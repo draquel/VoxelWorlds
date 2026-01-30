@@ -132,7 +132,7 @@ struct FChunkDescriptor {
     bool bHasEdits;            // Has edit layer modifications
     float MorphFactor;         // LOD transition blend (0-1)
     
-    uint32 GenerationSeed;     // For deterministic regeneration
+    int32 GenerationSeed;      // For deterministic regeneration (int32 for BP)
 };
 ```
 
@@ -176,7 +176,7 @@ struct FLODQueryContext {
     float TimeSliceMS = 2.0f;
     
     // Frame info
-    uint32 FrameNumber;
+    int64 FrameNumber;          // int64 for Blueprint compatibility
     float GameTime;
 };
 ```

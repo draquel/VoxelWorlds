@@ -225,13 +225,13 @@ struct FLODQueryContext {
     float TimeSliceMS = 2.0f;
     
     // ==================== Frame Information ====================
-    
-    /** Current frame number (for temporal logic) */
-    uint32 FrameNumber;
-    
+
+    /** Current frame number (for temporal logic) - int64 for Blueprint compatibility */
+    int64 FrameNumber;
+
     /** Current game time (seconds) */
     float GameTime;
-    
+
     /** Time since last frame (seconds) */
     float DeltaTime;
     

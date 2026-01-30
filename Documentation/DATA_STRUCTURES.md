@@ -2,6 +2,13 @@
 
 Complete reference for all voxel plugin data structures.
 
+## Blueprint Type Compatibility
+
+**Important**: Unreal Blueprint does not support unsigned integer types larger than uint8:
+- `uint8` → Supported as "Byte" type in Blueprints
+- `uint16`, `uint32`, `uint64` → **Not supported**, use signed equivalents
+- For frame counters and seeds, use `int32` or `int64` instead
+
 ## Core Voxel Data
 
 ### FVoxelData (4 bytes)
@@ -25,7 +32,8 @@ struct FChunkDescriptor {
     bool bIsDirty;
     bool bHasEdits;
     float MorphFactor;
-    uint32 GenerationSeed;
+    int32 GenerationSeed;       // int32 for Blueprint compatibility
+    EChunkState State;          // Streaming lifecycle state
 };
 ```
 
@@ -60,14 +68,30 @@ struct FChunkRenderData {
 ### FLODQueryContext
 ```cpp
 struct FLODQueryContext {
+    // Camera/Viewer State
     FVector ViewerPosition;
     FVector ViewerForward;
+    FVector ViewerRight;
+    FVector ViewerUp;
     float ViewDistance;
+    float FieldOfView;
+    float AspectRatio;
+    TArray<FPlane> FrustumPlanes;
+
+    // World State
     FVector WorldOrigin;
     EWorldMode WorldMode;
+    float WorldRadius;
+
+    // Performance Budgets
     int32 MaxChunksToLoadPerFrame;
+    int32 MaxChunksToUnloadPerFrame;
     float TimeSliceMS;
-    uint32 FrameNumber;
+
+    // Frame Information
+    int64 FrameNumber;          // int64 for Blueprint compatibility
+    float GameTime;
+    float DeltaTime;
 };
 ```
 

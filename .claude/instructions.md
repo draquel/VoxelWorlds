@@ -342,6 +342,9 @@ Simplest to implement, predictable performance, sufficient for most use cases. C
 - Document architectural decisions in code comments
 - Test each component independently before integration
 
+## Unreal Engine Implementation Notes
+- Blueprint types do not support uint* fields
+
 ---
 
 Last Updated: 2026-01-30  

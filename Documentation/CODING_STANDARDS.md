@@ -11,6 +11,28 @@ Follow standard UE coding conventions:
 - Enums: `EEnumName`
 - Member variables: `MemberName`, `bBoolMember`
 
+## Blueprint Type Compatibility
+
+**IMPORTANT**: When exposing properties to Blueprints (`BlueprintReadWrite`), use only Blueprint-compatible types:
+
+| C++ Type | Blueprint Support | Alternative |
+|----------|-------------------|-------------|
+| `uint8`  | ✅ Yes (as "Byte") | - |
+| `int8`   | ❌ No | `int32` |
+| `uint16` | ❌ No | `int32` |
+| `int16`  | ❌ No | `int32` |
+| `uint32` | ❌ No | `int32` or `int64` |
+| `int32`  | ✅ Yes | - |
+| `uint64` | ❌ No | `int64` |
+| `int64`  | ✅ Yes | - |
+
+**Guidelines**:
+- For counters/seeds where full uint32 range isn't needed: use `int32`
+- For frame numbers or timestamps: use `int64`
+- For byte-sized data (0-255): `uint8` is fine
+- Internal-only fields (no `BlueprintReadWrite`): any type is acceptable
+- Add comment noting "for Blueprint compatibility" when using signed alternatives
+
 ## Naming Conventions
 
 ### Files
