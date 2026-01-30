@@ -26,6 +26,7 @@ public class VoxelWorlds : ModuleRules
 			new string[]
 			{
 				"Core",
+				"VoxelCore"
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
