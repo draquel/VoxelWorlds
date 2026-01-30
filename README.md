@@ -15,7 +15,7 @@ A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.7 featur
 
 ### Core Documentation
 - **[Architecture Overview](Documentation/ARCHITECTURE.md)** - Complete system design and component interaction
-- **[Quick Start Guide](Documentation/QUICK_START.md)** - Getting started with development
+- **[Quick Start Guide](Documentation/00_START_HERE.md)** - Getting started with development
 - **[Coding Standards](Documentation/CODING_STANDARDS.md)** - Project conventions and best practices
 
 ### System Deep Dives
@@ -96,6 +96,7 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 
 1. **Read the Architecture**: Start with [ARCHITECTURE.md](Documentation/ARCHITECTURE.md)
 2. **Understand LOD System**: Review [LOD_SYSTEM.md](Documentation/LOD_SYSTEM.md)
+3. **Understand Rendering System**: Review [RENDERING_SYSTEM.md](Documentation/RENDERING_SYSTEM.md)
 3. **Review Coding Standards**: Check [CODING_STANDARDS.md](Documentation/CODING_STANDARDS.md)
 4. **Begin Implementation**: Follow [IMPLEMENTATION_PHASES.md](Documentation/IMPLEMENTATION_PHASES.md)
 
