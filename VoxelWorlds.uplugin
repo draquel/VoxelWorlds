@@ -1,0 +1,23 @@
+﻿{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "VoxelWorlds",
+	"Description": "Voxel Engine Plugin for UE 5",
+	"Category": "Other",
+	"CreatedBy": "Daniel Raquel",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "VoxelWorlds",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
