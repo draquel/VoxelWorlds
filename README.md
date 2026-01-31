@@ -15,7 +15,7 @@ A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.7 featur
 
 ### Core Documentation
 - **[Architecture Overview](Documentation/ARCHITECTURE.md)** - Complete system design and component interaction
-- **[Quick Start Guide](Documentation/00_START_HERE.md)** - Getting started with development
+- **[Quick Start Guide](Documentation/QUICK_START.md)** - Getting started with development
 - **[Coding Standards](Documentation/CODING_STANDARDS.md)** - Project conventions and best practices
 
 ### System Deep Dives
