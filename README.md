@@ -85,14 +85,26 @@ VoxelWorlds/
   - Component pooling for reduced allocations
   - CPU mesh data conversion (FVector3f/uint32 to FVector/int32)
   - Automatic tangent generation and collision mesh support
+  - Dynamic vertex color material creation for biome visualization
+- ✅ **Biome & Material System** (Phase 2)
+  - FVoxelMaterialRegistry: Static registry with 7 material definitions (Grass, Dirt, Stone, Sand, Snow, Sandstone, Frozen Dirt)
+  - FVoxelBiomeRegistry: Static registry with 3 biome definitions (Plains, Desert, Tundra)
+  - Temperature/moisture noise sampling for biome selection
+  - Depth-based material assignment per biome (surface, subsurface, deep)
+  - Vertex color visualization with AO support
+- ✅ **Chunk Streaming Pipeline** (Phase 2)
+  - Full generation pipeline: Noise → World Mode → Meshing → Rendering
+  - AVoxelWorldTestActor: Test actor for runtime voxel world instantiation
+  - Distance-based chunk loading/unloading
+  - Debug visualization and statistics
 
 ### In Progress
-- 🔄 Phase 2: Basic biome system (2-3 biomes)
+- 🔄 Phase 2: Performance optimization and polish
 
 ### Planned
-- ⏳ Phase 2: Chunk generation pipeline
-- ⏳ Phase 3+: Advanced meshing (Greedy, Marching Cubes)
-- ⏳ Phase 3+: Custom Vertex Factory renderer
+- ⏳ Phase 3: Advanced meshing (Greedy, Marching Cubes)
+- ⏳ Phase 3: Custom Vertex Factory renderer
+- ⏳ Phase 3: LOD morphing
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
@@ -115,10 +127,13 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FVoxelGPUCubicMesher` - GPU compute shader cubic meshing
 - `FVoxelPMCRenderer` - ProceduralMeshComponent-based renderer
 - `FVoxelVertexFactory` - Custom vertex factory for GPU rendering
+- `FVoxelMaterialRegistry` - Static material definitions registry
+- `FVoxelBiomeRegistry` - Static biome definitions registry
+- `AVoxelWorldTestActor` - Test actor for runtime world instantiation
 - `UVoxelWorldConfiguration` - World configuration asset
 
 ### Key Data Structures
-- `FVoxelData` - Per-voxel data (4 bytes)
+- `FVoxelData` - Per-voxel data (4 bytes: MaterialID, Density, BiomeID, Metadata)
 - `FVoxelVertex` - GPU vertex format (28 bytes)
 - `FChunkDescriptor` - Chunk metadata
 - `FChunkMeshData` - CPU mesh data
@@ -127,6 +142,8 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FVoxelNoiseParams` - Noise generation parameters
 - `FVoxelMeshingRequest` - Mesh generation request with neighbor data
 - `FWorldModeTerrainParams` - Terrain configuration (SeaLevel, HeightScale, etc.)
+- `FVoxelMaterialDefinition` - Material definition (ID, Name, Color)
+- `FBiomeDefinition` - Biome definition (climate ranges, material assignments)
 
 ## Getting Started
 

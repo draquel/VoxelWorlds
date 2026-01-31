@@ -6,6 +6,9 @@
 #include "ProceduralMeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "Engine/World.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialExpressionVertexColor.h"
+#include "Materials/MaterialExpressionConstant.h"
 
 // ==================== AVoxelPMCContainerActor ====================
 
@@ -64,6 +67,12 @@ void FVoxelPMCRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguration
 #if WITH_EDITOR
 	ContainerActor->SetActorLabel(TEXT("VoxelPMCContainer"));
 #endif
+
+	// Create default vertex color material if none specified
+	if (!CurrentMaterial.IsValid())
+	{
+		CreateDefaultVertexColorMaterial();
+	}
 
 	bIsInitialized = true;
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer initialized"));
@@ -593,4 +602,44 @@ FBox FVoxelPMCRenderer::CalculateChunkBounds(const FIntVector& ChunkCoord) const
 	const FVector ChunkMax = ChunkMin + FVector(ChunkWorldSize);
 
 	return FBox(ChunkMin, ChunkMax);
+}
+
+void FVoxelPMCRenderer::CreateDefaultVertexColorMaterial()
+{
+#if WITH_EDITOR
+	// Create a simple material that displays vertex colors (editor only)
+	UMaterial* Material = NewObject<UMaterial>(GetTransientPackage(), TEXT("VoxelVertexColorMaterial"));
+	if (!Material)
+	{
+		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelPMCRenderer: Failed to create vertex color material"));
+		return;
+	}
+
+	// Create a Vertex Color expression node
+	UMaterialExpressionVertexColor* VertexColorExpr = NewObject<UMaterialExpressionVertexColor>(Material);
+	VertexColorExpr->MaterialExpressionEditorX = -200;
+	VertexColorExpr->MaterialExpressionEditorY = 0;
+	Material->GetEditorOnlyData()->ExpressionCollection.Expressions.Add(VertexColorExpr);
+
+	// Connect vertex color RGB to Base Color
+	Material->GetEditorOnlyData()->BaseColor.Expression = VertexColorExpr;
+
+	// Set material properties for voxel terrain
+	Material->TwoSided = false;
+	Material->SetShadingModel(MSM_DefaultLit);
+
+	// Compile the material
+	Material->PreEditChange(nullptr);
+	Material->PostEditChange();
+
+	CurrentMaterial = Material;
+	DefaultVertexColorMaterial.Reset(Material);
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: Created default vertex color material"));
+#else
+	// In packaged builds, a material asset must be provided via SetMaterial()
+	// or configured in VoxelWorldConfiguration
+	UE_LOG(LogVoxelRendering, Warning,
+		TEXT("FVoxelPMCRenderer: No material set. In packaged builds, you must provide a vertex color material via SetMaterial() or VoxelWorldConfiguration."));
+#endif
 }

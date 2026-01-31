@@ -2,6 +2,7 @@
 
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelMeshing.h"
+#include "VoxelMaterialRegistry.h"
 
 // Face direction offsets: +X, -X, +Y, -Y, +Z, -Z
 const FIntVector FVoxelCPUCubicMesher::FaceOffsets[6] = {
@@ -323,9 +324,15 @@ void FVoxelCPUCubicMesher::EmitQuad(
 			MeshData.UVs.Add(FVector2f::ZeroVector);
 		}
 
-		// Pack color: R=MaterialID, G=BiomeID, B=AO, A=Flags
-		const uint8 AO = Config.bCalculateAO ? Voxel.GetAO() : 0;
-		MeshData.Colors.Add(FColor(Voxel.MaterialID, Voxel.BiomeID, AO * 85, 255));
+		// Look up material color from registry and apply AO
+		FColor MaterialColor = FVoxelMaterialRegistry::GetMaterialColor(Voxel.MaterialID);
+		const uint8 AO = Config.bCalculateAO ? Voxel.GetAO() : 15;  // Default to max AO if disabled
+		const float AOFactor = (AO + 1) / 16.0f;  // Convert 0-15 AO to 0.0625-1.0 factor
+		MeshData.Colors.Add(FColor(
+			static_cast<uint8>(MaterialColor.R * AOFactor),
+			static_cast<uint8>(MaterialColor.G * AOFactor),
+			static_cast<uint8>(MaterialColor.B * AOFactor),
+			255));
 	}
 
 	// Emit 6 indices (2 triangles, CW winding for Unreal's left-handed coordinate system)

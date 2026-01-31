@@ -29,7 +29,7 @@ Development roadmap for the VoxelWorlds plugin.
 
 ---
 
-## Phase 2: Generation & Basic Rendering (Weeks 3-4)
+## Phase 2: Generation & Basic Rendering (Weeks 3-4) ✓ COMPLETE
 
 **Goal**: First visible terrain
 
@@ -38,22 +38,22 @@ Development roadmap for the VoxelWorlds plugin.
 - [x] Infinite plane world mode
 - [x] Cubic meshing (face culling)
 - [x] PMC renderer implementation
-- [ ] Basic biome system (2-3 biomes)
-- [ ] Material registry
-- [ ] Chunk generation pipeline
-- [ ] Basic streaming
+- [x] Basic biome system (3 biomes: Plains, Desert, Tundra)
+- [x] Material registry (7 materials with vertex color visualization)
+- [x] Chunk generation pipeline
+- [x] Basic streaming
 
 ### Deliverables
 - Working infinite plane world
 - Visible cubic voxel terrain
-- 2-3 biomes with different materials
+- 3 biomes with different materials
 - Chunk loading/unloading
 
 ### Success Criteria
-- Can generate and render 100+ chunks
-- Frame time < 16ms with 100 chunks
-- No visible gaps between chunks
-- Materials display correctly
+- Can generate and render 100+ chunks ✓
+- Frame time < 16ms with 100 chunks ✓
+- No visible gaps between chunks ✓
+- Materials display correctly ✓
 
 ---
 
@@ -178,8 +178,8 @@ Development roadmap for the VoxelWorlds plugin.
 
 ## Current Status
 
-**Active Phase**: Phase 2 (Generation & Basic Rendering)
-**Progress**: Phase 1 COMPLETE - Phase 2 in progress (80% complete)
+**Active Phase**: Phase 3 (Advanced Meshing)
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 starting
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -187,7 +187,7 @@ Development roadmap for the VoxelWorlds plugin.
 3. ~~VoxelRendering module~~ - IVoxelMeshRenderer interface
 4. ~~VoxelStreaming module~~ - UVoxelChunkManager skeleton
 
-**Phase 2 Progress**:
+**Phase 2 Completed**:
 1. ~~GPU noise library~~ - CPU and GPU noise generators with Perlin/Simplex FBM (VoxelGeneration module)
    - FVoxelCPUNoiseGenerator: CPU-based noise for fallback and single-point sampling
    - FVoxelGPUNoiseGenerator: RDG-based compute shader noise generation
@@ -198,7 +198,6 @@ Development roadmap for the VoxelWorlds plugin.
    - FInfinitePlaneWorldMode: 2D heightmap extending infinitely in X/Y, Z as height
    - WorldModeSDF.ush: GPU shader functions for terrain SDF calculation
    - Terrain params: SeaLevel, HeightScale, BaseHeight (configurable in UVoxelWorldConfiguration)
-   - Depth-based material assignment: Grass (surface), Dirt (shallow), Stone (deep)
    - Automation tests passing (Basic, Density, CPUGeneration, Coordinates, GPUConsistency, Materials)
 
 3. ~~Cubic meshing system~~ - Face culling mesh generation (VoxelMeshing module)
@@ -220,11 +219,32 @@ Development roadmap for the VoxelWorlds plugin.
    - Automatic tangent generation from normals
    - Statistics tracking: Vertex/triangle counts, memory usage
    - Collision mesh support via bGenerateCollision config
+   - Dynamic vertex color material for biome visualization
 
-**Next Immediate Steps** (Phase 2):
-1. Chunk generation pipeline (connect noise → world mode → meshing → rendering)
-2. Basic biome system (2-3 biomes)
-3. Material registry
+5. ~~Biome & Material System~~ - Climate-based biome selection with material registry (VoxelCore module)
+   - FVoxelMaterialDefinition: Material struct with ID, Name, Color
+   - FVoxelMaterialRegistry: Static registry with 7 materials
+     - Grass (Forest Green), Dirt (Brown), Stone (Gray)
+     - Sand (Tan), Snow (White), Sandstone (Dark Tan), Frozen Dirt (Gray-Blue)
+   - FBiomeDefinition: Biome struct with temperature/moisture ranges, material assignments
+   - FVoxelBiomeRegistry: Static registry with 3 biomes
+     - Plains: Temperature -0.3 to 0.6, Grass/Dirt/Stone
+     - Desert: Temperature 0.5 to 1.0, dry, Sand/Sandstone/Stone
+     - Tundra: Temperature -1.0 to -0.3, Snow/Frozen Dirt/Stone
+   - Temperature/moisture noise sampling in VoxelCPUNoiseGenerator
+   - Vertex color output with AO support in VoxelCPUCubicMesher
+
+6. ~~Chunk Streaming Pipeline~~ - Full generation and rendering pipeline
+   - AVoxelWorldTestActor: Test actor for runtime voxel world instantiation
+   - UVoxelChunkManager: Coordinates chunk states (Unloaded → Generating → Meshing → Ready)
+   - Distance-based chunk loading via FDistanceBandLODStrategy
+   - Unload distance multiplier for hysteresis
+   - Debug visualization and statistics output
+
+**Next Immediate Steps** (Phase 3):
+1. Greedy meshing algorithm for triangle reduction
+2. Ambient occlusion calculation improvements
+3. Custom Vertex Factory for GPU-driven rendering
 
 ---
 

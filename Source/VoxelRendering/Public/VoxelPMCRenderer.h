@@ -5,7 +5,10 @@
 #include "CoreMinimal.h"
 #include "IVoxelMeshRenderer.h"
 #include "GameFramework/Actor.h"
+#include "UObject/StrongObjectPtr.h"
 #include "VoxelPMCRenderer.generated.h"
+
+class UMaterial;
 
 // Forward declarations
 class UProceduralMeshComponent;
@@ -158,6 +161,9 @@ private:
 	/** Calculate world-space bounds for a chunk */
 	FBox CalculateChunkBounds(const FIntVector& ChunkCoord) const;
 
+	/** Create a default material that displays vertex colors */
+	void CreateDefaultVertexColorMaterial();
+
 	// ==================== Member Data ====================
 
 	/** Whether the renderer has been initialized */
@@ -174,6 +180,9 @@ private:
 
 	/** Current material for all chunks */
 	TWeakObjectPtr<UMaterialInterface> CurrentMaterial;
+
+	/** Strong reference to the default vertex color material we created */
+	TStrongObjectPtr<UMaterial> DefaultVertexColorMaterial;
 
 	/** Map of chunk coordinates to their data */
 	TMap<FIntVector, FPMCChunkData> ChunkDataMap;

@@ -3,6 +3,8 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelGeneration.h"
 #include "InfinitePlaneWorldMode.h"
+#include "VoxelBiomeRegistry.h"
+#include "VoxelMaterialRegistry.h"
 #include "Async/Async.h"
 
 // Permutation table for Perlin noise (Ken Perlin's original)
@@ -139,6 +141,25 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 	const float EffectiveVoxelSize = Request.GetEffectiveVoxelSize();
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 
+	// Set up biome noise parameters
+	FVoxelNoiseParams TempNoiseParams;
+	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	TempNoiseParams.Seed = Request.NoiseParams.Seed + Request.TemperatureSeedOffset;
+	TempNoiseParams.Frequency = Request.TemperatureNoiseFrequency;
+	TempNoiseParams.Octaves = 2;  // Fewer octaves for smoother biome transitions
+	TempNoiseParams.Persistence = 0.5f;
+	TempNoiseParams.Lacunarity = 2.0f;
+	TempNoiseParams.Amplitude = 1.0f;
+
+	FVoxelNoiseParams MoistureNoiseParams;
+	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	MoistureNoiseParams.Seed = Request.NoiseParams.Seed + Request.MoistureSeedOffset;
+	MoistureNoiseParams.Frequency = Request.MoistureNoiseFrequency;
+	MoistureNoiseParams.Octaves = 2;
+	MoistureNoiseParams.Persistence = 0.5f;
+	MoistureNoiseParams.Lacunarity = 2.0f;
+	MoistureNoiseParams.Amplitude = 1.0f;
+
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
 		for (int32 Y = 0; Y < ChunkSize; ++Y)
@@ -168,14 +189,39 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
 					SignedDistance, EffectiveVoxelSize);
 
-				// Calculate depth below surface for material assignment
-				float DepthBelowSurface = TerrainHeight - WorldPos.Z;
+				// Calculate depth below surface for material assignment (in voxels)
+				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / EffectiveVoxelSize;
 
-				// Determine material based on depth
-				uint8 MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface);
-
-				// Default biome
+				// Determine material and biome
+				uint8 MaterialID = 0;
 				uint8 BiomeID = 0;
+
+				if (Request.bEnableBiomes)
+				{
+					// Sample biome noise at X,Y (2D, constant for a column)
+					// Use 3D function with Z=0 for 2D sampling
+					FVector BiomeSamplePos(WorldPos.X, WorldPos.Y, 0.0f);
+					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
+					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+
+					// Select biome based on temperature and moisture
+					const FBiomeDefinition* Biome = FVoxelBiomeRegistry::SelectBiome(Temperature, Moisture);
+					if (Biome)
+					{
+						BiomeID = Biome->BiomeID;
+						MaterialID = Biome->GetMaterialAtDepth(DepthBelowSurface);
+					}
+					else
+					{
+						// Fallback to stone if no biome found
+						MaterialID = EVoxelMaterial::Stone;
+					}
+				}
+				else
+				{
+					// Legacy behavior: use world mode's material assignment
+					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * EffectiveVoxelSize);
+				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
 				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);

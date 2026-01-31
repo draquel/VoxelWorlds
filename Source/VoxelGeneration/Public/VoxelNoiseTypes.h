@@ -55,6 +55,28 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Mode")
 	float BaseHeight = 0.0f;
 
+	// ==================== Biome Parameters ====================
+
+	/** Whether to enable biome-based material selection */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
+	bool bEnableBiomes = true;
+
+	/** Frequency for temperature noise (lower = larger biome regions) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
+	float TemperatureNoiseFrequency = 0.00005f;
+
+	/** Frequency for moisture noise (lower = larger biome regions) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
+	float MoistureNoiseFrequency = 0.00007f;
+
+	/** Seed offset for temperature noise (added to main seed) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
+	int32 TemperatureSeedOffset = 1234;
+
+	/** Seed offset for moisture noise (added to main seed) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
+	int32 MoistureSeedOffset = 5678;
+
 	FVoxelNoiseGenerationRequest() = default;
 
 	/** Get the world position of this chunk's origin */
