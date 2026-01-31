@@ -78,6 +78,55 @@ const FVector2f FVoxelCPUCubicMesher::QuadUVs[4] = {
 	FVector2f(0.0f, 1.0f)
 };
 
+// AO neighbor offsets for each face and vertex
+// AONeighborOffsets[Face][Vertex][0=Side1, 1=Side2, 2=Corner]
+// For each vertex, we check two edge-adjacent neighbors and one corner neighbor
+// to determine ambient occlusion level (0-3)
+const FIntVector FVoxelCPUCubicMesher::AONeighborOffsets[6][4][3] = {
+	// Face 0: +X
+	{
+		{ FIntVector(1,-1,0), FIntVector(1,0,-1), FIntVector(1,-1,-1) },
+		{ FIntVector(1,1,0),  FIntVector(1,0,-1), FIntVector(1,1,-1)  },
+		{ FIntVector(1,1,0),  FIntVector(1,0,1),  FIntVector(1,1,1)   },
+		{ FIntVector(1,-1,0), FIntVector(1,0,1),  FIntVector(1,-1,1)  }
+	},
+	// Face 1: -X
+	{
+		{ FIntVector(-1,1,0),  FIntVector(-1,0,-1), FIntVector(-1,1,-1)  },
+		{ FIntVector(-1,-1,0), FIntVector(-1,0,-1), FIntVector(-1,-1,-1) },
+		{ FIntVector(-1,-1,0), FIntVector(-1,0,1),  FIntVector(-1,-1,1)  },
+		{ FIntVector(-1,1,0),  FIntVector(-1,0,1),  FIntVector(-1,1,1)   }
+	},
+	// Face 2: +Y
+	{
+		{ FIntVector(1,1,0),  FIntVector(0,1,-1), FIntVector(1,1,-1)  },
+		{ FIntVector(-1,1,0), FIntVector(0,1,-1), FIntVector(-1,1,-1) },
+		{ FIntVector(-1,1,0), FIntVector(0,1,1),  FIntVector(-1,1,1)  },
+		{ FIntVector(1,1,0),  FIntVector(0,1,1),  FIntVector(1,1,1)   }
+	},
+	// Face 3: -Y
+	{
+		{ FIntVector(-1,-1,0), FIntVector(0,-1,-1), FIntVector(-1,-1,-1) },
+		{ FIntVector(1,-1,0),  FIntVector(0,-1,-1), FIntVector(1,-1,-1)  },
+		{ FIntVector(1,-1,0),  FIntVector(0,-1,1),  FIntVector(1,-1,1)   },
+		{ FIntVector(-1,-1,0), FIntVector(0,-1,1),  FIntVector(-1,-1,1)  }
+	},
+	// Face 4: +Z
+	{
+		{ FIntVector(-1,0,1), FIntVector(0,-1,1), FIntVector(-1,-1,1) },
+		{ FIntVector(1,0,1),  FIntVector(0,-1,1), FIntVector(1,-1,1)  },
+		{ FIntVector(1,0,1),  FIntVector(0,1,1),  FIntVector(1,1,1)   },
+		{ FIntVector(-1,0,1), FIntVector(0,1,1),  FIntVector(-1,1,1)  }
+	},
+	// Face 5: -Z
+	{
+		{ FIntVector(1,0,-1),  FIntVector(0,-1,-1), FIntVector(1,-1,-1)  },
+		{ FIntVector(-1,0,-1), FIntVector(0,-1,-1), FIntVector(-1,-1,-1) },
+		{ FIntVector(-1,0,-1), FIntVector(0,1,-1),  FIntVector(-1,1,-1)  },
+		{ FIntVector(1,0,-1),  FIntVector(0,1,-1),  FIntVector(1,1,-1)   }
+	}
+};
+
 FVoxelCPUCubicMesher::FVoxelCPUCubicMesher()
 {
 }
@@ -526,7 +575,48 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 	FVector3f Corner2 = Corner0 + UDir * Width + VDir * Height;  // +U +V
 	FVector3f Corner3 = Corner0 + VDir * Height;  // +V
 
+	// Calculate per-vertex AO at the 4 corner voxels of the merged quad
+	// Corner voxel positions in 2D (U,V) space:
+	// Vertex 0: (U, V)
+	// Vertex 1: (U+Width-1, V)
+	// Vertex 2: (U+Width-1, V+Height-1)
+	// Vertex 3: (U, V+Height-1)
+	uint8 VertexAO[4] = {0, 0, 0, 0};
+	if (Config.bCalculateAO)
+	{
+		// Map 2D corner positions to 3D voxel coordinates
+		int32 CornerCoords[4][3];
+
+		// Corner 0: (U, V)
+		CornerCoords[0][PrimaryAxis] = SliceIndex;
+		CornerCoords[0][UAxis] = U;
+		CornerCoords[0][VAxis] = V;
+
+		// Corner 1: (U+Width-1, V)
+		CornerCoords[1][PrimaryAxis] = SliceIndex;
+		CornerCoords[1][UAxis] = U + Width - 1;
+		CornerCoords[1][VAxis] = V;
+
+		// Corner 2: (U+Width-1, V+Height-1)
+		CornerCoords[2][PrimaryAxis] = SliceIndex;
+		CornerCoords[2][UAxis] = U + Width - 1;
+		CornerCoords[2][VAxis] = V + Height - 1;
+
+		// Corner 3: (U, V+Height-1)
+		CornerCoords[3][PrimaryAxis] = SliceIndex;
+		CornerCoords[3][UAxis] = U;
+		CornerCoords[3][VAxis] = V + Height - 1;
+
+		// Calculate AO for each corner vertex
+		VertexAO[0] = CalculateVertexAO(Request, CornerCoords[0][0], CornerCoords[0][1], CornerCoords[0][2], Face, 0);
+		VertexAO[1] = CalculateVertexAO(Request, CornerCoords[1][0], CornerCoords[1][1], CornerCoords[1][2], Face, 1);
+		VertexAO[2] = CalculateVertexAO(Request, CornerCoords[2][0], CornerCoords[2][1], CornerCoords[2][2], Face, 2);
+		VertexAO[3] = CalculateVertexAO(Request, CornerCoords[3][0], CornerCoords[3][1], CornerCoords[3][2], Face, 3);
+	}
+
 	// Adjust winding based on face direction to match the original QuadVertices patterns
+	// Also track which AO value goes with which vertex after reordering
+	int32 AOMapping[4] = {0, 1, 2, 3};
 	switch (Face)
 	{
 	case 0: // +X: Y increases left-to-right, Z increases bottom-to-top (when viewed from +X)
@@ -534,52 +624,47 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 		Vertices[1] = Corner1;
 		Vertices[2] = Corner2;
 		Vertices[3] = Corner3;
+		AOMapping[0] = 0; AOMapping[1] = 1; AOMapping[2] = 2; AOMapping[3] = 3;
 		break;
 	case 1: // -X: Need to reverse winding
 		Vertices[0] = Corner1;
 		Vertices[1] = Corner0;
 		Vertices[2] = Corner3;
 		Vertices[3] = Corner2;
+		AOMapping[0] = 1; AOMapping[1] = 0; AOMapping[2] = 3; AOMapping[3] = 2;
 		break;
 	case 2: // +Y: X increases, Z increases
 		Vertices[0] = Corner1;
 		Vertices[1] = Corner0;
 		Vertices[2] = Corner3;
 		Vertices[3] = Corner2;
+		AOMapping[0] = 1; AOMapping[1] = 0; AOMapping[2] = 3; AOMapping[3] = 2;
 		break;
 	case 3: // -Y: Need to reverse
 		Vertices[0] = Corner0;
 		Vertices[1] = Corner1;
 		Vertices[2] = Corner2;
 		Vertices[3] = Corner3;
+		AOMapping[0] = 0; AOMapping[1] = 1; AOMapping[2] = 2; AOMapping[3] = 3;
 		break;
 	case 4: // +Z: X increases, Y increases
 		Vertices[0] = Corner0;
 		Vertices[1] = Corner1;
 		Vertices[2] = Corner2;
 		Vertices[3] = Corner3;
+		AOMapping[0] = 0; AOMapping[1] = 1; AOMapping[2] = 2; AOMapping[3] = 3;
 		break;
 	case 5: // -Z: Need to reverse for correct winding when viewed from below
 		Vertices[0] = Corner0;
 		Vertices[1] = Corner1;
 		Vertices[2] = Corner2;
 		Vertices[3] = Corner3;
+		AOMapping[0] = 0; AOMapping[1] = 1; AOMapping[2] = 2; AOMapping[3] = 3;
 		break;
 	}
 
 	// Look up material color
 	FColor MaterialColor = FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
-
-	// For merged quads, we don't have per-vertex AO, so use a default
-	const uint8 AO = Config.bCalculateAO ? 12 : 15;  // Slightly dimmed if AO enabled
-	const float AOFactor = (AO + 1) / 16.0f;
-
-	const FColor VertexColor(
-		static_cast<uint8>(MaterialColor.R * AOFactor),
-		static_cast<uint8>(MaterialColor.G * AOFactor),
-		static_cast<uint8>(MaterialColor.B * AOFactor),
-		255
-	);
 
 	// UV coordinates scaled by quad size for proper texture tiling
 	const FVector2f UV0(0.0f, 0.0f);
@@ -587,11 +672,20 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 	const FVector2f UV2(Width * Config.UVScale, Height * Config.UVScale);
 	const FVector2f UV3(0.0f, Height * Config.UVScale);
 
-	// Emit 4 vertices
+	// Emit 4 vertices with per-vertex AO
 	for (int32 i = 0; i < 4; i++)
 	{
 		MeshData.Positions.Add(Vertices[i]);
 		MeshData.Normals.Add(Normal);
+
+		// Apply per-vertex AO: 0=unoccluded (full brightness), 3=fully occluded (25% brightness)
+		const float AOFactor = Config.bCalculateAO ? (1.0f - VertexAO[AOMapping[i]] * 0.25f) : 1.0f;
+		const FColor VertexColor(
+			static_cast<uint8>(MaterialColor.R * AOFactor),
+			static_cast<uint8>(MaterialColor.G * AOFactor),
+			static_cast<uint8>(MaterialColor.B * AOFactor),
+			255
+		);
 		MeshData.Colors.Add(VertexColor);
 	}
 
@@ -650,52 +744,110 @@ FVoxelData FVoxelCPUCubicMesher::GetVoxelAt(
 	}
 
 	// Handle neighbor chunk lookups
+	// Note: For AO calculations, we may need diagonal neighbors that span multiple chunks.
+	// We only have face-adjacent neighbor data, so diagonal lookups return air.
 	const int32 SliceSize = ChunkSize * ChunkSize;
 
-	// +X neighbor
-	if (X >= ChunkSize && Request.NeighborXPos.Num() == SliceSize)
+	// +X neighbor (requires Y and Z to be in bounds)
+	if (X >= ChunkSize && X < ChunkSize + 1 && Y >= 0 && Y < ChunkSize && Z >= 0 && Z < ChunkSize)
 	{
-		const int32 Index = Y + Z * ChunkSize;
-		return Request.NeighborXPos[Index];
+		if (Request.NeighborXPos.Num() == SliceSize)
+		{
+			const int32 Index = Y + Z * ChunkSize;
+			return Request.NeighborXPos[Index];
+		}
+		return FVoxelData::Air();
 	}
 
-	// -X neighbor
-	if (X < 0 && Request.NeighborXNeg.Num() == SliceSize)
+	// -X neighbor (requires Y and Z to be in bounds)
+	if (X < 0 && X >= -1 && Y >= 0 && Y < ChunkSize && Z >= 0 && Z < ChunkSize)
 	{
-		const int32 Index = Y + Z * ChunkSize;
-		return Request.NeighborXNeg[Index];
+		if (Request.NeighborXNeg.Num() == SliceSize)
+		{
+			const int32 Index = Y + Z * ChunkSize;
+			return Request.NeighborXNeg[Index];
+		}
+		return FVoxelData::Air();
 	}
 
-	// +Y neighbor
-	if (Y >= ChunkSize && Request.NeighborYPos.Num() == SliceSize)
+	// +Y neighbor (requires X and Z to be in bounds)
+	if (Y >= ChunkSize && Y < ChunkSize + 1 && X >= 0 && X < ChunkSize && Z >= 0 && Z < ChunkSize)
 	{
-		const int32 Index = X + Z * ChunkSize;
-		return Request.NeighborYPos[Index];
+		if (Request.NeighborYPos.Num() == SliceSize)
+		{
+			const int32 Index = X + Z * ChunkSize;
+			return Request.NeighborYPos[Index];
+		}
+		return FVoxelData::Air();
 	}
 
-	// -Y neighbor
-	if (Y < 0 && Request.NeighborYNeg.Num() == SliceSize)
+	// -Y neighbor (requires X and Z to be in bounds)
+	if (Y < 0 && Y >= -1 && X >= 0 && X < ChunkSize && Z >= 0 && Z < ChunkSize)
 	{
-		const int32 Index = X + Z * ChunkSize;
-		return Request.NeighborYNeg[Index];
+		if (Request.NeighborYNeg.Num() == SliceSize)
+		{
+			const int32 Index = X + Z * ChunkSize;
+			return Request.NeighborYNeg[Index];
+		}
+		return FVoxelData::Air();
 	}
 
-	// +Z neighbor
-	if (Z >= ChunkSize && Request.NeighborZPos.Num() == SliceSize)
+	// +Z neighbor (requires X and Y to be in bounds)
+	if (Z >= ChunkSize && Z < ChunkSize + 1 && X >= 0 && X < ChunkSize && Y >= 0 && Y < ChunkSize)
 	{
-		const int32 Index = X + Y * ChunkSize;
-		return Request.NeighborZPos[Index];
+		if (Request.NeighborZPos.Num() == SliceSize)
+		{
+			const int32 Index = X + Y * ChunkSize;
+			return Request.NeighborZPos[Index];
+		}
+		return FVoxelData::Air();
 	}
 
-	// -Z neighbor
-	if (Z < 0 && Request.NeighborZNeg.Num() == SliceSize)
+	// -Z neighbor (requires X and Y to be in bounds)
+	if (Z < 0 && Z >= -1 && X >= 0 && X < ChunkSize && Y >= 0 && Y < ChunkSize)
 	{
-		const int32 Index = X + Y * ChunkSize;
-		return Request.NeighborZNeg[Index];
+		if (Request.NeighborZNeg.Num() == SliceSize)
+		{
+			const int32 Index = X + Y * ChunkSize;
+			return Request.NeighborZNeg[Index];
+		}
+		return FVoxelData::Air();
 	}
 
-	// No neighbor data available - treat as air (render boundary faces)
+	// Out of bounds in multiple directions (diagonal) or too far out - treat as air
 	return FVoxelData::Air();
+}
+
+uint8 FVoxelCPUCubicMesher::CalculateVertexAO(
+	const FVoxelMeshingRequest& Request,
+	int32 X, int32 Y, int32 Z,
+	int32 Face, int32 VertexIndex) const
+{
+	const FIntVector& Side1 = AONeighborOffsets[Face][VertexIndex][0];
+	const FIntVector& Side2 = AONeighborOffsets[Face][VertexIndex][1];
+	const FIntVector& Corner = AONeighborOffsets[Face][VertexIndex][2];
+
+	const bool bSide1 = !GetVoxelAt(Request, X + Side1.X, Y + Side1.Y, Z + Side1.Z).IsAir();
+	const bool bSide2 = !GetVoxelAt(Request, X + Side2.X, Y + Side2.Y, Z + Side2.Z).IsAir();
+	const bool bCorner = !GetVoxelAt(Request, X + Corner.X, Y + Corner.Y, Z + Corner.Z).IsAir();
+
+	// Standard voxel AO formula: if both sides are solid, corner is fully occluded
+	if (bSide1 && bSide2)
+	{
+		return 3;
+	}
+	return static_cast<uint8>(bSide1 + bSide2 + bCorner);
+}
+
+void FVoxelCPUCubicMesher::CalculateFaceAO(
+	const FVoxelMeshingRequest& Request,
+	int32 X, int32 Y, int32 Z,
+	int32 Face, uint8 OutAO[4]) const
+{
+	for (int32 V = 0; V < 4; V++)
+	{
+		OutAO[V] = CalculateVertexAO(Request, X, Y, Z, Face, V);
+	}
 }
 
 void FVoxelCPUCubicMesher::EmitQuad(
@@ -715,6 +867,16 @@ void FVoxelCPUCubicMesher::EmitQuad(
 	const FVector3f& Normal = FaceNormals[Face];
 	const uint32 BaseVertex = MeshData.Positions.Num();
 
+	// Calculate per-vertex AO if enabled
+	uint8 VertexAO[4] = {0, 0, 0, 0};
+	if (Config.bCalculateAO)
+	{
+		CalculateFaceAO(Request, X, Y, Z, Face, VertexAO);
+	}
+
+	// Look up material color from registry
+	FColor MaterialColor = FVoxelMaterialRegistry::GetMaterialColor(Voxel.MaterialID);
+
 	// Emit 4 vertices
 	for (int32 V = 0; V < 4; V++)
 	{
@@ -731,10 +893,9 @@ void FVoxelCPUCubicMesher::EmitQuad(
 			MeshData.UVs.Add(FVector2f::ZeroVector);
 		}
 
-		// Look up material color from registry and apply AO
-		FColor MaterialColor = FVoxelMaterialRegistry::GetMaterialColor(Voxel.MaterialID);
-		const uint8 AO = Config.bCalculateAO ? Voxel.GetAO() : 15;  // Default to max AO if disabled
-		const float AOFactor = (AO + 1) / 16.0f;  // Convert 0-15 AO to 0.0625-1.0 factor
+		// Apply per-vertex AO: 0=unoccluded (full brightness), 3=fully occluded (25% brightness)
+		// Formula: AOFactor = 1.0 - (AO * 0.25)
+		const float AOFactor = Config.bCalculateAO ? (1.0f - VertexAO[V] * 0.25f) : 1.0f;
 		MeshData.Colors.Add(FColor(
 			static_cast<uint8>(MaterialColor.R * AOFactor),
 			static_cast<uint8>(MaterialColor.G * AOFactor),

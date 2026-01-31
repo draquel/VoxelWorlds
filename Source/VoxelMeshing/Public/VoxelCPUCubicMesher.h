@@ -217,4 +217,37 @@ private:
 
 	/** UV coordinates for quad vertices */
 	static const FVector2f QuadUVs[4];
+
+	/** AO neighbor offsets: [Face][Vertex][Side1, Side2, Corner] */
+	static const FIntVector AONeighborOffsets[6][4][3];
+
+	// ============================================================================
+	// Ambient Occlusion
+	// ============================================================================
+
+	/**
+	 * Calculate AO for a single vertex of a face.
+	 * Uses the standard voxel AO algorithm checking side1, side2, and corner neighbors.
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z Voxel position
+	 * @param Face Face direction (0-5)
+	 * @param VertexIndex Vertex index within the face (0-3)
+	 * @return AO value 0-3 (0=unoccluded, 3=fully occluded)
+	 */
+	uint8 CalculateVertexAO(
+		const FVoxelMeshingRequest& Request,
+		int32 X, int32 Y, int32 Z,
+		int32 Face, int32 VertexIndex) const;
+
+	/**
+	 * Calculate AO for all 4 vertices of a face.
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z Voxel position
+	 * @param Face Face direction (0-5)
+	 * @param OutAO Output array of 4 AO values (0-3 each)
+	 */
+	void CalculateFaceAO(
+		const FVoxelMeshingRequest& Request,
+		int32 X, int32 Y, int32 Z,
+		int32 Face, uint8 OutAO[4]) const;
 };

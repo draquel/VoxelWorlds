@@ -101,7 +101,7 @@ VoxelWorlds/
 ### In Progress
 - 🔄 Phase 3: Advanced Meshing
   - ✅ Greedy meshing algorithm (40-60% triangle reduction, seamless chunk boundaries)
-  - ⏳ Ambient occlusion improvements
+  - ✅ Per-vertex ambient occlusion (standard voxel AO with neighbor sampling)
   - ⏳ Custom Vertex Factory renderer
 
 ### Planned

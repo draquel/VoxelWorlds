@@ -63,7 +63,7 @@ Development roadmap for the VoxelWorlds plugin.
 
 ### Tasks
 - [x] Greedy meshing algorithm
-- [ ] Ambient occlusion calculation
+- [x] Ambient occlusion calculation
 - [ ] Smooth meshing (Marching Cubes)
 - [ ] Custom Vertex Factory
 - [ ] GPU-driven renderer
@@ -179,7 +179,7 @@ Development roadmap for the VoxelWorlds plugin.
 ## Current Status
 
 **Active Phase**: Phase 3 (Advanced Meshing)
-**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 in progress (Greedy Meshing complete)
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 in progress (Greedy Meshing + AO complete)
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -252,10 +252,21 @@ Development roadmap for the VoxelWorlds plugin.
      - Added automatic neighbor remeshing when chunks finish generating
      - Seamless boundaries regardless of chunk load order
 
+2. ~~Per-vertex ambient occlusion~~ - COMPLETE
+   - Standard voxel AO algorithm checking side1, side2, and corner neighbors per vertex
+   - Static lookup table (AONeighborOffsets[6][4][3]) for all face/vertex combinations
+   - CalculateVertexAO(): Returns 0-3 occlusion level per vertex
+   - CalculateFaceAO(): Computes all 4 vertices of a face
+   - Brightness mapping: AO 0 = 100%, AO 3 = 25% (formula: 1.0 - AO * 0.25)
+   - Works with both simple and greedy meshing modes
+   - Cross-chunk boundary support via GetVoxelAt() neighbor lookups
+   - Diagonal neighbor lookups (multi-axis out-of-bounds) treated as air
+   - Enabled by default via `bCalculateAO = true` in FVoxelMeshingConfig
+
 **Next Immediate Steps** (Phase 3):
-1. Ambient occlusion calculation improvements
-2. Custom Vertex Factory for GPU-driven rendering
-3. Smooth meshing (Marching Cubes)
+1. Custom Vertex Factory for GPU-driven rendering
+2. Smooth meshing (Marching Cubes)
+3. LOD morphing
 
 ---
 

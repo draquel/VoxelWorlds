@@ -221,7 +221,7 @@ struct VOXELMESHING_API FVoxelMeshingConfig
 
 	/** Whether to calculate ambient occlusion */
 	UPROPERTY()
-	bool bCalculateAO = false;
+	bool bCalculateAO = true;
 
 	/** UV scale for texture mapping */
 	UPROPERTY()
