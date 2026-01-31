@@ -1,11 +1,33 @@
 # GPU Compute Pipeline
 
-**Modules**: VoxelGeneration, VoxelMeshing  
+**Modules**: VoxelGeneration, VoxelMeshing
 **Dependencies**: VoxelCore
 
 ## Overview
 
 The GPU compute pipeline handles all voxel generation and meshing on the GPU, minimizing CPU overhead and maximizing parallelism.
+
+## Module Configuration
+
+**IMPORTANT**: Modules that use global shaders (via `IMPLEMENT_GLOBAL_SHADER`) must be configured with `LoadingPhase: PostConfigInit` in the `.uplugin` file. This ensures the shader system is initialized before the module loads.
+
+```json
+{
+    "Name": "VoxelGeneration",
+    "Type": "Runtime",
+    "LoadingPhase": "PostConfigInit"
+}
+```
+
+Failure to set this loading phase will cause editor crashes during startup with access violations in `CreatePackage` or `ProcessNewlyLoadedUObjects`.
+
+### Header Best Practices
+
+To avoid static initialization issues in GPU modules:
+
+1. **Minimize RDG includes in headers** - Forward declare types like `FRDGPooledBuffer` instead of including heavy headers
+2. **Move heavy includes to .cpp files** - `RenderGraphBuilder.h`, `RenderGraphResources.h`, etc.
+3. **Use `RHIFwd.h`** for forward declarations of RHI types in headers
 
 ## Pipeline Stages
 
