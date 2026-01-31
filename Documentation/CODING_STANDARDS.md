@@ -33,6 +33,31 @@ Follow standard UE coding conventions:
 - Internal-only fields (no `BlueprintReadWrite`): any type is acceptable
 - Add comment noting "for Blueprint compatibility" when using signed alternatives
 
+## UE5 API Deprecations
+
+Track deprecated APIs to maintain forward compatibility with future engine versions.
+
+### TArray::Pop / TArray::RemoveAt Shrinking Parameter
+
+**Deprecated (UE 5.5+)**: `TArray::Pop(bool bAllowShrinking)` and similar methods with boolean shrinking parameter.
+
+**New API**: Use `EAllowShrinking` enum instead.
+
+```cpp
+// ❌ Deprecated
+TArray<int32> Arr;
+int32 Value = Arr.Pop(false);           // Warning C4996
+Arr.RemoveAt(0, 1, false);              // Warning C4996
+
+// ✅ Correct
+int32 Value = Arr.Pop(EAllowShrinking::No);
+Arr.RemoveAt(0, 1, EAllowShrinking::No);
+
+// Or allow shrinking:
+int32 Value = Arr.Pop(EAllowShrinking::Yes);
+Arr.Pop();  // Default behavior (allows shrinking)
+```
+
 ## Naming Conventions
 
 ### Files
