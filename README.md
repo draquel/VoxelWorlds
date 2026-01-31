@@ -79,9 +79,14 @@ VoxelWorlds/
   - CubicMeshGeneration.usf compute shader with RDG integration
   - Seamless chunk boundaries via neighbor data
   - Full test coverage (9 automation tests passing)
+- ✅ **PMC Renderer** (Phase 2)
+  - FVoxelPMCRenderer: ProceduralMeshComponent-based IVoxelMeshRenderer implementation
+  - AVoxelPMCContainerActor: Transient actor for PMC component management
+  - Component pooling for reduced allocations
+  - CPU mesh data conversion (FVector3f/uint32 to FVector/int32)
+  - Automatic tangent generation and collision mesh support
 
 ### In Progress
-- 🔄 Phase 2: PMC renderer implementation
 - 🔄 Phase 2: Basic biome system (2-3 biomes)
 
 ### Planned
@@ -108,6 +113,7 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FVoxelGPUNoiseGenerator` - GPU compute shader noise generation
 - `FVoxelCPUCubicMesher` - CPU-based cubic mesh generation
 - `FVoxelGPUCubicMesher` - GPU compute shader cubic meshing
+- `FVoxelPMCRenderer` - ProceduralMeshComponent-based renderer
 - `FVoxelVertexFactory` - Custom vertex factory for GPU rendering
 - `UVoxelWorldConfiguration` - World configuration asset
 

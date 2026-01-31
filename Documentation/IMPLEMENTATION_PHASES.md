@@ -37,7 +37,7 @@ Development roadmap for the VoxelWorlds plugin.
 - [x] GPU noise library (Perlin, Simplex)
 - [x] Infinite plane world mode
 - [x] Cubic meshing (face culling)
-- [ ] PMC renderer implementation
+- [x] PMC renderer implementation
 - [ ] Basic biome system (2-3 biomes)
 - [ ] Material registry
 - [ ] Chunk generation pipeline
@@ -179,7 +179,7 @@ Development roadmap for the VoxelWorlds plugin.
 ## Current Status
 
 **Active Phase**: Phase 2 (Generation & Basic Rendering)
-**Progress**: Phase 1 COMPLETE - Phase 2 in progress (75% complete)
+**Progress**: Phase 1 COMPLETE - Phase 2 in progress (80% complete)
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -212,10 +212,19 @@ Development roadmap for the VoxelWorlds plugin.
    - Performance: CPU ~0.65ms, GPU ~2.89ms for 32³ terrain chunks
    - Automation tests passing (EmptyChunk, SingleVoxel, FaceCulling, FullChunk, GPUAsync, GPUReadback, CPUvsGPU, Performance, ChunkBoundary)
 
+4. ~~PMC renderer~~ - ProceduralMeshComponent-based renderer (VoxelRendering module)
+   - FVoxelPMCRenderer: Full IVoxelMeshRenderer implementation
+   - AVoxelPMCContainerActor: Transient actor holding all PMC instances
+   - Component pooling: Reusable PMC components to reduce allocations
+   - Data conversion: FChunkMeshData (FVector3f, uint32) to PMC format (FVector, int32)
+   - Automatic tangent generation from normals
+   - Statistics tracking: Vertex/triangle counts, memory usage
+   - Collision mesh support via bGenerateCollision config
+
 **Next Immediate Steps** (Phase 2):
-1. PMC renderer implementation
+1. Chunk generation pipeline (connect noise → world mode → meshing → rendering)
 2. Basic biome system (2-3 biomes)
-3. Chunk generation pipeline
+3. Material registry
 
 ---
 
