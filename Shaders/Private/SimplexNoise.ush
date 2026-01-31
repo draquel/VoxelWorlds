@@ -1,0 +1,125 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * 3D Simplex noise implementation for compute shaders.
+ * Returns values in range [-1, 1].
+ *
+ * Simplex noise is faster and has fewer directional artifacts than Perlin noise.
+ */
+
+#pragma once
+
+#include "VoxelNoiseCommon.ush"
+
+/**
+ * Sample 3D Simplex noise at a position.
+ *
+ * @param Position World position to sample
+ * @param Seed Random seed for hash offset
+ * @return Noise value in range [-1, 1]
+ */
+float Simplex3D(float3 Position, int Seed)
+{
+    float X = Position.x;
+    float Y = Position.y;
+    float Z = Position.z;
+
+    // Skew the input space to determine which simplex cell we're in
+    float S = (X + Y + Z) * F3;
+    int I = FastFloor(X + S);
+    int J = FastFloor(Y + S);
+    int K = FastFloor(Z + S);
+
+    float T = (I + J + K) * G3;
+    float X0 = X - (I - T);
+    float Y0 = Y - (J - T);
+    float Z0 = Z - (K - T);
+
+    // Determine which simplex we're in
+    int I1, J1, K1;
+    int I2, J2, K2;
+
+    if (X0 >= Y0)
+    {
+        if (Y0 >= Z0) { I1 = 1; J1 = 0; K1 = 0; I2 = 1; J2 = 1; K2 = 0; }
+        else if (X0 >= Z0) { I1 = 1; J1 = 0; K1 = 0; I2 = 1; J2 = 0; K2 = 1; }
+        else { I1 = 0; J1 = 0; K1 = 1; I2 = 1; J2 = 0; K2 = 1; }
+    }
+    else
+    {
+        if (Y0 < Z0) { I1 = 0; J1 = 0; K1 = 1; I2 = 0; J2 = 1; K2 = 1; }
+        else if (X0 < Z0) { I1 = 0; J1 = 1; K1 = 0; I2 = 0; J2 = 1; K2 = 1; }
+        else { I1 = 0; J1 = 1; K1 = 0; I2 = 1; J2 = 1; K2 = 0; }
+    }
+
+    // Offsets for corners
+    float X1 = X0 - I1 + G3;
+    float Y1 = Y0 - J1 + G3;
+    float Z1 = Z0 - K1 + G3;
+    float X2 = X0 - I2 + 2.0f * G3;
+    float Y2 = Y0 - J2 + 2.0f * G3;
+    float Z2 = Z0 - K2 + 2.0f * G3;
+    float X3 = X0 - 1.0f + 3.0f * G3;
+    float Y3 = Y0 - 1.0f + 3.0f * G3;
+    float Z3 = Z0 - 1.0f + 3.0f * G3;
+
+    // Hash corner coordinates
+    int II = I & 255;
+    int JJ = J & 255;
+    int KK = K & 255;
+
+    int Gi0 = Hash3D(II, JJ, KK, Seed) % 12;
+    int Gi1 = Hash3D(II + I1, JJ + J1, KK + K1, Seed) % 12;
+    int Gi2 = Hash3D(II + I2, JJ + J2, KK + K2, Seed) % 12;
+    int Gi3 = Hash3D(II + 1, JJ + 1, KK + 1, Seed) % 12;
+
+    // Calculate contribution from the four corners
+    float N0, N1, N2, N3;
+
+    float T0 = 0.6f - X0 * X0 - Y0 * Y0 - Z0 * Z0;
+    if (T0 < 0)
+    {
+        N0 = 0.0f;
+    }
+    else
+    {
+        T0 *= T0;
+        N0 = T0 * T0 * SimplexDot(Grad3[Gi0], X0, Y0, Z0);
+    }
+
+    float T1 = 0.6f - X1 * X1 - Y1 * Y1 - Z1 * Z1;
+    if (T1 < 0)
+    {
+        N1 = 0.0f;
+    }
+    else
+    {
+        T1 *= T1;
+        N1 = T1 * T1 * SimplexDot(Grad3[Gi1], X1, Y1, Z1);
+    }
+
+    float T2 = 0.6f - X2 * X2 - Y2 * Y2 - Z2 * Z2;
+    if (T2 < 0)
+    {
+        N2 = 0.0f;
+    }
+    else
+    {
+        T2 *= T2;
+        N2 = T2 * T2 * SimplexDot(Grad3[Gi2], X2, Y2, Z2);
+    }
+
+    float T3 = 0.6f - X3 * X3 - Y3 * Y3 - Z3 * Z3;
+    if (T3 < 0)
+    {
+        N3 = 0.0f;
+    }
+    else
+    {
+        T3 *= T3;
+        N3 = T3 * T3 * SimplexDot(Grad3[Gi3], X3, Y3, Z3);
+    }
+
+    // Sum and scale to [-1, 1]
+    return 32.0f * (N0 + N1 + N2 + N3);
+}

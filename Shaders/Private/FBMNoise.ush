@@ -1,0 +1,131 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Fractal Brownian Motion (fBm) noise implementation.
+ * Combines multiple octaves of noise for natural-looking terrain.
+ */
+
+#pragma once
+
+#include "PerlinNoise.ush"
+#include "SimplexNoise.ush"
+
+// Noise type enum (must match EVoxelNoiseType)
+#define NOISE_TYPE_PERLIN 0
+#define NOISE_TYPE_SIMPLEX 1
+
+/**
+ * Sample fBm noise using the specified noise type.
+ *
+ * @param Position World position to sample
+ * @param NoiseType 0 = Perlin, 1 = Simplex
+ * @param Seed Random seed
+ * @param Octaves Number of noise layers to combine
+ * @param Frequency Base frequency (lower = larger features)
+ * @param Amplitude Base amplitude
+ * @param Lacunarity Frequency multiplier per octave (typically 2.0)
+ * @param Persistence Amplitude multiplier per octave (typically 0.5)
+ * @return Noise value in range approximately [-1, 1]
+ */
+float FBM3D(
+    float3 Position,
+    int NoiseType,
+    int Seed,
+    int Octaves,
+    float Frequency,
+    float Amplitude,
+    float Lacunarity,
+    float Persistence)
+{
+    float Total = 0.0f;
+    float CurrentFrequency = Frequency;
+    float CurrentAmplitude = Amplitude;
+    float MaxValue = 0.0f;
+
+    for (int i = 0; i < Octaves; ++i)
+    {
+        float3 ScaledPos = Position * CurrentFrequency;
+
+        float NoiseValue;
+        if (NoiseType == NOISE_TYPE_PERLIN)
+        {
+            NoiseValue = Perlin3D(ScaledPos, Seed);
+        }
+        else
+        {
+            NoiseValue = Simplex3D(ScaledPos, Seed);
+        }
+
+        Total += NoiseValue * CurrentAmplitude;
+        MaxValue += CurrentAmplitude;
+
+        CurrentAmplitude *= Persistence;
+        CurrentFrequency *= Lacunarity;
+    }
+
+    // Normalize to approximately [-1, 1] range
+    return Total / MaxValue;
+}
+
+/**
+ * Simplified fBm with default Simplex noise.
+ */
+float FBMSimplex(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
+{
+    return FBM3D(Position, NOISE_TYPE_SIMPLEX, Seed, Octaves, Frequency, 1.0f, 2.0f, Persistence);
+}
+
+/**
+ * Simplified fBm with default Perlin noise.
+ */
+float FBMPerlin(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
+{
+    return FBM3D(Position, NOISE_TYPE_PERLIN, Seed, Octaves, Frequency, 1.0f, 2.0f, Persistence);
+}
+
+/**
+ * Ridged fBm for mountain-like features.
+ * Takes absolute value and inverts for ridged appearance.
+ */
+float RidgedFBM3D(
+    float3 Position,
+    int NoiseType,
+    int Seed,
+    int Octaves,
+    float Frequency,
+    float Lacunarity,
+    float Persistence)
+{
+    float Total = 0.0f;
+    float CurrentFrequency = Frequency;
+    float CurrentAmplitude = 1.0f;
+    float MaxValue = 0.0f;
+
+    for (int i = 0; i < Octaves; ++i)
+    {
+        float3 ScaledPos = Position * CurrentFrequency;
+
+        float NoiseValue;
+        if (NoiseType == NOISE_TYPE_PERLIN)
+        {
+            NoiseValue = Perlin3D(ScaledPos, Seed);
+        }
+        else
+        {
+            NoiseValue = Simplex3D(ScaledPos, Seed);
+        }
+
+        // Ridged transformation: 1 - |noise|
+        NoiseValue = 1.0f - abs(NoiseValue);
+        NoiseValue *= NoiseValue; // Square for sharper ridges
+
+        Total += NoiseValue * CurrentAmplitude;
+        MaxValue += CurrentAmplitude;
+
+        CurrentAmplitude *= Persistence;
+        CurrentFrequency *= Lacunarity;
+    }
+
+    // Scale to [-1, 1] range (ridged naturally is [0, 1] so adjust)
+    return (Total / MaxValue) * 2.0f - 1.0f;
+}

@@ -1,0 +1,97 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Main compute shader for generating voxel density data.
+ *
+ * Generates a 3D grid of voxel data using noise-based terrain generation.
+ * Each thread computes one voxel's density and packs it into the output buffer.
+ *
+ * Thread Group Size: [4, 4, 4] = 64 threads per group
+ * Dispatch: ChunkSize/4 in each dimension
+ */
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/VoxelWorlds/Private/FBMNoise.ush"
+
+// ==================== Shader Parameters ====================
+
+// Chunk world position (origin of this chunk)
+float3 ChunkWorldPosition;
+
+// Number of voxels per chunk edge
+uint ChunkSize;
+
+// Size of each voxel in world units
+float VoxelSize;
+
+// LOD level (voxel size multiplier = 2^LODLevel)
+uint LODLevel;
+
+// Noise parameters
+int NoiseType;      // 0 = Perlin, 1 = Simplex
+int NoiseSeed;
+int NoiseOctaves;
+float NoiseFrequency;
+float NoiseAmplitude;
+float NoiseLacunarity;
+float NoisePersistence;
+
+// Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
+RWStructuredBuffer<uint> OutputVoxelData;
+
+// ==================== Main Compute Shader ====================
+
+[numthreads(4, 4, 4)]
+void MainCS(
+    uint3 GroupId : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID,
+    uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    // Calculate voxel index in chunk
+    uint3 VoxelCoord = DispatchThreadId;
+
+    // Early out if outside chunk bounds
+    if (VoxelCoord.x >= ChunkSize || VoxelCoord.y >= ChunkSize || VoxelCoord.z >= ChunkSize)
+    {
+        return;
+    }
+
+    // Calculate linear index for output buffer
+    uint LinearIndex = VoxelCoord.x + VoxelCoord.y * ChunkSize + VoxelCoord.z * ChunkSize * ChunkSize;
+
+    // Calculate effective voxel size at this LOD level
+    float EffectiveVoxelSize = VoxelSize * (float)(1u << LODLevel);
+
+    // Calculate world position for this voxel
+    float3 WorldPos = ChunkWorldPosition + float3(VoxelCoord) * EffectiveVoxelSize;
+
+    // Sample noise at this position
+    float NoiseValue = FBM3D(
+        WorldPos,
+        NoiseType,
+        NoiseSeed,
+        NoiseOctaves,
+        NoiseFrequency,
+        NoiseAmplitude,
+        NoiseLacunarity,
+        NoisePersistence
+    );
+
+    // Convert noise to density
+    uint Density = NoiseToDensity(NoiseValue);
+
+    // Determine material based on height (simple example)
+    // Below Z=0: Stone (MaterialID=1)
+    // At/Above Z=0: Grass (MaterialID=0)
+    uint MaterialID = (WorldPos.z < 0.0f) ? 1u : 0u;
+
+    // Default biome and metadata
+    uint BiomeID = 0u;
+    uint Metadata = 0u;
+
+    // Pack voxel data
+    uint PackedData = PackVoxelData(MaterialID, Density, BiomeID, Metadata);
+
+    // Write to output buffer
+    OutputVoxelData[LinearIndex] = PackedData;
+}

@@ -1,0 +1,68 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * 3D Perlin noise implementation for compute shaders.
+ * Returns values in range [-1, 1].
+ */
+
+#pragma once
+
+#include "VoxelNoiseCommon.ush"
+
+/**
+ * Sample 3D Perlin noise at a position.
+ *
+ * @param Position World position to sample
+ * @param Seed Random seed for permutation table offset
+ * @return Noise value in range [-1, 1]
+ */
+float Perlin3D(float3 Position, int Seed)
+{
+    float X = Position.x;
+    float Y = Position.y;
+    float Z = Position.z;
+
+    // Find unit cube that contains point
+    int Xi = FastFloor(X) & 255;
+    int Yi = FastFloor(Y) & 255;
+    int Zi = FastFloor(Z) & 255;
+
+    // Find relative X, Y, Z of point in cube
+    X -= FastFloor(Position.x);
+    Y -= FastFloor(Position.y);
+    Z -= FastFloor(Position.z);
+
+    // Compute fade curves for each of X, Y, Z
+    float U = Fade(X);
+    float V = Fade(Y);
+    float W = Fade(Z);
+
+    // Hash coordinates of the 8 cube corners
+    int A = PermValue(Xi, Seed) + Yi;
+    int AA = PermValue(A, Seed) + Zi;
+    int AB = PermValue(A + 1, Seed) + Zi;
+    int B = PermValue(Xi + 1, Seed) + Yi;
+    int BA = PermValue(B, Seed) + Zi;
+    int BB = PermValue(B + 1, Seed) + Zi;
+
+    // Compute gradients and blend
+    float GradAAA = Grad(PermValue(AA, Seed), X, Y, Z);
+    float GradBAA = Grad(PermValue(BA, Seed), X - 1, Y, Z);
+    float GradABA = Grad(PermValue(AB, Seed), X, Y - 1, Z);
+    float GradBBA = Grad(PermValue(BB, Seed), X - 1, Y - 1, Z);
+    float GradAAB = Grad(PermValue(AA + 1, Seed), X, Y, Z - 1);
+    float GradBAB = Grad(PermValue(BA + 1, Seed), X - 1, Y, Z - 1);
+    float GradABB = Grad(PermValue(AB + 1, Seed), X, Y - 1, Z - 1);
+    float GradBBB = Grad(PermValue(BB + 1, Seed), X - 1, Y - 1, Z - 1);
+
+    // Trilinear interpolation
+    float LerpX1 = lerp(GradAAA, GradBAA, U);
+    float LerpX2 = lerp(GradABA, GradBBA, U);
+    float LerpX3 = lerp(GradAAB, GradBAB, U);
+    float LerpX4 = lerp(GradABB, GradBBB, U);
+
+    float LerpY1 = lerp(LerpX1, LerpX2, V);
+    float LerpY2 = lerp(LerpX3, LerpX4, V);
+
+    return lerp(LerpY1, LerpY2, W);
+}
