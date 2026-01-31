@@ -370,6 +370,15 @@ protected:
 	void OnChunkMeshingComplete(const FIntVector& ChunkCoord);
 
 	/**
+	 * Queue neighbors for remeshing when a chunk's voxel data becomes available.
+	 * This ensures seamless boundaries when chunks load in different orders.
+	 * Only queues neighbors that are already in Loaded state.
+	 *
+	 * @param ChunkCoord The chunk that just finished generation
+	 */
+	void QueueNeighborsForRemesh(const FIntVector& ChunkCoord);
+
+	/**
 	 * Extract neighbor edge slices for seamless chunk boundaries.
 	 *
 	 * For each of 6 faces, checks if neighbor chunk is loaded and

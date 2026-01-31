@@ -813,6 +813,10 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 
 	SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
 
+	// Queue neighbors for remeshing so they can incorporate this chunk's edge data
+	// This ensures seamless boundaries when chunks load in different orders
+	QueueNeighborsForRemesh(ChunkCoord);
+
 	// Fire event
 	OnChunkGenerated.Broadcast(ChunkCoord);
 
@@ -868,6 +872,66 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 }
 
+void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
+{
+	// Direction offsets for each neighbor
+	static const FIntVector NeighborOffsets[6] = {
+		FIntVector(1, 0, 0),   // +X
+		FIntVector(-1, 0, 0),  // -X
+		FIntVector(0, 1, 0),   // +Y
+		FIntVector(0, -1, 0),  // -Y
+		FIntVector(0, 0, 1),   // +Z
+		FIntVector(0, 0, -1)   // -Z
+	};
+
+	// Check each neighbor
+	for (int32 i = 0; i < 6; ++i)
+	{
+		const FIntVector NeighborCoord = ChunkCoord + NeighborOffsets[i];
+
+		FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
+		if (!NeighborState)
+		{
+			continue;
+		}
+
+		// Only remesh neighbors that are already in Loaded state
+		// Neighbors in earlier states will get correct data during their initial meshing
+		if (NeighborState->State == EChunkState::Loaded)
+		{
+			// Queue for remeshing - lower priority since it's a refinement
+			FChunkLODRequest Request;
+			Request.ChunkCoord = NeighborCoord;
+			Request.LODLevel = NeighborState->LODLevel;
+			Request.Priority = NeighborState->Priority * 0.5f; // Lower priority than new chunks
+
+			// Check if not already in meshing queue
+			bool bAlreadyQueued = false;
+			for (const FChunkLODRequest& Existing : MeshingQueue)
+			{
+				if (Existing.ChunkCoord == NeighborCoord)
+				{
+					bAlreadyQueued = true;
+					break;
+				}
+			}
+
+			if (!bAlreadyQueued)
+			{
+				MeshingQueue.Add(Request);
+				SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
+
+				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) queued for remesh (neighbor of %d, %d, %d)"),
+					NeighborCoord.X, NeighborCoord.Y, NeighborCoord.Z,
+					ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+			}
+		}
+	}
+
+	// Re-sort the meshing queue after adding potential remesh requests
+	MeshingQueue.Sort();
+}
+
 void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest)
 {
 	if (!Configuration)
@@ -893,19 +957,20 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 	{
 		const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[Face];
 
-		// Check if neighbor chunk is loaded
+		// Check if neighbor chunk exists and has voxel data
+		// Voxel data is available in states: PendingMeshing, Meshing, Loaded, PendingUnload
 		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
-		if (!NeighborState || NeighborState->State != EChunkState::Loaded)
+		if (!NeighborState)
 		{
-			// No loaded neighbor - leave array empty (boundary faces will render)
+			// No neighbor chunk - leave array empty (boundary faces will render)
 			continue;
 		}
 
-		// Get neighbor's voxel data
+		// Get neighbor's voxel data - available once generation is complete
 		const TArray<FVoxelData>& NeighborVoxels = NeighborState->Descriptor.VoxelData;
 		if (NeighborVoxels.Num() != ChunkSize * ChunkSize * ChunkSize)
 		{
-			// Neighbor doesn't have valid voxel data
+			// Neighbor doesn't have valid voxel data yet (still generating or not started)
 			continue;
 		}
 

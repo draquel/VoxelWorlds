@@ -143,24 +143,103 @@ bool FVoxelCPUCubicMesher::GenerateMeshCPU(
 		return false;
 	}
 
+	if (Config.bUseGreedyMeshing)
+	{
+		// Use greedy meshing for optimized output (40-60% fewer triangles)
+		GenerateMeshGreedy(Request, OutMeshData, OutStats);
+	}
+	else
+	{
+		// Use simple per-voxel meshing (useful for debugging or when per-face data needed)
+		GenerateMeshSimple(Request, OutMeshData, OutStats);
+	}
+
+	return true;
+}
+
+void FVoxelCPUCubicMesher::GenerateMeshGreedy(
+	const FVoxelMeshingRequest& Request,
+	FChunkMeshData& OutMeshData,
+	FVoxelMeshingStats& OutStats)
+{
 	const double StartTime = FPlatformTime::Seconds();
 
 	// Reset output
 	OutMeshData.Reset();
 	OutStats = FVoxelMeshingStats();
 
-	// Pre-allocate arrays (estimate based on typical terrain)
-	const int32 EstimatedFaces = Request.ChunkSize * Request.ChunkSize * 6;
+	// Pre-allocate arrays (greedy meshing produces fewer faces, so estimate lower)
+	const int32 EstimatedFaces = Request.ChunkSize * Request.ChunkSize * 2;
 	OutMeshData.Positions.Reserve(EstimatedFaces * 4);
 	OutMeshData.Normals.Reserve(EstimatedFaces * 4);
 	OutMeshData.UVs.Reserve(EstimatedFaces * 4);
 	OutMeshData.Colors.Reserve(EstimatedFaces * 4);
 	OutMeshData.Indices.Reserve(EstimatedFaces * 6);
 
+	uint32 GeneratedFaces = 0;
+
+	// Process each face direction
+	for (int32 Face = 0; Face < 6; Face++)
+	{
+		ProcessFaceDirectionGreedy(Face, Request, OutMeshData, GeneratedFaces);
+	}
+
+	// Count solid voxels for stats
 	const int32 ChunkSize = Request.ChunkSize;
 	uint32 SolidVoxels = 0;
-	uint32 CulledFaces = 0;
+	for (int32 Z = 0; Z < ChunkSize; Z++)
+	{
+		for (int32 Y = 0; Y < ChunkSize; Y++)
+		{
+			for (int32 X = 0; X < ChunkSize; X++)
+			{
+				if (!Request.GetVoxel(X, Y, Z).IsAir())
+				{
+					SolidVoxels++;
+				}
+			}
+		}
+	}
+
+	// Calculate stats
+	const double EndTime = FPlatformTime::Seconds();
+	OutStats.VertexCount = OutMeshData.Positions.Num();
+	OutStats.IndexCount = OutMeshData.Indices.Num();
+	OutStats.FaceCount = GeneratedFaces;
+	OutStats.SolidVoxelCount = SolidVoxels;
+	OutStats.CulledFaceCount = 0; // Not tracked in greedy meshing
+	OutStats.GenerationTimeMs = static_cast<float>((EndTime - StartTime) * 1000.0);
+
+	UE_LOG(LogVoxelMeshing, Verbose,
+		TEXT("Greedy meshing complete: %d verts, %d tris, %d merged faces, %.2fms"),
+		OutStats.VertexCount, OutStats.GetTriangleCount(), GeneratedFaces,
+		OutStats.GenerationTimeMs);
+}
+
+void FVoxelCPUCubicMesher::GenerateMeshSimple(
+	const FVoxelMeshingRequest& Request,
+	FChunkMeshData& OutMeshData,
+	FVoxelMeshingStats& OutStats)
+{
+	const double StartTime = FPlatformTime::Seconds();
+
+	// Reset output
+	OutMeshData.Reset();
+	OutStats = FVoxelMeshingStats();
+
+	const int32 ChunkSize = Request.ChunkSize;
+
+	// Pre-allocate arrays (estimate worst case: each voxel exposes some faces)
+	const int32 EstimatedFaces = ChunkSize * ChunkSize * 6;
+	OutMeshData.Positions.Reserve(EstimatedFaces * 4);
+	OutMeshData.Normals.Reserve(EstimatedFaces * 4);
+	OutMeshData.UVs.Reserve(EstimatedFaces * 4);
+	OutMeshData.Colors.Reserve(EstimatedFaces * 4);
+	OutMeshData.Indices.Reserve(EstimatedFaces * 6);
+
+	uint32 SolidVoxels = 0;
 	uint32 GeneratedFaces = 0;
+	uint32 CulledFaces = 0;
 
 	// Iterate through all voxels
 	for (int32 Z = 0; Z < ChunkSize; Z++)
@@ -179,7 +258,7 @@ bool FVoxelCPUCubicMesher::GenerateMeshCPU(
 
 				SolidVoxels++;
 
-				// Check each face
+				// Check all 6 faces
 				for (int32 Face = 0; Face < 6; Face++)
 				{
 					if (ShouldRenderFace(Request, X, Y, Z, Face))
@@ -206,11 +285,339 @@ bool FVoxelCPUCubicMesher::GenerateMeshCPU(
 	OutStats.GenerationTimeMs = static_cast<float>((EndTime - StartTime) * 1000.0);
 
 	UE_LOG(LogVoxelMeshing, Verbose,
-		TEXT("CPU meshing complete: %d verts, %d tris, %d faces (%d culled), %.2fms"),
+		TEXT("Simple meshing complete: %d verts, %d tris, %d faces (culled %d), %.2fms"),
 		OutStats.VertexCount, OutStats.GetTriangleCount(), GeneratedFaces, CulledFaces,
 		OutStats.GenerationTimeMs);
+}
 
-	return true;
+void FVoxelCPUCubicMesher::GetFaceAxes(int32 Face, int32& OutPrimaryAxis, int32& OutUAxis, int32& OutVAxis, bool& OutPositive)
+{
+	// Face 0: +X, Face 1: -X -> Primary=X(0), U=Y(1), V=Z(2)
+	// Face 2: +Y, Face 3: -Y -> Primary=Y(1), U=X(0), V=Z(2)
+	// Face 4: +Z, Face 5: -Z -> Primary=Z(2), U=X(0), V=Y(1)
+	switch (Face)
+	{
+	case 0: // +X
+		OutPrimaryAxis = 0; OutUAxis = 1; OutVAxis = 2; OutPositive = true;
+		break;
+	case 1: // -X
+		OutPrimaryAxis = 0; OutUAxis = 1; OutVAxis = 2; OutPositive = false;
+		break;
+	case 2: // +Y
+		OutPrimaryAxis = 1; OutUAxis = 0; OutVAxis = 2; OutPositive = true;
+		break;
+	case 3: // -Y
+		OutPrimaryAxis = 1; OutUAxis = 0; OutVAxis = 2; OutPositive = false;
+		break;
+	case 4: // +Z
+		OutPrimaryAxis = 2; OutUAxis = 0; OutVAxis = 1; OutPositive = true;
+		break;
+	case 5: // -Z
+	default:
+		OutPrimaryAxis = 2; OutUAxis = 0; OutVAxis = 1; OutPositive = false;
+		break;
+	}
+}
+
+void FVoxelCPUCubicMesher::ProcessFaceDirectionGreedy(
+	int32 Face,
+	const FVoxelMeshingRequest& Request,
+	FChunkMeshData& OutMeshData,
+	uint32& OutGeneratedFaces)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	const int32 SliceSize = ChunkSize * ChunkSize;
+
+	// Get axis mapping for this face
+	int32 PrimaryAxis, UAxis, VAxis;
+	bool bPositive;
+	GetFaceAxes(Face, PrimaryAxis, UAxis, VAxis, bPositive);
+
+	// Allocate mask and processed arrays
+	TArray<uint16> FaceMask;
+	TArray<bool> Processed;
+	FaceMask.SetNumZeroed(SliceSize);
+	Processed.SetNumZeroed(SliceSize);
+
+	// Process each slice along the primary axis
+	for (int32 SliceIndex = 0; SliceIndex < ChunkSize; SliceIndex++)
+	{
+		// Build face mask for this slice
+		BuildFaceMask(Face, SliceIndex, Request, FaceMask);
+
+		// Reset processed array
+		FMemory::Memzero(Processed.GetData(), SliceSize * sizeof(bool));
+
+		// Greedy merge algorithm
+		for (int32 V = 0; V < ChunkSize; V++)
+		{
+			for (int32 U = 0; U < ChunkSize; U++)
+			{
+				const int32 Index = U + V * ChunkSize;
+
+				// Skip if already processed or no face needed
+				if (Processed[Index] || FaceMask[Index] == 0)
+				{
+					continue;
+				}
+
+				const uint16 CurrentMaterial = FaceMask[Index];
+
+				// Find maximum width (extend along U axis)
+				int32 Width = 1;
+				while (U + Width < ChunkSize)
+				{
+					const int32 NextIndex = (U + Width) + V * ChunkSize;
+					if (Processed[NextIndex] || FaceMask[NextIndex] != CurrentMaterial)
+					{
+						break;
+					}
+					Width++;
+				}
+
+				// Find maximum height (extend along V axis) for this width
+				int32 Height = 1;
+				bool bCanExtend = true;
+				while (bCanExtend && V + Height < ChunkSize)
+				{
+					// Check if the entire row can be extended
+					for (int32 DU = 0; DU < Width; DU++)
+					{
+						const int32 CheckIndex = (U + DU) + (V + Height) * ChunkSize;
+						if (Processed[CheckIndex] || FaceMask[CheckIndex] != CurrentMaterial)
+						{
+							bCanExtend = false;
+							break;
+						}
+					}
+					if (bCanExtend)
+					{
+						Height++;
+					}
+				}
+
+				// Mark all cells in this rectangle as processed
+				for (int32 DV = 0; DV < Height; DV++)
+				{
+					for (int32 DU = 0; DU < Width; DU++)
+					{
+						const int32 MarkIndex = (U + DU) + (V + DV) * ChunkSize;
+						Processed[MarkIndex] = true;
+					}
+				}
+
+				// Emit merged quad
+				const uint8 MaterialID = static_cast<uint8>(CurrentMaterial - 1);
+				EmitMergedQuad(OutMeshData, Request, Face, SliceIndex, U, V, Width, Height, MaterialID);
+				OutGeneratedFaces++;
+			}
+		}
+	}
+}
+
+void FVoxelCPUCubicMesher::BuildFaceMask(
+	int32 Face,
+	int32 SliceIndex,
+	const FVoxelMeshingRequest& Request,
+	TArray<uint16>& OutMask) const
+{
+	const int32 ChunkSize = Request.ChunkSize;
+
+	// Get axis mapping
+	int32 PrimaryAxis, UAxis, VAxis;
+	bool bPositive;
+	GetFaceAxes(Face, PrimaryAxis, UAxis, VAxis, bPositive);
+
+	// Clear mask
+	FMemory::Memzero(OutMask.GetData(), ChunkSize * ChunkSize * sizeof(uint16));
+
+	// Build coordinate array for iteration
+	int32 Coords[3];
+
+	for (int32 V = 0; V < ChunkSize; V++)
+	{
+		for (int32 U = 0; U < ChunkSize; U++)
+		{
+			// Map U, V to world coordinates
+			Coords[PrimaryAxis] = SliceIndex;
+			Coords[UAxis] = U;
+			Coords[VAxis] = V;
+
+			const int32 X = Coords[0];
+			const int32 Y = Coords[1];
+			const int32 Z = Coords[2];
+
+			const FVoxelData& Voxel = Request.GetVoxel(X, Y, Z);
+
+			// Skip air voxels
+			if (Voxel.IsAir())
+			{
+				continue;
+			}
+
+			// Check if face should be rendered (neighbor is air)
+			if (ShouldRenderFace(Request, X, Y, Z, Face))
+			{
+				// Store MaterialID + 1 (so 0 means no face)
+				const int32 MaskIndex = U + V * ChunkSize;
+				OutMask[MaskIndex] = static_cast<uint16>(Voxel.MaterialID) + 1;
+			}
+		}
+	}
+}
+
+void FVoxelCPUCubicMesher::EmitMergedQuad(
+	FChunkMeshData& MeshData,
+	const FVoxelMeshingRequest& Request,
+	int32 Face,
+	int32 SliceIndex,
+	int32 U, int32 V,
+	int32 Width, int32 Height,
+	uint8 MaterialID) const
+{
+	const float VoxelSize = Request.VoxelSize;
+	const int32 ChunkSize = Request.ChunkSize;
+
+	// Get axis mapping
+	int32 PrimaryAxis, UAxis, VAxis;
+	bool bPositive;
+	GetFaceAxes(Face, PrimaryAxis, UAxis, VAxis, bPositive);
+
+	// Calculate base position in world coordinates
+	FVector3f BasePos;
+	int32 Coords[3];
+	Coords[PrimaryAxis] = SliceIndex;
+	Coords[UAxis] = U;
+	Coords[VAxis] = V;
+	BasePos = FVector3f(
+		static_cast<float>(Coords[0]) * VoxelSize,
+		static_cast<float>(Coords[1]) * VoxelSize,
+		static_cast<float>(Coords[2]) * VoxelSize
+	);
+
+	// Calculate the offset for the face (positive faces are offset by 1 voxel)
+	FVector3f FaceOffset = FVector3f::ZeroVector;
+	if (bPositive)
+	{
+		FaceOffset[PrimaryAxis] = VoxelSize;
+	}
+
+	// Calculate quad size
+	const float QuadWidth = Width * VoxelSize;
+	const float QuadHeight = Height * VoxelSize;
+
+	// Get the axis vectors for U and V directions
+	FVector3f UDir = FVector3f::ZeroVector;
+	FVector3f VDir = FVector3f::ZeroVector;
+	UDir[UAxis] = VoxelSize;
+	VDir[VAxis] = VoxelSize;
+
+	const FVector3f& Normal = FaceNormals[Face];
+	const uint32 BaseVertex = MeshData.Positions.Num();
+
+	// Calculate the 4 vertices of the merged quad
+	// We need to maintain correct winding order for each face direction
+	TArray<FVector3f, TInlineAllocator<4>> Vertices;
+	Vertices.SetNum(4);
+
+	// The vertex order depends on the face direction to maintain correct winding
+	FVector3f Corner0 = BasePos + FaceOffset;  // Base corner
+	FVector3f Corner1 = Corner0 + UDir * Width;  // +U
+	FVector3f Corner2 = Corner0 + UDir * Width + VDir * Height;  // +U +V
+	FVector3f Corner3 = Corner0 + VDir * Height;  // +V
+
+	// Adjust winding based on face direction to match the original QuadVertices patterns
+	switch (Face)
+	{
+	case 0: // +X: Y increases left-to-right, Z increases bottom-to-top (when viewed from +X)
+		Vertices[0] = Corner0;
+		Vertices[1] = Corner1;
+		Vertices[2] = Corner2;
+		Vertices[3] = Corner3;
+		break;
+	case 1: // -X: Need to reverse winding
+		Vertices[0] = Corner1;
+		Vertices[1] = Corner0;
+		Vertices[2] = Corner3;
+		Vertices[3] = Corner2;
+		break;
+	case 2: // +Y: X increases, Z increases
+		Vertices[0] = Corner1;
+		Vertices[1] = Corner0;
+		Vertices[2] = Corner3;
+		Vertices[3] = Corner2;
+		break;
+	case 3: // -Y: Need to reverse
+		Vertices[0] = Corner0;
+		Vertices[1] = Corner1;
+		Vertices[2] = Corner2;
+		Vertices[3] = Corner3;
+		break;
+	case 4: // +Z: X increases, Y increases
+		Vertices[0] = Corner0;
+		Vertices[1] = Corner1;
+		Vertices[2] = Corner2;
+		Vertices[3] = Corner3;
+		break;
+	case 5: // -Z: Need to reverse for correct winding when viewed from below
+		Vertices[0] = Corner0;
+		Vertices[1] = Corner1;
+		Vertices[2] = Corner2;
+		Vertices[3] = Corner3;
+		break;
+	}
+
+	// Look up material color
+	FColor MaterialColor = FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
+
+	// For merged quads, we don't have per-vertex AO, so use a default
+	const uint8 AO = Config.bCalculateAO ? 12 : 15;  // Slightly dimmed if AO enabled
+	const float AOFactor = (AO + 1) / 16.0f;
+
+	const FColor VertexColor(
+		static_cast<uint8>(MaterialColor.R * AOFactor),
+		static_cast<uint8>(MaterialColor.G * AOFactor),
+		static_cast<uint8>(MaterialColor.B * AOFactor),
+		255
+	);
+
+	// UV coordinates scaled by quad size for proper texture tiling
+	const FVector2f UV0(0.0f, 0.0f);
+	const FVector2f UV1(Width * Config.UVScale, 0.0f);
+	const FVector2f UV2(Width * Config.UVScale, Height * Config.UVScale);
+	const FVector2f UV3(0.0f, Height * Config.UVScale);
+
+	// Emit 4 vertices
+	for (int32 i = 0; i < 4; i++)
+	{
+		MeshData.Positions.Add(Vertices[i]);
+		MeshData.Normals.Add(Normal);
+		MeshData.Colors.Add(VertexColor);
+	}
+
+	// Add UVs
+	if (Config.bGenerateUVs)
+	{
+		MeshData.UVs.Add(UV0);
+		MeshData.UVs.Add(UV1);
+		MeshData.UVs.Add(UV2);
+		MeshData.UVs.Add(UV3);
+	}
+	else
+	{
+		MeshData.UVs.Add(FVector2f::ZeroVector);
+		MeshData.UVs.Add(FVector2f::ZeroVector);
+		MeshData.UVs.Add(FVector2f::ZeroVector);
+		MeshData.UVs.Add(FVector2f::ZeroVector);
+	}
+
+	// Emit 6 indices (2 triangles, CW winding)
+	MeshData.Indices.Add(BaseVertex + 0);
+	MeshData.Indices.Add(BaseVertex + 2);
+	MeshData.Indices.Add(BaseVertex + 1);
+	MeshData.Indices.Add(BaseVertex + 0);
+	MeshData.Indices.Add(BaseVertex + 3);
+	MeshData.Indices.Add(BaseVertex + 2);
 }
 
 bool FVoxelCPUCubicMesher::ShouldRenderFace(

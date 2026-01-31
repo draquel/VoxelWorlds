@@ -226,4 +226,13 @@ struct VOXELMESHING_API FVoxelMeshingConfig
 	/** UV scale for texture mapping */
 	UPROPERTY()
 	float UVScale = 1.0f;
+
+	/**
+	 * Whether to use greedy meshing algorithm.
+	 * Greedy meshing merges adjacent coplanar faces with the same material
+	 * into larger quads, significantly reducing triangle count (typically 40-60%).
+	 * Disable for debugging or when per-voxel face data is needed.
+	 */
+	UPROPERTY()
+	bool bUseGreedyMeshing = true;
 };

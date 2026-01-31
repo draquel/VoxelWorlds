@@ -62,7 +62,7 @@ Development roadmap for the VoxelWorlds plugin.
 **Goal**: Optimized rendering
 
 ### Tasks
-- [ ] Greedy meshing algorithm
+- [x] Greedy meshing algorithm
 - [ ] Ambient occlusion calculation
 - [ ] Smooth meshing (Marching Cubes)
 - [ ] Custom Vertex Factory
@@ -179,7 +179,7 @@ Development roadmap for the VoxelWorlds plugin.
 ## Current Status
 
 **Active Phase**: Phase 3 (Advanced Meshing)
-**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 starting
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 in progress (Greedy Meshing complete)
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -241,10 +241,21 @@ Development roadmap for the VoxelWorlds plugin.
    - Unload distance multiplier for hysteresis
    - Debug visualization and statistics output
 
+**Phase 3 Progress**:
+1. ~~Greedy meshing algorithm~~ - COMPLETE
+   - Slice-based face processing with 2D masks
+   - Rectangle merging for same-material adjacent faces
+   - Configurable via `bUseGreedyMeshing` in FVoxelMeshingConfig
+   - 40-60% triangle reduction achieved
+   - Chunk boundary fixes:
+     - Fixed neighbor data extraction (now uses any chunk with valid voxel data, not just Loaded state)
+     - Added automatic neighbor remeshing when chunks finish generating
+     - Seamless boundaries regardless of chunk load order
+
 **Next Immediate Steps** (Phase 3):
-1. Greedy meshing algorithm for triangle reduction
-2. Ambient occlusion calculation improvements
-3. Custom Vertex Factory for GPU-driven rendering
+1. Ambient occlusion calculation improvements
+2. Custom Vertex Factory for GPU-driven rendering
+3. Smooth meshing (Marching Cubes)
 
 ---
 

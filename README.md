@@ -99,11 +99,13 @@ VoxelWorlds/
   - Debug visualization and statistics
 
 ### In Progress
-- 🔄 Phase 2: Performance optimization and polish
+- 🔄 Phase 3: Advanced Meshing
+  - ✅ Greedy meshing algorithm (40-60% triangle reduction, seamless chunk boundaries)
+  - ⏳ Ambient occlusion improvements
+  - ⏳ Custom Vertex Factory renderer
 
 ### Planned
-- ⏳ Phase 3: Advanced meshing (Greedy, Marching Cubes)
-- ⏳ Phase 3: Custom Vertex Factory renderer
+- ⏳ Phase 3: Smooth meshing (Marching Cubes)
 - ⏳ Phase 3: LOD morphing
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.

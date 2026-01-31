@@ -105,6 +105,84 @@ private:
 		int32 Face,
 		const FVoxelData& Voxel) const;
 
+	// ============================================================================
+	// Greedy Meshing
+	// ============================================================================
+
+	/**
+	 * Generate mesh using greedy meshing algorithm.
+	 * Merges adjacent coplanar faces with the same material into larger quads.
+	 */
+	void GenerateMeshGreedy(
+		const FVoxelMeshingRequest& Request,
+		FChunkMeshData& OutMeshData,
+		FVoxelMeshingStats& OutStats);
+
+	/**
+	 * Generate mesh using simple per-voxel meshing algorithm.
+	 * Emits one quad per visible face without merging.
+	 * Useful for debugging or when per-voxel face data is needed.
+	 */
+	void GenerateMeshSimple(
+		const FVoxelMeshingRequest& Request,
+		FChunkMeshData& OutMeshData,
+		FVoxelMeshingStats& OutStats);
+
+	/**
+	 * Process a single face direction using greedy meshing.
+	 * @param Face Face direction (0-5)
+	 * @param Request The meshing request
+	 * @param OutMeshData Output mesh data
+	 * @param OutGeneratedFaces Counter for generated faces
+	 */
+	void ProcessFaceDirectionGreedy(
+		int32 Face,
+		const FVoxelMeshingRequest& Request,
+		FChunkMeshData& OutMeshData,
+		uint32& OutGeneratedFaces);
+
+	/**
+	 * Build a 2D face mask for a slice perpendicular to a face direction.
+	 * @param Face Face direction
+	 * @param SliceIndex Position along the primary axis
+	 * @param Request The meshing request
+	 * @param OutMask Output mask (ChunkSize x ChunkSize), 0 = no face, otherwise MaterialID + 1
+	 */
+	void BuildFaceMask(
+		int32 Face,
+		int32 SliceIndex,
+		const FVoxelMeshingRequest& Request,
+		TArray<uint16>& OutMask) const;
+
+	/**
+	 * Emit a merged quad covering multiple voxels.
+	 * @param Face Face direction
+	 * @param SliceIndex Position along the primary axis
+	 * @param U Start position on first secondary axis
+	 * @param V Start position on second secondary axis
+	 * @param Width Size along first secondary axis
+	 * @param Height Size along second secondary axis
+	 * @param MaterialID Material for this quad
+	 */
+	void EmitMergedQuad(
+		FChunkMeshData& MeshData,
+		const FVoxelMeshingRequest& Request,
+		int32 Face,
+		int32 SliceIndex,
+		int32 U, int32 V,
+		int32 Width, int32 Height,
+		uint8 MaterialID) const;
+
+	/**
+	 * Get the axis mapping for a face direction.
+	 * @param Face Face direction (0-5)
+	 * @param OutPrimaryAxis The axis perpendicular to the face (0=X, 1=Y, 2=Z)
+	 * @param OutUAxis The first axis parallel to the face
+	 * @param OutVAxis The second axis parallel to the face
+	 * @param OutPositive Whether the face points in the positive direction
+	 */
+	static void GetFaceAxes(int32 Face, int32& OutPrimaryAxis, int32& OutUAxis, int32& OutVAxis, bool& OutPositive);
+
 	/** Whether the mesher is initialized */
 	bool bIsInitialized = false;
 
