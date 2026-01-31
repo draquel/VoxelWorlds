@@ -25,6 +25,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "VoxelRendering",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "VoxelWorlds",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
