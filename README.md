@@ -66,9 +66,14 @@ VoxelWorlds/
   - CPU and GPU noise generators (Perlin, Simplex with FBM)
   - RDG-based compute shader integration for UE 5.7
   - Full test coverage (4 automation tests passing)
+- ✅ **Infinite Plane World Mode** (Phase 2)
+  - IVoxelWorldMode interface with SDF-based terrain generation
+  - FInfinitePlaneWorldMode: 2D heightmap terrain extending infinitely in X/Y
+  - GPU shader integration (WorldModeSDF.ush)
+  - Depth-based material assignment (Grass/Dirt/Stone)
+  - Full test coverage (6 automation tests passing)
 
 ### In Progress
-- 🔄 Phase 2: Infinite plane world mode
 - 🔄 Phase 2: Cubic meshing (face culling)
 - 🔄 Phase 2: PMC renderer implementation
 
@@ -86,10 +91,14 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `IVoxelLODStrategy` - LOD strategy abstraction
 - `IVoxelMeshRenderer` - Renderer abstraction
 - `IVoxelWorldMode` - World mode abstraction
+- `IVoxelNoiseGenerator` - Noise generation abstraction
 
 ### Key Classes
 - `UVoxelChunkManager` - Chunk streaming coordinator
 - `FDistanceBandLODStrategy` - Default LOD implementation
+- `FInfinitePlaneWorldMode` - 2D heightmap world mode
+- `FVoxelCPUNoiseGenerator` - CPU-based noise generation
+- `FVoxelGPUNoiseGenerator` - GPU compute shader noise generation
 - `FVoxelVertexFactory` - Custom vertex factory for GPU rendering
 - `UVoxelWorldConfiguration` - World configuration asset
 
@@ -98,6 +107,8 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FChunkDescriptor` - Chunk metadata
 - `FLODQueryContext` - LOD query parameters
 - `FChunkRenderData` - Mesh render data
+- `FVoxelNoiseParams` - Noise generation parameters
+- `FWorldModeTerrainParams` - Terrain configuration (SeaLevel, HeightScale, etc.)
 
 ## Getting Started
 

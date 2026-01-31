@@ -35,7 +35,7 @@ Development roadmap for the VoxelWorlds plugin.
 
 ### Tasks
 - [x] GPU noise library (Perlin, Simplex)
-- [ ] Infinite plane world mode
+- [x] Infinite plane world mode
 - [ ] Basic biome system (2-3 biomes)
 - [ ] Cubic meshing (face culling only)
 - [ ] PMC renderer implementation
@@ -179,7 +179,7 @@ Development roadmap for the VoxelWorlds plugin.
 ## Current Status
 
 **Active Phase**: Phase 2 (Generation & Basic Rendering)
-**Progress**: Phase 1 COMPLETE - Phase 2 in progress
+**Progress**: Phase 1 COMPLETE - Phase 2 in progress (50% complete)
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -193,11 +193,19 @@ Development roadmap for the VoxelWorlds plugin.
    - FVoxelGPUNoiseGenerator: RDG-based compute shader noise generation
    - Automation tests passing (CPUNoiseGenerator, GPUNoiseGeneratorAsync, GPUvsCPUConsistency, Performance)
 
+2. ~~Infinite plane world mode~~ - 2D heightmap terrain with SDF-based generation
+   - IVoxelWorldMode interface: Abstract base for all world modes
+   - FInfinitePlaneWorldMode: 2D heightmap extending infinitely in X/Y, Z as height
+   - WorldModeSDF.ush: GPU shader functions for terrain SDF calculation
+   - Terrain params: SeaLevel, HeightScale, BaseHeight (configurable in UVoxelWorldConfiguration)
+   - Depth-based material assignment: Grass (surface), Dirt (shallow), Stone (deep)
+   - Automation tests passing (Basic, Density, CPUGeneration, Coordinates, GPUConsistency, Materials)
+
 **Next Immediate Steps** (Phase 2):
-1. Infinite plane world mode implementation
-2. Cubic meshing (face culling)
-3. PMC renderer implementation
-4. Basic biome system (2-3 biomes)
+1. Cubic meshing (face culling)
+2. PMC renderer implementation
+3. Basic biome system (2-3 biomes)
+4. Chunk generation pipeline
 
 ---
 
