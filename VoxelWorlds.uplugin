@@ -40,6 +40,11 @@
 			"LoadingPhase": "PostConfigInit"
 		},
 		{
+			"Name": "VoxelMeshing",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		},
+		{
 			"Name": "VoxelWorlds",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"

@@ -72,13 +72,19 @@ VoxelWorlds/
   - GPU shader integration (WorldModeSDF.ush)
   - Depth-based material assignment (Grass/Dirt/Stone)
   - Full test coverage (6 automation tests passing)
+- ✅ **Cubic Meshing System** (Phase 2)
+  - IVoxelMesher interface with sync/async meshing support
+  - FVoxelCPUCubicMesher: CPU-based face culling with neighbor support
+  - FVoxelGPUCubicMesher: GPU compute shader meshing with atomic counters
+  - CubicMeshGeneration.usf compute shader with RDG integration
+  - Seamless chunk boundaries via neighbor data
+  - Full test coverage (9 automation tests passing)
 
 ### In Progress
-- 🔄 Phase 2: Cubic meshing (face culling)
 - 🔄 Phase 2: PMC renderer implementation
+- 🔄 Phase 2: Basic biome system (2-3 biomes)
 
 ### Planned
-- ⏳ Phase 2: Basic biome system (2-3 biomes)
 - ⏳ Phase 2: Chunk generation pipeline
 - ⏳ Phase 3+: Advanced meshing (Greedy, Marching Cubes)
 - ⏳ Phase 3+: Custom Vertex Factory renderer
@@ -92,6 +98,7 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `IVoxelMeshRenderer` - Renderer abstraction
 - `IVoxelWorldMode` - World mode abstraction
 - `IVoxelNoiseGenerator` - Noise generation abstraction
+- `IVoxelMesher` - Mesh generation abstraction
 
 ### Key Classes
 - `UVoxelChunkManager` - Chunk streaming coordinator
@@ -99,15 +106,20 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FInfinitePlaneWorldMode` - 2D heightmap world mode
 - `FVoxelCPUNoiseGenerator` - CPU-based noise generation
 - `FVoxelGPUNoiseGenerator` - GPU compute shader noise generation
+- `FVoxelCPUCubicMesher` - CPU-based cubic mesh generation
+- `FVoxelGPUCubicMesher` - GPU compute shader cubic meshing
 - `FVoxelVertexFactory` - Custom vertex factory for GPU rendering
 - `UVoxelWorldConfiguration` - World configuration asset
 
 ### Key Data Structures
 - `FVoxelData` - Per-voxel data (4 bytes)
+- `FVoxelVertex` - GPU vertex format (28 bytes)
 - `FChunkDescriptor` - Chunk metadata
+- `FChunkMeshData` - CPU mesh data
+- `FChunkRenderData` - GPU render data
 - `FLODQueryContext` - LOD query parameters
-- `FChunkRenderData` - Mesh render data
 - `FVoxelNoiseParams` - Noise generation parameters
+- `FVoxelMeshingRequest` - Mesh generation request with neighbor data
 - `FWorldModeTerrainParams` - Terrain configuration (SeaLevel, HeightScale, etc.)
 
 ## Getting Started

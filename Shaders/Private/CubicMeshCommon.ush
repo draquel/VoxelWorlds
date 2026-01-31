@@ -1,0 +1,315 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Common utilities for cubic mesh generation shaders.
+ * Contains face tables, vertex helpers, and packing functions.
+ */
+
+#pragma once
+
+// ==================== Face Direction Constants ====================
+
+// Face indices
+#define FACE_X_POS 0  // +X (East)
+#define FACE_X_NEG 1  // -X (West)
+#define FACE_Y_POS 2  // +Y (North)
+#define FACE_Y_NEG 3  // -Y (South)
+#define FACE_Z_POS 4  // +Z (Top)
+#define FACE_Z_NEG 5  // -Z (Bottom)
+
+// Face direction offsets
+static const int3 FaceOffsets[6] = {
+    int3( 1,  0,  0),  // +X (East)
+    int3(-1,  0,  0),  // -X (West)
+    int3( 0,  1,  0),  // +Y (North)
+    int3( 0, -1,  0),  // -Y (South)
+    int3( 0,  0,  1),  // +Z (Top)
+    int3( 0,  0, -1)   // -Z (Bottom)
+};
+
+// Face normals
+static const float3 FaceNormals[6] = {
+    float3( 1.0f,  0.0f,  0.0f),  // +X
+    float3(-1.0f,  0.0f,  0.0f),  // -X
+    float3( 0.0f,  1.0f,  0.0f),  // +Y
+    float3( 0.0f, -1.0f,  0.0f),  // -Y
+    float3( 0.0f,  0.0f,  1.0f),  // +Z
+    float3( 0.0f,  0.0f, -1.0f)   // -Z
+};
+
+// ==================== Packed Normal Constants ====================
+
+/**
+ * Pre-packed face normals with AO=0.
+ * Format: Bits 0-9: Normal X (10 bits, signed)
+ *         Bits 10-19: Normal Y (10 bits, signed)
+ *         Bits 20-29: Normal Z (10 bits, signed)
+ *         Bits 30-31: AO (2 bits, 0-3)
+ *
+ * +1.0 = 511 (0x1FF), -1.0 = -511 (0x201 in 10-bit signed)
+ */
+static const uint PackedFaceNormals[6] = {
+    0x000001FF,  // +X: (511, 0, 0)
+    0x00000201,  // -X: (-511, 0, 0)
+    0x0007FC00,  // +Y: (0, 511, 0)
+    0x00080400,  // -Y: (0, -511, 0)
+    0x1FF00000,  // +Z: (0, 0, 511)
+    0x20100000   // -Z: (0, 0, -511)
+};
+
+// ==================== Quad Vertex Tables ====================
+
+/**
+ * Quad vertex offsets for each face.
+ * 4 vertices per face, in counter-clockwise order when viewed from outside.
+ * Each row is one face, each column is one vertex.
+ */
+
+// +X face (East)
+static const float3 QuadVerticesXPos[4] = {
+    float3(1.0f, 0.0f, 0.0f),
+    float3(1.0f, 1.0f, 0.0f),
+    float3(1.0f, 1.0f, 1.0f),
+    float3(1.0f, 0.0f, 1.0f)
+};
+
+// -X face (West)
+static const float3 QuadVerticesXNeg[4] = {
+    float3(0.0f, 1.0f, 0.0f),
+    float3(0.0f, 0.0f, 0.0f),
+    float3(0.0f, 0.0f, 1.0f),
+    float3(0.0f, 1.0f, 1.0f)
+};
+
+// +Y face (North)
+static const float3 QuadVerticesYPos[4] = {
+    float3(1.0f, 1.0f, 0.0f),
+    float3(0.0f, 1.0f, 0.0f),
+    float3(0.0f, 1.0f, 1.0f),
+    float3(1.0f, 1.0f, 1.0f)
+};
+
+// -Y face (South)
+static const float3 QuadVerticesYNeg[4] = {
+    float3(0.0f, 0.0f, 0.0f),
+    float3(1.0f, 0.0f, 0.0f),
+    float3(1.0f, 0.0f, 1.0f),
+    float3(0.0f, 0.0f, 1.0f)
+};
+
+// +Z face (Top)
+static const float3 QuadVerticesZPos[4] = {
+    float3(0.0f, 0.0f, 1.0f),
+    float3(1.0f, 0.0f, 1.0f),
+    float3(1.0f, 1.0f, 1.0f),
+    float3(0.0f, 1.0f, 1.0f)
+};
+
+// -Z face (Bottom)
+static const float3 QuadVerticesZNeg[4] = {
+    float3(0.0f, 1.0f, 0.0f),
+    float3(1.0f, 1.0f, 0.0f),
+    float3(1.0f, 0.0f, 0.0f),
+    float3(0.0f, 0.0f, 0.0f)
+};
+
+/**
+ * Get quad vertex offset for a given face and vertex index.
+ */
+float3 GetQuadVertex(uint Face, uint VertexIndex)
+{
+    switch (Face)
+    {
+        case FACE_X_POS: return QuadVerticesXPos[VertexIndex];
+        case FACE_X_NEG: return QuadVerticesXNeg[VertexIndex];
+        case FACE_Y_POS: return QuadVerticesYPos[VertexIndex];
+        case FACE_Y_NEG: return QuadVerticesYNeg[VertexIndex];
+        case FACE_Z_POS: return QuadVerticesZPos[VertexIndex];
+        case FACE_Z_NEG: return QuadVerticesZNeg[VertexIndex];
+        default: return float3(0, 0, 0);
+    }
+}
+
+// UV coordinates for quad vertices
+static const float2 QuadUVs[4] = {
+    float2(0.0f, 0.0f),
+    float2(1.0f, 0.0f),
+    float2(1.0f, 1.0f),
+    float2(0.0f, 1.0f)
+};
+
+// ==================== Voxel Data Functions ====================
+
+/**
+ * Check if a packed voxel is solid.
+ * Density is in bits 8-15, surface threshold is 127.
+ */
+bool IsVoxelSolid(uint PackedVoxel)
+{
+    uint Density = (PackedVoxel >> 8) & 0xFF;
+    return Density >= 127;
+}
+
+/**
+ * Check if a packed voxel is air.
+ */
+bool IsVoxelAir(uint PackedVoxel)
+{
+    uint Density = (PackedVoxel >> 8) & 0xFF;
+    return Density < 127;
+}
+
+/**
+ * Get material ID from packed voxel data.
+ */
+uint GetMaterialID(uint PackedVoxel)
+{
+    return PackedVoxel & 0xFF;
+}
+
+/**
+ * Get biome ID from packed voxel data.
+ */
+uint GetBiomeID(uint PackedVoxel)
+{
+    return (PackedVoxel >> 16) & 0xFF;
+}
+
+/**
+ * Get metadata from packed voxel data.
+ */
+uint GetMetadata(uint PackedVoxel)
+{
+    return (PackedVoxel >> 24) & 0xFF;
+}
+
+// ==================== Vertex Packing Functions ====================
+
+/**
+ * Pack a normal vector with ambient occlusion into a uint32.
+ * Normal components are stored as 10-bit signed values.
+ * AO is stored in the top 2 bits.
+ */
+uint PackNormalAndAO(float3 Normal, uint AO)
+{
+    // Normalize and convert to 10-bit signed values (-512 to 511)
+    int NX = clamp((int)(Normal.x * 511.0f), -512, 511);
+    int NY = clamp((int)(Normal.y * 511.0f), -512, 511);
+    int NZ = clamp((int)(Normal.z * 511.0f), -512, 511);
+
+    // Pack into 32 bits
+    uint Result = ((uint)(NX & 0x3FF))
+                | ((uint)(NY & 0x3FF) << 10)
+                | ((uint)(NZ & 0x3FF) << 20)
+                | ((AO & 0x3) << 30);
+
+    return Result;
+}
+
+/**
+ * Pack material data into a uint32.
+ * Format: MaterialID (8 bits) | BiomeID (8 bits) | Reserved (8 bits) | Flags (8 bits)
+ */
+uint PackMaterialData(uint MaterialID, uint BiomeID, uint Flags)
+{
+    return (MaterialID & 0xFF)
+         | ((BiomeID & 0xFF) << 8)
+         | ((Flags & 0xFF) << 24);
+}
+
+// ==================== Vertex Structure ====================
+
+/**
+ * GPU vertex structure - must match FVoxelVertex (28 bytes).
+ * Position: float3 (12 bytes)
+ * PackedNormalAndAO: uint (4 bytes)
+ * UV: float2 (8 bytes)
+ * PackedMaterialData: uint (4 bytes)
+ */
+struct FVoxelVertexGPU
+{
+    float3 Position;
+    uint PackedNormalAndAO;
+    float2 UV;
+    uint PackedMaterialData;
+};
+
+/**
+ * Create a vertex for a quad face.
+ */
+FVoxelVertexGPU CreateQuadVertex(
+    float3 VoxelPosition,
+    float VoxelSize,
+    uint Face,
+    uint VertexIndex,
+    uint MaterialID,
+    uint BiomeID,
+    uint AO)
+{
+    FVoxelVertexGPU Vertex;
+
+    // Calculate position
+    Vertex.Position = VoxelPosition + GetQuadVertex(Face, VertexIndex) * VoxelSize;
+
+    // Set packed normal with AO
+    Vertex.PackedNormalAndAO = PackedFaceNormals[Face] | ((AO & 0x3) << 30);
+
+    // Set UV
+    Vertex.UV = QuadUVs[VertexIndex];
+
+    // Set material data
+    Vertex.PackedMaterialData = PackMaterialData(MaterialID, BiomeID, 0);
+
+    return Vertex;
+}
+
+// ==================== Index Helper Functions ====================
+
+/**
+ * Get quad indices for two triangles.
+ * Returns 6 indices in CCW winding order.
+ * BaseVertex is the first vertex of the quad.
+ */
+void GetQuadIndices(uint BaseVertex, out uint Indices[6])
+{
+    // Triangle 1
+    Indices[0] = BaseVertex + 0;
+    Indices[1] = BaseVertex + 1;
+    Indices[2] = BaseVertex + 2;
+    // Triangle 2
+    Indices[3] = BaseVertex + 0;
+    Indices[4] = BaseVertex + 2;
+    Indices[5] = BaseVertex + 3;
+}
+
+// ==================== Neighbor Lookup ====================
+
+/**
+ * Calculate linear index for a voxel position.
+ */
+uint GetVoxelIndex(int3 Position, uint ChunkSize)
+{
+    return (uint)Position.x + (uint)Position.y * ChunkSize + (uint)Position.z * ChunkSize * ChunkSize;
+}
+
+/**
+ * Calculate neighbor slice index for boundary voxels.
+ * Used when accessing neighbor chunk edge data.
+ */
+uint GetNeighborSliceIndex(int3 Position, uint Face, uint ChunkSize)
+{
+    switch (Face)
+    {
+        case FACE_X_POS:
+        case FACE_X_NEG:
+            return (uint)Position.y + (uint)Position.z * ChunkSize;
+        case FACE_Y_POS:
+        case FACE_Y_NEG:
+            return (uint)Position.x + (uint)Position.z * ChunkSize;
+        case FACE_Z_POS:
+        case FACE_Z_NEG:
+            return (uint)Position.x + (uint)Position.y * ChunkSize;
+        default:
+            return 0;
+    }
+}

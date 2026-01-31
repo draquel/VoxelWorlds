@@ -1,0 +1,229 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Compute shader for cubic mesh generation with face culling.
+ *
+ * Generates mesh geometry from voxel data by:
+ * 1. Iterating through all voxels
+ * 2. For each solid voxel, checking 6 neighbors
+ * 3. Emitting quad faces where neighbors are air
+ * 4. Using atomic counters for dynamic vertex/index allocation
+ *
+ * Thread Group Size: [8, 8, 4] = 256 threads per group
+ * Dispatch: ceil(ChunkSize/8), ceil(ChunkSize/8), ceil(ChunkSize/4)
+ */
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/VoxelWorlds/Private/CubicMeshCommon.ush"
+
+// ==================== Shader Parameters ====================
+
+// Input: Packed voxel data (ChunkSize^3 elements)
+StructuredBuffer<uint> InputVoxelData;
+
+// Neighbor chunk data (ChunkSize^2 elements each, or 0 if not present)
+StructuredBuffer<uint> NeighborXPos;
+StructuredBuffer<uint> NeighborXNeg;
+StructuredBuffer<uint> NeighborYPos;
+StructuredBuffer<uint> NeighborYNeg;
+StructuredBuffer<uint> NeighborZPos;
+StructuredBuffer<uint> NeighborZNeg;
+
+// Neighbor data presence flags (packed into single uint)
+// Bit 0: XPos, Bit 1: XNeg, Bit 2: YPos, Bit 3: YNeg, Bit 4: ZPos, Bit 5: ZNeg
+uint NeighborFlags;
+
+// Output: Vertex buffer
+RWStructuredBuffer<FVoxelVertexGPU> OutputVertices;
+
+// Output: Index buffer
+RWStructuredBuffer<uint> OutputIndices;
+
+// Atomic counters for dynamic allocation
+// Index 0 = vertex count, Index 1 = index count
+RWStructuredBuffer<uint> MeshCounters;
+
+// Chunk parameters
+uint ChunkSize;
+float VoxelSize;
+float3 ChunkWorldPosition;
+
+// ==================== Helper Functions ====================
+
+/**
+ * Check if neighbor data is available for a face.
+ */
+bool HasNeighborData(uint Face)
+{
+    return (NeighborFlags & (1u << Face)) != 0;
+}
+
+/**
+ * Get voxel data at position, handling chunk boundaries.
+ * Returns packed voxel data, or 0 (air) if outside bounds and no neighbor.
+ */
+uint GetVoxelAt(int3 Position)
+{
+    // Check if within chunk bounds
+    if (all(Position >= 0) && all(Position < (int)ChunkSize))
+    {
+        uint Index = GetVoxelIndex(Position, ChunkSize);
+        return InputVoxelData[Index];
+    }
+
+    // Handle neighbor chunk lookups
+    uint SliceIndex;
+
+    // +X neighbor
+    if (Position.x >= (int)ChunkSize && HasNeighborData(FACE_X_POS))
+    {
+        SliceIndex = (uint)Position.y + (uint)Position.z * ChunkSize;
+        return NeighborXPos[SliceIndex];
+    }
+
+    // -X neighbor
+    if (Position.x < 0 && HasNeighborData(FACE_X_NEG))
+    {
+        SliceIndex = (uint)Position.y + (uint)Position.z * ChunkSize;
+        return NeighborXNeg[SliceIndex];
+    }
+
+    // +Y neighbor
+    if (Position.y >= (int)ChunkSize && HasNeighborData(FACE_Y_POS))
+    {
+        SliceIndex = (uint)Position.x + (uint)Position.z * ChunkSize;
+        return NeighborYPos[SliceIndex];
+    }
+
+    // -Y neighbor
+    if (Position.y < 0 && HasNeighborData(FACE_Y_NEG))
+    {
+        SliceIndex = (uint)Position.x + (uint)Position.z * ChunkSize;
+        return NeighborYNeg[SliceIndex];
+    }
+
+    // +Z neighbor
+    if (Position.z >= (int)ChunkSize && HasNeighborData(FACE_Z_POS))
+    {
+        SliceIndex = (uint)Position.x + (uint)Position.y * ChunkSize;
+        return NeighborZPos[SliceIndex];
+    }
+
+    // -Z neighbor
+    if (Position.z < 0 && HasNeighborData(FACE_Z_NEG))
+    {
+        SliceIndex = (uint)Position.x + (uint)Position.y * ChunkSize;
+        return NeighborZNeg[SliceIndex];
+    }
+
+    // No neighbor data available - treat as air (will render boundary faces)
+    return 0;
+}
+
+/**
+ * Check if a face should be rendered.
+ * Returns true if the neighbor is air (density < 127).
+ */
+bool ShouldRenderFace(int3 VoxelPos, uint Face)
+{
+    int3 NeighborPos = VoxelPos + FaceOffsets[Face];
+    uint NeighborVoxel = GetVoxelAt(NeighborPos);
+    return IsVoxelAir(NeighborVoxel);
+}
+
+/**
+ * Emit a quad face for a voxel.
+ * Uses atomic counters to allocate vertex/index slots.
+ */
+void EmitQuad(float3 VoxelPosition, uint Face, uint MaterialID, uint BiomeID, uint AO)
+{
+    // Atomically allocate vertex slots (counter index 0)
+    uint VertexStart;
+    InterlockedAdd(MeshCounters[0], 4, VertexStart);
+
+    // Atomically allocate index slots (counter index 1)
+    uint IndexStart;
+    InterlockedAdd(MeshCounters[1], 6, IndexStart);
+
+    // Emit 4 vertices
+    [unroll]
+    for (uint v = 0; v < 4; v++)
+    {
+        OutputVertices[VertexStart + v] = CreateQuadVertex(
+            VoxelPosition,
+            VoxelSize,
+            Face,
+            v,
+            MaterialID,
+            BiomeID,
+            AO
+        );
+    }
+
+    // Emit 6 indices (2 triangles)
+    OutputIndices[IndexStart + 0] = VertexStart + 0;
+    OutputIndices[IndexStart + 1] = VertexStart + 1;
+    OutputIndices[IndexStart + 2] = VertexStart + 2;
+    OutputIndices[IndexStart + 3] = VertexStart + 0;
+    OutputIndices[IndexStart + 4] = VertexStart + 2;
+    OutputIndices[IndexStart + 5] = VertexStart + 3;
+}
+
+// ==================== Main Compute Shader ====================
+
+[numthreads(8, 8, 4)]
+void MainCS(
+    uint3 GroupId : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID,
+    uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int3 VoxelPos = (int3)DispatchThreadId;
+
+    // Early out if outside chunk bounds
+    if (any(VoxelPos >= (int)ChunkSize))
+    {
+        return;
+    }
+
+    // Get voxel data
+    uint VoxelIndex = GetVoxelIndex(VoxelPos, ChunkSize);
+    uint PackedVoxel = InputVoxelData[VoxelIndex];
+
+    // Skip air voxels
+    if (IsVoxelAir(PackedVoxel))
+    {
+        return;
+    }
+
+    // Extract voxel properties
+    uint MaterialID = GetMaterialID(PackedVoxel);
+    uint BiomeID = GetBiomeID(PackedVoxel);
+    uint Metadata = GetMetadata(PackedVoxel);
+    uint AO = Metadata & 0xF;  // Lower 4 bits of metadata are AO
+
+    // Calculate world position for vertices
+    float3 VoxelWorldPos = float3(VoxelPos) * VoxelSize;
+
+    // Check each face and emit if visible
+    [unroll]
+    for (uint Face = 0; Face < 6; Face++)
+    {
+        if (ShouldRenderFace(VoxelPos, Face))
+        {
+            EmitQuad(VoxelWorldPos, Face, MaterialID, BiomeID, AO);
+        }
+    }
+}
+
+// ==================== Counter Reset Shader ====================
+
+/**
+ * Simple shader to reset atomic counters before meshing.
+ * Dispatch with (1, 1, 1).
+ */
+[numthreads(1, 1, 1)]
+void ResetCountersCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    MeshCounters[0] = 0;  // Vertex counter
+    MeshCounters[1] = 0;  // Index counter
+}

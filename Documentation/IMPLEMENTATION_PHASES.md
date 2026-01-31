@@ -36,9 +36,9 @@ Development roadmap for the VoxelWorlds plugin.
 ### Tasks
 - [x] GPU noise library (Perlin, Simplex)
 - [x] Infinite plane world mode
-- [ ] Basic biome system (2-3 biomes)
-- [ ] Cubic meshing (face culling only)
+- [x] Cubic meshing (face culling)
 - [ ] PMC renderer implementation
+- [ ] Basic biome system (2-3 biomes)
 - [ ] Material registry
 - [ ] Chunk generation pipeline
 - [ ] Basic streaming
@@ -179,7 +179,7 @@ Development roadmap for the VoxelWorlds plugin.
 ## Current Status
 
 **Active Phase**: Phase 2 (Generation & Basic Rendering)
-**Progress**: Phase 1 COMPLETE - Phase 2 in progress (50% complete)
+**Progress**: Phase 1 COMPLETE - Phase 2 in progress (75% complete)
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -201,11 +201,21 @@ Development roadmap for the VoxelWorlds plugin.
    - Depth-based material assignment: Grass (surface), Dirt (shallow), Stone (deep)
    - Automation tests passing (Basic, Density, CPUGeneration, Coordinates, GPUConsistency, Materials)
 
+3. ~~Cubic meshing system~~ - Face culling mesh generation (VoxelMeshing module)
+   - IVoxelMesher interface: Abstract meshing interface with sync/async support
+   - FVoxelCPUCubicMesher: CPU-based face culling algorithm
+   - FVoxelGPUCubicMesher: RDG-based compute shader with atomic counters
+   - CubicMeshGeneration.usf: GPU compute shader for mesh generation
+   - CubicMeshCommon.ush: Shared face tables, vertex helpers, packing functions
+   - Neighbor chunk support: Seamless boundaries via edge slice data
+   - 28-byte FVoxelVertex format: Packed normals, UVs, material data
+   - Performance: CPU ~0.65ms, GPU ~2.89ms for 32³ terrain chunks
+   - Automation tests passing (EmptyChunk, SingleVoxel, FaceCulling, FullChunk, GPUAsync, GPUReadback, CPUvsGPU, Performance, ChunkBoundary)
+
 **Next Immediate Steps** (Phase 2):
-1. Cubic meshing (face culling)
-2. PMC renderer implementation
-3. Basic biome system (2-3 biomes)
-4. Chunk generation pipeline
+1. PMC renderer implementation
+2. Basic biome system (2-3 biomes)
+3. Chunk generation pipeline
 
 ---
 
