@@ -240,16 +240,18 @@ VoxelCore
 - FLODQueryContext and related types
 - Depends only on VoxelCore
 
-**VoxelGeneration**
+**VoxelGeneration** *(LoadingPhase: PostConfigInit)*
 - Noise generation (GPU compute shaders)
 - Biome system
 - World mode implementations (IVoxelWorldMode)
 - Material assignment logic
+- **Note**: Requires `PostConfigInit` loading phase for global shader registration
 
-**VoxelMeshing**
+**VoxelMeshing** *(LoadingPhase: PostConfigInit)*
 - Cubic mesher (face culling, greedy meshing, AO)
 - Smooth mesher (Marching Cubes, Dual Contouring)
 - Mesh generation compute shaders
+- **Note**: Requires `PostConfigInit` loading phase for global shader registration
 
 **VoxelRendering**
 - IVoxelMeshRenderer interface
@@ -278,6 +280,21 @@ VoxelCore
 - UVoxelWorldSubsystem
 - Blueprint integration
 - Editor tools
+
+### Module Loading Phases
+
+Modules that use global shaders (`IMPLEMENT_GLOBAL_SHADER` macro) must use `PostConfigInit` loading phase in the `.uplugin` file. This ensures the shader system is fully initialized before shader registration occurs.
+
+| Module | LoadingPhase | Reason |
+|--------|--------------|--------|
+| VoxelCore | Default | No shaders |
+| VoxelLOD | Default | No shaders |
+| VoxelGeneration | **PostConfigInit** | GPU compute shaders |
+| VoxelMeshing | **PostConfigInit** | GPU compute shaders |
+| VoxelRendering | Default | Uses shaders but no IMPLEMENT_GLOBAL_SHADER |
+| VoxelStreaming | Default | No shaders |
+
+**Failure to set correct LoadingPhase** will cause editor crashes during startup with access violations in `CreatePackage` or `ProcessNewlyLoadedUObjects`.
 
 ---
 
