@@ -30,6 +30,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "VoxelStreaming",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "VoxelWorlds",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
