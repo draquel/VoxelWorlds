@@ -54,6 +54,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel")
 	int32 WorldSeed = 0;
 
+	// ==================== Noise Generation Settings ====================
+
+	/** Parameters for noise-based terrain generation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Generation")
+	FVoxelNoiseParams NoiseParams;
+
+	/** Use GPU compute shaders for terrain generation (true) or CPU fallback (false) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Generation")
+	bool bUseGPUGeneration = true;
+
 	// ==================== LOD Settings ====================
 
 	/** LOD distance bands configuration */

@@ -2,9 +2,9 @@
 
 using UnrealBuildTool;
 
-public class VoxelStreaming : ModuleRules
+public class VoxelGeneration : ModuleRules
 {
-	public VoxelStreaming(ReadOnlyTargetRules Target) : base(Target)
+	public VoxelGeneration(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
@@ -24,16 +24,17 @@ public class VoxelStreaming : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"RenderCore",
+				"RHI",
 				"VoxelCore",
-				"VoxelLOD",
-				"VoxelRendering",
-				"VoxelGeneration",
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"Projects",
+				"Renderer",
 			}
 		);
 
