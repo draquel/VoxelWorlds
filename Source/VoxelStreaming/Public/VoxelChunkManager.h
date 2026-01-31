@@ -6,7 +6,12 @@
 #include "Components/ActorComponent.h"
 #include "VoxelCoreTypes.h"
 #include "ChunkDescriptor.h"
+#include "ChunkRenderData.h"
 #include "LODTypes.h"
+#include "VoxelCPUNoiseGenerator.h"
+#include "InfinitePlaneWorldMode.h"
+#include "VoxelCPUCubicMesher.h"
+#include "VoxelMeshingTypes.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -364,6 +369,18 @@ protected:
 	 */
 	void OnChunkMeshingComplete(const FIntVector& ChunkCoord);
 
+	/**
+	 * Extract neighbor edge slices for seamless chunk boundaries.
+	 *
+	 * For each of 6 faces, checks if neighbor chunk is loaded and
+	 * extracts the edge slice (ChunkSize² voxels) from neighbor's voxel data.
+	 * Empty arrays indicate no neighbor (boundary faces will render).
+	 *
+	 * @param ChunkCoord Chunk coordinate to get neighbors for
+	 * @param OutRequest Meshing request to populate with neighbor data
+	 */
+	void ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest);
+
 protected:
 	// ==================== Configuration ====================
 
@@ -424,4 +441,31 @@ protected:
 
 	/** Total chunks unloaded this session */
 	int64 TotalChunksUnloaded = 0;
+
+	// ==================== Generation Components ====================
+
+	/** CPU noise generator for voxel data generation */
+	TUniquePtr<FVoxelCPUNoiseGenerator> NoiseGenerator;
+
+	/** World mode for terrain generation (Infinite Plane) */
+	TUniquePtr<FInfinitePlaneWorldMode> WorldMode;
+
+	/** CPU mesher for generating mesh geometry */
+	TUniquePtr<FVoxelCPUCubicMesher> Mesher;
+
+	// ==================== Pending Mesh Storage ====================
+
+	/** Pending mesh data waiting to be sent to renderer */
+	struct FPendingMeshData
+	{
+		FIntVector ChunkCoord;
+		int32 LODLevel;
+		FChunkMeshData MeshData;
+	};
+
+	/** Queue of meshes waiting to be uploaded to renderer */
+	TArray<FPendingMeshData> PendingMeshQueue;
+
+	/** Maximum pending meshes before throttling generation */
+	static constexpr int32 MaxPendingMeshes = 16;
 };

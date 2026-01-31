@@ -6,6 +6,7 @@
 #include "VoxelCoordinates.h"
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
+#include "VoxelNoiseTypes.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "DrawDebugHelpers.h"
@@ -105,6 +106,22 @@ void UVoxelChunkManager::Initialize(
 	TotalChunksUnloaded = 0;
 	CurrentFrame = 0;
 
+	// Create generation components
+	FWorldModeTerrainParams TerrainParams;
+	TerrainParams.SeaLevel = Configuration->SeaLevel;
+	TerrainParams.HeightScale = Configuration->HeightScale;
+	TerrainParams.BaseHeight = Configuration->BaseHeight;
+	WorldMode = MakeUnique<FInfinitePlaneWorldMode>(TerrainParams);
+
+	NoiseGenerator = MakeUnique<FVoxelCPUNoiseGenerator>();
+	NoiseGenerator->Initialize();
+
+	Mesher = MakeUnique<FVoxelCPUCubicMesher>();
+	Mesher->Initialize();
+
+	// Clear pending mesh queue
+	PendingMeshQueue.Empty();
+
 	bIsInitialized = true;
 
 	UE_LOG(LogVoxelStreaming, Log, TEXT("ChunkManager initialized with config: VoxelSize=%.1f, ChunkSize=%d"),
@@ -137,6 +154,24 @@ void UVoxelChunkManager::Shutdown()
 		delete LODStrategy;
 		LODStrategy = nullptr;
 	}
+
+	// Shutdown and cleanup generation components
+	if (Mesher)
+	{
+		Mesher->Shutdown();
+		Mesher.Reset();
+	}
+
+	if (NoiseGenerator)
+	{
+		NoiseGenerator->Shutdown();
+		NoiseGenerator.Reset();
+	}
+
+	WorldMode.Reset();
+
+	// Clear pending mesh queue
+	PendingMeshQueue.Empty();
 
 	// Don't delete renderer - we don't own it
 	MeshRenderer = nullptr;
@@ -451,6 +486,15 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 	TArray<FChunkLODRequest> ChunksToLoad;
 	LODStrategy->GetChunksToLoad(ChunksToLoad, LoadedChunkCoords, Context);
 
+	// Debug: Log streaming decisions periodically
+	static int32 DebugFrameCounter = 0;
+	if (++DebugFrameCounter % 60 == 0)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Streaming: Viewer at (%.0f, %.0f, %.0f), ChunksToLoad=%d, Loaded=%d, GenQueue=%d"),
+			Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z,
+			ChunksToLoad.Num(), LoadedChunkCoords.Num(), GenerationQueue.Num());
+	}
+
 	// Add to generation queue (avoiding duplicates)
 	for (const FChunkLODRequest& Request : ChunksToLoad)
 	{
@@ -489,14 +533,14 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 
 void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 {
-	if (GenerationQueue.Num() == 0)
+	if (GenerationQueue.Num() == 0 || !NoiseGenerator || !Configuration)
 	{
 		return;
 	}
 
 	const double StartTime = FPlatformTime::Seconds();
 	const double TimeLimit = TimeSliceMS / 1000.0;
-	const int32 MaxChunks = Configuration ? Configuration->MaxChunksToLoadPerFrame : 4;
+	const int32 MaxChunks = Configuration->MaxChunksToLoadPerFrame;
 	int32 ProcessedCount = 0;
 
 	while (GenerationQueue.Num() > 0 && ProcessedCount < MaxChunks)
@@ -520,9 +564,44 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		// Mark as generating
 		SetChunkState(Request.ChunkCoord, EChunkState::Generating);
 
-		// TODO: Phase 2 - Dispatch actual GPU generation
-		// For now, immediately mark as complete (skeleton implementation)
-		OnChunkGenerationComplete(Request.ChunkCoord);
+		// Build generation request
+		FVoxelNoiseGenerationRequest GenRequest;
+		GenRequest.ChunkCoord = Request.ChunkCoord;
+		GenRequest.LODLevel = Request.LODLevel;
+		GenRequest.ChunkSize = Configuration->ChunkSize;
+		GenRequest.VoxelSize = Configuration->VoxelSize;
+		GenRequest.NoiseParams = Configuration->NoiseParams;
+		GenRequest.WorldMode = Configuration->WorldMode;
+		GenRequest.SeaLevel = Configuration->SeaLevel;
+		GenRequest.HeightScale = Configuration->HeightScale;
+		GenRequest.BaseHeight = Configuration->BaseHeight;
+
+		// Get chunk state to store voxel data
+		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
+		if (!State)
+		{
+			// State was removed during processing
+			continue;
+		}
+
+		// Generate voxel data using CPU noise generator
+		TArray<FVoxelData> VoxelData;
+		const bool bSuccess = NoiseGenerator->GenerateChunkCPU(GenRequest, VoxelData);
+
+		if (bSuccess)
+		{
+			// Store voxel data in chunk descriptor
+			State->Descriptor.VoxelData = MoveTemp(VoxelData);
+			OnChunkGenerationComplete(Request.ChunkCoord);
+		}
+		else
+		{
+			// Generation failed - reset to Unloaded state
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d, %d, %d) generation failed"),
+				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
+			State->Descriptor.VoxelData.Empty();
+			SetChunkState(Request.ChunkCoord, EChunkState::Unloaded);
+		}
 
 		++ProcessedCount;
 	}
@@ -530,17 +609,23 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 
 void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 {
-	if (MeshingQueue.Num() == 0)
+	if (MeshingQueue.Num() == 0 || !Mesher || !Configuration)
+	{
+		return;
+	}
+
+	// Throttle if pending mesh queue is full
+	if (PendingMeshQueue.Num() >= MaxPendingMeshes)
 	{
 		return;
 	}
 
 	const double StartTime = FPlatformTime::Seconds();
 	const double TimeLimit = TimeSliceMS / 1000.0;
-	const int32 MaxChunks = Configuration ? Configuration->MaxChunksToLoadPerFrame : 4;
+	const int32 MaxChunks = Configuration->MaxChunksToLoadPerFrame;
 	int32 ProcessedCount = 0;
 
-	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxChunks)
+	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxChunks && PendingMeshQueue.Num() < MaxPendingMeshes)
 	{
 		// Check time limit
 		if (FPlatformTime::Seconds() - StartTime > TimeLimit)
@@ -558,12 +643,50 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			continue;
 		}
 
+		// Get chunk state for voxel data
+		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
+		if (!State || State->Descriptor.VoxelData.Num() == 0)
+		{
+			// No voxel data available - skip
+			continue;
+		}
+
 		// Mark as meshing
 		SetChunkState(Request.ChunkCoord, EChunkState::Meshing);
 
-		// TODO: Phase 2 - Dispatch actual GPU meshing
-		// For now, immediately mark as complete (skeleton implementation)
-		OnChunkMeshingComplete(Request.ChunkCoord);
+		// Build meshing request
+		FVoxelMeshingRequest MeshRequest;
+		MeshRequest.ChunkCoord = Request.ChunkCoord;
+		MeshRequest.LODLevel = Request.LODLevel;
+		MeshRequest.ChunkSize = Configuration->ChunkSize;
+		MeshRequest.VoxelSize = Configuration->VoxelSize;
+		MeshRequest.VoxelData = State->Descriptor.VoxelData;
+
+		// Extract neighbor edge slices for seamless boundaries
+		ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
+
+		// Generate mesh using CPU mesher
+		FChunkMeshData MeshData;
+		const bool bSuccess = Mesher->GenerateMeshCPU(MeshRequest, MeshData);
+
+		if (bSuccess)
+		{
+			// Store mesh in pending queue
+			FPendingMeshData PendingMesh;
+			PendingMesh.ChunkCoord = Request.ChunkCoord;
+			PendingMesh.LODLevel = Request.LODLevel;
+			PendingMesh.MeshData = MoveTemp(MeshData);
+			PendingMeshQueue.Add(MoveTemp(PendingMesh));
+
+			OnChunkMeshingComplete(Request.ChunkCoord);
+		}
+		else
+		{
+			// Meshing failed - reset to PendingGeneration to retry
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d, %d, %d) meshing failed"),
+				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
+			SetChunkState(Request.ChunkCoord, EChunkState::PendingMeshing);
+		}
 
 		++ProcessedCount;
 	}
@@ -707,8 +830,31 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	++TotalChunksMeshed;
 
-	// TODO: Phase 2 - Send mesh to renderer
-	// MeshRenderer->UpdateChunkMesh(RenderData);
+	// Find mesh in pending queue
+	int32 PendingIndex = INDEX_NONE;
+	for (int32 i = 0; i < PendingMeshQueue.Num(); ++i)
+	{
+		if (PendingMeshQueue[i].ChunkCoord == ChunkCoord)
+		{
+			PendingIndex = i;
+			break;
+		}
+	}
+
+	if (PendingIndex != INDEX_NONE && MeshRenderer)
+	{
+		const FPendingMeshData& PendingMesh = PendingMeshQueue[PendingIndex];
+
+		// Send mesh to renderer
+		MeshRenderer->UpdateChunkMeshFromCPU(
+			ChunkCoord,
+			PendingMesh.LODLevel,
+			PendingMesh.MeshData
+		);
+
+		// Remove from pending queue
+		PendingMeshQueue.RemoveAt(PendingIndex);
+	}
 
 	// Mark as loaded
 	LoadedChunkCoords.Add(ChunkCoord);
@@ -720,4 +866,146 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) loaded"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+}
+
+void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest)
+{
+	if (!Configuration)
+	{
+		return;
+	}
+
+	const int32 ChunkSize = Configuration->ChunkSize;
+	const int32 SliceSize = ChunkSize * ChunkSize;
+
+	// Direction offsets for each face
+	static const FIntVector FaceOffsets[6] = {
+		FIntVector(1, 0, 0),   // +X (Face 0)
+		FIntVector(-1, 0, 0),  // -X (Face 1)
+		FIntVector(0, 1, 0),   // +Y (Face 2)
+		FIntVector(0, -1, 0),  // -Y (Face 3)
+		FIntVector(0, 0, 1),   // +Z (Face 4)
+		FIntVector(0, 0, -1)   // -Z (Face 5)
+	};
+
+	// Process each face
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[Face];
+
+		// Check if neighbor chunk is loaded
+		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
+		if (!NeighborState || NeighborState->State != EChunkState::Loaded)
+		{
+			// No loaded neighbor - leave array empty (boundary faces will render)
+			continue;
+		}
+
+		// Get neighbor's voxel data
+		const TArray<FVoxelData>& NeighborVoxels = NeighborState->Descriptor.VoxelData;
+		if (NeighborVoxels.Num() != ChunkSize * ChunkSize * ChunkSize)
+		{
+			// Neighbor doesn't have valid voxel data
+			continue;
+		}
+
+		// Get reference to the appropriate neighbor slice array
+		TArray<FVoxelData>* TargetSlice = nullptr;
+		switch (Face)
+		{
+		case 0: TargetSlice = &OutRequest.NeighborXPos; break;
+		case 1: TargetSlice = &OutRequest.NeighborXNeg; break;
+		case 2: TargetSlice = &OutRequest.NeighborYPos; break;
+		case 3: TargetSlice = &OutRequest.NeighborYNeg; break;
+		case 4: TargetSlice = &OutRequest.NeighborZPos; break;
+		case 5: TargetSlice = &OutRequest.NeighborZNeg; break;
+		}
+
+		if (!TargetSlice)
+		{
+			continue;
+		}
+
+		// Allocate slice array
+		TargetSlice->SetNumUninitialized(SliceSize);
+
+		// Extract the edge slice from neighbor chunk
+		// For +X neighbor, we need X=0 slice from neighbor
+		// For -X neighbor, we need X=ChunkSize-1 slice from neighbor
+		// etc.
+		switch (Face)
+		{
+		case 0: // +X neighbor: extract X=0 slice
+			for (int32 Z = 0; Z < ChunkSize; ++Z)
+			{
+				for (int32 Y = 0; Y < ChunkSize; ++Y)
+				{
+					const int32 SrcIndex = 0 + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+					const int32 DstIndex = Y + Z * ChunkSize;
+					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
+				}
+			}
+			break;
+
+		case 1: // -X neighbor: extract X=ChunkSize-1 slice
+			for (int32 Z = 0; Z < ChunkSize; ++Z)
+			{
+				for (int32 Y = 0; Y < ChunkSize; ++Y)
+				{
+					const int32 SrcIndex = (ChunkSize - 1) + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+					const int32 DstIndex = Y + Z * ChunkSize;
+					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
+				}
+			}
+			break;
+
+		case 2: // +Y neighbor: extract Y=0 slice
+			for (int32 Z = 0; Z < ChunkSize; ++Z)
+			{
+				for (int32 X = 0; X < ChunkSize; ++X)
+				{
+					const int32 SrcIndex = X + 0 * ChunkSize + Z * ChunkSize * ChunkSize;
+					const int32 DstIndex = X + Z * ChunkSize;
+					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
+				}
+			}
+			break;
+
+		case 3: // -Y neighbor: extract Y=ChunkSize-1 slice
+			for (int32 Z = 0; Z < ChunkSize; ++Z)
+			{
+				for (int32 X = 0; X < ChunkSize; ++X)
+				{
+					const int32 SrcIndex = X + (ChunkSize - 1) * ChunkSize + Z * ChunkSize * ChunkSize;
+					const int32 DstIndex = X + Z * ChunkSize;
+					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
+				}
+			}
+			break;
+
+		case 4: // +Z neighbor: extract Z=0 slice
+			for (int32 Y = 0; Y < ChunkSize; ++Y)
+			{
+				for (int32 X = 0; X < ChunkSize; ++X)
+				{
+					const int32 SrcIndex = X + Y * ChunkSize + 0 * ChunkSize * ChunkSize;
+					const int32 DstIndex = X + Y * ChunkSize;
+					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
+				}
+			}
+			break;
+
+		case 5: // -Z neighbor: extract Z=ChunkSize-1 slice
+			for (int32 Y = 0; Y < ChunkSize; ++Y)
+			{
+				for (int32 X = 0; X < ChunkSize; ++X)
+				{
+					const int32 SrcIndex = X + Y * ChunkSize + (ChunkSize - 1) * ChunkSize * ChunkSize;
+					const int32 DstIndex = X + Y * ChunkSize;
+					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
+				}
+			}
+			break;
+		}
+	}
 }

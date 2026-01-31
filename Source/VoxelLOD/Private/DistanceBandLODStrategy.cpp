@@ -196,17 +196,13 @@ void FDistanceBandLODStrategy::GetChunksToLoad(
 	TArray<FChunkLODRequest> VisibleChunks = GetVisibleChunks(Context);
 
 	// Filter to only chunks that aren't loaded
+	// Note: Rate limiting is handled by the chunk manager's ProcessGenerationQueue,
+	// not here. We return all visible unloaded chunks so the manager can track them.
 	for (const FChunkLODRequest& Request : VisibleChunks)
 	{
 		if (!LoadedChunks.Contains(Request.ChunkCoord))
 		{
 			OutLoad.Add(Request);
-
-			// Respect per-frame limit
-			if (OutLoad.Num() >= Context.MaxChunksToLoadPerFrame)
-			{
-				break;
-			}
 		}
 	}
 }

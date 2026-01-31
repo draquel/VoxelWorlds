@@ -403,20 +403,35 @@ FString FVoxelPMCRenderer::GetRendererTypeName() const
 
 UProceduralMeshComponent* FVoxelPMCRenderer::AcquireComponent(const FIntVector& ChunkCoord)
 {
+	UProceduralMeshComponent* PMC = nullptr;
+
 	// Try to get from pool first
 	while (ComponentPool.Num() > 0)
 	{
 		TWeakObjectPtr<UProceduralMeshComponent> WeakPMC = ComponentPool.Pop(EAllowShrinking::No);
 		if (WeakPMC.IsValid())
 		{
-			UProceduralMeshComponent* PMC = WeakPMC.Get();
+			PMC = WeakPMC.Get();
 			PMC->SetVisibility(true);
-			return PMC;
+			break;
 		}
 	}
 
-	// Create new component
-	return CreateNewComponent();
+	// Create new component if pool was empty
+	if (!PMC)
+	{
+		PMC = CreateNewComponent();
+	}
+
+	// Position the PMC at the chunk's world location
+	if (PMC && CachedConfig.IsValid())
+	{
+		const float ChunkWorldSize = CachedConfig->GetChunkWorldSize();
+		const FVector ChunkWorldPos = FVector(ChunkCoord) * ChunkWorldSize;
+		PMC->SetWorldLocation(ChunkWorldPos);
+	}
+
+	return PMC;
 }
 
 void FVoxelPMCRenderer::ReleaseComponent(UProceduralMeshComponent* PMC)

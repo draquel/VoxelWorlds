@@ -28,6 +28,7 @@ public class VoxelStreaming : ModuleRules
 				"VoxelLOD",
 				"VoxelRendering",
 				"VoxelGeneration",
+				"VoxelMeshing",
 			}
 		);
 

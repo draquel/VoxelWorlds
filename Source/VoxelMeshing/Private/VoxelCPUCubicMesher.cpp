@@ -60,12 +60,12 @@ const FVector3f FVoxelCPUCubicMesher::QuadVertices[6][4] = {
 		FVector3f(1.0f, 1.0f, 1.0f),
 		FVector3f(0.0f, 1.0f, 1.0f)
 	},
-	// -Z face (Bottom)
+	// -Z face (Bottom) - CCW when viewed from below
 	{
-		FVector3f(0.0f, 1.0f, 0.0f),
-		FVector3f(1.0f, 1.0f, 0.0f),
+		FVector3f(0.0f, 0.0f, 0.0f),
 		FVector3f(1.0f, 0.0f, 0.0f),
-		FVector3f(0.0f, 0.0f, 0.0f)
+		FVector3f(1.0f, 1.0f, 0.0f),
+		FVector3f(0.0f, 1.0f, 0.0f)
 	}
 };
 
@@ -328,13 +328,13 @@ void FVoxelCPUCubicMesher::EmitQuad(
 		MeshData.Colors.Add(FColor(Voxel.MaterialID, Voxel.BiomeID, AO * 85, 255));
 	}
 
-	// Emit 6 indices (2 triangles, CCW winding)
+	// Emit 6 indices (2 triangles, CW winding for Unreal's left-handed coordinate system)
 	MeshData.Indices.Add(BaseVertex + 0);
+	MeshData.Indices.Add(BaseVertex + 2);
 	MeshData.Indices.Add(BaseVertex + 1);
-	MeshData.Indices.Add(BaseVertex + 2);
 	MeshData.Indices.Add(BaseVertex + 0);
-	MeshData.Indices.Add(BaseVertex + 2);
 	MeshData.Indices.Add(BaseVertex + 3);
+	MeshData.Indices.Add(BaseVertex + 2);
 }
 
 // ============================================================================
