@@ -12,6 +12,7 @@
 
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/VoxelWorlds/Private/FBMNoise.ush"
+#include "/Plugin/VoxelWorlds/Private/WorldModeSDF.ush"
 
 // ==================== Shader Parameters ====================
 
@@ -35,6 +36,12 @@ float NoiseFrequency;
 float NoiseAmplitude;
 float NoiseLacunarity;
 float NoisePersistence;
+
+// World mode parameters
+int WorldMode;      // 0 = InfinitePlane, 1 = SphericalPlanet, 2 = IslandBowl
+float SeaLevel;
+float HeightScale;
+float BaseHeight;
 
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;
@@ -65,29 +72,55 @@ void MainCS(
     // Calculate world position for this voxel
     float3 WorldPos = ChunkWorldPosition + float3(VoxelCoord) * EffectiveVoxelSize;
 
-    // Sample noise at this position
-    float NoiseValue = FBM3D(
-        WorldPos,
-        NoiseType,
-        NoiseSeed,
-        NoiseOctaves,
-        NoiseFrequency,
-        NoiseAmplitude,
-        NoiseLacunarity,
-        NoisePersistence
-    );
-
-    // Convert noise to density
-    uint Density = NoiseToDensity(NoiseValue);
-
-    // Determine material based on height (simple example)
-    // Below Z=0: Stone (MaterialID=1)
-    // At/Above Z=0: Grass (MaterialID=0)
-    uint MaterialID = (WorldPos.z < 0.0f) ? 1u : 0u;
-
-    // Default biome and metadata
+    uint Density;
+    uint MaterialID;
     uint BiomeID = 0u;
     uint Metadata = 0u;
+
+    // Branch based on world mode
+    if (WorldMode == WORLD_MODE_INFINITE_PLANE)
+    {
+        // Infinite Plane: 2D heightmap-based terrain
+        float TerrainHeight;
+        Density = ApplyInfinitePlaneSDF(
+            WorldPos,
+            EffectiveVoxelSize,
+            NoiseType,
+            NoiseSeed,
+            NoiseOctaves,
+            NoiseFrequency,
+            NoiseAmplitude,
+            NoiseLacunarity,
+            NoisePersistence,
+            SeaLevel,
+            HeightScale,
+            BaseHeight,
+            TerrainHeight
+        );
+
+        // Assign material based on depth below surface
+        MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
+    }
+    else
+    {
+        // Default: 3D noise generation (for SphericalPlanet, IslandBowl, etc.)
+        float NoiseValue = FBM3D(
+            WorldPos,
+            NoiseType,
+            NoiseSeed,
+            NoiseOctaves,
+            NoiseFrequency,
+            NoiseAmplitude,
+            NoiseLacunarity,
+            NoisePersistence
+        );
+
+        // Convert noise to density
+        Density = NoiseToDensity(NoiseValue);
+
+        // Simple height-based material
+        MaterialID = (WorldPos.z < 0.0f) ? 1u : 0u;
+    }
 
     // Pack voxel data
     uint PackedData = PackVoxelData(MaterialID, Density, BiomeID, Metadata);

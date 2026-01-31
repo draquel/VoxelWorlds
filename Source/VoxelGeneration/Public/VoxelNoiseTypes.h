@@ -37,6 +37,24 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Request")
 	FVoxelNoiseParams NoiseParams;
 
+	// ==================== World Mode Parameters ====================
+
+	/** World generation mode */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Mode")
+	EWorldMode WorldMode = EWorldMode::InfinitePlane;
+
+	/** Sea level height for terrain generation (world units) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Mode")
+	float SeaLevel = 0.0f;
+
+	/** Scale factor for noise-to-height conversion */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Mode")
+	float HeightScale = 5000.0f;
+
+	/** Base height offset from sea level */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Mode")
+	float BaseHeight = 0.0f;
+
 	FVoxelNoiseGenerationRequest() = default;
 
 	/** Get the world position of this chunk's origin */

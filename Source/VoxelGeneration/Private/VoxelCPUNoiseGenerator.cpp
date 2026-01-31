@@ -2,6 +2,7 @@
 
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelGeneration.h"
+#include "InfinitePlaneWorldMode.h"
 #include "Async/Async.h"
 
 // Permutation table for Perlin noise (Ken Perlin's original)
@@ -111,6 +112,33 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 
 	OutVoxelData.SetNum(TotalVoxels);
 
+	// Check world mode and delegate to appropriate generation method
+	if (Request.WorldMode == EWorldMode::InfinitePlane)
+	{
+		// Create world mode with terrain parameters
+		FWorldModeTerrainParams TerrainParams(Request.SeaLevel, Request.HeightScale, Request.BaseHeight);
+		FInfinitePlaneWorldMode WorldMode(TerrainParams);
+
+		GenerateChunkInfinitePlane(Request, WorldMode, OutVoxelData);
+	}
+	else
+	{
+		// Default 3D noise generation for other modes
+		GenerateChunk3DNoise(Request, OutVoxelData);
+	}
+
+	return true;
+}
+
+void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
+	const FVoxelNoiseGenerationRequest& Request,
+	const FInfinitePlaneWorldMode& WorldMode,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	const float EffectiveVoxelSize = Request.GetEffectiveVoxelSize();
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
 		for (int32 Y = 0; Y < ChunkSize; ++Y)
@@ -124,7 +152,60 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 					Z * EffectiveVoxelSize
 				);
 
-				// Sample noise at this position
+				// Sample 2D noise at X,Y (Z=0 for heightmap)
+				float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
+					WorldPos.X, WorldPos.Y, Request.NoiseParams);
+
+				// Get terrain height from noise
+				float TerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
+					NoiseValue, WorldMode.GetTerrainParams());
+
+				// Calculate signed distance to surface
+				float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(
+					WorldPos.Z, TerrainHeight);
+
+				// Convert to density
+				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
+					SignedDistance, EffectiveVoxelSize);
+
+				// Calculate depth below surface for material assignment
+				float DepthBelowSurface = TerrainHeight - WorldPos.Z;
+
+				// Determine material based on depth
+				uint8 MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface);
+
+				// Default biome
+				uint8 BiomeID = 0;
+
+				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);
+			}
+		}
+	}
+}
+
+void FVoxelCPUNoiseGenerator::GenerateChunk3DNoise(
+	const FVoxelNoiseGenerationRequest& Request,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	const float EffectiveVoxelSize = Request.GetEffectiveVoxelSize();
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+
+	for (int32 Z = 0; Z < ChunkSize; ++Z)
+	{
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				// Calculate world position for this voxel
+				FVector WorldPos = ChunkWorldPos + FVector(
+					X * EffectiveVoxelSize,
+					Y * EffectiveVoxelSize,
+					Z * EffectiveVoxelSize
+				);
+
+				// Sample 3D noise at this position
 				float NoiseValue = FBM3D(WorldPos, Request.NoiseParams);
 
 				// Convert noise to density
@@ -140,8 +221,6 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 			}
 		}
 	}
-
-	return true;
 }
 
 float FVoxelCPUNoiseGenerator::SampleNoiseAt(

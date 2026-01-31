@@ -40,6 +40,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World", meta = (ClampMin = "1000", EditCondition = "WorldMode != EWorldMode::InfinitePlane"))
 	float WorldRadius = 100000.0f;
 
+	// ==================== Terrain Generation Settings (Infinite Plane) ====================
+
+	/** Sea level height - base elevation of terrain (world units) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode == EWorldMode::InfinitePlane"))
+	float SeaLevel = 0.0f;
+
+	/** Height scale - multiplier for noise-to-height conversion (world units) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::InfinitePlane"))
+	float HeightScale = 5000.0f;
+
+	/** Base height - additional offset added to terrain height (world units) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode == EWorldMode::InfinitePlane"))
+	float BaseHeight = 0.0f;
+
 	// ==================== Voxel Settings ====================
 
 	/** Size of one voxel in world units (cm) */

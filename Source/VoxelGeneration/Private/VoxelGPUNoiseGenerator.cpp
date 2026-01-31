@@ -34,6 +34,10 @@ public:
 		SHADER_PARAMETER(float, NoiseAmplitude)
 		SHADER_PARAMETER(float, NoiseLacunarity)
 		SHADER_PARAMETER(float, NoisePersistence)
+		SHADER_PARAMETER(int32, WorldMode)
+		SHADER_PARAMETER(float, SeaLevel)
+		SHADER_PARAMETER(float, HeightScale)
+		SHADER_PARAMETER(float, BaseHeight)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -152,6 +156,10 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 			Parameters->NoiseAmplitude = CapturedRequest.NoiseParams.Amplitude;
 			Parameters->NoiseLacunarity = CapturedRequest.NoiseParams.Lacunarity;
 			Parameters->NoisePersistence = CapturedRequest.NoiseParams.Persistence;
+			Parameters->WorldMode = static_cast<int32>(CapturedRequest.WorldMode);
+			Parameters->SeaLevel = CapturedRequest.SeaLevel;
+			Parameters->HeightScale = CapturedRequest.HeightScale;
+			Parameters->BaseHeight = CapturedRequest.BaseHeight;
 			Parameters->OutputVoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
 
 			// Get shader

@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "IVoxelNoiseGenerator.h"
 
+class FInfinitePlaneWorldMode;
+
 /**
  * CPU-based noise generator for voxel terrain.
  *
@@ -88,6 +90,23 @@ private:
 	/** Stored results for async requests (CPU just completes immediately) */
 	TMap<uint64, TArray<FVoxelData>> StoredResults;
 	FCriticalSection ResultsLock;
+
+	// ==================== World Mode Generation ====================
+
+	/**
+	 * Generate chunk using Infinite Plane world mode (2D heightmap).
+	 */
+	void GenerateChunkInfinitePlane(
+		const FVoxelNoiseGenerationRequest& Request,
+		const FInfinitePlaneWorldMode& WorldMode,
+		TArray<FVoxelData>& OutVoxelData);
+
+	/**
+	 * Generate chunk using full 3D noise (for volumetric modes).
+	 */
+	void GenerateChunk3DNoise(
+		const FVoxelNoiseGenerationRequest& Request,
+		TArray<FVoxelData>& OutVoxelData);
 
 	// ==================== Noise Helper Functions ====================
 

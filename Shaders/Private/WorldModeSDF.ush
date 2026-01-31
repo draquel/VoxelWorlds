@@ -1,0 +1,196 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * World Mode SDF (Signed Distance Field) functions.
+ * Provides terrain generation transformations for different world modes.
+ */
+
+#pragma once
+
+#include "FBMNoise.ush"
+
+// World mode enum (must match EWorldMode in C++)
+#define WORLD_MODE_INFINITE_PLANE 0
+#define WORLD_MODE_SPHERICAL_PLANET 1
+#define WORLD_MODE_ISLAND_BOWL 2
+
+// ==================== Infinite Plane Mode ====================
+
+/**
+ * Sample 2D terrain height noise for Infinite Plane mode.
+ * Uses X,Y coordinates only (Z=0) for heightmap generation.
+ *
+ * @param X World X coordinate
+ * @param Y World Y coordinate
+ * @param NoiseType 0 = Perlin, 1 = Simplex
+ * @param Seed Random seed
+ * @param Octaves Number of noise layers
+ * @param Frequency Base noise frequency
+ * @param Amplitude Base noise amplitude
+ * @param Lacunarity Frequency multiplier per octave
+ * @param Persistence Amplitude multiplier per octave
+ * @return Noise value in range [-1, 1]
+ */
+float SampleTerrainHeight2D(
+    float X,
+    float Y,
+    int NoiseType,
+    int Seed,
+    int Octaves,
+    float Frequency,
+    float Amplitude,
+    float Lacunarity,
+    float Persistence)
+{
+    // Sample noise with Z=0 for 2D heightmap
+    float3 Position2D = float3(X, Y, 0.0f);
+    return FBM3D(Position2D, NoiseType, Seed, Octaves, Frequency, Amplitude, Lacunarity, Persistence);
+}
+
+/**
+ * Convert noise value to terrain height.
+ *
+ * @param NoiseValue Noise sample in range [-1, 1]
+ * @param SeaLevel Base terrain elevation
+ * @param HeightScale Noise amplitude multiplier
+ * @param BaseHeight Additional height offset
+ * @return World Z height for terrain surface
+ */
+float NoiseToTerrainHeight(
+    float NoiseValue,
+    float SeaLevel,
+    float HeightScale,
+    float BaseHeight)
+{
+    return SeaLevel + BaseHeight + (NoiseValue * HeightScale);
+}
+
+/**
+ * Calculate signed distance to terrain surface.
+ * Positive = below surface (solid), Negative = above surface (air)
+ *
+ * @param WorldZ World Z coordinate of sample point
+ * @param TerrainHeight Z height of terrain surface
+ * @return Signed distance to surface
+ */
+float CalculateSignedDistance(float WorldZ, float TerrainHeight)
+{
+    return TerrainHeight - WorldZ;
+}
+
+/**
+ * Convert signed distance to voxel density.
+ * Uses smooth falloff normalized by voxel size.
+ *
+ * @param SignedDistance Distance to surface (positive = inside)
+ * @param VoxelSize Size of voxel for normalization
+ * @return Density value [0-255] where 127 = surface
+ */
+uint SignedDistanceToDensity(float SignedDistance, float VoxelSize)
+{
+    // Normalize by voxel size
+    float NormalizedDistance = SignedDistance / VoxelSize;
+
+    // Clamp to [-1, 1]
+    float Clamped = clamp(NormalizedDistance, -1.0f, 1.0f);
+
+    // Map to [0, 255] where 127 is surface
+    float Density = (Clamped + 1.0f) * 127.5f;
+
+    return (uint)clamp(Density, 0.0f, 255.0f);
+}
+
+/**
+ * Apply Infinite Plane SDF transformation.
+ * Samples 2D noise and converts to density based on height.
+ *
+ * @param WorldPos World position of voxel
+ * @param VoxelSize Size of voxel in world units
+ * @param NoiseType 0 = Perlin, 1 = Simplex
+ * @param Seed Random seed
+ * @param Octaves Number of noise layers
+ * @param Frequency Base noise frequency
+ * @param Amplitude Base noise amplitude
+ * @param Lacunarity Frequency multiplier per octave
+ * @param Persistence Amplitude multiplier per octave
+ * @param SeaLevel Base terrain elevation
+ * @param HeightScale Noise amplitude multiplier
+ * @param BaseHeight Additional height offset
+ * @param OutTerrainHeight Output terrain height at this X,Y
+ * @return Density value [0-255]
+ */
+uint ApplyInfinitePlaneSDF(
+    float3 WorldPos,
+    float VoxelSize,
+    int NoiseType,
+    int Seed,
+    int Octaves,
+    float Frequency,
+    float Amplitude,
+    float Lacunarity,
+    float Persistence,
+    float SeaLevel,
+    float HeightScale,
+    float BaseHeight,
+    out float OutTerrainHeight)
+{
+    // Sample 2D noise at X,Y
+    float NoiseValue = SampleTerrainHeight2D(
+        WorldPos.x, WorldPos.y,
+        NoiseType, Seed, Octaves, Frequency, Amplitude, Lacunarity, Persistence);
+
+    // Convert to terrain height
+    OutTerrainHeight = NoiseToTerrainHeight(NoiseValue, SeaLevel, HeightScale, BaseHeight);
+
+    // Calculate signed distance
+    float SignedDistance = CalculateSignedDistance(WorldPos.z, OutTerrainHeight);
+
+    // Convert to density
+    return SignedDistanceToDensity(SignedDistance, VoxelSize);
+}
+
+/**
+ * Get material ID based on depth below terrain surface.
+ * Material assignment for Infinite Plane mode:
+ * - 0 = Grass (at surface)
+ * - 1 = Dirt (1-4 voxels below)
+ * - 2 = Stone (deep underground)
+ *
+ * @param WorldZ World Z coordinate
+ * @param TerrainHeight Height of terrain surface at this X,Y
+ * @param VoxelSize Size of voxel for depth calculation
+ * @return Material ID
+ */
+uint GetMaterialForInfinitePlane(float WorldZ, float TerrainHeight, float VoxelSize)
+{
+    float DepthBelowSurface = TerrainHeight - WorldZ;
+
+    if (DepthBelowSurface <= 0.0f)
+    {
+        // At or above surface - air (no material)
+        return 0u;
+    }
+    else if (DepthBelowSurface < VoxelSize) // ~1 voxel
+    {
+        // Near surface - grass
+        return 0u;
+    }
+    else if (DepthBelowSurface < VoxelSize * 4.0f) // ~1-4 voxels
+    {
+        // Subsurface - dirt
+        return 1u;
+    }
+    else
+    {
+        // Deep underground - stone
+        return 2u;
+    }
+}
+
+// ==================== Future World Modes ====================
+
+// Placeholder for SphericalPlanet SDF
+// float ApplySphericalPlanetSDF(float3 WorldPos, float3 PlanetCenter, float PlanetRadius, ...)
+
+// Placeholder for IslandBowl SDF
+// float ApplyIslandBowlSDF(float3 WorldPos, float3 IslandCenter, float IslandRadius, float FalloffDistance, ...)
