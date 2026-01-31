@@ -34,7 +34,7 @@ Development roadmap for the VoxelWorlds plugin.
 **Goal**: First visible terrain
 
 ### Tasks
-- [ ] GPU noise library (Perlin, Simplex)
+- [x] GPU noise library (Perlin, Simplex)
 - [ ] Infinite plane world mode
 - [ ] Basic biome system (2-3 biomes)
 - [ ] Cubic meshing (face culling only)
@@ -179,7 +179,7 @@ Development roadmap for the VoxelWorlds plugin.
 ## Current Status
 
 **Active Phase**: Phase 2 (Generation & Basic Rendering)
-**Progress**: Phase 1 COMPLETE - Starting Phase 2
+**Progress**: Phase 1 COMPLETE - Phase 2 in progress
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -187,11 +187,17 @@ Development roadmap for the VoxelWorlds plugin.
 3. ~~VoxelRendering module~~ - IVoxelMeshRenderer interface
 4. ~~VoxelStreaming module~~ - UVoxelChunkManager skeleton
 
+**Phase 2 Progress**:
+1. ~~GPU noise library~~ - CPU and GPU noise generators with Perlin/Simplex FBM (VoxelGeneration module)
+   - FVoxelCPUNoiseGenerator: CPU-based noise for fallback and single-point sampling
+   - FVoxelGPUNoiseGenerator: RDG-based compute shader noise generation
+   - Automation tests passing (CPUNoiseGenerator, GPUNoiseGeneratorAsync, GPUvsCPUConsistency, Performance)
+
 **Next Immediate Steps** (Phase 2):
-1. GPU noise library (Perlin, Simplex compute shaders)
-2. Infinite plane world mode implementation
-3. Cubic meshing (face culling)
-4. PMC renderer implementation
+1. Infinite plane world mode implementation
+2. Cubic meshing (face culling)
+3. PMC renderer implementation
+4. Basic biome system (2-3 biomes)
 
 ---
 
