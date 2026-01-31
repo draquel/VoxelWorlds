@@ -118,7 +118,6 @@ public:
 	 * @param InLODStrategy LOD strategy to use (ownership transferred)
 	 * @param InRenderer Mesh renderer to use (ownership NOT transferred)
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	void Initialize(
 		UVoxelWorldConfiguration* InConfig,
 		IVoxelLODStrategy* InLODStrategy,
