@@ -7,6 +7,8 @@
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "VoxelNoiseTypes.h"
+#include "VoxelCPUCubicMesher.h"
+#include "VoxelCPUSmoothMesher.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "DrawDebugHelpers.h"
@@ -116,8 +118,27 @@ void UVoxelChunkManager::Initialize(
 	NoiseGenerator = MakeUnique<FVoxelCPUNoiseGenerator>();
 	NoiseGenerator->Initialize();
 
-	Mesher = MakeUnique<FVoxelCPUCubicMesher>();
-	Mesher->Initialize();
+	// Create mesher based on configuration
+	if (Configuration->MeshingMode == EMeshingMode::Smooth)
+	{
+		auto SmoothMesher = MakeUnique<FVoxelCPUSmoothMesher>();
+		SmoothMesher->Initialize();
+
+		// Configure smooth meshing parameters
+		FVoxelMeshingConfig MeshConfig = SmoothMesher->GetConfig();
+		MeshConfig.bUseSmoothMeshing = true;
+		MeshConfig.IsoLevel = 0.5f;
+		SmoothMesher->SetConfig(MeshConfig);
+
+		Mesher = MoveTemp(SmoothMesher);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Smooth (Marching Cubes) mesher"));
+	}
+	else
+	{
+		Mesher = MakeUnique<FVoxelCPUCubicMesher>();
+		Mesher->Initialize();
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Cubic mesher"));
+	}
 
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
@@ -874,18 +895,25 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
 {
-	// Direction offsets for each neighbor
-	static const FIntVector NeighborOffsets[6] = {
-		FIntVector(1, 0, 0),   // +X
-		FIntVector(-1, 0, 0),  // -X
-		FIntVector(0, 1, 0),   // +Y
-		FIntVector(0, -1, 0),  // -Y
-		FIntVector(0, 0, 1),   // +Z
-		FIntVector(0, 0, -1)   // -Z
+	// For Marching Cubes, we need to remesh all 26 neighbors (faces, edges, corners)
+	// because diagonal chunks may use our voxel data at their boundaries.
+	// Build list of all neighbor offsets: 6 faces + 12 edges + 8 corners = 26 total
+	static const FIntVector NeighborOffsets[26] = {
+		// 6 Face neighbors
+		FIntVector(1, 0, 0),   FIntVector(-1, 0, 0),
+		FIntVector(0, 1, 0),   FIntVector(0, -1, 0),
+		FIntVector(0, 0, 1),   FIntVector(0, 0, -1),
+		// 12 Edge neighbors
+		FIntVector(1, 1, 0),   FIntVector(1, -1, 0),   FIntVector(-1, 1, 0),   FIntVector(-1, -1, 0),
+		FIntVector(1, 0, 1),   FIntVector(1, 0, -1),   FIntVector(-1, 0, 1),   FIntVector(-1, 0, -1),
+		FIntVector(0, 1, 1),   FIntVector(0, 1, -1),   FIntVector(0, -1, 1),   FIntVector(0, -1, -1),
+		// 8 Corner neighbors
+		FIntVector(1, 1, 1),   FIntVector(1, 1, -1),   FIntVector(1, -1, 1),   FIntVector(1, -1, -1),
+		FIntVector(-1, 1, 1),  FIntVector(-1, 1, -1),  FIntVector(-1, -1, 1),  FIntVector(-1, -1, -1)
 	};
 
 	// Check each neighbor
-	for (int32 i = 0; i < 6; ++i)
+	for (int32 i = 0; i < 26; ++i)
 	{
 		const FIntVector NeighborCoord = ChunkCoord + NeighborOffsets[i];
 
@@ -941,136 +969,302 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 
 	const int32 ChunkSize = Configuration->ChunkSize;
 	const int32 SliceSize = ChunkSize * ChunkSize;
+	const int32 VolumeSize = ChunkSize * ChunkSize * ChunkSize;
 
-	// Direction offsets for each face
-	static const FIntVector FaceOffsets[6] = {
-		FIntVector(1, 0, 0),   // +X (Face 0)
-		FIntVector(-1, 0, 0),  // -X (Face 1)
-		FIntVector(0, 1, 0),   // +Y (Face 2)
-		FIntVector(0, -1, 0),  // -Y (Face 3)
-		FIntVector(0, 0, 1),   // +Z (Face 4)
-		FIntVector(0, 0, -1)   // -Z (Face 5)
-	};
+	// Reset edge/corner flags
+	OutRequest.EdgeCornerFlags = 0;
 
-	// Process each face
-	for (int32 Face = 0; Face < 6; ++Face)
+	// Helper lambda to get voxel data from a neighbor chunk
+	auto GetNeighborVoxels = [this, VolumeSize](const FIntVector& NeighborCoord) -> const TArray<FVoxelData>*
 	{
-		const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[Face];
-
-		// Check if neighbor chunk exists and has voxel data
-		// Voxel data is available in states: PendingMeshing, Meshing, Loaded, PendingUnload
 		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
 		if (!NeighborState)
 		{
-			// No neighbor chunk - leave array empty (boundary faces will render)
-			continue;
+			return nullptr;
 		}
-
-		// Get neighbor's voxel data - available once generation is complete
-		const TArray<FVoxelData>& NeighborVoxels = NeighborState->Descriptor.VoxelData;
-		if (NeighborVoxels.Num() != ChunkSize * ChunkSize * ChunkSize)
+		const TArray<FVoxelData>& Voxels = NeighborState->Descriptor.VoxelData;
+		if (Voxels.Num() != VolumeSize)
 		{
-			// Neighbor doesn't have valid voxel data yet (still generating or not started)
-			continue;
+			return nullptr;
 		}
+		return &Voxels;
+	};
 
-		// Get reference to the appropriate neighbor slice array
-		TArray<FVoxelData>* TargetSlice = nullptr;
-		switch (Face)
+	// Helper to get voxel index
+	auto GetIndex = [ChunkSize](int32 X, int32 Y, int32 Z) -> int32
+	{
+		return X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+	};
+
+	// ==================== Extract Face Neighbors ====================
+
+	// +X neighbor
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, 0, 0)))
+	{
+		OutRequest.NeighborXPos.SetNumUninitialized(SliceSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
 		{
-		case 0: TargetSlice = &OutRequest.NeighborXPos; break;
-		case 1: TargetSlice = &OutRequest.NeighborXNeg; break;
-		case 2: TargetSlice = &OutRequest.NeighborYPos; break;
-		case 3: TargetSlice = &OutRequest.NeighborYNeg; break;
-		case 4: TargetSlice = &OutRequest.NeighborZPos; break;
-		case 5: TargetSlice = &OutRequest.NeighborZNeg; break;
-		}
-
-		if (!TargetSlice)
-		{
-			continue;
-		}
-
-		// Allocate slice array
-		TargetSlice->SetNumUninitialized(SliceSize);
-
-		// Extract the edge slice from neighbor chunk
-		// For +X neighbor, we need X=0 slice from neighbor
-		// For -X neighbor, we need X=ChunkSize-1 slice from neighbor
-		// etc.
-		switch (Face)
-		{
-		case 0: // +X neighbor: extract X=0 slice
-			for (int32 Z = 0; Z < ChunkSize; ++Z)
-			{
-				for (int32 Y = 0; Y < ChunkSize; ++Y)
-				{
-					const int32 SrcIndex = 0 + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-					const int32 DstIndex = Y + Z * ChunkSize;
-					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
-				}
-			}
-			break;
-
-		case 1: // -X neighbor: extract X=ChunkSize-1 slice
-			for (int32 Z = 0; Z < ChunkSize; ++Z)
-			{
-				for (int32 Y = 0; Y < ChunkSize; ++Y)
-				{
-					const int32 SrcIndex = (ChunkSize - 1) + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-					const int32 DstIndex = Y + Z * ChunkSize;
-					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
-				}
-			}
-			break;
-
-		case 2: // +Y neighbor: extract Y=0 slice
-			for (int32 Z = 0; Z < ChunkSize; ++Z)
-			{
-				for (int32 X = 0; X < ChunkSize; ++X)
-				{
-					const int32 SrcIndex = X + 0 * ChunkSize + Z * ChunkSize * ChunkSize;
-					const int32 DstIndex = X + Z * ChunkSize;
-					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
-				}
-			}
-			break;
-
-		case 3: // -Y neighbor: extract Y=ChunkSize-1 slice
-			for (int32 Z = 0; Z < ChunkSize; ++Z)
-			{
-				for (int32 X = 0; X < ChunkSize; ++X)
-				{
-					const int32 SrcIndex = X + (ChunkSize - 1) * ChunkSize + Z * ChunkSize * ChunkSize;
-					const int32 DstIndex = X + Z * ChunkSize;
-					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
-				}
-			}
-			break;
-
-		case 4: // +Z neighbor: extract Z=0 slice
 			for (int32 Y = 0; Y < ChunkSize; ++Y)
 			{
-				for (int32 X = 0; X < ChunkSize; ++X)
-				{
-					const int32 SrcIndex = X + Y * ChunkSize + 0 * ChunkSize * ChunkSize;
-					const int32 DstIndex = X + Y * ChunkSize;
-					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
-				}
+				OutRequest.NeighborXPos[Y + Z * ChunkSize] = (*Voxels)[GetIndex(0, Y, Z)];
 			}
-			break;
+		}
+	}
 
-		case 5: // -Z neighbor: extract Z=ChunkSize-1 slice
+	// -X neighbor
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, 0, 0)))
+	{
+		OutRequest.NeighborXNeg.SetNumUninitialized(SliceSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
 			for (int32 Y = 0; Y < ChunkSize; ++Y)
 			{
-				for (int32 X = 0; X < ChunkSize; ++X)
-				{
-					const int32 SrcIndex = X + Y * ChunkSize + (ChunkSize - 1) * ChunkSize * ChunkSize;
-					const int32 DstIndex = X + Y * ChunkSize;
-					(*TargetSlice)[DstIndex] = NeighborVoxels[SrcIndex];
-				}
+				OutRequest.NeighborXNeg[Y + Z * ChunkSize] = (*Voxels)[GetIndex(ChunkSize - 1, Y, Z)];
 			}
-			break;
 		}
+	}
+
+	// +Y neighbor
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, 1, 0)))
+	{
+		OutRequest.NeighborYPos.SetNumUninitialized(SliceSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				OutRequest.NeighborYPos[X + Z * ChunkSize] = (*Voxels)[GetIndex(X, 0, Z)];
+			}
+		}
+	}
+
+	// -Y neighbor
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, -1, 0)))
+	{
+		OutRequest.NeighborYNeg.SetNumUninitialized(SliceSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				OutRequest.NeighborYNeg[X + Z * ChunkSize] = (*Voxels)[GetIndex(X, ChunkSize - 1, Z)];
+			}
+		}
+	}
+
+	// +Z neighbor
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, 0, 1)))
+	{
+		OutRequest.NeighborZPos.SetNumUninitialized(SliceSize);
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				OutRequest.NeighborZPos[X + Y * ChunkSize] = (*Voxels)[GetIndex(X, Y, 0)];
+			}
+		}
+	}
+
+	// -Z neighbor
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, 0, -1)))
+	{
+		OutRequest.NeighborZNeg.SetNumUninitialized(SliceSize);
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				OutRequest.NeighborZNeg[X + Y * ChunkSize] = (*Voxels)[GetIndex(X, Y, ChunkSize - 1)];
+			}
+		}
+	}
+
+	// ==================== Extract Edge Neighbors (for Marching Cubes) ====================
+
+	// Edge X+Y+ (diagonal chunk at +X+Y, extract X=0, Y=0, Z varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, 1, 0)))
+	{
+		OutRequest.EdgeXPosYPos.SetNumUninitialized(ChunkSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
+			OutRequest.EdgeXPosYPos[Z] = (*Voxels)[GetIndex(0, 0, Z)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XPOS_YPOS;
+	}
+
+	// Edge X+Y- (diagonal chunk at +X-Y, extract X=0, Y=ChunkSize-1, Z varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, -1, 0)))
+	{
+		OutRequest.EdgeXPosYNeg.SetNumUninitialized(ChunkSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
+			OutRequest.EdgeXPosYNeg[Z] = (*Voxels)[GetIndex(0, ChunkSize - 1, Z)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XPOS_YNEG;
+	}
+
+	// Edge X-Y+ (diagonal chunk at -X+Y, extract X=ChunkSize-1, Y=0, Z varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, 1, 0)))
+	{
+		OutRequest.EdgeXNegYPos.SetNumUninitialized(ChunkSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
+			OutRequest.EdgeXNegYPos[Z] = (*Voxels)[GetIndex(ChunkSize - 1, 0, Z)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XNEG_YPOS;
+	}
+
+	// Edge X-Y- (diagonal chunk at -X-Y, extract X=ChunkSize-1, Y=ChunkSize-1, Z varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, -1, 0)))
+	{
+		OutRequest.EdgeXNegYNeg.SetNumUninitialized(ChunkSize);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
+			OutRequest.EdgeXNegYNeg[Z] = (*Voxels)[GetIndex(ChunkSize - 1, ChunkSize - 1, Z)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XNEG_YNEG;
+	}
+
+	// Edge X+Z+ (diagonal chunk at +X+Z, extract X=0, Z=0, Y varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, 0, 1)))
+	{
+		OutRequest.EdgeXPosZPos.SetNumUninitialized(ChunkSize);
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			OutRequest.EdgeXPosZPos[Y] = (*Voxels)[GetIndex(0, Y, 0)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XPOS_ZPOS;
+	}
+
+	// Edge X+Z- (diagonal chunk at +X-Z, extract X=0, Z=ChunkSize-1, Y varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, 0, -1)))
+	{
+		OutRequest.EdgeXPosZNeg.SetNumUninitialized(ChunkSize);
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			OutRequest.EdgeXPosZNeg[Y] = (*Voxels)[GetIndex(0, Y, ChunkSize - 1)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XPOS_ZNEG;
+	}
+
+	// Edge X-Z+ (diagonal chunk at -X+Z, extract X=ChunkSize-1, Z=0, Y varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, 0, 1)))
+	{
+		OutRequest.EdgeXNegZPos.SetNumUninitialized(ChunkSize);
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			OutRequest.EdgeXNegZPos[Y] = (*Voxels)[GetIndex(ChunkSize - 1, Y, 0)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XNEG_ZPOS;
+	}
+
+	// Edge X-Z- (diagonal chunk at -X-Z, extract X=ChunkSize-1, Z=ChunkSize-1, Y varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, 0, -1)))
+	{
+		OutRequest.EdgeXNegZNeg.SetNumUninitialized(ChunkSize);
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			OutRequest.EdgeXNegZNeg[Y] = (*Voxels)[GetIndex(ChunkSize - 1, Y, ChunkSize - 1)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_XNEG_ZNEG;
+	}
+
+	// Edge Y+Z+ (diagonal chunk at +Y+Z, extract Y=0, Z=0, X varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, 1, 1)))
+	{
+		OutRequest.EdgeYPosZPos.SetNumUninitialized(ChunkSize);
+		for (int32 X = 0; X < ChunkSize; ++X)
+		{
+			OutRequest.EdgeYPosZPos[X] = (*Voxels)[GetIndex(X, 0, 0)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_YPOS_ZPOS;
+	}
+
+	// Edge Y+Z- (diagonal chunk at +Y-Z, extract Y=0, Z=ChunkSize-1, X varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, 1, -1)))
+	{
+		OutRequest.EdgeYPosZNeg.SetNumUninitialized(ChunkSize);
+		for (int32 X = 0; X < ChunkSize; ++X)
+		{
+			OutRequest.EdgeYPosZNeg[X] = (*Voxels)[GetIndex(X, 0, ChunkSize - 1)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_YPOS_ZNEG;
+	}
+
+	// Edge Y-Z+ (diagonal chunk at -Y+Z, extract Y=ChunkSize-1, Z=0, X varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, -1, 1)))
+	{
+		OutRequest.EdgeYNegZPos.SetNumUninitialized(ChunkSize);
+		for (int32 X = 0; X < ChunkSize; ++X)
+		{
+			OutRequest.EdgeYNegZPos[X] = (*Voxels)[GetIndex(X, ChunkSize - 1, 0)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_YNEG_ZPOS;
+	}
+
+	// Edge Y-Z- (diagonal chunk at -Y-Z, extract Y=ChunkSize-1, Z=ChunkSize-1, X varies)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(0, -1, -1)))
+	{
+		OutRequest.EdgeYNegZNeg.SetNumUninitialized(ChunkSize);
+		for (int32 X = 0; X < ChunkSize; ++X)
+		{
+			OutRequest.EdgeYNegZNeg[X] = (*Voxels)[GetIndex(X, ChunkSize - 1, ChunkSize - 1)];
+		}
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::EDGE_YNEG_ZNEG;
+	}
+
+	// ==================== Extract Corner Neighbors (for Marching Cubes) ====================
+
+	// Corner X+Y+Z+ (diagonal chunk at +X+Y+Z, extract voxel at 0,0,0)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, 1, 1)))
+	{
+		OutRequest.CornerXPosYPosZPos = (*Voxels)[GetIndex(0, 0, 0)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZPOS;
+	}
+
+	// Corner X+Y+Z- (diagonal chunk at +X+Y-Z, extract voxel at 0,0,ChunkSize-1)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, 1, -1)))
+	{
+		OutRequest.CornerXPosYPosZNeg = (*Voxels)[GetIndex(0, 0, ChunkSize - 1)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZNEG;
+	}
+
+	// Corner X+Y-Z+ (diagonal chunk at +X-Y+Z, extract voxel at 0,ChunkSize-1,0)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, -1, 1)))
+	{
+		OutRequest.CornerXPosYNegZPos = (*Voxels)[GetIndex(0, ChunkSize - 1, 0)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZPOS;
+	}
+
+	// Corner X+Y-Z- (diagonal chunk at +X-Y-Z, extract voxel at 0,ChunkSize-1,ChunkSize-1)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(1, -1, -1)))
+	{
+		OutRequest.CornerXPosYNegZNeg = (*Voxels)[GetIndex(0, ChunkSize - 1, ChunkSize - 1)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZNEG;
+	}
+
+	// Corner X-Y+Z+ (diagonal chunk at -X+Y+Z, extract voxel at ChunkSize-1,0,0)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, 1, 1)))
+	{
+		OutRequest.CornerXNegYPosZPos = (*Voxels)[GetIndex(ChunkSize - 1, 0, 0)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZPOS;
+	}
+
+	// Corner X-Y+Z- (diagonal chunk at -X+Y-Z, extract voxel at ChunkSize-1,0,ChunkSize-1)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, 1, -1)))
+	{
+		OutRequest.CornerXNegYPosZNeg = (*Voxels)[GetIndex(ChunkSize - 1, 0, ChunkSize - 1)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZNEG;
+	}
+
+	// Corner X-Y-Z+ (diagonal chunk at -X-Y+Z, extract voxel at ChunkSize-1,ChunkSize-1,0)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, -1, 1)))
+	{
+		OutRequest.CornerXNegYNegZPos = (*Voxels)[GetIndex(ChunkSize - 1, ChunkSize - 1, 0)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZPOS;
+	}
+
+	// Corner X-Y-Z- (diagonal chunk at -X-Y-Z, extract voxel at ChunkSize-1,ChunkSize-1,ChunkSize-1)
+	if (const TArray<FVoxelData>* Voxels = GetNeighborVoxels(ChunkCoord + FIntVector(-1, -1, -1)))
+	{
+		OutRequest.CornerXNegYNegZNeg = (*Voxels)[GetIndex(ChunkSize - 1, ChunkSize - 1, ChunkSize - 1)];
+		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZNEG;
 	}
 }

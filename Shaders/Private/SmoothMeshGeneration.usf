@@ -1,0 +1,469 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Compute shader for smooth (Marching Cubes) mesh generation.
+ *
+ * Generates smooth mesh geometry by interpolating vertex positions
+ * along cube edges where the density field crosses the isosurface.
+ *
+ * Thread Group Size: [8, 8, 4] = 256 threads per group
+ * Dispatch: ceil(ChunkSize/8), ceil(ChunkSize/8), ceil(ChunkSize/4)
+ */
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/VoxelWorlds/Private/MarchingCubesCommon.ush"
+
+// ==================== Shader Parameters ====================
+
+// Input: Packed voxel data (ChunkSize^3 elements)
+StructuredBuffer<uint> InputVoxelData;
+
+// Face neighbor chunk data for seamless boundaries (6 faces)
+StructuredBuffer<uint> NeighborXPos;
+StructuredBuffer<uint> NeighborXNeg;
+StructuredBuffer<uint> NeighborYPos;
+StructuredBuffer<uint> NeighborYNeg;
+StructuredBuffer<uint> NeighborZPos;
+StructuredBuffer<uint> NeighborZNeg;
+
+// Edge neighbor data for diagonal chunk boundaries (12 edges)
+StructuredBuffer<uint> EdgeXPosYPos;
+StructuredBuffer<uint> EdgeXPosYNeg;
+StructuredBuffer<uint> EdgeXNegYPos;
+StructuredBuffer<uint> EdgeXNegYNeg;
+StructuredBuffer<uint> EdgeXPosZPos;
+StructuredBuffer<uint> EdgeXPosZNeg;
+StructuredBuffer<uint> EdgeXNegZPos;
+StructuredBuffer<uint> EdgeXNegZNeg;
+StructuredBuffer<uint> EdgeYPosZPos;
+StructuredBuffer<uint> EdgeYPosZNeg;
+StructuredBuffer<uint> EdgeYNegZPos;
+StructuredBuffer<uint> EdgeYNegZNeg;
+
+// Corner neighbor data (8 corners)
+StructuredBuffer<uint> CornerData;
+
+// Face neighbor presence flags (bits 0-5)
+uint NeighborFlags;
+
+// Edge/corner presence flags (bits 0-11 for edges, 12-19 for corners)
+uint EdgeCornerFlags;
+
+// Edge flag bit positions
+#define EDGE_XPOS_YPOS (1u << 0)
+#define EDGE_XPOS_YNEG (1u << 1)
+#define EDGE_XNEG_YPOS (1u << 2)
+#define EDGE_XNEG_YNEG (1u << 3)
+#define EDGE_XPOS_ZPOS (1u << 4)
+#define EDGE_XPOS_ZNEG (1u << 5)
+#define EDGE_XNEG_ZPOS (1u << 6)
+#define EDGE_XNEG_ZNEG (1u << 7)
+#define EDGE_YPOS_ZPOS (1u << 8)
+#define EDGE_YPOS_ZNEG (1u << 9)
+#define EDGE_YNEG_ZPOS (1u << 10)
+#define EDGE_YNEG_ZNEG (1u << 11)
+
+// Corner flag bit positions
+#define CORNER_XPOS_YPOS_ZPOS (1u << 12)
+#define CORNER_XPOS_YPOS_ZNEG (1u << 13)
+#define CORNER_XPOS_YNEG_ZPOS (1u << 14)
+#define CORNER_XPOS_YNEG_ZNEG (1u << 15)
+#define CORNER_XNEG_YPOS_ZPOS (1u << 16)
+#define CORNER_XNEG_YPOS_ZNEG (1u << 17)
+#define CORNER_XNEG_YNEG_ZPOS (1u << 18)
+#define CORNER_XNEG_YNEG_ZNEG (1u << 19)
+
+// Triangle table buffer (256 * 16 elements)
+StructuredBuffer<int> TriangleTable;
+
+// Output buffers
+RWStructuredBuffer<FVoxelVertexGPU> OutputVertices;
+RWStructuredBuffer<uint> OutputIndices;
+RWStructuredBuffer<uint> MeshCounters;
+
+// Chunk parameters
+uint ChunkSize;
+float VoxelSize;
+float3 ChunkWorldPosition;
+float IsoLevel;
+
+// ==================== Helper Functions ====================
+
+/**
+ * Check if face neighbor data is available for a direction.
+ */
+bool HasNeighborData(uint Face)
+{
+    return (NeighborFlags & (1u << Face)) != 0;
+}
+
+/**
+ * Check if edge neighbor data is available.
+ */
+bool HasEdgeData(uint EdgeFlag)
+{
+    return (EdgeCornerFlags & EdgeFlag) != 0;
+}
+
+/**
+ * Check if corner neighbor data is available.
+ */
+bool HasCornerData(uint CornerFlag)
+{
+    return (EdgeCornerFlags & CornerFlag) != 0;
+}
+
+/**
+ * Get packed voxel data at position, handling chunk boundaries.
+ * Handles face neighbors (1 axis out), edge neighbors (2 axes out),
+ * and corner neighbors (3 axes out).
+ */
+uint GetVoxelAt(int3 Position)
+{
+    // Check if within chunk bounds
+    if (all(Position >= 0) && all(Position < (int)ChunkSize))
+    {
+        uint Index = GetVoxelIndex(Position, ChunkSize);
+        return InputVoxelData[Index];
+    }
+
+    // Clamp coordinates for fallback
+    int3 ClampedPos = clamp(Position, int3(0, 0, 0), int3((int)ChunkSize - 1, (int)ChunkSize - 1, (int)ChunkSize - 1));
+
+    // Determine which axes are out of bounds and in which direction
+    bool bXPos = (Position.x >= (int)ChunkSize);
+    bool bXNeg = (Position.x < 0);
+    bool bYPos = (Position.y >= (int)ChunkSize);
+    bool bYNeg = (Position.y < 0);
+    bool bZPos = (Position.z >= (int)ChunkSize);
+    bool bZNeg = (Position.z < 0);
+
+    bool bOutX = bXPos || bXNeg;
+    bool bOutY = bYPos || bYNeg;
+    bool bOutZ = bZPos || bZNeg;
+    uint OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
+
+    // Single-axis out of bounds: use face neighbor data
+    if (OutCount == 1)
+    {
+        if (bXPos && HasNeighborData(FACE_X_POS))
+            return NeighborXPos[(uint)Position.y + (uint)Position.z * ChunkSize];
+        if (bXNeg && HasNeighborData(FACE_X_NEG))
+            return NeighborXNeg[(uint)Position.y + (uint)Position.z * ChunkSize];
+        if (bYPos && HasNeighborData(FACE_Y_POS))
+            return NeighborYPos[(uint)Position.x + (uint)Position.z * ChunkSize];
+        if (bYNeg && HasNeighborData(FACE_Y_NEG))
+            return NeighborYNeg[(uint)Position.x + (uint)Position.z * ChunkSize];
+        if (bZPos && HasNeighborData(FACE_Z_POS))
+            return NeighborZPos[(uint)Position.x + (uint)Position.y * ChunkSize];
+        if (bZNeg && HasNeighborData(FACE_Z_NEG))
+            return NeighborZNeg[(uint)Position.x + (uint)Position.y * ChunkSize];
+        // Fallback to edge voxel
+        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+    }
+
+    // Edge case (2 axes out of bounds): use edge neighbor data
+    if (OutCount == 2)
+    {
+        // X+Y edges (Z varies)
+        if (bXPos && bYPos && HasEdgeData(EDGE_XPOS_YPOS))
+            return EdgeXPosYPos[(uint)Position.z];
+        if (bXPos && bYNeg && HasEdgeData(EDGE_XPOS_YNEG))
+            return EdgeXPosYNeg[(uint)Position.z];
+        if (bXNeg && bYPos && HasEdgeData(EDGE_XNEG_YPOS))
+            return EdgeXNegYPos[(uint)Position.z];
+        if (bXNeg && bYNeg && HasEdgeData(EDGE_XNEG_YNEG))
+            return EdgeXNegYNeg[(uint)Position.z];
+
+        // X+Z edges (Y varies)
+        if (bXPos && bZPos && HasEdgeData(EDGE_XPOS_ZPOS))
+            return EdgeXPosZPos[(uint)Position.y];
+        if (bXPos && bZNeg && HasEdgeData(EDGE_XPOS_ZNEG))
+            return EdgeXPosZNeg[(uint)Position.y];
+        if (bXNeg && bZPos && HasEdgeData(EDGE_XNEG_ZPOS))
+            return EdgeXNegZPos[(uint)Position.y];
+        if (bXNeg && bZNeg && HasEdgeData(EDGE_XNEG_ZNEG))
+            return EdgeXNegZNeg[(uint)Position.y];
+
+        // Y+Z edges (X varies)
+        if (bYPos && bZPos && HasEdgeData(EDGE_YPOS_ZPOS))
+            return EdgeYPosZPos[(uint)Position.x];
+        if (bYPos && bZNeg && HasEdgeData(EDGE_YPOS_ZNEG))
+            return EdgeYPosZNeg[(uint)Position.x];
+        if (bYNeg && bZPos && HasEdgeData(EDGE_YNEG_ZPOS))
+            return EdgeYNegZPos[(uint)Position.x];
+        if (bYNeg && bZNeg && HasEdgeData(EDGE_YNEG_ZNEG))
+            return EdgeYNegZNeg[(uint)Position.x];
+
+        // Fallback to edge voxel
+        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+    }
+
+    // Corner case (3 axes out of bounds): use corner neighbor data
+    if (OutCount == 3)
+    {
+        // Corner indices in CornerData buffer:
+        // 0: X+Y+Z+, 1: X+Y+Z-, 2: X+Y-Z+, 3: X+Y-Z-
+        // 4: X-Y+Z+, 5: X-Y+Z-, 6: X-Y-Z+, 7: X-Y-Z-
+        if (bXPos && bYPos && bZPos && HasCornerData(CORNER_XPOS_YPOS_ZPOS))
+            return CornerData[0];
+        if (bXPos && bYPos && bZNeg && HasCornerData(CORNER_XPOS_YPOS_ZNEG))
+            return CornerData[1];
+        if (bXPos && bYNeg && bZPos && HasCornerData(CORNER_XPOS_YNEG_ZPOS))
+            return CornerData[2];
+        if (bXPos && bYNeg && bZNeg && HasCornerData(CORNER_XPOS_YNEG_ZNEG))
+            return CornerData[3];
+        if (bXNeg && bYPos && bZPos && HasCornerData(CORNER_XNEG_YPOS_ZPOS))
+            return CornerData[4];
+        if (bXNeg && bYPos && bZNeg && HasCornerData(CORNER_XNEG_YPOS_ZNEG))
+            return CornerData[5];
+        if (bXNeg && bYNeg && bZPos && HasCornerData(CORNER_XNEG_YNEG_ZPOS))
+            return CornerData[6];
+        if (bXNeg && bYNeg && bZNeg && HasCornerData(CORNER_XNEG_YNEG_ZNEG))
+            return CornerData[7];
+
+        // Fallback to corner voxel
+        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+    }
+
+    // Out of bounds - treat as air (density = 0)
+    return 0;
+}
+
+/**
+ * Get density at position (normalized 0-1).
+ */
+float GetDensityAt(int3 Position)
+{
+    uint PackedVoxel = GetVoxelAt(Position);
+    return GetDensity(PackedVoxel);
+}
+
+/**
+ * Calculate gradient-based normal using central differences.
+ */
+float3 CalculateGradientNormal(int3 Position)
+{
+    float gx = GetDensityAt(Position + int3(1, 0, 0)) - GetDensityAt(Position + int3(-1, 0, 0));
+    float gy = GetDensityAt(Position + int3(0, 1, 0)) - GetDensityAt(Position + int3(0, -1, 0));
+    float gz = GetDensityAt(Position + int3(0, 0, 1)) - GetDensityAt(Position + int3(0, 0, -1));
+
+    float3 Normal = float3(-gx, -gy, -gz);
+
+    float Len = length(Normal);
+    if (Len > 0.0001f)
+    {
+        return Normal / Len;
+    }
+    return float3(0, 0, 1);
+}
+
+/**
+ * Get dominant material from solid corners.
+ */
+uint GetDominantMaterial(int3 CubePos, uint CubeIndex)
+{
+    // Simple approach: use material from first solid corner
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        if (CubeIndex & (1u << i))
+        {
+            int3 CornerPos = CubePos + CornerOffsets[i];
+            uint PackedVoxel = GetVoxelAt(CornerPos);
+            return GetMaterialID(PackedVoxel);
+        }
+    }
+    return 0;
+}
+
+/**
+ * Get dominant biome from solid corners.
+ */
+uint GetDominantBiome(int3 CubePos, uint CubeIndex)
+{
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        if (CubeIndex & (1u << i))
+        {
+            int3 CornerPos = CubePos + CornerOffsets[i];
+            uint PackedVoxel = GetVoxelAt(CornerPos);
+            return GetBiomeID(PackedVoxel);
+        }
+    }
+    return 0;
+}
+
+/**
+ * Get triangle edge from lookup table buffer.
+ */
+int GetTriTableEntry(uint CubeIndex, uint TriIndex)
+{
+    return TriangleTable[CubeIndex * 16 + TriIndex];
+}
+
+// ==================== Main Compute Shader ====================
+
+[numthreads(8, 8, 4)]
+void MainCS(
+    uint3 GroupId : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID,
+    uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int3 CubePos = (int3)DispatchThreadId;
+
+    // Early out if outside chunk bounds
+    if (any(CubePos >= (int)ChunkSize))
+    {
+        return;
+    }
+
+    // Sample density at 8 cube corners
+    float CornerDensities[8];
+    float3 CornerPositions[8];
+
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        int3 CornerPos = CubePos + CornerOffsets[i];
+        CornerDensities[i] = GetDensityAt(CornerPos);
+        CornerPositions[i] = ChunkWorldPosition + float3(CornerPos) * VoxelSize;
+    }
+
+    // Calculate cube index
+    uint CubeIndex = CalculateCubeIndex(CornerDensities, IsoLevel);
+
+    // Early out if cube is entirely inside or outside
+    if (EdgeTable[CubeIndex] == 0)
+    {
+        return;
+    }
+
+    // Get material and biome for this cube
+    uint MaterialID = GetDominantMaterial(CubePos, CubeIndex);
+    uint BiomeID = GetDominantBiome(CubePos, CubeIndex);
+
+    // Interpolate vertex positions along intersected edges
+    float3 EdgeVertices[12];
+    uint EdgeMask = EdgeTable[CubeIndex];
+
+    [unroll]
+    for (uint Edge = 0; Edge < 12; Edge++)
+    {
+        if (EdgeMask & (1u << Edge))
+        {
+            int V0 = EdgeVertexPairs[Edge][0];
+            int V1 = EdgeVertexPairs[Edge][1];
+
+            EdgeVertices[Edge] = InterpolateEdge(
+                CornerDensities[V0], CornerDensities[V1],
+                CornerPositions[V0], CornerPositions[V1],
+                IsoLevel
+            );
+        }
+    }
+
+    // Count triangles for this cube
+    uint TriCount = 0;
+    for (uint t = 0; t < 15; t += 3)
+    {
+        if (GetTriTableEntry(CubeIndex, t) == -1)
+            break;
+        TriCount++;
+    }
+
+    if (TriCount == 0)
+    {
+        return;
+    }
+
+    // Atomically allocate vertices and indices
+    uint VertexStart;
+    uint IndexStart;
+    InterlockedAdd(MeshCounters[0], TriCount * 3, VertexStart);
+    InterlockedAdd(MeshCounters[1], TriCount * 3, IndexStart);
+
+    // Generate triangles
+    uint CurrentVertex = VertexStart;
+    uint CurrentIndex = IndexStart;
+
+    for (uint ti = 0; ti < 15; ti += 3)
+    {
+        int Edge0 = GetTriTableEntry(CubeIndex, ti);
+        if (Edge0 == -1)
+            break;
+
+        int Edge1 = GetTriTableEntry(CubeIndex, ti + 1);
+        int Edge2 = GetTriTableEntry(CubeIndex, ti + 2);
+
+        float3 P0 = EdgeVertices[Edge0];
+        float3 P1 = EdgeVertices[Edge1];
+        float3 P2 = EdgeVertices[Edge2];
+
+        // Calculate normals at vertex positions
+        // Convert world position back to voxel space for gradient calculation
+        int3 VP0 = (int3)((P0 - ChunkWorldPosition) / VoxelSize);
+        int3 VP1 = (int3)((P1 - ChunkWorldPosition) / VoxelSize);
+        int3 VP2 = (int3)((P2 - ChunkWorldPosition) / VoxelSize);
+
+        float3 N0 = CalculateGradientNormal(VP0);
+        float3 N1 = CalculateGradientNormal(VP1);
+        float3 N2 = CalculateGradientNormal(VP2);
+
+        // Dominant-axis UV projection based on face normal
+        // This reduces texture stretching on slopes by choosing the best projection plane
+        float3 FaceNormal = normalize(cross(P1 - P0, P2 - P0));
+
+        float AbsX = abs(FaceNormal.x);
+        float AbsY = abs(FaceNormal.y);
+        float AbsZ = abs(FaceNormal.z);
+
+        float UVScale = 0.1f;
+        float2 UV0, UV1, UV2;
+
+        if (AbsZ >= AbsX && AbsZ >= AbsY)
+        {
+            // Z-dominant (horizontal surface): project onto XY plane
+            UV0 = P0.xy / VoxelSize * UVScale;
+            UV1 = P1.xy / VoxelSize * UVScale;
+            UV2 = P2.xy / VoxelSize * UVScale;
+        }
+        else if (AbsX >= AbsY)
+        {
+            // X-dominant (East/West facing): project onto YZ plane
+            UV0 = P0.yz / VoxelSize * UVScale;
+            UV1 = P1.yz / VoxelSize * UVScale;
+            UV2 = P2.yz / VoxelSize * UVScale;
+        }
+        else
+        {
+            // Y-dominant (North/South facing): project onto XZ plane
+            UV0 = P0.xz / VoxelSize * UVScale;
+            UV1 = P1.xz / VoxelSize * UVScale;
+            UV2 = P2.xz / VoxelSize * UVScale;
+        }
+
+        // Create and emit vertices
+        OutputVertices[CurrentVertex + 0] = CreateSmoothVertex(P0, N0, UV0, MaterialID, BiomeID);
+        OutputVertices[CurrentVertex + 1] = CreateSmoothVertex(P1, N1, UV1, MaterialID, BiomeID);
+        OutputVertices[CurrentVertex + 2] = CreateSmoothVertex(P2, N2, UV2, MaterialID, BiomeID);
+
+        // Emit indices
+        OutputIndices[CurrentIndex + 0] = CurrentVertex + 0;
+        OutputIndices[CurrentIndex + 1] = CurrentVertex + 1;
+        OutputIndices[CurrentIndex + 2] = CurrentVertex + 2;
+
+        CurrentVertex += 3;
+        CurrentIndex += 3;
+    }
+}
+
+// ==================== Counter Reset Shader ====================
+
+[numthreads(1, 1, 1)]
+void ResetCountersCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    MeshCounters[0] = 0;  // Vertex counter
+    MeshCounters[1] = 0;  // Index counter
+}

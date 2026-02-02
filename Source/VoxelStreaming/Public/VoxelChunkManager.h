@@ -10,7 +10,7 @@
 #include "LODTypes.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "InfinitePlaneWorldMode.h"
-#include "VoxelCPUCubicMesher.h"
+#include "IVoxelMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelChunkManager.generated.h"
 
@@ -459,8 +459,8 @@ protected:
 	/** World mode for terrain generation (Infinite Plane) */
 	TUniquePtr<FInfinitePlaneWorldMode> WorldMode;
 
-	/** CPU mesher for generating mesh geometry */
-	TUniquePtr<FVoxelCPUCubicMesher> Mesher;
+	/** CPU mesher for generating mesh geometry (polymorphic - can be cubic or smooth) */
+	TUniquePtr<IVoxelMesher> Mesher;
 
 	// ==================== Pending Mesh Storage ====================
 

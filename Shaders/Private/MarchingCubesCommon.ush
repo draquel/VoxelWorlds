@@ -1,0 +1,223 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Common utilities for Marching Cubes smooth mesh generation shaders.
+ * Contains lookup tables, vertex helpers, and interpolation functions.
+ *
+ * Cube Corner Layout:
+ *          7-------6
+ *         /|      /|
+ *        4-------5 |
+ *        | |     | |
+ *        | 3-----|-2
+ *        |/      |/
+ *        0-------1
+ */
+
+#pragma once
+
+#include "/Plugin/VoxelWorlds/Private/CubicMeshCommon.ush"
+
+// ==================== Corner Offset Table ====================
+
+/**
+ * Local position offsets for the 8 cube corners.
+ */
+static const int3 CornerOffsets[8] = {
+    int3(0, 0, 0),  // Corner 0
+    int3(1, 0, 0),  // Corner 1
+    int3(1, 1, 0),  // Corner 2
+    int3(0, 1, 0),  // Corner 3
+    int3(0, 0, 1),  // Corner 4
+    int3(1, 0, 1),  // Corner 5
+    int3(1, 1, 1),  // Corner 6
+    int3(0, 1, 1)   // Corner 7
+};
+
+// ==================== Edge Vertex Pairs ====================
+
+/**
+ * Which two corners each of the 12 edges connects.
+ * EdgeVertexPairs[Edge][0] = first corner
+ * EdgeVertexPairs[Edge][1] = second corner
+ */
+static const int EdgeVertexPairs[12][2] = {
+    {0, 1}, // Edge 0
+    {1, 2}, // Edge 1
+    {2, 3}, // Edge 2
+    {3, 0}, // Edge 3
+    {4, 5}, // Edge 4
+    {5, 6}, // Edge 5
+    {6, 7}, // Edge 6
+    {7, 4}, // Edge 7
+    {0, 4}, // Edge 8
+    {1, 5}, // Edge 9
+    {2, 6}, // Edge 10
+    {3, 7}  // Edge 11
+};
+
+// ==================== Edge Table ====================
+
+/**
+ * Edge table: for each of 256 cube configurations, a 12-bit mask
+ * indicating which edges are intersected by the isosurface.
+ */
+static const uint EdgeTable[256] = {
+    0x000, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x099, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x033, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0x0aa, 0x7a6, 0x6af, 0x5a5, 0x4ac,
+    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x066, 0x16f, 0x265, 0x36c,
+    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0x0ff, 0x3f5, 0x2fc,
+    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x055, 0x15c,
+    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0x0cc,
+    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+    0x0cc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+    0x15c, 0x055, 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+    0x2fc, 0x3f5, 0x0ff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+    0x36c, 0x265, 0x16f, 0x066, 0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+    0x4ac, 0x5a5, 0x6af, 0x7a6, 0x0aa, 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x033, 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x099, 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+    0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x000
+};
+
+// ==================== Triangle Table ====================
+
+/**
+ * Triangle table: for each configuration, edge indices for up to 5 triangles.
+ * Terminated by -1 (stored as 255 for unsigned).
+ * Due to HLSL array limitations, we store 16 values per row with 255 as terminator.
+ */
+
+// Helper to get triangle edge at specific index
+// Returns 255 (terminator) if index is out of bounds
+int GetTriangleEdge(uint CubeIndex, uint TriIndex);
+
+// Triangle table is too large for static const in HLSL, so we use a buffer or
+// implement it as a function that returns the appropriate edge index.
+// For simplicity in this implementation, we provide a lookup function.
+
+// The full triangle table is provided via StructuredBuffer in the main shader.
+// This header provides the interface and helper functions.
+
+// ==================== Density Functions ====================
+
+/**
+ * Get normalized density (0-1) from packed voxel data.
+ */
+float GetDensity(uint PackedVoxel)
+{
+    uint Density = (PackedVoxel >> 8) & 0xFF;
+    return float(Density) / 255.0f;
+}
+
+/**
+ * Check if density is above isosurface threshold.
+ */
+bool IsSolid(float Density, float IsoLevel)
+{
+    return Density >= IsoLevel;
+}
+
+// ==================== Edge Interpolation ====================
+
+/**
+ * Interpolate position along an edge where isosurface crosses.
+ * @param d0 Density at first corner
+ * @param d1 Density at second corner
+ * @param p0 Position of first corner
+ * @param p1 Position of second corner
+ * @param IsoLevel Isosurface threshold
+ * @return Interpolated position on the edge
+ */
+float3 InterpolateEdge(float d0, float d1, float3 p0, float3 p1, float IsoLevel)
+{
+    // Avoid division by zero
+    float denom = d1 - d0;
+    if (abs(denom) < 0.00001f)
+    {
+        return (p0 + p1) * 0.5f;
+    }
+
+    float t = (IsoLevel - d0) / denom;
+    t = saturate(t);
+
+    return p0 + (p1 - p0) * t;
+}
+
+// ==================== Normal Calculation ====================
+
+/**
+ * Pack a normalized normal vector with AO into uint32.
+ * Same format as cubic meshing for compatibility.
+ */
+uint PackSmoothNormalAndAO(float3 Normal, uint AO)
+{
+    // Normalize and convert to 10-bit signed values
+    int NX = clamp((int)(Normal.x * 511.0f), -512, 511);
+    int NY = clamp((int)(Normal.y * 511.0f), -512, 511);
+    int NZ = clamp((int)(Normal.z * 511.0f), -512, 511);
+
+    // Pack into 32 bits
+    return ((uint)(NX & 0x3FF))
+         | ((uint)(NY & 0x3FF) << 10)
+         | ((uint)(NZ & 0x3FF) << 20)
+         | ((AO & 0x3) << 30);
+}
+
+// ==================== Smooth Meshing Vertex ====================
+
+/**
+ * Create a smooth mesh vertex.
+ * Uses same FVoxelVertexGPU structure as cubic for compatibility.
+ */
+FVoxelVertexGPU CreateSmoothVertex(
+    float3 Position,
+    float3 Normal,
+    float2 UV,
+    uint MaterialID,
+    uint BiomeID)
+{
+    FVoxelVertexGPU Vertex;
+    Vertex.Position = Position;
+    Vertex.PackedNormalAndAO = PackSmoothNormalAndAO(Normal, 0);
+    Vertex.UV = UV;
+    Vertex.PackedMaterialData = PackMaterialData(MaterialID, BiomeID, 0);
+    return Vertex;
+}
+
+// ==================== Cube Index Calculation ====================
+
+/**
+ * Calculate the cube index (0-255) from 8 corner densities.
+ * A bit is set if the corresponding corner is inside (density >= IsoLevel).
+ */
+uint CalculateCubeIndex(float Densities[8], float IsoLevel)
+{
+    uint CubeIndex = 0;
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        if (Densities[i] >= IsoLevel)
+        {
+            CubeIndex |= (1u << i);
+        }
+    }
+    return CubeIndex;
+}

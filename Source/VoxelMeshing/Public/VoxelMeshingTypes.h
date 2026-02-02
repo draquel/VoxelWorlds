@@ -40,8 +40,8 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	TArray<FVoxelData> VoxelData;
 
 	/**
-	 * Neighbor chunk data for seamless boundaries.
-	 * Each array contains ChunkSize^2 voxels representing the edge slice.
+	 * Face neighbor chunk data for seamless boundaries.
+	 * Each array contains ChunkSize^2 voxels representing the face slice.
 	 * Empty arrays mean boundary faces will be generated (chunk edge).
 	 */
 	UPROPERTY()
@@ -61,6 +61,103 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 
 	UPROPERTY()
 	TArray<FVoxelData> NeighborZNeg;  // -Z neighbor (Bottom)
+
+	/**
+	 * Edge neighbor data for diagonal chunk boundaries (Marching Cubes).
+	 * Each array contains ChunkSize voxels representing an edge strip.
+	 * Named by the two positive/negative axes involved.
+	 */
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosYPos;  // +X+Y edge (Z varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosYNeg;  // +X-Y edge (Z varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegYPos;  // -X+Y edge (Z varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegYNeg;  // -X-Y edge (Z varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosZPos;  // +X+Z edge (Y varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosZNeg;  // +X-Z edge (Y varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegZPos;  // -X+Z edge (Y varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegZNeg;  // -X-Z edge (Y varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYPosZPos;  // +Y+Z edge (X varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYPosZNeg;  // +Y-Z edge (X varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYNegZPos;  // -Y+Z edge (X varies)
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYNegZNeg;  // -Y-Z edge (X varies)
+
+	/**
+	 * Corner neighbor data for diagonal chunk boundaries (Marching Cubes).
+	 * Single voxel at each of the 8 chunk corners.
+	 */
+	UPROPERTY()
+	FVoxelData CornerXPosYPosZPos;  // +X+Y+Z corner
+
+	UPROPERTY()
+	FVoxelData CornerXPosYPosZNeg;  // +X+Y-Z corner
+
+	UPROPERTY()
+	FVoxelData CornerXPosYNegZPos;  // +X-Y+Z corner
+
+	UPROPERTY()
+	FVoxelData CornerXPosYNegZNeg;  // +X-Y-Z corner
+
+	UPROPERTY()
+	FVoxelData CornerXNegYPosZPos;  // -X+Y+Z corner
+
+	UPROPERTY()
+	FVoxelData CornerXNegYPosZNeg;  // -X+Y-Z corner
+
+	UPROPERTY()
+	FVoxelData CornerXNegYNegZPos;  // -X-Y+Z corner
+
+	UPROPERTY()
+	FVoxelData CornerXNegYNegZNeg;  // -X-Y-Z corner
+
+	/** Flags indicating which edge/corner data is valid */
+	UPROPERTY()
+	uint32 EdgeCornerFlags = 0;
+
+	// Edge flag bits (0-11)
+	static constexpr uint32 EDGE_XPOS_YPOS = 1 << 0;
+	static constexpr uint32 EDGE_XPOS_YNEG = 1 << 1;
+	static constexpr uint32 EDGE_XNEG_YPOS = 1 << 2;
+	static constexpr uint32 EDGE_XNEG_YNEG = 1 << 3;
+	static constexpr uint32 EDGE_XPOS_ZPOS = 1 << 4;
+	static constexpr uint32 EDGE_XPOS_ZNEG = 1 << 5;
+	static constexpr uint32 EDGE_XNEG_ZPOS = 1 << 6;
+	static constexpr uint32 EDGE_XNEG_ZNEG = 1 << 7;
+	static constexpr uint32 EDGE_YPOS_ZPOS = 1 << 8;
+	static constexpr uint32 EDGE_YPOS_ZNEG = 1 << 9;
+	static constexpr uint32 EDGE_YNEG_ZPOS = 1 << 10;
+	static constexpr uint32 EDGE_YNEG_ZNEG = 1 << 11;
+
+	// Corner flag bits (12-19)
+	static constexpr uint32 CORNER_XPOS_YPOS_ZPOS = 1 << 12;
+	static constexpr uint32 CORNER_XPOS_YPOS_ZNEG = 1 << 13;
+	static constexpr uint32 CORNER_XPOS_YNEG_ZPOS = 1 << 14;
+	static constexpr uint32 CORNER_XPOS_YNEG_ZNEG = 1 << 15;
+	static constexpr uint32 CORNER_XNEG_YPOS_ZPOS = 1 << 16;
+	static constexpr uint32 CORNER_XNEG_YPOS_ZNEG = 1 << 17;
+	static constexpr uint32 CORNER_XNEG_YNEG_ZPOS = 1 << 18;
+	static constexpr uint32 CORNER_XNEG_YNEG_ZNEG = 1 << 19;
 
 	/** Get voxel at local position */
 	FORCEINLINE const FVoxelData& GetVoxel(int32 X, int32 Y, int32 Z) const
@@ -100,6 +197,24 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 		case 5: return NeighborZNeg.Num() == GetNeighborSliceSize();
 		default: return false;
 		}
+	}
+
+	/** Check if an edge strip is present */
+	FORCEINLINE bool HasEdge(uint32 EdgeFlag) const
+	{
+		return (EdgeCornerFlags & EdgeFlag) != 0;
+	}
+
+	/** Check if a corner is present */
+	FORCEINLINE bool HasCorner(uint32 CornerFlag) const
+	{
+		return (EdgeCornerFlags & CornerFlag) != 0;
+	}
+
+	/** Get expected edge strip size */
+	FORCEINLINE int32 GetEdgeStripSize() const
+	{
+		return ChunkSize;
 	}
 };
 
@@ -238,7 +353,27 @@ struct VOXELMESHING_API FVoxelMeshingConfig
 	 * Greedy meshing merges adjacent coplanar faces with the same material
 	 * into larger quads, significantly reducing triangle count (typically 40-60%).
 	 * Disable for debugging or when per-voxel face data is needed.
+	 * Only applies to cubic meshing.
 	 */
 	UPROPERTY()
 	bool bUseGreedyMeshing = true;
+
+	/**
+	 * Use smooth (Marching Cubes) meshing instead of cubic.
+	 * Smooth meshing interpolates vertex positions along cube edges where the
+	 * density field crosses the isosurface, producing organic curved surfaces
+	 * instead of blocky voxel geometry.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Meshing")
+	bool bUseSmoothMeshing = false;
+
+	/**
+	 * ISO surface threshold for smooth meshing (0.0-1.0).
+	 * The isosurface is generated where density equals this value.
+	 * Default 0.5 corresponds to density threshold 127 (VOXEL_SURFACE_THRESHOLD).
+	 * Lower values produce larger/more solid meshes, higher values produce smaller.
+	 * Only applies when bUseSmoothMeshing is true.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Meshing", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bUseSmoothMeshing"))
+	float IsoLevel = 0.5f;
 };

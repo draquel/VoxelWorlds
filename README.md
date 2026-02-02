@@ -1,6 +1,6 @@
 # VoxelWorlds - GPU-Driven Voxel Terrain System
 
-A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.5 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes.
+A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.7 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes.
 
 ## Key Features
 
@@ -176,6 +176,6 @@ For Claude Code assistance, the project context is available in `.claude/instruc
 
 ---
 
-**Current Engine Version**: Unreal Engine 5.5
+**Current Engine Version**: Unreal Engine 5.7
 **Language**: C++ (17)
 **Rendering**: FLocalVertexFactory + Compute Shaders (GPU-driven)
