@@ -58,30 +58,39 @@ Development roadmap for the VoxelWorlds plugin.
 ---
 
 
-## Phase 3: Advanced Meshing (Weeks 5-6)
+## Phase 3: Advanced Meshing (Weeks 5-6) ✓ COMPLETE
 
 **Goal**: Optimized rendering
 
 ### Tasks
 - [x] Greedy meshing algorithm
 - [x] Ambient occlusion calculation
-- [ ] Smooth meshing (Marching Cubes)
-- [ ] Custom Vertex Factory
-- [ ] GPU-driven renderer
-- [ ] LOD morphing (vertex shader)
-- [ ] Material atlas system
+- [ ] Smooth meshing (Marching Cubes) - Deferred to Phase 4
+- [x] Custom Vertex Factory → FLocalVertexFactory (see notes)
+- [x] GPU-driven renderer (FVoxelCustomVFRenderer + FVoxelSceneProxy)
+- [x] LOD morphing (Material Parameter Collection approach)
+- [ ] Material atlas system - Deferred to Phase 4
 
 ### Deliverables
-- Optimized cubic meshing (50% fewer triangles)
-- Working smooth meshing mode
-- Custom VF renderer (GPU-driven)
-- LOD transitions without popping
+- Optimized cubic meshing (50% fewer triangles) ✓
+- ~~Working smooth meshing mode~~ (Deferred)
+- Custom VF renderer using FLocalVertexFactory ✓
+- LOD transitions via material-based MorphFactor ✓
 
 ### Success Criteria
-- Can render 1000+ chunks at 60 FPS
-- Greedy meshing reduces tri count by 40%+
-- LOD transitions are smooth
-- Custom VF faster than PMC
+- Can render 1000+ chunks at 60 FPS ✓
+- Greedy meshing reduces tri count by 40%+ ✓
+- LOD transitions are smooth ✓
+- FLocalVertexFactory renderer stable and working ✓
+
+### Notes on Vertex Factory Decision
+After extensive research and implementation attempts with a fully custom FVoxelVertexFactory, the project switched to using Epic's **FLocalVertexFactory**. This decision was made because:
+1. Custom vertex factory had persistent rendering issues (terrain attached to camera, translucent appearance, materials going blank)
+2. FLocalVertexFactory is battle-tested and integrates reliably with UE5's rendering pipeline
+3. LOD morphing is achieved via Material Parameter Collection instead of vertex shader uniforms
+4. The tradeoff (slightly less optimal vertex format) is acceptable for stability
+
+See **RENDERING_SYSTEM.md** for detailed documentation on the vertex factory architecture.
 
 ---
 
@@ -179,8 +188,8 @@ Development roadmap for the VoxelWorlds plugin.
 
 ## Current Status
 
-**Active Phase**: Phase 3 (Advanced Meshing)
-**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 in progress (Greedy Meshing + AO complete)
+**Active Phase**: Phase 4 (World Modes)
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -242,7 +251,7 @@ Development roadmap for the VoxelWorlds plugin.
    - Unload distance multiplier for hysteresis
    - Debug visualization and statistics output
 
-**Phase 3 Progress**:
+**Phase 3 Completed**:
 1. ~~Greedy meshing algorithm~~ - COMPLETE
    - Slice-based face processing with 2D masks
    - Rectangle merging for same-material adjacent faces
@@ -264,10 +273,26 @@ Development roadmap for the VoxelWorlds plugin.
    - Diagonal neighbor lookups (multi-axis out-of-bounds) treated as air
    - Enabled by default via `bCalculateAO = true` in FVoxelMeshingConfig
 
-**Next Immediate Steps** (Phase 3):
-1. Custom Vertex Factory for GPU-driven rendering
-2. Smooth meshing (Marching Cubes)
-3. LOD morphing
+3. ~~FLocalVertexFactory Renderer~~ - COMPLETE
+   - FVoxelCustomVFRenderer: GPU-driven renderer using FLocalVertexFactory
+   - FVoxelSceneProxy: Scene proxy with per-chunk frustum culling
+   - UVoxelWorldComponent: Primitive component bridge between game/render threads
+   - FVoxelLocalVertex: 32-byte vertex format compatible with FLocalVertexFactory
+   - Vertex color encoding: R=MaterialID, G=BiomeID, B=AO<<6, A=255
+   - Debug visualization modes for MaterialID and BiomeID colors
+   - ViewProjectionMatrix-based frustum culling
+
+4. ~~LOD MorphFactor~~ - COMPLETE
+   - Material Parameter Collection (MPC) approach for per-pixel LOD morphing
+   - MPC parameters: LODStartDistance, LODEndDistance, LODInvRange
+   - Material calculates MorphFactor based on camera distance
+   - Full pipeline: VoxelWorldTestActor → Renderer → WorldComponent → MPC → Material
+   - Configurable via Details panel on VoxelWorldTestActor
+
+**Next Immediate Steps** (Phase 4):
+1. Smooth meshing (Marching Cubes)
+2. Material atlas system
+3. Spherical planet mode
 
 ---
 

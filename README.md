@@ -1,6 +1,6 @@
 # VoxelWorlds - GPU-Driven Voxel Terrain System
 
-A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.7 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes.
+A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.5 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes.
 
 ## Key Features
 
@@ -98,15 +98,17 @@ VoxelWorlds/
   - Distance-based chunk loading/unloading
   - Debug visualization and statistics
 
-### In Progress
-- 🔄 Phase 3: Advanced Meshing
+- ✅ **Phase 3: Advanced Meshing** - COMPLETE
   - ✅ Greedy meshing algorithm (40-60% triangle reduction, seamless chunk boundaries)
   - ✅ Per-vertex ambient occlusion (standard voxel AO with neighbor sampling)
-  - ⏳ Custom Vertex Factory renderer
+  - ✅ FLocalVertexFactory renderer (GPU-driven, stable rendering)
+  - ✅ LOD morphing via Material Parameter Collection
 
-### Planned
-- ⏳ Phase 3: Smooth meshing (Marching Cubes)
-- ⏳ Phase 3: LOD morphing
+### In Progress
+- 🔄 Phase 4: World Modes
+  - ⏳ Smooth meshing (Marching Cubes)
+  - ⏳ Material atlas system
+  - ⏳ Spherical planet mode
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
@@ -125,10 +127,12 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FInfinitePlaneWorldMode` - 2D heightmap world mode
 - `FVoxelCPUNoiseGenerator` - CPU-based noise generation
 - `FVoxelGPUNoiseGenerator` - GPU compute shader noise generation
-- `FVoxelCPUCubicMesher` - CPU-based cubic mesh generation
+- `FVoxelCPUCubicMesher` - CPU-based cubic mesh generation with greedy meshing
 - `FVoxelGPUCubicMesher` - GPU compute shader cubic meshing
-- `FVoxelPMCRenderer` - ProceduralMeshComponent-based renderer
-- `FVoxelVertexFactory` - Custom vertex factory for GPU rendering
+- `FVoxelPMCRenderer` - ProceduralMeshComponent-based renderer (CPU fallback)
+- `FVoxelCustomVFRenderer` - GPU-driven renderer using FLocalVertexFactory
+- `FVoxelSceneProxy` - Scene proxy for chunk rendering with frustum culling
+- `UVoxelWorldComponent` - Primitive component bridge for rendering
 - `FVoxelMaterialRegistry` - Static material definitions registry
 - `FVoxelBiomeRegistry` - Static biome definitions registry
 - `AVoxelWorldTestActor` - Test actor for runtime world instantiation
@@ -172,6 +176,6 @@ For Claude Code assistance, the project context is available in `.claude/instruc
 
 ---
 
-**Current Engine Version**: Unreal Engine 5.7  
-**Language**: C++ (17)  
-**Rendering**: Custom Vertex Factory + Compute Shaders
+**Current Engine Version**: Unreal Engine 5.5
+**Language**: C++ (17)
+**Rendering**: FLocalVertexFactory + Compute Shaders (GPU-driven)
