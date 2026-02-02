@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Materials/MaterialInterface.h"
 #include "VoxelWorldTestActor.generated.h"
 
 // Forward declarations
@@ -65,6 +66,14 @@ public:
 	/** Height scale for terrain variation. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Configuration", meta = (EditCondition = "Configuration == nullptr", ClampMin = "100"))
 	float HeightScale = 3000.0f;
+
+	/**
+	 * Material for voxel rendering when using Custom Vertex Factory renderer.
+	 * REQUIRED: Create a simple opaque surface material and assign it here.
+	 * The default engine materials do NOT work with the custom vertex factory.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Rendering")
+	TObjectPtr<UMaterialInterface> VoxelMaterial;
 
 	/** Enable debug visualization */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug")

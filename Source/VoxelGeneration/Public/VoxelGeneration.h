@@ -39,9 +39,4 @@ public:
 	{
 		return FModuleManager::Get().IsModuleLoaded("VoxelGeneration");
 	}
-
-	/**
-	 * Get the plugin's shader directory path.
-	 */
-	static FString GetShaderDirectory();
 };

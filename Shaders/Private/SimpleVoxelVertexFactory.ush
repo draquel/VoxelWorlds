@@ -1,0 +1,286 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Simple Voxel Vertex Factory Shader - Phase 3
+ *
+ * A minimal custom vertex factory shader for testing.
+ * Vertices are in LOCAL space - transformed by Primitive.LocalToWorld.
+ *
+ * Vertex Format:
+ * - ATTRIBUTE0: Position (float3)
+ * - ATTRIBUTE1: Normal (float3)
+ * - ATTRIBUTE2: TexCoord (float2)
+ * - ATTRIBUTE3: Color (RGBA8)
+ */
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/VertexFactoryCommon.ush"
+
+// ==================== Vertex Input Structures ====================
+
+struct FVertexFactoryInput
+{
+	float3 Position : ATTRIBUTE0;
+	float3 Normal : ATTRIBUTE1;
+	float2 TexCoord : ATTRIBUTE2;
+	float4 Color : ATTRIBUTE3;
+};
+
+struct FPositionOnlyVertexFactoryInput
+{
+	float3 Position : ATTRIBUTE0;
+};
+
+struct FPositionAndNormalOnlyVertexFactoryInput
+{
+	float3 Position : ATTRIBUTE0;
+	float3 Normal : ATTRIBUTE1;
+};
+
+// ==================== Interpolants (VS to PS) ====================
+
+struct FVertexFactoryInterpolantsVSToPS
+{
+#if NUM_TEX_COORD_INTERPOLATORS
+	float4 TexCoords[(NUM_TEX_COORD_INTERPOLATORS + 1) / 2] : TEXCOORD0;
+#endif
+
+	float4 TangentToWorld0 : TANGENTTOWORLD0;
+	float4 TangentToWorld2 : TANGENTTOWORLD2;
+
+	float4 Color : COLOR0;
+
+#if INSTANCED_STEREO
+	nointerpolation uint EyeIndex : PACKED_EYE_INDEX;
+#endif
+};
+
+// ==================== Interpolant Accessors ====================
+
+#if NUM_TEX_COORD_INTERPOLATORS
+float2 GetUV(FVertexFactoryInterpolantsVSToPS Interpolants, int UVIndex)
+{
+	float4 UVVector = Interpolants.TexCoords[UVIndex / 2];
+	return UVIndex % 2 ? UVVector.zw : UVVector.xy;
+}
+
+void SetUV(inout FVertexFactoryInterpolantsVSToPS Interpolants, int UVIndex, float2 InValue)
+{
+	FLATTEN
+	if (UVIndex % 2)
+	{
+		Interpolants.TexCoords[UVIndex / 2].zw = InValue;
+	}
+	else
+	{
+		Interpolants.TexCoords[UVIndex / 2].xy = InValue;
+	}
+}
+#endif
+
+float4 GetTangentToWorld0(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+	return Interpolants.TangentToWorld0;
+}
+
+float4 GetTangentToWorld2(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+	return Interpolants.TangentToWorld2;
+}
+
+float4 GetColor(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+	return Interpolants.Color;
+}
+
+// ==================== Vertex Factory Intermediates ====================
+
+struct FVertexFactoryIntermediates
+{
+	float3 LocalPosition;
+	float3 WorldPosition;
+	float3 WorldNormal;
+	float3 WorldTangent;
+	float3 WorldBinormal;
+	float2 TexCoords;
+	float4 Color;
+};
+
+FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
+{
+	FVertexFactoryIntermediates Intermediates;
+
+	// Store local position
+	Intermediates.LocalPosition = Input.Position;
+
+	// Transform position to world space using primitive's LocalToWorld (handles LWC)
+	FDFMatrix LocalToWorld = GetPrimitiveData(0).LocalToWorld;
+	Intermediates.WorldPosition = DFMultiply(float4(Input.Position, 1.0f), LocalToWorld).xyz;
+
+	// Transform normal to world space using the float3x3 rotation part
+	// Extract rotation matrix from the LWC matrix
+	float3x3 LocalToWorld3x3 = DFToFloat3x3(LocalToWorld);
+	Intermediates.WorldNormal = normalize(mul(Input.Normal, LocalToWorld3x3));
+
+	// Compute tangent and binormal from normal
+	float3 RefVector = abs(Intermediates.WorldNormal.z) < 0.999f ? float3(0, 0, 1) : float3(1, 0, 0);
+	Intermediates.WorldTangent = normalize(cross(RefVector, Intermediates.WorldNormal));
+	Intermediates.WorldBinormal = normalize(cross(Intermediates.WorldNormal, Intermediates.WorldTangent));
+
+	// Pass through UVs and color
+	Intermediates.TexCoords = Input.TexCoord;
+	Intermediates.Color = Input.Color;
+
+	return Intermediates;
+}
+
+// ==================== Position Functions ====================
+
+/**
+ * Get translated world position for rendering.
+ * Uses the primitive's LocalToWorld transform.
+ */
+float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	// Return world position (engine adds PreViewTranslation automatically via primitive uniform buffer)
+	return float4(Intermediates.WorldPosition, 1.0f);
+}
+
+float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	// For static meshes, previous position is same as current
+	return float4(Intermediates.WorldPosition, 1.0f);
+}
+
+float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 InWorldPosition)
+{
+	return InWorldPosition;
+}
+
+float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return Intermediates.WorldNormal;
+}
+
+// Position-only variants
+float4 VertexFactoryGetWorldPosition(FPositionOnlyVertexFactoryInput Input)
+{
+	FDFMatrix LocalToWorld = GetPrimitiveData(0).LocalToWorld;
+	return float4(DFMultiply(float4(Input.Position, 1.0f), LocalToWorld).xyz, 1.0f);
+}
+
+float4 VertexFactoryGetPreviousWorldPosition(FPositionOnlyVertexFactoryInput Input)
+{
+	return VertexFactoryGetWorldPosition(Input);
+}
+
+float4 VertexFactoryGetWorldPosition(FPositionAndNormalOnlyVertexFactoryInput Input)
+{
+	FDFMatrix LocalToWorld = GetPrimitiveData(0).LocalToWorld;
+	return float4(DFMultiply(float4(Input.Position, 1.0f), LocalToWorld).xyz, 1.0f);
+}
+
+// ==================== Tangent Functions ====================
+
+half3x3 VertexFactoryGetTangentToLocal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	// Return identity since we compute world tangent directly
+	return half3x3(
+		half3(1, 0, 0),
+		half3(0, 1, 0),
+		half3(0, 0, 1)
+	);
+}
+
+// ==================== Material Parameter Functions ====================
+
+FMaterialVertexParameters GetMaterialVertexParameters(
+	FVertexFactoryInput Input,
+	FVertexFactoryIntermediates Intermediates,
+	float3 WorldPosition,
+	half3x3 TangentToLocal)
+{
+	FMaterialVertexParameters Result = (FMaterialVertexParameters)0;
+
+	Result.WorldPosition = WorldPosition;
+	Result.VertexColor = Intermediates.Color;
+
+#if NUM_MATERIAL_TEXCOORDS_VERTEX
+	UNROLL
+	for (int CoordIndex = 0; CoordIndex < NUM_MATERIAL_TEXCOORDS_VERTEX; CoordIndex++)
+	{
+		Result.TexCoords[CoordIndex] = Intermediates.TexCoords;
+	}
+#endif
+
+	Result.TangentToWorld = float3x3(
+		Intermediates.WorldTangent,
+		Intermediates.WorldBinormal,
+		Intermediates.WorldNormal
+	);
+
+	Result.PreSkinnedPosition = Intermediates.LocalPosition;
+	Result.PreSkinnedNormal = Input.Normal;
+
+	return Result;
+}
+
+FMaterialPixelParameters GetMaterialPixelParameters(
+	FVertexFactoryInterpolantsVSToPS Interpolants,
+	float4 SvPosition)
+{
+	FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
+
+#if NUM_TEX_COORD_INTERPOLATORS
+	UNROLL
+	for (int CoordIndex = 0; CoordIndex < NUM_TEX_COORD_INTERPOLATORS; CoordIndex++)
+	{
+		Result.TexCoords[CoordIndex] = GetUV(Interpolants, CoordIndex);
+	}
+#endif
+
+	Result.VertexColor = GetColor(Interpolants);
+
+	half3 TangentToWorld0 = GetTangentToWorld0(Interpolants).xyz;
+	half4 TangentToWorld2 = GetTangentToWorld2(Interpolants);
+	Result.TangentToWorld = AssembleTangentToWorld(TangentToWorld0, TangentToWorld2);
+
+	Result.WorldNormal = Result.TangentToWorld[2];
+	Result.TwoSidedSign = TangentToWorld2.w;
+	Result.UnMirrored = 1.0f;
+
+	return Result;
+}
+
+// ==================== VS to PS Interpolants ====================
+
+FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(
+	FVertexFactoryInput Input,
+	FVertexFactoryIntermediates Intermediates,
+	FMaterialVertexParameters VertexParameters)
+{
+	FVertexFactoryInterpolantsVSToPS Interpolants = (FVertexFactoryInterpolantsVSToPS)0;
+
+#if NUM_TEX_COORD_INTERPOLATORS
+	float2 CustomizedUVs[NUM_TEX_COORD_INTERPOLATORS];
+	GetMaterialCustomizedUVs(VertexParameters, CustomizedUVs);
+	GetCustomInterpolators(VertexParameters, CustomizedUVs);
+
+	UNROLL
+	for (int CoordIndex = 0; CoordIndex < NUM_TEX_COORD_INTERPOLATORS; CoordIndex++)
+	{
+		SetUV(Interpolants, CoordIndex, CustomizedUVs[CoordIndex]);
+	}
+#endif
+
+	Interpolants.TangentToWorld0 = float4(Intermediates.WorldTangent, 0);
+	Interpolants.TangentToWorld2 = float4(Intermediates.WorldNormal, 1);
+
+	Interpolants.Color = Intermediates.Color;
+
+#if INSTANCED_STEREO
+	Interpolants.EyeIndex = 0;
+#endif
+
+	return Interpolants;
+}

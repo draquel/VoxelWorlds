@@ -75,6 +75,12 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 		return VoxelData.Num() == ChunkSize * ChunkSize * ChunkSize;
 	}
 
+	/** Get the world-space position of this chunk's origin */
+	FORCEINLINE FVector GetChunkWorldPosition() const
+	{
+		return FVector(ChunkCoord) * static_cast<float>(ChunkSize) * VoxelSize;
+	}
+
 	/** Get expected neighbor slice size */
 	FORCEINLINE int32 GetNeighborSliceSize() const
 	{

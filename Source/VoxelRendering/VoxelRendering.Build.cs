@@ -26,6 +26,8 @@ public class VoxelRendering : ModuleRules
 				"Engine",
 				"RenderCore",
 				"RHI",
+				"Renderer",
+				"Projects",
 				"VoxelCore",
 			}
 		);
@@ -36,6 +38,12 @@ public class VoxelRendering : ModuleRules
 				"ProceduralMeshComponent",
 			}
 		);
+
+		// Enable shader compilation
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
 
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]

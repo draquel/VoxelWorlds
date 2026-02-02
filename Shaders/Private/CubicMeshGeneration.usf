@@ -201,8 +201,8 @@ void MainCS(
     uint Metadata = GetMetadata(PackedVoxel);
     uint AO = Metadata & 0xF;  // Lower 4 bits of metadata are AO
 
-    // Calculate world position for vertices
-    float3 VoxelWorldPos = float3(VoxelPos) * VoxelSize;
+    // Calculate world position for vertices (chunk-local + chunk world offset)
+    float3 VoxelWorldPos = ChunkWorldPosition + float3(VoxelPos) * VoxelSize;
 
     // Check each face and emit if visible
     [unroll]

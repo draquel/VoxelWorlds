@@ -57,6 +57,7 @@ Development roadmap for the VoxelWorlds plugin.
 
 ---
 
+
 ## Phase 3: Advanced Meshing (Weeks 5-6)
 
 **Goal**: Optimized rendering

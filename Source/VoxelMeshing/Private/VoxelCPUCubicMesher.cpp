@@ -858,7 +858,9 @@ void FVoxelCPUCubicMesher::EmitQuad(
 	const FVoxelData& Voxel) const
 {
 	const float VoxelSize = Request.VoxelSize;
-	const FVector3f VoxelPos(
+	// Get chunk world position and add local voxel position to get world position
+	const FVector3f ChunkWorldPos = FVector3f(Request.GetChunkWorldPosition());
+	const FVector3f VoxelPos = ChunkWorldPos + FVector3f(
 		static_cast<float>(X) * VoxelSize,
 		static_cast<float>(Y) * VoxelSize,
 		static_cast<float>(Z) * VoxelSize

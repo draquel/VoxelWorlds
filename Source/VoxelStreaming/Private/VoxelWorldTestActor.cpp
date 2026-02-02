@@ -6,6 +6,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "DistanceBandLODStrategy.h"
 #include "VoxelPMCRenderer.h"
+#include "VoxelCustomVFRenderer.h"
 #include "Engine/World.h"
 
 AVoxelWorldTestActor::AVoxelWorldTestActor()
@@ -91,10 +92,39 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 	FDistanceBandLODStrategy* DistanceBandStrategy = new FDistanceBandLODStrategy();
 	LODStrategy = DistanceBandStrategy;
 
-	// Create mesh renderer
-	FVoxelPMCRenderer* PMCRenderer = new FVoxelPMCRenderer();
-	PMCRenderer->Initialize(World, Config);
-	MeshRenderer = PMCRenderer;
+	// Create mesh renderer based on configuration
+	if (Config->bUseGPURenderer)
+	{
+		// Use GPU-driven Custom Vertex Factory renderer
+		FVoxelCustomVFRenderer* CustomVFRenderer = new FVoxelCustomVFRenderer();
+
+		// Set material BEFORE Initialize - REQUIRED for Custom VF renderer
+		// The scene proxy is created during Initialize, so material must be set first
+		if (VoxelMaterial)
+		{
+			CustomVFRenderer->SetMaterial(VoxelMaterial);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using material '%s'"), *VoxelMaterial->GetName());
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning,
+				TEXT("VoxelWorldTestActor: No VoxelMaterial assigned! Custom VF renderer requires a custom material. ")
+				TEXT("Create a simple opaque material and assign it to the VoxelMaterial property."));
+		}
+
+		CustomVFRenderer->Initialize(World, Config);
+
+		MeshRenderer = CustomVFRenderer;
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using Custom Vertex Factory renderer (GPU-driven)"));
+	}
+	else
+	{
+		// Use PMC fallback renderer
+		FVoxelPMCRenderer* PMCRenderer = new FVoxelPMCRenderer();
+		PMCRenderer->Initialize(World, Config);
+		MeshRenderer = PMCRenderer;
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using PMC renderer (CPU fallback)"));
+	}
 
 	// Initialize chunk manager
 	if (ChunkManager)
@@ -214,7 +244,7 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Config->MaxLoadedChunks = 500;
 
 	// Rendering settings
-	Config->bUseGPURenderer = false;  // Use PMC for testing
+	Config->bUseGPURenderer = true;  // Use Custom Vertex Factory renderer
 	Config->bGenerateCollision = false;  // Disable for faster testing
 	Config->bEnableLODMorphing = true;
 	Config->bEnableFrustumCulling = true;
