@@ -8,6 +8,7 @@
 
 class UVoxelWorldComponent;
 class UMaterialInterface;
+class UMaterialParameterCollection;
 class UWorld;
 class UVoxelWorldConfiguration;
 
@@ -63,6 +64,10 @@ public:
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;
 	virtual void UpdateLODTransitionsBatch(const TArray<TPair<FIntVector, float>>& Transitions) override;
+
+	// LOD Configuration
+	virtual void SetLODParameterCollection(UMaterialParameterCollection* Collection) override;
+	virtual void SetLODTransitionDistances(float StartDistance, float EndDistance) override;
 
 	// Queries
 	virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override;

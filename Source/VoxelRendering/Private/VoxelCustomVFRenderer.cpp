@@ -460,6 +460,28 @@ void FVoxelCustomVFRenderer::UpdateLODTransitionsBatch(const TArray<TPair<FIntVe
 	}
 }
 
+// ==================== LOD Configuration ====================
+
+void FVoxelCustomVFRenderer::SetLODParameterCollection(UMaterialParameterCollection* Collection)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->SetLODParameterCollection(Collection);
+	}
+}
+
+void FVoxelCustomVFRenderer::SetLODTransitionDistances(float StartDistance, float EndDistance)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->SetLODTransitionDistances(StartDistance, EndDistance);
+	}
+}
+
 // ==================== Queries ====================
 
 bool FVoxelCustomVFRenderer::IsChunkLoaded(const FIntVector& ChunkCoord) const

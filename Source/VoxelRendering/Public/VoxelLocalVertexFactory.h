@@ -46,6 +46,17 @@ extern VOXELRENDERING_API int32 GVoxelVertexColorDebugMode;
  *   BiomeID = round(VertexColor.G * 255)
  *   AO = floor(VertexColor.B * 4)  // 0-3 range
  *   AOFactor = 1.0 - (AO * 0.25)   // For darkening
+ *
+ * LOD Morphing via Material Parameter Collection (MPC):
+ *   Create an MPC with scalar parameters:
+ *     - LODStartDistance: Distance where MorphFactor = 0
+ *     - LODEndDistance: Distance where MorphFactor = 1
+ *     - LODInvRange: 1.0 / (End - Start) for efficient calculation
+ *   Assign MPC to UVoxelWorldComponent::LODParameterCollection
+ *
+ * In material graph, use CollectionParameter nodes to calculate per-pixel MorphFactor:
+ *   Distance = length(WorldPosition - CameraPosition)
+ *   MorphFactor = saturate((Distance - LODStartDistance) * LODInvRange)
  */
 struct VOXELRENDERING_API FVoxelLocalVertex
 {

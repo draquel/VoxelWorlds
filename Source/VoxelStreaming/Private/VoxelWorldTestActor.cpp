@@ -114,6 +114,20 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 
 		CustomVFRenderer->Initialize(World, Config);
 
+		// Configure LOD material parameters (after Initialize creates the WorldComponent)
+		if (LODParameterCollection)
+		{
+			CustomVFRenderer->SetLODParameterCollection(LODParameterCollection);
+			CustomVFRenderer->SetLODTransitionDistances(LODStartDistance, LODEndDistance);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: LOD MPC configured (Start=%.0f, End=%.0f)"),
+				LODStartDistance, LODEndDistance);
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No LOD Parameter Collection assigned. ")
+				TEXT("Material-based LOD morphing disabled."));
+		}
+
 		MeshRenderer = CustomVFRenderer;
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using Custom Vertex Factory renderer (GPU-driven)"));
 	}

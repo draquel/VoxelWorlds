@@ -10,6 +10,7 @@
 
 class FVoxelSceneProxy;
 class UMaterialInterface;
+class UMaterialParameterCollection;
 
 /**
  * Primitive component for rendering voxel worlds.
@@ -117,6 +118,44 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel")
 	float GetChunkWorldSize() const { return ChunkWorldSize; }
 
+	// ==================== LOD Configuration ====================
+
+	/**
+	 * Set LOD transition distances for material-based morphing.
+	 * Updates the Material Parameter Collection with these values.
+	 *
+	 * In your material, use CollectionParameter nodes with:
+	 *   - "LODStartDistance": Distance where MorphFactor = 0
+	 *   - "LODEndDistance": Distance where MorphFactor = 1
+	 *   - "LODInvRange": 1 / (End - Start) for efficient calculation
+	 *
+	 * Material MorphFactor calculation:
+	 *   Distance = length(WorldPosition - CameraPosition)
+	 *   MorphFactor = saturate((Distance - LODStartDistance) * LODInvRange)
+	 *
+	 * @param InLODStartDistance Distance where LOD transition starts (MorphFactor = 0)
+	 * @param InLODEndDistance Distance where LOD transition ends (MorphFactor = 1)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|LOD")
+	void SetLODTransitionDistances(float InLODStartDistance, float InLODEndDistance);
+
+	/** Get LOD start distance */
+	UFUNCTION(BlueprintPure, Category = "Voxel|LOD")
+	float GetLODStartDistance() const { return LODStartDistance; }
+
+	/** Get LOD end distance */
+	UFUNCTION(BlueprintPure, Category = "Voxel|LOD")
+	float GetLODEndDistance() const { return LODEndDistance; }
+
+	/**
+	 * Set the Material Parameter Collection used for LOD parameters.
+	 * The MPC should have scalar parameters: LODStartDistance, LODEndDistance, LODInvRange
+	 *
+	 * @param InCollection The Material Parameter Collection to use
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|LOD")
+	void SetLODParameterCollection(UMaterialParameterCollection* InCollection);
+
 	// ==================== Queries ====================
 
 	/**
@@ -186,6 +225,25 @@ private:
 	/** Chunk world size */
 	UPROPERTY(EditAnywhere, Category = "Voxel", meta = (ClampMin = "100"))
 	float ChunkWorldSize = 3200.0f;
+
+	/** Distance where LOD transition starts (MorphFactor = 0) */
+	UPROPERTY(EditAnywhere, Category = "Voxel|LOD", meta = (ClampMin = "0"))
+	float LODStartDistance = 5000.0f;
+
+	/** Distance where LOD transition ends (MorphFactor = 1) */
+	UPROPERTY(EditAnywhere, Category = "Voxel|LOD", meta = (ClampMin = "0"))
+	float LODEndDistance = 10000.0f;
+
+	/**
+	 * Material Parameter Collection for LOD parameters.
+	 * Create an MPC asset with scalar parameters: LODStartDistance, LODEndDistance, LODInvRange
+	 * Then assign it here to enable material-based LOD morphing.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Voxel|LOD")
+	TObjectPtr<UMaterialParameterCollection> LODParameterCollection;
+
+	/** Update the Material Parameter Collection with current LOD values */
+	void UpdateLODParameterCollection();
 
 	/** Cached chunk data for game thread tracking */
 	struct FChunkInfo

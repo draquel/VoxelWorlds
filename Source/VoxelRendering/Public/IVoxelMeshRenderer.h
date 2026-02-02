@@ -10,6 +10,7 @@
 class UWorld;
 class UMaterialInterface;
 class UVoxelWorldConfiguration;
+class UMaterialParameterCollection;
 
 /**
  * Voxel Mesh Renderer Interface.
@@ -183,6 +184,39 @@ public:
 		{
 			UpdateLODTransition(Pair.Key, Pair.Value);
 		}
+	}
+
+	// ==================== LOD Configuration ====================
+
+	/**
+	 * Set the Material Parameter Collection used for LOD parameters.
+	 *
+	 * The MPC should contain scalar parameters:
+	 *   - LODStartDistance: Distance where MorphFactor = 0
+	 *   - LODEndDistance: Distance where MorphFactor = 1
+	 *   - LODInvRange: 1.0 / (EndDistance - StartDistance)
+	 *
+	 * @param Collection The Material Parameter Collection to use
+	 */
+	virtual void SetLODParameterCollection(UMaterialParameterCollection* Collection)
+	{
+		// Default: no-op (renderer doesn't support material-based LOD)
+	}
+
+	/**
+	 * Set LOD transition distances for material-based morphing.
+	 *
+	 * These values are written to the Material Parameter Collection.
+	 * The material can calculate per-pixel MorphFactor using:
+	 *   Distance = length(WorldPosition - CameraPosition)
+	 *   MorphFactor = saturate((Distance - StartDistance) * InvRange)
+	 *
+	 * @param StartDistance Distance where MorphFactor = 0
+	 * @param EndDistance Distance where MorphFactor = 1
+	 */
+	virtual void SetLODTransitionDistances(float StartDistance, float EndDistance)
+	{
+		// Default: no-op (renderer doesn't support material-based LOD)
 	}
 
 	// ==================== Queries ====================

@@ -7,13 +7,17 @@
 
 1. [Overview](#overview)
 2. [Hybrid Architecture](#hybrid-architecture)
-3. [Renderer Interface](#renderer-interface)
-4. [Custom Vertex Factory](#custom-vertex-factory)
-5. [PMC Renderer](#pmc-renderer)
-6. [Collision System](#collision-system)
-7. [Integration Flow](#integration-flow)
-8. [Performance Comparison](#performance-comparison)
-9. [Implementation Guide](#implementation-guide)
+3. [Vertex Factory Evolution](#vertex-factory-evolution)
+4. [Current Implementation](#current-implementation)
+5. [Renderer Interface](#renderer-interface)
+6. [Custom Vertex Factory](#custom-vertex-factory)
+7. [PMC Renderer](#pmc-renderer)
+8. [LOD Morphing System](#lod-morphing-system)
+9. [Vertex Color Encoding](#vertex-color-encoding)
+10. [Collision System](#collision-system)
+11. [Integration Flow](#integration-flow)
+12. [Performance Comparison](#performance-comparison)
+13. [Implementation Guide](#implementation-guide)
 
 ---
 
@@ -63,6 +67,206 @@ IVoxelMeshRenderer (Interface)
 - ✅ Debugging mesh generation
 - ✅ Prototyping/development
 - ✅ Tools that need mesh data on CPU
+
+---
+
+## Vertex Factory Evolution
+
+### Original Design: Custom FVoxelVertexFactory
+
+The initial design called for a fully custom `FVoxelVertexFactory` that would:
+- Use an optimized 28-byte vertex format (`FVoxelVertex`)
+- Support LOD morphing via uniform buffer parameters
+- Directly bind GPU compute shader output buffers
+- Provide maximum control over vertex shader behavior
+
+### Issues Encountered
+
+During implementation, the custom vertex factory exhibited persistent rendering problems:
+
+1. **Terrain attached to camera**: Geometry followed camera movement instead of staying in world space
+2. **Translucent appearance**: Meshes rendered as if depth testing was disabled
+3. **Materials going blank**: After certain operations, all materials would stop rendering
+4. **World coordinate issues**: UE5's Large World Coordinates (LWC) and Translated World Space caused positioning problems
+
+These issues proved difficult to diagnose and resolve despite:
+- Multiple architectural approaches (component-owned vs renderer-owned vertex factory)
+- Various initialization patterns (direct RHI buffer binding, RDG conversion)
+- Different shader permutation configurations
+
+### Decision: FLocalVertexFactory
+
+After extensive debugging, the project switched to using Epic's **FLocalVertexFactory**:
+
+**Rationale:**
+- Battle-tested implementation that works reliably with UE5's rendering pipeline
+- Proper handling of LWC and Translated World Space
+- Full material compatibility without special setup
+- Maintained GPU efficiency (vertex data stays on GPU)
+
+**Tradeoffs:**
+- Slightly larger vertex format (32 bytes vs 28 bytes)
+- LOD morphing requires Material Parameter Collection instead of vertex shader uniforms
+- Less control over vertex shader behavior
+
+**Conclusion:** The stability and reliability of FLocalVertexFactory outweighs the minor performance overhead of the larger vertex format.
+
+---
+
+## Current Implementation
+
+### Architecture Overview
+
+```
+AVoxelWorldTestActor
+    │
+    ├── UVoxelChunkManager (component)
+    │   └── Coordinates chunk streaming
+    │
+    └── IVoxelMeshRenderer (interface)
+        │
+        ├── FVoxelCustomVFRenderer (GPU-driven)
+        │   └── UVoxelWorldComponent
+        │       └── FVoxelSceneProxy
+        │           └── FLocalVertexFactory (per chunk)
+        │
+        └── FVoxelPMCRenderer (CPU fallback)
+            └── ProceduralMeshComponents
+```
+
+### Key Components
+
+**FVoxelCustomVFRenderer** (`VoxelRendering/Private/VoxelCustomVFRenderer.cpp`)
+- Implements `IVoxelMeshRenderer` interface
+- Creates and manages `UVoxelWorldComponent` internally
+- Forwards chunk updates and LOD configuration to the component
+
+**UVoxelWorldComponent** (`VoxelRendering/Public/VoxelWorldComponent.h`)
+- `UPrimitiveComponent` that bridges game thread and render thread
+- Creates `FVoxelSceneProxy` for actual rendering
+- Manages Material Parameter Collection for LOD morphing
+- Exposes statistics and chunk queries
+
+**FVoxelSceneProxy** (`VoxelRendering/Private/VoxelSceneProxy.cpp`)
+- Manages per-chunk `FLocalVertexFactory` instances
+- Performs frustum culling via ViewProjectionMatrix
+- Issues draw calls in `GetDynamicMeshElements()`
+- Handles game→render thread chunk buffer updates
+
+**FVoxelLocalVertex** (`VoxelRendering/Public/VoxelLocalVertexFactory.h`)
+- 32-byte vertex format compatible with FLocalVertexFactory
+- Converts from `FVoxelVertex` (28-byte mesher output)
+- Encodes MaterialID, BiomeID, and AO in vertex color
+
+### Data Flow
+
+```
+[Mesher Output]
+    FVoxelVertex (28 bytes)
+    ↓
+[Conversion in UpdateChunkBuffers_RenderThread]
+    FVoxelLocalVertex (32 bytes)
+    ↓
+[GPU Buffer Creation]
+    FBufferRHIRef (vertex + index)
+    ↓
+[FLocalVertexFactory Setup]
+    Stream components bound
+    ↓
+[GetDynamicMeshElements]
+    Frustum culling → FMeshBatch → Draw
+```
+
+---
+
+## LOD Morphing System
+
+### Material Parameter Collection Approach
+
+Since FLocalVertexFactory doesn't support custom uniform buffers for per-chunk data, LOD morphing is achieved via **Material Parameter Collection (MPC)**:
+
+1. **MPC Asset** (`MPC_VoxelLOD`) contains scalar parameters:
+   - `LODStartDistance`: Distance where MorphFactor = 0
+   - `LODEndDistance`: Distance where MorphFactor = 1
+   - `LODInvRange`: Pre-calculated 1/(End-Start) for efficiency
+
+2. **Component updates MPC** via `UVoxelWorldComponent::UpdateLODParameterCollection()`
+
+3. **Material calculates per-pixel MorphFactor**:
+   ```hlsl
+   Distance = length(WorldPosition - CameraPosition)
+   MorphFactor = saturate((Distance - LODStartDistance) * LODInvRange)
+   ```
+
+### Configuration Pipeline
+
+```
+AVoxelWorldTestActor (Details panel)
+    │
+    ├── LODParameterCollection (MPC asset reference)
+    ├── LODStartDistance (float)
+    └── LODEndDistance (float)
+    │
+    ↓ InitializeVoxelWorld()
+    │
+IVoxelMeshRenderer::SetLODParameterCollection()
+    │
+    ↓
+FVoxelCustomVFRenderer::SetLODParameterCollection()
+    │
+    ↓
+UVoxelWorldComponent::SetLODParameterCollection()
+    │
+    ↓
+UMaterialParameterCollectionInstance::SetScalarParameterValue()
+    │
+    ↓
+Material reads via CollectionParameter nodes
+```
+
+### Material Setup
+
+In your voxel material:
+1. Add **CollectionParameter** nodes referencing `MPC_VoxelLOD`
+2. Calculate distance: `Length(WorldPosition - CameraPositionWS)`
+3. Compute MorphFactor: `Saturate((Distance - LODStartDistance) * LODInvRange)`
+4. Use MorphFactor for:
+   - Dithered opacity (masked material)
+   - Detail texture fading
+   - Normal map intensity reduction
+
+---
+
+## Vertex Color Encoding
+
+### Channel Layout
+
+The vertex color encodes per-vertex data for material graph access:
+
+| Channel | Data | Range | Material Access |
+|---------|------|-------|-----------------|
+| R | MaterialID | 0-255 | `round(VertexColor.R * 255)` |
+| G | BiomeID | 0-255 | `round(VertexColor.G * 255)` |
+| B | AO (top 2 bits) | 0-192 | `floor(VertexColor.B * 4)` → 0-3 |
+| A | Reserved | 255 | - |
+
+### AO Calculation
+
+```cpp
+// In material:
+AO = floor(VertexColor.B * 4);  // 0-3
+AOFactor = 1.0 - (AO * 0.25);   // 1.0, 0.75, 0.5, 0.25
+FinalColor = BaseColor * AOFactor;
+```
+
+### Debug Visualization Modes
+
+Console variable `voxel.VertexColorDebugMode`:
+- **0** (Default): Normal encoding (R=MaterialID, G=BiomeID, B=AO)
+- **1** (MaterialColors): RGB = MaterialColor * AO
+- **2** (BiomeColors): RGB = BiomeHue * AO (Red=0, Green=1, Blue=2, etc.)
+
+Note: Chunks must be re-meshed after changing debug mode.
 
 ---
 
@@ -1128,5 +1332,6 @@ void UVoxelChunkManager::Initialize(UVoxelWorldConfiguration* Config) {
 
 ---
 
-**Status**: Design Complete, Ready for Implementation  
-**Recommended Order**: PMC first (testing), then Custom VF (optimization)
+**Status**: Implementation Complete (Phase 3)
+**Current Architecture**: FLocalVertexFactory-based renderer with MPC LOD morphing
+**Fallback**: PMC renderer available for editor/debugging use cases

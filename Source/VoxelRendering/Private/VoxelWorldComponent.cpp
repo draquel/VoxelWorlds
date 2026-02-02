@@ -4,6 +4,8 @@
 #include "VoxelSceneProxy.h"
 #include "VoxelRendering.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialParameterCollection.h"
+#include "Materials/MaterialParameterCollectionInstance.h"
 #include "Engine/World.h"
 
 // ==================== UVoxelWorldComponent ====================
@@ -306,6 +308,61 @@ void UVoxelWorldComponent::SetVoxelSize(float InVoxelSize)
 void UVoxelWorldComponent::SetChunkWorldSize(float InChunkWorldSize)
 {
 	ChunkWorldSize = FMath::Max(100.0f, InChunkWorldSize);
+}
+
+// ==================== LOD Configuration ====================
+
+void UVoxelWorldComponent::SetLODTransitionDistances(float InLODStartDistance, float InLODEndDistance)
+{
+	LODStartDistance = FMath::Max(0.0f, InLODStartDistance);
+	LODEndDistance = FMath::Max(LODStartDistance + 1.0f, InLODEndDistance);
+
+	// Update Material Parameter Collection with new values
+	UpdateLODParameterCollection();
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("LOD Transition: Start=%.0f, End=%.0f"), LODStartDistance, LODEndDistance);
+}
+
+void UVoxelWorldComponent::SetLODParameterCollection(UMaterialParameterCollection* InCollection)
+{
+	LODParameterCollection = InCollection;
+
+	// Update with current values
+	UpdateLODParameterCollection();
+}
+
+void UVoxelWorldComponent::UpdateLODParameterCollection()
+{
+	if (!LODParameterCollection)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Get the parameter collection instance for this world
+	UMaterialParameterCollectionInstance* MPCInstance = World->GetParameterCollectionInstance(LODParameterCollection);
+	if (!MPCInstance)
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("Failed to get MPC instance for LOD parameters"));
+		return;
+	}
+
+	// Calculate inverse range for efficient shader calculation
+	const float InvRange = 1.0f / FMath::Max(LODEndDistance - LODStartDistance, 1.0f);
+
+	// Update the parameters
+	// These correspond to CollectionParameter nodes in the material
+	MPCInstance->SetScalarParameterValue(FName("LODStartDistance"), LODStartDistance);
+	MPCInstance->SetScalarParameterValue(FName("LODEndDistance"), LODEndDistance);
+	MPCInstance->SetScalarParameterValue(FName("LODInvRange"), InvRange);
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("Updated MPC: Start=%.0f, End=%.0f, InvRange=%.6f"),
+		LODStartDistance, LODEndDistance, InvRange);
 }
 
 // ==================== Queries ====================
