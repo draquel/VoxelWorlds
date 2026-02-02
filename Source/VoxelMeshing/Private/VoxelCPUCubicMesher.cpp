@@ -455,9 +455,11 @@ void FVoxelCPUCubicMesher::ProcessFaceDirectionGreedy(
 					}
 				}
 
-				// Emit merged quad
-				const uint8 MaterialID = static_cast<uint8>(CurrentMaterial - 1);
-				EmitMergedQuad(OutMeshData, Request, Face, SliceIndex, U, V, Width, Height, MaterialID);
+				// Extract MaterialID and BiomeID from packed mask value
+				// Lower 8 bits: MaterialID + 1, Upper 8 bits: BiomeID
+				const uint8 MaterialID = static_cast<uint8>((CurrentMaterial & 0xFF) - 1);
+				const uint8 BiomeID = static_cast<uint8>((CurrentMaterial >> 8) & 0xFF);
+				EmitMergedQuad(OutMeshData, Request, Face, SliceIndex, U, V, Width, Height, MaterialID, BiomeID);
 				OutGeneratedFaces++;
 			}
 		}
@@ -507,9 +509,11 @@ void FVoxelCPUCubicMesher::BuildFaceMask(
 			// Check if face should be rendered (neighbor is air)
 			if (ShouldRenderFace(Request, X, Y, Z, Face))
 			{
-				// Store MaterialID + 1 (so 0 means no face)
+				// Pack MaterialID and BiomeID into uint16:
+				// Lower 8 bits: MaterialID + 1 (so 0 means no face)
+				// Upper 8 bits: BiomeID
 				const int32 MaskIndex = U + V * ChunkSize;
-				OutMask[MaskIndex] = static_cast<uint16>(Voxel.MaterialID) + 1;
+				OutMask[MaskIndex] = static_cast<uint16>((Voxel.MaterialID + 1) | (Voxel.BiomeID << 8));
 			}
 		}
 	}
@@ -522,7 +526,8 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 	int32 SliceIndex,
 	int32 U, int32 V,
 	int32 Width, int32 Height,
-	uint8 MaterialID) const
+	uint8 MaterialID,
+	uint8 BiomeID) const
 {
 	const float VoxelSize = Request.VoxelSize;
 	const int32 ChunkSize = Request.ChunkSize;
@@ -663,9 +668,6 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 		break;
 	}
 
-	// Look up material color
-	FColor MaterialColor = FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
-
 	// UV coordinates scaled by quad size for proper texture tiling
 	const FVector2f UV0(0.0f, 0.0f);
 	const FVector2f UV1(Width * Config.UVScale, 0.0f);
@@ -678,12 +680,17 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 		MeshData.Positions.Add(Vertices[i]);
 		MeshData.Normals.Add(Normal);
 
-		// Apply per-vertex AO: 0=unoccluded (full brightness), 3=fully occluded (25% brightness)
-		const float AOFactor = Config.bCalculateAO ? (1.0f - VertexAO[AOMapping[i]] * 0.25f) : 1.0f;
+		// Encode vertex data in color channels for custom vertex factory path:
+		// R = MaterialID (0-255)
+		// G = BiomeID (0-255)
+		// B = AO in top 2 bits (0-3 << 6), lower 6 bits available for future use
+		// A = 255
+		// For PMC path, the material handles the color lookup from MaterialID
+		const uint8 AOValue = Config.bCalculateAO ? VertexAO[AOMapping[i]] : 0;
 		const FColor VertexColor(
-			static_cast<uint8>(MaterialColor.R * AOFactor),
-			static_cast<uint8>(MaterialColor.G * AOFactor),
-			static_cast<uint8>(MaterialColor.B * AOFactor),
+			MaterialID,           // R: MaterialID for texture array lookup
+			BiomeID,              // G: BiomeID for biome-based effects
+			AOValue << 6,         // B: AO in top 2 bits (0, 64, 128, 192)
 			255
 		);
 		MeshData.Colors.Add(VertexColor);
@@ -876,9 +883,6 @@ void FVoxelCPUCubicMesher::EmitQuad(
 		CalculateFaceAO(Request, X, Y, Z, Face, VertexAO);
 	}
 
-	// Look up material color from registry
-	FColor MaterialColor = FVoxelMaterialRegistry::GetMaterialColor(Voxel.MaterialID);
-
 	// Emit 4 vertices
 	for (int32 V = 0; V < 4; V++)
 	{
@@ -895,13 +899,16 @@ void FVoxelCPUCubicMesher::EmitQuad(
 			MeshData.UVs.Add(FVector2f::ZeroVector);
 		}
 
-		// Apply per-vertex AO: 0=unoccluded (full brightness), 3=fully occluded (25% brightness)
-		// Formula: AOFactor = 1.0 - (AO * 0.25)
-		const float AOFactor = Config.bCalculateAO ? (1.0f - VertexAO[V] * 0.25f) : 1.0f;
+		// Encode vertex data in color channels for custom vertex factory path:
+		// R = MaterialID (0-255)
+		// G = BiomeID (0-255, currently 0 - CPU path doesn't track per-vertex biome)
+		// B = AO in top 2 bits (0-3 << 6)
+		// A = 255
+		const uint8 AOValue = Config.bCalculateAO ? VertexAO[V] : 0;
 		MeshData.Colors.Add(FColor(
-			static_cast<uint8>(MaterialColor.R * AOFactor),
-			static_cast<uint8>(MaterialColor.G * AOFactor),
-			static_cast<uint8>(MaterialColor.B * AOFactor),
+			Voxel.MaterialID,     // R: MaterialID for texture array lookup
+			Voxel.BiomeID,        // G: BiomeID for biome-based effects
+			AOValue << 6,         // B: AO in top 2 bits
 			255));
 	}
 

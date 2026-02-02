@@ -163,6 +163,7 @@ private:
 	 * @param Width Size along first secondary axis
 	 * @param Height Size along second secondary axis
 	 * @param MaterialID Material for this quad
+	 * @param BiomeID Biome for this quad
 	 */
 	void EmitMergedQuad(
 		FChunkMeshData& MeshData,
@@ -171,7 +172,8 @@ private:
 		int32 SliceIndex,
 		int32 U, int32 V,
 		int32 Width, int32 Height,
-		uint8 MaterialID) const;
+		uint8 MaterialID,
+		uint8 BiomeID) const;
 
 	/**
 	 * Get the axis mapping for a face direction.

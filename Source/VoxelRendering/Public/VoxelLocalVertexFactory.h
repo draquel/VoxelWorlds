@@ -6,13 +6,46 @@
 #include "RenderResource.h"
 #include "LocalVertexFactory.h"
 #include "VoxelVertex.h"
+#include "VoxelMaterialRegistry.h"
 #include "RenderUtils.h"  // For FPackedNormal
+
+/**
+ * Debug mode for vertex color output.
+ * When enabled, material colors are baked directly into vertex RGB for visual debugging.
+ * When disabled, encoded data (AO, MaterialID, BiomeID) is stored for material graph use.
+ */
+namespace EVoxelVertexColorDebugMode
+{
+	/** Normal mode: R=AO, G=MaterialID/255, B=BiomeID/255, A=1 */
+	constexpr int32 Disabled = 0;
+
+	/** Debug mode: RGB=MaterialColor * AO, A=1 (visual debugging) */
+	constexpr int32 MaterialColors = 1;
+
+	/** Debug mode: RGB=BiomeID as hue, A=1 */
+	constexpr int32 BiomeColors = 2;
+}
+
+/** Current debug mode - change this to switch modes (defined in VoxelSceneProxy.cpp) */
+extern VOXELRENDERING_API int32 GVoxelVertexColorDebugMode;
 
 /**
  * Vertex format compatible with FLocalVertexFactory.
  * 32 bytes per vertex (vs 28 for FVoxelVertex).
  *
  * Uses FPackedNormal for tangent basis which is what FLocalVertexFactory expects.
+ *
+ * Color channel encoding (ALIGNED with CPU mesher for shared materials):
+ *   R: MaterialID (0-255) - VertexColor.R * 255 for texture array index
+ *   G: BiomeID (0-255) - VertexColor.G * 255 for biome blending
+ *   B: AO in top 2 bits - (VertexColor.B * 255) >> 6 gives AO 0-3
+ *   A: Reserved (1.0)
+ *
+ * In material graph:
+ *   MaterialID = round(VertexColor.R * 255)
+ *   BiomeID = round(VertexColor.G * 255)
+ *   AO = floor(VertexColor.B * 4)  // 0-3 range
+ *   AOFactor = 1.0 - (AO * 0.25)   // For darkening
  */
 struct VOXELRENDERING_API FVoxelLocalVertex
 {
@@ -40,7 +73,21 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 		TangentZ.Vector.W = 127;
 	}
 
-	/** Convert from FVoxelVertex */
+	/**
+	 * Convert from FVoxelVertex.
+	 *
+	 * Vertex color encoding (aligned with CPU mesher for shared materials):
+	 *   R: MaterialID (0-255)
+	 *   G: BiomeID (0-255)
+	 *   B: AO << 6 (top 2 bits encode AO 0-3)
+	 *   A: 255
+	 *
+	 * In material, access via VertexColor node:
+	 *   - MaterialID = round(VertexColor.R * 255)
+	 *   - BiomeID = round(VertexColor.G * 255)
+	 *   - AO = floor(VertexColor.B * 4)
+	 *   - AOFactor = 1.0 - (AO * 0.25)
+	 */
 	static FVoxelLocalVertex FromVoxelVertex(const FVoxelVertex& VoxelVert)
 	{
 		FVoxelLocalVertex Result;
@@ -56,14 +103,59 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 		Result.TangentZ = FPackedNormal(Normal);
 		Result.TangentZ.Vector.W = 127; // Positive binormal sign
 
-		// Convert AO to grayscale color (0=occluded/dark, 3=unoccluded/bright)
-		// AO 0 = fully occluded = dark, AO 3 = unoccluded = bright
+		// Get vertex attributes
 		uint8 AOValue = VoxelVert.GetAO();
-		uint8 Brightness = static_cast<uint8>(255 - (AOValue * 64)); // 0->255, 1->191, 2->127, 3->63
-		// Actually, AO 0 = unoccluded, 3 = fully occluded (from the mesher)
-		// So: AO 0 = bright (255), AO 3 = dark (64)
-		Brightness = static_cast<uint8>(255 - (AOValue * 64));
-		Result.Color = FColor(Brightness, Brightness, Brightness, 255);
+		uint8 MaterialID = VoxelVert.GetMaterialID();
+		uint8 BiomeID = VoxelVert.GetBiomeID();
+
+		// Apply debug mode
+		if (GVoxelVertexColorDebugMode == EVoxelVertexColorDebugMode::MaterialColors)
+		{
+			// Debug: Bake material color * AO directly into vertex color
+			float AOFactor = 1.0f - (AOValue * 0.25f); // 0->1.0, 1->0.75, 2->0.5, 3->0.25
+			FColor MatColor = FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
+			Result.Color = FColor(
+				static_cast<uint8>(MatColor.R * AOFactor),
+				static_cast<uint8>(MatColor.G * AOFactor),
+				static_cast<uint8>(MatColor.B * AOFactor),
+				255
+			);
+		}
+		else if (GVoxelVertexColorDebugMode == EVoxelVertexColorDebugMode::BiomeColors)
+		{
+			// Debug: Show BiomeID as distinct color using lookup table
+			// Each BiomeID gets a unique, easily distinguishable color
+			static const FColor BiomeDebugColors[] = {
+				FColor(255, 0, 0, 255),     // 0 = Red
+				FColor(0, 255, 0, 255),     // 1 = Green
+				FColor(0, 0, 255, 255),     // 2 = Blue
+				FColor(255, 255, 0, 255),   // 3 = Yellow
+				FColor(255, 0, 255, 255),   // 4 = Magenta
+				FColor(0, 255, 255, 255),   // 5 = Cyan
+				FColor(255, 128, 0, 255),   // 6 = Orange
+				FColor(128, 0, 255, 255),   // 7 = Purple
+			};
+			constexpr int32 NumBiomeColors = sizeof(BiomeDebugColors) / sizeof(BiomeDebugColors[0]);
+
+			float AOFactor = 1.0f - (AOValue * 0.25f);
+			FColor BaseColor = BiomeDebugColors[BiomeID % NumBiomeColors];
+			Result.Color = FColor(
+				static_cast<uint8>(BaseColor.R * AOFactor),
+				static_cast<uint8>(BaseColor.G * AOFactor),
+				static_cast<uint8>(BaseColor.B * AOFactor),
+				255
+			);
+		}
+		else
+		{
+			// Normal mode: Encode data for material graph
+			// ALIGNED with CPU mesher (FChunkMeshData.Colors) for shared materials:
+			// R = MaterialID (0-255)
+			// G = BiomeID (0-255)
+			// B = AO << 6 (top 2 bits: 0, 64, 128, 192 for AO 0-3)
+			// A = 255
+			Result.Color = FColor(MaterialID, BiomeID, AOValue << 6, 255);
+		}
 
 		return Result;
 	}

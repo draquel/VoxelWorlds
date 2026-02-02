@@ -15,6 +15,28 @@
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalRenderResources.h"
 
+// ==================== Console Variables ====================
+
+// Global debug mode variable (declared extern in VoxelLocalVertexFactory.h)
+int32 GVoxelVertexColorDebugMode = EVoxelVertexColorDebugMode::Disabled;
+
+static TAutoConsoleVariable<int32> CVarVoxelVertexColorDebugMode(
+	TEXT("voxel.VertexColorDebugMode"),
+	0,
+	TEXT("Debug mode for voxel vertex colors:\n")
+	TEXT("  0 = Disabled (R=AO, G=MaterialID, B=BiomeID) - for material graph use\n")
+	TEXT("  1 = MaterialColors (RGB=MaterialColor*AO) - visual debugging\n")
+	TEXT("  2 = BiomeColors (RGB=BiomeHue*AO) - visual debugging\n")
+	TEXT("Note: Chunks must be re-meshed to see changes (reload level or move far away and back)."),
+	ECVF_Default
+);
+
+// Sync the console variable to the global debug mode on access
+static void SyncVertexColorDebugMode()
+{
+	GVoxelVertexColorDebugMode = CVarVoxelVertexColorDebugMode.GetValueOnAnyThread();
+}
+
 // ==================== Helper Function Implementation ====================
 
 void InitVoxelLocalVertexFactory(
@@ -388,6 +410,17 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 {
 	check(IsInRenderingThread());
 
+	// Sync debug mode from console variable
+	SyncVertexColorDebugMode();
+
+	// Log debug mode for verification
+	static int32 LastLoggedMode = -1;
+	if (GVoxelVertexColorDebugMode != LastLoggedMode)
+	{
+		UE_LOG(LogVoxelRendering, Log, TEXT("Vertex Color Debug Mode: %d"), GVoxelVertexColorDebugMode);
+		LastLoggedMode = GVoxelVertexColorDebugMode;
+	}
+
 	if (!GPUData.HasValidBuffers() || GPUData.VertexCount == 0)
 	{
 		UE_LOG(LogVoxelRendering, Warning, TEXT("UpdateChunkBuffers_RenderThread: Invalid GPU data for chunk %s"), *ChunkCoord.ToString());
@@ -447,12 +480,71 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 	// Get chunk world position offset
 	const FVector3f ChunkOffset = FVector3f(GPUData.ChunkWorldPosition);
 
+	// Debug: Track MaterialID and BiomeID distribution for first chunk
+	static bool bLoggedMaterialIDs = false;
+	TMap<uint8, int32> MaterialIDCounts;
+	TMap<uint8, int32> BiomeIDCounts;
+
 	for (uint32 i = 0; i < SourceVertexCount; i++)
 	{
+		// Debug: Count MaterialIDs and BiomeIDs
+		if (!bLoggedMaterialIDs)
+		{
+			uint8 MatID = SourceVertices[i].GetMaterialID();
+			uint8 BiomeID = SourceVertices[i].GetBiomeID();
+			MaterialIDCounts.FindOrAdd(MatID)++;
+			BiomeIDCounts.FindOrAdd(BiomeID)++;
+		}
+
 		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(SourceVertices[i]);
 		// Offset vertex position from chunk-local to world space
 		ConvertedVertices[i].Position += ChunkOffset;
 		ColorData[i] = ConvertedVertices[i].Color;
+	}
+
+	// Debug: Log MaterialID distribution once
+	if (!bLoggedMaterialIDs && SourceVertexCount > 0)
+	{
+		bLoggedMaterialIDs = true;
+
+		// Log to Output Log
+		UE_LOG(LogVoxelRendering, Error, TEXT("=== MaterialID Distribution for chunk %s ==="), *ChunkCoord.ToString());
+		for (const auto& Pair : MaterialIDCounts)
+		{
+			UE_LOG(LogVoxelRendering, Error, TEXT("  MaterialID %d: %d vertices"), Pair.Key, Pair.Value);
+		}
+		UE_LOG(LogVoxelRendering, Error, TEXT("=== BiomeID Distribution ==="));
+		for (const auto& Pair : BiomeIDCounts)
+		{
+			UE_LOG(LogVoxelRendering, Error, TEXT("  BiomeID %d: %d vertices"), Pair.Key, Pair.Value);
+		}
+		UE_LOG(LogVoxelRendering, Error, TEXT("  Total: %d vertices"), SourceVertexCount);
+
+		// Also print to screen for easy visibility
+		if (GEngine)
+		{
+			FString ScreenMsg = FString::Printf(TEXT("MaterialID Distribution (chunk %s):"), *ChunkCoord.ToString());
+			for (const auto& Pair : MaterialIDCounts)
+			{
+				ScreenMsg += FString::Printf(TEXT("\n  Mat %d: %d"), Pair.Key, Pair.Value);
+			}
+			ScreenMsg += TEXT("\nBiomeID Distribution:");
+			for (const auto& Pair : BiomeIDCounts)
+			{
+				ScreenMsg += FString::Printf(TEXT("\n  Biome %d: %d"), Pair.Key, Pair.Value);
+			}
+			GEngine->AddOnScreenDebugMessage(-1, 15.0f, FColor::Yellow, ScreenMsg);
+		}
+
+		// Also log PackedMaterialData from first vertex
+		if (SourceVertexCount > 0)
+		{
+			const FVoxelVertex& FirstVert = SourceVertices[0];
+			UE_LOG(LogVoxelRendering, Warning, TEXT("  First vertex PackedMaterialData raw: 0x%08X"),
+				*reinterpret_cast<const uint32*>(&FirstVert.PackedMaterialData));
+			UE_LOG(LogVoxelRendering, Warning, TEXT("  First vertex GetMaterialID(): %d, GetBiomeID(): %d, GetAO(): %d"),
+				FirstVert.GetMaterialID(), FirstVert.GetBiomeID(), FirstVert.GetAO());
+		}
 	}
 
 	// Create new render data
