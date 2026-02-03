@@ -244,6 +244,11 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	int32 TotalMeshesAdded = 0;
 	int32 SkippedInvisible = 0;
 	int32 SkippedFrustum = 0;
+	int32 SkippedOverLimit = 0;
+
+	// Safety limit for mesh batches - should rarely be hit with proper frustum culling
+	// The Non-Nanite job queue overflow was caused by Virtual Shadow Maps, not mesh count
+	constexpr int32 MaxMeshBatchesPerFrame = 500;
 
 	// Process each view
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
@@ -258,6 +263,13 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 		// Iterate over all chunks
 		for (const auto& Pair : ChunkRenderData)
 		{
+			// Check mesh batch limit to avoid job queue overflow
+			if (TotalMeshesAdded >= MaxMeshBatchesPerFrame)
+			{
+				SkippedOverLimit++;
+				continue;
+			}
+
 			const FIntVector& ChunkCoord = Pair.Key;
 			const FVoxelChunkRenderData& RenderData = Pair.Value;
 
@@ -378,8 +390,8 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	if (LogCounter >= 60)
 	{
 		LogCounter = 0;
-		UE_LOG(LogVoxelRendering, Log, TEXT("GetDynamicMeshElements: Added %d meshes, Skipped %d (invisible/invalid), %d (frustum culled)"),
-			TotalMeshesAdded, SkippedInvisible, SkippedFrustum);
+		UE_LOG(LogVoxelRendering, Log, TEXT("GetDynamicMeshElements: Added %d meshes (limit=%d), Skipped: %d invisible, %d frustum, %d over-limit"),
+			TotalMeshesAdded, MaxMeshBatchesPerFrame, SkippedInvisible, SkippedFrustum, SkippedOverLimit);
 	}
 }
 
@@ -900,6 +912,204 @@ void FVoxelSceneProxy::SetMaterial_RenderThread(UMaterialInterface* InMaterial)
 	{
 		MaterialRelevance = Material->GetRelevance(FeatureLevel);
 	}
+}
+
+void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
+	FRHICommandListBase& RHICmdList,
+	TArray<FBatchChunkAdd>&& Adds,
+	TArray<FIntVector>&& Removals)
+{
+	check(IsInRenderingThread());
+
+	// Sync debug mode from console variable
+	SyncVertexColorDebugMode();
+
+	// Process removals first to free up resources
+	for (const FIntVector& ChunkCoord : Removals)
+	{
+		FScopeLock Lock(&ChunkDataLock);
+
+		if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
+		{
+			RenderData->ReleaseResources();
+			ChunkRenderData.Remove(ChunkCoord);
+		}
+
+		if (TSharedPtr<FVoxelLocalVertexBuffer>* VB = ChunkVertexBuffers.Find(ChunkCoord))
+		{
+			if (VB->IsValid())
+			{
+				(*VB)->ReleaseResource();
+			}
+			ChunkVertexBuffers.Remove(ChunkCoord);
+		}
+
+		if (TSharedPtr<FVoxelLocalIndexBuffer>* IB = ChunkIndexBuffers.Find(ChunkCoord))
+		{
+			if (IB->IsValid())
+			{
+				(*IB)->ReleaseResource();
+			}
+			ChunkIndexBuffers.Remove(ChunkCoord);
+		}
+
+		if (TSharedPtr<FLocalVertexFactory>* VF = ChunkVertexFactories.Find(ChunkCoord))
+		{
+			if (VF->IsValid())
+			{
+				(*VF)->ReleaseResource();
+			}
+			ChunkVertexFactories.Remove(ChunkCoord);
+		}
+	}
+
+	// Process adds
+	for (FBatchChunkAdd& Add : Adds)
+	{
+		const FIntVector& ChunkCoord = Add.ChunkCoord;
+		const uint32 VertexCount = Add.Vertices.Num();
+		const uint32 IndexCount = Add.Indices.Num();
+
+		if (VertexCount == 0 || IndexCount == 0)
+		{
+			continue;
+		}
+
+		FScopeLock Lock(&ChunkDataLock);
+
+		// Remove existing data if any
+		if (FVoxelChunkRenderData* ExistingData = ChunkRenderData.Find(ChunkCoord))
+		{
+			ExistingData->ReleaseResources();
+		}
+		if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = ChunkVertexBuffers.Find(ChunkCoord))
+		{
+			if (ExistingVB->IsValid())
+			{
+				(*ExistingVB)->ReleaseResource();
+			}
+		}
+		if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = ChunkIndexBuffers.Find(ChunkCoord))
+		{
+			if (ExistingIB->IsValid())
+			{
+				(*ExistingIB)->ReleaseResource();
+			}
+		}
+		if (TSharedPtr<FLocalVertexFactory>* ExistingVF = ChunkVertexFactories.Find(ChunkCoord))
+		{
+			if (ExistingVF->IsValid())
+			{
+				(*ExistingVF)->ReleaseResource();
+			}
+		}
+
+		// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data
+		const FVector3f ChunkOffset = FVector3f(Add.ChunkWorldPosition);
+
+		TArray<FVoxelLocalVertex> ConvertedVertices;
+		ConvertedVertices.SetNumUninitialized(VertexCount);
+
+		TArray<FColor> ColorData;
+		ColorData.SetNumUninitialized(VertexCount);
+
+		for (uint32 i = 0; i < VertexCount; i++)
+		{
+			ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Add.Vertices[i]);
+			// Offset vertex position from chunk-local to world space
+			ConvertedVertices[i].Position += ChunkOffset;
+			ColorData[i] = ConvertedVertices[i].Color;
+		}
+
+		// Create new render data
+		FVoxelChunkRenderData NewRenderData;
+		NewRenderData.ChunkCoord = ChunkCoord;
+		NewRenderData.LODLevel = Add.LODLevel;
+		NewRenderData.VertexCount = VertexCount;
+		NewRenderData.IndexCount = IndexCount;
+		// Offset local bounds to world space
+		NewRenderData.WorldBounds = Add.LocalBounds.ShiftBy(Add.ChunkWorldPosition);
+		NewRenderData.ChunkWorldPosition = Add.ChunkWorldPosition;
+		NewRenderData.MorphFactor = 0.0f;
+		NewRenderData.bIsVisible = true;
+
+		// Create vertex buffer
+		const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
+		FRHIResourceCreateInfo VertexCreateInfo(TEXT("VoxelLocalVertexBuffer_Batch"));
+		NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
+			ConvertedVertexSize,
+			BUF_Static | BUF_VertexBuffer,
+			sizeof(FVoxelLocalVertex),
+			ERHIAccess::VertexOrIndexBuffer,
+			VertexCreateInfo
+		);
+
+		void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
+		FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
+		RHICmdList.UnlockBuffer(NewRenderData.VertexBufferRHI);
+
+		// Create separate color buffer for SRV
+		const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
+		FRHIResourceCreateInfo ColorCreateInfo(TEXT("VoxelColorBuffer_Batch"));
+		NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
+			ColorBufferSize,
+			BUF_Static | BUF_ShaderResource,
+			sizeof(FColor),
+			ERHIAccess::SRVMask,
+			ColorCreateInfo
+		);
+
+		void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
+		FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
+		RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
+
+		// Create color SRV
+		NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+
+		// Create index buffer directly from CPU data
+		const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
+		FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelIndexBuffer_Batch"));
+		NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
+			IndexBufferSize,
+			BUF_Static | BUF_IndexBuffer,
+			sizeof(uint32),
+			ERHIAccess::VertexOrIndexBuffer,
+			IndexCreateInfo
+		);
+
+		void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
+		FMemory::Memcpy(IndexData, Add.Indices.GetData(), IndexBufferSize);
+		RHICmdList.UnlockBuffer(NewRenderData.IndexBufferRHI);
+
+		// Store render data
+		ChunkRenderData.Add(ChunkCoord, NewRenderData);
+
+		// Create and initialize vertex buffer wrapper
+		TSharedPtr<FVoxelLocalVertexBuffer> VertexBufferWrapper = MakeShared<FVoxelLocalVertexBuffer>();
+		VertexBufferWrapper->InitWithRHIBuffer(NewRenderData.VertexBufferRHI);
+		VertexBufferWrapper->InitResource(RHICmdList);
+		ChunkVertexBuffers.Add(ChunkCoord, VertexBufferWrapper);
+
+		// Create and initialize index buffer wrapper
+		TSharedPtr<FVoxelLocalIndexBuffer> IndexBufferWrapper = MakeShared<FVoxelLocalIndexBuffer>();
+		IndexBufferWrapper->InitWithRHIBuffer(NewRenderData.IndexBufferRHI, IndexCount);
+		IndexBufferWrapper->InitResource(RHICmdList);
+		ChunkIndexBuffers.Add(ChunkCoord, IndexBufferWrapper);
+
+		// Create and initialize per-chunk vertex factory
+		TSharedPtr<FLocalVertexFactory> ChunkVertexFactory = MakeShared<FLocalVertexFactory>(FeatureLevel, "FVoxelChunkVertexFactory_Batch");
+		InitVoxelLocalVertexFactory(
+			RHICmdList,
+			ChunkVertexFactory.Get(),
+			VertexBufferWrapper.Get(),
+			NewRenderData.ColorSRV
+		);
+		ChunkVertexFactory->InitResource(RHICmdList);
+		ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);
+	}
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Batch update - %d adds, %d removals processed"),
+		Adds.Num(), Removals.Num());
 }
 
 // ==================== Statistics ====================

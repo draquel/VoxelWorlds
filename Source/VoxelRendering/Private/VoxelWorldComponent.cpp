@@ -231,26 +231,15 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 	// Calculate chunk world position
 	FVector ChunkWorldPos = FVector(ChunkCoord) * ChunkWorldSize;
 
-	// Enqueue render thread update - pass CPU data directly (NO GPU ROUNDTRIP!)
-	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
-	if (Proxy)
-	{
-		ENQUEUE_RENDER_COMMAND(UpdateVoxelChunkFromCPU)(
-			[Proxy, ChunkCoord, Vertices = MoveTemp(Vertices), Indices = MoveTemp(Indices), LODLevel, ChunkLocalBounds = LocalBounds, ChunkWorldPos]
-			(FRHICommandListImmediate& RHICmdList) mutable
-			{
-				Proxy->UpdateChunkFromCPUData_RenderThread(
-					RHICmdList,
-					ChunkCoord,
-					MoveTemp(Vertices),
-					MoveTemp(Indices),
-					LODLevel,
-					ChunkLocalBounds,
-					ChunkWorldPos
-				);
-			}
-		);
-	}
+	// Queue for batched submission instead of immediate render command
+	FPendingChunkAdd PendingAdd;
+	PendingAdd.ChunkCoord = ChunkCoord;
+	PendingAdd.Vertices = MoveTemp(Vertices);
+	PendingAdd.Indices = MoveTemp(Indices);
+	PendingAdd.LODLevel = LODLevel;
+	PendingAdd.LocalBounds = LocalBounds;
+	PendingAdd.ChunkWorldPosition = ChunkWorldPos;
+	PendingAdds.Add(MoveTemp(PendingAdd));
 
 	// Update bounds
 	UpdateBounds();
@@ -270,17 +259,8 @@ void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
 		}
 	}
 
-	// Enqueue render thread removal
-	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
-	if (Proxy)
-	{
-		ENQUEUE_RENDER_COMMAND(RemoveVoxelChunk)(
-			[Proxy, ChunkCoord](FRHICommandListImmediate& RHICmdList)
-			{
-				Proxy->RemoveChunk_RenderThread(ChunkCoord);
-			}
-		);
-	}
+	// Queue for batched submission instead of immediate render command
+	PendingRemovals.AddUnique(ChunkCoord);
 
 	UpdateBounds();
 }
@@ -300,6 +280,10 @@ void UVoxelWorldComponent::ClearAllChunks()
 	CachedVertexCount = 0;
 	CachedTriangleCount = 0;
 	CachedGPUMemory = 0;
+
+	// Clear any pending batched operations - they're now obsolete
+	PendingAdds.Empty();
+	PendingRemovals.Empty();
 
 	// Enqueue render thread clear
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
@@ -502,4 +486,62 @@ void UVoxelWorldComponent::MarkRenderStateDirtyAndNotify()
 FVoxelSceneProxy* UVoxelWorldComponent::GetVoxelSceneProxy() const
 {
 	return static_cast<FVoxelSceneProxy*>(SceneProxy);
+}
+
+void UVoxelWorldComponent::FlushPendingOperations()
+{
+	check(IsInGameThread());
+
+	// Early out if nothing to do
+	if (!HasPendingOperations())
+	{
+		return;
+	}
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (!Proxy)
+	{
+		// No proxy - just clear the pending operations
+		PendingAdds.Empty();
+		PendingRemovals.Empty();
+		return;
+	}
+
+	// Convert pending adds to batch format
+	TArray<FVoxelSceneProxy::FBatchChunkAdd> BatchAdds;
+	BatchAdds.Reserve(PendingAdds.Num());
+
+	for (FPendingChunkAdd& PendingAdd : PendingAdds)
+	{
+		FVoxelSceneProxy::FBatchChunkAdd BatchAdd;
+		BatchAdd.ChunkCoord = PendingAdd.ChunkCoord;
+		BatchAdd.Vertices = MoveTemp(PendingAdd.Vertices);
+		BatchAdd.Indices = MoveTemp(PendingAdd.Indices);
+		BatchAdd.LODLevel = PendingAdd.LODLevel;
+		BatchAdd.LocalBounds = PendingAdd.LocalBounds;
+		BatchAdd.ChunkWorldPosition = PendingAdd.ChunkWorldPosition;
+		BatchAdds.Add(MoveTemp(BatchAdd));
+	}
+
+	// Move pending removals
+	TArray<FIntVector> BatchRemovals = MoveTemp(PendingRemovals);
+
+	// Store counts before move for logging
+	const int32 NumAdds = BatchAdds.Num();
+	const int32 NumRemovals = BatchRemovals.Num();
+
+	// Clear pending arrays
+	PendingAdds.Empty();
+	PendingRemovals.Empty();
+
+	// Send single batched render command
+	ENQUEUE_RENDER_COMMAND(FlushVoxelBatchUpdate)(
+		[Proxy, BatchAdds = MoveTemp(BatchAdds), BatchRemovals = MoveTemp(BatchRemovals)](FRHICommandListImmediate& RHICmdList) mutable
+		{
+			Proxy->ProcessBatchUpdate_RenderThread(RHICmdList, MoveTemp(BatchAdds), MoveTemp(BatchRemovals));
+		}
+	);
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("UVoxelWorldComponent: Flushed %d adds, %d removals in single batch"),
+		NumAdds, NumRemovals);
 }

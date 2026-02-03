@@ -186,6 +186,19 @@ public:
 		}
 	}
 
+	/**
+	 * Flush all pending render operations as a single batched command.
+	 *
+	 * This consolidates multiple chunk updates/removals into a single render
+	 * command to reduce render thread overhead and prevent job queue overflow.
+	 *
+	 * Should be called once per frame after all chunk operations are queued.
+	 */
+	virtual void FlushPendingOperations()
+	{
+		// Default: no-op (renderer doesn't batch operations)
+	}
+
 	// ==================== LOD Configuration ====================
 
 	/**

@@ -65,6 +65,9 @@ public:
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;
 	virtual void UpdateLODTransitionsBatch(const TArray<TPair<FIntVector, float>>& Transitions) override;
 
+	// Batched Operations
+	virtual void FlushPendingOperations() override;
+
 	// LOD Configuration
 	virtual void SetLODParameterCollection(UMaterialParameterCollection* Collection) override;
 	virtual void SetLODTransitionDistances(float StartDistance, float EndDistance) override;

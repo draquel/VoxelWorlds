@@ -389,29 +389,31 @@ void FVoxelCustomVFRenderer::UpdateLODTransitionsBatch(const TArray<TPair<FIntVe
 {
 	check(IsInGameThread());
 
+	if (!WorldComponent || Transitions.Num() == 0)
+	{
+		return;
+	}
+
+	// DISABLED: Morph factor updates send too many render commands and cause overflow
+	// The morph factor infrastructure exists but is not visually used yet (shader doesn't apply it)
+	// Re-enable when vertex morphing is implemented in the shader
+	//
+	// For now, just skip morph factor updates entirely to prevent overflow
+	return;
+}
+
+void FVoxelCustomVFRenderer::FlushPendingOperations()
+{
+	check(IsInGameThread());
+
 	if (!WorldComponent)
 	{
 		return;
 	}
 
-	// Batch updates through a single render command
-	TWeakObjectPtr<UVoxelWorldComponent> WeakComponent = WorldComponent;
-	TArray<TPair<FIntVector, float>> TransitionsCopy = Transitions;
-
-	ENQUEUE_RENDER_COMMAND(BatchUpdateLODMorph)(
-		[WeakComponent, TransitionsCopy](FRHICommandListImmediate& RHICmdList)
-		{
-			// This runs on render thread - we need to go back to game thread
-			// for component access, or implement direct scene proxy access
-			// For now, we queue individual updates
-		}
-	);
-
-	// Fallback to individual updates
-	for (const auto& Pair : Transitions)
-	{
-		WorldComponent->UpdateChunkMorphFactor(Pair.Key, Pair.Value);
-	}
+	// Delegate to the world component which batches all pending adds/removes
+	// into a single render command
+	WorldComponent->FlushPendingOperations();
 }
 
 // ==================== LOD Configuration ====================

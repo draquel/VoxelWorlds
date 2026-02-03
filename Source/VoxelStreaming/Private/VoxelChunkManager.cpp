@@ -73,12 +73,35 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	ProcessGenerationQueue(TimeSlice * 0.4f);
 	ProcessMeshingQueue(TimeSlice * 0.4f);
 
-	// Process unloads
-	const int32 MaxUnloads = Configuration ? Configuration->MaxChunksToUnloadPerFrame : 8;
-	ProcessUnloadQueue(MaxUnloads);
+	// Submit pending meshes to renderer
+	// With batched render operations, multiple submits are consolidated into one render command
+	// so we can process more per frame without overwhelming the render thread
+	const int32 MaxRenderSubmitsPerFrame = Configuration ? Configuration->MaxChunksToLoadPerFrame : 8;
+
+	if (PendingMeshQueue.Num() > 0)
+	{
+		int32 RenderSubmitCount = 0;
+		while (PendingMeshQueue.Num() > 0 && RenderSubmitCount < MaxRenderSubmitsPerFrame)
+		{
+			const FIntVector ChunkCoord = PendingMeshQueue[0].ChunkCoord;
+			OnChunkMeshingComplete(ChunkCoord);
+			++RenderSubmitCount;
+		}
+	}
+
+	// Process unloads - with batched operations we can handle more per frame
+	const int32 MaxUnloadsPerFrame = Configuration ? Configuration->MaxChunksToUnloadPerFrame : 8;
+	ProcessUnloadQueue(MaxUnloadsPerFrame);
 
 	// Update LOD transitions
 	UpdateLODTransitions(Context);
+
+	// Flush all pending render operations as a single batched command
+	// This consolidates all chunk adds/removes into one render command per frame
+	if (MeshRenderer)
+	{
+		MeshRenderer->FlushPendingOperations();
+	}
 }
 
 // ==================== Initialization ====================
@@ -767,14 +790,15 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 
 		if (bSuccess)
 		{
-			// Store mesh in pending queue
+			// Store mesh in pending queue (will be submitted later, throttled)
 			FPendingMeshData PendingMesh;
 			PendingMesh.ChunkCoord = Request.ChunkCoord;
 			PendingMesh.LODLevel = Request.LODLevel;
 			PendingMesh.MeshData = MoveTemp(MeshData);
 			PendingMeshQueue.Add(MoveTemp(PendingMesh));
 
-			OnChunkMeshingComplete(Request.ChunkCoord);
+			// NOTE: Don't call OnChunkMeshingComplete here - it's called in TickComponent
+			// after throttled render submission
 		}
 		else
 		{
@@ -835,7 +859,7 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 
 	// Throttle LOD remeshing to prevent overwhelming the render system
 	// Keep this low to avoid Non-Nanite job queue overflow
-	constexpr int32 MaxLODRemeshPerFrame = 2;
+	constexpr int32 MaxLODRemeshPerFrame = 1;
 
 	// Count how many chunks are already pending remesh
 	int32 CurrentPendingRemesh = 0;

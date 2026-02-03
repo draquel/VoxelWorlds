@@ -95,6 +95,12 @@ public:
 	void ClearAllChunks();
 
 	/**
+	 * Flush all pending chunk operations as a single batched render command.
+	 * Called once per frame to consolidate multiple add/remove operations.
+	 */
+	void FlushPendingOperations();
+
+	/**
 	 * Set visibility for a chunk.
 	 *
 	 * @param ChunkCoord Chunk coordinate
@@ -273,6 +279,28 @@ private:
 
 	/** Game thread chunk tracking */
 	TMap<FIntVector, FChunkInfo> ChunkInfoMap;
+
+	// ==================== Batched Render Operations ====================
+	// Instead of sending individual render commands, we batch operations
+	// and flush them once per frame to reduce render command overhead
+
+	/** Pending chunk data to add (batched) */
+	struct FPendingChunkAdd
+	{
+		FIntVector ChunkCoord;
+		TArray<FVoxelVertex> Vertices;
+		TArray<uint32> Indices;
+		int32 LODLevel;
+		FBox LocalBounds;
+		FVector ChunkWorldPosition;
+	};
+	TArray<FPendingChunkAdd> PendingAdds;
+
+	/** Pending chunk removals (batched) */
+	TArray<FIntVector> PendingRemovals;
+
+	/** Whether we have pending operations to flush */
+	bool HasPendingOperations() const { return PendingAdds.Num() > 0 || PendingRemovals.Num() > 0; }
 
 	/** Critical section for chunk info access */
 	mutable FCriticalSection ChunkInfoLock;

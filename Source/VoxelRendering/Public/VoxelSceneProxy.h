@@ -102,6 +102,25 @@ public:
 	void RemoveChunk_RenderThread(const FIntVector& ChunkCoord);
 
 	/**
+	 * Batch update - process multiple adds and removes in a single call.
+	 * This reduces render command overhead significantly.
+	 * Must be called on render thread.
+	 */
+	struct FBatchChunkAdd
+	{
+		FIntVector ChunkCoord;
+		TArray<FVoxelVertex> Vertices;
+		TArray<uint32> Indices;
+		int32 LODLevel;
+		FBox LocalBounds;
+		FVector ChunkWorldPosition;
+	};
+	void ProcessBatchUpdate_RenderThread(
+		FRHICommandListBase& RHICmdList,
+		TArray<FBatchChunkAdd>&& Adds,
+		TArray<FIntVector>&& Removals);
+
+	/**
 	 * Clear all chunks.
 	 * Must be called on render thread.
 	 */
