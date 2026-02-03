@@ -82,6 +82,16 @@ int32 FDistanceBandLODStrategy::GetLODForChunk(
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 	const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 
+	// Debug: Log LOD calculation for chunk at origin periodically
+	static int32 LODDebugCounter = 0;
+	if (++LODDebugCounter % 600 == 0 && ChunkCoord == FIntVector(0, 0, 0))
+	{
+		UE_LOG(LogVoxelLOD, Warning, TEXT("GetLODForChunk(0,0,0): ChunkCenter=(%.0f,%.0f,%.0f), ViewerPos=(%.0f,%.0f,%.0f), Distance=%.0f"),
+			ChunkCenter.X, ChunkCenter.Y, ChunkCenter.Z,
+			Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z,
+			Distance);
+	}
+
 	const FLODBand* Band = FindBandForDistance(Distance);
 	if (Band)
 	{

@@ -110,7 +110,7 @@ void InitVoxelLocalVertexFactory(
 	// Set the data on the vertex factory
 	VertexFactory->SetData(RHICmdList, NewData);
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("InitVoxelLocalVertexFactory - Configured with Stride=%d"), Stride);
+	// UE_LOG(LogVoxelRendering, Log, TEXT("InitVoxelLocalVertexFactory - Configured with Stride=%d"), Stride);
 }
 
 // ==================== FVoxelSceneProxy ====================
@@ -623,6 +623,165 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 
 	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Updated chunk %s with %d vertices, %d indices (converted to FLocalVertexFactory format)"),
 		*ChunkCoord.ToString(), SourceVertexCount, GPUData.IndexCount);
+}
+
+void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
+	FRHICommandListBase& RHICmdList,
+	const FIntVector& ChunkCoord,
+	TArray<FVoxelVertex>&& Vertices,
+	TArray<uint32>&& Indices,
+	int32 LODLevel,
+	const FBox& ChunkLocalBounds,
+	const FVector& ChunkWorldPosition)
+{
+	check(IsInRenderingThread());
+
+	// Sync debug mode from console variable
+	SyncVertexColorDebugMode();
+
+	const uint32 VertexCount = Vertices.Num();
+	const uint32 IndexCount = Indices.Num();
+
+	if (VertexCount == 0 || IndexCount == 0)
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("UpdateChunkFromCPUData_RenderThread: Empty data for chunk %s"), *ChunkCoord.ToString());
+		return;
+	}
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	// Remove existing data if any
+	if (FVoxelChunkRenderData* ExistingData = ChunkRenderData.Find(ChunkCoord))
+	{
+		ExistingData->ReleaseResources();
+	}
+	if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = ChunkVertexBuffers.Find(ChunkCoord))
+	{
+		if (ExistingVB->IsValid())
+		{
+			(*ExistingVB)->ReleaseResource();
+		}
+	}
+	if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = ChunkIndexBuffers.Find(ChunkCoord))
+	{
+		if (ExistingIB->IsValid())
+		{
+			(*ExistingIB)->ReleaseResource();
+		}
+	}
+	if (TSharedPtr<FLocalVertexFactory>* ExistingVF = ChunkVertexFactories.Find(ChunkCoord))
+	{
+		if (ExistingVF->IsValid())
+		{
+			(*ExistingVF)->ReleaseResource();
+		}
+	}
+
+	// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data (NO GPU READBACK!)
+	const FVector3f ChunkOffset = FVector3f(ChunkWorldPosition);
+
+	TArray<FVoxelLocalVertex> ConvertedVertices;
+	ConvertedVertices.SetNumUninitialized(VertexCount);
+
+	TArray<FColor> ColorData;
+	ColorData.SetNumUninitialized(VertexCount);
+
+	for (uint32 i = 0; i < VertexCount; i++)
+	{
+		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Vertices[i]);
+		// Offset vertex position from chunk-local to world space
+		ConvertedVertices[i].Position += ChunkOffset;
+		ColorData[i] = ConvertedVertices[i].Color;
+	}
+
+	// Create new render data
+	FVoxelChunkRenderData NewRenderData;
+	NewRenderData.ChunkCoord = ChunkCoord;
+	NewRenderData.LODLevel = LODLevel;
+	NewRenderData.VertexCount = VertexCount;
+	NewRenderData.IndexCount = IndexCount;
+	// Offset local bounds to world space
+	NewRenderData.WorldBounds = ChunkLocalBounds.ShiftBy(ChunkWorldPosition);
+	NewRenderData.ChunkWorldPosition = ChunkWorldPosition;
+	NewRenderData.MorphFactor = 0.0f;
+	NewRenderData.bIsVisible = true;
+
+	// Create vertex buffer
+	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
+	FRHIResourceCreateInfo VertexCreateInfo(TEXT("VoxelLocalVertexBuffer_CPU"));
+	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
+		ConvertedVertexSize,
+		BUF_Static | BUF_VertexBuffer,
+		sizeof(FVoxelLocalVertex),
+		ERHIAccess::VertexOrIndexBuffer,
+		VertexCreateInfo
+	);
+
+	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
+	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
+	RHICmdList.UnlockBuffer(NewRenderData.VertexBufferRHI);
+
+	// Create separate color buffer for SRV
+	const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
+	FRHIResourceCreateInfo ColorCreateInfo(TEXT("VoxelColorBuffer_CPU"));
+	NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
+		ColorBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FColor),
+		ERHIAccess::SRVMask,
+		ColorCreateInfo
+	);
+
+	void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
+
+	// Create color SRV
+	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+
+	// Create index buffer directly from CPU data
+	const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
+	FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelIndexBuffer_CPU"));
+	NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
+		IndexBufferSize,
+		BUF_Static | BUF_IndexBuffer,
+		sizeof(uint32),
+		ERHIAccess::VertexOrIndexBuffer,
+		IndexCreateInfo
+	);
+
+	void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.IndexBufferRHI);
+
+	// Store render data
+	ChunkRenderData.Add(ChunkCoord, NewRenderData);
+
+	// Create and initialize vertex buffer wrapper
+	TSharedPtr<FVoxelLocalVertexBuffer> VertexBufferWrapper = MakeShared<FVoxelLocalVertexBuffer>();
+	VertexBufferWrapper->InitWithRHIBuffer(NewRenderData.VertexBufferRHI);
+	VertexBufferWrapper->InitResource(RHICmdList);
+	ChunkVertexBuffers.Add(ChunkCoord, VertexBufferWrapper);
+
+	// Create and initialize index buffer wrapper
+	TSharedPtr<FVoxelLocalIndexBuffer> IndexBufferWrapper = MakeShared<FVoxelLocalIndexBuffer>();
+	IndexBufferWrapper->InitWithRHIBuffer(NewRenderData.IndexBufferRHI, IndexCount);
+	IndexBufferWrapper->InitResource(RHICmdList);
+	ChunkIndexBuffers.Add(ChunkCoord, IndexBufferWrapper);
+
+	// Create and initialize per-chunk vertex factory
+	TSharedPtr<FLocalVertexFactory> ChunkVertexFactory = MakeShared<FLocalVertexFactory>(FeatureLevel, "FVoxelChunkVertexFactory_CPU");
+	InitVoxelLocalVertexFactory(
+		RHICmdList,
+		ChunkVertexFactory.Get(),
+		VertexBufferWrapper.Get(),
+		NewRenderData.ColorSRV
+	);
+	ChunkVertexFactory->InitResource(RHICmdList);
+	ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Updated chunk %s from CPU data - %d vertices, %d indices (DIRECT PATH)"),
+		*ChunkCoord.ToString(), VertexCount, IndexCount);
 }
 
 void FVoxelSceneProxy::RemoveChunk_RenderThread(const FIntVector& ChunkCoord)

@@ -11,7 +11,14 @@
 #include "VoxelCPUSmoothMesher.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/Pawn.h"
 #include "DrawDebugHelpers.h"
+
+#if WITH_EDITOR
+#include "Editor.h"
+#include "LevelEditorViewport.h"
+#endif
 
 UVoxelChunkManager::UVoxelChunkManager()
 {
@@ -43,6 +50,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// Build query context from camera state
 	FLODQueryContext Context = BuildQueryContext();
+
+	// Debug: Log viewer position periodically
+	static int32 ViewerLogCounter = 0;
+	if (++ViewerLogCounter % 120 == 0)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Viewer position: (%.0f, %.0f, %.0f)"),
+			Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z);
+	}
 
 	// Update LOD strategy
 	if (LODStrategy)
@@ -454,6 +469,8 @@ void UVoxelChunkManager::DrawDebugVisualization() const
 FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 {
 	FLODQueryContext Context;
+	bool bFoundViewer = false;
+	FString ViewerSource = TEXT("None");
 
 	// Get viewer state from player controller
 	if (UWorld* World = GetWorld())
@@ -463,20 +480,78 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 			FVector Location;
 			FRotator Rotation;
 			PC->GetPlayerViewPoint(Location, Rotation);
+			ViewerSource = TEXT("GetPlayerViewPoint");
+
+			// Check if we got a valid position (not at origin when player is elsewhere)
+			if (PC->GetPawn())
+			{
+				// Use pawn location if available - more reliable than GetPlayerViewPoint in some cases
+				Location = PC->GetPawn()->GetActorLocation();
+				Rotation = PC->GetControlRotation();
+				ViewerSource = TEXT("Pawn");
+			}
 
 			Context.ViewerPosition = Location;
 			Context.ViewerForward = Rotation.Vector();
 			Context.ViewerRight = Rotation.RotateVector(FVector::RightVector);
 			Context.ViewerUp = Rotation.RotateVector(FVector::UpVector);
+			bFoundViewer = true;
 
 			if (PC->PlayerCameraManager)
 			{
 				Context.FieldOfView = PC->PlayerCameraManager->GetFOVAngle();
+				// Camera manager has most accurate view location
+				Context.ViewerPosition = PC->PlayerCameraManager->GetCameraLocation();
+				Context.ViewerForward = PC->PlayerCameraManager->GetCameraRotation().Vector();
+				ViewerSource = TEXT("CameraManager");
 			}
 		}
 
+#if WITH_EDITOR
+		// In editor, try to get the editor viewport camera if no player found
+		if (!bFoundViewer)
+		{
+			if (GEditor)
+			{
+				for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
+				{
+					if (ViewportClient && ViewportClient->IsPerspective())
+					{
+						Context.ViewerPosition = ViewportClient->GetViewLocation();
+						Context.ViewerForward = ViewportClient->GetViewRotation().Vector();
+						Context.FieldOfView = ViewportClient->ViewFOV;
+						bFoundViewer = true;
+						ViewerSource = TEXT("EditorViewport");
+						break;
+					}
+				}
+			}
+		}
+#endif
+
 		Context.GameTime = World->GetTimeSeconds();
 		Context.DeltaTime = World->GetDeltaSeconds();
+	}
+
+	// Fallback: If no viewer found, use the owning actor's location
+	if (!bFoundViewer)
+	{
+		if (AActor* Owner = GetOwner())
+		{
+			Context.ViewerPosition = Owner->GetActorLocation();
+			Context.ViewerForward = Owner->GetActorForwardVector();
+			ViewerSource = TEXT("OwnerActor");
+			bFoundViewer = true;
+		}
+	}
+
+	// Debug: Log viewer source and position periodically
+	static int32 ContextDebugCounter = 0;
+	if (++ContextDebugCounter % 180 == 0)  // Every 3 seconds at 60fps
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("BuildQueryContext: Source=%s, Pos=(%.0f, %.0f, %.0f), Found=%s"),
+			*ViewerSource, Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z,
+			bFoundViewer ? TEXT("Yes") : TEXT("No"));
 	}
 
 	// Configuration values
@@ -758,21 +833,140 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 		return;
 	}
 
+	// Throttle LOD remeshing to prevent overwhelming the render system
+	// Keep this low to avoid Non-Nanite job queue overflow
+	constexpr int32 MaxLODRemeshPerFrame = 2;
+
+	// Count how many chunks are already pending remesh
+	int32 CurrentPendingRemesh = 0;
+	for (const FChunkLODRequest& Existing : MeshingQueue)
+	{
+		if (FVoxelChunkState* State = ChunkStates.Find(Existing.ChunkCoord))
+		{
+			if (State->State == EChunkState::PendingMeshing)
+			{
+				++CurrentPendingRemesh;
+			}
+		}
+	}
+
 	// Batch update morph factors
 	TArray<TPair<FIntVector, float>> Transitions;
+
+	// Track chunks that need remeshing due to LOD level changes, with priority info
+	struct FLODRemeshCandidate
+	{
+		FIntVector ChunkCoord;
+		int32 NewLODLevel;
+		float Distance;
+		bool bIsUpgrade; // true if going to finer LOD (higher priority)
+	};
+	TArray<FLODRemeshCandidate> RemeshCandidates;
 
 	for (const FIntVector& ChunkCoord : LoadedChunkCoords)
 	{
 		const float NewMorphFactor = LODStrategy->GetLODMorphFactor(ChunkCoord, Context);
+		const int32 NewLODLevel = LODStrategy->GetLODForChunk(ChunkCoord, Context);
 
 		if (FVoxelChunkState* State = ChunkStates.Find(ChunkCoord))
 		{
+			// Check if LOD level changed - this requires remeshing
+			if (State->LODLevel != NewLODLevel)
+			{
+				// Calculate distance for prioritization
+				const float ChunkWorldSize = Configuration ? Configuration->GetChunkWorldSize() : 3200.0f;
+				const FVector ChunkCenter = FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+				const float Distance = FVector::Dist(ChunkCenter, Context.ViewerPosition);
+
+				FLODRemeshCandidate Candidate;
+				Candidate.ChunkCoord = ChunkCoord;
+				Candidate.NewLODLevel = NewLODLevel;
+				Candidate.Distance = Distance;
+				Candidate.bIsUpgrade = NewLODLevel < State->LODLevel; // Lower LOD number = higher detail
+
+				RemeshCandidates.Add(Candidate);
+			}
+
+			// Update morph factor
 			if (FMath::Abs(State->MorphFactor - NewMorphFactor) > 0.01f)
 			{
 				State->MorphFactor = NewMorphFactor;
 				Transitions.Add(TPair<FIntVector, float>(ChunkCoord, NewMorphFactor));
 			}
 		}
+	}
+
+	// Sort candidates: prioritize LOD upgrades (finer detail), then by distance (closer first)
+	RemeshCandidates.Sort([](const FLODRemeshCandidate& A, const FLODRemeshCandidate& B)
+	{
+		// Upgrades (finer LOD) take priority over downgrades
+		if (A.bIsUpgrade != B.bIsUpgrade)
+		{
+			return A.bIsUpgrade; // true (upgrade) comes before false (downgrade)
+		}
+		// Within same category, closer chunks first
+		return A.Distance < B.Distance;
+	});
+
+	// Queue limited number of remeshes per frame
+	int32 QueuedThisFrame = 0;
+	const int32 MaxToQueue = FMath::Max(0, MaxLODRemeshPerFrame - CurrentPendingRemesh);
+
+	for (const FLODRemeshCandidate& Candidate : RemeshCandidates)
+	{
+		if (QueuedThisFrame >= MaxToQueue)
+		{
+			break;
+		}
+
+		if (FVoxelChunkState* State = ChunkStates.Find(Candidate.ChunkCoord))
+		{
+			// Only queue if chunk is in Loaded state (not already being processed)
+			if (State->State == EChunkState::Loaded)
+			{
+				// Update the stored LOD level
+				State->LODLevel = Candidate.NewLODLevel;
+
+				FChunkLODRequest Request;
+				Request.ChunkCoord = Candidate.ChunkCoord;
+				Request.LODLevel = Candidate.NewLODLevel;
+				// Higher priority for upgrades and closer chunks
+				Request.Priority = (Candidate.bIsUpgrade ? 100.0f : 50.0f) + (10000.0f / FMath::Max(Candidate.Distance, 1.0f));
+
+				// Check if not already in meshing queue
+				bool bAlreadyQueued = false;
+				for (const FChunkLODRequest& Existing : MeshingQueue)
+				{
+					if (Existing.ChunkCoord == Candidate.ChunkCoord)
+					{
+						bAlreadyQueued = true;
+						break;
+					}
+				}
+
+				if (!bAlreadyQueued)
+				{
+					// IMPORTANT: Set state to PendingMeshing so ProcessMeshingQueue will process it
+					SetChunkState(Candidate.ChunkCoord, EChunkState::PendingMeshing);
+					MeshingQueue.Add(Request);
+					++QueuedThisFrame;
+
+					UE_LOG(LogVoxelStreaming, Verbose, TEXT("Queued chunk (%d,%d,%d) for LOD %s: %d (dist=%.0f)"),
+						Candidate.ChunkCoord.X, Candidate.ChunkCoord.Y, Candidate.ChunkCoord.Z,
+						Candidate.bIsUpgrade ? TEXT("upgrade") : TEXT("downgrade"),
+						Candidate.NewLODLevel, Candidate.Distance);
+				}
+			}
+		}
+	}
+
+	// Sort meshing queue by priority if we added new items
+	if (QueuedThisFrame > 0)
+	{
+		MeshingQueue.Sort();
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD transitions: %d candidates, queued %d this frame (pending: %d)"),
+			RemeshCandidates.Num(), QueuedThisFrame, CurrentPendingRemesh + QueuedThisFrame);
 	}
 
 	if (Transitions.Num() > 0)

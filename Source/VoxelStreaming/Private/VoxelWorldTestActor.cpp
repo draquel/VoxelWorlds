@@ -81,6 +81,30 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 		Config = CreateDefaultConfiguration();
 		RuntimeConfiguration = Config;
 	}
+	else
+	{
+		// Clamp LOD bands to ViewDistance limit
+		const float MaxViewDist = Config->ViewDistance;
+		for (FLODBand& Band : Config->LODBands)
+		{
+			if (Band.MaxDistance > MaxViewDist)
+			{
+				Band.MaxDistance = MaxViewDist;
+			}
+			if (Band.MinDistance > MaxViewDist)
+			{
+				Band.MinDistance = MaxViewDist;
+			}
+		}
+		// Remove bands that are entirely beyond ViewDistance
+		Config->LODBands.RemoveAll([MaxViewDist](const FLODBand& Band)
+		{
+			return Band.MinDistance >= MaxViewDist;
+		});
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using Configuration asset, ViewDistance=%.0f clamped LOD bands to %d"),
+			MaxViewDist, Config->LODBands.Num());
+	}
 
 	if (!Config)
 	{
@@ -153,6 +177,15 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 	UE_LOG(LogVoxelStreaming, Log, TEXT("  VoxelSize: %.1f, ChunkSize: %d"), Config->VoxelSize, Config->ChunkSize);
 	UE_LOG(LogVoxelStreaming, Log, TEXT("  ViewDistance: %.1f, SeaLevel: %.1f, HeightScale: %.1f"),
 		Config->ViewDistance, Config->SeaLevel, Config->HeightScale);
+
+	// Log LOD bands to verify halved values are applied
+	UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelWorldTestActor: LOD Bands configured:"));
+	for (int32 i = 0; i < Config->LODBands.Num(); ++i)
+	{
+		const FLODBand& Band = Config->LODBands[i];
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Band %d: LOD%d, %.0f-%.0f, stride=%d"),
+			i, Band.LODLevel, Band.MinDistance, Band.MaxDistance, Band.VoxelStride);
+	}
 }
 
 void AVoxelWorldTestActor::ShutdownVoxelWorld()
@@ -224,38 +257,34 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Config->NoiseParams.Persistence = 0.5f;
 	Config->NoiseParams.Amplitude = 1.0f;
 
-	// LOD bands - create reasonable defaults
+	// LOD bands - MINIMAL for testing smooth meshing performance
+	// ChunkSize=32, VoxelSize=100 -> 3200 units per chunk
+	// Max view distance: 6400 units (2 chunk radius) = ~50 chunks total
 	Config->LODBands.Empty();
 
-	// LOD 0: 0 - 3000 units (close detail)
+	// LOD 0: 0-3200 units (1 chunk radius), full detail
 	FLODBand Band0;
 	Band0.LODLevel = 0;
 	Band0.MinDistance = 0.0f;
-	Band0.MaxDistance = 3000.0f;
-	Band0.MorphRange = 500.0f;
+	Band0.MaxDistance = 3200.0f;
+	Band0.VoxelStride = 1;
+	Band0.MorphRange = 800.0f;
 	Config->LODBands.Add(Band0);
 
-	// LOD 1: 3000 - 6000 units
+	// LOD 1: 3200-6400 units (2 chunk radius), half detail
 	FLODBand Band1;
 	Band1.LODLevel = 1;
-	Band1.MinDistance = 3000.0f;
-	Band1.MaxDistance = 6000.0f;
-	Band1.MorphRange = 500.0f;
+	Band1.MinDistance = 3200.0f;
+	Band1.MaxDistance = 6400.0f;
+	Band1.VoxelStride = 2;
+	Band1.MorphRange = 800.0f;
 	Config->LODBands.Add(Band1);
 
-	// LOD 2: 6000 - 10000 units
-	FLODBand Band2;
-	Band2.LODLevel = 2;
-	Band2.MinDistance = 6000.0f;
-	Band2.MaxDistance = 10000.0f;
-	Band2.MorphRange = 500.0f;
-	Config->LODBands.Add(Band2);
-
-	// Streaming settings
-	Config->MaxChunksToLoadPerFrame = 4;
-	Config->MaxChunksToUnloadPerFrame = 8;
-	Config->StreamingTimeSliceMS = 4.0f;  // More generous for testing
-	Config->MaxLoadedChunks = 500;
+	// Streaming settings - minimal for testing
+	Config->MaxChunksToLoadPerFrame = 2;
+	Config->MaxChunksToUnloadPerFrame = 4;
+	Config->StreamingTimeSliceMS = 2.0f;
+	Config->MaxLoadedChunks = 100;  // Small view distance = fewer chunks
 
 	// Rendering settings
 	Config->bUseGPURenderer = true;  // Use Custom Vertex Factory renderer

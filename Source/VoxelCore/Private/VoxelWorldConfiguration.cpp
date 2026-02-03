@@ -6,12 +6,14 @@
 UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 {
 	// Setup default LOD bands for infinite plane
+	// Default: ChunkSize=32, VoxelSize=100 -> ChunkWorldSize=3200 units
+	// LOD bands are scaled relative to chunk size for proper visual transitions
 	LODBands.Empty();
-	LODBands.Add(FLODBand(0.0f, 512.0f, 0, 1, 32));      // LOD 0: 0-512m, full detail
-	LODBands.Add(FLODBand(512.0f, 1024.0f, 1, 2, 32));   // LOD 1: 512-1024m, half detail
-	LODBands.Add(FLODBand(1024.0f, 2048.0f, 2, 4, 32));  // LOD 2: 1024-2048m, quarter detail
-	LODBands.Add(FLODBand(2048.0f, 4096.0f, 3, 8, 64));  // LOD 3: 2048-4096m, coarse
-	LODBands.Add(FLODBand(4096.0f, 8192.0f, 4, 16, 128)); // LOD 4: 4096-8192m, very coarse
+	LODBands.Add(FLODBand(0.0f, 3200.0f, 0, 1, 32));       // LOD 0: 0-1 chunk, full detail
+	LODBands.Add(FLODBand(3200.0f, 6400.0f, 1, 2, 32));    // LOD 1: 1-2 chunks, half detail
+	LODBands.Add(FLODBand(6400.0f, 12800.0f, 2, 4, 32));   // LOD 2: 2-4 chunks, quarter detail
+	LODBands.Add(FLODBand(12800.0f, 25600.0f, 3, 8, 64));  // LOD 3: 4-8 chunks, coarse
+	LODBands.Add(FLODBand(25600.0f, 51200.0f, 4, 16, 128)); // LOD 4: 8-16 chunks, very coarse
 
 	// Set morph ranges for smooth transitions
 	for (int32 i = 0; i < LODBands.Num() - 1; ++i)

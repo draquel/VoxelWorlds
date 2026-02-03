@@ -72,6 +72,28 @@ public:
 	void UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FIntVector& ChunkCoord, const FVoxelChunkGPUData& GPUData);
 
 	/**
+	 * Update chunk directly from CPU vertex data - FAST PATH.
+	 * Avoids GPU buffer roundtrip by taking CPU arrays directly.
+	 * Must be called on render thread.
+	 *
+	 * @param RHICmdList RHI command list for resource initialization
+	 * @param ChunkCoord Chunk coordinate
+	 * @param Vertices CPU vertex array (will be moved)
+	 * @param Indices CPU index array (will be moved)
+	 * @param LODLevel LOD level of the mesh
+	 * @param ChunkLocalBounds Local bounds of the mesh
+	 * @param ChunkWorldPosition World position of chunk origin
+	 */
+	void UpdateChunkFromCPUData_RenderThread(
+		FRHICommandListBase& RHICmdList,
+		const FIntVector& ChunkCoord,
+		TArray<FVoxelVertex>&& Vertices,
+		TArray<uint32>&& Indices,
+		int32 LODLevel,
+		const FBox& ChunkLocalBounds,
+		const FVector& ChunkWorldPosition);
+
+	/**
 	 * Remove a chunk.
 	 * Must be called on render thread.
 	 *

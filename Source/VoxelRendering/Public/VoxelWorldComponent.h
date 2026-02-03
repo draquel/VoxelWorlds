@@ -61,6 +61,24 @@ public:
 	void UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& GPUData);
 
 	/**
+	 * Update chunk from CPU vertex/index data directly - FAST PATH.
+	 * Skips GPU buffer roundtrip by passing CPU data straight to render thread.
+	 * This is the preferred path for CPU-generated mesh data.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param Vertices CPU vertex array (will be moved)
+	 * @param Indices CPU index array (will be moved)
+	 * @param LODLevel LOD level of the mesh
+	 * @param LocalBounds Local bounds of the mesh
+	 */
+	void UpdateChunkBuffersFromCPUData(
+		const FIntVector& ChunkCoord,
+		TArray<FVoxelVertex>&& Vertices,
+		TArray<uint32>&& Indices,
+		int32 LODLevel,
+		const FBox& LocalBounds);
+
+	/**
 	 * Remove a chunk.
 	 * Enqueues removal to render thread.
 	 *

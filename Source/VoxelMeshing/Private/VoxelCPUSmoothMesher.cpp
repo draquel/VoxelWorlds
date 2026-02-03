@@ -77,8 +77,20 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 
 	const int32 ChunkSize = Request.ChunkSize;
 
-	// Pre-allocate arrays (estimate based on typical terrain)
-	const int32 EstimatedTriangles = ChunkSize * ChunkSize * 2;
+	// Calculate LOD stride - each LOD level doubles the stride
+	// LOD 0 = stride 1 (full detail), LOD 1 = stride 2, LOD 2 = stride 4, etc.
+	const int32 LODLevel = FMath::Clamp(Request.LODLevel, 0, 7);
+	const int32 Stride = 1 << LODLevel;  // 2^LODLevel
+
+	// Number of cubes to process at this LOD level
+	const int32 LODChunkSize = ChunkSize / Stride;
+
+	UE_LOG(LogVoxelMeshing, Log, TEXT("Smooth meshing chunk (%d,%d,%d) at LOD %d (stride %d, cubes %d^3)"),
+		Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
+		LODLevel, Stride, LODChunkSize);
+
+	// Pre-allocate arrays (estimate based on typical terrain, scaled for LOD)
+	const int32 EstimatedTriangles = LODChunkSize * LODChunkSize * 2;
 	OutMeshData.Positions.Reserve(EstimatedTriangles * 3);
 	OutMeshData.Normals.Reserve(EstimatedTriangles * 3);
 	OutMeshData.UVs.Reserve(EstimatedTriangles * 3);
@@ -88,12 +100,12 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 	uint32 TriangleCount = 0;
 	uint32 SolidVoxels = 0;
 
-	// Count solid voxels
-	for (int32 Z = 0; Z < ChunkSize; Z++)
+	// Count solid voxels (sampled at LOD stride)
+	for (int32 Z = 0; Z < ChunkSize; Z += Stride)
 	{
-		for (int32 Y = 0; Y < ChunkSize; Y++)
+		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
 		{
-			for (int32 X = 0; X < ChunkSize; X++)
+			for (int32 X = 0; X < ChunkSize; X += Stride)
 			{
 				if (!Request.GetVoxel(X, Y, Z).IsAir())
 				{
@@ -103,16 +115,16 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 		}
 	}
 
-	// Process each cube in the chunk
-	// Note: We process cubes from (0,0,0) to (ChunkSize-1, ChunkSize-1, ChunkSize-1)
-	// Each cube samples corners at (X,Y,Z) to (X+1,Y+1,Z+1), so we need neighbor data
-	for (int32 Z = 0; Z < ChunkSize; Z++)
+	// Process each cube in the chunk at LOD resolution
+	// At higher LOD levels, we process fewer but larger cubes
+	// Each cube at LOD level N covers a Stride x Stride x Stride region
+	for (int32 Z = 0; Z < ChunkSize; Z += Stride)
 	{
-		for (int32 Y = 0; Y < ChunkSize; Y++)
+		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
 		{
-			for (int32 X = 0; X < ChunkSize; X++)
+			for (int32 X = 0; X < ChunkSize; X += Stride)
 			{
-				ProcessCube(Request, X, Y, Z, OutMeshData, TriangleCount);
+				ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount);
 			}
 		}
 	}
@@ -283,6 +295,173 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 		OutMeshData.Colors.Add(VertexColor);
 
 		// Add indices (already in correct winding order from table)
+		OutMeshData.Indices.Add(BaseVertex + 0);
+		OutMeshData.Indices.Add(BaseVertex + 1);
+		OutMeshData.Indices.Add(BaseVertex + 2);
+
+		OutTriangleCount++;
+	}
+}
+
+void FVoxelCPUSmoothMesher::ProcessCubeLOD(
+	const FVoxelMeshingRequest& Request,
+	int32 X, int32 Y, int32 Z,
+	int32 Stride,
+	FChunkMeshData& OutMeshData,
+	uint32& OutTriangleCount)
+{
+	const float VoxelSize = Request.VoxelSize;
+	const float IsoLevel = Config.IsoLevel;
+
+	// At higher LOD levels, each cube covers Stride voxels
+	// The effective cube size in world units is VoxelSize * Stride
+	const float LODVoxelSize = VoxelSize * static_cast<float>(Stride);
+
+	// Sample density at 8 cube corners (at strided positions)
+	float CornerDensities[8];
+	for (int32 i = 0; i < 8; i++)
+	{
+		const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
+		// Sample at strided positions
+		const int32 SampleX = X + Offset.X * Stride;
+		const int32 SampleY = Y + Offset.Y * Stride;
+		const int32 SampleZ = Z + Offset.Z * Stride;
+		CornerDensities[i] = GetDensityAt(Request, SampleX, SampleY, SampleZ);
+	}
+
+	// Build cube index from corner inside/outside states
+	uint8 CubeIndex = 0;
+	for (int32 i = 0; i < 8; i++)
+	{
+		if (CornerDensities[i] >= IsoLevel)
+		{
+			CubeIndex |= (1 << i);
+		}
+	}
+
+	// Early out if cube is entirely inside or outside
+	if (MarchingCubesTables::EdgeTable[CubeIndex] == 0)
+	{
+		return;
+	}
+
+	// Get material and biome for this cube (sample at base position)
+	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, Stride, CubeIndex);
+	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, Stride, CubeIndex);
+
+	// Calculate corner world positions (in actual world units)
+	FVector3f CornerPositions[8];
+	for (int32 i = 0; i < 8; i++)
+	{
+		const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
+		// Position in world space (stride affects the spacing)
+		CornerPositions[i] = FVector3f(
+			static_cast<float>(X + Offset.X * Stride) * VoxelSize,
+			static_cast<float>(Y + Offset.Y * Stride) * VoxelSize,
+			static_cast<float>(Z + Offset.Z * Stride) * VoxelSize
+		);
+	}
+
+	// Interpolate vertex positions along intersected edges
+	FVector3f EdgeVertices[12];
+	const uint16 EdgeMask = MarchingCubesTables::EdgeTable[CubeIndex];
+
+	for (int32 Edge = 0; Edge < 12; Edge++)
+	{
+		if (EdgeMask & (1 << Edge))
+		{
+			const int32 V0 = MarchingCubesTables::EdgeVertexPairs[Edge][0];
+			const int32 V1 = MarchingCubesTables::EdgeVertexPairs[Edge][1];
+
+			EdgeVertices[Edge] = InterpolateEdge(
+				CornerDensities[V0], CornerDensities[V1],
+				CornerPositions[V0], CornerPositions[V1],
+				IsoLevel
+			);
+		}
+	}
+
+	// Generate triangles from the lookup table
+	const int8* TriIndices = MarchingCubesTables::TriTable[CubeIndex];
+
+	for (int32 i = 0; TriIndices[i] != -1; i += 3)
+	{
+		const int32 Edge0 = TriIndices[i];
+		const int32 Edge1 = TriIndices[i + 1];
+		const int32 Edge2 = TriIndices[i + 2];
+
+		const FVector3f& P0 = EdgeVertices[Edge0];
+		const FVector3f& P1 = EdgeVertices[Edge1];
+		const FVector3f& P2 = EdgeVertices[Edge2];
+
+		// Calculate normals using gradient of density field at each vertex
+		// For LOD, we sample gradients at the actual world positions
+		const FVector3f N0 = CalculateGradientNormalLOD(Request,
+			P0.X / VoxelSize, P0.Y / VoxelSize, P0.Z / VoxelSize, Stride);
+		const FVector3f N1 = CalculateGradientNormalLOD(Request,
+			P1.X / VoxelSize, P1.Y / VoxelSize, P1.Z / VoxelSize, Stride);
+		const FVector3f N2 = CalculateGradientNormalLOD(Request,
+			P2.X / VoxelSize, P2.Y / VoxelSize, P2.Z / VoxelSize, Stride);
+
+		// Dominant-axis UV projection based on face normal
+		const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
+
+		// Calculate face normal from triangle edges
+		const FVector3f FaceNormal = FVector3f::CrossProduct(P1 - P0, P2 - P0).GetSafeNormal();
+
+		// Determine dominant axis based on face normal
+		const float AbsX = FMath::Abs(FaceNormal.X);
+		const float AbsY = FMath::Abs(FaceNormal.Y);
+		const float AbsZ = FMath::Abs(FaceNormal.Z);
+
+		FVector2f UV0, UV1, UV2;
+
+		if (AbsZ >= AbsX && AbsZ >= AbsY)
+		{
+			// Z-dominant (horizontal surface): project onto XY plane
+			UV0 = FVector2f(P0.X * UVScale / VoxelSize, P0.Y * UVScale / VoxelSize);
+			UV1 = FVector2f(P1.X * UVScale / VoxelSize, P1.Y * UVScale / VoxelSize);
+			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Y * UVScale / VoxelSize);
+		}
+		else if (AbsX >= AbsY)
+		{
+			// X-dominant (East/West facing): project onto YZ plane
+			UV0 = FVector2f(P0.Y * UVScale / VoxelSize, P0.Z * UVScale / VoxelSize);
+			UV1 = FVector2f(P1.Y * UVScale / VoxelSize, P1.Z * UVScale / VoxelSize);
+			UV2 = FVector2f(P2.Y * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
+		}
+		else
+		{
+			// Y-dominant (North/South facing): project onto XZ plane
+			UV0 = FVector2f(P0.X * UVScale / VoxelSize, P0.Z * UVScale / VoxelSize);
+			UV1 = FVector2f(P1.X * UVScale / VoxelSize, P1.Z * UVScale / VoxelSize);
+			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
+		}
+
+		// Vertex color: MaterialID, BiomeID, AO
+		const FColor VertexColor(MaterialID, BiomeID, 0, 255);
+
+		// Get base index for this triangle
+		const uint32 BaseVertex = OutMeshData.Positions.Num();
+
+		// Add vertices
+		OutMeshData.Positions.Add(P0);
+		OutMeshData.Positions.Add(P1);
+		OutMeshData.Positions.Add(P2);
+
+		OutMeshData.Normals.Add(N0);
+		OutMeshData.Normals.Add(N1);
+		OutMeshData.Normals.Add(N2);
+
+		OutMeshData.UVs.Add(UV0);
+		OutMeshData.UVs.Add(UV1);
+		OutMeshData.UVs.Add(UV2);
+
+		OutMeshData.Colors.Add(VertexColor);
+		OutMeshData.Colors.Add(VertexColor);
+		OutMeshData.Colors.Add(VertexColor);
+
+		// Add indices
 		OutMeshData.Indices.Add(BaseVertex + 0);
 		OutMeshData.Indices.Add(BaseVertex + 1);
 		OutMeshData.Indices.Add(BaseVertex + 2);
@@ -572,6 +751,113 @@ uint8 FVoxelCPUSmoothMesher::GetDominantBiome(
 	}
 
 	// Find the most common biome
+	uint8 DominantBiome = 0;
+	int32 MaxCount = 0;
+
+	for (const auto& Pair : BiomeCounts)
+	{
+		if (Pair.Value > MaxCount)
+		{
+			MaxCount = Pair.Value;
+			DominantBiome = Pair.Key;
+		}
+	}
+
+	return DominantBiome;
+}
+
+// ============================================================================
+// LOD Helper Functions
+// ============================================================================
+
+FVector3f FVoxelCPUSmoothMesher::CalculateGradientNormalLOD(
+	const FVoxelMeshingRequest& Request,
+	float X, float Y, float Z,
+	int32 Stride) const
+{
+	// Use stride-scaled central difference for gradient approximation
+	// This gives smoother normals at higher LOD levels
+	const float Delta = static_cast<float>(Stride);
+
+	const int32 IX = FMath::FloorToInt(X);
+	const int32 IY = FMath::FloorToInt(Y);
+	const int32 IZ = FMath::FloorToInt(Z);
+
+	// Central difference gradient with LOD-scaled sampling
+	float gx = GetDensityAt(Request, IX + Stride, IY, IZ) - GetDensityAt(Request, IX - Stride, IY, IZ);
+	float gy = GetDensityAt(Request, IX, IY + Stride, IZ) - GetDensityAt(Request, IX, IY - Stride, IZ);
+	float gz = GetDensityAt(Request, IX, IY, IZ + Stride) - GetDensityAt(Request, IX, IY, IZ - Stride);
+
+	// Normal points away from solid (opposite to gradient direction)
+	FVector3f Normal(-gx, -gy, -gz);
+
+	if (!Normal.Normalize())
+	{
+		return FVector3f(0.0f, 0.0f, 1.0f);
+	}
+
+	return Normal;
+}
+
+uint8 FVoxelCPUSmoothMesher::GetDominantMaterialLOD(
+	const FVoxelMeshingRequest& Request,
+	int32 X, int32 Y, int32 Z,
+	int32 Stride,
+	uint8 CubeIndex) const
+{
+	// Count materials from solid corners at strided positions
+	TMap<uint8, int32> MaterialCounts;
+
+	for (int32 i = 0; i < 8; i++)
+	{
+		if (CubeIndex & (1 << i))
+		{
+			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
+			const int32 SampleX = X + Offset.X * Stride;
+			const int32 SampleY = Y + Offset.Y * Stride;
+			const int32 SampleZ = Z + Offset.Z * Stride;
+			const FVoxelData Voxel = GetVoxelAt(Request, SampleX, SampleY, SampleZ);
+			MaterialCounts.FindOrAdd(Voxel.MaterialID)++;
+		}
+	}
+
+	uint8 DominantMaterial = 0;
+	int32 MaxCount = 0;
+
+	for (const auto& Pair : MaterialCounts)
+	{
+		if (Pair.Value > MaxCount)
+		{
+			MaxCount = Pair.Value;
+			DominantMaterial = Pair.Key;
+		}
+	}
+
+	return DominantMaterial;
+}
+
+uint8 FVoxelCPUSmoothMesher::GetDominantBiomeLOD(
+	const FVoxelMeshingRequest& Request,
+	int32 X, int32 Y, int32 Z,
+	int32 Stride,
+	uint8 CubeIndex) const
+{
+	// Count biomes from solid corners at strided positions
+	TMap<uint8, int32> BiomeCounts;
+
+	for (int32 i = 0; i < 8; i++)
+	{
+		if (CubeIndex & (1 << i))
+		{
+			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
+			const int32 SampleX = X + Offset.X * Stride;
+			const int32 SampleY = Y + Offset.Y * Stride;
+			const int32 SampleZ = Z + Offset.Z * Stride;
+			const FVoxelData Voxel = GetVoxelAt(Request, SampleX, SampleY, SampleZ);
+			BiomeCounts.FindOrAdd(Voxel.BiomeID)++;
+		}
+	}
+
 	uint8 DominantBiome = 0;
 	int32 MaxCount = 0;
 

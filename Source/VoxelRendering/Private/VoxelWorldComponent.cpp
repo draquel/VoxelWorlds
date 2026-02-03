@@ -193,6 +193,69 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& G
 	UpdateBounds();
 }
 
+void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
+	const FIntVector& ChunkCoord,
+	TArray<FVoxelVertex>&& Vertices,
+	TArray<uint32>&& Indices,
+	int32 LODLevel,
+	const FBox& LocalBounds)
+{
+	check(IsInGameThread());
+
+	const uint32 VertexCount = Vertices.Num();
+	const uint32 IndexCount = Indices.Num();
+
+	if (VertexCount == 0 || IndexCount == 0)
+	{
+		RemoveChunk(ChunkCoord);
+		return;
+	}
+
+	// Update game thread tracking
+	{
+		FScopeLock Lock(&ChunkInfoLock);
+
+		FChunkInfo& Info = ChunkInfoMap.FindOrAdd(ChunkCoord);
+		Info.Bounds = LocalBounds;
+		Info.LODLevel = LODLevel;
+		Info.bIsVisible = true;
+
+		bTotalBoundsDirty = true;
+	}
+
+	// Update statistics
+	CachedVertexCount += VertexCount;
+	CachedTriangleCount += IndexCount / 3;
+	CachedGPUMemory += (VertexCount * sizeof(FVoxelVertex)) + (IndexCount * sizeof(uint32));
+
+	// Calculate chunk world position
+	FVector ChunkWorldPos = FVector(ChunkCoord) * ChunkWorldSize;
+
+	// Enqueue render thread update - pass CPU data directly (NO GPU ROUNDTRIP!)
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(UpdateVoxelChunkFromCPU)(
+			[Proxy, ChunkCoord, Vertices = MoveTemp(Vertices), Indices = MoveTemp(Indices), LODLevel, ChunkLocalBounds = LocalBounds, ChunkWorldPos]
+			(FRHICommandListImmediate& RHICmdList) mutable
+			{
+				Proxy->UpdateChunkFromCPUData_RenderThread(
+					RHICmdList,
+					ChunkCoord,
+					MoveTemp(Vertices),
+					MoveTemp(Indices),
+					LODLevel,
+					ChunkLocalBounds,
+					ChunkWorldPos
+				);
+			}
+		);
+	}
+
+	// Update bounds
+	UpdateBounds();
+}
+
 void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
 {
 	check(IsInGameThread());

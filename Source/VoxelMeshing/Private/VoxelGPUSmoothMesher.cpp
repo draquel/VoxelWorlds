@@ -61,6 +61,7 @@ public:
 		SHADER_PARAMETER(float, VoxelSize)
 		SHADER_PARAMETER(FVector3f, ChunkWorldPosition)
 		SHADER_PARAMETER(float, IsoLevel)
+		SHADER_PARAMETER(uint32, LODStride)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -340,6 +341,10 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 	const FVoxelMeshingConfig CapturedConfig = Config;
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 
+	// Calculate LOD stride: 2^LODLevel
+	const int32 LODLevel = FMath::Clamp(Request.LODLevel, 0, 7);
+	const uint32 LODStride = 1u << LODLevel;
+
 	ENQUEUE_RENDER_COMMAND(GenerateSmoothMesh)(
 		[PackedVoxels = MoveTemp(PackedVoxels),
 		 TriTableData = MoveTemp(TriTableData),
@@ -369,6 +374,7 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 		 ChunkWorldPos,
 		 CapturedConfig,
 		 ChunkCoord,
+		 LODStride,
 		 RequestId,
 		 Result,
 		 OnComplete](FRHICommandListImmediate& RHICmdList)
@@ -506,12 +512,15 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 				MeshParams->VoxelSize = VoxelSize;
 				MeshParams->ChunkWorldPosition = ChunkWorldPos;
 				MeshParams->IsoLevel = CapturedConfig.IsoLevel;
+				MeshParams->LODStride = LODStride;
 
 				// Calculate dispatch dimensions (8x8x4 thread groups)
+				// With LOD stride, we need fewer threads (ChunkSize/Stride cubes per axis)
+				const int32 LODChunkSize = ChunkSize / (int32)LODStride;
 				FIntVector GroupCount(
-					FMath::DivideAndRoundUp(ChunkSize, 8),
-					FMath::DivideAndRoundUp(ChunkSize, 8),
-					FMath::DivideAndRoundUp(ChunkSize, 4)
+					FMath::DivideAndRoundUp(LODChunkSize, 8),
+					FMath::DivideAndRoundUp(LODChunkSize, 8),
+					FMath::DivideAndRoundUp(LODChunkSize, 4)
 				);
 
 				FComputeShaderUtils::AddPass(

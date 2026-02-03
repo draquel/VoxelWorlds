@@ -475,6 +475,6 @@ protected:
 	/** Queue of meshes waiting to be uploaded to renderer */
 	TArray<FPendingMeshData> PendingMeshQueue;
 
-	/** Maximum pending meshes before throttling generation */
-	static constexpr int32 MaxPendingMeshes = 16;
+	/** Maximum pending meshes before throttling generation - keep low to avoid render job overflow */
+	static constexpr int32 MaxPendingMeshes = 4;
 };

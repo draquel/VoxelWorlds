@@ -38,6 +38,12 @@ public class VoxelStreaming : ModuleRules
 			}
 		);
 
+		// Editor-only dependencies for viewport camera tracking
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
+
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{

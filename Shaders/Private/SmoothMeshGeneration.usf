@@ -86,6 +86,7 @@ uint ChunkSize;
 float VoxelSize;
 float3 ChunkWorldPosition;
 float IsoLevel;
+uint LODStride;  // 2^LODLevel (1, 2, 4, 8...)
 
 // ==================== Helper Functions ====================
 
@@ -259,6 +260,25 @@ float3 CalculateGradientNormal(int3 Position)
 }
 
 /**
+ * Calculate gradient-based normal with LOD-aware sampling.
+ */
+float3 CalculateGradientNormalLOD(int3 Position, int Stride)
+{
+    float gx = GetDensityAt(Position + int3(Stride, 0, 0)) - GetDensityAt(Position + int3(-Stride, 0, 0));
+    float gy = GetDensityAt(Position + int3(0, Stride, 0)) - GetDensityAt(Position + int3(0, -Stride, 0));
+    float gz = GetDensityAt(Position + int3(0, 0, Stride)) - GetDensityAt(Position + int3(0, 0, -Stride));
+
+    float3 Normal = float3(-gx, -gy, -gz);
+
+    float Len = length(Normal);
+    if (Len > 0.0001f)
+    {
+        return Normal / Len;
+    }
+    return float3(0, 0, 1);
+}
+
+/**
  * Get dominant material from solid corners.
  */
 uint GetDominantMaterial(int3 CubePos, uint CubeIndex)
@@ -296,6 +316,42 @@ uint GetDominantBiome(int3 CubePos, uint CubeIndex)
 }
 
 /**
+ * Get dominant material from solid corners (LOD version with stride).
+ */
+uint GetDominantMaterialLOD(int3 CubePos, uint CubeIndex, int Stride)
+{
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        if (CubeIndex & (1u << i))
+        {
+            int3 CornerPos = CubePos + CornerOffsets[i] * Stride;
+            uint PackedVoxel = GetVoxelAt(CornerPos);
+            return GetMaterialID(PackedVoxel);
+        }
+    }
+    return 0;
+}
+
+/**
+ * Get dominant biome from solid corners (LOD version with stride).
+ */
+uint GetDominantBiomeLOD(int3 CubePos, uint CubeIndex, int Stride)
+{
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        if (CubeIndex & (1u << i))
+        {
+            int3 CornerPos = CubePos + CornerOffsets[i] * Stride;
+            uint PackedVoxel = GetVoxelAt(CornerPos);
+            return GetBiomeID(PackedVoxel);
+        }
+    }
+    return 0;
+}
+
+/**
  * Get triangle edge from lookup table buffer.
  */
 int GetTriTableEntry(uint CubeIndex, uint TriIndex)
@@ -311,7 +367,11 @@ void MainCS(
     uint3 GroupThreadId : SV_GroupThreadID,
     uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-    int3 CubePos = (int3)DispatchThreadId;
+    int Stride = (int)LODStride;
+
+    // Convert dispatch thread ID to actual voxel position using stride
+    // Each thread handles one LOD cube at strided intervals
+    int3 CubePos = (int3)DispatchThreadId * Stride;
 
     // Early out if outside chunk bounds
     if (any(CubePos >= (int)ChunkSize))
@@ -319,14 +379,15 @@ void MainCS(
         return;
     }
 
-    // Sample density at 8 cube corners
+    // Sample density at 8 cube corners using strided positions
     float CornerDensities[8];
     float3 CornerPositions[8];
 
     [unroll]
     for (uint i = 0; i < 8; i++)
     {
-        int3 CornerPos = CubePos + CornerOffsets[i];
+        // Corner positions are offset by stride to form larger LOD cubes
+        int3 CornerPos = CubePos + CornerOffsets[i] * Stride;
         CornerDensities[i] = GetDensityAt(CornerPos);
         CornerPositions[i] = ChunkWorldPosition + float3(CornerPos) * VoxelSize;
     }
@@ -341,8 +402,8 @@ void MainCS(
     }
 
     // Get material and biome for this cube
-    uint MaterialID = GetDominantMaterial(CubePos, CubeIndex);
-    uint BiomeID = GetDominantBiome(CubePos, CubeIndex);
+    uint MaterialID = GetDominantMaterialLOD(CubePos, CubeIndex, Stride);
+    uint BiomeID = GetDominantBiomeLOD(CubePos, CubeIndex, Stride);
 
     // Interpolate vertex positions along intersected edges
     float3 EdgeVertices[12];
@@ -407,9 +468,10 @@ void MainCS(
         int3 VP1 = (int3)((P1 - ChunkWorldPosition) / VoxelSize);
         int3 VP2 = (int3)((P2 - ChunkWorldPosition) / VoxelSize);
 
-        float3 N0 = CalculateGradientNormal(VP0);
-        float3 N1 = CalculateGradientNormal(VP1);
-        float3 N2 = CalculateGradientNormal(VP2);
+        // Use LOD-aware gradient calculation
+        float3 N0 = CalculateGradientNormalLOD(VP0, Stride);
+        float3 N1 = CalculateGradientNormalLOD(VP1, Stride);
+        float3 N2 = CalculateGradientNormalLOD(VP2, Stride);
 
         // Dominant-axis UV projection based on face normal
         // This reduces texture stretching on slopes by choosing the best projection plane

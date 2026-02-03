@@ -243,7 +243,7 @@ void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
 	Stats.TriangleCount = Indices.Num() / 3;
 	Stats.LODLevel = LODLevel;
 	Stats.MemoryUsage = (Vertices.Num() * sizeof(FVoxelVertex)) + (Indices.Num() * sizeof(uint32));
-	// Bounds are already in world space (vertices include chunk world position)
+	// Bounds are in local space here, will be offset in scene proxy
 	Stats.Bounds = LocalBounds;
 	Stats.bIsVisible = true;
 
@@ -251,66 +251,20 @@ void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
 	TotalTriangleCount += Stats.TriangleCount;
 	TotalGPUMemory += Stats.MemoryUsage;
 
-	// Create GPU buffers on render thread
-	TWeakObjectPtr<UVoxelWorldComponent> WeakComponent = WorldComponent;
-	FVector ChunkWorldPos = FVector(ChunkCoord) * ChunkWorldSize;
-
-	ENQUEUE_RENDER_COMMAND(UploadVoxelMeshCPU)(
-		[WeakComponent, ChunkCoord, LODLevel, LocalBounds, ChunkWorldPos, Vertices = MoveTemp(Vertices), Indices = MoveTemp(Indices)]
-		(FRHICommandListImmediate& RHICmdList) mutable
-		{
-			if (!WeakComponent.IsValid())
-			{
-				return;
-			}
-
-			// Create vertex buffer
-			const uint32 VBSize = Vertices.Num() * sizeof(FVoxelVertex);
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-			FRHIResourceCreateInfo VBCreateInfo(TEXT("VoxelVertexBuffer"));
-			FBufferRHIRef VertexBufferRHI = RHICmdList.CreateBuffer(VBSize, BUF_Static | BUF_VertexBuffer, sizeof(FVoxelVertex), ERHIAccess::VertexOrIndexBuffer, VBCreateInfo);
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
-			void* VBData = RHICmdList.LockBuffer(VertexBufferRHI, 0, VBSize, RLM_WriteOnly);
-			FMemory::Memcpy(VBData, Vertices.GetData(), VBSize);
-			RHICmdList.UnlockBuffer(VertexBufferRHI);
-
-			// Create index buffer
-			const uint32 IBSize = Indices.Num() * sizeof(uint32);
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-			FRHIResourceCreateInfo IBCreateInfo(TEXT("VoxelIndexBuffer"));
-			FBufferRHIRef IndexBufferRHI = RHICmdList.CreateBuffer(IBSize, BUF_Static | BUF_IndexBuffer, sizeof(uint32), ERHIAccess::VertexOrIndexBuffer, IBCreateInfo);
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
-			void* IBData = RHICmdList.LockBuffer(IndexBufferRHI, 0, IBSize, RLM_WriteOnly);
-			FMemory::Memcpy(IBData, Indices.GetData(), IBSize);
-			RHICmdList.UnlockBuffer(IndexBufferRHI);
-
-			// Create GPU data struct
-			FVoxelChunkGPUData GPUData;
-			GPUData.ChunkCoord = ChunkCoord;
-			GPUData.LODLevel = LODLevel;
-			GPUData.VertexCount = Vertices.Num();
-			GPUData.IndexCount = Indices.Num();
-			GPUData.LocalBounds = LocalBounds;
-			GPUData.ChunkWorldPosition = ChunkWorldPos;
-			GPUData.MorphFactor = 0.0f;
-			GPUData.bIsVisible = true;
-			GPUData.VertexBufferRHI = VertexBufferRHI;
-			GPUData.IndexBufferRHI = IndexBufferRHI;
-
-			// Enqueue back to game thread to update component
-			AsyncTask(ENamedThreads::GameThread, [WeakComponent, GPUData]()
-			{
-				if (WeakComponent.IsValid())
-				{
-					WeakComponent->UpdateChunkBuffersFromGPU(GPUData);
-				}
-			});
-		}
+	// Use DIRECT CPU PATH - no GPU buffer roundtrip!
+	// This passes CPU arrays directly to the render thread, avoiding:
+	// 1. Creating intermediate GPU buffers
+	// 2. Bouncing back to game thread
+	// 3. GPU readback stalls in scene proxy
+	WorldComponent->UpdateChunkBuffersFromCPUData(
+		ChunkCoord,
+		MoveTemp(Vertices),
+		MoveTemp(Indices),
+		LODLevel,
+		LocalBounds
 	);
 
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated chunk %s (CPU path) - %d verts, %d tris"),
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated chunk %s (DIRECT CPU path) - %d verts, %d tris"),
 		*ChunkCoord.ToString(), Stats.VertexCount, Stats.TriangleCount);
 }
 

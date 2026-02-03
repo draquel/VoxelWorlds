@@ -178,6 +178,70 @@ private:
 		uint8 CubeIndex) const;
 
 	// ============================================================================
+	// LOD Support
+	// ============================================================================
+
+	/**
+	 * Process a single cube at position with LOD stride.
+	 * Generates triangles for the isosurface using strided sampling.
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z Cube position (in voxel coordinates, not LOD-scaled)
+	 * @param Stride LOD stride (2^LODLevel)
+	 * @param OutMeshData Output mesh data
+	 * @param OutTriangleCount Counter for generated triangles
+	 */
+	void ProcessCubeLOD(
+		const FVoxelMeshingRequest& Request,
+		int32 X, int32 Y, int32 Z,
+		int32 Stride,
+		FChunkMeshData& OutMeshData,
+		uint32& OutTriangleCount);
+
+	/**
+	 * Calculate gradient-based normal at a position using LOD-aware sampling.
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z Position to calculate normal at (in world units)
+	 * @param Stride LOD stride for sampling offset
+	 * @return Unit normal vector pointing away from solid
+	 */
+	FVector3f CalculateGradientNormalLOD(
+		const FVoxelMeshingRequest& Request,
+		float X, float Y, float Z,
+		int32 Stride) const;
+
+	/**
+	 * Get dominant material for an LOD cube from strided corners.
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z Cube position
+	 * @param Stride LOD stride
+	 * @param CubeIndex The cube configuration index
+	 * @return Material ID from dominant solid corner
+	 */
+	uint8 GetDominantMaterialLOD(
+		const FVoxelMeshingRequest& Request,
+		int32 X, int32 Y, int32 Z,
+		int32 Stride,
+		uint8 CubeIndex) const;
+
+	/**
+	 * Get dominant biome for an LOD cube from strided corners.
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z Cube position
+	 * @param Stride LOD stride
+	 * @param CubeIndex The cube configuration index
+	 * @return Biome ID from dominant solid corner
+	 */
+	uint8 GetDominantBiomeLOD(
+		const FVoxelMeshingRequest& Request,
+		int32 X, int32 Y, int32 Z,
+		int32 Stride,
+		uint8 CubeIndex) const;
+
+	// ============================================================================
 	// State
 	// ============================================================================
 
