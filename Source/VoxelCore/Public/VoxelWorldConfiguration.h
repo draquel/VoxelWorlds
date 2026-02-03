@@ -80,13 +80,29 @@ public:
 
 	// ==================== LOD Settings ====================
 
-	/** LOD distance bands configuration */
+	/**
+	 * Enable Level of Detail system.
+	 * When disabled, all chunks render at LOD 0 (full detail).
+	 * Useful for debugging LOD seams or when view distance is small.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	bool bEnableLOD = true;
+
+	/** LOD distance bands configuration */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLOD"))
 	TArray<FLODBand> LODBands;
 
 	/** Enable smooth LOD transitions (morphing) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLOD"))
 	bool bEnableLODMorphing = true;
+
+	/**
+	 * Enable LOD seam handling (skirts, Transvoxel, etc.).
+	 * When disabled, no seam geometry is generated between LOD levels.
+	 * Useful for debugging or when LOD is disabled entirely.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLOD"))
+	bool bEnableLODSeams = true;
 
 	/** Enable view frustum culling for chunks */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")

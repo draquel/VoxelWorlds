@@ -23,6 +23,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	VoxelSize = WorldConfig->VoxelSize;
 	BaseChunkSize = WorldConfig->ChunkSize;
 	WorldMode = WorldConfig->WorldMode;
+	bEnableLOD = WorldConfig->bEnableLOD;
 	bEnableMorphing = WorldConfig->bEnableLODMorphing;
 	bEnableFrustumCulling = WorldConfig->bEnableFrustumCulling;
 
@@ -79,6 +80,12 @@ int32 FDistanceBandLODStrategy::GetLODForChunk(
 	const FIntVector& ChunkCoord,
 	const FLODQueryContext& Context) const
 {
+	// When LOD is disabled, always return LOD 0 (full detail)
+	if (!bEnableLOD)
+	{
+		return 0;
+	}
+
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 	const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 

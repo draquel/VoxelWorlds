@@ -18,6 +18,7 @@
 class UVoxelWorldConfiguration;
 class IVoxelLODStrategy;
 class IVoxelMeshRenderer;
+class FVoxelCPUSmoothMesher;
 
 /**
  * Internal chunk state tracking.
@@ -284,6 +285,12 @@ public:
 	 * Draw debug visualization.
 	 */
 	void DrawDebugVisualization() const;
+
+	/**
+	 * Get the smooth mesher for debug access.
+	 * Returns nullptr if mesher is not a smooth mesher or not initialized.
+	 */
+	FVoxelCPUSmoothMesher* GetSmoothMesher() const;
 
 	// ==================== Events ====================
 

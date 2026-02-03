@@ -109,6 +109,32 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug", meta = (ClampMin = "0"))
 	float DebugStatsPrintInterval = 5.0f;
 
+	// ==================== Transvoxel Debug ====================
+
+	/** Enable detailed logging for Transvoxel transition cells */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel")
+	bool bDebugLogTransitionCells = false;
+
+	/** Enable visualization of Transvoxel transition cells */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel")
+	bool bDrawTransitionCellDebug = false;
+
+	/** Show sample points in transition cells (red=outside, green=inside) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel", meta = (EditCondition = "bDrawTransitionCellDebug"))
+	bool bShowTransitionSamplePoints = true;
+
+	/** Show generated vertices in transition cells */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel", meta = (EditCondition = "bDrawTransitionCellDebug"))
+	bool bShowTransitionVertices = true;
+
+	/** Show transition cell bounding boxes */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel", meta = (EditCondition = "bDrawTransitionCellDebug"))
+	bool bShowTransitionCellBounds = true;
+
+	/** Size of debug points in world units */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel", meta = (ClampMin = "1", ClampMax = "50"))
+	float DebugPointSize = 10.0f;
+
 	// ==================== Runtime Access ====================
 
 	/** Get the chunk manager component */
@@ -122,6 +148,14 @@ public:
 	/** Force a streaming update */
 	UFUNCTION(BlueprintCallable, Category = "Voxel")
 	void ForceStreamingUpdate();
+
+	/** Draw transition cell debug visualization */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Debug|Transvoxel")
+	void DrawTransitionCellDebug();
+
+	/** Toggle transition cell debugging on/off */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Debug|Transvoxel")
+	void SetTransitionCellDebugging(bool bEnable);
 
 protected:
 	/** Initialize the voxel world systems */

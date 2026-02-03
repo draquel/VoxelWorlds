@@ -135,6 +135,31 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	UPROPERTY()
 	uint32 EdgeCornerFlags = 0;
 
+	/**
+	 * Flags indicating which faces border lower-LOD neighbors.
+	 * Used by Transvoxel to generate transition cells.
+	 * Bit 0: -X, Bit 1: +X, Bit 2: -Y, Bit 3: +Y, Bit 4: -Z, Bit 5: +Z
+	 */
+	UPROPERTY()
+	uint8 TransitionFaces = 0;
+
+	/**
+	 * LOD levels of neighbor chunks for each face.
+	 * Used by Transvoxel to determine transition cell stride.
+	 * Order: -X, +X, -Y, +Y, -Z, +Z
+	 * Value of -1 means no neighbor (chunk at world boundary).
+	 */
+	UPROPERTY()
+	int32 NeighborLODLevels[6] = {-1, -1, -1, -1, -1, -1};
+
+	// Transition face flag bits
+	static constexpr uint8 TRANSITION_XNEG = 1 << 0;
+	static constexpr uint8 TRANSITION_XPOS = 1 << 1;
+	static constexpr uint8 TRANSITION_YNEG = 1 << 2;
+	static constexpr uint8 TRANSITION_YPOS = 1 << 3;
+	static constexpr uint8 TRANSITION_ZNEG = 1 << 4;
+	static constexpr uint8 TRANSITION_ZPOS = 1 << 5;
+
 	// Edge flag bits (0-11)
 	static constexpr uint32 EDGE_XPOS_YPOS = 1 << 0;
 	static constexpr uint32 EDGE_XPOS_YNEG = 1 << 1;
@@ -376,4 +401,34 @@ struct VOXELMESHING_API FVoxelMeshingConfig
 	 */
 	UPROPERTY(EditAnywhere, Category = "Meshing", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bUseSmoothMeshing"))
 	float IsoLevel = 0.5f;
+
+	/**
+	 * Use Transvoxel algorithm for seamless LOD transitions.
+	 * Transvoxel generates special transition cells at LOD boundaries that
+	 * properly connect high-resolution and low-resolution meshes without seams.
+	 * Uses Eric Lengyel's official lookup tables for correct triangulation.
+	 * Only applies when bUseSmoothMeshing is true.
+	 *
+	 * NOTE: Currently disabled by default due to complexity. Consider using
+	 * skirts or boundary snapping for simpler LOD seam handling.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Meshing", meta = (EditCondition = "bUseSmoothMeshing"))
+	bool bUseTransvoxel = false;
+
+	/**
+	 * Generate skirts along chunk boundaries to hide LOD seams.
+	 * Skirts extend boundary edges outward to overlap with neighboring chunks,
+	 * covering gaps between chunks at different LOD levels.
+	 * Only applies when bUseSmoothMeshing is true and Transvoxel is disabled.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Meshing", meta = (EditCondition = "bUseSmoothMeshing && !bUseTransvoxel"))
+	bool bGenerateSkirts = true;
+
+	/**
+	 * Depth of skirts in voxel units.
+	 * Larger values better hide LOD transitions but add more geometry.
+	 * Default 2.0 provides good coverage for most LOD transitions.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Meshing", meta = (ClampMin = "0.5", ClampMax = "8.0", EditCondition = "bUseSmoothMeshing && !bUseTransvoxel && bGenerateSkirts"))
+	float SkirtDepth = 2.0f;
 };

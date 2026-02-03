@@ -730,6 +730,7 @@ See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap
 ## References
 
 - [LOD System Details](LOD_SYSTEM.md)
+- [Smooth Meshing (Marching Cubes & Transvoxel)](SMOOTH_MESHING.md)
 - [Rendering System Details](RENDERING_SYSTEM.md)
 - [GPU Pipeline Details](GPU_PIPELINE.md)
 - [Data Structures Reference](DATA_STRUCTURES.md)

@@ -7,7 +7,9 @@
 #include "DistanceBandLODStrategy.h"
 #include "VoxelPMCRenderer.h"
 #include "VoxelCustomVFRenderer.h"
+#include "VoxelCPUSmoothMesher.h"
 #include "Engine/World.h"
+#include "DrawDebugHelpers.h"
 
 AVoxelWorldTestActor::AVoxelWorldTestActor()
 {
@@ -45,6 +47,30 @@ void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 	if (bDrawDebugVisualization && ChunkManager)
 	{
 		ChunkManager->DrawDebugVisualization();
+	}
+
+	// Sync Transvoxel debug flags to mesher each tick (allows runtime toggling)
+	static bool bWasDebuggingEnabled = false;
+	const bool bDebuggingEnabled = bDebugLogTransitionCells || bDrawTransitionCellDebug;
+
+	if (FVoxelCPUSmoothMesher* SmoothMesher = ChunkManager ? ChunkManager->GetSmoothMesher() : nullptr)
+	{
+		SmoothMesher->SetDebugLogging(bDebugLogTransitionCells);
+		SmoothMesher->SetDebugVisualization(bDrawTransitionCellDebug);
+
+		// Clear debug data when debugging is just enabled (fresh start)
+		if (bDebuggingEnabled && !bWasDebuggingEnabled)
+		{
+			SmoothMesher->ClearDebugData();
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Transvoxel debugging enabled - cleared debug data for fresh start"));
+		}
+	}
+	bWasDebuggingEnabled = bDebuggingEnabled;
+
+	// Transvoxel debug visualization
+	if (bDrawTransitionCellDebug)
+	{
+		DrawTransitionCellDebug();
 	}
 
 	// Periodic debug stats printing
@@ -186,6 +212,15 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Band %d: LOD%d, %.0f-%.0f, stride=%d"),
 			i, Band.LODLevel, Band.MinDistance, Band.MaxDistance, Band.VoxelStride);
 	}
+
+	// Propagate debug flags to mesher if enabled
+	if (bDebugLogTransitionCells || bDrawTransitionCellDebug)
+	{
+		SetTransitionCellDebugging(true);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelWorldTestActor: Transvoxel debugging ENABLED (Log=%s, Viz=%s)"),
+			bDebugLogTransitionCells ? TEXT("Yes") : TEXT("No"),
+			bDrawTransitionCellDebug ? TEXT("Yes") : TEXT("No"));
+	}
 }
 
 void AVoxelWorldTestActor::ShutdownVoxelWorld()
@@ -320,5 +355,155 @@ void AVoxelWorldTestActor::ForceStreamingUpdate()
 	if (ChunkManager)
 	{
 		ChunkManager->ForceStreamingUpdate();
+	}
+}
+
+void AVoxelWorldTestActor::SetTransitionCellDebugging(bool bEnable)
+{
+	// When called with bEnable, set both flags. Otherwise, this function
+	// can be called internally to sync existing flag values to the mesher.
+	if (bEnable)
+	{
+		bDebugLogTransitionCells = true;
+		bDrawTransitionCellDebug = true;
+	}
+
+	// Set the debug flags on the mesher via the chunk manager
+	if (ChunkManager)
+	{
+		if (FVoxelCPUSmoothMesher* SmoothMesher = ChunkManager->GetSmoothMesher())
+		{
+			SmoothMesher->SetDebugLogging(bDebugLogTransitionCells);
+			SmoothMesher->SetDebugVisualization(bDrawTransitionCellDebug);
+
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Transvoxel debug flags synced to mesher: Logging=%s, Visualization=%s"),
+				bDebugLogTransitionCells ? TEXT("ON") : TEXT("OFF"),
+				bDrawTransitionCellDebug ? TEXT("ON") : TEXT("OFF"));
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("SetTransitionCellDebugging: Smooth mesher not available (GetSmoothMesher returned nullptr)"));
+		}
+	}
+}
+
+void AVoxelWorldTestActor::DrawTransitionCellDebug()
+{
+	if (!bDrawTransitionCellDebug || !ChunkManager)
+	{
+		return;
+	}
+
+	FVoxelCPUSmoothMesher* SmoothMesher = ChunkManager->GetSmoothMesher();
+	if (!SmoothMesher)
+	{
+		static bool bLoggedOnce = false;
+		if (!bLoggedOnce)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("DrawTransitionCellDebug: SmoothMesher is nullptr"));
+			bLoggedOnce = true;
+		}
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const TArray<FVoxelCPUSmoothMesher::FTransitionCellDebugData>& DebugCells = SmoothMesher->GetTransitionCellDebugData();
+
+	// Log debug cell count periodically
+	static int32 FrameCounter = 0;
+	if (++FrameCounter % 60 == 0)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("DrawTransitionCellDebug: %d transition cells in debug data"), DebugCells.Num());
+	}
+
+	// Face colors for visualization
+	static const FColor FaceColors[6] = {
+		FColor::Red,     // -X
+		FColor::Green,   // +X
+		FColor::Blue,    // -Y
+		FColor::Yellow,  // +Y
+		FColor::Cyan,    // -Z
+		FColor::Magenta  // +Z
+	};
+
+	// Get chunk world offset
+	UVoxelWorldConfiguration* Config = ChunkManager->GetConfiguration();
+	const float ChunkWorldSize = Config ? Config->ChunkSize * Config->VoxelSize : 3200.0f;
+
+	for (const auto& Cell : DebugCells)
+	{
+		// Calculate world position offset for this chunk
+		const FVector ChunkWorldOffset = FVector(Cell.ChunkCoord) * ChunkWorldSize;
+		const FColor FaceColor = (Cell.FaceIndex >= 0 && Cell.FaceIndex < 6) ? FaceColors[Cell.FaceIndex] : FColor::White;
+
+		// Draw cell bounding box
+		if (bShowTransitionCellBounds)
+		{
+			const FVector CellMin = ChunkWorldOffset + FVector(Cell.CellBasePos);
+			const float CellSize = Cell.Stride * (Config ? Config->VoxelSize : 100.0f);
+			const FVector CellMax = CellMin + FVector(CellSize, CellSize, CellSize);
+			const FVector CellCenter = (CellMin + CellMax) * 0.5f;
+			const FVector CellExtent = FVector(CellSize * 0.5f);
+
+			DrawDebugBox(World, CellCenter, CellExtent, FaceColor, false, 0.0f, 0, 2.0f);
+
+			// Draw face label
+			FString Label = FString::Printf(TEXT("F%d C%d"), Cell.FaceIndex, Cell.CaseIndex);
+			DrawDebugString(World, CellCenter + FVector(0, 0, CellSize * 0.6f), Label, nullptr, FaceColor, 0.0f, true);
+		}
+
+		// Draw sample points
+		if (bShowTransitionSamplePoints && Cell.SamplePositions.Num() == 13)
+		{
+			for (int32 i = 0; i < 13; i++)
+			{
+				const FVector SamplePos = ChunkWorldOffset + FVector(Cell.SamplePositions[i]);
+				const bool bInside = Cell.SampleDensities[i] >= 0.5f;
+				const FColor SampleColor = bInside ? FColor::Green : FColor::Red;
+
+				// Draw larger spheres for corner samples (0,2,6,8), smaller for others
+				const bool bIsCorner = (i == 0 || i == 2 || i == 6 || i == 8);
+				const float PointSize = bIsCorner ? DebugPointSize * 1.5f : DebugPointSize;
+
+				DrawDebugSphere(World, SamplePos, PointSize, 8, SampleColor, false, 0.0f, 0, 1.0f);
+
+				// Label with index and density
+				if (bIsCorner || i == 4) // Label corners and center
+				{
+					FString SampleLabel = FString::Printf(TEXT("%d:%.2f"), i, Cell.SampleDensities[i]);
+					DrawDebugString(World, SamplePos + FVector(0, 0, PointSize * 2.0f), SampleLabel, nullptr, FColor::White, 0.0f, true);
+				}
+			}
+		}
+
+		// Draw generated vertices
+		if (bShowTransitionVertices)
+		{
+			for (int32 i = 0; i < Cell.GeneratedVertices.Num(); i++)
+			{
+				const FVector VertexPos = ChunkWorldOffset + FVector(Cell.GeneratedVertices[i]);
+
+				// Vertices in bright yellow
+				DrawDebugPoint(World, VertexPos, DebugPointSize * 2.0f, FColor::Yellow, false, 0.0f, 0);
+
+				// Connect vertices with lines (for first few to show structure)
+				if (i > 0)
+				{
+					const FVector PrevPos = ChunkWorldOffset + FVector(Cell.GeneratedVertices[i - 1]);
+					DrawDebugLine(World, PrevPos, VertexPos, FColor::Orange, false, 0.0f, 0, 1.0f);
+				}
+			}
+		}
+	}
+
+	// Draw summary in top-left
+	if (DebugCells.Num() > 0)
+	{
+		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Drawing %d transition cells debug visualization"), DebugCells.Num());
 	}
 }

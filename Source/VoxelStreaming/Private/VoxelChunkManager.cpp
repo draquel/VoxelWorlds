@@ -166,6 +166,14 @@ void UVoxelChunkManager::Initialize(
 		FVoxelMeshingConfig MeshConfig = SmoothMesher->GetConfig();
 		MeshConfig.bUseSmoothMeshing = true;
 		MeshConfig.IsoLevel = 0.5f;
+
+		// Disable LOD seam handling if configured
+		if (!Configuration->bEnableLODSeams)
+		{
+			MeshConfig.bUseTransvoxel = false;
+			MeshConfig.bGenerateSkirts = false;
+		}
+
 		SmoothMesher->SetConfig(MeshConfig);
 
 		Mesher = MoveTemp(SmoothMesher);
@@ -487,6 +495,23 @@ void UVoxelChunkManager::DrawDebugVisualization() const
 #endif
 }
 
+FVoxelCPUSmoothMesher* UVoxelChunkManager::GetSmoothMesher() const
+{
+	if (!Mesher.IsValid())
+	{
+		return nullptr;
+	}
+
+	// Check mesher type using the virtual GetMesherTypeName method
+	// This avoids dynamic_cast which requires RTTI (disabled in UE)
+	if (Mesher->GetMesherTypeName() == TEXT("CPU Smooth"))
+	{
+		return static_cast<FVoxelCPUSmoothMesher*>(Mesher.Get());
+	}
+
+	return nullptr;
+}
+
 // ==================== Internal Update Methods ====================
 
 FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
@@ -783,6 +808,129 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 
 		// Extract neighbor edge slices for seamless boundaries
 		ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
+
+		// Calculate transition faces for Transvoxel LOD seam handling
+		// A face needs transition cells if the neighbor is at a lower LOD level (coarser)
+		MeshRequest.TransitionFaces = 0;
+		const int32 CurrentLOD = Request.LODLevel;
+
+		// Check each of 6 faces for lower-LOD neighbors
+		static const FIntVector NeighborOffsets[6] = {
+			FIntVector(-1, 0, 0),  // -X
+			FIntVector(1, 0, 0),   // +X
+			FIntVector(0, -1, 0),  // -Y
+			FIntVector(0, 1, 0),   // +Y
+			FIntVector(0, 0, -1),  // -Z
+			FIntVector(0, 0, 1),   // +Z
+		};
+		static const uint8 TransitionFlags[6] = {
+			FVoxelMeshingRequest::TRANSITION_XNEG,
+			FVoxelMeshingRequest::TRANSITION_XPOS,
+			FVoxelMeshingRequest::TRANSITION_YNEG,
+			FVoxelMeshingRequest::TRANSITION_YPOS,
+			FVoxelMeshingRequest::TRANSITION_ZNEG,
+			FVoxelMeshingRequest::TRANSITION_ZPOS,
+		};
+
+		// Helper to check if neighbor data was successfully extracted
+		const int32 SliceSize = Configuration->ChunkSize * Configuration->ChunkSize;
+		const int32 ChunkSize = Configuration->ChunkSize;
+		auto HasNeighborData = [&MeshRequest, SliceSize](int32 FaceIndex) -> bool
+		{
+			switch (FaceIndex)
+			{
+				case 0: return MeshRequest.NeighborXNeg.Num() == SliceSize;
+				case 1: return MeshRequest.NeighborXPos.Num() == SliceSize;
+				case 2: return MeshRequest.NeighborYNeg.Num() == SliceSize;
+				case 3: return MeshRequest.NeighborYPos.Num() == SliceSize;
+				case 4: return MeshRequest.NeighborZNeg.Num() == SliceSize;
+				case 5: return MeshRequest.NeighborZPos.Num() == SliceSize;
+				default: return false;
+			}
+		};
+
+		// Helper to check if ALL edge data needed for a transition face is available
+		// Transition cells at face edges need diagonal neighbor data
+		auto HasAllEdgeDataForFace = [&MeshRequest, ChunkSize](int32 FaceIndex) -> bool
+		{
+			// For each face, check if the edge neighbors that would be needed exist
+			// Face 0 (-X): needs edges with Y and Z neighbors
+			// Face 1 (+X): needs edges with Y and Z neighbors
+			// Face 2 (-Y): needs edges with X and Z neighbors
+			// Face 3 (+Y): needs edges with X and Z neighbors
+			// Face 4 (-Z): needs edges with X and Y neighbors
+			// Face 5 (+Z): needs edges with X and Y neighbors
+			switch (FaceIndex)
+			{
+				case 0: // -X face
+					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YPOS) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZPOS);
+				case 1: // +X face
+					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YPOS) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZPOS);
+				case 2: // -Y face
+					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZPOS);
+				case 3: // +Y face
+					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YPOS) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YPOS) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZPOS);
+				case 4: // -Z face
+					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZNEG) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZNEG);
+				case 5: // +Z face
+					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZPOS) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZPOS) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZPOS) &&
+					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZPOS);
+				default:
+					return false;
+			}
+		};
+
+		for (int32 i = 0; i < 6; i++)
+		{
+			const FIntVector NeighborCoord = Request.ChunkCoord + NeighborOffsets[i];
+			if (const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
+			{
+				// Store neighbor LOD level for transition cell stride calculation
+				MeshRequest.NeighborLODLevels[i] = NeighborState->LODLevel;
+
+				// Neighbor exists - check if it's at a lower LOD (higher LOD level number = coarser)
+				// IMPORTANT: Verify that ALL neighbor data needed for this face is available!
+				// This includes the face neighbor AND all edge neighbors for transition cells at edges.
+				if (NeighborState->LODLevel > CurrentLOD)
+				{
+					if (HasNeighborData(i) && HasAllEdgeDataForFace(i))
+					{
+						MeshRequest.TransitionFaces |= TransitionFlags[i];
+					}
+					else
+					{
+						// Missing some neighbor data - skip transition cells for entire face
+						// This prevents mixing transition and regular MC on the same boundary
+						UE_LOG(LogVoxelStreaming, Verbose,
+							TEXT("Chunk (%d,%d,%d) face %d: missing edge/face neighbor data - skipping all transition cells for this face"),
+							Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, i);
+					}
+				}
+			}
+			else
+			{
+				// No neighbor - mark as -1
+				MeshRequest.NeighborLODLevels[i] = -1;
+			}
+			// If neighbor doesn't exist, no transition needed (will be at chunk boundary anyway)
+		}
 
 		// Generate mesh using CPU mesher
 		FChunkMeshData MeshData;

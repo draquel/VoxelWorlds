@@ -860,18 +860,61 @@ static FAutoConsoleCommand ShowLODZones(
 
 ---
 
+## LOD Seam Handling
+
+When adjacent chunks render at different LOD levels, their boundary vertices may not align, creating visible seams. The VoxelWorlds system handles this differently for each meshing mode:
+
+### Cubic Meshing
+
+Cubic meshes naturally align at boundaries because voxel faces are axis-aligned. No special seam handling is required.
+
+### Smooth Meshing (Transvoxel)
+
+Smooth meshing (Marching Cubes) has mismatched vertices at LOD boundaries because vertex positions depend on density interpolation. The **Transvoxel algorithm** solves this:
+
+1. **Transition Detection**: The chunk manager detects which faces border lower-LOD neighbors
+2. **Transition Cells**: Boundary cells use special 9-sample transition cells instead of standard 8-corner cubes
+3. **Seamless Geometry**: Transition cells produce geometry that correctly connects to both LOD levels
+
+See [SMOOTH_MESHING.md](SMOOTH_MESHING.md) for detailed Transvoxel documentation.
+
+### Configuration
+
+```cpp
+// In FVoxelMeshingConfig
+bool bUseTransvoxel = true;  // Recommended for smooth meshing
+
+// Fallback (deprecated)
+bool bGenerateSkirts = true;  // Only if Transvoxel disabled
+float SkirtDepth = 2.0f;
+```
+
+### Chunk Manager Integration
+
+The chunk manager sets `TransitionFaces` in the meshing request:
+
+```cpp
+// For each face, check if neighbor is at lower LOD
+if (NeighborState->LODLevel > CurrentLOD) {
+    MeshRequest.TransitionFaces |= TransitionFlags[face];
+}
+```
+
+---
+
 ## Next Steps
 
-1. Implement `IVoxelLODStrategy` interface
-2. Implement `FDistanceBandLODStrategy`
-3. Create UObject wrappers
-4. Integrate with ChunkManager
-5. Test with simple scene
+1. ~~Implement `IVoxelLODStrategy` interface~~ ✓
+2. ~~Implement `FDistanceBandLODStrategy`~~ ✓
+3. ~~Create UObject wrappers~~ ✓
+4. ~~Integrate with ChunkManager~~ ✓
+5. ~~Test with simple scene~~ ✓
 6. Add debug visualization
 7. Profile and optimize
+8. ~~Implement Transvoxel for smooth meshing LOD seams~~ ✓
 
 See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
 ---
 
-**Status**: Design Complete, Ready for Implementation
+**Status**: Implemented - Distance band LOD with Transvoxel seam handling

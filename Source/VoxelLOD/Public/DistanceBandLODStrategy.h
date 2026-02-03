@@ -160,6 +160,9 @@ protected:
 	/** LOD bands sorted by distance */
 	TArray<FLODBand> LODBands;
 
+	/** Master LOD enable flag - when false, all chunks use LOD 0 */
+	bool bEnableLOD = true;
+
 	/** Enable smooth LOD transitions via vertex morphing */
 	bool bEnableMorphing = true;
 
