@@ -104,11 +104,19 @@ VoxelWorlds/
   - ✅ FLocalVertexFactory renderer (GPU-driven, stable rendering)
   - ✅ LOD morphing via Material Parameter Collection
 
+- ✅ **Phase 4: Smooth Meshing** - COMPLETE
+  - ✅ Marching Cubes algorithm (CPU implementation with trilinear interpolation)
+  - ✅ Gradient-based normal calculation for smooth shading
+  - ✅ LOD stride support (2^LODLevel voxel stepping)
+  - ✅ Skirt-based LOD seam hiding (configurable)
+  - ✅ LOD configuration gates (bEnableLOD, bEnableLODSeams)
+  - ⏸️ Transvoxel algorithm (implemented but disabled - complex edge cases)
+
 ### In Progress
-- 🔄 Phase 4: World Modes
-  - ⏳ Smooth meshing (Marching Cubes)
+- 🔄 Phase 5: World Modes
   - ⏳ Material atlas system
   - ⏳ Spherical planet mode
+  - ⏳ Island/bowl mode
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
@@ -129,6 +137,7 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FVoxelGPUNoiseGenerator` - GPU compute shader noise generation
 - `FVoxelCPUCubicMesher` - CPU-based cubic mesh generation with greedy meshing
 - `FVoxelGPUCubicMesher` - GPU compute shader cubic meshing
+- `FVoxelCPUSmoothMesher` - CPU-based smooth meshing (Marching Cubes)
 - `FVoxelPMCRenderer` - ProceduralMeshComponent-based renderer (CPU fallback)
 - `FVoxelCustomVFRenderer` - GPU-driven renderer using FLocalVertexFactory
 - `FVoxelSceneProxy` - Scene proxy for chunk rendering with frustum culling

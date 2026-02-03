@@ -65,15 +65,12 @@ Development roadmap for the VoxelWorlds plugin.
 ### Tasks
 - [x] Greedy meshing algorithm
 - [x] Ambient occlusion calculation
-- [ ] Smooth meshing (Marching Cubes) - Deferred to Phase 4
 - [x] Custom Vertex Factory → FLocalVertexFactory (see notes)
 - [x] GPU-driven renderer (FVoxelCustomVFRenderer + FVoxelSceneProxy)
 - [x] LOD morphing (Material Parameter Collection approach)
-- [ ] Material atlas system - Deferred to Phase 4
 
 ### Deliverables
 - Optimized cubic meshing (50% fewer triangles) ✓
-- ~~Working smooth meshing mode~~ (Deferred)
 - Custom VF renderer using FLocalVertexFactory ✓
 - LOD transitions via material-based MorphFactor ✓
 
@@ -94,11 +91,54 @@ See **RENDERING_SYSTEM.md** for detailed documentation on the vertex factory arc
 
 ---
 
-## Phase 4: World Modes (Weeks 7-8)
+## Phase 4: Smooth Meshing (Weeks 7-8) ✓ COMPLETE
+
+**Goal**: Marching Cubes terrain with LOD support
+
+### Tasks
+- [x] Marching Cubes algorithm (CPU implementation)
+- [x] Trilinear interpolation for vertex positioning
+- [x] Gradient-based normal calculation
+- [x] LOD stride support (2^LODLevel stepping)
+- [x] Neighbor chunk data for seamless boundaries
+- [x] Skirt-based LOD seam hiding
+- [x] LOD configuration gates (bEnableLOD, bEnableLODSeams)
+- [x] Transvoxel transition cells (implemented, disabled by default)
+
+### Deliverables
+- Working smooth terrain meshing ✓
+- LOD support with configurable seam handling ✓
+- Configuration options for debugging ✓
+
+### Success Criteria
+- Smooth terrain renders correctly ✓
+- LOD transitions functional ✓
+- Seams can be hidden or disabled for debugging ✓
+
+### Notes on LOD Seam Handling
+Two approaches were implemented for LOD seam handling:
+
+1. **Skirts** (Default): Vertical geometry strips along chunk boundaries that hide gaps between LOD levels. Simple and reliable but adds geometry.
+
+2. **Transvoxel** (Disabled): Eric Lengyel's algorithm using 13-sample transition cells. Implemented but disabled due to complexity:
+   - Requires face, edge, AND corner neighbor data for boundary cells
+   - Subtle bugs with fractional sample positions at LOD 0
+   - Edge cases at chunk corners need data from 7 neighbors
+   - Future consideration: Octree-based LOD may be simpler
+
+Configuration options in `UVoxelWorldConfiguration`:
+- `bEnableLOD`: Master toggle, when false all chunks use LOD 0
+- `bEnableLODSeams`: When false, disables all seam handling (skirts/Transvoxel)
+- `bEnableLODMorphing`: Smooth vertex transitions between LOD levels
+
+---
+
+## Phase 5: World Modes (Weeks 9-10)
 
 **Goal**: Multiple world types
 
 ### Tasks
+- [ ] Material atlas system
 - [ ] Spherical planet mode
 - [ ] Island/bowl mode
 - [ ] World mode-specific LOD
@@ -119,7 +159,7 @@ See **RENDERING_SYSTEM.md** for detailed documentation on the vertex factory arc
 
 ---
 
-## Phase 5: Editing & Collision (Weeks 9-10)
+## Phase 6: Editing & Collision (Weeks 11-12)
 
 **Goal**: Interactive terrain
 
@@ -144,7 +184,7 @@ See **RENDERING_SYSTEM.md** for detailed documentation on the vertex factory arc
 
 ---
 
-## Phase 6: Scatter & Polish (Weeks 11-12)
+## Phase 7: Scatter & Polish (Weeks 13-14)
 
 **Goal**: Complete feature set
 
@@ -170,7 +210,7 @@ See **RENDERING_SYSTEM.md** for detailed documentation on the vertex factory arc
 
 ---
 
-## Phase 7: Advanced Features (Future)
+## Phase 8: Advanced Features (Future)
 
 **Optional enhancements based on profiling**
 
@@ -188,8 +228,8 @@ See **RENDERING_SYSTEM.md** for detailed documentation on the vertex factory arc
 
 ## Current Status
 
-**Active Phase**: Phase 4 (World Modes)
-**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE
+**Active Phase**: Phase 5 (World Modes)
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE - Phase 4 COMPLETE
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -289,10 +329,27 @@ See **RENDERING_SYSTEM.md** for detailed documentation on the vertex factory arc
    - Full pipeline: VoxelWorldTestActor → Renderer → WorldComponent → MPC → Material
    - Configurable via Details panel on VoxelWorldTestActor
 
-**Next Immediate Steps** (Phase 4):
-1. Smooth meshing (Marching Cubes)
-2. Material atlas system
-3. Spherical planet mode
+**Phase 4 Completed**:
+1. ~~Smooth meshing (Marching Cubes)~~ - COMPLETE
+   - FVoxelCPUSmoothMesher: CPU-based Marching Cubes implementation
+   - 256-case lookup table for cube configurations
+   - Trilinear interpolation for vertex positioning on edges
+   - Gradient-based normal calculation using central differences
+   - LOD stride support: 2^LODLevel voxel stepping for lower detail levels
+   - Neighbor chunk data support for seamless boundaries
+   - Skirt generation for LOD seam hiding (configurable)
+   - Transvoxel transition cells (implemented but disabled by default)
+
+2. ~~LOD Configuration Gates~~ - COMPLETE
+   - `bEnableLOD`: Master toggle in UVoxelWorldConfiguration
+   - `bEnableLODSeams`: Disables all seam handling when false
+   - `bUseTransvoxel`: Per-mesher toggle (default: false)
+   - `bGenerateSkirts`: Fallback seam handling (default: true)
+
+**Next Immediate Steps** (Phase 5):
+1. Material atlas system
+2. Spherical planet mode
+3. Island/bowl mode
 
 ---
 
@@ -320,7 +377,7 @@ Throughout all phases:
 - 60 FPS
 - < 150 MB memory
 
-### Phase 6 Targets (Final)
+### Phase 7 Targets (Final)
 - 1000+ visible chunks
 - 60 FPS
 - < 250 MB memory
