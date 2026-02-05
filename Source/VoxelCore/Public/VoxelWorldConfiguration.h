@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "VoxelCoreTypes.h"
 #include "LODTypes.h"
 #include "VoxelWorldConfiguration.generated.h"
@@ -112,6 +113,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1000"))
 	float ViewDistance = 10000.0f;
 
+	/**
+	 * Material Parameter Collection for LOD morphing.
+	 *
+	 * Create an MPC asset with these scalar parameters:
+	 *   - LODStartDistance: Distance where MorphFactor = 0
+	 *   - LODEndDistance: Distance where MorphFactor = 1
+	 *   - LODInvRange: 1.0 / (EndDistance - StartDistance)
+	 *
+	 * Values are auto-calculated from LODBands configuration.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLODMorphing"))
+	TObjectPtr<UMaterialParameterCollection> LODParameterCollection;
+
 	// ==================== Streaming Settings ====================
 
 	/** Maximum chunks to load per frame */
@@ -189,6 +203,18 @@ public:
 
 	/** Validate configuration and log any issues */
 	bool ValidateConfiguration() const;
+
+	/**
+	 * Get the start distance for material-based LOD morphing.
+	 * Derived from LODBands: first band's (MaxDistance - MorphRange)
+	 */
+	float GetMaterialLODStartDistance() const;
+
+	/**
+	 * Get the end distance for material-based LOD morphing.
+	 * Derived from LODBands: last band's MaxDistance (clamped to ViewDistance)
+	 */
+	float GetMaterialLODEndDistance() const;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;

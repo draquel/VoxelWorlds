@@ -143,6 +143,29 @@ bool UVoxelWorldConfiguration::ValidateConfiguration() const
 	return bValid;
 }
 
+float UVoxelWorldConfiguration::GetMaterialLODStartDistance() const
+{
+	if (LODBands.Num() == 0)
+	{
+		return 0.0f;
+	}
+
+	// Start morphing at first band's morph start point
+	const FLODBand& FirstBand = LODBands[0];
+	return FMath::Max(0.0f, FirstBand.MaxDistance - FirstBand.MorphRange);
+}
+
+float UVoxelWorldConfiguration::GetMaterialLODEndDistance() const
+{
+	if (LODBands.Num() == 0)
+	{
+		return ViewDistance;
+	}
+
+	// End at the last band's max distance, clamped to ViewDistance
+	return FMath::Min(LODBands.Last().MaxDistance, ViewDistance);
+}
+
 #if WITH_EDITOR
 void UVoxelWorldConfiguration::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {

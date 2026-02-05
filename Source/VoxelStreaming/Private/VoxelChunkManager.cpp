@@ -127,7 +127,19 @@ void UVoxelChunkManager::Initialize(
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
 
-	// Initialize LOD strategy
+	// Disable LOD for cubic mode BEFORE initializing LOD strategy
+	// Cubic meshes cannot benefit from:
+	// - Stride-based simplification (greedy meshing handles optimization)
+	// - Vertex morphing (hard-edged quads cannot interpolate)
+	// This avoids unnecessary LOD distance calculations and morph factor updates
+	if (Configuration->MeshingMode == EMeshingMode::Cubic && Configuration->bEnableLOD)
+	{
+		Configuration->bEnableLOD = false;
+		Configuration->bEnableLODMorphing = false;
+		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD automatically disabled for cubic meshing mode (greedy meshing provides optimization)"));
+	}
+
+	// Initialize LOD strategy (will use the potentially-modified bEnableLOD setting)
 	if (LODStrategy)
 	{
 		LODStrategy->Initialize(Configuration);
@@ -1021,6 +1033,12 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 {
 	if (!LODStrategy || !MeshRenderer)
+	{
+		return;
+	}
+
+	// Skip LOD transition processing when LOD is disabled (e.g., cubic mode)
+	if (Configuration && !Configuration->bEnableLOD)
 	{
 		return;
 	}

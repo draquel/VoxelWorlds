@@ -5,7 +5,6 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
-#include "Materials/MaterialParameterCollection.h"
 #include "VoxelWorldTestActor.generated.h"
 
 class UVoxelMaterialAtlas;
@@ -89,31 +88,6 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Rendering")
 	TObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;
-
-	// ==================== LOD Material Parameters ====================
-
-	/**
-	 * Material Parameter Collection for LOD morphing.
-	 *
-	 * Create an MPC asset with these scalar parameters:
-	 *   - LODStartDistance: Distance where MorphFactor = 0
-	 *   - LODEndDistance: Distance where MorphFactor = 1
-	 *   - LODInvRange: 1.0 / (EndDistance - StartDistance)
-	 *
-	 * In your material, use CollectionParameter nodes to calculate MorphFactor:
-	 *   Distance = length(WorldPosition - CameraPosition)
-	 *   MorphFactor = saturate((Distance - LODStartDistance) * LODInvRange)
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|LOD")
-	TObjectPtr<UMaterialParameterCollection> LODParameterCollection;
-
-	/** Distance where LOD transition starts (MorphFactor = 0) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|LOD", meta = (ClampMin = "0"))
-	float LODStartDistance = 400.0f;
-
-	/** Distance where LOD transition ends (MorphFactor = 1) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|LOD", meta = (ClampMin = "0"))
-	float LODEndDistance = 2000.0f;
 
 	/** Enable debug visualization */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug")
