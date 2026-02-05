@@ -71,8 +71,9 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 
 void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float DeltaTime)
 {
-	// Cache viewer position for quick access
+	// Cache viewer position and world origin for quick access
 	CachedViewerPosition = Context.ViewerPosition;
+	CachedWorldOrigin = Context.WorldOrigin;
 	CachedViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 }
 
@@ -371,12 +372,14 @@ void FDistanceBandLODStrategy::SetLODBands(const TArray<FLODBand>& InBands)
 
 FVector FDistanceBandLODStrategy::ChunkCoordToWorldCenter(const FIntVector& ChunkCoord) const
 {
-	return FVoxelCoordinates::ChunkToWorldCenter(ChunkCoord, BaseChunkSize, VoxelSize);
+	// Include CachedWorldOrigin for correct world-space position
+	return CachedWorldOrigin + FVoxelCoordinates::ChunkToWorldCenter(ChunkCoord, BaseChunkSize, VoxelSize);
 }
 
 FIntVector FDistanceBandLODStrategy::WorldPosToChunkCoord(const FVector& WorldPos) const
 {
-	return FVoxelCoordinates::WorldToChunk(WorldPos, BaseChunkSize, VoxelSize);
+	// Subtract WorldOrigin to get position relative to chunk coordinate system
+	return FVoxelCoordinates::WorldToChunk(WorldPos - CachedWorldOrigin, BaseChunkSize, VoxelSize);
 }
 
 float FDistanceBandLODStrategy::GetDistanceToViewer(
@@ -428,8 +431,9 @@ bool FDistanceBandLODStrategy::IsChunkInFrustum(
 		return true;
 	}
 
-	// Get chunk bounding box
-	const FBox ChunkBounds = FVoxelCoordinates::ChunkToWorldBounds(ChunkCoord, BaseChunkSize, VoxelSize);
+	// Get chunk bounding box (includes WorldOrigin offset)
+	const FBox LocalBounds = FVoxelCoordinates::ChunkToWorldBounds(ChunkCoord, BaseChunkSize, VoxelSize);
+	const FBox ChunkBounds(LocalBounds.Min + CachedWorldOrigin, LocalBounds.Max + CachedWorldOrigin);
 	const FVector BoxCenter = ChunkBounds.GetCenter();
 	const FVector BoxExtent = ChunkBounds.GetExtent();
 

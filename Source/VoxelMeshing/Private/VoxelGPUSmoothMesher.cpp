@@ -333,11 +333,8 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 	// Capture data for lambda
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
-	const FVector3f ChunkWorldPos = FVector3f(
-		Request.ChunkCoord.X * ChunkSize * VoxelSize,
-		Request.ChunkCoord.Y * ChunkSize * VoxelSize,
-		Request.ChunkCoord.Z * ChunkSize * VoxelSize
-	);
+	// Use GetChunkWorldPosition() which includes WorldOrigin offset
+	const FVector3f ChunkWorldPos = FVector3f(Request.GetChunkWorldPosition());
 	const FVoxelMeshingConfig CapturedConfig = Config;
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 

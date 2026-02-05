@@ -109,7 +109,9 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 {
 	const int32 ChunkSize = Request.ChunkSize;
 	const int32 TotalVoxels = ChunkSize * ChunkSize * ChunkSize;
-	const float EffectiveVoxelSize = Request.GetEffectiveVoxelSize();
+	// Always generate at base VoxelSize regardless of LOD level
+	// LOD stride is applied during meshing, not generation
+	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 
 	OutVoxelData.SetNum(TotalVoxels);
@@ -138,7 +140,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 	TArray<FVoxelData>& OutVoxelData)
 {
 	const int32 ChunkSize = Request.ChunkSize;
-	const float EffectiveVoxelSize = Request.GetEffectiveVoxelSize();
+	// Always generate at base VoxelSize for voxel positioning
+	// LOD stride is applied during meshing, not generation
+	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 
 	// Set up biome noise parameters
@@ -166,11 +170,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 		{
 			for (int32 X = 0; X < ChunkSize; ++X)
 			{
-				// Calculate world position for this voxel
+				// Calculate world position for this voxel (using base VoxelSize)
 				FVector WorldPos = ChunkWorldPos + FVector(
-					X * EffectiveVoxelSize,
-					Y * EffectiveVoxelSize,
-					Z * EffectiveVoxelSize
+					X * VoxelSize,
+					Y * VoxelSize,
+					Z * VoxelSize
 				);
 
 				// Sample 2D noise at X,Y (Z=0 for heightmap)
@@ -187,10 +191,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 
 				// Convert to density
 				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
-					SignedDistance, EffectiveVoxelSize);
+					SignedDistance, VoxelSize);
 
 				// Calculate depth below surface for material assignment (in voxels)
-				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / EffectiveVoxelSize;
+				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / VoxelSize;
 
 				// Determine material and biome
 				uint8 MaterialID = 0;
@@ -220,7 +224,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				else
 				{
 					// Legacy behavior: use world mode's material assignment
-					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * EffectiveVoxelSize);
+					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * VoxelSize);
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -235,7 +239,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunk3DNoise(
 	TArray<FVoxelData>& OutVoxelData)
 {
 	const int32 ChunkSize = Request.ChunkSize;
-	const float EffectiveVoxelSize = Request.GetEffectiveVoxelSize();
+	// Always generate at base VoxelSize for voxel positioning
+	// LOD stride is applied during meshing, not generation
+	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
@@ -244,11 +250,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunk3DNoise(
 		{
 			for (int32 X = 0; X < ChunkSize; ++X)
 			{
-				// Calculate world position for this voxel
+				// Calculate world position for this voxel (using base VoxelSize)
 				FVector WorldPos = ChunkWorldPos + FVector(
-					X * EffectiveVoxelSize,
-					Y * EffectiveVoxelSize,
-					Z * EffectiveVoxelSize
+					X * VoxelSize,
+					Y * VoxelSize,
+					Z * VoxelSize
 				);
 
 				// Sample 3D noise at this position

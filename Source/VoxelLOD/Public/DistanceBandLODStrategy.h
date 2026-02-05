@@ -196,6 +196,9 @@ protected:
 	/** Cached viewer chunk coordinate */
 	FIntVector CachedViewerChunk = FIntVector::ZeroValue;
 
+	/** Cached world origin from last update */
+	FVector CachedWorldOrigin = FVector::ZeroVector;
+
 	/** Whether the strategy has been initialized */
 	bool bIsInitialized = false;
 };

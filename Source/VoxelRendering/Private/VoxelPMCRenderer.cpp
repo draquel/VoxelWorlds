@@ -432,11 +432,11 @@ UProceduralMeshComponent* FVoxelPMCRenderer::AcquireComponent(const FIntVector& 
 		PMC = CreateNewComponent();
 	}
 
-	// Position the PMC at the chunk's world location
+	// Position the PMC at the chunk's world location (includes WorldOrigin offset)
 	if (PMC && CachedConfig.IsValid())
 	{
 		const float ChunkWorldSize = CachedConfig->GetChunkWorldSize();
-		const FVector ChunkWorldPos = FVector(ChunkCoord) * ChunkWorldSize;
+		const FVector ChunkWorldPos = CachedConfig->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 		PMC->SetWorldLocation(ChunkWorldPos);
 	}
 
@@ -598,7 +598,7 @@ FBox FVoxelPMCRenderer::CalculateChunkBounds(const FIntVector& ChunkCoord) const
 	}
 
 	const float ChunkWorldSize = CachedConfig->GetChunkWorldSize();
-	const FVector ChunkMin = FVector(ChunkCoord) * ChunkWorldSize;
+	const FVector ChunkMin = CachedConfig->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 	const FVector ChunkMax = ChunkMin + FVector(ChunkWorldSize);
 
 	return FBox(ChunkMin, ChunkMax);

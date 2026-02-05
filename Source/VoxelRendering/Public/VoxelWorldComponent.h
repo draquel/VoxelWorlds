@@ -144,6 +144,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel")
 	float GetChunkWorldSize() const { return ChunkWorldSize; }
 
+	/**
+	 * Set world origin offset.
+	 * All chunk positions are relative to this origin.
+	 * Should be called before chunks are added.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	void SetWorldOrigin(const FVector& InWorldOrigin);
+
+	/** Get world origin offset */
+	UFUNCTION(BlueprintPure, Category = "Voxel")
+	FVector GetWorldOrigin() const { return WorldOrigin; }
+
 	// ==================== Material Atlas ====================
 
 	/**
@@ -303,6 +315,10 @@ private:
 	/** Chunk world size */
 	UPROPERTY(EditAnywhere, Category = "Voxel", meta = (ClampMin = "100"))
 	float ChunkWorldSize = 3200.0f;
+
+	/** World origin offset - all chunk positions are relative to this */
+	UPROPERTY(VisibleAnywhere, Category = "Voxel")
+	FVector WorldOrigin = FVector::ZeroVector;
 
 	/** Distance where LOD transition starts (MorphFactor = 0) */
 	UPROPERTY(EditAnywhere, Category = "Voxel|LOD", meta = (ClampMin = "0"))

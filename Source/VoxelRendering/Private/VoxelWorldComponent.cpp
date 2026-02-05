@@ -144,7 +144,7 @@ void UVoxelWorldComponent::UpdateChunkBuffers(const FChunkRenderData& RenderData
 	GPUData.VertexCount = RenderData.VertexCount;
 	GPUData.IndexCount = RenderData.IndexCount;
 	GPUData.LocalBounds = RenderData.Bounds;
-	GPUData.ChunkWorldPosition = FVector(RenderData.ChunkCoord) * ChunkWorldSize;
+	GPUData.ChunkWorldPosition = WorldOrigin + FVector(RenderData.ChunkCoord) * ChunkWorldSize;
 	GPUData.MorphFactor = RenderData.MorphFactor;
 	GPUData.bIsVisible = true;
 	GPUData.VertexBufferRHI = RenderData.VertexBufferRHI;
@@ -238,8 +238,8 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 	CachedTriangleCount += IndexCount / 3;
 	CachedGPUMemory += (VertexCount * sizeof(FVoxelVertex)) + (IndexCount * sizeof(uint32));
 
-	// Calculate chunk world position
-	FVector ChunkWorldPos = FVector(ChunkCoord) * ChunkWorldSize;
+	// Calculate chunk world position (includes WorldOrigin offset)
+	FVector ChunkWorldPos = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 
 	// Queue for batched submission instead of immediate render command
 	FPendingChunkAdd PendingAdd;
@@ -365,6 +365,11 @@ void UVoxelWorldComponent::SetVoxelSize(float InVoxelSize)
 void UVoxelWorldComponent::SetChunkWorldSize(float InChunkWorldSize)
 {
 	ChunkWorldSize = FMath::Max(100.0f, InChunkWorldSize);
+}
+
+void UVoxelWorldComponent::SetWorldOrigin(const FVector& InWorldOrigin)
+{
+	WorldOrigin = InWorldOrigin;
 }
 
 // ==================== Material Atlas ====================

@@ -35,6 +35,10 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	UPROPERTY()
 	float VoxelSize = 100.0f;
 
+	/** World origin offset - all chunk positions are relative to this */
+	UPROPERTY()
+	FVector WorldOrigin = FVector::ZeroVector;
+
 	/** Input voxel data (ChunkSize^3 elements) */
 	UPROPERTY()
 	TArray<FVoxelData> VoxelData;
@@ -197,10 +201,12 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 		return VoxelData.Num() == ChunkSize * ChunkSize * ChunkSize;
 	}
 
-	/** Get the world-space position of this chunk's origin */
+	/** Get the world-space position of this chunk's origin (includes WorldOrigin offset) */
 	FORCEINLINE FVector GetChunkWorldPosition() const
 	{
-		return FVector(ChunkCoord) * static_cast<float>(ChunkSize) * VoxelSize;
+		// All chunks cover the same world area regardless of LOD level
+		// LOD only affects voxel resolution within the chunk, not chunk position
+		return WorldOrigin + FVector(ChunkCoord) * static_cast<float>(ChunkSize) * VoxelSize;
 	}
 
 	/** Get expected neighbor slice size */

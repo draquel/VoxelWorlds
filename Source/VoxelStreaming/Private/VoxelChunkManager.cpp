@@ -500,11 +500,13 @@ void UVoxelChunkManager::DrawDebugVisualization() const
 			default:                            Color = FColor::White; break;
 		}
 
-		const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(
+		const FBox LocalBounds = FVoxelCoordinates::ChunkToWorldBounds(
 			ChunkCoord,
 			Configuration->ChunkSize,
 			Configuration->VoxelSize
 		);
+		// Add WorldOrigin offset for correct world-space position
+		const FBox Bounds(LocalBounds.Min + Configuration->WorldOrigin, LocalBounds.Max + Configuration->WorldOrigin);
 
 		DrawDebugBox(GetWorld(), Bounds.GetCenter(), Bounds.GetExtent(), Color, false, -1.0f, 0, 2.0f);
 	}
@@ -735,6 +737,7 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		GenRequest.SeaLevel = Configuration->SeaLevel;
 		GenRequest.HeightScale = Configuration->HeightScale;
 		GenRequest.BaseHeight = Configuration->BaseHeight;
+		GenRequest.WorldOrigin = Configuration->WorldOrigin;
 
 		// Get chunk state to store voxel data
 		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
@@ -820,6 +823,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		MeshRequest.LODLevel = Request.LODLevel;
 		MeshRequest.ChunkSize = Configuration->ChunkSize;
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
+		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
 		MeshRequest.VoxelData = State->Descriptor.VoxelData;
 
 		// Extract neighbor edge slices for seamless boundaries
@@ -1061,9 +1065,10 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 			// Check if LOD level changed - this requires remeshing
 			if (State->LODLevel != NewLODLevel)
 			{
-				// Calculate distance for prioritization
+				// Calculate distance for prioritization (includes WorldOrigin)
 				const float ChunkWorldSize = Configuration ? Configuration->GetChunkWorldSize() : 3200.0f;
-				const FVector ChunkCenter = FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+				const FVector WorldOrigin = Configuration ? Configuration->WorldOrigin : FVector::ZeroVector;
+				const FVector ChunkCenter = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
 				const float Distance = FVector::Dist(ChunkCenter, Context.ViewerPosition);
 
 				FLODRemeshCandidate Candidate;

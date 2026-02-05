@@ -78,6 +78,7 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 	// Configure component
 	WorldComponent->SetVoxelSize(VoxelSize);
 	WorldComponent->SetChunkWorldSize(ChunkWorldSize);
+	WorldComponent->SetWorldOrigin(WorldConfig->WorldOrigin);
 
 	// Sync material mode with configuration's meshing mode
 	const bool bIsSmooth = (WorldConfig->MeshingMode == EMeshingMode::Smooth);
@@ -642,7 +643,8 @@ void FVoxelCustomVFRenderer::ConvertToVoxelVertices(
 
 FBox FVoxelCustomVFRenderer::CalculateChunkBounds(const FIntVector& ChunkCoord) const
 {
-	const FVector ChunkMin = FVector(ChunkCoord) * ChunkWorldSize;
+	const FVector WorldOrigin = CachedConfig.IsValid() ? CachedConfig->WorldOrigin : FVector::ZeroVector;
+	const FVector ChunkMin = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 	const FVector ChunkMax = ChunkMin + FVector(ChunkWorldSize);
 	return FBox(ChunkMin, ChunkMax);
 }

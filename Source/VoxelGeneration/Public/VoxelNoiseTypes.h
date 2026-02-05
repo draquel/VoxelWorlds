@@ -77,13 +77,21 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
 	int32 MoistureSeedOffset = 5678;
 
+	// ==================== World Origin ====================
+
+	/** World origin offset - all chunk positions are relative to this */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Mode")
+	FVector WorldOrigin = FVector::ZeroVector;
+
 	FVoxelNoiseGenerationRequest() = default;
 
-	/** Get the world position of this chunk's origin */
+	/** Get the world position of this chunk's origin (includes WorldOrigin offset) */
 	FVector GetChunkWorldPosition() const
 	{
-		float ChunkWorldSize = ChunkSize * VoxelSize * FMath::Pow(2.0f, static_cast<float>(LODLevel));
-		return FVector(ChunkCoord) * ChunkWorldSize;
+		// All chunks cover the same world area regardless of LOD level
+		// LOD only affects voxel resolution within the chunk, not chunk position
+		float ChunkWorldSize = ChunkSize * VoxelSize;
+		return WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 	}
 
 	/** Get the effective voxel size at this LOD level */
