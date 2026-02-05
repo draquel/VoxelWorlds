@@ -3,10 +3,15 @@
 #include "VoxelWorldComponent.h"
 #include "VoxelSceneProxy.h"
 #include "VoxelRendering.h"
+#include "VoxelMaterialAtlas.h"
+#include "VoxelMaterialRegistry.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialParameterCollectionInstance.h"
 #include "Engine/World.h"
+#include "Engine/Texture2D.h"
+#include "Engine/Texture2DArray.h"
 
 // ==================== UVoxelWorldComponent ====================
 
@@ -100,12 +105,17 @@ void UVoxelWorldComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* M
 
 		// Update render thread
 		FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
-		if (Proxy)
+		if (Proxy && Material)
 		{
+			// Compute MaterialRelevance on game thread (GetRelevance requires game thread)
+			UWorld* World = GetWorld();
+			ERHIFeatureLevel::Type FeatureLevel = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
+			FMaterialRelevance MatRelevance = Material->GetRelevance(FeatureLevel);
+
 			ENQUEUE_RENDER_COMMAND(SetVoxelMaterial)(
-				[Proxy, Material](FRHICommandListImmediate& RHICmdList)
+				[Proxy, Material, MatRelevance](FRHICommandListImmediate& RHICmdList)
 				{
-					Proxy->SetMaterial_RenderThread(Material);
+					Proxy->SetMaterial_RenderThread(Material, MatRelevance);
 				}
 			);
 		}
@@ -355,6 +365,154 @@ void UVoxelWorldComponent::SetVoxelSize(float InVoxelSize)
 void UVoxelWorldComponent::SetChunkWorldSize(float InChunkWorldSize)
 {
 	ChunkWorldSize = FMath::Max(100.0f, InChunkWorldSize);
+}
+
+// ==================== Material Atlas ====================
+
+void UVoxelWorldComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)
+{
+	MaterialAtlas = InAtlas;
+
+	if (MaterialAtlas)
+	{
+		// Update registry with atlas positions
+		FVoxelMaterialRegistry::SetAtlasPositions(
+			MaterialAtlas->MaterialConfigs,
+			MaterialAtlas->AtlasColumns,
+			MaterialAtlas->AtlasRows);
+
+		// Update material parameters if we have a dynamic instance
+		UpdateMaterialAtlasParameters();
+	}
+}
+
+UMaterialInstanceDynamic* UVoxelWorldComponent::CreateVoxelMaterialInstance(UMaterialInterface* MasterMaterial)
+{
+	if (!MasterMaterial)
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("CreateVoxelMaterialInstance: MasterMaterial is null"));
+		return nullptr;
+	}
+
+	// Create dynamic material instance
+	DynamicMaterialInstance = UMaterialInstanceDynamic::Create(MasterMaterial, this);
+
+	if (DynamicMaterialInstance)
+	{
+		// Set as the voxel material
+		SetMaterial(0, DynamicMaterialInstance);
+
+		// Configure with atlas parameters
+		UpdateMaterialAtlasParameters();
+
+		UE_LOG(LogVoxelRendering, Log, TEXT("Created dynamic material instance from: %s"), *MasterMaterial->GetName());
+	}
+
+	return DynamicMaterialInstance;
+}
+
+void UVoxelWorldComponent::UpdateMaterialAtlasParameters()
+{
+	UE_LOG(LogVoxelRendering, Log, TEXT("UpdateMaterialAtlasParameters called - DynamicMaterial: %s, MaterialAtlas: %s"),
+		DynamicMaterialInstance ? TEXT("Valid") : TEXT("NULL"),
+		MaterialAtlas ? TEXT("Valid") : TEXT("NULL"));
+
+	if (!DynamicMaterialInstance)
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("UpdateMaterialAtlasParameters: No DynamicMaterialInstance, skipping"));
+		return;
+	}
+
+	// Set smooth meshing switch
+	// Note: Static switches can't be changed at runtime, this is a scalar parameter fallback
+	DynamicMaterialInstance->SetScalarParameterValue(FName("UseSmoothMeshing"), bUseSmoothMeshing ? 1.0f : 0.0f);
+
+	if (!MaterialAtlas)
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("UpdateMaterialAtlasParameters: No MaterialAtlas, skipping atlas setup"));
+		return;
+	}
+
+	// ===== Material LUT (Face Variant Lookup Table) =====
+
+	// Build LUT if needed
+	if (MaterialAtlas->IsLUTDirty() || !MaterialAtlas->GetMaterialLUT())
+	{
+		UE_LOG(LogVoxelRendering, Log, TEXT("Building MaterialLUT (Dirty=%s, Exists=%s)"),
+			MaterialAtlas->IsLUTDirty() ? TEXT("Yes") : TEXT("No"),
+			MaterialAtlas->GetMaterialLUT() ? TEXT("Yes") : TEXT("No"));
+		MaterialAtlas->BuildMaterialLUT();
+	}
+
+	// Pass LUT texture to material
+	if (UTexture2D* LUT = MaterialAtlas->GetMaterialLUT())
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FName("MaterialLUT"), LUT);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set MaterialLUT texture: %s (%dx%d)"),
+			*LUT->GetName(), LUT->GetSizeX(), LUT->GetSizeY());
+	}
+	else
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("MaterialLUT is NULL after build attempt!"));
+	}
+
+	// ===== Packed Atlas Parameters (Cubic Terrain) =====
+
+	if (MaterialAtlas->PackedAlbedoAtlas)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FName("PackedAlbedoAtlas"), MaterialAtlas->PackedAlbedoAtlas);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set PackedAlbedoAtlas: %s"), *MaterialAtlas->PackedAlbedoAtlas->GetName());
+	}
+	else
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("PackedAlbedoAtlas is NULL!"));
+	}
+
+	if (MaterialAtlas->PackedNormalAtlas)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FName("PackedNormalAtlas"), MaterialAtlas->PackedNormalAtlas);
+	}
+
+	if (MaterialAtlas->PackedRoughnessAtlas)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FName("PackedRoughnessAtlas"), MaterialAtlas->PackedRoughnessAtlas);
+	}
+
+	DynamicMaterialInstance->SetScalarParameterValue(FName("AtlasColumns"), static_cast<float>(MaterialAtlas->AtlasColumns));
+	DynamicMaterialInstance->SetScalarParameterValue(FName("AtlasRows"), static_cast<float>(MaterialAtlas->AtlasRows));
+	UE_LOG(LogVoxelRendering, Log, TEXT("Set Atlas dimensions: %d x %d"), MaterialAtlas->AtlasColumns, MaterialAtlas->AtlasRows);
+
+	// ===== Texture Array Parameters (Smooth Terrain) =====
+
+	if (MaterialAtlas->AlbedoArray)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FName("AlbedoArray"), MaterialAtlas->AlbedoArray);
+	}
+
+	if (MaterialAtlas->NormalArray)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FName("NormalArray"), MaterialAtlas->NormalArray);
+	}
+
+	if (MaterialAtlas->RoughnessArray)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FName("RoughnessArray"), MaterialAtlas->RoughnessArray);
+	}
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("UpdateMaterialAtlasParameters COMPLETE: Columns=%d, Rows=%d, SmoothMeshing=%s, LUT=%s, AlbedoAtlas=%s"),
+		MaterialAtlas->AtlasColumns, MaterialAtlas->AtlasRows,
+		bUseSmoothMeshing ? TEXT("true") : TEXT("false"),
+		MaterialAtlas->GetMaterialLUT() ? TEXT("valid") : TEXT("null"),
+		MaterialAtlas->PackedAlbedoAtlas ? TEXT("valid") : TEXT("null"));
+}
+
+void UVoxelWorldComponent::SetUseSmoothMeshing(bool bUseSmooth)
+{
+	if (bUseSmoothMeshing != bUseSmooth)
+	{
+		bUseSmoothMeshing = bUseSmooth;
+		UpdateMaterialAtlasParameters();
+	}
 }
 
 // ==================== LOD Configuration ====================

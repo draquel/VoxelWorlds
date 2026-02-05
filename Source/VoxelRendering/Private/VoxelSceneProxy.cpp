@@ -43,7 +43,9 @@ void InitVoxelLocalVertexFactory(
 	FRHICommandListBase& RHICmdList,
 	FLocalVertexFactory* VertexFactory,
 	const FVertexBuffer* VertexBuffer,
-	FRHIShaderResourceView* ColorSRV)
+	FRHIShaderResourceView* ColorSRV,
+	FRHIShaderResourceView* TangentsSRV,
+	FRHIShaderResourceView* TexCoordSRV)
 {
 	check(IsInRenderingThread());
 	check(VertexFactory != nullptr);
@@ -66,7 +68,7 @@ void InitVoxelLocalVertexFactory(
 	// The actual vertex data comes from the vertex stream components
 	NewData.PositionComponentSRV = GNullColorVertexBuffer.VertexBufferSRV;
 
-	// Tangent basis stream components
+	// Tangent basis stream components - for traditional vertex input
 	NewData.TangentBasisComponents[0] = FVertexStreamComponent(
 		VertexBuffer,
 		STRUCT_OFFSET(FVoxelLocalVertex, TangentX),
@@ -80,10 +82,12 @@ void InitVoxelLocalVertexFactory(
 		VET_PackedNormal
 	);
 
-	// Tangents SRV - use global null buffer
-	NewData.TangentsSRV = GNullColorVertexBuffer.VertexBufferSRV;
+	// Tangents SRV - for manual vertex fetch (GPUScene path)
+	NewData.TangentsSRV = TangentsSRV ? TangentsSRV : GNullColorVertexBuffer.VertexBufferSRV.GetReference();
 
-	// Texture coordinates
+	// Texture coordinates - for traditional vertex input
+	// UV0: Face UVs for texture tiling within atlas tiles
+	// UV1: MaterialID (X) and FaceType (Y) as floats to avoid sRGB issues
 	NewData.TextureCoordinates.Empty();
 	NewData.TextureCoordinates.Add(FVertexStreamComponent(
 		VertexBuffer,
@@ -91,26 +95,33 @@ void InitVoxelLocalVertexFactory(
 		Stride,
 		VET_Float2
 	));
-	NewData.TextureCoordinatesSRV = GNullColorVertexBuffer.VertexBufferSRV;
+	NewData.TextureCoordinates.Add(FVertexStreamComponent(
+		VertexBuffer,
+		STRUCT_OFFSET(FVoxelLocalVertex, TexCoord1),
+		Stride,
+		VET_Float2
+	));
+	// TexCoord SRV - for manual vertex fetch (GPUScene path)
+	NewData.TextureCoordinatesSRV = TexCoordSRV ? TexCoordSRV : GNullColorVertexBuffer.VertexBufferSRV.GetReference();
 
-	// Vertex color
+	// Vertex color - for traditional vertex input
+	// Note: VET_Color applies sRGB conversion. Use gamma correction in shader to recover linear values.
+	// MaterialID and FaceType are now in UV1 to avoid sRGB issues.
 	NewData.ColorComponent = FVertexStreamComponent(
 		VertexBuffer,
 		STRUCT_OFFSET(FVoxelLocalVertex, Color),
 		Stride,
 		VET_Color
 	);
-	// Use provided ColorSRV for manual vertex fetch of colors
+	// Color SRV - for manual vertex fetch (GPUScene path)
 	NewData.ColorComponentsSRV = ColorSRV ? ColorSRV : GNullColorVertexBuffer.VertexBufferSRV.GetReference();
 
 	// Light map coordinate index
 	NewData.LightMapCoordinateIndex = 0;
-	NewData.NumTexCoords = 1;
+	NewData.NumTexCoords = 2;
 
 	// Set the data on the vertex factory
 	VertexFactory->SetData(RHICmdList, NewData);
-
-	// UE_LOG(LogVoxelRendering, Log, TEXT("InitVoxelLocalVertexFactory - Configured with Stride=%d"), Stride);
 }
 
 // ==================== FVoxelSceneProxy ====================
@@ -489,6 +500,20 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 	TArray<FColor> ColorData;
 	ColorData.SetNumUninitialized(SourceVertexCount);
 
+	// Tangent data for SRV: interleaved TangentX + TangentZ (2 x FPackedNormal = 8 bytes per vertex)
+	struct FPackedTangentPair
+	{
+		FPackedNormal TangentX;
+		FPackedNormal TangentZ;
+	};
+	TArray<FPackedTangentPair> TangentData;
+	TangentData.SetNumUninitialized(SourceVertexCount);
+
+	// TexCoord data for SRV (GPUScene manual vertex fetch)
+	// With 2 UV channels, store as float4 per vertex: (UV0.x, UV0.y, UV1.x, UV1.y)
+	TArray<FVector4f> TexCoordData;
+	TexCoordData.SetNumUninitialized(SourceVertexCount);
+
 	// Get chunk world position offset
 	const FVector3f ChunkOffset = FVector3f(GPUData.ChunkWorldPosition);
 
@@ -512,6 +537,18 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 		// Offset vertex position from chunk-local to world space
 		ConvertedVertices[i].Position += ChunkOffset;
 		ColorData[i] = ConvertedVertices[i].Color;
+
+		// Extract tangent data for SRV
+		TangentData[i].TangentX = ConvertedVertices[i].TangentX;
+		TangentData[i].TangentZ = ConvertedVertices[i].TangentZ;
+
+		// Extract TexCoord data for SRV (both UV channels as float4)
+		TexCoordData[i] = FVector4f(
+			ConvertedVertices[i].TexCoord.X,
+			ConvertedVertices[i].TexCoord.Y,
+			ConvertedVertices[i].TexCoord1.X,
+			ConvertedVertices[i].TexCoord1.Y
+		);
 	}
 
 	// Debug: Log MaterialID distribution once
@@ -604,6 +641,43 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 	// Create color SRV (PF_B8G8R8A8 matches FColor's BGRA layout)
 	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
 
+	// Create tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex)
+	const uint32 TangentBufferSize = SourceVertexCount * sizeof(FPackedTangentPair);
+	FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelTangentBuffer"));
+	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
+		TangentBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FPackedTangentPair),
+		ERHIAccess::SRVMask,
+		TangentCreateInfo
+	);
+
+	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
+
+	// Create tangent SRV
+	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+
+	// Create TexCoord buffer for SRV (GPUScene manual vertex fetch)
+	// With 2 UV channels, each vertex has 4 floats (UV0.xy, UV1.xy)
+	const uint32 TexCoordBufferSize = SourceVertexCount * sizeof(FVector4f);
+	FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelTexCoordBuffer"));
+	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
+		TexCoordBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FVector4f),
+		ERHIAccess::SRVMask,
+		TexCoordCreateInfo
+	);
+
+	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
+
+	// Create TexCoord SRV - FVector4f is 16 bytes (4x float for 2 UV channels)
+	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+
 	// Copy index buffer reference
 	NewRenderData.IndexBufferRHI = GPUData.IndexBufferRHI;
 
@@ -628,7 +702,9 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 		RHICmdList,
 		ChunkVertexFactory.Get(),
 		VertexBufferWrapper.Get(),
-		NewRenderData.ColorSRV
+		NewRenderData.ColorSRV,
+		NewRenderData.TangentsSRV,
+		NewRenderData.TexCoordSRV
 	);
 	ChunkVertexFactory->InitResource(RHICmdList);
 	ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);
@@ -698,12 +774,38 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 	TArray<FColor> ColorData;
 	ColorData.SetNumUninitialized(VertexCount);
 
+	// Tangent data for SRV: interleaved TangentX + TangentZ (2 x FPackedNormal = 8 bytes per vertex)
+	struct FPackedTangentPair
+	{
+		FPackedNormal TangentX;
+		FPackedNormal TangentZ;
+	};
+	TArray<FPackedTangentPair> TangentData;
+	TangentData.SetNumUninitialized(VertexCount);
+
+	// TexCoord data for SRV (GPUScene manual vertex fetch)
+	// With 2 UV channels, store as float4 per vertex: (UV0.x, UV0.y, UV1.x, UV1.y)
+	TArray<FVector4f> TexCoordData;
+	TexCoordData.SetNumUninitialized(VertexCount);
+
 	for (uint32 i = 0; i < VertexCount; i++)
 	{
 		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Vertices[i]);
 		// Offset vertex position from chunk-local to world space
 		ConvertedVertices[i].Position += ChunkOffset;
 		ColorData[i] = ConvertedVertices[i].Color;
+
+		// Extract tangent data for SRV
+		TangentData[i].TangentX = ConvertedVertices[i].TangentX;
+		TangentData[i].TangentZ = ConvertedVertices[i].TangentZ;
+
+		// Extract TexCoord data for SRV (both UV channels as float4)
+		TexCoordData[i] = FVector4f(
+			ConvertedVertices[i].TexCoord.X,
+			ConvertedVertices[i].TexCoord.Y,
+			ConvertedVertices[i].TexCoord1.X,
+			ConvertedVertices[i].TexCoord1.Y
+		);
 	}
 
 	// Create new render data
@@ -751,6 +853,43 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 	// Create color SRV
 	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
 
+	// Create tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex)
+	const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
+	FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelTangentBuffer_CPU"));
+	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
+		TangentBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FPackedTangentPair),
+		ERHIAccess::SRVMask,
+		TangentCreateInfo
+	);
+
+	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
+
+	// Create tangent SRV
+	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+
+	// Create TexCoord buffer for SRV (GPUScene manual vertex fetch)
+	// With 2 UV channels, each vertex has 4 floats (UV0.xy, UV1.xy)
+	const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
+	FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelTexCoordBuffer_CPU"));
+	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
+		TexCoordBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FVector4f),
+		ERHIAccess::SRVMask,
+		TexCoordCreateInfo
+	);
+
+	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
+
+	// Create TexCoord SRV - FVector4f is 16 bytes (4x float for 2 UV channels)
+	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+
 	// Create index buffer directly from CPU data
 	const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
 	FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelIndexBuffer_CPU"));
@@ -787,7 +926,9 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 		RHICmdList,
 		ChunkVertexFactory.Get(),
 		VertexBufferWrapper.Get(),
-		NewRenderData.ColorSRV
+		NewRenderData.ColorSRV,
+		NewRenderData.TangentsSRV,
+		NewRenderData.TexCoordSRV
 	);
 	ChunkVertexFactory->InitResource(RHICmdList);
 	ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);
@@ -904,14 +1045,11 @@ void FVoxelSceneProxy::UpdateChunkMorphFactor_RenderThread(const FIntVector& Chu
 	}
 }
 
-void FVoxelSceneProxy::SetMaterial_RenderThread(UMaterialInterface* InMaterial)
+void FVoxelSceneProxy::SetMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InMaterialRelevance)
 {
 	check(IsInRenderingThread());
 	Material = InMaterial;
-	if (Material)
-	{
-		MaterialRelevance = Material->GetRelevance(FeatureLevel);
-	}
+	MaterialRelevance = InMaterialRelevance;
 }
 
 void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
@@ -1013,12 +1151,69 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 		TArray<FColor> ColorData;
 		ColorData.SetNumUninitialized(VertexCount);
 
+		// Tangent data for SRV: interleaved TangentX + TangentZ (2 x FPackedNormal = 8 bytes per vertex)
+		struct FPackedTangentPair
+		{
+			FPackedNormal TangentX;
+			FPackedNormal TangentZ;
+		};
+		TArray<FPackedTangentPair> TangentData;
+		TangentData.SetNumUninitialized(VertexCount);
+
+		// TexCoord data for SRV
+		// With 2 UV channels, store as float4 per vertex: (UV0.x, UV0.y, UV1.x, UV1.y)
+		TArray<FVector4f> TexCoordData;
+		TexCoordData.SetNumUninitialized(VertexCount);
+
+		// Debug: Track normal statistics
+		int32 ZeroNormals = 0;
+		int32 UpNormals = 0;
+		int32 ValidNormals = 0;
+
 		for (uint32 i = 0; i < VertexCount; i++)
 		{
+			// Debug: Check input normal before conversion
+			FVector3f InputNormal = Add.Vertices[i].GetNormal();
+
 			ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Add.Vertices[i]);
 			// Offset vertex position from chunk-local to world space
 			ConvertedVertices[i].Position += ChunkOffset;
 			ColorData[i] = ConvertedVertices[i].Color;
+
+			// Extract tangent data for SRV
+			TangentData[i].TangentX = ConvertedVertices[i].TangentX;
+			TangentData[i].TangentZ = ConvertedVertices[i].TangentZ;
+
+			// Extract TexCoord data for SRV (both UV channels as float4)
+			TexCoordData[i] = FVector4f(
+				ConvertedVertices[i].TexCoord.X,
+				ConvertedVertices[i].TexCoord.Y,
+				ConvertedVertices[i].TexCoord1.X,
+				ConvertedVertices[i].TexCoord1.Y
+			);
+
+			// Debug: Categorize normals
+			if (InputNormal.IsNearlyZero(0.01f))
+			{
+				ZeroNormals++;
+			}
+			else if (FMath::Abs(InputNormal.Z - 1.0f) < 0.01f && FMath::Abs(InputNormal.X) < 0.01f && FMath::Abs(InputNormal.Y) < 0.01f)
+			{
+				UpNormals++;
+			}
+			else
+			{
+				ValidNormals++;
+			}
+		}
+
+		// Log normal statistics for first few chunks
+		static int32 DebugChunkCount = 0;
+		if (DebugChunkCount < 5)
+		{
+			DebugChunkCount++;
+			UE_LOG(LogVoxelRendering, Warning, TEXT("Chunk %s normals: %d zero, %d up-only, %d varied (total %d)"),
+				*ChunkCoord.ToString(), ZeroNormals, UpNormals, ValidNormals, VertexCount);
 		}
 
 		// Create new render data
@@ -1066,6 +1261,44 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 		// Create color SRV
 		NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
 
+		// Create tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex)
+		const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
+		FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelTangentBuffer_Batch"));
+		NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
+			TangentBufferSize,
+			BUF_Static | BUF_ShaderResource,
+			sizeof(FPackedTangentPair),
+			ERHIAccess::SRVMask,
+			TangentCreateInfo
+		);
+
+		void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
+		FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
+		RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
+
+		// Create tangent SRV - use 2x4 bytes format (RGBA8 x2 for TangentX and TangentZ)
+		// FLocalVertexFactory expects tangents as 2x FPackedNormal per vertex
+		NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+
+		// Create TexCoord buffer for SRV
+		// With 2 UV channels, each vertex has 4 floats (UV0.xy, UV1.xy)
+		const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
+		FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelTexCoordBuffer_Batch"));
+		NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
+			TexCoordBufferSize,
+			BUF_Static | BUF_ShaderResource,
+			sizeof(FVector4f),
+			ERHIAccess::SRVMask,
+			TexCoordCreateInfo
+		);
+
+		void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
+		FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
+		RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
+
+		// Create TexCoord SRV - FVector4f is 16 bytes (4x float for 2 UV channels)
+		NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+
 		// Create index buffer directly from CPU data
 		const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
 		FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelIndexBuffer_Batch"));
@@ -1102,7 +1335,9 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 			RHICmdList,
 			ChunkVertexFactory.Get(),
 			VertexBufferWrapper.Get(),
-			NewRenderData.ColorSRV
+			NewRenderData.ColorSRV,
+			NewRenderData.TangentsSRV,
+			NewRenderData.TexCoordSRV
 		);
 		ChunkVertexFactory->InitResource(RHICmdList);
 		ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);

@@ -130,6 +130,31 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "100", ClampMax = "10000"))
 	int32 MaxLoadedChunks = 2000;
 
+	// ==================== Meshing Settings ====================
+
+	/**
+	 * Use greedy meshing to merge adjacent faces with the same material.
+	 * Reduces triangle count by 40-60% but requires special material handling for texture atlases.
+	 * When disabled, each voxel face is a separate quad with 0-1 UVs (simpler material setup).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Meshing")
+	bool bUseGreedyMeshing = false;
+
+	/**
+	 * Calculate per-vertex ambient occlusion.
+	 * Adds subtle shadowing in corners and crevices.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Meshing")
+	bool bCalculateAO = true;
+
+	/**
+	 * UV scale multiplier for texture coordinates.
+	 * With greedy meshing: UVs scale with merged quad size (e.g., 5x3 quad = UV 0-5, 0-3).
+	 * Without greedy meshing: Each face is 0-1 * UVScale.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Meshing", meta = (ClampMin = "0.01", ClampMax = "10.0"))
+	float UVScale = 1.0f;
+
 	// ==================== Rendering Settings ====================
 
 	/** Use GPU-driven custom vertex factory (true) or PMC fallback (false) */

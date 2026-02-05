@@ -4,6 +4,7 @@
 #include "VoxelRendering.h"
 #include "VoxelWorldComponent.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelMaterialAtlas.h"
 #include "VoxelVertex.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -371,6 +372,33 @@ void FVoxelCustomVFRenderer::UpdateMaterialParameters()
 	{
 		WorldComponent->MarkRenderStateDirty();
 	}
+}
+
+void FVoxelCustomVFRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		// Create a dynamic material instance if we have a material but no dynamic instance yet
+		// This is required for the LUT texture to be passed to the material
+		if (CurrentMaterial.IsValid() && WorldComponent->GetMaterial(0) == CurrentMaterial.Get())
+		{
+			// Create dynamic instance from the current material
+			WorldComponent->CreateVoxelMaterialInstance(CurrentMaterial.Get());
+		}
+
+		WorldComponent->SetMaterialAtlas(Atlas);
+	}
+}
+
+UVoxelMaterialAtlas* FVoxelCustomVFRenderer::GetMaterialAtlas() const
+{
+	if (WorldComponent)
+	{
+		return WorldComponent->GetMaterialAtlas();
+	}
+	return nullptr;
 }
 
 // ==================== LOD Transitions ====================

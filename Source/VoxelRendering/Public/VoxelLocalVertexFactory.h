@@ -31,18 +31,24 @@ extern VOXELRENDERING_API int32 GVoxelVertexColorDebugMode;
 
 /**
  * Vertex format compatible with FLocalVertexFactory.
- * 32 bytes per vertex (vs 28 for FVoxelVertex).
+ * 40 bytes per vertex.
  *
  * Uses FPackedNormal for tangent basis which is what FLocalVertexFactory expects.
  *
- * Color channel encoding (ALIGNED with CPU mesher for shared materials):
- *   R: MaterialID (0-255) - VertexColor.R * 255 for texture array index
- *   G: BiomeID (0-255) - VertexColor.G * 255 for biome blending
+ * TexCoord (UV0): Face UVs for texture tiling within atlas tiles
+ * TexCoord1 (UV1): Material data passed as floats to avoid sRGB conversion
+ *   UV1.x = MaterialID (0-255 as float)
+ *   UV1.y = FaceType (0=Top, 1=Side, 2=Bottom as float)
+ *
+ * Color channel encoding (for AO and BiomeID):
+ *   R: Reserved (legacy MaterialID for compatibility)
+ *   G: BiomeID (0-255)
  *   B: AO in top 2 bits - (VertexColor.B * 255) >> 6 gives AO 0-3
  *   A: Reserved (1.0)
  *
- * In material graph:
- *   MaterialID = round(VertexColor.R * 255)
+ * In material graph, use TexCoord[1] for MaterialID/FaceType:
+ *   MaterialID = floor(TexCoord[1].x + 0.5)  // Round to nearest int
+ *   FaceType = floor(TexCoord[1].y + 0.5)    // Round to nearest int
  *   BiomeID = round(VertexColor.G * 255)
  *   AO = floor(VertexColor.B * 4)  // 0-3 range
  *   AOFactor = 1.0 - (AO * 0.25)   // For darkening
@@ -63,15 +69,34 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 	FVector3f Position;       // 12 bytes, offset 0
 	FPackedNormal TangentX;   // 4 bytes, offset 12
 	FPackedNormal TangentZ;   // 4 bytes, offset 16 (TangentZ.W contains sign for binormal)
-	FVector2f TexCoord;       // 8 bytes, offset 20
-	FColor Color;             // 4 bytes, offset 28
-	// Total: 32 bytes
+	FVector2f TexCoord;       // 8 bytes, offset 20 (UV0: face UVs for tiling)
+	FVector2f TexCoord1;      // 8 bytes, offset 28 (UV1: MaterialID, FaceType as floats)
+	FColor Color;             // 4 bytes, offset 36 (AO, BiomeID)
+	// Total: 40 bytes
 
 	FVoxelLocalVertex() = default;
 
+	FVoxelLocalVertex(const FVector3f& InPos, const FVector3f& InNormal, const FVector2f& InUV, const FVector2f& InUV1, const FColor& InColor)
+		: Position(InPos)
+		, TexCoord(InUV)
+		, TexCoord1(InUV1)
+		, Color(InColor)
+	{
+		// Compute tangent from normal
+		FVector3f RefVector = FMath::Abs(InNormal.Z) < 0.999f ? FVector3f(0, 0, 1) : FVector3f(1, 0, 0);
+		FVector3f TangentVec = FVector3f::CrossProduct(RefVector, InNormal).GetSafeNormal();
+
+		TangentX = FPackedNormal(TangentVec);
+		TangentZ = FPackedNormal(InNormal);
+		// Set W component of TangentZ to encode binormal sign (127 = positive/no flip)
+		TangentZ.Vector.W = 127;
+	}
+
+	// Legacy constructor for compatibility
 	FVoxelLocalVertex(const FVector3f& InPos, const FVector3f& InNormal, const FVector2f& InUV, const FColor& InColor)
 		: Position(InPos)
 		, TexCoord(InUV)
+		, TexCoord1(FVector2f::ZeroVector)
 		, Color(InColor)
 	{
 		// Compute tangent from normal
@@ -87,14 +112,19 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 	/**
 	 * Convert from FVoxelVertex.
 	 *
-	 * Vertex color encoding (aligned with CPU mesher for shared materials):
-	 *   R: MaterialID (0-255)
+	 * UV1 encoding (avoids sRGB issues):
+	 *   UV1.x = MaterialID (0-255 as float)
+	 *   UV1.y = FaceType (0=Top, 1=Side, 2=Bottom as float)
+	 *
+	 * Vertex color encoding:
+	 *   R: Reserved (legacy MaterialID for compatibility)
 	 *   G: BiomeID (0-255)
 	 *   B: AO << 6 (top 2 bits encode AO 0-3)
 	 *   A: 255
 	 *
-	 * In material, access via VertexColor node:
-	 *   - MaterialID = round(VertexColor.R * 255)
+	 * In material, access via TexCoord[1] for MaterialID/FaceType:
+	 *   - MaterialID = floor(TexCoord[1].x + 0.5)
+	 *   - FaceType = floor(TexCoord[1].y + 0.5)
 	 *   - BiomeID = round(VertexColor.G * 255)
 	 *   - AO = floor(VertexColor.B * 4)
 	 *   - AOFactor = 1.0 - (AO * 0.25)
@@ -107,6 +137,18 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 
 		// Get normal and compute tangent
 		FVector3f Normal = VoxelVert.GetNormal();
+
+		// Defensive: If normal is zero or invalid, default to up vector
+		if (Normal.IsNearlyZero(KINDA_SMALL_NUMBER))
+		{
+			Normal = FVector3f::UpVector;
+		}
+		else
+		{
+			Normal = Normal.GetSafeNormal();
+		}
+
+		// Compute tangent perpendicular to normal
 		FVector3f RefVector = FMath::Abs(Normal.Z) < 0.999f ? FVector3f(0, 0, 1) : FVector3f(1, 0, 0);
 		FVector3f TangentVec = FVector3f::CrossProduct(RefVector, Normal).GetSafeNormal();
 
@@ -118,6 +160,21 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 		uint8 AOValue = VoxelVert.GetAO();
 		uint8 MaterialID = VoxelVert.GetMaterialID();
 		uint8 BiomeID = VoxelVert.GetBiomeID();
+
+		// Determine face type from normal (for GPU meshing path)
+		// Top = +Z (0), Side = X/Y faces (1), Bottom = -Z (2)
+		uint8 FaceType = 1; // Default to side
+		if (Normal.Z > 0.7f)
+		{
+			FaceType = 0; // Top
+		}
+		else if (Normal.Z < -0.7f)
+		{
+			FaceType = 2; // Bottom
+		}
+
+		// Store MaterialID and FaceType in UV1 as exact floats (no interpolation issues)
+		Result.TexCoord1 = FVector2f(static_cast<float>(MaterialID), static_cast<float>(FaceType));
 
 		// Apply debug mode
 		if (GVoxelVertexColorDebugMode == EVoxelVertexColorDebugMode::MaterialColors)
@@ -160,8 +217,7 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 		else
 		{
 			// Normal mode: Encode data for material graph
-			// ALIGNED with CPU mesher (FChunkMeshData.Colors) for shared materials:
-			// R = MaterialID (0-255)
+			// R = Reserved (legacy MaterialID for compatibility)
 			// G = BiomeID (0-255)
 			// B = AO << 6 (top 2 bits: 0, 64, 128, 192 for AO 0-3)
 			// A = 255
@@ -173,12 +229,13 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 };
 
 // Verify struct layout at compile time
-static_assert(sizeof(FVoxelLocalVertex) == 32, "FVoxelLocalVertex size mismatch");
+static_assert(sizeof(FVoxelLocalVertex) == 40, "FVoxelLocalVertex size mismatch");
 static_assert(STRUCT_OFFSET(FVoxelLocalVertex, Position) == 0, "Position offset mismatch");
 static_assert(STRUCT_OFFSET(FVoxelLocalVertex, TangentX) == 12, "TangentX offset mismatch");
 static_assert(STRUCT_OFFSET(FVoxelLocalVertex, TangentZ) == 16, "TangentZ offset mismatch");
 static_assert(STRUCT_OFFSET(FVoxelLocalVertex, TexCoord) == 20, "TexCoord offset mismatch");
-static_assert(STRUCT_OFFSET(FVoxelLocalVertex, Color) == 28, "Color offset mismatch");
+static_assert(STRUCT_OFFSET(FVoxelLocalVertex, TexCoord1) == 28, "TexCoord1 offset mismatch");
+static_assert(STRUCT_OFFSET(FVoxelLocalVertex, Color) == 36, "Color offset mismatch");
 
 /**
  * Per-chunk GPU data for use with FLocalVertexFactory.
@@ -221,6 +278,18 @@ struct VOXELRENDERING_API FVoxelChunkRenderData
 	/** Color SRV for FLocalVertexFactory */
 	FShaderResourceViewRHIRef ColorSRV;
 
+	/** Tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex) */
+	FBufferRHIRef TangentBufferRHI;
+
+	/** Tangent SRV for FLocalVertexFactory (needed for GPUScene manual vertex fetch) */
+	FShaderResourceViewRHIRef TangentsSRV;
+
+	/** TexCoord buffer for SRV */
+	FBufferRHIRef TexCoordBufferRHI;
+
+	/** TexCoord SRV for FLocalVertexFactory (needed for GPUScene manual vertex fetch) */
+	FShaderResourceViewRHIRef TexCoordSRV;
+
 	/** Check if GPU buffers are valid */
 	FORCEINLINE bool HasValidBuffers() const
 	{
@@ -233,12 +302,18 @@ struct VOXELRENDERING_API FVoxelChunkRenderData
 		SIZE_T VertexSize = VertexCount * sizeof(FVoxelLocalVertex);
 		SIZE_T IndexSize = IndexCount * sizeof(uint32);
 		SIZE_T ColorSize = VertexCount * sizeof(FColor);
-		return VertexSize + IndexSize + ColorSize;
+		SIZE_T TangentSize = VertexCount * 8; // 2 x FPackedNormal (4 bytes each)
+		SIZE_T TexCoordSize = VertexCount * sizeof(FVector2f);
+		return VertexSize + IndexSize + ColorSize + TangentSize + TexCoordSize;
 	}
 
 	/** Release GPU resources */
 	void ReleaseResources()
 	{
+		TexCoordSRV.SafeRelease();
+		TexCoordBufferRHI.SafeRelease();
+		TangentsSRV.SafeRelease();
+		TangentBufferRHI.SafeRelease();
 		ColorSRV.SafeRelease();
 		ColorBufferRHI.SafeRelease();
 		VertexBufferRHI.SafeRelease();
@@ -315,9 +390,18 @@ private:
 /**
  * Helper function to initialize FLocalVertexFactory with voxel vertex data.
  * Uses the same pattern as LocalVFTestComponent.
+ *
+ * @param RHICmdList RHI command list
+ * @param VertexFactory Vertex factory to initialize
+ * @param VertexBuffer Vertex buffer containing FVoxelLocalVertex data
+ * @param ColorSRV SRV for vertex colors (manual vertex fetch)
+ * @param TangentsSRV Optional SRV for tangents (manual vertex fetch, used by GPUScene)
+ * @param TexCoordSRV Optional SRV for texture coordinates (manual vertex fetch, used by GPUScene)
  */
 void VOXELRENDERING_API InitVoxelLocalVertexFactory(
 	FRHICommandListBase& RHICmdList,
 	FLocalVertexFactory* VertexFactory,
 	const FVertexBuffer* VertexBuffer,
-	FRHIShaderResourceView* ColorSRV);
+	FRHIShaderResourceView* ColorSRV,
+	FRHIShaderResourceView* TangentsSRV = nullptr,
+	FRHIShaderResourceView* TexCoordSRV = nullptr);

@@ -11,6 +11,7 @@ class UWorld;
 class UMaterialInterface;
 class UVoxelWorldConfiguration;
 class UMaterialParameterCollection;
+class UVoxelMaterialAtlas;
 
 /**
  * Voxel Mesh Renderer Interface.
@@ -151,6 +152,29 @@ public:
 	 * all chunks reflect the changes.
 	 */
 	virtual void UpdateMaterialParameters() = 0;
+
+	/**
+	 * Set material atlas for texture lookup.
+	 *
+	 * The material atlas defines how MaterialIDs map to atlas positions
+	 * and provides the LUT texture for per-face texture variants.
+	 *
+	 * @param Atlas Material atlas data asset
+	 */
+	virtual void SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
+	{
+		// Default: no-op (renderer doesn't support material atlas)
+	}
+
+	/**
+	 * Get the current material atlas.
+	 *
+	 * @return Current material atlas or nullptr if not set
+	 */
+	virtual UVoxelMaterialAtlas* GetMaterialAtlas() const
+	{
+		return nullptr;
+	}
 
 	// ==================== LOD Transitions ====================
 

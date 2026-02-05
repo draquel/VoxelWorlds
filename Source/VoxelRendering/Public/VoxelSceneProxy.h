@@ -141,8 +141,9 @@ public:
 	/**
 	 * Update the material used for rendering.
 	 * Must be called on render thread.
+	 * MaterialRelevance must be computed on game thread before calling.
 	 */
-	void SetMaterial_RenderThread(UMaterialInterface* InMaterial);
+	void SetMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InMaterialRelevance);
 
 	// ==================== Statistics ====================
 

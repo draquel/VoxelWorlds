@@ -166,6 +166,8 @@ void UVoxelChunkManager::Initialize(
 		FVoxelMeshingConfig MeshConfig = SmoothMesher->GetConfig();
 		MeshConfig.bUseSmoothMeshing = true;
 		MeshConfig.IsoLevel = 0.5f;
+		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
+		MeshConfig.UVScale = Configuration->UVScale;
 
 		// Disable LOD seam handling if configured
 		if (!Configuration->bEnableLODSeams)
@@ -177,13 +179,27 @@ void UVoxelChunkManager::Initialize(
 		SmoothMesher->SetConfig(MeshConfig);
 
 		Mesher = MoveTemp(SmoothMesher);
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Smooth (Marching Cubes) mesher"));
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Smooth (Marching Cubes) mesher (AO=%s, UVScale=%.2f)"),
+			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+			Configuration->UVScale);
 	}
 	else
 	{
-		Mesher = MakeUnique<FVoxelCPUCubicMesher>();
-		Mesher->Initialize();
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Cubic mesher"));
+		auto CubicMesher = MakeUnique<FVoxelCPUCubicMesher>();
+		CubicMesher->Initialize();
+
+		// Configure cubic meshing parameters from world config
+		FVoxelMeshingConfig MeshConfig = CubicMesher->GetConfig();
+		MeshConfig.bUseGreedyMeshing = Configuration->bUseGreedyMeshing;
+		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
+		MeshConfig.UVScale = Configuration->UVScale;
+		CubicMesher->SetConfig(MeshConfig);
+
+		Mesher = MoveTemp(CubicMesher);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Cubic mesher (Greedy=%s, AO=%s, UVScale=%.2f)"),
+			Configuration->bUseGreedyMeshing ? TEXT("true") : TEXT("false"),
+			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+			Configuration->UVScale);
 	}
 
 	// Clear pending mesh queue

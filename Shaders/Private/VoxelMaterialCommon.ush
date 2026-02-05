@@ -1,0 +1,230 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+// VoxelMaterialCommon.ush - Common functions for voxel material sampling
+
+#pragma once
+
+// Face type constants
+#define VOXEL_FACE_TOP 0
+#define VOXEL_FACE_SIDE 1
+#define VOXEL_FACE_BOTTOM 2
+
+// ============================================================================
+// UV1-based Material Data Access (Recommended - avoids sRGB conversion issues)
+// ============================================================================
+
+/**
+ * Extract MaterialID from UV1.
+ * MaterialID is stored as a float in UV1.x (e.g., 5.0 for MaterialID 5).
+ * This method avoids sRGB color space conversion issues with vertex colors.
+ *
+ * @param UV1 - The second texture coordinate (TexCoord[1] in material)
+ * @return MaterialID as integer (0-255)
+ */
+int GetVoxelMaterialIDFromUV(float2 UV1)
+{
+    return (int)floor(UV1.x + 0.5);
+}
+
+/**
+ * Extract FaceType from UV1.
+ * FaceType is stored as a float in UV1.y (0.0=Top, 1.0=Side, 2.0=Bottom).
+ * This method avoids sRGB color space conversion issues with vertex colors.
+ *
+ * @param UV1 - The second texture coordinate (TexCoord[1] in material)
+ * @return FaceType as integer (0=Top, 1=Side, 2=Bottom)
+ */
+int GetVoxelFaceTypeFromUV(float2 UV1)
+{
+    return (int)floor(UV1.y + 0.5);
+}
+
+// ============================================================================
+// Vertex Color-based Access (Legacy - subject to sRGB conversion issues)
+// ============================================================================
+
+/**
+ * Extract MaterialID from vertex color.
+ * MaterialID is stored in the R channel (0-1 range, multiply by 255 to get ID).
+ * NOTE: Vertex colors undergo sRGB conversion which can cause interpolation
+ * artifacts. Prefer GetVoxelMaterialIDFromUV() using TexCoord[1] instead.
+ *
+ * @param VertexColor - The vertex color from VertexColor node
+ * @return MaterialID as integer (0-255)
+ */
+int GetVoxelMaterialID(float4 VertexColor)
+{
+    return (int)round(VertexColor.r * 255.0);
+}
+
+/**
+ * Extract BiomeID from vertex color.
+ * BiomeID is stored in the G channel.
+ *
+ * @param VertexColor - The vertex color from VertexColor node
+ * @return BiomeID as integer (0-255)
+ */
+int GetVoxelBiomeID(float4 VertexColor)
+{
+    return (int)round(VertexColor.g * 255.0);
+}
+
+/**
+ * Extract Ambient Occlusion from vertex color.
+ * AO is stored in the top 2 bits of the B channel.
+ *
+ * @param VertexColor - The vertex color from VertexColor node
+ * @return AO factor (1.0 = no occlusion, 0.25 = full occlusion)
+ */
+float GetVoxelAO(float4 VertexColor)
+{
+    int aoValue = (int)(VertexColor.b * 255.0) >> 6; // Top 2 bits (0-3)
+    return 1.0 - (aoValue * 0.25); // Convert to darkening factor
+}
+
+/**
+ * Determine face type from world normal.
+ *
+ * @param WorldNormal - The world-space normal vector
+ * @param Threshold - Threshold for detecting top/bottom (default 0.7)
+ * @return Face type: 0=Top, 1=Side, 2=Bottom
+ */
+int GetVoxelFaceType(float3 WorldNormal, float Threshold)
+{
+    float absZ = abs(WorldNormal.z);
+
+    if (absZ > Threshold)
+    {
+        // Top or bottom face
+        return (WorldNormal.z > 0) ? VOXEL_FACE_TOP : VOXEL_FACE_BOTTOM;
+    }
+    else
+    {
+        // Side face
+        return VOXEL_FACE_SIDE;
+    }
+}
+
+/**
+ * Sample the Material LUT texture to get atlas tile position.
+ *
+ * LUT Format: 256 x 3 texture (MaterialID x FaceType)
+ * - R channel: Atlas column (0-255, divide by AtlasColumns to get normalized)
+ * - G channel: Atlas row (0-255, divide by AtlasRows to get normalized)
+ *
+ * @param LUTTexture - The Material LUT texture
+ * @param LUTSampler - Sampler for the LUT (use point/nearest filtering!)
+ * @param MaterialID - Material ID (0-255)
+ * @param FaceType - Face type (0=Top, 1=Side, 2=Bottom)
+ * @return float2 with (Column, Row) in 0-255 range
+ */
+float2 SampleVoxelLUT(Texture2D LUTTexture, SamplerState LUTSampler, int MaterialID, int FaceType)
+{
+    // LUT is 256 wide (MaterialID) x 3 tall (FaceType)
+    // Add 0.5 to sample center of texel
+    float2 lutUV = float2(
+        (MaterialID + 0.5) / 256.0,
+        (FaceType + 0.5) / 3.0
+    );
+
+    float4 lutSample = LUTTexture.SampleLevel(LUTSampler, lutUV, 0);
+
+    // R and G channels contain column and row (0-1 range, scaled by 255)
+    return float2(lutSample.r * 255.0, lutSample.g * 255.0);
+}
+
+/**
+ * Transform face UVs (0-1) to atlas UVs for a specific tile.
+ *
+ * @param FaceUV - Input UV coordinates (0-1 range per face)
+ * @param AtlasColumn - Column in atlas (0-based)
+ * @param AtlasRow - Row in atlas (0-based)
+ * @param AtlasColumns - Total columns in atlas
+ * @param AtlasRows - Total rows in atlas
+ * @return Transformed UV for sampling the atlas
+ */
+float2 TransformToAtlasUV(float2 FaceUV, float AtlasColumn, float AtlasRow, float AtlasColumns, float AtlasRows)
+{
+    float tileWidth = 1.0 / AtlasColumns;
+    float tileHeight = 1.0 / AtlasRows;
+
+    // Wrap UVs to 0-1 range (for tiling within a face)
+    float2 wrappedUV = frac(FaceUV);
+
+    // Scale to tile size and offset to correct tile
+    float2 atlasUV;
+    atlasUV.x = (wrappedUV.x * tileWidth) + (AtlasColumn * tileWidth);
+    atlasUV.y = (wrappedUV.y * tileHeight) + (AtlasRow * tileHeight);
+
+    return atlasUV;
+}
+
+/**
+ * Complete voxel atlas sampling function using UV1 for material data.
+ * This is the RECOMMENDED method - avoids sRGB conversion issues.
+ * Combines all steps: get material ID, face type from UV1, LUT lookup, UV transform.
+ *
+ * @param AtlasTexture - The packed atlas texture
+ * @param AtlasSampler - Sampler for the atlas
+ * @param LUTTexture - The Material LUT texture
+ * @param LUTSampler - Sampler for the LUT (point filtering)
+ * @param FaceUV - Face UV coordinates from TexCoord[0] (0-1)
+ * @param MaterialUV - Material data from TexCoord[1] (x=MaterialID, y=FaceType)
+ * @param AtlasColumns - Number of columns in atlas
+ * @param AtlasRows - Number of rows in atlas
+ * @return Sampled color from atlas
+ */
+float4 SampleVoxelAtlasUV1(
+    Texture2D AtlasTexture, SamplerState AtlasSampler,
+    Texture2D LUTTexture, SamplerState LUTSampler,
+    float2 FaceUV, float2 MaterialUV,
+    float AtlasColumns, float AtlasRows)
+{
+    // Get material ID and face type from UV1 (no sRGB issues!)
+    int materialID = GetVoxelMaterialIDFromUV(MaterialUV);
+    int faceType = GetVoxelFaceTypeFromUV(MaterialUV);
+
+    // Sample LUT to get atlas tile position
+    float2 tilePos = SampleVoxelLUT(LUTTexture, LUTSampler, materialID, faceType);
+
+    // Transform UVs to atlas space
+    float2 atlasUV = TransformToAtlasUV(FaceUV, tilePos.x, tilePos.y, AtlasColumns, AtlasRows);
+
+    // Sample atlas with explicit mip level 0 to avoid bleeding
+    return AtlasTexture.SampleLevel(AtlasSampler, atlasUV, 0);
+}
+
+/**
+ * Complete voxel atlas sampling function (legacy vertex color version).
+ * NOTE: This version may have sRGB interpolation artifacts at triangle edges.
+ * Prefer SampleVoxelAtlasUV1() which uses TexCoord[1] for material data.
+ *
+ * @param AtlasTexture - The packed atlas texture
+ * @param AtlasSampler - Sampler for the atlas
+ * @param LUTTexture - The Material LUT texture
+ * @param LUTSampler - Sampler for the LUT (point filtering)
+ * @param VertexColor - Vertex color input
+ * @param WorldNormal - World-space normal
+ * @param FaceUV - Face UV coordinates (0-1)
+ * @param AtlasColumns - Number of columns in atlas
+ * @param AtlasRows - Number of rows in atlas
+ * @return Sampled color from atlas
+ */
+float4 SampleVoxelAtlas(
+    Texture2D AtlasTexture, SamplerState AtlasSampler,
+    Texture2D LUTTexture, SamplerState LUTSampler,
+    float4 VertexColor, float3 WorldNormal, float2 FaceUV,
+    float AtlasColumns, float AtlasRows)
+{
+    // Get material ID and face type
+    int materialID = GetVoxelMaterialID(VertexColor);
+    int faceType = GetVoxelFaceType(WorldNormal, 0.7);
+
+    // Sample LUT to get atlas tile position
+    float2 tilePos = SampleVoxelLUT(LUTTexture, LUTSampler, materialID, faceType);
+
+    // Transform UVs to atlas space
+    float2 atlasUV = TransformToAtlasUV(FaceUV, tilePos.x, tilePos.y, AtlasColumns, AtlasRows);
+
+    // Sample atlas
+    return AtlasTexture.Sample(AtlasSampler, atlasUV);
+}

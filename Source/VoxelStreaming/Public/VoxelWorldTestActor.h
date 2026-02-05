@@ -8,6 +8,8 @@
 #include "Materials/MaterialParameterCollection.h"
 #include "VoxelWorldTestActor.generated.h"
 
+class UVoxelMaterialAtlas;
+
 // Forward declarations
 class UVoxelChunkManager;
 class UVoxelWorldConfiguration;
@@ -75,6 +77,18 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Rendering")
 	TObjectPtr<UMaterialInterface> VoxelMaterial;
+
+	/**
+	 * Material atlas for texture lookup and face variants.
+	 *
+	 * The atlas defines how MaterialIDs map to texture atlas positions.
+	 * Supports per-face texture variants (top/side/bottom).
+	 *
+	 * Create a VoxelMaterialAtlas data asset in the Content Browser,
+	 * configure materials and atlas positions, then assign it here.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Rendering")
+	TObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;
 
 	// ==================== LOD Material Parameters ====================
 

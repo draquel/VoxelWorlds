@@ -9,6 +9,7 @@
 class UVoxelWorldComponent;
 class UMaterialInterface;
 class UMaterialParameterCollection;
+class UVoxelMaterialAtlas;
 class UWorld;
 class UVoxelWorldConfiguration;
 
@@ -60,6 +61,8 @@ public:
 	virtual void SetMaterial(UMaterialInterface* Material) override;
 	virtual UMaterialInterface* GetMaterial() const override;
 	virtual void UpdateMaterialParameters() override;
+	virtual void SetMaterialAtlas(UVoxelMaterialAtlas* Atlas) override;
+	virtual UVoxelMaterialAtlas* GetMaterialAtlas() const override;
 
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;

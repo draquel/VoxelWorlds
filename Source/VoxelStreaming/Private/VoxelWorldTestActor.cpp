@@ -4,6 +4,7 @@
 #include "VoxelStreaming.h"
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelMaterialAtlas.h"
 #include "DistanceBandLODStrategy.h"
 #include "VoxelPMCRenderer.h"
 #include "VoxelCustomVFRenderer.h"
@@ -176,6 +177,19 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 		{
 			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No LOD Parameter Collection assigned. ")
 				TEXT("Material-based LOD morphing disabled."));
+		}
+
+		// Configure material atlas for face variants and texture lookup
+		if (MaterialAtlas)
+		{
+			CustomVFRenderer->SetMaterialAtlas(MaterialAtlas);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Material atlas configured with %d materials"),
+				MaterialAtlas->GetMaterialCount());
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No Material Atlas assigned. ")
+				TEXT("Face variants and LUT-based texture lookup disabled."));
 		}
 
 		MeshRenderer = CustomVFRenderer;

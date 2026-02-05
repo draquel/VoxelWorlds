@@ -61,21 +61,77 @@ const FVector3f FVoxelCPUCubicMesher::QuadVertices[6][4] = {
 		FVector3f(1.0f, 1.0f, 1.0f),
 		FVector3f(0.0f, 1.0f, 1.0f)
 	},
-	// -Z face (Bottom) - CCW when viewed from below
+	// -Z face (Bottom) - CW when viewed from below (reversed Y to match opposite normal direction)
 	{
-		FVector3f(0.0f, 0.0f, 0.0f),
-		FVector3f(1.0f, 0.0f, 0.0f),
+		FVector3f(0.0f, 1.0f, 0.0f),
 		FVector3f(1.0f, 1.0f, 0.0f),
-		FVector3f(0.0f, 1.0f, 0.0f)
+		FVector3f(1.0f, 0.0f, 0.0f),
+		FVector3f(0.0f, 0.0f, 0.0f)
 	}
 };
 
-// UV coordinates for quad vertices
+// UV coordinates for quad vertices (legacy)
 const FVector2f FVoxelCPUCubicMesher::QuadUVs[4] = {
 	FVector2f(0.0f, 0.0f),
 	FVector2f(1.0f, 0.0f),
 	FVector2f(1.0f, 1.0f),
 	FVector2f(0.0f, 1.0f)
+};
+
+// Per-face UV coordinates ensuring consistent texture orientation
+// For each face, UVs are mapped so:
+// - U increases left-to-right when viewing the face from outside the voxel
+// - V=0 at TOP of face, V=1 at BOTTOM (matches texture space where V=0 is top of image)
+// This ensures grass overhang textures appear at the top of side faces
+const FVector2f FVoxelCPUCubicMesher::FaceUVs[6][4] = {
+	// Face 0: +X (East) - viewing from +X, Y increases to the right
+	// V flipped: Z=1 (top) -> V=0, Z=0 (bottom) -> V=1
+	{
+		FVector2f(0.0f, 1.0f),  // V0: (1,0,0) -> left-bottom (V=1)
+		FVector2f(1.0f, 1.0f),  // V1: (1,1,0) -> right-bottom (V=1)
+		FVector2f(1.0f, 0.0f),  // V2: (1,1,1) -> right-top (V=0)
+		FVector2f(0.0f, 0.0f)   // V3: (1,0,1) -> left-top (V=0)
+	},
+	// Face 1: -X (West) - viewing from -X, Y increases to the right
+	// V flipped: Z=1 (top) -> V=0, Z=0 (bottom) -> V=1
+	{
+		FVector2f(1.0f, 1.0f),  // V0: (0,1,0) -> right-bottom (V=1)
+		FVector2f(0.0f, 1.0f),  // V1: (0,0,0) -> left-bottom (V=1)
+		FVector2f(0.0f, 0.0f),  // V2: (0,0,1) -> left-top (V=0)
+		FVector2f(1.0f, 0.0f)   // V3: (0,1,1) -> right-top (V=0)
+	},
+	// Face 2: +Y (North) - viewing from +Y, X decreases to the right
+	// V flipped: Z=1 (top) -> V=0, Z=0 (bottom) -> V=1
+	{
+		FVector2f(0.0f, 1.0f),  // V0: (1,1,0) -> left-bottom (V=1)
+		FVector2f(1.0f, 1.0f),  // V1: (0,1,0) -> right-bottom (V=1)
+		FVector2f(1.0f, 0.0f),  // V2: (0,1,1) -> right-top (V=0)
+		FVector2f(0.0f, 0.0f)   // V3: (1,1,1) -> left-top (V=0)
+	},
+	// Face 3: -Y (South) - viewing from -Y, X increases to the right
+	// V flipped: Z=1 (top) -> V=0, Z=0 (bottom) -> V=1
+	{
+		FVector2f(0.0f, 1.0f),  // V0: (0,0,0) -> left-bottom (V=1)
+		FVector2f(1.0f, 1.0f),  // V1: (1,0,0) -> right-bottom (V=1)
+		FVector2f(1.0f, 0.0f),  // V2: (1,0,1) -> right-top (V=0)
+		FVector2f(0.0f, 0.0f)   // V3: (0,0,1) -> left-top (V=0)
+	},
+	// Face 4: +Z (Top) - viewing from above, X increases to the right, Y increases upward
+	// Top face doesn't need V flip (looking down at horizontal surface)
+	{
+		FVector2f(0.0f, 0.0f),  // V0: (0,0,1)
+		FVector2f(1.0f, 0.0f),  // V1: (1,0,1)
+		FVector2f(1.0f, 1.0f),  // V2: (1,1,1)
+		FVector2f(0.0f, 1.0f)   // V3: (0,1,1)
+	},
+	// Face 5: -Z (Bottom) - viewing from below (vertex order reversed)
+	// Bottom face doesn't need V flip (looking up at horizontal surface)
+	{
+		FVector2f(0.0f, 1.0f),  // V0: (0,1,0) - top-left
+		FVector2f(1.0f, 1.0f),  // V1: (1,1,0) - top-right
+		FVector2f(1.0f, 0.0f),  // V2: (1,0,0) - bottom-right
+		FVector2f(0.0f, 0.0f)   // V3: (0,0,0) - bottom-left
+	}
 };
 
 // AO neighbor offsets for each face and vertex
@@ -118,12 +174,12 @@ const FIntVector FVoxelCPUCubicMesher::AONeighborOffsets[6][4][3] = {
 		{ FIntVector(1,0,1),  FIntVector(0,1,1),  FIntVector(1,1,1)   },
 		{ FIntVector(-1,0,1), FIntVector(0,1,1),  FIntVector(-1,1,1)  }
 	},
-	// Face 5: -Z
+	// Face 5: -Z (vertex order reversed to match new winding)
 	{
-		{ FIntVector(1,0,-1),  FIntVector(0,-1,-1), FIntVector(1,-1,-1)  },
-		{ FIntVector(-1,0,-1), FIntVector(0,-1,-1), FIntVector(-1,-1,-1) },
-		{ FIntVector(-1,0,-1), FIntVector(0,1,-1),  FIntVector(-1,1,-1)  },
-		{ FIntVector(1,0,-1),  FIntVector(0,1,-1),  FIntVector(1,1,-1)   }
+		{ FIntVector(1,0,-1),  FIntVector(0,1,-1),  FIntVector(1,1,-1)   },   // New V0 (was V3)
+		{ FIntVector(-1,0,-1), FIntVector(0,1,-1),  FIntVector(-1,1,-1)  },   // New V1 (was V2)
+		{ FIntVector(-1,0,-1), FIntVector(0,-1,-1), FIntVector(-1,-1,-1) },   // New V2 (was V1)
+		{ FIntVector(1,0,-1),  FIntVector(0,-1,-1), FIntVector(1,-1,-1)  }    // New V3 (was V0)
 	}
 };
 
@@ -222,6 +278,7 @@ void FVoxelCPUCubicMesher::GenerateMeshGreedy(
 	OutMeshData.Positions.Reserve(EstimatedFaces * 4);
 	OutMeshData.Normals.Reserve(EstimatedFaces * 4);
 	OutMeshData.UVs.Reserve(EstimatedFaces * 4);
+	OutMeshData.UV1s.Reserve(EstimatedFaces * 4);
 	OutMeshData.Colors.Reserve(EstimatedFaces * 4);
 	OutMeshData.Indices.Reserve(EstimatedFaces * 6);
 
@@ -283,6 +340,7 @@ void FVoxelCPUCubicMesher::GenerateMeshSimple(
 	OutMeshData.Positions.Reserve(EstimatedFaces * 4);
 	OutMeshData.Normals.Reserve(EstimatedFaces * 4);
 	OutMeshData.UVs.Reserve(EstimatedFaces * 4);
+	OutMeshData.UV1s.Reserve(EstimatedFaces * 4);
 	OutMeshData.Colors.Reserve(EstimatedFaces * 4);
 	OutMeshData.Indices.Reserve(EstimatedFaces * 6);
 
@@ -537,7 +595,7 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 	bool bPositive;
 	GetFaceAxes(Face, PrimaryAxis, UAxis, VAxis, bPositive);
 
-	// Calculate base position in world coordinates
+	// Calculate base position in local chunk coordinates (chunk offset added by scene proxy)
 	FVector3f BasePos;
 	int32 Coords[3];
 	Coords[PrimaryAxis] = SliceIndex;
@@ -659,57 +717,114 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 		Vertices[3] = Corner3;
 		AOMapping[0] = 0; AOMapping[1] = 1; AOMapping[2] = 2; AOMapping[3] = 3;
 		break;
-	case 5: // -Z: Need to reverse for correct winding when viewed from below
-		Vertices[0] = Corner0;
-		Vertices[1] = Corner1;
-		Vertices[2] = Corner2;
-		Vertices[3] = Corner3;
-		AOMapping[0] = 0; AOMapping[1] = 1; AOMapping[2] = 2; AOMapping[3] = 3;
+	case 5: // -Z: Reversed winding to match corrected QuadVertices
+		Vertices[0] = Corner3;  // (U, V+H) = top-left
+		Vertices[1] = Corner2;  // (U+W, V+H) = top-right
+		Vertices[2] = Corner1;  // (U+W, V) = bottom-right
+		Vertices[3] = Corner0;  // (U, V) = bottom-left
+		AOMapping[0] = 3; AOMapping[1] = 2; AOMapping[2] = 1; AOMapping[3] = 0;
 		break;
 	}
 
 	// UV coordinates scaled by quad size for proper texture tiling
-	const FVector2f UV0(0.0f, 0.0f);
-	const FVector2f UV1(Width * Config.UVScale, 0.0f);
-	const FVector2f UV2(Width * Config.UVScale, Height * Config.UVScale);
-	const FVector2f UV3(0.0f, Height * Config.UVScale);
+	// For side faces (0-3), V is flipped so V=0 is at top, V=1 at bottom
+	// This matches texture space where V=0 is top of image (grass overhang)
+	const float ScaledWidth = Width * Config.UVScale;
+	const float ScaledHeight = Height * Config.UVScale;
 
-	// Emit 4 vertices with per-vertex AO
+	// Determine if this is a side face that needs V flipping
+	const bool bIsSideFace = (Face >= 0 && Face <= 3);
+
+	FVector2f CornerUV0, CornerUV1, CornerUV2, CornerUV3;
+	if (bIsSideFace)
+	{
+		// Side faces: V flipped (V=0 at top of face, V=1 at bottom)
+		// Corner0 = (U, V) at bottom -> UV = (0, Height)
+		// Corner1 = (U+Width, V) at bottom -> UV = (Width, Height)
+		// Corner2 = (U+Width, V+Height) at top -> UV = (Width, 0)
+		// Corner3 = (U, V+Height) at top -> UV = (0, 0)
+		CornerUV0 = FVector2f(0.0f, ScaledHeight);
+		CornerUV1 = FVector2f(ScaledWidth, ScaledHeight);
+		CornerUV2 = FVector2f(ScaledWidth, 0.0f);
+		CornerUV3 = FVector2f(0.0f, 0.0f);
+	}
+	else
+	{
+		// Top/Bottom faces: standard UV mapping
+		// Corner0 = (U, V) -> UV = (0, 0)
+		// Corner1 = (U+Width, V) -> UV = (Width, 0)
+		// Corner2 = (U+Width, V+Height) -> UV = (Width, Height)
+		// Corner3 = (U, V+Height) -> UV = (0, Height)
+		CornerUV0 = FVector2f(0.0f, 0.0f);
+		CornerUV1 = FVector2f(ScaledWidth, 0.0f);
+		CornerUV2 = FVector2f(ScaledWidth, ScaledHeight);
+		CornerUV3 = FVector2f(0.0f, ScaledHeight);
+	}
+
+	// Reorder UVs to match vertex reordering (same mapping as vertices)
+	TArray<FVector2f, TInlineAllocator<4>> UVs;
+	UVs.SetNum(4);
+	switch (Face)
+	{
+	case 0: // +X: Vertices[0]=Corner0, [1]=Corner1, [2]=Corner2, [3]=Corner3
+		UVs[0] = CornerUV0; UVs[1] = CornerUV1; UVs[2] = CornerUV2; UVs[3] = CornerUV3;
+		break;
+	case 1: // -X: Vertices[0]=Corner1, [1]=Corner0, [2]=Corner3, [3]=Corner2
+		UVs[0] = CornerUV1; UVs[1] = CornerUV0; UVs[2] = CornerUV3; UVs[3] = CornerUV2;
+		break;
+	case 2: // +Y: Vertices[0]=Corner1, [1]=Corner0, [2]=Corner3, [3]=Corner2
+		UVs[0] = CornerUV1; UVs[1] = CornerUV0; UVs[2] = CornerUV3; UVs[3] = CornerUV2;
+		break;
+	case 3: // -Y: Vertices[0]=Corner0, [1]=Corner1, [2]=Corner2, [3]=Corner3
+		UVs[0] = CornerUV0; UVs[1] = CornerUV1; UVs[2] = CornerUV2; UVs[3] = CornerUV3;
+		break;
+	case 4: // +Z: Vertices[0]=Corner0, [1]=Corner1, [2]=Corner2, [3]=Corner3
+		UVs[0] = CornerUV0; UVs[1] = CornerUV1; UVs[2] = CornerUV2; UVs[3] = CornerUV3;
+		break;
+	case 5: // -Z: Vertices[0]=Corner3, [1]=Corner2, [2]=Corner1, [3]=Corner0
+		UVs[0] = CornerUV3; UVs[1] = CornerUV2; UVs[2] = CornerUV1; UVs[3] = CornerUV0;
+		break;
+	default:
+		UVs[0] = CornerUV0; UVs[1] = CornerUV1; UVs[2] = CornerUV2; UVs[3] = CornerUV3;
+		break;
+	}
+
+	// Convert 6-face index to 3-face type: 0-3=sides(1), 4=top(0), 5=bottom(2)
+	const uint8 FaceType = (Face == 4) ? 0 : ((Face == 5) ? 2 : 1);
+
+	// Emit 4 vertices with per-vertex AO and correctly mapped UVs
 	for (int32 i = 0; i < 4; i++)
 	{
 		MeshData.Positions.Add(Vertices[i]);
 		MeshData.Normals.Add(Normal);
 
+		// Add UV0 (face UVs for texture tiling)
+		if (Config.bGenerateUVs)
+		{
+			MeshData.UVs.Add(UVs[i]);
+		}
+		else
+		{
+			MeshData.UVs.Add(FVector2f::ZeroVector);
+		}
+
+		// Add UV1 (MaterialID and FaceType as floats - avoids sRGB conversion issues)
+		// These are constant across the entire face, so no interpolation problems
+		MeshData.UV1s.Add(FVector2f(static_cast<float>(MaterialID), static_cast<float>(FaceType)));
+
 		// Encode vertex data in color channels for custom vertex factory path:
-		// R = MaterialID (0-255)
+		// R = MaterialID (legacy, kept for compatibility)
 		// G = BiomeID (0-255)
-		// B = AO in top 2 bits (0-3 << 6), lower 6 bits available for future use
-		// A = 255
-		// For PMC path, the material handles the color lookup from MaterialID
+		// B = AO in top 2 bits (0-3 << 6) - varies per vertex
+		// A = 255 (unused, alpha channel not reliably passed)
 		const uint8 AOValue = Config.bCalculateAO ? VertexAO[AOMapping[i]] : 0;
 		const FColor VertexColor(
-			MaterialID,           // R: MaterialID for texture array lookup
-			BiomeID,              // G: BiomeID for biome-based effects
-			AOValue << 6,         // B: AO in top 2 bits (0, 64, 128, 192)
+			MaterialID,      // R: MaterialID (legacy)
+			BiomeID,         // G: BiomeID
+			AOValue << 6,    // B: AO in top 2 bits
 			255
 		);
 		MeshData.Colors.Add(VertexColor);
-	}
-
-	// Add UVs
-	if (Config.bGenerateUVs)
-	{
-		MeshData.UVs.Add(UV0);
-		MeshData.UVs.Add(UV1);
-		MeshData.UVs.Add(UV2);
-		MeshData.UVs.Add(UV3);
-	}
-	else
-	{
-		MeshData.UVs.Add(FVector2f::ZeroVector);
-		MeshData.UVs.Add(FVector2f::ZeroVector);
-		MeshData.UVs.Add(FVector2f::ZeroVector);
-		MeshData.UVs.Add(FVector2f::ZeroVector);
 	}
 
 	// Emit 6 indices (2 triangles, CW winding)
@@ -865,9 +980,8 @@ void FVoxelCPUCubicMesher::EmitQuad(
 	const FVoxelData& Voxel) const
 {
 	const float VoxelSize = Request.VoxelSize;
-	// Get chunk world position and add local voxel position to get world position
-	const FVector3f ChunkWorldPos = FVector3f(Request.GetChunkWorldPosition());
-	const FVector3f VoxelPos = ChunkWorldPos + FVector3f(
+	// Calculate local voxel position within chunk (chunk offset added by scene proxy)
+	const FVector3f VoxelPos = FVector3f(
 		static_cast<float>(X) * VoxelSize,
 		static_cast<float>(Y) * VoxelSize,
 		static_cast<float>(Z) * VoxelSize
@@ -883,6 +997,9 @@ void FVoxelCPUCubicMesher::EmitQuad(
 		CalculateFaceAO(Request, X, Y, Z, Face, VertexAO);
 	}
 
+	// Convert 6-face index to 3-face type: 0-3=sides(1), 4=top(0), 5=bottom(2)
+	const uint8 FaceType = (Face == 4) ? 0 : ((Face == 5) ? 2 : 1);
+
 	// Emit 4 vertices
 	for (int32 V = 0; V < 4; V++)
 	{
@@ -890,25 +1007,31 @@ void FVoxelCPUCubicMesher::EmitQuad(
 		MeshData.Positions.Add(Position);
 		MeshData.Normals.Add(Normal);
 
+		// Add UV0 (face UVs for texture tiling)
 		if (Config.bGenerateUVs)
 		{
-			MeshData.UVs.Add(QuadUVs[V] * Config.UVScale);
+			// Use per-face UVs for consistent texture orientation
+			MeshData.UVs.Add(FaceUVs[Face][V] * Config.UVScale);
 		}
 		else
 		{
 			MeshData.UVs.Add(FVector2f::ZeroVector);
 		}
 
+		// Add UV1 (MaterialID and FaceType as floats - avoids sRGB conversion issues)
+		// These are constant across the entire face, so no interpolation problems
+		MeshData.UV1s.Add(FVector2f(static_cast<float>(Voxel.MaterialID), static_cast<float>(FaceType)));
+
 		// Encode vertex data in color channels for custom vertex factory path:
-		// R = MaterialID (0-255)
-		// G = BiomeID (0-255, currently 0 - CPU path doesn't track per-vertex biome)
-		// B = AO in top 2 bits (0-3 << 6)
-		// A = 255
+		// R = MaterialID (legacy, kept for compatibility)
+		// G = BiomeID (0-255)
+		// B = AO in top 2 bits (0-3 << 6) - varies per vertex
+		// A = 255 (unused, alpha channel not reliably passed)
 		const uint8 AOValue = Config.bCalculateAO ? VertexAO[V] : 0;
 		MeshData.Colors.Add(FColor(
-			Voxel.MaterialID,     // R: MaterialID for texture array lookup
-			Voxel.BiomeID,        // G: BiomeID for biome-based effects
-			AOValue << 6,         // B: AO in top 2 bits
+			Voxel.MaterialID,    // R: MaterialID (legacy)
+			Voxel.BiomeID,       // G: BiomeID
+			AOValue << 6,        // B: AO in top 2 bits
 			255));
 	}
 

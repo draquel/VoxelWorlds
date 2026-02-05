@@ -119,11 +119,20 @@ struct VOXELCORE_API FChunkMeshData
 	UPROPERTY()
 	TArray<FVector3f> Normals;
 
-	/** Texture coordinates */
+	/** Texture coordinates (face UVs for texture tiling) */
 	UPROPERTY()
 	TArray<FVector2f> UVs;
 
-	/** Vertex colors (packed AO + material) */
+	/**
+	 * Secondary texture coordinates for material data.
+	 * UV1.x = MaterialID as float (0-255)
+	 * UV1.y = FaceType as float (0=Top, 1=Side, 2=Bottom)
+	 * Using UV channel avoids sRGB color space conversion issues with vertex colors.
+	 */
+	UPROPERTY()
+	TArray<FVector2f> UV1s;
+
+	/** Vertex colors (packed AO + BiomeID, legacy MaterialID kept for compatibility) */
 	UPROPERTY()
 	TArray<FColor> Colors;
 
@@ -137,6 +146,7 @@ struct VOXELCORE_API FChunkMeshData
 		Positions.Reset();
 		Normals.Reset();
 		UVs.Reset();
+		UV1s.Reset();
 		Colors.Reset();
 		Indices.Reset();
 	}
@@ -165,6 +175,7 @@ struct VOXELCORE_API FChunkMeshData
 		return Positions.GetAllocatedSize()
 			+ Normals.GetAllocatedSize()
 			+ UVs.GetAllocatedSize()
+			+ UV1s.GetAllocatedSize()
 			+ Colors.GetAllocatedSize()
 			+ Indices.GetAllocatedSize();
 	}

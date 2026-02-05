@@ -10,7 +10,9 @@
 
 class FVoxelSceneProxy;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class UMaterialParameterCollection;
+class UVoxelMaterialAtlas;
 
 /**
  * Primitive component for rendering voxel worlds.
@@ -142,6 +144,46 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel")
 	float GetChunkWorldSize() const { return ChunkWorldSize; }
 
+	// ==================== Material Atlas ====================
+
+	/**
+	 * Set the material atlas for this voxel world.
+	 * This binds atlas textures and parameters to the material.
+	 *
+	 * @param InAtlas The material atlas data asset to use
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Materials")
+	void SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas);
+
+	/** Get the current material atlas */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Materials")
+	UVoxelMaterialAtlas* GetMaterialAtlas() const { return MaterialAtlas; }
+
+	/**
+	 * Create a dynamic material instance from a master material.
+	 * The instance will be configured with atlas parameters.
+	 *
+	 * @param MasterMaterial The master material to create an instance from
+	 * @return The created dynamic material instance
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Materials")
+	UMaterialInstanceDynamic* CreateVoxelMaterialInstance(UMaterialInterface* MasterMaterial);
+
+	/**
+	 * Update material parameters from the current atlas.
+	 * Call this after changing atlas settings to refresh the material.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Materials")
+	void UpdateMaterialAtlasParameters();
+
+	/** Get whether smooth meshing mode is enabled */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Materials")
+	bool GetUseSmoothMeshing() const { return bUseSmoothMeshing; }
+
+	/** Set smooth meshing mode (triplanar vs packed atlas) */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Materials")
+	void SetUseSmoothMeshing(bool bUseSmooth);
+
 	// ==================== LOD Configuration ====================
 
 	/**
@@ -241,6 +283,18 @@ private:
 	/** Material used for rendering */
 	UPROPERTY(EditAnywhere, Category = "Voxel")
 	TObjectPtr<UMaterialInterface> VoxelMaterial;
+
+	/** Material atlas data asset for texture configuration */
+	UPROPERTY(EditAnywhere, Category = "Voxel|Materials")
+	TObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;
+
+	/** Enable smooth meshing mode (triplanar projection with Texture2DArrays) vs cubic (packed atlas) */
+	UPROPERTY(EditAnywhere, Category = "Voxel|Materials")
+	bool bUseSmoothMeshing = false;
+
+	/** Dynamic material instance created from the master material */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> DynamicMaterialInstance;
 
 	/** Voxel size in world units */
 	UPROPERTY(EditAnywhere, Category = "Voxel", meta = (ClampMin = "1"))
