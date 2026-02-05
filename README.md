@@ -25,6 +25,7 @@ A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.7 featur
 - **[GPU Pipeline](Documentation/GPU_PIPELINE.md)** - Compute shader workflow and integration
 - **[World Modes](Documentation/WORLD_MODES.md)** - Infinite, spherical, and island world types
 - **[Material System](Documentation/MATERIAL_SYSTEM.md)** - Material registry and atlas configuration
+- **[Master Material Setup](Documentation/MASTER_MATERIAL_SETUP.md)** - M_VoxelMaster material creation guide
 - **[Biome System](Documentation/BIOME_SYSTEM.md)** - Biome definitions and blending
 - **[Edit Layer](Documentation/EDIT_LAYER.md)** - Terrain editing and modification system
 - **[Scatter System](Documentation/SCATTER_SYSTEM.md)** - Vegetation and foliage placement
@@ -114,7 +115,12 @@ VoxelWorlds/
 
 ### In Progress
 - 🔄 Phase 5: World Modes
-  - ⏳ Material atlas system
+  - ✅ Material atlas system complete:
+    - UVoxelMaterialAtlas data asset with auto-built Texture2DArrays
+    - Unified M_VoxelMaster material with 4 material functions
+    - Automatic mode switching (Cubic/Smooth) from configuration
+    - Triplanar sampling with UDN normal blending (smooth terrain)
+    - UV-based atlas sampling with MaterialLUT (cubic terrain)
   - ⏳ Spherical planet mode
   - ⏳ Island/bowl mode
 

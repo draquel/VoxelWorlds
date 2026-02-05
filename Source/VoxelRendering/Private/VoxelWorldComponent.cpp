@@ -423,9 +423,9 @@ void UVoxelWorldComponent::UpdateMaterialAtlasParameters()
 		return;
 	}
 
-	// Set smooth meshing switch
+	// Set smooth meshing switch (matches bSmoothTerrain parameter in M_VoxelMaster)
 	// Note: Static switches can't be changed at runtime, this is a scalar parameter fallback
-	DynamicMaterialInstance->SetScalarParameterValue(FName("UseSmoothMeshing"), bUseSmoothMeshing ? 1.0f : 0.0f);
+	DynamicMaterialInstance->SetScalarParameterValue(FName("bSmoothTerrain"), bUseSmoothMeshing ? 1.0f : 0.0f);
 
 	if (!MaterialAtlas)
 	{

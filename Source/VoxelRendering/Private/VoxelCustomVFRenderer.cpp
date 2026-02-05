@@ -79,6 +79,13 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 	WorldComponent->SetVoxelSize(VoxelSize);
 	WorldComponent->SetChunkWorldSize(ChunkWorldSize);
 
+	// Sync material mode with configuration's meshing mode
+	const bool bIsSmooth = (WorldConfig->MeshingMode == EMeshingMode::Smooth);
+	WorldComponent->SetUseSmoothMeshing(bIsSmooth);
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelCustomVFRenderer: MeshingMode=%s, bUseSmoothMeshing=%s"),
+		bIsSmooth ? TEXT("Smooth") : TEXT("Cubic"),
+		bIsSmooth ? TEXT("true") : TEXT("false"));
+
 	// Set initial material BEFORE registration - scene proxy is created during RegisterComponent
 	if (CurrentMaterial.IsValid())
 	{

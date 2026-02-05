@@ -1,119 +1,163 @@
 # Material System
 
-**Module**: VoxelGeneration  
-**Dependencies**: VoxelCore
+**Module**: VoxelCore
+**Dependencies**: Engine, RenderCore
 
 ## Overview
 
-The material system manages 256 different material types with texture atlases for cubic meshing and triplanar projection for smooth meshing.
+The material system manages 256 different material types with texture atlases for cubic meshing and Texture2DArrays with triplanar projection for smooth meshing. The system is centered around the `UVoxelMaterialAtlas` data asset which provides both runtime texture management and editor configuration.
 
-## Material Registry
+## Implementation Status: COMPLETE
 
-### FVoxelMaterialDefinition
+The material system has been fully implemented with:
+- UVoxelMaterialAtlas data asset for material configuration
+- Auto-generated Texture2DArrays from source textures
+- MaterialID encoding via UV1 channel (sRGB-safe)
+- Triplanar sampling with UDN normal blending
+- Runtime material binding via DynamicMaterialInstance
+
+## UVoxelMaterialAtlas (Data Asset)
+
+The primary interface for material configuration. Create this asset in the Content Browser and assign it to your VoxelWorldComponent.
+
+### FVoxelMaterialTextureConfig
 
 ```cpp
 /**
- * Material Definition
- * 
- * Defines a single material type with textures and properties.
+ * Configuration for a single material in the atlas.
+ * Maps MaterialID to atlas position and source textures.
+ * Supports per-face texture variants (top/side/bottom).
  */
-struct FVoxelMaterialDefinition
+USTRUCT(BlueprintType)
+struct VOXELCORE_API FVoxelMaterialTextureConfig
 {
-    /** Material ID (0-255) */
-    uint8 MaterialID;
-    
-    /** Display name */
+    GENERATED_BODY()
+
+    /** Material ID this config applies to (0-255) */
+    uint8 MaterialID = 0;
+
+    /** Display name for this material */
     FString MaterialName;
-    
-    // ==================== Cubic Mode (Atlas UVs) ====================
-    
-    /** Top face UV coordinates in atlas */
-    FVector2D TopUV;
-    
-    /** Bottom face UV coordinates in atlas */
-    FVector2D BottomUV;
-    
-    /** Side faces UV coordinates in atlas */
-    FVector2D SideUV;
-    
-    // ==================== Smooth Mode (Triplanar) ====================
-    
-    /** Albedo texture */
-    UTexture2D* AlbedoTexture;
-    
-    /** Normal texture */
-    UTexture2D* NormalTexture;
-    
-    /** Roughness/Metallic texture */
-    UTexture2D* RoughnessMetallicTexture;
-    
-    // ==================== Physical Properties ====================
-    
-    /** Hardness (affects mining time) */
-    float Hardness = 1.0f;
-    
-    /** Emissive (glowing) */
-    bool bEmissive = false;
-    
-    /** Emissive color/intensity */
-    FLinearColor EmissiveColor = FLinearColor::Black;
-    
-    /** Triplanar scale */
+
+    // ===== Face Variants =====
+
+    /** Enable different textures for top/side/bottom faces */
+    bool bUseFaceVariants = false;
+
+    /** Atlas tiles for Top/Side/Bottom faces (when bUseFaceVariants = true) */
+    FVoxelAtlasTile TopTile, SideTile, BottomTile;
+
+    // ===== Default Atlas Position (when not using face variants) =====
+
+    int32 AtlasColumn = 0;
+    int32 AtlasRow = 0;
+
+    // ===== Source Textures for Texture2DArray (Smooth Terrain) =====
+
+    /** Albedo/BaseColor texture for this material */
+    TSoftObjectPtr<UTexture2D> AlbedoTexture;
+
+    /** Normal map texture for this material */
+    TSoftObjectPtr<UTexture2D> NormalTexture;
+
+    /** Roughness texture for this material (R channel) */
+    TSoftObjectPtr<UTexture2D> RoughnessTexture;
+
+    // ===== Per-Material Properties =====
+
+    /** Scale for triplanar projection (smooth terrain). Higher = more tiling. */
     float TriplanarScale = 1.0f;
+
+    /** UV scale multiplier for packed atlas sampling */
+    float UVScale = 1.0f;
 };
 ```
 
-### UVoxelMaterialRegistry
+### UVoxelMaterialAtlas
 
 ```cpp
 /**
- * Material Registry
- * 
- * Central registry for all voxel materials.
- * Singleton accessed by generation and rendering systems.
+ * Data asset defining the material atlas configuration for voxel terrain.
+ *
+ * Supports two rendering modes:
+ * - Cubic Terrain: Uses packed texture atlases with UV-based sampling
+ * - Smooth Terrain: Uses Texture2DArrays with triplanar projection
  */
-UCLASS()
-class UVoxelMaterialRegistry : public UObject
+UCLASS(BlueprintType)
+class VOXELCORE_API UVoxelMaterialAtlas : public UDataAsset
 {
     GENERATED_BODY()
-    
+
 public:
-    /** Get singleton instance */
-    static UVoxelMaterialRegistry* Get();
-    
-    /** Register a material definition */
-    void RegisterMaterial(const FVoxelMaterialDefinition& Material);
-    
-    /** Get material by ID */
-    const FVoxelMaterialDefinition* GetMaterial(uint8 MaterialID) const;
-    
-    /** Get atlas UV for material face */
-    FVector2D GetAtlasUV(uint8 MaterialID, EVoxelFace Face) const;
-    
-    /** Get material count */
-    int32 GetMaterialCount() const { return Materials.Num(); }
-    
-    /** Build material atlas texture */
-    void BuildAtlasTexture();
-    
-    /** Get atlas texture (for rendering) */
-    UTexture2D* GetAtlasTexture() const { return AtlasTexture; }
-    
-private:
-    /** Material definitions indexed by MaterialID */
-    UPROPERTY()
-    TMap<uint8, FVoxelMaterialDefinition> Materials;
-    
-    /** Generated atlas texture (cubic mode) */
-    UPROPERTY()
-    UTexture2D* AtlasTexture;
-    
-    /** Atlas resolution */
-    int32 AtlasSize = 2048;
-    
-    /** Tile size in atlas */
-    int32 TileSize = 64;
+    // ===== Packed Atlas (Cubic Terrain) =====
+
+    UTexture2D* PackedAlbedoAtlas;
+    UTexture2D* PackedNormalAtlas;
+    UTexture2D* PackedRoughnessAtlas;
+    int32 AtlasColumns = 4;
+    int32 AtlasRows = 4;
+
+    // ===== Texture Arrays (Smooth Terrain) - Auto-generated =====
+
+    /** Auto-built from MaterialConfigs source textures */
+    UTexture2DArray* AlbedoArray;    // VisibleAnywhere - runtime generated
+    UTexture2DArray* NormalArray;
+    UTexture2DArray* RoughnessArray;
+    int32 TextureArraySize = 512;    // Target size for array slices
+
+    // ===== Per-Material Configuration =====
+
+    TArray<FVoxelMaterialTextureConfig> MaterialConfigs;
+
+    // ===== Key API Functions =====
+
+    /** Build Texture2DArrays from source textures in MaterialConfigs */
+    UFUNCTION(BlueprintCallable, CallInEditor)
+    void BuildTextureArrays();
+
+    /** Build Material Lookup Table for face-variant atlas positions */
+    UFUNCTION(BlueprintCallable, CallInEditor)
+    void BuildMaterialLUT();
+
+    /** Check if arrays need rebuilding */
+    bool AreTextureArraysDirty() const;
 };
+```
+
+---
+
+## Shader Utilities: VoxelTriplanarCommon.ush
+
+The `Shaders/Private/VoxelTriplanarCommon.ush` file provides reusable triplanar mapping functions:
+
+```hlsl
+// Calculate triplanar blend weights from world normal
+float3 GetTriplanarBlendWeights(float3 WorldNormal, float Sharpness)
+
+// Calculate triplanar UVs from world position
+void GetTriplanarUVs(float3 WorldPosition, float Scale,
+                     out float2 UV_X, out float2 UV_Y, out float2 UV_Z)
+
+// Apply sign correction for consistent texture orientation
+void CorrectTriplanarUVOrientation(float3 WorldNormal,
+                                   inout float2 UV_X, inout float2 UV_Y, inout float2 UV_Z)
+
+// Extract MaterialID from UV1 (smooth terrain)
+int GetSmoothMaterialID(float2 UV1)
+
+// Sample texture using triplanar projection
+float4 SampleTriplanar(Texture2D Tex, SamplerState Samp,
+                       float3 WorldPosition, float3 WorldNormal,
+                       float Scale, float Sharpness)
+
+// Sample Texture2DArray using triplanar projection
+float4 SampleTriplanarArray(Texture2DArray TexArray, SamplerState Samp,
+                            float3 WorldPosition, float3 WorldNormal,
+                            int ArrayIndex, float Scale, float Sharpness)
+
+// Debug visualization helpers
+float3 DebugTriplanarWeights(float3 WorldNormal, float Sharpness)
+float3 DebugMaterialColor(int MaterialID)
 ```
 
 ---
@@ -224,78 +268,115 @@ float2 GetAtlasUV(uint MaterialID, uint Face, float2 LocalUV)
 
 ## Smooth Mode: Triplanar Projection
 
-For smooth meshing, materials use triplanar projection to avoid UV seams.
+For smooth meshing (Marching Cubes), materials use triplanar projection to avoid UV seams. The implementation uses Custom HLSL nodes in the Unreal Material Editor.
 
-### Triplanar Shader
+### MaterialID Encoding
+
+MaterialID is stored in the **UV1.x** channel as a float value. This avoids sRGB gamma conversion issues that would corrupt integer data in vertex colors.
+
+**In Mesh Generator (FVoxelCPUSmoothMesher):**
+```cpp
+// Store MaterialID in UV1.x
+Vertex.UV1.X = static_cast<float>(MaterialID);
+Vertex.UV1.Y = 0.0f;  // Reserved
+```
+
+**In Shader:**
+```hlsl
+int MaterialID = (int)floor(MaterialUV.x + 0.5);
+```
+
+### Triplanar Albedo/Roughness Sampling (Custom Node)
+
+This custom HLSL node samples both albedo and roughness arrays:
+
+**Inputs:**
+- `WorldPos` (float3) - Absolute World Position
+- `WorldNormal` (float3) - VertexNormalWS
+- `MaterialUV` (float2) - TexCoord[1]
+- `Scale` (float) - Triplanar tiling scale (e.g., 0.01)
+- `Sharpness` (float) - Blend sharpness (e.g., 4.0)
+- `AlbedoArray` (Texture2DArray) - Material atlas parameter
+- `RoughnessArray` (Texture2DArray) - Material atlas parameter
+
+**Output:** `float4` (RGB = Albedo, A = Roughness)
 
 ```hlsl
-// Material sampling with triplanar projection
-float4 SampleTriplanar(Texture2D Tex, SamplerState Sampler, float3 WorldPos, float3 Normal, float Scale)
-{
-    // Calculate blend weights
-    float3 BlendWeights = abs(Normal);
-    BlendWeights = BlendWeights / (BlendWeights.x + BlendWeights.y + BlendWeights.z);
-    
-    // Sample each axis
-    float4 XAxis = Tex.Sample(Sampler, WorldPos.yz * Scale);
-    float4 YAxis = Tex.Sample(Sampler, WorldPos.xz * Scale);
-    float4 ZAxis = Tex.Sample(Sampler, WorldPos.xy * Scale);
-    
-    // Blend
-    return XAxis * BlendWeights.x + YAxis * BlendWeights.y + ZAxis * BlendWeights.z;
-}
+int MaterialID = (int)floor(MaterialUV.x + 0.5);
 
-// Pixel shader for smooth voxel mesh
-float4 VoxelPixelShader(PixelInput Input) : SV_Target
-{
-    // Unpack material ID
-    uint MaterialID = (Input.MaterialData >> 24) & 0xFF;
-    
-    // Get material definition (from constant buffer)
-    MaterialDefinition Mat = Materials[MaterialID];
-    
-    // Sample albedo with triplanar
-    float4 Albedo = SampleTriplanar(
-        Mat.AlbedoTexture,
-        Mat.AlbedoSampler,
-        Input.WorldPosition,
-        Input.Normal,
-        Mat.TriplanarScale
-    );
-    
-    // Sample normal map
-    float3 NormalMap = SampleTriplanar(
-        Mat.NormalTexture,
-        Mat.NormalSampler,
-        Input.WorldPosition,
-        Input.Normal,
-        Mat.TriplanarScale
-    ).xyz;
-    
-    // Apply normal map
-    float3 FinalNormal = ApplyNormalMap(Input.Normal, NormalMap);
-    
-    // Sample roughness/metallic
-    float2 RoughnessMetallic = SampleTriplanar(
-        Mat.RoughnessMetallicTexture,
-        Mat.RMSampler,
-        Input.WorldPosition,
-        Input.Normal,
-        Mat.TriplanarScale
-    ).xy;
-    
-    // Lighting calculations
-    float3 Lighting = CalculateLighting(Albedo.rgb, FinalNormal, RoughnessMetallic.x, RoughnessMetallic.y);
-    
-    // Apply emissive
-    if (Mat.bEmissive)
-    {
-        Lighting += Mat.EmissiveColor.rgb * Mat.EmissiveColor.a;
-    }
-    
-    return float4(Lighting, 1.0);
-}
+// Calculate triplanar blend weights
+float3 Weights = pow(abs(WorldNormal), Sharpness);
+Weights /= max(Weights.x + Weights.y + Weights.z, 0.0001);
+
+// Calculate triplanar UVs
+float2 UV_X = WorldPos.zy * Scale;  // YZ plane
+float2 UV_Y = WorldPos.xz * Scale;  // XZ plane (top/bottom)
+float2 UV_Z = WorldPos.xy * Scale;  // XY plane
+
+// Use SampleLevel for ray tracing compatibility
+SamplerState Samp = View.MaterialTextureBilinearWrapedSampler;
+
+// Sample albedo from each projection
+float4 Albedo_X = AlbedoArray.SampleLevel(Samp, float3(UV_X, MaterialID), 0);
+float4 Albedo_Y = AlbedoArray.SampleLevel(Samp, float3(UV_Y, MaterialID), 0);
+float4 Albedo_Z = AlbedoArray.SampleLevel(Samp, float3(UV_Z, MaterialID), 0);
+float3 Albedo = Albedo_X.rgb * Weights.x + Albedo_Y.rgb * Weights.y + Albedo_Z.rgb * Weights.z;
+
+// Sample roughness
+float Rough_X = RoughnessArray.SampleLevel(Samp, float3(UV_X, MaterialID), 0).r;
+float Rough_Y = RoughnessArray.SampleLevel(Samp, float3(UV_Y, MaterialID), 0).r;
+float Rough_Z = RoughnessArray.SampleLevel(Samp, float3(UV_Z, MaterialID), 0).r;
+float Roughness = Rough_X * Weights.x + Rough_Y * Weights.y + Rough_Z * Weights.z;
+
+return float4(Albedo, Roughness);
 ```
+
+### Triplanar Normal Sampling with UDN Blend (Custom Node)
+
+Normal maps require special blending to avoid "plaid" artifacts. This uses UDN (Unreal Developer Network) blend:
+
+**Inputs:**
+- `WorldPos` (float3) - Absolute World Position
+- `WorldNormal` (float3) - VertexNormalWS (NOT PixelNormalWS)
+- `MaterialUV` (float2) - TexCoord[1]
+- `Scale` (float) - Triplanar tiling scale
+- `Sharpness` (float) - Blend sharpness
+- `NormalArray` (Texture2DArray) - Material atlas parameter
+
+**Output:** `float3` (World-space normal)
+
+```hlsl
+int MaterialID = (int)floor(MaterialUV.x + 0.5);
+
+float3 Weights = pow(abs(WorldNormal), Sharpness);
+Weights /= max(Weights.x + Weights.y + Weights.z, 0.0001);
+
+float2 UV_X = WorldPos.zy * Scale;
+float2 UV_Y = WorldPos.xz * Scale;
+float2 UV_Z = WorldPos.xy * Scale;
+
+SamplerState Samp = View.MaterialTextureBilinearWrapedSampler;
+
+// Decode tangent-space normals
+float3 TN_X = NormalArray.SampleLevel(Samp, float3(UV_X, MaterialID), 0).rgb * 2.0 - 1.0;
+float3 TN_Y = NormalArray.SampleLevel(Samp, float3(UV_Y, MaterialID), 0).rgb * 2.0 - 1.0;
+float3 TN_Z = NormalArray.SampleLevel(Samp, float3(UV_Z, MaterialID), 0).rgb * 2.0 - 1.0;
+
+// UDN blend: Project tangent-space normals to world-space derivatives
+float3 N_X = float3(0, TN_X.y, -TN_X.x);        // X-axis projection
+float3 N_Y = float3(TN_Y.x, 0, -TN_Y.y);        // Y-axis projection
+float3 N_Z = float3(TN_Z.xy, 0);                 // Z-axis projection
+
+// Blend and add to base normal
+float3 BlendedNormal = normalize(N_X * Weights.x + N_Y * Weights.y + N_Z * Weights.z + WorldNormal);
+
+return BlendedNormal;
+```
+
+**Important Notes:**
+- Use `VertexNormalWS` as input, NOT `PixelNormalWS` (creates circular dependency)
+- Disable "Tangent Space Normal" in material settings
+- Use `SampleLevel()` instead of `Sample()` for ray tracing compatibility
 
 ---
 
@@ -445,41 +526,68 @@ public:
 
 ---
 
-## GPU Material Buffer
+## Runtime Material Binding
 
-For smooth meshing, material data is uploaded to GPU:
+The material system uses Dynamic Material Instances to bind texture arrays at runtime.
+
+### UVoxelWorldComponent::UpdateMaterialAtlasParameters
 
 ```cpp
-struct FGPUMaterialData
+void UVoxelWorldComponent::UpdateMaterialAtlasParameters(UMaterialInstanceDynamic* DynamicMaterial)
 {
-    uint32 Flags;              // Emissive, etc.
-    FVector4f EmissiveColor;   // RGB + Intensity
-    float TriplanarScale;
-    float Hardness;
-    uint32 TextureIndices[3];  // Albedo, Normal, RM
-};
-
-// Upload to structured buffer
-void UpdateMaterialBuffer()
-{
-    TArray<FGPUMaterialData> GPUMaterials;
-    
-    for (int32 i = 0; i < 256; ++i)
+    if (!MaterialAtlas)
     {
-        const FVoxelMaterialDefinition* Mat = Registry->GetMaterial(i);
-        
-        FGPUMaterialData& GPUMat = GPUMaterials.AddDefaulted_GetRef();
-        GPUMat.Flags = Mat->bEmissive ? 1 : 0;
-        GPUMat.EmissiveColor = Mat->EmissiveColor;
-        GPUMat.TriplanarScale = Mat->TriplanarScale;
-        GPUMat.Hardness = Mat->Hardness;
-        // ... texture indices
+        UE_LOG(LogVoxelRendering, Warning, TEXT("No MaterialAtlas, skipping atlas setup"));
+        return;
     }
-    
-    // Upload to GPU
-    MaterialBuffer->UpdateStructuredBuffer(GPUMaterials);
+
+    // Build LUT if needed
+    if (MaterialAtlas->IsLUTDirty() || !MaterialAtlas->GetMaterialLUT())
+    {
+        MaterialAtlas->BuildMaterialLUT();
+    }
+
+    // Build texture arrays if needed
+    if (MaterialAtlas->AreTextureArraysDirty() || !MaterialAtlas->AlbedoArray)
+    {
+        MaterialAtlas->BuildTextureArrays();
+    }
+
+    // Set texture array parameters
+    if (MaterialAtlas->AlbedoArray)
+    {
+        DynamicMaterial->SetTextureParameterValue(TEXT("AlbedoArray"), MaterialAtlas->AlbedoArray);
+    }
+    if (MaterialAtlas->NormalArray)
+    {
+        DynamicMaterial->SetTextureParameterValue(TEXT("NormalArray"), MaterialAtlas->NormalArray);
+    }
+    if (MaterialAtlas->RoughnessArray)
+    {
+        DynamicMaterial->SetTextureParameterValue(TEXT("RoughnessArray"), MaterialAtlas->RoughnessArray);
+    }
+
+    // Set atlas dimensions
+    DynamicMaterial->SetScalarParameterValue(TEXT("AtlasColumns"), MaterialAtlas->AtlasColumns);
+    DynamicMaterial->SetScalarParameterValue(TEXT("AtlasRows"), MaterialAtlas->AtlasRows);
 }
 ```
+
+### Material Setup in Material Editor
+
+1. Create **TextureObjectParameter** nodes for:
+   - `AlbedoArray` (Texture2DArray)
+   - `NormalArray` (Texture2DArray)
+   - `RoughnessArray` (Texture2DArray)
+
+2. Assign a **placeholder Texture2DArray** to each parameter (required for material compilation)
+
+3. Create Custom nodes for triplanar sampling (see shader code above)
+
+4. Connect outputs:
+   - Albedo RGB → Base Color
+   - Roughness A → Roughness
+   - BlendedNormal → World Space Normal (disable Tangent Space Normal)
 
 ---
 
@@ -509,13 +617,76 @@ void UpdateMaterialBuffer()
 
 ---
 
-## Next Steps
+## Unified Master Material (M_VoxelMaster)
 
-1. Create `UVoxelMaterialRegistry` class
-2. Define default material set
-3. Build atlas texture system
-4. Implement triplanar shader
-5. Integrate with biome system
+The material system uses a unified master material that automatically switches between cubic and smooth rendering modes based on `UVoxelWorldConfiguration::MeshingMode`.
+
+### Automatic Mode Selection
+
+The material mode is synced automatically in `FVoxelCustomVFRenderer::Initialize()`:
+
+```cpp
+// Sync material mode with configuration's meshing mode
+const bool bIsSmooth = (WorldConfig->MeshingMode == EMeshingMode::Smooth);
+WorldComponent->SetUseSmoothMeshing(bIsSmooth);
+```
+
+This sets the `bSmoothTerrain` material parameter which controls the Lerp nodes in M_VoxelMaster.
+
+### Material Functions
+
+The master material uses 4 reusable material functions:
+
+1. **MF_GetMaterialID** - Extracts MaterialID from UV1.x
+2. **MF_TriplanarSampleAlbedoRoughness** - Smooth terrain color/roughness sampling
+3. **MF_TriplanarSampleNormal** - Smooth terrain normals with UDN blend
+4. **MF_CubicAtlasSample** - Cubic terrain sampling via UV0 + MaterialLUT
+
+### Material Assets
+
+| Asset | Location | Purpose |
+|-------|----------|---------|
+| M_VoxelMaster | Content/VoxelWorlds/Materials/ | Master material with both paths |
+| MI_VoxelDefault | Content/VoxelWorlds/Materials/ | Default material instance |
+| MF_* | Content/VoxelWorlds/Materials/Functions/ | Reusable material functions |
+
+See [MASTER_MATERIAL_SETUP.md](MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
+
+---
+
+## Implementation Complete
+
+The material system is fully implemented with:
+
+1. ✅ `UVoxelMaterialAtlas` data asset with per-material configuration
+2. ✅ Auto-generated Texture2DArrays from source textures
+3. ✅ MaterialID encoding via UV1 channel (sRGB-safe)
+4. ✅ Triplanar sampling for smooth terrain (UDN normal blending)
+5. ✅ UV-based atlas sampling for cubic terrain (MaterialLUT lookup)
+6. ✅ Unified M_VoxelMaster material with automatic mode switching
+7. ✅ 4 reusable Material Functions
+8. ✅ Runtime binding via DynamicMaterialInstance
+9. ✅ Automatic mode sync from UVoxelWorldConfiguration::MeshingMode
+10. ✅ VoxelTriplanarCommon.ush shader utilities
+
+### Key Files
+
+**C++ Code:**
+- `VoxelCore/Public/VoxelMaterialAtlas.h` - Data asset header
+- `VoxelCore/Private/VoxelMaterialAtlas.cpp` - BuildTextureArrays(), BuildMaterialLUT()
+- `VoxelRendering/Private/VoxelWorldComponent.cpp` - UpdateMaterialAtlasParameters()
+- `VoxelRendering/Private/VoxelCustomVFRenderer.cpp` - Automatic mode sync
+
+**Shaders:**
+- `Shaders/Private/VoxelTriplanarCommon.ush` - Triplanar utility functions
+
+**Material Assets (Content/VoxelWorlds/Materials/):**
+- `M_VoxelMaster` - Unified master material
+- `MI_VoxelDefault` - Default material instance
+- `Functions/MF_GetMaterialID` - MaterialID extraction
+- `Functions/MF_TriplanarSampleAlbedoRoughness` - Smooth terrain sampling
+- `Functions/MF_TriplanarSampleNormal` - Smooth terrain normals
+- `Functions/MF_CubicAtlasSample` - Cubic terrain sampling
 
 See [BIOME_SYSTEM.md](BIOME_SYSTEM.md) for material assignment logic.
 

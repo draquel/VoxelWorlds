@@ -138,7 +138,7 @@ Configuration options in `UVoxelWorldConfiguration`:
 **Goal**: Multiple world types
 
 ### Tasks
-- [ ] Material atlas system
+- [x] Material atlas system
 - [ ] Spherical planet mode
 - [ ] Island/bowl mode
 - [ ] World mode-specific LOD
@@ -156,6 +156,45 @@ Configuration options in `UVoxelWorldConfiguration`:
 - Spherical planet has correct curvature
 - Island has smooth falloff
 - Biomes blend well
+
+### Notes on Material Atlas System
+The material atlas system was implemented with the following components:
+
+1. **UVoxelMaterialAtlas Data Asset**:
+   - Packed atlas textures for cubic meshing (UV-based sampling)
+   - Auto-generated Texture2DArrays for smooth terrain (triplanar sampling)
+   - Per-material configuration via FVoxelMaterialTextureConfig
+   - Material Lookup Table (LUT) for face-variant texture mapping
+   - BuildTextureArrays() for runtime texture array generation from source textures
+
+2. **MaterialID Encoding**:
+   - UV1.x channel stores MaterialID as float (avoids sRGB conversion issues)
+   - UV1.y channel stores FaceType for cubic terrain (0=Top, 1=Side, 2=Bottom)
+   - Shader extracts via `int MaterialID = (int)floor(MaterialUV.x + 0.5)`
+
+3. **Unified Master Material (M_VoxelMaster)**:
+   - Single material supporting both cubic and smooth terrain modes
+   - 4 Material Functions: MF_GetMaterialID, MF_TriplanarSampleAlbedoRoughness, MF_TriplanarSampleNormal, MF_CubicAtlasSample
+   - Automatic mode switching via Lerp nodes controlled by bSmoothTerrain parameter
+   - Mode automatically synced from UVoxelWorldConfiguration::MeshingMode
+
+4. **Smooth Terrain Path (Triplanar + Texture2DArrays)**:
+   - Custom HLSL nodes in material functions
+   - SampleLevel() instead of Sample() for ray tracing compatibility
+   - UDN (Unreal Developer Network) blend for normal maps (eliminates plaid artifacts)
+   - Blend weights: `pow(abs(WorldNormal), Sharpness)` normalized
+
+5. **Cubic Terrain Path (UV-based + PackedAtlas)**:
+   - MaterialLUT texture lookup for per-material, per-face atlas positions
+   - UV0 provides local face coordinates, transformed to atlas space
+   - Tangent-space normals converted to world-space via Transform node
+   - Fallback handling for missing normal/roughness textures
+
+6. **Runtime Material Binding**:
+   - Dynamic Material Instance created from M_VoxelMaster
+   - UVoxelWorldComponent::UpdateMaterialAtlasParameters() binds all textures
+   - FVoxelCustomVFRenderer::Initialize() syncs mode from configuration
+   - Texture arrays auto-built on first use if dirty
 
 ---
 
@@ -346,10 +385,22 @@ Configuration options in `UVoxelWorldConfiguration`:
    - `bUseTransvoxel`: Per-mesher toggle (default: false)
    - `bGenerateSkirts`: Fallback seam handling (default: true)
 
+**Phase 5 In Progress**:
+1. ~~Material atlas system~~ - COMPLETE
+   - UVoxelMaterialAtlas: Data asset with packed atlases and auto-built Texture2DArrays
+   - FVoxelMaterialTextureConfig: Per-material configuration (source textures, face variants)
+   - MaterialID stored in UV1.x channel, FaceType in UV1.y (float encoding, sRGB-safe)
+   - M_VoxelMaster: Unified material with automatic cubic/smooth mode switching
+   - 4 Material Functions: MF_GetMaterialID, MF_TriplanarSampleAlbedoRoughness, MF_TriplanarSampleNormal, MF_CubicAtlasSample
+   - Smooth path: Triplanar sampling with Texture2DArrays, UDN normal blending
+   - Cubic path: UV-based atlas sampling with MaterialLUT lookup
+   - Automatic mode sync from UVoxelWorldConfiguration::MeshingMode
+   - Runtime binding via DynamicMaterialInstance in UVoxelWorldComponent
+   - VoxelTriplanarCommon.ush: Shared triplanar utility functions
+
 **Next Immediate Steps** (Phase 5):
-1. Material atlas system
-2. Spherical planet mode
-3. Island/bowl mode
+1. Spherical planet mode
+2. Island/bowl mode
 
 ---
 
