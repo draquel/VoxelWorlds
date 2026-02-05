@@ -9,6 +9,8 @@
 #include "LODTypes.h"
 #include "VoxelWorldConfiguration.generated.h"
 
+class UVoxelBiomeConfiguration;
+
 /**
  * Configuration data asset for a voxel world.
  *
@@ -78,6 +80,21 @@ public:
 	/** Use GPU compute shaders for terrain generation (true) or CPU fallback (false) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Generation")
 	bool bUseGPUGeneration = true;
+
+	// ==================== Biome Settings ====================
+
+	/** Enable biome-based material selection (temperature/moisture driven) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
+	bool bEnableBiomes = true;
+
+	/**
+	 * Biome configuration data asset.
+	 * Defines biomes, blending parameters, and height-based material rules.
+	 * Create a UVoxelBiomeConfiguration asset and assign it here.
+	 * If null, default biomes (Plains, Desert, Tundra) will be used.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome", meta = (EditCondition = "bEnableBiomes"))
+	TObjectPtr<UVoxelBiomeConfiguration> BiomeConfiguration;
 
 	// ==================== LOD Settings ====================
 

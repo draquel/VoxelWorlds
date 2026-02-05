@@ -6,6 +6,8 @@
 #include "VoxelCoreTypes.h"
 #include "VoxelNoiseTypes.generated.h"
 
+class UVoxelBiomeConfiguration;
+
 // Re-export EVoxelNoiseType and FVoxelNoiseParams from VoxelCoreTypes.h
 // These are defined in VoxelCore to avoid circular dependencies with VoxelWorldConfiguration
 
@@ -61,21 +63,12 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
 	bool bEnableBiomes = true;
 
-	/** Frequency for temperature noise (lower = larger biome regions) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
-	float TemperatureNoiseFrequency = 0.00005f;
-
-	/** Frequency for moisture noise (lower = larger biome regions) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
-	float MoistureNoiseFrequency = 0.00007f;
-
-	/** Seed offset for temperature noise (added to main seed) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
-	int32 TemperatureSeedOffset = 1234;
-
-	/** Seed offset for moisture noise (added to main seed) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome")
-	int32 MoistureSeedOffset = 5678;
+	/**
+	 * Biome configuration containing biome definitions, blending parameters,
+	 * and height material rules. Set by VoxelChunkManager from the world config.
+	 * Not a UPROPERTY - kept alive by VoxelWorldConfiguration.
+	 */
+	UVoxelBiomeConfiguration* BiomeConfiguration = nullptr;
 
 	// ==================== World Origin ====================
 

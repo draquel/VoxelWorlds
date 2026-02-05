@@ -99,4 +99,158 @@ struct VOXELCORE_API FBiomeDefinition
 			return DeepMaterial;
 		}
 	}
+
+	/**
+	 * Calculate the distance from a point in temperature/moisture space to this biome's center.
+	 * Used for blending weight calculations.
+	 */
+	float GetDistanceToCenter(float Temperature, float Moisture) const
+	{
+		const float CenterTemp = (TemperatureRange.X + TemperatureRange.Y) * 0.5f;
+		const float CenterMoist = (MoistureRange.X + MoistureRange.Y) * 0.5f;
+		const float DeltaT = Temperature - CenterTemp;
+		const float DeltaM = Moisture - CenterMoist;
+		return FMath::Sqrt(DeltaT * DeltaT + DeltaM * DeltaM);
+	}
+
+	/**
+	 * Calculate the distance from a point to the edge of this biome's range.
+	 * Returns positive if inside, negative if outside.
+	 */
+	float GetSignedDistanceToEdge(float Temperature, float Moisture) const
+	{
+		// Distance to each edge (positive = inside, negative = outside)
+		const float DistTempMin = Temperature - TemperatureRange.X;
+		const float DistTempMax = TemperatureRange.Y - Temperature;
+		const float DistMoistMin = Moisture - MoistureRange.X;
+		const float DistMoistMax = MoistureRange.Y - Moisture;
+
+		// Minimum distance to any edge (positive if inside all edges)
+		return FMath::Min(FMath::Min(DistTempMin, DistTempMax), FMath::Min(DistMoistMin, DistMoistMax));
+	}
+};
+
+/**
+ * Rule for overriding material based on world height.
+ * Applied after biome-based material selection for elevation-dependent effects
+ * like snow on mountain peaks or exposed rock at high altitude.
+ */
+USTRUCT(BlueprintType)
+struct VOXELCORE_API FHeightMaterialRule
+{
+	GENERATED_BODY()
+
+	/** Minimum world height (Z) for this rule to apply (in world units) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Rule")
+	float MinHeight = 0.0f;
+
+	/** Maximum world height (Z) for this rule to apply (in world units). Set to MAX_FLT for no upper limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Rule")
+	float MaxHeight = MAX_FLT;
+
+	/** Material ID to use when this rule applies */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Rule")
+	uint8 MaterialID = 0;
+
+	/** Only apply to surface voxels (depth below surface < threshold) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Rule")
+	bool bSurfaceOnly = true;
+
+	/** Maximum depth below surface for this rule to apply (when bSurfaceOnly is true) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Rule", meta = (EditCondition = "bSurfaceOnly"))
+	float MaxDepthBelowSurface = 2.0f;
+
+	/** Priority for rule ordering (higher = checked first) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Rule")
+	int32 Priority = 0;
+
+	FHeightMaterialRule() = default;
+
+	FHeightMaterialRule(float InMinHeight, float InMaxHeight, uint8 InMaterialID, bool bInSurfaceOnly = true, float InMaxDepth = 2.0f, int32 InPriority = 0)
+		: MinHeight(InMinHeight)
+		, MaxHeight(InMaxHeight)
+		, MaterialID(InMaterialID)
+		, bSurfaceOnly(bInSurfaceOnly)
+		, MaxDepthBelowSurface(InMaxDepth)
+		, Priority(InPriority)
+	{
+	}
+
+	/** Check if this rule applies at the given height and depth */
+	bool Applies(float WorldHeight, float DepthBelowSurface) const
+	{
+		if (WorldHeight < MinHeight || WorldHeight > MaxHeight)
+		{
+			return false;
+		}
+		if (bSurfaceOnly && DepthBelowSurface > MaxDepthBelowSurface)
+		{
+			return false;
+		}
+		return true;
+	}
+};
+
+/**
+ * Maximum number of biomes that can be blended at once.
+ */
+constexpr int32 MAX_BIOME_BLEND = 4;
+
+/**
+ * Blend result containing multiple biomes with weights.
+ * Used for smooth transitions between biome regions.
+ */
+USTRUCT(BlueprintType)
+struct VOXELCORE_API FBiomeBlend
+{
+	GENERATED_BODY()
+
+	/** Biome IDs participating in the blend (up to MAX_BIOME_BLEND) */
+	uint8 BiomeIDs[MAX_BIOME_BLEND] = { 0, 0, 0, 0 };
+
+	/** Blend weights for each biome (sum should equal 1.0) */
+	float Weights[MAX_BIOME_BLEND] = { 1.0f, 0.0f, 0.0f, 0.0f };
+
+	/** Number of biomes in this blend (1-4) */
+	UPROPERTY(BlueprintReadOnly, Category = "Voxel Biome")
+	int32 BiomeCount = 1;
+
+	FBiomeBlend() = default;
+
+	/** Create a single-biome blend (no blending) */
+	explicit FBiomeBlend(uint8 SingleBiomeID)
+		: BiomeCount(1)
+	{
+		BiomeIDs[0] = SingleBiomeID;
+		Weights[0] = 1.0f;
+	}
+
+	/** Get the dominant biome ID (highest weight) */
+	uint8 GetDominantBiome() const
+	{
+		return BiomeIDs[0]; // Sorted by weight, so index 0 is dominant
+	}
+
+	/** Check if blending is occurring (more than one biome with significant weight) */
+	bool IsBlending() const
+	{
+		return BiomeCount > 1 && Weights[1] > 0.01f;
+	}
+
+	/** Normalize weights to sum to 1.0 */
+	void NormalizeWeights()
+	{
+		float TotalWeight = 0.0f;
+		for (int32 i = 0; i < BiomeCount; ++i)
+		{
+			TotalWeight += Weights[i];
+		}
+		if (TotalWeight > KINDA_SMALL_NUMBER)
+		{
+			for (int32 i = 0; i < BiomeCount; ++i)
+			{
+				Weights[i] /= TotalWeight;
+			}
+		}
+	}
 };

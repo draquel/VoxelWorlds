@@ -58,6 +58,25 @@ public:
 	 */
 	static const TArray<FBiomeDefinition>& GetAllBiomes();
 
+	/**
+	 * Calculate blended biome selection for smooth transitions.
+	 * Uses distance-based weighting from biome boundaries.
+	 * @param Temperature Normalized temperature (-1 to 1)
+	 * @param Moisture Normalized moisture (-1 to 1)
+	 * @param BlendWidth Width of the blend zone (in temperature/moisture units, default 0.1)
+	 * @return Blend result with up to MAX_BIOME_BLEND biomes and their weights
+	 */
+	static FBiomeBlend GetBiomeBlend(float Temperature, float Moisture, float BlendWidth = 0.1f);
+
+	/**
+	 * Get material ID considering biome blending.
+	 * Performs weighted selection based on blend weights.
+	 * @param Blend The biome blend result
+	 * @param DepthBelowSurface Depth below terrain surface
+	 * @return Material ID selected based on blend weights
+	 */
+	static uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface);
+
 private:
 	/** Array of all biome definitions */
 	static TArray<FBiomeDefinition> Biomes;

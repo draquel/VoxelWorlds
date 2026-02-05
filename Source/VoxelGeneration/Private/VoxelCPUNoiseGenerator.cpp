@@ -4,6 +4,7 @@
 #include "VoxelGeneration.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelBiomeRegistry.h"
+#include "VoxelBiomeConfiguration.h"
 #include "VoxelMaterialRegistry.h"
 #include "Async/Async.h"
 
@@ -145,11 +146,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 
-	// Set up biome noise parameters
+	// Get biome configuration (may be null if biomes disabled)
+	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+
+	// Set up biome noise parameters from configuration
 	FVoxelNoiseParams TempNoiseParams;
 	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	TempNoiseParams.Seed = Request.NoiseParams.Seed + Request.TemperatureSeedOffset;
-	TempNoiseParams.Frequency = Request.TemperatureNoiseFrequency;
 	TempNoiseParams.Octaves = 2;  // Fewer octaves for smoother biome transitions
 	TempNoiseParams.Persistence = 0.5f;
 	TempNoiseParams.Lacunarity = 2.0f;
@@ -157,12 +159,27 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 
 	FVoxelNoiseParams MoistureNoiseParams;
 	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	MoistureNoiseParams.Seed = Request.NoiseParams.Seed + Request.MoistureSeedOffset;
-	MoistureNoiseParams.Frequency = Request.MoistureNoiseFrequency;
 	MoistureNoiseParams.Octaves = 2;
 	MoistureNoiseParams.Persistence = 0.5f;
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
+
+	// Use configuration values if available, otherwise use defaults
+	if (BiomeConfig)
+	{
+		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
+		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
+		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
+		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
+	}
+	else
+	{
+		// Defaults matching original FVoxelBiomeRegistry behavior
+		TempNoiseParams.Seed = Request.NoiseParams.Seed + 1234;
+		TempNoiseParams.Frequency = 0.00005f;
+		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
+		MoistureNoiseParams.Frequency = 0.00007f;
+	}
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -200,7 +217,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				uint8 MaterialID = 0;
 				uint8 BiomeID = 0;
 
-				if (Request.bEnableBiomes)
+				if (Request.bEnableBiomes && BiomeConfig && BiomeConfig->IsValid())
 				{
 					// Sample biome noise at X,Y (2D, constant for a column)
 					// Use 3D function with Z=0 for 2D sampling
@@ -208,18 +225,28 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
-					// Select biome based on temperature and moisture
-					const FBiomeDefinition* Biome = FVoxelBiomeRegistry::SelectBiome(Temperature, Moisture);
-					if (Biome)
-					{
-						BiomeID = Biome->BiomeID;
-						MaterialID = Biome->GetMaterialAtDepth(DepthBelowSurface);
-					}
-					else
-					{
-						// Fallback to stone if no biome found
-						MaterialID = EVoxelMaterial::Stone;
-					}
+					// Get blended biome selection for smooth transitions
+					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
+
+					// Store the dominant biome ID
+					BiomeID = Blend.GetDominantBiome();
+
+					// Get material considering blend weights (creates dithered transition effect)
+					MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+
+					// Apply height-based material overrides (snow at peaks, rock at altitude, etc.)
+					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
+				}
+				else if (Request.bEnableBiomes)
+				{
+					// Fallback to static registry if no BiomeConfiguration provided
+					FVector BiomeSamplePos(WorldPos.X, WorldPos.Y, 0.0f);
+					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
+					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+
+					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+					BiomeID = Blend.GetDominantBiome();
+					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
 				}
 				else
 				{

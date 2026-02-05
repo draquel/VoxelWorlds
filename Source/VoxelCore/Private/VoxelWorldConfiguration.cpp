@@ -2,6 +2,7 @@
 
 #include "VoxelWorldConfiguration.h"
 #include "VoxelCore.h"
+#include "VoxelMaterialRegistry.h"
 
 UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 {
@@ -25,6 +26,12 @@ UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 	{
 		Band.MorphRange = (Band.MaxDistance - Band.MinDistance) * 0.25f;
 	}
+
+	// Biome configuration (BiomeConfiguration data asset) contains:
+	// - Biome definitions (Plains, Desert, Tundra, etc.)
+	// - Biome blending parameters
+	// - Height material rules (snow at peaks, rock at altitude)
+	// If BiomeConfiguration is null, a default one will be created at runtime
 }
 
 float UVoxelWorldConfiguration::GetChunkWorldSizeAtLOD(int32 LODLevel) const

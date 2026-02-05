@@ -3,6 +3,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelStreaming.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelBiomeConfiguration.h"
 #include "Algo/BinarySearch.h"
 #include "VoxelCoordinates.h"
 #include "IVoxelLODStrategy.h"
@@ -806,6 +807,10 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		GenRequest.HeightScale = Configuration->HeightScale;
 		GenRequest.BaseHeight = Configuration->BaseHeight;
 		GenRequest.WorldOrigin = Configuration->WorldOrigin;
+
+		// Biome configuration (contains biome definitions, blend settings, height rules)
+		GenRequest.bEnableBiomes = Configuration->bEnableBiomes;
+		GenRequest.BiomeConfiguration = Configuration->BiomeConfiguration;
 
 		// Get chunk state to store voxel data
 		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
