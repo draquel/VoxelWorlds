@@ -407,12 +407,15 @@ bool FSmoothMeshingChunkBoundaryTest::RunTest(const FString& Parameters)
 
 	int32 TrisWithoutNeighbor = MeshDataNoNeighbor.Indices.Num() / 3;
 
-	// Now add neighbor data showing solid voxels adjacent
+	// Now add neighbor data showing AIR voxels adjacent
+	// Without neighbor data: X=ChunkSize falls back to edge voxel (solid at X=ChunkSize-1)
+	// With AIR neighbor data: X=ChunkSize reads air from neighbor, creating a solid/air boundary
+	// This should result in MORE triangles at the +X face
 	const int32 SliceSize = ChunkSize * ChunkSize;
 	Request.NeighborXPos.SetNum(SliceSize);
 	for (int32 i = 0; i < SliceSize; ++i)
 	{
-		Request.NeighborXPos[i] = FVoxelData::Solid(1);
+		Request.NeighborXPos[i] = FVoxelData::Air();
 	}
 
 	FChunkMeshData MeshDataWithNeighbor;
@@ -421,13 +424,14 @@ bool FSmoothMeshingChunkBoundaryTest::RunTest(const FString& Parameters)
 
 	int32 TrisWithNeighbor = MeshDataWithNeighbor.Indices.Num() / 3;
 
-	AddInfo(FString::Printf(TEXT("Boundary test: %d tris without neighbor, %d with neighbor"),
+	AddInfo(FString::Printf(TEXT("Boundary test: %d tris without neighbor, %d with neighbor (air)"),
 		TrisWithoutNeighbor, TrisWithNeighbor));
 
-	// With solid neighbor data, the +X boundary cubes should have different configurations
-	// This should result in different (likely fewer) triangles at the boundary
-	TestTrue(TEXT("Neighbor data should affect triangle count"),
-		TrisWithoutNeighbor != TrisWithNeighbor);
+	// With AIR neighbor data, the +X boundary cubes have a solid/air transition
+	// This creates surface triangles at the chunk boundary
+	// Without neighbor data, fallback samples the edge voxel (solid), so no surface there
+	TestTrue(TEXT("AIR neighbor data should create more triangles at boundary"),
+		TrisWithNeighbor > TrisWithoutNeighbor);
 
 	Mesher.Shutdown();
 	return true;

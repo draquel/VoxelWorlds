@@ -229,6 +229,11 @@ bool FCubicMeshingFaceCullingTest::RunTest(const FString& Parameters)
 	FVoxelCPUCubicMesher Mesher;
 	Mesher.Initialize();
 
+	// Disable greedy meshing to test face culling specifically
+	FVoxelMeshingConfig Config = Mesher.GetConfig();
+	Config.bUseGreedyMeshing = false;
+	Mesher.SetConfig(Config);
+
 	// Create adjacent voxels request
 	FVoxelMeshingRequest Request = CreateAdjacentVoxelsRequest(8);
 
@@ -263,6 +268,11 @@ bool FCubicMeshingFullChunkTest::RunTest(const FString& Parameters)
 {
 	FVoxelCPUCubicMesher Mesher;
 	Mesher.Initialize();
+
+	// Disable greedy meshing to test per-face output
+	FVoxelMeshingConfig Config = Mesher.GetConfig();
+	Config.bUseGreedyMeshing = false;
+	Mesher.SetConfig(Config);
 
 	// Create full chunk request (small size for test)
 	const int32 ChunkSize = 4;
@@ -422,6 +432,11 @@ bool FCubicMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
 
 	CPUMesher.Initialize();
 	GPUMesher.Initialize();
+
+	// Disable greedy meshing on CPU to match GPU output (GPU doesn't use greedy)
+	FVoxelMeshingConfig Config = CPUMesher.GetConfig();
+	Config.bUseGreedyMeshing = false;
+	CPUMesher.SetConfig(Config);
 
 	// Create terrain-like request for comparison
 	FVoxelMeshingRequest Request = CreateTerrainLikeRequest(8);
