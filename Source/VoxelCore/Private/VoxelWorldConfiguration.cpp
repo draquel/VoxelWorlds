@@ -5,20 +5,25 @@
 
 UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 {
-	// Setup default LOD bands for infinite plane
+	// Setup default LOD bands matched to default ViewDistance (10000 units)
 	// Default: ChunkSize=32, VoxelSize=100 -> ChunkWorldSize=3200 units
-	// LOD bands are scaled relative to chunk size for proper visual transitions
+	//
+	// Design principles:
+	// - Bands should cover up to ViewDistance (not far beyond)
+	// - MorphRange ~25% of band width for smooth transitions
+	// - Wider bands at distance for stability (less popping)
+	// - Last band extends to ViewDistance
+	//
+	// When changing ViewDistance, adjust bands proportionally or extend the last band.
 	LODBands.Empty();
-	LODBands.Add(FLODBand(0.0f, 3200.0f, 0, 1, 32));       // LOD 0: 0-1 chunk, full detail
-	LODBands.Add(FLODBand(3200.0f, 6400.0f, 1, 2, 32));    // LOD 1: 1-2 chunks, half detail
-	LODBands.Add(FLODBand(6400.0f, 12800.0f, 2, 4, 32));   // LOD 2: 2-4 chunks, quarter detail
-	LODBands.Add(FLODBand(12800.0f, 25600.0f, 3, 8, 64));  // LOD 3: 4-8 chunks, coarse
-	LODBands.Add(FLODBand(25600.0f, 51200.0f, 4, 16, 128)); // LOD 4: 8-16 chunks, very coarse
+	LODBands.Add(FLODBand(0.0f, 4000.0f, 0, 1, 32));      // LOD 0: 0-4000, full detail
+	LODBands.Add(FLODBand(4000.0f, 7000.0f, 1, 2, 32));   // LOD 1: 4000-7000, half detail
+	LODBands.Add(FLODBand(7000.0f, 10000.0f, 2, 4, 32));  // LOD 2: 7000-10000, quarter detail
 
-	// Set morph ranges for smooth transitions
-	for (int32 i = 0; i < LODBands.Num() - 1; ++i)
+	// Set morph ranges to 25% of band width for smooth transitions
+	for (FLODBand& Band : LODBands)
 	{
-		LODBands[i].MorphRange = (LODBands[i].MaxDistance - LODBands[i].MinDistance) * 0.25f;
+		Band.MorphRange = (Band.MaxDistance - Band.MinDistance) * 0.25f;
 	}
 }
 

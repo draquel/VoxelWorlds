@@ -107,6 +107,8 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 	{
 		Config = CreateDefaultConfiguration();
 		RuntimeConfiguration = Config;
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using runtime config (no asset), ViewDistance=%.0f"),
+			Config->ViewDistance);
 	}
 	else
 	{
@@ -337,34 +339,40 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Config->NoiseParams.Persistence = 0.5f;
 	Config->NoiseParams.Amplitude = 1.0f;
 
-	// LOD bands - MINIMAL for testing smooth meshing performance
+	// LOD bands matched to ViewDistance (default 10000)
 	// ChunkSize=32, VoxelSize=100 -> 3200 units per chunk
-	// Max view distance: 6400 units (2 chunk radius) = ~50 chunks total
+	// MorphRange = 25% of band width for smooth transitions
 	Config->LODBands.Empty();
 
-	// LOD 0: 0-3200 units (1 chunk radius), full detail
 	FLODBand Band0;
 	Band0.LODLevel = 0;
 	Band0.MinDistance = 0.0f;
-	Band0.MaxDistance = 3200.0f;
+	Band0.MaxDistance = 4000.0f;
 	Band0.VoxelStride = 1;
-	Band0.MorphRange = 800.0f;
+	Band0.MorphRange = 1000.0f;
 	Config->LODBands.Add(Band0);
 
-	// LOD 1: 3200-6400 units (2 chunk radius), half detail
 	FLODBand Band1;
 	Band1.LODLevel = 1;
-	Band1.MinDistance = 3200.0f;
-	Band1.MaxDistance = 6400.0f;
+	Band1.MinDistance = 4000.0f;
+	Band1.MaxDistance = 7000.0f;
 	Band1.VoxelStride = 2;
-	Band1.MorphRange = 800.0f;
+	Band1.MorphRange = 750.0f;
 	Config->LODBands.Add(Band1);
 
-	// Streaming settings - minimal for testing
-	Config->MaxChunksToLoadPerFrame = 2;
-	Config->MaxChunksToUnloadPerFrame = 4;
-	Config->StreamingTimeSliceMS = 2.0f;
-	Config->MaxLoadedChunks = 100;  // Small view distance = fewer chunks
+	FLODBand Band2;
+	Band2.LODLevel = 2;
+	Band2.MinDistance = 7000.0f;
+	Band2.MaxDistance = 10000.0f;
+	Band2.VoxelStride = 4;
+	Band2.MorphRange = 750.0f;
+	Config->LODBands.Add(Band2);
+
+	// Streaming settings - balanced for ViewDistance=10000 (~500 chunks)
+	Config->MaxChunksToLoadPerFrame = 8;
+	Config->MaxChunksToUnloadPerFrame = 16;
+	Config->StreamingTimeSliceMS = 4.0f;
+	Config->MaxLoadedChunks = 1000;
 
 	// Rendering settings
 	Config->bUseGPURenderer = true;  // Use Custom Vertex Factory renderer

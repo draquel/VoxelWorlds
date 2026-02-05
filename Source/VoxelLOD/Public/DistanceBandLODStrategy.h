@@ -96,6 +96,10 @@ public:
 	void SetUnloadDistanceMultiplier(float Multiplier) { UnloadDistanceMultiplier = Multiplier; }
 	float GetUnloadDistanceMultiplier() const { return UnloadDistanceMultiplier; }
 
+	/** Set the maximum view distance for chunk loading */
+	void SetViewDistance(float Distance) { MaxViewDistance = Distance; }
+	float GetViewDistance() const { return MaxViewDistance; }
+
 protected:
 	// ==================== Internal Helpers ====================
 
@@ -181,7 +185,7 @@ protected:
 	/** Cached world mode from configuration */
 	EWorldMode WorldMode = EWorldMode::InfinitePlane;
 
-	/** Maximum view distance (from outermost LOD band) */
+	/** Maximum view distance for chunk loading (from Configuration->ViewDistance) */
 	float MaxViewDistance = 0.0f;
 
 	/** Vertical chunk range for infinite plane mode */

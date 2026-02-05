@@ -128,21 +128,21 @@ public:
 
 	// ==================== Streaming Settings ====================
 
-	/** Maximum chunks to load per frame */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "1", ClampMax = "32"))
-	int32 MaxChunksToLoadPerFrame = 4;
+	/** Maximum chunks to load per frame (generation, meshing, render submit) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 MaxChunksToLoadPerFrame = 8;
 
 	/** Maximum chunks to unload per frame */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "1", ClampMax = "64"))
-	int32 MaxChunksToUnloadPerFrame = 8;
+	int32 MaxChunksToUnloadPerFrame = 16;
 
 	/** Time budget for streaming operations per frame (milliseconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "0.5", ClampMax = "10"))
-	float StreamingTimeSliceMS = 2.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "0.5", ClampMax = "16"))
+	float StreamingTimeSliceMS = 4.0f;
 
 	/** Maximum number of chunks to keep loaded */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "100", ClampMax = "10000"))
-	int32 MaxLoadedChunks = 2000;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "100", ClampMax = "50000"))
+	int32 MaxLoadedChunks = 5000;
 
 	// ==================== Meshing Settings ====================
 

@@ -36,12 +36,9 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		return A.MinDistance < B.MinDistance;
 	});
 
-	// Calculate max view distance
-	MaxViewDistance = 0.0f;
-	for (const FLODBand& Band : LODBands)
-	{
-		MaxViewDistance = FMath::Max(MaxViewDistance, Band.MaxDistance);
-	}
+	// Use ViewDistance from configuration as the authoritative max distance
+	// This allows easy control over render distance independent of LOD band setup
+	MaxViewDistance = WorldConfig->ViewDistance;
 
 	// Set vertical range based on world mode
 	switch (WorldMode)
@@ -65,8 +62,26 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 
 	bIsInitialized = true;
 
-	UE_LOG(LogVoxelLOD, Log, TEXT("FDistanceBandLODStrategy initialized with %d LOD bands, max distance: %.0f"),
-		LODBands.Num(), MaxViewDistance);
+	// Calculate expected chunk radius for reference
+	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+	const int32 ExpectedChunkRadius = FMath::CeilToInt(MaxViewDistance / ChunkWorldSize) + 1;
+
+	UE_LOG(LogVoxelLOD, Log, TEXT("FDistanceBandLODStrategy initialized:"));
+	UE_LOG(LogVoxelLOD, Log, TEXT("  ViewDistance: %.0f, LOD Bands: %d, LOD Enabled: %s"),
+		MaxViewDistance, LODBands.Num(), bEnableLOD ? TEXT("Yes") : TEXT("No"));
+	UE_LOG(LogVoxelLOD, Log, TEXT("  ChunkWorldSize: %.0f, ExpectedChunkRadius: %d (~%d chunks per Z level)"),
+		ChunkWorldSize, ExpectedChunkRadius, (ExpectedChunkRadius * 2 + 1) * (ExpectedChunkRadius * 2 + 1));
+
+	if (LODBands.Num() > 0)
+	{
+		UE_LOG(LogVoxelLOD, Log, TEXT("  LOD Band range: 0 - %.0f (last band max)"),
+			LODBands.Last().MaxDistance);
+		if (MaxViewDistance > LODBands.Last().MaxDistance)
+		{
+			UE_LOG(LogVoxelLOD, Log, TEXT("  Note: ViewDistance extends %.0f beyond last LOD band"),
+				MaxViewDistance - LODBands.Last().MaxDistance);
+		}
+	}
 }
 
 void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float DeltaTime)
@@ -174,10 +189,22 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 
 				// Find appropriate LOD band
 				const FLODBand* Band = FindBandForDistance(Distance);
-				if (!Band)
+
+				// Determine LOD level: use band if found, otherwise fallback
+				int32 LODLevel = 0;
+				float MorphFactor = 0.0f;
+
+				if (Band)
 				{
-					continue;
+					LODLevel = Band->LODLevel;
+					MorphFactor = bEnableMorphing ? Band->GetMorphFactor(Distance) : 0.0f;
 				}
+				else if (bEnableLOD && LODBands.Num() > 0)
+				{
+					// Beyond all bands but within ViewDistance - use coarsest LOD
+					LODLevel = LODBands.Last().LODLevel;
+				}
+				// else: LOD disabled or no bands - use LOD 0
 
 				// Frustum culling (optional)
 				if (bEnableFrustumCulling && !IsChunkInFrustum(ChunkCoord, Context))
@@ -188,9 +215,9 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 				// Create request
 				FChunkLODRequest Request;
 				Request.ChunkCoord = ChunkCoord;
-				Request.LODLevel = Band->LODLevel;
+				Request.LODLevel = LODLevel;
 				Request.Priority = CalculatePriority(ChunkCoord, Context);
-				Request.MorphFactor = bEnableMorphing ? Band->GetMorphFactor(Distance) : 0.0f;
+				Request.MorphFactor = MorphFactor;
 
 				Requests.Add(Request);
 			}
@@ -360,12 +387,8 @@ void FDistanceBandLODStrategy::SetLODBands(const TArray<FLODBand>& InBands)
 		return A.MinDistance < B.MinDistance;
 	});
 
-	// Recalculate max view distance
-	MaxViewDistance = 0.0f;
-	for (const FLODBand& Band : LODBands)
-	{
-		MaxViewDistance = FMath::Max(MaxViewDistance, Band.MaxDistance);
-	}
+	// Note: MaxViewDistance is set from Configuration->ViewDistance during Initialize()
+	// and should not be overridden here. Call SetViewDistance() if needed.
 }
 
 // ==================== Internal Helpers ====================
