@@ -2,10 +2,14 @@
 
 #include "VoxelMaterialAtlas.h"
 #include "VoxelMaterialRegistry.h"
+#include "Engine/Texture2DArray.h"
+#include "TextureResource.h"
 
 #if WITH_EDITOR
 #include "Misc/DataValidation.h"
 #endif
+
+DEFINE_LOG_CATEGORY_STATIC(LogVoxelMaterialAtlas, Log, All);
 
 UVoxelMaterialAtlas::UVoxelMaterialAtlas()
 {
@@ -185,7 +189,7 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 		MaterialLUT = UTexture2D::CreateTransient(LUTWidth, LUTHeight, PF_B8G8R8A8, TEXT("VoxelMaterialLUT"));
 		if (!MaterialLUT)
 		{
-			UE_LOG(LogTemp, Error, TEXT("UVoxelMaterialAtlas: Failed to create LUT texture"));
+			UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("UVoxelMaterialAtlas: Failed to create LUT texture"));
 			return;
 		}
 
@@ -204,7 +208,7 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 
 	if (!TextureData)
 	{
-		UE_LOG(LogTemp, Error, TEXT("UVoxelMaterialAtlas: Failed to lock LUT texture for writing"));
+		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("UVoxelMaterialAtlas: Failed to lock LUT texture for writing"));
 		return;
 	}
 
@@ -249,8 +253,193 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 
 	bLUTDirty = false;
 
-	UE_LOG(LogTemp, Log, TEXT("UVoxelMaterialAtlas: Built material LUT (%d x %d) with %d material configs"),
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Built material LUT (%d x %d) with %d material configs"),
 		LUTWidth, LUTHeight, MaterialConfigs.Num());
+}
+
+UTexture2D* UVoxelMaterialAtlas::CreatePlaceholderTexture(FColor Color, int32 Size) const
+{
+	UTexture2D* Texture = UTexture2D::CreateTransient(Size, Size, PF_B8G8R8A8);
+	if (!Texture)
+	{
+		return nullptr;
+	}
+
+	// Configure texture
+	Texture->SRGB = true;
+	Texture->Filter = TF_Bilinear;
+	Texture->CompressionSettings = TC_Default;
+	Texture->MipGenSettings = TMGS_NoMipmaps;
+
+	// Fill with solid color
+	FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
+	void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
+	if (TextureData)
+	{
+		uint8* PixelData = static_cast<uint8*>(TextureData);
+		const int32 NumPixels = Size * Size;
+		for (int32 i = 0; i < NumPixels; ++i)
+		{
+			// BGRA format
+			PixelData[i * 4 + 0] = Color.B;
+			PixelData[i * 4 + 1] = Color.G;
+			PixelData[i * 4 + 2] = Color.R;
+			PixelData[i * 4 + 3] = Color.A;
+		}
+		Mip.BulkData.Unlock();
+		Texture->UpdateResource();
+	}
+
+	return Texture;
+}
+
+bool UVoxelMaterialAtlas::BuildSingleTextureArray(
+	TObjectPtr<UTexture2DArray>& OutArray,
+	TFunctionRef<TSoftObjectPtr<UTexture2D>(const FVoxelMaterialTextureConfig&)> TextureGetter,
+	FColor PlaceholderColor,
+	const FString& ArrayName)
+{
+	if (MaterialConfigs.Num() == 0)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): No material configs defined"), *ArrayName);
+		return false;
+	}
+
+	// Find maximum MaterialID to determine array size
+	uint8 MaxMaterialID = 0;
+	for (const FVoxelMaterialTextureConfig& Config : MaterialConfigs)
+	{
+		MaxMaterialID = FMath::Max(MaxMaterialID, Config.MaterialID);
+	}
+	const int32 NumSlices = MaxMaterialID + 1;
+
+	// Collect source textures (load soft pointers)
+	TArray<UTexture2D*> SourceTextures;
+	SourceTextures.SetNum(NumSlices);
+
+	// Initialize all to nullptr
+	for (int32 i = 0; i < NumSlices; ++i)
+	{
+		SourceTextures[i] = nullptr;
+	}
+
+	// Load textures from configs
+	int32 LoadedCount = 0;
+	for (const FVoxelMaterialTextureConfig& Config : MaterialConfigs)
+	{
+		TSoftObjectPtr<UTexture2D> SoftTexture = TextureGetter(Config);
+		if (!SoftTexture.IsNull())
+		{
+			UTexture2D* LoadedTexture = SoftTexture.LoadSynchronous();
+			if (LoadedTexture)
+			{
+				SourceTextures[Config.MaterialID] = LoadedTexture;
+				LoadedCount++;
+			}
+			else
+			{
+				UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): Failed to load texture for MaterialID %d (%s)"),
+					*ArrayName, Config.MaterialID, *Config.MaterialName);
+			}
+		}
+	}
+
+	if (LoadedCount == 0)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): No textures loaded, skipping array creation"), *ArrayName);
+		OutArray = nullptr;
+		return false;
+	}
+
+	// Create placeholder for missing slots
+	UTexture2D* Placeholder = CreatePlaceholderTexture(PlaceholderColor, TextureArraySize);
+	if (!Placeholder)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): Failed to create placeholder texture"), *ArrayName);
+		return false;
+	}
+
+	// Fill missing slots with placeholder
+	for (int32 i = 0; i < NumSlices; ++i)
+	{
+		if (!SourceTextures[i])
+		{
+			SourceTextures[i] = Placeholder;
+		}
+	}
+
+	// Create the Texture2DArray
+	OutArray = NewObject<UTexture2DArray>(GetTransientPackage(), *FString::Printf(TEXT("VoxelMaterial%sArray"), *ArrayName));
+	if (!OutArray)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): Failed to create UTexture2DArray"), *ArrayName);
+		return false;
+	}
+
+	// Configure array settings
+	OutArray->Filter = TF_Bilinear;
+	OutArray->SRGB = (ArrayName != TEXT("Normal")); // Normal maps should not be sRGB
+	OutArray->LODGroup = TEXTUREGROUP_World;
+
+#if WITH_EDITOR
+	// In editor, we can use the source textures directly
+	OutArray->SourceTextures.Empty();
+	for (UTexture2D* Texture : SourceTextures)
+	{
+		OutArray->SourceTextures.Add(Texture);
+	}
+
+	// Update the array resource
+	OutArray->UpdateSourceFromSourceTextures();
+#endif
+
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Created array with %d slices (%d from configs, %d placeholders)"),
+		*ArrayName, NumSlices, LoadedCount, NumSlices - LoadedCount);
+
+	return true;
+}
+
+void UVoxelMaterialAtlas::BuildTextureArrays()
+{
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Building texture arrays from %d material configs..."), MaterialConfigs.Num());
+
+	// Build Albedo array
+	bool bAlbedoSuccess = BuildSingleTextureArray(
+		AlbedoArray,
+		[](const FVoxelMaterialTextureConfig& Config) { return Config.AlbedoTexture; },
+		FColor(128, 128, 128, 255), // Gray placeholder
+		TEXT("Albedo")
+	);
+
+	// Build Normal array
+	bool bNormalSuccess = BuildSingleTextureArray(
+		NormalArray,
+		[](const FVoxelMaterialTextureConfig& Config) { return Config.NormalTexture; },
+		FColor(128, 128, 255, 255), // Flat normal (pointing up in tangent space)
+		TEXT("Normal")
+	);
+
+	// Build Roughness array
+	bool bRoughnessSuccess = BuildSingleTextureArray(
+		RoughnessArray,
+		[](const FVoxelMaterialTextureConfig& Config) { return Config.RoughnessTexture; },
+		FColor(128, 128, 128, 255), // 0.5 roughness
+		TEXT("Roughness")
+	);
+
+	bTextureArraysDirty = false;
+
+	if (bAlbedoSuccess || bNormalSuccess || bRoughnessSuccess)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Texture arrays built successfully (Albedo: %s, Normal: %s, Roughness: %s)"),
+			bAlbedoSuccess ? TEXT("Yes") : TEXT("No"),
+			bNormalSuccess ? TEXT("Yes") : TEXT("No"),
+			bRoughnessSuccess ? TEXT("Yes") : TEXT("No"));
+	}
+	else
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("No texture arrays were built - check that MaterialConfigs have source textures assigned"));
+	}
 }
 
 void UVoxelMaterialAtlas::RebuildConfigIndexCache() const
@@ -376,6 +565,27 @@ EDataValidationResult UVoxelMaterialAtlas::IsDataValid(FDataValidationContext& C
 		Context.AddWarning(FText::FromString(TEXT("Material LUT needs rebuilding. Click 'Build Material LUT' button.")));
 	}
 
+	// Warn if texture arrays are dirty
+	if (bTextureArraysDirty)
+	{
+		Context.AddWarning(FText::FromString(TEXT("Texture arrays need rebuilding. Click 'Build Texture Arrays' button.")));
+	}
+
+	// Check if any materials have source textures but arrays aren't built
+	bool bHasSourceTextures = false;
+	for (const FVoxelMaterialTextureConfig& Config : MaterialConfigs)
+	{
+		if (!Config.AlbedoTexture.IsNull() || !Config.NormalTexture.IsNull() || !Config.RoughnessTexture.IsNull())
+		{
+			bHasSourceTextures = true;
+			break;
+		}
+	}
+	if (bHasSourceTextures && !AlbedoArray)
+	{
+		Context.AddWarning(FText::FromString(TEXT("Materials have source textures but texture arrays are not built. Click 'Build Texture Arrays' to generate them.")));
+	}
+
 	// Overall validation
 	if (!IsValid())
 	{
@@ -409,9 +619,25 @@ void UVoxelMaterialAtlas::PostEditChangeProperty(FPropertyChangedEvent& Property
 		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, UVScale),
 	};
 
+	// Properties that affect texture arrays
+	static const TSet<FName> TextureArrayAffectingProperties = {
+		GET_MEMBER_NAME_CHECKED(UVoxelMaterialAtlas, MaterialConfigs),
+		GET_MEMBER_NAME_CHECKED(UVoxelMaterialAtlas, TextureArraySize),
+		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, MaterialID),
+		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, AlbedoTexture),
+		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, NormalTexture),
+		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, RoughnessTexture),
+	};
+
 	if (LUTAffectingProperties.Contains(PropertyName) || LUTAffectingProperties.Contains(MemberPropertyName))
 	{
 		bLUTDirty = true;
+		bConfigIndexCacheDirty = true;
+	}
+
+	if (TextureArrayAffectingProperties.Contains(PropertyName) || TextureArrayAffectingProperties.Contains(MemberPropertyName))
+	{
+		bTextureArraysDirty = true;
 		bConfigIndexCacheDirty = true;
 	}
 }

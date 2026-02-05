@@ -178,19 +178,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Packed Atlas", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 AtlasRows = 4;
 
-	// ===== Texture Arrays (Smooth Terrain) =====
+	// ===== Texture Arrays (Smooth Terrain) - Auto-generated from MaterialConfigs =====
 
-	/** Albedo Texture2DArray for triplanar sampling (smooth meshing) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Texture Arrays")
+	/** Albedo Texture2DArray for triplanar sampling (auto-built from MaterialConfigs) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
 	TObjectPtr<UTexture2DArray> AlbedoArray;
 
-	/** Normal map Texture2DArray for triplanar sampling */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Texture Arrays")
+	/** Normal map Texture2DArray for triplanar sampling (auto-built from MaterialConfigs) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
 	TObjectPtr<UTexture2DArray> NormalArray;
 
-	/** Roughness Texture2DArray for triplanar sampling */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Texture Arrays")
+	/** Roughness Texture2DArray for triplanar sampling (auto-built from MaterialConfigs) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
 	TObjectPtr<UTexture2DArray> RoughnessArray;
+
+	/** Target texture size for generated arrays (textures will be resized to match) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Texture Arrays", meta = (ClampMin = "64", ClampMax = "4096"))
+	int32 TextureArraySize = 512;
 
 	// ===== Per-Material Configuration =====
 
@@ -307,6 +311,27 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
 	bool IsLUTDirty() const { return bLUTDirty; }
 
+	// ===== Texture Array Building =====
+
+	/**
+	 * Build or rebuild texture arrays from individual MaterialConfig textures.
+	 * Creates AlbedoArray, NormalArray, and RoughnessArray from the per-material
+	 * source textures defined in MaterialConfigs.
+	 *
+	 * All source textures will be resized to TextureArraySize x TextureArraySize.
+	 * Materials without textures will use a placeholder (solid color).
+	 *
+	 * Call this after modifying MaterialConfigs or source textures.
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Voxel|Material Atlas")
+	void BuildTextureArrays();
+
+	/**
+	 * Check if texture arrays need rebuilding.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
+	bool AreTextureArraysDirty() const { return bTextureArraysDirty; }
+
 	/**
 	 * Get the atlas tile for a material and face type.
 	 * @param MaterialID The material ID
@@ -345,4 +370,27 @@ private:
 
 	/** Whether the LUT needs rebuilding */
 	mutable bool bLUTDirty = true;
+
+	/** Whether texture arrays need rebuilding */
+	mutable bool bTextureArraysDirty = true;
+
+	/**
+	 * Helper to create a solid color placeholder texture.
+	 * Used when a material config doesn't have a source texture assigned.
+	 */
+	UTexture2D* CreatePlaceholderTexture(FColor Color, int32 Size) const;
+
+	/**
+	 * Helper to build a single texture array from source textures.
+	 * @param OutArray The array to populate
+	 * @param TextureGetter Function to get the source texture from a config
+	 * @param PlaceholderColor Color for missing textures
+	 * @param ArrayName Name for the created array (for debugging)
+	 * @return true if successful
+	 */
+	bool BuildSingleTextureArray(
+		TObjectPtr<UTexture2DArray>& OutArray,
+		TFunctionRef<TSoftObjectPtr<UTexture2D>(const FVoxelMaterialTextureConfig&)> TextureGetter,
+		FColor PlaceholderColor,
+		const FString& ArrayName);
 };

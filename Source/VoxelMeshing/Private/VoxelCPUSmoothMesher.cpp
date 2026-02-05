@@ -5,6 +5,9 @@
 #include "MarchingCubesTables.h"
 #include "TransvoxelTables.h"
 
+// Note: Smooth meshing uses triplanar blending, so FaceType is not needed.
+// UV1.x stores MaterialID, UV1.y is reserved (set to 0).
+
 FVoxelCPUSmoothMesher::FVoxelCPUSmoothMesher()
 {
 }
@@ -105,6 +108,7 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 	OutMeshData.Positions.Reserve(EstimatedTriangles * 3);
 	OutMeshData.Normals.Reserve(EstimatedTriangles * 3);
 	OutMeshData.UVs.Reserve(EstimatedTriangles * 3);
+	OutMeshData.UV1s.Reserve(EstimatedTriangles * 3);
 	OutMeshData.Colors.Reserve(EstimatedTriangles * 3);
 	OutMeshData.Indices.Reserve(EstimatedTriangles * 3);
 
@@ -448,7 +452,7 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
 		}
 
-		// Vertex color: MaterialID, BiomeID, AO (smooth meshing doesn't compute per-vertex AO)
+		// Vertex color: MaterialID (legacy), BiomeID, AO (smooth meshing doesn't compute per-vertex AO)
 		const FColor VertexColor(MaterialID, BiomeID, 0, 255);
 
 		// Get base index for this triangle
@@ -466,6 +470,12 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 		OutMeshData.UVs.Add(UV0);
 		OutMeshData.UVs.Add(UV1);
 		OutMeshData.UVs.Add(UV2);
+
+		// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
+		const FVector2f MaterialUV(static_cast<float>(MaterialID), 0.0f);
+		OutMeshData.UV1s.Add(MaterialUV);
+		OutMeshData.UV1s.Add(MaterialUV);
+		OutMeshData.UV1s.Add(MaterialUV);
 
 		OutMeshData.Colors.Add(VertexColor);
 		OutMeshData.Colors.Add(VertexColor);
@@ -615,7 +625,7 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
 		}
 
-		// Vertex color: MaterialID, BiomeID, AO
+		// Vertex color: MaterialID (legacy), BiomeID, AO
 		const FColor VertexColor(MaterialID, BiomeID, 0, 255);
 
 		// Get base index for this triangle
@@ -633,6 +643,12 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 		OutMeshData.UVs.Add(UV0);
 		OutMeshData.UVs.Add(UV1);
 		OutMeshData.UVs.Add(UV2);
+
+		// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
+		const FVector2f MaterialUV(static_cast<float>(MaterialID), 0.0f);
+		OutMeshData.UV1s.Add(MaterialUV);
+		OutMeshData.UV1s.Add(MaterialUV);
+		OutMeshData.UV1s.Add(MaterialUV);
 
 		OutMeshData.Colors.Add(VertexColor);
 		OutMeshData.Colors.Add(VertexColor);
@@ -1358,6 +1374,8 @@ void FVoxelCPUSmoothMesher::GenerateSkirts(
 			const FVector3f N1 = OutMeshData.Normals[Edge.V1];
 			const FColor C0 = OutMeshData.Colors[Edge.V0];
 			const FColor C1 = OutMeshData.Colors[Edge.V1];
+			const FVector2f MatUV0 = OutMeshData.UV1s.IsValidIndex(Edge.V0) ? OutMeshData.UV1s[Edge.V0] : FVector2f::ZeroVector;
+			const FVector2f MatUV1 = OutMeshData.UV1s.IsValidIndex(Edge.V1) ? OutMeshData.UV1s[Edge.V1] : FVector2f::ZeroVector;
 
 			// Create skirt vertices that extend straight down
 			// This creates a vertical curtain that hides gaps between LOD levels
@@ -1412,6 +1430,12 @@ void FVoxelCPUSmoothMesher::GenerateSkirts(
 			OutMeshData.UVs.Add(UVBottom0);
 			OutMeshData.UVs.Add(UV1);
 			OutMeshData.UVs.Add(UVBottom1);
+
+			// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
+			OutMeshData.UV1s.Add(FVector2f(MatUV0.X, 0.0f));
+			OutMeshData.UV1s.Add(FVector2f(MatUV0.X, 0.0f));
+			OutMeshData.UV1s.Add(FVector2f(MatUV1.X, 0.0f));
+			OutMeshData.UV1s.Add(FVector2f(MatUV1.X, 0.0f));
 
 			OutMeshData.Colors.Add(C0);
 			OutMeshData.Colors.Add(C0);
@@ -2064,6 +2088,9 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 			UV = FVector2f(Pos.X, Pos.Z) * Config.UVScale / VoxelSize;
 		}
 		OutMeshData.UVs.Add(UV);
+
+		// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
+		OutMeshData.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
 
 		OutMeshData.Colors.Add(VertexColor);
 	}

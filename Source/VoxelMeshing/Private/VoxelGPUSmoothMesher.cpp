@@ -792,6 +792,7 @@ bool FVoxelGPUSmoothMesher::ReadbackToCPU(
 	OutMeshData.Positions.SetNum(VertexCount);
 	OutMeshData.Normals.SetNum(VertexCount);
 	OutMeshData.UVs.SetNum(VertexCount);
+	OutMeshData.UV1s.SetNum(VertexCount);
 	OutMeshData.Colors.SetNum(VertexCount);
 	OutMeshData.Indices.SetNum(IndexCount);
 
@@ -842,10 +843,16 @@ bool FVoxelGPUSmoothMesher::ReadbackToCPU(
 					for (uint32 i = 0; i < VertexCount; ++i)
 					{
 						OutDataPtr->Positions[i] = Vertices[i].Position;
-						OutDataPtr->Normals[i] = Vertices[i].GetNormal();
+						const FVector3f Normal = Vertices[i].GetNormal();
+						OutDataPtr->Normals[i] = Normal;
 						OutDataPtr->UVs[i] = Vertices[i].UV;
+
+						// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
+						const uint8 MaterialID = Vertices[i].GetMaterialID();
+						OutDataPtr->UV1s[i] = FVector2f(static_cast<float>(MaterialID), 0.0f);
+
 						OutDataPtr->Colors[i] = FColor(
-							Vertices[i].GetMaterialID(),
+							MaterialID,
 							Vertices[i].GetBiomeID(),
 							Vertices[i].GetAO() * 85,
 							255

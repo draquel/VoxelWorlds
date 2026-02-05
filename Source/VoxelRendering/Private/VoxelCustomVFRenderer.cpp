@@ -378,17 +378,35 @@ void FVoxelCustomVFRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
 {
 	check(IsInGameThread());
 
+	UE_LOG(LogVoxelRendering, Log, TEXT("SetMaterialAtlas called - WorldComponent: %s, CurrentMaterial: %s, Atlas: %s"),
+		WorldComponent ? TEXT("Valid") : TEXT("NULL"),
+		CurrentMaterial.IsValid() ? *CurrentMaterial->GetName() : TEXT("NULL"),
+		Atlas ? *Atlas->GetName() : TEXT("NULL"));
+
 	if (WorldComponent)
 	{
+		// Set the atlas FIRST - CreateVoxelMaterialInstance calls UpdateMaterialAtlasParameters
+		// which needs the atlas to be set
+		WorldComponent->SetMaterialAtlas(Atlas);
+
+		UMaterialInterface* ComponentMaterial = WorldComponent->GetMaterial(0);
+		UE_LOG(LogVoxelRendering, Log, TEXT("  ComponentMaterial: %s, CurrentMaterial.Get(): %s, Match: %s"),
+			ComponentMaterial ? *ComponentMaterial->GetName() : TEXT("NULL"),
+			CurrentMaterial.IsValid() ? *CurrentMaterial.Get()->GetName() : TEXT("NULL"),
+			(ComponentMaterial == CurrentMaterial.Get()) ? TEXT("YES") : TEXT("NO"));
+
 		// Create a dynamic material instance if we have a material but no dynamic instance yet
 		// This is required for the LUT texture to be passed to the material
 		if (CurrentMaterial.IsValid() && WorldComponent->GetMaterial(0) == CurrentMaterial.Get())
 		{
+			UE_LOG(LogVoxelRendering, Log, TEXT("  Creating dynamic material instance..."));
 			// Create dynamic instance from the current material
 			WorldComponent->CreateVoxelMaterialInstance(CurrentMaterial.Get());
 		}
-
-		WorldComponent->SetMaterialAtlas(Atlas);
+		else
+		{
+			UE_LOG(LogVoxelRendering, Warning, TEXT("  NOT creating dynamic material instance - condition failed"));
+		}
 	}
 }
 

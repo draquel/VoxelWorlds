@@ -484,19 +484,31 @@ void UVoxelWorldComponent::UpdateMaterialAtlasParameters()
 
 	// ===== Texture Array Parameters (Smooth Terrain) =====
 
+	// Build texture arrays if needed (similar to LUT)
+	if (MaterialAtlas->AreTextureArraysDirty() || !MaterialAtlas->AlbedoArray)
+	{
+		UE_LOG(LogVoxelRendering, Log, TEXT("Building Texture Arrays (Dirty=%s, AlbedoArray=%s)"),
+			MaterialAtlas->AreTextureArraysDirty() ? TEXT("Yes") : TEXT("No"),
+			MaterialAtlas->AlbedoArray ? TEXT("Exists") : TEXT("NULL"));
+		MaterialAtlas->BuildTextureArrays();
+	}
+
 	if (MaterialAtlas->AlbedoArray)
 	{
 		DynamicMaterialInstance->SetTextureParameterValue(FName("AlbedoArray"), MaterialAtlas->AlbedoArray);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set AlbedoArray texture parameter"));
 	}
 
 	if (MaterialAtlas->NormalArray)
 	{
 		DynamicMaterialInstance->SetTextureParameterValue(FName("NormalArray"), MaterialAtlas->NormalArray);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set NormalArray texture parameter"));
 	}
 
 	if (MaterialAtlas->RoughnessArray)
 	{
 		DynamicMaterialInstance->SetTextureParameterValue(FName("RoughnessArray"), MaterialAtlas->RoughnessArray);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set RoughnessArray texture parameter"));
 	}
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("UpdateMaterialAtlasParameters COMPLETE: Columns=%d, Rows=%d, SmoothMeshing=%s, LUT=%s, AlbedoAtlas=%s"),

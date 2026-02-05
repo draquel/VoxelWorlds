@@ -1,0 +1,236 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+// VoxelTriplanarCommon.ush - Triplanar mapping functions for smooth voxel terrain
+
+#pragma once
+
+// ============================================================================
+// Triplanar Blending Utilities
+// ============================================================================
+
+/**
+ * Calculate triplanar blend weights from world normal.
+ * Uses absolute normal components with contrast sharpening.
+ *
+ * @param WorldNormal - Normalized world-space normal
+ * @param Sharpness - Blending sharpness (1.0 = soft, 4.0+ = sharp transitions)
+ * @return Normalized blend weights for XY, XZ, YZ planes
+ */
+float3 GetTriplanarBlendWeights(float3 WorldNormal, float Sharpness)
+{
+    // Use absolute value of normal components
+    float3 Weights = abs(WorldNormal);
+
+    // Apply sharpness (power function for contrast)
+    Weights = pow(Weights, Sharpness);
+
+    // Normalize so weights sum to 1
+    float WeightSum = Weights.x + Weights.y + Weights.z;
+    Weights /= max(WeightSum, 0.0001);
+
+    return Weights;
+}
+
+/**
+ * Calculate triplanar UVs from world position.
+ *
+ * @param WorldPosition - World-space position
+ * @param Scale - UV tiling scale (higher = smaller textures)
+ * @return float3x2 containing UVs for X, Y, Z projections
+ *         [0] = X projection (YZ plane) - used when normal points along X
+ *         [1] = Y projection (XZ plane) - used when normal points along Y (top/bottom)
+ *         [2] = Z projection (XY plane) - used when normal points along Z
+ */
+void GetTriplanarUVs(float3 WorldPosition, float Scale, out float2 UV_X, out float2 UV_Y, out float2 UV_Z)
+{
+    // X projection: sample with YZ coordinates (for faces pointing along X axis)
+    UV_X = WorldPosition.yz * Scale;
+
+    // Y projection: sample with XZ coordinates (for top/bottom faces)
+    UV_Y = WorldPosition.xz * Scale;
+
+    // Z projection: sample with XY coordinates (for faces pointing along Z axis)
+    UV_Z = WorldPosition.xy * Scale;
+}
+
+/**
+ * Apply sign correction to triplanar UVs for consistent texture orientation.
+ * This prevents mirrored textures on opposite-facing surfaces.
+ *
+ * @param WorldNormal - World-space normal (determines facing direction)
+ * @param UV_X, UV_Y, UV_Z - Triplanar UVs to correct (modified in place)
+ */
+void CorrectTriplanarUVOrientation(float3 WorldNormal, inout float2 UV_X, inout float2 UV_Y, inout float2 UV_Z)
+{
+    // Flip U based on normal direction to prevent mirroring
+    UV_X.x *= sign(WorldNormal.x);
+    UV_Y.x *= sign(WorldNormal.y);
+    UV_Z.x *= sign(WorldNormal.z);
+}
+
+// ============================================================================
+// Material ID Access (from UV1)
+// ============================================================================
+
+/**
+ * Extract MaterialID from UV1.
+ * For smooth terrain, MaterialID is stored as a float in UV1.x.
+ * UV1.y is reserved (currently unused for smooth terrain).
+ *
+ * @param UV1 - Second texture coordinate (TexCoord[1] in material)
+ * @return MaterialID as integer (0-255)
+ */
+int GetSmoothMaterialID(float2 UV1)
+{
+    return (int)floor(UV1.x + 0.5);
+}
+
+// ============================================================================
+// Single Texture Triplanar Sampling
+// ============================================================================
+
+/**
+ * Sample a texture using triplanar projection.
+ *
+ * @param Tex - Texture to sample
+ * @param Samp - Sampler state
+ * @param WorldPosition - World-space position
+ * @param WorldNormal - World-space normal (normalized)
+ * @param Scale - UV tiling scale
+ * @param Sharpness - Blend sharpness (recommended: 2.0-4.0)
+ * @return Blended texture sample
+ */
+float4 SampleTriplanar(
+    Texture2D Tex, SamplerState Samp,
+    float3 WorldPosition, float3 WorldNormal,
+    float Scale, float Sharpness)
+{
+    // Calculate blend weights
+    float3 Weights = GetTriplanarBlendWeights(WorldNormal, Sharpness);
+
+    // Calculate UVs for each projection
+    float2 UV_X, UV_Y, UV_Z;
+    GetTriplanarUVs(WorldPosition, Scale, UV_X, UV_Y, UV_Z);
+    CorrectTriplanarUVOrientation(WorldNormal, UV_X, UV_Y, UV_Z);
+
+    // Sample texture from each projection
+    float4 Sample_X = Tex.Sample(Samp, UV_X);
+    float4 Sample_Y = Tex.Sample(Samp, UV_Y);
+    float4 Sample_Z = Tex.Sample(Samp, UV_Z);
+
+    // Blend based on weights
+    return Sample_X * Weights.x + Sample_Y * Weights.y + Sample_Z * Weights.z;
+}
+
+/**
+ * Sample a texture using triplanar projection with explicit mip level.
+ * Use this to avoid mip bleeding artifacts.
+ */
+float4 SampleTriplanarLevel(
+    Texture2D Tex, SamplerState Samp,
+    float3 WorldPosition, float3 WorldNormal,
+    float Scale, float Sharpness, float MipLevel)
+{
+    float3 Weights = GetTriplanarBlendWeights(WorldNormal, Sharpness);
+
+    float2 UV_X, UV_Y, UV_Z;
+    GetTriplanarUVs(WorldPosition, Scale, UV_X, UV_Y, UV_Z);
+    CorrectTriplanarUVOrientation(WorldNormal, UV_X, UV_Y, UV_Z);
+
+    float4 Sample_X = Tex.SampleLevel(Samp, UV_X, MipLevel);
+    float4 Sample_Y = Tex.SampleLevel(Samp, UV_Y, MipLevel);
+    float4 Sample_Z = Tex.SampleLevel(Samp, UV_Z, MipLevel);
+
+    return Sample_X * Weights.x + Sample_Y * Weights.y + Sample_Z * Weights.z;
+}
+
+// ============================================================================
+// Texture Array Triplanar Sampling
+// ============================================================================
+
+/**
+ * Sample a Texture2DArray using triplanar projection.
+ * Use this when materials are stored in a texture array indexed by MaterialID.
+ *
+ * @param TexArray - Texture2DArray to sample
+ * @param Samp - Sampler state
+ * @param WorldPosition - World-space position
+ * @param WorldNormal - World-space normal (normalized)
+ * @param ArrayIndex - Slice index in the texture array (typically MaterialID)
+ * @param Scale - UV tiling scale
+ * @param Sharpness - Blend sharpness
+ * @return Blended texture sample
+ */
+float4 SampleTriplanarArray(
+    Texture2DArray TexArray, SamplerState Samp,
+    float3 WorldPosition, float3 WorldNormal,
+    int ArrayIndex, float Scale, float Sharpness)
+{
+    float3 Weights = GetTriplanarBlendWeights(WorldNormal, Sharpness);
+
+    float2 UV_X, UV_Y, UV_Z;
+    GetTriplanarUVs(WorldPosition, Scale, UV_X, UV_Y, UV_Z);
+    CorrectTriplanarUVOrientation(WorldNormal, UV_X, UV_Y, UV_Z);
+
+    // Sample texture array with array index as Z coordinate
+    float4 Sample_X = TexArray.Sample(Samp, float3(UV_X, ArrayIndex));
+    float4 Sample_Y = TexArray.Sample(Samp, float3(UV_Y, ArrayIndex));
+    float4 Sample_Z = TexArray.Sample(Samp, float3(UV_Z, ArrayIndex));
+
+    return Sample_X * Weights.x + Sample_Y * Weights.y + Sample_Z * Weights.z;
+}
+
+// ============================================================================
+// Debug Visualization
+// ============================================================================
+
+/**
+ * Visualize triplanar blend weights as RGB color.
+ * Useful for debugging: Red=X, Green=Y, Blue=Z projection dominance.
+ */
+float3 DebugTriplanarWeights(float3 WorldNormal, float Sharpness)
+{
+    return GetTriplanarBlendWeights(WorldNormal, Sharpness);
+}
+
+/**
+ * Visualize MaterialID as a color.
+ * Uses a simple hash to generate distinct colors for different materials.
+ */
+float3 DebugMaterialColor(int MaterialID)
+{
+    // Simple color generation from material ID
+    float3 Color;
+    Color.r = frac(MaterialID * 0.381966);
+    Color.g = frac(MaterialID * 0.618034);
+    Color.b = frac(MaterialID * 0.127);
+    return Color;
+}
+
+// ============================================================================
+// Complete Smooth Terrain Sampling (Convenience Function)
+// ============================================================================
+
+/**
+ * Complete triplanar sampling for smooth voxel terrain using UV1 material data.
+ * This is the main entry point for smooth terrain materials.
+ *
+ * @param Tex - Diffuse/Albedo texture
+ * @param Samp - Sampler state
+ * @param WorldPosition - World-space position (from Absolute World Position node)
+ * @param WorldNormal - World-space normal (from VertexNormalWS or PixelNormalWS)
+ * @param MaterialUV - TexCoord[1] containing MaterialID in X component
+ * @param Scale - Base UV scale (will be multiplied by material's triplanar scale)
+ * @param Sharpness - Blend sharpness (2.0-4.0 recommended)
+ * @return Sampled and blended texture color
+ */
+float4 SampleSmoothTerrainTriplanar(
+    Texture2D Tex, SamplerState Samp,
+    float3 WorldPosition, float3 WorldNormal,
+    float2 MaterialUV, float Scale, float Sharpness)
+{
+    // MaterialID is in UV1.x (for future use with texture arrays or material lookup)
+    // int MaterialID = GetSmoothMaterialID(MaterialUV);
+
+    return SampleTriplanar(Tex, Samp, WorldPosition, WorldNormal, Scale, Sharpness);
+}
+
