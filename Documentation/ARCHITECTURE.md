@@ -429,27 +429,36 @@ Each biome defines:
 ### ChunkManager ↔ LODStrategy
 
 ```cpp
-// ChunkManager calls LODStrategy every frame
-void UVoxelChunkManager::Update(float DeltaTime) {
+// ChunkManager uses cached streaming decisions to avoid per-frame recalculation
+void UVoxelChunkManager::TickComponent(float DeltaTime) {
     FLODQueryContext Context = BuildQueryContext();
-    
-    // Update strategy state
+    FIntVector CurrentViewerChunk = WorldToChunkCoord(Context.ViewerPosition);
+
+    // Phase 2 Optimization: Only update streaming when viewer crosses chunk boundary
+    bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
+
+    // Always update LOD strategy for morph factor interpolation
     LODStrategy->Update(Context, DeltaTime);
-    
-    // Get streaming decisions
-    TArray<FChunkLODRequest> ToLoad;
-    TArray<FIntVector> ToUnload;
-    
-    LODStrategy->GetChunksToLoad(ToLoad, Context);
-    LODStrategy->GetChunksToUnload(ToUnload, Context);
-    
-    // Queue operations
-    for (const FChunkLODRequest& Request : ToLoad) {
-        RequestChunkGeneration(Request);
+
+    // Streaming decisions only when necessary
+    if (bForceStreamingUpdate || bViewerChunkChanged) {
+        TArray<FChunkLODRequest> ToLoad;
+        TArray<FIntVector> ToUnload;
+
+        LODStrategy->GetChunksToLoad(ToLoad, LoadedChunkCoords, Context);
+        LODStrategy->GetChunksToUnload(ToUnload, LoadedChunkCoords, Context);
+
+        // Queue operations with O(1) duplicate detection (Phase 1)
+        for (const FChunkLODRequest& Request : ToLoad) {
+            AddToGenerationQueue(Request);  // Uses TSet for dedup
+        }
+
+        CachedViewerChunk = CurrentViewerChunk;
     }
-    
-    for (const FIntVector& Coord : ToUnload) {
-        UnloadChunk(Coord);
+
+    // LOD transitions only when viewer moved significantly
+    if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq) {
+        UpdateLODTransitions(Context);
     }
 }
 ```
@@ -609,6 +618,25 @@ At player speed 1000 cm/s:
 5. **Collision Throttling**: Update less frequently than visuals
 6. **Frustum Culling**: Don't generate off-screen chunks
 7. **Chunk Pooling**: Reuse memory allocations
+
+### Streaming Optimizations (Phase 1 & 2)
+
+The streaming system has been optimized to eliminate per-frame overhead:
+
+**Phase 1: Queue Management**
+- O(1) duplicate detection using TSet tracking alongside queue arrays
+- Sorted insertion with `Algo::LowerBound()` instead of repeated Sort() calls
+- Per-frame queue growth limiting (2x processing rate cap)
+
+**Phase 2: Decision Caching**
+- `CachedViewerChunk`: Only recompute visible chunks when viewer crosses chunk boundary
+- `LastLODUpdatePosition`: Skip LOD morph factor updates when viewer moved < 100 units
+- `bForceStreamingUpdate`: Flag for manual refresh when needed
+
+**Future Phase 3: LOD Hysteresis** (if needed)
+- Buffer zone around LOD boundaries to prevent rapid back-and-forth remeshing
+- Separate thresholds for LOD upgrades vs downgrades
+- Would add ~50-100 units of hysteresis per LOD band boundary
 
 ---
 

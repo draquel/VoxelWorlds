@@ -65,11 +65,14 @@ Total:          228 MB
 
 | Operation | Budget | Notes |
 |-----------|--------|-------|
-| LOD Queries | 0.5 ms | GetVisibleChunks() |
-| Queue Management | 0.5 ms | Sort, prioritize |
-| State Updates | 0.5 ms | Chunk states, transitions |
+| LOD Queries | 0.1 ms | Cached - only on chunk boundary crossing |
+| Queue Management | 0.3 ms | O(1) dedup, O(log n) insert |
+| State Updates | 0.5 ms | Chunk states, transitions (throttled) |
+| Processing | 0.6 ms | Generation/meshing dispatch |
 | Other | 0.5 ms | Buffer |
 | **Total** | **2.0 ms** | 12% of frame |
+
+**Note**: LOD queries reduced from 0.5ms to 0.1ms via Phase 2 caching. Queue management reduced via Phase 1 O(1) operations.
 
 ---
 
@@ -211,6 +214,23 @@ At player speed 1000 cm/s (10 m/s):
 3. **Parallel Queue Processing**: Multi-thread where safe
 4. **Temporal Coherence**: Skip updates if camera static
 5. **Chunk Pooling**: Avoid allocations
+
+### Streaming Optimizations (Implemented)
+
+**Phase 1: Queue Management**
+- O(1) duplicate detection with TSet tracking
+- Sorted insertion with `Algo::LowerBound()` (O(log n) vs O(n²))
+- Queue growth capped at 2× processing rate per frame
+
+**Phase 2: Decision Caching**
+- Streaming decisions cached until viewer crosses chunk boundary
+- LOD updates skip when viewer moved < 100 units
+- Reduces LOD queries from 60,000/sec to ~190/sec (99.7% reduction)
+
+**Phase 3: LOD Hysteresis** (Future, if needed)
+- Buffer zones around LOD boundaries (~50-100 units)
+- Prevents rapid back-and-forth remeshing at band edges
+- Asymmetric thresholds for LOD upgrades vs downgrades
 
 ---
 

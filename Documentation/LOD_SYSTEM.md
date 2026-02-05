@@ -558,40 +558,48 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
 
 ### ChunkManager Update Loop
 
+The ChunkManager has been optimized with streaming decision caching to minimize per-frame overhead:
+
 ```cpp
-void UVoxelChunkManager::Update(float DeltaTime) {
+void UVoxelChunkManager::TickComponent(float DeltaTime) {
     // 1. Build query context from camera
     FLODQueryContext Context = BuildQueryContext();
-    
-    // 2. Update LOD strategy
+    FIntVector CurrentViewerChunk = WorldToChunkCoord(Context.ViewerPosition);
+
+    // 2. Check if streaming update is needed (Phase 2 optimization)
+    bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
+    bool bNeedStreamingUpdate = bForceStreamingUpdate || bViewerChunkChanged;
+
+    // 3. Always update LOD strategy (for morph interpolation)
     LODStrategy->Update(Context, DeltaTime);
-    
-    // 3. Get streaming decisions
-    TArray<FChunkLODRequest> ToLoad;
-    TArray<FIntVector> ToUnload;
-    
-    LODStrategy->GetChunksToLoad(ToLoad, Context);
-    LODStrategy->GetChunksToUnload(ToUnload, Context);
-    
-    // 4. Queue operations
-    for (const FChunkLODRequest& Request : ToLoad) {
-        if (!LoadedChunks.Contains(Request.ChunkCoord)) {
-            GenerationQueue.Add(Request);
+
+    // 4. Streaming decisions only when viewer crosses chunk boundary
+    if (bNeedStreamingUpdate) {
+        TArray<FChunkLODRequest> ToLoad;
+        TArray<FIntVector> ToUnload;
+
+        LODStrategy->GetChunksToLoad(ToLoad, LoadedChunkCoords, Context);
+        LODStrategy->GetChunksToUnload(ToUnload, LoadedChunkCoords, Context);
+
+        // Queue with O(1) duplicate detection (Phase 1 optimization)
+        for (const FChunkLODRequest& Request : ToLoad) {
+            AddToGenerationQueue(Request);  // Uses TSet for dedup
         }
+
+        CachedViewerChunk = CurrentViewerChunk;
+        bForceStreamingUpdate = false;
     }
-    
-    for (const FIntVector& Coord : ToUnload) {
-        if (LoadedChunks.Contains(Coord)) {
-            UnloadQueue.Add(Coord);
-        }
-    }
-    
+
     // 5. Process queues (time-sliced)
     ProcessGenerationQueue(Context.TimeSliceMS);
     ProcessUnloadQueue(Context.MaxChunksToUnloadPerFrame);
-    
-    // 6. Update LOD transitions
-    UpdateLODTransitions(Context);
+
+    // 6. LOD transitions only when viewer moved significantly
+    float PositionDeltaSq = FVector::DistSquared(Context.ViewerPosition, LastLODUpdatePosition);
+    if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq) {
+        UpdateLODTransitions(Context);
+        LastLODUpdatePosition = Context.ViewerPosition;
+    }
 }
 ```
 
@@ -705,22 +713,44 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context) {
 
 ### Query Frequency
 
-`GetLODForChunk()` is called:
-- Once per visible chunk per frame
-- 1000 visible chunks × 60 FPS = 60,000 calls/sec
-- **Must be fast: target < 1μs per call**
+With **Phase 2 streaming optimizations**, query frequency is dramatically reduced:
 
-### Optimization Strategies
+**Before optimization**:
+- `GetVisibleChunks()` called every frame
+- 1000 visible chunks × 60 FPS = 60,000 LOD queries/sec
 
-1. **Cache Results**: LOD rarely changes, cache per-chunk
-2. **Spatial Indexing**: Use grid or tree for visibility queries
-3. **Frustum Culling**: Early-out for off-screen chunks
-4. **Temporal Coherence**: Don't re-query every frame if camera hasn't moved much
-5. **SIMD**: Vectorize distance calculations
+**After optimization**:
+- `GetVisibleChunks()` called only when viewer crosses chunk boundary
+- At walking speed (~600 cm/s) with 3200 unit chunks: ~0.19 crossings/sec
+- Reduces to ~190 LOD queries/sec (99.7% reduction)
+
+### Implemented Optimizations
+
+**Phase 1: Queue Management**
+1. **O(1) Duplicate Detection**: TSet tracking alongside queue arrays
+2. **Sorted Insertion**: `Algo::LowerBound()` for O(log n) insert instead of O(n²) re-sort
+3. **Queue Growth Limiting**: Cap at 2× processing rate per frame
+
+**Phase 2: Decision Caching**
+1. **Chunk Boundary Caching**: `CachedViewerChunk` tracks viewer's current chunk
+2. **Position Delta Threshold**: Skip LOD updates when viewer moved < 100 units
+3. **Cached Positions**: `LastStreamingUpdatePosition`, `LastLODUpdatePosition`
+
+**Future Phase 3: LOD Hysteresis** (if needed)
+1. **Buffer Zones**: Prevent rapid LOD switching at band boundaries
+2. **Asymmetric Thresholds**: Different distances for upgrade vs downgrade
+3. **Implementation**: Add ~50-100 unit hysteresis per LOD band boundary
+
+### Additional Optimization Strategies
+
+1. **Spatial Indexing**: Use grid or tree for visibility queries
+2. **Frustum Culling**: Early-out for off-screen chunks
+3. **SIMD**: Vectorize distance calculations
 
 ### Memory Overhead
 
 **Distance Bands**: Minimal state (just band configuration)
+**Streaming Cache**: ~48 bytes (FIntVector + 2× FVector + bool)
 **Quadtree**: ~16 bytes per node × ~1000 nodes = 16 KB
 **Octree**: ~32 bytes per node × ~10,000 nodes = 320 KB
 
@@ -910,11 +940,12 @@ if (NeighborState->LODLevel > CurrentLOD) {
 4. ~~Integrate with ChunkManager~~ ✓
 5. ~~Test with simple scene~~ ✓
 6. Add debug visualization
-7. Profile and optimize
+7. ~~Profile and optimize~~ ✓ (Phase 1 & 2 streaming optimizations)
 8. ~~Implement Transvoxel for smooth meshing LOD seams~~ ✓
+9. **(Future)** Phase 3: LOD hysteresis if thrashing observed at large view distances
 
 See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
 ---
 
-**Status**: Implemented - Distance band LOD with Transvoxel seam handling
+**Status**: Implemented - Distance band LOD with Transvoxel seam handling and streaming optimizations

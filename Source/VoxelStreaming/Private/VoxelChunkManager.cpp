@@ -3,6 +3,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelStreaming.h"
 #include "VoxelWorldConfiguration.h"
+#include "Algo/BinarySearch.h"
 #include "VoxelCoordinates.h"
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
@@ -59,14 +60,36 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z);
 	}
 
-	// Update LOD strategy
+	// Calculate current viewer chunk coordinate
+	const FIntVector CurrentViewerChunk = WorldToChunkCoord(Context.ViewerPosition);
+
+	// Determine if we need to update streaming decisions
+	// Only update when:
+	// 1. Force flag is set
+	// 2. Viewer moved to a different chunk
+	// 3. This is the first update (CachedViewerChunk is at sentinel value)
+	const bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
+	const bool bNeedStreamingUpdate = bForceStreamingUpdate || bViewerChunkChanged;
+
+	// Update LOD strategy (always update for morph factor interpolation)
 	if (LODStrategy)
 	{
 		LODStrategy->Update(Context, DeltaTime);
 	}
 
-	// Update streaming decisions
-	UpdateStreamingDecisions(Context);
+	// Update streaming decisions only when necessary
+	if (bNeedStreamingUpdate)
+	{
+		UpdateStreamingDecisions(Context);
+		CachedViewerChunk = CurrentViewerChunk;
+		LastStreamingUpdatePosition = Context.ViewerPosition;
+		bForceStreamingUpdate = false;
+
+		// Debug: Log when streaming decisions are updated
+		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Streaming update: ViewerChunk=(%d,%d,%d), Forced=%s"),
+			CurrentViewerChunk.X, CurrentViewerChunk.Y, CurrentViewerChunk.Z,
+			bForceStreamingUpdate ? TEXT("Yes") : TEXT("No"));
+	}
 
 	// Process queues (time-sliced)
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
@@ -93,8 +116,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	const int32 MaxUnloadsPerFrame = Configuration ? Configuration->MaxChunksToUnloadPerFrame : 8;
 	ProcessUnloadQueue(MaxUnloadsPerFrame);
 
-	// Update LOD transitions
-	UpdateLODTransitions(Context);
+	// Update LOD transitions only if viewer moved significantly
+	// This reduces LOD morph factor calculations when stationary or moving slowly
+	const float PositionDeltaSq = FVector::DistSquared(Context.ViewerPosition, LastLODUpdatePosition);
+	if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq)
+	{
+		UpdateLODTransitions(Context);
+		LastLODUpdatePosition = Context.ViewerPosition;
+	}
 
 	// Flush all pending render operations as a single batched command
 	// This consolidates all chunk adds/removes into one render command per frame
@@ -127,19 +156,15 @@ void UVoxelChunkManager::Initialize(
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
 
-	// Disable LOD for cubic mode BEFORE initializing LOD strategy
-	// Cubic meshes cannot benefit from:
-	// - Stride-based simplification (greedy meshing handles optimization)
-	// - Vertex morphing (hard-edged quads cannot interpolate)
-	// This avoids unnecessary LOD distance calculations and morph factor updates
-	if (Configuration->MeshingMode == EMeshingMode::Cubic && Configuration->bEnableLOD)
+	// Disable LOD morphing for cubic mode - vertices cannot interpolate with hard edges
+	// LOD bands and levels still apply (for distance-based loading and potential stride use)
+	if (Configuration->MeshingMode == EMeshingMode::Cubic && Configuration->bEnableLODMorphing)
 	{
-		Configuration->bEnableLOD = false;
 		Configuration->bEnableLODMorphing = false;
-		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD automatically disabled for cubic meshing mode (greedy meshing provides optimization)"));
+		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD morphing disabled for cubic mode (hard-edged vertices cannot interpolate)"));
 	}
 
-	// Initialize LOD strategy (will use the potentially-modified bEnableLOD setting)
+	// Initialize LOD strategy
 	if (LODStrategy)
 	{
 		LODStrategy->Initialize(Configuration);
@@ -149,14 +174,23 @@ void UVoxelChunkManager::Initialize(
 	ChunkStates.Empty();
 	LoadedChunkCoords.Empty();
 	GenerationQueue.Empty();
+	GenerationQueueSet.Empty();
 	MeshingQueue.Empty();
+	MeshingQueueSet.Empty();
 	UnloadQueue.Empty();
+	UnloadQueueSet.Empty();
 
 	// Reset statistics
 	TotalChunksGenerated = 0;
 	TotalChunksMeshed = 0;
 	TotalChunksUnloaded = 0;
 	CurrentFrame = 0;
+
+	// Reset streaming decision caching (sentinel values force update on first tick)
+	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
+	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
+	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
+	bForceStreamingUpdate = false;
 
 	// Create generation components
 	FWorldModeTerrainParams TerrainParams;
@@ -240,8 +274,17 @@ void UVoxelChunkManager::Shutdown()
 	ChunkStates.Empty();
 	LoadedChunkCoords.Empty();
 	GenerationQueue.Empty();
+	GenerationQueueSet.Empty();
 	MeshingQueue.Empty();
+	MeshingQueueSet.Empty();
 	UnloadQueue.Empty();
+	UnloadQueueSet.Empty();
+
+	// Reset streaming decision caching
+	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
+	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
+	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
+	bForceStreamingUpdate = false;
 
 	// Clean up LOD strategy (we own it)
 	if (LODStrategy)
@@ -301,14 +344,11 @@ void UVoxelChunkManager::ForceStreamingUpdate()
 		return;
 	}
 
-	FLODQueryContext Context = BuildQueryContext();
+	// Set the force flag - TickComponent will handle the actual update
+	// This ensures updates happen at the proper point in the frame sequence
+	bForceStreamingUpdate = true;
 
-	if (LODStrategy)
-	{
-		LODStrategy->Update(Context, 0.0f);
-	}
-
-	UpdateStreamingDecisions(Context);
+	UE_LOG(LogVoxelStreaming, Log, TEXT("Force streaming update requested"));
 }
 
 // ==================== Chunk Requests ====================
@@ -324,19 +364,19 @@ void UVoxelChunkManager::RequestChunkLoad(const FIntVector& ChunkCoord, float Pr
 
 	if (State.State == EChunkState::Unloaded)
 	{
-		// Add to generation queue
+		// Add to generation queue with sorted insertion
 		FChunkLODRequest Request;
 		Request.ChunkCoord = ChunkCoord;
 		Request.LODLevel = 0; // Will be determined by LOD strategy
 		Request.Priority = Priority;
 
-		GenerationQueue.Add(Request);
-		GenerationQueue.Sort();
+		if (AddToGenerationQueue(Request))
+		{
+			SetChunkState(ChunkCoord, EChunkState::PendingGeneration);
 
-		SetChunkState(ChunkCoord, EChunkState::PendingGeneration);
-
-		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for loading"),
-			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for loading"),
+				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+		}
 	}
 }
 
@@ -353,11 +393,13 @@ void UVoxelChunkManager::RequestChunkUnload(const FIntVector& ChunkCoord)
 
 		if (CurrentState != EChunkState::Unloaded && CurrentState != EChunkState::PendingUnload)
 		{
-			UnloadQueue.Add(ChunkCoord);
-			SetChunkState(ChunkCoord, EChunkState::PendingUnload);
+			if (AddToUnloadQueue(ChunkCoord))
+			{
+				SetChunkState(ChunkCoord, EChunkState::PendingUnload);
 
-			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for unloading"),
-				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for unloading"),
+					ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+			}
 		}
 	}
 }
@@ -375,16 +417,16 @@ void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 		{
 			State->Descriptor.bIsDirty = true;
 
-			// Add to meshing queue for remeshing
+			// Add to meshing queue for remeshing with sorted insertion
 			FChunkLODRequest Request;
 			Request.ChunkCoord = ChunkCoord;
 			Request.LODLevel = State->LODLevel;
 			Request.Priority = 100.0f; // High priority for dirty chunks
 
-			MeshingQueue.Add(Request);
-			MeshingQueue.Sort();
-
-			SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
+			if (AddToMeshingQueue(Request))
+			{
+				SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
+			}
 		}
 	}
 }
@@ -660,18 +702,29 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 	TArray<FChunkLODRequest> ChunksToLoad;
 	LODStrategy->GetChunksToLoad(ChunksToLoad, LoadedChunkCoords, Context);
 
+	// Limit how many chunks we add per frame to prevent queue explosion
+	// Cap at 2x the processing rate to allow queue to stabilize
+	const int32 MaxChunksToAddPerFrame = Configuration->MaxChunksToLoadPerFrame * 2;
+	int32 ChunksAddedThisFrame = 0;
+
 	// Debug: Log streaming decisions periodically
 	static int32 DebugFrameCounter = 0;
 	if (++DebugFrameCounter % 60 == 0)
 	{
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Streaming: Viewer at (%.0f, %.0f, %.0f), ChunksToLoad=%d, Loaded=%d, GenQueue=%d"),
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Streaming: Viewer at (%.0f, %.0f, %.0f), ChunksToLoad=%d, Loaded=%d, GenQueue=%d, MeshQueue=%d"),
 			Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z,
-			ChunksToLoad.Num(), LoadedChunkCoords.Num(), GenerationQueue.Num());
+			ChunksToLoad.Num(), LoadedChunkCoords.Num(), GenerationQueue.Num(), MeshingQueue.Num());
 	}
 
-	// Add to generation queue (avoiding duplicates)
+	// Add to generation queue with sorted insertion (O(1) duplicate check, O(log n) insert)
 	for (const FChunkLODRequest& Request : ChunksToLoad)
 	{
+		// Respect per-frame limit to prevent unbounded queue growth
+		if (ChunksAddedThisFrame >= MaxChunksToAddPerFrame)
+		{
+			break;
+		}
+
 		const EChunkState CurrentState = GetChunkState(Request.ChunkCoord);
 
 		if (CurrentState == EChunkState::Unloaded)
@@ -680,27 +733,29 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 			State.LODLevel = Request.LODLevel;
 			State.Priority = Request.Priority;
 
-			GenerationQueue.Add(Request);
-			SetChunkState(Request.ChunkCoord, EChunkState::PendingGeneration);
+			if (AddToGenerationQueue(Request))
+			{
+				SetChunkState(Request.ChunkCoord, EChunkState::PendingGeneration);
+				++ChunksAddedThisFrame;
+			}
 		}
 	}
-
-	// Sort generation queue by priority
-	GenerationQueue.Sort();
 
 	// Get chunks to unload
 	TArray<FIntVector> ChunksToUnload;
 	LODStrategy->GetChunksToUnload(ChunksToUnload, LoadedChunkCoords, Context);
 
-	// Add to unload queue
+	// Add to unload queue with O(1) duplicate check
 	for (const FIntVector& ChunkCoord : ChunksToUnload)
 	{
 		const EChunkState CurrentState = GetChunkState(ChunkCoord);
 
 		if (CurrentState == EChunkState::Loaded)
 		{
-			UnloadQueue.Add(ChunkCoord);
-			SetChunkState(ChunkCoord, EChunkState::PendingUnload);
+			if (AddToUnloadQueue(ChunkCoord))
+			{
+				SetChunkState(ChunkCoord, EChunkState::PendingUnload);
+			}
 		}
 	}
 }
@@ -725,9 +780,10 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 			break;
 		}
 
-		// Get highest priority chunk
+		// Get highest priority chunk and remove from queue and tracking set
 		FChunkLODRequest Request = GenerationQueue[0];
 		GenerationQueue.RemoveAt(0);
+		GenerationQueueSet.Remove(Request.ChunkCoord);
 
 		// Skip if state changed
 		if (GetChunkState(Request.ChunkCoord) != EChunkState::PendingGeneration)
@@ -808,9 +864,10 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			break;
 		}
 
-		// Get highest priority chunk
+		// Get highest priority chunk and remove from queue and tracking set
 		FChunkLODRequest Request = MeshingQueue[0];
 		MeshingQueue.RemoveAt(0);
+		MeshingQueueSet.Remove(Request.ChunkCoord);
 
 		// Skip if state changed
 		if (GetChunkState(Request.ChunkCoord) != EChunkState::PendingMeshing)
@@ -998,8 +1055,10 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 
 	while (UnloadQueue.Num() > 0 && ProcessedCount < MaxChunks)
 	{
+		// Remove from queue and tracking set
 		FIntVector ChunkCoord = UnloadQueue[0];
 		UnloadQueue.RemoveAt(0);
+		UnloadQueueSet.Remove(ChunkCoord);
 
 		// Skip if state changed
 		if (GetChunkState(ChunkCoord) != EChunkState::PendingUnload)
@@ -1037,11 +1096,14 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 		return;
 	}
 
-	// Skip LOD transition processing when LOD is disabled (e.g., cubic mode)
+	// Skip LOD transition processing when LOD system is completely disabled
 	if (Configuration && !Configuration->bEnableLOD)
 	{
 		return;
 	}
+
+	// Note: For cubic mode, bEnableLOD is true but bEnableLODMorphing is false.
+	// LOD level changes still trigger remeshing, but morph factors stay at 0.
 
 	// Throttle LOD remeshing to prevent overwhelming the render system
 	// Keep this low to avoid Non-Nanite job queue overflow
@@ -1144,22 +1206,11 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 				// Higher priority for upgrades and closer chunks
 				Request.Priority = (Candidate.bIsUpgrade ? 100.0f : 50.0f) + (10000.0f / FMath::Max(Candidate.Distance, 1.0f));
 
-				// Check if not already in meshing queue
-				bool bAlreadyQueued = false;
-				for (const FChunkLODRequest& Existing : MeshingQueue)
-				{
-					if (Existing.ChunkCoord == Candidate.ChunkCoord)
-					{
-						bAlreadyQueued = true;
-						break;
-					}
-				}
-
-				if (!bAlreadyQueued)
+				// O(1) duplicate check + sorted insertion
+				if (AddToMeshingQueue(Request))
 				{
 					// IMPORTANT: Set state to PendingMeshing so ProcessMeshingQueue will process it
 					SetChunkState(Candidate.ChunkCoord, EChunkState::PendingMeshing);
-					MeshingQueue.Add(Request);
 					++QueuedThisFrame;
 
 					UE_LOG(LogVoxelStreaming, Verbose, TEXT("Queued chunk (%d,%d,%d) for LOD %s: %d (dist=%.0f)"),
@@ -1171,11 +1222,9 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 		}
 	}
 
-	// Sort meshing queue by priority if we added new items
+	// Log if we queued any LOD transitions
 	if (QueuedThisFrame > 0)
 	{
-		MeshingQueue.Sort();
-
 		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD transitions: %d candidates, queued %d this frame (pending: %d)"),
 			RemeshCandidates.Num(), QueuedThisFrame, CurrentPendingRemesh + QueuedThisFrame);
 	}
@@ -1228,15 +1277,13 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 
 	++TotalChunksGenerated;
 
-	// Queue for meshing
+	// Queue for meshing with sorted insertion
 	FChunkLODRequest Request;
 	Request.ChunkCoord = ChunkCoord;
 	Request.LODLevel = State->LODLevel;
 	Request.Priority = State->Priority;
 
-	MeshingQueue.Add(Request);
-	MeshingQueue.Sort();
-
+	AddToMeshingQueue(Request);
 	SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
 
 	// Queue neighbors for remeshing so they can incorporate this chunk's edge data
@@ -1338,20 +1385,9 @@ void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
 			Request.LODLevel = NeighborState->LODLevel;
 			Request.Priority = NeighborState->Priority * 0.5f; // Lower priority than new chunks
 
-			// Check if not already in meshing queue
-			bool bAlreadyQueued = false;
-			for (const FChunkLODRequest& Existing : MeshingQueue)
+			// O(1) duplicate check + sorted insertion
+			if (AddToMeshingQueue(Request))
 			{
-				if (Existing.ChunkCoord == NeighborCoord)
-				{
-					bAlreadyQueued = true;
-					break;
-				}
-			}
-
-			if (!bAlreadyQueued)
-			{
-				MeshingQueue.Add(Request);
 				SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
 
 				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) queued for remesh (neighbor of %d, %d, %d)"),
@@ -1360,9 +1396,6 @@ void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
 			}
 		}
 	}
-
-	// Re-sort the meshing queue after adding potential remesh requests
-	MeshingQueue.Sort();
 }
 
 void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest)
@@ -1672,4 +1705,99 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 		OutRequest.CornerXNegYNegZNeg = (*Voxels)[GetIndex(ChunkSize - 1, ChunkSize - 1, ChunkSize - 1)];
 		OutRequest.EdgeCornerFlags |= FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZNEG;
 	}
+}
+
+// ==================== Queue Management ====================
+
+bool UVoxelChunkManager::AddToGenerationQueue(const FChunkLODRequest& Request)
+{
+	// O(1) duplicate check
+	if (GenerationQueueSet.Contains(Request.ChunkCoord))
+	{
+		return false;
+	}
+
+	// Add to tracking set
+	GenerationQueueSet.Add(Request.ChunkCoord);
+
+	// Binary search for sorted insertion (highest priority first)
+	// FChunkLODRequest::operator< returns true if this.Priority > Other.Priority
+	int32 InsertIndex = Algo::LowerBound(GenerationQueue, Request);
+	GenerationQueue.Insert(Request, InsertIndex);
+
+	return true;
+}
+
+bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request)
+{
+	// O(1) duplicate check
+	if (MeshingQueueSet.Contains(Request.ChunkCoord))
+	{
+		return false;
+	}
+
+	// Add to tracking set
+	MeshingQueueSet.Add(Request.ChunkCoord);
+
+	// Binary search for sorted insertion (highest priority first)
+	int32 InsertIndex = Algo::LowerBound(MeshingQueue, Request);
+	MeshingQueue.Insert(Request, InsertIndex);
+
+	return true;
+}
+
+bool UVoxelChunkManager::AddToUnloadQueue(const FIntVector& ChunkCoord)
+{
+	// O(1) duplicate check
+	if (UnloadQueueSet.Contains(ChunkCoord))
+	{
+		return false;
+	}
+
+	// Add to tracking set and queue
+	UnloadQueueSet.Add(ChunkCoord);
+	UnloadQueue.Add(ChunkCoord);
+
+	return true;
+}
+
+void UVoxelChunkManager::RemoveFromGenerationQueue(const FIntVector& ChunkCoord)
+{
+	// Remove from tracking set
+	GenerationQueueSet.Remove(ChunkCoord);
+
+	// Remove from queue (linear search, but only called when processing)
+	for (int32 i = 0; i < GenerationQueue.Num(); ++i)
+	{
+		if (GenerationQueue[i].ChunkCoord == ChunkCoord)
+		{
+			GenerationQueue.RemoveAt(i);
+			return;
+		}
+	}
+}
+
+void UVoxelChunkManager::RemoveFromMeshingQueue(const FIntVector& ChunkCoord)
+{
+	// Remove from tracking set
+	MeshingQueueSet.Remove(ChunkCoord);
+
+	// Remove from queue (linear search, but only called when processing)
+	for (int32 i = 0; i < MeshingQueue.Num(); ++i)
+	{
+		if (MeshingQueue[i].ChunkCoord == ChunkCoord)
+		{
+			MeshingQueue.RemoveAt(i);
+			return;
+		}
+	}
+}
+
+void UVoxelChunkManager::RemoveFromUnloadQueue(const FIntVector& ChunkCoord)
+{
+	// Remove from tracking set
+	UnloadQueueSet.Remove(ChunkCoord);
+
+	// Remove from queue
+	UnloadQueue.Remove(ChunkCoord);
 }

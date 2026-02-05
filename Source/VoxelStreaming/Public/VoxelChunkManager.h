@@ -397,6 +397,56 @@ protected:
 	 */
 	void ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest);
 
+	// ==================== Queue Management ====================
+
+	/**
+	 * Add a chunk to the generation queue with sorted insertion.
+	 * Uses O(1) set lookup for duplicate detection, O(log n) binary search for insertion.
+	 *
+	 * @param Request The chunk request to add
+	 * @return True if added, false if already in queue
+	 */
+	bool AddToGenerationQueue(const FChunkLODRequest& Request);
+
+	/**
+	 * Add a chunk to the meshing queue with sorted insertion.
+	 * Uses O(1) set lookup for duplicate detection, O(log n) binary search for insertion.
+	 *
+	 * @param Request The chunk request to add
+	 * @return True if added, false if already in queue
+	 */
+	bool AddToMeshingQueue(const FChunkLODRequest& Request);
+
+	/**
+	 * Add a chunk to the unload queue.
+	 * Uses O(1) set lookup for duplicate detection.
+	 *
+	 * @param ChunkCoord The chunk coordinate to add
+	 * @return True if added, false if already in queue
+	 */
+	bool AddToUnloadQueue(const FIntVector& ChunkCoord);
+
+	/**
+	 * Remove a chunk from the generation queue.
+	 *
+	 * @param ChunkCoord The chunk coordinate to remove
+	 */
+	void RemoveFromGenerationQueue(const FIntVector& ChunkCoord);
+
+	/**
+	 * Remove a chunk from the meshing queue.
+	 *
+	 * @param ChunkCoord The chunk coordinate to remove
+	 */
+	void RemoveFromMeshingQueue(const FIntVector& ChunkCoord);
+
+	/**
+	 * Remove a chunk from the unload queue.
+	 *
+	 * @param ChunkCoord The chunk coordinate to remove
+	 */
+	void RemoveFromUnloadQueue(const FIntVector& ChunkCoord);
+
 protected:
 	// ==================== Configuration ====================
 
@@ -427,14 +477,23 @@ protected:
 
 	// ==================== Processing Queues ====================
 
-	/** Chunks waiting to be generated (sorted by priority) */
+	/** Chunks waiting to be generated (sorted by priority, highest first) */
 	TArray<FChunkLODRequest> GenerationQueue;
 
-	/** Chunks waiting to be meshed (sorted by priority) */
+	/** Set of chunk coords in GenerationQueue for O(1) duplicate detection */
+	TSet<FIntVector> GenerationQueueSet;
+
+	/** Chunks waiting to be meshed (sorted by priority, highest first) */
 	TArray<FChunkLODRequest> MeshingQueue;
+
+	/** Set of chunk coords in MeshingQueue for O(1) duplicate detection */
+	TSet<FIntVector> MeshingQueueSet;
 
 	/** Chunks waiting to be unloaded */
 	TArray<FIntVector> UnloadQueue;
+
+	/** Set of chunk coords in UnloadQueue for O(1) duplicate detection */
+	TSet<FIntVector> UnloadQueueSet;
 
 	// ==================== Runtime State ====================
 
@@ -446,6 +505,38 @@ protected:
 
 	/** Cached viewer forward direction */
 	FVector CachedViewerForward = FVector::ForwardVector;
+
+	// ==================== Streaming Decision Caching ====================
+
+	/**
+	 * Cached viewer chunk coordinate - only recompute visible chunks when viewer moves to a new chunk.
+	 * This dramatically reduces LOD strategy calls from every frame to only on chunk boundary crossings.
+	 */
+	FIntVector CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
+
+	/**
+	 * Last position where streaming decisions were updated.
+	 * Used to skip redundant streaming updates when viewer hasn't moved significantly.
+	 */
+	FVector LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
+
+	/**
+	 * Last position where LOD transitions were updated.
+	 * LOD updates are more sensitive to position changes than streaming decisions.
+	 */
+	FVector LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
+
+	/**
+	 * Flag to force streaming update on next tick.
+	 * Set by ForceStreamingUpdate(), cleared after use.
+	 */
+	bool bForceStreamingUpdate = false;
+
+	/**
+	 * Threshold for LOD update position delta (squared for efficient comparison).
+	 * LOD morph factors should update when viewer moves ~100 units.
+	 */
+	static constexpr float LODUpdateThresholdSq = 100.0f * 100.0f;  // 100 units
 
 	// ==================== Statistics ====================
 
