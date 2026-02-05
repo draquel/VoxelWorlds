@@ -199,7 +199,34 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 	{
 		// Use PMC fallback renderer
 		FVoxelPMCRenderer* PMCRenderer = new FVoxelPMCRenderer();
+
+		// Set material BEFORE Initialize (similar to CustomVF path)
+		if (VoxelMaterial)
+		{
+			PMCRenderer->SetMaterial(VoxelMaterial);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: PMC using material '%s'"), *VoxelMaterial->GetName());
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning,
+				TEXT("VoxelWorldTestActor: No VoxelMaterial assigned for PMC renderer. Using default vertex color material."));
+		}
+
 		PMCRenderer->Initialize(World, Config);
+
+		// Configure material atlas for face variants and texture lookup
+		if (MaterialAtlas)
+		{
+			PMCRenderer->SetMaterialAtlas(MaterialAtlas);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: PMC material atlas configured with %d materials"),
+				MaterialAtlas->GetMaterialCount());
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No Material Atlas assigned for PMC. ")
+				TEXT("Face variants and LUT-based texture lookup disabled."));
+		}
+
 		MeshRenderer = PMCRenderer;
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using PMC renderer (CPU fallback)"));
 	}

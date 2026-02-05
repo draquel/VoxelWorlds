@@ -3,10 +3,15 @@
 #include "VoxelPMCRenderer.h"
 #include "VoxelRendering.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelMaterialAtlas.h"
+#include "VoxelMaterialRegistry.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "Engine/World.h"
+#include "Engine/Texture2D.h"
+#include "Engine/Texture2DArray.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialExpressionVertexColor.h"
 #include "Materials/MaterialExpressionConstant.h"
 
@@ -68,6 +73,12 @@ void FVoxelPMCRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguration
 	ContainerActor->SetActorLabel(TEXT("VoxelPMCContainer"));
 #endif
 
+	// Sync material mode with configuration's meshing mode
+	bUseSmoothMeshing = (WorldConfig->MeshingMode == EMeshingMode::Smooth);
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: MeshingMode=%s, bUseSmoothMeshing=%s"),
+		bUseSmoothMeshing ? TEXT("Smooth") : TEXT("Cubic"),
+		bUseSmoothMeshing ? TEXT("true") : TEXT("false"));
+
 	// Create default vertex color material if none specified
 	if (!CurrentMaterial.IsValid())
 	{
@@ -103,6 +114,8 @@ void FVoxelPMCRenderer::Shutdown()
 	CachedWorld.Reset();
 	CachedConfig.Reset();
 	CurrentMaterial.Reset();
+	DynamicMaterialInstance.Reset();
+	MaterialAtlas.Reset();
 
 	bIsInitialized = false;
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer shutdown"));
@@ -148,11 +161,12 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 	TArray<FVector> Vertices;
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
-	TArray<FVector2D> UVs;
-	TArray<FLinearColor> Colors;
+	TArray<FVector2D> UV0;
+	TArray<FVector2D> UV1;
+	TArray<FColor> Colors;
 	TArray<FProcMeshTangent> Tangents;
 
-	ConvertMeshDataToPMCFormat(MeshData, Vertices, Triangles, Normals, UVs, Colors, Tangents);
+	ConvertMeshDataToPMCFormat(MeshData, Vertices, Triangles, Normals, UV0, UV1, Colors, Tangents);
 
 	// Acquire or reuse a component
 	UProceduralMeshComponent* PMC = nullptr;
@@ -177,13 +191,19 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 		}
 	}
 
-	// Create the mesh section
-	PMC->CreateMeshSection_LinearColor(
+	// Create the mesh section using multi-UV API for MaterialID support
+	// UV0 = texture tiling coordinates
+	// UV1 = material data (UV1.x = MaterialID, UV1.y = FaceType)
+	TArray<FVector2D> EmptyUV;  // UV2 and UV3 not used
+	PMC->CreateMeshSection(
 		0,              // Section index (one section per chunk)
 		Vertices,
 		Triangles,
 		Normals,
-		UVs,
+		UV0,
+		UV1,
+		EmptyUV,        // UV2
+		EmptyUV,        // UV3
 		Colors,
 		Tangents,
 		bGenerateCollision
@@ -289,6 +309,10 @@ void FVoxelPMCRenderer::SetMaterial(UMaterialInterface* Material)
 
 	CurrentMaterial = Material;
 
+	// Clear dynamic instance when base material changes
+	// A new instance will be created when SetMaterialAtlas is called
+	DynamicMaterialInstance.Reset();
+
 	// Apply to all existing chunks
 	for (auto& Pair : ChunkDataMap)
 	{
@@ -306,7 +330,45 @@ UMaterialInterface* FVoxelPMCRenderer::GetMaterial() const
 
 void FVoxelPMCRenderer::UpdateMaterialParameters()
 {
-	// No-op for PMC - material parameters update automatically through UMaterialInstanceDynamic
+	// Update atlas parameters if we have a dynamic instance
+	UpdateMaterialAtlasParameters();
+}
+
+void FVoxelPMCRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
+{
+	check(IsInGameThread());
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer::SetMaterialAtlas called - CurrentMaterial: %s, Atlas: %s"),
+		CurrentMaterial.IsValid() ? *CurrentMaterial->GetName() : TEXT("NULL"),
+		Atlas ? *Atlas->GetName() : TEXT("NULL"));
+
+	MaterialAtlas = Atlas;
+
+	if (MaterialAtlas.IsValid())
+	{
+		// Update registry with atlas positions
+		FVoxelMaterialRegistry::SetAtlasPositions(
+			MaterialAtlas->MaterialConfigs,
+			MaterialAtlas->AtlasColumns,
+			MaterialAtlas->AtlasRows);
+
+		// Create a dynamic material instance if we have a material but no dynamic instance yet
+		if (CurrentMaterial.IsValid() && !DynamicMaterialInstance.IsValid())
+		{
+			UE_LOG(LogVoxelRendering, Log, TEXT("  Creating dynamic material instance..."));
+			CreateVoxelMaterialInstance(CurrentMaterial.Get());
+		}
+		else
+		{
+			// Just update parameters on existing instance
+			UpdateMaterialAtlasParameters();
+		}
+	}
+}
+
+UVoxelMaterialAtlas* FVoxelPMCRenderer::GetMaterialAtlas() const
+{
+	return MaterialAtlas.Get();
 }
 
 // ==================== LOD Transitions ====================
@@ -393,13 +455,17 @@ FString FVoxelPMCRenderer::GetDebugStats() const
 		TEXT("  Triangles: %lld\n")
 		TEXT("  Memory: %.2f MB\n")
 		TEXT("  Pool Size: %d\n")
-		TEXT("  Collision: %s"),
+		TEXT("  Collision: %s\n")
+		TEXT("  MeshingMode: %s\n")
+		TEXT("  MaterialAtlas: %s"),
 		ChunkDataMap.Num(),
 		TotalVertexCount,
 		TotalTriangleCount,
 		TotalMemoryUsage / (1024.0 * 1024.0),
 		ComponentPool.Num(),
-		bGenerateCollision ? TEXT("Enabled") : TEXT("Disabled")
+		bGenerateCollision ? TEXT("Enabled") : TEXT("Disabled"),
+		bUseSmoothMeshing ? TEXT("Smooth") : TEXT("Cubic"),
+		MaterialAtlas.IsValid() ? *MaterialAtlas->GetName() : TEXT("None")
 	);
 }
 
@@ -491,8 +557,9 @@ void FVoxelPMCRenderer::ConvertMeshDataToPMCFormat(
 	TArray<FVector>& OutVertices,
 	TArray<int32>& OutTriangles,
 	TArray<FVector>& OutNormals,
-	TArray<FVector2D>& OutUVs,
-	TArray<FLinearColor>& OutColors,
+	TArray<FVector2D>& OutUV0,
+	TArray<FVector2D>& OutUV1,
+	TArray<FColor>& OutColors,
 	TArray<FProcMeshTangent>& OutTangents)
 {
 	const int32 VertexCount = MeshData.Positions.Num();
@@ -501,7 +568,8 @@ void FVoxelPMCRenderer::ConvertMeshDataToPMCFormat(
 	// Pre-allocate arrays
 	OutVertices.SetNumUninitialized(VertexCount);
 	OutNormals.SetNumUninitialized(VertexCount);
-	OutUVs.SetNumUninitialized(VertexCount);
+	OutUV0.SetNumUninitialized(VertexCount);
+	OutUV1.SetNumUninitialized(VertexCount);
 	OutTangents.SetNumUninitialized(VertexCount);
 	OutTriangles.SetNumUninitialized(IndexCount);
 
@@ -528,12 +596,12 @@ void FVoxelPMCRenderer::ConvertMeshDataToPMCFormat(
 		}
 	}
 
-	// Convert UVs: FVector2f -> FVector2D
+	// Convert UV0 (texture tiling): FVector2f -> FVector2D
 	if (MeshData.UVs.Num() == VertexCount)
 	{
 		for (int32 i = 0; i < VertexCount; ++i)
 		{
-			OutUVs[i] = FVector2D(MeshData.UVs[i]);
+			OutUV0[i] = FVector2D(MeshData.UVs[i]);
 		}
 	}
 	else
@@ -541,17 +609,36 @@ void FVoxelPMCRenderer::ConvertMeshDataToPMCFormat(
 		// Default UVs if not provided
 		for (int32 i = 0; i < VertexCount; ++i)
 		{
-			OutUVs[i] = FVector2D::ZeroVector;
+			OutUV0[i] = FVector2D::ZeroVector;
 		}
 	}
 
-	// Convert colors: FColor -> FLinearColor
+	// Convert UV1 (MaterialID + FaceType): FVector2f -> FVector2D
+	// UV1.x = MaterialID as float (0-255)
+	// UV1.y = FaceType as float (0=Top, 1=Side, 2=Bottom)
+	if (MeshData.UV1s.Num() == VertexCount)
+	{
+		for (int32 i = 0; i < VertexCount; ++i)
+		{
+			OutUV1[i] = FVector2D(MeshData.UV1s[i]);
+		}
+	}
+	else
+	{
+		// Default UV1 if not provided (MaterialID 0, FaceType Side)
+		for (int32 i = 0; i < VertexCount; ++i)
+		{
+			OutUV1[i] = FVector2D(0.0, 1.0);
+		}
+	}
+
+	// Copy colors directly (FColor -> FColor, no conversion needed)
 	if (MeshData.Colors.Num() == VertexCount)
 	{
 		OutColors.SetNumUninitialized(VertexCount);
 		for (int32 i = 0; i < VertexCount; ++i)
 		{
-			OutColors[i] = FLinearColor(MeshData.Colors[i]);
+			OutColors[i] = MeshData.Colors[i];
 		}
 	}
 	else
@@ -560,7 +647,7 @@ void FVoxelPMCRenderer::ConvertMeshDataToPMCFormat(
 		OutColors.SetNumUninitialized(VertexCount);
 		for (int32 i = 0; i < VertexCount; ++i)
 		{
-			OutColors[i] = FLinearColor::White;
+			OutColors[i] = FColor::White;
 		}
 	}
 
@@ -642,4 +729,150 @@ void FVoxelPMCRenderer::CreateDefaultVertexColorMaterial()
 	UE_LOG(LogVoxelRendering, Warning,
 		TEXT("FVoxelPMCRenderer: No material set. In packaged builds, you must provide a vertex color material via SetMaterial() or VoxelWorldConfiguration."));
 #endif
+}
+
+UMaterialInstanceDynamic* FVoxelPMCRenderer::CreateVoxelMaterialInstance(UMaterialInterface* MasterMaterial)
+{
+	if (!MasterMaterial)
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelPMCRenderer::CreateVoxelMaterialInstance: MasterMaterial is null"));
+		return nullptr;
+	}
+
+	// Create dynamic material instance
+	UMaterialInstanceDynamic* NewInstance = UMaterialInstanceDynamic::Create(MasterMaterial, GetTransientPackage());
+
+	if (NewInstance)
+	{
+		DynamicMaterialInstance.Reset(NewInstance);
+
+		// Update the current material reference
+		CurrentMaterial = NewInstance;
+
+		// Apply to all existing chunks
+		for (auto& Pair : ChunkDataMap)
+		{
+			if (Pair.Value.MeshComponent.IsValid())
+			{
+				Pair.Value.MeshComponent->SetMaterial(0, NewInstance);
+			}
+		}
+
+		// Configure with atlas parameters
+		UpdateMaterialAtlasParameters();
+
+		UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: Created dynamic material instance from: %s"), *MasterMaterial->GetName());
+	}
+
+	return NewInstance;
+}
+
+void FVoxelPMCRenderer::UpdateMaterialAtlasParameters()
+{
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer::UpdateMaterialAtlasParameters called - DynamicMaterial: %s, MaterialAtlas: %s"),
+		DynamicMaterialInstance.IsValid() ? TEXT("Valid") : TEXT("NULL"),
+		MaterialAtlas.IsValid() ? TEXT("Valid") : TEXT("NULL"));
+
+	if (!DynamicMaterialInstance.IsValid())
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelPMCRenderer::UpdateMaterialAtlasParameters: No DynamicMaterialInstance, skipping"));
+		return;
+	}
+
+	UMaterialInstanceDynamic* MID = DynamicMaterialInstance.Get();
+
+	// Set smooth meshing switch (matches bSmoothTerrain parameter in M_VoxelMaster)
+	MID->SetScalarParameterValue(FName("bSmoothTerrain"), bUseSmoothMeshing ? 1.0f : 0.0f);
+
+	if (!MaterialAtlas.IsValid())
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelPMCRenderer::UpdateMaterialAtlasParameters: No MaterialAtlas, skipping atlas setup"));
+		return;
+	}
+
+	UVoxelMaterialAtlas* Atlas = MaterialAtlas.Get();
+
+	// ===== Material LUT (Face Variant Lookup Table) =====
+
+	// Build LUT if needed
+	if (Atlas->IsLUTDirty() || !Atlas->GetMaterialLUT())
+	{
+		UE_LOG(LogVoxelRendering, Log, TEXT("Building MaterialLUT (Dirty=%s, Exists=%s)"),
+			Atlas->IsLUTDirty() ? TEXT("Yes") : TEXT("No"),
+			Atlas->GetMaterialLUT() ? TEXT("Yes") : TEXT("No"));
+		Atlas->BuildMaterialLUT();
+	}
+
+	// Pass LUT texture to material
+	if (UTexture2D* LUT = Atlas->GetMaterialLUT())
+	{
+		MID->SetTextureParameterValue(FName("MaterialLUT"), LUT);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set MaterialLUT texture: %s (%dx%d)"),
+			*LUT->GetName(), LUT->GetSizeX(), LUT->GetSizeY());
+	}
+	else
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("MaterialLUT is NULL after build attempt!"));
+	}
+
+	// ===== Packed Atlas Parameters (Cubic Terrain) =====
+
+	if (Atlas->PackedAlbedoAtlas)
+	{
+		MID->SetTextureParameterValue(FName("PackedAlbedoAtlas"), Atlas->PackedAlbedoAtlas);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set PackedAlbedoAtlas: %s"), *Atlas->PackedAlbedoAtlas->GetName());
+	}
+	else
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("PackedAlbedoAtlas is NULL!"));
+	}
+
+	if (Atlas->PackedNormalAtlas)
+	{
+		MID->SetTextureParameterValue(FName("PackedNormalAtlas"), Atlas->PackedNormalAtlas);
+	}
+
+	if (Atlas->PackedRoughnessAtlas)
+	{
+		MID->SetTextureParameterValue(FName("PackedRoughnessAtlas"), Atlas->PackedRoughnessAtlas);
+	}
+
+	MID->SetScalarParameterValue(FName("AtlasColumns"), static_cast<float>(Atlas->AtlasColumns));
+	MID->SetScalarParameterValue(FName("AtlasRows"), static_cast<float>(Atlas->AtlasRows));
+	UE_LOG(LogVoxelRendering, Log, TEXT("Set Atlas dimensions: %d x %d"), Atlas->AtlasColumns, Atlas->AtlasRows);
+
+	// ===== Texture Array Parameters (Smooth Terrain) =====
+
+	// Build texture arrays if needed (similar to LUT)
+	if (Atlas->AreTextureArraysDirty() || !Atlas->AlbedoArray)
+	{
+		UE_LOG(LogVoxelRendering, Log, TEXT("Building Texture Arrays (Dirty=%s, AlbedoArray=%s)"),
+			Atlas->AreTextureArraysDirty() ? TEXT("Yes") : TEXT("No"),
+			Atlas->AlbedoArray ? TEXT("Exists") : TEXT("NULL"));
+		Atlas->BuildTextureArrays();
+	}
+
+	if (Atlas->AlbedoArray)
+	{
+		MID->SetTextureParameterValue(FName("AlbedoArray"), Atlas->AlbedoArray);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set AlbedoArray texture parameter"));
+	}
+
+	if (Atlas->NormalArray)
+	{
+		MID->SetTextureParameterValue(FName("NormalArray"), Atlas->NormalArray);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set NormalArray texture parameter"));
+	}
+
+	if (Atlas->RoughnessArray)
+	{
+		MID->SetTextureParameterValue(FName("RoughnessArray"), Atlas->RoughnessArray);
+		UE_LOG(LogVoxelRendering, Log, TEXT("Set RoughnessArray texture parameter"));
+	}
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer::UpdateMaterialAtlasParameters COMPLETE: Columns=%d, Rows=%d, SmoothMeshing=%s, LUT=%s, AlbedoAtlas=%s"),
+		Atlas->AtlasColumns, Atlas->AtlasRows,
+		bUseSmoothMeshing ? TEXT("true") : TEXT("false"),
+		Atlas->GetMaterialLUT() ? TEXT("valid") : TEXT("null"),
+		Atlas->PackedAlbedoAtlas ? TEXT("valid") : TEXT("null"));
 }

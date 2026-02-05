@@ -9,6 +9,8 @@
 #include "VoxelPMCRenderer.generated.h"
 
 class UMaterial;
+class UMaterialInstanceDynamic;
+class UVoxelMaterialAtlas;
 
 // Forward declarations
 class UProceduralMeshComponent;
@@ -113,6 +115,8 @@ public:
 	virtual void SetMaterial(UMaterialInterface* Material) override;
 	virtual UMaterialInterface* GetMaterial() const override;
 	virtual void UpdateMaterialParameters() override;
+	virtual void SetMaterialAtlas(UVoxelMaterialAtlas* Atlas) override;
+	virtual UVoxelMaterialAtlas* GetMaterialAtlas() const override;
 
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;
@@ -153,8 +157,9 @@ private:
 		TArray<FVector>& OutVertices,
 		TArray<int32>& OutTriangles,
 		TArray<FVector>& OutNormals,
-		TArray<FVector2D>& OutUVs,
-		TArray<FLinearColor>& OutColors,
+		TArray<FVector2D>& OutUV0,
+		TArray<FVector2D>& OutUV1,
+		TArray<FColor>& OutColors,
 		TArray<struct FProcMeshTangent>& OutTangents
 	);
 
@@ -163,6 +168,12 @@ private:
 
 	/** Create a default material that displays vertex colors */
 	void CreateDefaultVertexColorMaterial();
+
+	/** Create a dynamic material instance from a master material */
+	UMaterialInstanceDynamic* CreateVoxelMaterialInstance(UMaterialInterface* MasterMaterial);
+
+	/** Update material parameters from the current atlas */
+	void UpdateMaterialAtlasParameters();
 
 	// ==================== Member Data ====================
 
@@ -183,6 +194,15 @@ private:
 
 	/** Strong reference to the default vertex color material we created */
 	TStrongObjectPtr<UMaterial> DefaultVertexColorMaterial;
+
+	/** Dynamic material instance for atlas parameters */
+	TStrongObjectPtr<UMaterialInstanceDynamic> DynamicMaterialInstance;
+
+	/** Material atlas data asset */
+	TWeakObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;
+
+	/** Whether smooth meshing mode is enabled */
+	bool bUseSmoothMeshing = false;
 
 	/** Map of chunk coordinates to their data */
 	TMap<FIntVector, FPMCChunkData> ChunkDataMap;
