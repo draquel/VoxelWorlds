@@ -144,9 +144,10 @@ Configuration options in `UVoxelWorldConfiguration`:
 - [x] World mode-specific LOD culling
 - [x] LOD material selection fix (smooth terrain)
 - [x] Streaming performance optimizations
-- [ ] Advanced biome blending (deferred)
-- [ ] Height-based material assignment (deferred)
-- [ ] Ocean/water level support (deferred)
+- [x] Advanced biome blending
+- [x] Height-based material assignment
+- [x] Water level support
+- [x] Ore vein system
 
 ### Deliverables
 - 3 working world modes ✓
@@ -277,6 +278,107 @@ Fixed material pop-in at LOD > 0 in smooth terrain mode:
 ```
 
 Same approach applied to `GetDominantBiomeLOD()` for biome selection.
+
+### Notes on Advanced Biome Blending
+
+Implemented smooth biome transitions via weighted blending:
+
+1. **FBiomeBlend Structure**:
+   - Holds up to 4 biomes with weights (MAX_BIOME_BLEND = 4)
+   - `BiomeIDs[]` and `Weights[]` arrays, sorted by weight descending
+   - `GetDominantBiome()` returns highest-weight biome
+   - `NormalizeWeights()` ensures weights sum to 1.0
+
+2. **UVoxelBiomeConfiguration::GetBiomeBlend()**:
+   - Uses signed distance to biome edges for weight calculation
+   - Smoothstep falloff within `BiomeBlendWidth` (configurable, default 0.15)
+   - Candidates sorted by weight, limited to MAX_BIOME_BLEND
+
+3. **GetBlendedMaterial()**:
+   - Single dominant biome (weight > 0.9): Direct lookup
+   - Blended biomes: Weighted random/dithered selection
+   - Creates natural-looking transitions without texture blending overhead
+
+### Notes on Height-Based Material Assignment
+
+Implemented elevation-based material overrides for effects like snow on peaks:
+
+1. **FHeightMaterialRule Structure**:
+   - `MinHeight`, `MaxHeight`: World Z range for rule application
+   - `MaterialID`: Override material when rule applies
+   - `bSurfaceOnly`: Only apply to surface voxels (depth check)
+   - `MaxDepthBelowSurface`: Depth limit when bSurfaceOnly is true
+   - `Priority`: Higher values checked first
+
+2. **UVoxelBiomeConfiguration::ApplyHeightMaterialRules()**:
+   - Called AFTER biome/water material selection
+   - Iterates sorted rules (by priority descending)
+   - First matching rule wins
+   - Default rules: Snow above 4000 units, exposed rock 3000-4000 units
+
+3. **Integration in Noise Generator**:
+   - Applied after `GetBlendedMaterial()` or `GetBlendedMaterialWithWater()`
+   - Snow on high peaks even if base terrain is underwater
+
+### Notes on Water Level Support
+
+Implemented water level for all three world modes:
+
+1. **Configuration (UVoxelWorldConfiguration)**:
+   - `bEnableWaterLevel`: Master toggle
+   - `WaterLevel`: Height for InfinitePlane/IslandBowl modes
+   - `WaterRadius`: Radius for SphericalPlanet mode (radial comparison)
+   - `bShowWaterPlane`: Toggle water visualization
+
+2. **Per-Biome Underwater Materials (FBiomeDefinition)**:
+   - `UnderwaterSurfaceMaterial`: Surface material when below water (default: Sand)
+   - `UnderwaterSubsurfaceMaterial`: Subsurface material when below water
+   - `GetMaterialAtDepth(float, bool bIsUnderwater)`: Overloaded method
+
+3. **UVoxelBiomeConfiguration::GetBlendedMaterialWithWater()**:
+   - Determines underwater state: `TerrainSurfaceHeight < WaterLevel`
+   - Uses biome's underwater materials when applicable
+   - Falls back to `DefaultUnderwaterMaterial` (Sand) if not specified
+
+4. **Default Underwater Materials**:
+   - Plains: Grass → Sand
+   - Desert: Sand → Sand (naturally sandy)
+   - Tundra: Snow → Stone (cold water erodes to rock)
+
+5. **Water Visualization (AVoxelWorldTestActor)**:
+   - `WaterPlaneMesh`: Flat plane for InfinitePlane/IslandBowl modes
+   - `WaterSphereMesh`: Sphere for SphericalPlanet mode
+   - `WaterMaterial`: User-assignable water material
+   - `WaterPlaneScale`: Size multiplier (based on ViewDistance)
+   - Automatic mode switching when world mode changes
+
+### Notes on Ore Vein System
+
+Implemented 3D noise-based ore deposit generation:
+
+1. **FOreVeinConfig Structure**:
+   - `MaterialID`: Ore material (Coal=10, Iron=11, Gold=12, etc.)
+   - `MinDepth`, `MaxDepth`: Depth constraints (prevents surface exposure)
+   - `Shape`: Blob (3D threshold) or Streak (anisotropic/directional)
+   - `Frequency`, `Threshold`: Noise parameters
+   - `Rarity`: Additional spawn chance multiplier
+   - `Priority`: Higher values checked first
+
+2. **Global and Per-Biome Ores**:
+   - `UVoxelBiomeConfiguration::GlobalOreVeins`: Spawn in all biomes
+   - `FBiomeDefinition::BiomeOreVeins`: Biome-specific ores
+   - `bAddToGlobalOres`: Combine or replace global ores
+
+3. **Default Ore Types**:
+   - Coal: Shallow (12-60 depth), common, blob-shaped
+   - Iron: Medium (15-100 depth), streak-shaped veins
+   - Gold: Deep (30+ depth), rare, small blobs
+
+4. **Integration**:
+   - Checked in noise generator after height rules
+   - Only for solid voxels (`Density >= VOXEL_SURFACE_THRESHOLD`)
+   - `MinDepth > 10` prevents ores visible on smooth terrain surface
+   - `CheckOreVeinPlacement()` returns first matching ore by priority
 
 ---
 
@@ -498,6 +600,28 @@ Same approach applied to `GetDominantBiomeLOD()` for biome selection.
 5. ~~LOD Material Selection Fix~~ - COMPLETE
    - Upward surface scanning for smooth terrain at LOD > 0
    - Prevents underground material pop-in
+
+6. ~~Advanced Biome Blending~~ - COMPLETE
+   - FBiomeBlend: Up to 4 biomes with normalized weights
+   - Smoothstep falloff within configurable BiomeBlendWidth
+   - Weighted random/dithered material selection for natural transitions
+
+7. ~~Height-Based Material Assignment~~ - COMPLETE
+   - FHeightMaterialRule: Elevation-based material overrides
+   - Priority-sorted rule evaluation
+   - Default rules: Snow above 4000, exposed rock 3000-4000
+
+8. ~~Water Level Support~~ - COMPLETE
+   - Per-biome underwater materials (UnderwaterSurfaceMaterial, UnderwaterSubsurfaceMaterial)
+   - GetBlendedMaterialWithWater() for water-aware material selection
+   - WaterLevel (flat modes) and WaterRadius (spherical mode)
+   - Water visualization: Plane for flat worlds, Sphere for planets
+
+9. ~~Ore Vein System~~ - COMPLETE
+   - FOreVeinConfig: 3D noise-based ore placement
+   - Blob and Streak shape types
+   - Global ores + per-biome ore overrides
+   - Default ores: Coal (shallow), Iron (medium, streaks), Gold (deep, rare)
 
 **Next Immediate Steps** (Phase 6):
 1. Edit layer implementation
