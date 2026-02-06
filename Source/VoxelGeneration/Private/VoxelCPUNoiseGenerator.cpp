@@ -134,7 +134,9 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		FWorldModeTerrainParams TerrainParams(Request.SeaLevel, Request.HeightScale, Request.BaseHeight);
 
 		FIslandBowlParams IslandParams;
+		IslandParams.Shape = static_cast<EIslandShape>(Request.IslandParams.Shape);
 		IslandParams.IslandRadius = Request.IslandParams.IslandRadius;
+		IslandParams.SizeY = Request.IslandParams.SizeY;
 		IslandParams.FalloffWidth = Request.IslandParams.FalloffWidth;
 		IslandParams.FalloffType = static_cast<EIslandFalloffType>(Request.IslandParams.FalloffType);
 		IslandParams.CenterX = Request.IslandParams.CenterX;

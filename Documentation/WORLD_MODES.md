@@ -82,14 +82,26 @@ Bounded terrain with smooth falloff at edges, creating floating island or mounta
 // World Settings
 EWorldMode WorldMode = EWorldMode::IslandBowl;
 
+// Island Shape
+int32 IslandShape = 0;               // 0=Circular, 1=Rectangle
+
 // Island Parameters
-float IslandRadius = 50000.0f;       // Distance from center to edge start
+float IslandRadius = 50000.0f;       // Radius (circular) or SizeX (rectangle)
+float IslandSizeY = 50000.0f;        // SizeY (rectangle only, ignored for circular)
 float IslandFalloffWidth = 10000.0f; // Width of transition zone
 int32 IslandFalloffType = 1;         // 0=Linear, 1=Smooth, 2=Squared, 3=Exponential
 float IslandCenterX = 0.0f;          // Center offset from WorldOrigin
 float IslandCenterY = 0.0f;          // Center offset from WorldOrigin
 float IslandEdgeHeight = -1000.0f;   // Terrain height at island edge
 bool bIslandBowlShape = false;       // True for bowl (lowered center)
+```
+
+### Island Shape Types
+```cpp
+enum class EIslandShape : uint8 {
+    Circular = 0,    // Radial distance from center (default)
+    Rectangle = 1    // Axis-aligned box with separate X/Y sizes
+};
 ```
 
 ### Falloff Types
@@ -103,45 +115,56 @@ enum class EIslandFalloffType : uint8 {
 ```
 
 ### Implementation (FIslandBowlWorldMode)
+
+For **Circular** islands, falloff is based on Euclidean distance from center:
 ```cpp
-float FIslandBowlWorldMode::GetDensityAt(const FVector& WorldPos,
-                                          const FVoxelNoiseParams& NoiseParams) const
+float Distance = FMath::Sqrt(DX * DX + DY * DY);
+float T = (Distance - IslandRadius) / FalloffWidth;  // 0 at edge, 1 at falloff end
+```
+
+For **Rectangle** islands, falloff is based on the maximum normalized axis distance:
+```cpp
+// Calculate how far into falloff zone on each axis
+float TX = FMath::Max(0.0f, (FMath::Abs(DX) - IslandRadius) / FalloffWidth);
+float TY = FMath::Max(0.0f, (FMath::Abs(DY) - SizeY) / FalloffWidth);
+float T = FMath::Max(TX, TY);  // Use the axis furthest into falloff
+```
+
+```cpp
+float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
+    float X, float Y,
+    const FIslandBowlParams& IslandParams)
 {
-    // Base terrain density (same as infinite plane)
-    float TerrainDensity = GetBaseTerrain(WorldPos, NoiseParams);
+    const float DX = FMath::Abs(X - IslandParams.CenterX);
+    const float DY = FMath::Abs(Y - IslandParams.CenterY);
 
-    // Calculate 2D distance from island center
-    FVector2D ToCenter(
-        WorldPos.X - (WorldOrigin.X + IslandCenterX),
-        WorldPos.Y - (WorldOrigin.Y + IslandCenterY)
-    );
-    float DistFromCenter = ToCenter.Size();
-
-    // Calculate falloff factor
-    float FalloffFactor = 1.0f;
-    if (DistFromCenter > IslandRadius) {
-        float T = (DistFromCenter - IslandRadius) / IslandFalloffWidth;
-        T = FMath::Clamp(T, 0.0f, 1.0f);
-
-        switch (FalloffType) {
-            case 0: FalloffFactor = 1.0f - T; break;                    // Linear
-            case 1: FalloffFactor = 1.0f - (T * T * (3.0f - 2.0f * T)); break; // Smooth
-            case 2: FalloffFactor = 1.0f - (T * T); break;              // Squared
-            case 3: FalloffFactor = FMath::Exp(-T * 3.0f); break;       // Exponential
-        }
+    float T = 0.0f;
+    if (IslandParams.Shape == EIslandShape::Rectangle)
+    {
+        // Rectangle: use max of normalized axis distances
+        float TX = FMath::Max(0.0f, (DX - IslandParams.IslandRadius) / IslandParams.FalloffWidth);
+        float TY = FMath::Max(0.0f, (DY - IslandParams.SizeY) / IslandParams.FalloffWidth);
+        T = FMath::Clamp(FMath::Max(TX, TY), 0.0f, 1.0f);
+    }
+    else
+    {
+        // Circular: use Euclidean distance
+        float Distance = FMath::Sqrt(DX * DX + DY * DY);
+        T = FMath::Clamp((Distance - IslandParams.IslandRadius) / IslandParams.FalloffWidth, 0.0f, 1.0f);
     }
 
-    // Blend terrain down at edges
-    float EdgeDensity = IslandEdgeHeight - WorldPos.Z;
-    return FMath::Lerp(EdgeDensity, TerrainDensity, FalloffFactor);
+    // Apply falloff curve (Linear, Smooth, Squared, or Exponential)
+    return ApplyFalloffCurve(T, IslandParams.FalloffType);
 }
 ```
 
 ### LOD Culling
 - **Terrain Bounds Culling**: Chunks above/below terrain height range are skipped (same as Infinite Plane)
-- **Island Boundary Culling**: Chunks beyond `IslandRadius + FalloffWidth` in X/Y are skipped
+- **Island Boundary Culling**:
+  - Circular: Chunks beyond `IslandRadius + FalloffWidth` (Euclidean distance) are skipped
+  - Rectangle: Chunks beyond `IslandRadius + FalloffWidth` in X OR `IslandSizeY + FalloffWidth` in Y are skipped
 - Height range considers `IslandEdgeHeight` for bowl shapes with lowered edges
-- Adds chunk diagonal buffer to prevent edge popping
+- Adds chunk buffer to prevent edge popping
 
 ### Use Cases
 - Floating islands

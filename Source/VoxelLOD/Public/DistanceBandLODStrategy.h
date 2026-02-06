@@ -229,8 +229,14 @@ protected:
 
 	// ==================== Island Mode Culling ====================
 
-	/** Total island extent (IslandRadius + FalloffWidth) for boundary culling */
-	float IslandTotalExtent = 0.0f;
+	/** Island shape type: 0 = Circular, 1 = Rectangle */
+	int32 IslandShape = 0;
+
+	/** Total island extent X (IslandRadius + FalloffWidth) for boundary culling */
+	float IslandTotalExtentX = 0.0f;
+
+	/** Total island extent Y (IslandSizeY + FalloffWidth) for rectangle culling */
+	float IslandTotalExtentY = 0.0f;
 
 	/** Island center offset from WorldOrigin */
 	FVector2D IslandCenterOffset = FVector2D::ZeroVector;

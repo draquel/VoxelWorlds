@@ -66,11 +66,15 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	// Cache Island mode parameters for boundary culling
 	if (WorldMode == EWorldMode::IslandBowl)
 	{
-		IslandTotalExtent = WorldConfig->IslandRadius + WorldConfig->IslandFalloffWidth;
+		IslandShape = WorldConfig->IslandShape;
+		IslandTotalExtentX = WorldConfig->IslandRadius + WorldConfig->IslandFalloffWidth;
+		IslandTotalExtentY = (IslandShape == 1 ? WorldConfig->IslandSizeY : WorldConfig->IslandRadius) + WorldConfig->IslandFalloffWidth;
 		IslandCenterOffset = FVector2D(WorldConfig->IslandCenterX, WorldConfig->IslandCenterY);
 
-		UE_LOG(LogVoxelLOD, Log, TEXT("  Island culling enabled: TotalExtent=%.0f, CenterOffset=(%.0f, %.0f)"),
-			IslandTotalExtent, IslandCenterOffset.X, IslandCenterOffset.Y);
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Island culling enabled: Shape=%s, ExtentX=%.0f, ExtentY=%.0f, CenterOffset=(%.0f, %.0f)"),
+			IslandShape == 1 ? TEXT("Rectangle") : TEXT("Circular"),
+			IslandTotalExtentX, IslandTotalExtentY,
+			IslandCenterOffset.X, IslandCenterOffset.Y);
 	}
 
 	// Cache Spherical Planet parameters for shell culling
@@ -411,10 +415,12 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 		Info += FString::Printf(TEXT("  Terrain Culling: Height=[%.0f - %.0f]\n"),
 			TerrainMinHeight, TerrainMaxHeight);
 	}
-	if (WorldMode == EWorldMode::IslandBowl && IslandTotalExtent > 0.0f)
+	if (WorldMode == EWorldMode::IslandBowl && IslandTotalExtentX > 0.0f)
 	{
-		Info += FString::Printf(TEXT("  Island Boundary Culling: Extent=%.0f, Center=(%.0f, %.0f)\n"),
-			IslandTotalExtent, IslandCenterOffset.X, IslandCenterOffset.Y);
+		Info += FString::Printf(TEXT("  Island Boundary Culling: Shape=%s, ExtentX=%.0f, ExtentY=%.0f, Center=(%.0f, %.0f)\n"),
+			IslandShape == 1 ? TEXT("Rectangle") : TEXT("Circular"),
+			IslandTotalExtentX, IslandTotalExtentY,
+			IslandCenterOffset.X, IslandCenterOffset.Y);
 	}
 	if (WorldMode == EWorldMode::SphericalPlanet && PlanetRadius > 0.0f)
 	{
@@ -682,7 +688,7 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 	const FIntVector& ChunkCoord,
 	const FLODQueryContext& Context) const
 {
-	if (WorldMode != EWorldMode::IslandBowl || IslandTotalExtent <= 0.0f)
+	if (WorldMode != EWorldMode::IslandBowl || IslandTotalExtentX <= 0.0f)
 	{
 		return false;
 	}
@@ -690,20 +696,31 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 	// Get chunk center in world space
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 
-	// Calculate 2D distance from island center (WorldOrigin + IslandCenterOffset)
-	const FVector2D IslandCenter(
-		Context.WorldOrigin.X + IslandCenterOffset.X,
-		Context.WorldOrigin.Y + IslandCenterOffset.Y
-	);
-	const FVector2D ChunkCenter2D(ChunkCenter.X, ChunkCenter.Y);
-	const float Distance2D = FVector2D::Distance(ChunkCenter2D, IslandCenter);
+	// Calculate offset from island center (WorldOrigin + IslandCenterOffset)
+	const float IslandCenterX = Context.WorldOrigin.X + IslandCenterOffset.X;
+	const float IslandCenterY = Context.WorldOrigin.Y + IslandCenterOffset.Y;
+	const float DX = FMath::Abs(ChunkCenter.X - IslandCenterX);
+	const float DY = FMath::Abs(ChunkCenter.Y - IslandCenterY);
 
-	// Add chunk diagonal as buffer (chunk could overlap island boundary)
+	// Add chunk half-size as buffer (chunk could overlap island boundary)
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_2;
+	const float ChunkHalfSize = ChunkWorldSize * 0.5f;
 
-	// Cull if chunk center is beyond island extent + buffer
-	return Distance2D > (IslandTotalExtent + ChunkDiagonal);
+	if (IslandShape == 1)  // Rectangle
+	{
+		// For rectangle, check each axis independently
+		// Cull if chunk is entirely outside the island bounds on either axis
+		const bool bOutsideX = DX > (IslandTotalExtentX + ChunkHalfSize);
+		const bool bOutsideY = DY > (IslandTotalExtentY + ChunkHalfSize);
+		return bOutsideX || bOutsideY;
+	}
+	else  // Circular
+	{
+		// For circular, use 2D Euclidean distance
+		const float Distance2D = FMath::Sqrt(DX * DX + DY * DY);
+		const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_2;
+		return Distance2D > (IslandTotalExtentX + ChunkDiagonal);
+	}
 }
 
 bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(

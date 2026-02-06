@@ -44,8 +44,14 @@ struct FSphericalPlanetModeParams
  */
 struct FIslandModeParams
 {
-	/** Radius of the island in world units (distance from center to edge start) */
+	/** Shape type: 0 = Circular, 1 = Rectangle */
+	uint8 Shape = 0;
+
+	/** Radius/SizeX of the island in world units (distance from center to edge start) */
 	float IslandRadius = 50000.0f;
+
+	/** Size Y of the island (only used for Rectangle shape) */
+	float SizeY = 50000.0f;
 
 	/** Width of the falloff zone where terrain fades to nothing */
 	float FalloffWidth = 10000.0f;
@@ -67,10 +73,39 @@ struct FIslandModeParams
 
 	FIslandModeParams() = default;
 
-	/** Get the total island extent (radius + falloff) */
-	float GetTotalExtent() const
+	/** Get the total island extent in X (radius/sizeX + falloff) */
+	float GetTotalExtentX() const
 	{
 		return IslandRadius + FalloffWidth;
+	}
+
+	/** Get the total island extent in Y (sizeY + falloff, or same as X for circular) */
+	float GetTotalExtentY() const
+	{
+		return (Shape == 1 ? SizeY : IslandRadius) + FalloffWidth;
+	}
+
+	/** Get the maximum total extent (for compatibility) */
+	float GetTotalExtent() const
+	{
+		return FMath::Max(GetTotalExtentX(), GetTotalExtentY());
+	}
+
+	/** Check if a point is within island bounds */
+	bool IsWithinBounds(float X, float Y) const
+	{
+		const float DX = FMath::Abs(X - CenterX);
+		const float DY = FMath::Abs(Y - CenterY);
+
+		if (Shape == 1)  // Rectangle
+		{
+			return DX <= GetTotalExtentX() && DY <= GetTotalExtentY();
+		}
+		else  // Circular
+		{
+			const float Distance = FMath::Sqrt(DX * DX + DY * DY);
+			return Distance <= GetTotalExtent();
+		}
 	}
 };
 

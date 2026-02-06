@@ -6,6 +6,18 @@
 #include "IVoxelWorldMode.h"
 
 /**
+ * Island shape types for boundary calculation.
+ */
+enum class EIslandShape : uint8
+{
+	/** Circular island (radial distance from center) */
+	Circular,
+
+	/** Rectangular island (axis-aligned box with separate X/Y sizes) */
+	Rectangle
+};
+
+/**
  * Falloff curve types for island edge transitions.
  */
 enum class EIslandFalloffType : uint8
@@ -28,8 +40,14 @@ enum class EIslandFalloffType : uint8
  */
 struct VOXELGENERATION_API FIslandBowlParams
 {
-	/** Radius of the island in world units (distance from center to edge start) */
+	/** Shape of the island (Circular or Rectangle) */
+	EIslandShape Shape = EIslandShape::Circular;
+
+	/** Radius/SizeX of the island in world units (distance from center to edge start) */
 	float IslandRadius = 50000.0f;
+
+	/** Size Y of the island (only used for Rectangle shape) */
+	float SizeY = 50000.0f;
 
 	/** Width of the falloff zone where terrain fades to nothing */
 	float FalloffWidth = 10000.0f;
@@ -53,15 +71,28 @@ struct VOXELGENERATION_API FIslandBowlParams
 
 	FIslandBowlParams(float InRadius, float InFalloff, EIslandFalloffType InType = EIslandFalloffType::Smooth)
 		: IslandRadius(InRadius)
+		, SizeY(InRadius)
 		, FalloffWidth(InFalloff)
 		, FalloffType(InType)
 	{
 	}
 
-	/** Get the total island extent (radius + falloff) */
-	float GetTotalExtent() const
+	/** Get the total island extent in X (radius/sizeX + falloff) */
+	float GetTotalExtentX() const
 	{
 		return IslandRadius + FalloffWidth;
+	}
+
+	/** Get the total island extent in Y (sizeY + falloff, or same as X for circular) */
+	float GetTotalExtentY() const
+	{
+		return (Shape == EIslandShape::Rectangle ? SizeY : IslandRadius) + FalloffWidth;
+	}
+
+	/** Get the maximum total extent (for circular compatibility) */
+	float GetTotalExtent() const
+	{
+		return FMath::Max(GetTotalExtentX(), GetTotalExtentY());
 	}
 };
 
@@ -152,6 +183,7 @@ public:
 
 	/**
 	 * Calculate the distance from a point to the island center (2D, ignoring Z).
+	 * For circular islands, returns Euclidean distance.
 	 *
 	 * @param X World X coordinate
 	 * @param Y World Y coordinate
@@ -164,9 +196,22 @@ public:
 		float CenterX, float CenterY);
 
 	/**
+	 * Calculate the normalized distance from a point to the island boundary.
+	 * Works for both circular and rectangular islands.
+	 *
+	 * @param X World X coordinate
+	 * @param Y World Y coordinate
+	 * @param IslandParams Island configuration parameters
+	 * @return Normalized distance: 0 = at center, 1 = at edge, >1 = in falloff zone
+	 */
+	static float CalculateNormalizedDistance(
+		float X, float Y,
+		const FIslandBowlParams& IslandParams);
+
+	/**
 	 * Calculate the falloff factor based on distance from center.
 	 *
-	 * @param Distance Distance from island center
+	 * @param Distance Distance from island center (or normalized distance for rectangle)
 	 * @param IslandRadius Inner radius where falloff starts
 	 * @param FalloffWidth Width of the falloff zone
 	 * @param FalloffType Type of falloff curve
@@ -177,6 +222,18 @@ public:
 		float IslandRadius,
 		float FalloffWidth,
 		EIslandFalloffType FalloffType);
+
+	/**
+	 * Calculate the falloff factor using island params (handles both shapes).
+	 *
+	 * @param X World X coordinate
+	 * @param Y World Y coordinate
+	 * @param IslandParams Island configuration
+	 * @return Falloff factor in range [0, 1] (1 = full terrain, 0 = no terrain)
+	 */
+	static float CalculateFalloffFactorForPoint(
+		float X, float Y,
+		const FIslandBowlParams& IslandParams);
 
 	/**
 	 * Apply falloff to a terrain height value.

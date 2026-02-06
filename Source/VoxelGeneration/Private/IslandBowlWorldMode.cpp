@@ -23,24 +23,17 @@ float FIslandBowlWorldMode::GetDensityAt(
 	int32 LODLevel,
 	float NoiseValue) const
 {
-	// Calculate distance from island center (2D)
-	const float Distance = CalculateDistanceFromCenter(
-		WorldPos.X, WorldPos.Y,
-		IslandParams.CenterX, IslandParams.CenterY);
-
-	// If completely outside island bounds, return air
-	if (Distance > IslandParams.GetTotalExtent())
+	// Check if completely outside island bounds
+	if (!IsWithinIslandBounds(WorldPos.X, WorldPos.Y, IslandParams))
 	{
 		// Return a large negative value (definitely air)
 		return -1000.0f;
 	}
 
-	// Calculate falloff factor
-	const float FalloffFactor = CalculateFalloffFactor(
-		Distance,
-		IslandParams.IslandRadius,
-		IslandParams.FalloffWidth,
-		IslandParams.FalloffType);
+	// Calculate falloff factor (handles both circular and rectangle)
+	const float FalloffFactor = CalculateFalloffFactorForPoint(
+		WorldPos.X, WorldPos.Y,
+		IslandParams);
 
 	// Get base terrain height from noise (reusing InfinitePlane logic)
 	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
@@ -61,23 +54,14 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 	float Y,
 	const FVoxelNoiseParams& NoiseParams) const
 {
-	// Calculate distance from island center
-	const float Distance = CalculateDistanceFromCenter(
-		X, Y,
-		IslandParams.CenterX, IslandParams.CenterY);
-
 	// If outside island bounds, return edge height (or very low for air)
-	if (Distance > IslandParams.GetTotalExtent())
+	if (!IsWithinIslandBounds(X, Y, IslandParams))
 	{
 		return IslandParams.EdgeHeight - 1000.0f; // Below any reasonable terrain
 	}
 
-	// Calculate falloff factor
-	const float FalloffFactor = CalculateFalloffFactor(
-		Distance,
-		IslandParams.IslandRadius,
-		IslandParams.FalloffWidth,
-		IslandParams.FalloffType);
+	// Calculate falloff factor (handles both circular and rectangle)
+	const float FalloffFactor = CalculateFalloffFactorForPoint(X, Y, IslandParams);
 
 	// Sample base terrain noise (reusing InfinitePlane method)
 	const float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(X, Y, NoiseParams);
@@ -163,6 +147,31 @@ float FIslandBowlWorldMode::CalculateDistanceFromCenter(
 	return FMath::Sqrt(DX * DX + DY * DY);
 }
 
+float FIslandBowlWorldMode::CalculateNormalizedDistance(
+	float X, float Y,
+	const FIslandBowlParams& IslandParams)
+{
+	const float DX = X - IslandParams.CenterX;
+	const float DY = Y - IslandParams.CenterY;
+
+	if (IslandParams.Shape == EIslandShape::Rectangle)
+	{
+		// For rectangle, use Chebyshev distance (max of normalized X and Y distances)
+		// This creates a smooth rectangular falloff
+		const float NormX = FMath::Abs(DX) / IslandParams.IslandRadius;
+		const float NormY = FMath::Abs(DY) / IslandParams.SizeY;
+
+		// Use the maximum of the two normalized distances
+		// This gives us the "distance to the nearest edge" in normalized space
+		return FMath::Max(NormX, NormY);
+	}
+	else
+	{
+		// For circular, use Euclidean distance normalized by radius
+		return FMath::Sqrt(DX * DX + DY * DY) / IslandParams.IslandRadius;
+	}
+}
+
 float FIslandBowlWorldMode::CalculateFalloffFactor(
 	float Distance,
 	float IslandRadius,
@@ -213,6 +222,84 @@ float FIslandBowlWorldMode::CalculateFalloffFactor(
 	}
 }
 
+float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
+	float X, float Y,
+	const FIslandBowlParams& IslandParams)
+{
+	if (IslandParams.Shape == EIslandShape::Rectangle)
+	{
+		// For rectangle, calculate distance to edge in each axis separately
+		const float DX = FMath::Abs(X - IslandParams.CenterX);
+		const float DY = FMath::Abs(Y - IslandParams.CenterY);
+
+		// Calculate how far into the falloff zone we are for each axis
+		const float FalloffStartX = IslandParams.IslandRadius;
+		const float FalloffStartY = IslandParams.SizeY;
+		const float FalloffEndX = FalloffStartX + IslandParams.FalloffWidth;
+		const float FalloffEndY = FalloffStartY + IslandParams.FalloffWidth;
+
+		// Calculate T values for each axis (0 = at edge, 1 = at falloff end)
+		float TX = 0.0f;
+		if (DX > FalloffStartX)
+		{
+			TX = FMath::Clamp((DX - FalloffStartX) / IslandParams.FalloffWidth, 0.0f, 1.0f);
+		}
+
+		float TY = 0.0f;
+		if (DY > FalloffStartY)
+		{
+			TY = FMath::Clamp((DY - FalloffStartY) / IslandParams.FalloffWidth, 0.0f, 1.0f);
+		}
+
+		// Use the maximum T value (the axis that's furthest into falloff determines the factor)
+		const float T = FMath::Max(TX, TY);
+
+		// If we're inside the rectangle (not in falloff), return 1
+		if (T <= 0.0f)
+		{
+			return 1.0f;
+		}
+
+		// Apply the falloff curve
+		switch (IslandParams.FalloffType)
+		{
+		case EIslandFalloffType::Linear:
+			return 1.0f - T;
+
+		case EIslandFalloffType::Smooth:
+			{
+				const float InvT = 1.0f - T;
+				return InvT * InvT * (3.0f - 2.0f * InvT);
+			}
+
+		case EIslandFalloffType::Squared:
+			{
+				const float InvT = 1.0f - T;
+				return InvT * InvT;
+			}
+
+		case EIslandFalloffType::Exponential:
+			return FMath::Exp(-T * 3.0f);
+
+		default:
+			return 1.0f - T;
+		}
+	}
+	else
+	{
+		// Circular: use standard distance-based calculation
+		const float Distance = CalculateDistanceFromCenter(
+			X, Y,
+			IslandParams.CenterX, IslandParams.CenterY);
+
+		return CalculateFalloffFactor(
+			Distance,
+			IslandParams.IslandRadius,
+			IslandParams.FalloffWidth,
+			IslandParams.FalloffType);
+	}
+}
+
 float FIslandBowlWorldMode::ApplyFalloffToHeight(
 	float BaseHeight,
 	float FalloffFactor,
@@ -226,8 +313,19 @@ bool FIslandBowlWorldMode::IsWithinIslandBounds(
 	float X, float Y,
 	const FIslandBowlParams& IslandParams)
 {
-	const float Distance = CalculateDistanceFromCenter(
-		X, Y,
-		IslandParams.CenterX, IslandParams.CenterY);
-	return Distance <= IslandParams.GetTotalExtent();
+	const float DX = FMath::Abs(X - IslandParams.CenterX);
+	const float DY = FMath::Abs(Y - IslandParams.CenterY);
+
+	if (IslandParams.Shape == EIslandShape::Rectangle)
+	{
+		// Rectangle bounds check
+		return DX <= IslandParams.GetTotalExtentX() &&
+		       DY <= IslandParams.GetTotalExtentY();
+	}
+	else
+	{
+		// Circular bounds check
+		const float Distance = FMath::Sqrt(DX * DX + DY * DY);
+		return Distance <= IslandParams.GetTotalExtent();
+	}
 }

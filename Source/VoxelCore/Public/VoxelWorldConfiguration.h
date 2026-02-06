@@ -45,9 +45,21 @@ public:
 
 	// ==================== Island Bowl Mode Settings ====================
 
-	/** Radius of the island in world units (distance from center to edge start) */
+	/**
+	 * Island shape type:
+	 * 0 = Circular (radial distance from center)
+	 * 1 = Rectangle (axis-aligned box with separate X/Y sizes)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "0", ClampMax = "1", EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	int32 IslandShape = 0;  // Default: Circular
+
+	/** Radius/SizeX of the island in world units (distance from center to edge start) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "1000", EditCondition = "WorldMode == EWorldMode::IslandBowl"))
 	float IslandRadius = 50000.0f;
+
+	/** Size Y of the island (only used when IslandShape = Rectangle) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "1000", EditCondition = "WorldMode == EWorldMode::IslandBowl && IslandShape == 1"))
+	float IslandSizeY = 50000.0f;
 
 	/** Width of the falloff zone where terrain fades to nothing */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "100", EditCondition = "WorldMode == EWorldMode::IslandBowl"))

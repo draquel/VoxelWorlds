@@ -839,7 +839,9 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		// Island mode parameters (used when WorldMode == IslandBowl)
 		if (Configuration->WorldMode == EWorldMode::IslandBowl)
 		{
+			GenRequest.IslandParams.Shape = static_cast<uint8>(Configuration->IslandShape);
 			GenRequest.IslandParams.IslandRadius = Configuration->IslandRadius;
+			GenRequest.IslandParams.SizeY = Configuration->IslandSizeY;
 			GenRequest.IslandParams.FalloffWidth = Configuration->IslandFalloffWidth;
 			GenRequest.IslandParams.FalloffType = static_cast<uint8>(Configuration->IslandFalloffType);
 			GenRequest.IslandParams.CenterX = Configuration->IslandCenterX;
