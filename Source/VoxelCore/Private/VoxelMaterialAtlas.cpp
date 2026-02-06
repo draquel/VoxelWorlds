@@ -351,13 +351,38 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 		return false;
 	}
 
-	// Create placeholder for missing slots
-	UTexture2D* Placeholder = CreatePlaceholderTexture(PlaceholderColor, TextureArraySize);
+	// Determine texture size and format from first valid loaded texture
+	int32 ActualTextureSize = TextureArraySize;
+	EPixelFormat SourceFormat = PF_B8G8R8A8;
+	UTexture2D* FirstValidTexture = nullptr;
+	for (int32 i = 0; i < NumSlices; ++i)
+	{
+		if (SourceTextures[i] && SourceTextures[i]->GetSizeX() > 0)
+		{
+			FirstValidTexture = SourceTextures[i];
+			ActualTextureSize = SourceTextures[i]->GetSizeX();
+			if (SourceTextures[i]->GetPlatformData() && SourceTextures[i]->GetPlatformData()->Mips.Num() > 0)
+			{
+				SourceFormat = SourceTextures[i]->GetPlatformData()->PixelFormat;
+			}
+			UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Detected texture size %dx%d format %d from slot %d"),
+				*ArrayName, ActualTextureSize, ActualTextureSize, (int32)SourceFormat, i);
+			break;
+		}
+	}
+
+	// For placeholder, we'll use the first valid texture itself as a template
+	// This avoids format mismatch issues with compressed textures
+	UTexture2D* Placeholder = FirstValidTexture ? FirstValidTexture : CreatePlaceholderTexture(PlaceholderColor, ActualTextureSize);
 	if (!Placeholder)
 	{
 		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): Failed to create placeholder texture"), *ArrayName);
 		return false;
 	}
+
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Using %s as placeholder: %dx%d"),
+		*ArrayName, FirstValidTexture ? TEXT("first valid texture") : TEXT("generated placeholder"),
+		Placeholder->GetSizeX(), Placeholder->GetSizeY());
 
 	// Fill missing slots with placeholder
 	for (int32 i = 0; i < NumSlices; ++i)
@@ -365,6 +390,35 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 		if (!SourceTextures[i])
 		{
 			SourceTextures[i] = Placeholder;
+		}
+	}
+
+	// Verify all textures have valid dimensions
+	int32 FirstValidWidth = 0, FirstValidHeight = 0;
+	for (int32 i = 0; i < NumSlices; ++i)
+	{
+		if (SourceTextures[i])
+		{
+			int32 W = SourceTextures[i]->GetSizeX();
+			int32 H = SourceTextures[i]->GetSizeY();
+			if (W > 0 && H > 0)
+			{
+				if (FirstValidWidth == 0)
+				{
+					FirstValidWidth = W;
+					FirstValidHeight = H;
+				}
+				else if (W != FirstValidWidth || H != FirstValidHeight)
+				{
+					UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): Texture[%d] size mismatch: %dx%d vs expected %dx%d"),
+						*ArrayName, i, W, H, FirstValidWidth, FirstValidHeight);
+				}
+			}
+			else
+			{
+				UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): Texture[%d] has invalid size: %dx%d"),
+					*ArrayName, i, W, H);
+			}
 		}
 	}
 
@@ -384,13 +438,72 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 #if WITH_EDITOR
 	// In editor, we can use the source textures directly
 	OutArray->SourceTextures.Empty();
-	for (UTexture2D* Texture : SourceTextures)
+
+	// Check format compatibility of all textures
+	EPixelFormat ExpectedFormat = PF_Unknown;
+	bool bFormatMismatch = false;
+
+	for (int32 i = 0; i < SourceTextures.Num(); ++i)
 	{
-		OutArray->SourceTextures.Add(Texture);
+		UTexture2D* Texture = SourceTextures[i];
+		if (Texture)
+		{
+			OutArray->SourceTextures.Add(Texture);
+
+			// Get texture format for logging
+			EPixelFormat TexFormat = PF_Unknown;
+			if (Texture->GetPlatformData() && Texture->GetPlatformData()->Mips.Num() > 0)
+			{
+				TexFormat = Texture->GetPlatformData()->PixelFormat;
+			}
+
+			if (ExpectedFormat == PF_Unknown)
+			{
+				ExpectedFormat = TexFormat;
+			}
+			else if (TexFormat != ExpectedFormat)
+			{
+				bFormatMismatch = true;
+				UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("  Slice[%d]: %s (%dx%d) FORMAT MISMATCH: %d vs expected %d"),
+					i, *Texture->GetName(), Texture->GetSizeX(), Texture->GetSizeY(), (int32)TexFormat, (int32)ExpectedFormat);
+			}
+
+			UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("  Slice[%d]: %s (%dx%d, format=%d, sRGB=%s)"),
+				i, *Texture->GetName(), Texture->GetSizeX(), Texture->GetSizeY(),
+				(int32)TexFormat, Texture->SRGB ? TEXT("Yes") : TEXT("No"));
+		}
+		else
+		{
+			UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("  Slice[%d]: NULL texture!"), i);
+			OutArray->SourceTextures.Add(Placeholder); // Ensure we add something
+		}
 	}
 
-	// Update the array resource
+	if (bFormatMismatch)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): FORMAT MISMATCH detected! All textures must have the same compression format. Array may fail to build."), *ArrayName);
+	}
+
+	// Update the array resource from source textures
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Calling UpdateSourceFromSourceTextures with %d textures..."), *ArrayName, OutArray->SourceTextures.Num());
 	OutArray->UpdateSourceFromSourceTextures();
+
+	// Check dimensions after update
+	int32 ResultSizeX = OutArray->GetSizeX();
+	int32 ResultSizeY = OutArray->GetSizeY();
+
+	if (ResultSizeX == 0 || ResultSizeY == 0)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): UpdateSourceFromSourceTextures FAILED - result is %dx%d! Check texture formats and compression settings."),
+			*ArrayName, ResultSizeX, ResultSizeY);
+	}
+	else
+	{
+		// Upload to GPU
+		OutArray->UpdateResource();
+		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): SUCCESS - Array dimensions: %dx%dx%d"),
+			*ArrayName, ResultSizeX, ResultSizeY, OutArray->SourceTextures.Num());
+	}
 #endif
 
 	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Created array with %d slices (%d from configs, %d placeholders)"),
@@ -402,6 +515,16 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 void UVoxelMaterialAtlas::BuildTextureArrays()
 {
 	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Building texture arrays from %d material configs..."), MaterialConfigs.Num());
+
+	// Log each config to help debug missing textures
+	for (int32 i = 0; i < MaterialConfigs.Num(); ++i)
+	{
+		const FVoxelMaterialTextureConfig& Config = MaterialConfigs[i];
+		UE_LOG(LogVoxelMaterialAtlas, Verbose, TEXT("  Config[%d]: MaterialID=%d, Name=%s, HasAlbedo=%s, HasNormal=%s"),
+			i, Config.MaterialID, *Config.MaterialName,
+			Config.AlbedoTexture.IsNull() ? TEXT("No") : TEXT("Yes"),
+			Config.NormalTexture.IsNull() ? TEXT("No") : TEXT("Yes"));
+	}
 
 	// Build Albedo array
 	bool bAlbedoSuccess = BuildSingleTextureArray(

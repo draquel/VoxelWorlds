@@ -3,6 +3,7 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCore.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelBiomeDefinition.h"
 
 #if WITH_EDITOR
 #include "Misc/DataValidation.h"
@@ -80,9 +81,56 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 		50                     // Priority
 	));
 
+	// Setup default ore veins (Coal, Iron, Gold)
+	GlobalOreVeins.Empty();
+
+	// Coal - Common, medium depth, blob-shaped
+	// MinDepth 12+ ensures ores stay below smooth terrain surface sampling range
+	// NOTE: Using Stone (2) as placeholder until Coal textures are added to array index 10
+	GlobalOreVeins.Add(FOreVeinConfig(
+		TEXT("Coal"),
+		EVoxelMaterial::Stone,   // MaterialID - use Stone until Coal textures added
+		12.0f,                   // MinDepth (must be > 10 for smooth terrain)
+		60.0f,                   // MaxDepth
+		EOreVeinShape::Blob,     // Shape
+		0.08f,                   // Frequency
+		0.82f,                   // Threshold
+		100,                     // SeedOffset
+		10                       // Priority
+	));
+
+	// Iron - Moderate rarity, medium-deep, streak-shaped veins
+	// NOTE: Using Stone (2) as placeholder until Iron textures are added to array index 11
+	GlobalOreVeins.Add(FOreVeinConfig(
+		TEXT("Iron"),
+		EVoxelMaterial::Stone,   // MaterialID - use Stone until Iron textures added
+		15.0f,                   // MinDepth
+		100.0f,                  // MaxDepth
+		EOreVeinShape::Streak,   // Shape (elongated veins)
+		0.06f,                   // Frequency
+		0.87f,                   // Threshold
+		200,                     // SeedOffset
+		20                       // Priority
+	));
+
+	// Gold - Rare, deep only, small blobs
+	// NOTE: Using Sand (3) as placeholder until Gold textures are added to array index 12
+	GlobalOreVeins.Add(FOreVeinConfig(
+		TEXT("Gold"),
+		EVoxelMaterial::Sand,    // MaterialID - use Sand until Gold textures added
+		30.0f,                   // MinDepth (deep only)
+		0.0f,                    // MaxDepth (no limit)
+		EOreVeinShape::Blob,     // Shape
+		0.04f,                   // Frequency
+		0.93f,                   // Threshold (rare)
+		300,                     // SeedOffset
+		30                       // Priority (highest, checked first)
+	));
+
 	// Mark caches as dirty
 	bBiomeIndexCacheDirty = true;
 	bHeightRulesCacheDirty = true;
+	bOreVeinsCacheDirty = true;
 }
 
 void UVoxelBiomeConfiguration::RebuildBiomeIndexCache() const
@@ -102,6 +150,63 @@ void UVoxelBiomeConfiguration::RebuildHeightRulesCache() const
 		return A.Priority > B.Priority; // Higher priority first
 	});
 	bHeightRulesCacheDirty = false;
+}
+
+void UVoxelBiomeConfiguration::RebuildOreVeinsCache() const
+{
+	SortedGlobalOres = GlobalOreVeins;
+	SortedGlobalOres.Sort([](const FOreVeinConfig& A, const FOreVeinConfig& B) {
+		return A.Priority > B.Priority; // Higher priority first
+	});
+	bOreVeinsCacheDirty = false;
+}
+
+void UVoxelBiomeConfiguration::GetOreVeinsForBiome(uint8 BiomeID, TArray<FOreVeinConfig>& OutOres) const
+{
+	OutOres.Empty();
+
+	if (!bEnableOreVeins)
+	{
+		return;
+	}
+
+	// Rebuild cache if needed
+	if (bOreVeinsCacheDirty)
+	{
+		RebuildOreVeinsCache();
+	}
+
+	// Get the biome definition
+	const FBiomeDefinition* Biome = GetBiome(BiomeID);
+
+	if (Biome && Biome->BiomeOreVeins.Num() > 0)
+	{
+		// Biome has its own ores
+		if (Biome->bAddToGlobalOres)
+		{
+			// Combine biome ores with global ores
+			OutOres = SortedGlobalOres;
+			OutOres.Append(Biome->BiomeOreVeins);
+
+			// Re-sort by priority
+			OutOres.Sort([](const FOreVeinConfig& A, const FOreVeinConfig& B) {
+				return A.Priority > B.Priority;
+			});
+		}
+		else
+		{
+			// Biome ores replace global ores
+			OutOres = Biome->BiomeOreVeins;
+			OutOres.Sort([](const FOreVeinConfig& A, const FOreVeinConfig& B) {
+				return A.Priority > B.Priority;
+			});
+		}
+	}
+	else
+	{
+		// Use global ores
+		OutOres = SortedGlobalOres;
+	}
 }
 
 const FBiomeDefinition* UVoxelBiomeConfiguration::GetBiome(uint8 BiomeID) const
@@ -361,5 +466,6 @@ void UVoxelBiomeConfiguration::PostEditChangeProperty(FPropertyChangedEvent& Pro
 	// Mark caches as dirty when properties change
 	bBiomeIndexCacheDirty = true;
 	bHeightRulesCacheDirty = true;
+	bOreVeinsCacheDirty = true;
 }
 #endif

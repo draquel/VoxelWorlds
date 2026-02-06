@@ -273,6 +273,21 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 
 					// Apply height-based material overrides (snow at peaks, rock at altitude, etc.)
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
+
+					// Apply ore vein overrides (only for solid voxels well below surface)
+					// Use depth > 10 to ensure ores aren't visible on smooth terrain surfaces
+					// (smooth mesher scans up to 8 voxels for material selection)
+					if (Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 10.0f)
+					{
+						TArray<FOreVeinConfig> ApplicableOres;
+						BiomeConfig->GetOreVeinsForBiome(BiomeID, ApplicableOres);
+
+						uint8 OreMaterial = 0;
+						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial))
+						{
+							MaterialID = OreMaterial;
+						}
+					}
 				}
 				else if (Request.bEnableBiomes)
 				{
@@ -692,6 +707,21 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 
 					// Apply height-based material overrides
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
+
+					// Apply ore vein overrides (only for solid voxels well below surface)
+					// Use depth > 10 to ensure ores aren't visible on smooth terrain surfaces
+					// (smooth mesher scans up to 8 voxels for material selection)
+					if (Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 10.0f)
+					{
+						TArray<FOreVeinConfig> ApplicableOres;
+						BiomeConfig->GetOreVeinsForBiome(BiomeID, ApplicableOres);
+
+						uint8 OreMaterial = 0;
+						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial))
+						{
+							MaterialID = OreMaterial;
+						}
+					}
 				}
 				else if (Request.bEnableBiomes)
 				{
@@ -715,6 +745,90 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 			}
 		}
 	}
+}
+
+// ==================== Ore Vein Helpers ====================
+
+float FVoxelCPUNoiseGenerator::SampleOreVeinNoise(const FVector& WorldPos, const FOreVeinConfig& OreConfig, int32 WorldSeed)
+{
+	// Create ore-specific noise params
+	FVoxelNoiseParams OreNoiseParams;
+	OreNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	OreNoiseParams.Seed = WorldSeed + OreConfig.SeedOffset;
+	OreNoiseParams.Frequency = OreConfig.Frequency;
+	OreNoiseParams.Octaves = 2;  // Simple noise for ores
+	OreNoiseParams.Persistence = 0.5f;
+	OreNoiseParams.Lacunarity = 2.0f;
+	OreNoiseParams.Amplitude = 1.0f;
+
+	FVector SamplePos = WorldPos;
+
+	if (OreConfig.Shape == EOreVeinShape::Streak)
+	{
+		// For streak shapes, stretch the noise along a pseudo-random direction
+		// derived from position to create elongated vein shapes
+		const float StreakSeed = static_cast<float>(OreConfig.SeedOffset) * 0.1f;
+
+		// Create direction vector based on position (varies smoothly across world)
+		FVector StreakDir;
+		StreakDir.X = FMath::Sin(WorldPos.Y * 0.0001f + StreakSeed);
+		StreakDir.Y = FMath::Cos(WorldPos.X * 0.0001f + StreakSeed * 1.5f);
+		StreakDir.Z = FMath::Sin(WorldPos.Z * 0.0002f + StreakSeed * 2.0f);
+		StreakDir.Normalize();
+
+		// Project position onto perpendicular plane to stretch
+		FVector Projected = WorldPos - StreakDir * FVector::DotProduct(WorldPos, StreakDir);
+		SamplePos = Projected + StreakDir * (FVector::DotProduct(WorldPos, StreakDir) / OreConfig.StreakStretch);
+	}
+
+	// Sample noise
+	float NoiseValue = FBM3D(SamplePos, OreNoiseParams);
+
+	// Normalize from [-1, 1] to [0, 1]
+	return (NoiseValue + 1.0f) * 0.5f;
+}
+
+bool FVoxelCPUNoiseGenerator::CheckOreVeinPlacement(
+	const FVector& WorldPos,
+	float DepthBelowSurface,
+	const TArray<FOreVeinConfig>& OreConfigs,
+	int32 WorldSeed,
+	uint8& OutMaterialID)
+{
+	// Check each ore type in priority order (assumed to be pre-sorted)
+	for (const FOreVeinConfig& OreConfig : OreConfigs)
+	{
+		// Check depth constraints
+		if (!OreConfig.IsValidDepth(DepthBelowSurface))
+		{
+			continue;
+		}
+
+		// Sample ore noise at this position
+		float OreNoise = SampleOreVeinNoise(WorldPos, OreConfig, WorldSeed);
+
+		// Check against threshold
+		if (OreNoise >= OreConfig.Threshold)
+		{
+			// Apply rarity check (if rarity < 1, randomly skip some valid placements)
+			if (OreConfig.Rarity < 1.0f)
+			{
+				// Use deterministic random based on position
+				float RandomValue = FMath::Frac(
+					FMath::Sin(WorldPos.X * 12.9898f + WorldPos.Y * 78.233f + WorldPos.Z * 45.164f) * 43758.5453f
+				);
+				if (RandomValue > OreConfig.Rarity)
+				{
+					continue;
+				}
+			}
+
+			OutMaterialID = OreConfig.MaterialID;
+			return true;
+		}
+	}
+
+	return false;
 }
 
 void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
@@ -809,6 +923,21 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					BiomeID = Blend.GetDominantBiome();
 					MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, DistFromCenter, DepthBelowSurface);
+
+					// Apply ore vein overrides (only for solid voxels well below surface)
+					// Use depth > 10 to ensure ores aren't visible on smooth terrain surfaces
+					// (smooth mesher scans up to 8 voxels for material selection)
+					if (Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 10.0f)
+					{
+						TArray<FOreVeinConfig> ApplicableOres;
+						BiomeConfig->GetOreVeinsForBiome(BiomeID, ApplicableOres);
+
+						uint8 OreMaterial = 0;
+						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial))
+						{
+							MaterialID = OreMaterial;
+						}
+					}
 				}
 				else if (Request.bEnableBiomes)
 				{

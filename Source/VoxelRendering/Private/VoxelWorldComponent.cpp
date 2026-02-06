@@ -492,10 +492,17 @@ void UVoxelWorldComponent::UpdateMaterialAtlasParameters()
 	// Build texture arrays if needed (similar to LUT)
 	if (MaterialAtlas->AreTextureArraysDirty() || !MaterialAtlas->AlbedoArray)
 	{
-		UE_LOG(LogVoxelRendering, Log, TEXT("Building Texture Arrays (Dirty=%s, AlbedoArray=%s)"),
+		UE_LOG(LogVoxelRendering, Log, TEXT("Building Texture Arrays (Dirty=%s, AlbedoArray=%s, NumConfigs=%d)"),
 			MaterialAtlas->AreTextureArraysDirty() ? TEXT("Yes") : TEXT("No"),
-			MaterialAtlas->AlbedoArray ? TEXT("Exists") : TEXT("NULL"));
+			MaterialAtlas->AlbedoArray ? TEXT("Exists") : TEXT("NULL"),
+			MaterialAtlas->GetMaterialCount());
 		MaterialAtlas->BuildTextureArrays();
+	}
+
+	// Warn if arrays are still null after build attempt
+	if (!MaterialAtlas->AlbedoArray)
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("AlbedoArray is NULL after BuildTextureArrays! Check that MaterialConfigs have AlbedoTexture assigned."));
 	}
 
 	if (MaterialAtlas->AlbedoArray)

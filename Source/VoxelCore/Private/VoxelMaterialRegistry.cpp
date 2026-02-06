@@ -76,6 +76,52 @@ void FVoxelMaterialRegistry::EnsureInitialized()
 		2, 1
 	));
 
+	// Reserved slots (7-9) for future base materials
+	Materials.Add(FVoxelMaterialDefinition(7, TEXT("Reserved7"), FColor(100, 100, 100), 3, 1));
+	Materials.Add(FVoxelMaterialDefinition(8, TEXT("Reserved8"), FColor(100, 100, 100), 0, 2));
+	Materials.Add(FVoxelMaterialDefinition(9, TEXT("Reserved9"), FColor(100, 100, 100), 1, 2));
+
+	// Ore materials (10-14) - Row 2-3
+	// Coal - Dark Gray/Black (Col 2, Row 2)
+	Materials.Add(FVoxelMaterialDefinition(
+		EVoxelMaterial::Coal,
+		TEXT("Coal"),
+		FColor(32, 32, 32),
+		2, 2
+	));
+
+	// Iron - Rust/Orange (Col 3, Row 2)
+	Materials.Add(FVoxelMaterialDefinition(
+		EVoxelMaterial::Iron,
+		TEXT("Iron"),
+		FColor(150, 90, 60),
+		3, 2
+	));
+
+	// Gold - Yellow/Gold (Col 0, Row 3)
+	Materials.Add(FVoxelMaterialDefinition(
+		EVoxelMaterial::Gold,
+		TEXT("Gold"),
+		FColor(255, 215, 0),
+		0, 3
+	));
+
+	// Copper - Orange/Copper (Col 1, Row 3)
+	Materials.Add(FVoxelMaterialDefinition(
+		EVoxelMaterial::Copper,
+		TEXT("Copper"),
+		FColor(184, 115, 51),
+		1, 3
+	));
+
+	// Diamond - Light Blue/Cyan (Col 2, Row 3)
+	Materials.Add(FVoxelMaterialDefinition(
+		EVoxelMaterial::Diamond,
+		TEXT("Diamond"),
+		FColor(185, 242, 255),
+		2, 3
+	));
+
 	bInitialized = true;
 }
 

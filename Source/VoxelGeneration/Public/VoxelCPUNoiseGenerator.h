@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "IVoxelNoiseGenerator.h"
+#include "VoxelBiomeDefinition.h"
 
 class FInfinitePlaneWorldMode;
 class FIslandBowlWorldMode;
@@ -148,4 +149,31 @@ private:
 
 	/** Dot product for simplex gradient */
 	static float SimplexDot(const int32* G, float X, float Y, float Z);
+
+	// ==================== Ore Vein Helpers ====================
+
+	/**
+	 * Sample ore vein noise at a position.
+	 * @param WorldPos World position to sample
+	 * @param OreConfig Configuration for this ore type
+	 * @param WorldSeed Base world seed
+	 * @return Normalized noise value in range [0, 1]
+	 */
+	static float SampleOreVeinNoise(const FVector& WorldPos, const struct FOreVeinConfig& OreConfig, int32 WorldSeed);
+
+	/**
+	 * Check if an ore vein should be placed at a position and return the ore material.
+	 * @param WorldPos World position to check
+	 * @param DepthBelowSurface Depth below terrain surface in voxels
+	 * @param OreConfigs Array of ore configurations to check
+	 * @param WorldSeed Base world seed
+	 * @param OutMaterialID Output material ID if ore found
+	 * @return True if ore should be placed here
+	 */
+	static bool CheckOreVeinPlacement(
+		const FVector& WorldPos,
+		float DepthBelowSurface,
+		const TArray<struct FOreVeinConfig>& OreConfigs,
+		int32 WorldSeed,
+		uint8& OutMaterialID);
 };

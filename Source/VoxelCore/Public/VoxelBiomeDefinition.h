@@ -6,6 +6,117 @@
 #include "VoxelBiomeDefinition.generated.h"
 
 /**
+ * Maximum number of biomes that can be blended at once.
+ */
+constexpr int32 MAX_BIOME_BLEND = 4;
+
+/**
+ * Maximum number of ore veins that can be configured.
+ */
+constexpr int32 MAX_ORE_VEINS = 16;
+
+/**
+ * Shape type for ore vein generation.
+ */
+UENUM(BlueprintType)
+enum class EOreVeinShape : uint8
+{
+	/** Blobby, rounded clusters using 3D noise threshold */
+	Blob,
+
+	/** Elongated, streak-like veins using anisotropic/directional noise */
+	Streak
+};
+
+/**
+ * Configuration for a single ore vein type.
+ * Defines where and how ore deposits spawn in the terrain.
+ */
+USTRUCT(BlueprintType)
+struct VOXELCORE_API FOreVeinConfig
+{
+	GENERATED_BODY()
+
+	/** Display name for this ore type */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein")
+	FString Name;
+
+	/** Material ID for this ore (index into material atlas) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein")
+	uint8 MaterialID = 0;
+
+	/** Minimum depth below surface for ore to spawn (in voxels) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein", meta = (ClampMin = "0"))
+	float MinDepth = 3.0f;
+
+	/** Maximum depth below surface for ore to spawn (in voxels, 0 = no limit) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein")
+	float MaxDepth = 0.0f;
+
+	/** Shape of ore deposits */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein")
+	EOreVeinShape Shape = EOreVeinShape::Blob;
+
+	/** Frequency of ore noise (lower = larger deposits, higher = smaller deposits) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein", meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	float Frequency = 0.05f;
+
+	/** Noise threshold for ore placement (higher = rarer ore, 0.8-0.95 typical) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Threshold = 0.85f;
+
+	/** Seed offset for this ore type (added to world seed) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein")
+	int32 SeedOffset = 0;
+
+	/** Rarity multiplier (0-1, lower = rarer). Applied after threshold check. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Rarity = 1.0f;
+
+	/**
+	 * Stretch factor for streak-shaped veins.
+	 * Values > 1 create elongated deposits along random directions.
+	 * Only used when Shape == Streak.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein", meta = (ClampMin = "1.0", ClampMax = "10.0", EditCondition = "Shape == EOreVeinShape::Streak"))
+	float StreakStretch = 4.0f;
+
+	/** Priority for ore placement (higher = checked first, can override other ores) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Vein")
+	int32 Priority = 0;
+
+	FOreVeinConfig() = default;
+
+	FOreVeinConfig(const FString& InName, uint8 InMaterialID, float InMinDepth, float InMaxDepth,
+		EOreVeinShape InShape, float InFrequency, float InThreshold, int32 InSeedOffset, int32 InPriority = 0)
+		: Name(InName)
+		, MaterialID(InMaterialID)
+		, MinDepth(InMinDepth)
+		, MaxDepth(InMaxDepth)
+		, Shape(InShape)
+		, Frequency(InFrequency)
+		, Threshold(InThreshold)
+		, SeedOffset(InSeedOffset)
+		, Priority(InPriority)
+	{
+	}
+
+	/** Check if ore can spawn at this depth */
+	bool IsValidDepth(float DepthBelowSurface) const
+	{
+		if (DepthBelowSurface < MinDepth)
+		{
+			return false;
+		}
+		if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth)
+		{
+			return false;
+		}
+		return true;
+	}
+};
+
+/**
  * Definition of a biome with climate ranges and material assignments.
  * Biomes are selected based on temperature and moisture values.
  */
@@ -49,6 +160,18 @@ struct VOXELCORE_API FBiomeDefinition
 	/** Depth threshold between subsurface and deep (in voxels) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome")
 	float SubsurfaceDepth = 4.0f;
+
+	/**
+	 * Biome-specific ore veins (optional).
+	 * If populated, these override global ore veins for this biome.
+	 * If empty, global ore veins are used instead.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome|Ore")
+	TArray<FOreVeinConfig> BiomeOreVeins;
+
+	/** If true, biome ores ADD to global ores. If false, biome ores REPLACE global ores. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome|Ore")
+	bool bAddToGlobalOres = false;
 
 	FBiomeDefinition() = default;
 
@@ -190,11 +313,6 @@ struct VOXELCORE_API FHeightMaterialRule
 		return true;
 	}
 };
-
-/**
- * Maximum number of biomes that can be blended at once.
- */
-constexpr int32 MAX_BIOME_BLEND = 4;
 
 /**
  * Blend result containing multiple biomes with weights.

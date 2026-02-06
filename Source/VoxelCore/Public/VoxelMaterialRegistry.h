@@ -10,6 +10,7 @@
  */
 namespace EVoxelMaterial
 {
+	// Base terrain materials
 	constexpr uint8 Grass = 0;
 	constexpr uint8 Dirt = 1;
 	constexpr uint8 Stone = 2;
@@ -18,8 +19,15 @@ namespace EVoxelMaterial
 	constexpr uint8 Sandstone = 5;
 	constexpr uint8 FrozenDirt = 6;
 
-	/** Total number of defined materials */
-	constexpr uint8 Count = 7;
+	// Ore materials (10-19 range)
+	constexpr uint8 Coal = 10;
+	constexpr uint8 Iron = 11;
+	constexpr uint8 Gold = 12;
+	constexpr uint8 Copper = 13;
+	constexpr uint8 Diamond = 14;
+
+	/** Total number of defined materials (base + ores) */
+	constexpr uint8 Count = 15;
 }
 
 struct FVoxelMaterialTextureConfig;

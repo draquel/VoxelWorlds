@@ -63,6 +63,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Materials", meta = (EditCondition = "bEnableHeightMaterials"))
 	TArray<FHeightMaterialRule> HeightMaterialRules;
 
+	// ==================== Ore Vein Settings ====================
+
+	/**
+	 * Enable ore vein generation.
+	 * When enabled, ore deposits are placed using 3D noise patterns.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Veins")
+	bool bEnableOreVeins = true;
+
+	/**
+	 * Global ore vein configurations.
+	 * These ores spawn in all biomes (unless overridden by biome-specific ores).
+	 * Checked in priority order (highest first).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Veins", meta = (EditCondition = "bEnableOreVeins"))
+	TArray<FOreVeinConfig> GlobalOreVeins;
+
 	// ==================== Noise Parameters ====================
 
 	/**
@@ -162,6 +179,20 @@ public:
 	uint8 ApplyHeightMaterialRules(uint8 CurrentMaterial, float WorldHeight, float DepthBelowSurface) const;
 
 	/**
+	 * Get the applicable ore veins for a biome.
+	 * Returns biome-specific ores if configured, otherwise global ores.
+	 * @param BiomeID The biome to get ores for
+	 * @param OutOres Output array of applicable ore configs
+	 */
+	void GetOreVeinsForBiome(uint8 BiomeID, TArray<FOreVeinConfig>& OutOres) const;
+
+	/**
+	 * Check if ore veins are enabled and configured.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Ore")
+	bool HasOreVeins() const { return bEnableOreVeins && GlobalOreVeins.Num() > 0; }
+
+	/**
 	 * Check if this configuration is valid for use.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Biome")
@@ -193,4 +224,11 @@ private:
 
 	/** Rebuild the sorted height rules cache */
 	void RebuildHeightRulesCache() const;
+
+	/** Cached sorted global ore veins (sorted by priority descending) */
+	mutable TArray<FOreVeinConfig> SortedGlobalOres;
+	mutable bool bOreVeinsCacheDirty = true;
+
+	/** Rebuild the sorted ore veins cache */
+	void RebuildOreVeinsCache() const;
 };
