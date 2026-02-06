@@ -941,8 +941,12 @@ uint8 FVoxelCPUSmoothMesher::GetDominantMaterial(
 	int32 X, int32 Y, int32 Z,
 	uint8 CubeIndex) const
 {
-	// Count materials from solid corners
-	TMap<uint8, int32> MaterialCounts;
+	// Select material from the solid corner closest to the isosurface (density nearest 0.5).
+	// This ensures consistent surface material selection across all LOD levels.
+
+	constexpr uint8 IsosurfaceThreshold = 128; // 0.5 in uint8 density
+	uint8 SurfaceMaterial = 0;
+	int32 ClosestDistance = INT32_MAX;
 
 	for (int32 i = 0; i < 8; i++)
 	{
@@ -951,24 +955,19 @@ uint8 FVoxelCPUSmoothMesher::GetDominantMaterial(
 		{
 			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
 			const FVoxelData Voxel = GetVoxelAt(Request, X + Offset.X, Y + Offset.Y, Z + Offset.Z);
-			MaterialCounts.FindOrAdd(Voxel.MaterialID)++;
+
+			// Calculate distance from isosurface (how close density is to 0.5)
+			const int32 DistanceFromSurface = FMath::Abs(static_cast<int32>(Voxel.Density) - IsosurfaceThreshold);
+
+			if (DistanceFromSurface < ClosestDistance)
+			{
+				ClosestDistance = DistanceFromSurface;
+				SurfaceMaterial = Voxel.MaterialID;
+			}
 		}
 	}
 
-	// Find the most common material
-	uint8 DominantMaterial = 0;
-	int32 MaxCount = 0;
-
-	for (const auto& Pair : MaterialCounts)
-	{
-		if (Pair.Value > MaxCount)
-		{
-			MaxCount = Pair.Value;
-			DominantMaterial = Pair.Key;
-		}
-	}
-
-	return DominantMaterial;
+	return SurfaceMaterial;
 }
 
 uint8 FVoxelCPUSmoothMesher::GetDominantBiome(
@@ -976,8 +975,12 @@ uint8 FVoxelCPUSmoothMesher::GetDominantBiome(
 	int32 X, int32 Y, int32 Z,
 	uint8 CubeIndex) const
 {
-	// Count biomes from solid corners
-	TMap<uint8, int32> BiomeCounts;
+	// Select biome from the solid corner closest to the isosurface (density nearest 0.5).
+	// Consistent with GetDominantMaterial for uniform surface selection.
+
+	constexpr uint8 IsosurfaceThreshold = 128; // 0.5 in uint8 density
+	uint8 SurfaceBiome = 0;
+	int32 ClosestDistance = INT32_MAX;
 
 	for (int32 i = 0; i < 8; i++)
 	{
@@ -986,24 +989,19 @@ uint8 FVoxelCPUSmoothMesher::GetDominantBiome(
 		{
 			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
 			const FVoxelData Voxel = GetVoxelAt(Request, X + Offset.X, Y + Offset.Y, Z + Offset.Z);
-			BiomeCounts.FindOrAdd(Voxel.BiomeID)++;
+
+			// Calculate distance from isosurface (how close density is to 0.5)
+			const int32 DistanceFromSurface = FMath::Abs(static_cast<int32>(Voxel.Density) - IsosurfaceThreshold);
+
+			if (DistanceFromSurface < ClosestDistance)
+			{
+				ClosestDistance = DistanceFromSurface;
+				SurfaceBiome = Voxel.BiomeID;
+			}
 		}
 	}
 
-	// Find the most common biome
-	uint8 DominantBiome = 0;
-	int32 MaxCount = 0;
-
-	for (const auto& Pair : BiomeCounts)
-	{
-		if (Pair.Value > MaxCount)
-		{
-			MaxCount = Pair.Value;
-			DominantBiome = Pair.Key;
-		}
-	}
-
-	return DominantBiome;
+	return SurfaceBiome;
 }
 
 // ============================================================================
@@ -1045,35 +1043,57 @@ uint8 FVoxelCPUSmoothMesher::GetDominantMaterialLOD(
 	int32 Stride,
 	uint8 CubeIndex) const
 {
-	// Count materials from solid corners at strided positions
-	TMap<uint8, int32> MaterialCounts;
+	// For LOD > 0, find the surface material by scanning upward from solid corners.
+	// On slopes, the surface is at different Z levels across the cube, so we need
+	// to find the actual surface transition (solid→air) for each corner and use
+	// the material from just below that transition.
+	//
+	// Strategy: For each solid strided corner, scan upward to find where density
+	// drops below threshold (the surface), then use the last solid voxel's material.
+
+	constexpr int32 MaxScanDistance = 8; // Don't scan too far up
+	uint8 SurfaceMaterial = 0;
+	int32 HighestSurfaceZ = INT32_MIN;
 
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CubeIndex & (1 << i))
 		{
 			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-			const int32 SampleX = X + Offset.X * Stride;
-			const int32 SampleY = Y + Offset.Y * Stride;
-			const int32 SampleZ = Z + Offset.Z * Stride;
-			const FVoxelData Voxel = GetVoxelAt(Request, SampleX, SampleY, SampleZ);
-			MaterialCounts.FindOrAdd(Voxel.MaterialID)++;
+			const int32 CornerX = X + Offset.X * Stride;
+			const int32 CornerY = Y + Offset.Y * Stride;
+			const int32 CornerZ = Z + Offset.Z * Stride;
+
+			// Scan upward from this corner to find the surface
+			uint8 LastSolidMaterial = 0;
+			int32 SurfaceZ = CornerZ;
+
+			for (int32 dz = 0; dz <= MaxScanDistance; dz++)
+			{
+				const FVoxelData Voxel = GetVoxelAt(Request, CornerX, CornerY, CornerZ + dz);
+
+				if (Voxel.IsSolid())
+				{
+					LastSolidMaterial = Voxel.MaterialID;
+					SurfaceZ = CornerZ + dz;
+				}
+				else
+				{
+					// Found air - the surface is at the previous solid voxel
+					break;
+				}
+			}
+
+			// Use the material from the highest surface found (prefer grass over dirt)
+			if (SurfaceZ > HighestSurfaceZ)
+			{
+				HighestSurfaceZ = SurfaceZ;
+				SurfaceMaterial = LastSolidMaterial;
+			}
 		}
 	}
 
-	uint8 DominantMaterial = 0;
-	int32 MaxCount = 0;
-
-	for (const auto& Pair : MaterialCounts)
-	{
-		if (Pair.Value > MaxCount)
-		{
-			MaxCount = Pair.Value;
-			DominantMaterial = Pair.Key;
-		}
-	}
-
-	return DominantMaterial;
+	return SurfaceMaterial;
 }
 
 uint8 FVoxelCPUSmoothMesher::GetDominantBiomeLOD(
@@ -1082,35 +1102,51 @@ uint8 FVoxelCPUSmoothMesher::GetDominantBiomeLOD(
 	int32 Stride,
 	uint8 CubeIndex) const
 {
-	// Count biomes from solid corners at strided positions
-	TMap<uint8, int32> BiomeCounts;
+	// For LOD > 0, find the surface biome by scanning upward from solid corners.
+	// Consistent with GetDominantMaterialLOD approach.
+
+	constexpr int32 MaxScanDistance = 8;
+	uint8 SurfaceBiome = 0;
+	int32 HighestSurfaceZ = INT32_MIN;
 
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CubeIndex & (1 << i))
 		{
 			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-			const int32 SampleX = X + Offset.X * Stride;
-			const int32 SampleY = Y + Offset.Y * Stride;
-			const int32 SampleZ = Z + Offset.Z * Stride;
-			const FVoxelData Voxel = GetVoxelAt(Request, SampleX, SampleY, SampleZ);
-			BiomeCounts.FindOrAdd(Voxel.BiomeID)++;
+			const int32 CornerX = X + Offset.X * Stride;
+			const int32 CornerY = Y + Offset.Y * Stride;
+			const int32 CornerZ = Z + Offset.Z * Stride;
+
+			// Scan upward from this corner to find the surface
+			uint8 LastSolidBiome = 0;
+			int32 SurfaceZ = CornerZ;
+
+			for (int32 dz = 0; dz <= MaxScanDistance; dz++)
+			{
+				const FVoxelData Voxel = GetVoxelAt(Request, CornerX, CornerY, CornerZ + dz);
+
+				if (Voxel.IsSolid())
+				{
+					LastSolidBiome = Voxel.BiomeID;
+					SurfaceZ = CornerZ + dz;
+				}
+				else
+				{
+					break;
+				}
+			}
+
+			// Use the biome from the highest surface found
+			if (SurfaceZ > HighestSurfaceZ)
+			{
+				HighestSurfaceZ = SurfaceZ;
+				SurfaceBiome = LastSolidBiome;
+			}
 		}
 	}
 
-	uint8 DominantBiome = 0;
-	int32 MaxCount = 0;
-
-	for (const auto& Pair : BiomeCounts)
-	{
-		if (Pair.Value > MaxCount)
-		{
-			MaxCount = Pair.Value;
-			DominantBiome = Pair.Key;
-		}
-	}
-
-	return DominantBiome;
+	return SurfaceBiome;
 }
 
 // ============================================================================
