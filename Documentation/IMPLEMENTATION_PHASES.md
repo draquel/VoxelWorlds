@@ -133,29 +133,31 @@ Configuration options in `UVoxelWorldConfiguration`:
 
 ---
 
-## Phase 5: World Modes (Weeks 9-10)
+## Phase 5: World Modes (Weeks 9-10) ✓ COMPLETE
 
 **Goal**: Multiple world types
 
 ### Tasks
 - [x] Material atlas system
-- [ ] Spherical planet mode
-- [ ] Island/bowl mode
-- [ ] World mode-specific LOD
-- [ ] Advanced biome blending
-- [ ] Height-based material assignment
-- [ ] Ocean/water level support
+- [x] Spherical planet mode
+- [x] Island/bowl mode
+- [x] World mode-specific LOD culling
+- [x] LOD material selection fix (smooth terrain)
+- [x] Streaming performance optimizations
+- [ ] Advanced biome blending (deferred)
+- [ ] Height-based material assignment (deferred)
+- [ ] Ocean/water level support (deferred)
 
 ### Deliverables
-- 3 working world modes
-- Biome transitions look natural
-- Materials vary by height/biome
+- 3 working world modes ✓
+- Mode-specific chunk culling ✓
+- Optimized streaming pipeline ✓
 
 ### Success Criteria
-- All 3 world modes functional
-- Spherical planet has correct curvature
-- Island has smooth falloff
-- Biomes blend well
+- All 3 world modes functional ✓
+- Spherical planet has correct curvature ✓
+- Island has smooth falloff ✓
+- LOD transitions without material pop-in ✓
 
 ### Notes on Material Atlas System
 The material atlas system was implemented with the following components:
@@ -195,6 +197,86 @@ The material atlas system was implemented with the following components:
    - UVoxelWorldComponent::UpdateMaterialAtlasParameters() binds all textures
    - FVoxelCustomVFRenderer::Initialize() syncs mode from configuration
    - Texture arrays auto-built on first use if dirty
+
+### Notes on World Modes Implementation
+
+All three world modes are now fully implemented:
+
+1. **Infinite Plane Mode (FInfinitePlaneWorldMode)**:
+   - 2D heightmap terrain extending infinitely in X/Y
+   - Configurable SeaLevel, HeightScale, BaseHeight
+   - Terrain bounds culling: Chunks above/below terrain height range are skipped
+
+2. **Island Bowl Mode (FIslandBowlWorldMode)**:
+   - Bounded terrain with configurable edge falloff
+   - Falloff types: Linear, Smooth (hermite), Squared, Exponential
+   - Parameters: IslandRadius, FalloffWidth, IslandCenterX/Y, EdgeHeight, bBowlShape
+   - Island boundary culling: Chunks beyond IslandRadius + FalloffWidth are skipped
+
+3. **Spherical Planet Mode (FSphericalPlanetWorldMode)**:
+   - Radial terrain on spherical surface
+   - Cubic chunks with radial density calculation
+   - Noise sampled via direction vector from planet center
+   - Parameters: WorldRadius, PlanetMaxTerrainHeight, PlanetMaxTerrainDepth, PlanetSpawnLocation
+   - Horizon culling: Chunks beyond geometric horizon are skipped
+   - Shell culling: Inner core and outer space chunks are skipped
+   - Spawn position helper: `GetPlanetSpawnPosition()` returns surface spawn location
+
+### Notes on Mode-Specific LOD Culling
+
+The LOD strategy now includes mode-specific culling optimizations:
+
+1. **Terrain Bounds Culling (Infinite Plane)**:
+   - `ShouldCullOutsideTerrainBounds()` skips chunks above/below terrain height range
+   - Height range: SeaLevel + BaseHeight ± HeightScale with buffer
+
+2. **Island Boundary Culling (Island Mode)**:
+   - `ShouldCullIslandBoundary()` skips chunks beyond island extent
+   - Extent = IslandRadius + FalloffWidth + chunk diagonal buffer
+
+3. **Horizon/Shell Culling (Spherical Planet)**:
+   - `ShouldCullBeyondHorizon()` skips chunks beyond geometric horizon
+   - Horizon distance: √(2Rh + h²) where R = planet radius, h = viewer altitude
+   - Inner shell: Chunks closer to center than WorldRadius - MaxTerrainDepth
+   - Outer shell: Chunks farther than WorldRadius + MaxTerrainHeight
+
+### Notes on Streaming Optimizations
+
+The streaming system was significantly optimized:
+
+1. **Queue Management (O(1) Duplicate Detection)**:
+   - TSet tracking alongside queue arrays
+   - `Algo::LowerBound()` for O(log n) sorted insertion
+   - Queue growth capped at 2× processing rate per frame
+
+2. **Separated Load/Unload Decisions**:
+   - Load decisions: Only when viewer crosses chunk boundary
+   - Unload decisions: Every frame (cheap operation, prevents orphaned chunks)
+   - `UpdateLoadDecisions()` and `UpdateUnloadDecisions()` split from single method
+
+3. **LOD Update Threshold**:
+   - Skip LOD morph factor updates when viewer moved < 100 units
+   - Cached positions: `CachedViewerChunk`, `LastStreamingUpdatePosition`, `LastLODUpdatePosition`
+
+### Notes on LOD Material Selection Fix (Smooth Terrain)
+
+Fixed material pop-in at LOD > 0 in smooth terrain mode:
+
+**Problem**: At higher LOD levels, strided sampling misses thin surface material layer, showing underground materials that get "covered" when LOD 0 loads.
+
+**Solution**: `GetDominantMaterialLOD()` scans upward from each solid corner to find actual surface:
+```cpp
+// For each solid corner in the cube:
+// 1. Scan upward from corner position (max 8 voxels)
+// 2. Track the last solid material before hitting air
+// 3. Record the Z position of the surface transition
+// 4. Use material from corner with highest surface Z
+
+// This ensures grass (on surface) is selected over dirt (underground)
+// even when LOD stride causes corners to sample below surface
+```
+
+Same approach applied to `GetDominantBiomeLOD()` for biome selection.
 
 ---
 
@@ -267,8 +349,8 @@ The material atlas system was implemented with the following components:
 
 ## Current Status
 
-**Active Phase**: Phase 5 (World Modes)
-**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE - Phase 4 COMPLETE
+**Active Phase**: Phase 6 (Editing & Collision)
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE - Phase 4 COMPLETE - Phase 5 COMPLETE
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -385,7 +467,7 @@ The material atlas system was implemented with the following components:
    - `bUseTransvoxel`: Per-mesher toggle (default: false)
    - `bGenerateSkirts`: Fallback seam handling (default: true)
 
-**Phase 5 In Progress**:
+**Phase 5 Completed**:
 1. ~~Material atlas system~~ - COMPLETE
    - UVoxelMaterialAtlas: Data asset with packed atlases and auto-built Texture2DArrays
    - FVoxelMaterialTextureConfig: Per-material configuration (source textures, face variants)
@@ -398,9 +480,28 @@ The material atlas system was implemented with the following components:
    - Runtime binding via DynamicMaterialInstance in UVoxelWorldComponent
    - VoxelTriplanarCommon.ush: Shared triplanar utility functions
 
-**Next Immediate Steps** (Phase 5):
-1. Spherical planet mode
-2. Island/bowl mode
+2. ~~World Modes~~ - COMPLETE
+   - FInfinitePlaneWorldMode: 2D heightmap, infinite X/Y, terrain bounds culling
+   - FIslandBowlWorldMode: Bounded terrain with configurable falloff (4 types)
+   - FSphericalPlanetWorldMode: Radial terrain, horizon/shell culling, spawn position helper
+
+3. ~~Mode-Specific LOD Culling~~ - COMPLETE
+   - Terrain bounds culling for Infinite Plane
+   - Island boundary culling for Island/Bowl mode
+   - Horizon + shell culling for Spherical Planet
+
+4. ~~Streaming Optimizations~~ - COMPLETE
+   - O(1) duplicate detection with TSet tracking
+   - Separated load/unload decisions (unload every frame)
+   - Position-based LOD update threshold
+
+5. ~~LOD Material Selection Fix~~ - COMPLETE
+   - Upward surface scanning for smooth terrain at LOD > 0
+   - Prevents underground material pop-in
+
+**Next Immediate Steps** (Phase 6):
+1. Edit layer implementation
+2. Add/subtract/paint tools
 
 ---
 

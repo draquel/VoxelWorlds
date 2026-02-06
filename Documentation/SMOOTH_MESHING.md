@@ -1,7 +1,7 @@
 # Smooth Meshing System
 
 **Module**: VoxelMeshing
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-06
 
 ## Table of Contents
 
@@ -325,7 +325,7 @@ FVoxelData CornerXPosYPosZPos, ...;
 
 ### Material Assignment
 
-For smooth meshes, material comes from the majority of solid corners:
+For smooth meshes at LOD 0, material comes from the majority of solid corners:
 
 ```cpp
 uint8 GetDominantMaterial(int X, int Y, int Z, uint8 CubeIndex) {
@@ -340,6 +340,61 @@ uint8 GetDominantMaterial(int X, int Y, int Z, uint8 CubeIndex) {
     return MaterialCounts.FindMaxKey();
 }
 ```
+
+### LOD Material Selection (LOD > 0)
+
+At higher LOD levels, the standard majority-vote approach causes material pop-in because strided sampling misses thin surface layers. The surface material (e.g., grass) may only be 1-2 voxels thick, while the strided cube samples deeper underground materials (e.g., dirt).
+
+**Solution**: Upward surface scanning finds the actual surface transition:
+
+```cpp
+uint8 GetDominantMaterialLOD(const FVoxelMeshingRequest& Request,
+                              int32 X, int32 Y, int32 Z,
+                              int32 Stride, uint8 CubeIndex) const
+{
+    constexpr int32 MaxScanDistance = 8;
+    uint8 SurfaceMaterial = 0;
+    int32 HighestSurfaceZ = INT32_MIN;
+
+    // For each solid corner in the cube
+    for (int32 i = 0; i < 8; i++) {
+        if (CubeIndex & (1 << i)) {
+            const FIntVector& Offset = CornerOffsets[i];
+            const int32 CornerX = X + Offset.X * Stride;
+            const int32 CornerY = Y + Offset.Y * Stride;
+            const int32 CornerZ = Z + Offset.Z * Stride;
+
+            uint8 LastSolidMaterial = 0;
+            int32 SurfaceZ = CornerZ;
+
+            // Scan upward from corner to find surface
+            for (int32 dz = 0; dz <= MaxScanDistance; dz++) {
+                const FVoxelData Voxel = GetVoxelAt(Request, CornerX, CornerY, CornerZ + dz);
+                if (Voxel.IsSolid()) {
+                    LastSolidMaterial = Voxel.MaterialID;
+                    SurfaceZ = CornerZ + dz;
+                } else {
+                    break;  // Hit air, surface found
+                }
+            }
+
+            // Use material from corner with highest surface Z
+            // (prefers grass on slopes over dirt underground)
+            if (SurfaceZ > HighestSurfaceZ) {
+                HighestSurfaceZ = SurfaceZ;
+                SurfaceMaterial = LastSolidMaterial;
+            }
+        }
+    }
+    return SurfaceMaterial;
+}
+```
+
+**Why This Works**:
+- Even when LOD stride causes corners to sample below surface, scanning upward finds the actual surface
+- Using highest surface Z ensures grass (on top) is preferred over dirt (on slopes where one corner touches surface)
+- MaxScanDistance of 8 limits performance impact while covering typical terrain variations
+- Same approach applied to `GetDominantBiomeLOD()` for consistent biome selection
 
 ---
 
@@ -422,4 +477,34 @@ Per 32^3 chunk at LOD 0:
 
 ---
 
-**Status**: Implemented - CPU Transvoxel active, GPU implementation pending
+---
+
+## LOD-Aware Material Selection
+
+### The Problem
+
+At LOD > 0, Marching Cubes samples with a stride (LOD 1 = stride 2, LOD 2 = stride 4, etc.). This causes the cube corners to sample deeper into the terrain than at LOD 0. When the surface material layer (grass) is thin (1-2 voxels), the strided corners may entirely miss it, causing underground materials (dirt, stone) to be selected.
+
+This manifests as visible "pop-in" when chunks transition from high LOD to LOD 0 - the material suddenly changes from dirt to grass.
+
+### The Solution
+
+Instead of simple majority voting, `GetDominantMaterialLOD()` scans upward from each solid corner to find the actual surface transition point:
+
+1. For each solid corner in the cube, scan upward (max 8 voxels)
+2. Track the last solid material before hitting air
+3. Record the Z position of this surface transition
+4. Use the material from the corner with the highest surface Z
+
+This ensures that surface materials (grass on top) are preferred over underground materials (dirt on slopes).
+
+### Implementation Notes
+
+- `MaxScanDistance = 8` limits performance impact
+- Same approach used for `GetDominantBiomeLOD()` to prevent biome pop-in
+- At LOD 0, standard majority voting is used (no scanning needed)
+- The fix only affects smooth meshing; cubic meshing uses face-based material assignment
+
+---
+
+**Status**: Implemented - CPU Marching Cubes with LOD material fix, skirts enabled by default, Transvoxel available but disabled

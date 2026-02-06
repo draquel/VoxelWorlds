@@ -506,6 +506,154 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
 
 ---
 
+## Mode-Specific Culling
+
+The LOD strategy includes mode-specific culling optimizations that skip chunks guaranteed to be empty or invisible, significantly reducing the number of chunks loaded.
+
+### Terrain Bounds Culling (Infinite Plane)
+
+For infinite plane mode, chunks above or below the terrain height range are skipped:
+
+```cpp
+bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
+    const FIntVector& ChunkCoord,
+    const FLODQueryContext& Context) const
+{
+    if (WorldMode != EWorldMode::InfinitePlane) return false;
+
+    const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+    const float ChunkMinZ = Context.WorldOrigin.Z + (ChunkCoord.Z * ChunkWorldSize);
+    const float ChunkMaxZ = ChunkMinZ + ChunkWorldSize;
+
+    // Skip chunks entirely above terrain max or below terrain min
+    if (ChunkMaxZ < TerrainMinHeight) return true;
+    if (ChunkMinZ > TerrainMaxHeight) return true;
+
+    return false;
+}
+```
+
+**Height Range Calculation**:
+- `TerrainMinHeight = SeaLevel + BaseHeight - HeightScale - Buffer`
+- `TerrainMaxHeight = SeaLevel + BaseHeight + HeightScale + Buffer`
+- Buffer accounts for noise variation and prevents popping
+
+### Island Boundary Culling (Island/Bowl Mode)
+
+For island mode, chunks beyond the island extent are skipped:
+
+```cpp
+bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
+    const FIntVector& ChunkCoord,
+    const FLODQueryContext& Context) const
+{
+    if (WorldMode != EWorldMode::IslandBowl) return false;
+
+    const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+    const FVector ChunkCenter = Context.WorldOrigin +
+        FVector(ChunkCoord) * ChunkWorldSize +
+        FVector(ChunkWorldSize * 0.5f);
+
+    // 2D distance from island center
+    const FVector2D ToCenter(
+        ChunkCenter.X - (Context.WorldOrigin.X + IslandCenterOffset.X),
+        ChunkCenter.Y - (Context.WorldOrigin.Y + IslandCenterOffset.Y)
+    );
+    const float Distance2D = ToCenter.Size();
+
+    // Add buffer for chunk diagonal
+    const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_2;
+    const float CullDistance = IslandTotalExtent + ChunkDiagonal;
+
+    return Distance2D > CullDistance;
+}
+```
+
+**Island Extent**: `IslandRadius + FalloffWidth`
+
+### Horizon and Shell Culling (Spherical Planet)
+
+For spherical planets, three types of culling are applied:
+
+```cpp
+bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
+    const FIntVector& ChunkCoord,
+    const FLODQueryContext& Context) const
+{
+    if (WorldMode != EWorldMode::SphericalPlanet) return false;
+
+    const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+    const FVector ChunkCenter = Context.WorldOrigin +
+        FVector(ChunkCoord) * ChunkWorldSize +
+        FVector(ChunkWorldSize * 0.5f);
+
+    // Distance from planet center
+    const float ChunkDistFromCenter = FVector::Distance(ChunkCenter, Context.WorldOrigin);
+
+    // Inner shell culling (planet core - no terrain here)
+    const float InnerShellRadius = PlanetRadius - PlanetMaxTerrainDepth;
+    if (ChunkDistFromCenter < InnerShellRadius - ChunkWorldSize) {
+        return true;  // Deep inside planet
+    }
+
+    // Outer shell culling (empty space above terrain)
+    const float OuterShellRadius = PlanetRadius + PlanetMaxTerrainHeight;
+    if (ChunkDistFromCenter > OuterShellRadius + ChunkWorldSize) {
+        return true;  // Far above surface
+    }
+
+    // Horizon culling
+    const float ViewerDistFromCenter = FVector::Distance(Context.ViewerPosition, Context.WorldOrigin);
+    const float ViewerAltitude = ViewerDistFromCenter - PlanetRadius;
+
+    if (ViewerAltitude > 0) {
+        // Geometric horizon distance: sqrt(2*R*h + h^2)
+        const float HorizonDistance = FMath::Sqrt(
+            2.0f * PlanetRadius * ViewerAltitude +
+            ViewerAltitude * ViewerAltitude
+        );
+
+        // Add buffer for terrain height and chunk size
+        const float CullDistance = HorizonDistance +
+            PlanetMaxTerrainHeight +
+            ChunkWorldSize * UE_SQRT_3;
+
+        const float ChunkDistance = FVector::Distance(ChunkCenter, Context.ViewerPosition);
+        if (ChunkDistance > CullDistance) {
+            return true;  // Beyond horizon
+        }
+    }
+
+    return false;
+}
+```
+
+**Horizon Formula**: `√(2Rh + h²)` where R = planet radius, h = viewer altitude
+
+### Integration with Streaming
+
+Culling checks are applied in both load and unload decisions:
+
+```cpp
+// In GetChunksToLoad(): Skip chunks that would be culled
+if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context) ||
+    ShouldCullIslandBoundary(ChunkCoord, Context) ||
+    ShouldCullBeyondHorizon(ChunkCoord, Context))
+{
+    continue;  // Don't add to load queue
+}
+
+// In GetChunksToUnload(): Unload chunks that should now be culled
+if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context) ||
+    ShouldCullIslandBoundary(ChunkCoord, Context) ||
+    ShouldCullBeyondHorizon(ChunkCoord, Context))
+{
+    OutUnload.Add(ChunkCoord);
+}
+```
+
+---
+
 ## Future Strategies
 
 ### Quadtree LOD (Future)
@@ -942,10 +1090,13 @@ if (NeighborState->LODLevel > CurrentLOD) {
 6. Add debug visualization
 7. ~~Profile and optimize~~ ✓ (Phase 1 & 2 streaming optimizations)
 8. ~~Implement Transvoxel for smooth meshing LOD seams~~ ✓
-9. **(Future)** Phase 3: LOD hysteresis if thrashing observed at large view distances
+9. ~~Mode-specific culling~~ ✓ (Terrain bounds, island boundary, horizon/shell)
+10. ~~LOD material selection fix~~ ✓ (Upward surface scanning)
+11. **(Future)** Phase 3: LOD hysteresis if thrashing observed at large view distances
+12. **(Future)** Octree LOD for orbital-scale spherical planet viewing
 
 See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
 ---
 
-**Status**: Implemented - Distance band LOD with Transvoxel seam handling and streaming optimizations
+**Status**: Implemented - Distance band LOD with mode-specific culling, Transvoxel seam handling, and streaming optimizations
