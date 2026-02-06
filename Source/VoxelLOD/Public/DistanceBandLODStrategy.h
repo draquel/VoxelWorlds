@@ -159,6 +159,15 @@ protected:
 	FColor GetLODDebugColor(int32 LODLevel) const;
 
 	/**
+	 * Check if chunk should be culled for Infinite Plane mode (outside terrain bounds).
+	 * Returns true if chunk should be CULLED (not rendered).
+	 */
+	bool ShouldCullOutsideTerrainBounds(
+		const FIntVector& ChunkCoord,
+		const FLODQueryContext& Context
+	) const;
+
+	/**
 	 * Check if chunk should be culled for Island mode (beyond island boundary).
 	 * Returns true if chunk should be CULLED (not rendered).
 	 */
@@ -210,6 +219,14 @@ protected:
 	int32 MinVerticalChunks = -2;
 	int32 MaxVerticalChunks = 4;
 
+	// ==================== Infinite Plane Mode Culling ====================
+
+	/** Minimum terrain height (SeaLevel + BaseHeight - buffer) */
+	float TerrainMinHeight = 0.0f;
+
+	/** Maximum terrain height (SeaLevel + BaseHeight + HeightScale + buffer) */
+	float TerrainMaxHeight = 0.0f;
+
 	// ==================== Island Mode Culling ====================
 
 	/** Total island extent (IslandRadius + FalloffWidth) for boundary culling */
@@ -225,6 +242,9 @@ protected:
 
 	/** Max terrain height above planet radius (for horizon buffer) */
 	float PlanetMaxTerrainHeight = 0.0f;
+
+	/** Max terrain depth below planet radius (for inner shell culling) */
+	float PlanetMaxTerrainDepth = 0.0f;
 
 	// ==================== Runtime State ====================
 

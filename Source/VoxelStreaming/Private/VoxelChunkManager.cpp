@@ -78,14 +78,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		LODStrategy->Update(Context, DeltaTime);
 	}
 
-	// Update streaming decisions only when necessary
+	// Update LOAD decisions only when viewer chunk changes (expensive operation)
 	if (bNeedStreamingUpdate)
 	{
 		// Clear the force flag BEFORE UpdateStreamingDecisions - it may set it again if more chunks remain
 		const bool bWasForced = bForceStreamingUpdate;
 		bForceStreamingUpdate = false;
 
-		UpdateStreamingDecisions(Context);
+		UpdateLoadDecisions(Context);
 		CachedViewerChunk = CurrentViewerChunk;
 		LastStreamingUpdatePosition = Context.ViewerPosition;
 
@@ -95,6 +95,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			bWasForced ? TEXT("Yes") : TEXT("No"),
 			bForceStreamingUpdate ? TEXT("Yes") : TEXT("No"));
 	}
+
+	// ALWAYS update UNLOAD decisions (cheap operation, prevents orphaned chunks)
+	UpdateUnloadDecisions(Context);
 
 	// Process queues (time-sliced)
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
@@ -696,14 +699,14 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 	return Context;
 }
 
-void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Context)
+void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 {
 	if (!LODStrategy)
 	{
 		return;
 	}
 
-	// Get chunks to load
+	// Get chunks to load (expensive operation - iterates visible area)
 	TArray<FChunkLODRequest> ChunksToLoad;
 	LODStrategy->GetChunksToLoad(ChunksToLoad, LoadedChunkCoords, Context);
 
@@ -754,8 +757,16 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 		bForceStreamingUpdate = true;
 		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Streaming: %d chunks remaining, will continue next frame"), ChunksRemaining);
 	}
+}
 
-	// Get chunks to unload
+void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
+{
+	if (!LODStrategy)
+	{
+		return;
+	}
+
+	// Get chunks to unload (cheap operation - just iterates loaded chunks)
 	TArray<FIntVector> ChunksToUnload;
 	LODStrategy->GetChunksToUnload(ChunksToUnload, LoadedChunkCoords, Context);
 

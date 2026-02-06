@@ -315,9 +315,16 @@ protected:
 	FLODQueryContext BuildQueryContext() const;
 
 	/**
-	 * Update streaming decisions based on LOD strategy.
+	 * Update LOAD decisions based on LOD strategy.
+	 * Called only when viewer chunk changes (expensive operation).
 	 */
-	void UpdateStreamingDecisions(const FLODQueryContext& Context);
+	void UpdateLoadDecisions(const FLODQueryContext& Context);
+
+	/**
+	 * Update UNLOAD decisions based on LOD strategy.
+	 * Called every frame to ensure orphaned chunks are cleaned up.
+	 */
+	void UpdateUnloadDecisions(const FLODQueryContext& Context);
 
 	/**
 	 * Process the generation queue (time-sliced).

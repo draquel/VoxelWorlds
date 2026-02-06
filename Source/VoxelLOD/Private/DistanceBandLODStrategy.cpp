@@ -40,24 +40,20 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	// This allows easy control over render distance independent of LOD band setup
 	MaxViewDistance = WorldConfig->ViewDistance;
 
-	// Set vertical range based on world mode
-	switch (WorldMode)
+	// Cache world-mode-specific parameters first (needed for vertical range calculation)
+	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+
+	// Cache Infinite Plane terrain bounds for vertical culling
+	if (WorldMode == EWorldMode::InfinitePlane)
 	{
-		case EWorldMode::InfinitePlane:
-			MinVerticalChunks = -2;
-			MaxVerticalChunks = 8;
-			break;
+		// Terrain extends from SeaLevel + BaseHeight (minimum) to SeaLevel + BaseHeight + HeightScale (maximum)
+		// Add one chunk as buffer for terrain variation and meshing
+		const float TerrainBase = WorldConfig->SeaLevel + WorldConfig->BaseHeight;
+		TerrainMinHeight = TerrainBase - ChunkWorldSize; // One chunk below base for safety
+		TerrainMaxHeight = TerrainBase + WorldConfig->HeightScale + ChunkWorldSize; // One chunk above max
 
-		case EWorldMode::SphericalPlanet:
-			// Spherical worlds need full 3D range
-			MinVerticalChunks = -32;
-			MaxVerticalChunks = 32;
-			break;
-
-		case EWorldMode::IslandBowl:
-			MinVerticalChunks = -4;
-			MaxVerticalChunks = 8;
-			break;
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Terrain bounds culling: Height range [%.0f - %.0f]"),
+			TerrainMinHeight, TerrainMaxHeight);
 	}
 
 	// Cache Island mode parameters for boundary culling
@@ -70,20 +66,55 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 			IslandTotalExtent, IslandCenterOffset.X, IslandCenterOffset.Y);
 	}
 
-	// Cache Spherical Planet parameters for horizon culling
+	// Cache Spherical Planet parameters for shell culling
 	if (WorldMode == EWorldMode::SphericalPlanet)
 	{
 		PlanetRadius = WorldConfig->WorldRadius;
 		PlanetMaxTerrainHeight = WorldConfig->PlanetMaxTerrainHeight;
+		PlanetMaxTerrainDepth = WorldConfig->PlanetMaxTerrainDepth;
 
-		UE_LOG(LogVoxelLOD, Log, TEXT("  Horizon culling enabled: PlanetRadius=%.0f, MaxTerrainHeight=%.0f"),
-			PlanetRadius, PlanetMaxTerrainHeight);
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Shell culling enabled: Radius=%.0f, Height=%.0f, Depth=%.0f"),
+			PlanetRadius, PlanetMaxTerrainHeight, PlanetMaxTerrainDepth);
+	}
+
+	// Set vertical range based on world mode
+	switch (WorldMode)
+	{
+		case EWorldMode::InfinitePlane:
+			MinVerticalChunks = -2;
+			MaxVerticalChunks = 8;
+			break;
+
+		case EWorldMode::SphericalPlanet:
+		{
+			// For spherical planets, calculate vertical range based on terrain shell thickness
+			// The terrain shell extends from (Radius - Depth) to (Radius + Height)
+			// We need chunks that can intersect this shell within view distance
+			const float ShellThickness = PlanetMaxTerrainHeight + PlanetMaxTerrainDepth;
+			const float MaxVerticalExtent = FMath::Min(MaxViewDistance, PlanetRadius + PlanetMaxTerrainHeight);
+
+			// Calculate chunk range needed to cover the vertical extent
+			// Use a reasonable range based on view distance, not the full planet
+			const int32 VerticalChunkRange = FMath::CeilToInt(MaxVerticalExtent / ChunkWorldSize) + 1;
+
+			// Clamp to reasonable limits
+			MinVerticalChunks = -FMath::Min(VerticalChunkRange, 16);
+			MaxVerticalChunks = FMath::Min(VerticalChunkRange, 16);
+
+			UE_LOG(LogVoxelLOD, Log, TEXT("  Spherical vertical range: %d to %d chunks (shell thickness=%.0f)"),
+				MinVerticalChunks, MaxVerticalChunks, ShellThickness);
+			break;
+		}
+
+		case EWorldMode::IslandBowl:
+			MinVerticalChunks = -4;
+			MaxVerticalChunks = 8;
+			break;
 	}
 
 	bIsInitialized = true;
 
-	// Calculate expected chunk radius for reference
-	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+	// Calculate expected chunk radius for reference (ChunkWorldSize already defined above)
 	const int32 ExpectedChunkRadius = FMath::CeilToInt(MaxViewDistance / ChunkWorldSize) + 1;
 
 	UE_LOG(LogVoxelLOD, Log, TEXT("FDistanceBandLODStrategy initialized:"));
@@ -208,13 +239,19 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 				}
 
 				// World-mode-specific culling
+				// Infinite plane: skip chunks outside terrain height bounds
+				if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context))
+				{
+					continue;
+				}
+
 				// Island mode: skip chunks outside island boundary
 				if (ShouldCullIslandBoundary(ChunkCoord, Context))
 				{
 					continue;
 				}
 
-				// Spherical planet mode: skip chunks beyond horizon
+				// Spherical planet mode: skip chunks beyond horizon/shell
 				if (ShouldCullBeyondHorizon(ChunkCoord, Context))
 				{
 					continue;
@@ -297,11 +334,28 @@ void FDistanceBandLODStrategy::GetChunksToUnload(
 	// Check each loaded chunk
 	for (const FIntVector& ChunkCoord : LoadedChunks)
 	{
-		const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-		const float Distance = GetDistanceToViewer(ChunkCenter, Context);
+		bool bShouldUnload = false;
 
-		// Unload if beyond unload distance
-		if (Distance > UnloadDistance)
+		// Check world-mode-specific culling first (these should be unloaded immediately)
+		if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context) ||
+			ShouldCullIslandBoundary(ChunkCoord, Context) ||
+			ShouldCullBeyondHorizon(ChunkCoord, Context))
+		{
+			bShouldUnload = true;
+		}
+		else
+		{
+			// Standard distance-based unloading
+			const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
+			const float Distance = GetDistanceToViewer(ChunkCenter, Context);
+
+			if (Distance > UnloadDistance)
+			{
+				bShouldUnload = true;
+			}
+		}
+
+		if (bShouldUnload)
 		{
 			OutUnload.Add(ChunkCoord);
 
@@ -341,6 +395,11 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 		CachedViewerChunk.X, CachedViewerChunk.Y, CachedViewerChunk.Z);
 
 	// World-mode-specific culling info
+	if (WorldMode == EWorldMode::InfinitePlane)
+	{
+		Info += FString::Printf(TEXT("  Terrain Culling: Height=[%.0f - %.0f]\n"),
+			TerrainMinHeight, TerrainMaxHeight);
+	}
 	if (WorldMode == EWorldMode::IslandBowl && IslandTotalExtent > 0.0f)
 	{
 		Info += FString::Printf(TEXT("  Island Culling: Extent=%.0f, Center=(%.0f, %.0f)\n"),
@@ -348,8 +407,10 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 	}
 	if (WorldMode == EWorldMode::SphericalPlanet && PlanetRadius > 0.0f)
 	{
-		Info += FString::Printf(TEXT("  Horizon Culling: Radius=%.0f, MaxHeight=%.0f\n"),
-			PlanetRadius, PlanetMaxTerrainHeight);
+		const float InnerRadius = PlanetRadius - PlanetMaxTerrainDepth;
+		const float OuterRadius = PlanetRadius + PlanetMaxTerrainHeight;
+		Info += FString::Printf(TEXT("  Shell Culling: Radius=%.0f, Shell=[%.0f - %.0f]\n"),
+			PlanetRadius, InnerRadius, OuterRadius);
 	}
 
 	Info += TEXT("\n  Bands:\n");
@@ -576,6 +637,35 @@ FColor FDistanceBandLODStrategy::GetLODDebugColor(int32 LODLevel) const
 	return LODColors[ColorIndex];
 }
 
+bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
+	const FIntVector& ChunkCoord,
+	const FLODQueryContext& Context) const
+{
+	if (WorldMode != EWorldMode::InfinitePlane)
+	{
+		return false;
+	}
+
+	// Get chunk's Z bounds in world space
+	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+	const float ChunkMinZ = Context.WorldOrigin.Z + (ChunkCoord.Z * ChunkWorldSize);
+	const float ChunkMaxZ = ChunkMinZ + ChunkWorldSize;
+
+	// Cull if chunk is entirely below terrain minimum
+	if (ChunkMaxZ < TerrainMinHeight)
+	{
+		return true;
+	}
+
+	// Cull if chunk is entirely above terrain maximum
+	if (ChunkMinZ > TerrainMaxHeight)
+	{
+		return true;
+	}
+
+	return false;
+}
+
 bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 	const FIntVector& ChunkCoord,
 	const FLODQueryContext& Context) const
@@ -613,31 +703,65 @@ bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
 		return false;
 	}
 
-	// Calculate viewer's altitude above planet surface
-	const FVector ToPlanetCenter = Context.WorldOrigin - Context.ViewerPosition;
-	const float DistanceToCenter = ToPlanetCenter.Size();
-	const float ViewerAltitude = DistanceToCenter - PlanetRadius;
+	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+	const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_3; // 3D diagonal for spherical
 
-	// If viewer is inside the planet (underground), don't cull by horizon
-	if (ViewerAltitude < 0.0f)
+	// Get chunk bounds for shell intersection tests
+	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
+	const FVector ToChunkFromPlanet = ChunkCenter - Context.WorldOrigin;
+	const float ChunkDistanceFromCenter = ToChunkFromPlanet.Size();
+
+	// Calculate inner and outer shell radii
+	const float InnerShellRadius = PlanetRadius - PlanetMaxTerrainDepth;
+	const float OuterShellRadius = PlanetRadius + PlanetMaxTerrainHeight;
+
+	// INNER SHELL CULLING: Cull chunks entirely inside the planet core
+	// If the chunk's farthest point from planet center is still inside the inner shell, cull it
+	const float ChunkMaxRadius = ChunkDistanceFromCenter + ChunkDiagonal;
+	if (ChunkMaxRadius < InnerShellRadius)
+	{
+		return true; // Chunk is entirely inside planet core
+	}
+
+	// OUTER SHELL CULLING: Cull chunks entirely outside the terrain shell
+	// If the chunk's closest point to planet center is outside the outer shell, cull it
+	const float ChunkMinRadius = FMath::Max(0.0f, ChunkDistanceFromCenter - ChunkDiagonal);
+	if (ChunkMinRadius > OuterShellRadius)
+	{
+		return true; // Chunk is entirely outside terrain shell
+	}
+
+	// HORIZON CULLING: For chunks that intersect the shell, check if they're beyond the horizon
+	// Calculate viewer's altitude above planet surface
+	const FVector ToViewerFromPlanet = Context.ViewerPosition - Context.WorldOrigin;
+	const float ViewerDistanceFromCenter = ToViewerFromPlanet.Size();
+	const float ViewerAltitude = ViewerDistanceFromCenter - PlanetRadius;
+
+	// If viewer is deep underground, skip horizon culling (they're inside the planet)
+	if (ViewerAltitude < -PlanetMaxTerrainDepth)
 	{
 		return false;
 	}
 
-	// Calculate horizon distance: sqrt(2*R*h + h^2) where R = radius, h = altitude
-	// This is the distance along the surface to the geometric horizon
-	// For straight-line distance to horizon point, it's slightly different but this is a good approximation
-	const float HorizonDistance = FMath::Sqrt(2.0f * PlanetRadius * ViewerAltitude + ViewerAltitude * ViewerAltitude);
+	// Calculate horizon distance using viewer's effective altitude (clamped to surface)
+	const float EffectiveAltitude = FMath::Max(0.0f, ViewerAltitude);
+	if (EffectiveAltitude > 0.0f)
+	{
+		// Horizon distance formula: sqrt(2*R*h + h^2)
+		const float HorizonDistance = FMath::Sqrt(2.0f * PlanetRadius * EffectiveAltitude + EffectiveAltitude * EffectiveAltitude);
 
-	// Add buffer for terrain height and chunk size
-	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_3; // 3D diagonal for spherical
-	const float HorizonBuffer = HorizonDistance + PlanetMaxTerrainHeight + ChunkDiagonal;
+		// Add buffer for terrain variation (but smaller than before - just terrain height, not full diagonal)
+		const float HorizonBuffer = HorizonDistance + PlanetMaxTerrainHeight;
 
-	// Get chunk center and calculate distance from viewer
-	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-	const float DistanceToChunk = FVector::Distance(Context.ViewerPosition, ChunkCenter);
+		// Distance from viewer to chunk
+		const float DistanceToChunk = FVector::Distance(Context.ViewerPosition, ChunkCenter);
 
-	// Cull if chunk is beyond horizon + buffer
-	return DistanceToChunk > HorizonBuffer;
+		// Cull if chunk center is beyond horizon + buffer
+		if (DistanceToChunk > HorizonBuffer + ChunkDiagonal)
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
