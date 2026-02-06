@@ -19,6 +19,8 @@ class UVoxelWorldConfiguration;
 class IVoxelLODStrategy;
 class IVoxelMeshRenderer;
 class FVoxelCPUSmoothMesher;
+class UVoxelEditManager;
+class UVoxelCollisionManager;
 
 /**
  * Internal chunk state tracking.
@@ -272,6 +274,36 @@ public:
 	 * Get the current mesh renderer.
 	 */
 	IVoxelMeshRenderer* GetMeshRenderer() const { return MeshRenderer; }
+
+	/**
+	 * Get the edit manager.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
+	UVoxelEditManager* GetEditManager() const { return EditManager; }
+
+	/**
+	 * Get the collision manager.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
+	UVoxelCollisionManager* GetCollisionManager() const { return CollisionManager; }
+
+	// ==================== Collision Mesh Generation ====================
+
+	/**
+	 * Generate collision mesh data for a chunk at a specific LOD level.
+	 *
+	 * Used by VoxelCollisionManager to generate collision geometry.
+	 * The mesh is generated fresh from voxel data with edits applied.
+	 *
+	 * @param ChunkCoord Chunk coordinate to generate collision for
+	 * @param LODLevel LOD level for collision mesh (higher = simpler mesh)
+	 * @param OutMeshData Output mesh data (positions and indices)
+	 * @return True if mesh was generated successfully
+	 */
+	bool GetChunkCollisionMesh(
+		const FIntVector& ChunkCoord,
+		int32 LODLevel,
+		FChunkMeshData& OutMeshData);
 
 	// ==================== Debug ====================
 
@@ -582,4 +614,14 @@ protected:
 
 	/** Maximum pending meshes before throttling generation - keep low to avoid render job overflow */
 	static constexpr int32 MaxPendingMeshes = 4;
+
+	// ==================== Edit & Collision Systems ====================
+
+	/** Edit manager for terrain modifications */
+	UPROPERTY()
+	TObjectPtr<UVoxelEditManager> EditManager;
+
+	/** Collision manager for physics */
+	UPROPERTY()
+	TObjectPtr<UVoxelCollisionManager> CollisionManager;
 };

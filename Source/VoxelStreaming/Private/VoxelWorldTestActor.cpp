@@ -9,10 +9,14 @@
 #include "VoxelPMCRenderer.h"
 #include "VoxelCustomVFRenderer.h"
 #include "VoxelCPUSmoothMesher.h"
+#include "VoxelEditManager.h"
+#include "VoxelEditTypes.h"
+#include "VoxelCollisionManager.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "DrawDebugHelpers.h"
+#include "Misc/Paths.h"
 
 AVoxelWorldTestActor::AVoxelWorldTestActor()
 {
@@ -782,4 +786,224 @@ void AVoxelWorldTestActor::DestroyWaterVisualization()
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Destroyed water sphere visualization"));
 	}
+}
+
+// ==================== Edit System Testing ====================
+
+int32 AVoxelWorldTestActor::TestDigAt(FVector WorldLocation, float Radius)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestDigAt: ChunkManager not available"));
+		return 0;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestDigAt: EditManager not available"));
+		return 0;
+	}
+
+	// Configure brush for digging (subtract mode)
+	FVoxelBrushParams Brush;
+	Brush.Shape = EVoxelBrushShape::Sphere;
+	Brush.Radius = Radius;
+	Brush.Strength = 1.0f;
+	Brush.FalloffType = EVoxelBrushFalloff::Smooth;
+	Brush.DensityDelta = 100;  // Full subtraction
+
+	// Apply the edit
+	EditManager->BeginEditOperation(TEXT("Dig"));
+	const int32 VoxelsModified = EditManager->ApplyBrushEdit(WorldLocation, Brush, EEditMode::Subtract);
+	EditManager->EndEditOperation();
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestDigAt: Dug at (%.0f, %.0f, %.0f) with radius %.0f - %d voxels modified"),
+		WorldLocation.X, WorldLocation.Y, WorldLocation.Z, Radius, VoxelsModified);
+
+	return VoxelsModified;
+}
+
+int32 AVoxelWorldTestActor::TestBuildAt(FVector WorldLocation, float Radius, uint8 MaterialID)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestBuildAt: ChunkManager not available"));
+		return 0;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestBuildAt: EditManager not available"));
+		return 0;
+	}
+
+	// Configure brush for building (add mode)
+	FVoxelBrushParams Brush;
+	Brush.Shape = EVoxelBrushShape::Sphere;
+	Brush.Radius = Radius;
+	Brush.Strength = 1.0f;
+	Brush.FalloffType = EVoxelBrushFalloff::Smooth;
+	Brush.MaterialID = MaterialID;
+	Brush.DensityDelta = 100;  // Full addition
+
+	// Apply the edit
+	EditManager->BeginEditOperation(TEXT("Build"));
+	const int32 VoxelsModified = EditManager->ApplyBrushEdit(WorldLocation, Brush, EEditMode::Add);
+	EditManager->EndEditOperation();
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestBuildAt: Built at (%.0f, %.0f, %.0f) with radius %.0f, material %d - %d voxels modified"),
+		WorldLocation.X, WorldLocation.Y, WorldLocation.Z, Radius, MaterialID, VoxelsModified);
+
+	return VoxelsModified;
+}
+
+bool AVoxelWorldTestActor::TestUndo()
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestUndo: ChunkManager not available"));
+		return false;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestUndo: EditManager not available"));
+		return false;
+	}
+
+	if (!EditManager->CanUndo())
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("TestUndo: Nothing to undo"));
+		return false;
+	}
+
+	const bool bSuccess = EditManager->Undo();
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestUndo: %s"), bSuccess ? TEXT("Success") : TEXT("Failed"));
+	return bSuccess;
+}
+
+bool AVoxelWorldTestActor::TestRedo()
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestRedo: ChunkManager not available"));
+		return false;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestRedo: EditManager not available"));
+		return false;
+	}
+
+	if (!EditManager->CanRedo())
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("TestRedo: Nothing to redo"));
+		return false;
+	}
+
+	const bool bSuccess = EditManager->Redo();
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestRedo: %s"), bSuccess ? TEXT("Success") : TEXT("Failed"));
+	return bSuccess;
+}
+
+bool AVoxelWorldTestActor::TestSaveEdits(const FString& FileName)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestSaveEdits: ChunkManager not available"));
+		return false;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestSaveEdits: EditManager not available"));
+		return false;
+	}
+
+	// Save to project's Saved folder
+	const FString FilePath = FPaths::ProjectSavedDir() / FileName;
+	const bool bSuccess = EditManager->SaveEditsToFile(FilePath);
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestSaveEdits: %s to '%s'"),
+		bSuccess ? TEXT("Saved") : TEXT("Failed to save"), *FilePath);
+
+	return bSuccess;
+}
+
+bool AVoxelWorldTestActor::TestLoadEdits(const FString& FileName)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestLoadEdits: ChunkManager not available"));
+		return false;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestLoadEdits: EditManager not available"));
+		return false;
+	}
+
+	// Load from project's Saved folder
+	const FString FilePath = FPaths::ProjectSavedDir() / FileName;
+	const bool bSuccess = EditManager->LoadEditsFromFile(FilePath);
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestLoadEdits: %s from '%s'"),
+		bSuccess ? TEXT("Loaded") : TEXT("Failed to load"), *FilePath);
+
+	return bSuccess;
+}
+
+void AVoxelWorldTestActor::PrintEditStats()
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("PrintEditStats: ChunkManager not available"));
+		return;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("PrintEditStats: EditManager not available"));
+		return;
+	}
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("=== Voxel Edit System Statistics ==="));
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Chunks with edits: %d"), EditManager->GetEditedChunkCount());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Total individual edits: %d"), EditManager->GetTotalEditCount());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Undo stack size: %d"), EditManager->GetUndoCount());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Redo stack size: %d"), EditManager->GetRedoCount());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Can Undo: %s"), EditManager->CanUndo() ? TEXT("Yes") : TEXT("No"));
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Can Redo: %s"), EditManager->CanRedo() ? TEXT("Yes") : TEXT("No"));
+}
+
+void AVoxelWorldTestActor::PrintCollisionStats()
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("PrintCollisionStats: ChunkManager not available"));
+		return;
+	}
+
+	UVoxelCollisionManager* CollisionMgr = ChunkManager->GetCollisionManager();
+	if (!CollisionMgr)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("PrintCollisionStats: CollisionManager not available (is bGenerateCollision enabled?)"));
+		return;
+	}
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("=== Voxel Collision System Statistics ==="));
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Collision Radius: %.0f"), CollisionMgr->GetCollisionRadius());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Collision LOD Level: %d"), CollisionMgr->GetCollisionLODLevel());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Active collision chunks: %d"), CollisionMgr->GetCollisionChunkCount());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Pending cook requests: %d"), CollisionMgr->GetCookQueueCount());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("  Currently cooking: %d"), CollisionMgr->GetCookingCount());
 }

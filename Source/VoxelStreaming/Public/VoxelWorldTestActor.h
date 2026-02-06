@@ -171,6 +171,73 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Debug|Transvoxel")
 	void SetTransitionCellDebugging(bool bEnable);
 
+	// ==================== Edit System Testing ====================
+
+	/**
+	 * Apply a test brush edit at the specified world location.
+	 * Uses Subtract mode to dig a hole in the terrain.
+	 *
+	 * @param WorldLocation Center of the edit in world space
+	 * @param Radius Brush radius in world units
+	 * @return Number of voxels modified
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	int32 TestDigAt(FVector WorldLocation, float Radius = 300.0f);
+
+	/**
+	 * Apply a test brush edit at the specified world location.
+	 * Uses Add mode to build terrain.
+	 *
+	 * @param WorldLocation Center of the edit in world space
+	 * @param Radius Brush radius in world units
+	 * @param MaterialID Material to use for new terrain
+	 * @return Number of voxels modified
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	int32 TestBuildAt(FVector WorldLocation, float Radius = 300.0f, uint8 MaterialID = 1);
+
+	/**
+	 * Undo the last edit operation.
+	 * @return True if undo was performed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	bool TestUndo();
+
+	/**
+	 * Redo the last undone operation.
+	 * @return True if redo was performed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	bool TestRedo();
+
+	/**
+	 * Save all edits to a file.
+	 * @param FileName Name of the save file (saved to project's Saved folder)
+	 * @return True if save was successful
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	bool TestSaveEdits(const FString& FileName = TEXT("VoxelEdits.dat"));
+
+	/**
+	 * Load edits from a file.
+	 * @param FileName Name of the save file to load
+	 * @return True if load was successful
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	bool TestLoadEdits(const FString& FileName = TEXT("VoxelEdits.dat"));
+
+	/**
+	 * Print edit system statistics to the log.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	void PrintEditStats();
+
+	/**
+	 * Print collision system statistics to the log.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Collision")
+	void PrintCollisionStats();
+
 protected:
 	/** Initialize the voxel world systems */
 	void InitializeVoxelWorld();

@@ -29,6 +29,9 @@ public class VoxelStreaming : ModuleRules
 				"VoxelRendering",
 				"VoxelGeneration",
 				"VoxelMeshing",
+				"PhysicsCore",
+				"Chaos",
+				"ChaosCore",
 			}
 		);
 

@@ -11,6 +11,9 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelCPUSmoothMesher.h"
+#include "VoxelEditManager.h"
+#include "VoxelEditTypes.h"
+#include "VoxelCollisionManager.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
@@ -131,6 +134,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		UpdateLODTransitions(Context);
 		LastLODUpdatePosition = Context.ViewerPosition;
+	}
+
+	// Update collision manager
+	if (CollisionManager && Configuration && Configuration->bGenerateCollision)
+	{
+		CollisionManager->Update(Context.ViewerPosition, DeltaTime);
 	}
 
 	// Flush all pending render operations as a single batched command
@@ -259,6 +268,34 @@ void UVoxelChunkManager::Initialize(
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
 
+	// Create edit manager
+	EditManager = NewObject<UVoxelEditManager>(this);
+	EditManager->Initialize(Configuration);
+
+	// Subscribe to edit events - mark chunks dirty when edited
+	EditManager->OnChunkEdited.AddLambda([this](const FIntVector& ChunkCoord)
+	{
+		MarkChunkDirty(ChunkCoord);
+		if (CollisionManager)
+		{
+			CollisionManager->MarkChunkDirty(ChunkCoord);
+		}
+	});
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelEditManager created and initialized"));
+
+	// Create collision manager if enabled
+	if (Configuration->bGenerateCollision)
+	{
+		CollisionManager = NewObject<UVoxelCollisionManager>(this);
+		CollisionManager->Initialize(Configuration, this);
+		CollisionManager->SetCollisionRadius(Configuration->ViewDistance * 0.5f);
+		CollisionManager->SetCollisionLODLevel(Configuration->CollisionLODLevel);
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelCollisionManager created (Radius=%.0f, LOD=%d)"),
+			Configuration->ViewDistance * 0.5f, Configuration->CollisionLODLevel);
+	}
+
 	bIsInitialized = true;
 
 	UE_LOG(LogVoxelStreaming, Log, TEXT("ChunkManager initialized with config: VoxelSize=%.1f, ChunkSize=%d"),
@@ -318,6 +355,20 @@ void UVoxelChunkManager::Shutdown()
 
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
+
+	// Shutdown collision manager
+	if (CollisionManager)
+	{
+		CollisionManager->Shutdown();
+		CollisionManager = nullptr;
+	}
+
+	// Shutdown edit manager
+	if (EditManager)
+	{
+		EditManager->Shutdown();
+		EditManager = nullptr;
+	}
 
 	// Don't delete renderer - we don't own it
 	MeshRenderer = nullptr;
@@ -953,6 +1004,28 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
 		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
 		MeshRequest.VoxelData = State->Descriptor.VoxelData;
+
+		// Merge edit layer if present
+		if (EditManager && EditManager->ChunkHasEdits(Request.ChunkCoord))
+		{
+			const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(Request.ChunkCoord);
+			if (EditLayer && !EditLayer->IsEmpty())
+			{
+				for (const auto& EditPair : EditLayer->Edits)
+				{
+					const int32 Index = EditPair.Key;
+					const FVoxelEdit& Edit = EditPair.Value;
+					if (MeshRequest.VoxelData.IsValidIndex(Index))
+					{
+						MeshRequest.VoxelData[Index] = Edit.NewData;
+					}
+				}
+				State->Descriptor.bHasEdits = true;
+
+				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) merged %d edits from edit layer"),
+					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, EditLayer->GetEditCount());
+			}
+		}
 
 		// Extract neighbor edge slices for seamless boundaries
 		ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
@@ -1859,4 +1932,77 @@ void UVoxelChunkManager::RemoveFromUnloadQueue(const FIntVector& ChunkCoord)
 
 	// Remove from queue
 	UnloadQueue.Remove(ChunkCoord);
+}
+
+// ==================== Collision Mesh Generation ====================
+
+bool UVoxelChunkManager::GetChunkCollisionMesh(
+	const FIntVector& ChunkCoord,
+	int32 LODLevel,
+	FChunkMeshData& OutMeshData)
+{
+	if (!bIsInitialized || !Configuration || !Mesher)
+	{
+		return false;
+	}
+
+	// Get chunk state
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State || State->State == EChunkState::Unloaded)
+	{
+		return false;
+	}
+
+	// Verify we have voxel data
+	const int32 ChunkSize = Configuration->ChunkSize;
+	const int32 VolumeSize = ChunkSize * ChunkSize * ChunkSize;
+	if (State->Descriptor.VoxelData.Num() != VolumeSize)
+	{
+		return false;
+	}
+
+	// Build meshing request for collision LOD
+	FVoxelMeshingRequest MeshRequest;
+	MeshRequest.ChunkCoord = ChunkCoord;
+	MeshRequest.LODLevel = LODLevel;
+	MeshRequest.ChunkSize = ChunkSize;
+	MeshRequest.VoxelSize = Configuration->VoxelSize;
+	MeshRequest.WorldOrigin = Configuration->WorldOrigin;
+	// Note: Meshing mode (smooth/cubic) is determined by which mesher is instantiated
+
+	// Copy voxel data
+	MeshRequest.VoxelData = State->Descriptor.VoxelData;
+
+	// Merge edit layer if present
+	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	{
+		const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(ChunkCoord);
+		if (EditLayer && !EditLayer->IsEmpty())
+		{
+			for (const auto& EditPair : EditLayer->Edits)
+			{
+				const int32 Index = EditPair.Key;
+				const FVoxelEdit& Edit = EditPair.Value;
+				if (MeshRequest.VoxelData.IsValidIndex(Index))
+				{
+					MeshRequest.VoxelData[Index] = Edit.NewData;
+				}
+			}
+		}
+	}
+
+	// Extract neighbor data for seamless boundaries
+	ExtractNeighborEdgeSlices(ChunkCoord, MeshRequest);
+
+	// For collision, we don't need transition cells - just generate the regular mesh
+	// at the collision LOD level without fancy seams
+	MeshRequest.TransitionFaces = 0;
+	for (int32 i = 0; i < 6; ++i)
+	{
+		MeshRequest.NeighborLODLevels[i] = LODLevel; // Same LOD as us (no transitions)
+	}
+
+	// Generate mesh
+	OutMeshData.Reset();
+	return Mesher->GenerateMeshCPU(MeshRequest, OutMeshData);
 }
