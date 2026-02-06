@@ -137,6 +137,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel")
 	void ForceStreamingUpdate();
 
+	/**
+	 * Get the recommended spawn position for spherical planet mode.
+	 * Returns the position on the planet surface based on PlanetSpawnLocation setting.
+	 * Only valid when WorldMode == SphericalPlanet.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	FVector GetPlanetSpawnPosition() const;
+
 	/** Draw transition cell debug visualization */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Debug|Transvoxel")
 	void DrawTransitionCellDebug();

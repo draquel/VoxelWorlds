@@ -7,6 +7,7 @@
 
 class FInfinitePlaneWorldMode;
 class FIslandBowlWorldMode;
+class FSphericalPlanetWorldMode;
 
 /**
  * CPU-based noise generator for voxel terrain.
@@ -115,6 +116,14 @@ private:
 	void GenerateChunkIslandBowl(
 		const FVoxelNoiseGenerationRequest& Request,
 		const FIslandBowlWorldMode& WorldMode,
+		TArray<FVoxelData>& OutVoxelData);
+
+	/**
+	 * Generate chunk using Spherical Planet world mode (radial terrain on sphere).
+	 */
+	void GenerateChunkSphericalPlanet(
+		const FVoxelNoiseGenerationRequest& Request,
+		const FSphericalPlanetWorldMode& WorldMode,
 		TArray<FVoxelData>& OutVoxelData);
 
 	// ==================== Noise Helper Functions ====================

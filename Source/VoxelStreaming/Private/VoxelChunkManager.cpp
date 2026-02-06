@@ -837,6 +837,17 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 			GenRequest.IslandParams.bBowlShape = Configuration->bIslandBowlShape;
 		}
 
+		// Spherical planet mode parameters (used when WorldMode == SphericalPlanet)
+		if (Configuration->WorldMode == EWorldMode::SphericalPlanet)
+		{
+			GenRequest.SphericalPlanetParams.PlanetRadius = Configuration->WorldRadius;
+			GenRequest.SphericalPlanetParams.MaxTerrainHeight = Configuration->PlanetMaxTerrainHeight;
+			GenRequest.SphericalPlanetParams.MaxTerrainDepth = Configuration->PlanetMaxTerrainDepth;
+			GenRequest.SphericalPlanetParams.PlanetCenter = Configuration->WorldOrigin;
+			// Use PlanetHeightScale for terrain generation
+			GenRequest.HeightScale = Configuration->PlanetHeightScale;
+		}
+
 		// Get chunk state to store voxel data
 		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
 		if (!State)

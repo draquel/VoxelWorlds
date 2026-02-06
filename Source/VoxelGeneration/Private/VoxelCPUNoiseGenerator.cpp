@@ -4,6 +4,7 @@
 #include "VoxelGeneration.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelMaterialRegistry.h"
@@ -144,6 +145,21 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		FIslandBowlWorldMode WorldMode(TerrainParams, IslandParams);
 
 		GenerateChunkIslandBowl(Request, WorldMode, OutVoxelData);
+	}
+	else if (Request.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		// Create spherical planet world mode
+		FWorldModeTerrainParams TerrainParams(0.0f, Request.HeightScale, Request.BaseHeight);
+
+		FSphericalPlanetParams PlanetParams;
+		PlanetParams.PlanetRadius = Request.SphericalPlanetParams.PlanetRadius;
+		PlanetParams.MaxTerrainHeight = Request.SphericalPlanetParams.MaxTerrainHeight;
+		PlanetParams.MaxTerrainDepth = Request.SphericalPlanetParams.MaxTerrainDepth;
+		PlanetParams.PlanetCenter = Request.SphericalPlanetParams.PlanetCenter;
+
+		FSphericalPlanetWorldMode WorldMode(TerrainParams, PlanetParams);
+
+		GenerateChunkSphericalPlanet(Request, WorldMode, OutVoxelData);
 	}
 	else
 	{
@@ -690,6 +706,121 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 				{
 					// Use world mode's material assignment
 					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * VoxelSize);
+				}
+
+				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);
+			}
+		}
+	}
+}
+
+void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
+	const FVoxelNoiseGenerationRequest& Request,
+	const FSphericalPlanetWorldMode& WorldMode,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	const float VoxelSize = Request.VoxelSize;
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	const FVector PlanetCenter = WorldMode.GetPlanetParams().PlanetCenter;
+
+	// Get biome configuration (may be null if biomes disabled)
+	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+
+	// Set up biome noise parameters
+	FVoxelNoiseParams TempNoiseParams;
+	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	TempNoiseParams.Octaves = 2;
+	TempNoiseParams.Persistence = 0.5f;
+	TempNoiseParams.Lacunarity = 2.0f;
+	TempNoiseParams.Amplitude = 1.0f;
+
+	FVoxelNoiseParams MoistureNoiseParams;
+	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	MoistureNoiseParams.Octaves = 2;
+	MoistureNoiseParams.Persistence = 0.5f;
+	MoistureNoiseParams.Lacunarity = 2.0f;
+	MoistureNoiseParams.Amplitude = 1.0f;
+
+	if (BiomeConfig)
+	{
+		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
+		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
+		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
+		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
+	}
+	else
+	{
+		TempNoiseParams.Seed = Request.NoiseParams.Seed + 1234;
+		TempNoiseParams.Frequency = 0.00005f;
+		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
+		MoistureNoiseParams.Frequency = 0.00007f;
+	}
+
+	for (int32 Z = 0; Z < ChunkSize; ++Z)
+	{
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				// Calculate world position for this voxel
+				FVector WorldPos = ChunkWorldPos + FVector(
+					X * VoxelSize,
+					Y * VoxelSize,
+					Z * VoxelSize
+				);
+
+				// Get direction from planet center for noise sampling
+				FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, PlanetCenter);
+
+				// Sample spherical noise using direction
+				float NoiseValue = FSphericalPlanetWorldMode::SampleSphericalNoise(Direction, Request.NoiseParams);
+
+				// Get density from spherical planet world mode
+				float SignedDistance = WorldMode.GetDensityAt(WorldPos, Request.LODLevel, NoiseValue);
+
+				// Convert signed distance to density
+				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
+
+				// Calculate radial distance for material assignment
+				float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);
+				float TerrainRadius = WorldMode.GetPlanetParams().PlanetRadius +
+					FSphericalPlanetWorldMode::NoiseToRadialDisplacement(NoiseValue, WorldMode.GetTerrainParams());
+
+				// Depth below surface is radial (terrain radius - distance from center)
+				float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
+
+				// Determine material and biome
+				uint8 MaterialID = 0;
+				uint8 BiomeID = 0;
+
+				if (Request.bEnableBiomes && BiomeConfig && BiomeConfig->IsValid())
+				{
+					// For spherical planets, use direction for biome sampling
+					// Scale direction to get varied biome coordinates
+					FVector BiomeSamplePos = Direction * 10000.0f;
+					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
+					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+
+					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
+					BiomeID = Blend.GetDominantBiome();
+					MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, DistFromCenter, DepthBelowSurface);
+				}
+				else if (Request.bEnableBiomes)
+				{
+					FVector BiomeSamplePos = Direction * 10000.0f;
+					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
+					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+
+					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+					BiomeID = Blend.GetDominantBiome();
+					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+				}
+				else
+				{
+					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainRadius, DepthBelowSurface * VoxelSize);
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;

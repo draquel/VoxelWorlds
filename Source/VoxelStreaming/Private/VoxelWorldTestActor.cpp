@@ -260,6 +260,23 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 			i, Band.LODLevel, Band.MinDistance, Band.MaxDistance, Band.VoxelStride);
 	}
 
+	// Log spawn position for spherical planet mode
+	if (Config->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		const FVector SpawnPos = Config->GetPlanetSpawnPosition();
+		static const TCHAR* SpawnLocationNames[] = { TEXT("+X Equator"), TEXT("+Y Equator"), TEXT("+Z North Pole"), TEXT("-Z South Pole") };
+		const int32 SpawnLocIdx = FMath::Clamp(Config->PlanetSpawnLocation, 0, 3);
+
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelWorldTestActor: Spherical Planet Mode"));
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Planet Radius: %.0f, Max Height: %.0f, Max Depth: %.0f"),
+			Config->WorldRadius, Config->PlanetMaxTerrainHeight, Config->PlanetMaxTerrainDepth);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Spawn Location: %s, Altitude: %.0f"),
+			SpawnLocationNames[SpawnLocIdx], Config->PlanetSpawnAltitude);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Recommended Spawn Position: (%.0f, %.0f, %.0f)"),
+			SpawnPos.X, SpawnPos.Y, SpawnPos.Z);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Place PlayerStart at this position or call GetPlanetSpawnPosition()"));
+	}
+
 	// Propagate debug flags to mesher if enabled
 	if (bDebugLogTransitionCells || bDrawTransitionCellDebug)
 	{
@@ -409,6 +426,18 @@ void AVoxelWorldTestActor::ForceStreamingUpdate()
 	{
 		ChunkManager->ForceStreamingUpdate();
 	}
+}
+
+FVector AVoxelWorldTestActor::GetPlanetSpawnPosition() const
+{
+	UVoxelWorldConfiguration* Config = Configuration ? Configuration.Get() : RuntimeConfiguration.Get();
+	if (Config && Config->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		return Config->GetPlanetSpawnPosition();
+	}
+
+	// For non-spherical modes, return the world origin (actor location)
+	return Config ? Config->WorldOrigin : GetActorLocation();
 }
 
 void AVoxelWorldTestActor::SetTransitionCellDebugging(bool bEnable)

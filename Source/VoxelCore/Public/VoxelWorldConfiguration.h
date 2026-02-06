@@ -79,6 +79,44 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
 	bool bIslandBowlShape = false;
 
+	// ==================== Spherical Planet Mode Settings ====================
+
+	/**
+	 * Maximum terrain height above the planet's base radius.
+	 * Mountains and peaks can rise this high above WorldRadius.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	float PlanetMaxTerrainHeight = 5000.0f;
+
+	/**
+	 * Maximum terrain depth below the planet's base radius.
+	 * Valleys and caves can descend this deep below WorldRadius.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	float PlanetMaxTerrainDepth = 2000.0f;
+
+	/**
+	 * Height scale for planetary terrain features.
+	 * Controls the magnitude of terrain displacement from the base radius.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	float PlanetHeightScale = 5000.0f;
+
+	/**
+	 * Spawn location on the planet surface.
+	 * 0 = +X (Equator East), 1 = +Y (Equator North), 2 = +Z (North Pole), 3 = -Z (South Pole)
+	 * The spawn position will be at WorldOrigin + Direction * (WorldRadius + SpawnAltitude)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", ClampMax = "3", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	int32 PlanetSpawnLocation = 2;  // Default: North Pole (+Z)
+
+	/**
+	 * Altitude above the planet surface for spawn point.
+	 * Added to WorldRadius to place spawn slightly above terrain.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", ClampMax = "10000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	float PlanetSpawnAltitude = 500.0f;
+
 	// ==================== Terrain Generation Settings ====================
 
 	/** Sea level height - base elevation of terrain (world units) */
@@ -268,6 +306,20 @@ public:
 	 * Derived from LODBands: last band's MaxDistance (clamped to ViewDistance)
 	 */
 	float GetMaterialLODEndDistance() const;
+
+	/**
+	 * Get the spawn position for spherical planet mode.
+	 * Returns WorldOrigin + SpawnDirection * (WorldRadius + PlanetSpawnAltitude)
+	 *
+	 * PlanetSpawnLocation values:
+	 *   0 = +X (Equator East)
+	 *   1 = +Y (Equator North)
+	 *   2 = +Z (North Pole) - Default
+	 *   3 = -Z (South Pole)
+	 *
+	 * Only valid when WorldMode == SphericalPlanet.
+	 */
+	FVector GetPlanetSpawnPosition() const;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;

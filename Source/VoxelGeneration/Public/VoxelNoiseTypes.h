@@ -12,6 +12,33 @@ class UVoxelBiomeConfiguration;
 enum class EIslandFalloffType : uint8;
 
 /**
+ * Spherical planet parameters for generation request.
+ * Lightweight copy of FSphericalPlanetParams for passing through the pipeline.
+ */
+struct FSphericalPlanetModeParams
+{
+	/** Radius of the planet surface in world units */
+	float PlanetRadius = 100000.0f;
+
+	/** Maximum terrain height above PlanetRadius */
+	float MaxTerrainHeight = 5000.0f;
+
+	/** Maximum terrain depth below PlanetRadius */
+	float MaxTerrainDepth = 2000.0f;
+
+	/** Center of the planet in world space (typically WorldOrigin) */
+	FVector PlanetCenter = FVector::ZeroVector;
+
+	FSphericalPlanetModeParams() = default;
+
+	/** Get the inner shell radius */
+	float GetInnerRadius() const { return PlanetRadius - MaxTerrainDepth; }
+
+	/** Get the outer shell radius */
+	float GetOuterRadius() const { return PlanetRadius + MaxTerrainHeight; }
+};
+
+/**
  * Island mode parameters for generation request.
  * Lightweight copy of FIslandBowlParams for passing through the pipeline.
  */
@@ -119,6 +146,11 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 
 	/** Island mode configuration (used when WorldMode == IslandBowl) */
 	FIslandModeParams IslandParams;
+
+	// ==================== Spherical Planet Mode Parameters ====================
+
+	/** Spherical planet configuration (used when WorldMode == SphericalPlanet) */
+	FSphericalPlanetModeParams SphericalPlanetParams;
 
 	FVoxelNoiseGenerationRequest() = default;
 

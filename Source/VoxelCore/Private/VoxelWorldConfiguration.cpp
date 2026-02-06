@@ -178,6 +178,34 @@ float UVoxelWorldConfiguration::GetMaterialLODEndDistance() const
 	return FMath::Min(LODBands.Last().MaxDistance, ViewDistance);
 }
 
+FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
+{
+	// Determine spawn direction based on PlanetSpawnLocation setting
+	FVector SpawnDirection;
+	switch (PlanetSpawnLocation)
+	{
+	case 0:  // +X (Equator East)
+		SpawnDirection = FVector(1.0f, 0.0f, 0.0f);
+		break;
+	case 1:  // +Y (Equator North)
+		SpawnDirection = FVector(0.0f, 1.0f, 0.0f);
+		break;
+	case 2:  // +Z (North Pole) - Default
+		SpawnDirection = FVector(0.0f, 0.0f, 1.0f);
+		break;
+	case 3:  // -Z (South Pole)
+		SpawnDirection = FVector(0.0f, 0.0f, -1.0f);
+		break;
+	default:
+		SpawnDirection = FVector(0.0f, 0.0f, 1.0f);
+		break;
+	}
+
+	// Calculate spawn position: center + direction * (radius + altitude)
+	const float SpawnRadius = WorldRadius + PlanetSpawnAltitude;
+	return WorldOrigin + SpawnDirection * SpawnRadius;
+}
+
 #if WITH_EDITOR
 void UVoxelWorldConfiguration::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
