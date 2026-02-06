@@ -3,6 +3,7 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelGeneration.h"
 #include "InfinitePlaneWorldMode.h"
+#include "IslandBowlWorldMode.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelMaterialRegistry.h"
@@ -125,6 +126,24 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		FInfinitePlaneWorldMode WorldMode(TerrainParams);
 
 		GenerateChunkInfinitePlane(Request, WorldMode, OutVoxelData);
+	}
+	else if (Request.WorldMode == EWorldMode::IslandBowl)
+	{
+		// Create island bowl world mode with terrain and island parameters
+		FWorldModeTerrainParams TerrainParams(Request.SeaLevel, Request.HeightScale, Request.BaseHeight);
+
+		FIslandBowlParams IslandParams;
+		IslandParams.IslandRadius = Request.IslandParams.IslandRadius;
+		IslandParams.FalloffWidth = Request.IslandParams.FalloffWidth;
+		IslandParams.FalloffType = static_cast<EIslandFalloffType>(Request.IslandParams.FalloffType);
+		IslandParams.CenterX = Request.IslandParams.CenterX;
+		IslandParams.CenterY = Request.IslandParams.CenterY;
+		IslandParams.EdgeHeight = Request.IslandParams.EdgeHeight;
+		IslandParams.bBowlShape = Request.IslandParams.bBowlShape;
+
+		FIslandBowlWorldMode WorldMode(TerrainParams, IslandParams);
+
+		GenerateChunkIslandBowl(Request, WorldMode, OutVoxelData);
 	}
 	else
 	{
@@ -559,4 +578,123 @@ float FVoxelCPUNoiseGenerator::FBM3D(const FVector& Position, const FVoxelNoiseP
 
 	// Normalize to [-1, 1] range
 	return Total / MaxValue;
+}
+
+void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
+	const FVoxelNoiseGenerationRequest& Request,
+	const FIslandBowlWorldMode& WorldMode,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	// Always generate at base VoxelSize for voxel positioning
+	// LOD stride is applied during meshing, not generation
+	const float VoxelSize = Request.VoxelSize;
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+
+	// Get biome configuration (may be null if biomes disabled)
+	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+
+	// Set up biome noise parameters from configuration
+	FVoxelNoiseParams TempNoiseParams;
+	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	TempNoiseParams.Octaves = 2;
+	TempNoiseParams.Persistence = 0.5f;
+	TempNoiseParams.Lacunarity = 2.0f;
+	TempNoiseParams.Amplitude = 1.0f;
+
+	FVoxelNoiseParams MoistureNoiseParams;
+	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	MoistureNoiseParams.Octaves = 2;
+	MoistureNoiseParams.Persistence = 0.5f;
+	MoistureNoiseParams.Lacunarity = 2.0f;
+	MoistureNoiseParams.Amplitude = 1.0f;
+
+	// Use configuration values if available, otherwise use defaults
+	if (BiomeConfig)
+	{
+		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
+		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
+		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
+		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
+	}
+	else
+	{
+		TempNoiseParams.Seed = Request.NoiseParams.Seed + 1234;
+		TempNoiseParams.Frequency = 0.00005f;
+		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
+		MoistureNoiseParams.Frequency = 0.00007f;
+	}
+
+	for (int32 Z = 0; Z < ChunkSize; ++Z)
+	{
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				// Calculate world position for this voxel (using base VoxelSize)
+				FVector WorldPos = ChunkWorldPos + FVector(
+					X * VoxelSize,
+					Y * VoxelSize,
+					Z * VoxelSize
+				);
+
+				// Sample 2D noise at X,Y (same as InfinitePlane base)
+				float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
+					WorldPos.X, WorldPos.Y, Request.NoiseParams);
+
+				// Get density from island bowl world mode (handles falloff)
+				float SignedDistance = WorldMode.GetDensityAt(WorldPos, Request.LODLevel, NoiseValue);
+
+				// Convert signed distance to density
+				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
+
+				// Get terrain height for material assignment (includes island falloff)
+				float TerrainHeight = WorldMode.GetTerrainHeightAt(WorldPos.X, WorldPos.Y, Request.NoiseParams);
+
+				// Calculate depth below surface for material assignment
+				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / VoxelSize;
+
+				// Determine material and biome
+				uint8 MaterialID = 0;
+				uint8 BiomeID = 0;
+
+				if (Request.bEnableBiomes && BiomeConfig && BiomeConfig->IsValid())
+				{
+					// Sample biome noise at X,Y
+					FVector BiomeSamplePos(WorldPos.X, WorldPos.Y, 0.0f);
+					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
+					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+
+					// Get blended biome selection
+					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
+					BiomeID = Blend.GetDominantBiome();
+
+					// Get material considering blend weights
+					MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+
+					// Apply height-based material overrides
+					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
+				}
+				else if (Request.bEnableBiomes)
+				{
+					// Fallback to static registry
+					FVector BiomeSamplePos(WorldPos.X, WorldPos.Y, 0.0f);
+					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
+					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+
+					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+					BiomeID = Blend.GetDominantBiome();
+					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+				}
+				else
+				{
+					// Use world mode's material assignment
+					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * VoxelSize);
+				}
+
+				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);
+			}
+		}
+	}
 }

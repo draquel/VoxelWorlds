@@ -43,18 +43,54 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World", meta = (ClampMin = "1000", EditCondition = "WorldMode != EWorldMode::InfinitePlane"))
 	float WorldRadius = 100000.0f;
 
-	// ==================== Terrain Generation Settings (Infinite Plane) ====================
+	// ==================== Island Bowl Mode Settings ====================
+
+	/** Radius of the island in world units (distance from center to edge start) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "1000", EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	float IslandRadius = 50000.0f;
+
+	/** Width of the falloff zone where terrain fades to nothing */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "100", EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	float IslandFalloffWidth = 10000.0f;
+
+	/**
+	 * Type of falloff curve for island edges:
+	 * 0 = Linear (simple but sharp)
+	 * 1 = Smooth (hermite, gradual and natural-looking)
+	 * 2 = Squared (faster drop near edge)
+	 * 3 = Exponential (gradual then sharp drop)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "0", ClampMax = "3", EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	int32 IslandFalloffType = 1;  // Default: Smooth
+
+	/** Center X offset for the island (relative to WorldOrigin) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	float IslandCenterX = 0.0f;
+
+	/** Center Y offset for the island (relative to WorldOrigin) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	float IslandCenterY = 0.0f;
+
+	/** Minimum terrain height at island edges (can be negative for bowl effect) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	float IslandEdgeHeight = -1000.0f;
+
+	/** Create a bowl shape (lowered edges) instead of plateau (raised center) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	bool bIslandBowlShape = false;
+
+	// ==================== Terrain Generation Settings ====================
 
 	/** Sea level height - base elevation of terrain (world units) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode == EWorldMode::InfinitePlane"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode != EWorldMode::SphericalPlanet"))
 	float SeaLevel = 0.0f;
 
 	/** Height scale - multiplier for noise-to-height conversion (world units) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::InfinitePlane"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode != EWorldMode::SphericalPlanet"))
 	float HeightScale = 5000.0f;
 
 	/** Base height - additional offset added to terrain height (world units) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode == EWorldMode::InfinitePlane"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode != EWorldMode::SphericalPlanet"))
 	float BaseHeight = 0.0f;
 
 	// ==================== Voxel Settings ====================

@@ -6,6 +6,7 @@
 #include "IVoxelNoiseGenerator.h"
 
 class FInfinitePlaneWorldMode;
+class FIslandBowlWorldMode;
 
 /**
  * CPU-based noise generator for voxel terrain.
@@ -106,6 +107,14 @@ private:
 	 */
 	void GenerateChunk3DNoise(
 		const FVoxelNoiseGenerationRequest& Request,
+		TArray<FVoxelData>& OutVoxelData);
+
+	/**
+	 * Generate chunk using Island Bowl world mode (bounded terrain with falloff).
+	 */
+	void GenerateChunkIslandBowl(
+		const FVoxelNoiseGenerationRequest& Request,
+		const FIslandBowlWorldMode& WorldMode,
 		TArray<FVoxelData>& OutVoxelData);
 
 	// ==================== Noise Helper Functions ====================

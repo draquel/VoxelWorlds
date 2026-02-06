@@ -8,6 +8,45 @@
 
 class UVoxelBiomeConfiguration;
 
+// Forward declaration for island falloff type
+enum class EIslandFalloffType : uint8;
+
+/**
+ * Island mode parameters for generation request.
+ * Lightweight copy of FIslandBowlParams for passing through the pipeline.
+ */
+struct FIslandModeParams
+{
+	/** Radius of the island in world units (distance from center to edge start) */
+	float IslandRadius = 50000.0f;
+
+	/** Width of the falloff zone where terrain fades to nothing */
+	float FalloffWidth = 10000.0f;
+
+	/** Type of falloff curve to use (cast from EIslandFalloffType) */
+	uint8 FalloffType = 1;  // Default: Smooth
+
+	/** Center of the island in world X coordinate (relative to WorldOrigin) */
+	float CenterX = 0.0f;
+
+	/** Center of the island in world Y coordinate (relative to WorldOrigin) */
+	float CenterY = 0.0f;
+
+	/** Minimum terrain height at island edges (can be negative for bowl effect) */
+	float EdgeHeight = -1000.0f;
+
+	/** Whether to create a bowl (lowered edges) or plateau (raised center) */
+	bool bBowlShape = false;
+
+	FIslandModeParams() = default;
+
+	/** Get the total island extent (radius + falloff) */
+	float GetTotalExtent() const
+	{
+		return IslandRadius + FalloffWidth;
+	}
+};
+
 // Re-export EVoxelNoiseType and FVoxelNoiseParams from VoxelCoreTypes.h
 // These are defined in VoxelCore to avoid circular dependencies with VoxelWorldConfiguration
 
@@ -75,6 +114,11 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	/** World origin offset - all chunk positions are relative to this */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Mode")
 	FVector WorldOrigin = FVector::ZeroVector;
+
+	// ==================== Island Mode Parameters ====================
+
+	/** Island mode configuration (used when WorldMode == IslandBowl) */
+	FIslandModeParams IslandParams;
 
 	FVoxelNoiseGenerationRequest() = default;
 

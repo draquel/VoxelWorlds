@@ -81,14 +81,18 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Update streaming decisions only when necessary
 	if (bNeedStreamingUpdate)
 	{
+		// Clear the force flag BEFORE UpdateStreamingDecisions - it may set it again if more chunks remain
+		const bool bWasForced = bForceStreamingUpdate;
+		bForceStreamingUpdate = false;
+
 		UpdateStreamingDecisions(Context);
 		CachedViewerChunk = CurrentViewerChunk;
 		LastStreamingUpdatePosition = Context.ViewerPosition;
-		bForceStreamingUpdate = false;
 
 		// Debug: Log when streaming decisions are updated
-		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Streaming update: ViewerChunk=(%d,%d,%d), Forced=%s"),
+		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Streaming update: ViewerChunk=(%d,%d,%d), WasForced=%s, ContinueNextFrame=%s"),
 			CurrentViewerChunk.X, CurrentViewerChunk.Y, CurrentViewerChunk.Z,
+			bWasForced ? TEXT("Yes") : TEXT("No"),
 			bForceStreamingUpdate ? TEXT("Yes") : TEXT("No"));
 	}
 
@@ -703,10 +707,11 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 	TArray<FChunkLODRequest> ChunksToLoad;
 	LODStrategy->GetChunksToLoad(ChunksToLoad, LoadedChunkCoords, Context);
 
-	// Limit how many chunks we add per frame to prevent queue explosion
-	// Cap at 2x the processing rate to allow queue to stabilize
-	const int32 MaxChunksToAddPerFrame = Configuration->MaxChunksToLoadPerFrame * 2;
+	// Limit how many chunks we add per frame to prevent overwhelming the queue
+	// Use a higher limit to ensure view distance fills in reasonable time
+	const int32 MaxChunksToAddPerFrame = Configuration->MaxChunksToLoadPerFrame * 4;
 	int32 ChunksAddedThisFrame = 0;
+	int32 ChunksRemaining = 0;
 
 	// Debug: Log streaming decisions periodically
 	static int32 DebugFrameCounter = 0;
@@ -720,16 +725,17 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 	// Add to generation queue with sorted insertion (O(1) duplicate check, O(log n) insert)
 	for (const FChunkLODRequest& Request : ChunksToLoad)
 	{
-		// Respect per-frame limit to prevent unbounded queue growth
-		if (ChunksAddedThisFrame >= MaxChunksToAddPerFrame)
-		{
-			break;
-		}
-
 		const EChunkState CurrentState = GetChunkState(Request.ChunkCoord);
 
 		if (CurrentState == EChunkState::Unloaded)
 		{
+			// Respect per-frame limit to prevent overwhelming the queue
+			if (ChunksAddedThisFrame >= MaxChunksToAddPerFrame)
+			{
+				++ChunksRemaining;
+				continue;  // Count remaining but don't add yet
+			}
+
 			FVoxelChunkState& State = GetOrCreateChunkState(Request.ChunkCoord);
 			State.LODLevel = Request.LODLevel;
 			State.Priority = Request.Priority;
@@ -740,6 +746,13 @@ void UVoxelChunkManager::UpdateStreamingDecisions(const FLODQueryContext& Contex
 				++ChunksAddedThisFrame;
 			}
 		}
+	}
+
+	// If we hit the limit and there are still chunks to add, force an update next frame
+	if (ChunksRemaining > 0)
+	{
+		bForceStreamingUpdate = true;
+		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Streaming: %d chunks remaining, will continue next frame"), ChunksRemaining);
 	}
 
 	// Get chunks to unload
@@ -811,6 +824,18 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		// Biome configuration (contains biome definitions, blend settings, height rules)
 		GenRequest.bEnableBiomes = Configuration->bEnableBiomes;
 		GenRequest.BiomeConfiguration = Configuration->BiomeConfiguration;
+
+		// Island mode parameters (used when WorldMode == IslandBowl)
+		if (Configuration->WorldMode == EWorldMode::IslandBowl)
+		{
+			GenRequest.IslandParams.IslandRadius = Configuration->IslandRadius;
+			GenRequest.IslandParams.FalloffWidth = Configuration->IslandFalloffWidth;
+			GenRequest.IslandParams.FalloffType = static_cast<uint8>(Configuration->IslandFalloffType);
+			GenRequest.IslandParams.CenterX = Configuration->IslandCenterX;
+			GenRequest.IslandParams.CenterY = Configuration->IslandCenterY;
+			GenRequest.IslandParams.EdgeHeight = Configuration->IslandEdgeHeight;
+			GenRequest.IslandParams.bBowlShape = Configuration->bIslandBowlShape;
+		}
 
 		// Get chunk state to store voxel data
 		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
