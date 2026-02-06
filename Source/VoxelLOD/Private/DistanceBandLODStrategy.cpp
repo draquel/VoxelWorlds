@@ -43,14 +43,21 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	// Cache world-mode-specific parameters first (needed for vertical range calculation)
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 
-	// Cache Infinite Plane terrain bounds for vertical culling
-	if (WorldMode == EWorldMode::InfinitePlane)
+	// Cache terrain bounds for vertical culling (applies to Infinite Plane and Island modes)
+	// Both modes use the same 2D heightmap terrain generation with SeaLevel, BaseHeight, HeightScale
+	if (WorldMode == EWorldMode::InfinitePlane || WorldMode == EWorldMode::IslandBowl)
 	{
 		// Terrain extends from SeaLevel + BaseHeight (minimum) to SeaLevel + BaseHeight + HeightScale (maximum)
 		// Add one chunk as buffer for terrain variation and meshing
 		const float TerrainBase = WorldConfig->SeaLevel + WorldConfig->BaseHeight;
 		TerrainMinHeight = TerrainBase - ChunkWorldSize; // One chunk below base for safety
 		TerrainMaxHeight = TerrainBase + WorldConfig->HeightScale + ChunkWorldSize; // One chunk above max
+
+		// For Island mode, also consider the edge height (can be negative for bowl shapes)
+		if (WorldMode == EWorldMode::IslandBowl)
+		{
+			TerrainMinHeight = FMath::Min(TerrainMinHeight, WorldConfig->IslandEdgeHeight - ChunkWorldSize);
+		}
 
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Terrain bounds culling: Height range [%.0f - %.0f]"),
 			TerrainMinHeight, TerrainMaxHeight);
@@ -107,9 +114,13 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		}
 
 		case EWorldMode::IslandBowl:
-			MinVerticalChunks = -4;
-			MaxVerticalChunks = 8;
+		{
+			// Same as Infinite Plane - terrain bounds culling handles the actual limits
+			// Use a reasonable relative range that covers typical terrain variation
+			MinVerticalChunks = -2;
+			MaxVerticalChunks = 4;
 			break;
+		}
 	}
 
 	bIsInitialized = true;
@@ -395,14 +406,14 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 		CachedViewerChunk.X, CachedViewerChunk.Y, CachedViewerChunk.Z);
 
 	// World-mode-specific culling info
-	if (WorldMode == EWorldMode::InfinitePlane)
+	if (WorldMode == EWorldMode::InfinitePlane || WorldMode == EWorldMode::IslandBowl)
 	{
 		Info += FString::Printf(TEXT("  Terrain Culling: Height=[%.0f - %.0f]\n"),
 			TerrainMinHeight, TerrainMaxHeight);
 	}
 	if (WorldMode == EWorldMode::IslandBowl && IslandTotalExtent > 0.0f)
 	{
-		Info += FString::Printf(TEXT("  Island Culling: Extent=%.0f, Center=(%.0f, %.0f)\n"),
+		Info += FString::Printf(TEXT("  Island Boundary Culling: Extent=%.0f, Center=(%.0f, %.0f)\n"),
 			IslandTotalExtent, IslandCenterOffset.X, IslandCenterOffset.Y);
 	}
 	if (WorldMode == EWorldMode::SphericalPlanet && PlanetRadius > 0.0f)
@@ -641,7 +652,8 @@ bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
 	const FIntVector& ChunkCoord,
 	const FLODQueryContext& Context) const
 {
-	if (WorldMode != EWorldMode::InfinitePlane)
+	// Applies to Infinite Plane and Island modes (both use 2D heightmap terrain)
+	if (WorldMode != EWorldMode::InfinitePlane && WorldMode != EWorldMode::IslandBowl)
 	{
 		return false;
 	}

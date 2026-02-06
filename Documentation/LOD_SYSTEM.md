@@ -510,16 +510,18 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
 
 The LOD strategy includes mode-specific culling optimizations that skip chunks guaranteed to be empty or invisible, significantly reducing the number of chunks loaded.
 
-### Terrain Bounds Culling (Infinite Plane)
+### Terrain Bounds Culling (Infinite Plane & Island/Bowl)
 
-For infinite plane mode, chunks above or below the terrain height range are skipped:
+For infinite plane and island modes, chunks above or below the terrain height range are skipped. Both modes use the same 2D heightmap terrain generation:
 
 ```cpp
 bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
     const FIntVector& ChunkCoord,
     const FLODQueryContext& Context) const
 {
-    if (WorldMode != EWorldMode::InfinitePlane) return false;
+    // Applies to both Infinite Plane and Island modes
+    if (WorldMode != EWorldMode::InfinitePlane &&
+        WorldMode != EWorldMode::IslandBowl) return false;
 
     const float ChunkWorldSize = BaseChunkSize * VoxelSize;
     const float ChunkMinZ = Context.WorldOrigin.Z + (ChunkCoord.Z * ChunkWorldSize);
@@ -534,9 +536,10 @@ bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
 ```
 
 **Height Range Calculation**:
-- `TerrainMinHeight = SeaLevel + BaseHeight - HeightScale - Buffer`
+- `TerrainMinHeight = SeaLevel + BaseHeight - Buffer`
 - `TerrainMaxHeight = SeaLevel + BaseHeight + HeightScale + Buffer`
-- Buffer accounts for noise variation and prevents popping
+- For Island mode: `TerrainMinHeight = min(TerrainMinHeight, IslandEdgeHeight - Buffer)` to handle bowl shapes
+- Buffer (one chunk) accounts for noise variation and prevents popping
 
 ### Island Boundary Culling (Island/Bowl Mode)
 

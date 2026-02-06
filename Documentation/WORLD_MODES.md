@@ -138,7 +138,9 @@ float FIslandBowlWorldMode::GetDensityAt(const FVector& WorldPos,
 ```
 
 ### LOD Culling
-- **Island Boundary Culling**: Chunks beyond `IslandRadius + FalloffWidth` are skipped
+- **Terrain Bounds Culling**: Chunks above/below terrain height range are skipped (same as Infinite Plane)
+- **Island Boundary Culling**: Chunks beyond `IslandRadius + FalloffWidth` in X/Y are skipped
+- Height range considers `IslandEdgeHeight` for bowl shapes with lowered edges
 - Adds chunk diagonal buffer to prevent edge popping
 
 ### Use Cases
