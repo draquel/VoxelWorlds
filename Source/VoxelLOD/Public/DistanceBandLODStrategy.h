@@ -158,6 +158,24 @@ protected:
 	 */
 	FColor GetLODDebugColor(int32 LODLevel) const;
 
+	/**
+	 * Check if chunk should be culled for Island mode (beyond island boundary).
+	 * Returns true if chunk should be CULLED (not rendered).
+	 */
+	bool ShouldCullIslandBoundary(
+		const FIntVector& ChunkCoord,
+		const FLODQueryContext& Context
+	) const;
+
+	/**
+	 * Check if chunk should be culled for Spherical Planet mode (beyond horizon).
+	 * Returns true if chunk should be CULLED (not rendered).
+	 */
+	bool ShouldCullBeyondHorizon(
+		const FIntVector& ChunkCoord,
+		const FLODQueryContext& Context
+	) const;
+
 protected:
 	// ==================== Configuration State ====================
 
@@ -191,6 +209,22 @@ protected:
 	/** Vertical chunk range for infinite plane mode */
 	int32 MinVerticalChunks = -2;
 	int32 MaxVerticalChunks = 4;
+
+	// ==================== Island Mode Culling ====================
+
+	/** Total island extent (IslandRadius + FalloffWidth) for boundary culling */
+	float IslandTotalExtent = 0.0f;
+
+	/** Island center offset from WorldOrigin */
+	FVector2D IslandCenterOffset = FVector2D::ZeroVector;
+
+	// ==================== Spherical Planet Mode Culling ====================
+
+	/** Cached planet radius for horizon calculations */
+	float PlanetRadius = 0.0f;
+
+	/** Max terrain height above planet radius (for horizon buffer) */
+	float PlanetMaxTerrainHeight = 0.0f;
 
 	// ==================== Runtime State ====================
 
