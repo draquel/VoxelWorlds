@@ -129,6 +129,38 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", ClampMax = "10000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetSpawnAltitude = 500.0f;
 
+	// ==================== Water Settings ====================
+
+	/**
+	 * Enable water level for the world.
+	 * When enabled, terrain below the water level uses underwater materials.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water")
+	bool bEnableWaterLevel = false;
+
+	/**
+	 * Water level height in world units.
+	 * Used for InfinitePlane and IslandBowl world modes.
+	 * Terrain surface below this height will use underwater materials.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel && WorldMode != EWorldMode::SphericalPlanet"))
+	float WaterLevel = 0.0f;
+
+	/**
+	 * Water radius for spherical planet mode.
+	 * Used instead of WaterLevel for SphericalPlanet world mode.
+	 * Terrain surface below this radius from planet center will use underwater materials.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (ClampMin = "1000", EditCondition = "bEnableWaterLevel && WorldMode == EWorldMode::SphericalPlanet"))
+	float WaterRadius = 100000.0f;
+
+	/**
+	 * Show a visual water plane in the world.
+	 * Creates a simple static mesh plane at the water level for visualization.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel"))
+	bool bShowWaterPlane = true;
+
 	// ==================== Terrain Generation Settings ====================
 
 	/** Sea level height - base elevation of terrain (world units) */

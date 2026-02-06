@@ -268,10 +268,19 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					// Store the dominant biome ID
 					BiomeID = Blend.GetDominantBiome();
 
-					// Get material considering blend weights (creates dithered transition effect)
-					MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+					// Get material considering blend weights and water level
+					if (Request.bEnableWaterLevel)
+					{
+						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
+							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel);
+					}
+					else
+					{
+						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+					}
 
 					// Apply height-based material overrides (snow at peaks, rock at altitude, etc.)
+					// Height rules still apply after water (snow on peaks even if base is underwater)
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
 
 					// Apply ore vein overrides (only for solid voxels well below surface)
@@ -702,10 +711,19 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
 					BiomeID = Blend.GetDominantBiome();
 
-					// Get material considering blend weights
-					MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+					// Get material considering blend weights and water level
+					if (Request.bEnableWaterLevel)
+					{
+						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
+							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel);
+					}
+					else
+					{
+						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+					}
 
 					// Apply height-based material overrides
+					// Height rules still apply after water (snow on peaks even if base is underwater)
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
 
 					// Apply ore vein overrides (only for solid voxels well below surface)
@@ -921,7 +939,20 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
 					BiomeID = Blend.GetDominantBiome();
-					MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+
+					// Get material considering blend weights and water level
+					// For spherical planets: underwater if terrain radius < water radius
+					if (Request.bEnableWaterLevel)
+					{
+						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
+							Blend, DepthBelowSurface, TerrainRadius, Request.WaterRadius);
+					}
+					else
+					{
+						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+					}
+
+					// Height rules use radial distance as "height" for spherical planets
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, DistFromCenter, DepthBelowSurface);
 
 					// Apply ore vein overrides (only for solid voxels well below surface)

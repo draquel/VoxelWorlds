@@ -80,6 +80,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ore Veins", meta = (EditCondition = "bEnableOreVeins"))
 	TArray<FOreVeinConfig> GlobalOreVeins;
 
+	// ==================== Underwater Material Settings ====================
+
+	/**
+	 * Enable underwater material overrides.
+	 * When enabled and terrain is below water level, use biome's underwater materials.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Underwater")
+	bool bEnableUnderwaterMaterials = true;
+
+	/**
+	 * Default underwater material ID (used when biome doesn't specify one).
+	 * Typically Sand (3) for a beach-like underwater appearance.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Underwater", meta = (EditCondition = "bEnableUnderwaterMaterials"))
+	uint8 DefaultUnderwaterMaterial = 3; // EVoxelMaterial::Sand
+
 	// ==================== Noise Parameters ====================
 
 	/**
@@ -167,6 +183,18 @@ public:
 	 * @return Material ID selected based on blend weights
 	 */
 	uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface) const;
+
+	/**
+	 * Get material ID considering biome blending and water level.
+	 * Uses underwater materials when terrain surface is below water level.
+	 * @param Blend The biome blend result
+	 * @param DepthBelowSurface Depth below terrain surface
+	 * @param TerrainSurfaceHeight The height of the terrain surface at this X,Y
+	 * @param WaterLevel The water level height (or radius for spherical)
+	 * @return Material ID selected based on blend weights and water state
+	 */
+	uint8 GetBlendedMaterialWithWater(const FBiomeBlend& Blend, float DepthBelowSurface,
+		float TerrainSurfaceHeight, float WaterLevel) const;
 
 	/**
 	 * Apply height material rules to override a material based on elevation.

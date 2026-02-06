@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
+#include "Components/StaticMeshComponent.h"
 #include "VoxelWorldTestActor.generated.h"
 
 class UVoxelMaterialAtlas;
@@ -97,6 +98,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug", meta = (ClampMin = "0"))
 	float DebugStatsPrintInterval = 5.0f;
 
+	// ==================== Water Visualization ====================
+
+	/**
+	 * Material for the water plane visualization.
+	 * Create a translucent water material and assign it here.
+	 * If null, a default semi-transparent blue material will be used.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Water")
+	TObjectPtr<UMaterialInterface> WaterMaterial;
+
+	/**
+	 * Scale multiplier for the water plane size.
+	 * The plane will be scaled based on ViewDistance * WaterPlaneScale.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Water", meta = (ClampMin = "1.0", ClampMax = "100.0"))
+	float WaterPlaneScale = 10.0f;
+
 	// ==================== Transvoxel Debug ====================
 
 	/** Enable detailed logging for Transvoxel transition cells */
@@ -163,10 +181,24 @@ protected:
 	/** Create default configuration if none provided */
 	UVoxelWorldConfiguration* CreateDefaultConfiguration();
 
+	/** Create or update the water plane visualization */
+	void UpdateWaterVisualization();
+
+	/** Destroy the water plane visualization */
+	void DestroyWaterVisualization();
+
 protected:
 	/** Chunk manager component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Voxel")
 	TObjectPtr<UVoxelChunkManager> ChunkManager;
+
+	/** Water plane static mesh component (for flat world modes) */
+	UPROPERTY()
+	TObjectPtr<UStaticMeshComponent> WaterPlaneMesh;
+
+	/** Water sphere static mesh component (for spherical planet mode) */
+	UPROPERTY()
+	TObjectPtr<UStaticMeshComponent> WaterSphereMesh;
 
 	/** LOD strategy (owned by this actor) */
 	IVoxelLODStrategy* LODStrategy = nullptr;

@@ -861,6 +861,11 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 			GenRequest.HeightScale = Configuration->PlanetHeightScale;
 		}
 
+		// Water level parameters
+		GenRequest.bEnableWaterLevel = Configuration->bEnableWaterLevel;
+		GenRequest.WaterLevel = Configuration->WaterLevel;
+		GenRequest.WaterRadius = Configuration->WaterRadius;
+
 		// Get chunk state to store voxel data
 		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
 		if (!State)

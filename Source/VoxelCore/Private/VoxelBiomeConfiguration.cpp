@@ -30,6 +30,9 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Plains.DeepMaterial = EVoxelMaterial::Stone;
 	Plains.SurfaceDepth = 1.0f;
 	Plains.SubsurfaceDepth = 4.0f;
+	// Underwater: grass becomes sand
+	Plains.UnderwaterSurfaceMaterial = EVoxelMaterial::Sand;
+	Plains.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Sand;
 	Biomes.Add(Plains);
 
 	// Desert - Hot and dry
@@ -43,6 +46,9 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Desert.DeepMaterial = EVoxelMaterial::Stone;
 	Desert.SurfaceDepth = 1.0f;
 	Desert.SubsurfaceDepth = 4.0f;
+	// Underwater: stays sand (naturally sandy)
+	Desert.UnderwaterSurfaceMaterial = EVoxelMaterial::Sand;
+	Desert.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Sandstone;
 	Biomes.Add(Desert);
 
 	// Tundra - Cold (any moisture)
@@ -56,6 +62,9 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Tundra.DeepMaterial = EVoxelMaterial::Stone;
 	Tundra.SurfaceDepth = 1.0f;
 	Tundra.SubsurfaceDepth = 4.0f;
+	// Underwater: stone/gravel look (cold water erodes to rock)
+	Tundra.UnderwaterSurfaceMaterial = EVoxelMaterial::Stone;
+	Tundra.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Stone;
 	Biomes.Add(Tundra);
 
 	// Setup default height material rules
@@ -376,6 +385,55 @@ uint8 UVoxelBiomeConfiguration::GetBlendedMaterial(const FBiomeBlend& Blend, flo
 	// Fallback to dominant biome
 	const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
 	return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
+}
+
+uint8 UVoxelBiomeConfiguration::GetBlendedMaterialWithWater(const FBiomeBlend& Blend, float DepthBelowSurface,
+	float TerrainSurfaceHeight, float WaterLevel) const
+{
+	// Determine if terrain surface is underwater
+	const bool bIsUnderwater = bEnableUnderwaterMaterials && (TerrainSurfaceHeight < WaterLevel);
+
+	// For single biome or dominant biome, use simple lookup
+	if (Blend.BiomeCount == 1 || Blend.Weights[0] > 0.9f)
+	{
+		const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
+		if (Biome)
+		{
+			return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
+		}
+		return bIsUnderwater ? DefaultUnderwaterMaterial : 0;
+	}
+
+	// For blended biomes, use weighted random selection
+	float RandomValue = FMath::Frac(
+		Blend.Weights[0] * 17.3f +
+		Blend.Weights[1] * 31.7f +
+		DepthBelowSurface * 0.1f
+	);
+
+	// Walk through weights to select biome
+	float CumulativeWeight = 0.0f;
+	for (int32 i = 0; i < Blend.BiomeCount; ++i)
+	{
+		CumulativeWeight += Blend.Weights[i];
+		if (RandomValue < CumulativeWeight)
+		{
+			const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[i]);
+			if (Biome)
+			{
+				return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
+			}
+			return bIsUnderwater ? DefaultUnderwaterMaterial : 0;
+		}
+	}
+
+	// Fallback to dominant biome
+	const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
+	if (Biome)
+	{
+		return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
+	}
+	return bIsUnderwater ? DefaultUnderwaterMaterial : 0;
 }
 
 uint8 UVoxelBiomeConfiguration::ApplyHeightMaterialRules(uint8 CurrentMaterial, float WorldHeight, float DepthBelowSurface) const

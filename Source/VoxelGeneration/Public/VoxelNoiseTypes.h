@@ -187,6 +187,17 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	/** Spherical planet configuration (used when WorldMode == SphericalPlanet) */
 	FSphericalPlanetModeParams SphericalPlanetParams;
 
+	// ==================== Water Level Parameters ====================
+
+	/** Whether water level is enabled for this request */
+	bool bEnableWaterLevel = false;
+
+	/** Water level height for InfinitePlane/IslandBowl modes (world units) */
+	float WaterLevel = 0.0f;
+
+	/** Water radius for SphericalPlanet mode (world units from planet center) */
+	float WaterRadius = 0.0f;
+
 	FVoxelNoiseGenerationRequest() = default;
 
 	/** Get the world position of this chunk's origin (includes WorldOrigin offset) */

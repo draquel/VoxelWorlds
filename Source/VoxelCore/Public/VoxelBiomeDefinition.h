@@ -161,6 +161,16 @@ struct VOXELCORE_API FBiomeDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome")
 	float SubsurfaceDepth = 4.0f;
 
+	// ==================== Underwater Materials ====================
+
+	/** Material ID for surface voxels when terrain is below water level */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome|Underwater")
+	uint8 UnderwaterSurfaceMaterial = 3; // Default: Sand
+
+	/** Material ID for subsurface voxels when terrain is below water level */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome|Underwater")
+	uint8 UnderwaterSubsurfaceMaterial = 3; // Default: Sand
+
 	/**
 	 * Biome-specific ore veins (optional).
 	 * If populated, these override global ore veins for this biome.
@@ -221,6 +231,33 @@ struct VOXELCORE_API FBiomeDefinition
 		{
 			return DeepMaterial;
 		}
+	}
+
+	/**
+	 * Get the appropriate material ID considering underwater state.
+	 * @param DepthBelowSurface How many voxels below the terrain surface (0 = surface)
+	 * @param bIsUnderwater Whether the terrain surface is below water level
+	 * @return Material ID for this depth (uses underwater materials if bIsUnderwater)
+	 */
+	uint8 GetMaterialAtDepth(float DepthBelowSurface, bool bIsUnderwater) const
+	{
+		if (bIsUnderwater)
+		{
+			// Underwater uses separate material set (no deep material distinction)
+			if (DepthBelowSurface <= SurfaceDepth)
+			{
+				return UnderwaterSurfaceMaterial;
+			}
+			else if (DepthBelowSurface <= SubsurfaceDepth)
+			{
+				return UnderwaterSubsurfaceMaterial;
+			}
+			else
+			{
+				return DeepMaterial; // Deep material stays the same (stone)
+			}
+		}
+		return GetMaterialAtDepth(DepthBelowSurface);
 	}
 
 	/**

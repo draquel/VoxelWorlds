@@ -10,6 +10,8 @@
 #include "VoxelCustomVFRenderer.h"
 #include "VoxelCPUSmoothMesher.h"
 #include "Engine/World.h"
+#include "Engine/StaticMesh.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "DrawDebugHelpers.h"
 
 AVoxelWorldTestActor::AVoxelWorldTestActor()
@@ -285,6 +287,9 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 			bDebugLogTransitionCells ? TEXT("Yes") : TEXT("No"),
 			bDrawTransitionCellDebug ? TEXT("Yes") : TEXT("No"));
 	}
+
+	// Create water plane visualization if enabled
+	UpdateWaterVisualization();
 }
 
 void AVoxelWorldTestActor::ShutdownVoxelWorld()
@@ -293,6 +298,9 @@ void AVoxelWorldTestActor::ShutdownVoxelWorld()
 	{
 		return;
 	}
+
+	// Destroy water visualization
+	DestroyWaterVisualization();
 
 	// Shutdown chunk manager (this also cleans up LOD strategy)
 	if (ChunkManager)
@@ -587,5 +595,191 @@ void AVoxelWorldTestActor::DrawTransitionCellDebug()
 	if (DebugCells.Num() > 0)
 	{
 		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Drawing %d transition cells debug visualization"), DebugCells.Num());
+	}
+}
+
+void AVoxelWorldTestActor::UpdateWaterVisualization()
+{
+	// Get the active configuration
+	UVoxelWorldConfiguration* Config = Configuration ? Configuration.Get() : RuntimeConfiguration.Get();
+	if (!Config)
+	{
+		return;
+	}
+
+	// Check if water visualization should be shown
+	const bool bShouldShowWater = Config->bEnableWaterLevel && Config->bShowWaterPlane;
+
+	if (!bShouldShowWater)
+	{
+		DestroyWaterVisualization();
+		return;
+	}
+
+	// Different visualization based on world mode
+	if (Config->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		// Destroy plane if it exists (switching modes)
+		if (WaterPlaneMesh)
+		{
+			WaterPlaneMesh->DestroyComponent();
+			WaterPlaneMesh = nullptr;
+		}
+
+		// Create the water sphere mesh component if it doesn't exist
+		if (!WaterSphereMesh)
+		{
+			WaterSphereMesh = NewObject<UStaticMeshComponent>(this, TEXT("WaterSphereMesh"));
+			if (WaterSphereMesh)
+			{
+				WaterSphereMesh->SetupAttachment(GetRootComponent());
+				WaterSphereMesh->RegisterComponent();
+
+				// Use the default sphere mesh from the engine
+				UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+				if (SphereMesh)
+				{
+					WaterSphereMesh->SetStaticMesh(SphereMesh);
+				}
+
+				// Disable collision for visualization
+				WaterSphereMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+				// Set cast shadows to false
+				WaterSphereMesh->SetCastShadow(false);
+
+				UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Created water sphere visualization component"));
+			}
+		}
+
+		if (!WaterSphereMesh)
+		{
+			return;
+		}
+
+		// Position at planet center (WorldOrigin)
+		WaterSphereMesh->SetWorldLocation(Config->WorldOrigin);
+
+		// Scale to WaterRadius
+		// The default sphere is 100 units diameter (50 unit radius), so scale = WaterRadius / 50
+		const float Scale = Config->WaterRadius / 50.0f;
+		WaterSphereMesh->SetWorldScale3D(FVector(Scale, Scale, Scale));
+
+		// Set material
+		if (WaterMaterial)
+		{
+			WaterSphereMesh->SetMaterial(0, WaterMaterial);
+		}
+		else
+		{
+			// Create a simple translucent blue material if none provided
+			UMaterialInstanceDynamic* DefaultWaterMat = UMaterialInstanceDynamic::Create(
+				WaterSphereMesh->GetMaterial(0), this);
+			if (DefaultWaterMat)
+			{
+				DefaultWaterMat->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.1f, 0.3f, 0.6f, 0.5f));
+				WaterSphereMesh->SetMaterial(0, DefaultWaterMat);
+			}
+		}
+
+		WaterSphereMesh->SetVisibility(true);
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water sphere at origin (%.0f, %.0f, %.0f), Radius=%.0f"),
+			Config->WorldOrigin.X, Config->WorldOrigin.Y, Config->WorldOrigin.Z, Config->WaterRadius);
+	}
+	else
+	{
+		// Flat world modes (InfinitePlane, IslandBowl) - use plane
+
+		// Destroy sphere if it exists (switching modes)
+		if (WaterSphereMesh)
+		{
+			WaterSphereMesh->DestroyComponent();
+			WaterSphereMesh = nullptr;
+		}
+
+		// Create the water plane mesh component if it doesn't exist
+		if (!WaterPlaneMesh)
+		{
+			WaterPlaneMesh = NewObject<UStaticMeshComponent>(this, TEXT("WaterPlaneMesh"));
+			if (WaterPlaneMesh)
+			{
+				WaterPlaneMesh->SetupAttachment(GetRootComponent());
+				WaterPlaneMesh->RegisterComponent();
+
+				// Use the default plane mesh from the engine
+				UStaticMesh* PlaneMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane"));
+				if (PlaneMesh)
+				{
+					WaterPlaneMesh->SetStaticMesh(PlaneMesh);
+				}
+
+				// Disable collision for visualization
+				WaterPlaneMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+				// Set cast shadows to false (water plane shouldn't cast shadows)
+				WaterPlaneMesh->SetCastShadow(false);
+
+				UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Created water plane visualization component"));
+			}
+		}
+
+		if (!WaterPlaneMesh)
+		{
+			return;
+		}
+
+		// Set position at water level (relative to WorldOrigin)
+		FVector WaterPosition = Config->WorldOrigin;
+		WaterPosition.Z = Config->WaterLevel;
+		WaterPlaneMesh->SetWorldLocation(WaterPosition);
+
+		// Scale based on ViewDistance and WaterPlaneScale
+		// The default plane is 100x100 units, so we scale to cover ViewDistance
+		const float PlaneSize = Config->ViewDistance * WaterPlaneScale;
+		const float Scale = PlaneSize / 100.0f;  // Default plane is 100 units
+		WaterPlaneMesh->SetWorldScale3D(FVector(Scale, Scale, 1.0f));
+
+		// Set material
+		if (WaterMaterial)
+		{
+			WaterPlaneMesh->SetMaterial(0, WaterMaterial);
+		}
+		else
+		{
+			// Create a simple translucent blue material if none provided
+			UMaterialInstanceDynamic* DefaultWaterMat = UMaterialInstanceDynamic::Create(
+				WaterPlaneMesh->GetMaterial(0), this);
+			if (DefaultWaterMat)
+			{
+				// Try to set some basic parameters (depends on the base material supporting them)
+				DefaultWaterMat->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.1f, 0.3f, 0.6f, 0.5f));
+				WaterPlaneMesh->SetMaterial(0, DefaultWaterMat);
+			}
+		}
+
+		WaterPlaneMesh->SetVisibility(true);
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water plane at Z=%.0f, Scale=%.0f"),
+			Config->WaterLevel, PlaneSize);
+	}
+}
+
+void AVoxelWorldTestActor::DestroyWaterVisualization()
+{
+	if (WaterPlaneMesh)
+	{
+		WaterPlaneMesh->DestroyComponent();
+		WaterPlaneMesh = nullptr;
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Destroyed water plane visualization"));
+	}
+
+	if (WaterSphereMesh)
+	{
+		WaterSphereMesh->DestroyComponent();
+		WaterSphereMesh = nullptr;
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Destroyed water sphere visualization"));
 	}
 }
