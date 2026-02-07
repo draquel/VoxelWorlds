@@ -63,7 +63,7 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 
 void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float DeltaTime)
 {
-	if (!bIsInitialized)
+	if (!bIsInitialized || !ScatterManager)
 	{
 		return;
 	}
@@ -82,9 +82,13 @@ void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float DeltaTime)
 		TimeSinceViewerMoved += DeltaTime;
 	}
 
-	// Only process rebuilds when viewer has been stationary for a bit
-	// This prevents flickering while the player is moving
-	if (TimeSinceViewerMoved >= RebuildStationaryDelay || PendingRebuildScatterTypes.Num() == 0)
+	// Only process rebuilds when:
+	// 1. Viewer has been stationary for a bit (prevents flicker during movement)
+	// 2. No chunks are pending generation (prevents flicker during initial load)
+	const bool bViewerStationary = TimeSinceViewerMoved >= RebuildStationaryDelay;
+	const bool bWorldStable = ScatterManager->GetPendingGenerationCount() == 0;
+
+	if (bViewerStationary && bWorldStable)
 	{
 		FlushPendingRebuilds();
 	}
@@ -270,9 +274,9 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 	}
 
 	// Check if already exists
-	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* ExistingPtr = HISMComponents.Find(ScatterTypeID))
+	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* ExistingHISM = HISMComponents.Find(ScatterTypeID))
 	{
-		return ExistingPtr->Get();
+		return ExistingHISM->Get();
 	}
 
 	// Get scatter definition
@@ -404,13 +408,29 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 		return;
 	}
 
-	// Culling distances
-	HISM->SetCullDistances(0, Definition.CullDistance);
+	// ==================== LOD & Culling ====================
 
-	// Shadows
+	// Set cull distances (start fade, end cull)
+	// LODStartDistance = where instances start fading/simplifying
+	// CullDistance = where instances are completely culled
+	HISM->SetCullDistances(Definition.LODStartDistance, Definition.CullDistance);
+
+	// Enable distance-based instance culling for better performance
+	HISM->bEnableDiscardOnLoad = false;
+
+	// ==================== Shadows ====================
+
 	HISM->SetCastShadow(Definition.bCastShadows);
 
-	// Collision
+	// Disable shadow casting at distance for performance
+	if (Definition.bCastShadows)
+	{
+		// Shadows only render up to LODStartDistance (closer instances)
+		HISM->CachedMaxDrawDistance = Definition.LODStartDistance;
+	}
+
+	// ==================== Collision ====================
+
 	if (Definition.bEnableCollision)
 	{
 		HISM->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
@@ -421,7 +441,8 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 		HISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	}
 
-	// Decals
+	// ==================== Visual Settings ====================
+
 	HISM->bReceivesDecals = Definition.bReceivesDecals;
 
 	// Override materials if specified
@@ -437,14 +458,19 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 		}
 	}
 
-	// Performance settings
+	// ==================== Performance Settings ====================
+
 	HISM->SetMobility(EComponentMobility::Static);
 	HISM->bDisableCollision = !Definition.bEnableCollision;
 	HISM->bUseDefaultCollision = false;
 
-	// HISM-specific settings for better performance
+	// HISM-specific performance settings
 	HISM->bEnableDensityScaling = false;
 	HISM->SetCanEverAffectNavigation(false);
+
+	// Use the mesh's built-in LODs if available
+	// The static mesh should have LOD0, LOD1, etc. defined
+	// HISM will automatically switch between them based on distance
 }
 
 void UVoxelScatterRenderer::AddInstancesToHISM(
@@ -551,7 +577,6 @@ void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
 		return;
 	}
 
-	// Get or create HISM for this type
 	UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(ScatterTypeID);
 	if (!HISM)
 	{
@@ -561,33 +586,26 @@ void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
 	// Track old instance count for statistics
 	const int32 OldInstanceCount = HISM->GetInstanceCount();
 
-	// Clear all existing instances
-	HISM->ClearInstances();
-	TotalInstancesRemoved += OldInstanceCount;
-
-	// Collect all spawn points for this scatter type from all chunks
+	// Collect all transforms from all chunks that have this scatter type
 	TArray<FTransform> AllTransforms;
-	AllTransforms.Reserve(1024); // Pre-allocate reasonable amount
+	AllTransforms.Reserve(FMath::Max(OldInstanceCount, 1024));
 
 	for (const auto& ChunkPair : ChunkScatterTypes)
 	{
 		const FIntVector& ChunkCoord = ChunkPair.Key;
 		const TSet<int32>& ScatterTypes = ChunkPair.Value;
 
-		// Skip chunks that don't have this scatter type
 		if (!ScatterTypes.Contains(ScatterTypeID))
 		{
 			continue;
 		}
 
-		// Get scatter data from manager
 		const FChunkScatterData* ScatterData = ScatterManager->GetChunkScatterData(ChunkCoord);
 		if (!ScatterData || !ScatterData->bIsValid)
 		{
 			continue;
 		}
 
-		// Collect spawn points for this scatter type
 		for (const FScatterSpawnPoint& Point : ScatterData->SpawnPoints)
 		{
 			if (Point.ScatterTypeID == ScatterTypeID)
@@ -598,16 +616,14 @@ void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
 		}
 	}
 
-	// Add all instances in batch using batch API for better performance
+	// Clear existing instances and add new ones
+	TotalInstancesRemoved += OldInstanceCount;
+	HISM->ClearInstances();
+
 	if (AllTransforms.Num() > 0)
 	{
-		// Use batch AddInstances - more efficient than individual calls
-		// Parameters: InstanceTransforms, bShouldReturnIndices=false, bWorldSpace=true
 		HISM->AddInstances(AllTransforms, false, true);
 		TotalInstancesAdded += AllTransforms.Num();
-
-		// Mark render state dirty once after all additions
-		HISM->MarkRenderStateDirty();
 	}
 
 	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Rebuilt scatter type %d (%s): %d -> %d instances"),

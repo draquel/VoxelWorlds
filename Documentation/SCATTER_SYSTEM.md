@@ -272,9 +272,11 @@ The scatter renderer uses a **full rebuild** approach per scatter type:
    - Uses `HISM->AddInstances()` for efficient batch addition
 
 3. **Deferred rebuilds:**
-   - Rebuilds are queued, not immediate
-   - Processed in `Tick()` when viewer has been stationary for 0.5s
-   - Prevents flickering during movement
+   - Rebuilds are queued via `QueueRebuild()`, not immediate
+   - Processed in `Tick()` when BOTH conditions met:
+     - Viewer stationary for 0.5s (`RebuildStationaryDelay`)
+     - World stable (`GetPendingGenerationCount() == 0`)
+   - Prevents flickering during movement and initial world loading
 
 ```cpp
 void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
@@ -292,7 +294,7 @@ void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
         {
             if (Point.ScatterTypeID == ScatterTypeID)
             {
-                AllTransforms.Add(Point.GetTransform(Definition->bAlignToSurfaceNormal, Definition->SurfaceOffset));
+                AllTransforms.Add(Point.GetTransform(...));
             }
         }
     }
@@ -456,6 +458,7 @@ Created automatically if no configuration is provided:
 - `MaxScatterGenerationsPerFrame = 2`: Limits surface extraction per frame
 - `MaxRebuildsPerFrame = 0` (unlimited): Rebuilds are fast once transforms are collected
 - `RebuildStationaryDelay = 0.5s`: Prevents flicker during movement
+- World stability check: Rebuilds wait for `GetPendingGenerationCount() == 0` (prevents initial load flicker)
 
 ### Memory
 

@@ -152,6 +152,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	int32 GetScatterChunkCount() const { return ScatterDataCache.Num(); }
 
+	/**
+	 * Get number of chunks pending scatter generation.
+	 * Used to detect if world is still loading.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
+	int32 GetPendingGenerationCount() const { return PendingGenerationQueue.Num(); }
+
 	// ==================== Mesh Data Callback ====================
 
 	/**
