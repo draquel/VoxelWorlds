@@ -564,8 +564,8 @@ Mesh generation was moved to background threads to eliminate stuttering:
 - [x] Edit integration (targeted removal for player edits)
 - [x] Flicker prevention (stationary-only rebuilds)
 - [x] Foliage LOD (HISM distance culling + per-type LOD settings)
+- [x] Performance profiling (on-screen HUD with Phase 7 targets)
 - [ ] GPU-based scatter generation (future optimization)
-- [ ] Performance profiling
 - [ ] Memory optimization
 
 ### Deliverables
@@ -662,6 +662,23 @@ HISM uses the static mesh's built-in LOD levels (LOD0, LOD1, etc.) when availabl
 1. **Grass**: Dense (50%), shallow slopes, grass material only
 2. **Rocks**: Sparse (5%), moderate slopes, stone/dirt materials
 3. **Trees**: Very sparse (2%), flat terrain, grass material only
+
+#### Performance HUD
+Enable via `bShowPerformanceHUD` on VoxelWorldTestActor to display:
+- FPS and frame time (color-coded: green ≥60, yellow ≥30, red <30)
+- Loaded chunk count vs Phase 7 target (1000+)
+- Generation and meshing queue depths
+- Memory usage vs Phase 7 target (<250 MB)
+- Scatter stats (chunks, instances, pending)
+- Collision stats
+
+Phase 7 performance targets displayed for comparison:
+| Metric | Target |
+|--------|--------|
+| Chunks | 1000+ |
+| FPS | 60+ |
+| Memory | <250 MB |
+| GPU/frame | <5 ms |
 
 ---
 

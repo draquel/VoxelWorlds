@@ -98,6 +98,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug", meta = (ClampMin = "0"))
 	float DebugStatsPrintInterval = 5.0f;
 
+	/** Show performance stats HUD on screen */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug")
+	bool bShowPerformanceHUD = false;
+
 	// ==================== Water Visualization ====================
 
 	/**
@@ -387,6 +391,9 @@ protected:
 
 	/** Draw edit crosshair on screen */
 	void DrawEditCrosshair() const;
+
+	/** Draw performance HUD on screen */
+	void DrawPerformanceHUD() const;
 
 protected:
 	/** Chunk manager component */
