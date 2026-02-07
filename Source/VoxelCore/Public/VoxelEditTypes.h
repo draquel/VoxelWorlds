@@ -8,6 +8,22 @@
 #include "VoxelEditTypes.generated.h"
 
 /**
+ * Source of an edit operation - determines how scatter and other systems respond.
+ */
+UENUM(BlueprintType)
+enum class EEditSource : uint8
+{
+	/** Player-initiated edit (in-game). Scatter is permanently removed from edited area. */
+	Player,
+
+	/** System/game edit (POIs, procedural structures). Scatter regenerates with new terrain. */
+	System,
+
+	/** Editor/tool edit. Scatter regenerates with new terrain. */
+	Editor
+};
+
+/**
  * Brush shape for voxel editing operations.
  */
 UENUM(BlueprintType)

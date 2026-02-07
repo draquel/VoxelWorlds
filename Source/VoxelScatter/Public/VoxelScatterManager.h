@@ -172,12 +172,30 @@ public:
 	void OnChunkUnloaded(const FIntVector& ChunkCoord);
 
 	/**
-	 * Regenerate scatter for a chunk (e.g., after edit).
+	 * Regenerate scatter for a chunk (e.g., after system edit).
+	 * Clears existing scatter and allows regeneration when new mesh arrives.
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	void RegenerateChunkScatter(const FIntVector& ChunkCoord);
+
+	/**
+	 * Clear scatter in a specific area (e.g., after player edit).
+	 * Only removes instances within the edit radius, not the entire chunk.
+	 * Prevents regeneration in the cleared area until chunk is fully unloaded/reloaded.
+	 *
+	 * @param WorldPosition Center of the edit in world space
+	 * @param Radius Radius of the edit brush
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
+	void ClearScatterInRadius(const FVector& WorldPosition, float Radius);
+
+	/**
+	 * Check if a point falls within any cleared volume for a chunk.
+	 * Used during scatter generation to skip points in player-edited areas.
+	 */
+	bool IsPointInClearedVolume(const FIntVector& ChunkCoord, const FVector& WorldPosition) const;
 
 	// ==================== Configuration ====================
 
@@ -320,6 +338,27 @@ protected:
 	/** Per-chunk scatter data cache */
 	TMap<FIntVector, FChunkScatterData> ScatterDataCache;
 
+	/**
+	 * Cleared scatter volume - represents an area where scatter should not regenerate.
+	 * Used for player edits to surgically remove scatter in the affected area only.
+	 */
+	struct FClearedScatterVolume
+	{
+		FVector Center;
+		float Radius;
+
+		FClearedScatterVolume() : Center(FVector::ZeroVector), Radius(0.0f) {}
+		FClearedScatterVolume(const FVector& InCenter, float InRadius) : Center(InCenter), Radius(InRadius) {}
+
+		bool ContainsPoint(const FVector& Point) const
+		{
+			return FVector::DistSquared(Center, Point) <= (Radius * Radius);
+		}
+	};
+
+	/** Per-chunk list of cleared volumes from player edits */
+	TMap<FIntVector, TArray<FClearedScatterVolume>> ClearedVolumesPerChunk;
+
 	// ==================== Debug ====================
 
 	/** Whether debug visualization is enabled */
@@ -327,6 +366,44 @@ protected:
 
 	/** Last viewer position (for debug drawing) */
 	FVector LastViewerPosition = FVector::ZeroVector;
+
+	// ==================== Deferred Generation Queue ====================
+
+	/**
+	 * Pending scatter generation request.
+	 * Stores lightweight copy of mesh data needed for surface extraction.
+	 */
+	struct FPendingScatterGeneration
+	{
+		FIntVector ChunkCoord;
+		float DistanceToViewer;
+
+		// Lightweight mesh data copy (only what's needed for surface extraction)
+		TArray<FVector3f> Positions;
+		TArray<FVector3f> Normals;
+		TArray<FVector2f> UV1s;
+		TArray<FColor> Colors;
+
+		bool operator<(const FPendingScatterGeneration& Other) const
+		{
+			return DistanceToViewer < Other.DistanceToViewer; // Closer first
+		}
+	};
+
+	/** Queue of pending scatter generations, sorted by distance */
+	TArray<FPendingScatterGeneration> PendingGenerationQueue;
+
+	/** Set of chunks in the pending queue (O(1) duplicate check) */
+	TSet<FIntVector> PendingQueueSet;
+
+	/** Maximum scatter generations per frame (0 = unlimited) */
+	int32 MaxScatterGenerationsPerFrame = 2;
+
+	/** Process pending scatter generation queue */
+	void ProcessPendingGenerationQueue();
+
+	/** Generate scatter from cached pending data */
+	void GenerateChunkScatterFromPending(const FPendingScatterGeneration& PendingData);
 
 	// ==================== Statistics ====================
 

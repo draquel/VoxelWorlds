@@ -10,8 +10,12 @@ class UVoxelWorldConfiguration;
 
 /**
  * Delegate fired when a chunk's edits are modified.
+ * @param ChunkCoord The chunk that was edited
+ * @param Source The source of the edit (Player, System, Editor)
+ * @param EditCenter World position of the edit center (for targeted scatter removal)
+ * @param EditRadius Radius of the edit brush (for targeted scatter removal)
  */
-DECLARE_MULTICAST_DELEGATE_OneParam(FOnChunkEdited, const FIntVector& /*ChunkCoord*/);
+DECLARE_MULTICAST_DELEGATE_FourParams(FOnChunkEdited, const FIntVector& /*ChunkCoord*/, EEditSource /*Source*/, const FVector& /*EditCenter*/, float /*EditRadius*/);
 
 /**
  * Delegate fired when undo/redo state changes.
@@ -96,6 +100,20 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
 	bool IsEditOperationInProgress() const { return CurrentOperation.IsValid(); }
+
+	/**
+	 * Set the source of subsequent edit operations.
+	 * This determines how systems like scatter respond to edits.
+	 * @param Source The edit source (Player, System, Editor)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	void SetEditSource(EEditSource Source) { CurrentEditSource = Source; }
+
+	/**
+	 * Get the current edit source.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	EEditSource GetEditSource() const { return CurrentEditSource; }
 
 	/**
 	 * Apply a single voxel edit at a world position.
@@ -330,6 +348,15 @@ protected:
 
 	/** Whether the manager is initialized */
 	bool bIsInitialized = false;
+
+	/** Current edit source - determines how scatter and other systems respond */
+	EEditSource CurrentEditSource = EEditSource::Player;
+
+	/** Current edit center in world space (for scatter removal) */
+	FVector CurrentEditCenter = FVector::ZeroVector;
+
+	/** Current edit radius (for scatter removal) */
+	float CurrentEditRadius = 0.0f;
 
 	// ==================== Edit Storage ====================
 

@@ -1,216 +1,255 @@
 # Scatter System
 
-**Module**: VoxelScatter  
-**Dependencies**: VoxelCore, VoxelGeneration
+**Module**: VoxelScatter
+**Dependencies**: VoxelCore, VoxelStreaming
 
 ## Overview
 
-The scatter system places vegetation (trees, grass, rocks) on voxel terrain using GPU-driven placement and Hierarchical Instanced Static Mesh (HISM) rendering.
+The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. The system extracts surface points from mesh data, applies placement rules, and manages HISM instances with optimized rebuild strategies.
 
-## Scatter Definition
+## Architecture
+
+```
+VoxelChunkManager
+    │
+    ├── OnChunkMeshDataReady() ──► VoxelScatterManager
+    │                                    │
+    │                                    ├── VoxelSurfaceExtractor (extract surface points)
+    │                                    │
+    │                                    ├── VoxelScatterPlacement (apply rules, generate spawn points)
+    │                                    │
+    │                                    └── VoxelScatterRenderer (HISM instance management)
+    │
+    └── OnChunkEdited() ──► ClearScatterInRadius() or RegenerateChunkScatter()
+```
+
+## Key Components
+
+### VoxelScatterManager
+
+Coordinates scatter generation and manages per-chunk data caches.
 
 ```cpp
-/**
- * Scatter Definition
- * 
- * Defines rules for placing a type of scatter (trees, grass, etc.)
- */
-struct FScatterDefinition
+UCLASS(BlueprintType)
+class UVoxelScatterManager : public UObject
 {
-    /** Scatter ID */
-    int32 ScatterID;
-    
-    /** Display name */
-    FString ScatterName;
-    
-    /** Static mesh to instance */
-    UStaticMesh* Mesh;
-    
-    // ==================== Placement Rules ====================
-    
-    /** Density (instances per square meter) */
-    float Density;
-    
-    /** Minimum slope (degrees) */
-    float MinSlope;
-    
-    /** Maximum slope (degrees) */
-    float MaxSlope;
-    
-    /** Allowed materials (surface must be one of these) */
-    TArray<uint8> AllowedMaterials;
-    
-    /** Allowed biomes */
-    TArray<uint8> AllowedBiomes;
-    
-    /** Minimum elevation */
-    float MinElevation;
-    
-    /** Maximum elevation */
-    float MaxElevation;
-    
-    // ==================== Instance Variation ====================
-    
-    /** Scale range */
-    FVector2D ScaleRange;
-    
-    /** Random rotation? */
-    bool bRandomRotation;
-    
-    /** Align to surface normal? */
-    bool bAlignToNormal;
-    
-    /** Offset from surface (cm) */
-    float SurfaceOffset;
-    
-    // ==================== Culling ====================
-    
-    /** LOD distances */
-    TArray<float> LODDistances;
-    
-    /** Cull distance */
-    float CullDistance;
+public:
+    // Lifecycle
+    void Initialize(UVoxelWorldConfiguration* Config, UWorld* World);
+    void Shutdown();
+    void Update(const FVector& ViewerPosition, float DeltaTime);
+
+    // Scatter definitions
+    void AddScatterDefinition(const FScatterDefinition& Definition);
+    bool RemoveScatterDefinition(int32 ScatterID);
+    const FScatterDefinition* GetScatterDefinition(int32 ScatterID) const;
+
+    // Mesh data callback (called by ChunkManager)
+    void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData);
+    void OnChunkUnloaded(const FIntVector& ChunkCoord);
+
+    // Edit integration
+    void ClearScatterInRadius(const FVector& WorldPosition, float Radius);
+    void RegenerateChunkScatter(const FIntVector& ChunkCoord);
+    bool IsPointInClearedVolume(const FIntVector& ChunkCoord, const FVector& WorldPosition) const;
+
+protected:
+    // Deferred generation queue (sorted by distance, throttled)
+    TArray<FPendingScatterGeneration> PendingGenerationQueue;
+    int32 MaxScatterGenerationsPerFrame = 2;
+
+    // Cleared volumes for player edits (prevents regeneration)
+    TMap<FIntVector, TArray<FClearedScatterVolume>> ClearedVolumesPerChunk;
 };
 ```
 
-## GPU Scatter Generation
+### VoxelScatterRenderer
+
+Manages HISM components with deferred rebuild strategy.
 
 ```cpp
-/**
- * Generate scatter for a chunk (GPU compute shader)
- */
-void UVoxelScatterManager::GenerateScatterForChunk(FIntVector ChunkCoord)
+UCLASS()
+class UVoxelScatterRenderer : public UObject
 {
-    FRDGBuilder GraphBuilder(RHICmdList);
-    
-    // Get surface voxels for chunk
-    FRDGBufferRef SurfaceBuffer = GetChunkSurfaceVoxels(ChunkCoord);
-    
-    // Create output buffer for instances
-    FRDGBufferDesc InstanceBufferDesc = FRDGBufferDesc::CreateStructuredDesc(
-        sizeof(FScatterInstance),
-        MaxInstancesPerChunk
-    );
-    FRDGBufferRef InstanceBuffer = GraphBuilder.CreateBuffer(InstanceBufferDesc, TEXT("ScatterInstances"));
-    
-    // Dispatch scatter generation shader
-    FScatterGenerationCS::FParameters* Params = GraphBuilder.AllocParameters<FScatterGenerationCS::FParameters>();
-    Params->SurfaceVoxels = GraphBuilder.CreateSRV(SurfaceBuffer);
-    Params->OutInstances = GraphBuilder.CreateUAV(InstanceBuffer);
-    Params->ScatterDefinitions = ScatterDefinitionsBuffer;
-    Params->ChunkCoord = ChunkCoord;
-    Params->RandomSeed = GetRandomSeed(ChunkCoord);
-    
-    TShaderMapRef<FScatterGenerationCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-    
-    FComputeShaderUtils::AddPass(
-        GraphBuilder,
-        RDG_EVENT_NAME("GenerateScatter"),
-        ComputeShader,
-        Params,
-        FIntVector(ChunkSize, ChunkSize, 1)
-    );
-    
-    GraphBuilder.Execute();
-    
-    // Extract instances to HISM
-    UpdateHISMInstances(ChunkCoord, InstanceBuffer);
+public:
+    void Initialize(UVoxelScatterManager* Manager, UWorld* World);
+    void Tick(const FVector& ViewerPosition, float DeltaTime);
+
+    // Instance management
+    void UpdateChunkInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData);
+    void RemoveChunkInstances(const FIntVector& ChunkCoord);
+
+    // Deferred rebuilds (prevents flicker)
+    void QueueRebuild(int32 ScatterTypeID);
+
+protected:
+    // One HISM per scatter type
+    TMap<int32, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
+
+    // Pending rebuilds (processed when viewer is stationary)
+    TSet<int32> PendingRebuildScatterTypes;
+    float RebuildStationaryDelay = 0.5f;
+    float TimeSinceViewerMoved = 0.0f;
+};
+```
+
+## Data Structures
+
+### FScatterDefinition
+
+Defines placement rules for a scatter type.
+
+```cpp
+USTRUCT(BlueprintType)
+struct FScatterDefinition
+{
+    // Identification
+    int32 ScatterID;
+    FString Name;
+    bool bEnabled = true;
+
+    // Mesh
+    TSoftObjectPtr<UStaticMesh> Mesh;
+    TArray<TSoftObjectPtr<UMaterialInterface>> OverrideMaterials;
+
+    // Placement Rules
+    float Density = 0.1f;                    // 0.0-1.0, probability per surface point
+    float MinSlopeDegrees = 0.0f;
+    float MaxSlopeDegrees = 45.0f;
+    TArray<EVoxelMaterial> AllowedMaterials;
+    TArray<uint8> AllowedBiomes;
+    float MinElevation = -FLT_MAX;
+    float MaxElevation = FLT_MAX;
+    bool bTopFacesOnly = true;
+    float SpawnDistance = 0.0f;              // 0 = use global ScatterRadius
+
+    // Instance Variation
+    FVector2D ScaleRange = FVector2D(0.8f, 1.2f);
+    bool bRandomYawRotation = true;
+    bool bAlignToSurfaceNormal = false;
+    float SurfaceOffset = 0.0f;
+    float PositionJitter = 0.0f;
+
+    // Rendering
+    float CullDistance = 10000.0f;
+    bool bCastShadows = true;
+    bool bEnableCollision = false;
+    bool bReceivesDecals = true;
+
+    // Debug
+    FColor DebugColor = FColor::Green;
+};
+```
+
+### FScatterSpawnPoint
+
+Individual scatter instance data.
+
+```cpp
+USTRUCT()
+struct FScatterSpawnPoint
+{
+    FVector Position;           // World position
+    FVector Normal;             // Surface normal
+    float Scale;                // Random scale
+    float YawRotation;          // Random Y rotation (radians)
+    int32 ScatterTypeID;        // Reference to definition
+
+    FTransform GetTransform(bool bAlignToNormal, float SurfaceOffset) const;
+};
+```
+
+## Placement Pipeline
+
+### 1. Surface Extraction
+
+When mesh data is ready, surface points are extracted using spatial hashing:
+
+```cpp
+void FVoxelSurfaceExtractor::ExtractSurfacePoints(
+    const FChunkMeshData& MeshData,
+    const FIntVector& ChunkCoord,
+    const FVector& ChunkWorldOrigin,
+    float TargetSpacing,
+    int32 LODLevel,
+    FChunkSurfaceData& OutSurfaceData)
+{
+    // Spatial hash grid for even distribution
+    TMap<FIntVector, int32> OccupiedCells;
+
+    for (int32 VertIndex = 0; VertIndex < MeshData.Positions.Num(); ++VertIndex)
+    {
+        FVector WorldPos = ChunkWorldOrigin + FVector(MeshData.Positions[VertIndex]);
+
+        // Spatial hash cell
+        FIntVector Cell(
+            FMath::FloorToInt(WorldPos.X / TargetSpacing),
+            FMath::FloorToInt(WorldPos.Y / TargetSpacing),
+            FMath::FloorToInt(WorldPos.Z / TargetSpacing)
+        );
+
+        if (OccupiedCells.Contains(Cell)) continue;
+
+        // Extract surface point data from mesh
+        FVoxelSurfacePoint Point;
+        Point.Position = WorldPos;
+        Point.Normal = FVector(MeshData.Normals[VertIndex]).GetSafeNormal();
+        Point.MaterialID = DecodeFromUV1(MeshData.UV1s[VertIndex]);
+        Point.BiomeID = MeshData.Colors[VertIndex].G;
+        Point.FaceType = DecodeFaceType(MeshData.UV1s[VertIndex]);
+
+        OutSurfaceData.SurfacePoints.Add(Point);
+        OccupiedCells.Add(Cell, OutSurfaceData.SurfacePoints.Num() - 1);
+    }
 }
 ```
 
-### Scatter Shader
+### 2. Scatter Placement
 
-```hlsl
-// ScatterGeneration.usf
+Spawn points are generated using deterministic randomness:
 
-struct ScatterDefinition
+```cpp
+void FVoxelScatterPlacement::GenerateSpawnPoints(
+    const FChunkSurfaceData& SurfaceData,
+    const TArray<FScatterDefinition>& Definitions,
+    uint32 ChunkSeed,
+    FChunkScatterData& OutScatterData)
 {
-    float Density;
-    float MinSlope;
-    float MaxSlope;
-    uint MaterialMask;  // Bitmask of allowed materials
-    float MinElevation;
-    float MaxElevation;
-    float2 ScaleRange;
-    // ...
-};
+    FRandomStream Random(ChunkSeed);
 
-struct SurfaceVoxel
-{
-    float3 WorldPosition;
-    float3 Normal;
-    uint MaterialID;
-    uint BiomeID;
-};
-
-struct ScatterInstance
-{
-    float3 Position;
-    float4 Rotation;  // Quaternion
-    float Scale;
-    uint ScatterID;
-};
-
-StructuredBuffer<SurfaceVoxel> SurfaceVoxels;
-StructuredBuffer<ScatterDefinition> ScatterDefinitions;
-RWStructuredBuffer<ScatterInstance> OutInstances;
-
-[numthreads(8,8,1)]
-void GenerateScatter(uint3 ThreadID : SV_DispatchThreadID)
-{
-    uint VoxelIndex = ThreadID.x + ThreadID.y * ChunkSize;
-    if (VoxelIndex >= SurfaceVoxelCount) return;
-    
-    SurfaceVoxel Voxel = SurfaceVoxels[VoxelIndex];
-    
-    // Calculate slope
-    float Slope = acos(dot(Voxel.Normal, float3(0,0,1))) * 57.2958; // Radians to degrees
-    
-    // Iterate scatter types
-    for (uint i = 0; i < ScatterTypeCount; ++i)
+    for (const FVoxelSurfacePoint& Point : SurfaceData.SurfacePoints)
     {
-        ScatterDefinition Scatter = ScatterDefinitions[i];
-        
-        // Check placement rules
-        if (Slope < Scatter.MinSlope || Slope > Scatter.MaxSlope) continue;
-        if (Voxel.WorldPosition.z < Scatter.MinElevation || Voxel.WorldPosition.z > Scatter.MaxElevation) continue;
-        if (!IsMaterialAllowed(Voxel.MaterialID, Scatter.MaterialMask)) continue;
-        
-        // Poisson disk sampling for placement
-        uint Seed = Hash(VoxelIndex + RandomSeed + i);
-        float Random = Random01(Seed);
-        
-        if (Random < Scatter.Density)
+        float SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(Point.Normal.Z));
+
+        for (const FScatterDefinition& Def : Definitions)
         {
-            // Create instance
-            ScatterInstance Instance;
-            Instance.Position = Voxel.WorldPosition + Voxel.Normal * Scatter.SurfaceOffset;
-            Instance.Scale = lerp(Scatter.ScaleRange.x, Scatter.ScaleRange.y, Random01(Seed + 1));
-            
-            if (Scatter.bRandomRotation)
+            // Check placement rules
+            if (!Def.bEnabled) continue;
+            if (SlopeAngle < Def.MinSlopeDegrees || SlopeAngle > Def.MaxSlopeDegrees) continue;
+            if (Def.AllowedMaterials.Num() > 0 && !Def.AllowedMaterials.Contains(Point.MaterialID)) continue;
+            if (Def.AllowedBiomes.Num() > 0 && !Def.AllowedBiomes.Contains(Point.BiomeID)) continue;
+            if (Point.Position.Z < Def.MinElevation || Point.Position.Z > Def.MaxElevation) continue;
+            if (Def.bTopFacesOnly && Point.FaceType != EVoxelFaceType::Top) continue;
+
+            // Density check
+            if (Random.FRand() > Def.Density) continue;
+
+            // Create spawn point
+            FScatterSpawnPoint SpawnPoint;
+            SpawnPoint.Position = Point.Position + Point.Normal * Def.SurfaceOffset;
+            SpawnPoint.Normal = Point.Normal;
+            SpawnPoint.Scale = Random.FRandRange(Def.ScaleRange.X, Def.ScaleRange.Y);
+            SpawnPoint.YawRotation = Def.bRandomYawRotation ? Random.FRand() * 2.0f * PI : 0.0f;
+            SpawnPoint.ScatterTypeID = Def.ScatterID;
+
+            // Apply position jitter
+            if (Def.PositionJitter > 0.0f)
             {
-                float Angle = Random01(Seed + 2) * 6.28318; // 0 to 2π
-                Instance.Rotation = QuaternionFromAxisAngle(float3(0,0,1), Angle);
+                SpawnPoint.Position.X += Random.FRandRange(-Def.PositionJitter, Def.PositionJitter);
+                SpawnPoint.Position.Y += Random.FRandRange(-Def.PositionJitter, Def.PositionJitter);
             }
-            else if (Scatter.bAlignToNormal)
-            {
-                Instance.Rotation = QuaternionLookRotation(Voxel.Normal, float3(0,0,1));
-            }
-            else
-            {
-                Instance.Rotation = float4(0,0,0,1); // Identity
-            }
-            
-            Instance.ScatterID = i;
-            
-            // Append to output (atomic)
-            uint OutputIndex;
-            InterlockedAdd(InstanceCount, 1, OutputIndex);
-            
-            if (OutputIndex < MaxInstancesPerChunk)
-            {
-                OutInstances[OutputIndex] = Instance;
-            }
+
+            OutScatterData.SpawnPoints.Add(SpawnPoint);
         }
     }
 }
@@ -218,198 +257,236 @@ void GenerateScatter(uint3 ThreadID : SV_DispatchThreadID)
 
 ## HISM Management
 
+### Rebuild Strategy
+
+The scatter renderer uses a **full rebuild** approach per scatter type:
+
+1. **Why not individual RemoveInstance?**
+   - HISM's `RemoveInstance()` shifts all subsequent indices
+   - Index tracking becomes invalid after any removal
+   - Complex to maintain chunk→instance mappings
+
+2. **Rebuild approach:**
+   - When a chunk changes, queue affected scatter types for rebuild
+   - On rebuild: Clear all instances, collect from all chunks, batch add
+   - Uses `HISM->AddInstances()` for efficient batch addition
+
+3. **Deferred rebuilds:**
+   - Rebuilds are queued, not immediate
+   - Processed in `Tick()` when viewer has been stationary for 0.5s
+   - Prevents flickering during movement
+
 ```cpp
-/**
- * Scatter Component Manager
- * 
- * Manages HISMs for scatter rendering.
- */
-class UVoxelScatterComponent : public USceneComponent
+void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
 {
-public:
-    /** HISM components per scatter type */
-    TMap<int32, UHierarchicalInstancedStaticMeshComponent*> HISMComponents;
-    
-    /**
-     * Create HISM for scatter type
-     */
-    UHierarchicalInstancedStaticMeshComponent* GetOrCreateHISM(int32 ScatterID)
+    UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(ScatterTypeID);
+
+    // Collect all transforms FIRST
+    TArray<FTransform> AllTransforms;
+    for (const auto& ChunkPair : ChunkScatterTypes)
     {
-        if (UHierarchicalInstancedStaticMeshComponent** Existing = HISMComponents.Find(ScatterID))
+        if (!ChunkPair.Value.Contains(ScatterTypeID)) continue;
+
+        const FChunkScatterData* Data = ScatterManager->GetChunkScatterData(ChunkPair.Key);
+        for (const FScatterSpawnPoint& Point : Data->SpawnPoints)
         {
-            return *Existing;
-        }
-        
-        const FScatterDefinition& Scatter = ScatterRegistry->GetScatter(ScatterID);
-        
-        UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
-        HISM->SetStaticMesh(Scatter.Mesh);
-        HISM->SetCullDistances(0, Scatter.CullDistance);
-        HISM->SetupAttachment(this);
-        HISM->RegisterComponent();
-        
-        HISMComponents.Add(ScatterID, HISM);
-        return HISM;
-    }
-    
-    /**
-     * Update instances for a chunk
-     */
-    void UpdateChunkInstances(FIntVector ChunkCoord, const TArray<FScatterInstance>& Instances)
-    {
-        // Group instances by scatter type
-        TMap<int32, TArray<FTransform>> InstancesByType;
-        
-        for (const FScatterInstance& Instance : Instances)
-        {
-            FTransform Transform;
-            Transform.SetLocation(Instance.Position);
-            Transform.SetRotation(Instance.Rotation);
-            Transform.SetScale3D(FVector(Instance.Scale));
-            
-            InstancesByType.FindOrAdd(Instance.ScatterID).Add(Transform);
-        }
-        
-        // Update HISMs
-        for (auto& Pair : InstancesByType)
-        {
-            int32 ScatterID = Pair.Key;
-            TArray<FTransform>& Transforms = Pair.Value;
-            
-            UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(ScatterID);
-            
-            // Clear old instances for this chunk
-            ClearChunkInstances(HISM, ChunkCoord);
-            
-            // Add new instances
-            for (const FTransform& Transform : Transforms)
+            if (Point.ScatterTypeID == ScatterTypeID)
             {
-                HISM->AddInstance(Transform);
+                AllTransforms.Add(Point.GetTransform(Definition->bAlignToSurfaceNormal, Definition->SurfaceOffset));
             }
-            
-            // Build spatial tree
-            HISM->BuildTreeIfOutdated(true, false);
         }
     }
-};
-```
 
-## Biome Integration
-
-```cpp
-/**
- * Get scatter types for biome
- */
-TArray<FScatterDefinition> GetScatterForBiome(uint8 BiomeID)
-{
-    const FBiomeDefinition& Biome = BiomeRegistry->GetBiome(BiomeID);
-    
-    TArray<FScatterDefinition> Result;
-    
-    // Trees
-    if (Biome.TreeDensity > 0.0f)
+    // Clear and add in quick succession
+    HISM->ClearInstances();
+    if (AllTransforms.Num() > 0)
     {
-        FScatterDefinition TreeScatter;
-        TreeScatter.ScatterID = 0;
-        TreeScatter.Mesh = TreeMeshes[Biome.BiomeID];
-        TreeScatter.Density = Biome.TreeDensity;
-        TreeScatter.MinSlope = 0.0f;
-        TreeScatter.MaxSlope = 30.0f;
-        TreeScatter.AllowedMaterials = { Biome.SurfaceMaterial };
-        TreeScatter.ScaleRange = FVector2D(0.8f, 1.2f);
-        TreeScatter.bRandomRotation = true;
-        TreeScatter.bAlignToNormal = true;
-        
-        Result.Add(TreeScatter);
+        HISM->AddInstances(AllTransforms, false, true);
     }
-    
-    // Grass
-    if (Biome.GrassDensity > 0.0f)
-    {
-        FScatterDefinition GrassScatter;
-        GrassScatter.ScatterID = 1;
-        GrassScatter.Mesh = GrassMesh;
-        GrassScatter.Density = Biome.GrassDensity;
-        GrassScatter.MinSlope = 0.0f;
-        GrassScatter.MaxSlope = 45.0f;
-        GrassScatter.AllowedMaterials = { Biome.SurfaceMaterial };
-        GrassScatter.ScaleRange = FVector2D(0.9f, 1.1f);
-        GrassScatter.bRandomRotation = true;
-        GrassScatter.bAlignToNormal = true;
-        GrassScatter.CullDistance = 5000.0f;  // Grass culls closer
-        
-        Result.Add(GrassScatter);
-    }
-    
-    return Result;
 }
 ```
 
-## Performance Optimization
+### New Chunk Optimization
 
-### Instance Pooling
+New chunks (no existing scatter) bypass the rebuild system entirely:
 
 ```cpp
-// Reuse instances when chunks load/unload
-TMap<FIntVector, TArray<FScatterInstance>> InstanceCache;
-
-void UVoxelScatterManager::UnloadChunk(FIntVector ChunkCoord)
+void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData)
 {
-    // Cache instances before unloading
-    TArray<FScatterInstance> Instances = GetChunkInstances(ChunkCoord);
-    InstanceCache.Add(ChunkCoord, Instances);
-    
-    // Clear from HISM
-    ClearChunkFromHISM(ChunkCoord);
-}
+    const bool bIsNewChunk = !ChunkScatterTypes.Contains(ChunkCoord);
 
-void UVoxelScatterManager::LoadChunk(FIntVector ChunkCoord)
-{
-    // Check cache first
-    if (TArray<FScatterInstance>* Cached = InstanceCache.Find(ChunkCoord))
+    if (bIsNewChunk && ScatterData.bIsValid)
     {
-        UpdateChunkInstances(ChunkCoord, *Cached);
-        InstanceCache.Remove(ChunkCoord);
+        // Direct instance addition - no rebuild, no flicker
+        TMap<int32, TArray<FTransform>> TransformsByType;
+        // ... group transforms by scatter type ...
+
+        for (auto& Pair : TransformsByType)
+        {
+            UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(Pair.Key);
+            HISM->AddInstances(Pair.Value, false, true);
+        }
     }
     else
     {
-        // Generate new
-        GenerateScatterForChunk(ChunkCoord);
+        // Existing chunk update - queue rebuild
+        for (int32 ScatterTypeID : AffectedTypes)
+        {
+            QueueRebuild(ScatterTypeID);
+        }
     }
 }
 ```
 
-### LOD System
+## Edit Integration
+
+### Edit Source System
+
+Scatter responds differently based on edit source:
 
 ```cpp
-// Update scatter LOD based on distance
-void UpdateScatterLOD()
+enum class EEditSource : uint8
 {
-    FVector ViewerPos = GetViewerPosition();
-    
-    for (auto& Pair : HISMComponents)
+    Player,  // Surgical removal, no regeneration
+    System,  // Full regeneration allowed (POIs, game events)
+    Editor   // Full regeneration allowed
+};
+```
+
+### Targeted Removal
+
+Player edits remove only instances within the brush radius:
+
+```cpp
+void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, float Radius)
+{
+    // Find affected chunks
+    for (each affected chunk)
     {
-        UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value;
-        const FScatterDefinition& Scatter = GetScatterDefinition(Pair.Key);
-        
-        // Set LOD distances
-        HISM->OverrideMaterials = GetLODMaterials(Scatter.ScatterID);
-        
-        // Cull based on distance
-        float DistanceToViewer = FVector::Dist(HISM->GetComponentLocation(), ViewerPos);
-        HISM->SetVisibility(DistanceToViewer < Scatter.CullDistance);
+        // Track cleared volume (prevents regeneration)
+        ClearedVolumesPerChunk.FindOrAdd(ChunkCoord).Add(FClearedScatterVolume(WorldPosition, Radius));
+
+        // Remove spawn points within radius
+        FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+        for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
+        {
+            if (FVector::DistSquared(ScatterData->SpawnPoints[i].Position, WorldPosition) <= Radius * Radius)
+            {
+                ScatterTypesToRebuild.Add(ScatterData->SpawnPoints[i].ScatterTypeID);
+                ScatterData->SpawnPoints.RemoveAt(i);
+            }
+        }
+    }
+
+    // Queue rebuilds for affected scatter types only
+    for (int32 ScatterTypeID : ScatterTypesToRebuild)
+    {
+        ScatterRenderer->QueueRebuild(ScatterTypeID);
     }
 }
 ```
 
-## Next Steps
+### Cleared Volume Tracking
 
-1. Implement scatter generation shader
-2. Create HISM management system
-3. Define scatter types (trees, grass, rocks)
-4. Integrate with biome system
-5. Add LOD and culling
-6. Optimize instance pooling
+Prevents scatter from regenerating in player-edited areas:
 
-See [BIOME_SYSTEM.md](BIOME_SYSTEM.md) for biome-scatter integration.
+```cpp
+struct FClearedScatterVolume
+{
+    FVector Center;
+    float Radius;
 
+    bool ContainsPoint(const FVector& Point) const
+    {
+        return FVector::DistSquared(Center, Point) <= (Radius * Radius);
+    }
+};
+
+// During scatter generation, skip cleared volumes
+if (IsPointInClearedVolume(ChunkCoord, WorldPos))
+{
+    continue;  // Don't place scatter here
+}
+
+// Cleared volumes are removed when chunk fully unloads
+// This allows scatter to regenerate when player returns later
+void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
+{
+    ClearedVolumesPerChunk.Remove(ChunkCoord);
+    // ...
+}
+```
+
+## Configuration
+
+### VoxelScatterConfiguration Asset
+
+Editor-configurable scatter definitions:
+
+```cpp
+UCLASS(BlueprintType)
+class UVoxelScatterConfiguration : public UDataAsset
+{
+public:
+    UPROPERTY(EditAnywhere, Category = "Scatter")
+    TArray<FScatterDefinition> ScatterDefinitions;
+
+    UPROPERTY(EditAnywhere, Category = "Scatter")
+    float SurfacePointSpacing = 100.0f;
+
+    UPROPERTY(EditAnywhere, Category = "Scatter")
+    bool bUseDefaultsIfEmpty = true;
+};
+```
+
+### Default Scatter Types
+
+Created automatically if no configuration is provided:
+
+| Type | Density | Slope | Materials | Notes |
+|------|---------|-------|-----------|-------|
+| Grass | 50% | 0-30° | Grass | Top faces only, dense |
+| Rocks | 5% | 0-60° | Stone, Dirt | Can appear on slopes |
+| Trees | 2% | 0-20° | Grass | Very sparse, flat terrain |
+
+## Performance Considerations
+
+### Throttling
+
+- `MaxScatterGenerationsPerFrame = 2`: Limits surface extraction per frame
+- `MaxRebuildsPerFrame = 0` (unlimited): Rebuilds are fast once transforms are collected
+- `RebuildStationaryDelay = 0.5s`: Prevents flicker during movement
+
+### Memory
+
+- Surface data cached per chunk (`SurfaceDataCache`)
+- Scatter spawn points cached per chunk (`ScatterDataCache`)
+- HISM components shared across chunks (one per scatter type)
+
+### Distance-Based Loading
+
+- Per-definition `SpawnDistance` allows different ranges per scatter type
+- Trees can have larger spawn distance to prevent pop-in
+- Grass can have smaller distance for performance
+
+## Debug Visualization
+
+Enable via `bScatterDebugVisualization` in VoxelWorldConfiguration:
+
+- Spawn points: Colored spheres per scatter type
+- Surface normals: Blue lines
+- Scatter radius: Yellow sphere around viewer
+
+## Future Enhancements
+
+1. **GPU-based scatter generation**: Move placement to compute shader
+2. **Foliage LOD**: Leverage HISM's built-in LOD system
+3. **Procedural variation**: Per-instance custom data for shader variation
+4. **Async surface extraction**: Move to background threads
+5. **Instance pooling**: Reuse instances when chunks unload/reload
+
+## See Also
+
+- [BIOME_SYSTEM.md](BIOME_SYSTEM.md) - Biome-scatter integration
+- [EDIT_LAYER.md](EDIT_LAYER.md) - Edit system integration
+- [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) - Phase 7 details

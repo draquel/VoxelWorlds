@@ -290,13 +290,29 @@ void UVoxelChunkManager::Initialize(
 	EditManager->Initialize(Configuration);
 
 	// Subscribe to edit events - mark chunks dirty when edited
-	EditManager->OnChunkEdited.AddLambda([this](const FIntVector& ChunkCoord)
+	EditManager->OnChunkEdited.AddLambda([this](const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
 	{
 		// Mark the edited chunk dirty
 		MarkChunkDirty(ChunkCoord);
 		if (CollisionManager)
 		{
 			CollisionManager->MarkChunkDirty(ChunkCoord);
+		}
+		if (ScatterManager)
+		{
+			// Handle scatter based on edit source
+			if (Source == EEditSource::Player && EditRadius > 0.0f)
+			{
+				// Player edits: surgically remove scatter in the affected radius only
+				ScatterManager->ClearScatterInRadius(EditCenter, EditRadius);
+			}
+			else if (Source != EEditSource::Player)
+			{
+				// System/Editor edits allow scatter to regenerate with new mesh
+				ScatterManager->RegenerateChunkScatter(ChunkCoord);
+			}
+			// Note: Player edits with zero radius (undo/redo) don't need scatter handling
+			// since the targeted removal already happened during the original edit
 		}
 
 		// Also mark neighboring chunks dirty so they re-extract boundary data
@@ -316,6 +332,12 @@ void UVoxelChunkManager::Initialize(
 				if (CollisionManager)
 				{
 					CollisionManager->MarkChunkDirty(NeighborCoord);
+				}
+				// Note: Scatter for neighbors is already handled by ClearScatterInRadius
+				// which affects all chunks within the edit radius, not just the primary chunk
+				if (ScatterManager && Source != EEditSource::Player)
+				{
+					ScatterManager->RegenerateChunkScatter(NeighborCoord);
 				}
 			}
 		}

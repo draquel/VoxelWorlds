@@ -57,8 +57,12 @@ public:
 	/**
 	 * Per-frame tick to process deferred rebuilds.
 	 * Call this once per frame to flush pending scatter type rebuilds.
+	 * Rebuilds are deferred while the viewer is moving to prevent flicker.
+	 *
+	 * @param ViewerPosition Current viewer position
+	 * @param DeltaTime Time since last tick
 	 */
-	void Tick();
+	void Tick(const FVector& ViewerPosition, float DeltaTime);
 
 	// ==================== Instance Management ====================
 
@@ -119,6 +123,14 @@ public:
 	 */
 	FString GetDebugStats() const;
 
+	/**
+	 * Queue a scatter type for deferred rebuild.
+	 * Actual rebuild happens in Tick() to batch multiple chunk updates.
+	 *
+	 * @param ScatterTypeID The scatter type to queue for rebuild
+	 */
+	void QueueRebuild(int32 ScatterTypeID);
+
 protected:
 	// ==================== Internal Methods ====================
 
@@ -178,14 +190,6 @@ protected:
 	void RebuildScatterType(int32 ScatterTypeID);
 
 	/**
-	 * Queue a scatter type for deferred rebuild.
-	 * Actual rebuild happens in Tick() to batch multiple chunk updates.
-	 *
-	 * @param ScatterTypeID The scatter type to queue for rebuild
-	 */
-	void QueueRebuild(int32 ScatterTypeID);
-
-	/**
 	 * Process all pending rebuilds.
 	 * Called by Tick() or can be called manually to force immediate processing.
 	 */
@@ -198,6 +202,18 @@ protected:
 
 	/** Maximum number of scatter types to rebuild per frame (0 = unlimited) */
 	int32 MaxRebuildsPerFrame = 0;
+
+	/** Minimum time since last viewer movement before processing rebuilds (seconds) */
+	float RebuildStationaryDelay = 0.5f;
+
+	/** Time since viewer last moved significantly */
+	float TimeSinceViewerMoved = 0.0f;
+
+	/** Last known viewer position for movement detection */
+	FVector LastViewerPosition = FVector::ZeroVector;
+
+	/** Movement threshold to consider viewer as "moving" */
+	float ViewerMovementThreshold = 50.0f;
 
 	// ==================== References ====================
 

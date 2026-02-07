@@ -11,6 +11,7 @@
 #include "VoxelBiomeRegistry.h"
 #include "VoxelScatter.h"
 #include "DrawDebugHelpers.h"
+#include "Algo/BinarySearch.h"
 
 UVoxelScatterManager::UVoxelScatterManager()
 {
@@ -124,10 +125,15 @@ void UVoxelScatterManager::Shutdown()
 		ScatterRenderer = nullptr;
 	}
 
+	// Clear pending queue
+	PendingGenerationQueue.Empty();
+	PendingQueueSet.Empty();
+
 	// Clear all cached data
 	SurfaceDataCache.Empty();
 	ScatterDataCache.Empty();
 	ScatterDefinitions.Empty();
+	ClearedVolumesPerChunk.Empty();
 
 	Configuration = nullptr;
 	CachedWorld = nullptr;
@@ -148,11 +154,14 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 
 	LastViewerPosition = ViewerPosition;
 
+	// Process pending scatter generations (throttled)
+	ProcessPendingGenerationQueue();
+
 	// Tick the scatter renderer to flush pending HISM rebuilds
-	// This batches all chunk updates from this frame into single rebuilds per scatter type
+	// Rebuilds are deferred while viewer is moving to prevent flicker
 	if (ScatterRenderer && ScatterRenderer->IsInitialized())
 	{
-		ScatterRenderer->Tick();
+		ScatterRenderer->Tick(ViewerPosition, DeltaTime);
 	}
 
 	// Debug visualization is drawn separately via DrawDebugVisualization()
@@ -241,6 +250,12 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, co
 		return;
 	}
 
+	// Validate mesh data
+	if (!MeshData.IsValid())
+	{
+		return;
+	}
+
 	// Calculate chunk distance from viewer
 	const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 		FVector(Configuration->GetChunkWorldSize() * 0.5f);
@@ -293,11 +308,46 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, co
 		RemoveChunkScatter(ChunkCoord);
 	}
 
-	GenerateChunkScatter(ChunkCoord, MeshData);
+	// Skip if already in pending queue
+	if (PendingQueueSet.Contains(ChunkCoord))
+	{
+		return;
+	}
+
+	// Create pending generation request with lightweight mesh data copy
+	FPendingScatterGeneration PendingRequest;
+	PendingRequest.ChunkCoord = ChunkCoord;
+	PendingRequest.DistanceToViewer = ChunkDistance;
+
+	// Copy only the mesh data needed for surface extraction
+	PendingRequest.Positions = MeshData.Positions;
+	PendingRequest.Normals = MeshData.Normals;
+	PendingRequest.UV1s = MeshData.UV1s;
+	PendingRequest.Colors = MeshData.Colors;
+
+	// Insert sorted by distance (closer chunks first)
+	int32 InsertIndex = Algo::LowerBound(PendingGenerationQueue, PendingRequest);
+	PendingGenerationQueue.Insert(MoveTemp(PendingRequest), InsertIndex);
+	PendingQueueSet.Add(ChunkCoord);
+
+	UE_LOG(LogVoxelScatter, Verbose, TEXT("Queued scatter generation for chunk (%d,%d,%d) at distance %.0f (queue size: %d)"),
+		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ChunkDistance, PendingGenerationQueue.Num());
 }
 
 void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 {
+	// Remove from pending queue if present
+	if (PendingQueueSet.Remove(ChunkCoord) > 0)
+	{
+		PendingGenerationQueue.RemoveAll([&ChunkCoord](const FPendingScatterGeneration& Request)
+		{
+			return Request.ChunkCoord == ChunkCoord;
+		});
+	}
+
+	// Clear cleared volumes - when chunk is fully unloaded/reloaded, scatter can regenerate
+	ClearedVolumesPerChunk.Remove(ChunkCoord);
+
 	RemoveChunkScatter(ChunkCoord);
 }
 
@@ -308,12 +358,133 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 		return;
 	}
 
-	// Remove existing data
+	// Remove from pending queue if present
+	if (PendingQueueSet.Remove(ChunkCoord) > 0)
+	{
+		PendingGenerationQueue.RemoveAll([&ChunkCoord](const FPendingScatterGeneration& Request)
+		{
+			return Request.ChunkCoord == ChunkCoord;
+		});
+	}
+
+	// Clear cleared volumes so scatter can regenerate
+	ClearedVolumesPerChunk.Remove(ChunkCoord);
+
+	// Remove existing scatter data
 	RemoveChunkScatter(ChunkCoord);
 
 	// Regeneration requires new mesh data - the caller should provide it via OnChunkMeshDataReady
 	UE_LOG(LogVoxelScatter, Verbose, TEXT("Regenerate scatter requested for chunk (%d,%d,%d) - awaiting new mesh data"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+}
+
+void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, float Radius)
+{
+	if (!bIsInitialized || !Configuration)
+	{
+		return;
+	}
+
+	// Find which chunks are affected by this edit
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const FVector WorldOrigin = Configuration->WorldOrigin;
+
+	// Calculate affected chunk range
+	const FVector MinWorld = WorldPosition - FVector(Radius);
+	const FVector MaxWorld = WorldPosition + FVector(Radius);
+
+	const FIntVector MinChunk(
+		FMath::FloorToInt((MinWorld.X - WorldOrigin.X) / ChunkWorldSize),
+		FMath::FloorToInt((MinWorld.Y - WorldOrigin.Y) / ChunkWorldSize),
+		FMath::FloorToInt((MinWorld.Z - WorldOrigin.Z) / ChunkWorldSize)
+	);
+	const FIntVector MaxChunk(
+		FMath::FloorToInt((MaxWorld.X - WorldOrigin.X) / ChunkWorldSize),
+		FMath::FloorToInt((MaxWorld.Y - WorldOrigin.Y) / ChunkWorldSize),
+		FMath::FloorToInt((MaxWorld.Z - WorldOrigin.Z) / ChunkWorldSize)
+	);
+
+	// Track which scatter types need rebuilding
+	TSet<int32> ScatterTypesToRebuild;
+	int32 TotalRemoved = 0;
+
+	// Process each potentially affected chunk
+	for (int32 CX = MinChunk.X; CX <= MaxChunk.X; ++CX)
+	{
+		for (int32 CY = MinChunk.Y; CY <= MaxChunk.Y; ++CY)
+		{
+			for (int32 CZ = MinChunk.Z; CZ <= MaxChunk.Z; ++CZ)
+			{
+				const FIntVector ChunkCoord(CX, CY, CZ);
+
+				// Add cleared volume to this chunk
+				TArray<FClearedScatterVolume>& ClearedVolumes = ClearedVolumesPerChunk.FindOrAdd(ChunkCoord);
+				ClearedVolumes.Add(FClearedScatterVolume(WorldPosition, Radius));
+
+				// Remove spawn points that fall within the radius
+				FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+				if (ScatterData && ScatterData->bIsValid)
+				{
+					const float RadiusSq = Radius * Radius;
+
+					for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
+					{
+						const FScatterSpawnPoint& Point = ScatterData->SpawnPoints[i];
+						if (FVector::DistSquared(Point.Position, WorldPosition) <= RadiusSq)
+						{
+							ScatterTypesToRebuild.Add(Point.ScatterTypeID);
+							ScatterData->SpawnPoints.RemoveAt(i);
+							++TotalRemoved;
+						}
+					}
+				}
+
+				// Also remove from pending queue to prevent stale data
+				if (PendingQueueSet.Contains(ChunkCoord))
+				{
+					PendingQueueSet.Remove(ChunkCoord);
+					PendingGenerationQueue.RemoveAll([&ChunkCoord](const FPendingScatterGeneration& Request)
+					{
+						return Request.ChunkCoord == ChunkCoord;
+					});
+				}
+			}
+		}
+	}
+
+	// Queue rebuilds for affected scatter types
+	if (ScatterRenderer && ScatterRenderer->IsInitialized())
+	{
+		for (int32 ScatterTypeID : ScatterTypesToRebuild)
+		{
+			ScatterRenderer->QueueRebuild(ScatterTypeID);
+		}
+	}
+
+	if (TotalRemoved > 0)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Cleared %d scatter instances at (%.0f, %.0f, %.0f) radius %.0f"),
+			TotalRemoved, WorldPosition.X, WorldPosition.Y, WorldPosition.Z, Radius);
+	}
+}
+
+bool UVoxelScatterManager::IsPointInClearedVolume(const FIntVector& ChunkCoord, const FVector& WorldPosition) const
+{
+	const TArray<FClearedScatterVolume>* ClearedVolumes = ClearedVolumesPerChunk.Find(ChunkCoord);
+	if (!ClearedVolumes)
+	{
+		return false;
+	}
+
+	for (const FClearedScatterVolume& Volume : *ClearedVolumes)
+	{
+		if (Volume.ContainsPoint(WorldPosition))
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 // ==================== Configuration ====================
@@ -419,6 +590,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Initialized: %s\n")
 		TEXT("Definitions: %d\n")
 		TEXT("Chunks with Scatter: %d\n")
+		TEXT("Pending Queue: %d\n")
 		TEXT("Total Surface Points: %lld\n")
 		TEXT("Total Spawn Points: %lld\n")
 		TEXT("Avg Surface/Chunk: %.1f\n")
@@ -429,6 +601,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		bIsInitialized ? TEXT("Yes") : TEXT("No"),
 		ScatterDefinitions.Num(),
 		Stats.ChunksWithScatter,
+		PendingGenerationQueue.Num(),
 		Stats.TotalSurfacePoints,
 		Stats.TotalSpawnPoints,
 		Stats.GetAverageSurfacePointsPerChunk(),
@@ -549,6 +722,208 @@ void UVoxelScatterManager::RemoveChunkScatter(const FIntVector& ChunkCoord)
 		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Scatter data removed"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 	}
+}
+
+void UVoxelScatterManager::ProcessPendingGenerationQueue()
+{
+	if (PendingGenerationQueue.Num() == 0)
+	{
+		return;
+	}
+
+	// Determine how many to process this frame
+	int32 NumToProcess = PendingGenerationQueue.Num();
+	if (MaxScatterGenerationsPerFrame > 0 && NumToProcess > MaxScatterGenerationsPerFrame)
+	{
+		NumToProcess = MaxScatterGenerationsPerFrame;
+	}
+
+	// Process from front of queue (closest chunks first, due to sorted insertion)
+	for (int32 i = 0; i < NumToProcess; ++i)
+	{
+		if (PendingGenerationQueue.Num() == 0)
+		{
+			break;
+		}
+
+		// Take first item (closest chunk)
+		FPendingScatterGeneration Request = MoveTemp(PendingGenerationQueue[0]);
+		PendingGenerationQueue.RemoveAt(0);
+		PendingQueueSet.Remove(Request.ChunkCoord);
+
+		// Generate scatter from the pending data
+		GenerateChunkScatterFromPending(Request);
+	}
+
+	if (NumToProcess > 0)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Processed %d pending scatter generations (%d remaining)"),
+			NumToProcess, PendingGenerationQueue.Num());
+	}
+}
+
+void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatterGeneration& PendingData)
+{
+	const FIntVector& ChunkCoord = PendingData.ChunkCoord;
+	const FVector ChunkWorldOrigin = GetChunkWorldOrigin(ChunkCoord);
+
+	// Recalculate chunk distance (viewer may have moved)
+	float ChunkDistance = 0.0f;
+	if (Configuration)
+	{
+		const FVector ChunkCenter = ChunkWorldOrigin + FVector(Configuration->GetChunkWorldSize() * 0.5f);
+		ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+	}
+
+	// Filter definitions to only those within their spawn distance
+	TArray<FScatterDefinition> FilteredDefinitions;
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		if (!Def.bEnabled)
+		{
+			continue;
+		}
+
+		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
+		if (ChunkDistance <= EffectiveSpawnDistance)
+		{
+			FilteredDefinitions.Add(Def);
+		}
+	}
+
+	// Skip if no definitions in range (viewer moved away while queued)
+	if (FilteredDefinitions.Num() == 0)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Skipped scatter - viewer moved out of range"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+		return;
+	}
+
+	// Validate mesh data
+	const int32 VertexCount = PendingData.Positions.Num();
+	const bool bHasNormals = PendingData.Normals.Num() == VertexCount;
+
+	if (VertexCount == 0 || !bHasNormals)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Skipped scatter - invalid mesh data"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+		return;
+	}
+
+	// Extract surface points directly from pending data
+	// (Inline version of what VoxelSurfaceExtractor does)
+	const bool bHasUV1 = PendingData.UV1s.Num() == VertexCount;
+	const bool bHasColors = PendingData.Colors.Num() == VertexCount;
+
+	const float CellSize = SurfacePointSpacing;
+	TMap<FIntVector, int32> OccupiedCells;
+
+	FChunkSurfaceData SurfaceData(ChunkCoord);
+	SurfaceData.LODLevel = 0;
+	SurfaceData.AveragePointSpacing = SurfacePointSpacing;
+	SurfaceData.SurfacePoints.Reserve(VertexCount / 4);
+	OccupiedCells.Reserve(VertexCount / 4);
+
+	for (int32 VertIndex = 0; VertIndex < VertexCount; ++VertIndex)
+	{
+		const FVector LocalPos(PendingData.Positions[VertIndex]);
+		const FVector WorldPos = ChunkWorldOrigin + LocalPos;
+
+		// Spatial hash cell check
+		const FIntVector Cell(
+			FMath::FloorToInt(WorldPos.X / CellSize),
+			FMath::FloorToInt(WorldPos.Y / CellSize),
+			FMath::FloorToInt(WorldPos.Z / CellSize)
+		);
+
+		if (OccupiedCells.Contains(Cell))
+		{
+			continue;
+		}
+
+		const FVector Normal(PendingData.Normals[VertIndex]);
+
+		// Decode UV1 data
+		uint8 MaterialID = 0;
+		EVoxelFaceType FaceType = EVoxelFaceType::Top;
+		if (bHasUV1)
+		{
+			MaterialID = static_cast<uint8>(FMath::RoundToInt(PendingData.UV1s[VertIndex].X));
+			const int32 FaceTypeInt = FMath::RoundToInt(PendingData.UV1s[VertIndex].Y);
+			FaceType = (FaceTypeInt == 1) ? EVoxelFaceType::Side :
+					   (FaceTypeInt == 2) ? EVoxelFaceType::Bottom : EVoxelFaceType::Top;
+		}
+
+		// Decode color data
+		uint8 BiomeID = 0;
+		uint8 AO = 0;
+		if (bHasColors)
+		{
+			BiomeID = PendingData.Colors[VertIndex].G;
+			AO = PendingData.Colors[VertIndex].B & 0x03;
+		}
+
+		// Skip points in cleared volumes (player-edited areas)
+		if (IsPointInClearedVolume(ChunkCoord, WorldPos))
+		{
+			continue;
+		}
+
+		// Create surface point
+		FVoxelSurfacePoint Point;
+		Point.Position = WorldPos;
+		Point.Normal = FVector(Normal).GetSafeNormal();
+		Point.MaterialID = MaterialID;
+		Point.BiomeID = BiomeID;
+		Point.FaceType = FaceType;
+		Point.AmbientOcclusion = AO;
+
+		const int32 NewIndex = SurfaceData.SurfacePoints.Add(Point);
+		OccupiedCells.Add(Cell, NewIndex);
+	}
+
+	SurfaceData.SurfaceAreaEstimate = SurfaceData.SurfacePoints.Num() * CellSize * CellSize;
+	SurfaceData.bIsValid = true;
+
+	if (SurfaceData.SurfacePoints.Num() == 0)
+	{
+		return;
+	}
+
+	// Cache surface data
+	SurfaceDataCache.Add(ChunkCoord, MoveTemp(SurfaceData));
+	TotalSurfacePointsExtracted += SurfaceDataCache[ChunkCoord].SurfacePoints.Num();
+
+	// Generate spawn points
+	const uint32 ChunkSeed = FVoxelScatterPlacement::ComputeChunkSeed(ChunkCoord, WorldSeed);
+
+	FChunkScatterData ScatterData;
+	FVoxelScatterPlacement::GenerateSpawnPoints(
+		SurfaceDataCache[ChunkCoord],
+		FilteredDefinitions,
+		ChunkSeed,
+		ScatterData
+	);
+
+	const int32 SpawnCount = ScatterData.SpawnPoints.Num();
+
+	// Cache scatter data
+	ScatterDataCache.Add(ChunkCoord, MoveTemp(ScatterData));
+	TotalSpawnPointsGenerated += SpawnCount;
+	++TotalChunksProcessed;
+
+	// Update HISM instances
+	if (ScatterRenderer && ScatterRenderer->IsInitialized())
+	{
+		ScatterRenderer->UpdateChunkInstances(ChunkCoord, ScatterDataCache[ChunkCoord]);
+	}
+
+	// Broadcast event
+	OnChunkScatterReady.Broadcast(ChunkCoord, SpawnCount);
+
+	UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Generated scatter from queue (%d surface points, %d spawn points)"),
+		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
+		SurfaceDataCache[ChunkCoord].SurfacePoints.Num(), SpawnCount);
 }
 
 FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) const

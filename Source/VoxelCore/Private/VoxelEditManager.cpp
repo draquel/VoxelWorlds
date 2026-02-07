@@ -164,10 +164,10 @@ void UVoxelEditManager::CancelEditOperation()
 		}
 	}
 
-	// Notify affected chunks
+	// Notify affected chunks (use current source - cancelling reverts player's work)
 	for (const FIntVector& ChunkCoord : CurrentOperation->AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord);
+		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
 	}
 
 	UE_LOG(LogVoxelEdit, Log, TEXT("Edit operation '%s' cancelled (%d edits reverted)"),
@@ -229,6 +229,10 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 	{
 		return 0;
 	}
+
+	// Track edit center and radius for scatter removal
+	CurrentEditCenter = WorldPos;
+	CurrentEditRadius = Brush.Radius;
 
 	const float VoxelSize = Configuration->VoxelSize;
 	const int32 ChunkSize = Configuration->ChunkSize;
@@ -405,10 +409,11 @@ bool UVoxelEditManager::Undo()
 	// Add to redo stack
 	RedoStack.Add(MoveTemp(Operation));
 
-	// Notify affected chunks
+	// Notify affected chunks (undo restores previous state, so use System to regenerate scatter)
+	// Use zero radius since we want full regeneration, not targeted removal
 	for (const FIntVector& ChunkCoord : AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord);
+		OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
 	}
 
 	OnUndoRedoStateChanged.Broadcast();
@@ -455,10 +460,11 @@ bool UVoxelEditManager::Redo()
 	// Add back to undo stack
 	UndoStack.Add(MoveTemp(Operation));
 
-	// Notify affected chunks
+	// Notify affected chunks (redo reapplies edits, use current source - typically Player)
+	// Use zero radius since this is a full operation redo
 	for (const FIntVector& ChunkCoord : AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord);
+		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, FVector::ZeroVector, 0.0f);
 	}
 
 	OnUndoRedoStateChanged.Broadcast();
@@ -522,7 +528,8 @@ bool UVoxelEditManager::ClearChunkEdits(const FIntVector& ChunkCoord)
 		if (!Layer->IsEmpty())
 		{
 			Layer->Clear();
-			OnChunkEdited.Broadcast(ChunkCoord);
+			// Clearing edits is a system action - scatter should regenerate
+			OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
 			return true;
 		}
 	}
@@ -543,10 +550,10 @@ void UVoxelEditManager::ClearAllEdits()
 
 	EditLayers.Empty();
 
-	// Notify all affected chunks
+	// Notify all affected chunks (clearing is system action - regenerate scatter)
 	for (const FIntVector& ChunkCoord : AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord);
+		OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
 	}
 
 	UE_LOG(LogVoxelEdit, Log, TEXT("All edits cleared (%d chunks affected)"), AffectedChunks.Num());
@@ -730,10 +737,10 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 		LoadedChunks.Add(ChunkCoord);
 	}
 
-	// Notify all loaded chunks
+	// Notify all loaded chunks (loading from file is system action - regenerate scatter)
 	for (const FIntVector& ChunkCoord : LoadedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord);
+		OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
 	}
 
 	UE_LOG(LogVoxelEdit, Log, TEXT("Loaded %d edits across %d chunks from '%s'"),
@@ -879,8 +886,8 @@ void UVoxelEditManager::ApplyEditInternal(
 		CurrentOperation->AddEdit(Edit, ChunkCoord);
 	}
 
-	// Notify listeners
-	OnChunkEdited.Broadcast(ChunkCoord);
+	// Notify listeners with current edit source and location
+	OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
 }
 
 void UVoxelEditManager::ApplyEditInternal(
@@ -952,7 +959,7 @@ void UVoxelEditManager::ApplyEditInternal(
 					}
 
 					// Notify listeners that chunk changed
-					OnChunkEdited.Broadcast(ChunkCoord);
+					OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
 					return;
 				}
 			}
@@ -993,8 +1000,8 @@ void UVoxelEditManager::ApplyEditInternal(
 		CurrentOperation->AddEdit(EditCopy, ChunkCoord);
 	}
 
-	// Notify listeners
-	OnChunkEdited.Broadcast(ChunkCoord);
+	// Notify listeners with current edit source and location
+	OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
 }
 
 FVoxelData UVoxelEditManager::GetOriginalVoxelData(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const

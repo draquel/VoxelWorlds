@@ -550,29 +550,103 @@ Mesh generation was moved to background threads to eliminate stuttering:
 
 ---
 
-## Phase 7: Scatter & Polish (Weeks 13-14)
+## Phase 7: Scatter & Polish (Weeks 13-14) 🔄 IN PROGRESS
 
 **Goal**: Complete feature set
 
 ### Tasks
-- [ ] Scatter system
-- [ ] GPU-based vegetation placement
-- [ ] HISM integration
-- [ ] Foliage LOD
+- [x] Scatter system foundation (VoxelScatter module)
+- [x] Surface point extraction from mesh data
+- [x] Placement rules (density, slope, materials, biomes, elevation)
+- [x] HISM integration (per-type components)
+- [x] Deferred HISM rebuilds (batch updates)
+- [x] Throttled scatter generation (MaxScatterGenerationsPerFrame)
+- [x] Edit integration (targeted removal for player edits)
+- [x] Flicker prevention (stationary-only rebuilds)
+- [ ] GPU-based scatter generation (future optimization)
+- [ ] Foliage LOD (using HISM built-in)
 - [ ] Performance profiling
 - [ ] Memory optimization
-- [ ] Debug visualization tools
 
 ### Deliverables
-- Working vegetation system
-- Profiling tools
-- Debug overlays
+- Working vegetation system ✓
+- Edit-aware scatter (surgical removal) ✓
+- Deferred rebuild system ✓
 
 ### Success Criteria
-- Vegetation places correctly
-- Performance targets met
-- Memory within budget
-- Debug tools are useful
+- Vegetation places correctly ✓
+- No flicker during movement ✓
+- Edits remove only affected instances ✓
+- Performance targets (in progress)
+
+### Notes on Scatter System Implementation
+
+The scatter system was implemented in three sub-phases:
+
+#### Phase 7A: Scatter Placement Foundation
+1. **VoxelScatter Module**: New module for vegetation/object placement
+2. **VoxelScatterTypes.h**: Core data structures in VoxelCore
+   - `FVoxelSurfacePoint`: Position, normal, material, biome, face type
+   - `FScatterDefinition`: Scatter type configuration (mesh, density, rules)
+   - `FScatterSpawnPoint`: Instance data (position, rotation, scale)
+   - `FChunkScatterData`: Per-chunk spawn point collection
+3. **VoxelScatterConfiguration**: UDataAsset for editor-configurable definitions
+4. **VoxelSurfaceExtractor**: Samples mesh vertices with spatial hashing
+5. **VoxelScatterPlacement**: Deterministic placement (same seed = same scatter)
+
+#### Phase 7B: HISM Mesh Rendering
+1. **VoxelScatterRenderer**: HISM component management
+   - One HISM per scatter type (not per chunk)
+   - Rebuild approach: Clear all instances, re-add from all chunks
+   - Avoids HISM index-shifting bugs from individual RemoveInstance calls
+2. **Integration**: VoxelChunkManager notifies ScatterManager via `OnChunkMeshDataReady()`
+
+#### Phase 7C: Performance Optimization
+1. **Deferred Rebuilds**: `QueueRebuild()` + `FlushPendingRebuilds()`
+   - Multiple chunk updates batched into single rebuild per scatter type
+   - Processed in `ScatterRenderer::Tick()`
+2. **Batch Instance Addition**: `HISM->AddInstances()` instead of individual calls
+3. **Throttled Generation**: `PendingGenerationQueue` sorted by distance
+   - `MaxScatterGenerationsPerFrame = 2` limits chunks processed per frame
+   - Closer chunks processed first
+4. **New Chunk Optimization**: Direct instance append without rebuild
+   - Only existing chunk updates trigger full rebuild
+5. **Stationary Rebuild Delay**: Rebuilds deferred while viewer is moving
+   - `RebuildStationaryDelay = 0.5s` prevents flicker during movement
+   - `ViewerMovementThreshold = 50 units` determines "moving" state
+
+#### Edit Integration
+1. **Edit Source System**: `EEditSource::Player`, `System`, `Editor`
+2. **Targeted Removal**: `ClearScatterInRadius(WorldPosition, Radius)`
+   - Only removes instances within edit brush radius
+   - Does NOT clear entire chunks
+3. **Cleared Volume Tracking**: `FClearedScatterVolume` struct
+   - Per-chunk arrays of cleared spherical volumes
+   - Prevents scatter regeneration in player-edited areas
+   - Cleared on full chunk unload (allows regen when player returns)
+4. **4-Parameter Delegate**: `OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius)`
+5. **Behavior by Source**:
+   - Player edits: Surgical removal, no regeneration
+   - System/Editor edits: Full chunk regeneration allowed
+
+#### Placement Rules
+- `Density`: 0.0-1.0 probability per surface point
+- `MinSlopeDegrees`, `MaxSlopeDegrees`: Slope constraints
+- `AllowedMaterials`: Array of EVoxelMaterial values
+- `AllowedBiomes`: Array of biome IDs
+- `MinElevation`, `MaxElevation`: World Z constraints
+- `bTopFacesOnly`: Restrict to upward-facing surfaces
+- `SpawnDistance`: Per-definition range (0 = use global ScatterRadius)
+- `ScaleRange`: Random scale variation
+- `bRandomYawRotation`: Y-axis rotation randomization
+- `bAlignToSurfaceNormal`: Align up-vector to surface normal
+- `SurfaceOffset`: Offset from surface along normal
+- `PositionJitter`: Random XY offset for natural placement
+
+#### Default Scatter Types
+1. **Grass**: Dense (50%), shallow slopes, grass material only
+2. **Rocks**: Sparse (5%), moderate slopes, stone/dirt materials
+3. **Trees**: Very sparse (2%), flat terrain, grass material only
 
 ---
 
@@ -808,9 +882,13 @@ Mesh generation was moved to background threads to eliminate stuttering:
    - Visual crosshair and brush sphere
    - On-screen control hints
 
-**Next Immediate Steps** (Phase 7):
-1. Scatter system design
-2. GPU-based vegetation placement
+**Phase 7 In Progress**:
+1. ~~Scatter system foundation~~ - COMPLETE (7A)
+2. ~~HISM mesh rendering~~ - COMPLETE (7B)
+3. ~~Performance optimization~~ - COMPLETE (7C)
+4. ~~Edit integration~~ - COMPLETE
+5. GPU-based scatter generation - Future optimization
+6. Performance profiling - In progress
 
 ---
 

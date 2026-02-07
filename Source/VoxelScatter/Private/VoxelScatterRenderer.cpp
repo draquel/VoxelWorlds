@@ -61,15 +61,33 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 	UE_LOG(LogVoxelScatterRenderer, Log, TEXT("ScatterRenderer initialized"));
 }
 
-void UVoxelScatterRenderer::Tick()
+void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float DeltaTime)
 {
 	if (!bIsInitialized)
 	{
 		return;
 	}
 
-	// Process any pending rebuilds accumulated from chunk updates
-	FlushPendingRebuilds();
+	// Check if viewer has moved significantly
+	const float ViewerMovement = FVector::Dist(ViewerPosition, LastViewerPosition);
+	if (ViewerMovement > ViewerMovementThreshold)
+	{
+		// Viewer is moving - reset stationary timer
+		TimeSinceViewerMoved = 0.0f;
+		LastViewerPosition = ViewerPosition;
+	}
+	else
+	{
+		// Viewer is stationary - accumulate time
+		TimeSinceViewerMoved += DeltaTime;
+	}
+
+	// Only process rebuilds when viewer has been stationary for a bit
+	// This prevents flickering while the player is moving
+	if (TimeSinceViewerMoved >= RebuildStationaryDelay || PendingRebuildScatterTypes.Num() == 0)
+	{
+		FlushPendingRebuilds();
+	}
 }
 
 void UVoxelScatterRenderer::Shutdown()
@@ -120,33 +138,78 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 		return;
 	}
 
-	// Collect scatter types that need rebuilding
-	TSet<int32> ScatterTypesToRebuild;
+	// Check if this chunk already has scatter (update case vs new chunk case)
+	TSet<int32>* ExistingTypes = ChunkScatterTypes.Find(ChunkCoord);
+	const bool bIsNewChunk = (ExistingTypes == nullptr || ExistingTypes->Num() == 0);
 
-	// Get existing scatter types for this chunk (before update)
-	if (TSet<int32>* ExistingTypes = ChunkScatterTypes.Find(ChunkCoord))
+	if (bIsNewChunk && ScatterData.bIsValid && ScatterData.SpawnPoints.Num() > 0)
 	{
-		ScatterTypesToRebuild.Append(*ExistingTypes);
-	}
+		// NEW CHUNK: Just append instances directly without rebuilding
+		// This avoids flickering existing instances from other chunks
 
-	// Update tracking for this chunk
-	ChunkScatterTypes.Remove(ChunkCoord);
-
-	if (ScatterData.bIsValid && ScatterData.SpawnPoints.Num() > 0)
-	{
-		// Collect new scatter types from this chunk
-		TSet<int32>& NewTypes = ChunkScatterTypes.FindOrAdd(ChunkCoord);
+		// Group spawn points by scatter type for batch adding
+		TMap<int32, TArray<FTransform>> TransformsByType;
 		for (const FScatterSpawnPoint& Point : ScatterData.SpawnPoints)
 		{
-			NewTypes.Add(Point.ScatterTypeID);
-			ScatterTypesToRebuild.Add(Point.ScatterTypeID);
+			const FScatterDefinition* Definition = ScatterManager->GetScatterDefinition(Point.ScatterTypeID);
+			if (Definition)
+			{
+				FTransform Transform = Point.GetTransform(Definition->bAlignToSurfaceNormal, Definition->SurfaceOffset);
+				TransformsByType.FindOrAdd(Point.ScatterTypeID).Add(Transform);
+			}
 		}
-	}
 
-	// Queue all affected scatter types for deferred rebuild
-	for (int32 ScatterTypeID : ScatterTypesToRebuild)
+		// Add instances to each HISM
+		TSet<int32>& NewTypes = ChunkScatterTypes.FindOrAdd(ChunkCoord);
+		for (auto& Pair : TransformsByType)
+		{
+			const int32 ScatterTypeID = Pair.Key;
+			TArray<FTransform>& Transforms = Pair.Value;
+
+			UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(ScatterTypeID);
+			if (HISM && Transforms.Num() > 0)
+			{
+				HISM->AddInstances(Transforms, false, true);
+				TotalInstancesAdded += Transforms.Num();
+				NewTypes.Add(ScatterTypeID);
+			}
+		}
+
+		UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Chunk (%d,%d,%d): Added %d instances (new chunk, no rebuild)"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ScatterData.SpawnPoints.Num());
+	}
+	else
 	{
-		QueueRebuild(ScatterTypeID);
+		// EXISTING CHUNK UPDATE: Need to rebuild affected scatter types
+		// This happens when chunk scatter is regenerated (e.g., after edit)
+
+		TSet<int32> ScatterTypesToRebuild;
+
+		// Mark existing types for rebuild (they may have changed)
+		if (ExistingTypes)
+		{
+			ScatterTypesToRebuild.Append(*ExistingTypes);
+		}
+
+		// Update tracking for this chunk
+		ChunkScatterTypes.Remove(ChunkCoord);
+
+		if (ScatterData.bIsValid && ScatterData.SpawnPoints.Num() > 0)
+		{
+			// Track new scatter types
+			TSet<int32>& NewTypes = ChunkScatterTypes.FindOrAdd(ChunkCoord);
+			for (const FScatterSpawnPoint& Point : ScatterData.SpawnPoints)
+			{
+				NewTypes.Add(Point.ScatterTypeID);
+				ScatterTypesToRebuild.Add(Point.ScatterTypeID);
+			}
+		}
+
+		// Queue affected scatter types for deferred rebuild
+		for (int32 ScatterTypeID : ScatterTypesToRebuild)
+		{
+			QueueRebuild(ScatterTypeID);
+		}
 	}
 }
 

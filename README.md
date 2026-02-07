@@ -46,7 +46,7 @@ VoxelWorlds/
 │   ├── VoxelMeshing/       # Cubic and smooth meshing
 │   ├── VoxelRendering/     # Hybrid rendering system
 │   ├── VoxelStreaming/     # Chunk management, collision, test actors
-│   ├── VoxelScatter/       # Foliage and scatter system (planned)
+│   ├── VoxelScatter/       # Foliage and scatter system
 │   └── VoxelRuntime/       # UE integration and components (planned)
 ├── Shaders/                # HLSL compute shaders
 ├── Content/                # Assets, materials, configurations
@@ -133,10 +133,12 @@ VoxelWorlds/
   - ✅ Performance optimizations (neighbor cache, collision throttling)
 
 ### In Progress
-- 🔄 Phase 7: Scatter & Polish
-  - ⏳ Scatter system for vegetation placement
-  - ⏳ GPU-based foliage distribution
-  - ⏳ HISM integration
+- 🔄 **Phase 7: Scatter & Polish**
+  - ✅ **Phase 7A**: Scatter placement foundation (VoxelScatter module, surface extraction, placement rules)
+  - ✅ **Phase 7B**: HISM mesh rendering (per-type HISM components, instance management)
+  - ✅ **Phase 7C**: Performance optimization (deferred rebuilds, batch instance addition, throttled generation)
+  - ✅ **Edit integration**: Targeted scatter removal for player edits, full regeneration for system edits
+  - ⏳ GPU-based scatter generation (future optimization)
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
@@ -168,6 +170,8 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FVoxelBiomeRegistry` - Static biome definitions registry
 - `UVoxelEditManager` - Edit layer storage and undo/redo management
 - `UVoxelCollisionManager` - Distance-based collision with async cooking
+- `UVoxelScatterManager` - Scatter placement coordinator with surface extraction
+- `UVoxelScatterRenderer` - HISM instance management with deferred rebuilds
 - `AVoxelWorldTestActor` - Test actor for runtime world instantiation
 - `UVoxelWorldConfiguration` - World configuration asset
 
@@ -187,6 +191,9 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FChunkEditLayer` - Sparse per-chunk edit storage
 - `FVoxelBrushParams` - Brush configuration (shape, radius, falloff, strength)
 - `FChunkCollisionData` - Per-chunk collision state and UBodySetup reference
+- `FScatterDefinition` - Scatter type configuration (mesh, density, placement rules)
+- `FScatterSpawnPoint` - Individual scatter instance data (position, rotation, scale)
+- `FChunkScatterData` - Per-chunk scatter spawn points
 
 ## Getting Started
 
