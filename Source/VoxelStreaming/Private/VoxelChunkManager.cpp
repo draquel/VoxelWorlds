@@ -15,6 +15,7 @@
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelCollisionManager.h"
+#include "VoxelScatterManager.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
@@ -144,6 +145,18 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	if (CollisionManager && Configuration && Configuration->bGenerateCollision)
 	{
 		CollisionManager->Update(Context.ViewerPosition, DeltaTime);
+	}
+
+	// Update scatter manager
+	if (ScatterManager && Configuration && Configuration->bEnableScatter)
+	{
+		ScatterManager->Update(Context.ViewerPosition, DeltaTime);
+
+		// Draw debug visualization if enabled
+		if (Configuration->bScatterDebugVisualization)
+		{
+			ScatterManager->DrawDebugVisualization(GetWorld());
+		}
 	}
 
 	// Flush all pending render operations as a single batched command
@@ -322,6 +335,18 @@ void UVoxelChunkManager::Initialize(
 			Configuration->ViewDistance * 0.5f, Configuration->CollisionLODLevel);
 	}
 
+	// Create scatter manager if enabled
+	if (Configuration->bEnableScatter)
+	{
+		ScatterManager = NewObject<UVoxelScatterManager>(this);
+		ScatterManager->Initialize(Configuration, GetWorld());
+		ScatterManager->SetScatterRadius(Configuration->ScatterRadius);
+		ScatterManager->SetWorldSeed(static_cast<uint32>(Configuration->WorldSeed));
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
+			Configuration->ScatterRadius);
+	}
+
 	bIsInitialized = true;
 
 	UE_LOG(LogVoxelStreaming, Log, TEXT("ChunkManager initialized with config: VoxelSize=%.1f, ChunkSize=%d"),
@@ -395,6 +420,13 @@ void UVoxelChunkManager::Shutdown()
 	{
 		CollisionManager->Shutdown();
 		CollisionManager = nullptr;
+	}
+
+	// Shutdown scatter manager
+	if (ScatterManager)
+	{
+		ScatterManager->Shutdown();
+		ScatterManager = nullptr;
 	}
 
 	// Shutdown edit manager
@@ -1306,6 +1338,12 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 		// Remove from loaded set
 		LoadedChunkCoords.Remove(ChunkCoord);
 
+		// Notify scatter manager
+		if (ScatterManager)
+		{
+			ScatterManager->OnChunkUnloaded(ChunkCoord);
+		}
+
 		// Remove state tracking
 		RemoveChunkState(ChunkCoord);
 
@@ -1559,6 +1597,14 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			PendingMesh.LODLevel,
 			PendingMesh.MeshData
 		);
+
+		// Notify scatter manager for any LOD level
+		// The scatter manager will skip if it already has data for this chunk,
+		// and will filter definitions by their individual SpawnDistance
+		if (ScatterManager && Configuration && Configuration->bEnableScatter)
+		{
+			ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.MeshData);
+		}
 
 		// Remove from pending queue
 		PendingMeshQueue.RemoveAt(PendingIndex);

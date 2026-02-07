@@ -2,9 +2,9 @@
 
 using UnrealBuildTool;
 
-public class VoxelStreaming : ModuleRules
+public class VoxelScatter : ModuleRules
 {
-	public VoxelStreaming(ReadOnlyTargetRules Target) : base(Target)
+	public VoxelScatter(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
@@ -24,30 +24,16 @@ public class VoxelStreaming : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"InputCore",
 				"VoxelCore",
-				"VoxelLOD",
-				"VoxelRendering",
-				"VoxelGeneration",
-				"VoxelMeshing",
-				"VoxelScatter",
-				"PhysicsCore",
-				"Chaos",
-				"ChaosCore",
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"VoxelGeneration",
 			}
 		);
-
-		// Editor-only dependencies for viewport camera tracking
-		if (Target.bBuildEditor)
-		{
-			PrivateDependencyModuleNames.Add("UnrealEd");
-		}
 
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]

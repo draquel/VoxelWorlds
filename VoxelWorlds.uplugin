@@ -45,6 +45,11 @@
 			"LoadingPhase": "PostConfigInit"
 		},
 		{
+			"Name": "VoxelScatter",
+			"Type": "Runtime",
+			"LoadingPhase": "PostEngineInit"
+		},
+		{
 			"Name": "VoxelWorlds",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"

@@ -22,6 +22,7 @@ class IVoxelMeshRenderer;
 class FVoxelCPUSmoothMesher;
 class UVoxelEditManager;
 class UVoxelCollisionManager;
+class UVoxelScatterManager;
 
 /**
  * Internal chunk state tracking.
@@ -287,6 +288,12 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	UVoxelCollisionManager* GetCollisionManager() const { return CollisionManager; }
+
+	/**
+	 * Get the scatter manager.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
+	UVoxelScatterManager* GetScatterManager() const { return ScatterManager; }
 
 	// ==================== Collision Mesh Generation ====================
 
@@ -651,4 +658,8 @@ protected:
 	/** Collision manager for physics */
 	UPROPERTY()
 	TObjectPtr<UVoxelCollisionManager> CollisionManager;
+
+	/** Scatter manager for vegetation placement */
+	UPROPERTY()
+	TObjectPtr<UVoxelScatterManager> ScatterManager;
 };

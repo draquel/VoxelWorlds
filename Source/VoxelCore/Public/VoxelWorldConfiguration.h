@@ -10,6 +10,7 @@
 #include "VoxelWorldConfiguration.generated.h"
 
 class UVoxelBiomeConfiguration;
+class UVoxelScatterConfiguration;
 
 /**
  * Configuration data asset for a voxel world.
@@ -318,6 +319,31 @@ public:
 	/** LOD level to use for collision (higher = simpler) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "0", ClampMax = "4", EditCondition = "bGenerateCollision"))
 	int32 CollisionLODLevel = 1;
+
+	// ==================== Scatter Settings ====================
+
+	/** Enable scatter system (vegetation, rocks, etc.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
+	bool bEnableScatter = true;
+
+	/**
+	 * Scatter configuration data asset.
+	 * Defines scatter types (grass, rocks, trees) with meshes and placement rules.
+	 * Create a UVoxelScatterConfiguration asset and assign it here.
+	 * If null, default scatter definitions will be used.
+	 *
+	 * To create: Right-click in Content Browser -> Miscellaneous -> Data Asset -> VoxelScatterConfiguration
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (EditCondition = "bEnableScatter"))
+	TObjectPtr<UVoxelScatterConfiguration> ScatterConfiguration;
+
+	/** Maximum distance for scatter placement (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (ClampMin = "1000.0", EditCondition = "bEnableScatter"))
+	float ScatterRadius = 10000.0f;
+
+	/** Enable scatter debug visualization (spheres at spawn points) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Debug", meta = (EditCondition = "bEnableScatter"))
+	bool bScatterDebugVisualization = false;
 
 public:
 	UVoxelWorldConfiguration();
