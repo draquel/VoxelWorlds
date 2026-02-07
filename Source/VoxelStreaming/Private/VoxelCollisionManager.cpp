@@ -87,6 +87,7 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 	// Reset cached state
 	LastViewerPosition = FVector(FLT_MAX);
 	FrameCounter = 0;
+	bPendingInitialUpdate = true;
 
 	// Reset statistics
 	TotalCollisionsGenerated = 0;
@@ -156,15 +157,25 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 
 	// Only process expensive collision operations every N frames to reduce stuttering
 	// Dirty chunk processing and cooking are the expensive parts (mesh generation on game thread)
-	const bool bShouldProcessThisFrame = (FrameCounter % FrameSkipInterval) == 0;
+	// Exception: During initial load, process every frame until collision is established
+	const bool bShouldProcessThisFrame = bPendingInitialUpdate || (FrameCounter % FrameSkipInterval) == 0;
 
 	// Check if viewer moved enough to warrant full collision update
 	// This is relatively cheap (just iterating loaded chunks), so do it more often
+	// Also run on every frame during initial load to catch chunks as they become available
 	const float DistanceMoved = FVector::Dist(ViewerPosition, LastViewerPosition);
-	if (DistanceMoved > UpdateThreshold || LastViewerPosition.X == FLT_MAX)
+	if (DistanceMoved > UpdateThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate)
 	{
 		UpdateCollisionDecisions(ViewerPosition);
 		LastViewerPosition = ViewerPosition;
+
+		// Once we've queued or generated any collision, initial load is complete
+		if (bPendingInitialUpdate && (CookingQueue.Num() > 0 || CurrentlyCooking.Num() > 0 || CollisionData.Num() > 0))
+		{
+			bPendingInitialUpdate = false;
+			UE_LOG(LogVoxelCollision, Log, TEXT("Initial collision load complete (queued=%d, cooking=%d, ready=%d)"),
+				CookingQueue.Num(), CurrentlyCooking.Num(), CollisionData.Num());
+		}
 	}
 
 	// Process dirty chunks and cooking queue only on designated frames

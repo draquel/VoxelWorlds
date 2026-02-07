@@ -409,6 +409,9 @@ protected:
 	/** Frame counter for throttled updates */
 	int32 FrameCounter = 0;
 
+	/** True until we've successfully queued initial collision (chunks may not be loaded on first frame) */
+	bool bPendingInitialUpdate = true;
+
 	// ==================== Statistics ====================
 
 	/** Total collision meshes generated */
