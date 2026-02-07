@@ -307,54 +307,27 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				continue;
 			}
 
-			// Frustum culling - use ViewProjectionMatrix to test points directly
+			// Frustum culling - use proper box-frustum intersection test
+			// The old corner-only test failed for nearby chunks when looking down
 			{
 				FBox WorldBounds = RenderData.WorldBounds;
 
 				if (WorldBounds.IsValid)
 				{
-					// Expand bounds for safety margin
+					// Expand bounds for safety margin (accounts for vertex displacement, LOD morphing)
 					WorldBounds = WorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
 
-					// Test if any corner of the bounds is visible
-					// This is a conservative test - if any corner is in frustum, render the chunk
-					const FMatrix& ViewProjMatrix = View->ViewMatrices.GetViewProjectionMatrix();
+					// Use UE's built-in frustum intersection test which handles all edge cases:
+					// - Corners outside but surface visible
+					// - Camera inside bounds
+					// - Bounds spanning frustum planes
+					const FConvexVolume& ViewFrustum = View->ViewFrustum;
 
-					FVector Corners[8];
-					WorldBounds.GetVertices(Corners);
+					// IntersectBox returns true if the box intersects or is inside the frustum
+					// This is the proper conservative test for frustum culling
+					bool bIntersects = ViewFrustum.IntersectBox(WorldBounds.GetCenter(), WorldBounds.GetExtent());
 
-					bool bAnyCornerVisible = false;
-					for (int32 i = 0; i < 8; i++)
-					{
-						// Transform to clip space
-						FVector4 ClipPos = ViewProjMatrix.TransformFVector4(FVector4(Corners[i], 1.0f));
-
-						// Check if inside frustum (with some margin)
-						// Point is visible if: -W <= X <= W, -W <= Y <= W, 0 <= Z <= W
-						float Margin = ClipPos.W * 0.1f; // 10% margin
-						if (ClipPos.X >= -ClipPos.W - Margin && ClipPos.X <= ClipPos.W + Margin &&
-							ClipPos.Y >= -ClipPos.W - Margin && ClipPos.Y <= ClipPos.W + Margin &&
-							ClipPos.Z >= -Margin && ClipPos.Z <= ClipPos.W + Margin)
-						{
-							bAnyCornerVisible = true;
-							break;
-						}
-					}
-
-					// Also test center point
-					if (!bAnyCornerVisible)
-					{
-						FVector4 CenterClip = ViewProjMatrix.TransformFVector4(FVector4(WorldBounds.GetCenter(), 1.0f));
-						float Margin = CenterClip.W * 0.5f;
-						if (CenterClip.X >= -CenterClip.W - Margin && CenterClip.X <= CenterClip.W + Margin &&
-							CenterClip.Y >= -CenterClip.W - Margin && CenterClip.Y <= CenterClip.W + Margin &&
-							CenterClip.Z >= -Margin && CenterClip.Z <= CenterClip.W + Margin)
-						{
-							bAnyCornerVisible = true;
-						}
-					}
-
-					if (!bAnyCornerVisible)
+					if (!bIntersects)
 					{
 						SkippedFrustum++;
 						continue;
