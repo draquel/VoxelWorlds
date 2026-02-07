@@ -124,10 +124,13 @@ VoxelWorlds/
 - ✅ **Phase 6: Editing & Collision** - COMPLETE
   - ✅ Edit layer with overlay architecture (sparse storage, merged at mesh time)
   - ✅ Brush tools: Add, Subtract, Paint with Sphere/Cube/Cylinder shapes
+  - ✅ Discrete editing mode for single-block operations (cubic terrain)
   - ✅ Collision manager with async Chaos physics cooking
   - ✅ Undo/redo system with operation batching
-  - ✅ Binary serialization for edit persistence
+  - ✅ Binary serialization for edit persistence (v2 format)
   - ✅ Input-based testing (mouse + keyboard controls in VoxelWorldTestActor)
+  - ✅ **Async mesh generation** (visual meshing on background threads)
+  - ✅ Performance optimizations (neighbor cache, collision throttling)
 
 ### In Progress
 - 🔄 Phase 7: Scatter & Polish

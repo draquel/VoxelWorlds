@@ -923,46 +923,62 @@ void UVoxelEditManager::ApplyEditInternal(
 			// Accumulate
 			int32 TotalSignedDelta = ExistingSignedDelta + NewSignedDelta;
 
-			// If edits cancel out to zero, remove the edit entirely
-			// This reverts the voxel to pure procedural state
+			// If edits cancel out to zero density change...
 			if (TotalSignedDelta == 0)
 			{
-				Layer->RemoveEdit(LocalPos);
-
-				// Track removal in current operation if active
-				if (CurrentOperation.IsValid())
+				// Check if the new edit is an Add with a material - convert to Paint instead of removing
+				// This handles the case: dig block, then place different material at same location
+				if (Edit.EditMode == EEditMode::Add && Edit.BrushMaterialID != 0)
 				{
-					// Store a "removal" edit for undo purposes
-					FVoxelEdit RemovalEdit = *ExistingEdit;
-					RemovalEdit.DensityDelta = 0;
-					CurrentOperation->AddEdit(RemovalEdit, ChunkCoord);
+					// Convert to Paint operation - density unchanged, material changes
+					EditCopy.EditMode = EEditMode::Paint;
+					EditCopy.DensityDelta = 0;
+					EditCopy.BrushMaterialID = Edit.BrushMaterialID;
+					// Skip the normal mode/delta logic below - go directly to apply
 				}
+				else
+				{
+					// No material change, remove the edit entirely
+					// This reverts the voxel to pure procedural state
+					Layer->RemoveEdit(LocalPos);
 
-				// Notify listeners that chunk changed
-				OnChunkEdited.Broadcast(ChunkCoord);
-				return;
-			}
+					// Track removal in current operation if active
+					if (CurrentOperation.IsValid())
+					{
+						// Store a "removal" edit for undo purposes
+						FVoxelEdit RemovalEdit = *ExistingEdit;
+						RemovalEdit.DensityDelta = 0;
+						CurrentOperation->AddEdit(RemovalEdit, ChunkCoord);
+					}
 
-			// Store as unsigned delta with appropriate mode
-			if (TotalSignedDelta > 0)
-			{
-				EditCopy.EditMode = EEditMode::Add;
-				EditCopy.DensityDelta = TotalSignedDelta;
+					// Notify listeners that chunk changed
+					OnChunkEdited.Broadcast(ChunkCoord);
+					return;
+				}
 			}
 			else
 			{
-				EditCopy.EditMode = EEditMode::Subtract;
-				EditCopy.DensityDelta = -TotalSignedDelta;
-			}
+				// Store as unsigned delta with appropriate mode
+				if (TotalSignedDelta > 0)
+				{
+					EditCopy.EditMode = EEditMode::Add;
+					EditCopy.DensityDelta = TotalSignedDelta;
+				}
+				else
+				{
+					EditCopy.EditMode = EEditMode::Subtract;
+					EditCopy.DensityDelta = -TotalSignedDelta;
+				}
 
-			// Keep material from whichever edit is adding material
-			if (Edit.EditMode == EEditMode::Add)
-			{
-				EditCopy.BrushMaterialID = Edit.BrushMaterialID;
-			}
-			else if (ExistingEdit->EditMode == EEditMode::Add)
-			{
-				EditCopy.BrushMaterialID = ExistingEdit->BrushMaterialID;
+				// Keep material from whichever edit is adding material
+				if (Edit.EditMode == EEditMode::Add)
+				{
+					EditCopy.BrushMaterialID = Edit.BrushMaterialID;
+				}
+				else if (ExistingEdit->EditMode == EEditMode::Add)
+				{
+					EditCopy.BrushMaterialID = ExistingEdit->BrushMaterialID;
+				}
 			}
 		}
 		// For Set mode or mixed modes, the new edit replaces (current behavior)

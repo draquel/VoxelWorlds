@@ -86,6 +86,7 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 
 	// Reset cached state
 	LastViewerPosition = FVector(FLT_MAX);
+	FrameCounter = 0;
 
 	// Reset statistics
 	TotalCollisionsGenerated = 0;
@@ -150,7 +151,15 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		return;
 	}
 
+	// Increment frame counter
+	++FrameCounter;
+
+	// Only process expensive collision operations every N frames to reduce stuttering
+	// Dirty chunk processing and cooking are the expensive parts (mesh generation on game thread)
+	const bool bShouldProcessThisFrame = (FrameCounter % FrameSkipInterval) == 0;
+
 	// Check if viewer moved enough to warrant full collision update
+	// This is relatively cheap (just iterating loaded chunks), so do it more often
 	const float DistanceMoved = FVector::Dist(ViewerPosition, LastViewerPosition);
 	if (DistanceMoved > UpdateThreshold || LastViewerPosition.X == FLT_MAX)
 	{
@@ -158,11 +167,15 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		LastViewerPosition = ViewerPosition;
 	}
 
-	// Always process dirty chunks (from edits) even when standing still
-	ProcessDirtyChunks(ViewerPosition);
+	// Process dirty chunks and cooking queue only on designated frames
+	if (bShouldProcessThisFrame)
+	{
+		// Process dirty chunks (from edits)
+		ProcessDirtyChunks(ViewerPosition);
 
-	// Process cooking queue
-	ProcessCookingQueue();
+		// Process cooking queue (mesh gen is synchronous but heavily throttled)
+		ProcessCookingQueue();
+	}
 }
 
 void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
@@ -425,6 +438,7 @@ void UVoxelCollisionManager::ProcessCookingQueue()
 		CookingQueueSet.Remove(Request.ChunkCoord);
 
 		// Generate mesh data if not already provided
+		// Note: This is synchronous but heavily throttled (MaxCooksPerFrame=1, every 5 frames)
 		if (Request.Vertices.Num() == 0)
 		{
 			if (!GenerateCollisionMesh(Request.ChunkCoord, Request.Vertices, Request.Indices))

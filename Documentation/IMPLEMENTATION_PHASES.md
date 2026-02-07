@@ -479,20 +479,74 @@ VoxelWorldTestActor provides interactive edit testing:
 2. **Keyboard Shortcuts**:
    - Z: Undo last edit operation
    - Y: Redo last undone operation
-   - F5: Save edits to VoxelEdits.dat
-   - F9: Load edits from VoxelEdits.dat
+   - F9: Save edits to VoxelEdits.dat
+   - F10: Load edits from VoxelEdits.dat
 
 3. **Visual Feedback**:
-   - Crosshair (cyan): 3D cross at target location
-   - Brush sphere (yellow): Shows edit radius
+   - Brush mode crosshair: Cyan 3D cross + yellow sphere (brush radius)
+   - Discrete mode crosshair: Cyan box (remove target) + green box (place target) + yellow arrow (face normal)
    - On-screen text: Current mode, radius, material ID, keyboard shortcuts
    - Action feedback: Shows voxels modified per edit
 
 4. **Properties**:
    - `bEnableEditInputs`: Master toggle for input handling
+   - `bUseDiscreteEditing`: Toggle for single-block mode (cubic terrain)
    - `EditBrushRadius`: Current brush size (50-2000)
    - `EditMaterialID`: Material for Build/Paint operations
    - `bShowEditCrosshair`: Toggle crosshair visualization
+
+5. **Discrete Editing Mode** (bUseDiscreteEditing = true):
+   - Single-block operations for Minecraft-style cubic terrain
+   - LMB: Remove block at crosshair (uses hit normal to find solid voxel)
+   - RMB: Place block adjacent to hit face
+   - MMB: Paint block at crosshair
+   - `GetSolidVoxelPosition()`: Offsets hit point opposite to normal for accurate targeting
+   - `GetAdjacentVoxelPosition()`: Offsets hit point along normal for placement
+
+### Notes on Async Mesh Generation
+
+Mesh generation was moved to background threads to eliminate stuttering:
+
+1. **Visual Meshing (VoxelChunkManager)**:
+   - `LaunchAsyncMeshGeneration()`: Launches mesh gen on thread pool
+   - `CompletedMeshQueue`: Thread-safe MPSC queue for results
+   - `AsyncMeshingInProgress`: Tracks in-flight async tasks
+   - `ProcessCompletedAsyncMeshes()`: Picks up results on game thread
+   - Mesh request data prepared on game thread (copies voxel data, neighbors)
+   - Only `GenerateMeshCPU()` runs asynchronously (thread-safe, stateless)
+
+2. **Throttling**:
+   - `MaxAsyncMeshTasks = 4`: Max concurrent async tasks
+   - `MaxPendingMeshes = 4`: Max render queue depth
+   - `MaxChunksToLoadPerFrame = 2`: Max async launches per frame
+
+3. **Safety**:
+   - Weak pointer check prevents crashes if ChunkManager destroyed
+   - State check discards results for unloaded chunks
+   - Shutdown drains the queue
+
+4. **Collision Meshing** (VoxelCollisionManager):
+   - Remains synchronous but heavily throttled
+   - `FrameSkipInterval = 5`: Only process every 5th frame
+   - `MaxCooksPerFrame = 1`: Only 1 mesh generation per eligible frame
+   - `UpdateThreshold = 1000`: Collision decisions every 1000 units of movement
+
+### Notes on Performance Optimizations
+
+1. **Neighbor Cache** (ExtractNeighborEdgeSlices):
+   - `FNeighborCache`: Caches chunk state and edit layer per neighbor
+   - Reduces TMap lookups from thousands to ~26 per mesh
+   - Cached once per neighbor, reused for all voxel extractions
+
+2. **Edit Accumulation Fix**:
+   - Remove + Place different material now works correctly
+   - When density delta cancels to zero with new material, converts to Paint mode
+   - Prevents reversion to procedural material on same-location edits
+
+3. **Serialization Version 2**:
+   - Binary format updated to include EditMode, DensityDelta, BrushMaterialID
+   - Magic number: VETI, version 2
+   - Backwards compatible: version 1 files still loadable with defaults
 
 ---
 

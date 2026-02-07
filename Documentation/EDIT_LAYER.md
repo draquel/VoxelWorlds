@@ -1,11 +1,28 @@
 # Edit Layer System
 
-**Module**: VoxelEditing  
+**Module**: VoxelCore (VoxelEditTypes.h, VoxelEditManager.h/cpp)
 **Dependencies**: VoxelCore, VoxelStreaming
+**Status**: ✅ COMPLETE (Phase 6)
 
 ## Overview
 
 The edit layer allows runtime modification of voxel terrain with add/subtract/paint operations, undo/redo support, and serialization.
+
+> **Note**: This document contains the original design specification. For actual implementation details, see:
+> - [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) - "Notes on Edit Layer Implementation" section
+> - Source files: `VoxelCore/Public/VoxelEditTypes.h`, `VoxelCore/Public/VoxelEditManager.h`
+
+## Implementation Highlights
+
+The actual implementation uses an **overlay architecture**:
+- Edits stored in `FChunkEditLayer` using sparse `TMap<int32, FVoxelEdit>` (memory-efficient)
+- Edits merged at mesh time via `ApplyToProceduralData()` (not stored in procedural data)
+- Relative edits with `DensityDelta` and `BrushMaterialID` for accumulation
+- Binary serialization format v2 with magic number `VETI`
+- Input-based testing via `VoxelWorldTestActor` with mouse/keyboard controls
+- Discrete editing mode (`bUseDiscreteEditing`) for single-block operations
+
+## Original Design Specification
 
 ## Edit Operations
 

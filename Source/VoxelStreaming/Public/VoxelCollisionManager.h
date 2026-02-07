@@ -372,11 +372,14 @@ protected:
 	/** LOD level to use for collision (higher = fewer triangles) */
 	int32 CollisionLODLevel = 1;
 
-	/** Maximum collision cooking operations per frame */
-	int32 MaxCooksPerFrame = 2;
+	/** Maximum collision cooking operations per frame (mesh generation is expensive) */
+	int32 MaxCooksPerFrame = 1;
 
 	/** Maximum concurrent cooking operations */
 	int32 MaxConcurrentCooks = 4;
+
+	/** Only process collision every N frames to reduce game thread load */
+	int32 FrameSkipInterval = 5;
 
 	// ==================== Collision Storage ====================
 
@@ -400,8 +403,11 @@ protected:
 	/** Last viewer position for change detection */
 	FVector LastViewerPosition = FVector(FLT_MAX);
 
-	/** Threshold for viewer movement to trigger collision update */
-	static constexpr float UpdateThreshold = 500.0f;
+	/** Threshold for viewer movement to trigger collision update (increased to reduce update frequency) */
+	static constexpr float UpdateThreshold = 1000.0f;
+
+	/** Frame counter for throttled updates */
+	int32 FrameCounter = 0;
 
 	// ==================== Statistics ====================
 

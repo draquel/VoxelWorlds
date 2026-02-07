@@ -200,6 +200,14 @@ public:
 	bool bShowEditCrosshair = true;
 
 	/**
+	 * Use discrete voxel editing (for cubic mode).
+	 * When enabled, edits snap to voxel grid and affect single blocks.
+	 * Building places blocks adjacent to the hit face.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit", meta = (EditCondition = "bEnableEditInputs"))
+	bool bUseDiscreteEditing = false;
+
+	/**
 	 * Apply a test brush edit at the specified world location.
 	 * Uses Subtract mode to dig a hole in the terrain.
 	 *
@@ -233,6 +241,43 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
 	int32 TestPaintAt(FVector WorldLocation, float Radius = 300.0f, uint8 MaterialID = 1);
+
+	// ==================== Discrete Voxel Editing (Cubic Mode) ====================
+
+	/**
+	 * Remove a single voxel at the specified world location.
+	 * Uses hit normal to ensure we target the solid voxel, not air.
+	 *
+	 * @param WorldLocation Hit location on terrain surface
+	 * @param HitNormal Normal of the face that was hit
+	 * @return True if a block was removed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	bool TestRemoveBlock(FVector WorldLocation, FVector HitNormal);
+
+	/**
+	 * Place a single voxel adjacent to the hit location.
+	 * Uses the hit normal to determine which face was hit and places block on that side.
+	 *
+	 * @param WorldLocation Hit location on existing terrain
+	 * @param HitNormal Normal of the face that was hit
+	 * @param MaterialID Material for the new block
+	 * @return True if a block was placed
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	bool TestPlaceBlock(FVector WorldLocation, FVector HitNormal, uint8 MaterialID = 1);
+
+	/**
+	 * Paint a single voxel at the specified world location.
+	 * Uses hit normal to ensure we target the solid voxel, not air.
+	 *
+	 * @param WorldLocation Hit location on terrain surface
+	 * @param HitNormal Normal of the face that was hit
+	 * @param MaterialID Material to apply
+	 * @return True if a block was painted
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	bool TestPaintBlock(FVector WorldLocation, FVector HitNormal, uint8 MaterialID = 1);
 
 	/**
 	 * Undo the last edit operation.
@@ -301,6 +346,44 @@ protected:
 	 * @return True if terrain was hit
 	 */
 	bool TraceTerrainFromCamera(FVector& OutHitLocation) const;
+
+	/**
+	 * Perform a line trace from the camera to find terrain hit location and normal.
+	 * @param OutHitLocation Output hit location in world space
+	 * @param OutHitNormal Output hit normal
+	 * @return True if terrain was hit
+	 */
+	bool TraceTerrainFromCamera(FVector& OutHitLocation, FVector& OutHitNormal) const;
+
+	/**
+	 * Snap a world position to the center of the containing voxel.
+	 * @param WorldPos World position to snap
+	 * @return Snapped position at voxel center
+	 */
+	FVector SnapToVoxelCenter(const FVector& WorldPos) const;
+
+	/**
+	 * Get the voxel position adjacent to a hit point based on hit normal (for placing blocks).
+	 * @param HitLocation Location on terrain surface
+	 * @param HitNormal Normal of the hit face
+	 * @return World position of the adjacent (air) voxel center
+	 */
+	FVector GetAdjacentVoxelPosition(const FVector& HitLocation, const FVector& HitNormal) const;
+
+	/**
+	 * Get the solid voxel position from a hit point based on hit normal (for removing/painting blocks).
+	 * @param HitLocation Location on terrain surface
+	 * @param HitNormal Normal of the hit face
+	 * @return World position of the solid voxel center that was hit
+	 */
+	FVector GetSolidVoxelPosition(const FVector& HitLocation, const FVector& HitNormal) const;
+
+	/**
+	 * Get the world-space bounding box for the voxel at a given position.
+	 * @param VoxelCenter Center of the voxel
+	 * @return Bounding box for the voxel
+	 */
+	FBox GetVoxelBounds(const FVector& VoxelCenter) const;
 
 	/** Draw edit crosshair on screen */
 	void DrawEditCrosshair() const;

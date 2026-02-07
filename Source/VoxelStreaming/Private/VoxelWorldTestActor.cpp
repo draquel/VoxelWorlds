@@ -413,9 +413,10 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Config->LODBands.Add(Band2);
 
 	// Streaming settings - balanced for ViewDistance=10000 (~500 chunks)
-	Config->MaxChunksToLoadPerFrame = 8;
-	Config->MaxChunksToUnloadPerFrame = 16;
-	Config->StreamingTimeSliceMS = 4.0f;
+	// Lower MaxChunksToLoadPerFrame reduces stuttering during movement
+	Config->MaxChunksToLoadPerFrame = 2;
+	Config->MaxChunksToUnloadPerFrame = 8;
+	Config->StreamingTimeSliceMS = 3.0f;
 	Config->MaxLoadedChunks = 1000;
 
 	// Rendering settings
@@ -909,6 +910,179 @@ int32 AVoxelWorldTestActor::TestPaintAt(FVector WorldLocation, float Radius, uin
 	return VoxelsModified;
 }
 
+// ==================== Discrete Voxel Editing ====================
+
+bool AVoxelWorldTestActor::TestRemoveBlock(FVector WorldLocation, FVector HitNormal)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestRemoveBlock: ChunkManager not available"));
+		return false;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestRemoveBlock: EditManager not available"));
+		return false;
+	}
+
+	// Get the solid voxel that was hit (offset into solid, then snap)
+	const FVector VoxelCenter = GetSolidVoxelPosition(WorldLocation, HitNormal);
+
+	// Create a single-voxel edit that sets density to 0 (air)
+	FVoxelBrushParams Brush;
+	Brush.Shape = EVoxelBrushShape::Cube;
+	Brush.Radius = Configuration ? Configuration->VoxelSize * 0.4f : 25.0f;  // Just under half voxel size
+	Brush.Strength = 1.0f;
+	Brush.FalloffType = EVoxelBrushFalloff::Sharp;
+	Brush.DensityDelta = 255;  // Full removal
+
+	EditManager->BeginEditOperation(TEXT("Remove Block"));
+	const int32 VoxelsModified = EditManager->ApplyBrushEdit(VoxelCenter, Brush, EEditMode::Subtract);
+	EditManager->EndEditOperation();
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestRemoveBlock: Removed block at (%.0f, %.0f, %.0f) - %d voxels"),
+		VoxelCenter.X, VoxelCenter.Y, VoxelCenter.Z, VoxelsModified);
+
+	return VoxelsModified > 0;
+}
+
+bool AVoxelWorldTestActor::TestPlaceBlock(FVector WorldLocation, FVector HitNormal, uint8 MaterialID)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestPlaceBlock: ChunkManager not available"));
+		return false;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestPlaceBlock: EditManager not available"));
+		return false;
+	}
+
+	// Get the adjacent voxel position based on hit normal
+	const FVector VoxelCenter = GetAdjacentVoxelPosition(WorldLocation, HitNormal);
+
+	// Create a single-voxel edit that sets density to 255 (solid)
+	FVoxelBrushParams Brush;
+	Brush.Shape = EVoxelBrushShape::Cube;
+	Brush.Radius = Configuration ? Configuration->VoxelSize * 0.4f : 25.0f;
+	Brush.Strength = 1.0f;
+	Brush.FalloffType = EVoxelBrushFalloff::Sharp;
+	Brush.MaterialID = MaterialID;
+	Brush.DensityDelta = 255;  // Full solid
+
+	EditManager->BeginEditOperation(TEXT("Place Block"));
+	const int32 VoxelsModified = EditManager->ApplyBrushEdit(VoxelCenter, Brush, EEditMode::Add);
+	EditManager->EndEditOperation();
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestPlaceBlock: Placed block at (%.0f, %.0f, %.0f) with material %d - %d voxels"),
+		VoxelCenter.X, VoxelCenter.Y, VoxelCenter.Z, MaterialID, VoxelsModified);
+
+	return VoxelsModified > 0;
+}
+
+bool AVoxelWorldTestActor::TestPaintBlock(FVector WorldLocation, FVector HitNormal, uint8 MaterialID)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestPaintBlock: ChunkManager not available"));
+		return false;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestPaintBlock: EditManager not available"));
+		return false;
+	}
+
+	// Get the solid voxel that was hit (offset into solid, then snap)
+	const FVector VoxelCenter = GetSolidVoxelPosition(WorldLocation, HitNormal);
+
+	// Create a single-voxel paint edit
+	FVoxelBrushParams Brush;
+	Brush.Shape = EVoxelBrushShape::Cube;
+	Brush.Radius = Configuration ? Configuration->VoxelSize * 0.4f : 25.0f;
+	Brush.Strength = 1.0f;
+	Brush.FalloffType = EVoxelBrushFalloff::Sharp;
+	Brush.MaterialID = MaterialID;
+	Brush.DensityDelta = 0;
+
+	EditManager->BeginEditOperation(TEXT("Paint Block"));
+	const int32 VoxelsModified = EditManager->ApplyBrushEdit(VoxelCenter, Brush, EEditMode::Paint);
+	EditManager->EndEditOperation();
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestPaintBlock: Painted block at (%.0f, %.0f, %.0f) with material %d - %d voxels"),
+		VoxelCenter.X, VoxelCenter.Y, VoxelCenter.Z, MaterialID, VoxelsModified);
+
+	return VoxelsModified > 0;
+}
+
+FVector AVoxelWorldTestActor::SnapToVoxelCenter(const FVector& WorldPos) const
+{
+	if (!Configuration)
+	{
+		return WorldPos;
+	}
+
+	const float ConfigVoxelSize = Configuration->VoxelSize;
+	const FVector RelativePos = WorldPos - Configuration->WorldOrigin;
+
+	// Snap to voxel grid and get center
+	const FVector SnappedRelative(
+		FMath::FloorToFloat(RelativePos.X / ConfigVoxelSize) * ConfigVoxelSize + ConfigVoxelSize * 0.5f,
+		FMath::FloorToFloat(RelativePos.Y / ConfigVoxelSize) * ConfigVoxelSize + ConfigVoxelSize * 0.5f,
+		FMath::FloorToFloat(RelativePos.Z / ConfigVoxelSize) * ConfigVoxelSize + ConfigVoxelSize * 0.5f
+	);
+
+	return SnappedRelative + Configuration->WorldOrigin;
+}
+
+FVector AVoxelWorldTestActor::GetAdjacentVoxelPosition(const FVector& HitLocation, const FVector& HitNormal) const
+{
+	if (!Configuration)
+	{
+		return HitLocation;
+	}
+
+	const float ConfigVoxelSize = Configuration->VoxelSize;
+
+	// Offset slightly in the normal direction to get into the adjacent (air) voxel
+	const FVector AdjacentPos = HitLocation + HitNormal * (ConfigVoxelSize * 0.5f);
+
+	return SnapToVoxelCenter(AdjacentPos);
+}
+
+FVector AVoxelWorldTestActor::GetSolidVoxelPosition(const FVector& HitLocation, const FVector& HitNormal) const
+{
+	if (!Configuration)
+	{
+		return HitLocation;
+	}
+
+	const float ConfigVoxelSize = Configuration->VoxelSize;
+
+	// Offset slightly OPPOSITE to the normal direction to get into the solid voxel
+	const FVector SolidPos = HitLocation - HitNormal * (ConfigVoxelSize * 0.5f);
+
+	return SnapToVoxelCenter(SolidPos);
+}
+
+FBox AVoxelWorldTestActor::GetVoxelBounds(const FVector& VoxelCenter) const
+{
+	if (!Configuration)
+	{
+		return FBox(VoxelCenter - FVector(25.0f), VoxelCenter + FVector(25.0f));
+	}
+
+	const float HalfVoxel = Configuration->VoxelSize * 0.5f;
+	return FBox(VoxelCenter - FVector(HalfVoxel), VoxelCenter + FVector(HalfVoxel));
+}
+
 bool AVoxelWorldTestActor::TestUndo()
 {
 	if (!ChunkManager)
@@ -1150,77 +1324,144 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 	bWasMiddleMouseDown = bMiddleMouseDown;
 
 	// Handle edit actions on press
-	if (bLeftMousePressed)
+	if (bUseDiscreteEditing)
 	{
-		FVector HitLocation;
-		if (TraceTerrainFromCamera(HitLocation))
+		// Discrete voxel editing mode (for cubic terrain)
+		if (bLeftMousePressed)
 		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("LEFT CLICK: Dig at (%.0f, %.0f, %.0f)"),
-				HitLocation.X, HitLocation.Y, HitLocation.Z);
-			const int32 VoxelsModified = TestDigAt(HitLocation, EditBrushRadius);
-			if (GEngine)
+			FVector HitLocation, HitNormal;
+			if (TraceTerrainFromCamera(HitLocation, HitNormal))
 			{
-				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
-					FString::Printf(TEXT("Dig at (%.0f, %.0f, %.0f): %d voxels"),
-						HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified));
+				const bool bSuccess = TestRemoveBlock(HitLocation, HitNormal);
+				if (GEngine)
+				{
+					const FVector SnappedPos = GetSolidVoxelPosition(HitLocation, HitNormal);
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, bSuccess ? FColor::Orange : FColor::Red,
+						bSuccess ? FString::Printf(TEXT("Removed block at (%.0f, %.0f, %.0f)"),
+							SnappedPos.X, SnappedPos.Y, SnappedPos.Z) : TEXT("Failed to remove block"));
+				}
+			}
+			else if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Remove: No terrain under crosshair"));
 			}
 		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("LEFT CLICK: No terrain hit"));
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Dig: No terrain under crosshair"));
-			}
-		}
-	}
 
-	if (bRightMousePressed)
-	{
-		FVector HitLocation;
-		if (TraceTerrainFromCamera(HitLocation))
+		if (bRightMousePressed)
 		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("RIGHT CLICK: Build at (%.0f, %.0f, %.0f)"),
-				HitLocation.X, HitLocation.Y, HitLocation.Z);
-			const int32 VoxelsModified = TestBuildAt(HitLocation, EditBrushRadius, EditMaterialID);
-			if (GEngine)
+			FVector HitLocation, HitNormal;
+			if (TraceTerrainFromCamera(HitLocation, HitNormal))
 			{
-				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green,
-					FString::Printf(TEXT("Build at (%.0f, %.0f, %.0f): %d voxels (Mat %d)"),
-						HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified, EditMaterialID));
+				const bool bSuccess = TestPlaceBlock(HitLocation, HitNormal, EditMaterialID);
+				if (GEngine)
+				{
+					const FVector PlacePos = GetAdjacentVoxelPosition(HitLocation, HitNormal);
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, bSuccess ? FColor::Green : FColor::Red,
+						bSuccess ? FString::Printf(TEXT("Placed block at (%.0f, %.0f, %.0f) Mat %d"),
+							PlacePos.X, PlacePos.Y, PlacePos.Z, EditMaterialID) : TEXT("Failed to place block"));
+				}
+			}
+			else if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Place: No terrain under crosshair"));
 			}
 		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("RIGHT CLICK: No terrain hit"));
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Build: No terrain under crosshair"));
-			}
-		}
-	}
 
-	if (bMiddleMousePressed)
-	{
-		FVector HitLocation;
-		if (TraceTerrainFromCamera(HitLocation))
+		if (bMiddleMousePressed)
 		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("MIDDLE CLICK: Paint at (%.0f, %.0f, %.0f)"),
-				HitLocation.X, HitLocation.Y, HitLocation.Z);
-			const int32 VoxelsModified = TestPaintAt(HitLocation, EditBrushRadius, EditMaterialID);
-			if (GEngine)
+			FVector HitLocation, HitNormal;
+			if (TraceTerrainFromCamera(HitLocation, HitNormal))
 			{
-				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Magenta,
-					FString::Printf(TEXT("Paint at (%.0f, %.0f, %.0f): %d voxels (Mat %d)"),
-						HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified, EditMaterialID));
+				const bool bSuccess = TestPaintBlock(HitLocation, HitNormal, EditMaterialID);
+				if (GEngine)
+				{
+					const FVector SnappedPos = GetSolidVoxelPosition(HitLocation, HitNormal);
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, bSuccess ? FColor::Magenta : FColor::Red,
+						bSuccess ? FString::Printf(TEXT("Painted block at (%.0f, %.0f, %.0f) Mat %d"),
+							SnappedPos.X, SnappedPos.Y, SnappedPos.Z, EditMaterialID) : TEXT("Failed to paint block"));
+				}
 			}
-		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("MIDDLE CLICK: No terrain hit"));
-			if (GEngine)
+			else if (GEngine)
 			{
 				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Paint: No terrain under crosshair"));
+			}
+		}
+	}
+	else
+	{
+		// Brush-based editing mode (for smooth terrain)
+		if (bLeftMousePressed)
+		{
+			FVector HitLocation;
+			if (TraceTerrainFromCamera(HitLocation))
+			{
+				UE_LOG(LogVoxelStreaming, Log, TEXT("LEFT CLICK: Dig at (%.0f, %.0f, %.0f)"),
+					HitLocation.X, HitLocation.Y, HitLocation.Z);
+				const int32 VoxelsModified = TestDigAt(HitLocation, EditBrushRadius);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
+						FString::Printf(TEXT("Dig at (%.0f, %.0f, %.0f): %d voxels"),
+							HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified));
+				}
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("LEFT CLICK: No terrain hit"));
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Dig: No terrain under crosshair"));
+				}
+			}
+		}
+
+		if (bRightMousePressed)
+		{
+			FVector HitLocation;
+			if (TraceTerrainFromCamera(HitLocation))
+			{
+				UE_LOG(LogVoxelStreaming, Log, TEXT("RIGHT CLICK: Build at (%.0f, %.0f, %.0f)"),
+					HitLocation.X, HitLocation.Y, HitLocation.Z);
+				const int32 VoxelsModified = TestBuildAt(HitLocation, EditBrushRadius, EditMaterialID);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green,
+						FString::Printf(TEXT("Build at (%.0f, %.0f, %.0f): %d voxels (Mat %d)"),
+							HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified, EditMaterialID));
+				}
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("RIGHT CLICK: No terrain hit"));
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Build: No terrain under crosshair"));
+				}
+			}
+		}
+
+		if (bMiddleMousePressed)
+		{
+			FVector HitLocation;
+			if (TraceTerrainFromCamera(HitLocation))
+			{
+				UE_LOG(LogVoxelStreaming, Log, TEXT("MIDDLE CLICK: Paint at (%.0f, %.0f, %.0f)"),
+					HitLocation.X, HitLocation.Y, HitLocation.Z);
+				const int32 VoxelsModified = TestPaintAt(HitLocation, EditBrushRadius, EditMaterialID);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Magenta,
+						FString::Printf(TEXT("Paint at (%.0f, %.0f, %.0f): %d voxels (Mat %d)"),
+							HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified, EditMaterialID));
+				}
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("MIDDLE CLICK: No terrain hit"));
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Paint: No terrain under crosshair"));
+				}
 			}
 		}
 	}
@@ -1280,6 +1521,60 @@ bool AVoxelWorldTestActor::TraceTerrainFromCamera(FVector& OutHitLocation) const
 	return false;
 }
 
+bool AVoxelWorldTestActor::TraceTerrainFromCamera(FVector& OutHitLocation, FVector& OutHitNormal) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC)
+	{
+		return false;
+	}
+
+	// Get camera location and rotation
+	FVector CameraLocation;
+	FRotator CameraRotation;
+	PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
+
+	// Calculate trace end point
+	const FVector TraceDirection = CameraRotation.Vector();
+	const float TraceDistance = 100000.0f;
+	const FVector TraceEnd = CameraLocation + TraceDirection * TraceDistance;
+
+	// Set up trace parameters
+	FCollisionQueryParams QueryParams;
+	QueryParams.bTraceComplex = false;
+	QueryParams.AddIgnoredActor(this);
+
+	if (APawn* PlayerPawn = PC->GetPawn())
+	{
+		QueryParams.AddIgnoredActor(PlayerPawn);
+	}
+
+	// Trace for terrain collision
+	FHitResult HitResult;
+	const bool bHit = World->LineTraceSingleByChannel(
+		HitResult,
+		CameraLocation,
+		TraceEnd,
+		ECC_WorldStatic,
+		QueryParams
+	);
+
+	if (bHit)
+	{
+		OutHitLocation = HitResult.ImpactPoint;
+		OutHitNormal = HitResult.ImpactNormal;
+		return true;
+	}
+
+	return false;
+}
+
 void AVoxelWorldTestActor::DrawEditCrosshair() const
 {
 	UWorld* World = GetWorld();
@@ -1294,17 +1589,27 @@ void AVoxelWorldTestActor::DrawEditCrosshair() const
 		return;
 	}
 
-	// Trace to find target location
-	FVector HitLocation;
-	const bool bHasTarget = TraceTerrainFromCamera(HitLocation);
+	// Trace to find target location and normal
+	FVector HitLocation, HitNormal;
+	const bool bHasTarget = TraceTerrainFromCamera(HitLocation, HitNormal);
 
 	// Draw on-screen status text (two lines)
 	if (GEngine)
 	{
-		// Line 1: Mouse controls
-		const FString MouseText = bHasTarget
-			? FString::Printf(TEXT("[Edit] LMB: Dig | RMB: Build | MMB: Paint | Wheel: Radius %.0f | Mat: %d"), EditBrushRadius, EditMaterialID)
-			: FString::Printf(TEXT("[Edit] No terrain target | Wheel: Radius %.0f | Mat: %d"), EditBrushRadius, EditMaterialID);
+		// Line 1: Mode and mouse controls
+		FString MouseText;
+		if (bUseDiscreteEditing)
+		{
+			MouseText = bHasTarget
+				? FString::Printf(TEXT("[Block Mode] LMB: Remove | RMB: Place | MMB: Paint | Mat: %d"), EditMaterialID)
+				: FString::Printf(TEXT("[Block Mode] No terrain target | Mat: %d"), EditMaterialID);
+		}
+		else
+		{
+			MouseText = bHasTarget
+				? FString::Printf(TEXT("[Brush Mode] LMB: Dig | RMB: Build | MMB: Paint | Radius: %.0f | Mat: %d"), EditBrushRadius, EditMaterialID)
+				: FString::Printf(TEXT("[Brush Mode] No terrain target | Radius: %.0f | Mat: %d"), EditBrushRadius, EditMaterialID);
+		}
 
 		const FColor TextColor = bHasTarget ? FColor::Cyan : FColor(128, 128, 128);
 		GEngine->AddOnScreenDebugMessage(-2, 0.0f, TextColor, MouseText);
@@ -1313,20 +1618,42 @@ void AVoxelWorldTestActor::DrawEditCrosshair() const
 		GEngine->AddOnScreenDebugMessage(-3, 0.0f, FColor::White, TEXT("[Keys] Z: Undo | Y: Redo | F9: Save | F10: Load"));
 	}
 
-	// Draw 3D crosshair/target indicator at hit location
+	// Draw 3D target indicator at hit location
 	if (bHasTarget)
 	{
-		const FColor TargetColor = FColor::Cyan;
+		if (bUseDiscreteEditing)
+		{
+			// Discrete mode: Draw box outline around the targeted voxel
+			const FVector TargetVoxelCenter = SnapToVoxelCenter(HitLocation);
+			const FBox VoxelBox = GetVoxelBounds(TargetVoxelCenter);
 
-		// Draw cross lines at target - same size as brush radius
-		DrawDebugLine(World, HitLocation - FVector(EditBrushRadius, 0, 0), HitLocation + FVector(EditBrushRadius, 0, 0),
-			TargetColor, false, 0.0f, 0, 3.0f);
-		DrawDebugLine(World, HitLocation - FVector(0, EditBrushRadius, 0), HitLocation + FVector(0, EditBrushRadius, 0),
-			TargetColor, false, 0.0f, 0, 3.0f);
-		DrawDebugLine(World, HitLocation - FVector(0, 0, EditBrushRadius), HitLocation + FVector(0, 0, EditBrushRadius),
-			TargetColor, false, 0.0f, 0, 3.0f);
+			// Draw the voxel being targeted for removal (cyan)
+			DrawDebugBox(World, VoxelBox.GetCenter(), VoxelBox.GetExtent(), FColor::Cyan, false, 0.0f, 0, 3.0f);
 
-		// Draw sphere showing brush radius
-		DrawDebugSphere(World, HitLocation, EditBrushRadius, 24, FColor::Yellow, false, 0.0f, 0, 1.0f);
+			// Also show where a block would be placed (green, adjacent voxel)
+			const FVector PlaceVoxelCenter = GetAdjacentVoxelPosition(HitLocation, HitNormal);
+			const FBox PlaceBox = GetVoxelBounds(PlaceVoxelCenter);
+			DrawDebugBox(World, PlaceBox.GetCenter(), PlaceBox.GetExtent(), FColor::Green, false, 0.0f, 0, 2.0f);
+
+			// Draw small indicator showing hit normal direction
+			DrawDebugDirectionalArrow(World, HitLocation, HitLocation + HitNormal * (Configuration ? Configuration->VoxelSize : 50.0f),
+				20.0f, FColor::Yellow, false, 0.0f, 0, 2.0f);
+		}
+		else
+		{
+			// Brush mode: Draw cross and sphere
+			const FColor TargetColor = FColor::Cyan;
+
+			// Draw cross lines at target - same size as brush radius
+			DrawDebugLine(World, HitLocation - FVector(EditBrushRadius, 0, 0), HitLocation + FVector(EditBrushRadius, 0, 0),
+				TargetColor, false, 0.0f, 0, 3.0f);
+			DrawDebugLine(World, HitLocation - FVector(0, EditBrushRadius, 0), HitLocation + FVector(0, EditBrushRadius, 0),
+				TargetColor, false, 0.0f, 0, 3.0f);
+			DrawDebugLine(World, HitLocation - FVector(0, 0, EditBrushRadius), HitLocation + FVector(0, 0, EditBrushRadius),
+				TargetColor, false, 0.0f, 0, 3.0f);
+
+			// Draw sphere showing brush radius
+			DrawDebugSphere(World, HitLocation, EditBrushRadius, 24, FColor::Yellow, false, 0.0f, 0, 1.0f);
+		}
 	}
 }

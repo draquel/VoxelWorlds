@@ -5,6 +5,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
 #include "Algo/BinarySearch.h"
+#include "Async/Async.h"
 #include "VoxelCoordinates.h"
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
@@ -106,6 +107,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
 	ProcessGenerationQueue(TimeSlice * 0.4f);
 	ProcessMeshingQueue(TimeSlice * 0.4f);
+
+	// Process completed async mesh tasks (moves results to PendingMeshQueue)
+	ProcessCompletedAsyncMeshes();
 
 	// Submit pending meshes to renderer
 	// With batched render operations, multiple submits are consolidated into one render command
@@ -346,6 +350,14 @@ void UVoxelChunkManager::Shutdown()
 	MeshingQueueSet.Empty();
 	UnloadQueue.Empty();
 	UnloadQueueSet.Empty();
+
+	// Clear async meshing state
+	// Note: In-flight async tasks will safely no-op due to weak pointer check
+	AsyncMeshingInProgress.Empty();
+	PendingMeshQueue.Empty();
+	// Drain the completed queue
+	FAsyncMeshResult DiscardedResult;
+	while (CompletedMeshQueue.Dequeue(DiscardedResult)) {}
 
 	// Reset streaming decision caching
 	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
@@ -977,23 +989,29 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		return;
 	}
 
-	// Throttle if pending mesh queue is full
+	// Throttle if too many async tasks in flight or pending queue is full
+	if (AsyncMeshingInProgress.Num() >= MaxAsyncMeshTasks)
+	{
+		return;
+	}
 	if (PendingMeshQueue.Num() >= MaxPendingMeshes)
 	{
 		return;
 	}
 
-	const double StartTime = FPlatformTime::Seconds();
-	const double TimeLimit = TimeSliceMS / 1000.0;
+	// For async, we don't need time slicing - just limit concurrent tasks
 	const int32 MaxChunks = Configuration->MaxChunksToLoadPerFrame;
 	int32 ProcessedCount = 0;
 
-	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxChunks && PendingMeshQueue.Num() < MaxPendingMeshes)
+	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxChunks &&
+	       AsyncMeshingInProgress.Num() < MaxAsyncMeshTasks &&
+	       PendingMeshQueue.Num() < MaxPendingMeshes)
 	{
-		// Check time limit
-		if (FPlatformTime::Seconds() - StartTime > TimeLimit)
+		// Skip chunks already being meshed asynchronously
+		if (AsyncMeshingInProgress.Contains(MeshingQueue[0].ChunkCoord))
 		{
-			break;
+			MeshingQueue.RemoveAt(0);
+			continue;
 		}
 
 		// Get highest priority chunk and remove from queue and tracking set
@@ -1177,28 +1195,85 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			// If neighbor doesn't exist, no transition needed (will be at chunk boundary anyway)
 		}
 
-		// Generate mesh using CPU mesher
-		FChunkMeshData MeshData;
-		const bool bSuccess = Mesher->GenerateMeshCPU(MeshRequest, MeshData);
+		// Launch async mesh generation instead of blocking
+		LaunchAsyncMeshGeneration(Request, MeshRequest);
 
-		if (bSuccess)
+		++ProcessedCount;
+	}
+}
+
+void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest)
+{
+	// Mark as in-progress
+	AsyncMeshingInProgress.Add(Request.ChunkCoord);
+
+	// Capture mesher pointer (it's a TUniquePtr, so we need raw pointer for lambda)
+	IVoxelMesher* MesherPtr = Mesher.Get();
+	const FIntVector ChunkCoord = Request.ChunkCoord;
+	const int32 LODLevel = Request.LODLevel;
+
+	// Use a weak pointer to safely check if ChunkManager is still valid
+	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
+
+	// Launch async task on thread pool
+	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel]() mutable
+	{
+		// Generate mesh on background thread
+		FChunkMeshData MeshData;
+		const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
+
+		// Queue result for game thread (thread-safe MPSC queue)
+		if (UVoxelChunkManager* This = WeakThis.Get())
+		{
+			FAsyncMeshResult Result;
+			Result.ChunkCoord = ChunkCoord;
+			Result.LODLevel = LODLevel;
+			Result.bSuccess = bSuccess;
+			if (bSuccess)
+			{
+				Result.MeshData = MoveTemp(MeshData);
+			}
+			This->CompletedMeshQueue.Enqueue(MoveTemp(Result));
+		}
+	});
+}
+
+void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
+{
+	FAsyncMeshResult Result;
+	int32 ProcessedCount = 0;
+	const int32 MaxProcessPerFrame = 8; // Limit how many we process to spread render uploads
+
+	while (CompletedMeshQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
+	{
+		// Remove from in-progress tracking
+		AsyncMeshingInProgress.Remove(Result.ChunkCoord);
+
+		// Check if chunk is still in a valid state (might have been unloaded while meshing)
+		const EChunkState CurrentState = GetChunkState(Result.ChunkCoord);
+		if (CurrentState != EChunkState::Meshing)
+		{
+			// Chunk state changed while we were meshing - discard result
+			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async mesh discarded - state changed to %d"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
+			continue;
+		}
+
+		if (Result.bSuccess)
 		{
 			// Store mesh in pending queue (will be submitted later, throttled)
 			FPendingMeshData PendingMesh;
-			PendingMesh.ChunkCoord = Request.ChunkCoord;
-			PendingMesh.LODLevel = Request.LODLevel;
-			PendingMesh.MeshData = MoveTemp(MeshData);
+			PendingMesh.ChunkCoord = Result.ChunkCoord;
+			PendingMesh.LODLevel = Result.LODLevel;
+			PendingMesh.MeshData = MoveTemp(Result.MeshData);
 			PendingMeshQueue.Add(MoveTemp(PendingMesh));
-
-			// NOTE: Don't call OnChunkMeshingComplete here - it's called in TickComponent
-			// after throttled render submission
 		}
 		else
 		{
-			// Meshing failed - reset to PendingGeneration to retry
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d, %d, %d) meshing failed"),
-				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
-			SetChunkState(Request.ChunkCoord, EChunkState::PendingMeshing);
+			// Meshing failed - reset to PendingMeshing to retry
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d,%d,%d) async meshing failed"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+			SetChunkState(Result.ChunkCoord, EChunkState::PendingMeshing);
 		}
 
 		++ProcessedCount;
@@ -1568,17 +1643,52 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 	// Reset edge/corner flags
 	OutRequest.EdgeCornerFlags = 0;
 
-	// Helper lambda to get a single voxel from a neighbor chunk, with edits applied
-	auto GetNeighborVoxel = [this, ChunkSize](const FIntVector& NeighborCoord, int32 X, int32 Y, int32 Z) -> FVoxelData
+	// Cache structure for neighbor chunk data to avoid repeated TMap lookups
+	struct FNeighborCache
 	{
-		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
-		if (!NeighborState)
+		const FVoxelChunkState* State = nullptr;
+		const FChunkEditLayer* EditLayer = nullptr;
+		bool bHasData = false;
+	};
+
+	// Pre-cache neighbor data (26 potential neighbors: 6 faces + 12 edges + 8 corners)
+	// Use a simple lambda to initialize cache on first access per neighbor
+	TMap<FIntVector, FNeighborCache> NeighborCaches;
+	NeighborCaches.Reserve(26);
+
+	auto GetNeighborCache = [this, VolumeSize, &NeighborCaches](const FIntVector& NeighborCoord) -> const FNeighborCache&
+	{
+		if (const FNeighborCache* Cached = NeighborCaches.Find(NeighborCoord))
+		{
+			return *Cached;
+		}
+
+		FNeighborCache Cache;
+		Cache.State = ChunkStates.Find(NeighborCoord);
+		if (Cache.State && Cache.State->Descriptor.VoxelData.Num() == VolumeSize)
+		{
+			Cache.bHasData = true;
+			// Cache edit layer lookup (only once per neighbor)
+			if (EditManager)
+			{
+				Cache.EditLayer = EditManager->GetEditLayer(NeighborCoord);
+			}
+		}
+		return NeighborCaches.Add(NeighborCoord, Cache);
+	};
+
+	// Optimized helper lambda to get a single voxel from a neighbor chunk
+	// Uses cached state and edit layer to avoid repeated TMap lookups
+	auto GetNeighborVoxel = [ChunkSize, &GetNeighborCache](const FIntVector& NeighborCoord, int32 X, int32 Y, int32 Z) -> FVoxelData
+	{
+		const FNeighborCache& Cache = GetNeighborCache(NeighborCoord);
+		if (!Cache.bHasData)
 		{
 			return FVoxelData::Air();
 		}
 
 		const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-		const TArray<FVoxelData>& Voxels = NeighborState->Descriptor.VoxelData;
+		const TArray<FVoxelData>& Voxels = Cache.State->Descriptor.VoxelData;
 		if (!Voxels.IsValidIndex(Index))
 		{
 			return FVoxelData::Air();
@@ -1586,31 +1696,22 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 
 		FVoxelData Result = Voxels[Index];
 
-		// Apply edit if present
-		if (EditManager && EditManager->ChunkHasEdits(NeighborCoord))
+		// Apply edit if present (using cached edit layer)
+		if (Cache.EditLayer)
 		{
-			const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(NeighborCoord);
-			if (EditLayer)
+			if (const FVoxelEdit* Edit = Cache.EditLayer->GetEdit(FIntVector(X, Y, Z)))
 			{
-				if (const FVoxelEdit* Edit = EditLayer->GetEdit(FIntVector(X, Y, Z)))
-				{
-					Result = Edit->ApplyToProceduralData(Result);
-				}
+				Result = Edit->ApplyToProceduralData(Result);
 			}
 		}
 
 		return Result;
 	};
 
-	// Helper to check if neighbor chunk exists and has valid data
-	auto HasNeighborData = [this, VolumeSize](const FIntVector& NeighborCoord) -> bool
+	// Helper to check if neighbor chunk exists and has valid data (uses cache)
+	auto HasNeighborData = [&GetNeighborCache](const FIntVector& NeighborCoord) -> bool
 	{
-		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
-		if (!NeighborState)
-		{
-			return false;
-		}
-		return NeighborState->Descriptor.VoxelData.Num() == VolumeSize;
+		return GetNeighborCache(NeighborCoord).bHasData;
 	};
 
 	// Helper to get voxel index

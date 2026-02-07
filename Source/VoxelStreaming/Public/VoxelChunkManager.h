@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Containers/Queue.h"
 #include "VoxelCoreTypes.h"
 #include "ChunkDescriptor.h"
 #include "ChunkRenderData.h"
@@ -614,6 +615,32 @@ protected:
 
 	/** Maximum pending meshes before throttling generation - keep low to avoid render job overflow */
 	static constexpr int32 MaxPendingMeshes = 4;
+
+	// ==================== Async Mesh Generation ====================
+
+	/** Result of an async mesh generation task */
+	struct FAsyncMeshResult
+	{
+		FIntVector ChunkCoord;
+		int32 LODLevel;
+		FChunkMeshData MeshData;
+		bool bSuccess = false;
+	};
+
+	/** Thread-safe queue for completed async mesh results */
+	TQueue<FAsyncMeshResult, EQueueMode::Mpsc> CompletedMeshQueue;
+
+	/** Set of chunks currently being meshed asynchronously */
+	TSet<FIntVector> AsyncMeshingInProgress;
+
+	/** Maximum concurrent async mesh tasks */
+	static constexpr int32 MaxAsyncMeshTasks = 4;
+
+	/** Process completed async mesh tasks (called from game thread) */
+	void ProcessCompletedAsyncMeshes();
+
+	/** Launch async mesh generation for a chunk */
+	void LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest);
 
 	// ==================== Edit & Collision Systems ====================
 

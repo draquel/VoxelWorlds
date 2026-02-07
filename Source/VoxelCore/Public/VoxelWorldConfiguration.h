@@ -263,9 +263,10 @@ public:
 
 	// ==================== Streaming Settings ====================
 
-	/** Maximum chunks to load per frame (generation, meshing, render submit) */
+	/** Maximum chunks to load per frame (generation, meshing, render submit).
+	 * Lower values reduce stuttering but slow initial loading. Mesh generation is expensive. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "1", ClampMax = "64"))
-	int32 MaxChunksToLoadPerFrame = 8;
+	int32 MaxChunksToLoadPerFrame = 2;
 
 	/** Maximum chunks to unload per frame */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "1", ClampMax = "64"))
