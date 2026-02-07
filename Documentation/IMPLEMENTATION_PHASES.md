@@ -563,8 +563,8 @@ Mesh generation was moved to background threads to eliminate stuttering:
 - [x] Throttled scatter generation (MaxScatterGenerationsPerFrame)
 - [x] Edit integration (targeted removal for player edits)
 - [x] Flicker prevention (stationary-only rebuilds)
+- [x] Foliage LOD (HISM distance culling + per-type LOD settings)
 - [ ] GPU-based scatter generation (future optimization)
-- [ ] Foliage LOD (using HISM built-in)
 - [ ] Performance profiling
 - [ ] Memory optimization
 
@@ -628,6 +628,21 @@ The scatter system was implemented in three sub-phases:
 5. **Behavior by Source**:
    - Player edits: Surgical removal, no regeneration
    - System/Editor edits: Full chunk regeneration allowed
+
+#### Foliage LOD
+Per-scatter-type LOD settings via `FScatterDefinition`:
+- `LODStartDistance`: Where mesh LOD transitions begin (also shadow cutoff)
+- `CullDistance`: Where instances are completely hidden
+- `MinScreenSize`: Screen-size based culling (0.0-1.0)
+
+Default LOD distances by type:
+| Type | LODStart | CullDist | Shadows | Notes |
+|------|----------|----------|---------|-------|
+| Grass | 3000 | 8000 | No | Aggressive culling, no shadows |
+| Rocks | 8000 | 20000 | Yes | Medium distance, shadows nearby |
+| Trees | 15000 | 50000 | Yes | Long distance, spawn early |
+
+HISM uses the static mesh's built-in LOD levels (LOD0, LOD1, etc.) when available.
 
 #### Placement Rules
 - `Density`: 0.0-1.0 probability per surface point

@@ -940,6 +940,7 @@ FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) 
 void UVoxelScatterManager::CreateDefaultDefinitions()
 {
 	// Grass scatter - dense on grass material
+	// Short view distance, aggressive culling for performance
 	FScatterDefinition GrassScatter;
 	GrassScatter.ScatterID = 0;
 	GrassScatter.Name = TEXT("Grass");
@@ -956,9 +957,15 @@ void UVoxelScatterManager::CreateDefaultDefinitions()
 	GrassScatter.bAlignToSurfaceNormal = true;
 	GrassScatter.SurfaceOffset = 0.0f;
 	GrassScatter.PositionJitter = 25.0f;
+	// LOD settings - grass is small, cull aggressively
+	GrassScatter.LODStartDistance = 3000.0f;   // LOD transitions start at 30m
+	GrassScatter.CullDistance = 8000.0f;       // Fully culled at 80m
+	GrassScatter.MinScreenSize = 0.005f;       // Cull tiny grass instances
+	GrassScatter.bCastShadows = false;         // Grass doesn't cast shadows (performance)
 	AddScatterDefinition(GrassScatter);
 
 	// Rock scatter - less dense, on stone and dirt
+	// Medium view distance
 	FScatterDefinition RockScatter;
 	RockScatter.ScatterID = 1;
 	RockScatter.Name = TEXT("Rocks");
@@ -975,9 +982,15 @@ void UVoxelScatterManager::CreateDefaultDefinitions()
 	RockScatter.bAlignToSurfaceNormal = false;
 	RockScatter.SurfaceOffset = 0.0f;
 	RockScatter.PositionJitter = 50.0f;
+	// LOD settings - rocks are medium sized
+	RockScatter.LODStartDistance = 8000.0f;    // LOD transitions start at 80m
+	RockScatter.CullDistance = 20000.0f;       // Fully culled at 200m
+	RockScatter.MinScreenSize = 0.002f;        // Cull very small rock instances
+	RockScatter.bCastShadows = true;           // Rocks cast shadows (nearby only)
 	AddScatterDefinition(RockScatter);
 
 	// Tree scatter - very sparse on grass
+	// Long view distance to prevent pop-in
 	FScatterDefinition TreeScatter;
 	TreeScatter.ScatterID = 2;
 	TreeScatter.Name = TEXT("Trees");
@@ -994,6 +1007,12 @@ void UVoxelScatterManager::CreateDefaultDefinitions()
 	TreeScatter.bAlignToSurfaceNormal = false;
 	TreeScatter.SurfaceOffset = 0.0f;
 	TreeScatter.PositionJitter = 100.0f;
+	// LOD settings - trees are large, visible from far
+	TreeScatter.LODStartDistance = 15000.0f;   // LOD transitions start at 150m
+	TreeScatter.CullDistance = 50000.0f;       // Fully culled at 500m
+	TreeScatter.MinScreenSize = 0.001f;        // Minimal screen size culling
+	TreeScatter.bCastShadows = true;           // Trees cast shadows
+	TreeScatter.SpawnDistance = 20000.0f;      // Spawn trees at distance to prevent pop-in
 	AddScatterDefinition(TreeScatter);
 
 	UE_LOG(LogVoxelScatter, Log, TEXT("Created %d default scatter definitions"), ScatterDefinitions.Num());

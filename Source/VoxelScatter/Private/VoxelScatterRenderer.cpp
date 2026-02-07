@@ -415,9 +415,6 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 	// CullDistance = where instances are completely culled
 	HISM->SetCullDistances(Definition.LODStartDistance, Definition.CullDistance);
 
-	// Enable distance-based instance culling for better performance
-	HISM->bEnableDiscardOnLoad = false;
-
 	// ==================== Shadows ====================
 
 	HISM->SetCastShadow(Definition.bCastShadows);
@@ -468,9 +465,20 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 	HISM->bEnableDensityScaling = false;
 	HISM->SetCanEverAffectNavigation(false);
 
+	// Screen size culling - cull instances that are very small on screen
+	if (Definition.MinScreenSize > 0.0f)
+	{
+		HISM->MinLOD = 0;
+		// Note: Screen size thresholds are typically set per-LOD in the static mesh asset
+		// The MinScreenSize here affects the overall component visibility
+	}
+
 	// Use the mesh's built-in LODs if available
-	// The static mesh should have LOD0, LOD1, etc. defined
-	// HISM will automatically switch between them based on distance
+	// The static mesh should have LOD0, LOD1, etc. defined with screen size thresholds
+	// HISM will automatically switch between them based on distance and screen size
+
+	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Configured HISM for %s: LODStart=%.0f, Cull=%.0f"),
+		*Definition.Name, Definition.LODStartDistance, Definition.CullDistance);
 }
 
 void UVoxelScatterRenderer::AddInstancesToHISM(

@@ -130,8 +130,13 @@ struct FScatterDefinition
     float SurfaceOffset = 0.0f;
     float PositionJitter = 0.0f;
 
+    // LOD & Culling
+    float SpawnDistance = 0.0f;              // 0 = use global ScatterRadius
+    float CullDistance = 50000.0f;           // Max render distance
+    float LODStartDistance = 5000.0f;        // LOD transitions + shadow cutoff
+    float MinScreenSize = 0.0f;              // Screen-size culling (0-1)
+
     // Rendering
-    float CullDistance = 10000.0f;
     bool bCastShadows = true;
     bool bEnableCollision = false;
     bool bReceivesDecals = true;

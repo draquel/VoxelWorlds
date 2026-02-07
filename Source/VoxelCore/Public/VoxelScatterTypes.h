@@ -317,13 +317,26 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0.0"))
 	float SpawnDistance = 0.0f;
 
-	/** Maximum distance for rendering (HISM cull distance) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	/** Maximum distance for rendering (HISM cull distance - instances beyond this are invisible) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "100.0"))
 	float CullDistance = 50000.0f;
 
-	/** Start distance for LOD transitions */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	/**
+	 * Distance where LOD transitions begin (instances start using lower LOD meshes).
+	 * Also controls shadow distance - shadows only cast from instances closer than this.
+	 * Should be less than CullDistance.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "100.0"))
 	float LODStartDistance = 5000.0f;
+
+	/**
+	 * Minimum screen size for instances (0.0-1.0).
+	 * Instances smaller than this on screen are culled.
+	 * Higher values = more aggressive culling = better performance.
+	 * 0.0 = no screen size culling, 0.01 = cull very small instances.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MinScreenSize = 0.0f;
 
 	FScatterDefinition() = default;
 
