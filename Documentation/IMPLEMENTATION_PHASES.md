@@ -382,28 +382,117 @@ Implemented 3D noise-based ore deposit generation:
 
 ---
 
-## Phase 6: Editing & Collision (Weeks 11-12)
+## Phase 6: Editing & Collision (Weeks 11-12) ✓ COMPLETE
 
 **Goal**: Interactive terrain
 
 ### Tasks
-- [ ] Edit layer implementation
-- [ ] Add/subtract/paint tools
-- [ ] Collision manager
-- [ ] Async collision generation
-- [ ] Edit serialization
-- [ ] Undo/redo system
+- [x] Edit layer implementation
+- [x] Add/subtract/paint tools
+- [x] Collision manager
+- [x] Async collision generation
+- [x] Edit serialization
+- [x] Undo/redo system
+- [x] Input-based testing (mouse + keyboard controls)
 
 ### Deliverables
-- Working terrain editing
-- Physics collision
-- Save/load edits
+- Working terrain editing ✓
+- Physics collision ✓
+- Save/load edits ✓
 
 ### Success Criteria
-- Can add/remove voxels in real-time
-- Collision updates don't block rendering
-- Edits persist across sessions
-- Physics works correctly
+- Can add/remove voxels in real-time ✓
+- Collision updates don't block rendering ✓
+- Edits persist across sessions ✓
+- Physics works correctly ✓
+
+### Notes on Edit Layer Implementation
+
+The edit layer uses an **overlay architecture** where edits are stored separately from procedural data and merged at mesh generation time:
+
+1. **VoxelEditTypes.h** - Core data structures:
+   - `FVoxelEdit`: Single voxel edit with DensityDelta, BrushMaterialID, EditMode
+   - `FChunkEditLayer`: Sparse per-chunk edit storage using TMap<int32, FVoxelEdit>
+   - `FVoxelEditOperation`: Batch of edits for undo/redo
+   - `FVoxelBrushParams`: Brush configuration (shape, radius, falloff, strength)
+
+2. **VoxelEditManager.h/cpp** - Edit management:
+   - Sparse TMap-based storage (memory-efficient for few edits)
+   - Command pattern undo/redo with configurable history (MaxUndoHistory = 100)
+   - Brush operations: Sphere, Cube, Cylinder shapes with falloff
+   - Binary serialization (magic number VETI, version 1)
+   - `OnChunkEdited` delegate triggers remesh + collision update
+
+3. **Edit Merge** (VoxelChunkManager::ProcessMeshingQueue):
+   - Edits applied to copy of VoxelData via `ApplyToProceduralData()`
+   - Relative edits: DensityDelta added/subtracted from procedural density
+   - Neighbor edge extraction includes edits for seamless chunk boundaries
+   - Neighbors marked dirty when edits occur near chunk borders
+
+4. **Edit Modes**:
+   - `Set`: Absolute voxel data replacement
+   - `Add`: Increases density (builds terrain)
+   - `Subtract`: Decreases density (digs terrain)
+   - `Paint`: Changes material without modifying density
+   - `Smooth`: Reserved for future smoothing brush
+
+5. **Edit Accumulation**:
+   - Same-location Add/Subtract edits accumulate their deltas
+   - Zero-delta edits are removed (reverts to procedural state)
+   - Known limitation: Overlapping build/dig with falloff can leave minor remnants
+
+### Notes on Collision Manager Implementation
+
+The collision manager provides **distance-based physics collision** with async cooking:
+
+1. **VoxelCollisionManager.h/cpp** (VoxelStreaming module):
+   - Distance-based collision loading/unloading
+   - CollisionRadius: Default 50% of ViewDistance
+   - CollisionLODLevel: Uses coarser meshes for physics (fewer triangles)
+   - Async cooking via UBodySetup to prevent frame hitches
+
+2. **Chaos Physics Integration** (UE 5.7):
+   - `Chaos::FTriangleMeshImplicitObject` with `TRefCountPtr`
+   - Uses `TriMeshGeometries` (not deprecated `ChaosTriMeshes`)
+   - `UBoxComponent` as container, overrides FBodyInstance::BodySetup
+
+3. **Container Actor**:
+   - `CollisionContainerActor` holds all chunk collision components
+   - Components created/destroyed as chunks enter/leave collision radius
+   - Dirty marking via `EditManager->OnChunkEdited` delegate
+
+4. **Mesh Generation**:
+   - `VoxelChunkManager::GetChunkCollisionMesh()` generates at collision LOD
+   - Same mesher as visual mesh but at lower detail level
+   - Collision updates every frame for dirty chunks
+
+### Notes on Input-Based Testing
+
+VoxelWorldTestActor provides interactive edit testing:
+
+1. **Mouse Controls** (when `bEnableEditInputs` is true):
+   - Left Mouse Button: Dig (Subtract mode)
+   - Right Mouse Button: Build (Add mode)
+   - Middle Mouse Button: Paint (Paint mode)
+   - Mouse Wheel: Adjust brush radius (50-2000 units)
+
+2. **Keyboard Shortcuts**:
+   - Z: Undo last edit operation
+   - Y: Redo last undone operation
+   - F5: Save edits to VoxelEdits.dat
+   - F9: Load edits from VoxelEdits.dat
+
+3. **Visual Feedback**:
+   - Crosshair (cyan): 3D cross at target location
+   - Brush sphere (yellow): Shows edit radius
+   - On-screen text: Current mode, radius, material ID, keyboard shortcuts
+   - Action feedback: Shows voxels modified per edit
+
+4. **Properties**:
+   - `bEnableEditInputs`: Master toggle for input handling
+   - `EditBrushRadius`: Current brush size (50-2000)
+   - `EditMaterialID`: Material for Build/Paint operations
+   - `bShowEditCrosshair`: Toggle crosshair visualization
 
 ---
 
@@ -451,8 +540,8 @@ Implemented 3D noise-based ore deposit generation:
 
 ## Current Status
 
-**Active Phase**: Phase 6 (Editing & Collision)
-**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE - Phase 4 COMPLETE - Phase 5 COMPLETE
+**Active Phase**: Phase 7 (Scatter & Polish)
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE - Phase 4 COMPLETE - Phase 5 COMPLETE - Phase 6 COMPLETE
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -623,9 +712,51 @@ Implemented 3D noise-based ore deposit generation:
    - Global ores + per-biome ore overrides
    - Default ores: Coal (shallow), Iron (medium, streaks), Gold (deep, rare)
 
-**Next Immediate Steps** (Phase 6):
-1. Edit layer implementation
-2. Add/subtract/paint tools
+**Phase 6 Completed**:
+1. ~~Edit Layer Implementation~~ - COMPLETE
+   - FVoxelEdit: Relative edits with DensityDelta and BrushMaterialID
+   - FChunkEditLayer: Sparse per-chunk storage with TMap
+   - Overlay architecture: Edits stored separately, merged at mesh time
+   - Edit accumulation: Same-location edits combine, zero-delta edits removed
+
+2. ~~Add/Subtract/Paint Tools~~ - COMPLETE
+   - FVoxelBrushParams: Sphere, Cube, Cylinder shapes with configurable falloff
+   - ApplyBrushEdit(): Iterates voxels in brush volume
+   - Paint mode: Changes material without modifying density
+   - Falloff types: Linear, Smooth (hermite), Sharp
+
+3. ~~Collision Manager~~ - COMPLETE
+   - VoxelCollisionManager: Distance-based collision loading
+   - Chaos physics integration with FTriangleMeshImplicitObject
+   - CollisionRadius: 50% of ViewDistance (configurable)
+   - CollisionLODLevel: Coarser meshes for physics
+
+4. ~~Async Collision Generation~~ - COMPLETE
+   - UBodySetup async cooking to prevent frame hitches
+   - MaxCooksPerFrame and MaxConcurrentCooks limits
+   - ProcessDirtyChunks() for edit-triggered updates
+   - Old collision destroyed before new collision created
+
+5. ~~Edit Serialization~~ - COMPLETE
+   - Binary format with magic number (VETI) and version
+   - SaveEditsToFile() / LoadEditsFromFile()
+   - Saves to project's Saved folder (VoxelEdits.dat)
+
+6. ~~Undo/Redo System~~ - COMPLETE
+   - FVoxelEditOperation: Batch of edits with description
+   - BeginEditOperation() / EndEditOperation() for grouping
+   - UndoStack and RedoStack with MaxUndoHistory = 100
+   - OnUndoRedoStateChanged delegate
+
+7. ~~Input-Based Testing~~ - COMPLETE
+   - Mouse controls: LMB=Dig, RMB=Build, MMB=Paint, Wheel=Radius
+   - Keyboard: Z=Undo, Y=Redo, F5=Save, F9=Load
+   - Visual crosshair and brush sphere
+   - On-screen control hints
+
+**Next Immediate Steps** (Phase 7):
+1. Scatter system design
+2. GPU-based vegetation placement
 
 ---
 

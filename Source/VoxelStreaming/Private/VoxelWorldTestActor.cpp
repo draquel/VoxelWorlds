@@ -874,6 +874,41 @@ int32 AVoxelWorldTestActor::TestBuildAt(FVector WorldLocation, float Radius, uin
 	return VoxelsModified;
 }
 
+int32 AVoxelWorldTestActor::TestPaintAt(FVector WorldLocation, float Radius, uint8 MaterialID)
+{
+	if (!ChunkManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestPaintAt: ChunkManager not available"));
+		return 0;
+	}
+
+	UVoxelEditManager* EditManager = ChunkManager->GetEditManager();
+	if (!EditManager)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("TestPaintAt: EditManager not available"));
+		return 0;
+	}
+
+	// Configure brush for painting (paint mode - only changes material)
+	FVoxelBrushParams Brush;
+	Brush.Shape = EVoxelBrushShape::Sphere;
+	Brush.Radius = Radius;
+	Brush.Strength = 1.0f;
+	Brush.FalloffType = EVoxelBrushFalloff::Smooth;
+	Brush.MaterialID = MaterialID;
+	Brush.DensityDelta = 0;  // Paint mode doesn't change density
+
+	// Apply the edit
+	EditManager->BeginEditOperation(TEXT("Paint"));
+	const int32 VoxelsModified = EditManager->ApplyBrushEdit(WorldLocation, Brush, EEditMode::Paint);
+	EditManager->EndEditOperation();
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("TestPaintAt: Painted at (%.0f, %.0f, %.0f) with radius %.0f, material %d - %d voxels modified"),
+		WorldLocation.X, WorldLocation.Y, WorldLocation.Z, Radius, MaterialID, VoxelsModified);
+
+	return VoxelsModified;
+}
+
 bool AVoxelWorldTestActor::TestUndo()
 {
 	if (!ChunkManager)
@@ -1042,6 +1077,7 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 	// Get current mouse button states
 	const bool bLeftMouseDown = PC->IsInputKeyDown(EKeys::LeftMouseButton);
 	const bool bRightMouseDown = PC->IsInputKeyDown(EKeys::RightMouseButton);
+	const bool bMiddleMouseDown = PC->IsInputKeyDown(EKeys::MiddleMouseButton);
 
 	// Handle mouse wheel for brush radius adjustment using scroll up/down keys
 	const bool bScrollUp = PC->WasInputKeyJustPressed(EKeys::MouseScrollUp);
@@ -1062,13 +1098,56 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 		}
 	}
 
+	// Handle keyboard shortcuts for edit operations
+	if (PC->WasInputKeyJustPressed(EKeys::Z))
+	{
+		const bool bSuccess = TestUndo();
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 1.5f, bSuccess ? FColor::Yellow : FColor::Red,
+				bSuccess ? TEXT("Undo") : TEXT("Nothing to undo"));
+		}
+	}
+
+	if (PC->WasInputKeyJustPressed(EKeys::Y))
+	{
+		const bool bSuccess = TestRedo();
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 1.5f, bSuccess ? FColor::Yellow : FColor::Red,
+				bSuccess ? TEXT("Redo") : TEXT("Nothing to redo"));
+		}
+	}
+
+	if (PC->WasInputKeyJustPressed(EKeys::F9))
+	{
+		const bool bSuccess = TestSaveEdits();
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, bSuccess ? FColor::Green : FColor::Red,
+				bSuccess ? TEXT("Edits saved to VoxelEdits.dat") : TEXT("Failed to save edits"));
+		}
+	}
+
+	if (PC->WasInputKeyJustPressed(EKeys::F10))
+	{
+		const bool bSuccess = TestLoadEdits();
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.0f, bSuccess ? FColor::Green : FColor::Red,
+				bSuccess ? TEXT("Edits loaded from VoxelEdits.dat") : TEXT("Failed to load edits"));
+		}
+	}
+
 	// Detect button press (transition from not-pressed to pressed)
 	const bool bLeftMousePressed = bLeftMouseDown && !bWasLeftMouseDown;
 	const bool bRightMousePressed = bRightMouseDown && !bWasRightMouseDown;
+	const bool bMiddleMousePressed = bMiddleMouseDown && !bWasMiddleMouseDown;
 
 	// Update previous state
 	bWasLeftMouseDown = bLeftMouseDown;
 	bWasRightMouseDown = bRightMouseDown;
+	bWasMiddleMouseDown = bMiddleMouseDown;
 
 	// Handle edit actions on press
 	if (bLeftMousePressed)
@@ -1117,6 +1196,31 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 			if (GEngine)
 			{
 				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Build: No terrain under crosshair"));
+			}
+		}
+	}
+
+	if (bMiddleMousePressed)
+	{
+		FVector HitLocation;
+		if (TraceTerrainFromCamera(HitLocation))
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("MIDDLE CLICK: Paint at (%.0f, %.0f, %.0f)"),
+				HitLocation.X, HitLocation.Y, HitLocation.Z);
+			const int32 VoxelsModified = TestPaintAt(HitLocation, EditBrushRadius, EditMaterialID);
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Magenta,
+					FString::Printf(TEXT("Paint at (%.0f, %.0f, %.0f): %d voxels (Mat %d)"),
+						HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified, EditMaterialID));
+			}
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("MIDDLE CLICK: No terrain hit"));
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Paint: No terrain under crosshair"));
 			}
 		}
 	}
@@ -1194,15 +1298,19 @@ void AVoxelWorldTestActor::DrawEditCrosshair() const
 	FVector HitLocation;
 	const bool bHasTarget = TraceTerrainFromCamera(HitLocation);
 
-	// Draw on-screen status text
+	// Draw on-screen status text (two lines)
 	if (GEngine)
 	{
-		const FString StatusText = bHasTarget
-			? FString::Printf(TEXT("[Edit Mode] LMB: Dig | RMB: Build | Wheel: Radius %.0f"), EditBrushRadius)
-			: FString::Printf(TEXT("[Edit Mode] No terrain target | Wheel: Radius %.0f"), EditBrushRadius);
+		// Line 1: Mouse controls
+		const FString MouseText = bHasTarget
+			? FString::Printf(TEXT("[Edit] LMB: Dig | RMB: Build | MMB: Paint | Wheel: Radius %.0f | Mat: %d"), EditBrushRadius, EditMaterialID)
+			: FString::Printf(TEXT("[Edit] No terrain target | Wheel: Radius %.0f | Mat: %d"), EditBrushRadius, EditMaterialID);
 
 		const FColor TextColor = bHasTarget ? FColor::Cyan : FColor(128, 128, 128);
-		GEngine->AddOnScreenDebugMessage(-2, 0.0f, TextColor, StatusText);
+		GEngine->AddOnScreenDebugMessage(-2, 0.0f, TextColor, MouseText);
+
+		// Line 2: Keyboard shortcuts
+		GEngine->AddOnScreenDebugMessage(-3, 0.0f, FColor::White, TEXT("[Keys] Z: Undo | Y: Redo | F9: Save | F10: Load"));
 	}
 
 	// Draw 3D crosshair/target indicator at hit location

@@ -40,15 +40,14 @@ A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.7 featur
 ```
 VoxelWorlds/
 ├── Source/
-│   ├── VoxelCore/          # Data structures, math utilities
+│   ├── VoxelCore/          # Data structures, edit types, math utilities
 │   ├── VoxelLOD/           # Pluggable LOD system
 │   ├── VoxelGeneration/    # Noise, biomes, world modes
 │   ├── VoxelMeshing/       # Cubic and smooth meshing
 │   ├── VoxelRendering/     # Hybrid rendering system
-│   ├── VoxelStreaming/     # Chunk management and streaming
-│   ├── VoxelEditing/       # Edit layer and tools
-│   ├── VoxelScatter/       # Foliage and scatter system
-│   └── VoxelRuntime/       # UE integration and components
+│   ├── VoxelStreaming/     # Chunk management, collision, test actors
+│   ├── VoxelScatter/       # Foliage and scatter system (planned)
+│   └── VoxelRuntime/       # UE integration and components (planned)
 ├── Shaders/                # HLSL compute shaders
 ├── Content/                # Assets, materials, configurations
 └── Documentation/          # This documentation
@@ -113,16 +112,28 @@ VoxelWorlds/
   - ✅ LOD configuration gates (bEnableLOD, bEnableLODSeams)
   - ⏸️ Transvoxel algorithm (implemented but disabled - complex edge cases)
 
+- ✅ **Phase 5: World Modes** - COMPLETE
+  - ✅ Material atlas system (Texture2DArrays for smooth, packed atlas for cubic)
+  - ✅ Unified M_VoxelMaster material with automatic mode switching
+  - ✅ Spherical planet mode with horizon/shell culling
+  - ✅ Island/bowl mode with configurable falloff
+  - ✅ Advanced biome blending and height-based materials
+  - ✅ Water level support with per-biome underwater materials
+  - ✅ Ore vein system (Coal, Iron, Gold with depth constraints)
+
+- ✅ **Phase 6: Editing & Collision** - COMPLETE
+  - ✅ Edit layer with overlay architecture (sparse storage, merged at mesh time)
+  - ✅ Brush tools: Add, Subtract, Paint with Sphere/Cube/Cylinder shapes
+  - ✅ Collision manager with async Chaos physics cooking
+  - ✅ Undo/redo system with operation batching
+  - ✅ Binary serialization for edit persistence
+  - ✅ Input-based testing (mouse + keyboard controls in VoxelWorldTestActor)
+
 ### In Progress
-- 🔄 Phase 5: World Modes
-  - ✅ Material atlas system complete:
-    - UVoxelMaterialAtlas data asset with auto-built Texture2DArrays
-    - Unified M_VoxelMaster material with 4 material functions
-    - Automatic mode switching (Cubic/Smooth) from configuration
-    - Triplanar sampling with UDN normal blending (smooth terrain)
-    - UV-based atlas sampling with MaterialLUT (cubic terrain)
-  - ⏳ Spherical planet mode
-  - ⏳ Island/bowl mode
+- 🔄 Phase 7: Scatter & Polish
+  - ⏳ Scatter system for vegetation placement
+  - ⏳ GPU-based foliage distribution
+  - ⏳ HISM integration
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
@@ -139,6 +150,8 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `UVoxelChunkManager` - Chunk streaming coordinator
 - `FDistanceBandLODStrategy` - Default LOD implementation
 - `FInfinitePlaneWorldMode` - 2D heightmap world mode
+- `FIslandBowlWorldMode` - Bounded island with edge falloff
+- `FSphericalPlanetWorldMode` - Radial terrain on spherical surface
 - `FVoxelCPUNoiseGenerator` - CPU-based noise generation
 - `FVoxelGPUNoiseGenerator` - GPU compute shader noise generation
 - `FVoxelCPUCubicMesher` - CPU-based cubic mesh generation with greedy meshing
@@ -150,6 +163,8 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `UVoxelWorldComponent` - Primitive component bridge for rendering
 - `FVoxelMaterialRegistry` - Static material definitions registry
 - `FVoxelBiomeRegistry` - Static biome definitions registry
+- `UVoxelEditManager` - Edit layer storage and undo/redo management
+- `UVoxelCollisionManager` - Distance-based collision with async cooking
 - `AVoxelWorldTestActor` - Test actor for runtime world instantiation
 - `UVoxelWorldConfiguration` - World configuration asset
 
@@ -165,6 +180,10 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FWorldModeTerrainParams` - Terrain configuration (SeaLevel, HeightScale, etc.)
 - `FVoxelMaterialDefinition` - Material definition (ID, Name, Color)
 - `FBiomeDefinition` - Biome definition (climate ranges, material assignments)
+- `FVoxelEdit` - Single voxel edit with DensityDelta and BrushMaterialID
+- `FChunkEditLayer` - Sparse per-chunk edit storage
+- `FVoxelBrushParams` - Brush configuration (shape, radius, falloff, strength)
+- `FChunkCollisionData` - Per-chunk collision state and UBodySetup reference
 
 ## Getting Started
 

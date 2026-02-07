@@ -11,7 +11,9 @@
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelEdit, Log, All);
 
 // File format version for binary serialization
-static constexpr uint32 VOXEL_EDIT_FILE_VERSION = 1;
+// Version 1: Original format with NewData/OriginalData only
+// Version 2: Added EditMode, DensityDelta, BrushMaterialID for relative edits
+static constexpr uint32 VOXEL_EDIT_FILE_VERSION = 2;
 static constexpr uint32 VOXEL_EDIT_FILE_MAGIC = 0x56455449; // "VETI" - Voxel Edit
 
 UVoxelEditManager::UVoxelEditManager()
@@ -589,7 +591,16 @@ bool UVoxelEditManager::SaveEditsToFile(const FString& FilePath)
 		{
 			const FVoxelEdit& Edit = EditPair.Value;
 
+			// Core position
 			Writer << const_cast<FIntVector&>(Edit.LocalPosition);
+
+			// Edit mode and relative edit data (Version 2+)
+			uint8 EditModeValue = static_cast<uint8>(Edit.EditMode);
+			Writer << EditModeValue;
+			Writer << const_cast<int32&>(Edit.DensityDelta);
+			Writer << const_cast<uint8&>(Edit.BrushMaterialID);
+
+			// Legacy NewData/OriginalData (kept for potential backwards compatibility)
 			Writer << const_cast<uint8&>(Edit.NewData.MaterialID);
 			Writer << const_cast<uint8&>(Edit.NewData.Density);
 			Writer << const_cast<uint8&>(Edit.NewData.BiomeID);
@@ -644,12 +655,14 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 		return false;
 	}
 
-	if (Version != VOXEL_EDIT_FILE_VERSION)
+	if (Version != VOXEL_EDIT_FILE_VERSION && Version != 1)
 	{
-		UE_LOG(LogVoxelEdit, Error, TEXT("LoadEditsFromFile: Unsupported version %d (expected %d)"),
+		UE_LOG(LogVoxelEdit, Error, TEXT("LoadEditsFromFile: Unsupported version %d (expected %d or 1)"),
 			Version, VOXEL_EDIT_FILE_VERSION);
 		return false;
 	}
+
+	const bool bIsVersion2 = (Version >= 2);
 
 	// Clear existing edits
 	ClearAllEdits();
@@ -677,7 +690,20 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 		{
 			FVoxelEdit Edit;
 
+			// Core position
 			Reader << Edit.LocalPosition;
+
+			// Version 2+: Read edit mode and relative edit data
+			if (bIsVersion2)
+			{
+				uint8 EditModeValue = 0;
+				Reader << EditModeValue;
+				Edit.EditMode = static_cast<EEditMode>(EditModeValue);
+				Reader << Edit.DensityDelta;
+				Reader << Edit.BrushMaterialID;
+			}
+
+			// Read NewData/OriginalData (all versions)
 			Reader << Edit.NewData.MaterialID;
 			Reader << Edit.NewData.Density;
 			Reader << Edit.NewData.BiomeID;
@@ -687,7 +713,14 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 			Reader << Edit.OriginalData.BiomeID;
 			Reader << Edit.OriginalData.Metadata;
 
-			Edit.EditMode = EEditMode::Set;
+			// Version 1 fallback: Use Set mode with absolute data
+			if (!bIsVersion2)
+			{
+				Edit.EditMode = EEditMode::Set;
+				Edit.DensityDelta = 0;
+				Edit.BrushMaterialID = Edit.NewData.MaterialID;
+			}
+
 			Edit.Timestamp = FPlatformTime::Seconds();
 
 			Layer->ApplyEdit(Edit);

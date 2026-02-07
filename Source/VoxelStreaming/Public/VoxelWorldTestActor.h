@@ -223,6 +223,18 @@ public:
 	int32 TestBuildAt(FVector WorldLocation, float Radius = 300.0f, uint8 MaterialID = 1);
 
 	/**
+	 * Apply a test brush edit at the specified world location.
+	 * Uses Paint mode to change material without modifying terrain shape.
+	 *
+	 * @param WorldLocation Center of the edit in world space
+	 * @param Radius Brush radius in world units
+	 * @param MaterialID Material to paint
+	 * @return Number of voxels modified
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	int32 TestPaintAt(FVector WorldLocation, float Radius = 300.0f, uint8 MaterialID = 1);
+
+	/**
 	 * Undo the last edit operation.
 	 * @return True if undo was performed
 	 */
@@ -329,6 +341,9 @@ protected:
 
 	/** Previous frame right mouse button state (for press detection) */
 	bool bWasRightMouseDown = false;
+
+	/** Previous frame middle mouse button state (for press detection) */
+	bool bWasMiddleMouseDown = false;
 
 	/** Previous frame mouse wheel value (for delta detection) */
 	float LastMouseWheelDelta = 0.0f;
