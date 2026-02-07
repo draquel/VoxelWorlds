@@ -150,7 +150,7 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		return;
 	}
 
-	// Check if viewer moved enough to warrant collision update
+	// Check if viewer moved enough to warrant full collision update
 	const float DistanceMoved = FVector::Dist(ViewerPosition, LastViewerPosition);
 	if (DistanceMoved > UpdateThreshold || LastViewerPosition.X == FLT_MAX)
 	{
@@ -158,8 +158,43 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		LastViewerPosition = ViewerPosition;
 	}
 
+	// Always process dirty chunks (from edits) even when standing still
+	ProcessDirtyChunks(ViewerPosition);
+
 	// Process cooking queue
 	ProcessCookingQueue();
+}
+
+void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
+{
+	if (!Configuration)
+	{
+		return;
+	}
+
+	const float ChunkWorldSize = Configuration->ChunkSize * Configuration->VoxelSize;
+
+	// Check all collision data for dirty chunks that need regeneration
+	for (auto& Pair : CollisionData)
+	{
+		FChunkCollisionData& Data = Pair.Value;
+
+		if (Data.bNeedsUpdate && !Data.bIsCooking)
+		{
+			// Calculate priority based on distance
+			const FVector ChunkCenter = Configuration->WorldOrigin
+				+ FVector(Data.ChunkCoord) * ChunkWorldSize
+				+ FVector(ChunkWorldSize * 0.5f);
+			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
+			const float Priority = CollisionRadius - Distance + 500.0f; // Dirty chunks get priority boost
+
+			// Request regeneration
+			RequestCollision(Data.ChunkCoord, Priority);
+
+			UE_LOG(LogVoxelCollision, Log, TEXT("Chunk (%d,%d,%d) dirty collision queued for regeneration"),
+				Data.ChunkCoord.X, Data.ChunkCoord.Y, Data.ChunkCoord.Z);
+		}
+	}
 }
 
 // ==================== Dirty Marking ====================
@@ -600,6 +635,13 @@ void UVoxelCollisionManager::StartAsyncCook(const FCollisionCookRequest& Request
 
 	if (bCookSuccess)
 	{
+		// Destroy old collision component if it exists (from previous cook/edit)
+		if (Data.CollisionComponent)
+		{
+			Data.CollisionComponent->DestroyComponent();
+			Data.CollisionComponent = nullptr;
+		}
+
 		// Create collision component to register with physics
 		Data.CollisionComponent = CreateCollisionComponent(Request.ChunkCoord, Data.BodySetup);
 

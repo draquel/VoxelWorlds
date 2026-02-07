@@ -265,6 +265,12 @@ protected:
 	void UpdateCollisionDecisions(const FVector& ViewerPosition);
 
 	/**
+	 * Process dirty chunks that need collision regeneration (from edits).
+	 * Called every frame to ensure edits are reflected in collision promptly.
+	 */
+	void ProcessDirtyChunks(const FVector& ViewerPosition);
+
+	/**
 	 * Process the cooking queue (start new cooks, check completions).
 	 */
 	void ProcessCookingQueue();

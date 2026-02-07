@@ -24,6 +24,7 @@ public class VoxelStreaming : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"InputCore",
 				"VoxelCore",
 				"VoxelLOD",
 				"VoxelRendering",

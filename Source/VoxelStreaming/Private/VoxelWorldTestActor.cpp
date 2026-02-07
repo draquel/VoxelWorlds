@@ -17,6 +17,9 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "DrawDebugHelpers.h"
 #include "Misc/Paths.h"
+#include "GameFramework/PlayerController.h"
+#include "Engine/Canvas.h"
+#include "Engine/Engine.h"
 
 AVoxelWorldTestActor::AVoxelWorldTestActor()
 {
@@ -89,6 +92,18 @@ void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 			DebugStatsTimer = 0.0f;
 			PrintDebugStats();
 		}
+	}
+
+	// Process edit inputs if enabled
+	if (bEnableEditInputs)
+	{
+		ProcessEditInputs();
+	}
+
+	// Draw edit crosshair (can be enabled independently of edit inputs)
+	if (bShowEditCrosshair)
+	{
+		DrawEditCrosshair();
 	}
 }
 
@@ -1006,4 +1021,204 @@ void AVoxelWorldTestActor::PrintCollisionStats()
 	UE_LOG(LogVoxelStreaming, Log, TEXT("  Active collision chunks: %d"), CollisionMgr->GetCollisionChunkCount());
 	UE_LOG(LogVoxelStreaming, Log, TEXT("  Pending cook requests: %d"), CollisionMgr->GetCookQueueCount());
 	UE_LOG(LogVoxelStreaming, Log, TEXT("  Currently cooking: %d"), CollisionMgr->GetCookingCount());
+}
+
+// ==================== Edit Input Processing ====================
+
+void AVoxelWorldTestActor::ProcessEditInputs()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC)
+	{
+		return;
+	}
+
+	// Get current mouse button states
+	const bool bLeftMouseDown = PC->IsInputKeyDown(EKeys::LeftMouseButton);
+	const bool bRightMouseDown = PC->IsInputKeyDown(EKeys::RightMouseButton);
+
+	// Handle mouse wheel for brush radius adjustment using scroll up/down keys
+	const bool bScrollUp = PC->WasInputKeyJustPressed(EKeys::MouseScrollUp);
+	const bool bScrollDown = PC->WasInputKeyJustPressed(EKeys::MouseScrollDown);
+
+	if (bScrollUp || bScrollDown)
+	{
+		// Adjust radius by 10% per scroll tick
+		const float Direction = bScrollUp ? 1.0f : -1.0f;
+		const float RadiusAdjustment = EditBrushRadius * 0.1f * Direction;
+		EditBrushRadius = FMath::Clamp(EditBrushRadius + RadiusAdjustment, 50.0f, 2000.0f);
+
+		// Screen feedback for radius change
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Cyan,
+				FString::Printf(TEXT("Brush Radius: %.0f"), EditBrushRadius));
+		}
+	}
+
+	// Detect button press (transition from not-pressed to pressed)
+	const bool bLeftMousePressed = bLeftMouseDown && !bWasLeftMouseDown;
+	const bool bRightMousePressed = bRightMouseDown && !bWasRightMouseDown;
+
+	// Update previous state
+	bWasLeftMouseDown = bLeftMouseDown;
+	bWasRightMouseDown = bRightMouseDown;
+
+	// Handle edit actions on press
+	if (bLeftMousePressed)
+	{
+		FVector HitLocation;
+		if (TraceTerrainFromCamera(HitLocation))
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("LEFT CLICK: Dig at (%.0f, %.0f, %.0f)"),
+				HitLocation.X, HitLocation.Y, HitLocation.Z);
+			const int32 VoxelsModified = TestDigAt(HitLocation, EditBrushRadius);
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
+					FString::Printf(TEXT("Dig at (%.0f, %.0f, %.0f): %d voxels"),
+						HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified));
+			}
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("LEFT CLICK: No terrain hit"));
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Dig: No terrain under crosshair"));
+			}
+		}
+	}
+
+	if (bRightMousePressed)
+	{
+		FVector HitLocation;
+		if (TraceTerrainFromCamera(HitLocation))
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("RIGHT CLICK: Build at (%.0f, %.0f, %.0f)"),
+				HitLocation.X, HitLocation.Y, HitLocation.Z);
+			const int32 VoxelsModified = TestBuildAt(HitLocation, EditBrushRadius, EditMaterialID);
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green,
+					FString::Printf(TEXT("Build at (%.0f, %.0f, %.0f): %d voxels (Mat %d)"),
+						HitLocation.X, HitLocation.Y, HitLocation.Z, VoxelsModified, EditMaterialID));
+			}
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("RIGHT CLICK: No terrain hit"));
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Red, TEXT("Build: No terrain under crosshair"));
+			}
+		}
+	}
+}
+
+bool AVoxelWorldTestActor::TraceTerrainFromCamera(FVector& OutHitLocation) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC)
+	{
+		return false;
+	}
+
+	// Get camera location and rotation
+	FVector CameraLocation;
+	FRotator CameraRotation;
+	PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
+
+	// Calculate trace end point (very far in camera direction)
+	const FVector TraceDirection = CameraRotation.Vector();
+	const float TraceDistance = 100000.0f;  // 1km trace distance
+	const FVector TraceEnd = CameraLocation + TraceDirection * TraceDistance;
+
+	// Set up trace parameters
+	FCollisionQueryParams QueryParams;
+	QueryParams.bTraceComplex = false;  // Use simple collision for terrain
+	QueryParams.AddIgnoredActor(this);
+
+	// Ignore the player pawn to avoid hitting ourselves
+	if (APawn* PlayerPawn = PC->GetPawn())
+	{
+		QueryParams.AddIgnoredActor(PlayerPawn);
+	}
+
+	// Trace for terrain collision
+	FHitResult HitResult;
+	const bool bHit = World->LineTraceSingleByChannel(
+		HitResult,
+		CameraLocation,
+		TraceEnd,
+		ECC_WorldStatic,
+		QueryParams
+	);
+
+	if (bHit)
+	{
+		OutHitLocation = HitResult.ImpactPoint;
+		return true;
+	}
+
+	return false;
+}
+
+void AVoxelWorldTestActor::DrawEditCrosshair() const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC)
+	{
+		return;
+	}
+
+	// Trace to find target location
+	FVector HitLocation;
+	const bool bHasTarget = TraceTerrainFromCamera(HitLocation);
+
+	// Draw on-screen status text
+	if (GEngine)
+	{
+		const FString StatusText = bHasTarget
+			? FString::Printf(TEXT("[Edit Mode] LMB: Dig | RMB: Build | Wheel: Radius %.0f"), EditBrushRadius)
+			: FString::Printf(TEXT("[Edit Mode] No terrain target | Wheel: Radius %.0f"), EditBrushRadius);
+
+		const FColor TextColor = bHasTarget ? FColor::Cyan : FColor(128, 128, 128);
+		GEngine->AddOnScreenDebugMessage(-2, 0.0f, TextColor, StatusText);
+	}
+
+	// Draw 3D crosshair/target indicator at hit location
+	if (bHasTarget)
+	{
+		const FColor TargetColor = FColor::Cyan;
+
+		// Draw cross lines at target - same size as brush radius
+		DrawDebugLine(World, HitLocation - FVector(EditBrushRadius, 0, 0), HitLocation + FVector(EditBrushRadius, 0, 0),
+			TargetColor, false, 0.0f, 0, 3.0f);
+		DrawDebugLine(World, HitLocation - FVector(0, EditBrushRadius, 0), HitLocation + FVector(0, EditBrushRadius, 0),
+			TargetColor, false, 0.0f, 0, 3.0f);
+		DrawDebugLine(World, HitLocation - FVector(0, 0, EditBrushRadius), HitLocation + FVector(0, 0, EditBrushRadius),
+			TargetColor, false, 0.0f, 0, 3.0f);
+
+		// Draw sphere showing brush radius
+		DrawDebugSphere(World, HitLocation, EditBrushRadius, 24, FColor::Yellow, false, 0.0f, 0, 1.0f);
+	}
 }

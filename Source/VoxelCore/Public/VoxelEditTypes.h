@@ -145,6 +145,14 @@ struct VOXELCORE_API FVoxelEdit
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
 	EEditMode EditMode = EEditMode::Set;
 
+	/** Density delta for Add/Subtract modes (applied to procedural data at merge time) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
+	int32 DensityDelta = 0;
+
+	/** Material ID for Set/Add/Paint modes */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
+	uint8 BrushMaterialID = 1;
+
 	/** Timestamp when edit was applied */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
 	double Timestamp = 0.0;
@@ -158,6 +166,70 @@ struct VOXELCORE_API FVoxelEdit
 		, EditMode(InMode)
 		, Timestamp(FPlatformTime::Seconds())
 	{
+	}
+
+	FVoxelEdit(const FIntVector& InLocalPos, EEditMode InMode, int32 InDensityDelta, uint8 InMaterialID)
+		: LocalPosition(InLocalPos)
+		, EditMode(InMode)
+		, DensityDelta(InDensityDelta)
+		, BrushMaterialID(InMaterialID)
+		, Timestamp(FPlatformTime::Seconds())
+	{
+	}
+
+	/**
+	 * Apply this edit to procedural voxel data.
+	 * Uses EditMode and DensityDelta to compute the merged result.
+	 * @param ProceduralData The original procedural voxel data
+	 * @return The merged voxel data after applying this edit
+	 */
+	FVoxelData ApplyToProceduralData(const FVoxelData& ProceduralData) const
+	{
+		FVoxelData Result = ProceduralData;
+
+		switch (EditMode)
+		{
+		case EEditMode::Set:
+			// Set mode replaces entirely
+			Result = NewData;
+			break;
+
+		case EEditMode::Add:
+			// Add increases density (makes more solid)
+			Result.Density = static_cast<uint8>(FMath::Clamp(
+				static_cast<int32>(ProceduralData.Density) + DensityDelta, 0, 255));
+			// Set material if we're adding solid matter
+			if (Result.Density >= VOXEL_SURFACE_THRESHOLD && ProceduralData.Density < VOXEL_SURFACE_THRESHOLD)
+			{
+				Result.MaterialID = BrushMaterialID;
+			}
+			else if (Result.Density >= VOXEL_SURFACE_THRESHOLD && Result.MaterialID == 0)
+			{
+				Result.MaterialID = BrushMaterialID;
+			}
+			break;
+
+		case EEditMode::Subtract:
+			// Subtract decreases density (makes more air)
+			Result.Density = static_cast<uint8>(FMath::Clamp(
+				static_cast<int32>(ProceduralData.Density) - DensityDelta, 0, 255));
+			break;
+
+		case EEditMode::Paint:
+			// Paint only changes material, not density
+			if (ProceduralData.Density >= VOXEL_SURFACE_THRESHOLD)
+			{
+				Result.MaterialID = BrushMaterialID;
+			}
+			break;
+
+		case EEditMode::Smooth:
+			// Smooth uses pre-computed NewData (calculated from neighbors)
+			Result = NewData;
+			break;
+		}
+
+		return Result;
 	}
 
 	/**

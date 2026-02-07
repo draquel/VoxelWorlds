@@ -299,6 +299,18 @@ protected:
 		EEditMode Mode);
 
 	/**
+	 * Apply a pre-constructed edit internally, tracking it in the current operation.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param LocalPos Local position within chunk
+	 * @param Edit The edit to apply (with DensityDelta for relative edits)
+	 */
+	void ApplyEditInternal(
+		const FIntVector& ChunkCoord,
+		const FIntVector& LocalPos,
+		const FVoxelEdit& Edit);
+
+	/**
 	 * Get the original voxel data at a position (from edit layer or procedural).
 	 * For now, returns air if no edit exists (procedural data not accessible here).
 	 */

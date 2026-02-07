@@ -174,6 +174,32 @@ public:
 	// ==================== Edit System Testing ====================
 
 	/**
+	 * Enable mouse-based terrain editing.
+	 * Left click = Dig, Right click = Build, Mouse wheel = Adjust radius.
+	 * Requires being in PIE with a player controller.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit")
+	bool bEnableEditInputs = false;
+
+	/**
+	 * Current brush radius for mouse-based editing.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit", meta = (ClampMin = "50", ClampMax = "2000", EditCondition = "bEnableEditInputs"))
+	float EditBrushRadius = 300.0f;
+
+	/**
+	 * Material ID for building (right-click).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit", meta = (ClampMin = "1", ClampMax = "255", EditCondition = "bEnableEditInputs"))
+	uint8 EditMaterialID = 1;
+
+	/**
+	 * Show crosshair when edit inputs are enabled.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit", meta = (EditCondition = "bEnableEditInputs"))
+	bool bShowEditCrosshair = true;
+
+	/**
 	 * Apply a test brush edit at the specified world location.
 	 * Uses Subtract mode to dig a hole in the terrain.
 	 *
@@ -254,6 +280,19 @@ protected:
 	/** Destroy the water plane visualization */
 	void DestroyWaterVisualization();
 
+	/** Process edit inputs (called from Tick when bEnableEditInputs is true) */
+	void ProcessEditInputs();
+
+	/**
+	 * Perform a line trace from the camera to find terrain hit location.
+	 * @param OutHitLocation Output hit location in world space
+	 * @return True if terrain was hit
+	 */
+	bool TraceTerrainFromCamera(FVector& OutHitLocation) const;
+
+	/** Draw edit crosshair on screen */
+	void DrawEditCrosshair() const;
+
 protected:
 	/** Chunk manager component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Voxel")
@@ -282,4 +321,15 @@ protected:
 
 	/** Whether the voxel world has been initialized */
 	bool bIsVoxelWorldInitialized = false;
+
+	// ==================== Edit Input State ====================
+
+	/** Previous frame left mouse button state (for press detection) */
+	bool bWasLeftMouseDown = false;
+
+	/** Previous frame right mouse button state (for press detection) */
+	bool bWasRightMouseDown = false;
+
+	/** Previous frame mouse wheel value (for delta detection) */
+	float LastMouseWheelDelta = 0.0f;
 };

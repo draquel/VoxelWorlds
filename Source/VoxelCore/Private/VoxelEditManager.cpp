@@ -318,63 +318,27 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 					continue;
 				}
 
-				// Get original data
-				const FVoxelData OriginalData = GetOriginalVoxelData(ChunkCoord, LocalPos);
+				// Calculate density delta for this voxel (affected by falloff)
+				const int32 DensityChange = FMath::RoundToInt(Brush.DensityDelta * EffectiveStrength);
 
-				// Calculate new data based on edit mode
-				FVoxelData NewData = OriginalData;
-
-				switch (Mode)
+				// Skip if no meaningful change
+				if (DensityChange < 1 && Mode != EEditMode::Paint && Mode != EEditMode::Set)
 				{
-				case EEditMode::Set:
-					NewData.MaterialID = Brush.MaterialID;
-					NewData.Density = 255; // Full solid
-					break;
-
-				case EEditMode::Add:
-					{
-						const int32 DensityChange = FMath::RoundToInt(Brush.DensityDelta * EffectiveStrength);
-						NewData.Density = FMath::Clamp(OriginalData.Density + DensityChange, 0, 255);
-						if (NewData.Density > OriginalData.Density && NewData.MaterialID == 0)
-						{
-							NewData.MaterialID = Brush.MaterialID;
-						}
-					}
-					break;
-
-				case EEditMode::Subtract:
-					{
-						const int32 DensityChange = FMath::RoundToInt(Brush.DensityDelta * EffectiveStrength);
-						NewData.Density = FMath::Clamp(OriginalData.Density - DensityChange, 0, 255);
-					}
-					break;
-
-				case EEditMode::Paint:
-					// Only paint solid voxels
-					if (OriginalData.IsSolid())
-					{
-						NewData.MaterialID = Brush.MaterialID;
-					}
-					else
-					{
-						continue; // Skip air voxels
-					}
-					break;
-
-				case EEditMode::Smooth:
-					// TODO: Implement smoothing (average of neighbors)
-					// For now, just skip
 					continue;
 				}
 
-				// Skip if no change
-				if (NewData == OriginalData)
+				// Create edit with delta values (will be applied to procedural data at merge time)
+				FVoxelEdit Edit(LocalPos, Mode, DensityChange, Brush.MaterialID);
+
+				// For Set mode, pre-compute the NewData since it's absolute
+				if (Mode == EEditMode::Set)
 				{
-					continue;
+					Edit.NewData.MaterialID = Brush.MaterialID;
+					Edit.NewData.Density = 255;
 				}
 
 				// Apply the edit
-				ApplyEditInternal(ChunkCoord, LocalPos, NewData, OriginalData, Mode);
+				ApplyEditInternal(ChunkCoord, LocalPos, Edit);
 				++ModifiedCount;
 			}
 		}
@@ -804,7 +768,10 @@ FIntVector UVoxelEditManager::WorldToChunkCoord(const FVector& WorldPos) const
 		return FIntVector::ZeroValue;
 	}
 
-	return FVoxelCoordinates::WorldToChunk(WorldPos, Configuration->ChunkSize, Configuration->VoxelSize);
+	// Subtract WorldOrigin to get position relative to voxel world
+	const FVector RelativePos = WorldPos - Configuration->WorldOrigin;
+
+	return FVoxelCoordinates::WorldToChunk(RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
 }
 
 FIntVector UVoxelEditManager::WorldToLocalPos(const FVector& WorldPos, const FIntVector& ChunkCoord) const
@@ -818,11 +785,14 @@ FIntVector UVoxelEditManager::WorldToLocalPos(const FVector& WorldPos, const FIn
 	const int32 ChunkSize = Configuration->ChunkSize;
 	const float ChunkWorldSize = ChunkSize * VoxelSize;
 
-	// Chunk origin in world space
+	// Subtract WorldOrigin to get position relative to voxel world
+	const FVector RelativePos = WorldPos - Configuration->WorldOrigin;
+
+	// Chunk origin in voxel world space (relative to WorldOrigin)
 	const FVector ChunkOrigin = FVector(ChunkCoord) * ChunkWorldSize;
 
 	// Offset from chunk origin
-	const FVector LocalOffset = WorldPos - ChunkOrigin;
+	const FVector LocalOffset = RelativePos - ChunkOrigin;
 
 	// Convert to voxel indices
 	return FIntVector(
@@ -843,8 +813,9 @@ FVector UVoxelEditManager::LocalToWorldPos(const FIntVector& ChunkCoord, const F
 	const int32 ChunkSize = Configuration->ChunkSize;
 	const float ChunkWorldSize = ChunkSize * VoxelSize;
 
-	// Chunk origin + local offset + half voxel (center)
-	return FVector(ChunkCoord) * ChunkWorldSize
+	// Chunk origin + local offset + half voxel (center) + WorldOrigin
+	return Configuration->WorldOrigin
+		+ FVector(ChunkCoord) * ChunkWorldSize
 		+ FVector(LocalPos) * VoxelSize
 		+ FVector(VoxelSize * 0.5f);
 }
@@ -873,6 +844,104 @@ void UVoxelEditManager::ApplyEditInternal(
 	if (CurrentOperation.IsValid())
 	{
 		CurrentOperation->AddEdit(Edit, ChunkCoord);
+	}
+
+	// Notify listeners
+	OnChunkEdited.Broadcast(ChunkCoord);
+}
+
+void UVoxelEditManager::ApplyEditInternal(
+	const FIntVector& ChunkCoord,
+	const FIntVector& LocalPos,
+	const FVoxelEdit& Edit)
+{
+	// Create or get edit layer
+	FChunkEditLayer* Layer = GetOrCreateEditLayer(ChunkCoord);
+	if (!Layer)
+	{
+		return;
+	}
+
+	// Make a copy with correct local position
+	FVoxelEdit EditCopy = Edit;
+	EditCopy.LocalPosition = LocalPos;
+
+	// Check for existing edit at this location and accumulate if compatible
+	if (const FVoxelEdit* ExistingEdit = Layer->GetEdit(LocalPos))
+	{
+		// For Add/Subtract modes, accumulate the density delta
+		if ((EditCopy.EditMode == EEditMode::Add || EditCopy.EditMode == EEditMode::Subtract) &&
+			(ExistingEdit->EditMode == EEditMode::Add || ExistingEdit->EditMode == EEditMode::Subtract))
+		{
+			// Convert existing edit's effect to a signed delta
+			int32 ExistingSignedDelta = ExistingEdit->DensityDelta;
+			if (ExistingEdit->EditMode == EEditMode::Subtract)
+			{
+				ExistingSignedDelta = -ExistingSignedDelta;
+			}
+
+			// Convert new edit's effect to a signed delta
+			int32 NewSignedDelta = EditCopy.DensityDelta;
+			if (EditCopy.EditMode == EEditMode::Subtract)
+			{
+				NewSignedDelta = -NewSignedDelta;
+			}
+
+			// Accumulate
+			int32 TotalSignedDelta = ExistingSignedDelta + NewSignedDelta;
+
+			// If edits cancel out to zero, remove the edit entirely
+			// This reverts the voxel to pure procedural state
+			if (TotalSignedDelta == 0)
+			{
+				Layer->RemoveEdit(LocalPos);
+
+				// Track removal in current operation if active
+				if (CurrentOperation.IsValid())
+				{
+					// Store a "removal" edit for undo purposes
+					FVoxelEdit RemovalEdit = *ExistingEdit;
+					RemovalEdit.DensityDelta = 0;
+					CurrentOperation->AddEdit(RemovalEdit, ChunkCoord);
+				}
+
+				// Notify listeners that chunk changed
+				OnChunkEdited.Broadcast(ChunkCoord);
+				return;
+			}
+
+			// Store as unsigned delta with appropriate mode
+			if (TotalSignedDelta > 0)
+			{
+				EditCopy.EditMode = EEditMode::Add;
+				EditCopy.DensityDelta = TotalSignedDelta;
+			}
+			else
+			{
+				EditCopy.EditMode = EEditMode::Subtract;
+				EditCopy.DensityDelta = -TotalSignedDelta;
+			}
+
+			// Keep material from whichever edit is adding material
+			if (Edit.EditMode == EEditMode::Add)
+			{
+				EditCopy.BrushMaterialID = Edit.BrushMaterialID;
+			}
+			else if (ExistingEdit->EditMode == EEditMode::Add)
+			{
+				EditCopy.BrushMaterialID = ExistingEdit->BrushMaterialID;
+			}
+		}
+		// For Set mode or mixed modes, the new edit replaces (current behavior)
+	}
+
+	// Apply to layer
+	Layer->ApplyEdit(EditCopy);
+
+	// Track in current operation if active
+	if (CurrentOperation.IsValid())
+	{
+		CurrentOperation->AddEdit(EditCopy, ChunkCoord);
 	}
 
 	// Notify listeners
