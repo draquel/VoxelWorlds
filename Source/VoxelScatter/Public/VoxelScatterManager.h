@@ -258,6 +258,11 @@ public:
 	void DrawDebugVisualization(UWorld* World) const;
 
 	/**
+	 * Get approximate total memory usage of scatter system in bytes.
+	 */
+	int64 GetTotalMemoryUsage() const;
+
+	/**
 	 * Get statistics for debugging.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Debug")

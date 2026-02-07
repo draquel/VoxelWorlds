@@ -555,6 +555,51 @@ void UVoxelScatterManager::DrawDebugVisualization(UWorld* World) const
 #endif
 }
 
+int64 UVoxelScatterManager::GetTotalMemoryUsage() const
+{
+	int64 Total = sizeof(UVoxelScatterManager);
+
+	// Surface data cache
+	Total += SurfaceDataCache.GetAllocatedSize();
+	for (const auto& Pair : SurfaceDataCache)
+	{
+		Total += Pair.Value.GetAllocatedSize();
+	}
+
+	// Scatter data cache
+	Total += ScatterDataCache.GetAllocatedSize();
+	for (const auto& Pair : ScatterDataCache)
+	{
+		Total += Pair.Value.GetAllocatedSize();
+	}
+
+	// Pending generation queue
+	Total += PendingGenerationQueue.GetAllocatedSize();
+	for (const auto& Pending : PendingGenerationQueue)
+	{
+		Total += Pending.Positions.GetAllocatedSize()
+			+ Pending.Normals.GetAllocatedSize()
+			+ Pending.UV1s.GetAllocatedSize()
+			+ Pending.Colors.GetAllocatedSize();
+	}
+	Total += PendingQueueSet.GetAllocatedSize();
+
+	// Cleared volumes
+	Total += ClearedVolumesPerChunk.GetAllocatedSize();
+	for (const auto& Pair : ClearedVolumesPerChunk)
+	{
+		Total += Pair.Value.GetAllocatedSize();
+	}
+
+	// Scatter renderer
+	if (ScatterRenderer)
+	{
+		Total += ScatterRenderer->GetTotalMemoryUsage();
+	}
+
+	return Total;
+}
+
 FScatterStatistics UVoxelScatterManager::GetStatistics() const
 {
 	FScatterStatistics Stats;

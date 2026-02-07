@@ -125,6 +125,7 @@ public:
 	virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override;
 	virtual int32 GetLoadedChunkCount() const override;
 	virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override;
+	virtual int64 GetCPUMemoryUsage() const override;
 	virtual int64 GetGPUMemoryUsage() const override;
 	virtual int64 GetTotalVertexCount() const override;
 	virtual int64 GetTotalTriangleCount() const override;

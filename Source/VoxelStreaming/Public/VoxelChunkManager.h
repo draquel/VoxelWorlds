@@ -313,6 +313,45 @@ public:
 		int32 LODLevel,
 		FChunkMeshData& OutMeshData);
 
+	// ==================== Performance Stats ====================
+
+	/** Voxel-specific memory breakdown */
+	struct FVoxelMemoryStats
+	{
+		int64 VoxelDataBytes = 0;      // ChunkStates voxel data
+		int64 EditDataBytes = 0;       // Edit manager memory
+		int64 RendererCPUBytes = 0;    // Renderer CPU-side memory
+		int64 RendererGPUBytes = 0;    // Renderer GPU memory
+		int64 CollisionBytes = 0;      // Collision manager memory
+		int64 ScatterBytes = 0;        // Scatter manager + renderer memory
+		int64 TotalBytes = 0;          // Sum of above
+	};
+
+	/** Per-system timing breakdown (milliseconds) */
+	struct FVoxelTimingStats
+	{
+		float GenerationMs = 0.0f;
+		float MeshingMs = 0.0f;
+		float RenderSubmitMs = 0.0f;
+		float CollisionMs = 0.0f;
+		float ScatterMs = 0.0f;
+		float LODMs = 0.0f;
+		float StreamingMs = 0.0f;
+		float TotalMs = 0.0f;
+	};
+
+	/** Get voxel-specific memory usage breakdown */
+	FVoxelMemoryStats GetVoxelMemoryStats() const;
+
+	/** Get per-system timing stats from last frame */
+	const FVoxelTimingStats& GetTimingStats() const { return LastTimingStats; }
+
+	/** Get effective (adaptive) throttle values */
+	int32 GetEffectiveMaxAsyncMeshTasks() const { return EffectiveMaxAsyncMeshTasks; }
+	int32 GetEffectiveMaxLODRemeshPerFrame() const { return EffectiveMaxLODRemeshPerFrame; }
+	int32 GetEffectiveMaxPendingMeshes() const { return EffectiveMaxPendingMeshes; }
+	bool AreSubsystemsDeferred() const { return bSubsystemsDeferred; }
+
 	// ==================== Debug ====================
 
 	/**
@@ -388,9 +427,17 @@ protected:
 	void ProcessUnloadQueue(int32 MaxChunks);
 
 	/**
-	 * Update LOD transitions for loaded chunks.
+	 * Evaluate LOD level changes for loaded chunks and queue remeshes.
+	 * Separated from morph updates so it can run when queues drain,
+	 * not just when the viewer moves.
 	 */
-	void UpdateLODTransitions(const FLODQueryContext& Context);
+	void EvaluateLODLevelChanges(const FLODQueryContext& Context);
+
+	/**
+	 * Update LOD morph factors for loaded chunks.
+	 * Only morph factor interpolation — no level change detection.
+	 */
+	void UpdateLODMorphFactors(const FLODQueryContext& Context);
 
 	// ==================== Chunk State Management ====================
 
@@ -580,8 +627,15 @@ protected:
 	bool bForceStreamingUpdate = false;
 
 	/**
-	 * Threshold for LOD update position delta (squared for efficient comparison).
-	 * LOD morph factors should update when viewer moves ~100 units.
+	 * Flag indicating that a LOD level sweep is pending.
+	 * Set when all queues drain to zero, cleared after a successful sweep
+	 * discovers no new work. Ensures stationary viewers eventually get correct LOD.
+	 */
+	bool bPendingLODSweep = false;
+
+	/**
+	 * Threshold for LOD morph factor update position delta (squared).
+	 * Morph factors should update when viewer moves ~100 units.
 	 */
 	static constexpr float LODUpdateThresholdSq = 100.0f * 100.0f;  // 100 units
 
@@ -620,8 +674,7 @@ protected:
 	/** Queue of meshes waiting to be uploaded to renderer */
 	TArray<FPendingMeshData> PendingMeshQueue;
 
-	/** Maximum pending meshes before throttling generation - keep low to avoid render job overflow */
-	static constexpr int32 MaxPendingMeshes = 4;
+	/** Note: MaxPendingMeshes is now in VoxelWorldConfiguration; runtime value in EffectiveMaxPendingMeshes */
 
 	// ==================== Async Mesh Generation ====================
 
@@ -640,8 +693,7 @@ protected:
 	/** Set of chunks currently being meshed asynchronously */
 	TSet<FIntVector> AsyncMeshingInProgress;
 
-	/** Maximum concurrent async mesh tasks */
-	static constexpr int32 MaxAsyncMeshTasks = 4;
+	/** Note: MaxAsyncMeshTasks is now in VoxelWorldConfiguration; runtime value in EffectiveMaxAsyncMeshTasks */
 
 	/** Process completed async mesh tasks (called from game thread) */
 	void ProcessCompletedAsyncMeshes();
@@ -662,4 +714,22 @@ protected:
 	/** Scatter manager for vegetation placement */
 	UPROPERTY()
 	TObjectPtr<UVoxelScatterManager> ScatterManager;
+
+	// ==================== Adaptive Throttling State ====================
+
+	/** Effective throttle values (adjusted by adaptive throttling) */
+	int32 EffectiveMaxAsyncMeshTasks = 4;
+	int32 EffectiveMaxLODRemeshPerFrame = 1;
+	int32 EffectiveMaxPendingMeshes = 4;
+
+	/** Smoothed frame time for stable throttle decisions (EMA) */
+	float SmoothedFrameTimeMs = 16.67f;
+
+	/** Whether collision/scatter updates are deferred due to heavy gen queue */
+	bool bSubsystemsDeferred = false;
+
+	// ==================== Per-Frame Timing ====================
+
+	/** Timing stats from last frame */
+	FVoxelTimingStats LastTimingStats;
 };

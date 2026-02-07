@@ -1681,21 +1681,26 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 	const int32 LoadedChunks = ChunkManager->GetLoadedChunkCount();
 	const int32 TotalTracked = ChunkManager->GetTotalChunkCount();
 
-	// Get memory usage (approximate - UE doesn't expose exact GPU memory easily)
-	const SIZE_T UsedPhysical = FPlatformMemory::GetStats().UsedPhysical;
-	const float UsedMB = static_cast<float>(UsedPhysical) / (1024.0f * 1024.0f);
+	// Voxel-specific memory stats
+	const auto MemStats = ChunkManager->GetVoxelMemoryStats();
+	const float VoxelMB = static_cast<float>(MemStats.TotalBytes) / (1024.0f * 1024.0f);
 
-	// Phase 7 targets
+	// Process memory for reference
+	const SIZE_T UsedPhysical = FPlatformMemory::GetStats().UsedPhysical;
+	const float ProcessMB = static_cast<float>(UsedPhysical) / (1024.0f * 1024.0f);
+
+	// Targets
 	const int32 TargetChunks = 1000;
 	const float TargetFPS = 60.0f;
-	const float TargetMemoryMB = 250.0f;
+	const float TargetVoxelMemoryMB = 400.0f;
 
-	// Color coding based on meeting targets
+	// Color coding
 	const FColor ChunkColor = LoadedChunks >= TargetChunks ? FColor::Green : FColor::Yellow;
 	const FColor FPSColor = FPS >= TargetFPS ? FColor::Green : (FPS >= 30.0f ? FColor::Yellow : FColor::Red);
+	const FColor MemColor = VoxelMB < TargetVoxelMemoryMB ? FColor::Green : FColor::Yellow;
 
 	// Build HUD text
-	int32 LineKey = -100; // Start at -100 to avoid conflicts with edit crosshair messages
+	int32 LineKey = -100;
 
 	// Title
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::Cyan, TEXT("=== VOXEL PERFORMANCE HUD ==="));
@@ -1703,6 +1708,13 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 	// FPS / Frame Time
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FPSColor,
 		FString::Printf(TEXT("FPS: %.1f (%.2f ms) [Target: %.0f]"), FPS, FrameTimeMs, TargetFPS));
+
+	// Per-system timing
+	const auto& Timing = ChunkManager->GetTimingStats();
+	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
+		FString::Printf(TEXT("  Gen=%.1fms Mesh=%.1fms Render=%.1fms Coll=%.1fms Scat=%.1fms LOD=%.1fms"),
+			Timing.GenerationMs, Timing.MeshingMs, Timing.RenderSubmitMs,
+			Timing.CollisionMs, Timing.ScatterMs, Timing.LODMs));
 
 	// Chunks
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, ChunkColor,
@@ -1714,25 +1726,56 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
 		FString::Printf(TEXT("Queues: Gen=%d, Mesh=%d"), GenQueue, MeshQueue));
 
-	// Memory
-	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, UsedMB < TargetMemoryMB ? FColor::Green : FColor::Yellow,
-		FString::Printf(TEXT("Memory: %.0f MB [Target: <%.0f MB]"), UsedMB, TargetMemoryMB));
+	// Voxel-specific memory breakdown
+	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, MemColor,
+		FString::Printf(TEXT("Voxel Memory: %.0f MB [Target: <%.0f MB]"), VoxelMB, TargetVoxelMemoryMB));
+	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
+		FString::Printf(TEXT("  VoxelData=%.1fMB Edit=%.1fMB CPU=%.1fMB GPU=%.1fMB Coll=%.1fMB Scat=%.1fMB"),
+			MemStats.VoxelDataBytes / (1024.0f * 1024.0f),
+			MemStats.EditDataBytes / (1024.0f * 1024.0f),
+			MemStats.RendererCPUBytes / (1024.0f * 1024.0f),
+			MemStats.RendererGPUBytes / (1024.0f * 1024.0f),
+			MemStats.CollisionBytes / (1024.0f * 1024.0f),
+			MemStats.ScatterBytes / (1024.0f * 1024.0f)));
+	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor(128, 128, 128),
+		FString::Printf(TEXT("  Process Total: %.0f MB (includes UE Editor)"), ProcessMB));
+
+	// Adaptive throttle state
+	{
+		const int32 EffAsync = ChunkManager->GetEffectiveMaxAsyncMeshTasks();
+		const int32 EffLOD = ChunkManager->GetEffectiveMaxLODRemeshPerFrame();
+		const int32 EffPending = ChunkManager->GetEffectiveMaxPendingMeshes();
+		const bool bDeferred = ChunkManager->AreSubsystemsDeferred();
+
+		UVoxelWorldConfiguration* Config = ChunkManager->GetConfiguration();
+		const int32 CfgAsync = Config ? Config->MaxAsyncMeshTasks : 4;
+		const int32 CfgLOD = Config ? Config->MaxLODRemeshPerFrame : 1;
+		const int32 CfgPending = Config ? Config->MaxPendingMeshes : 4;
+
+		const bool bThrottled = (EffAsync < CfgAsync || EffLOD < CfgLOD || EffPending < CfgPending);
+		const FColor ThrottleColor = bThrottled ? FColor::Yellow : FColor::White;
+		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, ThrottleColor,
+			FString::Printf(TEXT("Throttle: Async=%d/%d LODRemesh=%d/%d Pending=%d/%d%s"),
+				EffAsync, CfgAsync, EffLOD, CfgLOD, EffPending, CfgPending,
+				bDeferred ? TEXT(" [DEFERRED]") : TEXT("")));
+	}
 
 	// Scatter stats (if available)
-	if (UVoxelScatterManager* ScatterManager = ChunkManager->GetScatterManager())
+	if (UVoxelScatterManager* ScatterMgr = ChunkManager->GetScatterManager())
 	{
-		const FScatterStatistics Stats = ScatterManager->GetStatistics();
-		const int32 PendingScatter = ScatterManager->GetPendingGenerationCount();
+		const FScatterStatistics Stats = ScatterMgr->GetStatistics();
+		const int32 PendingScatter = ScatterMgr->GetPendingGenerationCount();
 		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
 			FString::Printf(TEXT("Scatter: %d chunks, %lld instances, Pending=%d"),
 				Stats.ChunksWithScatter, Stats.TotalSpawnPoints, PendingScatter));
 	}
 
 	// Collision stats (if available)
-	if (UVoxelCollisionManager* CollisionManager = ChunkManager->GetCollisionManager())
+	if (UVoxelCollisionManager* CollMgr = ChunkManager->GetCollisionManager())
 	{
 		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-			FString::Printf(TEXT("Collision: %s"), *CollisionManager->GetDebugStats()));
+			FString::Printf(TEXT("Collision: %d chunks, Queue=%d, Cooking=%d"),
+				CollMgr->GetCollisionChunkCount(), CollMgr->GetCookQueueCount(), CollMgr->GetCookingCount()));
 	}
 
 	// Separator

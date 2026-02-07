@@ -400,6 +400,11 @@ void FVoxelPMCRenderer::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
 	}
 }
 
+int64 FVoxelPMCRenderer::GetCPUMemoryUsage() const
+{
+	return static_cast<int64>(TotalMemoryUsage);
+}
+
 int64 FVoxelPMCRenderer::GetGPUMemoryUsage() const
 {
 	// PMC uploads to GPU, so memory usage is roughly the same

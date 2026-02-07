@@ -55,6 +55,48 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	++CurrentFrame;
 
+	const double TickStartTime = FPlatformTime::Seconds();
+	FVoxelTimingStats Timing;
+
+	// === Adaptive Throttling: update smoothed frame time ===
+	{
+		const float FrameTimeMs = DeltaTime * 1000.0f;
+		constexpr float Alpha = 0.1f;
+		SmoothedFrameTimeMs = SmoothedFrameTimeMs + Alpha * (FrameTimeMs - SmoothedFrameTimeMs);
+
+		const float TargetFPS = Configuration ? Configuration->TargetFrameRate : 60.0f;
+		const bool bAdaptive = Configuration ? Configuration->bAdaptiveThrottling : true;
+		const int32 ConfigMaxAsync = Configuration ? Configuration->MaxAsyncMeshTasks : 4;
+		const int32 ConfigMaxLODRemesh = Configuration ? Configuration->MaxLODRemeshPerFrame : 1;
+		const int32 ConfigMaxPending = Configuration ? Configuration->MaxPendingMeshes : 4;
+
+		if (bAdaptive && TargetFPS > 0.0f)
+		{
+			const float TargetMs = 1000.0f / TargetFPS;
+			if (SmoothedFrameTimeMs > TargetMs * 1.2f)
+			{
+				// Over budget: halve effective limits (min 1)
+				EffectiveMaxAsyncMeshTasks = FMath::Max(1, ConfigMaxAsync / 2);
+				EffectiveMaxLODRemeshPerFrame = FMath::Max(1, ConfigMaxLODRemesh / 2);
+				EffectiveMaxPendingMeshes = FMath::Max(2, ConfigMaxPending / 2);
+			}
+			else if (SmoothedFrameTimeMs < TargetMs * 0.8f)
+			{
+				// Under budget: restore configured limits
+				EffectiveMaxAsyncMeshTasks = ConfigMaxAsync;
+				EffectiveMaxLODRemeshPerFrame = ConfigMaxLODRemesh;
+				EffectiveMaxPendingMeshes = ConfigMaxPending;
+			}
+			// else: in the 80-120% band, keep current values
+		}
+		else
+		{
+			EffectiveMaxAsyncMeshTasks = ConfigMaxAsync;
+			EffectiveMaxLODRemeshPerFrame = ConfigMaxLODRemesh;
+			EffectiveMaxPendingMeshes = ConfigMaxPending;
+		}
+	}
+
 	// Build query context from camera state
 	FLODQueryContext Context = BuildQueryContext();
 
@@ -70,10 +112,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	const FIntVector CurrentViewerChunk = WorldToChunkCoord(Context.ViewerPosition);
 
 	// Determine if we need to update streaming decisions
-	// Only update when:
-	// 1. Force flag is set
-	// 2. Viewer moved to a different chunk
-	// 3. This is the first update (CachedViewerChunk is at sentinel value)
 	const bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
 	const bool bNeedStreamingUpdate = bForceStreamingUpdate || bViewerChunkChanged;
 
@@ -83,10 +121,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		LODStrategy->Update(Context, DeltaTime);
 	}
 
-	// Update LOAD decisions only when viewer chunk changes (expensive operation)
+	// === Streaming decisions ===
+	double SectionStart = FPlatformTime::Seconds();
 	if (bNeedStreamingUpdate)
 	{
-		// Clear the force flag BEFORE UpdateStreamingDecisions - it may set it again if more chunks remain
 		const bool bWasForced = bForceStreamingUpdate;
 		bForceStreamingUpdate = false;
 
@@ -94,7 +132,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		CachedViewerChunk = CurrentViewerChunk;
 		LastStreamingUpdatePosition = Context.ViewerPosition;
 
-		// Debug: Log when streaming decisions are updated
 		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Streaming update: ViewerChunk=(%d,%d,%d), WasForced=%s, ContinueNextFrame=%s"),
 			CurrentViewerChunk.X, CurrentViewerChunk.Y, CurrentViewerChunk.Z,
 			bWasForced ? TEXT("Yes") : TEXT("No"),
@@ -103,20 +140,23 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// ALWAYS update UNLOAD decisions (cheap operation, prevents orphaned chunks)
 	UpdateUnloadDecisions(Context);
+	Timing.StreamingMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
-	// Process queues (time-sliced)
+	// === Generation queue ===
+	SectionStart = FPlatformTime::Seconds();
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
 	ProcessGenerationQueue(TimeSlice * 0.4f);
+	Timing.GenerationMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+
+	// === Meshing queue ===
+	SectionStart = FPlatformTime::Seconds();
 	ProcessMeshingQueue(TimeSlice * 0.4f);
-
-	// Process completed async mesh tasks (moves results to PendingMeshQueue)
 	ProcessCompletedAsyncMeshes();
+	Timing.MeshingMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
-	// Submit pending meshes to renderer
-	// With batched render operations, multiple submits are consolidated into one render command
-	// so we can process more per frame without overwhelming the render thread
+	// === Render submit ===
+	SectionStart = FPlatformTime::Seconds();
 	const int32 MaxRenderSubmitsPerFrame = Configuration ? Configuration->MaxChunksToLoadPerFrame : 8;
-
 	if (PendingMeshQueue.Num() > 0)
 	{
 		int32 RenderSubmitCount = 0;
@@ -128,43 +168,80 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		}
 	}
 
-	// Process unloads - with batched operations we can handle more per frame
 	const int32 MaxUnloadsPerFrame = Configuration ? Configuration->MaxChunksToUnloadPerFrame : 8;
 	ProcessUnloadQueue(MaxUnloadsPerFrame);
+	Timing.RenderSubmitMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
-	// Update LOD transitions only if viewer moved significantly
-	// This reduces LOD morph factor calculations when stationary or moving slowly
-	const float PositionDeltaSq = FVector::DistSquared(Context.ViewerPosition, LastLODUpdatePosition);
-	if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq)
+	// === LOD level changes and morph factor updates ===
+	SectionStart = FPlatformTime::Seconds();
 	{
-		UpdateLODTransitions(Context);
-		LastLODUpdatePosition = Context.ViewerPosition;
-	}
+		// Detect when all queues drain — signal that a LOD sweep is needed
+		const bool bQueuesEmpty = GenerationQueue.Num() == 0
+			&& MeshingQueue.Num() == 0
+			&& AsyncMeshingInProgress.Num() == 0
+			&& PendingMeshQueue.Num() == 0;
 
-	// Update collision manager
-	if (CollisionManager && Configuration && Configuration->bGenerateCollision)
+		if (bQueuesEmpty && !bPendingLODSweep)
+		{
+			bPendingLODSweep = true;
+		}
+
+		// LOD level evaluation: runs on viewer chunk change OR pending sweep
+		if (bViewerChunkChanged || bPendingLODSweep)
+		{
+			EvaluateLODLevelChanges(Context);
+
+			// Clear sweep flag only if queues are still empty after evaluation
+			// (no new work was generated)
+			if (bPendingLODSweep && bQueuesEmpty && MeshingQueue.Num() == 0)
+			{
+				bPendingLODSweep = false;
+			}
+		}
+
+		// Morph factor updates: gated by movement threshold
+		const float PositionDeltaSq = FVector::DistSquared(Context.ViewerPosition, LastLODUpdatePosition);
+		if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq)
+		{
+			UpdateLODMorphFactors(Context);
+			LastLODUpdatePosition = Context.ViewerPosition;
+		}
+	}
+	Timing.LODMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+
+	// === Subsystem deferral check ===
+	const int32 DeferThreshold = Configuration ? Configuration->DeferSubsystemsThreshold : 20;
+	bSubsystemsDeferred = (DeferThreshold > 0 && GenerationQueue.Num() > DeferThreshold);
+
+	// === Collision manager ===
+	SectionStart = FPlatformTime::Seconds();
+	if (!bSubsystemsDeferred && CollisionManager && Configuration && Configuration->bGenerateCollision)
 	{
 		CollisionManager->Update(Context.ViewerPosition, DeltaTime);
 	}
+	Timing.CollisionMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
-	// Update scatter manager
-	if (ScatterManager && Configuration && Configuration->bEnableScatter)
+	// === Scatter manager ===
+	SectionStart = FPlatformTime::Seconds();
+	if (!bSubsystemsDeferred && ScatterManager && Configuration && Configuration->bEnableScatter)
 	{
 		ScatterManager->Update(Context.ViewerPosition, DeltaTime);
 
-		// Draw debug visualization if enabled
 		if (Configuration->bScatterDebugVisualization)
 		{
 			ScatterManager->DrawDebugVisualization(GetWorld());
 		}
 	}
+	Timing.ScatterMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
 	// Flush all pending render operations as a single batched command
-	// This consolidates all chunk adds/removes into one render command per frame
 	if (MeshRenderer)
 	{
 		MeshRenderer->FlushPendingOperations();
 	}
+
+	Timing.TotalMs = static_cast<float>((FPlatformTime::Seconds() - TickStartTime) * 1000.0);
+	LastTimingStats = Timing;
 }
 
 // ==================== Initialization ====================
@@ -225,6 +302,15 @@ void UVoxelChunkManager::Initialize(
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
+	bPendingLODSweep = false;
+
+	// Reset adaptive throttle state
+	SmoothedFrameTimeMs = 16.67f;
+	bSubsystemsDeferred = false;
+	EffectiveMaxAsyncMeshTasks = Configuration->MaxAsyncMeshTasks;
+	EffectiveMaxLODRemeshPerFrame = Configuration->MaxLODRemeshPerFrame;
+	EffectiveMaxPendingMeshes = Configuration->MaxPendingMeshes;
+	LastTimingStats = FVoxelTimingStats();
 
 	// Create generation components
 	FWorldModeTerrainParams TerrainParams;
@@ -411,6 +497,8 @@ void UVoxelChunkManager::Shutdown()
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
+	bPendingLODSweep = false;
+	bSubsystemsDeferred = false;
 
 	// Clean up LOD strategy (we own it)
 	if (LODStrategy)
@@ -664,6 +752,47 @@ FString UVoxelChunkManager::GetDebugStats() const
 		Stats += TEXT("\n");
 		Stats += LODStrategy->GetDebugInfo();
 	}
+
+	return Stats;
+}
+
+UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() const
+{
+	FVoxelMemoryStats Stats;
+
+	// Voxel data in chunk states
+	for (const auto& Pair : ChunkStates)
+	{
+		Stats.VoxelDataBytes += Pair.Value.Descriptor.GetMemoryUsage();
+	}
+
+	// Edit manager
+	if (EditManager)
+	{
+		Stats.EditDataBytes = static_cast<int64>(EditManager->GetMemoryUsage());
+	}
+
+	// Renderer
+	if (MeshRenderer)
+	{
+		Stats.RendererCPUBytes = MeshRenderer->GetCPUMemoryUsage();
+		Stats.RendererGPUBytes = MeshRenderer->GetGPUMemoryUsage();
+	}
+
+	// Collision
+	if (CollisionManager)
+	{
+		Stats.CollisionBytes = CollisionManager->GetTotalMemoryUsage();
+	}
+
+	// Scatter
+	if (ScatterManager)
+	{
+		Stats.ScatterBytes = ScatterManager->GetTotalMemoryUsage();
+	}
+
+	Stats.TotalBytes = Stats.VoxelDataBytes + Stats.EditDataBytes + Stats.RendererCPUBytes
+		+ Stats.RendererGPUBytes + Stats.CollisionBytes + Stats.ScatterBytes;
 
 	return Stats;
 }
@@ -1044,11 +1173,11 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 	}
 
 	// Throttle if too many async tasks in flight or pending queue is full
-	if (AsyncMeshingInProgress.Num() >= MaxAsyncMeshTasks)
+	if (AsyncMeshingInProgress.Num() >= EffectiveMaxAsyncMeshTasks)
 	{
 		return;
 	}
-	if (PendingMeshQueue.Num() >= MaxPendingMeshes)
+	if (PendingMeshQueue.Num() >= EffectiveMaxPendingMeshes)
 	{
 		return;
 	}
@@ -1058,8 +1187,8 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 	int32 ProcessedCount = 0;
 
 	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxChunks &&
-	       AsyncMeshingInProgress.Num() < MaxAsyncMeshTasks &&
-	       PendingMeshQueue.Num() < MaxPendingMeshes)
+	       AsyncMeshingInProgress.Num() < EffectiveMaxAsyncMeshTasks &&
+	       PendingMeshQueue.Num() < EffectiveMaxPendingMeshes)
 	{
 		// Skip chunks already being meshed asynchronously
 		if (AsyncMeshingInProgress.Contains(MeshingQueue[0].ChunkCoord))
@@ -1380,25 +1509,20 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 	}
 }
 
-void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
+void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context)
 {
 	if (!LODStrategy || !MeshRenderer)
 	{
 		return;
 	}
 
-	// Skip LOD transition processing when LOD system is completely disabled
 	if (Configuration && !Configuration->bEnableLOD)
 	{
 		return;
 	}
 
-	// Note: For cubic mode, bEnableLOD is true but bEnableLODMorphing is false.
-	// LOD level changes still trigger remeshing, but morph factors stay at 0.
-
-	// Throttle LOD remeshing to prevent overwhelming the render system
-	// Keep this low to avoid Non-Nanite job queue overflow
-	constexpr int32 MaxLODRemeshPerFrame = 1;
+	// Use effective (adaptive) throttle value
+	const int32 MaxLODRemesh = EffectiveMaxLODRemeshPerFrame;
 
 	// Count how many chunks are already pending remesh
 	int32 CurrentPendingRemesh = 0;
@@ -1413,30 +1537,24 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 		}
 	}
 
-	// Batch update morph factors
-	TArray<TPair<FIntVector, float>> Transitions;
-
-	// Track chunks that need remeshing due to LOD level changes, with priority info
+	// Track chunks that need remeshing due to LOD level changes
 	struct FLODRemeshCandidate
 	{
 		FIntVector ChunkCoord;
 		int32 NewLODLevel;
 		float Distance;
-		bool bIsUpgrade; // true if going to finer LOD (higher priority)
+		bool bIsUpgrade;
 	};
 	TArray<FLODRemeshCandidate> RemeshCandidates;
 
 	for (const FIntVector& ChunkCoord : LoadedChunkCoords)
 	{
-		const float NewMorphFactor = LODStrategy->GetLODMorphFactor(ChunkCoord, Context);
 		const int32 NewLODLevel = LODStrategy->GetLODForChunk(ChunkCoord, Context);
 
 		if (FVoxelChunkState* State = ChunkStates.Find(ChunkCoord))
 		{
-			// Check if LOD level changed - this requires remeshing
 			if (State->LODLevel != NewLODLevel)
 			{
-				// Calculate distance for prioritization (includes WorldOrigin)
 				const float ChunkWorldSize = Configuration ? Configuration->GetChunkWorldSize() : 3200.0f;
 				const FVector WorldOrigin = Configuration ? Configuration->WorldOrigin : FVector::ZeroVector;
 				const FVector ChunkCenter = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
@@ -1446,35 +1564,26 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 				Candidate.ChunkCoord = ChunkCoord;
 				Candidate.NewLODLevel = NewLODLevel;
 				Candidate.Distance = Distance;
-				Candidate.bIsUpgrade = NewLODLevel < State->LODLevel; // Lower LOD number = higher detail
+				Candidate.bIsUpgrade = NewLODLevel < State->LODLevel;
 
 				RemeshCandidates.Add(Candidate);
-			}
-
-			// Update morph factor
-			if (FMath::Abs(State->MorphFactor - NewMorphFactor) > 0.01f)
-			{
-				State->MorphFactor = NewMorphFactor;
-				Transitions.Add(TPair<FIntVector, float>(ChunkCoord, NewMorphFactor));
 			}
 		}
 	}
 
-	// Sort candidates: prioritize LOD upgrades (finer detail), then by distance (closer first)
+	// Sort: upgrades first, then closer chunks first
 	RemeshCandidates.Sort([](const FLODRemeshCandidate& A, const FLODRemeshCandidate& B)
 	{
-		// Upgrades (finer LOD) take priority over downgrades
 		if (A.bIsUpgrade != B.bIsUpgrade)
 		{
-			return A.bIsUpgrade; // true (upgrade) comes before false (downgrade)
+			return A.bIsUpgrade;
 		}
-		// Within same category, closer chunks first
 		return A.Distance < B.Distance;
 	});
 
 	// Queue limited number of remeshes per frame
 	int32 QueuedThisFrame = 0;
-	const int32 MaxToQueue = FMath::Max(0, MaxLODRemeshPerFrame - CurrentPendingRemesh);
+	const int32 MaxToQueue = FMath::Max(0, MaxLODRemesh - CurrentPendingRemesh);
 
 	for (const FLODRemeshCandidate& Candidate : RemeshCandidates)
 	{
@@ -1485,22 +1594,17 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 
 		if (FVoxelChunkState* State = ChunkStates.Find(Candidate.ChunkCoord))
 		{
-			// Only queue if chunk is in Loaded state (not already being processed)
 			if (State->State == EChunkState::Loaded)
 			{
-				// Update the stored LOD level
 				State->LODLevel = Candidate.NewLODLevel;
 
 				FChunkLODRequest Request;
 				Request.ChunkCoord = Candidate.ChunkCoord;
 				Request.LODLevel = Candidate.NewLODLevel;
-				// Higher priority for upgrades and closer chunks
 				Request.Priority = (Candidate.bIsUpgrade ? 100.0f : 50.0f) + (10000.0f / FMath::Max(Candidate.Distance, 1.0f));
 
-				// O(1) duplicate check + sorted insertion
 				if (AddToMeshingQueue(Request))
 				{
-					// IMPORTANT: Set state to PendingMeshing so ProcessMeshingQueue will process it
 					SetChunkState(Candidate.ChunkCoord, EChunkState::PendingMeshing);
 					++QueuedThisFrame;
 
@@ -1513,11 +1617,39 @@ void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context)
 		}
 	}
 
-	// Log if we queued any LOD transitions
 	if (QueuedThisFrame > 0)
 	{
-		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD transitions: %d candidates, queued %d this frame (pending: %d)"),
+		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD level changes: %d candidates, queued %d this frame (pending: %d)"),
 			RemeshCandidates.Num(), QueuedThisFrame, CurrentPendingRemesh + QueuedThisFrame);
+	}
+}
+
+void UVoxelChunkManager::UpdateLODMorphFactors(const FLODQueryContext& Context)
+{
+	if (!LODStrategy || !MeshRenderer)
+	{
+		return;
+	}
+
+	if (Configuration && !Configuration->bEnableLOD)
+	{
+		return;
+	}
+
+	TArray<TPair<FIntVector, float>> Transitions;
+
+	for (const FIntVector& ChunkCoord : LoadedChunkCoords)
+	{
+		const float NewMorphFactor = LODStrategy->GetLODMorphFactor(ChunkCoord, Context);
+
+		if (FVoxelChunkState* State = ChunkStates.Find(ChunkCoord))
+		{
+			if (FMath::Abs(State->MorphFactor - NewMorphFactor) > 0.01f)
+			{
+				State->MorphFactor = NewMorphFactor;
+				Transitions.Add(TPair<FIntVector, float>(ChunkCoord, NewMorphFactor));
+			}
+		}
 	}
 
 	if (Transitions.Num() > 0)

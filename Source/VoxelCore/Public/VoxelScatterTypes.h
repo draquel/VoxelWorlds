@@ -172,10 +172,11 @@ struct VOXELCORE_API FScatterSpawnPoint
 	{
 		if (bAlignToNormal)
 		{
-			// Align Z axis to surface normal, rotate around it by yaw
-			FRotator AlignedRotation = Normal.Rotation();
-			AlignedRotation.Yaw += RotationYaw;
-			return AlignedRotation;
+			// Rotate the object's Z-axis (up) to align with the surface normal,
+			// then apply yaw rotation around that new up axis
+			const FQuat AlignQuat = FQuat::FindBetweenNormals(FVector::UpVector, Normal);
+			const FQuat YawQuat(Normal, FMath::DegreesToRadians(RotationYaw));
+			return (YawQuat * AlignQuat).Rotator();
 		}
 		else
 		{

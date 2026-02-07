@@ -116,6 +116,11 @@ public:
 	 */
 	int32 GetTotalInstanceCount() const;
 
+	/**
+	 * Get approximate total memory usage of HISM instances in bytes.
+	 */
+	int64 GetTotalMemoryUsage() const;
+
 	// ==================== Debug ====================
 
 	/**

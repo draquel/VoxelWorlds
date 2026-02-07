@@ -205,6 +205,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Collision")
 	int32 GetCookQueueCount() const { return CookingQueue.Num(); }
 
+	/**
+	 * Get approximate total memory usage of collision system in bytes.
+	 */
+	int64 GetTotalMemoryUsage() const;
+
 	// ==================== Configuration ====================
 
 	/**

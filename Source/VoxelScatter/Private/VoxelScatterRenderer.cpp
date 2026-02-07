@@ -337,6 +337,34 @@ int32 UVoxelScatterRenderer::GetTotalInstanceCount() const
 
 // ==================== Debug ====================
 
+int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
+{
+	int64 Total = sizeof(UVoxelScatterRenderer);
+
+	// HISM components map
+	Total += HISMComponents.GetAllocatedSize();
+
+	// Instance count × FTransform size (approximate HISM instance storage)
+	for (const auto& Pair : HISMComponents)
+	{
+		if (Pair.Value)
+		{
+			Total += Pair.Value->GetInstanceCount() * static_cast<int64>(sizeof(FTransform));
+		}
+	}
+
+	// Chunk-to-scatter-type tracking
+	Total += ChunkScatterTypes.GetAllocatedSize();
+	for (const auto& Pair : ChunkScatterTypes)
+	{
+		Total += Pair.Value.GetAllocatedSize();
+	}
+
+	Total += PendingRebuildScatterTypes.GetAllocatedSize();
+
+	return Total;
+}
+
 FString UVoxelScatterRenderer::GetDebugStats() const
 {
 	const int32 TotalInstances = GetTotalInstanceCount();

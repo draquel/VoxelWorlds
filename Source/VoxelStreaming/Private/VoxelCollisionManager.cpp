@@ -11,6 +11,7 @@
 #include "Algo/BinarySearch.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
+#include "Serialization/ArchiveCountMem.h"
 
 // Chaos physics includes (UE5 always uses Chaos)
 #include "Chaos/TriangleMeshImplicitObject.h"
@@ -302,6 +303,39 @@ FString UVoxelCollisionManager::GetDebugStats() const
 	Stats += FString::Printf(TEXT("Total Removed: %lld\n"), TotalCollisionsRemoved);
 
 	return Stats;
+}
+
+int64 UVoxelCollisionManager::GetTotalMemoryUsage() const
+{
+	int64 Total = sizeof(UVoxelCollisionManager);
+
+	// Collision data map overhead
+	Total += CollisionData.GetAllocatedSize();
+
+	// Per-chunk: BodySetup resource size estimate
+	for (const auto& Pair : CollisionData)
+	{
+		Total += sizeof(FChunkCollisionData);
+		if (Pair.Value.BodySetup)
+		{
+			// Approximate: BodySetup stores cooked tri-mesh data
+			FResourceSizeEx ResSize;
+			Pair.Value.BodySetup->GetResourceSizeEx(ResSize);
+			Total += ResSize.GetTotalMemoryBytes();
+		}
+	}
+
+	// Cooking queue
+	Total += CookingQueue.GetAllocatedSize();
+	for (const FCollisionCookRequest& Req : CookingQueue)
+	{
+		Total += Req.Vertices.GetAllocatedSize() + Req.Indices.GetAllocatedSize();
+	}
+
+	Total += CookingQueueSet.GetAllocatedSize();
+	Total += CurrentlyCooking.GetAllocatedSize();
+
+	return Total;
 }
 
 void UVoxelCollisionManager::DrawDebugVisualization(UWorld* World, const FVector& ViewerPosition) const

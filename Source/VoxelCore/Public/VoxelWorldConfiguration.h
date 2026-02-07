@@ -345,6 +345,32 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Debug", meta = (EditCondition = "bEnableScatter"))
 	bool bScatterDebugVisualization = false;
 
+	// ==================== Performance Tuning ====================
+
+	/** Maximum concurrent async mesh generation tasks (1-16) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 MaxAsyncMeshTasks = 4;
+
+	/** Maximum LOD level change remeshes queued per frame (1-8) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 MaxLODRemeshPerFrame = 1;
+
+	/** Maximum pending meshes before throttling generation (2-16) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "2", ClampMax = "16"))
+	int32 MaxPendingMeshes = 4;
+
+	/** Target frame rate for adaptive throttling (0 = disabled) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "0", ClampMax = "240"))
+	float TargetFrameRate = 60.0f;
+
+	/** Reduce generation work when FPS drops below target */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance")
+	bool bAdaptiveThrottling = true;
+
+	/** Defer collision/scatter when generation queue exceeds this count (0 = disabled) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "0", ClampMax = "200"))
+	int32 DeferSubsystemsThreshold = 20;
+
 public:
 	UVoxelWorldConfiguration();
 

@@ -281,6 +281,13 @@ public:
 	virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const = 0;
 
 	/**
+	 * Get total CPU-side memory usage (approximate).
+	 *
+	 * @return CPU memory in bytes used by renderer data structures
+	 */
+	virtual int64 GetCPUMemoryUsage() const { return 0; }
+
+	/**
 	 * Get total GPU memory usage (approximate).
 	 *
 	 * @return GPU memory in bytes
