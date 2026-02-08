@@ -447,12 +447,9 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 
 	HISM->SetCastShadow(Definition.bCastShadows);
 
-	// Disable shadow casting at distance for performance
-	if (Definition.bCastShadows)
-	{
-		// Shadows only render up to LODStartDistance (closer instances)
-		HISM->CachedMaxDrawDistance = Definition.LODStartDistance;
-	}
+	// Note: Do NOT set CachedMaxDrawDistance here — it culls the entire HISM component
+	// (all instances) when the camera exceeds that distance from the component bounds.
+	// Per-instance culling is already handled by SetCullDistances above.
 
 	// ==================== Collision ====================
 

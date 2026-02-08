@@ -351,3 +351,37 @@ All stress tests must:
 - Significantly reduced targets
 - 720p @ 30 FPS with 100 chunks
 
+---
+
+## Scatter System Performance (Phase 7D)
+
+### Compute Time Budget
+
+| System | Before 7D | After 7D-1 (Async) | After 7D-2 (GPU) |
+|--------|-----------|---------------------|-------------------|
+| Scatter (game thread) | ~0.5-1.0ms | ~0.1ms | ~0.1ms |
+| Scatter (thread pool) | 0ms | ~0.5-1.0ms | ~0.3ms (placement only) |
+| Scatter (GPU) | 0ms | 0ms | ~0.1-0.2ms (extraction) |
+
+### Surface Extraction Methods
+
+| Method | Path | LOD-Independent | Notes |
+|--------|------|-----------------|-------|
+| Voxel-based (7D-5) | CPU (default) | Yes | Scans 32³ voxel columns, identical output at any LOD |
+| GPU compute (7D-2) | GPU (optional) | No | Mesh vertex extraction, varies with LOD |
+| Mesh vertex (legacy) | CPU | No | Original spatial hash extraction |
+
+The voxel-based path (7D-5) is the default because it produces consistent scatter regardless of LOD level, preventing density changes and position shifts when chunks change LOD.
+
+### Configuration Defaults
+- `MaxAsyncScatterTasks = 2`: Concurrent thread pool tasks
+- `MaxScatterGenerationsPerFrame = 2`: Queue drain rate
+- `bUseGPUScatterExtraction = false`: GPU path off by default (enable for SM5+ hardware)
+
+### Scatter Stress Test
+- Fly fast through dense scatter terrain (Grass 50%, Rocks 5%, Trees 2%)
+- Target: No frame drops below 55 FPS
+- Target: No missing scatter or visual artifacts
+- Target: No crashes from rapid unload/reload cycles
+- Target: Scatter density consistent across LOD transitions (7D-5)
+

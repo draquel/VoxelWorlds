@@ -12,6 +12,8 @@
 #include "VoxelScatter.h"
 #include "DrawDebugHelpers.h"
 #include "Algo/BinarySearch.h"
+#include "Async/Async.h"
+#include "VoxelGPUSurfaceExtractor.h"
 
 UVoxelScatterManager::UVoxelScatterManager()
 {
@@ -96,6 +98,16 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 		CreateDefaultDefinitions();
 	}
 
+	// Async scatter configuration
+	MaxAsyncScatterTasks = FMath::Clamp(Config->MaxAsyncScatterTasks, 1, 4);
+
+	// GPU extraction: enabled only if config says so AND platform supports SM5
+	bUseGPUExtraction = Config->bUseGPUScatterExtraction && FVoxelGPUSurfaceExtractor::IsGPUExtractionSupported();
+	if (Config->bUseGPUScatterExtraction && !bUseGPUExtraction)
+	{
+		UE_LOG(LogVoxelScatter, Warning, TEXT("GPU scatter extraction requested but SM5 not supported, falling back to CPU"));
+	}
+
 	// Reset statistics
 	TotalChunksProcessed = 0;
 	TotalSurfacePointsExtracted = 0;
@@ -125,13 +137,30 @@ void UVoxelScatterManager::Shutdown()
 		ScatterRenderer = nullptr;
 	}
 
-	// Clear pending queue
+	// Drain completed async scatter queue
+	{
+		FAsyncScatterResult DiscardedResult;
+		while (CompletedScatterQueue.Dequeue(DiscardedResult)) {}
+	}
+	AsyncScatterInProgress.Empty();
+
+	// Drain GPU extraction queue
+	{
+		FGPUExtractionResult DiscardedGPUResult;
+		while (CompletedGPUExtractionQueue.Dequeue(DiscardedGPUResult)) {}
+	}
+	GPUExtractionPendingPlacement.Empty();
+	GPUExtractionPendingLODLevel.Empty();
+
+	// Clear pending queue and deferred upgrades
 	PendingGenerationQueue.Empty();
 	PendingQueueSet.Empty();
+	DeferredSupplementalPasses.Empty();
 
 	// Clear all cached data
 	SurfaceDataCache.Empty();
 	ScatterDataCache.Empty();
+	CompletedScatterTypes.Empty();
 	ScatterDefinitions.Empty();
 	ClearedVolumesPerChunk.Empty();
 
@@ -154,7 +183,16 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 
 	LastViewerPosition = ViewerPosition;
 
-	// Process pending scatter generations (throttled)
+	// Process completed GPU extractions (dispatches placement tasks)
+	if (bUseGPUExtraction)
+	{
+		ProcessCompletedGPUExtractions();
+	}
+
+	// Process completed async scatter results (game thread only: cache + HISM update)
+	ProcessCompletedAsyncScatter();
+
+	// Launch new async scatter tasks from pending queue (throttled)
 	ProcessPendingGenerationQueue();
 
 	// Tick the scatter renderer to flush pending HISM rebuilds
@@ -243,26 +281,41 @@ bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 
 // ==================== Mesh Data Callback ====================
 
-void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData)
+void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData,
+	const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize)
 {
 	if (!bIsInitialized || !Configuration)
 	{
 		return;
 	}
 
-	// Validate mesh data
-	if (!MeshData.IsValid())
+	// Voxel data is required for CPU extraction (always full resolution, LOD-independent)
+	const bool bHasVoxelData = VoxelData.Num() == ChunkSize * ChunkSize * ChunkSize;
+	if (!bHasVoxelData && !bUseGPUExtraction)
+	{
+		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): No voxel data for scatter extraction (expected %d, got %d)"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ChunkSize * ChunkSize * ChunkSize, VoxelData.Num());
+		return;
+	}
+
+	// GPU path still needs valid mesh data
+	if (bUseGPUExtraction && !MeshData.IsValid())
 	{
 		return;
 	}
 
-	// Calculate chunk distance from viewer
 	const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 		FVector(Configuration->GetChunkWorldSize() * 0.5f);
 	const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
 
-	// Check which definitions should be generated at this distance
-	TSet<int32> DefinitionsInRange;
+	// Get the set of scatter types already generated for this chunk (never regenerated)
+	const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
+
+	// Build definitions to generate:
+	//  - All enabled defs within their SpawnDistance/ScatterRadius range
+	//  - Exclude types already completed for this chunk
+	//  - No LOD-based filtering: voxel data is always full resolution
+	TArray<FScatterDefinition> DefsToGenerate;
 	for (const FScatterDefinition& Def : ScatterDefinitions)
 	{
 		if (!Def.bEnabled)
@@ -270,68 +323,101 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, co
 			continue;
 		}
 
-		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
-		if (ChunkDistance <= EffectiveSpawnDistance)
+		// Skip types already generated for this chunk
+		if (CompletedTypes && CompletedTypes->Contains(Def.ScatterID))
 		{
-			DefinitionsInRange.Add(Def.ScatterID);
+			continue;
 		}
+
+		// Distance check
+		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
+		if (ChunkDistance > EffectiveSpawnDistance)
+		{
+			continue;
+		}
+
+		DefsToGenerate.Add(Def);
 	}
 
-	// If no definitions in range, skip
-	if (DefinitionsInRange.Num() == 0)
+	if (DefsToGenerate.Num() == 0)
 	{
 		return;
 	}
 
-	// Check if we already have scatter data for this chunk
-	FChunkScatterData* ExistingData = ScatterDataCache.Find(ChunkCoord);
-	if (ExistingData && ExistingData->bIsValid)
+	// Build pending request
+	auto MakePendingRequest = [&]() -> FPendingScatterGeneration
 	{
-		// Check which definitions are already generated
-		TSet<int32> ExistingDefinitions;
-		for (const FScatterSpawnPoint& Point : ExistingData->SpawnPoints)
+		FPendingScatterGeneration Req;
+		Req.ChunkCoord = ChunkCoord;
+		Req.DistanceToViewer = ChunkDistance;
+		Req.LODLevel = LODLevel;
+		Req.CapturedDefinitions = DefsToGenerate;
+
+		// Always store voxel data for CPU extraction path
+		if (bHasVoxelData)
 		{
-			ExistingDefinitions.Add(Point.ScatterTypeID);
+			Req.ChunkVoxelData = VoxelData;
+			Req.ChunkSize = ChunkSize;
+			Req.VoxelSize = VoxelSize;
 		}
 
-		// Find definitions that are now in range but weren't generated yet
-		TSet<int32> NewDefinitions = DefinitionsInRange.Difference(ExistingDefinitions);
-
-		if (NewDefinitions.Num() == 0)
+		// Only store mesh data when GPU extraction is enabled
+		if (bUseGPUExtraction && MeshData.IsValid())
 		{
-			// All in-range definitions already generated, nothing to do
-			return;
+			Req.Positions = MeshData.Positions;
+			Req.Normals = MeshData.Normals;
+			Req.UV1s = MeshData.UV1s;
+			Req.Colors = MeshData.Colors;
 		}
+		return Req;
+	};
 
-		// Need to add more scatter types - regenerate with current mesh data
-		// (We regenerate rather than append to ensure consistent surface point sampling)
-		RemoveChunkScatter(ChunkCoord);
-	}
-
-	// Skip if already in pending queue
+	// If already in pending queue: merge new definitions into pending entry
 	if (PendingQueueSet.Contains(ChunkCoord))
 	{
+		for (FPendingScatterGeneration& Pending : PendingGenerationQueue)
+		{
+			if (Pending.ChunkCoord == ChunkCoord)
+			{
+				// Build set of already-pending type IDs
+				TSet<int32> PendingTypeIDs;
+				for (const FScatterDefinition& Def : Pending.CapturedDefinitions)
+				{
+					PendingTypeIDs.Add(Def.ScatterID);
+				}
+
+				// Add any new definitions not already pending
+				for (const FScatterDefinition& Def : DefsToGenerate)
+				{
+					if (!PendingTypeIDs.Contains(Def.ScatterID))
+					{
+						Pending.CapturedDefinitions.Add(Def);
+					}
+				}
+				break;
+			}
+		}
 		return;
 	}
 
-	// Create pending generation request with lightweight mesh data copy
-	FPendingScatterGeneration PendingRequest;
-	PendingRequest.ChunkCoord = ChunkCoord;
-	PendingRequest.DistanceToViewer = ChunkDistance;
+	// If async scatter is in-flight: defer as supplemental pass
+	if (AsyncScatterInProgress.Contains(ChunkCoord))
+	{
+		DeferredSupplementalPasses.Add(ChunkCoord, MakePendingRequest());
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Deferred supplemental scatter (%d defs) — async in-flight"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, DefsToGenerate.Num());
+		return;
+	}
 
-	// Copy only the mesh data needed for surface extraction
-	PendingRequest.Positions = MeshData.Positions;
-	PendingRequest.Normals = MeshData.Normals;
-	PendingRequest.UV1s = MeshData.UV1s;
-	PendingRequest.Colors = MeshData.Colors;
-
-	// Insert sorted by distance (closer chunks first)
+	// Queue new scatter generation
+	FPendingScatterGeneration PendingRequest = MakePendingRequest();
 	int32 InsertIndex = Algo::LowerBound(PendingGenerationQueue, PendingRequest);
 	PendingGenerationQueue.Insert(MoveTemp(PendingRequest), InsertIndex);
 	PendingQueueSet.Add(ChunkCoord);
 
-	UE_LOG(LogVoxelScatter, Verbose, TEXT("Queued scatter generation for chunk (%d,%d,%d) at distance %.0f (queue size: %d)"),
-		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ChunkDistance, PendingGenerationQueue.Num());
+	UE_LOG(LogVoxelScatter, Verbose, TEXT("Queued scatter for chunk (%d,%d,%d) %d defs, dist %.0f (queue: %d)"),
+		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, DefsToGenerate.Num(),
+		ChunkDistance, PendingGenerationQueue.Num());
 }
 
 void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
@@ -345,8 +431,19 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 		});
 	}
 
-	// Clear cleared volumes - when chunk is fully unloaded/reloaded, scatter can regenerate
+	// Remove from async in-progress tracking (stale result will be discarded on arrival)
+	AsyncScatterInProgress.Remove(ChunkCoord);
+
+	// Remove deferred supplemental passes
+	DeferredSupplementalPasses.Remove(ChunkCoord);
+
+	// Remove from GPU pending placement
+	GPUExtractionPendingPlacement.Remove(ChunkCoord);
+	GPUExtractionPendingLODLevel.Remove(ChunkCoord);
+
+	// Clear cleared volumes and completed type tracking - allow full regeneration on reload
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
+	CompletedScatterTypes.Remove(ChunkCoord);
 
 	RemoveChunkScatter(ChunkCoord);
 }
@@ -367,8 +464,19 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 		});
 	}
 
-	// Clear cleared volumes so scatter can regenerate
+	// Remove from async in-progress (stale result will be discarded on arrival)
+	AsyncScatterInProgress.Remove(ChunkCoord);
+
+	// Remove from GPU pending placement
+	GPUExtractionPendingPlacement.Remove(ChunkCoord);
+	GPUExtractionPendingLODLevel.Remove(ChunkCoord);
+
+	// Remove deferred supplemental passes
+	DeferredSupplementalPasses.Remove(ChunkCoord);
+
+	// Clear cleared volumes and completed types so scatter can fully regenerate
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
+	CompletedScatterTypes.Remove(ChunkCoord);
 
 	// Remove existing scatter data
 	RemoveChunkScatter(ChunkCoord);
@@ -577,12 +685,16 @@ int64 UVoxelScatterManager::GetTotalMemoryUsage() const
 	Total += PendingGenerationQueue.GetAllocatedSize();
 	for (const auto& Pending : PendingGenerationQueue)
 	{
-		Total += Pending.Positions.GetAllocatedSize()
+		Total += Pending.ChunkVoxelData.GetAllocatedSize()
+			+ Pending.Positions.GetAllocatedSize()
 			+ Pending.Normals.GetAllocatedSize()
 			+ Pending.UV1s.GetAllocatedSize()
 			+ Pending.Colors.GetAllocatedSize();
 	}
 	Total += PendingQueueSet.GetAllocatedSize();
+
+	// Async in-progress set
+	Total += AsyncScatterInProgress.GetAllocatedSize();
 
 	// Cleared volumes
 	Total += ClearedVolumesPerChunk.GetAllocatedSize();
@@ -604,6 +716,7 @@ FScatterStatistics UVoxelScatterManager::GetStatistics() const
 {
 	FScatterStatistics Stats;
 	Stats.ChunksWithScatter = ScatterDataCache.Num();
+	Stats.TotalHISMInstances = (ScatterRenderer && ScatterRenderer->IsInitialized()) ? ScatterRenderer->GetTotalInstanceCount() : 0;
 	Stats.TotalSurfacePoints = TotalSurfacePointsExtracted;
 	Stats.TotalSpawnPoints = TotalSpawnPointsGenerated;
 
@@ -636,6 +749,8 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Definitions: %d\n")
 		TEXT("Chunks with Scatter: %d\n")
 		TEXT("Pending Queue: %d\n")
+		TEXT("Async In-Flight: %d / %d\n")
+		TEXT("GPU Extraction: %s\n")
 		TEXT("Total Surface Points: %lld\n")
 		TEXT("Total Spawn Points: %lld\n")
 		TEXT("Avg Surface/Chunk: %.1f\n")
@@ -647,6 +762,8 @@ FString UVoxelScatterManager::GetDebugStats() const
 		ScatterDefinitions.Num(),
 		Stats.ChunksWithScatter,
 		PendingGenerationQueue.Num(),
+		AsyncScatterInProgress.Num(), MaxAsyncScatterTasks,
+		bUseGPUExtraction ? TEXT("Enabled") : TEXT("Disabled"),
 		Stats.TotalSurfacePoints,
 		Stats.TotalSpawnPoints,
 		Stats.GetAverageSurfacePointsPerChunk(),
@@ -776,15 +893,24 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 		return;
 	}
 
-	// Determine how many to process this frame
-	int32 NumToProcess = PendingGenerationQueue.Num();
-	if (MaxScatterGenerationsPerFrame > 0 && NumToProcess > MaxScatterGenerationsPerFrame)
+	// Throttle by number of in-flight async tasks
+	const int32 AvailableSlots = MaxAsyncScatterTasks - AsyncScatterInProgress.Num();
+	if (AvailableSlots <= 0)
 	{
-		NumToProcess = MaxScatterGenerationsPerFrame;
+		return;
 	}
 
-	// Process from back of queue (closest chunks are at back, due to reversed sort)
-	for (int32 i = 0; i < NumToProcess; ++i)
+	// Also respect per-frame limit
+	int32 NumToLaunch = FMath::Min(AvailableSlots, PendingGenerationQueue.Num());
+	if (MaxScatterGenerationsPerFrame > 0)
+	{
+		NumToLaunch = FMath::Min(NumToLaunch, MaxScatterGenerationsPerFrame);
+	}
+
+	int32 LaunchedCount = 0;
+
+	// Launch from back of queue (closest chunks are at back, due to reversed sort)
+	for (int32 i = 0; i < NumToLaunch; ++i)
 	{
 		if (PendingGenerationQueue.Num() == 0)
 		{
@@ -796,14 +922,15 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 		PendingGenerationQueue.Pop(EAllowShrinking::No);
 		PendingQueueSet.Remove(Request.ChunkCoord);
 
-		// Generate scatter from the pending data
-		GenerateChunkScatterFromPending(Request);
+		// Launch async scatter generation on thread pool
+		LaunchAsyncScatterGeneration(MoveTemp(Request));
+		++LaunchedCount;
 	}
 
-	if (NumToProcess > 0)
+	if (LaunchedCount > 0)
 	{
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Processed %d pending scatter generations (%d remaining)"),
-			NumToProcess, PendingGenerationQueue.Num());
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Launched %d async scatter tasks (%d queued, %d in-flight)"),
+			LaunchedCount, PendingGenerationQueue.Num(), AsyncScatterInProgress.Num());
 	}
 }
 
@@ -812,126 +939,42 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 	const FIntVector& ChunkCoord = PendingData.ChunkCoord;
 	const FVector ChunkWorldOrigin = GetChunkWorldOrigin(ChunkCoord);
 
-	// Recalculate chunk distance (viewer may have moved)
-	float ChunkDistance = 0.0f;
-	if (Configuration)
-	{
-		const FVector ChunkCenter = ChunkWorldOrigin + FVector(Configuration->GetChunkWorldSize() * 0.5f);
-		ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
-	}
+	// Use definitions captured at queue time (already filtered by distance)
+	const TArray<FScatterDefinition>& FilteredDefinitions = PendingData.CapturedDefinitions;
 
-	// Filter definitions to only those within their spawn distance
-	TArray<FScatterDefinition> FilteredDefinitions;
-	for (const FScatterDefinition& Def : ScatterDefinitions)
-	{
-		if (!Def.bEnabled)
-		{
-			continue;
-		}
-
-		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
-		if (ChunkDistance <= EffectiveSpawnDistance)
-		{
-			FilteredDefinitions.Add(Def);
-		}
-	}
-
-	// Skip if no definitions in range (viewer moved away while queued)
 	if (FilteredDefinitions.Num() == 0)
 	{
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Skipped scatter - viewer moved out of range"),
+		return;
+	}
+
+	// Validate voxel data
+	if (PendingData.ChunkVoxelData.Num() != PendingData.ChunkSize * PendingData.ChunkSize * PendingData.ChunkSize)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Skipped scatter - invalid voxel data"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 		return;
 	}
 
-	// Validate mesh data
-	const int32 VertexCount = PendingData.Positions.Num();
-	const bool bHasNormals = PendingData.Normals.Num() == VertexCount;
-
-	if (VertexCount == 0 || !bHasNormals)
+	// Extract surface points from voxel data (LOD-independent)
+	TArray<FClearedScatterVolume> ClearedVolumes;
+	if (const TArray<FClearedScatterVolume>* Volumes = ClearedVolumesPerChunk.Find(ChunkCoord))
 	{
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Skipped scatter - invalid mesh data"),
-			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-		return;
+		ClearedVolumes = *Volumes;
 	}
 
-	// Extract surface points directly from pending data
-	// (Inline version of what VoxelSurfaceExtractor does)
-	const bool bHasUV1 = PendingData.UV1s.Num() == VertexCount;
-	const bool bHasColors = PendingData.Colors.Num() == VertexCount;
+	FChunkSurfaceData SurfaceData;
+	ExtractSurfacePointsFromVoxelData(
+		PendingData.ChunkVoxelData,
+		ChunkCoord,
+		ChunkWorldOrigin,
+		PendingData.ChunkSize,
+		PendingData.VoxelSize,
+		SurfacePointSpacing,
+		ClearedVolumes,
+		SurfaceData
+	);
 
-	const float CellSize = SurfacePointSpacing;
-	TMap<FIntVector, int32> OccupiedCells;
-
-	FChunkSurfaceData SurfaceData(ChunkCoord);
-	SurfaceData.LODLevel = 0;
-	SurfaceData.AveragePointSpacing = SurfacePointSpacing;
-	SurfaceData.SurfacePoints.Reserve(VertexCount / 4);
-	OccupiedCells.Reserve(VertexCount / 4);
-
-	for (int32 VertIndex = 0; VertIndex < VertexCount; ++VertIndex)
-	{
-		const FVector LocalPos(PendingData.Positions[VertIndex]);
-		const FVector WorldPos = ChunkWorldOrigin + LocalPos;
-
-		// Spatial hash cell check
-		const FIntVector Cell(
-			FMath::FloorToInt(WorldPos.X / CellSize),
-			FMath::FloorToInt(WorldPos.Y / CellSize),
-			FMath::FloorToInt(WorldPos.Z / CellSize)
-		);
-
-		if (OccupiedCells.Contains(Cell))
-		{
-			continue;
-		}
-
-		const FVector Normal(PendingData.Normals[VertIndex]);
-
-		// Decode UV1 data
-		uint8 MaterialID = 0;
-		EVoxelFaceType FaceType = EVoxelFaceType::Top;
-		if (bHasUV1)
-		{
-			MaterialID = static_cast<uint8>(FMath::RoundToInt(PendingData.UV1s[VertIndex].X));
-			const int32 FaceTypeInt = FMath::RoundToInt(PendingData.UV1s[VertIndex].Y);
-			FaceType = (FaceTypeInt == 1) ? EVoxelFaceType::Side :
-					   (FaceTypeInt == 2) ? EVoxelFaceType::Bottom : EVoxelFaceType::Top;
-		}
-
-		// Decode color data
-		uint8 BiomeID = 0;
-		uint8 AO = 0;
-		if (bHasColors)
-		{
-			BiomeID = PendingData.Colors[VertIndex].G;
-			AO = PendingData.Colors[VertIndex].B & 0x03;
-		}
-
-		// Skip points in cleared volumes (player-edited areas)
-		if (IsPointInClearedVolume(ChunkCoord, WorldPos))
-		{
-			continue;
-		}
-
-		// Create surface point
-		FVoxelSurfacePoint Point;
-		Point.Position = WorldPos;
-		Point.Normal = FVector(Normal).GetSafeNormal();
-		Point.MaterialID = MaterialID;
-		Point.BiomeID = BiomeID;
-		Point.FaceType = FaceType;
-		Point.AmbientOcclusion = AO;
-		Point.ComputeSlopeAngle();
-
-		const int32 NewIndex = SurfaceData.SurfacePoints.Add(Point);
-		OccupiedCells.Add(Cell, NewIndex);
-	}
-
-	SurfaceData.SurfaceAreaEstimate = SurfaceData.SurfacePoints.Num() * CellSize * CellSize;
-	SurfaceData.bIsValid = true;
-
-	if (SurfaceData.SurfacePoints.Num() == 0)
+	if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
 	{
 		return;
 	}
@@ -953,23 +996,524 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 
 	const int32 SpawnCount = ScatterData.SpawnPoints.Num();
 
-	// Cache scatter data
-	ScatterDataCache.Add(ChunkCoord, MoveTemp(ScatterData));
+	// Track completed types
+	TSet<int32>& Completed = CompletedScatterTypes.FindOrAdd(ChunkCoord);
+	for (const FScatterDefinition& Def : FilteredDefinitions)
+	{
+		Completed.Add(Def.ScatterID);
+	}
+
+	// Append or create scatter data
+	FChunkScatterData* ExistingScatter = ScatterDataCache.Find(ChunkCoord);
+	if (ExistingScatter && ExistingScatter->bIsValid)
+	{
+		ExistingScatter->SpawnPoints.Append(ScatterData.SpawnPoints);
+	}
+	else
+	{
+		ScatterDataCache.Add(ChunkCoord, MoveTemp(ScatterData));
+	}
 	TotalSpawnPointsGenerated += SpawnCount;
 	++TotalChunksProcessed;
 
-	// Update HISM instances
+	// Update HISM instances with full (possibly merged) scatter data
 	if (ScatterRenderer && ScatterRenderer->IsInitialized())
 	{
 		ScatterRenderer->UpdateChunkInstances(ChunkCoord, ScatterDataCache[ChunkCoord]);
 	}
 
-	// Broadcast event
 	OnChunkScatterReady.Broadcast(ChunkCoord, SpawnCount);
 
-	UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Generated scatter from queue (%d surface points, %d spawn points)"),
+	UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Generated scatter from queue (%d surface pts, %d spawn pts)"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
 		SurfaceDataCache[ChunkCoord].SurfacePoints.Num(), SpawnCount);
+}
+
+void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneration PendingData)
+{
+	const FIntVector ChunkCoord = PendingData.ChunkCoord;
+
+	// Mark as in-progress
+	AsyncScatterInProgress.Add(ChunkCoord);
+
+	// Capture all values needed by the background thread (no UObject access)
+	const FVector ChunkWorldOrigin = GetChunkWorldOrigin(ChunkCoord);
+	const float CapturedSurfacePointSpacing = SurfacePointSpacing;
+	const uint32 CapturedWorldSeed = WorldSeed;
+
+	// Use definitions captured at queue time (already filtered by distance)
+	TArray<FScatterDefinition> FilteredDefinitions = MoveTemp(PendingData.CapturedDefinitions);
+
+	if (FilteredDefinitions.Num() == 0)
+	{
+		AsyncScatterInProgress.Remove(ChunkCoord);
+		return;
+	}
+
+	// === GPU Extraction Path (uses mesh vertex data) ===
+	if (bUseGPUExtraction)
+	{
+		// Dispatch GPU surface extraction
+		FGPUExtractionRequest GPURequest;
+		GPURequest.ChunkCoord = ChunkCoord;
+		GPURequest.ChunkWorldOrigin = ChunkWorldOrigin;
+		GPURequest.CellSize = CapturedSurfacePointSpacing;
+		GPURequest.Positions = MoveTemp(PendingData.Positions);
+		GPURequest.Normals = MoveTemp(PendingData.Normals);
+		GPURequest.UV1s = MoveTemp(PendingData.UV1s);
+		GPURequest.Colors = MoveTemp(PendingData.Colors);
+
+		// Store filtered definitions and LOD level for placement after GPU extraction completes
+		GPUExtractionPendingPlacement.Add(ChunkCoord, MoveTemp(FilteredDefinitions));
+		GPUExtractionPendingLODLevel.Add(ChunkCoord, PendingData.LODLevel);
+
+		FVoxelGPUSurfaceExtractor::DispatchExtraction(
+			MoveTemp(GPURequest),
+			&CompletedGPUExtractionQueue);
+
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Dispatched GPU scatter extraction"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+		return;
+	}
+
+	// === CPU Async Path (voxel-based extraction — LOD-independent) ===
+
+	// Snapshot cleared volumes for this chunk (read-only on thread pool)
+	TArray<FClearedScatterVolume> CapturedClearedVolumes;
+	if (const TArray<FClearedScatterVolume>* Volumes = ClearedVolumesPerChunk.Find(ChunkCoord))
+	{
+		CapturedClearedVolumes = *Volumes;
+	}
+
+	TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
+
+	Async(EAsyncExecution::ThreadPool,
+		[WeakThis, PendingData = MoveTemp(PendingData), ChunkWorldOrigin,
+		 CapturedSurfacePointSpacing, CapturedWorldSeed, ChunkCoord,
+		 FilteredDefinitions = MoveTemp(FilteredDefinitions),
+		 CapturedClearedVolumes = MoveTemp(CapturedClearedVolumes)]() mutable
+	{
+		// === THREAD POOL: Voxel-based surface extraction + placement ===
+
+		FAsyncScatterResult Result;
+		Result.ChunkCoord = ChunkCoord;
+		Result.bSuccess = false;
+
+		// Validate voxel data
+		const int32 ExpectedVoxels = PendingData.ChunkSize * PendingData.ChunkSize * PendingData.ChunkSize;
+		if (PendingData.ChunkVoxelData.Num() != ExpectedVoxels)
+		{
+			if (UVoxelScatterManager* This = WeakThis.Get())
+			{
+				This->CompletedScatterQueue.Enqueue(MoveTemp(Result));
+			}
+			return;
+		}
+
+		// Extract surface points from voxel data (LOD-independent)
+		FChunkSurfaceData SurfaceData;
+		ExtractSurfacePointsFromVoxelData(
+			PendingData.ChunkVoxelData,
+			ChunkCoord,
+			ChunkWorldOrigin,
+			PendingData.ChunkSize,
+			PendingData.VoxelSize,
+			CapturedSurfacePointSpacing,
+			CapturedClearedVolumes,
+			SurfaceData
+		);
+
+		if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
+		{
+			if (UVoxelScatterManager* This = WeakThis.Get())
+			{
+				This->CompletedScatterQueue.Enqueue(MoveTemp(Result));
+			}
+			return;
+		}
+
+		// Scatter placement
+		const uint32 ChunkSeed = FVoxelScatterPlacement::ComputeChunkSeed(ChunkCoord, CapturedWorldSeed);
+
+		FChunkScatterData ScatterData;
+		FVoxelScatterPlacement::GenerateSpawnPoints(
+			SurfaceData,
+			FilteredDefinitions,
+			ChunkSeed,
+			ScatterData
+		);
+
+		Result.SurfaceData = MoveTemp(SurfaceData);
+		Result.ScatterData = MoveTemp(ScatterData);
+		Result.bSuccess = true;
+
+		// Track which types were generated
+		for (const FScatterDefinition& Def : FilteredDefinitions)
+		{
+			Result.GeneratedTypeIDs.Add(Def.ScatterID);
+		}
+
+		// Enqueue result for game thread consumption
+		if (UVoxelScatterManager* This = WeakThis.Get())
+		{
+			This->CompletedScatterQueue.Enqueue(MoveTemp(Result));
+		}
+	});
+}
+
+void UVoxelScatterManager::ProcessCompletedAsyncScatter()
+{
+	FAsyncScatterResult Result;
+	int32 ProcessedCount = 0;
+	const int32 MaxProcessPerFrame = 4;
+
+	while (CompletedScatterQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
+	{
+		++ProcessedCount;
+
+		// Remove from in-progress tracking
+		AsyncScatterInProgress.Remove(Result.ChunkCoord);
+
+		if (!Configuration)
+		{
+			continue;
+		}
+
+		if (!Result.bSuccess)
+		{
+			continue;
+		}
+
+		const int32 SurfacePointCount = Result.SurfaceData.SurfacePoints.Num();
+		const int32 SpawnCount = Result.ScatterData.SpawnPoints.Num();
+
+		// Track which scatter types were generated (never regenerated)
+		TSet<int32>& Completed = CompletedScatterTypes.FindOrAdd(Result.ChunkCoord);
+		Completed.Append(Result.GeneratedTypeIDs);
+
+		// Append or create scatter/surface data
+		FChunkScatterData* ExistingScatter = ScatterDataCache.Find(Result.ChunkCoord);
+		if (ExistingScatter && ExistingScatter->bIsValid)
+		{
+			// Supplemental pass: append new spawn points to existing data
+			ExistingScatter->SpawnPoints.Append(Result.ScatterData.SpawnPoints);
+
+			// Update surface data with the better LOD mesh if applicable
+			FChunkSurfaceData* ExistingSurface = SurfaceDataCache.Find(Result.ChunkCoord);
+			if (ExistingSurface && Result.SurfaceData.LODLevel < ExistingSurface->LODLevel)
+			{
+				*ExistingSurface = MoveTemp(Result.SurfaceData);
+			}
+
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Supplemental scatter appended (+%d spawn, total %d)"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z,
+				SpawnCount, ExistingScatter->SpawnPoints.Num());
+		}
+		else
+		{
+			// First pass: cache new data
+			SurfaceDataCache.Add(Result.ChunkCoord, MoveTemp(Result.SurfaceData));
+			ScatterDataCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
+		}
+
+		TotalSurfacePointsExtracted += SurfacePointCount;
+		TotalSpawnPointsGenerated += SpawnCount;
+		++TotalChunksProcessed;
+
+		// Update HISM instances with full (possibly merged) scatter data
+		if (ScatterRenderer && ScatterRenderer->IsInitialized())
+		{
+			ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, ScatterDataCache[Result.ChunkCoord]);
+		}
+
+		OnChunkScatterReady.Broadcast(Result.ChunkCoord, SpawnCount);
+
+		const FChunkSurfaceData* CachedSurface = SurfaceDataCache.Find(Result.ChunkCoord);
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Async scatter complete (%d surface pts, %d spawn pts, LOD %d)"),
+			Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z,
+			SurfacePointCount, SpawnCount, CachedSurface ? CachedSurface->LODLevel : -1);
+
+		// Check for deferred supplemental pass (e.g., LOD 0 defs arrived while LOD > 0 was in-flight)
+		FPendingScatterGeneration DeferredPass;
+		if (DeferredSupplementalPasses.RemoveAndCopyValue(Result.ChunkCoord, DeferredPass))
+		{
+			// Remove any types that were just completed
+			DeferredPass.CapturedDefinitions.RemoveAll([&Completed](const FScatterDefinition& Def)
+			{
+				return Completed.Contains(Def.ScatterID);
+			});
+
+			if (DeferredPass.CapturedDefinitions.Num() > 0)
+			{
+				UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Re-queuing deferred supplemental (%d defs)"),
+					Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z,
+					DeferredPass.CapturedDefinitions.Num());
+
+				int32 InsertIndex = Algo::LowerBound(PendingGenerationQueue, DeferredPass);
+				PendingGenerationQueue.Insert(MoveTemp(DeferredPass), InsertIndex);
+				PendingQueueSet.Add(Result.ChunkCoord);
+			}
+		}
+	}
+}
+
+void UVoxelScatterManager::ProcessCompletedGPUExtractions()
+{
+	FGPUExtractionResult GPUResult;
+	int32 ProcessedCount = 0;
+	const int32 MaxGPUProcessPerFrame = 4;
+
+	while (CompletedGPUExtractionQueue.Dequeue(GPUResult) && ProcessedCount < MaxGPUProcessPerFrame)
+	{
+		++ProcessedCount;
+
+		const FIntVector ChunkCoord = GPUResult.ChunkCoord;
+
+		// Look up the pending placement definitions for this chunk
+		TArray<FScatterDefinition> FilteredDefinitions;
+		if (TArray<FScatterDefinition>* PendingDefs = GPUExtractionPendingPlacement.Find(ChunkCoord))
+		{
+			FilteredDefinitions = MoveTemp(*PendingDefs);
+			GPUExtractionPendingPlacement.Remove(ChunkCoord);
+		}
+
+		// Discard if chunk is no longer in async tracking (was unloaded)
+		if (!AsyncScatterInProgress.Contains(ChunkCoord))
+		{
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): GPU extraction result discarded - chunk no longer tracked"),
+				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+			continue;
+		}
+
+		if (!GPUResult.bSuccess || FilteredDefinitions.Num() == 0)
+		{
+			// Remove from in-progress tracking for failed/empty results
+			AsyncScatterInProgress.Remove(ChunkCoord);
+			continue;
+		}
+
+		// GPU extraction complete - now launch CPU placement on thread pool
+		// Build surface data from GPU extraction result
+		FChunkSurfaceData SurfaceData(ChunkCoord);
+		SurfaceData.LODLevel = GPUExtractionPendingLODLevel.FindRef(ChunkCoord);
+		GPUExtractionPendingLODLevel.Remove(ChunkCoord);
+		SurfaceData.AveragePointSpacing = SurfacePointSpacing;
+		SurfaceData.SurfacePoints = MoveTemp(GPUResult.SurfacePoints);
+		SurfaceData.SurfaceAreaEstimate = SurfaceData.SurfacePoints.Num() * SurfacePointSpacing * SurfacePointSpacing;
+		SurfaceData.bIsValid = true;
+
+		if (SurfaceData.SurfacePoints.Num() == 0)
+		{
+			AsyncScatterInProgress.Remove(ChunkCoord);
+			continue;
+		}
+
+		// Filter out points in cleared volumes (GPU doesn't know about these)
+		if (const TArray<FClearedScatterVolume>* Volumes = ClearedVolumesPerChunk.Find(ChunkCoord))
+		{
+			SurfaceData.SurfacePoints.RemoveAll([&Volumes](const FVoxelSurfacePoint& Point)
+			{
+				for (const FClearedScatterVolume& Volume : *Volumes)
+				{
+					if (Volume.ContainsPoint(Point.Position))
+					{
+						return true;
+					}
+				}
+				return false;
+			});
+
+			if (SurfaceData.SurfacePoints.Num() == 0)
+			{
+				AsyncScatterInProgress.Remove(ChunkCoord);
+				continue;
+			}
+		}
+
+		// Launch placement on thread pool (same as CPU async path from here)
+		const uint32 CapturedWorldSeed = WorldSeed;
+		const int32 GPUSurfacePointCount = SurfaceData.SurfacePoints.Num();
+		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
+
+		Async(EAsyncExecution::ThreadPool,
+			[WeakThis, SurfaceData = MoveTemp(SurfaceData), FilteredDefinitions = MoveTemp(FilteredDefinitions),
+			 CapturedWorldSeed, ChunkCoord]() mutable
+		{
+			FAsyncScatterResult Result;
+			Result.ChunkCoord = ChunkCoord;
+
+			const uint32 ChunkSeed = FVoxelScatterPlacement::ComputeChunkSeed(ChunkCoord, CapturedWorldSeed);
+
+			FChunkScatterData ScatterData;
+			FVoxelScatterPlacement::GenerateSpawnPoints(
+				SurfaceData,
+				FilteredDefinitions,
+				ChunkSeed,
+				ScatterData
+			);
+
+			Result.SurfaceData = MoveTemp(SurfaceData);
+			Result.ScatterData = MoveTemp(ScatterData);
+			Result.bSuccess = true;
+
+			for (const FScatterDefinition& Def : FilteredDefinitions)
+			{
+				Result.GeneratedTypeIDs.Add(Def.ScatterID);
+			}
+
+			if (UVoxelScatterManager* This = WeakThis.Get())
+			{
+				This->CompletedScatterQueue.Enqueue(MoveTemp(Result));
+			}
+		});
+
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): GPU extraction complete (%d surface points), launching placement"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, GPUSurfacePointCount);
+	}
+}
+
+void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
+	const TArray<FVoxelData>& VoxelData,
+	const FIntVector& ChunkCoord,
+	const FVector& ChunkWorldOrigin,
+	int32 ChunkSize,
+	float VoxelSize,
+	float SurfacePointSpacing,
+	const TArray<FClearedScatterVolume>& ClearedVolumes,
+	FChunkSurfaceData& OutSurfaceData)
+{
+	OutSurfaceData = FChunkSurfaceData(ChunkCoord);
+	OutSurfaceData.AveragePointSpacing = SurfacePointSpacing;
+	OutSurfaceData.LODLevel = 0; // Voxel-based extraction is always full resolution
+
+	const int32 ExpectedVoxels = ChunkSize * ChunkSize * ChunkSize;
+	if (VoxelData.Num() != ExpectedVoxels)
+	{
+		OutSurfaceData.bIsValid = false;
+		return;
+	}
+
+	// Stride to match SurfacePointSpacing (e.g., 100cm spacing with 100cm voxels = stride 1)
+	const int32 Stride = FMath::Max(1, FMath::RoundToInt(SurfacePointSpacing / VoxelSize));
+	const int32 ColumnsPerAxis = (ChunkSize + Stride - 1) / Stride;
+	OutSurfaceData.SurfacePoints.Reserve(ColumnsPerAxis * ColumnsPerAxis);
+
+	// Helper lambda: get density at voxel position with bounds clamping
+	auto GetDensity = [&](int32 X, int32 Y, int32 Z) -> float
+	{
+		X = FMath::Clamp(X, 0, ChunkSize - 1);
+		Y = FMath::Clamp(Y, 0, ChunkSize - 1);
+		Z = FMath::Clamp(Z, 0, ChunkSize - 1);
+		const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+		return static_cast<float>(VoxelData[Index].Density);
+	};
+
+	// Scan each column at stride intervals
+	for (int32 X = 0; X < ChunkSize; X += Stride)
+	{
+		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
+		{
+			// Scan top-down to find topmost surface transition (solid below, air above)
+			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
+			{
+				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+				const FVoxelData& Voxel = VoxelData[Index];
+
+				if (!Voxel.IsSolid())
+				{
+					continue;
+				}
+
+				// Found solid voxel — check if there's air above
+				float AirDensity = 0.0f; // Above chunk boundary = air
+				if (Z + 1 < ChunkSize)
+				{
+					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
+					const FVoxelData& AboveVoxel = VoxelData[AboveIndex];
+					if (AboveVoxel.IsSolid())
+					{
+						continue; // Not a surface transition
+					}
+					AirDensity = static_cast<float>(AboveVoxel.Density);
+				}
+
+				// Interpolate exact Z position (same formula as Marching Cubes edge interpolation)
+				const float SolidDensity = static_cast<float>(Voxel.Density);
+				float Fraction = 0.5f;
+				const float DensityRange = AirDensity - SolidDensity;
+				if (FMath::Abs(DensityRange) > SMALL_NUMBER)
+				{
+					Fraction = (static_cast<float>(VOXEL_SURFACE_THRESHOLD) - SolidDensity) / DensityRange;
+					Fraction = FMath::Clamp(Fraction, 0.0f, 1.0f);
+				}
+
+				// World position (voxel grid positions, matching mesher convention)
+				const FVector WorldPos(
+					ChunkWorldOrigin.X + X * VoxelSize,
+					ChunkWorldOrigin.Y + Y * VoxelSize,
+					ChunkWorldOrigin.Z + (Z + Fraction) * VoxelSize
+				);
+
+				// Check cleared volumes
+				bool bInClearedVolume = false;
+				for (const FClearedScatterVolume& Volume : ClearedVolumes)
+				{
+					if (Volume.ContainsPoint(WorldPos))
+					{
+						bInClearedVolume = true;
+						break;
+					}
+				}
+				if (bInClearedVolume)
+				{
+					break; // Skip this column entirely
+				}
+
+				// Compute normal from density gradient (central differences)
+				const float GradX = GetDensity(X + 1, Y, Z) - GetDensity(X - 1, Y, Z);
+				const float GradY = GetDensity(X, Y + 1, Z) - GetDensity(X, Y - 1, Z);
+				const float GradZ = GetDensity(X, Y, Z + 1) - GetDensity(X, Y, Z - 1);
+
+				// Normal points from solid toward air (negative gradient direction)
+				FVector Normal(-GradX, -GradY, -GradZ);
+				if (!Normal.Normalize())
+				{
+					Normal = FVector::UpVector; // Fallback for flat areas
+				}
+
+				// Determine face type from normal direction
+				EVoxelFaceType FaceType;
+				if (Normal.Z > 0.5f)
+				{
+					FaceType = EVoxelFaceType::Top;
+				}
+				else if (Normal.Z < -0.5f)
+				{
+					FaceType = EVoxelFaceType::Bottom;
+				}
+				else
+				{
+					FaceType = EVoxelFaceType::Side;
+				}
+
+				// Create surface point
+				FVoxelSurfacePoint Point;
+				Point.Position = WorldPos;
+				Point.Normal = Normal;
+				Point.MaterialID = Voxel.MaterialID;
+				Point.BiomeID = Voxel.BiomeID;
+				Point.FaceType = FaceType;
+				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
+				Point.ComputeSlopeAngle();
+
+				OutSurfaceData.SurfacePoints.Add(Point);
+				break; // Found topmost surface for this column
+			}
+		}
+	}
+
+	OutSurfaceData.SurfaceAreaEstimate = OutSurfaceData.SurfacePoints.Num() * SurfacePointSpacing * SurfacePointSpacing;
+	OutSurfaceData.bIsValid = true;
 }
 
 FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) const

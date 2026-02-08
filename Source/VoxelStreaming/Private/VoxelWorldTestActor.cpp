@@ -1769,8 +1769,8 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 		const FScatterStatistics Stats = ScatterMgr->GetStatistics();
 		const int32 PendingScatter = ScatterMgr->GetPendingGenerationCount();
 		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-			FString::Printf(TEXT("Scatter: %d chunks, %lld instances, Pending=%d"),
-				Stats.ChunksWithScatter, Stats.TotalSpawnPoints, PendingScatter));
+			FString::Printf(TEXT("Scatter: %d chunks, %d HISM, %lld spawned, Pending=%d"),
+				Stats.ChunksWithScatter, Stats.TotalHISMInstances, Stats.TotalSpawnPoints, PendingScatter));
 	}
 
 	// Collision stats (if available)

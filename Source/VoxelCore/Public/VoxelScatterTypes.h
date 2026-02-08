@@ -538,11 +538,15 @@ struct VOXELCORE_API FScatterStatistics
 	UPROPERTY(BlueprintReadOnly)
 	int32 ChunksWithScatter = 0;
 
-	/** Total surface points extracted */
+	/** Current HISM instance count (actual rendered instances) */
+	UPROPERTY(BlueprintReadOnly)
+	int32 TotalHISMInstances = 0;
+
+	/** Total surface points extracted (cumulative) */
 	UPROPERTY(BlueprintReadOnly)
 	int64 TotalSurfacePoints = 0;
 
-	/** Total spawn points generated */
+	/** Total spawn points generated (cumulative) */
 	UPROPERTY(BlueprintReadOnly)
 	int64 TotalSpawnPoints = 0;
 

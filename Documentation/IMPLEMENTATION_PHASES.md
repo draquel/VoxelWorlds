@@ -565,8 +565,9 @@ Mesh generation was moved to background threads to eliminate stuttering:
 - [x] Flicker prevention (stationary-only rebuilds)
 - [x] Foliage LOD (HISM distance culling + per-type LOD settings)
 - [x] Performance profiling (on-screen HUD with Phase 7 targets)
-- [ ] GPU-based scatter generation (future optimization)
-- [ ] Memory optimization
+- [x] Async scatter generation (7D-1: thread pool extraction + placement)
+- [x] GPU surface extraction (7D-2: compute shader with occupancy grid dedup)
+- [x] Voxel-based surface extraction (7D-5: LOD-independent scatter from voxel data)
 
 ### Deliverables
 - Working vegetation system ✓
@@ -919,8 +920,46 @@ Phase 7 performance targets displayed for comparison:
 2. ~~HISM mesh rendering~~ - COMPLETE (7B)
 3. ~~Performance optimization~~ - COMPLETE (7C)
 4. ~~Edit integration~~ - COMPLETE
-5. GPU-based scatter generation - Future optimization
-6. Performance profiling - In progress
+5. ~~GPU-based scatter generation~~ - COMPLETE (7D-2)
+6. ~~Performance profiling~~ - COMPLETE
+7. ~~Async scatter generation~~ - COMPLETE (7D-1)
+8. ~~Voxel-based surface extraction~~ - COMPLETE (7D-5)
+
+### Phase 7D: Async & GPU Scatter Optimization
+
+**Goal**: Eliminate scatter-caused frame drops when moving fast through scatter-heavy areas.
+
+#### 7D-1: Async Scatter Generation - COMPLETE
+- [x] Add `MaxAsyncScatterTasks` UPROPERTY to VoxelWorldConfiguration (int32, default 2)
+- [x] Add `FAsyncScatterResult` struct with ChunkCoord, FChunkSurfaceData, FChunkScatterData
+- [x] Add MPSC queue `CompletedScatterQueue` for thread pool -> game thread results
+- [x] Add `AsyncScatterInProgress` TSet for in-flight tracking
+- [x] Refactor `ProcessPendingGenerationQueue()` to launch async tasks instead of inline generation
+- [x] Implement `LaunchAsyncScatterGeneration()` - captures all data by value, dispatches to thread pool
+- [x] Implement `ProcessCompletedAsyncScatter()` - drains results, caches data, updates HISM on game thread
+- [x] Update `GetPendingGenerationCount()` to include async in-flight tasks
+- [x] Handle edge cases: chunk unloaded during async, edit during async, shutdown safety
+
+#### 7D-2: GPU Surface Extraction - COMPLETE
+- [x] Create `ScatterSurfaceExtraction.usf` compute shader (64 threads/group, spatial dedup via occupancy grid)
+- [x] Create `VoxelGPUSurfaceExtractor.h/cpp` - RDG dispatch, staging buffer readback
+- [x] Add RenderCore/RHI/Renderer dependencies to VoxelScatter.Build.cs
+- [x] Add `bUseGPUScatterExtraction` config property (default false)
+- [x] Integrate GPU path into `LaunchAsyncScatterGeneration()` - GPU extraction then CPU placement
+- [x] Add `ProcessCompletedGPUExtractions()` for GPU->placement pipeline
+- [x] Cleared volume filtering applied after GPU readback (GPU has no UObject access)
+
+#### 7D-5: Voxel-Based Surface Extraction - COMPLETE
+- [x] Implement `ExtractSurfacePointsFromVoxelData()` - scans 32×32 voxel columns top-down for surface transitions
+- [x] Interpolate Z from density using Marching Cubes edge interpolation formula
+- [x] Compute normals from density gradient (central differences)
+- [x] Read MaterialID/BiomeID directly from FVoxelData (no UV1/Color decoding needed)
+- [x] Update `OnChunkMeshDataReady()` to pass VoxelData, ChunkSize, VoxelSize from ChunkManager
+- [x] Store VoxelData in `FPendingScatterGeneration` for CPU path, mesh data only for GPU path
+- [x] Update async path (`LaunchAsyncScatterGeneration()`) to use voxel-based extraction
+- [x] Update sync fallback (`GenerateChunkScatterFromPending()`) to use voxel-based extraction
+- [x] Remove LOD-tiered filtering (no longer needed since voxel data is LOD-independent)
+- [x] Known limitation: Uses base VoxelData, not edit-merged data (player edits handled via ClearedVolumesPerChunk)
 
 ---
 

@@ -5,20 +5,29 @@
 
 ## Overview
 
-The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. The system extracts surface points from mesh data, applies placement rules, and manages HISM instances with optimized rebuild strategies.
+The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. The system extracts surface points from voxel data (or optionally mesh vertices via GPU compute), applies placement rules, and manages HISM instances with optimized rebuild strategies. All scatter generation runs asynchronously on the thread pool.
 
 ## Architecture
 
 ```
 VoxelChunkManager
     │
-    ├── OnChunkMeshDataReady() ──► VoxelScatterManager
-    │                                    │
-    │                                    ├── VoxelSurfaceExtractor (extract surface points)
-    │                                    │
-    │                                    ├── VoxelScatterPlacement (apply rules, generate spawn points)
-    │                                    │
-    │                                    └── VoxelScatterRenderer (HISM instance management)
+    ├── OnChunkMeshDataReady(ChunkCoord, LOD, MeshData, VoxelData, ChunkSize, VoxelSize)
+    │       │
+    │       ▼
+    │   VoxelScatterManager
+    │       │
+    │       ├── [CPU Path - Default] ExtractSurfacePointsFromVoxelData()
+    │       │       Uses 32³ voxel data directly (LOD-independent)
+    │       │
+    │       ├── [GPU Path - Optional] VoxelGPUSurfaceExtractor
+    │       │       Compute shader extraction from mesh vertices
+    │       │
+    │       ├── VoxelScatterPlacement (apply rules, generate spawn points)
+    │       │       Runs on thread pool (async)
+    │       │
+    │       └── VoxelScatterRenderer (HISM instance management)
+    │               Game thread only
     │
     └── OnChunkEdited() ──► ClearScatterInRadius() or RegenerateChunkScatter()
 ```
@@ -168,7 +177,71 @@ struct FScatterSpawnPoint
 
 ### 1. Surface Extraction
 
-When mesh data is ready, surface points are extracted using spatial hashing:
+Two extraction methods are available:
+
+#### CPU Path: Voxel-Based Extraction (Default)
+
+The default path extracts surface points directly from the 32³ voxel data, which is **LOD-independent** — voxel data is always generated at full resolution regardless of the chunk's LOD level, producing identical scatter at any LOD.
+
+```cpp
+void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
+    const TArray<FVoxelData>& VoxelData,
+    const FIntVector& ChunkCoord,
+    const FVector& ChunkWorldOrigin,
+    int32 ChunkSize,      // Always 32
+    float VoxelSize,
+    float SurfacePointSpacing,
+    const TArray<FClearedScatterVolume>& ClearedVolumes,
+    FChunkSurfaceData& OutSurfaceData)
+{
+    // Stride to match SurfacePointSpacing
+    const int32 Stride = FMath::Max(1, FMath::RoundToInt(SurfacePointSpacing / VoxelSize));
+
+    // Scan columns top-down for surface transitions
+    for (int32 X = 0; X < ChunkSize; X += Stride)
+    {
+        for (int32 Y = 0; Y < ChunkSize; Y += Stride)
+        {
+            for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
+            {
+                const FVoxelData& Voxel = VoxelData[X + Y*ChunkSize + Z*ChunkSize*ChunkSize];
+                if (!Voxel.IsSolid()) continue;
+
+                // Check voxel above is air (surface transition)
+                if (Z + 1 < ChunkSize && VoxelData[...above...].IsSolid()) continue;
+
+                // Interpolate Z position (same formula as Marching Cubes edge interpolation)
+                // t = (VOXEL_SURFACE_THRESHOLD - D_solid) / (D_air - D_solid)
+                float Fraction = ...;
+                FVector WorldPos(ChunkWorldOrigin.X + X * VoxelSize,
+                                 ChunkWorldOrigin.Y + Y * VoxelSize,
+                                 ChunkWorldOrigin.Z + (Z + Fraction) * VoxelSize);
+
+                // Normal from density gradient (central differences)
+                // MaterialID/BiomeID read directly from FVoxelData
+                // Skip if inside cleared volume
+
+                break; // Found topmost surface for this column
+            }
+        }
+    }
+}
+```
+
+**Advantages**:
+- LOD-independent: Identical scatter output regardless of chunk LOD level
+- No mesh dependency: Works before mesh is fully ready
+- Direct data access: MaterialID and BiomeID read from FVoxelData without UV decoding
+
+**Known Limitation**: Uses base procedural VoxelData, not edit-merged data. Player edits are handled via `ClearedVolumesPerChunk` instead.
+
+#### GPU Path: Mesh Vertex Extraction (Optional)
+
+When `bUseGPUScatterExtraction` is enabled, surface points are extracted from mesh vertices via compute shader. See [GPU Surface Extraction](#gpu-surface-extraction-phase-7d-2) for details.
+
+#### Legacy CPU Path: Mesh Vertex Extraction
+
+The original `FVoxelSurfaceExtractor` samples mesh vertices with spatial hashing. Still used internally by the GPU fallback path:
 
 ```cpp
 void FVoxelSurfaceExtractor::ExtractSurfacePoints(
@@ -185,17 +258,10 @@ void FVoxelSurfaceExtractor::ExtractSurfacePoints(
     for (int32 VertIndex = 0; VertIndex < MeshData.Positions.Num(); ++VertIndex)
     {
         FVector WorldPos = ChunkWorldOrigin + FVector(MeshData.Positions[VertIndex]);
-
-        // Spatial hash cell
-        FIntVector Cell(
-            FMath::FloorToInt(WorldPos.X / TargetSpacing),
-            FMath::FloorToInt(WorldPos.Y / TargetSpacing),
-            FMath::FloorToInt(WorldPos.Z / TargetSpacing)
-        );
-
+        FIntVector Cell(FMath::FloorToInt(WorldPos.X / TargetSpacing), ...);
         if (OccupiedCells.Contains(Cell)) continue;
 
-        // Extract surface point data from mesh
+        // Extract surface point data from mesh vertex
         FVoxelSurfacePoint Point;
         Point.Position = WorldPos;
         Point.Normal = FVector(MeshData.Normals[VertIndex]).GetSafeNormal();
@@ -208,6 +274,8 @@ void FVoxelSurfaceExtractor::ExtractSurfacePoints(
     }
 }
 ```
+
+**Note**: This path is LOD-dependent — mesh vertices change with LOD level, causing different scatter density and positions at different LODs.
 
 ### 2. Scatter Placement
 
@@ -485,13 +553,108 @@ Enable via `bScatterDebugVisualization` in VoxelWorldConfiguration:
 - Surface normals: Blue lines
 - Scatter radius: Yellow sphere around viewer
 
+## Async Generation (Phase 7D-1)
+
+Surface extraction and scatter placement now run on the thread pool, keeping the game thread free.
+
+### Data Flow
+```
+Game Thread:  Pop queue -> Launch Async
+Thread Pool:               Extract -> Place -> Enqueue Result
+Game Thread:               Drain Result -> Cache -> HISM Update
+```
+
+### Configuration
+- `MaxAsyncScatterTasks` (1-4, default 2): Max concurrent async tasks
+- `MaxScatterGenerationsPerFrame` (default 2): Max tasks launched per frame
+
+### Edge Cases
+- **Chunk unloaded during async**: Result arrives, chunk not in tracking -> discarded
+- **Edit during async**: Cleared volumes updated on game thread; stale result discarded
+- **GetPendingGenerationCount()**: Returns queued + in-flight count for "world stable" check
+- **Shutdown safety**: `TWeakObjectPtr<UVoxelScatterManager>` in lambda prevents use-after-free
+
+### Key Files
+- `VoxelScatterManager.h`: `FAsyncScatterResult`, `CompletedScatterQueue`, `AsyncScatterInProgress`
+- `VoxelScatterManager.cpp`: `LaunchAsyncScatterGeneration()`, `ProcessCompletedAsyncScatter()`
+
+## GPU Surface Extraction (Phase 7D-2)
+
+Optional GPU compute shader path for surface point extraction. Enabled via `bUseGPUScatterExtraction` in VoxelWorldConfiguration.
+
+### Architecture
+```
+Game Thread:  Prepare request -> ENQUEUE_RENDER_COMMAND
+Render Thread:                   Upload -> Dispatch CS -> Readback -> Enqueue result
+Game Thread:  Drain GPU result -> Filter cleared volumes -> Launch CPU placement on thread pool
+Thread Pool:                     Scatter placement -> Enqueue final result
+Game Thread:  Drain final result -> Cache -> HISM Update
+```
+
+### Compute Shader
+- File: `Shaders/Private/ScatterSurfaceExtraction.usf`
+- Thread groups: `[numthreads(64, 1, 1)]`, one thread per mesh vertex
+- Deduplication: Occupancy grid with `InterlockedCompareExchange`
+- Output: `FSurfacePointGPU` (48 bytes) with atomic append counter
+
+### Memory Per Dispatch
+- Upload: ~400KB (10K vertices * 4 buffers)
+- Occupancy grid: ~32KB (32x32x32 cells)
+- Output: ~192KB (4096 points * 48 bytes max)
+- Total: ~624KB per chunk, ~1.2MB with 2 concurrent
+
+### Fallback
+If GPU unavailable or `bUseGPUScatterExtraction = false`, seamlessly falls back to CPU async path.
+
+### Key Files
+- `ScatterSurfaceExtraction.usf`: GPU compute shader
+- `VoxelGPUSurfaceExtractor.h/cpp`: RDG dispatch and readback
+- `VoxelScatterManager.cpp`: `ProcessCompletedGPUExtractions()`
+
+## Voxel-Based Surface Extraction (Phase 7D-5)
+
+The default CPU extraction path uses voxel data instead of mesh vertices, making scatter generation **LOD-independent**.
+
+### Why Voxel-Based?
+
+Mesh-vertex-based extraction produces different results at different LOD levels because:
+- LOD stride reduces vertex count (LOD 1 = half vertices, LOD 2 = quarter, etc.)
+- Fewer surface points means lower scatter density at higher LODs
+- Vertex positions shift slightly with LOD interpolation
+
+Voxel data is **always 32³ at base VoxelSize** regardless of LOD level, so the same chunk produces identical surface points whether it's at LOD 0 or LOD 3.
+
+### Algorithm
+
+1. For each column (X, Y) at `SurfacePointSpacing` stride:
+2. Scan Z from top (ChunkSize-1) to bottom (0)
+3. Find first solid voxel (`Density >= 127`) with air above
+4. Interpolate exact Z: `t = (127 - D_solid) / (D_air - D_solid)`
+5. Compute normal from density gradient (central differences)
+6. Read MaterialID and BiomeID directly from `FVoxelData`
+7. Skip points inside cleared volumes (player edits)
+
+### Key Properties
+- **Deterministic**: Same voxel data always produces same surface points
+- **LOD-independent**: No LOD-tiered filtering needed
+- **CompletedScatterTypes**: Tracks which types have been generated per chunk to prevent duplicates
+- **Supplemental passes**: Distance-based definitions still added when player approaches
+
+### Key Files
+- `VoxelScatterManager.h`: `ExtractSurfacePointsFromVoxelData()` declaration, `FPendingScatterGeneration::ChunkVoxelData`
+- `VoxelScatterManager.cpp`: `ExtractSurfacePointsFromVoxelData()` implementation, integration in `LaunchAsyncScatterGeneration()`
+- `VoxelChunkManager.cpp`: Passes `VoxelData`, `ChunkSize`, `VoxelSize` via `OnChunkMeshDataReady()`
+
 ## Future Enhancements
 
-1. **GPU-based scatter generation**: Move placement to compute shader
+1. ~~**GPU-based scatter generation**~~: COMPLETE (7D-2)
 2. **Foliage LOD**: Leverage HISM's built-in LOD system
 3. **Procedural variation**: Per-instance custom data for shader variation
-4. **Async surface extraction**: Move to background threads
-5. **Instance pooling**: Reuse instances when chunks unload/reload
+4. ~~**Async surface extraction**~~: COMPLETE (7D-1)
+5. ~~**Voxel-based surface extraction**~~: COMPLETE (7D-5)
+6. **Instance pooling**: Reuse instances when chunks unload/reload
+7. **GPU scatter placement** (7D-3): Move rule evaluation to compute shader
+8. **Direct GPU->HISM** (7D-4): Eliminate readback by writing transforms directly
 
 ## See Also
 

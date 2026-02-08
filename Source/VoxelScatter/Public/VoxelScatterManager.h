@@ -3,7 +3,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Queue.h"
+#include "VoxelData.h"
 #include "VoxelScatterTypes.h"
+#include "VoxelGPUSurfaceExtractor.h"
 #include "VoxelScatterManager.generated.h"
 
 class UVoxelWorldConfiguration;
@@ -37,7 +40,9 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnChunkScatterRemoved, const FIntVector& /*
  * - Listens for chunk mesh ready events
  * - Cleans up when chunks unload
  *
- * Thread Safety: Must be accessed from game thread only.
+ * Thread Safety: Game thread for all public API. Surface extraction and placement
+ * run on thread pool via LaunchAsyncScatterGeneration(). Results are consumed
+ * on game thread via ProcessCompletedAsyncScatter().
  *
  * @see UVoxelChunkManager
  * @see FVoxelSurfaceExtractor
@@ -153,22 +158,28 @@ public:
 	int32 GetScatterChunkCount() const { return ScatterDataCache.Num(); }
 
 	/**
-	 * Get number of chunks pending scatter generation.
+	 * Get number of chunks pending scatter generation (queued + in-flight async).
 	 * Used to detect if world is still loading.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
-	int32 GetPendingGenerationCount() const { return PendingGenerationQueue.Num(); }
+	int32 GetPendingGenerationCount() const { return PendingGenerationQueue.Num() + AsyncScatterInProgress.Num(); }
 
 	// ==================== Mesh Data Callback ====================
 
 	/**
 	 * Called when chunk mesh data is ready.
-	 * Triggers surface extraction and scatter generation.
+	 * Triggers surface extraction and scatter generation using voxel data
+	 * (LOD-independent) for consistent scatter regardless of mesh LOD level.
 	 *
 	 * @param ChunkCoord Chunk coordinate
-	 * @param MeshData The mesh data
+	 * @param LODLevel LOD level of the mesh (used for GPU extraction fallback)
+	 * @param MeshData The mesh data (used for GPU extraction path only)
+	 * @param VoxelData Full-resolution voxel data for LOD-independent surface extraction
+	 * @param ChunkSize Number of voxels per edge (typically 32)
+	 * @param VoxelSize World-space size of each voxel (typically 100)
 	 */
-	void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData);
+	void OnChunkMeshDataReady(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData,
+		const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
 
 	/**
 	 * Called when a chunk is unloaded.
@@ -371,6 +382,22 @@ protected:
 	/** Per-chunk list of cleared volumes from player edits */
 	TMap<FIntVector, TArray<FClearedScatterVolume>> ClearedVolumesPerChunk;
 
+	/**
+	 * Extract surface points from voxel data (LOD-independent).
+	 * Scans voxel columns top-down for surface transitions, interpolates exact Z,
+	 * computes normals from density gradient, reads MaterialID/BiomeID from voxel data.
+	 * Produces consistent results regardless of which LOD level the mesh was generated at.
+	 */
+	static void ExtractSurfacePointsFromVoxelData(
+		const TArray<FVoxelData>& VoxelData,
+		const FIntVector& ChunkCoord,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize,
+		float SurfacePointSpacing,
+		const TArray<FClearedScatterVolume>& ClearedVolumes,
+		FChunkSurfaceData& OutSurfaceData);
+
 	// ==================== Debug ====================
 
 	/** Whether debug visualization is enabled */
@@ -389,8 +416,17 @@ protected:
 	{
 		FIntVector ChunkCoord;
 		float DistanceToViewer;
+		int32 LODLevel = 0;
 
-		// Lightweight mesh data copy (only what's needed for surface extraction)
+		// Definitions to generate (captured at queue time based on distance rules)
+		TArray<FScatterDefinition> CapturedDefinitions;
+
+		// Voxel data for LOD-independent surface extraction (CPU path)
+		TArray<FVoxelData> ChunkVoxelData;
+		int32 ChunkSize = VOXEL_DEFAULT_CHUNK_SIZE;
+		float VoxelSize = 100.0f;
+
+		// Mesh data copy (only populated when GPU extraction is enabled)
 		TArray<FVector3f> Positions;
 		TArray<FVector3f> Normals;
 		TArray<FVector2f> UV1s;
@@ -414,8 +450,61 @@ protected:
 	/** Process pending scatter generation queue */
 	void ProcessPendingGenerationQueue();
 
-	/** Generate scatter from cached pending data */
+	/** Generate scatter from cached pending data (used as fallback, normally async) */
 	void GenerateChunkScatterFromPending(const FPendingScatterGeneration& PendingData);
+
+	// ==================== Async Scatter Generation ====================
+
+	/** Result from async scatter generation on thread pool */
+	struct FAsyncScatterResult
+	{
+		FIntVector ChunkCoord;
+		FChunkSurfaceData SurfaceData;
+		FChunkScatterData ScatterData;
+		TSet<int32> GeneratedTypeIDs;
+		bool bSuccess = false;
+	};
+
+	/** MPSC queue for completed async scatter results (written by thread pool, read by game thread) */
+	TQueue<FAsyncScatterResult, EQueueMode::Mpsc> CompletedScatterQueue;
+
+	/** Chunks currently being processed asynchronously */
+	TSet<FIntVector> AsyncScatterInProgress;
+
+	/** Supplemental passes deferred because async scatter was in-flight.
+	 *  E.g., LOD 0 mesh arrived while LOD > 0 trees are being generated.
+	 *  Re-queued when async result arrives in ProcessCompletedAsyncScatter(). */
+	TMap<FIntVector, FPendingScatterGeneration> DeferredSupplementalPasses;
+
+	/** Per-chunk set of scatter type IDs that have been fully generated.
+	 *  Types are never regenerated once completed — prevents pop-in. */
+	TMap<FIntVector, TSet<int32>> CompletedScatterTypes;
+
+	/** Maximum concurrent async scatter tasks */
+	int32 MaxAsyncScatterTasks = 2;
+
+	/** Launch async scatter generation on thread pool */
+	void LaunchAsyncScatterGeneration(FPendingScatterGeneration PendingData);
+
+	/** Process completed async scatter results on game thread */
+	void ProcessCompletedAsyncScatter();
+
+	// ==================== GPU Surface Extraction ====================
+
+	/** Whether GPU surface extraction is enabled and supported */
+	bool bUseGPUExtraction = false;
+
+	/** MPSC queue for completed GPU extraction results (written by render thread) */
+	TQueue<FGPUExtractionResult, EQueueMode::Mpsc> CompletedGPUExtractionQueue;
+
+	/** Chunks waiting for GPU extraction results before scatter placement */
+	TMap<FIntVector, TArray<FScatterDefinition>> GPUExtractionPendingPlacement;
+
+	/** LOD level of mesh data used for GPU extraction (for LOD tracking) */
+	TMap<FIntVector, int32> GPUExtractionPendingLODLevel;
+
+	/** Process completed GPU extractions and launch placement on thread pool */
+	void ProcessCompletedGPUExtractions();
 
 	// ==================== Statistics ====================
 

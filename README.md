@@ -138,7 +138,9 @@ VoxelWorlds/
   - ✅ **Phase 7B**: HISM mesh rendering (per-type HISM components, instance management)
   - ✅ **Phase 7C**: Performance optimization (deferred rebuilds, batch instance addition, throttled generation)
   - ✅ **Edit integration**: Targeted scatter removal for player edits, full regeneration for system edits
-  - ⏳ GPU-based scatter generation (future optimization)
+  - ✅ **Phase 7D-1**: Async scatter generation (thread pool extraction + placement)
+  - ✅ **Phase 7D-2**: GPU surface extraction (compute shader with occupancy grid dedup)
+  - ✅ **Phase 7D-5**: Voxel-based surface extraction (LOD-independent scatter from voxel data)
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 

@@ -341,6 +341,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (ClampMin = "1000.0", EditCondition = "bEnableScatter"))
 	float ScatterRadius = 10000.0f;
 
+	/** Use GPU compute shaders for scatter surface extraction (requires SM5) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (EditCondition = "bEnableScatter"))
+	bool bUseGPUScatterExtraction = false;
+
 	/** Enable scatter debug visualization (spheres at spawn points) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Debug", meta = (EditCondition = "bEnableScatter"))
 	bool bScatterDebugVisualization = false;
@@ -374,6 +378,10 @@ public:
 	/** Defer collision/scatter when generation queue exceeds this count (0 = disabled) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "0", ClampMax = "200"))
 	int32 DeferSubsystemsThreshold = 20;
+
+	/** Maximum concurrent async scatter generation tasks (1-4). Scatter extraction and placement run on thread pool. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 MaxAsyncScatterTasks = 2;
 
 public:
 	UVoxelWorldConfiguration();

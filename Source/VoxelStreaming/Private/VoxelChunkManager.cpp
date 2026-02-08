@@ -236,8 +236,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	Timing.CollisionMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
 	// === Scatter manager ===
+	// Always update scatter (drains async results, updates HISM instances).
+	// New task launches are throttled internally; skipping Update() entirely
+	// when deferred causes async results to pile up and blocks new generations
+	// once the generation queue drains.
 	SectionStart = FPlatformTime::Seconds();
-	if (!bSubsystemsDeferred && ScatterManager && Configuration && Configuration->bEnableScatter)
+	if (ScatterManager && Configuration && Configuration->bEnableScatter)
 	{
 		ScatterManager->Update(Context.ViewerPosition, DeltaTime);
 
@@ -1825,12 +1829,11 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			PendingMesh.MeshData
 		);
 
-		// Notify scatter manager for any LOD level
-		// The scatter manager will skip if it already has data for this chunk,
-		// and will filter definitions by their individual SpawnDistance
+		// Notify scatter manager with voxel data for LOD-independent surface extraction
 		if (ScatterManager && Configuration && Configuration->bEnableScatter)
 		{
-			ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.MeshData);
+			ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
+				State->Descriptor.VoxelData, State->Descriptor.ChunkSize, Configuration->VoxelSize);
 		}
 
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)

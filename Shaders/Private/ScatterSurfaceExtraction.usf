@@ -1,0 +1,174 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// GPU Compute Shader for Scatter Surface Extraction
+//
+// Extracts surface points from mesh vertex data for scatter placement.
+// One thread per mesh vertex. Uses spatial hashing via occupancy grid
+// for deduplication (same as CPU path).
+//
+// Input:  Mesh vertex data (Positions, Normals, UV1s, Colors)
+// Output: Deduplicated surface points with material/biome/slope data
+
+#include "/Engine/Public/Platform.ush"
+
+// ==================== Parameters ====================
+
+StructuredBuffer<float3> InputPositions;
+StructuredBuffer<float3> InputNormals;
+StructuredBuffer<float2> InputUV1s;
+StructuredBuffer<uint>   InputColors;
+
+// Occupancy grid for spatial deduplication
+// Grid covers chunk volume: ChunkWorldSize / CellSize cells per axis
+RWStructuredBuffer<uint> OccupancyGrid;
+
+// Output surface points with atomic append counter
+struct FSurfacePointGPU
+{
+	float3 Position;     // 12
+	float3 Normal;       // 12
+	uint   MaterialID;   // 4
+	uint   BiomeID;      // 4
+	uint   FaceType;     // 4  (0=Top, 1=Side, 2=Bottom)
+	uint   AO;           // 4
+	float  SlopeAngle;   // 4
+	uint   _Pad;         // 4  (align to 16)
+};
+
+RWStructuredBuffer<FSurfacePointGPU> OutputSurfacePoints;
+
+// Counter buffer: [0] = surface point count
+RWStructuredBuffer<uint> SurfacePointCounter;
+
+// ==================== Uniforms ====================
+
+uint   VertexCount;
+uint   bHasUV1;
+uint   bHasColors;
+float3 ChunkWorldOrigin;
+float  CellSize;
+uint   GridDimX;
+uint   GridDimY;
+uint   GridDimZ;
+float3 GridOrigin;         // World-space origin of the occupancy grid
+uint   MaxOutputPoints;
+
+// ==================== Helper Functions ====================
+
+uint GetGridIndex(int3 GridCell)
+{
+	// Clamp to grid bounds
+	GridCell.x = clamp(GridCell.x, 0, (int)GridDimX - 1);
+	GridCell.y = clamp(GridCell.y, 0, (int)GridDimY - 1);
+	GridCell.z = clamp(GridCell.z, 0, (int)GridDimZ - 1);
+	return (uint)GridCell.x + (uint)GridCell.y * GridDimX + (uint)GridCell.z * GridDimX * GridDimY;
+}
+
+int3 WorldToGridCell(float3 WorldPos)
+{
+	float3 RelPos = WorldPos - GridOrigin;
+	return int3(
+		(int)floor(RelPos.x / CellSize),
+		(int)floor(RelPos.y / CellSize),
+		(int)floor(RelPos.z / CellSize)
+	);
+}
+
+// ==================== Reset Counter Shader ====================
+
+[numthreads(1, 1, 1)]
+void ResetCounterCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	SurfacePointCounter[0] = 0;
+}
+
+// ==================== Main Extraction Shader ====================
+
+[numthreads(64, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint VertIndex = DispatchThreadId.x;
+	if (VertIndex >= VertexCount)
+	{
+		return;
+	}
+
+	// Read vertex position and compute world position
+	float3 LocalPos = InputPositions[VertIndex];
+	float3 WorldPos = ChunkWorldOrigin + LocalPos;
+
+	// Spatial hash cell check (deduplication)
+	int3 GridCell = WorldToGridCell(WorldPos);
+
+	// Check grid bounds
+	if (GridCell.x < 0 || GridCell.x >= (int)GridDimX ||
+	    GridCell.y < 0 || GridCell.y >= (int)GridDimY ||
+	    GridCell.z < 0 || GridCell.z >= (int)GridDimZ)
+	{
+		return;
+	}
+
+	uint GridIdx = GetGridIndex(GridCell);
+
+	// Atomic claim: first thread to claim a cell wins
+	uint OldValue;
+	InterlockedCompareExchange(OccupancyGrid[GridIdx], 0, 1, OldValue);
+	if (OldValue != 0)
+	{
+		// Cell already occupied, skip this vertex
+		return;
+	}
+
+	// Read normal
+	float3 Normal = normalize(InputNormals[VertIndex]);
+
+	// Decode UV1 data (MaterialID in .x, FaceType in .y)
+	uint MaterialID = 0;
+	uint FaceType = 0; // 0=Top
+	if (bHasUV1)
+	{
+		float2 UV1 = InputUV1s[VertIndex];
+		MaterialID = (uint)round(UV1.x);
+		int FaceTypeInt = (int)round(UV1.y);
+		FaceType = (FaceTypeInt == 1) ? 1 : (FaceTypeInt == 2) ? 2 : 0;
+	}
+
+	// Decode color data (BiomeID in G, AO in B low 2 bits)
+	uint BiomeID = 0;
+	uint AO = 0;
+	if (bHasColors)
+	{
+		uint PackedColor = InputColors[VertIndex];
+		// BGRA packing: B=byte0, G=byte1, R=byte2, A=byte3
+		BiomeID = (PackedColor >> 8) & 0xFF;  // G channel
+		AO = PackedColor & 0x03;               // B channel low 2 bits
+	}
+
+	// Compute slope angle inline
+	float CosAngle = clamp(dot(Normal, float3(0, 0, 1)), -1.0f, 1.0f);
+	float SlopeAngle = degrees(acos(CosAngle));
+
+	// Atomic append to output buffer
+	uint OutputIndex;
+	InterlockedAdd(SurfacePointCounter[0], 1, OutputIndex);
+
+	if (OutputIndex >= MaxOutputPoints)
+	{
+		// Output buffer full, decrement counter back
+		InterlockedAdd(SurfacePointCounter[0], -1);
+		return;
+	}
+
+	// Write surface point
+	FSurfacePointGPU Point;
+	Point.Position = WorldPos;
+	Point.Normal = Normal;
+	Point.MaterialID = MaterialID;
+	Point.BiomeID = BiomeID;
+	Point.FaceType = FaceType;
+	Point.AO = AO;
+	Point.SlopeAngle = SlopeAngle;
+	Point._Pad = 0;
+
+	OutputSurfacePoints[OutputIndex] = Point;
+}

@@ -22,6 +22,9 @@ void FVoxelScatterPlacement::GenerateSpawnPoints(
 
 	if (Definitions.Num() == 0)
 	{
+		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): GenerateSpawnPoints called with 0 definitions! (surface points=%d)"),
+			SurfaceData.ChunkCoord.X, SurfaceData.ChunkCoord.Y, SurfaceData.ChunkCoord.Z,
+			SurfaceData.SurfacePoints.Num());
 		OutScatterData.bIsValid = true; // Valid but empty
 		return;
 	}
@@ -32,12 +35,14 @@ void FVoxelScatterPlacement::GenerateSpawnPoints(
 	OutScatterData.SpawnPoints.Reserve(EstimatedPointsPerDef * Definitions.Num());
 
 	// Generate spawn points for each scatter type
+	int32 EnabledDefCount = 0;
 	for (const FScatterDefinition& Definition : Definitions)
 	{
 		if (!Definition.bEnabled)
 		{
 			continue;
 		}
+		++EnabledDefCount;
 
 		// Use unique seed per scatter type to ensure independence
 		const uint32 TypeSeed = ChunkSeed ^ (Definition.ScatterID * 2654435761u);
@@ -46,9 +51,18 @@ void FVoxelScatterPlacement::GenerateSpawnPoints(
 
 	OutScatterData.bIsValid = true;
 
-	UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Generated %d spawn points from %d surface points"),
-		SurfaceData.ChunkCoord.X, SurfaceData.ChunkCoord.Y, SurfaceData.ChunkCoord.Z,
-		OutScatterData.SpawnPoints.Num(), SurfaceData.SurfacePoints.Num());
+	if (OutScatterData.SpawnPoints.Num() == 0 && SurfaceData.SurfacePoints.Num() > 0)
+	{
+		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): 0 spawn from %d defs (%d enabled), %d surface pts"),
+			SurfaceData.ChunkCoord.X, SurfaceData.ChunkCoord.Y, SurfaceData.ChunkCoord.Z,
+			Definitions.Num(), EnabledDefCount, SurfaceData.SurfacePoints.Num());
+	}
+	else
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Generated %d spawn points from %d surface points"),
+			SurfaceData.ChunkCoord.X, SurfaceData.ChunkCoord.Y, SurfaceData.ChunkCoord.Z,
+			OutScatterData.SpawnPoints.Num(), SurfaceData.SurfacePoints.Num());
+	}
 }
 
 int32 FVoxelScatterPlacement::GenerateSpawnPointsForType(
