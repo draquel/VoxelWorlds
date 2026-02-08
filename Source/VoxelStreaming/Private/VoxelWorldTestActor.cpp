@@ -1722,9 +1722,10 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 
 	// Queue depths
 	const int32 GenQueue = ChunkManager->GetPendingGenerationCount();
+	const int32 GenInFlight = ChunkManager->GetAsyncGenerationInProgressCount();
 	const int32 MeshQueue = ChunkManager->GetPendingMeshingCount();
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-		FString::Printf(TEXT("Queues: Gen=%d, Mesh=%d"), GenQueue, MeshQueue));
+		FString::Printf(TEXT("Queues: Gen=%d (async=%d), Mesh=%d"), GenQueue, GenInFlight, MeshQueue));
 
 	// Voxel-specific memory breakdown
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, MemColor,
@@ -1742,21 +1743,23 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 
 	// Adaptive throttle state
 	{
+		const int32 EffGen = ChunkManager->GetEffectiveMaxAsyncGenerationTasks();
 		const int32 EffAsync = ChunkManager->GetEffectiveMaxAsyncMeshTasks();
 		const int32 EffLOD = ChunkManager->GetEffectiveMaxLODRemeshPerFrame();
 		const int32 EffPending = ChunkManager->GetEffectiveMaxPendingMeshes();
 		const bool bDeferred = ChunkManager->AreSubsystemsDeferred();
 
 		UVoxelWorldConfiguration* Config = ChunkManager->GetConfiguration();
+		const int32 CfgGen = Config ? Config->MaxAsyncGenerationTasks : 2;
 		const int32 CfgAsync = Config ? Config->MaxAsyncMeshTasks : 4;
 		const int32 CfgLOD = Config ? Config->MaxLODRemeshPerFrame : 1;
 		const int32 CfgPending = Config ? Config->MaxPendingMeshes : 4;
 
-		const bool bThrottled = (EffAsync < CfgAsync || EffLOD < CfgLOD || EffPending < CfgPending);
+		const bool bThrottled = (EffGen < CfgGen || EffAsync < CfgAsync || EffLOD < CfgLOD || EffPending < CfgPending);
 		const FColor ThrottleColor = bThrottled ? FColor::Yellow : FColor::White;
 		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, ThrottleColor,
-			FString::Printf(TEXT("Throttle: Async=%d/%d LODRemesh=%d/%d Pending=%d/%d%s"),
-				EffAsync, CfgAsync, EffLOD, CfgLOD, EffPending, CfgPending,
+			FString::Printf(TEXT("Throttle: Gen=%d/%d Mesh=%d/%d LOD=%d/%d Pend=%d/%d%s"),
+				EffGen, CfgGen, EffAsync, CfgAsync, EffLOD, CfgLOD, EffPending, CfgPending,
 				bDeferred ? TEXT(" [DEFERRED]") : TEXT("")));
 	}
 

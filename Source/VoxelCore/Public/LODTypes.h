@@ -155,10 +155,10 @@ struct VOXELCORE_API FChunkLODRequest
 	{
 	}
 
-	/** Comparison for priority sorting (higher priority first) */
+	/** Comparison for priority sorting (ascending — lowest priority first, highest at back for O(1) pop) */
 	bool operator<(const FChunkLODRequest& Other) const
 	{
-		return Priority > Other.Priority;
+		return Priority < Other.Priority;
 	}
 };
 

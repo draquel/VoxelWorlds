@@ -42,6 +42,9 @@ struct VOXELCORE_API FVoxelSurfacePoint
 	UPROPERTY(BlueprintReadOnly)
 	uint8 AmbientOcclusion = 0;
 
+	/** Pre-computed slope angle in degrees (0 = flat, 90 = vertical). Computed during surface extraction. */
+	float SlopeAngle = -1.0f;
+
 	FVoxelSurfacePoint() = default;
 
 	FVoxelSurfacePoint(const FVector& InPos, const FVector& InNormal, uint8 InMaterial, uint8 InBiome, EVoxelFaceType InFaceType)
@@ -51,12 +54,24 @@ struct VOXELCORE_API FVoxelSurfacePoint
 		, BiomeID(InBiome)
 		, FaceType(InFaceType)
 	{
+		ComputeSlopeAngle();
+	}
+
+	/** Compute and cache the slope angle from the normal */
+	void ComputeSlopeAngle()
+	{
+		const float CosAngle = FMath::Clamp(FVector::DotProduct(Normal, FVector::UpVector), -1.0f, 1.0f);
+		SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(CosAngle));
 	}
 
 	/** Get slope angle in degrees (0 = flat horizontal, 90 = vertical) */
 	float GetSlopeAngle() const
 	{
-		// Dot product with up vector gives cos(angle)
+		if (SlopeAngle >= 0.0f)
+		{
+			return SlopeAngle;
+		}
+		// Fallback: compute on demand if not pre-computed
 		const float CosAngle = FMath::Clamp(FVector::DotProduct(Normal, FVector::UpVector), -1.0f, 1.0f);
 		return FMath::RadiansToDegrees(FMath::Acos(CosAngle));
 	}
@@ -356,39 +371,40 @@ struct VOXELCORE_API FScatterDefinition
 			return false;
 		}
 
-		// Check slope
-		const float SlopeAngle = Point.GetSlopeAngle();
-		if (SlopeAngle < MinSlopeDegrees || SlopeAngle > MaxSlopeDegrees)
-		{
-			return false;
-		}
+		// Cheap integer/bool checks first (ordered by rejection likelihood)
 
-		// Check elevation
-		if (Point.Position.Z < MinElevation || Point.Position.Z > MaxElevation)
-		{
-			return false;
-		}
-
-		// Check face type
+		// Check face type (single bool + enum comparison)
 		if (bTopFacesOnly && Point.FaceType != EVoxelFaceType::Top)
 		{
 			return false;
 		}
 
-		// Check material filter
+		// Check elevation (two float comparisons, no trig)
+		if (Point.Position.Z < MinElevation || Point.Position.Z > MaxElevation)
+		{
+			return false;
+		}
+
+		// Check material filter (uint8 linear search)
 		if (AllowedMaterials.Num() > 0 && !AllowedMaterials.Contains(Point.MaterialID))
 		{
 			return false;
 		}
 
-		// Check biome filter
+		// Check biome filter (uint8 linear search)
 		if (AllowedBiomes.Num() > 0 && !AllowedBiomes.Contains(Point.BiomeID))
 		{
 			return false;
 		}
 
-		// Check ambient occlusion
+		// Check ambient occlusion (uint8 comparison)
 		if (bAvoidShadowedAreas && Point.AmbientOcclusion > MaxAmbientOcclusion)
+		{
+			return false;
+		}
+
+		// Slope check last — uses pre-computed angle (two float comparisons, no Acos)
+		if (Point.SlopeAngle < MinSlopeDegrees || Point.SlopeAngle > MaxSlopeDegrees)
 		{
 			return false;
 		}

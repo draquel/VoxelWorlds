@@ -112,6 +112,7 @@ void FVoxelSurfaceExtractor::ExtractSurfacePointsFiltered(
 		Point.BiomeID = BiomeID;
 		Point.FaceType = FaceType;
 		Point.AmbientOcclusion = AO;
+		Point.ComputeSlopeAngle();
 
 		// Add to output and mark cell as occupied
 		const int32 NewIndex = OutSurfaceData.SurfacePoints.Add(Point);

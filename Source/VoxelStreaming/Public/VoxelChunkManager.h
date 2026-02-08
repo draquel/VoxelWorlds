@@ -347,10 +347,14 @@ public:
 	const FVoxelTimingStats& GetTimingStats() const { return LastTimingStats; }
 
 	/** Get effective (adaptive) throttle values */
+	int32 GetEffectiveMaxAsyncGenerationTasks() const { return EffectiveMaxAsyncGenerationTasks; }
 	int32 GetEffectiveMaxAsyncMeshTasks() const { return EffectiveMaxAsyncMeshTasks; }
 	int32 GetEffectiveMaxLODRemeshPerFrame() const { return EffectiveMaxLODRemeshPerFrame; }
 	int32 GetEffectiveMaxPendingMeshes() const { return EffectiveMaxPendingMeshes; }
 	bool AreSubsystemsDeferred() const { return bSubsystemsDeferred; }
+
+	/** Get count of async generation tasks in flight */
+	int32 GetAsyncGenerationInProgressCount() const { return AsyncGenerationInProgress.Num(); }
 
 	// ==================== Debug ====================
 
@@ -541,6 +545,16 @@ protected:
 	 */
 	void RemoveFromUnloadQueue(const FIntVector& ChunkCoord);
 
+	/**
+	 * Re-prioritize generation and meshing queues based on current viewer position.
+	 * Called on viewer chunk change to ensure closest chunks are processed first.
+	 * Also updates LOD levels for queued items so they mesh at the correct LOD
+	 * without needing a post-load LOD transition. Evicts generation work beyond ViewDistance.
+	 *
+	 * @param Context Current LOD query context (viewer position, forward, etc.)
+	 */
+	void ReprioritizeQueues(const FLODQueryContext& Context);
+
 protected:
 	// ==================== Configuration ====================
 
@@ -571,13 +585,13 @@ protected:
 
 	// ==================== Processing Queues ====================
 
-	/** Chunks waiting to be generated (sorted by priority, highest first) */
+	/** Chunks waiting to be generated (sorted ascending — highest priority at back for O(1) pop) */
 	TArray<FChunkLODRequest> GenerationQueue;
 
 	/** Set of chunk coords in GenerationQueue for O(1) duplicate detection */
 	TSet<FIntVector> GenerationQueueSet;
 
-	/** Chunks waiting to be meshed (sorted by priority, highest first) */
+	/** Chunks waiting to be meshed (sorted ascending — highest priority at back for O(1) pop) */
 	TArray<FChunkLODRequest> MeshingQueue;
 
 	/** Set of chunk coords in MeshingQueue for O(1) duplicate detection */
@@ -676,6 +690,28 @@ protected:
 
 	/** Note: MaxPendingMeshes is now in VoxelWorldConfiguration; runtime value in EffectiveMaxPendingMeshes */
 
+	// ==================== Async Noise Generation ====================
+
+	/** Result of an async noise generation task */
+	struct FAsyncGenerationResult
+	{
+		FIntVector ChunkCoord;
+		TArray<FVoxelData> VoxelData;
+		bool bSuccess = false;
+	};
+
+	/** Thread-safe queue for completed async generation results */
+	TQueue<FAsyncGenerationResult, EQueueMode::Mpsc> CompletedGenerationQueue;
+
+	/** Set of chunks currently being generated asynchronously */
+	TSet<FIntVector> AsyncGenerationInProgress;
+
+	/** Process completed async generation tasks (called from game thread) */
+	void ProcessCompletedAsyncGenerations();
+
+	/** Launch async noise generation for a chunk */
+	void LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest);
+
 	// ==================== Async Mesh Generation ====================
 
 	/** Result of an async mesh generation task */
@@ -718,8 +754,9 @@ protected:
 	// ==================== Adaptive Throttling State ====================
 
 	/** Effective throttle values (adjusted by adaptive throttling) */
+	int32 EffectiveMaxAsyncGenerationTasks = 2;
 	int32 EffectiveMaxAsyncMeshTasks = 4;
-	int32 EffectiveMaxLODRemeshPerFrame = 1;
+	int32 EffectiveMaxLODRemeshPerFrame = 4;
 	int32 EffectiveMaxPendingMeshes = 4;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */

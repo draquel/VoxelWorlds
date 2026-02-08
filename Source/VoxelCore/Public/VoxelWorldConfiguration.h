@@ -347,13 +347,17 @@ public:
 
 	// ==================== Performance Tuning ====================
 
+	/** Maximum concurrent async noise generation tasks (1-8). Generation runs on thread pool to avoid game thread stalls. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 MaxAsyncGenerationTasks = 2;
+
 	/** Maximum concurrent async mesh generation tasks (1-16) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 MaxAsyncMeshTasks = 4;
 
 	/** Maximum LOD level change remeshes queued per frame (1-8) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "8"))
-	int32 MaxLODRemeshPerFrame = 1;
+	int32 MaxLODRemeshPerFrame = 4;
 
 	/** Maximum pending meshes before throttling generation (2-16) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "2", ClampMax = "16"))

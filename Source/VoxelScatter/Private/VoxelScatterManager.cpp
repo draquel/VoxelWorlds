@@ -783,7 +783,7 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 		NumToProcess = MaxScatterGenerationsPerFrame;
 	}
 
-	// Process from front of queue (closest chunks first, due to sorted insertion)
+	// Process from back of queue (closest chunks are at back, due to reversed sort)
 	for (int32 i = 0; i < NumToProcess; ++i)
 	{
 		if (PendingGenerationQueue.Num() == 0)
@@ -791,9 +791,9 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 			break;
 		}
 
-		// Take first item (closest chunk)
-		FPendingScatterGeneration Request = MoveTemp(PendingGenerationQueue[0]);
-		PendingGenerationQueue.RemoveAt(0);
+		// Take last item (closest chunk — O(1) pop from back)
+		FPendingScatterGeneration Request = MoveTemp(PendingGenerationQueue.Last());
+		PendingGenerationQueue.Pop(EAllowShrinking::No);
 		PendingQueueSet.Remove(Request.ChunkCoord);
 
 		// Generate scatter from the pending data
@@ -922,6 +922,7 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 		Point.BiomeID = BiomeID;
 		Point.FaceType = FaceType;
 		Point.AmbientOcclusion = AO;
+		Point.ComputeSlopeAngle();
 
 		const int32 NewIndex = SurfaceData.SurfacePoints.Add(Point);
 		OccupiedCells.Add(Cell, NewIndex);

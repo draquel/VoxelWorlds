@@ -136,10 +136,10 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 		30                       // Priority (highest, checked first)
 	));
 
-	// Mark caches as dirty
-	bBiomeIndexCacheDirty = true;
-	bHeightRulesCacheDirty = true;
-	bOreVeinsCacheDirty = true;
+	// Eagerly rebuild caches so they're ready for worker threads (not thread-safe to rebuild lazily)
+	RebuildBiomeIndexCache();
+	RebuildHeightRulesCache();
+	RebuildOreVeinsCache();
 }
 
 void UVoxelBiomeConfiguration::RebuildBiomeIndexCache() const
@@ -521,9 +521,9 @@ void UVoxelBiomeConfiguration::PostEditChangeProperty(FPropertyChangedEvent& Pro
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	// Mark caches as dirty when properties change
-	bBiomeIndexCacheDirty = true;
-	bHeightRulesCacheDirty = true;
-	bOreVeinsCacheDirty = true;
+	// Eagerly rebuild caches so they're ready for worker threads (not thread-safe to rebuild lazily)
+	RebuildBiomeIndexCache();
+	RebuildHeightRulesCache();
+	RebuildOreVeinsCache();
 }
 #endif

@@ -398,7 +398,7 @@ protected:
 
 		bool operator<(const FPendingScatterGeneration& Other) const
 		{
-			return DistanceToViewer < Other.DistanceToViewer; // Closer first
+			return DistanceToViewer > Other.DistanceToViewer; // Farthest first, closest at back for O(1) pop
 		}
 	};
 

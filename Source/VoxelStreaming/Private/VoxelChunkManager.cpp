@@ -66,8 +66,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 		const float TargetFPS = Configuration ? Configuration->TargetFrameRate : 60.0f;
 		const bool bAdaptive = Configuration ? Configuration->bAdaptiveThrottling : true;
+		const int32 ConfigMaxAsyncGen = Configuration ? Configuration->MaxAsyncGenerationTasks : 2;
 		const int32 ConfigMaxAsync = Configuration ? Configuration->MaxAsyncMeshTasks : 4;
-		const int32 ConfigMaxLODRemesh = Configuration ? Configuration->MaxLODRemeshPerFrame : 1;
+		const int32 ConfigMaxLODRemesh = Configuration ? Configuration->MaxLODRemeshPerFrame : 4;
 		const int32 ConfigMaxPending = Configuration ? Configuration->MaxPendingMeshes : 4;
 
 		if (bAdaptive && TargetFPS > 0.0f)
@@ -76,6 +77,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			if (SmoothedFrameTimeMs > TargetMs * 1.2f)
 			{
 				// Over budget: halve effective limits (min 1)
+				EffectiveMaxAsyncGenerationTasks = FMath::Max(1, ConfigMaxAsyncGen / 2);
 				EffectiveMaxAsyncMeshTasks = FMath::Max(1, ConfigMaxAsync / 2);
 				EffectiveMaxLODRemeshPerFrame = FMath::Max(1, ConfigMaxLODRemesh / 2);
 				EffectiveMaxPendingMeshes = FMath::Max(2, ConfigMaxPending / 2);
@@ -83,6 +85,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			else if (SmoothedFrameTimeMs < TargetMs * 0.8f)
 			{
 				// Under budget: restore configured limits
+				EffectiveMaxAsyncGenerationTasks = ConfigMaxAsyncGen;
 				EffectiveMaxAsyncMeshTasks = ConfigMaxAsync;
 				EffectiveMaxLODRemeshPerFrame = ConfigMaxLODRemesh;
 				EffectiveMaxPendingMeshes = ConfigMaxPending;
@@ -91,6 +94,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		}
 		else
 		{
+			EffectiveMaxAsyncGenerationTasks = ConfigMaxAsyncGen;
 			EffectiveMaxAsyncMeshTasks = ConfigMaxAsync;
 			EffectiveMaxLODRemeshPerFrame = ConfigMaxLODRemesh;
 			EffectiveMaxPendingMeshes = ConfigMaxPending;
@@ -140,12 +144,21 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// ALWAYS update UNLOAD decisions (cheap operation, prevents orphaned chunks)
 	UpdateUnloadDecisions(Context);
+
+	// Re-prioritize queues when viewer moves to a new chunk
+	// This ensures closest chunks are always processed first during fast movement
+	// Also updates LOD levels for queued items so they mesh at the correct LOD
+	if (bViewerChunkChanged)
+	{
+		ReprioritizeQueues(Context);
+	}
 	Timing.StreamingMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
-	// === Generation queue ===
+	// === Generation queue (async launch + completed result processing) ===
 	SectionStart = FPlatformTime::Seconds();
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
 	ProcessGenerationQueue(TimeSlice * 0.4f);
+	ProcessCompletedAsyncGenerations();
 	Timing.GenerationMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
 	// === Meshing queue ===
@@ -162,7 +175,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		int32 RenderSubmitCount = 0;
 		while (PendingMeshQueue.Num() > 0 && RenderSubmitCount < MaxRenderSubmitsPerFrame)
 		{
-			const FIntVector ChunkCoord = PendingMeshQueue[0].ChunkCoord;
+			const FIntVector ChunkCoord = PendingMeshQueue.Last().ChunkCoord;
 			OnChunkMeshingComplete(ChunkCoord);
 			++RenderSubmitCount;
 		}
@@ -177,6 +190,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		// Detect when all queues drain — signal that a LOD sweep is needed
 		const bool bQueuesEmpty = GenerationQueue.Num() == 0
+			&& AsyncGenerationInProgress.Num() == 0
 			&& MeshingQueue.Num() == 0
 			&& AsyncMeshingInProgress.Num() == 0
 			&& PendingMeshQueue.Num() == 0;
@@ -307,6 +321,7 @@ void UVoxelChunkManager::Initialize(
 	// Reset adaptive throttle state
 	SmoothedFrameTimeMs = 16.67f;
 	bSubsystemsDeferred = false;
+	EffectiveMaxAsyncGenerationTasks = Configuration->MaxAsyncGenerationTasks;
 	EffectiveMaxAsyncMeshTasks = Configuration->MaxAsyncMeshTasks;
 	EffectiveMaxLODRemeshPerFrame = Configuration->MaxLODRemeshPerFrame;
 	EffectiveMaxPendingMeshes = Configuration->MaxPendingMeshes;
@@ -484,13 +499,21 @@ void UVoxelChunkManager::Shutdown()
 	UnloadQueue.Empty();
 	UnloadQueueSet.Empty();
 
-	// Clear async meshing state
+	// Clear async generation state
 	// Note: In-flight async tasks will safely no-op due to weak pointer check
+	AsyncGenerationInProgress.Empty();
+	{
+		FAsyncGenerationResult DiscardedGenResult;
+		while (CompletedGenerationQueue.Dequeue(DiscardedGenResult)) {}
+	}
+
+	// Clear async meshing state
 	AsyncMeshingInProgress.Empty();
 	PendingMeshQueue.Empty();
-	// Drain the completed queue
-	FAsyncMeshResult DiscardedResult;
-	while (CompletedMeshQueue.Dequeue(DiscardedResult)) {}
+	{
+		FAsyncMeshResult DiscardedMeshResult;
+		while (CompletedMeshQueue.Dequeue(DiscardedMeshResult)) {}
+	}
 
 	// Reset streaming decision caching
 	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
@@ -1060,22 +1083,29 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		return;
 	}
 
-	const double StartTime = FPlatformTime::Seconds();
-	const double TimeLimit = TimeSliceMS / 1000.0;
+	// Throttle: limit concurrent async generation tasks
+	if (AsyncGenerationInProgress.Num() >= EffectiveMaxAsyncGenerationTasks)
+	{
+		return;
+	}
+
 	const int32 MaxChunks = Configuration->MaxChunksToLoadPerFrame;
 	int32 ProcessedCount = 0;
 
-	while (GenerationQueue.Num() > 0 && ProcessedCount < MaxChunks)
+	while (GenerationQueue.Num() > 0 && ProcessedCount < MaxChunks &&
+	       AsyncGenerationInProgress.Num() < EffectiveMaxAsyncGenerationTasks)
 	{
-		// Check time limit
-		if (FPlatformTime::Seconds() - StartTime > TimeLimit)
+		// Skip chunks already being generated asynchronously
+		if (AsyncGenerationInProgress.Contains(GenerationQueue.Last().ChunkCoord))
 		{
-			break;
+			GenerationQueueSet.Remove(GenerationQueue.Last().ChunkCoord);
+			GenerationQueue.Pop(EAllowShrinking::No);
+			continue;
 		}
 
-		// Get highest priority chunk and remove from queue and tracking set
-		FChunkLODRequest Request = GenerationQueue[0];
-		GenerationQueue.RemoveAt(0);
+		// Get highest priority chunk (at back) and remove from queue and tracking set
+		FChunkLODRequest Request = GenerationQueue.Last();
+		GenerationQueue.Pop(EAllowShrinking::No);
 		GenerationQueueSet.Remove(Request.ChunkCoord);
 
 		// Skip if state changed
@@ -1134,31 +1164,86 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		GenRequest.WaterLevel = Configuration->WaterLevel;
 		GenRequest.WaterRadius = Configuration->WaterRadius;
 
-		// Get chunk state to store voxel data
-		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
-		if (!State)
+		// Launch async generation on thread pool
+		LaunchAsyncGeneration(Request, MoveTemp(GenRequest));
+
+		++ProcessedCount;
+	}
+}
+
+void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest)
+{
+	// Mark as in-progress
+	AsyncGenerationInProgress.Add(Request.ChunkCoord);
+
+	// Capture raw pointer (TUniquePtr, safe because ChunkManager outlives tasks)
+	IVoxelNoiseGenerator* GeneratorPtr = NoiseGenerator.Get();
+	const FIntVector ChunkCoord = Request.ChunkCoord;
+
+	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
+
+	Async(EAsyncExecution::ThreadPool, [WeakThis, GeneratorPtr, GenRequest = MoveTemp(GenRequest), ChunkCoord]() mutable
+	{
+		// Generate voxel data on background thread
+		TArray<FVoxelData> VoxelData;
+		const bool bSuccess = GeneratorPtr->GenerateChunkCPU(GenRequest, VoxelData);
+
+		// Queue result for game thread
+		if (UVoxelChunkManager* This = WeakThis.Get())
 		{
-			// State was removed during processing
+			FAsyncGenerationResult Result;
+			Result.ChunkCoord = ChunkCoord;
+			Result.bSuccess = bSuccess;
+			if (bSuccess)
+			{
+				Result.VoxelData = MoveTemp(VoxelData);
+			}
+			This->CompletedGenerationQueue.Enqueue(MoveTemp(Result));
+		}
+	});
+}
+
+void UVoxelChunkManager::ProcessCompletedAsyncGenerations()
+{
+	FAsyncGenerationResult Result;
+	int32 ProcessedCount = 0;
+	const int32 MaxProcessPerFrame = 8;
+
+	while (CompletedGenerationQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
+	{
+		// Remove from in-progress tracking
+		AsyncGenerationInProgress.Remove(Result.ChunkCoord);
+
+		// Check if chunk is still in valid state
+		const EChunkState CurrentState = GetChunkState(Result.ChunkCoord);
+		if (CurrentState != EChunkState::Generating)
+		{
+			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async generation discarded - state changed to %d"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
 			continue;
 		}
 
-		// Generate voxel data using CPU noise generator
-		TArray<FVoxelData> VoxelData;
-		const bool bSuccess = NoiseGenerator->GenerateChunkCPU(GenRequest, VoxelData);
-
-		if (bSuccess)
+		if (Result.bSuccess)
 		{
-			// Store voxel data in chunk descriptor
-			State->Descriptor.VoxelData = MoveTemp(VoxelData);
-			OnChunkGenerationComplete(Request.ChunkCoord);
+			// Store voxel data in chunk state
+			FVoxelChunkState* State = ChunkStates.Find(Result.ChunkCoord);
+			if (State)
+			{
+				State->Descriptor.VoxelData = MoveTemp(Result.VoxelData);
+				OnChunkGenerationComplete(Result.ChunkCoord);
+			}
 		}
 		else
 		{
-			// Generation failed - reset to Unloaded state
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d, %d, %d) generation failed"),
-				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
-			State->Descriptor.VoxelData.Empty();
-			SetChunkState(Request.ChunkCoord, EChunkState::Unloaded);
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d,%d,%d) async generation failed"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+
+			FVoxelChunkState* State = ChunkStates.Find(Result.ChunkCoord);
+			if (State)
+			{
+				State->Descriptor.VoxelData.Empty();
+			}
+			SetChunkState(Result.ChunkCoord, EChunkState::Unloaded);
 		}
 
 		++ProcessedCount;
@@ -1191,15 +1276,16 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 	       PendingMeshQueue.Num() < EffectiveMaxPendingMeshes)
 	{
 		// Skip chunks already being meshed asynchronously
-		if (AsyncMeshingInProgress.Contains(MeshingQueue[0].ChunkCoord))
+		if (AsyncMeshingInProgress.Contains(MeshingQueue.Last().ChunkCoord))
 		{
-			MeshingQueue.RemoveAt(0);
+			MeshingQueueSet.Remove(MeshingQueue.Last().ChunkCoord);
+			MeshingQueue.Pop(EAllowShrinking::No);
 			continue;
 		}
 
-		// Get highest priority chunk and remove from queue and tracking set
-		FChunkLODRequest Request = MeshingQueue[0];
-		MeshingQueue.RemoveAt(0);
+		// Get highest priority chunk (at back) and remove from queue and tracking set
+		FChunkLODRequest Request = MeshingQueue.Last();
+		MeshingQueue.Pop(EAllowShrinking::No);
 		MeshingQueueSet.Remove(Request.ChunkCoord);
 
 		// Skip if state changed
@@ -1469,9 +1555,9 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 
 	while (UnloadQueue.Num() > 0 && ProcessedCount < MaxChunks)
 	{
-		// Remove from queue and tracking set
-		FIntVector ChunkCoord = UnloadQueue[0];
-		UnloadQueue.RemoveAt(0);
+		// Remove from queue and tracking set (pop from back for O(1))
+		FIntVector ChunkCoord = UnloadQueue.Last();
+		UnloadQueue.Pop(EAllowShrinking::No);
 		UnloadQueueSet.Remove(ChunkCoord);
 
 		// Skip if state changed
@@ -1521,21 +1607,9 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 		return;
 	}
 
-	// Use effective (adaptive) throttle value
-	const int32 MaxLODRemesh = EffectiveMaxLODRemeshPerFrame;
-
-	// Count how many chunks are already pending remesh
-	int32 CurrentPendingRemesh = 0;
-	for (const FChunkLODRequest& Existing : MeshingQueue)
-	{
-		if (FVoxelChunkState* State = ChunkStates.Find(Existing.ChunkCoord))
-		{
-			if (State->State == EChunkState::PendingMeshing)
-			{
-				++CurrentPendingRemesh;
-			}
-		}
-	}
+	// Use effective (adaptive) throttle value as a true per-frame cap
+	// This is how many LOD remeshes we can QUEUE THIS FRAME, regardless of total pending
+	const int32 MaxLODRemeshThisFrame = EffectiveMaxLODRemeshPerFrame;
 
 	// Track chunks that need remeshing due to LOD level changes
 	struct FLODRemeshCandidate
@@ -1581,13 +1655,12 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 		return A.Distance < B.Distance;
 	});
 
-	// Queue limited number of remeshes per frame
+	// Queue limited number of remeshes per frame (true per-frame cap, not limited by existing pending)
 	int32 QueuedThisFrame = 0;
-	const int32 MaxToQueue = FMath::Max(0, MaxLODRemesh - CurrentPendingRemesh);
 
 	for (const FLODRemeshCandidate& Candidate : RemeshCandidates)
 	{
-		if (QueuedThisFrame >= MaxToQueue)
+		if (QueuedThisFrame >= MaxLODRemeshThisFrame)
 		{
 			break;
 		}
@@ -1619,8 +1692,8 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 
 	if (QueuedThisFrame > 0)
 	{
-		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD level changes: %d candidates, queued %d this frame (pending: %d)"),
-			RemeshCandidates.Num(), QueuedThisFrame, CurrentPendingRemesh + QueuedThisFrame);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD level changes: %d candidates, queued %d/%d this frame"),
+			RemeshCandidates.Num(), QueuedThisFrame, MaxLODRemeshThisFrame);
 	}
 }
 
@@ -1730,9 +1803,9 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	++TotalChunksMeshed;
 
-	// Find mesh in pending queue
+	// Find mesh in pending queue (search from back since we pop from back)
 	int32 PendingIndex = INDEX_NONE;
-	for (int32 i = 0; i < PendingMeshQueue.Num(); ++i)
+	for (int32 i = PendingMeshQueue.Num() - 1; i >= 0; --i)
 	{
 		if (PendingMeshQueue[i].ChunkCoord == ChunkCoord)
 		{
@@ -1760,8 +1833,8 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.MeshData);
 		}
 
-		// Remove from pending queue
-		PendingMeshQueue.RemoveAt(PendingIndex);
+		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
+		PendingMeshQueue.RemoveAtSwap(PendingIndex, EAllowShrinking::No);
 	}
 
 	// Mark as loaded
@@ -2232,8 +2305,7 @@ bool UVoxelChunkManager::AddToGenerationQueue(const FChunkLODRequest& Request)
 	// Add to tracking set
 	GenerationQueueSet.Add(Request.ChunkCoord);
 
-	// Binary search for sorted insertion (highest priority first)
-	// FChunkLODRequest::operator< returns true if this.Priority > Other.Priority
+	// Binary search for sorted insertion (ascending — highest priority at back for O(1) pop)
 	int32 InsertIndex = Algo::LowerBound(GenerationQueue, Request);
 	GenerationQueue.Insert(Request, InsertIndex);
 
@@ -2251,7 +2323,7 @@ bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request)
 	// Add to tracking set
 	MeshingQueueSet.Add(Request.ChunkCoord);
 
-	// Binary search for sorted insertion (highest priority first)
+	// Binary search for sorted insertion (ascending — highest priority at back for O(1) pop)
 	int32 InsertIndex = Algo::LowerBound(MeshingQueue, Request);
 	MeshingQueue.Insert(Request, InsertIndex);
 
@@ -2312,6 +2384,106 @@ void UVoxelChunkManager::RemoveFromUnloadQueue(const FIntVector& ChunkCoord)
 
 	// Remove from queue
 	UnloadQueue.Remove(ChunkCoord);
+}
+
+// ==================== Queue Re-Prioritization ====================
+
+void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
+{
+	if (!Configuration)
+	{
+		return;
+	}
+
+	const FVector& ViewerPosition = Context.ViewerPosition;
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const FVector WorldOrigin = Configuration->WorldOrigin;
+	const float ViewDistance = Configuration->ViewDistance;
+	// Add 20% buffer to prevent flip-flopping at ViewDistance boundary
+	const float EvictDistanceSq = FMath::Square(ViewDistance * 1.2f);
+
+	int32 EvictedCount = 0;
+	int32 LODUpdatedCount = 0;
+
+	// Re-prioritize, update LOD levels, and evict stale items from generation queue
+	for (int32 i = GenerationQueue.Num() - 1; i >= 0; --i)
+	{
+		FChunkLODRequest& Request = GenerationQueue[i];
+		const FVector ChunkCenter = WorldOrigin + FVector(Request.ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+		const float DistSq = FVector::DistSquared(ChunkCenter, ViewerPosition);
+
+		if (DistSq > EvictDistanceSq)
+		{
+			// Beyond view distance — evict from queue and reset chunk state
+			GenerationQueueSet.Remove(Request.ChunkCoord);
+			SetChunkState(Request.ChunkCoord, EChunkState::Unloaded);
+			RemoveChunkState(Request.ChunkCoord);
+			GenerationQueue.RemoveAtSwap(i);
+			++EvictedCount;
+		}
+		else
+		{
+			// Update priority: closer = higher priority
+			Request.Priority = 1.0f / FMath::Max(FMath::Sqrt(DistSq), 1.0f);
+
+			// Update LOD level based on current viewer position
+			// This prevents chunks from being generated at a stale LOD level
+			if (LODStrategy)
+			{
+				const int32 NewLOD = LODStrategy->GetLODForChunk(Request.ChunkCoord, Context);
+				if (Request.LODLevel != NewLOD)
+				{
+					Request.LODLevel = NewLOD;
+					// Also update the chunk state's LOD level
+					if (FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord))
+					{
+						State->LODLevel = NewLOD;
+					}
+					++LODUpdatedCount;
+				}
+			}
+		}
+	}
+
+	// Re-sort generation queue (ascending — highest priority at back)
+	if (GenerationQueue.Num() > 1)
+	{
+		GenerationQueue.Sort();
+	}
+
+	// Re-prioritize and update LOD levels in meshing queue (don't evict — generation data already computed)
+	for (FChunkLODRequest& Request : MeshingQueue)
+	{
+		const FVector ChunkCenter = WorldOrigin + FVector(Request.ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+		const float Dist = FVector::Dist(ChunkCenter, ViewerPosition);
+		Request.Priority = 1.0f / FMath::Max(Dist, 1.0f);
+
+		// Update LOD level for meshing queue items too
+		if (LODStrategy)
+		{
+			const int32 NewLOD = LODStrategy->GetLODForChunk(Request.ChunkCoord, Context);
+			if (Request.LODLevel != NewLOD)
+			{
+				Request.LODLevel = NewLOD;
+				if (FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord))
+				{
+					State->LODLevel = NewLOD;
+				}
+				++LODUpdatedCount;
+			}
+		}
+	}
+
+	if (MeshingQueue.Num() > 1)
+	{
+		MeshingQueue.Sort();
+	}
+
+	if (EvictedCount > 0 || LODUpdatedCount > 0)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("ReprioritizeQueues: Evicted %d gen items, updated %d LOD levels, Gen=%d Mesh=%d remaining"),
+			EvictedCount, LODUpdatedCount, GenerationQueue.Num(), MeshingQueue.Num());
+	}
 }
 
 // ==================== Collision Mesh Generation ====================
