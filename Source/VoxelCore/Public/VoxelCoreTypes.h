@@ -71,6 +71,35 @@ enum class EVoxelFace : uint8
 };
 
 /**
+ * How a scatter definition's mesh is rendered.
+ */
+UENUM(BlueprintType)
+enum class EScatterMeshType : uint8
+{
+	/** Standard: assigned static mesh via HISM */
+	StaticMesh,
+
+	/** Runtime cross-billboard (2 intersecting quads) for grass/flowers */
+	CrossBillboard,
+
+	/** Trees stamped directly into VoxelData (editable terrain) */
+	VoxelInjection
+};
+
+/**
+ * How scatter positions are determined on the surface.
+ */
+UENUM(BlueprintType)
+enum class EScatterPlacementMode : uint8
+{
+	/** Default: density-interpolated positions (smooth terrain) */
+	SurfaceInterpolated,
+
+	/** Snap to block face center (cubic terrain) */
+	BlockFaceSnap
+};
+
+/**
  * Chunk state in the streaming lifecycle.
  */
 UENUM(BlueprintType)

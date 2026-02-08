@@ -26,8 +26,12 @@ namespace EVoxelMaterial
 	constexpr uint8 Copper = 13;
 	constexpr uint8 Diamond = 14;
 
-	/** Total number of defined materials (base + ores) */
-	constexpr uint8 Count = 15;
+	// Vegetation materials (20-29 range)
+	constexpr uint8 Wood = 20;
+	constexpr uint8 Leaves = 21;
+
+	/** Total number of defined materials (base + ores + vegetation) */
+	constexpr uint8 Count = 22;
 }
 
 struct FVoxelMaterialTextureConfig;

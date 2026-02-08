@@ -122,6 +122,30 @@ void FVoxelMaterialRegistry::EnsureInitialized()
 		2, 3
 	));
 
+	// Reserved slots (15-19) for future ore materials
+	Materials.Add(FVoxelMaterialDefinition(15, TEXT("Reserved15"), FColor(100, 100, 100), 3, 3));
+	Materials.Add(FVoxelMaterialDefinition(16, TEXT("Reserved16"), FColor(100, 100, 100), 0, 4));
+	Materials.Add(FVoxelMaterialDefinition(17, TEXT("Reserved17"), FColor(100, 100, 100), 1, 4));
+	Materials.Add(FVoxelMaterialDefinition(18, TEXT("Reserved18"), FColor(100, 100, 100), 2, 4));
+	Materials.Add(FVoxelMaterialDefinition(19, TEXT("Reserved19"), FColor(100, 100, 100), 3, 4));
+
+	// Vegetation materials (20-29) - Row 5
+	// Wood - Brown (Col 0, Row 5)
+	Materials.Add(FVoxelMaterialDefinition(
+		EVoxelMaterial::Wood,
+		TEXT("Wood"),
+		FColor(101, 67, 33),
+		0, 5
+	));
+
+	// Leaves - Dark Green (Col 1, Row 5)
+	Materials.Add(FVoxelMaterialDefinition(
+		EVoxelMaterial::Leaves,
+		TEXT("Leaves"),
+		FColor(34, 100, 34),
+		1, 5
+	));
+
 	bInitialized = true;
 }
 

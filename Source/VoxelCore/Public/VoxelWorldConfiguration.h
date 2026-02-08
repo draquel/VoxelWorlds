@@ -6,6 +6,7 @@
 #include "Engine/DataAsset.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelTreeTypes.h"
 #include "LODTypes.h"
 #include "VoxelWorldConfiguration.generated.h"
 
@@ -344,6 +345,42 @@ public:
 	/** Use GPU compute shaders for scatter surface extraction (requires SM5) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (EditCondition = "bEnableScatter"))
 	bool bUseGPUScatterExtraction = false;
+
+	/**
+	 * Automatically override scatter definitions to use BlockFaceSnap placement
+	 * and cubic-appropriate defaults when MeshingMode is Cubic.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Cubic", meta = (EditCondition = "bEnableScatter"))
+	bool bAutoCubicScatterDefaults = true;
+
+	// ==================== Scatter | Tree Settings ====================
+
+	/**
+	 * How voxel trees are rendered in cubic mode.
+	 * VoxelData = injected into terrain (editable), HISM = mesh instances, Both = near/far split.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Trees", meta = (EditCondition = "bEnableScatter"))
+	EVoxelTreeMode TreeMode = EVoxelTreeMode::VoxelData;
+
+	/**
+	 * Distance threshold for Both mode: VoxelData trees within this distance, HISM beyond.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Trees", meta = (ClampMin = "1000.0", EditCondition = "bEnableScatter && TreeMode == EVoxelTreeMode::Both"))
+	float VoxelTreeMaxDistance = 10000.0f;
+
+	/**
+	 * Tree templates defining tree shapes for voxel injection.
+	 * Index into this array using FScatterDefinition::TreeTemplateID.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Trees", meta = (EditCondition = "bEnableScatter"))
+	TArray<FVoxelTreeTemplate> TreeTemplates;
+
+	/**
+	 * Trees per chunk (fractional part is probability).
+	 * E.g., 1.5 = 1 guaranteed tree + 50% chance of a second.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Trees", meta = (ClampMin = "0.0", ClampMax = "10.0", EditCondition = "bEnableScatter"))
+	float TreeDensity = 1.5f;
 
 	/** Enable scatter debug visualization (spheres at spawn points) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Debug", meta = (EditCondition = "bEnableScatter"))

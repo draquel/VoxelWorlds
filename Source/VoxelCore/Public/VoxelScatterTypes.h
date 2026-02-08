@@ -3,10 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelCoreTypes.h" // For EScatterMeshType, EScatterPlacementMode
 #include "VoxelMaterialAtlas.h" // For EVoxelFaceType
 #include "VoxelScatterTypes.generated.h"
 
 class UStaticMesh;
+class UTexture2D;
 class UMaterialInterface;
 
 /**
@@ -321,6 +323,62 @@ struct VOXELCORE_API FScatterDefinition
 	/** Receives decals on mesh instances */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
 	bool bReceivesDecals = true;
+
+	// ==================== Cubic Scatter Settings ====================
+
+	/** How this scatter's mesh is rendered (StaticMesh, CrossBillboard, VoxelInjection) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter")
+	EScatterMeshType MeshType = EScatterMeshType::StaticMesh;
+
+	/** How positions are determined (SurfaceInterpolated for smooth, BlockFaceSnap for cubic) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter")
+	EScatterPlacementMode PlacementMode = EScatterPlacementMode::SurfaceInterpolated;
+
+	// ==================== Billboard Settings ====================
+
+	/** Texture for cross-billboard (only used when MeshType == CrossBillboard and bUseBillboardAtlas is false) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard", meta = (EditCondition = "MeshType == EScatterMeshType::CrossBillboard"))
+	TSoftObjectPtr<UTexture2D> BillboardTexture;
+
+	/** Width of billboard quad in cm */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard", meta = (ClampMin = "1.0", EditCondition = "MeshType == EScatterMeshType::CrossBillboard"))
+	float BillboardWidth = 100.0f;
+
+	/** Height of billboard quad in cm */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard", meta = (ClampMin = "1.0", EditCondition = "MeshType == EScatterMeshType::CrossBillboard"))
+	float BillboardHeight = 100.0f;
+
+	// ==================== Billboard Atlas Settings ====================
+
+	/** Use a texture atlas tile instead of a standalone BillboardTexture */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard Atlas", meta = (EditCondition = "MeshType == EScatterMeshType::CrossBillboard"))
+	bool bUseBillboardAtlas = false;
+
+	/** Atlas texture (shared across billboard types that use the same atlas) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard Atlas", meta = (EditCondition = "MeshType == EScatterMeshType::CrossBillboard && bUseBillboardAtlas"))
+	TSoftObjectPtr<UTexture2D> BillboardAtlasTexture;
+
+	/** Column of this billboard's tile in the atlas (0-based) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard Atlas", meta = (ClampMin = "0", EditCondition = "MeshType == EScatterMeshType::CrossBillboard && bUseBillboardAtlas"))
+	int32 BillboardAtlasColumn = 0;
+
+	/** Row of this billboard's tile in the atlas (0-based) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard Atlas", meta = (ClampMin = "0", EditCondition = "MeshType == EScatterMeshType::CrossBillboard && bUseBillboardAtlas"))
+	int32 BillboardAtlasRow = 0;
+
+	/** Number of columns in the billboard atlas grid */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard Atlas", meta = (ClampMin = "1", ClampMax = "16", EditCondition = "MeshType == EScatterMeshType::CrossBillboard && bUseBillboardAtlas"))
+	int32 BillboardAtlasColumns = 4;
+
+	/** Number of rows in the billboard atlas grid */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|Billboard Atlas", meta = (ClampMin = "1", ClampMax = "16", EditCondition = "MeshType == EScatterMeshType::CrossBillboard && bUseBillboardAtlas"))
+	int32 BillboardAtlasRows = 4;
+
+	// ==================== Voxel Injection Settings ====================
+
+	/** Index into Configuration->TreeTemplates (only used when MeshType == VoxelInjection) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cubic Scatter|VoxelInjection", meta = (ClampMin = "0", EditCondition = "MeshType == EScatterMeshType::VoxelInjection"))
+	int32 TreeTemplateID = 0;
 
 	// ==================== LOD & Culling ====================
 

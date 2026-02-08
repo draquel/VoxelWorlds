@@ -16,6 +16,8 @@
 #include "VoxelEditTypes.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelScatterManager.h"
+#include "VoxelTreeInjector.h"
+#include "VoxelTreeTypes.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
@@ -409,7 +411,11 @@ void UVoxelChunkManager::Initialize(
 			if (Source == EEditSource::Player && EditRadius > 0.0f)
 			{
 				// Player edits: surgically remove scatter in the affected radius only
-				ScatterManager->ClearScatterInRadius(EditCenter, EditRadius);
+				// Pad by half a VoxelSize so scatter on block faces above/around the
+				// edit center is also cleared (block-face-snapped scatter sits at the
+				// face center, which is 0.5*VoxelSize from the block center)
+				const float ScatterClearRadius = EditRadius + Configuration->VoxelSize * 0.6f;
+				ScatterManager->ClearScatterInRadius(EditCenter, ScatterClearRadius);
 			}
 			else if (Source != EEditSource::Player)
 			{
@@ -1184,13 +1190,65 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	IVoxelNoiseGenerator* GeneratorPtr = NoiseGenerator.Get();
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 
+	// Tree injection captures (value copies for thread safety)
+	const bool bInjectTrees = Configuration &&
+		Configuration->MeshingMode == EMeshingMode::Cubic &&
+		Configuration->TreeMode != EVoxelTreeMode::HISM &&
+		Configuration->TreeTemplates.Num() > 0 &&
+		Configuration->TreeDensity > 0.0f;
+	TArray<FVoxelTreeTemplate> CapturedTreeTemplates;
+	float CapturedTreeDensity = 0.0f;
+	int32 CapturedWorldSeed = 0;
+	FVector CapturedWorldOrigin = FVector::ZeroVector;
+	FVoxelNoiseParams CapturedNoiseParams;
+	IVoxelWorldMode* WorldModePtr = nullptr;
+	UVoxelBiomeConfiguration* CapturedBiomeConfig = nullptr;
+	bool CapturedEnableWaterLevel = false;
+	float CapturedWaterLevel = 0.0f;
+
+	if (bInjectTrees)
+	{
+		CapturedTreeTemplates = Configuration->TreeTemplates;
+		CapturedTreeDensity = Configuration->TreeDensity;
+		CapturedWorldSeed = Configuration->WorldSeed;
+		CapturedWorldOrigin = Configuration->WorldOrigin;
+		CapturedNoiseParams = Configuration->NoiseParams;
+		WorldModePtr = WorldMode.Get(); // Raw ptr, same lifetime as NoiseGenerator
+		CapturedBiomeConfig = Configuration->BiomeConfiguration;
+		CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;
+		CapturedWaterLevel = Configuration->WaterLevel;
+	}
+
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
-	Async(EAsyncExecution::ThreadPool, [WeakThis, GeneratorPtr, GenRequest = MoveTemp(GenRequest), ChunkCoord]() mutable
+	Async(EAsyncExecution::ThreadPool, [WeakThis, GeneratorPtr, GenRequest = MoveTemp(GenRequest), ChunkCoord,
+		bInjectTrees, CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
+		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
+		CapturedNoiseParams, WorldModePtr,
+		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel]() mutable
 	{
 		// Generate voxel data on background thread
 		TArray<FVoxelData> VoxelData;
 		const bool bSuccess = GeneratorPtr->GenerateChunkCPU(GenRequest, VoxelData);
+
+		// Inject voxel trees (runs on same thread pool worker, before enqueue)
+		if (bSuccess && bInjectTrees && WorldModePtr)
+		{
+			FVoxelTreeInjector::InjectTrees(
+				ChunkCoord,
+				GenRequest.ChunkSize,
+				GenRequest.VoxelSize,
+				CapturedWorldOrigin,
+				CapturedWorldSeed,
+				CapturedTreeTemplates,
+				CapturedNoiseParams,
+				*WorldModePtr,
+				CapturedTreeDensity,
+				CapturedBiomeConfig,
+				CapturedEnableWaterLevel,
+				CapturedWaterLevel,
+				VoxelData);
+		}
 
 		// Queue result for game thread
 		if (UVoxelChunkManager* This = WeakThis.Get())

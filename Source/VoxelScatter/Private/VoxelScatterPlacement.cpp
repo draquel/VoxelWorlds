@@ -125,8 +125,8 @@ int32 FVoxelScatterPlacement::GenerateSpawnPointsForType(
 		SpawnPoint.Scale = Definition.ComputeScale(RandomFromSeed(PointSeed));
 		SpawnPoint.RotationYaw = Definition.ComputeRotationYaw(RandomFromSeed(PointSeed));
 
-		// Apply position jitter
-		if (Definition.PositionJitter > 0.0f)
+		// Apply position jitter (skip for BlockFaceSnap — scatter should stay centered on block)
+		if (Definition.PositionJitter > 0.0f && Definition.PlacementMode != EScatterPlacementMode::BlockFaceSnap)
 		{
 			const FVector Jitter = Definition.ComputePositionJitter(
 				RandomFromSeed(PointSeed),

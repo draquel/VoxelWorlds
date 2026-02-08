@@ -33,6 +33,8 @@ public class VoxelScatter : ModuleRules
 			{
 				"VoxelGeneration",
 				"VoxelMeshing",
+				"MeshDescription",
+				"StaticMeshDescription",
 			}
 		);
 

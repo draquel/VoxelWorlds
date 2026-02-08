@@ -98,6 +98,19 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 		CreateDefaultDefinitions();
 	}
 
+	// Auto-override scatter definitions for cubic mode
+	if (Config->bAutoCubicScatterDefaults && Config->MeshingMode == EMeshingMode::Cubic)
+	{
+		for (FScatterDefinition& Def : ScatterDefinitions)
+		{
+			if (Def.PlacementMode != EScatterPlacementMode::BlockFaceSnap)
+			{
+				Def.PlacementMode = EScatterPlacementMode::BlockFaceSnap;
+			}
+		}
+		UE_LOG(LogVoxelScatter, Log, TEXT("Cubic mode: auto-overriding %d definitions to BlockFaceSnap"), ScatterDefinitions.Num());
+	}
+
 	// Async scatter configuration
 	MaxAsyncScatterTasks = FMath::Clamp(Config->MaxAsyncScatterTasks, 1, 4);
 
@@ -311,16 +324,35 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, in
 	// Get the set of scatter types already generated for this chunk (never regenerated)
 	const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
 
+	// Tree mode filtering
+	const EVoxelTreeMode TreeMode = Configuration->TreeMode;
+	const float VoxelTreeMaxDist = Configuration->VoxelTreeMaxDistance;
+
 	// Build definitions to generate:
 	//  - All enabled defs within their SpawnDistance/ScatterRadius range
 	//  - Exclude types already completed for this chunk
 	//  - No LOD-based filtering: voxel data is always full resolution
+	//  - Tree mode filtering: VoxelInjection defs handled based on TreeMode
 	TArray<FScatterDefinition> DefsToGenerate;
 	for (const FScatterDefinition& Def : ScatterDefinitions)
 	{
 		if (!Def.bEnabled)
 		{
 			continue;
+		}
+
+		// Tree mode filtering for VoxelInjection types
+		if (Def.MeshType == EScatterMeshType::VoxelInjection)
+		{
+			// VoxelInjection definitions are rendered as HISM scatter ONLY in HISM or Both (far) mode
+			if (TreeMode == EVoxelTreeMode::VoxelData)
+			{
+				continue; // Trees are in VoxelData already, skip HISM
+			}
+			if (TreeMode == EVoxelTreeMode::Both && ChunkDistance <= VoxelTreeMaxDist)
+			{
+				continue; // Within VoxelData range, skip HISM
+			}
 		}
 
 		// Skip types already generated for this chunk
@@ -963,16 +995,32 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 	}
 
 	FChunkSurfaceData SurfaceData;
-	ExtractSurfacePointsFromVoxelData(
-		PendingData.ChunkVoxelData,
-		ChunkCoord,
-		ChunkWorldOrigin,
-		PendingData.ChunkSize,
-		PendingData.VoxelSize,
-		SurfacePointSpacing,
-		ClearedVolumes,
-		SurfaceData
-	);
+	const bool bUseCubicExtraction = Configuration && Configuration->MeshingMode == EMeshingMode::Cubic;
+	if (bUseCubicExtraction)
+	{
+		ExtractSurfacePointsCubic(
+			PendingData.ChunkVoxelData,
+			ChunkCoord,
+			ChunkWorldOrigin,
+			PendingData.ChunkSize,
+			PendingData.VoxelSize,
+			ClearedVolumes,
+			SurfaceData
+		);
+	}
+	else
+	{
+		ExtractSurfacePointsFromVoxelData(
+			PendingData.ChunkVoxelData,
+			ChunkCoord,
+			ChunkWorldOrigin,
+			PendingData.ChunkSize,
+			PendingData.VoxelSize,
+			SurfacePointSpacing,
+			ClearedVolumes,
+			SurfaceData
+		);
+	}
 
 	if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
 	{
@@ -1085,13 +1133,15 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 		CapturedClearedVolumes = *Volumes;
 	}
 
+	const bool bCubicExtraction = Configuration && Configuration->MeshingMode == EMeshingMode::Cubic;
 	TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 
 	Async(EAsyncExecution::ThreadPool,
 		[WeakThis, PendingData = MoveTemp(PendingData), ChunkWorldOrigin,
 		 CapturedSurfacePointSpacing, CapturedWorldSeed, ChunkCoord,
 		 FilteredDefinitions = MoveTemp(FilteredDefinitions),
-		 CapturedClearedVolumes = MoveTemp(CapturedClearedVolumes)]() mutable
+		 CapturedClearedVolumes = MoveTemp(CapturedClearedVolumes),
+		 bCubicExtraction]() mutable
 	{
 		// === THREAD POOL: Voxel-based surface extraction + placement ===
 
@@ -1112,16 +1162,31 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 
 		// Extract surface points from voxel data (LOD-independent)
 		FChunkSurfaceData SurfaceData;
-		ExtractSurfacePointsFromVoxelData(
-			PendingData.ChunkVoxelData,
-			ChunkCoord,
-			ChunkWorldOrigin,
-			PendingData.ChunkSize,
-			PendingData.VoxelSize,
-			CapturedSurfacePointSpacing,
-			CapturedClearedVolumes,
-			SurfaceData
-		);
+		if (bCubicExtraction)
+		{
+			ExtractSurfacePointsCubic(
+				PendingData.ChunkVoxelData,
+				ChunkCoord,
+				ChunkWorldOrigin,
+				PendingData.ChunkSize,
+				PendingData.VoxelSize,
+				CapturedClearedVolumes,
+				SurfaceData
+			);
+		}
+		else
+		{
+			ExtractSurfacePointsFromVoxelData(
+				PendingData.ChunkVoxelData,
+				ChunkCoord,
+				ChunkWorldOrigin,
+				PendingData.ChunkSize,
+				PendingData.VoxelSize,
+				CapturedSurfacePointSpacing,
+				CapturedClearedVolumes,
+				SurfaceData
+			);
+		}
 
 		if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
 		{
@@ -1516,6 +1581,96 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	OutSurfaceData.bIsValid = true;
 }
 
+void UVoxelScatterManager::ExtractSurfacePointsCubic(
+	const TArray<FVoxelData>& VoxelData,
+	const FIntVector& ChunkCoord,
+	const FVector& ChunkWorldOrigin,
+	int32 ChunkSize,
+	float VoxelSize,
+	const TArray<FClearedScatterVolume>& ClearedVolumes,
+	FChunkSurfaceData& OutSurfaceData)
+{
+	OutSurfaceData = FChunkSurfaceData(ChunkCoord);
+	OutSurfaceData.AveragePointSpacing = VoxelSize;
+	OutSurfaceData.LODLevel = 0;
+
+	const int32 ExpectedVoxels = ChunkSize * ChunkSize * ChunkSize;
+	if (VoxelData.Num() != ExpectedVoxels)
+	{
+		OutSurfaceData.bIsValid = false;
+		return;
+	}
+
+	// One surface point per exposed top face (one per block column)
+	OutSurfaceData.SurfacePoints.Reserve(ChunkSize * ChunkSize);
+
+	for (int32 X = 0; X < ChunkSize; ++X)
+	{
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			// Scan top-down to find topmost solid voxel with air above
+			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
+			{
+				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+				const FVoxelData& Voxel = VoxelData[Index];
+
+				if (!Voxel.IsSolid())
+				{
+					continue;
+				}
+
+				// Check air above
+				if (Z + 1 < ChunkSize)
+				{
+					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
+					if (VoxelData[AboveIndex].IsSolid())
+					{
+						continue; // Not a surface
+					}
+				}
+
+				// Block face center: center of block XY, top of block Z
+				const FVector WorldPos(
+					ChunkWorldOrigin.X + (X + 0.5f) * VoxelSize,
+					ChunkWorldOrigin.Y + (Y + 0.5f) * VoxelSize,
+					ChunkWorldOrigin.Z + (Z + 1.0f) * VoxelSize
+				);
+
+				// Check cleared volumes
+				bool bInClearedVolume = false;
+				for (const FClearedScatterVolume& Volume : ClearedVolumes)
+				{
+					if (Volume.ContainsPoint(WorldPos))
+					{
+						bInClearedVolume = true;
+						break;
+					}
+				}
+				if (bInClearedVolume)
+				{
+					break;
+				}
+
+				// Cubic: normal is always up, face type is always Top
+				FVoxelSurfacePoint Point;
+				Point.Position = WorldPos;
+				Point.Normal = FVector::UpVector;
+				Point.MaterialID = Voxel.MaterialID;
+				Point.BiomeID = Voxel.BiomeID;
+				Point.FaceType = EVoxelFaceType::Top;
+				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
+				Point.SlopeAngle = 0.0f; // Flat top face
+
+				OutSurfaceData.SurfacePoints.Add(Point);
+				break; // Found topmost surface for this column
+			}
+		}
+	}
+
+	OutSurfaceData.SurfaceAreaEstimate = OutSurfaceData.SurfacePoints.Num() * VoxelSize * VoxelSize;
+	OutSurfaceData.bIsValid = true;
+}
+
 FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) const
 {
 	if (!Configuration)
@@ -1529,81 +1684,204 @@ FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) 
 
 void UVoxelScatterManager::CreateDefaultDefinitions()
 {
-	// Grass scatter - dense on grass material
-	// Short view distance, aggressive culling for performance
-	FScatterDefinition GrassScatter;
-	GrassScatter.ScatterID = 0;
-	GrassScatter.Name = TEXT("Grass");
-	GrassScatter.DebugColor = FColor::Green;
-	GrassScatter.DebugSphereRadius = 8.0f;
-	GrassScatter.bEnabled = true;
-	GrassScatter.Density = 0.5f; // 50% of valid points
-	GrassScatter.MinSlopeDegrees = 0.0f;
-	GrassScatter.MaxSlopeDegrees = 30.0f;
-	GrassScatter.AllowedMaterials = { EVoxelMaterial::Grass };
-	GrassScatter.bTopFacesOnly = true;
-	GrassScatter.ScaleRange = FVector2D(0.7f, 1.3f);
-	GrassScatter.bRandomYawRotation = true;
-	GrassScatter.bAlignToSurfaceNormal = true;
-	GrassScatter.SurfaceOffset = 0.0f;
-	GrassScatter.PositionJitter = 25.0f;
-	// LOD settings - grass is small, cull aggressively
-	GrassScatter.LODStartDistance = 3000.0f;   // LOD transitions start at 30m
-	GrassScatter.CullDistance = 8000.0f;       // Fully culled at 80m
-	GrassScatter.MinScreenSize = 0.005f;       // Cull tiny grass instances
-	GrassScatter.bCastShadows = false;         // Grass doesn't cast shadows (performance)
-	AddScatterDefinition(GrassScatter);
+	const bool bCubicMode = Configuration && Configuration->MeshingMode == EMeshingMode::Cubic;
 
-	// Rock scatter - less dense, on stone and dirt
-	// Medium view distance
-	FScatterDefinition RockScatter;
-	RockScatter.ScatterID = 1;
-	RockScatter.Name = TEXT("Rocks");
-	RockScatter.DebugColor = FColor(128, 128, 128); // Gray
-	RockScatter.DebugSphereRadius = 15.0f;
-	RockScatter.bEnabled = true;
-	RockScatter.Density = 0.05f; // 5% of valid points
-	RockScatter.MinSlopeDegrees = 0.0f;
-	RockScatter.MaxSlopeDegrees = 60.0f;
-	RockScatter.AllowedMaterials = { EVoxelMaterial::Stone, EVoxelMaterial::Dirt };
-	RockScatter.bTopFacesOnly = false; // Can appear on slopes
-	RockScatter.ScaleRange = FVector2D(0.5f, 2.0f);
-	RockScatter.bRandomYawRotation = true;
-	RockScatter.bAlignToSurfaceNormal = false;
-	RockScatter.SurfaceOffset = 0.0f;
-	RockScatter.PositionJitter = 50.0f;
-	// LOD settings - rocks are medium sized
-	RockScatter.LODStartDistance = 8000.0f;    // LOD transitions start at 80m
-	RockScatter.CullDistance = 20000.0f;       // Fully culled at 200m
-	RockScatter.MinScreenSize = 0.002f;        // Cull very small rock instances
-	RockScatter.bCastShadows = true;           // Rocks cast shadows (nearby only)
-	AddScatterDefinition(RockScatter);
+	if (bCubicMode)
+	{
+		// ==================== Cubic Mode Defaults ====================
 
-	// Tree scatter - very sparse on grass
-	// Long view distance to prevent pop-in
-	FScatterDefinition TreeScatter;
-	TreeScatter.ScatterID = 2;
-	TreeScatter.Name = TEXT("Trees");
-	TreeScatter.DebugColor = FColor(34, 139, 34); // Forest green
-	TreeScatter.DebugSphereRadius = 25.0f;
-	TreeScatter.bEnabled = true;
-	TreeScatter.Density = 0.02f; // 2% of valid points
-	TreeScatter.MinSlopeDegrees = 0.0f;
-	TreeScatter.MaxSlopeDegrees = 20.0f;
-	TreeScatter.AllowedMaterials = { EVoxelMaterial::Grass };
-	TreeScatter.bTopFacesOnly = true;
-	TreeScatter.ScaleRange = FVector2D(0.8f, 1.5f);
-	TreeScatter.bRandomYawRotation = true;
-	TreeScatter.bAlignToSurfaceNormal = false;
-	TreeScatter.SurfaceOffset = 0.0f;
-	TreeScatter.PositionJitter = 100.0f;
-	// LOD settings - trees are large, visible from far
-	TreeScatter.LODStartDistance = 15000.0f;   // LOD transitions start at 150m
-	TreeScatter.CullDistance = 50000.0f;       // Fully culled at 500m
-	TreeScatter.MinScreenSize = 0.001f;        // Minimal screen size culling
-	TreeScatter.bCastShadows = true;           // Trees cast shadows
-	TreeScatter.SpawnDistance = 20000.0f;      // Spawn trees at distance to prevent pop-in
-	AddScatterDefinition(TreeScatter);
+		// Cubic Grass - cross-billboard on grass blocks
+		FScatterDefinition CubicGrass;
+		CubicGrass.ScatterID = 100;
+		CubicGrass.Name = TEXT("CubicGrass");
+		CubicGrass.DebugColor = FColor::Green;
+		CubicGrass.DebugSphereRadius = 8.0f;
+		CubicGrass.bEnabled = true;
+		CubicGrass.Density = 0.4f;
+		CubicGrass.MinSlopeDegrees = 0.0f;
+		CubicGrass.MaxSlopeDegrees = 10.0f;
+		CubicGrass.AllowedMaterials = { EVoxelMaterial::Grass };
+		CubicGrass.bTopFacesOnly = true;
+		CubicGrass.ScaleRange = FVector2D(0.7f, 1.2f);
+		CubicGrass.bRandomYawRotation = true;
+		CubicGrass.bAlignToSurfaceNormal = false;
+		CubicGrass.SurfaceOffset = 0.0f;
+		CubicGrass.PositionJitter = 0.0f; // No jitter for block-snapped
+		CubicGrass.MeshType = EScatterMeshType::CrossBillboard;
+		CubicGrass.PlacementMode = EScatterPlacementMode::BlockFaceSnap;
+		CubicGrass.BillboardWidth = 80.0f;
+		CubicGrass.BillboardHeight = 80.0f;
+		CubicGrass.bUseBillboardAtlas = true;
+		CubicGrass.BillboardAtlasColumn = 0;
+		CubicGrass.BillboardAtlasRow = 0;
+		CubicGrass.BillboardAtlasColumns = 4;
+		CubicGrass.BillboardAtlasRows = 4;
+		CubicGrass.LODStartDistance = 3000.0f;
+		CubicGrass.CullDistance = 5000.0f;
+		CubicGrass.MinScreenSize = 0.005f;
+		CubicGrass.bCastShadows = false;
+		AddScatterDefinition(CubicGrass);
 
-	UE_LOG(LogVoxelScatter, Log, TEXT("Created %d default scatter definitions"), ScatterDefinitions.Num());
+		// Cubic Flowers - cross-billboard, sparser
+		FScatterDefinition CubicFlowers;
+		CubicFlowers.ScatterID = 101;
+		CubicFlowers.Name = TEXT("CubicFlowers");
+		CubicFlowers.DebugColor = FColor::Yellow;
+		CubicFlowers.DebugSphereRadius = 6.0f;
+		CubicFlowers.bEnabled = true;
+		CubicFlowers.Density = 0.08f;
+		CubicFlowers.MinSlopeDegrees = 0.0f;
+		CubicFlowers.MaxSlopeDegrees = 10.0f;
+		CubicFlowers.AllowedMaterials = { EVoxelMaterial::Grass };
+		CubicFlowers.bTopFacesOnly = true;
+		CubicFlowers.ScaleRange = FVector2D(0.6f, 1.0f);
+		CubicFlowers.bRandomYawRotation = true;
+		CubicFlowers.bAlignToSurfaceNormal = false;
+		CubicFlowers.SurfaceOffset = 0.0f;
+		CubicFlowers.PositionJitter = 0.0f;
+		CubicFlowers.MeshType = EScatterMeshType::CrossBillboard;
+		CubicFlowers.PlacementMode = EScatterPlacementMode::BlockFaceSnap;
+		CubicFlowers.BillboardWidth = 60.0f;
+		CubicFlowers.BillboardHeight = 60.0f;
+		CubicFlowers.bUseBillboardAtlas = true;
+		CubicFlowers.BillboardAtlasColumn = 1;
+		CubicFlowers.BillboardAtlasRow = 0;
+		CubicFlowers.BillboardAtlasColumns = 4;
+		CubicFlowers.BillboardAtlasRows = 4;
+		CubicFlowers.LODStartDistance = 2000.0f;
+		CubicFlowers.CullDistance = 4000.0f;
+		CubicFlowers.MinScreenSize = 0.005f;
+		CubicFlowers.bCastShadows = false;
+		AddScatterDefinition(CubicFlowers);
+
+		// Cubic Rocks - static mesh on stone/dirt
+		FScatterDefinition CubicRocks;
+		CubicRocks.ScatterID = 102;
+		CubicRocks.Name = TEXT("CubicRocks");
+		CubicRocks.DebugColor = FColor(128, 128, 128);
+		CubicRocks.DebugSphereRadius = 12.0f;
+		CubicRocks.bEnabled = true;
+		CubicRocks.Density = 0.05f;
+		CubicRocks.MinSlopeDegrees = 0.0f;
+		CubicRocks.MaxSlopeDegrees = 45.0f;
+		CubicRocks.AllowedMaterials = { EVoxelMaterial::Stone, EVoxelMaterial::Dirt };
+		CubicRocks.bTopFacesOnly = true;
+		CubicRocks.ScaleRange = FVector2D(0.5f, 1.5f);
+		CubicRocks.bRandomYawRotation = true;
+		CubicRocks.bAlignToSurfaceNormal = false;
+		CubicRocks.SurfaceOffset = 0.0f;
+		CubicRocks.PositionJitter = 0.0f;
+		CubicRocks.MeshType = EScatterMeshType::StaticMesh;
+		CubicRocks.PlacementMode = EScatterPlacementMode::BlockFaceSnap;
+		CubicRocks.LODStartDistance = 8000.0f;
+		CubicRocks.CullDistance = 20000.0f;
+		CubicRocks.MinScreenSize = 0.002f;
+		CubicRocks.bCastShadows = true;
+		AddScatterDefinition(CubicRocks);
+
+		// HISM Block Trees - used in HISM or Both mode (VoxelInjection type for tree mode filtering)
+		// User should assign a block-style tree mesh in ScatterConfiguration
+		FScatterDefinition HISMTree;
+		HISMTree.ScatterID = 10;
+		HISMTree.Name = TEXT("HISMBlockTree");
+		HISMTree.DebugColor = FColor(34, 139, 34);
+		HISMTree.DebugSphereRadius = 25.0f;
+		HISMTree.bEnabled = true;
+		HISMTree.Density = 0.02f;
+		HISMTree.MinSlopeDegrees = 0.0f;
+		HISMTree.MaxSlopeDegrees = 20.0f;
+		HISMTree.AllowedMaterials = { EVoxelMaterial::Grass };
+		HISMTree.bTopFacesOnly = true;
+		HISMTree.ScaleRange = FVector2D(0.8f, 1.3f);
+		HISMTree.bRandomYawRotation = true;
+		HISMTree.bAlignToSurfaceNormal = false;
+		HISMTree.SurfaceOffset = 0.0f;
+		HISMTree.PositionJitter = 0.0f;
+		HISMTree.MeshType = EScatterMeshType::VoxelInjection; // Filtered by TreeMode
+		HISMTree.PlacementMode = EScatterPlacementMode::BlockFaceSnap;
+		HISMTree.TreeTemplateID = 0;
+		HISMTree.LODStartDistance = 15000.0f;
+		HISMTree.CullDistance = 50000.0f;
+		HISMTree.MinScreenSize = 0.001f;
+		HISMTree.bCastShadows = true;
+		HISMTree.SpawnDistance = 20000.0f;
+		AddScatterDefinition(HISMTree);
+	}
+	else
+	{
+		// ==================== Smooth Mode Defaults ====================
+
+		// Grass scatter - dense on grass material
+		FScatterDefinition GrassScatter;
+		GrassScatter.ScatterID = 0;
+		GrassScatter.Name = TEXT("Grass");
+		GrassScatter.DebugColor = FColor::Green;
+		GrassScatter.DebugSphereRadius = 8.0f;
+		GrassScatter.bEnabled = true;
+		GrassScatter.Density = 0.5f;
+		GrassScatter.MinSlopeDegrees = 0.0f;
+		GrassScatter.MaxSlopeDegrees = 30.0f;
+		GrassScatter.AllowedMaterials = { EVoxelMaterial::Grass };
+		GrassScatter.bTopFacesOnly = true;
+		GrassScatter.ScaleRange = FVector2D(0.7f, 1.3f);
+		GrassScatter.bRandomYawRotation = true;
+		GrassScatter.bAlignToSurfaceNormal = true;
+		GrassScatter.SurfaceOffset = 0.0f;
+		GrassScatter.PositionJitter = 25.0f;
+		GrassScatter.LODStartDistance = 3000.0f;
+		GrassScatter.CullDistance = 8000.0f;
+		GrassScatter.MinScreenSize = 0.005f;
+		GrassScatter.bCastShadows = false;
+		AddScatterDefinition(GrassScatter);
+
+		// Rock scatter - less dense, on stone and dirt
+		FScatterDefinition RockScatter;
+		RockScatter.ScatterID = 1;
+		RockScatter.Name = TEXT("Rocks");
+		RockScatter.DebugColor = FColor(128, 128, 128);
+		RockScatter.DebugSphereRadius = 15.0f;
+		RockScatter.bEnabled = true;
+		RockScatter.Density = 0.05f;
+		RockScatter.MinSlopeDegrees = 0.0f;
+		RockScatter.MaxSlopeDegrees = 60.0f;
+		RockScatter.AllowedMaterials = { EVoxelMaterial::Stone, EVoxelMaterial::Dirt };
+		RockScatter.bTopFacesOnly = false;
+		RockScatter.ScaleRange = FVector2D(0.5f, 2.0f);
+		RockScatter.bRandomYawRotation = true;
+		RockScatter.bAlignToSurfaceNormal = false;
+		RockScatter.SurfaceOffset = 0.0f;
+		RockScatter.PositionJitter = 50.0f;
+		RockScatter.LODStartDistance = 8000.0f;
+		RockScatter.CullDistance = 20000.0f;
+		RockScatter.MinScreenSize = 0.002f;
+		RockScatter.bCastShadows = true;
+		AddScatterDefinition(RockScatter);
+
+		// Tree scatter - very sparse on grass
+		FScatterDefinition TreeScatter;
+		TreeScatter.ScatterID = 2;
+		TreeScatter.Name = TEXT("Trees");
+		TreeScatter.DebugColor = FColor(34, 139, 34);
+		TreeScatter.DebugSphereRadius = 25.0f;
+		TreeScatter.bEnabled = true;
+		TreeScatter.Density = 0.02f;
+		TreeScatter.MinSlopeDegrees = 0.0f;
+		TreeScatter.MaxSlopeDegrees = 20.0f;
+		TreeScatter.AllowedMaterials = { EVoxelMaterial::Grass };
+		TreeScatter.bTopFacesOnly = true;
+		TreeScatter.ScaleRange = FVector2D(0.8f, 1.5f);
+		TreeScatter.bRandomYawRotation = true;
+		TreeScatter.bAlignToSurfaceNormal = false;
+		TreeScatter.SurfaceOffset = 0.0f;
+		TreeScatter.PositionJitter = 100.0f;
+		TreeScatter.LODStartDistance = 15000.0f;
+		TreeScatter.CullDistance = 50000.0f;
+		TreeScatter.MinScreenSize = 0.001f;
+		TreeScatter.bCastShadows = true;
+		TreeScatter.SpawnDistance = 20000.0f;
+		AddScatterDefinition(TreeScatter);
+	}
+
+	UE_LOG(LogVoxelScatter, Log, TEXT("Created %d default scatter definitions (mode: %s)"),
+		ScatterDefinitions.Num(), bCubicMode ? TEXT("Cubic") : TEXT("Smooth"));
 }

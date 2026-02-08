@@ -2,10 +2,13 @@
 
 #include "VoxelScatterRenderer.h"
 #include "VoxelScatterManager.h"
+#include "VoxelBillboardMeshGenerator.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/Actor.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelScatterRenderer, Log, All);
@@ -281,7 +284,13 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 
 	// Get scatter definition
 	const FScatterDefinition* Definition = ScatterManager->GetScatterDefinition(ScatterTypeID);
-	if (!Definition || Definition->Mesh.IsNull())
+	if (!Definition)
+	{
+		return nullptr;
+	}
+
+	// CrossBillboard types use runtime-generated meshes, so Mesh soft pointer is not set
+	if (Definition->MeshType != EScatterMeshType::CrossBillboard && Definition->Mesh.IsNull())
 	{
 		return nullptr;
 	}
@@ -388,12 +397,50 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 		return nullptr;
 	}
 
-	// Load mesh synchronously (TSoftObjectPtr)
-	UStaticMesh* Mesh = Definition.Mesh.LoadSynchronous();
-	if (!Mesh)
+	UStaticMesh* Mesh = nullptr;
+
+	if (Definition.MeshType == EScatterMeshType::CrossBillboard)
 	{
-		UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("Failed to load mesh for scatter type: %s"), *Definition.Name);
-		return nullptr;
+		// Compute UV bounds: atlas tile or full [0,1]
+		FVector2f UVMin(0.0f, 0.0f);
+		FVector2f UVMax(1.0f, 1.0f);
+
+		if (Definition.bUseBillboardAtlas && Definition.BillboardAtlasColumns > 0 && Definition.BillboardAtlasRows > 0)
+		{
+			const float TileU = 1.0f / static_cast<float>(Definition.BillboardAtlasColumns);
+			const float TileV = 1.0f / static_cast<float>(Definition.BillboardAtlasRows);
+			UVMin.X = Definition.BillboardAtlasColumn * TileU;
+			UVMin.Y = Definition.BillboardAtlasRow * TileV;
+			UVMax.X = UVMin.X + TileU;
+			UVMax.Y = UVMin.Y + TileV;
+
+			// Inset UVs by half a texel to prevent bilinear filtering from
+			// sampling across atlas tile boundaries (causes visible border)
+			constexpr float AtlasTexelInset = 0.001f; // ~1 texel at 1024x1024
+			UVMin.X += AtlasTexelInset;
+			UVMin.Y += AtlasTexelInset;
+			UVMax.X -= AtlasTexelInset;
+			UVMax.Y -= AtlasTexelInset;
+		}
+
+		// Generate cross-billboard mesh at runtime with atlas UVs baked in
+		Mesh = FVoxelBillboardMeshGenerator::GetOrCreateBillboardMesh(
+			Definition.BillboardWidth, Definition.BillboardHeight, UVMin, UVMax);
+		if (!Mesh)
+		{
+			UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("Failed to create billboard mesh for scatter type: %s"), *Definition.Name);
+			return nullptr;
+		}
+	}
+	else
+	{
+		// Load mesh synchronously (TSoftObjectPtr)
+		Mesh = Definition.Mesh.LoadSynchronous();
+		if (!Mesh)
+		{
+			UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("Failed to load mesh for scatter type: %s"), *Definition.Name);
+			return nullptr;
+		}
 	}
 
 	// Create component name
@@ -421,10 +468,51 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 	// Configure the component
 	ConfigureHISMComponent(HISM, Definition);
 
+	// Apply billboard-specific material override
+	if (Definition.MeshType == EScatterMeshType::CrossBillboard)
+	{
+		UTexture2D* BillboardTex = nullptr;
+
+		if (Definition.bUseBillboardAtlas)
+		{
+			// Atlas mode: use the shared atlas texture (UVs already baked into mesh)
+			BillboardTex = Definition.BillboardAtlasTexture.LoadSynchronous();
+		}
+		else
+		{
+			// Standalone texture mode
+			BillboardTex = Definition.BillboardTexture.LoadSynchronous();
+		}
+
+		if (BillboardTex)
+		{
+			UMaterialInstanceDynamic* BillboardMat = FVoxelBillboardMeshGenerator::CreateBillboardMaterial(
+				BillboardTex, HISM);
+			if (BillboardMat)
+			{
+				HISM->SetMaterial(0, BillboardMat);
+			}
+		}
+		else
+		{
+			UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("No billboard texture assigned for scatter type: %s (ID %d). "
+				"Set BillboardTexture or BillboardAtlasTexture for proper rendering."),
+				*Definition.Name, Definition.ScatterID);
+
+			// Apply a basic two-sided material so geometry is at least visible for debugging
+			UMaterialInstanceDynamic* FallbackMat = FVoxelBillboardMeshGenerator::CreateBillboardMaterial(nullptr, HISM);
+			if (FallbackMat)
+			{
+				HISM->SetMaterial(0, FallbackMat);
+			}
+		}
+	}
+
 	// Register with world
 	HISM->RegisterComponent();
 
-	UE_LOG(LogVoxelScatterRenderer, Log, TEXT("Created HISM component for: %s (ID: %d)"), *Definition.Name, Definition.ScatterID);
+	UE_LOG(LogVoxelScatterRenderer, Log, TEXT("Created HISM component for: %s (ID: %d, MeshType: %d)"),
+		*Definition.Name, Definition.ScatterID, static_cast<int32>(Definition.MeshType));
 
 	return HISM;
 }
@@ -605,7 +693,13 @@ void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
 
 	// Get scatter definition
 	const FScatterDefinition* Definition = ScatterManager->GetScatterDefinition(ScatterTypeID);
-	if (!Definition || Definition->Mesh.IsNull())
+	if (!Definition)
+	{
+		return;
+	}
+
+	// CrossBillboard types use runtime-generated meshes, so Mesh soft pointer is not set
+	if (Definition->MeshType != EScatterMeshType::CrossBillboard && Definition->Mesh.IsNull())
 	{
 		return;
 	}

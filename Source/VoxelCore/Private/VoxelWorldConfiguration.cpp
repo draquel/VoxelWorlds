@@ -3,6 +3,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelCore.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelTreeTypes.h"
 
 UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 {
@@ -32,6 +33,57 @@ UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 	// - Biome blending parameters
 	// - Height material rules (snow at peaks, rock at altitude)
 	// If BiomeConfiguration is null, a default one will be created at runtime
+
+	// Default tree templates
+	{
+		FVoxelTreeTemplate Oak;
+		Oak.TemplateID = 0;
+		Oak.Name = TEXT("Oak");
+		Oak.TrunkHeight = 5;
+		Oak.TrunkHeightVariance = 3;
+		Oak.TrunkRadius = 0;
+		Oak.TrunkMaterialID = 20; // Wood
+		Oak.CanopyShape = ETreeCanopyShape::Sphere;
+		Oak.CanopyRadius = 3;
+		Oak.CanopyRadiusVariance = 1;
+		Oak.LeafMaterialID = 21; // Leaves
+		Oak.CanopyVerticalOffset = 0;
+		Oak.AllowedMaterials = { 0 }; // Grass only
+		Oak.MaxSlopeDegrees = 30.0f;
+		TreeTemplates.Add(Oak);
+
+		FVoxelTreeTemplate Birch;
+		Birch.TemplateID = 1;
+		Birch.Name = TEXT("Birch");
+		Birch.TrunkHeight = 7;
+		Birch.TrunkHeightVariance = 4;
+		Birch.TrunkRadius = 0;
+		Birch.TrunkMaterialID = 20;
+		Birch.CanopyShape = ETreeCanopyShape::Sphere;
+		Birch.CanopyRadius = 2;
+		Birch.CanopyRadiusVariance = 1;
+		Birch.LeafMaterialID = 21;
+		Birch.CanopyVerticalOffset = 0;
+		Birch.AllowedMaterials = { 0 }; // Grass only
+		Birch.MaxSlopeDegrees = 25.0f;
+		TreeTemplates.Add(Birch);
+
+		FVoxelTreeTemplate Bush;
+		Bush.TemplateID = 2;
+		Bush.Name = TEXT("Bush");
+		Bush.TrunkHeight = 1;
+		Bush.TrunkHeightVariance = 1;
+		Bush.TrunkRadius = 0;
+		Bush.TrunkMaterialID = 20;
+		Bush.CanopyShape = ETreeCanopyShape::Sphere;
+		Bush.CanopyRadius = 2;
+		Bush.CanopyRadiusVariance = 1;
+		Bush.LeafMaterialID = 21;
+		Bush.CanopyVerticalOffset = -1;
+		Bush.AllowedMaterials = { 0, 1 }; // Grass and Dirt
+		Bush.MaxSlopeDegrees = 40.0f;
+		TreeTemplates.Add(Bush);
+	}
 }
 
 float UVoxelWorldConfiguration::GetChunkWorldSizeAtLOD(int32 LODLevel) const

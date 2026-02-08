@@ -398,6 +398,20 @@ protected:
 		const TArray<FClearedScatterVolume>& ClearedVolumes,
 		FChunkSurfaceData& OutSurfaceData);
 
+	/**
+	 * Extract surface points using block-face snapping (cubic terrain).
+	 * Positions snap to block face centers instead of interpolated positions.
+	 * One point per exposed top face, normal is always up, no interpolation.
+	 */
+	static void ExtractSurfacePointsCubic(
+		const TArray<FVoxelData>& VoxelData,
+		const FIntVector& ChunkCoord,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize,
+		const TArray<FClearedScatterVolume>& ClearedVolumes,
+		FChunkSurfaceData& OutSurfaceData);
+
 	// ==================== Debug ====================
 
 	/** Whether debug visualization is enabled */
