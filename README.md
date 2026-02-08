@@ -141,6 +141,13 @@ VoxelWorlds/
   - ✅ **Phase 7D-1**: Async scatter generation (thread pool extraction + placement)
   - ✅ **Phase 7D-2**: GPU surface extraction (compute shader with occupancy grid dedup)
   - ✅ **Phase 7D-5**: Voxel-based surface extraction (LOD-independent scatter from voxel data)
+  - ✅ **Phase 7E**: Cubic terrain scatter support
+    - Block-face snapping for cubic terrain placement
+    - Cross-billboard HISM scatter (grass, flowers) with atlas UV support
+    - Voxel tree injection (deterministic, cross-chunk, editable terrain trees)
+    - Tree placement rules (material, biome, slope, elevation, water level)
+    - Tree mode system (VoxelData / HISM / Both with distance threshold)
+    - Runtime billboard material (TwoSided, Masked, with fallback generation)
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
@@ -174,6 +181,8 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `UVoxelCollisionManager` - Distance-based collision with async cooking
 - `UVoxelScatterManager` - Scatter placement coordinator with surface extraction
 - `UVoxelScatterRenderer` - HISM instance management with deferred rebuilds
+- `FVoxelBillboardMeshGenerator` - Runtime cross-billboard mesh generation for cubic scatter
+- `FVoxelTreeInjector` - Deterministic cross-chunk voxel tree injection
 - `AVoxelWorldTestActor` - Test actor for runtime world instantiation
 - `UVoxelWorldConfiguration` - World configuration asset
 
@@ -193,9 +202,10 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FChunkEditLayer` - Sparse per-chunk edit storage
 - `FVoxelBrushParams` - Brush configuration (shape, radius, falloff, strength)
 - `FChunkCollisionData` - Per-chunk collision state and UBodySetup reference
-- `FScatterDefinition` - Scatter type configuration (mesh, density, placement rules)
+- `FScatterDefinition` - Scatter type configuration (mesh, density, placement rules, billboard/tree settings)
 - `FScatterSpawnPoint` - Individual scatter instance data (position, rotation, scale)
 - `FChunkScatterData` - Per-chunk scatter spawn points
+- `FVoxelTreeTemplate` - Tree template (trunk/canopy params, placement rules, variance)
 
 ## Getting Started
 

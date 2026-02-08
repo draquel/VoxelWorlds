@@ -568,6 +568,7 @@ Mesh generation was moved to background threads to eliminate stuttering:
 - [x] Async scatter generation (7D-1: thread pool extraction + placement)
 - [x] GPU surface extraction (7D-2: compute shader with occupancy grid dedup)
 - [x] Voxel-based surface extraction (7D-5: LOD-independent scatter from voxel data)
+- [x] Cubic terrain scatter (7E: block-face snapping, billboard scatter, voxel trees)
 
 ### Deliverables
 - Working vegetation system ✓
@@ -680,6 +681,93 @@ Phase 7 performance targets displayed for comparison:
 | FPS | 60+ |
 | Memory | <250 MB |
 | GPU/frame | <5 ms |
+
+### Phase 7E: Cubic Terrain Scatter Support - COMPLETE
+
+**Goal**: Minecraft-style scatter for cubic terrain: billboard grass/flowers, voxel tree injection, HISM block model trees, and block-face snapping.
+
+#### 7E-1: Foundation Types & Block-Face Snapping - COMPLETE
+- [x] Add `EScatterMeshType` enum: StaticMesh, CrossBillboard, VoxelInjection
+- [x] Add `EScatterPlacementMode` enum: SurfaceInterpolated, BlockFaceSnap
+- [x] Add Wood (20) and Leaves (21) material IDs to `EVoxelMaterial`
+- [x] Extend `FScatterDefinition` with MeshType, PlacementMode, Billboard, and VoxelInjection fields
+- [x] Implement `ExtractSurfacePointsCubic()` — one point per exposed top block face
+- [x] Route extraction via `MeshingMode == Cubic` in sync and async scatter paths
+- [x] Skip position jitter for `BlockFaceSnap` placement mode
+- [x] Add `bAutoCubicScatterDefaults` config option
+
+#### 7E-2: Billboard Scatter (Cross-Billboard HISM) - COMPLETE
+- [x] Create `FVoxelBillboardMeshGenerator` — runtime cross-billboard mesh (2 intersecting quads, 8 verts, 4 tris)
+- [x] Mesh built via `UStaticMeshDescription` + `FMeshDescription` API (MeshDescription module dep)
+- [x] Mesh cache by hash of (width, height, UVMin, UVMax)
+- [x] Billboard material: Two-sided, masked, `TextureSampleParameter2D("BaseTexture")` for alpha testing
+- [x] Runtime material fallback via `GetOrCreateRuntimeBillboardBaseMaterial()` when `M_Billboard_Master` asset not found
+- [x] Billboard atlas UV support: Per-definition atlas column/row/grid, UVs baked into mesh vertices
+- [x] Half-texel UV inset for atlas mode to prevent bilinear filtering bleed at tile boundaries
+- [x] Integrate into `VoxelScatterRenderer::CreateHISMComponent()` for CrossBillboard types
+- [x] Fix `GetOrCreateHISM()` and `RebuildScatterType()` to bypass `Mesh.IsNull()` for CrossBillboard types
+- [x] Fallback material applied even when no texture assigned (with warning log)
+- [x] Default cubic definitions: CubicGrass (ID=100, 80x80cm, density 0.4), CubicFlowers (ID=101, 60x60cm, density 0.08), CubicRocks (ID=102, static mesh)
+
+#### 7E-3: Voxel Tree Types & Configuration - COMPLETE
+- [x] Create `VoxelTreeTypes.h` with `ETreeCanopyShape`, `EVoxelTreeMode`, `FVoxelTreeTemplate`
+- [x] Canopy shapes: Sphere, Cone, FlatDisc, RoundedCube
+- [x] Tree modes: VoxelData (editable terrain), HISM (pre-built meshes), Both (distance-based hybrid)
+- [x] Add TreeMode, VoxelTreeMaxDistance, TreeTemplates, TreeDensity to `UVoxelWorldConfiguration`
+- [x] Default templates: Oak (height 5-8, sphere canopy R=3), Birch (height 7-11, R=2), Bush (height 2-3, R=2)
+
+#### 7E-4: Voxel Tree Injection System - COMPLETE
+- [x] Create `FVoxelTreeInjector` — stateless, thread-safe static class
+- [x] `InjectTrees()` computes trees for current + 26 neighbor chunks (cross-chunk safe)
+- [x] `ComputeTreePositionsForChunk()` — deterministic from chunk seed + noise height sampling
+- [x] `StampTree()` — trunk column + canopy shape, only writes within chunk bounds
+- [x] Canopy uses `bOnlyReplaceAir` to avoid overwriting existing terrain
+- [x] Tree placement rules: AllowedMaterials, AllowedBiomes, MinElevation, MaxElevation, MaxSlopeDegrees
+- [x] `ComputeSlopeAt()` — central difference gradient from 4 neighbor height samples
+- [x] `QuerySurfaceConditions()` — replicates biome pipeline (temp/moisture noise → biome → material)
+- [x] Water level check: Trees below water level are skipped
+- [x] Default rules: Oak/Birch on Grass (30/25° slope max), Bush on Grass+Dirt (40° slope max)
+- [x] Integration: `VoxelChunkManager::LaunchAsyncGeneration()` calls after `GenerateChunkCPU()`
+- [x] Condition: `MeshingMode == Cubic && TreeMode != HISM && TreeTemplates.Num() > 0`
+- [x] Editable: Trees are in VoxelData, player edits modify/destroy them, edit layer preserves changes
+
+#### 7E-5: HISM Block Trees & Tree Mode Filtering - COMPLETE
+- [x] HISM block trees via existing scatter pipeline (StaticMesh + BlockFaceSnap)
+- [x] Tree mode filtering in `OnChunkMeshDataReady()`:
+  - VoxelData mode: Skip all VoxelInjection scatter defs
+  - HISM mode: Include VoxelInjection defs (rendered as HISM instances)
+  - Both mode: Skip within `VoxelTreeMaxDistance`, include beyond
+
+#### Billboard Visibility Fixes (Post-7E)
+- [x] Fix `GetOrCreateHISM()` / `RebuildScatterType()` — bypass `Mesh.IsNull()` for CrossBillboard types
+- [x] Runtime billboard base material with `TwoSided`, `BLEND_Masked`, `bUsedWithInstancedStaticMeshes`
+- [x] Material expression setup via `#if WITH_EDITORONLY_DATA` (TextureSampleParameter2D → BaseColor + OpacityMask)
+- [x] Atlas UV half-texel inset prevents bilinear bleed at tile borders
+- [x] Scatter clear radius padded by `VoxelSize * 0.6` so block-face scatter clears when block is broken
+
+#### New Files (Phase 7E)
+| File | Module | Purpose |
+|------|--------|---------|
+| `VoxelCore/Public/VoxelTreeTypes.h` | VoxelCore | Tree templates, EVoxelTreeMode, ETreeCanopyShape |
+| `VoxelGeneration/Public/VoxelTreeInjector.h` | VoxelGeneration | Tree injection header |
+| `VoxelGeneration/Private/VoxelTreeInjector.cpp` | VoxelGeneration | Cross-chunk deterministic tree injection |
+| `VoxelScatter/Public/VoxelBillboardMeshGenerator.h` | VoxelScatter | Billboard mesh generator header |
+| `VoxelScatter/Private/VoxelBillboardMeshGenerator.cpp` | VoxelScatter | Runtime cross-billboard mesh + material |
+
+#### Modified Files (Phase 7E)
+| File | Changes |
+|------|---------|
+| `VoxelCore/Public/VoxelCoreTypes.h` | EScatterMeshType, EScatterPlacementMode enums |
+| `VoxelCore/Public/VoxelMaterialRegistry.h` | Wood=20, Leaves=21 material IDs |
+| `VoxelCore/Private/VoxelMaterialRegistry.cpp` | Register Wood/Leaves material definitions |
+| `VoxelCore/Public/VoxelScatterTypes.h` | MeshType, PlacementMode, Billboard, Atlas fields |
+| `VoxelCore/Public/VoxelWorldConfiguration.h` | TreeMode, TreeTemplates, cubic scatter config |
+| `VoxelCore/Private/VoxelWorldConfiguration.cpp` | Default tree templates with placement rules |
+| `VoxelScatter/Private/VoxelScatterManager.cpp` | Cubic extraction, defaults, tree mode filter |
+| `VoxelScatter/Private/VoxelScatterRenderer.cpp` | Billboard HISM, Mesh.IsNull bypass, atlas UV inset |
+| `VoxelScatter/Private/VoxelScatterPlacement.cpp` | Skip jitter for BlockFaceSnap |
+| `VoxelScatter/VoxelScatter.Build.cs` | +MeshDescription, +StaticMeshDescription |
+| `VoxelStreaming/Private/VoxelChunkManager.cpp` | Tree injection in async, scatter clear radius padding |
 
 ---
 
@@ -924,6 +1012,14 @@ Phase 7 performance targets displayed for comparison:
 6. ~~Performance profiling~~ - COMPLETE
 7. ~~Async scatter generation~~ - COMPLETE (7D-1)
 8. ~~Voxel-based surface extraction~~ - COMPLETE (7D-5)
+9. ~~Cubic terrain scatter~~ - COMPLETE (7E)
+   - Block-face snapping, billboard scatter (cross-billboard HISM)
+   - Billboard atlas UV support with half-texel inset
+   - Voxel tree injection (deterministic, cross-chunk, editable)
+   - Tree placement rules (material, biome, slope, elevation, water level)
+   - Tree mode filtering (VoxelData / HISM / Both)
+   - Runtime billboard material (TwoSided, Masked, with fallback)
+   - Scatter clear radius padding for block-face scatter
 
 ### Phase 7D: Async & GPU Scatter Optimization
 

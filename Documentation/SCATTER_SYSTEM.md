@@ -121,6 +121,26 @@ struct FScatterDefinition
     TSoftObjectPtr<UStaticMesh> Mesh;
     TArray<TSoftObjectPtr<UMaterialInterface>> OverrideMaterials;
 
+    // Cubic Scatter Settings
+    EScatterMeshType MeshType = EScatterMeshType::StaticMesh;
+    EScatterPlacementMode PlacementMode = EScatterPlacementMode::SurfaceInterpolated;
+
+    // Billboard Settings (when MeshType == CrossBillboard)
+    TSoftObjectPtr<UTexture2D> BillboardTexture;
+    float BillboardWidth = 100.0f;     // cm
+    float BillboardHeight = 100.0f;    // cm
+
+    // Billboard Atlas Settings
+    bool bUseBillboardAtlas = false;
+    TSoftObjectPtr<UTexture2D> BillboardAtlasTexture;
+    int32 BillboardAtlasColumn = 0;
+    int32 BillboardAtlasRow = 0;
+    int32 BillboardAtlasColumns = 4;
+    int32 BillboardAtlasRows = 4;
+
+    // Voxel Injection Settings (when MeshType == VoxelInjection)
+    int32 TreeTemplateID = 0;          // Index into Configuration->TreeTemplates
+
     // Placement Rules
     float Density = 0.1f;                    // 0.0-1.0, probability per surface point
     float MinSlopeDegrees = 0.0f;
@@ -140,7 +160,6 @@ struct FScatterDefinition
     float PositionJitter = 0.0f;
 
     // LOD & Culling
-    float SpawnDistance = 0.0f;              // 0 = use global ScatterRadius
     float CullDistance = 50000.0f;           // Max render distance
     float LODStartDistance = 5000.0f;        // LOD transitions + shadow cutoff
     float MinScreenSize = 0.0f;              // Screen-size culling (0-1)
@@ -645,6 +664,205 @@ Voxel data is **always 32³ at base VoxelSize** regardless of LOD level, so the 
 - `VoxelScatterManager.cpp`: `ExtractSurfacePointsFromVoxelData()` implementation, integration in `LaunchAsyncScatterGeneration()`
 - `VoxelChunkManager.cpp`: Passes `VoxelData`, `ChunkSize`, `VoxelSize` via `OnChunkMeshDataReady()`
 
+## Cubic Terrain Scatter (Phase 7E)
+
+Cubic meshing mode uses specialized scatter behavior: block-face snapping, cross-billboard meshes for grass/flowers, and voxel tree injection for editable terrain trees.
+
+### Block-Face Snap Placement
+
+When `MeshingMode == Cubic`, scatter uses `ExtractSurfacePointsCubic()` instead of the smooth-terrain voxel column scan:
+
+- One surface point per exposed top block face
+- Position at face center: `(X + 0.5) * VoxelSize, (Y + 0.5) * VoxelSize, (Z + 1) * VoxelSize`
+- Normal always `FVector::UpVector`, SlopeAngle always 0
+- No density interpolation — exact block-face positions
+- Position jitter is skipped for `BlockFaceSnap` placement mode
+
+Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic` in both sync and async scatter paths.
+
+### Scatter Mesh Types
+
+`EScatterMeshType` (VoxelCoreTypes.h):
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| `StaticMesh` | Standard assigned static mesh via HISM | Rocks, decorations |
+| `CrossBillboard` | Runtime 2-quad cross mesh with alpha-tested material | Grass, flowers |
+| `VoxelInjection` | Trees stamped directly into VoxelData | Editable/destructible trees |
+
+### Billboard Scatter
+
+Cross-billboard meshes are generated at runtime by `FVoxelBillboardMeshGenerator`:
+
+- **Geometry**: 2 quads intersecting at 90 degrees (XZ + YZ planes), pivot at bottom center
+- **Vertices**: 8 vertices, 4 triangles per instance
+- **UVs**: Baked into mesh vertices — atlas mode uses tile region UVs, standalone uses [0,1]
+- **Mesh cache**: Keyed by hash of (width, height, UVMin, UVMax) to avoid re-creation
+- **Material**: Two-sided masked with `TextureSampleParameter2D("BaseTexture")` → BaseColor (RGB) + OpacityMask (Alpha)
+
+#### Billboard Atlas Support
+
+Multiple billboard types can share a single atlas texture with per-tile UV offsetting:
+
+```cpp
+// FScatterDefinition billboard atlas fields:
+bool bUseBillboardAtlas = false;
+TSoftObjectPtr<UTexture2D> BillboardAtlasTexture;
+int32 BillboardAtlasColumn = 0;  // Tile column in atlas grid
+int32 BillboardAtlasRow = 0;     // Tile row in atlas grid
+int32 BillboardAtlasColumns = 4; // Atlas grid columns
+int32 BillboardAtlasRows = 4;    // Atlas grid rows
+```
+
+- Atlas tile UVs computed in `CreateHISMComponent()`: `UVMin = (col/cols, row/rows)`, `UVMax = ((col+1)/cols, (row+1)/rows)`
+- UVs baked into billboard mesh vertices (different mesh per tile, shared material)
+- **Half-texel inset** applied to prevent bilinear filtering bleed at atlas tile boundaries
+- Definitions sharing same atlas texture share one material instance but have different meshes
+
+#### Billboard Material
+
+`CreateBillboardMaterial()` creates a `UMaterialInstanceDynamic`:
+1. Tries to load user-provided `/VoxelWorlds/Materials/M_Billboard_Master`
+2. Falls back to runtime-generated `UMaterial` with proper settings:
+   - `TwoSided = true`, `BlendMode = BLEND_Masked`, `bUsedWithInstancedStaticMeshes = true`
+   - `TextureSampleParameter2D("BaseTexture")` connected to BaseColor + OpacityMask
+   - Material expressions created via `#if WITH_EDITORONLY_DATA`
+   - Cached in static `CachedRuntimeBillboardBaseMaterial`
+
+### Default Cubic Scatter Definitions
+
+Created when `MeshingMode == Cubic`:
+
+| ID | Name | Type | Size | Density | Materials | Cull Dist |
+|----|------|------|------|---------|-----------|-----------|
+| 100 | CubicGrass | CrossBillboard | 80x80cm | 0.4 | Grass | 5000 |
+| 101 | CubicFlowers | CrossBillboard | 60x60cm | 0.08 | Grass | 4000 |
+| 102 | CubicRocks | StaticMesh | — | 0.05 | Stone, Dirt | 20000 |
+
+### Scatter Edit Integration for Block Edits
+
+When a block is broken (discrete edit), scatter on the block's top face must also be removed. The scatter clear radius is padded by `VoxelSize * 0.6` to account for the half-block offset between the edit center (block center) and the scatter position (top face center):
+
+```cpp
+// VoxelChunkManager OnChunkEdited handler:
+const float ScatterClearRadius = EditRadius + Configuration->VoxelSize * 0.6f;
+ScatterManager->ClearScatterInRadius(EditCenter, ScatterClearRadius);
+```
+
+## Voxel Tree System (Phase 7E)
+
+### Tree Configuration
+
+Tree settings in `UVoxelWorldConfiguration`:
+
+```cpp
+EVoxelTreeMode TreeMode = EVoxelTreeMode::VoxelData;
+float VoxelTreeMaxDistance = 10000.0f;  // "Both" mode threshold
+TArray<FVoxelTreeTemplate> TreeTemplates;
+float TreeDensity = 1.5f;  // Trees per chunk (fractional = probability)
+```
+
+### Tree Templates (FVoxelTreeTemplate)
+
+Each template defines trunk, canopy, and placement rules:
+
+```cpp
+struct FVoxelTreeTemplate
+{
+    // Identity
+    int32 TemplateID;
+    FString Name;
+
+    // Trunk
+    int32 TrunkHeight = 6;           // voxels
+    int32 TrunkHeightVariance = 2;   // +/- random
+    int32 TrunkRadius = 0;           // 0=1x1, 1=3x3 cross
+    uint8 TrunkMaterialID = 20;      // Wood
+
+    // Canopy
+    ETreeCanopyShape CanopyShape;     // Sphere, Cone, FlatDisc, RoundedCube
+    int32 CanopyRadius = 3;
+    int32 CanopyRadiusVariance = 1;
+    uint8 LeafMaterialID = 21;       // Leaves
+    int32 CanopyVerticalOffset = 0;
+
+    // Placement Rules
+    TArray<uint8> AllowedMaterials;   // Surface material filter (empty = all)
+    TArray<uint8> AllowedBiomes;      // Biome ID filter (empty = all)
+    float MinElevation = -1000000.0f;
+    float MaxElevation = 1000000.0f;
+    float MaxSlopeDegrees = 30.0f;
+};
+```
+
+Default templates:
+
+| Template | Height | Canopy | Materials | Max Slope |
+|----------|--------|--------|-----------|-----------|
+| Oak | 5-8 | Sphere R=3 | Grass | 30 deg |
+| Birch | 7-11 | Sphere R=2 | Grass | 25 deg |
+| Bush | 2-3 | Sphere R=2 | Grass, Dirt | 40 deg |
+
+### Voxel Tree Injection (FVoxelTreeInjector)
+
+Stateless, thread-safe static class that stamps tree blocks into VoxelData during async generation.
+
+**Cross-chunk algorithm**:
+1. Compute max tree extent from templates → neighbor search radius (usually 1 chunk each direction)
+2. For current chunk AND up to 26 neighbors, call `ComputeTreePositionsForChunk()`:
+   - Deterministic seed from `HashCombine(WorldSeed, SourceChunkCoord)`
+   - `numTrees = floor(TreeDensity) + probability(fractional_part)`
+   - Random X,Y within source chunk → sample `WorldMode.GetTerrainHeightAt()` for Z
+   - Filter by placement rules: material, biome, slope, elevation, water level
+3. For each tree position, if bounding box overlaps current chunk: call `StampTree()`
+
+**StampTree() algorithm**:
+```
+actualHeight = TrunkHeight + RandomVariance(seed)
+actualCanopyR = CanopyRadius + RandomVariance(seed)
+
+// Trunk: column of solid Wood voxels
+for z in [0, actualHeight):
+    if within chunk bounds: set MaterialID=Wood, Density=255
+
+// Canopy: shape around top of trunk
+canopyCenter = base + (0, 0, actualHeight + CanopyVerticalOffset)
+for each voxel in canopy bounding box:
+    if within shape AND within chunk AND current voxel is air:
+        set MaterialID=Leaves, Density=255
+```
+
+**Integration**: Called in `VoxelChunkManager::LaunchAsyncGeneration()` after `GenerateChunkCPU()` completes, conditioned on `MeshingMode == Cubic && TreeMode != HISM && TreeTemplates.Num() > 0`.
+
+**Placement filtering**: `QuerySurfaceConditions()` replicates the CPU noise generator's biome pipeline (temperature/moisture noise → biome selection → surface material) using static `FBM3D()`. This ensures trees respect biome boundaries without requiring the full noise generator.
+
+**Edit integration**: Trees are part of VoxelData, so player edits work naturally — dig through trunks, remove leaves, etc. The edit layer preserves changes across chunk reload.
+
+### Tree Mode Filtering
+
+`EVoxelTreeMode` controls how trees are rendered:
+
+| Mode | VoxelData Injection | HISM Scatter | Use Case |
+|------|--------------------:|-------------:|----------|
+| VoxelData | Yes (all distances) | No | Editable trees, performance cost |
+| HISM | No | Yes (all distances) | Visual-only, best performance |
+| Both | Yes (near) | Yes (far) | Hybrid: edit nearby, visual far |
+
+In `OnChunkMeshDataReady()`, VoxelInjection scatter definitions are filtered based on TreeMode:
+- **VoxelData**: Skip all VoxelInjection defs (trees already in terrain mesh)
+- **HISM**: Include VoxelInjection defs (rendered as HISM instances)
+- **Both**: Skip within `VoxelTreeMaxDistance`, include beyond
+
+### Key Files (Phase 7E)
+
+| File | Purpose |
+|------|---------|
+| `VoxelCore/Public/VoxelTreeTypes.h` | FVoxelTreeTemplate, EVoxelTreeMode, ETreeCanopyShape |
+| `VoxelGeneration/Public/VoxelTreeInjector.h` | Tree injection API |
+| `VoxelGeneration/Private/VoxelTreeInjector.cpp` | Cross-chunk deterministic injection + placement rules |
+| `VoxelScatter/Public/VoxelBillboardMeshGenerator.h` | Billboard mesh generation API |
+| `VoxelScatter/Private/VoxelBillboardMeshGenerator.cpp` | Runtime cross-billboard mesh + material |
+
 ## Future Enhancements
 
 1. ~~**GPU-based scatter generation**~~: COMPLETE (7D-2)
@@ -652,9 +870,11 @@ Voxel data is **always 32³ at base VoxelSize** regardless of LOD level, so the 
 3. **Procedural variation**: Per-instance custom data for shader variation
 4. ~~**Async surface extraction**~~: COMPLETE (7D-1)
 5. ~~**Voxel-based surface extraction**~~: COMPLETE (7D-5)
-6. **Instance pooling**: Reuse instances when chunks unload/reload
-7. **GPU scatter placement** (7D-3): Move rule evaluation to compute shader
-8. **Direct GPU->HISM** (7D-4): Eliminate readback by writing transforms directly
+6. ~~**Cubic terrain scatter**~~: COMPLETE (7E)
+7. **Instance pooling**: Reuse instances when chunks unload/reload
+8. **GPU scatter placement** (7D-3): Move rule evaluation to compute shader
+9. **Direct GPU->HISM** (7D-4): Eliminate readback by writing transforms directly
+10. **Tree physics**: Unsupported leaf blocks fall when trunk is destroyed
 
 ## See Also
 
