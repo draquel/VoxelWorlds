@@ -23,76 +23,71 @@ void FVoxelTreeInjector::InjectTrees(
 		return;
 	}
 
-	// Compute max tree extent to determine neighbor search radius
+	// Compute max tree horizontal extent to determine XY neighbor search radius
 	int32 MaxExtent = 0;
-	int32 MaxHeight = 0;
 	for (const FVoxelTreeTemplate& Tmpl : Templates)
 	{
 		MaxExtent = FMath::Max(MaxExtent, Tmpl.GetMaxHorizontalExtent());
-		MaxHeight = FMath::Max(MaxHeight, Tmpl.GetMaxHeight());
 	}
 
 	// Neighbor search radius in chunks (how far a tree from a neighbor could reach into this chunk)
 	const int32 SearchRadiusChunks = FMath::Max(1, FMath::CeilToInt(static_cast<float>(MaxExtent) / ChunkSize));
 
-	// Iterate over this chunk and neighbor chunks
+	// Iterate over this chunk and XY neighbor chunks
+	// Tree placement is 2D (terrain height determines Z), so no DZ loop needed
+	const FIntVector ChunkMin = ChunkCoord * ChunkSize;
+	const FIntVector ChunkMax = ChunkMin + FIntVector(ChunkSize, ChunkSize, ChunkSize);
+
 	for (int32 DX = -SearchRadiusChunks; DX <= SearchRadiusChunks; ++DX)
 	{
 		for (int32 DY = -SearchRadiusChunks; DY <= SearchRadiusChunks; ++DY)
 		{
-			// Search Z levels both below (tree base in lower chunk, canopy reaches up here)
-			// and above (tree base in upper chunk, but terrain height places base lower)
-			const int32 MaxZSearch = FMath::CeilToInt(static_cast<float>(MaxHeight) / ChunkSize);
-			for (int32 DZ = -MaxZSearch; DZ <= MaxZSearch; ++DZ)
+			// Source chunk uses target's Z (irrelevant since seed is 2D)
+			const FIntVector SourceChunk(ChunkCoord.X + DX, ChunkCoord.Y + DY, ChunkCoord.Z);
+
+			TArray<FIntVector> TreePositions;
+			TArray<int32> TemplateIDs;
+			TArray<uint32> TreeSeeds;
+
+			ComputeTreePositionsForChunk(
+				SourceChunk,
+				ChunkSize, VoxelSize,
+				WorldOrigin, WorldSeed,
+				NoiseParams, WorldMode,
+				TreeDensity, Templates,
+				BiomeConfig, bEnableWaterLevel, WaterLevel,
+				TreePositions, TemplateIDs, TreeSeeds);
+
+			// Stamp each tree that could overlap this chunk
+			for (int32 i = 0; i < TreePositions.Num(); ++i)
 			{
-				const FIntVector SourceChunk = ChunkCoord + FIntVector(DX, DY, DZ);
-
-				TArray<FIntVector> TreePositions;
-				TArray<int32> TemplateIDs;
-				TArray<uint32> TreeSeeds;
-
-				ComputeTreePositionsForChunk(
-					SourceChunk,
-					ChunkSize, VoxelSize,
-					WorldOrigin, WorldSeed,
-					NoiseParams, WorldMode,
-					TreeDensity, Templates,
-					BiomeConfig, bEnableWaterLevel, WaterLevel,
-					TreePositions, TemplateIDs, TreeSeeds);
-
-				// Stamp each tree that could overlap this chunk
-				for (int32 i = 0; i < TreePositions.Num(); ++i)
+				const int32 TmplIdx = TemplateIDs[i];
+				if (TmplIdx < 0 || TmplIdx >= Templates.Num())
 				{
-					const int32 TmplIdx = TemplateIDs[i];
-					if (TmplIdx < 0 || TmplIdx >= Templates.Num())
-					{
-						continue;
-					}
-
-					const FVoxelTreeTemplate& Tmpl = Templates[TmplIdx];
-					const FIntVector& BasePos = TreePositions[i];
-
-					// Quick bounding box check: does tree potentially overlap this chunk?
-					const int32 Extent = Tmpl.GetMaxHorizontalExtent();
-					const int32 Height = Tmpl.GetMaxHeight();
-					const FIntVector ChunkMin = ChunkCoord * ChunkSize;
-					const FIntVector ChunkMax = ChunkMin + FIntVector(ChunkSize, ChunkSize, ChunkSize);
-
-					if (BasePos.X + Extent < ChunkMin.X || BasePos.X - Extent >= ChunkMax.X)
-					{
-						continue;
-					}
-					if (BasePos.Y + Extent < ChunkMin.Y || BasePos.Y - Extent >= ChunkMax.Y)
-					{
-						continue;
-					}
-					if (BasePos.Z >= ChunkMax.Z || BasePos.Z + Height < ChunkMin.Z)
-					{
-						continue;
-					}
-
-					StampTree(BasePos, Tmpl, TreeSeeds[i], ChunkCoord, ChunkSize, InOutVoxelData);
+					continue;
 				}
+
+				const FVoxelTreeTemplate& Tmpl = Templates[TmplIdx];
+				const FIntVector& BasePos = TreePositions[i];
+
+				// Quick bounding box check: does tree potentially overlap this chunk?
+				const int32 Extent = Tmpl.GetMaxHorizontalExtent();
+				const int32 Height = Tmpl.GetMaxHeight();
+
+				if (BasePos.X + Extent < ChunkMin.X || BasePos.X - Extent >= ChunkMax.X)
+				{
+					continue;
+				}
+				if (BasePos.Y + Extent < ChunkMin.Y || BasePos.Y - Extent >= ChunkMax.Y)
+				{
+					continue;
+				}
+				if (BasePos.Z >= ChunkMax.Z || BasePos.Z + Height < ChunkMin.Z)
+				{
+					continue;
+				}
+
+				StampTree(BasePos, Tmpl, TreeSeeds[i], ChunkCoord, ChunkSize, InOutVoxelData);
 			}
 		}
 	}
@@ -427,13 +422,12 @@ void FVoxelTreeInjector::StampTree(
 
 uint32 FVoxelTreeInjector::ComputeTreeChunkSeed(const FIntVector& ChunkCoord, int32 WorldSeed)
 {
-	// FNV-1a hash with a different salt than scatter placement to avoid correlation
+	// FNV-1a hash using only X,Y — tree placement is 2D (determined by terrain height)
+	// Including Z would create different tree sets per Z-level chunk, causing phantom trees
 	uint32 Seed = static_cast<uint32>(WorldSeed) ^ 0xDEADBEEFu;
 	Seed ^= static_cast<uint32>(ChunkCoord.X);
 	Seed *= 16777619u;
 	Seed ^= static_cast<uint32>(ChunkCoord.Y);
-	Seed *= 16777619u;
-	Seed ^= static_cast<uint32>(ChunkCoord.Z);
 	Seed *= 16777619u;
 	return Seed;
 }
