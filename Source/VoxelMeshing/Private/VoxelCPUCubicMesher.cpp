@@ -202,7 +202,21 @@ void FVoxelCPUCubicMesher::Initialize()
 		return;
 	}
 
-	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU Cubic Mesher initialized"));
+	// Log non-occluding status for all materials that have it set
+	{
+		const TArray<FVoxelMaterialDefinition>& AllMats = FVoxelMaterialRegistry::GetAllMaterials();
+		FString NonOccludingList;
+		for (const FVoxelMaterialDefinition& MatDef : AllMats)
+		{
+			if (MatDef.bNonOccluding)
+			{
+				if (NonOccludingList.Len() > 0) NonOccludingList += TEXT(", ");
+				NonOccludingList += FString::Printf(TEXT("%s(%d)"), *MatDef.Name, MatDef.MaterialID);
+			}
+		}
+		UE_LOG(LogVoxelMeshing, Log, TEXT("CPU Cubic Mesher initialized (%d materials, NonOccluding: [%s])"),
+			AllMats.Num(), *NonOccludingList);
+	}
 	bIsInitialized = true;
 }
 
@@ -887,10 +901,13 @@ bool FVoxelCPUCubicMesher::ShouldRenderFace(
 		return true;
 	}
 
-	// Non-occluding materials (e.g., leaves, glass): render ALL faces so that
-	// overlapping alpha-cutout layers create visual density/depth.
+	// Non-occluding materials (e.g., leaves, glass): render face if EITHER side
+	// is non-occluding. This ensures:
+	// - Leaf renders all its own faces (internal density)
+	// - Neighbors render their face toward leaves (no void through alpha holes)
 	const FVoxelData& Voxel = Request.GetVoxel(X, Y, Z);
-	if (FVoxelMaterialRegistry::IsNonOccluding(Voxel.MaterialID))
+	if (FVoxelMaterialRegistry::IsNonOccluding(Voxel.MaterialID) ||
+		FVoxelMaterialRegistry::IsNonOccluding(Neighbor.MaterialID))
 	{
 		return true;
 	}
@@ -1055,21 +1072,7 @@ void FVoxelCPUCubicMesher::EmitQuad(
 		// Add UV0 (face UVs for texture tiling)
 		if (Config.bGenerateUVs)
 		{
-			FVector2f UV = FaceUVs[Face][V] * Config.UVScale;
-
-			// Non-occluding materials: offset UVs by depth along the face's primary axis
-			// so internal parallel faces sample different atlas positions, preventing
-			// identical alpha-cutout patterns from aligning and becoming invisible.
-			if (FVoxelMaterialRegistry::IsNonOccluding(Voxel.MaterialID))
-			{
-				float DepthCoord;
-				if (Face <= 1) DepthCoord = static_cast<float>(X);
-				else if (Face <= 3) DepthCoord = static_cast<float>(Y);
-				else DepthCoord = static_cast<float>(Z);
-				UV.X += DepthCoord * 0.5f;
-			}
-
-			MeshData.UVs.Add(UV);
+			MeshData.UVs.Add(FaceUVs[Face][V] * Config.UVScale);
 		}
 		else
 		{

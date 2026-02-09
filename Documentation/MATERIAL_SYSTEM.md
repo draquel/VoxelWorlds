@@ -70,6 +70,16 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 
     /** UV scale multiplier for packed atlas sampling */
     float UVScale = 1.0f;
+
+    // ===== Opacity Flags =====
+
+    /** Use masked (alpha cutout) blending for this material.
+     *  Requires albedo texture to have alpha channel with cutout pattern. */
+    bool bIsMasked = false;
+
+    /** Non-occluding material — render faces between this and any different material.
+     *  Same-material adjacency still culls. Creates visual density for leaves, etc. */
+    bool bNonOccluding = false;
 };
 ```
 
@@ -654,6 +664,65 @@ See [MASTER_MATERIAL_SETUP.md](MASTER_MATERIAL_SETUP.md) for detailed setup inst
 
 ---
 
+## Per-Material Opacity / Non-Occluding Materials
+
+### Overview
+
+Materials can be flagged as **masked** (alpha cutout) and/or **non-occluding** (render all boundary faces). These flags are set per-material in `FVoxelMaterialTextureConfig` on the `UVoxelMaterialAtlas` data asset. The atlas configuration is **authoritative** — it overrides any hardcoded registry defaults.
+
+### Flags
+
+| Flag | Effect |
+|------|--------|
+| `bIsMasked` | Triangles rendered with `BLEND_Masked` using albedo alpha as opacity mask |
+| `bNonOccluding` | Face culling disabled between this material and any other material. Same-material adjacency still culls. |
+
+### LUT A-Channel Encoding
+
+The Material LUT texture (256x3) uses the **A channel** to encode per-material flags:
+- **Bit 0**: `bIsMasked` (1 = masked blend, 0 = opaque)
+- **Bits 1-7**: Reserved for future flags
+
+Previously the A channel was unused (always 255). Now it encodes flags as a bitfield.
+
+### PMC Section Splitting
+
+When a chunk contains masked materials, the PMC renderer splits the mesh into two sections:
+- **Section 0 (opaque)**: All triangles with opaque materials — uses standard `BLEND_Opaque` material
+- **Section 1 (masked)**: All triangles with masked materials — uses `BLEND_Masked` material instance with `OpacityMaskClipValue = 0.333`
+
+Chunks without any masked materials remain single-section (no overhead).
+
+### Non-Occluding Face Generation (Cubic Mesher)
+
+For non-occluding materials, `ShouldRenderFace()` returns true if **either** the current voxel or the neighbor voxel has `bNonOccluding` set. This generates all boundary faces for visual density.
+
+Non-occluding faces are emitted as individual 1x1 quads in a **pre-pass** before greedy meshing. This prevents them from being merged into larger quads (which would lose per-voxel visual variation).
+
+### Material Registry Dynamic Growth
+
+`SetAtlasPositions()` grows the `Materials` array if the atlas defines MaterialIDs beyond the hardcoded set (IDs 0-21). This allows users to define arbitrary materials in the atlas without modifying C++ code.
+
+### Texture Requirements
+
+For masked materials to work:
+- The albedo texture in the packed atlas (or Texture2DArray slice) must have an **alpha channel** with the cutout pattern
+- The atlas texture format must preserve alpha (RGBA, `TC_Default` or `TC_BC7`)
+- All other material tiles should have alpha = 1.0 (fully opaque)
+
+### Master Material Setup
+
+The master material (M_VoxelMaster) must:
+1. Use `BLEND_Masked` as its blend mode (the PMC renderer creates a separate masked MID that inherits this)
+2. Connect the atlas albedo **alpha channel** to the **Opacity Mask** pin
+3. Set `Opacity Mask Clip Value` to 0.333 (or desired threshold)
+
+When the opaque MID overrides blend mode back to `BLEND_Opaque`, UE ignores the OpacityMask pin entirely — no performance cost for opaque chunks.
+
+See [MASTER_MATERIAL_SETUP.md](MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
+
+---
+
 ## Implementation Complete
 
 The material system is fully implemented with:
@@ -668,6 +737,10 @@ The material system is fully implemented with:
 8. ✅ Runtime binding via DynamicMaterialInstance
 9. ✅ Automatic mode sync from UVoxelWorldConfiguration::MeshingMode
 10. ✅ VoxelTriplanarCommon.ush shader utilities
+11. ✅ Per-material opacity flags (`bIsMasked`, `bNonOccluding`)
+12. ✅ PMC section splitting (opaque + masked sections)
+13. ✅ LUT A-channel flag encoding
+14. ✅ Non-occluding face generation in cubic mesher
 
 ### Key Files
 

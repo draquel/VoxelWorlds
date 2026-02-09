@@ -2,6 +2,7 @@
 
 #include "VoxelMaterialRegistry.h"
 #include "VoxelMaterialAtlas.h"
+#include "VoxelCore.h"
 
 TArray<FVoxelMaterialDefinition> FVoxelMaterialRegistry::Materials;
 bool FVoxelMaterialRegistry::bInitialized = false;
@@ -302,6 +303,26 @@ void FVoxelMaterialRegistry::SetAtlasPositions(const TArray<FVoxelMaterialTextur
 {
 	EnsureInitialized();
 
+	// Grow the Materials array if atlas defines materials beyond the hardcoded set
+	for (const FVoxelMaterialTextureConfig& Config : Configs)
+	{
+		if (Config.MaterialID >= Materials.Num())
+		{
+			// Fill gaps with default placeholder definitions
+			while (Materials.Num() <= Config.MaterialID)
+			{
+				const uint8 NewID = static_cast<uint8>(Materials.Num());
+				Materials.Add(FVoxelMaterialDefinition(
+					NewID,
+					*FString::Printf(TEXT("Material%d"), NewID),
+					FColor(100, 100, 100),
+					NewID % AtlasColumns,
+					NewID / AtlasColumns
+				));
+			}
+		}
+	}
+
 	for (const FVoxelMaterialTextureConfig& Config : Configs)
 	{
 		if (Config.MaterialID < Materials.Num())
@@ -309,14 +330,26 @@ void FVoxelMaterialRegistry::SetAtlasPositions(const TArray<FVoxelMaterialTextur
 			FVoxelMaterialDefinition& Mat = Materials[Config.MaterialID];
 			Mat.AtlasColumn = Config.AtlasColumn;
 			Mat.AtlasRow = Config.AtlasRow;
-			Mat.ArrayIndex = Config.MaterialID;  // Array index matches MaterialID
+			Mat.ArrayIndex = Config.MaterialID;
 			Mat.TriplanarScale = Config.TriplanarScale;
 			Mat.UVScale = Config.UVScale;
-			// OR-merge behavior flags: registry defaults are preserved, atlas can only ADD flags.
-			// This prevents existing atlas assets (saved before a flag was added) from
-			// overwriting hardcoded registry defaults with their UPROPERTY default of false.
-			Mat.bIsMasked = Mat.bIsMasked || Config.bIsMasked;
-			Mat.bNonOccluding = Mat.bNonOccluding || Config.bNonOccluding;
+			Mat.Name = Config.MaterialName;
+			// Atlas config is authoritative — overrides registry defaults
+			Mat.bIsMasked = Config.bIsMasked;
+			Mat.bNonOccluding = Config.bNonOccluding;
 		}
 	}
+
+	// Log non-occluding materials after atlas application
+	FString NonOccList;
+	for (const FVoxelMaterialDefinition& Mat : Materials)
+	{
+		if (Mat.bNonOccluding)
+		{
+			if (NonOccList.Len() > 0) NonOccList += TEXT(", ");
+			NonOccList += FString::Printf(TEXT("%s(%d)"), *Mat.Name, Mat.MaterialID);
+		}
+	}
+	UE_LOG(LogVoxelCore, Log, TEXT("SetAtlasPositions: %d materials total, NonOccluding: [%s]"),
+		Materials.Num(), *NonOccList);
 }

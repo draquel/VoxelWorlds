@@ -342,11 +342,14 @@ return TangentNormal;
 Create in: `Content/VoxelWorlds/Materials/M_VoxelMaster`
 
 ### Material Settings
-- **Blend Mode**: Opaque
+- **Blend Mode**: Masked
 - **Shading Model**: Default Lit
 - **Two Sided**: false
+- **Opacity Mask Clip Value**: 0.333
 - **Use Material Attributes**: false
 - **Tangent Space Normal**: OFF (we output world-space normals)
+
+> **Why Masked?** The master material uses `BLEND_Masked` so that the PMC renderer can create a masked material instance (MID) that inherits alpha cutout support for materials like leaves. The opaque MID overrides the blend mode back to `BLEND_Opaque`, which causes UE to ignore the OpacityMask pin entirely — no performance cost for opaque chunks.
 
 ### Parameters to Create
 
@@ -437,10 +440,11 @@ Create in: `Content/VoxelWorlds/Materials/M_VoxelMaster`
 │                      ▼                                                      │
 │  ┌─────────────────────────────────────────────────────────────┐            │
 │  │ MATERIAL OUTPUTS:                                           │            │
-│  │   Base Color ◄── Lerp_Albedo (or Debug color)               │            │
-│  │   Roughness  ◄── Lerp_Roughness × RoughnessMultiplier       │            │
-│  │   Metallic   ◄── MetallicValue parameter                    │            │
-│  │   Normal     ◄── Lerp_Normal (World Space)                  │            │
+│  │   Base Color    ◄── Lerp_Albedo (or Debug color)              │            │
+│  │   Opacity Mask  ◄── Atlas Albedo Alpha (Lerp cubic/smooth)   │            │
+│  │   Roughness     ◄── Lerp_Roughness × RoughnessMultiplier     │            │
+│  │   Metallic      ◄── MetallicValue parameter                  │            │
+│  │   Normal        ◄── Lerp_Normal (World Space)                │            │
 │  └─────────────────────────────────────────────────────────────┘            │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -511,9 +515,18 @@ Color.b = frac(MaterialID * 0.127);
 return Color;
 ```
 
-#### 7. Final Connections
+#### 7. Opacity Mask Connection
+Connect the **alpha channel** of the atlas albedo sample to the **Opacity Mask** pin:
+- **Cubic path**: `MF_CubicAtlasSample` albedo output `.a` → Opacity Mask
+- **Smooth path**: `MF_TriplanarSampleAlbedoRoughness` albedo output `.a` → Opacity Mask
+- Use a Lerp with `bSmoothTerrain` to select the correct alpha, same as for albedo
+
+When blend mode is Opaque (opaque MID override), UE ignores the OpacityMask pin entirely. When the masked MID inherits `BLEND_Masked`, alpha cutout activates.
+
+#### 8. Final Connections
 Connect to Material Outputs:
 - Base Color ← bDebugMode Switch (Debug color OR Albedo)
+- Opacity Mask ← Atlas Albedo Alpha (Lerp between cubic/smooth alpha)
 - Roughness ← Roughness * RoughnessMultiplier (or 0.5 in debug)
 - Metallic ← MetallicValue parameter
 - Normal ← bSmoothTerrain Switch output (World Space)

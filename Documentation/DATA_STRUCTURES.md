@@ -139,15 +139,28 @@ struct FBiomeDefinition {
 ### FVoxelMaterialDefinition
 ```cpp
 struct FVoxelMaterialDefinition {
-    int32 MaterialID;
-    FString MaterialName;
-    FVector2D TopUV;
-    FVector2D BottomUV;
-    FVector2D SideUV;
-    float Hardness;
-    bool bEmissive;
+    uint8 MaterialID;           // 0-255 material ID
+    FString Name;               // Display name
+    FColor Color;               // Fallback color (used when no atlas)
+
+    // Atlas position (cubic mode)
+    int32 AtlasColumn = 0;      // Column in packed atlas grid
+    int32 AtlasRow = 0;         // Row in packed atlas grid
+
+    // Texture array (smooth mode)
+    int32 ArrayIndex = -1;      // Index into Texture2DArray slices
+    float TriplanarScale = 1.0f;// Scale for triplanar projection
+    float UVScale = 1.0f;       // UV scale multiplier for atlas sampling
+
+    // Opacity flags
+    bool bIsMasked = false;     // Alpha cutout blending (BLEND_Masked)
+    bool bNonOccluding = false; // Render ALL faces (doesn't cull adjacent faces)
 };
 ```
+
+**Opacity Flags**:
+- `bIsMasked`: Triangles with this material render with `BLEND_Masked` using the albedo alpha channel as an opacity mask (e.g., leaves with holes).
+- `bNonOccluding`: Faces between this material and any different material always generate. Same-material adjacency still culls internal faces. Used for materials like leaves where visual density from internal faces is desired.
 
 ## Edit Layer Data
 

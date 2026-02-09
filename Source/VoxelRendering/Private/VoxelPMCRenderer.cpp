@@ -904,22 +904,22 @@ UMaterialInstanceDynamic* FVoxelPMCRenderer::CreateVoxelMaterialInstance(UMateri
 		// Update the current material reference
 		CurrentMaterial = NewInstance;
 
-		// Create masked MIC with two-sided override (internal faces visible from both sides)
+		// Create masked MIC (inherits BLEND_Masked from master material).
+		// Not two-sided: non-occluding materials generate all internal faces,
+		// so every backface has a corresponding frontface from the adjacent voxel.
 		UMaterialInstanceConstant* NewMaskedMIC = NewObject<UMaterialInstanceConstant>(GetTransientPackage());
 		if (NewMaskedMIC)
 		{
 			NewMaskedMIC->Parent = MasterMaterial;
-			NewMaskedMIC->BasePropertyOverrides.bOverride_TwoSided = true;
-			NewMaskedMIC->BasePropertyOverrides.TwoSided = true;
 			NewMaskedMIC->UpdateStaticPermutation();
 			MaskedMIC.Reset(NewMaskedMIC);
 
-			// Create masked MID from the MIC (inherits Masked + TwoSided)
+			// Create masked MID from the MIC (inherits Masked from master)
 			UMaterialInstanceDynamic* MaskedInstance = UMaterialInstanceDynamic::Create(NewMaskedMIC, GetTransientPackage());
 			if (MaskedInstance)
 			{
 				MaskedMaterialInstance.Reset(MaskedInstance);
-				UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: Created masked material instance (two-sided)"));
+				UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: Created masked material instance"));
 			}
 		}
 

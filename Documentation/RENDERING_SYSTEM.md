@@ -1316,6 +1316,6 @@ void UVoxelChunkManager::Initialize(UVoxelWorldConfiguration* Config) {
 
 ---
 
-**Status**: Implementation Complete (Phase 3)
+**Status**: Implementation Complete (Phase 3 + Per-Material Opacity)
 **Current Architecture**: FLocalVertexFactory-based renderer with MPC LOD morphing
-**Fallback**: PMC renderer available for editor/debugging use cases
+**Fallback**: PMC renderer available for editor/debugging use cases, supports masked material section splitting
