@@ -100,6 +100,25 @@ public:
 	static float GetUVScale(uint8 MaterialID);
 
 	/**
+	 * Check if a material uses masked (alpha cutout) blending.
+	 * @param MaterialID The material ID to check
+	 * @return true if the material has bIsMasked set
+	 */
+	static bool IsMaterialMasked(uint8 MaterialID);
+
+	/**
+	 * Check if a material is non-occluding (doesn't cull adjacent faces).
+	 * @param MaterialID The material ID to check
+	 * @return true if the material has bNonOccluding set
+	 */
+	static bool IsNonOccluding(uint8 MaterialID);
+
+	/**
+	 * Get the set of all MaterialIDs that use masked blending.
+	 */
+	static TSet<uint8> GetMaskedMaterialIDs();
+
+	/**
 	 * Update material atlas positions from texture configs.
 	 * @param Configs Array of material texture configurations
 	 * @param AtlasColumns Number of columns in the atlas

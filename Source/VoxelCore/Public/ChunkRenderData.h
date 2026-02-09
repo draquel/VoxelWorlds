@@ -140,6 +140,10 @@ struct VOXELCORE_API FChunkMeshData
 	UPROPERTY()
 	TArray<uint32> Indices;
 
+	/** Whether this mesh contains any triangles with masked (alpha-cutout) materials.
+	 *  Used by renderers to decide whether to create a masked mesh section. */
+	bool bHasMaskedMaterial = false;
+
 	/** Clear all mesh data */
 	void Reset()
 	{
@@ -149,6 +153,7 @@ struct VOXELCORE_API FChunkMeshData
 		UV1s.Reset();
 		Colors.Reset();
 		Indices.Reset();
+		bHasMaskedMaterial = false;
 	}
 
 	/** Check if mesh has valid data */

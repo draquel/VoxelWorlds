@@ -114,6 +114,17 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties", meta = (ClampMin = "0.01", ClampMax = "10.0"))
 	float UVScale = 1.0f;
 
+	/** Use masked (alpha cutout) blending for this material.
+	 *  Requires albedo texture to have alpha channel with cutout pattern. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
+	bool bIsMasked = false;
+
+	/** Non-occluding material (like glass or leaves).
+	 *  When true, faces between this material and different materials are always generated.
+	 *  Same-material adjacency still culls normally (no internal face explosion). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
+	bool bNonOccluding = false;
+
 	FVoxelMaterialTextureConfig() = default;
 
 	/** Get the atlas tile for a specific face type */
@@ -273,6 +284,14 @@ public:
 	const FVoxelMaterialTextureConfig* GetMaterialConfig(uint8 MaterialID) const;
 
 	/**
+	 * Check if a material uses masked (alpha cutout) blending.
+	 * @param MaterialID The material ID to check
+	 * @return true if the material has bIsMasked set
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
+	bool IsMaterialMasked(uint8 MaterialID) const;
+
+	/**
 	 * Initialize material configs from the material registry defaults.
 	 * Call this to auto-populate configs with registered materials.
 	 */
@@ -293,7 +312,7 @@ public:
 	 * - R channel: Atlas column (0-255)
 	 * - G channel: Atlas row (0-255)
 	 * - B channel: Reserved (UV scale * 25.5, clamped to 0-255)
-	 * - A channel: Reserved (flags)
+	 * - A channel: Flags (bit 0 = bIsMasked)
 	 */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Voxel|Material Atlas")
 	void BuildMaterialLUT();
@@ -310,6 +329,12 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
 	bool IsLUTDirty() const { return bLUTDirty; }
+
+	/**
+	 * Get the set of MaterialIDs that use masked blending.
+	 * Useful for efficient triangle partitioning during rendering.
+	 */
+	TSet<uint8> GetMaskedMaterialIDs() const;
 
 	// ===== Texture Array Building =====
 

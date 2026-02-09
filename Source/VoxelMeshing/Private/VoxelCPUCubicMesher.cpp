@@ -455,6 +455,38 @@ void FVoxelCPUCubicMesher::ProcessFaceDirectionGreedy(
 		// Reset processed array
 		FMemory::Memzero(Processed.GetData(), SliceSize * sizeof(bool));
 
+		// Pre-pass: emit non-occluding faces as individual 1x1 quads (not greedy-merged).
+		// These need per-voxel UV offsets for visual density, so they can't be merged.
+		for (int32 V = 0; V < ChunkSize; V++)
+		{
+			for (int32 U = 0; U < ChunkSize; U++)
+			{
+				const int32 Index = U + V * ChunkSize;
+				if (FaceMask[Index] == 0)
+				{
+					continue;
+				}
+
+				const uint8 MatID = static_cast<uint8>((FaceMask[Index] & 0xFF) - 1);
+				if (FVoxelMaterialRegistry::IsNonOccluding(MatID))
+				{
+					// Recover XYZ from slice coordinates
+					int32 Coords[3];
+					Coords[PrimaryAxis] = SliceIndex;
+					Coords[UAxis] = U;
+					Coords[VAxis] = V;
+
+					const FVoxelData& Voxel = Request.GetVoxel(Coords[0], Coords[1], Coords[2]);
+					EmitQuad(OutMeshData, Request, Coords[0], Coords[1], Coords[2], Face, Voxel);
+					OutGeneratedFaces++;
+
+					// Remove from mask so greedy merge skips it
+					FaceMask[Index] = 0;
+					Processed[Index] = true;
+				}
+			}
+		}
+
 		// Greedy merge algorithm
 		for (int32 V = 0; V < ChunkSize; V++)
 		{
@@ -564,7 +596,7 @@ void FVoxelCPUCubicMesher::BuildFaceMask(
 				continue;
 			}
 
-			// Check if face should be rendered (neighbor is air)
+			// Check if face should be rendered
 			if (ShouldRenderFace(Request, X, Y, Z, Face))
 			{
 				// Pack MaterialID and BiomeID into uint16:
@@ -849,8 +881,21 @@ bool FVoxelCPUCubicMesher::ShouldRenderFace(
 	// Get neighbor voxel (handles chunk boundaries)
 	const FVoxelData Neighbor = GetVoxelAt(Request, NX, NY, NZ);
 
-	// Render face if neighbor is air
-	return Neighbor.IsAir();
+	// Always render face if neighbor is air
+	if (Neighbor.IsAir())
+	{
+		return true;
+	}
+
+	// Non-occluding materials (e.g., leaves, glass): render ALL faces so that
+	// overlapping alpha-cutout layers create visual density/depth.
+	const FVoxelData& Voxel = Request.GetVoxel(X, Y, Z);
+	if (FVoxelMaterialRegistry::IsNonOccluding(Voxel.MaterialID))
+	{
+		return true;
+	}
+
+	return false;
 }
 
 FVoxelData FVoxelCPUCubicMesher::GetVoxelAt(
@@ -1010,8 +1055,21 @@ void FVoxelCPUCubicMesher::EmitQuad(
 		// Add UV0 (face UVs for texture tiling)
 		if (Config.bGenerateUVs)
 		{
-			// Use per-face UVs for consistent texture orientation
-			MeshData.UVs.Add(FaceUVs[Face][V] * Config.UVScale);
+			FVector2f UV = FaceUVs[Face][V] * Config.UVScale;
+
+			// Non-occluding materials: offset UVs by depth along the face's primary axis
+			// so internal parallel faces sample different atlas positions, preventing
+			// identical alpha-cutout patterns from aligning and becoming invisible.
+			if (FVoxelMaterialRegistry::IsNonOccluding(Voxel.MaterialID))
+			{
+				float DepthCoord;
+				if (Face <= 1) DepthCoord = static_cast<float>(X);
+				else if (Face <= 3) DepthCoord = static_cast<float>(Y);
+				else DepthCoord = static_cast<float>(Z);
+				UV.X += DepthCoord * 0.5f;
+			}
+
+			MeshData.UVs.Add(UV);
 		}
 		else
 		{

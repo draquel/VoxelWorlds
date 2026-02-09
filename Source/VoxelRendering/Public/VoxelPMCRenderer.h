@@ -6,6 +6,7 @@
 #include "IVoxelMeshRenderer.h"
 #include "GameFramework/Actor.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "VoxelPMCRenderer.generated.h"
 
 class UMaterial;
@@ -196,8 +197,20 @@ private:
 	/** Strong reference to the default vertex color material we created */
 	TStrongObjectPtr<UMaterial> DefaultVertexColorMaterial;
 
-	/** Dynamic material instance for atlas parameters */
+	/** Constant material instance for opaque blend mode override (parent for opaque MID) */
+	TStrongObjectPtr<UMaterialInstanceConstant> OpaqueMIC;
+
+	/** Constant material instance for masked two-sided override (parent for masked MID) */
+	TStrongObjectPtr<UMaterialInstanceConstant> MaskedMIC;
+
+	/** Dynamic material instance for atlas parameters (opaque) */
 	TStrongObjectPtr<UMaterialInstanceDynamic> DynamicMaterialInstance;
+
+	/** Dynamic material instance for masked (alpha cutout) sections */
+	TStrongObjectPtr<UMaterialInstanceDynamic> MaskedMaterialInstance;
+
+	/** Set of MaterialIDs that use masked blending (cached from atlas/registry) */
+	TSet<uint8> MaskedMaterialIDs;
 
 	/** Material atlas data asset */
 	TWeakObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;

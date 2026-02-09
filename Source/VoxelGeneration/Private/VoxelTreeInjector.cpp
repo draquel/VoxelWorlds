@@ -40,9 +40,10 @@ void FVoxelTreeInjector::InjectTrees(
 	{
 		for (int32 DY = -SearchRadiusChunks; DY <= SearchRadiusChunks; ++DY)
 		{
-			// Only check same Z level and one above/below (trees grow upward)
+			// Search Z levels both below (tree base in lower chunk, canopy reaches up here)
+			// and above (tree base in upper chunk, but terrain height places base lower)
 			const int32 MaxZSearch = FMath::CeilToInt(static_cast<float>(MaxHeight) / ChunkSize);
-			for (int32 DZ = -MaxZSearch; DZ <= 0; ++DZ)
+			for (int32 DZ = -MaxZSearch; DZ <= MaxZSearch; ++DZ)
 			{
 				const FIntVector SourceChunk = ChunkCoord + FIntVector(DX, DY, DZ);
 
@@ -289,6 +290,7 @@ void FVoxelTreeInjector::StampTree(
 	const FIntVector ChunkMin = ChunkCoord * ChunkSize;
 
 	// Helper: write a voxel if it's within this chunk's bounds
+	// bOnlyReplaceAir: true = skip if existing voxel is solid terrain (but allow overwriting other tree materials)
 	auto SetVoxel = [&](int32 GX, int32 GY, int32 GZ, uint8 MaterialID, bool bOnlyReplaceAir)
 	{
 		const int32 LX = GX - ChunkMin.X;
@@ -305,7 +307,13 @@ void FVoxelTreeInjector::StampTree(
 
 		if (bOnlyReplaceAir && Voxel.IsSolid())
 		{
-			return; // Don't overwrite existing terrain
+			// Allow overwriting other tree materials (leaves from neighboring trees)
+			// but don't overwrite natural terrain
+			const bool bIsTreeMaterial = (Voxel.MaterialID == Template.TrunkMaterialID || Voxel.MaterialID == Template.LeafMaterialID);
+			if (!bIsTreeMaterial)
+			{
+				return; // Don't overwrite existing terrain
+			}
 		}
 
 		Voxel.Density = 255; // Fully solid

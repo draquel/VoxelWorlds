@@ -154,12 +154,33 @@ void UVoxelMaterialAtlas::InitializeFromRegistry()
 
 		Config.TriplanarScale = 1.0f;
 		Config.UVScale = 1.0f;
+		Config.bIsMasked = MatDef.bIsMasked;
+		Config.bNonOccluding = MatDef.bNonOccluding;
 
 		MaterialConfigs.Add(Config);
 	}
 
 	bConfigIndexCacheDirty = true;
 	bLUTDirty = true;
+}
+
+bool UVoxelMaterialAtlas::IsMaterialMasked(uint8 MaterialID) const
+{
+	const FVoxelMaterialTextureConfig* Config = GetMaterialConfig(MaterialID);
+	return Config && Config->bIsMasked;
+}
+
+TSet<uint8> UVoxelMaterialAtlas::GetMaskedMaterialIDs() const
+{
+	TSet<uint8> Result;
+	for (const FVoxelMaterialTextureConfig& Config : MaterialConfigs)
+	{
+		if (Config.bIsMasked)
+		{
+			Result.Add(Config.MaterialID);
+		}
+	}
+	return Result;
 }
 
 FVoxelAtlasTile UVoxelMaterialAtlas::GetTileForFace(uint8 MaterialID, EVoxelFaceType FaceType) const
@@ -243,7 +264,13 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 			PixelData[PixelIndex + 0] = static_cast<uint8>(FMath::Clamp(UVScale * 25.5f, 0.0f, 255.0f)); // B = UV Scale
 			PixelData[PixelIndex + 1] = static_cast<uint8>(FMath::Clamp(Tile.Row, 0, 255));              // G = Row
 			PixelData[PixelIndex + 2] = static_cast<uint8>(FMath::Clamp(Tile.Column, 0, 255));           // R = Column
-			PixelData[PixelIndex + 3] = 255;                                                              // A = Reserved
+			// A channel: flags (bit 0 = bIsMasked)
+			uint8 Flags = 0;
+			if (Config && Config->bIsMasked)
+			{
+				Flags |= 0x01;
+			}
+			PixelData[PixelIndex + 3] = Flags;
 		}
 	}
 
@@ -740,6 +767,8 @@ void UVoxelMaterialAtlas::PostEditChangeProperty(FPropertyChangedEvent& Property
 		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, AtlasColumn),
 		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, AtlasRow),
 		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, UVScale),
+		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, bIsMasked),
+		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, bNonOccluding),
 	};
 
 	// Properties that affect texture arrays

@@ -11,6 +11,7 @@
 #include "Engine/Texture2D.h"
 #include "Engine/Texture2DArray.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialExpressionVertexColor.h"
 #include "Materials/MaterialExpressionConstant.h"
@@ -114,7 +115,11 @@ void FVoxelPMCRenderer::Shutdown()
 	CachedWorld.Reset();
 	CachedConfig.Reset();
 	CurrentMaterial.Reset();
+	OpaqueMIC.Reset();
+	MaskedMIC.Reset();
 	DynamicMaterialInstance.Reset();
+	MaskedMaterialInstance.Reset();
+	MaskedMaterialIDs.Empty();
 	MaterialAtlas.Reset();
 
 	bIsInitialized = false;
@@ -175,6 +180,8 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 	if (ExistingData && ExistingData->MeshComponent.IsValid())
 	{
 		PMC = ExistingData->MeshComponent.Get();
+		// Clear existing sections before rebuilding
+		PMC->ClearAllMeshSections();
 		// Update statistics (subtract old, add new later)
 		TotalVertexCount -= ExistingData->VertexCount;
 		TotalTriangleCount -= ExistingData->TriangleCount;
@@ -191,28 +198,148 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 		}
 	}
 
-	// Create the mesh section using multi-UV API for MaterialID support
-	// UV0 = texture tiling coordinates
-	// UV1 = material data (UV1.x = MaterialID, UV1.y = FaceType)
-	TArray<FVector2D> EmptyUV;  // UV2 and UV3 not used
-	PMC->CreateMeshSection(
-		0,              // Section index (one section per chunk)
-		Vertices,
-		Triangles,
-		Normals,
-		UV0,
-		UV1,
-		EmptyUV,        // UV2
-		EmptyUV,        // UV3
-		Colors,
-		Tangents,
-		bGenerateCollision
-	);
-
-	// Apply material
-	if (CurrentMaterial.IsValid())
+	// Check if this mesh has any masked materials
+	bool bHasMasked = false;
+	if (MaskedMaterialIDs.Num() > 0 && MaskedMaterialInstance.IsValid())
 	{
-		PMC->SetMaterial(0, CurrentMaterial.Get());
+		for (const FVector2D& UV1Val : UV1)
+		{
+			uint8 MatID = static_cast<uint8>(FMath::RoundToInt(UV1Val.X));
+			if (MaskedMaterialIDs.Contains(MatID))
+			{
+				bHasMasked = true;
+				break;
+			}
+		}
+	}
+
+	TArray<FVector2D> EmptyUV;  // UV2 and UV3 not used
+
+	if (!bHasMasked)
+	{
+		// Single opaque section (fast path — most chunks)
+		PMC->CreateMeshSection(
+			0,
+			Vertices,
+			Triangles,
+			Normals,
+			UV0,
+			UV1,
+			EmptyUV,
+			EmptyUV,
+			Colors,
+			Tangents,
+			bGenerateCollision
+		);
+
+		if (CurrentMaterial.IsValid())
+		{
+			PMC->SetMaterial(0, CurrentMaterial.Get());
+		}
+	}
+	else
+	{
+		// Partition triangles into opaque and masked groups
+		const int32 NumTriangles = Triangles.Num() / 3;
+
+		// Tag each triangle: false = opaque, true = masked
+		TArray<bool> TriIsMasked;
+		TriIsMasked.SetNumUninitialized(NumTriangles);
+
+		int32 MaskedTriCount = 0;
+		for (int32 TriIdx = 0; TriIdx < NumTriangles; ++TriIdx)
+		{
+			// Check MaterialID of first vertex of triangle (all verts share same MaterialID in cubic mesh)
+			int32 VertIdx = Triangles[TriIdx * 3];
+			uint8 MatID = static_cast<uint8>(FMath::RoundToInt(UV1[VertIdx].X));
+			bool bMasked = MaskedMaterialIDs.Contains(MatID);
+			TriIsMasked[TriIdx] = bMasked;
+			if (bMasked) ++MaskedTriCount;
+		}
+
+		int32 OpaqueTriCount = NumTriangles - MaskedTriCount;
+
+		// Build vertex remapping and section data for each group
+		auto BuildSection = [&](bool bWantMasked, int32 TriCount) -> bool
+		{
+			if (TriCount == 0) return false;
+
+			TMap<int32, int32> VertRemap;
+			VertRemap.Reserve(TriCount * 3);
+
+			TArray<FVector> SecVerts;
+			TArray<int32> SecTris;
+			TArray<FVector> SecNormals;
+			TArray<FVector2D> SecUV0;
+			TArray<FVector2D> SecUV1;
+			TArray<FColor> SecColors;
+			TArray<FProcMeshTangent> SecTangents;
+
+			SecVerts.Reserve(TriCount * 3);
+			SecTris.Reserve(TriCount * 3);
+			SecNormals.Reserve(TriCount * 3);
+			SecUV0.Reserve(TriCount * 3);
+			SecUV1.Reserve(TriCount * 3);
+			SecColors.Reserve(TriCount * 3);
+			SecTangents.Reserve(TriCount * 3);
+
+			for (int32 TriIdx = 0; TriIdx < NumTriangles; ++TriIdx)
+			{
+				if (TriIsMasked[TriIdx] != bWantMasked) continue;
+
+				for (int32 Corner = 0; Corner < 3; ++Corner)
+				{
+					int32 OldIdx = Triangles[TriIdx * 3 + Corner];
+					int32* NewIdxPtr = VertRemap.Find(OldIdx);
+					int32 NewIdx;
+					if (NewIdxPtr)
+					{
+						NewIdx = *NewIdxPtr;
+					}
+					else
+					{
+						NewIdx = SecVerts.Num();
+						VertRemap.Add(OldIdx, NewIdx);
+						SecVerts.Add(Vertices[OldIdx]);
+						SecNormals.Add(Normals[OldIdx]);
+						SecUV0.Add(UV0[OldIdx]);
+						SecUV1.Add(UV1[OldIdx]);
+						SecColors.Add(Colors[OldIdx]);
+						SecTangents.Add(Tangents[OldIdx]);
+					}
+					SecTris.Add(NewIdx);
+				}
+			}
+
+			int32 SectionIndex = bWantMasked ? 1 : 0;
+			PMC->CreateMeshSection(
+				SectionIndex,
+				SecVerts,
+				SecTris,
+				SecNormals,
+				SecUV0,
+				SecUV1,
+				EmptyUV,
+				EmptyUV,
+				SecColors,
+				SecTangents,
+				!bWantMasked && bGenerateCollision  // Only opaque section gets collision
+			);
+			return true;
+		};
+
+		// Build opaque section (index 0)
+		BuildSection(false, OpaqueTriCount);
+		if (CurrentMaterial.IsValid())
+		{
+			PMC->SetMaterial(0, CurrentMaterial.Get());
+		}
+
+		// Build masked section (index 1)
+		if (BuildSection(true, MaskedTriCount))
+		{
+			PMC->SetMaterial(1, MaskedMaterialInstance.Get());
+		}
 	}
 
 	// Update chunk data
@@ -309,9 +436,12 @@ void FVoxelPMCRenderer::SetMaterial(UMaterialInterface* Material)
 
 	CurrentMaterial = Material;
 
-	// Clear dynamic instance when base material changes
-	// A new instance will be created when SetMaterialAtlas is called
+	// Clear all material instances when base material changes
+	// New instances will be created when SetMaterialAtlas is called
+	OpaqueMIC.Reset();
+	MaskedMIC.Reset();
 	DynamicMaterialInstance.Reset();
+	MaskedMaterialInstance.Reset();
 
 	// Apply to all existing chunks
 	for (auto& Pair : ChunkDataMap)
@@ -351,6 +481,9 @@ void FVoxelPMCRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
 			MaterialAtlas->MaterialConfigs,
 			MaterialAtlas->AtlasColumns,
 			MaterialAtlas->AtlasRows);
+
+		// Cache masked material IDs from atlas
+		MaskedMaterialIDs = MaterialAtlas->GetMaskedMaterialIDs();
 
 		// Create a dynamic material instance if we have a material but no dynamic instance yet
 		if (CurrentMaterial.IsValid() && !DynamicMaterialInstance.IsValid())
@@ -744,8 +877,25 @@ UMaterialInstanceDynamic* FVoxelPMCRenderer::CreateVoxelMaterialInstance(UMateri
 		return nullptr;
 	}
 
-	// Create dynamic material instance
-	UMaterialInstanceDynamic* NewInstance = UMaterialInstanceDynamic::Create(MasterMaterial, GetTransientPackage());
+	// Master material should be set to BLEND_Masked so the OpacityMask pin is available.
+	// We create a MIC with BLEND_Opaque override (requires static permutation recompile),
+	// then parent the opaque MID to it. The masked MID parents directly to master (already Masked).
+
+	// Create opaque MIC with blend mode override (MICs support UpdateStaticPermutation)
+	UMaterialInstanceConstant* NewOpaqueMIC = NewObject<UMaterialInstanceConstant>(GetTransientPackage());
+	if (!NewOpaqueMIC)
+	{
+		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelPMCRenderer: Failed to create opaque MIC"));
+		return nullptr;
+	}
+	NewOpaqueMIC->Parent = MasterMaterial;
+	NewOpaqueMIC->BasePropertyOverrides.bOverride_BlendMode = true;
+	NewOpaqueMIC->BasePropertyOverrides.BlendMode = BLEND_Opaque;
+	NewOpaqueMIC->UpdateStaticPermutation();
+	OpaqueMIC.Reset(NewOpaqueMIC);
+
+	// Create opaque MID from the MIC (inherits Opaque blend mode, dynamic atlas params)
+	UMaterialInstanceDynamic* NewInstance = UMaterialInstanceDynamic::Create(NewOpaqueMIC, GetTransientPackage());
 
 	if (NewInstance)
 	{
@@ -753,6 +903,35 @@ UMaterialInstanceDynamic* FVoxelPMCRenderer::CreateVoxelMaterialInstance(UMateri
 
 		// Update the current material reference
 		CurrentMaterial = NewInstance;
+
+		// Create masked MIC with two-sided override (internal faces visible from both sides)
+		UMaterialInstanceConstant* NewMaskedMIC = NewObject<UMaterialInstanceConstant>(GetTransientPackage());
+		if (NewMaskedMIC)
+		{
+			NewMaskedMIC->Parent = MasterMaterial;
+			NewMaskedMIC->BasePropertyOverrides.bOverride_TwoSided = true;
+			NewMaskedMIC->BasePropertyOverrides.TwoSided = true;
+			NewMaskedMIC->UpdateStaticPermutation();
+			MaskedMIC.Reset(NewMaskedMIC);
+
+			// Create masked MID from the MIC (inherits Masked + TwoSided)
+			UMaterialInstanceDynamic* MaskedInstance = UMaterialInstanceDynamic::Create(NewMaskedMIC, GetTransientPackage());
+			if (MaskedInstance)
+			{
+				MaskedMaterialInstance.Reset(MaskedInstance);
+				UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: Created masked material instance (two-sided)"));
+			}
+		}
+
+		// Cache masked material IDs
+		if (MaterialAtlas.IsValid())
+		{
+			MaskedMaterialIDs = MaterialAtlas->GetMaskedMaterialIDs();
+		}
+		else
+		{
+			MaskedMaterialIDs = FVoxelMaterialRegistry::GetMaskedMaterialIDs();
+		}
 
 		// Apply to all existing chunks
 		for (auto& Pair : ChunkDataMap)
@@ -875,9 +1054,57 @@ void FVoxelPMCRenderer::UpdateMaterialAtlasParameters()
 		UE_LOG(LogVoxelRendering, Log, TEXT("Set RoughnessArray texture parameter"));
 	}
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer::UpdateMaterialAtlasParameters COMPLETE: Columns=%d, Rows=%d, SmoothMeshing=%s, LUT=%s, AlbedoAtlas=%s"),
+	// Update masked material IDs cache
+	MaskedMaterialIDs = Atlas->GetMaskedMaterialIDs();
+
+	// Apply same atlas parameters to masked material instance
+	if (MaskedMaterialInstance.IsValid())
+	{
+		UMaterialInstanceDynamic* MaskedMID = MaskedMaterialInstance.Get();
+
+		MaskedMID->SetScalarParameterValue(FName("bSmoothTerrain"), bUseSmoothMeshing ? 1.0f : 0.0f);
+
+		if (UTexture2D* LUT = Atlas->GetMaterialLUT())
+		{
+			MaskedMID->SetTextureParameterValue(FName("MaterialLUT"), LUT);
+		}
+
+		if (Atlas->PackedAlbedoAtlas)
+		{
+			MaskedMID->SetTextureParameterValue(FName("PackedAlbedoAtlas"), Atlas->PackedAlbedoAtlas);
+		}
+		if (Atlas->PackedNormalAtlas)
+		{
+			MaskedMID->SetTextureParameterValue(FName("PackedNormalAtlas"), Atlas->PackedNormalAtlas);
+		}
+		if (Atlas->PackedRoughnessAtlas)
+		{
+			MaskedMID->SetTextureParameterValue(FName("PackedRoughnessAtlas"), Atlas->PackedRoughnessAtlas);
+		}
+
+		MaskedMID->SetScalarParameterValue(FName("AtlasColumns"), static_cast<float>(Atlas->AtlasColumns));
+		MaskedMID->SetScalarParameterValue(FName("AtlasRows"), static_cast<float>(Atlas->AtlasRows));
+
+		if (Atlas->AlbedoArray)
+		{
+			MaskedMID->SetTextureParameterValue(FName("AlbedoArray"), Atlas->AlbedoArray);
+		}
+		if (Atlas->NormalArray)
+		{
+			MaskedMID->SetTextureParameterValue(FName("NormalArray"), Atlas->NormalArray);
+		}
+		if (Atlas->RoughnessArray)
+		{
+			MaskedMID->SetTextureParameterValue(FName("RoughnessArray"), Atlas->RoughnessArray);
+		}
+
+		UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: Updated masked material instance parameters"));
+	}
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer::UpdateMaterialAtlasParameters COMPLETE: Columns=%d, Rows=%d, SmoothMeshing=%s, LUT=%s, AlbedoAtlas=%s, MaskedMaterials=%d"),
 		Atlas->AtlasColumns, Atlas->AtlasRows,
 		bUseSmoothMeshing ? TEXT("true") : TEXT("false"),
 		Atlas->GetMaterialLUT() ? TEXT("valid") : TEXT("null"),
-		Atlas->PackedAlbedoAtlas ? TEXT("valid") : TEXT("null"));
+		Atlas->PackedAlbedoAtlas ? TEXT("valid") : TEXT("null"),
+		MaskedMaterialIDs.Num());
 }

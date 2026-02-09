@@ -48,6 +48,19 @@ struct VOXELCORE_API FVoxelMaterialDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material|Atlas", meta = (ClampMin = "0.01", ClampMax = "10.0"))
 	float UVScale = 1.0f;
 
+	/** Whether this material uses masked (alpha cutout) blending.
+	 *  When true, triangles with this material are rendered with BLEND_Masked
+	 *  using the albedo alpha channel as opacity mask. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material")
+	bool bIsMasked = false;
+
+	/** Whether this material is non-occluding (like glass or leaves).
+	 *  When true, adjacent solid voxels are NOT occluded — faces between this
+	 *  material and any different material are always generated.
+	 *  Same-material adjacency still culls (no internal faces). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material")
+	bool bNonOccluding = false;
+
 	FVoxelMaterialDefinition() = default;
 
 	FVoxelMaterialDefinition(uint8 InID, const FString& InName, const FColor& InColor)

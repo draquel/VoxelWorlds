@@ -1058,108 +1058,92 @@ private:
 
 ## Collision System
 
-Collision is managed separately from visual rendering to allow different update rates and LOD levels.
+Collision is managed separately from visual rendering, using a fully async pipeline to eliminate game-thread stutter.
 
 ### Architecture
 
+The collision system uses a three-stage async pipeline:
+
+1. **Data Preparation** (game thread, lightweight): Copy voxel data, merge edits, extract neighbor slices
+2. **Mesh Generation + Trimesh Construction** (thread pool, ~3-5ms): Run `GenerateMeshCPU()` at collision LOD, build `Chaos::FTriangleMeshImplicitObject`
+3. **Physics Registration** (game thread, ~0.5ms): Create `UBodySetup`, register collision component
+
 ```cpp
 /**
- * Voxel Collision Manager
- * 
+ * Voxel Collision Manager — Async Pipeline
+ *
  * Manages physics collision for voxel chunks independently from visual mesh.
- * Updates at lower frequency and can use simplified meshes.
+ * Heavy work (mesh gen + trimesh) runs on thread pool; only lightweight
+ * physics registration happens on the game thread.
  */
 class UVoxelCollisionManager : public UObject {
 public:
-    /**
-     * Queue collision update for a chunk.
-     * Throttled to avoid frame spikes.
-     */
-    void QueueCollisionUpdate(const FChunkRenderData& RenderData) {
-        // Only update if conditions met
-        if (!ShouldUpdateCollision(RenderData.ChunkCoord)) {
-            return;
+    // Called every frame from ChunkManager tick
+    void Update(const FVector& ViewerPosition, float DeltaTime) {
+        // 1. Drain completed async results (game thread, ~0.5ms per apply)
+        ProcessCompletedCollisionCooks();
+
+        // 2. Update collision decisions (distance-based load/unload)
+        if (ViewerMovedEnough || bPendingInitialUpdate) {
+            UpdateCollisionDecisions(ViewerPosition);
         }
-        
-        FCollisionGenerationTask Task;
-        Task.ChunkCoord = RenderData.ChunkCoord;
-        Task.VoxelData = RenderData.VoxelData;
-        Task.CollisionLOD = CalculateCollisionLOD(RenderData.LODLevel);
-        
-        TaskQueue.Enqueue(Task);
+
+        // 3. Process dirty chunks from edits (just queues requests)
+        ProcessDirtyChunks(ViewerPosition);
+
+        // 4. Launch async tasks from priority queue
+        ProcessCookingQueue();
     }
-    
-    /**
-     * Process collision tasks (time-sliced).
-     */
-    void ProcessTasks(float TimeSliceMS) {
-        double StartTime = FPlatformTime::Seconds();
-        double TimeSliceSec = TimeSliceMS / 1000.0;
-        
-        FCollisionGenerationTask Task;
-        while (TaskQueue.Dequeue(Task)) {
-            // Generate simplified collision mesh
-            GenerateCollisionMesh(Task);
-            
-            // Check time budget
-            double Elapsed = FPlatformTime::Seconds() - StartTime;
-            if (Elapsed > TimeSliceSec) {
-                break;
-            }
-        }
-    }
-    
+
 private:
-    struct FCollisionGenerationTask {
-        FIntVector ChunkCoord;
-        TArray<FVoxelData> VoxelData;
-        int32 CollisionLOD;  // Typically 2-3 (coarser than visuals)
-    };
-    
-    /** Async task queue */
-    TQueue<FCollisionGenerationTask> TaskQueue;
-    
-    /** Per-chunk collision bodies */
-    TMap<FIntVector, UBodySetup*> CollisionBodies;
-    
-    /** Last update frame per chunk (for throttling) */
-    TMap<FIntVector, uint32> LastUpdateFrame;
-    
-    /**
-     * Should we update collision for this chunk?
-     */
-    bool ShouldUpdateCollision(FIntVector ChunkCoord) const {
-        // Update less frequently than visuals
-        const uint32 MinFramesBetweenUpdates = 60; // ~1 second at 60 FPS
-        
-        if (const uint32* LastFrame = LastUpdateFrame.Find(ChunkCoord)) {
-            return (GFrameNumber - *LastFrame) > MinFramesBetweenUpdates;
-        }
-        
-        return true;
+    // Launches async collision cook on thread pool
+    void LaunchAsyncCollisionCook(const FCollisionCookRequest& Request) {
+        // Game thread: prepare meshing request (copy data, merge edits)
+        FVoxelMeshingRequest MeshRequest;
+        ChunkManager->PrepareCollisionMeshRequest(ChunkCoord, LODLevel, MeshRequest);
+        IVoxelMesher* MesherPtr = ChunkManager->GetMesherPtr();
+
+        // Thread pool: mesh gen + Chaos trimesh construction
+        Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest]() {
+            FChunkMeshData MeshData;
+            MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);  // ~2-4ms
+
+            // Build Chaos::FTriangleMeshImplicitObject                // ~1-2ms
+            TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = ...;
+
+            // Enqueue for game thread (MPSC queue)
+            CompletedCollisionQueue.Enqueue(Result);
+        });
     }
-    
-    /**
-     * Calculate appropriate collision LOD (typically coarser).
-     */
-    int32 CalculateCollisionLOD(int32 VisualLOD) const {
-        // Collision uses LOD 2-3 levels higher
-        return FMath::Min(VisualLOD + 2, MaxCollisionLOD);
+
+    // Game thread: apply trimesh to physics
+    void ApplyCollisionResult(FAsyncCollisionResult& Result) {
+        // Create/reuse UBodySetup, set TriMeshGeometries
+        // Create UBoxComponent, override FBodyInstance::BodySetup
+        // RegisterComponent + InitBody (~0.5ms)
     }
-    
-    /**
-     * Generate collision mesh on worker thread.
-     */
-    void GenerateCollisionMesh(const FCollisionGenerationTask& Task) {
-        // Async task - generate simplified mesh
-        // Use same meshing algorithm but at higher LOD
-        // Create UBodySetup
-        // Register with physics scene
-    }
-    
-    static constexpr int32 MaxCollisionLOD = 4;
+
+    /** Priority queue (sorted ascending, pop from back for O(1)) */
+    TArray<FCollisionCookRequest> CookingQueue;
+
+    /** MPSC queue for thread pool → game thread results */
+    TQueue<FAsyncCollisionResult, EQueueMode::Mpsc> CompletedCollisionQueue;
+
+    /** Tracks in-flight async tasks */
+    TSet<FIntVector> AsyncCollisionInProgress;
+
+    // Config: MaxAsyncCollisionTasks (default 2), MaxAppliesPerFrame (2)
 };
 ```
+
+### Key Design Decisions
+
+- **CollisionRadius**: Default 50% of ViewDistance (configurable)
+- **CollisionLODLevel**: Uses coarser meshes for physics (fewer triangles, configurable)
+- **Chaos Physics** (UE 5.7): `TriMeshGeometries` with `TRefCountPtr<FTriangleMeshImplicitObject>`
+- **Container Actor**: `CollisionContainerActor` holds all chunk `UBoxComponent` collision holders
+- **Edit Integration**: `MarkChunkDirty()` called from `EditManager->OnChunkEdited` delegate
+- **Thread Safety**: Data prep reads game-thread state; mesher is stateless; trimesh is pure data construction
 
 ---
 

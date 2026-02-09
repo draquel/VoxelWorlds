@@ -474,10 +474,8 @@ void UVoxelChunkManager::OnChunkMeshingComplete(
     // Send to renderer (GPU buffers stay on GPU)
     MeshRenderer->UpdateChunkMesh(RenderData);
     
-    // Queue collision update (separate, lower priority)
-    if (RenderData.bNeedsCollisionUpdate) {
-        CollisionManager->QueueCollisionUpdate(RenderData);
-    }
+    // Collision handled separately by CollisionManager::Update()
+    // (async pipeline: data prep → thread pool mesh gen + trimesh → game thread physics)
     
     // Update scatter/foliage
     ScatterSystem->GenerateScatterForChunk(ChunkCoord);

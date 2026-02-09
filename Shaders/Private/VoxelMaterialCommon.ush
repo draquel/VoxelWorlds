@@ -159,6 +159,54 @@ float2 TransformToAtlasUV(float2 FaceUV, float AtlasColumn, float AtlasRow, floa
 }
 
 /**
+ * Sample the full LUT data for a material (including flags in A channel).
+ *
+ * @param LUTTexture - The Material LUT texture
+ * @param LUTSampler - Sampler for the LUT (use point/nearest filtering!)
+ * @param MaterialID - Material ID (0-255)
+ * @param FaceType - Face type (0=Top, 1=Side, 2=Bottom)
+ * @return float4 with R=Column/255, G=Row/255, B=UVScale/255, A=Flags/255
+ */
+float4 SampleVoxelLUTFull(Texture2D LUTTexture, SamplerState LUTSampler, int MaterialID, int FaceType)
+{
+    float2 lutUV = float2(
+        (MaterialID + 0.5) / 256.0,
+        (FaceType + 0.5) / 3.0
+    );
+    return LUTTexture.SampleLevel(LUTSampler, lutUV, 0);
+}
+
+/**
+ * Check if a material uses masked blending (from LUT flags).
+ * Returns true if the material's LUT A-channel bit 0 is set.
+ *
+ * @param LUTTexture - The Material LUT texture
+ * @param LUTSampler - Sampler for the LUT (use point/nearest filtering!)
+ * @param MaterialID - Material ID (0-255)
+ * @param FaceType - Face type (0=Top, 1=Side, 2=Bottom)
+ * @return true if the material is masked
+ */
+bool IsVoxelMaterialMasked(Texture2D LUTTexture, SamplerState LUTSampler, int MaterialID, int FaceType)
+{
+    float4 lutSample = SampleVoxelLUTFull(LUTTexture, LUTSampler, MaterialID, FaceType);
+    int flags = (int)(lutSample.a * 255.0 + 0.5);
+    return (flags & 0x01) != 0;
+}
+
+/**
+ * Get the opacity mask value for a voxel atlas sample.
+ * Returns the alpha channel of the atlas color, which can be connected
+ * to the OpacityMask pin for masked materials.
+ *
+ * @param AtlasColor - The sampled atlas color (float4 with alpha)
+ * @return Alpha value suitable for OpacityMask input
+ */
+float GetVoxelOpacityMask(float4 AtlasColor)
+{
+    return AtlasColor.a;
+}
+
+/**
  * Complete voxel atlas sampling function using UV1 for material data.
  * This is the RECOMMENDED method - avoids sRGB conversion issues.
  * Combines all steps: get material ID, face type from UV1, LUT lookup, UV transform.

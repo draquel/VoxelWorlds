@@ -443,28 +443,33 @@ The edit layer uses an **overlay architecture** where edits are stored separatel
 
 ### Notes on Collision Manager Implementation
 
-The collision manager provides **distance-based physics collision** with async cooking:
+The collision manager provides **distance-based physics collision** with a fully async pipeline:
 
 1. **VoxelCollisionManager.h/cpp** (VoxelStreaming module):
    - Distance-based collision loading/unloading
    - CollisionRadius: Default 50% of ViewDistance
    - CollisionLODLevel: Uses coarser meshes for physics (fewer triangles)
-   - Async cooking via UBodySetup to prevent frame hitches
+   - Fully async pipeline: data prep (game thread) → mesh gen + trimesh (thread pool) → physics registration (game thread)
 
-2. **Chaos Physics Integration** (UE 5.7):
+2. **Async Pipeline** (eliminates game-thread stutter):
+   - `PrepareCollisionMeshRequest()`: Copies voxel data, merges edits, extracts neighbors (game thread, lightweight)
+   - `LaunchAsyncCollisionCook()`: Dispatches `GenerateMeshCPU()` + `FTriangleMeshImplicitObject` construction to thread pool
+   - `ProcessCompletedCollisionCooks()`: Drains MPSC queue, calls `ApplyCollisionResult()` (game thread, ~0.5ms per chunk)
+   - Config: `MaxAsyncCollisionTasks(2)`, `MaxAppliesPerFrame=2`
+
+3. **Chaos Physics Integration** (UE 5.7):
    - `Chaos::FTriangleMeshImplicitObject` with `TRefCountPtr`
    - Uses `TriMeshGeometries` (not deprecated `ChaosTriMeshes`)
    - `UBoxComponent` as container, overrides FBodyInstance::BodySetup
 
-3. **Container Actor**:
+4. **Container Actor**:
    - `CollisionContainerActor` holds all chunk collision components
    - Components created/destroyed as chunks enter/leave collision radius
    - Dirty marking via `EditManager->OnChunkEdited` delegate
 
-4. **Mesh Generation**:
-   - `VoxelChunkManager::GetChunkCollisionMesh()` generates at collision LOD
-   - Same mesher as visual mesh but at lower detail level
-   - Collision updates every frame for dirty chunks
+5. **ChunkManager API**:
+   - `PrepareCollisionMeshRequest()`: Builds `FVoxelMeshingRequest` without running mesher (data prep only)
+   - `GetMesherPtr()`: Returns raw `IVoxelMesher*` for async dispatch (stateless, thread-safe)
 
 ### Notes on Input-Based Testing
 
@@ -526,10 +531,11 @@ Mesh generation was moved to background threads to eliminate stuttering:
    - Shutdown drains the queue
 
 4. **Collision Meshing** (VoxelCollisionManager):
-   - Remains synchronous but heavily throttled
-   - `FrameSkipInterval = 5`: Only process every 5th frame
-   - `MaxCooksPerFrame = 1`: Only 1 mesh generation per eligible frame
+   - Fully async: mesh generation + trimesh construction on thread pool
+   - `MaxAsyncCollisionTasks = 2`: Concurrent background tasks
+   - `MaxAppliesPerFrame = 2`: Physics registrations per frame (lightweight)
    - `UpdateThreshold = 1000`: Collision decisions every 1000 units of movement
+   - Same pattern as `LaunchAsyncMeshGeneration()` with MPSC queue
 
 ### Notes on Performance Optimizations
 
@@ -981,8 +987,8 @@ Phase 7 performance targets displayed for comparison:
    - CollisionLODLevel: Coarser meshes for physics
 
 4. ~~Async Collision Generation~~ - COMPLETE
-   - UBodySetup async cooking to prevent frame hitches
-   - MaxCooksPerFrame and MaxConcurrentCooks limits
+   - Fully async pipeline: data prep (game thread) → GenerateMeshCPU + trimesh (thread pool) → ApplyCollisionResult (game thread)
+   - MaxAsyncCollisionTasks config (default 2), MPSC CompletedCollisionQueue
    - ProcessDirtyChunks() for edit-triggered updates
    - Old collision destroyed before new collision created
 

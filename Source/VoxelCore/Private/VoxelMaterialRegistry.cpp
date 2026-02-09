@@ -138,13 +138,18 @@ void FVoxelMaterialRegistry::EnsureInitialized()
 		0, 5
 	));
 
-	// Leaves - Dark Green (Col 1, Row 5)
-	Materials.Add(FVoxelMaterialDefinition(
-		EVoxelMaterial::Leaves,
-		TEXT("Leaves"),
-		FColor(34, 100, 34),
-		1, 5
-	));
+	// Leaves - Dark Green (Col 1, Row 5) - Masked (alpha cutout), Non-occluding
+	{
+		FVoxelMaterialDefinition LeavesDef(
+			EVoxelMaterial::Leaves,
+			TEXT("Leaves"),
+			FColor(34, 100, 34),
+			1, 5
+		);
+		LeavesDef.bIsMasked = true;
+		LeavesDef.bNonOccluding = true;
+		Materials.Add(LeavesDef);
+	}
 
 	bInitialized = true;
 }
@@ -254,6 +259,45 @@ float FVoxelMaterialRegistry::GetUVScale(uint8 MaterialID)
 	return 1.0f;
 }
 
+bool FVoxelMaterialRegistry::IsMaterialMasked(uint8 MaterialID)
+{
+	EnsureInitialized();
+
+	if (MaterialID < Materials.Num())
+	{
+		return Materials[MaterialID].bIsMasked;
+	}
+
+	return false;
+}
+
+bool FVoxelMaterialRegistry::IsNonOccluding(uint8 MaterialID)
+{
+	EnsureInitialized();
+
+	if (MaterialID < Materials.Num())
+	{
+		return Materials[MaterialID].bNonOccluding;
+	}
+
+	return false;
+}
+
+TSet<uint8> FVoxelMaterialRegistry::GetMaskedMaterialIDs()
+{
+	EnsureInitialized();
+
+	TSet<uint8> Result;
+	for (const FVoxelMaterialDefinition& Mat : Materials)
+	{
+		if (Mat.bIsMasked)
+		{
+			Result.Add(Mat.MaterialID);
+		}
+	}
+	return Result;
+}
+
 void FVoxelMaterialRegistry::SetAtlasPositions(const TArray<FVoxelMaterialTextureConfig>& Configs, int32 AtlasColumns, int32 AtlasRows)
 {
 	EnsureInitialized();
@@ -268,6 +312,11 @@ void FVoxelMaterialRegistry::SetAtlasPositions(const TArray<FVoxelMaterialTextur
 			Mat.ArrayIndex = Config.MaterialID;  // Array index matches MaterialID
 			Mat.TriplanarScale = Config.TriplanarScale;
 			Mat.UVScale = Config.UVScale;
+			// OR-merge behavior flags: registry defaults are preserved, atlas can only ADD flags.
+			// This prevents existing atlas assets (saved before a flag was added) from
+			// overwriting hardcoded registry defaults with their UPROPERTY default of false.
+			Mat.bIsMasked = Mat.bIsMasked || Config.bIsMasked;
+			Mat.bNonOccluding = Mat.bNonOccluding || Config.bNonOccluding;
 		}
 	}
 }
