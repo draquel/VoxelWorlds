@@ -44,7 +44,9 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 	ContainerActor = World->SpawnActor<AActor>(AActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
 	if (ContainerActor)
 	{
+#if WITH_EDITOR
 		ContainerActor->SetActorLabel(TEXT("VoxelScatterContainer"));
+#endif
 
 		// Add a root component for the actor
 		USceneComponent* RootComponent = NewObject<USceneComponent>(ContainerActor, TEXT("RootComponent"));

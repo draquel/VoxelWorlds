@@ -27,6 +27,9 @@ class VOXELCORE_API UVoxelBiomeConfiguration : public UDataAsset
 public:
 	UVoxelBiomeConfiguration();
 
+	/** Rebuild caches after deserialization loads actual property values */
+	virtual void PostLoad() override;
+
 	// ==================== Biome Definitions ====================
 
 	/**
@@ -225,6 +228,12 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Biome")
 	bool IsValid() const;
+
+	/**
+	 * Log all configuration values to the output log for debugging.
+	 * Dumps biome definitions, height rules, and ore vein configs.
+	 */
+	void LogConfiguration() const;
 
 #if WITH_EDITOR
 	/**

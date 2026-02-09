@@ -15,6 +15,21 @@ UVoxelBiomeConfiguration::UVoxelBiomeConfiguration()
 	InitializeDefaults();
 }
 
+void UVoxelBiomeConfiguration::PostLoad()
+{
+	Super::PostLoad();
+
+	// Rebuild caches after deserialization overwrites UPROPERTY arrays.
+	// The constructor calls InitializeDefaults() which builds caches for the
+	// default biomes/ores. Serialization then overwrites Biomes, GlobalOreVeins,
+	// and HeightMaterialRules with the user's data, but the cached arrays
+	// (BiomeIDToIndex, SortedGlobalOres, SortedHeightRules) are NOT UPROPERTYs
+	// and still hold the stale constructor values. Rebuild them now.
+	RebuildBiomeIndexCache();
+	RebuildHeightRulesCache();
+	RebuildOreVeinsCache();
+}
+
 void UVoxelBiomeConfiguration::InitializeDefaults()
 {
 	Biomes.Empty();
@@ -463,6 +478,50 @@ uint8 UVoxelBiomeConfiguration::ApplyHeightMaterialRules(uint8 CurrentMaterial, 
 bool UVoxelBiomeConfiguration::IsValid() const
 {
 	return Biomes.Num() > 0;
+}
+
+void UVoxelBiomeConfiguration::LogConfiguration() const
+{
+	UE_LOG(LogVoxelCore, Warning, TEXT("========== BiomeConfiguration Dump =========="));
+	UE_LOG(LogVoxelCore, Warning, TEXT("Asset: %s"), *GetPathName());
+	UE_LOG(LogVoxelCore, Warning, TEXT("BlendWidth=%.3f, HeightMaterials=%s, OreVeins=%s, UnderwaterMaterials=%s"),
+		BiomeBlendWidth, bEnableHeightMaterials ? TEXT("ON") : TEXT("OFF"),
+		bEnableOreVeins ? TEXT("ON") : TEXT("OFF"), bEnableUnderwaterMaterials ? TEXT("ON") : TEXT("OFF"));
+	UE_LOG(LogVoxelCore, Warning, TEXT("TempFreq=%.7f, MoistFreq=%.7f, TempSeed=%d, MoistSeed=%d"),
+		TemperatureNoiseFrequency, MoistureNoiseFrequency, TemperatureSeedOffset, MoistureSeedOffset);
+
+	UE_LOG(LogVoxelCore, Warning, TEXT("--- Biomes (%d) ---"), Biomes.Num());
+	for (const FBiomeDefinition& B : Biomes)
+	{
+		UE_LOG(LogVoxelCore, Warning, TEXT("  [%d] %s: Temp(%.2f..%.2f) Moist(%.2f..%.2f)"),
+			B.BiomeID, *B.Name, B.TemperatureRange.X, B.TemperatureRange.Y,
+			B.MoistureRange.X, B.MoistureRange.Y);
+		UE_LOG(LogVoxelCore, Warning, TEXT("       Surface=%d Subsurface=%d Deep=%d  SurfDepth=%.1f SubDepth=%.1f"),
+			B.SurfaceMaterial, B.SubsurfaceMaterial, B.DeepMaterial,
+			B.SurfaceDepth, B.SubsurfaceDepth);
+		UE_LOG(LogVoxelCore, Warning, TEXT("       UnderwaterSurf=%d UnderwaterSub=%d  BiomeOres=%d AddToGlobal=%s"),
+			B.UnderwaterSurfaceMaterial, B.UnderwaterSubsurfaceMaterial,
+			B.BiomeOreVeins.Num(), B.bAddToGlobalOres ? TEXT("Y") : TEXT("N"));
+	}
+
+	UE_LOG(LogVoxelCore, Warning, TEXT("--- Height Rules (%d) ---"), HeightMaterialRules.Num());
+	for (const FHeightMaterialRule& R : HeightMaterialRules)
+	{
+		UE_LOG(LogVoxelCore, Warning, TEXT("  Mat=%d Height(%.0f..%.0f) SurfOnly=%s MaxDepth=%.1f Priority=%d"),
+			R.MaterialID, R.MinHeight, R.MaxHeight,
+			R.bSurfaceOnly ? TEXT("Y") : TEXT("N"), R.MaxDepthBelowSurface, R.Priority);
+	}
+
+	UE_LOG(LogVoxelCore, Warning, TEXT("--- Global Ore Veins (%d) ---"), GlobalOreVeins.Num());
+	for (const FOreVeinConfig& O : GlobalOreVeins)
+	{
+		UE_LOG(LogVoxelCore, Warning, TEXT("  %s: Mat=%d Depth(%.0f..%.0f) Shape=%s Freq=%.4f Thresh=%.3f Seed=%d Pri=%d"),
+			*O.Name, O.MaterialID, O.MinDepth, O.MaxDepth,
+			O.Shape == EOreVeinShape::Blob ? TEXT("Blob") : TEXT("Streak"),
+			O.Frequency, O.Threshold, O.SeedOffset, O.Priority);
+	}
+
+	UE_LOG(LogVoxelCore, Warning, TEXT("========== End BiomeConfiguration Dump =========="));
 }
 
 #if WITH_EDITOR

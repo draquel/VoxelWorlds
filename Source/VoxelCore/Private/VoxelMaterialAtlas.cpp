@@ -218,7 +218,9 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 		MaterialLUT->Filter = TF_Nearest;
 		MaterialLUT->SRGB = false;
 		MaterialLUT->CompressionSettings = TC_VectorDisplacementmap; // No compression
+#if WITH_EDITORONLY_DATA
 		MaterialLUT->MipGenSettings = TMGS_NoMipmaps;
+#endif
 		MaterialLUT->AddressX = TA_Clamp;
 		MaterialLUT->AddressY = TA_Clamp;
 	}
@@ -296,7 +298,9 @@ UTexture2D* UVoxelMaterialAtlas::CreatePlaceholderTexture(FColor Color, int32 Si
 	Texture->SRGB = true;
 	Texture->Filter = TF_Bilinear;
 	Texture->CompressionSettings = TC_Default;
+#if WITH_EDITORONLY_DATA
 	Texture->MipGenSettings = TMGS_NoMipmaps;
+#endif
 
 	// Fill with solid color
 	FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];

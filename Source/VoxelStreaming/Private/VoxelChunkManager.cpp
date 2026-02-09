@@ -484,6 +484,12 @@ void UVoxelChunkManager::Initialize(
 
 	bIsInitialized = true;
 
+	// Dump biome configuration for diagnostics
+	if (Configuration->BiomeConfiguration)
+	{
+		Configuration->BiomeConfiguration->LogConfiguration();
+	}
+
 	UE_LOG(LogVoxelStreaming, Log, TEXT("ChunkManager initialized with config: VoxelSize=%.1f, ChunkSize=%d"),
 		Configuration->VoxelSize, Configuration->ChunkSize);
 }

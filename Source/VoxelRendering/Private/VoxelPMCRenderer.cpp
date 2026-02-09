@@ -881,7 +881,7 @@ UMaterialInstanceDynamic* FVoxelPMCRenderer::CreateVoxelMaterialInstance(UMateri
 	// We create a MIC with BLEND_Opaque override (requires static permutation recompile),
 	// then parent the opaque MID to it. The masked MID parents directly to master (already Masked).
 
-	// Create opaque MIC with blend mode override (MICs support UpdateStaticPermutation)
+	// Create opaque MIC with blend mode override
 	UMaterialInstanceConstant* NewOpaqueMIC = NewObject<UMaterialInstanceConstant>(GetTransientPackage());
 	if (!NewOpaqueMIC)
 	{
@@ -891,7 +891,7 @@ UMaterialInstanceDynamic* FVoxelPMCRenderer::CreateVoxelMaterialInstance(UMateri
 	NewOpaqueMIC->Parent = MasterMaterial;
 	NewOpaqueMIC->BasePropertyOverrides.bOverride_BlendMode = true;
 	NewOpaqueMIC->BasePropertyOverrides.BlendMode = BLEND_Opaque;
-	NewOpaqueMIC->UpdateStaticPermutation();
+	NewOpaqueMIC->InitStaticPermutation();
 	OpaqueMIC.Reset(NewOpaqueMIC);
 
 	// Create opaque MID from the MIC (inherits Opaque blend mode, dynamic atlas params)
@@ -911,7 +911,7 @@ UMaterialInstanceDynamic* FVoxelPMCRenderer::CreateVoxelMaterialInstance(UMateri
 		if (NewMaskedMIC)
 		{
 			NewMaskedMIC->Parent = MasterMaterial;
-			NewMaskedMIC->UpdateStaticPermutation();
+			NewMaskedMIC->InitStaticPermutation();
 			MaskedMIC.Reset(NewMaskedMIC);
 
 			// Create masked MID from the MIC (inherits Masked from master)
