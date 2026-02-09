@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
+#include "Containers/Queue.h"
+#include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelCollisionManager.generated.h"
 
 class UVoxelWorldConfiguration;
@@ -76,32 +78,41 @@ struct FCollisionCookRequest
 	/** Priority for processing (higher = sooner) */
 	float Priority = 0.0f;
 
-	/** Mesh vertices (local space) */
-	TArray<FVector3f> Vertices;
-
-	/** Mesh triangle indices */
-	TArray<uint32> Indices;
-
-	/** Comparison for priority queue (higher priority first) */
+	/** Comparison for priority queue (lower priority value = earlier in array, highest at back) */
 	bool operator<(const FCollisionCookRequest& Other) const
 	{
-		return Priority > Other.Priority;
+		return Priority < Other.Priority;
 	}
+};
+
+/**
+ * Result of an async collision cooking task (mesh gen + trimesh construction on thread pool).
+ */
+struct FAsyncCollisionResult
+{
+	FIntVector ChunkCoord;
+	int32 LODLevel = 0;
+	TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh;
+	int32 NumVertices = 0;
+	int32 NumTriangles = 0;
+	bool bSuccess = false;
 };
 
 /**
  * Voxel Collision Manager.
  *
  * Manages distance-based collision generation for voxel terrain.
- * Uses async cooking to prevent frame hitches.
+ * Mesh generation and trimesh construction run on a background thread pool.
+ * Only physics component creation (lightweight) happens on the game thread.
  *
  * Design principles:
  * - Only chunks within CollisionRadius have collision
  * - Uses CollisionLODLevel for coarser collision meshes (fewer triangles)
- * - Async UBodySetup cooking to avoid main thread stalls
+ * - Async mesh gen + trimesh cook on thread pool to avoid main thread stalls
  * - Supports both PMC and Custom VF renderers
  *
- * Thread Safety: Must be accessed from game thread only.
+ * Thread Safety: Update/Apply must be called from game thread only.
+ * Background tasks access ChunkManager read-only state and stateless mesher.
  *
  * @see UVoxelChunkManager
  * @see UBodySetup
@@ -194,10 +205,10 @@ public:
 	int32 GetCollisionChunkCount() const { return CollisionData.Num(); }
 
 	/**
-	 * Get number of chunks currently being cooked.
+	 * Get number of chunks currently being cooked asynchronously.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Collision")
-	int32 GetCookingCount() const { return CurrentlyCooking.Num(); }
+	int32 GetCookingCount() const { return AsyncCollisionInProgress.Num(); }
 
 	/**
 	 * Get number of chunks in cook queue.
@@ -240,6 +251,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Collision")
 	int32 GetCollisionLODLevel() const { return CollisionLODLevel; }
 
+	/**
+	 * Set the maximum number of concurrent async collision tasks.
+	 *
+	 * @param MaxTasks Max async tasks (1-4)
+	 */
+	void SetMaxAsyncCollisionTasks(int32 MaxTasks);
+
 	// ==================== Events ====================
 
 	/** Called when a chunk's collision becomes ready */
@@ -271,14 +289,35 @@ protected:
 
 	/**
 	 * Process dirty chunks that need collision regeneration (from edits).
-	 * Called every frame to ensure edits are reflected in collision promptly.
 	 */
 	void ProcessDirtyChunks(const FVector& ViewerPosition);
 
 	/**
-	 * Process the cooking queue (start new cooks, check completions).
+	 * Process the cooking queue — launches async tasks (lightweight, no mesh gen on game thread).
 	 */
 	void ProcessCookingQueue();
+
+	/**
+	 * Launch async collision cook for a chunk on the thread pool.
+	 * Performs mesh generation + Chaos trimesh construction off the game thread.
+	 *
+	 * @param Request The cook request (ChunkCoord, LODLevel, Priority)
+	 */
+	void LaunchAsyncCollisionCook(const FCollisionCookRequest& Request);
+
+	/**
+	 * Process completed async collision results (game thread).
+	 * Drains the MPSC queue and applies results by creating physics components.
+	 */
+	void ProcessCompletedCollisionCooks();
+
+	/**
+	 * Apply a completed collision result on the game thread.
+	 * Creates BodySetup, collision component, and registers physics.
+	 *
+	 * @param Result The async result containing the trimesh
+	 */
+	void ApplyCollisionResult(FAsyncCollisionResult& Result);
 
 	/**
 	 * Request collision generation for a chunk.
@@ -294,34 +333,6 @@ protected:
 	 * @param ChunkCoord Chunk coordinate
 	 */
 	void RemoveCollision(const FIntVector& ChunkCoord);
-
-	/**
-	 * Generate collision mesh data for a chunk.
-	 *
-	 * @param ChunkCoord Chunk coordinate
-	 * @param OutVerts Output vertices
-	 * @param OutIndices Output indices
-	 * @return True if mesh generation succeeded
-	 */
-	bool GenerateCollisionMesh(
-		const FIntVector& ChunkCoord,
-		TArray<FVector3f>& OutVerts,
-		TArray<uint32>& OutIndices);
-
-	/**
-	 * Start async cooking for a collision request.
-	 *
-	 * @param Request The cook request with mesh data
-	 */
-	void StartAsyncCook(const FCollisionCookRequest& Request);
-
-	/**
-	 * Called when async cooking completes.
-	 *
-	 * @param ChunkCoord Chunk coordinate
-	 * @param bSuccess Whether cooking succeeded
-	 */
-	void OnCookComplete(const FIntVector& ChunkCoord, bool bSuccess);
 
 	/**
 	 * Create a new BodySetup for a chunk.
@@ -377,14 +388,11 @@ protected:
 	/** LOD level to use for collision (higher = fewer triangles) */
 	int32 CollisionLODLevel = 1;
 
-	/** Maximum collision cooking operations per frame (mesh generation is expensive) */
-	int32 MaxCooksPerFrame = 1;
+	/** Maximum concurrent async collision tasks */
+	int32 MaxAsyncCollisionTasks = 2;
 
-	/** Maximum concurrent cooking operations */
-	int32 MaxConcurrentCooks = 4;
-
-	/** Only process collision every N frames to reduce game thread load */
-	int32 FrameSkipInterval = 5;
+	/** Maximum completed results to apply per frame (physics registration) */
+	int32 MaxAppliesPerFrame = 2;
 
 	// ==================== Collision Storage ====================
 
@@ -392,27 +400,27 @@ protected:
 	UPROPERTY()
 	TMap<FIntVector, FChunkCollisionData> CollisionData;
 
-	// ==================== Cooking Queue ====================
+	// ==================== Async Cooking Pipeline ====================
 
-	/** Queue of chunks waiting for collision cooking */
+	/** Queue of chunks waiting to be launched as async tasks */
 	TArray<FCollisionCookRequest> CookingQueue;
 
 	/** Set of chunk coords in CookingQueue for O(1) duplicate detection */
 	TSet<FIntVector> CookingQueueSet;
 
-	/** Set of chunks currently being cooked */
-	TSet<FIntVector> CurrentlyCooking;
+	/** Set of chunks currently being cooked asynchronously on thread pool */
+	TSet<FIntVector> AsyncCollisionInProgress;
+
+	/** Thread-safe MPSC queue for completed async collision results */
+	TQueue<FAsyncCollisionResult, EQueueMode::Mpsc> CompletedCollisionQueue;
 
 	// ==================== Cached State ====================
 
 	/** Last viewer position for change detection */
 	FVector LastViewerPosition = FVector(FLT_MAX);
 
-	/** Threshold for viewer movement to trigger collision update (increased to reduce update frequency) */
+	/** Threshold for viewer movement to trigger collision update */
 	static constexpr float UpdateThreshold = 1000.0f;
-
-	/** Frame counter for throttled updates */
-	int32 FrameCounter = 0;
 
 	/** True until we've successfully queued initial collision (chunks may not be loaded on first frame) */
 	bool bPendingInitialUpdate = true;

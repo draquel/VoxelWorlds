@@ -464,8 +464,10 @@ void UVoxelChunkManager::Initialize(
 		CollisionManager->SetCollisionRadius(Configuration->ViewDistance * 0.5f);
 		CollisionManager->SetCollisionLODLevel(Configuration->CollisionLODLevel);
 
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelCollisionManager created (Radius=%.0f, LOD=%d)"),
-			Configuration->ViewDistance * 0.5f, Configuration->CollisionLODLevel);
+		CollisionManager->SetMaxAsyncCollisionTasks(Configuration->MaxAsyncCollisionTasks);
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelCollisionManager created (Radius=%.0f, LOD=%d, MaxAsyncTasks=%d)"),
+			Configuration->ViewDistance * 0.5f, Configuration->CollisionLODLevel, Configuration->MaxAsyncCollisionTasks);
 	}
 
 	// Create scatter manager if enabled
@@ -2549,10 +2551,10 @@ void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 
 // ==================== Collision Mesh Generation ====================
 
-bool UVoxelChunkManager::GetChunkCollisionMesh(
+bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,
-	FChunkMeshData& OutMeshData)
+	FVoxelMeshingRequest& OutMeshRequest)
 {
 	if (!bIsInitialized || !Configuration || !Mesher)
 	{
@@ -2575,16 +2577,14 @@ bool UVoxelChunkManager::GetChunkCollisionMesh(
 	}
 
 	// Build meshing request for collision LOD
-	FVoxelMeshingRequest MeshRequest;
-	MeshRequest.ChunkCoord = ChunkCoord;
-	MeshRequest.LODLevel = LODLevel;
-	MeshRequest.ChunkSize = ChunkSize;
-	MeshRequest.VoxelSize = Configuration->VoxelSize;
-	MeshRequest.WorldOrigin = Configuration->WorldOrigin;
-	// Note: Meshing mode (smooth/cubic) is determined by which mesher is instantiated
+	OutMeshRequest.ChunkCoord = ChunkCoord;
+	OutMeshRequest.LODLevel = LODLevel;
+	OutMeshRequest.ChunkSize = ChunkSize;
+	OutMeshRequest.VoxelSize = Configuration->VoxelSize;
+	OutMeshRequest.WorldOrigin = Configuration->WorldOrigin;
 
 	// Copy voxel data
-	MeshRequest.VoxelData = State->Descriptor.VoxelData;
+	OutMeshRequest.VoxelData = State->Descriptor.VoxelData;
 
 	// Merge edit layer if present
 	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
@@ -2596,28 +2596,39 @@ bool UVoxelChunkManager::GetChunkCollisionMesh(
 			{
 				const int32 Index = EditPair.Key;
 				const FVoxelEdit& Edit = EditPair.Value;
-				if (MeshRequest.VoxelData.IsValidIndex(Index))
+				if (OutMeshRequest.VoxelData.IsValidIndex(Index))
 				{
-					// Apply edit relative to procedural data using edit mode and delta
-					const FVoxelData& ProceduralData = MeshRequest.VoxelData[Index];
-					MeshRequest.VoxelData[Index] = Edit.ApplyToProceduralData(ProceduralData);
+					const FVoxelData& ProceduralData = OutMeshRequest.VoxelData[Index];
+					OutMeshRequest.VoxelData[Index] = Edit.ApplyToProceduralData(ProceduralData);
 				}
 			}
 		}
 	}
 
 	// Extract neighbor data for seamless boundaries
-	ExtractNeighborEdgeSlices(ChunkCoord, MeshRequest);
+	ExtractNeighborEdgeSlices(ChunkCoord, OutMeshRequest);
 
-	// For collision, we don't need transition cells - just generate the regular mesh
-	// at the collision LOD level without fancy seams
-	MeshRequest.TransitionFaces = 0;
+	// For collision, we don't need transition cells
+	OutMeshRequest.TransitionFaces = 0;
 	for (int32 i = 0; i < 6; ++i)
 	{
-		MeshRequest.NeighborLODLevels[i] = LODLevel; // Same LOD as us (no transitions)
+		OutMeshRequest.NeighborLODLevels[i] = LODLevel;
 	}
 
-	// Generate mesh
+	return true;
+}
+
+bool UVoxelChunkManager::GetChunkCollisionMesh(
+	const FIntVector& ChunkCoord,
+	int32 LODLevel,
+	FChunkMeshData& OutMeshData)
+{
+	FVoxelMeshingRequest MeshRequest;
+	if (!PrepareCollisionMeshRequest(ChunkCoord, LODLevel, MeshRequest))
+	{
+		return false;
+	}
+
 	OutMeshData.Reset();
 	return Mesher->GenerateMeshCPU(MeshRequest, OutMeshData);
 }

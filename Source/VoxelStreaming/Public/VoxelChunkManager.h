@@ -313,6 +313,28 @@ public:
 		int32 LODLevel,
 		FChunkMeshData& OutMeshData);
 
+	/**
+	 * Prepare a meshing request for collision (game thread only).
+	 *
+	 * Copies voxel data, merges edits, and extracts neighbor slices.
+	 * The returned request can then be dispatched to GenerateMeshCPU on a background thread.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param LODLevel LOD level for collision mesh
+	 * @param OutMeshRequest Output meshing request ready for GenerateMeshCPU
+	 * @return True if request was prepared successfully
+	 */
+	bool PrepareCollisionMeshRequest(
+		const FIntVector& ChunkCoord,
+		int32 LODLevel,
+		FVoxelMeshingRequest& OutMeshRequest);
+
+	/**
+	 * Get raw pointer to the mesher (for async dispatch).
+	 * The mesher's GenerateMeshCPU is stateless and thread-safe.
+	 */
+	IVoxelMesher* GetMesherPtr() const { return Mesher.Get(); }
+
 	// ==================== Performance Stats ====================
 
 	/** Voxel-specific memory breakdown */

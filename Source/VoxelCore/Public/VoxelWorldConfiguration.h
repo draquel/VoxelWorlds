@@ -420,6 +420,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "4"))
 	int32 MaxAsyncScatterTasks = 2;
 
+	/** Maximum concurrent async collision cooking tasks (1-4). Collision mesh generation runs on thread pool. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 MaxAsyncCollisionTasks = 2;
+
 public:
 	UVoxelWorldConfiguration();
 

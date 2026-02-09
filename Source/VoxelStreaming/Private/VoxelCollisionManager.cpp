@@ -5,6 +5,8 @@
 #include "VoxelChunkManager.h"
 #include "VoxelCoordinates.h"
 #include "ChunkRenderData.h"
+#include "IVoxelMesher.h"
+#include "VoxelMeshingTypes.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "DrawDebugHelpers.h"
@@ -12,6 +14,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "Serialization/ArchiveCountMem.h"
+#include "Async/Async.h"
 
 // Chaos physics includes (UE5 always uses Chaos)
 #include "Chaos/TriangleMeshImplicitObject.h"
@@ -78,16 +81,22 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 
 	// Apply configuration
 	CollisionLODLevel = Config->CollisionLODLevel;
+	MaxAsyncCollisionTasks = FMath::Clamp(Config->MaxAsyncCollisionTasks, 1, 4);
 
 	// Clear any existing state
 	CollisionData.Empty();
 	CookingQueue.Empty();
 	CookingQueueSet.Empty();
-	CurrentlyCooking.Empty();
+	AsyncCollisionInProgress.Empty();
+
+	// Drain any stale results from the MPSC queue
+	{
+		FAsyncCollisionResult Stale;
+		while (CompletedCollisionQueue.Dequeue(Stale)) {}
+	}
 
 	// Reset cached state
 	LastViewerPosition = FVector(FLT_MAX);
-	FrameCounter = 0;
 	bPendingInitialUpdate = true;
 
 	// Reset statistics
@@ -96,8 +105,8 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 
 	bIsInitialized = true;
 
-	UE_LOG(LogVoxelCollision, Log, TEXT("VoxelCollisionManager initialized (Radius=%.0f, LOD=%d)"),
-		CollisionRadius, CollisionLODLevel);
+	UE_LOG(LogVoxelCollision, Log, TEXT("VoxelCollisionManager initialized (Radius=%.0f, LOD=%d, MaxAsyncTasks=%d)"),
+		CollisionRadius, CollisionLODLevel, MaxAsyncCollisionTasks);
 }
 
 void UVoxelCollisionManager::Shutdown()
@@ -110,7 +119,13 @@ void UVoxelCollisionManager::Shutdown()
 	// Cancel all pending cooking
 	CookingQueue.Empty();
 	CookingQueueSet.Empty();
-	CurrentlyCooking.Empty();
+	AsyncCollisionInProgress.Empty();
+
+	// Drain completed queue (results may still be arriving)
+	{
+		FAsyncCollisionResult Stale;
+		while (CompletedCollisionQueue.Dequeue(Stale)) {}
+	}
 
 	// Release all collision data and components
 	for (auto& Pair : CollisionData)
@@ -153,17 +168,10 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		return;
 	}
 
-	// Increment frame counter
-	++FrameCounter;
+	// 1. Always drain completed async results first (lightweight game-thread work)
+	ProcessCompletedCollisionCooks();
 
-	// Only process expensive collision operations every N frames to reduce stuttering
-	// Dirty chunk processing and cooking are the expensive parts (mesh generation on game thread)
-	// Exception: During initial load, process every frame until collision is established
-	const bool bShouldProcessThisFrame = bPendingInitialUpdate || (FrameCounter % FrameSkipInterval) == 0;
-
-	// Check if viewer moved enough to warrant full collision update
-	// This is relatively cheap (just iterating loaded chunks), so do it more often
-	// Also run on every frame during initial load to catch chunks as they become available
+	// 2. Check if viewer moved enough to warrant full collision update
 	const float DistanceMoved = FVector::Dist(ViewerPosition, LastViewerPosition);
 	if (DistanceMoved > UpdateThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate)
 	{
@@ -171,23 +179,19 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		LastViewerPosition = ViewerPosition;
 
 		// Once we've queued or generated any collision, initial load is complete
-		if (bPendingInitialUpdate && (CookingQueue.Num() > 0 || CurrentlyCooking.Num() > 0 || CollisionData.Num() > 0))
+		if (bPendingInitialUpdate && (CookingQueue.Num() > 0 || AsyncCollisionInProgress.Num() > 0 || CollisionData.Num() > 0))
 		{
 			bPendingInitialUpdate = false;
-			UE_LOG(LogVoxelCollision, Log, TEXT("Initial collision load complete (queued=%d, cooking=%d, ready=%d)"),
-				CookingQueue.Num(), CurrentlyCooking.Num(), CollisionData.Num());
+			UE_LOG(LogVoxelCollision, Log, TEXT("Initial collision load complete (queued=%d, async=%d, ready=%d)"),
+				CookingQueue.Num(), AsyncCollisionInProgress.Num(), CollisionData.Num());
 		}
 	}
 
-	// Process dirty chunks and cooking queue only on designated frames
-	if (bShouldProcessThisFrame)
-	{
-		// Process dirty chunks (from edits)
-		ProcessDirtyChunks(ViewerPosition);
+	// 3. Process dirty chunks (from edits) — just queues requests, lightweight
+	ProcessDirtyChunks(ViewerPosition);
 
-		// Process cooking queue (mesh gen is synchronous but heavily throttled)
-		ProcessCookingQueue();
-	}
+	// 4. Launch async tasks from queue (no mesh gen here, just dispatch)
+	ProcessCookingQueue();
 }
 
 void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
@@ -288,6 +292,11 @@ void UVoxelCollisionManager::SetCollisionLODLevel(int32 LODLevel)
 	UE_LOG(LogVoxelCollision, Log, TEXT("Collision LOD level set to %d"), CollisionLODLevel);
 }
 
+void UVoxelCollisionManager::SetMaxAsyncCollisionTasks(int32 MaxTasks)
+{
+	MaxAsyncCollisionTasks = FMath::Clamp(MaxTasks, 1, 4);
+}
+
 // ==================== Debug ====================
 
 FString UVoxelCollisionManager::GetDebugStats() const
@@ -298,7 +307,7 @@ FString UVoxelCollisionManager::GetDebugStats() const
 	Stats += FString::Printf(TEXT("Collision LOD: %d\n"), CollisionLODLevel);
 	Stats += FString::Printf(TEXT("Chunks with Collision: %d\n"), CollisionData.Num());
 	Stats += FString::Printf(TEXT("Cook Queue: %d\n"), CookingQueue.Num());
-	Stats += FString::Printf(TEXT("Currently Cooking: %d\n"), CurrentlyCooking.Num());
+	Stats += FString::Printf(TEXT("Async In-Progress: %d\n"), AsyncCollisionInProgress.Num());
 	Stats += FString::Printf(TEXT("Total Generated: %lld\n"), TotalCollisionsGenerated);
 	Stats += FString::Printf(TEXT("Total Removed: %lld\n"), TotalCollisionsRemoved);
 
@@ -325,15 +334,10 @@ int64 UVoxelCollisionManager::GetTotalMemoryUsage() const
 		}
 	}
 
-	// Cooking queue
+	// Cooking queue (lightweight — no mesh data stored in requests)
 	Total += CookingQueue.GetAllocatedSize();
-	for (const FCollisionCookRequest& Req : CookingQueue)
-	{
-		Total += Req.Vertices.GetAllocatedSize() + Req.Indices.GetAllocatedSize();
-	}
-
 	Total += CookingQueueSet.GetAllocatedSize();
-	Total += CurrentlyCooking.GetAllocatedSize();
+	Total += AsyncCollisionInProgress.GetAllocatedSize();
 
 	return Total;
 }
@@ -470,40 +474,233 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 
 void UVoxelCollisionManager::ProcessCookingQueue()
 {
-	// Start new cooking operations
-	int32 NewCooksThisFrame = 0;
-
+	// Launch async tasks from the queue up to the concurrency limit
 	while (CookingQueue.Num() > 0 &&
-		CurrentlyCooking.Num() < MaxConcurrentCooks &&
-		NewCooksThisFrame < MaxCooksPerFrame)
+		AsyncCollisionInProgress.Num() < MaxAsyncCollisionTasks)
 	{
-		// Get highest priority request
-		FCollisionCookRequest Request = MoveTemp(CookingQueue[0]);
-		CookingQueue.RemoveAt(0);
+		// Pop highest priority from the back (O(1) — queue sorted ascending, highest at back)
+		FCollisionCookRequest Request = MoveTemp(CookingQueue.Last());
+		CookingQueue.Pop();
 		CookingQueueSet.Remove(Request.ChunkCoord);
 
-		// Generate mesh data if not already provided
-		// Note: This is synchronous but heavily throttled (MaxCooksPerFrame=1, every 5 frames)
-		if (Request.Vertices.Num() == 0)
+		// Launch async mesh generation + trimesh construction
+		LaunchAsyncCollisionCook(Request);
+	}
+}
+
+void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookRequest& Request)
+{
+	if (!ChunkManager || !Configuration)
+	{
+		return;
+	}
+
+	// Mark as in-progress (both in collision data and async tracking)
+	FChunkCollisionData& Data = CollisionData.FindOrAdd(Request.ChunkCoord);
+	Data.ChunkCoord = Request.ChunkCoord;
+	Data.CollisionLODLevel = Request.LODLevel;
+	Data.bIsCooking = true;
+	Data.bNeedsUpdate = false;
+
+	AsyncCollisionInProgress.Add(Request.ChunkCoord);
+
+	// Prepare meshing request on the game thread (reads ChunkStates, EditManager — game thread only)
+	FVoxelMeshingRequest MeshRequest;
+	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest))
+	{
+		// Chunk may not be loaded yet or has no geometry — cancel
+		Data.bIsCooking = false;
+		AsyncCollisionInProgress.Remove(Request.ChunkCoord);
+
+		UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) collision mesh request preparation failed (not loaded)"),
+			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
+		return;
+	}
+
+	// Capture mesher pointer (stateless, thread-safe — same pattern as LaunchAsyncMeshGeneration)
+	IVoxelMesher* MesherPtr = ChunkManager->GetMesherPtr();
+	if (!MesherPtr)
+	{
+		Data.bIsCooking = false;
+		AsyncCollisionInProgress.Remove(Request.ChunkCoord);
+		return;
+	}
+
+	// Capture data for async task
+	const FIntVector ChunkCoord = Request.ChunkCoord;
+	const int32 LODLevel = Request.LODLevel;
+	TWeakObjectPtr<UVoxelCollisionManager> WeakThis(this);
+
+	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
+	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel]() mutable
+	{
+		FAsyncCollisionResult Result;
+		Result.ChunkCoord = ChunkCoord;
+		Result.LODLevel = LODLevel;
+
+		// Step 1: Generate mesh on background thread (the expensive part, ~2-4ms)
+		FChunkMeshData MeshData;
+		const bool bMeshSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
+
+		if (bMeshSuccess && MeshData.IsValid())
 		{
-			if (!GenerateCollisionMesh(Request.ChunkCoord, Request.Vertices, Request.Indices))
+			const TArray<FVector3f>& Vertices = MeshData.Positions;
+			const TArray<uint32>& Indices = MeshData.Indices;
+
+			Result.NumVertices = Vertices.Num();
+			Result.NumTriangles = Indices.Num() / 3;
+
+			// Step 2: Build Chaos trimesh (~1-2ms)
+			TArray<Chaos::TVec3<Chaos::FRealSingle>> ChaosVertices;
+			TArray<Chaos::TVector<int32, 3>> ChaosTriangles;
+
+			ChaosVertices.Reserve(Vertices.Num());
+			for (const FVector3f& V : Vertices)
 			{
-				UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) collision mesh generation failed (empty or error)"),
-					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
-				continue;
+				ChaosVertices.Add(Chaos::TVec3<Chaos::FRealSingle>(V.X, V.Y, V.Z));
+			}
+
+			const int32 NumTriangles = Indices.Num() / 3;
+			ChaosTriangles.Reserve(NumTriangles);
+			for (int32 i = 0; i < NumTriangles; ++i)
+			{
+				ChaosTriangles.Add(Chaos::TVector<int32, 3>(
+					static_cast<int32>(Indices[i * 3 + 0]),
+					static_cast<int32>(Indices[i * 3 + 1]),
+					static_cast<int32>(Indices[i * 3 + 2])
+				));
+			}
+
+			// Create the Chaos trimesh implicit object (thread-safe — pure data construction)
+			TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = new Chaos::FTriangleMeshImplicitObject(
+				MoveTemp(ChaosVertices),
+				MoveTemp(ChaosTriangles),
+				TArray<uint16>() // Empty materials array
+			);
+
+			if (TriMesh.IsValid())
+			{
+				Result.TriMesh = MoveTemp(TriMesh);
+				Result.bSuccess = true;
 			}
 		}
 
-		// Start async cook
-		StartAsyncCook(Request);
-		++NewCooksThisFrame;
+		// Enqueue result for game thread (thread-safe MPSC queue)
+		if (UVoxelCollisionManager* This = WeakThis.Get())
+		{
+			This->CompletedCollisionQueue.Enqueue(MoveTemp(Result));
+		}
+	});
+}
+
+void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
+{
+	FAsyncCollisionResult Result;
+	int32 AppliedCount = 0;
+
+	while (CompletedCollisionQueue.Dequeue(Result) && AppliedCount < MaxAppliesPerFrame)
+	{
+		// Remove from in-progress tracking
+		AsyncCollisionInProgress.Remove(Result.ChunkCoord);
+
+		// Check if chunk is still relevant (may have been removed while cooking)
+		FChunkCollisionData* Data = CollisionData.Find(Result.ChunkCoord);
+		if (!Data)
+		{
+			// Chunk was unloaded while we were cooking — discard result
+			UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) async collision discarded - chunk removed"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+			continue;
+		}
+
+		if (Result.bSuccess)
+		{
+			ApplyCollisionResult(Result);
+			++AppliedCount;
+		}
+		else
+		{
+			UE_LOG(LogVoxelCollision, Warning, TEXT("Chunk (%d,%d,%d) async collision cooking failed"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+			Data->bIsCooking = false;
+		}
+	}
+}
+
+void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
+{
+	FChunkCollisionData* Data = CollisionData.Find(Result.ChunkCoord);
+	if (!Data)
+	{
+		return;
+	}
+
+	// Create or reuse BodySetup
+	if (!Data->BodySetup)
+	{
+		Data->BodySetup = CreateBodySetup(Result.ChunkCoord);
+	}
+
+	if (!Data->BodySetup)
+	{
+		UE_LOG(LogVoxelCollision, Error, TEXT("Failed to create BodySetup for chunk (%d,%d,%d)"),
+			Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+		Data->bIsCooking = false;
+		return;
+	}
+
+	UBodySetup* BS = Data->BodySetup;
+
+	// Clear existing collision geometry
+	BS->AggGeom.ConvexElems.Empty();
+	BS->AggGeom.BoxElems.Empty();
+	BS->AggGeom.SphereElems.Empty();
+	BS->AggGeom.SphylElems.Empty();
+	BS->AggGeom.TaperedCapsuleElems.Empty();
+
+	// Set up for complex collision using trimesh
+	BS->bMeshCollideAll = true;
+	BS->CollisionTraceFlag = CTF_UseComplexAsSimple;
+	BS->bHasCookedCollisionData = false;
+
+	// Set the trimesh from the async result
+	BS->TriMeshGeometries.Empty();
+	BS->TriMeshGeometries.Add(Result.TriMesh);
+	BS->bCreatedPhysicsMeshes = true;
+
+	// Mark cooking complete
+	Data->bIsCooking = false;
+
+	// Destroy old collision component if it exists (from previous cook/edit)
+	if (Data->CollisionComponent)
+	{
+		Data->CollisionComponent->DestroyComponent();
+		Data->CollisionComponent = nullptr;
+	}
+
+	// Create collision component to register with physics (game thread only, ~0.5ms)
+	Data->CollisionComponent = CreateCollisionComponent(Result.ChunkCoord, BS);
+
+	if (Data->CollisionComponent)
+	{
+		++TotalCollisionsGenerated;
+		OnCollisionReady.Broadcast(Result.ChunkCoord);
+
+		UE_LOG(LogVoxelCollision, Log, TEXT("Created collision for chunk (%d,%d,%d) (%d verts, %d tris)"),
+			Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z,
+			Result.NumVertices, Result.NumTriangles);
+	}
+	else
+	{
+		UE_LOG(LogVoxelCollision, Warning, TEXT("Failed to create collision component for chunk (%d,%d,%d)"),
+			Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
 	}
 }
 
 void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, float Priority)
 {
 	// O(1) duplicate check
-	if (CookingQueueSet.Contains(ChunkCoord) || CurrentlyCooking.Contains(ChunkCoord))
+	if (CookingQueueSet.Contains(ChunkCoord) || AsyncCollisionInProgress.Contains(ChunkCoord))
 	{
 		return;
 	}
@@ -517,7 +714,7 @@ void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, floa
 	// Add to tracking set
 	CookingQueueSet.Add(ChunkCoord);
 
-	// Sorted insertion (highest priority first)
+	// Sorted insertion (lowest priority first, highest at back for O(1) Pop)
 	int32 InsertIndex = Algo::LowerBound(CookingQueue, Request);
 	CookingQueue.Insert(Request, InsertIndex);
 
@@ -540,6 +737,10 @@ void UVoxelCollisionManager::RemoveCollision(const FIntVector& ChunkCoord)
 		}
 	}
 
+	// Note: if async is in-progress, the result will be discarded when it completes
+	// (ProcessCompletedCollisionCooks checks if chunk is still in CollisionData)
+	AsyncCollisionInProgress.Remove(ChunkCoord);
+
 	// Remove collision data and component
 	if (FChunkCollisionData* Data = CollisionData.Find(ChunkCoord))
 	{
@@ -560,201 +761,6 @@ void UVoxelCollisionManager::RemoveCollision(const FIntVector& ChunkCoord)
 
 		UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) collision removed"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-	}
-}
-
-bool UVoxelCollisionManager::GenerateCollisionMesh(
-	const FIntVector& ChunkCoord,
-	TArray<FVector3f>& OutVerts,
-	TArray<uint32>& OutIndices)
-{
-	if (!ChunkManager || !Configuration)
-	{
-		return false;
-	}
-
-	// Generate mesh at collision LOD level
-	FChunkMeshData MeshData;
-	if (!ChunkManager->GetChunkCollisionMesh(ChunkCoord, CollisionLODLevel, MeshData))
-	{
-		// Chunk may not be loaded yet or has no geometry
-		return false;
-	}
-
-	// Check if mesh has valid geometry
-	if (!MeshData.IsValid())
-	{
-		// Empty chunk (air or solid) - valid but no collision needed
-		return false;
-	}
-
-	// Copy positions and indices for collision
-	OutVerts = MoveTemp(MeshData.Positions);
-	OutIndices = MoveTemp(MeshData.Indices);
-
-	UE_LOG(LogVoxelCollision, Verbose, TEXT("Generated collision mesh for chunk (%d,%d,%d) at LOD %d: %d verts, %d tris"),
-		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, CollisionLODLevel,
-		OutVerts.Num(), OutIndices.Num() / 3);
-
-	return OutVerts.Num() > 0 && OutIndices.Num() > 0;
-}
-
-void UVoxelCollisionManager::StartAsyncCook(const FCollisionCookRequest& Request)
-{
-	// Create or update collision data entry
-	FChunkCollisionData& Data = CollisionData.FindOrAdd(Request.ChunkCoord);
-	Data.ChunkCoord = Request.ChunkCoord;
-	Data.CollisionLODLevel = Request.LODLevel;
-	Data.bIsCooking = true;
-	Data.bNeedsUpdate = false;
-
-	// Track as currently cooking
-	CurrentlyCooking.Add(Request.ChunkCoord);
-
-	// Create body setup if needed
-	if (!Data.BodySetup)
-	{
-		Data.BodySetup = CreateBodySetup(Request.ChunkCoord);
-	}
-
-	if (!Data.BodySetup)
-	{
-		UE_LOG(LogVoxelCollision, Error, TEXT("Failed to create BodySetup for chunk (%d,%d,%d)"),
-			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
-		OnCookComplete(Request.ChunkCoord, false);
-		return;
-	}
-
-	// Handle empty mesh case
-	if (Request.Vertices.Num() == 0 || Request.Indices.Num() == 0)
-	{
-		Data.BodySetup->bCreatedPhysicsMeshes = true;
-		Data.bIsCooking = false;
-		CurrentlyCooking.Remove(Request.ChunkCoord);
-		OnCookComplete(Request.ChunkCoord, true);
-		return;
-	}
-
-	// Clear existing collision data
-	Data.BodySetup->AggGeom.ConvexElems.Empty();
-	Data.BodySetup->AggGeom.BoxElems.Empty();
-	Data.BodySetup->AggGeom.SphereElems.Empty();
-	Data.BodySetup->AggGeom.SphylElems.Empty();
-	Data.BodySetup->AggGeom.TaperedCapsuleElems.Empty();
-
-	// Set up for complex collision using trimesh
-	Data.BodySetup->bMeshCollideAll = true;
-	Data.BodySetup->CollisionTraceFlag = CTF_UseComplexAsSimple;
-	Data.BodySetup->bHasCookedCollisionData = false;
-
-	// Clear any existing trimeshes (UE 5.7+ uses TriMeshGeometries)
-	Data.BodySetup->TriMeshGeometries.Empty();
-
-	// For terrain collision, we create trimesh collision directly
-	const int32 NumTriangles = Request.Indices.Num() / 3;
-	bool bCookSuccess = false;
-
-	// Build triangle data for Chaos physics
-	TArray<Chaos::TVec3<Chaos::FRealSingle>> ChaosVertices;
-	TArray<Chaos::TVector<int32, 3>> ChaosTriangles;
-
-	ChaosVertices.Reserve(Request.Vertices.Num());
-	for (const FVector3f& V : Request.Vertices)
-	{
-		ChaosVertices.Add(Chaos::TVec3<Chaos::FRealSingle>(V.X, V.Y, V.Z));
-	}
-
-	ChaosTriangles.Reserve(NumTriangles);
-	for (int32 i = 0; i < NumTriangles; ++i)
-	{
-		ChaosTriangles.Add(Chaos::TVector<int32, 3>(
-			static_cast<int32>(Request.Indices[i * 3 + 0]),
-			static_cast<int32>(Request.Indices[i * 3 + 1]),
-			static_cast<int32>(Request.Indices[i * 3 + 2])
-		));
-	}
-
-	// Create the Chaos trimesh implicit object (UE 5.7+ uses TRefCountPtr)
-	TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = new Chaos::FTriangleMeshImplicitObject(
-		MoveTemp(ChaosVertices),
-		MoveTemp(ChaosTriangles),
-		TArray<uint16>() // Empty materials array (single material for terrain)
-	);
-
-	if (TriMesh.IsValid())
-	{
-		Data.BodySetup->TriMeshGeometries.Add(TriMesh);
-		Data.BodySetup->bCreatedPhysicsMeshes = true;
-		bCookSuccess = true;
-	}
-
-	// Mark cooking complete
-	Data.bIsCooking = false;
-	CurrentlyCooking.Remove(Request.ChunkCoord);
-
-	if (bCookSuccess)
-	{
-		// Destroy old collision component if it exists (from previous cook/edit)
-		if (Data.CollisionComponent)
-		{
-			Data.CollisionComponent->DestroyComponent();
-			Data.CollisionComponent = nullptr;
-		}
-
-		// Create collision component to register with physics
-		Data.CollisionComponent = CreateCollisionComponent(Request.ChunkCoord, Data.BodySetup);
-
-		if (Data.CollisionComponent)
-		{
-			++TotalCollisionsGenerated;
-			OnCollisionReady.Broadcast(Request.ChunkCoord);
-
-			UE_LOG(LogVoxelCollision, Log, TEXT("Created collision for chunk (%d,%d,%d) (%d verts, %d tris)"),
-				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
-				Request.Vertices.Num(), NumTriangles);
-		}
-		else
-		{
-			UE_LOG(LogVoxelCollision, Warning, TEXT("Failed to create collision component for chunk (%d,%d,%d)"),
-				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
-		}
-	}
-	else
-	{
-		UE_LOG(LogVoxelCollision, Warning, TEXT("Collision cooking failed for chunk (%d,%d,%d)"),
-			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
-		OnCookComplete(Request.ChunkCoord, false);
-	}
-}
-
-void UVoxelCollisionManager::OnCookComplete(const FIntVector& ChunkCoord, bool bSuccess)
-{
-	CurrentlyCooking.Remove(ChunkCoord);
-
-	if (FChunkCollisionData* Data = CollisionData.Find(ChunkCoord))
-	{
-		Data->bIsCooking = false;
-
-		if (bSuccess)
-		{
-			++TotalCollisionsGenerated;
-			OnCollisionReady.Broadcast(ChunkCoord);
-
-			UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) collision ready"),
-				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-		}
-		else
-		{
-			UE_LOG(LogVoxelCollision, Warning, TEXT("Chunk (%d,%d,%d) collision cooking failed"),
-				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-
-			// Remove failed collision data
-			if (Data->BodySetup)
-			{
-				Data->BodySetup->MarkAsGarbage();
-			}
-			CollisionData.Remove(ChunkCoord);
-		}
 	}
 }
 
