@@ -330,35 +330,7 @@ void FVoxelTreeInjector::StampTree(
 	const int32 TrunkH = FMath::Max(1, ActualTrunkHeight);
 	const int32 CanopyR = FMath::Max(1, ActualCanopyRadius);
 
-	// ==================== Trunk ====================
-	for (int32 Z = 0; Z < TrunkH; ++Z)
-	{
-		const int32 GZ = BaseGlobalVoxel.Z + Z;
-
-		if (Template.TrunkRadius == 0)
-		{
-			// 1x1 trunk
-			SetVoxel(BaseGlobalVoxel.X, BaseGlobalVoxel.Y, GZ, Template.TrunkMaterialID, false);
-		}
-		else
-		{
-			// Cross pattern (3x3 minus corners for radius 1)
-			for (int32 DX = -Template.TrunkRadius; DX <= Template.TrunkRadius; ++DX)
-			{
-				for (int32 DY = -Template.TrunkRadius; DY <= Template.TrunkRadius; ++DY)
-				{
-					// Skip corners for cross pattern
-					if (FMath::Abs(DX) + FMath::Abs(DY) > Template.TrunkRadius)
-					{
-						continue;
-					}
-					SetVoxel(BaseGlobalVoxel.X + DX, BaseGlobalVoxel.Y + DY, GZ, Template.TrunkMaterialID, false);
-				}
-			}
-		}
-	}
-
-	// ==================== Canopy ====================
+	// ==================== Canopy (stamped first so trunk can punch through) ====================
 	const FIntVector CanopyCenter(
 		BaseGlobalVoxel.X,
 		BaseGlobalVoxel.Y,
@@ -417,6 +389,36 @@ void FVoxelTreeInjector::StampTree(
 						Template.LeafMaterialID,
 						true // Only replace air
 					);
+				}
+			}
+		}
+	}
+
+	// ==================== Trunk (stamped second to punch through canopy) ====================
+	// Trunk extends from ground up to the canopy center so it pokes into the leaf ball
+	const int32 TotalTrunkH = TrunkH + Template.CanopyVerticalOffset + 1;
+	for (int32 Z = 0; Z < TotalTrunkH; ++Z)
+	{
+		const int32 GZ = BaseGlobalVoxel.Z + Z;
+
+		if (Template.TrunkRadius == 0)
+		{
+			// 1x1 trunk
+			SetVoxel(BaseGlobalVoxel.X, BaseGlobalVoxel.Y, GZ, Template.TrunkMaterialID, false);
+		}
+		else
+		{
+			// Cross pattern (3x3 minus corners for radius 1)
+			for (int32 DX = -Template.TrunkRadius; DX <= Template.TrunkRadius; ++DX)
+			{
+				for (int32 DY = -Template.TrunkRadius; DY <= Template.TrunkRadius; ++DY)
+				{
+					// Skip corners for cross pattern
+					if (FMath::Abs(DX) + FMath::Abs(DY) > Template.TrunkRadius)
+					{
+						continue;
+					}
+					SetVoxel(BaseGlobalVoxel.X + DX, BaseGlobalVoxel.Y + DY, GZ, Template.TrunkMaterialID, false);
 				}
 			}
 		}
