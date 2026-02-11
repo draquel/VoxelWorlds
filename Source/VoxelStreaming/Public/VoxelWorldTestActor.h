@@ -141,6 +141,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel", meta = (EditCondition = "bDrawTransitionCellDebug"))
 	bool bShowTransitionCellBounds = true;
 
+	/** Color transition cell triangles: orange=transition, green=regular MC, blue=MC fallback */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel")
+	bool bDebugColorTransitionCells = false;
+
+	/** Log anomalous transition cells (disagreements, clamped vertices, folded triangles) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel")
+	bool bDebugLogAnomalies = false;
+
+	/** Collect comparison MC geometry alongside transition cells (stored in debug data) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel", meta = (EditCondition = "bDrawTransitionCellDebug"))
+	bool bDebugComparisonMesh = false;
+
 	/** Size of debug points in world units */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug|Transvoxel", meta = (ClampMin = "1", ClampMax = "50"))
 	float DebugPointSize = 10.0f;

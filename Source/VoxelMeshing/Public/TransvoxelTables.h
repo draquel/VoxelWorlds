@@ -172,4 +172,53 @@ namespace TransvoxelTables
 			default:  return 0;   // Fallback
 		}
 	}
+
+	// =========================================================================
+	// Lengyel's Regular Marching Cubes Tables
+	// =========================================================================
+	//
+	// These are the modified Marching Cubes tables from Eric Lengyel's Transvoxel
+	// implementation. Using these instead of classic Lorensen & Cline tables ensures
+	// that the regular MC triangulation is compatible with the Transvoxel transition
+	// cells, preventing gaps at LOD boundaries due to ambiguous case resolution.
+	//
+	// Corner ordering (differs from classic MC):
+	//   0=(0,0,0), 1=(1,0,0), 2=(0,1,0), 3=(1,1,0),
+	//   4=(0,0,1), 5=(1,0,1), 6=(0,1,1), 7=(1,1,1)
+	//
+	// Source: https://github.com/EricLengyel/Transvoxel (MIT License)
+
+	/**
+	 * Cell data for one of the 16 regular MC equivalence classes.
+	 * GeometryCounts: high nibble = vertex count, low nibble = triangle count.
+	 * VertexIndex: groups of 3 indices giving the triangulation.
+	 */
+	struct FRegularCellData
+	{
+		uint8 GeometryCounts;
+		uint8 VertexIndex[15];
+
+		FORCEINLINE int32 GetVertexCount() const { return GeometryCounts >> 4; }
+		FORCEINLINE int32 GetTriangleCount() const { return GeometryCounts & 0x0F; }
+	};
+
+	/**
+	 * Maps an 8-bit regular MC case index to an equivalence class (0-15).
+	 * Uses Lengyel's corner ordering.
+	 */
+	extern const uint8 RegularCellClass[256];
+
+	/**
+	 * Triangulation data for each of the 16 equivalence classes.
+	 */
+	extern const FRegularCellData RegularCellData[16];
+
+	/**
+	 * Vertex data for each of the 256 MC cases.
+	 * Each uint16 encodes an edge:
+	 * - Low byte, low nibble: first corner index (0-7)
+	 * - Low byte, high nibble: second corner index (0-7)
+	 * - High byte: vertex reuse information (can be ignored)
+	 */
+	extern const uint16 RegularVertexData[256][12];
 }

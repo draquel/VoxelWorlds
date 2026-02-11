@@ -140,8 +140,9 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	uint32 EdgeCornerFlags = 0;
 
 	/**
-	 * Flags indicating which faces border lower-LOD neighbors.
-	 * Used by Transvoxel to generate transition cells.
+	 * Flags indicating which faces border coarser (higher LOD level) neighbors.
+	 * Per Lengyel's Transvoxel: the FINER chunk generates transition cells
+	 * so the face corners match the coarser neighbor's MC grid exactly.
 	 * Bit 0: -X, Bit 1: +X, Bit 2: -Y, Bit 3: +Y, Bit 4: -Z, Bit 5: +Z
 	 */
 	UPROPERTY()
@@ -415,11 +416,10 @@ struct VOXELMESHING_API FVoxelMeshingConfig
 	 * Uses Eric Lengyel's official lookup tables for correct triangulation.
 	 * Only applies when bUseSmoothMeshing is true.
 	 *
-	 * NOTE: Currently disabled by default due to complexity. Consider using
-	 * skirts or boundary snapping for simpler LOD seam handling.
+	 * When disabled, falls back to skirt generation for LOD seam hiding.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Meshing", meta = (EditCondition = "bUseSmoothMeshing"))
-	bool bUseTransvoxel = false;
+	bool bUseTransvoxel = true;
 
 	/**
 	 * Generate skirts along chunk boundaries to hide LOD seams.

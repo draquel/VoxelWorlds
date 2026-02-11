@@ -62,12 +62,16 @@ void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 
 	// Sync Transvoxel debug flags to mesher each tick (allows runtime toggling)
 	static bool bWasDebuggingEnabled = false;
-	const bool bDebuggingEnabled = bDebugLogTransitionCells || bDrawTransitionCellDebug;
+	const bool bDebuggingEnabled = bDebugLogTransitionCells || bDrawTransitionCellDebug
+		|| bDebugColorTransitionCells || bDebugLogAnomalies;
 
 	if (FVoxelCPUSmoothMesher* SmoothMesher = ChunkManager ? ChunkManager->GetSmoothMesher() : nullptr)
 	{
 		SmoothMesher->SetDebugLogging(bDebugLogTransitionCells);
 		SmoothMesher->SetDebugVisualization(bDrawTransitionCellDebug);
+		SmoothMesher->SetDebugColorTransitionCells(bDebugColorTransitionCells);
+		SmoothMesher->SetDebugLogAnomalies(bDebugLogAnomalies);
+		SmoothMesher->SetDebugComparisonMesh(bDebugComparisonMesh);
 
 		// Clear debug data when debugging is just enabled (fresh start)
 		if (bDebuggingEnabled && !bWasDebuggingEnabled)
@@ -605,14 +609,88 @@ void AVoxelWorldTestActor::DrawTransitionCellDebug()
 			{
 				const FVector VertexPos = ChunkWorldOffset + FVector(Cell.GeneratedVertices[i]);
 
-				// Vertices in bright yellow
-				DrawDebugPoint(World, VertexPos, DebugPointSize * 2.0f, FColor::Yellow, false, 0.0f, 0);
+				// Vertices in bright yellow (or red if cell has anomalies)
+				const FColor VertColor = (Cell.bHasFaceInteriorDisagreement || Cell.bHasClampedVertices || Cell.bHasFoldedTriangles)
+					? FColor::Red : FColor::Yellow;
+				DrawDebugPoint(World, VertexPos, DebugPointSize * 2.0f, VertColor, false, 0.0f, 0);
 
 				// Connect vertices with lines (for first few to show structure)
 				if (i > 0)
 				{
 					const FVector PrevPos = ChunkWorldOffset + FVector(Cell.GeneratedVertices[i - 1]);
 					DrawDebugLine(World, PrevPos, VertexPos, FColor::Orange, false, 0.0f, 0, 1.0f);
+				}
+			}
+		}
+
+		// Draw anomaly indicators
+		if (Cell.bHasFaceInteriorDisagreement || Cell.bHasClampedVertices || Cell.bHasFoldedTriangles || Cell.NumFilteredTriangles > 0)
+		{
+			const FVector CellPos = ChunkWorldOffset + FVector(Cell.CellBasePos);
+			const float Offset = Cell.Stride * (Config ? Config->VoxelSize : 100.0f) * 0.5f;
+			const FVector LabelPos = CellPos + FVector(0, 0, Offset * 2.5f);
+
+			FString AnomalyStr;
+			if (Cell.bHasFaceInteriorDisagreement)
+			{
+				AnomalyStr += FString::Printf(TEXT("DISAGREE(0x%X) "), Cell.DisagreementMask);
+			}
+			if (Cell.bHasClampedVertices)
+			{
+				AnomalyStr += TEXT("CLAMPED ");
+			}
+			if (Cell.bHasFoldedTriangles)
+			{
+				AnomalyStr += TEXT("FOLDED ");
+			}
+			if (Cell.NumFilteredTriangles > 0)
+			{
+				AnomalyStr += FString::Printf(TEXT("FILTERED(%d)"), Cell.NumFilteredTriangles);
+			}
+
+			DrawDebugString(World, LabelPos, AnomalyStr, nullptr, FColor::Red, 0.0f, true);
+
+			// Highlight anomalous cells with thicker red box
+			if (bShowTransitionCellBounds)
+			{
+				const FVector CellMin = CellPos;
+				const float CellSize = Cell.Stride * (Config ? Config->VoxelSize : 100.0f);
+				const FVector CellCenter = CellMin + FVector(CellSize * 0.5f);
+				const FVector CellExtent = FVector(CellSize * 0.5f);
+				DrawDebugBox(World, CellCenter, CellExtent, FColor::Red, false, 0.0f, 0, 4.0f);
+			}
+		}
+
+		// Draw MC comparison mesh (wireframe, cyan, slightly offset outward from face)
+		if (bDebugComparisonMesh && Cell.MCComparisonVertices.Num() > 0 && Cell.MCComparisonIndices.Num() >= 3)
+		{
+			// Face outward normal for offset
+			static const FVector FaceNormals[6] = {
+				FVector(-1, 0, 0), FVector(1, 0, 0),
+				FVector(0, -1, 0), FVector(0, 1, 0),
+				FVector(0, 0, -1), FVector(0, 0, 1)
+			};
+			const FVector OffsetDir = (Cell.FaceIndex >= 0 && Cell.FaceIndex < 6)
+				? FaceNormals[Cell.FaceIndex] : FVector::ZeroVector;
+			const float OffsetDist = (Config ? Config->VoxelSize : 100.0f) * 0.5f;
+			const FVector ComparisonOffset = ChunkWorldOffset + OffsetDir * OffsetDist;
+
+			// Draw MC comparison triangles as wireframe
+			for (int32 ti = 0; ti + 2 < Cell.MCComparisonIndices.Num(); ti += 3)
+			{
+				const int32 I0 = Cell.MCComparisonIndices[ti];
+				const int32 I1 = Cell.MCComparisonIndices[ti + 1];
+				const int32 I2 = Cell.MCComparisonIndices[ti + 2];
+
+				if (I0 < Cell.MCComparisonVertices.Num() && I1 < Cell.MCComparisonVertices.Num() && I2 < Cell.MCComparisonVertices.Num())
+				{
+					const FVector V0 = ComparisonOffset + FVector(Cell.MCComparisonVertices[I0]);
+					const FVector V1 = ComparisonOffset + FVector(Cell.MCComparisonVertices[I1]);
+					const FVector V2 = ComparisonOffset + FVector(Cell.MCComparisonVertices[I2]);
+
+					DrawDebugLine(World, V0, V1, FColor::Cyan, false, 0.0f, 0, 1.5f);
+					DrawDebugLine(World, V1, V2, FColor::Cyan, false, 0.0f, 0, 1.5f);
+					DrawDebugLine(World, V2, V0, FColor::Cyan, false, 0.0f, 0, 1.5f);
 				}
 			}
 		}

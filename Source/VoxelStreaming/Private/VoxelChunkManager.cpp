@@ -744,6 +744,29 @@ FIntVector UVoxelChunkManager::WorldToChunkCoord(const FVector& WorldPosition) c
 	return FVoxelCoordinates::WorldToChunk(WorldPosition, Configuration->ChunkSize, Configuration->VoxelSize);
 }
 
+FVoxelData UVoxelChunkManager::GetVoxelAtWorldPosition(const FVector& WorldPosition) const
+{
+	if (!bIsInitialized || !Configuration)
+	{
+		return FVoxelData::Air();
+	}
+
+	const FVector RelativePos = WorldPosition - Configuration->WorldOrigin;
+	const FIntVector ChunkCoord = FVoxelCoordinates::WorldToChunk(
+		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
+
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State || !State->Descriptor.HasVoxelData())
+	{
+		return FVoxelData::Air();
+	}
+
+	const FIntVector LocalPos = FVoxelCoordinates::WorldToLocalVoxel(
+		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
+
+	return State->Descriptor.GetVoxel(LocalPos);
+}
+
 // ==================== Debug ====================
 
 FString UVoxelChunkManager::GetDebugStats() const
@@ -1412,11 +1435,16 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
 
 		// Calculate transition faces for Transvoxel LOD seam handling
-		// A face needs transition cells if the neighbor is at a lower LOD level (coarser)
+		// Per Lengyel's Transvoxel algorithm, transition cells are generated on the FINER chunk
+		// at faces that border a coarser neighbor. The transition cell's face corners (0,2,6,8)
+		// match the coarser neighbor's MC grid, ensuring shared edge crossings produce identical
+		// vertices. The 5 face midpoints add fine detail between coarse corners. The 4 interior
+		// corners connect to the finer chunk's own MC grid.
+		// A face needs transition cells if the neighbor is at a higher LOD level (coarser).
 		MeshRequest.TransitionFaces = 0;
 		const int32 CurrentLOD = Request.LODLevel;
 
-		// Check each of 6 faces for lower-LOD neighbors
+		// Check each of 6 faces for coarser (higher LOD level) neighbors
 		static const FIntVector NeighborOffsets[6] = {
 			FIntVector(-1, 0, 0),  // -X
 			FIntVector(1, 0, 0),   // +X
@@ -1507,9 +1535,12 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 				// Store neighbor LOD level for transition cell stride calculation
 				MeshRequest.NeighborLODLevels[i] = NeighborState->LODLevel;
 
-				// Neighbor exists - check if it's at a lower LOD (higher LOD level number = coarser)
+				// Neighbor exists - check if it's at a higher LOD level (coarser)
+				// Per Lengyel's Transvoxel: the FINER chunk generates transition cells on its
+				// face facing the coarser neighbor. The transition cell's face corners (0,2,6,8)
+				// align exactly with the coarser neighbor's MC grid corners, ensuring shared
+				// edge crossings produce identical vertices with no triangulation conflicts.
 				// IMPORTANT: Verify that ALL neighbor data needed for this face is available!
-				// This includes the face neighbor AND all edge neighbors for transition cells at edges.
 				if (NeighborState->LODLevel > CurrentLOD)
 				{
 					if (HasNeighborData(i) && HasAllEdgeDataForFace(i))

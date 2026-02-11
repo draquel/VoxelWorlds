@@ -202,13 +202,15 @@ private:
 	 * @param Stride LOD stride (2^LODLevel)
 	 * @param OutMeshData Output mesh data
 	 * @param OutTriangleCount Counter for generated triangles
+	 * @param DebugColorOverride When alpha != 0, overrides vertex color (for debug coloring)
 	 */
 	void ProcessCubeLOD(
 		const FVoxelMeshingRequest& Request,
 		int32 X, int32 Y, int32 Z,
 		int32 Stride,
 		FChunkMeshData& OutMeshData,
-		uint32& OutTriangleCount);
+		uint32& OutTriangleCount,
+		FColor DebugColorOverride = FColor(0, 0, 0, 0));
 
 	/**
 	 * Calculate gradient-based normal at a position using LOD-aware sampling.
@@ -284,7 +286,7 @@ private:
 	 * @param OutMeshData Output mesh data
 	 * @param OutTriangleCount Counter for generated triangles
 	 */
-	void ProcessTransitionCell(
+	bool ProcessTransitionCell(
 		const FVoxelMeshingRequest& Request,
 		int32 X, int32 Y, int32 Z,
 		int32 Stride,
@@ -403,7 +405,35 @@ public:
 		uint16 CaseIndex;           // The 9-bit case index
 		uint8 CellClass;            // Equivalence class (0-55)
 		bool bInverted;             // Winding order inverted?
+
+		// Anomaly detection results
+		bool bHasFaceInteriorDisagreement = false;  // Interior corner disagrees with face corner on solid/air
+		bool bHasClampedVertices = false;            // Some edge vertices have t clamped to 0 or 1
+		bool bHasFoldedTriangles = false;            // Face normal opposes gradient normal
+		int32 NumFilteredTriangles = 0;              // Triangles filtered by edge-length check
+		uint8 DisagreementMask = 0;                  // Bits 0-3: which interior corners disagree
+
+		// MC comparison: what regular MC would produce for this cell's footprint
+		TArray<FVector3f> MCComparisonVertices;
+		TArray<uint32> MCComparisonIndices;
 	};
+
+	/**
+	 * Summary of transition cell anomalies for a mesh generation pass.
+	 */
+	struct FTransitionDebugSummary
+	{
+		int32 TotalTransitionCells = 0;
+		int32 EmptyCells = 0;          // Cells that fell back to MC (class 0)
+		int32 CellsWithDisagreement = 0;
+		int32 CellsWithClampedVertices = 0;
+		int32 CellsWithFoldedTriangles = 0;
+		int32 TotalFilteredTriangles = 0;
+		int32 PerFaceCounts[6] = {};   // How many transition cells per face
+	};
+
+	/** Compute summary from collected debug data */
+	FTransitionDebugSummary GetTransitionDebugSummary() const;
 
 	/** Collection of debug data from last mesh generation */
 	TArray<FTransitionCellDebugData> TransitionCellDebugData;
@@ -414,17 +444,20 @@ public:
 	/** Enable collection of debug visualization data */
 	bool bCollectDebugVisualization = false;
 
-	/**
-	 * Enable transition cell debug logging.
-	 * When enabled, detailed information about each transition cell is logged.
-	 */
-	void SetDebugLogging(bool bEnable) { bDebugLogTransitionCells = bEnable; }
+	/** Debug: Color transition cell triangles distinctly (orange=transition, green=MC, blue=fallback) */
+	bool bDebugColorTransitionCells = false;
 
-	/**
-	 * Enable debug visualization data collection.
-	 * When enabled, TransitionCellDebugData is populated during meshing.
-	 */
+	/** Debug: Log anomalous transition cells (disagreements, clamped vertices, folded triangles) */
+	bool bDebugLogAnomalies = false;
+
+	/** Debug: Generate comparison MC geometry alongside transition cells */
+	bool bDebugComparisonMesh = false;
+
+	void SetDebugLogging(bool bEnable) { bDebugLogTransitionCells = bEnable; }
 	void SetDebugVisualization(bool bEnable) { bCollectDebugVisualization = bEnable; }
+	void SetDebugColorTransitionCells(bool bEnable) { bDebugColorTransitionCells = bEnable; }
+	void SetDebugLogAnomalies(bool bEnable) { bDebugLogAnomalies = bEnable; }
+	void SetDebugComparisonMesh(bool bEnable) { bDebugComparisonMesh = bEnable; }
 
 	/**
 	 * Get collected debug data from last mesh generation.

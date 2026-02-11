@@ -159,116 +159,120 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 		UE_LOG(LogVoxelMeshing, Verbose, TEXT("Chunk has transition faces: 0x%02X"), TransitionMask);
 	}
 
-	// Process each cube in the chunk at LOD resolution
-	// At higher LOD levels, we process fewer but larger cubes
-	// Each cube at LOD level N covers a Stride x Stride x Stride region
+	// TWO-PASS HYBRID approach for Transvoxel:
+	//
+	// Pass 1: Generate transition cells at all aligned boundary positions. Track which
+	//         positions produced non-empty geometry (surface crosses the transition face).
+	// Pass 2: Generate MC for all cells EXCEPT those covered by a non-empty transition
+	//         cell. This ensures:
+	//   - No missing geometry: empty transition cells (case 0) get MC fallback
+	//   - No overlap where transition cells are active: clean outer-edge matching
+	//   - Small T-junctions at the inner edge of transition strips (per Lengyel)
+	//
+	// The transition cell's outer edge matches the coarser neighbor's MC grid exactly
+	// (same densities from shared neighbor data, same InterpolateEdge formula).
+	// Boundary MC cells produce stride-1 resolution vertices that DON'T match the
+	// coarser MC's stride-2 vertices — this is why we must skip them where transition
+	// cells are active.
+
+	// Pass 1: Generate transition cells and track non-empty results
+	// Key encoding: Face(3 bits) | AlignedFP1/CoarserStride(8 bits) | AlignedFP2/CoarserStride(8 bits)
+	TSet<uint32> NonEmptyTransitionCells;
+
+	if (Config.bUseTransvoxel && bHasTransitions)
+	{
+		for (int32 Face = 0; Face < 6; Face++)
+		{
+			if (!(TransitionMask & (1 << Face)))
+				continue;
+
+			const int32 DepthAxis = Face / 2;
+			const int32 BoundaryPos = (Face % 2 == 0) ? 0 : (ChunkSize - Stride);
+
+			const int32 NeighborLOD = Request.NeighborLODLevels[Face];
+			const int32 CoarserStride = (NeighborLOD > Request.LODLevel)
+				? (1 << NeighborLOD) : Stride;
+
+			for (int32 FP2 = 0; FP2 < ChunkSize; FP2 += CoarserStride)
+			{
+				for (int32 FP1 = 0; FP1 < ChunkSize; FP1 += CoarserStride)
+				{
+					int32 CellX, CellY, CellZ;
+					switch (DepthAxis)
+					{
+					case 0: CellX = BoundaryPos; CellY = FP1; CellZ = FP2; break;
+					case 1: CellX = FP1; CellY = BoundaryPos; CellZ = FP2; break;
+					default: CellX = FP1; CellY = FP2; CellZ = BoundaryPos; break;
+					}
+
+					const bool bGenerated = ProcessTransitionCell(
+						Request, CellX, CellY, CellZ, CoarserStride, Face, OutMeshData, TriangleCount);
+
+					if (bGenerated)
+					{
+						const uint32 Key = (static_cast<uint32>(Face) << 16) |
+							((FP1 / CoarserStride) << 8) |
+							(FP2 / CoarserStride);
+						NonEmptyTransitionCells.Add(Key);
+					}
+				}
+			}
+		}
+	}
+
+	// Pass 2: Generate MC for all cells, skipping boundary cells covered by transition cells
 	for (int32 Z = 0; Z < ChunkSize; Z += Stride)
 	{
 		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
 		{
 			for (int32 X = 0; X < ChunkSize; X += Stride)
 			{
-				if (Config.bUseTransvoxel)
+				bool bSkipMC = false;
+
+				if (Config.bUseTransvoxel && bHasTransitions)
 				{
-					// Check if this cell needs transition geometry (Transvoxel)
-					int32 TransitionFaceIndex = -1;
-					if (bHasTransitions && IsTransitionCell(X, Y, Z, ChunkSize, Stride, TransitionMask, TransitionFaceIndex))
+					for (int32 Face = 0; Face < 6; Face++)
 					{
-						// Get the transition cell stride (should match neighbor's stride for alignment)
-						const int32 TransitionStride = GetTransitionCellStride(Request, TransitionFaceIndex, Stride);
+						if (!(TransitionMask & (1 << Face)))
+							continue;
 
-						// When transition stride > current stride, we need to:
-						// 1. Only process transition cells at positions aligned to the transition stride
-						// 2. Skip positions that fall within a larger transition cell
-						//
-						// For example, at LOD 0 (Stride=1) with LOD 1 neighbor (TransitionStride=2):
-						// - Process transition cell at X=0 (covers X=[0,2))
-						// - Skip X=1 (it's inside the X=0 transition cell)
+						const int32 DepthAxis = Face / 2;
+						const int32 DepthCoord = (DepthAxis == 0) ? X : (DepthAxis == 1) ? Y : Z;
+						const int32 BoundaryPos = (Face % 2 == 0) ? 0 : (ChunkSize - Stride);
+						if (DepthCoord != BoundaryPos)
+							continue;
 
-						bool bShouldProcessTransition = true;
+						// This cell is on a transition boundary. Check if it's covered
+						// by a non-empty transition cell.
+						const int32 NeighborLOD = Request.NeighborLODLevels[Face];
+						const int32 CoarserStride = (NeighborLOD > Request.LODLevel)
+							? (1 << NeighborLOD) : Stride;
 
-						// For transition cells, we need to determine the correct base position.
-						// For negative faces (-X, -Y, -Z), the cell is at 0 in the face-normal direction.
-						// For positive faces (+X, +Y, +Z), the cell must be at ChunkSize - TransitionStride
-						// so that face samples (at offset 1.0) land exactly at the chunk boundary.
-						int32 TransitionX = X;
-						int32 TransitionY = Y;
-						int32 TransitionZ = Z;
-
-						if (TransitionStride > Stride)
+						int32 FP1, FP2;
+						switch (DepthAxis)
 						{
-							// Check alignment and calculate correct base position
-							switch (TransitionFaceIndex)
-							{
-							case 0: // -X: cell at X=0, must be aligned in Y and Z
-								bShouldProcessTransition = (Y % TransitionStride == 0) && (Z % TransitionStride == 0);
-								TransitionY = (Y / TransitionStride) * TransitionStride;
-								TransitionZ = (Z / TransitionStride) * TransitionStride;
-								break;
-							case 1: // +X: cell at ChunkSize-TransitionStride, aligned in Y and Z
-								bShouldProcessTransition = (Y % TransitionStride == 0) && (Z % TransitionStride == 0);
-								TransitionX = ChunkSize - TransitionStride;
-								TransitionY = (Y / TransitionStride) * TransitionStride;
-								TransitionZ = (Z / TransitionStride) * TransitionStride;
-								break;
-							case 2: // -Y: cell at Y=0, must be aligned in X and Z
-								bShouldProcessTransition = (X % TransitionStride == 0) && (Z % TransitionStride == 0);
-								TransitionX = (X / TransitionStride) * TransitionStride;
-								TransitionZ = (Z / TransitionStride) * TransitionStride;
-								break;
-							case 3: // +Y: cell at ChunkSize-TransitionStride, aligned in X and Z
-								bShouldProcessTransition = (X % TransitionStride == 0) && (Z % TransitionStride == 0);
-								TransitionX = (X / TransitionStride) * TransitionStride;
-								TransitionY = ChunkSize - TransitionStride;
-								TransitionZ = (Z / TransitionStride) * TransitionStride;
-								break;
-							case 4: // -Z: cell at Z=0, must be aligned in X and Y
-								bShouldProcessTransition = (X % TransitionStride == 0) && (Y % TransitionStride == 0);
-								TransitionX = (X / TransitionStride) * TransitionStride;
-								TransitionY = (Y / TransitionStride) * TransitionStride;
-								break;
-							case 5: // +Z: cell at ChunkSize-TransitionStride, aligned in X and Y
-								bShouldProcessTransition = (X % TransitionStride == 0) && (Y % TransitionStride == 0);
-								TransitionX = (X / TransitionStride) * TransitionStride;
-								TransitionY = (Y / TransitionStride) * TransitionStride;
-								TransitionZ = ChunkSize - TransitionStride;
-								break;
-							}
+						case 0: FP1 = Y; FP2 = Z; break;
+						case 1: FP1 = X; FP2 = Z; break;
+						default: FP1 = X; FP2 = Y; break;
 						}
 
-						if (bShouldProcessTransition)
+						// Find the aligned transition cell that covers this position
+						const int32 AlignedFP1 = FP1 - (FP1 % CoarserStride);
+						const int32 AlignedFP2 = FP2 - (FP2 % CoarserStride);
+						const uint32 Key = (static_cast<uint32>(Face) << 16) |
+							((AlignedFP1 / CoarserStride) << 8) |
+							(AlignedFP2 / CoarserStride);
+
+						if (NonEmptyTransitionCells.Contains(Key))
 						{
-							// Process as transition cell for seamless LOD connection
-							// The face-level check in VoxelChunkManager ensures edge data is available.
-							// Per-cell check is kept as safety for corner cases, but we still attempt
-							// transition cells even if corner data is missing - the non-crossing edge
-							// handling will minimize artifacts.
-							if (!HasRequiredNeighborData(Request, TransitionX, TransitionY, TransitionZ, TransitionStride, TransitionFaceIndex))
-							{
-								if (bDebugLogTransitionCells)
-								{
-									UE_LOG(LogVoxelMeshing, Verbose, TEXT("Transition cell at (%d,%d,%d) face %d: some corner data may be missing"),
-										TransitionX, TransitionY, TransitionZ, TransitionFaceIndex);
-								}
-							}
-							ProcessTransitionCell(Request, TransitionX, TransitionY, TransitionZ, TransitionStride, TransitionFaceIndex, OutMeshData, TriangleCount);
-						}
-						// else: This cell is covered by an earlier aligned transition cell, skip it
-					}
-					else
-					{
-						// Check if this cell falls within a transition cell's footprint.
-						// If so, skip it - the transition cell will cover this region.
-						if (!bHasTransitions || !IsInTransitionRegion(Request, X, Y, Z, ChunkSize, Stride, TransitionMask))
-						{
-							// Regular Marching Cubes cell
-							ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount);
+							bSkipMC = true;
+							break;
 						}
 					}
 				}
-				else
+
+				if (!bSkipMC)
 				{
-					// Regular Marching Cubes - no transition handling
 					ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount);
 				}
 			}
@@ -310,6 +314,34 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 		}
 	}
 
+	// Anomaly detection summary
+	if (bDebugLogAnomalies && bCollectDebugVisualization && TransitionCellDebugData.Num() > 0)
+	{
+		const FTransitionDebugSummary Summary = GetTransitionDebugSummary();
+		UE_LOG(LogVoxelMeshing, Warning,
+			TEXT("=== ANOMALY SUMMARY Chunk (%d,%d,%d) LOD %d ==="),
+			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, Request.LODLevel);
+		UE_LOG(LogVoxelMeshing, Warning,
+			TEXT("  Transition cells: %d total, %d empty (fell back to MC)"),
+			Summary.TotalTransitionCells, Summary.EmptyCells);
+		UE_LOG(LogVoxelMeshing, Warning,
+			TEXT("  Per face: -X:%d +X:%d -Y:%d +Y:%d -Z:%d +Z:%d"),
+			Summary.PerFaceCounts[0], Summary.PerFaceCounts[1], Summary.PerFaceCounts[2],
+			Summary.PerFaceCounts[3], Summary.PerFaceCounts[4], Summary.PerFaceCounts[5]);
+		if (Summary.CellsWithDisagreement > 0 || Summary.CellsWithClampedVertices > 0
+			|| Summary.CellsWithFoldedTriangles > 0 || Summary.TotalFilteredTriangles > 0)
+		{
+			UE_LOG(LogVoxelMeshing, Warning,
+				TEXT("  Anomalies: %d disagreement, %d clamped, %d folded, %d filtered tris"),
+				Summary.CellsWithDisagreement, Summary.CellsWithClampedVertices,
+				Summary.CellsWithFoldedTriangles, Summary.TotalFilteredTriangles);
+		}
+		else
+		{
+			UE_LOG(LogVoxelMeshing, Warning, TEXT("  No anomalies detected"));
+		}
+	}
+
 	// Calculate stats
 	const double EndTime = FPlatformTime::Seconds();
 	OutStats.VertexCount = OutMeshData.Positions.Num();
@@ -335,80 +367,114 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 	const float VoxelSize = Request.VoxelSize;
 	const float IsoLevel = Config.IsoLevel;
 
-	// Sample density at 8 cube corners
+	// Lengyel's corner ordering — matches the Transvoxel regular MC tables
+	// so that LOD 0 boundary triangulations are compatible with transition cells.
+	// 0=(0,0,0), 1=(1,0,0), 2=(0,1,0), 3=(1,1,0),
+	// 4=(0,0,1), 5=(1,0,1), 6=(0,1,1), 7=(1,1,1)
+	static const FIntVector LengyelCornerOffsets[8] = {
+		FIntVector(0, 0, 0), FIntVector(1, 0, 0),
+		FIntVector(0, 1, 0), FIntVector(1, 1, 0),
+		FIntVector(0, 0, 1), FIntVector(1, 0, 1),
+		FIntVector(0, 1, 1), FIntVector(1, 1, 1),
+	};
+
+	// Sample density and compute world positions at 8 cube corners
 	float CornerDensities[8];
+	FVector3f CornerPositions[8];
 	for (int32 i = 0; i < 8; i++)
 	{
-		const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-		CornerDensities[i] = GetDensityAt(Request, X + Offset.X, Y + Offset.Y, Z + Offset.Z);
+		const FIntVector& Offset = LengyelCornerOffsets[i];
+		const int32 SampleX = X + Offset.X;
+		const int32 SampleY = Y + Offset.Y;
+		const int32 SampleZ = Z + Offset.Z;
+		CornerDensities[i] = GetDensityAt(Request, SampleX, SampleY, SampleZ);
+		CornerPositions[i] = FVector3f(
+			static_cast<float>(SampleX) * VoxelSize,
+			static_cast<float>(SampleY) * VoxelSize,
+			static_cast<float>(SampleZ) * VoxelSize
+		);
 	}
 
-	// Build cube index from corner inside/outside states
-	uint8 CubeIndex = 0;
+	// Build case index using Lengyel's corner ordering
+	// Bits mark SOLID corners (density >= IsoLevel) in our convention.
+	uint16 SolidMask = 0;
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CornerDensities[i] >= IsoLevel)
 		{
-			CubeIndex |= (1 << i);
+			SolidMask |= (1 << i);
 		}
 	}
 
-	// Early out if cube is entirely inside or outside
-	if (MarchingCubesTables::EdgeTable[CubeIndex] == 0)
+	// Lengyel's tables use opposite polarity: bit set = OUTSIDE the surface.
+	// Complement to convert our solid-mask to Lengyel's outside-mask.
+	const uint16 CaseIndex = (~SolidMask) & 0xFF;
+
+	// Look up equivalence class and cell data
+	const uint8 CellClass = TransvoxelTables::RegularCellClass[CaseIndex];
+	const TransvoxelTables::FRegularCellData& CellData = TransvoxelTables::RegularCellData[CellClass];
+	const int32 TriangleCount = CellData.GetTriangleCount();
+
+	// Early out if no geometry
+	if (TriangleCount == 0)
 	{
 		return;
 	}
 
-	// Get material and biome for this cube
-	const uint8 MaterialID = GetDominantMaterial(Request, X, Y, Z, CubeIndex);
-	const uint8 BiomeID = GetDominantBiome(Request, X, Y, Z, CubeIndex);
+	// Convert SolidMask (Lengyel corner order, bits = solid) to classic MC ordering
+	// for material/biome lookups. Classic corners 2↔3 and 6↔7 are swapped.
+	const uint8 ClassicCubeIndex = static_cast<uint8>(
+		(SolidMask & 0x33) |
+		((SolidMask & 0x04) << 1) |
+		((SolidMask & 0x08) >> 1) |
+		((SolidMask & 0x40) << 1) |
+		((SolidMask & 0x80) >> 1)
+	);
 
-	// Calculate corner world positions
-	FVector3f CornerPositions[8];
-	for (int32 i = 0; i < 8; i++)
+	const uint8 MaterialID = GetDominantMaterial(Request, X, Y, Z, ClassicCubeIndex);
+	const uint8 BiomeID = GetDominantBiome(Request, X, Y, Z, ClassicCubeIndex);
+
+	// Decode edge vertices from RegularVertexData
+	const int32 VertexCount = CellData.GetVertexCount();
+	const uint16* VertexDataRow = TransvoxelTables::RegularVertexData[CaseIndex];
+	FVector3f CellVertices[12];
+
+	for (int32 i = 0; i < VertexCount; i++)
 	{
-		const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-		CornerPositions[i] = FVector3f(
-			static_cast<float>(X + Offset.X) * VoxelSize,
-			static_cast<float>(Y + Offset.Y) * VoxelSize,
-			static_cast<float>(Z + Offset.Z) * VoxelSize
-		);
-	}
+		const uint16 VertexCode = VertexDataRow[i];
+		const int32 CornerA = VertexCode & 0x0F;
+		const int32 CornerB = (VertexCode >> 4) & 0x0F;
 
-	// Interpolate vertex positions along intersected edges
-	FVector3f EdgeVertices[12];
-	const uint16 EdgeMask = MarchingCubesTables::EdgeTable[CubeIndex];
-
-	for (int32 Edge = 0; Edge < 12; Edge++)
-	{
-		if (EdgeMask & (1 << Edge))
+		if (CornerA == CornerB)
 		{
-			const int32 V0 = MarchingCubesTables::EdgeVertexPairs[Edge][0];
-			const int32 V1 = MarchingCubesTables::EdgeVertexPairs[Edge][1];
-
-			EdgeVertices[Edge] = InterpolateEdge(
-				CornerDensities[V0], CornerDensities[V1],
-				CornerPositions[V0], CornerPositions[V1],
+			CellVertices[i] = CornerPositions[CornerA];
+		}
+		else
+		{
+			CellVertices[i] = InterpolateEdge(
+				CornerDensities[CornerA], CornerDensities[CornerB],
+				CornerPositions[CornerA], CornerPositions[CornerB],
 				IsoLevel
 			);
 		}
 	}
 
-	// Generate triangles from the lookup table
-	const int8* TriIndices = MarchingCubesTables::TriTable[CubeIndex];
+	// Emit triangles
+	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
+	const FColor VertexColor(MaterialID, BiomeID, 0, 255);
+	const FVector2f MaterialUV(static_cast<float>(MaterialID), 0.0f);
 
-	for (int32 i = 0; TriIndices[i] != -1; i += 3)
+	for (int32 t = 0; t < TriangleCount; t++)
 	{
-		const int32 Edge0 = TriIndices[i];
-		const int32 Edge1 = TriIndices[i + 1];
-		const int32 Edge2 = TriIndices[i + 2];
+		const int32 Idx0 = CellData.VertexIndex[t * 3 + 0];
+		const int32 Idx1 = CellData.VertexIndex[t * 3 + 1];
+		const int32 Idx2 = CellData.VertexIndex[t * 3 + 2];
 
-		const FVector3f& P0 = EdgeVertices[Edge0];
-		const FVector3f& P1 = EdgeVertices[Edge1];
-		const FVector3f& P2 = EdgeVertices[Edge2];
+		const FVector3f& P0 = CellVertices[Idx0];
+		const FVector3f& P1 = CellVertices[Idx1];
+		const FVector3f& P2 = CellVertices[Idx2];
 
-		// Calculate normals using gradient of density field at each vertex
-		// Convert back to voxel coordinates for gradient calculation
+		// Calculate normals using gradient of density field
 		const FVector3f N0 = CalculateGradientNormal(Request,
 			P0.X / VoxelSize, P0.Y / VoxelSize, P0.Z / VoxelSize);
 		const FVector3f N1 = CalculateGradientNormal(Request,
@@ -417,13 +483,7 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 			P2.X / VoxelSize, P2.Y / VoxelSize, P2.Z / VoxelSize);
 
 		// Dominant-axis UV projection based on face normal
-		// This reduces texture stretching on slopes by choosing the best projection plane
-		const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-
-		// Calculate face normal from triangle edges
 		const FVector3f FaceNormal = FVector3f::CrossProduct(P1 - P0, P2 - P0).GetSafeNormal();
-
-		// Determine dominant axis based on face normal
 		const float AbsX = FMath::Abs(FaceNormal.X);
 		const float AbsY = FMath::Abs(FaceNormal.Y);
 		const float AbsZ = FMath::Abs(FaceNormal.Z);
@@ -432,33 +492,25 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 
 		if (AbsZ >= AbsX && AbsZ >= AbsY)
 		{
-			// Z-dominant (horizontal surface): project onto XY plane
 			UV0 = FVector2f(P0.X * UVScale / VoxelSize, P0.Y * UVScale / VoxelSize);
 			UV1 = FVector2f(P1.X * UVScale / VoxelSize, P1.Y * UVScale / VoxelSize);
 			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Y * UVScale / VoxelSize);
 		}
 		else if (AbsX >= AbsY)
 		{
-			// X-dominant (East/West facing): project onto YZ plane
 			UV0 = FVector2f(P0.Y * UVScale / VoxelSize, P0.Z * UVScale / VoxelSize);
 			UV1 = FVector2f(P1.Y * UVScale / VoxelSize, P1.Z * UVScale / VoxelSize);
 			UV2 = FVector2f(P2.Y * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
 		}
 		else
 		{
-			// Y-dominant (North/South facing): project onto XZ plane
 			UV0 = FVector2f(P0.X * UVScale / VoxelSize, P0.Z * UVScale / VoxelSize);
 			UV1 = FVector2f(P1.X * UVScale / VoxelSize, P1.Z * UVScale / VoxelSize);
 			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
 		}
 
-		// Vertex color: MaterialID (legacy), BiomeID, AO (smooth meshing doesn't compute per-vertex AO)
-		const FColor VertexColor(MaterialID, BiomeID, 0, 255);
-
-		// Get base index for this triangle
 		const uint32 BaseVertex = OutMeshData.Positions.Num();
 
-		// Add vertices
 		OutMeshData.Positions.Add(P0);
 		OutMeshData.Positions.Add(P1);
 		OutMeshData.Positions.Add(P2);
@@ -471,8 +523,6 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 		OutMeshData.UVs.Add(UV1);
 		OutMeshData.UVs.Add(UV2);
 
-		// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
-		const FVector2f MaterialUV(static_cast<float>(MaterialID), 0.0f);
 		OutMeshData.UV1s.Add(MaterialUV);
 		OutMeshData.UV1s.Add(MaterialUV);
 		OutMeshData.UV1s.Add(MaterialUV);
@@ -481,7 +531,6 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 		OutMeshData.Colors.Add(VertexColor);
 		OutMeshData.Colors.Add(VertexColor);
 
-		// Add indices (already in correct winding order from table)
 		OutMeshData.Indices.Add(BaseVertex + 0);
 		OutMeshData.Indices.Add(BaseVertex + 1);
 		OutMeshData.Indices.Add(BaseVertex + 2);
@@ -495,94 +544,132 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
 	FChunkMeshData& OutMeshData,
-	uint32& OutTriangleCount)
+	uint32& OutTriangleCount,
+	FColor DebugColorOverride)
 {
 	const float VoxelSize = Request.VoxelSize;
 	const float IsoLevel = Config.IsoLevel;
 
-	// At higher LOD levels, each cube covers Stride voxels
-	// The effective cube size in world units is VoxelSize * Stride
-	const float LODVoxelSize = VoxelSize * static_cast<float>(Stride);
+	// Lengyel's corner ordering — matches the Transvoxel regular MC tables
+	// so that interior cell triangulations are compatible with transition cells.
+	// 0=(0,0,0), 1=(1,0,0), 2=(0,1,0), 3=(1,1,0),
+	// 4=(0,0,1), 5=(1,0,1), 6=(0,1,1), 7=(1,1,1)
+	static const FIntVector LengyelCornerOffsets[8] = {
+		FIntVector(0, 0, 0), FIntVector(1, 0, 0),
+		FIntVector(0, 1, 0), FIntVector(1, 1, 0),
+		FIntVector(0, 0, 1), FIntVector(1, 0, 1),
+		FIntVector(0, 1, 1), FIntVector(1, 1, 1),
+	};
 
-	// Sample density at 8 cube corners (at strided positions)
+	// Sample density and compute world positions at 8 cube corners
 	float CornerDensities[8];
+	FVector3f CornerPositions[8];
 	for (int32 i = 0; i < 8; i++)
 	{
-		const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-		// Sample at strided positions
+		const FIntVector& Offset = LengyelCornerOffsets[i];
 		const int32 SampleX = X + Offset.X * Stride;
 		const int32 SampleY = Y + Offset.Y * Stride;
 		const int32 SampleZ = Z + Offset.Z * Stride;
 		CornerDensities[i] = GetDensityAt(Request, SampleX, SampleY, SampleZ);
+		CornerPositions[i] = FVector3f(
+			static_cast<float>(SampleX) * VoxelSize,
+			static_cast<float>(SampleY) * VoxelSize,
+			static_cast<float>(SampleZ) * VoxelSize
+		);
 	}
 
-	// Build cube index from corner inside/outside states
-	uint8 CubeIndex = 0;
+	// Build case index using Lengyel's corner ordering.
+	// Bits mark SOLID corners (density >= IsoLevel) in our convention.
+	uint16 SolidMask = 0;
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CornerDensities[i] >= IsoLevel)
 		{
-			CubeIndex |= (1 << i);
+			SolidMask |= (1 << i);
 		}
 	}
 
-	// Early out if cube is entirely inside or outside
-	if (MarchingCubesTables::EdgeTable[CubeIndex] == 0)
+	// Lengyel's tables use opposite polarity: bit set = OUTSIDE the surface.
+	// Complement to convert our solid-mask to Lengyel's outside-mask.
+	const uint16 CaseIndex = (~SolidMask) & 0xFF;
+
+	// Look up equivalence class and cell data
+	const uint8 CellClass = TransvoxelTables::RegularCellClass[CaseIndex];
+	const TransvoxelTables::FRegularCellData& CellData = TransvoxelTables::RegularCellData[CellClass];
+	const int32 TriangleCount = CellData.GetTriangleCount();
+
+	// Early out if no geometry (fully inside or fully outside)
+	if (TriangleCount == 0)
 	{
 		return;
 	}
 
-	// Get material and biome for this cube (sample at base position)
-	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, Stride, CubeIndex);
-	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, Stride, CubeIndex);
+	// Convert SolidMask (Lengyel corner order, bits = solid) to classic MC ordering
+	// for material/biome lookups. Classic corners 2↔3 and 6↔7 are swapped.
+	const uint8 ClassicCubeIndex = static_cast<uint8>(
+		(SolidMask & 0x33) |           // bits 0,1,4,5 unchanged
+		((SolidMask & 0x04) << 1) |    // Lengyel bit 2 → classic bit 3
+		((SolidMask & 0x08) >> 1) |    // Lengyel bit 3 → classic bit 2
+		((SolidMask & 0x40) << 1) |    // Lengyel bit 6 → classic bit 7
+		((SolidMask & 0x80) >> 1)      // Lengyel bit 7 → classic bit 6
+	);
 
-	// Calculate corner world positions (in actual world units)
-	FVector3f CornerPositions[8];
-	for (int32 i = 0; i < 8; i++)
+	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, Stride, ClassicCubeIndex);
+	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, Stride, ClassicCubeIndex);
+
+	// Decode edge vertices from RegularVertexData.
+	// Each uint16: low nibble = corner A, next nibble = corner B, high byte = reuse info.
+	const int32 VertexCount = CellData.GetVertexCount();
+	const uint16* VertexDataRow = TransvoxelTables::RegularVertexData[CaseIndex];
+	FVector3f CellVertices[12];
+
+	for (int32 i = 0; i < VertexCount; i++)
 	{
-		const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-		// Position in world space (stride affects the spacing)
-		CornerPositions[i] = FVector3f(
-			static_cast<float>(X + Offset.X * Stride) * VoxelSize,
-			static_cast<float>(Y + Offset.Y * Stride) * VoxelSize,
-			static_cast<float>(Z + Offset.Z * Stride) * VoxelSize
-		);
-	}
+		const uint16 VertexCode = VertexDataRow[i];
+		const int32 CornerA = VertexCode & 0x0F;
+		const int32 CornerB = (VertexCode >> 4) & 0x0F;
 
-	// Interpolate vertex positions along intersected edges
-	FVector3f EdgeVertices[12];
-	const uint16 EdgeMask = MarchingCubesTables::EdgeTable[CubeIndex];
-
-	for (int32 Edge = 0; Edge < 12; Edge++)
-	{
-		if (EdgeMask & (1 << Edge))
+		if (CornerA == CornerB)
 		{
-			const int32 V0 = MarchingCubesTables::EdgeVertexPairs[Edge][0];
-			const int32 V1 = MarchingCubesTables::EdgeVertexPairs[Edge][1];
-
-			EdgeVertices[Edge] = InterpolateEdge(
-				CornerDensities[V0], CornerDensities[V1],
-				CornerPositions[V0], CornerPositions[V1],
+			CellVertices[i] = CornerPositions[CornerA];
+		}
+		else
+		{
+			CellVertices[i] = InterpolateEdge(
+				CornerDensities[CornerA], CornerDensities[CornerB],
+				CornerPositions[CornerA], CornerPositions[CornerB],
 				IsoLevel
 			);
 		}
 	}
 
-	// Generate triangles from the lookup table
-	const int8* TriIndices = MarchingCubesTables::TriTable[CubeIndex];
-
-	for (int32 i = 0; TriIndices[i] != -1; i += 3)
+	// Emit triangles using CellData triangle indices
+	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
+	FColor VertexColor(MaterialID, BiomeID, 0, 255);
+	if (bDebugColorTransitionCells)
 	{
-		const int32 Edge0 = TriIndices[i];
-		const int32 Edge1 = TriIndices[i + 1];
-		const int32 Edge2 = TriIndices[i + 2];
+		if (DebugColorOverride.A != 0)
+		{
+			VertexColor = DebugColorOverride; // Caller-specified (blue for fallback MC)
+		}
+		else
+		{
+			VertexColor = FColor(0, 200, 0, 255); // Green for regular MC
+		}
+	}
+	const FVector2f MaterialUV(static_cast<float>(MaterialID), 0.0f);
 
-		const FVector3f& P0 = EdgeVertices[Edge0];
-		const FVector3f& P1 = EdgeVertices[Edge1];
-		const FVector3f& P2 = EdgeVertices[Edge2];
+	for (int32 t = 0; t < TriangleCount; t++)
+	{
+		const int32 Idx0 = CellData.VertexIndex[t * 3 + 0];
+		const int32 Idx1 = CellData.VertexIndex[t * 3 + 1];
+		const int32 Idx2 = CellData.VertexIndex[t * 3 + 2];
 
-		// Calculate normals using gradient of density field at each vertex
-		// For LOD, we sample gradients at the actual world positions
+		const FVector3f& P0 = CellVertices[Idx0];
+		const FVector3f& P1 = CellVertices[Idx1];
+		const FVector3f& P2 = CellVertices[Idx2];
+
+		// Calculate normals using gradient of density field
 		const FVector3f N0 = CalculateGradientNormalLOD(Request,
 			P0.X / VoxelSize, P0.Y / VoxelSize, P0.Z / VoxelSize, Stride);
 		const FVector3f N1 = CalculateGradientNormalLOD(Request,
@@ -591,12 +678,7 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 			P2.X / VoxelSize, P2.Y / VoxelSize, P2.Z / VoxelSize, Stride);
 
 		// Dominant-axis UV projection based on face normal
-		const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-
-		// Calculate face normal from triangle edges
 		const FVector3f FaceNormal = FVector3f::CrossProduct(P1 - P0, P2 - P0).GetSafeNormal();
-
-		// Determine dominant axis based on face normal
 		const float AbsX = FMath::Abs(FaceNormal.X);
 		const float AbsY = FMath::Abs(FaceNormal.Y);
 		const float AbsZ = FMath::Abs(FaceNormal.Z);
@@ -605,33 +687,25 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 
 		if (AbsZ >= AbsX && AbsZ >= AbsY)
 		{
-			// Z-dominant (horizontal surface): project onto XY plane
 			UV0 = FVector2f(P0.X * UVScale / VoxelSize, P0.Y * UVScale / VoxelSize);
 			UV1 = FVector2f(P1.X * UVScale / VoxelSize, P1.Y * UVScale / VoxelSize);
 			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Y * UVScale / VoxelSize);
 		}
 		else if (AbsX >= AbsY)
 		{
-			// X-dominant (East/West facing): project onto YZ plane
 			UV0 = FVector2f(P0.Y * UVScale / VoxelSize, P0.Z * UVScale / VoxelSize);
 			UV1 = FVector2f(P1.Y * UVScale / VoxelSize, P1.Z * UVScale / VoxelSize);
 			UV2 = FVector2f(P2.Y * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
 		}
 		else
 		{
-			// Y-dominant (North/South facing): project onto XZ plane
 			UV0 = FVector2f(P0.X * UVScale / VoxelSize, P0.Z * UVScale / VoxelSize);
 			UV1 = FVector2f(P1.X * UVScale / VoxelSize, P1.Z * UVScale / VoxelSize);
 			UV2 = FVector2f(P2.X * UVScale / VoxelSize, P2.Z * UVScale / VoxelSize);
 		}
 
-		// Vertex color: MaterialID (legacy), BiomeID, AO
-		const FColor VertexColor(MaterialID, BiomeID, 0, 255);
-
-		// Get base index for this triangle
 		const uint32 BaseVertex = OutMeshData.Positions.Num();
 
-		// Add vertices
 		OutMeshData.Positions.Add(P0);
 		OutMeshData.Positions.Add(P1);
 		OutMeshData.Positions.Add(P2);
@@ -644,8 +718,6 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 		OutMeshData.UVs.Add(UV1);
 		OutMeshData.UVs.Add(UV2);
 
-		// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
-		const FVector2f MaterialUV(static_cast<float>(MaterialID), 0.0f);
 		OutMeshData.UV1s.Add(MaterialUV);
 		OutMeshData.UV1s.Add(MaterialUV);
 		OutMeshData.UV1s.Add(MaterialUV);
@@ -654,7 +726,6 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 		OutMeshData.Colors.Add(VertexColor);
 		OutMeshData.Colors.Add(VertexColor);
 
-		// Add indices
 		OutMeshData.Indices.Add(BaseVertex + 0);
 		OutMeshData.Indices.Add(BaseVertex + 1);
 		OutMeshData.Indices.Add(BaseVertex + 2);
@@ -1526,7 +1597,7 @@ void FVoxelCPUSmoothMesher::GenerateSkirts(
 uint8 FVoxelCPUSmoothMesher::GetTransitionFaces(const FVoxelMeshingRequest& Request) const
 {
 	// The TransitionFaces field is set by the chunk manager based on neighbor LOD levels.
-	// A face needs transition cells if the neighbor chunk is at a lower LOD (higher LOD level number).
+	// A face needs transition cells if the neighbor chunk is COARSER (higher LOD level number).
 	return Request.TransitionFaces;
 }
 
@@ -1537,7 +1608,7 @@ bool FVoxelCPUSmoothMesher::IsTransitionCell(
 	int32& OutFaceIndex) const
 {
 	// A cell is a transition cell if it's on the edge of the chunk
-	// and that edge borders a lower-LOD neighbor.
+	// and that edge borders a coarser (higher LOD level) neighbor.
 	// We only need transition cells on the last row of cells on each face.
 
 	// Check each face
@@ -1614,17 +1685,21 @@ bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
 	// Check each face for transition regions.
 	// A cell is in a transition region if:
 	// 1. That face has a transition (bit set in TransitionMask)
-	// 2. The cell is within TransitionStride of the boundary
+	// 2. The cell is within CurrentStride (thin cell depth) of the boundary
 	// 3. The cell is NOT the boundary row itself (that's handled by IsTransitionCell)
+	//
+	// THIN TRANSITION CELLS: With thin cells (depth = CurrentStride), the transition region
+	// has zero depth for positive faces (always false) and impossible range for negative faces
+	// when CurrentStride=1 (X < 1 && X != 0 is empty). This effectively disables suppression.
 
-	// For negative faces, transition region is [0, TransitionStride)
-	// For positive faces, transition region is [ChunkSize - TransitionStride, ChunkSize - CurrentStride)
+	// For negative faces, transition region is [0, CurrentStride)
+	// For positive faces, transition region is [ChunkSize - CurrentStride, ChunkSize - CurrentStride) (always false)
 
 	// -X face
 	if (TransitionMask & TransitionXNeg)
 	{
 		const int32 TransitionStride = GetTransitionCellStride(Request, 0, CurrentStride);
-		if (TransitionStride > CurrentStride && X >= 0 && X < TransitionStride && X != 0)
+		if (TransitionStride > CurrentStride && X >= 0 && X < CurrentStride && X != 0)
 		{
 			return true; // In -X transition region but not the boundary row
 		}
@@ -1634,7 +1709,7 @@ bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
 	if (TransitionMask & TransitionXPos)
 	{
 		const int32 TransitionStride = GetTransitionCellStride(Request, 1, CurrentStride);
-		if (TransitionStride > CurrentStride && X >= ChunkSize - TransitionStride && X < ChunkSize - CurrentStride)
+		if (TransitionStride > CurrentStride && X >= ChunkSize - CurrentStride && X < ChunkSize - CurrentStride)
 		{
 			return true; // In +X transition region but not the boundary row
 		}
@@ -1644,7 +1719,7 @@ bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
 	if (TransitionMask & TransitionYNeg)
 	{
 		const int32 TransitionStride = GetTransitionCellStride(Request, 2, CurrentStride);
-		if (TransitionStride > CurrentStride && Y >= 0 && Y < TransitionStride && Y != 0)
+		if (TransitionStride > CurrentStride && Y >= 0 && Y < CurrentStride && Y != 0)
 		{
 			return true;
 		}
@@ -1654,7 +1729,7 @@ bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
 	if (TransitionMask & TransitionYPos)
 	{
 		const int32 TransitionStride = GetTransitionCellStride(Request, 3, CurrentStride);
-		if (TransitionStride > CurrentStride && Y >= ChunkSize - TransitionStride && Y < ChunkSize - CurrentStride)
+		if (TransitionStride > CurrentStride && Y >= ChunkSize - CurrentStride && Y < ChunkSize - CurrentStride)
 		{
 			return true;
 		}
@@ -1664,7 +1739,7 @@ bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
 	if (TransitionMask & TransitionZNeg)
 	{
 		const int32 TransitionStride = GetTransitionCellStride(Request, 4, CurrentStride);
-		if (TransitionStride > CurrentStride && Z >= 0 && Z < TransitionStride && Z != 0)
+		if (TransitionStride > CurrentStride && Z >= 0 && Z < CurrentStride && Z != 0)
 		{
 			return true;
 		}
@@ -1674,7 +1749,7 @@ bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
 	if (TransitionMask & TransitionZPos)
 	{
 		const int32 TransitionStride = GetTransitionCellStride(Request, 5, CurrentStride);
-		if (TransitionStride > CurrentStride && Z >= ChunkSize - TransitionStride && Z < ChunkSize - CurrentStride)
+		if (TransitionStride > CurrentStride && Z >= ChunkSize - CurrentStride && Z < ChunkSize - CurrentStride)
 		{
 			return true;
 		}
@@ -1796,37 +1871,64 @@ void FVoxelCPUSmoothMesher::GetTransitionCellDensities(
 	int32 FaceIndex,
 	float OutDensities[13]) const
 {
-	// Sample 13 points for the transition cell:
-	// - Points 0-8: 3x3 grid on the transition face (high-res detail)
-	// - Points 9-12: Interior corners of the cell (low-res corners)
+	// Sample 13 points for the transition cell (standard Lengyel orientation):
+	// Transition cells are on the FINER chunk, facing a coarser neighbor.
+	// - Points 0-8: 3x3 grid on the BOUNDARY face spanning the coarser neighbor's cell.
+	//   Corners 0,2,6,8 align with the coarser MC grid corners (CoarserStride apart),
+	//   ensuring the outer edge matches the coarser mesh's boundary vertices exactly.
+	//   Midpoints 1,3,4,5,7 at half-CoarserStride provide finer chunk's resolution.
+	// - Points 9-12: Interior corners at CurrentStride depth into the finer chunk.
+	//   These create the depth transition from face to interior MC grid.
 	//
-	// Points 0, 2, 6, 8 are face corners (what the low-LOD neighbor sees on the face)
-	// Points 1, 3, 4, 5, 7 are mid-edge and center points (high-res detail)
-	// Points 9-12 are at the opposite side of the cell from the face
-	//
-	// IMPORTANT: At low LOD levels (especially LOD 0 with Stride=1), the mid-point
-	// samples (1, 3, 4, 5, 7) fall at fractional voxel positions (e.g., 0.5).
-	// We must use trilinear interpolation to get correct density values,
-	// otherwise the transition geometry will be misaligned.
+	// NON-UNIFORM CELL: Face-parallel axes use CoarserStride (Stride parameter),
+	// face-normal (depth) axis uses CurrentStride (= 1 << LODLevel).
+	// This gives the cell rectangular proportions matching the LOD boundary.
 
-	const int32 ChunkSize = Request.ChunkSize;
+	const int32 CurrentStride = 1 << Request.LODLevel;
 
-	// Sample all 13 points using float positions
+	// Compute per-axis scale based on face orientation
+	// Depth axis uses CurrentStride, face-parallel axes use TransitionStride (Stride)
+	int32 ScaleX, ScaleY, ScaleZ;
+	switch (FaceIndex / 2)
+	{
+	case 0: // X faces: X is depth
+		ScaleX = CurrentStride;
+		ScaleY = Stride;
+		ScaleZ = Stride;
+		break;
+	case 1: // Y faces: Y is depth
+		ScaleX = Stride;
+		ScaleY = CurrentStride;
+		ScaleZ = Stride;
+		break;
+	case 2: // Z faces: Z is depth
+		ScaleX = Stride;
+		ScaleY = Stride;
+		ScaleZ = CurrentStride;
+		break;
+	default:
+		ScaleX = ScaleY = ScaleZ = Stride;
+		break;
+	}
+
+	// Sample all 13 points using the table's offsets directly
 	for (int32 i = 0; i < 13; i++)
 	{
 		const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][i];
 
 		// Convert offset (0-1) to voxel coordinates as FLOATS to preserve fractional positions
-		const float SampleX = static_cast<float>(X) + Offset.X * static_cast<float>(Stride);
-		const float SampleY = static_cast<float>(Y) + Offset.Y * static_cast<float>(Stride);
-		const float SampleZ = static_cast<float>(Z) + Offset.Z * static_cast<float>(Stride);
+		// Use per-axis scale for non-uniform transition cell shape
+		const float SampleX = static_cast<float>(X) + Offset.X * static_cast<float>(ScaleX);
+		const float SampleY = static_cast<float>(Y) + Offset.Y * static_cast<float>(ScaleY);
+		const float SampleZ = static_cast<float>(Z) + Offset.Z * static_cast<float>(ScaleZ);
 
 		// Use trilinear interpolation for fractional positions
 		OutDensities[i] = GetDensityAtTrilinear(Request, SampleX, SampleY, SampleZ);
 	}
+
 }
 
-void FVoxelCPUSmoothMesher::ProcessTransitionCell(
+bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
@@ -1845,16 +1947,38 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 	const float IsoLevel = Config.IsoLevel;
 	const float VoxelSize = Request.VoxelSize;
 
-	// Build the case index from the 9 FACE samples only
-	// The case index determines the triangulation pattern
-	uint16 CaseIndex = 0;
-	for (int32 i = 0; i < 9; i++)
+	// Build the 9-bit case index from face samples using Lengyel's bit ordering.
+	//
+	// CRITICAL: The TransitionVertexData table uses a DIFFERENT sample-to-bit mapping
+	// than the natural row-by-row order. Lengyel's bits trace the 3x3 grid perimeter
+	// clockwise, then the center last:
+	//
+	//   Natural sample layout:     Lengyel bit layout:
+	//     6---7---8                  6---5---4
+	//     |   |   |                  |   |   |
+	//     3---4---5                  7---8---3
+	//     |   |   |                  |   |   |
+	//     0---1---2                  0---1---2
+	//
+	//   Bit 0→Sample 0, Bit 1→Sample 1, Bit 2→Sample 2, Bit 3→Sample 5,
+	//   Bit 4→Sample 8, Bit 5→Sample 7, Bit 6→Sample 6, Bit 7→Sample 3, Bit 8→Sample 4
+	//
+	// The endpoint indices in TransitionVertexData (low byte nibbles) still use the
+	// NATURAL sample order (0-8). Only the CASE BITS use the perimeter ordering.
+	// Using direct bit N → sample N (as we did before) selects the WRONG case,
+	// producing edges between samples on the same side of the isosurface.
+	//
+	// Reference: Godot Voxel's transvoxel.cpp, Lengyel's Transvoxel reference.
+	static constexpr int32 BitToSample[9] = { 0, 1, 2, 5, 8, 7, 6, 3, 4 };
+	uint16 SolidMask = 0;
+	for (int32 Bit = 0; Bit < 9; Bit++)
 	{
-		if (Densities[i] >= IsoLevel)
+		if (Densities[BitToSample[Bit]] >= IsoLevel)
 		{
-			CaseIndex |= (1 << i);
+			SolidMask |= (1 << Bit);
 		}
 	}
+	const uint16 CaseIndex = (~SolidMask) & 0x1FF;
 
 	// Look up the equivalence class
 	// The high bit (0x80) indicates inverted winding order
@@ -1883,20 +2007,22 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 	}
 
 	// Early out for empty cases (class 0)
+	// No surface crosses the transition face in this cell. Adjacent non-boundary
+	// MC cells handle any interior crossings. No fallback MC needed.
 	if (CellClass == 0)
 	{
 		if (bDebugLogTransitionCells)
 		{
-			UE_LOG(LogVoxelMeshing, Log, TEXT("  Result: Empty (class 0)"));
+			UE_LOG(LogVoxelMeshing, Log, TEXT("  Result: Empty (class 0) - falling back to regular MC"));
 		}
-		return;
+		return false;
 	}
 
 	// Bounds check
 	if (CellClass >= 56)
 	{
 		UE_LOG(LogVoxelMeshing, Warning, TEXT("Invalid transition cell class %d for case %d"), CellClass, CaseIndex);
-		return;
+		return false;
 	}
 
 	const uint8 CellData = TransvoxelTables::TransitionCellData[CellClass];
@@ -1905,19 +2031,48 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 
 	if (VertexCount == 0 || TriangleCount == 0)
 	{
-		return;
+		return false;
 	}
 
 	// Bounds check vertex count
 	if (VertexCount > 12)
 	{
 		UE_LOG(LogVoxelMeshing, Warning, TEXT("Invalid vertex count %d for class %d"), VertexCount, CellClass);
-		return;
+		return false;
 	}
 
 	if (bDebugLogTransitionCells)
 	{
 		UE_LOG(LogVoxelMeshing, Log, TEXT("  Generating: %d vertices, %d triangles"), VertexCount, TriangleCount);
+	}
+
+	// ---- Anomaly Detection: Interior-Face Corner Disagreement ----
+	// Interior corners 9-12 correspond to face corners 0,2,6,8.
+	// If they disagree on inside/outside, the surface crosses between face and interior.
+	// This is expected but logged for diagnosis. Multiple disagreements can indicate
+	// the transition cell is producing a surface very different from what regular MC would.
+	uint8 DisagreementMask = 0;
+	if (bDebugLogAnomalies || bCollectDebugVisualization)
+	{
+		static constexpr int32 InteriorToFace[4] = { 0, 2, 6, 8 };
+		for (int32 i = 0; i < 4; i++)
+		{
+			const bool bFaceInside = (Densities[InteriorToFace[i]] >= IsoLevel);
+			const bool bInteriorInside = (Densities[9 + i] >= IsoLevel);
+			if (bFaceInside != bInteriorInside)
+			{
+				DisagreementMask |= (1 << i);
+			}
+		}
+		if (DisagreementMask != 0 && bDebugLogAnomalies)
+		{
+			UE_LOG(LogVoxelMeshing, Warning,
+				TEXT("ANOMALY [Disagreement] Cell (%d,%d,%d) Face %s: interior corners disagree mask=0x%X "
+					 "(densities: face[%.3f,%.3f,%.3f,%.3f] interior[%.3f,%.3f,%.3f,%.3f])"),
+				X, Y, Z, FaceNames[FaceIndex], DisagreementMask,
+				Densities[0], Densities[2], Densities[6], Densities[8],
+				Densities[9], Densities[10], Densities[11], Densities[12]);
+		}
 	}
 
 	// Get base position in world coordinates
@@ -1927,7 +2082,27 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		static_cast<float>(Z) * VoxelSize
 	);
 
-	const float CellSize = static_cast<float>(Stride) * VoxelSize;
+	// Non-uniform cell scale: face-parallel axes use CoarserStride (Stride param),
+	// depth axis uses CurrentStride. Face spans coarser cell, depth is one finer stride.
+	const int32 CurrentStride = 1 << Request.LODLevel;
+	const float DepthScale = static_cast<float>(CurrentStride) * VoxelSize;
+	const float FaceScale = static_cast<float>(Stride) * VoxelSize;
+	FVector3f CellScale;
+	switch (FaceIndex / 2)
+	{
+	case 0: // X faces: X is depth
+		CellScale = FVector3f(DepthScale, FaceScale, FaceScale);
+		break;
+	case 1: // Y faces: Y is depth
+		CellScale = FVector3f(FaceScale, DepthScale, FaceScale);
+		break;
+	case 2: // Z faces: Z is depth
+		CellScale = FVector3f(FaceScale, FaceScale, DepthScale);
+		break;
+	default:
+		CellScale = FVector3f(FaceScale);
+		break;
+	}
 
 	// Collect debug visualization data if enabled
 	FTransitionCellDebugData* DebugData = nullptr;
@@ -1950,7 +2125,7 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		for (int32 i = 0; i < 13; i++)
 		{
 			const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][i];
-			DebugData->SamplePositions.Add(BasePos + Offset * CellSize);
+			DebugData->SamplePositions.Add(BasePos + Offset * CellScale);
 		}
 	}
 
@@ -1969,6 +2144,7 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 	//   C (0xC): Interior corner 3 (sample index 12)
 	TArray<FVector3f> CellVertices;
 	CellVertices.Reserve(VertexCount);
+	bool bHasClampedVertices = false;
 
 	// IMPORTANT: Index by CASE, not by class! The vertex data is pre-transformed per case.
 	const uint16* VertexData = TransvoxelTables::TransitionVertexData[CaseIndex];
@@ -2011,57 +2187,75 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		{
 			// Vertex is exactly at this sample point
 			const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][SampleA];
-			VertexPos = BasePos + Offset * CellSize;
+			VertexPos = BasePos + Offset * CellScale;
 		}
 		else
 		{
-			// Interpolate between two sample points
+			// Edge between two different samples.
 			const float DensityA = Densities[SampleA];
 			const float DensityB = Densities[SampleB];
 
-			// CRITICAL: Validate that the isosurface actually crosses this edge
-			// The Transvoxel case index only considers face samples (0-8), but vertex data
-			// can reference edges involving interior samples (9-12). If the interior samples
-			// don't match the expected configuration, we may get edges that don't cross.
-			const bool bAInside = (DensityA >= IsoLevel);
-			const bool bBInside = (DensityB >= IsoLevel);
-			if (bAInside == bBInside)
+			const FVector3f& OffsetA = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][SampleA];
+			const FVector3f& OffsetB = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][SampleB];
+			const FVector3f PosA = BasePos + OffsetA * CellScale;
+			const FVector3f PosB = BasePos + OffsetB * CellScale;
+
+			// Detect face-interior edges where both endpoints are on the same side
+			// of the isosurface (no actual surface crossing). InterpolateEdge would
+			// clamp t to 0 or 1, potentially placing the vertex at the INTERIOR
+			// endpoint — one stride deep into the terrain — creating "fin" triangles.
+			// Snap these vertices to the FACE endpoint to collapse the fin to the
+			// face plane. The resulting triangle degenerates to near-zero area.
+			const bool bIsFaceInteriorEdge = (SampleA <= 8) != (SampleB <= 8);
+			const bool bBothSolid = (DensityA >= IsoLevel) && (DensityB >= IsoLevel);
+			const bool bBothAir = (DensityA < IsoLevel) && (DensityB < IsoLevel);
+
+			if (bIsFaceInteriorEdge && (bBothSolid || bBothAir))
 			{
-				// Edge doesn't cross the isosurface - this vertex is invalid
-				// Place it at the midpoint to minimize visual artifacts, but mark for potential skip
-				const FVector3f& OffsetA = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][SampleA];
-				const FVector3f& OffsetB = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][SampleB];
-				const FVector3f PosA = BasePos + OffsetA * CellSize;
-				const FVector3f PosB = BasePos + OffsetB * CellSize;
+				// Snap to face endpoint position to eliminate depth fin
+				const int32 FaceSample = (SampleA <= 8) ? SampleA : SampleB;
+				const FVector3f& FaceOffset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][FaceSample];
+				VertexPos = BasePos + FaceOffset * CellScale;
 
-				// For edges that don't cross, snap to the endpoint that's closest to the surface
-				// This prevents wild interpolation values and reduces visual artifacts
-				if (bAInside)
+				bHasClampedVertices = true;
+				if (bDebugLogAnomalies)
 				{
-					// Both inside - snap to the one closer to the surface (lower density means closer to surface from inside)
-					VertexPos = (DensityA <= DensityB) ? PosA : PosB;
-				}
-				else
-				{
-					// Both outside - snap to the one closer to the surface (higher density means closer to surface from outside)
-					VertexPos = (DensityA >= DensityB) ? PosA : PosB;
-				}
-
-				// Only log occasionally to avoid spam
-				static int32 NonCrossingEdgeCount = 0;
-				if (++NonCrossingEdgeCount <= 10)
-				{
-					UE_LOG(LogVoxelMeshing, Verbose, TEXT("Transition cell: edge %d-%d doesn't cross isosurface (d0=%.3f, d1=%.3f)"),
-						SampleA, SampleB, DensityA, DensityB);
+					UE_LOG(LogVoxelMeshing, Warning,
+						TEXT("ANOMALY [FaceSnap] Cell (%d,%d,%d) Face %s: vertex %d face-interior edge %d-%d "
+							 "snapped to face sample %d (d=%.3f,%.3f) — both %s"),
+						X, Y, Z, FaceNames[FaceIndex], i, SampleA, SampleB, FaceSample,
+						DensityA, DensityB,
+						bBothSolid ? TEXT("solid") : TEXT("air"));
 				}
 			}
 			else
 			{
-				// Normal case - edge crosses the isosurface, interpolate correctly
-				const FVector3f& OffsetA = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][SampleA];
-				const FVector3f& OffsetB = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][SampleB];
-				const FVector3f PosA = BasePos + OffsetA * CellSize;
-				const FVector3f PosB = BasePos + OffsetB * CellSize;
+				// Standard interpolation — proper crossing or face-face/interior-interior edge
+				if (bDebugLogAnomalies || bCollectDebugVisualization)
+				{
+					const float Denom = DensityB - DensityA;
+					if (FMath::Abs(Denom) > KINDA_SMALL_NUMBER)
+					{
+						const float RawT = (IsoLevel - DensityA) / Denom;
+						if (RawT < 0.0f || RawT > 1.0f)
+						{
+							bHasClampedVertices = true;
+							if (bDebugLogAnomalies)
+							{
+								const TCHAR* EdgeType =
+									(SampleA >= 9 && SampleB >= 9) ? TEXT("interior-interior") :
+									(SampleA >= 9 || SampleB >= 9) ? TEXT("face-interior") :
+									TEXT("face-face");
+								UE_LOG(LogVoxelMeshing, Warning,
+									TEXT("ANOMALY [Clamped] Cell (%d,%d,%d) Face %s: vertex %d %s edge %d-%d "
+										 "t=%.3f (d=%.3f,%.3f) — both endpoints %s isosurface"),
+									X, Y, Z, FaceNames[FaceIndex], i, EdgeType, SampleA, SampleB,
+									RawT, DensityA, DensityB,
+									RawT < 0.0f ? TEXT("above") : TEXT("below"));
+							}
+						}
+					}
+				}
 
 				VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
 			}
@@ -2071,7 +2265,7 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		if (!FMath::IsFinite(VertexPos.X) || !FMath::IsFinite(VertexPos.Y) || !FMath::IsFinite(VertexPos.Z))
 		{
 			UE_LOG(LogVoxelMeshing, Error, TEXT("Transition cell: NaN/Inf vertex %d - skipping cell"), i);
-			return;
+			return false;
 		}
 
 		CellVertices.Add(VertexPos);
@@ -2090,10 +2284,21 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		DebugData->GeneratedVertices = CellVertices;
 	}
 
-	// Get material and biome info
-	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, Stride, static_cast<uint8>(CaseIndex & 0xFF));
-	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, Stride, static_cast<uint8>(CaseIndex & 0xFF));
-	const FColor VertexColor = FColor(MaterialID, BiomeID, 0, 255);
+	// Get material and biome info.
+	// Use natural-order solid mask (not Lengyel bit ordering) for MC-based material lookup.
+	uint8 NaturalSolidMask = 0;
+	for (int32 i = 0; i < 8; i++)
+	{
+		if (Densities[i] >= IsoLevel)
+		{
+			NaturalSolidMask |= (1 << i);
+		}
+	}
+	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, Stride, NaturalSolidMask);
+	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, Stride, NaturalSolidMask);
+	const FColor VertexColor = bDebugColorTransitionCells
+		? FColor(255, 128, 0, 255)  // Orange for transition cells
+		: FColor(MaterialID, BiomeID, 0, 255);
 
 	// Add vertices to mesh
 	const uint32 BaseIndex = OutMeshData.Positions.Num();
@@ -2131,9 +2336,30 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		OutMeshData.Colors.Add(VertexColor);
 	}
 
-	// Add triangles with proper winding order
-	// Lengyel's tables use opposite winding from Unreal's convention, so we reverse by default
-	// The inverted flag (0x80) then indicates we should use the original (non-reversed) order
+	// Add triangles with proper winding order.
+	// Each face maps 2D table coordinates (u, v) to 3D world axes differently.
+	// When the cross product u×v points OPPOSITE to the outward face normal,
+	// the table's winding order needs reversal for correct front-facing geometry.
+	// Analysis (verified via cross product of u,v axes from TransitionCellSampleOffsets):
+	//   Face 0 (-X): u=+Y, v=+Z → u×v=+X, outward=-X → reversed → true
+	//   Face 1 (+X): u=-Y, v=+Z → u×v=-X, outward=+X → reversed → true
+	//   Face 2 (-Y): u=+X, v=+Z → u×v=-Y, outward=-Y → same    → false
+	//   Face 3 (+Y): u=-X, v=+Z → u×v=+Y, outward=+Y → same    → false
+	//   Face 4 (-Z): u=+X, v=+Y → u×v=+Z, outward=-Z → reversed → true
+	//   Face 5 (+Z): u=-X, v=+Y → u×v=-Z, outward=+Z → reversed → true
+	// Combined with bInverted (which flips winding for reflected equivalence classes):
+	//   Use original winding when bInverted != FaceNeedsWindingReverse[FaceIndex]
+	//   (right-handed faces need reversal flag=true, left-handed=false)
+	static constexpr bool FaceNeedsWindingReverse[6] = { true, true, false, false, true, true };
+	const bool bUseOriginalWinding = (bInverted != FaceNeedsWindingReverse[FaceIndex]);
+
+	// Maximum allowed edge length squared for triangle validation.
+	// Triangles with edges longer than this are degenerate (fins from underground vertices).
+	const float MaxCellDim = FMath::Max3(CellScale.X, CellScale.Y, CellScale.Z);
+	const float MaxEdgeLengthSq = MaxCellDim * MaxCellDim * 4.0f; // 2× cell diagonal
+	int32 NumFilteredTriangles = 0;
+	bool bHasFoldedTriangles = false;
+
 	const uint8* Triangles = TransvoxelTables::TransitionCellTriangles[CellClass];
 	for (int32 t = 0; t < TriangleCount; t++)
 	{
@@ -2155,16 +2381,65 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 			continue;
 		}
 
-		if (bInverted)
+		// Skip degenerate triangles with overly long edges (fin artifacts from
+		// interior vertices at incorrect positions on steep terrain)
 		{
-			// Inverted cases: use original table winding
+			const FVector3f& V0 = CellVertices[Idx0];
+			const FVector3f& V1 = CellVertices[Idx1];
+			const FVector3f& V2 = CellVertices[Idx2];
+			const float EdgeSq01 = (V1 - V0).SizeSquared();
+			const float EdgeSq12 = (V2 - V1).SizeSquared();
+			const float EdgeSq20 = (V0 - V2).SizeSquared();
+			if (EdgeSq01 > MaxEdgeLengthSq || EdgeSq12 > MaxEdgeLengthSq || EdgeSq20 > MaxEdgeLengthSq)
+			{
+				NumFilteredTriangles++;
+				if (bDebugLogAnomalies)
+				{
+					UE_LOG(LogVoxelMeshing, Warning,
+						TEXT("ANOMALY [Filtered] Cell (%d,%d,%d) Face %s: tri %d filtered (edges: %.1f, %.1f, %.1f, max: %.1f)"),
+						X, Y, Z, FaceNames[FaceIndex], t,
+						FMath::Sqrt(EdgeSq01), FMath::Sqrt(EdgeSq12), FMath::Sqrt(EdgeSq20),
+						FMath::Sqrt(MaxEdgeLengthSq));
+				}
+				continue; // Skip this degenerate triangle
+			}
+
+			// Folded triangle detection: RENDERED face normal vs gradient at centroid
+			// Account for winding reversal to avoid false positives
+			if (bDebugLogAnomalies || bCollectDebugVisualization)
+			{
+				const FVector3f TableNormal = FVector3f::CrossProduct(V1 - V0, V2 - V0);
+				const FVector3f FaceNormal = bUseOriginalWinding ? TableNormal : -TableNormal;
+				if (FaceNormal.SizeSquared() > KINDA_SMALL_NUMBER)
+				{
+					const FVector3f Centroid = (V0 + V1 + V2) / 3.0f;
+					const FVector3f GradNormal = CalculateGradientNormalLOD(Request,
+						Centroid.X / VoxelSize, Centroid.Y / VoxelSize, Centroid.Z / VoxelSize, CurrentStride);
+					const float Dot = FVector3f::DotProduct(FaceNormal.GetSafeNormal(), GradNormal);
+					if (Dot < -0.1f) // Face normal opposes gradient by more than ~95 degrees
+					{
+						bHasFoldedTriangles = true;
+						if (bDebugLogAnomalies)
+						{
+							UE_LOG(LogVoxelMeshing, Warning,
+								TEXT("ANOMALY [Folded] Cell (%d,%d,%d) Face %s: tri %d has face normal opposing gradient "
+									 "(dot=%.3f, verts: [%.1f,%.1f,%.1f] [%.1f,%.1f,%.1f] [%.1f,%.1f,%.1f])"),
+								X, Y, Z, FaceNames[FaceIndex], t, Dot,
+								V0.X, V0.Y, V0.Z, V1.X, V1.Y, V1.Z, V2.X, V2.Y, V2.Z);
+						}
+					}
+				}
+			}
+		}
+
+		if (bUseOriginalWinding)
+		{
 			OutMeshData.Indices.Add(BaseIndex + Idx0);
 			OutMeshData.Indices.Add(BaseIndex + Idx1);
 			OutMeshData.Indices.Add(BaseIndex + Idx2);
 		}
 		else
 		{
-			// Normal cases: reverse winding for Unreal's coordinate system
 			OutMeshData.Indices.Add(BaseIndex + Idx2);
 			OutMeshData.Indices.Add(BaseIndex + Idx1);
 			OutMeshData.Indices.Add(BaseIndex + Idx0);
@@ -2172,4 +2447,76 @@ void FVoxelCPUSmoothMesher::ProcessTransitionCell(
 	}
 
 	OutTriangleCount += TriangleCount;
+
+	// Store anomaly flags in debug data
+	if (DebugData)
+	{
+		DebugData->bHasFaceInteriorDisagreement = (DisagreementMask != 0);
+		DebugData->bHasClampedVertices = bHasClampedVertices;
+		DebugData->bHasFoldedTriangles = bHasFoldedTriangles;
+		DebugData->NumFilteredTriangles = NumFilteredTriangles;
+		DebugData->DisagreementMask = DisagreementMask;
+	}
+
+	// ---- MC Comparison Mesh: generate what regular MC would produce ----
+	if (bDebugComparisonMesh && DebugData)
+	{
+		FChunkMeshData TempMeshData;
+		uint32 TempTriCount = 0;
+		const int32 DepthAxis = FaceIndex / 2;
+		for (int32 d1 = 0; d1 < Stride; d1 += CurrentStride)
+		{
+			for (int32 d0 = 0; d0 < Stride; d0 += CurrentStride)
+			{
+				int32 CX, CY, CZ;
+				switch (DepthAxis)
+				{
+				case 0: CX = X; CY = Y + d0; CZ = Z + d1; break;
+				case 1: CX = X + d0; CY = Y; CZ = Z + d1; break;
+				default: CX = X + d0; CY = Y + d1; CZ = Z; break;
+				}
+				if (CX < Request.ChunkSize && CY < Request.ChunkSize && CZ < Request.ChunkSize)
+				{
+					ProcessCubeLOD(Request, CX, CY, CZ, CurrentStride, TempMeshData, TempTriCount);
+				}
+			}
+		}
+		DebugData->MCComparisonVertices = MoveTemp(TempMeshData.Positions);
+		DebugData->MCComparisonIndices = MoveTemp(TempMeshData.Indices);
+	}
+
+	return true;
+}
+
+FVoxelCPUSmoothMesher::FTransitionDebugSummary FVoxelCPUSmoothMesher::GetTransitionDebugSummary() const
+{
+	FTransitionDebugSummary Summary;
+	Summary.TotalTransitionCells = TransitionCellDebugData.Num();
+
+	for (const FTransitionCellDebugData& Cell : TransitionCellDebugData)
+	{
+		if (Cell.FaceIndex >= 0 && Cell.FaceIndex < 6)
+		{
+			Summary.PerFaceCounts[Cell.FaceIndex]++;
+		}
+		if (Cell.CellClass == 0)
+		{
+			Summary.EmptyCells++;
+		}
+		if (Cell.bHasFaceInteriorDisagreement)
+		{
+			Summary.CellsWithDisagreement++;
+		}
+		if (Cell.bHasClampedVertices)
+		{
+			Summary.CellsWithClampedVertices++;
+		}
+		if (Cell.bHasFoldedTriangles)
+		{
+			Summary.CellsWithFoldedTriangles++;
+		}
+		Summary.TotalFilteredTriangles += Cell.NumFilteredTriangles;
+	}
+
+	return Summary;
 }
