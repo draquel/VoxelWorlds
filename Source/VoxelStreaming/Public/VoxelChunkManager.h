@@ -259,6 +259,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	FIntVector WorldToChunkCoord(const FVector& WorldPosition) const;
 
+	/**
+	 * Get voxel data at a world position.
+	 * Returns Air if the position is in an unloaded or ungenerated chunk.
+	 *
+	 * @param WorldPosition Position in world space
+	 * @return Voxel data at that position
+	 */
+	FVoxelData GetVoxelAtWorldPosition(const FVector& WorldPosition) const;
+
 	// ==================== Configuration Access ====================
 
 	/**
