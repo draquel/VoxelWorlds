@@ -56,7 +56,10 @@ void FVoxelPMCRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguration
 
 	CachedWorld = World;
 	CachedConfig = WorldConfig;
-	bGenerateCollision = WorldConfig->bGenerateCollision;
+	// PMC no longer generates its own collision — the dedicated VoxelCollisionManager
+	// handles collision when bGenerateCollision is enabled in the configuration.
+	// Dual collision (PMC + CollisionManager) caused character movement issues.
+	bGenerateCollision = false;
 
 	// Spawn container actor
 	FActorSpawnParameters SpawnParams;

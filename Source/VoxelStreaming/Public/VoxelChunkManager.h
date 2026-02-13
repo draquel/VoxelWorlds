@@ -299,6 +299,14 @@ public:
 	UVoxelCollisionManager* GetCollisionManager() const { return CollisionManager; }
 
 	/**
+	 * Get the world mode used for terrain generation.
+	 * Allows external code to query deterministic terrain height without loaded chunks.
+	 *
+	 * @return World mode interface, or nullptr if not initialized
+	 */
+	const IVoxelWorldMode* GetWorldMode() const { return WorldMode.Get(); }
+
+	/**
 	 * Get the scatter manager.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")

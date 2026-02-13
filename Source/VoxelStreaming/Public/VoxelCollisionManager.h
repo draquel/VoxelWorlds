@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
 #include "Containers/Queue.h"
+#include "Components/PrimitiveComponent.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelCollisionManager.generated.h"
 
@@ -13,15 +14,40 @@ class UVoxelChunkManager;
 class UBodySetup;
 
 /**
+ * Lightweight collision-only component backed by a custom BodySetup.
+ *
+ * Unlike hacking a UBoxComponent's FBodyInstance, this component properly
+ * overrides GetBodySetup() so the physics engine always uses our trimesh
+ * BodySetup for sweeps, traces, and overlap queries.
+ */
+UCLASS(MinimalAPI)
+class UVoxelCollisionComponent : public UPrimitiveComponent
+{
+	GENERATED_BODY()
+
+public:
+	UVoxelCollisionComponent(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+
+	/** Assign the BodySetup that contains our trimesh collision. */
+	void SetCollisionBodySetup(UBodySetup* InBodySetup, const FBox& InLocalBounds);
+
+	// --- UPrimitiveComponent overrides ---
+	virtual UBodySetup* GetBodySetup() override { return CollisionBodySetup; }
+	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+	virtual bool ShouldCreatePhysicsState() const override { return CollisionBodySetup != nullptr; }
+
+private:
+	UPROPERTY()
+	TObjectPtr<UBodySetup> CollisionBodySetup;
+
+	/** Cached local-space bounding box (set when BodySetup is assigned). */
+	FBox LocalBounds;
+};
+
+/**
  * Delegate fired when a chunk's collision becomes ready.
  */
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnChunkCollisionReady, const FIntVector& /*ChunkCoord*/);
-
-/**
- * Per-chunk collision data storage.
- */
-// Forward declaration
-class UShapeComponent;
 
 USTRUCT()
 struct FChunkCollisionData
@@ -258,6 +284,17 @@ public:
 	 */
 	void SetMaxAsyncCollisionTasks(int32 MaxTasks);
 
+	// ==================== External Requests ====================
+
+	/**
+	 * Request collision generation for a chunk.
+	 * Safe to call externally (e.g., from character spawn logic).
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param Priority Processing priority (higher = sooner)
+	 */
+	void RequestCollision(const FIntVector& ChunkCoord, float Priority);
+
 	// ==================== Events ====================
 
 	/** Called when a chunk's collision becomes ready */
@@ -318,14 +355,6 @@ protected:
 	 * @param Result The async result containing the trimesh
 	 */
 	void ApplyCollisionResult(FAsyncCollisionResult& Result);
-
-	/**
-	 * Request collision generation for a chunk.
-	 *
-	 * @param ChunkCoord Chunk coordinate
-	 * @param Priority Processing priority
-	 */
-	void RequestCollision(const FIntVector& ChunkCoord, float Priority);
 
 	/**
 	 * Remove collision data for a chunk.

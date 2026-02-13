@@ -230,8 +230,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	bSubsystemsDeferred = (DeferThreshold > 0 && GenerationQueue.Num() > DeferThreshold);
 
 	// === Collision manager ===
+	// Always update collision (drains async results, creates physics bodies).
+	// Skipping Update() when deferred blocks the async pipeline and prevents
+	// collision from ever being generated during initial load.
+	// New task launches are throttled internally by MaxAsyncCollisionTasks.
 	SectionStart = FPlatformTime::Seconds();
-	if (!bSubsystemsDeferred && CollisionManager && Configuration && Configuration->bGenerateCollision)
+	if (CollisionManager && Configuration && Configuration->bGenerateCollision)
 	{
 		CollisionManager->Update(Context.ViewerPosition, DeltaTime);
 	}

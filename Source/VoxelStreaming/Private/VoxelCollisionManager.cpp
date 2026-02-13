@@ -9,10 +9,10 @@
 #include "VoxelMeshingTypes.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsSettings.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
+#include "Engine/CollisionProfile.h"
 #include "DrawDebugHelpers.h"
 #include "Algo/BinarySearch.h"
-#include "Components/StaticMeshComponent.h"
-#include "Components/BoxComponent.h"
 #include "Serialization/ArchiveCountMem.h"
 #include "Async/Async.h"
 
@@ -20,6 +20,45 @@
 #include "Chaos/TriangleMeshImplicitObject.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelCollision, Log, All);
+
+// ==================== UVoxelCollisionComponent ====================
+
+UVoxelCollisionComponent::UVoxelCollisionComponent(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+	, LocalBounds(ForceInit)
+{
+	// Invisible, collision-only
+	SetVisibility(false);
+	SetHiddenInGame(true);
+	bCastStaticShadow = false;
+	bCastDynamicShadow = false;
+	SetCanEverAffectNavigation(false);
+
+	// Use the standard "BlockAll" collision profile (WorldStatic, blocks all channels).
+	// This ensures proper physics filter data for character movement sweeps (ECC_Pawn),
+	// line traces (ECC_WorldStatic, ECC_Visibility), and camera collision (ECC_Camera).
+	// Using individual SetCollisionResponse calls with no named profile can leave the
+	// BodyInstance's filter data in an ambiguous state that sweeps don't detect.
+	SetCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
+}
+
+void UVoxelCollisionComponent::SetCollisionBodySetup(UBodySetup* InBodySetup, const FBox& InLocalBounds)
+{
+	CollisionBodySetup = InBodySetup;
+	LocalBounds = InLocalBounds;
+
+	// Mark bounds dirty so broadphase picks up the new geometry
+	UpdateBounds();
+}
+
+FBoxSphereBounds UVoxelCollisionComponent::CalcBounds(const FTransform& LocalToWorld) const
+{
+	if (LocalBounds.IsValid)
+	{
+		return FBoxSphereBounds(LocalBounds).TransformBy(LocalToWorld);
+	}
+	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector::ZeroVector, 0.f);
+}
 
 UVoxelCollisionManager::UVoxelCollisionManager()
 {
@@ -508,8 +547,9 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	FVoxelMeshingRequest MeshRequest;
 	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest))
 	{
-		// Chunk may not be loaded yet or has no geometry — cancel
-		Data.bIsCooking = false;
+		// Chunk may not be loaded yet or has no geometry — remove the CollisionData
+		// entry so UpdateCollisionDecisions() can re-request on a future sweep.
+		CollisionData.Remove(Request.ChunkCoord);
 		AsyncCollisionInProgress.Remove(Request.ChunkCoord);
 
 		UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) collision mesh request preparation failed (not loaded)"),
@@ -651,22 +691,21 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 
 	UBodySetup* BS = Data->BodySetup;
 
-	// Clear existing collision geometry
-	BS->AggGeom.ConvexElems.Empty();
-	BS->AggGeom.BoxElems.Empty();
-	BS->AggGeom.SphereElems.Empty();
-	BS->AggGeom.SphylElems.Empty();
-	BS->AggGeom.TaperedCapsuleElems.Empty();
+	// Reset physics mesh state — clears old AggGeom, TriMeshGeometries,
+	// bCreatedPhysicsMeshes so the BodySetup accepts our pre-built trimesh
+	BS->InvalidatePhysicsData();
 
 	// Set up for complex collision using trimesh
 	BS->bMeshCollideAll = true;
 	BS->CollisionTraceFlag = CTF_UseComplexAsSimple;
-	BS->bHasCookedCollisionData = false;
 
 	// Set the trimesh from the async result
 	BS->TriMeshGeometries.Empty();
 	BS->TriMeshGeometries.Add(Result.TriMesh);
+
+	// Mark as cooked so InitBody uses our TriMeshGeometries directly
 	BS->bCreatedPhysicsMeshes = true;
+	BS->bHasCookedCollisionData = true;
 
 	// Mark cooking complete
 	Data->bIsCooking = false;
@@ -764,6 +803,30 @@ void UVoxelCollisionManager::RemoveCollision(const FIntVector& ChunkCoord)
 	}
 }
 
+/** Shared physical material for all voxel collision geometry. Created once, reused by all chunks. */
+static UPhysicalMaterial* GetSharedVoxelPhysicalMaterial()
+{
+	static TWeakObjectPtr<UPhysicalMaterial> WeakPhysMat;
+
+	UPhysicalMaterial* PhysMat = WeakPhysMat.Get();
+	if (!PhysMat)
+	{
+		PhysMat = NewObject<UPhysicalMaterial>(GetTransientPackage(), TEXT("VoxelTerrainPhysMat"));
+		PhysMat->AddToRoot(); // Prevent GC — lives for the entire session
+		PhysMat->Friction = 0.8f;
+		PhysMat->Restitution = 0.0f;
+		PhysMat->FrictionCombineMode = EFrictionCombineMode::Max;
+		PhysMat->RestitutionCombineMode = EFrictionCombineMode::Min;
+
+		WeakPhysMat = PhysMat;
+
+		UE_LOG(LogVoxelCollision, Log, TEXT("Created shared VoxelTerrainPhysMat (Friction=%.1f, Restitution=%.1f, CombineMode=Max)"),
+			PhysMat->Friction, PhysMat->Restitution);
+	}
+
+	return PhysMat;
+}
+
 UBodySetup* UVoxelCollisionManager::CreateBodySetup(const FIntVector& ChunkCoord)
 {
 	// Create body setup with unique name
@@ -781,6 +844,9 @@ UBodySetup* UVoxelCollisionManager::CreateBodySetup(const FIntVector& ChunkCoord
 	NewBodySetup->bGenerateMirroredCollision = false;
 	NewBodySetup->bDoubleSidedGeometry = true;
 	NewBodySetup->CollisionTraceFlag = CTF_UseComplexAsSimple;
+
+	// Assign shared physical material for consistent friction/restitution
+	NewBodySetup->PhysMaterial = GetSharedVoxelPhysicalMaterial();
 
 	return NewBodySetup;
 }
@@ -800,9 +866,8 @@ UPrimitiveComponent* UVoxelCollisionManager::CreateCollisionComponent(const FInt
 	FString ComponentName = FString::Printf(TEXT("VoxelCollision_%d_%d_%d"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 
-	// Create a box component as the collision holder
-	// We override its body setup after creation
-	UBoxComponent* CollisionComp = NewObject<UBoxComponent>(
+	// Create our custom collision component that properly exposes the BodySetup
+	UVoxelCollisionComponent* CollisionComp = NewObject<UVoxelCollisionComponent>(
 		CollisionContainerActor,
 		FName(*ComponentName)
 	);
@@ -812,38 +877,49 @@ UPrimitiveComponent* UVoxelCollisionManager::CreateCollisionComponent(const FInt
 		return nullptr;
 	}
 
-	// Set up the component - make it large enough to cover the chunk
+	// Assign the trimesh BodySetup BEFORE registration so the physics body
+	// is created from our trimesh geometry, not a default shape.
+	// Local bounds: mesh vertices span (0,0,0) to (ChunkWorldSize) in chunk-local space.
+	const FBox ChunkLocalBounds(FVector::ZeroVector, FVector(ChunkWorldSize));
+	CollisionComp->SetCollisionBodySetup(BodySetup, ChunkLocalBounds);
+
 	CollisionComp->SetupAttachment(CollisionContainerActor->GetRootComponent());
 	CollisionComp->SetWorldLocation(ChunkWorldPos);
-	CollisionComp->SetBoxExtent(FVector(ChunkWorldSize * 0.5f)); // Box extent is half-size
-	CollisionComp->SetVisibility(false);
-	CollisionComp->SetHiddenInGame(true);
 
-	// Configure collision
-	CollisionComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	CollisionComp->SetCollisionObjectType(ECollisionChannel::ECC_WorldStatic);
-	CollisionComp->SetCollisionResponseToAllChannels(ECollisionResponse::ECR_Block);
-
-	// Register the component first (needed before we can modify physics)
+	// Register creates the physics body via GetBodySetup() → our trimesh
 	CollisionComp->RegisterComponent();
 
-	// Get the body instance and override its body setup with our trimesh
-	FBodyInstance* BodyInst = CollisionComp->GetBodyInstance();
-	if (BodyInst)
+	// Verify physics body was created — if not, force recreation
+	if (!CollisionComp->BodyInstance.IsValidBodyInstance())
 	{
-		// Terminate existing physics state
-		BodyInst->TermBody();
-
-		// Set our custom body setup
-		BodyInst->BodySetup = BodySetup;
-
-		// Reinitialize physics with our body setup
-		BodyInst->InitBody(BodySetup, CollisionComp->GetComponentTransform(), CollisionComp, CachedWorld->GetPhysicsScene());
+		UE_LOG(LogVoxelCollision, Warning,
+			TEXT("Chunk (%d,%d,%d) physics body not created during RegisterComponent — forcing RecreatePhysicsState"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+		CollisionComp->RecreatePhysicsState();
 	}
 
-	UE_LOG(LogVoxelCollision, Log, TEXT("Created collision component for chunk (%d,%d,%d) at (%.0f, %.0f, %.0f)"),
+	UE_LOG(LogVoxelCollision, Log,
+		TEXT("Created collision component for chunk (%d,%d,%d) at (%.0f, %.0f, %.0f) — PhysicsValid=%s, TriMeshCount=%d"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
-		ChunkWorldPos.X, ChunkWorldPos.Y, ChunkWorldPos.Z);
+		ChunkWorldPos.X, ChunkWorldPos.Y, ChunkWorldPos.Z,
+		CollisionComp->BodyInstance.IsValidBodyInstance() ? TEXT("Yes") : TEXT("NO"),
+		BodySetup->TriMeshGeometries.Num());
+
+	// Verification trace: confirm the collision component responds to line traces.
+	// Traces downward through the center of the chunk — should hit terrain if any surface exists.
+	if (CachedWorld)
+	{
+		const FVector TraceStart = ChunkWorldPos + FVector(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f, ChunkWorldSize + 100.f);
+		const FVector TraceEnd = ChunkWorldPos + FVector(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f, -100.f);
+		FHitResult VerifyHit;
+		const bool bVerifyHit = CachedWorld->LineTraceSingleByChannel(VerifyHit, TraceStart, TraceEnd, ECC_WorldStatic);
+		UE_LOG(LogVoxelCollision, Log,
+			TEXT("  Verification trace for chunk (%d,%d,%d): %s%s"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
+			bVerifyHit ? TEXT("HIT") : TEXT("MISS"),
+			bVerifyHit ? *FString::Printf(TEXT(" at Z=%.0f comp=%s"), VerifyHit.ImpactPoint.Z,
+				VerifyHit.GetComponent() ? *VerifyHit.GetComponent()->GetName() : TEXT("null")) : TEXT(""));
+	}
 
 	return CollisionComp;
 }
