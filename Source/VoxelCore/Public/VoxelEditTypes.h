@@ -214,12 +214,10 @@ struct VOXELCORE_API FVoxelEdit
 			// Add increases density (makes more solid)
 			Result.Density = static_cast<uint8>(FMath::Clamp(
 				static_cast<int32>(ProceduralData.Density) + DensityDelta, 0, 255));
-			// Set material if we're adding solid matter
-			if (Result.Density >= VOXEL_SURFACE_THRESHOLD && ProceduralData.Density < VOXEL_SURFACE_THRESHOLD)
-			{
-				Result.MaterialID = BrushMaterialID;
-			}
-			else if (Result.Density >= VOXEL_SURFACE_THRESHOLD && Result.MaterialID == 0)
+			// Always apply brush material when adding solid matter.
+			// This ensures placing a block in a previously dug area uses
+			// the player's selected material, not the original terrain material.
+			if (Result.Density >= VOXEL_SURFACE_THRESHOLD && BrushMaterialID != 0)
 			{
 				Result.MaterialID = BrushMaterialID;
 			}
