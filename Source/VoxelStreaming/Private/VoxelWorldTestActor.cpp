@@ -432,7 +432,7 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 
 	// Rendering settings
 	Config->bUseGPURenderer = true;  // Use Custom Vertex Factory renderer
-	Config->bGenerateCollision = false;  // Disable for faster testing
+	Config->bGenerateCollision = true;
 	Config->bEnableLODMorphing = true;
 	Config->bEnableFrustumCulling = true;
 

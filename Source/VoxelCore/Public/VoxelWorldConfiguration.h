@@ -319,7 +319,7 @@ public:
 
 	/** LOD level to use for collision (higher = simpler) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "0", ClampMax = "4", EditCondition = "bGenerateCollision"))
-	int32 CollisionLODLevel = 1;
+	int32 CollisionLODLevel = 0;
 
 	// ==================== Scatter Settings ====================
 
