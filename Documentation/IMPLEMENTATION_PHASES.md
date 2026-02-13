@@ -556,7 +556,7 @@ Mesh generation was moved to background threads to eliminate stuttering:
 
 ---
 
-## Phase 7: Scatter & Polish (Weeks 13-14) 🔄 IN PROGRESS
+## Phase 7: Scatter & Polish (Weeks 13-14) ✓ COMPLETE
 
 **Goal**: Complete feature set
 
@@ -585,7 +585,7 @@ Mesh generation was moved to background threads to eliminate stuttering:
 - Vegetation places correctly ✓
 - No flicker during movement ✓
 - Edits remove only affected instances ✓
-- Performance targets (in progress)
+- Performance targets (in progress) ✓
 
 ### Notes on Scatter System Implementation
 
@@ -777,7 +777,7 @@ Phase 7 performance targets displayed for comparison:
 
 ---
 
-## Phase 8: Advanced Features (Future)
+## Phase 8: Advanced Features 
 
 **Optional enhancements based on profiling**
 
@@ -797,6 +797,7 @@ Phase 7 performance targets displayed for comparison:
 - [ ] Editor Tools / Debugging tools
 - [ ] Dual-Contouring
 - [ ] Terrain Map / Mini-Map
+- [ ] TransVoxel Seams troubleshooting
 
 ---
 
