@@ -205,6 +205,35 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 					default: CellX = FP1; CellY = FP2; CellZ = BoundaryPos; break;
 					}
 
+					// Skip corner cells where this position is also on another active
+					// transition face's boundary. Both faces would generate overlapping
+					// geometry at the corner. MC handles corners instead.
+					bool bIsCorner = false;
+					for (int32 OtherFace = 0; OtherFace < 6; OtherFace++)
+					{
+						if (OtherFace == Face) continue;
+						if (!(TransitionMask & (1 << OtherFace))) continue;
+
+						const int32 OtherDepthAxis = OtherFace / 2;
+						const int32 OtherBoundaryPos = (OtherFace % 2 == 0) ? 0 : (ChunkSize - Stride);
+						int32 OtherDepthCoord;
+						switch (OtherDepthAxis)
+						{
+						case 0: OtherDepthCoord = CellX; break;
+						case 1: OtherDepthCoord = CellY; break;
+						default: OtherDepthCoord = CellZ; break;
+						}
+
+						if (OtherDepthCoord == OtherBoundaryPos)
+						{
+							bIsCorner = true;
+							break;
+						}
+					}
+
+					if (bIsCorner)
+						continue;
+
 					const bool bGenerated = ProcessTransitionCell(
 						Request, CellX, CellY, CellZ, CoarserStride, Face, OutMeshData, TriangleCount);
 
@@ -2257,7 +2286,59 @@ bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 					}
 				}
 
-				VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
+				// OUTER BOUNDARY PROJECTION: For face-face edges on the perimeter of
+				// the 3x3 grid that involve midpoint samples (1,3,5,7), project the
+				// vertex onto the coarser MC's corner-to-corner edge. The coarser MC
+				// interpolates directly between corners (0,2,6,8) at stride-2 spacing.
+				// Without this projection, midpoint edges produce vertices at different
+				// positions than the coarser MC, causing visible outer edge misalignment.
+				//
+				// Face sample layout:    Outer boundary edges:
+				//   6---7---8             6--7--8  (top:    corners 6,8)
+				//   |   |   |             |     |
+				//   3---4---5             3     5  (left/right: corners 0,6 / 2,8)
+				//   |   |   |             |     |
+				//   0---1---2             0--1--2  (bottom: corners 0,2)
+				const bool bBothOnFace = (SampleA <= 8 && SampleB <= 8);
+				if (bBothOnFace)
+				{
+					// Check if this is an outer boundary edge involving a midpoint.
+					// Map each outer edge to its surrounding corner pair.
+					int32 CornerSampleA = -1, CornerSampleB = -1;
+					auto CheckEdge = [&](int32 SA, int32 SB, int32 CA, int32 CB) {
+						if ((SampleA == SA && SampleB == SB) || (SampleA == SB && SampleB == SA))
+						{ CornerSampleA = CA; CornerSampleB = CB; }
+					};
+					// Bottom edge: 0-1-2, corners 0,2
+					CheckEdge(0, 1, 0, 2); CheckEdge(1, 2, 0, 2);
+					// Left edge: 0-3-6, corners 0,6
+					CheckEdge(0, 3, 0, 6); CheckEdge(3, 6, 0, 6);
+					// Right edge: 2-5-8, corners 2,8
+					CheckEdge(2, 5, 2, 8); CheckEdge(5, 8, 2, 8);
+					// Top edge: 6-7-8, corners 6,8
+					CheckEdge(6, 7, 6, 8); CheckEdge(7, 8, 6, 8);
+
+					if (CornerSampleA >= 0)
+					{
+						// Project onto the coarser MC's corner-to-corner edge
+						const FVector3f& CornerOffA = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][CornerSampleA];
+						const FVector3f& CornerOffB = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][CornerSampleB];
+						const FVector3f CornerPosA = BasePos + CornerOffA * CellScale;
+						const FVector3f CornerPosB = BasePos + CornerOffB * CellScale;
+						VertexPos = InterpolateEdge(Densities[CornerSampleA], Densities[CornerSampleB],
+							CornerPosA, CornerPosB, IsoLevel);
+					}
+					else
+					{
+						// Interior face edge or corner-to-corner edge - normal interpolation
+						VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
+					}
+				}
+				else
+				{
+					// Face-interior or interior-interior edge - normal interpolation
+					VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
+				}
 			}
 		}
 
