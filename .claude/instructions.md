@@ -247,15 +247,11 @@ See: `Documentation/TESTING_STRATEGY.md`
 
 ## Current Development Phase
 
-**Phase 1: Foundation (Weeks 1-2)**
-- [x] Architecture design complete
-- [x] Documentation structure created
-- [ ] Core data structures implementation
-- [ ] Distance Band LOD strategy
-- [ ] Hybrid rendering interface
-- [ ] Chunk manager skeleton
+**Phases 1–7: COMPLETE** — Foundation, Generation, Advanced Meshing, Smooth Meshing, World Modes, Editing & Collision, Scatter & Polish.
 
-**Next**: Implement core data structures in VoxelCore module
+**Phase 8: Advanced Features** (in progress)
+- [x] `GetWorldMode()` public getter on `UVoxelChunkManager` — exposes terrain height queries for external systems
+- [ ] Quadtree/Octree LOD, cave generation, improved water, editor tools, etc.
 
 See: `Documentation/IMPLEMENTATION_PHASES.md` for full roadmap
 
@@ -347,5 +343,5 @@ Simplest to implement, predictable performance, sufficient for most use cases. C
 
 ---
 
-Last Updated: 2026-01-30  
-Architecture Version: 2.0
+Last Updated: 2026-02-13
+Architecture Version: 2.1

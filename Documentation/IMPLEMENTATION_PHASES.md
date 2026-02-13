@@ -777,9 +777,12 @@ Phase 7 performance targets displayed for comparison:
 
 ---
 
-## Phase 8: Advanced Features 
+## Phase 8: Advanced Features
 
 **Optional enhancements based on profiling**
+
+### Completed
+- [x] `GetWorldMode()` public getter on `UVoxelChunkManager` — exposes `const IVoxelWorldMode*` for deterministic terrain height queries without loaded chunks (used by VoxelCharacterPlugin for spawn point finding)
 
 ### Potential Features
 - [ ] Quadtree LOD (if distance bands insufficient)
@@ -803,8 +806,8 @@ Phase 7 performance targets displayed for comparison:
 
 ## Current Status
 
-**Active Phase**: Phase 7 (Scatter & Polish)
-**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE - Phase 4 COMPLETE - Phase 5 COMPLETE - Phase 6 COMPLETE
+**Active Phase**: Phase 8 (Advanced Features)
+**Progress**: Phase 1 COMPLETE - Phase 2 COMPLETE - Phase 3 COMPLETE - Phase 4 COMPLETE - Phase 5 COMPLETE - Phase 6 COMPLETE - Phase 7 COMPLETE
 
 **Phase 1 Completed**:
 1. ~~VoxelCore module~~ - Core data structures (FVoxelData, FChunkDescriptor, etc.)
@@ -1017,7 +1020,7 @@ Phase 7 performance targets displayed for comparison:
    - Visual crosshair and brush sphere
    - On-screen control hints
 
-**Phase 7 In Progress**:
+**Phase 7 Completed**:
 1. ~~Scatter system foundation~~ - COMPLETE (7A)
 2. ~~HISM mesh rendering~~ - COMPLETE (7B)
 3. ~~Performance optimization~~ - COMPLETE (7C)

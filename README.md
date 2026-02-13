@@ -132,8 +132,7 @@ VoxelWorlds/
   - ✅ **Async mesh generation** (visual meshing on background threads)
   - ✅ Performance optimizations (neighbor cache, collision throttling)
 
-### In Progress
-- 🔄 **Phase 7: Scatter & Polish**
+- ✅ **Phase 7: Scatter & Polish** - COMPLETE
   - ✅ **Phase 7A**: Scatter placement foundation (VoxelScatter module, surface extraction, placement rules)
   - ✅ **Phase 7B**: HISM mesh rendering (per-type HISM components, instance management)
   - ✅ **Phase 7C**: Performance optimization (deferred rebuilds, batch instance addition, throttled generation)
@@ -148,6 +147,9 @@ VoxelWorlds/
     - Tree placement rules (material, biome, slope, elevation, water level)
     - Tree mode system (VoxelData / HISM / Both with distance threshold)
     - Runtime billboard material (TwoSided, Masked, with fallback generation)
+
+### In Progress
+- 🔄 **Phase 8: Advanced Features** — See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md)
 
 See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
