@@ -44,6 +44,16 @@ float SeaLevel;
 float HeightScale;
 float BaseHeight;
 
+// Continentalness parameters
+int ContinentalnessEnabled;
+int ContinentalnessSeed;
+float ContinentalnessFrequency;
+float ContinentalnessHeightMin;
+float ContinentalnessHeightMid;
+float ContinentalnessHeightMax;
+float ContinentalnessHeightScaleMin;
+float ContinentalnessHeightScaleMax;
+
 // Cave parameters — packed as vectors (4 layers in .xyzw components)
 int CaveEnabled;
 int CaveLayerCount;
@@ -100,6 +110,44 @@ void MainCS(
     // Branch based on world mode
     if (WorldMode == WORLD_MODE_INFINITE_PLANE)
     {
+        // Apply continentalness height modulation
+        float EffectiveBaseHeight = BaseHeight;
+        float EffectiveHeightScale = HeightScale;
+
+        if (ContinentalnessEnabled != 0)
+        {
+            // Sample continentalness noise at X,Y (2D, Z=0)
+            float3 ContSamplePos = float3(WorldPos.x, WorldPos.y, 0.0);
+            float ContinentalnessNoise = FBM3D(
+                ContSamplePos,
+                NOISE_TYPE_SIMPLEX,
+                ContinentalnessSeed,
+                2,
+                ContinentalnessFrequency,
+                1.0,
+                2.0,
+                0.5
+            );
+
+            // Piecewise linear height offset
+            float HeightOffset;
+            if (ContinentalnessNoise < 0.0)
+            {
+                HeightOffset = lerp(ContinentalnessHeightMin, ContinentalnessHeightMid, ContinentalnessNoise + 1.0);
+            }
+            else
+            {
+                HeightOffset = lerp(ContinentalnessHeightMid, ContinentalnessHeightMax, ContinentalnessNoise);
+            }
+
+            EffectiveBaseHeight += HeightOffset;
+
+            // HeightScale multiplier interpolation
+            float ScaleMult = lerp(ContinentalnessHeightScaleMin, ContinentalnessHeightScaleMax,
+                                   ContinentalnessNoise * 0.5 + 0.5);
+            EffectiveHeightScale *= ScaleMult;
+        }
+
         // Infinite Plane: 2D heightmap-based terrain
         float TerrainHeight;
         Density = ApplyInfinitePlaneSDF(
@@ -113,8 +161,8 @@ void MainCS(
             NoiseLacunarity,
             NoisePersistence,
             SeaLevel,
-            HeightScale,
-            BaseHeight,
+            EffectiveHeightScale,
+            EffectiveBaseHeight,
             TerrainHeight
         );
 

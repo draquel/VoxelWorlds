@@ -4,6 +4,7 @@
 #include "VoxelGeneration.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelCaveConfiguration.h"
+#include "VoxelBiomeConfiguration.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphResources.h"
 #include "RenderGraphUtils.h"
@@ -57,6 +58,15 @@ public:
 		SHADER_PARAMETER(FVector4f, CaveLayerMaxDepth)      // float4
 		SHADER_PARAMETER(FVector4f, CaveLayerDepthFadeWidth)// float4
 		SHADER_PARAMETER(FVector4f, CaveLayerVerticalScale) // float4
+		// Continentalness parameters
+		SHADER_PARAMETER(int32, ContinentalnessEnabled)
+		SHADER_PARAMETER(int32, ContinentalnessSeed)
+		SHADER_PARAMETER(float, ContinentalnessFrequency)
+		SHADER_PARAMETER(float, ContinentalnessHeightMin)
+		SHADER_PARAMETER(float, ContinentalnessHeightMid)
+		SHADER_PARAMETER(float, ContinentalnessHeightMax)
+		SHADER_PARAMETER(float, ContinentalnessHeightScaleMin)
+		SHADER_PARAMETER(float, ContinentalnessHeightScaleMax)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -180,6 +190,29 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 			Parameters->HeightScale = CapturedRequest.HeightScale;
 			Parameters->BaseHeight = CapturedRequest.BaseHeight;
 			Parameters->OutputVoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+
+			// Continentalness parameters
+			Parameters->ContinentalnessEnabled = 0;
+			Parameters->ContinentalnessSeed = 0;
+			Parameters->ContinentalnessFrequency = 0.00002f;
+			Parameters->ContinentalnessHeightMin = -3000.0f;
+			Parameters->ContinentalnessHeightMid = 0.0f;
+			Parameters->ContinentalnessHeightMax = 1000.0f;
+			Parameters->ContinentalnessHeightScaleMin = 0.2f;
+			Parameters->ContinentalnessHeightScaleMax = 1.0f;
+
+			if (CapturedRequest.BiomeConfiguration && CapturedRequest.BiomeConfiguration->bEnableContinentalness)
+			{
+				const UVoxelBiomeConfiguration* BiomeConfig = CapturedRequest.BiomeConfiguration;
+				Parameters->ContinentalnessEnabled = 1;
+				Parameters->ContinentalnessSeed = CapturedRequest.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
+				Parameters->ContinentalnessFrequency = BiomeConfig->ContinentalnessNoiseFrequency;
+				Parameters->ContinentalnessHeightMin = BiomeConfig->ContinentalnessHeightMin;
+				Parameters->ContinentalnessHeightMid = BiomeConfig->ContinentalnessHeightMid;
+				Parameters->ContinentalnessHeightMax = BiomeConfig->ContinentalnessHeightMax;
+				Parameters->ContinentalnessHeightScaleMin = BiomeConfig->ContinentalnessHeightScaleMin;
+				Parameters->ContinentalnessHeightScaleMax = BiomeConfig->ContinentalnessHeightScaleMax;
+			}
 
 			// Cave parameters — zero-initialize packed vectors
 			Parameters->CaveEnabled = 0;

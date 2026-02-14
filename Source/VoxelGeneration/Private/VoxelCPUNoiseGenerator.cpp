@@ -202,6 +202,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
+	// Set up continentalness noise parameters
+	FVoxelNoiseParams ContinentalnessNoiseParams;
+	ContinentalnessNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	ContinentalnessNoiseParams.Octaves = 2;
+	ContinentalnessNoiseParams.Persistence = 0.5f;
+	ContinentalnessNoiseParams.Lacunarity = 2.0f;
+	ContinentalnessNoiseParams.Amplitude = 1.0f;
+
 	// Use configuration values if available, otherwise use defaults
 	if (BiomeConfig)
 	{
@@ -209,6 +217,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
+
+		if (BiomeConfig->bEnableContinentalness)
+		{
+			ContinentalnessNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
+			ContinentalnessNoiseParams.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
+		}
 	}
 	else
 	{
@@ -218,6 +232,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
+
+	const bool bUseContinentalness = BiomeConfig && BiomeConfig->bEnableContinentalness;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -236,9 +252,23 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
 					WorldPos.X, WorldPos.Y, Request.NoiseParams);
 
-				// Get terrain height from noise
+				// Sample continentalness and modulate terrain params
+				float Continentalness = 0.0f;
+				FWorldModeTerrainParams EffectiveParams = WorldMode.GetTerrainParams();
+				if (bUseContinentalness)
+				{
+					FVector BiomeSamplePos2D(WorldPos.X, WorldPos.Y, 0.0f);
+					Continentalness = FBM3D(BiomeSamplePos2D, ContinentalnessNoiseParams);
+
+					float HeightOffset, HeightScaleMult;
+					BiomeConfig->GetContinentalnessTerrainParams(Continentalness, HeightOffset, HeightScaleMult);
+					EffectiveParams.BaseHeight += HeightOffset;
+					EffectiveParams.HeightScale *= HeightScaleMult;
+				}
+
+				// Get terrain height from noise (using potentially modulated params)
 				float TerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
-					NoiseValue, WorldMode.GetTerrainParams());
+					NoiseValue, EffectiveParams);
 
 				// Calculate signed distance to surface
 				float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(
@@ -264,7 +294,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
 					// Get blended biome selection for smooth transitions
-					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
+					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
 
 					// Store the dominant biome ID
 					BiomeID = Blend.GetDominantBiome();
@@ -820,6 +850,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
+	// Set up continentalness noise parameters
+	FVoxelNoiseParams ContinentalnessNoiseParamsIB;
+	ContinentalnessNoiseParamsIB.NoiseType = EVoxelNoiseType::Simplex;
+	ContinentalnessNoiseParamsIB.Octaves = 2;
+	ContinentalnessNoiseParamsIB.Persistence = 0.5f;
+	ContinentalnessNoiseParamsIB.Lacunarity = 2.0f;
+	ContinentalnessNoiseParamsIB.Amplitude = 1.0f;
+
 	// Use configuration values if available, otherwise use defaults
 	if (BiomeConfig)
 	{
@@ -827,6 +865,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
+
+		if (BiomeConfig->bEnableContinentalness)
+		{
+			ContinentalnessNoiseParamsIB.Seed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
+			ContinentalnessNoiseParamsIB.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
+		}
 	}
 	else
 	{
@@ -835,6 +879,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
+
+	const bool bUseContinentalnessIB = BiomeConfig && BiomeConfig->bEnableContinentalness;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -848,6 +894,15 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					Y * VoxelSize,
 					Z * VoxelSize
 				);
+
+				// Sample continentalness for biome selection (height modulation
+				// is not applied for IslandBowl since it has its own falloff system)
+				float Continentalness = 0.0f;
+				if (bUseContinentalnessIB)
+				{
+					FVector BiomeSamplePos2D(WorldPos.X, WorldPos.Y, 0.0f);
+					Continentalness = FBM3D(BiomeSamplePos2D, ContinentalnessNoiseParamsIB);
+				}
 
 				// Sample 2D noise at X,Y (same as InfinitePlane base)
 				float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
@@ -877,7 +932,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
 					// Get blended biome selection
-					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
+					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
 					BiomeID = Blend.GetDominantBiome();
 
 					// Cave carving: subtract density for underground cavities
@@ -1236,12 +1291,26 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
+	// Set up continentalness noise parameters
+	FVoxelNoiseParams ContinentalnessNoiseParamsSP;
+	ContinentalnessNoiseParamsSP.NoiseType = EVoxelNoiseType::Simplex;
+	ContinentalnessNoiseParamsSP.Octaves = 2;
+	ContinentalnessNoiseParamsSP.Persistence = 0.5f;
+	ContinentalnessNoiseParamsSP.Lacunarity = 2.0f;
+	ContinentalnessNoiseParamsSP.Amplitude = 1.0f;
+
 	if (BiomeConfig)
 	{
 		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
 		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
+
+		if (BiomeConfig->bEnableContinentalness)
+		{
+			ContinentalnessNoiseParamsSP.Seed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
+			ContinentalnessNoiseParamsSP.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
+		}
 	}
 	else
 	{
@@ -1250,6 +1319,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
+
+	const bool bUseContinentalnessSP = BiomeConfig && BiomeConfig->bEnableContinentalness;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -1266,6 +1337,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 				// Get direction from planet center for noise sampling
 				FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, PlanetCenter);
+
+				// Sample continentalness for biome selection (uses direction like other biome noise)
+				float Continentalness = 0.0f;
+				if (bUseContinentalnessSP)
+				{
+					FVector BiomeSamplePosSP = Direction * 10000.0f;
+					Continentalness = FBM3D(BiomeSamplePosSP, ContinentalnessNoiseParamsSP);
+				}
 
 				// Sample spherical noise using direction
 				float NoiseValue = FSphericalPlanetWorldMode::SampleSphericalNoise(Direction, Request.NoiseParams);
@@ -1296,7 +1375,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
-					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
+					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
 					BiomeID = Blend.GetDominantBiome();
 
 					// Cave carving: subtract density for underground cavities

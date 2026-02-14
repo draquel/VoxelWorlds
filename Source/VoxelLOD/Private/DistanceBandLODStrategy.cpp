@@ -3,6 +3,7 @@
 #include "DistanceBandLODStrategy.h"
 #include "VoxelLOD.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelBiomeConfiguration.h"
 #include "VoxelCoordinates.h"
 #include "DrawDebugHelpers.h"
 
@@ -52,6 +53,18 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		const float TerrainBase = WorldConfig->SeaLevel + WorldConfig->BaseHeight;
 		TerrainMinHeight = TerrainBase - ChunkWorldSize; // One chunk below base for safety
 		TerrainMaxHeight = TerrainBase + WorldConfig->HeightScale + ChunkWorldSize; // One chunk above max
+
+		// Extend bounds for continentalness height modulation
+		if (WorldConfig->BiomeConfiguration && WorldConfig->BiomeConfiguration->bEnableContinentalness)
+		{
+			const UVoxelBiomeConfiguration* BiomeConfig = WorldConfig->BiomeConfiguration;
+			// ContinentalnessHeightMin is negative (lowers terrain), extend minimum
+			TerrainMinHeight = FMath::Min(TerrainMinHeight,
+				TerrainBase + BiomeConfig->ContinentalnessHeightMin - ChunkWorldSize);
+			// ContinentalnessHeightMax raises terrain, extend maximum
+			TerrainMaxHeight = FMath::Max(TerrainMaxHeight,
+				TerrainBase + BiomeConfig->ContinentalnessHeightMax + WorldConfig->HeightScale + ChunkWorldSize);
+		}
 
 		// For Island mode, also consider the edge height (can be negative for bowl shapes)
 		if (WorldMode == EWorldMode::IslandBowl)

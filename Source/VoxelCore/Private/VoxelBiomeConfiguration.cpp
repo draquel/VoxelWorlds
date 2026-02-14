@@ -40,6 +40,7 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Plains.Name = TEXT("Plains");
 	Plains.TemperatureRange = FVector2D(-0.3, 0.6);
 	Plains.MoistureRange = FVector2D(-0.5, 0.5);
+	Plains.ContinentalnessRange = FVector2D(-0.2, 1.0); // Coastal to inland
 	Plains.SurfaceMaterial = EVoxelMaterial::Grass;
 	Plains.SubsurfaceMaterial = EVoxelMaterial::Dirt;
 	Plains.DeepMaterial = EVoxelMaterial::Stone;
@@ -56,6 +57,7 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Desert.Name = TEXT("Desert");
 	Desert.TemperatureRange = FVector2D(0.5, 1.0);
 	Desert.MoistureRange = FVector2D(-1.0, 0.0);
+	Desert.ContinentalnessRange = FVector2D(0.1, 1.0); // Inland only
 	Desert.SurfaceMaterial = EVoxelMaterial::Sand;
 	Desert.SubsurfaceMaterial = EVoxelMaterial::Sandstone;
 	Desert.DeepMaterial = EVoxelMaterial::Stone;
@@ -72,6 +74,7 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Tundra.Name = TEXT("Tundra");
 	Tundra.TemperatureRange = FVector2D(-1.0, -0.3);
 	Tundra.MoistureRange = FVector2D(-1.0, 1.0);
+	Tundra.ContinentalnessRange = FVector2D(-0.1, 1.0); // Can extend to cold coastlines
 	Tundra.SurfaceMaterial = EVoxelMaterial::Snow;
 	Tundra.SubsurfaceMaterial = EVoxelMaterial::FrozenDirt;
 	Tundra.DeepMaterial = EVoxelMaterial::Stone;
@@ -81,6 +84,22 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Tundra.UnderwaterSurfaceMaterial = EVoxelMaterial::Stone;
 	Tundra.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Stone;
 	Biomes.Add(Tundra);
+
+	// Ocean - Deep ocean to near-coast (all temperatures, all moisture)
+	FBiomeDefinition Ocean;
+	Ocean.BiomeID = 3;
+	Ocean.Name = TEXT("Ocean");
+	Ocean.TemperatureRange = FVector2D(-1.0, 1.0);
+	Ocean.MoistureRange = FVector2D(-1.0, 1.0);
+	Ocean.ContinentalnessRange = FVector2D(-1.0, -0.15); // Deep ocean to near-coast
+	Ocean.SurfaceMaterial = EVoxelMaterial::Sand;
+	Ocean.SubsurfaceMaterial = EVoxelMaterial::Sand;
+	Ocean.DeepMaterial = EVoxelMaterial::Stone;
+	Ocean.SurfaceDepth = 1.0f;
+	Ocean.SubsurfaceDepth = 4.0f;
+	Ocean.UnderwaterSurfaceMaterial = EVoxelMaterial::Sand;
+	Ocean.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Sand;
+	Biomes.Add(Ocean);
 
 	// Setup default height material rules
 	HeightMaterialRules.Empty();
@@ -155,6 +174,26 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	RebuildBiomeIndexCache();
 	RebuildHeightRulesCache();
 	RebuildOreVeinsCache();
+}
+
+void UVoxelBiomeConfiguration::GetContinentalnessTerrainParams(float Continentalness, float& OutHeightOffset, float& OutHeightScaleMultiplier) const
+{
+	// Piecewise linear interpolation for height offset:
+	// [-1, 0] maps ContinentalnessHeightMin -> ContinentalnessHeightMid
+	// [0, +1] maps ContinentalnessHeightMid -> ContinentalnessHeightMax
+	if (Continentalness < 0.0f)
+	{
+		OutHeightOffset = FMath::Lerp(ContinentalnessHeightMin, ContinentalnessHeightMid, Continentalness + 1.0f);
+	}
+	else
+	{
+		OutHeightOffset = FMath::Lerp(ContinentalnessHeightMid, ContinentalnessHeightMax, Continentalness);
+	}
+
+	// Linear interpolation for height scale multiplier:
+	// [-1, +1] maps ContinentalnessHeightScaleMin -> ContinentalnessHeightScaleMax
+	float T = Continentalness * 0.5f + 0.5f; // Remap [-1,1] to [0,1]
+	OutHeightScaleMultiplier = FMath::Lerp(ContinentalnessHeightScaleMin, ContinentalnessHeightScaleMax, T);
 }
 
 void UVoxelBiomeConfiguration::RebuildBiomeIndexCache() const
@@ -249,7 +288,7 @@ const FBiomeDefinition* UVoxelBiomeConfiguration::GetBiome(uint8 BiomeID) const
 	return nullptr;
 }
 
-const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature, float Moisture) const
+const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature, float Moisture, float Continentalness) const
 {
 	if (Biomes.Num() == 0)
 	{
@@ -259,13 +298,15 @@ const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature,
 	// Clamp values to valid range
 	Temperature = FMath::Clamp(Temperature, -1.0f, 1.0f);
 	Moisture = FMath::Clamp(Moisture, -1.0f, 1.0f);
+	Continentalness = FMath::Clamp(Continentalness, -1.0f, 1.0f);
 
 	// Priority-based selection: Tundra (cold) > Desert (hot+dry) > Plains (default)
 	// This matches the original FVoxelBiomeRegistry logic
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
 		// Check Tundra first (cold overrides everything)
-		if (Biome.Name == TEXT("Tundra") && Temperature <= Biome.TemperatureRange.Y)
+		if (Biome.Name == TEXT("Tundra") && Temperature <= Biome.TemperatureRange.Y
+			&& Continentalness >= Biome.ContinentalnessRange.X && Continentalness <= Biome.ContinentalnessRange.Y)
 		{
 			return &Biome;
 		}
@@ -276,7 +317,17 @@ const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature,
 		// Check Desert (hot and dry)
 		if (Biome.Name == TEXT("Desert") &&
 			Temperature >= Biome.TemperatureRange.X &&
-			Moisture <= Biome.MoistureRange.Y)
+			Moisture <= Biome.MoistureRange.Y &&
+			Continentalness >= Biome.ContinentalnessRange.X && Continentalness <= Biome.ContinentalnessRange.Y)
+		{
+			return &Biome;
+		}
+	}
+
+	// Check all biomes by containment (for user-defined biomes like Ocean)
+	for (const FBiomeDefinition& Biome : Biomes)
+	{
+		if (Biome.Contains(Temperature, Moisture, Continentalness))
 		{
 			return &Biome;
 		}
@@ -286,13 +337,13 @@ const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature,
 	return &Biomes[0];
 }
 
-uint8 UVoxelBiomeConfiguration::SelectBiomeID(float Temperature, float Moisture) const
+uint8 UVoxelBiomeConfiguration::SelectBiomeID(float Temperature, float Moisture, float Continentalness) const
 {
-	const FBiomeDefinition* Biome = SelectBiome(Temperature, Moisture);
+	const FBiomeDefinition* Biome = SelectBiome(Temperature, Moisture, Continentalness);
 	return Biome ? Biome->BiomeID : 0;
 }
 
-FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moisture) const
+FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moisture, float Continentalness) const
 {
 	if (Biomes.Num() == 0)
 	{
@@ -302,6 +353,7 @@ FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moi
 	// Clamp values to valid range
 	Temperature = FMath::Clamp(Temperature, -1.0f, 1.0f);
 	Moisture = FMath::Clamp(Moisture, -1.0f, 1.0f);
+	Continentalness = FMath::Clamp(Continentalness, -1.0f, 1.0f);
 
 	// Ensure minimum blend width
 	float EffectiveBlendWidth = FMath::Max(BiomeBlendWidth, 0.01f);
@@ -318,7 +370,7 @@ FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moi
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
 		// Get signed distance to biome edge (positive = inside, negative = outside)
-		float SignedDist = Biome.GetSignedDistanceToEdge(Temperature, Moisture);
+		float SignedDist = Biome.GetSignedDistanceToEdge(Temperature, Moisture, Continentalness);
 
 		// Calculate weight based on distance
 		float Weight = 0.0f;
@@ -489,13 +541,21 @@ void UVoxelBiomeConfiguration::LogConfiguration() const
 		bEnableOreVeins ? TEXT("ON") : TEXT("OFF"), bEnableUnderwaterMaterials ? TEXT("ON") : TEXT("OFF"));
 	UE_LOG(LogVoxelCore, Warning, TEXT("TempFreq=%.7f, MoistFreq=%.7f, TempSeed=%d, MoistSeed=%d"),
 		TemperatureNoiseFrequency, MoistureNoiseFrequency, TemperatureSeedOffset, MoistureSeedOffset);
+	if (bEnableContinentalness)
+	{
+		UE_LOG(LogVoxelCore, Warning, TEXT("Continentalness: Freq=%.7f, Seed=%d, Heights(%.0f/%.0f/%.0f), Scale(%.2f/%.2f)"),
+			ContinentalnessNoiseFrequency, ContinentalnessSeedOffset,
+			ContinentalnessHeightMin, ContinentalnessHeightMid, ContinentalnessHeightMax,
+			ContinentalnessHeightScaleMin, ContinentalnessHeightScaleMax);
+	}
 
 	UE_LOG(LogVoxelCore, Warning, TEXT("--- Biomes (%d) ---"), Biomes.Num());
 	for (const FBiomeDefinition& B : Biomes)
 	{
-		UE_LOG(LogVoxelCore, Warning, TEXT("  [%d] %s: Temp(%.2f..%.2f) Moist(%.2f..%.2f)"),
+		UE_LOG(LogVoxelCore, Warning, TEXT("  [%d] %s: Temp(%.2f..%.2f) Moist(%.2f..%.2f) Cont(%.2f..%.2f)"),
 			B.BiomeID, *B.Name, B.TemperatureRange.X, B.TemperatureRange.Y,
-			B.MoistureRange.X, B.MoistureRange.Y);
+			B.MoistureRange.X, B.MoistureRange.Y,
+			B.ContinentalnessRange.X, B.ContinentalnessRange.Y);
 		UE_LOG(LogVoxelCore, Warning, TEXT("       Surface=%d Subsurface=%d Deep=%d  SurfDepth=%.1f SubDepth=%.1f"),
 			B.SurfaceMaterial, B.SubsurfaceMaterial, B.DeepMaterial,
 			B.SurfaceDepth, B.SubsurfaceDepth);
@@ -548,7 +608,7 @@ EDataValidationResult UVoxelBiomeConfiguration::IsDataValid(FDataValidationConte
 		SeenIDs.Add(Biome.BiomeID);
 	}
 
-	// Validate temperature/moisture ranges
+	// Validate temperature/moisture/continentalness ranges
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
 		if (Biome.TemperatureRange.X > Biome.TemperatureRange.Y)
@@ -560,6 +620,11 @@ EDataValidationResult UVoxelBiomeConfiguration::IsDataValid(FDataValidationConte
 		{
 			Context.AddWarning(FText::FromString(FString::Printf(
 				TEXT("Biome '%s' has invalid moisture range (min > max)."), *Biome.Name)));
+		}
+		if (Biome.ContinentalnessRange.X > Biome.ContinentalnessRange.Y)
+		{
+			Context.AddWarning(FText::FromString(FString::Printf(
+				TEXT("Biome '%s' has invalid continentalness range (min > max)."), *Biome.Name)));
 		}
 	}
 

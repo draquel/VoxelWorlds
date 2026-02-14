@@ -129,6 +129,68 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	int32 MoistureSeedOffset = 5678;
 
+	// ==================== Continentalness ====================
+
+	/**
+	 * Enable continentalness as a biome selection axis and terrain height modulator.
+	 * When enabled, a third noise axis controls large-scale land/water distribution.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness")
+	bool bEnableContinentalness = false;
+
+	/**
+	 * Frequency for continentalness noise (lower = larger land masses).
+	 * Default is very low for continental-scale features.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.000001", ClampMax = "0.001", EditCondition = "bEnableContinentalness"))
+	float ContinentalnessNoiseFrequency = 0.00002f;
+
+	/**
+	 * Seed offset for continentalness noise (added to world seed).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (EditCondition = "bEnableContinentalness"))
+	int32 ContinentalnessSeedOffset = 9012;
+
+	/**
+	 * Height offset at continentalness = -1 (deep ocean), in world units.
+	 * Should be well below WaterLevel to create ocean floor.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (EditCondition = "bEnableContinentalness"))
+	float ContinentalnessHeightMin = -3000.0f;
+
+	/**
+	 * Height offset at continentalness = 0 (coast).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (EditCondition = "bEnableContinentalness"))
+	float ContinentalnessHeightMid = 0.0f;
+
+	/**
+	 * Height offset at continentalness = +1 (continental interior).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (EditCondition = "bEnableContinentalness"))
+	float ContinentalnessHeightMax = 1000.0f;
+
+	/**
+	 * HeightScale multiplier at continentalness = -1 (ocean: flat seabed).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bEnableContinentalness"))
+	float ContinentalnessHeightScaleMin = 0.2f;
+
+	/**
+	 * HeightScale multiplier at continentalness = +1 (inland: full terrain variation).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bEnableContinentalness"))
+	float ContinentalnessHeightScaleMax = 1.0f;
+
+	/**
+	 * Map continentalness value to terrain height offset and height scale multiplier.
+	 * Uses piecewise linear interpolation: [-1,0] maps HeightMin->HeightMid, [0,1] maps HeightMid->HeightMax.
+	 * @param Continentalness Input value in [-1, 1]
+	 * @param OutHeightOffset Output height offset in world units
+	 * @param OutHeightScaleMultiplier Output multiplier for HeightScale
+	 */
+	void GetContinentalnessTerrainParams(float Continentalness, float& OutHeightOffset, float& OutHeightScaleMultiplier) const;
+
 	// ==================== API ====================
 
 	/**
@@ -156,27 +218,30 @@ public:
 	 * Uses simple priority-based selection (first matching biome wins).
 	 * @param Temperature Normalized temperature (-1 to 1)
 	 * @param Moisture Normalized moisture (-1 to 1)
+	 * @param Continentalness Normalized continentalness (-1 to 1), default 0 for backward compat
 	 * @return Pointer to the selected biome definition, or first biome as fallback
 	 */
-	const FBiomeDefinition* SelectBiome(float Temperature, float Moisture) const;
+	const FBiomeDefinition* SelectBiome(float Temperature, float Moisture, float Continentalness = 0.0f) const;
 
 	/**
 	 * Select the biome ID for given climate values.
 	 * @param Temperature Normalized temperature (-1 to 1)
 	 * @param Moisture Normalized moisture (-1 to 1)
+	 * @param Continentalness Normalized continentalness (-1 to 1), default 0 for backward compat
 	 * @return Biome ID
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Biome")
-	uint8 SelectBiomeID(float Temperature, float Moisture) const;
+	uint8 SelectBiomeID(float Temperature, float Moisture, float Continentalness = 0.0f) const;
 
 	/**
 	 * Calculate blended biome selection for smooth transitions.
 	 * Uses distance-based weighting from biome boundaries.
 	 * @param Temperature Normalized temperature (-1 to 1)
 	 * @param Moisture Normalized moisture (-1 to 1)
+	 * @param Continentalness Normalized continentalness (-1 to 1), default 0 for backward compat
 	 * @return Blend result with up to MAX_BIOME_BLEND biomes and their weights
 	 */
-	FBiomeBlend GetBiomeBlend(float Temperature, float Moisture) const;
+	FBiomeBlend GetBiomeBlend(float Temperature, float Moisture, float Continentalness = 0.0f) const;
 
 	/**
 	 * Get material ID considering biome blending.

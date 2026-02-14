@@ -141,6 +141,12 @@ struct VOXELCORE_API FBiomeDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome")
 	FVector2D MoistureRange = FVector2D(-1.0, 1.0);
 
+	/** Continentalness range (X=min, Y=max) in normalized -1 to 1 space.
+	 *  -1 = deep ocean, 0 = coastline, 1 = continental interior.
+	 *  Default full range (-1,1) for backward compatibility. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome")
+	FVector2D ContinentalnessRange = FVector2D(-1.0, 1.0);
+
 	/** Material ID for surface voxels (depth 0-1) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome")
 	uint8 SurfaceMaterial = 0;
@@ -204,12 +210,16 @@ struct VOXELCORE_API FBiomeDefinition
 	}
 
 	/**
-	 * Check if the given temperature and moisture values fall within this biome's ranges.
+	 * Check if the given climate values fall within this biome's ranges.
+	 * @param Temperature Normalized temperature (-1 to 1)
+	 * @param Moisture Normalized moisture (-1 to 1)
+	 * @param Continentalness Normalized continentalness (-1 to 1), default 0 for backward compat
 	 */
-	bool Contains(float Temperature, float Moisture) const
+	bool Contains(float Temperature, float Moisture, float Continentalness = 0.0f) const
 	{
 		return Temperature >= TemperatureRange.X && Temperature <= TemperatureRange.Y
-			&& Moisture >= MoistureRange.X && Moisture <= MoistureRange.Y;
+			&& Moisture >= MoistureRange.X && Moisture <= MoistureRange.Y
+			&& Continentalness >= ContinentalnessRange.X && Continentalness <= ContinentalnessRange.Y;
 	}
 
 	/**
@@ -276,17 +286,22 @@ struct VOXELCORE_API FBiomeDefinition
 	/**
 	 * Calculate the distance from a point to the edge of this biome's range.
 	 * Returns positive if inside, negative if outside.
+	 * @param Continentalness Default 0 for backward compatibility
 	 */
-	float GetSignedDistanceToEdge(float Temperature, float Moisture) const
+	float GetSignedDistanceToEdge(float Temperature, float Moisture, float Continentalness = 0.0f) const
 	{
 		// Distance to each edge (positive = inside, negative = outside)
 		const float DistTempMin = Temperature - TemperatureRange.X;
 		const float DistTempMax = TemperatureRange.Y - Temperature;
 		const float DistMoistMin = Moisture - MoistureRange.X;
 		const float DistMoistMax = MoistureRange.Y - Moisture;
+		const float DistContMin = Continentalness - ContinentalnessRange.X;
+		const float DistContMax = ContinentalnessRange.Y - Continentalness;
 
 		// Minimum distance to any edge (positive if inside all edges)
-		return FMath::Min(FMath::Min(DistTempMin, DistTempMax), FMath::Min(DistMoistMin, DistMoistMax));
+		return FMath::Min(
+			FMath::Min(FMath::Min(DistTempMin, DistTempMax), FMath::Min(DistMoistMin, DistMoistMax)),
+			FMath::Min(DistContMin, DistContMax));
 	}
 };
 

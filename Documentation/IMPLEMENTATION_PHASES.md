@@ -794,13 +794,13 @@ Phase 7 performance targets displayed for comparison:
 - [ ] Multiplayer support
 - [ ] Destructible terrain
 - [ ] Improve Water
-- [ ] Character Movement
 - [ ] Export to Unreal Terrain / Static Terrain Mesh(es)
 - [ ] Stair, Door, Fence, Gate Block Types (Gameplay - Need a strategy for compartmentalization)
 - [ ] Final World Actor(s)
 - [ ] Editor Tools / Debugging tools
 - [ ] Dual-Contouring
 - [ ] TransVoxel Seams troubleshooting
+- [ ] Continentalness / Ocean Biome
 
 ---
 
