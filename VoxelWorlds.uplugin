@@ -50,6 +50,11 @@
 			"LoadingPhase": "PostEngineInit"
 		},
 		{
+			"Name": "VoxelMap",
+			"Type": "Runtime",
+			"LoadingPhase": "PostEngineInit"
+		},
+		{
 			"Name": "VoxelWorlds",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
