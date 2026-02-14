@@ -353,9 +353,12 @@ All modes benefit from the streaming optimizations:
 
 ---
 
+## Completed Enhancements
+
+- **Cave Systems**: Multi-layer cave generation (Cheese caverns, Spaghetti tunnels, Noodle passages) via `UVoxelCaveConfiguration` data asset. Density subtraction model works across all 3 world modes. See `Documentation/CAVE_SYSTEM.md`.
+
 ## Future Enhancements
 
-- **Cave Systems**: Carving noise that creates underground cavities in all modes
 - **Octree LOD**: For orbital-scale spherical planet viewing
 - **Water/Ocean**: Sea level handling with underwater terrain
 - **Biome Transitions**: Smooth material blending between biomes

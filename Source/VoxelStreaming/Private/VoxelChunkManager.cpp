@@ -4,6 +4,7 @@
 #include "VoxelStreaming.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelCaveConfiguration.h"
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
 #include "VoxelCoordinates.h"
@@ -1203,6 +1204,10 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 			// Use PlanetHeightScale for terrain generation
 			GenRequest.HeightScale = Configuration->PlanetHeightScale;
 		}
+
+		// Cave parameters
+		GenRequest.bEnableCaves = Configuration->bEnableCaves;
+		GenRequest.CaveConfiguration = Configuration->CaveConfiguration;
 
 		// Water level parameters
 		GenRequest.bEnableWaterLevel = Configuration->bEnableWaterLevel;

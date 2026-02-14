@@ -3,6 +3,7 @@
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelGeneration.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelCaveConfiguration.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphResources.h"
 #include "RenderGraphUtils.h"
@@ -38,6 +39,24 @@ public:
 		SHADER_PARAMETER(float, SeaLevel)
 		SHADER_PARAMETER(float, HeightScale)
 		SHADER_PARAMETER(float, BaseHeight)
+		// Cave parameters — packed into vectors (4 layers → .xyzw components)
+		SHADER_PARAMETER(int32, CaveEnabled)
+		SHADER_PARAMETER(int32, CaveLayerCount)
+		SHADER_PARAMETER(FIntVector4, CaveLayerType)        // int4: layer types
+		SHADER_PARAMETER(FIntVector4, CaveLayerSeed)        // int4: primary seeds
+		SHADER_PARAMETER(FIntVector4, CaveLayerSeed2)       // int4: secondary seeds
+		SHADER_PARAMETER(FVector4f, CaveLayerFrequency)     // float4: primary frequencies
+		SHADER_PARAMETER(FVector4f, CaveLayerFrequency2)    // float4: secondary frequencies
+		SHADER_PARAMETER(FIntVector4, CaveLayerOctaves)     // int4: octave counts
+		SHADER_PARAMETER(FVector4f, CaveLayerPersistence)   // float4
+		SHADER_PARAMETER(FVector4f, CaveLayerLacunarity)    // float4
+		SHADER_PARAMETER(FVector4f, CaveLayerThreshold)     // float4
+		SHADER_PARAMETER(FVector4f, CaveLayerCarveStrength) // float4
+		SHADER_PARAMETER(FVector4f, CaveLayerCarveFalloff)  // float4
+		SHADER_PARAMETER(FVector4f, CaveLayerMinDepth)      // float4
+		SHADER_PARAMETER(FVector4f, CaveLayerMaxDepth)      // float4
+		SHADER_PARAMETER(FVector4f, CaveLayerDepthFadeWidth)// float4
+		SHADER_PARAMETER(FVector4f, CaveLayerVerticalScale) // float4
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -161,6 +180,60 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 			Parameters->HeightScale = CapturedRequest.HeightScale;
 			Parameters->BaseHeight = CapturedRequest.BaseHeight;
 			Parameters->OutputVoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+
+			// Cave parameters — zero-initialize packed vectors
+			Parameters->CaveEnabled = 0;
+			Parameters->CaveLayerCount = 0;
+			Parameters->CaveLayerType = FIntVector4(0, 0, 0, 0);
+			Parameters->CaveLayerSeed = FIntVector4(0, 0, 0, 0);
+			Parameters->CaveLayerSeed2 = FIntVector4(0, 0, 0, 0);
+			Parameters->CaveLayerFrequency = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerFrequency2 = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerOctaves = FIntVector4(0, 0, 0, 0);
+			Parameters->CaveLayerPersistence = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerLacunarity = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerThreshold = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerCarveStrength = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerCarveFalloff = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerMinDepth = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerMaxDepth = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerDepthFadeWidth = FVector4f(0, 0, 0, 0);
+			Parameters->CaveLayerVerticalScale = FVector4f(0, 0, 0, 0);
+
+			if (CapturedRequest.bEnableCaves && CapturedRequest.CaveConfiguration)
+			{
+				const UVoxelCaveConfiguration* CaveConfig = CapturedRequest.CaveConfiguration;
+				if (CaveConfig->bEnableCaves && CaveConfig->HasEnabledLayers())
+				{
+					Parameters->CaveEnabled = 1;
+					int32 LayerIdx = 0;
+					for (const FCaveLayerConfig& Layer : CaveConfig->CaveLayers)
+					{
+						if (!Layer.bEnabled || LayerIdx >= 4)
+						{
+							continue;
+						}
+						// Pack into vector components: [0]=X, [1]=Y, [2]=Z, [3]=W
+						reinterpret_cast<int32*>(&Parameters->CaveLayerType)[LayerIdx] = static_cast<int32>(Layer.CaveType);
+						reinterpret_cast<int32*>(&Parameters->CaveLayerSeed)[LayerIdx] = CapturedRequest.NoiseParams.Seed + Layer.SeedOffset;
+						reinterpret_cast<int32*>(&Parameters->CaveLayerSeed2)[LayerIdx] = CapturedRequest.NoiseParams.Seed + Layer.SecondNoiseSeedOffset;
+						reinterpret_cast<float*>(&Parameters->CaveLayerFrequency)[LayerIdx] = Layer.Frequency;
+						reinterpret_cast<float*>(&Parameters->CaveLayerFrequency2)[LayerIdx] = Layer.Frequency * Layer.SecondNoiseFrequencyScale;
+						reinterpret_cast<int32*>(&Parameters->CaveLayerOctaves)[LayerIdx] = Layer.Octaves;
+						reinterpret_cast<float*>(&Parameters->CaveLayerPersistence)[LayerIdx] = Layer.Persistence;
+						reinterpret_cast<float*>(&Parameters->CaveLayerLacunarity)[LayerIdx] = Layer.Lacunarity;
+						reinterpret_cast<float*>(&Parameters->CaveLayerThreshold)[LayerIdx] = Layer.Threshold;
+						reinterpret_cast<float*>(&Parameters->CaveLayerCarveStrength)[LayerIdx] = Layer.CarveStrength;
+						reinterpret_cast<float*>(&Parameters->CaveLayerCarveFalloff)[LayerIdx] = Layer.CarveFalloff;
+						reinterpret_cast<float*>(&Parameters->CaveLayerMinDepth)[LayerIdx] = Layer.MinDepth;
+						reinterpret_cast<float*>(&Parameters->CaveLayerMaxDepth)[LayerIdx] = Layer.MaxDepth;
+						reinterpret_cast<float*>(&Parameters->CaveLayerDepthFadeWidth)[LayerIdx] = Layer.DepthFadeWidth;
+						reinterpret_cast<float*>(&Parameters->CaveLayerVerticalScale)[LayerIdx] = Layer.VerticalScale;
+						++LayerIdx;
+					}
+					Parameters->CaveLayerCount = LayerIdx;
+				}
+			}
 
 			// Get shader
 			TShaderMapRef<FGenerateVoxelDensityCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));

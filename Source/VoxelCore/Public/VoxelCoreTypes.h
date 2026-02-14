@@ -152,7 +152,13 @@ enum class EVoxelNoiseType : uint8
 	Perlin,
 
 	/** Simplex noise - faster and less directional artifacts than Perlin */
-	Simplex
+	Simplex,
+
+	/** Cellular (Worley) noise - organic cell patterns, F1 distance */
+	Cellular,
+
+	/** Voronoi noise - cell edge patterns, F2-F1 distance */
+	Voronoi
 };
 
 /**

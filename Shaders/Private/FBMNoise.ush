@@ -9,10 +9,13 @@
 
 #include "PerlinNoise.ush"
 #include "SimplexNoise.ush"
+#include "CellularNoise.ush"
 
 // Noise type enum (must match EVoxelNoiseType)
 #define NOISE_TYPE_PERLIN 0
 #define NOISE_TYPE_SIMPLEX 1
+#define NOISE_TYPE_CELLULAR 2
+#define NOISE_TYPE_VORONOI 3
 
 /**
  * Sample fBm noise using the specified noise type.
@@ -50,6 +53,18 @@ float FBM3D(
         if (NoiseType == NOISE_TYPE_PERLIN)
         {
             NoiseValue = Perlin3D(ScaledPos, Seed);
+        }
+        else if (NoiseType == NOISE_TYPE_CELLULAR)
+        {
+            // Cellular: use F1 distance, map from [0, ~1.5] to [-1, 1]
+            float2 Cell = Cellular3D(ScaledPos, Seed);
+            NoiseValue = Cell.x * 2.0f - 1.0f;
+        }
+        else if (NoiseType == NOISE_TYPE_VORONOI)
+        {
+            // Voronoi: use F2-F1 edge distance, map from [0, ~1] to [-1, 1]
+            float3 Vor = Voronoi3D(ScaledPos, Seed);
+            NoiseValue = (Vor.y - Vor.x) * 2.0f - 1.0f;
         }
         else
         {
@@ -110,6 +125,16 @@ float RidgedFBM3D(
         {
             NoiseValue = Perlin3D(ScaledPos, Seed);
         }
+        else if (NoiseType == NOISE_TYPE_CELLULAR)
+        {
+            float2 Cell = Cellular3D(ScaledPos, Seed);
+            NoiseValue = Cell.x * 2.0f - 1.0f;
+        }
+        else if (NoiseType == NOISE_TYPE_VORONOI)
+        {
+            float3 Vor = Voronoi3D(ScaledPos, Seed);
+            NoiseValue = (Vor.y - Vor.x) * 2.0f - 1.0f;
+        }
         else
         {
             NoiseValue = Simplex3D(ScaledPos, Seed);
@@ -128,4 +153,20 @@ float RidgedFBM3D(
 
     // Scale to [-1, 1] range (ridged naturally is [0, 1] so adjust)
     return (Total / MaxValue) * 2.0f - 1.0f;
+}
+
+/**
+ * Simplified fBm with Cellular noise.
+ */
+float FBMCellular(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
+{
+    return FBM3D(Position, NOISE_TYPE_CELLULAR, Seed, Octaves, Frequency, 1.0f, 2.0f, Persistence);
+}
+
+/**
+ * Simplified fBm with Voronoi noise.
+ */
+float FBMVoronoi(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
+{
+    return FBM3D(Position, NOISE_TYPE_VORONOI, Seed, Octaves, Frequency, 1.0f, 2.0f, Persistence);
 }

@@ -1,0 +1,132 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Cellular (Worley) and Voronoi noise implementation for GPU.
+ * Uses 3x3x3 cell neighborhood search with hash-based feature points.
+ */
+
+#pragma once
+
+#include "VoxelNoiseCommon.ush"
+
+/**
+ * Hash-based random 3D offset for a cell feature point.
+ * Returns a float3 in [0, 1] range per component.
+ */
+float3 CellFeaturePoint(int3 Cell, int Seed)
+{
+    // Use multiple hash passes for each component to get pseudo-random offsets
+    int H0 = Hash3D(Cell.x, Cell.y, Cell.z, Seed);
+    int H1 = Hash3D(Cell.x + 127, Cell.y + 63, Cell.z + 31, Seed);
+    int H2 = Hash3D(Cell.x + 59, Cell.y + 113, Cell.z + 97, Seed);
+
+    return float3(
+        float(H0) / 255.0f,
+        float(H1) / 255.0f,
+        float(H2) / 255.0f
+    );
+}
+
+/**
+ * 3D Cellular noise (Worley noise).
+ * Searches a 3x3x3 neighborhood to find distances to nearest two feature points.
+ *
+ * @param Position Input position (pre-scaled by frequency)
+ * @param Seed Random seed
+ * @return float2(F1, F2) where F1 = distance to nearest, F2 = distance to second nearest
+ */
+float2 Cellular3D(float3 Position, int Seed)
+{
+    int3 Cell = int3(floor(Position));
+    float3 Frac = Position - float3(Cell);
+
+    float F1 = 100.0f;
+    float F2 = 100.0f;
+
+    // Search 3x3x3 neighborhood
+    [unroll]
+    for (int dz = -1; dz <= 1; ++dz)
+    {
+        [unroll]
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            [unroll]
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                int3 NeighborCell = Cell + int3(dx, dy, dz);
+                float3 FeatureOffset = CellFeaturePoint(NeighborCell, Seed);
+
+                // Feature point position relative to our fractional position
+                float3 Delta = float3(dx, dy, dz) + FeatureOffset - Frac;
+                float Dist = dot(Delta, Delta); // Squared distance for performance
+
+                // Update F1 and F2 (sorted insert)
+                if (Dist < F1)
+                {
+                    F2 = F1;
+                    F1 = Dist;
+                }
+                else if (Dist < F2)
+                {
+                    F2 = Dist;
+                }
+            }
+        }
+    }
+
+    // Return actual distances (sqrt of squared)
+    return float2(sqrt(F1), sqrt(F2));
+}
+
+/**
+ * 3D Voronoi noise with cell ID.
+ * Same as Cellular but also returns a unique cell identifier.
+ *
+ * @param Position Input position (pre-scaled by frequency)
+ * @param Seed Random seed
+ * @return float3(F1, F2, CellID) where CellID is a hash-based identifier [0, 1]
+ */
+float3 Voronoi3D(float3 Position, int Seed)
+{
+    int3 Cell = int3(floor(Position));
+    float3 Frac = Position - float3(Cell);
+
+    float F1 = 100.0f;
+    float F2 = 100.0f;
+    int3 NearestCell = Cell;
+
+    // Search 3x3x3 neighborhood
+    [unroll]
+    for (int dz = -1; dz <= 1; ++dz)
+    {
+        [unroll]
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            [unroll]
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                int3 NeighborCell = Cell + int3(dx, dy, dz);
+                float3 FeatureOffset = CellFeaturePoint(NeighborCell, Seed);
+
+                float3 Delta = float3(dx, dy, dz) + FeatureOffset - Frac;
+                float Dist = dot(Delta, Delta);
+
+                if (Dist < F1)
+                {
+                    F2 = F1;
+                    F1 = Dist;
+                    NearestCell = NeighborCell;
+                }
+                else if (Dist < F2)
+                {
+                    F2 = Dist;
+                }
+            }
+        }
+    }
+
+    // Cell ID: hash the nearest cell coordinates to get a stable per-cell value
+    float CellID = float(Hash3D(NearestCell.x, NearestCell.y, NearestCell.z, Seed + 12345)) / 255.0f;
+
+    return float3(sqrt(F1), sqrt(F2), CellID);
+}

@@ -7,6 +7,7 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelCaveConfiguration.h"
 #include "VoxelMaterialRegistry.h"
 #include "Async/Async.h"
 
@@ -268,6 +269,18 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					// Store the dominant biome ID
 					BiomeID = Blend.GetDominantBiome();
 
+					// Cave carving: subtract density for underground cavities
+					float CaveDensity = 0.0f;
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
+
 					// Get material considering blend weights and water level
 					if (Request.bEnableWaterLevel)
 					{
@@ -282,6 +295,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					// Apply height-based material overrides (snow at peaks, rock at altitude, etc.)
 					// Height rules still apply after water (snow on peaks even if base is underwater)
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
+
+					// Cave wall material override (solid voxels near cave boundaries)
+					if (Request.bEnableCaves && Request.CaveConfiguration
+						&& Request.CaveConfiguration->bOverrideCaveWallMaterial
+						&& CaveDensity > 0.0f && CaveDensity < 1.0f
+						&& Density >= VOXEL_SURFACE_THRESHOLD
+						&& DepthBelowSurface >= Request.CaveConfiguration->CaveWallMaterialMinDepth)
+					{
+						MaterialID = Request.CaveConfiguration->CaveWallMaterialID;
+					}
 
 					// Apply ore vein overrides (only for solid voxels well below surface)
 					// Use depth > 10 to ensure ores aren't visible on smooth terrain surfaces
@@ -308,11 +331,33 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
 					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+
+					// Cave carving for fallback path
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
 				}
 				else
 				{
 					// Legacy behavior: use world mode's material assignment
 					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * VoxelSize);
+
+					// Cave carving for non-biome path
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -590,6 +635,116 @@ float FVoxelCPUNoiseGenerator::Simplex3D(const FVector& Position, int32 Seed)
 	return 32.0f * (N0 + N1 + N2 + N3);
 }
 
+void FVoxelCPUNoiseGenerator::Cellular3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2)
+{
+	const int32 CellX = FastFloor(Position.X);
+	const int32 CellY = FastFloor(Position.Y);
+	const int32 CellZ = FastFloor(Position.Z);
+	const float FracX = Position.X - CellX;
+	const float FracY = Position.Y - CellY;
+	const float FracZ = Position.Z - CellZ;
+
+	OutF1 = 100.0f;
+	OutF2 = 100.0f;
+
+	// Search 3x3x3 neighborhood
+	for (int32 dz = -1; dz <= 1; ++dz)
+	{
+		for (int32 dy = -1; dy <= 1; ++dy)
+		{
+			for (int32 dx = -1; dx <= 1; ++dx)
+			{
+				const int32 NX = CellX + dx;
+				const int32 NY = CellY + dy;
+				const int32 NZ = CellZ + dz;
+
+				// Hash-based feature point offset [0, 1] per component
+				const float OffX = static_cast<float>(Hash(NX + Hash(NY + Hash(NZ, Seed), Seed), Seed)) / 255.0f;
+				const float OffY = static_cast<float>(Hash(NX + 127 + Hash(NY + 63 + Hash(NZ + 31, Seed), Seed), Seed)) / 255.0f;
+				const float OffZ = static_cast<float>(Hash(NX + 59 + Hash(NY + 113 + Hash(NZ + 97, Seed), Seed), Seed)) / 255.0f;
+
+				// Delta from fractional position to feature point
+				const float DeltaX = static_cast<float>(dx) + OffX - FracX;
+				const float DeltaY = static_cast<float>(dy) + OffY - FracY;
+				const float DeltaZ = static_cast<float>(dz) + OffZ - FracZ;
+
+				const float DistSq = DeltaX * DeltaX + DeltaY * DeltaY + DeltaZ * DeltaZ;
+
+				if (DistSq < OutF1)
+				{
+					OutF2 = OutF1;
+					OutF1 = DistSq;
+				}
+				else if (DistSq < OutF2)
+				{
+					OutF2 = DistSq;
+				}
+			}
+		}
+	}
+
+	OutF1 = FMath::Sqrt(OutF1);
+	OutF2 = FMath::Sqrt(OutF2);
+}
+
+void FVoxelCPUNoiseGenerator::Voronoi3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2, float& OutCellID)
+{
+	const int32 CellX = FastFloor(Position.X);
+	const int32 CellY = FastFloor(Position.Y);
+	const int32 CellZ = FastFloor(Position.Z);
+	const float FracX = Position.X - CellX;
+	const float FracY = Position.Y - CellY;
+	const float FracZ = Position.Z - CellZ;
+
+	OutF1 = 100.0f;
+	OutF2 = 100.0f;
+	int32 NearestCellX = CellX;
+	int32 NearestCellY = CellY;
+	int32 NearestCellZ = CellZ;
+
+	for (int32 dz = -1; dz <= 1; ++dz)
+	{
+		for (int32 dy = -1; dy <= 1; ++dy)
+		{
+			for (int32 dx = -1; dx <= 1; ++dx)
+			{
+				const int32 NX = CellX + dx;
+				const int32 NY = CellY + dy;
+				const int32 NZ = CellZ + dz;
+
+				const float OffX = static_cast<float>(Hash(NX + Hash(NY + Hash(NZ, Seed), Seed), Seed)) / 255.0f;
+				const float OffY = static_cast<float>(Hash(NX + 127 + Hash(NY + 63 + Hash(NZ + 31, Seed), Seed), Seed)) / 255.0f;
+				const float OffZ = static_cast<float>(Hash(NX + 59 + Hash(NY + 113 + Hash(NZ + 97, Seed), Seed), Seed)) / 255.0f;
+
+				const float DeltaX = static_cast<float>(dx) + OffX - FracX;
+				const float DeltaY = static_cast<float>(dy) + OffY - FracY;
+				const float DeltaZ = static_cast<float>(dz) + OffZ - FracZ;
+
+				const float DistSq = DeltaX * DeltaX + DeltaY * DeltaY + DeltaZ * DeltaZ;
+
+				if (DistSq < OutF1)
+				{
+					OutF2 = OutF1;
+					OutF1 = DistSq;
+					NearestCellX = NX;
+					NearestCellY = NY;
+					NearestCellZ = NZ;
+				}
+				else if (DistSq < OutF2)
+				{
+					OutF2 = DistSq;
+				}
+			}
+		}
+	}
+
+	OutF1 = FMath::Sqrt(OutF1);
+	OutF2 = FMath::Sqrt(OutF2);
+
+	// Cell ID: hash the nearest cell for a stable per-cell value
+	OutCellID = static_cast<float>(Hash(NearestCellX + Hash(NearestCellY + Hash(NearestCellZ, Seed + 12345), Seed + 12345), Seed + 12345)) / 255.0f;
+}
+
 float FVoxelCPUNoiseGenerator::FBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
 {
 	float Total = 0.0f;
@@ -605,6 +760,20 @@ float FVoxelCPUNoiseGenerator::FBM3D(const FVector& Position, const FVoxelNoiseP
 		if (Params.NoiseType == EVoxelNoiseType::Perlin)
 		{
 			NoiseValue = Perlin3D(ScaledPos, Params.Seed);
+		}
+		else if (Params.NoiseType == EVoxelNoiseType::Cellular)
+		{
+			// Cellular: use F1 distance, map from [0, ~1.5] to [-1, 1]
+			float F1, F2;
+			Cellular3D(ScaledPos, Params.Seed, F1, F2);
+			NoiseValue = F1 * 2.0f - 1.0f;
+		}
+		else if (Params.NoiseType == EVoxelNoiseType::Voronoi)
+		{
+			// Voronoi: use F2-F1 edge distance, map from [0, ~1] to [-1, 1]
+			float F1, F2, CellID;
+			Voronoi3D(ScaledPos, Params.Seed, F1, F2, CellID);
+			NoiseValue = (F2 - F1) * 2.0f - 1.0f;
 		}
 		else
 		{
@@ -711,6 +880,18 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
 					BiomeID = Blend.GetDominantBiome();
 
+					// Cave carving: subtract density for underground cavities
+					float CaveDensity = 0.0f;
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
+
 					// Get material considering blend weights and water level
 					if (Request.bEnableWaterLevel)
 					{
@@ -725,6 +906,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					// Apply height-based material overrides
 					// Height rules still apply after water (snow on peaks even if base is underwater)
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
+
+					// Cave wall material override (solid voxels near cave boundaries)
+					if (Request.bEnableCaves && Request.CaveConfiguration
+						&& Request.CaveConfiguration->bOverrideCaveWallMaterial
+						&& CaveDensity > 0.0f && CaveDensity < 1.0f
+						&& Density >= VOXEL_SURFACE_THRESHOLD
+						&& DepthBelowSurface >= Request.CaveConfiguration->CaveWallMaterialMinDepth)
+					{
+						MaterialID = Request.CaveConfiguration->CaveWallMaterialID;
+					}
 
 					// Apply ore vein overrides (only for solid voxels well below surface)
 					// Use depth > 10 to ensure ores aren't visible on smooth terrain surfaces
@@ -751,11 +942,33 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
 					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+
+					// Cave carving for fallback path
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
 				}
 				else
 				{
 					// Use world mode's material assignment
 					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * VoxelSize);
+
+					// Cave carving for non-biome path
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -763,6 +976,152 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 			}
 		}
 	}
+}
+
+// ==================== Cave Generation Helpers ====================
+
+float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed)
+{
+	// Apply vertical scale to flatten caves horizontally
+	FVector ScaledPos(WorldPos.X, WorldPos.Y, WorldPos.Z * LayerConfig.VerticalScale);
+
+	// Build noise params for first noise field
+	FVoxelNoiseParams CaveNoiseParams;
+	CaveNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	CaveNoiseParams.Seed = WorldSeed + LayerConfig.SeedOffset;
+	CaveNoiseParams.Frequency = LayerConfig.Frequency;
+	CaveNoiseParams.Octaves = LayerConfig.Octaves;
+	CaveNoiseParams.Persistence = LayerConfig.Persistence;
+	CaveNoiseParams.Lacunarity = LayerConfig.Lacunarity;
+	CaveNoiseParams.Amplitude = 1.0f;
+
+	if (LayerConfig.CaveType == ECaveType::Cheese)
+	{
+		// Cheese caves: single noise field, carve where noise > threshold
+		float Noise = FBM3D(ScaledPos, CaveNoiseParams);
+
+		// Noise is in [-1, 1], map threshold to that range
+		if (Noise <= LayerConfig.Threshold)
+		{
+			return 0.0f;
+		}
+
+		// Smooth falloff above threshold
+		float Excess = Noise - LayerConfig.Threshold;
+		float FalloffRange = FMath::Max(LayerConfig.CarveFalloff, 0.01f);
+		float CarveDensity = FMath::Clamp(Excess / FalloffRange, 0.0f, 1.0f);
+
+		return CarveDensity * LayerConfig.CarveStrength;
+	}
+	else
+	{
+		// Spaghetti and Noodle: dual-noise intersection
+		// Tunnel forms where BOTH noise fields are near zero simultaneously
+		float Noise1 = FBM3D(ScaledPos, CaveNoiseParams);
+
+		// Second noise field with offset seed and scaled frequency
+		FVoxelNoiseParams SecondNoiseParams = CaveNoiseParams;
+		SecondNoiseParams.Seed = WorldSeed + LayerConfig.SecondNoiseSeedOffset;
+		SecondNoiseParams.Frequency = LayerConfig.Frequency * LayerConfig.SecondNoiseFrequencyScale;
+
+		float Noise2 = FBM3D(ScaledPos, SecondNoiseParams);
+
+		// Both noise fields must be within [-Threshold, Threshold] for a tunnel
+		float AbsNoise1 = FMath::Abs(Noise1);
+		float AbsNoise2 = FMath::Abs(Noise2);
+
+		if (AbsNoise1 >= LayerConfig.Threshold || AbsNoise2 >= LayerConfig.Threshold)
+		{
+			return 0.0f;
+		}
+
+		// Carve density is stronger as both approach zero
+		float FalloffRange = FMath::Max(LayerConfig.CarveFalloff, 0.01f);
+		float Carve1 = FMath::Clamp(1.0f - (AbsNoise1 / LayerConfig.Threshold), 0.0f, 1.0f);
+		float Carve2 = FMath::Clamp(1.0f - (AbsNoise2 / LayerConfig.Threshold), 0.0f, 1.0f);
+
+		// Multiply for intersection — both must be near zero
+		float CarveDensity = Carve1 * Carve2;
+
+		// Apply smooth falloff
+		CarveDensity = FMath::SmoothStep(0.0f, FalloffRange, CarveDensity);
+
+		return CarveDensity * LayerConfig.CarveStrength;
+	}
+}
+
+float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
+	const FVector& WorldPos,
+	float DepthBelowSurface,
+	uint8 BiomeID,
+	const UVoxelCaveConfiguration* CaveConfig,
+	int32 WorldSeed)
+{
+	if (!CaveConfig || !CaveConfig->bEnableCaves)
+	{
+		return 0.0f;
+	}
+
+	// Get biome scaling
+	float BiomeCaveScale = CaveConfig->GetBiomeCaveScale(BiomeID);
+	if (BiomeCaveScale <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	float BiomeMinDepthOverride = CaveConfig->GetBiomeMinDepthOverride(BiomeID);
+
+	float MaxCarveDensity = 0.0f;
+
+	for (const FCaveLayerConfig& Layer : CaveConfig->CaveLayers)
+	{
+		if (!Layer.bEnabled)
+		{
+			continue;
+		}
+
+		// Determine effective min depth (biome override or layer default)
+		float EffectiveMinDepth = (BiomeMinDepthOverride >= 0.0f) ? BiomeMinDepthOverride : Layer.MinDepth;
+
+		// Check depth constraints
+		if (DepthBelowSurface < EffectiveMinDepth - Layer.DepthFadeWidth)
+		{
+			continue;
+		}
+
+		if (Layer.MaxDepth > 0.0f && DepthBelowSurface > Layer.MaxDepth + Layer.DepthFadeWidth)
+		{
+			continue;
+		}
+
+		// Sample this cave layer
+		float LayerCarve = SampleCaveLayer(WorldPos, Layer, WorldSeed);
+
+		if (LayerCarve <= 0.0f)
+		{
+			continue;
+		}
+
+		// Apply depth fade at MinDepth boundary
+		if (DepthBelowSurface < EffectiveMinDepth)
+		{
+			float FadeT = (DepthBelowSurface - (EffectiveMinDepth - Layer.DepthFadeWidth)) / Layer.DepthFadeWidth;
+			LayerCarve *= FMath::SmoothStep(0.0f, 1.0f, FadeT);
+		}
+
+		// Apply depth fade at MaxDepth boundary
+		if (Layer.MaxDepth > 0.0f && DepthBelowSurface > Layer.MaxDepth)
+		{
+			float FadeT = 1.0f - (DepthBelowSurface - Layer.MaxDepth) / Layer.DepthFadeWidth;
+			LayerCarve *= FMath::SmoothStep(0.0f, 1.0f, FadeT);
+		}
+
+		// Union composition: take the maximum carve from any layer
+		MaxCarveDensity = FMath::Max(MaxCarveDensity, LayerCarve);
+	}
+
+	// Apply biome scaling
+	return FMath::Clamp(MaxCarveDensity * BiomeCaveScale, 0.0f, 1.0f);
 }
 
 // ==================== Ore Vein Helpers ====================
@@ -940,6 +1299,18 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
 					BiomeID = Blend.GetDominantBiome();
 
+					// Cave carving: subtract density for underground cavities
+					float CaveDensity = 0.0f;
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
+
 					// Get material considering blend weights and water level
 					// For spherical planets: underwater if terrain radius < water radius
 					if (Request.bEnableWaterLevel)
@@ -954,6 +1325,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 					// Height rules use radial distance as "height" for spherical planets
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, DistFromCenter, DepthBelowSurface);
+
+					// Cave wall material override (solid voxels near cave boundaries)
+					if (Request.bEnableCaves && Request.CaveConfiguration
+						&& Request.CaveConfiguration->bOverrideCaveWallMaterial
+						&& CaveDensity > 0.0f && CaveDensity < 1.0f
+						&& Density >= VOXEL_SURFACE_THRESHOLD
+						&& DepthBelowSurface >= Request.CaveConfiguration->CaveWallMaterialMinDepth)
+					{
+						MaterialID = Request.CaveConfiguration->CaveWallMaterialID;
+					}
 
 					// Apply ore vein overrides (only for solid voxels well below surface)
 					// Use depth > 10 to ensure ores aren't visible on smooth terrain surfaces
@@ -979,10 +1360,32 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
 					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+
+					// Cave carving for fallback path
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
 				}
 				else
 				{
 					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainRadius, DepthBelowSurface * VoxelSize);
+
+					// Cave carving for non-biome path
+					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+					{
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						if (CaveDensity > 0.0f)
+						{
+							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
+							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
+						}
+					}
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;

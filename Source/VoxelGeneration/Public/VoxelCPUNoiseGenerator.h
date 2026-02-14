@@ -9,6 +9,8 @@
 class FInfinitePlaneWorldMode;
 class FIslandBowlWorldMode;
 class FSphericalPlanetWorldMode;
+class UVoxelCaveConfiguration;
+struct FCaveLayerConfig;
 
 /**
  * CPU-based noise generator for voxel terrain.
@@ -84,6 +86,29 @@ public:
 	 */
 	static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
 
+	/**
+	 * Sample 3D Cellular (Worley) noise at a position.
+	 * Uses 3x3x3 cell search to find distances to nearest two feature points.
+	 *
+	 * @param Position World position to sample (pre-scaled by frequency)
+	 * @param Seed Random seed
+	 * @param OutF1 Distance to nearest feature point
+	 * @param OutF2 Distance to second nearest feature point
+	 */
+	static void Cellular3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2);
+
+	/**
+	 * Sample 3D Voronoi noise at a position.
+	 * Same as Cellular but also returns a stable cell ID.
+	 *
+	 * @param Position World position to sample (pre-scaled by frequency)
+	 * @param Seed Random seed
+	 * @param OutF1 Distance to nearest feature point
+	 * @param OutF2 Distance to second nearest feature point
+	 * @param OutCellID Stable hash-based cell identifier [0, 1]
+	 */
+	static void Voronoi3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2, float& OutCellID);
+
 private:
 	bool bIsInitialized = false;
 
@@ -149,6 +174,38 @@ private:
 
 	/** Dot product for simplex gradient */
 	static float SimplexDot(const int32* G, float X, float Y, float Z);
+
+	// ==================== Cave Generation Helpers ====================
+
+	/**
+	 * Sample a single cave layer's carve density at a position.
+	 * Cheese: single noise field threshold carving.
+	 * Spaghetti/Noodle: dual-noise field intersection carving.
+	 *
+	 * @param WorldPos World position to sample
+	 * @param LayerConfig Configuration for this cave layer
+	 * @param WorldSeed Base world seed
+	 * @return Carve density in range [0, 1] where 0 = no carving, 1 = full carving
+	 */
+	static float SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed);
+
+	/**
+	 * Calculate total cave carve density at a position from all enabled layers.
+	 * Applies depth constraints, biome scaling, and union composition (max).
+	 *
+	 * @param WorldPos World position to sample
+	 * @param DepthBelowSurface Depth below terrain surface in voxels
+	 * @param BiomeID Current biome ID for per-biome overrides
+	 * @param CaveConfig Cave configuration data asset
+	 * @param WorldSeed Base world seed
+	 * @return Carve density in range [0, 1]
+	 */
+	static float CalculateCaveDensity(
+		const FVector& WorldPos,
+		float DepthBelowSurface,
+		uint8 BiomeID,
+		const UVoxelCaveConfiguration* CaveConfig,
+		int32 WorldSeed);
 
 	// ==================== Ore Vein Helpers ====================
 

@@ -13,6 +13,7 @@
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/VoxelWorlds/Private/FBMNoise.ush"
 #include "/Plugin/VoxelWorlds/Private/WorldModeSDF.ush"
+#include "/Plugin/VoxelWorlds/Private/CaveGeneration.ush"
 
 // ==================== Shader Parameters ====================
 
@@ -42,6 +43,25 @@ int WorldMode;      // 0 = InfinitePlane, 1 = SphericalPlanet, 2 = IslandBowl
 float SeaLevel;
 float HeightScale;
 float BaseHeight;
+
+// Cave parameters — packed as vectors (4 layers in .xyzw components)
+int CaveEnabled;
+int CaveLayerCount;
+int4 CaveLayerType;
+int4 CaveLayerSeed;
+int4 CaveLayerSeed2;
+float4 CaveLayerFrequency;
+float4 CaveLayerFrequency2;
+int4 CaveLayerOctaves;
+float4 CaveLayerPersistence;
+float4 CaveLayerLacunarity;
+float4 CaveLayerThreshold;
+float4 CaveLayerCarveStrength;
+float4 CaveLayerCarveFalloff;
+float4 CaveLayerMinDepth;
+float4 CaveLayerMaxDepth;
+float4 CaveLayerDepthFadeWidth;
+float4 CaveLayerVerticalScale;
 
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;
@@ -100,6 +120,70 @@ void MainCS(
 
         // Assign material based on depth below surface
         MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
+
+        // Cave carving: subtract density for underground cavities
+        if (CaveEnabled != 0 && Density >= 127u)
+        {
+            float DepthBelowSurface = (TerrainHeight - WorldPos.z) / EffectiveVoxelSize;
+
+            if (DepthBelowSurface > 0.0f)
+            {
+                float MaxCarveDensity = 0.0f;
+
+                for (int ci = 0; ci < CaveLayerCount; ++ci)
+                {
+                    // Apply vertical scale to flatten caves horizontally
+                    float3 CavePos = float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]);
+
+                    float LayerCarve = 0.0f;
+
+                    if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
+                    {
+                        LayerCarve = SampleCheeseCave(
+                            CavePos,
+                            CaveLayerSeed[ci],
+                            CaveLayerFrequency[ci],
+                            CaveLayerOctaves[ci],
+                            CaveLayerPersistence[ci],
+                            CaveLayerLacunarity[ci],
+                            CaveLayerThreshold[ci],
+                            CaveLayerCarveFalloff[ci],
+                            CaveLayerCarveStrength[ci]);
+                    }
+                    else
+                    {
+                        LayerCarve = SampleTunnelCave(
+                            CavePos,
+                            CaveLayerSeed[ci],
+                            CaveLayerSeed2[ci],
+                            CaveLayerFrequency[ci],
+                            CaveLayerFrequency2[ci],
+                            CaveLayerOctaves[ci],
+                            CaveLayerPersistence[ci],
+                            CaveLayerLacunarity[ci],
+                            CaveLayerThreshold[ci],
+                            CaveLayerCarveFalloff[ci],
+                            CaveLayerCarveStrength[ci]);
+                    }
+
+                    // Apply depth fade
+                    LayerCarve *= CalculateDepthFade(
+                        DepthBelowSurface,
+                        CaveLayerMinDepth[ci],
+                        CaveLayerMaxDepth[ci],
+                        CaveLayerDepthFadeWidth[ci]);
+
+                    MaxCarveDensity = max(MaxCarveDensity, LayerCarve);
+                }
+
+                // Subtract cave density from terrain density
+                if (MaxCarveDensity > 0.0f)
+                {
+                    float NewDensity = max(0.0f, float(Density) - MaxCarveDensity * 255.0f);
+                    Density = (uint)clamp(NewDensity, 0.0f, 255.0f);
+                }
+            }
+        }
     }
     else
     {

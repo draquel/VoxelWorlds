@@ -1,0 +1,151 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * GPU cave generation functions.
+ * Provides cave density sampling for compute shader integration.
+ */
+
+#pragma once
+
+#include "FBMNoise.ush"
+
+// Maximum number of cave layers supported on GPU
+#define MAX_GPU_CAVE_LAYERS 4
+
+// Cave type enum (must match ECaveType)
+#define CAVE_TYPE_CHEESE 0
+#define CAVE_TYPE_SPAGHETTI 1
+#define CAVE_TYPE_NOODLE 2
+
+/**
+ * Calculate depth fade factor for cave depth constraints.
+ * Smoothly fades caves at MinDepth and MaxDepth boundaries.
+ *
+ * @param Depth Current depth below surface in voxels
+ * @param MinDepth Minimum depth for this cave layer
+ * @param MaxDepth Maximum depth (0 = no limit)
+ * @param FadeWidth Width of the fade zone
+ * @return Fade factor [0, 1]
+ */
+float CalculateDepthFade(float Depth, float MinDepth, float MaxDepth, float FadeWidth)
+{
+    float Fade = 1.0f;
+
+    // Fade at MinDepth boundary
+    if (Depth < MinDepth)
+    {
+        float FadeStart = MinDepth - FadeWidth;
+        if (Depth < FadeStart)
+        {
+            return 0.0f;
+        }
+        Fade *= smoothstep(0.0f, 1.0f, (Depth - FadeStart) / FadeWidth);
+    }
+
+    // Fade at MaxDepth boundary
+    if (MaxDepth > 0.0f && Depth > MaxDepth)
+    {
+        float FadeEnd = MaxDepth + FadeWidth;
+        if (Depth > FadeEnd)
+        {
+            return 0.0f;
+        }
+        Fade *= smoothstep(0.0f, 1.0f, 1.0f - (Depth - MaxDepth) / FadeWidth);
+    }
+
+    return Fade;
+}
+
+/**
+ * Sample cheese cave density at a position.
+ * Carves where single noise field exceeds threshold.
+ *
+ * @param ScaledPos Position with vertical scale applied
+ * @param Seed Noise seed for this layer
+ * @param Frequency Base frequency
+ * @param Octaves Number of fBm octaves
+ * @param Persistence Amplitude decay per octave
+ * @param Lacunarity Frequency growth per octave
+ * @param Threshold Noise value threshold for carving
+ * @param CarveFalloff Smooth falloff width above threshold
+ * @param CarveStrength Maximum carve intensity
+ * @return Carve density [0, 1]
+ */
+float SampleCheeseCave(
+    float3 ScaledPos,
+    int Seed,
+    float Frequency,
+    int Octaves,
+    float Persistence,
+    float Lacunarity,
+    float Threshold,
+    float CarveFalloff,
+    float CarveStrength)
+{
+    float Noise = FBM3D(ScaledPos, NOISE_TYPE_SIMPLEX, Seed, Octaves, Frequency, 1.0f, Lacunarity, Persistence);
+
+    if (Noise <= Threshold)
+    {
+        return 0.0f;
+    }
+
+    float Excess = Noise - Threshold;
+    float FalloffRange = max(CarveFalloff, 0.01f);
+    float CarveDensity = saturate(Excess / FalloffRange);
+
+    return CarveDensity * CarveStrength;
+}
+
+/**
+ * Sample tunnel cave density at a position (Spaghetti/Noodle).
+ * Carves where two noise fields are simultaneously near zero.
+ *
+ * @param ScaledPos Position with vertical scale applied
+ * @param Seed1 Seed for first noise field
+ * @param Seed2 Seed for second noise field
+ * @param Frequency1 Frequency for first noise field
+ * @param Frequency2 Frequency for second noise field
+ * @param Octaves Number of fBm octaves
+ * @param Persistence Amplitude decay per octave
+ * @param Lacunarity Frequency growth per octave
+ * @param Threshold Maximum absolute noise value for tunnel
+ * @param CarveFalloff Smooth falloff factor
+ * @param CarveStrength Maximum carve intensity
+ * @return Carve density [0, 1]
+ */
+float SampleTunnelCave(
+    float3 ScaledPos,
+    int Seed1,
+    int Seed2,
+    float Frequency1,
+    float Frequency2,
+    int Octaves,
+    float Persistence,
+    float Lacunarity,
+    float Threshold,
+    float CarveFalloff,
+    float CarveStrength)
+{
+    float Noise1 = FBM3D(ScaledPos, NOISE_TYPE_SIMPLEX, Seed1, Octaves, Frequency1, 1.0f, Lacunarity, Persistence);
+    float Noise2 = FBM3D(ScaledPos, NOISE_TYPE_SIMPLEX, Seed2, Octaves, Frequency2, 1.0f, Lacunarity, Persistence);
+
+    float AbsNoise1 = abs(Noise1);
+    float AbsNoise2 = abs(Noise2);
+
+    if (AbsNoise1 >= Threshold || AbsNoise2 >= Threshold)
+    {
+        return 0.0f;
+    }
+
+    float Carve1 = saturate(1.0f - (AbsNoise1 / Threshold));
+    float Carve2 = saturate(1.0f - (AbsNoise2 / Threshold));
+
+    // Intersection: both must be near zero
+    float CarveDensity = Carve1 * Carve2;
+
+    // Smooth falloff
+    float FalloffRange = max(CarveFalloff, 0.01f);
+    CarveDensity = smoothstep(0.0f, FalloffRange, CarveDensity);
+
+    return CarveDensity * CarveStrength;
+}

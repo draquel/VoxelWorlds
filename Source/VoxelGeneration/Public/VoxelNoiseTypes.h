@@ -7,6 +7,7 @@
 #include "VoxelNoiseTypes.generated.h"
 
 class UVoxelBiomeConfiguration;
+class UVoxelCaveConfiguration;
 
 // Forward declaration for island falloff type
 enum class EIslandFalloffType : uint8;
@@ -186,6 +187,18 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 
 	/** Spherical planet configuration (used when WorldMode == SphericalPlanet) */
 	FSphericalPlanetModeParams SphericalPlanetParams;
+
+	// ==================== Cave Parameters ====================
+
+	/** Whether cave generation is enabled for this request */
+	bool bEnableCaves = false;
+
+	/**
+	 * Cave configuration containing layer definitions and biome overrides.
+	 * Set by VoxelChunkManager from the world config.
+	 * Not a UPROPERTY - kept alive by VoxelWorldConfiguration.
+	 */
+	UVoxelCaveConfiguration* CaveConfiguration = nullptr;
 
 	// ==================== Water Level Parameters ====================
 

@@ -251,7 +251,10 @@ See: `Documentation/TESTING_STRATEGY.md`
 
 **Phase 8: Advanced Features** (in progress)
 - [x] `GetWorldMode()` public getter on `UVoxelChunkManager` — exposes terrain height queries for external systems
-- [ ] Quadtree/Octree LOD, cave generation, improved water, editor tools, etc.
+- [x] Terrain Map / Mini-Map
+- [x] Cave generation — multi-layer (Cheese, Spaghetti, Noodle) via `UVoxelCaveConfiguration`. See `Documentation/CAVE_SYSTEM.md`
+- [x] Advanced noise (Cellular, Voronoi) — GPU + CPU implementations. See `Documentation/NOISE_LIBRARY.md`
+- [ ] Quadtree/Octree LOD, improved water, editor tools, etc.
 
 See: `Documentation/IMPLEMENTATION_PHASES.md` for full roadmap
 

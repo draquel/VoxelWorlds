@@ -11,6 +11,7 @@
 #include "VoxelWorldConfiguration.generated.h"
 
 class UVoxelBiomeConfiguration;
+class UVoxelCaveConfiguration;
 class UVoxelScatterConfiguration;
 
 /**
@@ -215,6 +216,22 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome", meta = (EditCondition = "bEnableBiomes"))
 	TObjectPtr<UVoxelBiomeConfiguration> BiomeConfiguration;
+
+	// ==================== Cave Settings ====================
+
+	/** Enable cave generation (underground caverns, tunnels, and passages) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves")
+	bool bEnableCaves = false;
+
+	/**
+	 * Cave configuration data asset.
+	 * Defines cave layers (cheese caverns, spaghetti tunnels, noodle passages),
+	 * per-biome overrides, and cave wall material settings.
+	 * Create a UVoxelCaveConfiguration asset and assign it here.
+	 * If null but bEnableCaves is true, default cave layers will be used.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves", meta = (EditCondition = "bEnableCaves"))
+	TObjectPtr<UVoxelCaveConfiguration> CaveConfiguration;
 
 	// ==================== LOD Settings ====================
 

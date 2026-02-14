@@ -783,15 +783,16 @@ Phase 7 performance targets displayed for comparison:
 
 ### Completed
 - [x] `GetWorldMode()` public getter on `UVoxelChunkManager` — exposes `const IVoxelWorldMode*` for deterministic terrain height queries without loaded chunks (used by VoxelCharacterPlugin for spawn point finding)
+- [x] Terrain Map / Mini-Map
+- [x] Cave generation — multi-layer (Cheese, Spaghetti, Noodle) via `UVoxelCaveConfiguration` data asset, density subtraction model, works across all 3 world modes (CPU + GPU InfinitePlane), depth constraints, biome overrides, cave wall material override. See `Documentation/CAVE_SYSTEM.md`
+- [x] Advanced noise (Voronoi, Cellular) — `EVoxelNoiseType::Cellular` and `Voronoi` added to enum, GPU (`CellularNoise.ush`) and CPU (`Cellular3D`, `Voronoi3D`) implementations, integrated into fBm on both paths. See `Documentation/NOISE_LIBRARY.md`
 
 ### Potential Features
 - [ ] Quadtree LOD (if distance bands insufficient)
 - [ ] Octree LOD (if needed for spherical)
-- [ ] Advanced noise (Voronoi, Cellular)
 - [ ] Weather/season system
 - [ ] Multiplayer support
 - [ ] Destructible terrain
-- [ ] Cave generation
 - [ ] Improve Water
 - [ ] Character Movement
 - [ ] Export to Unreal Terrain / Static Terrain Mesh(es)
@@ -799,7 +800,6 @@ Phase 7 performance targets displayed for comparison:
 - [ ] Final World Actor(s)
 - [ ] Editor Tools / Debugging tools
 - [ ] Dual-Contouring
-- [ ] Terrain Map / Mini-Map
 - [ ] TransVoxel Seams troubleshooting
 
 ---
