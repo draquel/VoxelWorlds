@@ -96,6 +96,46 @@ struct VOXELCORE_API FVoxelData
 		Metadata = (Metadata & 0x0F) | ((Flags & 0x0F) << 4);
 	}
 
+	/** Water flag bit within the flags nibble */
+	static constexpr uint8 VOXEL_FLAG_WATER = 0x01;
+
+	/** Cave-carved air flag bit within the flags nibble (temporary, cleared after water fill) */
+	static constexpr uint8 VOXEL_FLAG_CAVE = 0x02;
+
+	/** Check if this voxel is marked as containing water */
+	FORCEINLINE bool HasWaterFlag() const
+	{
+		return (GetFlags() & VOXEL_FLAG_WATER) != 0;
+	}
+
+	/** Set or clear the water flag */
+	FORCEINLINE void SetWaterFlag(bool bHasWater)
+	{
+		uint8 Flags = GetFlags();
+		if (bHasWater)
+			Flags |= VOXEL_FLAG_WATER;
+		else
+			Flags &= ~VOXEL_FLAG_WATER;
+		SetFlags(Flags);
+	}
+
+	/** Check if this voxel was carved by cave generation (temporary flag) */
+	FORCEINLINE bool HasCaveFlag() const
+	{
+		return (GetFlags() & VOXEL_FLAG_CAVE) != 0;
+	}
+
+	/** Set or clear the cave-carved flag */
+	FORCEINLINE void SetCaveFlag(bool bIsCave)
+	{
+		uint8 Flags = GetFlags();
+		if (bIsCave)
+			Flags |= VOXEL_FLAG_CAVE;
+		else
+			Flags &= ~VOXEL_FLAG_CAVE;
+		SetFlags(Flags);
+	}
+
 	/** Pack to uint32 for GPU transfer */
 	FORCEINLINE uint32 Pack() const
 	{
@@ -120,6 +160,12 @@ struct VOXELCORE_API FVoxelData
 	FORCEINLINE static FVoxelData Air()
 	{
 		return FVoxelData(0, 0, 0, 0);
+	}
+
+	/** Create a water voxel (air with water flag set) */
+	FORCEINLINE static FVoxelData Water()
+	{
+		return FVoxelData(0, 0, 0, 0x10); // bit 4 = water flag (bit 0 of flags nibble)
 	}
 
 	/** Create a solid voxel with given material */

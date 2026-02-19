@@ -73,6 +73,10 @@ float4 CaveLayerMaxDepth;
 float4 CaveLayerDepthFadeWidth;
 float4 CaveLayerVerticalScale;
 
+// Water level parameters
+int WaterLevelEnabled;
+float WaterLevelHeight;
+
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;
 
@@ -231,6 +235,13 @@ void MainCS(
                     Density = (uint)clamp(NewDensity, 0.0f, 255.0f);
                 }
             }
+        }
+
+        // Water flag: mark air voxels between terrain surface and water level
+        if (WaterLevelEnabled != 0 && Density < 127u
+            && WorldPos.z < WaterLevelHeight && WorldPos.z > TerrainHeight)
+        {
+            Metadata = Metadata | 0x10u; // Set bit 4 = water flag
         }
     }
     else

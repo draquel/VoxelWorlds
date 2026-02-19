@@ -205,7 +205,8 @@ private:
 		float DepthBelowSurface,
 		uint8 BiomeID,
 		const UVoxelCaveConfiguration* CaveConfig,
-		int32 WorldSeed);
+		int32 WorldSeed,
+		bool bIsUnderwater = false);
 
 	// ==================== Ore Vein Helpers ====================
 
@@ -233,4 +234,11 @@ private:
 		const TArray<struct FOreVeinConfig>& OreConfigs,
 		int32 WorldSeed,
 		uint8& OutMaterialID);
+
+	// ==================== Water Fill Pass ====================
+
+	/** Post-generation: mark air voxels below water level as water via column scan. */
+	static void ApplyWaterFillPass(
+		const FVoxelNoiseGenerationRequest& Request,
+		TArray<FVoxelData>& OutVoxelData);
 };

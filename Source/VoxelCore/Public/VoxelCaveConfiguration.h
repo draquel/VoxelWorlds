@@ -49,6 +49,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Biome Overrides")
 	TArray<FBiomeCaveOverride> BiomeOverrides;
 
+	// ==================== Underwater Suppression ====================
+
+	/**
+	 * Minimum depth below seabed for caves when terrain surface is below water level.
+	 * Applied regardless of biome — catches transition zones where ocean biome
+	 * isn't assigned but terrain is still underwater. Set to 0 to disable.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Underwater", meta = (ClampMin = "0"))
+	float UnderwaterMinDepth = 0.0f;
+
 	// ==================== Cave Wall Material ====================
 
 	/** Override material on cave wall surfaces */

@@ -67,6 +67,9 @@ public:
 		SHADER_PARAMETER(float, ContinentalnessHeightMax)
 		SHADER_PARAMETER(float, ContinentalnessHeightScaleMin)
 		SHADER_PARAMETER(float, ContinentalnessHeightScaleMax)
+		// Water level parameters
+		SHADER_PARAMETER(int32, WaterLevelEnabled)
+		SHADER_PARAMETER(float, WaterLevelHeight)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -213,6 +216,10 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 				Parameters->ContinentalnessHeightScaleMin = BiomeConfig->ContinentalnessHeightScaleMin;
 				Parameters->ContinentalnessHeightScaleMax = BiomeConfig->ContinentalnessHeightScaleMax;
 			}
+
+			// Water level parameters
+			Parameters->WaterLevelEnabled = CapturedRequest.bEnableWaterLevel ? 1 : 0;
+			Parameters->WaterLevelHeight = CapturedRequest.WaterLevel;
 
 			// Cave parameters — zero-initialize packed vectors
 			Parameters->CaveEnabled = 0;

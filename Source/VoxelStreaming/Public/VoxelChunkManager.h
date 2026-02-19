@@ -23,6 +23,7 @@ class FVoxelCPUSmoothMesher;
 class UVoxelEditManager;
 class UVoxelCollisionManager;
 class UVoxelScatterManager;
+class UVoxelWaterPropagation;
 
 /**
  * Internal chunk state tracking.
@@ -287,6 +288,16 @@ public:
 	IVoxelMeshRenderer* GetMeshRenderer() const { return MeshRenderer; }
 
 	/**
+	 * Set a secondary renderer for water surface mesh.
+	 * When set, the chunk manager will generate water meshes alongside terrain
+	 * and send them to this renderer. The caller retains ownership.
+	 */
+	void SetWaterRenderer(IVoxelMeshRenderer* InWaterRenderer) { WaterMeshRenderer = InWaterRenderer; }
+
+	/** Get the water mesh renderer (may be nullptr). */
+	IVoxelMeshRenderer* GetWaterRenderer() const { return WaterMeshRenderer; }
+
+	/**
 	 * Get the edit manager.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
@@ -523,6 +534,19 @@ protected:
 	void QueueNeighborsForRemesh(const FIntVector& ChunkCoord);
 
 	/**
+	 * Propagate water flags from loaded neighbor chunks into this chunk.
+	 *
+	 * Checks 6 face-neighbor chunks for water-flagged voxels at their shared
+	 * boundary. Any dry air voxels on this chunk's boundary that are below water
+	 * level and adjacent to a neighbor's water voxel become seeds for an
+	 * intra-chunk BFS flood fill.
+	 *
+	 * @param ChunkCoord The chunk to propagate water into
+	 * @return True if any new water flags were set (caller should regenerate water mesh)
+	 */
+	bool PropagateWaterFromNeighbors(const FIntVector& ChunkCoord);
+
+	/**
 	 * Extract neighbor edge slices for seamless chunk boundaries.
 	 *
 	 * For each of 6 faces, checks if neighbor chunk is loaded and
@@ -606,6 +630,9 @@ protected:
 
 	/** Mesh renderer (NOT owned by this manager) */
 	IVoxelMeshRenderer* MeshRenderer = nullptr;
+
+	/** Water mesh renderer (NOT owned by this manager, may be nullptr) */
+	IVoxelMeshRenderer* WaterMeshRenderer = nullptr;
 
 	/** Whether the manager has been initialized */
 	bool bIsInitialized = false;
@@ -789,6 +816,10 @@ protected:
 	/** Scatter manager for vegetation placement */
 	UPROPERTY()
 	TObjectPtr<UVoxelScatterManager> ScatterManager;
+
+	/** Water propagation system for flooding caves on edit */
+	UPROPERTY()
+	TObjectPtr<UVoxelWaterPropagation> WaterPropagation;
 
 	// ==================== Adaptive Throttling State ====================
 

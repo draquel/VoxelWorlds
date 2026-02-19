@@ -269,10 +269,39 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using PMC renderer (CPU fallback)"));
 	}
 
+	// Create water mesh renderer (same type as terrain renderer, separate component with water material)
+	if (Config->bEnableWaterLevel && Config->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		FVoxelCustomVFRenderer* WaterCustomVFRenderer = new FVoxelCustomVFRenderer();
+
+		// Set water material BEFORE Initialize (creates scene proxy)
+		if (WaterMaterial)
+		{
+			WaterCustomVFRenderer->SetMaterial(WaterMaterial);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water renderer using material '%s'"), *WaterMaterial->GetName());
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning,
+				TEXT("VoxelWorldTestActor: No WaterMaterial assigned. Water surface will use default material."));
+		}
+
+		WaterCustomVFRenderer->Initialize(World, Config);
+		WaterMeshRenderer = WaterCustomVFRenderer;
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water mesh renderer created (per-chunk water surface)"));
+	}
+
 	// Initialize chunk manager
 	if (ChunkManager)
 	{
 		ChunkManager->Initialize(Config, LODStrategy, MeshRenderer);
+
+		// Set water renderer so chunk manager generates water meshes alongside terrain
+		if (WaterMeshRenderer)
+		{
+			ChunkManager->SetWaterRenderer(WaterMeshRenderer);
+		}
+
 		ChunkManager->SetStreamingEnabled(true);
 	}
 
@@ -340,6 +369,14 @@ void AVoxelWorldTestActor::ShutdownVoxelWorld()
 
 	// LODStrategy is deleted by ChunkManager::Shutdown()
 	LODStrategy = nullptr;
+
+	// Clean up water renderer (we own it)
+	if (WaterMeshRenderer)
+	{
+		WaterMeshRenderer->Shutdown();
+		delete WaterMeshRenderer;
+		WaterMeshRenderer = nullptr;
+	}
 
 	// Clean up renderer (we own it)
 	if (MeshRenderer)
@@ -724,6 +761,8 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 	// Different visualization based on world mode
 	if (Config->WorldMode == EWorldMode::SphericalPlanet)
 	{
+		// Spherical planet mode: use sphere mesh (per-chunk water not supported for spherical yet)
+
 		// Destroy plane if it exists (switching modes)
 		if (WaterPlaneMesh)
 		{
@@ -794,7 +833,7 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 	}
 	else
 	{
-		// Flat world modes (InfinitePlane, IslandBowl) - use plane
+		// Flat world modes (InfinitePlane, IslandBowl)
 
 		// Destroy sphere if it exists (switching modes)
 		if (WaterSphereMesh)
@@ -803,70 +842,22 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 			WaterSphereMesh = nullptr;
 		}
 
-		// Create the water plane mesh component if it doesn't exist
-		if (!WaterPlaneMesh)
+		// Per-chunk water mesh renderer handles water visualization — no static plane needed.
+		// Destroy any legacy plane.
+		if (WaterPlaneMesh)
 		{
-			WaterPlaneMesh = NewObject<UStaticMeshComponent>(this, TEXT("WaterPlaneMesh"));
-			if (WaterPlaneMesh)
-			{
-				WaterPlaneMesh->SetupAttachment(GetRootComponent());
-				WaterPlaneMesh->RegisterComponent();
-
-				// Use the default plane mesh from the engine
-				UStaticMesh* PlaneMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane"));
-				if (PlaneMesh)
-				{
-					WaterPlaneMesh->SetStaticMesh(PlaneMesh);
-				}
-
-				// Disable collision for visualization
-				WaterPlaneMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-
-				// Set cast shadows to false (water plane shouldn't cast shadows)
-				WaterPlaneMesh->SetCastShadow(false);
-
-				UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Created water plane visualization component"));
-			}
+			WaterPlaneMesh->DestroyComponent();
+			WaterPlaneMesh = nullptr;
 		}
 
-		if (!WaterPlaneMesh)
+		if (WaterMeshRenderer)
 		{
-			return;
-		}
-
-		// Set position at water level (relative to WorldOrigin)
-		FVector WaterPosition = Config->WorldOrigin;
-		WaterPosition.Z = Config->WaterLevel;
-		WaterPlaneMesh->SetWorldLocation(WaterPosition);
-
-		// Scale based on ViewDistance and WaterPlaneScale
-		// The default plane is 100x100 units, so we scale to cover ViewDistance
-		const float PlaneSize = Config->ViewDistance * WaterPlaneScale;
-		const float Scale = PlaneSize / 100.0f;  // Default plane is 100 units
-		WaterPlaneMesh->SetWorldScale3D(FVector(Scale, Scale, 1.0f));
-
-		// Set material
-		if (WaterMaterial)
-		{
-			WaterPlaneMesh->SetMaterial(0, WaterMaterial);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using per-chunk water mesh renderer (static plane removed)"));
 		}
 		else
 		{
-			// Create a simple translucent blue material if none provided
-			UMaterialInstanceDynamic* DefaultWaterMat = UMaterialInstanceDynamic::Create(
-				WaterPlaneMesh->GetMaterial(0), this);
-			if (DefaultWaterMat)
-			{
-				// Try to set some basic parameters (depends on the base material supporting them)
-				DefaultWaterMat->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.1f, 0.3f, 0.6f, 0.5f));
-				WaterPlaneMesh->SetMaterial(0, DefaultWaterMat);
-			}
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelWorldTestActor: Water enabled but no WaterMeshRenderer created — water will not be visible"));
 		}
-
-		WaterPlaneMesh->SetVisibility(true);
-
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water plane at Z=%.0f, Scale=%.0f"),
-			Config->WaterLevel, PlaneSize);
 	}
 }
 

@@ -170,6 +170,9 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		GenerateChunk3DNoise(Request, OutVoxelData);
 	}
 
+	// Post-generation: mark water voxels via column scan
+	ApplyWaterFillPass(Request, OutVoxelData);
+
 	return true;
 }
 
@@ -281,6 +284,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				// Calculate depth below surface for material assignment (in voxels)
 				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / VoxelSize;
 
+				// Save pre-cave density to detect cave carving (solid → air transition)
+				const uint8 PreCaveDensity = Density;
+
 				// Determine material and biome
 				uint8 MaterialID = 0;
 				uint8 BiomeID = 0;
@@ -303,7 +309,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					float CaveDensity = 0.0f;
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -365,7 +372,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -381,7 +389,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -391,7 +400,13 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);
+
+				// Set cave flag if cave carving converted this voxel from solid to air.
+				// Water fill uses this to treat cave voids as barriers during initial fill,
+				// then clears flags and re-propagates to fill only connected caves.
+				const bool bCaveCarved = (PreCaveDensity >= VOXEL_SURFACE_THRESHOLD && Density < VOXEL_SURFACE_THRESHOLD);
+				const uint8 InitMetadata = bCaveCarved ? (FVoxelData::VOXEL_FLAG_CAVE << 4) : 0;
+				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, InitMetadata);
 			}
 		}
 	}
@@ -920,6 +935,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 				// Calculate depth below surface for material assignment
 				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / VoxelSize;
 
+				// Save pre-cave density to detect cave carving (solid → air transition)
+				const uint8 PreCaveDensity = Density;
+
 				// Determine material and biome
 				uint8 MaterialID = 0;
 				uint8 BiomeID = 0;
@@ -939,7 +957,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					float CaveDensity = 0.0f;
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1001,7 +1020,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1017,7 +1037,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1027,7 +1048,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);
+
+				const bool bCaveCarved = (PreCaveDensity >= VOXEL_SURFACE_THRESHOLD && Density < VOXEL_SURFACE_THRESHOLD);
+				const uint8 InitMetadata = bCaveCarved ? (FVoxelData::VOXEL_FLAG_CAVE << 4) : 0;
+				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, InitMetadata);
 			}
 		}
 	}
@@ -1110,7 +1134,8 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 	float DepthBelowSurface,
 	uint8 BiomeID,
 	const UVoxelCaveConfiguration* CaveConfig,
-	int32 WorldSeed)
+	int32 WorldSeed,
+	bool bIsUnderwater)
 {
 	if (!CaveConfig || !CaveConfig->bEnableCaves)
 	{
@@ -1125,6 +1150,20 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 	}
 
 	float BiomeMinDepthOverride = CaveConfig->GetBiomeMinDepthOverride(BiomeID);
+
+	// Apply underwater min depth — catches biome transition zones where the
+	// ocean biome isn't assigned but terrain is still below water level
+	if (bIsUnderwater && CaveConfig->UnderwaterMinDepth > 0.0f)
+	{
+		if (BiomeMinDepthOverride < 0.0f)
+		{
+			BiomeMinDepthOverride = CaveConfig->UnderwaterMinDepth;
+		}
+		else
+		{
+			BiomeMinDepthOverride = FMath::Max(BiomeMinDepthOverride, CaveConfig->UnderwaterMinDepth);
+		}
+	}
 
 	float MaxCarveDensity = 0.0f;
 
@@ -1470,6 +1509,193 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
 				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);
 			}
+		}
+	}
+}
+
+// ==================== Water Fill Pass ====================
+
+void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
+	const FVoxelNoiseGenerationRequest& Request,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	if (!Request.bEnableWaterLevel)
+		return;
+
+	// SphericalPlanet uses radial water — skip flat-plane column scan
+	if (Request.WorldMode == EWorldMode::SphericalPlanet)
+		return;
+
+	const int32 ChunkSize = Request.ChunkSize;
+	const float VoxelSize = Request.VoxelSize;
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	const float WaterLevel = Request.WaterLevel;
+	const int32 SliceSize = ChunkSize * ChunkSize;
+	const int32 VolumeSize = SliceSize * ChunkSize;
+
+	// === Phase 1: Column scan — seed water in open ocean ===
+	// Cave-flagged voxels are treated as solid barriers so the column scan
+	// doesn't flood through cave openings in the seabed.
+	const float ChunkTopZ = ChunkWorldPos.Z + ChunkSize * VoxelSize;
+	const bool bChunkContainsWaterLevel = (WaterLevel >= ChunkWorldPos.Z && WaterLevel < ChunkTopZ);
+
+	if (bChunkContainsWaterLevel)
+	{
+		const int32 WaterZ = FMath::Clamp(
+			FMath::FloorToInt32((WaterLevel - ChunkWorldPos.Z) / VoxelSize),
+			0, ChunkSize - 1);
+
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				// When WaterZ < ChunkSize - 1, verify the column is open from
+				// the chunk top down to the water level. Solid or cave-flagged
+				// voxels above water level mean this column is underground.
+				if (WaterZ < ChunkSize - 1)
+				{
+					bool bColumnOpen = true;
+					for (int32 Z = ChunkSize - 1; Z > WaterZ; --Z)
+					{
+						int32 Index = X + Y * ChunkSize + Z * SliceSize;
+						if (OutVoxelData[Index].IsSolid() || OutVoxelData[Index].HasCaveFlag())
+						{
+							bColumnOpen = false;
+							break;
+						}
+					}
+					if (!bColumnOpen)
+						continue;
+				}
+
+				// Scan from water level downward: flag air, stop at solid or cave barrier
+				for (int32 Z = WaterZ; Z >= 0; --Z)
+				{
+					int32 Index = X + Y * ChunkSize + Z * SliceSize;
+					FVoxelData& Voxel = OutVoxelData[Index];
+
+					if (Voxel.IsSolid() || Voxel.HasCaveFlag())
+						break;
+
+					Voxel.SetWaterFlag(true);
+				}
+			}
+		}
+	}
+
+	// === Phase 2: BFS flood fill — propagate water through non-cave air ===
+	// Cave-flagged voxels act as barriers so water stays in the open ocean
+	// and doesn't leak into cave interiors.
+	TArray<int32> BFSQueue;
+	BFSQueue.Reserve(SliceSize);
+
+	for (int32 i = 0; i < VolumeSize; ++i)
+	{
+		if (OutVoxelData[i].HasWaterFlag())
+		{
+			BFSQueue.Add(i);
+		}
+	}
+
+	static constexpr int32 DX[6] = { 1, -1,  0,  0,  0,  0 };
+	static constexpr int32 DY[6] = { 0,  0,  1, -1,  0,  0 };
+	static constexpr int32 DZ[6] = { 0,  0,  0,  0,  1, -1 };
+
+	int32 QueueHead = 0;
+	while (QueueHead < BFSQueue.Num())
+	{
+		const int32 CurrentIdx = BFSQueue[QueueHead++];
+		const int32 CZ = CurrentIdx / SliceSize;
+		const int32 CY = (CurrentIdx - CZ * SliceSize) / ChunkSize;
+		const int32 CX = CurrentIdx - CZ * SliceSize - CY * ChunkSize;
+
+		for (int32 D = 0; D < 6; ++D)
+		{
+			const int32 NX = CX + DX[D];
+			const int32 NY = CY + DY[D];
+			const int32 NZ = CZ + DZ[D];
+
+			if (NX < 0 || NX >= ChunkSize ||
+				NY < 0 || NY >= ChunkSize ||
+				NZ < 0 || NZ >= ChunkSize)
+			{
+				continue;
+			}
+
+			const int32 NeighborIdx = NX + NY * ChunkSize + NZ * SliceSize;
+			FVoxelData& Neighbor = OutVoxelData[NeighborIdx];
+
+			// Skip solid, already-flagged, and cave-carved voxels
+			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag() || Neighbor.HasCaveFlag())
+				continue;
+
+			const float NeighborWorldZ = ChunkWorldPos.Z + NZ * VoxelSize;
+			if (NeighborWorldZ > WaterLevel)
+				continue;
+
+			Neighbor.SetWaterFlag(true);
+			BFSQueue.Add(NeighborIdx);
+		}
+	}
+
+	// === Phase 3: Clear cave flags ===
+	// Cave flags were temporary barriers to prevent ocean water from flooding
+	// cave interiors during the column scan and initial BFS. Now clear them
+	// so cave voids become normal air for the connectivity pass.
+	for (int32 i = 0; i < VolumeSize; ++i)
+	{
+		if (OutVoxelData[i].HasCaveFlag())
+		{
+			OutVoxelData[i].SetCaveFlag(false);
+		}
+	}
+
+	// === Phase 4: BFS — propagate water into connected cave voids ===
+	// Re-run BFS from all water-flagged voxels. Cave voids adjacent to ocean
+	// water (e.g. cave openings in the seabed) will now receive water.
+	// Sealed caves (no adjacent water source) remain dry.
+	BFSQueue.Reset();
+	for (int32 i = 0; i < VolumeSize; ++i)
+	{
+		if (OutVoxelData[i].HasWaterFlag())
+		{
+			BFSQueue.Add(i);
+		}
+	}
+
+	QueueHead = 0;
+	while (QueueHead < BFSQueue.Num())
+	{
+		const int32 CurrentIdx = BFSQueue[QueueHead++];
+		const int32 CZ = CurrentIdx / SliceSize;
+		const int32 CY = (CurrentIdx - CZ * SliceSize) / ChunkSize;
+		const int32 CX = CurrentIdx - CZ * SliceSize - CY * ChunkSize;
+
+		for (int32 D = 0; D < 6; ++D)
+		{
+			const int32 NX = CX + DX[D];
+			const int32 NY = CY + DY[D];
+			const int32 NZ = CZ + DZ[D];
+
+			if (NX < 0 || NX >= ChunkSize ||
+				NY < 0 || NY >= ChunkSize ||
+				NZ < 0 || NZ >= ChunkSize)
+			{
+				continue;
+			}
+
+			const int32 NeighborIdx = NX + NY * ChunkSize + NZ * SliceSize;
+			FVoxelData& Neighbor = OutVoxelData[NeighborIdx];
+
+			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag())
+				continue;
+
+			const float NeighborWorldZ = ChunkWorldPos.Z + NZ * VoxelSize;
+			if (NeighborWorldZ > WaterLevel)
+				continue;
+
+			Neighbor.SetWaterFlag(true);
+			BFSQueue.Add(NeighborIdx);
 		}
 	}
 }

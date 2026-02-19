@@ -13,8 +13,10 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelCPUSmoothMesher.h"
+#include "VoxelWaterMesher.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
+#include "VoxelWaterPropagation.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelScatterManager.h"
 #include "VoxelTreeInjector.h"
@@ -188,6 +190,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	ProcessUnloadQueue(MaxUnloadsPerFrame);
 	Timing.RenderSubmitMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
+	// === Water propagation (bounded BFS per frame) ===
+	if (WaterPropagation && WaterPropagation->HasPendingWork())
+	{
+		WaterPropagation->ProcessPropagation(512);
+	}
+
 	// === LOD level changes and morph factor updates ===
 	SectionStart = FPlatformTime::Seconds();
 	{
@@ -263,6 +271,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	if (MeshRenderer)
 	{
 		MeshRenderer->FlushPendingOperations();
+	}
+	if (WaterMeshRenderer)
+	{
+		WaterMeshRenderer->FlushPendingOperations();
 	}
 
 	Timing.TotalMs = static_cast<float>((FPlatformTime::Seconds() - TickStartTime) * 1000.0);
@@ -431,6 +443,12 @@ void UVoxelChunkManager::Initialize(
 			// since the targeted removal already happened during the original edit
 		}
 
+		// Notify water propagation system of the edit
+		if (WaterPropagation)
+		{
+			WaterPropagation->OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius);
+		}
+
 		// Also mark neighboring chunks dirty so they re-extract boundary data
 		// This ensures seamless edits across chunk borders
 		static const FIntVector NeighborOffsets[6] = {
@@ -485,6 +503,16 @@ void UVoxelChunkManager::Initialize(
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
 			Configuration->ScatterRadius);
+	}
+
+	// Create water propagation system if water is enabled
+	if (Configuration->bEnableWaterLevel)
+	{
+		WaterPropagation = NewObject<UVoxelWaterPropagation>(this);
+		WaterPropagation->Initialize(this, EditManager, Configuration->WaterLevel);
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWaterPropagation created (WaterLevel=%.0f)"),
+			Configuration->WaterLevel);
 	}
 
 	bIsInitialized = true;
@@ -584,6 +612,9 @@ void UVoxelChunkManager::Shutdown()
 		ScatterManager->Shutdown();
 		ScatterManager = nullptr;
 	}
+
+	// Shutdown water propagation (before edit manager since it depends on it)
+	WaterPropagation = nullptr;
 
 	// Shutdown edit manager
 	if (EditManager)
@@ -1682,6 +1713,12 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 			MeshRenderer->RemoveChunk(ChunkCoord);
 		}
 
+		// Remove water mesh for this chunk
+		if (WaterMeshRenderer)
+		{
+			WaterMeshRenderer->RemoveChunk(ChunkCoord);
+		}
+
 		// Remove from loaded set
 		LoadedChunkCoords.Remove(ChunkCoord);
 
@@ -1942,6 +1979,58 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 				State->Descriptor.VoxelData, State->Descriptor.ChunkSize, Configuration->VoxelSize);
 		}
 
+		// Propagate water flags from loaded neighbors into this chunk's voxel data
+		// before generating the water mesh, so caves connected across chunk
+		// boundaries receive consistent water flags.
+		if (Configuration && Configuration->bEnableWaterLevel)
+		{
+			PropagateWaterFromNeighbors(ChunkCoord);
+		}
+
+		// Generate water surface mesh and send to water renderer
+		if (WaterMeshRenderer && Configuration && Configuration->bEnableWaterLevel)
+		{
+			FVoxelMeshingRequest WaterRequest;
+			WaterRequest.ChunkCoord = ChunkCoord;
+			WaterRequest.LODLevel = PendingMesh.LODLevel;
+			WaterRequest.ChunkSize = Configuration->ChunkSize;
+			WaterRequest.VoxelSize = Configuration->VoxelSize;
+			WaterRequest.WorldOrigin = Configuration->WorldOrigin;
+			WaterRequest.VoxelData = State->Descriptor.VoxelData;
+
+			// Merge edit layer for water mesh to reflect terrain edits
+			if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+			{
+				const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(ChunkCoord);
+				if (EditLayer && !EditLayer->IsEmpty())
+				{
+					for (const auto& EditPair : EditLayer->Edits)
+					{
+						if (WaterRequest.VoxelData.IsValidIndex(EditPair.Key))
+						{
+							const FVoxelData& ProceduralData = WaterRequest.VoxelData[EditPair.Key];
+							WaterRequest.VoxelData[EditPair.Key] = EditPair.Value.ApplyToProceduralData(ProceduralData);
+						}
+					}
+				}
+			}
+
+			// Extract +Z neighbor for surface detection at chunk top boundary
+			ExtractNeighborEdgeSlices(ChunkCoord, WaterRequest);
+
+			FChunkMeshData WaterMeshData;
+			FVoxelWaterMesher::GenerateWaterMesh(WaterRequest, WaterMeshData);
+			if (WaterMeshData.IsValid())
+			{
+				WaterMeshRenderer->UpdateChunkMeshFromCPU(ChunkCoord, PendingMesh.LODLevel, WaterMeshData);
+			}
+			else
+			{
+				// No water surface in this chunk — remove any existing water mesh
+				WaterMeshRenderer->RemoveChunk(ChunkCoord);
+			}
+		}
+
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
 		PendingMeshQueue.RemoveAtSwap(PendingIndex, EAllowShrinking::No);
 	}
@@ -1953,6 +2042,69 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	// Fire event
 	OnChunkLoaded.Broadcast(ChunkCoord);
+
+	// Reverse water propagation: if this chunk has water at its boundary faces,
+	// loaded neighbors might have dry caves that should now receive water.
+	// Only re-check face neighbors that are already Loaded (lightweight boundary scan).
+	if (WaterMeshRenderer && Configuration && Configuration->bEnableWaterLevel && State)
+	{
+		static const FIntVector FaceOffsets[6] = {
+			{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
+		};
+		const int32 CS = Configuration->ChunkSize;
+		const int32 VolumeSize = CS * CS * CS;
+
+		for (int32 F = 0; F < 6; ++F)
+		{
+			const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[F];
+			FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
+			if (!NeighborState || NeighborState->State != EChunkState::Loaded)
+			{
+				continue;
+			}
+			if (NeighborState->Descriptor.VoxelData.Num() != VolumeSize)
+			{
+				continue;
+			}
+
+			if (PropagateWaterFromNeighbors(NeighborCoord))
+			{
+				// Regenerate water mesh for the neighbor
+				FVoxelMeshingRequest WaterReq;
+				WaterReq.ChunkCoord = NeighborCoord;
+				WaterReq.LODLevel = NeighborState->LODLevel;
+				WaterReq.ChunkSize = CS;
+				WaterReq.VoxelSize = Configuration->VoxelSize;
+				WaterReq.WorldOrigin = Configuration->WorldOrigin;
+				WaterReq.VoxelData = NeighborState->Descriptor.VoxelData;
+
+				if (EditManager && EditManager->ChunkHasEdits(NeighborCoord))
+				{
+					const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(NeighborCoord);
+					if (EditLayer && !EditLayer->IsEmpty())
+					{
+						for (const auto& EditPair : EditLayer->Edits)
+						{
+							if (WaterReq.VoxelData.IsValidIndex(EditPair.Key))
+							{
+								const FVoxelData& ProceduralData = WaterReq.VoxelData[EditPair.Key];
+								WaterReq.VoxelData[EditPair.Key] = EditPair.Value.ApplyToProceduralData(ProceduralData);
+							}
+						}
+					}
+				}
+
+				ExtractNeighborEdgeSlices(NeighborCoord, WaterReq);
+
+				FChunkMeshData WaterMeshData;
+				FVoxelWaterMesher::GenerateWaterMesh(WaterReq, WaterMeshData);
+				if (WaterMeshData.IsValid())
+				{
+					WaterMeshRenderer->UpdateChunkMeshFromCPU(NeighborCoord, NeighborState->LODLevel, WaterMeshData);
+				}
+			}
+		}
+	}
 
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) loaded"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
@@ -2009,6 +2161,184 @@ void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
 			}
 		}
 	}
+}
+
+bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoord)
+{
+	if (!Configuration || !Configuration->bEnableWaterLevel)
+	{
+		return false;
+	}
+
+	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State || State->Descriptor.VoxelData.Num() == 0)
+	{
+		return false;
+	}
+
+	const int32 CS = Configuration->ChunkSize;
+	const float VS = Configuration->VoxelSize;
+	const int32 VolumeSize = CS * CS * CS;
+	const int32 SliceSize = CS * CS;
+	const float WaterLevel = Configuration->WaterLevel;
+	const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(ChunkCoord, CS, VS);
+
+	if (State->Descriptor.VoxelData.Num() != VolumeSize)
+	{
+		return false;
+	}
+
+	TArray<FVoxelData>& VoxelData = State->Descriptor.VoxelData;
+
+	// Collect seed voxels from 6 face neighbors
+	TArray<int32> Seeds;
+
+	static const FIntVector FaceOffsets[6] = {
+		{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
+	};
+
+	for (int32 F = 0; F < 6; ++F)
+	{
+		const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[F];
+		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
+		if (!NeighborState || NeighborState->Descriptor.VoxelData.Num() != VolumeSize)
+		{
+			continue;
+		}
+
+		const TArray<FVoxelData>& NeighborData = NeighborState->Descriptor.VoxelData;
+
+		// Determine which boundary face to check on each chunk
+		// For face direction F, check our boundary face and the neighbor's opposite face
+		// e.g. +X neighbor: our X=CS-1 face vs neighbor's X=0 face
+		const int32 MaxIdx = CS - 1;
+
+		// Iterate boundary face voxels (2D loop over the two axes perpendicular to this face)
+		for (int32 A = 0; A < CS; ++A)
+		{
+			for (int32 B = 0; B < CS; ++B)
+			{
+				int32 OurX, OurY, OurZ;
+				int32 NbrX, NbrY, NbrZ;
+
+				switch (F)
+				{
+				case 0: // +X neighbor: our X=MaxIdx, neighbor X=0
+					OurX = MaxIdx; OurY = A; OurZ = B;
+					NbrX = 0;      NbrY = A; NbrZ = B;
+					break;
+				case 1: // -X neighbor: our X=0, neighbor X=MaxIdx
+					OurX = 0;      OurY = A; OurZ = B;
+					NbrX = MaxIdx; NbrY = A; NbrZ = B;
+					break;
+				case 2: // +Y neighbor: our Y=MaxIdx, neighbor Y=0
+					OurX = A; OurY = MaxIdx; OurZ = B;
+					NbrX = A; NbrY = 0;      NbrZ = B;
+					break;
+				case 3: // -Y neighbor: our Y=0, neighbor Y=MaxIdx
+					OurX = A; OurY = 0;      OurZ = B;
+					NbrX = A; NbrY = MaxIdx; NbrZ = B;
+					break;
+				case 4: // +Z neighbor: our Z=MaxIdx, neighbor Z=0
+					OurX = A; OurY = B; OurZ = MaxIdx;
+					NbrX = A; NbrY = B; NbrZ = 0;
+					break;
+				case 5: // -Z neighbor: our Z=0, neighbor Z=MaxIdx
+					OurX = A; OurY = B; OurZ = 0;
+					NbrX = A; NbrY = B; NbrZ = MaxIdx;
+					break;
+				default:
+					continue;
+				}
+
+				const int32 NbrIdx = NbrX + NbrY * CS + NbrZ * SliceSize;
+				const FVoxelData& NbrVoxel = NeighborData[NbrIdx];
+
+				const int32 OurIdx = OurX + OurY * CS + OurZ * SliceSize;
+				FVoxelData& OurVoxel = VoxelData[OurIdx];
+
+				// Our voxel must be dry air below water level
+				if (OurVoxel.IsSolid() || OurVoxel.HasWaterFlag())
+				{
+					continue;
+				}
+
+				const float OurWorldZ = ChunkWorldPos.Z + OurZ * VS;
+				if (OurWorldZ > WaterLevel)
+				{
+					continue;
+				}
+
+				// Only propagate water from neighbors that already have water flags.
+				// No special-casing for +Z face — the column scan in
+				// ApplyWaterFillPass handles seeding for the water-level chunk.
+				if (!NbrVoxel.HasWaterFlag())
+				{
+					continue;
+				}
+
+				// Seed this voxel
+				OurVoxel.SetWaterFlag(true);
+				Seeds.Add(OurIdx);
+			}
+		}
+	}
+
+	if (Seeds.Num() == 0)
+	{
+		return false;
+	}
+
+	// BFS flood fill from seeds (same algorithm as ApplyWaterFillPass Phase 2)
+	const int32 NumSeeds = Seeds.Num();
+	TArray<int32> BFSQueue = MoveTemp(Seeds);
+	int32 QueueHead = 0;
+
+	static constexpr int32 DX[6] = { 1, -1,  0,  0,  0,  0 };
+	static constexpr int32 DY[6] = { 0,  0,  1, -1,  0,  0 };
+	static constexpr int32 DZ[6] = { 0,  0,  0,  0,  1, -1 };
+
+	while (QueueHead < BFSQueue.Num())
+	{
+		const int32 CurrentIdx = BFSQueue[QueueHead++];
+		const int32 CZ = CurrentIdx / SliceSize;
+		const int32 CY = (CurrentIdx - CZ * SliceSize) / CS;
+		const int32 CX = CurrentIdx - CZ * SliceSize - CY * CS;
+
+		for (int32 D = 0; D < 6; ++D)
+		{
+			const int32 NX = CX + DX[D];
+			const int32 NY = CY + DY[D];
+			const int32 NZ = CZ + DZ[D];
+
+			if (NX < 0 || NX >= CS || NY < 0 || NY >= CS || NZ < 0 || NZ >= CS)
+			{
+				continue;
+			}
+
+			const int32 NeighborIdx = NX + NY * CS + NZ * SliceSize;
+			FVoxelData& Neighbor = VoxelData[NeighborIdx];
+
+			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag())
+			{
+				continue;
+			}
+
+			const float NeighborWorldZ = ChunkWorldPos.Z + NZ * VS;
+			if (NeighborWorldZ > WaterLevel)
+			{
+				continue;
+			}
+
+			Neighbor.SetWaterFlag(true);
+			BFSQueue.Add(NeighborIdx);
+		}
+	}
+
+	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d): PropagateWaterFromNeighbors — %d seeds, %d total propagated"),
+		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NumSeeds, BFSQueue.Num());
+
+	return true;
 }
 
 void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest)

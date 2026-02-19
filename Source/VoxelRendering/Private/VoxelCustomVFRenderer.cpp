@@ -47,9 +47,8 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 	VoxelSize = WorldConfig->VoxelSize;
 	ChunkWorldSize = WorldConfig->GetChunkWorldSize();
 
-	// Spawn container actor
+	// Spawn container actor (no fixed Name — multiple renderers may coexist)
 	FActorSpawnParameters SpawnParams;
-	SpawnParams.Name = TEXT("VoxelCustomVFContainer");
 	SpawnParams.ObjectFlags |= RF_Transient;
 
 	AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), SpawnParams);

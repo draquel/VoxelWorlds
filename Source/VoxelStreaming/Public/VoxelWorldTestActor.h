@@ -412,7 +412,7 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Voxel")
 	TObjectPtr<UVoxelChunkManager> ChunkManager;
 
-	/** Water plane static mesh component (for flat world modes) */
+	/** Water plane static mesh component — legacy fallback for spherical planet mode */
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> WaterPlaneMesh;
 
@@ -425,6 +425,9 @@ protected:
 
 	/** Mesh renderer (owned by this actor) */
 	IVoxelMeshRenderer* MeshRenderer = nullptr;
+
+	/** Water mesh renderer (owned by this actor) — renders per-chunk water surface */
+	IVoxelMeshRenderer* WaterMeshRenderer = nullptr;
 
 	/** Runtime-created configuration (if no asset provided) */
 	UPROPERTY()
