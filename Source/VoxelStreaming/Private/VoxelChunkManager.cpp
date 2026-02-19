@@ -14,6 +14,8 @@
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelCPUSmoothMesher.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelGPUDualContourMesher.h"
+#include "VoxelGPUSmoothMesher.h"
 #include "VoxelWaterMesher.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -364,11 +366,7 @@ void UVoxelChunkManager::Initialize(
 	// Create mesher based on configuration
 	if (Configuration->MeshingMode == EMeshingMode::Smooth)
 	{
-		auto SmoothMesher = MakeUnique<FVoxelCPUSmoothMesher>();
-		SmoothMesher->Initialize();
-
-		// Configure smooth meshing parameters
-		FVoxelMeshingConfig MeshConfig = SmoothMesher->GetConfig();
+		FVoxelMeshingConfig MeshConfig;
 		MeshConfig.bUseSmoothMeshing = true;
 		MeshConfig.IsoLevel = 0.5f;
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
@@ -381,29 +379,55 @@ void UVoxelChunkManager::Initialize(
 			MeshConfig.bGenerateSkirts = false;
 		}
 
-		SmoothMesher->SetConfig(MeshConfig);
-
-		Mesher = MoveTemp(SmoothMesher);
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Smooth (Marching Cubes) mesher (AO=%s, UVScale=%.2f)"),
-			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
-			Configuration->UVScale);
+		if (Configuration->bUseGPUMeshing)
+		{
+			auto GPUSmoothMesher = MakeUnique<FVoxelGPUSmoothMesher>();
+			GPUSmoothMesher->Initialize();
+			GPUSmoothMesher->SetConfig(MeshConfig);
+			Mesher = MoveTemp(GPUSmoothMesher);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using GPU Smooth (Marching Cubes) mesher (AO=%s, UVScale=%.2f)"),
+				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+				Configuration->UVScale);
+		}
+		else
+		{
+			auto SmoothMesher = MakeUnique<FVoxelCPUSmoothMesher>();
+			SmoothMesher->Initialize();
+			SmoothMesher->SetConfig(MeshConfig);
+			Mesher = MoveTemp(SmoothMesher);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU Smooth (Marching Cubes) mesher (AO=%s, UVScale=%.2f)"),
+				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+				Configuration->UVScale);
+		}
 	}
 	else if (Configuration->MeshingMode == EMeshingMode::DualContouring)
 	{
-		auto DCMesher = MakeUnique<FVoxelCPUDualContourMesher>();
-		DCMesher->Initialize();
-
-		FVoxelMeshingConfig MeshConfig = DCMesher->GetConfig();
+		FVoxelMeshingConfig MeshConfig;
 		MeshConfig.bUseSmoothMeshing = true;
 		MeshConfig.IsoLevel = 0.5f;
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
 		MeshConfig.UVScale = Configuration->UVScale;
-		DCMesher->SetConfig(MeshConfig);
 
-		Mesher = MoveTemp(DCMesher);
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Dual Contouring mesher (AO=%s, UVScale=%.2f)"),
-			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
-			Configuration->UVScale);
+		if (Configuration->bUseGPUMeshing)
+		{
+			auto GPUDCMesher = MakeUnique<FVoxelGPUDualContourMesher>();
+			GPUDCMesher->Initialize();
+			GPUDCMesher->SetConfig(MeshConfig);
+			Mesher = MoveTemp(GPUDCMesher);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using GPU Dual Contouring mesher (AO=%s, UVScale=%.2f)"),
+				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+				Configuration->UVScale);
+		}
+		else
+		{
+			auto DCMesher = MakeUnique<FVoxelCPUDualContourMesher>();
+			DCMesher->Initialize();
+			DCMesher->SetConfig(MeshConfig);
+			Mesher = MoveTemp(DCMesher);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU Dual Contouring mesher (AO=%s, UVScale=%.2f)"),
+				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+				Configuration->UVScale);
+		}
 	}
 	else
 	{
@@ -1643,27 +1667,71 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	// Use a weak pointer to safely check if ChunkManager is still valid
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
-	// Launch async task on thread pool
-	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel]() mutable
-	{
-		// Generate mesh on background thread
-		FChunkMeshData MeshData;
-		const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
+	// Detect GPU meshers by type name — use GenerateMeshAsync() for GPU dispatch
+	const bool bUseGPUPath = MesherPtr->GetMesherTypeName().Contains(TEXT("GPU"));
 
-		// Queue result for game thread (thread-safe MPSC queue)
-		if (UVoxelChunkManager* This = WeakThis.Get())
+	if (bUseGPUPath)
+	{
+		// GPU path: dispatch from game thread via render thread, async callback enqueues result
+		FOnVoxelMeshingComplete OnComplete;
+		OnComplete.BindLambda([WeakThis, MesherPtr, ChunkCoord, LODLevel](
+			FVoxelMeshingHandle Handle, bool bSuccess)
 		{
-			FAsyncMeshResult Result;
-			Result.ChunkCoord = ChunkCoord;
-			Result.LODLevel = LODLevel;
-			Result.bSuccess = bSuccess;
+			UVoxelChunkManager* This = WeakThis.Get();
+			if (!This)
+			{
+				return;
+			}
+
+			FAsyncMeshResult AsyncResult;
+			AsyncResult.ChunkCoord = ChunkCoord;
+			AsyncResult.LODLevel = LODLevel;
+
 			if (bSuccess)
 			{
-				Result.MeshData = MoveTemp(MeshData);
+				// Readback GPU data to CPU for the rendering pipeline
+				FChunkMeshData MeshData;
+				if (MesherPtr->ReadbackToCPU(Handle, MeshData))
+				{
+					AsyncResult.bSuccess = true;
+					AsyncResult.MeshData = MoveTemp(MeshData);
+				}
+				MesherPtr->ReleaseHandle(Handle);
 			}
-			This->CompletedMeshQueue.Enqueue(MoveTemp(Result));
-		}
-	});
+			else
+			{
+				AsyncResult.bSuccess = false;
+			}
+
+			This->CompletedMeshQueue.Enqueue(MoveTemp(AsyncResult));
+		});
+
+		MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
+	}
+	else
+	{
+		// CPU path: existing thread pool dispatch (unchanged)
+		Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel]() mutable
+		{
+			// Generate mesh on background thread
+			FChunkMeshData MeshData;
+			const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
+
+			// Queue result for game thread (thread-safe MPSC queue)
+			if (UVoxelChunkManager* This = WeakThis.Get())
+			{
+				FAsyncMeshResult Result;
+				Result.ChunkCoord = ChunkCoord;
+				Result.LODLevel = LODLevel;
+				Result.bSuccess = bSuccess;
+				if (bSuccess)
+				{
+					Result.MeshData = MoveTemp(MeshData);
+				}
+				This->CompletedMeshQueue.Enqueue(MoveTemp(Result));
+			}
+		});
+	}
 }
 
 void UVoxelChunkManager::ProcessCompletedAsyncMeshes()

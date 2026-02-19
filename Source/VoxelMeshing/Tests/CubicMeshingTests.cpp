@@ -11,7 +11,7 @@
 
 // ==================== Helper Functions ====================
 
-namespace
+namespace CubicMeshingTestHelpers
 {
 	/**
 	 * Create a meshing request with all air voxels.
@@ -151,7 +151,8 @@ namespace
 
 		return Request;
 	}
-}
+} // namespace CubicMeshingTestHelpers
+using namespace CubicMeshingTestHelpers;
 
 // ==================== CPU Mesher Tests ====================
 

@@ -310,6 +310,14 @@ public:
 	bool bUseGreedyMeshing = false;
 
 	/**
+	 * Use GPU compute shaders for mesh generation (Smooth and DualContouring modes).
+	 * When enabled, meshing runs asynchronously on the GPU via RDG compute shaders.
+	 * Falls back to CPU meshing if GPU is unavailable or for Cubic mode.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Meshing", meta = (EditCondition = "MeshingMode != EMeshingMode::Cubic"))
+	bool bUseGPUMeshing = false;
+
+	/**
 	 * Calculate per-vertex ambient occlusion.
 	 * Adds subtle shadowing in corners and crevices.
 	 */

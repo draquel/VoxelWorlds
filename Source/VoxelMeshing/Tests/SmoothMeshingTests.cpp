@@ -11,12 +11,12 @@
 
 // ==================== Helper Functions ====================
 
-namespace
+namespace SmoothMeshingTestHelpers
 {
 	/**
 	 * Create a meshing request with all air voxels.
 	 */
-	FVoxelMeshingRequest CreateEmptyChunkRequest(int32 ChunkSize = 16)
+	FVoxelMeshingRequest CreateSmoothEmptyRequest(int32 ChunkSize = 16)
 	{
 		FVoxelMeshingRequest Request;
 		Request.ChunkCoord = FIntVector(0, 0, 0);
@@ -209,7 +209,8 @@ namespace
 		Config.bCalculateAO = false;  // Smooth meshing doesn't use AO
 		return Config;
 	}
-}
+} // namespace SmoothMeshingTestHelpers
+using namespace SmoothMeshingTestHelpers;
 
 // ==================== CPU Smooth Mesher Tests ====================
 
@@ -225,7 +226,7 @@ bool FSmoothMeshingEmptyChunkTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Mesher should be initialized"), Mesher.IsInitialized());
 
 	// Create empty chunk request
-	FVoxelMeshingRequest Request = CreateEmptyChunkRequest(8);
+	FVoxelMeshingRequest Request = CreateSmoothEmptyRequest(8);
 
 	// Generate mesh
 	FChunkMeshData MeshData;

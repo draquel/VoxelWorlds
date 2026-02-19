@@ -1,0 +1,895 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Compute shaders for Dual Contouring mesh generation.
+ *
+ * 4-pass pipeline executed within a single RDG graph:
+ *   Pass 0: ResetCountersCS     [1,1,1]       - Zero all atomic counters
+ *   Pass 1: EdgeCrossingCS      [8,8,4]       - Detect density sign changes
+ *   Pass 2: QEFSolveCS          [8,8,4]       - Solve 3x3 QEF per cell
+ *   Pass 3: QuadGenerationCS    [64,1,1]      - Emit quads from edge sharing
+ */
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/VoxelWorlds/Private/MarchingCubesCommon.ush"
+
+// ==================== Shader Parameters ====================
+
+// Input: Packed voxel data (ChunkSize^3 elements)
+StructuredBuffer<uint> InputVoxelData;
+
+// Face neighbor chunk data for seamless boundaries (6 faces)
+StructuredBuffer<uint> NeighborXPos;
+StructuredBuffer<uint> NeighborXNeg;
+StructuredBuffer<uint> NeighborYPos;
+StructuredBuffer<uint> NeighborYNeg;
+StructuredBuffer<uint> NeighborZPos;
+StructuredBuffer<uint> NeighborZNeg;
+
+// Edge neighbor data for diagonal chunk boundaries (12 edges)
+StructuredBuffer<uint> EdgeXPosYPos;
+StructuredBuffer<uint> EdgeXPosYNeg;
+StructuredBuffer<uint> EdgeXNegYPos;
+StructuredBuffer<uint> EdgeXNegYNeg;
+StructuredBuffer<uint> EdgeXPosZPos;
+StructuredBuffer<uint> EdgeXPosZNeg;
+StructuredBuffer<uint> EdgeXNegZPos;
+StructuredBuffer<uint> EdgeXNegZNeg;
+StructuredBuffer<uint> EdgeYPosZPos;
+StructuredBuffer<uint> EdgeYPosZNeg;
+StructuredBuffer<uint> EdgeYNegZPos;
+StructuredBuffer<uint> EdgeYNegZNeg;
+
+// Corner neighbor data (8 corners)
+StructuredBuffer<uint> CornerData;
+
+// Face neighbor presence flags (bits 0-5)
+uint NeighborFlags;
+
+// Edge/corner presence flags (bits 0-11 for edges, 12-19 for corners)
+uint EdgeCornerFlags;
+
+// Edge flag bit positions (same as SmoothMeshGeneration.usf)
+#define EDGE_XPOS_YPOS (1u << 0)
+#define EDGE_XPOS_YNEG (1u << 1)
+#define EDGE_XNEG_YPOS (1u << 2)
+#define EDGE_XNEG_YNEG (1u << 3)
+#define EDGE_XPOS_ZPOS (1u << 4)
+#define EDGE_XPOS_ZNEG (1u << 5)
+#define EDGE_XNEG_ZPOS (1u << 6)
+#define EDGE_XNEG_ZNEG (1u << 7)
+#define EDGE_YPOS_ZPOS (1u << 8)
+#define EDGE_YPOS_ZNEG (1u << 9)
+#define EDGE_YNEG_ZPOS (1u << 10)
+#define EDGE_YNEG_ZNEG (1u << 11)
+
+// Corner flag bit positions
+#define CORNER_XPOS_YPOS_ZPOS (1u << 12)
+#define CORNER_XPOS_YPOS_ZNEG (1u << 13)
+#define CORNER_XPOS_YNEG_ZPOS (1u << 14)
+#define CORNER_XPOS_YNEG_ZNEG (1u << 15)
+#define CORNER_XNEG_YPOS_ZPOS (1u << 16)
+#define CORNER_XNEG_YPOS_ZNEG (1u << 17)
+#define CORNER_XNEG_YNEG_ZPOS (1u << 18)
+#define CORNER_XNEG_YNEG_ZNEG (1u << 19)
+
+// ==================== DC Intermediate Structures ====================
+
+/** Edge crossing hermite data (32 bytes) */
+struct FDCEdgeCrossingGPU
+{
+    float3 Position;     // Crossing point in chunk-local space
+    float3 Normal;       // Gradient normal
+    uint PackedMaterial; // MaterialID(8) | BiomeID(8) | pad(16)
+    uint Flags;          // bit 0 = bValid
+};
+
+/** Cell vertex from QEF solve (32 bytes) */
+struct FDCCellVertexGPU
+{
+    float3 Position;     // QEF-solved position
+    uint PackedNormal;   // 10+10+10+2 packed normal
+    uint PackedMaterial; // MaterialID(8) | BiomeID(8)
+    uint Flags;          // bit 0 = bValid
+    uint VertexIndex;    // Output mesh index (0xFFFFFFFF = unassigned)
+    uint _Pad;           // Alignment
+};
+
+// ==================== Intermediate Buffers ====================
+
+// Pass 1 output / Pass 2-3 input
+RWStructuredBuffer<FDCEdgeCrossingGPU> DCEdgeCrossings;
+RWStructuredBuffer<uint> DCValidEdgeIndices;
+
+// Pass 2 output / Pass 3 input
+RWStructuredBuffer<FDCCellVertexGPU> DCCellVertices;
+
+// LOD merge map (CPU-built, GPU-read)
+StructuredBuffer<uint> LODMergeMap;    // Pairs of uint: [OriginalCellIdx, ReplacementCellIdx]
+uint LODMergeMapCount;                 // Number of pairs
+
+// Output buffers
+RWStructuredBuffer<FVoxelVertexGPU> OutputVertices;
+RWStructuredBuffer<uint> OutputIndices;
+
+// Counters: [0]=VertexCount, [1]=IndexCount, [2]=ValidEdgeCount
+RWStructuredBuffer<uint> MeshCounters;
+
+// Chunk parameters
+uint ChunkSize;
+float VoxelSize;
+float3 ChunkWorldPosition;
+float IsoLevel;
+uint LODStride;
+uint GridDim;       // = ChunkSize/LODStride + 3
+float QEFThreshold; // SVD threshold for QEF solve
+float QEFBias;      // Bias strength for clamping outside cell bounds
+uint MaxVertexCount;  // Buffer capacity for overflow protection
+uint MaxIndexCount;   // Buffer capacity for overflow protection
+
+// ==================== Helper Functions ====================
+
+bool HasNeighborData(uint Face)
+{
+    return (NeighborFlags & (1u << Face)) != 0;
+}
+
+bool HasEdgeData(uint EdgeFlag)
+{
+    return (EdgeCornerFlags & EdgeFlag) != 0;
+}
+
+bool HasCornerData(uint CornerFlag)
+{
+    return (EdgeCornerFlags & CornerFlag) != 0;
+}
+
+/**
+ * Get packed voxel data at position, handling chunk boundaries.
+ * Duplicated from SmoothMeshGeneration.usf for self-contained shader.
+ */
+uint GetVoxelAt(int3 Position)
+{
+    if (all(Position >= 0) && all(Position < (int)ChunkSize))
+    {
+        uint Index = GetVoxelIndex(Position, ChunkSize);
+        return InputVoxelData[Index];
+    }
+
+    int3 ClampedPos = clamp(Position, int3(0, 0, 0), int3((int)ChunkSize - 1, (int)ChunkSize - 1, (int)ChunkSize - 1));
+
+    bool bXPos = (Position.x >= (int)ChunkSize);
+    bool bXNeg = (Position.x < 0);
+    bool bYPos = (Position.y >= (int)ChunkSize);
+    bool bYNeg = (Position.y < 0);
+    bool bZPos = (Position.z >= (int)ChunkSize);
+    bool bZNeg = (Position.z < 0);
+
+    bool bOutX = bXPos || bXNeg;
+    bool bOutY = bYPos || bYNeg;
+    bool bOutZ = bZPos || bZNeg;
+    uint OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
+
+    if (OutCount == 1)
+    {
+        if (bXPos && HasNeighborData(FACE_X_POS))
+            return NeighborXPos[(uint)Position.y + (uint)Position.z * ChunkSize];
+        if (bXNeg && HasNeighborData(FACE_X_NEG))
+            return NeighborXNeg[(uint)Position.y + (uint)Position.z * ChunkSize];
+        if (bYPos && HasNeighborData(FACE_Y_POS))
+            return NeighborYPos[(uint)Position.x + (uint)Position.z * ChunkSize];
+        if (bYNeg && HasNeighborData(FACE_Y_NEG))
+            return NeighborYNeg[(uint)Position.x + (uint)Position.z * ChunkSize];
+        if (bZPos && HasNeighborData(FACE_Z_POS))
+            return NeighborZPos[(uint)Position.x + (uint)Position.y * ChunkSize];
+        if (bZNeg && HasNeighborData(FACE_Z_NEG))
+            return NeighborZNeg[(uint)Position.x + (uint)Position.y * ChunkSize];
+        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+    }
+
+    if (OutCount == 2)
+    {
+        if (bXPos && bYPos && HasEdgeData(EDGE_XPOS_YPOS))
+            return EdgeXPosYPos[(uint)Position.z];
+        if (bXPos && bYNeg && HasEdgeData(EDGE_XPOS_YNEG))
+            return EdgeXPosYNeg[(uint)Position.z];
+        if (bXNeg && bYPos && HasEdgeData(EDGE_XNEG_YPOS))
+            return EdgeXNegYPos[(uint)Position.z];
+        if (bXNeg && bYNeg && HasEdgeData(EDGE_XNEG_YNEG))
+            return EdgeXNegYNeg[(uint)Position.z];
+        if (bXPos && bZPos && HasEdgeData(EDGE_XPOS_ZPOS))
+            return EdgeXPosZPos[(uint)Position.y];
+        if (bXPos && bZNeg && HasEdgeData(EDGE_XPOS_ZNEG))
+            return EdgeXPosZNeg[(uint)Position.y];
+        if (bXNeg && bZPos && HasEdgeData(EDGE_XNEG_ZPOS))
+            return EdgeXNegZPos[(uint)Position.y];
+        if (bXNeg && bZNeg && HasEdgeData(EDGE_XNEG_ZNEG))
+            return EdgeXNegZNeg[(uint)Position.y];
+        if (bYPos && bZPos && HasEdgeData(EDGE_YPOS_ZPOS))
+            return EdgeYPosZPos[(uint)Position.x];
+        if (bYPos && bZNeg && HasEdgeData(EDGE_YPOS_ZNEG))
+            return EdgeYPosZNeg[(uint)Position.x];
+        if (bYNeg && bZPos && HasEdgeData(EDGE_YNEG_ZPOS))
+            return EdgeYNegZPos[(uint)Position.x];
+        if (bYNeg && bZNeg && HasEdgeData(EDGE_YNEG_ZNEG))
+            return EdgeYNegZNeg[(uint)Position.x];
+        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+    }
+
+    if (OutCount == 3)
+    {
+        if (bXPos && bYPos && bZPos && HasCornerData(CORNER_XPOS_YPOS_ZPOS))
+            return CornerData[0];
+        if (bXPos && bYPos && bZNeg && HasCornerData(CORNER_XPOS_YPOS_ZNEG))
+            return CornerData[1];
+        if (bXPos && bYNeg && bZPos && HasCornerData(CORNER_XPOS_YNEG_ZPOS))
+            return CornerData[2];
+        if (bXPos && bYNeg && bZNeg && HasCornerData(CORNER_XPOS_YNEG_ZNEG))
+            return CornerData[3];
+        if (bXNeg && bYPos && bZPos && HasCornerData(CORNER_XNEG_YPOS_ZPOS))
+            return CornerData[4];
+        if (bXNeg && bYPos && bZNeg && HasCornerData(CORNER_XNEG_YPOS_ZNEG))
+            return CornerData[5];
+        if (bXNeg && bYNeg && bZPos && HasCornerData(CORNER_XNEG_YNEG_ZPOS))
+            return CornerData[6];
+        if (bXNeg && bYNeg && bZNeg && HasCornerData(CORNER_XNEG_YNEG_ZNEG))
+            return CornerData[7];
+        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+    }
+
+    return 0;
+}
+
+float GetDensityAt(int3 Position)
+{
+    uint PackedVoxel = GetVoxelAt(Position);
+    return GetDensity(PackedVoxel);
+}
+
+float3 CalculateGradientNormalLOD(int3 Position, int Stride)
+{
+    float gx = GetDensityAt(Position + int3(Stride, 0, 0)) - GetDensityAt(Position + int3(-Stride, 0, 0));
+    float gy = GetDensityAt(Position + int3(0, Stride, 0)) - GetDensityAt(Position + int3(0, -Stride, 0));
+    float gz = GetDensityAt(Position + int3(0, 0, Stride)) - GetDensityAt(Position + int3(0, 0, -Stride));
+
+    float3 Normal = float3(-gx, -gy, -gz);
+    float Len = length(Normal);
+    if (Len > 0.0001f)
+    {
+        return Normal / Len;
+    }
+    return float3(0, 0, 1);
+}
+
+// ==================== DC Indexing Helpers ====================
+
+/** Cell index: maps (CX,CY,CZ) in [-1, GridSize+1] to flat array */
+uint DCCellIndex(int CX, int CY, int CZ)
+{
+    return (uint)(CX + 1) + (uint)(CY + 1) * GridDim + (uint)(CZ + 1) * GridDim * GridDim;
+}
+
+/** Edge index: 3 edges per cell position (axes 0,1,2) */
+uint DCEdgeIndex(int CX, int CY, int CZ, int Axis)
+{
+    return DCCellIndex(CX, CY, CZ) * 3 + (uint)Axis;
+}
+
+/** Get cell material by finding solid voxel closest to isosurface */
+uint GetCellMaterial(int3 CellVoxelPos, int Stride)
+{
+    uint BestMat = 0;
+    int ClosestDist = 0x7FFFFFFF;
+    [unroll]
+    for (int dz = 0; dz <= 1; dz++)
+    {
+        [unroll]
+        for (int dy = 0; dy <= 1; dy++)
+        {
+            [unroll]
+            for (int dx = 0; dx <= 1; dx++)
+            {
+                int3 VP = CellVoxelPos + int3(dx, dy, dz) * Stride;
+                uint Packed = GetVoxelAt(VP);
+                uint Density = (Packed >> 8) & 0xFF;
+                if (Density >= 127) // IsSolid
+                {
+                    int Dist = abs((int)Density - 128);
+                    if (Dist < ClosestDist)
+                    {
+                        ClosestDist = Dist;
+                        BestMat = GetMaterialID(Packed);
+                    }
+                }
+            }
+        }
+    }
+    return BestMat;
+}
+
+/** Get cell biome by finding solid voxel closest to isosurface */
+uint GetCellBiome(int3 CellVoxelPos, int Stride)
+{
+    uint BestBiome = 0;
+    int ClosestDist = 0x7FFFFFFF;
+    [unroll]
+    for (int dz = 0; dz <= 1; dz++)
+    {
+        [unroll]
+        for (int dy = 0; dy <= 1; dy++)
+        {
+            [unroll]
+            for (int dx = 0; dx <= 1; dx++)
+            {
+                int3 VP = CellVoxelPos + int3(dx, dy, dz) * Stride;
+                uint Packed = GetVoxelAt(VP);
+                uint Density = (Packed >> 8) & 0xFF;
+                if (Density >= 127)
+                {
+                    int Dist = abs((int)Density - 128);
+                    if (Dist < ClosestDist)
+                    {
+                        ClosestDist = Dist;
+                        BestBiome = GetBiomeID(Packed);
+                    }
+                }
+            }
+        }
+    }
+    return BestBiome;
+}
+
+// ==================== Pass 0: Reset Counters ====================
+
+[numthreads(1, 1, 1)]
+void DCResetCountersCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    MeshCounters[0] = 0; // Vertex counter
+    MeshCounters[1] = 0; // Index counter
+    MeshCounters[2] = 0; // Valid edge counter
+}
+
+// ==================== Pass 1: Edge Crossing Detection ====================
+
+[numthreads(8, 8, 4)]
+void DCEdgeCrossingCS(
+    uint3 GroupId : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID,
+    uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int Stride = (int)LODStride;
+    int GridSize = (int)GridDim - 3; // GridDim = GridSize + 3
+
+    // Map dispatch thread to cell coordinates [-1, GridSize]
+    int CX = (int)DispatchThreadId.x - 1;
+    int CY = (int)DispatchThreadId.y - 1;
+    int CZ = (int)DispatchThreadId.z - 1;
+
+    // Early out if outside valid cell range [-1, GridSize].
+    // Edges at GridSize+1 are NOT computed (they remain zero-initialized with Flags=0),
+    // matching CPU mesher behavior where TArray::SetNum zeroes bValid for all entries.
+    if (CX > GridSize || CY > GridSize || CZ > GridSize)
+    {
+        return;
+    }
+
+    // Voxel coordinates for this cell's minimum corner
+    int VX = CX * Stride;
+    int VY = CY * Stride;
+    int VZ = CZ * Stride;
+
+    float D0 = GetDensityAt(int3(VX, VY, VZ));
+
+    // Check 3 edges (+X, +Y, +Z) from this cell
+    [unroll]
+    for (int Axis = 0; Axis < 3; Axis++)
+    {
+        int3 Neighbor = int3(VX, VY, VZ);
+        if (Axis == 0) Neighbor.x += Stride;
+        else if (Axis == 1) Neighbor.y += Stride;
+        else Neighbor.z += Stride;
+
+        float D1 = GetDensityAt(Neighbor);
+
+        bool bSolid0 = (D0 >= IsoLevel);
+        bool bSolid1 = (D1 >= IsoLevel);
+
+        uint EIdx = DCEdgeIndex(CX, CY, CZ, Axis);
+
+        if (bSolid0 != bSolid1)
+        {
+            // Interpolate crossing position
+            float t = (IsoLevel - D0) / (D1 - D0);
+            t = saturate(t);
+
+            float3 P0 = float3((float)VX, (float)VY, (float)VZ) * VoxelSize;
+            float3 P1 = float3(Neighbor) * VoxelSize;
+            float3 CrossPos = P0 + (P1 - P0) * t;
+
+            // Compute gradient normal at crossing point
+            int3 CrossVoxel = (int3)(CrossPos / VoxelSize);
+            float3 Normal = CalculateGradientNormalLOD(CrossVoxel, Stride);
+
+            // Get material/biome from the solid side
+            uint SolidPacked = bSolid0 ? GetVoxelAt(int3(VX, VY, VZ)) : GetVoxelAt(Neighbor);
+            uint MatID = GetMaterialID(SolidPacked);
+            uint BiomeID = GetBiomeID(SolidPacked);
+
+            // Write edge crossing
+            FDCEdgeCrossingGPU Crossing;
+            Crossing.Position = CrossPos;
+            Crossing.Normal = Normal;
+            Crossing.PackedMaterial = (MatID & 0xFF) | ((BiomeID & 0xFF) << 8);
+            Crossing.Flags = 1; // bValid
+
+            DCEdgeCrossings[EIdx] = Crossing;
+
+            // Append to valid edge list
+            uint ValidIdx;
+            InterlockedAdd(MeshCounters[2], 1, ValidIdx);
+            DCValidEdgeIndices[ValidIdx] = EIdx;
+        }
+        else
+        {
+            // Mark as invalid
+            FDCEdgeCrossingGPU Invalid;
+            Invalid.Position = float3(0, 0, 0);
+            Invalid.Normal = float3(0, 0, 0);
+            Invalid.PackedMaterial = 0;
+            Invalid.Flags = 0;
+            DCEdgeCrossings[EIdx] = Invalid;
+        }
+    }
+}
+
+// ==================== Jacobi 3x3 Eigenvalue Decomposition ====================
+
+/**
+ * Solve 3x3 symmetric eigenvalue problem via Jacobi iteration.
+ * Direct port of QEFSolver.h JacobiEigen3x3.
+ * All computation in registers — no shared memory needed.
+ */
+void JacobiEigen3x3(
+    inout float M00, inout float M01, inout float M02,
+    inout float M11, inout float M12, inout float M22,
+    out float3 Eigenvalues,
+    out float3 V0, out float3 V1, out float3 V2)
+{
+    // Working copy of full symmetric matrix
+    float A[3][3];
+    A[0][0] = M00; A[0][1] = M01; A[0][2] = M02;
+    A[1][0] = M01; A[1][1] = M11; A[1][2] = M12;
+    A[2][0] = M02; A[2][1] = M12; A[2][2] = M22;
+
+    // Initialize eigenvectors to identity
+    V0 = float3(1, 0, 0);
+    V1 = float3(0, 1, 0);
+    V2 = float3(0, 0, 1);
+
+    // Jacobi iteration
+    // NOTE: [loop] not [unroll] — dynamic break + dynamic p,q indexing can miscompile with [unroll]
+    [loop]
+    for (int Iter = 0; Iter < 20; Iter++)
+    {
+        // Find largest off-diagonal element
+        float Abs01 = abs(A[0][1]);
+        float Abs02 = abs(A[0][2]);
+        float Abs12 = abs(A[1][2]);
+
+        int p, q;
+        float MaxVal = Abs01;
+        p = 0; q = 1;
+        if (Abs02 > MaxVal) { p = 0; q = 2; MaxVal = Abs02; }
+        if (Abs12 > MaxVal) { p = 1; q = 2; MaxVal = Abs12; }
+
+        // Convergence check
+        if (MaxVal < 1e-8f)
+        {
+            break;
+        }
+
+        // Compute Givens rotation
+        float Diff = A[q][q] - A[p][p];
+        float t;
+        if (abs(Diff) < 1e-10f)
+        {
+            t = 1.0f;
+        }
+        else
+        {
+            float Phi = Diff / (2.0f * A[p][q]);
+            t = 1.0f / (abs(Phi) + sqrt(Phi * Phi + 1.0f));
+            if (Phi < 0.0f) t = -t;
+        }
+
+        float c = 1.0f / sqrt(t * t + 1.0f);
+        float s = t * c;
+        float Tau = s / (1.0f + c);
+        float Apq = A[p][q];
+
+        A[p][q] = 0.0f;
+        A[q][p] = 0.0f;
+        A[p][p] -= t * Apq;
+        A[q][q] += t * Apq;
+
+        // Update remaining elements
+        [unroll]
+        for (int r = 0; r < 3; r++)
+        {
+            if (r != p && r != q)
+            {
+                float Arp = A[r][p];
+                float Arq = A[r][q];
+                A[r][p] = A[p][r] = Arp - s * (Arq + Tau * Arp);
+                A[r][q] = A[q][r] = Arq + s * (Arp - Tau * Arq);
+            }
+        }
+
+        // Update eigenvectors (stored as 3 column vectors)
+        float3 Vp, Vq;
+        if (p == 0) Vp = V0; else if (p == 1) Vp = V1; else Vp = V2;
+        if (q == 0) Vq = V0; else if (q == 1) Vq = V1; else Vq = V2;
+
+        float3 NewVp = Vp - s * (Vq + Tau * Vp);
+        float3 NewVq = Vq + s * (Vp - Tau * Vq);
+
+        if (p == 0) V0 = NewVp; else if (p == 1) V1 = NewVp; else V2 = NewVp;
+        if (q == 0) V0 = NewVq; else if (q == 1) V1 = NewVq; else V2 = NewVq;
+    }
+
+    Eigenvalues = float3(A[0][0], A[1][1], A[2][2]);
+}
+
+// ==================== Pass 2: QEF Vertex Solve ====================
+
+// 12 edges of a cube cell: offset (DX,DY,DZ) and axis
+// Must match CPU FVoxelCPUDualContourMesher::SolveCellVertices
+static const int4 CellEdgeRefs[12] = {
+    int4(0, 0, 0, 0), int4(0, 0, 0, 1), int4(0, 0, 0, 2),
+    int4(1, 0, 0, 1), int4(1, 0, 0, 2),
+    int4(0, 1, 0, 0), int4(0, 1, 0, 2),
+    int4(0, 0, 1, 0), int4(0, 0, 1, 1),
+    int4(1, 1, 0, 2), int4(1, 0, 1, 1), int4(0, 1, 1, 0),
+};
+
+[numthreads(8, 8, 4)]
+void DCQEFSolveCS(
+    uint3 GroupId : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID,
+    uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int Stride = (int)LODStride;
+    int GridSize = (int)GridDim - 3;
+
+    int CX = (int)DispatchThreadId.x - 1;
+    int CY = (int)DispatchThreadId.y - 1;
+    int CZ = (int)DispatchThreadId.z - 1;
+
+    if (CX > GridSize || CY > GridSize || CZ > GridSize)
+    {
+        return;
+    }
+
+    uint CIdx = DCCellIndex(CX, CY, CZ);
+
+    // Accumulate QEF: A^T*A (symmetric 3x3) + A^T*b
+    float ATA00 = 0, ATA01 = 0, ATA02 = 0;
+    float ATA11 = 0, ATA12 = 0, ATA22 = 0;
+    float ATb0 = 0, ATb1 = 0, ATb2 = 0;
+    float3 MassPoint = float3(0, 0, 0);
+    int Count = 0;
+    float3 AvgNormal = float3(0, 0, 0);
+
+    // Check 12 edges touching this cell
+    [unroll]
+    for (int e = 0; e < 12; e++)
+    {
+        int4 Ref = CellEdgeRefs[e];
+        uint EIdx = DCEdgeIndex(CX + Ref.x, CY + Ref.y, CZ + Ref.z, Ref.w);
+        FDCEdgeCrossingGPU Crossing = DCEdgeCrossings[EIdx];
+
+        if (Crossing.Flags & 1) // bValid
+        {
+            float3 P = Crossing.Position;
+            float3 N = Crossing.Normal;
+
+            // Accumulate A^T*A (outer product of normal)
+            ATA00 += N.x * N.x;
+            ATA01 += N.x * N.y;
+            ATA02 += N.x * N.z;
+            ATA11 += N.y * N.y;
+            ATA12 += N.y * N.z;
+            ATA22 += N.z * N.z;
+
+            // Accumulate A^T*b where b_i = n_i . p_i
+            float Dot = dot(N, P);
+            ATb0 += N.x * Dot;
+            ATb1 += N.y * Dot;
+            ATb2 += N.z * Dot;
+
+            MassPoint += P;
+            AvgNormal += N;
+            Count++;
+        }
+    }
+
+    // No edge crossings — cell has no surface
+    if (Count == 0)
+    {
+        FDCCellVertexGPU EmptyVert;
+        EmptyVert.Position = float3(0, 0, 0);
+        EmptyVert.PackedNormal = 0;
+        EmptyVert.PackedMaterial = 0;
+        EmptyVert.Flags = 0;
+        EmptyVert.VertexIndex = 0xFFFFFFFF;
+        EmptyVert._Pad = 0;
+        DCCellVertices[CIdx] = EmptyVert;
+        return;
+    }
+
+    float3 MP = MassPoint / (float)Count;
+
+    float3 QEFResult;
+    if (Count == 1)
+    {
+        QEFResult = MP;
+    }
+    else
+    {
+        // Solve via Jacobi eigenvalue decomposition
+        float3 Eigenvalues;
+        float3 V0, V1, V2;
+        JacobiEigen3x3(ATA00, ATA01, ATA02, ATA11, ATA12, ATA22,
+                        Eigenvalues, V0, V1, V2);
+
+        // Pseudoinverse solution: v = V * S^-1 * V^T * ATb
+        float3 ATbVec = float3(ATb0, ATb1, ATb2);
+        QEFResult = float3(0, 0, 0);
+
+        // Column 0
+        if (Eigenvalues.x > QEFThreshold)
+        {
+            float Proj = dot(V0, ATbVec) / Eigenvalues.x;
+            QEFResult += V0 * Proj;
+        }
+        // Column 1
+        if (Eigenvalues.y > QEFThreshold)
+        {
+            float Proj = dot(V1, ATbVec) / Eigenvalues.y;
+            QEFResult += V1 * Proj;
+        }
+        // Column 2
+        if (Eigenvalues.z > QEFThreshold)
+        {
+            float Proj = dot(V2, ATbVec) / Eigenvalues.z;
+            QEFResult += V2 * Proj;
+        }
+    }
+
+    // Cell bounds for clamping
+    float CellWorldSize = (float)Stride * VoxelSize;
+    float3 CellMin = float3((float)(CX * Stride), (float)(CY * Stride), (float)(CZ * Stride)) * VoxelSize;
+    float3 CellMax = CellMin + float3(CellWorldSize, CellWorldSize, CellWorldSize);
+
+    // Clamp/blend toward mass point if outside cell bounds
+    if (any(QEFResult < CellMin) || any(QEFResult > CellMax))
+    {
+        float3 Closest = clamp(QEFResult, CellMin, CellMax);
+        float DistOutside = length(QEFResult - Closest);
+        float Blend = saturate(DistOutside / max(CellWorldSize, 0.001f) * QEFBias * 2.0f);
+        QEFResult = lerp(QEFResult, MP, Blend);
+    }
+
+    // Normalize average normal
+    float NLen = length(AvgNormal);
+    if (NLen > 0.0001f)
+    {
+        AvgNormal /= NLen;
+    }
+    else
+    {
+        AvgNormal = float3(0, 0, 1);
+    }
+
+    // Get material and biome
+    int3 CellVoxelPos = int3(CX * Stride, CY * Stride, CZ * Stride);
+    uint MatID = GetCellMaterial(CellVoxelPos, Stride);
+    uint BiomeId = GetCellBiome(CellVoxelPos, Stride);
+
+    // Allocate output vertex index (pre-assign before Pass 3)
+    uint OutIdx;
+    InterlockedAdd(MeshCounters[0], 1, OutIdx);
+
+    // Bounds check — skip if vertex buffer is full
+    if (OutIdx >= MaxVertexCount)
+    {
+        FDCCellVertexGPU OverflowVert;
+        OverflowVert.Position = float3(0, 0, 0);
+        OverflowVert.PackedNormal = 0;
+        OverflowVert.PackedMaterial = 0;
+        OverflowVert.Flags = 0;
+        OverflowVert.VertexIndex = 0xFFFFFFFF;
+        OverflowVert._Pad = 0;
+        DCCellVertices[CIdx] = OverflowVert;
+        return;
+    }
+
+    // Compute triplanar UV from position and normal
+    float AbsNX = abs(AvgNormal.x);
+    float AbsNY = abs(AvgNormal.y);
+    float AbsNZ = abs(AvgNormal.z);
+    float UVScale = 0.1f;
+    float2 UV;
+    if (AbsNZ >= AbsNX && AbsNZ >= AbsNY)
+        UV = QEFResult.xy / VoxelSize * UVScale;
+    else if (AbsNX >= AbsNY)
+        UV = QEFResult.yz / VoxelSize * UVScale;
+    else
+        UV = QEFResult.xz / VoxelSize * UVScale;
+
+    // Create and write output vertex
+    FVoxelVertexGPU OutVert;
+    OutVert.Position = QEFResult;
+    OutVert.PackedNormalAndAO = PackSmoothNormalAndAO(AvgNormal, 0);
+    OutVert.UV = UV;
+    OutVert.PackedMaterialData = PackMaterialData(MatID, BiomeId, 0);
+    OutputVertices[OutIdx] = OutVert;
+
+    // Write cell vertex with pre-assigned index
+    FDCCellVertexGPU Vert;
+    Vert.Position = QEFResult;
+    Vert.PackedNormal = PackSmoothNormalAndAO(AvgNormal, 0);
+    Vert.PackedMaterial = (MatID & 0xFF) | ((BiomeId & 0xFF) << 8);
+    Vert.Flags = 1; // bValid
+    Vert.VertexIndex = OutIdx;
+    Vert._Pad = 0;
+    DCCellVertices[CIdx] = Vert;
+}
+
+// ==================== Pass 3: Quad Generation ====================
+
+// 4-cell offsets per axis for quad generation (matches CPU winding)
+static const int3 AxisQuadOffsets[3][4] = {
+    // Axis 0 (X-edge): vary Y,Z
+    {int3(0, 0, 0), int3(0, -1, 0), int3(0, -1, -1), int3(0, 0, -1)},
+    // Axis 1 (Y-edge): vary Z,X
+    {int3(0, 0, 0), int3(0, 0, -1), int3(-1, 0, -1), int3(-1, 0, 0)},
+    // Axis 2 (Z-edge): vary X,Y
+    {int3(0, 0, 0), int3(-1, 0, 0), int3(-1, -1, 0), int3(0, -1, 0)},
+};
+
+[numthreads(64, 1, 1)]
+void DCQuadGenerationCS(
+    uint3 GroupId : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID,
+    uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint ThreadIdx = DispatchThreadId.x;
+    uint ValidEdgeCount = MeshCounters[2];
+
+    if (ThreadIdx >= ValidEdgeCount)
+    {
+        return;
+    }
+
+    uint EIdx = DCValidEdgeIndices[ThreadIdx];
+    int Stride = (int)LODStride;
+    int GridSize = (int)GridDim - 3;
+
+    // Decode flat edge index back to (CX, CY, CZ, Axis)
+    uint Axis = EIdx % 3;
+    uint CellLinear = EIdx / 3;
+    int CX = (int)(CellLinear % GridDim) - 1;
+    int CY = (int)((CellLinear / GridDim) % GridDim) - 1;
+    int CZ = (int)(CellLinear / (GridDim * GridDim)) - 1;
+
+    // Edge ownership: at least one of 4 cells must be in [0, GridSize-1]
+    bool bOwned = false;
+    [unroll]
+    for (int i = 0; i < 4; i++)
+    {
+        int3 Off;
+        if (Axis == 0) Off = AxisQuadOffsets[0][i];
+        else if (Axis == 1) Off = AxisQuadOffsets[1][i];
+        else Off = AxisQuadOffsets[2][i];
+
+        int CCX = CX + Off.x;
+        int CCY = CY + Off.y;
+        int CCZ = CZ + Off.z;
+        if (CCX >= 0 && CCX < GridSize && CCY >= 0 && CCY < GridSize && CCZ >= 0 && CCZ < GridSize)
+        {
+            bOwned = true;
+            break;
+        }
+    }
+    if (!bOwned)
+    {
+        return;
+    }
+
+    // Look up 4 cell vertices
+    uint CellIndices[4];
+    bool bAllValid = true;
+    [unroll]
+    for (int i = 0; i < 4; i++)
+    {
+        int3 Off;
+        if (Axis == 0) Off = AxisQuadOffsets[0][i];
+        else if (Axis == 1) Off = AxisQuadOffsets[1][i];
+        else Off = AxisQuadOffsets[2][i];
+
+        uint CIdx = DCCellIndex(CX + Off.x, CY + Off.y, CZ + Off.z);
+
+        // Check LOD merge map redirection
+        for (uint m = 0; m < LODMergeMapCount; m++)
+        {
+            uint OrigIdx = LODMergeMap[m * 2];
+            if (CIdx == OrigIdx)
+            {
+                CIdx = LODMergeMap[m * 2 + 1];
+                break;
+            }
+        }
+
+        CellIndices[i] = CIdx;
+
+        if (!(DCCellVertices[CIdx].Flags & 1))
+        {
+            bAllValid = false;
+            break;
+        }
+    }
+
+    if (!bAllValid)
+    {
+        return;
+    }
+
+    // Read pre-assigned vertex indices (allocated in Pass 2 QEF Solve)
+    // No CAS or spin-wait needed — indices were assigned before this pass
+    uint VertIndices[4];
+    [unroll]
+    for (int i = 0; i < 4; i++)
+    {
+        uint CIdx = CellIndices[i];
+        uint VIdx = DCCellVertices[CIdx].VertexIndex;
+        if (VIdx == 0xFFFFFFFF)
+        {
+            return; // Vertex not allocated — skip quad
+        }
+        VertIndices[i] = VIdx;
+    }
+
+    // Determine winding order from density sign
+    float D0 = GetDensityAt(int3(CX * Stride, CY * Stride, CZ * Stride));
+    bool bFlip = (D0 < IsoLevel);
+
+    // Allocate 6 indices (2 triangles per quad)
+    uint IndexStart;
+    InterlockedAdd(MeshCounters[1], 6, IndexStart);
+
+    // Bounds check — skip if index buffer is full
+    if (IndexStart + 5 >= MaxIndexCount)
+    {
+        return;
+    }
+
+    if (bFlip)
+    {
+        OutputIndices[IndexStart + 0] = VertIndices[0];
+        OutputIndices[IndexStart + 1] = VertIndices[1];
+        OutputIndices[IndexStart + 2] = VertIndices[2];
+        OutputIndices[IndexStart + 3] = VertIndices[0];
+        OutputIndices[IndexStart + 4] = VertIndices[2];
+        OutputIndices[IndexStart + 5] = VertIndices[3];
+    }
+    else
+    {
+        OutputIndices[IndexStart + 0] = VertIndices[0];
+        OutputIndices[IndexStart + 1] = VertIndices[2];
+        OutputIndices[IndexStart + 2] = VertIndices[1];
+        OutputIndices[IndexStart + 3] = VertIndices[0];
+        OutputIndices[IndexStart + 4] = VertIndices[3];
+        OutputIndices[IndexStart + 5] = VertIndices[2];
+    }
+}
