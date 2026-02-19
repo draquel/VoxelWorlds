@@ -86,6 +86,7 @@ private:
 	{
 		FVector3f Position;  // World-space crossing point on edge
 		FVector3f Normal;    // Surface gradient normal at crossing
+		bool bValid = false; // Whether this edge has a crossing
 	};
 
 	/** Per-cell QEF vertex */
@@ -96,25 +97,22 @@ private:
 		uint8 MaterialID = 0;
 		uint8 BiomeID = 0;
 		int32 MeshVertexIndex = -1;  // Index in output FChunkMeshData (-1 = not emitted yet)
+		bool bValid = false;         // Whether this cell has a QEF vertex
 	};
 
-	/** Edge key encodes cell coordinate + axis into a uint64 for TMap lookup */
-	static FORCEINLINE uint64 MakeEdgeKey(int32 CX, int32 CY, int32 CZ, int32 Axis)
+	/**
+	 * Flat array indexing for cells. Grid dimension = GridSize + 3 to cover
+	 * cells from -1 to GridSize+1 (needed for edge lookups at cell+1 offsets).
+	 */
+	static FORCEINLINE int32 CellIndex(int32 CX, int32 CY, int32 CZ, int32 GridDim)
 	{
-		// Pack: Axis(2 bits) | CZ+1(10 bits) | CY+1(10 bits) | CX+1(10 bits)
-		// +1 offset to handle -1 coords from neighbor overlap
-		return (static_cast<uint64>(Axis) << 30) |
-			   (static_cast<uint64>(CZ + 1) << 20) |
-			   (static_cast<uint64>(CY + 1) << 10) |
-			   static_cast<uint64>(CX + 1);
+		return (CX + 1) + (CY + 1) * GridDim + (CZ + 1) * GridDim * GridDim;
 	}
 
-	/** Cell key encodes cell coordinate into a uint64 for TMap lookup */
-	static FORCEINLINE uint64 MakeCellKey(int32 CX, int32 CY, int32 CZ)
+	/** Flat array indexing for edges: 3 edges per cell position (axes 0,1,2) */
+	static FORCEINLINE int32 EdgeIndex(int32 CX, int32 CY, int32 CZ, int32 Axis, int32 GridDim)
 	{
-		return (static_cast<uint64>(CZ + 1) << 20) |
-			   (static_cast<uint64>(CY + 1) << 10) |
-			   static_cast<uint64>(CX + 1);
+		return ((CX + 1) + (CY + 1) * GridDim + (CZ + 1) * GridDim * GridDim) * 3 + Axis;
 	}
 
 	// ============================================================================
@@ -149,7 +147,9 @@ private:
 	void DetectEdgeCrossings(
 		const FVoxelMeshingRequest& Request,
 		int32 Stride,
-		TMap<uint64, FDCEdgeCrossing>& OutEdgeCrossings);
+		int32 GridDim,
+		TArray<FDCEdgeCrossing>& OutEdgeCrossings,
+		TArray<int32>& OutValidEdgeIndices);
 
 	/**
 	 * Pass 2: Solve QEF for each cell that has edge crossings.
@@ -158,8 +158,9 @@ private:
 	void SolveCellVertices(
 		const FVoxelMeshingRequest& Request,
 		int32 Stride,
-		const TMap<uint64, FDCEdgeCrossing>& EdgeCrossings,
-		TMap<uint64, FDCCellVertex>& OutCellVertices);
+		int32 GridDim,
+		const TArray<FDCEdgeCrossing>& EdgeCrossings,
+		TArray<FDCCellVertex>& OutCellVertices);
 
 	/**
 	 * Pass 3: Generate quads for each edge crossing.
@@ -168,8 +169,10 @@ private:
 	void GenerateQuads(
 		const FVoxelMeshingRequest& Request,
 		int32 Stride,
-		const TMap<uint64, FDCEdgeCrossing>& EdgeCrossings,
-		TMap<uint64, FDCCellVertex>& CellVertices,
+		int32 GridDim,
+		const TArray<FDCEdgeCrossing>& EdgeCrossings,
+		const TArray<int32>& ValidEdgeIndices,
+		TArray<FDCCellVertex>& CellVertices,
 		FChunkMeshData& OutMeshData,
 		uint32& OutTriangleCount);
 
@@ -180,8 +183,9 @@ private:
 	void MergeLODBoundaryCells(
 		const FVoxelMeshingRequest& Request,
 		int32 Stride,
-		TMap<uint64, FDCEdgeCrossing>& EdgeCrossings,
-		TMap<uint64, FDCCellVertex>& CellVertices);
+		int32 GridDim,
+		TArray<FDCEdgeCrossing>& EdgeCrossings,
+		TArray<FDCCellVertex>& CellVertices);
 
 	/**
 	 * Get the dominant material for a cell by voting across solid voxels.
