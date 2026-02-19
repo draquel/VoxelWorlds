@@ -87,6 +87,9 @@ void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float DeltaTime)
 		TimeSinceViewerMoved += DeltaTime;
 	}
 
+	// Always flush deferred instance additions (budget-limited)
+	FlushPendingInstanceAdds();
+
 	// Only process rebuilds when:
 	// 1. Viewer has been stationary for a bit (prevents flicker during movement)
 	// 2. No chunks are pending generation (prevents flicker during initial load)
@@ -153,8 +156,8 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 
 	if (bIsNewChunk && ScatterData.bIsValid && ScatterData.SpawnPoints.Num() > 0)
 	{
-		// NEW CHUNK: Just append instances directly without rebuilding
-		// This avoids flickering existing instances from other chunks
+		// NEW CHUNK: Queue instances for deferred addition (budget-limited per frame)
+		// This prevents frame spikes when many chunks complete scatter simultaneously
 
 		// Group spawn points by scatter type for batch adding
 		TMap<int32, TArray<FTransform>> TransformsByType;
@@ -168,23 +171,26 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 			}
 		}
 
-		// Add instances to each HISM
+		// Track scatter types for this chunk and queue instance additions
 		TSet<int32>& NewTypes = ChunkScatterTypes.FindOrAdd(ChunkCoord);
 		for (auto& Pair : TransformsByType)
 		{
 			const int32 ScatterTypeID = Pair.Key;
 			TArray<FTransform>& Transforms = Pair.Value;
 
-			UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(ScatterTypeID);
-			if (HISM && Transforms.Num() > 0)
+			if (Transforms.Num() > 0)
 			{
-				HISM->AddInstances(Transforms, false, true);
-				TotalInstancesAdded += Transforms.Num();
 				NewTypes.Add(ScatterTypeID);
+
+				FPendingInstanceAdd PendingAdd;
+				PendingAdd.ScatterTypeID = ScatterTypeID;
+				PendingAdd.ChunkCoord = ChunkCoord;
+				PendingAdd.Transforms = MoveTemp(Transforms);
+				PendingInstanceAdds.Add(MoveTemp(PendingAdd));
 			}
 		}
 
-		UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Chunk (%d,%d,%d): Added %d instances (new chunk, no rebuild)"),
+		UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Chunk (%d,%d,%d): Queued %d instances for deferred addition (new chunk)"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ScatterData.SpawnPoints.Num());
 	}
 	else
@@ -294,6 +300,10 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 	// CrossBillboard types use runtime-generated meshes, so Mesh soft pointer is not set
 	if (Definition->MeshType != EScatterMeshType::CrossBillboard && Definition->Mesh.IsNull())
 	{
+		UE_LOG(LogVoxelScatterRenderer, Warning,
+			TEXT("Scatter type %d (%s): Mesh soft reference is null — cannot create HISM. "
+				 "Assign a static mesh in the ScatterConfiguration data asset."),
+			ScatterTypeID, *Definition->Name);
 		return nullptr;
 	}
 
@@ -637,6 +647,69 @@ void UVoxelScatterRenderer::AddInstancesToHISM(
 	HISM->MarkRenderStateDirty();
 }
 
+void UVoxelScatterRenderer::FlushPendingInstanceAdds()
+{
+	if (PendingInstanceAdds.Num() == 0)
+	{
+		return;
+	}
+
+	int32 InstanceBudget = MaxInstanceAddsPerFrame;
+	int32 EntriesProcessed = 0;
+
+	for (int32 i = 0; i < PendingInstanceAdds.Num() && InstanceBudget > 0; ++i)
+	{
+		FPendingInstanceAdd& PendingAdd = PendingInstanceAdds[i];
+
+		UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(PendingAdd.ScatterTypeID);
+		if (!HISM)
+		{
+			// Can't create HISM for this type — discard
+			++EntriesProcessed;
+			continue;
+		}
+
+		const int32 InstancesToAdd = PendingAdd.Transforms.Num();
+		if (InstancesToAdd <= InstanceBudget)
+		{
+			// Entire batch fits within budget
+			HISM->AddInstances(PendingAdd.Transforms, false, true);
+			TotalInstancesAdded += InstancesToAdd;
+			InstanceBudget -= InstancesToAdd;
+			++EntriesProcessed;
+		}
+		else
+		{
+			// Partial batch: add what we can, keep the rest for next frame
+			TArray<FTransform> BatchToAdd;
+			BatchToAdd.Reserve(InstanceBudget);
+			for (int32 j = 0; j < InstanceBudget; ++j)
+			{
+				BatchToAdd.Add(PendingAdd.Transforms[j]);
+			}
+			HISM->AddInstances(BatchToAdd, false, true);
+			TotalInstancesAdded += InstanceBudget;
+
+			// Remove processed transforms from the pending entry
+			PendingAdd.Transforms.RemoveAt(0, InstanceBudget);
+			InstanceBudget = 0;
+			// Don't increment EntriesProcessed — this entry still has remaining transforms
+		}
+	}
+
+	// Remove fully processed entries from the front
+	if (EntriesProcessed > 0)
+	{
+		PendingInstanceAdds.RemoveAt(0, EntriesProcessed);
+	}
+
+	if (PendingInstanceAdds.Num() > 0)
+	{
+		UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Deferred instance adds: %d entries remaining (%d budget used)"),
+			PendingInstanceAdds.Num(), MaxInstanceAddsPerFrame - InstanceBudget);
+	}
+}
+
 void UVoxelScatterRenderer::QueueRebuild(int32 ScatterTypeID)
 {
 	PendingRebuildScatterTypes.Add(ScatterTypeID);
@@ -703,6 +776,9 @@ void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
 	// CrossBillboard types use runtime-generated meshes, so Mesh soft pointer is not set
 	if (Definition->MeshType != EScatterMeshType::CrossBillboard && Definition->Mesh.IsNull())
 	{
+		UE_LOG(LogVoxelScatterRenderer, Warning,
+			TEXT("RebuildScatterType %d (%s): Mesh is null — skipping rebuild"),
+			ScatterTypeID, *Definition->Name);
 		return;
 	}
 

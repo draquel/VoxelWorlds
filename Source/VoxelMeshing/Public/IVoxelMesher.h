@@ -225,4 +225,11 @@ public:
 	 * @return Type name string (e.g., "CPU Cubic", "GPU Cubic")
 	 */
 	virtual FString GetMesherTypeName() const = 0;
+
+	// ============================================================================
+	// Per-Frame Update
+	// ============================================================================
+
+	/** Called each frame. GPU meshers use this to poll async readbacks. */
+	virtual void Tick(float DeltaTime) {}
 };

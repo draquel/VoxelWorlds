@@ -338,6 +338,8 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, in
 	{
 		if (!Def.bEnabled)
 		{
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — disabled"),
+				Def.ScatterID, *Def.Name);
 			continue;
 		}
 
@@ -347,10 +349,14 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, in
 			// VoxelInjection definitions are rendered as HISM scatter ONLY in HISM or Both (far) mode
 			if (TreeMode == EVoxelTreeMode::VoxelData)
 			{
+				UE_LOG(LogVoxelScatter, Warning, TEXT("  Scatter %d (%s): SKIPPED — VoxelInjection type with TreeMode=VoxelData (trees only in terrain, no HISM). Set TreeMode to HISM or Both to see trees as HISM instances."),
+					Def.ScatterID, *Def.Name);
 				continue; // Trees are in VoxelData already, skip HISM
 			}
 			if (TreeMode == EVoxelTreeMode::Both && ChunkDistance <= VoxelTreeMaxDist)
 			{
+				UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — VoxelInjection type within VoxelTree range (%.0f <= %.0f)"),
+					Def.ScatterID, *Def.Name, ChunkDistance, VoxelTreeMaxDist);
 				continue; // Within VoxelData range, skip HISM
 			}
 		}
@@ -358,6 +364,8 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, in
 		// Skip types already generated for this chunk
 		if (CompletedTypes && CompletedTypes->Contains(Def.ScatterID))
 		{
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — already completed for this chunk"),
+				Def.ScatterID, *Def.Name);
 			continue;
 		}
 
@@ -365,6 +373,8 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, in
 		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
 		if (ChunkDistance > EffectiveSpawnDistance)
 		{
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — distance %.0f > spawn distance %.0f"),
+				Def.ScatterID, *Def.Name, ChunkDistance, EffectiveSpawnDistance);
 			continue;
 		}
 
@@ -1230,7 +1240,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 {
 	FAsyncScatterResult Result;
 	int32 ProcessedCount = 0;
-	const int32 MaxProcessPerFrame = 4;
+	const int32 MaxProcessPerFrame = 2;
 
 	while (CompletedScatterQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
 	{

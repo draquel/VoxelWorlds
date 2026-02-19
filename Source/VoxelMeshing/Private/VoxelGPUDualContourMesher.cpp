@@ -11,6 +11,7 @@
 #include "ShaderParameterStruct.h"
 #include "RHICommandList.h"
 #include "RHIResources.h"
+#include "RHIGPUReadback.h"
 #include "RenderingThread.h"
 #include "DataDrivenShaderPlatformInfo.h"
 
@@ -179,6 +180,27 @@ public:
 };
 
 /**
+ * Pass 2.5: Prepare indirect dispatch arguments for Pass 3.
+ * Reads ValidEdgeCount from MeshCounters[2] and writes thread group counts.
+ */
+class FDCPrepareIndirectArgsCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FDCPrepareIndirectArgsCS);
+	SHADER_USE_PARAMETER_STRUCT(FDCPrepareIndirectArgsCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, MeshCounters)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, IndirectArgs)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+/**
  * Pass 3: Quad generation from edge crossings.
  * 1D dispatch over valid edges, emits quads from 4 cells sharing each edge.
  */
@@ -235,6 +257,7 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FDCResetCountersCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCResetCountersCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCEdgeCrossingCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCEdgeCrossingCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCQEFSolveCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCQEFSolveCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FDCPrepareIndirectArgsCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCPrepareIndirectArgsCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCQuadGenerationCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCQuadGenerationCS", SF_Compute);
 
 // ==================== FVoxelGPUDualContourMesher Implementation ====================
@@ -776,7 +799,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				);
 			}
 
-			// ===== Pass 3: Quad Generation =====
+			// ===== Pass 3: Quad Generation (Fixed Dispatch) =====
 			{
 				TShaderMapRef<FDCQuadGenerationCS> QuadShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 				FDCQuadGenerationCS::FParameters* QuadParams = GraphBuilder.AllocParameters<FDCQuadGenerationCS::FParameters>();
@@ -795,16 +818,20 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				QuadParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
 				BindVoxelAccess(QuadParams);
 
-				// 1D dispatch: one thread per possible valid edge
-				// MaxEdges is the worst case; actual count is in MeshCounters[2]
-				const int32 QuadGroupCount = FMath::DivideAndRoundUp(MaxEdges, 64);
+				// Fixed dispatch: worst-case thread groups for all possible edges
+				const uint32 QuadMaxEdges = static_cast<uint32>(GridDim) * GridDim * GridDim * 3;
+				const FIntVector QuadGroupCount(
+					FMath::DivideAndRoundUp(QuadMaxEdges, 64u),
+					1,
+					1
+				);
 
 				FComputeShaderUtils::AddPass(
 					GraphBuilder,
 					RDG_EVENT_NAME("DCQuadGeneration"),
 					QuadShader,
 					QuadParams,
-					FIntVector(QuadGroupCount, 1, 1)
+					QuadGroupCount
 				);
 			}
 
@@ -817,81 +844,200 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 
 			const double EndTime = FPlatformTime::Seconds();
 			Result->Stats.GenerationTimeMs = static_cast<float>((EndTime - StartTime) * 1000.0);
-			Result->bIsComplete = true;
-			Result->bWasSuccessful = true;
 
-			FVoxelMeshingHandle Handle(RequestId, ChunkCoord);
-			Handle.bIsComplete = true;
-			Handle.bWasSuccessful = true;
+			// Enqueue async counter readback (non-blocking)
+			Result->CounterReadback = new FRHIGPUBufferReadback(TEXT("DCCounterReadback"));
+			Result->CounterReadback->EnqueueCopy(RHICmdList, Result->CounterBuffer->GetRHI(), 3 * sizeof(uint32));
 
-			if (OnComplete.IsBound())
-			{
-				AsyncTask(ENamedThreads::GameThread, [OnComplete, Handle]()
-				{
-					OnComplete.Execute(Handle, true);
-				});
-			}
+			// Store callback for deferred firing — TickReadbacks will fire it when data is ready
+			Result->PendingOnComplete = OnComplete;
+			Result->PendingHandle = FVoxelMeshingHandle(RequestId, ChunkCoord);
+			Result->ReadbackPhase = EReadbackPhase::WaitingForCounters;
+			Result->CapturedMaxVertices = CapturedConfig.MaxVerticesPerChunk;
+			Result->CapturedMaxIndices = CapturedConfig.MaxIndicesPerChunk;
 		}
 	);
 }
 
-void FVoxelGPUDualContourMesher::ReadCounters(TSharedPtr<FMeshingResult> Result)
+void FVoxelGPUDualContourMesher::Tick(float DeltaTime)
 {
-	if (!Result || Result->bCountsRead || !Result->CounterBuffer.IsValid())
+	TickReadbacks();
+}
+
+void FVoxelGPUDualContourMesher::TickReadbacks()
+{
+	TArray<TPair<FOnVoxelMeshingComplete, FVoxelMeshingHandle>> CompletedCallbacks;
+
 	{
-		return;
-	}
-
-	// Capture max buffer capacities — GPU atomic counters can over-count because
-	// InterlockedAdd increments before the bounds check, so readback values may
-	// exceed the actual buffer sizes. We must clamp to prevent copy overrun.
-	const uint32 MaxVerts = Config.MaxVerticesPerChunk;
-	const uint32 MaxIdxs = Config.MaxIndicesPerChunk;
-
-	ENQUEUE_RENDER_COMMAND(ReadDCMeshCounters)(
-		[Result, MaxVerts, MaxIdxs](FRHICommandListImmediate& RHICmdList)
+		FScopeLock Lock(&ResultsLock);
+		for (auto& Pair : MeshingResults)
 		{
-			FRDGBuilder GraphBuilder(RHICmdList);
+			TSharedPtr<FMeshingResult>& Result = Pair.Value;
 
-			FRDGBufferRef CounterBuffer = GraphBuilder.RegisterExternalBuffer(Result->CounterBuffer, TEXT("CounterBuffer"));
-
-			FRDGBufferDesc StagingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 3);
-			FRDGBufferRef StagingBuffer = GraphBuilder.CreateBuffer(StagingDesc, TEXT("StagingCounters"));
-
-			AddCopyBufferPass(GraphBuilder, StagingBuffer, CounterBuffer);
-			GraphBuilder.QueueBufferExtraction(StagingBuffer, &Result->StagingCounterBuffer);
-
-			GraphBuilder.Execute();
-
-			if (Result->StagingCounterBuffer.IsValid())
+			if (Result->ReadbackPhase == EReadbackPhase::WaitingForCounters)
 			{
-				FRHIBuffer* StagingRHI = Result->StagingCounterBuffer->GetRHI();
-				void* MappedData = RHICmdList.LockBuffer(
-					StagingRHI,
-					0,
-					3 * sizeof(uint32),
-					RLM_ReadOnly
-				);
-
-				if (MappedData)
+				if (Result->CounterReadback && Result->CounterReadback->IsReady())
 				{
-					const uint32* Counts = static_cast<const uint32*>(MappedData);
-					// Clamp to buffer capacity — atomic counters may exceed max due to
-					// InterlockedAdd happening before the bounds check in the shader
-					Result->VertexCount = FMath::Min(Counts[0], MaxVerts);
-					Result->IndexCount = FMath::Min(Counts[1], MaxIdxs);
-					Result->Stats.VertexCount = Result->VertexCount;
-					Result->Stats.IndexCount = Result->IndexCount;
-					Result->Stats.FaceCount = Result->IndexCount / 3;
-					Result->bCountsRead = true;
-
-					RHICmdList.UnlockBuffer(StagingRHI);
+					// Counter readback ready — enqueue render cmd to Lock/copy/Unlock
+					TSharedPtr<FMeshingResult> SharedResult = Result;
+					ENQUEUE_RENDER_COMMAND(LockDCCounters)(
+						[SharedResult](FRHICommandListImmediate& RHICmdList)
+						{
+							const void* Data = SharedResult->CounterReadback->Lock(3 * sizeof(uint32));
+							if (Data)
+							{
+								const uint32* Counts = static_cast<const uint32*>(Data);
+								SharedResult->VertexCount = FMath::Min(Counts[0], SharedResult->CapturedMaxVertices);
+								SharedResult->IndexCount = FMath::Min(Counts[1], SharedResult->CapturedMaxIndices);
+								SharedResult->Stats.VertexCount = SharedResult->VertexCount;
+								SharedResult->Stats.IndexCount = SharedResult->IndexCount;
+								SharedResult->Stats.FaceCount = SharedResult->IndexCount / 3;
+							}
+							SharedResult->CounterReadback->Unlock();
+							delete SharedResult->CounterReadback;
+							SharedResult->CounterReadback = nullptr;
+							SharedResult->bCountsRead = true;
+						}
+					);
+					Result->ReadbackPhase = EReadbackPhase::CopyingCounters;
 				}
 			}
-		}
-	);
+			else if (Result->ReadbackPhase == EReadbackPhase::CopyingCounters)
+			{
+				// Poll until render cmd has finished copying counters
+				if (Result->bCountsRead)
+				{
+					if (Result->VertexCount == 0 || Result->IndexCount == 0)
+					{
+						// Empty mesh — skip data readback
+						Result->ReadbackMeshData.Reset();
+						Result->ReadbackPhase = EReadbackPhase::Complete;
+						Result->bIsComplete = true;
+						Result->bWasSuccessful = true;
+					}
+					else
+					{
+						// Enqueue vertex + index readback on render thread (non-blocking)
+						const uint32 VCount = Result->VertexCount;
+						const uint32 ICount = Result->IndexCount;
+						TSharedPtr<FMeshingResult> SharedResult = Result;
+						ENQUEUE_RENDER_COMMAND(EnqueueDCDataReadback)(
+							[SharedResult, VCount, ICount](FRHICommandListImmediate& RHICmdList)
+							{
+								SharedResult->VertexReadback = new FRHIGPUBufferReadback(TEXT("DCVertexReadback"));
+								SharedResult->VertexReadback->EnqueueCopy(
+									RHICmdList,
+									SharedResult->VertexBuffer->GetRHI(),
+									VCount * sizeof(FVoxelVertex));
 
-	FlushRenderingCommands();
+								SharedResult->IndexReadback = new FRHIGPUBufferReadback(TEXT("DCIndexReadback"));
+								SharedResult->IndexReadback->EnqueueCopy(
+									RHICmdList,
+									SharedResult->IndexBuffer->GetRHI(),
+									ICount * sizeof(uint32));
+							}
+						);
+						Result->ReadbackPhase = EReadbackPhase::WaitingForData;
+					}
+				}
+			}
+			else if (Result->ReadbackPhase == EReadbackPhase::WaitingForData)
+			{
+				if (Result->VertexReadback && Result->VertexReadback->IsReady()
+					&& Result->IndexReadback && Result->IndexReadback->IsReady())
+				{
+					// Data readback ready — enqueue render cmd to Lock/copy/Unlock
+					TSharedPtr<FMeshingResult> SharedResult = Result;
+					ENQUEUE_RENDER_COMMAND(LockDCMeshData)(
+						[SharedResult](FRHICommandListImmediate& RHICmdList)
+						{
+							CopyVertexReadbackData_RT(SharedResult);
+							CopyIndexReadbackData_RT(SharedResult);
+
+							delete SharedResult->VertexReadback;
+							SharedResult->VertexReadback = nullptr;
+							delete SharedResult->IndexReadback;
+							SharedResult->IndexReadback = nullptr;
+
+							SharedResult->CounterBuffer.SafeRelease();
+							SharedResult->bIsComplete = true;
+							SharedResult->bWasSuccessful = true;
+						}
+					);
+					Result->ReadbackPhase = EReadbackPhase::CopyingData;
+				}
+			}
+			else if (Result->ReadbackPhase == EReadbackPhase::CopyingData)
+			{
+				// Poll until render cmd has finished copying mesh data
+				if (Result->bIsComplete)
+				{
+					Result->ReadbackPhase = EReadbackPhase::Complete;
+				}
+			}
+
+			if (Result->ReadbackPhase == EReadbackPhase::Complete && Result->PendingOnComplete.IsBound())
+			{
+				CompletedCallbacks.Add(TPair<FOnVoxelMeshingComplete, FVoxelMeshingHandle>(
+					Result->PendingOnComplete, Result->PendingHandle));
+				Result->PendingOnComplete.Unbind();
+			}
+		}
+	}
+
+	// Fire callbacks outside the lock to avoid deadlocks
+	for (auto& Callback : CompletedCallbacks)
+	{
+		Callback.Key.Execute(Callback.Value, true);
+	}
+}
+
+void FVoxelGPUDualContourMesher::CopyVertexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
+{
+	const uint32 VertexCount = Result->VertexCount;
+
+	Result->ReadbackMeshData.Positions.SetNum(VertexCount);
+	Result->ReadbackMeshData.Normals.SetNum(VertexCount);
+	Result->ReadbackMeshData.UVs.SetNum(VertexCount);
+	Result->ReadbackMeshData.UV1s.SetNum(VertexCount);
+	Result->ReadbackMeshData.Colors.SetNum(VertexCount);
+
+	const void* Data = Result->VertexReadback->Lock(VertexCount * sizeof(FVoxelVertex));
+	if (Data)
+	{
+		const FVoxelVertex* Vertices = static_cast<const FVoxelVertex*>(Data);
+		for (uint32 i = 0; i < VertexCount; ++i)
+		{
+			Result->ReadbackMeshData.Positions[i] = Vertices[i].Position;
+			Result->ReadbackMeshData.Normals[i] = Vertices[i].GetNormal();
+			Result->ReadbackMeshData.UVs[i] = Vertices[i].UV;
+
+			const uint8 MaterialID = Vertices[i].GetMaterialID();
+			Result->ReadbackMeshData.UV1s[i] = FVector2f(static_cast<float>(MaterialID), 0.0f);
+
+			Result->ReadbackMeshData.Colors[i] = FColor(
+				MaterialID,
+				Vertices[i].GetBiomeID(),
+				Vertices[i].GetAO() * 85,
+				255
+			);
+		}
+	}
+	Result->VertexReadback->Unlock();
+}
+
+void FVoxelGPUDualContourMesher::CopyIndexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
+{
+	const uint32 IndexCount = Result->IndexCount;
+
+	Result->ReadbackMeshData.Indices.SetNum(IndexCount);
+
+	const void* Data = Result->IndexReadback->Lock(IndexCount * sizeof(uint32));
+	if (Data)
+	{
+		FMemory::Memcpy(Result->ReadbackMeshData.Indices.GetData(), Data, IndexCount * sizeof(uint32));
+	}
+	Result->IndexReadback->Unlock();
 }
 
 bool FVoxelGPUDualContourMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
@@ -952,30 +1098,16 @@ bool FVoxelGPUDualContourMesher::GetBufferCounts(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
+	FScopeLock Lock(&ResultsLock);
+	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr || !(*ResultPtr)->bIsComplete || !(*ResultPtr)->bCountsRead)
 	{
-		FScopeLock Lock(&ResultsLock);
-		const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr || !(*ResultPtr)->bIsComplete)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
+		return false;
 	}
 
-	if (!Result->bCountsRead)
-	{
-		const_cast<FVoxelGPUDualContourMesher*>(this)->ReadCounters(Result);
-	}
-
-	if (Result->bCountsRead)
-	{
-		OutVertexCount = Result->VertexCount;
-		OutIndexCount = Result->IndexCount;
-		return true;
-	}
-
-	return false;
+	OutVertexCount = (*ResultPtr)->VertexCount;
+	OutIndexCount = (*ResultPtr)->IndexCount;
+	return true;
 }
 
 bool FVoxelGPUDualContourMesher::GetRenderData(
@@ -987,26 +1119,14 @@ bool FVoxelGPUDualContourMesher::GetRenderData(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
-	{
-		FScopeLock Lock(&ResultsLock);
-		TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr || !(*ResultPtr)->bIsComplete)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
-	}
-
-	if (!Result->bCountsRead)
-	{
-		ReadCounters(Result);
-	}
-
-	if (!Result->bCountsRead)
+	FScopeLock Lock(&ResultsLock);
+	TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr || !(*ResultPtr)->bIsComplete || !(*ResultPtr)->bCountsRead)
 	{
 		return false;
 	}
+
+	TSharedPtr<FMeshingResult> Result = *ResultPtr;
 
 	OutRenderData.ChunkCoord = Result->ChunkCoord;
 	OutRenderData.VertexCount = Result->VertexCount;
@@ -1033,121 +1153,15 @@ bool FVoxelGPUDualContourMesher::ReadbackToCPU(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
+	FScopeLock Lock(&ResultsLock);
+	TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr || (*ResultPtr)->ReadbackPhase != EReadbackPhase::Complete)
 	{
-		FScopeLock Lock(&ResultsLock);
-		TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr || !(*ResultPtr)->bIsComplete)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
+		return false;
 	}
 
-	if (!Result->bCountsRead)
-	{
-		ReadCounters(Result);
-	}
-
-	if (!Result->bCountsRead || Result->VertexCount == 0 || Result->IndexCount == 0)
-	{
-		OutMeshData.Reset();
-		return true; // Empty mesh is valid
-	}
-
-	const uint32 VertexCount = Result->VertexCount;
-	const uint32 IndexCount = Result->IndexCount;
-
-	OutMeshData.Reset();
-	OutMeshData.Positions.SetNum(VertexCount);
-	OutMeshData.Normals.SetNum(VertexCount);
-	OutMeshData.UVs.SetNum(VertexCount);
-	OutMeshData.UV1s.SetNum(VertexCount);
-	OutMeshData.Colors.SetNum(VertexCount);
-	OutMeshData.Indices.SetNum(IndexCount);
-
-	FChunkMeshData* OutDataPtr = &OutMeshData;
-
-	ENQUEUE_RENDER_COMMAND(ReadbackDCMeshData)(
-		[Result, VertexCount, IndexCount, OutDataPtr](FRHICommandListImmediate& RHICmdList)
-		{
-			FRDGBuilder GraphBuilder(RHICmdList);
-
-			FRDGBufferRef VertexBuffer = GraphBuilder.RegisterExternalBuffer(Result->VertexBuffer, TEXT("VertexBuffer"));
-			FRDGBufferRef IndexBuffer = GraphBuilder.RegisterExternalBuffer(Result->IndexBuffer, TEXT("IndexBuffer"));
-
-			FRDGBufferDesc VertexStagingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FVoxelVertex), VertexCount);
-			FRDGBufferRef VertexStagingBuffer = GraphBuilder.CreateBuffer(VertexStagingDesc, TEXT("VertexStaging"));
-
-			FRDGBufferDesc IndexStagingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), IndexCount);
-			FRDGBufferRef IndexStagingBuffer = GraphBuilder.CreateBuffer(IndexStagingDesc, TEXT("IndexStaging"));
-
-			const uint64 VertexBytes = VertexCount * sizeof(FVoxelVertex);
-			const uint64 IndexBytes = IndexCount * sizeof(uint32);
-			AddCopyBufferPass(GraphBuilder, VertexStagingBuffer, 0, VertexBuffer, 0, VertexBytes);
-			AddCopyBufferPass(GraphBuilder, IndexStagingBuffer, 0, IndexBuffer, 0, IndexBytes);
-
-			GraphBuilder.QueueBufferExtraction(VertexStagingBuffer, &Result->StagingVertexBuffer);
-			GraphBuilder.QueueBufferExtraction(IndexStagingBuffer, &Result->StagingIndexBuffer);
-
-			GraphBuilder.Execute();
-
-			// Read vertex data
-			if (Result->StagingVertexBuffer.IsValid())
-			{
-				FRHIBuffer* StagingRHI = Result->StagingVertexBuffer->GetRHI();
-				void* MappedData = RHICmdList.LockBuffer(
-					StagingRHI,
-					0,
-					VertexCount * sizeof(FVoxelVertex),
-					RLM_ReadOnly
-				);
-
-				if (MappedData)
-				{
-					const FVoxelVertex* Vertices = static_cast<const FVoxelVertex*>(MappedData);
-					for (uint32 i = 0; i < VertexCount; ++i)
-					{
-						OutDataPtr->Positions[i] = Vertices[i].Position;
-						const FVector3f Normal = Vertices[i].GetNormal();
-						OutDataPtr->Normals[i] = Normal;
-						OutDataPtr->UVs[i] = Vertices[i].UV;
-
-						const uint8 MaterialID = Vertices[i].GetMaterialID();
-						OutDataPtr->UV1s[i] = FVector2f(static_cast<float>(MaterialID), 0.0f);
-
-						OutDataPtr->Colors[i] = FColor(
-							MaterialID,
-							Vertices[i].GetBiomeID(),
-							Vertices[i].GetAO() * 85,
-							255
-						);
-					}
-					RHICmdList.UnlockBuffer(StagingRHI);
-				}
-			}
-
-			// Read index data
-			if (Result->StagingIndexBuffer.IsValid())
-			{
-				FRHIBuffer* StagingRHI = Result->StagingIndexBuffer->GetRHI();
-				void* MappedData = RHICmdList.LockBuffer(
-					StagingRHI,
-					0,
-					IndexCount * sizeof(uint32),
-					RLM_ReadOnly
-				);
-
-				if (MappedData)
-				{
-					FMemory::Memcpy(OutDataPtr->Indices.GetData(), MappedData, IndexCount * sizeof(uint32));
-					RHICmdList.UnlockBuffer(StagingRHI);
-				}
-			}
-		}
-	);
-
-	FlushRenderingCommands();
+	// Data was already read from GPU by TickReadbacks — just move it
+	OutMeshData = MoveTemp((*ResultPtr)->ReadbackMeshData);
 	return true;
 }
 
@@ -1158,10 +1172,9 @@ void FVoxelGPUDualContourMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle
 		return;
 	}
 
-	FlushRenderingCommands();
-
 	FScopeLock Lock(&ResultsLock);
 	MeshingResults.Remove(Handle.RequestId);
+	// GPU resources freed via TRefCountPtr/TSharedPtr destructors — no flush needed
 }
 
 void FVoxelGPUDualContourMesher::ReleaseAllHandles()
@@ -1191,22 +1204,13 @@ bool FVoxelGPUDualContourMesher::GetStats(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
+	FScopeLock Lock(&ResultsLock);
+	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr)
 	{
-		FScopeLock Lock(&ResultsLock);
-		const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
+		return false;
 	}
 
-	if (!Result->bCountsRead && Result->bIsComplete)
-	{
-		const_cast<FVoxelGPUDualContourMesher*>(this)->ReadCounters(Result);
-	}
-
-	OutStats = Result->Stats;
+	OutStats = (*ResultPtr)->Stats;
 	return true;
 }

@@ -171,13 +171,18 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Meshing queue ===
 	SectionStart = FPlatformTime::Seconds();
+	if (Mesher)
+	{
+		Mesher->Tick(DeltaTime);
+	}
 	ProcessMeshingQueue(TimeSlice * 0.4f);
 	ProcessCompletedAsyncMeshes();
 	Timing.MeshingMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
-	// === Render submit ===
+	// === Render submit (time-budgeted) ===
 	SectionStart = FPlatformTime::Seconds();
 	const int32 MaxRenderSubmitsPerFrame = Configuration ? Configuration->MaxChunksToLoadPerFrame : 8;
+	constexpr double RenderSubmitBudgetSec = 0.004; // 4ms budget — leaves headroom for other systems
 	if (PendingMeshQueue.Num() > 0)
 	{
 		int32 RenderSubmitCount = 0;
@@ -186,6 +191,13 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			const FIntVector ChunkCoord = PendingMeshQueue.Last().ChunkCoord;
 			OnChunkMeshingComplete(ChunkCoord);
 			++RenderSubmitCount;
+
+			// Stop early if we've exhausted the frame budget for render submits.
+			// Remaining chunks stay in PendingMeshQueue and process next frame.
+			if ((FPlatformTime::Seconds() - SectionStart) >= RenderSubmitBudgetSec)
+			{
+				break;
+			}
 		}
 	}
 
@@ -1442,11 +1454,15 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		return;
 	}
 
-	// For async, we don't need time slicing - just limit concurrent tasks
-	const int32 MaxChunks = Configuration->MaxChunksToLoadPerFrame;
+	// Limit new dispatches per frame to avoid flooding the render thread.
+	// Each GPU dispatch builds an RDG graph + uploads ~150KB + 4 compute passes.
+	// Dispatching too many in one frame causes a render thread stall at frame sync.
+	// The in-flight cap (EffectiveMaxAsyncMeshTasks) still controls pipeline depth;
+	// this cap just prevents burst-refilling the pipeline in a single frame.
+	const int32 MaxNewDispatches = FMath::Min(Configuration->MaxChunksToLoadPerFrame, 2);
 	int32 ProcessedCount = 0;
 
-	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxChunks &&
+	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxNewDispatches &&
 	       AsyncMeshingInProgress.Num() < EffectiveMaxAsyncMeshTasks &&
 	       PendingMeshQueue.Num() < EffectiveMaxPendingMeshes)
 	{

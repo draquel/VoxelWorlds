@@ -200,6 +200,24 @@ protected:
 	 */
 	void FlushPendingRebuilds();
 
+	// ==================== Deferred Instance Additions ====================
+
+	/** Pending instance additions queued by UpdateChunkInstances for budget-limited flushing */
+	struct FPendingInstanceAdd
+	{
+		int32 ScatterTypeID;
+		FIntVector ChunkCoord;
+		TArray<FTransform> Transforms;
+	};
+
+	TArray<FPendingInstanceAdd> PendingInstanceAdds;
+
+	/** Maximum instances to add to HISMs per frame (across all scatter types) */
+	int32 MaxInstanceAddsPerFrame = 2000;
+
+	/** Flush pending instance additions within the per-frame budget. Called by Tick(). */
+	void FlushPendingInstanceAdds();
+
 	// ==================== Pending Rebuilds ====================
 
 	/** Scatter types pending rebuild - processed in FlushPendingRebuilds() */

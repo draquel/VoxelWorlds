@@ -746,6 +746,25 @@ void DCQEFSolveCS(
     DCCellVertices[CIdx] = Vert;
 }
 
+// ==================== Pass 2.5: Prepare Indirect Args ====================
+
+// Indirect dispatch arguments buffer (3 uints: ThreadGroupCountX/Y/Z)
+RWBuffer<uint> IndirectArgs;
+
+/**
+ * Reads ValidEdgeCount from MeshCounters[2] and writes the indirect dispatch
+ * arguments for Pass 3 (QuadGenerationCS). This avoids dispatching a fixed
+ * worst-case number of thread groups when only a fraction have real work.
+ */
+[numthreads(1, 1, 1)]
+void DCPrepareIndirectArgsCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint ValidEdgeCount = MeshCounters[2];
+    IndirectArgs[0] = (ValidEdgeCount + 63) / 64;  // ThreadGroupCountX
+    IndirectArgs[1] = 1;                             // ThreadGroupCountY
+    IndirectArgs[2] = 1;                             // ThreadGroupCountZ
+}
+
 // ==================== Pass 3: Quad Generation ====================
 
 // 4-cell offsets per axis for quad generation (matches CPU winding)

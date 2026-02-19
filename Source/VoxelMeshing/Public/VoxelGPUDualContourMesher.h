@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "IVoxelMesher.h"
 #include "RHIFwd.h"
+#include "RHIGPUReadback.h"
 
 // Forward declarations
 class FRDGPooledBuffer;
@@ -83,6 +84,9 @@ public:
 
 	virtual FString GetMesherTypeName() const override { return TEXT("GPU Dual Contouring"); }
 
+	/** Called each frame to poll async GPU readbacks. */
+	virtual void Tick(float DeltaTime) override;
+
 private:
 	bool bIsInitialized = false;
 
@@ -92,15 +96,25 @@ private:
 	/** Current configuration */
 	FVoxelMeshingConfig Config;
 
+	/** Async readback state machine phases */
+	enum class EReadbackPhase : uint8
+	{
+		WaitingForCounters,  // Counter readback enqueued, polling IsReady()
+		CopyingCounters,     // Render cmd enqueued to Lock/copy/Unlock counters
+		WaitingForData,      // Vertex/index readback enqueued, polling IsReady()
+		CopyingData,         // Render cmd enqueued to Lock/copy/Unlock mesh data
+		Complete,            // Data ready on CPU, OnComplete fired
+		Failed
+	};
+
 	/** Stored meshing results */
 	struct FMeshingResult
 	{
+		// GPU buffers extracted from RDG graph
 		TRefCountPtr<FRDGPooledBuffer> VertexBuffer;
 		TRefCountPtr<FRDGPooledBuffer> IndexBuffer;
 		TRefCountPtr<FRDGPooledBuffer> CounterBuffer;
-		TRefCountPtr<FRDGPooledBuffer> StagingVertexBuffer;
-		TRefCountPtr<FRDGPooledBuffer> StagingIndexBuffer;
-		TRefCountPtr<FRDGPooledBuffer> StagingCounterBuffer;
+
 		FIntVector ChunkCoord;
 		int32 ChunkSize = 0;
 		uint32 VertexCount = 0;
@@ -109,10 +123,43 @@ private:
 		bool bWasSuccessful = false;
 		bool bCountsRead = false;
 		FVoxelMeshingStats Stats;
+
+		// Async readback state
+		EReadbackPhase ReadbackPhase = EReadbackPhase::WaitingForCounters;
+		FRHIGPUBufferReadback* CounterReadback = nullptr;
+		FRHIGPUBufferReadback* VertexReadback = nullptr;
+		FRHIGPUBufferReadback* IndexReadback = nullptr;
+
+		// Deferred completion callback (fired when CPU data is ready)
+		FOnVoxelMeshingComplete PendingOnComplete;
+		FVoxelMeshingHandle PendingHandle;
+
+		// Pre-read mesh data (populated by TickReadbacks, consumed by ReadbackToCPU)
+		FChunkMeshData ReadbackMeshData;
+
+		// Config snapshot captured at dispatch time (for max buffer capacities)
+		uint32 CapturedMaxVertices = 0;
+		uint32 CapturedMaxIndices = 0;
+
+		~FMeshingResult()
+		{
+			delete CounterReadback;
+			delete VertexReadback;
+			delete IndexReadback;
+		}
 	};
 
 	TMap<uint64, TSharedPtr<FMeshingResult>> MeshingResults;
 	mutable FCriticalSection ResultsLock;
+
+	/** Poll all pending async readbacks and fire callbacks for completed ones. */
+	void TickReadbacks();
+
+	/** Copy vertex data from readback buffer into Result->ReadbackMeshData. Render thread only. */
+	static void CopyVertexReadbackData_RT(TSharedPtr<FMeshingResult> Result);
+
+	/** Copy index data from readback buffer into Result->ReadbackMeshData. Render thread only. */
+	static void CopyIndexReadbackData_RT(TSharedPtr<FMeshingResult> Result);
 
 	/** Dispatch the 4-pass compute shader pipeline on the render thread */
 	void DispatchComputeShader(
@@ -120,9 +167,6 @@ private:
 		uint64 RequestId,
 		TSharedPtr<FMeshingResult> Result,
 		FOnVoxelMeshingComplete OnComplete);
-
-	/** Read vertex/index counts from GPU */
-	void ReadCounters(TSharedPtr<FMeshingResult> Result);
 
 	/** Pack voxel data for GPU upload */
 	TArray<uint32> PackVoxelDataForGPU(const TArray<FVoxelData>& VoxelData);

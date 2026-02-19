@@ -537,84 +537,203 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 			// Execute the graph
 			GraphBuilder.Execute();
 
-			// Calculate generation time
 			const double EndTime = FPlatformTime::Seconds();
 			Result->Stats.GenerationTimeMs = static_cast<float>((EndTime - StartTime) * 1000.0);
-			Result->bIsComplete = true;
-			Result->bWasSuccessful = true;
 
-			// Create handle for callback
-			FVoxelMeshingHandle Handle(RequestId, ChunkCoord);
-			Handle.bIsComplete = true;
-			Handle.bWasSuccessful = true;
+			// Enqueue async counter readback (non-blocking)
+			Result->CounterReadback = new FRHIGPUBufferReadback(TEXT("SmoothCounterReadback"));
+			Result->CounterReadback->EnqueueCopy(RHICmdList, Result->CounterBuffer->GetRHI(), 2 * sizeof(uint32));
 
-			// Call completion callback on game thread
-			if (OnComplete.IsBound())
-			{
-				AsyncTask(ENamedThreads::GameThread, [OnComplete, Handle]()
-				{
-					OnComplete.Execute(Handle, true);
-				});
-			}
+			// Store callback for deferred firing — TickReadbacks will fire it when data is ready
+			Result->PendingOnComplete = OnComplete;
+			Result->PendingHandle = FVoxelMeshingHandle(RequestId, ChunkCoord);
+			Result->ReadbackPhase = EReadbackPhase::WaitingForCounters;
+			Result->CapturedMaxVertices = CapturedConfig.MaxVerticesPerChunk;
+			Result->CapturedMaxIndices = CapturedConfig.MaxIndicesPerChunk;
 		}
 	);
 }
 
-void FVoxelGPUSmoothMesher::ReadCounters(TSharedPtr<FMeshingResult> Result)
+void FVoxelGPUSmoothMesher::Tick(float DeltaTime)
 {
-	if (!Result || Result->bCountsRead || !Result->CounterBuffer.IsValid())
+	TickReadbacks();
+}
+
+void FVoxelGPUSmoothMesher::TickReadbacks()
+{
+	TArray<TPair<FOnVoxelMeshingComplete, FVoxelMeshingHandle>> CompletedCallbacks;
+
 	{
-		return;
-	}
-
-	ENQUEUE_RENDER_COMMAND(ReadSmoothMeshCounters)(
-		[Result](FRHICommandListImmediate& RHICmdList)
+		FScopeLock Lock(&ResultsLock);
+		for (auto& Pair : MeshingResults)
 		{
-			FRDGBuilder GraphBuilder(RHICmdList);
+			TSharedPtr<FMeshingResult>& Result = Pair.Value;
 
-			// Register external buffer
-			FRDGBufferRef CounterBuffer = GraphBuilder.RegisterExternalBuffer(Result->CounterBuffer, TEXT("CounterBuffer"));
-
-			// Create staging buffer
-			FRDGBufferDesc StagingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 2);
-			FRDGBufferRef StagingBuffer = GraphBuilder.CreateBuffer(StagingDesc, TEXT("StagingCounters"));
-
-			// Copy to staging
-			AddCopyBufferPass(GraphBuilder, StagingBuffer, CounterBuffer);
-
-			// Extract staging buffer
-			GraphBuilder.QueueBufferExtraction(StagingBuffer, &Result->StagingCounterBuffer);
-
-			GraphBuilder.Execute();
-
-			// Read from staging buffer
-			if (Result->StagingCounterBuffer.IsValid())
+			if (Result->ReadbackPhase == EReadbackPhase::WaitingForCounters)
 			{
-				FRHIBuffer* StagingRHI = Result->StagingCounterBuffer->GetRHI();
-				void* MappedData = RHICmdList.LockBuffer(
-					StagingRHI,
-					0,
-					2 * sizeof(uint32),
-					RLM_ReadOnly
-				);
-
-				if (MappedData)
+				if (Result->CounterReadback && Result->CounterReadback->IsReady())
 				{
-					const uint32* Counts = static_cast<const uint32*>(MappedData);
-					Result->VertexCount = Counts[0];
-					Result->IndexCount = Counts[1];
-					Result->Stats.VertexCount = Result->VertexCount;
-					Result->Stats.IndexCount = Result->IndexCount;
-					Result->Stats.FaceCount = Result->IndexCount / 3;  // Triangles, not quads
-					Result->bCountsRead = true;
-
-					RHICmdList.UnlockBuffer(StagingRHI);
+					// Counter readback ready — enqueue render cmd to Lock/copy/Unlock
+					TSharedPtr<FMeshingResult> SharedResult = Result;
+					ENQUEUE_RENDER_COMMAND(LockSmoothCounters)(
+						[SharedResult](FRHICommandListImmediate& RHICmdList)
+						{
+							const void* Data = SharedResult->CounterReadback->Lock(2 * sizeof(uint32));
+							if (Data)
+							{
+								const uint32* Counts = static_cast<const uint32*>(Data);
+								SharedResult->VertexCount = FMath::Min(Counts[0], SharedResult->CapturedMaxVertices);
+								SharedResult->IndexCount = FMath::Min(Counts[1], SharedResult->CapturedMaxIndices);
+								SharedResult->Stats.VertexCount = SharedResult->VertexCount;
+								SharedResult->Stats.IndexCount = SharedResult->IndexCount;
+								SharedResult->Stats.FaceCount = SharedResult->IndexCount / 3;
+							}
+							SharedResult->CounterReadback->Unlock();
+							delete SharedResult->CounterReadback;
+							SharedResult->CounterReadback = nullptr;
+							SharedResult->bCountsRead = true;
+						}
+					);
+					Result->ReadbackPhase = EReadbackPhase::CopyingCounters;
 				}
 			}
-		}
-	);
+			else if (Result->ReadbackPhase == EReadbackPhase::CopyingCounters)
+			{
+				// Poll until render cmd has finished copying counters
+				if (Result->bCountsRead)
+				{
+					if (Result->VertexCount == 0 || Result->IndexCount == 0)
+					{
+						// Empty mesh — skip data readback
+						Result->ReadbackMeshData.Reset();
+						Result->ReadbackPhase = EReadbackPhase::Complete;
+						Result->bIsComplete = true;
+						Result->bWasSuccessful = true;
+					}
+					else
+					{
+						// Enqueue vertex + index readback on render thread (non-blocking)
+						const uint32 VCount = Result->VertexCount;
+						const uint32 ICount = Result->IndexCount;
+						TSharedPtr<FMeshingResult> SharedResult = Result;
+						ENQUEUE_RENDER_COMMAND(EnqueueSmoothDataReadback)(
+							[SharedResult, VCount, ICount](FRHICommandListImmediate& RHICmdList)
+							{
+								SharedResult->VertexReadback = new FRHIGPUBufferReadback(TEXT("SmoothVertexReadback"));
+								SharedResult->VertexReadback->EnqueueCopy(
+									RHICmdList,
+									SharedResult->VertexBuffer->GetRHI(),
+									VCount * sizeof(FVoxelVertex));
 
-	FlushRenderingCommands();
+								SharedResult->IndexReadback = new FRHIGPUBufferReadback(TEXT("SmoothIndexReadback"));
+								SharedResult->IndexReadback->EnqueueCopy(
+									RHICmdList,
+									SharedResult->IndexBuffer->GetRHI(),
+									ICount * sizeof(uint32));
+							}
+						);
+						Result->ReadbackPhase = EReadbackPhase::WaitingForData;
+					}
+				}
+			}
+			else if (Result->ReadbackPhase == EReadbackPhase::WaitingForData)
+			{
+				if (Result->VertexReadback && Result->VertexReadback->IsReady()
+					&& Result->IndexReadback && Result->IndexReadback->IsReady())
+				{
+					// Data readback ready — enqueue render cmd to Lock/copy/Unlock
+					TSharedPtr<FMeshingResult> SharedResult = Result;
+					ENQUEUE_RENDER_COMMAND(LockSmoothMeshData)(
+						[SharedResult](FRHICommandListImmediate& RHICmdList)
+						{
+							CopyVertexReadbackData_RT(SharedResult);
+							CopyIndexReadbackData_RT(SharedResult);
+
+							delete SharedResult->VertexReadback;
+							SharedResult->VertexReadback = nullptr;
+							delete SharedResult->IndexReadback;
+							SharedResult->IndexReadback = nullptr;
+
+							SharedResult->CounterBuffer.SafeRelease();
+							SharedResult->bIsComplete = true;
+							SharedResult->bWasSuccessful = true;
+						}
+					);
+					Result->ReadbackPhase = EReadbackPhase::CopyingData;
+				}
+			}
+			else if (Result->ReadbackPhase == EReadbackPhase::CopyingData)
+			{
+				// Poll until render cmd has finished copying mesh data
+				if (Result->bIsComplete)
+				{
+					Result->ReadbackPhase = EReadbackPhase::Complete;
+				}
+			}
+
+			if (Result->ReadbackPhase == EReadbackPhase::Complete && Result->PendingOnComplete.IsBound())
+			{
+				CompletedCallbacks.Add(TPair<FOnVoxelMeshingComplete, FVoxelMeshingHandle>(
+					Result->PendingOnComplete, Result->PendingHandle));
+				Result->PendingOnComplete.Unbind();
+			}
+		}
+	}
+
+	// Fire callbacks outside the lock to avoid deadlocks
+	for (auto& Callback : CompletedCallbacks)
+	{
+		Callback.Key.Execute(Callback.Value, true);
+	}
+}
+
+void FVoxelGPUSmoothMesher::CopyVertexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
+{
+	const uint32 VertexCount = Result->VertexCount;
+
+	Result->ReadbackMeshData.Positions.SetNum(VertexCount);
+	Result->ReadbackMeshData.Normals.SetNum(VertexCount);
+	Result->ReadbackMeshData.UVs.SetNum(VertexCount);
+	Result->ReadbackMeshData.UV1s.SetNum(VertexCount);
+	Result->ReadbackMeshData.Colors.SetNum(VertexCount);
+
+	const void* Data = Result->VertexReadback->Lock(VertexCount * sizeof(FVoxelVertex));
+	if (Data)
+	{
+		const FVoxelVertex* Vertices = static_cast<const FVoxelVertex*>(Data);
+		for (uint32 i = 0; i < VertexCount; ++i)
+		{
+			Result->ReadbackMeshData.Positions[i] = Vertices[i].Position;
+			Result->ReadbackMeshData.Normals[i] = Vertices[i].GetNormal();
+			Result->ReadbackMeshData.UVs[i] = Vertices[i].UV;
+
+			// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
+			const uint8 MaterialID = Vertices[i].GetMaterialID();
+			Result->ReadbackMeshData.UV1s[i] = FVector2f(static_cast<float>(MaterialID), 0.0f);
+
+			Result->ReadbackMeshData.Colors[i] = FColor(
+				MaterialID,
+				Vertices[i].GetBiomeID(),
+				Vertices[i].GetAO() * 85,
+				255
+			);
+		}
+	}
+	Result->VertexReadback->Unlock();
+}
+
+void FVoxelGPUSmoothMesher::CopyIndexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
+{
+	const uint32 IndexCount = Result->IndexCount;
+
+	Result->ReadbackMeshData.Indices.SetNum(IndexCount);
+
+	const void* Data = Result->IndexReadback->Lock(IndexCount * sizeof(uint32));
+	if (Data)
+	{
+		FMemory::Memcpy(Result->ReadbackMeshData.Indices.GetData(), Data, IndexCount * sizeof(uint32));
+	}
+	Result->IndexReadback->Unlock();
 }
 
 bool FVoxelGPUSmoothMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
@@ -675,31 +794,16 @@ bool FVoxelGPUSmoothMesher::GetBufferCounts(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
+	FScopeLock Lock(&ResultsLock);
+	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr || !(*ResultPtr)->bCountsRead)
 	{
-		FScopeLock Lock(&ResultsLock);
-		const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr || !(*ResultPtr)->bIsComplete)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
+		return false;
 	}
 
-	// Read counters if not already done
-	if (!Result->bCountsRead)
-	{
-		const_cast<FVoxelGPUSmoothMesher*>(this)->ReadCounters(Result);
-	}
-
-	if (Result->bCountsRead)
-	{
-		OutVertexCount = Result->VertexCount;
-		OutIndexCount = Result->IndexCount;
-		return true;
-	}
-
-	return false;
+	OutVertexCount = (*ResultPtr)->VertexCount;
+	OutIndexCount = (*ResultPtr)->IndexCount;
+	return true;
 }
 
 bool FVoxelGPUSmoothMesher::GetRenderData(
@@ -711,27 +815,14 @@ bool FVoxelGPUSmoothMesher::GetRenderData(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
-	{
-		FScopeLock Lock(&ResultsLock);
-		TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr || !(*ResultPtr)->bIsComplete)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
-	}
-
-	// Read counters if not already done
-	if (!Result->bCountsRead)
-	{
-		ReadCounters(Result);
-	}
-
-	if (!Result->bCountsRead)
+	FScopeLock Lock(&ResultsLock);
+	TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr || !(*ResultPtr)->bIsComplete || !(*ResultPtr)->bCountsRead)
 	{
 		return false;
 	}
+
+	TSharedPtr<FMeshingResult>& Result = *ResultPtr;
 
 	OutRenderData.ChunkCoord = Result->ChunkCoord;
 	OutRenderData.VertexCount = Result->VertexCount;
@@ -758,128 +849,15 @@ bool FVoxelGPUSmoothMesher::ReadbackToCPU(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
+	FScopeLock Lock(&ResultsLock);
+	TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr || (*ResultPtr)->ReadbackPhase != EReadbackPhase::Complete)
 	{
-		FScopeLock Lock(&ResultsLock);
-		TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr || !(*ResultPtr)->bIsComplete)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
+		return false;
 	}
 
-	// Ensure we have counts
-	if (!Result->bCountsRead)
-	{
-		ReadCounters(Result);
-	}
-
-	if (!Result->bCountsRead || Result->VertexCount == 0)
-	{
-		OutMeshData.Reset();
-		return true;  // Empty mesh is valid
-	}
-
-	const uint32 VertexCount = Result->VertexCount;
-	const uint32 IndexCount = Result->IndexCount;
-
-	// Prepare output
-	OutMeshData.Reset();
-	OutMeshData.Positions.SetNum(VertexCount);
-	OutMeshData.Normals.SetNum(VertexCount);
-	OutMeshData.UVs.SetNum(VertexCount);
-	OutMeshData.UV1s.SetNum(VertexCount);
-	OutMeshData.Colors.SetNum(VertexCount);
-	OutMeshData.Indices.SetNum(IndexCount);
-
-	FChunkMeshData* OutDataPtr = &OutMeshData;
-
-	ENQUEUE_RENDER_COMMAND(ReadbackSmoothMeshData)(
-		[Result, VertexCount, IndexCount, OutDataPtr](FRHICommandListImmediate& RHICmdList)
-		{
-			FRDGBuilder GraphBuilder(RHICmdList);
-
-			// Register external buffers
-			FRDGBufferRef VertexBuffer = GraphBuilder.RegisterExternalBuffer(Result->VertexBuffer, TEXT("VertexBuffer"));
-			FRDGBufferRef IndexBuffer = GraphBuilder.RegisterExternalBuffer(Result->IndexBuffer, TEXT("IndexBuffer"));
-
-			// Create staging buffers
-			FRDGBufferDesc VertexStagingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FVoxelVertex), VertexCount);
-			FRDGBufferRef VertexStagingBuffer = GraphBuilder.CreateBuffer(VertexStagingDesc, TEXT("VertexStaging"));
-
-			FRDGBufferDesc IndexStagingDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), IndexCount);
-			FRDGBufferRef IndexStagingBuffer = GraphBuilder.CreateBuffer(IndexStagingDesc, TEXT("IndexStaging"));
-
-			// Copy to staging
-			const uint64 VertexBytes = VertexCount * sizeof(FVoxelVertex);
-			const uint64 IndexBytes = IndexCount * sizeof(uint32);
-			AddCopyBufferPass(GraphBuilder, VertexStagingBuffer, 0, VertexBuffer, 0, VertexBytes);
-			AddCopyBufferPass(GraphBuilder, IndexStagingBuffer, 0, IndexBuffer, 0, IndexBytes);
-
-			// Extract staging buffers
-			GraphBuilder.QueueBufferExtraction(VertexStagingBuffer, &Result->StagingVertexBuffer);
-			GraphBuilder.QueueBufferExtraction(IndexStagingBuffer, &Result->StagingIndexBuffer);
-
-			GraphBuilder.Execute();
-
-			// Read vertex data
-			if (Result->StagingVertexBuffer.IsValid())
-			{
-				FRHIBuffer* StagingRHI = Result->StagingVertexBuffer->GetRHI();
-				void* MappedData = RHICmdList.LockBuffer(
-					StagingRHI,
-					0,
-					VertexCount * sizeof(FVoxelVertex),
-					RLM_ReadOnly
-				);
-
-				if (MappedData)
-				{
-					const FVoxelVertex* Vertices = static_cast<const FVoxelVertex*>(MappedData);
-					for (uint32 i = 0; i < VertexCount; ++i)
-					{
-						OutDataPtr->Positions[i] = Vertices[i].Position;
-						const FVector3f Normal = Vertices[i].GetNormal();
-						OutDataPtr->Normals[i] = Normal;
-						OutDataPtr->UVs[i] = Vertices[i].UV;
-
-						// UV1: MaterialID only (smooth meshing uses triplanar, no FaceType needed)
-						const uint8 MaterialID = Vertices[i].GetMaterialID();
-						OutDataPtr->UV1s[i] = FVector2f(static_cast<float>(MaterialID), 0.0f);
-
-						OutDataPtr->Colors[i] = FColor(
-							MaterialID,
-							Vertices[i].GetBiomeID(),
-							Vertices[i].GetAO() * 85,
-							255
-						);
-					}
-					RHICmdList.UnlockBuffer(StagingRHI);
-				}
-			}
-
-			// Read index data
-			if (Result->StagingIndexBuffer.IsValid())
-			{
-				FRHIBuffer* StagingRHI = Result->StagingIndexBuffer->GetRHI();
-				void* MappedData = RHICmdList.LockBuffer(
-					StagingRHI,
-					0,
-					IndexCount * sizeof(uint32),
-					RLM_ReadOnly
-				);
-
-				if (MappedData)
-				{
-					FMemory::Memcpy(OutDataPtr->Indices.GetData(), MappedData, IndexCount * sizeof(uint32));
-					RHICmdList.UnlockBuffer(StagingRHI);
-				}
-			}
-		}
-	);
-
-	FlushRenderingCommands();
+	// Data was already read from GPU by TickReadbacks — just move it
+	OutMeshData = MoveTemp((*ResultPtr)->ReadbackMeshData);
 	return true;
 }
 
@@ -890,10 +868,9 @@ void FVoxelGPUSmoothMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
 		return;
 	}
 
-	FlushRenderingCommands();
-
 	FScopeLock Lock(&ResultsLock);
 	MeshingResults.Remove(Handle.RequestId);
+	// GPU resources freed via TRefCountPtr/TSharedPtr destructors — no flush needed
 }
 
 void FVoxelGPUSmoothMesher::ReleaseAllHandles()
@@ -923,23 +900,13 @@ bool FVoxelGPUSmoothMesher::GetStats(
 		return false;
 	}
 
-	TSharedPtr<FMeshingResult> Result;
+	FScopeLock Lock(&ResultsLock);
+	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
+	if (!ResultPtr)
 	{
-		FScopeLock Lock(&ResultsLock);
-		const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-		if (!ResultPtr)
-		{
-			return false;
-		}
-		Result = *ResultPtr;
+		return false;
 	}
 
-	// Ensure counts are read
-	if (!Result->bCountsRead && Result->bIsComplete)
-	{
-		const_cast<FVoxelGPUSmoothMesher*>(this)->ReadCounters(Result);
-	}
-
-	OutStats = Result->Stats;
+	OutStats = (*ResultPtr)->Stats;
 	return true;
 }
