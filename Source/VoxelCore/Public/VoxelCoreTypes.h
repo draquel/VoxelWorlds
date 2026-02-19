@@ -31,7 +31,11 @@ enum class EMeshingMode : uint8
 	Cubic,
 
 	/** Smooth terrain using Marching Cubes or similar */
-	Smooth
+	Smooth,
+
+	/** Smooth terrain using Dual Contouring with QEF vertex placement.
+	 *  Produces seamless LOD transitions without Transvoxel transition cells. */
+	DualContouring
 };
 
 /**

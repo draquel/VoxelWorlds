@@ -1955,6 +1955,23 @@ void FVoxelCPUSmoothMesher::GetTransitionCellDensities(
 		OutDensities[i] = GetDensityAtTrilinear(Request, SampleX, SampleY, SampleZ);
 	}
 
+	// Replace face midpoint densities (1,3,5,7,4) with values bilinearly interpolated
+	// from face corner densities (0,2,6,8). This ensures the transition cell's face
+	// surface is geometrically identical to the coarser MC's face surface, eliminating
+	// the outer-edge seam caused by extra detail in the midpoint samples.
+	//
+	// Face sample layout:    Corner interpolation:
+	//   6---7---8             6-----------8
+	//   |   |   |             |           |
+	//   3---4---5      =>     | from 0268 |
+	//   |   |   |             |           |
+	//   0---1---2             0-----------2
+	OutDensities[1] = (OutDensities[0] + OutDensities[2]) * 0.5f;  // Bottom midpoint
+	OutDensities[3] = (OutDensities[0] + OutDensities[6]) * 0.5f;  // Left midpoint
+	OutDensities[5] = (OutDensities[2] + OutDensities[8]) * 0.5f;  // Right midpoint
+	OutDensities[7] = (OutDensities[6] + OutDensities[8]) * 0.5f;  // Top midpoint
+	OutDensities[4] = (OutDensities[0] + OutDensities[2] + OutDensities[6] + OutDensities[8]) * 0.25f;  // Center
+
 }
 
 bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
@@ -2172,7 +2189,9 @@ bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 	//   B (0xB): Interior corner 2 (sample index 11)
 	//   C (0xC): Interior corner 3 (sample index 12)
 	TArray<FVector3f> CellVertices;
+	TArray<bool> VertexOnOuterFace;  // true = both endpoints on face (samples 0-8), use CoarserStride for normals
 	CellVertices.Reserve(VertexCount);
+	VertexOnOuterFace.Reserve(VertexCount);
 	bool bHasClampedVertices = false;
 
 	// IMPORTANT: Index by CASE, not by class! The vertex data is pre-transformed per case.
@@ -2245,17 +2264,6 @@ bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 				const int32 FaceSample = (SampleA <= 8) ? SampleA : SampleB;
 				const FVector3f& FaceOffset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][FaceSample];
 				VertexPos = BasePos + FaceOffset * CellScale;
-
-				bHasClampedVertices = true;
-				if (bDebugLogAnomalies)
-				{
-					UE_LOG(LogVoxelMeshing, Warning,
-						TEXT("ANOMALY [FaceSnap] Cell (%d,%d,%d) Face %s: vertex %d face-interior edge %d-%d "
-							 "snapped to face sample %d (d=%.3f,%.3f) — both %s"),
-						X, Y, Z, FaceNames[FaceIndex], i, SampleA, SampleB, FaceSample,
-						DensityA, DensityB,
-						bBothSolid ? TEXT("solid") : TEXT("air"));
-				}
 			}
 			else
 			{
@@ -2350,6 +2358,7 @@ bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		}
 
 		CellVertices.Add(VertexPos);
+		VertexOnOuterFace.Add(SampleA <= 8 && SampleB <= 8);
 
 		if (bDebugLogTransitionCells)
 		{
@@ -2375,8 +2384,8 @@ bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 			NaturalSolidMask |= (1 << i);
 		}
 	}
-	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, Stride, NaturalSolidMask);
-	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, Stride, NaturalSolidMask);
+	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, CurrentStride, NaturalSolidMask);
+	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, CurrentStride, NaturalSolidMask);
 	const FColor VertexColor = bDebugColorTransitionCells
 		? FColor(255, 128, 0, 255)  // Orange for transition cells
 		: FColor(MaterialID, BiomeID, 0, 255);
@@ -2389,9 +2398,12 @@ bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 		const FVector3f& Pos = CellVertices[i];
 		OutMeshData.Positions.Add(Pos);
 
-		// Calculate normal using gradient
+		// Calculate normal using gradient — match the stride of the adjacent mesh:
+		// Outer face vertices use CoarserStride (matches coarser neighbor MC normals),
+		// interior/depth vertices use CurrentStride (matches finer chunk MC normals).
+		const int32 NormalStride = VertexOnOuterFace[i] ? Stride : CurrentStride;
 		const FVector3f Normal = CalculateGradientNormalLOD(Request,
-			Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize, Stride);
+			Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize, NormalStride);
 		OutMeshData.Normals.Add(Normal);
 
 		// UV mapping (triplanar-style based on normal)

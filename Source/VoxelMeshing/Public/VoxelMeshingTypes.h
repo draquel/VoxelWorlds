@@ -437,4 +437,25 @@ struct VOXELMESHING_API FVoxelMeshingConfig
 	 */
 	UPROPERTY(EditAnywhere, Category = "Meshing", meta = (ClampMin = "0.5", ClampMax = "8.0", EditCondition = "bUseSmoothMeshing && !bUseTransvoxel && bGenerateSkirts"))
 	float SkirtDepth = 2.0f;
+
+	// ============================================================================
+	// Dual Contouring Options
+	// ============================================================================
+
+	/**
+	 * SVD singular value threshold for QEF solver.
+	 * Values below this are treated as zero during SVD decomposition.
+	 * Higher values produce smoother but less feature-preserving results.
+	 * Lower values preserve sharp features but may cause vertex instability.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Meshing|Dual Contouring", meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	float QEFSVDThreshold = 0.1f;
+
+	/**
+	 * Blend factor for mass-point bias when QEF vertex is outside cell bounds.
+	 * 0.0 = pure QEF solution (may be outside cell), 1.0 = always use mass point.
+	 * Default 0.5 provides good balance between feature preservation and stability.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Meshing|Dual Contouring", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float QEFBiasStrength = 0.5f;
 };

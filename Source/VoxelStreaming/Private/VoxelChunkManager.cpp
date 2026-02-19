@@ -13,6 +13,7 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelCPUSmoothMesher.h"
+#include "VoxelCPUDualContourMesher.h"
 #include "VoxelWaterMesher.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -384,6 +385,23 @@ void UVoxelChunkManager::Initialize(
 
 		Mesher = MoveTemp(SmoothMesher);
 		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Smooth (Marching Cubes) mesher (AO=%s, UVScale=%.2f)"),
+			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+			Configuration->UVScale);
+	}
+	else if (Configuration->MeshingMode == EMeshingMode::DualContouring)
+	{
+		auto DCMesher = MakeUnique<FVoxelCPUDualContourMesher>();
+		DCMesher->Initialize();
+
+		FVoxelMeshingConfig MeshConfig = DCMesher->GetConfig();
+		MeshConfig.bUseSmoothMeshing = true;
+		MeshConfig.IsoLevel = 0.5f;
+		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
+		MeshConfig.UVScale = Configuration->UVScale;
+		DCMesher->SetConfig(MeshConfig);
+
+		Mesher = MoveTemp(DCMesher);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Dual Contouring mesher (AO=%s, UVScale=%.2f)"),
 			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
 			Configuration->UVScale);
 	}

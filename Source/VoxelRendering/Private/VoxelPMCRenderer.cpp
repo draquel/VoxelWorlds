@@ -78,7 +78,8 @@ void FVoxelPMCRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguration
 #endif
 
 	// Sync material mode with configuration's meshing mode
-	bUseSmoothMeshing = (WorldConfig->MeshingMode == EMeshingMode::Smooth);
+	// Both Smooth (MC) and DualContouring use triplanar texturing instead of atlas faces
+	bUseSmoothMeshing = (WorldConfig->MeshingMode != EMeshingMode::Cubic);
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: MeshingMode=%s, bUseSmoothMeshing=%s"),
 		bUseSmoothMeshing ? TEXT("Smooth") : TEXT("Cubic"),
 		bUseSmoothMeshing ? TEXT("true") : TEXT("false"));
