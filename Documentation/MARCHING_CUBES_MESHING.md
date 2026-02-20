@@ -1,18 +1,19 @@
 # Marching Cubes Meshing System
 
 **Module**: VoxelMeshing
-**Last Updated**: 2026-02-06
+**Last Updated**: 2026-02-19
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Marching Cubes Algorithm](#marching-cubes-algorithm)
-3. [LOD Support](#lod-support)
-4. [Transvoxel Algorithm](#transvoxel-algorithm)
-5. [Configuration](#configuration)
-6. [Implementation Details](#implementation-details)
-7. [Performance Considerations](#performance-considerations)
-8. [Troubleshooting](#troubleshooting)
+2. [Smooth Terrain Pipeline](#smooth-terrain-pipeline)
+3. [Marching Cubes Algorithm](#marching-cubes-algorithm)
+4. [LOD Support](#lod-support)
+5. [Transvoxel Algorithm](#transvoxel-algorithm)
+6. [Configuration](#configuration)
+7. [Implementation Details](#implementation-details)
+8. [Performance Considerations](#performance-considerations)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -31,6 +32,8 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 - Planetary surfaces
 - Any terrain where smooth contours are desired
 
+> **See also**: [Dual Contouring](DUAL_CONTOURING.md) for the alternative smooth meshing algorithm that preserves sharp features via QEF vertex placement.
+
 ### Key Files
 
 | File | Purpose |
@@ -40,6 +43,52 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 | `MarchingCubesTables.h/cpp` | Lookup tables for standard Marching Cubes |
 | `TransvoxelTables.h/cpp` | Lookup tables for LOD transitions |
 | `VoxelMeshingTypes.h` | Configuration structures |
+
+---
+
+## Smooth Terrain Pipeline
+
+Marching Cubes and [Dual Contouring](DUAL_CONTOURING.md) are both **smooth meshing algorithms** — they produce organic, curved surfaces from the voxel density field. They share a common rendering pipeline that differs from the cubic meshing path:
+
+### Shared Infrastructure
+
+| Component | Smooth (MC + DC) | Cubic |
+|-----------|------------------|-------|
+| Rendering mode | Triplanar texturing (`bUseSmoothMeshing = true`) | UV-atlas per face |
+| Vertex format | `FVoxelVertex` (28 bytes) | Same format, different UV usage |
+| Material parameter | `bSmoothTerrain = 1` in shader | `bSmoothTerrain = 0` |
+| Normal source | Density gradient (central differences) | Face normals |
+| UV computation | Triplanar projection (dominant axis) | Per-face atlas lookup |
+
+### The `bUseSmoothMeshing` Flag
+
+The `FVoxelMeshingConfig::bUseSmoothMeshing` property controls the **rendering style**, not the meshing algorithm. When `true`, both renderers (Custom VF and PMC) use triplanar texturing. The specific algorithm (MarchingCubes vs DualContouring) is selected separately via `EMeshingMode` in the world configuration.
+
+```
+EMeshingMode::MarchingCubes  + bUseSmoothMeshing=true  →  MC algorithm, triplanar rendering
+EMeshingMode::DualContouring + bUseSmoothMeshing=true  →  DC algorithm, triplanar rendering
+EMeshingMode::Cubic          + bUseSmoothMeshing=false →  Cubic algorithm, atlas rendering
+```
+
+### Shared Mesh Types
+
+Both smooth meshers implement the `IVoxelMesher` interface and produce the same output types:
+- **Input**: `FVoxelMeshingRequest` (voxel data + neighbor slices + LOD info)
+- **Output**: `FChunkMeshData` (positions, normals, UVs, colors, indices)
+- **Config**: `FVoxelMeshingConfig` (shared fields + algorithm-specific fields)
+
+Both use the same neighbor data system (face slices, edge strips, corner voxels) for seamless chunk boundaries. Both share the `MarchingCubesCommon.ush` shader include for GPU-side voxel packing, vertex format, and normal encoding.
+
+### LOD Transition Differences
+
+The two smooth meshers handle LOD boundaries differently:
+
+| | Marching Cubes | Dual Contouring |
+|-|---------------|-----------------|
+| Mechanism | Transvoxel transition cells | Boundary cell merging |
+| Lookup tables | 512-entry tables (56 classes) | None |
+| Config | `bUseTransvoxel`, `TransitionFaces` | `NeighborLODLevels` |
+| Fallback | Skirt generation | N/A (merging always works) |
 
 ---
 
@@ -470,6 +519,7 @@ Per 32^3 chunk at LOD 0:
 
 ## References
 
+- [Dual Contouring (companion doc)](DUAL_CONTOURING.md) — DC algorithm, QEF solver, LOD boundary merging
 - [Marching Cubes Original Paper](http://www.cs.carleton.edu/cs_comps/0405/shape/marching_cubes.html)
 - [Transvoxel Algorithm](https://transvoxel.org/) - Eric Lengyel
 - [Polygonising a Scalar Field](http://paulbourke.net/geometry/polygonise/) - Paul Bourke

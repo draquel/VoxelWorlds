@@ -1,7 +1,7 @@
 # VoxelWorlds Architecture Overview
 
-**Version**: 2.0  
-**Last Updated**: 2026-01-30  
+**Version**: 2.1
+**Last Updated**: 2026-02-19
 **Target Engine**: Unreal Engine 5.7
 
 ## Table of Contents
@@ -30,7 +30,7 @@ VoxelWorlds is a **GPU-driven voxel terrain system** designed for high-performan
 ### Key Capabilities
 
 - Multiple world modes (infinite plane, spherical planet, island/bowl)
-- Dual meshing styles (cubic/smooth)
+- Three meshing algorithms (cubic, Marching Cubes, Dual Contouring)
 - Pluggable LOD system (distance bands, quadtree, octree)
 - Hybrid rendering (Custom VF + PMC fallback)
 - GPU compute pipeline for generation and meshing
@@ -91,9 +91,10 @@ VoxelWorld (Root Container)
 │   │   │   └── LOD Morphing (Vertex Shader)
 │   │   └── VoxelPMCRenderer (Editor/tools)
 │   │       └── ProceduralMeshComponents
-│   ├── MeshingSystem
+│   ├── MeshingSystem (3 algorithms)
 │   │   ├── CubicMesher (Face-culling, Greedy, AO)
-│   │   └── MarchingCubesMesher / DualContourMesher
+│   │   ├── MarchingCubesMesher (Isosurface + Transvoxel LOD)
+│   │   └── DualContourMesher (QEF vertex + Cell-merge LOD)
 │   └── CollisionManager (Separate, Async, Lower LOD)
 │
 └── ScatterSystem
@@ -249,7 +250,9 @@ VoxelCore
 
 **VoxelMeshing** *(LoadingPhase: PostConfigInit)*
 - Cubic mesher (face culling, greedy meshing, AO)
-- Smooth mesher (Marching Cubes, Dual Contouring)
+- Marching Cubes mesher (isosurface extraction, Transvoxel LOD transitions)
+- Dual Contouring mesher (QEF vertex placement, LOD boundary cell merging)
+- All meshers implement `IVoxelMesher` interface (CPU sync + GPU async paths)
 - Mesh generation compute shaders
 - **Note**: Requires `PostConfigInit` loading phase for global shader registration
 
@@ -369,7 +372,9 @@ Output: RWStructuredBuffer<FVoxelData>
 **Phase 2: Meshing**
 ```
 Input: VoxelData buffer, MeshingMode
-Compute Shader: GenerateCubicMesh.usf or GenerateSmoothMesh.usf
+Compute Shader: CubicMeshGeneration.usf
+             or MarchingCubesMeshGeneration.usf
+             or DualContourMeshGeneration.usf (4-pass: edges → QEF → quads)
 Output: RWStructuredBuffer<FVoxelVertex>, RWStructuredBuffer<uint32>
 ```
 
@@ -406,7 +411,7 @@ See: [WORLD_MODES.md](WORLD_MODES.md) for complete details.
 See: [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) for complete details.
 
 **Cubic Mode**: Tile atlas with per-face UVs
-**Smooth Mode**: Triplanar projection with material blending
+**Smooth Mode** (MarchingCubes + DualContouring): Triplanar projection with material blending
 
 ### 6. Biome System
 
@@ -757,6 +762,7 @@ See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap
 
 - [LOD System Details](LOD_SYSTEM.md)
 - [Marching Cubes Meshing & Transvoxel](MARCHING_CUBES_MESHING.md)
+- [Dual Contouring Meshing](DUAL_CONTOURING.md)
 - [Rendering System Details](RENDERING_SYSTEM.md)
 - [GPU Pipeline Details](GPU_PIPELINE.md)
 - [Data Structures Reference](DATA_STRUCTURES.md)
@@ -766,5 +772,5 @@ See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap
 
 ---
 
-**Architecture Version**: 2.0  
+**Architecture Version**: 2.1
 **Status**: Design Complete, Implementation In Progress

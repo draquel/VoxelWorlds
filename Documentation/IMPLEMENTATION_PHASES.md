@@ -798,7 +798,7 @@ Phase 7 performance targets displayed for comparison:
 - [ ] Stair, Door, Fence, Gate Block Types (Gameplay - Need a strategy for compartmentalization)
 - [ ] Final World Actor(s)
 - [ ] Editor Tools / Debugging tools
-- [ ] Dual-Contouring
+- [x] Dual Contouring — CPU + GPU implementations with QEF solver and LOD boundary merging. See `DUAL_CONTOURING.md`
 - [ ] TransVoxel Seams troubleshooting
 - [ ] Continentalness / Ocean Biome
 

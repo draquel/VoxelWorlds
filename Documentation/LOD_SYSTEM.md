@@ -1049,9 +1049,9 @@ When adjacent chunks render at different LOD levels, their boundary vertices may
 
 Cubic meshes naturally align at boundaries because voxel faces are axis-aligned. No special seam handling is required.
 
-### Smooth Meshing (Transvoxel)
+### Marching Cubes (Transvoxel)
 
-Smooth meshing (Marching Cubes) has mismatched vertices at LOD boundaries because vertex positions depend on density interpolation. The **Transvoxel algorithm** solves this:
+Marching Cubes has mismatched vertices at LOD boundaries because vertex positions depend on density interpolation. The **Transvoxel algorithm** solves this:
 
 1. **Transition Detection**: The chunk manager detects which faces border lower-LOD neighbors
 2. **Transition Cells**: Boundary cells use special 9-sample transition cells instead of standard 8-corner cubes
@@ -1059,26 +1059,46 @@ Smooth meshing (Marching Cubes) has mismatched vertices at LOD boundaries becaus
 
 See [MARCHING_CUBES_MESHING.md](MARCHING_CUBES_MESHING.md) for detailed Transvoxel documentation.
 
+### Dual Contouring (Boundary Cell Merging)
+
+Dual Contouring uses **LOD boundary cell merging** instead of Transvoxel transition cells. When a chunk face borders a coarser neighbor:
+
+1. **Merge Ratio**: Computed from `CoarserStride / CurrentStride`
+2. **Cell Grouping**: Fine boundary cells are grouped into `MergeRatio x MergeRatio` blocks
+3. **QEF Re-solve**: The grouped edge crossings are merged into a single QEF and re-solved
+4. **Vertex Aliasing**: All fine cells in the group point to the merged vertex
+
+This approach is simpler than Transvoxel (no lookup tables) and naturally extends to arbitrary LOD level differences.
+
+See [DUAL_CONTOURING.md](DUAL_CONTOURING.md) for detailed boundary merging documentation.
+
 ### Configuration
 
 ```cpp
-// In FVoxelMeshingConfig
-bool bUseTransvoxel = true;  // Recommended for smooth meshing
-
-// Fallback (deprecated)
-bool bGenerateSkirts = true;  // Only if Transvoxel disabled
+// Marching Cubes LOD transitions
+bool bUseTransvoxel = true;  // Recommended for MC
+bool bGenerateSkirts = true;  // Fallback if Transvoxel disabled
 float SkirtDepth = 2.0f;
+
+// Dual Contouring LOD transitions
+// No explicit config — uses NeighborLODLevels from FVoxelMeshingRequest
+// QEF solver settings affect merged vertex quality:
+float QEFSVDThreshold = 0.1f;
+float QEFBiasStrength = 0.5f;
 ```
 
 ### Chunk Manager Integration
 
-The chunk manager sets `TransitionFaces` in the meshing request:
+The chunk manager populates LOD transition data in the meshing request:
 
 ```cpp
-// For each face, check if neighbor is at lower LOD
+// For Marching Cubes: set TransitionFaces bitmask
 if (NeighborState->LODLevel > CurrentLOD) {
     MeshRequest.TransitionFaces |= TransitionFlags[face];
 }
+
+// For Dual Contouring: set NeighborLODLevels array
+MeshRequest.NeighborLODLevels[face] = NeighborState->LODLevel;
 ```
 
 ---

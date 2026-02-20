@@ -254,6 +254,7 @@ See: `Documentation/TESTING_STRATEGY.md`
 - [x] Terrain Map / Mini-Map
 - [x] Cave generation — multi-layer (Cheese, Spaghetti, Noodle) via `UVoxelCaveConfiguration`. See `Documentation/CAVE_SYSTEM.md`
 - [x] Advanced noise (Cellular, Voronoi) — GPU + CPU implementations. See `Documentation/NOISE_LIBRARY.md`
+- [x] Dual Contouring mesher — CPU + GPU implementations with QEF solver and LOD boundary merging. See `Documentation/DUAL_CONTOURING.md`
 - [ ] Quadtree/Octree LOD, improved water, editor tools, etc.
 
 See: `Documentation/IMPLEMENTATION_PHASES.md` for full roadmap
@@ -307,10 +308,18 @@ See: `Documentation/PERFORMANCE_TARGETS.md`
 - `Source/VoxelRendering/Private/VoxelCustomVFRenderer.cpp` - GPU renderer
 - `Source/VoxelStreaming/Private/VoxelChunkManager.cpp` - Chunk streaming
 
+### Meshing
+- `Source/VoxelMeshing/Public/VoxelCPUMarchingCubesMesher.h` - CPU Marching Cubes
+- `Source/VoxelMeshing/Public/VoxelCPUDualContourMesher.h` - CPU Dual Contouring
+- `Source/VoxelMeshing/Public/VoxelGPUMarchingCubesMesher.h` - GPU Marching Cubes
+- `Source/VoxelMeshing/Public/VoxelGPUDualContourMesher.h` - GPU Dual Contouring
+- `Source/VoxelMeshing/Private/QEFSolver.h` - QEF solver (Jacobi SVD)
+
 ### Shaders
 - `Shaders/VoxelGeneration.usf` - Voxel generation compute shader
 - `Shaders/VoxelCubicMeshing.usf` - Cubic meshing compute shader
 - `Shaders/MarchingCubesMeshGeneration.usf` - Marching Cubes meshing compute shader
+- `Shaders/DualContourMeshGeneration.usf` - Dual Contouring 4-pass compute shader
 
 ## Architecture Decision Records
 
@@ -346,5 +355,5 @@ Simplest to implement, predictable performance, sufficient for most use cases. C
 
 ---
 
-Last Updated: 2026-02-13
+Last Updated: 2026-02-19
 Architecture Version: 2.1
