@@ -528,4 +528,5 @@ void ResetCountersCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
     MeshCounters[0] = 0;  // Vertex counter
     MeshCounters[1] = 0;  // Index counter
+    MeshCounters[2] = 0;  // Reserved
 }

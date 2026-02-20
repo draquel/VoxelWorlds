@@ -94,8 +94,10 @@ private:
 	/** Async readback state machine phases */
 	enum class EReadbackPhase : uint8
 	{
-		WaitingForCounters,  // Counter readback enqueued, polling IsReady()
-		CopyingCounters,     // Render cmd enqueued to Lock/copy/Unlock counters
+		WaitingForCounters,  // (legacy) Counter readback enqueued, polling IsReady()
+		CopyingCounters,     // (legacy) Render cmd enqueued to Lock/copy/Unlock counters
+		WaitingForAllReadbacks, // All 3 readbacks enqueued at once, polling IsReady()
+		CopyingAllData,      // Render cmd enqueued to Lock/copy/Unlock all data
 		WaitingForData,      // Vertex/index readback enqueued, polling IsReady()
 		CopyingData,         // Render cmd enqueued to Lock/copy/Unlock mesh data
 		Complete,            // Data ready on CPU, OnComplete fired
@@ -114,9 +116,9 @@ private:
 		int32 ChunkSize = 0;
 		uint32 VertexCount = 0;
 		uint32 IndexCount = 0;
-		bool bIsComplete = false;
-		bool bWasSuccessful = false;
-		bool bCountsRead = false;
+		std::atomic<bool> bIsComplete{false};
+		std::atomic<bool> bWasSuccessful{false};
+		std::atomic<bool> bCountsRead{false};
 		FVoxelMeshingStats Stats;
 
 		// Async readback state
@@ -135,6 +137,16 @@ private:
 		// Config snapshot captured at dispatch time (for max buffer capacities)
 		uint32 CapturedMaxVertices = 0;
 		uint32 CapturedMaxIndices = 0;
+
+		// Chunk world position captured at dispatch time (shader outputs world-space positions;
+		// must subtract this to convert back to local chunk space for the rendering pipeline)
+		FVector3f ChunkWorldPosition = FVector3f::ZeroVector;
+
+		// Atomic flags to prevent game-thread polling of IsReady() before render-thread
+		// EnqueueCopy has been called (a freshly-created FRHIGPUBufferReadback with no
+		// pending fence reports IsReady()=true, which would cause premature Lock())
+		std::atomic<bool> bCounterReadbackEnqueued{false};
+		std::atomic<bool> bDataReadbackEnqueued{false};
 
 		~FMeshingResult()
 		{

@@ -855,6 +855,9 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			Result->ReadbackPhase = EReadbackPhase::WaitingForCounters;
 			Result->CapturedMaxVertices = CapturedConfig.MaxVerticesPerChunk;
 			Result->CapturedMaxIndices = CapturedConfig.MaxIndicesPerChunk;
+
+			// Signal that counter readback is fully enqueued — must be AFTER EnqueueCopy
+			Result->bCounterReadbackEnqueued.store(true, std::memory_order_release);
 		}
 	);
 }
@@ -876,7 +879,8 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 
 			if (Result->ReadbackPhase == EReadbackPhase::WaitingForCounters)
 			{
-				if (Result->CounterReadback && Result->CounterReadback->IsReady())
+				if (Result->bCounterReadbackEnqueued.load(std::memory_order_acquire)
+					&& Result->CounterReadback && Result->CounterReadback->IsReady())
 				{
 					// Counter readback ready — enqueue render cmd to Lock/copy/Unlock
 					TSharedPtr<FMeshingResult> SharedResult = Result;
@@ -893,10 +897,15 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 								SharedResult->Stats.IndexCount = SharedResult->IndexCount;
 								SharedResult->Stats.FaceCount = SharedResult->IndexCount / 3;
 							}
+							else
+							{
+								UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU DC: Counter Lock() returned null for chunk %s"),
+									*SharedResult->ChunkCoord.ToString());
+							}
 							SharedResult->CounterReadback->Unlock();
 							delete SharedResult->CounterReadback;
 							SharedResult->CounterReadback = nullptr;
-							SharedResult->bCountsRead = true;
+							SharedResult->bCountsRead.store(true, std::memory_order_release);
 						}
 					);
 					Result->ReadbackPhase = EReadbackPhase::CopyingCounters;
@@ -905,15 +914,15 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 			else if (Result->ReadbackPhase == EReadbackPhase::CopyingCounters)
 			{
 				// Poll until render cmd has finished copying counters
-				if (Result->bCountsRead)
+				if (Result->bCountsRead.load(std::memory_order_acquire))
 				{
 					if (Result->VertexCount == 0 || Result->IndexCount == 0)
 					{
 						// Empty mesh — skip data readback
 						Result->ReadbackMeshData.Reset();
 						Result->ReadbackPhase = EReadbackPhase::Complete;
-						Result->bIsComplete = true;
-						Result->bWasSuccessful = true;
+						Result->bWasSuccessful.store(true, std::memory_order_relaxed);
+						Result->bIsComplete.store(true, std::memory_order_release);
 					}
 					else
 					{
@@ -935,6 +944,9 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 									RHICmdList,
 									SharedResult->IndexBuffer->GetRHI(),
 									ICount * sizeof(uint32));
+
+								// Signal that data readback is fully enqueued — must be AFTER both EnqueueCopy
+								SharedResult->bDataReadbackEnqueued.store(true, std::memory_order_release);
 							}
 						);
 						Result->ReadbackPhase = EReadbackPhase::WaitingForData;
@@ -943,7 +955,8 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 			}
 			else if (Result->ReadbackPhase == EReadbackPhase::WaitingForData)
 			{
-				if (Result->VertexReadback && Result->VertexReadback->IsReady()
+				if (Result->bDataReadbackEnqueued.load(std::memory_order_acquire)
+					&& Result->VertexReadback && Result->VertexReadback->IsReady()
 					&& Result->IndexReadback && Result->IndexReadback->IsReady())
 				{
 					// Data readback ready — enqueue render cmd to Lock/copy/Unlock
@@ -960,8 +973,8 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 							SharedResult->IndexReadback = nullptr;
 
 							SharedResult->CounterBuffer.SafeRelease();
-							SharedResult->bIsComplete = true;
-							SharedResult->bWasSuccessful = true;
+							SharedResult->bWasSuccessful.store(true, std::memory_order_relaxed);
+							SharedResult->bIsComplete.store(true, std::memory_order_release);
 						}
 					);
 					Result->ReadbackPhase = EReadbackPhase::CopyingData;
@@ -970,7 +983,7 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 			else if (Result->ReadbackPhase == EReadbackPhase::CopyingData)
 			{
 				// Poll until render cmd has finished copying mesh data
-				if (Result->bIsComplete)
+				if (Result->bIsComplete.load(std::memory_order_acquire))
 				{
 					Result->ReadbackPhase = EReadbackPhase::Complete;
 				}
@@ -1023,6 +1036,11 @@ void FVoxelGPUDualContourMesher::CopyVertexReadbackData_RT(TSharedPtr<FMeshingRe
 			);
 		}
 	}
+	else
+	{
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU DC: Vertex Lock() returned null for chunk %s (VertexCount=%u)"),
+			*Result->ChunkCoord.ToString(), VertexCount);
+	}
 	Result->VertexReadback->Unlock();
 }
 
@@ -1037,6 +1055,11 @@ void FVoxelGPUDualContourMesher::CopyIndexReadbackData_RT(TSharedPtr<FMeshingRes
 	{
 		FMemory::Memcpy(Result->ReadbackMeshData.Indices.GetData(), Data, IndexCount * sizeof(uint32));
 	}
+	else
+	{
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU DC: Index Lock() returned null for chunk %s (IndexCount=%u)"),
+			*Result->ChunkCoord.ToString(), IndexCount);
+	}
 	Result->IndexReadback->Unlock();
 }
 
@@ -1044,14 +1067,14 @@ bool FVoxelGPUDualContourMesher::IsComplete(const FVoxelMeshingHandle& Handle) c
 {
 	FScopeLock Lock(&ResultsLock);
 	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-	return ResultPtr && (*ResultPtr)->bIsComplete;
+	return ResultPtr && (*ResultPtr)->bIsComplete.load(std::memory_order_acquire);
 }
 
 bool FVoxelGPUDualContourMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
 {
 	FScopeLock Lock(&ResultsLock);
 	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-	return ResultPtr && (*ResultPtr)->bWasSuccessful;
+	return ResultPtr && (*ResultPtr)->bWasSuccessful.load(std::memory_order_acquire);
 }
 
 FRHIBuffer* FVoxelGPUDualContourMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
@@ -1100,7 +1123,7 @@ bool FVoxelGPUDualContourMesher::GetBufferCounts(
 
 	FScopeLock Lock(&ResultsLock);
 	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-	if (!ResultPtr || !(*ResultPtr)->bIsComplete || !(*ResultPtr)->bCountsRead)
+	if (!ResultPtr || !(*ResultPtr)->bIsComplete.load(std::memory_order_acquire) || !(*ResultPtr)->bCountsRead.load(std::memory_order_acquire))
 	{
 		return false;
 	}
@@ -1121,7 +1144,7 @@ bool FVoxelGPUDualContourMesher::GetRenderData(
 
 	FScopeLock Lock(&ResultsLock);
 	TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
-	if (!ResultPtr || !(*ResultPtr)->bIsComplete || !(*ResultPtr)->bCountsRead)
+	if (!ResultPtr || !(*ResultPtr)->bIsComplete.load(std::memory_order_acquire) || !(*ResultPtr)->bCountsRead.load(std::memory_order_acquire))
 	{
 		return false;
 	}

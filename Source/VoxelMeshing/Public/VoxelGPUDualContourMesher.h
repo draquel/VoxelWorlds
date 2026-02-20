@@ -119,9 +119,9 @@ private:
 		int32 ChunkSize = 0;
 		uint32 VertexCount = 0;
 		uint32 IndexCount = 0;
-		bool bIsComplete = false;
-		bool bWasSuccessful = false;
-		bool bCountsRead = false;
+		std::atomic<bool> bIsComplete{false};
+		std::atomic<bool> bWasSuccessful{false};
+		std::atomic<bool> bCountsRead{false};
 		FVoxelMeshingStats Stats;
 
 		// Async readback state
@@ -140,6 +140,12 @@ private:
 		// Config snapshot captured at dispatch time (for max buffer capacities)
 		uint32 CapturedMaxVertices = 0;
 		uint32 CapturedMaxIndices = 0;
+
+		// Atomic flags to prevent game-thread polling of IsReady() before render-thread
+		// EnqueueCopy has been called (a freshly-created FRHIGPUBufferReadback with no
+		// pending fence reports IsReady()=true, which would cause premature Lock())
+		std::atomic<bool> bCounterReadbackEnqueued{false};
+		std::atomic<bool> bDataReadbackEnqueued{false};
 
 		~FMeshingResult()
 		{

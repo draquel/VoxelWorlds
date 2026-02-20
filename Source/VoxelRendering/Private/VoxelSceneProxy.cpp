@@ -284,8 +284,8 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			const FIntVector& ChunkCoord = Pair.Key;
 			const FVoxelChunkRenderData& RenderData = Pair.Value;
 
-			// Skip invisible or empty chunks
-			if (!RenderData.bIsVisible || !RenderData.HasValidBuffers())
+			// Skip invisible or empty chunks (IndexCount < 3 means zero triangles)
+			if (!RenderData.bIsVisible || !RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
 			{
 				SkippedInvisible++;
 				continue;
