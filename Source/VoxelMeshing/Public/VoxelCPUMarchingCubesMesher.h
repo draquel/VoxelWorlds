@@ -6,7 +6,7 @@
 #include "IVoxelMesher.h"
 
 /**
- * CPU-based smooth mesher using Marching Cubes algorithm.
+ * CPU-based Marching Cubes mesher.
  *
  * Generates smooth mesh geometry by interpolating vertex positions
  * along cube edges where the density field crosses the isosurface.
@@ -21,14 +21,14 @@
  * Performance: ~30-80ms for 32^3 chunk on typical CPU
  *
  * @see IVoxelMesher
- * @see FVoxelGPUSmoothMesher
+ * @see FVoxelGPUMarchingCubesMesher
  * @see MarchingCubesTables
  */
-class VOXELMESHING_API FVoxelCPUSmoothMesher : public IVoxelMesher
+class VOXELMESHING_API FVoxelCPUMarchingCubesMesher : public IVoxelMesher
 {
 public:
-	FVoxelCPUSmoothMesher();
-	virtual ~FVoxelCPUSmoothMesher() override;
+	FVoxelCPUMarchingCubesMesher();
+	virtual ~FVoxelCPUMarchingCubesMesher() override;
 
 	// ============================================================================
 	// IVoxelMesher Interface
@@ -78,7 +78,7 @@ public:
 		const FVoxelMeshingHandle& Handle,
 		FVoxelMeshingStats& OutStats) const override;
 
-	virtual FString GetMesherTypeName() const override { return TEXT("CPU Smooth"); }
+	virtual FString GetMesherTypeName() const override { return TEXT("CPU MarchingCubes"); }
 
 private:
 	// ============================================================================

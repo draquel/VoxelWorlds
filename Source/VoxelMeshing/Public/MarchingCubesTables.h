@@ -44,8 +44,8 @@
  * Edge 10: 2-6  (right back)
  * Edge 11: 3-7  (left back)
  *
- * @see FVoxelCPUSmoothMesher
- * @see FVoxelGPUSmoothMesher
+ * @see FVoxelCPUMarchingCubesMesher
+ * @see FVoxelGPUMarchingCubesMesher
  */
 namespace MarchingCubesTables
 {

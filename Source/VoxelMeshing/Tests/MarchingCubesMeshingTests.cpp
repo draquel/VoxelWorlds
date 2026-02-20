@@ -2,8 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "VoxelCPUSmoothMesher.h"
-#include "VoxelGPUSmoothMesher.h"
+#include "VoxelCPUMarchingCubesMesher.h"
+#include "VoxelGPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
@@ -11,12 +11,12 @@
 
 // ==================== Helper Functions ====================
 
-namespace SmoothMeshingTestHelpers
+namespace MarchingCubesMeshingTestHelpers
 {
 	/**
 	 * Create a meshing request with all air voxels.
 	 */
-	FVoxelMeshingRequest CreateSmoothEmptyRequest(int32 ChunkSize = 16)
+	FVoxelMeshingRequest CreateMCEmptyRequest(int32 ChunkSize = 16)
 	{
 		FVoxelMeshingRequest Request;
 		Request.ChunkCoord = FIntVector(0, 0, 0);
@@ -200,33 +200,33 @@ namespace SmoothMeshingTestHelpers
 	/**
 	 * Configure a mesher for smooth meshing.
 	 */
-	FVoxelMeshingConfig CreateSmoothConfig()
+	FVoxelMeshingConfig CreateMCConfig()
 	{
 		FVoxelMeshingConfig Config;
 		Config.bUseSmoothMeshing = true;
 		Config.IsoLevel = 0.5f;
 		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;  // Smooth meshing doesn't use AO
+		Config.bCalculateAO = false;  // MarchingCubes meshing doesn't use AO
 		return Config;
 	}
-} // namespace SmoothMeshingTestHelpers
-using namespace SmoothMeshingTestHelpers;
+} // namespace MarchingCubesMeshingTestHelpers
+using namespace MarchingCubesMeshingTestHelpers;
 
-// ==================== CPU Smooth Mesher Tests ====================
+// ==================== CPU MarchingCubes Mesher Tests ====================
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingEmptyChunkTest, "VoxelWorlds.Meshing.Smooth.EmptyChunk",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingEmptyChunkTest, "VoxelWorlds.Meshing.MarchingCubes.EmptyChunk",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FSmoothMeshingEmptyChunkTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingEmptyChunkTest::RunTest(const FString& Parameters)
 {
-	FVoxelCPUSmoothMesher Mesher;
+	FVoxelCPUMarchingCubesMesher Mesher;
 	Mesher.Initialize();
-	Mesher.SetConfig(CreateSmoothConfig());
+	Mesher.SetConfig(CreateMCConfig());
 
 	TestTrue(TEXT("Mesher should be initialized"), Mesher.IsInitialized());
 
 	// Create empty chunk request
-	FVoxelMeshingRequest Request = CreateSmoothEmptyRequest(8);
+	FVoxelMeshingRequest Request = CreateMCEmptyRequest(8);
 
 	// Generate mesh
 	FChunkMeshData MeshData;
@@ -242,14 +242,14 @@ bool FSmoothMeshingEmptyChunkTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingSolidChunkTest, "VoxelWorlds.Meshing.Smooth.SolidChunk",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingSolidChunkTest, "VoxelWorlds.Meshing.MarchingCubes.SolidChunk",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FSmoothMeshingSolidChunkTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingSolidChunkTest::RunTest(const FString& Parameters)
 {
-	FVoxelCPUSmoothMesher Mesher;
+	FVoxelCPUMarchingCubesMesher Mesher;
 	Mesher.Initialize();
-	Mesher.SetConfig(CreateSmoothConfig());
+	Mesher.SetConfig(CreateMCConfig());
 
 	// Create fully solid chunk (all corners inside)
 	FVoxelMeshingRequest Request = CreateSolidChunkRequest(8);
@@ -273,14 +273,14 @@ bool FSmoothMeshingSolidChunkTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingHalfSolidTest, "VoxelWorlds.Meshing.Smooth.HalfSolid",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingHalfSolidTest, "VoxelWorlds.Meshing.MarchingCubes.HalfSolid",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FSmoothMeshingHalfSolidTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingHalfSolidTest::RunTest(const FString& Parameters)
 {
-	FVoxelCPUSmoothMesher Mesher;
+	FVoxelCPUMarchingCubesMesher Mesher;
 	Mesher.Initialize();
-	Mesher.SetConfig(CreateSmoothConfig());
+	Mesher.SetConfig(CreateMCConfig());
 
 	// Create half-solid request (horizontal plane)
 	FVoxelMeshingRequest Request = CreateHalfSolidRequest(8);
@@ -329,14 +329,14 @@ bool FSmoothMeshingHalfSolidTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingSphereSdfTest, "VoxelWorlds.Meshing.Smooth.SphereSDF",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingSphereSdfTest, "VoxelWorlds.Meshing.MarchingCubes.SphereSDF",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FSmoothMeshingSphereSdfTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingSphereSdfTest::RunTest(const FString& Parameters)
 {
-	FVoxelCPUSmoothMesher Mesher;
+	FVoxelCPUMarchingCubesMesher Mesher;
 	Mesher.Initialize();
-	Mesher.SetConfig(CreateSmoothConfig());
+	Mesher.SetConfig(CreateMCConfig());
 
 	// Create sphere SDF request
 	const int32 ChunkSize = 16;
@@ -387,14 +387,14 @@ bool FSmoothMeshingSphereSdfTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingChunkBoundaryTest, "VoxelWorlds.Meshing.Smooth.ChunkBoundary",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingChunkBoundaryTest, "VoxelWorlds.Meshing.MarchingCubes.ChunkBoundary",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FSmoothMeshingChunkBoundaryTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingChunkBoundaryTest::RunTest(const FString& Parameters)
 {
-	FVoxelCPUSmoothMesher Mesher;
+	FVoxelCPUMarchingCubesMesher Mesher;
 	Mesher.Initialize();
-	Mesher.SetConfig(CreateSmoothConfig());
+	Mesher.SetConfig(CreateMCConfig());
 
 	const int32 ChunkSize = 8;
 
@@ -438,18 +438,18 @@ bool FSmoothMeshingChunkBoundaryTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// ==================== GPU Smooth Mesher Tests ====================
+// ==================== GPU MarchingCubes Mesher Tests ====================
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingGPUAsyncTest, "VoxelWorlds.Meshing.Smooth.GPUAsync",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingGPUAsyncTest, "VoxelWorlds.Meshing.MarchingCubes.GPUAsync",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FSmoothMeshingGPUAsyncTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingGPUAsyncTest::RunTest(const FString& Parameters)
 {
-	FVoxelGPUSmoothMesher Mesher;
+	FVoxelGPUMarchingCubesMesher Mesher;
 	Mesher.Initialize();
-	Mesher.SetConfig(CreateSmoothConfig());
+	Mesher.SetConfig(CreateMCConfig());
 
-	TestTrue(TEXT("GPU Smooth Mesher should be initialized"), Mesher.IsInitialized());
+	TestTrue(TEXT("GPU MarchingCubes Mesher should be initialized"), Mesher.IsInitialized());
 
 	// Create half-solid request for testing
 	FVoxelMeshingRequest Request = CreateHalfSolidRequest(8);
@@ -512,20 +512,20 @@ bool FSmoothMeshingGPUAsyncTest::RunTest(const FString& Parameters)
 
 // ==================== CPU vs GPU Consistency Test ====================
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingCPUvsGPUTest, "VoxelWorlds.Meshing.Smooth.CPUvsGPU",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingCPUvsGPUTest, "VoxelWorlds.Meshing.MarchingCubes.CPUvsGPU",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FSmoothMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
 {
-	FVoxelCPUSmoothMesher CPUMesher;
-	FVoxelGPUSmoothMesher GPUMesher;
+	FVoxelCPUMarchingCubesMesher CPUMesher;
+	FVoxelGPUMarchingCubesMesher GPUMesher;
 
-	FVoxelMeshingConfig SmoothConfig = CreateSmoothConfig();
+	FVoxelMeshingConfig MCConfig = CreateMCConfig();
 
 	CPUMesher.Initialize();
-	CPUMesher.SetConfig(SmoothConfig);
+	CPUMesher.SetConfig(MCConfig);
 	GPUMesher.Initialize();
-	GPUMesher.SetConfig(SmoothConfig);
+	GPUMesher.SetConfig(MCConfig);
 
 	// Create half-solid request for comparison
 	FVoxelMeshingRequest Request = CreateHalfSolidRequest(8);
@@ -612,20 +612,20 @@ bool FSmoothMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
 
 // ==================== Performance Test ====================
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSmoothMeshingPerformanceTest, "VoxelWorlds.Meshing.Smooth.Performance",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingPerformanceTest, "VoxelWorlds.Meshing.MarchingCubes.Performance",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::MediumPriority)
 
-bool FSmoothMeshingPerformanceTest::RunTest(const FString& Parameters)
+bool FMarchingCubesMeshingPerformanceTest::RunTest(const FString& Parameters)
 {
-	FVoxelCPUSmoothMesher CPUMesher;
-	FVoxelGPUSmoothMesher GPUMesher;
+	FVoxelCPUMarchingCubesMesher CPUMesher;
+	FVoxelGPUMarchingCubesMesher GPUMesher;
 
-	FVoxelMeshingConfig SmoothConfig = CreateSmoothConfig();
+	FVoxelMeshingConfig MCConfig = CreateMCConfig();
 
 	CPUMesher.Initialize();
-	CPUMesher.SetConfig(SmoothConfig);
+	CPUMesher.SetConfig(MCConfig);
 	GPUMesher.Initialize();
-	GPUMesher.SetConfig(SmoothConfig);
+	GPUMesher.SetConfig(MCConfig);
 
 	// Create 32^3 terrain request (standard chunk size)
 	FVoxelMeshingRequest Request = CreateHalfSolidRequest(32);
@@ -681,7 +681,7 @@ bool FSmoothMeshingPerformanceTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("  GPU average (with count readback): %.2f ms"), GPUAvgMs));
 
 	// Performance targets: CPU < 100ms, GPU < 5ms
-	// Smooth meshing is more complex than cubic meshing
+	// MarchingCubes meshing is more complex than cubic meshing
 	TestTrue(TEXT("CPU smooth meshing should complete in < 100ms"), CPUAvgMs < 100.0);
 	TestTrue(TEXT("GPU smooth meshing should complete in < 5ms"), GPUAvgMs < 5.0);
 

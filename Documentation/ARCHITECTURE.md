@@ -93,7 +93,7 @@ VoxelWorld (Root Container)
 │   │       └── ProceduralMeshComponents
 │   ├── MeshingSystem
 │   │   ├── CubicMesher (Face-culling, Greedy, AO)
-│   │   └── SmoothMesher (Marching Cubes / Dual Contouring)
+│   │   └── MarchingCubesMesher / DualContourMesher
 │   └── CollisionManager (Separate, Async, Lower LOD)
 │
 └── ScatterSystem
@@ -756,7 +756,7 @@ See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap
 ## References
 
 - [LOD System Details](LOD_SYSTEM.md)
-- [Smooth Meshing (Marching Cubes & Transvoxel)](SMOOTH_MESHING.md)
+- [Marching Cubes Meshing & Transvoxel](MARCHING_CUBES_MESHING.md)
 - [Rendering System Details](RENDERING_SYSTEM.md)
 - [GPU Pipeline Details](GPU_PIPELINE.md)
 - [Data Structures Reference](DATA_STRUCTURES.md)

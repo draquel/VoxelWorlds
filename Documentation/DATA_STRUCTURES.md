@@ -189,8 +189,9 @@ enum class EWorldMode : uint8 {
 ### EMeshingMode
 ```cpp
 enum class EMeshingMode : uint8 {
-    Cubic,    // Block-style
-    Smooth    // Marching cubes
+    Cubic,          // Block-style
+    MarchingCubes,  // Isosurface extraction
+    DualContouring  // QEF vertex placement
 };
 ```
 

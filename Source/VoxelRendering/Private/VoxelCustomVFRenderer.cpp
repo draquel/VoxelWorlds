@@ -80,11 +80,11 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 	WorldComponent->SetWorldOrigin(WorldConfig->WorldOrigin);
 
 	// Sync material mode with configuration's meshing mode
-	// Both Smooth (MC) and DualContouring use triplanar texturing instead of atlas faces
+	// Both MarchingCubes and DualContouring use triplanar texturing instead of atlas faces
 	const bool bIsSmooth = (WorldConfig->MeshingMode != EMeshingMode::Cubic);
 	WorldComponent->SetUseSmoothMeshing(bIsSmooth);
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelCustomVFRenderer: MeshingMode=%s, bUseSmoothMeshing=%s"),
-		bIsSmooth ? TEXT("Smooth") : TEXT("Cubic"),
+		bIsSmooth ? TEXT("Triplanar") : TEXT("Cubic"),
 		bIsSmooth ? TEXT("true") : TEXT("false"));
 
 	// Set initial material BEFORE registration - scene proxy is created during RegisterComponent

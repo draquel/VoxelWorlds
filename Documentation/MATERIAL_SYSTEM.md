@@ -284,7 +284,7 @@ For smooth meshing (Marching Cubes), materials use triplanar projection to avoid
 
 MaterialID is stored in the **UV1.x** channel as a float value. This avoids sRGB gamma conversion issues that would corrupt integer data in vertex colors.
 
-**In Mesh Generator (FVoxelCPUSmoothMesher):**
+**In Mesh Generator (FVoxelCPUMarchingCubesMesher):**
 ```cpp
 // Store MaterialID in UV1.x
 Vertex.UV1.X = static_cast<float>(MaterialID);
@@ -637,7 +637,7 @@ The material mode is synced automatically in `FVoxelCustomVFRenderer::Initialize
 
 ```cpp
 // Sync material mode with configuration's meshing mode
-const bool bIsSmooth = (WorldConfig->MeshingMode == EMeshingMode::Smooth);
+const bool bIsSmooth = (WorldConfig->MeshingMode != EMeshingMode::Cubic);
 WorldComponent->SetUseSmoothMeshing(bIsSmooth);
 ```
 

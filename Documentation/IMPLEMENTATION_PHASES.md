@@ -909,7 +909,7 @@ Phase 7 performance targets displayed for comparison:
 
 **Phase 4 Completed**:
 1. ~~Smooth meshing (Marching Cubes)~~ - COMPLETE
-   - FVoxelCPUSmoothMesher: CPU-based Marching Cubes implementation
+   - FVoxelCPUMarchingCubesMesher: CPU-based Marching Cubes implementation
    - 256-case lookup table for cube configurations
    - Trilinear interpolation for vertex positioning on edges
    - Gradient-based normal calculation using central differences

@@ -8,7 +8,7 @@
 #include "DistanceBandLODStrategy.h"
 #include "VoxelPMCRenderer.h"
 #include "VoxelCustomVFRenderer.h"
-#include "VoxelCPUSmoothMesher.h"
+#include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelCollisionManager.h"
@@ -65,18 +65,18 @@ void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 	const bool bDebuggingEnabled = bDebugLogTransitionCells || bDrawTransitionCellDebug
 		|| bDebugColorTransitionCells || bDebugLogAnomalies;
 
-	if (FVoxelCPUSmoothMesher* SmoothMesher = ChunkManager ? ChunkManager->GetSmoothMesher() : nullptr)
+	if (FVoxelCPUMarchingCubesMesher* MCMesher = ChunkManager ? ChunkManager->GetMarchingCubesMesher() : nullptr)
 	{
-		SmoothMesher->SetDebugLogging(bDebugLogTransitionCells);
-		SmoothMesher->SetDebugVisualization(bDrawTransitionCellDebug);
-		SmoothMesher->SetDebugColorTransitionCells(bDebugColorTransitionCells);
-		SmoothMesher->SetDebugLogAnomalies(bDebugLogAnomalies);
-		SmoothMesher->SetDebugComparisonMesh(bDebugComparisonMesh);
+		MCMesher->SetDebugLogging(bDebugLogTransitionCells);
+		MCMesher->SetDebugVisualization(bDrawTransitionCellDebug);
+		MCMesher->SetDebugColorTransitionCells(bDebugColorTransitionCells);
+		MCMesher->SetDebugLogAnomalies(bDebugLogAnomalies);
+		MCMesher->SetDebugComparisonMesh(bDebugComparisonMesh);
 
 		// Clear debug data when debugging is just enabled (fresh start)
 		if (bDebuggingEnabled && !bWasDebuggingEnabled)
 		{
-			SmoothMesher->ClearDebugData();
+			MCMesher->ClearDebugData();
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("Transvoxel debugging enabled - cleared debug data for fresh start"));
 		}
 	}
@@ -529,10 +529,10 @@ void AVoxelWorldTestActor::SetTransitionCellDebugging(bool bEnable)
 	// Set the debug flags on the mesher via the chunk manager
 	if (ChunkManager)
 	{
-		if (FVoxelCPUSmoothMesher* SmoothMesher = ChunkManager->GetSmoothMesher())
+		if (FVoxelCPUMarchingCubesMesher* MCMesher = ChunkManager->GetMarchingCubesMesher())
 		{
-			SmoothMesher->SetDebugLogging(bDebugLogTransitionCells);
-			SmoothMesher->SetDebugVisualization(bDrawTransitionCellDebug);
+			MCMesher->SetDebugLogging(bDebugLogTransitionCells);
+			MCMesher->SetDebugVisualization(bDrawTransitionCellDebug);
 
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("Transvoxel debug flags synced to mesher: Logging=%s, Visualization=%s"),
 				bDebugLogTransitionCells ? TEXT("ON") : TEXT("OFF"),
@@ -540,7 +540,7 @@ void AVoxelWorldTestActor::SetTransitionCellDebugging(bool bEnable)
 		}
 		else
 		{
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("SetTransitionCellDebugging: Smooth mesher not available (GetSmoothMesher returned nullptr)"));
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("SetTransitionCellDebugging: MarchingCubes mesher not available (GetMarchingCubesMesher returned nullptr)"));
 		}
 	}
 }
@@ -552,13 +552,13 @@ void AVoxelWorldTestActor::DrawTransitionCellDebug()
 		return;
 	}
 
-	FVoxelCPUSmoothMesher* SmoothMesher = ChunkManager->GetSmoothMesher();
-	if (!SmoothMesher)
+	FVoxelCPUMarchingCubesMesher* MCMesher = ChunkManager->GetMarchingCubesMesher();
+	if (!MCMesher)
 	{
 		static bool bLoggedOnce = false;
 		if (!bLoggedOnce)
 		{
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("DrawTransitionCellDebug: SmoothMesher is nullptr"));
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("DrawTransitionCellDebug: MCMesher is nullptr"));
 			bLoggedOnce = true;
 		}
 		return;
@@ -570,7 +570,7 @@ void AVoxelWorldTestActor::DrawTransitionCellDebug()
 		return;
 	}
 
-	const TArray<FVoxelCPUSmoothMesher::FTransitionCellDebugData>& DebugCells = SmoothMesher->GetTransitionCellDebugData();
+	const TArray<FVoxelCPUMarchingCubesMesher::FTransitionCellDebugData>& DebugCells = MCMesher->GetTransitionCellDebugData();
 
 	// Log debug cell count periodically
 	static int32 FrameCounter = 0;

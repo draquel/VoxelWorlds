@@ -12,10 +12,10 @@
 #include "IVoxelMeshRenderer.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
-#include "VoxelCPUSmoothMesher.h"
+#include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelGPUDualContourMesher.h"
-#include "VoxelGPUSmoothMesher.h"
+#include "VoxelGPUMarchingCubesMesher.h"
 #include "VoxelWaterMesher.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -376,7 +376,7 @@ void UVoxelChunkManager::Initialize(
 	NoiseGenerator->Initialize();
 
 	// Create mesher based on configuration
-	if (Configuration->MeshingMode == EMeshingMode::Smooth)
+	if (Configuration->MeshingMode == EMeshingMode::MarchingCubes)
 	{
 		FVoxelMeshingConfig MeshConfig;
 		MeshConfig.bUseSmoothMeshing = true;
@@ -393,21 +393,21 @@ void UVoxelChunkManager::Initialize(
 
 		if (Configuration->bUseGPUMeshing)
 		{
-			auto GPUSmoothMesher = MakeUnique<FVoxelGPUSmoothMesher>();
-			GPUSmoothMesher->Initialize();
-			GPUSmoothMesher->SetConfig(MeshConfig);
-			Mesher = MoveTemp(GPUSmoothMesher);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Using GPU Smooth (Marching Cubes) mesher (AO=%s, UVScale=%.2f)"),
+			auto GPUMCMesher = MakeUnique<FVoxelGPUMarchingCubesMesher>();
+			GPUMCMesher->Initialize();
+			GPUMCMesher->SetConfig(MeshConfig);
+			Mesher = MoveTemp(GPUMCMesher);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using GPU MarchingCubes mesher (AO=%s, UVScale=%.2f)"),
 				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
 				Configuration->UVScale);
 		}
 		else
 		{
-			auto SmoothMesher = MakeUnique<FVoxelCPUSmoothMesher>();
-			SmoothMesher->Initialize();
-			SmoothMesher->SetConfig(MeshConfig);
-			Mesher = MoveTemp(SmoothMesher);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU Smooth (Marching Cubes) mesher (AO=%s, UVScale=%.2f)"),
+			auto CPUMCMesher = MakeUnique<FVoxelCPUMarchingCubesMesher>();
+			CPUMCMesher->Initialize();
+			CPUMCMesher->SetConfig(MeshConfig);
+			Mesher = MoveTemp(CPUMCMesher);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU MarchingCubes mesher (AO=%s, UVScale=%.2f)"),
 				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
 				Configuration->UVScale);
 		}
@@ -997,7 +997,7 @@ void UVoxelChunkManager::DrawDebugVisualization() const
 #endif
 }
 
-FVoxelCPUSmoothMesher* UVoxelChunkManager::GetSmoothMesher() const
+FVoxelCPUMarchingCubesMesher* UVoxelChunkManager::GetMarchingCubesMesher() const
 {
 	if (!Mesher.IsValid())
 	{
@@ -1006,9 +1006,9 @@ FVoxelCPUSmoothMesher* UVoxelChunkManager::GetSmoothMesher() const
 
 	// Check mesher type using the virtual GetMesherTypeName method
 	// This avoids dynamic_cast which requires RTTI (disabled in UE)
-	if (Mesher->GetMesherTypeName() == TEXT("CPU Smooth"))
+	if (Mesher->GetMesherTypeName() == TEXT("CPU MarchingCubes"))
 	{
-		return static_cast<FVoxelCPUSmoothMesher*>(Mesher.Get());
+		return static_cast<FVoxelCPUMarchingCubesMesher*>(Mesher.Get());
 	}
 
 	return nullptr;

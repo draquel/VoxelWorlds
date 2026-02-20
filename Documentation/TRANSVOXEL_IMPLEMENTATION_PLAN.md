@@ -1,7 +1,7 @@
 # Transvoxel Seam Stitching — Implementation Plan
 
 **Project**: VoxelWorlds Plugin (UE 5.7.2)
-**Target File**: `VoxelCPUSmoothMesher.cpp` (CPU path; GPU path later)
+**Target File**: `VoxelCPUMarchingCubesMesher.cpp` (CPU path; GPU path later)
 **Status**: Transvoxel was previously implemented but disabled due to bugs. This plan provides a corrected, step-by-step reimplementation.
 
 ---
@@ -78,7 +78,7 @@ The vertex shader (or material in our case via MPC) interpolates between primary
 3. **No edge/corner neighbor data needed**: This is the critical correction from the previous implementation. Transition cells only need data from the **face neighbor** and the chunk's own boundary voxels. The 13 sample points all lie within the chunk boundary and its immediate face neighbor. Edge/corner neighbor data is NOT required for transition cells.
 
 **Files to modify**:
-- `VoxelCPUSmoothMesher.h/cpp` — verify `GetDensityAt()` can access boundary+1 voxel positions
+- `VoxelCPUMarchingCubesMesher.h/cpp` — verify `GetDensityAt()` can access boundary+1 voxel positions
 
 ### Phase B: Transition Cell Tables (20 min)
 
@@ -420,7 +420,7 @@ for (int32 X = 0; X < CellCount; X++)
 
 1. **Wire up the new `ProcessTransitionFace()` into the mesher**:
    ```cpp
-   void FVoxelCPUSmoothMesher::GenerateMesh(const FVoxelMeshingRequest& Request, ...)
+   void FVoxelCPUMarchingCubesMesher::GenerateMesh(const FVoxelMeshingRequest& Request, ...)
    {
        // ... existing MC processing ...
        

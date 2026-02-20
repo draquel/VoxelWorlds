@@ -725,7 +725,7 @@ int32 FVoxelCPUDualContourMesher::EmitVertex(
 }
 
 // ============================================================================
-// Density & Voxel Access (copied from FVoxelCPUSmoothMesher)
+// Density & Voxel Access (copied from FVoxelCPUMarchingCubesMesher)
 // ============================================================================
 
 float FVoxelCPUDualContourMesher::GetDensityAt(

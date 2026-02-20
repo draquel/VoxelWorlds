@@ -35,7 +35,7 @@
  * Tables derived from Eric Lengyel's official Transvoxel implementation (MIT License).
  * Source: https://github.com/EricLengyel/Transvoxel
  *
- * @see FVoxelCPUSmoothMesher
+ * @see FVoxelCPUMarchingCubesMesher
  * @see https://transvoxel.org/
  */
 namespace TransvoxelTables

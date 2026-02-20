@@ -11,7 +11,7 @@
 class FRDGPooledBuffer;
 
 /**
- * GPU-based smooth mesher using Marching Cubes compute shaders.
+ * GPU-based Marching Cubes mesher using compute shaders.
  *
  * Generates smooth mesh geometry on the GPU by interpolating vertex
  * positions along cube edges where the density field crosses the isosurface.
@@ -21,14 +21,14 @@ class FRDGPooledBuffer;
  * Thread Safety: Must be called from game thread, work dispatched to render thread
  *
  * @see IVoxelMesher
- * @see FVoxelCPUSmoothMesher
+ * @see FVoxelCPUMarchingCubesMesher
  * @see MarchingCubesTables
  */
-class VOXELMESHING_API FVoxelGPUSmoothMesher : public IVoxelMesher
+class VOXELMESHING_API FVoxelGPUMarchingCubesMesher : public IVoxelMesher
 {
 public:
-	FVoxelGPUSmoothMesher();
-	virtual ~FVoxelGPUSmoothMesher() override;
+	FVoxelGPUMarchingCubesMesher();
+	virtual ~FVoxelGPUMarchingCubesMesher() override;
 
 	// ============================================================================
 	// IVoxelMesher Interface
@@ -77,7 +77,7 @@ public:
 		const FVoxelMeshingHandle& Handle,
 		FVoxelMeshingStats& OutStats) const override;
 
-	virtual FString GetMesherTypeName() const override { return TEXT("GPU Smooth"); }
+	virtual FString GetMesherTypeName() const override { return TEXT("GPU MarchingCubes"); }
 
 	/** Called each frame to poll async GPU readbacks. */
 	virtual void Tick(float DeltaTime) override;

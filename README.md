@@ -172,7 +172,7 @@ See [Implementation Phases](Documentation/IMPLEMENTATION_PHASES.md) for detailed
 - `FVoxelGPUNoiseGenerator` - GPU compute shader noise generation
 - `FVoxelCPUCubicMesher` - CPU-based cubic mesh generation with greedy meshing
 - `FVoxelGPUCubicMesher` - GPU compute shader cubic meshing
-- `FVoxelCPUSmoothMesher` - CPU-based smooth meshing (Marching Cubes)
+- `FVoxelCPUMarchingCubesMesher` - CPU-based Marching Cubes meshing
 - `FVoxelPMCRenderer` - ProceduralMeshComponent-based renderer (CPU fallback)
 - `FVoxelCustomVFRenderer` - GPU-driven renderer using FLocalVertexFactory
 - `FVoxelSceneProxy` - Scene proxy for chunk rendering with frustum culling

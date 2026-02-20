@@ -1,18 +1,18 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-#include "VoxelCPUSmoothMesher.h"
+#include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshing.h"
 #include "MarchingCubesTables.h"
 #include "TransvoxelTables.h"
 
-// Note: Smooth meshing uses triplanar blending, so FaceType is not needed.
+// Note: MarchingCubes meshing uses triplanar blending, so FaceType is not needed.
 // UV1.x stores MaterialID, UV1.y is reserved (set to 0).
 
-FVoxelCPUSmoothMesher::FVoxelCPUSmoothMesher()
+FVoxelCPUMarchingCubesMesher::FVoxelCPUMarchingCubesMesher()
 {
 }
 
-FVoxelCPUSmoothMesher::~FVoxelCPUSmoothMesher()
+FVoxelCPUMarchingCubesMesher::~FVoxelCPUMarchingCubesMesher()
 {
 	if (bIsInitialized)
 	{
@@ -20,18 +20,18 @@ FVoxelCPUSmoothMesher::~FVoxelCPUSmoothMesher()
 	}
 }
 
-void FVoxelCPUSmoothMesher::Initialize()
+void FVoxelCPUMarchingCubesMesher::Initialize()
 {
 	if (bIsInitialized)
 	{
 		return;
 	}
 
-	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU Smooth Mesher initialized"));
+	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU MarchingCubes Mesher initialized"));
 	bIsInitialized = true;
 }
 
-void FVoxelCPUSmoothMesher::Shutdown()
+void FVoxelCPUMarchingCubesMesher::Shutdown()
 {
 	if (!bIsInitialized)
 	{
@@ -40,15 +40,15 @@ void FVoxelCPUSmoothMesher::Shutdown()
 
 	ReleaseAllHandles();
 	bIsInitialized = false;
-	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU Smooth Mesher shutdown"));
+	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU MarchingCubes Mesher shutdown"));
 }
 
-bool FVoxelCPUSmoothMesher::IsInitialized() const
+bool FVoxelCPUMarchingCubesMesher::IsInitialized() const
 {
 	return bIsInitialized;
 }
 
-bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
+bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	const FVoxelMeshingRequest& Request,
 	FChunkMeshData& OutMeshData)
 {
@@ -56,14 +56,14 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 	return GenerateMeshCPU(Request, OutMeshData, Stats);
 }
 
-bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
+bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	const FVoxelMeshingRequest& Request,
 	FChunkMeshData& OutMeshData,
 	FVoxelMeshingStats& OutStats)
 {
 	if (!bIsInitialized)
 	{
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("CPU Smooth Mesher not initialized"));
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("CPU MarchingCubes Mesher not initialized"));
 		return false;
 	}
 
@@ -99,7 +99,7 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 	// Number of cubes to process at this LOD level
 	const int32 LODChunkSize = ChunkSize / Stride;
 
-	UE_LOG(LogVoxelMeshing, Log, TEXT("Smooth meshing chunk (%d,%d,%d) at LOD %d (stride %d, cubes %d^3)"),
+	UE_LOG(LogVoxelMeshing, Log, TEXT("MarchingCubes meshing chunk (%d,%d,%d) at LOD %d (stride %d, cubes %d^3)"),
 		Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
 		LODLevel, Stride, LODChunkSize);
 
@@ -381,13 +381,13 @@ bool FVoxelCPUSmoothMesher::GenerateMeshCPU(
 	OutStats.GenerationTimeMs = static_cast<float>((EndTime - StartTime) * 1000.0);
 
 	UE_LOG(LogVoxelMeshing, Verbose,
-		TEXT("Smooth meshing complete: %d verts, %d tris, %.2fms"),
+		TEXT("MarchingCubes meshing complete: %d verts, %d tris, %.2fms"),
 		OutStats.VertexCount, TriangleCount, OutStats.GenerationTimeMs);
 
 	return true;
 }
 
-void FVoxelCPUSmoothMesher::ProcessCube(
+void FVoxelCPUMarchingCubesMesher::ProcessCube(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	FChunkMeshData& OutMeshData,
@@ -568,7 +568,7 @@ void FVoxelCPUSmoothMesher::ProcessCube(
 	}
 }
 
-void FVoxelCPUSmoothMesher::ProcessCubeLOD(
+void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
@@ -763,7 +763,7 @@ void FVoxelCPUSmoothMesher::ProcessCubeLOD(
 	}
 }
 
-float FVoxelCPUSmoothMesher::GetDensityAt(
+float FVoxelCPUMarchingCubesMesher::GetDensityAt(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z) const
 {
@@ -771,7 +771,7 @@ float FVoxelCPUSmoothMesher::GetDensityAt(
 	return static_cast<float>(Voxel.Density) / 255.0f;
 }
 
-float FVoxelCPUSmoothMesher::GetDensityAtTrilinear(
+float FVoxelCPUMarchingCubesMesher::GetDensityAtTrilinear(
 	const FVoxelMeshingRequest& Request,
 	float X, float Y, float Z) const
 {
@@ -818,7 +818,7 @@ float FVoxelCPUSmoothMesher::GetDensityAtTrilinear(
 	return FMath::Lerp(D0, D1, FracZ);
 }
 
-FVoxelData FVoxelCPUSmoothMesher::GetVoxelAt(
+FVoxelData FVoxelCPUMarchingCubesMesher::GetVoxelAt(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z) const
 {
@@ -987,7 +987,7 @@ FVoxelData FVoxelCPUSmoothMesher::GetVoxelAt(
 	return FVoxelData::Air();
 }
 
-FVector3f FVoxelCPUSmoothMesher::InterpolateEdge(
+FVector3f FVoxelCPUMarchingCubesMesher::InterpolateEdge(
 	float d0, float d1,
 	const FVector3f& p0, const FVector3f& p1,
 	float IsoLevel) const
@@ -1005,7 +1005,7 @@ FVector3f FVoxelCPUSmoothMesher::InterpolateEdge(
 	return p0 + (p1 - p0) * t;
 }
 
-FVector3f FVoxelCPUSmoothMesher::CalculateGradientNormal(
+FVector3f FVoxelCPUMarchingCubesMesher::CalculateGradientNormal(
 	const FVoxelMeshingRequest& Request,
 	float X, float Y, float Z) const
 {
@@ -1036,7 +1036,7 @@ FVector3f FVoxelCPUSmoothMesher::CalculateGradientNormal(
 	return Normal;
 }
 
-uint8 FVoxelCPUSmoothMesher::GetDominantMaterial(
+uint8 FVoxelCPUMarchingCubesMesher::GetDominantMaterial(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	uint8 CubeIndex) const
@@ -1070,7 +1070,7 @@ uint8 FVoxelCPUSmoothMesher::GetDominantMaterial(
 	return SurfaceMaterial;
 }
 
-uint8 FVoxelCPUSmoothMesher::GetDominantBiome(
+uint8 FVoxelCPUMarchingCubesMesher::GetDominantBiome(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	uint8 CubeIndex) const
@@ -1108,7 +1108,7 @@ uint8 FVoxelCPUSmoothMesher::GetDominantBiome(
 // LOD Helper Functions
 // ============================================================================
 
-FVector3f FVoxelCPUSmoothMesher::CalculateGradientNormalLOD(
+FVector3f FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD(
 	const FVoxelMeshingRequest& Request,
 	float X, float Y, float Z,
 	int32 Stride) const
@@ -1137,7 +1137,7 @@ FVector3f FVoxelCPUSmoothMesher::CalculateGradientNormalLOD(
 	return Normal;
 }
 
-uint8 FVoxelCPUSmoothMesher::GetDominantMaterialLOD(
+uint8 FVoxelCPUMarchingCubesMesher::GetDominantMaterialLOD(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
@@ -1196,7 +1196,7 @@ uint8 FVoxelCPUSmoothMesher::GetDominantMaterialLOD(
 	return SurfaceMaterial;
 }
 
-uint8 FVoxelCPUSmoothMesher::GetDominantBiomeLOD(
+uint8 FVoxelCPUMarchingCubesMesher::GetDominantBiomeLOD(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
@@ -1253,7 +1253,7 @@ uint8 FVoxelCPUSmoothMesher::GetDominantBiomeLOD(
 // Async Pattern (wraps sync for CPU mesher)
 // ============================================================================
 
-FVoxelMeshingHandle FVoxelCPUSmoothMesher::GenerateMeshAsync(
+FVoxelMeshingHandle FVoxelCPUMarchingCubesMesher::GenerateMeshAsync(
 	const FVoxelMeshingRequest& Request,
 	FOnVoxelMeshingComplete OnComplete)
 {
@@ -1282,29 +1282,29 @@ FVoxelMeshingHandle FVoxelCPUSmoothMesher::GenerateMeshAsync(
 	return Handle;
 }
 
-bool FVoxelCPUSmoothMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
+bool FVoxelCPUMarchingCubesMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
 {
 	return Handle.bIsComplete;
 }
 
-bool FVoxelCPUSmoothMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
+bool FVoxelCPUMarchingCubesMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
 {
 	return Handle.bWasSuccessful;
 }
 
-FRHIBuffer* FVoxelCPUSmoothMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
+FRHIBuffer* FVoxelCPUMarchingCubesMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
 {
 	// CPU mesher doesn't create GPU buffers
 	return nullptr;
 }
 
-FRHIBuffer* FVoxelCPUSmoothMesher::GetIndexBuffer(const FVoxelMeshingHandle& Handle)
+FRHIBuffer* FVoxelCPUMarchingCubesMesher::GetIndexBuffer(const FVoxelMeshingHandle& Handle)
 {
 	// CPU mesher doesn't create GPU buffers
 	return nullptr;
 }
 
-bool FVoxelCPUSmoothMesher::GetBufferCounts(
+bool FVoxelCPUMarchingCubesMesher::GetBufferCounts(
 	const FVoxelMeshingHandle& Handle,
 	uint32& OutVertexCount,
 	uint32& OutIndexCount) const
@@ -1320,7 +1320,7 @@ bool FVoxelCPUSmoothMesher::GetBufferCounts(
 	return false;
 }
 
-bool FVoxelCPUSmoothMesher::GetRenderData(
+bool FVoxelCPUMarchingCubesMesher::GetRenderData(
 	const FVoxelMeshingHandle& Handle,
 	FChunkRenderData& OutRenderData)
 {
@@ -1336,7 +1336,7 @@ bool FVoxelCPUSmoothMesher::GetRenderData(
 	return false;
 }
 
-bool FVoxelCPUSmoothMesher::ReadbackToCPU(
+bool FVoxelCPUMarchingCubesMesher::ReadbackToCPU(
 	const FVoxelMeshingHandle& Handle,
 	FChunkMeshData& OutMeshData)
 {
@@ -1350,29 +1350,29 @@ bool FVoxelCPUSmoothMesher::ReadbackToCPU(
 	return false;
 }
 
-void FVoxelCPUSmoothMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
+void FVoxelCPUMarchingCubesMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
 {
 	FScopeLock Lock(&CacheLock);
 	CachedResults.Remove(Handle.RequestId);
 }
 
-void FVoxelCPUSmoothMesher::ReleaseAllHandles()
+void FVoxelCPUMarchingCubesMesher::ReleaseAllHandles()
 {
 	FScopeLock Lock(&CacheLock);
 	CachedResults.Empty();
 }
 
-void FVoxelCPUSmoothMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
+void FVoxelCPUMarchingCubesMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
 {
 	Config = InConfig;
 }
 
-const FVoxelMeshingConfig& FVoxelCPUSmoothMesher::GetConfig() const
+const FVoxelMeshingConfig& FVoxelCPUMarchingCubesMesher::GetConfig() const
 {
 	return Config;
 }
 
-bool FVoxelCPUSmoothMesher::GetStats(
+bool FVoxelCPUMarchingCubesMesher::GetStats(
 	const FVoxelMeshingHandle& Handle,
 	FVoxelMeshingStats& OutStats) const
 {
@@ -1390,7 +1390,7 @@ bool FVoxelCPUSmoothMesher::GetStats(
 // Skirt Generation (LOD Seam Hiding)
 // ============================================================================
 
-void FVoxelCPUSmoothMesher::GenerateSkirts(
+void FVoxelCPUMarchingCubesMesher::GenerateSkirts(
 	const FVoxelMeshingRequest& Request,
 	int32 Stride,
 	FChunkMeshData& OutMeshData,
@@ -1623,14 +1623,14 @@ void FVoxelCPUSmoothMesher::GenerateSkirts(
 // Transvoxel Implementation
 // ============================================================================
 
-uint8 FVoxelCPUSmoothMesher::GetTransitionFaces(const FVoxelMeshingRequest& Request) const
+uint8 FVoxelCPUMarchingCubesMesher::GetTransitionFaces(const FVoxelMeshingRequest& Request) const
 {
 	// The TransitionFaces field is set by the chunk manager based on neighbor LOD levels.
 	// A face needs transition cells if the neighbor chunk is COARSER (higher LOD level number).
 	return Request.TransitionFaces;
 }
 
-bool FVoxelCPUSmoothMesher::IsTransitionCell(
+bool FVoxelCPUMarchingCubesMesher::IsTransitionCell(
 	int32 X, int32 Y, int32 Z,
 	int32 ChunkSize, int32 Stride,
 	uint8 TransitionMask,
@@ -1682,7 +1682,7 @@ bool FVoxelCPUSmoothMesher::IsTransitionCell(
 	return false;
 }
 
-int32 FVoxelCPUSmoothMesher::GetTransitionCellStride(
+int32 FVoxelCPUMarchingCubesMesher::GetTransitionCellStride(
 	const FVoxelMeshingRequest& Request,
 	int32 FaceIndex,
 	int32 CurrentStride) const
@@ -1705,7 +1705,7 @@ int32 FVoxelCPUSmoothMesher::GetTransitionCellStride(
 	return FMath::Max(CurrentStride, NeighborStride);
 }
 
-bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
+bool FVoxelCPUMarchingCubesMesher::IsInTransitionRegion(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 ChunkSize, int32 CurrentStride,
@@ -1787,7 +1787,7 @@ bool FVoxelCPUSmoothMesher::IsInTransitionRegion(
 	return false;
 }
 
-bool FVoxelCPUSmoothMesher::HasRequiredNeighborData(
+bool FVoxelCPUMarchingCubesMesher::HasRequiredNeighborData(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
@@ -1893,7 +1893,7 @@ bool FVoxelCPUSmoothMesher::HasRequiredNeighborData(
 	return true;
 }
 
-void FVoxelCPUSmoothMesher::GetTransitionCellDensities(
+void FVoxelCPUMarchingCubesMesher::GetTransitionCellDensities(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
@@ -1974,7 +1974,7 @@ void FVoxelCPUSmoothMesher::GetTransitionCellDensities(
 
 }
 
-bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
+bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z,
 	int32 Stride,
@@ -2581,7 +2581,7 @@ bool FVoxelCPUSmoothMesher::ProcessTransitionCell(
 	return true;
 }
 
-FVoxelCPUSmoothMesher::FTransitionDebugSummary FVoxelCPUSmoothMesher::GetTransitionDebugSummary() const
+FVoxelCPUMarchingCubesMesher::FTransitionDebugSummary FVoxelCPUMarchingCubesMesher::GetTransitionDebugSummary() const
 {
 	FTransitionDebugSummary Summary;
 	Summary.TotalTransitionCells = TransitionCellDebugData.Num();

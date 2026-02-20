@@ -78,10 +78,10 @@ void FVoxelPMCRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguration
 #endif
 
 	// Sync material mode with configuration's meshing mode
-	// Both Smooth (MC) and DualContouring use triplanar texturing instead of atlas faces
+	// Both MarchingCubes and DualContouring use triplanar texturing instead of atlas faces
 	bUseSmoothMeshing = (WorldConfig->MeshingMode != EMeshingMode::Cubic);
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelPMCRenderer: MeshingMode=%s, bUseSmoothMeshing=%s"),
-		bUseSmoothMeshing ? TEXT("Smooth") : TEXT("Cubic"),
+		bUseSmoothMeshing ? TEXT("Triplanar") : TEXT("Cubic"),
 		bUseSmoothMeshing ? TEXT("true") : TEXT("false"));
 
 	// Create default vertex color material if none specified
@@ -606,7 +606,7 @@ FString FVoxelPMCRenderer::GetDebugStats() const
 		TotalMemoryUsage / (1024.0 * 1024.0),
 		ComponentPool.Num(),
 		bGenerateCollision ? TEXT("Enabled") : TEXT("Disabled"),
-		bUseSmoothMeshing ? TEXT("Smooth") : TEXT("Cubic"),
+		bUseSmoothMeshing ? TEXT("Triplanar") : TEXT("Cubic"),
 		MaterialAtlas.IsValid() ? *MaterialAtlas->GetName() : TEXT("None")
 	);
 }

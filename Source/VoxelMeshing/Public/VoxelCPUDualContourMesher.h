@@ -116,7 +116,7 @@ private:
 	}
 
 	// ============================================================================
-	// Density & Voxel Access (copied from FVoxelCPUSmoothMesher)
+	// Density & Voxel Access (copied from FVoxelCPUMarchingCubesMesher)
 	// ============================================================================
 
 	float GetDensityAt(

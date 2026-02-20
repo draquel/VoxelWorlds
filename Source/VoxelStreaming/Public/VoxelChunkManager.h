@@ -19,7 +19,7 @@
 class UVoxelWorldConfiguration;
 class IVoxelLODStrategy;
 class IVoxelMeshRenderer;
-class FVoxelCPUSmoothMesher;
+class FVoxelCPUMarchingCubesMesher;
 class UVoxelEditManager;
 class UVoxelCollisionManager;
 class UVoxelScatterManager;
@@ -420,10 +420,10 @@ public:
 	void DrawDebugVisualization() const;
 
 	/**
-	 * Get the smooth mesher for debug access.
-	 * Returns nullptr if mesher is not a smooth mesher or not initialized.
+	 * Get the Marching Cubes mesher for debug access.
+	 * Returns nullptr if mesher is not a MarchingCubes mesher or not initialized.
 	 */
-	FVoxelCPUSmoothMesher* GetSmoothMesher() const;
+	FVoxelCPUMarchingCubesMesher* GetMarchingCubesMesher() const;
 
 	// ==================== Events ====================
 

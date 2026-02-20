@@ -1057,7 +1057,7 @@ Smooth meshing (Marching Cubes) has mismatched vertices at LOD boundaries becaus
 2. **Transition Cells**: Boundary cells use special 9-sample transition cells instead of standard 8-corner cubes
 3. **Seamless Geometry**: Transition cells produce geometry that correctly connects to both LOD levels
 
-See [SMOOTH_MESHING.md](SMOOTH_MESHING.md) for detailed Transvoxel documentation.
+See [MARCHING_CUBES_MESHING.md](MARCHING_CUBES_MESHING.md) for detailed Transvoxel documentation.
 
 ### Configuration
 

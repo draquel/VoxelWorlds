@@ -247,7 +247,7 @@ See: `Documentation/TESTING_STRATEGY.md`
 
 ## Current Development Phase
 
-**Phases 1–7: COMPLETE** — Foundation, Generation, Advanced Meshing, Smooth Meshing, World Modes, Editing & Collision, Scatter & Polish.
+**Phases 1–7: COMPLETE** — Foundation, Generation, Advanced Meshing, Marching Cubes Meshing, World Modes, Editing & Collision, Scatter & Polish.
 
 **Phase 8: Advanced Features** (in progress)
 - [x] `GetWorldMode()` public getter on `UVoxelChunkManager` — exposes terrain height queries for external systems
@@ -310,7 +310,7 @@ See: `Documentation/PERFORMANCE_TARGETS.md`
 ### Shaders
 - `Shaders/VoxelGeneration.usf` - Voxel generation compute shader
 - `Shaders/VoxelCubicMeshing.usf` - Cubic meshing compute shader
-- `Shaders/VoxelSmoothMeshing.usf` - Smooth meshing compute shader
+- `Shaders/MarchingCubesMeshGeneration.usf` - Marching Cubes meshing compute shader
 
 ## Architecture Decision Records
 

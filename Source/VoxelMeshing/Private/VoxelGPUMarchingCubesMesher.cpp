@@ -1,8 +1,8 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-#include "VoxelGPUSmoothMesher.h"
+#include "VoxelGPUMarchingCubesMesher.h"
 #include "VoxelMeshing.h"
-#include "VoxelCPUSmoothMesher.h"
+#include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelVertex.h"
 #include "MarchingCubesTables.h"
 #include "RenderGraphBuilder.h"
@@ -18,13 +18,13 @@
 // ==================== Compute Shader Declarations ====================
 
 /**
- * Main smooth mesh generation compute shader.
+ * Main Marching Cubes mesh generation compute shader.
  */
-class FGenerateSmoothMeshCS : public FGlobalShader
+class FGenerateMarchingCubesMeshCS : public FGlobalShader
 {
 public:
-	DECLARE_GLOBAL_SHADER(FGenerateSmoothMeshCS);
-	SHADER_USE_PARAMETER_STRUCT(FGenerateSmoothMeshCS, FGlobalShader);
+	DECLARE_GLOBAL_SHADER(FGenerateMarchingCubesMeshCS);
+	SHADER_USE_PARAMETER_STRUCT(FGenerateMarchingCubesMeshCS, FGlobalShader);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InputVoxelData)
@@ -79,13 +79,13 @@ public:
 };
 
 /**
- * Counter reset compute shader for smooth meshing.
+ * Counter reset compute shader for Marching Cubes meshing.
  */
-class FResetSmoothMeshCountersCS : public FGlobalShader
+class FResetMarchingCubesCountersCS : public FGlobalShader
 {
 public:
-	DECLARE_GLOBAL_SHADER(FResetSmoothMeshCountersCS);
-	SHADER_USE_PARAMETER_STRUCT(FResetSmoothMeshCountersCS, FGlobalShader);
+	DECLARE_GLOBAL_SHADER(FResetMarchingCubesCountersCS);
+	SHADER_USE_PARAMETER_STRUCT(FResetMarchingCubesCountersCS, FGlobalShader);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, MeshCounters)
@@ -97,16 +97,16 @@ public:
 	}
 };
 
-IMPLEMENT_GLOBAL_SHADER(FGenerateSmoothMeshCS, "/Plugin/VoxelWorlds/Private/SmoothMeshGeneration.usf", "MainCS", SF_Compute);
-IMPLEMENT_GLOBAL_SHADER(FResetSmoothMeshCountersCS, "/Plugin/VoxelWorlds/Private/SmoothMeshGeneration.usf", "ResetCountersCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FGenerateMarchingCubesMeshCS, "/Plugin/VoxelWorlds/Private/MarchingCubesMeshGeneration.usf", "MainCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FResetMarchingCubesCountersCS, "/Plugin/VoxelWorlds/Private/MarchingCubesMeshGeneration.usf", "ResetCountersCS", SF_Compute);
 
-// ==================== FVoxelGPUSmoothMesher Implementation ====================
+// ==================== FVoxelGPUMarchingCubesMesher Implementation ====================
 
-FVoxelGPUSmoothMesher::FVoxelGPUSmoothMesher()
+FVoxelGPUMarchingCubesMesher::FVoxelGPUMarchingCubesMesher()
 {
 }
 
-FVoxelGPUSmoothMesher::~FVoxelGPUSmoothMesher()
+FVoxelGPUMarchingCubesMesher::~FVoxelGPUMarchingCubesMesher()
 {
 	if (bIsInitialized)
 	{
@@ -114,7 +114,7 @@ FVoxelGPUSmoothMesher::~FVoxelGPUSmoothMesher()
 	}
 }
 
-void FVoxelGPUSmoothMesher::Initialize()
+void FVoxelGPUMarchingCubesMesher::Initialize()
 {
 	if (bIsInitialized)
 	{
@@ -122,10 +122,10 @@ void FVoxelGPUSmoothMesher::Initialize()
 	}
 
 	bIsInitialized = true;
-	UE_LOG(LogVoxelMeshing, Log, TEXT("GPU Smooth Mesher initialized"));
+	UE_LOG(LogVoxelMeshing, Log, TEXT("GPU MarchingCubes Mesher initialized"));
 }
 
-void FVoxelGPUSmoothMesher::Shutdown()
+void FVoxelGPUMarchingCubesMesher::Shutdown()
 {
 	if (!bIsInitialized)
 	{
@@ -138,15 +138,15 @@ void FVoxelGPUSmoothMesher::Shutdown()
 	ReleaseAllHandles();
 	bIsInitialized = false;
 
-	UE_LOG(LogVoxelMeshing, Log, TEXT("GPU Smooth Mesher shutdown"));
+	UE_LOG(LogVoxelMeshing, Log, TEXT("GPU MarchingCubes Mesher shutdown"));
 }
 
-bool FVoxelGPUSmoothMesher::GenerateMeshCPU(
+bool FVoxelGPUMarchingCubesMesher::GenerateMeshCPU(
 	const FVoxelMeshingRequest& Request,
 	FChunkMeshData& OutMeshData)
 {
 	// Fallback to CPU mesher
-	FVoxelCPUSmoothMesher CPUMesher;
+	FVoxelCPUMarchingCubesMesher CPUMesher;
 	CPUMesher.Initialize();
 	CPUMesher.SetConfig(Config);
 	bool bResult = CPUMesher.GenerateMeshCPU(Request, OutMeshData);
@@ -154,13 +154,13 @@ bool FVoxelGPUSmoothMesher::GenerateMeshCPU(
 	return bResult;
 }
 
-bool FVoxelGPUSmoothMesher::GenerateMeshCPU(
+bool FVoxelGPUMarchingCubesMesher::GenerateMeshCPU(
 	const FVoxelMeshingRequest& Request,
 	FChunkMeshData& OutMeshData,
 	FVoxelMeshingStats& OutStats)
 {
 	// Fallback to CPU mesher
-	FVoxelCPUSmoothMesher CPUMesher;
+	FVoxelCPUMarchingCubesMesher CPUMesher;
 	CPUMesher.Initialize();
 	CPUMesher.SetConfig(Config);
 	bool bResult = CPUMesher.GenerateMeshCPU(Request, OutMeshData, OutStats);
@@ -168,7 +168,7 @@ bool FVoxelGPUSmoothMesher::GenerateMeshCPU(
 	return bResult;
 }
 
-TArray<uint32> FVoxelGPUSmoothMesher::PackVoxelDataForGPU(const TArray<FVoxelData>& VoxelData)
+TArray<uint32> FVoxelGPUMarchingCubesMesher::PackVoxelDataForGPU(const TArray<FVoxelData>& VoxelData)
 {
 	TArray<uint32> PackedData;
 	PackedData.SetNum(VoxelData.Num());
@@ -181,7 +181,7 @@ TArray<uint32> FVoxelGPUSmoothMesher::PackVoxelDataForGPU(const TArray<FVoxelDat
 	return PackedData;
 }
 
-TArray<int32> FVoxelGPUSmoothMesher::CreateTriangleTableData()
+TArray<int32> FVoxelGPUMarchingCubesMesher::CreateTriangleTableData()
 {
 	TArray<int32> TableData;
 	TableData.SetNum(256 * 16);
@@ -197,13 +197,13 @@ TArray<int32> FVoxelGPUSmoothMesher::CreateTriangleTableData()
 	return TableData;
 }
 
-FVoxelMeshingHandle FVoxelGPUSmoothMesher::GenerateMeshAsync(
+FVoxelMeshingHandle FVoxelGPUMarchingCubesMesher::GenerateMeshAsync(
 	const FVoxelMeshingRequest& Request,
 	FOnVoxelMeshingComplete OnComplete)
 {
 	if (!bIsInitialized)
 	{
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU Smooth Mesher not initialized"));
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU MarchingCubes Mesher not initialized"));
 		return FVoxelMeshingHandle();
 	}
 
@@ -233,7 +233,7 @@ FVoxelMeshingHandle FVoxelGPUSmoothMesher::GenerateMeshAsync(
 	return Handle;
 }
 
-void FVoxelGPUSmoothMesher::DispatchComputeShader(
+void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 	const FVoxelMeshingRequest& Request,
 	uint64 RequestId,
 	TSharedPtr<FMeshingResult> Result,
@@ -342,7 +342,7 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 	const int32 LODLevel = FMath::Clamp(Request.LODLevel, 0, 7);
 	const uint32 LODStride = 1u << LODLevel;
 
-	ENQUEUE_RENDER_COMMAND(GenerateSmoothMesh)(
+	ENQUEUE_RENDER_COMMAND(GenerateMarchingCubesMesh)(
 		[PackedVoxels = MoveTemp(PackedVoxels),
 		 TriTableData = MoveTemp(TriTableData),
 		 PackedNeighborXPos = MoveTemp(PackedNeighborXPos),
@@ -445,7 +445,7 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 				sizeof(FVoxelVertex),
 				CapturedConfig.MaxVerticesPerChunk
 			);
-			Result->VertexBuffer = AllocatePooledBuffer(VertexBufferDesc, TEXT("SmoothVertexOutput"));
+			Result->VertexBuffer = AllocatePooledBuffer(VertexBufferDesc, TEXT("MCVertexOutput"));
 			FRDGBufferRef VertexBuffer = GraphBuilder.RegisterExternalBuffer(
 				Result->VertexBuffer, ERDGBufferFlags::None);
 
@@ -453,12 +453,12 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 				sizeof(uint32),
 				CapturedConfig.MaxIndicesPerChunk
 			);
-			Result->IndexBuffer = AllocatePooledBuffer(IndexBufferDesc, TEXT("SmoothIndexOutput"));
+			Result->IndexBuffer = AllocatePooledBuffer(IndexBufferDesc, TEXT("MCIndexOutput"));
 			FRDGBufferRef IndexBuffer = GraphBuilder.RegisterExternalBuffer(
 				Result->IndexBuffer, ERDGBufferFlags::None);
 
 			FRDGBufferDesc CounterBufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 3);
-			Result->CounterBuffer = AllocatePooledBuffer(CounterBufferDesc, TEXT("SmoothCounterOutput"));
+			Result->CounterBuffer = AllocatePooledBuffer(CounterBufferDesc, TEXT("MCCounterOutput"));
 			FRDGBufferRef MeshCountersBuffer = GraphBuilder.RegisterExternalBuffer(
 				Result->CounterBuffer, ERDGBufferFlags::None);
 
@@ -467,13 +467,13 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 
 			// Reset counters pass
 			{
-				TShaderMapRef<FResetSmoothMeshCountersCS> ResetShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-				FResetSmoothMeshCountersCS::FParameters* ResetParams = GraphBuilder.AllocParameters<FResetSmoothMeshCountersCS::FParameters>();
+				TShaderMapRef<FResetMarchingCubesCountersCS> ResetShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FResetMarchingCubesCountersCS::FParameters* ResetParams = GraphBuilder.AllocParameters<FResetMarchingCubesCountersCS::FParameters>();
 				ResetParams->MeshCounters = MeshCountersUAV;
 
 				FComputeShaderUtils::AddPass(
 					GraphBuilder,
-					RDG_EVENT_NAME("ResetSmoothMeshCounters"),
+					RDG_EVENT_NAME("ResetMarchingCubesCounters"),
 					ResetShader,
 					ResetParams,
 					FIntVector(1, 1, 1)
@@ -482,8 +482,8 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 
 			// Main meshing pass
 			{
-				TShaderMapRef<FGenerateSmoothMeshCS> MeshShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-				FGenerateSmoothMeshCS::FParameters* MeshParams = GraphBuilder.AllocParameters<FGenerateSmoothMeshCS::FParameters>();
+				TShaderMapRef<FGenerateMarchingCubesMeshCS> MeshShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FGenerateMarchingCubesMeshCS::FParameters* MeshParams = GraphBuilder.AllocParameters<FGenerateMarchingCubesMeshCS::FParameters>();
 
 				MeshParams->InputVoxelData = GraphBuilder.CreateSRV(VoxelBuffer);
 				// Face neighbors
@@ -532,7 +532,7 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 
 				FComputeShaderUtils::AddPass(
 					GraphBuilder,
-					RDG_EVENT_NAME("GenerateSmoothMesh"),
+					RDG_EVENT_NAME("GenerateMarchingCubesMesh"),
 					MeshShader,
 					MeshParams,
 					GroupCount
@@ -555,7 +555,7 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 
 			// Enqueue async counter readback only (matching DC mesher's two-phase pattern).
 			// Vertex/index readback deferred to TickReadbacks after counter values are known.
-			Result->CounterReadback = new FRHIGPUBufferReadback(TEXT("SmoothCounterReadback"));
+			Result->CounterReadback = new FRHIGPUBufferReadback(TEXT("MCCounterReadback"));
 			Result->CounterReadback->EnqueueCopy(RHICmdList, Result->CounterBuffer->GetRHI(), 3 * sizeof(uint32));
 
 			// Store callback for deferred firing — TickReadbacks will fire it when data is ready
@@ -572,12 +572,12 @@ void FVoxelGPUSmoothMesher::DispatchComputeShader(
 	);
 }
 
-void FVoxelGPUSmoothMesher::Tick(float DeltaTime)
+void FVoxelGPUMarchingCubesMesher::Tick(float DeltaTime)
 {
 	TickReadbacks();
 }
 
-void FVoxelGPUSmoothMesher::TickReadbacks()
+void FVoxelGPUMarchingCubesMesher::TickReadbacks()
 {
 	TArray<TPair<FOnVoxelMeshingComplete, FVoxelMeshingHandle>> CompletedCallbacks;
 
@@ -594,7 +594,7 @@ void FVoxelGPUSmoothMesher::TickReadbacks()
 				{
 					// Counter readback ready — enqueue render cmd to Lock/copy/Unlock
 					TSharedPtr<FMeshingResult> SharedResult = Result;
-					ENQUEUE_RENDER_COMMAND(LockSmoothCounters)(
+					ENQUEUE_RENDER_COMMAND(LockMCCounters)(
 						[SharedResult](FRHICommandListImmediate& RHICmdList)
 						{
 							const void* Data = SharedResult->CounterReadback->Lock(3 * sizeof(uint32));
@@ -609,7 +609,7 @@ void FVoxelGPUSmoothMesher::TickReadbacks()
 							}
 							else
 							{
-								UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU Smooth: Counter Lock() returned null for chunk %s"),
+								UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU MC: Counter Lock() returned null for chunk %s"),
 									*SharedResult->ChunkCoord.ToString());
 							}
 							SharedResult->CounterReadback->Unlock();
@@ -640,7 +640,7 @@ void FVoxelGPUSmoothMesher::TickReadbacks()
 						const uint32 VCount = Result->VertexCount;
 						const uint32 ICount = Result->IndexCount;
 						TSharedPtr<FMeshingResult> SharedResult = Result;
-						ENQUEUE_RENDER_COMMAND(EnqueueSmoothDataReadback)(
+						ENQUEUE_RENDER_COMMAND(EnqueueMCDataReadback)(
 							[SharedResult, VCount, ICount](FRHICommandListImmediate& RHICmdList)
 							{
 								// Transition vertex + index buffers from UAV to CopySrc for readback
@@ -650,13 +650,13 @@ void FVoxelGPUSmoothMesher::TickReadbacks()
 								};
 								RHICmdList.Transition(MakeArrayView(Transitions, UE_ARRAY_COUNT(Transitions)));
 
-								SharedResult->VertexReadback = new FRHIGPUBufferReadback(TEXT("SmoothVertexReadback"));
+								SharedResult->VertexReadback = new FRHIGPUBufferReadback(TEXT("MCVertexReadback"));
 								SharedResult->VertexReadback->EnqueueCopy(
 									RHICmdList,
 									SharedResult->VertexBuffer->GetRHI(),
 									VCount * sizeof(FVoxelVertex));
 
-								SharedResult->IndexReadback = new FRHIGPUBufferReadback(TEXT("SmoothIndexReadback"));
+								SharedResult->IndexReadback = new FRHIGPUBufferReadback(TEXT("MCIndexReadback"));
 								SharedResult->IndexReadback->EnqueueCopy(
 									RHICmdList,
 									SharedResult->IndexBuffer->GetRHI(),
@@ -678,7 +678,7 @@ void FVoxelGPUSmoothMesher::TickReadbacks()
 				{
 					// Data readback ready — enqueue render cmd to Lock/copy/Unlock
 					TSharedPtr<FMeshingResult> SharedResult = Result;
-					ENQUEUE_RENDER_COMMAND(LockSmoothMeshData)(
+					ENQUEUE_RENDER_COMMAND(LockMCMeshData)(
 						[SharedResult](FRHICommandListImmediate& RHICmdList)
 						{
 							CopyVertexReadbackData_RT(SharedResult);
@@ -722,7 +722,7 @@ void FVoxelGPUSmoothMesher::TickReadbacks()
 	}
 }
 
-void FVoxelGPUSmoothMesher::CopyVertexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
+void FVoxelGPUMarchingCubesMesher::CopyVertexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
 {
 	const uint32 VertexCount = Result->VertexCount;
 
@@ -761,13 +761,13 @@ void FVoxelGPUSmoothMesher::CopyVertexReadbackData_RT(TSharedPtr<FMeshingResult>
 	}
 	else
 	{
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU Smooth: Vertex Lock() returned null for chunk %s (VertexCount=%u)"),
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU MC: Vertex Lock() returned null for chunk %s (VertexCount=%u)"),
 			*Result->ChunkCoord.ToString(), VertexCount);
 	}
 	Result->VertexReadback->Unlock();
 }
 
-void FVoxelGPUSmoothMesher::CopyIndexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
+void FVoxelGPUMarchingCubesMesher::CopyIndexReadbackData_RT(TSharedPtr<FMeshingResult> Result)
 {
 	const uint32 IndexCount = Result->IndexCount;
 
@@ -780,27 +780,27 @@ void FVoxelGPUSmoothMesher::CopyIndexReadbackData_RT(TSharedPtr<FMeshingResult> 
 	}
 	else
 	{
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU Smooth: Index Lock() returned null for chunk %s (IndexCount=%u)"),
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("GPU MC: Index Lock() returned null for chunk %s (IndexCount=%u)"),
 			*Result->ChunkCoord.ToString(), IndexCount);
 	}
 	Result->IndexReadback->Unlock();
 }
 
-bool FVoxelGPUSmoothMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
+bool FVoxelGPUMarchingCubesMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
 {
 	FScopeLock Lock(&ResultsLock);
 	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
 	return ResultPtr && (*ResultPtr)->bIsComplete.load(std::memory_order_acquire);
 }
 
-bool FVoxelGPUSmoothMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
+bool FVoxelGPUMarchingCubesMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
 {
 	FScopeLock Lock(&ResultsLock);
 	const TSharedPtr<FMeshingResult>* ResultPtr = MeshingResults.Find(Handle.RequestId);
 	return ResultPtr && (*ResultPtr)->bWasSuccessful.load(std::memory_order_acquire);
 }
 
-FRHIBuffer* FVoxelGPUSmoothMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
+FRHIBuffer* FVoxelGPUMarchingCubesMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
 {
 	if (!Handle.IsValid())
 	{
@@ -817,7 +817,7 @@ FRHIBuffer* FVoxelGPUSmoothMesher::GetVertexBuffer(const FVoxelMeshingHandle& Ha
 	return nullptr;
 }
 
-FRHIBuffer* FVoxelGPUSmoothMesher::GetIndexBuffer(const FVoxelMeshingHandle& Handle)
+FRHIBuffer* FVoxelGPUMarchingCubesMesher::GetIndexBuffer(const FVoxelMeshingHandle& Handle)
 {
 	if (!Handle.IsValid())
 	{
@@ -834,7 +834,7 @@ FRHIBuffer* FVoxelGPUSmoothMesher::GetIndexBuffer(const FVoxelMeshingHandle& Han
 	return nullptr;
 }
 
-bool FVoxelGPUSmoothMesher::GetBufferCounts(
+bool FVoxelGPUMarchingCubesMesher::GetBufferCounts(
 	const FVoxelMeshingHandle& Handle,
 	uint32& OutVertexCount,
 	uint32& OutIndexCount) const
@@ -856,7 +856,7 @@ bool FVoxelGPUSmoothMesher::GetBufferCounts(
 	return true;
 }
 
-bool FVoxelGPUSmoothMesher::GetRenderData(
+bool FVoxelGPUMarchingCubesMesher::GetRenderData(
 	const FVoxelMeshingHandle& Handle,
 	FChunkRenderData& OutRenderData)
 {
@@ -890,7 +890,7 @@ bool FVoxelGPUSmoothMesher::GetRenderData(
 	return true;
 }
 
-bool FVoxelGPUSmoothMesher::ReadbackToCPU(
+bool FVoxelGPUMarchingCubesMesher::ReadbackToCPU(
 	const FVoxelMeshingHandle& Handle,
 	FChunkMeshData& OutMeshData)
 {
@@ -911,7 +911,7 @@ bool FVoxelGPUSmoothMesher::ReadbackToCPU(
 	return true;
 }
 
-void FVoxelGPUSmoothMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
+void FVoxelGPUMarchingCubesMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
 {
 	if (!Handle.IsValid())
 	{
@@ -923,7 +923,7 @@ void FVoxelGPUSmoothMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
 	// GPU resources freed via TRefCountPtr/TSharedPtr destructors — no flush needed
 }
 
-void FVoxelGPUSmoothMesher::ReleaseAllHandles()
+void FVoxelGPUMarchingCubesMesher::ReleaseAllHandles()
 {
 	FlushRenderingCommands();
 
@@ -931,17 +931,17 @@ void FVoxelGPUSmoothMesher::ReleaseAllHandles()
 	MeshingResults.Empty();
 }
 
-void FVoxelGPUSmoothMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
+void FVoxelGPUMarchingCubesMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
 {
 	Config = InConfig;
 }
 
-const FVoxelMeshingConfig& FVoxelGPUSmoothMesher::GetConfig() const
+const FVoxelMeshingConfig& FVoxelGPUMarchingCubesMesher::GetConfig() const
 {
 	return Config;
 }
 
-bool FVoxelGPUSmoothMesher::GetStats(
+bool FVoxelGPUMarchingCubesMesher::GetStats(
 	const FVoxelMeshingHandle& Handle,
 	FVoxelMeshingStats& OutStats) const
 {

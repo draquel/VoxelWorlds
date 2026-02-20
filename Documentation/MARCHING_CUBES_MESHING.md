@@ -1,4 +1,4 @@
-# Smooth Meshing System
+# Marching Cubes Meshing System
 
 **Module**: VoxelMeshing
 **Last Updated**: 2026-02-06
@@ -18,13 +18,13 @@
 
 ## Overview
 
-The smooth meshing system generates organic, curved terrain surfaces using the **Marching Cubes** algorithm, as an alternative to the blocky cubic meshing style. The system includes:
+The Marching Cubes meshing system generates organic, curved terrain surfaces using the **Marching Cubes** algorithm, as an alternative to the blocky cubic meshing style. The system includes:
 
 - **Marching Cubes**: Core algorithm for isosurface extraction from density fields
 - **LOD Support**: Strided sampling for level-of-detail rendering
 - **Transvoxel**: Seamless LOD transitions without visible seams
 
-### When to Use Smooth Meshing
+### When to Use Marching Cubes Meshing
 
 - Organic terrain (hills, caves, overhangs)
 - Sculpted/deformed terrain
@@ -35,8 +35,8 @@ The smooth meshing system generates organic, curved terrain surfaces using the *
 
 | File | Purpose |
 |------|---------|
-| `VoxelCPUSmoothMesher.h/cpp` | CPU implementation |
-| `VoxelGPUSmoothMesher.h/cpp` | GPU compute implementation |
+| `VoxelCPUMarchingCubesMesher.h/cpp` | CPU implementation |
+| `VoxelGPUMarchingCubesMesher.h/cpp` | GPU compute implementation |
 | `MarchingCubesTables.h/cpp` | Lookup tables for standard Marching Cubes |
 | `TransvoxelTables.h/cpp` | Lookup tables for LOD transitions |
 | `VoxelMeshingTypes.h` | Configuration structures |
@@ -97,7 +97,7 @@ The `FVoxelData.Density` field stores values from 0-255:
 - **127**: Surface threshold (`VOXEL_SURFACE_THRESHOLD`)
 - **255**: Fully inside (solid)
 
-For smooth meshing, this is converted to a 0.0-1.0 float range, with an `IsoLevel` threshold (default 0.5) determining the surface.
+For Marching Cubes meshing, this is converted to a 0.0-1.0 float range, with an `IsoLevel` threshold (default 0.5) determining the surface.
 
 ### Edge Interpolation
 
@@ -228,7 +228,7 @@ for (int i = 0; i < 6; i++) {
 }
 ```
 
-**In Smooth Mesher:**
+**In MarchingCubes Mesher:**
 ```cpp
 for each cell:
     if (IsTransitionCell(X, Y, Z, TransitionMask, FaceIndex)) {
@@ -255,7 +255,7 @@ for each cell:
 ### FVoxelMeshingConfig
 
 ```cpp
-// Enable smooth meshing (vs cubic)
+// Enable smooth/triplanar meshing (vs cubic)
 bool bUseSmoothMeshing = false;
 
 // Isosurface threshold (0.0-1.0, default 0.5 = density 127)
@@ -294,13 +294,13 @@ Config.SkirtDepth = 2.0f;
 
 ### CPU vs GPU
 
-**CPU Mesher (`FVoxelCPUSmoothMesher`):**
+**CPU Mesher (`FVoxelCPUMarchingCubesMesher`):**
 - Synchronous execution
 - Good for debugging
 - Used when GPU mesher unavailable
 - Performance: ~30-80ms per 32^3 chunk at LOD 0
 
-**GPU Mesher (`FVoxelGPUSmoothMesher`):**
+**GPU Mesher (`FVoxelGPUMarchingCubesMesher`):**
 - Asynchronous compute shaders
 - Much faster for large worlds
 - Requires RDG/RHI setup
@@ -308,7 +308,7 @@ Config.SkirtDepth = 2.0f;
 
 ### Neighbor Data Handling
 
-Smooth meshing requires sampling beyond chunk boundaries. The meshing request includes neighbor slice data:
+Marching Cubes meshing requires sampling beyond chunk boundaries. The meshing request includes neighbor slice data:
 
 ```cpp
 // Face neighbors (ChunkSize^2 voxels each)
@@ -325,7 +325,7 @@ FVoxelData CornerXPosYPosZPos, ...;
 
 ### Material Assignment
 
-For smooth meshes at LOD 0, material comes from the majority of solid corners:
+For Marching Cubes meshes at LOD 0, material comes from the majority of solid corners:
 
 ```cpp
 uint8 GetDominantMaterial(int X, int Y, int Z, uint8 CubeIndex) {
@@ -402,9 +402,9 @@ uint8 GetDominantMaterialLOD(const FVoxelMeshingRequest& Request,
 
 ### Triangle Counts
 
-Smooth meshing typically produces more triangles than cubic:
+Marching Cubes meshing typically produces more triangles than cubic:
 
-| Chunk Type | Cubic (Greedy) | Smooth (MC) |
+| Chunk Type | Cubic (Greedy) | MarchingCubes |
 |------------|----------------|-------------|
 | Flat surface | ~2 tris | ~200 tris |
 | Hilly terrain | ~500 tris | ~2000 tris |
@@ -503,7 +503,7 @@ This ensures that surface materials (grass on top) are preferred over undergroun
 - `MaxScanDistance = 8` limits performance impact
 - Same approach used for `GetDominantBiomeLOD()` to prevent biome pop-in
 - At LOD 0, standard majority voting is used (no scanning needed)
-- The fix only affects smooth meshing; cubic meshing uses face-based material assignment
+- The fix only affects Marching Cubes meshing; cubic meshing uses face-based material assignment
 
 ---
 

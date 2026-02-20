@@ -49,7 +49,7 @@ uint NeighborFlags;
 // Edge/corner presence flags (bits 0-11 for edges, 12-19 for corners)
 uint EdgeCornerFlags;
 
-// Edge flag bit positions (same as SmoothMeshGeneration.usf)
+// Edge flag bit positions (same as MarchingCubesMeshGeneration.usf)
 #define EDGE_XPOS_YPOS (1u << 0)
 #define EDGE_XPOS_YNEG (1u << 1)
 #define EDGE_XNEG_YPOS (1u << 2)
@@ -146,7 +146,7 @@ bool HasCornerData(uint CornerFlag)
 
 /**
  * Get packed voxel data at position, handling chunk boundaries.
- * Duplicated from SmoothMeshGeneration.usf for self-contained shader.
+ * Duplicated from MarchingCubesMeshGeneration.usf for self-contained shader.
  */
 uint GetVoxelAt(int3 Position)
 {

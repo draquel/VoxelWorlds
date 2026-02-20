@@ -16,7 +16,7 @@ The master material system consists of:
 ## Automatic Mode Selection
 
 The material mode is automatically determined by `UVoxelWorldConfiguration::MeshingMode`:
-- `EMeshingMode::Smooth` → Triplanar sampling with Texture2DArrays
+- `EMeshingMode::MarchingCubes` / `EMeshingMode::DualContouring` → Triplanar sampling with Texture2DArrays
 - `EMeshingMode::Cubic` → UV-based sampling with PackedAtlas + MaterialLUT
 
 This is synced in `FVoxelCustomVFRenderer::Initialize()` which sets `bUseSmoothMeshing` on the WorldComponent based on the configuration.
