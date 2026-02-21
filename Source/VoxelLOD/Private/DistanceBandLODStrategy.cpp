@@ -285,24 +285,25 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 					continue;
 				}
 
-				// Find appropriate LOD band
-				const FLODBand* Band = FindBandForDistance(Distance);
-
-				// Determine LOD level: use band if found, otherwise fallback
+				// Determine LOD level
 				int32 LODLevel = 0;
 				float MorphFactor = 0.0f;
 
-				if (Band)
+				if (bEnableLOD)
 				{
-					LODLevel = Band->LODLevel;
-					MorphFactor = bEnableMorphing ? Band->GetMorphFactor(Distance) : 0.0f;
+					const FLODBand* Band = FindBandForDistance(Distance);
+					if (Band)
+					{
+						LODLevel = Band->LODLevel;
+						MorphFactor = bEnableMorphing ? Band->GetMorphFactor(Distance) : 0.0f;
+					}
+					else if (LODBands.Num() > 0)
+					{
+						// Beyond all bands but within ViewDistance - use coarsest LOD
+						LODLevel = LODBands.Last().LODLevel;
+					}
 				}
-				else if (bEnableLOD && LODBands.Num() > 0)
-				{
-					// Beyond all bands but within ViewDistance - use coarsest LOD
-					LODLevel = LODBands.Last().LODLevel;
-				}
-				// else: LOD disabled or no bands - use LOD 0
+				// When LOD disabled: LODLevel stays 0 (full detail for all chunks)
 
 				// Frustum culling (optional)
 				if (bEnableFrustumCulling && !IsChunkInFrustum(ChunkCoord, Context))

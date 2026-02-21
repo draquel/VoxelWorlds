@@ -1251,7 +1251,8 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		// Build generation request
 		FVoxelNoiseGenerationRequest GenRequest;
 		GenRequest.ChunkCoord = Request.ChunkCoord;
-		GenRequest.LODLevel = Request.LODLevel;
+		// Force LOD 0 when LOD system is disabled (defense-in-depth)
+		GenRequest.LODLevel = (Configuration->bEnableLOD) ? Request.LODLevel : 0;
 		GenRequest.ChunkSize = Configuration->ChunkSize;
 		GenRequest.VoxelSize = Configuration->VoxelSize;
 		GenRequest.NoiseParams = Configuration->NoiseParams;
@@ -1499,7 +1500,8 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		// Build meshing request
 		FVoxelMeshingRequest MeshRequest;
 		MeshRequest.ChunkCoord = Request.ChunkCoord;
-		MeshRequest.LODLevel = Request.LODLevel;
+		// Force LOD 0 when LOD system is disabled (defense-in-depth)
+		MeshRequest.LODLevel = (Configuration->bEnableLOD) ? Request.LODLevel : 0;
 		MeshRequest.ChunkSize = Configuration->ChunkSize;
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
 		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
@@ -1625,43 +1627,48 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			}
 		};
 
-		for (int32 i = 0; i < 6; i++)
+		// When LOD is disabled, skip all transition/neighbor LOD logic — all chunks are LOD 0
+		if (Configuration->bEnableLOD)
 		{
-			const FIntVector NeighborCoord = Request.ChunkCoord + NeighborOffsets[i];
-			if (const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
+			for (int32 i = 0; i < 6; i++)
 			{
-				// Store neighbor LOD level for transition cell stride calculation
-				MeshRequest.NeighborLODLevels[i] = NeighborState->LODLevel;
-
-				// Neighbor exists - check if it's at a higher LOD level (coarser)
-				// Per Lengyel's Transvoxel: the FINER chunk generates transition cells on its
-				// face facing the coarser neighbor. The transition cell's face corners (0,2,6,8)
-				// align exactly with the coarser neighbor's MC grid corners, ensuring shared
-				// edge crossings produce identical vertices with no triangulation conflicts.
-				// IMPORTANT: Verify that ALL neighbor data needed for this face is available!
-				if (NeighborState->LODLevel > CurrentLOD)
+				const FIntVector NeighborCoord = Request.ChunkCoord + NeighborOffsets[i];
+				if (const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
 				{
-					if (HasNeighborData(i) && HasAllEdgeDataForFace(i))
+					// Store neighbor LOD level for transition cell stride calculation
+					MeshRequest.NeighborLODLevels[i] = NeighborState->LODLevel;
+
+					// Neighbor exists - check if it's at a higher LOD level (coarser)
+					// Per Lengyel's Transvoxel: the FINER chunk generates transition cells on its
+					// face facing the coarser neighbor. The transition cell's face corners (0,2,6,8)
+					// align exactly with the coarser neighbor's MC grid corners, ensuring shared
+					// edge crossings produce identical vertices with no triangulation conflicts.
+					// IMPORTANT: Verify that ALL neighbor data needed for this face is available!
+					if (NeighborState->LODLevel > CurrentLOD)
 					{
-						MeshRequest.TransitionFaces |= TransitionFlags[i];
-					}
-					else
-					{
-						// Missing some neighbor data - skip transition cells for entire face
-						// This prevents mixing transition and regular MC on the same boundary
-						UE_LOG(LogVoxelStreaming, Verbose,
-							TEXT("Chunk (%d,%d,%d) face %d: missing edge/face neighbor data - skipping all transition cells for this face"),
-							Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, i);
+						if (HasNeighborData(i) && HasAllEdgeDataForFace(i))
+						{
+							MeshRequest.TransitionFaces |= TransitionFlags[i];
+						}
+						else
+						{
+							// Missing some neighbor data - skip transition cells for entire face
+							// This prevents mixing transition and regular MC on the same boundary
+							UE_LOG(LogVoxelStreaming, Verbose,
+								TEXT("Chunk (%d,%d,%d) face %d: missing edge/face neighbor data - skipping all transition cells for this face"),
+								Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, i);
+						}
 					}
 				}
+				else
+				{
+					// No neighbor - mark as -1
+					MeshRequest.NeighborLODLevels[i] = -1;
+				}
+				// If neighbor doesn't exist, no transition needed (will be at chunk boundary anyway)
 			}
-			else
-			{
-				// No neighbor - mark as -1
-				MeshRequest.NeighborLODLevels[i] = -1;
-			}
-			// If neighbor doesn't exist, no transition needed (will be at chunk boundary anyway)
 		}
+		// else: LOD disabled — NeighborLODLevels stays all -1 (default), TransitionFaces stays 0
 
 		// Launch async mesh generation instead of blocking
 		LaunchAsyncMeshGeneration(Request, MeshRequest);
