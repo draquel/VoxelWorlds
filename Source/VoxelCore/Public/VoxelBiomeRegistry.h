@@ -11,11 +11,12 @@
 namespace EVoxelBiome
 {
 	constexpr uint8 Plains = 0;
-	constexpr uint8 Desert = 1;
-	constexpr uint8 Tundra = 2;
+	constexpr uint8 Forest = 1;
+	constexpr uint8 Mountain = 2;
+	constexpr uint8 Ocean = 3;
 
 	/** Total number of defined biomes */
-	constexpr uint8 Count = 3;
+	constexpr uint8 Count = 4;
 }
 
 /**

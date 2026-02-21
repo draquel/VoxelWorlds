@@ -212,7 +212,7 @@ public:
 	 * Biome configuration data asset.
 	 * Defines biomes, blending parameters, and height-based material rules.
 	 * Create a UVoxelBiomeConfiguration asset and assign it here.
-	 * If null, default biomes (Plains, Desert, Tundra) will be used.
+	 * If null, default biomes (Plains, Forest, Mountain, Ocean) will be used.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome", meta = (EditCondition = "bEnableBiomes"))
 	TObjectPtr<UVoxelBiomeConfiguration> BiomeConfiguration;

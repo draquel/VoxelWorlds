@@ -194,7 +194,7 @@ public:
 	// ==================== API ====================
 
 	/**
-	 * Initialize biomes with default definitions (Plains, Desert, Tundra).
+	 * Initialize biomes with default definitions (Plains, Forest, Mountain, Ocean).
 	 * Call this to populate a new configuration with standard biomes.
 	 */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Voxel|Biome")

@@ -25,7 +25,7 @@ bool FBiomeBlendStructTest::RunTest(const FString& Parameters)
 	FBiomeBlend ManualBlend;
 	ManualBlend.BiomeCount = 2;
 	ManualBlend.BiomeIDs[0] = EVoxelBiome::Plains;
-	ManualBlend.BiomeIDs[1] = EVoxelBiome::Desert;
+	ManualBlend.BiomeIDs[1] = EVoxelBiome::Forest;
 	ManualBlend.Weights[0] = 3.0f;
 	ManualBlend.Weights[1] = 1.0f;
 	ManualBlend.NormalizeWeights();
@@ -46,23 +46,23 @@ bool FBiomeSelectionTest::RunTest(const FString& Parameters)
 {
 	// Test biome selection at various temperature/moisture combinations
 
-	// Cold = Tundra
+	// Cold = Mountain
 	const FBiomeDefinition* ColdBiome = FVoxelBiomeRegistry::SelectBiome(-0.8f, 0.0f);
 	TestNotNull(TEXT("Cold biome should be found"), ColdBiome);
 	if (ColdBiome)
 	{
-		TestEqual(TEXT("Cold biome should be Tundra"), ColdBiome->BiomeID, EVoxelBiome::Tundra);
+		TestEqual(TEXT("Cold biome should be Mountain"), ColdBiome->BiomeID, EVoxelBiome::Mountain);
 	}
 
-	// Hot + Dry = Desert
-	const FBiomeDefinition* HotDryBiome = FVoxelBiomeRegistry::SelectBiome(0.8f, -0.5f);
-	TestNotNull(TEXT("Hot+dry biome should be found"), HotDryBiome);
-	if (HotDryBiome)
+	// Humid = Forest
+	const FBiomeDefinition* HumidBiome = FVoxelBiomeRegistry::SelectBiome(0.3f, 0.5f);
+	TestNotNull(TEXT("Humid biome should be found"), HumidBiome);
+	if (HumidBiome)
 	{
-		TestEqual(TEXT("Hot+dry biome should be Desert"), HotDryBiome->BiomeID, EVoxelBiome::Desert);
+		TestEqual(TEXT("Humid biome should be Forest"), HumidBiome->BiomeID, EVoxelBiome::Forest);
 	}
 
-	// Temperate = Plains (default)
+	// Temperate + moderate moisture = Plains (default)
 	const FBiomeDefinition* TempBiome = FVoxelBiomeRegistry::SelectBiome(0.0f, 0.0f);
 	TestNotNull(TEXT("Temperate biome should be found"), TempBiome);
 	if (TempBiome)
@@ -81,31 +81,31 @@ bool FBiomeBlendingTest::RunTest(const FString& Parameters)
 	// Test blending at biome boundaries
 
 	// Well inside Plains - should be single biome
-	FBiomeBlend CenterPlains = FVoxelBiomeRegistry::GetBiomeBlend(0.0f, 0.0f, 0.1f);
+	FBiomeBlend CenterPlains = FVoxelBiomeRegistry::GetBiomeBlend(0.2f, -0.1f, 0.1f);
 	TestEqual(TEXT("Center Plains should have dominant Plains"),
 		CenterPlains.GetDominantBiome(), EVoxelBiome::Plains);
 	TestTrue(TEXT("Center Plains should have high weight for Plains"),
 		CenterPlains.Weights[0] > 0.8f);
 
-	// Near Tundra boundary (temperature ~-0.3)
-	FBiomeBlend NearTundra = FVoxelBiomeRegistry::GetBiomeBlend(-0.25f, 0.0f, 0.15f);
-	AddInfo(FString::Printf(TEXT("Near Tundra blend: BiomeCount=%d, Weights=[%.2f, %.2f]"),
-		NearTundra.BiomeCount, NearTundra.Weights[0], NearTundra.Weights[1]));
+	// Near Mountain boundary (temperature ~-0.1)
+	FBiomeBlend NearMountain = FVoxelBiomeRegistry::GetBiomeBlend(-0.05f, 0.0f, 0.15f);
+	AddInfo(FString::Printf(TEXT("Near Mountain blend: BiomeCount=%d, Weights=[%.2f, %.2f]"),
+		NearMountain.BiomeCount, NearMountain.Weights[0], NearMountain.Weights[1]));
 
 	// Should have some blending (may be 1 or 2 biomes depending on exact position)
 	TestTrue(TEXT("Near boundary blend count should be reasonable"),
-		NearTundra.BiomeCount >= 1 && NearTundra.BiomeCount <= MAX_BIOME_BLEND);
+		NearMountain.BiomeCount >= 1 && NearMountain.BiomeCount <= MAX_BIOME_BLEND);
 
-	// Well inside Tundra - should be single biome
-	FBiomeBlend CenterTundra = FVoxelBiomeRegistry::GetBiomeBlend(-0.8f, 0.0f, 0.1f);
-	TestEqual(TEXT("Center Tundra should have dominant Tundra"),
-		CenterTundra.GetDominantBiome(), EVoxelBiome::Tundra);
+	// Well inside Mountain - should be single biome
+	FBiomeBlend CenterMountain = FVoxelBiomeRegistry::GetBiomeBlend(-0.8f, 0.0f, 0.1f);
+	TestEqual(TEXT("Center Mountain should have dominant Mountain"),
+		CenterMountain.GetDominantBiome(), EVoxelBiome::Mountain);
 
 	// Verify blend weights sum to 1.0
 	float TotalWeight = 0.0f;
-	for (int32 i = 0; i < NearTundra.BiomeCount; ++i)
+	for (int32 i = 0; i < NearMountain.BiomeCount; ++i)
 	{
-		TotalWeight += NearTundra.Weights[i];
+		TotalWeight += NearMountain.Weights[i];
 	}
 	TestTrue(TEXT("Blend weights should sum to 1.0"),
 		FMath::IsNearlyEqual(TotalWeight, 1.0f, 0.01f));
@@ -128,15 +128,15 @@ bool FBiomeBlendMaterialTest::RunTest(const FString& Parameters)
 	uint8 DeepMaterial = FVoxelBiomeRegistry::GetBlendedMaterial(SingleBiome, 10.0f);
 	TestEqual(TEXT("Plains deep should be Stone"), DeepMaterial, EVoxelMaterial::Stone);
 
-	// Tundra biome
-	FBiomeBlend TundraBiome(EVoxelBiome::Tundra);
-	uint8 TundraSurface = FVoxelBiomeRegistry::GetBlendedMaterial(TundraBiome, 0.0f);
-	TestEqual(TEXT("Tundra surface should be Snow"), TundraSurface, EVoxelMaterial::Snow);
+	// Mountain biome
+	FBiomeBlend MountainBiome(EVoxelBiome::Mountain);
+	uint8 MountainSurface = FVoxelBiomeRegistry::GetBlendedMaterial(MountainBiome, 0.0f);
+	TestEqual(TEXT("Mountain surface should be Stone"), MountainSurface, EVoxelMaterial::Stone);
 
-	// Desert biome
-	FBiomeBlend DesertBiome(EVoxelBiome::Desert);
-	uint8 DesertSurface = FVoxelBiomeRegistry::GetBlendedMaterial(DesertBiome, 0.0f);
-	TestEqual(TEXT("Desert surface should be Sand"), DesertSurface, EVoxelMaterial::Sand);
+	// Forest biome
+	FBiomeBlend ForestBiome(EVoxelBiome::Forest);
+	uint8 ForestSurface = FVoxelBiomeRegistry::GetBlendedMaterial(ForestBiome, 0.0f);
+	TestEqual(TEXT("Forest surface should be Grass"), ForestSurface, EVoxelMaterial::Grass);
 
 	return true;
 }
@@ -232,7 +232,7 @@ bool FBiomeRegistryTest::RunTest(const FString& Parameters)
 
 	// Check biome count
 	int32 BiomeCount = FVoxelBiomeRegistry::GetBiomeCount();
-	TestTrue(TEXT("Should have at least 3 biomes"), BiomeCount >= 3);
+	TestTrue(TEXT("Should have at least 4 biomes"), BiomeCount >= 4);
 
 	// Check all biomes are accessible
 	const TArray<FBiomeDefinition>& AllBiomes = FVoxelBiomeRegistry::GetAllBiomes();
@@ -247,11 +247,14 @@ bool FBiomeRegistryTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Plains should have valid name"), Plains->Name.Len() > 0);
 	}
 
-	const FBiomeDefinition* Desert = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Desert);
-	TestNotNull(TEXT("Desert biome should exist"), Desert);
+	const FBiomeDefinition* Forest = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Forest);
+	TestNotNull(TEXT("Forest biome should exist"), Forest);
 
-	const FBiomeDefinition* Tundra = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Tundra);
-	TestNotNull(TEXT("Tundra biome should exist"), Tundra);
+	const FBiomeDefinition* Mountain = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Mountain);
+	TestNotNull(TEXT("Mountain biome should exist"), Mountain);
+
+	const FBiomeDefinition* Ocean = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Ocean);
+	TestNotNull(TEXT("Ocean biome should exist"), Ocean);
 
 	// Invalid biome ID should return nullptr
 	const FBiomeDefinition* Invalid = FVoxelBiomeRegistry::GetBiome(255);
@@ -283,24 +286,24 @@ bool FBiomeMaterialDepthTest::RunTest(const FString& Parameters)
 	uint8 Deep = Plains->GetMaterialAtDepth(10.0f);
 	TestEqual(TEXT("Plains deep should be Stone"), Deep, EVoxelMaterial::Stone);
 
-	// Test Desert
-	const FBiomeDefinition* Desert = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Desert);
-	if (Desert)
+	// Test Forest
+	const FBiomeDefinition* Forest = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Forest);
+	if (Forest)
 	{
-		TestEqual(TEXT("Desert surface should be Sand"),
-			Desert->GetMaterialAtDepth(0.0f), EVoxelMaterial::Sand);
-		TestEqual(TEXT("Desert subsurface should be Sandstone"),
-			Desert->GetMaterialAtDepth(2.0f), EVoxelMaterial::Sandstone);
+		TestEqual(TEXT("Forest surface should be Grass"),
+			Forest->GetMaterialAtDepth(0.0f), EVoxelMaterial::Grass);
+		TestEqual(TEXT("Forest subsurface should be Dirt"),
+			Forest->GetMaterialAtDepth(2.0f), EVoxelMaterial::Dirt);
 	}
 
-	// Test Tundra
-	const FBiomeDefinition* Tundra = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Tundra);
-	if (Tundra)
+	// Test Mountain
+	const FBiomeDefinition* Mountain = FVoxelBiomeRegistry::GetBiome(EVoxelBiome::Mountain);
+	if (Mountain)
 	{
-		TestEqual(TEXT("Tundra surface should be Snow"),
-			Tundra->GetMaterialAtDepth(0.0f), EVoxelMaterial::Snow);
-		TestEqual(TEXT("Tundra subsurface should be FrozenDirt"),
-			Tundra->GetMaterialAtDepth(2.0f), EVoxelMaterial::FrozenDirt);
+		TestEqual(TEXT("Mountain surface should be Stone"),
+			Mountain->GetMaterialAtDepth(0.0f), EVoxelMaterial::Stone);
+		TestEqual(TEXT("Mountain subsurface should be Stone"),
+			Mountain->GetMaterialAtDepth(2.0f), EVoxelMaterial::Stone);
 	}
 
 	return true;
@@ -320,7 +323,7 @@ bool FBiomeConfigurationInitDefaultsTest::RunTest(const FString& Parameters)
 
 	// Constructor should call InitializeDefaults
 	TestTrue(TEXT("Config should be valid after construction"), Config->IsValid());
-	TestTrue(TEXT("Config should have at least 3 biomes"), Config->GetBiomeCount() >= 3);
+	TestTrue(TEXT("Config should have 4 biomes"), Config->GetBiomeCount() >= 4);
 
 	// Check default biomes exist
 	const FBiomeDefinition* Plains = Config->GetBiome(0);
@@ -331,18 +334,25 @@ bool FBiomeConfigurationInitDefaultsTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Plains surface should be Grass"), Plains->SurfaceMaterial, EVoxelMaterial::Grass);
 	}
 
-	const FBiomeDefinition* Desert = Config->GetBiome(1);
-	TestNotNull(TEXT("Desert (ID 1) should exist"), Desert);
-	if (Desert)
+	const FBiomeDefinition* Forest = Config->GetBiome(1);
+	TestNotNull(TEXT("Forest (ID 1) should exist"), Forest);
+	if (Forest)
 	{
-		TestEqual(TEXT("Desert surface should be Sand"), Desert->SurfaceMaterial, EVoxelMaterial::Sand);
+		TestEqual(TEXT("Forest surface should be Grass"), Forest->SurfaceMaterial, EVoxelMaterial::Grass);
 	}
 
-	const FBiomeDefinition* Tundra = Config->GetBiome(2);
-	TestNotNull(TEXT("Tundra (ID 2) should exist"), Tundra);
-	if (Tundra)
+	const FBiomeDefinition* Mountain = Config->GetBiome(2);
+	TestNotNull(TEXT("Mountain (ID 2) should exist"), Mountain);
+	if (Mountain)
 	{
-		TestEqual(TEXT("Tundra surface should be Snow"), Tundra->SurfaceMaterial, EVoxelMaterial::Snow);
+		TestEqual(TEXT("Mountain surface should be Stone"), Mountain->SurfaceMaterial, EVoxelMaterial::Stone);
+	}
+
+	const FBiomeDefinition* Ocean = Config->GetBiome(3);
+	TestNotNull(TEXT("Ocean (ID 3) should exist"), Ocean);
+	if (Ocean)
+	{
+		TestEqual(TEXT("Ocean surface should be Sand"), Ocean->SurfaceMaterial, EVoxelMaterial::Sand);
 	}
 
 	// Check default height rules
@@ -362,16 +372,16 @@ bool FBiomeConfigurationSelectionTest::RunTest(const FString& Parameters)
 	if (!Config) return false;
 
 	// Test biome selection
-	// Cold = Tundra
-	uint8 ColdBiome = Config->SelectBiomeID(-0.8f, 0.0f);
-	TestEqual(TEXT("Cold (-0.8) should select Tundra"), ColdBiome, (uint8)2);
+	// Cold + inland = Mountain
+	uint8 ColdBiome = Config->SelectBiomeID(-0.8f, 0.0f, 0.5f);
+	TestEqual(TEXT("Cold+inland should select Mountain"), ColdBiome, (uint8)2);
 
-	// Hot + Dry = Desert
-	uint8 HotDryBiome = Config->SelectBiomeID(0.8f, -0.5f);
-	TestEqual(TEXT("Hot+dry should select Desert"), HotDryBiome, (uint8)1);
+	// Warm + humid = Forest
+	uint8 HumidBiome = Config->SelectBiomeID(0.3f, 0.5f, 0.5f);
+	TestEqual(TEXT("Warm+humid should select Forest"), HumidBiome, (uint8)1);
 
-	// Temperate = Plains
-	uint8 TempBiome = Config->SelectBiomeID(0.0f, 0.0f);
+	// Temperate + moderate moisture = Plains
+	uint8 TempBiome = Config->SelectBiomeID(0.2f, 0.0f, 0.5f);
 	TestEqual(TEXT("Temperate should select Plains"), TempBiome, (uint8)0);
 
 	return true;
@@ -387,20 +397,20 @@ bool FBiomeConfigurationBlendingTest::RunTest(const FString& Parameters)
 	if (!Config) return false;
 
 	// Test blending - well inside Plains
-	FBiomeBlend CenterBlend = Config->GetBiomeBlend(0.0f, 0.0f);
+	FBiomeBlend CenterBlend = Config->GetBiomeBlend(0.2f, 0.0f, 0.5f);
 	TestEqual(TEXT("Center should have Plains dominant"), CenterBlend.GetDominantBiome(), (uint8)0);
 	TestTrue(TEXT("Center should have high weight"), CenterBlend.Weights[0] > 0.8f);
 
-	// Test blending - near Tundra boundary
-	FBiomeBlend NearTundra = Config->GetBiomeBlend(-0.25f, 0.0f);
-	AddInfo(FString::Printf(TEXT("Near Tundra: BiomeCount=%d, Dominant=%d, Weight=%.2f"),
-		NearTundra.BiomeCount, NearTundra.GetDominantBiome(), NearTundra.Weights[0]));
+	// Test blending - near Mountain boundary
+	FBiomeBlend NearMountain = Config->GetBiomeBlend(-0.05f, 0.0f, 0.5f);
+	AddInfo(FString::Printf(TEXT("Near Mountain: BiomeCount=%d, Dominant=%d, Weight=%.2f"),
+		NearMountain.BiomeCount, NearMountain.GetDominantBiome(), NearMountain.Weights[0]));
 
 	// Weights should sum to 1.0
 	float TotalWeight = 0.0f;
-	for (int32 i = 0; i < NearTundra.BiomeCount; ++i)
+	for (int32 i = 0; i < NearMountain.BiomeCount; ++i)
 	{
-		TotalWeight += NearTundra.Weights[i];
+		TotalWeight += NearMountain.Weights[i];
 	}
 	TestTrue(TEXT("Blend weights should sum to 1.0"),
 		FMath::IsNearlyEqual(TotalWeight, 1.0f, 0.01f));
@@ -454,10 +464,10 @@ bool FBiomeConfigurationBlendedMaterialTest::RunTest(const FString& Parameters)
 	uint8 PlainsDeep = Config->GetBlendedMaterial(PlainsBlend, 10.0f);
 	TestEqual(TEXT("Plains blend deep should be Stone"), PlainsDeep, EVoxelMaterial::Stone);
 
-	// Test Tundra blend
-	FBiomeBlend TundraBlend(2); // Tundra
-	uint8 TundraSurface = Config->GetBlendedMaterial(TundraBlend, 0.0f);
-	TestEqual(TEXT("Tundra blend surface should be Snow"), TundraSurface, EVoxelMaterial::Snow);
+	// Test Mountain blend
+	FBiomeBlend MountainBlend(2); // Mountain
+	uint8 MountainSurface = Config->GetBlendedMaterial(MountainBlend, 0.0f);
+	TestEqual(TEXT("Mountain blend surface should be Stone"), MountainSurface, EVoxelMaterial::Stone);
 
 	return true;
 }

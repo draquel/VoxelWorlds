@@ -19,42 +19,55 @@ void FVoxelBiomeRegistry::EnsureInitialized()
 	// Define biomes with their climate ranges and materials
 	// Biomes are checked in order, so more specific ranges should come first
 
-	// Plains - Temperate, moderate moisture
-	// Temperature: -0.3 to 0.6 (cool to warm)
-	// Moisture: -0.5 to 0.5 (semi-arid to semi-humid)
+	// Plains - Temperate, moderate moisture (default/fallback biome)
+	// Temperature: -0.3 to 0.7 (cool to warm)
+	// Moisture: -0.5 to 0.3 (semi-arid to moderate)
 	Biomes.Add(FBiomeDefinition(
 		EVoxelBiome::Plains,
 		TEXT("Plains"),
-		FVector2D(-0.3, 0.6),    // Temperature range
-		FVector2D(-0.5, 0.5),    // Moisture range
+		FVector2D(-0.3, 0.7),    // Temperature range
+		FVector2D(-0.5, 0.3),    // Moisture range
 		EVoxelMaterial::Grass,    // Surface
 		EVoxelMaterial::Dirt,     // Subsurface
 		EVoxelMaterial::Stone     // Deep
 	));
 
-	// Desert - Hot and dry
-	// Temperature: 0.5 to 1.0 (hot)
-	// Moisture: -1.0 to 0.0 (arid)
+	// Forest - Lush, humid areas with dense vegetation
+	// Temperature: -0.4 to 0.7 (wide range — forests in many climates)
+	// Moisture: 0.2 to 1.0 (humid — forests need moisture)
 	Biomes.Add(FBiomeDefinition(
-		EVoxelBiome::Desert,
-		TEXT("Desert"),
-		FVector2D(0.5, 1.0),      // Temperature range
-		FVector2D(-1.0, 0.0),     // Moisture range
-		EVoxelMaterial::Sand,     // Surface
-		EVoxelMaterial::Sandstone,// Subsurface
+		EVoxelBiome::Forest,
+		TEXT("Forest"),
+		FVector2D(-0.4, 0.7),     // Temperature range
+		FVector2D(0.2, 1.0),      // Moisture range
+		EVoxelMaterial::Grass,    // Surface (forest floor)
+		EVoxelMaterial::Dirt,     // Subsurface
 		EVoxelMaterial::Stone     // Deep
 	));
 
-	// Tundra - Cold (any moisture)
-	// Temperature: -1.0 to -0.3 (freezing to cold)
+	// Mountain - Cold, rocky high-altitude terrain
+	// Temperature: -1.0 to -0.1 (cold — high elevation)
 	// Moisture: -1.0 to 1.0 (any)
 	Biomes.Add(FBiomeDefinition(
-		EVoxelBiome::Tundra,
-		TEXT("Tundra"),
-		FVector2D(-1.0, -0.3),    // Temperature range
+		EVoxelBiome::Mountain,
+		TEXT("Mountain"),
+		FVector2D(-1.0, -0.1),    // Temperature range
 		FVector2D(-1.0, 1.0),     // Moisture range (any)
-		EVoxelMaterial::Snow,     // Surface
-		EVoxelMaterial::FrozenDirt,// Subsurface
+		EVoxelMaterial::Stone,    // Surface (rocky peaks)
+		EVoxelMaterial::Stone,    // Subsurface
+		EVoxelMaterial::Stone     // Deep
+	));
+
+	// Ocean - Deep water (placeholder for registry, full support via BiomeConfiguration)
+	// Temperature: -1.0 to 1.0 (any)
+	// Moisture: -1.0 to 1.0 (any)
+	Biomes.Add(FBiomeDefinition(
+		EVoxelBiome::Ocean,
+		TEXT("Ocean"),
+		FVector2D(-1.0, 1.0),     // Temperature range (any)
+		FVector2D(-1.0, 1.0),     // Moisture range (any)
+		EVoxelMaterial::Sand,     // Surface
+		EVoxelMaterial::Sand,     // Subsurface
 		EVoxelMaterial::Stone     // Deep
 	));
 
@@ -70,16 +83,16 @@ const FBiomeDefinition* FVoxelBiomeRegistry::SelectBiome(float Temperature, floa
 	Moisture = FMath::Clamp(Moisture, -1.0f, 1.0f);
 
 	// Check biomes in priority order
-	// Tundra first (cold overrides everything)
-	if (Temperature <= -0.3f)
+	// Mountain first (cold overrides everything — high elevation)
+	if (Temperature <= -0.1f)
 	{
-		return &Biomes[EVoxelBiome::Tundra];
+		return &Biomes[EVoxelBiome::Mountain];
 	}
 
-	// Desert (hot and dry)
-	if (Temperature >= 0.5f && Moisture <= 0.0f)
+	// Forest (humid areas)
+	if (Moisture >= 0.2f)
 	{
-		return &Biomes[EVoxelBiome::Desert];
+		return &Biomes[EVoxelBiome::Forest];
 	}
 
 	// Default to Plains

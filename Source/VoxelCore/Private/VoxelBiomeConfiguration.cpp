@@ -35,55 +35,55 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Biomes.Empty();
 
 	// Plains - Temperate, moderate moisture (default/fallback biome)
+	// Wide temperature tolerance, low-to-moderate moisture. Flat grasslands.
 	FBiomeDefinition Plains;
 	Plains.BiomeID = 0;
 	Plains.Name = TEXT("Plains");
-	Plains.TemperatureRange = FVector2D(-0.3, 0.6);
-	Plains.MoistureRange = FVector2D(-0.5, 0.5);
-	Plains.ContinentalnessRange = FVector2D(-0.2, 1.0); // Coastal to inland
+	Plains.TemperatureRange = FVector2D(-0.3, 0.7);
+	Plains.MoistureRange = FVector2D(-0.5, 0.3);
+	Plains.ContinentalnessRange = FVector2D(-0.2, 0.8); // Coastal to mid-inland
 	Plains.SurfaceMaterial = EVoxelMaterial::Grass;
 	Plains.SubsurfaceMaterial = EVoxelMaterial::Dirt;
 	Plains.DeepMaterial = EVoxelMaterial::Stone;
 	Plains.SurfaceDepth = 1.0f;
 	Plains.SubsurfaceDepth = 4.0f;
-	// Underwater: grass becomes sand
 	Plains.UnderwaterSurfaceMaterial = EVoxelMaterial::Sand;
 	Plains.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Sand;
 	Biomes.Add(Plains);
 
-	// Desert - Hot and dry
-	FBiomeDefinition Desert;
-	Desert.BiomeID = 1;
-	Desert.Name = TEXT("Desert");
-	Desert.TemperatureRange = FVector2D(0.5, 1.0);
-	Desert.MoistureRange = FVector2D(-1.0, 0.0);
-	Desert.ContinentalnessRange = FVector2D(0.1, 1.0); // Inland only
-	Desert.SurfaceMaterial = EVoxelMaterial::Sand;
-	Desert.SubsurfaceMaterial = EVoxelMaterial::Sandstone;
-	Desert.DeepMaterial = EVoxelMaterial::Stone;
-	Desert.SurfaceDepth = 1.0f;
-	Desert.SubsurfaceDepth = 4.0f;
-	// Underwater: stays sand (naturally sandy)
-	Desert.UnderwaterSurfaceMaterial = EVoxelMaterial::Sand;
-	Desert.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Sandstone;
-	Biomes.Add(Desert);
+	// Forest - Lush, humid areas with dense vegetation
+	// Similar temperature to plains but requires higher moisture.
+	FBiomeDefinition Forest;
+	Forest.BiomeID = 1;
+	Forest.Name = TEXT("Forest");
+	Forest.TemperatureRange = FVector2D(-0.4, 0.7);
+	Forest.MoistureRange = FVector2D(0.2, 1.0);
+	Forest.ContinentalnessRange = FVector2D(-0.1, 1.0); // Near-coast to deep inland
+	Forest.SurfaceMaterial = EVoxelMaterial::Grass;
+	Forest.SubsurfaceMaterial = EVoxelMaterial::Dirt;
+	Forest.DeepMaterial = EVoxelMaterial::Stone;
+	Forest.SurfaceDepth = 1.0f;
+	Forest.SubsurfaceDepth = 5.0f; // Thicker soil layer in forests
+	Forest.UnderwaterSurfaceMaterial = EVoxelMaterial::Dirt;
+	Forest.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Dirt;
+	Biomes.Add(Forest);
 
-	// Tundra - Cold (any moisture)
-	FBiomeDefinition Tundra;
-	Tundra.BiomeID = 2;
-	Tundra.Name = TEXT("Tundra");
-	Tundra.TemperatureRange = FVector2D(-1.0, -0.3);
-	Tundra.MoistureRange = FVector2D(-1.0, 1.0);
-	Tundra.ContinentalnessRange = FVector2D(-0.1, 1.0); // Can extend to cold coastlines
-	Tundra.SurfaceMaterial = EVoxelMaterial::Snow;
-	Tundra.SubsurfaceMaterial = EVoxelMaterial::FrozenDirt;
-	Tundra.DeepMaterial = EVoxelMaterial::Stone;
-	Tundra.SurfaceDepth = 1.0f;
-	Tundra.SubsurfaceDepth = 4.0f;
-	// Underwater: stone/gravel look (cold water erodes to rock)
-	Tundra.UnderwaterSurfaceMaterial = EVoxelMaterial::Stone;
-	Tundra.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Stone;
-	Biomes.Add(Tundra);
+	// Mountain - Cold, rocky high-altitude terrain
+	// Cold temperatures with high continentalness (deep inland / elevated).
+	FBiomeDefinition Mountain;
+	Mountain.BiomeID = 2;
+	Mountain.Name = TEXT("Mountain");
+	Mountain.TemperatureRange = FVector2D(-1.0, -0.1);
+	Mountain.MoistureRange = FVector2D(-1.0, 1.0);
+	Mountain.ContinentalnessRange = FVector2D(0.3, 1.0); // Deep inland only
+	Mountain.SurfaceMaterial = EVoxelMaterial::Stone;
+	Mountain.SubsurfaceMaterial = EVoxelMaterial::Stone;
+	Mountain.DeepMaterial = EVoxelMaterial::Stone;
+	Mountain.SurfaceDepth = 1.0f;
+	Mountain.SubsurfaceDepth = 3.0f;
+	Mountain.UnderwaterSurfaceMaterial = EVoxelMaterial::Stone;
+	Mountain.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Stone;
+	Biomes.Add(Mountain);
 
 	// Ocean - Deep ocean to near-coast (all temperatures, all moisture)
 	FBiomeDefinition Ocean;
@@ -95,8 +95,8 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Ocean.SurfaceMaterial = EVoxelMaterial::Sand;
 	Ocean.SubsurfaceMaterial = EVoxelMaterial::Sand;
 	Ocean.DeepMaterial = EVoxelMaterial::Stone;
-	Ocean.SurfaceDepth = 1.0f;
-	Ocean.SubsurfaceDepth = 4.0f;
+	Ocean.SurfaceDepth = 2.0f; // Thicker sand layer on ocean floor
+	Ocean.SubsurfaceDepth = 5.0f;
 	Ocean.UnderwaterSurfaceMaterial = EVoxelMaterial::Sand;
 	Ocean.UnderwaterSubsurfaceMaterial = EVoxelMaterial::Sand;
 	Biomes.Add(Ocean);
@@ -300,12 +300,11 @@ const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature,
 	Moisture = FMath::Clamp(Moisture, -1.0f, 1.0f);
 	Continentalness = FMath::Clamp(Continentalness, -1.0f, 1.0f);
 
-	// Priority-based selection: Tundra (cold) > Desert (hot+dry) > Plains (default)
-	// This matches the original FVoxelBiomeRegistry logic
+	// Priority-based selection: Mountain (cold+inland) > Forest (humid) > containment > Plains (default)
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
-		// Check Tundra first (cold overrides everything)
-		if (Biome.Name == TEXT("Tundra") && Temperature <= Biome.TemperatureRange.Y
+		// Check Mountain first (cold + deep inland overrides everything)
+		if (Biome.Name == TEXT("Mountain") && Temperature <= Biome.TemperatureRange.Y
 			&& Continentalness >= Biome.ContinentalnessRange.X && Continentalness <= Biome.ContinentalnessRange.Y)
 		{
 			return &Biome;
@@ -314,17 +313,17 @@ const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature,
 
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
-		// Check Desert (hot and dry)
-		if (Biome.Name == TEXT("Desert") &&
-			Temperature >= Biome.TemperatureRange.X &&
-			Moisture <= Biome.MoistureRange.Y &&
+		// Check Forest (humid areas get trees)
+		if (Biome.Name == TEXT("Forest") &&
+			Moisture >= Biome.MoistureRange.X &&
+			Temperature >= Biome.TemperatureRange.X && Temperature <= Biome.TemperatureRange.Y &&
 			Continentalness >= Biome.ContinentalnessRange.X && Continentalness <= Biome.ContinentalnessRange.Y)
 		{
 			return &Biome;
 		}
 	}
 
-	// Check all biomes by containment (for user-defined biomes like Ocean)
+	// Check all biomes by containment (for Ocean and user-defined biomes)
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
 		if (Biome.Contains(Temperature, Moisture, Continentalness))
