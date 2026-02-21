@@ -407,7 +407,8 @@ FMaterialVertexParameters GetMaterialVertexParameters(
 	FVoxelVertexInput Input,
 	FVertexFactoryIntermediates Intermediates,
 	float3 WorldPosition,
-	half3x3 TangentToLocal)
+	half3x3 TangentToLocal,
+	bool bIsPreviousFrame = false)
 {
 	FMaterialVertexParameters Result = (FMaterialVertexParameters)0;
 
