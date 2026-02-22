@@ -158,6 +158,12 @@ public:
 	int32 GetScatterChunkCount() const { return ScatterDataCache.Num(); }
 
 	/**
+	 * Get read-only access to the scatter data cache.
+	 * Used by the renderer to iterate all cached scatter data during rebuilds.
+	 */
+	const TMap<FIntVector, FChunkScatterData>& GetScatterDataCache() const { return ScatterDataCache; }
+
+	/**
 	 * Get number of chunks pending scatter generation (queued + in-flight async).
 	 * Used to detect if world is still loading.
 	 */
@@ -491,11 +497,69 @@ protected:
 	TMap<FIntVector, FPendingScatterGeneration> DeferredSupplementalPasses;
 
 	/** Per-chunk set of scatter type IDs that have been fully generated.
-	 *  Types are never regenerated once completed — prevents pop-in. */
+	 *  Types are cleared when they go out of SpawnDistance range,
+	 *  allowing regeneration when the player returns. */
 	TMap<FIntVector, TSet<int32>> CompletedScatterTypes;
 
 	/** Maximum concurrent async scatter tasks */
 	int32 MaxAsyncScatterTasks = 2;
+
+	// ==================== Distance-Based Streaming ====================
+
+	/**
+	 * Remove scatter instances for definitions that have gone out of SpawnDistance range.
+	 * Called periodically from Update() to keep scatter data in sync with viewer position.
+	 * Uses hysteresis to prevent thrashing at boundaries.
+	 */
+	void PerformDistanceCleanup();
+
+	/**
+	 * Generate scatter for definitions that have come into SpawnDistance range.
+	 * Launches async tasks on the thread pool using cached surface data.
+	 * Fully decoupled from the chunk generation async pipeline — uses its own
+	 * DistanceStreamQueue and DistanceStreamInProgress tracking.
+	 * Also clears CompletedScatterTypes entries for out-of-range definitions
+	 * so they can regenerate when the player returns.
+	 */
+	void PerformDistanceSpawn();
+
+	/** Process completed distance stream results on game thread */
+	void ProcessCompletedDistanceStream();
+
+	/** Result from async distance stream generation */
+	struct FDistanceStreamResult
+	{
+		FIntVector ChunkCoord;
+		FChunkScatterData ScatterData;
+		TArray<int32> GeneratedTypeIDs;
+		bool bSuccess = false;
+	};
+
+	/** Dedicated MPSC queue for distance stream results (separate from chunk generation) */
+	TQueue<FDistanceStreamResult, EQueueMode::Mpsc> DistanceStreamQueue;
+
+	/** Chunks currently being processed by distance streaming (separate from AsyncScatterInProgress) */
+	TSet<FIntVector> DistanceStreamInProgress;
+
+	/** Maximum concurrent distance stream async tasks */
+	int32 MaxDistanceStreamTasks = 4;
+
+	/** Maximum distance stream results to process per frame */
+	int32 MaxDistanceStreamResultsPerFrame = 8;
+
+	/** Interval between distance streaming checks (seconds) */
+	float DistanceStreamingInterval = 0.25f;
+
+	/** Time accumulated since last distance streaming check */
+	float TimeSinceLastDistanceCheck = 0.0f;
+
+	/** Hysteresis multiplier for cleanup distance.
+	 *  Scatter is removed at SpawnDistance * (1 + Hysteresis) to prevent thrashing.
+	 *  E.g., 0.1 means remove at 110% of SpawnDistance, respawn at 100%. */
+	float DistanceCleanupHysteresis = 0.1f;
+
+	/** Maximum chunks to launch per distance-spawn pass */
+	int32 MaxDistanceSpawnChunksPerPass = 8;
 
 	/** Launch async scatter generation on thread pool */
 	void LaunchAsyncScatterGeneration(FPendingScatterGeneration PendingData);

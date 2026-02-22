@@ -157,6 +157,13 @@ void UVoxelScatterManager::Shutdown()
 	}
 	AsyncScatterInProgress.Empty();
 
+	// Drain distance stream queue
+	{
+		FDistanceStreamResult DiscardedResult;
+		while (DistanceStreamQueue.Dequeue(DiscardedResult)) {}
+	}
+	DistanceStreamInProgress.Empty();
+
 	// Drain GPU extraction queue
 	{
 		FGPUExtractionResult DiscardedGPUResult;
@@ -207,6 +214,18 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 
 	// Launch new async scatter tasks from pending queue (throttled)
 	ProcessPendingGenerationQueue();
+
+	// Distance-based scatter streaming — fully decoupled from chunk generation.
+	// Uses its own async pipeline (DistanceStreamQueue / DistanceStreamInProgress).
+	// Process completed results every frame; launch new tasks periodically.
+	ProcessCompletedDistanceStream();
+
+	TimeSinceLastDistanceCheck += DeltaTime;
+	if (TimeSinceLastDistanceCheck >= DistanceStreamingInterval)
+	{
+		TimeSinceLastDistanceCheck = 0.0f;
+		PerformDistanceSpawn();
+	}
 
 	// Tick the scatter renderer to flush pending HISM rebuilds
 	// Rebuilds are deferred while viewer is moving to prevent flicker
@@ -476,6 +495,9 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 	// Remove from async in-progress tracking (stale result will be discarded on arrival)
 	AsyncScatterInProgress.Remove(ChunkCoord);
 
+	// Remove from distance stream tracking (stale result will be discarded on arrival)
+	DistanceStreamInProgress.Remove(ChunkCoord);
+
 	// Remove deferred supplemental passes
 	DeferredSupplementalPasses.Remove(ChunkCoord);
 
@@ -735,8 +757,9 @@ int64 UVoxelScatterManager::GetTotalMemoryUsage() const
 	}
 	Total += PendingQueueSet.GetAllocatedSize();
 
-	// Async in-progress set
+	// Async in-progress sets
 	Total += AsyncScatterInProgress.GetAllocatedSize();
+	Total += DistanceStreamInProgress.GetAllocatedSize();
 
 	// Cleared volumes
 	Total += ClearedVolumesPerChunk.GetAllocatedSize();
@@ -792,6 +815,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Chunks with Scatter: %d\n")
 		TEXT("Pending Queue: %d\n")
 		TEXT("Async In-Flight: %d / %d\n")
+		TEXT("Distance Stream In-Flight: %d / %d\n")
 		TEXT("GPU Extraction: %s\n")
 		TEXT("Total Surface Points: %lld\n")
 		TEXT("Total Spawn Points: %lld\n")
@@ -805,6 +829,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		Stats.ChunksWithScatter,
 		PendingGenerationQueue.Num(),
 		AsyncScatterInProgress.Num(), MaxAsyncScatterTasks,
+		DistanceStreamInProgress.Num(), MaxDistanceStreamTasks,
 		bUseGPUExtraction ? TEXT("Enabled") : TEXT("Disabled"),
 		Stats.TotalSurfacePoints,
 		Stats.TotalSpawnPoints,
@@ -973,6 +998,429 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 	{
 		UE_LOG(LogVoxelScatter, Verbose, TEXT("Launched %d async scatter tasks (%d queued, %d in-flight)"),
 			LaunchedCount, PendingGenerationQueue.Num(), AsyncScatterInProgress.Num());
+	}
+}
+
+void UVoxelScatterManager::PerformDistanceCleanup()
+{
+	if (!Configuration || ScatterDataCache.Num() == 0)
+	{
+		return;
+	}
+
+	// Collect chunks that need cleanup (can't modify ScatterDataCache while iterating)
+	struct FChunkCleanupInfo
+	{
+		FIntVector ChunkCoord;
+		TArray<int32> ScatterTypesToRemove;
+	};
+	TArray<FChunkCleanupInfo> ChunksToClean;
+
+	for (auto& Pair : ScatterDataCache)
+	{
+		const FIntVector& ChunkCoord = Pair.Key;
+		const FChunkScatterData& ScatterData = Pair.Value;
+
+		if (!ScatterData.bIsValid || ScatterData.SpawnPoints.Num() == 0)
+		{
+			continue;
+		}
+
+		// Skip chunks that are still being processed asynchronously
+		if (AsyncScatterInProgress.Contains(ChunkCoord) || PendingQueueSet.Contains(ChunkCoord))
+		{
+			continue;
+		}
+
+		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
+			FVector(Configuration->GetChunkWorldSize() * 0.5f);
+		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+
+		// Check each active scatter type in this chunk
+		TSet<int32> ActiveTypes;
+		for (const FScatterSpawnPoint& Point : ScatterData.SpawnPoints)
+		{
+			ActiveTypes.Add(Point.ScatterTypeID);
+		}
+
+		TArray<int32> OutOfRangeTypes;
+		for (int32 TypeID : ActiveTypes)
+		{
+			const FScatterDefinition* Def = GetScatterDefinition(TypeID);
+			if (!Def)
+			{
+				continue;
+			}
+
+			// SpawnDistance=0 means use global ScatterRadius (matches chunk streaming)
+			if (Def->SpawnDistance <= 0.0f)
+			{
+				continue; // These clean up naturally with chunk unloading
+			}
+
+			// Apply hysteresis: remove at SpawnDistance * (1 + Hysteresis)
+			const float RemovalDistance = Def->SpawnDistance * (1.0f + DistanceCleanupHysteresis);
+			if (ChunkDistance > RemovalDistance)
+			{
+				OutOfRangeTypes.Add(TypeID);
+			}
+		}
+
+		if (OutOfRangeTypes.Num() > 0)
+		{
+			FChunkCleanupInfo Info;
+			Info.ChunkCoord = ChunkCoord;
+			Info.ScatterTypesToRemove = MoveTemp(OutOfRangeTypes);
+			ChunksToClean.Add(MoveTemp(Info));
+		}
+	}
+
+	if (ChunksToClean.Num() == 0)
+	{
+		return;
+	}
+
+	// Perform cleanup
+	int32 TotalTypesRemoved = 0;
+	int32 TotalPointsRemoved = 0;
+
+	for (const FChunkCleanupInfo& Info : ChunksToClean)
+	{
+		FChunkScatterData* ScatterData = ScatterDataCache.Find(Info.ChunkCoord);
+		if (!ScatterData)
+		{
+			continue;
+		}
+
+		// Build set for fast lookup
+		TSet<int32> RemoveSet;
+		for (int32 TypeID : Info.ScatterTypesToRemove)
+		{
+			RemoveSet.Add(TypeID);
+		}
+
+		// Remove spawn points for out-of-range types
+		const int32 PointsBefore = ScatterData->SpawnPoints.Num();
+		ScatterData->SpawnPoints.RemoveAll([&RemoveSet](const FScatterSpawnPoint& Point)
+		{
+			return RemoveSet.Contains(Point.ScatterTypeID);
+		});
+		const int32 PointsRemoved = PointsBefore - ScatterData->SpawnPoints.Num();
+		TotalPointsRemoved += PointsRemoved;
+
+		// Clear completion tracking for removed types so they can regenerate
+		TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(Info.ChunkCoord);
+		if (CompletedTypes)
+		{
+			for (int32 TypeID : Info.ScatterTypesToRemove)
+			{
+				CompletedTypes->Remove(TypeID);
+			}
+		}
+
+		// Release instances for out-of-range types back to the pool
+		// Instances are zero-scaled (hidden) — no rebuild needed
+		if (ScatterRenderer && ScatterRenderer->IsInitialized())
+		{
+			for (int32 TypeID : Info.ScatterTypesToRemove)
+			{
+				ScatterRenderer->ReleaseChunkScatterType(Info.ChunkCoord, TypeID);
+			}
+		}
+
+		TotalTypesRemoved += Info.ScatterTypesToRemove.Num();
+
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Distance cleanup removed %d types (%d points)"),
+			Info.ChunkCoord.X, Info.ChunkCoord.Y, Info.ChunkCoord.Z,
+			Info.ScatterTypesToRemove.Num(), PointsRemoved);
+
+		// If all spawn points removed, clean up the empty scatter data
+		if (ScatterData->SpawnPoints.Num() == 0)
+		{
+			ScatterDataCache.Remove(Info.ChunkCoord);
+			SurfaceDataCache.Remove(Info.ChunkCoord);
+		}
+	}
+
+	if (TotalTypesRemoved > 0)
+	{
+		UE_LOG(LogVoxelScatter, Log, TEXT("Distance cleanup: %d chunks, %d types, %d points removed"),
+			ChunksToClean.Num(), TotalTypesRemoved, TotalPointsRemoved);
+	}
+}
+
+void UVoxelScatterManager::PerformDistanceSpawn()
+{
+	if (!Configuration || SurfaceDataCache.Num() == 0)
+	{
+		return;
+	}
+
+	// Collect definitions that have per-definition SpawnDistance
+	TArray<const FScatterDefinition*> DistanceLimitedDefs;
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		if (Def.bEnabled && Def.SpawnDistance > 0.0f)
+		{
+			DistanceLimitedDefs.Add(&Def);
+		}
+	}
+
+	if (DistanceLimitedDefs.Num() == 0)
+	{
+		return;
+	}
+
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+
+	// --- Out-of-range cleanup pass ---
+	// For types beyond SpawnDistance * (1 + hysteresis):
+	// 1. Clear from CompletedScatterTypes (allows regeneration on return)
+	// 2. Remove spawn points from ScatterDataCache (prevents data bloat)
+	// 3. Release instances in renderer (zero-scaled, returned to pool — no flicker)
+
+	for (auto& CompletedPair : CompletedScatterTypes)
+	{
+		const FIntVector& ChunkCoord = CompletedPair.Key;
+		TSet<int32>& CompletedTypeIDs = CompletedPair.Value;
+
+		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
+			FVector(ChunkWorldSize * 0.5f);
+		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+
+		TArray<int32> TypesToRemove;
+		for (const FScatterDefinition* Def : DistanceLimitedDefs)
+		{
+			const float CleanupDistance = Def->SpawnDistance * (1.0f + DistanceCleanupHysteresis);
+			if (ChunkDistance > CleanupDistance && CompletedTypeIDs.Contains(Def->ScatterID))
+			{
+				TypesToRemove.Add(Def->ScatterID);
+			}
+		}
+
+		if (TypesToRemove.Num() == 0)
+		{
+			continue;
+		}
+
+		// Clear from completed tracking (allows regeneration when player returns)
+		for (int32 TypeID : TypesToRemove)
+		{
+			CompletedTypeIDs.Remove(TypeID);
+		}
+
+		// Release instances directly — zero-scaled, returned to pool
+		if (ScatterRenderer && ScatterRenderer->IsInitialized())
+		{
+			for (int32 TypeID : TypesToRemove)
+			{
+				ScatterRenderer->ReleaseChunkScatterType(ChunkCoord, TypeID);
+			}
+		}
+
+		// Remove spawn points for these types from the scatter data cache
+		FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+		if (ScatterData && ScatterData->bIsValid)
+		{
+			TSet<int32> TypeIDSet(TypesToRemove);
+			ScatterData->SpawnPoints.RemoveAll([&TypeIDSet](const FScatterSpawnPoint& Point)
+			{
+				return TypeIDSet.Contains(Point.ScatterTypeID);
+			});
+		}
+	}
+
+	// --- Spawn pass ---
+	// Don't launch more if our dedicated pipeline is saturated
+	const int32 AvailableSlots = MaxDistanceStreamTasks - DistanceStreamInProgress.Num();
+	if (AvailableSlots <= 0)
+	{
+		return;
+	}
+
+	// Collect candidates: chunks with cached surface data that need new scatter types
+	struct FSpawnCandidate
+	{
+		FIntVector ChunkCoord;
+		float Distance;
+		TArray<FScatterDefinition> Definitions;
+	};
+	TArray<FSpawnCandidate> Candidates;
+
+	for (const auto& Pair : SurfaceDataCache)
+	{
+		const FIntVector& ChunkCoord = Pair.Key;
+		const FChunkSurfaceData& SurfaceData = Pair.Value;
+
+		if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
+		{
+			continue;
+		}
+
+		// Skip chunks already being processed by distance streaming
+		if (DistanceStreamInProgress.Contains(ChunkCoord))
+		{
+			continue;
+		}
+
+		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
+			FVector(ChunkWorldSize * 0.5f);
+		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+
+		// Get completed types for this chunk
+		const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
+
+		// Find definitions that are now in range but haven't been generated
+		TArray<FScatterDefinition> NewlyInRangeDefs;
+		for (const FScatterDefinition* Def : DistanceLimitedDefs)
+		{
+			if (CompletedTypes && CompletedTypes->Contains(Def->ScatterID))
+			{
+				continue;
+			}
+
+			if (ChunkDistance <= Def->SpawnDistance)
+			{
+				NewlyInRangeDefs.Add(*Def);
+			}
+		}
+
+		if (NewlyInRangeDefs.Num() > 0)
+		{
+			FSpawnCandidate Candidate;
+			Candidate.ChunkCoord = ChunkCoord;
+			Candidate.Distance = ChunkDistance;
+			Candidate.Definitions = MoveTemp(NewlyInRangeDefs);
+			Candidates.Add(MoveTemp(Candidate));
+		}
+	}
+
+	if (Candidates.Num() == 0)
+	{
+		return;
+	}
+
+	// Sort closest first for best player experience
+	Candidates.Sort([](const FSpawnCandidate& A, const FSpawnCandidate& B)
+	{
+		return A.Distance < B.Distance;
+	});
+
+	// Launch async tasks on thread pool — dedicated pipeline, no competition with chunk generation
+	int32 ChunksLaunched = 0;
+	const int32 MaxToLaunch = FMath::Min(MaxDistanceSpawnChunksPerPass, AvailableSlots);
+
+	for (const FSpawnCandidate& Candidate : Candidates)
+	{
+		if (ChunksLaunched >= MaxToLaunch)
+		{
+			break;
+		}
+
+		const FChunkSurfaceData* SurfaceData = SurfaceDataCache.Find(Candidate.ChunkCoord);
+		if (!SurfaceData)
+		{
+			continue;
+		}
+
+		const uint32 ChunkSeed = FVoxelScatterPlacement::ComputeChunkSeed(Candidate.ChunkCoord, WorldSeed);
+
+		// Mark as in-progress in our dedicated tracking (not AsyncScatterInProgress)
+		DistanceStreamInProgress.Add(Candidate.ChunkCoord);
+
+		// Pre-mark types as completed to prevent duplicate launches on next pass
+		TSet<int32>& Completed = CompletedScatterTypes.FindOrAdd(Candidate.ChunkCoord);
+		TArray<int32> TypeIDs;
+		for (const FScatterDefinition& Def : Candidate.Definitions)
+		{
+			Completed.Add(Def.ScatterID);
+			TypeIDs.Add(Def.ScatterID);
+		}
+
+		// Capture data for thread pool — copy surface data, move definitions
+		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
+		const FIntVector ChunkCoord = Candidate.ChunkCoord;
+		FChunkSurfaceData CapturedSurface = *SurfaceData;
+		TArray<FScatterDefinition> DefsToGenerate = Candidate.Definitions;
+
+		Async(EAsyncExecution::ThreadPool,
+			[WeakThis, ChunkCoord, ChunkSeed,
+			 CapturedSurface = MoveTemp(CapturedSurface),
+			 DefsToGenerate = MoveTemp(DefsToGenerate),
+			 TypeIDs = MoveTemp(TypeIDs)]() mutable
+		{
+			FDistanceStreamResult Result;
+			Result.ChunkCoord = ChunkCoord;
+
+			FVoxelScatterPlacement::GenerateSpawnPoints(
+				CapturedSurface,
+				DefsToGenerate,
+				ChunkSeed,
+				Result.ScatterData
+			);
+
+			Result.GeneratedTypeIDs = MoveTemp(TypeIDs);
+			Result.bSuccess = true;
+
+			if (UVoxelScatterManager* This = WeakThis.Get())
+			{
+				This->DistanceStreamQueue.Enqueue(MoveTemp(Result));
+			}
+		});
+
+		++ChunksLaunched;
+	}
+
+	if (ChunksLaunched > 0)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Distance spawn: launched %d async tasks (%d candidates, %d in-flight)"),
+			ChunksLaunched, Candidates.Num(), DistanceStreamInProgress.Num());
+	}
+}
+
+void UVoxelScatterManager::ProcessCompletedDistanceStream()
+{
+	FDistanceStreamResult Result;
+	int32 ProcessedCount = 0;
+
+	while (DistanceStreamQueue.Dequeue(Result) && ProcessedCount < MaxDistanceStreamResultsPerFrame)
+	{
+		++ProcessedCount;
+
+		// Remove from distance stream tracking
+		DistanceStreamInProgress.Remove(Result.ChunkCoord);
+
+		if (!Result.bSuccess)
+		{
+			continue;
+		}
+
+		// Discard if chunk was unloaded while async was in-flight
+		if (!SurfaceDataCache.Contains(Result.ChunkCoord))
+		{
+			continue;
+		}
+
+		const int32 SpawnCount = Result.ScatterData.SpawnPoints.Num();
+
+		// Send to renderer for budget-limited HISM addition
+		if (SpawnCount > 0 && ScatterRenderer && ScatterRenderer->IsInitialized())
+		{
+			ScatterRenderer->AddSupplementalInstances(Result.ChunkCoord, Result.ScatterData);
+		}
+
+		// Append to scatter data cache
+		FChunkScatterData* ExistingScatter = ScatterDataCache.Find(Result.ChunkCoord);
+		if (ExistingScatter && ExistingScatter->bIsValid)
+		{
+			ExistingScatter->SpawnPoints.Append(Result.ScatterData.SpawnPoints);
+		}
+		else
+		{
+			ScatterDataCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
+		}
+
+		TotalSpawnPointsGenerated += SpawnCount;
 	}
 }
 
@@ -1295,7 +1743,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 		TotalSpawnPointsGenerated += SpawnCount;
 		++TotalChunksProcessed;
 
-		// Update HISM instances with full (possibly merged) scatter data
+		// Update HISM instances (normal chunk generation path — full update)
 		if (ScatterRenderer && ScatterRenderer->IsInitialized())
 		{
 			ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, ScatterDataCache[Result.ChunkCoord]);

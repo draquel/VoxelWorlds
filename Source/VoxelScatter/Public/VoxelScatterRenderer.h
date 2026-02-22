@@ -10,16 +10,36 @@ class UVoxelScatterManager;
 class UHierarchicalInstancedStaticMeshComponent;
 
 /**
+ * Per-HISM instance pool state for recycling instances without structural HISM changes.
+ * Instances are never removed from the HISM — they're hidden by setting scale to
+ * FVector::ZeroVector and placed on a free list. When new instances are needed,
+ * they're recycled from the free list first (via UpdateInstanceTransform).
+ */
+struct FHISMInstancePool
+{
+	/** Free list of instance indices (zero-scaled, ready for recycling) */
+	TArray<int32> FreeIndices;
+
+	/** Which instances belong to each chunk: ChunkCoord -> array of instance indices */
+	TMap<FIntVector, TArray<int32>> ChunkInstanceIndices;
+
+	/** Total allocated instances in this HISM (active + free) */
+	int32 TotalAllocated = 0;
+};
+
+/**
  * Manages HISM (Hierarchical Instanced Static Mesh) components for scatter rendering.
  *
  * Creates one HISM per scatter type and manages instances based on chunk lifecycle.
- * Instances are added when scatter data is generated and removed when chunks unload.
+ * Uses an instance pool per HISM to recycle instances via UpdateInstanceTransform
+ * instead of ClearInstances/AddInstances, eliminating visual flicker during
+ * distance-based streaming.
  *
  * Key responsibilities:
  * - Create and configure HISM components per scatter type
- * - Add instances from scatter spawn points
- * - Remove instances when chunks unload
- * - Track instance indices for proper removal
+ * - Add instances from scatter spawn points (recycling pooled instances first)
+ * - Release instances back to pool when chunks unload (zero-scale, no HISM removal)
+ * - Track instance indices per chunk for proper pool management
  *
  * Thread Safety: Must be accessed from game thread only.
  *
@@ -78,6 +98,17 @@ public:
 	void UpdateChunkInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData);
 
 	/**
+	 * Add supplemental scatter instances to existing chunk HISMs.
+	 * Only adds instances for NEW scatter types in the data — does not
+	 * clear or rebuild existing instances. Used by distance-based streaming
+	 * to avoid the blink caused by full HISM rebuild.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param NewScatterData Scatter data containing only the new spawn points to add
+	 */
+	void AddSupplementalInstances(const FIntVector& ChunkCoord, const FChunkScatterData& NewScatterData);
+
+	/**
 	 * Remove all instances for a chunk.
 	 *
 	 * Called when a chunk is unloaded.
@@ -85,6 +116,24 @@ public:
 	 * @param ChunkCoord Chunk coordinate
 	 */
 	void RemoveChunkInstances(const FIntVector& ChunkCoord);
+
+	/**
+	 * Release instances for a specific scatter type from a chunk back to the pool.
+	 * Instances are zero-scaled (hidden) and added to the free list.
+	 * Does NOT trigger a rebuild — instances remain allocated in HISM.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param ScatterTypeID Scatter type ID to release
+	 */
+	void ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID);
+
+	/**
+	 * Release all active instances for a scatter type back to the pool.
+	 * Used by RebuildScatterType before re-adding fresh transforms.
+	 *
+	 * @param ScatterTypeID Scatter type to release all instances for
+	 */
+	void ReleaseAllForScatterType(int32 ScatterTypeID);
 
 	/**
 	 * Clear all instances from all HISM components.
@@ -179,12 +228,16 @@ protected:
 	/**
 	 * Track which scatter types have instances from each chunk.
 	 * Structure: ChunkCoord -> Set of ScatterTypeIDs
-	 *
-	 * NOTE: We do NOT track individual instance indices because HISM
-	 * RemoveInstance shifts all subsequent indices, invalidating our tracking.
-	 * Instead, we rebuild entire HISM components when chunks change.
+	 * Works alongside InstancePools which tracks individual instance indices.
 	 */
 	TMap<FIntVector, TSet<int32>> ChunkScatterTypes;
+
+	/**
+	 * Per-scatter-type instance pool. Tracks free (zero-scaled) and active
+	 * instance indices to enable recycling without structural HISM changes.
+	 * Keyed by ScatterTypeID matching HISMComponents.
+	 */
+	TMap<int32, FHISMInstancePool> InstancePools;
 
 	/**
 	 * Rebuild a scatter type's HISM from all cached scatter data.

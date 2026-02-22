@@ -90,9 +90,12 @@ void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float DeltaTime)
 	// Always flush deferred instance additions (budget-limited)
 	FlushPendingInstanceAdds();
 
-	// Only process rebuilds when:
+	// Only process full rebuilds when:
 	// 1. Viewer has been stationary for a bit (prevents flicker during movement)
 	// 2. No chunks are pending generation (prevents flicker during initial load)
+	// Rebuilds are triggered by: chunk unload, edits/regeneration, and distance
+	// cleanup (removing out-of-range scatter types). Distance streaming additions
+	// use AddSupplementalInstances() → FlushPendingInstanceAdds() (no rebuild).
 	const bool bViewerStationary = TimeSinceViewerMoved >= RebuildStationaryDelay;
 	const bool bWorldStable = ScatterManager->GetPendingGenerationCount() == 0;
 
@@ -133,6 +136,7 @@ void UVoxelScatterRenderer::Shutdown()
 	}
 
 	ChunkScatterTypes.Empty();
+	InstancePools.Empty();
 	ScatterManager = nullptr;
 	CachedWorld = nullptr;
 	bIsInitialized = false;
@@ -228,6 +232,55 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 	}
 }
 
+void UVoxelScatterRenderer::AddSupplementalInstances(const FIntVector& ChunkCoord, const FChunkScatterData& NewScatterData)
+{
+	if (!bIsInitialized || !ScatterManager)
+	{
+		return;
+	}
+
+	if (!NewScatterData.bIsValid || NewScatterData.SpawnPoints.Num() == 0)
+	{
+		return;
+	}
+
+	// Group new spawn points by scatter type
+	TMap<int32, TArray<FTransform>> TransformsByType;
+	for (const FScatterSpawnPoint& Point : NewScatterData.SpawnPoints)
+	{
+		const FScatterDefinition* Definition = ScatterManager->GetScatterDefinition(Point.ScatterTypeID);
+		if (Definition)
+		{
+			FTransform Transform = Point.GetTransform(Definition->bAlignToSurfaceNormal, Definition->SurfaceOffset);
+			TransformsByType.FindOrAdd(Point.ScatterTypeID).Add(Transform);
+		}
+	}
+
+	// Update chunk tracking and queue deferred instance additions
+	// No stale type reconciliation needed — cleanup uses ReleaseChunkScatterType
+	// which zero-scales instances and returns them to the pool silently.
+	TSet<int32>& ChunkTypes = ChunkScatterTypes.FindOrAdd(ChunkCoord);
+	for (auto& Pair : TransformsByType)
+	{
+		const int32 ScatterTypeID = Pair.Key;
+		TArray<FTransform>& Transforms = Pair.Value;
+
+		if (Transforms.Num() > 0)
+		{
+			ChunkTypes.Add(ScatterTypeID);
+
+			FPendingInstanceAdd PendingAdd;
+			PendingAdd.ScatterTypeID = ScatterTypeID;
+			PendingAdd.ChunkCoord = ChunkCoord;
+			PendingAdd.Transforms = MoveTemp(Transforms);
+			PendingInstanceAdds.Add(MoveTemp(PendingAdd));
+		}
+	}
+
+	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Chunk (%d,%d,%d): Queued %d supplemental instances"),
+		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NewScatterData.SpawnPoints.Num());
+}
+
 void UVoxelScatterRenderer::RemoveChunkInstances(const FIntVector& ChunkCoord)
 {
 	if (!bIsInitialized)
@@ -238,19 +291,157 @@ void UVoxelScatterRenderer::RemoveChunkInstances(const FIntVector& ChunkCoord)
 	TSet<int32>* ScatterTypes = ChunkScatterTypes.Find(ChunkCoord);
 	if (!ScatterTypes || ScatterTypes->Num() == 0)
 	{
+		ChunkScatterTypes.Remove(ChunkCoord);
 		return;
 	}
 
-	// Collect scatter types to rebuild
-	TSet<int32> ScatterTypesToRebuild = *ScatterTypes;
-
-	// Remove tracking for this chunk BEFORE rebuilding
-	ChunkScatterTypes.Remove(ChunkCoord);
-
-	// Queue all affected scatter types for deferred rebuild (they will now exclude this chunk)
-	for (int32 ScatterTypeID : ScatterTypesToRebuild)
+	// Release all scatter types for this chunk back to the pool
+	// Copy the set since ReleaseChunkScatterType modifies ChunkScatterTypes
+	TArray<int32> TypesToRelease = ScatterTypes->Array();
+	for (int32 ScatterTypeID : TypesToRelease)
 	{
-		QueueRebuild(ScatterTypeID);
+		ReleaseChunkScatterType(ChunkCoord, ScatterTypeID);
+	}
+
+	// Also discard any pending instance adds for this chunk
+	PendingInstanceAdds.RemoveAll([&ChunkCoord](const FPendingInstanceAdd& Add)
+	{
+		return Add.ChunkCoord == ChunkCoord;
+	});
+}
+
+void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID)
+{
+	if (!bIsInitialized)
+	{
+		return;
+	}
+
+	FHISMInstancePool* Pool = InstancePools.Find(ScatterTypeID);
+	if (!Pool)
+	{
+		// No pool means no instances were ever added for this type — just update tracking
+		TSet<int32>* ChunkTypes = ChunkScatterTypes.Find(ChunkCoord);
+		if (ChunkTypes)
+		{
+			ChunkTypes->Remove(ScatterTypeID);
+			if (ChunkTypes->Num() == 0)
+			{
+				ChunkScatterTypes.Remove(ChunkCoord);
+			}
+		}
+		return;
+	}
+
+	TArray<int32>* Indices = Pool->ChunkInstanceIndices.Find(ChunkCoord);
+	if (!Indices || Indices->Num() == 0)
+	{
+		Pool->ChunkInstanceIndices.Remove(ChunkCoord);
+		// Update chunk tracking
+		TSet<int32>* ChunkTypes = ChunkScatterTypes.Find(ChunkCoord);
+		if (ChunkTypes)
+		{
+			ChunkTypes->Remove(ScatterTypeID);
+			if (ChunkTypes->Num() == 0)
+			{
+				ChunkScatterTypes.Remove(ChunkCoord);
+			}
+		}
+		return;
+	}
+
+	// Zero-scale all instances and move to free list
+	UHierarchicalInstancedStaticMeshComponent* HISM = nullptr;
+	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMComponents.Find(ScatterTypeID))
+	{
+		HISM = Found->Get();
+	}
+
+	if (HISM)
+	{
+		const FTransform ZeroTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
+		for (int32 Index : *Indices)
+		{
+			HISM->UpdateInstanceTransform(Index, ZeroTransform,
+				/*bWorldSpace=*/true, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+		}
+		HISM->MarkRenderStateDirty();
+	}
+
+	// Move indices to free list
+	Pool->FreeIndices.Append(*Indices);
+	TotalInstancesRemoved += Indices->Num();
+
+	// Clean up chunk entry from pool
+	Pool->ChunkInstanceIndices.Remove(ChunkCoord);
+
+	// Update chunk scatter type tracking
+	TSet<int32>* ChunkTypes = ChunkScatterTypes.Find(ChunkCoord);
+	if (ChunkTypes)
+	{
+		ChunkTypes->Remove(ScatterTypeID);
+		if (ChunkTypes->Num() == 0)
+		{
+			ChunkScatterTypes.Remove(ChunkCoord);
+		}
+	}
+}
+
+void UVoxelScatterRenderer::ReleaseAllForScatterType(int32 ScatterTypeID)
+{
+	if (!bIsInitialized)
+	{
+		return;
+	}
+
+	FHISMInstancePool* Pool = InstancePools.Find(ScatterTypeID);
+	if (!Pool)
+	{
+		return;
+	}
+
+	UHierarchicalInstancedStaticMeshComponent* HISM = nullptr;
+	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMComponents.Find(ScatterTypeID))
+	{
+		HISM = Found->Get();
+	}
+
+	const FTransform ZeroTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
+
+	for (auto& ChunkPair : Pool->ChunkInstanceIndices)
+	{
+		const FIntVector& ChunkCoord = ChunkPair.Key;
+		TArray<int32>& Indices = ChunkPair.Value;
+
+		if (HISM)
+		{
+			for (int32 Index : Indices)
+			{
+				HISM->UpdateInstanceTransform(Index, ZeroTransform,
+					/*bWorldSpace=*/true, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+			}
+		}
+
+		Pool->FreeIndices.Append(Indices);
+		TotalInstancesRemoved += Indices.Num();
+
+		// Remove this type from chunk tracking
+		TSet<int32>* ChunkTypes = ChunkScatterTypes.Find(ChunkCoord);
+		if (ChunkTypes)
+		{
+			ChunkTypes->Remove(ScatterTypeID);
+			if (ChunkTypes->Num() == 0)
+			{
+				ChunkScatterTypes.Remove(ChunkCoord);
+			}
+		}
+	}
+
+	Pool->ChunkInstanceIndices.Empty();
+
+	if (HISM)
+	{
+		HISM->MarkRenderStateDirty();
 	}
 }
 
@@ -271,8 +462,9 @@ void UVoxelScatterRenderer::ClearAllInstances()
 		}
 	}
 
-	// Clear tracking
+	// Clear tracking and pools
 	ChunkScatterTypes.Empty();
+	InstancePools.Empty();
 }
 
 // ==================== HISM Management ====================
@@ -381,6 +573,19 @@ int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 		Total += Pair.Value.GetAllocatedSize();
 	}
 
+	// Instance pool tracking
+	Total += InstancePools.GetAllocatedSize();
+	for (const auto& PoolPair : InstancePools)
+	{
+		const FHISMInstancePool& Pool = PoolPair.Value;
+		Total += Pool.FreeIndices.GetAllocatedSize();
+		Total += Pool.ChunkInstanceIndices.GetAllocatedSize();
+		for (const auto& ChunkPair : Pool.ChunkInstanceIndices)
+		{
+			Total += ChunkPair.Value.GetAllocatedSize();
+		}
+	}
+
 	Total += PendingRebuildScatterTypes.GetAllocatedSize();
 
 	return Total;
@@ -391,13 +596,27 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 	const int32 TotalInstances = GetTotalInstanceCount();
 	const int32 ChunksWithInstances = ChunkScatterTypes.Num();
 
-	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances, %d chunks, Pending: %d, Added: %lld, Removed: %lld"),
+	// Calculate pool statistics
+	int32 TotalPooled = 0;
+	int32 TotalAllocated = 0;
+	for (const auto& PoolPair : InstancePools)
+	{
+		const FHISMInstancePool& Pool = PoolPair.Value;
+		TotalPooled += Pool.FreeIndices.Num();
+		TotalAllocated += Pool.TotalAllocated;
+	}
+	const int32 ActiveInstances = TotalAllocated - TotalPooled;
+	const float Utilization = TotalAllocated > 0 ? (static_cast<float>(ActiveInstances) / TotalAllocated * 100.0f) : 0.0f;
+
+	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d chunks, Pending: %d rebuilds/%d adds"),
 		HISMComponents.Num(),
-		TotalInstances,
+		TotalAllocated,
+		ActiveInstances,
+		TotalPooled,
+		Utilization,
 		ChunksWithInstances,
 		PendingRebuildScatterTypes.Num(),
-		TotalInstancesAdded,
-		TotalInstancesRemoved);
+		PendingInstanceAdds.Num());
 }
 
 // ==================== Internal Methods ====================
@@ -657,9 +876,19 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 	int32 InstanceBudget = MaxInstanceAddsPerFrame;
 	int32 EntriesProcessed = 0;
 
+	// Track which HISMs need render state marked dirty after batch updates
+	TSet<UHierarchicalInstancedStaticMeshComponent*> DirtyHISMs;
+
 	for (int32 i = 0; i < PendingInstanceAdds.Num() && InstanceBudget > 0; ++i)
 	{
 		FPendingInstanceAdd& PendingAdd = PendingInstanceAdds[i];
+
+		// Skip entries for chunks that were unloaded while pending
+		if (!ChunkScatterTypes.Contains(PendingAdd.ChunkCoord))
+		{
+			++EntriesProcessed;
+			continue;
+		}
 
 		UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(PendingAdd.ScatterTypeID);
 		if (!HISM)
@@ -669,31 +898,65 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 			continue;
 		}
 
-		const int32 InstancesToAdd = PendingAdd.Transforms.Num();
-		if (InstancesToAdd <= InstanceBudget)
+		FHISMInstancePool& Pool = InstancePools.FindOrAdd(PendingAdd.ScatterTypeID);
+		TArray<int32>& ChunkIndices = Pool.ChunkInstanceIndices.FindOrAdd(PendingAdd.ChunkCoord);
+
+		const int32 TotalNeeded = PendingAdd.Transforms.Num();
+		const int32 ToProcess = FMath::Min(TotalNeeded, InstanceBudget);
+
+		// Determine how many can be recycled from free list
+		const int32 ToRecycle = FMath::Min(ToProcess, Pool.FreeIndices.Num());
+		const int32 ToGrow = ToProcess - ToRecycle;
+
+		// Recycle from free list: update transforms of zero-scaled instances
+		for (int32 j = 0; j < ToRecycle; ++j)
 		{
-			// Entire batch fits within budget
-			HISM->AddInstances(PendingAdd.Transforms, false, true);
-			TotalInstancesAdded += InstancesToAdd;
-			InstanceBudget -= InstancesToAdd;
+			const int32 RecycledIndex = Pool.FreeIndices.Pop(EAllowShrinking::No);
+			HISM->UpdateInstanceTransform(RecycledIndex, PendingAdd.Transforms[j],
+				/*bWorldSpace=*/true, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+			ChunkIndices.Add(RecycledIndex);
+		}
+
+		// Grow pool: add new instances for remainder
+		if (ToGrow > 0)
+		{
+			TArrayView<FTransform> GrowTransforms = MakeArrayView(
+				PendingAdd.Transforms.GetData() + ToRecycle, ToGrow);
+			TArray<FTransform> GrowBatch(GrowTransforms.GetData(), GrowTransforms.Num());
+
+			const int32 FirstNewIndex = HISM->GetInstanceCount();
+			HISM->AddInstances(GrowBatch, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/true);
+
+			for (int32 j = 0; j < ToGrow; ++j)
+			{
+				ChunkIndices.Add(FirstNewIndex + j);
+			}
+			Pool.TotalAllocated += ToGrow;
+		}
+
+		TotalInstancesAdded += ToProcess;
+		InstanceBudget -= ToProcess;
+		DirtyHISMs.Add(HISM);
+
+		if (ToProcess >= TotalNeeded)
+		{
+			// Entire batch processed
 			++EntriesProcessed;
 		}
 		else
 		{
-			// Partial batch: add what we can, keep the rest for next frame
-			TArray<FTransform> BatchToAdd;
-			BatchToAdd.Reserve(InstanceBudget);
-			for (int32 j = 0; j < InstanceBudget; ++j)
-			{
-				BatchToAdd.Add(PendingAdd.Transforms[j]);
-			}
-			HISM->AddInstances(BatchToAdd, false, true);
-			TotalInstancesAdded += InstanceBudget;
-
-			// Remove processed transforms from the pending entry
-			PendingAdd.Transforms.RemoveAt(0, InstanceBudget);
-			InstanceBudget = 0;
+			// Partial batch: remove processed transforms, keep rest for next frame
+			PendingAdd.Transforms.RemoveAt(0, ToProcess);
 			// Don't increment EntriesProcessed — this entry still has remaining transforms
+		}
+	}
+
+	// Batch mark dirty after all updates
+	for (UHierarchicalInstancedStaticMeshComponent* HISM : DirtyHISMs)
+	{
+		if (HISM)
+		{
+			HISM->MarkRenderStateDirty();
 		}
 	}
 
@@ -729,7 +992,7 @@ void UVoxelScatterRenderer::FlushPendingRebuilds()
 		NumToProcess = MaxRebuildsPerFrame;
 	}
 
-	// Process pending rebuilds
+	// Collect which types will be rebuilt
 	int32 Processed = 0;
 	TArray<int32> ToRemove;
 	ToRemove.Reserve(NumToProcess);
@@ -740,10 +1003,25 @@ void UVoxelScatterRenderer::FlushPendingRebuilds()
 		{
 			break;
 		}
-
-		RebuildScatterType(ScatterTypeID);
 		ToRemove.Add(ScatterTypeID);
 		++Processed;
+	}
+
+	// Clear any PendingInstanceAdds for types about to be rebuilt,
+	// otherwise deferred adds would stack on top of the rebuild result.
+	if (PendingInstanceAdds.Num() > 0 && ToRemove.Num() > 0)
+	{
+		TSet<int32> RebuildTypeSet(ToRemove);
+		PendingInstanceAdds.RemoveAll([&RebuildTypeSet](const FPendingInstanceAdd& Add)
+		{
+			return RebuildTypeSet.Contains(Add.ScatterTypeID);
+		});
+	}
+
+	// Execute rebuilds
+	for (int32 ScatterTypeID : ToRemove)
+	{
+		RebuildScatterType(ScatterTypeID);
 	}
 
 	// Remove processed items
@@ -788,49 +1066,53 @@ void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
 		return;
 	}
 
-	// Track old instance count for statistics
-	const int32 OldInstanceCount = HISM->GetInstanceCount();
+	// Release all existing instances for this type back to the pool
+	ReleaseAllForScatterType(ScatterTypeID);
 
-	// Collect all transforms from all chunks that have this scatter type
-	TArray<FTransform> AllTransforms;
-	AllTransforms.Reserve(FMath::Max(OldInstanceCount, 1024));
+	// Collect all transforms from all chunks that have this scatter type in the cache
+	// Note: ChunkScatterTypes was cleared by ReleaseAllForScatterType, so we scan
+	// the manager's ScatterDataCache directly
+	TMap<FIntVector, TArray<FTransform>> TransformsByChunk;
 
-	for (const auto& ChunkPair : ChunkScatterTypes)
+	for (const auto& CachePair : ScatterManager->GetScatterDataCache())
 	{
-		const FIntVector& ChunkCoord = ChunkPair.Key;
-		const TSet<int32>& ScatterTypes = ChunkPair.Value;
+		const FIntVector& ChunkCoord = CachePair.Key;
+		const FChunkScatterData& ScatterData = CachePair.Value;
 
-		if (!ScatterTypes.Contains(ScatterTypeID))
+		if (!ScatterData.bIsValid)
 		{
 			continue;
 		}
 
-		const FChunkScatterData* ScatterData = ScatterManager->GetChunkScatterData(ChunkCoord);
-		if (!ScatterData || !ScatterData->bIsValid)
-		{
-			continue;
-		}
-
-		for (const FScatterSpawnPoint& Point : ScatterData->SpawnPoints)
+		TArray<FTransform> ChunkTransforms;
+		for (const FScatterSpawnPoint& Point : ScatterData.SpawnPoints)
 		{
 			if (Point.ScatterTypeID == ScatterTypeID)
 			{
 				FTransform Transform = Point.GetTransform(Definition->bAlignToSurfaceNormal, Definition->SurfaceOffset);
-				AllTransforms.Add(Transform);
+				ChunkTransforms.Add(Transform);
 			}
+		}
+
+		if (ChunkTransforms.Num() > 0)
+		{
+			TransformsByChunk.Add(ChunkCoord, MoveTemp(ChunkTransforms));
 		}
 	}
 
-	// Clear existing instances and add new ones
-	TotalInstancesRemoved += OldInstanceCount;
-	HISM->ClearInstances();
-
-	if (AllTransforms.Num() > 0)
+	// Queue as PendingInstanceAdd entries — FlushPendingInstanceAdds will recycle from free list
+	for (auto& Pair : TransformsByChunk)
 	{
-		HISM->AddInstances(AllTransforms, false, true);
-		TotalInstancesAdded += AllTransforms.Num();
+		// Re-establish chunk tracking
+		ChunkScatterTypes.FindOrAdd(Pair.Key).Add(ScatterTypeID);
+
+		FPendingInstanceAdd PendingAdd;
+		PendingAdd.ScatterTypeID = ScatterTypeID;
+		PendingAdd.ChunkCoord = Pair.Key;
+		PendingAdd.Transforms = MoveTemp(Pair.Value);
+		PendingInstanceAdds.Add(MoveTemp(PendingAdd));
 	}
 
-	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Rebuilt scatter type %d (%s): %d -> %d instances"),
-		ScatterTypeID, *Definition->Name, OldInstanceCount, AllTransforms.Num());
+	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Rebuilt scatter type %d (%s): released to pool, queued %d chunks for re-add"),
+		ScatterTypeID, *Definition->Name, TransformsByChunk.Num());
 }

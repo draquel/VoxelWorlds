@@ -74,7 +74,7 @@ protected:
 
 ### VoxelScatterRenderer
 
-Manages HISM components with deferred rebuild strategy.
+Manages HISM components with instance pooling and deferred rebuild strategy. Instances are never removed from the HISM — they are hidden by setting scale to zero and placed on a free list. When new instances are needed, they are recycled from the free list first via `UpdateInstanceTransform`, eliminating the visual flicker caused by `ClearInstances()`/`AddInstances()` cycling.
 
 ```cpp
 UCLASS()
@@ -86,7 +86,12 @@ public:
 
     // Instance management
     void UpdateChunkInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData);
+    void AddSupplementalInstances(const FIntVector& ChunkCoord, const FChunkScatterData& NewScatterData);
     void RemoveChunkInstances(const FIntVector& ChunkCoord);
+
+    // Instance pool operations
+    void ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID);
+    void ReleaseAllForScatterType(int32 ScatterTypeID);
 
     // Deferred rebuilds (prevents flicker)
     void QueueRebuild(int32 ScatterTypeID);
@@ -94,6 +99,9 @@ public:
 protected:
     // One HISM per scatter type
     TMap<int32, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
+
+    // Per-scatter-type instance pool for recycling
+    TMap<int32, FHISMInstancePool> InstancePools;
 
     // Pending rebuilds (processed when viewer is stationary)
     TSet<int32> PendingRebuildScatterTypes;
@@ -349,60 +357,89 @@ void FVoxelScatterPlacement::GenerateSpawnPoints(
 
 ## HISM Management
 
-### Rebuild Strategy
+### Instance Pool / Recycling System
 
-The scatter renderer uses a **full rebuild** approach per scatter type:
+The scatter renderer uses an **instance pool** per HISM to eliminate visual flicker during distance-based streaming. Instances are never removed from the HISM — they are hidden by zero-scaling and placed on a free list for later recycling.
 
-1. **Why not individual RemoveInstance?**
-   - HISM's `RemoveInstance()` shifts all subsequent indices
-   - Index tracking becomes invalid after any removal
-   - Complex to maintain chunk→instance mappings
+#### FHISMInstancePool
 
-2. **Rebuild approach:**
-   - When a chunk changes, queue affected scatter types for rebuild
-   - On rebuild: Clear all instances, collect from all chunks, batch add
-   - Uses `HISM->AddInstances()` for efficient batch addition
-
-3. **Deferred rebuilds:**
-   - Rebuilds are queued via `QueueRebuild()`, not immediate
-   - Processed in `Tick()` when BOTH conditions met:
-     - Viewer stationary for 0.5s (`RebuildStationaryDelay`)
-     - World stable (`GetPendingGenerationCount() == 0`)
-   - Prevents flickering during movement and initial world loading
+Each scatter type has a pool tracking its HISM instance lifecycle:
 
 ```cpp
-void UVoxelScatterRenderer::RebuildScatterType(int32 ScatterTypeID)
+struct FHISMInstancePool
 {
-    UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(ScatterTypeID);
+    TArray<int32> FreeIndices;                          // Zero-scaled, ready for recycling
+    TMap<FIntVector, TArray<int32>> ChunkInstanceIndices; // Active instances per chunk
+    int32 TotalAllocated = 0;                           // Active + free (high water mark)
+};
+```
 
-    // Collect all transforms FIRST
-    TArray<FTransform> AllTransforms;
-    for (const auto& ChunkPair : ChunkScatterTypes)
-    {
-        if (!ChunkPair.Value.Contains(ScatterTypeID)) continue;
+#### Why Pooling Instead of ClearInstances/AddInstances?
 
-        const FChunkScatterData* Data = ScatterManager->GetChunkScatterData(ChunkPair.Key);
-        for (const FScatterSpawnPoint& Point : Data->SpawnPoints)
-        {
-            if (Point.ScatterTypeID == ScatterTypeID)
-            {
-                AllTransforms.Add(Point.GetTransform(...));
-            }
-        }
-    }
+The previous approach (`ClearInstances()` + `AddInstances()`) produced visible flicker because UE5 propagates these as separate render state updates — even when done in the same frame, there is a brief gap where the HISM has zero instances. The pool eliminates this:
 
-    // Clear and add in quick succession
-    HISM->ClearInstances();
-    if (AllTransforms.Num() > 0)
-    {
-        HISM->AddInstances(AllTransforms, false, true);
-    }
+- **Release**: `UpdateInstanceTransform(Index, ZeroScaleTransform)` — instance becomes invisible but stays allocated in HISM internal arrays. Zero-scale means zero bounding box, so HISM's spatial tree culls it at zero cost.
+- **Recycle**: `UpdateInstanceTransform(Index, RealTransform)` — instance reappears at new position. No structural HISM change, no render state rebuild.
+- **Grow**: `AddInstances()` only when free list is exhausted. Pool grows to peak usage then stabilizes.
+
+#### Release Operations
+
+```cpp
+// Release a specific scatter type's instances from one chunk back to pool
+void ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID)
+{
+    // 1. Look up pool and chunk indices
+    // 2. Zero-scale each instance via UpdateInstanceTransform
+    // 3. Move indices to FreeIndices
+    // 4. Remove chunk from pool's ChunkInstanceIndices
+    // 5. Update ChunkScatterTypes tracking
+    // 6. Mark HISM render state dirty (single batch call)
+}
+
+// Release ALL instances for a scatter type (used by RebuildScatterType)
+void ReleaseAllForScatterType(int32 ScatterTypeID)
+{
+    // Same as above but across all chunks
 }
 ```
 
+#### Recycling in FlushPendingInstanceAdds
+
+The per-frame budget-limited flush recycles from the free list before growing:
+
+```
+For each PendingInstanceAdd entry:
+  1. Get/create HISM and pool for ScatterTypeID
+  2. Skip entries for chunks unloaded while pending
+  3. Recycle min(needed, FreeIndices.Num()) via UpdateInstanceTransform
+  4. Grow via AddInstances() for remainder (updates pool.TotalAllocated)
+  5. Record all indices in pool.ChunkInstanceIndices[ChunkCoord]
+  6. Batch mark HISM render state dirty after all updates
+```
+
+Both recycled and newly added instances count toward the per-frame budget (`MaxInstanceAddsPerFrame`).
+
+#### Rebuild Strategy
+
+Rebuilds (triggered by chunk edits/regeneration) now work through the pool:
+
+1. `ReleaseAllForScatterType()` — all instances go to free list (zero-scaled)
+2. Collect transforms from `ScatterDataCache` for all chunks with this type
+3. Queue as `PendingInstanceAdd` entries — `FlushPendingInstanceAdds` recycles from free list
+
+This means rebuilds reuse existing pool capacity — no net HISM growth.
+
+#### Deferred Rebuilds
+
+- Rebuilds are queued via `QueueRebuild()`, not immediate
+- Processed in `Tick()` when BOTH conditions met:
+  - Viewer stationary for 0.5s (`RebuildStationaryDelay`)
+  - World stable (`GetPendingGenerationCount() == 0`)
+- Prevents flickering during movement and initial world loading
+
 ### New Chunk Optimization
 
-New chunks (no existing scatter) bypass the rebuild system entirely:
+New chunks (no existing scatter) go directly through the deferred add pipeline:
 
 ```cpp
 void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData)
@@ -411,15 +448,8 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 
     if (bIsNewChunk && ScatterData.bIsValid)
     {
-        // Direct instance addition - no rebuild, no flicker
-        TMap<int32, TArray<FTransform>> TransformsByType;
-        // ... group transforms by scatter type ...
-
-        for (auto& Pair : TransformsByType)
-        {
-            UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(Pair.Key);
-            HISM->AddInstances(Pair.Value, false, true);
-        }
+        // Group transforms by type, queue as PendingInstanceAdds
+        // FlushPendingInstanceAdds handles pool recycling + growth
     }
     else
     {
@@ -431,6 +461,36 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
     }
 }
 ```
+
+### Chunk Unload
+
+When a chunk unloads, all its scatter types are released back to the pool:
+
+```cpp
+void UVoxelScatterRenderer::RemoveChunkInstances(const FIntVector& ChunkCoord)
+{
+    // For each scatter type in this chunk:
+    //   ReleaseChunkScatterType(ChunkCoord, TypeID)
+    // Also discard any pending adds for this chunk
+}
+```
+
+No rebuild is needed — instances silently return to the free list.
+
+### Distance Streaming Cleanup
+
+When scatter types go out of range, the manager calls `ReleaseChunkScatterType()` directly instead of the previous stale-type tracking approach. Instances are zero-scaled immediately (CullDistance already hides them at that range) and recycled when the player returns and new transforms are generated.
+
+### Debug Stats
+
+`GetDebugStats()` reports pool health:
+```
+ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 42 chunks, Pending: 0 rebuilds/0 adds
+```
+
+- **Active**: Instances with real transforms (visible within CullDistance)
+- **Pooled**: Zero-scaled instances on free list (invisible, zero render cost)
+- **Util**: Active / TotalAllocated — approaches 100% after initial exploration stabilizes
 
 ## Edit Integration
 
@@ -548,6 +608,7 @@ Created automatically if no configuration is provided:
 ### Throttling
 
 - `MaxScatterGenerationsPerFrame = 2`: Limits surface extraction per frame
+- `MaxInstanceAddsPerFrame = 2000`: Budget for instance additions/recycling per frame
 - `MaxRebuildsPerFrame = 0` (unlimited): Rebuilds are fast once transforms are collected
 - `RebuildStationaryDelay = 0.5s`: Prevents flicker during movement
 - World stability check: Rebuilds wait for `GetPendingGenerationCount() == 0` (prevents initial load flicker)
@@ -557,12 +618,16 @@ Created automatically if no configuration is provided:
 - Surface data cached per chunk (`SurfaceDataCache`)
 - Scatter spawn points cached per chunk (`ScatterDataCache`)
 - HISM components shared across chunks (one per scatter type)
+- Instance pool per scatter type (`InstancePools`) — tracks free list and per-chunk indices
+- Pool never shrinks: peak allocation is the high water mark. Zero-scaled instances cost only a `FTransform` in HISM internal arrays and have zero rendering cost (zero bounding box = culled by spatial tree)
 
 ### Distance-Based Loading
 
 - Per-definition `SpawnDistance` allows different ranges per scatter type
 - Trees can have larger spawn distance to prevent pop-in
 - Grass can have smaller distance for performance
+- Out-of-range cleanup releases instances to pool via `ReleaseChunkScatterType()` (no rebuild)
+- Returning to an area recycles from pool — faster than initial load since instances already exist in HISM
 
 ## Debug Visualization
 
@@ -871,7 +936,7 @@ In `OnChunkMeshDataReady()`, VoxelInjection scatter definitions are filtered bas
 4. ~~**Async surface extraction**~~: COMPLETE (7D-1)
 5. ~~**Voxel-based surface extraction**~~: COMPLETE (7D-5)
 6. ~~**Cubic terrain scatter**~~: COMPLETE (7E)
-7. **Instance pooling**: Reuse instances when chunks unload/reload
+7. ~~**Instance pooling**~~: COMPLETE — Per-HISM free list recycling via `UpdateInstanceTransform`, eliminates flicker from `ClearInstances`/`AddInstances` cycling
 8. **GPU scatter placement** (7D-3): Move rule evaluation to compute shader
 9. **Direct GPU->HISM** (7D-4): Eliminate readback by writing transforms directly
 10. **Tree physics**: Unsupported leaf blocks fall when trunk is destroyed
