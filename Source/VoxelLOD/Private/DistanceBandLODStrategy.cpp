@@ -54,16 +54,23 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		TerrainMinHeight = TerrainBase - ChunkWorldSize; // One chunk below base for safety
 		TerrainMaxHeight = TerrainBase + WorldConfig->HeightScale + ChunkWorldSize; // One chunk above max
 
-		// Extend bounds for continentalness height modulation
+		// Extend bounds for continentalness height modulation (scan baked curve arrays)
 		if (WorldConfig->BiomeConfiguration && WorldConfig->BiomeConfiguration->bEnableContinentalness)
 		{
 			const UVoxelBiomeConfiguration* BiomeConfig = WorldConfig->BiomeConfiguration;
-			// ContinentalnessHeightMin is negative (lowers terrain), extend minimum
-			TerrainMinHeight = FMath::Min(TerrainMinHeight,
-				TerrainBase + BiomeConfig->ContinentalnessHeightMin - ChunkWorldSize);
-			// ContinentalnessHeightMax raises terrain, extend maximum
-			TerrainMaxHeight = FMath::Max(TerrainMaxHeight,
-				TerrainBase + BiomeConfig->ContinentalnessHeightMax + WorldConfig->HeightScale + ChunkWorldSize);
+			if (BiomeConfig->BakedHeightCurve.Num() > 0 && BiomeConfig->BakedHeightScaleCurve.Num() > 0)
+			{
+				// Find min/max height offset from the baked height curve
+				const float CurveHeightMin = FMath::Min(BiomeConfig->BakedHeightCurve);
+				const float CurveHeightMax = FMath::Max(BiomeConfig->BakedHeightCurve);
+				// Find max height scale multiplier for computing full terrain range
+				const float MaxScaleMult = FMath::Max(BiomeConfig->BakedHeightScaleCurve);
+
+				TerrainMinHeight = FMath::Min(TerrainMinHeight,
+					TerrainBase + CurveHeightMin - ChunkWorldSize);
+				TerrainMaxHeight = FMath::Max(TerrainMaxHeight,
+					TerrainBase + CurveHeightMax + WorldConfig->HeightScale * MaxScaleMult + ChunkWorldSize);
+			}
 		}
 
 		// For Island mode, also consider the edge height (can be negative for bowl shapes)

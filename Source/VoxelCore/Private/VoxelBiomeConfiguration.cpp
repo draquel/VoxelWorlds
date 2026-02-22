@@ -28,6 +28,7 @@ void UVoxelBiomeConfiguration::PostLoad()
 	RebuildBiomeIndexCache();
 	RebuildHeightRulesCache();
 	RebuildOreVeinsCache();
+	RebuildBakedCurves();
 }
 
 void UVoxelBiomeConfiguration::InitializeDefaults()
@@ -41,7 +42,8 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Plains.Name = TEXT("Plains");
 	Plains.TemperatureRange = FVector2D(-0.3, 0.7);
 	Plains.MoistureRange = FVector2D(-0.5, 0.3);
-	Plains.ContinentalnessRange = FVector2D(-0.2, 0.8); // Coastal to mid-inland
+	Plains.ContinentalnessRange = FVector2D(-0.05, 0.8); // Coastal to mid-inland
+	Plains.SelectionPriority = 0; // Fallback biome
 	Plains.SurfaceMaterial = EVoxelMaterial::Grass;
 	Plains.SubsurfaceMaterial = EVoxelMaterial::Dirt;
 	Plains.DeepMaterial = EVoxelMaterial::Stone;
@@ -58,7 +60,8 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Forest.Name = TEXT("Forest");
 	Forest.TemperatureRange = FVector2D(-0.4, 0.7);
 	Forest.MoistureRange = FVector2D(0.2, 1.0);
-	Forest.ContinentalnessRange = FVector2D(-0.1, 1.0); // Near-coast to deep inland
+	Forest.ContinentalnessRange = FVector2D(-0.05, 1.0); // Near-coast to deep inland
+	Forest.SelectionPriority = 3;
 	Forest.SurfaceMaterial = EVoxelMaterial::Grass;
 	Forest.SubsurfaceMaterial = EVoxelMaterial::Dirt;
 	Forest.DeepMaterial = EVoxelMaterial::Stone;
@@ -76,6 +79,7 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Mountain.TemperatureRange = FVector2D(-1.0, -0.1);
 	Mountain.MoistureRange = FVector2D(-1.0, 1.0);
 	Mountain.ContinentalnessRange = FVector2D(0.3, 1.0); // Deep inland only
+	Mountain.SelectionPriority = 5;
 	Mountain.SurfaceMaterial = EVoxelMaterial::Stone;
 	Mountain.SubsurfaceMaterial = EVoxelMaterial::Stone;
 	Mountain.DeepMaterial = EVoxelMaterial::Stone;
@@ -91,7 +95,8 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	Ocean.Name = TEXT("Ocean");
 	Ocean.TemperatureRange = FVector2D(-1.0, 1.0);
 	Ocean.MoistureRange = FVector2D(-1.0, 1.0);
-	Ocean.ContinentalnessRange = FVector2D(-1.0, -0.15); // Deep ocean to near-coast
+	Ocean.ContinentalnessRange = FVector2D(-1.0, -0.05); // Deep ocean to near-coast
+	Ocean.SelectionPriority = 10;
 	Ocean.SurfaceMaterial = EVoxelMaterial::Sand;
 	Ocean.SubsurfaceMaterial = EVoxelMaterial::Sand;
 	Ocean.DeepMaterial = EVoxelMaterial::Stone;
@@ -170,30 +175,72 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 		30                       // Priority (highest, checked first)
 	));
 
+	// Initialize continentalness curves with default keys matching old 3-point piecewise linear
+	{
+		FRichCurve* HeightCurvePtr = const_cast<FRichCurve*>(ContinentalnessHeightCurve.GetRichCurveConst());
+		HeightCurvePtr->Reset();
+		HeightCurvePtr->AddKey(-1.0f, -3000.0f);
+		HeightCurvePtr->AddKey(0.0f, 0.0f);
+		HeightCurvePtr->AddKey(1.0f, 1000.0f);
+		for (auto It = HeightCurvePtr->GetKeyHandleIterator(); It; ++It)
+		{
+			HeightCurvePtr->SetKeyInterpMode(*It, RCIM_Linear);
+		}
+
+		FRichCurve* ScaleCurvePtr = const_cast<FRichCurve*>(ContinentalnessHeightScaleCurve.GetRichCurveConst());
+		ScaleCurvePtr->Reset();
+		ScaleCurvePtr->AddKey(-1.0f, 0.2f);
+		ScaleCurvePtr->AddKey(1.0f, 1.0f);
+		for (auto It = ScaleCurvePtr->GetKeyHandleIterator(); It; ++It)
+		{
+			ScaleCurvePtr->SetKeyInterpMode(*It, RCIM_Linear);
+		}
+	}
+
 	// Eagerly rebuild caches so they're ready for worker threads (not thread-safe to rebuild lazily)
 	RebuildBiomeIndexCache();
 	RebuildHeightRulesCache();
 	RebuildOreVeinsCache();
+	RebuildBakedCurves();
+}
+
+void UVoxelBiomeConfiguration::RebuildBakedCurves()
+{
+	const int32 N = CONTINENTALNESS_CURVE_SAMPLE_COUNT;
+	BakedHeightCurve.SetNum(N);
+	BakedHeightScaleCurve.SetNum(N);
+
+	const FRichCurve* HeightCurve = ContinentalnessHeightCurve.GetRichCurveConst();
+	const FRichCurve* ScaleCurve = ContinentalnessHeightScaleCurve.GetRichCurveConst();
+
+	for (int32 i = 0; i < N; ++i)
+	{
+		// Evenly space samples across [-1, 1]
+		const float T = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(N - 1);
+		BakedHeightCurve[i] = HeightCurve ? HeightCurve->Eval(T) : 0.0f;
+		BakedHeightScaleCurve[i] = ScaleCurve ? ScaleCurve->Eval(T) : 1.0f;
+	}
 }
 
 void UVoxelBiomeConfiguration::GetContinentalnessTerrainParams(float Continentalness, float& OutHeightOffset, float& OutHeightScaleMultiplier) const
 {
-	// Piecewise linear interpolation for height offset:
-	// [-1, 0] maps ContinentalnessHeightMin -> ContinentalnessHeightMid
-	// [0, +1] maps ContinentalnessHeightMid -> ContinentalnessHeightMax
-	if (Continentalness < 0.0f)
+	const int32 N = CONTINENTALNESS_CURVE_SAMPLE_COUNT;
+
+	// Fallback if baked arrays are empty (shouldn't happen after proper init)
+	if (BakedHeightCurve.Num() < N || BakedHeightScaleCurve.Num() < N)
 	{
-		OutHeightOffset = FMath::Lerp(ContinentalnessHeightMin, ContinentalnessHeightMid, Continentalness + 1.0f);
-	}
-	else
-	{
-		OutHeightOffset = FMath::Lerp(ContinentalnessHeightMid, ContinentalnessHeightMax, Continentalness);
+		OutHeightOffset = 0.0f;
+		OutHeightScaleMultiplier = 1.0f;
+		return;
 	}
 
-	// Linear interpolation for height scale multiplier:
-	// [-1, +1] maps ContinentalnessHeightScaleMin -> ContinentalnessHeightScaleMax
-	float T = Continentalness * 0.5f + 0.5f; // Remap [-1,1] to [0,1]
-	OutHeightScaleMultiplier = FMath::Lerp(ContinentalnessHeightScaleMin, ContinentalnessHeightScaleMax, T);
+	// Map continentalness [-1,1] to float index [0, N-1], lerp between adjacent samples
+	const float FIdx = (Continentalness + 1.0f) * 0.5f * static_cast<float>(N - 1);
+	const int32 Idx0 = FMath::Clamp(FMath::FloorToInt(FIdx), 0, N - 2);
+	const float Frac = FIdx - static_cast<float>(Idx0);
+
+	OutHeightOffset = FMath::Lerp(BakedHeightCurve[Idx0], BakedHeightCurve[Idx0 + 1], Frac);
+	OutHeightScaleMultiplier = FMath::Lerp(BakedHeightScaleCurve[Idx0], BakedHeightScaleCurve[Idx0 + 1], Frac);
 }
 
 void UVoxelBiomeConfiguration::RebuildBiomeIndexCache() const
@@ -300,40 +347,21 @@ const FBiomeDefinition* UVoxelBiomeConfiguration::SelectBiome(float Temperature,
 	Moisture = FMath::Clamp(Moisture, -1.0f, 1.0f);
 	Continentalness = FMath::Clamp(Continentalness, -1.0f, 1.0f);
 
-	// Priority-based selection: Mountain (cold+inland) > Forest (humid) > containment > Plains (default)
-	for (const FBiomeDefinition& Biome : Biomes)
-	{
-		// Check Mountain first (cold + deep inland overrides everything)
-		if (Biome.Name == TEXT("Mountain") && Temperature <= Biome.TemperatureRange.Y
-			&& Continentalness >= Biome.ContinentalnessRange.X && Continentalness <= Biome.ContinentalnessRange.Y)
-		{
-			return &Biome;
-		}
-	}
+	// Data-driven priority selection: filter by containment, return highest SelectionPriority
+	const FBiomeDefinition* BestBiome = nullptr;
+	int32 BestPriority = INT_MIN;
 
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
-		// Check Forest (humid areas get trees)
-		if (Biome.Name == TEXT("Forest") &&
-			Moisture >= Biome.MoistureRange.X &&
-			Temperature >= Biome.TemperatureRange.X && Temperature <= Biome.TemperatureRange.Y &&
-			Continentalness >= Biome.ContinentalnessRange.X && Continentalness <= Biome.ContinentalnessRange.Y)
+		if (Biome.Contains(Temperature, Moisture, Continentalness) && Biome.SelectionPriority > BestPriority)
 		{
-			return &Biome;
+			BestBiome = &Biome;
+			BestPriority = Biome.SelectionPriority;
 		}
 	}
 
-	// Check all biomes by containment (for Ocean and user-defined biomes)
-	for (const FBiomeDefinition& Biome : Biomes)
-	{
-		if (Biome.Contains(Temperature, Moisture, Continentalness))
-		{
-			return &Biome;
-		}
-	}
-
-	// Default to first biome (Plains)
-	return &Biomes[0];
+	// Fallback to first biome if no containment match
+	return BestBiome ? BestBiome : &Biomes[0];
 }
 
 uint8 UVoxelBiomeConfiguration::SelectBiomeID(float Temperature, float Moisture, float Continentalness) const
@@ -355,9 +383,10 @@ FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moi
 	Continentalness = FMath::Clamp(Continentalness, -1.0f, 1.0f);
 
 	// Ensure minimum blend width
-	float EffectiveBlendWidth = FMath::Max(BiomeBlendWidth, 0.01f);
+	const float EffectiveBlendWidth = FMath::Max(BiomeBlendWidth, 0.01f);
 
-	// Calculate weights for all biomes based on distance to their edges
+	// Tiered blending: continentalness is a hard gate with soft edges,
+	// temperature/moisture is the selector within the filtered set.
 	struct FBiomeWeight
 	{
 		uint8 BiomeID;
@@ -368,27 +397,52 @@ FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moi
 
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
-		// Get signed distance to biome edge (positive = inside, negative = outside)
-		float SignedDist = Biome.GetSignedDistanceToEdge(Temperature, Moisture, Continentalness);
-
-		// Calculate weight based on distance
-		float Weight = 0.0f;
-
-		if (SignedDist >= EffectiveBlendWidth)
+		// Step 1: Continentalness gate — hard exclusion outside blend zone
+		const float ContDist = Biome.GetContinentalnessSignedDistance(Continentalness);
+		if (ContDist < -EffectiveBlendWidth)
 		{
-			// Well inside this biome - full weight
-			Weight = 1.0f;
-		}
-		else if (SignedDist > -EffectiveBlendWidth)
-		{
-			// In the blend zone - smooth falloff using smoothstep
-			float T = (SignedDist + EffectiveBlendWidth) / (2.0f * EffectiveBlendWidth);
-			Weight = T * T * (3.0f - 2.0f * T);
+			continue; // Excluded by continentalness gate
 		}
 
-		if (Weight > 0.001f)
+		// Step 2: Continentalness factor — smoothstep from 0 at -BlendWidth to 1 at +BlendWidth
+		float ContFactor;
+		if (ContDist >= EffectiveBlendWidth)
 		{
-			CandidateBiomes.Add({ Biome.BiomeID, Weight });
+			ContFactor = 1.0f;
+		}
+		else
+		{
+			const float T = (ContDist + EffectiveBlendWidth) / (2.0f * EffectiveBlendWidth);
+			ContFactor = T * T * (3.0f - 2.0f * T); // smoothstep
+		}
+
+		// Step 3: Temperature/Moisture weight — 2D signed distance with smoothstep
+		const float TMDist = Biome.GetSignedDistanceToEdge2D(Temperature, Moisture);
+		float TMWeight;
+		if (TMDist >= EffectiveBlendWidth)
+		{
+			TMWeight = 1.0f;
+		}
+		else if (TMDist > -EffectiveBlendWidth)
+		{
+			const float T = (TMDist + EffectiveBlendWidth) / (2.0f * EffectiveBlendWidth);
+			TMWeight = T * T * (3.0f - 2.0f * T); // smoothstep
+		}
+		else
+		{
+			TMWeight = 0.0f;
+		}
+
+		// Step 4: Combined weight = TM selection * continentalness gate * priority boost
+		// Priority boost ensures higher-priority biomes dominate in blend zones.
+		// Uses exponential scaling so high-priority biomes strongly outweigh low-priority
+		// in contested blend regions. Priority 0 → 1.0x, Priority 10 → 4.0x.
+		const float PriorityBoost = FMath::Pow(2.0f, Biome.SelectionPriority * 0.2f);
+		const float FinalWeight = TMWeight * ContFactor * PriorityBoost;
+
+		if (FinalWeight > 0.001f)
+		{
+			CandidateBiomes.Add({ Biome.BiomeID, FinalWeight });
 		}
 	}
 
@@ -542,17 +596,31 @@ void UVoxelBiomeConfiguration::LogConfiguration() const
 		TemperatureNoiseFrequency, MoistureNoiseFrequency, TemperatureSeedOffset, MoistureSeedOffset);
 	if (bEnableContinentalness)
 	{
-		UE_LOG(LogVoxelCore, Warning, TEXT("Continentalness: Freq=%.7f, Seed=%d, Heights(%.0f/%.0f/%.0f), Scale(%.2f/%.2f)"),
+		const FRichCurve* HC = ContinentalnessHeightCurve.GetRichCurveConst();
+		const FRichCurve* SC = ContinentalnessHeightScaleCurve.GetRichCurveConst();
+		const int32 HKeys = HC ? HC->GetNumKeys() : 0;
+		const int32 SKeys = SC ? SC->GetNumKeys() : 0;
+		float HMin = 0.0f, HMax = 0.0f, SMin = 1.0f, SMax = 1.0f;
+		if (BakedHeightCurve.Num() > 0)
+		{
+			HMin = FMath::Min(BakedHeightCurve);
+			HMax = FMath::Max(BakedHeightCurve);
+		}
+		if (BakedHeightScaleCurve.Num() > 0)
+		{
+			SMin = FMath::Min(BakedHeightScaleCurve);
+			SMax = FMath::Max(BakedHeightScaleCurve);
+		}
+		UE_LOG(LogVoxelCore, Warning, TEXT("Continentalness: Freq=%.7f, Seed=%d, HeightCurve(%d keys, range %.0f..%.0f), ScaleCurve(%d keys, range %.2f..%.2f)"),
 			ContinentalnessNoiseFrequency, ContinentalnessSeedOffset,
-			ContinentalnessHeightMin, ContinentalnessHeightMid, ContinentalnessHeightMax,
-			ContinentalnessHeightScaleMin, ContinentalnessHeightScaleMax);
+			HKeys, HMin, HMax, SKeys, SMin, SMax);
 	}
 
 	UE_LOG(LogVoxelCore, Warning, TEXT("--- Biomes (%d) ---"), Biomes.Num());
 	for (const FBiomeDefinition& B : Biomes)
 	{
-		UE_LOG(LogVoxelCore, Warning, TEXT("  [%d] %s: Temp(%.2f..%.2f) Moist(%.2f..%.2f) Cont(%.2f..%.2f)"),
-			B.BiomeID, *B.Name, B.TemperatureRange.X, B.TemperatureRange.Y,
+		UE_LOG(LogVoxelCore, Warning, TEXT("  [%d] %s (Pri=%d): Temp(%.2f..%.2f) Moist(%.2f..%.2f) Cont(%.2f..%.2f)"),
+			B.BiomeID, *B.Name, B.SelectionPriority, B.TemperatureRange.X, B.TemperatureRange.Y,
 			B.MoistureRange.X, B.MoistureRange.Y,
 			B.ContinentalnessRange.X, B.ContinentalnessRange.Y);
 		UE_LOG(LogVoxelCore, Warning, TEXT("       Surface=%d Subsurface=%d Deep=%d  SurfDepth=%.1f SubDepth=%.1f"),
@@ -648,5 +716,6 @@ void UVoxelBiomeConfiguration::PostEditChangeProperty(FPropertyChangedEvent& Pro
 	RebuildBiomeIndexCache();
 	RebuildHeightRulesCache();
 	RebuildOreVeinsCache();
+	RebuildBakedCurves();
 }
 #endif

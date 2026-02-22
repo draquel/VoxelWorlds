@@ -189,6 +189,14 @@ struct VOXELCORE_API FBiomeDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome|Ore")
 	bool bAddToGlobalOres = false;
 
+	/**
+	 * Selection priority when multiple biomes contain a point.
+	 * Higher priority wins. Used by tiered biome selection.
+	 * Example: Ocean=10, Mountain=5, Forest=3, Plains=0 (fallback).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Biome")
+	int32 SelectionPriority = 0;
+
 	FBiomeDefinition() = default;
 
 	FBiomeDefinition(
@@ -281,6 +289,30 @@ struct VOXELCORE_API FBiomeDefinition
 		const float DeltaT = Temperature - CenterTemp;
 		const float DeltaM = Moisture - CenterMoist;
 		return FMath::Sqrt(DeltaT * DeltaT + DeltaM * DeltaM);
+	}
+
+	/**
+	 * Calculate signed distance using only temperature and moisture axes.
+	 * Positive = inside, negative = outside. Used by tiered biome blending.
+	 */
+	float GetSignedDistanceToEdge2D(float Temperature, float Moisture) const
+	{
+		const float DistTempMin = Temperature - TemperatureRange.X;
+		const float DistTempMax = TemperatureRange.Y - Temperature;
+		const float DistMoistMin = Moisture - MoistureRange.X;
+		const float DistMoistMax = MoistureRange.Y - Moisture;
+		return FMath::Min(FMath::Min(DistTempMin, DistTempMax), FMath::Min(DistMoistMin, DistMoistMax));
+	}
+
+	/**
+	 * Calculate signed distance on the continentalness axis only.
+	 * Positive = inside, negative = outside. Used as a hard gate in tiered selection.
+	 */
+	float GetContinentalnessSignedDistance(float Continentalness) const
+	{
+		const float DistMin = Continentalness - ContinentalnessRange.X;
+		const float DistMax = ContinentalnessRange.Y - Continentalness;
+		return FMath::Min(DistMin, DistMax);
 	}
 
 	/**

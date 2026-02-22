@@ -62,11 +62,9 @@ public:
 		SHADER_PARAMETER(int32, ContinentalnessEnabled)
 		SHADER_PARAMETER(int32, ContinentalnessSeed)
 		SHADER_PARAMETER(float, ContinentalnessFrequency)
-		SHADER_PARAMETER(float, ContinentalnessHeightMin)
-		SHADER_PARAMETER(float, ContinentalnessHeightMid)
-		SHADER_PARAMETER(float, ContinentalnessHeightMax)
-		SHADER_PARAMETER(float, ContinentalnessHeightScaleMin)
-		SHADER_PARAMETER(float, ContinentalnessHeightScaleMax)
+		SHADER_PARAMETER(int32, ContinentalnessCurveSamples)
+		SHADER_PARAMETER_SCALAR_ARRAY(float, ContinentalnessHeightCurve, [32])
+		SHADER_PARAMETER_SCALAR_ARRAY(float, ContinentalnessHeightScaleCurve, [32])
 		// Water level parameters
 		SHADER_PARAMETER(int32, WaterLevelEnabled)
 		SHADER_PARAMETER(float, WaterLevelHeight)
@@ -194,15 +192,17 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 			Parameters->BaseHeight = CapturedRequest.BaseHeight;
 			Parameters->OutputVoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
 
-			// Continentalness parameters
+			// Continentalness parameters — zero-initialize curve arrays
 			Parameters->ContinentalnessEnabled = 0;
 			Parameters->ContinentalnessSeed = 0;
 			Parameters->ContinentalnessFrequency = 0.00002f;
-			Parameters->ContinentalnessHeightMin = -3000.0f;
-			Parameters->ContinentalnessHeightMid = 0.0f;
-			Parameters->ContinentalnessHeightMax = 1000.0f;
-			Parameters->ContinentalnessHeightScaleMin = 0.2f;
-			Parameters->ContinentalnessHeightScaleMax = 1.0f;
+			Parameters->ContinentalnessCurveSamples = 0;
+			// SHADER_PARAMETER_SCALAR_ARRAY packs floats into FVector4f (4 per element)
+			for (int32 i = 0; i < 8; ++i)
+			{
+				Parameters->ContinentalnessHeightCurve[i] = FVector4f(0.0f);
+				Parameters->ContinentalnessHeightScaleCurve[i] = FVector4f(0.0f);
+			}
 
 			if (CapturedRequest.BiomeConfiguration && CapturedRequest.BiomeConfiguration->bEnableContinentalness)
 			{
@@ -210,11 +210,17 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 				Parameters->ContinentalnessEnabled = 1;
 				Parameters->ContinentalnessSeed = CapturedRequest.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
 				Parameters->ContinentalnessFrequency = BiomeConfig->ContinentalnessNoiseFrequency;
-				Parameters->ContinentalnessHeightMin = BiomeConfig->ContinentalnessHeightMin;
-				Parameters->ContinentalnessHeightMid = BiomeConfig->ContinentalnessHeightMid;
-				Parameters->ContinentalnessHeightMax = BiomeConfig->ContinentalnessHeightMax;
-				Parameters->ContinentalnessHeightScaleMin = BiomeConfig->ContinentalnessHeightScaleMin;
-				Parameters->ContinentalnessHeightScaleMax = BiomeConfig->ContinentalnessHeightScaleMax;
+
+				// Upload baked curve arrays to shader — pack 4 floats per FVector4f
+				const int32 NumSamples = FMath::Min(BiomeConfig->BakedHeightCurve.Num(), 32);
+				Parameters->ContinentalnessCurveSamples = NumSamples;
+				for (int32 i = 0; i < NumSamples; ++i)
+				{
+					const int32 VecIdx = i / 4;
+					const int32 CompIdx = i % 4;
+					reinterpret_cast<float*>(&Parameters->ContinentalnessHeightCurve[VecIdx])[CompIdx] = BiomeConfig->BakedHeightCurve[i];
+					reinterpret_cast<float*>(&Parameters->ContinentalnessHeightScaleCurve[VecIdx])[CompIdx] = BiomeConfig->BakedHeightScaleCurve[i];
+				}
 			}
 
 			// Water level parameters

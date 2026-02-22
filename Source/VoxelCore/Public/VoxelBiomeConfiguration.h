@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "Curves/CurveFloat.h"
 #include "VoxelBiomeDefinition.h"
 #include "VoxelBiomeConfiguration.generated.h"
 
@@ -152,44 +153,41 @@ public:
 	int32 ContinentalnessSeedOffset = 9012;
 
 	/**
-	 * Height offset at continentalness = -1 (deep ocean), in world units.
-	 * Should be well below WaterLevel to create ocean floor.
+	 * Maps continentalness [-1,1] to height offset in world units.
+	 * Use the curve editor to shape continental shelves, coastline drops, plateaus, etc.
+	 * Default keys: (-1, -3000), (0, 0), (1, 1000) for backward-compatible 3-point linear.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (EditCondition = "bEnableContinentalness"))
-	float ContinentalnessHeightMin = -3000.0f;
+	FRuntimeFloatCurve ContinentalnessHeightCurve;
 
 	/**
-	 * Height offset at continentalness = 0 (coast).
+	 * Maps continentalness [-1,1] to HeightScale multiplier.
+	 * Controls terrain roughness: ocean floors are flat (low multiplier), inland has full variation.
+	 * Default keys: (-1, 0.2), (1, 1.0) for backward-compatible linear interpolation.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (EditCondition = "bEnableContinentalness"))
-	float ContinentalnessHeightMid = 0.0f;
+	FRuntimeFloatCurve ContinentalnessHeightScaleCurve;
 
-	/**
-	 * Height offset at continentalness = +1 (continental interior).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (EditCondition = "bEnableContinentalness"))
-	float ContinentalnessHeightMax = 1000.0f;
-
-	/**
-	 * HeightScale multiplier at continentalness = -1 (ocean: flat seabed).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bEnableContinentalness"))
-	float ContinentalnessHeightScaleMin = 0.2f;
-
-	/**
-	 * HeightScale multiplier at continentalness = +1 (inland: full terrain variation).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bEnableContinentalness"))
-	float ContinentalnessHeightScaleMax = 1.0f;
+	/** Number of samples in the baked continentalness curves */
+	static constexpr int32 CONTINENTALNESS_CURVE_SAMPLE_COUNT = 32;
 
 	/**
 	 * Map continentalness value to terrain height offset and height scale multiplier.
-	 * Uses piecewise linear interpolation: [-1,0] maps HeightMin->HeightMid, [0,1] maps HeightMid->HeightMax.
+	 * Interpolates from baked curve arrays for efficient per-voxel evaluation.
 	 * @param Continentalness Input value in [-1, 1]
 	 * @param OutHeightOffset Output height offset in world units
 	 * @param OutHeightScaleMultiplier Output multiplier for HeightScale
 	 */
 	void GetContinentalnessTerrainParams(float Continentalness, float& OutHeightOffset, float& OutHeightScaleMultiplier) const;
+
+	/** Rebuild baked curve arrays from the FRuntimeFloatCurve properties. Call after curves change. */
+	void RebuildBakedCurves();
+
+	/** Baked height curve samples (CONTINENTALNESS_CURVE_SAMPLE_COUNT entries, evenly spaced over [-1,1]) */
+	TArray<float> BakedHeightCurve;
+
+	/** Baked height scale curve samples (CONTINENTALNESS_CURVE_SAMPLE_COUNT entries, evenly spaced over [-1,1]) */
+	TArray<float> BakedHeightScaleCurve;
 
 	// ==================== API ====================
 

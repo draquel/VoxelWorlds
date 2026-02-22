@@ -331,11 +331,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	ContinentalnessNoiseParams.Persistence = 0.5f;
 	ContinentalnessNoiseParams.Lacunarity = 2.0f;
 	ContinentalnessNoiseParams.Amplitude = 1.0f;
-	float ContHeightMin = -3000.0f;
-	float ContHeightMid = 0.0f;
-	float ContHeightMax = 1000.0f;
-	float ContScaleMin = 0.2f;
-	float ContScaleMax = 1.0f;
+	TArray<float> BakedHeightCurve;
+	TArray<float> BakedScaleCurve;
 
 	if (bUseBiomes && CachedBiomeConfig && CachedBiomeConfig->IsValid())
 	{
@@ -357,11 +354,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 			bUseContinentalness = true;
 			ContinentalnessNoiseParams.Seed = NoiseParams.Seed + CachedBiomeConfig->ContinentalnessSeedOffset;
 			ContinentalnessNoiseParams.Frequency = CachedBiomeConfig->ContinentalnessNoiseFrequency;
-			ContHeightMin = CachedBiomeConfig->ContinentalnessHeightMin;
-			ContHeightMid = CachedBiomeConfig->ContinentalnessHeightMid;
-			ContHeightMax = CachedBiomeConfig->ContinentalnessHeightMax;
-			ContScaleMin = CachedBiomeConfig->ContinentalnessHeightScaleMin;
-			ContScaleMax = CachedBiomeConfig->ContinentalnessHeightScaleMax;
+			BakedHeightCurve = CachedBiomeConfig->BakedHeightCurve;
+			BakedScaleCurve = CachedBiomeConfig->BakedHeightScaleCurve;
 		}
 	}
 	else if (bUseBiomes)
@@ -383,7 +377,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		 bEnableHeightMaterials, HeightRules = MoveTemp(HeightRules),
 		 TempNoiseParams, MoistureNoiseParams,
 		 bUseContinentalness, ContinentalnessNoiseParams,
-		 ContHeightMin, ContHeightMid, ContHeightMax, ContScaleMin, ContScaleMax]()
+		 BakedHeightCurve = MoveTemp(BakedHeightCurve), BakedScaleCurve = MoveTemp(BakedScaleCurve)]()
 	{
 		if (!WorldMode)
 		{
@@ -410,38 +404,18 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 					const FVector ContSamplePos(WorldX, WorldY, 0.0f);
 					Continentalness = FVoxelCPUNoiseGenerator::FBM3D(ContSamplePos, ContinentalnessNoiseParams);
 
-					// Modulate terrain height to match CPU generator
-					// Piecewise linear height offset
-					float HeightOffset;
-					if (Continentalness < 0.0f)
+					// Modulate terrain height using baked curve lookup (matches CPU/GPU generator)
+					const int32 N = BakedHeightCurve.Num();
+					if (N >= 2)
 					{
-						HeightOffset = FMath::Lerp(ContHeightMin, ContHeightMid, Continentalness + 1.0f);
-					}
-					else
-					{
-						HeightOffset = FMath::Lerp(ContHeightMid, ContHeightMax, Continentalness);
-					}
+						const float FIdx = (Continentalness + 1.0f) * 0.5f * static_cast<float>(N - 1);
+						const int32 Idx0 = FMath::Clamp(FMath::FloorToInt(FIdx), 0, N - 2);
+						const float Frac = FIdx - static_cast<float>(Idx0);
+						const float HeightOffset = FMath::Lerp(BakedHeightCurve[Idx0], BakedHeightCurve[Idx0 + 1], Frac);
 
-					// Height scale multiplier
-					float ScaleMult = FMath::Lerp(ContScaleMin, ContScaleMax, Continentalness * 0.5f + 0.5f);
-
-					// Reconstruct height with modulated params:
-					// Original Height = SeaLevel + BaseHeight + NoiseValue * HeightScale
-					// We need:        = SeaLevel + (BaseHeight + HeightOffset) + NoiseValue * (HeightScale * ScaleMult)
-					// Difference:      = HeightOffset + NoiseValue * HeightScale * (ScaleMult - 1)
-					// Since we don't have NoiseValue directly, approximate by using the
-					// offset relative to base: NoiseContribution = Height - (SeaLevel + BaseHeight)
-					// This gives: ModifiedHeight = SeaLevel + (BaseHeight + HeightOffset) + NoiseContribution * ScaleMult
-					// But WorldMode->GetTerrainHeightAt already computed Height with original params.
-					// Compute the noise contribution and re-apply with modulated scale.
-					float BaseTerrainHeight = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
-					// The simplest correct approach: WorldMode returns SeaLevel + BaseHeight + noise*HeightScale
-					// We want SeaLevel + (BaseHeight + HeightOffset) + noise*(HeightScale*ScaleMult)
-					// = BaseTerrainHeight + HeightOffset + noise*HeightScale*(ScaleMult - 1)
-					// noise*HeightScale = BaseTerrainHeight - (SeaLevel + BaseHeight)
-					// We don't have SeaLevel/BaseHeight separately here. Use the offset only as approximation
-					// that's consistent for map rendering (height modulation shifts the whole column).
-					Height = BaseTerrainHeight + HeightOffset;
+						float BaseTerrainHeight = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+						Height = BaseTerrainHeight + HeightOffset;
+					}
 				}
 
 				// Determine surface material using biome system (matches VoxelCPUNoiseGenerator)
@@ -460,17 +434,13 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 						// Replicate the blend logic locally since we can't call UObject methods
 						// from a background thread. Select dominant biome by closest center.
 						const FBiomeDefinition* BestBiome = BiomeDefs.Num() > 0 ? &BiomeDefs[0] : nullptr;
-						float BestDist = MAX_FLT;
+						int32 BestPriority = INT_MIN;
 						for (const FBiomeDefinition& Biome : BiomeDefs)
 						{
-							if (Biome.Contains(Temperature, Moisture, Continentalness))
+							if (Biome.Contains(Temperature, Moisture, Continentalness) && Biome.SelectionPriority > BestPriority)
 							{
-								const float Dist = Biome.GetDistanceToCenter(Temperature, Moisture);
-								if (Dist < BestDist)
-								{
-									BestDist = Dist;
-									BestBiome = &Biome;
-								}
+								BestPriority = Biome.SelectionPriority;
+								BestBiome = &Biome;
 							}
 						}
 						if (BestBiome)

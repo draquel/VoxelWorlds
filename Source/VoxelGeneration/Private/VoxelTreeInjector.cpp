@@ -252,8 +252,23 @@ void FVoxelTreeInjector::QuerySurfaceConditions(
 	const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, TempNoiseParams);
 	const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
-	// Select biome
-	FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture);
+	// Sample continentalness noise if enabled
+	float Continentalness = 0.0f;
+	if (BiomeConfig->bEnableContinentalness)
+	{
+		FVoxelNoiseParams ContNoiseParams;
+		ContNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+		ContNoiseParams.Octaves = 2;
+		ContNoiseParams.Persistence = 0.5f;
+		ContNoiseParams.Lacunarity = 2.0f;
+		ContNoiseParams.Amplitude = 1.0f;
+		ContNoiseParams.Seed = WorldSeed + BiomeConfig->ContinentalnessSeedOffset;
+		ContNoiseParams.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
+		Continentalness = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ContNoiseParams);
+	}
+
+	// Select biome (now with continentalness for proper tiered gating)
+	FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
 	OutBiomeID = Blend.GetDominantBiome();
 
 	// Get surface material (depth = 0 for surface)
