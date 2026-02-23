@@ -14,10 +14,11 @@
 7. [PMC Renderer](#pmc-renderer)
 8. [LOD Morphing System](#lod-morphing-system)
 9. [Vertex Color Encoding](#vertex-color-encoding)
-10. [Collision System](#collision-system)
-11. [Integration Flow](#integration-flow)
-12. [Performance Comparison](#performance-comparison)
-13. [Implementation Guide](#implementation-guide)
+10. [Water Tile Rendering](#water-tile-rendering)
+11. [Collision System](#collision-system)
+12. [Integration Flow](#integration-flow)
+13. [Performance Comparison](#performance-comparison)
+14. [Implementation Guide](#implementation-guide)
 
 ---
 
@@ -1053,6 +1054,70 @@ private:
     }
 };
 ```
+
+---
+
+## Water Tile Rendering
+
+Both renderer implementations support water tile rendering via the `IVoxelMeshRenderer` water tile API. Water tiles are keyed by `FIntVector2` (XY chunk column), separate from terrain chunks keyed by `FIntVector`.
+
+See [WATER_SYSTEM.md](WATER_SYSTEM.md) for the full water system architecture (flag storage, propagation, meshing, tile management).
+
+### Interface
+
+```cpp
+virtual void SetWaterMaterial(UMaterialInterface* Material) { }
+virtual void UpdateWaterTileMesh(
+    const FIntVector2& TileCoord,
+    const FChunkMeshData& WaterMeshData) { }
+virtual void RemoveWaterTile(const FIntVector2& TileCoord) { }
+virtual void ClearAllWaterTiles() { }
+```
+
+### Custom VF Water Rendering
+
+The GPU renderer renders water tiles as a **second pass** in `GetDynamicMeshElements`, after the terrain chunk loop:
+
+```
+FVoxelCustomVFRenderer::UpdateWaterTileMesh()
+    ↓ ConvertToVoxelVertices (FChunkMeshData → FVoxelVertex[])
+    ↓
+UVoxelWorldComponent::UpdateWaterTileFromCPUData()
+    ↓ ENQUEUE_RENDER_COMMAND
+    ↓
+FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread()
+    ↓ Create GPU buffers (vertex, color SRV, tangent SRV, texcoord SRV, index)
+    ↓ Create FLocalVertexFactory
+    ↓ Store in WaterTile* maps (FIntVector2-keyed)
+
+FVoxelSceneProxy::GetDynamicMeshElements()
+    ├── [Pass 1] Terrain chunks (existing)
+    └── [Pass 2] Water tiles
+        ├── Uses WaterMaterial (separate from terrain)
+        ├── Same frustum culling as terrain
+        ├── CastShadow = false
+        ├── bUseAsOccluder = false
+        └── Shares 500 mesh batch limit with terrain
+```
+
+**GetViewRelevance**: Water material relevance is OR'd with terrain material relevance so the scene proxy correctly reports translucency support when water uses a translucent or Single Layer Water material.
+
+**CreateSceneProxy**: When the scene proxy is recreated, water material is re-synced via `ENQUEUE_RENDER_COMMAND`.
+
+### PMC Water Rendering
+
+The PMC renderer creates one `UProceduralMeshComponent` per water tile:
+- Dedicated PMC attached to the container actor
+- Water material applied separately from terrain material
+- Single mesh section per tile containing all greedy-merged water quads
+- Component pooling for reuse on tile removal/recreation
+
+### Water Material Requirements
+
+- Should be **translucent** or **Single Layer Water** shading model
+- Must NOT be opaque (water renders in a separate pass and needs correct sorting)
+- Configured via `UVoxelWorldConfiguration::WaterMeshMaterial`
+- When null, the system falls back to a static water plane
 
 ---
 

@@ -786,6 +786,9 @@ Phase 7 performance targets displayed for comparison:
 - [x] Terrain Map / Mini-Map
 - [x] Cave generation — multi-layer (Cheese, Spaghetti, Noodle) via `UVoxelCaveConfiguration` data asset, density subtraction model, works across all 3 world modes (CPU + GPU InfinitePlane), depth constraints, biome overrides, cave wall material override. See `Documentation/CAVE_SYSTEM.md`
 - [x] Advanced noise (Voronoi, Cellular) — `EVoxelNoiseType::Cellular` and `Voronoi` added to enum, GPU (`CellularNoise.ush`) and CPU (`Cellular3D`, `Voronoi3D`) implementations, integrated into fBm on both paths. See `Documentation/NOISE_LIBRARY.md`
+- [x] Dual Contouring — CPU + GPU implementations with QEF solver and LOD boundary merging. See `DUAL_CONTOURING.md`
+- [x] Continentalness / Ocean Biome
+- [x] Improve Water
 
 ### Potential Features
 - [ ] Quadtree LOD (if distance bands insufficient)
@@ -793,14 +796,14 @@ Phase 7 performance targets displayed for comparison:
 - [ ] Weather/season system
 - [ ] Multiplayer support
 - [ ] Destructible terrain
-- [ ] Improve Water
 - [ ] Export to Unreal Terrain / Static Terrain Mesh(es)
 - [ ] Stair, Door, Fence, Gate Block Types (Gameplay - Need a strategy for compartmentalization)
 - [ ] Final World Actor(s)
 - [ ] Editor Tools / Debugging tools
-- [x] Dual Contouring — CPU + GPU implementations with QEF solver and LOD boundary merging. See `DUAL_CONTOURING.md`
+
+### Issues
 - [ ] TransVoxel Seams troubleshooting
-- [ ] Continentalness / Ocean Biome
+- [ ] LOD Testing/Troubleshooting
 
 ---
 

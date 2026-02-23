@@ -88,14 +88,23 @@ VoxelWorld (Root Container)
 │   │   │   ├── FVoxelVertexFactory
 │   │   │   ├── FVoxelSceneProxy
 │   │   │   ├── Per-Chunk GPU Buffers
-│   │   │   └── LOD Morphing (Vertex Shader)
+│   │   │   ├── LOD Morphing (Vertex Shader)
+│   │   │   └── Water Tile Rendering (second pass)
 │   │   └── VoxelPMCRenderer (Editor/tools)
-│   │       └── ProceduralMeshComponents
+│   │       ├── ProceduralMeshComponents
+│   │       └── Water Tile PMCs (dedicated)
 │   ├── MeshingSystem (3 algorithms)
 │   │   ├── CubicMesher (Face-culling, Greedy, AO)
 │   │   ├── MarchingCubesMesher (Isosurface + Transvoxel LOD)
 │   │   └── DualContourMesher (QEF vertex + Cell-merge LOD)
 │   └── CollisionManager (Separate, Async, Lower LOD)
+│
+├── WaterSystem
+│   ├── Water Flags (FVoxelData::Metadata bit 4)
+│   ├── Water Fill Pass (column-scan during generation)
+│   ├── Water Propagation (BFS on terrain edits)
+│   ├── Water Mesher (column mask + dilation + greedy merge)
+│   └── 2D Water Tiles (FIntVector2-keyed, per XY column)
 │
 └── ScatterSystem
     ├── Vegetation Placement
@@ -413,7 +422,17 @@ See: [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) for complete details.
 **Cubic Mode**: Tile atlas with per-face UVs
 **Smooth Mode** (MarchingCubes + DualContouring): Triplanar projection with material blending
 
-### 6. Biome System
+### 6. Water System
+
+See: [WATER_SYSTEM.md](WATER_SYSTEM.md) for complete details.
+
+**Per-voxel water flags** stored in `FVoxelData::Metadata` bit 4, set during generation via column-scan and propagated across chunk boundaries. When terrain edits expose air adjacent to water, `UVoxelWaterPropagation` performs bounded BFS flood fill.
+
+**2D Water Tiles** (`FIntVector2`-keyed) aggregate water from multiple Z-level chunks per XY column. `FVoxelWaterMesher` builds column masks, dilates by 3 cells for shoreline overlap, and greedy-merges into minimal quads.
+
+**Rendering**: Both `FVoxelCustomVFRenderer` (GPU — second render pass with separate water material) and `FVoxelPMCRenderer` (dedicated PMC per tile) support water tiles via `IVoxelMeshRenderer` water tile API.
+
+### 7. Biome System
 
 See: [BIOME_SYSTEM.md](BIOME_SYSTEM.md) for complete details.
 
@@ -764,6 +783,7 @@ See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap
 - [Marching Cubes Meshing & Transvoxel](MARCHING_CUBES_MESHING.md)
 - [Dual Contouring Meshing](DUAL_CONTOURING.md)
 - [Rendering System Details](RENDERING_SYSTEM.md)
+- [Water System](WATER_SYSTEM.md)
 - [GPU Pipeline Details](GPU_PIPELINE.md)
 - [Data Structures Reference](DATA_STRUCTURES.md)
 - [World Modes Guide](WORLD_MODES.md)
