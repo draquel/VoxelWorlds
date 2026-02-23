@@ -110,8 +110,9 @@ void FVoxelCustomVFRenderer::Shutdown()
 		return;
 	}
 
-	// Clear all chunks first
+	// Clear all chunks and water tiles first
 	ClearAllChunks();
+	ClearAllWaterTiles();
 
 	// Destroy component
 	if (WorldComponent)
@@ -130,6 +131,7 @@ void FVoxelCustomVFRenderer::Shutdown()
 	CachedWorld.Reset();
 	CachedConfig.Reset();
 	CurrentMaterial.Reset();
+	CurrentWaterMaterial.Reset();
 
 	ChunkStatsMap.Empty();
 	TotalVertexCount = 0;
@@ -425,6 +427,76 @@ UVoxelMaterialAtlas* FVoxelCustomVFRenderer::GetMaterialAtlas() const
 		return WorldComponent->GetMaterialAtlas();
 	}
 	return nullptr;
+}
+
+// ==================== Water Tile Support ====================
+
+void FVoxelCustomVFRenderer::SetWaterMaterial(UMaterialInterface* Material)
+{
+	check(IsInGameThread());
+
+	CurrentWaterMaterial = Material;
+
+	if (WorldComponent)
+	{
+		WorldComponent->SetWaterMaterial(Material);
+	}
+}
+
+void FVoxelCustomVFRenderer::UpdateWaterTileMesh(
+	const FIntVector2& TileCoord,
+	const FChunkMeshData& WaterMeshData)
+{
+	check(IsInGameThread());
+
+	if (!IsInitialized())
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelCustomVFRenderer::UpdateWaterTileMesh called before initialization"));
+		return;
+	}
+
+	if (!WaterMeshData.IsValid())
+	{
+		RemoveWaterTile(TileCoord);
+		return;
+	}
+
+	// Convert CPU mesh data to FVoxelVertex array
+	TArray<FVoxelVertex> Vertices;
+	ConvertToVoxelVertices(WaterMeshData, Vertices);
+
+	// Copy indices
+	TArray<uint32> Indices = WaterMeshData.Indices;
+
+	// Calculate tile world position
+	const FVector WorldOrigin = CachedConfig.IsValid() ? CachedConfig->WorldOrigin : FVector::ZeroVector;
+	const FVector TileWorldPos = WorldOrigin + FVector(TileCoord.X * ChunkWorldSize, TileCoord.Y * ChunkWorldSize, 0.0);
+
+	// Forward to world component
+	WorldComponent->UpdateWaterTileFromCPUData(TileCoord, MoveTemp(Vertices), MoveTemp(Indices), TileWorldPos);
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated water tile (%d,%d) - %d verts"),
+		TileCoord.X, TileCoord.Y, WaterMeshData.Positions.Num());
+}
+
+void FVoxelCustomVFRenderer::RemoveWaterTile(const FIntVector2& TileCoord)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->RemoveWaterTile(TileCoord);
+	}
+}
+
+void FVoxelCustomVFRenderer::ClearAllWaterTiles()
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->ClearAllWaterTiles();
+	}
 }
 
 // ==================== LOD Transitions ====================

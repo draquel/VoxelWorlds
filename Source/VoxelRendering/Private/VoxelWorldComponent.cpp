@@ -68,7 +68,25 @@ FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
 	UE_LOG(LogVoxelRendering, Log, TEXT("UVoxelWorldComponent: Creating scene proxy with material: %s"),
 		MaterialToUse ? *MaterialToUse->GetName() : TEXT("nullptr"));
 
-	return new FVoxelSceneProxy(this, MaterialToUse);
+	FVoxelSceneProxy* NewProxy = new FVoxelSceneProxy(this, MaterialToUse);
+
+	// Sync water material to the new proxy if already set
+	if (WaterMaterial)
+	{
+		UWorld* World = GetWorld();
+		ERHIFeatureLevel::Type FL = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
+		FMaterialRelevance WaterRelevance = WaterMaterial->GetRelevance(FL);
+		UMaterialInterface* WaterMat = WaterMaterial;
+
+		ENQUEUE_RENDER_COMMAND(SyncWaterMaterialToProxy)(
+			[NewProxy, WaterMat, WaterRelevance](FRHICommandListImmediate& RHICmdList)
+			{
+				NewProxy->SetWaterMaterial_RenderThread(WaterMat, WaterRelevance);
+			}
+		);
+	}
+
+	return NewProxy;
 }
 
 FBoxSphereBounds UVoxelWorldComponent::CalcBounds(const FTransform& LocalToWorld) const
@@ -295,19 +313,115 @@ void UVoxelWorldComponent::ClearAllChunks()
 	PendingAdds.Empty();
 	PendingRemovals.Empty();
 
-	// Enqueue render thread clear
+	// Enqueue render thread clear (chunks + water tiles)
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
-		ENQUEUE_RENDER_COMMAND(ClearVoxelChunks)(
+		ENQUEUE_RENDER_COMMAND(ClearVoxelChunksAndWater)(
 			[Proxy](FRHICommandListImmediate& RHICmdList)
 			{
 				Proxy->ClearAllChunks_RenderThread();
+				Proxy->ClearAllWaterTiles_RenderThread();
 			}
 		);
 	}
 
 	UpdateBounds();
+}
+
+// ==================== Water Tile Management ====================
+
+void UVoxelWorldComponent::SetWaterMaterial(UMaterialInterface* InMaterial)
+{
+	check(IsInGameThread());
+
+	WaterMaterial = InMaterial;
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy && InMaterial)
+	{
+		// Compute MaterialRelevance on game thread (GetRelevance requires game thread)
+		UWorld* World = GetWorld();
+		ERHIFeatureLevel::Type FL = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
+		FMaterialRelevance WaterRelevance = InMaterial->GetRelevance(FL);
+
+		ENQUEUE_RENDER_COMMAND(SetVoxelWaterMaterial)(
+			[Proxy, InMaterial, WaterRelevance](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->SetWaterMaterial_RenderThread(InMaterial, WaterRelevance);
+			}
+		);
+	}
+	else if (Proxy && !InMaterial)
+	{
+		// Clear water material
+		ENQUEUE_RENDER_COMMAND(ClearVoxelWaterMaterial)(
+			[Proxy](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->SetWaterMaterial_RenderThread(nullptr, FMaterialRelevance());
+			}
+		);
+	}
+
+	MarkRenderStateDirtyAndNotify();
+}
+
+void UVoxelWorldComponent::UpdateWaterTileFromCPUData(
+	const FIntVector2& TileCoord,
+	TArray<FVoxelVertex>&& Vertices,
+	TArray<uint32>&& Indices,
+	const FVector& TileWorldPosition)
+{
+	check(IsInGameThread());
+
+	if (Vertices.Num() == 0 || Indices.Num() == 0)
+	{
+		RemoveWaterTile(TileCoord);
+		return;
+	}
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(UpdateVoxelWaterTile)(
+			[Proxy, TileCoord, Verts = MoveTemp(Vertices), Idxs = MoveTemp(Indices), TileWorldPosition](FRHICommandListImmediate& RHICmdList) mutable
+			{
+				Proxy->UpdateWaterTileFromCPUData_RenderThread(RHICmdList, TileCoord, MoveTemp(Verts), MoveTemp(Idxs), TileWorldPosition);
+			}
+		);
+	}
+}
+
+void UVoxelWorldComponent::RemoveWaterTile(const FIntVector2& TileCoord)
+{
+	check(IsInGameThread());
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(RemoveVoxelWaterTile)(
+			[Proxy, TileCoord](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->RemoveWaterTile_RenderThread(TileCoord);
+			}
+		);
+	}
+}
+
+void UVoxelWorldComponent::ClearAllWaterTiles()
+{
+	check(IsInGameThread());
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(ClearVoxelWaterTiles)(
+			[Proxy](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->ClearAllWaterTiles_RenderThread();
+			}
+		);
+	}
 }
 
 void UVoxelWorldComponent::SetChunkVisible(const FIntVector& ChunkCoord, bool bNewVisibility)

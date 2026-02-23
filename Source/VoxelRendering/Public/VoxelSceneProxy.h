@@ -145,6 +145,46 @@ public:
 	 */
 	void SetMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InMaterialRelevance);
 
+	// ==================== Water Tile Management (Render Thread) ====================
+
+	/**
+	 * Set water material. Must be called on render thread.
+	 * MaterialRelevance must be computed on game thread before calling.
+	 *
+	 * @param InMaterial Water material (typically translucent or Single Layer Water)
+	 * @param InRelevance Pre-computed material relevance
+	 */
+	void SetWaterMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InRelevance);
+
+	/**
+	 * Update water tile GPU data from CPU vertex arrays. Must be called on render thread.
+	 * Uses the same vertex conversion pipeline as terrain chunks.
+	 *
+	 * @param RHICmdList RHI command list for resource initialization
+	 * @param TileCoord 2D tile coordinate (XY chunk column)
+	 * @param Vertices CPU vertex array (will be moved)
+	 * @param Indices CPU index array (will be moved)
+	 * @param TileWorldPosition World position of tile origin
+	 */
+	void UpdateWaterTileFromCPUData_RenderThread(
+		FRHICommandListBase& RHICmdList,
+		const FIntVector2& TileCoord,
+		TArray<FVoxelVertex>&& Vertices,
+		TArray<uint32>&& Indices,
+		const FVector& TileWorldPosition);
+
+	/**
+	 * Remove a water tile. Must be called on render thread.
+	 *
+	 * @param TileCoord 2D tile coordinate to remove
+	 */
+	void RemoveWaterTile_RenderThread(const FIntVector2& TileCoord);
+
+	/**
+	 * Clear all water tiles. Must be called on render thread.
+	 */
+	void ClearAllWaterTiles_RenderThread();
+
 	// ==================== Statistics ====================
 
 	/** Get number of loaded chunks */
@@ -160,6 +200,8 @@ public:
 	SIZE_T GetGPUMemoryUsage() const;
 
 private:
+	// ==================== Terrain Chunk Data ====================
+
 	/** Per-chunk render data (converted to FLocalVertexFactory format) */
 	TMap<FIntVector, FVoxelChunkRenderData> ChunkRenderData;
 
@@ -172,11 +214,35 @@ private:
 	/** Per-chunk vertex factories (each chunk needs its own since stream components reference specific buffers) */
 	TMap<FIntVector, TSharedPtr<FLocalVertexFactory>> ChunkVertexFactories;
 
-	/** Material for rendering */
+	// ==================== Water Tile Data ====================
+
+	/** Per-tile water render data (FIntVector2 key = XY chunk column) */
+	TMap<FIntVector2, FVoxelChunkRenderData> WaterTileRenderData;
+
+	/** Per-tile water vertex buffers */
+	TMap<FIntVector2, TSharedPtr<FVoxelLocalVertexBuffer>> WaterTileVertexBuffers;
+
+	/** Per-tile water index buffers */
+	TMap<FIntVector2, TSharedPtr<FVoxelLocalIndexBuffer>> WaterTileIndexBuffers;
+
+	/** Per-tile water vertex factories */
+	TMap<FIntVector2, TSharedPtr<FLocalVertexFactory>> WaterTileVertexFactories;
+
+	// ==================== Materials ====================
+
+	/** Material for terrain rendering */
 	UMaterialInterface* Material;
 
 	/** Material relevance */
 	FMaterialRelevance MaterialRelevance;
+
+	/** Material for water tiles (separate from terrain material) */
+	UMaterialInterface* WaterMaterial = nullptr;
+
+	/** Cached water material relevance */
+	FMaterialRelevance WaterMaterialRelevance;
+
+	// ==================== Configuration ====================
 
 	/** Feature level */
 	ERHIFeatureLevel::Type FeatureLevel;

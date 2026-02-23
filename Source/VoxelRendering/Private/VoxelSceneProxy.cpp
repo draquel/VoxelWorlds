@@ -196,6 +196,40 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 		}
 	}
 	ChunkVertexFactories.Empty();
+
+	// Release all water tile resources
+	for (auto& Pair : WaterTileRenderData)
+	{
+		Pair.Value.ReleaseResources();
+	}
+	WaterTileRenderData.Empty();
+
+	for (auto& Pair : WaterTileVertexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	WaterTileVertexBuffers.Empty();
+
+	for (auto& Pair : WaterTileIndexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	WaterTileIndexBuffers.Empty();
+
+	for (auto& Pair : WaterTileVertexFactories)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	WaterTileVertexFactories.Empty();
 }
 
 SIZE_T FVoxelSceneProxy::GetTypeHash() const
@@ -368,14 +402,124 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 		}
 	}
 
+	// ==================== Water Tile Pass ====================
+	// Render water tiles with separate water material
+
+	if (WaterMaterial && WaterTileRenderData.Num() > 0)
+	{
+		FMaterialRenderProxy* WaterMaterialProxy = nullptr;
+
+		if (bWireframe)
+		{
+			FColoredMaterialRenderProxy* WireframeWaterProxy = new FColoredMaterialRenderProxy(
+				GEngine->WireframeMaterial ? GEngine->WireframeMaterial->GetRenderProxy() : nullptr,
+				FLinearColor(0, 0.8f, 1.f)
+			);
+			Collector.RegisterOneFrameMaterialProxy(WireframeWaterProxy);
+			WaterMaterialProxy = WireframeWaterProxy;
+		}
+		else
+		{
+			WaterMaterialProxy = WaterMaterial->GetRenderProxy();
+		}
+
+		if (WaterMaterialProxy)
+		{
+			for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+			{
+				if (!(VisibilityMap & (1 << ViewIndex)))
+				{
+					continue;
+				}
+
+				const FSceneView* View = Views[ViewIndex];
+
+				for (const auto& Pair : WaterTileRenderData)
+				{
+					if (TotalMeshesAdded >= MaxMeshBatchesPerFrame)
+					{
+						SkippedOverLimit++;
+						continue;
+					}
+
+					const FIntVector2& TileCoord = Pair.Key;
+					const FVoxelChunkRenderData& RenderData = Pair.Value;
+
+					if (!RenderData.bIsVisible || !RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
+					{
+						SkippedInvisible++;
+						continue;
+					}
+
+					const TSharedPtr<FLocalVertexFactory>* VertexFactoryPtr = WaterTileVertexFactories.Find(TileCoord);
+					if (!VertexFactoryPtr || !VertexFactoryPtr->IsValid())
+					{
+						SkippedInvisible++;
+						continue;
+					}
+
+					const TSharedPtr<FVoxelLocalIndexBuffer>* IndexBufferPtr = WaterTileIndexBuffers.Find(TileCoord);
+					if (!IndexBufferPtr || !IndexBufferPtr->IsValid())
+					{
+						SkippedInvisible++;
+						continue;
+					}
+
+					// Frustum culling
+					{
+						FBox WorldBounds = RenderData.WorldBounds;
+						if (WorldBounds.IsValid)
+						{
+							WorldBounds = WorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
+							const FConvexVolume& ViewFrustum = View->ViewFrustum;
+							if (!ViewFrustum.IntersectBox(WorldBounds.GetCenter(), WorldBounds.GetExtent()))
+							{
+								SkippedFrustum++;
+								continue;
+							}
+						}
+					}
+
+					FMeshBatch& MeshBatch = Collector.AllocateMesh();
+					MeshBatch.VertexFactory = VertexFactoryPtr->Get();
+					MeshBatch.MaterialRenderProxy = WaterMaterialProxy;
+					MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
+					MeshBatch.bDisableBackfaceCulling = false;
+					MeshBatch.Type = PT_TriangleList;
+					MeshBatch.DepthPriorityGroup = SDPG_World;
+					MeshBatch.bCanApplyViewModeOverrides = true;
+					MeshBatch.bUseWireframeSelectionColoring = IsSelected();
+					MeshBatch.bUseAsOccluder = false;  // Water is translucent
+					MeshBatch.bWireframe = bWireframe;
+					MeshBatch.CastShadow = false;       // Water doesn't cast shadows
+					MeshBatch.bUseForMaterial = true;
+					MeshBatch.bUseForDepthPass = true;
+					MeshBatch.LODIndex = 0;
+					MeshBatch.SegmentIndex = 0;
+
+					FMeshBatchElement& BatchElement = MeshBatch.Elements[0];
+					BatchElement.IndexBuffer = IndexBufferPtr->Get();
+					BatchElement.FirstIndex = 0;
+					BatchElement.NumPrimitives = RenderData.IndexCount / 3;
+					BatchElement.MinVertexIndex = 0;
+					BatchElement.MaxVertexIndex = RenderData.VertexCount - 1;
+					BatchElement.PrimitiveUniformBuffer = GetUniformBuffer();
+
+					Collector.AddMesh(ViewIndex, MeshBatch);
+					TotalMeshesAdded++;
+				}
+			}
+		}
+	}
+
 	// Debug logging (every 60 frames)
 	static int32 LogCounter = 0;
 	LogCounter++;
 	if (LogCounter >= 60)
 	{
 		LogCounter = 0;
-		UE_LOG(LogVoxelRendering, Log, TEXT("GetDynamicMeshElements: Added %d meshes (limit=%d), Skipped: %d invisible, %d frustum, %d over-limit"),
-			TotalMeshesAdded, MaxMeshBatchesPerFrame, SkippedInvisible, SkippedFrustum, SkippedOverLimit);
+		UE_LOG(LogVoxelRendering, Log, TEXT("GetDynamicMeshElements: Added %d meshes (limit=%d, water=%d), Skipped: %d invisible, %d frustum, %d over-limit"),
+			TotalMeshesAdded, MaxMeshBatchesPerFrame, WaterTileRenderData.Num(), SkippedInvisible, SkippedFrustum, SkippedOverLimit);
 	}
 }
 
@@ -392,6 +536,10 @@ FPrimitiveViewRelevance FVoxelSceneProxy::GetViewRelevance(const FSceneView* Vie
 	Result.bTranslucentSelfShadow = false;
 	Result.bVelocityRelevance = false;
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
+	if (WaterMaterial)
+	{
+		WaterMaterialRelevance.SetPrimitiveViewRelevance(Result);
+	}
 	return Result;
 }
 
@@ -1023,6 +1171,310 @@ void FVoxelSceneProxy::SetMaterial_RenderThread(UMaterialInterface* InMaterial, 
 	check(IsInRenderingThread());
 	Material = InMaterial;
 	MaterialRelevance = InMaterialRelevance;
+}
+
+// ==================== Water Tile Management ====================
+
+void FVoxelSceneProxy::SetWaterMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InRelevance)
+{
+	check(IsInRenderingThread());
+	WaterMaterial = InMaterial;
+	WaterMaterialRelevance = InRelevance;
+}
+
+void FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread(
+	FRHICommandListBase& RHICmdList,
+	const FIntVector2& TileCoord,
+	TArray<FVoxelVertex>&& Vertices,
+	TArray<uint32>&& Indices,
+	const FVector& TileWorldPosition)
+{
+	check(IsInRenderingThread());
+
+	const uint32 VertexCount = Vertices.Num();
+	const uint32 IndexCount = Indices.Num();
+
+	if (VertexCount == 0 || IndexCount == 0)
+	{
+		return;
+	}
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	// Remove existing data if any
+	if (FVoxelChunkRenderData* ExistingData = WaterTileRenderData.Find(TileCoord))
+	{
+		ExistingData->ReleaseResources();
+	}
+	if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = WaterTileVertexBuffers.Find(TileCoord))
+	{
+		if (ExistingVB->IsValid())
+		{
+			(*ExistingVB)->ReleaseResource();
+		}
+	}
+	if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = WaterTileIndexBuffers.Find(TileCoord))
+	{
+		if (ExistingIB->IsValid())
+		{
+			(*ExistingIB)->ReleaseResource();
+		}
+	}
+	if (TSharedPtr<FLocalVertexFactory>* ExistingVF = WaterTileVertexFactories.Find(TileCoord))
+	{
+		if (ExistingVF->IsValid())
+		{
+			(*ExistingVF)->ReleaseResource();
+		}
+	}
+
+	// Convert FVoxelVertex to FVoxelLocalVertex format
+	const FVector3f TileOffset = FVector3f(TileWorldPosition);
+
+	TArray<FVoxelLocalVertex> ConvertedVertices;
+	ConvertedVertices.SetNumUninitialized(VertexCount);
+
+	TArray<FColor> ColorData;
+	ColorData.SetNumUninitialized(VertexCount);
+
+	struct FPackedTangentPair
+	{
+		FPackedNormal TangentX;
+		FPackedNormal TangentZ;
+	};
+	TArray<FPackedTangentPair> TangentData;
+	TangentData.SetNumUninitialized(VertexCount);
+
+	TArray<FVector4f> TexCoordData;
+	TexCoordData.SetNumUninitialized(VertexCount);
+
+	FBox TileBounds(ForceInit);
+
+	for (uint32 i = 0; i < VertexCount; i++)
+	{
+		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Vertices[i]);
+		ConvertedVertices[i].Position += TileOffset;
+		ColorData[i] = ConvertedVertices[i].Color;
+
+		TangentData[i].TangentX = ConvertedVertices[i].TangentX;
+		TangentData[i].TangentZ = ConvertedVertices[i].TangentZ;
+
+		TexCoordData[i] = FVector4f(
+			ConvertedVertices[i].TexCoord.X,
+			ConvertedVertices[i].TexCoord.Y,
+			ConvertedVertices[i].TexCoord1.X,
+			ConvertedVertices[i].TexCoord1.Y
+		);
+
+		TileBounds += FVector(Vertices[i].Position);
+	}
+
+	// Create new render data
+	FVoxelChunkRenderData NewRenderData;
+	NewRenderData.ChunkCoord = FIntVector(TileCoord.X, TileCoord.Y, 0);
+	NewRenderData.LODLevel = 0;
+	NewRenderData.VertexCount = VertexCount;
+	NewRenderData.IndexCount = IndexCount;
+	NewRenderData.WorldBounds = TileBounds.ShiftBy(TileWorldPosition);
+	NewRenderData.ChunkWorldPosition = TileWorldPosition;
+	NewRenderData.MorphFactor = 0.0f;
+	NewRenderData.bIsVisible = true;
+
+	// Create vertex buffer
+	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
+	FRHIResourceCreateInfo VertexCreateInfo(TEXT("VoxelWaterVertexBuffer"));
+	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
+		ConvertedVertexSize,
+		BUF_Static | BUF_VertexBuffer,
+		sizeof(FVoxelLocalVertex),
+		ERHIAccess::VertexOrIndexBuffer,
+		VertexCreateInfo
+	);
+
+	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
+	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
+	RHICmdList.UnlockBuffer(NewRenderData.VertexBufferRHI);
+
+	// Create color buffer for SRV
+	const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
+	FRHIResourceCreateInfo ColorCreateInfo(TEXT("VoxelWaterColorBuffer"));
+	NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
+		ColorBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FColor),
+		ERHIAccess::SRVMask,
+		ColorCreateInfo
+	);
+
+	void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
+
+	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+
+	// Create tangent buffer for SRV
+	const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
+	FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelWaterTangentBuffer"));
+	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
+		TangentBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FPackedTangentPair),
+		ERHIAccess::SRVMask,
+		TangentCreateInfo
+	);
+
+	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
+
+	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+
+	// Create TexCoord buffer for SRV
+	const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
+	FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelWaterTexCoordBuffer"));
+	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
+		TexCoordBufferSize,
+		BUF_Static | BUF_ShaderResource,
+		sizeof(FVector4f),
+		ERHIAccess::SRVMask,
+		TexCoordCreateInfo
+	);
+
+	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
+
+	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+
+	// Create index buffer
+	const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
+	FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelWaterIndexBuffer"));
+	NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
+		IndexBufferSize,
+		BUF_Static | BUF_IndexBuffer,
+		sizeof(uint32),
+		ERHIAccess::VertexOrIndexBuffer,
+		IndexCreateInfo
+	);
+
+	void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.IndexBufferRHI);
+
+	// Store render data
+	WaterTileRenderData.Add(TileCoord, NewRenderData);
+
+	// Create and initialize vertex buffer wrapper
+	TSharedPtr<FVoxelLocalVertexBuffer> VertexBufferWrapper = MakeShared<FVoxelLocalVertexBuffer>();
+	VertexBufferWrapper->InitWithRHIBuffer(NewRenderData.VertexBufferRHI);
+	VertexBufferWrapper->InitResource(RHICmdList);
+	WaterTileVertexBuffers.Add(TileCoord, VertexBufferWrapper);
+
+	// Create and initialize index buffer wrapper
+	TSharedPtr<FVoxelLocalIndexBuffer> IndexBufferWrapper = MakeShared<FVoxelLocalIndexBuffer>();
+	IndexBufferWrapper->InitWithRHIBuffer(NewRenderData.IndexBufferRHI, IndexCount);
+	IndexBufferWrapper->InitResource(RHICmdList);
+	WaterTileIndexBuffers.Add(TileCoord, IndexBufferWrapper);
+
+	// Create and initialize per-tile vertex factory
+	TSharedPtr<FLocalVertexFactory> TileVertexFactory = MakeShared<FLocalVertexFactory>(FeatureLevel, "FVoxelWaterTileVertexFactory");
+	InitVoxelLocalVertexFactory(
+		RHICmdList,
+		TileVertexFactory.Get(),
+		VertexBufferWrapper.Get(),
+		NewRenderData.ColorSRV,
+		NewRenderData.TangentsSRV,
+		NewRenderData.TexCoordSRV
+	);
+	TileVertexFactory->InitResource(RHICmdList);
+	WaterTileVertexFactories.Add(TileCoord, TileVertexFactory);
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Updated water tile (%d,%d) - %d vertices, %d indices"),
+		TileCoord.X, TileCoord.Y, VertexCount, IndexCount);
+}
+
+void FVoxelSceneProxy::RemoveWaterTile_RenderThread(const FIntVector2& TileCoord)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	if (FVoxelChunkRenderData* RenderData = WaterTileRenderData.Find(TileCoord))
+	{
+		RenderData->ReleaseResources();
+		WaterTileRenderData.Remove(TileCoord);
+	}
+
+	if (TSharedPtr<FVoxelLocalVertexBuffer>* VB = WaterTileVertexBuffers.Find(TileCoord))
+	{
+		if (VB->IsValid())
+		{
+			(*VB)->ReleaseResource();
+		}
+		WaterTileVertexBuffers.Remove(TileCoord);
+	}
+
+	if (TSharedPtr<FVoxelLocalIndexBuffer>* IB = WaterTileIndexBuffers.Find(TileCoord))
+	{
+		if (IB->IsValid())
+		{
+			(*IB)->ReleaseResource();
+		}
+		WaterTileIndexBuffers.Remove(TileCoord);
+	}
+
+	if (TSharedPtr<FLocalVertexFactory>* VF = WaterTileVertexFactories.Find(TileCoord))
+	{
+		if (VF->IsValid())
+		{
+			(*VF)->ReleaseResource();
+		}
+		WaterTileVertexFactories.Remove(TileCoord);
+	}
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Removed water tile (%d,%d)"), TileCoord.X, TileCoord.Y);
+}
+
+void FVoxelSceneProxy::ClearAllWaterTiles_RenderThread()
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	for (auto& Pair : WaterTileRenderData)
+	{
+		Pair.Value.ReleaseResources();
+	}
+	WaterTileRenderData.Empty();
+
+	for (auto& Pair : WaterTileVertexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	WaterTileVertexBuffers.Empty();
+
+	for (auto& Pair : WaterTileIndexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	WaterTileIndexBuffers.Empty();
+
+	for (auto& Pair : WaterTileVertexFactories)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	WaterTileVertexFactories.Empty();
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all water tiles"));
 }
 
 void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(

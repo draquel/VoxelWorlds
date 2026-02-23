@@ -61,8 +61,16 @@ public:
 	virtual void SetMaterial(UMaterialInterface* Material) override;
 	virtual UMaterialInterface* GetMaterial() const override;
 	virtual void UpdateMaterialParameters() override;
+	virtual void SetWaterMaterial(UMaterialInterface* Material) override;
 	virtual void SetMaterialAtlas(UVoxelMaterialAtlas* Atlas) override;
 	virtual UVoxelMaterialAtlas* GetMaterialAtlas() const override;
+
+	// Water Tile Support
+	virtual void UpdateWaterTileMesh(
+		const FIntVector2& TileCoord,
+		const FChunkMeshData& WaterMeshData) override;
+	virtual void RemoveWaterTile(const FIntVector2& TileCoord) override;
+	virtual void ClearAllWaterTiles() override;
 
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;
@@ -135,8 +143,11 @@ private:
 	/** Container actor for the component */
 	TWeakObjectPtr<AActor> ContainerActor;
 
-	/** Current material */
+	/** Current terrain material */
 	TWeakObjectPtr<UMaterialInterface> CurrentMaterial;
+
+	/** Current water material */
+	TWeakObjectPtr<UMaterialInterface> CurrentWaterMaterial;
 
 	// ==================== Statistics ====================
 

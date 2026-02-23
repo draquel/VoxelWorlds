@@ -120,6 +120,41 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel")
 	void UpdateChunkMorphFactor(const FIntVector& ChunkCoord, float MorphFactor);
 
+	// ==================== Water Tile Management ====================
+
+	/**
+	 * Set water material and forward to render thread.
+	 *
+	 * @param InMaterial Water material (typically translucent or Single Layer Water), or nullptr to disable
+	 */
+	void SetWaterMaterial(UMaterialInterface* InMaterial);
+
+	/**
+	 * Update water tile from CPU vertex data. Enqueues render command.
+	 *
+	 * @param TileCoord 2D tile coordinate (XY chunk column)
+	 * @param Vertices CPU vertex array (will be moved)
+	 * @param Indices CPU index array (will be moved)
+	 * @param TileWorldPosition World position of tile origin
+	 */
+	void UpdateWaterTileFromCPUData(
+		const FIntVector2& TileCoord,
+		TArray<FVoxelVertex>&& Vertices,
+		TArray<uint32>&& Indices,
+		const FVector& TileWorldPosition);
+
+	/**
+	 * Remove a water tile. Enqueues render command.
+	 *
+	 * @param TileCoord 2D tile coordinate to remove
+	 */
+	void RemoveWaterTile(const FIntVector2& TileCoord);
+
+	/**
+	 * Clear all water tiles. Enqueues render command.
+	 */
+	void ClearAllWaterTiles();
+
 	// ==================== Configuration ====================
 
 	/**
@@ -292,9 +327,13 @@ private:
 	/** Get scene proxy pointer (may be null) */
 	FVoxelSceneProxy* GetVoxelSceneProxy() const;
 
-	/** Material used for rendering */
+	/** Material used for terrain rendering */
 	UPROPERTY(EditAnywhere, Category = "Voxel")
 	TObjectPtr<UMaterialInterface> VoxelMaterial;
+
+	/** Water material for water tile rendering */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> WaterMaterial;
 
 	/** Material atlas data asset for texture configuration */
 	UPROPERTY(EditAnywhere, Category = "Voxel|Materials")
