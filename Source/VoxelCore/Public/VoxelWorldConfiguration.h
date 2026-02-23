@@ -10,6 +10,7 @@
 #include "LODTypes.h"
 #include "VoxelWorldConfiguration.generated.h"
 
+class UMaterialInterface;
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
 class UVoxelScatterConfiguration;
@@ -160,9 +161,19 @@ public:
 	/**
 	 * Show a visual water plane in the world.
 	 * Creates a simple static mesh plane at the water level for visualization.
+	 * Only used as fallback when WaterMeshMaterial is not set.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel"))
 	bool bShowWaterPlane = true;
+
+	/**
+	 * Material for per-chunk water surface rendering.
+	 * Should use translucent or Single Layer Water shading model.
+	 * When set, each chunk generates its own cave-aware water mesh (no water inside caves).
+	 * If null, falls back to single water plane (bShowWaterPlane) which renders water everywhere.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel"))
+	TObjectPtr<UMaterialInterface> WaterMeshMaterial;
 
 	// ==================== Terrain Generation Settings ====================
 

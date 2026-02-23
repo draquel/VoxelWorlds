@@ -1,8 +1,4 @@
 // Copyright Daniel Raquel. All Rights Reserved.
-//
-// DEPRECATED: Per-chunk water meshing has been replaced by a single dynamic water plane
-// that follows the viewer. This file is kept for potential future use (e.g., non-flat
-// water surfaces or per-chunk water in specific world modes). No code currently references it.
 
 #pragma once
 
@@ -17,13 +13,22 @@
  * non-water above them (surface boundary). Uses greedy meshing to coalesce
  * adjacent water surface voxels into large quads for efficiency.
  *
- * This is a standalone utility class — it does NOT implement IVoxelMesher
- * since water meshing is simpler and doesn't need GPU dispatch or LOD support.
+ * Supports two modes:
+ * - Per-chunk: GenerateWaterMesh() scans a single chunk's voxel data
+ * - 2D tile: BuildColumnMask() + GenerateWaterMeshFromMask() for independent
+ *   water tiles that aggregate water from multiple Z chunks per XY column
  *
- * Usage:
+ * Usage (per-chunk):
  *   FChunkMeshData WaterMesh;
- *   FVoxelWaterMesher::GenerateWaterMesh(MeshingRequest, WaterMesh);
- *   if (WaterMesh.IsValid()) { WaterRenderer->UpdateChunkMeshFromCPU(...); }
+ *   FVoxelWaterMesher::GenerateWaterMesh(MeshingRequest, WaterMesh, WaterLevel);
+ *
+ * Usage (2D tile):
+ *   TArray<bool> Mask;
+ *   Mask.SetNumZeroed(ChunkSize * ChunkSize);
+ *   FVoxelWaterMesher::BuildColumnMask(VoxelData, ChunkSize, Mask);
+ *   // OR multiple masks together from different Z chunks...
+ *   FVoxelWaterMesher::GenerateWaterMeshFromMask(CombinedMask, ChunkSize, VoxelSize,
+ *       TileWorldPos, WaterLevel, OutMeshData);
  */
 class VOXELMESHING_API FVoxelWaterMesher
 {
@@ -37,8 +42,47 @@ public:
 	 *
 	 * @param Request Meshing request with voxel data and chunk info
 	 * @param OutMeshData Output mesh data (cleared before use)
+	 * @param WaterLevel World-space water level height (used as the Z for all water quads)
 	 */
-	static void GenerateWaterMesh(const FVoxelMeshingRequest& Request, FChunkMeshData& OutMeshData);
+	static void GenerateWaterMesh(const FVoxelMeshingRequest& Request, FChunkMeshData& OutMeshData, float WaterLevel);
+
+	/**
+	 * Scan chunk voxel data and build a 2D column mask.
+	 *
+	 * A column is marked true if ANY voxel in it is air + water-flagged
+	 * + not underground (cave interior).
+	 *
+	 * @param VoxelData Raw voxel data array (ChunkSize^3 elements)
+	 * @param ChunkSize Number of voxels per chunk axis
+	 * @param OutMask Pre-allocated bool array (ChunkSize * ChunkSize), filled with water presence
+	 * @return True if any water was found
+	 */
+	static bool BuildColumnMask(
+		const TArray<FVoxelData>& VoxelData,
+		int32 ChunkSize,
+		TArray<bool>& OutMask);
+
+	/**
+	 * Generate water mesh from a pre-built column mask.
+	 *
+	 * Takes a combined column mask (OR of multiple chunks' partial masks)
+	 * and generates water surface geometry. Applies dilation to extend water
+	 * under terrain at shorelines, then greedy-merges into large quads.
+	 *
+	 * @param ColumnMask Bool array (ChunkSize * ChunkSize) indicating water presence per column
+	 * @param ChunkSize Number of voxels per chunk axis
+	 * @param VoxelSize World-space size of each voxel
+	 * @param TileWorldPosition World-space origin of the tile (for UV calculation)
+	 * @param WaterLevel World-space Z height for the water surface
+	 * @param OutMeshData Output mesh data (cleared before use)
+	 */
+	static void GenerateWaterMeshFromMask(
+		const TArray<bool>& ColumnMask,
+		int32 ChunkSize,
+		float VoxelSize,
+		const FVector& TileWorldPosition,
+		float WaterLevel,
+		FChunkMeshData& OutMeshData);
 
 private:
 	/** Water material ID used in UV1.x to identify water geometry */
@@ -61,8 +105,9 @@ private:
 	 * Emit a greedy-merged water quad into the mesh data.
 	 *
 	 * @param MeshData Output mesh data to append to
-	 * @param Request Meshing request for coordinate/size info
-	 * @param SliceZ Z-level of the water surface (quad emitted at Z+1 face)
+	 * @param VoxelSize World-space size of each voxel
+	 * @param TileWorldPos World-space origin of the tile (for UV calculation)
+	 * @param LocalWaterZ Water surface Z in tile-local space
 	 * @param U Start position along X axis
 	 * @param V Start position along Y axis
 	 * @param Width Quad width along X axis (in voxels)
@@ -70,8 +115,9 @@ private:
 	 */
 	static void EmitWaterQuad(
 		FChunkMeshData& MeshData,
-		const FVoxelMeshingRequest& Request,
-		int32 SliceZ,
+		float VoxelSize,
+		const FVector& TileWorldPos,
+		float LocalWaterZ,
 		int32 U, int32 V,
 		int32 Width, int32 Height);
 };

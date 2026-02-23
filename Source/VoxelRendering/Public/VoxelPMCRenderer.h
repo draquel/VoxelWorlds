@@ -116,6 +116,12 @@ public:
 	virtual void SetMaterial(UMaterialInterface* Material) override;
 	virtual UMaterialInterface* GetMaterial() const override;
 	virtual void UpdateMaterialParameters() override;
+	virtual void SetWaterMaterial(UMaterialInterface* Material) override;
+	virtual void UpdateWaterTileMesh(
+		const FIntVector2& TileCoord,
+		const FChunkMeshData& WaterMeshData) override;
+	virtual void RemoveWaterTile(const FIntVector2& TileCoord) override;
+	virtual void ClearAllWaterTiles() override;
 	virtual void SetMaterialAtlas(UVoxelMaterialAtlas* Atlas) override;
 	virtual UVoxelMaterialAtlas* GetMaterialAtlas() const override;
 
@@ -211,6 +217,12 @@ private:
 
 	/** Set of MaterialIDs that use masked blending (cached from atlas/registry) */
 	TSet<uint8> MaskedMaterialIDs;
+
+	/** Material for water tile mesh */
+	TWeakObjectPtr<UMaterialInterface> WaterMaterial;
+
+	/** Dedicated PMCs for 2D water tiles (indexed by XY chunk column) */
+	TMap<FIntVector2, TWeakObjectPtr<UProceduralMeshComponent>> WaterTilePMCs;
 
 	/** Material atlas data asset */
 	TWeakObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;

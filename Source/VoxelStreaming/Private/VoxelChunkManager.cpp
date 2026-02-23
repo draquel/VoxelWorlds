@@ -19,6 +19,7 @@
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelWaterPropagation.h"
+#include "VoxelWaterMesher.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelScatterManager.h"
 #include "VoxelTreeInjector.h"
@@ -202,6 +203,13 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	const int32 MaxUnloadsPerFrame = Configuration ? Configuration->MaxChunksToUnloadPerFrame : 8;
 	ProcessUnloadQueue(MaxUnloadsPerFrame);
+
+	// === Process dirty water tiles (2D water grid) ===
+	if (Configuration && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
+	{
+		ProcessDirtyWaterTiles(8);
+	}
+
 	Timing.RenderSubmitMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
 	// === Water propagation (bounded BFS per frame) ===
@@ -312,6 +320,12 @@ void UVoxelChunkManager::Initialize(
 	Configuration = InConfig;
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
+
+	// Pass water material to renderer for per-chunk water mesh sections
+	if (MeshRenderer && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
+	{
+		MeshRenderer->SetWaterMaterial(Configuration->WaterMeshMaterial);
+	}
 
 	// Disable LOD morphing for cubic mode - vertices cannot interpolate with hard edges
 	// LOD bands and levels still apply (for distance-based loading and potential stride use)
@@ -582,9 +596,15 @@ void UVoxelChunkManager::Shutdown()
 		return;
 	}
 
-	// Clear all chunks from renderer
+	// Clear water tile state
+	WaterTiles.Empty();
+	DirtyWaterTileQueue.Empty();
+	DirtyWaterTileSet.Empty();
+
+	// Clear all chunks and water tiles from renderer
 	if (MeshRenderer)
 	{
+		MeshRenderer->ClearAllWaterTiles();
 		MeshRenderer->ClearAllChunks();
 	}
 
@@ -1819,6 +1839,12 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 		// Remove from loaded set
 		LoadedChunkCoords.Remove(ChunkCoord);
 
+		// Remove water tile contribution before state is cleared
+		if (Configuration && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
+		{
+			RemoveWaterTileContribution(ChunkCoord);
+		}
+
 		// Notify scatter manager
 		if (ScatterManager)
 		{
@@ -2077,11 +2103,16 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		}
 
 		// Propagate water flags from loaded neighbors into this chunk's voxel data
-		// before generating the water mesh, so caves connected across chunk
-		// boundaries receive consistent water flags.
+		// so caves connected across chunk boundaries receive consistent water flags.
 		if (Configuration && Configuration->bEnableWaterLevel)
 		{
 			PropagateWaterFromNeighbors(ChunkCoord);
+
+			// Update this chunk's contribution to its 2D water tile
+			if (Configuration->WaterMeshMaterial)
+			{
+				UpdateWaterTileContribution(ChunkCoord);
+			}
 		}
 
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
@@ -2329,6 +2360,141 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NumSeeds, BFSQueue.Num());
 
 	return true;
+}
+
+// ==================== 2D Water Tile System ====================
+
+void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoord)
+{
+	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State || State->Descriptor.VoxelData.Num() == 0)
+	{
+		return;
+	}
+
+	const int32 CS = State->Descriptor.ChunkSize;
+	TArray<bool> PartialMask;
+	PartialMask.SetNumZeroed(CS * CS);
+
+	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
+		State->Descriptor.VoxelData, CS, PartialMask);
+
+	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
+	FWaterTileState& Tile = WaterTiles.FindOrAdd(TileCoord);
+
+	if (bAnyWater)
+	{
+		Tile.PartialMasks.Add(ChunkCoord.Z, MoveTemp(PartialMask));
+	}
+	else
+	{
+		Tile.PartialMasks.Remove(ChunkCoord.Z);
+	}
+
+	// Mark dirty and queue
+	Tile.bDirty = true;
+	if (!DirtyWaterTileSet.Contains(TileCoord))
+	{
+		DirtyWaterTileQueue.Add(TileCoord);
+		DirtyWaterTileSet.Add(TileCoord);
+	}
+}
+
+void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoord)
+{
+	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
+	FWaterTileState* Tile = WaterTiles.Find(TileCoord);
+	if (!Tile)
+	{
+		return;
+	}
+
+	Tile->PartialMasks.Remove(ChunkCoord.Z);
+
+	if (Tile->PartialMasks.IsEmpty())
+	{
+		// No more contributors — remove the tile entirely
+		if (MeshRenderer)
+		{
+			MeshRenderer->RemoveWaterTile(TileCoord);
+		}
+		WaterTiles.Remove(TileCoord);
+		DirtyWaterTileSet.Remove(TileCoord);
+	}
+	else
+	{
+		// Still has contributors — mark dirty for re-evaluation
+		Tile->bDirty = true;
+		if (!DirtyWaterTileSet.Contains(TileCoord))
+		{
+			DirtyWaterTileQueue.Add(TileCoord);
+			DirtyWaterTileSet.Add(TileCoord);
+		}
+	}
+}
+
+void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)
+{
+	if (!Configuration || !MeshRenderer)
+	{
+		return;
+	}
+
+	int32 Processed = 0;
+	while (DirtyWaterTileQueue.Num() > 0 && Processed < MaxTilesPerFrame)
+	{
+		FIntVector2 TileCoord = DirtyWaterTileQueue.Last();
+		DirtyWaterTileQueue.Pop();
+		DirtyWaterTileSet.Remove(TileCoord);
+
+		FWaterTileState* Tile = WaterTiles.Find(TileCoord);
+		if (!Tile || !Tile->bDirty)
+		{
+			continue;
+		}
+		Tile->bDirty = false;
+
+		// Combine all partial masks via OR
+		const int32 CS = Configuration->ChunkSize;
+		TArray<bool> CombinedMask;
+		CombinedMask.SetNumZeroed(CS * CS);
+
+		for (auto& Pair : Tile->PartialMasks)
+		{
+			for (int32 i = 0; i < CS * CS; i++)
+			{
+				if (Pair.Value[i])
+				{
+					CombinedMask[i] = true;
+				}
+			}
+		}
+
+		// Generate water mesh from combined mask
+		const float ChunkExtent = static_cast<float>(CS) * Configuration->VoxelSize;
+		const FVector TileWorldPos(
+			Configuration->WorldOrigin.X + TileCoord.X * ChunkExtent,
+			Configuration->WorldOrigin.Y + TileCoord.Y * ChunkExtent,
+			Configuration->WorldOrigin.Z);
+
+		FChunkMeshData WaterMeshData;
+		FVoxelWaterMesher::GenerateWaterMeshFromMask(
+			CombinedMask, CS, Configuration->VoxelSize,
+			TileWorldPos, Configuration->WaterLevel, WaterMeshData);
+
+		if (WaterMeshData.IsValid())
+		{
+			MeshRenderer->UpdateWaterTileMesh(TileCoord, WaterMeshData);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Water tile (%d,%d): mesh submitted — %d verts, %d tris"),
+				TileCoord.X, TileCoord.Y,
+				WaterMeshData.GetVertexCount(), WaterMeshData.GetTriangleCount());
+		}
+		else
+		{
+			MeshRenderer->RemoveWaterTile(TileCoord);
+		}
+		++Processed;
+	}
 }
 
 void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest)

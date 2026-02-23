@@ -536,6 +536,32 @@ protected:
 	 */
 	bool PropagateWaterFromNeighbors(const FIntVector& ChunkCoord);
 
+	// ==================== 2D Water Tile System ====================
+
+	/**
+	 * Scan a chunk's voxel data and update its water tile contribution.
+	 * Called after meshing completes for a 3D chunk.
+	 *
+	 * @param ChunkCoord 3D chunk coordinate
+	 */
+	void UpdateWaterTileContribution(const FIntVector& ChunkCoord);
+
+	/**
+	 * Remove a chunk's water tile contribution.
+	 * Called when a 3D chunk is unloaded.
+	 *
+	 * @param ChunkCoord 3D chunk coordinate
+	 */
+	void RemoveWaterTileContribution(const FIntVector& ChunkCoord);
+
+	/**
+	 * Process dirty water tiles (time-sliced, called from TickComponent).
+	 * Combines partial masks, generates water mesh, and sends to renderer.
+	 *
+	 * @param MaxTilesPerFrame Maximum number of water tiles to process this frame
+	 */
+	void ProcessDirtyWaterTiles(int32 MaxTilesPerFrame);
+
 	/**
 	 * Extract neighbor edge slices for seamless chunk boundaries.
 	 *
@@ -807,6 +833,28 @@ protected:
 	/** Water propagation system for flooding caves on edit */
 	UPROPERTY()
 	TObjectPtr<UVoxelWaterPropagation> WaterPropagation;
+
+	// ==================== 2D Water Tile State ====================
+
+	/** Tracks water state for a single XY chunk column (2D tile). */
+	struct FWaterTileState
+	{
+		/** Per-Z-level partial column masks contributed by loaded 3D chunks.
+		 *  Key = chunk Z coordinate, Value = ChunkSize² bool mask. */
+		TMap<int32, TArray<bool>> PartialMasks;
+
+		/** Whether the combined mask needs regeneration. */
+		bool bDirty = true;
+	};
+
+	/** 2D water tile tracking: XY chunk column → water state */
+	TMap<FIntVector2, FWaterTileState> WaterTiles;
+
+	/** Queue of water tiles needing mesh regeneration */
+	TArray<FIntVector2> DirtyWaterTileQueue;
+
+	/** Set for O(1) duplicate detection in DirtyWaterTileQueue */
+	TSet<FIntVector2> DirtyWaterTileSet;
 
 	// ==================== Adaptive Throttling State ====================
 

@@ -103,8 +103,9 @@ void FVoxelPMCRenderer::Shutdown()
 		return;
 	}
 
-	// Clear all chunk data
+	// Clear all chunk data and water tiles
 	ClearAllChunks();
+	ClearAllWaterTiles();
 
 	// Clear the component pool
 	ComponentPool.Empty();
@@ -184,7 +185,7 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 	if (ExistingData && ExistingData->MeshComponent.IsValid())
 	{
 		PMC = ExistingData->MeshComponent.Get();
-		// Clear existing sections before rebuilding
+		// Clear all sections — water is now on separate dedicated PMCs
 		PMC->ClearAllMeshSections();
 		// Update statistics (subtract old, add new later)
 		TotalVertexCount -= ExistingData->VertexCount;
@@ -466,6 +467,145 @@ void FVoxelPMCRenderer::UpdateMaterialParameters()
 {
 	// Update atlas parameters if we have a dynamic instance
 	UpdateMaterialAtlasParameters();
+}
+
+void FVoxelPMCRenderer::SetWaterMaterial(UMaterialInterface* Material)
+{
+	check(IsInGameThread());
+	WaterMaterial = Material;
+}
+
+void FVoxelPMCRenderer::UpdateWaterTileMesh(
+	const FIntVector2& TileCoord,
+	const FChunkMeshData& WaterMeshData)
+{
+	check(IsInGameThread());
+
+	if (!IsInitialized() || !WaterMeshData.IsValid())
+	{
+		if (!WaterMeshData.IsValid())
+		{
+			RemoveWaterTile(TileCoord);
+		}
+		return;
+	}
+
+	// Acquire or reuse a PMC for this water tile
+	UProceduralMeshComponent* PMC = nullptr;
+	TWeakObjectPtr<UProceduralMeshComponent>* ExistingPMC = WaterTilePMCs.Find(TileCoord);
+
+	if (ExistingPMC && ExistingPMC->IsValid())
+	{
+		PMC = ExistingPMC->Get();
+		PMC->ClearAllMeshSections();
+	}
+	else
+	{
+		// Try pool first, then create new
+		while (ComponentPool.Num() > 0)
+		{
+			TWeakObjectPtr<UProceduralMeshComponent> WeakPMC = ComponentPool.Pop(EAllowShrinking::No);
+			if (WeakPMC.IsValid())
+			{
+				PMC = WeakPMC.Get();
+				PMC->SetVisibility(true);
+				break;
+			}
+		}
+
+		if (!PMC)
+		{
+			PMC = CreateNewComponent();
+		}
+
+		if (!PMC)
+		{
+			UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelPMCRenderer: Failed to acquire PMC for water tile (%d,%d)"),
+				TileCoord.X, TileCoord.Y);
+			return;
+		}
+
+		WaterTilePMCs.Add(TileCoord, PMC);
+	}
+
+	// Position PMC at tile world location (XY from tile coord, Z at world origin)
+	if (CachedConfig.IsValid())
+	{
+		const float ChunkWorldSize = CachedConfig->GetChunkWorldSize();
+		const FVector TileWorldPos = CachedConfig->WorldOrigin + FVector(
+			TileCoord.X * ChunkWorldSize,
+			TileCoord.Y * ChunkWorldSize,
+			0.0);
+		PMC->SetWorldLocation(TileWorldPos);
+	}
+
+	// Water tiles don't cast shadows
+	PMC->SetCastShadow(false);
+
+	// Convert mesh data to PMC format
+	TArray<FVector> Vertices;
+	TArray<int32> Triangles;
+	TArray<FVector> Normals;
+	TArray<FVector2D> UV0;
+	TArray<FVector2D> UV1;
+	TArray<FColor> Colors;
+	TArray<FProcMeshTangent> Tangents;
+
+	ConvertMeshDataToPMCFormat(WaterMeshData, Vertices, Triangles, Normals, UV0, UV1, Colors, Tangents);
+
+	TArray<FVector2D> EmptyUV;
+
+	PMC->CreateMeshSection(
+		0,  // Section 0 on dedicated water PMC
+		Vertices,
+		Triangles,
+		Normals,
+		UV0,
+		UV1,
+		EmptyUV,
+		EmptyUV,
+		Colors,
+		Tangents,
+		false  // No collision for water
+	);
+
+	if (WaterMaterial.IsValid())
+	{
+		PMC->SetMaterial(0, WaterMaterial.Get());
+	}
+}
+
+void FVoxelPMCRenderer::RemoveWaterTile(const FIntVector2& TileCoord)
+{
+	check(IsInGameThread());
+
+	TWeakObjectPtr<UProceduralMeshComponent>* ExistingPMC = WaterTilePMCs.Find(TileCoord);
+	if (!ExistingPMC)
+	{
+		return;
+	}
+
+	if (ExistingPMC->IsValid())
+	{
+		ReleaseComponent(ExistingPMC->Get());
+	}
+
+	WaterTilePMCs.Remove(TileCoord);
+}
+
+void FVoxelPMCRenderer::ClearAllWaterTiles()
+{
+	check(IsInGameThread());
+
+	for (auto& Pair : WaterTilePMCs)
+	{
+		if (Pair.Value.IsValid())
+		{
+			ReleaseComponent(Pair.Value.Get());
+		}
+	}
+
+	WaterTilePMCs.Empty();
 }
 
 void FVoxelPMCRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)

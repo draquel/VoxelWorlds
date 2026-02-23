@@ -154,6 +154,54 @@ public:
 	virtual void UpdateMaterialParameters() = 0;
 
 	/**
+	 * Set the material used for water mesh sections.
+	 *
+	 * Per-chunk water meshes are rendered in a separate mesh section
+	 * with this material (typically translucent or Single Layer Water).
+	 *
+	 * @param Material Water material to use, or nullptr to disable water mesh sections
+	 */
+	virtual void SetWaterMaterial(UMaterialInterface* Material)
+	{
+		// Default: no-op (renderer doesn't support per-chunk water)
+	}
+
+	/**
+	 * Update water mesh for a 2D tile (XY chunk column).
+	 *
+	 * Water tiles are independent of 3D terrain chunks. Each tile has its own
+	 * dedicated PMC positioned at the tile's world location.
+	 *
+	 * @param TileCoord 2D tile coordinate (XY chunk column)
+	 * @param WaterMeshData CPU-side water surface mesh data
+	 */
+	virtual void UpdateWaterTileMesh(
+		const FIntVector2& TileCoord,
+		const FChunkMeshData& WaterMeshData)
+	{
+		// Default: no-op (renderer doesn't support water tiles)
+	}
+
+	/**
+	 * Remove water tile and release its resources.
+	 *
+	 * @param TileCoord 2D tile coordinate to remove
+	 */
+	virtual void RemoveWaterTile(const FIntVector2& TileCoord)
+	{
+		// Default: no-op (renderer doesn't support water tiles)
+	}
+
+	/**
+	 * Remove all water tiles.
+	 * Called during Shutdown/ClearAllChunks.
+	 */
+	virtual void ClearAllWaterTiles()
+	{
+		// Default: no-op (renderer doesn't support water tiles)
+	}
+
+	/**
 	 * Set material atlas for texture lookup.
 	 *
 	 * The material atlas defines how MaterialIDs map to atlas positions

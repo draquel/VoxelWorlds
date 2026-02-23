@@ -723,6 +723,14 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 		return;
 	}
 
+	// Per-chunk water rendering is active — skip single plane/sphere creation
+	// Each chunk renders its own cave-aware water surface via WaterMeshMaterial
+	if (Config->WaterMeshMaterial)
+	{
+		DestroyWaterVisualization();
+		return;
+	}
+
 	// Different visualization based on world mode
 	if (Config->WorldMode == EWorldMode::SphericalPlanet)
 	{
@@ -871,7 +879,7 @@ void AVoxelWorldTestActor::UpdateWaterPlanePosition()
 	}
 
 	UVoxelWorldConfiguration* Config = Configuration ? Configuration.Get() : RuntimeConfiguration.Get();
-	if (!Config || !Config->bEnableWaterLevel)
+	if (!Config || !Config->bEnableWaterLevel || Config->WaterMeshMaterial)
 	{
 		return;
 	}

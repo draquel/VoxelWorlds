@@ -1,14 +1,195 @@
 // Copyright Daniel Raquel. All Rights Reserved.
-//
-// DEPRECATED: Per-chunk water meshing has been replaced by a single dynamic water plane.
-// See VoxelWorldTestActor::UpdateWaterVisualization() for the current water rendering approach.
 
 #include "VoxelWaterMesher.h"
 #include "VoxelData.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelWaterMesher, Log, All);
 
-void FVoxelWaterMesher::GenerateWaterMesh(const FVoxelMeshingRequest& Request, FChunkMeshData& OutMeshData)
+bool FVoxelWaterMesher::BuildColumnMask(
+	const TArray<FVoxelData>& VoxelData,
+	int32 ChunkSize,
+	TArray<bool>& OutMask)
+{
+	const int32 SliceSize = ChunkSize * ChunkSize;
+
+	if (VoxelData.Num() < SliceSize * ChunkSize || OutMask.Num() < SliceSize)
+	{
+		return false;
+	}
+
+	bool bHasAnyWater = false;
+
+	for (int32 Y = 0; Y < ChunkSize; Y++)
+	{
+		for (int32 X = 0; X < ChunkSize; X++)
+		{
+			for (int32 Z = 0; Z < ChunkSize; Z++)
+			{
+				const int32 Index = X + Y * ChunkSize + Z * SliceSize;
+				const FVoxelData& Voxel = VoxelData[Index];
+				if (Voxel.IsAir() && Voxel.HasWaterFlag() && !Voxel.HasUndergroundFlag())
+				{
+					OutMask[X + Y * ChunkSize] = true;
+					bHasAnyWater = true;
+					break;
+				}
+			}
+		}
+	}
+
+	return bHasAnyWater;
+}
+
+void FVoxelWaterMesher::GenerateWaterMeshFromMask(
+	const TArray<bool>& ColumnMask,
+	int32 ChunkSize,
+	float VoxelSize,
+	const FVector& TileWorldPosition,
+	float WaterLevel,
+	FChunkMeshData& OutMeshData)
+{
+	OutMeshData.Reset();
+
+	const int32 SliceSize = ChunkSize * ChunkSize;
+
+	if (ColumnMask.Num() < SliceSize)
+	{
+		return;
+	}
+
+	// Check if any water exists in the mask
+	bool bHasAnyWater = false;
+	for (int32 i = 0; i < SliceSize; i++)
+	{
+		if (ColumnMask[i])
+		{
+			bHasAnyWater = true;
+			break;
+		}
+	}
+
+	if (!bHasAnyWater)
+	{
+		return;
+	}
+
+	// Dilate the column mask by 3 cells in each direction.
+	// This extends water quads 3 voxels past the actual water boundary so they tuck
+	// under the terrain mesh at shorelines. Three cells are needed because terrain
+	// surface transitions can be up to 2 voxels inward from the actual water boundary,
+	// plus 1 cell for marching cubes surface transition.
+	// Dilation happens BEFORE greedy merge so the resulting quads are guaranteed
+	// non-overlapping — no double-blending artifacts with translucent materials.
+	constexpr int32 DilationRadius = 3;
+	TArray<bool> FinalMask;
+	FinalMask.SetNumZeroed(SliceSize);
+
+	for (int32 Y = 0; Y < ChunkSize; Y++)
+	{
+		for (int32 X = 0; X < ChunkSize; X++)
+		{
+			if (!ColumnMask[X + Y * ChunkSize])
+			{
+				continue;
+			}
+
+			// Stamp a square of radius DilationRadius around this cell
+			const int32 MinDX = FMath::Max(0, X - DilationRadius);
+			const int32 MaxDX = FMath::Min(ChunkSize - 1, X + DilationRadius);
+			const int32 MinDY = FMath::Max(0, Y - DilationRadius);
+			const int32 MaxDY = FMath::Min(ChunkSize - 1, Y + DilationRadius);
+
+			for (int32 DY = MinDY; DY <= MaxDY; DY++)
+			{
+				for (int32 DX = MinDX; DX <= MaxDX; DX++)
+				{
+					FinalMask[DX + DY * ChunkSize] = true;
+				}
+			}
+		}
+	}
+
+	// Pre-allocate reasonable capacity
+	OutMeshData.Positions.Reserve(SliceSize);
+	OutMeshData.Normals.Reserve(SliceSize);
+	OutMeshData.UVs.Reserve(SliceSize);
+	OutMeshData.UV1s.Reserve(SliceSize);
+	OutMeshData.Colors.Reserve(SliceSize);
+	OutMeshData.Indices.Reserve(SliceSize * 6 / 4);
+
+	// Compute local water Z relative to tile origin
+	const float LocalWaterZ = static_cast<float>(WaterLevel - TileWorldPosition.Z);
+
+	// Greedy rectangle merging on the dilated mask
+	TArray<bool> Processed;
+	Processed.SetNumZeroed(SliceSize);
+
+	for (int32 Y = 0; Y < ChunkSize; Y++)
+	{
+		for (int32 X = 0; X < ChunkSize; X++)
+		{
+			const int32 Index = X + Y * ChunkSize;
+
+			if (Processed[Index] || !FinalMask[Index])
+			{
+				continue;
+			}
+
+			// Find maximum width (extend along X axis)
+			int32 Width = 1;
+			while (X + Width < ChunkSize)
+			{
+				const int32 NextIndex = (X + Width) + Y * ChunkSize;
+				if (Processed[NextIndex] || !FinalMask[NextIndex])
+				{
+					break;
+				}
+				Width++;
+			}
+
+			// Find maximum height (extend along Y axis) for this width
+			int32 Height = 1;
+			bool bCanExtend = true;
+			while (bCanExtend && Y + Height < ChunkSize)
+			{
+				for (int32 DX = 0; DX < Width; DX++)
+				{
+					const int32 CheckIndex = (X + DX) + (Y + Height) * ChunkSize;
+					if (Processed[CheckIndex] || !FinalMask[CheckIndex])
+					{
+						bCanExtend = false;
+						break;
+					}
+				}
+				if (bCanExtend)
+				{
+					Height++;
+				}
+			}
+
+			// Mark all cells in this rectangle as processed
+			for (int32 DY = 0; DY < Height; DY++)
+			{
+				for (int32 DX = 0; DX < Width; DX++)
+				{
+					Processed[(X + DX) + (Y + DY) * ChunkSize] = true;
+				}
+			}
+
+			// Emit merged water quad at the actual water level
+			EmitWaterQuad(OutMeshData, VoxelSize, TileWorldPosition, LocalWaterZ, X, Y, Width, Height);
+		}
+	}
+
+	if (OutMeshData.IsValid())
+	{
+		UE_LOG(LogVoxelWaterMesher, Verbose, TEXT("Water tile at (%.0f, %.0f): mesh generated — %d verts, %d tris"),
+			TileWorldPosition.X, TileWorldPosition.Y,
+			OutMeshData.GetVertexCount(), OutMeshData.GetTriangleCount());
+	}
+}
+
+void FVoxelWaterMesher::GenerateWaterMesh(const FVoxelMeshingRequest& Request, FChunkMeshData& OutMeshData, float WaterLevel)
 {
 	OutMeshData.Reset();
 
@@ -20,106 +201,36 @@ void FVoxelWaterMesher::GenerateWaterMesh(const FVoxelMeshingRequest& Request, F
 	const int32 ChunkSize = Request.ChunkSize;
 	const int32 SliceSize = ChunkSize * ChunkSize;
 
-	// Allocate mask and processed arrays (reused per Z-slice)
-	TArray<bool> SurfaceMask;
-	TArray<bool> Processed;
-	SurfaceMask.SetNumZeroed(SliceSize);
-	Processed.SetNumZeroed(SliceSize);
+	// Build column mask from the request's voxel data
+	TArray<bool> ColumnMask;
+	ColumnMask.SetNumZeroed(SliceSize);
+	bool bHasAnyWater = false;
 
-	// Pre-allocate reasonable capacity (water surfaces are often large flat areas)
-	OutMeshData.Positions.Reserve(SliceSize);
-	OutMeshData.Normals.Reserve(SliceSize);
-	OutMeshData.UVs.Reserve(SliceSize);
-	OutMeshData.UV1s.Reserve(SliceSize);
-	OutMeshData.Colors.Reserve(SliceSize);
-	OutMeshData.Indices.Reserve(SliceSize * 6 / 4); // 6 indices per 4 vertices
-
-	// Process each Z-slice looking for water surface voxels
-	for (int32 Z = 0; Z < ChunkSize; Z++)
+	for (int32 Y = 0; Y < ChunkSize; Y++)
 	{
-		// Build surface mask for this Z-slice
-		bool bHasAnySurface = false;
-		for (int32 Y = 0; Y < ChunkSize; Y++)
+		for (int32 X = 0; X < ChunkSize; X++)
 		{
-			for (int32 X = 0; X < ChunkSize; X++)
+			for (int32 Z = 0; Z < ChunkSize; Z++)
 			{
-				const int32 Index = X + Y * ChunkSize;
-				const bool bIsSurface = IsWaterSurface(Request, X, Y, Z);
-				SurfaceMask[Index] = bIsSurface;
-				if (bIsSurface)
+				const FVoxelData& Voxel = Request.GetVoxel(X, Y, Z);
+				if (Voxel.IsAir() && Voxel.HasWaterFlag() && !Voxel.HasUndergroundFlag())
 				{
-					bHasAnySurface = true;
+					ColumnMask[X + Y * ChunkSize] = true;
+					bHasAnyWater = true;
+					break;
 				}
-			}
-		}
-
-		if (!bHasAnySurface)
-		{
-			continue;
-		}
-
-		// Reset processed array for this slice
-		FMemory::Memzero(Processed.GetData(), SliceSize * sizeof(bool));
-
-		// Greedy rectangle merging (same algorithm as cubic mesher)
-		for (int32 Y = 0; Y < ChunkSize; Y++)
-		{
-			for (int32 X = 0; X < ChunkSize; X++)
-			{
-				const int32 Index = X + Y * ChunkSize;
-
-				if (Processed[Index] || !SurfaceMask[Index])
-				{
-					continue;
-				}
-
-				// Find maximum width (extend along X axis)
-				int32 Width = 1;
-				while (X + Width < ChunkSize)
-				{
-					const int32 NextIndex = (X + Width) + Y * ChunkSize;
-					if (Processed[NextIndex] || !SurfaceMask[NextIndex])
-					{
-						break;
-					}
-					Width++;
-				}
-
-				// Find maximum height (extend along Y axis) for this width
-				int32 Height = 1;
-				bool bCanExtend = true;
-				while (bCanExtend && Y + Height < ChunkSize)
-				{
-					for (int32 DX = 0; DX < Width; DX++)
-					{
-						const int32 CheckIndex = (X + DX) + (Y + Height) * ChunkSize;
-						if (Processed[CheckIndex] || !SurfaceMask[CheckIndex])
-						{
-							bCanExtend = false;
-							break;
-						}
-					}
-					if (bCanExtend)
-					{
-						Height++;
-					}
-				}
-
-				// Mark all cells in this rectangle as processed
-				for (int32 DY = 0; DY < Height; DY++)
-				{
-					for (int32 DX = 0; DX < Width; DX++)
-					{
-						const int32 MarkIndex = (X + DX) + (Y + DY) * ChunkSize;
-						Processed[MarkIndex] = true;
-					}
-				}
-
-				// Emit merged water quad
-				EmitWaterQuad(OutMeshData, Request, Z, X, Y, Width, Height);
 			}
 		}
 	}
+
+	if (!bHasAnyWater)
+	{
+		return;
+	}
+
+	// Delegate to GenerateWaterMeshFromMask for dilation + greedy merge
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	GenerateWaterMeshFromMask(ColumnMask, ChunkSize, Request.VoxelSize, ChunkWorldPos, WaterLevel, OutMeshData);
 
 	if (OutMeshData.IsValid())
 	{
@@ -133,8 +244,8 @@ bool FVoxelWaterMesher::IsWaterSurface(const FVoxelMeshingRequest& Request, int3
 {
 	const FVoxelData& Voxel = Request.GetVoxel(X, Y, Z);
 
-	// Must be an air voxel with the water flag set
-	if (!Voxel.IsAir() || !Voxel.HasWaterFlag())
+	// Must be air with water flag, and NOT underground (cave interior)
+	if (!Voxel.IsAir() || !Voxel.HasWaterFlag() || Voxel.HasUndergroundFlag())
 	{
 		return false;
 	}
@@ -178,32 +289,34 @@ bool FVoxelWaterMesher::GetVoxelAbove(const FVoxelMeshingRequest& Request, int32
 
 void FVoxelWaterMesher::EmitWaterQuad(
 	FChunkMeshData& MeshData,
-	const FVoxelMeshingRequest& Request,
-	int32 SliceZ,
+	float VoxelSize,
+	const FVector& TileWorldPos,
+	float LocalWaterZ,
 	int32 U, int32 V,
 	int32 Width, int32 Height)
 {
-	const float VoxelSize = Request.VoxelSize;
 	const uint32 BaseVertex = MeshData.Positions.Num();
 
-	// Water surface is at the TOP of the water voxel (Z+1 face)
-	const float SurfaceZ = static_cast<float>(SliceZ + 1) * VoxelSize;
+	// Water surface sits at the actual water level, not a voxel boundary
+	const float SurfaceZ = LocalWaterZ;
 
-	// Calculate the 4 corners of the quad in local chunk space
-	// +Z face winding: CCW when viewed from above
-	const FVector3f Corner0(static_cast<float>(U) * VoxelSize, static_cast<float>(V) * VoxelSize, SurfaceZ);
-	const FVector3f Corner1(static_cast<float>(U + Width) * VoxelSize, static_cast<float>(V) * VoxelSize, SurfaceZ);
-	const FVector3f Corner2(static_cast<float>(U + Width) * VoxelSize, static_cast<float>(V + Height) * VoxelSize, SurfaceZ);
-	const FVector3f Corner3(static_cast<float>(U) * VoxelSize, static_cast<float>(V + Height) * VoxelSize, SurfaceZ);
+	float MinX = static_cast<float>(U) * VoxelSize;
+	float MaxX = static_cast<float>(U + Width) * VoxelSize;
+	float MinY = static_cast<float>(V) * VoxelSize;
+	float MaxY = static_cast<float>(V + Height) * VoxelSize;
+
+	// Calculate the 4 corners of the quad in local space
+	const FVector3f Corner0(MinX, MinY, SurfaceZ);
+	const FVector3f Corner1(MaxX, MinY, SurfaceZ);
+	const FVector3f Corner2(MaxX, MaxY, SurfaceZ);
+	const FVector3f Corner3(MinX, MaxY, SurfaceZ);
 
 	// Normal: straight up for water surface
 	const FVector3f Normal(0.0f, 0.0f, 1.0f);
 
 	// World-space UVs for seamless cross-chunk tiling
-	// Chunk world position offset
-	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
-	const float WorldX0 = static_cast<float>(ChunkWorldPos.X) + static_cast<float>(U) * VoxelSize;
-	const float WorldY0 = static_cast<float>(ChunkWorldPos.Y) + static_cast<float>(V) * VoxelSize;
+	const float WorldX0 = static_cast<float>(TileWorldPos.X) + static_cast<float>(U) * VoxelSize;
+	const float WorldY0 = static_cast<float>(TileWorldPos.Y) + static_cast<float>(V) * VoxelSize;
 
 	// UV scale: 1 unit per voxel for consistent tiling
 	const float UVScale = 1.0f / VoxelSize;
@@ -245,13 +358,12 @@ void FVoxelWaterMesher::EmitWaterQuad(
 	MeshData.Colors.Add(WaterColor);
 	MeshData.Colors.Add(WaterColor);
 
-	// Emit 6 indices (2 triangles, CCW winding when viewed from above +Z)
+	// Emit 6 indices (2 triangles, CW winding for Unreal's left-handed coordinate system)
 	// Water corners are: 0=(minX,minY) 1=(maxX,minY) 2=(maxX,maxY) 3=(minX,maxY)
-	// Cubic mesher +Z face uses reversed Y corners, so we use 0-1-2, 0-2-3 here
 	MeshData.Indices.Add(BaseVertex + 0);
+	MeshData.Indices.Add(BaseVertex + 2);
 	MeshData.Indices.Add(BaseVertex + 1);
-	MeshData.Indices.Add(BaseVertex + 2);
 	MeshData.Indices.Add(BaseVertex + 0);
-	MeshData.Indices.Add(BaseVertex + 2);
 	MeshData.Indices.Add(BaseVertex + 3);
+	MeshData.Indices.Add(BaseVertex + 2);
 }
