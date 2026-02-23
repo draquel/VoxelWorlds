@@ -288,16 +288,6 @@ public:
 	IVoxelMeshRenderer* GetMeshRenderer() const { return MeshRenderer; }
 
 	/**
-	 * Set a secondary renderer for water surface mesh.
-	 * When set, the chunk manager will generate water meshes alongside terrain
-	 * and send them to this renderer. The caller retains ownership.
-	 */
-	void SetWaterRenderer(IVoxelMeshRenderer* InWaterRenderer) { WaterMeshRenderer = InWaterRenderer; }
-
-	/** Get the water mesh renderer (may be nullptr). */
-	IVoxelMeshRenderer* GetWaterRenderer() const { return WaterMeshRenderer; }
-
-	/**
 	 * Get the edit manager.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
@@ -630,9 +620,6 @@ protected:
 
 	/** Mesh renderer (NOT owned by this manager) */
 	IVoxelMeshRenderer* MeshRenderer = nullptr;
-
-	/** Water mesh renderer (NOT owned by this manager, may be nullptr) */
-	IVoxelMeshRenderer* WaterMeshRenderer = nullptr;
 
 	/** Whether the manager has been initialized */
 	bool bIsInitialized = false;

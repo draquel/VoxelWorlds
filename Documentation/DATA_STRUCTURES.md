@@ -16,10 +16,22 @@ Complete reference for all voxel plugin data structures.
 struct FVoxelData {
     uint8 MaterialID;   // 0-255 material types
     uint8 Density;      // 0-255 (127 = surface, <127 = air, >127 = solid)
-    uint8 BiomeID;      // 0-255 biome types  
+    uint8 BiomeID;      // 0-255 biome types
     uint8 Metadata;     // AO (4 bits) + flags (4 bits)
 };
+
+// Metadata layout:
+//   Bits 7-4: Ambient occlusion (0-15)
+//   Bit 3:    (reserved)
+//   Bit 2:    VOXEL_FLAG_UNDERGROUND (0x04) — underground air or cave boundary solid
+//   Bit 1:    VOXEL_FLAG_CAVE (0x02) — directly carved by cave generation
+//   Bit 0:    VOXEL_FLAG_WATER (0x01) — water-filled air voxel
+//
+// Flag accessors: HasWaterFlag(), HasCaveFlag(), HasUndergroundFlag()
+// Flag mutators: SetWaterFlag(bool), SetCaveFlag(bool), SetUndergroundFlag(bool)
 ```
+
+See [UNDERGROUND_CLASSIFICATION.md](UNDERGROUND_CLASSIFICATION.md) for details on `VOXEL_FLAG_UNDERGROUND` propagation.
 
 ### FChunkDescriptor
 ```cpp

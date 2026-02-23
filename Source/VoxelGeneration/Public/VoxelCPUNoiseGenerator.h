@@ -241,4 +241,9 @@ private:
 	static void ApplyWaterFillPass(
 		const FVoxelNoiseGenerationRequest& Request,
 		TArray<FVoxelData>& OutVoxelData);
+
+	/** Post-generation: mark air voxels below terrain surface as underground (caves, enclosed voids). */
+	static void ApplyUndergroundClassificationPass(
+		const FVoxelNoiseGenerationRequest& Request,
+		TArray<FVoxelData>& OutVoxelData);
 };

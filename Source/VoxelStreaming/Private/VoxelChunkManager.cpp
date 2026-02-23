@@ -16,7 +16,6 @@
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelGPUDualContourMesher.h"
 #include "VoxelGPUMarchingCubesMesher.h"
-#include "VoxelWaterMesher.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelWaterPropagation.h"
@@ -287,11 +286,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		MeshRenderer->FlushPendingOperations();
 	}
-	if (WaterMeshRenderer)
-	{
-		WaterMeshRenderer->FlushPendingOperations();
-	}
-
 	Timing.TotalMs = static_cast<float>((FPlatformTime::Seconds() - TickStartTime) * 1000.0);
 	LastTimingStats = Timing;
 }
@@ -1822,12 +1816,6 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 			MeshRenderer->RemoveChunk(ChunkCoord);
 		}
 
-		// Remove water mesh for this chunk
-		if (WaterMeshRenderer)
-		{
-			WaterMeshRenderer->RemoveChunk(ChunkCoord);
-		}
-
 		// Remove from loaded set
 		LoadedChunkCoords.Remove(ChunkCoord);
 
@@ -2096,50 +2084,6 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			PropagateWaterFromNeighbors(ChunkCoord);
 		}
 
-		// Generate water surface mesh and send to water renderer
-		if (WaterMeshRenderer && Configuration && Configuration->bEnableWaterLevel)
-		{
-			FVoxelMeshingRequest WaterRequest;
-			WaterRequest.ChunkCoord = ChunkCoord;
-			WaterRequest.LODLevel = PendingMesh.LODLevel;
-			WaterRequest.ChunkSize = Configuration->ChunkSize;
-			WaterRequest.VoxelSize = Configuration->VoxelSize;
-			WaterRequest.WorldOrigin = Configuration->WorldOrigin;
-			WaterRequest.VoxelData = State->Descriptor.VoxelData;
-
-			// Merge edit layer for water mesh to reflect terrain edits
-			if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
-			{
-				const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(ChunkCoord);
-				if (EditLayer && !EditLayer->IsEmpty())
-				{
-					for (const auto& EditPair : EditLayer->Edits)
-					{
-						if (WaterRequest.VoxelData.IsValidIndex(EditPair.Key))
-						{
-							const FVoxelData& ProceduralData = WaterRequest.VoxelData[EditPair.Key];
-							WaterRequest.VoxelData[EditPair.Key] = EditPair.Value.ApplyToProceduralData(ProceduralData);
-						}
-					}
-				}
-			}
-
-			// Extract +Z neighbor for surface detection at chunk top boundary
-			ExtractNeighborEdgeSlices(ChunkCoord, WaterRequest);
-
-			FChunkMeshData WaterMeshData;
-			FVoxelWaterMesher::GenerateWaterMesh(WaterRequest, WaterMeshData);
-			if (WaterMeshData.IsValid())
-			{
-				WaterMeshRenderer->UpdateChunkMeshFromCPU(ChunkCoord, PendingMesh.LODLevel, WaterMeshData);
-			}
-			else
-			{
-				// No water surface in this chunk — remove any existing water mesh
-				WaterMeshRenderer->RemoveChunk(ChunkCoord);
-			}
-		}
-
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
 		PendingMeshQueue.RemoveAtSwap(PendingIndex, EAllowShrinking::No);
 	}
@@ -2151,69 +2095,6 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	// Fire event
 	OnChunkLoaded.Broadcast(ChunkCoord);
-
-	// Reverse water propagation: if this chunk has water at its boundary faces,
-	// loaded neighbors might have dry caves that should now receive water.
-	// Only re-check face neighbors that are already Loaded (lightweight boundary scan).
-	if (WaterMeshRenderer && Configuration && Configuration->bEnableWaterLevel && State)
-	{
-		static const FIntVector FaceOffsets[6] = {
-			{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
-		};
-		const int32 CS = Configuration->ChunkSize;
-		const int32 VolumeSize = CS * CS * CS;
-
-		for (int32 F = 0; F < 6; ++F)
-		{
-			const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[F];
-			FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
-			if (!NeighborState || NeighborState->State != EChunkState::Loaded)
-			{
-				continue;
-			}
-			if (NeighborState->Descriptor.VoxelData.Num() != VolumeSize)
-			{
-				continue;
-			}
-
-			if (PropagateWaterFromNeighbors(NeighborCoord))
-			{
-				// Regenerate water mesh for the neighbor
-				FVoxelMeshingRequest WaterReq;
-				WaterReq.ChunkCoord = NeighborCoord;
-				WaterReq.LODLevel = NeighborState->LODLevel;
-				WaterReq.ChunkSize = CS;
-				WaterReq.VoxelSize = Configuration->VoxelSize;
-				WaterReq.WorldOrigin = Configuration->WorldOrigin;
-				WaterReq.VoxelData = NeighborState->Descriptor.VoxelData;
-
-				if (EditManager && EditManager->ChunkHasEdits(NeighborCoord))
-				{
-					const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(NeighborCoord);
-					if (EditLayer && !EditLayer->IsEmpty())
-					{
-						for (const auto& EditPair : EditLayer->Edits)
-						{
-							if (WaterReq.VoxelData.IsValidIndex(EditPair.Key))
-							{
-								const FVoxelData& ProceduralData = WaterReq.VoxelData[EditPair.Key];
-								WaterReq.VoxelData[EditPair.Key] = EditPair.Value.ApplyToProceduralData(ProceduralData);
-							}
-						}
-					}
-				}
-
-				ExtractNeighborEdgeSlices(NeighborCoord, WaterReq);
-
-				FChunkMeshData WaterMeshData;
-				FVoxelWaterMesher::GenerateWaterMesh(WaterReq, WaterMeshData);
-				if (WaterMeshData.IsValid())
-				{
-					WaterMeshRenderer->UpdateChunkMeshFromCPU(NeighborCoord, NeighborState->LODLevel, WaterMeshData);
-				}
-			}
-		}
-	}
 
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) loaded"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);

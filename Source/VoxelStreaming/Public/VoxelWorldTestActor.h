@@ -353,6 +353,9 @@ protected:
 	/** Destroy the water plane visualization */
 	void DestroyWaterVisualization();
 
+	/** Update water plane XY position to follow the viewer each tick */
+	void UpdateWaterPlanePosition();
+
 	/** Process edit inputs (called from Tick when bEnableEditInputs is true) */
 	void ProcessEditInputs();
 
@@ -412,7 +415,7 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Voxel")
 	TObjectPtr<UVoxelChunkManager> ChunkManager;
 
-	/** Water plane static mesh component — legacy fallback for spherical planet mode */
+	/** Water plane static mesh component — single plane at water level, follows viewer */
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> WaterPlaneMesh;
 
@@ -425,9 +428,6 @@ protected:
 
 	/** Mesh renderer (owned by this actor) */
 	IVoxelMeshRenderer* MeshRenderer = nullptr;
-
-	/** Water mesh renderer (owned by this actor) — renders per-chunk water surface */
-	IVoxelMeshRenderer* WaterMeshRenderer = nullptr;
 
 	/** Runtime-created configuration (if no asset provided) */
 	UPROPERTY()

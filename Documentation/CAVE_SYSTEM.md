@@ -168,6 +168,12 @@ Cave parameters are passed as flat arrays (up to 4 layers) to the compute shader
 - Use `FBiomeCaveOverride` with `CaveScale = 0` to disable in specific biomes
 - Use `MinDepthOverride` to push caves deeper in flat biomes
 
+## Underground Classification
+
+Cave carving sets `VOXEL_FLAG_UNDERGROUND` on all carved air voxels. After generation completes, `ApplyUndergroundClassificationPass()` extends this flag to additional underground air (via column scan) and to solid boundary voxels (via neighbor propagation). The scatter system uses these flags to filter `EScatterSurfaceLocation::SurfaceOnly` and `UndergroundOnly` scatter definitions.
+
+See [UNDERGROUND_CLASSIFICATION.md](UNDERGROUND_CLASSIFICATION.md) for full details on the flag propagation pipeline and scatter surface point classification.
+
 ## Performance
 
 - CPU: ~15-30% overhead per chunk with 3 default layers (3D noise sampling is the cost)

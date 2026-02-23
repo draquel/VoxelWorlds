@@ -1,4 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
+//
+// DEPRECATED: Per-chunk water meshing has been replaced by a single dynamic water plane.
+// See VoxelWorldTestActor::UpdateWaterVisualization() for the current water rendering approach.
 
 #include "VoxelWaterMesher.h"
 #include "VoxelData.h"

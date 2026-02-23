@@ -87,6 +87,43 @@ void FVoxelTreeInjector::InjectTrees(
 					continue;
 				}
 
+				// Underground check: skip trees whose base is under an overhang or cave roof.
+				// Scan upward from the air voxel above the base looking for any solid.
+				{
+					const FIntVector LocalBase = FIntVector(BasePos.X, BasePos.Y, BasePos.Z + 1) - ChunkMin;
+					if (LocalBase.X >= 0 && LocalBase.X < ChunkSize &&
+						LocalBase.Y >= 0 && LocalBase.Y < ChunkSize &&
+						LocalBase.Z >= 0 && LocalBase.Z < ChunkSize)
+					{
+						bool bIsUnderground = false;
+						const int32 BaseIdx = LocalBase.X + LocalBase.Y * ChunkSize + LocalBase.Z * ChunkSize * ChunkSize;
+
+						// Fast path: check generation-time underground flag
+						if (InOutVoxelData[BaseIdx].HasUndergroundFlag())
+						{
+							bIsUnderground = true;
+						}
+						else
+						{
+							// Column scan: look for solid above within this chunk
+							for (int32 ScanZ = LocalBase.Z + 1; ScanZ < ChunkSize; ++ScanZ)
+							{
+								const int32 ScanIdx = LocalBase.X + LocalBase.Y * ChunkSize + ScanZ * ChunkSize * ChunkSize;
+								if (InOutVoxelData[ScanIdx].IsSolid())
+								{
+									bIsUnderground = true;
+									break;
+								}
+							}
+						}
+
+						if (bIsUnderground)
+						{
+							continue;
+						}
+					}
+				}
+
 				StampTree(BasePos, Tmpl, TreeSeeds[i], ChunkCoord, ChunkSize, InOutVoxelData);
 			}
 		}

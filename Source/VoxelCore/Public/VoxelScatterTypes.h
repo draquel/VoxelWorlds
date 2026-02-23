@@ -11,6 +11,18 @@ class UStaticMesh;
 class UTexture2D;
 class UMaterialInterface;
 
+/** Where a scatter type can spawn relative to the terrain surface */
+UENUM(BlueprintType)
+enum class EScatterSurfaceLocation : uint8
+{
+	/** Spawn on any surface — both open sky and underground */
+	Any           UMETA(DisplayName = "Any"),
+	/** Only spawn on open-sky surfaces (exclude caves/underground) */
+	SurfaceOnly   UMETA(DisplayName = "Surface Only"),
+	/** Only spawn underground (caves, enclosed spaces) */
+	UndergroundOnly UMETA(DisplayName = "Underground Only")
+};
+
 /**
  * A single extracted surface point from mesh data.
  * Used as input for scatter placement decisions.
@@ -43,6 +55,9 @@ struct VOXELCORE_API FVoxelSurfacePoint
 	/** Ambient occlusion value (0-3) */
 	UPROPERTY(BlueprintReadOnly)
 	uint8 AmbientOcclusion = 0;
+
+	/** Whether this surface point is underground (cave interior, below terrain) */
+	bool bIsUnderground = false;
 
 	/** Pre-computed slope angle in degrees (0 = flat, 90 = vertical). Computed during surface extraction. */
 	float SlopeAngle = -1.0f;
@@ -272,6 +287,10 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
 	bool bTopFacesOnly = true;
 
+	/** Where this scatter type can spawn relative to terrain surface */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
+	EScatterSurfaceLocation SurfaceLocation = EScatterSurfaceLocation::SurfaceOnly;
+
 	/** Avoid placement in shadowed areas (high AO) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
 	bool bAvoidShadowedAreas = false;
@@ -433,6 +452,16 @@ struct VOXELCORE_API FScatterDefinition
 
 		// Check face type (single bool + enum comparison)
 		if (bTopFacesOnly && Point.FaceType != EVoxelFaceType::Top)
+		{
+			return false;
+		}
+
+		// Check surface location filter (underground vs surface)
+		if (SurfaceLocation == EScatterSurfaceLocation::SurfaceOnly && Point.bIsUnderground)
+		{
+			return false;
+		}
+		if (SurfaceLocation == EScatterSurfaceLocation::UndergroundOnly && !Point.bIsUnderground)
 		{
 			return false;
 		}

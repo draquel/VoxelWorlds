@@ -173,6 +173,9 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 	// Post-generation: mark water voxels via column scan
 	ApplyWaterFillPass(Request, OutVoxelData);
 
+	// Post-generation: classify underground air (caves, enclosed voids)
+	ApplyUndergroundClassificationPass(Request, OutVoxelData);
+
 	return true;
 }
 
@@ -401,11 +404,13 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
 
-				// Set cave flag if cave carving converted this voxel from solid to air.
-				// Water fill uses this to treat cave voids as barriers during initial fill,
-				// then clears flags and re-propagates to fill only connected caves.
+				// Set cave flag and underground flag if cave carving converted solid to air.
+				// Cave flag: temporary barrier for water fill (cleared in Phase 3).
+				// Underground flag: persistent — used by scatter filtering and water plane.
 				const bool bCaveCarved = (PreCaveDensity >= VOXEL_SURFACE_THRESHOLD && Density < VOXEL_SURFACE_THRESHOLD);
-				const uint8 InitMetadata = bCaveCarved ? (FVoxelData::VOXEL_FLAG_CAVE << 4) : 0;
+				const uint8 InitMetadata = bCaveCarved
+					? ((FVoxelData::VOXEL_FLAG_CAVE | FVoxelData::VOXEL_FLAG_UNDERGROUND) << 4)
+					: 0;
 				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, InitMetadata);
 			}
 		}
@@ -1050,7 +1055,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
 
 				const bool bCaveCarved = (PreCaveDensity >= VOXEL_SURFACE_THRESHOLD && Density < VOXEL_SURFACE_THRESHOLD);
-				const uint8 InitMetadata = bCaveCarved ? (FVoxelData::VOXEL_FLAG_CAVE << 4) : 0;
+				const uint8 InitMetadata = bCaveCarved
+					? ((FVoxelData::VOXEL_FLAG_CAVE | FVoxelData::VOXEL_FLAG_UNDERGROUND) << 4)
+					: 0;
 				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, InitMetadata);
 			}
 		}
@@ -1402,6 +1409,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// Depth below surface is radial (terrain radius - distance from center)
 				float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
 
+				// Save pre-cave density to detect cave carving (solid → air transition)
+				const uint8 PreCaveDensity = Density;
+
 				// Determine material and biome
 				uint8 MaterialID = 0;
 				uint8 BiomeID = 0;
@@ -1507,7 +1517,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				}
 
 				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, 0);
+
+				const bool bCaveCarved = (PreCaveDensity >= VOXEL_SURFACE_THRESHOLD && Density < VOXEL_SURFACE_THRESHOLD);
+				const uint8 InitMetadata = bCaveCarved
+					? ((FVoxelData::VOXEL_FLAG_CAVE | FVoxelData::VOXEL_FLAG_UNDERGROUND) << 4)
+					: 0;
+				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, InitMetadata);
 			}
 		}
 	}
@@ -1641,7 +1656,9 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	// === Phase 3: Clear cave flags ===
 	// Cave flags were temporary barriers to prevent ocean water from flooding
 	// cave interiors during the column scan and initial BFS. Now clear them
-	// so cave voids become normal air for the connectivity pass.
+	// so cave voids become normal air.
+	// Note: Phase 4 (cave re-flooding BFS) was removed — caves below water
+	// level are intentionally kept dry so players can explore them on foot.
 	for (int32 i = 0; i < VolumeSize; ++i)
 	{
 		if (OutVoxelData[i].HasCaveFlag())
@@ -1649,53 +1666,133 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 			OutVoxelData[i].SetCaveFlag(false);
 		}
 	}
+}
 
-	// === Phase 4: BFS — propagate water into connected cave voids ===
-	// Re-run BFS from all water-flagged voxels. Cave voids adjacent to ocean
-	// water (e.g. cave openings in the seabed) will now receive water.
-	// Sealed caves (no adjacent water source) remain dry.
-	BFSQueue.Reset();
-	for (int32 i = 0; i < VolumeSize; ++i)
+// ==================== Underground Classification Pass ====================
+
+void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
+	const FVoxelNoiseGenerationRequest& Request,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	const int32 SliceSize = ChunkSize * ChunkSize;
+
+	// Pass 1: Column scan to flag underground air not already flagged by cave carving.
+	// State machine: scan top-down, require seeing open air BEFORE counting solid.
+	// Solid voxels at the column top (before any air) are terrain surface geometry
+	// (peaks, ridges, chunk-boundary terrain), NOT cave ceilings. Only begin
+	// counting solid thickness after the first air gap, so the pattern must be:
+	//   [optional solid at top] → air → solid (>= MinSolidThickness) → air = underground
+	// This avoids falsely flagging surface air below ridges/overhangs as underground.
+	const int32 MinSolidThickness = 3;
+
+	for (int32 Y = 0; Y < ChunkSize; ++Y)
 	{
-		if (OutVoxelData[i].HasWaterFlag())
+		for (int32 X = 0; X < ChunkSize; ++X)
 		{
-			BFSQueue.Add(i);
+			bool bSeenAir = false;
+			bool bUnderground = false;
+			int32 ConsecutiveSolid = 0;
+
+			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
+			{
+				const int32 Index = X + Y * ChunkSize + Z * SliceSize;
+				FVoxelData& Voxel = OutVoxelData[Index];
+
+				if (Voxel.IsSolid())
+				{
+					// Only count solid after we've seen air (sky/surface)
+					if (bSeenAir)
+					{
+						++ConsecutiveSolid;
+					}
+				}
+				else
+				{
+					bSeenAir = true;
+
+					// Air voxel — decide if it's underground
+					if (!bUnderground && ConsecutiveSolid >= MinSolidThickness)
+					{
+						// Passed through thick terrain ceiling — everything below is underground
+						bUnderground = true;
+					}
+
+					if (bUnderground && !Voxel.HasWaterFlag())
+					{
+						Voxel.SetUndergroundFlag(true);
+					}
+
+					// Reset for next solid sequence (only matters while still above ground)
+					if (!bUnderground)
+					{
+						ConsecutiveSolid = 0;
+					}
+				}
+			}
 		}
 	}
 
-	QueueHead = 0;
-	while (QueueHead < BFSQueue.Num())
+	// Pass 2: Propagate underground flag to solid boundary voxels.
+	// Scatter surface points sit at solid-air boundaries. Flagging the solid
+	// side ensures ClassifySurfacePointsUnderground always finds the flag
+	// regardless of which voxel the surface point position maps to.
+	// Two iterations extend the flag deeper into solid geometry for corners
+	// and edges where mesh interpolation places surface points further
+	// from the cave air.
+	// Guard: never flag a solid voxel that has a non-underground air neighbor.
+	// Such voxels are surface-exposed (terrain face, cliff, overhang) and
+	// flagging them would cause surface scatter to be classified underground.
+	const int32 PropagationDepth = 2;
+	for (int32 Iteration = 0; Iteration < PropagationDepth; ++Iteration)
 	{
-		const int32 CurrentIdx = BFSQueue[QueueHead++];
-		const int32 CZ = CurrentIdx / SliceSize;
-		const int32 CY = (CurrentIdx - CZ * SliceSize) / ChunkSize;
-		const int32 CX = CurrentIdx - CZ * SliceSize - CY * ChunkSize;
-
-		for (int32 D = 0; D < 6; ++D)
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
 		{
-			const int32 NX = CX + DX[D];
-			const int32 NY = CY + DY[D];
-			const int32 NZ = CZ + DZ[D];
-
-			if (NX < 0 || NX >= ChunkSize ||
-				NY < 0 || NY >= ChunkSize ||
-				NZ < 0 || NZ >= ChunkSize)
+			for (int32 Y = 0; Y < ChunkSize; ++Y)
 			{
-				continue;
+				for (int32 X = 0; X < ChunkSize; ++X)
+				{
+					const int32 Index = X + Y * ChunkSize + Z * SliceSize;
+					FVoxelData& Voxel = OutVoxelData[Index];
+
+					if (!Voxel.IsSolid() || Voxel.HasUndergroundFlag())
+						continue;
+
+					// Check 6-connected neighbors
+					const int32 Neighbors[6] = {
+						(X > 0)              ? Index - 1 : -1,
+						(X < ChunkSize - 1)  ? Index + 1 : -1,
+						(Y > 0)              ? Index - ChunkSize : -1,
+						(Y < ChunkSize - 1)  ? Index + ChunkSize : -1,
+						(Z > 0)              ? Index - SliceSize : -1,
+						(Z < ChunkSize - 1)  ? Index + SliceSize : -1,
+					};
+
+					bool bAdjacentToUnderground = false;
+					bool bAdjacentToSurfaceAir = false;
+					for (int32 N = 0; N < 6; ++N)
+					{
+						if (Neighbors[N] >= 0)
+						{
+							const FVoxelData& Nbr = OutVoxelData[Neighbors[N]];
+							if (Nbr.HasUndergroundFlag())
+							{
+								bAdjacentToUnderground = true;
+							}
+							else if (!Nbr.IsSolid())
+							{
+								// Non-underground air = surface/sky exposure
+								bAdjacentToSurfaceAir = true;
+							}
+						}
+					}
+
+					if (bAdjacentToUnderground && !bAdjacentToSurfaceAir)
+					{
+						Voxel.SetUndergroundFlag(true);
+					}
+				}
 			}
-
-			const int32 NeighborIdx = NX + NY * ChunkSize + NZ * SliceSize;
-			FVoxelData& Neighbor = OutVoxelData[NeighborIdx];
-
-			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag())
-				continue;
-
-			const float NeighborWorldZ = ChunkWorldPos.Z + NZ * VoxelSize;
-			if (NeighborWorldZ > WaterLevel)
-				continue;
-
-			Neighbor.SetWaterFlag(true);
-			BFSQueue.Add(NeighborIdx);
 		}
 	}
 }

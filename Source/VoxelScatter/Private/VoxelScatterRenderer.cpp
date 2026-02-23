@@ -591,6 +591,36 @@ int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 	return Total;
 }
 
+void UVoxelScatterRenderer::SetSurfaceScatterVisible(bool bVisible)
+{
+	if (!ScatterManager)
+	{
+		return;
+	}
+
+	for (auto& Pair : HISMComponents)
+	{
+		const int32 ScatterTypeID = Pair.Key;
+		UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value;
+		if (!HISM)
+		{
+			continue;
+		}
+
+		const FScatterDefinition* Def = ScatterManager->GetScatterDefinition(ScatterTypeID);
+		if (!Def)
+		{
+			continue;
+		}
+
+		// Only toggle surface-only scatter. Underground and Any scatter stay visible.
+		if (Def->SurfaceLocation == EScatterSurfaceLocation::SurfaceOnly)
+		{
+			HISM->SetVisibility(bVisible);
+		}
+	}
+}
+
 FString UVoxelScatterRenderer::GetDebugStats() const
 {
 	const int32 TotalInstances = GetTotalInstanceCount();

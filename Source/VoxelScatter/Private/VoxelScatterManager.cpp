@@ -293,6 +293,14 @@ const FScatterDefinition* UVoxelScatterManager::GetScatterDefinition(int32 Scatt
 	return nullptr;
 }
 
+void UVoxelScatterManager::SetSurfaceScatterVisible(bool bVisible)
+{
+	if (ScatterRenderer)
+	{
+		ScatterRenderer->SetSurfaceScatterVisible(bVisible);
+	}
+}
+
 // ==================== Scatter Data Access ====================
 
 const FChunkScatterData* UVoxelScatterManager::GetChunkScatterData(const FIntVector& ChunkCoord) const
@@ -504,6 +512,7 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 	// Remove from GPU pending placement
 	GPUExtractionPendingPlacement.Remove(ChunkCoord);
 	GPUExtractionPendingLODLevel.Remove(ChunkCoord);
+	GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
 
 	// Clear cleared volumes and completed type tracking - allow full regeneration on reload
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
@@ -534,6 +543,7 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 	// Remove from GPU pending placement
 	GPUExtractionPendingPlacement.Remove(ChunkCoord);
 	GPUExtractionPendingLODLevel.Remove(ChunkCoord);
+	GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
 
 	// Remove deferred supplemental passes
 	DeferredSupplementalPasses.Remove(ChunkCoord);
@@ -1569,9 +1579,19 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 		GPURequest.UV1s = MoveTemp(PendingData.UV1s);
 		GPURequest.Colors = MoveTemp(PendingData.Colors);
 
-		// Store filtered definitions and LOD level for placement after GPU extraction completes
+		// Store filtered definitions, LOD level, and voxel data for placement after GPU extraction completes
 		GPUExtractionPendingPlacement.Add(ChunkCoord, MoveTemp(FilteredDefinitions));
 		GPUExtractionPendingLODLevel.Add(ChunkCoord, PendingData.LODLevel);
+
+		// Store voxel data for underground classification of GPU-extracted surface points
+		if (PendingData.ChunkVoxelData.Num() > 0)
+		{
+			FGPUExtractionVoxelInfo VoxelInfo;
+			VoxelInfo.VoxelData = MoveTemp(PendingData.ChunkVoxelData);
+			VoxelInfo.ChunkSize = PendingData.ChunkSize;
+			VoxelInfo.VoxelSize = PendingData.VoxelSize;
+			GPUExtractionPendingVoxelInfo.Add(ChunkCoord, MoveTemp(VoxelInfo));
+		}
 
 		FVoxelGPUSurfaceExtractor::DispatchExtraction(
 			MoveTemp(GPURequest),
@@ -1805,6 +1825,7 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 		{
 			UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): GPU extraction result discarded - chunk no longer tracked"),
 				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+			GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
 			continue;
 		}
 
@@ -1812,6 +1833,7 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 		{
 			// Remove from in-progress tracking for failed/empty results
 			AsyncScatterInProgress.Remove(ChunkCoord);
+			GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
 			continue;
 		}
 
@@ -1853,6 +1875,20 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 			}
 		}
 
+		// Retrieve voxel data for underground classification (if available)
+		TArray<FVoxelData> CapturedVoxelData;
+		int32 CapturedChunkSize = 0;
+		float CapturedVoxelSize = 0.0f;
+		if (FGPUExtractionVoxelInfo* VoxelInfo = GPUExtractionPendingVoxelInfo.Find(ChunkCoord))
+		{
+			CapturedVoxelData = MoveTemp(VoxelInfo->VoxelData);
+			CapturedChunkSize = VoxelInfo->ChunkSize;
+			CapturedVoxelSize = VoxelInfo->VoxelSize;
+			GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
+		}
+
+		const FVector CapturedChunkWorldOrigin = GetChunkWorldOrigin(ChunkCoord);
+
 		// Launch placement on thread pool (same as CPU async path from here)
 		const uint32 CapturedWorldSeed = WorldSeed;
 		const int32 GPUSurfacePointCount = SurfaceData.SurfacePoints.Num();
@@ -1860,8 +1896,28 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 
 		Async(EAsyncExecution::ThreadPool,
 			[WeakThis, SurfaceData = MoveTemp(SurfaceData), FilteredDefinitions = MoveTemp(FilteredDefinitions),
-			 CapturedWorldSeed, ChunkCoord]() mutable
+			 CapturedWorldSeed, ChunkCoord,
+			 CapturedVoxelData = MoveTemp(CapturedVoxelData), CapturedChunkSize, CapturedVoxelSize,
+			 CapturedChunkWorldOrigin]() mutable
 		{
+			// Classify GPU-extracted surface points as underground using voxel data
+			if (CapturedVoxelData.Num() == CapturedChunkSize * CapturedChunkSize * CapturedChunkSize && CapturedChunkSize > 0)
+			{
+				ClassifySurfacePointsUnderground(
+					SurfaceData.SurfacePoints,
+					CapturedVoxelData,
+					CapturedChunkWorldOrigin,
+					CapturedChunkSize,
+					CapturedVoxelSize);
+			}
+
+			// Count underground points for diagnostic
+			int32 UGCount = 0;
+			for (const FVoxelSurfacePoint& Pt : SurfaceData.SurfacePoints)
+			{
+				if (Pt.bIsUnderground) ++UGCount;
+			}
+
 			FAsyncScatterResult Result;
 			Result.ChunkCoord = ChunkCoord;
 
@@ -1874,6 +1930,10 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 				ChunkSeed,
 				ScatterData
 			);
+
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("GPUScatter (%d,%d,%d): surfPts=%d underground=%d spawnPts=%d defs=%d"),
+				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
+				SurfaceData.SurfacePoints.Num(), UGCount, ScatterData.SpawnPoints.Num(), FilteredDefinitions.Num());
 
 			Result.SurfaceData = MoveTemp(SurfaceData);
 			Result.ScatterData = MoveTemp(ScatterData);
@@ -1893,6 +1953,112 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): GPU extraction complete (%d surface points), launching placement"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, GPUSurfacePointCount);
 	}
+}
+
+void UVoxelScatterManager::ClassifySurfacePointsUnderground(
+	TArray<FVoxelSurfacePoint>& SurfacePoints,
+	const TArray<FVoxelData>& VoxelData,
+	const FVector& ChunkWorldOrigin,
+	int32 ChunkSize,
+	float VoxelSize)
+{
+	const int32 ExpectedVoxels = ChunkSize * ChunkSize * ChunkSize;
+	if (VoxelData.Num() != ExpectedVoxels || ChunkSize <= 0 || VoxelSize <= 0.0f)
+		return;
+
+	const int32 SliceSize = ChunkSize * ChunkSize;
+	int32 UndergroundCount = 0;
+
+	for (FVoxelSurfacePoint& Point : SurfacePoints)
+	{
+		const FVector LocalPos = (Point.Position - ChunkWorldOrigin) / VoxelSize;
+		const int32 VX = FMath::Clamp(FMath::FloorToInt(LocalPos.X), 0, ChunkSize - 1);
+		const int32 VY = FMath::Clamp(FMath::FloorToInt(LocalPos.Y), 0, ChunkSize - 1);
+		const int32 VZ = FMath::Clamp(FMath::FloorToInt(LocalPos.Z), 0, ChunkSize - 1);
+		const int32 Idx = VX + VY * ChunkSize + VZ * SliceSize;
+
+		bool bFlaggedUnderground = false;
+
+		// Direct flag check — covers both air and solid boundary voxels
+		if (VoxelData[Idx].HasUndergroundFlag())
+		{
+			bFlaggedUnderground = true;
+		}
+		// For mesh-interpolated positions on solid voxels, check air neighbor along normal
+		else if (VoxelData[Idx].IsSolid())
+		{
+			const FVector AirLocal = (Point.Position + FVector(Point.Normal) * VoxelSize * 0.5f - ChunkWorldOrigin) / VoxelSize;
+			const int32 AX = FMath::Clamp(FMath::FloorToInt(AirLocal.X), 0, ChunkSize - 1);
+			const int32 AY = FMath::Clamp(FMath::FloorToInt(AirLocal.Y), 0, ChunkSize - 1);
+			const int32 AZ = FMath::Clamp(FMath::FloorToInt(AirLocal.Z), 0, ChunkSize - 1);
+			const int32 AirIdx = AX + AY * ChunkSize + AZ * SliceSize;
+
+			if (VoxelData[AirIdx].HasUndergroundFlag())
+			{
+				bFlaggedUnderground = true;
+			}
+		}
+
+		// Column scan override for upward-facing surfaces (floors, slopes).
+		// Two checks:
+		// 1. Find first air above — if surface air (not underground), de-classify
+		// 2. If genuinely underground, check cave headroom — de-classify if ceiling
+		//    is too close (mushroom meshes would poke through thin terrain)
+		if (bFlaggedUnderground && Point.Normal.Z > 0.3f)
+		{
+			bool bFoundUndergroundAir = false;
+			int32 Headroom = 0; // air voxels above before hitting solid ceiling
+
+			for (int32 dz = 1; dz < ChunkSize; ++dz)
+			{
+				const int32 CheckZ = VZ + dz;
+				if (CheckZ >= ChunkSize)
+					break;
+
+				const int32 CheckIdx = VX + VY * ChunkSize + CheckZ * SliceSize;
+				const FVoxelData& CheckVoxel = VoxelData[CheckIdx];
+
+				if (!CheckVoxel.IsSolid())
+				{
+					if (!bFoundUndergroundAir)
+					{
+						// First air voxel — determines underground vs surface
+						if (CheckVoxel.HasUndergroundFlag())
+							bFoundUndergroundAir = true;
+						else
+							break; // Surface air → will de-classify below
+					}
+					++Headroom;
+				}
+				else if (bFoundUndergroundAir)
+				{
+					// Hit ceiling after finding underground air
+					break;
+				}
+			}
+
+			// De-classify if surface air above, or chunk boundary (all solid)
+			if (!bFoundUndergroundAir)
+			{
+				bFlaggedUnderground = false;
+			}
+			// De-classify if cave headroom is insufficient (< 3 voxels = 300 units).
+			// Prevents mushroom meshes from poking through thin cave ceilings.
+			else if (Headroom < 3)
+			{
+				bFlaggedUnderground = false;
+			}
+		}
+
+		if (bFlaggedUnderground)
+		{
+			Point.bIsUnderground = true;
+			++UndergroundCount;
+		}
+	}
+
+	UE_LOG(LogVoxelScatter, Log, TEXT("ClassifyUnderground: %d/%d surface points marked underground"),
+		UndergroundCount, SurfacePoints.Num());
 }
 
 void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
@@ -1931,12 +2097,14 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 		return static_cast<float>(VoxelData[Index].Density);
 	};
 
-	// Scan each column at stride intervals
+	// Scan each column at stride intervals, finding all solid-air transitions.
+	// Underground classification uses the voxel underground flag (set by
+	// ApplyUndergroundClassificationPass) rather than a column-based heuristic,
+	// which avoids falsely classifying exposed slope faces as underground.
 	for (int32 X = 0; X < ChunkSize; X += Stride)
 	{
 		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
 		{
-			// Scan top-down to find topmost surface transition (solid below, air above)
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
 				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -1949,6 +2117,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 
 				// Found solid voxel — check if there's air above
 				float AirDensity = 0.0f; // Above chunk boundary = air
+				bool bAirAboveIsUnderground = false;
 				if (Z + 1 < ChunkSize)
 				{
 					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
@@ -1958,6 +2127,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 						continue; // Not a surface transition
 					}
 					AirDensity = static_cast<float>(AboveVoxel.Density);
+					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
 				}
 
 				// Interpolate exact Z position (same formula as Marching Cubes edge interpolation)
@@ -1989,7 +2159,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				}
 				if (bInClearedVolume)
 				{
-					break; // Skip this column entirely
+					break; // Skip rest of this column
 				}
 
 				// Compute normal from density gradient (central differences)
@@ -2029,14 +2199,44 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
 				Point.ComputeSlopeAngle();
 
+				// Underground classification: use the air voxel's flag directly.
+				// The flag is set by cave carving (generation time) and
+				// ApplyUndergroundClassificationPass (column scan with solid
+				// thickness threshold). This replaces the old column-based
+				// heuristic that falsely flagged exposed slope faces.
+				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
+
 				OutSurfaceData.SurfacePoints.Add(Point);
-				break; // Found topmost surface for this column
 			}
 		}
 	}
 
 	OutSurfaceData.SurfaceAreaEstimate = OutSurfaceData.SurfacePoints.Num() * SurfacePointSpacing * SurfacePointSpacing;
 	OutSurfaceData.bIsValid = true;
+
+	// Diagnostic: log underground classification results
+	int32 UGCount = 0;
+	float MinUGZ = TNumericLimits<float>::Max();
+	float MaxSurfZ = TNumericLimits<float>::Lowest();
+	for (const FVoxelSurfacePoint& Pt : OutSurfaceData.SurfacePoints)
+	{
+		if (Pt.bIsUnderground)
+		{
+			++UGCount;
+			MinUGZ = FMath::Min(MinUGZ, Pt.Position.Z);
+		}
+		else
+		{
+			MaxSurfZ = FMath::Max(MaxSurfZ, Pt.Position.Z);
+		}
+	}
+	if (UGCount > 0)
+	{
+		UE_LOG(LogVoxelScatter, Warning, TEXT("DIAG Extract chunk(%d,%d,%d): %d/%d underground. SurfMaxZ=%.0f, UGMinZ=%.0f (gap=%.0f)"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
+			UGCount, OutSurfaceData.SurfacePoints.Num(),
+			MaxSurfZ, MinUGZ, MaxSurfZ - MinUGZ);
+	}
 }
 
 void UVoxelScatterManager::ExtractSurfacePointsCubic(
@@ -2059,14 +2259,14 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 		return;
 	}
 
-	// One surface point per exposed top face (one per block column)
+	// Surface points per exposed top face — scans all solid-air transitions per column.
+	// Underground classification uses voxel flags rather than column-based heuristic.
 	OutSurfaceData.SurfacePoints.Reserve(ChunkSize * ChunkSize);
 
 	for (int32 X = 0; X < ChunkSize; ++X)
 	{
 		for (int32 Y = 0; Y < ChunkSize; ++Y)
 		{
-			// Scan top-down to find topmost solid voxel with air above
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
 				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -2078,13 +2278,16 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				}
 
 				// Check air above
+				bool bAirAboveIsUnderground = false;
 				if (Z + 1 < ChunkSize)
 				{
 					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
-					if (VoxelData[AboveIndex].IsSolid())
+					const FVoxelData& AboveVoxel = VoxelData[AboveIndex];
+					if (AboveVoxel.IsSolid())
 					{
 						continue; // Not a surface
 					}
+					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
 				}
 
 				// Block face center: center of block XY, top of block Z
@@ -2106,7 +2309,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				}
 				if (bInClearedVolume)
 				{
-					break;
+					break; // Skip rest of this column
 				}
 
 				// Cubic: normal is always up, face type is always Top
@@ -2119,8 +2322,10 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
 				Point.SlopeAngle = 0.0f; // Flat top face
 
+				// Use voxel underground flag directly
+				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
+
 				OutSurfaceData.SurfacePoints.Add(Point);
-				break; // Found topmost surface for this column
 			}
 		}
 	}

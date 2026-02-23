@@ -102,6 +102,9 @@ struct VOXELCORE_API FVoxelData
 	/** Cave-carved air flag bit within the flags nibble (temporary, cleared after water fill) */
 	static constexpr uint8 VOXEL_FLAG_CAVE = 0x02;
 
+	/** Persistent underground flag — air below terrain surface (caves, enclosed voids) */
+	static constexpr uint8 VOXEL_FLAG_UNDERGROUND = 0x04;
+
 	/** Check if this voxel is marked as containing water */
 	FORCEINLINE bool HasWaterFlag() const
 	{
@@ -133,6 +136,23 @@ struct VOXELCORE_API FVoxelData
 			Flags |= VOXEL_FLAG_CAVE;
 		else
 			Flags &= ~VOXEL_FLAG_CAVE;
+		SetFlags(Flags);
+	}
+
+	/** Check if this voxel is underground (cave interior, below terrain surface) */
+	FORCEINLINE bool HasUndergroundFlag() const
+	{
+		return (GetFlags() & VOXEL_FLAG_UNDERGROUND) != 0;
+	}
+
+	/** Set or clear the underground flag */
+	FORCEINLINE void SetUndergroundFlag(bool bIsUnderground)
+	{
+		uint8 Flags = GetFlags();
+		if (bIsUnderground)
+			Flags |= VOXEL_FLAG_UNDERGROUND;
+		else
+			Flags &= ~VOXEL_FLAG_UNDERGROUND;
 		SetFlags(Flags);
 	}
 

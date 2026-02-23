@@ -51,17 +51,25 @@ void FVoxelScatterPlacement::GenerateSpawnPoints(
 
 	OutScatterData.bIsValid = true;
 
+	// Count underground surface points for diagnostic
+	int32 UGSurfacePts = 0;
+	for (const FVoxelSurfacePoint& Pt : SurfaceData.SurfacePoints)
+	{
+		if (Pt.bIsUnderground) ++UGSurfacePts;
+	}
+
 	if (OutScatterData.SpawnPoints.Num() == 0 && SurfaceData.SurfacePoints.Num() > 0)
 	{
-		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): 0 spawn from %d defs (%d enabled), %d surface pts"),
+		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): 0 spawn from %d defs (%d enabled), %d surface pts (%d underground)"),
 			SurfaceData.ChunkCoord.X, SurfaceData.ChunkCoord.Y, SurfaceData.ChunkCoord.Z,
-			Definitions.Num(), EnabledDefCount, SurfaceData.SurfacePoints.Num());
+			Definitions.Num(), EnabledDefCount, SurfaceData.SurfacePoints.Num(), UGSurfacePts);
 	}
 	else
 	{
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Generated %d spawn points from %d surface points"),
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): %d spawn from %d defs (%d enabled), %d surface pts (%d underground)"),
 			SurfaceData.ChunkCoord.X, SurfaceData.ChunkCoord.Y, SurfaceData.ChunkCoord.Z,
-			OutScatterData.SpawnPoints.Num(), SurfaceData.SurfacePoints.Num());
+			OutScatterData.SpawnPoints.Num(), Definitions.Num(), EnabledDefCount,
+			SurfaceData.SurfacePoints.Num(), UGSurfacePts);
 	}
 }
 

@@ -170,6 +170,16 @@ public:
 	 */
 	int64 GetTotalMemoryUsage() const;
 
+	// ==================== Visibility ====================
+
+	/**
+	 * Show or hide HISM components for surface-only scatter types.
+	 * Used to hide foliage/trees when the viewer is underground.
+	 *
+	 * @param bVisible True to show surface scatter, false to hide
+	 */
+	void SetSurfaceScatterVisible(bool bVisible);
+
 	// ==================== Debug ====================
 
 	/**

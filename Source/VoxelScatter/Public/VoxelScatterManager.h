@@ -127,6 +127,17 @@ public:
 	 */
 	const FScatterDefinition* GetScatterDefinition(int32 ScatterID) const;
 
+	// ==================== Visibility ====================
+
+	/**
+	 * Show or hide surface-only scatter (trees, grass, etc.) based on viewer position.
+	 * When the viewer is underground, surface scatter should be hidden to prevent
+	 * foliage from being visible through cave ceilings.
+	 *
+	 * @param bVisible True to show surface scatter, false to hide
+	 */
+	void SetSurfaceScatterVisible(bool bVisible);
+
 	// ==================== Scatter Data Access ====================
 
 	/**
@@ -580,6 +591,23 @@ protected:
 
 	/** LOD level of mesh data used for GPU extraction (for LOD tracking) */
 	TMap<FIntVector, int32> GPUExtractionPendingLODLevel;
+
+	/** Voxel data stored during GPU extraction dispatch for underground classification */
+	struct FGPUExtractionVoxelInfo
+	{
+		TArray<FVoxelData> VoxelData;
+		int32 ChunkSize = 0;
+		float VoxelSize = 0.0f;
+	};
+	TMap<FIntVector, FGPUExtractionVoxelInfo> GPUExtractionPendingVoxelInfo;
+
+	/** Classify GPU-extracted surface points as underground using voxel data */
+	static void ClassifySurfacePointsUnderground(
+		TArray<FVoxelSurfacePoint>& SurfacePoints,
+		const TArray<FVoxelData>& VoxelData,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize);
 
 	/** Process completed GPU extractions and launch placement on thread pool */
 	void ProcessCompletedGPUExtractions();

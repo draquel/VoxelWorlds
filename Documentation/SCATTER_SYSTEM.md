@@ -159,6 +159,8 @@ struct FScatterDefinition
     float MaxElevation = FLT_MAX;
     bool bTopFacesOnly = true;
     float SpawnDistance = 0.0f;              // 0 = use global ScatterRadius
+    EScatterSurfaceLocation SurfaceLocation = EScatterSurfaceLocation::SurfaceOnly;
+    // Any, SurfaceOnly, UndergroundOnly — see UNDERGROUND_CLASSIFICATION.md
 
     // Instance Variation
     FVector2D ScaleRange = FVector2D(0.8f, 1.2f);
@@ -943,6 +945,8 @@ In `OnChunkMeshDataReady()`, VoxelInjection scatter definitions are filtered bas
 
 ## See Also
 
+- [UNDERGROUND_CLASSIFICATION.md](UNDERGROUND_CLASSIFICATION.md) - Underground flag propagation and scatter surface/underground filtering
 - [BIOME_SYSTEM.md](BIOME_SYSTEM.md) - Biome-scatter integration
+- [CAVE_SYSTEM.md](CAVE_SYSTEM.md) - Cave generation (density subtraction, cave types)
 - [EDIT_LAYER.md](EDIT_LAYER.md) - Edit system integration
 - [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) - Phase 7 details

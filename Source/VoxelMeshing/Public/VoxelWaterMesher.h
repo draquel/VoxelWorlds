@@ -1,4 +1,8 @@
 // Copyright Daniel Raquel. All Rights Reserved.
+//
+// DEPRECATED: Per-chunk water meshing has been replaced by a single dynamic water plane
+// that follows the viewer. This file is kept for potential future use (e.g., non-flat
+// water surfaces or per-chunk water in specific world modes). No code currently references it.
 
 #pragma once
 
