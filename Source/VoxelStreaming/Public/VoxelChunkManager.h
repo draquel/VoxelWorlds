@@ -41,9 +41,13 @@ struct FVoxelChunkState
 	UPROPERTY()
 	EChunkState State = EChunkState::Unloaded;
 
-	/** Current LOD level */
+	/** Target LOD level (updated immediately when LOD change is queued) */
 	UPROPERTY()
 	int32 LODLevel = 0;
+
+	/** LOD level of the currently rendered mesh (updated when mesh is submitted to renderer) */
+	UPROPERTY()
+	int32 MeshedLODLevel = 0;
 
 	/** Current morph factor for LOD transitions */
 	UPROPERTY()

@@ -6,6 +6,7 @@ Development roadmap for the VoxelWorlds plugin.
 
 **Goal**: Core architecture and interfaces
 
+- [x] Improve Water
 ### Tasks
 - [x] Architecture design
 - [x] Documentation structure

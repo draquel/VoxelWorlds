@@ -131,11 +131,18 @@ bool FVoxelCPUDualContourMesher::GenerateMeshCPU(
 	CellVertices.SetNumZeroed(TotalCells);
 	SolveCellVertices(Request, Stride, GridDim, EdgeCrossings, CellVertices);
 
-	// Pass 3.5: Merge LOD boundary cells (before quad generation)
+	// Pass 3.5: Merge fine boundary cells to match coarser neighbor resolution at LOD transitions.
+	// Combined with skirts on the finer side, this minimizes gaps at LOD boundaries.
 	MergeLODBoundaryCells(Request, Stride, GridDim, EdgeCrossings, CellVertices);
 
 	// Pass 3: Generate quads
 	GenerateQuads(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices, CellVertices, OutMeshData, TriangleCount);
+
+	// Generate skirts at LOD transition boundaries (when Transvoxel is disabled)
+	if (Config.bGenerateSkirts && Request.TransitionFaces != 0)
+	{
+		GenerateSkirts(Request, Stride, OutMeshData, TriangleCount);
+	}
 
 	// Calculate stats
 	const double EndTime = FPlatformTime::Seconds();
@@ -254,11 +261,21 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 		{1, 1, 0, 2}, {1, 0, 1, 1}, {0, 1, 1, 0},
 	};
 
-	for (int32 CZ = -1; CZ <= GridSize; CZ++)
+	// Solve from -1 to GridSize-1 (NOT GridSize).
+	// Cells at -1 use face-neighbor data correctly (one layer is sufficient since
+	// edges from CX=-1 access neighbor at X=ChunkSize-1 and chunk at X=0).
+	// Cells at GridSize would have incomplete QEF data: face-neighbor slices provide
+	// only one layer (X=0 of neighbor), so X-axis edges at GridSize map both endpoints
+	// to the same density value, producing no crossings. The resulting QEF vertices are
+	// unreliable, causing quads to be skipped or degenerate. The +X neighbor chunk
+	// generates these boundary quads using ITS CX=-1 cells (which work correctly).
+	// Edge detection still iterates to GridSize so cells at GridSize-1 get full
+	// boundary edge data from their +1 neighbor edges.
+	for (int32 CZ = -1; CZ < GridSize; CZ++)
 	{
-		for (int32 CY = -1; CY <= GridSize; CY++)
+		for (int32 CY = -1; CY < GridSize; CY++)
 		{
-			for (int32 CX = -1; CX <= GridSize; CX++)
+			for (int32 CX = -1; CX < GridSize; CX++)
 			{
 				FQEFSolver QEF;
 				FVector3f AvgNormal = FVector3f::ZeroVector;
@@ -347,19 +364,11 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 
 		const FCellOffset* Offsets = AxisOffsets[Axis];
 
-		// Edge ownership: at least one of 4 cells must be in [0, GridSize-1]
-		bool bOwned = false;
-		for (int32 i = 0; i < 4; i++)
-		{
-			const int32 CCX = CX + Offsets[i].DX;
-			const int32 CCY = CY + Offsets[i].DY;
-			const int32 CCZ = CZ + Offsets[i].DZ;
-			if (CCX >= 0 && CCX < GridSize && CCY >= 0 && CCY < GridSize && CCZ >= 0 && CCZ < GridSize)
-			{
-				bOwned = true;
-				break;
-			}
-		}
+		// Edge ownership: the edge position itself must be in [0, GridSize).
+		// This ensures each physical edge is owned by exactly one chunk.
+		// Cell offsets (containing 0 and -1) access cells in [-1, GridSize-1],
+		// which SolveCellVertices already computes.
+		const bool bOwned = (CX >= 0 && CX < GridSize && CY >= 0 && CY < GridSize && CZ >= 0 && CZ < GridSize);
 		if (!bOwned)
 		{
 			continue;
@@ -475,7 +484,10 @@ void FVoxelCPUDualContourMesher::MergeLODBoundaryCells(
 			for (int32 A1 = 0; A1 < Axis1Size; A1 += MergeRatio)
 			{
 				FQEFSolver MergedQEF;
-				int32 MergedCount = 0;
+
+				// Collect fine cell keys and normals BEFORE invalidation (deferred invalidation)
+				TArray<int32, TInlineAllocator<4>> FineCellIndices;
+				TArray<FVector3f, TInlineAllocator<4>> FineCellNormals;
 
 				for (int32 DA2 = 0; DA2 < MergeRatio && (A2 + DA2) < Axis2Size; DA2++)
 				{
@@ -495,6 +507,10 @@ void FVoxelCPUDualContourMesher::MergeLODBoundaryCells(
 							continue;
 						}
 
+						// Save fine cell info for deferred invalidation and normal blending
+						FineCellIndices.Add(CIdx);
+						FineCellNormals.Add(CellVertices[CIdx].Normal);
+
 						for (const auto& Edge : CellEdges)
 						{
 							const int32 EIdx = EdgeIndex(CX + Edge.DX, CY + Edge.DY, CZ + Edge.DZ, Edge.Axis, GridDim);
@@ -505,13 +521,12 @@ void FVoxelCPUDualContourMesher::MergeLODBoundaryCells(
 							}
 						}
 
-						// Invalidate fine cell vertex (replaced by merged)
-						CellVertices[CIdx].bValid = false;
-						MergedCount++;
+						// DO NOT invalidate here — defer until merge succeeds
 					}
 				}
 
-				if (MergedQEF.Count == 0 || MergedCount == 0)
+				// Skip if merged QEF has no crossings — fine cells remain valid
+				if (MergedQEF.Count == 0 || FineCellIndices.Num() == 0)
 				{
 					continue;
 				}
@@ -555,13 +570,35 @@ void FVoxelCPUDualContourMesher::MergeLODBoundaryCells(
 				MergedVertex.bValid = true;
 				MergedVertex.Position = MergedQEF.Solve(SVDThreshold, MergedBounds, BiasStrength);
 
+				// Blend fine-cell normals with coarse-stride gradient for smooth transitions
 				const float VoxX = MergedVertex.Position.X / VoxelSize;
 				const float VoxY = MergedVertex.Position.Y / VoxelSize;
 				const float VoxZ = MergedVertex.Position.Z / VoxelSize;
-				MergedVertex.Normal = CalculateGradientNormalLOD(Request, VoxX, VoxY, VoxZ, CoarserStride);
+				FVector3f CoarseNormal = CalculateGradientNormalLOD(Request, VoxX, VoxY, VoxZ, CoarserStride);
+
+				FVector3f BlendedNormal = FVector3f::ZeroVector;
+				for (const FVector3f& FineNormal : FineCellNormals)
+				{
+					BlendedNormal += FineNormal;
+				}
+				if (FineCellNormals.Num() > 0)
+				{
+					BlendedNormal = (BlendedNormal / static_cast<float>(FineCellNormals.Num()) + CoarseNormal).GetSafeNormal();
+				}
+				else
+				{
+					BlendedNormal = CoarseNormal;
+				}
+				MergedVertex.Normal = BlendedNormal;
 
 				MergedVertex.MaterialID = GetCellMaterial(Request, BaseCX * Stride, BaseCY * Stride, BaseCZ * Stride, CoarserStride);
 				MergedVertex.BiomeID = GetCellBiome(Request, BaseCX * Stride, BaseCY * Stride, BaseCZ * Stride, CoarserStride);
+
+				// Merge succeeded — now invalidate fine cells
+				for (const int32 CIdx : FineCellIndices)
+				{
+					CellVertices[CIdx].bValid = false;
+				}
 
 				// Store at base position
 				CellVertices[CellIndex(BaseCX, BaseCY, BaseCZ, GridDim)] = MergedVertex;
@@ -794,7 +831,10 @@ FVoxelData FVoxelCPUDualContourMesher::GetVoxelAt(
 		{
 			return Request.NeighborZNeg[X + Y * ChunkSize];
 		}
-		return Request.GetVoxel(ClampedX, ClampedY, ClampedZ);
+		// Neighbor data unavailable — return Air so that edge crossings at chunk
+		// boundaries are detected (solid→air transition). The geometry will be
+		// refined when the neighbor loads and triggers a remesh.
+		return FVoxelData::Air();
 	}
 
 	// Edge case (2 axes out of bounds): use edge neighbor data
@@ -851,7 +891,7 @@ FVoxelData FVoxelCPUDualContourMesher::GetVoxelAt(
 			return Request.EdgeYNegZNeg[X];
 		}
 
-		return Request.GetVoxel(ClampedX, ClampedY, ClampedZ);
+		return FVoxelData::Air();
 	}
 
 	// Corner case (3 axes out of bounds): use corner neighbor data
@@ -890,7 +930,7 @@ FVoxelData FVoxelCPUDualContourMesher::GetVoxelAt(
 			return Request.CornerXNegYNegZNeg;
 		}
 
-		return Request.GetVoxel(ClampedX, ClampedY, ClampedZ);
+		return FVoxelData::Air();
 	}
 
 	return FVoxelData::Air();
@@ -939,6 +979,200 @@ FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormalLOD(
 	}
 
 	return Normal;
+}
+
+// ============================================================================
+// Skirt Generation (LOD Seam Hiding)
+// ============================================================================
+
+void FVoxelCPUDualContourMesher::GenerateSkirts(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	FChunkMeshData& OutMeshData,
+	uint32& OutTriangleCount)
+{
+	const uint32 TrisBefore = OutTriangleCount;
+	const int32 ChunkSize = Request.ChunkSize;
+	const float VoxelSize = Request.VoxelSize;
+	const float SkirtDepth = Config.SkirtDepth * VoxelSize * Stride;
+	const float ChunkWorldSize = static_cast<float>(ChunkSize) * VoxelSize;
+
+	// Tolerance for boundary detection — larger to catch QEF-solved vertices near boundary
+	const float BoundaryTolerance = VoxelSize * Stride * 0.6f;
+
+	const int32 OriginalVertexCount = OutMeshData.Positions.Num();
+	const int32 OriginalIndexCount = OutMeshData.Indices.Num();
+
+	const uint8 TransitionMask = Request.TransitionFaces;
+
+	// Only horizontal faces (±X, ±Y) — vertical seams are rare and less visible
+	for (int32 Face = 0; Face < 4; Face++)
+	{
+		static const uint8 FaceTransitionFlags[4] = {
+			FVoxelMeshingRequest::TRANSITION_XNEG,
+			FVoxelMeshingRequest::TRANSITION_XPOS,
+			FVoxelMeshingRequest::TRANSITION_YNEG,
+			FVoxelMeshingRequest::TRANSITION_YPOS,
+		};
+
+		if ((TransitionMask & FaceTransitionFlags[Face]) == 0)
+		{
+			continue;
+		}
+
+		struct FBoundaryEdge
+		{
+			int32 V0, V1;
+		};
+		TArray<FBoundaryEdge> BoundaryEdges;
+
+		const bool bIsXFace = (Face == 0 || Face == 1);
+		const bool bIsPositiveFace = (Face == 1 || Face == 3);
+		const float BoundaryValue = bIsPositiveFace ? ChunkWorldSize : 0.0f;
+
+		const FVector3f SkirtDir = FVector3f(0.0f, 0.0f, -1.0f);
+
+		// Find edges on this boundary from original mesh triangles
+		const int32 NumTriangles = OriginalIndexCount / 3;
+		for (int32 TriIdx = 0; TriIdx < NumTriangles; TriIdx++)
+		{
+			const int32 BaseIdx = TriIdx * 3;
+			const int32 Idx0 = OutMeshData.Indices[BaseIdx];
+			const int32 Idx1 = OutMeshData.Indices[BaseIdx + 1];
+			const int32 Idx2 = OutMeshData.Indices[BaseIdx + 2];
+
+			if (Idx0 >= OriginalVertexCount || Idx1 >= OriginalVertexCount || Idx2 >= OriginalVertexCount)
+			{
+				continue;
+			}
+
+			const FVector3f& P0 = OutMeshData.Positions[Idx0];
+			const FVector3f& P1 = OutMeshData.Positions[Idx1];
+			const FVector3f& P2 = OutMeshData.Positions[Idx2];
+
+			auto IsOnBoundary = [&](const FVector3f& P) -> bool
+			{
+				const float Coord = bIsXFace ? P.X : P.Y;
+				return FMath::Abs(Coord - BoundaryValue) < BoundaryTolerance;
+			};
+
+			const bool b0 = IsOnBoundary(P0);
+			const bool b1 = IsOnBoundary(P1);
+			const bool b2 = IsOnBoundary(P2);
+
+			auto AddEdgeIfOnBoundary = [&](int32 IdxA, int32 IdxB, bool bA, bool bB)
+			{
+				if (bA && bB)
+				{
+					BoundaryEdges.Add({IdxA, IdxB});
+				}
+			};
+
+			AddEdgeIfOnBoundary(Idx0, Idx1, b0, b1);
+			AddEdgeIfOnBoundary(Idx1, Idx2, b1, b2);
+			AddEdgeIfOnBoundary(Idx2, Idx0, b2, b0);
+		}
+
+		const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
+
+		for (const FBoundaryEdge& Edge : BoundaryEdges)
+		{
+			// Copy vertex data (adding to arrays may reallocate)
+			const FVector3f P0 = OutMeshData.Positions[Edge.V0];
+			const FVector3f P1 = OutMeshData.Positions[Edge.V1];
+			const FColor C0 = OutMeshData.Colors[Edge.V0];
+			const FColor C1 = OutMeshData.Colors[Edge.V1];
+			const FVector2f MatUV0 = OutMeshData.UV1s.IsValidIndex(Edge.V0) ? OutMeshData.UV1s[Edge.V0] : FVector2f::ZeroVector;
+			const FVector2f MatUV1 = OutMeshData.UV1s.IsValidIndex(Edge.V1) ? OutMeshData.UV1s[Edge.V1] : FVector2f::ZeroVector;
+
+			const FVector3f Bottom0 = P0 + SkirtDir * SkirtDepth;
+			const FVector3f Bottom1 = P1 + SkirtDir * SkirtDepth;
+
+			FVector3f SkirtNormal;
+			if (bIsXFace)
+			{
+				SkirtNormal = bIsPositiveFace ? FVector3f(1, 0, 0) : FVector3f(-1, 0, 0);
+			}
+			else
+			{
+				SkirtNormal = bIsPositiveFace ? FVector3f(0, 1, 0) : FVector3f(0, -1, 0);
+			}
+
+			auto CalcUV = [&](const FVector3f& Pos) -> FVector2f
+			{
+				if (bIsXFace)
+				{
+					return FVector2f(Pos.Y * UVScale / VoxelSize, Pos.Z * UVScale / VoxelSize);
+				}
+				else
+				{
+					return FVector2f(Pos.X * UVScale / VoxelSize, Pos.Z * UVScale / VoxelSize);
+				}
+			};
+
+			const FVector2f UV0 = CalcUV(P0);
+			const FVector2f UV1 = CalcUV(P1);
+			const FVector2f UVBottom0 = CalcUV(Bottom0);
+			const FVector2f UVBottom1 = CalcUV(Bottom1);
+
+			const uint32 BaseVertex = OutMeshData.Positions.Num();
+
+			OutMeshData.Positions.Add(P0);
+			OutMeshData.Positions.Add(Bottom0);
+			OutMeshData.Positions.Add(P1);
+			OutMeshData.Positions.Add(Bottom1);
+
+			OutMeshData.Normals.Add(SkirtNormal);
+			OutMeshData.Normals.Add(SkirtNormal);
+			OutMeshData.Normals.Add(SkirtNormal);
+			OutMeshData.Normals.Add(SkirtNormal);
+
+			OutMeshData.UVs.Add(UV0);
+			OutMeshData.UVs.Add(UVBottom0);
+			OutMeshData.UVs.Add(UV1);
+			OutMeshData.UVs.Add(UVBottom1);
+
+			OutMeshData.UV1s.Add(FVector2f(MatUV0.X, 0.0f));
+			OutMeshData.UV1s.Add(FVector2f(MatUV0.X, 0.0f));
+			OutMeshData.UV1s.Add(FVector2f(MatUV1.X, 0.0f));
+			OutMeshData.UV1s.Add(FVector2f(MatUV1.X, 0.0f));
+
+			OutMeshData.Colors.Add(C0);
+			OutMeshData.Colors.Add(C0);
+			OutMeshData.Colors.Add(C1);
+			OutMeshData.Colors.Add(C1);
+
+			if (bIsPositiveFace)
+			{
+				OutMeshData.Indices.Add(BaseVertex + 0);
+				OutMeshData.Indices.Add(BaseVertex + 1);
+				OutMeshData.Indices.Add(BaseVertex + 2);
+
+				OutMeshData.Indices.Add(BaseVertex + 2);
+				OutMeshData.Indices.Add(BaseVertex + 1);
+				OutMeshData.Indices.Add(BaseVertex + 3);
+			}
+			else
+			{
+				OutMeshData.Indices.Add(BaseVertex + 0);
+				OutMeshData.Indices.Add(BaseVertex + 2);
+				OutMeshData.Indices.Add(BaseVertex + 1);
+
+				OutMeshData.Indices.Add(BaseVertex + 2);
+				OutMeshData.Indices.Add(BaseVertex + 3);
+				OutMeshData.Indices.Add(BaseVertex + 1);
+			}
+
+			OutTriangleCount += 2;
+		}
+	}
+
+	const uint32 SkirtTris = OutTriangleCount - TrisBefore;
+	if (SkirtTris > 0)
+	{
+		UE_LOG(LogVoxelMeshing, Verbose, TEXT("DC: Generated %d skirt triangles for chunk (%d,%d,%d) at LOD %d"),
+			SkirtTris, Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, Request.LODLevel);
+	}
 }
 
 // ============================================================================

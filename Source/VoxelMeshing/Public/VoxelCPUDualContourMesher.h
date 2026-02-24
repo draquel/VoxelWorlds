@@ -212,6 +212,13 @@ private:
 		FDCCellVertex& Vertex,
 		FChunkMeshData& OutMeshData);
 
+	/** Generate vertical skirt geometry at LOD transition boundaries to hide seams. */
+	void GenerateSkirts(
+		const FVoxelMeshingRequest& Request,
+		int32 Stride,
+		FChunkMeshData& OutMeshData,
+		uint32& OutTriangleCount);
+
 	// ============================================================================
 	// State
 	// ============================================================================

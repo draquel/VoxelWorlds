@@ -428,6 +428,10 @@ void UVoxelChunkManager::Initialize(
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
 		MeshConfig.UVScale = Configuration->UVScale;
 
+		// DC uses its own LOD boundary merging, not Transvoxel transition cells
+		MeshConfig.bUseTransvoxel = false;
+		MeshConfig.bGenerateSkirts = Configuration->bEnableLODSeams;
+
 		if (Configuration->bUseGPUMeshing)
 		{
 			auto GPUDCMesher = MakeUnique<FVoxelGPUDualContourMesher>();
@@ -1650,27 +1654,22 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 				if (const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
 				{
 					// Store neighbor LOD level for transition cell stride calculation
-					MeshRequest.NeighborLODLevels[i] = NeighborState->LODLevel;
+					// Use the neighbor's *rendered* LOD (not target LOD) so that
+					// MergeLODBoundaryCells and skirts align with the neighbor's actual mesh.
+					MeshRequest.NeighborLODLevels[i] = NeighborState->MeshedLODLevel;
 
-					// Neighbor exists - check if it's at a higher LOD level (coarser)
-					// Per Lengyel's Transvoxel: the FINER chunk generates transition cells on its
-					// face facing the coarser neighbor. The transition cell's face corners (0,2,6,8)
-					// align exactly with the coarser neighbor's MC grid corners, ensuring shared
-					// edge crossings produce identical vertices with no triangulation conflicts.
-					// IMPORTANT: Verify that ALL neighbor data needed for this face is available!
-					if (NeighborState->LODLevel > CurrentLOD)
+					// Generate skirts when:
+					// 1. Neighbor is currently rendering at a coarser LOD than us
+					// 2. Neighbor is mid-LOD-transition (its rendered mesh doesn't match its
+					//    target LOD, so its boundary vertices may change soon — skirts cover
+					//    the transient gap until both sides stabilize)
+					const bool bNeighborCoarser = NeighborState->MeshedLODLevel > CurrentLOD;
+					const bool bNeighborTransitioning = NeighborState->MeshedLODLevel != NeighborState->LODLevel;
+					if (bNeighborCoarser || bNeighborTransitioning)
 					{
-						if (HasNeighborData(i) && HasAllEdgeDataForFace(i))
+						if (HasNeighborData(i))
 						{
 							MeshRequest.TransitionFaces |= TransitionFlags[i];
-						}
-						else
-						{
-							// Missing some neighbor data - skip transition cells for entire face
-							// This prevents mixing transition and regular MC on the same boundary
-							UE_LOG(LogVoxelStreaming, Verbose,
-								TEXT("Chunk (%d,%d,%d) face %d: missing edge/face neighbor data - skipping all transition cells for this face"),
-								Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, i);
 						}
 					}
 				}
@@ -1786,14 +1785,53 @@ void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 		const EChunkState CurrentState = GetChunkState(Result.ChunkCoord);
 		if (CurrentState != EChunkState::Meshing)
 		{
-			// Chunk state changed while we were meshing - discard result
-			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async mesh discarded - state changed to %d"),
-				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
+			// State changed while we were meshing. Route through PendingMeshQueue instead of
+			// submitting directly to the renderer — this ensures OnChunkMeshingComplete handles
+			// all mesh submissions, maintaining proper state tracking, LoadedChunkCoords, and
+			// neighbor remesh cascades.
+			if (Result.bSuccess && CurrentState != EChunkState::PendingUnload &&
+				CurrentState != EChunkState::Unloaded)
+			{
+				// Deduplicate: remove any existing pending entry for this chunk coord
+				for (int32 i = PendingMeshQueue.Num() - 1; i >= 0; --i)
+				{
+					if (PendingMeshQueue[i].ChunkCoord == Result.ChunkCoord)
+					{
+						PendingMeshQueue.RemoveAtSwap(i, EAllowShrinking::No);
+						break;
+					}
+				}
+
+				// Queue through normal path so OnChunkMeshingComplete processes it
+				FPendingMeshData PendingMesh;
+				PendingMesh.ChunkCoord = Result.ChunkCoord;
+				PendingMesh.LODLevel = Result.LODLevel;
+				PendingMesh.MeshData = MoveTemp(Result.MeshData);
+				PendingMeshQueue.Add(MoveTemp(PendingMesh));
+
+				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) mesh queued despite state change to %d"),
+					Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async mesh discarded - state changed to %d"),
+					Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
+			}
 			continue;
 		}
 
 		if (Result.bSuccess)
 		{
+			// Deduplicate: remove stale pending entry for same chunk coord
+			for (int32 i = PendingMeshQueue.Num() - 1; i >= 0; --i)
+			{
+				if (PendingMeshQueue[i].ChunkCoord == Result.ChunkCoord)
+				{
+					PendingMeshQueue.RemoveAtSwap(i, EAllowShrinking::No);
+					break;
+				}
+			}
+
 			// Store mesh in pending queue (will be submitted later, throttled)
 			FPendingMeshData PendingMesh;
 			PendingMesh.ChunkCoord = Result.ChunkCoord;
@@ -1960,10 +1998,67 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 		}
 	}
 
+	// When a chunk's LOD level changes, its face neighbors need re-meshing so they
+	// pick up the new NeighborLODLevels and TransitionFaces. Without this, neighbors
+	// retain stale boundary handling and produce holes at LOD transitions.
 	if (QueuedThisFrame > 0)
 	{
-		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD level changes: %d candidates, queued %d/%d this frame"),
-			RemeshCandidates.Num(), QueuedThisFrame, MaxLODRemeshThisFrame);
+		static const FIntVector FaceOffsets[6] = {
+			FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
+			FIntVector(0, -1, 0), FIntVector(0, 1, 0),
+			FIntVector(0, 0, -1), FIntVector(0, 0, 1),
+		};
+
+		TSet<FIntVector> NeighborRemeshSet;
+		for (const FLODRemeshCandidate& Candidate : RemeshCandidates)
+		{
+			// Only consider candidates that were actually queued (Loaded state)
+			if (const FVoxelChunkState* State = ChunkStates.Find(Candidate.ChunkCoord))
+			{
+				if (State->State == EChunkState::PendingMeshing || State->State == EChunkState::Meshing)
+				{
+					for (const FIntVector& Offset : FaceOffsets)
+					{
+						const FIntVector NeighborCoord = Candidate.ChunkCoord + Offset;
+						// Don't re-queue chunks that already changed LOD this frame
+						if (!NeighborRemeshSet.Contains(NeighborCoord))
+						{
+							NeighborRemeshSet.Add(NeighborCoord);
+						}
+					}
+				}
+			}
+		}
+
+		// Remove candidates that are already being re-meshed this frame
+		for (const FLODRemeshCandidate& Candidate : RemeshCandidates)
+		{
+			NeighborRemeshSet.Remove(Candidate.ChunkCoord);
+		}
+
+		int32 NeighborRemeshCount = 0;
+		for (const FIntVector& NeighborCoord : NeighborRemeshSet)
+		{
+			if (FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
+			{
+				if (NeighborState->State == EChunkState::Loaded)
+				{
+					FChunkLODRequest Request;
+					Request.ChunkCoord = NeighborCoord;
+					Request.LODLevel = NeighborState->LODLevel;
+					Request.Priority = 30.0f; // Lower priority than direct LOD changes
+
+					if (AddToMeshingQueue(Request))
+					{
+						SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
+						++NeighborRemeshCount;
+					}
+				}
+			}
+		}
+
+		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD level changes: %d candidates, queued %d/%d this frame + %d neighbor remeshes"),
+			RemeshCandidates.Num(), QueuedThisFrame, MaxLODRemeshThisFrame, NeighborRemeshCount);
 	}
 }
 
@@ -2068,6 +2163,83 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
 	if (!State || State->State != EChunkState::Meshing)
 	{
+		// State changed while mesh was in PendingMeshQueue (e.g., chunk re-queued for remesh
+		// or marked for unload). Still submit the mesh to the renderer to keep the chunk visible,
+		// but don't change chunk state — the new mesh cycle will handle the state transition.
+		bool bMeshSubmitted = false;
+		int32 SubmittedLOD = -1;
+		int32 PreviousMeshedLOD = State ? State->MeshedLODLevel : -1;
+
+		for (int32 i = PendingMeshQueue.Num() - 1; i >= 0; --i)
+		{
+			if (PendingMeshQueue[i].ChunkCoord == ChunkCoord)
+			{
+				if (MeshRenderer && State)
+				{
+					MeshRenderer->UpdateChunkMeshFromCPU(
+						ChunkCoord,
+						PendingMeshQueue[i].LODLevel,
+						PendingMeshQueue[i].MeshData);
+					State->MeshedLODLevel = PendingMeshQueue[i].LODLevel;
+					SubmittedLOD = PendingMeshQueue[i].LODLevel;
+					bMeshSubmitted = true;
+				}
+				PendingMeshQueue.RemoveAtSwap(i, EAllowShrinking::No);
+				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) mesh submitted despite state change (state=%d)"),
+					ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, State ? static_cast<int32>(State->State) : -1);
+				break;
+			}
+		}
+
+		// If the chunk is already Loaded (e.g., neighbor remesh submitted a new mesh for it),
+		// still trigger neighbor remesh cascade since MeshedLODLevel may have changed.
+		if (bMeshSubmitted && State && State->State == EChunkState::Loaded)
+		{
+			if (Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
+			{
+				static const FIntVector FaceOffsets[6] = {
+					FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
+					FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
+					FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
+				};
+				for (const FIntVector& Offset : FaceOffsets)
+				{
+					const FIntVector NeighborCoord = ChunkCoord + Offset;
+					if (FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
+					{
+						if (NeighborState->State == EChunkState::Loaded)
+						{
+							FChunkLODRequest Request;
+							Request.ChunkCoord = NeighborCoord;
+							Request.LODLevel = NeighborState->LODLevel;
+							Request.Priority = 20.0f;
+							if (AddToMeshingQueue(Request))
+							{
+								SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
+							}
+						}
+					}
+				}
+			}
+		}
+		// Safety net: if chunk is in an unexpected state (not actively transitioning and not Loaded),
+		// force it to Loaded to avoid permanently invisible chunks.
+		else if (bMeshSubmitted && State &&
+			State->State != EChunkState::PendingMeshing &&
+			State->State != EChunkState::Meshing &&
+			State->State != EChunkState::Loaded &&
+			State->State != EChunkState::PendingUnload &&
+			State->State != EChunkState::Unloaded)
+		{
+			UE_LOG(LogVoxelStreaming, Warning,
+				TEXT("Chunk (%d,%d,%d) mesh submitted but chunk in unexpected state %d — forcing to Loaded"),
+				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, static_cast<int32>(State->State));
+			LoadedChunkCoords.Add(ChunkCoord);
+			State->Descriptor.bIsDirty = false;
+			SetChunkState(ChunkCoord, EChunkState::Loaded);
+			OnChunkLoaded.Broadcast(ChunkCoord);
+		}
+
 		return;
 	}
 
@@ -2087,6 +2259,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 	if (PendingIndex != INDEX_NONE && MeshRenderer)
 	{
 		const FPendingMeshData& PendingMesh = PendingMeshQueue[PendingIndex];
+		const int32 PreviousMeshedLOD = State->MeshedLODLevel;
 
 		// Send mesh to renderer
 		MeshRenderer->UpdateChunkMeshFromCPU(
@@ -2094,6 +2267,10 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			PendingMesh.LODLevel,
 			PendingMesh.MeshData
 		);
+
+		// Track which LOD is actually rendered so neighbors can read the correct
+		// LOD level for MergeLODBoundaryCells and transition face setup.
+		State->MeshedLODLevel = PendingMesh.LODLevel;
 
 		// Notify scatter manager with voxel data for LOD-independent surface extraction
 		if (ScatterManager && Configuration && Configuration->bEnableScatter)
@@ -2117,6 +2294,53 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
 		PendingMeshQueue.RemoveAtSwap(PendingIndex, EAllowShrinking::No);
+
+		// When MeshedLODLevel changed, face neighbors need to remesh so their
+		// MergeLODBoundaryCells and TransitionFaces align with our new rendered LOD.
+		// This closes the "break" phase of LOD transitions: without this, neighbors
+		// retain stale boundary alignment until some other trigger re-meshes them.
+		if (Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
+		{
+			static const FIntVector FaceOffsets[6] = {
+				FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
+				FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
+				FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
+			};
+			for (const FIntVector& Offset : FaceOffsets)
+			{
+				const FIntVector NeighborCoord = ChunkCoord + Offset;
+				if (FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
+				{
+					if (NeighborState->State == EChunkState::Loaded)
+					{
+						FChunkLODRequest Request;
+						Request.ChunkCoord = NeighborCoord;
+						Request.LODLevel = NeighborState->LODLevel;
+						Request.Priority = 20.0f; // Low priority — refinement pass
+						if (AddToMeshingQueue(Request))
+						{
+							SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
+						}
+					}
+				}
+			}
+		}
+	}
+	else if (PendingIndex == INDEX_NONE)
+	{
+		// Safety net: chunk reached OnChunkMeshingComplete but had no pending mesh data.
+		// Re-queue for meshing to avoid an invisible loaded chunk.
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d,%d,%d) completed meshing with no pending mesh data — re-queueing"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+		FChunkLODRequest Request;
+		Request.ChunkCoord = ChunkCoord;
+		Request.LODLevel = State->LODLevel;
+		Request.Priority = 80.0f;
+		if (AddToMeshingQueue(Request))
+		{
+			SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
+		}
+		return; // Don't set to Loaded — it needs to remesh first
 	}
 
 	// Mark as loaded

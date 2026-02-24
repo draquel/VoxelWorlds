@@ -162,8 +162,16 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 
 	if (!MeshData.IsValid())
 	{
-		// Empty mesh - remove if exists
-		RemoveChunk(ChunkCoord);
+		// Don't remove a chunk that already has a valid rendered mesh.
+		// Empty remesh data is a transient condition (e.g., neighbor data incomplete).
+		// The old mesh stays visible until a valid new mesh arrives.
+		if (ChunkDataMap.Contains(ChunkCoord))
+		{
+			UE_LOG(LogVoxelRendering, Warning, TEXT("Empty mesh data for chunk %s — preserving existing mesh"),
+				*ChunkCoord.ToString());
+			return;
+		}
+		// No existing mesh — nothing to preserve or remove
 		return;
 	}
 
@@ -185,12 +193,9 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 	if (ExistingData && ExistingData->MeshComponent.IsValid())
 	{
 		PMC = ExistingData->MeshComponent.Get();
-		// Clear all sections — water is now on separate dedicated PMCs
-		PMC->ClearAllMeshSections();
-		// Update statistics (subtract old, add new later)
-		TotalVertexCount -= ExistingData->VertexCount;
-		TotalTriangleCount -= ExistingData->TriangleCount;
-		TotalMemoryUsage -= ExistingData->MemoryUsage;
+		// Don't ClearAllMeshSections() — that destroys rendering before new sections exist.
+		// CreateMeshSection() replaces an existing section at the same index atomically,
+		// so the opaque section (0) is never absent. Stale sections are cleared individually below.
 	}
 	else
 	{
@@ -223,6 +228,8 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 	if (!bHasMasked)
 	{
 		// Single opaque section (fast path — most chunks)
+		// CreateMeshSection replaces an existing section at the same index in-place,
+		// so the opaque mesh is atomically swapped — never absent between frames.
 		PMC->CreateMeshSection(
 			0,
 			Vertices,
@@ -236,6 +243,12 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 			Tangents,
 			bGenerateCollision
 		);
+
+		// Remove stale masked section if the previous mesh had one
+		if (PMC->GetNumSections() > 1)
+		{
+			PMC->ClearMeshSection(1);
+		}
 
 		if (CurrentMaterial.IsValid())
 		{
@@ -347,8 +360,12 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 		}
 	}
 
-	// Update chunk data
+	// Update chunk data — subtract old stats before overwriting, then add new
 	FPMCChunkData& ChunkData = ChunkDataMap.FindOrAdd(ChunkCoord);
+	TotalVertexCount -= ChunkData.VertexCount;
+	TotalTriangleCount -= ChunkData.TriangleCount;
+	TotalMemoryUsage -= ChunkData.MemoryUsage;
+
 	ChunkData.MeshComponent = PMC;
 	ChunkData.LODLevel = LODLevel;
 	ChunkData.bIsVisible = true;
@@ -357,7 +374,6 @@ void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 	ChunkData.TriangleCount = MeshData.GetTriangleCount();
 	ChunkData.MemoryUsage = MeshData.GetMemoryUsage();
 
-	// Update statistics
 	TotalVertexCount += ChunkData.VertexCount;
 	TotalTriangleCount += ChunkData.TriangleCount;
 	TotalMemoryUsage += ChunkData.MemoryUsage;

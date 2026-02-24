@@ -1567,7 +1567,11 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 	}
 
 	// === GPU Extraction Path (uses mesh vertex data) ===
-	if (bUseGPUExtraction)
+	// Fall back to CPU when LOD > 0: GPU extraction uses mesh vertices which vary
+	// with LOD level, causing inconsistent scatter density. CPU path always uses
+	// full-resolution voxel data (LOD-independent).
+	const bool bUseCPUFallback = bUseGPUExtraction && PendingData.LODLevel > 0;
+	if (bUseGPUExtraction && !bUseCPUFallback)
 	{
 		// Dispatch GPU surface extraction
 		FGPUExtractionRequest GPURequest;
