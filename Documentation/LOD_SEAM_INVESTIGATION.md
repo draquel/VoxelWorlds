@@ -75,6 +75,47 @@ watertight. That isolates mesher math from streaming/state effects and turns the
 remaining hypotheses (slice content vs. request assembly vs. stale meshes) into
 pass/fail facts.
 
+## Two-chunk watertightness test plan (Stage 2, next step)
+
+New file: `Source/VoxelMeshing/Tests/MarchingCubesLODBoundaryTests.cpp`
+(follow the harness pattern in `MarchingCubesMeshingTests.cpp`, which already
+has an LOD0 `ChunkBoundary` test).
+
+**Fixture (shared helpers):**
+- Analytic density field in world space (flat plane `z = h`, plus a sloped-plane
+  variant so the surface crosses the shared chunk face). Fill two adjacent 32³
+  chunks A (origin 0) and B (origin x=3200) from the same function — ground
+  truth, no streaming involved.
+- Slice builder that fills `FVoxelMeshingRequest` neighbor face/edge arrays in
+  the production layout (`NeighborXPos[Y + Z*ChunkSize]` = B's plane 0, etc.)
+  and sets `EdgeCornerFlags`/`NeighborLODLevels` the way the chunk manager does.
+- Boundary-vertex collector + matcher: gather A's vertices with |x−3200| < ε and
+  B's with |x−0| < ε (transformed to world), assert one-to-one positional match
+  within tolerance; report max mismatch distance and unmatched count on failure.
+
+**Test cases — each converts a hypothesis to pass/fail:**
+
+| # | Setup | Expected | Decides |
+|---|-------|----------|---------|
+| T1 | A,B both LOD0, full slices | pass (baseline) | harness sanity |
+| T2 | both LOD1 (stride 2), full slices, seams off | pass | is same-LOD strided boundary meshing sound? |
+| T3 | both LOD2 (stride 4), full slices, seams off | pass | same, at stride 4 |
+| T4 | A LOD0, B LOD1, seams off | cracks ≤ 1 fine cell | true magnitude of the raw LOD mismatch; gross displacement (≥ 1 coarse cell) ⇒ mesher math bug |
+| T5 | T2 with neighbor arrays left empty | expected-fail; quantify displacement | documents the silent Air/clamp fallback hazard |
+| T6 | A LOD0 + TransitionFaces(+X), B LOD1 | initially expected-fail | becomes the transvoxel acceptance test later |
+
+**Run loop:** headless via
+`UnrealEditor-Cmd.exe <uproject> -ExecCmds="Automation RunTests VoxelWorlds.Meshing.MarchingCubes.LODBoundary; Quit" -unattended -nullrhi`
+— seconds per iteration, no PIE needed.
+
+**Decision tree after first run:**
+- T2/T3 fail → fix `ProcessCubeLOD`/`GetVoxelAt` strided boundary math first.
+- T2/T3 pass and T4 is sane → mesher math is fine; move instrumentation into
+  `VoxelChunkManager` request assembly (log slice residency + `MeshedLODLevel`
+  staleness at meshing time during a live repro).
+- Either way, replace the silent fallbacks surfaced by T5 with an explicit
+  defer-or-warn path (a chunk should not mesh its boundary against phantom air).
+
 ## Where to look next (Stage 2 reframed)
 
 Priority 1 — **same-LOD strided boundary meshing** in
