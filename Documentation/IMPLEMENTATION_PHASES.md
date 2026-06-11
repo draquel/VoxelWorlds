@@ -803,8 +803,9 @@ Phase 7 performance targets displayed for comparison:
 - [ ] Editor Tools / Debugging tools
 
 ### Issues
-- [ ] TransVoxel Seams troubleshooting
-- [ ] LOD Testing/Troubleshooting
+- [ ] LOD > 0 boundary meshing produces torn/displaced geometry even between same-LOD chunks — root cause of the visible "LOD seams"; must be fixed before transvoxel work. See `Documentation/LOD_SEAM_INVESTIGATION.md` (Stage 1 findings, 2026-06-10)
+- [ ] TransVoxel Seams troubleshooting (blocked by the above)
+- [ ] LOD band hysteresis — ring-edge chunks flip-flop LOD/transition masks with small viewer moves
 
 ---
 
