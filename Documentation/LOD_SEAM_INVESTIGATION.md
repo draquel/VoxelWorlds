@@ -38,6 +38,43 @@ partially papers over it. Fixing transition cells first would be building on san
   exists in `VoxelNoiseTypes.h` but is dead code — never called). LOD0 and LOD1
   chunks see the same density field.
 
+## Stage 2 corrections & code findings (2026-06-11)
+
+**Correction to the same-LOD claim:** recomputing band distances for the frozen
+viewer (~0,0,900) shows the survey_12/13 tear plane at x=12800 separates chunk
+(3,0,1) at ~11,970 (LOD1) from chunk (4,0,1) at ~15,000 (LOD2) — an LOD1|LOD2
+boundary, not LOD2|LOD2. The unified symptom across all captures: **at every
+coarser|finer LOD boundary, the boundary-adjacent geometry on one side is missing
+or displaced**, with nothing patching it in seams-off mode. A true same-LOD tear
+has not yet been isolated; verify with a controlled capture before assuming basic
+stride meshing is sound.
+
+Code facts established (`VoxelCPUMarchingCubesMesher.cpp`, `VoxelChunkManager.cpp`):
+
+1. `GetVoxelAt()` (mesher ~line 821) handles out-of-bounds lookups only ONE
+   plane/edge deep and ignores how far out the coordinate is. Gradient normals at
+   LOD stride sample `±Stride` beyond corners (e.g. X=36 at stride 4), which
+   silently returns the *plane-32 slice value* — wrong sample, corrupts boundary
+   normals (cosmetic, not the tear cause).
+2. When a face/edge slice is absent, `GetVoxelAt` silently falls back to the
+   clamped own-chunk voxel (duplicate plane) — and `ExtractNeighborEdgeSlices`'
+   `GetNeighborVoxel` returns **Air** when the neighbor's CPU `VoxelData` array
+   isn't resident (`VoxelChunkManager.cpp:2760`). Both fallbacks displace the
+   iso-surface in boundary cubes with no warning. `VoxelData` appears to be
+   retained except on generation failure, but residency at meshing time has not
+   been verified empirically.
+3. `MeshRequest.NeighborLODLevels[i] = NeighborState->MeshedLODLevel` (rendered,
+   not target LOD) — fine for seams, but nothing forces a chunk whose *own*
+   MeshedLODLevel ≠ LODLevel to re-mesh once neighbors settle; stale-mesh windows
+   at LOD flip zones may leave a chunk rendering coarser content than its slot.
+
+Next concrete step: a **VoxelMeshing automation test** that builds two synthetic
+adjacent chunks (flat density surface), meshes them at equal and at differing
+LODs with properly extracted neighbor slices, and asserts boundary vertices are
+watertight. That isolates mesher math from streaming/state effects and turns the
+remaining hypotheses (slice content vs. request assembly vs. stale meshes) into
+pass/fail facts.
+
 ## Where to look next (Stage 2 reframed)
 
 Priority 1 — **same-LOD strided boundary meshing** in
