@@ -145,6 +145,55 @@ follow-up (P3).
 
 Run: `& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" VoxelEngine.uproject -ExecCmds="Automation RunTests VoxelWorlds.Meshing.MarchingCubes.LODBoundary; Quit" -unattended -nullrhi` (exit code is nonzero while T6 is an intentional red acceptance gate).
 
+## P1 — live-repro instrumentation (2026-06-13)
+
+Added a CVar-gated diagnostic at request-assembly time
+(`VoxelChunkManager.cpp`, just before `LaunchAsyncMeshGeneration`; enable with
+`voxel.LogBoundaryResidency 1|2`). For each meshed chunk it logs, per boundary
+face: whether the neighbor slice is resident (`res=Y/N`), the neighbor LOD, the
+neighbor slice's solid count, the chunk's own boundary-plane solid count, and a
+`CLAMP` / `AIRRACE` flag. Repro: `LODSeamTestConfig` on the `VoxelWorldsTest`
+map, PIE, stream-settle, then a frozen forced-remesh of the +X LOD-ring chunks.
+Screenshots `Saved/Screenshots/Claudius/p1_plusx_boundary.png` (torn) and
+`p1_plusx_after_remesh.png` (still torn).
+
+**Findings (counts over one streamed session, ~7,900 chunk-mesh events):**
+
+| Signal | Count | Verdict |
+|--------|-------|---------|
+| **Genuine clamp** (neighbor in `ChunkStates` with a `MeshedLODLevel`, but its `VoxelData` NOT resident → duplicate-plane clamp) | **584 faces** | **Confirmed dominant hazard** |
+| Benign world-edge clamp (`nbrLOD=-1`, no neighbor at all) | 1197 faces | Expected, not a defect |
+| `AIRRACE` (resident neighbor, all-Air slice, own plane has terrain) | 30 faces, **max `ownSolid` = 6/1024** | **Not substantiated** — all are terrain grazing a face corner (false positives); no large-mismatch case |
+| Adjacent chunks ≥ 2 LOD levels apart (resident) | **1387 events** | LOD-strategy instability — a co-primary driver |
+
+**Decision:** Of the two candidate request-assembly hazards, the **clamp path is
+the live mechanism** (neighbor known but data not resident at mesh time). The
+**Air-fill race (T5b) is not occurring** in practice — the only all-Air resident
+slices are where the surface barely grazes the face (≤ 6/1024 voxels), which is
+legitimate, not a race.
+
+**Two new facts the test plan did not predict:**
+1. **The tear persists after a forced remesh with all neighbors resident**
+   (`res=Y`, `sliceSolid ≈ ownSolid` on every face, yet the boundary is still
+   torn in `p1_plusx_after_remesh.png`). So the clamp is only half the story:
+   chunks meshed once against a missing neighbor are never refreshed (stale mesh),
+   AND something independent of residency still tears them.
+2. **That independent factor is LOD instability.** 1387 mesh events had a resident
+   neighbor ≥ 2 LOD levels away (e.g. an LOD0 chunk whose +X neighbor is LOD2),
+   and the ring chunks re-meshed at flipping LODs (0/1/2) across a single frozen
+   pass. A 2-level gap exceeds what single-level Transvoxel transition cells can
+   bridge, so even with perfect neighbor data the boundary cannot be made
+   watertight. This promotes LOD-band hysteresis from "later" to **co-primary**.
+
+**Revised P2 (now two prongs):**
+- (A) **Residency:** a boundary chunk must not mesh against non-resident neighbor
+  data — defer the mesh until neighbors are resident, and re-mesh on neighbor
+  arrival / LOD change (kills the 584 clamp faces and the stale-mesh persistence).
+  Replace the silent clamp with a `Warning` so regressions are visible.
+- (B) **LOD stability:** the LOD strategy must not place adjacent chunks ≥ 2
+  levels apart and must damp churn (hysteresis), so the mesher only ever sees
+  1-level transitions it can bridge. Necessary for watertightness even after (A).
+
 **Decision tree after first run:**
 - T2/T3 fail → fix `ProcessCubeLOD`/`GetVoxelAt` strided boundary math first.
 - T2/T3 pass and T4 is sane → mesher math is fine; move instrumentation into

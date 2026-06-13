@@ -35,6 +35,22 @@
 #include "LevelEditorViewport.h"
 #endif
 
+// P1 LOD-seam diagnostic (see Documentation/LOD_SEAM_INVESTIGATION.md).
+// Logs, per meshed chunk at request-assembly time, which boundary faces carry a
+// surface crossing and whether the neighbor data for that face is (a) absent
+// (-> GetVoxelAt clamps the duplicate edge plane = the confirmed clamp hazard)
+// or (b) present but all-Air (-> the plausible allocated-but-ungenerated race).
+// This is what turns the two candidate request-assembly hazards into an
+// observation on a live torn chunk. Enable with `voxel.LogBoundaryResidency 1`.
+//   0 = off
+//   1 = log only chunks with at least one at-risk boundary face
+//   2 = log every chunk's boundary faces
+static TAutoConsoleVariable<int32> CVarLogBoundaryResidency(
+	TEXT("voxel.LogBoundaryResidency"),
+	0,
+	TEXT("Log per-face neighbor-slice residency + all-Air state for each meshed chunk (LOD seam diagnosis)."),
+	ECVF_Default);
+
 UVoxelChunkManager::UVoxelChunkManager()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -1682,6 +1698,86 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			}
 		}
 		// else: LOD disabled — NeighborLODLevels stays all -1 (default), TransitionFaces stays 0
+
+		// P1 LOD-seam diagnostic: classify boundary faces for this chunk before it
+		// meshes, distinguishing the confirmed clamp hazard from the Air-fill race.
+		if (const int32 DiagLevel = CVarLogBoundaryResidency.GetValueOnGameThread())
+		{
+			// Per-face: slice array (neighbor) + own boundary plane, in the
+			// -X,+X,-Y,+Y,-Z,+Z order used by NeighborLODLevels above.
+			const TArray<FVoxelData>* FaceSlices[6] = {
+				&MeshRequest.NeighborXNeg, &MeshRequest.NeighborXPos,
+				&MeshRequest.NeighborYNeg, &MeshRequest.NeighborYPos,
+				&MeshRequest.NeighborZNeg, &MeshRequest.NeighborZPos,
+			};
+			static const TCHAR* FaceNames[6] = { TEXT("-X"), TEXT("+X"), TEXT("-Y"), TEXT("+Y"), TEXT("-Z"), TEXT("+Z") };
+
+			auto CountSolid = [](const TArray<FVoxelData>& Arr) -> int32
+			{
+				int32 N = 0;
+				for (const FVoxelData& V : Arr) { if (V.IsSolid()) { ++N; } }
+				return N;
+			};
+
+			// Count solids on this chunk's own boundary plane for a face.
+			auto OwnPlaneSolid = [&MeshRequest, ChunkSize](int32 Face) -> int32
+			{
+				int32 N = 0;
+				for (int32 A = 0; A < ChunkSize; ++A)
+				{
+					for (int32 B = 0; B < ChunkSize; ++B)
+					{
+						int32 X = 0, Y = 0, Z = 0;
+						switch (Face)
+						{
+						case 0: X = 0;             Y = A; Z = B; break; // -X
+						case 1: X = ChunkSize - 1; Y = A; Z = B; break; // +X
+						case 2: Y = 0;             X = A; Z = B; break; // -Y
+						case 3: Y = ChunkSize - 1; X = A; Z = B; break; // +Y
+						case 4: Z = 0;             X = A; Y = B; break; // -Z
+						default: Z = ChunkSize - 1; X = A; Y = B; break; // +Z
+						}
+						if (MeshRequest.GetVoxel(X, Y, Z).IsSolid()) { ++N; }
+					}
+				}
+				return N;
+			};
+
+			FString FaceReport;
+			int32 ClampRiskFaces = 0;
+			int32 AirRaceFaces = 0;
+			for (int32 i = 0; i < 6; ++i)
+			{
+				const bool bResident = FaceSlices[i]->Num() == SliceSize;
+				const int32 SliceSolid = bResident ? CountSolid(*FaceSlices[i]) : 0;
+				const int32 OwnSolid = OwnPlaneSolid(i);
+				// A face can tear only if its own plane straddles the surface
+				// (mix of solid and air). Fully-solid or fully-air planes are safe.
+				const bool bActive = OwnSolid > 0 && OwnSolid < SliceSize;
+				const bool bClampRisk = bActive && !bResident;
+				const bool bAirRaceRisk = bActive && bResident && SliceSolid == 0;
+				if (bClampRisk) { ++ClampRiskFaces; }
+				if (bAirRaceRisk) { ++AirRaceFaces; }
+
+				if (DiagLevel >= 2 || bClampRisk || bAirRaceRisk)
+				{
+					FaceReport += FString::Printf(
+						TEXT(" [%s res=%s nbrLOD=%d sliceSolid=%d ownSolid=%d%s%s]"),
+						FaceNames[i], bResident ? TEXT("Y") : TEXT("N"),
+						MeshRequest.NeighborLODLevels[i], SliceSolid, OwnSolid,
+						bClampRisk ? TEXT(" CLAMP") : TEXT(""),
+						bAirRaceRisk ? TEXT(" AIRRACE") : TEXT(""));
+				}
+			}
+
+			if (DiagLevel >= 2 || ClampRiskFaces > 0 || AirRaceFaces > 0)
+			{
+				UE_LOG(LogVoxelStreaming, Warning,
+					TEXT("[BoundaryDiag] Chunk(%d,%d,%d) LOD=%d clampRiskFaces=%d airRaceFaces=%d%s"),
+					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
+					CurrentLOD, ClampRiskFaces, AirRaceFaces, *FaceReport);
+			}
+		}
 
 		// Launch async mesh generation instead of blocking
 		LaunchAsyncMeshGeneration(Request, MeshRequest);
