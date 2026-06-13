@@ -38,14 +38,42 @@ namespace MarchingCubesLODBoundaryTestHelpers
 	constexpr float DedupTolerance = 0.01f;
 
 	/**
-	 * Analytic surface height: gently sloped plane with a sine ripple in Y so
-	 * the iso-line on the shared face is curved (a straight line would let
-	 * coarse and fine meshes coincide and hide T-junction cracks in T4).
+	 * Which analytic field the helpers sample. Automation tests run sequentially
+	 * on one thread, so a file-scope selector is a safe, contained way to swap
+	 * the field for a single test without threading a functor through every
+	 * request/neighbor builder. Tests set it at entry and restore Smooth on exit.
+	 */
+	enum class ETestField { Smooth, Cliff };
+	static ETestField GActiveField = ETestField::Smooth;
+
+	/**
+	 * Analytic surface height.
+	 *
+	 * Smooth: gently sloped plane with a sine ripple in Y so the iso-line on the
+	 * shared face is curved (a straight line would let coarse and fine meshes
+	 * coincide and hide T-junction cracks in T4).
+	 *
+	 * Cliff: steep ramp in X near the shared face (world x=3200). Height changes
+	 * ~250 units over the 100-unit span between world x=3100 (the plane the clamp
+	 * fallback duplicates) and x=3200 (the true face), so an empty neighbor slice
+	 * displaces the finer chunk's face vertices by more than one coarse (LOD1)
+	 * cell — the gross regime the gentle field cannot exhibit.
 	 */
 	float SurfaceHeight(float WorldX, float WorldY)
 	{
+		if (GActiveField == ETestField::Cliff)
+		{
+			return 1600.0f + 2.5f * (WorldX - 3100.0f) + 40.0f * FMath::Sin(WorldY * 0.01f);
+		}
 		return 1600.0f + 0.15f * WorldX + 0.1f * WorldY + 60.0f * FMath::Sin(WorldY * 0.01f);
 	}
+
+	/** RAII guard that selects a field for the duration of a test and restores Smooth. */
+	struct FScopedTestField
+	{
+		explicit FScopedTestField(ETestField Field) { GActiveField = Field; }
+		~FScopedTestField() { GActiveField = ETestField::Smooth; }
+	};
 
 	/**
 	 * Sample the analytic density field at a world position.
@@ -456,7 +484,7 @@ bool FMCLODBoundaryT4MixedLODRawTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// ==================== T5: both LOD1, neighbor arrays empty (fallback hazard) ====================
+// ==================== T5: both LOD1, neighbor arrays empty, gentle field (confirmed clamp hazard) ====================
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT5NoNeighborDataTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T5_LOD1_NoNeighborData",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -464,8 +492,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT5NoNeighborDataTest, "VoxelWorld
 bool FMCLODBoundaryT5NoNeighborDataTest::RunTest(const FString& Parameters)
 {
 	// Same as T2 but neighbor face/edge/corner arrays are deliberately left
-	// empty, exercising GetVoxelAt's silent clamped-own-voxel fallback that the
-	// chunk manager hits when a neighbor's CPU VoxelData is not resident.
+	// empty. This is the CONFIRMED production fallback: ExtractNeighborEdgeSlices
+	// guards every slice with HasNeighborData, so a non-resident neighbor leaves
+	// the slice empty (Num()==0). GetVoxelAt then clamps the out-of-bounds plane
+	// to the chunk's own edge voxel (duplicate plane), NOT to Air. On this gentle
+	// field the duplicated plane is nearly identical to the true plane, so the
+	// displacement is small (~0.19 voxel) - it documents that the clamp hazard's
+	// magnitude is terrain-dependent. See T5c for the gross (steep terrain) case.
 	FVoxelMeshingRequest RequestA = MakeChunkRequest(FIntVector(0, 0, 0), 1);
 	FVoxelMeshingRequest RequestB = MakeChunkRequest(FIntVector(1, 0, 0), 1);
 
@@ -474,32 +507,73 @@ bool FMCLODBoundaryT5NoNeighborDataTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Chunk B meshing should succeed"), MeshChunk(RequestB, false, MeshB));
 
 	const FSeamReport Seam = MeasureSeam(MeshA, MeshB);
-	AddInfo(FString::Printf(TEXT("T5 LOD1|LOD1 no neighbor data: %s"), *DescribeSeam(Seam)));
+	AddInfo(FString::Printf(TEXT("T5 LOD1|LOD1 no neighbor data (gentle): %s"), *DescribeSeam(Seam)));
 
 	// This documents the hazard: with no neighbor data, the boundary should NOT
-	// be watertight (the fallback displaces the iso-surface in boundary cubes).
-	// If this ever starts matching, the fallback became benign and the
+	// be watertight (the clamp fallback displaces the iso-surface in boundary
+	// cubes). If this ever starts matching, the fallback became benign and the
 	// investigation notes should be updated.
-	TestTrue(TEXT("Empty neighbor arrays should produce a displaced (non-watertight) boundary - documents the silent fallback hazard"),
+	TestTrue(TEXT("Empty neighbor arrays should produce a displaced (non-watertight) boundary - documents the silent clamp fallback hazard"),
 		!Seam.IsWatertight());
-	AddInfo(FString::Printf(TEXT("T5 fallback displacement magnitude: max crack %.3f units (%.2f voxels)"),
+	AddInfo(FString::Printf(TEXT("T5 clamp displacement magnitude (gentle field): max crack %.3f units (%.2f voxels)"),
 		Seam.MaxCrack, Seam.MaxCrack / TestVoxelSize));
 	return true;
 }
 
-// ==================== T5b: both LOD1, +X slice filled with Air (non-resident neighbor) ====================
+// ==================== T5c: both LOD1, neighbor arrays empty, cliff field (gross clamp hazard) ====================
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT5cCliffClampTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T5c_LOD1_NoNeighborData_Cliff",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCLODBoundaryT5cCliffClampTest::RunTest(const FString& Parameters)
+{
+	// Same CONFIRMED empty-slice clamp path as T5, but over a steep field. The
+	// clamp duplicates world x=3100 onto the x=3200 face; with ~250 units of
+	// height change across that 100-unit span, the finer chunk's face vertices
+	// land more than a full coarse (LOD1, 200-unit) cell away from the true
+	// surface B meshes. This is the regime that produces the void-corridor /
+	// exposed-cross-section tears seen in the field captures - and it shows the
+	// clamp fallback alone (no Air-fill needed) is sufficient to cause them.
+	FScopedTestField CliffField(ETestField::Cliff);
+
+	FVoxelMeshingRequest RequestA = MakeChunkRequest(FIntVector(0, 0, 0), 1);
+	FVoxelMeshingRequest RequestB = MakeChunkRequest(FIntVector(1, 0, 0), 1);
+
+	FChunkMeshData MeshA, MeshB;
+	TestTrue(TEXT("Chunk A meshing should succeed"), MeshChunk(RequestA, false, MeshA));
+	TestTrue(TEXT("Chunk B meshing should succeed"), MeshChunk(RequestB, false, MeshB));
+
+	const FSeamReport Seam = MeasureSeam(MeshA, MeshB);
+	AddInfo(FString::Printf(TEXT("T5c LOD1|LOD1 no neighbor data (cliff): %s"), *DescribeSeam(Seam)));
+
+	const float CoarseCell = TestVoxelSize * 2; // 200, B's LOD1 cell
+
+	TestTrue(TEXT("Surface should cross the shared face on both sides"), Seam.NumA > 0 && Seam.NumB > 0);
+	TestTrue(TEXT("Steep clamp fallback should be non-watertight"), !Seam.IsWatertight());
+	TestTrue(FString::Printf(TEXT("Steep clamp fallback should produce a gross (>= 1 coarse cell, %.0f) tear, got %.1f"),
+		CoarseCell, Seam.MaxCrack), Seam.MaxCrack >= CoarseCell);
+	AddInfo(FString::Printf(TEXT("T5c clamp displacement magnitude (cliff field): max crack %.3f units (%.2f voxels) vs T5 gentle ~0.19 voxels"),
+		Seam.MaxCrack, Seam.MaxCrack / TestVoxelSize));
+	return true;
+}
+
+// ==================== T5b: both LOD1, +X slice Air-filled (resident-but-ungenerated race) ====================
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT5bAirSliceTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T5b_LOD1_AirSlice",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FMCLODBoundaryT5bAirSliceTest::RunTest(const FString& Parameters)
 {
-	// Simulates the production hazard at VoxelChunkManager.cpp GetNeighborVoxel:
-	// when the +X neighbor's CPU VoxelData is not resident, the extracted slice
-	// is filled with Air rather than left empty. The mesher then meshes A's
-	// boundary cubes against a phantom air wall: the surface retreats from the
-	// shared face (void corridor) while B's sheet still reaches it (exposed
-	// cross-section) - exactly the artifact observed in the field captures.
+	// PLAUSIBLE-but-unconfirmed production hazard (distinct from T5's confirmed
+	// clamp path): a neighbor whose VoxelData array is allocated (so it passes
+	// ExtractNeighborEdgeSlices' HasNeighborData check, Num()==VolumeSize) but
+	// has not yet been populated by generation - its contents are still Air. The
+	// extractor then copies a real-but-all-Air slice, and GetNeighborVoxel's
+	// Air() branch (VoxelChunkManager.cpp:2779) is the same value. The mesher
+	// meshes A's boundary cubes against a phantom air wall: A's surface retreats
+	// from the shared face (void corridor) while B's sheet still reaches it
+	// (exposed cross-section). Whether this race actually occurs at meshing time
+	// is the open question for the live-repro instrumentation step (P1).
 	FVoxelMeshingRequest RequestA = MakeChunkRequest(FIntVector(0, 0, 0), 1);
 	FVoxelMeshingRequest RequestB = MakeChunkRequest(FIntVector(1, 0, 0), 1);
 	FillAllNeighborData(RequestA);
@@ -507,8 +581,8 @@ bool FMCLODBoundaryT5bAirSliceTest::RunTest(const FString& Parameters)
 	RequestA.NeighborLODLevels[1] = 1;
 	RequestB.NeighborLODLevels[0] = 1;
 
-	// Overwrite only A's +X face slice with Air, as a non-resident (1,0,0)
-	// neighbor would produce. Edge/corner strips come from other chunks.
+	// Overwrite only A's +X face slice with Air, as an allocated-but-ungenerated
+	// (1,0,0) neighbor would produce. Edge/corner strips come from other chunks.
 	for (FVoxelData& Voxel : RequestA.NeighborXPos)
 	{
 		Voxel = FVoxelData::Air();
