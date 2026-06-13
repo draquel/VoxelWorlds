@@ -108,6 +108,29 @@ has an LOD0 `ChunkBoundary` test).
 `UnrealEditor-Cmd.exe <uproject> -ExecCmds="Automation RunTests VoxelWorlds.Meshing.MarchingCubes.LODBoundary; Quit" -unattended -nullrhi`
 — seconds per iteration, no PIE needed.
 
+**Results (2026-06-11, first run — tests implemented, plus a T5b variant):**
+
+| # | Result | Measured |
+|---|--------|----------|
+| T1 | ✅ pass | 47/47 boundary verts, exact match (0.000) |
+| T2 | ✅ pass | 21/21, exact match (0.000) — stride-2 same-LOD boundary meshing is watertight |
+| T3 | ✅ pass | 10/10, exact match (0.000) — stride-4 watertight |
+| T4 | ✅ pass | max crack 28.1 units (0.28 fine cells) — raw LOD mismatch is small T-junction cracks, NOT gross displacement |
+| T5 | ✅ pass (hazard confirmed, but small) | clamp fallback displaces boundary ~19 units (0.19 voxels) — too small to explain field tears |
+| T5b (new) | ✅ pass (hazard confirmed, gross) | +X slice filled with **Air** (non-resident neighbor, `GetNeighborVoxel` path): 1022-vert wall in the last cell, tear spanning the full face (max crack 3124 units), B's sheet exposed as cross-section — **exactly the field artifact** |
+| T6 | ❌ fail (expected) | B's 21 coarse verts ALL matched by A's transition cells (outer edge alignment works), but A emits 28 extra fine verts on the plane up to 28 units off B's seam — same magnitude/pattern as seams-off T4, suggesting fine boundary MC cells leak through alongside transition cells (Pass-2 skip or thin-cell midpoint issue) |
+
+**Conclusion per the decision tree:** T2/T3 pass and T4 is sane ⇒ same-LOD strided
+boundary mesher math is SOUND. The gross field tears are not mesher math. T5b
+reproduces the observed void-corridor/cross-section artifact precisely: a face
+slice filled with Air at request-assembly time. Priority shifts to
+`VoxelChunkManager` request assembly — verify neighbor `VoxelData` residency at
+meshing time during a live repro, and replace the silent Air fill
+(`VoxelChunkManager.cpp` `GetNeighborVoxel`) with defer-or-warn. T6's leak of
+fine boundary cells alongside transition cells is the transvoxel-side follow-up.
+
+Run: `& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" VoxelEngine.uproject -ExecCmds="Automation RunTests VoxelWorlds.Meshing.MarchingCubes.LODBoundary; Quit" -unattended -nullrhi` (exit code is nonzero while T6 is red).
+
 **Decision tree after first run:**
 - T2/T3 fail → fix `ProcessCubeLOD`/`GetVoxelAt` strided boundary math first.
 - T2/T3 pass and T4 is sane → mesher math is fine; move instrumentation into
