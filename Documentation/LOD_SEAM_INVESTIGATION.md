@@ -164,7 +164,7 @@ Screenshots `Saved/Screenshots/Claudius/p1_plusx_boundary.png` (torn) and
 | **Genuine clamp** (neighbor in `ChunkStates` with a `MeshedLODLevel`, but its `VoxelData` NOT resident → duplicate-plane clamp) | **584 faces** | **Confirmed dominant hazard** |
 | Benign world-edge clamp (`nbrLOD=-1`, no neighbor at all) | 1197 faces | Expected, not a defect |
 | `AIRRACE` (resident neighbor, all-Air slice, own plane has terrain) | 30 faces, **max `ownSolid` = 6/1024** | **Not substantiated** — all are terrain grazing a face corner (false positives); no large-mismatch case |
-| Adjacent chunks ≥ 2 LOD levels apart (resident) | **1387 events** | LOD-strategy instability — a co-primary driver |
+| Adjacent chunks ≥ 2 LOD levels apart (by neighbor *rendered* `MeshedLODLevel`) | 1387 events | ⚠️ Misleading metric — see P2-B correction below: this is rendered-LOD lag/churn, NOT a target-assignment defect |
 
 **Decision:** Of the two candidate request-assembly hazards, the **clamp path is
 the live mechanism** (neighbor known but data not resident at mesh time). The
@@ -176,23 +176,54 @@ legitimate, not a race.
 1. **The tear persists after a forced remesh with all neighbors resident**
    (`res=Y`, `sliceSolid ≈ ownSolid` on every face, yet the boundary is still
    torn in `p1_plusx_after_remesh.png`). So the clamp is only half the story:
-   chunks meshed once against a missing neighbor are never refreshed (stale mesh),
-   AND something independent of residency still tears them.
-2. **That independent factor is LOD instability.** 1387 mesh events had a resident
-   neighbor ≥ 2 LOD levels away (e.g. an LOD0 chunk whose +X neighbor is LOD2),
-   and the ring chunks re-meshed at flipping LODs (0/1/2) across a single frozen
-   pass. A 2-level gap exceeds what single-level Transvoxel transition cells can
-   bridge, so even with perfect neighbor data the boundary cannot be made
-   watertight. This promotes LOD-band hysteresis from "later" to **co-primary**.
+   chunks meshed once against a missing neighbor are never refreshed (stale mesh)
+   — re-meshing them with good data does not happen automatically.
+2. **LOD churn.** The ring chunks re-meshed at flipping LODs (0/1/2) across a
+   single pass, and the `nbrLOD`-gap count was high (1387). At the time this read
+   like 2-level *target* gaps; **P2-B disproved that** (see below). The flipping is
+   real (bistability) but the gaps are rendered-LOD lag, not target misassignment.
 
-**Revised P2 (now two prongs):**
+**Revised P2 (originally two prongs; P2-B re-scoped after measurement):**
 - (A) **Residency:** a boundary chunk must not mesh against non-resident neighbor
   data — defer the mesh until neighbors are resident, and re-mesh on neighbor
   arrival / LOD change (kills the 584 clamp faces and the stale-mesh persistence).
   Replace the silent clamp with a `Warning` so regressions are visible.
-- (B) **LOD stability:** the LOD strategy must not place adjacent chunks ≥ 2
-  levels apart and must damp churn (hysteresis), so the mesher only ever sees
-  1-level transitions it can bridge. Necessary for watertightness even after (A).
+  **This is the actual tear fix.**
+- (B) **LOD stability:** a 2:1 adjacency invariant + hysteresis. Implemented and
+  measured (below) — it is a correctness safeguard + churn reduction, but **not**
+  the tear fix; the current distance bands already satisfy 2:1 by geometry.
+
+## P2-B — LOD adjacency balance + hysteresis (2026-06-13)
+
+Implemented in `FDistanceBandLODStrategy`: `Update()` builds a `BalancedLODCache`
+(raw band LOD → hysteresis vs last frame → 2:1 refine-to-fixpoint), and
+`GetLODForChunk`/`GetVisibleChunks` read it so all manager call sites agree.
+Toggle with `voxel.LODBalance` (default 1).
+
+**A/B over a settled session (`voxel.LogBoundaryResidency 2`, wide forced remesh):**
+
+| Metric | Balance OFF | Balance ON |
+|--------|-------------|------------|
+| `nbrLOD` gap (own LOD vs neighbor *rendered* `MeshedLODLevel`) | 645 / 1336 | 336 / 1316 |
+| **target-vs-target** adjacency (own meshed LOD vs neighbors' meshed LOD) | **0** | **0** |
+| Visible tear (`p2b_balance_off.png` vs `p2b_balance_on.png`) | torn | **identical, still torn** |
+
+**Correction to P1:** target-LOD adjacency is **already ≤ 1 without balancing**.
+With band widths (6000–7000) wider than a chunk (3200), two face-adjacent chunk
+centers cannot span a full band, so distance-band targets differ by at most one
+level **by geometry**. The P1 "1387 ≥2-level gaps" was `MeshedLODLevel` lag/churn,
+not a target defect — an over-interpretation of that metric.
+
+**What P2-B is worth (kept, not the fix):**
+- *Correctness invariant:* nothing else guarantees the LOD strategy respects the
+  mesher's single-level-transition limit. No-op for these wide bands, but protects
+  narrower-band configs and the planned quadtree/octree strategies (which *can*
+  produce 2-level gaps). CVar-gated, off-switchable.
+- *Churn reduction:* hysteresis cut rendered-LOD-lag gaps ~48% (645→336) with a
+  stationary viewer — less remesh thrash and transient popping.
+
+The off/on screenshots being identical confirm the tear is **request-assembly
+(clamp / stale-mesh), i.e. P2-A** — proceeding there next.
 
 **Decision tree after first run:**
 - T2/T3 fail → fix `ProcessCubeLOD`/`GetVoxelAt` strided boundary math first.

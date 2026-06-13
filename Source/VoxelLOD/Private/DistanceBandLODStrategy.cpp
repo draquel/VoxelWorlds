@@ -6,6 +6,16 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCoordinates.h"
 #include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
+
+// P2-B: toggle the LOD adjacency balance + hysteresis at runtime, so the
+// >=2-level-gap count (see voxel.LogBoundaryResidency) can be compared on/off in
+// a single live session. 1 = balanced (default), 0 = raw distance bands (legacy).
+static TAutoConsoleVariable<int32> CVarLODBalance(
+	TEXT("voxel.LODBalance"),
+	1,
+	TEXT("Enforce the 2:1 LOD adjacency balance + hysteresis in FDistanceBandLODStrategy. 1=on (default), 0=raw distance bands."),
+	ECVF_Default);
 
 FDistanceBandLODStrategy::FDistanceBandLODStrategy()
 {
@@ -176,31 +186,15 @@ void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float Del
 	CachedViewerPosition = Context.ViewerPosition;
 	CachedWorldOrigin = Context.WorldOrigin;
 	CachedViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
+
+	// Recompute the balanced LOD assignment for this frame. Must run before any
+	// GetLODForChunk / GetVisibleChunks query (the interface guarantees Update is
+	// called first each frame), so all consumers read a consistent, balanced map.
+	RebuildBalancedLODCache(Context);
 }
 
-int32 FDistanceBandLODStrategy::GetLODForChunk(
-	const FIntVector& ChunkCoord,
-	const FLODQueryContext& Context) const
+int32 FDistanceBandLODStrategy::GetRawLODForDistance(float Distance) const
 {
-	// When LOD is disabled, always return LOD 0 (full detail)
-	if (!bEnableLOD)
-	{
-		return 0;
-	}
-
-	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-	const float Distance = GetDistanceToViewer(ChunkCenter, Context);
-
-	// Debug: Log LOD calculation for chunk at origin periodically
-	static int32 LODDebugCounter = 0;
-	if (++LODDebugCounter % 600 == 0 && ChunkCoord == FIntVector(0, 0, 0))
-	{
-		UE_LOG(LogVoxelLOD, Warning, TEXT("GetLODForChunk(0,0,0): ChunkCenter=(%.0f,%.0f,%.0f), ViewerPos=(%.0f,%.0f,%.0f), Distance=%.0f"),
-			ChunkCenter.X, ChunkCenter.Y, ChunkCenter.Z,
-			Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z,
-			Distance);
-	}
-
 	const FLODBand* Band = FindBandForDistance(Distance);
 	if (Band)
 	{
@@ -214,6 +208,29 @@ int32 FDistanceBandLODStrategy::GetLODForChunk(
 	}
 
 	return 0;
+}
+
+int32 FDistanceBandLODStrategy::GetLODForChunk(
+	const FIntVector& ChunkCoord,
+	const FLODQueryContext& Context) const
+{
+	// When LOD is disabled, always return LOD 0 (full detail)
+	if (!bEnableLOD)
+	{
+		return 0;
+	}
+
+	// Prefer the balanced cache (2:1 adjacency + hysteresis). Chunks outside the
+	// candidate volume (e.g. transient queue entries beyond view distance) fall
+	// back to the raw distance-band LOD.
+	if (const int32* Balanced = BalancedLODCache.Find(ChunkCoord))
+	{
+		return *Balanced;
+	}
+
+	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
+	const float Distance = GetDistanceToViewer(ChunkCenter, Context);
+	return GetRawLODForDistance(Distance);
 }
 
 float FDistanceBandLODStrategy::GetLODMorphFactor(
@@ -298,16 +315,16 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 
 				if (bEnableLOD)
 				{
-					const FLODBand* Band = FindBandForDistance(Distance);
-					if (Band)
+					// Use the balanced LOD (2:1 adjacency + hysteresis) so loaded/
+					// meshed chunks never differ from a neighbor by more than one
+					// level. Morph still derives from the raw band the chunk sits in.
+					LODLevel = GetLODForChunk(ChunkCoord, Context);
+					if (bEnableMorphing)
 					{
-						LODLevel = Band->LODLevel;
-						MorphFactor = bEnableMorphing ? Band->GetMorphFactor(Distance) : 0.0f;
-					}
-					else if (LODBands.Num() > 0)
-					{
-						// Beyond all bands but within ViewDistance - use coarsest LOD
-						LODLevel = LODBands.Last().LODLevel;
+						if (const FLODBand* Band = FindBandForDistance(Distance))
+						{
+							MorphFactor = Band->GetMorphFactor(Distance);
+						}
 					}
 				}
 				// When LOD disabled: LODLevel stays 0 (full detail for all chunks)
@@ -586,6 +603,150 @@ const FLODBand* FDistanceBandLODStrategy::FindBandForDistance(float Distance) co
 	}
 
 	return nullptr;
+}
+
+const FLODBand* FDistanceBandLODStrategy::FindBandByLOD(int32 LODLevel) const
+{
+	for (const FLODBand& Band : LODBands)
+	{
+		if (Band.LODLevel == LODLevel)
+		{
+			return &Band;
+		}
+	}
+
+	return nullptr;
+}
+
+int32 FDistanceBandLODStrategy::ApplyLODHysteresis(int32 CommittedLOD, int32 RawLOD, float Distance) const
+{
+	if (RawLOD == CommittedLOD)
+	{
+		return CommittedLOD;
+	}
+
+	// Decisive (multi-level) changes — e.g. a teleport — are accepted immediately.
+	if (FMath::Abs(RawLOD - CommittedLOD) >= 2)
+	{
+		return RawLOD;
+	}
+
+	// Single-level change: require the distance to cross the committed band's edge
+	// by a margin before switching, so a chunk hovering on a band boundary doesn't
+	// flip every frame (the bistability seen at the LOD ring).
+	const float Margin = LODHysteresisChunkFraction * BaseChunkSize * VoxelSize;
+	const FLODBand* CommittedBand = FindBandByLOD(CommittedLOD);
+	if (!CommittedBand)
+	{
+		return RawLOD;
+	}
+
+	if (RawLOD > CommittedLOD)
+	{
+		// Coarsening (moving away): only accept once clearly past the outer edge.
+		return (Distance > CommittedBand->MaxDistance + Margin) ? RawLOD : CommittedLOD;
+	}
+
+	// Refining (moving closer): only accept once clearly inside the inner edge.
+	return (Distance < CommittedBand->MinDistance - Margin) ? RawLOD : CommittedLOD;
+}
+
+void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& Context)
+{
+	BalancedLODCache.Reset();
+
+	// LOD disabled or no bands: nothing to balance; consumers fall back to raw (0).
+	if (!bEnableLOD || LODBands.Num() == 0)
+	{
+		CommittedLODCache.Reset();
+		return;
+	}
+
+	const bool bBalance = CVarLODBalance.GetValueOnGameThread() != 0;
+
+	// Enumerate the same candidate volume GetVisibleChunks considers (radius +
+	// vertical range, within view distance), without per-world-mode culling. The
+	// resulting map is a superset of the chunks that will actually be meshed, so
+	// every meshed chunk has a balanced entry; culled chunks are harmless extras.
+	const FIntVector ViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
+	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+	const int32 MaxChunkRadius = FMath::CeilToInt(MaxViewDistance / FMath::Max(ChunkWorldSize, 1.0f)) + 1;
+
+	int32 MinZ, MaxZ;
+	GetVerticalChunkRange(Context, MinZ, MaxZ);
+
+	// Pass 1: raw band LOD + hysteresis (vs last frame's committed LOD).
+	BalancedLODCache.Reserve((2 * MaxChunkRadius + 1) * (2 * MaxChunkRadius + 1) * (MaxZ - MinZ + 1));
+	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius; ++X)
+	{
+		for (int32 Y = -MaxChunkRadius; Y <= MaxChunkRadius; ++Y)
+		{
+			for (int32 Z = MinZ; Z <= MaxZ; ++Z)
+			{
+				const FIntVector ChunkCoord = ViewerChunk + FIntVector(X, Y, Z);
+				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
+				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
+
+				if (Distance > MaxViewDistance)
+				{
+					continue;
+				}
+
+				const int32 RawLOD = GetRawLODForDistance(Distance);
+
+				int32 Committed = RawLOD;
+				if (bBalance)
+				{
+					if (const int32* Prev = CommittedLODCache.Find(ChunkCoord))
+					{
+						Committed = ApplyLODHysteresis(*Prev, RawLOD, Distance);
+					}
+				}
+
+				BalancedLODCache.Add(ChunkCoord, Committed);
+			}
+		}
+	}
+
+	// Pass 2: 2:1 adjacency balance. Refine any chunk that is more than
+	// MaxNeighborLODDelta coarser than its finest face-neighbor, iterating to a
+	// fixpoint. Refine-only (LOD numbers only decrease), so it always converges.
+	if (bBalance)
+	{
+		static const FIntVector FaceOffsets[6] = {
+			FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
+			FIntVector(0, -1, 0), FIntVector(0, 1, 0),
+			FIntVector(0, 0, -1), FIntVector(0, 0, 1),
+		};
+
+		bool bChanged = true;
+		int32 Guard = 0;
+		while (bChanged && Guard++ < 16)
+		{
+			bChanged = false;
+			for (TPair<FIntVector, int32>& Pair : BalancedLODCache)
+			{
+				int32 MinNeighbor = Pair.Value;
+				for (const FIntVector& Offset : FaceOffsets)
+				{
+					if (const int32* NLOD = BalancedLODCache.Find(Pair.Key + Offset))
+					{
+						MinNeighbor = FMath::Min(MinNeighbor, *NLOD);
+					}
+				}
+
+				const int32 MaxAllowed = MinNeighbor + MaxNeighborLODDelta;
+				if (Pair.Value > MaxAllowed)
+				{
+					Pair.Value = MaxAllowed;
+					bChanged = true;
+				}
+			}
+		}
+	}
+
+	// Commit for next frame's hysteresis.
+	CommittedLODCache = BalancedLODCache;
 }
 
 bool FDistanceBandLODStrategy::IsChunkInFrustum(

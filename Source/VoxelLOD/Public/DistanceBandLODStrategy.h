@@ -128,6 +128,40 @@ protected:
 	const FLODBand* FindBandForDistance(float Distance) const;
 
 	/**
+	 * Find the band whose LODLevel equals the given level (first match).
+	 * Used by hysteresis to look up a committed LOD's distance edges.
+	 */
+	const FLODBand* FindBandByLOD(int32 LODLevel) const;
+
+	/**
+	 * Raw distance-band LOD for a chunk, ignoring balancing/hysteresis.
+	 * This is the unmodified band lookup; the public GetLODForChunk layers
+	 * the balanced cache on top of it.
+	 */
+	int32 GetRawLODForDistance(float Distance) const;
+
+	/**
+	 * Apply LOD hysteresis to damp churn near band edges.
+	 * A single-level change is only accepted once the distance has crossed the
+	 * committed band's edge by LODHysteresisChunkFraction chunk-widths; multi-level
+	 * changes (e.g. a teleport) are accepted immediately. First-seen chunks (no
+	 * committed value) take the raw LOD.
+	 *
+	 * @param CommittedLOD The LOD committed for this chunk last frame
+	 * @param RawLOD The raw distance-band LOD this frame
+	 * @param Distance Chunk-center distance to viewer
+	 * @return The LOD to commit this frame
+	 */
+	int32 ApplyLODHysteresis(int32 CommittedLOD, int32 RawLOD, float Distance) const;
+
+	/**
+	 * Recompute BalancedLODCache for all candidate chunks: raw band LOD, then
+	 * hysteresis, then the 2:1 adjacency balance (no face-neighbor differs by more
+	 * than MaxNeighborLODDelta). Called from Update() each frame.
+	 */
+	void RebuildBalancedLODCache(const FLODQueryContext& Context);
+
+	/**
 	 * Check if a chunk is within the view frustum.
 	 */
 	bool IsChunkInFrustum(
@@ -202,6 +236,34 @@ protected:
 
 	/** Multiplier for unload distance (relative to max LOD band distance) */
 	float UnloadDistanceMultiplier = 1.2f;
+
+	// ==================== LOD Adjacency Balance + Hysteresis (P2-B) ====================
+
+	/**
+	 * Maximum LOD-level difference permitted between face-adjacent chunks (the 2:1
+	 * balance rule). The mesher's single-level Transvoxel transition cells can only
+	 * bridge a one-level gap, so larger gaps are refined (coarser chunks pulled
+	 * finer) until every adjacency is within this delta. See
+	 * Documentation/LOD_SEAM_INVESTIGATION.md (P2-B).
+	 */
+	int32 MaxNeighborLODDelta = 1;
+
+	/**
+	 * Hysteresis deadband, expressed in chunk-world-size units. A chunk only
+	 * changes its committed LOD once its distance crosses the band edge by this
+	 * many chunk widths, damping the bistable flip/churn observed at ring edges.
+	 */
+	float LODHysteresisChunkFraction = 0.5f;
+
+	/**
+	 * Balanced LOD per chunk, recomputed every Update(). GetLODForChunk and
+	 * GetVisibleChunks read this so all consumers see the same balanced result.
+	 * Empty / missing entries fall back to the raw distance-band LOD.
+	 */
+	TMap<FIntVector, int32> BalancedLODCache;
+
+	/** LOD committed last frame per chunk; input to this frame's hysteresis. */
+	TMap<FIntVector, int32> CommittedLODCache;
 
 	/** Cached voxel size from configuration */
 	float VoxelSize = 100.0f;
