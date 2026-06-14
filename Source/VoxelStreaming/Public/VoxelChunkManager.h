@@ -599,6 +599,23 @@ protected:
 	bool AddToMeshingQueue(const FChunkLODRequest& Request);
 
 	/**
+	 * P2-A: decide whether a chunk should defer meshing because a face neighbor's
+	 * voxel data is not yet resident.
+	 *
+	 * Meshing a boundary against a non-resident neighbor makes GetVoxelAt clamp the
+	 * missing plane to the chunk's own edge voxel, producing the LOD-seam tear that
+	 * is never refreshed once the neighbor arrives (see LOD_SEAM_INVESTIGATION.md).
+	 *
+	 * @param ChunkCoord The chunk about to mesh
+	 * @param bOutClampUnavoidable Set true when a neighbor lacks data but it is NOT
+	 *        coming (Loaded-but-freed / unloading) — caller should mesh anyway (to
+	 *        avoid a permanent stall) but may warn.
+	 * @return True if meshing should be deferred (a neighbor's data is still in the
+	 *         generation pipeline and will arrive).
+	 */
+	bool ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoord, bool& bOutClampUnavoidable) const;
+
+	/**
 	 * Add a chunk to the unload queue.
 	 * Uses O(1) set lookup for duplicate detection.
 	 *

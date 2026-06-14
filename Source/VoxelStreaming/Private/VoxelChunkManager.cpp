@@ -1497,10 +1497,23 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 	const int32 MaxNewDispatches = FMath::Min(Configuration->MaxChunksToLoadPerFrame, 2);
 	int32 ProcessedCount = 0;
 
+	// P2-A: chunks deferred this frame because a face neighbor's voxel data is
+	// still generating. They stay PendingMeshing and are re-queued after the loop
+	// so they retry next frame (when the neighbor's data should be resident),
+	// instead of meshing their boundary against a clamped duplicate plane.
+	// Examined bounds per-frame work so a queue full of deferrable chunks can't
+	// spin the whole queue every frame.
+	TArray<FChunkLODRequest> DeferredThisFrame;
+	int32 Examined = 0;
+	const int32 MaxExamined = MaxNewDispatches + 48;
+
 	while (MeshingQueue.Num() > 0 && ProcessedCount < MaxNewDispatches &&
+	       Examined < MaxExamined &&
 	       AsyncMeshingInProgress.Num() < EffectiveMaxAsyncMeshTasks &&
 	       PendingMeshQueue.Num() < EffectiveMaxPendingMeshes)
 	{
+		++Examined;
+
 		// Skip chunks already being meshed asynchronously
 		if (AsyncMeshingInProgress.Contains(MeshingQueue.Last().ChunkCoord))
 		{
@@ -1526,6 +1539,26 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		{
 			// No voxel data available - skip
 			continue;
+		}
+
+		// P2-A: don't mesh this boundary against a face neighbor whose voxel data
+		// is still in the generation pipeline. GetVoxelAt would clamp the missing
+		// plane to our own edge voxel (duplicate plane), producing the LOD-seam
+		// tear that is never refreshed once the neighbor arrives. Defer instead and
+		// retry next frame; if a neighbor's data will never arrive (freed/unloading)
+		// proceed with a one-line warning so we never stall permanently.
+		bool bClampUnavoidable = false;
+		if (ShouldDeferMeshForNeighbors(Request.ChunkCoord, bClampUnavoidable))
+		{
+			// Leave the chunk in PendingMeshing; re-queue after the loop.
+			DeferredThisFrame.Add(Request);
+			continue;
+		}
+		if (bClampUnavoidable)
+		{
+			UE_LOG(LogVoxelStreaming, Warning,
+				TEXT("Chunk (%d,%d,%d) meshing against a non-resident face neighbor whose data is not coming - boundary may clamp"),
+				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
 		}
 
 		// Mark as meshing
@@ -1783,6 +1816,13 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		LaunchAsyncMeshGeneration(Request, MeshRequest);
 
 		++ProcessedCount;
+	}
+
+	// P2-A: re-queue chunks deferred this frame so they retry once their neighbors'
+	// voxel data is resident. They are still in PendingMeshing state.
+	for (const FChunkLODRequest& Deferred : DeferredThisFrame)
+	{
+		AddToMeshingQueue(Deferred);
 	}
 }
 
@@ -2449,6 +2489,58 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) loaded"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+}
+
+bool UVoxelChunkManager::ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoord, bool& bOutClampUnavoidable) const
+{
+	bOutClampUnavoidable = false;
+
+	if (!Configuration)
+	{
+		return false;
+	}
+
+	const int32 VolumeSize = Configuration->ChunkSize * Configuration->ChunkSize * Configuration->ChunkSize;
+
+	static const FIntVector FaceOffsets[6] = {
+		FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
+		FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
+		FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
+	};
+
+	bool bDefer = false;
+	for (const FIntVector& Offset : FaceOffsets)
+	{
+		const FVoxelChunkState* Neighbor = ChunkStates.Find(ChunkCoord + Offset);
+		if (!Neighbor)
+		{
+			// No neighbor tracked here — this is the loaded-region edge, not a tear
+			// (the chunk will be re-meshed via QueueNeighborsForRemesh when/if the
+			// neighbor is later generated). Nothing to wait for.
+			continue;
+		}
+
+		if (Neighbor->Descriptor.VoxelData.Num() == VolumeSize)
+		{
+			continue; // resident — fine to mesh against
+		}
+
+		// Neighbor exists but its voxel data is not resident.
+		if (Neighbor->State == EChunkState::PendingGeneration ||
+			Neighbor->State == EChunkState::Generating)
+		{
+			// Data is in the pipeline and will arrive — wait for it.
+			bDefer = true;
+		}
+		else
+		{
+			// Loaded-but-freed, unloading, etc. — data is not coming. Don't stall
+			// forever; let the caller mesh (it will clamp) but flag it.
+			bOutClampUnavoidable = true;
+		}
+	}
+
+	return bDefer;
 }
 
 void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)

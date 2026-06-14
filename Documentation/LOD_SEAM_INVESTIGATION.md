@@ -1,6 +1,28 @@
 # LOD Seam Investigation — Stage 1 Findings (2026-06-10)
 
-## Headline
+> ## ⚠️ CORRECTION (2026-06-13) — read this first
+>
+> **The catastrophic "tears" that motivated this whole investigation were a camera
+> misdiagnosis, not meshing defects.** The pawn spawns in the cave layer (config
+> `BaseHeight=3000 + HeightScale=2000` → surface ~3000–5000), and the survey
+> camera sat *below the terrain surface*, looking into the **cave system**. The
+> "void corridor / floating fragments / roofed void" are cave interiors and the
+> underside of terrain.
+>
+> From proper above-surface vantages (`Saved/Screenshots/Claudius/audit_*.png`),
+> the terrain surface is **continuous and healthy at every LOD ring, seams ON and
+> OFF**. There is no catastrophic LOD seam. The real LOD-boundary issues are minor
+> and visually negligible at play scale (unit tests: T4 ≤1-fine-cell cracks, T6 a
+> small transvoxel leak).
+>
+> The Stage-1 headline below ("LOD>0 meshing produces torn geometry even between
+> same-LOD chunks") is therefore **superseded**: T2/T3 proved same-LOD strided
+> meshing is watertight, and the gross tears were cave/POV artifacts. What the work
+> *did* deliver is real correctness/robustness: the watertightness test suite, the
+> `voxel.LogBoundaryResidency` diagnostic, P2-A (clamp elimination), and P2-B (LOD
+> balance + hysteresis). See the P1 / P2-A / P2-B sections for specifics.
+
+## Headline (Stage 1 — superseded, see correction above)
 
 **The "transvoxel seam" problem is misattributed. LOD > 0 marching cubes meshing
 produces torn, displaced geometry even between same-LOD chunks** — with no LOD
@@ -188,7 +210,9 @@ legitimate, not a race.
   data — defer the mesh until neighbors are resident, and re-mesh on neighbor
   arrival / LOD change (kills the 584 clamp faces and the stale-mesh persistence).
   Replace the silent clamp with a `Warning` so regressions are visible.
-  **This is the actual tear fix.**
+  *(Implemented as P2-A — see below. NOTE: this was expected to be "the tear fix"
+  but the seam audit found there was no catastrophic tear; P2-A still eliminates a
+  real transient defect.)*
 - (B) **LOD stability:** a 2:1 adjacency invariant + hysteresis. Implemented and
   measured (below) — it is a correctness safeguard + churn reduction, but **not**
   the tear fix; the current distance bands already satisfy 2:1 by geometry.
@@ -206,7 +230,7 @@ Toggle with `voxel.LODBalance` (default 1).
 |--------|-------------|------------|
 | `nbrLOD` gap (own LOD vs neighbor *rendered* `MeshedLODLevel`) | 645 / 1336 | 336 / 1316 |
 | **target-vs-target** adjacency (own meshed LOD vs neighbors' meshed LOD) | **0** | **0** |
-| Visible tear (`p2b_balance_off.png` vs `p2b_balance_on.png`) | torn | **identical, still torn** |
+| Screenshot (`p2b_balance_off.png` vs `p2b_balance_on.png`) | identical | identical *(both were sub-surface/cave POV — see the CORRECTION at the top; not an LOD seam)* |
 
 **Correction to P1:** target-LOD adjacency is **already ≤ 1 without balancing**.
 With band widths (6000–7000) wider than a chunk (3200), two face-adjacent chunk
@@ -222,8 +246,50 @@ not a target defect — an over-interpretation of that metric.
 - *Churn reduction:* hysteresis cut rendered-LOD-lag gaps ~48% (645→336) with a
   stationary viewer — less remesh thrash and transient popping.
 
-The off/on screenshots being identical confirm the tear is **request-assembly
-(clamp / stale-mesh), i.e. P2-A** — proceeding there next.
+At the time, the identical off/on screenshots were read as "the tear is
+request-assembly (P2-A)." The seam audit later showed those screenshots were both
+sub-surface/cave POV, so they show no seam either way — see P2-A below.
+
+## P2-A — defer meshing against non-resident neighbors (2026-06-13)
+
+Implemented in `UVoxelChunkManager`:
+- `ProcessMeshingQueue` now calls `ShouldDeferMeshForNeighbors` before meshing a
+  chunk. If a face neighbor exists in `ChunkStates` but its `VoxelData` is still in
+  the generation pipeline (`PendingGeneration`/`Generating`), the chunk is deferred
+  (kept `PendingMeshing`, re-queued after the loop) instead of meshing its boundary
+  against a clamped duplicate plane. A per-frame `Examined` cap bounds the work.
+- If a neighbor lacks data but it is *not* coming (Loaded-but-freed / unloading),
+  the chunk meshes anyway (no permanent stall) with a one-line `Warning`.
+- Convergence: a chunk with resident own-data never blocks a neighbor (defer only
+  waits on *generating* neighbors), so there is no deadlock; the existing
+  `QueueNeighborsForRemesh` (Loaded neighbors) plus the per-frame deferred retry
+  cover re-mesh-on-arrival.
+
+**Live result (`voxel.LogBoundaryResidency 2`):** genuine clamp faces (neighbor
+known, data not resident) **584 → 0** over a streamed session; 0 "data-not-coming"
+warnings; the ~18 remaining clamps are benign world-edge (no neighbor exists yet).
+
+**Honest scope:** P2-A eliminates a real defect — meshing against phantom neighbor
+data, which produced *transient* boundary glitches during streaming — but it does
+**not** change the steady-state look, because (per the CORRECTION at the top) there
+was no catastrophic tear to begin with; the dramatic shots were cave/POV. P2-A is
+kept as correctness + it removed the residency confound that made the seam audit
+trustworthy.
+
+## Seam audit (2026-06-13) — the decisive visual check
+
+Proper above-surface vantages across both rings, seams ON and OFF
+(`Saved/Screenshots/Claudius/audit_*.png`):
+
+| Ring | Seams ON | Seams OFF |
+|------|----------|-----------|
+| LOD0/1 (~7000) | continuous | continuous — no visible crack |
+| LOD1/2 (~13000) | continuous | continuous (close-up clean; faint wide-shot lines were chunk-bound debug draw + scatter) |
+
+**Conclusion:** no catastrophic LOD seam exists. The LOD system is visually healthy
+at play scale. Remaining LOD-boundary issues are minor (T4 ≤1-fine-cell cracks, T6
+transvoxel leak) and not visible in normal play. Treat further seam work as
+low-priority polish, not a bug fix.
 
 **Decision tree after first run:**
 - T2/T3 fail → fix `ProcessCubeLOD`/`GetVoxelAt` strided boundary math first.
