@@ -495,6 +495,82 @@ namespace MarchingCubesLODBoundaryTestHelpers
 		}
 		return R;
 	}
+
+	// ===== Mesh hole detection (T9) =====
+	// A visible "opening" is MISSING geometry, which vertex-matching tests can't see.
+	// Detect it via manifold-ness: in a watertight surface every edge is shared by
+	// exactly two triangles, except where the surface exits the chunk's six faces
+	// (legitimately open). Any other single-triangle edge is the rim of a HOLE.
+	// Mesh vertex positions are chunk-LOCAL ([0, ChunkSize*VoxelSize]), so the chunk
+	// faces are the planes coord==0 and coord==ChunkSize*VoxelSize.
+	int32 CountInteriorOpenEdges(const FChunkMeshData& Mesh)
+	{
+		const float Lo = 0.0f;
+		const float Hi = TestChunkSize * TestVoxelSize;
+		const float FaceEps = 0.5f;
+
+		// Dedup vertices (O(n^2) is fine for test-sized meshes).
+		TArray<FVector3f> Verts;
+		TArray<int32> Remap;
+		Remap.SetNum(Mesh.Positions.Num());
+		for (int32 i = 0; i < Mesh.Positions.Num(); ++i)
+		{
+			const FVector3f& P = Mesh.Positions[i];
+			int32 Found = INDEX_NONE;
+			for (int32 v = 0; v < Verts.Num(); ++v)
+			{
+				if ((Verts[v] - P).SizeSquared() < DedupTolerance * DedupTolerance) { Found = v; break; }
+			}
+			if (Found == INDEX_NONE) { Found = Verts.Add(P); }
+			Remap[i] = Found;
+		}
+
+		auto EdgeKey = [](int32 a, int32 b) -> uint64
+		{
+			const uint32 lo = static_cast<uint32>(FMath::Min(a, b));
+			const uint32 hi = static_cast<uint32>(FMath::Max(a, b));
+			return (static_cast<uint64>(lo) << 32) | hi;
+		};
+
+		TMap<uint64, int32> EdgeCount;
+		const int32 NumTris = Mesh.Indices.Num() / 3;
+		for (int32 t = 0; t < NumTris; ++t)
+		{
+			const int32 i0 = Mesh.Indices[t * 3 + 0];
+			const int32 i1 = Mesh.Indices[t * 3 + 1];
+			const int32 i2 = Mesh.Indices[t * 3 + 2];
+			const FVector3f& P0 = Mesh.Positions[i0];
+			const FVector3f& P1 = Mesh.Positions[i1];
+			const FVector3f& P2 = Mesh.Positions[i2];
+			// Drop degenerate (near-zero-area) triangles — fin-snapping deliberately
+			// makes these and they don't actually seal a hole.
+			const float Area = 0.5f * FVector3f::CrossProduct(P1 - P0, P2 - P0).Size();
+			if (Area < 1.0f) { continue; }
+			const int32 a = Remap[i0], b = Remap[i1], c = Remap[i2];
+			EdgeCount.FindOrAdd(EdgeKey(a, b))++;
+			EdgeCount.FindOrAdd(EdgeKey(b, c))++;
+			EdgeCount.FindOrAdd(EdgeKey(c, a))++;
+		}
+
+		auto OnChunkFace = [&](const FVector3f& P) -> bool
+		{
+			return FMath::Abs(P.X - Lo) < FaceEps || FMath::Abs(P.X - Hi) < FaceEps
+				|| FMath::Abs(P.Y - Lo) < FaceEps || FMath::Abs(P.Y - Hi) < FaceEps
+				|| FMath::Abs(P.Z - Lo) < FaceEps || FMath::Abs(P.Z - Hi) < FaceEps;
+		};
+
+		int32 HoleEdges = 0;
+		for (const TPair<uint64, int32>& KV : EdgeCount)
+		{
+			if (KV.Value != 1) { continue; }
+			const int32 a = static_cast<int32>(KV.Key >> 32);
+			const int32 b = static_cast<int32>(KV.Key & 0xffffffffu);
+			// An edge with both endpoints on a chunk face is a legitimate open rim.
+			if (OnChunkFace(Verts[a]) && OnChunkFace(Verts[b])) { continue; }
+			++HoleEdges;
+		}
+		return HoleEdges;
+	}
 } // namespace MarchingCubesLODBoundaryTestHelpers
 using namespace MarchingCubesLODBoundaryTestHelpers;
 
@@ -887,5 +963,65 @@ bool FMCLODBoundaryT8NonLinearTest::RunTest(const FString& Parameters)
 	}
 
 	TestFalse(TEXT("Transition strip should match coarse neighbor heights on non-linear terrain"), bAnyMismatch);
+	return true;
+}
+
+// ==================== T9: mesh HOLE detection at the LOD transition (steep terrain) ====================
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT9HoleTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T9_TransitionHoles",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCLODBoundaryT9HoleTest::RunTest(const FString& Parameters)
+{
+	// The visible "openings larger than the character" are MISSING geometry (holes),
+	// which vertex-matching (T1-T8) cannot detect. This test meshes the finer chunk A
+	// with a +X transvoxel transition to a coarser neighbor and counts interior open
+	// edges (hole rims). It compares against the SAME chunk meshed as pure LOD0 (no
+	// transition): if the transition introduces interior open edges the pure mesh
+	// doesn't have, the transition strip is leaving holes. Run across field shapes -
+	// steep/non-linear are the suspected triggers (transition cell fin-snapping
+	// degenerating triangles, with P3's boundary-slab skip removing the fallback MC).
+	struct FFieldCase { ETestField Field; const TCHAR* Name; };
+	const FFieldCase Fields[] = {
+		{ ETestField::Smooth,     TEXT("Smooth") },
+		{ ETestField::NonLinearZ, TEXT("NonLinearZ") },
+		{ ETestField::Cliff,      TEXT("Cliff") },
+	};
+
+	bool bAnyNewHoles = false;
+	for (const FFieldCase& F : Fields)
+	{
+		FScopedTestField Scoped(F.Field);
+
+		// A with a +X transition to a coarser (LOD1) neighbor.
+		FVoxelMeshingRequest ReqTransition = MakeChunkRequest(FIntVector(0, 0, 0), 0);
+		FillAllNeighborData(ReqTransition);
+		ReqTransition.NeighborLODLevels[1] = 1;
+		ReqTransition.TransitionFaces = FVoxelMeshingRequest::TRANSITION_XPOS;
+
+		// Same chunk as pure LOD0 (no coarser neighbor, no transition) - the baseline.
+		FVoxelMeshingRequest ReqPure = MakeChunkRequest(FIntVector(0, 0, 0), 0);
+		FillAllNeighborData(ReqPure);
+		ReqPure.NeighborLODLevels[1] = 0;
+
+		FChunkMeshData MeshTransition, MeshPure;
+		TestTrue(TEXT("transition mesh should succeed"), MeshChunk(ReqTransition, true, MeshTransition));
+		TestTrue(TEXT("pure mesh should succeed"), MeshChunk(ReqPure, true, MeshPure));
+
+		const int32 HolesTransition = CountInteriorOpenEdges(MeshTransition);
+		const int32 HolesPure = CountInteriorOpenEdges(MeshPure);
+
+		AddInfo(FString::Printf(TEXT("T9 %s: interior open edges - transition=%d, pure-LOD0=%d (tris transition=%d pure=%d)"),
+			F.Name, HolesTransition, HolesPure, MeshTransition.Indices.Num() / 3, MeshPure.Indices.Num() / 3));
+
+		if (HolesTransition > HolesPure)
+		{
+			bAnyNewHoles = true;
+			AddError(FString::Printf(TEXT("%s: transition introduces %d interior open edges (holes) vs %d for pure LOD0"),
+				F.Name, HolesTransition, HolesPure));
+		}
+	}
+
+	TestFalse(TEXT("Transvoxel transition should not introduce mesh holes vs pure LOD0"), bAnyNewHoles);
 	return true;
 }

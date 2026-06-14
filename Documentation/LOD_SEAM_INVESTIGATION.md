@@ -403,11 +403,51 @@ diverging on steep terrain. (Only the minor zero-gap T-junctions remain,
 This redirects the hunt: the deterministic single-face mesher is correct, so the
 live bug must be in the **multi-chunk context** the unit tests don't model.
 
+### T9 — mesh HOLE detection: DETERMINISTIC REPRO (2026-06-13) ★
+
+The earlier tests checked boundary **vertex matching**; an "opening larger than the
+character" is **missing geometry (a hole)**, which vertex-matching can't see. T9
+detects holes via manifold-ness: count mesh edges used by exactly one triangle that
+are NOT on a chunk face (degenerate triangles dropped first). Pure LOD0 = 0 such
+edges (watertight); the transvoxel transition strip = **58–64**.
+
+| Field | Transition strip open edges | Pure LOD0 |
+|-------|-----------------------------|-----------|
+| Smooth | **64** | 0 |
+| NonLinearZ | **64** | 0 |
+| Cliff (steep) | **58** | 0 |
+
+**This is the first deterministic reproduction of the actual bug.** Key points:
+- The transvoxel transition strip is **not manifold-watertight** — it leaves ~60
+  open edges (hole rims) the pure LOD0 mesh doesn't have.
+- It reproduces **even on the smooth field**, so the holes are ALWAYS present at LOD
+  transitions. They are near-zero-gap on gentle terrain (why earlier above-surface
+  audits looked continuous and T6's crack was 0.58), but on **steep terrain the fine
+  surface deviates from the straight coarse transition edges between coarse corners,
+  opening the holes wide** — the visible "openings larger than the character."
+- This reconciles "visually obvious" with "all vertex tests passed": the boundary
+  vertices are placed correctly (T6/T8 = 0.00) but the strip is stitched with
+  T-junctions + a coarse inner connection, not a shared-vertex manifold.
+
+**Root cause:** the transition cell's high-res (9-sample) face is placed on the
+BOUNDARY (toward the coarse neighbor) and overridden to coarse, while the 4-corner
+(coarse) face is toward the FINE interior — inverted from Lengyel. So the outer face
+T-junctions against the coarse grid and the inner face under-tessellates against the
+fine interior, both leaving open edges.
+
+**Fix plan (now test-driven via T9 + T6/T8):** put the coarse 4-corner face toward
+the coarse neighbor (matches B exactly, no T-junctions) and the high-res 9-sample
+face toward the fine interior (shares the fine MC's boundary vertices), i.e. the
+correct Lengyel orientation; remove the midpoint-override now that the coarse side is
+genuinely 4-corner. Validate: T9 → 0 open edges, T6/T8 stay watertight, then confirm
+live on steep terrain.
+
+T9 is committed RED as the failing repro / known-issue gate until the fix lands.
+
 **Open issues / next steps:**
-1. **LOD-transition height-mismatch cracks (primary, still unfixed).** CONFIRMED
-   LOD-transition-specific (vanish with uniform LOD), but T8 shows the single-face
-   transition mesher is correct even on non-linear terrain. So the cause is in the
-   live multi-chunk path, candidates:
+1. **Transvoxel transition strip leaves holes (PRIMARY — deterministic repro in T9).**
+   Fix per the plan above (correct Lengyel orientation). Earlier multi-chunk
+   hypotheses below are now secondary — the core transition strip itself is the bug:
    (a) **LOD-state / transition-decision timing.** A boundary chunk meshes a
        transition for the neighbor's `MeshedLODLevel` *at mesh time*; rendered-LOD
        lag/churn can mean the fine chunk got no transition (or a wrong-stride one)
