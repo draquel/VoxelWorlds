@@ -1707,14 +1707,18 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 					// MergeLODBoundaryCells and skirts align with the neighbor's actual mesh.
 					MeshRequest.NeighborLODLevels[i] = NeighborState->MeshedLODLevel;
 
-					// Generate skirts when:
-					// 1. Neighbor is currently rendering at a coarser LOD than us
-					// 2. Neighbor is mid-LOD-transition (its rendered mesh doesn't match its
-					//    target LOD, so its boundary vertices may change soon — skirts cover
-					//    the transient gap until both sides stabilize)
+					// TransitionFaces drives Transvoxel transition cells, which are ONLY
+					// valid when the neighbor is genuinely COARSER (rendering at a higher
+					// LOD level). Generating them for a same-LOD (or finer) neighbor builds
+					// degenerate transition cells (CoarserStride == Stride) whose geometry
+					// replaces regular MC at the boundary (Pass-2 skip) and tears — the
+					// root cause of the live LOD-boundary fragments on steep terrain.
+					//
+					// A neighbor that is merely mid-LOD-transition (rendered != target) but
+					// NOT coarser than us must NOT get a transition strip; it is re-meshed
+					// via QueueNeighborsForRemesh once its LOD settles.
 					const bool bNeighborCoarser = NeighborState->MeshedLODLevel > CurrentLOD;
-					const bool bNeighborTransitioning = NeighborState->MeshedLODLevel != NeighborState->LODLevel;
-					if (bNeighborCoarser || bNeighborTransitioning)
+					if (bNeighborCoarser)
 					{
 						if (HasNeighborData(i))
 						{
@@ -1779,6 +1783,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			FString FaceReport;
 			int32 ClampRiskFaces = 0;
 			int32 AirRaceFaces = 0;
+			int32 MissingTransitionFaces = 0;  // active boundary, coarser neighbor, but NO transition set
 			for (int32 i = 0; i < 6; ++i)
 			{
 				const bool bResident = FaceSlices[i]->Num() == SliceSize;
@@ -1792,23 +1797,34 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 				if (bClampRisk) { ++ClampRiskFaces; }
 				if (bAirRaceRisk) { ++AirRaceFaces; }
 
-				if (DiagLevel >= 2 || bClampRisk || bAirRaceRisk)
+				// Transvoxel engagement: TransitionFlags[i] == (1<<i). A face SHOULD get
+				// a transition strip when it has a surface crossing AND a coarser
+				// neighbor. If that's true but the bit is not set, transvoxel is not
+				// engaging at this boundary — the suspected root cause of the live seam.
+				const bool bNbrCoarser = MeshRequest.NeighborLODLevels[i] > CurrentLOD;
+				const bool bTransitionSet = (MeshRequest.TransitionFaces & (1u << i)) != 0;
+				const bool bMissingTransition = bActive && bNbrCoarser && !bTransitionSet;
+				if (bMissingTransition) { ++MissingTransitionFaces; }
+
+				if (DiagLevel >= 2 || bClampRisk || bAirRaceRisk || bMissingTransition)
 				{
 					FaceReport += FString::Printf(
-						TEXT(" [%s res=%s nbrLOD=%d sliceSolid=%d ownSolid=%d%s%s]"),
+						TEXT(" [%s res=%s nbrLOD=%d sliceSolid=%d ownSolid=%d%s%s%s%s]"),
 						FaceNames[i], bResident ? TEXT("Y") : TEXT("N"),
 						MeshRequest.NeighborLODLevels[i], SliceSolid, OwnSolid,
+						bTransitionSet ? TEXT(" TF") : TEXT(""),
+						bMissingTransition ? TEXT(" NOTF!") : TEXT(""),
 						bClampRisk ? TEXT(" CLAMP") : TEXT(""),
 						bAirRaceRisk ? TEXT(" AIRRACE") : TEXT(""));
 				}
 			}
 
-			if (DiagLevel >= 2 || ClampRiskFaces > 0 || AirRaceFaces > 0)
+			if (DiagLevel >= 2 || ClampRiskFaces > 0 || AirRaceFaces > 0 || MissingTransitionFaces > 0)
 			{
 				UE_LOG(LogVoxelStreaming, Warning,
-					TEXT("[BoundaryDiag] Chunk(%d,%d,%d) LOD=%d clampRiskFaces=%d airRaceFaces=%d%s"),
+					TEXT("[BoundaryDiag] Chunk(%d,%d,%d) LOD=%d TF=0x%02X clampRiskFaces=%d airRaceFaces=%d missingTF=%d%s"),
 					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
-					CurrentLOD, ClampRiskFaces, AirRaceFaces, *FaceReport);
+					CurrentLOD, MeshRequest.TransitionFaces, ClampRiskFaces, AirRaceFaces, MissingTransitionFaces, *FaceReport);
 			}
 		}
 

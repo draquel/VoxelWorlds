@@ -341,16 +341,47 @@ crack from ~28 → 0.58 units. T6 re-asserted on `unmatchedB==0` + max-crack ≤
 the residual T-junctions (`unmatchedA`) are logged as a known limitation. **This is
 not the steep-terrain fragment fix.**
 
+## Transvoxel-engagement diagnostic + spurious-TF fix (2026-06-13)
+
+Extended `voxel.LogBoundaryResidency` to log `TransitionFaces` (TF) per chunk and
+flag faces that *should* transition (active boundary + coarser neighbor) but don't
+(`NOTF!`), and "spurious" TF (set on a same/finer-LOD neighbor).
+
+**Findings from the live CPU-MC repro:**
+- Transvoxel **does engage** — 104/135 chunks had TF set, `missingTF=0` (no genuine
+  coarser boundary was left without a transition). So the seam is **not** a
+  trigger/engagement failure (earlier hypothesis disproved).
+- **Spurious TF was rampant: 2097** surface-bearing face-occurrences had TF set on a
+  **same-or-finer** LOD neighbor. Cause: the trigger fired on `bNeighborTransitioning`
+  (neighbor rendered LOD ≠ target), not just on coarser neighbors. With P3's Pass-2
+  skip, those degenerate transition cells (CoarserStride == Stride) replaced regular
+  MC on same-LOD boundaries.
+- **Fix (landed):** set `TransitionFaces` only for genuinely coarser neighbors
+  (`MeshedLODLevel > CurrentLOD`); dropped spurious TF 2097 → **0**, genuine
+  transitions preserved (32).
+
+**BUT the visible fragments are unchanged** (`Saved/Screenshots/Claudius/cpumc_TFfix.png`
+vs `cpumc_seam_close.png`). The floating fragments are **invariant to all transvoxel
+handling** (seams ON, seams OFF, and spurious-TF fixed all look identical), so they
+are **not** produced by transition cells. They are sand-coloured (a lower-elevation
+material) while the surround is green → they sit at a **different height** than the
+main surface. Working hypothesis: **the base LOD meshing produces a coarse surface
+at a different height than the fine surface (raw stride mismatch on steep/non-linear
+terrain), and/or overlapping/stale LOD meshes render together** — not a
+transition-cell issue.
+
 **Open issues / next steps:**
-1. **Steep-terrain CPU-MC LOD tearing (primary).** Root-cause why transvoxel doesn't
-   engage live: confirm `TransitionFaces` is actually set at these boundaries in the
-   chunk manager (it derives from neighbor `MeshedLODLevel`); confirm transition
-   cells are generated and hold on steep slopes. Build a **steep / non-linear
-   reproducing test** first (deterministic), then fix.
+1. **Steep-terrain LOD-boundary fragments (primary, still unfixed).** Invariant to
+   seam handling → in the base meshing or renderer. Next: determine whether (a) two
+   LOD surfaces overlap (rendering / stale-mesh-not-removed at LOD change — check the
+   renderer's per-chunk mesh replacement), or (b) the coarse MC produces
+   disconnected/displaced geometry vs the fine on steep terrain (deterministic
+   meshing). A steep / non-linear reproducing unit test is still the missing tool.
 2. **GPU MC has no seam handling** — needs transvoxel/skirt added to the GPU shader
    if GPU MC is a shipping path.
 3. **CPU-MC T-junctions** (minor) — coarse-2×2 boundary-face restructure for strict 1:1.
 4. **DC LOD seams** — separate investigation (`BuildLODMergeMap` + DC shader).
+5. **Spurious-TF fix (DONE)** — landed; eliminates degenerate same-LOD transition cells.
 
 **Decision tree after first run:**
 - T2/T3 fail → fix `ProcessCubeLOD`/`GetVoxelAt` strided boundary math first.
