@@ -360,23 +360,47 @@ flag faces that *should* transition (active boundary + coarser neighbor) but don
   (`MeshedLODLevel > CurrentLOD`); dropped spurious TF 2097 → **0**, genuine
   transitions preserved (32).
 
-**BUT the visible fragments are unchanged** (`Saved/Screenshots/Claudius/cpumc_TFfix.png`
-vs `cpumc_seam_close.png`). The floating fragments are **invariant to all transvoxel
-handling** (seams ON, seams OFF, and spurious-TF fixed all look identical), so they
-are **not** produced by transition cells. They are sand-coloured (a lower-elevation
-material) while the surround is green → they sit at a **different height** than the
-main surface. Working hypothesis: **the base LOD meshing produces a coarse surface
-at a different height than the fine surface (raw stride mismatch on steep/non-linear
-terrain), and/or overlapping/stale LOD meshes render together** — not a
-transition-cell issue.
+**BUT the visible artifact is unchanged** (`cpumc_TFfix.png` vs `cpumc_seam_close.png`).
+
+### Correcting the visual target (user clarification)
+The "blocky fragments" are just the **sand/grass/dirt biome material patches** —
+normal. The actual artifact is the **thin blue slivers/cracks** showing the
+background *through* the terrain, **mostly horizontal**, at chunk borders, present
+**with and without seams**. These are genuine watertightness gaps.
+
+### Decisive localization: LOD-transition-specific
+Disabling LOD entirely (`enable_lod=False`, all chunks LOD0) makes the blue cracks
+**completely vanish** — the surface is continuous
+(`Saved/Screenshots/Claudius/cpumc_LODoff_grazing.png`). Therefore:
+
+- **The cracks occur ONLY at boundaries between chunks of different LOD level**
+  (none at same-LOD boundaries — consistent with T2/T3 watertight).
+- They are **height mismatches**: a "horizontal sliver" is the vertical gap where
+  the fine and coarse surfaces meet at different heights at the LOD boundary.
+- **Transvoxel engages there** (32 genuine-TF chunks, missingTF=0) **but does not
+  close the gap** on steep/non-linear terrain — identical with seams ON and OFF.
+- Scales with terrain steepness; the gentle linear-Z test field makes coarse/fine
+  heights identical, so T6/T7 cannot reproduce it (the suite's blind spot).
+
+Screenshots: `cpumc_seam_close.png` / `cpumc_sliver_closeup.png` (cracks, LOD on),
+`cpumc_topdown_pattern.png` (cracks along chunk-grid lines, worst at the LOD band),
+`cpumc_LODoff_grazing.png` (no cracks, LOD off).
 
 **Open issues / next steps:**
-1. **Steep-terrain LOD-boundary fragments (primary, still unfixed).** Invariant to
-   seam handling → in the base meshing or renderer. Next: determine whether (a) two
-   LOD surfaces overlap (rendering / stale-mesh-not-removed at LOD change — check the
-   renderer's per-chunk mesh replacement), or (b) the coarse MC produces
-   disconnected/displaced geometry vs the fine on steep terrain (deterministic
-   meshing). A steep / non-linear reproducing unit test is still the missing tool.
+1. **LOD-transition height-mismatch cracks (primary, still unfixed).** CONFIRMED
+   LOD-transition-specific (vanish with uniform LOD). Transvoxel engages but doesn't
+   close the height gap on steep/non-linear terrain (identical seams ON/OFF). The
+   fine chunk's transition strip is supposed to match the coarse neighbor's boundary
+   heights; on steep terrain it evidently doesn't. Next:
+   (a) Build a **steep / non-linear-Z reproducing unit test** (the gentle linear-Z
+       field makes coarse/fine heights identical, hiding the bug — this is the key
+       missing tool). Verify it shows `unmatchedB>0` / large max-crack.
+   (b) Then debug why the transition cell's outer face heights diverge from the
+       coarse neighbor's on steep terrain (candidate: the face midpoint-override /
+       trilinear sampling vs the coarse neighbor's own MC interpolation; or the
+       coarse neighbor computing boundary heights from data the fine side doesn't
+       sample identically). Also re-examine whether P3's boundary-slab skip leaves a
+       gap when the transition cell's height doesn't reach the fine interior.
 2. **GPU MC has no seam handling** — needs transvoxel/skirt added to the GPU shader
    if GPU MC is a shipping path.
 3. **CPU-MC T-junctions** (minor) — coarse-2×2 boundary-face restructure for strict 1:1.
