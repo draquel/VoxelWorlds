@@ -1901,18 +1901,23 @@ void FVoxelCPUMarchingCubesMesher::GetTransitionCellDensities(
 	int32 FaceIndex,
 	float OutDensities[13]) const
 {
-	// Sample 13 points for the transition cell (standard Lengyel orientation):
+	// Sample 13 points for the transition cell (corrected Lengyel orientation):
 	// Transition cells are on the FINER chunk, facing a coarser neighbor.
-	// - Points 0-8: 3x3 grid on the BOUNDARY face spanning the coarser neighbor's cell.
-	//   Corners 0,2,6,8 align with the coarser MC grid corners (CoarserStride apart),
-	//   ensuring the outer edge matches the coarser mesh's boundary vertices exactly.
-	//   Midpoints 1,3,4,5,7 at half-CoarserStride provide finer chunk's resolution.
-	// - Points 9-12: Interior corners at CurrentStride depth into the finer chunk.
-	//   These create the depth transition from face to interior MC grid.
+	// - Points 0-8: the fine 3x3 grid on the INNER face (toward the finer chunk's
+	//   interior MC). Corners 0,2,6,8 are CoarserStride apart; midpoints 1,3,4,5,7 at
+	//   half-CoarserStride carry the finer chunk's full resolution so this face shares
+	//   vertices with the adjacent fine MC cells exactly (no inner T-junctions).
+	// - Points 9-12: the 4 coarse corners on the OUTER face (the chunk boundary, toward
+	//   the coarser neighbor). They sit on the coarse grid so the outer edge matches the
+	//   coarser mesh's boundary vertices exactly (no outer T-junctions).
 	//
 	// NON-UNIFORM CELL: Face-parallel axes use CoarserStride (Stride parameter),
 	// face-normal (depth) axis uses CurrentStride (= 1 << LODLevel).
 	// This gives the cell rectangular proportions matching the LOD boundary.
+	//
+	// The midpoints are sampled directly from the field (no override): the fine inner
+	// face is meant to carry full resolution, identical to what the finer chunk's MC
+	// produces on that plane.
 
 	const int32 CurrentStride = 1 << Request.LODLevel;
 
@@ -1955,24 +1960,6 @@ void FVoxelCPUMarchingCubesMesher::GetTransitionCellDensities(
 		// Use trilinear interpolation for fractional positions
 		OutDensities[i] = GetDensityAtTrilinear(Request, SampleX, SampleY, SampleZ);
 	}
-
-	// Replace face midpoint densities (1,3,5,7,4) with values bilinearly interpolated
-	// from face corner densities (0,2,6,8). This ensures the transition cell's face
-	// surface is geometrically identical to the coarser MC's face surface, eliminating
-	// the outer-edge seam caused by extra detail in the midpoint samples.
-	//
-	// Face sample layout:    Corner interpolation:
-	//   6---7---8             6-----------8
-	//   |   |   |             |           |
-	//   3---4---5      =>     | from 0268 |
-	//   |   |   |             |           |
-	//   0---1---2             0-----------2
-	OutDensities[1] = (OutDensities[0] + OutDensities[2]) * 0.5f;  // Bottom midpoint
-	OutDensities[3] = (OutDensities[0] + OutDensities[6]) * 0.5f;  // Left midpoint
-	OutDensities[5] = (OutDensities[2] + OutDensities[8]) * 0.5f;  // Right midpoint
-	OutDensities[7] = (OutDensities[6] + OutDensities[8]) * 0.5f;  // Top midpoint
-	OutDensities[4] = (OutDensities[0] + OutDensities[2] + OutDensities[6] + OutDensities[8]) * 0.25f;  // Center
-
 }
 
 bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
@@ -2190,7 +2177,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	//   B (0xB): Interior corner 2 (sample index 11)
 	//   C (0xC): Interior corner 3 (sample index 12)
 	TArray<FVector3f> CellVertices;
-	TArray<bool> VertexOnOuterFace;  // true = both endpoints on face (samples 0-8), use CoarserStride for normals
+	TArray<bool> VertexOnOuterFace;  // true = both endpoints are coarse corners (9-12), i.e. on the outer/coarse face — use CoarserStride for normals
 	CellVertices.Reserve(VertexCount);
 	VertexOnOuterFace.Reserve(VertexCount);
 	bool bHasClampedVertices = false;
@@ -2240,7 +2227,19 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		}
 		else
 		{
-			// Edge between two different samples.
+			// Edge between two different samples — plain MC-style interpolation.
+			//
+			// With the corrected orientation (fine 9-sample face on the INNER side,
+			// coarse 4-corner face on the OUTER boundary side), every edge interpolates
+			// to the same position the adjacent mesh produces:
+			//   - face-face (both 0-8): the fine inner contour, shared with the finer
+			//     chunk's regular MC on that plane.
+			//   - corner-corner (both 9-12): the coarse outer contour, shared with the
+			//     coarser neighbour along its corner-to-corner edges.
+			//   - face-corner (one of each): a genuine depth-bridging crossing.
+			// No fin-snapping or boundary projection is needed; those were band-aids for
+			// the previous inverted orientation and themselves introduced holes (a
+			// snapped/degenerate triangle drops one user of an interior edge).
 			const float DensityA = Densities[SampleA];
 			const float DensityB = Densities[SampleB];
 
@@ -2249,106 +2248,33 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			const FVector3f PosA = BasePos + OffsetA * CellScale;
 			const FVector3f PosB = BasePos + OffsetB * CellScale;
 
-			// Detect face-interior edges where both endpoints are on the same side
-			// of the isosurface (no actual surface crossing). InterpolateEdge would
-			// clamp t to 0 or 1, potentially placing the vertex at the INTERIOR
-			// endpoint — one stride deep into the terrain — creating "fin" triangles.
-			// Snap these vertices to the FACE endpoint to collapse the fin to the
-			// face plane. The resulting triangle degenerates to near-zero area.
-			const bool bIsFaceInteriorEdge = (SampleA <= 8) != (SampleB <= 8);
-			const bool bBothSolid = (DensityA >= IsoLevel) && (DensityB >= IsoLevel);
-			const bool bBothAir = (DensityA < IsoLevel) && (DensityB < IsoLevel);
-
-			if (bIsFaceInteriorEdge && (bBothSolid || bBothAir))
+			if (bDebugLogAnomalies || bCollectDebugVisualization)
 			{
-				// Snap to face endpoint position to eliminate depth fin
-				const int32 FaceSample = (SampleA <= 8) ? SampleA : SampleB;
-				const FVector3f& FaceOffset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][FaceSample];
-				VertexPos = BasePos + FaceOffset * CellScale;
-			}
-			else
-			{
-				// Standard interpolation — proper crossing or face-face/interior-interior edge
-				if (bDebugLogAnomalies || bCollectDebugVisualization)
+				const float Denom = DensityB - DensityA;
+				if (FMath::Abs(Denom) > KINDA_SMALL_NUMBER)
 				{
-					const float Denom = DensityB - DensityA;
-					if (FMath::Abs(Denom) > KINDA_SMALL_NUMBER)
+					const float RawT = (IsoLevel - DensityA) / Denom;
+					if (RawT < 0.0f || RawT > 1.0f)
 					{
-						const float RawT = (IsoLevel - DensityA) / Denom;
-						if (RawT < 0.0f || RawT > 1.0f)
+						bHasClampedVertices = true;
+						if (bDebugLogAnomalies)
 						{
-							bHasClampedVertices = true;
-							if (bDebugLogAnomalies)
-							{
-								const TCHAR* EdgeType =
-									(SampleA >= 9 && SampleB >= 9) ? TEXT("interior-interior") :
-									(SampleA >= 9 || SampleB >= 9) ? TEXT("face-interior") :
-									TEXT("face-face");
-								UE_LOG(LogVoxelMeshing, Warning,
-									TEXT("ANOMALY [Clamped] Cell (%d,%d,%d) Face %s: vertex %d %s edge %d-%d "
-										 "t=%.3f (d=%.3f,%.3f) — both endpoints %s isosurface"),
-									X, Y, Z, FaceNames[FaceIndex], i, EdgeType, SampleA, SampleB,
-									RawT, DensityA, DensityB,
-									RawT < 0.0f ? TEXT("above") : TEXT("below"));
-							}
+							const TCHAR* EdgeType =
+								(SampleA >= 9 && SampleB >= 9) ? TEXT("corner-corner (outer)") :
+								(SampleA >= 9 || SampleB >= 9) ? TEXT("face-corner (depth)") :
+								TEXT("face-face (inner)");
+							UE_LOG(LogVoxelMeshing, Warning,
+								TEXT("ANOMALY [Clamped] Cell (%d,%d,%d) Face %s: vertex %d %s edge %d-%d "
+									 "t=%.3f (d=%.3f,%.3f) — both endpoints %s isosurface"),
+								X, Y, Z, FaceNames[FaceIndex], i, EdgeType, SampleA, SampleB,
+								RawT, DensityA, DensityB,
+								RawT < 0.0f ? TEXT("above") : TEXT("below"));
 						}
 					}
 				}
-
-				// OUTER BOUNDARY PROJECTION: For face-face edges on the perimeter of
-				// the 3x3 grid that involve midpoint samples (1,3,5,7), project the
-				// vertex onto the coarser MC's corner-to-corner edge. The coarser MC
-				// interpolates directly between corners (0,2,6,8) at stride-2 spacing.
-				// Without this projection, midpoint edges produce vertices at different
-				// positions than the coarser MC, causing visible outer edge misalignment.
-				//
-				// Face sample layout:    Outer boundary edges:
-				//   6---7---8             6--7--8  (top:    corners 6,8)
-				//   |   |   |             |     |
-				//   3---4---5             3     5  (left/right: corners 0,6 / 2,8)
-				//   |   |   |             |     |
-				//   0---1---2             0--1--2  (bottom: corners 0,2)
-				const bool bBothOnFace = (SampleA <= 8 && SampleB <= 8);
-				if (bBothOnFace)
-				{
-					// Check if this is an outer boundary edge involving a midpoint.
-					// Map each outer edge to its surrounding corner pair.
-					int32 CornerSampleA = -1, CornerSampleB = -1;
-					auto CheckEdge = [&](int32 SA, int32 SB, int32 CA, int32 CB) {
-						if ((SampleA == SA && SampleB == SB) || (SampleA == SB && SampleB == SA))
-						{ CornerSampleA = CA; CornerSampleB = CB; }
-					};
-					// Bottom edge: 0-1-2, corners 0,2
-					CheckEdge(0, 1, 0, 2); CheckEdge(1, 2, 0, 2);
-					// Left edge: 0-3-6, corners 0,6
-					CheckEdge(0, 3, 0, 6); CheckEdge(3, 6, 0, 6);
-					// Right edge: 2-5-8, corners 2,8
-					CheckEdge(2, 5, 2, 8); CheckEdge(5, 8, 2, 8);
-					// Top edge: 6-7-8, corners 6,8
-					CheckEdge(6, 7, 6, 8); CheckEdge(7, 8, 6, 8);
-
-					if (CornerSampleA >= 0)
-					{
-						// Project onto the coarser MC's corner-to-corner edge
-						const FVector3f& CornerOffA = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][CornerSampleA];
-						const FVector3f& CornerOffB = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][CornerSampleB];
-						const FVector3f CornerPosA = BasePos + CornerOffA * CellScale;
-						const FVector3f CornerPosB = BasePos + CornerOffB * CellScale;
-						VertexPos = InterpolateEdge(Densities[CornerSampleA], Densities[CornerSampleB],
-							CornerPosA, CornerPosB, IsoLevel);
-					}
-					else
-					{
-						// Interior face edge or corner-to-corner edge - normal interpolation
-						VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
-					}
-				}
-				else
-				{
-					// Face-interior or interior-interior edge - normal interpolation
-					VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
-				}
 			}
+
+			VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
 		}
 
 		// Validate vertex position is finite
@@ -2359,7 +2285,10 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		}
 
 		CellVertices.Add(VertexPos);
-		VertexOnOuterFace.Add(SampleA <= 8 && SampleB <= 8);
+		// "Outer face" = the coarse boundary face, whose vertices lie between coarse
+		// corners (samples 9-12). Those use the coarser stride for normals so they match
+		// the coarser neighbour; everything touching the fine inner face uses the fine stride.
+		VertexOnOuterFace.Add(SampleA >= 9 && SampleB >= 9);
 
 		if (bDebugLogTransitionCells)
 		{
@@ -2431,20 +2360,17 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	}
 
 	// Add triangles with proper winding order.
-	// Each face maps 2D table coordinates (u, v) to 3D world axes differently.
-	// When the cross product u×v points OPPOSITE to the outward face normal,
-	// the table's winding order needs reversal for correct front-facing geometry.
-	// Analysis (verified via cross product of u,v axes from TransitionCellSampleOffsets):
-	//   Face 0 (-X): u=+Y, v=+Z → u×v=+X, outward=-X → reversed → true
-	//   Face 1 (+X): u=-Y, v=+Z → u×v=-X, outward=+X → reversed → true
-	//   Face 2 (-Y): u=+X, v=+Z → u×v=-Y, outward=-Y → same    → false
-	//   Face 3 (+Y): u=-X, v=+Z → u×v=+Y, outward=+Y → same    → false
-	//   Face 4 (-Z): u=+X, v=+Y → u×v=+Z, outward=-Z → reversed → true
-	//   Face 5 (+Z): u=-X, v=+Y → u×v=-Z, outward=+Z → reversed → true
+	// Each face maps the table's (u, v) face axes to 3D world axes, and the cell's depth
+	// axis to the third. The corrected orientation (fine face inner, coarse corners
+	// outer) reflects the whole cell along its depth axis relative to the old tables
+	// (every sample's depth coord went d -> 1-d). A reflection flips handedness, so the
+	// per-face winding-reverse decision is the TOGGLE of the previous one for all faces:
+	//   old { true, true, false, false, true, true }  ->  new { false, false, true, true, false, false }
 	// Combined with bInverted (which flips winding for reflected equivalence classes):
-	//   Use original winding when bInverted != FaceNeedsWindingReverse[FaceIndex]
-	//   (right-handed faces need reversal flag=true, left-handed=false)
-	static constexpr bool FaceNeedsWindingReverse[6] = { true, true, false, false, true, true };
+	//   Use original winding when bInverted != FaceNeedsWindingReverse[FaceIndex].
+	// Verified by T10 (orientation test): no back-facing transition triangles vs the
+	// field gradient.
+	static constexpr bool FaceNeedsWindingReverse[6] = { false, false, true, true, false, false };
 	const bool bUseOriginalWinding = (bInverted != FaceNeedsWindingReverse[FaceIndex]);
 
 	// Maximum allowed edge length squared for triangle validation.

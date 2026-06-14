@@ -444,6 +444,59 @@ live on steep terrain.
 
 T9 is committed RED as the failing repro / known-issue gate until the fix lands.
 
+### Orientation fix landed (2026-06-14) — holes + winding FIXED, B-match residual remains ★
+
+Applied the planned re-orientation:
+- `TransitionCellSampleOffsets` (all 6 faces): flipped the depth axis so the fine
+  9-sample face is on the INNER (fine-interior) side and the 4 coarse corners (9-12)
+  are on the OUTER boundary (toward the coarser neighbour). This is a pure reflection
+  along each face's depth axis vs the old tables.
+- Removed the masking hacks: the coarse midpoint-override in `GetTransitionCellDensities`,
+  and the fin-snapping + outer-boundary-projection in `ProcessTransitionCell` (plain
+  `InterpolateEdge` now).
+- Toggled `FaceNeedsWindingReverse` (reflection flips handedness) → `{F,F,T,T,F,F}`.
+- `VertexOnOuterFace` now means "both endpoints are coarse corners (9-12)".
+- Added **T10** (winding/orientation): counts back-facing strip triangles vs the field
+  gradient; no other test catches a flipped (inside-out, back-face-culled) strip.
+
+Results (Smooth/NonLinearZ/Cliff):
+
+| Test | Before | After |
+|------|--------|-------|
+| T9 holes (+X strip) | 58–64 | **0** ✓ |
+| T10 winding (+X strip back-faces) | n/a | **0** ✓ |
+| T1–T5c | pass | pass |
+| T6/T7/T8 A↔B vertex match | pass (via hacks) | **regressed** |
+
+**The primary bug is fixed:** the transition strip is now manifold-watertight (0 open
+edges) and correctly wound — the big "openings larger than the character" are gone.
+
+**Remaining residual (T6/T7/T8):** A boundary-dump (T11, since removed) showed A's coarse
+contour is the SAME curve as the coarse neighbour B and matches it EXACTLY on most
+vertices — but A computes the contour's TOPOLOGY from the fine face sampled one fine
+cell INWARD of the boundary (the strip is one fine cell thick). On sloped/curved terrain
+that ~1-cell depth offset shifts the sampled height ~15 units, and near a coarse-cell
+corner it can FLIP whether an edge crosses, so A occasionally drops/adds a vertex B has
+(e.g. -X: B has `(2317,1800)`, A jumps `(2200,1822)→(2400,1800)` — an ~83-unit apparent
+gap that is really a thin near-corner sliver). +X happened to have no such flips (only
+the ~15-unit offset), which is why it nearly passed.
+
+**This is the inherent limit of the thick-cell transition:** a single 9-bit case driving
+BOTH the inner fine contour and the outer coarse contour cannot match B's boundary-plane
+topology when the field varies across the cell depth. Confirmed two ways:
+- Forcing corner densities to the fine-corner values (Lengyel invariant `d[0x9]=d[0]`…)
+  keeps topology self-consistent but moves the coarse contour OFF B → ALL verts unmatched.
+- Using boundary corner densities (current) matches B's POSITIONS exactly where topology
+  agrees, but topology still comes from the inner-plane case → near-corner flips.
+
+**True-watertight fix (next):** move to the proper zero-thickness Lengyel transition —
+the transition cell sits IN the boundary plane (corners 9-12 coincident with fine corners
+0,2,6,8, same densities), the finer chunk's regular MC runs to the boundary (no boundary-
+slab skip) producing the fine boundary contour, and the transition cell is the flat
+fine→coarse reduction ribbon. No depth offset → coarse topology == B (exact match) AND
+the fine face == fine MC (no holes). This is an architecture change to the two-pass
+skip; T9/T10 (hard gates) + T6/T7/T8 (B-match) make it test-driven.
+
 **Open issues / next steps:**
 1. **Transvoxel transition strip leaves holes (PRIMARY — deterministic repro in T9).**
    Fix per the plan above (correct Lengyel orientation). Earlier multi-chunk

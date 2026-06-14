@@ -42,75 +42,88 @@ const FVector2f TransitionSampleOffsets[9] = {
 // Face 0: -X, Face 1: +X, Face 2: -Y, Face 3: +Y, Face 4: -Z, Face 5: +Z
 //
 // Each face has 13 sample points:
-// - Samples 0-8: The 9 points on the transition face (3x3 grid)
-// - Samples 9-12 (0x9-0xC): The 4 interior corners of the cell
+// - Samples 0-8: The 9 points of the high-resolution 3x3 grid (the FINE face)
+// - Samples 9-12 (0x9-0xC): The 4 low-resolution corners (the COARSE face)
 //
-// The Transvoxel sample layout (looking at the face from OUTSIDE the chunk):
+// ORIENTATION (corrected 2026-06-14 — see LOD_SEAM_INVESTIGATION.md T9):
+// The transition strip is one fine cell thick on the finer chunk's boundary slab.
+// Fine MC owns everything INWARD of the strip; the coarser neighbor owns everything
+// OUTWARD. For a watertight (manifold) strip the two faces MUST be:
+//   - The fine 9-sample face (0-8) on the INNER side, so it shares vertices with the
+//     finer chunk's regular MC cells on that plane (no inner T-junctions).
+//   - The coarse 4-corner face (9-12) on the OUTER side (the chunk boundary, toward
+//     the coarser neighbor), so it produces only coarse-grid vertices matching the
+//     neighbor exactly (no outer T-junctions).
+// (Previously these were inverted, which left ~60 open edges per strip; the inner
+// face under-tessellated against fine MC and the outer face T-junctioned against the
+// coarse grid. The inversion was masked by a coarse midpoint-override + fin-snapping.)
+//
+// "Depth" is the face-normal axis. For NEGATIVE faces the chunk boundary is at local
+// depth 0, so coarse corners sit at depth 0 and the fine face at depth 1. For POSITIVE
+// faces the boundary is at local depth 1 (the cell base is one fine cell short of the
+// chunk face), so coarse corners sit at depth 1 and the fine face at depth 0.
+//
+// The Transvoxel face sample layout (looking at the fine face from OUTSIDE the chunk):
 //     6---7---8   (v=1, "top")
 //     |   |   |
 //     3---4---5   (v=0.5)
 //     |   |   |
 //     0---1---2   (v=0, "bottom")
 //    u=0 0.5  1
-//
-// For proper transitions, we use a SINGLE canonical orientation for ALL faces.
-// The cell always extends in the +X direction (interior at X=1).
-// Face orientation transformations are handled by rotating the case index.
 const FVector3f TransitionCellSampleOffsets[6][13] = {
-	// All faces use the same canonical layout: face at X=0, interior at X=1
-	// Face 0: -X
+	// Face 0: -X. Boundary at X=0 -> coarse corners at X=0, fine face at X=1.
 	{
-		// Face samples (X=0): u->Y, v->Z
-		FVector3f(0.0f, 0.0f, 0.0f), FVector3f(0.0f, 0.5f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f),
-		FVector3f(0.0f, 0.0f, 0.5f), FVector3f(0.0f, 0.5f, 0.5f), FVector3f(0.0f, 1.0f, 0.5f),
-		FVector3f(0.0f, 0.0f, 1.0f), FVector3f(0.0f, 0.5f, 1.0f), FVector3f(0.0f, 1.0f, 1.0f),
-		// Interior corners (X=1)
-		FVector3f(1.0f, 0.0f, 0.0f), FVector3f(1.0f, 1.0f, 0.0f), FVector3f(1.0f, 0.0f, 1.0f), FVector3f(1.0f, 1.0f, 1.0f),
+		// Fine face samples (X=1): u->Y, v->Z
+		FVector3f(1.0f, 0.0f, 0.0f), FVector3f(1.0f, 0.5f, 0.0f), FVector3f(1.0f, 1.0f, 0.0f),
+		FVector3f(1.0f, 0.0f, 0.5f), FVector3f(1.0f, 0.5f, 0.5f), FVector3f(1.0f, 1.0f, 0.5f),
+		FVector3f(1.0f, 0.0f, 1.0f), FVector3f(1.0f, 0.5f, 1.0f), FVector3f(1.0f, 1.0f, 1.0f),
+		// Coarse corners (X=0): correspond to fine corners 0,2,6,8
+		FVector3f(0.0f, 0.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.0f, 0.0f, 1.0f), FVector3f(0.0f, 1.0f, 1.0f),
 	},
-	// Face 1: +X (mirror in Y to maintain consistent winding when viewed from outside)
+	// Face 1: +X (mirror in Y). Boundary at X=1 -> coarse corners at X=1, fine face at X=0.
 	{
-		// Face samples (X=1): u->-Y (mirrored), v->Z
-		FVector3f(1.0f, 1.0f, 0.0f), FVector3f(1.0f, 0.5f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f),
-		FVector3f(1.0f, 1.0f, 0.5f), FVector3f(1.0f, 0.5f, 0.5f), FVector3f(1.0f, 0.0f, 0.5f),
-		FVector3f(1.0f, 1.0f, 1.0f), FVector3f(1.0f, 0.5f, 1.0f), FVector3f(1.0f, 0.0f, 1.0f),
-		// Interior corners (X=0, mirrored Y)
-		FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.0f, 0.0f, 0.0f), FVector3f(0.0f, 1.0f, 1.0f), FVector3f(0.0f, 0.0f, 1.0f),
+		// Fine face samples (X=0): u->-Y (mirrored), v->Z
+		FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.0f, 0.5f, 0.0f), FVector3f(0.0f, 0.0f, 0.0f),
+		FVector3f(0.0f, 1.0f, 0.5f), FVector3f(0.0f, 0.5f, 0.5f), FVector3f(0.0f, 0.0f, 0.5f),
+		FVector3f(0.0f, 1.0f, 1.0f), FVector3f(0.0f, 0.5f, 1.0f), FVector3f(0.0f, 0.0f, 1.0f),
+		// Coarse corners (X=1, mirrored Y)
+		FVector3f(1.0f, 1.0f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f), FVector3f(1.0f, 1.0f, 1.0f), FVector3f(1.0f, 0.0f, 1.0f),
 	},
-	// Face 2: -Y
+	// Face 2: -Y. Boundary at Y=0 -> coarse corners at Y=0, fine face at Y=1.
 	{
-		// Face samples (Y=0): u->X, v->Z
-		FVector3f(0.0f, 0.0f, 0.0f), FVector3f(0.5f, 0.0f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f),
-		FVector3f(0.0f, 0.0f, 0.5f), FVector3f(0.5f, 0.0f, 0.5f), FVector3f(1.0f, 0.0f, 0.5f),
-		FVector3f(0.0f, 0.0f, 1.0f), FVector3f(0.5f, 0.0f, 1.0f), FVector3f(1.0f, 0.0f, 1.0f),
-		// Interior corners (Y=1)
-		FVector3f(0.0f, 1.0f, 0.0f), FVector3f(1.0f, 1.0f, 0.0f), FVector3f(0.0f, 1.0f, 1.0f), FVector3f(1.0f, 1.0f, 1.0f),
-	},
-	// Face 3: +Y (mirror in X)
-	{
-		// Face samples (Y=1): u->-X (mirrored), v->Z
-		FVector3f(1.0f, 1.0f, 0.0f), FVector3f(0.5f, 1.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f),
-		FVector3f(1.0f, 1.0f, 0.5f), FVector3f(0.5f, 1.0f, 0.5f), FVector3f(0.0f, 1.0f, 0.5f),
-		FVector3f(1.0f, 1.0f, 1.0f), FVector3f(0.5f, 1.0f, 1.0f), FVector3f(0.0f, 1.0f, 1.0f),
-		// Interior corners (Y=0, mirrored X)
-		FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 0.0f, 0.0f), FVector3f(1.0f, 0.0f, 1.0f), FVector3f(0.0f, 0.0f, 1.0f),
-	},
-	// Face 4: -Z
-	{
-		// Face samples (Z=0): u->X, v->Y
-		FVector3f(0.0f, 0.0f, 0.0f), FVector3f(0.5f, 0.0f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f),
-		FVector3f(0.0f, 0.5f, 0.0f), FVector3f(0.5f, 0.5f, 0.0f), FVector3f(1.0f, 0.5f, 0.0f),
+		// Fine face samples (Y=1): u->X, v->Z
 		FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.5f, 1.0f, 0.0f), FVector3f(1.0f, 1.0f, 0.0f),
-		// Interior corners (Z=1)
-		FVector3f(0.0f, 0.0f, 1.0f), FVector3f(1.0f, 0.0f, 1.0f), FVector3f(0.0f, 1.0f, 1.0f), FVector3f(1.0f, 1.0f, 1.0f),
+		FVector3f(0.0f, 1.0f, 0.5f), FVector3f(0.5f, 1.0f, 0.5f), FVector3f(1.0f, 1.0f, 0.5f),
+		FVector3f(0.0f, 1.0f, 1.0f), FVector3f(0.5f, 1.0f, 1.0f), FVector3f(1.0f, 1.0f, 1.0f),
+		// Coarse corners (Y=0)
+		FVector3f(0.0f, 0.0f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 0.0f, 1.0f), FVector3f(1.0f, 0.0f, 1.0f),
 	},
-	// Face 5: +Z (mirror in X)
+	// Face 3: +Y (mirror in X). Boundary at Y=1 -> coarse corners at Y=1, fine face at Y=0.
 	{
-		// Face samples (Z=1): u->-X (mirrored), v->Y
+		// Fine face samples (Y=0): u->-X (mirrored), v->Z
+		FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.5f, 0.0f, 0.0f), FVector3f(0.0f, 0.0f, 0.0f),
+		FVector3f(1.0f, 0.0f, 0.5f), FVector3f(0.5f, 0.0f, 0.5f), FVector3f(0.0f, 0.0f, 0.5f),
 		FVector3f(1.0f, 0.0f, 1.0f), FVector3f(0.5f, 0.0f, 1.0f), FVector3f(0.0f, 0.0f, 1.0f),
-		FVector3f(1.0f, 0.5f, 1.0f), FVector3f(0.5f, 0.5f, 1.0f), FVector3f(0.0f, 0.5f, 1.0f),
-		FVector3f(1.0f, 1.0f, 1.0f), FVector3f(0.5f, 1.0f, 1.0f), FVector3f(0.0f, 1.0f, 1.0f),
-		// Interior corners (Z=0, mirrored X)
-		FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 0.0f, 0.0f), FVector3f(1.0f, 1.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f),
+		// Coarse corners (Y=1, mirrored X)
+		FVector3f(1.0f, 1.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f), FVector3f(1.0f, 1.0f, 1.0f), FVector3f(0.0f, 1.0f, 1.0f),
+	},
+	// Face 4: -Z. Boundary at Z=0 -> coarse corners at Z=0, fine face at Z=1.
+	{
+		// Fine face samples (Z=1): u->X, v->Y
+		FVector3f(0.0f, 0.0f, 1.0f), FVector3f(0.5f, 0.0f, 1.0f), FVector3f(1.0f, 0.0f, 1.0f),
+		FVector3f(0.0f, 0.5f, 1.0f), FVector3f(0.5f, 0.5f, 1.0f), FVector3f(1.0f, 0.5f, 1.0f),
+		FVector3f(0.0f, 1.0f, 1.0f), FVector3f(0.5f, 1.0f, 1.0f), FVector3f(1.0f, 1.0f, 1.0f),
+		// Coarse corners (Z=0)
+		FVector3f(0.0f, 0.0f, 0.0f), FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f), FVector3f(1.0f, 1.0f, 0.0f),
+	},
+	// Face 5: +Z (mirror in X). Boundary at Z=1 -> coarse corners at Z=1, fine face at Z=0.
+	{
+		// Fine face samples (Z=0): u->-X (mirrored), v->Y
+		FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.5f, 0.0f, 0.0f), FVector3f(0.0f, 0.0f, 0.0f),
+		FVector3f(1.0f, 0.5f, 0.0f), FVector3f(0.5f, 0.5f, 0.0f), FVector3f(0.0f, 0.5f, 0.0f),
+		FVector3f(1.0f, 1.0f, 0.0f), FVector3f(0.5f, 1.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f),
+		// Coarse corners (Z=1, mirrored X)
+		FVector3f(1.0f, 0.0f, 1.0f), FVector3f(0.0f, 0.0f, 1.0f), FVector3f(1.0f, 1.0f, 1.0f), FVector3f(0.0f, 1.0f, 1.0f),
 	},
 };
 

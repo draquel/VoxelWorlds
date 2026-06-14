@@ -571,6 +571,74 @@ namespace MarchingCubesLODBoundaryTestHelpers
 		}
 		return HoleEdges;
 	}
+
+	// ===== Triangle orientation / winding check (T10) =====
+	// No vertex-matching (T1-T8) or hole test (T9) catches an INSIDE-OUT strip: holes
+	// count edges regardless of winding, and the vertex positions are unchanged. But a
+	// flipped-winding strip is back-face culled in game -> it looks like a hole. Detect
+	// it by comparing each triangle's winding-derived normal to the field's outward
+	// ("air") direction = -gradient(density).
+
+	/** Outward/air direction at a world position: opposite the density gradient. */
+	FVector3f FieldAirDir(const FVector3f& WorldPos)
+	{
+		const float D = TestVoxelSize * 0.5f; // half a voxel
+		auto Dens = [](float x, float y, float z) -> float
+		{
+			return static_cast<float>(SampleField(FVector(x, y, z)).Density);
+		};
+		const float gx = Dens(WorldPos.X + D, WorldPos.Y, WorldPos.Z) - Dens(WorldPos.X - D, WorldPos.Y, WorldPos.Z);
+		const float gy = Dens(WorldPos.X, WorldPos.Y + D, WorldPos.Z) - Dens(WorldPos.X, WorldPos.Y - D, WorldPos.Z);
+		const float gz = Dens(WorldPos.X, WorldPos.Y, WorldPos.Z + D) - Dens(WorldPos.X, WorldPos.Y, WorldPos.Z - D);
+		return FVector3f(-gx, -gy, -gz).GetSafeNormal();
+	}
+
+	/** Front-face convention sign of a known-good mesh: sign of sum(faceNormal · airDir). */
+	float MeshConventionSign(const FChunkMeshData& Mesh, const FVector3f& WorldOffset)
+	{
+		double Sum = 0.0;
+		const int32 NumTris = Mesh.Indices.Num() / 3;
+		for (int32 t = 0; t < NumTris; ++t)
+		{
+			const FVector3f P0 = Mesh.Positions[Mesh.Indices[t * 3 + 0]] + WorldOffset;
+			const FVector3f P1 = Mesh.Positions[Mesh.Indices[t * 3 + 1]] + WorldOffset;
+			const FVector3f P2 = Mesh.Positions[Mesh.Indices[t * 3 + 2]] + WorldOffset;
+			const FVector3f Cross = FVector3f::CrossProduct(P1 - P0, P2 - P0);
+			if (0.5f * Cross.Size() < 1.0f) { continue; }
+			const FVector3f Centroid = (P0 + P1 + P2) / 3.0f;
+			Sum += FVector3f::DotProduct(Cross.GetSafeNormal(), FieldAirDir(Centroid));
+		}
+		return Sum >= 0.0 ? 1.0f : -1.0f;
+	}
+
+	/**
+	 * Count triangles whose winding-derived normal opposes the field air direction
+	 * (back-facing), considering only triangles whose centroid X is within [LoX, HiX]
+	 * (used to isolate the +X transition strip). ConventionSign is the mesher's
+	 * front-face sign measured from a known-good mesh. OutConsidered returns how many
+	 * non-degenerate triangles fell in the band.
+	 */
+	int32 CountBackfacingInBand(const FChunkMeshData& Mesh, const FVector3f& WorldOffset,
+		float LoX, float HiX, float ConventionSign, int32& OutConsidered)
+	{
+		int32 Backfacing = 0;
+		OutConsidered = 0;
+		const int32 NumTris = Mesh.Indices.Num() / 3;
+		for (int32 t = 0; t < NumTris; ++t)
+		{
+			const FVector3f P0 = Mesh.Positions[Mesh.Indices[t * 3 + 0]] + WorldOffset;
+			const FVector3f P1 = Mesh.Positions[Mesh.Indices[t * 3 + 1]] + WorldOffset;
+			const FVector3f P2 = Mesh.Positions[Mesh.Indices[t * 3 + 2]] + WorldOffset;
+			const FVector3f Cross = FVector3f::CrossProduct(P1 - P0, P2 - P0);
+			if (0.5f * Cross.Size() < 1.0f) { continue; }
+			const FVector3f Centroid = (P0 + P1 + P2) / 3.0f;
+			if (Centroid.X < LoX || Centroid.X > HiX) { continue; }
+			++OutConsidered;
+			const FVector3f N = Cross.GetSafeNormal();
+			if (FVector3f::DotProduct(N, FieldAirDir(Centroid)) * ConventionSign < -0.1f) { ++Backfacing; }
+		}
+		return Backfacing;
+	}
 } // namespace MarchingCubesLODBoundaryTestHelpers
 using namespace MarchingCubesLODBoundaryTestHelpers;
 
@@ -1025,3 +1093,70 @@ bool FMCLODBoundaryT9HoleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Transvoxel transition should not introduce mesh holes vs pure LOD0"), bAnyNewHoles);
 	return true;
 }
+
+// ==================== T10: transition strip winding / orientation ====================
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT10OrientationTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T10_TransitionWinding",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCLODBoundaryT10OrientationTest::RunTest(const FString& Parameters)
+{
+	// A flipped-winding transition strip is back-face culled in game -> it looks like a
+	// hole, yet passes every vertex (T1-T8) and hole (T9) test. Verify the +X transition
+	// strip triangles face the same way (outward, toward air) as the known-good regular
+	// MC mesh. This makes the winding decision (FaceNeedsWindingReverse) test-covered.
+	struct FFieldCase { ETestField Field; const TCHAR* Name; };
+	const FFieldCase Fields[] = {
+		{ ETestField::Smooth,     TEXT("Smooth") },
+		{ ETestField::NonLinearZ, TEXT("NonLinearZ") },
+		{ ETestField::Cliff,      TEXT("Cliff") },
+	};
+
+	const FVector3f NoOffset(0, 0, 0);
+	const float StripLo = (TestChunkSize - 1) * TestVoxelSize - 1.0f; // inner plane of the +X strip
+	const float StripHi = TestChunkSize * TestVoxelSize + 1.0f;       // boundary plane
+
+	bool bAnyFlipped = false;
+	for (const FFieldCase& F : Fields)
+	{
+		FScopedTestField Scoped(F.Field);
+
+		FVoxelMeshingRequest ReqTransition = MakeChunkRequest(FIntVector(0, 0, 0), 0);
+		FillAllNeighborData(ReqTransition);
+		ReqTransition.NeighborLODLevels[1] = 1;
+		ReqTransition.TransitionFaces = FVoxelMeshingRequest::TRANSITION_XPOS;
+
+		FVoxelMeshingRequest ReqPure = MakeChunkRequest(FIntVector(0, 0, 0), 0);
+		FillAllNeighborData(ReqPure);
+		ReqPure.NeighborLODLevels[1] = 0;
+
+		FChunkMeshData MeshTransition, MeshPure;
+		TestTrue(TEXT("transition mesh should succeed"), MeshChunk(ReqTransition, true, MeshTransition));
+		TestTrue(TEXT("pure mesh should succeed"), MeshChunk(ReqPure, true, MeshPure));
+
+		// Front-face convention sign from the known-good pure MC mesh.
+		const float Sign = MeshConventionSign(MeshPure, NoOffset);
+
+		int32 PureConsidered = 0;
+		const int32 PureBack = CountBackfacingInBand(MeshPure, NoOffset, StripLo, StripHi, Sign, PureConsidered);
+
+		int32 TransConsidered = 0;
+		const int32 TransBack = CountBackfacingInBand(MeshTransition, NoOffset, StripLo, StripHi, Sign, TransConsidered);
+
+		AddInfo(FString::Printf(TEXT("T10 %s: strip back-facing triangles - transition=%d/%d, pure-LOD0=%d/%d (convention sign %.0f)"),
+			F.Name, TransBack, TransConsidered, PureBack, PureConsidered, Sign));
+
+		// A flipped strip turns ~all of its triangles back-facing. Allow a few genuinely
+		// ambiguous steep triangles, but flag a clear, large excess over the baseline.
+		if (TransConsidered > 0 && TransBack > PureBack + FMath::Max(2, TransConsidered / 4))
+		{
+			bAnyFlipped = true;
+			AddError(FString::Printf(TEXT("%s: %d/%d transition strip triangles are back-facing (pure %d/%d) - winding likely flipped"),
+				F.Name, TransBack, TransConsidered, PureBack, PureConsidered));
+		}
+	}
+
+	TestFalse(TEXT("Transition strip triangles should not be back-facing (flipped winding)"), bAnyFlipped);
+	return true;
+}
+
