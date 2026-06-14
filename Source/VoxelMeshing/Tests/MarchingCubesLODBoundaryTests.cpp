@@ -43,7 +43,7 @@ namespace MarchingCubesLODBoundaryTestHelpers
 	 * the field for a single test without threading a functor through every
 	 * request/neighbor builder. Tests set it at entry and restore Smooth on exit.
 	 */
-	enum class ETestField { Smooth, Cliff };
+	enum class ETestField { Smooth, Cliff, NonLinearZ };
 	static ETestField GActiveField = ETestField::Smooth;
 
 	/**
@@ -77,13 +77,36 @@ namespace MarchingCubesLODBoundaryTestHelpers
 
 	/**
 	 * Sample the analytic density field at a world position.
-	 * Density is linear in Z over a 1600-unit ramp so the iso-crossing
-	 * interpolates to the same position regardless of sample stride.
+	 *
+	 * Smooth/Cliff: density is LINEAR in Z (0.5 + (H-Z)/1600). Because linear
+	 * interpolation of a linear field is exact, the iso-crossing height is
+	 * identical at any sample stride — coarse and fine agree perfectly. This is
+	 * convenient for harness sanity but it STRUCTURALLY hides the real bug.
+	 *
+	 * NonLinearZ: density follows a non-linear (tanh) profile through the surface.
+	 * Now the mesher's linear interpolation between SAMPLED densities lands the
+	 * iso-crossing at a STRIDE-DEPENDENT height: a fine chunk (stride 1) brackets
+	 * the surface tightly and lands near the true height, while a coarse chunk
+	 * (stride 2/4/8) brackets it loosely and lands at a different height. This is
+	 * exactly the real-terrain condition that produces the LOD-boundary height
+	 * mismatch (blue slivers) the gentle field cannot reproduce. Surface stays at
+	 * Z = H(x,y) (tanh is 0 there) so it still crosses the ±X/±Y shared planes.
 	 */
 	FVoxelData SampleField(const FVector& WorldPos)
 	{
 		const float H = SurfaceHeight(WorldPos.X, WorldPos.Y);
-		const float Normalized = FMath::Clamp(0.5f + (H - WorldPos.Z) / 1600.0f, 0.0f, 1.0f);
+		float Normalized;
+		if (GActiveField == ETestField::NonLinearZ)
+		{
+			// tanh profile: monotonic through 0.5 at Z=H, strongly curved within
+			// ~600 units of the surface so coarse strides misinterpolate the height.
+			Normalized = 0.5f + 0.5f * FMath::Tanh((H - static_cast<float>(WorldPos.Z)) / 300.0f);
+		}
+		else
+		{
+			Normalized = 0.5f + (H - static_cast<float>(WorldPos.Z)) / 1600.0f;
+		}
+		Normalized = FMath::Clamp(Normalized, 0.0f, 1.0f);
 
 		FVoxelData Voxel;
 		Voxel.Density = static_cast<uint8>(FMath::RoundToInt(Normalized * 255.0f));
@@ -808,5 +831,61 @@ bool FMCLODBoundaryT7PerFaceTest::RunTest(const FString& Parameters)
 	}
 
 	TestFalse(TEXT("No face should have a mirrored/misaligned transition boundary"), bAnyMirror);
+	return true;
+}
+
+// ==================== T8: steep / non-linear-Z field — reproduce the LOD height mismatch ====================
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT8NonLinearTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T8_NonLinearZ_LODMismatch",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCLODBoundaryT8NonLinearTest::RunTest(const FString& Parameters)
+{
+	// The live LOD-boundary "blue sliver" cracks are height mismatches at LOD
+	// transitions that VANISH when LOD is uniform (confirmed in-editor). The other
+	// tests use a LINEAR-in-Z field, where coarse and fine interpolate to the SAME
+	// height, so they cannot reproduce it. This test uses a NON-LINEAR (tanh) Z
+	// profile so coarse-stride sampling lands the iso-crossing at a different height
+	// than fine-stride — the real-terrain condition.
+	//
+	// Acceptance: the finer chunk's transition strip must still match the coarser
+	// neighbor's boundary heights (unmatchedB == 0, max-nearest small). If this
+	// FAILS, it has reproduced the live bug deterministically and becomes the
+	// regression test for the fix.
+	FScopedTestField NonLinear(ETestField::NonLinearZ);
+
+	struct FCase { int32 Face; int32 LODA; const TCHAR* Name; };
+	const FCase Cases[] = {
+		{ 1, 0, TEXT("+X LOD0|LOD1") },
+		{ 0, 0, TEXT("-X LOD0|LOD1") },
+		{ 3, 0, TEXT("+Y LOD0|LOD1") },
+		{ 2, 0, TEXT("-Y LOD0|LOD1") },
+		{ 1, 1, TEXT("+X LOD1|LOD2") },
+	};
+
+	bool bAnyMismatch = false;
+	for (const FCase& C : Cases)
+	{
+		const FSeamReport R = RunFaceTransvoxelCase(C.Face, C.LODA);
+		AddInfo(FString::Printf(TEXT("T8 %s: vertsA=%d vertsB=%d unmatchedA=%d unmatchedB=%d maxNearestVert=%.2f"),
+			C.Name, R.NumA, R.NumB, R.UnmatchedA, R.UnmatchedB, R.MaxNearestVertex));
+
+		if (R.NumA == 0 || R.NumB == 0)
+		{
+			AddInfo(FString::Printf(TEXT("  (%s: surface does not cross this shared plane - skipped)"), C.Name));
+			continue;
+		}
+
+		// Height mismatch shows as coarse-side vertices with no fine-side match
+		// within tolerance, and a large max-nearest distance.
+		if (R.UnmatchedB > 0)
+		{
+			bAnyMismatch = true;
+			AddError(FString::Printf(TEXT("%s: %d/%d coarse-side verts unmatched by transition strip (maxNearestVert=%.1f) - LOD height mismatch"),
+				C.Name, R.UnmatchedB, R.NumB, R.MaxNearestVertex));
+		}
+	}
+
+	TestFalse(TEXT("Transition strip should match coarse neighbor heights on non-linear terrain"), bAnyMismatch);
 	return true;
 }

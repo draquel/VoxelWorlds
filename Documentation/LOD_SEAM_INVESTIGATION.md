@@ -386,21 +386,45 @@ Screenshots: `cpumc_seam_close.png` / `cpumc_sliver_closeup.png` (cracks, LOD on
 `cpumc_topdown_pattern.png` (cracks along chunk-grid lines, worst at the LOD band),
 `cpumc_LODoff_grazing.png` (no cracks, LOD off).
 
+### T8 — non-linear-Z reproducing test: NEGATIVE result (2026-06-13)
+
+Added `ETestField::NonLinearZ` (tanh density profile through the surface, so the
+mesher's linear interpolation lands the iso-crossing at a **stride-dependent
+height** — the real-terrain condition) and T8, which runs the transvoxel
+acceptance across ±X/±Y at LOD0|LOD1 and +X at LOD1|LOD2 with that field.
+
+**Result: T8 PASSES — `unmatchedB=0`, `maxNearestVert=0.00` on every case.** Even
+on non-linear/steep terrain, the **single-face transvoxel transition matches the
+coarse neighbor's boundary heights exactly.** So the core transition meshing is
+**sound** — the live LOD-boundary cracks are **not** caused by the transition math
+diverging on steep terrain. (Only the minor zero-gap T-junctions remain,
+`unmatchedA>0`, as in T6.)
+
+This redirects the hunt: the deterministic single-face mesher is correct, so the
+live bug must be in the **multi-chunk context** the unit tests don't model.
+
 **Open issues / next steps:**
 1. **LOD-transition height-mismatch cracks (primary, still unfixed).** CONFIRMED
-   LOD-transition-specific (vanish with uniform LOD). Transvoxel engages but doesn't
-   close the height gap on steep/non-linear terrain (identical seams ON/OFF). The
-   fine chunk's transition strip is supposed to match the coarse neighbor's boundary
-   heights; on steep terrain it evidently doesn't. Next:
-   (a) Build a **steep / non-linear-Z reproducing unit test** (the gentle linear-Z
-       field makes coarse/fine heights identical, hiding the bug — this is the key
-       missing tool). Verify it shows `unmatchedB>0` / large max-crack.
-   (b) Then debug why the transition cell's outer face heights diverge from the
-       coarse neighbor's on steep terrain (candidate: the face midpoint-override /
-       trilinear sampling vs the coarse neighbor's own MC interpolation; or the
-       coarse neighbor computing boundary heights from data the fine side doesn't
-       sample identically). Also re-examine whether P3's boundary-slab skip leaves a
-       gap when the transition cell's height doesn't reach the fine interior.
+   LOD-transition-specific (vanish with uniform LOD), but T8 shows the single-face
+   transition mesher is correct even on non-linear terrain. So the cause is in the
+   live multi-chunk path, candidates:
+   (a) **LOD-state / transition-decision timing.** A boundary chunk meshes a
+       transition for the neighbor's `MeshedLODLevel` *at mesh time*; rendered-LOD
+       lag/churn can mean the fine chunk got no transition (or a wrong-stride one)
+       relative to the neighbor's eventual rendered LOD. (But: cracks persisted
+       after freeze + full remesh with settled LODs — so re-check whether the
+       forced remesh actually rebuilt TF from the *settled* MeshedLODLevels.)
+   (b) **Multi-face / corner interactions.** The live LOD ring curves, so chunks
+       border coarser neighbors on 2+ faces; corner cells are left to regular MC by
+       both passes and may gap. T8 only tests single-face transitions.
+   (c) **2-level rendered gaps.** P2-B balances *target* LODs; rendered
+       `MeshedLODLevel` can still be 2 levels apart transiently → transition built
+       for 1-level is wrong.
+   (d) **Rendering** (least likely given it survives remesh): overlapping/stale
+       per-chunk meshes.
+   Next probe: instrument the *specific* visible-crack chunks (their rendered LOD,
+   neighbor rendered LODs, and TF) and/or compare the two bordering chunks' actual
+   submitted boundary vertices live.
 2. **GPU MC has no seam handling** — needs transvoxel/skirt added to the GPU shader
    if GPU MC is a shipping path.
 3. **CPU-MC T-junctions** (minor) — coarse-2×2 boundary-face restructure for strict 1:1.
