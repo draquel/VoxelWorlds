@@ -1,26 +1,44 @@
 # LOD Seam Investigation — Stage 1 Findings (2026-06-10)
 
-> ## ⚠️ CORRECTION (2026-06-13) — read this first
+> ## ⚠️ CURRENT UNDERSTANDING (2026-06-13, latest) — read this first
 >
-> **The catastrophic "tears" that motivated this whole investigation were a camera
-> misdiagnosis, not meshing defects.** The pawn spawns in the cave layer (config
-> `BaseHeight=3000 + HeightScale=2000` → surface ~3000–5000), and the survey
-> camera sat *below the terrain surface*, looking into the **cave system**. The
-> "void corridor / floating fragments / roofed void" are cave interiors and the
-> underside of terrain.
+> There are **two distinct things** that were conflated, plus a real open bug:
 >
-> From proper above-surface vantages (`Saved/Screenshots/Claudius/audit_*.png`),
-> the terrain surface is **continuous and healthy at every LOD ring, seams ON and
-> OFF**. There is no catastrophic LOD seam. The real LOD-boundary issues are minor
-> and visually negligible at play scale (unit tests: T4 ≤1-fine-cell cracks, T6 a
-> small transvoxel leak).
+> 1. **Cave/POV confound (real).** On the gentle test world (`LODSeamTestConfig`,
+>    height ~3000–5000) the survey camera sat *below the surface* in the cave layer,
+>    so early "void corridor / roofed void" shots were cave interiors, not seams.
+>    From proper above-surface vantages that gentle world looks continuous.
 >
-> The Stage-1 headline below ("LOD>0 meshing produces torn geometry even between
-> same-LOD chunks") is therefore **superseded**: T2/T3 proved same-LOD strided
-> meshing is watertight, and the gross tears were cave/POV artifacts. What the work
-> *did* deliver is real correctness/robustness: the watertightness test suite, the
-> `voxel.LogBoundaryResidency` diagnostic, P2-A (clamp elimination), and P2-B (LOD
-> balance + hysteresis). See the P1 / P2-A / P2-B sections for specifics.
+> 2. **GPU MC has NO LOD-seam handling at all.** `VoxelGPUMarchingCubesMesher` has
+>    zero transvoxel/skirt/transition code — raw LOD boundaries. If the shipping
+>    config uses GPU MC, LOD borders mismatch in height (worse at higher LOD).
+>
+> 3. **Real open bug — steep-terrain LOD tearing in CPU MC.** On the actual demo
+>    terrain (non-linear noise, steep) meshed with **CPU MC**, the LOD boundary
+>    shows **gross floating/torn blocky fragments**
+>    (`Saved/Screenshots/Claudius/cpumc_seam_close.png`). It is **deterministic**
+>    (survives freeze + full remesh with all neighbors resident) and **identical
+>    with seams ON vs OFF** (`cpumc_seam_seamsOFF.png`) — i.e. the transvoxel
+>    transition is **not engaging/helping** on the live steep terrain. **This is the
+>    user's actual seam and it is NOT yet fixed.**
+>
+> **Test blind spot:** the watertightness suite (T1–T7) uses a *gentle, linear-in-Z*
+> field, so coarse/fine sampling produce identical heights → it cannot reproduce the
+> steep-terrain tearing. T6/T7 show the transvoxel strip matching the coarse neighbor
+> perfectly (`unmatchedB=0`) in that gentle field; the only residual there is minor
+> zero-gap T-junctions. **A steep / non-linear reproducing test is the missing piece.**
+>
+> What the work *did* land (committed, valid): the watertightness test suite, the
+> `voxel.LogBoundaryResidency` diagnostic, P2-A (mesh-against-phantom-data
+> elimination), P2-B (LOD adjacency balance + hysteresis), and P3-interim (Pass-2
+> boundary-slab ownership cutting CPU-MC transvoxel T-junctions 28 → 0.58 units).
+> The Stage-1 headline below is **superseded** (T2/T3 proved same-LOD strided
+> meshing watertight).
+>
+> **Open / next:** root-cause why CPU-MC transvoxel doesn't engage on steep terrain
+> (is `TransitionFaces` set at these boundaries live? are transition cells generated
+> and do they hold on steep slopes?), build a steep/non-linear reproducing test, and
+> fix. GPU MC needs its own seam handling. See "Live CPU-MC findings" section below.
 
 ## Headline (Stage 1 — superseded, see correction above)
 
@@ -286,10 +304,53 @@ Proper above-surface vantages across both rings, seams ON and OFF
 | LOD0/1 (~7000) | continuous | continuous — no visible crack |
 | LOD1/2 (~13000) | continuous | continuous (close-up clean; faint wide-shot lines were chunk-bound debug draw + scatter) |
 
-**Conclusion:** no catastrophic LOD seam exists. The LOD system is visually healthy
-at play scale. Remaining LOD-boundary issues are minor (T4 ≤1-fine-cell cracks, T6
-transvoxel leak) and not visible in normal play. Treat further seam work as
-low-priority polish, not a bug fix.
+**Conclusion (for the gentle test world only):** no catastrophic seam on the gentle
+`LODSeamTestConfig` terrain. **⚠️ SUPERSEDED for the real terrain** — see "Live
+CPU-MC findings" below: on the actual steep/non-linear demo terrain the LOD boundary
+*does* tear grossly. The audit above used the gentle world, which doesn't exhibit it.
+
+## Live CPU-MC findings on real terrain (2026-06-13)
+
+Set the test actor to a CPU-MC config derived from the user's `DemoWorldConfig`
+(`MeshingMode=MarchingCubes`, `use_gpu_meshing=False`, seams ON, morph OFF,
+water/scatter/caves OFF for a clean surface, `BaseHeight=500 HeightScale=2000` for
+viewability — still non-linear noise terrain). Screenshots:
+`Saved/Screenshots/Claudius/cpumc_seam_close.png` (seams ON),
+`cpumc_seam_seamsOFF.png`, `cpumc_after_remesh.png`.
+
+**Observations:**
+- The LOD boundary shows **gross floating/torn blocky fragments** — real geometry
+  tearing, not hairline T-junctions. (This is what Stage 1 originally saw; it was
+  *partly real*, not only the cave/POV confound.)
+- **Deterministic:** persists unchanged after freeze + full forced remesh with all
+  neighbors resident → not stale-mesh/churn (so P2-A/P2-B don't address it).
+- **Seams ON ≈ seams OFF:** the transvoxel transition is **not engaging or not
+  helping** on the live steep terrain. This is the key lead.
+- Reproduces only with **steep/non-linear** terrain; the gentle linear-Z test field
+  cannot exhibit it (coarse and fine interpolate to the same height).
+
+**Why the tests passed anyway:** the watertightness suite's analytic field is linear
+in Z, so coarse/fine sampling agree exactly. T6/T7 therefore show the transvoxel
+strip matching the coarse neighbor perfectly (`unmatchedB=0`, max-nearest 0.00) with
+only minor zero-gap T-junctions (`unmatchedA>0`). The suite has a **field blind
+spot** for steep terrain.
+
+**P3-interim (landed):** Pass 2 now skips the entire boundary slab on active
+transition faces (the coarse transition cells own it), cutting CPU-MC T-junction
+crack from ~28 → 0.58 units. T6 re-asserted on `unmatchedB==0` + max-crack ≤ 1.0;
+the residual T-junctions (`unmatchedA`) are logged as a known limitation. **This is
+not the steep-terrain fragment fix.**
+
+**Open issues / next steps:**
+1. **Steep-terrain CPU-MC LOD tearing (primary).** Root-cause why transvoxel doesn't
+   engage live: confirm `TransitionFaces` is actually set at these boundaries in the
+   chunk manager (it derives from neighbor `MeshedLODLevel`); confirm transition
+   cells are generated and hold on steep slopes. Build a **steep / non-linear
+   reproducing test** first (deterministic), then fix.
+2. **GPU MC has no seam handling** — needs transvoxel/skirt added to the GPU shader
+   if GPU MC is a shipping path.
+3. **CPU-MC T-junctions** (minor) — coarse-2×2 boundary-face restructure for strict 1:1.
+4. **DC LOD seams** — separate investigation (`BuildLODMergeMap` + DC shader).
 
 **Decision tree after first run:**
 - T2/T3 fail → fix `ProcessCubeLOD`/`GetVoxelAt` strided boundary math first.

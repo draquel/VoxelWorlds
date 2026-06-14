@@ -175,10 +175,9 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	// coarser MC's stride-2 vertices — this is why we must skip them where transition
 	// cells are active.
 
-	// Pass 1: Generate transition cells and track non-empty results
-	// Key encoding: Face(3 bits) | AlignedFP1/CoarserStride(8 bits) | AlignedFP2/CoarserStride(8 bits)
-	TSet<uint32> NonEmptyTransitionCells;
-
+	// Pass 1: Generate transition cells at every coarse-aligned boundary position.
+	// Pass 2 skips the whole boundary slab on active faces, so the transition cells
+	// own it outright — no need to track which produced geometry.
 	if (Config.bUseTransvoxel && bHasTransitions)
 	{
 		for (int32 Face = 0; Face < 6; Face++)
@@ -234,22 +233,26 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 					if (bIsCorner)
 						continue;
 
-					const bool bGenerated = ProcessTransitionCell(
+					ProcessTransitionCell(
 						Request, CellX, CellY, CellZ, CoarserStride, Face, OutMeshData, TriangleCount);
-
-					if (bGenerated)
-					{
-						const uint32 Key = (static_cast<uint32>(Face) << 16) |
-							((FP1 / CoarserStride) << 8) |
-							(FP2 / CoarserStride);
-						NonEmptyTransitionCells.Add(Key);
-					}
 				}
 			}
 		}
 	}
 
-	// Pass 2: Generate MC for all cells, skipping boundary cells covered by transition cells
+	// Pass 2: Generate MC for all cells, skipping the boundary slab on active
+	// transition faces — that slab is owned entirely by the coarse transition cells.
+	//
+	// We skip ALL boundary cells on an active face (not just those over a non-empty
+	// transition cell). The fine MC at the boundary row produces stride-1 vertices on
+	// the shared plane; the coarser neighbor only has stride-N vertices there, so any
+	// fine vertex left on that plane is an unmatched T-junction (the seam). Because a
+	// transition cell samples the same shared neighbor data the coarse neighbor uses,
+	// it is empty exactly when the coarse neighbor's boundary cube is empty — so
+	// suppressing fine MC even over "empty" transition cells does not open a gap with
+	// the neighbor; it only drops sub-coarse detail that the neighbor cannot represent
+	// anyway. Corner cells (on two active faces at once) get no transition cell and
+	// are left to MC, matching Pass 1's corner handling.
 	for (int32 Z = 0; Z < ChunkSize; Z += Stride)
 	{
 		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
@@ -271,28 +274,26 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 						if (DepthCoord != BoundaryPos)
 							continue;
 
-						// This cell is on a transition boundary. Check if it's covered
-						// by a non-empty transition cell.
-						const int32 NeighborLOD = Request.NeighborLODLevels[Face];
-						const int32 CoarserStride = (NeighborLOD > Request.LODLevel)
-							? (1 << NeighborLOD) : Stride;
-
-						int32 FP1, FP2;
-						switch (DepthAxis)
+						// This cell is on an active transition face's boundary row.
+						// Leave corner cells (also on another active face's boundary)
+						// to MC — Pass 1 generated no transition cell there.
+						bool bIsCorner = false;
+						for (int32 OtherFace = 0; OtherFace < 6; OtherFace++)
 						{
-						case 0: FP1 = Y; FP2 = Z; break;
-						case 1: FP1 = X; FP2 = Z; break;
-						default: FP1 = X; FP2 = Y; break;
+							if (OtherFace == Face) continue;
+							if (!(TransitionMask & (1 << OtherFace))) continue;
+
+							const int32 OtherDepthAxis = OtherFace / 2;
+							const int32 OtherBoundaryPos = (OtherFace % 2 == 0) ? 0 : (ChunkSize - Stride);
+							const int32 OtherDepthCoord = (OtherDepthAxis == 0) ? X : (OtherDepthAxis == 1) ? Y : Z;
+							if (OtherDepthCoord == OtherBoundaryPos)
+							{
+								bIsCorner = true;
+								break;
+							}
 						}
 
-						// Find the aligned transition cell that covers this position
-						const int32 AlignedFP1 = FP1 - (FP1 % CoarserStride);
-						const int32 AlignedFP2 = FP2 - (FP2 % CoarserStride);
-						const uint32 Key = (static_cast<uint32>(Face) << 16) |
-							((AlignedFP1 / CoarserStride) << 8) |
-							(AlignedFP2 / CoarserStride);
-
-						if (NonEmptyTransitionCells.Contains(Key))
+						if (!bIsCorner)
 						{
 							bSkipMC = true;
 							break;
