@@ -497,6 +497,101 @@ fine→coarse reduction ribbon. No depth offset → coarse topology == B (exact 
 the fine face == fine MC (no holes). This is an architecture change to the two-pass
 skip; T9/T10 (hard gates) + T6/T7/T8 (B-match) make it test-driven.
 
+#### Concrete zero-thickness design (locked 2026-06-14)
+
+Why both prior states fail and why zero-thickness is the only consistent option:
+the transition table is indexed by the 9-bit FINE case and ASSUMES the 4 coarse corners
+share the fine corners' state (`d[0x9]=d[0]`…). A thick cell forces the fine face and the
+coarse corners onto DIFFERENT planes, so either (a) corners sample the boundary (matches B's
+positions but breaks the invariant → near-corner topology flips = T6/7/8 residual), or
+(b) corners copy fine-corner densities (keeps the invariant but moves the coarse contour
+off B → all verts unmatched, confirmed). The contradiction dissolves only when the fine
+face and the coarse corners are on the SAME plane = the boundary, which also happens to be
+where `ProcessCubeLOD`'s boundary cell already samples its outer corners (X=ChunkSize).
+
+Implementation steps (each gated by the tests):
+1. **Stop skipping fine MC on transition faces** (Pass 2). Fine MC runs to the boundary,
+   producing the fine boundary contour at X=ChunkSize from boundary-plane densities — the
+   SAME densities the transition cell will use, so they share vertices.
+2. **Collapse the transition cell to the boundary plane** (zero depth): in
+   `GetTransitionCellDensities` + `ProcessTransitionCell`, set the depth component of the
+   cell scale to 0 and the cell's depth origin to the boundary plane (negative faces:
+   local 0; positive faces: `(ChunkSize)` i.e. `CellCoord_depth + CurrentStride`). All 13
+   points then lie in the boundary plane; corners 9-12 coincide with fine corners 0,2,6,8.
+3. **Invariant corners**: `d[9]=d[0], d[10]=d[2], d[11]=d[6], d[12]=d[8]` (they coincide,
+   so this is automatic, but set explicitly). The table now runs exactly as designed.
+4. The cell emits a FLAT reduction ribbon (the lens between the fine iso-polyline and the
+   coarse iso-polyline, both in the boundary plane): fine edge shared with fine MC, coarse
+   edge shared with neighbour B. Corner-corner reduction edges are zero-length (shared
+   points); midpoint→coarse triangles carry the area.
+5. Re-derive winding for the flat ribbon (T10) and check there is no double geometry where
+   fine MC's boundary cell meets the ribbon (add a >2-uses non-manifold check if needed).
+
+Expected: T6/T7/T8 exact match (coarse contour == B), T9 holes 0, T10 winding ok. Risk:
+the flat ribbon is a thin wall perpendicular to gently-sloped terrain (skirt-like); if it
+reads as a visible vertical fillet, follow up with the half-cell angled reduction (fine
+face at boundary, coarse corners displaced half a cell toward the fine interior) for a
+smoother ramp — same densities, so still exact-match + watertight.
+
+#### Tradeoff discovered before implementing (2026-06-14) — NOT a clean win
+
+Tracing the test metric against the design surfaced a real tension, so the restructure was
+paused for a decision instead of committing to one flavour:
+
+- The fundamental constraint (now proven 3 ways): a single 9-bit-case transition cell
+  cannot give all of {exact-B-match, fine-detail off the boundary plane, watertight}.
+  Exact-B-match needs the coarse corners at boundary density; the table invariant ties the
+  fine corners to the coarse corners (same density); matching fine MC needs the fine corners
+  at fine-MC's plane density → forces fine MC's plane = the boundary → the fine detail and
+  the reduction live IN the boundary plane (flat).
+- **Zero-thickness lens:** exact-B-match + watertight (T9=0), but (a) the reduction is a
+  flat patch in the boundary plane — a thin wall perpendicular to gently-sloped terrain,
+  potentially MORE visible than the current thin slivers; and (b) `MeasureSeam.MaxCrack`
+  measures A→B too, so A's legitimate finer boundary verts (off B's coarse chord by the
+  terrain's curvature over a coarse cell) trip MaxCrack even though they are sealed — the
+  vertex-match tests would need to defer to T9 (holes) for the watertightness verdict.
+- **Half-cell Lengyel (cell-shrink):** angled ribbon (no flat wall), ~half the residual,
+  but still approximate AND a meaningfully larger change (shrinking the fine boundary cells).
+- **Current committed thick cell (orientation fix):** no holes, correct winding, only
+  occasional thin near-corner slivers from the full-cell depth offset.
+
+Recommendation: before investing in the restructure, VISUALLY verify the committed
+orientation fix live (the big holes should be gone) and judge whether the residual slivers
+are actually objectionable — the restructure trades them for a flat wall and/or more
+complexity, so it may not be a net visual improvement. Decide flavour based on the live look.
+
+#### Zero-thickness restructure LANDED (2026-06-15) ★ — slivers gone
+
+Live verify of the committed orientation fix confirmed the big holes were gone but thin
+blue (sky-showing) slivers remained, worst at coarser LOD rings and at corners. Implemented
+the zero-thickness restructure (steps 1–4 above):
+- `GenerateMeshCPU` Pass 2: removed the boundary-slab skip — fine MC now runs to the
+  boundary on transition faces.
+- `GetTransitionCellDensities` + `ProcessTransitionCell`: collapse the transition cell onto
+  the boundary plane (depth scale 0, depth origin pinned to the boundary), invariant corner
+  densities. The cell is now a flat fine→coarse reduction ribbon in the boundary plane.
+- Pass 1: removed the (now-dead) corner-skip — each active face emits its own flat ribbon in
+  its own boundary plane, so corners are covered (ribbons don't overlap).
+- Tests: `MeasureSeam` now exposes `MaxCrackBtoA` (B→A, the true gap signal); T6 asserts on
+  it (A legitimately has extra finer boundary verts that trip the symmetric A→B crack but are
+  sealed — T9 holes is the watertightness gate). T10 relaxed to a gross-inversion guard since
+  the flat ribbon's per-triangle facing is intentionally ambiguous.
+
+Headless result (Smooth/NonLinearZ/Cliff): **T6/T7/T8 `unmatchedB=0`, `maxNearest=0.00`,
+`B→A crack 0.000` on every face incl. LOD1↔LOD2** (was 1–21 unmatched / 15–113 units before);
+**T9 holes 0**; T1–T5c green; T10 green. A's coarse contour now equals neighbour B exactly,
+so there is no A↔B gap and B's terrain sits right behind the boundary — even where the flat
+ribbon has mixed winding there is no see-through-to-sky.
+
+Live re-verify: the grid of blue slivers in the prior overview is gone; terrain reads
+continuous from face and diagonal/corner vantages. User confirmed in PIE: "much much much
+better … seams are covered by geometry now avoiding the cracks." **CPU MC LOD seams: DONE.**
+
+**Next phase: GPU MC path.** The GPU Marching Cubes mesher has no transvoxel/transition
+handling (see open issue 2 below) — it needs the same zero-thickness reduction (fine compute
+mesh to the boundary + a flat ribbon reducing to the coarse neighbour) added to its shader/
+compute path so GPU MC LOD seams match the CPU path. (DC LOD seams remain a separate track.)
+
 **Open issues / next steps:**
 1. **Transvoxel transition strip leaves holes (PRIMARY — deterministic repro in T9).**
    Fix per the plan above (correct Lengyel orientation). Earlier multi-chunk

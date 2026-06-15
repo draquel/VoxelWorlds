@@ -175,9 +175,12 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	// coarser MC's stride-2 vertices — this is why we must skip them where transition
 	// cells are active.
 
-	// Pass 1: Generate transition cells at every coarse-aligned boundary position.
-	// Pass 2 skips the whole boundary slab on active faces, so the transition cells
-	// own it outright — no need to track which produced geometry.
+	// Pass 1: Generate a zero-thickness transition ribbon at every coarse-aligned
+	// boundary position, for each active face. Corner cells (on two active faces at
+	// once) get a separate flat ribbon per face — the ribbons live in different boundary
+	// planes (e.g. +X in the X plane, +Y in the Y plane) so they do not overlap, and
+	// each reduces its own face's fine contour to its coarser neighbour. No corner-skip
+	// is needed (the old thick cells skipped corners to avoid overlapping volumes).
 	if (Config.bUseTransvoxel && bHasTransitions)
 	{
 		for (int32 Face = 0; Face < 6; Face++)
@@ -204,35 +207,6 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 					default: CellX = FP1; CellY = FP2; CellZ = BoundaryPos; break;
 					}
 
-					// Skip corner cells where this position is also on another active
-					// transition face's boundary. Both faces would generate overlapping
-					// geometry at the corner. MC handles corners instead.
-					bool bIsCorner = false;
-					for (int32 OtherFace = 0; OtherFace < 6; OtherFace++)
-					{
-						if (OtherFace == Face) continue;
-						if (!(TransitionMask & (1 << OtherFace))) continue;
-
-						const int32 OtherDepthAxis = OtherFace / 2;
-						const int32 OtherBoundaryPos = (OtherFace % 2 == 0) ? 0 : (ChunkSize - Stride);
-						int32 OtherDepthCoord;
-						switch (OtherDepthAxis)
-						{
-						case 0: OtherDepthCoord = CellX; break;
-						case 1: OtherDepthCoord = CellY; break;
-						default: OtherDepthCoord = CellZ; break;
-						}
-
-						if (OtherDepthCoord == OtherBoundaryPos)
-						{
-							bIsCorner = true;
-							break;
-						}
-					}
-
-					if (bIsCorner)
-						continue;
-
 					ProcessTransitionCell(
 						Request, CellX, CellY, CellZ, CoarserStride, Face, OutMeshData, TriangleCount);
 				}
@@ -240,71 +214,20 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 		}
 	}
 
-	// Pass 2: Generate MC for all cells, skipping the boundary slab on active
-	// transition faces — that slab is owned entirely by the coarse transition cells.
-	//
-	// We skip ALL boundary cells on an active face (not just those over a non-empty
-	// transition cell). The fine MC at the boundary row produces stride-1 vertices on
-	// the shared plane; the coarser neighbor only has stride-N vertices there, so any
-	// fine vertex left on that plane is an unmatched T-junction (the seam). Because a
-	// transition cell samples the same shared neighbor data the coarse neighbor uses,
-	// it is empty exactly when the coarse neighbor's boundary cube is empty — so
-	// suppressing fine MC even over "empty" transition cells does not open a gap with
-	// the neighbor; it only drops sub-coarse detail that the neighbor cannot represent
-	// anyway. Corner cells (on two active faces at once) get no transition cell and
-	// are left to MC, matching Pass 1's corner handling.
+	// Pass 2: Generate regular MC for ALL cells, including the boundary rows. With the
+	// zero-thickness transition design the finer chunk's MC runs right up to the
+	// boundary and produces the fine boundary contour; the Pass-1 transition ribbons
+	// then reduce that contour to the coarser neighbour's grid IN the boundary plane.
+	// (Previously the boundary slab was skipped and owned by a thick transition cell,
+	// which left holes on the fine-interior side and depth-offset slivers near coarse
+	// corners — see LOD_SEAM_INVESTIGATION.md.)
 	for (int32 Z = 0; Z < ChunkSize; Z += Stride)
 	{
 		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
 		{
 			for (int32 X = 0; X < ChunkSize; X += Stride)
 			{
-				bool bSkipMC = false;
-
-				if (Config.bUseTransvoxel && bHasTransitions)
-				{
-					for (int32 Face = 0; Face < 6; Face++)
-					{
-						if (!(TransitionMask & (1 << Face)))
-							continue;
-
-						const int32 DepthAxis = Face / 2;
-						const int32 DepthCoord = (DepthAxis == 0) ? X : (DepthAxis == 1) ? Y : Z;
-						const int32 BoundaryPos = (Face % 2 == 0) ? 0 : (ChunkSize - Stride);
-						if (DepthCoord != BoundaryPos)
-							continue;
-
-						// This cell is on an active transition face's boundary row.
-						// Leave corner cells (also on another active face's boundary)
-						// to MC — Pass 1 generated no transition cell there.
-						bool bIsCorner = false;
-						for (int32 OtherFace = 0; OtherFace < 6; OtherFace++)
-						{
-							if (OtherFace == Face) continue;
-							if (!(TransitionMask & (1 << OtherFace))) continue;
-
-							const int32 OtherDepthAxis = OtherFace / 2;
-							const int32 OtherBoundaryPos = (OtherFace % 2 == 0) ? 0 : (ChunkSize - Stride);
-							const int32 OtherDepthCoord = (OtherDepthAxis == 0) ? X : (OtherDepthAxis == 1) ? Y : Z;
-							if (OtherDepthCoord == OtherBoundaryPos)
-							{
-								bIsCorner = true;
-								break;
-							}
-						}
-
-						if (!bIsCorner)
-						{
-							bSkipMC = true;
-							break;
-						}
-					}
-				}
-
-				if (!bSkipMC)
-				{
-					ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount);
-				}
+				ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount);
 			}
 		}
 	}
@@ -1901,65 +1824,55 @@ void FVoxelCPUMarchingCubesMesher::GetTransitionCellDensities(
 	int32 FaceIndex,
 	float OutDensities[13]) const
 {
-	// Sample 13 points for the transition cell (corrected Lengyel orientation):
-	// Transition cells are on the FINER chunk, facing a coarser neighbor.
-	// - Points 0-8: the fine 3x3 grid on the INNER face (toward the finer chunk's
-	//   interior MC). Corners 0,2,6,8 are CoarserStride apart; midpoints 1,3,4,5,7 at
-	//   half-CoarserStride carry the finer chunk's full resolution so this face shares
-	//   vertices with the adjacent fine MC cells exactly (no inner T-junctions).
-	// - Points 9-12: the 4 coarse corners on the OUTER face (the chunk boundary, toward
-	//   the coarser neighbor). They sit on the coarse grid so the outer edge matches the
-	//   coarser mesh's boundary vertices exactly (no outer T-junctions).
+	// Sample 13 points for the ZERO-THICKNESS transition cell (see
+	// LOD_SEAM_INVESTIGATION.md). The transition cell is a flat reduction ribbon that
+	// lives entirely IN the boundary plane between the finer chunk and its coarser
+	// neighbour:
+	// - Points 0-8: the fine 3x3 grid, sampled ON the boundary plane. This is the SAME
+	//   plane and densities the finer chunk's regular MC samples for its boundary face,
+	//   so the fine contour is shared exactly (no inner T-junctions / holes).
+	// - Points 9-12: the 4 coarse corners, also ON the boundary plane, coincident with
+	//   fine corners 0,2,6,8. The coarse contour interpolates between them exactly as the
+	//   coarser neighbour does, so the outer contour matches B exactly.
+	// Because both the fine face and the coarse corners are on the same plane (zero
+	// depth), the table invariant d[0x9]=d[0] etc. holds and the contour topology is
+	// consistent with B's boundary plane — eliminating the depth-offset near-corner
+	// flips that the earlier thick cell left as slivers.
 	//
-	// NON-UNIFORM CELL: Face-parallel axes use CoarserStride (Stride parameter),
-	// face-normal (depth) axis uses CurrentStride (= 1 << LODLevel).
-	// This gives the cell rectangular proportions matching the LOD boundary.
-	//
-	// The midpoints are sampled directly from the field (no override): the fine inner
-	// face is meant to carry full resolution, identical to what the finer chunk's MC
-	// produces on that plane.
+	// Depth axis (face-normal) is PINNED to the boundary voxel coordinate; face-parallel
+	// axes spread across the coarse cell at CoarserStride (Stride parameter).
 
 	const int32 CurrentStride = 1 << Request.LODLevel;
+	const int32 DepthAxis = FaceIndex / 2;
+	const bool bPositiveFace = (FaceIndex % 2) == 1;
+	const int32 BaseDepthCoord = (DepthAxis == 0) ? X : (DepthAxis == 1) ? Y : Z;
+	// Negative faces: boundary at the cell's depth coord (0). Positive faces: boundary
+	// is one chunk-stride outward (the +face plane at ChunkSize).
+	const int32 BoundaryDepthCoord = bPositiveFace ? (BaseDepthCoord + CurrentStride) : BaseDepthCoord;
 
-	// Compute per-axis scale based on face orientation
-	// Depth axis uses CurrentStride, face-parallel axes use TransitionStride (Stride)
-	int32 ScaleX, ScaleY, ScaleZ;
-	switch (FaceIndex / 2)
-	{
-	case 0: // X faces: X is depth
-		ScaleX = CurrentStride;
-		ScaleY = Stride;
-		ScaleZ = Stride;
-		break;
-	case 1: // Y faces: Y is depth
-		ScaleX = Stride;
-		ScaleY = CurrentStride;
-		ScaleZ = Stride;
-		break;
-	case 2: // Z faces: Z is depth
-		ScaleX = Stride;
-		ScaleY = Stride;
-		ScaleZ = CurrentStride;
-		break;
-	default:
-		ScaleX = ScaleY = ScaleZ = Stride;
-		break;
-	}
-
-	// Sample all 13 points using the table's offsets directly
 	for (int32 i = 0; i < 13; i++)
 	{
 		const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][i];
 
-		// Convert offset (0-1) to voxel coordinates as FLOATS to preserve fractional positions
-		// Use per-axis scale for non-uniform transition cell shape
-		const float SampleX = static_cast<float>(X) + Offset.X * static_cast<float>(ScaleX);
-		const float SampleY = static_cast<float>(Y) + Offset.Y * static_cast<float>(ScaleY);
-		const float SampleZ = static_cast<float>(Z) + Offset.Z * static_cast<float>(ScaleZ);
+		// Face-parallel axes use offset * CoarserStride; the depth axis is pinned to the
+		// boundary plane (offset depth component ignored -> zero thickness).
+		const float SampleX = (DepthAxis == 0) ? static_cast<float>(BoundaryDepthCoord)
+			: (static_cast<float>(X) + Offset.X * static_cast<float>(Stride));
+		const float SampleY = (DepthAxis == 1) ? static_cast<float>(BoundaryDepthCoord)
+			: (static_cast<float>(Y) + Offset.Y * static_cast<float>(Stride));
+		const float SampleZ = (DepthAxis == 2) ? static_cast<float>(BoundaryDepthCoord)
+			: (static_cast<float>(Z) + Offset.Z * static_cast<float>(Stride));
 
-		// Use trilinear interpolation for fractional positions
 		OutDensities[i] = GetDensityAtTrilinear(Request, SampleX, SampleY, SampleZ);
 	}
+
+	// Lengyel invariant: the 4 coarse corners share the fine corners' state (they are
+	// coincident on the boundary plane). Set explicitly so the transition table's
+	// vertex-reuse + triangulation run exactly as designed.
+	OutDensities[9]  = OutDensities[0];
+	OutDensities[10] = OutDensities[2];
+	OutDensities[11] = OutDensities[6];
+	OutDensities[12] = OutDensities[8];
 }
 
 bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
@@ -2109,34 +2022,29 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		}
 	}
 
-	// Get base position in world coordinates
-	const FVector3f BasePos = FVector3f(
+	// ZERO-THICKNESS cell: positions collapse onto the boundary plane (matching the
+	// density sampling in GetTransitionCellDensities). Face-parallel axes spread across
+	// the coarse cell at CoarserStride; the depth axis is pinned to the boundary plane
+	// (depth scale 0), so the cell is a flat fine->coarse reduction ribbon shared with
+	// fine MC (fine contour) and the coarser neighbour (coarse contour).
+	const int32 CurrentStride = 1 << Request.LODLevel;
+	const int32 DepthAxis = FaceIndex / 2;
+	const bool bPositiveFace = (FaceIndex % 2) == 1;
+	const int32 BaseDepthCoord = (DepthAxis == 0) ? X : (DepthAxis == 1) ? Y : Z;
+	const int32 BoundaryDepthCoord = bPositiveFace ? (BaseDepthCoord + CurrentStride) : BaseDepthCoord;
+	const float FaceScale = static_cast<float>(Stride) * VoxelSize;
+
+	// Base position: face-parallel from the cell coord, depth pinned to the boundary plane.
+	FVector3f BasePos = FVector3f(
 		static_cast<float>(X) * VoxelSize,
 		static_cast<float>(Y) * VoxelSize,
 		static_cast<float>(Z) * VoxelSize
 	);
+	BasePos[DepthAxis] = static_cast<float>(BoundaryDepthCoord) * VoxelSize;
 
-	// Non-uniform cell scale: face-parallel axes use CoarserStride (Stride param),
-	// depth axis uses CurrentStride. Face spans coarser cell, depth is one finer stride.
-	const int32 CurrentStride = 1 << Request.LODLevel;
-	const float DepthScale = static_cast<float>(CurrentStride) * VoxelSize;
-	const float FaceScale = static_cast<float>(Stride) * VoxelSize;
-	FVector3f CellScale;
-	switch (FaceIndex / 2)
-	{
-	case 0: // X faces: X is depth
-		CellScale = FVector3f(DepthScale, FaceScale, FaceScale);
-		break;
-	case 1: // Y faces: Y is depth
-		CellScale = FVector3f(FaceScale, DepthScale, FaceScale);
-		break;
-	case 2: // Z faces: Z is depth
-		CellScale = FVector3f(FaceScale, FaceScale, DepthScale);
-		break;
-	default:
-		CellScale = FVector3f(FaceScale);
-		break;
-	}
+	// Cell scale: face-parallel = CoarserStride; depth = 0 (flat).
+	FVector3f CellScale(FaceScale, FaceScale, FaceScale);
+	CellScale[DepthAxis] = 0.0f;
 
 	// Collect debug visualization data if enabled
 	FTransitionCellDebugData* DebugData = nullptr;
@@ -2483,7 +2391,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	{
 		FChunkMeshData TempMeshData;
 		uint32 TempTriCount = 0;
-		const int32 DepthAxis = FaceIndex / 2;
 		for (int32 d1 = 0; d1 < Stride; d1 += CurrentStride)
 		{
 			for (int32 d0 = 0; d0 < Stride; d0 += CurrentStride)
