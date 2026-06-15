@@ -5,6 +5,7 @@
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelVertex.h"
 #include "MarchingCubesTables.h"
+#include "TransvoxelTables.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphResources.h"
 #include "RenderGraphUtils.h"
@@ -53,7 +54,19 @@ public:
 		// Flags indicating which neighbor data is present
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, TriangleTable)
+		// Lengyel REGULAR MC tables (table-compatible with the transition cells)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, RegularCellClassBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, RegularCellDataBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, RegularVertexDataBuf)
+		// Transvoxel TRANSITION cell tables (zero-thickness reduction ribbon)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TransitionCellClassBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TransitionCellDataBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TransitionCellTrianglesBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TransitionVertexDataBuf)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, TransitionSampleOffsetBuf)
+		// Transvoxel transition state
+		SHADER_PARAMETER(uint32, TransitionFaces)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CoarserStrideBuf)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVoxelVertex>, OutputVertices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputIndices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, MeshCounters)
@@ -79,6 +92,27 @@ public:
 };
 
 /**
+ * Transvoxel transition-cell compute shader.
+ *
+ * Emits the zero-thickness fine->coarse reduction ribbon at LOD boundaries,
+ * mirroring VoxelCPUMarchingCubesMesher::ProcessTransitionCell. Shares the main
+ * shader's parameter struct (same buffers / outputs / counters) and runs as a
+ * second pass after FGenerateMarchingCubesMeshCS, appending to the same buffers.
+ */
+class FGenerateTransitionCellsCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGenerateTransitionCellsCS);
+	using FParameters = FGenerateMarchingCubesMeshCS::FParameters;
+	SHADER_USE_PARAMETER_STRUCT(FGenerateTransitionCellsCS, FGlobalShader);
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+/**
  * Counter reset compute shader for Marching Cubes meshing.
  */
 class FResetMarchingCubesCountersCS : public FGlobalShader
@@ -98,6 +132,7 @@ public:
 };
 
 IMPLEMENT_GLOBAL_SHADER(FGenerateMarchingCubesMeshCS, "/Plugin/VoxelWorlds/Private/MarchingCubesMeshGeneration.usf", "MainCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FGenerateTransitionCellsCS, "/Plugin/VoxelWorlds/Private/MarchingCubesMeshGeneration.usf", "TransitionCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FResetMarchingCubesCountersCS, "/Plugin/VoxelWorlds/Private/MarchingCubesMeshGeneration.usf", "ResetCountersCS", SF_Compute);
 
 // ==================== FVoxelGPUMarchingCubesMesher Implementation ====================
@@ -181,20 +216,115 @@ TArray<uint32> FVoxelGPUMarchingCubesMesher::PackVoxelDataForGPU(const TArray<FV
 	return PackedData;
 }
 
-TArray<int32> FVoxelGPUMarchingCubesMesher::CreateTriangleTableData()
+TArray<uint32> FVoxelGPUMarchingCubesMesher::CreateRegularCellClassData()
 {
-	TArray<int32> TableData;
-	TableData.SetNum(256 * 16);
-
-	for (int32 CubeIndex = 0; CubeIndex < 256; ++CubeIndex)
+	TArray<uint32> Data;
+	Data.SetNum(256);
+	for (int32 i = 0; i < 256; ++i)
 	{
-		for (int32 TriIndex = 0; TriIndex < 16; ++TriIndex)
+		Data[i] = TransvoxelTables::RegularCellClass[i];
+	}
+	return Data;
+}
+
+TArray<uint32> FVoxelGPUMarchingCubesMesher::CreateRegularCellTableData()
+{
+	// 16 classes, each row = {GeometryCounts, VertexIndex[0..14]} (16 uints, padded).
+	TArray<uint32> Data;
+	Data.SetNumZeroed(16 * 16);
+	for (int32 Class = 0; Class < 16; ++Class)
+	{
+		const TransvoxelTables::FRegularCellData& Cell = TransvoxelTables::RegularCellData[Class];
+		Data[Class * 16 + 0] = Cell.GeometryCounts;
+		for (int32 k = 0; k < 15; ++k)
 		{
-			TableData[CubeIndex * 16 + TriIndex] = MarchingCubesTables::TriTable[CubeIndex][TriIndex];
+			Data[Class * 16 + 1 + k] = Cell.VertexIndex[k];
 		}
 	}
+	return Data;
+}
 
-	return TableData;
+TArray<uint32> FVoxelGPUMarchingCubesMesher::CreateRegularVertexTableData()
+{
+	TArray<uint32> Data;
+	Data.SetNum(256 * 12);
+	for (int32 Case = 0; Case < 256; ++Case)
+	{
+		for (int32 i = 0; i < 12; ++i)
+		{
+			Data[Case * 12 + i] = TransvoxelTables::RegularVertexData[Case][i];
+		}
+	}
+	return Data;
+}
+
+TArray<uint32> FVoxelGPUMarchingCubesMesher::CreateTransitionCellClassData()
+{
+	TArray<uint32> Data;
+	Data.SetNum(512);
+	for (int32 i = 0; i < 512; ++i)
+	{
+		Data[i] = TransvoxelTables::TransitionCellClass[i];
+	}
+	return Data;
+}
+
+TArray<uint32> FVoxelGPUMarchingCubesMesher::CreateTransitionCellDataData()
+{
+	TArray<uint32> Data;
+	Data.SetNum(56);
+	for (int32 i = 0; i < 56; ++i)
+	{
+		Data[i] = TransvoxelTables::TransitionCellData[i];
+	}
+	return Data;
+}
+
+TArray<uint32> FVoxelGPUMarchingCubesMesher::CreateTransitionTrianglesData()
+{
+	TArray<uint32> Data;
+	Data.SetNum(56 * 37);
+	for (int32 Class = 0; Class < 56; ++Class)
+	{
+		for (int32 k = 0; k < 37; ++k)
+		{
+			Data[Class * 37 + k] = TransvoxelTables::TransitionCellTriangles[Class][k];
+		}
+	}
+	return Data;
+}
+
+TArray<uint32> FVoxelGPUMarchingCubesMesher::CreateTransitionVertexTableData()
+{
+	TArray<uint32> Data;
+	Data.SetNum(512 * 12);
+	for (int32 Case = 0; Case < 512; ++Case)
+	{
+		for (int32 i = 0; i < 12; ++i)
+		{
+			Data[Case * 12 + i] = TransvoxelTables::TransitionVertexData[Case][i];
+		}
+	}
+	return Data;
+}
+
+TArray<float> FVoxelGPUMarchingCubesMesher::CreateTransitionSampleOffsetData()
+{
+	// [6 faces][13 samples][3 axes] flattened: index = (face*13 + i)*3 + axis.
+	TArray<float> Data;
+	Data.SetNum(6 * 13 * 3);
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		for (int32 i = 0; i < 13; ++i)
+		{
+			const FVector3f& Off = TransvoxelTables::TransitionCellSampleOffsets[Face][i];
+			const int32 Base = (Face * 13 + i) * 3;
+			Data[Base + 0] = Off.X;
+			Data[Base + 1] = Off.Y;
+			Data[Base + 2] = Off.Z;
+		}
+	}
+	return Data;
 }
 
 FVoxelMeshingHandle FVoxelGPUMarchingCubesMesher::GenerateMeshAsync(
@@ -242,8 +372,16 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 	// Pack voxel data for GPU
 	TArray<uint32> PackedVoxels = PackVoxelDataForGPU(Request.VoxelData);
 
-	// Create triangle table data
-	TArray<int32> TriTableData = CreateTriangleTableData();
+	// Build Lengyel regular + transvoxel transition lookup tables (single source of
+	// truth from TransvoxelTables; uploaded as structured buffers for both passes).
+	TArray<uint32> RegularCellClassData = CreateRegularCellClassData();
+	TArray<uint32> RegularCellTableData = CreateRegularCellTableData();
+	TArray<uint32> RegularVertexTableData = CreateRegularVertexTableData();
+	TArray<uint32> TransitionCellClassData = CreateTransitionCellClassData();
+	TArray<uint32> TransitionCellDataData = CreateTransitionCellDataData();
+	TArray<uint32> TransitionTrianglesData = CreateTransitionTrianglesData();
+	TArray<uint32> TransitionVertexTableData = CreateTransitionVertexTableData();
+	TArray<float>  TransitionSampleOffsetData = CreateTransitionSampleOffsetData();
 
 	// Pack face neighbor data
 	TArray<uint32> PackedNeighborXPos, PackedNeighborXNeg;
@@ -342,9 +480,45 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 	const int32 LODLevel = FMath::Clamp(Request.LODLevel, 0, 7);
 	const uint32 LODStride = 1u << LODLevel;
 
+	// Transvoxel transition state: which faces border a coarser neighbor (only when
+	// Transvoxel is enabled), and the coarse cell size (2^neighborLOD) per such face.
+	// Mirrors VoxelCPUMarchingCubesMesher Pass 1 (CoarserStride = 1<<NeighborLOD).
+	uint32 TransitionFaces = Config.bUseTransvoxel ? static_cast<uint32>(Request.TransitionFaces) : 0u;
+	TArray<uint32> CoarserStrides;
+	CoarserStrides.SetNumZeroed(6);
+	if (TransitionFaces != 0u)
+	{
+		for (int32 Face = 0; Face < 6; ++Face)
+		{
+			if ((TransitionFaces & (1u << Face)) == 0u)
+			{
+				continue;
+			}
+			const int32 NeighborLOD = Request.NeighborLODLevels[Face];
+			if (NeighborLOD > LODLevel)
+			{
+				CoarserStrides[Face] = 1u << FMath::Clamp(NeighborLOD, 0, 7);
+			}
+			else
+			{
+				// Spurious transition flag (neighbor same/finer LOD): drop it.
+				TransitionFaces &= ~(1u << Face);
+			}
+		}
+	}
+
 	ENQUEUE_RENDER_COMMAND(GenerateMarchingCubesMesh)(
 		[PackedVoxels = MoveTemp(PackedVoxels),
-		 TriTableData = MoveTemp(TriTableData),
+		 RegularCellClassData = MoveTemp(RegularCellClassData),
+		 RegularCellTableData = MoveTemp(RegularCellTableData),
+		 RegularVertexTableData = MoveTemp(RegularVertexTableData),
+		 TransitionCellClassData = MoveTemp(TransitionCellClassData),
+		 TransitionCellDataData = MoveTemp(TransitionCellDataData),
+		 TransitionTrianglesData = MoveTemp(TransitionTrianglesData),
+		 TransitionVertexTableData = MoveTemp(TransitionVertexTableData),
+		 TransitionSampleOffsetData = MoveTemp(TransitionSampleOffsetData),
+		 TransitionFaces,
+		 CoarserStrides = MoveTemp(CoarserStrides),
 		 PackedNeighborXPos = MoveTemp(PackedNeighborXPos),
 		 PackedNeighborXNeg = MoveTemp(PackedNeighborXNeg),
 		 PackedNeighborYPos = MoveTemp(PackedNeighborYPos),
@@ -386,11 +560,6 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 			FRDGBufferDesc VoxelBufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TotalVoxels);
 			FRDGBufferRef VoxelBuffer = GraphBuilder.CreateBuffer(VoxelBufferDesc, TEXT("InputVoxelData"));
 			GraphBuilder.QueueBufferUpload(VoxelBuffer, PackedVoxels.GetData(), PackedVoxels.Num() * sizeof(uint32));
-
-			// Create triangle table buffer
-			FRDGBufferDesc TriTableBufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(int32), 256 * 16);
-			FRDGBufferRef TriTableBuffer = GraphBuilder.CreateBuffer(TriTableBufferDesc, TEXT("TriangleTable"));
-			GraphBuilder.QueueBufferUpload(TriTableBuffer, TriTableData.GetData(), TriTableData.Num() * sizeof(int32));
 
 			// Create neighbor buffers
 			static const uint32 DummyData = 0;
@@ -438,6 +607,32 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 			FRDGBufferRef CornerDataBuffer = GraphBuilder.CreateBuffer(CornerBufferDesc, TEXT("CornerData"));
 			GraphBuilder.QueueBufferUpload(CornerDataBuffer, PackedCornerData.GetData(), PackedCornerData.Num() * sizeof(uint32));
 
+			// Lookup-table buffers (uint) and the float sample-offset buffer.
+			auto CreateUIntBuffer = [&](const TArray<uint32>& Data, const TCHAR* Name) -> FRDGBufferRef
+			{
+				FRDGBufferDesc Desc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(Data.Num(), 1));
+				FRDGBufferRef Buffer = GraphBuilder.CreateBuffer(Desc, Name);
+				GraphBuilder.QueueBufferUpload(Buffer, Data.GetData(), Data.Num() * sizeof(uint32));
+				return Buffer;
+			};
+			auto CreateFloatBuffer = [&](const TArray<float>& Data, const TCHAR* Name) -> FRDGBufferRef
+			{
+				FRDGBufferDesc Desc = FRDGBufferDesc::CreateStructuredDesc(sizeof(float), FMath::Max(Data.Num(), 1));
+				FRDGBufferRef Buffer = GraphBuilder.CreateBuffer(Desc, Name);
+				GraphBuilder.QueueBufferUpload(Buffer, Data.GetData(), Data.Num() * sizeof(float));
+				return Buffer;
+			};
+
+			FRDGBufferRef RegularCellClassBuffer = CreateUIntBuffer(RegularCellClassData, TEXT("RegularCellClassBuf"));
+			FRDGBufferRef RegularCellDataBuffer = CreateUIntBuffer(RegularCellTableData, TEXT("RegularCellDataBuf"));
+			FRDGBufferRef RegularVertexDataBuffer = CreateUIntBuffer(RegularVertexTableData, TEXT("RegularVertexDataBuf"));
+			FRDGBufferRef TransitionCellClassBuffer = CreateUIntBuffer(TransitionCellClassData, TEXT("TransitionCellClassBuf"));
+			FRDGBufferRef TransitionCellDataBuffer = CreateUIntBuffer(TransitionCellDataData, TEXT("TransitionCellDataBuf"));
+			FRDGBufferRef TransitionTrianglesBuffer = CreateUIntBuffer(TransitionTrianglesData, TEXT("TransitionCellTrianglesBuf"));
+			FRDGBufferRef TransitionVertexDataBuffer = CreateUIntBuffer(TransitionVertexTableData, TEXT("TransitionVertexDataBuf"));
+			FRDGBufferRef TransitionSampleOffsetBuffer = CreateFloatBuffer(TransitionSampleOffsetData, TEXT("TransitionSampleOffsetBuf"));
+			FRDGBufferRef CoarserStrideBuffer = CreateUIntBuffer(CoarserStrides, TEXT("CoarserStrideBuf"));
+
 			// Pre-allocate output buffers OUTSIDE the RDG graph to avoid transient
 			// resource aliasing. RegisterExternalBuffer tells RDG we own the lifetime,
 			// preventing the pool from aliasing the D3D12 memory after Execute().
@@ -462,8 +657,11 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 			FRDGBufferRef MeshCountersBuffer = GraphBuilder.RegisterExternalBuffer(
 				Result->CounterBuffer, ERDGBufferFlags::None);
 
-			// Create UAV once and reuse across passes (matches DC mesher pattern)
+			// Create UAVs once and reuse across passes (matches DC mesher pattern).
+			// The regular and transition passes both append to these via the counters.
 			auto MeshCountersUAV = GraphBuilder.CreateUAV(MeshCountersBuffer);
+			auto OutputVerticesUAV = GraphBuilder.CreateUAV(VertexBuffer);
+			auto OutputIndicesUAV = GraphBuilder.CreateUAV(IndexBuffer);
 
 			// Reset counters pass
 			{
@@ -511,9 +709,19 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				// Flags
 				MeshParams->NeighborFlags = NeighborFlags;
 				MeshParams->EdgeCornerFlags = EdgeCornerFlags;
-				MeshParams->TriangleTable = GraphBuilder.CreateSRV(TriTableBuffer);
-				MeshParams->OutputVertices = GraphBuilder.CreateUAV(VertexBuffer);
-				MeshParams->OutputIndices = GraphBuilder.CreateUAV(IndexBuffer);
+				// Lengyel regular + transvoxel transition tables
+				MeshParams->RegularCellClassBuf = GraphBuilder.CreateSRV(RegularCellClassBuffer);
+				MeshParams->RegularCellDataBuf = GraphBuilder.CreateSRV(RegularCellDataBuffer);
+				MeshParams->RegularVertexDataBuf = GraphBuilder.CreateSRV(RegularVertexDataBuffer);
+				MeshParams->TransitionCellClassBuf = GraphBuilder.CreateSRV(TransitionCellClassBuffer);
+				MeshParams->TransitionCellDataBuf = GraphBuilder.CreateSRV(TransitionCellDataBuffer);
+				MeshParams->TransitionCellTrianglesBuf = GraphBuilder.CreateSRV(TransitionTrianglesBuffer);
+				MeshParams->TransitionVertexDataBuf = GraphBuilder.CreateSRV(TransitionVertexDataBuffer);
+				MeshParams->TransitionSampleOffsetBuf = GraphBuilder.CreateSRV(TransitionSampleOffsetBuffer);
+				MeshParams->TransitionFaces = TransitionFaces;
+				MeshParams->CoarserStrideBuf = GraphBuilder.CreateSRV(CoarserStrideBuffer);
+				MeshParams->OutputVertices = OutputVerticesUAV;
+				MeshParams->OutputIndices = OutputIndicesUAV;
 				MeshParams->MeshCounters = MeshCountersUAV;
 				MeshParams->ChunkSize = ChunkSize;
 				MeshParams->VoxelSize = VoxelSize;
@@ -536,6 +744,72 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 					MeshShader,
 					MeshParams,
 					GroupCount
+				);
+			}
+
+			// Transvoxel transition pass: emit the zero-thickness reduction ribbon at
+			// LOD boundaries. Runs AFTER the main pass; RDG serializes via the shared
+			// MeshCounters/output UAVs so the soup counters accumulate. Skipped when no
+			// face transitions (TransitionFaces == 0).
+			if (TransitionFaces != 0u)
+			{
+				TShaderMapRef<FGenerateTransitionCellsCS> TransitionShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FGenerateTransitionCellsCS::FParameters* TParams = GraphBuilder.AllocParameters<FGenerateTransitionCellsCS::FParameters>();
+
+				TParams->InputVoxelData = GraphBuilder.CreateSRV(VoxelBuffer);
+				TParams->NeighborXPos = GraphBuilder.CreateSRV(NeighborXPosBuffer);
+				TParams->NeighborXNeg = GraphBuilder.CreateSRV(NeighborXNegBuffer);
+				TParams->NeighborYPos = GraphBuilder.CreateSRV(NeighborYPosBuffer);
+				TParams->NeighborYNeg = GraphBuilder.CreateSRV(NeighborYNegBuffer);
+				TParams->NeighborZPos = GraphBuilder.CreateSRV(NeighborZPosBuffer);
+				TParams->NeighborZNeg = GraphBuilder.CreateSRV(NeighborZNegBuffer);
+				TParams->EdgeXPosYPos = GraphBuilder.CreateSRV(EdgeXPosYPosBuffer);
+				TParams->EdgeXPosYNeg = GraphBuilder.CreateSRV(EdgeXPosYNegBuffer);
+				TParams->EdgeXNegYPos = GraphBuilder.CreateSRV(EdgeXNegYPosBuffer);
+				TParams->EdgeXNegYNeg = GraphBuilder.CreateSRV(EdgeXNegYNegBuffer);
+				TParams->EdgeXPosZPos = GraphBuilder.CreateSRV(EdgeXPosZPosBuffer);
+				TParams->EdgeXPosZNeg = GraphBuilder.CreateSRV(EdgeXPosZNegBuffer);
+				TParams->EdgeXNegZPos = GraphBuilder.CreateSRV(EdgeXNegZPosBuffer);
+				TParams->EdgeXNegZNeg = GraphBuilder.CreateSRV(EdgeXNegZNegBuffer);
+				TParams->EdgeYPosZPos = GraphBuilder.CreateSRV(EdgeYPosZPosBuffer);
+				TParams->EdgeYPosZNeg = GraphBuilder.CreateSRV(EdgeYPosZNegBuffer);
+				TParams->EdgeYNegZPos = GraphBuilder.CreateSRV(EdgeYNegZPosBuffer);
+				TParams->EdgeYNegZNeg = GraphBuilder.CreateSRV(EdgeYNegZNegBuffer);
+				TParams->CornerData = GraphBuilder.CreateSRV(CornerDataBuffer);
+				TParams->NeighborFlags = NeighborFlags;
+				TParams->EdgeCornerFlags = EdgeCornerFlags;
+				TParams->RegularCellClassBuf = GraphBuilder.CreateSRV(RegularCellClassBuffer);
+				TParams->RegularCellDataBuf = GraphBuilder.CreateSRV(RegularCellDataBuffer);
+				TParams->RegularVertexDataBuf = GraphBuilder.CreateSRV(RegularVertexDataBuffer);
+				TParams->TransitionCellClassBuf = GraphBuilder.CreateSRV(TransitionCellClassBuffer);
+				TParams->TransitionCellDataBuf = GraphBuilder.CreateSRV(TransitionCellDataBuffer);
+				TParams->TransitionCellTrianglesBuf = GraphBuilder.CreateSRV(TransitionTrianglesBuffer);
+				TParams->TransitionVertexDataBuf = GraphBuilder.CreateSRV(TransitionVertexDataBuffer);
+				TParams->TransitionSampleOffsetBuf = GraphBuilder.CreateSRV(TransitionSampleOffsetBuffer);
+				TParams->TransitionFaces = TransitionFaces;
+				TParams->CoarserStrideBuf = GraphBuilder.CreateSRV(CoarserStrideBuffer);
+				TParams->OutputVertices = OutputVerticesUAV;
+				TParams->OutputIndices = OutputIndicesUAV;
+				TParams->MeshCounters = MeshCountersUAV;
+				TParams->ChunkSize = ChunkSize;
+				TParams->VoxelSize = VoxelSize;
+				TParams->ChunkWorldPosition = ChunkWorldPos;
+				TParams->IsoLevel = CapturedConfig.IsoLevel;
+				TParams->LODStride = LODStride;
+
+				// One thread per (FP1, FP2, Face): cover the full ChunkSize face grid x 6 faces.
+				FIntVector TransitionGroupCount(
+					FMath::DivideAndRoundUp(ChunkSize, 8),
+					FMath::DivideAndRoundUp(ChunkSize, 8),
+					6
+				);
+
+				FComputeShaderUtils::AddPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("GenerateMarchingCubesTransitions"),
+					TransitionShader,
+					TParams,
+					TransitionGroupCount
 				);
 			}
 

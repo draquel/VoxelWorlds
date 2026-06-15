@@ -1,0 +1,89 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * Common utilities for Transvoxel LOD-transition meshing on the GPU.
+ *
+ * This is the GPU counterpart to the CPU transvoxel path in
+ * VoxelCPUMarchingCubesMesher.cpp. It provides:
+ *   - Lengyel's REGULAR Marching Cubes tables (so the regular MC pass is
+ *     table-compatible with the transition cells — the same reason the CPU
+ *     mesher uses Lengyel tables instead of classic Lorensen & Cline).
+ *   - The TRANSITION cell tables for the zero-thickness reduction ribbon.
+ *   - Small algorithm constants (corner ordering, case-bit mapping, endpoint
+ *     mapping) shared by the regular and transition passes.
+ *
+ * The large lookup tables are uploaded from the single C++ source of truth
+ * (TransvoxelTables.cpp) as structured buffers; only the small, stable
+ * algorithm constants are hardcoded here.
+ *
+ * @see Plugins/VoxelWorlds/Source/VoxelMeshing/Private/VoxelCPUMarchingCubesMesher.cpp
+ * @see Plugins/VoxelWorlds/Documentation/LOD_SEAM_INVESTIGATION.md
+ */
+
+#pragma once
+
+// ==================== Uploaded Lookup-Table Buffers ====================
+// Bound by name from FGenerateMarchingCubesMeshCS::FParameters /
+// FGenerateTransitionCellsCS::FParameters. Flattened from the TransvoxelTables
+// C++ arrays so there is exactly one source of truth.
+
+// Regular (Lengyel) MC tables
+StructuredBuffer<uint> RegularCellClassBuf;     // [256] -> equivalence class (0-15)
+StructuredBuffer<uint> RegularCellDataBuf;      // [16][16]: row = {GeometryCounts, VertexIndex[15]}
+StructuredBuffer<uint> RegularVertexDataBuf;    // [256][12]: edge-endpoint codes
+
+// Transition (Lengyel) tables
+StructuredBuffer<uint>  TransitionCellClassBuf;     // [512] -> class | 0x80 (inverted winding)
+StructuredBuffer<uint>  TransitionCellDataBuf;      // [56]  -> (vertexCount<<4)|triangleCount
+StructuredBuffer<uint>  TransitionCellTrianglesBuf; // [56][37] triangle vertex indices, 0xFF-terminated
+StructuredBuffer<uint>  TransitionVertexDataBuf;    // [512][12] edge-endpoint codes (CASE-indexed)
+StructuredBuffer<float> TransitionSampleOffsetBuf;  // [6][13][3] flat: (face*13 + i)*3 + axis
+
+// ==================== Lengyel Corner Ordering ====================
+// 0=(0,0,0), 1=(1,0,0), 2=(0,1,0), 3=(1,1,0),
+// 4=(0,0,1), 5=(1,0,1), 6=(0,1,1), 7=(1,1,1)
+static const int3 LengyelCornerOffsets[8] = {
+    int3(0, 0, 0), int3(1, 0, 0),
+    int3(0, 1, 0), int3(1, 1, 0),
+    int3(0, 0, 1), int3(1, 0, 1),
+    int3(0, 1, 1), int3(1, 1, 1),
+};
+
+// ==================== Transition Case-Bit Mapping ====================
+// Lengyel's 9-bit transition case traces the 3x3 grid perimeter clockwise then
+// the center last. Bit N corresponds to sample BitToSample[N] (natural layout).
+static const int BitToSample[9] = { 0, 1, 2, 5, 8, 7, 6, 3, 4 };
+
+// ==================== Accessors ====================
+
+uint Tv_RegularCellClass(uint CaseIndex)            { return RegularCellClassBuf[CaseIndex]; }
+uint Tv_RegularGeometryCounts(uint CellClass)       { return RegularCellDataBuf[CellClass * 16u + 0u]; }
+uint Tv_RegularVertexIndex(uint CellClass, uint k)  { return RegularCellDataBuf[CellClass * 16u + 1u + k]; }
+uint Tv_RegularVertexData(uint CaseIndex, uint i)   { return RegularVertexDataBuf[CaseIndex * 12u + i]; }
+
+uint Tv_TransitionCellClass(uint CaseIndex)              { return TransitionCellClassBuf[CaseIndex]; }
+uint Tv_TransitionCellData(uint CellClass)              { return TransitionCellDataBuf[CellClass]; }
+uint Tv_TransitionTriangle(uint CellClass, uint k)      { return TransitionCellTrianglesBuf[CellClass * 37u + k]; }
+uint Tv_TransitionVertexData(uint CaseIndex, uint i)    { return TransitionVertexDataBuf[CaseIndex * 12u + i]; }
+
+float3 Tv_TransitionSampleOffset(uint Face, uint i)
+{
+    uint Base = (Face * 13u + i) * 3u;
+    return float3(TransitionSampleOffsetBuf[Base + 0u],
+                  TransitionSampleOffsetBuf[Base + 1u],
+                  TransitionSampleOffsetBuf[Base + 2u]);
+}
+
+/**
+ * Map a transition endpoint index to a sample index.
+ * 0-8 map directly to face samples; 0x9-0xC map to the 4 coarse corners (9-12).
+ */
+uint Tv_MapEndpointToSample(uint Endpoint)
+{
+    if (Endpoint <= 8u)
+    {
+        return Endpoint;
+    }
+    // 0x9->9, 0xA->10, 0xB->11, 0xC->12
+    return Endpoint;
+}

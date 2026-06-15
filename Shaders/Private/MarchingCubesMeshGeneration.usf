@@ -3,15 +3,27 @@
 /**
  * Compute shader for smooth (Marching Cubes) mesh generation.
  *
- * Generates smooth mesh geometry by interpolating vertex positions
- * along cube edges where the density field crosses the isosurface.
+ * Generates smooth mesh geometry by interpolating vertex positions along cube
+ * edges where the density field crosses the isosurface.
  *
- * Thread Group Size: [8, 8, 4] = 256 threads per group
- * Dispatch: ceil(ChunkSize/8), ceil(ChunkSize/8), ceil(ChunkSize/4)
+ * This GPU path mirrors VoxelCPUMarchingCubesMesher.cpp:
+ *   - MainCS runs regular Marching Cubes using Lengyel's REGULAR MC tables
+ *     (ProcessCubeLOD), so the regular cells are table-compatible with the
+ *     transition cells (the same reason the CPU mesher uses Lengyel tables).
+ *   - TransitionCS emits the zero-thickness transvoxel reduction ribbon at LOD
+ *     boundaries (ProcessTransitionCell), sealing fine<->coarse seams.
+ *
+ * Both passes write to the same output buffers via the same atomic counters
+ * (triangle-soup: 3 fresh vertices per triangle, no index sharing).
+ *
+ * Thread Group Size: MainCS [8, 8, 4]; TransitionCS [8, 8, 1] (z = 6 faces)
+ *
+ * @see Plugins/VoxelWorlds/Documentation/LOD_SEAM_INVESTIGATION.md
  */
 
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/VoxelWorlds/Private/MarchingCubesCommon.ush"
+#include "/Plugin/VoxelWorlds/Private/TransvoxelCommon.ush"
 
 // ==================== Shader Parameters ====================
 
@@ -73,8 +85,11 @@ uint EdgeCornerFlags;
 #define CORNER_XNEG_YNEG_ZPOS (1u << 18)
 #define CORNER_XNEG_YNEG_ZNEG (1u << 19)
 
-// Triangle table buffer (256 * 16 elements)
-StructuredBuffer<int> TriangleTable;
+// Transvoxel transition state (mirrors FVoxelMeshingRequest)
+// Bit per face that borders a COARSER neighbor: 0:-X 1:+X 2:-Y 3:+Y 4:-Z 5:+Z
+uint TransitionFaces;
+// Per-face coarse cell size (2^neighborLOD) when that face transitions, else 0.
+StructuredBuffer<uint> CoarserStrideBuf;
 
 // Output buffers
 RWStructuredBuffer<FVoxelVertexGPU> OutputVertices;
@@ -90,25 +105,19 @@ uint LODStride;  // 2^LODLevel (1, 2, 4, 8...)
 
 // ==================== Helper Functions ====================
 
-/**
- * Check if face neighbor data is available for a direction.
- */
+/** Check if face neighbor data is available for a direction. */
 bool HasNeighborData(uint Face)
 {
     return (NeighborFlags & (1u << Face)) != 0;
 }
 
-/**
- * Check if edge neighbor data is available.
- */
+/** Check if edge neighbor data is available. */
 bool HasEdgeData(uint EdgeFlag)
 {
     return (EdgeCornerFlags & EdgeFlag) != 0;
 }
 
-/**
- * Check if corner neighbor data is available.
- */
+/** Check if corner neighbor data is available. */
 bool HasCornerData(uint CornerFlag)
 {
     return (EdgeCornerFlags & CornerFlag) != 0;
@@ -231,37 +240,14 @@ uint GetVoxelAt(int3 Position)
     return 0;
 }
 
-/**
- * Get density at position (normalized 0-1).
- */
+/** Get density at position (normalized 0-1). */
 float GetDensityAt(int3 Position)
 {
     uint PackedVoxel = GetVoxelAt(Position);
     return GetDensity(PackedVoxel);
 }
 
-/**
- * Calculate gradient-based normal using central differences.
- */
-float3 CalculateGradientNormal(int3 Position)
-{
-    float gx = GetDensityAt(Position + int3(1, 0, 0)) - GetDensityAt(Position + int3(-1, 0, 0));
-    float gy = GetDensityAt(Position + int3(0, 1, 0)) - GetDensityAt(Position + int3(0, -1, 0));
-    float gz = GetDensityAt(Position + int3(0, 0, 1)) - GetDensityAt(Position + int3(0, 0, -1));
-
-    float3 Normal = float3(-gx, -gy, -gz);
-
-    float Len = length(Normal);
-    if (Len > 0.0001f)
-    {
-        return Normal / Len;
-    }
-    return float3(0, 0, 1);
-}
-
-/**
- * Calculate gradient-based normal with LOD-aware sampling.
- */
+/** Calculate gradient-based normal with LOD-aware sampling. */
 float3 CalculateGradientNormalLOD(int3 Position, int Stride)
 {
     float gx = GetDensityAt(Position + int3(Stride, 0, 0)) - GetDensityAt(Position + int3(-Stride, 0, 0));
@@ -279,87 +265,70 @@ float3 CalculateGradientNormalLOD(int3 Position, int Stride)
 }
 
 /**
- * Get dominant material from solid corners.
+ * Dominant material/biome from the first solid corner, using Lengyel corner order.
+ * SolidMask has bit i set when corner i (LengyelCornerOffsets[i]) is solid.
  */
-uint GetDominantMaterial(int3 CubePos, uint CubeIndex)
+uint GetDominantMaterialLengyel(int3 CubePos, uint SolidMask, int Stride)
 {
-    // Simple approach: use material from first solid corner
     [unroll]
     for (uint i = 0; i < 8; i++)
     {
-        if (CubeIndex & (1u << i))
+        if (SolidMask & (1u << i))
         {
-            int3 CornerPos = CubePos + CornerOffsets[i];
-            uint PackedVoxel = GetVoxelAt(CornerPos);
-            return GetMaterialID(PackedVoxel);
+            int3 CornerPos = CubePos + LengyelCornerOffsets[i] * Stride;
+            return GetMaterialID(GetVoxelAt(CornerPos));
+        }
+    }
+    return 0;
+}
+
+uint GetDominantBiomeLengyel(int3 CubePos, uint SolidMask, int Stride)
+{
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        if (SolidMask & (1u << i))
+        {
+            int3 CornerPos = CubePos + LengyelCornerOffsets[i] * Stride;
+            return GetBiomeID(GetVoxelAt(CornerPos));
         }
     }
     return 0;
 }
 
 /**
- * Get dominant biome from solid corners.
+ * Dominant-axis (triplanar-style) UV projection for a triangle. World-space
+ * positions; matches the regular pass so the ribbon textures consistently.
  */
-uint GetDominantBiome(int3 CubePos, uint CubeIndex)
+void ComputeTriangleUVs(float3 P0, float3 P1, float3 P2, out float2 UV0, out float2 UV1, out float2 UV2)
 {
-    [unroll]
-    for (uint i = 0; i < 8; i++)
+    float3 FaceNormal = normalize(cross(P1 - P0, P2 - P0));
+    float AbsX = abs(FaceNormal.x);
+    float AbsY = abs(FaceNormal.y);
+    float AbsZ = abs(FaceNormal.z);
+
+    const float UVScale = 0.1f;
+    if (AbsZ >= AbsX && AbsZ >= AbsY)
     {
-        if (CubeIndex & (1u << i))
-        {
-            int3 CornerPos = CubePos + CornerOffsets[i];
-            uint PackedVoxel = GetVoxelAt(CornerPos);
-            return GetBiomeID(PackedVoxel);
-        }
+        UV0 = P0.xy / VoxelSize * UVScale;
+        UV1 = P1.xy / VoxelSize * UVScale;
+        UV2 = P2.xy / VoxelSize * UVScale;
     }
-    return 0;
-}
-
-/**
- * Get dominant material from solid corners (LOD version with stride).
- */
-uint GetDominantMaterialLOD(int3 CubePos, uint CubeIndex, int Stride)
-{
-    [unroll]
-    for (uint i = 0; i < 8; i++)
+    else if (AbsX >= AbsY)
     {
-        if (CubeIndex & (1u << i))
-        {
-            int3 CornerPos = CubePos + CornerOffsets[i] * Stride;
-            uint PackedVoxel = GetVoxelAt(CornerPos);
-            return GetMaterialID(PackedVoxel);
-        }
+        UV0 = P0.yz / VoxelSize * UVScale;
+        UV1 = P1.yz / VoxelSize * UVScale;
+        UV2 = P2.yz / VoxelSize * UVScale;
     }
-    return 0;
-}
-
-/**
- * Get dominant biome from solid corners (LOD version with stride).
- */
-uint GetDominantBiomeLOD(int3 CubePos, uint CubeIndex, int Stride)
-{
-    [unroll]
-    for (uint i = 0; i < 8; i++)
+    else
     {
-        if (CubeIndex & (1u << i))
-        {
-            int3 CornerPos = CubePos + CornerOffsets[i] * Stride;
-            uint PackedVoxel = GetVoxelAt(CornerPos);
-            return GetBiomeID(PackedVoxel);
-        }
+        UV0 = P0.xz / VoxelSize * UVScale;
+        UV1 = P1.xz / VoxelSize * UVScale;
+        UV2 = P2.xz / VoxelSize * UVScale;
     }
-    return 0;
 }
 
-/**
- * Get triangle edge from lookup table buffer.
- */
-int GetTriTableEntry(uint CubeIndex, uint TriIndex)
-{
-    return TriangleTable[CubeIndex * 16 + TriIndex];
-}
-
-// ==================== Main Compute Shader ====================
+// ==================== Main Compute Shader (Regular MC, Lengyel tables) ====================
 
 [numthreads(8, 8, 4)]
 void MainCS(
@@ -369,7 +338,6 @@ void MainCS(
 {
     int Stride = (int)LODStride;
 
-    // Convert dispatch thread ID to actual voxel position using stride
     // Each thread handles one LOD cube at strided intervals
     int3 CubePos = (int3)DispatchThreadId * Stride;
 
@@ -379,64 +347,67 @@ void MainCS(
         return;
     }
 
-    // Sample density at 8 cube corners using strided positions
+    // Sample density + world position at the 8 cube corners (Lengyel ordering)
     float CornerDensities[8];
     float3 CornerPositions[8];
-
     [unroll]
     for (uint i = 0; i < 8; i++)
     {
-        // Corner positions are offset by stride to form larger LOD cubes
-        int3 CornerPos = CubePos + CornerOffsets[i] * Stride;
+        int3 CornerPos = CubePos + LengyelCornerOffsets[i] * Stride;
         CornerDensities[i] = GetDensityAt(CornerPos);
         CornerPositions[i] = ChunkWorldPosition + float3(CornerPos) * VoxelSize;
     }
 
-    // Calculate cube index
-    uint CubeIndex = CalculateCubeIndex(CornerDensities, IsoLevel);
-
-    // Early out if cube is entirely inside or outside
-    if (EdgeTable[CubeIndex] == 0)
-    {
-        return;
-    }
-
-    // Get material and biome for this cube
-    uint MaterialID = GetDominantMaterialLOD(CubePos, CubeIndex, Stride);
-    uint BiomeID = GetDominantBiomeLOD(CubePos, CubeIndex, Stride);
-
-    // Interpolate vertex positions along intersected edges
-    float3 EdgeVertices[12];
-    uint EdgeMask = EdgeTable[CubeIndex];
-
+    // Build solid mask (bit set = corner inside), then Lengyel case index
+    // (Lengyel tables use opposite polarity: bit set = OUTSIDE).
+    uint SolidMask = 0;
     [unroll]
-    for (uint Edge = 0; Edge < 12; Edge++)
+    for (uint i = 0; i < 8; i++)
     {
-        if (EdgeMask & (1u << Edge))
+        if (CornerDensities[i] >= IsoLevel)
         {
-            int V0 = EdgeVertexPairs[Edge][0];
-            int V1 = EdgeVertexPairs[Edge][1];
-
-            EdgeVertices[Edge] = InterpolateEdge(
-                CornerDensities[V0], CornerDensities[V1],
-                CornerPositions[V0], CornerPositions[V1],
-                IsoLevel
-            );
+            SolidMask |= (1u << i);
         }
     }
+    uint CaseIndex = (~SolidMask) & 0xFFu;
 
-    // Count triangles for this cube
-    uint TriCount = 0;
-    for (uint t = 0; t < 15; t += 3)
-    {
-        if (GetTriTableEntry(CubeIndex, t) == -1)
-            break;
-        TriCount++;
-    }
+    uint CellClass = Tv_RegularCellClass(CaseIndex);
+    uint GeomCounts = Tv_RegularGeometryCounts(CellClass);
+    uint VertexCount = GeomCounts >> 4;
+    uint TriCount = GeomCounts & 0x0Fu;
 
+    // Early out if no geometry (fully inside or fully outside)
     if (TriCount == 0)
     {
         return;
+    }
+
+    uint MaterialID = GetDominantMaterialLengyel(CubePos, SolidMask, Stride);
+    uint BiomeID = GetDominantBiomeLengyel(CubePos, SolidMask, Stride);
+
+    // Decode edge vertices from RegularVertexData (low nibble = corner A, next = corner B)
+    float3 CellVertices[12];
+    [unroll]
+    for (uint i = 0; i < 12; i++)
+    {
+        if (i >= VertexCount)
+        {
+            break;
+        }
+        uint Code = Tv_RegularVertexData(CaseIndex, i);
+        uint CornerA = Code & 0x0Fu;
+        uint CornerB = (Code >> 4) & 0x0Fu;
+        if (CornerA == CornerB)
+        {
+            CellVertices[i] = CornerPositions[CornerA];
+        }
+        else
+        {
+            CellVertices[i] = InterpolateEdge(
+                CornerDensities[CornerA], CornerDensities[CornerB],
+                CornerPositions[CornerA], CornerPositions[CornerB],
+                IsoLevel);
+        }
     }
 
     // Atomically allocate vertices and indices
@@ -445,73 +416,287 @@ void MainCS(
     InterlockedAdd(MeshCounters[0], TriCount * 3, VertexStart);
     InterlockedAdd(MeshCounters[1], TriCount * 3, IndexStart);
 
-    // Generate triangles
     uint CurrentVertex = VertexStart;
     uint CurrentIndex = IndexStart;
 
-    for (uint ti = 0; ti < 15; ti += 3)
+    for (uint t = 0; t < TriCount; t++)
     {
-        int Edge0 = GetTriTableEntry(CubeIndex, ti);
-        if (Edge0 == -1)
-            break;
+        uint Idx0 = Tv_RegularVertexIndex(CellClass, t * 3 + 0);
+        uint Idx1 = Tv_RegularVertexIndex(CellClass, t * 3 + 1);
+        uint Idx2 = Tv_RegularVertexIndex(CellClass, t * 3 + 2);
 
-        int Edge1 = GetTriTableEntry(CubeIndex, ti + 1);
-        int Edge2 = GetTriTableEntry(CubeIndex, ti + 2);
+        float3 P0 = CellVertices[Idx0];
+        float3 P1 = CellVertices[Idx1];
+        float3 P2 = CellVertices[Idx2];
 
-        float3 P0 = EdgeVertices[Edge0];
-        float3 P1 = EdgeVertices[Edge1];
-        float3 P2 = EdgeVertices[Edge2];
-
-        // Calculate normals at vertex positions
-        // Convert world position back to voxel space for gradient calculation
+        // Gradient normals (convert world position back to voxel space)
         int3 VP0 = (int3)((P0 - ChunkWorldPosition) / VoxelSize);
         int3 VP1 = (int3)((P1 - ChunkWorldPosition) / VoxelSize);
         int3 VP2 = (int3)((P2 - ChunkWorldPosition) / VoxelSize);
-
-        // Use LOD-aware gradient calculation
         float3 N0 = CalculateGradientNormalLOD(VP0, Stride);
         float3 N1 = CalculateGradientNormalLOD(VP1, Stride);
         float3 N2 = CalculateGradientNormalLOD(VP2, Stride);
 
-        // Dominant-axis UV projection based on face normal
-        // This reduces texture stretching on slopes by choosing the best projection plane
-        float3 FaceNormal = normalize(cross(P1 - P0, P2 - P0));
-
-        float AbsX = abs(FaceNormal.x);
-        float AbsY = abs(FaceNormal.y);
-        float AbsZ = abs(FaceNormal.z);
-
-        float UVScale = 0.1f;
         float2 UV0, UV1, UV2;
+        ComputeTriangleUVs(P0, P1, P2, UV0, UV1, UV2);
 
-        if (AbsZ >= AbsX && AbsZ >= AbsY)
-        {
-            // Z-dominant (horizontal surface): project onto XY plane
-            UV0 = P0.xy / VoxelSize * UVScale;
-            UV1 = P1.xy / VoxelSize * UVScale;
-            UV2 = P2.xy / VoxelSize * UVScale;
-        }
-        else if (AbsX >= AbsY)
-        {
-            // X-dominant (East/West facing): project onto YZ plane
-            UV0 = P0.yz / VoxelSize * UVScale;
-            UV1 = P1.yz / VoxelSize * UVScale;
-            UV2 = P2.yz / VoxelSize * UVScale;
-        }
-        else
-        {
-            // Y-dominant (North/South facing): project onto XZ plane
-            UV0 = P0.xz / VoxelSize * UVScale;
-            UV1 = P1.xz / VoxelSize * UVScale;
-            UV2 = P2.xz / VoxelSize * UVScale;
-        }
-
-        // Create and emit vertices
         OutputVertices[CurrentVertex + 0] = CreateSmoothVertex(P0, N0, UV0, MaterialID, BiomeID);
         OutputVertices[CurrentVertex + 1] = CreateSmoothVertex(P1, N1, UV1, MaterialID, BiomeID);
         OutputVertices[CurrentVertex + 2] = CreateSmoothVertex(P2, N2, UV2, MaterialID, BiomeID);
 
-        // Emit indices
+        OutputIndices[CurrentIndex + 0] = CurrentVertex + 0;
+        OutputIndices[CurrentIndex + 1] = CurrentVertex + 1;
+        OutputIndices[CurrentIndex + 2] = CurrentVertex + 2;
+
+        CurrentVertex += 3;
+        CurrentIndex += 3;
+    }
+}
+
+// ==================== Transition Cells (zero-thickness reduction ribbon) ====================
+//
+// Mirrors VoxelCPUMarchingCubesMesher::GetTransitionCellDensities +
+// ProcessTransitionCell. For each active transition face and each coarse-aligned
+// boundary position, emit a flat fine->coarse reduction ribbon IN the boundary
+// plane (depth scale 0). The fine 9-sample face shares vertices with the finer
+// chunk's regular MC (MainCS) on that plane; the 4 coarse corners (invariant
+// d[9]=d[0], d[10]=d[2], d[11]=d[6], d[12]=d[8]) match the coarser neighbour.
+//
+// Dispatch: tid.x=FP1, tid.y=FP2, tid.z=Face (0..5).
+
+[numthreads(8, 8, 1)]
+void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint Face = DispatchThreadId.z;
+    if (Face >= 6u)
+    {
+        return;
+    }
+    if ((TransitionFaces & (1u << Face)) == 0u)
+    {
+        return;
+    }
+
+    uint CoarserStrideU = CoarserStrideBuf[Face];
+    if (CoarserStrideU == 0u)
+    {
+        return;
+    }
+    int CoarserStride = (int)CoarserStrideU;
+
+    int FP1 = (int)DispatchThreadId.x;
+    int FP2 = (int)DispatchThreadId.y;
+    if (FP1 >= (int)ChunkSize || FP2 >= (int)ChunkSize)
+    {
+        return;
+    }
+    // Only coarse-aligned boundary positions emit a ribbon
+    if ((FP1 % CoarserStride) != 0 || (FP2 % CoarserStride) != 0)
+    {
+        return;
+    }
+
+    int CurrentStride = (int)LODStride;
+    int DepthAxis = (int)(Face / 2u);
+    bool bPositiveFace = (Face & 1u) != 0u;
+    int BoundaryPos = bPositiveFace ? ((int)ChunkSize - CurrentStride) : 0;
+
+    int CellX, CellY, CellZ;
+    if (DepthAxis == 0) { CellX = BoundaryPos; CellY = FP1; CellZ = FP2; }
+    else if (DepthAxis == 1) { CellX = FP1; CellY = BoundaryPos; CellZ = FP2; }
+    else { CellX = FP1; CellY = FP2; CellZ = BoundaryPos; }
+
+    // Depth axis pinned to the boundary plane; positive faces sit one chunk-stride out.
+    int BaseDepthCoord = (DepthAxis == 0) ? CellX : (DepthAxis == 1) ? CellY : CellZ;
+    int BoundaryDepthCoord = bPositiveFace ? (BaseDepthCoord + CurrentStride) : BaseDepthCoord;
+
+    // ---- Sample 13 densities (zero-thickness: depth pinned, face-parallel * CoarserStride) ----
+    // All offsets are {0, 0.5, 1.0} * even CoarserStride -> integer voxel coords.
+    float Densities[13];
+    [unroll]
+    for (uint i = 0; i < 13u; i++)
+    {
+        float3 Off = Tv_TransitionSampleOffset(Face, i);
+        int SX = (DepthAxis == 0) ? BoundaryDepthCoord : (CellX + (int)round(Off.x * (float)CoarserStride));
+        int SY = (DepthAxis == 1) ? BoundaryDepthCoord : (CellY + (int)round(Off.y * (float)CoarserStride));
+        int SZ = (DepthAxis == 2) ? BoundaryDepthCoord : (CellZ + (int)round(Off.z * (float)CoarserStride));
+        Densities[i] = GetDensityAt(int3(SX, SY, SZ));
+    }
+    // Lengyel invariant: coarse corners share the fine corners' state.
+    Densities[9]  = Densities[0];
+    Densities[10] = Densities[2];
+    Densities[11] = Densities[6];
+    Densities[12] = Densities[8];
+
+    // ---- 9-bit case (Lengyel perimeter bit ordering) ----
+    uint SolidMask = 0;
+    [unroll]
+    for (uint b = 0; b < 9u; b++)
+    {
+        if (Densities[BitToSample[b]] >= IsoLevel)
+        {
+            SolidMask |= (1u << b);
+        }
+    }
+    uint CaseIndex = (~SolidMask) & 0x1FFu;
+
+    uint CellClassData = Tv_TransitionCellClass(CaseIndex);
+    bool bInverted = (CellClassData & 0x80u) != 0u;
+    uint CellClass = CellClassData & 0x7Fu;
+    if (CellClass == 0u || CellClass >= 56u)
+    {
+        return;
+    }
+
+    uint CellData = Tv_TransitionCellData(CellClass);
+    uint VertexCount = CellData >> 4;
+    uint TriangleCount = CellData & 0x0Fu;
+    if (VertexCount == 0u || TriangleCount == 0u || VertexCount > 12u)
+    {
+        return;
+    }
+
+    // ---- Positions: zero-thickness ribbon collapsed onto the boundary plane ----
+    float FaceScale = (float)CoarserStride * VoxelSize;
+    float3 BasePos = ChunkWorldPosition + float3((float)CellX, (float)CellY, (float)CellZ) * VoxelSize;
+    float3 CellScale = float3(FaceScale, FaceScale, FaceScale);
+    if (DepthAxis == 0)      { BasePos.x = ChunkWorldPosition.x + (float)BoundaryDepthCoord * VoxelSize; CellScale.x = 0.0f; }
+    else if (DepthAxis == 1) { BasePos.y = ChunkWorldPosition.y + (float)BoundaryDepthCoord * VoxelSize; CellScale.y = 0.0f; }
+    else                     { BasePos.z = ChunkWorldPosition.z + (float)BoundaryDepthCoord * VoxelSize; CellScale.z = 0.0f; }
+
+    // ---- Generate cell vertices ----
+    float3 CellVertices[12];
+    bool VertexOnOuterFace[12];
+    [unroll]
+    for (uint i = 0; i < 12u; i++)
+    {
+        if (i >= VertexCount)
+        {
+            break;
+        }
+        uint VData = Tv_TransitionVertexData(CaseIndex, i);
+        uint LowByte = VData & 0xFFu;
+        uint EndpointA = (LowByte >> 4) & 0x0Fu;
+        uint EndpointB = LowByte & 0x0Fu;
+        uint SampleA = Tv_MapEndpointToSample(EndpointA);
+        uint SampleB = Tv_MapEndpointToSample(EndpointB);
+
+        float3 PosA = BasePos + Tv_TransitionSampleOffset(Face, SampleA) * CellScale;
+        float3 PosB = BasePos + Tv_TransitionSampleOffset(Face, SampleB) * CellScale;
+
+        float3 VertexPos;
+        if (SampleA == SampleB)
+        {
+            VertexPos = PosA;
+        }
+        else
+        {
+            VertexPos = InterpolateEdge(Densities[SampleA], Densities[SampleB], PosA, PosB, IsoLevel);
+        }
+        CellVertices[i] = VertexPos;
+        // Outer (coarse) face: both endpoints are coarse corners (samples 9-12)
+        VertexOnOuterFace[i] = (SampleA >= 9u && SampleB >= 9u);
+    }
+
+    // ---- Material / biome from the first solid face sample ----
+    uint MaterialID = 0;
+    uint BiomeID = 0;
+    [unroll]
+    for (uint s = 0; s < 9u; s++)
+    {
+        if (Densities[s] >= IsoLevel)
+        {
+            float3 Off = Tv_TransitionSampleOffset(Face, s);
+            int SX = (DepthAxis == 0) ? BoundaryDepthCoord : (CellX + (int)round(Off.x * (float)CoarserStride));
+            int SY = (DepthAxis == 1) ? BoundaryDepthCoord : (CellY + (int)round(Off.y * (float)CoarserStride));
+            int SZ = (DepthAxis == 2) ? BoundaryDepthCoord : (CellZ + (int)round(Off.z * (float)CoarserStride));
+            uint Packed = GetVoxelAt(int3(SX, SY, SZ));
+            MaterialID = GetMaterialID(Packed);
+            BiomeID = GetBiomeID(Packed);
+            break;
+        }
+    }
+
+    // ---- Winding: reflection along depth flips handedness for +/-Y faces ----
+    bool bFaceNeedsWindingReverse = (Face == 2u || Face == 3u);
+    bool bUseOriginalWinding = (bInverted != bFaceNeedsWindingReverse);
+
+    // ---- Degenerate (fin) triangle filter: drop tris with an over-long edge ----
+    float MaxCellDim = max(max(CellScale.x, CellScale.y), CellScale.z);
+    float MaxEdgeLengthSq = MaxCellDim * MaxCellDim * 4.0f;
+
+    // Count valid triangles so soup allocation is exact (no buffer gaps).
+    uint ValidTriCount = 0;
+    for (uint t = 0; t < TriangleCount; t++)
+    {
+        uint i0 = Tv_TransitionTriangle(CellClass, t * 3 + 0);
+        if (i0 == 0xFFu) { break; }
+        uint i1 = Tv_TransitionTriangle(CellClass, t * 3 + 1);
+        uint i2 = Tv_TransitionTriangle(CellClass, t * 3 + 2);
+        if (i0 >= VertexCount || i1 >= VertexCount || i2 >= VertexCount) { continue; }
+        float3 A = CellVertices[i0];
+        float3 B = CellVertices[i1];
+        float3 C = CellVertices[i2];
+        if (dot(B - A, B - A) > MaxEdgeLengthSq ||
+            dot(C - B, C - B) > MaxEdgeLengthSq ||
+            dot(A - C, A - C) > MaxEdgeLengthSq) { continue; }
+        ValidTriCount++;
+    }
+    if (ValidTriCount == 0u)
+    {
+        return;
+    }
+
+    uint VertexStart;
+    uint IndexStart;
+    InterlockedAdd(MeshCounters[0], ValidTriCount * 3, VertexStart);
+    InterlockedAdd(MeshCounters[1], ValidTriCount * 3, IndexStart);
+
+    uint CurrentVertex = VertexStart;
+    uint CurrentIndex = IndexStart;
+
+    for (uint t = 0; t < TriangleCount; t++)
+    {
+        uint i0 = Tv_TransitionTriangle(CellClass, t * 3 + 0);
+        if (i0 == 0xFFu) { break; }
+        uint i1 = Tv_TransitionTriangle(CellClass, t * 3 + 1);
+        uint i2 = Tv_TransitionTriangle(CellClass, t * 3 + 2);
+        if (i0 >= VertexCount || i1 >= VertexCount || i2 >= VertexCount) { continue; }
+
+        float3 A = CellVertices[i0];
+        float3 B = CellVertices[i1];
+        float3 C = CellVertices[i2];
+        if (dot(B - A, B - A) > MaxEdgeLengthSq ||
+            dot(C - B, C - B) > MaxEdgeLengthSq ||
+            dot(A - C, A - C) > MaxEdgeLengthSq) { continue; }
+
+        // Source cell-vertex index per emitted slot (so normal stride matches the side)
+        uint S0 = bUseOriginalWinding ? i0 : i2;
+        uint S1 = i1;
+        uint S2 = bUseOriginalWinding ? i2 : i0;
+
+        float3 P0 = CellVertices[S0];
+        float3 P1 = CellVertices[S1];
+        float3 P2 = CellVertices[S2];
+
+        int NS0 = VertexOnOuterFace[S0] ? CoarserStride : CurrentStride;
+        int NS1 = VertexOnOuterFace[S1] ? CoarserStride : CurrentStride;
+        int NS2 = VertexOnOuterFace[S2] ? CoarserStride : CurrentStride;
+
+        int3 VP0 = (int3)((P0 - ChunkWorldPosition) / VoxelSize);
+        int3 VP1 = (int3)((P1 - ChunkWorldPosition) / VoxelSize);
+        int3 VP2 = (int3)((P2 - ChunkWorldPosition) / VoxelSize);
+        float3 N0 = CalculateGradientNormalLOD(VP0, NS0);
+        float3 N1 = CalculateGradientNormalLOD(VP1, NS1);
+        float3 N2 = CalculateGradientNormalLOD(VP2, NS2);
+
+        float2 UV0, UV1, UV2;
+        ComputeTriangleUVs(P0, P1, P2, UV0, UV1, UV2);
+
+        OutputVertices[CurrentVertex + 0] = CreateSmoothVertex(P0, N0, UV0, MaterialID, BiomeID);
+        OutputVertices[CurrentVertex + 1] = CreateSmoothVertex(P1, N1, UV1, MaterialID, BiomeID);
+        OutputVertices[CurrentVertex + 2] = CreateSmoothVertex(P2, N2, UV2, MaterialID, BiomeID);
+
         OutputIndices[CurrentIndex + 0] = CurrentVertex + 0;
         OutputIndices[CurrentIndex + 1] = CurrentVertex + 1;
         OutputIndices[CurrentIndex + 2] = CurrentVertex + 2;

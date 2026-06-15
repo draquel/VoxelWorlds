@@ -178,6 +178,25 @@ private:
 	/** Pack voxel data for GPU upload */
 	TArray<uint32> PackVoxelDataForGPU(const TArray<FVoxelData>& VoxelData);
 
-	/** Create the triangle table buffer for GPU */
-	TArray<int32> CreateTriangleTableData();
+	// ============================================================================
+	// Lookup-table buffer builders (flattened from TransvoxelTables, single source
+	// of truth). Uploaded as structured buffers consumed by the compute shaders.
+	// ============================================================================
+
+	/** Lengyel RegularCellClass[256] -> equivalence class. */
+	static TArray<uint32> CreateRegularCellClassData();
+	/** Lengyel RegularCellData[16] flattened to [16][16] = {GeometryCounts, VertexIndex[15]}. */
+	static TArray<uint32> CreateRegularCellTableData();
+	/** Lengyel RegularVertexData[256][12] edge-endpoint codes. */
+	static TArray<uint32> CreateRegularVertexTableData();
+	/** TransitionCellClass[512] (class | 0x80 inverted-winding bit). */
+	static TArray<uint32> CreateTransitionCellClassData();
+	/** TransitionCellData[56] -> (vertexCount<<4)|triangleCount. */
+	static TArray<uint32> CreateTransitionCellDataData();
+	/** TransitionCellTriangles[56][37] triangle vertex indices (0xFF-terminated). */
+	static TArray<uint32> CreateTransitionTrianglesData();
+	/** TransitionVertexData[512][12] edge-endpoint codes (CASE-indexed). */
+	static TArray<uint32> CreateTransitionVertexTableData();
+	/** TransitionCellSampleOffsets[6][13] flattened to floats: (face*13+i)*3+axis. */
+	static TArray<float> CreateTransitionSampleOffsetData();
 };

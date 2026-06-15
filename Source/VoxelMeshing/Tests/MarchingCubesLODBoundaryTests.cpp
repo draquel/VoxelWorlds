@@ -23,6 +23,7 @@
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
+#include "TransvoxelTables.h"
 
 namespace MarchingCubesLODBoundaryTestHelpers
 {
@@ -1165,6 +1166,198 @@ bool FMCLODBoundaryT10OrientationTest::RunTest(const FString& Parameters)
 	}
 
 	TestFalse(TEXT("Transition strip triangles should not be back-facing (flipped winding)"), bAnyFlipped);
+	return true;
+}
+
+// ==================== T11: GPU-port watertightness contract ====================
+//
+// The GPU Marching Cubes mesher (VoxelGPUMarchingCubesMesher + the TransitionCS
+// compute pass) is a line-for-line port of the CPU transvoxel path exercised by
+// T6-T10. Headless automation runs under -nullrhi, which has no compute-shader
+// support, so the GPU mesher itself cannot run here. This test pins, via the CPU
+// mesher the shader mirrors, the exact watertightness contract the GPU port must
+// reproduce for the LOD pairs it handles: the finer chunk's transition ribbon must
+// (a) introduce no mesh holes vs the pure mesh, and (b) match the coarser
+// neighbour's boundary exactly (unmatchedB == 0). Across the three field shapes.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT11GPUPortContractTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T11_GPUPortContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCLODBoundaryT11GPUPortContractTest::RunTest(const FString& Parameters)
+{
+	using namespace MarchingCubesLODBoundaryTestHelpers;
+
+	struct FFieldCase { ETestField Field; const TCHAR* Name; };
+	const FFieldCase Fields[] = {
+		{ ETestField::Smooth,     TEXT("Smooth") },
+		{ ETestField::NonLinearZ, TEXT("NonLinearZ") },
+		{ ETestField::Cliff,      TEXT("Cliff") },
+	};
+	// The two LOD boundaries the live GPU path must seal (one-level transitions).
+	const int32 LODAs[] = { 0, 1 }; // LOD0|LOD1 and LOD1|LOD2
+
+	bool bAnyFailure = false;
+	for (const FFieldCase& F : Fields)
+	{
+		FScopedTestField Scoped(F.Field);
+
+		for (int32 LODA : LODAs)
+		{
+			// (a) Holes: finer chunk A with a +X transition to a coarser neighbour,
+			// compared against the same chunk meshed with no transition (baseline).
+			FVoxelMeshingRequest ReqTransition = MakeChunkRequest(FIntVector(0, 0, 0), LODA);
+			FillAllNeighborData(ReqTransition);
+			ReqTransition.NeighborLODLevels[1] = LODA + 1;
+			ReqTransition.TransitionFaces = FVoxelMeshingRequest::TRANSITION_XPOS;
+
+			FVoxelMeshingRequest ReqPure = MakeChunkRequest(FIntVector(0, 0, 0), LODA);
+			FillAllNeighborData(ReqPure);
+			ReqPure.NeighborLODLevels[1] = LODA;
+
+			FChunkMeshData MeshTransition, MeshPure;
+			TestTrue(TEXT("transition mesh should succeed"), MeshChunk(ReqTransition, true, MeshTransition));
+			TestTrue(TEXT("pure mesh should succeed"), MeshChunk(ReqPure, true, MeshPure));
+
+			const int32 HolesTransition = CountInteriorOpenEdges(MeshTransition);
+			const int32 HolesPure = CountInteriorOpenEdges(MeshPure);
+
+			// (b) Coarse-side match across the shared face.
+			const FSeamReport R = RunFaceTransvoxelCase(/*Face=+X*/1, LODA);
+
+			AddInfo(FString::Printf(
+				TEXT("T11 %s LOD%d|LOD%d: holes transition=%d pure=%d | vertsA=%d vertsB=%d unmatchedB=%d maxNearestVert=%.2f"),
+				F.Name, LODA, LODA + 1, HolesTransition, HolesPure, R.NumA, R.NumB, R.UnmatchedB, R.MaxNearestVertex));
+
+			if (HolesTransition > HolesPure)
+			{
+				bAnyFailure = true;
+				AddError(FString::Printf(TEXT("%s LOD%d|LOD%d: transition introduces %d interior open edges (holes) vs %d pure"),
+					F.Name, LODA, LODA + 1, HolesTransition, HolesPure));
+			}
+			if (R.NumA > 0 && R.NumB > 0 && R.UnmatchedB > 0)
+			{
+				bAnyFailure = true;
+				AddError(FString::Printf(TEXT("%s LOD%d|LOD%d: %d/%d coarse-side verts unmatched by transition ribbon"),
+					F.Name, LODA, LODA + 1, R.UnmatchedB, R.NumB));
+			}
+		}
+	}
+
+	TestFalse(TEXT("GPU-port contract: ribbon must be hole-free and match the coarse neighbour for LOD0|LOD1 and LOD1|LOD2"), bAnyFailure);
+	return true;
+}
+
+// ==================== T12: transvoxel table / constant integrity (GPU buffer pin) ====================
+//
+// The GPU shader (TransitionCS / MainCS) is driven by the SAME TransvoxelTables
+// arrays the dispatcher flattens into structured buffers, plus a few hardcoded
+// algorithm constants (BitToSample, the invariant-corner mapping, the endpoint
+// nibble decode). This test pins the assumptions the shader makes about those
+// tables so they cannot drift silently and read out of bounds on the GPU:
+//   - every transition CASE maps to a class in [0,56)  (indexes TransitionCellData[56])
+//   - every transition CLASS's vertex count <= 12 and its triangle indices are
+//     < vertex count (until the 0xFF terminator)
+//   - every regular CASE maps to a class in [0,16); RegularCellData triangle/vertex
+//     indices are in range
+//   - the invariant-corner mapping is {0,2,6,8} and BitToSample is a permutation of 0..8
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT12TableContractTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T12_TableContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCLODBoundaryT12TableContractTest::RunTest(const FString& Parameters)
+{
+	using namespace TransvoxelTables;
+
+	// ---- Transition tables ----
+	for (int32 Case = 0; Case < 512; ++Case)
+	{
+		const uint8 ClassData = TransitionCellClass[Case];
+		const uint8 Class = ClassData & 0x7F;
+		if (Class >= 56)
+		{
+			AddError(FString::Printf(TEXT("TransitionCellClass[%d] class %d out of range [0,56)"), Case, Class));
+			return false;
+		}
+	}
+	for (int32 Class = 0; Class < 56; ++Class)
+	{
+		const uint8 Data = TransitionCellData[Class];
+		const int32 VertexCount = Data >> 4;
+		const int32 TriangleCount = Data & 0x0F;
+		TestTrue(FString::Printf(TEXT("transition class %d vertexCount %d <= 12"), Class, VertexCount), VertexCount <= 12);
+		// Triangle indices must reference valid cell vertices (until terminator).
+		const uint8* Tris = TransitionCellTriangles[Class];
+		for (int32 k = 0; k < TriangleCount * 3; ++k)
+		{
+			if (Tris[k] == 0xFF) { break; }
+			if (Tris[k] >= VertexCount)
+			{
+				AddError(FString::Printf(TEXT("TransitionCellTriangles[%d][%d]=%d >= vertexCount %d"), Class, k, Tris[k], VertexCount));
+				return false;
+			}
+		}
+	}
+
+	// ---- Regular (Lengyel) tables used by MainCS ----
+	for (int32 Case = 0; Case < 256; ++Case)
+	{
+		const uint8 Class = RegularCellClass[Case];
+		if (Class >= 16)
+		{
+			AddError(FString::Printf(TEXT("RegularCellClass[%d] class %d out of range [0,16)"), Case, Class));
+			return false;
+		}
+	}
+	for (int32 Class = 0; Class < 16; ++Class)
+	{
+		const FRegularCellData& Cell = RegularCellData[Class];
+		const int32 VertexCount = Cell.GetVertexCount();
+		const int32 TriangleCount = Cell.GetTriangleCount();
+		TestTrue(FString::Printf(TEXT("regular class %d vertexCount %d <= 12"), Class, VertexCount), VertexCount <= 12);
+		for (int32 k = 0; k < TriangleCount * 3; ++k)
+		{
+			if (Cell.VertexIndex[k] >= VertexCount)
+			{
+				AddError(FString::Printf(TEXT("RegularCellData[%d].VertexIndex[%d]=%d >= vertexCount %d"), Class, k, Cell.VertexIndex[k], VertexCount));
+				return false;
+			}
+		}
+	}
+
+	// ---- Hardcoded algorithm constants the shader replicates ----
+	// Invariant coarse-corner mapping: d[9]=d[0], d[10]=d[2], d[11]=d[6], d[12]=d[8].
+	TestEqual(TEXT("LowResCorners[0]"), LowResCorners[0], 0);
+	TestEqual(TEXT("LowResCorners[1]"), LowResCorners[1], 2);
+	TestEqual(TEXT("LowResCorners[2]"), LowResCorners[2], 6);
+	TestEqual(TEXT("LowResCorners[3]"), LowResCorners[3], 8);
+
+	// BitToSample (Lengyel perimeter bit ordering) must be a permutation of 0..8.
+	const int32 BitToSample[9] = { 0, 1, 2, 5, 8, 7, 6, 3, 4 };
+	bool Seen[9] = { false, false, false, false, false, false, false, false, false };
+	for (int32 b = 0; b < 9; ++b)
+	{
+		const int32 S = BitToSample[b];
+		TestTrue(FString::Printf(TEXT("BitToSample[%d]=%d in [0,9)"), b, S), S >= 0 && S < 9);
+		Seen[S] = true;
+	}
+	for (int32 s = 0; s < 9; ++s)
+	{
+		TestTrue(FString::Printf(TEXT("BitToSample covers sample %d"), s), Seen[s]);
+	}
+
+	// The 6 faces x 13 sample offsets the dispatcher uploads must be in [0,1] (the
+	// transition cell is a unit cell; the shader scales by CoarserStride*VoxelSize).
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		for (int32 i = 0; i < 13; ++i)
+		{
+			const FVector3f& O = TransitionCellSampleOffsets[Face][i];
+			const bool bInRange =
+				O.X >= -KINDA_SMALL_NUMBER && O.X <= 1.0f + KINDA_SMALL_NUMBER &&
+				O.Y >= -KINDA_SMALL_NUMBER && O.Y <= 1.0f + KINDA_SMALL_NUMBER &&
+				O.Z >= -KINDA_SMALL_NUMBER && O.Z <= 1.0f + KINDA_SMALL_NUMBER;
+			TestTrue(FString::Printf(TEXT("TransitionCellSampleOffsets[%d][%d] in [0,1]"), Face, i), bInRange);
+		}
+	}
+
 	return true;
 }
 

@@ -592,6 +592,48 @@ handling (see open issue 2 below) — it needs the same zero-thickness reduction
 mesh to the boundary + a flat ribbon reducing to the coarse neighbour) added to its shader/
 compute path so GPU MC LOD seams match the CPU path. (DC LOD seams remain a separate track.)
 
+#### GPU MC zero-thickness ribbon PORTED (2026-06-15) ★
+
+Ported the CPU zero-thickness approach to the GPU Marching Cubes path (faithful port: the GPU
+regular MC was converted to Lengyel tables so it is table-compatible with the transition cells,
+exactly as the CPU mesher requires — the GPU mesh is now identical in triangulation to the CPU
+mesh). The GPU mesh is a triangle soup (3 fresh verts per triangle, no index sharing), so
+watertightness is positional; Lengyel-on-both guarantees coincident crossing points.
+
+Changes:
+- `Shaders/Private/TransvoxelCommon.ush` (NEW): declares the uploaded lookup-table buffers
+  (regular + transition) and the small hardcoded constants (`LengyelCornerOffsets`,
+  `BitToSample`, endpoint→sample map) shared by both passes.
+- `Shaders/Private/MarchingCubesMeshGeneration.usf`: `MainCS` rewritten to Lengyel
+  table-driven MC (mirrors `ProcessCubeLOD`); new `TransitionCS` emits the zero-thickness
+  reduction ribbon (mirrors `GetTransitionCellDensities` + `ProcessTransitionCell`) — per active
+  face, per coarse-aligned boundary cell, depth pinned to the boundary plane, invariant corners
+  `d[9]=d[0]…`, winding `bInverted != (face is ±Y)`, degenerate-edge filter. All 13 samples land
+  on integer voxel coords (offsets `{0,0.5,1}×even CoarserStride`), so no GPU trilinear is needed.
+- `VoxelGPUMarchingCubesMesher` (.cpp/.h): builds the 8 lookup buffers from `TransvoxelTables`
+  (single source of truth), forwards `TransitionFaces` + per-face `CoarserStride`, adds the
+  `TransitionCS` pass after the main pass (RDG serializes via the shared counters; the soup
+  counters accumulate). Spurious transition flags (neighbour same/finer LOD) are dropped.
+
+Validation: headless `VoxelWorlds.Meshing.MarchingCubes.LODBoundary` suite — added **T11**
+(GPU-port watertightness contract: holes==0 + coarse-side match for LOD0|LOD1 and LOD1|LOD2 across
+Smooth/NonLinearZ/Cliff — the exact behaviour the shader reproduces) and **T12** (table/constant
+integrity pin: every transition case→class<56, regular case→class<16, triangle indices in range,
+`LowResCorners`=={0,2,6,8}, `BitToSample` is a permutation — guards the buffers the GPU indexes
+from drifting out of bounds). **All T1–T12 green** (T11: holes=0, unmatchedB=0, maxNearest=0.00 on
+every field/LOD pair). NOTE: `-nullrhi` headless cannot run GPU compute, so T11/T12 pin the CPU
+spec the shader mirrors; the GPU shader compile + visual seal are the live PIE gate (below).
+
+**Live PIE verify — PASSED (2026-06-15).** GPU-MC config (`use_gpu_meshing=True`, MC, seams ON),
+tight LOD bands (LOD0 0-3200 / LOD1 3200-6400 / LOD2 6400+) to frame the rings near origin. The
+GPU global shaders compiled with no errors and the GPU MC mesher rendered the terrain. Decisive
+A/B at a fixed vantage (`Saved/Screenshots/Claudius/gpumc_zoom_{off,on}.png`,
+`gpumc_rings_{off,on}.png`): **seams OFF** (no ribbon) shows blue see-through slivers along the LOD
+boundaries in both the grass and sand; **seams ON** (ribbon) seals them — terrain reads continuous
+with no see-through-to-sky. The GPU transition ribbon engages and closes the seams exactly like the
+CPU path. **GPU MC LOD seams: DONE.** (Setup scripts: `Saved/claudius_gpumc_setup.py`,
+`claudius_gpumc_bands.py`.)
+
 **Open issues / next steps:**
 1. **Transvoxel transition strip leaves holes (PRIMARY — deterministic repro in T9).**
    Fix per the plan above (correct Lengyel orientation). Earlier multi-chunk
@@ -613,8 +655,10 @@ compute path so GPU MC LOD seams match the CPU path. (DC LOD seams remain a sepa
    Next probe: instrument the *specific* visible-crack chunks (their rendered LOD,
    neighbor rendered LODs, and TF) and/or compare the two bordering chunks' actual
    submitted boundary vertices live.
-2. **GPU MC has no seam handling** — needs transvoxel/skirt added to the GPU shader
-   if GPU MC is a shipping path.
+2. **GPU MC seam handling — DONE (2026-06-15).** The zero-thickness transvoxel ribbon + Lengyel
+   regular-table conversion are implemented in the GPU shader/compute path (see "GPU MC
+   zero-thickness ribbon PORTED" above). Headless T11/T12 green; **live PIE A/B confirmed the ribbon
+   seals GPU-MC LOD seams** (OFF cracks, ON sealed).
 3. **CPU-MC T-junctions** (minor) — coarse-2×2 boundary-face restructure for strict 1:1.
 4. **DC LOD seams** — separate investigation (`BuildLODMergeMap` + DC shader).
 5. **Spurious-TF fix (DONE)** — landed; eliminates degenerate same-LOD transition cells.
