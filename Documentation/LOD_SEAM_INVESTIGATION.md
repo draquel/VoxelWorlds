@@ -634,6 +634,64 @@ with no see-through-to-sky. The GPU transition ribbon engages and closes the sea
 CPU path. **GPU MC LOD seams: DONE.** (Setup scripts: `Saved/claudius_gpumc_setup.py`,
 `claudius_gpumc_bands.py`.)
 
+## DC LOD seams — relationship to the MC findings (2026-06-15, code analysis)
+
+Scoping pass before opening a DC thread. No code changed; this is a code-grounded analysis of
+how Dual Contouring handles LOD boundaries and why the **MC root cause applies to DC too**.
+
+### How DC handles LOD boundaries (no transvoxel)
+DC has no transition geometry. At a face bordering a coarser neighbour it **merges** the fine
+boundary cells (Pass 3.5, `MergeLODBoundaryCells`): group `MergeRatio×MergeRatio` fine cells,
+produce one vertex, alias all fine cells to it. The merged vertex is derived **only from
+fine-side data**:
+- **CPU** (`VoxelCPUDualContourMesher::MergeLODBoundaryCells`, ~line 571): re-solves a QEF
+  accumulated from *all* the fine cells' edge crossings in the group, clamped to a coarse-area ×
+  one-fine-cell-deep box.
+- **GPU** (`VoxelGPUDualContourMesher::BuildLODMergeMap`, ~line 341): builds a CPU-side index
+  map `[aliasCell → baseCell]`; quad gen redirects fine cells to the **base corner cell's**
+  vertex — that single fine cell's Pass-2 QEF. **No group re-solve.**
+
+### Why this is the SAME root cause as the MC seam
+The MC headline finding: fine-stride and coarse-stride sampling land the isosurface at
+**different positions on non-linear/steep terrain**, so the two sides of a LOD boundary don't
+coincide; watertightness requires the fine side's boundary geometry to be derived from data the
+coarse neighbour also sees (the MC ribbon's coarse contour uses the neighbour's exact boundary
+densities → `B→A crack 0.000`). DC has the identical structural problem via QEF:
+
+1. **Fine-derived boundary vertex ≠ coarse neighbour's vertex.** The merged/redirected vertex is
+   computed from fine crossings (or one fine cell's QEF); the coarse neighbour computes its
+   boundary vertex from *coarse-stride* crossings via its own QEF. On non-linear terrain those
+   solve to different positions → boundary vertices don't coincide → crack. Nothing in the merge
+   references what the neighbour produces. (DC analogue of the MC depth-offset/stride-height seam.)
+2. **Same test blind spot.** DC has **no LOD-boundary tests at all**; the MC suite's linear-Z
+   field hid this class of bug — a linear field would hide the DC seam too.
+3. **Same CPU/GPU divergence.** CPU DC (group QEF re-solve) and GPU DC (redirect to base cell)
+   are *different algorithms* → CPU and GPU DC don't match each other at boundaries, exactly like
+   MC used classic tables on GPU vs Lengyel on CPU. The MC port unified them; DC needs the same.
+4. **Shared, mesher-agnostic fix already applies.** P2-A (defer meshing against non-resident
+   neighbour data) lives in `UVoxelChunkManager`, not the mesher — DC already benefits.
+
+### What transfers directly
+- The entire MC test harness (`MarchingCubesLODBoundaryTests.cpp`: `MakeChunkRequest`,
+  `FillAllNeighborData`, `MeasureSeam`, `CountInteriorOpenEdges`, the Smooth/NonLinearZ/Cliff
+  fields) is mesher-agnostic — swapping in `FVoxelCPUDualContourMesher` yields an instant DC
+  watertightness suite. The NonLinearZ/Cliff cases should reproduce the DC seam deterministically
+  (linear won't), mirroring how T9 first pinned the MC bug.
+- The fix *principle*: derive the shared-boundary vertex from data both sides agree on (make the
+  merged boundary vertex coincide with the coarse neighbour's QEF vertex), not from fine crossings
+  the neighbour never sees.
+
+### Where DC genuinely differs (don't over-transfer)
+- No shared-vertex/ribbon mechanism — the DC fix is surgery on the merge, not a ported table.
+- QEF makes *exact* coincidence harder than MC's `InterpolateEdge`; the target may be "coincident
+  within tolerance via shared input data" rather than bit-exact.
+
+### Suggested first steps for the DC thread
+1. Add a DC LOD-boundary suite (reuse the MC harness) → expect green on Smooth, **red on
+   NonLinearZ/Cliff** (reproduce first, like MC T9).
+2. Unify CPU+GPU DC merge and make the merged boundary vertex match the coarse neighbour; then
+   live-PIE A/B (seams on/off) on a GPU-DC config, as done for MC.
+
 **Open issues / next steps:**
 1. **Transvoxel transition strip leaves holes (PRIMARY — deterministic repro in T9).**
    Fix per the plan above (correct Lengyel orientation). Earlier multi-chunk
@@ -660,7 +718,9 @@ CPU path. **GPU MC LOD seams: DONE.** (Setup scripts: `Saved/claudius_gpumc_setu
    zero-thickness ribbon PORTED" above). Headless T11/T12 green; **live PIE A/B confirmed the ribbon
    seals GPU-MC LOD seams** (OFF cracks, ON sealed).
 3. **CPU-MC T-junctions** (minor) — coarse-2×2 boundary-face restructure for strict 1:1.
-4. **DC LOD seams** — separate investigation (`BuildLODMergeMap` + DC shader).
+4. **DC LOD seams** — separate track; same root cause as MC suspected. Code-grounded
+   relationship analysis landed (see "DC LOD seams — relationship to the MC findings"
+   section below). Next thread starts from there.
 5. **Spurious-TF fix (DONE)** — landed; eliminates degenerate same-LOD transition cells.
 
 **Decision tree after first run:**
