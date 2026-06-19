@@ -67,6 +67,34 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	TArray<FVoxelData> NeighborZNeg;  // -Z neighbor (Bottom)
 
 	/**
+	 * Additional neighbor planes BEYOND the first (plane 0) face slice above, for
+	 * smooth meshers (Dual Contouring / Marching Cubes) at LOD > 0. A strided
+	 * boundary cell physically reaches `stride` voxels into the neighbor and its
+	 * gradient normals reach ~2*stride; one plane (the fields above) is only enough
+	 * at stride 1. Each Deep array holds (NeighborPlaneDepth - 1) extra planes,
+	 * plane k (k=0..) at one voxel deeper than the previous: for -X that is
+	 * neighbor X = ChunkSize-2-k (world depth -(k+2)); for +X, neighbor X = 1+k
+	 * (world depth +(k+1)). Empty for LOD 0 / non-smooth meshers — readers fall back
+	 * to plane 0, so all existing single-plane consumers are unaffected.
+	 */
+	UPROPERTY()
+	TArray<FVoxelData> NeighborXPosDeep;
+	UPROPERTY()
+	TArray<FVoxelData> NeighborXNegDeep;
+	UPROPERTY()
+	TArray<FVoxelData> NeighborYPosDeep;
+	UPROPERTY()
+	TArray<FVoxelData> NeighborYNegDeep;
+	UPROPERTY()
+	TArray<FVoxelData> NeighborZPosDeep;
+	UPROPERTY()
+	TArray<FVoxelData> NeighborZNegDeep;
+
+	/** Total provided depth of the face-neighbor data (1 = single plane = legacy). */
+	UPROPERTY()
+	int32 NeighborPlaneDepth = 1;
+
+	/**
 	 * Edge neighbor data for diagonal chunk boundaries (Marching Cubes).
 	 * Each array contains ChunkSize voxels representing an edge strip.
 	 * Named by the two positive/negative axes involved.
@@ -108,6 +136,51 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	TArray<FVoxelData> EdgeYNegZNeg;  // -Y-Z edge (X varies)
 
 	/**
+	 * Deep edge neighbor data for strided (LOD>0) Dual Contouring boundary cells.
+	 * The 2-axis outward boundary cell at stride S reaches S voxels diagonally into the
+	 * edge neighbour, so the single Edge* strip (depth 1,1) is insufficient. Each Deep
+	 * array holds the full NeighborPlaneDepth x NeighborPlaneDepth grid of free-axis
+	 * strips: index ((dA * NeighborPlaneDepth) + dB) * ChunkSize + Free, where dA/dB are
+	 * 0-based depths into the two pinned axes (0,0 == the base Edge* strip). Empty when
+	 * NeighborPlaneDepth == 1 (LOD0) — readers fall back to the 1-strip Edge* field.
+	 */
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosYPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosYNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegYPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegYNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXPosZNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeXNegZNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYPosZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYPosZNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYNegZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> EdgeYNegZNegDeep;
+
+	/**
 	 * Corner neighbor data for diagonal chunk boundaries (Marching Cubes).
 	 * Single voxel at each of the 8 chunk corners.
 	 */
@@ -134,6 +207,38 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 
 	UPROPERTY()
 	FVoxelData CornerXNegYNegZNeg;  // -X-Y-Z corner
+
+	/**
+	 * Deep corner neighbor data for strided (LOD>0) Dual Contouring boundary cells.
+	 * The 3-axis outward boundary cell reaches S voxels along the body diagonal into the
+	 * corner neighbour. Each Deep array holds the full NeighborPlaneDepth^3 box:
+	 * index ((dA * NeighborPlaneDepth) + dB) * NeighborPlaneDepth + dC, where dA/dB/dC are
+	 * 0-based depths into the three pinned axes (0,0,0 == the single Corner* voxel). Empty
+	 * when NeighborPlaneDepth == 1 (LOD0) — readers fall back to the scalar Corner* field.
+	 */
+	UPROPERTY()
+	TArray<FVoxelData> CornerXPosYPosZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> CornerXPosYPosZNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> CornerXPosYNegZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> CornerXPosYNegZNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> CornerXNegYPosZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> CornerXNegYPosZNegDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> CornerXNegYNegZPosDeep;
+
+	UPROPERTY()
+	TArray<FVoxelData> CornerXNegYNegZNegDeep;
 
 	/** Flags indicating which edge/corner data is valid */
 	UPROPERTY()
@@ -241,6 +346,75 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	FORCEINLINE bool HasCorner(uint32 CornerFlag) const
 	{
 		return (EdgeCornerFlags & CornerFlag) != 0;
+	}
+
+	/**
+	 * Resolve a face-neighbor voxel at plane `PlaneIdx` into the neighbor, where
+	 * PlaneIdx 0 is the first (single) face slice and PlaneIdx >= 1 reads the Deep
+	 * array. Clamps past the provided depth, and falls back to plane 0 when no Deep
+	 * data is present (legacy single-plane behavior). InPlaneIdx is the index within
+	 * a face slice (e.g. Y + Z*ChunkSize for an X face).
+	 */
+	FORCEINLINE FVoxelData NeighborPlaneVoxel(const TArray<FVoxelData>& Plane0, const TArray<FVoxelData>& Deep,
+		int32 InPlaneIdx, int32 PlaneIdx) const
+	{
+		if (PlaneIdx <= 0)
+		{
+			return Plane0[InPlaneIdx];
+		}
+		const int32 SliceSize = GetNeighborSliceSize();
+		const int32 DeepPlanes = SliceSize > 0 ? Deep.Num() / SliceSize : 0;
+		if (DeepPlanes <= 0)
+		{
+			return Plane0[InPlaneIdx]; // legacy: only the single plane is available
+		}
+		const int32 K = FMath::Min(PlaneIdx - 1, DeepPlanes - 1);
+		return Deep[K * SliceSize + InPlaneIdx];
+	}
+
+	/**
+	 * Resolve an edge-neighbor voxel at depth (DepthA, DepthB) into the two pinned axes,
+	 * where (0,0) is the base Edge* strip and >=1 reads the Deep grid. FreeIdx is the
+	 * index along the free axis (0..ChunkSize-1). Clamps past the provided depth, and
+	 * falls back to the base strip when no Deep data is present (legacy LOD0 behavior).
+	 */
+	FORCEINLINE FVoxelData EdgeDeepVoxel(const TArray<FVoxelData>& Base1D, const TArray<FVoxelData>& Deep2D,
+		int32 FreeIdx, int32 DepthA, int32 DepthB) const
+	{
+		if (Deep2D.Num() == 0)
+		{
+			return Base1D.IsValidIndex(FreeIdx) ? Base1D[FreeIdx] : FVoxelData();
+		}
+		const int32 D = FMath::Max(NeighborPlaneDepth, 1);
+		const int32 a = FMath::Clamp(DepthA, 0, D - 1);
+		const int32 b = FMath::Clamp(DepthB, 0, D - 1);
+		const int32 Idx = (a * D + b) * ChunkSize + FreeIdx;
+		if (Deep2D.IsValidIndex(Idx))
+		{
+			return Deep2D[Idx];
+		}
+		return Base1D.IsValidIndex(FreeIdx) ? Base1D[FreeIdx] : FVoxelData();
+	}
+
+	/**
+	 * Resolve a corner-neighbor voxel at depth (DepthA, DepthB, DepthC) into the three
+	 * pinned axes, where (0,0,0) is the single Corner* voxel and >=1 reads the Deep box.
+	 * Clamps past the provided depth, and falls back to the scalar corner when no Deep
+	 * data is present (legacy LOD0 behavior).
+	 */
+	FORCEINLINE FVoxelData CornerDeepVoxel(const FVoxelData& Base, const TArray<FVoxelData>& Deep3D,
+		int32 DepthA, int32 DepthB, int32 DepthC) const
+	{
+		if (Deep3D.Num() == 0)
+		{
+			return Base;
+		}
+		const int32 D = FMath::Max(NeighborPlaneDepth, 1);
+		const int32 a = FMath::Clamp(DepthA, 0, D - 1);
+		const int32 b = FMath::Clamp(DepthB, 0, D - 1);
+		const int32 c = FMath::Clamp(DepthC, 0, D - 1);
+		const int32 Idx = (a * D + b) * D + c;
+		return Deep3D.IsValidIndex(Idx) ? Deep3D[Idx] : Base;
 	}
 
 	/** Get expected edge strip size */

@@ -692,6 +692,72 @@ densities → `B→A crack 0.000`). DC has the identical structural problem via 
 2. Unify CPU+GPU DC merge and make the merged boundary vertex match the coarse neighbour; then
    live-PIE A/B (seams on/off) on a GPU-DC config, as done for MC.
 
+## DC LOD seams — REPRODUCED, FIXED (mesher-local weld), GPU + live verified (2026-06-16) ★
+
+DC thread executed. New headless suite `Source/VoxelMeshing/Tests/DualContourLODBoundaryTests.cpp`
+(`VoxelWorlds.Meshing.DualContour.LODBoundary`, DT1–DT4) reusing the mesher-agnostic MC harness
+(Smooth/NonLinearZ/Cliff fields, request builders) with `FVoxelCPUDualContourMesher`.
+
+### Phase 1 — repro: the root cause is BROADER than the relationship analysis assumed
+Metric: coarse-side vertex match (every coarse-neighbour boundary vertex must coincide with a
+finer-side vertex). First run (pre-fix):
+
+| Test | Result | Note |
+|------|--------|------|
+| DT1 LOD0\|LOD0 (stride 1) | ✅ unmatched 0, maxDist **0.00** | bit-exact — the QEF solve IS frame-consistent |
+| DT2 LOD1\|LOD1 (stride 2) | ❌ 18/18 unmatched, 113u | same-LOD STRIDED also cracks |
+| DT3 LOD2\|LOD2 (stride 4) | ❌ 10/10, 183u | worse at higher stride |
+| DT4 fine\|coarse merge | ❌ all fields incl. **Smooth** (50–211u) | merge broken on every field |
+
+**Root cause (not the originally-suspected stride-height mismatch alone):** DC's QEF vertex is
+solved over a whole *cell*; a chunk's OUTWARD boundary cell (`CX=-1`) at stride S reaches S voxels
+past the chunk face, but neighbour data is only **one plane deep** (`ExtractNeighborEdgeSlices` fills
+`NeighborX* = SliceSize = ChunkSize²`; `FVoxelMeshingRequest` structurally holds one plane —
+verified). At stride ≥2 the outward cell reads clamped/wrong densities → the two sides of *every*
+stride>1 boundary disagree. Stride-1 (LOD0) reaches exactly the one provided plane → bit-exact.
+MC doesn't have this because MC boundary cubes never read past the boundary plane. The old DC merge
+(CPU group-QEF / GPU base-cell redirect) computed the boundary vertex from fine-side data only, so it
+never matched the coarse neighbour either — broken on Smooth too, disproving "green-on-Smooth".
+
+### Phase 2 — fix: mesher-local boundary weld (`WeldStridedBoundaryCells`, replaced `MergeLODBoundaryCells`)
+Decision (user, 2026-06-16): **weld now, defer the bit-exact pipeline-depth fix to the streaming
+pass** (the deep fix touches all LOD≥1 chunks' neighbour extraction — the streaming hot path — and
+disturbs MC's shared extraction/`GetVoxelAt`; the weld is mesher-local, zero perf/MC impact).
+
+The weld: for any face whose effective stride `E = 1<<max(selfLOD, neighborLOD) > 1`, snap each
+boundary-layer cell onto the **shared sub-feature** of the boundary faces it touches — one face → the
+face plane (perp from the coarse face-square iso-crossings), two faces → the shared edge line, three
+faces → the corner point — derived only from the shared face-plane voxels both neighbours see, so both
+sides coincide by construction. Stride-1 boundaries untouched (already bit-exact). On the FINER side of
+a transition (`E > Stride`) a steep cell with no on-plane crossing falls back to the 4 corner edges
+crossing one fine voxel into the slab (plane-1 → plane). Toggle: `voxel.DCBoundaryWeld` (default 1).
+
+Headless result (all DT green, exit 0): **DT1=0 (bit-exact), DT3=0, DT4 LOD1|LOD2=0 all fields**;
+residual ≤2 cells on DT2 and DT4 LOD0|LOD1 (incl. Cliff). The residual is at LOD-patch EDGES/CORNERS
+(a chunk edge crossing the LOD boundary) where two independently-meshed chunks of different LOD don't
+emit perfectly matching geometry — **the same class MC accepted as a known limitation (open issue
+1b)**. Tests gate `UnmatchedB <= AcceptedEdgeResidual (2)`; DT1 strict 0. MC suite re-run green (no
+regression — DC changes are DC-only).
+
+### Phase 3 — GPU unify + live verify
+GPU port = faithful mirror: new `DCWeldBoundaryCS` (Pass 2.6) in `DualContourMeshGeneration.usf`
+replicating `WeldStridedBoundaryCells` per-cell (packed `NeighborLODPacked`, same face/edge/corner
+weld + fine-side fallback), overwriting boundary cell + output vertex positions; **removed** the old
+`BuildLODMergeMap` + the quad-gen merge-map redirect (CPU/GPU now use the *same* algorithm). Gated by
+the same `voxel.DCBoundaryWeld` CVar. `FDCWeldBoundaryCS` **compiled clean** at editor startup
+(0.76s, no errors — the GPU gate, since `-nullrhi` headless can't run compute).
+
+**Live PIE A/B (GPU-DC config, `use_gpu_meshing=True`, DUAL_CONTOURING, tight LOD bands 0-3200 L0 /
+3200-6400 L1 / 6400+ L2):** same world re-meshed in place via `voxel.DCBoundaryWeld 0/1` + remesh-all
+(no PIE restart → identical terrain, only the weld differs). **OFF** (`gpudc_ab_off.png`): thin blue
+see-through slivers cut across the hillside and the sandy terraces at LOD chunk boundaries. **ON**
+(`gpudc_ab_on.png`): sealed. Setup scripts: `Saved/claudius_gpudc_setup.py`, `claudius_gpudc_bands.py`.
+
+**Deferred follow-up (streaming pass):** stride-deep neighbour data so strided boundary cells compute
+correct *floating* verts → bit-exact everywhere (like DT1), eliminating the edge/corner residual.
+Invasive: `FVoxelMeshingRequest` + `ExtractNeighborEdgeSlices` + both CPU meshers + GPU shader/buffers,
+and adds per-chunk extraction cost on all LOD≥1 chunks — design it into the streaming-perf work.
+
 **Open issues / next steps:**
 1. **Transvoxel transition strip leaves holes (PRIMARY — deterministic repro in T9).**
    Fix per the plan above (correct Lengyel orientation). Earlier multi-chunk

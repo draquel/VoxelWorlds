@@ -15,13 +15,15 @@ class FRDGPooledBuffer;
  *
  * Implements the same DC algorithm as FVoxelCPUDualContourMesher but executes
  * on the GPU via a 4-pass compute shader pipeline:
- *   Pass 0: ResetCountersCS     - Zero all atomic counters
- *   Pass 1: EdgeCrossingCS      - Detect density sign changes, store hermite data
- *   Pass 2: QEFSolveCS          - Solve 3x3 QEF per cell via Jacobi SVD
- *   Pass 3: QuadGenerationCS    - Emit quads from 4-cell edge sharing
+ *   Pass 0:   ResetCountersCS    - Zero all atomic counters
+ *   Pass 1:   EdgeCrossingCS     - Detect density sign changes, store hermite data
+ *   Pass 2:   QEFSolveCS         - Solve 3x3 QEF per cell via Jacobi SVD
+ *   Pass 2.6: WeldBoundaryCS     - Weld strided-boundary cell vertices onto the
+ *                                  shared face/edge/corner feature (LOD seam fix)
+ *   Pass 3:   QuadGenerationCS   - Emit quads from 4-cell edge sharing
  *
- * LOD boundary merging is handled as a CPU pre-pass that produces a merge map
- * buffer uploaded to the GPU before dispatch.
+ * LOD boundaries are sealed by the Pass 2.6 weld (mirrors the CPU
+ * WeldStridedBoundaryCells), which replaced the old CPU-built merge map.
  *
  * Performance: Target < 3ms per 32^3 chunk on modern GPUs
  * Thread Safety: Must be called from game thread, work dispatched to render thread
@@ -176,14 +178,4 @@ private:
 
 	/** Pack voxel data for GPU upload */
 	TArray<uint32> PackVoxelDataForGPU(const TArray<FVoxelData>& VoxelData);
-
-	/**
-	 * Build LOD merge map for boundary cell merging.
-	 * CPU pre-pass that identifies boundary cells to merge for LOD transitions.
-	 * Returns pairs of (OriginalCellIndex, ReplacementCellIndex).
-	 */
-	TArray<uint32> BuildLODMergeMap(
-		const FVoxelMeshingRequest& Request,
-		int32 GridDim,
-		int32 Stride);
 };

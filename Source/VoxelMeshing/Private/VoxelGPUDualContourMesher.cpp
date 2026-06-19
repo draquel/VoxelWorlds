@@ -14,6 +14,10 @@
 #include "RHIGPUReadback.h"
 #include "RenderingThread.h"
 #include "DataDrivenShaderPlatformInfo.h"
+#include "HAL/IConsoleManager.h"
+
+// Defined in VoxelCPUDualContourMesher.cpp — toggles the strided-boundary weld.
+extern TAutoConsoleVariable<int32> CVarDCBoundaryWeld;
 
 // ==================== GPU DC Intermediate Structures ====================
 // Must match HLSL struct layout in DualContourMeshGeneration.usf
@@ -90,6 +94,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZPos)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDCEdgeCrossingGPU>, DCEdgeCrossings)
@@ -161,6 +167,71 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZPos)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
+		SHADER_PARAMETER(uint32, NeighborFlags)
+		SHADER_PARAMETER(uint32, EdgeCornerFlags)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_X"), 8);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_Y"), 8);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_Z"), 4);
+	}
+};
+
+/**
+ * Pass 2.6: Weld strided boundary cells onto the shared chunk-face feature.
+ * Mirrors FVoxelCPUDualContourMesher::WeldStridedBoundaryCells (replaces the old
+ * LOD merge map). Overwrites boundary-layer cell + output vertex positions so both
+ * sides of every stride>1 boundary coincide.
+ */
+class FDCWeldBoundaryCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FDCWeldBoundaryCS);
+	SHADER_USE_PARAMETER_STRUCT(FDCWeldBoundaryCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDCCellVertexGPU>, DCCellVertices)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVoxelVertex>, OutputVertices)
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(float, VoxelSize)
+		SHADER_PARAMETER(float, IsoLevel)
+		SHADER_PARAMETER(uint32, LODStride)
+		SHADER_PARAMETER(uint32, GridDim)
+		SHADER_PARAMETER(uint32, MaxVertexCount)
+		SHADER_PARAMETER(uint32, NeighborLODPacked)
+		// Voxel access for density sampling at the boundary slab
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InputVoxelData)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborXPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborXNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborYPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborYNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborZPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborZNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosYPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosYNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegYPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegYNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosZPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosZNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegZPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegZNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYPosZPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYPosZNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZPos)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
 	END_SHADER_PARAMETER_STRUCT()
@@ -215,8 +286,6 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDCCellVertexGPU>, DCCellVertices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputIndices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, MeshCounters)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, LODMergeMap)
-		SHADER_PARAMETER(uint32, LODMergeMapCount)
 		SHADER_PARAMETER(uint32, ChunkSize)
 		SHADER_PARAMETER(float, VoxelSize)
 		SHADER_PARAMETER(float, IsoLevel)
@@ -244,6 +313,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZPos)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
 	END_SHADER_PARAMETER_STRUCT()
@@ -257,6 +328,7 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FDCResetCountersCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCResetCountersCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCEdgeCrossingCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCEdgeCrossingCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCQEFSolveCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCQEFSolveCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FDCWeldBoundaryCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCWeldBoundaryCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCPrepareIndirectArgsCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCPrepareIndirectArgsCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCQuadGenerationCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCQuadGenerationCS", SF_Compute);
 
@@ -336,83 +408,6 @@ TArray<uint32> FVoxelGPUDualContourMesher::PackVoxelDataForGPU(const TArray<FVox
 	}
 
 	return PackedData;
-}
-
-TArray<uint32> FVoxelGPUDualContourMesher::BuildLODMergeMap(
-	const FVoxelMeshingRequest& Request,
-	int32 GridDim,
-	int32 Stride)
-{
-	TArray<uint32> MergeMap;
-	const int32 ChunkSize = Request.ChunkSize;
-	const int32 GridSize = ChunkSize / Stride;
-
-	auto CellIdx = [GridDim](int32 CX, int32 CY, int32 CZ) -> uint32
-	{
-		return static_cast<uint32>((CX + 1) + (CY + 1) * GridDim + (CZ + 1) * GridDim * GridDim);
-	};
-
-	for (int32 Face = 0; Face < 6; Face++)
-	{
-		const int32 NeighborLOD = Request.NeighborLODLevels[Face];
-		if (NeighborLOD <= Request.LODLevel)
-		{
-			continue;
-		}
-
-		const int32 CoarserStride = 1 << NeighborLOD;
-		const int32 MergeRatio = CoarserStride / Stride;
-		if (MergeRatio <= 1)
-		{
-			continue;
-		}
-
-		const int32 DepthAxis = Face / 2;
-		const bool bPositiveFace = (Face % 2 == 1);
-		const int32 BoundaryCell = bPositiveFace ? (GridSize - 1) : 0;
-
-		for (int32 A2 = 0; A2 < GridSize; A2 += MergeRatio)
-		{
-			for (int32 A1 = 0; A1 < GridSize; A1 += MergeRatio)
-			{
-				// Compute base cell
-				int32 BaseCX, BaseCY, BaseCZ;
-				switch (DepthAxis)
-				{
-				case 0: BaseCX = BoundaryCell; BaseCY = A1; BaseCZ = A2; break;
-				case 1: BaseCX = A1; BaseCY = BoundaryCell; BaseCZ = A2; break;
-				default: BaseCX = A1; BaseCY = A2; BaseCZ = BoundaryCell; break;
-				}
-
-				const uint32 BaseIdx = CellIdx(BaseCX, BaseCY, BaseCZ);
-
-				// Map all fine cells in this group to the base cell
-				for (int32 DA2 = 0; DA2 < MergeRatio && (A2 + DA2) < GridSize; DA2++)
-				{
-					for (int32 DA1 = 0; DA1 < MergeRatio && (A1 + DA1) < GridSize; DA1++)
-					{
-						if (DA1 == 0 && DA2 == 0)
-						{
-							continue; // Skip base cell itself
-						}
-
-						int32 AliasCX, AliasCY, AliasCZ;
-						switch (DepthAxis)
-						{
-						case 0: AliasCX = BoundaryCell; AliasCY = A1 + DA1; AliasCZ = A2 + DA2; break;
-						case 1: AliasCX = A1 + DA1; AliasCY = BoundaryCell; AliasCZ = A2 + DA2; break;
-						default: AliasCX = A1 + DA1; AliasCY = A2 + DA2; AliasCZ = BoundaryCell; break;
-						}
-
-						MergeMap.Add(CellIdx(AliasCX, AliasCY, AliasCZ));
-						MergeMap.Add(BaseIdx);
-					}
-				}
-			}
-		}
-	}
-
-	return MergeMap;
 }
 
 FVoxelMeshingHandle FVoxelGPUDualContourMesher::GenerateMeshAsync(
@@ -504,6 +499,32 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 	PackedCornerData[6] = Request.CornerXNegYNegZPos.Pack();
 	PackedCornerData[7] = Request.CornerXNegYNegZNeg.Pack();
 
+	// Pack deep face neighbor data (strided LOD>0 boundary cells). Concatenate the 6 faces
+	// in order [XPos,XNeg,YPos,YNeg,ZPos,ZNeg], each (NeighborPlaneDepth-1)*SliceSize uints,
+	// zero-filling absent faces so the shader indexes by face*(D-1)*SliceSize. Mirrors the
+	// CPU FVoxelMeshingRequest::Neighbor*Deep arrays. Empty (dummy) for LOD0 (depth 1).
+	const uint32 NeighborPlaneDepth = static_cast<uint32>(FMath::Max(Request.NeighborPlaneDepth, 1));
+	const int32 DeepPlanes = static_cast<int32>(NeighborPlaneDepth) - 1;
+	TArray<uint32> PackedFaceDeep;
+	if (DeepPlanes > 0)
+	{
+		const int32 FaceStride = DeepPlanes * SliceSize;
+		PackedFaceDeep.SetNumZeroed(6 * FaceStride);
+		const TArray<FVoxelData>* DeepArrays[6] = {
+			&Request.NeighborXPosDeep, &Request.NeighborXNegDeep,
+			&Request.NeighborYPosDeep, &Request.NeighborYNegDeep,
+			&Request.NeighborZPosDeep, &Request.NeighborZNegDeep };
+		for (int32 Face = 0; Face < 6; ++Face)
+		{
+			const TArray<FVoxelData>& Arr = *DeepArrays[Face];
+			if (Arr.Num() == FaceStride)
+			{
+				const TArray<uint32> Packed = PackVoxelDataForGPU(Arr);
+				FMemory::Memcpy(&PackedFaceDeep[Face * FaceStride], Packed.GetData(), FaceStride * sizeof(uint32));
+			}
+		}
+	}
+
 	uint32 EdgeCornerFlags = Request.EdgeCornerFlags;
 
 	// LOD parameters
@@ -518,9 +539,16 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 	const int32 GridDim = LODChunkSize + 3;
 	const int32 TotalCells = GridDim * GridDim * GridDim;
 
-	// Build LOD merge map (CPU pre-pass)
-	TArray<uint32> MergeMap = BuildLODMergeMap(Request, GridDim, static_cast<int32>(LODStride));
-	const uint32 MergeMapPairCount = MergeMap.Num() / 2;
+	// Pack the 6 neighbor LOD levels for the strided boundary weld (Pass 2.6):
+	// 3 bits per face = clamp(NeighborLODLevels[face], 0, 7). The weld only uses
+	// max(NeighborLOD, 0), so encoding -1 (no neighbor) as 0 is equivalent.
+	uint32 NeighborLODPacked = 0;
+	for (int32 Face = 0; Face < 6; Face++)
+	{
+		const uint32 NL = static_cast<uint32>(FMath::Clamp(Request.NeighborLODLevels[Face], 0, 7));
+		NeighborLODPacked |= (NL << (Face * 3));
+	}
+	const bool bDoBoundaryWeld = CVarDCBoundaryWeld.GetValueOnGameThread() != 0;
 
 	ENQUEUE_RENDER_COMMAND(GenerateDCMesh)(
 		[PackedVoxels = MoveTemp(PackedVoxels),
@@ -543,7 +571,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		 PackedEdgeYNegZPos = MoveTemp(PackedEdgeYNegZPos),
 		 PackedEdgeYNegZNeg = MoveTemp(PackedEdgeYNegZNeg),
 		 PackedCornerData = MoveTemp(PackedCornerData),
-		 MergeMap = MoveTemp(MergeMap),
+		 PackedFaceDeep = MoveTemp(PackedFaceDeep),
+		 NeighborPlaneDepth,
 		 NeighborFlags,
 		 EdgeCornerFlags,
 		 ChunkSize,
@@ -554,7 +583,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		 LODStride,
 		 GridDim,
 		 TotalCells,
-		 MergeMapPairCount,
+		 NeighborLODPacked,
+		 bDoBoundaryWeld,
 		 RequestId,
 		 Result,
 		 OnComplete](FRHICommandListImmediate& RHICmdList)
@@ -615,6 +645,9 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			FRDGBufferRef CornerDataBuffer = GraphBuilder.CreateBuffer(CornerBufferDesc, TEXT("CornerData"));
 			GraphBuilder.QueueBufferUpload(CornerDataBuffer, PackedCornerData.GetData(), PackedCornerData.Num() * sizeof(uint32));
 
+			// Deep face neighbor data (concatenated 6 faces; dummy when LOD0/empty)
+			FRDGBufferRef FaceDeepBuffer = CreateNeighborBuffer(PackedFaceDeep, TEXT("FaceDeep"));
+
 			// ===== Create intermediate DC buffers =====
 
 			// Edge crossings: TotalCells * 3 entries
@@ -628,20 +661,6 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			// Cell vertices: TotalCells entries
 			FRDGBufferDesc CellVertexDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FDCCellVertexGPU), TotalCells);
 			FRDGBufferRef CellVertexBuffer = GraphBuilder.CreateBuffer(CellVertexDesc, TEXT("DCCellVertices"));
-
-			// LOD merge map
-			const int32 MergeMapElements = FMath::Max(MergeMap.Num(), 2); // At least 2 to avoid empty buffer
-			FRDGBufferDesc MergeMapDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MergeMapElements);
-			FRDGBufferRef MergeMapBuffer = GraphBuilder.CreateBuffer(MergeMapDesc, TEXT("LODMergeMap"));
-			if (MergeMap.Num() > 0)
-			{
-				GraphBuilder.QueueBufferUpload(MergeMapBuffer, MergeMap.GetData(), MergeMap.Num() * sizeof(uint32));
-			}
-			else
-			{
-				static const uint32 DummyMerge[2] = {0, 0};
-				GraphBuilder.QueueBufferUpload(MergeMapBuffer, DummyMerge, sizeof(DummyMerge));
-			}
 
 			// ===== Create output buffers =====
 			FRDGBufferDesc VertexBufferDesc = FRDGBufferDesc::CreateStructuredDesc(
@@ -688,6 +707,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			auto EdgeYNegZPosSRV = GraphBuilder.CreateSRV(EdgeYNegZPosBuffer);
 			auto EdgeYNegZNegSRV = GraphBuilder.CreateSRV(EdgeYNegZNegBuffer);
 			auto CornerSRV = GraphBuilder.CreateSRV(CornerDataBuffer);
+			auto FaceDeepSRV = GraphBuilder.CreateSRV(FaceDeepBuffer);
 			auto MeshCountersUAV = GraphBuilder.CreateUAV(MeshCountersBuffer);
 
 			// Helper lambda to bind voxel access parameters
@@ -713,6 +733,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				Params->EdgeYNegZPos = EdgeYNegZPosSRV;
 				Params->EdgeYNegZNeg = EdgeYNegZNegSRV;
 				Params->CornerData = CornerSRV;
+				Params->FaceDeep = FaceDeepSRV;
+				Params->NeighborPlaneDepth = NeighborPlaneDepth;
 				Params->NeighborFlags = NeighborFlags;
 				Params->EdgeCornerFlags = EdgeCornerFlags;
 			};
@@ -799,6 +821,42 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				);
 			}
 
+			// ===== Pass 2.6: Weld Strided Boundary Cells =====
+			// Replaces the old LOD merge map: welds boundary-layer cell + output
+			// vertices onto the shared face/edge/corner feature so both sides of every
+			// stride>1 boundary coincide. Mirrors the CPU WeldStridedBoundaryCells.
+			// Gated by voxel.DCBoundaryWeld (off = pre-fix cracks, for A/B verify).
+			if (bDoBoundaryWeld)
+			{
+				TShaderMapRef<FDCWeldBoundaryCS> WeldShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FDCWeldBoundaryCS::FParameters* WeldParams = GraphBuilder.AllocParameters<FDCWeldBoundaryCS::FParameters>();
+
+				WeldParams->DCCellVertices = GraphBuilder.CreateUAV(CellVertexBuffer);
+				WeldParams->OutputVertices = GraphBuilder.CreateUAV(VertexBuffer);
+				WeldParams->ChunkSize = ChunkSize;
+				WeldParams->VoxelSize = VoxelSize;
+				WeldParams->IsoLevel = CapturedConfig.IsoLevel;
+				WeldParams->LODStride = LODStride;
+				WeldParams->GridDim = GridDim;
+				WeldParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
+				WeldParams->NeighborLODPacked = NeighborLODPacked;
+				BindVoxelAccess(WeldParams);
+
+				FIntVector WeldGroupCount(
+					FMath::DivideAndRoundUp(GridDim, 8),
+					FMath::DivideAndRoundUp(GridDim, 8),
+					FMath::DivideAndRoundUp(GridDim, 4)
+				);
+
+				FComputeShaderUtils::AddPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("DCWeldBoundary"),
+					WeldShader,
+					WeldParams,
+					WeldGroupCount
+				);
+			}
+
 			// ===== Pass 3: Quad Generation (Fixed Dispatch) =====
 			{
 				TShaderMapRef<FDCQuadGenerationCS> QuadShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
@@ -808,8 +866,6 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				QuadParams->DCCellVertices = GraphBuilder.CreateUAV(CellVertexBuffer);
 				QuadParams->OutputIndices = GraphBuilder.CreateUAV(IndexBuffer);
 				QuadParams->MeshCounters = MeshCountersUAV;
-				QuadParams->LODMergeMap = GraphBuilder.CreateSRV(MergeMapBuffer);
-				QuadParams->LODMergeMapCount = MergeMapPairCount;
 				QuadParams->ChunkSize = ChunkSize;
 				QuadParams->VoxelSize = VoxelSize;
 				QuadParams->IsoLevel = CapturedConfig.IsoLevel;

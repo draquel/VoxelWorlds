@@ -177,14 +177,28 @@ private:
 		uint32& OutTriangleCount);
 
 	/**
-	 * Pass 4: Merge boundary cells for LOD transitions.
-	 * Groups 2x2 fine boundary cells into 1 coarser cell at LOD transition faces.
+	 * Pass 4: Weld strided boundary cells onto the shared chunk-face plane.
+	 *
+	 * DC's QEF vertex is solved over a whole cell, and a chunk's outward boundary
+	 * cell spans `stride` voxels past the face — but neighbor data is only one
+	 * plane deep. At stride 1 that one plane is exactly what the cell needs (the
+	 * boundary stays watertight untouched), but at stride >= 2 the outward cell
+	 * reads clamped (wrong) densities, so the two sides of a boundary disagree and
+	 * crack. This applies to BOTH same-LOD strided boundaries and fine|coarse LOD
+	 * transitions (where the finer side groups MergeRatio^2 cells into one).
+	 *
+	 * The fix: for any face whose effective stride S = 1<<max(selfLOD, neighborLOD)
+	 * is > 1, replace the boundary-layer cell vertices with one vertex per coarse
+	 * (S-strided) face cell, computed from the iso-crossings of that cell's edges
+	 * ON the shared face plane — the only data both neighbors see identically. Both
+	 * sides derive the same vertex (on the plane) from the same plane densities, so
+	 * they coincide and the seam is watertight. Replaces the old fine-only QEF
+	 * re-solve, which referenced fine-side crossings the coarse neighbor never saw.
 	 */
-	void MergeLODBoundaryCells(
+	void WeldStridedBoundaryCells(
 		const FVoxelMeshingRequest& Request,
 		int32 Stride,
 		int32 GridDim,
-		TArray<FDCEdgeCrossing>& EdgeCrossings,
 		TArray<FDCCellVertex>& CellVertices);
 
 	/**

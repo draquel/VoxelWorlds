@@ -43,11 +43,20 @@ StructuredBuffer<uint> EdgeYNegZNeg;
 // Corner neighbor data (8 corners)
 StructuredBuffer<uint> CornerData;
 
+// Deep face neighbor data for strided (LOD>0) boundary cells: 6 faces concatenated, each
+// (NeighborPlaneDepth-1) planes of ChunkSize^2, in face order XPos,XNeg,YPos,YNeg,ZPos,ZNeg.
+// Mirrors FVoxelMeshingRequest::Neighbor*Deep / NeighborPlaneVoxel on the CPU. Empty (dummy)
+// when NeighborPlaneDepth<=1 (LOD0) — GetVoxelAt falls back to the single face slice.
+StructuredBuffer<uint> FaceDeep;
+
 // Face neighbor presence flags (bits 0-5)
 uint NeighborFlags;
 
 // Edge/corner presence flags (bits 0-11 for edges, 12-19 for corners)
 uint EdgeCornerFlags;
+
+// Total neighbor planes supplied per face (1 = legacy single plane / LOD0; >1 = deep).
+uint NeighborPlaneDepth;
 
 // Edge flag bit positions (same as MarchingCubesMeshGeneration.usf)
 #define EDGE_XPOS_YPOS (1u << 0)
@@ -104,9 +113,9 @@ RWStructuredBuffer<uint> DCValidEdgeIndices;
 // Pass 2 output / Pass 3 input
 RWStructuredBuffer<FDCCellVertexGPU> DCCellVertices;
 
-// LOD merge map (CPU-built, GPU-read)
-StructuredBuffer<uint> LODMergeMap;    // Pairs of uint: [OriginalCellIdx, ReplacementCellIdx]
-uint LODMergeMapCount;                 // Number of pairs
+// Packed neighbor LOD levels for the strided boundary weld: 6 faces x 3 bits,
+// each = clamp(NeighborLODLevels[face], 0, 7). Replaces the old LOD merge map.
+uint NeighborLODPacked;
 
 // Output buffers
 RWStructuredBuffer<FVoxelVertexGPU> OutputVertices;
@@ -145,6 +154,23 @@ bool HasCornerData(uint CornerFlag)
 }
 
 /**
+ * Resolve a face-neighbor voxel at depth plane PlaneIdx into the neighbor (0 = the base
+ * face slice supplied as BaseValue; >=1 reads FaceDeep). Clamps past the supplied depth and
+ * falls back to BaseValue when no deep data is present. Mirrors NeighborPlaneVoxel on the CPU.
+ */
+uint FaceDeepVoxel(uint FaceIdx, uint InPlaneIdx, int PlaneIdx, uint BaseValue)
+{
+    if (PlaneIdx <= 0 || NeighborPlaneDepth <= 1)
+    {
+        return BaseValue;
+    }
+    uint SliceSize = ChunkSize * ChunkSize;
+    uint DeepPlanes = NeighborPlaneDepth - 1;
+    uint K = min((uint)(PlaneIdx - 1), DeepPlanes - 1);
+    return FaceDeep[(FaceIdx * DeepPlanes + K) * SliceSize + InPlaneIdx];
+}
+
+/**
  * Get packed voxel data at position, handling chunk boundaries.
  * Duplicated from MarchingCubesMeshGeneration.usf for self-contained shader.
  */
@@ -172,18 +198,38 @@ uint GetVoxelAt(int3 Position)
 
     if (OutCount == 1)
     {
+        // Read the correct DEPTH plane into the neighbor (plane 0 = the face slice, deeper
+        // planes from FaceDeep). At stride 1 / LOD0 PlaneIdx is 0 and this is the single slice.
         if (bXPos && HasNeighborData(FACE_X_POS))
-            return NeighborXPos[(uint)Position.y + (uint)Position.z * ChunkSize];
+        {
+            uint InIdx = (uint)Position.y + (uint)Position.z * ChunkSize;
+            return FaceDeepVoxel(0, InIdx, Position.x - (int)ChunkSize, NeighborXPos[InIdx]);
+        }
         if (bXNeg && HasNeighborData(FACE_X_NEG))
-            return NeighborXNeg[(uint)Position.y + (uint)Position.z * ChunkSize];
+        {
+            uint InIdx = (uint)Position.y + (uint)Position.z * ChunkSize;
+            return FaceDeepVoxel(1, InIdx, -Position.x - 1, NeighborXNeg[InIdx]);
+        }
         if (bYPos && HasNeighborData(FACE_Y_POS))
-            return NeighborYPos[(uint)Position.x + (uint)Position.z * ChunkSize];
+        {
+            uint InIdx = (uint)Position.x + (uint)Position.z * ChunkSize;
+            return FaceDeepVoxel(2, InIdx, Position.y - (int)ChunkSize, NeighborYPos[InIdx]);
+        }
         if (bYNeg && HasNeighborData(FACE_Y_NEG))
-            return NeighborYNeg[(uint)Position.x + (uint)Position.z * ChunkSize];
+        {
+            uint InIdx = (uint)Position.x + (uint)Position.z * ChunkSize;
+            return FaceDeepVoxel(3, InIdx, -Position.y - 1, NeighborYNeg[InIdx]);
+        }
         if (bZPos && HasNeighborData(FACE_Z_POS))
-            return NeighborZPos[(uint)Position.x + (uint)Position.y * ChunkSize];
+        {
+            uint InIdx = (uint)Position.x + (uint)Position.y * ChunkSize;
+            return FaceDeepVoxel(4, InIdx, Position.z - (int)ChunkSize, NeighborZPos[InIdx]);
+        }
         if (bZNeg && HasNeighborData(FACE_Z_NEG))
-            return NeighborZNeg[(uint)Position.x + (uint)Position.y * ChunkSize];
+        {
+            uint InIdx = (uint)Position.x + (uint)Position.y * ChunkSize;
+            return FaceDeepVoxel(5, InIdx, -Position.z - 1, NeighborZNeg[InIdx]);
+        }
         return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
     }
 
@@ -746,6 +792,168 @@ void DCQEFSolveCS(
     DCCellVertices[CIdx] = Vert;
 }
 
+// ==================== Pass 2.6: Weld Strided Boundary Cells ====================
+//
+// Faithful port of FVoxelCPUDualContourMesher::WeldStridedBoundaryCells. For any
+// face whose effective stride E = 1<<max(selfLOD, neighborLOD) > 1, snap the
+// boundary-layer cell onto the shared sub-feature of the boundary faces it touches
+// (one face -> the face plane, two faces -> the shared edge line, three faces ->
+// the corner point), derived only from the shared face-plane voxels both neighbors
+// see, so the two sides of every stride>1 boundary coincide. Replaces the old LOD
+// merge map. Stride-1 boundaries are left untouched (already watertight).
+
+int NbrLODClamped(int Face) { return (int)((NeighborLODPacked >> (uint)(Face * 3)) & 7u); }
+
+// Density / world position at axis-indexed (depth, perp1, perp2) voxel coords.
+float WeldDens(int DepthAxis, int PA, int PB, int Depth, int P1, int P2)
+{
+    int3 P = int3(0, 0, 0);
+    P[DepthAxis] = Depth; P[PA] = P1; P[PB] = P2;
+    return GetDensityAt(P);
+}
+float3 WeldWorld(int DepthAxis, int PA, int PB, float Depth, float P1, float P2)
+{
+    float3 W = float3(0, 0, 0);
+    W[DepthAxis] = Depth * VoxelSize; W[PA] = P1 * VoxelSize; W[PB] = P2 * VoxelSize;
+    return W;
+}
+// Iso-crossing parameter between two densities; returns false if no sign change.
+bool WeldCrossT(float Da, float Db, float Iso, out float OutT)
+{
+    OutT = 0.0f;
+    if ((Da >= Iso) == (Db >= Iso)) { return false; }
+    OutT = saturate((Iso - Da) / (Db - Da));
+    return true;
+}
+
+[numthreads(8, 8, 4)]
+void DCWeldBoundaryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int Stride = (int)LODStride;
+    int GridSize = (int)GridDim - 3;
+    int CX = (int)DispatchThreadId.x - 1;
+    int CY = (int)DispatchThreadId.y - 1;
+    int CZ = (int)DispatchThreadId.z - 1;
+    if (CX > GridSize || CY > GridSize || CZ > GridSize) { return; }
+
+    uint CIdx = DCCellIndex(CX, CY, CZ);
+    FDCCellVertexGPU Cell = DCCellVertices[CIdx];
+    if (!(Cell.Flags & 1)) { return; } // no surface vertex here
+
+    int SelfLOD = (int)firstbithigh(LODStride); // log2(stride); stride is a power of two
+
+    int C[3]; C[0] = CX; C[1] = CY; C[2] = CZ;
+    bool Pinned[3]; int PlaneV[3]; int Eff[3];
+    int NP = 0;
+    [unroll]
+    for (int A = 0; A < 3; A++)
+    {
+        Pinned[A] = false; PlaneV[A] = 0; Eff[A] = Stride;
+        int NegEff = 1 << max(SelfLOD, NbrLODClamped(2 * A));
+        int PosEff = 1 << max(SelfLOD, NbrLODClamped(2 * A + 1));
+        if (C[A] == -1 && NegEff > 1) { Pinned[A] = true; PlaneV[A] = 0; Eff[A] = NegEff; NP++; }
+        else if (C[A] == GridSize - 1 && PosEff > 1) { Pinned[A] = true; PlaneV[A] = (int)ChunkSize; Eff[A] = PosEff; NP++; }
+    }
+    if (NP == 0) { return; }
+
+    float Iso = IsoLevel;
+    float3 Pos = float3(0, 0, 0);
+    bool bHas = false;
+    int NEff = Stride;
+    [unroll]
+    for (int An = 0; An < 3; An++) { if (Pinned[An]) { NEff = max(NEff, Eff[An]); } }
+
+    if (NP == 3)
+    {
+        Pos = float3((float)PlaneV[0] * VoxelSize, (float)PlaneV[1] * VoxelSize, (float)PlaneV[2] * VoxelSize);
+        bHas = true;
+    }
+    else if (NP == 2)
+    {
+        int A1 = -1, A2 = -1, F = -1;
+        [unroll]
+        for (int A = 0; A < 3; A++) { if (Pinned[A]) { if (A1 < 0) { A1 = A; } else { A2 = A; } } else { F = A; } }
+        int E = max(Eff[A1], Eff[A2]);
+        int FV = C[F] * Stride;
+        int F0 = clamp((FV >= 0 ? (FV / E) * E : 0), 0, (int)ChunkSize - E);
+        int3 P0i = int3(0, 0, 0); P0i[A1] = PlaneV[A1]; P0i[A2] = PlaneV[A2]; P0i[F] = F0;
+        int3 P1i = int3(0, 0, 0); P1i[A1] = PlaneV[A1]; P1i[A2] = PlaneV[A2]; P1i[F] = F0 + E;
+        float t;
+        if (WeldCrossT(GetDensityAt(P0i), GetDensityAt(P1i), Iso, t))
+        {
+            Pos[A1] = (float)PlaneV[A1] * VoxelSize;
+            Pos[A2] = (float)PlaneV[A2] * VoxelSize;
+            Pos[F] = lerp((float)F0, (float)(F0 + E), t) * VoxelSize;
+            bHas = true;
+        }
+    }
+    else // NP == 1
+    {
+        int D = 0;
+        [unroll]
+        for (int A = 0; A < 3; A++) { if (Pinned[A]) { D = A; } }
+        int PA = (D == 0) ? 1 : 0;
+        int PB = (D == 2) ? 1 : 2;
+        int E = Eff[D];
+        int Plane = PlaneV[D];
+        int In = Plane - 1;
+        int Uv = C[PA] * Stride;
+        int Vv = C[PB] * Stride;
+        int U = clamp((Uv >= 0 ? (Uv / E) * E : 0), 0, (int)ChunkSize - E);
+        int V = clamp((Vv >= 0 ? (Vv / E) * E : 0), 0, (int)ChunkSize - E);
+        float D00 = WeldDens(D, PA, PB, Plane, U, V);
+        float D10 = WeldDens(D, PA, PB, Plane, U + E, V);
+        float D01 = WeldDens(D, PA, PB, Plane, U, V + E);
+        float D11 = WeldDens(D, PA, PB, Plane, U + E, V + E);
+        float3 Sum = float3(0, 0, 0);
+        int Count = 0;
+        float t;
+        if (WeldCrossT(D00, D10, Iso, t)) { Sum += WeldWorld(D, PA, PB, (float)Plane, lerp((float)U, (float)(U + E), t), (float)V); Count++; }
+        if (WeldCrossT(D01, D11, Iso, t)) { Sum += WeldWorld(D, PA, PB, (float)Plane, lerp((float)U, (float)(U + E), t), (float)(V + E)); Count++; }
+        if (WeldCrossT(D00, D01, Iso, t)) { Sum += WeldWorld(D, PA, PB, (float)Plane, (float)U, lerp((float)V, (float)(V + E), t)); Count++; }
+        if (WeldCrossT(D10, D11, Iso, t)) { Sum += WeldWorld(D, PA, PB, (float)Plane, (float)(U + E), lerp((float)V, (float)(V + E), t)); Count++; }
+        if (Count == 0)
+        {
+            // No on-plane crossing: a steep cell whose surface crosses perpendicular to
+            // the plane. Fall back to the 4 corner edges crossing one fine voxel into the
+            // shared slab (plane-1 -> plane) so the cell is not dropped. Ungated (fires for
+            // same-LOD strided boundaries too) to mirror the CPU WeldStridedBoundaryCells.
+            float Di00 = WeldDens(D, PA, PB, In, U, V);
+            float Di10 = WeldDens(D, PA, PB, In, U + E, V);
+            float Di01 = WeldDens(D, PA, PB, In, U, V + E);
+            float Di11 = WeldDens(D, PA, PB, In, U + E, V + E);
+            if (WeldCrossT(Di00, D00, Iso, t)) { Sum += WeldWorld(D, PA, PB, lerp((float)In, (float)Plane, t), (float)U, (float)V); Count++; }
+            if (WeldCrossT(Di10, D10, Iso, t)) { Sum += WeldWorld(D, PA, PB, lerp((float)In, (float)Plane, t), (float)(U + E), (float)V); Count++; }
+            if (WeldCrossT(Di01, D01, Iso, t)) { Sum += WeldWorld(D, PA, PB, lerp((float)In, (float)Plane, t), (float)U, (float)(V + E)); Count++; }
+            if (WeldCrossT(Di11, D11, Iso, t)) { Sum += WeldWorld(D, PA, PB, lerp((float)In, (float)Plane, t), (float)(U + E), (float)(V + E)); Count++; }
+        }
+        if (Count > 0) { Pos = Sum / (float)Count; bHas = true; }
+    }
+
+    if (!bHas)
+    {
+        // Keep the cell's original QEF vertex rather than dropping it: a dropped boundary
+        // cell punches a hole (missing geometry, see-through), far more visible than the
+        // thin vertex mismatch keeping it may leave. Mirrors the CPU WeldStridedBoundaryCells
+        // (no invalidation) — fixes the GPU equivalent of the LOD-seam invalidation regression.
+        return;
+    }
+
+    int3 PosVox = (int3)(Pos / VoxelSize);
+    float3 N = CalculateGradientNormalLOD(PosVox, NEff);
+    uint PackedN = PackSmoothNormalAndAO(N, 0);
+
+    DCCellVertices[CIdx].Position = Pos;
+    DCCellVertices[CIdx].PackedNormal = PackedN;
+
+    uint VIdx = Cell.VertexIndex;
+    if (VIdx != 0xFFFFFFFF && VIdx < MaxVertexCount)
+    {
+        OutputVertices[VIdx].Position = Pos;
+        OutputVertices[VIdx].PackedNormalAndAO = PackedN;
+    }
+}
+
 // ==================== Pass 2.5: Prepare Indirect Args ====================
 
 // Indirect dispatch arguments buffer (3 uints: ThreadGroupCountX/Y/Z)
@@ -837,19 +1045,9 @@ void DCQuadGenerationCS(
         else if (Axis == 1) Off = AxisQuadOffsets[1][i];
         else Off = AxisQuadOffsets[2][i];
 
+        // LOD boundaries are handled by DCWeldBoundaryCS (Pass 2.6), which welds the
+        // boundary cell vertices in place — no quad-time cell redirection needed.
         uint CIdx = DCCellIndex(CX + Off.x, CY + Off.y, CZ + Off.z);
-
-        // Check LOD merge map redirection
-        for (uint m = 0; m < LODMergeMapCount; m++)
-        {
-            uint OrigIdx = LODMergeMap[m * 2];
-            if (CIdx == OrigIdx)
-            {
-                CIdx = LODMergeMap[m * 2 + 1];
-                break;
-            }
-        }
-
         CellIndices[i] = CIdx;
 
         if (!(DCCellVertices[CIdx].Flags & 1))

@@ -778,29 +778,33 @@ FVoxelData FVoxelCPUMarchingCubesMesher::GetVoxelAt(
 	// Single-axis out of bounds: use face neighbor data
 	if (OutCount == 1)
 	{
+		// Read the correct DEPTH plane into the neighbor (PlaneIdx 0 = the face slice,
+		// deeper planes from the Deep arrays). MC geometry only samples PlaneIdx 0
+		// (cubes are inward); the deeper planes are used by the boundary gradient
+		// normals (central difference reaching past the face). At LOD 0 PlaneIdx is 0.
 		if (bXPos && Request.NeighborXPos.Num() == SliceSize)
 		{
-			return Request.NeighborXPos[Y + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborXPos, Request.NeighborXPosDeep, Y + Z * ChunkSize, X - ChunkSize);
 		}
 		if (bXNeg && Request.NeighborXNeg.Num() == SliceSize)
 		{
-			return Request.NeighborXNeg[Y + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborXNeg, Request.NeighborXNegDeep, Y + Z * ChunkSize, -X - 1);
 		}
 		if (bYPos && Request.NeighborYPos.Num() == SliceSize)
 		{
-			return Request.NeighborYPos[X + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborYPos, Request.NeighborYPosDeep, X + Z * ChunkSize, Y - ChunkSize);
 		}
 		if (bYNeg && Request.NeighborYNeg.Num() == SliceSize)
 		{
-			return Request.NeighborYNeg[X + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborYNeg, Request.NeighborYNegDeep, X + Z * ChunkSize, -Y - 1);
 		}
 		if (bZPos && Request.NeighborZPos.Num() == SliceSize)
 		{
-			return Request.NeighborZPos[X + Y * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborZPos, Request.NeighborZPosDeep, X + Y * ChunkSize, Z - ChunkSize);
 		}
 		if (bZNeg && Request.NeighborZNeg.Num() == SliceSize)
 		{
-			return Request.NeighborZNeg[X + Y * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborZNeg, Request.NeighborZNegDeep, X + Y * ChunkSize, -Z - 1);
 		}
 		// Fallback to edge voxel
 		return Request.GetVoxel(ClampedX, ClampedY, ClampedZ);

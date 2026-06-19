@@ -3,6 +3,17 @@
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelMeshing.h"
 #include "QEFSolver.h"
+#include "HAL/IConsoleManager.h"
+
+// Toggles the strided-boundary weld that seals DC LOD seams (Pass 3.5 on CPU /
+// Pass 2.6 on GPU). Default on; set 0 + remesh for an A/B comparison showing the
+// pre-fix cracks. Read on the worker/game thread; the GPU mesher reads the same
+// CVar at dispatch time.
+TAutoConsoleVariable<int32> CVarDCBoundaryWeld(
+	TEXT("voxel.DCBoundaryWeld"),
+	1,
+	TEXT("Dual Contouring: weld strided LOD-boundary cells onto the shared chunk-face feature to seal seams (1=on, 0=off)."),
+	ECVF_Default);
 
 FVoxelCPUDualContourMesher::FVoxelCPUDualContourMesher()
 {
@@ -131,9 +142,14 @@ bool FVoxelCPUDualContourMesher::GenerateMeshCPU(
 	CellVertices.SetNumZeroed(TotalCells);
 	SolveCellVertices(Request, Stride, GridDim, EdgeCrossings, CellVertices);
 
-	// Pass 3.5: Merge fine boundary cells to match coarser neighbor resolution at LOD transitions.
-	// Combined with skirts on the finer side, this minimizes gaps at LOD boundaries.
-	MergeLODBoundaryCells(Request, Stride, GridDim, EdgeCrossings, CellVertices);
+	// Pass 3.5: Weld strided boundary cells onto the shared chunk-face plane so both
+	// sides of every stride>1 boundary (same-LOD strided AND fine|coarse LOD
+	// transitions) derive the boundary vertex from the same shared face-plane data
+	// and coincide. Stride-1 boundaries are left untouched (already watertight).
+	if (CVarDCBoundaryWeld.GetValueOnAnyThread() != 0)
+	{
+		WeldStridedBoundaryCells(Request, Stride, GridDim, CellVertices);
+	}
 
 	// Pass 3: Generate quads
 	GenerateQuads(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices, CellVertices, OutMeshData, TriangleCount);
@@ -432,200 +448,194 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 }
 
 // ============================================================================
-// Pass 4: LOD Boundary Cell Merging
+// Pass 4: Strided Boundary Cell Welding
 // ============================================================================
 
-void FVoxelCPUDualContourMesher::MergeLODBoundaryCells(
+void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 	const FVoxelMeshingRequest& Request,
 	int32 Stride,
 	int32 GridDim,
-	TArray<FDCEdgeCrossing>& EdgeCrossings,
 	TArray<FDCCellVertex>& CellVertices)
 {
 	const int32 ChunkSize = Request.ChunkSize;
 	const int32 GridSize = ChunkSize / Stride;
 	const float VoxelSize = Request.VoxelSize;
-	const float SVDThreshold = Config.QEFSVDThreshold;
-	const float BiasStrength = Config.QEFBiasStrength;
+	const float IsoLevel = Config.IsoLevel;
+	const int32 SelfLOD = FMath::Clamp(Request.LODLevel, 0, 7);
 
-	struct FEdgeRef { int32 DX, DY, DZ, Axis; };
-	static const FEdgeRef CellEdges[12] = {
-		{0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 0, 2},
-		{1, 0, 0, 1}, {1, 0, 0, 2},
-		{0, 1, 0, 0}, {0, 1, 0, 2},
-		{0, 0, 1, 0}, {0, 0, 1, 1},
-		{1, 1, 0, 2}, {1, 0, 1, 1}, {0, 1, 1, 0},
+	// Per-axis, per-side effective stride and whether that boundary needs welding.
+	// EffStride = 1<<max(self, neighbor) = the coarser of the two sides. Both
+	// neighbors compute the same value (each knows the other's LOD), so they weld
+	// at the same stride. Stride-1 boundaries (the one-plane neighbor data is
+	// exactly what the cell needs) are left floating — already watertight (DT1).
+	int32 NegEff[3], PosEff[3];
+	bool NegWeld[3], PosWeld[3];
+	bool bAny = false;
+	for (int32 A = 0; A < 3; A++)
+	{
+		const int32 NLneg = Request.NeighborLODLevels[2 * A];
+		const int32 NLpos = Request.NeighborLODLevels[2 * A + 1];
+		NegEff[A] = 1 << FMath::Max(SelfLOD, FMath::Max(NLneg, 0));
+		PosEff[A] = 1 << FMath::Max(SelfLOD, FMath::Max(NLpos, 0));
+		NegWeld[A] = NegEff[A] > 1;
+		PosWeld[A] = PosEff[A] > 1;
+		bAny = bAny || NegWeld[A] || PosWeld[A];
+	}
+	if (!bAny)
+	{
+		return; // pure stride-1 chunk on all faces — boundaries already watertight
+	}
+
+	auto Dens = [&](int32 X, int32 Y, int32 Z) -> float { return GetDensityAt(Request, X, Y, Z); };
+	// Iso-crossing along one axis between two samples; returns the interpolated
+	// coordinate. The crossing depends only on the two sampled densities, so any
+	// neighbor sampling the same world positions gets the identical result.
+	auto Cross1D = [&](float Da, float Db, float Pa, float Pb, float& Out) -> bool
+	{
+		if ((Da >= IsoLevel) == (Db >= IsoLevel)) { return false; }
+		const float t = FMath::Clamp((IsoLevel - Da) / (Db - Da), 0.0f, 1.0f);
+		Out = FMath::Lerp(Pa, Pb, t);
+		return true;
 	};
 
-	for (int32 Face = 0; Face < 6; Face++)
+	// Single per-cell pass. Each boundary cell is snapped onto the shared
+	// sub-feature of the boundary faces it touches: one face -> the face plane
+	// (free in the two perpendicular axes), two faces -> the shared edge line
+	// (free along the third axis), three faces -> the shared corner point. Every
+	// chunk that touches a given feature derives it from the same shared data, so
+	// the welded vertices coincide and the seam (including its edges) is sealed.
+	for (int32 CZ = -1; CZ < GridSize; CZ++)
+	for (int32 CY = -1; CY < GridSize; CY++)
+	for (int32 CX = -1; CX < GridSize; CX++)
 	{
-		const int32 NeighborLOD = Request.NeighborLODLevels[Face];
-		if (NeighborLOD <= Request.LODLevel)
+		const int32 CIdx = CellIndex(CX, CY, CZ, GridDim);
+		if (!CellVertices[CIdx].bValid) { continue; }
+
+		const int32 C[3] = { CX, CY, CZ };
+		bool Pinned[3] = { false, false, false };
+		int32 PlaneV[3] = { 0, 0, 0 };
+		int32 Eff[3] = { Stride, Stride, Stride };
+		for (int32 A = 0; A < 3; A++)
 		{
-			continue;
+			if (C[A] == -1 && NegWeld[A]) { Pinned[A] = true; PlaneV[A] = 0; Eff[A] = NegEff[A]; }
+			else if (C[A] == GridSize - 1 && PosWeld[A]) { Pinned[A] = true; PlaneV[A] = ChunkSize; Eff[A] = PosEff[A]; }
 		}
+		const int32 NP = (Pinned[0] ? 1 : 0) + (Pinned[1] ? 1 : 0) + (Pinned[2] ? 1 : 0);
+		if (NP == 0) { continue; } // interior cell — keep its floating QEF vertex
 
-		const int32 CoarserStride = 1 << NeighborLOD;
-		const int32 MergeRatio = CoarserStride / Stride;
+		FVector3f Pos = FVector3f::ZeroVector;
+		bool bHas = false;
 
-		if (MergeRatio <= 1)
+		if (NP == 3)
 		{
-			continue;
+			// Shared chunk corner point.
+			Pos = FVector3f(PlaneV[0] * VoxelSize, PlaneV[1] * VoxelSize, PlaneV[2] * VoxelSize);
+			bHas = true;
 		}
-
-		const int32 DepthAxis = Face / 2;
-		const bool bPositiveFace = (Face % 2 == 1);
-		const int32 BoundaryCell = bPositiveFace ? (GridSize - 1) : 0;
-
-		int32 Axis1Size = GridSize, Axis2Size = GridSize;
-
-		for (int32 A2 = 0; A2 < Axis2Size; A2 += MergeRatio)
+		else if (NP == 2)
 		{
-			for (int32 A1 = 0; A1 < Axis1Size; A1 += MergeRatio)
+			// Shared edge line: two axes pinned to their planes; the vertex slides
+			// along the free axis to the iso-crossing of the shared edge column.
+			int32 A1 = -1, A2 = -1, F = -1;
+			for (int32 A = 0; A < 3; A++)
 			{
-				FQEFSolver MergedQEF;
-
-				// Collect fine cell keys and normals BEFORE invalidation (deferred invalidation)
-				TArray<int32, TInlineAllocator<4>> FineCellIndices;
-				TArray<FVector3f, TInlineAllocator<4>> FineCellNormals;
-
-				for (int32 DA2 = 0; DA2 < MergeRatio && (A2 + DA2) < Axis2Size; DA2++)
-				{
-					for (int32 DA1 = 0; DA1 < MergeRatio && (A1 + DA1) < Axis1Size; DA1++)
-					{
-						int32 CX, CY, CZ;
-						switch (DepthAxis)
-						{
-						case 0: CX = BoundaryCell; CY = A1 + DA1; CZ = A2 + DA2; break;
-						case 1: CX = A1 + DA1; CY = BoundaryCell; CZ = A2 + DA2; break;
-						default: CX = A1 + DA1; CY = A2 + DA2; CZ = BoundaryCell; break;
-						}
-
-						const int32 CIdx = CellIndex(CX, CY, CZ, GridDim);
-						if (!CellVertices[CIdx].bValid)
-						{
-							continue;
-						}
-
-						// Save fine cell info for deferred invalidation and normal blending
-						FineCellIndices.Add(CIdx);
-						FineCellNormals.Add(CellVertices[CIdx].Normal);
-
-						for (const auto& Edge : CellEdges)
-						{
-							const int32 EIdx = EdgeIndex(CX + Edge.DX, CY + Edge.DY, CZ + Edge.DZ, Edge.Axis, GridDim);
-							const FDCEdgeCrossing& Crossing = EdgeCrossings[EIdx];
-							if (Crossing.bValid)
-							{
-								MergedQEF.Add(Crossing.Position, Crossing.Normal);
-							}
-						}
-
-						// DO NOT invalidate here — defer until merge succeeds
-					}
-				}
-
-				// Skip if merged QEF has no crossings — fine cells remain valid
-				if (MergedQEF.Count == 0 || FineCellIndices.Num() == 0)
-				{
-					continue;
-				}
-
-				int32 BaseCX, BaseCY, BaseCZ;
-				switch (DepthAxis)
-				{
-				case 0: BaseCX = BoundaryCell; BaseCY = A1; BaseCZ = A2; break;
-				case 1: BaseCX = A1; BaseCY = BoundaryCell; BaseCZ = A2; break;
-				default: BaseCX = A1; BaseCY = A2; BaseCZ = BoundaryCell; break;
-				}
-
-				const float MinX = static_cast<float>(BaseCX * Stride) * VoxelSize;
-				const float MinY = static_cast<float>(BaseCY * Stride) * VoxelSize;
-				const float MinZ = static_cast<float>(BaseCZ * Stride) * VoxelSize;
-				float SizeX = static_cast<float>(Stride) * VoxelSize;
-				float SizeY = SizeX, SizeZ = SizeX;
-
-				switch (DepthAxis)
-				{
-				case 0:
-					SizeY = static_cast<float>(FMath::Min(MergeRatio, Axis1Size - A1) * Stride) * VoxelSize;
-					SizeZ = static_cast<float>(FMath::Min(MergeRatio, Axis2Size - A2) * Stride) * VoxelSize;
-					break;
-				case 1:
-					SizeX = static_cast<float>(FMath::Min(MergeRatio, Axis1Size - A1) * Stride) * VoxelSize;
-					SizeZ = static_cast<float>(FMath::Min(MergeRatio, Axis2Size - A2) * Stride) * VoxelSize;
-					break;
-				default:
-					SizeX = static_cast<float>(FMath::Min(MergeRatio, Axis1Size - A1) * Stride) * VoxelSize;
-					SizeY = static_cast<float>(FMath::Min(MergeRatio, Axis2Size - A2) * Stride) * VoxelSize;
-					break;
-				}
-
-				const FBox3f MergedBounds(
-					FVector3f(MinX, MinY, MinZ),
-					FVector3f(MinX + SizeX, MinY + SizeY, MinZ + SizeZ)
-				);
-
-				FDCCellVertex MergedVertex;
-				MergedVertex.bValid = true;
-				MergedVertex.Position = MergedQEF.Solve(SVDThreshold, MergedBounds, BiasStrength);
-
-				// Blend fine-cell normals with coarse-stride gradient for smooth transitions
-				const float VoxX = MergedVertex.Position.X / VoxelSize;
-				const float VoxY = MergedVertex.Position.Y / VoxelSize;
-				const float VoxZ = MergedVertex.Position.Z / VoxelSize;
-				FVector3f CoarseNormal = CalculateGradientNormalLOD(Request, VoxX, VoxY, VoxZ, CoarserStride);
-
-				FVector3f BlendedNormal = FVector3f::ZeroVector;
-				for (const FVector3f& FineNormal : FineCellNormals)
-				{
-					BlendedNormal += FineNormal;
-				}
-				if (FineCellNormals.Num() > 0)
-				{
-					BlendedNormal = (BlendedNormal / static_cast<float>(FineCellNormals.Num()) + CoarseNormal).GetSafeNormal();
-				}
-				else
-				{
-					BlendedNormal = CoarseNormal;
-				}
-				MergedVertex.Normal = BlendedNormal;
-
-				MergedVertex.MaterialID = GetCellMaterial(Request, BaseCX * Stride, BaseCY * Stride, BaseCZ * Stride, CoarserStride);
-				MergedVertex.BiomeID = GetCellBiome(Request, BaseCX * Stride, BaseCY * Stride, BaseCZ * Stride, CoarserStride);
-
-				// Merge succeeded — now invalidate fine cells
-				for (const int32 CIdx : FineCellIndices)
-				{
-					CellVertices[CIdx].bValid = false;
-				}
-
-				// Store at base position
-				CellVertices[CellIndex(BaseCX, BaseCY, BaseCZ, GridDim)] = MergedVertex;
-
-				// Alias all fine cells in this group to the merged vertex
-				for (int32 DA2 = 0; DA2 < MergeRatio && (A2 + DA2) < Axis2Size; DA2++)
-				{
-					for (int32 DA1 = 0; DA1 < MergeRatio && (A1 + DA1) < Axis1Size; DA1++)
-					{
-						if (DA1 == 0 && DA2 == 0)
-						{
-							continue;
-						}
-
-						int32 AliasCX, AliasCY, AliasCZ;
-						switch (DepthAxis)
-						{
-						case 0: AliasCX = BoundaryCell; AliasCY = A1 + DA1; AliasCZ = A2 + DA2; break;
-						case 1: AliasCX = A1 + DA1; AliasCY = BoundaryCell; AliasCZ = A2 + DA2; break;
-						default: AliasCX = A1 + DA1; AliasCY = A2 + DA2; AliasCZ = BoundaryCell; break;
-						}
-
-						CellVertices[CellIndex(AliasCX, AliasCY, AliasCZ, GridDim)] = MergedVertex;
-					}
-				}
+				if (Pinned[A]) { if (A1 < 0) { A1 = A; } else { A2 = A; } }
+				else { F = A; }
+			}
+			const int32 E = FMath::Max(Eff[A1], Eff[A2]);
+			const int32 FV = C[F] * Stride;
+			const int32 F0 = FMath::Clamp((FV >= 0 ? (FV / E) * E : 0), 0, ChunkSize - E);
+			auto EdgeDens = [&](int32 Fc) -> float
+			{
+				int32 V[3]; V[A1] = PlaneV[A1]; V[A2] = PlaneV[A2]; V[F] = Fc;
+				return Dens(V[0], V[1], V[2]);
+			};
+			float Crossed;
+			if (Cross1D(EdgeDens(F0), EdgeDens(F0 + E), (float)F0, (float)(F0 + E), Crossed))
+			{
+				Pos[A1] = PlaneV[A1] * VoxelSize;
+				Pos[A2] = PlaneV[A2] * VoxelSize;
+				Pos[F] = Crossed * VoxelSize;
+				bHas = true;
 			}
 		}
+		else // NP == 1: face plane
+		{
+			int32 D = 0;
+			for (int32 A = 0; A < 3; A++) { if (Pinned[A]) { D = A; } }
+			const int32 PAa = (D == 0) ? 1 : 0;
+			const int32 PBb = (D == 2) ? 1 : 2;
+			const int32 E = Eff[D];
+			const int32 Plane = PlaneV[D];
+			const int32 In = Plane - 1; // one fine voxel into the shared slab (world plane-1)
+			const int32 Uv = C[PAa] * Stride;
+			const int32 Vv = C[PBb] * Stride;
+			const int32 U = FMath::Clamp((Uv >= 0 ? (Uv / E) * E : 0), 0, ChunkSize - E);
+			const int32 V = FMath::Clamp((Vv >= 0 ? (Vv / E) * E : 0), 0, ChunkSize - E);
+			auto SD = [&](int32 Depth, int32 P1, int32 P2) -> float
+			{
+				int32 Vc[3]; Vc[D] = Depth; Vc[PAa] = P1; Vc[PBb] = P2;
+				return Dens(Vc[0], Vc[1], Vc[2]);
+			};
+			auto WD = [&](float Depth, float P1, float P2) -> FVector3f
+			{
+				FVector3f W; W[D] = Depth * VoxelSize; W[PAa] = P1 * VoxelSize; W[PBb] = P2 * VoxelSize;
+				return W;
+			};
+			FVector3f Sum = FVector3f::ZeroVector;
+			int32 Count = 0;
+			auto AddV = [&](float Da, float Db, const FVector3f& Pa, const FVector3f& Pb)
+			{
+				if ((Da >= IsoLevel) == (Db >= IsoLevel)) { return; }
+				const float t = FMath::Clamp((IsoLevel - Da) / (Db - Da), 0.0f, 1.0f);
+				Sum += FMath::Lerp(Pa, Pb, t);
+				++Count;
+			};
+			const float D00 = SD(Plane, U, V);
+			const float D10 = SD(Plane, U + E, V);
+			const float D01 = SD(Plane, U, V + E);
+			const float D11 = SD(Plane, U + E, V + E);
+			// Prefer the iso-crossings ON the face plane (the clean, exact-coincidence
+			// case — used whenever the surface meets the face). Both neighbors get the
+			// identical crossings from the shared plane densities.
+			AddV(D00, D10, WD(Plane, U, V), WD(Plane, U + E, V));
+			AddV(D01, D11, WD(Plane, U, V + E), WD(Plane, U + E, V + E));
+			AddV(D00, D01, WD(Plane, U, V), WD(Plane, U, V + E));
+			AddV(D10, D11, WD(Plane, U + E, V), WD(Plane, U + E, V + E));
+			if (Count == 0)
+			{
+				// No on-plane crossing: a steep cell whose surface crosses perpendicular
+				// to the plane. Fall back to the 4 corner edges crossing one fine voxel
+				// into the shared slab (plane-1 -> plane) so the cell is not dropped.
+				AddV(SD(In, U, V), D00, WD(In, U, V), WD(Plane, U, V));
+				AddV(SD(In, U + E, V), D10, WD(In, U + E, V), WD(Plane, U + E, V));
+				AddV(SD(In, U, V + E), D01, WD(In, U, V + E), WD(Plane, U, V + E));
+				AddV(SD(In, U + E, V + E), D11, WD(In, U + E, V + E), WD(Plane, U + E, V + E));
+			}
+			if (Count > 0)
+			{
+				Pos = Sum / static_cast<float>(Count);
+				bHas = true;
+			}
+		}
+
+		if (!bHas)
+		{
+			// No shared-feature crossing — keep the cell's original QEF vertex rather
+			// than dropping it: a dropped boundary cell punches a hole (missing
+			// geometry, see-through), which is far more visible than the thin vertex
+			// mismatch that keeping it may leave. Geometry stays present.
+			continue;
+		}
+
+		FDCCellVertex& Welded = CellVertices[CIdx];
+		Welded.Position = Pos;
+		Welded.MeshVertexIndex = -1;
+		int32 NEff = Stride;
+		for (int32 A = 0; A < 3; A++) { if (Pinned[A]) { NEff = FMath::Max(NEff, Eff[A]); } }
+		Welded.Normal = CalculateGradientNormalLOD(Request,
+			Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize, NEff);
+		// Material/biome left as solved — geometry coincidence is what seals the seam.
 	}
 }
 
@@ -804,32 +814,41 @@ FVoxelData FVoxelCPUDualContourMesher::GetVoxelAt(
 	const bool bOutZ = bZPos || bZNeg;
 	const int32 OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
 
+	// 0-based depth into a neighbor along each out-of-bounds axis (0 = the first plane
+	// just past the chunk face). Used to read deep edge/corner data for strided cells.
+	const int32 DepthX = bXPos ? (X - ChunkSize) : (bXNeg ? (-X - 1) : 0);
+	const int32 DepthY = bYPos ? (Y - ChunkSize) : (bYNeg ? (-Y - 1) : 0);
+	const int32 DepthZ = bZPos ? (Z - ChunkSize) : (bZNeg ? (-Z - 1) : 0);
+
 	// Single-axis out of bounds: use face neighbor data
 	if (OutCount == 1)
 	{
+		// Read the correct DEPTH plane into the neighbor (PlaneIdx 0 = the face slice,
+		// deeper planes from the Deep arrays). At stride 1 / LOD 0 PlaneIdx is 0 and
+		// this is identical to the single-plane behavior.
 		if (bXPos && Request.NeighborXPos.Num() == SliceSize)
 		{
-			return Request.NeighborXPos[Y + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborXPos, Request.NeighborXPosDeep, Y + Z * ChunkSize, X - ChunkSize);
 		}
 		if (bXNeg && Request.NeighborXNeg.Num() == SliceSize)
 		{
-			return Request.NeighborXNeg[Y + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborXNeg, Request.NeighborXNegDeep, Y + Z * ChunkSize, -X - 1);
 		}
 		if (bYPos && Request.NeighborYPos.Num() == SliceSize)
 		{
-			return Request.NeighborYPos[X + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborYPos, Request.NeighborYPosDeep, X + Z * ChunkSize, Y - ChunkSize);
 		}
 		if (bYNeg && Request.NeighborYNeg.Num() == SliceSize)
 		{
-			return Request.NeighborYNeg[X + Z * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborYNeg, Request.NeighborYNegDeep, X + Z * ChunkSize, -Y - 1);
 		}
 		if (bZPos && Request.NeighborZPos.Num() == SliceSize)
 		{
-			return Request.NeighborZPos[X + Y * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborZPos, Request.NeighborZPosDeep, X + Y * ChunkSize, Z - ChunkSize);
 		}
 		if (bZNeg && Request.NeighborZNeg.Num() == SliceSize)
 		{
-			return Request.NeighborZNeg[X + Y * ChunkSize];
+			return Request.NeighborPlaneVoxel(Request.NeighborZNeg, Request.NeighborZNegDeep, X + Y * ChunkSize, -Z - 1);
 		}
 		// Neighbor data unavailable — return Air so that edge crossings at chunk
 		// boundaries are detected (solid→air transition). The geometry will be
@@ -837,97 +856,106 @@ FVoxelData FVoxelCPUDualContourMesher::GetVoxelAt(
 		return FVoxelData::Air();
 	}
 
-	// Edge case (2 axes out of bounds): use edge neighbor data
+	// Edge case (2 axes out of bounds): use edge neighbor data. For strided cells the
+	// outward cell reaches diagonally into the edge neighbor, so read the deep grid at
+	// (DepthA, DepthB); at stride 1 / LOD0 both depths are 0 and this returns the base
+	// strip exactly as before. The free axis (in-range) indexes the strip.
 	if (OutCount == 2)
 	{
+		// XY edges (Z free)
 		if (bXPos && bYPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YPOS))
 		{
-			return Request.EdgeXPosYPos[Z];
+			return Request.EdgeDeepVoxel(Request.EdgeXPosYPos, Request.EdgeXPosYPosDeep, ClampedZ, DepthX, DepthY);
 		}
 		if (bXPos && bYNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YNEG))
 		{
-			return Request.EdgeXPosYNeg[Z];
+			return Request.EdgeDeepVoxel(Request.EdgeXPosYNeg, Request.EdgeXPosYNegDeep, ClampedZ, DepthX, DepthY);
 		}
 		if (bXNeg && bYPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YPOS))
 		{
-			return Request.EdgeXNegYPos[Z];
+			return Request.EdgeDeepVoxel(Request.EdgeXNegYPos, Request.EdgeXNegYPosDeep, ClampedZ, DepthX, DepthY);
 		}
 		if (bXNeg && bYNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YNEG))
 		{
-			return Request.EdgeXNegYNeg[Z];
+			return Request.EdgeDeepVoxel(Request.EdgeXNegYNeg, Request.EdgeXNegYNegDeep, ClampedZ, DepthX, DepthY);
 		}
 
+		// XZ edges (Y free)
 		if (bXPos && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZPOS))
 		{
-			return Request.EdgeXPosZPos[Y];
+			return Request.EdgeDeepVoxel(Request.EdgeXPosZPos, Request.EdgeXPosZPosDeep, ClampedY, DepthX, DepthZ);
 		}
 		if (bXPos && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZNEG))
 		{
-			return Request.EdgeXPosZNeg[Y];
+			return Request.EdgeDeepVoxel(Request.EdgeXPosZNeg, Request.EdgeXPosZNegDeep, ClampedY, DepthX, DepthZ);
 		}
 		if (bXNeg && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZPOS))
 		{
-			return Request.EdgeXNegZPos[Y];
+			return Request.EdgeDeepVoxel(Request.EdgeXNegZPos, Request.EdgeXNegZPosDeep, ClampedY, DepthX, DepthZ);
 		}
 		if (bXNeg && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZNEG))
 		{
-			return Request.EdgeXNegZNeg[Y];
+			return Request.EdgeDeepVoxel(Request.EdgeXNegZNeg, Request.EdgeXNegZNegDeep, ClampedY, DepthX, DepthZ);
 		}
 
+		// YZ edges (X free)
 		if (bYPos && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZPOS))
 		{
-			return Request.EdgeYPosZPos[X];
+			return Request.EdgeDeepVoxel(Request.EdgeYPosZPos, Request.EdgeYPosZPosDeep, ClampedX, DepthY, DepthZ);
 		}
 		if (bYPos && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZNEG))
 		{
-			return Request.EdgeYPosZNeg[X];
+			return Request.EdgeDeepVoxel(Request.EdgeYPosZNeg, Request.EdgeYPosZNegDeep, ClampedX, DepthY, DepthZ);
 		}
 		if (bYNeg && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZPOS))
 		{
-			return Request.EdgeYNegZPos[X];
+			return Request.EdgeDeepVoxel(Request.EdgeYNegZPos, Request.EdgeYNegZPosDeep, ClampedX, DepthY, DepthZ);
 		}
 		if (bYNeg && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZNEG))
 		{
-			return Request.EdgeYNegZNeg[X];
+			return Request.EdgeDeepVoxel(Request.EdgeYNegZNeg, Request.EdgeYNegZNegDeep, ClampedX, DepthY, DepthZ);
 		}
 
 		return FVoxelData::Air();
 	}
 
-	// Corner case (3 axes out of bounds): use corner neighbor data
+	// Corner case (3 axes out of bounds): use corner neighbor data. For strided cells the
+	// outward cell reaches along the body diagonal into the corner neighbor, so read the
+	// deep box at (DepthX, DepthY, DepthZ); at stride 1 / LOD0 all depths are 0 and this
+	// returns the single corner voxel exactly as before.
 	if (OutCount == 3)
 	{
 		if (bXPos && bYPos && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZPOS))
 		{
-			return Request.CornerXPosYPosZPos;
+			return Request.CornerDeepVoxel(Request.CornerXPosYPosZPos, Request.CornerXPosYPosZPosDeep, DepthX, DepthY, DepthZ);
 		}
 		if (bXPos && bYPos && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZNEG))
 		{
-			return Request.CornerXPosYPosZNeg;
+			return Request.CornerDeepVoxel(Request.CornerXPosYPosZNeg, Request.CornerXPosYPosZNegDeep, DepthX, DepthY, DepthZ);
 		}
 		if (bXPos && bYNeg && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZPOS))
 		{
-			return Request.CornerXPosYNegZPos;
+			return Request.CornerDeepVoxel(Request.CornerXPosYNegZPos, Request.CornerXPosYNegZPosDeep, DepthX, DepthY, DepthZ);
 		}
 		if (bXPos && bYNeg && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZNEG))
 		{
-			return Request.CornerXPosYNegZNeg;
+			return Request.CornerDeepVoxel(Request.CornerXPosYNegZNeg, Request.CornerXPosYNegZNegDeep, DepthX, DepthY, DepthZ);
 		}
 		if (bXNeg && bYPos && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZPOS))
 		{
-			return Request.CornerXNegYPosZPos;
+			return Request.CornerDeepVoxel(Request.CornerXNegYPosZPos, Request.CornerXNegYPosZPosDeep, DepthX, DepthY, DepthZ);
 		}
 		if (bXNeg && bYPos && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZNEG))
 		{
-			return Request.CornerXNegYPosZNeg;
+			return Request.CornerDeepVoxel(Request.CornerXNegYPosZNeg, Request.CornerXNegYPosZNegDeep, DepthX, DepthY, DepthZ);
 		}
 		if (bXNeg && bYNeg && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZPOS))
 		{
-			return Request.CornerXNegYNegZPos;
+			return Request.CornerDeepVoxel(Request.CornerXNegYNegZPos, Request.CornerXNegYNegZPosDeep, DepthX, DepthY, DepthZ);
 		}
 		if (bXNeg && bYNeg && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZNEG))
 		{
-			return Request.CornerXNegYNegZNeg;
+			return Request.CornerDeepVoxel(Request.CornerXNegYNegZNeg, Request.CornerXNegYNegZNegDeep, DepthX, DepthY, DepthZ);
 		}
 
 		return FVoxelData::Air();
