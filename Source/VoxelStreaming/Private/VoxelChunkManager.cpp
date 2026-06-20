@@ -103,11 +103,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		SmoothedFrameTimeMs = SmoothedFrameTimeMs + Alpha * (FrameTimeMs - SmoothedFrameTimeMs);
 
 		const float TargetFPS = Configuration ? Configuration->TargetFrameRate : 60.0f;
-		const bool bAdaptive = Configuration ? Configuration->bAdaptiveThrottling : true;
-		const int32 ConfigMaxAsyncGen = Configuration ? Configuration->MaxAsyncGenerationTasks : 2;
-		const int32 ConfigMaxAsync = Configuration ? Configuration->MaxAsyncMeshTasks : 4;
-		const int32 ConfigMaxLODRemesh = Configuration ? Configuration->MaxLODRemeshPerFrame : 4;
-		const int32 ConfigMaxPending = Configuration ? Configuration->MaxPendingMeshes : 4;
+		// -VoxelPinScheduler forces non-adaptive so the override/config limits hold for the run.
+		const bool bAdaptive = bSchedPinned ? false : (Configuration ? Configuration->bAdaptiveThrottling : true);
+		const int32 ConfigMaxAsyncGen = (SchedOverrideAsyncGen >= 0) ? SchedOverrideAsyncGen : (Configuration ? Configuration->MaxAsyncGenerationTasks : 2);
+		const int32 ConfigMaxAsync = (SchedOverrideAsyncMesh >= 0) ? SchedOverrideAsyncMesh : (Configuration ? Configuration->MaxAsyncMeshTasks : 4);
+		const int32 ConfigMaxLODRemesh = (SchedOverrideLODRemesh >= 0) ? SchedOverrideLODRemesh : (Configuration ? Configuration->MaxLODRemeshPerFrame : 4);
+		const int32 ConfigMaxPending = (SchedOverridePending >= 0) ? SchedOverridePending : (Configuration ? Configuration->MaxPendingMeshes : 4);
 
 		if (bAdaptive && TargetFPS > 0.0f)
 		{
@@ -351,6 +352,19 @@ void UVoxelChunkManager::Initialize(
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
 
+	// Benchmark scheduler overrides (command line) — pin specific concurrency limits for A/B runs.
+	// Absent keys leave the members at -1 (use the configuration value).
+	FParse::Value(FCommandLine::Get(), TEXT("VoxelMaxAsyncGen="), SchedOverrideAsyncGen);
+	FParse::Value(FCommandLine::Get(), TEXT("VoxelMaxAsyncMesh="), SchedOverrideAsyncMesh);
+	FParse::Value(FCommandLine::Get(), TEXT("VoxelMaxLODRemesh="), SchedOverrideLODRemesh);
+	FParse::Value(FCommandLine::Get(), TEXT("VoxelMaxPending="), SchedOverridePending);
+	bSchedPinned = FParse::Param(FCommandLine::Get(), TEXT("VoxelPinScheduler"));
+	if (SchedOverrideAsyncGen >= 0 || SchedOverrideAsyncMesh >= 0 || SchedOverrideLODRemesh >= 0 || SchedOverridePending >= 0 || bSchedPinned)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelSched override: gen=%d mesh=%d lodRemesh=%d pending=%d pinned=%d"),
+			SchedOverrideAsyncGen, SchedOverrideAsyncMesh, SchedOverrideLODRemesh, SchedOverridePending, bSchedPinned ? 1 : 0);
+	}
+
 	// Pass water material to renderer for per-chunk water mesh sections
 	if (MeshRenderer && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
 	{
@@ -397,10 +411,10 @@ void UVoxelChunkManager::Initialize(
 	// Reset adaptive throttle state
 	SmoothedFrameTimeMs = 16.67f;
 	bSubsystemsDeferred = false;
-	EffectiveMaxAsyncGenerationTasks = Configuration->MaxAsyncGenerationTasks;
-	EffectiveMaxAsyncMeshTasks = Configuration->MaxAsyncMeshTasks;
-	EffectiveMaxLODRemeshPerFrame = Configuration->MaxLODRemeshPerFrame;
-	EffectiveMaxPendingMeshes = Configuration->MaxPendingMeshes;
+	EffectiveMaxAsyncGenerationTasks = (SchedOverrideAsyncGen >= 0) ? SchedOverrideAsyncGen : Configuration->MaxAsyncGenerationTasks;
+	EffectiveMaxAsyncMeshTasks = (SchedOverrideAsyncMesh >= 0) ? SchedOverrideAsyncMesh : Configuration->MaxAsyncMeshTasks;
+	EffectiveMaxLODRemeshPerFrame = (SchedOverrideLODRemesh >= 0) ? SchedOverrideLODRemesh : Configuration->MaxLODRemeshPerFrame;
+	EffectiveMaxPendingMeshes = (SchedOverridePending >= 0) ? SchedOverridePending : Configuration->MaxPendingMeshes;
 	LastTimingStats = FVoxelTimingStats();
 
 	// Create generation components

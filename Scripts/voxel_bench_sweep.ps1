@@ -15,7 +15,10 @@ param(
   [string]$Prefix    = "sweep",
   [string]$Map       = "/Game/PluginTesting/VoxelWorldsTest",
   [int]$TimeoutSec   = 220,
-  [string]$EditorCmd = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe"
+  [string]$EditorCmd = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe",
+  # Extra command-line args appended to every run, e.g. scheduler A/B overrides:
+  #   -ExtraArgs "-VoxelMaxAsyncMesh=16 -VoxelMaxAsyncGen=8 -VoxelPinScheduler"
+  [string]$ExtraArgs = ""
 )
 
 # .../Plugins/VoxelWorlds/Scripts -> project root is three levels up.
@@ -30,7 +33,7 @@ foreach ($v in $Velocities) {
   $tag  = "${Prefix}_v$v"
   $log  = Join-Path $projectRoot "Saved\sweep_$tag.log"
   $before = @(Get-ChildItem "$benchDir\*_$tag.json" -ErrorAction SilentlyContinue | Select-Object -Expand FullName)
-  $cmdArgs = "`"$uproject`" $Map -game -nullrhi -VoxelForceCPU -unattended -nosplash -ExecCmds=`"voxel.Bench.Run $tag $v $dist`" -abslog=`"$log`""
+  $cmdArgs = "`"$uproject`" $Map -game -nullrhi -VoxelForceCPU -unattended -nosplash $ExtraArgs -ExecCmds=`"voxel.Bench.Run $tag $v $dist`" -abslog=`"$log`""
   Write-Host "=== $tag (velocity=$v dist=$dist) ==="
   $p = Start-Process $EditorCmd -ArgumentList $cmdArgs -PassThru
   $report = $null; $deadline = (Get-Date).AddSeconds($TimeoutSec)

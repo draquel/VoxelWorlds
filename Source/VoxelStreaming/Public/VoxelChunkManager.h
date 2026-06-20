@@ -932,6 +932,16 @@ protected:
 	int32 EffectiveMaxLODRemeshPerFrame = 4;
 	int32 EffectiveMaxPendingMeshes = 4;
 
+	/** Benchmark scheduler overrides parsed from the command line at Initialize (A/B tuning):
+	 *  -VoxelMaxAsyncGen=N / -VoxelMaxAsyncMesh=N / -VoxelMaxLODRemesh=N / -VoxelMaxPending=N
+	 *  substitute for the configuration values; -VoxelPinScheduler disables adaptive throttling
+	 *  so the chosen limits hold for the whole run. -1 == use the configuration value. */
+	int32 SchedOverrideAsyncGen = -1;
+	int32 SchedOverrideAsyncMesh = -1;
+	int32 SchedOverrideLODRemesh = -1;
+	int32 SchedOverridePending = -1;
+	bool bSchedPinned = false;
+
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;
 
