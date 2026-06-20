@@ -95,6 +95,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerDeep)
 		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
@@ -168,6 +170,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerDeep)
 		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
@@ -231,6 +235,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerDeep)
 		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
@@ -314,6 +320,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeDeep)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerDeep)
 		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
@@ -525,6 +533,46 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		}
 	}
 
+	// Pack deep edge data (12 edges, each D*D*EdgeSize uints, EDGE_* order) and deep corner
+	// data (8 corners, each D^3 uints, CORNER_* order). Zero-fill absent entries so the shader
+	// indexes by edge*D*D*EdgeSize / corner*D^3. Mirror the CPU FVoxelMeshingRequest::*Deep.
+	TArray<uint32> PackedEdgeDeep;
+	TArray<uint32> PackedCornerDeep;
+	if (DeepPlanes > 0)
+	{
+		const int32 D = static_cast<int32>(NeighborPlaneDepth);
+		const int32 EdgeDeepStride = D * D * EdgeSize;
+		PackedEdgeDeep.SetNumZeroed(12 * EdgeDeepStride);
+		const TArray<FVoxelData>* EdgeDeepArrays[12] = {
+			&Request.EdgeXPosYPosDeep, &Request.EdgeXPosYNegDeep, &Request.EdgeXNegYPosDeep, &Request.EdgeXNegYNegDeep,
+			&Request.EdgeXPosZPosDeep, &Request.EdgeXPosZNegDeep, &Request.EdgeXNegZPosDeep, &Request.EdgeXNegZNegDeep,
+			&Request.EdgeYPosZPosDeep, &Request.EdgeYPosZNegDeep, &Request.EdgeYNegZPosDeep, &Request.EdgeYNegZNegDeep };
+		for (int32 Edge = 0; Edge < 12; ++Edge)
+		{
+			const TArray<FVoxelData>& Arr = *EdgeDeepArrays[Edge];
+			if (Arr.Num() == EdgeDeepStride)
+			{
+				const TArray<uint32> Packed = PackVoxelDataForGPU(Arr);
+				FMemory::Memcpy(&PackedEdgeDeep[Edge * EdgeDeepStride], Packed.GetData(), EdgeDeepStride * sizeof(uint32));
+			}
+		}
+
+		const int32 CornerDeepStride = D * D * D;
+		PackedCornerDeep.SetNumZeroed(8 * CornerDeepStride);
+		const TArray<FVoxelData>* CornerDeepArrays[8] = {
+			&Request.CornerXPosYPosZPosDeep, &Request.CornerXPosYPosZNegDeep, &Request.CornerXPosYNegZPosDeep, &Request.CornerXPosYNegZNegDeep,
+			&Request.CornerXNegYPosZPosDeep, &Request.CornerXNegYPosZNegDeep, &Request.CornerXNegYNegZPosDeep, &Request.CornerXNegYNegZNegDeep };
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const TArray<FVoxelData>& Arr = *CornerDeepArrays[Corner];
+			if (Arr.Num() == CornerDeepStride)
+			{
+				const TArray<uint32> Packed = PackVoxelDataForGPU(Arr);
+				FMemory::Memcpy(&PackedCornerDeep[Corner * CornerDeepStride], Packed.GetData(), CornerDeepStride * sizeof(uint32));
+			}
+		}
+	}
+
 	uint32 EdgeCornerFlags = Request.EdgeCornerFlags;
 
 	// LOD parameters
@@ -572,6 +620,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		 PackedEdgeYNegZNeg = MoveTemp(PackedEdgeYNegZNeg),
 		 PackedCornerData = MoveTemp(PackedCornerData),
 		 PackedFaceDeep = MoveTemp(PackedFaceDeep),
+		 PackedEdgeDeep = MoveTemp(PackedEdgeDeep),
+		 PackedCornerDeep = MoveTemp(PackedCornerDeep),
 		 NeighborPlaneDepth,
 		 NeighborFlags,
 		 EdgeCornerFlags,
@@ -647,6 +697,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 
 			// Deep face neighbor data (concatenated 6 faces; dummy when LOD0/empty)
 			FRDGBufferRef FaceDeepBuffer = CreateNeighborBuffer(PackedFaceDeep, TEXT("FaceDeep"));
+			FRDGBufferRef EdgeDeepBuffer = CreateNeighborBuffer(PackedEdgeDeep, TEXT("EdgeDeep"));
+			FRDGBufferRef CornerDeepBuffer = CreateNeighborBuffer(PackedCornerDeep, TEXT("CornerDeep"));
 
 			// ===== Create intermediate DC buffers =====
 
@@ -708,6 +760,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			auto EdgeYNegZNegSRV = GraphBuilder.CreateSRV(EdgeYNegZNegBuffer);
 			auto CornerSRV = GraphBuilder.CreateSRV(CornerDataBuffer);
 			auto FaceDeepSRV = GraphBuilder.CreateSRV(FaceDeepBuffer);
+			auto EdgeDeepSRV = GraphBuilder.CreateSRV(EdgeDeepBuffer);
+			auto CornerDeepSRV = GraphBuilder.CreateSRV(CornerDeepBuffer);
 			auto MeshCountersUAV = GraphBuilder.CreateUAV(MeshCountersBuffer);
 
 			// Helper lambda to bind voxel access parameters
@@ -734,6 +788,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				Params->EdgeYNegZNeg = EdgeYNegZNegSRV;
 				Params->CornerData = CornerSRV;
 				Params->FaceDeep = FaceDeepSRV;
+				Params->EdgeDeep = EdgeDeepSRV;
+				Params->CornerDeep = CornerDeepSRV;
 				Params->NeighborPlaneDepth = NeighborPlaneDepth;
 				Params->NeighborFlags = NeighborFlags;
 				Params->EdgeCornerFlags = EdgeCornerFlags;

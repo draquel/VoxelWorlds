@@ -49,6 +49,16 @@ StructuredBuffer<uint> CornerData;
 // when NeighborPlaneDepth<=1 (LOD0) — GetVoxelAt falls back to the single face slice.
 StructuredBuffer<uint> FaceDeep;
 
+// Deep edge neighbor data: 12 edges concatenated, each NeighborPlaneDepth^2 free-axis strips
+// of ChunkSize, in the EDGE_* order (XPosYPos..YNegZNeg). Index per edge:
+// ((dA*D)+dB)*ChunkSize + free, with (0,0) == the base Edge* strip. Mirrors EdgeDeepVoxel (CPU).
+StructuredBuffer<uint> EdgeDeep;
+
+// Deep corner neighbor data: 8 corners concatenated, each NeighborPlaneDepth^3 voxels, in the
+// CORNER_* order. Index per corner: ((dX*D)+dY)*D + dZ, with (0,0,0) == the scalar Corner*.
+// Mirrors CornerDeepVoxel (CPU). Empty (dummy) when NeighborPlaneDepth<=1.
+StructuredBuffer<uint> CornerDeep;
+
 // Face neighbor presence flags (bits 0-5)
 uint NeighborFlags;
 
@@ -171,6 +181,41 @@ uint FaceDeepVoxel(uint FaceIdx, uint InPlaneIdx, int PlaneIdx, uint BaseValue)
 }
 
 /**
+ * Resolve an edge-neighbor voxel at depth (DepthA, DepthB) into the two pinned axes
+ * ((0,0) == the base Edge* strip supplied as BaseValue). FreeIdx indexes the free axis.
+ * Falls back to BaseValue when no deep data is present. Mirrors EdgeDeepVoxel on the CPU.
+ */
+uint EdgeDeepVoxelGPU(uint EdgeIdx, uint FreeIdx, int DepthA, int DepthB, uint BaseValue)
+{
+    if (NeighborPlaneDepth <= 1)
+    {
+        return BaseValue;
+    }
+    uint D = NeighborPlaneDepth;
+    uint a = (uint)clamp(DepthA, 0, (int)D - 1);
+    uint b = (uint)clamp(DepthB, 0, (int)D - 1);
+    return EdgeDeep[EdgeIdx * D * D * ChunkSize + (a * D + b) * ChunkSize + FreeIdx];
+}
+
+/**
+ * Resolve a corner-neighbor voxel at depth (DepthX, DepthY, DepthZ) into the three pinned
+ * axes ((0,0,0) == the scalar Corner* supplied as BaseValue). Falls back to BaseValue when
+ * no deep data is present. Mirrors CornerDeepVoxel on the CPU.
+ */
+uint CornerDeepVoxelGPU(uint CornerIdx, int DepthX, int DepthY, int DepthZ, uint BaseValue)
+{
+    if (NeighborPlaneDepth <= 1)
+    {
+        return BaseValue;
+    }
+    uint D = NeighborPlaneDepth;
+    uint a = (uint)clamp(DepthX, 0, (int)D - 1);
+    uint b = (uint)clamp(DepthY, 0, (int)D - 1);
+    uint c = (uint)clamp(DepthZ, 0, (int)D - 1);
+    return CornerDeep[CornerIdx * D * D * D + (a * D + b) * D + c];
+}
+
+/**
  * Get packed voxel data at position, handling chunk boundaries.
  * Duplicated from MarchingCubesMeshGeneration.usf for self-contained shader.
  */
@@ -195,6 +240,12 @@ uint GetVoxelAt(int3 Position)
     bool bOutY = bYPos || bYNeg;
     bool bOutZ = bZPos || bZNeg;
     uint OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
+
+    // 0-based depth into a neighbor along each out-of-bounds axis (0 = first plane past the
+    // face). Used to read deep edge/corner data for strided cells. Mirrors the CPU GetVoxelAt.
+    int DepthX = bXPos ? (Position.x - (int)ChunkSize) : (bXNeg ? (-Position.x - 1) : 0);
+    int DepthY = bYPos ? (Position.y - (int)ChunkSize) : (bYNeg ? (-Position.y - 1) : 0);
+    int DepthZ = bZPos ? (Position.z - (int)ChunkSize) : (bZNeg ? (-Position.z - 1) : 0);
 
     if (OutCount == 1)
     {
@@ -235,51 +286,55 @@ uint GetVoxelAt(int3 Position)
 
     if (OutCount == 2)
     {
+        // Read the depth grid into the edge neighbor (deep arrays for strided cells; the base
+        // strip at depth (0,0)). EdgeIdx matches the EDGE_* order. Free axis indexes the strip.
         if (bXPos && bYPos && HasEdgeData(EDGE_XPOS_YPOS))
-            return EdgeXPosYPos[(uint)Position.z];
+            return EdgeDeepVoxelGPU(0, (uint)Position.z, DepthX, DepthY, EdgeXPosYPos[(uint)Position.z]);
         if (bXPos && bYNeg && HasEdgeData(EDGE_XPOS_YNEG))
-            return EdgeXPosYNeg[(uint)Position.z];
+            return EdgeDeepVoxelGPU(1, (uint)Position.z, DepthX, DepthY, EdgeXPosYNeg[(uint)Position.z]);
         if (bXNeg && bYPos && HasEdgeData(EDGE_XNEG_YPOS))
-            return EdgeXNegYPos[(uint)Position.z];
+            return EdgeDeepVoxelGPU(2, (uint)Position.z, DepthX, DepthY, EdgeXNegYPos[(uint)Position.z]);
         if (bXNeg && bYNeg && HasEdgeData(EDGE_XNEG_YNEG))
-            return EdgeXNegYNeg[(uint)Position.z];
+            return EdgeDeepVoxelGPU(3, (uint)Position.z, DepthX, DepthY, EdgeXNegYNeg[(uint)Position.z]);
         if (bXPos && bZPos && HasEdgeData(EDGE_XPOS_ZPOS))
-            return EdgeXPosZPos[(uint)Position.y];
+            return EdgeDeepVoxelGPU(4, (uint)Position.y, DepthX, DepthZ, EdgeXPosZPos[(uint)Position.y]);
         if (bXPos && bZNeg && HasEdgeData(EDGE_XPOS_ZNEG))
-            return EdgeXPosZNeg[(uint)Position.y];
+            return EdgeDeepVoxelGPU(5, (uint)Position.y, DepthX, DepthZ, EdgeXPosZNeg[(uint)Position.y]);
         if (bXNeg && bZPos && HasEdgeData(EDGE_XNEG_ZPOS))
-            return EdgeXNegZPos[(uint)Position.y];
+            return EdgeDeepVoxelGPU(6, (uint)Position.y, DepthX, DepthZ, EdgeXNegZPos[(uint)Position.y]);
         if (bXNeg && bZNeg && HasEdgeData(EDGE_XNEG_ZNEG))
-            return EdgeXNegZNeg[(uint)Position.y];
+            return EdgeDeepVoxelGPU(7, (uint)Position.y, DepthX, DepthZ, EdgeXNegZNeg[(uint)Position.y]);
         if (bYPos && bZPos && HasEdgeData(EDGE_YPOS_ZPOS))
-            return EdgeYPosZPos[(uint)Position.x];
+            return EdgeDeepVoxelGPU(8, (uint)Position.x, DepthY, DepthZ, EdgeYPosZPos[(uint)Position.x]);
         if (bYPos && bZNeg && HasEdgeData(EDGE_YPOS_ZNEG))
-            return EdgeYPosZNeg[(uint)Position.x];
+            return EdgeDeepVoxelGPU(9, (uint)Position.x, DepthY, DepthZ, EdgeYPosZNeg[(uint)Position.x]);
         if (bYNeg && bZPos && HasEdgeData(EDGE_YNEG_ZPOS))
-            return EdgeYNegZPos[(uint)Position.x];
+            return EdgeDeepVoxelGPU(10, (uint)Position.x, DepthY, DepthZ, EdgeYNegZPos[(uint)Position.x]);
         if (bYNeg && bZNeg && HasEdgeData(EDGE_YNEG_ZNEG))
-            return EdgeYNegZNeg[(uint)Position.x];
+            return EdgeDeepVoxelGPU(11, (uint)Position.x, DepthY, DepthZ, EdgeYNegZNeg[(uint)Position.x]);
         return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
     }
 
     if (OutCount == 3)
     {
+        // Read the depth box into the corner neighbor (deep arrays for strided cells; the
+        // scalar Corner* at depth (0,0,0)). CornerIdx matches the CORNER_* order.
         if (bXPos && bYPos && bZPos && HasCornerData(CORNER_XPOS_YPOS_ZPOS))
-            return CornerData[0];
+            return CornerDeepVoxelGPU(0, DepthX, DepthY, DepthZ, CornerData[0]);
         if (bXPos && bYPos && bZNeg && HasCornerData(CORNER_XPOS_YPOS_ZNEG))
-            return CornerData[1];
+            return CornerDeepVoxelGPU(1, DepthX, DepthY, DepthZ, CornerData[1]);
         if (bXPos && bYNeg && bZPos && HasCornerData(CORNER_XPOS_YNEG_ZPOS))
-            return CornerData[2];
+            return CornerDeepVoxelGPU(2, DepthX, DepthY, DepthZ, CornerData[2]);
         if (bXPos && bYNeg && bZNeg && HasCornerData(CORNER_XPOS_YNEG_ZNEG))
-            return CornerData[3];
+            return CornerDeepVoxelGPU(3, DepthX, DepthY, DepthZ, CornerData[3]);
         if (bXNeg && bYPos && bZPos && HasCornerData(CORNER_XNEG_YPOS_ZPOS))
-            return CornerData[4];
+            return CornerDeepVoxelGPU(4, DepthX, DepthY, DepthZ, CornerData[4]);
         if (bXNeg && bYPos && bZNeg && HasCornerData(CORNER_XNEG_YPOS_ZNEG))
-            return CornerData[5];
+            return CornerDeepVoxelGPU(5, DepthX, DepthY, DepthZ, CornerData[5]);
         if (bXNeg && bYNeg && bZPos && HasCornerData(CORNER_XNEG_YNEG_ZPOS))
-            return CornerData[6];
+            return CornerDeepVoxelGPU(6, DepthX, DepthY, DepthZ, CornerData[6]);
         if (bXNeg && bYNeg && bZNeg && HasCornerData(CORNER_XNEG_YNEG_ZNEG))
-            return CornerData[7];
+            return CornerDeepVoxelGPU(7, DepthX, DepthY, DepthZ, CornerData[7]);
         return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
     }
 
