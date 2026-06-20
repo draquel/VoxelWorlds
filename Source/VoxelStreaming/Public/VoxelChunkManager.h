@@ -13,6 +13,7 @@
 #include "InfinitePlaneWorldMode.h"
 #include "IVoxelMesher.h"
 #include "VoxelMeshingTypes.h"
+#include "VoxelStreamingBenchmark.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -399,6 +400,52 @@ public:
 
 	/** Get count of async generation tasks in flight */
 	int32 GetAsyncGenerationInProgressCount() const { return AsyncGenerationInProgress.Num(); }
+
+	// ==================== Streaming Benchmark ====================
+
+	/** Drive streaming from a fixed position instead of the camera (deterministic benchmark). */
+	void SetBenchmarkView(bool bActive, const FVector& Position) { bBenchmarkViewActive = bActive; BenchmarkViewPosition = Position; }
+	bool IsBenchmarkViewActive() const { return bBenchmarkViewActive; }
+
+	/** Queue depths for benchmark sampling. */
+	int32 GetPendingUnloadCount() const { return UnloadQueue.Num(); }
+	int32 GetPendingMeshUploadCount() const { return PendingMeshQueue.Num(); }
+
+	/** Thrash: chunks re-queued for meshing after they already had a mesh. */
+	int64 GetBenchRemeshCount() const { return BenchRemeshCount; }
+
+	/** Unload-lag (enqueue -> actual unload), in milliseconds. */
+	void GetBenchUnloadLagStats(double& OutMeanMs, double& OutMaxMs, int64& OutCount) const
+	{
+		OutCount = BenchUnloadLagCount;
+		OutMeanMs = (BenchUnloadLagCount > 0) ? (BenchUnloadLagSumMs / static_cast<double>(BenchUnloadLagCount)) : 0.0;
+		OutMaxMs = BenchUnloadLagMaxMs;
+	}
+
+	/** Unload distance (viewer -> chunk at actual unload), in world units — the "lazy deletion"
+	 *  decision in distance form (how far past the active radius chunks linger before deletion). */
+	void GetBenchUnloadDistStats(double& OutMeanUU, double& OutMaxUU) const
+	{
+		OutMeanUU = (BenchUnloadLagCount > 0) ? (BenchUnloadDistSumUU / static_cast<double>(BenchUnloadLagCount)) : 0.0;
+		OutMaxUU = BenchUnloadDistMaxUU;
+	}
+
+	/** Start a deterministic streaming benchmark run (drives the streaming origin, samples each
+	 *  frame from TickComponent, and writes a CSV + JSON report on completion). */
+	void StartBenchmark(const FVoxelBenchConfig& InConfig);
+
+	/** Reset benchmark counters (call at the start of a benchmark run). */
+	void ResetBenchCounters()
+	{
+		BenchRemeshCount = 0;
+		BenchUnloadLagSumMs = 0.0;
+		BenchUnloadLagMaxMs = 0.0;
+		BenchUnloadLagCount = 0;
+		BenchUnloadDistSumUU = 0.0;
+		BenchUnloadDistMaxUU = 0.0;
+		UnloadEnqueueTimeSeconds.Reset();
+		BenchEverMeshed.Reset();
+	}
 
 	// ==================== Debug ====================
 
@@ -895,4 +942,31 @@ protected:
 
 	/** Timing stats from last frame */
 	FVoxelTimingStats LastTimingStats;
+
+	// ==================== Streaming Benchmark ====================
+
+	/** When active, BuildQueryContext uses BenchmarkViewPosition instead of the camera/viewport,
+	 *  giving a deterministic streaming origin for repeatable benchmarks (headless + PIE). */
+	bool bBenchmarkViewActive = false;
+	FVector BenchmarkViewPosition = FVector::ZeroVector;
+
+	/** Re-mesh churn: count of chunks re-queued for meshing after they already had a mesh. */
+	int64 BenchRemeshCount = 0;
+
+	/** Chunks meshed at least once during the active benchmark (to detect re-mesh churn). */
+	TSet<FIntVector> BenchEverMeshed;
+
+	/** Active benchmark run, ticked from TickComponent; reset when it finishes. */
+	TUniquePtr<FVoxelStreamingBenchmark> ActiveBenchmark;
+
+	/** Unload-lag: per-chunk enqueue time + accumulated dwell (enqueue -> actual unload) stats. */
+	TMap<FIntVector, double> UnloadEnqueueTimeSeconds;
+	double BenchUnloadLagSumMs = 0.0;
+	double BenchUnloadLagMaxMs = 0.0;
+	int64 BenchUnloadLagCount = 0;
+
+	/** Unload distance: viewer-to-chunk distance at the moment of actual unload (uu) — how far
+	 *  past the active radius chunks survive (the "lazy deletion" decision, distance form). */
+	double BenchUnloadDistSumUU = 0.0;
+	double BenchUnloadDistMaxUU = 0.0;
 };

@@ -25,10 +25,13 @@
 #include "VoxelTreeInjector.h"
 #include "VoxelTreeTypes.h"
 #include "Engine/World.h"
+#include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/Pawn.h"
 #include "DrawDebugHelpers.h"
+#include "EngineUtils.h"
+#include "HAL/IConsoleManager.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
@@ -78,6 +81,17 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	}
 
 	++CurrentFrame;
+
+	// Drive an active streaming benchmark: advances the bench view position + samples this frame,
+	// before BuildQueryContext picks the position up below. Cleared when the run completes.
+	if (ActiveBenchmark.IsValid())
+	{
+		ActiveBenchmark->Tick(DeltaTime);
+		if (ActiveBenchmark->IsDone())
+		{
+			ActiveBenchmark.Reset();
+		}
+	}
 
 	const double TickStartTime = FPlatformTime::Seconds();
 	FVoxelTimingStats Timing;
@@ -399,6 +413,16 @@ void UVoxelChunkManager::Initialize(
 	NoiseGenerator = MakeUnique<FVoxelCPUNoiseGenerator>();
 	NoiseGenerator->Initialize();
 
+	// Headless/benchmark override: force the CPU mesher path (e.g. under -nullrhi where GPU
+	// compute dispatch is unavailable, such as a headless streaming-benchmark run). Enabled by
+	// the -VoxelForceCPU command-line switch, evaluated here at mesher creation.
+	const bool bForceCPU = FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU"));
+	const bool bUseGPU = Configuration->bUseGPUMeshing && !bForceCPU;
+	if (bForceCPU)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelForceCPU: forcing CPU mesher (GPU meshing disabled)"));
+	}
+
 	// Create mesher based on configuration
 	if (Configuration->MeshingMode == EMeshingMode::MarchingCubes)
 	{
@@ -415,7 +439,7 @@ void UVoxelChunkManager::Initialize(
 			MeshConfig.bGenerateSkirts = false;
 		}
 
-		if (Configuration->bUseGPUMeshing)
+		if (bUseGPU)
 		{
 			auto GPUMCMesher = MakeUnique<FVoxelGPUMarchingCubesMesher>();
 			GPUMCMesher->Initialize();
@@ -448,7 +472,7 @@ void UVoxelChunkManager::Initialize(
 		MeshConfig.bUseTransvoxel = false;
 		MeshConfig.bGenerateSkirts = Configuration->bEnableLODSeams;
 
-		if (Configuration->bUseGPUMeshing)
+		if (bUseGPU)
 		{
 			auto GPUDCMesher = MakeUnique<FVoxelGPUDualContourMesher>();
 			GPUDCMesher->Initialize();
@@ -1055,6 +1079,34 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 	FLODQueryContext Context;
 	bool bFoundViewer = false;
 	FString ViewerSource = TEXT("None");
+
+	// Benchmark override: drive streaming from a fixed, script-controlled position so a run is
+	// reproducible (and identical in headless and PIE). Bypasses the camera/viewport entirely.
+	if (bBenchmarkViewActive)
+	{
+		Context.ViewerPosition = BenchmarkViewPosition;
+		Context.ViewerForward = FVector::ForwardVector;
+		Context.ViewerRight = FVector::RightVector;
+		Context.ViewerUp = FVector::UpVector;
+		Context.FieldOfView = 90.0f;
+		if (const UWorld* World = GetWorld())
+		{
+			Context.GameTime = World->GetTimeSeconds();
+			Context.DeltaTime = World->GetDeltaSeconds();
+		}
+		if (Configuration)
+		{
+			Context.ViewDistance = Configuration->ViewDistance;
+			Context.WorldOrigin = Configuration->WorldOrigin;
+			Context.WorldMode = Configuration->WorldMode;
+			Context.WorldRadius = Configuration->WorldRadius;
+			Context.MaxChunksToLoadPerFrame = Configuration->MaxChunksToLoadPerFrame;
+			Context.MaxChunksToUnloadPerFrame = Configuration->MaxChunksToUnloadPerFrame;
+			Context.TimeSliceMS = Configuration->StreamingTimeSliceMS;
+		}
+		Context.FrameNumber = CurrentFrame;
+		return Context;
+	}
 
 	// Get viewer state from player controller
 	if (UWorld* World = GetWorld())
@@ -2017,7 +2069,33 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 		// Skip if state changed
 		if (GetChunkState(ChunkCoord) != EChunkState::PendingUnload)
 		{
+			// Unload cancelled (chunk needed again) — drop the pending stamp, don't count as lag.
+			if (bBenchmarkViewActive) { UnloadEnqueueTimeSeconds.Remove(ChunkCoord); }
 			continue;
+		}
+
+		// Benchmark: record unload latency (enqueue -> actual unload) = the lazy-deletion lag.
+		if (bBenchmarkViewActive)
+		{
+			if (const double* EnqueueTime = UnloadEnqueueTimeSeconds.Find(ChunkCoord))
+			{
+				const double LagMs = (FPlatformTime::Seconds() - *EnqueueTime) * 1000.0;
+				BenchUnloadLagSumMs += LagMs;
+				BenchUnloadLagMaxMs = FMath::Max(BenchUnloadLagMaxMs, LagMs);
+				++BenchUnloadLagCount;
+				// Distance form of the lazy-deletion decision: how far the viewer is from the
+				// chunk when it is finally unloaded (large == chunks linger past the active radius).
+				if (Configuration)
+				{
+					const FBox LocalBounds = FVoxelCoordinates::ChunkToWorldBounds(
+						ChunkCoord, Configuration->ChunkSize, Configuration->VoxelSize);
+					const FVector ChunkCenter = LocalBounds.GetCenter() + Configuration->WorldOrigin;
+					const double DistUU = FVector::Dist(BenchmarkViewPosition, ChunkCenter);
+					BenchUnloadDistSumUU += DistUU;
+					BenchUnloadDistMaxUU = FMath::Max(BenchUnloadDistMaxUU, DistUU);
+				}
+				UnloadEnqueueTimeSeconds.Remove(ChunkCoord);
+			}
 		}
 
 		// Remove from renderer
@@ -2333,6 +2411,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 						PendingMeshQueue[i].LODLevel,
 						PendingMeshQueue[i].MeshData);
 					State->MeshedLODLevel = PendingMeshQueue[i].LODLevel;
+					if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 					SubmittedLOD = PendingMeshQueue[i].LODLevel;
 					bMeshSubmitted = true;
 				}
@@ -2423,6 +2502,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// Track which LOD is actually rendered so neighbors can read the correct
 		// LOD level for MergeLODBoundaryCells and transition face setup.
 		State->MeshedLODLevel = PendingMesh.LODLevel;
+		if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 
 		// Notify scatter manager with voxel data for LOD-independent surface extraction
 		if (ScatterManager && Configuration && Configuration->bEnableScatter)
@@ -3460,6 +3540,12 @@ bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request)
 		return false;
 	}
 
+	// Benchmark thrash: a chunk re-entering the meshing queue after it already had a mesh is churn.
+	if (bBenchmarkViewActive && BenchEverMeshed.Contains(Request.ChunkCoord))
+	{
+		++BenchRemeshCount;
+	}
+
 	// Add to tracking set
 	MeshingQueueSet.Add(Request.ChunkCoord);
 
@@ -3481,6 +3567,12 @@ bool UVoxelChunkManager::AddToUnloadQueue(const FIntVector& ChunkCoord)
 	// Add to tracking set and queue
 	UnloadQueueSet.Add(ChunkCoord);
 	UnloadQueue.Add(ChunkCoord);
+
+	// Benchmark: stamp enqueue time to measure unload latency (lazy-deletion lag).
+	if (bBenchmarkViewActive)
+	{
+		UnloadEnqueueTimeSeconds.Add(ChunkCoord, FPlatformTime::Seconds());
+	}
 
 	return true;
 }
@@ -3525,6 +3617,80 @@ void UVoxelChunkManager::RemoveFromUnloadQueue(const FIntVector& ChunkCoord)
 	// Remove from queue
 	UnloadQueue.Remove(ChunkCoord);
 }
+
+// ==================== Streaming Benchmark ====================
+
+void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)
+{
+	ActiveBenchmark = MakeUnique<FVoxelStreamingBenchmark>(InConfig, this);
+}
+
+// Console: voxel.Bench.Run [tag] [velocityUU] [distanceUU]
+// Starts a deterministic fixed-velocity traverse from the current view position (kept near the
+// ground so the leading edge streams at LOD0) and writes a report under Saved/VoxelBench/.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
+	TEXT("voxel.Bench.Run"),
+	TEXT("Run a streaming benchmark traverse: voxel.Bench.Run [tag] [velocityUU] [distanceUU]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		// Target the ticking game/PIE world, not the editor world the command may arrive on.
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+
+		UVoxelChunkManager* CM = nullptr;
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			if (UVoxelChunkManager* Found = It->FindComponentByClass<UVoxelChunkManager>())
+			{
+				CM = Found;
+				break;
+			}
+		}
+		if (!CM)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: no UVoxelChunkManager found in the game world"));
+			return;
+		}
+
+		FVoxelBenchConfig Config;
+		if (Args.Num() > 0) { Config.Tag = Args[0]; }
+		if (Args.Num() > 1) { Config.VelocityUU = FCString::Atof(*Args[1]); }
+		if (Args.Num() > 2) { Config.TraverseDistance = FCString::Atof(*Args[2]); }
+
+		// Start from the player view (on the ground -> leading edge stays LOD0); fall back to the
+		// chunk-manager owner if no valid player view is available.
+		FVector Start = FVector::ZeroVector;
+		if (APlayerController* PC = TargetWorld->GetFirstPlayerController())
+		{
+			FVector Loc; FRotator Rot;
+			PC->GetPlayerViewPoint(Loc, Rot);
+			Start = Loc;
+		}
+		if (Start.IsNearlyZero())
+		{
+			if (const AActor* Owner = CM->GetOwner()) { Start = Owner->GetActorLocation(); }
+			Start.Z += 500.0f; // keep slightly above the surface
+		}
+		Config.StartPosition = Start;
+		CM->StartBenchmark(Config);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run '%s': world=%s start=(%.0f,%.0f,%.0f) vel=%.0f dist=%.0f"),
+			*Config.Tag, *TargetWorld->GetName(), Start.X, Start.Y, Start.Z, Config.VelocityUU, Config.TraverseDistance);
+	}));
 
 // ==================== Queue Re-Prioritization ====================
 
