@@ -8,6 +8,7 @@
 #include "CoreMinimal.h"
 
 class UVoxelChunkManager;
+class APawn;
 
 /** Scenario + equilibrium parameters for a benchmark run. */
 struct FVoxelBenchConfig
@@ -74,6 +75,12 @@ private:
 	void Finish(bool bReachedEquilibrium);
 	void WriteReport();
 
+	/** Fly the player pawn along the path (teleport + no gravity) so it stays on loaded terrain
+	 *  and never falls through, and the rendered view follows the flight. Restored on finish. */
+	void SetupFlyPawn();
+	void UpdateFlyPawn();
+	void RestoreFlyPawn();
+
 	FVoxelBenchConfig Config;
 	UVoxelChunkManager* ChunkManager = nullptr;
 
@@ -90,4 +97,10 @@ private:
 
 	TArray<FSample> Samples;
 	FString ReportCsvPath;
+
+	// Fly-pawn state (so the viewer flies the path instead of a character running + falling through).
+	TWeakObjectPtr<APawn> FlyPawn;
+	FVector OriginalPawnLocation = FVector::ZeroVector;
+	uint8 OriginalMovementMode = 0;
+	bool bPawnConfigured = false;
 };

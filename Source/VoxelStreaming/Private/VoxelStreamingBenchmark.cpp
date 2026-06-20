@@ -4,6 +4,11 @@
 #include "Misc/Paths.h"
 #include "Misc/DateTime.h"
 #include "HAL/PlatformFileManager.h"
+#include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelBench, Log, All);
 
@@ -24,8 +29,56 @@ FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InCo
 		ChunkManager->SetBenchmarkView(true, CurrentPos);
 	}
 	Samples.Reserve(4096);
+	SetupFlyPawn();
 	UE_LOG(LogVoxelBench, Log, TEXT("Benchmark '%s' started: start=(%.0f,%.0f,%.0f) vel=%.0f dist=%.0f"),
 		*Config.Tag, CurrentPos.X, CurrentPos.Y, CurrentPos.Z, Config.VelocityUU, Config.TraverseDistance);
+}
+
+void FVoxelStreamingBenchmark::SetupFlyPawn()
+{
+	if (!ChunkManager) { return; }
+	UWorld* World = ChunkManager->GetWorld();
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	if (!Pawn) { return; }
+	FlyPawn = Pawn;
+	OriginalPawnLocation = Pawn->GetActorLocation();
+	bPawnConfigured = true;
+	// A character would walk + fall through unloaded terrain; switch it to flying so it tracks
+	// the bench path cleanly. Non-character pawns just get teleported each tick.
+	if (ACharacter* Char = Cast<ACharacter>(Pawn))
+	{
+		if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
+		{
+			OriginalMovementMode = static_cast<uint8>(Move->MovementMode.GetValue());
+			Move->SetMovementMode(MOVE_Flying);
+			Move->StopMovementImmediately();
+		}
+	}
+}
+
+void FVoxelStreamingBenchmark::UpdateFlyPawn()
+{
+	if (APawn* Pawn = FlyPawn.Get())
+	{
+		Pawn->SetActorLocation(CurrentPos, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+}
+
+void FVoxelStreamingBenchmark::RestoreFlyPawn()
+{
+	if (APawn* Pawn = FlyPawn.Get())
+	{
+		Pawn->SetActorLocation(OriginalPawnLocation, false, nullptr, ETeleportType::TeleportPhysics);
+		if (ACharacter* Char = Cast<ACharacter>(Pawn))
+		{
+			if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
+			{
+				Move->SetMovementMode(static_cast<EMovementMode>(OriginalMovementMode));
+			}
+		}
+	}
+	FlyPawn = nullptr;
 }
 
 bool FVoxelStreamingBenchmark::QueuesDrained() const
@@ -81,6 +134,7 @@ void FVoxelStreamingBenchmark::Tick(float DeltaTime)
 		CurrentPos = Config.StartPosition + Config.Direction * DistanceTraversed;
 	}
 	ChunkManager->SetBenchmarkView(true, CurrentPos);
+	UpdateFlyPawn();
 
 	TakeSample(DeltaTime);
 
@@ -137,6 +191,7 @@ void FVoxelStreamingBenchmark::Finish(bool bReachedEquilibrium)
 	{
 		ChunkManager->SetBenchmarkView(false, FVector::ZeroVector);
 	}
+	RestoreFlyPawn();
 	WriteReport();
 }
 
