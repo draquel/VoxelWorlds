@@ -367,11 +367,11 @@ void UVoxelChunkManager::Initialize(
 
 	// Deep neighbour-data depth override (per-job-cost A/B).
 	bDeepDepthOff = FParse::Param(FCommandLine::Get(), TEXT("VoxelDeepOff"));
-	bDeepDepthGeo = FParse::Param(FCommandLine::Get(), TEXT("VoxelDeepDepthGeo"));
-	if (bDeepDepthOff || bDeepDepthGeo)
+	bDeepDepthFull = FParse::Param(FCommandLine::Get(), TEXT("VoxelDeepFull"));
+	if (bDeepDepthOff || bDeepDepthFull)
 	{
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelDeepDepth override: %s"),
-			bDeepDepthOff ? TEXT("OFF (1 plane)") : TEXT("GEO (stride+1)"));
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelDeepDepth override: %s (default is GEO stride+1)"),
+			bDeepDepthOff ? TEXT("OFF (1 plane)") : TEXT("FULL (2*stride)"));
 	}
 
 	// Pass water material to renderer for per-chunk water mesh sections
@@ -3075,13 +3075,14 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 	// neighbor (watertight), and Marching Cubes gets correct boundary normals. LOD 0
 	// keeps a single plane (no extra cost). Capped so the source index stays in range.
 	const int32 MeshStride = 1 << FMath::Clamp(OutRequest.LODLevel, 0, 7);
-	// Total deep planes incl. plane 0. Default 2*stride covers geometry (reach = stride) AND
-	// central-difference normals (reach = 2*stride). The overrides trade boundary-normal quality
-	// for per-job cost: geometry-only (stride+1) or no deep data (1). See -VoxelDeepDepth* flags.
+	// Total deep planes incl. plane 0. Default stride+1 = geometry-only: the outward DC boundary
+	// cell reaches `stride` voxels deep (watertight), plus one plane for one-sided boundary normals.
+	// -VoxelDeepFull restores 2*stride (adds central-difference normal reach at higher per-job cost,
+	// ~14% slower catch-up at v6000); -VoxelDeepOff drops to 1 plane (no deep data, loses the seam fix).
 	int32 DeepDepth;
 	if (MeshStride <= 1 || bDeepDepthOff) { DeepDepth = 1; }
-	else if (bDeepDepthGeo)              { DeepDepth = MeshStride + 1; }
-	else                                 { DeepDepth = 2 * MeshStride; }
+	else if (bDeepDepthFull)             { DeepDepth = 2 * MeshStride; }
+	else                                 { DeepDepth = MeshStride + 1; }
 	const int32 ExtraPlanes = FMath::Clamp(DeepDepth - 1, 0, ChunkSize - 1);
 	OutRequest.NeighborPlaneDepth = ExtraPlanes + 1;
 

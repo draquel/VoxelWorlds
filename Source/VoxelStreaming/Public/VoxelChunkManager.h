@@ -954,10 +954,11 @@ protected:
 	int32 SchedOverridePending = -1;
 	bool bSchedPinned = false;
 
-	/** Deep neighbour-data depth override for per-job-cost A/B (command line, parsed at Initialize):
-	 *  -VoxelDeepDepthGeo => stride+1 (geometry-only, softer boundary normals); -VoxelDeepOff => 1
-	 *  (no deep data). Default (neither) = 2*stride. Applied in ExtractNeighborEdgeSlices. */
-	bool bDeepDepthGeo = false;
+	/** Deep neighbour-data depth override for per-job cost (command line, parsed at Initialize).
+	 *  Default = stride+1 (geometry-only: watertight, one-sided boundary normals, the cheaper job).
+	 *  -VoxelDeepFull => 2*stride (adds central-difference boundary-normal reach, the old default);
+	 *  -VoxelDeepOff => 1 (no deep data). Applied in ExtractNeighborEdgeSlices. */
+	bool bDeepDepthFull = false;
 	bool bDeepDepthOff = false;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */
