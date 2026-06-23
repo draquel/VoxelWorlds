@@ -365,6 +365,15 @@ void UVoxelChunkManager::Initialize(
 			SchedOverrideAsyncGen, SchedOverrideAsyncMesh, SchedOverrideLODRemesh, SchedOverridePending, bSchedPinned ? 1 : 0);
 	}
 
+	// Deep neighbour-data depth override (per-job-cost A/B).
+	bDeepDepthOff = FParse::Param(FCommandLine::Get(), TEXT("VoxelDeepOff"));
+	bDeepDepthGeo = FParse::Param(FCommandLine::Get(), TEXT("VoxelDeepDepthGeo"));
+	if (bDeepDepthOff || bDeepDepthGeo)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelDeepDepth override: %s"),
+			bDeepDepthOff ? TEXT("OFF (1 plane)") : TEXT("GEO (stride+1)"));
+	}
+
 	// Pass water material to renderer for per-chunk water mesh sections
 	if (MeshRenderer && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
 	{
@@ -3118,7 +3127,13 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 	// neighbor (watertight), and Marching Cubes gets correct boundary normals. LOD 0
 	// keeps a single plane (no extra cost). Capped so the source index stays in range.
 	const int32 MeshStride = 1 << FMath::Clamp(OutRequest.LODLevel, 0, 7);
-	const int32 DeepDepth = (MeshStride > 1) ? (2 * MeshStride) : 1; // total planes incl. plane 0
+	// Total deep planes incl. plane 0. Default 2*stride covers geometry (reach = stride) AND
+	// central-difference normals (reach = 2*stride). The overrides trade boundary-normal quality
+	// for per-job cost: geometry-only (stride+1) or no deep data (1). See -VoxelDeepDepth* flags.
+	int32 DeepDepth;
+	if (MeshStride <= 1 || bDeepDepthOff) { DeepDepth = 1; }
+	else if (bDeepDepthGeo)              { DeepDepth = MeshStride + 1; }
+	else                                 { DeepDepth = 2 * MeshStride; }
 	const int32 ExtraPlanes = FMath::Clamp(DeepDepth - 1, 0, ChunkSize - 1);
 	OutRequest.NeighborPlaneDepth = ExtraPlanes + 1;
 
