@@ -178,6 +178,20 @@ public:
 		return 1.0f;
 	}
 
+	/**
+	 * Get the distance (world units) beyond which a loaded chunk is out of range and
+	 * should be unloaded. Also used to cull chunks from the generation/mesh queue before
+	 * they ever load, when the viewer has moved far past them while they sat in the backlog.
+	 *
+	 * Default: -1 (no unload horizon -> stale-culling disabled for this strategy).
+	 *
+	 * @return Unload horizon distance in world units, or <= 0 to disable.
+	 */
+	virtual float GetUnloadDistance() const
+	{
+		return -1.0f;
+	}
+
 	// ==================== Debugging ====================
 
 	/**

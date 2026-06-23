@@ -100,6 +100,9 @@ public:
 	void SetViewDistance(float Distance) { MaxViewDistance = Distance; }
 	float GetViewDistance() const { return MaxViewDistance; }
 
+	/** Unload horizon: chunks beyond MaxViewDistance * UnloadDistanceMultiplier are out of range. */
+	virtual float GetUnloadDistance() const override { return MaxViewDistance * UnloadDistanceMultiplier; }
+
 protected:
 	// ==================== Internal Helpers ====================
 

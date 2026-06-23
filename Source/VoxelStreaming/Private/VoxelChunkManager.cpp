@@ -143,6 +143,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Build query context from camera state
 	FLODQueryContext Context = BuildQueryContext();
 
+	// Cache the current viewer position for the stale-cull distance test used by the queue
+	// processors (which don't build their own context). Reflects the benchmark view override.
+	CurrentViewerPosition = Context.ViewerPosition;
+
 	// Debug: Log viewer position periodically
 	static int32 ViewerLogCounter = 0;
 	if (++ViewerLogCounter % 120 == 0)
@@ -372,6 +376,13 @@ void UVoxelChunkManager::Initialize(
 	{
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelDeepDepth override: %s (default is GEO stride+1)"),
 			bDeepDepthOff ? TEXT("OFF (1 plane)") : TEXT("FULL (2*stride)"));
+	}
+
+	// Stale-cull (default on): skip meshing chunks the viewer has already moved past.
+	bStaleCull = !FParse::Param(FCommandLine::Get(), TEXT("VoxelNoStaleCull"));
+	if (!bStaleCull)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("Stale-cull DISABLED (-VoxelNoStaleCull): meshing chunks the viewer has passed"));
 	}
 
 	// Pass water material to renderer for per-chunk water mesh sections
@@ -1608,6 +1619,20 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			continue;
 		}
 
+		// Stale-cull: the viewer may have moved far past this chunk while it waited in the mesh
+		// backlog. If it is now beyond the unload horizon it would be deleted the instant it
+		// finished meshing -- so skip the wasted mesh job and route it straight to unload, freeing
+		// the pipeline for chunks the viewer still needs. Safe: only drops chunks that the standard
+		// distance-unload would remove on arrival anyway.
+		if (bStaleCull && IsChunkBeyondUnloadDistance(Request.ChunkCoord))
+		{
+			if (AddToUnloadQueue(Request.ChunkCoord))
+			{
+				SetChunkState(Request.ChunkCoord, EChunkState::PendingUnload);
+			}
+			continue;
+		}
+
 		// Get chunk state for voxel data
 		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
 		if (!State || State->Descriptor.VoxelData.Num() == 0)
@@ -2076,6 +2101,23 @@ void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 
 		++ProcessedCount;
 	}
+}
+
+bool UVoxelChunkManager::IsChunkBeyondUnloadDistance(const FIntVector& ChunkCoord) const
+{
+	if (!LODStrategy || !Configuration)
+	{
+		return false;
+	}
+	const float UnloadDist = LODStrategy->GetUnloadDistance();
+	if (UnloadDist <= 0.0f)
+	{
+		return false; // strategy defines no unload horizon -> never stale-cull
+	}
+	const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(
+		ChunkCoord, Configuration->ChunkSize, Configuration->VoxelSize);
+	const FVector ChunkCenter = Bounds.GetCenter() + Configuration->WorldOrigin;
+	return FVector::DistSquared(CurrentViewerPosition, ChunkCenter) > FMath::Square(UnloadDist);
 }
 
 void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)

@@ -683,6 +683,10 @@ protected:
 	 */
 	bool AddToUnloadQueue(const FIntVector& ChunkCoord);
 
+	/** True if ChunkCoord is beyond the LOD strategy's unload horizon from the current viewer
+	 *  position. Used to stale-cull chunks from the mesh queue before wasting a mesh job on them. */
+	bool IsChunkBeyondUnloadDistance(const FIntVector& ChunkCoord) const;
+
 	/**
 	 * Remove a chunk from the generation queue.
 	 *
@@ -960,6 +964,13 @@ protected:
 	 *  -VoxelDeepOff => 1 (no deep data). Applied in ExtractNeighborEdgeSlices. */
 	bool bDeepDepthFull = false;
 	bool bDeepDepthOff = false;
+
+	/** Stale-cull: skip meshing chunks the viewer has already moved past (beyond the unload
+	 *  horizon) instead of meshing them and unloading on arrival. Default on; -VoxelNoStaleCull disables. */
+	bool bStaleCull = true;
+
+	/** Latest viewer world position, cached each tick for the stale-cull distance test. */
+	FVector CurrentViewerPosition = FVector::ZeroVector;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;
