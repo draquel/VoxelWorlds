@@ -51,6 +51,26 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	// This allows easy control over render distance independent of LOD band setup
 	MaxViewDistance = WorldConfig->ViewDistance;
 
+	// Benchmark/iteration override: -VoxelLODScale=N scales every band boundary
+	// (Min/Max/MorphRange) by N while leaving MaxViewDistance (the field size /
+	// chunk budget) fixed. N<1 pulls the fine-LOD reach inward (coarser sooner =
+	// less re-mesh thrash, lower visual detail); N>1 pushes it outward (clamped to
+	// view distance). Lets us A/B the thrash-vs-detail tradeoff without re-authoring
+	// the config. Total LOD-transition thrash scales ~linearly with the sum of band
+	// radii for a planar traverse, so this is the primary band-tuning thrash lever.
+	float LODScale = 1.0f;
+	if (FParse::Value(FCommandLine::Get(), TEXT("VoxelLODScale="), LODScale) && LODScale > 0.0f && !FMath::IsNearlyEqual(LODScale, 1.0f))
+	{
+		for (FLODBand& Band : LODBands)
+		{
+			Band.MinDistance = FMath::Min(Band.MinDistance * LODScale, MaxViewDistance);
+			Band.MaxDistance = FMath::Min(Band.MaxDistance * LODScale, MaxViewDistance);
+			Band.MorphRange *= LODScale;
+		}
+		UE_LOG(LogVoxelLOD, Warning, TEXT("  -VoxelLODScale=%.3f applied: band boundaries scaled (view distance fixed at %.0f)"),
+			LODScale, MaxViewDistance);
+	}
+
 	// Cache world-mode-specific parameters first (needed for vertical range calculation)
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 
