@@ -242,6 +242,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	double UnloadDistMean = 0.0, UnloadDistMax = 0.0;
 	ChunkManager->GetBenchUnloadDistStats(UnloadDistMean, UnloadDistMax);
 	const int64 Thrash = ChunkManager->GetBenchRemeshCount();
+	const int64 ThrashNeighbor = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::NeighborRemesh);
+	const int64 ThrashLOD = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::LODTransition);
+	const int64 ThrashDirty = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::Dirty);
+	const int64 ThrashOther = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::Other);
 	const double TraverseDur = CatchUpStartSimTime - TraverseStartSimTime;
 
 	FString Json;
@@ -264,6 +268,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	Json += FString::Printf(TEXT("  \"totalMsP95\": %.3f,\n"), Percentile(TotalMsArr, 0.95f));
 	Json += FString::Printf(TEXT("  \"totalMsP99\": %.3f,\n"), Percentile(TotalMsArr, 0.99f));
 	Json += FString::Printf(TEXT("  \"thrashRemeshCount\": %lld,\n"), Thrash);
+	Json += FString::Printf(TEXT("  \"thrashNeighbor\": %lld,\n"), ThrashNeighbor);
+	Json += FString::Printf(TEXT("  \"thrashLOD\": %lld,\n"), ThrashLOD);
+	Json += FString::Printf(TEXT("  \"thrashDirty\": %lld,\n"), ThrashDirty);
+	Json += FString::Printf(TEXT("  \"thrashOther\": %lld,\n"), ThrashOther);
 	Json += FString::Printf(TEXT("  \"unloadLagMeanMs\": %.1f,\n"), UnloadLagMean);
 	Json += FString::Printf(TEXT("  \"unloadLagMaxMs\": %.1f,\n"), UnloadLagMax);
 	Json += FString::Printf(TEXT("  \"unloadCount\": %lld,\n"), UnloadLagCount);
@@ -277,7 +285,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 	FFileHelper::SaveStringToFile(Json, *(Base + TEXT(".json")));
 
 	UE_LOG(LogVoxelBench, Warning,
-		TEXT("Benchmark '%s' DONE: traverse=%.1fs catchUp=%.1fs peakMeshQ=%d peakGenQ=%d peakUnloadQ=%d frameP95=%.1fms totalP95=%.1fms thrash=%lld unloadLag(mean/max)=%.0f/%.0fms unloadDist(mean/max)=%.0f/%.0fuu -> %s"),
+		TEXT("Benchmark '%s' DONE: traverse=%.1fs catchUp=%.1fs peakMeshQ=%d peakGenQ=%d peakUnloadQ=%d frameP95=%.1fms totalP95=%.1fms thrash=%lld(nbr=%lld lod=%lld dirty=%lld other=%lld) unloadLag(mean/max)=%.0f/%.0fms unloadDist(mean/max)=%.0f/%.0fuu -> %s"),
 		*Config.Tag, TraverseDur, CatchUpDurationSec, PeakMesh, PeakGen, PeakUnload,
-		Percentile(FrameMsArr, 0.95f), Percentile(TotalMsArr, 0.95f), Thrash, UnloadLagMean, UnloadLagMax, UnloadDistMean, UnloadDistMax, *ReportCsvPath);
+		Percentile(FrameMsArr, 0.95f), Percentile(TotalMsArr, 0.95f), Thrash, ThrashNeighbor, ThrashLOD, ThrashDirty, ThrashOther, UnloadLagMean, UnloadLagMax, UnloadDistMean, UnloadDistMax, *ReportCsvPath);
 }

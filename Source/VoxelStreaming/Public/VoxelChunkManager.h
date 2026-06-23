@@ -88,6 +88,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkLoaded, FIntVector, ChunkCoo
  */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkUnloaded, FIntVector, ChunkCoord);
 
+/** Why a chunk was (re)queued for meshing — used to attribute re-mesh thrash in the benchmark. */
+enum class EVoxelRemeshReason : uint8
+{
+	Other = 0,        // first-time mesh or uncategorised path
+	NeighborRemesh,   // a neighbour's voxel data became available (seam fix cascade)
+	LODTransition,    // the chunk's LOD level changed as the viewer moved
+	Dirty,            // explicit dirty (voxel edit, forced remesh)
+	Count
+};
+
 /**
  * Voxel Chunk Manager Component.
  *
@@ -413,6 +423,7 @@ public:
 
 	/** Thrash: chunks re-queued for meshing after they already had a mesh. */
 	int64 GetBenchRemeshCount() const { return BenchRemeshCount; }
+	int64 GetBenchRemeshByReason(EVoxelRemeshReason Reason) const { return BenchRemeshByReason[static_cast<int32>(Reason)]; }
 
 	/** Unload-lag (enqueue -> actual unload), in milliseconds. */
 	void GetBenchUnloadLagStats(double& OutMeanMs, double& OutMaxMs, int64& OutCount) const
@@ -438,6 +449,7 @@ public:
 	void ResetBenchCounters()
 	{
 		BenchRemeshCount = 0;
+		for (int64& C : BenchRemeshByReason) { C = 0; }
 		BenchUnloadLagSumMs = 0.0;
 		BenchUnloadLagMaxMs = 0.0;
 		BenchUnloadLagCount = 0;
@@ -643,7 +655,7 @@ protected:
 	 * @param Request The chunk request to add
 	 * @return True if added, false if already in queue
 	 */
-	bool AddToMeshingQueue(const FChunkLODRequest& Request);
+	bool AddToMeshingQueue(const FChunkLODRequest& Request, EVoxelRemeshReason Reason = EVoxelRemeshReason::Other);
 
 	/**
 	 * P2-A: decide whether a chunk should defer meshing because a face neighbor's
@@ -968,6 +980,9 @@ protected:
 
 	/** Re-mesh churn: count of chunks re-queued for meshing after they already had a mesh. */
 	int64 BenchRemeshCount = 0;
+
+	/** Re-mesh thrash attributed by source (see EVoxelRemeshReason). */
+	int64 BenchRemeshByReason[static_cast<int32>(EVoxelRemeshReason::Count)] = {};
 
 	/** Chunks meshed at least once during the active benchmark (to detect re-mesh churn). */
 	TSet<FIntVector> BenchEverMeshed;

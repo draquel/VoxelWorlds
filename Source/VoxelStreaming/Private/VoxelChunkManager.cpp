@@ -870,7 +870,7 @@ void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 			Request.LODLevel = State->LODLevel;
 			Request.Priority = 100.0f; // High priority for dirty chunks
 
-			if (AddToMeshingQueue(Request))
+			if (AddToMeshingQueue(Request, EVoxelRemeshReason::Dirty))
 			{
 				SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
 			}
@@ -2237,7 +2237,7 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 				Request.LODLevel = Candidate.NewLODLevel;
 				Request.Priority = (Candidate.bIsUpgrade ? 100.0f : 50.0f) + (10000.0f / FMath::Max(Candidate.Distance, 1.0f));
 
-				if (AddToMeshingQueue(Request))
+				if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
 				{
 					SetChunkState(Candidate.ChunkCoord, EChunkState::PendingMeshing);
 					++QueuedThisFrame;
@@ -2301,7 +2301,7 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 					Request.LODLevel = NeighborState->LODLevel;
 					Request.Priority = 30.0f; // Lower priority than direct LOD changes
 
-					if (AddToMeshingQueue(Request))
+					if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
 					{
 						SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
 						++NeighborRemeshCount;
@@ -2467,7 +2467,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 							Request.ChunkCoord = NeighborCoord;
 							Request.LODLevel = NeighborState->LODLevel;
 							Request.Priority = 20.0f;
-							if (AddToMeshingQueue(Request))
+							if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
 							{
 								SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
 							}
@@ -2572,7 +2572,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 						Request.ChunkCoord = NeighborCoord;
 						Request.LODLevel = NeighborState->LODLevel;
 						Request.Priority = 20.0f; // Low priority — refinement pass
-						if (AddToMeshingQueue(Request))
+						if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
 						{
 							SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
 						}
@@ -2703,7 +2703,7 @@ void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
 			Request.Priority = NeighborState->Priority * 0.5f; // Lower priority than new chunks
 
 			// O(1) duplicate check + sorted insertion
-			if (AddToMeshingQueue(Request))
+			if (AddToMeshingQueue(Request, EVoxelRemeshReason::NeighborRemesh))
 			{
 				SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
 
@@ -3561,7 +3561,7 @@ bool UVoxelChunkManager::AddToGenerationQueue(const FChunkLODRequest& Request)
 	return true;
 }
 
-bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request)
+bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request, EVoxelRemeshReason Reason)
 {
 	// O(1) duplicate check
 	if (MeshingQueueSet.Contains(Request.ChunkCoord))
@@ -3570,9 +3570,11 @@ bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request)
 	}
 
 	// Benchmark thrash: a chunk re-entering the meshing queue after it already had a mesh is churn.
+	// Attribute it to its source so we know which driver to attack.
 	if (bBenchmarkViewActive && BenchEverMeshed.Contains(Request.ChunkCoord))
 	{
 		++BenchRemeshCount;
+		++BenchRemeshByReason[static_cast<int32>(Reason)];
 	}
 
 	// Add to tracking set
