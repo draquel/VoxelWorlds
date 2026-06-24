@@ -17,6 +17,18 @@ static TAutoConsoleVariable<int32> CVarLODBalance(
 	TEXT("Enforce the 2:1 LOD adjacency balance + hysteresis in FDistanceBandLODStrategy. 1=on (default), 0=raw distance bands."),
 	ECVF_Default);
 
+// When the 2:1 balance runs, balance across all 26 neighbours (6 faces + 12 edges + 8 corners)
+// instead of just the 6 faces. Face-only balancing leaves diagonal (edge/corner) neighbours able
+// to differ by 2 LOD levels, so three LODs can meet at a chunk corner (LOD0/1/2 junction) and the
+// per-face transvoxel/morph can't stitch it. Full 26-neighbour balancing guarantees every pair of
+// vertex-sharing chunks differs by <=1, so at most two LOD levels ever meet at any corner — no
+// 3-LOD junction, independent of band widths. 1=on (default), 0=face-only (legacy).
+static TAutoConsoleVariable<int32> CVarLODBalanceDiagonal(
+	TEXT("voxel.LODBalanceDiagonal"),
+	1,
+	TEXT("2:1 LOD balance across all 26 neighbours (edges+corners), not just 6 faces. Prevents 3-LOD corner junctions. 1=on (default), 0=face-only."),
+	ECVF_Default);
+
 FDistanceBandLODStrategy::FDistanceBandLODStrategy()
 {
 	// Default LOD bands will be set during Initialize()
@@ -739,8 +751,14 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 	}
 
 	// Pass 2: 2:1 adjacency balance. Refine any chunk that is more than
-	// MaxNeighborLODDelta coarser than its finest face-neighbor, iterating to a
-	// fixpoint. Refine-only (LOD numbers only decrease), so it always converges.
+	// MaxNeighborLODDelta coarser than its finest neighbor, iterating to a fixpoint.
+	// Refine-only (LOD numbers only decrease), so it always converges.
+	//
+	// Neighbour set: face-only (6) leaves diagonal (edge/corner) neighbours able to differ by
+	// 2 LOD levels, so three LODs can meet at a chunk corner (LOD0/1/2 junction) that the
+	// per-face transvoxel/morph can't stitch. The full 26-neighbour set (6 faces + 12 edges +
+	// 8 corners) makes every vertex-sharing pair differ by <=1, so at most two LOD levels meet
+	// at any corner — no 3-LOD junction, regardless of band widths. Toggle: voxel.LODBalanceDiagonal.
 	if (bBalance)
 	{
 		static const FIntVector FaceOffsets[6] = {
@@ -748,6 +766,30 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 			FIntVector(0, -1, 0), FIntVector(0, 1, 0),
 			FIntVector(0, 0, -1), FIntVector(0, 0, 1),
 		};
+		// All 26 neighbours (every dx,dy,dz in {-1,0,1} except the origin), built once.
+		static const TArray<FIntVector> AllOffsets = []()
+		{
+			TArray<FIntVector> Offs;
+			Offs.Reserve(26);
+			for (int32 dz = -1; dz <= 1; ++dz)
+			{
+				for (int32 dy = -1; dy <= 1; ++dy)
+				{
+					for (int32 dx = -1; dx <= 1; ++dx)
+					{
+						if (dx != 0 || dy != 0 || dz != 0)
+						{
+							Offs.Add(FIntVector(dx, dy, dz));
+						}
+					}
+				}
+			}
+			return Offs;
+		}();
+
+		const bool bDiagonal = CVarLODBalanceDiagonal.GetValueOnGameThread() != 0;
+		const FIntVector* Offsets = bDiagonal ? AllOffsets.GetData() : FaceOffsets;
+		const int32 NumOffsets = bDiagonal ? AllOffsets.Num() : 6;
 
 		bool bChanged = true;
 		int32 Guard = 0;
@@ -757,9 +799,9 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 			for (TPair<FIntVector, int32>& Pair : BalancedLODCache)
 			{
 				int32 MinNeighbor = Pair.Value;
-				for (const FIntVector& Offset : FaceOffsets)
+				for (int32 i = 0; i < NumOffsets; ++i)
 				{
-					if (const int32* NLOD = BalancedLODCache.Find(Pair.Key + Offset))
+					if (const int32* NLOD = BalancedLODCache.Find(Pair.Key + Offsets[i]))
 					{
 						MinNeighbor = FMath::Min(MinNeighbor, *NLOD);
 					}

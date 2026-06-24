@@ -203,6 +203,8 @@ private:
 	 * @param OutMeshData Output mesh data
 	 * @param OutTriangleCount Counter for generated triangles
 	 * @param DebugColorOverride When alpha != 0, overrides vertex color (for debug coloring)
+	 * @param TransitionMask Active transition faces (borders coarser neighbours). When non-zero,
+	 *                       boundary-slab vertices are geomorphed toward the coarse surface.
 	 */
 	void ProcessCubeLOD(
 		const FVoxelMeshingRequest& Request,
@@ -210,7 +212,64 @@ private:
 		int32 Stride,
 		FChunkMeshData& OutMeshData,
 		uint32& OutTriangleCount,
-		FColor DebugColorOverride = FColor(0, 0, 0, 0));
+		FColor DebugColorOverride = FColor(0, 0, 0, 0),
+		uint8 TransitionMask = 0);
+
+	/**
+	 * Geomorph (bake) the edge vertices of a boundary-slab cube toward the coarse-LOD surface.
+	 *
+	 * For each emitted vertex within the morph width of an active transition face, ramps its
+	 * height toward the coarse iso-surface so the fine boundary contour meets the coarser
+	 * neighbour with no vertical step (Transvoxel "secondary positions", baked). Gated by
+	 * voxel.MCBoundaryMorph; no-op when TransitionMask == 0.
+	 *
+	 * @param Request The meshing request (provides density + neighbour data)
+	 * @param Stride This chunk's LOD stride (2^LODLevel)
+	 * @param TransitionMask Active transition faces (1 bit per face, ETransitionFace order)
+	 * @param CellVertices In/out array of edge-crossing vertex positions (world units)
+	 * @param VertexCount Number of valid entries in CellVertices
+	 */
+	void ApplyBoundaryMorph(
+		const FVoxelMeshingRequest& Request,
+		int32 Stride,
+		uint8 TransitionMask,
+		FVector3f* CellVertices,
+		int32 VertexCount) const;
+
+	/**
+	 * Geomorph a single vertex toward the coarse-LOD surface (the per-vertex core of the
+	 * boundary morph). Shared by the fine-MC path (ProcessCubeLOD) and the ribbon path
+	 * (ProcessTransitionCell) so coincident vertices on both sides morph identically.
+	 *
+	 * @param Request The meshing request
+	 * @param SelfStride This chunk's LOD stride (2^LODLevel)
+	 * @param TransitionMask Active transition faces to ramp against
+	 * @param Vertex In/out world-space vertex position; its height is morphed in place
+	 */
+	void MorphVertexToCoarse(
+		const FVoxelMeshingRequest& Request,
+		int32 SelfStride,
+		uint8 TransitionMask,
+		FVector3f& Vertex) const;
+
+	/**
+	 * Find the height at which the coarse-LOD iso-surface crosses the vertical column at (Vx,Vy).
+	 *
+	 * Samples density on the stride-CoarserStride lattice (trilinear) and returns the iso-crossing
+	 * nearest NearVz. The morph target for height-function (plane) terrain.
+	 *
+	 * @param Request The meshing request
+	 * @param Vx, Vy Column position in voxel units (fine resolution)
+	 * @param NearVz Reference height (voxel units) — the crossing nearest this is returned
+	 * @param CoarserStride The coarse neighbour's stride (E)
+	 * @param OutVz Out: the coarse iso-surface height in voxel units
+	 * @return true if a crossing was found within the search band
+	 */
+	bool ComputeCoarseSurfaceZ(
+		const FVoxelMeshingRequest& Request,
+		float Vx, float Vy, float NearVz,
+		int32 CoarserStride,
+		float& OutVz) const;
 
 	/**
 	 * Calculate gradient-based normal at a position using LOD-aware sampling.

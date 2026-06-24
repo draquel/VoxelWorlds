@@ -19,6 +19,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "HAL/IConsoleManager.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
@@ -646,6 +647,46 @@ namespace MarchingCubesLODBoundaryTestHelpers
 		}
 		return Backfacing;
 	}
+
+	// ===== Surface-height sampler (step-magnitude metric, T13) =====
+	// Highest surface Z under (X,Y) in a triangle-soup mesh (chunk-local coords), or a large
+	// negative sentinel if no triangle covers (X,Y). Lets us measure the vertical seam step
+	// between the fine side (just inside the boundary) and the coarse neighbour (just outside).
+	constexpr float NoSurfaceHeight = -1.0e30f;
+	float SampleMeshHeight(const FChunkMeshData& Mesh, float X, float Y)
+	{
+		float BestZ = NoSurfaceHeight;
+		const int32 NumTris = Mesh.Indices.Num() / 3;
+		for (int32 t = 0; t < NumTris; ++t)
+		{
+			const FVector3f& A = Mesh.Positions[Mesh.Indices[t * 3 + 0]];
+			const FVector3f& B = Mesh.Positions[Mesh.Indices[t * 3 + 1]];
+			const FVector3f& C = Mesh.Positions[Mesh.Indices[t * 3 + 2]];
+			// Barycentric coords of (X,Y) in the triangle's XY projection.
+			const float Det = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
+			if (FMath::Abs(Det) < KINDA_SMALL_NUMBER) { continue; }
+			const float U = ((B.Y - C.Y) * (X - C.X) + (C.X - B.X) * (Y - C.Y)) / Det;
+			const float V = ((C.Y - A.Y) * (X - C.X) + (A.X - C.X) * (Y - C.Y)) / Det;
+			const float W = 1.0f - U - V;
+			if (U < -1.0e-3f || V < -1.0e-3f || W < -1.0e-3f) { continue; }
+			const float Z = U * A.Z + V * B.Z + W * C.Z;
+			if (Z > BestZ) { BestZ = Z; }
+		}
+		return BestZ;
+	}
+
+	/** RAII toggle for voxel.MCBoundaryMorph; restores the previous value on scope exit. */
+	struct FScopedMorph
+	{
+		IConsoleVariable* CVar = nullptr;
+		int32 Prev = 1;
+		explicit FScopedMorph(int32 Value)
+		{
+			CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MCBoundaryMorph"));
+			if (CVar) { Prev = CVar->GetInt(); CVar->Set(Value); }
+		}
+		~FScopedMorph() { if (CVar) { CVar->Set(Prev); } }
+	};
 } // namespace MarchingCubesLODBoundaryTestHelpers
 using namespace MarchingCubesLODBoundaryTestHelpers;
 
@@ -1357,6 +1398,86 @@ bool FMCLODBoundaryT12TableContractTest::RunTest(const FString& Parameters)
 			TestTrue(FString::Printf(TEXT("TransitionCellSampleOffsets[%d][%d] in [0,1]"), Face, i), bInRange);
 		}
 	}
+
+	return true;
+}
+
+// ==================== T13: boundary geomorph reduces the LOD seam step ====================
+// The vertical-wall step is the fine-vs-coarse height mismatch the ribbon seals as a curtain.
+// voxel.MCBoundaryMorph ramps the fine surface to the coarse height near the transition, so the
+// measured seam step (fine surface just inside the boundary vs coarse surface just outside) must
+// shrink sharply — without punching holes. Measured on the steep Cliff field (largest mismatch).
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT13BoundaryMorphTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T13_BoundaryMorphStep",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCLODBoundaryT13BoundaryMorphTest::RunTest(const FString& Parameters)
+{
+	// NonLinearZ = smooth height-function surface: clean for vertical height sampling AND a real
+	// stride-dependent step. LOD1|LOD2 (the largest stride jump) is where the wall — and the
+	// pre-fix ribbon watertightness break — were worst.
+	FScopedTestField NonLinearField(ETestField::NonLinearZ);
+
+	if (!IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MCBoundaryMorph")))
+	{
+		AddError(TEXT("voxel.MCBoundaryMorph CVar not found (mesher not linked?)"));
+		return false;
+	}
+
+	// A (fine LOD1) borders coarser B (LOD2) across +X; A generates the transition strip.
+	const int32 Face = 1; // +X
+	const FIntVector Off = FaceOffset(Face);
+	FVoxelMeshingRequest RequestA = MakeChunkRequest(FIntVector(0, 0, 0), 1);
+	FVoxelMeshingRequest RequestB = MakeChunkRequest(Off, 2);
+	FillAllNeighborData(RequestA);
+	FillAllNeighborData(RequestB);
+	RequestA.NeighborLODLevels[Face] = 2;        // A's +X neighbour is coarser B
+	RequestB.NeighborLODLevels[Face ^ 1] = 1;    // B's -X neighbour is finer A
+	RequestA.TransitionFaces = FaceTransitionFlag(Face);
+
+	// Coarse reference (B has no coarser neighbour -> morph never affects it).
+	FChunkMeshData MeshB;
+	MeshChunk(RequestB, true, MeshB);
+
+	const float BoundaryX = TestChunkSize * TestVoxelSize;
+	const float ChunkW = TestChunkSize * TestVoxelSize;
+	const float Eps = 5.0f; // small -> Za/Zb a few units apart, slope contribution negligible
+
+	// Max vertical gap between A's surface just inside the boundary and B's surface just
+	// outside it (B-local x = Eps), sampled across the shared face. Reads the current CVar.
+	auto MeasureStep = [&]() -> float
+	{
+		FChunkMeshData MeshA;
+		MeshChunk(RequestA, true, MeshA);
+		float MaxStep = 0.0f;
+		for (int32 i = 1; i <= 7; ++i)
+		{
+			const float Yq = ChunkW * static_cast<float>(i) / 8.0f;
+			const float Za = SampleMeshHeight(MeshA, BoundaryX - Eps, Yq);
+			const float Zb = SampleMeshHeight(MeshB, Eps, Yq);
+			if (Za <= NoSurfaceHeight * 0.5f || Zb <= NoSurfaceHeight * 0.5f) { continue; }
+			MaxStep = FMath::Max(MaxStep, FMath::Abs(Za - Zb));
+		}
+		return MaxStep;
+	};
+
+	float StepOff = 0.0f, StepOn = 0.0f;
+	int32 Holes = 0;
+	{ FScopedMorph M(0); StepOff = MeasureStep(); }
+	{
+		FScopedMorph M(1);
+		StepOn = MeasureStep();
+		FChunkMeshData MeshAOn;
+		MeshChunk(RequestA, true, MeshAOn);
+		Holes = CountInteriorOpenEdges(MeshAOn);
+	}
+
+	AddInfo(FString::Printf(TEXT("T13 NonLinearZ +X (LOD1|LOD2): stepOff=%.1f stepOn=%.1f units, holes(morphOn)=%d"),
+		StepOff, StepOn, Holes));
+
+	TestTrue(TEXT("a real seam step exists with morph off (> 15 units)"), StepOff > 15.0f);
+	TestTrue(TEXT("morph reduces the seam step by >= 50%"), StepOn <= StepOff * 0.5f);
+	TestEqual(TEXT("morph keeps the seam watertight (no interior holes)"), Holes, 0);
 
 	return true;
 }

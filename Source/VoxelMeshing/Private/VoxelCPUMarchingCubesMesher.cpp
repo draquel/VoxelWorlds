@@ -4,9 +4,28 @@
 #include "VoxelMeshing.h"
 #include "MarchingCubesTables.h"
 #include "TransvoxelTables.h"
+#include "HAL/IConsoleManager.h"
 
 // Note: MarchingCubes meshing uses triplanar blending, so FaceType is not needed.
 // UV1.x stores MaterialID, UV1.y is reserved (set to 0).
+
+// LOD-seam geomorph (Transvoxel "secondary positions", baked): near a face that borders a
+// coarser neighbour, ramp the fine surface toward the coarse-LOD surface so the boundary
+// contour meets the coarse neighbour with no vertical step. Baked at mesh time (the chunk is
+// re-meshed when its own or a neighbour's LOD changes), so it needs no vertex-format or shader
+// change on the CPU path. See Documentation/GEOMORPH_IMPLEMENTATION_PLAN.md.
+TAutoConsoleVariable<int32> CVarMCBoundaryMorph(
+	TEXT("voxel.MCBoundaryMorph"),
+	1,
+	TEXT("MC LOD-seam geomorph: ramp the fine surface to the coarse height near transition faces ")
+	TEXT("(1=on, 0=off). Off reproduces the vertical-wall step."),
+	ECVF_Default);
+
+TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
+	TEXT("voxel.MCBoundaryMorphWidth"),
+	2.0f,
+	TEXT("MC LOD-seam geomorph ramp width, in coarse cells. Larger = gentler ramp, more fine detail traded."),
+	ECVF_Default);
 
 FVoxelCPUMarchingCubesMesher::FVoxelCPUMarchingCubesMesher()
 {
@@ -227,7 +246,8 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 		{
 			for (int32 X = 0; X < ChunkSize; X += Stride)
 			{
-				ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount);
+				ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount,
+					FColor(0, 0, 0, 0), TransitionMask);
 			}
 		}
 	}
@@ -498,7 +518,8 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	int32 Stride,
 	FChunkMeshData& OutMeshData,
 	uint32& OutTriangleCount,
-	FColor DebugColorOverride)
+	FColor DebugColorOverride,
+	uint8 TransitionMask)
 {
 	const float VoxelSize = Request.VoxelSize;
 	const float IsoLevel = Config.IsoLevel;
@@ -594,6 +615,15 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 				IsoLevel
 			);
 		}
+	}
+
+	// LOD-seam geomorph: for cubes in the boundary slab of an active transition face, ramp the
+	// fine vertices toward the coarse-LOD surface so the boundary contour meets the coarser
+	// neighbour with no vertical step (the ribbon then has ~zero height to span). No-op unless
+	// this cube borders a coarser neighbour; gated by voxel.MCBoundaryMorph.
+	if (TransitionMask != 0)
+	{
+		ApplyBoundaryMorph(Request, Stride, TransitionMask, CellVertices, VertexCount);
 	}
 
 	// Emit triangles using CellData triangle indices
@@ -931,6 +961,185 @@ FVector3f FVoxelCPUMarchingCubesMesher::InterpolateEdge(
 	t = FMath::Clamp(t, 0.0f, 1.0f);
 
 	return p0 + (p1 - p0) * t;
+}
+
+bool FVoxelCPUMarchingCubesMesher::ComputeCoarseSurfaceZ(
+	const FVoxelMeshingRequest& Request,
+	float Vx, float Vy, float NearVz,
+	int32 CoarserStride,
+	float& OutVz) const
+{
+	const float IsoLevel = Config.IsoLevel;
+	const int32 E = FMath::Max(1, CoarserStride);
+	const float Ef = static_cast<float>(E);
+
+	const int32 ChunkSize = Request.ChunkSize;
+
+	// Density sampled on the coarse (stride-E) lattice, trilinear between coarse grid points.
+	// This is the surface the coarser neighbour sees, evaluated at the fine (Vx,Vy) column.
+	// Face-parallel sample coords are CLAMPED to [0, ChunkSize]: neighbour data is only one
+	// plane deep, so reading more than one voxel past a chunk face returns clamped/air densities
+	// and corrupts the coarse surface (worst on steep terrain -> large spurious morph -> seam
+	// holes). At a boundary the clamp samples the shared boundary plane = exactly what the
+	// neighbour sees, so the boundary morph target equals the neighbour's coarse contour.
+	auto SampleCoarse = [&](float Zq) -> float
+	{
+		const int32 X0 = FMath::FloorToInt(Vx / Ef) * E;
+		const int32 Y0 = FMath::FloorToInt(Vy / Ef) * E;
+		const int32 Z0 = FMath::FloorToInt(Zq / Ef) * E;
+		const float Fx = (Vx - static_cast<float>(X0)) / Ef;
+		const float Fy = (Vy - static_cast<float>(Y0)) / Ef;
+		const float Fz = (Zq - static_cast<float>(Z0)) / Ef;
+
+		const int32 Xa = FMath::Clamp(X0,     0, ChunkSize);
+		const int32 Xb = FMath::Clamp(X0 + E, 0, ChunkSize);
+		const int32 Ya = FMath::Clamp(Y0,     0, ChunkSize);
+		const int32 Yb = FMath::Clamp(Y0 + E, 0, ChunkSize);
+
+		const float D000 = GetDensityAt(Request, Xa, Ya, Z0);
+		const float D100 = GetDensityAt(Request, Xb, Ya, Z0);
+		const float D010 = GetDensityAt(Request, Xa, Yb, Z0);
+		const float D110 = GetDensityAt(Request, Xb, Yb, Z0);
+		const float D001 = GetDensityAt(Request, Xa, Ya, Z0 + E);
+		const float D101 = GetDensityAt(Request, Xb, Ya, Z0 + E);
+		const float D011 = GetDensityAt(Request, Xa, Yb, Z0 + E);
+		const float D111 = GetDensityAt(Request, Xb, Yb, Z0 + E);
+
+		const float D00 = FMath::Lerp(D000, D100, Fx);
+		const float D10 = FMath::Lerp(D010, D110, Fx);
+		const float D01 = FMath::Lerp(D001, D101, Fx);
+		const float D11 = FMath::Lerp(D011, D111, Fx);
+		const float D0 = FMath::Lerp(D00, D10, Fy);
+		const float D1 = FMath::Lerp(D01, D11, Fy);
+		return FMath::Lerp(D0, D1, Fz);
+	};
+
+	// Walk coarse Z cells around NearVz; return the iso-crossing nearest NearVz (handles caves /
+	// multiple crossings by picking the closest). Search band ±SearchCells coarse cells.
+	const int32 SearchCells = 4;
+	const int32 ZBase = FMath::FloorToInt(NearVz / Ef) * E;
+	float BestDist = TNumericLimits<float>::Max();
+	bool bFound = false;
+	for (int32 k = -SearchCells; k < SearchCells; k++)
+	{
+		const float Za = static_cast<float>(ZBase + k * E);
+		const float Zb = Za + Ef;
+		const float Da = SampleCoarse(Za);
+		const float Db = SampleCoarse(Zb);
+		const float Denom = Db - Da;
+		if ((Da >= IsoLevel) != (Db >= IsoLevel))
+		{
+			const float T = (FMath::Abs(Denom) < KINDA_SMALL_NUMBER)
+				? 0.5f : FMath::Clamp((IsoLevel - Da) / Denom, 0.0f, 1.0f);
+			const float Zc = Za + T * Ef;
+			const float Dist = FMath::Abs(Zc - NearVz);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				OutVz = Zc;
+				bFound = true;
+			}
+		}
+	}
+	return bFound;
+}
+
+void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
+	const FVoxelMeshingRequest& Request,
+	int32 SelfStride,
+	uint8 TransitionMask,
+	FVector3f& Vertex) const
+{
+	const float VoxelSize = Request.VoxelSize;
+	const int32 ChunkSize = Request.ChunkSize;
+	const int32 SelfLOD = Request.LODLevel;
+	const float MorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
+
+	const float Vx = Vertex.X / VoxelSize;
+	const float Vy = Vertex.Y / VoxelSize;
+	const float Vz = Vertex.Z / VoxelSize;
+
+	// Ramp weight = proximity to the nearest active transition face (1 at the seam, 0 at depth
+	// MorphWidth coarse cells). Track the coarser stride of that nearest face. Pure function of
+	// the vertex position + chunk params, so a vertex shared by two cells (or by the fine MC
+	// and the ribbon) morphs identically on both -> stays coincident -> watertight.
+	float BestW = 0.0f;
+	int32 BestE = SelfStride;
+	for (int32 Face = 0; Face < 6; Face++)
+	{
+		if (!(TransitionMask & (1 << Face)))
+		{
+			continue;
+		}
+		const int32 NbrLOD = Request.NeighborLODLevels[Face];
+		const int32 E = (NbrLOD > SelfLOD) ? (1 << NbrLOD) : SelfStride;
+		if (E <= SelfStride)
+		{
+			continue; // neighbour not actually coarser — nothing to reduce to
+		}
+		const int32 Axis = Face / 2;
+		const bool bPositive = (Face % 2) == 1;
+		const float BoundaryCoord = bPositive ? static_cast<float>(ChunkSize) : 0.0f;
+		const float VCoord = (Axis == 0) ? Vx : (Axis == 1) ? Vy : Vz;
+		const float DistCells = FMath::Abs(VCoord - BoundaryCoord) / static_cast<float>(E);
+		const float W = FMath::Clamp((MorphWidth - DistCells) / MorphWidth, 0.0f, 1.0f);
+		if (W > BestW)
+		{
+			BestW = W;
+			BestE = E;
+		}
+	}
+
+	if (BestW <= 0.0f)
+	{
+		return;
+	}
+
+	// Steepness gate: only morph where the surface is a HEIGHT FUNCTION (normal mostly vertical).
+	// On steep / near-vertical surfaces the vertical-Z morph is ill-conditioned — it distorts the
+	// thin boundary ribbon and opens the seam — so skip them; they keep their un-morphed,
+	// watertight boundary. The surface normal is -gradient(density); a small |normal.Z| relative
+	// to |normal| means a steep surface. Sampled ±1 voxel (within the 1-plane neighbour data) and
+	// a pure function of position, so coincident vertices share the decision and stay watertight.
+	// (v1 limitation; a normal-direction morph would generalise — see GEOMORPH_IMPLEMENTATION_PLAN.md.)
+	{
+		const float Gx = GetDensityAtTrilinear(Request, Vx + 1.0f, Vy, Vz) - GetDensityAtTrilinear(Request, Vx - 1.0f, Vy, Vz);
+		const float Gy = GetDensityAtTrilinear(Request, Vx, Vy + 1.0f, Vz) - GetDensityAtTrilinear(Request, Vx, Vy - 1.0f, Vz);
+		const float Gz = GetDensityAtTrilinear(Request, Vx, Vy, Vz + 1.0f) - GetDensityAtTrilinear(Request, Vx, Vy, Vz - 1.0f);
+		const float GMag = FMath::Sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
+		constexpr float SteepThreshold = 0.5f; // |normal.Z|/|normal| below this => too steep => skip
+		if (GMag < KINDA_SMALL_NUMBER || FMath::Abs(Gz) < SteepThreshold * GMag)
+		{
+			return;
+		}
+	}
+
+	// Morph the height toward the coarse surface. v1 morphs along Z (correct for
+	// height-function / INFINITE_PLANE terrain). If no coarse crossing is found nearby, leave
+	// the vertex untouched (never worse than the current wall).
+	float SecVz;
+	if (ComputeCoarseSurfaceZ(Request, Vx, Vy, Vz, BestE, SecVz))
+	{
+		Vertex.Z = FMath::Lerp(Vz, SecVz, BestW) * VoxelSize;
+	}
+}
+
+void FVoxelCPUMarchingCubesMesher::ApplyBoundaryMorph(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	uint8 TransitionMask,
+	FVector3f* CellVertices,
+	int32 VertexCount) const
+{
+	if (TransitionMask == 0 || CVarMCBoundaryMorph.GetValueOnAnyThread() == 0)
+	{
+		return;
+	}
+
+	for (int32 i = 0; i < VertexCount; i++)
+	{
+		MorphVertexToCoarse(Request, Stride, TransitionMask, CellVertices[i]);
+	}
 }
 
 FVector3f FVoxelCPUMarchingCubesMesher::CalculateGradientNormal(
@@ -2207,6 +2416,23 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			UE_LOG(LogVoxelMeshing, Log, TEXT("    Vertex %d: (%.1f, %.1f, %.1f) from samples %d-%d (d=%.3f,%.3f)"),
 				i, VertexPos.X, VertexPos.Y, VertexPos.Z, SampleA, SampleB,
 				Densities[SampleA], Densities[SampleB]);
+		}
+	}
+
+	// Geomorph the ribbon's FINE-side vertices toward the coarse surface, matching the (also
+	// morphed) fine-MC boundary contour so they stay coincident -> the vertical wall collapses
+	// while the seam stays watertight. The OUTER (coarse-corner) vertices are left on the coarse
+	// contour so the exact neighbour match (T6/T8) is preserved. Gated by voxel.MCBoundaryMorph.
+	if (CVarMCBoundaryMorph.GetValueOnAnyThread() != 0)
+	{
+		const int32 SelfStride = 1 << Request.LODLevel;
+		const uint8 FaceMask = static_cast<uint8>(1 << FaceIndex);
+		for (int32 i = 0; i < CellVertices.Num(); i++)
+		{
+			if (!VertexOnOuterFace[i])
+			{
+				MorphVertexToCoarse(Request, SelfStride, FaceMask, CellVertices[i]);
+			}
 		}
 	}
 
