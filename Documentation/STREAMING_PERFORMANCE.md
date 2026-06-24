@@ -93,6 +93,7 @@ editor/game command line. Defaults reflect shipped behaviour.
 | `-VoxelMaxAsyncGen/Mesh/LODRemesh/Pending=N` | Override the scheduler caps. |
 | `-VoxelPinScheduler` | Disable adaptive throttling (pin the caps). |
 | `-VoxelLODScale=N` | Scale the LOD band boundaries within a fixed view distance (A/B the detail/thrash tradeoff). N<1 pulls fine-LOD reach in. |
+| `-VoxelLODRefineHyst=N` / `-VoxelLODCoarsenHyst=N` | Override the asymmetric LOD hysteresis margins (chunk-widths). Lower refine = LOD0 lands sooner (more thrash); coarsen damps moving-away churn. Config: `LODRefineHysteresis` / `LODCoarsenHysteresis`. |
 | `-VoxelDeepFull` | Restore 2*stride deep neighbour depth (central-difference boundary normals; the pre-stride+1 default). |
 | `-VoxelDeepOff` | Drop deep neighbour data to 1 plane (loses the LOD-seam fix; lowest cost). |
 | `-VoxelNoStaleCull` | Disable stale-culling (mesh chunks the viewer has already passed; the old behaviour). |
@@ -109,6 +110,7 @@ Measured headless at v6000 (a deliberately punishing fast low traverse).
 | **Geo deep-depth (stride+1) default** | ✅ Shipped (default) | ~14% faster catch-up, watertight, softer boundary normals |
 | **Drop premature LOD cascade** | ✅ Shipped | -6% thrash, simpler, more correct |
 | LOD band scale (`-VoxelLODScale`) | Tradeoff dial | thrash ∝ sum of band radii; not a free win |
+| Asymmetric LOD hysteresis (eager refine) | ✅ Shipped (config, default 0.25/0.5) | LOD0 lands ~at entry vs halfway across; +15% thrash, catch-up flat |
 | Scheduler caps | Not the bottleneck | work-bound, not cap-bound (Mesh 4 vs 32 = no change) |
 | LOD 2:1 balance + hysteresis | Already a damper | turning it off *raises* thrash +33% |
 | Proactive queue sweep | Deferred | would bound peak queue *during* motion |

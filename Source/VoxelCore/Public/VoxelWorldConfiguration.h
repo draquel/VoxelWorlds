@@ -279,6 +279,23 @@ public:
 	float ViewDistance = 10000.0f;
 
 	/**
+	 * LOD refine (detail-increasing) hysteresis deadband, in chunk-width units. A chunk
+	 * upgrades to a finer LOD once the viewer crosses the band's inner edge by this many
+	 * chunk widths. Keep small (eager) so detail lands at/just-before you reach a chunk;
+	 * the asymmetry with LODCoarsenHysteresis still prevents flip/flop at the boundary.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0", EditCondition = "bEnableLOD"))
+	float LODRefineHysteresis = 0.25f;
+
+	/**
+	 * LOD coarsen (detail-decreasing) hysteresis deadband, in chunk-width units. A chunk
+	 * downgrades to a coarser LOD only once the viewer is this many chunk widths past the
+	 * band's outer edge. Keep larger (damped) so terrain you just left doesn't flicker.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0", EditCondition = "bEnableLOD"))
+	float LODCoarsenHysteresis = 0.5f;
+
+	/**
 	 * Material Parameter Collection for LOD morphing.
 	 *
 	 * Create an MPC asset with these scalar parameters:

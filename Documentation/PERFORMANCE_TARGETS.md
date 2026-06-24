@@ -228,7 +228,9 @@ At player speed 1000 cm/s (10 m/s):
 - Reduces LOD queries from 60,000/sec to ~190/sec (99.7% reduction)
 
 **Phase 3: LOD Hysteresis** (Implemented)
-- Deadband around LOD band edges (`LODHysteresisChunkFraction`, default 0.5 chunk-widths)
+- Asymmetric deadband around LOD band edges, in chunk-widths, exposed on the World config:
+  `LODRefineHysteresis` (default 0.25, eager — detail appears as you approach) and
+  `LODCoarsenHysteresis` (default 0.5, damped — terrain you left doesn't flicker)
 - Plus a 2:1 adjacency balance (`MaxNeighborLODDelta`); both toggled by cvar `voxel.LODBalance`
 - Damps band-edge churn; measured to remove ~25% of raw LOD transitions
 

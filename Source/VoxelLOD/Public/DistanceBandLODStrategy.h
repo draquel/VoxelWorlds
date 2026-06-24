@@ -146,9 +146,10 @@ protected:
 	/**
 	 * Apply LOD hysteresis to damp churn near band edges.
 	 * A single-level change is only accepted once the distance has crossed the
-	 * committed band's edge by LODHysteresisChunkFraction chunk-widths; multi-level
-	 * changes (e.g. a teleport) are accepted immediately. First-seen chunks (no
-	 * committed value) take the raw LOD.
+	 * committed band's edge by the applicable hysteresis margin (chunk-widths):
+	 * RefineHysteresisFraction (eager) when moving closer, CoarsenHysteresisFraction
+	 * (damped) when moving away. Multi-level changes (e.g. a teleport) are accepted
+	 * immediately. First-seen chunks (no committed value) take the raw LOD.
 	 *
 	 * @param CommittedLOD The LOD committed for this chunk last frame
 	 * @param RawLOD The raw distance-band LOD this frame
@@ -252,11 +253,14 @@ protected:
 	int32 MaxNeighborLODDelta = 1;
 
 	/**
-	 * Hysteresis deadband, expressed in chunk-world-size units. A chunk only
-	 * changes its committed LOD once its distance crosses the band edge by this
-	 * many chunk widths, damping the bistable flip/churn observed at ring edges.
+	 * Hysteresis deadbands in chunk-width units, applied ASYMMETRICALLY: a small refine
+	 * margin (eager — detail appears as you approach) and a larger coarsen margin (damped —
+	 * terrain you just left doesn't flicker). The asymmetry gives responsive upgrades
+	 * without reintroducing band-edge flip/churn. Read from UVoxelWorldConfiguration in
+	 * Initialize; overridable via -VoxelLODRefineHyst / -VoxelLODCoarsenHyst.
 	 */
-	float LODHysteresisChunkFraction = 0.5f;
+	float RefineHysteresisFraction = 0.25f;
+	float CoarsenHysteresisFraction = 0.5f;
 
 	/**
 	 * Balanced LOD per chunk, recomputed every Update(). GetLODForChunk and

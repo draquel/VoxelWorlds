@@ -38,6 +38,14 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	bEnableMorphing = WorldConfig->bEnableLODMorphing;
 	bEnableFrustumCulling = WorldConfig->bEnableFrustumCulling;
 
+	// Asymmetric LOD hysteresis (eager refine / damped coarsen). Read from config, then
+	// allow -VoxelLODRefineHyst / -VoxelLODCoarsenHyst command-line overrides for A/B.
+	RefineHysteresisFraction = FMath::Max(0.0f, WorldConfig->LODRefineHysteresis);
+	CoarsenHysteresisFraction = FMath::Max(0.0f, WorldConfig->LODCoarsenHysteresis);
+	float HystOverride;
+	if (FParse::Value(FCommandLine::Get(), TEXT("VoxelLODRefineHyst="), HystOverride)) { RefineHysteresisFraction = FMath::Max(0.0f, HystOverride); }
+	if (FParse::Value(FCommandLine::Get(), TEXT("VoxelLODCoarsenHyst="), HystOverride)) { CoarsenHysteresisFraction = FMath::Max(0.0f, HystOverride); }
+
 	// Copy LOD bands
 	LODBands = WorldConfig->LODBands;
 
@@ -654,7 +662,7 @@ int32 FDistanceBandLODStrategy::ApplyLODHysteresis(int32 CommittedLOD, int32 Raw
 	// Single-level change: require the distance to cross the committed band's edge
 	// by a margin before switching, so a chunk hovering on a band boundary doesn't
 	// flip every frame (the bistability seen at the LOD ring).
-	const float Margin = LODHysteresisChunkFraction * BaseChunkSize * VoxelSize;
+	const float ChunkW = BaseChunkSize * VoxelSize;
 	const FLODBand* CommittedBand = FindBandByLOD(CommittedLOD);
 	if (!CommittedBand)
 	{
@@ -663,12 +671,14 @@ int32 FDistanceBandLODStrategy::ApplyLODHysteresis(int32 CommittedLOD, int32 Raw
 
 	if (RawLOD > CommittedLOD)
 	{
-		// Coarsening (moving away): only accept once clearly past the outer edge.
-		return (Distance > CommittedBand->MaxDistance + Margin) ? RawLOD : CommittedLOD;
+		// Coarsening (moving away): only accept once clearly past the outer edge. Damped
+		// (larger margin) so terrain just left behind doesn't flicker back to detail.
+		return (Distance > CommittedBand->MaxDistance + CoarsenHysteresisFraction * ChunkW) ? RawLOD : CommittedLOD;
 	}
 
-	// Refining (moving closer): only accept once clearly inside the inner edge.
-	return (Distance < CommittedBand->MinDistance - Margin) ? RawLOD : CommittedLOD;
+	// Refining (moving closer): accept as soon as just inside the inner edge. Eager (small
+	// margin) so a chunk reaches full detail at/just-before you enter it, not halfway across.
+	return (Distance < CommittedBand->MinDistance - RefineHysteresisFraction * ChunkW) ? RawLOD : CommittedLOD;
 }
 
 void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& Context)
