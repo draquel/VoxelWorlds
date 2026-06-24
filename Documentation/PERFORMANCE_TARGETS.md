@@ -227,10 +227,18 @@ At player speed 1000 cm/s (10 m/s):
 - LOD updates skip when viewer moved < 100 units
 - Reduces LOD queries from 60,000/sec to ~190/sec (99.7% reduction)
 
-**Phase 3: LOD Hysteresis** (Future, if needed)
-- Buffer zones around LOD boundaries (~50-100 units)
-- Prevents rapid back-and-forth remeshing at band edges
-- Asymmetric thresholds for LOD upgrades vs downgrades
+**Phase 3: LOD Hysteresis** (Implemented)
+- Deadband around LOD band edges (`LODHysteresisChunkFraction`, default 0.5 chunk-widths)
+- Plus a 2:1 adjacency balance (`MaxNeighborLODDelta`); both toggled by cvar `voxel.LODBalance`
+- Damps band-edge churn; measured to remove ~25% of raw LOD transitions
+
+**Phase 4: Per-job cost + stale-cull** (Implemented)
+- Deep neighbour depth defaults to `stride+1` (geometry-watertight minimum) instead of `2*stride`
+- **Stale-cull**: chunks the viewer has driven past are dropped before meshing, not meshed-then-unloaded
+- Combined v6000: catch-up -57%, thrash -18%, peak resident -22%
+
+See **[STREAMING_PERFORMANCE.md](STREAMING_PERFORMANCE.md)** for the benchmark harness, the
+command-line tuning knobs, and the full lever-by-lever findings.
 
 ---
 
