@@ -103,6 +103,10 @@ float3 ChunkWorldPosition;
 float IsoLevel;
 uint LODStride;  // 2^LODLevel (1, 2, 4, 8...)
 
+// LOD-seam geomorph (mirrors VoxelCPUMarchingCubesMesher; voxel.MCBoundaryMorph / *Width).
+uint MCBoundaryMorph;        // 1 = ramp the fine surface to the coarse height near transition faces
+float MCBoundaryMorphWidth;  // ramp width in coarse cells
+
 // ==================== Helper Functions ====================
 
 /** Check if face neighbor data is available for a direction. */
@@ -328,6 +332,125 @@ void ComputeTriangleUVs(float3 P0, float3 P1, float3 P2, out float2 UV0, out flo
     }
 }
 
+// ==================== LOD-seam geomorph (mirrors the CPU mesher) ====================
+
+/** Trilinear density at a fractional voxel position (for the steepness gradient). */
+float GetDensityAtFloat(float3 P)
+{
+    int3 P0 = (int3)floor(P);
+    float3 F = P - (float3)P0;
+    float d000 = GetDensityAt(P0 + int3(0, 0, 0));
+    float d100 = GetDensityAt(P0 + int3(1, 0, 0));
+    float d010 = GetDensityAt(P0 + int3(0, 1, 0));
+    float d110 = GetDensityAt(P0 + int3(1, 1, 0));
+    float d001 = GetDensityAt(P0 + int3(0, 0, 1));
+    float d101 = GetDensityAt(P0 + int3(1, 0, 1));
+    float d011 = GetDensityAt(P0 + int3(0, 1, 1));
+    float d111 = GetDensityAt(P0 + int3(1, 1, 1));
+    float d00 = lerp(d000, d100, F.x);
+    float d10 = lerp(d010, d110, F.x);
+    float d01 = lerp(d001, d101, F.x);
+    float d11 = lerp(d011, d111, F.x);
+    return lerp(lerp(d00, d10, F.y), lerp(d01, d11, F.y), F.z);
+}
+
+/**
+ * Height (voxel units) where the coarse-LOD iso-surface crosses the column at (Vx,Vy),
+ * nearest NearVz. Face-parallel samples clamped to [0,ChunkSize] (neighbour data is one plane
+ * deep). Za/Zb are coarse-aligned, so each level is a bilinear XY sample. Returns false if no
+ * crossing is found in the search band.
+ */
+bool ComputeCoarseSurfaceZ(float Vx, float Vy, float NearVz, uint Eu, out float OutVz)
+{
+    OutVz = NearVz;
+    int E = (int)Eu;
+    float Ef = (float)E;
+    int CS = (int)ChunkSize;
+
+    int X0 = (int)floor(Vx / Ef) * E;
+    int Y0 = (int)floor(Vy / Ef) * E;
+    float Fx = (Vx - (float)X0) / Ef;
+    float Fy = (Vy - (float)Y0) / Ef;
+    int Xa = clamp(X0,     0, CS);
+    int Xb = clamp(X0 + E, 0, CS);
+    int Ya = clamp(Y0,     0, CS);
+    int Yb = clamp(Y0 + E, 0, CS);
+
+    int ZBase = (int)floor(NearVz / Ef) * E;
+    float BestDist = 1e30f;
+    bool bFound = false;
+    [loop]
+    for (int k = -4; k < 4; k++)
+    {
+        int Zai = ZBase + k * E;
+        int Zbi = Zai + E;
+        float Da = lerp(lerp(GetDensityAt(int3(Xa, Ya, Zai)), GetDensityAt(int3(Xb, Ya, Zai)), Fx),
+                        lerp(GetDensityAt(int3(Xa, Yb, Zai)), GetDensityAt(int3(Xb, Yb, Zai)), Fx), Fy);
+        float Db = lerp(lerp(GetDensityAt(int3(Xa, Ya, Zbi)), GetDensityAt(int3(Xb, Ya, Zbi)), Fx),
+                        lerp(GetDensityAt(int3(Xa, Yb, Zbi)), GetDensityAt(int3(Xb, Yb, Zbi)), Fx), Fy);
+        if ((Da >= IsoLevel) != (Db >= IsoLevel))
+        {
+            float Denom = Db - Da;
+            float T = (abs(Denom) < 1e-5f) ? 0.5f : saturate((IsoLevel - Da) / Denom);
+            float Zc = (float)Zai + T * Ef;
+            float Dist = abs(Zc - NearVz);
+            if (Dist < BestDist)
+            {
+                BestDist = Dist;
+                OutVz = Zc;
+                bFound = true;
+            }
+        }
+    }
+    return bFound;
+}
+
+/**
+ * Geomorph one (world-space) vertex toward the coarse-LOD surface. Mask = active transition
+ * faces to ramp against. Skips steep (non-height-function) surfaces. Pure function of position,
+ * so coincident fine-MC / ribbon vertices morph identically and stay watertight.
+ */
+void MorphVertexToCoarse(uint SelfStride, uint Mask, inout float3 Vertex)
+{
+    float Vx = (Vertex.x - ChunkWorldPosition.x) / VoxelSize;
+    float Vy = (Vertex.y - ChunkWorldPosition.y) / VoxelSize;
+    float Vz = (Vertex.z - ChunkWorldPosition.z) / VoxelSize;
+
+    float MorphWidth = max(0.01f, MCBoundaryMorphWidth);
+
+    float BestW = 0.0f;
+    uint BestE = SelfStride;
+    [unroll]
+    for (uint Face = 0; Face < 6u; Face++)
+    {
+        if ((Mask & (1u << Face)) == 0u) { continue; }
+        uint E = CoarserStrideBuf[Face];
+        if (E <= SelfStride) { continue; }
+        uint Axis = Face / 2u;
+        bool bPositive = (Face & 1u) != 0u;
+        float BoundaryCoord = bPositive ? (float)ChunkSize : 0.0f;
+        float VCoord = (Axis == 0u) ? Vx : ((Axis == 1u) ? Vy : Vz);
+        float DistCells = abs(VCoord - BoundaryCoord) / (float)E;
+        float W = saturate((MorphWidth - DistCells) / MorphWidth);
+        if (W > BestW) { BestW = W; BestE = E; }
+    }
+    if (BestW <= 0.0f) { return; }
+
+    // Steepness gate: only morph where the surface normal (-grad density) is mostly vertical.
+    float Gx = GetDensityAtFloat(float3(Vx + 1.0f, Vy, Vz)) - GetDensityAtFloat(float3(Vx - 1.0f, Vy, Vz));
+    float Gy = GetDensityAtFloat(float3(Vx, Vy + 1.0f, Vz)) - GetDensityAtFloat(float3(Vx, Vy - 1.0f, Vz));
+    float Gz = GetDensityAtFloat(float3(Vx, Vy, Vz + 1.0f)) - GetDensityAtFloat(float3(Vx, Vy, Vz - 1.0f));
+    float GMag = sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
+    if (GMag < 1e-5f || abs(Gz) < 0.5f * GMag) { return; }
+
+    float SecVz;
+    if (ComputeCoarseSurfaceZ(Vx, Vy, Vz, BestE, SecVz))
+    {
+        float MorphedVz = lerp(Vz, SecVz, BestW);
+        Vertex.z = ChunkWorldPosition.z + MorphedVz * VoxelSize;
+    }
+}
+
 // ==================== Main Compute Shader (Regular MC, Lengyel tables) ====================
 
 [numthreads(8, 8, 4)]
@@ -407,6 +530,17 @@ void MainCS(
                 CornerDensities[CornerA], CornerDensities[CornerB],
                 CornerPositions[CornerA], CornerPositions[CornerB],
                 IsoLevel);
+        }
+    }
+
+    // LOD-seam geomorph: ramp the fine boundary-slab vertices toward the coarse surface so the
+    // LOD step collapses (no-op unless this cube borders a coarser neighbour). Mirrors the CPU
+    // ApplyBoundaryMorph; the ribbon (TransitionCS) morphs its fine side the same way.
+    if (MCBoundaryMorph != 0u && TransitionFaces != 0u)
+    {
+        for (uint mi = 0; mi < VertexCount; mi++)
+        {
+            MorphVertexToCoarse(LODStride, TransitionFaces, CellVertices[mi]);
         }
     }
 
@@ -596,6 +730,21 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         CellVertices[i] = VertexPos;
         // Outer (coarse) face: both endpoints are coarse corners (samples 9-12)
         VertexOnOuterFace[i] = (SampleA >= 9u && SampleB >= 9u);
+    }
+
+    // Geomorph the ribbon's FINE-side vertices toward the coarse surface, matching the (also
+    // morphed) fine-MC boundary so they stay coincident -> the vertical wall collapses while the
+    // seam stays watertight. OUTER (coarse-corner) vertices are left on the coarse contour so the
+    // neighbour match is preserved. Done before triangle counting so count and emit agree.
+    if (MCBoundaryMorph != 0u)
+    {
+        for (uint mi = 0; mi < VertexCount; mi++)
+        {
+            if (!VertexOnOuterFace[mi])
+            {
+                MorphVertexToCoarse(LODStride, (1u << Face), CellVertices[mi]);
+            }
+        }
     }
 
     // ---- Material / biome from the first solid face sample ----

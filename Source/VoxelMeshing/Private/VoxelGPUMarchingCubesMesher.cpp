@@ -15,6 +15,12 @@
 #include "RHIResources.h"
 #include "RenderingThread.h"
 #include "DataDrivenShaderPlatformInfo.h"
+#include "HAL/IConsoleManager.h"
+
+// LOD-seam geomorph CVars (defined in VoxelCPUMarchingCubesMesher.cpp); the GPU path mirrors the
+// CPU bake, so both meshers share the same on/off toggle and morph width.
+extern TAutoConsoleVariable<int32> CVarMCBoundaryMorph;
+extern TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth;
 
 // ==================== Compute Shader Declarations ====================
 
@@ -75,6 +81,8 @@ public:
 		SHADER_PARAMETER(FVector3f, ChunkWorldPosition)
 		SHADER_PARAMETER(float, IsoLevel)
 		SHADER_PARAMETER(uint32, LODStride)
+		SHADER_PARAMETER(uint32, MCBoundaryMorph)
+		SHADER_PARAMETER(float, MCBoundaryMorphWidth)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -728,6 +736,8 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				MeshParams->ChunkWorldPosition = ChunkWorldPos;
 				MeshParams->IsoLevel = CapturedConfig.IsoLevel;
 				MeshParams->LODStride = LODStride;
+				MeshParams->MCBoundaryMorph = CVarMCBoundaryMorph.GetValueOnAnyThread() != 0 ? 1u : 0u;
+				MeshParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 
 				// Calculate dispatch dimensions (8x8x4 thread groups)
 				// With LOD stride, we need fewer threads (ChunkSize/Stride cubes per axis)
@@ -796,6 +806,8 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				TParams->ChunkWorldPosition = ChunkWorldPos;
 				TParams->IsoLevel = CapturedConfig.IsoLevel;
 				TParams->LODStride = LODStride;
+				TParams->MCBoundaryMorph = CVarMCBoundaryMorph.GetValueOnAnyThread() != 0 ? 1u : 0u;
+				TParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 
 				// One thread per (FP1, FP2, Face): cover the full ChunkSize face grid x 6 faces.
 				FIntVector TransitionGroupCount(

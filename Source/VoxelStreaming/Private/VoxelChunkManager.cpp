@@ -3714,6 +3714,51 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			*Config.Tag, *TargetWorld->GetName(), Start.X, Start.Y, Start.Z, Config.VelocityUU, Config.TraverseDistance);
 	}));
 
+// Console: voxel.RemeshAll
+// Re-mesh every currently-loaded chunk IN PLACE (marks them dirty without changing LOD), so a live
+// mesher CVar change (e.g. voxel.MCBoundaryMorph) takes effect immediately while the LOD rings /
+// seams stay exactly where they are. Handy for A/B-ing meshing changes while detached and flying.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
+	TEXT("voxel.RemeshAll"),
+	TEXT("Re-mesh all loaded voxel chunks in place (apply a live mesher CVar change without moving LOD)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.RemeshAll: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+
+		int32 Managers = 0;
+		int32 TotalDirtied = 0;
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			if (!CM) { continue; }
+			++Managers;
+			TArray<FIntVector> Loaded;
+			CM->GetLoadedChunks(Loaded);
+			for (const FIntVector& Coord : Loaded)
+			{
+				CM->MarkChunkDirty(Coord);
+			}
+			TotalDirtied += Loaded.Num();
+		}
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.RemeshAll: re-meshing %d chunk(s) across %d manager(s)"), TotalDirtied, Managers);
+	}));
+
 // ==================== Queue Re-Prioritization ====================
 
 void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
