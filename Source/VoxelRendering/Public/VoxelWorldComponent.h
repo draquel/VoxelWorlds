@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/PrimitiveComponent.h"
-#include "VoxelVertexFactory.h"
+#include "VoxelChunkGPUData.h"
 #include "ChunkRenderData.h"
 #include "VoxelWorldComponent.generated.h"
 
