@@ -75,7 +75,7 @@ FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
 	{
 		UWorld* World = GetWorld();
 		ERHIFeatureLevel::Type FL = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
-		FMaterialRelevance WaterRelevance = WaterMaterial->GetRelevance(FL);
+		FMaterialRelevance WaterRelevance = WaterMaterial->GetRelevance(GetFeatureLevelShaderPlatform(FL));
 		UMaterialInterface* WaterMat = WaterMaterial;
 
 		ENQUEUE_RENDER_COMMAND(SyncWaterMaterialToProxy)(
@@ -128,7 +128,7 @@ void UVoxelWorldComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* M
 			// Compute MaterialRelevance on game thread (GetRelevance requires game thread)
 			UWorld* World = GetWorld();
 			ERHIFeatureLevel::Type FeatureLevel = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
-			FMaterialRelevance MatRelevance = Material->GetRelevance(FeatureLevel);
+			FMaterialRelevance MatRelevance = Material->GetRelevance(GetFeatureLevelShaderPlatform(FeatureLevel));
 
 			ENQUEUE_RENDER_COMMAND(SetVoxelMaterial)(
 				[Proxy, Material, MatRelevance](FRHICommandListImmediate& RHICmdList)
@@ -343,7 +343,7 @@ void UVoxelWorldComponent::SetWaterMaterial(UMaterialInterface* InMaterial)
 		// Compute MaterialRelevance on game thread (GetRelevance requires game thread)
 		UWorld* World = GetWorld();
 		ERHIFeatureLevel::Type FL = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
-		FMaterialRelevance WaterRelevance = InMaterial->GetRelevance(FL);
+		FMaterialRelevance WaterRelevance = InMaterial->GetRelevance(GetFeatureLevelShaderPlatform(FL));
 
 		ENQUEUE_RENDER_COMMAND(SetVoxelWaterMaterial)(
 			[Proxy, InMaterial, WaterRelevance](FRHICommandListImmediate& RHICmdList)

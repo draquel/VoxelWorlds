@@ -119,15 +119,9 @@ void FLocalVFTestVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 	const uint32 SizeInBytes = NumVertices * sizeof(FLocalVFTestVertex);
 
 	// Create interleaved vertex buffer for vertex stream components
-	FRHIResourceCreateInfo CreateInfo(TEXT("LocalVFTestVertexBuffer"));
-
 	VertexBufferRHI = RHICmdList.CreateBuffer(
-		SizeInBytes,
-		BUF_Static | BUF_VertexBuffer,
-		sizeof(FLocalVFTestVertex),
-		ERHIAccess::VertexOrIndexBuffer,
-		CreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("LocalVFTestVertexBuffer"), SizeInBytes, sizeof(FLocalVFTestVertex), BUF_Static | BUF_VertexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* Data = RHICmdList.LockBuffer(VertexBufferRHI, 0, SizeInBytes, RLM_WriteOnly);
 	FMemory::Memcpy(Data, Vertices.GetData(), SizeInBytes);
@@ -136,15 +130,9 @@ void FLocalVFTestVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 	// Create separate color buffer for SRV access
 	// FLocalVertexFactory uses ColorComponentsSRV for manual vertex fetch of colors
 	const uint32 ColorBufferSize = NumVertices * sizeof(FColor);
-	FRHIResourceCreateInfo ColorCreateInfo(TEXT("LocalVFTestColorBuffer"));
-
 	ColorBufferRHI = RHICmdList.CreateBuffer(
-		ColorBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FColor),
-		ERHIAccess::SRVMask,
-		ColorCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("LocalVFTestColorBuffer"), ColorBufferSize, sizeof(FColor), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	// Copy just the color data to the separate buffer
 	FColor* ColorData = (FColor*)RHICmdList.LockBuffer(ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
@@ -156,7 +144,7 @@ void FLocalVFTestVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 
 	// Create SRV for colors from the separate color buffer
 	// PF_B8G8R8A8 matches FColor's BGRA memory layout
-	ColorSRV = RHICmdList.CreateShaderResourceView(ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+	ColorSRV = RHICmdList.CreateShaderResourceView(ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FLocalVFTestVertexBuffer: Created with %d vertices (%d bytes), ColorSRV: %s"),
 		NumVertices, SizeInBytes, ColorSRV.IsValid() ? TEXT("OK") : TEXT("NULL"));
@@ -183,15 +171,9 @@ void FLocalVFTestIndexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 	const uint32 NumIndices = Indices.Num();
 	const uint32 SizeInBytes = NumIndices * sizeof(uint32);
 
-	FRHIResourceCreateInfo CreateInfo(TEXT("LocalVFTestIndexBuffer"));
-
 	IndexBufferRHI = RHICmdList.CreateBuffer(
-		SizeInBytes,
-		BUF_Static | BUF_IndexBuffer,
-		sizeof(uint32),
-		ERHIAccess::VertexOrIndexBuffer,
-		CreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("LocalVFTestIndexBuffer"), SizeInBytes, sizeof(uint32), BUF_Static | BUF_IndexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* Data = RHICmdList.LockBuffer(IndexBufferRHI, 0, SizeInBytes, RLM_WriteOnly);
 	FMemory::Memcpy(Data, Indices.GetData(), SizeInBytes);
@@ -223,7 +205,7 @@ public:
 		}
 
 		// Cache material relevance for GetViewRelevance
-		MaterialRelevance = MaterialInterface->GetRelevance(GetScene().GetFeatureLevel());
+		MaterialRelevance = MaterialInterface->GetRelevance(GetFeatureLevelShaderPlatform(GetScene().GetFeatureLevel()));
 
 		// Build quad geometry in LOCAL space
 		const float HalfSize = Component->QuadSize * 0.5f;

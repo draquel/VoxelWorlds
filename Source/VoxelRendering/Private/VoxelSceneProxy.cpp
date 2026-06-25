@@ -145,7 +145,7 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelWorldComponent* InComponent, UMaterialI
 	}
 
 	// Cache material relevance
-	MaterialRelevance = Material->GetRelevance(FeatureLevel);
+	MaterialRelevance = Material->GetRelevance(GetFeatureLevelShaderPlatform(FeatureLevel));
 
 	// Note: Per-chunk vertex factories are created in UpdateChunkBuffers_RenderThread
 
@@ -731,14 +731,9 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 
 	// Create vertex buffer
 	const uint32 ConvertedVertexSize = SourceVertexCount * sizeof(FVoxelLocalVertex);
-	FRHIResourceCreateInfo VertexCreateInfo(TEXT("VoxelLocalVertexBuffer"));
 	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
-		ConvertedVertexSize,
-		BUF_Static | BUF_VertexBuffer,
-		sizeof(FVoxelLocalVertex),
-		ERHIAccess::VertexOrIndexBuffer,
-		VertexCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelLocalVertexBuffer"), ConvertedVertexSize, sizeof(FVoxelLocalVertex), BUF_Static | BUF_VertexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
 	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
@@ -746,58 +741,43 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 
 	// Create separate color buffer for SRV
 	const uint32 ColorBufferSize = SourceVertexCount * sizeof(FColor);
-	FRHIResourceCreateInfo ColorCreateInfo(TEXT("VoxelColorBuffer"));
 	NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
-		ColorBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FColor),
-		ERHIAccess::SRVMask,
-		ColorCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelColorBuffer"), ColorBufferSize, sizeof(FColor), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
 
 	// Create color SRV (PF_B8G8R8A8 matches FColor's BGRA layout)
-	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
 
 	// Create tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex)
 	const uint32 TangentBufferSize = SourceVertexCount * sizeof(FPackedTangentPair);
-	FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelTangentBuffer"));
 	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
-		TangentBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FPackedTangentPair),
-		ERHIAccess::SRVMask,
-		TangentCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelTangentBuffer"), TangentBufferSize, sizeof(FPackedTangentPair), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
 
 	// Create tangent SRV
-	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R8G8B8A8_SNORM));
 
 	// Create TexCoord buffer for SRV (GPUScene manual vertex fetch)
 	// With 2 UV channels, each vertex has 4 floats (UV0.xy, UV1.xy)
 	const uint32 TexCoordBufferSize = SourceVertexCount * sizeof(FVector4f);
-	FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelTexCoordBuffer"));
 	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
-		TexCoordBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FVector4f),
-		ERHIAccess::SRVMask,
-		TexCoordCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelTexCoordBuffer"), TexCoordBufferSize, sizeof(FVector4f), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
 
 	// Create TexCoord SRV - FVector4f is 16 bytes (4x float for 2 UV channels)
-	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
 
 	// Copy index buffer reference
 	NewRenderData.IndexBufferRHI = GPUData.IndexBufferRHI;
@@ -943,14 +923,9 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 
 	// Create vertex buffer
 	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
-	FRHIResourceCreateInfo VertexCreateInfo(TEXT("VoxelLocalVertexBuffer_CPU"));
 	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
-		ConvertedVertexSize,
-		BUF_Static | BUF_VertexBuffer,
-		sizeof(FVoxelLocalVertex),
-		ERHIAccess::VertexOrIndexBuffer,
-		VertexCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelLocalVertexBuffer_CPU"), ConvertedVertexSize, sizeof(FVoxelLocalVertex), BUF_Static | BUF_VertexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
 	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
@@ -958,69 +933,49 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 
 	// Create separate color buffer for SRV
 	const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
-	FRHIResourceCreateInfo ColorCreateInfo(TEXT("VoxelColorBuffer_CPU"));
 	NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
-		ColorBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FColor),
-		ERHIAccess::SRVMask,
-		ColorCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelColorBuffer_CPU"), ColorBufferSize, sizeof(FColor), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
 
 	// Create color SRV
-	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
 
 	// Create tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex)
 	const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
-	FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelTangentBuffer_CPU"));
 	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
-		TangentBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FPackedTangentPair),
-		ERHIAccess::SRVMask,
-		TangentCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelTangentBuffer_CPU"), TangentBufferSize, sizeof(FPackedTangentPair), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
 
 	// Create tangent SRV
-	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R8G8B8A8_SNORM));
 
 	// Create TexCoord buffer for SRV (GPUScene manual vertex fetch)
 	// With 2 UV channels, each vertex has 4 floats (UV0.xy, UV1.xy)
 	const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
-	FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelTexCoordBuffer_CPU"));
 	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
-		TexCoordBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FVector4f),
-		ERHIAccess::SRVMask,
-		TexCoordCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelTexCoordBuffer_CPU"), TexCoordBufferSize, sizeof(FVector4f), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
 
 	// Create TexCoord SRV - FVector4f is 16 bytes (4x float for 2 UV channels)
-	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
 
 	// Create index buffer directly from CPU data
 	const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
-	FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelIndexBuffer_CPU"));
 	NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
-		IndexBufferSize,
-		BUF_Static | BUF_IndexBuffer,
-		sizeof(uint32),
-		ERHIAccess::VertexOrIndexBuffer,
-		IndexCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelIndexBuffer_CPU"), IndexBufferSize, sizeof(uint32), BUF_Static | BUF_IndexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
@@ -1282,14 +1237,9 @@ void FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread(
 
 	// Create vertex buffer
 	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
-	FRHIResourceCreateInfo VertexCreateInfo(TEXT("VoxelWaterVertexBuffer"));
 	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
-		ConvertedVertexSize,
-		BUF_Static | BUF_VertexBuffer,
-		sizeof(FVoxelLocalVertex),
-		ERHIAccess::VertexOrIndexBuffer,
-		VertexCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelWaterVertexBuffer"), ConvertedVertexSize, sizeof(FVoxelLocalVertex), BUF_Static | BUF_VertexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
 	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
@@ -1297,65 +1247,45 @@ void FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread(
 
 	// Create color buffer for SRV
 	const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
-	FRHIResourceCreateInfo ColorCreateInfo(TEXT("VoxelWaterColorBuffer"));
 	NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
-		ColorBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FColor),
-		ERHIAccess::SRVMask,
-		ColorCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelWaterColorBuffer"), ColorBufferSize, sizeof(FColor), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
 
-	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
 
 	// Create tangent buffer for SRV
 	const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
-	FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelWaterTangentBuffer"));
 	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
-		TangentBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FPackedTangentPair),
-		ERHIAccess::SRVMask,
-		TangentCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelWaterTangentBuffer"), TangentBufferSize, sizeof(FPackedTangentPair), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
 
-	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R8G8B8A8_SNORM));
 
 	// Create TexCoord buffer for SRV
 	const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
-	FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelWaterTexCoordBuffer"));
 	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
-		TexCoordBufferSize,
-		BUF_Static | BUF_ShaderResource,
-		sizeof(FVector4f),
-		ERHIAccess::SRVMask,
-		TexCoordCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelWaterTexCoordBuffer"), TexCoordBufferSize, sizeof(FVector4f), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
 
 	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
 
-	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
 
 	// Create index buffer
 	const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
-	FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelWaterIndexBuffer"));
 	NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
-		IndexBufferSize,
-		BUF_Static | BUF_IndexBuffer,
-		sizeof(uint32),
-		ERHIAccess::VertexOrIndexBuffer,
-		IndexCreateInfo
-	);
+		FRHIBufferCreateDesc::Create(TEXT("VoxelWaterIndexBuffer"), IndexBufferSize, sizeof(uint32), BUF_Static | BUF_IndexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
@@ -1655,14 +1585,9 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 
 		// Create vertex buffer
 		const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
-		FRHIResourceCreateInfo VertexCreateInfo(TEXT("VoxelLocalVertexBuffer_Batch"));
 		NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
-			ConvertedVertexSize,
-			BUF_Static | BUF_VertexBuffer,
-			sizeof(FVoxelLocalVertex),
-			ERHIAccess::VertexOrIndexBuffer,
-			VertexCreateInfo
-		);
+			FRHIBufferCreateDesc::Create(TEXT("VoxelLocalVertexBuffer_Batch"), ConvertedVertexSize, sizeof(FVoxelLocalVertex), BUF_Static | BUF_VertexBuffer)
+				.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 		void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
 		FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
@@ -1670,32 +1595,22 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 
 		// Create separate color buffer for SRV
 		const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
-		FRHIResourceCreateInfo ColorCreateInfo(TEXT("VoxelColorBuffer_Batch"));
 		NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
-			ColorBufferSize,
-			BUF_Static | BUF_ShaderResource,
-			sizeof(FColor),
-			ERHIAccess::SRVMask,
-			ColorCreateInfo
-		);
+			FRHIBufferCreateDesc::Create(TEXT("VoxelColorBuffer_Batch"), ColorBufferSize, sizeof(FColor), BUF_Static | BUF_ShaderResource)
+				.SetInitialState(ERHIAccess::SRVMask));
 
 		void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
 		FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
 		RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
 
 		// Create color SRV
-		NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, sizeof(FColor), PF_B8G8R8A8);
+		NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
 
 		// Create tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex)
 		const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
-		FRHIResourceCreateInfo TangentCreateInfo(TEXT("VoxelTangentBuffer_Batch"));
 		NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
-			TangentBufferSize,
-			BUF_Static | BUF_ShaderResource,
-			sizeof(FPackedTangentPair),
-			ERHIAccess::SRVMask,
-			TangentCreateInfo
-		);
+			FRHIBufferCreateDesc::Create(TEXT("VoxelTangentBuffer_Batch"), TangentBufferSize, sizeof(FPackedTangentPair), BUF_Static | BUF_ShaderResource)
+				.SetInitialState(ERHIAccess::SRVMask));
 
 		void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
 		FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
@@ -1703,37 +1618,27 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 
 		// Create tangent SRV - use 2x4 bytes format (RGBA8 x2 for TangentX and TangentZ)
 		// FLocalVertexFactory expects tangents as 2x FPackedNormal per vertex
-		NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, sizeof(FPackedNormal), PF_R8G8B8A8_SNORM);
+		NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R8G8B8A8_SNORM));
 
 		// Create TexCoord buffer for SRV
 		// With 2 UV channels, each vertex has 4 floats (UV0.xy, UV1.xy)
 		const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
-		FRHIResourceCreateInfo TexCoordCreateInfo(TEXT("VoxelTexCoordBuffer_Batch"));
 		NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
-			TexCoordBufferSize,
-			BUF_Static | BUF_ShaderResource,
-			sizeof(FVector4f),
-			ERHIAccess::SRVMask,
-			TexCoordCreateInfo
-		);
+			FRHIBufferCreateDesc::Create(TEXT("VoxelTexCoordBuffer_Batch"), TexCoordBufferSize, sizeof(FVector4f), BUF_Static | BUF_ShaderResource)
+				.SetInitialState(ERHIAccess::SRVMask));
 
 		void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
 		FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
 		RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
 
 		// Create TexCoord SRV - FVector4f is 16 bytes (4x float for 2 UV channels)
-		NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, sizeof(FVector2f), PF_G32R32F);
+		NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
 
 		// Create index buffer directly from CPU data
 		const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
-		FRHIResourceCreateInfo IndexCreateInfo(TEXT("VoxelIndexBuffer_Batch"));
 		NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
-			IndexBufferSize,
-			BUF_Static | BUF_IndexBuffer,
-			sizeof(uint32),
-			ERHIAccess::VertexOrIndexBuffer,
-			IndexCreateInfo
-		);
+			FRHIBufferCreateDesc::Create(TEXT("VoxelIndexBuffer_Batch"), IndexBufferSize, sizeof(uint32), BUF_Static | BUF_IndexBuffer)
+				.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 		void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
 		FMemory::Memcpy(IndexData, Add.Indices.GetData(), IndexBufferSize);
