@@ -173,7 +173,7 @@ static UMaterial* GetOrCreateRuntimeBillboardBaseMaterial()
 	Mat->TwoSided = true;
 	Mat->BlendMode = BLEND_Masked;
 	Mat->SetShadingModel(MSM_DefaultLit);
-	Mat->bUsedWithInstancedStaticMeshes = true;
+	Mat->SetUsageByFlag(MATUSAGE_InstancedStaticMeshes, true);
 
 #if WITH_EDITORONLY_DATA
 	// Create texture sample parameter connected to BaseColor and OpacityMask
