@@ -1085,15 +1085,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCLODBoundaryDT7CornerTest, "VoxelWorlds.Meshi
 
 bool FDCLODBoundaryDT7CornerTest::RunTest(const FString& Parameters)
 {
-	// KnownResidual = open edges the weld currently leaves at this 4-chunk corner (the
-	// steep-field T-junction residual). We assert weld-on <= max(weld-off, KnownResidual):
+	// KnownResidual = extra open edges the weld is allowed to leave at this 4-chunk corner
+	// beyond the un-welded baseline. We assert weld-on <= max(weld-off, KnownResidual):
 	// the raw weld-off baseline is FP-sensitive, so a bare "must not exceed weld-off" check
-	// is fragile -- it flipped red on UE5.8's Precise FP even though the weld output is
-	// byte-identical to 5.7 (only the un-welded baseline shifted 8->4). Driving KnownResidual
-	// to 0 is the DC corner-weld improvement, tracked separately.
+	// is fragile. All cases are now 0: the max-min-area quad-diagonal choice in
+	// FVoxelCPUDualContourMesher::GenerateQuads splits welded boundary quads along the
+	// diagonal that avoids the near-zero-area sliver, eliminating the steep/shallow-seam
+	// T-junction that previously left this corner cracked (Smooth LOD1 weld-on 8 -> 0).
 	struct FCase { ETestField Field; int32 LOD; const TCHAR* Name; int32 KnownResidual; };
 	const FCase Cases[] = {
-		{ ETestField::Smooth,     1, TEXT("Smooth LOD1"),     8 },
+		{ ETestField::Smooth,     1, TEXT("Smooth LOD1"),     0 },
 		{ ETestField::NonLinearZ, 1, TEXT("NonLinearZ LOD1"), 0 },
 		{ ETestField::Cliff,      1, TEXT("Cliff LOD1"),      0 },
 		{ ETestField::Smooth,     2, TEXT("Smooth LOD2"),     0 },
@@ -1109,13 +1110,11 @@ bool FDCLODBoundaryDT7CornerTest::RunTest(const FString& Parameters)
 		{ FScopedWeld W(0); HolesOff = MeshCornerBlockHoles(C.LOD); }
 		{ FScopedWeld W(1); Holes = MeshCornerBlockHoles(C.LOD); }
 		AddInfo(FString::Printf(TEXT("DT7 %s: 4-chunk-corner interior open edges weld-off=%d weld-on=%d"), C.Name, HolesOff, Holes));
-		// FINDING: deep data + weld make SMOOTH same-LOD corners watertight (Smooth LOD2 and
-		// NonLinearZ LOD1 -> 0 open edges), but STEEP fields (Cliff) retain seam open edges
-		// (T-junctions: which side emits a boundary cell differs where the surface is steep
-		// relative to the stride). That is a seam-triangulation / cell-validity-asymmetry
-		// problem, NOT a missing-data one (the metric reaches 0 for smooth, so it is sound).
-		// The invariant we can hold today: the weld must never WORSEN the assembly. Tightening
-		// to 0 for all fields needs frame-independent boundary-cell validity or boundary skirts.
+		// The welded 4-chunk corner is now fully sealed (weld-on=0) for every field/LOD here,
+		// matching the Marching Cubes path. The former steep/shallow-seam T-junction came from
+		// a welded boundary quad whose fixed 0-2 diagonal degenerated into a near-zero-area
+		// sliver across the near-1D seam contour; GenerateQuads now splits each quad along the
+		// max-min-area diagonal, which steps through the intermediate welded vertex instead.
 		const int32 Allowed = FMath::Max(HolesOff, C.KnownResidual);
 		if (Holes > Allowed)
 		{
@@ -1124,7 +1123,7 @@ bool FDCLODBoundaryDT7CornerTest::RunTest(const FString& Parameters)
 				C.Name, Holes, Allowed, HolesOff, C.KnownResidual));
 		}
 	}
-	TestFalse(TEXT("DC boundary weld must not worsen 4-chunk corner watertightness (steep-field T-junction residual tracked as known issue)"), bWorse);
+	TestFalse(TEXT("DC boundary weld must seal 4-chunk corner watertightness (weld-on must not exceed the un-welded baseline)"), bWorse);
 	return true;
 }
 

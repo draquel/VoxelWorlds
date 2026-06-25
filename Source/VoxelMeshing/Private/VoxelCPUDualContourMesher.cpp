@@ -422,25 +422,44 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		const float D0 = GetDensityAt(Request, CX * Stride, CY * Stride, CZ * Stride);
 		const bool bFlip = (D0 < IsoLevel);
 
+		// Split the quad along the diagonal that maximises the smaller of the two triangle
+		// areas (a max-min-area / Delaunay-like choice). The boundary weld can pull the four
+		// cell vertices of a boundary quad onto the near-1D seam contour; the fixed 0-2
+		// diagonal then makes one triangle a near-zero-area sliver that spans a neighbouring
+		// welded vertex. The renderer (and the watertightness metric) drop that sliver,
+		// un-sealing the seam — the T-junction that cracked shallow 4-chunk corners (DT7
+		// Smooth LOD1). Choosing the diagonal whose worst triangle is largest avoids the
+		// sliver and steps through the intermediate vertex, matching the neighbour's tiling.
+		// For a well-shaped quad whose 0-2 split is already fine this leaves it untouched, so
+		// it does not disturb corners that were already sealed (e.g. Smooth LOD2).
+		auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
+		{
+			return 0.5f * FVector3f::CrossProduct(B - A, C - A).Size();
+		};
+		const FVector3f& P0 = Verts[0]->Position;
+		const FVector3f& P1 = Verts[1]->Position;
+		const FVector3f& P2 = Verts[2]->Position;
+		const FVector3f& P3 = Verts[3]->Position;
+		const float MinArea02 = FMath::Min(TriArea(P0, P1, P2), TriArea(P0, P2, P3));
+		const float MinArea13 = FMath::Min(TriArea(P1, P2, P3), TriArea(P1, P3, P0));
+		const bool bUse13 = MinArea13 > MinArea02;
+
+		auto AddTri = [&](int32 a, int32 b, int32 c)
+		{
+			OutMeshData.Indices.Add(Indices[a]);
+			OutMeshData.Indices.Add(Indices[b]);
+			OutMeshData.Indices.Add(Indices[c]);
+		};
+
 		if (bFlip)
 		{
-			OutMeshData.Indices.Add(Indices[0]);
-			OutMeshData.Indices.Add(Indices[1]);
-			OutMeshData.Indices.Add(Indices[2]);
-
-			OutMeshData.Indices.Add(Indices[0]);
-			OutMeshData.Indices.Add(Indices[2]);
-			OutMeshData.Indices.Add(Indices[3]);
+			if (bUse13) { AddTri(1, 2, 3); AddTri(1, 3, 0); }
+			else        { AddTri(0, 1, 2); AddTri(0, 2, 3); }
 		}
 		else
 		{
-			OutMeshData.Indices.Add(Indices[0]);
-			OutMeshData.Indices.Add(Indices[2]);
-			OutMeshData.Indices.Add(Indices[1]);
-
-			OutMeshData.Indices.Add(Indices[0]);
-			OutMeshData.Indices.Add(Indices[3]);
-			OutMeshData.Indices.Add(Indices[2]);
+			if (bUse13) { AddTri(1, 3, 2); AddTri(1, 0, 3); }
+			else        { AddTri(0, 2, 1); AddTri(0, 3, 2); }
 		}
 
 		OutTriangleCount += 2;
