@@ -7,7 +7,7 @@
 #include "Materials/MaterialInterface.h"
 #include "LocalVertexFactory.h"
 #include "VoxelLocalVertexFactory.h"
-#include "VoxelVertexFactory.h"  // For FVoxelChunkGPUData (legacy format input)
+#include "VoxelChunkGPUData.h"  // FVoxelChunkGPUData (GPU chunk buffer container)
 
 class UVoxelWorldComponent;
 

@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "IVoxelMeshRenderer.h"
-#include "VoxelVertexFactory.h"
+#include "VoxelChunkGPUData.h"
 
 class UVoxelWorldComponent;
 class UMaterialInterface;
@@ -28,7 +28,7 @@ class UVoxelWorldConfiguration;
  * Thread Safety: All public methods must be called from game thread
  *
  * @see IVoxelMeshRenderer
- * @see FVoxelVertexFactory
+ * @see UVoxelWorldComponent
  * @see Documentation/RENDERING_SYSTEM.md
  */
 class VOXELRENDERING_API FVoxelCustomVFRenderer : public IVoxelMeshRenderer
