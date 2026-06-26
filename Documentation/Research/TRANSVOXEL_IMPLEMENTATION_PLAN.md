@@ -1,8 +1,11 @@
 # Transvoxel Seam Stitching — Implementation Plan
 
-**Project**: VoxelWorlds Plugin (UE 5.7.2)
+**Project**: VoxelWorlds Plugin (UE 5.8)
 **Target File**: `VoxelCPUMarchingCubesMesher.cpp` (CPU path; GPU path later)
-**Status**: Transvoxel was previously implemented but disabled due to bugs. This plan provides a corrected, step-by-step reimplementation.
+**Status**: ⏸️ NOT PURSUED. Transvoxel was previously implemented but disabled (`bUseTransvoxel=false`)
+due to bugs; `TransvoxelTables.cpp` remains in the tree but the path is off. LOD-seam handling
+shipped via **geomorph** instead (see `GEOMORPH_IMPLEMENTATION_PLAN.md`) — this plan is kept as a
+research record of the corrected reimplementation approach, should Transvoxel be revisited.
 
 ---
 

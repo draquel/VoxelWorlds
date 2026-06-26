@@ -1,8 +1,10 @@
 # LOD Seam Geomorph (Transvoxel Secondary Positions) — Implementation Plan
 
-**Project**: VoxelWorlds Plugin (UE 5.7)
+**Project**: VoxelWorlds Plugin (UE 5.8)
 **Target**: `VoxelCPUMarchingCubesMesher` (CPU, increment 1) + `MarchingCubesMeshGeneration.usf` `MainCS` (GPU, increment 2)
-**Status**: Planned 2026-06-23. Root cause confirmed live (see below).
+**Status**: ✅ IMPLEMENTED (CPU + GPU). This plan is retained as the design record; the geomorph
+seam handling described here shipped in commits `ec2976b` (MC LOD-seam geomorph, CPU) and `332c8a6`
+(GPU MC LOD-seam geomorph port + `voxel.RemeshAll`). Original status: Planned 2026-06-23.
 
 ---
 

@@ -23,7 +23,12 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 
 - **Marching Cubes**: Core algorithm for isosurface extraction from density fields
 - **LOD Support**: Strided sampling for level-of-detail rendering
-- **Transvoxel**: Seamless LOD transitions without visible seams
+- **LOD-seam handling**: Shipped via **geomorph** (bending the fine surface toward the coarse
+  contour at the boundary) on both the CPU and GPU MC paths — see
+  [Research/GEOMORPH_IMPLEMENTATION_PLAN.md](../Research/GEOMORPH_IMPLEMENTATION_PLAN.md).
+  The Transvoxel transition-cell approach described later in this doc was implemented but is
+  **disabled** (`bUseTransvoxel=false`); see
+  [Research/TRANSVOXEL_IMPLEMENTATION_PLAN.md](../Research/TRANSVOXEL_IMPLEMENTATION_PLAN.md).
 
 ### When to Use Marching Cubes Meshing
 

@@ -458,7 +458,7 @@ The collision manager provides **distance-based physics collision** with a fully
    - `ProcessCompletedCollisionCooks()`: Drains MPSC queue, calls `ApplyCollisionResult()` (game thread, ~0.5ms per chunk)
    - Config: `MaxAsyncCollisionTasks(2)`, `MaxAppliesPerFrame=2`
 
-3. **Chaos Physics Integration** (UE 5.7):
+3. **Chaos Physics Integration** (UE 5.8):
    - `Chaos::FTriangleMeshImplicitObject` with `TRefCountPtr`
    - Uses `TriMeshGeometries` (not deprecated `ChaosTriMeshes`)
    - `UBoxComponent` as container, overrides FBodyInstance::BodySetup

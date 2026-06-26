@@ -2,7 +2,7 @@
 
 **Version**: 2.1
 **Last Updated**: 2026-02-19
-**Target Engine**: Unreal Engine 5.7
+**Target Engine**: Unreal Engine 5.8
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@
 
 ## System Overview
 
-VoxelWorlds is a **GPU-driven voxel terrain system** designed for high-performance, large-scale worlds in Unreal Engine 5.7. The architecture emphasizes:
+VoxelWorlds is a **GPU-driven voxel terrain system** designed for high-performance, large-scale worlds in Unreal Engine 5.8. The architecture emphasizes:
 
 - **Modularity**: Clear separation of concerns with interface-based integration
 - **Performance**: GPU-first approach minimizing CPU overhead

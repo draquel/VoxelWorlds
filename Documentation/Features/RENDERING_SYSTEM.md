@@ -46,7 +46,7 @@ This design allows shipping with optimized runtime performance while maintaining
 IVoxelMeshRenderer (Interface)
     │
     ├── FVoxelCustomVFRenderer (Runtime)
-    │   ├── FVoxelVertexFactory (Custom VF)
+    │   ├── FLocalVertexFactory (per-chunk; see "Vertex Factory Evolution" below)
     │   ├── FVoxelSceneProxy (Scene integration)
     │   └── GPU Buffers (Direct compute → render)
     │
@@ -1205,7 +1205,7 @@ private:
 
 - **CollisionRadius**: Default 50% of ViewDistance (configurable)
 - **CollisionLODLevel**: Uses coarser meshes for physics (fewer triangles, configurable)
-- **Chaos Physics** (UE 5.7): `TriMeshGeometries` with `TRefCountPtr<FTriangleMeshImplicitObject>`
+- **Chaos Physics** (UE 5.8): `TriMeshGeometries` with `TRefCountPtr<FTriangleMeshImplicitObject>`
 - **Container Actor**: `CollisionContainerActor` holds all chunk `UBoxComponent` collision holders
 - **Edit Integration**: `MarkChunkDirty()` called from `EditManager->OnChunkEdited` delegate
 - **Thread Safety**: Data prep reads game-thread state; mesher is stateless; trimesh is pure data construction

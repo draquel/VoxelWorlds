@@ -3,6 +3,12 @@
 **Module**: VoxelMeshing
 **Last Updated**: 2026-02-19
 
+> **Status note (2026-06):** The GPU Dual Contouring path has since reached **CPU watertightness
+> parity** — the `GT1–GT7` GPU LOD-boundary suite mirrors the CPU `DT*` suite and is green (floor
+> normals, referenced-vertex gating, CPU-style quad ownership, and mass-point-pinned boundary cells).
+> DC LOD seams and 4-chunk corner seams are sealed (max-min-area quad diagonal). The algorithm
+> description below is unchanged; these are correctness/parity refinements on top of it.
+
 ## Table of Contents
 
 1. [Overview](#overview)
