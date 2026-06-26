@@ -507,8 +507,17 @@ void DCEdgeCrossingCS(
             float3 P1 = float3(Neighbor) * VoxelSize;
             float3 CrossPos = P0 + (P1 - P0) * t;
 
-            // Compute gradient normal at crossing point
-            int3 CrossVoxel = (int3)(CrossPos / VoxelSize);
+            // Compute gradient normal at crossing point.
+            // floor(), NOT a C-style (int3) cast: the CPU samples the gradient at
+            // FMath::FloorToInt(CrossPos/VoxelSize) (FVoxelCPUDualContourMesher::
+            // CalculateGradientNormal). A truncating cast rounds toward zero, so for a
+            // boundary cell whose crossing lands at a negative local coord (the CX/CY/CZ=-1
+            // layer of a chunk with a neighbour, e.g. chunk B's -X face) it sampled voxel 0
+            // where the CPU sampled voxel -1 — a different normal, hence a different QEF
+            // vertex. That asymmetry desynced exactly the shared-seam verts (one chunk's +X
+            // boundary has positive coords and matched the CPU; the adjacent chunk's -X
+            // boundary went negative and did not), leaving the GT1 LOD0 seam ~37u open.
+            int3 CrossVoxel = (int3)floor(CrossPos / VoxelSize);
             float3 Normal = CalculateGradientNormalLOD(CrossVoxel, Stride);
 
             // Get material/biome from the solid side
@@ -653,6 +662,46 @@ static const int4 CellEdgeRefs[12] = {
     int4(1, 1, 0, 2), int4(1, 0, 1, 1), int4(0, 1, 1, 0),
 };
 
+// 4-cell offsets per axis for quad generation (matches CPU winding). Defined here, ahead of the
+// QEF pass, because BOTH DCQEFSolveCS (to decide which cells an owned quad will reference) and
+// DCQuadGenerationCS use it.
+static const int3 AxisQuadOffsets[3][4] = {
+    // Axis 0 (X-edge): vary Y,Z
+    {int3(0, 0, 0), int3(0, -1, 0), int3(0, -1, -1), int3(0, 0, -1)},
+    // Axis 1 (Y-edge): vary Z,X
+    {int3(0, 0, 0), int3(0, 0, -1), int3(-1, 0, -1), int3(-1, 0, 0)},
+    // Axis 2 (Z-edge): vary X,Y
+    {int3(0, 0, 0), int3(-1, 0, 0), int3(-1, -1, 0), int3(0, -1, 0)},
+};
+
+// A cell is emitted to the output mesh iff at least one OWNED, crossing edge has it as one of the
+// four cells of that edge's quad — matching the CPU mesher, which calls EmitVertex lazily only for
+// the cells an owned quad touches (FVoxelCPUDualContourMesher::GenerateQuads). The GPU previously
+// pre-allocated an output vertex for EVERY valid cell in Pass 2, so boundary cells whose only
+// crossings sit on neighbour-owned edges became isolated, unreferenced output verts; the
+// coarse-side watertightness metric counts those as extra, unmatched boundary verts (the GT4
+// failure). "Owned" uses the same rule as DCQuadGenerationCS: the edge's own cell is in [0,GridSize).
+bool IsCellReferencedByOwnedEdge(int CX, int CY, int CZ, int GridSize)
+{
+    [unroll]
+    for (int axis = 0; axis < 3; axis++)
+    {
+        [unroll]
+        for (int i = 0; i < 4; i++)
+        {
+            int3 Off = AxisQuadOffsets[axis][i];
+            // Our cell is quad-corner i of the edge located at (cell - Off).
+            int ex = CX - Off.x, ey = CY - Off.y, ez = CZ - Off.z;
+            if (ex >= 0 && ex < GridSize && ey >= 0 && ey < GridSize && ez >= 0 && ez < GridSize)
+            {
+                uint EIdx = DCEdgeIndex(ex, ey, ez, axis);
+                if (DCEdgeCrossings[EIdx].Flags & 1) { return true; }
+            }
+        }
+    }
+    return false;
+}
+
 [numthreads(8, 8, 4)]
 void DCQEFSolveCS(
     uint3 GroupId : SV_GroupID,
@@ -672,6 +721,16 @@ void DCQEFSolveCS(
     }
 
     uint CIdx = DCCellIndex(CX, CY, CZ);
+
+    // Solve the QEF in CELL-RELATIVE coordinates (origin at the cell's min corner). The QEF is
+    // translation-equivariant in exact arithmetic, but in float the projection (v_i . ATb)/lambda_i
+    // loses precision at large coordinate magnitudes — and for an under-constrained (near-planar)
+    // cell it divides by a tiny eigenvalue, amplifying that error along the unconstrained tangent.
+    // Two adjacent chunks solving the SAME shared boundary cell in different-magnitude local frames
+    // (one near +ChunkSize*VoxelSize, the other near 0) therefore drifted apart tangentially — the
+    // GT1 Smooth-seam slide. Solving relative to the cell origin feeds both chunks bit-identical
+    // inputs, so the shared vertex coincides; the result is shifted back to world space at the end.
+    float3 CellOrigin = float3((float)(CX * Stride), (float)(CY * Stride), (float)(CZ * Stride)) * VoxelSize;
 
     // Accumulate QEF: A^T*A (symmetric 3x3) + A^T*b
     float ATA00 = 0, ATA01 = 0, ATA02 = 0;
@@ -702,13 +761,14 @@ void DCQEFSolveCS(
             ATA12 += N.y * N.z;
             ATA22 += N.z * N.z;
 
-            // Accumulate A^T*b where b_i = n_i . p_i
-            float Dot = dot(N, P);
+            // Accumulate A^T*b where b_i = n_i . p_i, in cell-relative coordinates.
+            float3 Prel = P - CellOrigin;
+            float Dot = dot(N, Prel);
             ATb0 += N.x * Dot;
             ATb1 += N.y * Dot;
             ATb2 += N.z * Dot;
 
-            MassPoint += P;
+            MassPoint += Prel;
             AvgNormal += N;
             Count++;
         }
@@ -743,43 +803,88 @@ void DCQEFSolveCS(
         JacobiEigen3x3(ATA00, ATA01, ATA02, ATA11, ATA12, ATA22,
                         Eigenvalues, V0, V1, V2);
 
-        // Pseudoinverse solution: v = V * S^-1 * V^T * ATb
-        float3 ATbVec = float3(ATb0, ATb1, ATb2);
-        QEFResult = float3(0, 0, 0);
+        // Solve for the offset from the mass point: with v = MP + delta, minimizing
+        // Σ (n_i·(v - p_i))² gives ATA·delta = ATb - ATA·MP. The pseudoinverse zeroes the
+        // sub-threshold (under-constrained) directions, so delta has NO component there and the
+        // vertex stays AT the mass point along the unconstrained tangent — the centroid, which is
+        // exactly where the CPU's raw-solve + blend-to-MP also lands for a near-planar cell, and a
+        // frame-independent point (adjacent chunks share the same relative crossings and MP, hence
+        // the same delta). This is what makes the GT1 Smooth seam coincide. Well-constrained
+        // directions recover the same sharp-feature offset as the raw solve.
+        float3 ATAMp = float3(
+            ATA00 * MP.x + ATA01 * MP.y + ATA02 * MP.z,
+            ATA01 * MP.x + ATA11 * MP.y + ATA12 * MP.z,
+            ATA02 * MP.x + ATA12 * MP.y + ATA22 * MP.z);
+        float3 ATbVec = float3(ATb0, ATb1, ATb2) - ATAMp;
+
+        // Truncated-SVD cutoff: keep a singular direction only if its eigenvalue clears the absolute
+        // QEF threshold AND is within a decade of the dominant one. A locally planar cell has a
+        // single strong eigenvalue (its surface normal); the two tangent eigenvalues are tiny and
+        // ill-conditioned, and crucially they are built from the gradient normals — which two
+        // adjacent chunks compute DIFFERENTLY at a 1-plane boundary (one side reaches interior, the
+        // other clamps to the lone neighbour plane). Solving along those weak directions therefore
+        // slides the vertex apart along the under-constrained tangent (the GT1 Smooth-seam gap).
+        // Dropping them pins the vertex to the mass point there — the crossing centroid, the only
+        // quantity both chunks compute identically — so the shared boundary vertex coincides. Sharp
+        // edges/corners (2-3 comparable eigenvalues) keep their full solve.
+        float MaxEig = max(Eigenvalues.x, max(Eigenvalues.y, Eigenvalues.z));
+        float EffThreshold = max(QEFThreshold, MaxEig * 0.1f);
+        float3 Delta = float3(0, 0, 0);
 
         // Column 0
-        if (Eigenvalues.x > QEFThreshold)
+        if (Eigenvalues.x > EffThreshold)
         {
             float Proj = dot(V0, ATbVec) / Eigenvalues.x;
-            QEFResult += V0 * Proj;
+            Delta += V0 * Proj;
         }
         // Column 1
-        if (Eigenvalues.y > QEFThreshold)
+        if (Eigenvalues.y > EffThreshold)
         {
             float Proj = dot(V1, ATbVec) / Eigenvalues.y;
-            QEFResult += V1 * Proj;
+            Delta += V1 * Proj;
         }
         // Column 2
-        if (Eigenvalues.z > QEFThreshold)
+        if (Eigenvalues.z > EffThreshold)
         {
             float Proj = dot(V2, ATbVec) / Eigenvalues.z;
-            QEFResult += V2 * Proj;
+            Delta += V2 * Proj;
         }
+
+        QEFResult = MP + Delta;
     }
 
-    // Cell bounds for clamping
+    // Chunk-boundary cells (the -1 / GridSize-1 layer adjacent to a chunk face) read their gradient
+    // normals from only the single supplied neighbour plane, so the two chunks that share a face
+    // compute DIFFERENT normals there (one reaches interior, the other clamps to the lone plane) —
+    // and even the dominant QEF eigenvector then differs, sliding the shared vertex apart along the
+    // planar tangent (the residual GT1 seam gap that the truncated SVD alone can't close). Pin those
+    // cells to the mass point: the crossing centroid is built only from edge POSITIONS, which both
+    // chunks derive from the same shared face densities, so it is bit-identical on both sides and
+    // the seam vertex coincides. This is the same place the CPU's solve+blend lands for a planar
+    // seam. Interior cells see full data on every side and keep their solved feature position.
+    bool bBoundaryCell = (CX == -1 || CX == GridSize - 1 || CY == -1 || CY == GridSize - 1 || CZ == -1 || CZ == GridSize - 1);
+    if (bBoundaryCell)
+    {
+        QEFResult = MP;
+    }
+
+    // Cell bounds for clamping, in the same cell-relative frame: [0, CellWorldSize]. MP is already
+    // cell-relative (accumulated as P - CellOrigin).
     float CellWorldSize = (float)Stride * VoxelSize;
-    float3 CellMin = float3((float)(CX * Stride), (float)(CY * Stride), (float)(CZ * Stride)) * VoxelSize;
-    float3 CellMax = CellMin + float3(CellWorldSize, CellWorldSize, CellWorldSize);
+    float3 CellMinRel = float3(0, 0, 0);
+    float3 CellMaxRel = float3(CellWorldSize, CellWorldSize, CellWorldSize);
 
     // Clamp/blend toward mass point if outside cell bounds
-    if (any(QEFResult < CellMin) || any(QEFResult > CellMax))
+    if (any(QEFResult < CellMinRel) || any(QEFResult > CellMaxRel))
     {
-        float3 Closest = clamp(QEFResult, CellMin, CellMax);
+        float3 Closest = clamp(QEFResult, CellMinRel, CellMaxRel);
         float DistOutside = length(QEFResult - Closest);
         float Blend = saturate(DistOutside / max(CellWorldSize, 0.001f) * QEFBias * 2.0f);
         QEFResult = lerp(QEFResult, MP, Blend);
     }
+
+    // Shift the cell-relative solution back to world space for output / welding / quad generation.
+    QEFResult += CellOrigin;
 
     // Normalize average normal
     float NLen = length(AvgNormal);
@@ -797,21 +902,36 @@ void DCQEFSolveCS(
     uint MatID = GetCellMaterial(CellVoxelPos, Stride);
     uint BiomeId = GetCellBiome(CellVoxelPos, Stride);
 
+    // Common cell-vertex record. Written for every valid cell so the weld (Pass 2.6) and any owned
+    // quad (Pass 3) can read its solved position; VertexIndex is assigned below ONLY if this cell
+    // is actually emitted to the output mesh.
+    FDCCellVertexGPU Vert;
+    Vert.Position = QEFResult;
+    Vert.PackedNormal = PackSmoothNormalAndAO(AvgNormal, 0);
+    Vert.PackedMaterial = (MatID & 0xFF) | ((BiomeId & 0xFF) << 8);
+    Vert.Flags = 1; // bValid
+    Vert.VertexIndex = 0xFFFFFFFF;
+    Vert._Pad = 0;
+
+    // Emit an output vertex only for cells an owned quad will reference (parity with CPU
+    // EmitVertex). A valid-but-unreferenced cell — a boundary cell whose crossings all lie on
+    // neighbour-owned edges — is kept in DCCellVertices but produces NO isolated output vertex,
+    // which is what made the GPU coarse side carry extra unmatched boundary verts vs the CPU.
+    if (!IsCellReferencedByOwnedEdge(CX, CY, CZ, GridSize))
+    {
+        DCCellVertices[CIdx] = Vert;
+        return;
+    }
+
     // Allocate output vertex index (pre-assign before Pass 3)
     uint OutIdx;
     InterlockedAdd(MeshCounters[0], 1, OutIdx);
 
-    // Bounds check — skip if vertex buffer is full
+    // Bounds check — buffer full: keep the cell valid but unemitted (VertexIndex stays 0xFFFFFFFF,
+    // so any quad referencing it is skipped in Pass 3, matching a dropped vertex).
     if (OutIdx >= MaxVertexCount)
     {
-        FDCCellVertexGPU OverflowVert;
-        OverflowVert.Position = float3(0, 0, 0);
-        OverflowVert.PackedNormal = 0;
-        OverflowVert.PackedMaterial = 0;
-        OverflowVert.Flags = 0;
-        OverflowVert.VertexIndex = 0xFFFFFFFF;
-        OverflowVert._Pad = 0;
-        DCCellVertices[CIdx] = OverflowVert;
+        DCCellVertices[CIdx] = Vert;
         return;
     }
 
@@ -831,19 +951,13 @@ void DCQEFSolveCS(
     // Create and write output vertex
     FVoxelVertexGPU OutVert;
     OutVert.Position = QEFResult;
-    OutVert.PackedNormalAndAO = PackSmoothNormalAndAO(AvgNormal, 0);
+    OutVert.PackedNormalAndAO = Vert.PackedNormal;
     OutVert.UV = UV;
     OutVert.PackedMaterialData = PackMaterialData(MatID, BiomeId, 0);
     OutputVertices[OutIdx] = OutVert;
 
-    // Write cell vertex with pre-assigned index
-    FDCCellVertexGPU Vert;
-    Vert.Position = QEFResult;
-    Vert.PackedNormal = PackSmoothNormalAndAO(AvgNormal, 0);
-    Vert.PackedMaterial = (MatID & 0xFF) | ((BiomeId & 0xFF) << 8);
-    Vert.Flags = 1; // bValid
+    // Record the assigned output index on the cell vertex.
     Vert.VertexIndex = OutIdx;
-    Vert._Pad = 0;
     DCCellVertices[CIdx] = Vert;
 }
 
@@ -1029,16 +1143,7 @@ void DCPrepareIndirectArgsCS(uint3 DTid : SV_DispatchThreadID)
 }
 
 // ==================== Pass 3: Quad Generation ====================
-
-// 4-cell offsets per axis for quad generation (matches CPU winding)
-static const int3 AxisQuadOffsets[3][4] = {
-    // Axis 0 (X-edge): vary Y,Z
-    {int3(0, 0, 0), int3(0, -1, 0), int3(0, -1, -1), int3(0, 0, -1)},
-    // Axis 1 (Y-edge): vary Z,X
-    {int3(0, 0, 0), int3(0, 0, -1), int3(-1, 0, -1), int3(-1, 0, 0)},
-    // Axis 2 (Z-edge): vary X,Y
-    {int3(0, 0, 0), int3(-1, 0, 0), int3(-1, -1, 0), int3(0, -1, 0)},
-};
+// AxisQuadOffsets is defined above (shared with DCQEFSolveCS's IsCellReferencedByOwnedEdge).
 
 [numthreads(64, 1, 1)]
 void DCQuadGenerationCS(
@@ -1065,25 +1170,11 @@ void DCQuadGenerationCS(
     int CY = (int)((CellLinear / GridDim) % GridDim) - 1;
     int CZ = (int)(CellLinear / (GridDim * GridDim)) - 1;
 
-    // Edge ownership: at least one of 4 cells must be in [0, GridSize-1]
-    bool bOwned = false;
-    [unroll]
-    for (int i = 0; i < 4; i++)
-    {
-        int3 Off;
-        if (Axis == 0) Off = AxisQuadOffsets[0][i];
-        else if (Axis == 1) Off = AxisQuadOffsets[1][i];
-        else Off = AxisQuadOffsets[2][i];
-
-        int CCX = CX + Off.x;
-        int CCY = CY + Off.y;
-        int CCZ = CZ + Off.z;
-        if (CCX >= 0 && CCX < GridSize && CCY >= 0 && CCY < GridSize && CCZ >= 0 && CCZ < GridSize)
-        {
-            bOwned = true;
-            break;
-        }
-    }
+    // Edge ownership: the edge's OWN cell must be in [0, GridSize) — matches the CPU
+    // FVoxelCPUDualContourMesher::GenerateQuads so each physical edge is owned by exactly one
+    // chunk (no doubled seam quads), and is the same rule DCQEFSolveCS's
+    // IsCellReferencedByOwnedEdge uses to decide which cells get an output vertex.
+    bool bOwned = (CX >= 0 && CX < GridSize && CY >= 0 && CY < GridSize && CZ >= 0 && CZ < GridSize);
     if (!bOwned)
     {
         return;

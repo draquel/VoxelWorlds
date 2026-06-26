@@ -390,7 +390,13 @@ namespace DualContourLODBoundaryTestHelpers
 		// unlike the MC GPU mesher, the DC mesher's readback is Tick-driven, not render-command
 		// driven, so flushing alone never completes it.
 		const double StartTime = FPlatformTime::Seconds();
-		const double TimeoutSeconds = 10.0;
+		// 30s, not 10s: the VERY FIRST GPU DC dispatch in a process pays a cold-start cost
+		// (compute PSO creation for all DC passes, driver shader-cache warmup) that is several
+		// seconds and grows whenever the .usf changed and the shader was just recompiled. The
+		// first chunk meshed by the first GT* test was exceeding a 10s budget and returning empty
+		// (maxDist=FLT_MAX), a harness flake unrelated to mesh correctness. Every subsequent
+		// dispatch is sub-100ms, so the larger budget only affects the cold first call.
+		const double TimeoutSeconds = 30.0;
 		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < TimeoutSeconds)
 		{
 			FlushRenderingCommands();
@@ -1211,6 +1217,84 @@ bool FDCLODBoundaryDT7CornerTest::RunTest(const FString& Parameters)
  *  should early-out as a pass/skip. */
 #define DC_GPU_SKIP_IF_NO_RHI(TestObj) \
 	if (GUsingNullRHI) { (TestObj).AddInfo(TEXT("Skipped: GPU DC tests require a real RHI (run without -nullrhi)")); return true; }
+
+// ==================== GT0: CPU-vs-GPU per-chunk parity diagnostic ====================
+//
+// Not a hard gate (always passes) — a diagnostic that meshes each chunk on BOTH the CPU
+// (watertight reference) and GPU meshers and reports, per chunk, how many CPU vertices the
+// GPU FAILS to reproduce within FuseTolerance (the CPU->GPU direction; the GPU emits extra
+// unreferenced verts so GPU->CPU is noisy). Because the CPU pair is watertight, any GT1/GT4
+// GPU seam failure must come from at least one chunk's GPU mesh diverging from its CPU mesh —
+// this localizes the divergence to the fine (A) or coarse (B) side and logs the worst vertex
+// position (boundary world-X≈ChunkSize*VoxelSize vs interior).
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCGPULODBoundaryGT0Test, "VoxelWorlds.Meshing.DualContour.GPULODBoundary.GT0_CPUvsGPUParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCGPULODBoundaryGT0Test::RunTest(const FString& Parameters)
+{
+	DC_GPU_SKIP_IF_NO_RHI(*this);
+
+	// Per-chunk CPU-vs-GPU vertex divergence (CPU->GPU: CPU verts the GPU fails to reproduce).
+	auto NearestPos = [](const FVector3f& P, const TArray<FVector3f>& S, float& OutD) -> FVector3f
+	{
+		float Min = FLT_MAX; FVector3f Best = FVector3f::ZeroVector;
+		for (const FVector3f& Q : S) { const float D = (Q - P).Size(); if (D < Min) { Min = D; Best = Q; } }
+		OutD = Min; return Best;
+	};
+
+	struct FScn { ETestField Field; int32 FineLOD; int32 CoarseLOD; float CoarseCell; const TCHAR* Name; };
+	const FScn Scns[] = {
+		{ ETestField::Smooth, 0, 0, 100.0f, TEXT("Smooth LOD0|LOD0 (GT1)") },
+		{ ETestField::Cliff,  0, 1, 200.0f, TEXT("Cliff LOD0|LOD1 (GT4)") },
+	};
+	for (const FScn& S : Scns)
+	{
+		FScopedTestField Scoped(S.Field);
+		FVoxelMeshingRequest RA, RB;
+		BuildLODPair(S.FineLOD, S.CoarseLOD, RA, RB);
+		FChunkMeshData CA, GA, CB, GB;
+		const bool bOk = MeshChunk(RA, CA) && MeshChunk(RB, CB) && MeshChunkGPU(RA, GA) && MeshChunkGPU(RB, GB);
+		if (!bOk) { AddInfo(FString::Printf(TEXT("GT0 %s: a mesh failed — skipped"), S.Name)); continue; }
+
+		// 2x2 seam cross-match: which side (A fine / B coarse) does the GPU break? The metric
+		// collects B's boundary verts and finds the nearest A vert. CC is the watertight CPU
+		// reference; GG is the GT failure; CG (good A vs GPU B) high => GPU-B has bad/extra
+		// boundary verts; GC (GPU A vs good B) high => GPU-A fails to provide B's matches.
+		auto XM = [&](const FChunkMeshData& A, const FChunkMeshData& B, const TCHAR* Tag)
+		{
+			int32 N = 0, U = 0; float M = 0.0f;
+			MeasureCoarseSideMatch(A, B, S.CoarseCell, FuseTolerance, N, U, M);
+			AddInfo(FString::Printf(TEXT("GT0 %s  %-14s: B-band=%d unmatched=%d maxDist=%.1f"), S.Name, Tag, N, U, M));
+		};
+		XM(CA, CB, TEXT("CPUa-CPUb ref"));
+		XM(GA, GB, TEXT("GPUa-GPUb =GT"));
+		XM(CA, GB, TEXT("CPUa-GPUb"));
+		XM(GA, CB, TEXT("GPUa-CPUb"));
+		AddInfo(FString::Printf(TEXT("GT0 %s vertcounts: CPUa=%d GPUa=%d CPUb=%d GPUb=%d"),
+			S.Name, CA.Positions.Num(), GA.Positions.Num(), CB.Positions.Num(), GB.Positions.Num()));
+
+		// Dump the worst unmatched verts (CPU -> nearest GPU) for each side, to show whether the
+		// GPU vert is "near but offset" (position divergence) or a whole cell away (missing/extra).
+		auto DumpSide = [&](const FChunkMeshData& CPU, const FChunkMeshData& GPU, const TCHAR* Side)
+		{
+			int32 Shown = 0;
+			for (const FVector3f& P : CPU.Positions)
+			{
+				float D = 0.0f; const FVector3f G = NearestPos(P, GPU.Positions, D);
+				if (D > FuseTolerance && Shown < 6)
+				{
+					AddInfo(FString::Printf(TEXT("  GT0 %s %s unmatched CPU(%.0f,%.0f,%.0f)->GPU(%.0f,%.0f,%.0f) d=%.1f"),
+						S.Name, Side, P.X, P.Y, P.Z, G.X, G.Y, G.Z, D));
+					++Shown;
+				}
+			}
+		};
+		DumpSide(CA, GA, TEXT("A"));
+		DumpSide(CB, GB, TEXT("B"));
+	}
+	return true; // diagnostic only — never fails the suite
+}
 
 // ==================== GT1: both LOD0 (GPU sanity baseline) ====================
 
