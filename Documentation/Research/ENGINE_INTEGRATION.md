@@ -75,13 +75,10 @@ Progress legend: ✅ done · ⏳ needs running editor (post shader-recompile).
 0. ✅ **Enable virtual texture support** — `r.VirtualTextures=True` added to `Config/DefaultEngine.ini`. Requires a one-time global shader recompile on next editor launch.
 1. ✅ **Proxy wiring** — `FVoxelSceneProxy` opts in via `bSupportsRuntimeVirtualTexture = true` (ctor) and emits a cloned RVT mesh batch per `RuntimeVirtualTextureMaterialType` in the terrain loop of `GetDynamicMeshElements` (water excluded). Pattern mirrors `FBaseDynamicMeshSceneProxy`. The loop is a no-op when no RVT is assigned (zero overhead). Compiles clean (`UnrealEditor-VoxelRendering.dll`).
 2. ✅ **Component wiring** — none required: `UVoxelWorldComponent` inherits `UPrimitiveComponent::RuntimeVirtualTextures`; the base proxy ctor populates `RuntimeVirtualTextureMaterialTypes` from it automatically.
-3. ⏳ **Asset setup** — create a `URuntimeVirtualTexture` asset (BaseColor_Normal_Roughness material type) and an `ARuntimeVirtualTextureVolume` covering the test terrain bounds; assign the RVT to the voxel world component's `RuntimeVirtualTextures` array.
-4. ⏳ **Material** — author (Substrate) a material that outputs to the RVT and a main-pass terrain material that samples it (`Runtime Virtual Texture Sample` node). Note: project uses `r.Substrate=True`, so RVT output wiring differs from legacy materials.
-5. ⏳ **Verify (live)** — PIE on the CPU-MC test map; use the live-verify workflow (`unreal-mcp` for typed inspection + Claudius PIE screenshots). Pass criteria:
-   - RVT volume shows terrain content (not blank) in the RVT debug view.
-   - Main-pass terrain shading reads from the RVT (toggle RVT off → visible difference).
-   - No regression in the `GT0–GT7` correctness suite; no proxy crashes on chunk add/remove/LOD morph.
-6. ⏳ **Decision gate** — if dynamic-path RVT writes are clean → proceed to full material integration. If not → evaluate a static-element path or a dedicated RVT-writer primitive.
+3. ✅ **Asset setup** — `URuntimeVirtualTexture` asset (BaseColor_Normal_Roughness) at `/Game/PluginTesting/RVT/RVT_VoxelTerrain`; `ARuntimeVirtualTextureVolume` covering ±15000 XY / ±10000 Z over the terrain (unit box is local (0,0,0)-(1,1,1): set location=min, scale=size). RVT assigned to the volume's component and to the world component (via config, see step 1-permanent below).
+4. ✅ **Material** — read-back material `M_RVT_Readback` (`Runtime Virtual Texture Sample` → BaseColor/Normal/Roughness, plus BaseColor→Emissive for visibility) authored via the `unreal-mcp` MaterialTools toolset. **Critical:** the terrain master material **`M_VoxelMaster`** also needed a `Runtime Virtual Texture Output` node (BaseColor/Normal/Roughness) — without it the RVT pass writes nothing and read-back reads black. Under `r.Substrate=True` the legacy output pins auto-convert to a slab; both materials compile clean.
+5. ✅ **Verify (live)** — PIE on the test map; read-back plane (above terrain) shows the terrain biome albedo map, matching the lit terrain with the plane hidden. The black→color flip when the RVT Output node was added isolates the write path. `GT0–GT7` suite green (8/8); no proxy crashes.
+6. ✅ **Decision gate** — dynamic-path RVT writes are clean → full material integration done.
 
 #### Spike result (2026-06-27, live in PIE on `/Game/PluginTesting/VoxelWorldsTest`)
 
@@ -90,9 +87,18 @@ Progress legend: ✅ done · ⏳ needs running editor (post shader-recompile).
 - `GetDynamicMeshElements` runs every frame with the RVT path active and **no ensures, asserts, or errors**. The proxy recreates safely when the RVT is (un)assigned (`PostEditChangeProperty` → render-state recreate).
 - Decision gate → **PASS**: proceed to full material integration (read-back).
 
-**Method note (temporary):** the spike injected the RVT at runtime via Python (`set_editor_property("runtime_virtual_textures", ...)`) because the `UVoxelWorldComponent` is created at runtime by `FVoxelCustomVFRenderer`. For the real feature this must become **permanent C++ wiring** — carry an optional RVT list on `UVoxelWorldConfiguration` and assign `WorldComponent->RuntimeVirtualTextures` before `RegisterComponent()` in the renderer. Also note `RuntimeVirtualTexture` assets cannot be saved while PIE is active.
+#### Round-trip result (2026-06-27, committed on `feature/rvt-integration`, submodule 578027e / parent 0fea79c)
 
-**Still to verify (visual round-trip):** needs (a) permanent C++ wiring + a saved RVT asset, (b) an `ARuntimeVirtualTextureVolume` covering the terrain (no volume = no capture pages), (c) a Substrate read-back material (`Runtime Virtual Texture Sample`), and (d) camera on the terrain (anti-fall) for the screenshot. None of these are blocked — they're the next session's work.
+**Visual round-trip works: terrain writes its albedo into the RVT and a read-back material samples it back.** Three pieces, all committed:
+1. **Proxy opt-in** (spike) — `bSupportsRuntimeVirtualTexture=true` + per-`RuntimeVirtualTextureMaterialType` batch emission; logs `RVT material types=N`.
+2. **Permanent C++ wiring** (replaces the spike's runtime Python injection) — `UVoxelWorldConfiguration::RuntimeVirtualTextures` (EditAnywhere TArray); `FVoxelCustomVFRenderer::Initialize` copies it onto `WorldComponent->RuntimeVirtualTextures` *before* `RegisterComponent()`. Logs `Assigned N Runtime Virtual Texture(s) to WorldComponent from configuration`.
+3. **Terrain RVT Output node** (the piece the spike's "writes need no material change" missed) — `M_VoxelMaster` now has a `Runtime Virtual Texture Output` node fed by BaseColor/Normal/Roughness. The proxy emitting RVT batches is **necessary but not sufficient**; without this node the RVT pass writes nothing and pages read back black. Inert when no RVT is assigned to the primitive, so safe for all worlds.
+
+**Verification:** read-back plane above the terrain showed the biome albedo map; hiding the plane showed the same biome boundary on the lit terrain. The black→color flip when the RVT Output node was added is the cleanest proof.
+
+**Gotchas:** RVT assets/levels can't be saved during PIE (create/save outside PIE); the bound test config is `DemoWorldConfig` — assign the RVT **in-memory** (PIE duplicates the editor world, so in-memory config + spawned volume/plane are picked up) rather than mutating it. Force-killing the editor pops a "Restore Packages" modal on relaunch that hangs MCP/Claudius until dismissed.
+
+**Next:** runtime PCG (§2) + World Partition (§3).
 
 ### 2. PCG with Runtime Generation
 
