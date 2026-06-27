@@ -156,7 +156,14 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelWorldComponent* InComponent, UMaterialI
 	bAffectDynamicIndirectLighting = false;
 	bAffectDistanceFieldLighting = false;
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory"));
+	// Allow terrain chunks to write into Runtime Virtual Textures when the owning
+	// component has RVTs assigned. The base FPrimitiveSceneProxy constructor reads
+	// UPrimitiveComponent::RuntimeVirtualTextures and populates
+	// RuntimeVirtualTextureMaterialTypes; we just opt in here and emit the RVT mesh
+	// batches in GetDynamicMeshElements. See Documentation/Research/ENGINE_INTEGRATION.md.
+	bSupportsRuntimeVirtualTexture = true;
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory (RVT material types=%d)"), RuntimeVirtualTextureMaterialTypes.Num());
 }
 
 FVoxelSceneProxy::~FVoxelSceneProxy()
@@ -395,6 +402,26 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			BatchElement.MinVertexIndex = 0;
 			BatchElement.MaxVertexIndex = RenderData.VertexCount - 1;
 			BatchElement.PrimitiveUniformBuffer = GetUniformBuffer();
+
+			// ==================== Runtime Virtual Texture Pass ====================
+			// For each RVT material type this primitive writes to, emit a clone of the
+			// terrain batch flagged for the virtual texture pass. RuntimeVirtualTextureMaterialTypes
+			// is populated by the base FPrimitiveSceneProxy from the component's assigned RVTs,
+			// so this loop is a no-op when no RVT is assigned (zero overhead in that case).
+			// Pattern mirrors FBaseDynamicMeshSceneProxy. Only terrain writes to RVT; water does not.
+			for (ERuntimeVirtualTextureMaterialType RVTMaterialType : RuntimeVirtualTextureMaterialTypes)
+			{
+				FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
+				VirtualMeshBatch = MeshBatch;
+				VirtualMeshBatch.CastShadow = false;
+				VirtualMeshBatch.bUseAsOccluder = false;
+				VirtualMeshBatch.bUseForDepthPass = false;
+				VirtualMeshBatch.bUseForMaterial = false;
+				VirtualMeshBatch.bDitheredLODTransition = false;
+				VirtualMeshBatch.bRenderToVirtualTexture = true;
+				VirtualMeshBatch.RuntimeVirtualTextureMaterialType = (uint32)RVTMaterialType;
+				Collector.AddMesh(ViewIndex, VirtualMeshBatch);
+			}
 
 			// Add mesh to collector
 			Collector.AddMesh(ViewIndex, MeshBatch);

@@ -48,6 +48,7 @@ Documentation for the VoxelWorlds plugin (Unreal Engine 5.8), organized by purpo
 - [MASTER_MATERIAL_SETUP.md](Guides/MASTER_MATERIAL_SETUP.md) — M_VoxelMaster setup walkthrough
 
 ## Research (historical / process)
+- [ENGINE_INTEGRATION.md](Research/ENGINE_INTEGRATION.md) — which UE 5.8 systems to adopt (RVT, runtime PCG, World Partition) vs. keep hand-built; why Nanite is build-time only; RVT spike plan; Mesh Terrain as secondary bake bridge
 - [IMPLEMENTATION_PHASES.md](Research/IMPLEMENTATION_PHASES.md) — development roadmap / phase log
 - [LOD_SEAM_INVESTIGATION.md](Research/LOD_SEAM_INVESTIGATION.md) — LOD seam root-cause investigation
 - [GEOMORPH_IMPLEMENTATION_PLAN.md](Research/GEOMORPH_IMPLEMENTATION_PLAN.md) — geomorph seam plan (✅ implemented)
