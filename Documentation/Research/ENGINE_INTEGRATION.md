@@ -106,10 +106,43 @@ Progress legend: ✅ done · ⏳ needs running editor (post shader-recompile).
 
 **Why:** PCG's "Generate at Runtime" path is a maintained engine system that overlaps our `SCATTER_SYSTEM`. Candidate to replace parts of it rather than maintaining bespoke scatter.
 
+**Decisions (locked with project owner):** (1) Surface source = **re-sample the procedural generator**
+(not physics-trace, not the live voxel cache) — decoupled from chunk streaming, keeps biome/material/slope
+attributes. (2) Scope = **coexist/additive** — PCG is a new opt-in scatter path; voxel-tree injection +
+edit-driven removal stay bespoke; retire nothing until parity is proven.
+
 **Integration notes:**
-- Terrain surface must be queryable by PCG (collision/landscape-equivalent or a custom sampler). Our async collision trimesh (`RENDERING_SYSTEM.md` → Collision System) may serve as the surface source; otherwise a custom PCG point sampler reading voxel data.
+- Terrain surface is queried by a custom PCG node that re-samples the generator (not collision/landscape).
 - Sequencing: PCG runtime gen must trigger *after* a chunk's terrain exists and re-run on edits (`EDIT_LAYER.md` dirty events).
 - Evaluate against `SCATTER_SYSTEM` feature parity (voxel tree injection, biome-aware density) before committing to replacement vs. coexistence.
+
+#### Implementation status (2026-06-27)
+
+Phases 0–2 done & committed on `feature/pcg-integration`; **visual round-trip working in PIE** — PCG
+places static meshes on the runtime voxel terrain via the custom node.
+
+- **Phase 0** — `PCG` plugin enabled; new **`VoxelPCG`** runtime module isolates the PCG dependency
+  (declared in `VoxelWorlds.uplugin` → transitively enables PCG).
+- **Phase 1** — new public **`FVoxelSurfaceQuery`** (`VoxelGeneration`): stateless/thread-safe surface
+  queries (height, normal, slope, biome, material) against `IVoxelWorldMode` for any world X,Y. The tree
+  injector was refactored onto it (deleted its duplicated private slope/biome helpers; no behavior change).
+- **Phase 2** — **Voxel Surface Sampler** node (`UPCGVoxelSurfaceSamplerSettings` /
+  `FPCGVoxelSurfaceSamplerElement`): steps an XY grid over the sampling bounds, re-samples the generator
+  via `FVoxelSurfaceQuery`, emits PCG points carrying `Normal`/`Slope`/`MaterialID`/`BiomeID` (names match
+  `FScatterDefinition` filters). Resolves the live world's world-mode/config by finding an initialized
+  `UVoxelChunkManager` (mirrors `UVoxelMapSubsystem::ResolveChunkManager`).
+- **Phase 3 (round-trip verified)** — graph `Input → Voxel Surface Sampler (Bounding Shape) → Static Mesh
+  Spawner → Output` on a PCGVolume over the terrain; cubes spawn on the runtime terrain in PIE. **Two
+  follow-ups observed:** (a) the node only executes when it is on the graph's execution path — wire the
+  graph **Input** node into its **Bounding Shape** pin (consider marking that pin required). (b) Points sit
+  at the *analytic* generator height, which differs from the *voxelized* DC/MC surface by up to ~1 voxel
+  (worst on slopes) — plus the cube's center pivot. This is the inherent surface-approximation of the
+  re-sample approach (vs the bespoke scatter reading the exact voxel column). Mitigations: align-to-normal,
+  a surface Z offset, or an optional voxel-cache snap mode for near points.
+
+**Remaining:** Phase 4 — a `bUsePCGScatter` toggle on `UVoxelWorldConfiguration` to gate PCG vs the
+bespoke path (no double-placement), then a parity/perf pass. Deferred: edit-driven PCG regeneration
+(hook `EDIT_LAYER` dirty events) and the partitioned "Generate at Runtime" + generation-source setup.
 
 ### 3. World Partition (finite worlds)
 
