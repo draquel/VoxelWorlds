@@ -55,6 +55,11 @@
 			"LoadingPhase": "PostEngineInit"
 		},
 		{
+			"Name": "VoxelPCG",
+			"Type": "Runtime",
+			"LoadingPhase": "PostEngineInit"
+		},
+		{
 			"Name": "VoxelWorlds",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
@@ -63,6 +68,10 @@
 	"Plugins": [
 		{
 			"Name": "ProceduralMeshComponent",
+			"Enabled": true
+		},
+		{
+			"Name": "PCG",
 			"Enabled": true
 		}
 	]

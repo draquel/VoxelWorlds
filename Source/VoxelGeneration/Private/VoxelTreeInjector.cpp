@@ -5,6 +5,7 @@
 #include "IVoxelWorldMode.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelSurfaceQuery.h"
 
 void FVoxelTreeInjector::InjectTrees(
 	const FIntVector& ChunkCoord,
@@ -199,13 +200,13 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 			continue;
 		}
 
-		// Compute slope at tree position
-		const float SlopeAngle = ComputeSlopeAt(WorldX, WorldY, VoxelSize, WorldMode, NoiseParams);
+		// Compute slope at tree position (shared surface-query utility)
+		const float SlopeAngle = FVoxelSurfaceQuery::ComputeSlopeDegrees(WorldMode, WorldX, WorldY, VoxelSize, NoiseParams);
 
-		// Query surface material and biome
+		// Query surface material and biome (shared surface-query utility)
 		uint8 SurfaceMaterial = 0;
 		uint8 BiomeID = 0;
-		QuerySurfaceConditions(WorldX, WorldY, TerrainHeight, VoxelSize,
+		FVoxelSurfaceQuery::QuerySurfaceConditions(WorldX, WorldY, TerrainHeight, VoxelSize,
 			BiomeConfig, WorldSeed, bEnableWaterLevel, WaterLevel,
 			SurfaceMaterial, BiomeID);
 
@@ -225,104 +226,6 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		OutGlobalVoxelPositions.Add(GlobalVoxelPos);
 		OutTemplateIDs.Add(TemplateIdx);
 		OutSeeds.Add(TreeSeed);
-	}
-}
-
-float FVoxelTreeInjector::ComputeSlopeAt(
-	float WorldX, float WorldY, float VoxelSize,
-	const IVoxelWorldMode& WorldMode,
-	const FVoxelNoiseParams& NoiseParams)
-{
-	// Sample terrain height at 4 neighboring positions to compute gradient
-	const float Step = VoxelSize;
-
-	const float HX0 = WorldMode.GetTerrainHeightAt(WorldX - Step, WorldY, NoiseParams);
-	const float HX1 = WorldMode.GetTerrainHeightAt(WorldX + Step, WorldY, NoiseParams);
-	const float HY0 = WorldMode.GetTerrainHeightAt(WorldX, WorldY - Step, NoiseParams);
-	const float HY1 = WorldMode.GetTerrainHeightAt(WorldX, WorldY + Step, NoiseParams);
-
-	// Central difference gradient
-	const float DX = (HX1 - HX0) / (2.0f * Step);
-	const float DY = (HY1 - HY0) / (2.0f * Step);
-
-	// Slope angle from gradient magnitude
-	const float GradientMag = FMath::Sqrt(DX * DX + DY * DY);
-	return FMath::RadiansToDegrees(FMath::Atan(GradientMag));
-}
-
-void FVoxelTreeInjector::QuerySurfaceConditions(
-	float WorldX, float WorldY, float TerrainHeight, float VoxelSize,
-	const UVoxelBiomeConfiguration* BiomeConfig,
-	int32 WorldSeed,
-	bool bEnableWaterLevel, float WaterLevel,
-	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
-{
-	OutSurfaceMaterial = 0;
-	OutBiomeID = 0;
-
-	if (!BiomeConfig || !BiomeConfig->IsValid())
-	{
-		return;
-	}
-
-	// Sample temperature and moisture noise (same as VoxelCPUNoiseGenerator)
-	FVoxelNoiseParams TempNoiseParams;
-	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	TempNoiseParams.Octaves = 2;
-	TempNoiseParams.Persistence = 0.5f;
-	TempNoiseParams.Lacunarity = 2.0f;
-	TempNoiseParams.Amplitude = 1.0f;
-	TempNoiseParams.Seed = WorldSeed + BiomeConfig->TemperatureSeedOffset;
-	TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
-
-	FVoxelNoiseParams MoistureNoiseParams;
-	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	MoistureNoiseParams.Octaves = 2;
-	MoistureNoiseParams.Persistence = 0.5f;
-	MoistureNoiseParams.Lacunarity = 2.0f;
-	MoistureNoiseParams.Amplitude = 1.0f;
-	MoistureNoiseParams.Seed = WorldSeed + BiomeConfig->MoistureSeedOffset;
-	MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
-
-	// Sample at this world position (Z=0 for 2D biome sampling)
-	const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
-	const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, TempNoiseParams);
-	const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, MoistureNoiseParams);
-
-	// Sample continentalness noise if enabled
-	float Continentalness = 0.0f;
-	if (BiomeConfig->bEnableContinentalness)
-	{
-		FVoxelNoiseParams ContNoiseParams;
-		ContNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-		ContNoiseParams.Octaves = 2;
-		ContNoiseParams.Persistence = 0.5f;
-		ContNoiseParams.Lacunarity = 2.0f;
-		ContNoiseParams.Amplitude = 1.0f;
-		ContNoiseParams.Seed = WorldSeed + BiomeConfig->ContinentalnessSeedOffset;
-		ContNoiseParams.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
-		Continentalness = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ContNoiseParams);
-	}
-
-	// Select biome (now with continentalness for proper tiered gating)
-	FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
-	OutBiomeID = Blend.GetDominantBiome();
-
-	// Get surface material (depth = 0 for surface)
-	const bool bIsUnderwater = bEnableWaterLevel && TerrainHeight < WaterLevel;
-	if (bIsUnderwater)
-	{
-		OutSurfaceMaterial = BiomeConfig->GetBlendedMaterialWithWater(Blend, 0.0f, TerrainHeight, WaterLevel);
-	}
-	else
-	{
-		OutSurfaceMaterial = BiomeConfig->GetBlendedMaterial(Blend, 0.0f);
-	}
-
-	// Apply height material rules (snow on peaks, etc.)
-	if (BiomeConfig->bEnableHeightMaterials)
-	{
-		OutSurfaceMaterial = BiomeConfig->ApplyHeightMaterialRules(OutSurfaceMaterial, TerrainHeight, 0.0f);
 	}
 }
 
