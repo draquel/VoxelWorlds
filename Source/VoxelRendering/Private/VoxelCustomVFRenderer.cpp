@@ -9,6 +9,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
+#include "VT/RuntimeVirtualTexture.h"
 #include "RHICommandList.h"
 #include "RenderingThread.h"
 
@@ -91,6 +92,24 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 	if (CurrentMaterial.IsValid())
 	{
 		WorldComponent->SetMaterial(0, CurrentMaterial.Get());
+	}
+
+	// Assign Runtime Virtual Textures from the configuration BEFORE registration. The scene proxy
+	// is created during RegisterComponent() and its base FPrimitiveSceneProxy ctor populates
+	// RuntimeVirtualTextureMaterialTypes from the component's RuntimeVirtualTextures array, so this
+	// must be set first for the proxy to opt into the RVT pass and emit RVT mesh batches.
+	if (WorldConfig->RuntimeVirtualTextures.Num() > 0)
+	{
+		WorldComponent->RuntimeVirtualTextures.Reset(WorldConfig->RuntimeVirtualTextures.Num());
+		for (const TObjectPtr<URuntimeVirtualTexture>& RVT : WorldConfig->RuntimeVirtualTextures)
+		{
+			if (RVT)
+			{
+				WorldComponent->RuntimeVirtualTextures.Add(RVT);
+			}
+		}
+		UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelCustomVFRenderer: Assigned %d Runtime Virtual Texture(s) to WorldComponent from configuration"),
+			WorldComponent->RuntimeVirtualTextures.Num());
 	}
 
 	// Attach and register (this creates the scene proxy with the material set above)

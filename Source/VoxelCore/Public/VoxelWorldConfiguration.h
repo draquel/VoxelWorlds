@@ -14,6 +14,7 @@ class UMaterialInterface;
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
 class UVoxelScatterConfiguration;
+class URuntimeVirtualTexture;
 
 /**
  * Configuration data asset for a voxel world.
@@ -373,6 +374,22 @@ public:
 	/** LOD level to use for collision (higher = simpler) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "0", ClampMax = "4", EditCondition = "bGenerateCollision"))
 	int32 CollisionLODLevel = 0;
+
+	/**
+	 * Runtime Virtual Textures the terrain writes into.
+	 *
+	 * The UVoxelWorldComponent is created at runtime by the custom-VF renderer; this list is
+	 * copied onto WorldComponent->RuntimeVirtualTextures BEFORE RegisterComponent() so the voxel
+	 * scene proxy (created during registration) opts into the RVT pass and emits a mesh batch per
+	 * RuntimeVirtualTextureMaterialType into these pages. Leave empty to disable RVT writes
+	 * (zero overhead — the emission loop is a no-op when no RVT is assigned).
+	 *
+	 * The same URuntimeVirtualTexture asset(s) are referenced by an ARuntimeVirtualTextureVolume
+	 * (defines the capture region) and sampled back by read-back materials via the
+	 * "Runtime Virtual Texture Sample" node.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering|Runtime Virtual Texture")
+	TArray<TObjectPtr<URuntimeVirtualTexture>> RuntimeVirtualTextures;
 
 	// ==================== Scatter Settings ====================
 
