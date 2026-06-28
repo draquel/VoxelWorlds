@@ -46,6 +46,7 @@ Documentation for the VoxelWorlds plugin (Unreal Engine 5.8), organized by purpo
 - [CODING_STANDARDS.md](Guides/CODING_STANDARDS.md) — project conventions
 - [TESTING_STRATEGY.md](Guides/TESTING_STRATEGY.md) — automation test approach
 - [MASTER_MATERIAL_SETUP.md](Guides/MASTER_MATERIAL_SETUP.md) — M_VoxelMaster setup walkthrough
+- [PCG_BIOME_DECORATION_SETUP.md](Guides/PCG_BIOME_DECORATION_SETUP.md) — how to set up biome-keyed runtime PCG decoration (sampler → biome dispatcher → per-biome subgraphs)
 
 ## Research (historical / process)
 - [ENGINE_INTEGRATION.md](Research/ENGINE_INTEGRATION.md) — which UE 5.8 systems to adopt (RVT, runtime PCG, World Partition) vs. keep hand-built; why Nanite is build-time only; RVT spike plan; Mesh Terrain as secondary bake bridge
