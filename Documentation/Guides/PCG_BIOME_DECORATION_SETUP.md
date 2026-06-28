@@ -28,21 +28,53 @@ gameplay systems (Interaction/Inventory/Item), not raw PCG instances.
 
 ## Steps
 
-### 1. Author a decoration subgraph per biome
+### 1. Author a decoration graph per biome
 
-A decoration subgraph takes points on its **Input** node and spawns/scatters. Minimal form:
+**One graph per biome, not per scatter item.** A biome's graph receives that biome's surface points on its
+**Input** node (already carrying `BiomeID`, `MaterialID`, `Slope`, `Normal` from the Voxel Surface Sampler)
+and contains **all** of that biome's scatter — trees + bushes + rocks + grass for a Forest, etc. Author one
+per biome (`G_ForestDecoration`, `G_DesertDecoration`, …); they can differ arbitrarily — that is the point.
+
+#### What's inside a biome graph: one branch per item
+
+Each scatter item is one **branch off the Input node**: `filter(s) → density → Static Mesh Spawner`. The
+incoming points already have the attributes; you just filter and thin them per item:
 
 ```
-Input  →  Static Mesh Spawner  →  Output
+                 ┌─ Slope filter → Material filter → density → Spawner (Trees)
+Input (points) ──┤
+                 └─ Slope filter →                   density → Spawner (Rocks)
+                                                       … more items …            → Output
 ```
 
-Wire the graph **Input** node's `In` pin to the spawner's `In` pin, and the spawner's `Out` to the
-**Output** node's `Out` pin. (Connecting a Spatial input to a Point input auto-inserts a `To Point`
-node — that's expected.) Configure the spawner's mesh (e.g. a weighted mesh selector). Use the points'
-attributes (`Slope`, `MaterialID`) inside the subgraph for density/filtering as desired.
+#### The three node types
 
-Author one subgraph per biome (e.g. `Forest` → trees/bushes, `Desert` → rocks/cacti). They can differ
-arbitrarily — that is the point of per-biome subgraphs.
+| Job | Node | Key settings |
+|-----|------|--------------|
+| Filter by a numeric attribute (slope, material) | **Filter Attribute Elements by Range** | `Target Attribute` = `Slope` / `MaterialID`; set **Min/Max Threshold** → check **Use Constant Threshold**, pick the type (`Double` for Slope, `Integer32` for MaterialID) and value. Take the **InsideFilter** output. Min==Max gives an exact match. |
+| Keep a % of points (density) | **Random Choice** | uncheck **Fixed Mode**, set **Ratio** (e.g. `0.02` = 2%). Take the **Chosen** output. (Alternative: **Self Pruning** for minimum spacing.) |
+| Place the mesh | **Static Mesh Spawner** | set the mesh (weighted mesh selector → add an entry → Static Mesh). |
+
+#### Worked item — Forest trees (2% on flat grass)
+
+```
+Input → [Filter Slope 0–20] → [Filter MaterialID==grass] → [Random Choice 0.02] → [Spawner: tree] → Output
+```
+
+A ready-made reference graph is at **`/Game/PluginTesting/PCG/G_ForestDecoration`** with exactly this trees
+branch wired and configured (Slope `0–20`, MaterialID `1`, Ratio `0.02`, a placeholder cylinder mesh) and a
+comment box. Open it as a template; set `MaterialID` to your real grass id (`EVoxelMaterial`) and swap the
+cylinder for a tree mesh.
+
+#### Add more items
+
+A second item (rocks) is the **same branch** off `Input` with different settings (e.g. `Slope 25–90`, skip
+the material filter, `Ratio 0.05`, rock mesh). Run several spawners in one graph; route each spawner's `Out`
+to the graph `Output` (the Output pin accepts multiple connections), or `Merge Points` first.
+
+> **Wiring note:** connecting these nodes in the PCG editor connects directly. (Some external graph-editing
+> tools auto-insert small `Filter Data` adapter nodes between union-typed pins — harmless and deletable; you
+> won't get them when you drag-connect by hand.)
 
 ### 2. Create the biome → graph mapping
 
