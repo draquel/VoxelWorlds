@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelData.h"
 
 struct FVoxelNoiseParams;
 class IVoxelWorldMode;
@@ -97,4 +98,22 @@ public:
 		const UVoxelBiomeConfiguration* BiomeConfig,
 		int32 WorldSeed,
 		bool bEnableWaterLevel, float WaterLevel);
+
+	/**
+	 * Find the topmost terrain surface in a vertical voxel column (index 0 = lowest Z, ascending).
+	 *
+	 * This is the near-band, EDIT-AWARE path: the caller assembles a column of edit-merged voxels
+	 * (so digging/building is honored) and this finds the exact surface. Scans from the top for the
+	 * highest solid voxel with air directly above, interpolates the density crossing at
+	 * VOXEL_SURFACE_THRESHOLD, and reads the surface voxel's material/biome. Pure and deterministic.
+	 *
+	 * @param ColumnLowToHigh Voxels ordered from lowest to highest world Z
+	 * @param BaseZ           World Z of ColumnLowToHigh[0]
+	 * @param VoxelSize       World units per voxel (column step)
+	 * @return false if the column has no air-over-solid transition (caller falls back to the generator)
+	 */
+	static bool ExtractSurfaceFromColumn(
+		const TArray<FVoxelData>& ColumnLowToHigh,
+		float BaseZ, float VoxelSize,
+		float& OutHeight, uint8& OutMaterialID, uint8& OutBiomeID);
 };

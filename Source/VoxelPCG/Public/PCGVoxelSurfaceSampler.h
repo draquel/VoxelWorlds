@@ -48,6 +48,14 @@ public:
 	bool bAlignToSurfaceNormal = false;
 
 	/**
+	 * Near loaded chunks, sample the EDIT-MERGED voxel surface (honors player digging/building and hugs
+	 * the actual voxelized surface); beyond loaded chunks, fall back to the procedural generator. Disable
+	 * to always use the generator (edit-blind, analytic height).
+	 */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = Settings, meta = (PCG_Overridable))
+	bool bEditAwareNearby = true;
+
+	/**
 	 * If no Bounding Shape input is provided, the executing actor's bounds limit the sample
 	 * domain. Enable this to ignore actor bounds — requires a Bounding Shape input, otherwise
 	 * nothing is generated (guards against sampling an unbounded world).

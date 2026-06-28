@@ -164,3 +164,41 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurface(
 
 	return Sample;
 }
+
+bool FVoxelSurfaceQuery::ExtractSurfaceFromColumn(
+	const TArray<FVoxelData>& ColumnLowToHigh,
+	float BaseZ, float VoxelSize,
+	float& OutHeight, uint8& OutMaterialID, uint8& OutBiomeID)
+{
+	const int32 Num = ColumnLowToHigh.Num();
+	if (Num < 2)
+	{
+		return false;
+	}
+
+	// Scan top-down for the highest solid voxel that has air directly above it (= the top surface).
+	for (int32 i = Num - 2; i >= 0; --i)
+	{
+		const FVoxelData& Cur = ColumnLowToHigh[i];
+		const FVoxelData& Above = ColumnLowToHigh[i + 1];
+		if (Cur.IsSolid() && Above.IsAir())
+		{
+			// Density crosses the surface threshold between voxel i (>=threshold) and i+1 (<threshold).
+			const float D0 = static_cast<float>(Cur.Density);
+			const float D1 = static_cast<float>(Above.Density);
+			const float Denom = D1 - D0;
+			float T = 0.5f;
+			if (FMath::Abs(Denom) > KINDA_SMALL_NUMBER)
+			{
+				T = FMath::Clamp((static_cast<float>(VOXEL_SURFACE_THRESHOLD) - D0) / Denom, 0.0f, 1.0f);
+			}
+
+			OutHeight = BaseZ + (static_cast<float>(i) + T) * VoxelSize;
+			OutMaterialID = Cur.MaterialID;
+			OutBiomeID = Cur.BiomeID;
+			return true;
+		}
+	}
+
+	return false;
+}

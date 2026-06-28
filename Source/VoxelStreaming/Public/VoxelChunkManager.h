@@ -284,6 +284,33 @@ public:
 	 */
 	FVoxelData GetVoxelAtWorldPosition(const FVector& WorldPosition) const;
 
+	/**
+	 * Like GetVoxelAtWorldPosition, but applies the chunk's edit layer so the result reflects
+	 * runtime player edits (dig/build). Returns Air for unloaded/ungenerated chunks. Game thread only.
+	 */
+	FVoxelData GetEditMergedVoxelAtWorldPosition(const FVector& WorldPosition) const;
+
+	/**
+	 * EDIT-AWARE surface query at a world X,Y (the near band for PCG decoration).
+	 *
+	 * Locates the surface from edit-merged voxel data of loaded chunks, so it reflects player
+	 * digging/building and hugs the actual voxelized surface (not the analytic generator height).
+	 * Returns false when no loaded chunk covers the surface there, so the caller can fall back to the
+	 * generator (FVoxelSurfaceQuery::SampleSurface) for the far band. Game thread only.
+	 *
+	 * @param WorldX,WorldY     Sample position (world space)
+	 * @param OutHeight         World Z of the surface
+	 * @param OutNormal         Surface normal (from the edit-merged density gradient; up-facing)
+	 * @param OutSlopeDegrees   Slope angle (0 = flat)
+	 * @param OutMaterialID     Surface material from the edit-merged voxel
+	 * @param OutBiomeID        Biome from the edit-merged voxel
+	 * @return true if a loaded edit-merged surface was found
+	 */
+	bool QueryEditMergedSurface(
+		double WorldX, double WorldY,
+		float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
+		uint8& OutMaterialID, uint8& OutBiomeID) const;
+
 	// ==================== Configuration Access ====================
 
 	/**

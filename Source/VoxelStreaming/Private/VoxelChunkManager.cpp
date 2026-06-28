@@ -10,6 +10,8 @@
 #include "VoxelCoordinates.h"
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
+#include "IVoxelWorldMode.h"
+#include "VoxelSurfaceQuery.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelCPUMarchingCubesMesher.h"
@@ -947,6 +949,119 @@ FVoxelData UVoxelChunkManager::GetVoxelAtWorldPosition(const FVector& WorldPosit
 		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
 
 	return State->Descriptor.GetVoxel(LocalPos);
+}
+
+FVoxelData UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition(const FVector& WorldPosition) const
+{
+	if (!bIsInitialized || !Configuration)
+	{
+		return FVoxelData::Air();
+	}
+
+	const FVector RelativePos = WorldPosition - Configuration->WorldOrigin;
+	const FIntVector ChunkCoord = FVoxelCoordinates::WorldToChunk(
+		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
+
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State || !State->Descriptor.HasVoxelData())
+	{
+		return FVoxelData::Air();
+	}
+
+	const FIntVector LocalPos = FVoxelCoordinates::WorldToLocalVoxel(
+		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
+
+	FVoxelData Voxel = State->Descriptor.GetVoxel(LocalPos);
+
+	// Apply the chunk's edit layer (same index convention as the descriptor / collision merge).
+	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	{
+		const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(ChunkCoord);
+		if (EditLayer && !EditLayer->IsEmpty())
+		{
+			const int32 Index = State->Descriptor.GetVoxelIndex(LocalPos);
+			if (const FVoxelEdit* Edit = EditLayer->Edits.Find(Index))
+			{
+				Voxel = Edit->ApplyToProceduralData(Voxel);
+			}
+		}
+	}
+
+	return Voxel;
+}
+
+bool UVoxelChunkManager::QueryEditMergedSurface(
+	double WorldX, double WorldY,
+	float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
+	uint8& OutMaterialID, uint8& OutBiomeID) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !Configuration || !WM)
+	{
+		return false;
+	}
+
+	const float VoxelSize = Configuration->VoxelSize;
+	const int32 ChunkSize = Configuration->ChunkSize;
+	if (VoxelSize <= 0.0f || ChunkSize <= 0)
+	{
+		return false;
+	}
+
+	// Estimate the surface Z from the generator, used only to locate the column window + the
+	// near/far decision (whether the surface's chunk is loaded).
+	const float EstZ = WM->GetTerrainHeightAt(static_cast<float>(WorldX), static_cast<float>(WorldY), Configuration->NoiseParams);
+
+	const FVector RelEst = FVector(WorldX, WorldY, EstZ) - Configuration->WorldOrigin;
+	const FIntVector EstChunk = FVoxelCoordinates::WorldToChunk(RelEst, ChunkSize, VoxelSize);
+	if (!IsChunkLoaded(EstChunk))
+	{
+		return false; // far band — caller falls back to the generator
+	}
+
+	// Assemble a vertical merged-voxel column over a +/- one-chunk window around the estimate
+	// (covers dig-down / build-up that shifts the surface off the analytic height).
+	const int32 Window = ChunkSize;
+	const float BaseZ = EstZ - Window * VoxelSize;
+	const int32 Count = 2 * Window + 1;
+
+	TArray<FVoxelData> Column;
+	Column.SetNumUninitialized(Count);
+	for (int32 i = 0; i < Count; ++i)
+	{
+		const float Z = BaseZ + i * VoxelSize;
+		Column[i] = GetEditMergedVoxelAtWorldPosition(FVector(WorldX, WorldY, Z));
+	}
+
+	if (!FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, VoxelSize, OutHeight, OutMaterialID, OutBiomeID))
+	{
+		return false;
+	}
+
+	// Surface normal from the edit-merged density gradient (central differences at the surface).
+	auto Density = [this](double X, double Y, double Z) -> float
+	{
+		return static_cast<float>(GetEditMergedVoxelAtWorldPosition(FVector(X, Y, Z)).Density);
+	};
+	const float Step = VoxelSize;
+	const float Hz = OutHeight;
+	const float dX = Density(WorldX + Step, WorldY, Hz) - Density(WorldX - Step, WorldY, Hz);
+	const float dY = Density(WorldX, WorldY + Step, Hz) - Density(WorldX, WorldY - Step, Hz);
+	const float dZ = Density(WorldX, WorldY, Hz + Step) - Density(WorldX, WorldY, Hz - Step);
+
+	// Density increases into the solid; the outward surface normal is the negated gradient.
+	OutNormal = FVector(-dX, -dY, -dZ).GetSafeNormal();
+	if (OutNormal.IsNearlyZero())
+	{
+		OutNormal = FVector::UpVector;
+	}
+	else if (OutNormal.Z < 0.0f)
+	{
+		OutNormal = -OutNormal; // keep it up-facing for a top surface
+	}
+
+	OutSlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(OutNormal.Z), -1.0f, 1.0f)));
+	return true;
 }
 
 // ==================== Debug ====================

@@ -62,6 +62,41 @@ bool FVoxelSurfaceQueryConsistencyTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSurfaceQueryColumnTest, "VoxelWorlds.Generation.SurfaceQuery.ExtractColumn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSurfaceQueryColumnTest::RunTest(const FString& Parameters)
+{
+	const float BaseZ = 0.0f;
+	const float VoxelSize = 100.0f;
+
+	// Column (low -> high): solid, solid, solid(d=200), air, air.
+	// Surface is between index 2 (d=200) and index 3 (d=0): t = (127-200)/(0-200) = 0.365.
+	TArray<FVoxelData> Column;
+	Column.Add(FVoxelData(/*Mat*/ 5, /*Density*/ 255, /*Biome*/ 3));
+	Column.Add(FVoxelData(5, 255, 3));
+	Column.Add(FVoxelData(5, 200, 3));
+	Column.Add(FVoxelData::Air());
+	Column.Add(FVoxelData::Air());
+
+	float Height = 0.0f; uint8 Mat = 0; uint8 Biome = 0;
+	const bool bFound = FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, VoxelSize, Height, Mat, Biome);
+	TestTrue(TEXT("Surface found in column"), bFound);
+	TestTrue(TEXT("Interpolated height ~236.5"), FMath::IsNearlyEqual(Height, 236.5f, 0.5f));
+	TestEqual(TEXT("Surface material from solid voxel"), (int32)Mat, 5);
+	TestEqual(TEXT("Surface biome from solid voxel"), (int32)Biome, 3);
+
+	// All air -> no surface.
+	TArray<FVoxelData> AllAir; AllAir.Init(FVoxelData::Air(), 5);
+	TestFalse(TEXT("All-air column has no surface"), FVoxelSurfaceQuery::ExtractSurfaceFromColumn(AllAir, BaseZ, VoxelSize, Height, Mat, Biome));
+
+	// All solid -> no air-over-solid transition -> no surface (surface is above this column).
+	TArray<FVoxelData> AllSolid; AllSolid.Init(FVoxelData::Solid(5), 5);
+	TestFalse(TEXT("All-solid column has no surface"), FVoxelSurfaceQuery::ExtractSurfaceFromColumn(AllSolid, BaseZ, VoxelSize, Height, Mat, Biome));
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSurfaceQueryFlatTerrainTest, "VoxelWorlds.Generation.SurfaceQuery.FlatTerrain",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

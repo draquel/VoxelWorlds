@@ -37,6 +37,8 @@ namespace
 		float VoxelSize = 100.0f;
 		bool bWaterEnabled = false;
 		float WaterLevel = 0.0f;
+		// Live chunk manager for the edit-aware near band (edit-merged voxel surface query).
+		const UVoxelChunkManager* ChunkManager = nullptr;
 		bool bValid = false;
 	};
 
@@ -83,6 +85,7 @@ namespace
 		Out.bWaterEnabled = Config->bEnableWaterLevel;
 		Out.WaterLevel = Config->WaterLevel;
 		Out.BiomeConfig = Config->bEnableBiomes ? Config->BiomeConfiguration : nullptr;
+		Out.ChunkManager = ChunkMgr;
 		Out.bValid = true;
 		return Out;
 	}
@@ -100,11 +103,17 @@ FText UPCGVoxelSurfaceSamplerSettings::GetNodeTooltipText() const
 TArray<FPCGPinProperties> UPCGVoxelSurfaceSamplerSettings::InputPinProperties() const
 {
 	TArray<FPCGPinProperties> PinProperties;
-	PinProperties.Emplace(PCGVoxelSurfaceSamplerConstants::BoundingShapeLabel, EPCGDataType::Spatial,
+	// Required: PCG only schedules this generator when it is on the graph's execution path. Wire the
+	// graph Input node (or a bounding shape) here. The shape also supplies the sampling XY footprint;
+	// when it resolves to the executing actor's bounds, that is the grid cell for a runtime partition.
+	FPCGPinProperties& BoundingShapePin = PinProperties.Emplace_GetRef(
+		PCGVoxelSurfaceSamplerConstants::BoundingShapeLabel, EPCGDataType::Spatial,
 		/*bAllowMultipleConnections=*/false, /*bAllowMultipleData=*/false,
 		LOCTEXT("BoundingShapeTooltip",
-			"Optional. Limits sampling to this shape's XY footprint. If omitted (and Unbounded is off), "
-			"the executing actor's bounds are used (for a runtime PCG partition, that is the grid cell)."));
+			"Required. Wire the graph Input node (or a bounding shape) here so the node executes. "
+			"Supplies the sampling XY footprint; resolves to the executing actor's bounds (the grid "
+			"cell for a runtime PCG partition)."));
+	BoundingShapePin.SetRequiredPin();
 	return PinProperties;
 }
 
@@ -210,12 +219,37 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		{
 			const double WorldY = static_cast<double>(IY) * Spacing;
 
-			const FVoxelSurfaceSample Sample = FVoxelSurfaceQuery::SampleSurface(
-				*VoxelCtx.WorldMode,
-				static_cast<float>(WorldX), static_cast<float>(WorldY),
-				VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-				VoxelCtx.BiomeConfig, VoxelCtx.WorldSeed,
-				VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel);
+			// Hybrid surface source: edit-merged voxel data near loaded chunks (edit-aware + exact
+			// surface), the procedural generator beyond them (stream-independent reach).
+			FVoxelSurfaceSample Sample;
+			bool bGotNearBand = false;
+			if (Settings->bEditAwareNearby && VoxelCtx.ChunkManager)
+			{
+				float NearHeight = 0.0f;
+				FVector NearNormal = FVector::UpVector;
+				float NearSlope = 0.0f;
+				uint8 NearMaterial = 0;
+				uint8 NearBiome = 0;
+				if (VoxelCtx.ChunkManager->QueryEditMergedSurface(WorldX, WorldY, NearHeight, NearNormal, NearSlope, NearMaterial, NearBiome))
+				{
+					Sample.Height = NearHeight;
+					Sample.Normal = NearNormal;
+					Sample.SlopeDegrees = NearSlope;
+					Sample.MaterialID = NearMaterial;
+					Sample.BiomeID = NearBiome;
+					bGotNearBand = true;
+				}
+			}
+
+			if (!bGotNearBand)
+			{
+				Sample = FVoxelSurfaceQuery::SampleSurface(
+					*VoxelCtx.WorldMode,
+					static_cast<float>(WorldX), static_cast<float>(WorldY),
+					VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
+					VoxelCtx.BiomeConfig, VoxelCtx.WorldSeed,
+					VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel);
+			}
 
 			const FVector Position(WorldX, WorldY, static_cast<double>(Sample.Height));
 			const FQuat Rotation = Settings->bAlignToSurfaceNormal
