@@ -181,7 +181,7 @@ emerges from this model — not a global switch. Revised order:
 | Phase | Work | Notes |
 |-------|------|-------|
 | **3 — done** | Basic round-trip: sampler → static-mesh spawner → output; meshes on runtime terrain in PIE | Committed |
-| **4 (revised) — Edit-aware hybrid sampler** | Add the near-band (read edit-merged voxel data from loaded chunks) + far-band fallback to the generator; mark the Bounding Shape pin required | The load-bearing spine; **also fixes the Z-hugging** observed in Phase 3 |
+| **4 (revised) — Edit-aware hybrid sampler — DONE** | Near band reads edit-merged voxel data (`UVoxelChunkManager::QueryEditMergedSurface` + `FVoxelSurfaceQuery::ExtractSurfaceFromColumn`); far band falls back to the generator; Bounding Shape pin now required | The load-bearing spine; **fixed the Z-hugging** — PIE cubes now follow the terraced voxel surface, confirming the near band reads voxel data. Committed `ca90fd7`/`fead0f5` |
 | **5 — Per-biome routing** | Attribute-partition by `BiomeID` → per-biome subgraphs; `DecorationGraph` mapping on `FBiomeDefinition`; priority-stack scaffolding | Thin router; mine Biome Core patterns |
 | **6 — Claims-driven exclusion** | Consume tagged footprint data by tag for exclusion/priority; POI decoration policy enum; (claims *system* itself is game-level, tracked separately) | Boundary-safe via tags, no code coupling |
 | **7 — Edit/claim reactivity** | Hook `EDIT_LAYER` dirty + claim changes → throttled PCG cell regen | Debounced |
