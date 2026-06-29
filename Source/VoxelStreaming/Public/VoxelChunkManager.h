@@ -10,6 +10,7 @@
 #include "ChunkRenderData.h"
 #include "LODTypes.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IVoxelMesher.h"
 #include "VoxelMeshingTypes.h"
@@ -284,6 +285,33 @@ public:
 	 */
 	FVoxelData GetVoxelAtWorldPosition(const FVector& WorldPosition) const;
 
+	/**
+	 * Like GetVoxelAtWorldPosition, but applies the chunk's edit layer so the result reflects
+	 * runtime player edits (dig/build). Returns Air for unloaded/ungenerated chunks. Game thread only.
+	 */
+	FVoxelData GetEditMergedVoxelAtWorldPosition(const FVector& WorldPosition) const;
+
+	/**
+	 * EDIT-AWARE surface query at a world X,Y (the near band for PCG decoration).
+	 *
+	 * Locates the surface from edit-merged voxel data of loaded chunks, so it reflects player
+	 * digging/building and hugs the actual voxelized surface (not the analytic generator height).
+	 * Returns false when no loaded chunk covers the surface there, so the caller can fall back to the
+	 * generator (FVoxelSurfaceQuery::SampleSurface) for the far band. Game thread only.
+	 *
+	 * @param WorldX,WorldY     Sample position (world space)
+	 * @param OutHeight         World Z of the surface
+	 * @param OutNormal         Surface normal (from the edit-merged density gradient; up-facing)
+	 * @param OutSlopeDegrees   Slope angle (0 = flat)
+	 * @param OutMaterialID     Surface material from the edit-merged voxel
+	 * @param OutBiomeID        Biome from the edit-merged voxel
+	 * @return true if a loaded edit-merged surface was found
+	 */
+	bool QueryEditMergedSurface(
+		double WorldX, double WorldY,
+		float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
+		uint8& OutMaterialID, uint8& OutBiomeID) const;
+
 	// ==================== Configuration Access ====================
 
 	/**
@@ -327,6 +355,30 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	UVoxelScatterManager* GetScatterManager() const { return ScatterManager; }
+
+	// ==================== Terrain Conditioning (Phase 6c) ====================
+
+	/**
+	 * Add a gen-time terrain conditioning zone (flattens terrain toward a target under POIs/claims).
+	 * Affects chunks generated AFTER this call. For deterministic POIs, register conditioning at world
+	 * init so chunks generate already-conditioned. Re-conditioning already-loaded chunks is Phase 7.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
+	void AddConditioningZone(const FVoxelConditioningZone& Zone);
+
+	/** Remove all static conditioning zones. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
+	void ClearConditioningZones();
+
+	/** Number of registered static conditioning zones. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
+	int32 GetConditioningZoneCount() const { return ConditioningZones.Num(); }
+
+	/**
+	 * Register a dynamic terrain conditioner (game-side, boundary-safe — e.g. supplying zones from POI
+	 * claims). Queried per chunk at generation-request build time. Not owned; caller manages lifetime.
+	 */
+	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner) { TerrainConditioner = InConditioner; }
 
 	// ==================== Collision Mesh Generation ====================
 
@@ -834,6 +886,15 @@ protected:
 
 	/** World mode for terrain generation (Infinite Plane) */
 	TUniquePtr<FInfinitePlaneWorldMode> WorldMode;
+
+	/** Static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c). */
+	TArray<FVoxelConditioningZone> ConditioningZones;
+
+	/** Optional game-supplied dynamic conditioner queried per chunk (not owned). */
+	IVoxelTerrainConditioner* TerrainConditioner = nullptr;
+
+	/** Collect conditioning zones overlapping a chunk's XY footprint into OutZones (game thread). */
+	void GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const;
 
 	/** CPU mesher for generating mesh geometry (polymorphic - can be cubic or smooth) */
 	TUniquePtr<IVoxelMesher> Mesher;

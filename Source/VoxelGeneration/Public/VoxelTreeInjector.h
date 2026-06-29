@@ -112,25 +112,7 @@ private:
 	/** LCG random integer in [Min, Max] */
 	static int32 RandomIntFromSeed(uint32& Seed, int32 Min, int32 Max);
 
-	/**
-	 * Compute terrain slope angle at a world position by sampling neighboring heights.
-	 * @return Slope angle in degrees (0 = flat, 90 = vertical)
-	 */
-	static float ComputeSlopeAt(
-		float WorldX, float WorldY, float VoxelSize,
-		const IVoxelWorldMode& WorldMode,
-		const FVoxelNoiseParams& NoiseParams);
-
-	/**
-	 * Query surface material and biome at a world position.
-	 * Uses biome noise sampling (temperature/moisture → biome selection → surface material).
-	 * @param OutSurfaceMaterial The surface material ID at this position
-	 * @param OutBiomeID The biome ID at this position
-	 */
-	static void QuerySurfaceConditions(
-		float WorldX, float WorldY, float TerrainHeight, float VoxelSize,
-		const UVoxelBiomeConfiguration* BiomeConfig,
-		int32 WorldSeed,
-		bool bEnableWaterLevel, float WaterLevel,
-		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
+	// Surface slope and biome/material queries are provided by the shared
+	// FVoxelSurfaceQuery utility (VoxelGeneration/Public/VoxelSurfaceQuery.h),
+	// reused by both this injector and the VoxelPCG surface sampler.
 };

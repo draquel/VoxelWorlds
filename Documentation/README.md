@@ -46,8 +46,11 @@ Documentation for the VoxelWorlds plugin (Unreal Engine 5.8), organized by purpo
 - [CODING_STANDARDS.md](Guides/CODING_STANDARDS.md) — project conventions
 - [TESTING_STRATEGY.md](Guides/TESTING_STRATEGY.md) — automation test approach
 - [MASTER_MATERIAL_SETUP.md](Guides/MASTER_MATERIAL_SETUP.md) — M_VoxelMaster setup walkthrough
+- [PCG_BIOME_DECORATION_SETUP.md](Guides/PCG_BIOME_DECORATION_SETUP.md) — how to set up biome-keyed runtime PCG decoration (sampler → biome dispatcher → per-biome subgraphs)
 
 ## Research (historical / process)
+- [ENGINE_INTEGRATION.md](Research/ENGINE_INTEGRATION.md) — which UE 5.8 systems to adopt (RVT, runtime PCG, World Partition) vs. keep hand-built; why Nanite is build-time only; RVT spike plan; Mesh Terrain as secondary bake bridge
+- [PCG_DECORATION_ARCHITECTURE.md](Research/PCG_DECORATION_ARCHITECTURE.md) — PCG runtime decoration design: biome-keyed per-biome subgraphs, edit-aware hybrid sampler, POI/construction priority stack, standalone Claims/World-Annotation system; revised phase plan
 - [IMPLEMENTATION_PHASES.md](Research/IMPLEMENTATION_PHASES.md) — development roadmap / phase log
 - [LOD_SEAM_INVESTIGATION.md](Research/LOD_SEAM_INVESTIGATION.md) — LOD seam root-cause investigation
 - [GEOMORPH_IMPLEMENTATION_PLAN.md](Research/GEOMORPH_IMPLEMENTATION_PLAN.md) — geomorph seam plan (✅ implemented)

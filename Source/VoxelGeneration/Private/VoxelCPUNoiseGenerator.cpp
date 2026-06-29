@@ -2,6 +2,7 @@
 
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelGeneration.h"
+#include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
@@ -275,6 +276,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				// Get terrain height from noise (using potentially modulated params)
 				float TerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
 					NoiseValue, EffectiveParams);
+
+				// Phase 6c: blend the natural height toward any terrain conditioning zones
+				// (flatten under POIs / claims). Deterministic — the base terrain IS flat here.
+				if (Request.ConditioningZones.Num() > 0)
+				{
+					TerrainHeight = FVoxelTerrainConditioning::ApplyToHeight(
+						WorldPos.X, WorldPos.Y, TerrainHeight, Request.ConditioningZones);
+				}
 
 				// Calculate signed distance to surface
 				float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(
@@ -937,6 +946,21 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 				// Get terrain height for material assignment (includes island falloff)
 				float TerrainHeight = WorldMode.GetTerrainHeightAt(WorldPos.X, WorldPos.Y, Request.NoiseParams);
 
+				// Phase 6c: terrain conditioning (heightmap modes). Blend the island surface toward any
+				// conditioning zones and recompute density/SDF where it changes; outside zones the island's
+				// own GetDensityAt result is left untouched.
+				if (Request.ConditioningZones.Num() > 0)
+				{
+					const float Conditioned = FVoxelTerrainConditioning::ApplyToHeight(
+						WorldPos.X, WorldPos.Y, TerrainHeight, Request.ConditioningZones);
+					if (Conditioned != TerrainHeight)
+					{
+						TerrainHeight = Conditioned;
+						SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(WorldPos.Z, TerrainHeight);
+						Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
+					}
+				}
+
 				// Calculate depth below surface for material assignment
 				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / VoxelSize;
 
@@ -1397,6 +1421,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 				// Get density from spherical planet world mode
 				float SignedDistance = WorldMode.GetDensityAt(WorldPos, Request.LODLevel, NoiseValue);
+
+				// NOTE: terrain conditioning (Request.ConditioningZones) is intentionally NOT applied here.
+				// The zone model is heightmap (XY footprint + target Z height); a planet's surface is radial
+				// (a target RADIUS per direction), so flattening needs a separate radial-zone model. Deferred.
 
 				// Convert signed distance to density
 				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
