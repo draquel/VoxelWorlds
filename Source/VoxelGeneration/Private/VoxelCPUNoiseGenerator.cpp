@@ -2,6 +2,7 @@
 
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelGeneration.h"
+#include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
@@ -275,6 +276,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				// Get terrain height from noise (using potentially modulated params)
 				float TerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
 					NoiseValue, EffectiveParams);
+
+				// Phase 6c: blend the natural height toward any terrain conditioning zones
+				// (flatten under POIs / claims). Deterministic — the base terrain IS flat here.
+				if (Request.ConditioningZones.Num() > 0)
+				{
+					TerrainHeight = FVoxelTerrainConditioning::ApplyToHeight(
+						WorldPos.X, WorldPos.Y, TerrainHeight, Request.ConditioningZones);
+				}
 
 				// Calculate signed distance to surface
 				float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(

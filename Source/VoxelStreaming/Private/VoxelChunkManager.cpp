@@ -1535,10 +1535,56 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		GenRequest.WaterLevel = Configuration->WaterLevel;
 		GenRequest.WaterRadius = Configuration->WaterRadius;
 
+		// Terrain conditioning zones overlapping this chunk (Phase 6c: flatten under POIs/claims)
+		GatherConditioningZonesForChunk(Request.ChunkCoord, GenRequest.ConditioningZones);
+
 		// Launch async generation on thread pool
 		LaunchAsyncGeneration(Request, MoveTemp(GenRequest));
 
 		++ProcessedCount;
+	}
+}
+
+void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
+{
+	ConditioningZones.Add(Zone);
+	UE_LOG(LogVoxelStreaming, Log,
+		TEXT("Added terrain conditioning zone at (%.0f,%.0f) inner=%.0f falloff=%.0f target=%.0f strength=%.2f; %d total."),
+		Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningZones.Num());
+}
+
+void UVoxelChunkManager::ClearConditioningZones()
+{
+	ConditioningZones.Reset();
+}
+
+void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const
+{
+	if ((ConditioningZones.Num() == 0 && TerrainConditioner == nullptr) || !Configuration)
+	{
+		return;
+	}
+
+	// Chunk XY footprint in world space (chunks cover the same area at every LOD).
+	const float ChunkWorldSize = Configuration->ChunkSize * Configuration->VoxelSize;
+	const FVector ChunkOrigin = Configuration->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
+	const FBox2D ChunkRegion(
+		FVector2D(ChunkOrigin.X, ChunkOrigin.Y),
+		FVector2D(ChunkOrigin.X + ChunkWorldSize, ChunkOrigin.Y + ChunkWorldSize));
+
+	// Static zones whose influence overlaps the chunk footprint.
+	for (const FVoxelConditioningZone& Zone : ConditioningZones)
+	{
+		if (Zone.GetBounds2D().Intersect(ChunkRegion))
+		{
+			OutZones.Add(Zone);
+		}
+	}
+
+	// Dynamic (game-supplied) zones for this region.
+	if (TerrainConditioner)
+	{
+		TerrainConditioner->GatherConditioning(ChunkRegion, OutZones);
 	}
 }
 

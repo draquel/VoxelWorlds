@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelTerrainConditioning.h"
 #include "VoxelNoiseTypes.generated.h"
 
 class UVoxelBiomeConfiguration;
@@ -210,6 +211,16 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 
 	/** Water radius for SphericalPlanet mode (world units from planet center) */
 	float WaterRadius = 0.0f;
+
+	// ==================== Terrain Conditioning (Phase 6c) ====================
+
+	/**
+	 * Terrain conditioning zones overlapping this chunk — gen-time height flattening under POIs /
+	 * claims. Gathered (game thread) by VoxelChunkManager when the request is built; applied by the
+	 * heightmap generator. Empty for most chunks (no per-chunk cost when there's no conditioning).
+	 */
+	UPROPERTY()
+	TArray<FVoxelConditioningZone> ConditioningZones;
 
 	FVoxelNoiseGenerationRequest() = default;
 

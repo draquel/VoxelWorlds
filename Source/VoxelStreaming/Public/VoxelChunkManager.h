@@ -10,6 +10,7 @@
 #include "ChunkRenderData.h"
 #include "LODTypes.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IVoxelMesher.h"
 #include "VoxelMeshingTypes.h"
@@ -354,6 +355,30 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	UVoxelScatterManager* GetScatterManager() const { return ScatterManager; }
+
+	// ==================== Terrain Conditioning (Phase 6c) ====================
+
+	/**
+	 * Add a gen-time terrain conditioning zone (flattens terrain toward a target under POIs/claims).
+	 * Affects chunks generated AFTER this call. For deterministic POIs, register conditioning at world
+	 * init so chunks generate already-conditioned. Re-conditioning already-loaded chunks is Phase 7.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
+	void AddConditioningZone(const FVoxelConditioningZone& Zone);
+
+	/** Remove all static conditioning zones. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
+	void ClearConditioningZones();
+
+	/** Number of registered static conditioning zones. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
+	int32 GetConditioningZoneCount() const { return ConditioningZones.Num(); }
+
+	/**
+	 * Register a dynamic terrain conditioner (game-side, boundary-safe — e.g. supplying zones from POI
+	 * claims). Queried per chunk at generation-request build time. Not owned; caller manages lifetime.
+	 */
+	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner) { TerrainConditioner = InConditioner; }
 
 	// ==================== Collision Mesh Generation ====================
 
@@ -861,6 +886,15 @@ protected:
 
 	/** World mode for terrain generation (Infinite Plane) */
 	TUniquePtr<FInfinitePlaneWorldMode> WorldMode;
+
+	/** Static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c). */
+	TArray<FVoxelConditioningZone> ConditioningZones;
+
+	/** Optional game-supplied dynamic conditioner queried per chunk (not owned). */
+	IVoxelTerrainConditioner* TerrainConditioner = nullptr;
+
+	/** Collect conditioning zones overlapping a chunk's XY footprint into OutZones (game thread). */
+	void GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const;
 
 	/** CPU mesher for generating mesh geometry (polymorphic - can be cubic or smooth) */
 	TUniquePtr<IVoxelMesher> Mesher;
