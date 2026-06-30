@@ -13,7 +13,7 @@
 | **Nanite** | ❌ Cannot use (runtime path) | Nanite geometry is **build/cook-time only**. It cannot be constructed from meshes generated at runtime in a packaged game. Our primary goal is runtime procedural generation, which structurally excludes Nanite. |
 | **Runtime Virtual Textures (RVT)** | ✅ Adopt (first) | Offloads material/texture blending into a cached pass; biggest near-term rendering win. Works with our existing `FVoxelSceneProxy` once it emits RVT mesh batches. |
 | **PCG (runtime generation)** | ✅ Adopt | "Generate at Runtime" PCG can place scatter/foliage/props on terrain at runtime. Candidate to replace parts of `SCATTER_SYSTEM`. |
-| **World Partition** | ✅ Adopt (finite worlds) | Hand off finite-world streaming to a maintained engine system. |
+| **World Partition** | ✅ Adopt the coexistence pattern (finite worlds; **actor layer only**) | WP streams finite-world **actors** (POI/prop/gameplay), **not** the terrain — terrain is a custom proxy on one always-loaded actor, which WP can't and needn't stream. Coexistence live-verified (voxel actor non-spatial; WP streams placed actors around it without disrupting `VoxelChunkManager`). |
 | **Mesh Terrain** | ⚠️ Secondary only | Editor authoring tool (preview/compiled-section split, modifier stack). Useful only as an offline bake/finishing canvas for hand-crafted projects — not a runtime terrain engine. |
 | **DynamicMeshComponent / GeometryScript** | ❌ Avoid | Dynamic draw path, no instancing, unoptimized buffers — strictly worse than our `FLocalVertexFactory` proxy for runtime-generated geometry. |
 
@@ -152,13 +152,75 @@ systems is boundary-safe (tagged PCG-readable data, no code dependency).
 reactivity, and finally a per-category coexistence/parity pass (which replaces the global `bUsePCGScatter`
 idea). Full phase table in the design doc §9.
 
-### 3. World Partition (finite worlds)
+### 3. World Partition (finite worlds) — Phase 0 investigation + coexistence spike (2026-06-29)
 
-**Goal:** Use World Partition for finite-world spatial streaming instead of maintaining that concern ourselves where our streaming overlaps it.
+**The reframe that matters most.** World Partition is an **actor**-streaming + Data-Layer + HLOD system for
+**finite** worlds. It does **not** stream the voxel terrain — that is our custom `FVoxelSceneProxy` fed by the
+bespoke `VoxelChunkManager`. So "WP integration" is *not* "stream the terrain with WP"; it is: **should WP own
+the streaming of the game-level actors around the terrain (POI/claim volumes, future POI placed-actor clusters,
+PCG-spawned decoration, props, gameplay actors) in finite worlds, and how does a WP-enabled map coexist with the
+single voxel-world actor + the bespoke chunk streaming without the two fighting?**
 
-**Integration notes:**
-- Our runtime chunk streaming (`VoxelChunkManager`, `STREAMING_PERFORMANCE.md`) is bespoke. World Partition is most relevant for finite worlds with baked or session-static content; reconcile ownership of the streaming decision so the two don't fight.
-- Lower priority than RVT/PCG; revisit once the runtime-static world flow is concrete.
+**The architectural linchpin (why there is nothing to fight over).** The entire voxel world is **one placed
+actor** (`AVoxelWorldTestActor`, holding a `UVoxelChunkManager` *component*) plus **one runtime-spawned
+collision container actor** (`VoxelCollisionManager` → a plain `AActor` holding per-chunk
+`UVoxelCollisionComponent`s). Terrain rendering is a single `UVoxelWorldComponent` + custom scene proxy that
+draws *all* chunks. **There are zero per-chunk actors.** WP streams placed level actors by grid cell; the
+terrain isn't actors, so WP has nothing to stream there and cannot collide with `VoxelChunkManager`.
+
+#### Q&A (the five investigation questions)
+
+1. **Scope of fit.** `InfinitePlane` = infinite (WP N/A — no grid to bound). `IslandBowl` = bounded
+   (`IslandRadius` + `IslandFalloffWidth`, `MinZ/MaxZ` chunk clamp → a computable AABB) = **the clean WP
+   candidate**. `SphericalPlanet` = finite but **radial** → mismatch with WP's axis-aligned grid (same reason
+   gen-conditioning was deferred for it); **defer**.
+2. **Coexistence.** The voxel world actor must be **`Is Spatially Loaded = false`** (always-loaded / non-spatial)
+   so WP never streams the terrain actor out mid-session. The runtime collision container is dynamically spawned
+   → already outside WP's grid (always-loaded by default). With that one setting, the two systems are orthogonal.
+3. **What WP actually buys us.** For a single small finite island, **little today** — the whole ~30 km island
+   fits inside WP's default loading range, so WP keeps everything resident (its streaming value scales with world
+   size and *placed*-actor count). HLOD is out for runtime geometry (can't bake). WP's value is **conditional and
+   forward-looking**: it pays off when finite worlds gain **authored/placed actor content** — most concretely the
+   planned **POI placed-actor clusters** (a POI today is a claim volume + flatten zone, but will grow into many
+   placed actors forming a city/structure). Those are exactly what WP's grid + Data Layers are built to stream.
+4. **Ownership boundary (clean, no double-streaming).** `VoxelChunkManager` owns **terrain** streaming, always,
+   via its own `ViewDistance`. WP owns **finite-world placed-actor** streaming only. They never overlap because
+   terrain is not actors. Verified live: with the streaming source 250 km away, WP unloaded **all** placeholder
+   actors (8 → 0) while the voxel terrain stayed streaming (172 chunks) — and reloaded them (0 → 8) on return.
+5. **Claims/PCG tie-in.** Boundary-safe — WP managing POI/claim/decoration actors is a map / Data-Layer concern,
+   no new cross-plugin deps. (Caveat: today's POI/claim volumes are *runtime-spawned* by
+   `POIPlacementSubsystem`, and PCG decoration is runtime-generated; runtime-spawned actors are always-loaded and
+   are **not** WP-grid-managed. Getting WP value for the POI layer means those becoming *placed* actors — which is
+   the stated direction for POI content.)
+
+#### Coexistence spike — live-verified (2026-06-29, PIE)
+
+Test map `/Game/PluginTesting/WorldPartition/WP_VoxelCoexistTest` (created from the engine **OpenWorld** template
+= real WP: `WorldDataLayers`, `WorldPartitionMiniMap`, OFPA external actors on disk; template Landscape stripped
+so the voxel terrain is the only terrain). Contents: the voxel world actor (IslandBowl config
+`WP_IslandBowlConfig`, marked **non-spatial**), a `PlayerStart`, and **8 spatially-loaded placeholder
+StaticMeshActors** standing in for future POI placed-actor clusters.
+
+Verified in PIE:
+- **Terrain streams normally inside the WP map** — `VoxelChunkManager` generated **218 chunks, 0 pending**,
+  responsive to view (218 → 126 → 244 as the view moved); no ensures/errors/crashes.
+- **Spatial flags correct** — voxel actor `is_spatially_loaded = false`; all placeholders `= true`.
+- **WP actively streams the actor layer, terrain untouched** — streaming source at 250 km → placeholders **8 → 0**
+  (WP unloaded them) while terrain stayed loaded (172 chunks); return to origin → **0 → 8** reloaded.
+
+**Conclusion / decision gate → adopt the coexistence pattern, defer broad WP actor-streaming until POI content is
+placed-actor-based.** The voxel terrain and WP are cleanly orthogonal: **mark the voxel world actor non-spatial
+and a WP-enabled finite-world map "just works."** That pattern is the deliverable now (it future-proofs the move
+to POI placed-actor clusters and authored props). Building WP-managed streaming of the *current* runtime-spawned
+POI/claim + PCG-decoration layer buys little and would mean re-architecting how those actors are created — so it
+is **deferred** until POI content is authored/placed. `SphericalPlanet` WP support is **deferred** (radial vs
+axis-aligned grid). `InfinitePlane` is **out of scope** (not finite).
+
+**Ownership-boundary rule (for finite-world maps):**
+- Voxel world actor → **non-spatial / always-loaded** (WP never unloads the terrain).
+- Terrain streaming → **`VoxelChunkManager`** only (its own `ViewDistance`).
+- Placed game-level actors (future POI clusters, props, gameplay) → **WP grid / Data Layers**.
+- No double-streaming: terrain is a scene proxy on one component, never per-chunk actors.
 
 ---
 
@@ -183,7 +245,7 @@ Mesh Terrain specifics (UE 5.8, Experimental):
 - **RVT × dynamic-path proxy** (primary risk) — does a `GetDynamicMeshElements` proxy write to RVT cleanly? Resolved by the spike above.
 - **PCG surface source** — does PCG runtime gen need real collision, or can it sample voxel data directly? Affects whether scatter depends on the collision pipeline.
 - **PCG vs SCATTER_SYSTEM** — replace or coexist? Decide after a parity pass.
-- **World Partition vs bespoke streaming** — who owns the streaming decision for finite worlds?
+- **World Partition vs bespoke streaming** — who owns the streaming decision for finite worlds? **Resolved (§3, 2026-06-29):** no overlap — terrain isn't actors, so `VoxelChunkManager` owns terrain streaming and WP owns placed-actor streaming; the voxel world actor is marked non-spatial. Coexistence live-verified.
 - **Mesh Terrain extensibility** — is the modifier API usable programmatically for a bake bridge, or editor-interaction only? Requires live inspection.
 
 ---
