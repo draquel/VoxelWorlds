@@ -207,6 +207,14 @@ Verified in PIE:
 - **Spatial flags correct** — voxel actor `is_spatially_loaded = false`; all placeholders `= true`.
 - **WP actively streams the actor layer, terrain untouched** — streaming source at 250 km → placeholders **8 → 0**
   (WP unloaded them) while terrain stayed loaded (172 chunks); return to origin → **0 → 8** reloaded.
+- **Terrain RENDERS correctly under WP (not just streams)** — verified by reproducing the exact non-WP
+  `VoxelWorldsTest` baseline mountain *inside* the WP map (same `DemoWorldConfig`, streaming origin placed at the
+  baseline's high-terrain coords): identical lit voxel terrain renders, with the placeholder actors above it. The
+  voxel custom-VF scene proxy is unaffected by WP. **Pitfall that masked this at first (documented so it isn't
+  repeated):** (a) the GPU mesher lags the view by ~60–90 s — poll `GetPendingGenerationCount == 0` before
+  screenshotting; (b) a viewer-following **water plane** over low/underwater terrain (at the origin, and in a hasty
+  IslandBowl config) reads as a flat blue fill that hides terrain — frame *known high terrain*, or disable water.
+  Neither is a WP effect.
 
 **Conclusion / decision gate → adopt the coexistence pattern, defer broad WP actor-streaming until POI content is
 placed-actor-based.** The voxel terrain and WP are cleanly orthogonal: **mark the voxel world actor non-spatial
