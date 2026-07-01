@@ -6,6 +6,7 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelData.h"
+#include "VoxelBiomeConfiguration.h"
 #include "RenderingThread.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCPUNoiseGeneratorTest, "VoxelWorlds.Generation.CPUNoiseGenerator",
@@ -299,6 +300,145 @@ bool FVoxelGPUvsCPUConsistencyTest::RunTest(const FString& Parameters)
 	GPUGenerator.ReleaseHandle(Handle);
 	GPUGenerator.Shutdown();
 
+	return true;
+}
+
+// Phase B: strict GPU==CPU parity for the FULL FVoxelData (density + material + biome + metadata) with a
+// biome configuration (biomes + height rule + ore vein) + a conditioning zone, at LOD 0/1/2. Runs the CPU
+// post-passes on the GPU readback (as the streaming path does) so water/underground metadata is comparable.
+// The LOD>0 cases guard the Phase A LOD-stride regression (generation must be LOD-independent).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUMaterialParityTest, "VoxelWorlds.Generation.GPUvsCPUMaterialParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUMaterialParityTest::RunTest(const FString& Parameters)
+{
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults(); // Plains / Forest / Mountain / Ocean
+
+	// Height rule: exercise ApplyHeightMaterialRules (snow-like override above a height, on the surface).
+	BiomeConfig->bEnableHeightMaterials = true;
+	BiomeConfig->HeightMaterialRules.Empty();
+	{
+		FHeightMaterialRule Rule;
+		Rule.MinHeight = 2500.0f; Rule.MaxHeight = MAX_FLT; Rule.MaterialID = 6;
+		Rule.bSurfaceOnly = true; Rule.MaxDepthBelowSurface = 2.0f; Rule.Priority = 10;
+		BiomeConfig->HeightMaterialRules.Add(Rule);
+	}
+
+	// Global ore vein (Rarity 1.0 so the precision-sensitive rarity hash is not exercised).
+	BiomeConfig->bEnableOreVeins = true;
+	BiomeConfig->GlobalOreVeins.Empty();
+	{
+		FOreVeinConfig Ore;
+		Ore.Name = TEXT("Iron"); Ore.MaterialID = 8; Ore.MinDepth = 12.0f; Ore.MaxDepth = 0.0f;
+		Ore.Shape = EOreVeinShape::Blob; Ore.Frequency = 0.02f; Ore.Threshold = 0.55f;
+		Ore.SeedOffset = 111; Ore.Rarity = 1.0f; Ore.Priority = 0;
+		BiomeConfig->GlobalOreVeins.Add(Ore);
+	}
+	BiomeConfig->BuildGpuData(); // bake GPU arrays (also triggers the sort/index cache rebuilds it needs)
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+
+	FVoxelNoiseGenerationRequest Request;
+	Request.ChunkCoord = FIntVector(3, 1, 0);
+	Request.ChunkSize = 16;
+	Request.VoxelSize = 100.0f;
+	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Request.NoiseParams.Seed = 4325;
+	Request.NoiseParams.Frequency = 0.0025f;
+	Request.NoiseParams.Amplitude = 1.0f;
+	Request.NoiseParams.Octaves = 4;
+	Request.NoiseParams.Lacunarity = 2.0f;
+	Request.NoiseParams.Persistence = 0.5f;
+	Request.WorldMode = EWorldMode::InfinitePlane;
+	Request.SeaLevel = 0.0f;
+	Request.HeightScale = 4000.0f;
+	Request.BaseHeight = 0.0f;
+	Request.bEnableBiomes = true;
+	Request.BiomeConfiguration = BiomeConfig;
+	// Conditioning zone overlapping the chunk (exercise the GPU height-flatten before the SDF).
+	Request.ConditioningZones.Add(FVoxelConditioningZone(FVector2D(4800.0, 1600.0), 800.0f, 1200.0f, 500.0f, 1.0f));
+
+	bool bAllPass = true;
+	const int32 LODs[3] = { 0, 1, 2 };
+	for (int32 li = 0; li < 3; ++li)
+	{
+		Request.LODLevel = LODs[li];
+
+		TArray<FVoxelData> CPUData;
+		GPUGenerator.GenerateChunkCPU(Request, CPUData); // CPU fallback: includes water + underground passes
+
+		volatile bool bCompleted = false;
+		FVoxelGenerationHandle Handle = GPUGenerator.GenerateChunkAsync(Request,
+			FOnVoxelGenerationComplete::CreateLambda([&bCompleted](FVoxelGenerationHandle, bool) { bCompleted = true; }));
+		const double StartTime = FPlatformTime::Seconds();
+		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 10.0)
+		{
+			FPlatformProcess::Sleep(0.01f);
+			FlushRenderingCommands();
+		}
+		TArray<FVoxelData> GPUData;
+		GPUGenerator.ReadbackToCPU(Handle, GPUData);
+		GPUGenerator.ReleaseHandle(Handle);
+
+		// Apply the same post-passes the streaming path runs on GPU readback (water + underground).
+		FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, GPUData);
+
+		if (CPUData.Num() != GPUData.Num() || CPUData.Num() == 0)
+		{
+			AddError(FString::Printf(TEXT("LOD%d: size mismatch/empty CPU=%d GPU=%d"), LODs[li], CPUData.Num(), GPUData.Num()));
+			bAllPass = false;
+			continue;
+		}
+
+		const int32 Total = CPUData.Num();
+		int32 DensityClose = 0, MatMatch = 0, BiomeMatch = 0, MetaMatch = 0;
+		int32 DensityEqualCount = 0, MatMatchWhenDensEqual = 0;
+		int32 Reported = 0;
+		for (int32 i = 0; i < Total; ++i)
+		{
+			const FVoxelData& C = CPUData[i];
+			const FVoxelData& G = GPUData[i];
+			if (FMath::Abs((int32)C.Density - (int32)G.Density) <= 2) { DensityClose++; }
+			if (C.MaterialID == G.MaterialID) { MatMatch++; }
+			if (C.BiomeID == G.BiomeID) { BiomeMatch++; }
+			if (C.Metadata == G.Metadata) { MetaMatch++; }
+			if (C.Density == G.Density)
+			{
+				DensityEqualCount++;
+				if (C.MaterialID == G.MaterialID) { MatMatchWhenDensEqual++; }
+			}
+			if ((C.MaterialID != G.MaterialID || C.BiomeID != G.BiomeID) && Reported < 8)
+			{
+				AddInfo(FString::Printf(TEXT("LOD%d mismatch @%d: dens C=%d G=%d, mat C=%d G=%d, biome C=%d G=%d, meta C=%d G=%d"),
+					LODs[li], i, C.Density, G.Density, C.MaterialID, G.MaterialID, C.BiomeID, G.BiomeID, C.Metadata, G.Metadata));
+				Reported++;
+			}
+		}
+
+		const float DensityClosePct = 100.0f * DensityClose / Total;
+		const float MatPct = 100.0f * MatMatch / Total;
+		const float BiomePct = 100.0f * BiomeMatch / Total;
+		const float MetaPct = 100.0f * MetaMatch / Total;
+		const float MatWhenDensEqPct = DensityEqualCount > 0 ? 100.0f * MatMatchWhenDensEqual / DensityEqualCount : 100.0f;
+
+		AddInfo(FString::Printf(TEXT("LOD%d [%d voxels]: density~%.1f%%, material %.1f%%, biome %.1f%%, meta %.1f%%, material(density==) %.2f%%"),
+			LODs[li], Total, DensityClosePct, MatPct, BiomePct, MetaPct, MatWhenDensEqPct));
+
+		// Density near-identical (Phase A). Material/biome/meta exact except at density boundaries; when the
+		// density is identical, material must match almost exactly (isolates logic errors from FP boundaries).
+		if (DensityClosePct < 99.0f) { AddError(FString::Printf(TEXT("LOD%d density parity %.1f%% < 99%%"), LODs[li], DensityClosePct)); bAllPass = false; }
+		if (MatPct < 95.0f) { AddError(FString::Printf(TEXT("LOD%d material parity %.1f%% < 95%%"), LODs[li], MatPct)); bAllPass = false; }
+		if (BiomePct < 98.0f) { AddError(FString::Printf(TEXT("LOD%d biome parity %.1f%% < 98%%"), LODs[li], BiomePct)); bAllPass = false; }
+		if (MetaPct < 98.0f) { AddError(FString::Printf(TEXT("LOD%d metadata parity %.1f%% < 98%%"), LODs[li], MetaPct)); bAllPass = false; }
+		if (MatWhenDensEqPct < 99.0f) { AddError(FString::Printf(TEXT("LOD%d material(density==) %.2f%% < 99%%"), LODs[li], MatWhenDensEqPct)); bAllPass = false; }
+	}
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU material/biome/metadata parity across LOD 0/1/2"), bAllPass);
 	return true;
 }
 

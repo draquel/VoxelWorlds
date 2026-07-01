@@ -1914,7 +1914,10 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 		Result.ChunkCoord = ChunkCoord;
 		if (Status == EVoxelGPUReadbackStatus::Ready && VoxelData.Num() == ExpectedVoxels)
 		{
-			// CPU post-pass on the game thread (mirrors the CPU worker path's tree injection).
+			// CPU post-passes on the readback data — same order + effect as GenerateChunkCPU:
+			// water fill + underground classification (whole-chunk passes, not ported to the shader),
+			// then tree injection.
+			FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Pending.GenRequest, VoxelData);
 			InjectTreesIfNeeded(ChunkCoord, Pending.GenRequest, VoxelData);
 			Result.bSuccess = true;
 			Result.VoxelData = MoveTemp(VoxelData);

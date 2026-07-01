@@ -179,12 +179,148 @@ uint GpuBlendedMaterial(BiomeBlendResult blend, float DepthBelowSurface, bool bU
     return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
 }
 
-// Top-level: blend the biomes, output the dominant BiomeID, and return the blended material.
+// Top-level: blend the biomes, output the dominant BiomeID + its ore range, return the blended material.
 uint ComputeBiomeMaterial(float Temperature, float Moisture, float Continentalness,
-                          float DepthBelowSurface, float TerrainHeight, out uint OutBiomeID)
+                          float DepthBelowSurface, float TerrainHeight,
+                          out uint OutBiomeID, out uint OutOreStart, out uint OutOreCount)
 {
     BiomeBlendResult blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
-    OutBiomeID = LoadGpuBiome(blend.Indices[0]).BiomeID;
+    GpuBiome dominant = LoadGpuBiome(blend.Indices[0]);
+    OutBiomeID = dominant.BiomeID;
+    OutOreStart = dominant.OreStart;   // ore lookup uses the dominant biome (CPU: GetOreVeinsForBiome(BiomeID))
+    OutOreCount = dominant.OreCount;
     bool bUnderwater = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainHeight < WaterLevelHeight);
     return GpuBlendedMaterial(blend, DepthBelowSurface, bUnderwater);
+}
+
+// UVoxelBiomeConfiguration::ApplyHeightMaterialRules — first priority-sorted rule that applies wins.
+// HeightRuleData: 2 float4s per rule: [MinHeight,MaxHeight,MaxDepthBelowSurface,MaterialID][bSurfaceOnly,0,0,0].
+uint ApplyGpuHeightRules(uint CurrentMaterial, float WorldHeight, float DepthBelowSurface)
+{
+    for (int r = 0; r < HeightRuleCount; ++r)
+    {
+        float4 a = HeightRuleData[r * 2 + 0];
+        float4 b = HeightRuleData[r * 2 + 1];
+        float minH = a.x;
+        float maxH = a.y;
+        float maxDepth = a.z;
+        uint matID = (uint)(a.w + 0.5);
+        bool surfaceOnly = b.x > 0.5;
+
+        if (WorldHeight < minH || WorldHeight > maxH) { continue; }
+        if (surfaceOnly && DepthBelowSurface > maxDepth) { continue; }
+        return matID;
+    }
+    return CurrentMaterial;
+}
+
+// FVoxelCPUNoiseGenerator::SampleOreVeinNoise — Simplex FBM (2 octaves) with optional streak stretch.
+// Ore record (3 float4s): [MaterialID,MinDepth,MaxDepth,Shape][Frequency,Threshold,SeedOffset,Rarity][StreakStretch,0,0,0].
+float SampleGpuOreVeinNoise(float3 WorldPos, uint OreIdx, int WorldSeed)
+{
+    float4 o0 = OreVeinData[OreIdx * 3 + 0];
+    float4 o1 = OreVeinData[OreIdx * 3 + 1];
+    float4 o2 = OreVeinData[OreIdx * 3 + 2];
+
+    uint shape = (uint)(o0.w + 0.5);
+    float frequency = o1.x;
+    int seedOffset = (int)o1.z;
+    float streakStretch = o2.x;
+
+    float3 samplePos = WorldPos;
+    if (shape == 1u) // Streak — stretch along a position-derived pseudo-random direction
+    {
+        float streakSeed = (float)seedOffset * 0.1;
+        float3 streakDir;
+        streakDir.x = sin(WorldPos.y * 0.0001 + streakSeed);
+        streakDir.y = cos(WorldPos.x * 0.0001 + streakSeed * 1.5);
+        streakDir.z = sin(WorldPos.z * 0.0002 + streakSeed * 2.0);
+        streakDir = normalize(streakDir);
+        float proj = dot(WorldPos, streakDir);
+        float3 projected = WorldPos - streakDir * proj;
+        samplePos = projected + streakDir * (proj / streakStretch);
+    }
+
+    float noiseValue = FBM3D(samplePos, NOISE_TYPE_SIMPLEX, WorldSeed + seedOffset, 2, frequency, 1.0, 2.0, 0.5);
+    return (noiseValue + 1.0) * 0.5;
+}
+
+// FVoxelCPUNoiseGenerator::CheckOreVeinPlacement over [OreStart, OreStart+OreCount). First match wins.
+bool GpuCheckOreVein(float3 WorldPos, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, out uint OutMat)
+{
+    OutMat = 0u;
+    for (uint i = 0; i < OreCount; ++i)
+    {
+        uint idx = OreStart + i;
+        float4 o0 = OreVeinData[idx * 3 + 0];
+        float4 o1 = OreVeinData[idx * 3 + 1];
+        uint matID = (uint)(o0.x + 0.5);
+        float minDepth = o0.y;
+        float maxDepth = o0.z;
+        float threshold = o1.y;
+        float rarity = o1.w;
+
+        // IsValidDepth
+        if (DepthBelowSurface < minDepth) { continue; }
+        if (maxDepth > 0.0 && DepthBelowSurface > maxDepth) { continue; }
+
+        float oreNoise = SampleGpuOreVeinNoise(WorldPos, idx, WorldSeed);
+        if (oreNoise >= threshold)
+        {
+            if (rarity < 1.0)
+            {
+                // NOTE: this position hash is precision-sensitive; the CPU computes it in double, the GPU
+                // in float, so ores with rarity < 1 may differ by a few voxels GPU vs CPU.
+                float randomValue = frac(sin(WorldPos.x * 12.9898 + WorldPos.y * 78.233 + WorldPos.z * 45.164) * 43758.5453);
+                if (randomValue > rarity) { continue; }
+            }
+            OutMat = matID;
+            return true;
+        }
+    }
+    return false;
+}
+
+// FVoxelTerrainConditioning::ApplyToHeight — blend the height toward each zone's target by its weight.
+// ConditioningZoneData: 2 float4s per zone: [CenterX,CenterY,InnerRadius,FalloffWidth][TargetHeight,Strength,0,0].
+float GpuApplyConditioning(float WorldX, float WorldY, float BaseHeight)
+{
+    float H = BaseHeight;
+    for (int z = 0; z < ConditioningZoneCount; ++z)
+    {
+        float4 c0 = ConditioningZoneData[z * 2 + 0];
+        float4 c1 = ConditioningZoneData[z * 2 + 1];
+        float2 center = c0.xy;
+        float innerRadius = c0.z;
+        float falloffWidth = c0.w;
+        float targetHeight = c1.x;
+        float strength = c1.y;
+
+        float dx = WorldX - center.x;
+        float dy = WorldY - center.y;
+        float dist = sqrt(dx * dx + dy * dy);
+
+        float w;
+        if (dist <= innerRadius)
+        {
+            w = strength;
+        }
+        else
+        {
+            float falloff = max(1.0, falloffWidth);
+            if (dist >= innerRadius + falloff)
+            {
+                w = 0.0;
+            }
+            else
+            {
+                float t = (dist - innerRadius) / falloff;
+                float s = 1.0 - (t * t * (3.0 - 2.0 * t)); // smoothstep 1 -> 0
+                w = strength * s;
+            }
+        }
+
+        if (w > 0.0) { H = lerp(H, targetHeight, w); }
+    }
+    return H;
 }
