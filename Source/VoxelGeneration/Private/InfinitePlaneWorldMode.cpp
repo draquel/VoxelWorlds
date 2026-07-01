@@ -2,6 +2,19 @@
 
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelBiomeConfiguration.h"
+#include "HAL/IConsoleManager.h"
+
+// When 1 (default), the analytic terrain-height query (GetTerrainHeightAt) applies the same
+// continentalness height modulation as generation, so spawn / nav / POI placement matches the real
+// generated surface. Set to 0 to restore the legacy raw base-noise height (A/B or emergency revert).
+static int32 GVoxelAnalyticContinentalness = 1;
+static FAutoConsoleVariableRef CVarVoxelAnalyticContinentalness(
+	TEXT("voxel.Height.AnalyticContinentalness"),
+	GVoxelAnalyticContinentalness,
+	TEXT("1 (default): analytic GetTerrainHeightAt applies continentalness modulation to match the ")
+	TEXT("generated surface (spawn/nav/POI). 0: legacy raw base-noise height."),
+	ECVF_Default);
 
 FInfinitePlaneWorldMode::FInfinitePlaneWorldMode()
 	: TerrainParams()
@@ -35,8 +48,16 @@ float FInfinitePlaneWorldMode::GetTerrainHeightAt(
 	// Sample 2D noise at this X,Y position
 	float NoiseValue = SampleTerrainNoise2D(X, Y, NoiseParams);
 
+	// Match generation: modulate the terrain params by continentalness so the analytic height equals
+	// the real generated surface (spawn / nav / POI placement). Gated so it can be reverted at runtime.
+	// Generation applies continentalness whenever a biome config has it enabled; mirror that here.
+	const UVoxelBiomeConfiguration* Ctx = (GVoxelAnalyticContinentalness != 0) ? BiomeContext : nullptr;
+	float Continentalness = 0.0f;
+	const FWorldModeTerrainParams EffectiveParams =
+		ComputeEffectiveTerrainParams(X, Y, TerrainParams, NoiseParams, Ctx, Continentalness);
+
 	// Convert to terrain height
-	return NoiseToTerrainHeight(NoiseValue, TerrainParams);
+	return NoiseToTerrainHeight(NoiseValue, EffectiveParams);
 }
 
 FIntVector FInfinitePlaneWorldMode::WorldToChunkCoord(
@@ -123,14 +144,84 @@ float FInfinitePlaneWorldMode::NoiseToTerrainHeight(
 	float NoiseValue,
 	const FWorldModeTerrainParams& TerrainParams)
 {
-	// Noise value is in range [-1, 1]
-	// Map to terrain height:
-	// TerrainHeight = SeaLevel + BaseHeight + (NoiseValue * HeightScale)
+	// Noise value is in range [-1, 1]:
+	//   TerrainHeight = SeaLevel + BaseHeight + (NoiseValue * HeightScale)
+	//
+	// Intentionally UNCLAMPED, to stay bit-identical with the GPU generator's NoiseToTerrainHeight
+	// (Shaders/Private/WorldModeSDF.ush), which applies no height clamp. A former CPU-only clamp to
+	// [MinHeight,MaxHeight] silently clipped peaks/valleys the GPU still generated, so the analytic
+	// height diverged from the real (GPU) surface above ~10000 uu. The height range is bounded by the
+	// caller's HeightScale (+ continentalness); chunk generation is bounded by GetMinZ()/GetMaxZ().
+	return TerrainParams.SeaLevel + TerrainParams.BaseHeight + (NoiseValue * TerrainParams.HeightScale);
+}
 
-	float Height = TerrainParams.SeaLevel + TerrainParams.BaseHeight + (NoiseValue * TerrainParams.HeightScale);
+FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
+	float X,
+	float Y,
+	const FWorldModeTerrainParams& BaseParams,
+	const FVoxelNoiseParams& BaseNoiseParams,
+	const UVoxelBiomeConfiguration* BiomeConfig,
+	float& OutContinentalness)
+{
+	OutContinentalness = 0.0f;
+	FWorldModeTerrainParams Effective = BaseParams;
 
-	// Clamp to configured limits
-	return FMath::Clamp(Height, TerrainParams.MinHeight, TerrainParams.MaxHeight);
+	// Continentalness modulates height independently of biome material selection (matches
+	// FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane, which gates only on bEnableContinentalness).
+	if (BiomeConfig && BiomeConfig->bEnableContinentalness)
+	{
+		// Same continentalness noise field as generation: 2-octave Simplex, seed offset from the config.
+		FVoxelNoiseParams ContinentalnessNoiseParams;
+		ContinentalnessNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+		ContinentalnessNoiseParams.Octaves = 2;
+		ContinentalnessNoiseParams.Persistence = 0.5f;
+		ContinentalnessNoiseParams.Lacunarity = 2.0f;
+		ContinentalnessNoiseParams.Amplitude = 1.0f;
+		ContinentalnessNoiseParams.Seed = BaseNoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
+		ContinentalnessNoiseParams.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
+
+		const FVector SamplePos(X, Y, 0.0f);
+		OutContinentalness = FVoxelCPUNoiseGenerator::FBM3D(SamplePos, ContinentalnessNoiseParams);
+
+		float HeightOffset = 0.0f;
+		float HeightScaleMult = 1.0f;
+		BiomeConfig->GetContinentalnessTerrainParams(OutContinentalness, HeightOffset, HeightScaleMult);
+		Effective.BaseHeight += HeightOffset;
+		Effective.HeightScale *= HeightScaleMult;
+	}
+
+	return Effective;
+}
+
+void FInfinitePlaneWorldMode::GetTerrainHeightBounds(
+	const FWorldModeTerrainParams& BaseParams,
+	const UVoxelBiomeConfiguration* BiomeConfig,
+	float& OutMin,
+	float& OutMax)
+{
+	// Height at any (X,Y): SeaLevel + (BaseHeight + Offset(cont)) + Noise * (HeightScale * Mult(cont)),
+	// with Noise in [-1,1]. Bound each modulated term by its extreme over the continentalness curves.
+	float MinOffset = 0.0f;
+	float MaxOffset = 0.0f;
+	float MaxScaleMult = 1.0f; // no continentalness => full HeightScale amplitude
+
+	if (BiomeConfig && BiomeConfig->bEnableContinentalness
+		&& BiomeConfig->BakedHeightCurve.Num() > 0 && BiomeConfig->BakedHeightScaleCurve.Num() > 0)
+	{
+		MinOffset = FMath::Min(BiomeConfig->BakedHeightCurve);
+		MaxOffset = FMath::Max(BiomeConfig->BakedHeightCurve);
+		// Amplitude scales by the LARGEST multiplier any point can take. Guard a degenerate curve.
+		MaxScaleMult = FMath::Max(0.0f, FMath::Max(BiomeConfig->BakedHeightScaleCurve));
+	}
+
+	const float Center = BaseParams.SeaLevel + BaseParams.BaseHeight;
+	const float Amplitude = BaseParams.HeightScale * MaxScaleMult; // Noise = +/-1 reaches +/- this
+
+	// Conservative decoupled bounds: the true extremes are within these (offset and multiplier are
+	// correlated via the same continentalness value, so decoupling only widens the range — never
+	// clips real terrain).
+	OutMin = Center + MinOffset - Amplitude;
+	OutMax = Center + MaxOffset + Amplitude;
 }
 
 float FInfinitePlaneWorldMode::CalculateSignedDistance(

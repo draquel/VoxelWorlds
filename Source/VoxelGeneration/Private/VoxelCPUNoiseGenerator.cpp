@@ -209,27 +209,15 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
-	// Set up continentalness noise parameters
-	FVoxelNoiseParams ContinentalnessNoiseParams;
-	ContinentalnessNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	ContinentalnessNoiseParams.Octaves = 2;
-	ContinentalnessNoiseParams.Persistence = 0.5f;
-	ContinentalnessNoiseParams.Lacunarity = 2.0f;
-	ContinentalnessNoiseParams.Amplitude = 1.0f;
-
-	// Use configuration values if available, otherwise use defaults
+	// Use configuration values if available, otherwise use defaults.
+	// (Continentalness noise params are built inside FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams
+	// — the single source of truth shared with the analytic GetTerrainHeightAt query.)
 	if (BiomeConfig)
 	{
 		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
 		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
-
-		if (BiomeConfig->bEnableContinentalness)
-		{
-			ContinentalnessNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
-			ContinentalnessNoiseParams.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
-		}
 	}
 	else
 	{
@@ -239,8 +227,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
-
-	const bool bUseContinentalness = BiomeConfig && BiomeConfig->bEnableContinentalness;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -259,19 +245,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
 					WorldPos.X, WorldPos.Y, Request.NoiseParams);
 
-				// Sample continentalness and modulate terrain params
+				// Continentalness height modulation — shared with the analytic GetTerrainHeightAt query
+				// so spawn / nav / POI placement matches this generated surface. The sampled
+				// continentalness is reused for the biome blend below.
 				float Continentalness = 0.0f;
-				FWorldModeTerrainParams EffectiveParams = WorldMode.GetTerrainParams();
-				if (bUseContinentalness)
-				{
-					FVector BiomeSamplePos2D(WorldPos.X, WorldPos.Y, 0.0f);
-					Continentalness = FBM3D(BiomeSamplePos2D, ContinentalnessNoiseParams);
-
-					float HeightOffset, HeightScaleMult;
-					BiomeConfig->GetContinentalnessTerrainParams(Continentalness, HeightOffset, HeightScaleMult);
-					EffectiveParams.BaseHeight += HeightOffset;
-					EffectiveParams.HeightScale *= HeightScaleMult;
-				}
+				const FWorldModeTerrainParams EffectiveParams =
+					FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
+						WorldPos.X, WorldPos.Y, WorldMode.GetTerrainParams(),
+						Request.NoiseParams, BiomeConfig, Continentalness);
 
 				// Get terrain height from noise (using potentially modulated params)
 				float TerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(

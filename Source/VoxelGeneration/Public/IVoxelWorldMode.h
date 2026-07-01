@@ -171,11 +171,9 @@ struct VOXELGENERATION_API FWorldModeTerrainParams
 	/** Minimum terrain height offset from sea level */
 	float BaseHeight = 0.0f;
 
-	/** Maximum terrain height (for clamping) */
-	float MaxHeight = 10000.0f;
-
-	/** Minimum terrain height (for clamping) */
-	float MinHeight = -10000.0f;
+	// NOTE: no Min/MaxHeight clamp here — terrain height is intentionally unclamped so the CPU stays
+	// bit-identical to the GPU generator (which never clamped). A height cap would have to be applied
+	// identically on BOTH the CPU and the GPU shader; see FInfinitePlaneWorldMode::NoiseToTerrainHeight.
 
 	FWorldModeTerrainParams() = default;
 

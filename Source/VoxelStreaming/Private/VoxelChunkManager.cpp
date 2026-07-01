@@ -502,6 +502,9 @@ void UVoxelChunkManager::Initialize(
 	TerrainParams.HeightScale = Configuration->HeightScale;
 	TerrainParams.BaseHeight = Configuration->BaseHeight;
 	WorldMode = MakeUnique<FInfinitePlaneWorldMode>(TerrainParams);
+	// Give the world mode the biome config so the analytic height query (GetTerrainHeightAt) applies the
+	// same continentalness modulation as generation — spawn / nav / POI heights match the real surface.
+	WorldMode->SetBiomeContext(Configuration->BiomeConfiguration);
 
 	NoiseGenerator = MakeUnique<FVoxelCPUNoiseGenerator>();
 	NoiseGenerator->Initialize();
@@ -1629,10 +1632,20 @@ void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& Chunk
 		FVector2D(ChunkOrigin.X, ChunkOrigin.Y),
 		FVector2D(ChunkOrigin.X + ChunkWorldSize, ChunkOrigin.Y + ChunkWorldSize));
 
-	// Static zones whose influence overlaps the chunk footprint.
+	GatherConditioningZonesForRegion(ChunkRegion, OutZones);
+}
+
+void UVoxelChunkManager::GatherConditioningZonesForRegion(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const
+{
+	if (ConditioningZones.Num() == 0 && TerrainConditioner == nullptr)
+	{
+		return;
+	}
+
+	// Static zones whose influence overlaps the region.
 	for (const FVoxelConditioningZone& Zone : ConditioningZones)
 	{
-		if (Zone.GetBounds2D().Intersect(ChunkRegion))
+		if (Zone.GetBounds2D().Intersect(Region))
 		{
 			OutZones.Add(Zone);
 		}
@@ -1641,8 +1654,42 @@ void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& Chunk
 	// Dynamic (game-supplied) zones for this region.
 	if (TerrainConditioner)
 	{
-		TerrainConditioner->GatherConditioning(ChunkRegion, OutZones);
+		TerrainConditioner->GatherConditioning(Region, OutZones);
 	}
+}
+
+void UVoxelChunkManager::GatherConditioningZonesForPoint(double WorldX, double WorldY, TArray<FVoxelConditioningZone>& OutZones) const
+{
+	// A degenerate (point) region: zone bounds that contain (X,Y) intersect it. FBox2D::Intersect is
+	// inclusive on the boundary, so a point exactly on a zone's outer edge (weight 0) is harmless.
+	const FVector2D P(WorldX, WorldY);
+	GatherConditioningZonesForRegion(FBox2D(P, P), OutZones);
+}
+
+float UVoxelChunkManager::GetGeneratedSurfaceHeight(double WorldX, double WorldY) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !WM || !Configuration)
+	{
+		return 0.0f;
+	}
+
+	// Base terrain + continentalness (the world mode carries the biome context set at init).
+	float Height = WM->GetTerrainHeightAt(
+		static_cast<float>(WorldX), static_cast<float>(WorldY), Configuration->NoiseParams);
+
+	// Layer terrain conditioning zones (POI / claim flatten) exactly as generation does.
+	if (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr)
+	{
+		TArray<FVoxelConditioningZone> Zones;
+		GatherConditioningZonesForPoint(WorldX, WorldY, Zones);
+		if (Zones.Num() > 0)
+		{
+			Height = FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Height, Zones);
+		}
+	}
+
+	return Height;
 }
 
 void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest)

@@ -312,6 +312,24 @@ public:
 		float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
 		uint8& OutMaterialID, uint8& OutBiomeID) const;
 
+	/**
+	 * Analytic surface height at a world (X,Y): the continentalness-modulated base terrain PLUS any
+	 * terrain conditioning zones — matching what generation produces — WITHOUT requiring the chunk to be
+	 * loaded. This is the canonical FAR-BAND placement estimate (spawn / nav / POI seeding). For the near
+	 * band where a chunk is loaded and may hold player edits, prefer QueryEditMergedSurface.
+	 *
+	 * Unlike the raw IVoxelWorldMode::GetTerrainHeightAt, this accounts for both continentalness (via the
+	 * world mode's biome context) and conditioning-zone flattening, so the returned Z sits on the real
+	 * generated isosurface even far from the origin and inside POI/claim footprints.
+	 *
+	 * @param WorldX,WorldY Sample position (world space)
+	 * @return World Z of the generated terrain surface at (X,Y); 0 if the manager is not initialized
+	 *
+	 * Note: plain C++ (not a UFUNCTION) to keep double-precision world coordinates, matching the sibling
+	 * QueryEditMergedSurface. A float-param BlueprintCallable wrapper can be added if BP access is needed.
+	 */
+	float GetGeneratedSurfaceHeight(double WorldX, double WorldY) const;
+
 	// ==================== Configuration Access ====================
 
 	/**
@@ -901,6 +919,12 @@ protected:
 
 	/** Collect conditioning zones overlapping a chunk's XY footprint into OutZones (game thread). */
 	void GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const;
+
+	/** Append conditioning zones (static + dynamic) whose influence overlaps a world-space XY region. */
+	void GatherConditioningZonesForRegion(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const;
+
+	/** Append conditioning zones (static + dynamic) whose influence covers a single world-space XY point. */
+	void GatherConditioningZonesForPoint(double WorldX, double WorldY, TArray<FVoxelConditioningZone>& OutZones) const;
 
 	/** CPU mesher for generating mesh geometry (polymorphic - can be cubic or smooth) */
 	TUniquePtr<IVoxelMesher> Mesher;
