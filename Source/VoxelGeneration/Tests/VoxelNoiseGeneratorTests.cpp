@@ -7,6 +7,7 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelData.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelCaveConfiguration.h"
 #include "RenderingThread.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCPUNoiseGeneratorTest, "VoxelWorlds.Generation.CPUNoiseGenerator",
@@ -210,98 +211,110 @@ bool FVoxelGPUNoiseGeneratorAsyncTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUConsistencyTest, "VoxelWorlds.Generation.GPUvsCPUConsistency",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FVoxelGPUvsCPUConsistencyTest::RunTest(const FString& Parameters)
+// ==================== Shared GPU==CPU parity harness (Phase D) ====================
+//
+// The strict parity tests (InfinitePlane, IslandBowl, caves, noise types, water, ore) all follow the same
+// shape: for each LOD, generate the same request on CPU and GPU, run the CPU post-passes on the GPU
+// readback (as the streaming path does), then compare the full FVoxelData. This helper is that loop, so
+// each scenario is just "build a Request + call RunGpuCpuParity".
+namespace VoxelParityHarness
 {
-	// This test verifies that GPU and CPU generators produce similar results
-	// They may not be bit-exact due to floating point differences, but should be close
-
-	FVoxelGPUNoiseGenerator GPUGenerator;
-	GPUGenerator.Initialize();
-
-	// Create generation request with frequency that avoids integer grid positions
-	FVoxelNoiseGenerationRequest Request;
-	Request.ChunkCoord = FIntVector(0, 0, 0);
-	Request.ChunkSize = 8; // Small chunk for quick comparison
-	Request.VoxelSize = 100.0f;
-	Request.LODLevel = 0;
-	Request.NoiseParams.NoiseType = EVoxelNoiseType::Perlin;
-	Request.NoiseParams.Seed = 42;
-	Request.NoiseParams.Frequency = 0.013f; // Avoids integer grid positions
-	Request.NoiseParams.Amplitude = 1.0f;
-	Request.NoiseParams.Octaves = 2;
-	Request.NoiseParams.Lacunarity = 2.0f;
-	Request.NoiseParams.Persistence = 0.5f;
-
-	// Generate on CPU (GPU generator has CPU fallback)
-	TArray<FVoxelData> CPUData;
-	bool bCPUSuccess = GPUGenerator.GenerateChunkCPU(Request, CPUData);
-	TestTrue(TEXT("CPU generation should succeed"), bCPUSuccess);
-
-	// Generate on GPU
-	volatile bool bCompleted = false;
-	FVoxelGenerationHandle Handle = GPUGenerator.GenerateChunkAsync(Request,
-		FOnVoxelGenerationComplete::CreateLambda([&bCompleted](FVoxelGenerationHandle, bool)
-		{
-			bCompleted = true;
-		}));
-
-	// Wait for completion
-	double StartTime = FPlatformTime::Seconds();
-	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 5.0)
+	/** Per-channel pass thresholds (percent). Defaults match the Phase B/C parity acceptance. */
+	struct FParityThresholds
 	{
-		FPlatformProcess::Sleep(0.01f);
-		FlushRenderingCommands();
-	}
+		float DensityClose = 99.0f;    // |ΔDensity| <= 2 (FP-boundary tolerant)
+		float Mat = 95.0f;             // material exact (boundary voxels may frac-dither)
+		float Biome = 98.0f;           // biome exact
+		float Meta = 98.0f;            // metadata exact (cave/underground/water flags)
+		float MatWhenDensEq = 99.0f;   // material exact among density-identical voxels (isolates logic from FP)
+		bool bCheckMeta = true;        // some scenarios opt out of the metadata gate
+	};
 
-	TestTrue(TEXT("GPU generation should complete"), bCompleted);
-
-	// Readback GPU data
-	TArray<FVoxelData> GPUData;
-	bool bReadbackSuccess = GPUGenerator.ReadbackToCPU(Handle, GPUData);
-	TestTrue(TEXT("GPU readback should succeed"), bReadbackSuccess);
-
-	// Compare sizes
-	TestEqual(TEXT("CPU and GPU should produce same number of voxels"), CPUData.Num(), GPUData.Num());
-
-	if (CPUData.Num() == GPUData.Num())
+	// Runs GPU-vs-CPU parity for a configured request across the given LODs. Emits per-LOD stats via AddInfo
+	// and per-channel failures via AddError. Returns true iff every channel passed at every LOD.
+	// Request is taken by value: the helper owns LODLevel across the sweep.
+	static bool RunGpuCpuParity(
+		FAutomationTestBase& Test,
+		FVoxelGPUNoiseGenerator& Generator,
+		FVoxelNoiseGenerationRequest Request,
+		const TCHAR* Label,
+		const FParityThresholds& Thr = FParityThresholds(),
+		const TArray<int32>& LODs = { 0, 1, 2 })
 	{
-		// Compare values - allow for some floating point variance
-		int32 MatchCount = 0;
-		int32 CloseCount = 0;
-		const int32 DensityTolerance = 5; // Allow 5 units of variance due to FP precision
-
-		for (int32 i = 0; i < CPUData.Num(); ++i)
+		bool bAllPass = true;
+		for (int32 LOD : LODs)
 		{
-			int32 CPUDensity = CPUData[i].Density;
-			int32 GPUDensity = GPUData[i].Density;
+			Request.LODLevel = LOD;
 
-			if (CPUDensity == GPUDensity)
+			TArray<FVoxelData> CPUData;
+			Generator.GenerateChunkCPU(Request, CPUData); // CPU fallback: includes water + underground passes
+
+			volatile bool bCompleted = false;
+			FVoxelGenerationHandle Handle = Generator.GenerateChunkAsync(Request,
+				FOnVoxelGenerationComplete::CreateLambda([&bCompleted](FVoxelGenerationHandle, bool) { bCompleted = true; }));
+			const double StartTime = FPlatformTime::Seconds();
+			while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 10.0)
 			{
-				MatchCount++;
+				FPlatformProcess::Sleep(0.01f);
+				FlushRenderingCommands();
 			}
-			else if (FMath::Abs(CPUDensity - GPUDensity) <= DensityTolerance)
+			TArray<FVoxelData> GPUData;
+			Generator.ReadbackToCPU(Handle, GPUData);
+			Generator.ReleaseHandle(Handle);
+
+			// Apply the same post-passes the streaming path runs on GPU readback (water + underground).
+			FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, GPUData);
+
+			if (CPUData.Num() != GPUData.Num() || CPUData.Num() == 0)
 			{
-				CloseCount++;
+				Test.AddError(FString::Printf(TEXT("%s LOD%d: size mismatch/empty CPU=%d GPU=%d"), Label, LOD, CPUData.Num(), GPUData.Num()));
+				bAllPass = false;
+				continue;
 			}
+
+			const int32 Total = CPUData.Num();
+			int32 DensityClose = 0, MatMatch = 0, BiomeMatch = 0, MetaMatch = 0;
+			int32 DensityEqualCount = 0, MatMatchWhenDensEqual = 0;
+			int32 Reported = 0;
+			for (int32 i = 0; i < Total; ++i)
+			{
+				const FVoxelData& C = CPUData[i];
+				const FVoxelData& G = GPUData[i];
+				if (FMath::Abs((int32)C.Density - (int32)G.Density) <= 2) { DensityClose++; }
+				if (C.MaterialID == G.MaterialID) { MatMatch++; }
+				if (C.BiomeID == G.BiomeID) { BiomeMatch++; }
+				if (C.Metadata == G.Metadata) { MetaMatch++; }
+				if (C.Density == G.Density)
+				{
+					DensityEqualCount++;
+					if (C.MaterialID == G.MaterialID) { MatMatchWhenDensEqual++; }
+				}
+				if ((C.MaterialID != G.MaterialID || C.BiomeID != G.BiomeID || C.Metadata != G.Metadata) && Reported < 8)
+				{
+					Test.AddInfo(FString::Printf(TEXT("%s LOD%d mismatch @%d: dens C=%d G=%d, mat C=%d G=%d, biome C=%d G=%d, meta C=%d G=%d"),
+						Label, LOD, i, C.Density, G.Density, C.MaterialID, G.MaterialID, C.BiomeID, G.BiomeID, C.Metadata, G.Metadata));
+					Reported++;
+				}
+			}
+
+			const float DensityClosePct = 100.0f * DensityClose / Total;
+			const float MatPct = 100.0f * MatMatch / Total;
+			const float BiomePct = 100.0f * BiomeMatch / Total;
+			const float MetaPct = 100.0f * MetaMatch / Total;
+			const float MatWhenDensEqPct = DensityEqualCount > 0 ? 100.0f * MatMatchWhenDensEqual / DensityEqualCount : 100.0f;
+
+			Test.AddInfo(FString::Printf(TEXT("%s LOD%d [%d voxels]: density~%.1f%%, material %.1f%%, biome %.1f%%, meta %.1f%%, material(density==) %.2f%%"),
+				Label, LOD, Total, DensityClosePct, MatPct, BiomePct, MetaPct, MatWhenDensEqPct));
+
+			if (DensityClosePct < Thr.DensityClose) { Test.AddError(FString::Printf(TEXT("%s LOD%d density parity %.1f%% < %.1f%%"), Label, LOD, DensityClosePct, Thr.DensityClose)); bAllPass = false; }
+			if (MatPct < Thr.Mat) { Test.AddError(FString::Printf(TEXT("%s LOD%d material parity %.1f%% < %.1f%%"), Label, LOD, MatPct, Thr.Mat)); bAllPass = false; }
+			if (BiomePct < Thr.Biome) { Test.AddError(FString::Printf(TEXT("%s LOD%d biome parity %.1f%% < %.1f%%"), Label, LOD, BiomePct, Thr.Biome)); bAllPass = false; }
+			if (Thr.bCheckMeta && MetaPct < Thr.Meta) { Test.AddError(FString::Printf(TEXT("%s LOD%d metadata parity %.1f%% < %.1f%%"), Label, LOD, MetaPct, Thr.Meta)); bAllPass = false; }
+			if (MatWhenDensEqPct < Thr.MatWhenDensEq) { Test.AddError(FString::Printf(TEXT("%s LOD%d material(density==) %.2f%% < %.2f%%"), Label, LOD, MatWhenDensEqPct, Thr.MatWhenDensEq)); bAllPass = false; }
 		}
-
-		float MatchPercent = (float)(MatchCount + CloseCount) / CPUData.Num() * 100.0f;
-
-		AddInfo(FString::Printf(TEXT("CPU vs GPU: %d exact matches, %d close matches (%.1f%% within tolerance)"),
-			MatchCount, CloseCount, MatchPercent));
-
-		// At least 90% should match or be close
-		TestTrue(TEXT("CPU and GPU results should be similar (90%+ within tolerance)"), MatchPercent >= 90.0f);
+		return bAllPass;
 	}
-
-	GPUGenerator.ReleaseHandle(Handle);
-	GPUGenerator.Shutdown();
-
-	return true;
-}
+} // namespace VoxelParityHarness
 
 // Phase B: strict GPU==CPU parity for the FULL FVoxelData (density + material + biome + metadata) with a
 // biome configuration (biomes + height rule + ore vein) + a conditioning zone, at LOD 0/1/2. Runs the CPU
@@ -361,80 +374,9 @@ bool FVoxelGPUvsCPUMaterialParityTest::RunTest(const FString& Parameters)
 	// Conditioning zone overlapping the chunk (exercise the GPU height-flatten before the SDF).
 	Request.ConditioningZones.Add(FVoxelConditioningZone(FVector2D(4800.0, 1600.0), 800.0f, 1200.0f, 500.0f, 1.0f));
 
-	bool bAllPass = true;
-	const int32 LODs[3] = { 0, 1, 2 };
-	for (int32 li = 0; li < 3; ++li)
-	{
-		Request.LODLevel = LODs[li];
-
-		TArray<FVoxelData> CPUData;
-		GPUGenerator.GenerateChunkCPU(Request, CPUData); // CPU fallback: includes water + underground passes
-
-		volatile bool bCompleted = false;
-		FVoxelGenerationHandle Handle = GPUGenerator.GenerateChunkAsync(Request,
-			FOnVoxelGenerationComplete::CreateLambda([&bCompleted](FVoxelGenerationHandle, bool) { bCompleted = true; }));
-		const double StartTime = FPlatformTime::Seconds();
-		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 10.0)
-		{
-			FPlatformProcess::Sleep(0.01f);
-			FlushRenderingCommands();
-		}
-		TArray<FVoxelData> GPUData;
-		GPUGenerator.ReadbackToCPU(Handle, GPUData);
-		GPUGenerator.ReleaseHandle(Handle);
-
-		// Apply the same post-passes the streaming path runs on GPU readback (water + underground).
-		FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, GPUData);
-
-		if (CPUData.Num() != GPUData.Num() || CPUData.Num() == 0)
-		{
-			AddError(FString::Printf(TEXT("LOD%d: size mismatch/empty CPU=%d GPU=%d"), LODs[li], CPUData.Num(), GPUData.Num()));
-			bAllPass = false;
-			continue;
-		}
-
-		const int32 Total = CPUData.Num();
-		int32 DensityClose = 0, MatMatch = 0, BiomeMatch = 0, MetaMatch = 0;
-		int32 DensityEqualCount = 0, MatMatchWhenDensEqual = 0;
-		int32 Reported = 0;
-		for (int32 i = 0; i < Total; ++i)
-		{
-			const FVoxelData& C = CPUData[i];
-			const FVoxelData& G = GPUData[i];
-			if (FMath::Abs((int32)C.Density - (int32)G.Density) <= 2) { DensityClose++; }
-			if (C.MaterialID == G.MaterialID) { MatMatch++; }
-			if (C.BiomeID == G.BiomeID) { BiomeMatch++; }
-			if (C.Metadata == G.Metadata) { MetaMatch++; }
-			if (C.Density == G.Density)
-			{
-				DensityEqualCount++;
-				if (C.MaterialID == G.MaterialID) { MatMatchWhenDensEqual++; }
-			}
-			if ((C.MaterialID != G.MaterialID || C.BiomeID != G.BiomeID) && Reported < 8)
-			{
-				AddInfo(FString::Printf(TEXT("LOD%d mismatch @%d: dens C=%d G=%d, mat C=%d G=%d, biome C=%d G=%d, meta C=%d G=%d"),
-					LODs[li], i, C.Density, G.Density, C.MaterialID, G.MaterialID, C.BiomeID, G.BiomeID, C.Metadata, G.Metadata));
-				Reported++;
-			}
-		}
-
-		const float DensityClosePct = 100.0f * DensityClose / Total;
-		const float MatPct = 100.0f * MatMatch / Total;
-		const float BiomePct = 100.0f * BiomeMatch / Total;
-		const float MetaPct = 100.0f * MetaMatch / Total;
-		const float MatWhenDensEqPct = DensityEqualCount > 0 ? 100.0f * MatMatchWhenDensEqual / DensityEqualCount : 100.0f;
-
-		AddInfo(FString::Printf(TEXT("LOD%d [%d voxels]: density~%.1f%%, material %.1f%%, biome %.1f%%, meta %.1f%%, material(density==) %.2f%%"),
-			LODs[li], Total, DensityClosePct, MatPct, BiomePct, MetaPct, MatWhenDensEqPct));
-
-		// Density near-identical (Phase A). Material/biome/meta exact except at density boundaries; when the
-		// density is identical, material must match almost exactly (isolates logic errors from FP boundaries).
-		if (DensityClosePct < 99.0f) { AddError(FString::Printf(TEXT("LOD%d density parity %.1f%% < 99%%"), LODs[li], DensityClosePct)); bAllPass = false; }
-		if (MatPct < 95.0f) { AddError(FString::Printf(TEXT("LOD%d material parity %.1f%% < 95%%"), LODs[li], MatPct)); bAllPass = false; }
-		if (BiomePct < 98.0f) { AddError(FString::Printf(TEXT("LOD%d biome parity %.1f%% < 98%%"), LODs[li], BiomePct)); bAllPass = false; }
-		if (MetaPct < 98.0f) { AddError(FString::Printf(TEXT("LOD%d metadata parity %.1f%% < 98%%"), LODs[li], MetaPct)); bAllPass = false; }
-		if (MatWhenDensEqPct < 99.0f) { AddError(FString::Printf(TEXT("LOD%d material(density==) %.2f%% < 99%%"), LODs[li], MatWhenDensEqPct)); bAllPass = false; }
-	}
+	// Density near-identical (Phase A). Material/biome/meta exact except at density boundaries; when the
+	// density is identical, material must match almost exactly (isolates logic errors from FP boundaries).
+	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("InfinitePlane"));
 
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
@@ -497,63 +439,322 @@ bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 	Request.IslandParams.CenterY = 0.0f;
 	Request.IslandParams.EdgeHeight = -1000.0f;
 
-	bool bAllPass = true;
-	const int32 LODs[3] = { 0, 1, 2 };
-	for (int32 li = 0; li < 3; ++li)
-	{
-		Request.LODLevel = LODs[li];
-
-		TArray<FVoxelData> CPUData;
-		GPUGenerator.GenerateChunkCPU(Request, CPUData);
-
-		volatile bool bCompleted = false;
-		FVoxelGenerationHandle Handle = GPUGenerator.GenerateChunkAsync(Request,
-			FOnVoxelGenerationComplete::CreateLambda([&bCompleted](FVoxelGenerationHandle, bool) { bCompleted = true; }));
-		const double StartTime = FPlatformTime::Seconds();
-		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 10.0)
-		{
-			FPlatformProcess::Sleep(0.01f);
-			FlushRenderingCommands();
-		}
-		TArray<FVoxelData> GPUData;
-		GPUGenerator.ReadbackToCPU(Handle, GPUData);
-		GPUGenerator.ReleaseHandle(Handle);
-		FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, GPUData);
-
-		if (CPUData.Num() != GPUData.Num() || CPUData.Num() == 0)
-		{
-			AddError(FString::Printf(TEXT("IslandBowl LOD%d: size mismatch/empty CPU=%d GPU=%d"), LODs[li], CPUData.Num(), GPUData.Num()));
-			bAllPass = false;
-			continue;
-		}
-
-		const int32 Total = CPUData.Num();
-		int32 DensityClose = 0, MatMatch = 0, BiomeMatch = 0, DensityEq = 0, MatWhenEq = 0;
-		for (int32 i = 0; i < Total; ++i)
-		{
-			const FVoxelData& C = CPUData[i];
-			const FVoxelData& G = GPUData[i];
-			if (FMath::Abs((int32)C.Density - (int32)G.Density) <= 2) { DensityClose++; }
-			if (C.MaterialID == G.MaterialID) { MatMatch++; }
-			if (C.BiomeID == G.BiomeID) { BiomeMatch++; }
-			if (C.Density == G.Density) { DensityEq++; if (C.MaterialID == G.MaterialID) { MatWhenEq++; } }
-		}
-		const float DC = 100.0f * DensityClose / Total;
-		const float MP = 100.0f * MatMatch / Total;
-		const float BP = 100.0f * BiomeMatch / Total;
-		const float MWE = DensityEq > 0 ? 100.0f * MatWhenEq / DensityEq : 100.0f;
-		AddInfo(FString::Printf(TEXT("IslandBowl LOD%d [%d]: density~%.1f%%, material %.1f%%, biome %.1f%%, material(density==) %.2f%%"),
-			LODs[li], Total, DC, MP, BP, MWE));
-
-		if (DC < 99.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d density %.1f%% < 99%%"), LODs[li], DC)); bAllPass = false; }
-		if (MP < 95.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d material %.1f%% < 95%%"), LODs[li], MP)); bAllPass = false; }
-		if (BP < 98.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d biome %.1f%% < 98%%"), LODs[li], BP)); bAllPass = false; }
-		if (MWE < 99.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d material(density==) %.2f%% < 99%%"), LODs[li], MWE)); bAllPass = false; }
-	}
+	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl"));
 
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
 	TestTrue(TEXT("GPU==CPU IslandBowl parity (continentalness + falloff) across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// Phase D: GPU==CPU parity for cave carving (cheese + tunnel layers + cave-wall material override), at
+// LOD 0/1/2. Verifies the GPU cave block (GenerateVoxelDensity.usf + CaveGeneration.ush) matches the CPU
+// CalculateCaveDensity/SampleCaveLayer path. The config uses NO biome cave overrides and no underwater
+// suppression (GetBiomeCaveScale==1.0, no min-depth override) — that is exactly the core carving path the
+// GPU shader implements; per-biome scale + underwater min-depth are a documented GPU gap, not tested here.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUCavesParityTest, "VoxelWorlds.Generation.GPUvsCPUCavesParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUCavesParityTest::RunTest(const FString& Parameters)
+{
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->BuildGpuData();
+
+	// Global cave config: one cheese + one tunnel (spaghetti) layer, cave-wall override on. No biome
+	// overrides / underwater suppression → CPU reduces to the shader's core carving path.
+	UVoxelCaveConfiguration* CaveConfig = NewObject<UVoxelCaveConfiguration>();
+	CaveConfig->AddToRoot();
+	CaveConfig->bEnableCaves = true;
+	CaveConfig->BiomeOverrides.Empty();     // GetBiomeCaveScale() == 1.0, GetBiomeMinDepthOverride() == -1
+	CaveConfig->UnderwaterMinDepth = 0.0f;  // no underwater min-depth (shader doesn't implement it)
+	CaveConfig->bOverrideCaveWallMaterial = true;
+	CaveConfig->CaveWallMaterialID = 2;
+	CaveConfig->CaveWallMaterialMinDepth = 8.0f;
+	CaveConfig->CaveLayers.Empty();
+	{
+		FCaveLayerConfig Cheese;
+		Cheese.bEnabled = true;
+		Cheese.CaveType = ECaveType::Cheese;
+		Cheese.SeedOffset = 1234;
+		Cheese.Frequency = 0.010f; Cheese.Octaves = 3; Cheese.Persistence = 0.5f; Cheese.Lacunarity = 2.0f;
+		Cheese.Threshold = 0.30f; Cheese.CarveStrength = 1.0f; Cheese.CarveFalloff = 0.25f;
+		Cheese.MinDepth = 4.0f; Cheese.MaxDepth = 0.0f; Cheese.DepthFadeWidth = 4.0f; Cheese.VerticalScale = 0.6f;
+		CaveConfig->CaveLayers.Add(Cheese);
+
+		FCaveLayerConfig Tunnel;
+		Tunnel.bEnabled = true;
+		Tunnel.CaveType = ECaveType::Spaghetti;
+		Tunnel.SeedOffset = 5678;
+		Tunnel.Frequency = 0.012f; Tunnel.Octaves = 3; Tunnel.Persistence = 0.5f; Tunnel.Lacunarity = 2.0f;
+		Tunnel.Threshold = 0.30f; Tunnel.CarveStrength = 1.0f; Tunnel.CarveFalloff = 0.20f;
+		Tunnel.MinDepth = 4.0f; Tunnel.MaxDepth = 0.0f; Tunnel.DepthFadeWidth = 4.0f; Tunnel.VerticalScale = 0.7f;
+		Tunnel.SecondNoiseSeedOffset = 7777; Tunnel.SecondNoiseFrequencyScale = 1.2f;
+		CaveConfig->CaveLayers.Add(Tunnel);
+	}
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+
+	FVoxelNoiseGenerationRequest Request;
+	Request.ChunkCoord = FIntVector(3, 1, 0); // same chunk as the InfinitePlane material test (has real terrain)
+	Request.ChunkSize = 16;
+	Request.VoxelSize = 100.0f;
+	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Request.NoiseParams.Seed = 4325;
+	Request.NoiseParams.Frequency = 0.0025f;
+	Request.NoiseParams.Amplitude = 1.0f;
+	Request.NoiseParams.Octaves = 4;
+	Request.NoiseParams.Lacunarity = 2.0f;
+	Request.NoiseParams.Persistence = 0.5f;
+	Request.WorldMode = EWorldMode::InfinitePlane;
+	Request.SeaLevel = 0.0f;
+	Request.HeightScale = 4000.0f;
+	Request.BaseHeight = 0.0f;
+	Request.bEnableBiomes = true;
+	Request.BiomeConfiguration = BiomeConfig;
+	Request.bEnableCaves = true;
+	Request.CaveConfiguration = CaveConfig;
+	Request.bEnableWaterLevel = false; // terrain above water → bUnderwater=false (no underwater suppression)
+
+	// Guard against a vacuous pass: confirm caves actually carved voxels. The CAVE flag is temporary
+	// (cleared by the water-fill pass), so count the persistent UNDERGROUND flag on air voxels — in a
+	// terrain chunk, underground air comes from cave carving.
+	{
+		FVoxelNoiseGenerationRequest Probe = Request; Probe.LODLevel = 0;
+		TArray<FVoxelData> ProbeData;
+		GPUGenerator.GenerateChunkCPU(Probe, ProbeData);
+		int32 UndergroundAir = 0;
+		for (const FVoxelData& V : ProbeData)
+		{
+			if (V.IsAir() && V.HasUndergroundFlag()) { UndergroundAir++; }
+		}
+		AddInfo(FString::Printf(TEXT("Caves probe: %d underground-air (cave) voxels of %d"), UndergroundAir, ProbeData.Num()));
+		TestTrue(TEXT("Cave config should carve some voxels (non-vacuous test)"), UndergroundAir > 0);
+	}
+
+	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Caves"));
+
+	GPUGenerator.Shutdown();
+	CaveConfig->RemoveFromRoot();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU caves parity (cheese + tunnel + cave-wall) across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// Phase D: GPU==CPU parity across all four noise types (Perlin, Simplex, Cellular, Voronoi) driving the
+// terrain height field, with biomes on, at LOD 0/1/2. Perlin+Simplex were already covered; Cellular+Voronoi
+// are the new coverage. CPU and GPU share the same Perlin permutation table + Hash3D, the 3x3x3 cell search,
+// and the F1 / (F2-F1) mappings — this locks them in lockstep. The density~% channel is the primary
+// noise-type signal (the terrain surface derives directly from the chosen noise type).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUNoiseTypeParityTest, "VoxelWorlds.Generation.GPUvsCPUNoiseTypeParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUNoiseTypeParityTest::RunTest(const FString& Parameters)
+{
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->BuildGpuData();
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+
+	const EVoxelNoiseType Types[4] = { EVoxelNoiseType::Perlin, EVoxelNoiseType::Simplex, EVoxelNoiseType::Cellular, EVoxelNoiseType::Voronoi };
+	const TCHAR* Names[4] = { TEXT("Perlin"), TEXT("Simplex"), TEXT("Cellular"), TEXT("Voronoi") };
+
+	bool bAllPass = true;
+	for (int32 ti = 0; ti < 4; ++ti)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.ChunkCoord = FIntVector(3, 1, 0);
+		Request.ChunkSize = 16;
+		Request.VoxelSize = 100.0f;
+		Request.NoiseParams.NoiseType = Types[ti];
+		Request.NoiseParams.Seed = 1337;
+		Request.NoiseParams.Frequency = 0.0025f;
+		Request.NoiseParams.Amplitude = 1.0f;
+		Request.NoiseParams.Octaves = 3;
+		Request.NoiseParams.Lacunarity = 2.0f;
+		Request.NoiseParams.Persistence = 0.5f;
+		Request.WorldMode = EWorldMode::InfinitePlane;
+		Request.SeaLevel = 0.0f;
+		Request.HeightScale = 3000.0f;
+		Request.BaseHeight = 0.0f;
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = BiomeConfig;
+
+		const FString Label = FString::Printf(TEXT("Noise-%s"), Names[ti]);
+		if (!VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, *Label))
+		{
+			bAllPass = false;
+		}
+	}
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU parity across Perlin/Simplex/Cellular/Voronoi at LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// Phase D: GPU==CPU parity with water ON — underwater material selection + the water-fill post-pass, at
+// LOD 0/1/2. Phase B/C only ran with water off; this covers the underwater branch (GpuMaterialAtDepth's
+// UwSurf/UwSub bands, gated by WaterLevelEnabled && EnableUnderwaterMaterials && TerrainHeight < WaterLevel)
+// and the shared ApplyWaterFillPass (WATER flag). WaterLevel is set above the terrain so surface voxels are
+// underwater; distinct underwater materials make the branch observable (vs the surface materials Phase B
+// already covered).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUWaterParityTest, "VoxelWorlds.Generation.GPUvsCPUWaterParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUWaterParityTest::RunTest(const FString& Parameters)
+{
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->bEnableUnderwaterMaterials = true;
+	// Distinct underwater materials so the underwater branch is observably different from the surface path
+	// (which Phase B already covered). Any solid surface/subsurface voxel below water becomes 20/21.
+	for (FBiomeDefinition& Biome : BiomeConfig->Biomes)
+	{
+		Biome.UnderwaterSurfaceMaterial = 20;
+		Biome.UnderwaterSubsurfaceMaterial = 21;
+	}
+	BiomeConfig->BuildGpuData();
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+
+	FVoxelNoiseGenerationRequest Request;
+	Request.ChunkCoord = FIntVector(3, 1, 0);
+	Request.ChunkSize = 16;
+	Request.VoxelSize = 100.0f;
+	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Request.NoiseParams.Seed = 4325;
+	Request.NoiseParams.Frequency = 0.0025f;
+	Request.NoiseParams.Amplitude = 1.0f;
+	Request.NoiseParams.Octaves = 4;
+	Request.NoiseParams.Lacunarity = 2.0f;
+	Request.NoiseParams.Persistence = 0.5f;
+	Request.WorldMode = EWorldMode::InfinitePlane;
+	Request.SeaLevel = 0.0f;
+	Request.HeightScale = 3000.0f;
+	Request.BaseHeight = 0.0f;
+	Request.bEnableBiomes = true;
+	Request.BiomeConfiguration = BiomeConfig;
+	Request.bEnableWaterLevel = true;
+	// Water level must sit inside this chunk's Z span [0,1600): ApplyWaterFillPass only column-scans the
+	// chunk that CONTAINS the water level (bChunkContainsWaterLevel). Most columns' terrain surface is below
+	// 800 (HeightScale 3000, mean ~0) → their in-chunk surface voxels are underwater.
+	Request.WaterLevel = 800.0f;
+
+	// Guard against a vacuous pass: confirm water actually filled voxels AND underwater materials appeared.
+	{
+		FVoxelNoiseGenerationRequest Probe = Request; Probe.LODLevel = 0;
+		TArray<FVoxelData> ProbeData;
+		GPUGenerator.GenerateChunkCPU(Probe, ProbeData);
+		int32 WaterCount = 0, UwMatCount = 0;
+		for (const FVoxelData& V : ProbeData)
+		{
+			if (V.HasWaterFlag()) { WaterCount++; }
+			if (V.MaterialID == 20 || V.MaterialID == 21) { UwMatCount++; }
+		}
+		AddInfo(FString::Printf(TEXT("Water probe: %d water-flagged, %d underwater-material of %d"), WaterCount, UwMatCount, ProbeData.Num()));
+		TestTrue(TEXT("Water config should fill some water voxels (non-vacuous)"), WaterCount > 0);
+		TestTrue(TEXT("Underwater materials should appear (non-vacuous)"), UwMatCount > 0);
+	}
+
+	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Water"));
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU water parity (underwater materials + water fill) across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// Phase D: GPU==CPU parity for ore vein variants — a STREAK-shape global ore (exercises the streak-stretch
+// branch of SampleGpuOreVeinNoise) and a distinct PER-BIOME ore range (exercises the per-biome
+// OreStart/OreCount path, where different biomes bake different ore lists). The chunk is pushed fully
+// underground (raised BaseHeight) so every voxel is deep solid → the material(density==) channel compares
+// ore selection on the whole chunk. Rarity stays 1 (rarity<1 is a documented double-vs-float precision gap).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUOreVariantParityTest, "VoxelWorlds.Generation.GPUvsCPUOreVariantParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUOreVariantParityTest::RunTest(const FString& Parameters)
+{
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->bEnableOreVeins = true;
+
+	// Use PER-BIOME ores (Biome.BiomeOreVeins is read fresh by GetOreVeinsForBiome — no dependency on the
+	// lazily-rebuilt global-ore cache, which a direct GlobalOreVeins edit wouldn't mark dirty). Every biome
+	// gets a STREAK ore (exercises SampleGpuOreVeinNoise's streak-stretch branch); biome 0 additionally gets
+	// a blob "gem" so it bakes a distinct 2-ore range vs the others. bAddToGlobalOres=false → the biome ores
+	// replace globals, so GetOreVeinsForBiome returns exactly this list (CPU per-voxel + GPU bake agree).
+	for (int32 bi = 0; bi < BiomeConfig->Biomes.Num(); ++bi)
+	{
+		FBiomeDefinition& Biome = BiomeConfig->Biomes[bi];
+		Biome.bAddToGlobalOres = false;
+		Biome.BiomeOreVeins.Empty();
+
+		FOreVeinConfig Streak;
+		Streak.Name = TEXT("StreakOre"); Streak.MaterialID = 9; Streak.MinDepth = 12.0f; Streak.MaxDepth = 0.0f;
+		Streak.Shape = EOreVeinShape::Streak; Streak.StreakStretch = 3.0f;
+		Streak.Frequency = 0.03f; Streak.Threshold = 0.50f; Streak.SeedOffset = 222; Streak.Rarity = 1.0f; Streak.Priority = 0;
+		Biome.BiomeOreVeins.Add(Streak);
+
+		if (bi == 0)
+		{
+			FOreVeinConfig Gem;
+			Gem.Name = TEXT("BiomeGem"); Gem.MaterialID = 12; Gem.MinDepth = 12.0f; Gem.MaxDepth = 0.0f;
+			Gem.Shape = EOreVeinShape::Blob; Gem.Frequency = 0.025f; Gem.Threshold = 0.50f; Gem.SeedOffset = 333; Gem.Rarity = 1.0f; Gem.Priority = 5;
+			Biome.BiomeOreVeins.Add(Gem);
+		}
+	}
+
+	BiomeConfig->BuildGpuData();
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+
+	FVoxelNoiseGenerationRequest Request;
+	Request.ChunkCoord = FIntVector(3, 1, 0);
+	Request.ChunkSize = 16;
+	Request.VoxelSize = 100.0f;
+	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Request.NoiseParams.Seed = 4325;
+	Request.NoiseParams.Frequency = 0.0025f;
+	Request.NoiseParams.Amplitude = 1.0f;
+	Request.NoiseParams.Octaves = 4;
+	Request.NoiseParams.Lacunarity = 2.0f;
+	Request.NoiseParams.Persistence = 0.5f;
+	Request.WorldMode = EWorldMode::InfinitePlane;
+	Request.SeaLevel = 0.0f;
+	Request.HeightScale = 2000.0f;
+	Request.BaseHeight = 5000.0f; // raise the surface above the chunk → the whole chunk is deep solid
+	Request.bEnableBiomes = true;
+	Request.BiomeConfiguration = BiomeConfig;
+
+	// Guard against a vacuous pass: confirm some ore voxels (streak mat 9 or gem mat 12) actually placed.
+	{
+		FVoxelNoiseGenerationRequest Probe = Request; Probe.LODLevel = 0;
+		TArray<FVoxelData> ProbeData;
+		GPUGenerator.GenerateChunkCPU(Probe, ProbeData);
+		int32 OreCount = 0;
+		for (const FVoxelData& V : ProbeData)
+		{
+			if (V.MaterialID == 9 || V.MaterialID == 12) { OreCount++; }
+		}
+		AddInfo(FString::Printf(TEXT("Ore probe: %d ore-material voxels of %d"), OreCount, ProbeData.Num()));
+		TestTrue(TEXT("Ore config should place some ore voxels (non-vacuous)"), OreCount > 0);
+	}
+
+	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("OreVariant"));
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU ore-variant parity (streak + per-biome) across LOD 0/1/2"), bAllPass);
 	return true;
 }
 

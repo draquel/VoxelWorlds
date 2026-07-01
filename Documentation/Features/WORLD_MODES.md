@@ -365,18 +365,39 @@ All modes benefit from the streaming optimizations:
 
 ---
 
-## GPU Generation Parity & World-Mode Review (Phase A–C, 2026-07-01)
+## GPU Generation Parity & World-Mode Review (Phase A–D, 2026-07-01)
 
 `bUseGPUGeneration` runs terrain generation on the GPU (render-thread compute dispatch + async readback).
 The GPU `GenerateVoxelDensity.usf` is verified bit-close to the CPU `FVoxelCPUNoiseGenerator` by the
 `VoxelWorlds.Generation.GPUvsCPU*` automation tests (full `FVoxelData` — density + material + biome +
-metadata — at LOD 0/1/2). Per-mode status:
+metadata — at LOD 0/1/2, real RHI in-editor). Per-mode status:
 
 | Mode | Analytic (`GetTerrainHeightAt`) | GPU generation | Parity result |
 |------|--------------------------------|----------------|---------------|
 | **InfinitePlane** | ✅ continentalness-modulated (matches gen) | ✅ full | density 99.9%, biome/metadata 100%, material 99.8% (0.2% = frac-dithered biome-blend-boundary voxels) |
 | **IslandBowl** | ✅ continentalness + edge falloff (matches gen) | ✅ full | density 99.9%, biome/material/metadata 100% |
 | **SphericalPlanet** | ⚠️ radial — analytic consumers assume Z-up (see gap analysis) | ❌ generic 3D-noise branch (RESERVED) | not GPU-parity; see gap analysis |
+
+**Feature × mode parity (Phase D hardening):** each feature path below is a dedicated `GPUvsCPU*` test that
+carries the full pipeline (biomes + materials + metadata) at LOD 0/1/2. All green for the two shipped modes
+(InfinitePlane + IslandBowl); every value is 100% except the FP-boundary channels noted above.
+
+| Feature | Test | Result |
+|---------|------|--------|
+| Cave carving (cheese + tunnel + cave-wall override) | `GPUvsCPUCavesParity` | density 99.9%, material/biome/meta 100% |
+| Noise types (Perlin, Simplex, **Cellular**, **Voronoi**) | `GPUvsCPUNoiseTypeParity` | 100% all channels (all four types) |
+| Water on (underwater materials + water-fill flag) | `GPUvsCPUWaterParity` | 100% all channels |
+| Ore veins (**streak** shape + **per-biome** ranges) | `GPUvsCPUOreVariantParity` | 100% all channels |
+
+Ports are deliberate mirrors: cave noise/threshold/depth-fade, the Perlin-permutation `Hash3D` behind
+Cellular/Voronoi, the underwater-material gate (`WaterLevelEnabled && EnableUnderwaterMaterials &&
+TerrainHeight < WaterLevel`), and the per-biome ore bake (`GetOreVeinsForBiome` → `OreStart/OreCount`) are
+identical CPU↔shader, so Phase D added **no** shader changes — it locked the existing behaviour with tests.
+Known limit (documented): ore veins with `Rarity < 1` use a precision-sensitive position hash (double on
+CPU, float on GPU) and may differ by a few voxels; per-biome cave *scale* / underwater cave suppression are
+CPU-only (the GPU cave loop carves the global layers). **Perf:** GPU single-chunk generation 3.6 ms vs CPU
+23.5 ms (32³, with readback); streaming perf per [[voxel-streaming-benchmark]] unchanged since Phase B
+(no gen-path code changed in Phase D).
 
 **Cached analytic world mode (fixed Phase C):** the chunk manager now builds the analytic
 `IVoxelWorldMode` matching `config->WorldMode` (was always `FInfinitePlaneWorldMode`). So spawn / nav /
@@ -418,4 +439,6 @@ generation (`voxel.GPUGeneration.Enable 0`) and treat the analytic queries as ap
 ---
 
 **Status**: All three world modes implemented and tested with mode-specific LOD culling.
-GPU generation parity: InfinitePlane + IslandBowl verified (Phase A–C); SphericalPlanet reserved (see gap analysis).
+GPU generation parity: InfinitePlane + IslandBowl fully verified across the feature matrix — density,
+materials, biomes, metadata, caves, all four noise types, water/underwater, and ore variants at LOD 0/1/2
+(Phase A–D). SphericalPlanet reserved (see gap analysis).
