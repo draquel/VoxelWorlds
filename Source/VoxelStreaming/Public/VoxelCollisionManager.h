@@ -264,6 +264,13 @@ public:
 	float GetCollisionRadius() const { return CollisionRadius; }
 
 	/**
+	 * Get the radius actually used this frame (CollisionRadius plus the speed-aware lead when
+	 * voxel.Collision.LeadFix is on). Diagnostics/validation for the Tier-0 fall-through fix.
+	 * Plain (non-UFUNCTION) getter so adding it is Live-Coding-friendly.
+	 */
+	float GetCurrentEffectiveRadius() const { return CurrentEffectiveRadius; }
+
+	/**
 	 * Set the LOD level used for collision meshes.
 	 *
 	 * @param LODLevel LOD level (higher = coarser, fewer triangles)
@@ -323,6 +330,13 @@ protected:
 	 * Update which chunks should have collision based on viewer distance.
 	 */
 	void UpdateCollisionDecisions(const FVector& ViewerPosition);
+
+	/**
+	 * Resolve the position collision should center on. With voxel.Collision.LeadFix on, this is the
+	 * player pawn (the camera trails it in 3rd person, which shrinks the forward collision lead);
+	 * otherwise the passed viewer position.
+	 */
+	FVector ResolveFocusPosition(const FVector& FallbackViewerPosition) const;
 
 	/**
 	 * Process dirty chunks that need collision regeneration (from edits).
@@ -453,6 +467,23 @@ protected:
 
 	/** True until we've successfully queued initial collision (chunks may not be loaded on first frame) */
 	bool bPendingInitialUpdate = true;
+
+	// ==================== Tier 0: pawn-centered, speed-aware collision (voxel.Collision.LeadFix) ====================
+
+	/** Last focus (pawn) position, for velocity estimation. FLT_MAX until the first Update(). */
+	FVector LastFocusPosition = FVector(FLT_MAX);
+
+	/** Smoothed focus speed (uu/s); drives the speed-aware radius lead. */
+	float SmoothedFocusSpeed = 0.0f;
+
+	/** Collision radius actually used this frame (CollisionRadius + speed lead). Refreshed in Update(). */
+	float CurrentEffectiveRadius = 5000.0f;
+
+	/** True when the focus was ~stationary last frame; used to force an eager stop->start re-decision. */
+	bool bWasStationary = true;
+
+	/** Speed (uu/s) at or below which the focus counts as stationary. */
+	static constexpr float StationarySpeedThreshold = 10.0f;
 
 	// ==================== Statistics ====================
 
