@@ -56,10 +56,55 @@ static TAutoConsoleVariable<int32> CVarLogBoundaryResidency(
 	TEXT("Log per-face neighbor-slice residency + all-Air state for each meshed chunk (LOD seam diagnosis)."),
 	ECVF_Default);
 
+// ==================== High-speed traversal: stream throughput overrides ====================
+// The walk-speed fall-through is a collision-cook issue (see VoxelCollisionManager); at high speed the
+// limiter shifts UPSTREAM to chunk generation — the pawn outruns the load front, so terrain ahead isn't
+// even loaded (feetLd=0) and collision can't cook what doesn't exist. These raise the generation/submit
+// throughput so the load front keeps up. Adaptive throttling still applies under frame pressure.
+
+static TAutoConsoleVariable<int32> CVarStreamMaxLoadPerFrame(
+	TEXT("voxel.Stream.MaxLoadPerFrame"),
+	0,
+	TEXT("Override MaxChunksToLoadPerFrame (generation dispatch + queue admission + render submit). "
+	     "0 = use configuration. Clamped [1,64]. Raise for fast/far traversal."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamMaxAsyncGenTasks(
+	TEXT("voxel.Stream.MaxAsyncGenTasks"),
+	0,
+	TEXT("Override max concurrent async chunk-generation tasks. 0 = use configuration. Clamped [1,16]."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamSpeedAdaptive(
+	TEXT("voxel.Stream.SpeedAdaptive"),
+	1,
+	TEXT("Auto-raise the per-frame load budget with viewer horizontal speed so the load front leads "
+	     "during fast traversal (idle stays at the configured budget). 0 = disable. "
+	     "Covers realistic fast movement; extreme speeds (~40 m/s+) still need forward-biased generation."),
+	ECVF_Default);
+
 UVoxelChunkManager::UVoxelChunkManager()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+}
+
+int32 UVoxelChunkManager::ResolveMaxLoadPerFrame() const
+{
+	const int32 CvarOverride = CVarStreamMaxLoadPerFrame.GetValueOnGameThread();
+	const int32 ConfigBase = Configuration ? Configuration->MaxChunksToLoadPerFrame : 8;
+	int32 Budget = (CvarOverride > 0) ? CvarOverride : ConfigBase;
+
+	// Speed-adaptive: the faster the viewer moves, the further the load front must lead, so raise the
+	// per-frame budget with horizontal speed (~+1 chunk/frame per 128 uu/s). Idle stays at ConfigBase.
+	// Realistic fast movement is covered; extreme speeds still need forward-biased generation.
+	if (CVarStreamSpeedAdaptive.GetValueOnGameThread() != 0)
+	{
+		const int32 SpeedBudget = ConfigBase + FMath::CeilToInt(ViewerHorizSpeed / 128.0f);
+		Budget = FMath::Max(Budget, SpeedBudget);
+	}
+
+	return FMath::Clamp(Budget, 1, 64);
 }
 
 void UVoxelChunkManager::BeginPlay()
@@ -107,7 +152,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		const float TargetFPS = Configuration ? Configuration->TargetFrameRate : 60.0f;
 		// -VoxelPinScheduler forces non-adaptive so the override/config limits hold for the run.
 		const bool bAdaptive = bSchedPinned ? false : (Configuration ? Configuration->bAdaptiveThrottling : true);
-		const int32 ConfigMaxAsyncGen = (SchedOverrideAsyncGen >= 0) ? SchedOverrideAsyncGen : (Configuration ? Configuration->MaxAsyncGenerationTasks : 2);
+		const int32 CvarAsyncGen = CVarStreamMaxAsyncGenTasks.GetValueOnGameThread();
+		const int32 ConfigMaxAsyncGen = (CvarAsyncGen > 0) ? FMath::Clamp(CvarAsyncGen, 1, 16)
+			: (SchedOverrideAsyncGen >= 0) ? SchedOverrideAsyncGen : (Configuration ? Configuration->MaxAsyncGenerationTasks : 2);
 		const int32 ConfigMaxAsync = (SchedOverrideAsyncMesh >= 0) ? SchedOverrideAsyncMesh : (Configuration ? Configuration->MaxAsyncMeshTasks : 4);
 		const int32 ConfigMaxLODRemesh = (SchedOverrideLODRemesh >= 0) ? SchedOverrideLODRemesh : (Configuration ? Configuration->MaxLODRemeshPerFrame : 4);
 		const int32 ConfigMaxPending = (SchedOverridePending >= 0) ? SchedOverridePending : (Configuration ? Configuration->MaxPendingMeshes : 4);
@@ -148,6 +195,16 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Cache the current viewer position for the stale-cull distance test used by the queue
 	// processors (which don't build their own context). Reflects the benchmark view override.
 	CurrentViewerPosition = Context.ViewerPosition;
+
+	// Track viewer HORIZONTAL speed for the speed-adaptive load budget (ResolveMaxLoadPerFrame).
+	// Smoothed so a teleport spike doesn't blow the budget out for a frame.
+	if (DeltaTime > SMALL_NUMBER && LastViewerPosForSpeed.X != FLT_MAX)
+	{
+		const FVector ViewerDelta = CurrentViewerPosition - LastViewerPosForSpeed;
+		const float InstHorizSpeed = FVector2D(ViewerDelta.X, ViewerDelta.Y).Size() / DeltaTime;
+		ViewerHorizSpeed = FMath::FInterpTo(ViewerHorizSpeed, InstHorizSpeed, DeltaTime, 4.0f);
+	}
+	LastViewerPosForSpeed = CurrentViewerPosition;
 
 	// Debug: Log viewer position periodically
 	static int32 ViewerLogCounter = 0;
@@ -218,7 +275,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Render submit (time-budgeted) ===
 	SectionStart = FPlatformTime::Seconds();
-	const int32 MaxRenderSubmitsPerFrame = Configuration ? Configuration->MaxChunksToLoadPerFrame : 8;
+	const int32 MaxRenderSubmitsPerFrame = ResolveMaxLoadPerFrame();
 	constexpr double RenderSubmitBudgetSec = 0.004; // 4ms budget — leaves headroom for other systems
 	if (PendingMeshQueue.Num() > 0)
 	{
@@ -1369,7 +1426,7 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 
 	// Limit how many chunks we add per frame to prevent overwhelming the queue
 	// Use a higher limit to ensure view distance fills in reasonable time
-	const int32 MaxChunksToAddPerFrame = Configuration->MaxChunksToLoadPerFrame * 4;
+	const int32 MaxChunksToAddPerFrame = ResolveMaxLoadPerFrame() * 4;
 	int32 ChunksAddedThisFrame = 0;
 	int32 ChunksRemaining = 0;
 
@@ -1455,7 +1512,7 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		return;
 	}
 
-	const int32 MaxChunks = Configuration->MaxChunksToLoadPerFrame;
+	const int32 MaxChunks = ResolveMaxLoadPerFrame();
 	int32 ProcessedCount = 0;
 
 	while (GenerationQueue.Num() > 0 && ProcessedCount < MaxChunks &&
