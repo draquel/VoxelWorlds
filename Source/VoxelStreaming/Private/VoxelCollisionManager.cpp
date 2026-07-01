@@ -54,6 +54,29 @@ static TAutoConsoleVariable<float> CVarCollisionMoveUpdateThreshold(
 	TEXT("Min focus movement (uu) between collision decision sweeps when LeadFix is on (legacy = 1000)."),
 	ECVF_Default);
 
+// ---- Tier 1: cook throughput + path/descent coverage (all under LeadFix) ----
+
+static TAutoConsoleVariable<int32> CVarCollisionMaxApplies(
+	TEXT("voxel.Collision.MaxAppliesPerFrame"),
+	4,
+	TEXT("Max collision cooks physics-registered per frame. Higher keeps collision up during sustained traversal, "
+	     "at some game-thread cost. Clamped [1,16]."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCollisionMaxAsyncTasks(
+	TEXT("voxel.Collision.MaxAsyncTasks"),
+	0,
+	TEXT("Override max concurrent async collision cook tasks. 0 = use the configured value. Clamped [1,8]."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCollisionLookAheadChunks(
+	TEXT("voxel.Collision.LookAheadChunks"),
+	2,
+	TEXT("When LeadFix is on, force-cook this many chunks ahead along the pawn's horizontal velocity — plus the "
+	     "chunk it is descending into — at top priority, so ground under imminent (incl. downhill) footfalls is "
+	     "cooked before entry. 0 disables path coverage."),
+	ECVF_Default);
+
 // ==================== UVoxelCollisionComponent ====================
 
 UVoxelCollisionComponent::UVoxelCollisionComponent(const FObjectInitializer& ObjectInitializer)
@@ -250,13 +273,18 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	const bool bLeadFix = CVarCollisionLeadFix.GetValueOnGameThread() != 0;
 	const FVector FocusPosition = ResolveFocusPosition(ViewerPosition);
 
-	// Estimate focus speed (uu/s) for a speed-aware radius and stop->start detection. Lightly
-	// smoothed so a teleport spike doesn't blow the radius out for a frame.
+	// Focus velocity for the speed-aware radius + path coverage. Use HORIZONTAL speed for the lead:
+	// vertical velocity (walking downhill or falling) must NOT inflate the radius, or it floods the
+	// cook queue with far chunks and starves the pawn's own next chunk — the sustained-traversal
+	// fall-through we saw on descents (effRadius ballooned to ~11k while dropping). Lightly smoothed
+	// so a teleport spike doesn't blow the radius out for a frame.
+	FVector FocusVelocity = FVector::ZeroVector;
 	float FocusSpeed = 0.0f;
 	if (DeltaTime > SMALL_NUMBER && LastFocusPosition.X != FLT_MAX)
 	{
-		const float InstSpeed = FVector::Dist(FocusPosition, LastFocusPosition) / DeltaTime;
-		SmoothedFocusSpeed = FMath::FInterpTo(SmoothedFocusSpeed, InstSpeed, DeltaTime, 5.0f);
+		FocusVelocity = (FocusPosition - LastFocusPosition) / DeltaTime;
+		const float InstHorizSpeed = FVector2D(FocusVelocity.X, FocusVelocity.Y).Size();
+		SmoothedFocusSpeed = FMath::FInterpTo(SmoothedFocusSpeed, InstHorizSpeed, DeltaTime, 5.0f);
 		FocusSpeed = SmoothedFocusSpeed;
 	}
 
@@ -296,6 +324,15 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	bWasStationary = FocusSpeed <= StationarySpeedThreshold;
 	LastFocusPosition = FocusPosition;
 
+	// Tier 1: guarantee the ground under the pawn and the chunks it is about to enter — including the
+	// one it is descending into — are cooked FIRST, overriding their center-distance priority (a
+	// descending chunk's center is far below, so distance-priority deprioritizes it until the pawn is
+	// already dropping in). This closes the residual sustained-traversal / downhill fall-through.
+	if (bLeadFix)
+	{
+		ForcePathCoverage(FocusPosition, FocusVelocity);
+	}
+
 	// 3. Process dirty chunks (from edits) — just queues requests, lightweight
 	ProcessDirtyChunks(FocusPosition);
 
@@ -316,6 +353,63 @@ FVector UVoxelCollisionManager::ResolveFocusPosition(const FVector& FallbackView
 		}
 	}
 	return FallbackViewerPosition;
+}
+
+void UVoxelCollisionManager::ForcePathCoverage(const FVector& FocusPosition, const FVector& FocusVelocity)
+{
+	if (!Configuration || !ChunkManager)
+	{
+		return;
+	}
+
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	if (ChunkWorldSize <= 0.f)
+	{
+		return;
+	}
+	const int32 LookAhead = FMath::Clamp(CVarCollisionLookAheadChunks.GetValueOnGameThread(), 0, 8);
+
+	// Boost path priorities far above the distance-based ones (which max at ~CurrentEffectiveRadius),
+	// so imminent-footfall chunks cook first. RequestCollision re-prioritizes an already-queued chunk.
+	constexpr float PathBoost = 1.0e6f;
+
+	auto CoverAt = [&](const FVector& WorldPos, float Bias)
+	{
+		const FIntVector Chunk = ChunkManager->WorldToChunkCoord(WorldPos);
+		if (ChunkManager->IsChunkLoaded(Chunk) && !HasCollision(Chunk))
+		{
+			RequestCollision(Chunk, PathBoost + Bias);
+		}
+	};
+
+	// The pawn's own chunk + a sample below its feet (covers standing atop a vertical chunk seam).
+	CoverAt(FocusPosition, 1000.f);
+	CoverAt(FocusPosition - FVector(0.f, 0.f, ChunkWorldSize * 0.5f), 950.f);
+
+	if (LookAhead <= 0)
+	{
+		return;
+	}
+
+	FVector HeadingH(FocusVelocity.X, FocusVelocity.Y, 0.f);
+	if (HeadingH.IsNearlyZero())
+	{
+		return; // stationary — nothing ahead to pre-cover
+	}
+	HeadingH = HeadingH.GetSafeNormal();
+	const bool bDescending = FocusVelocity.Z < -1.0f;
+
+	for (int32 i = 1; i <= LookAhead; ++i)
+	{
+		const FVector Ahead = FocusPosition + HeadingH * (ChunkWorldSize * i);
+		CoverAt(Ahead, 800.f - i);
+		// Descending: also cover the chunk one below the look-ahead point — terrain (and the pawn's
+		// feet) drop as it advances, so the chunk it will actually land in is lower than straight ahead.
+		if (bDescending)
+		{
+			CoverAt(Ahead - FVector(0.f, 0.f, ChunkWorldSize), 780.f - i);
+		}
+	}
 }
 
 void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
@@ -601,9 +695,11 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 
 void UVoxelCollisionManager::ProcessCookingQueue()
 {
-	// Launch async tasks from the queue up to the concurrency limit
+	// Launch async tasks from the queue up to the concurrency limit (cvar override for Tier 1 headroom).
+	const int32 AsyncOverride = CVarCollisionMaxAsyncTasks.GetValueOnGameThread();
+	const int32 MaxAsync = AsyncOverride > 0 ? FMath::Clamp(AsyncOverride, 1, 8) : MaxAsyncCollisionTasks;
 	while (CookingQueue.Num() > 0 &&
-		AsyncCollisionInProgress.Num() < MaxAsyncCollisionTasks)
+		AsyncCollisionInProgress.Num() < MaxAsync)
 	{
 		// Pop highest priority from the back (O(1) — queue sorted ascending, highest at back)
 		FCollisionCookRequest Request = MoveTemp(CookingQueue.Last());
@@ -726,7 +822,10 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 	FAsyncCollisionResult Result;
 	int32 AppliedCount = 0;
 
-	while (CompletedCollisionQueue.Dequeue(Result) && AppliedCount < MaxAppliesPerFrame)
+	// Tier 1: cvar-tunable applies-per-frame (was a hardcoded 2 — a throughput bottleneck during
+	// sustained traversal). Clamped so a bad value can't stall the game thread.
+	const int32 MaxApplies = FMath::Clamp(CVarCollisionMaxApplies.GetValueOnGameThread(), 1, 16);
+	while (CompletedCollisionQueue.Dequeue(Result) && AppliedCount < MaxApplies)
 	{
 		// Remove from in-progress tracking
 		AsyncCollisionInProgress.Remove(Result.ChunkCoord);
@@ -826,9 +925,33 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 
 void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, float Priority)
 {
-	// O(1) duplicate check
-	if (CookingQueueSet.Contains(ChunkCoord) || AsyncCollisionInProgress.Contains(ChunkCoord))
+	// Already cooking — can't reprioritize an in-flight task.
+	if (AsyncCollisionInProgress.Contains(ChunkCoord))
 	{
+		return;
+	}
+
+	// Already queued — bump its priority if this request is higher, then re-sort. Lets ForcePathCoverage
+	// promote a chunk that UpdateCollisionDecisions queued at a low center-distance priority.
+	if (CookingQueueSet.Contains(ChunkCoord))
+	{
+		for (int32 i = 0; i < CookingQueue.Num(); ++i)
+		{
+			if (CookingQueue[i].ChunkCoord == ChunkCoord)
+			{
+				if (Priority > CookingQueue[i].Priority)
+				{
+					CookingQueue.RemoveAt(i);
+					FCollisionCookRequest Bumped;
+					Bumped.ChunkCoord = ChunkCoord;
+					Bumped.LODLevel = CollisionLODLevel;
+					Bumped.Priority = Priority;
+					const int32 BumpIdx = Algo::LowerBound(CookingQueue, Bumped);
+					CookingQueue.Insert(Bumped, BumpIdx);
+				}
+				return;
+			}
+		}
 		return;
 	}
 

@@ -339,6 +339,14 @@ protected:
 	FVector ResolveFocusPosition(const FVector& FallbackViewerPosition) const;
 
 	/**
+	 * Tier 1 (LeadFix-gated): force-cook, at top priority, the chunk under the focus plus a short fan
+	 * along its horizontal velocity — including the chunk it is descending into — so ground under
+	 * imminent (and downhill) footfalls is cooked before the pawn enters it. Overrides the normal
+	 * center-distance priority (which deprioritizes a descending chunk whose center is far below).
+	 */
+	void ForcePathCoverage(const FVector& FocusPosition, const FVector& FocusVelocity);
+
+	/**
 	 * Process dirty chunks that need collision regeneration (from edits).
 	 */
 	void ProcessDirtyChunks(const FVector& ViewerPosition);
