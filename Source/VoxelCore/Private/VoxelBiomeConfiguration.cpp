@@ -29,6 +29,7 @@ void UVoxelBiomeConfiguration::PostLoad()
 	RebuildHeightRulesCache();
 	RebuildOreVeinsCache();
 	RebuildBakedCurves();
+	BuildGpuData();
 }
 
 void UVoxelBiomeConfiguration::InitializeDefaults()
@@ -202,6 +203,7 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	RebuildHeightRulesCache();
 	RebuildOreVeinsCache();
 	RebuildBakedCurves();
+	BuildGpuData();
 }
 
 void UVoxelBiomeConfiguration::RebuildBakedCurves()
@@ -220,6 +222,52 @@ void UVoxelBiomeConfiguration::RebuildBakedCurves()
 		BakedHeightCurve[i] = HeightCurve ? HeightCurve->Eval(T) : 0.0f;
 		BakedHeightScaleCurve[i] = ScaleCurve ? ScaleCurve->Eval(T) : 1.0f;
 	}
+}
+
+void UVoxelBiomeConfiguration::BuildGpuData()
+{
+	BakedGpuBiomes.Reset();
+	BakedGpuHeightRules.Reset();
+	BakedGpuOreVeins.Reset();
+
+	// Biomes (in Biomes array order — the shader blend visits them in the same order) + per-biome ores
+	// flattened into BakedGpuOreVeins. Each biome resolves its applicable ores exactly like the CPU
+	// per-voxel path (GetOreVeinsForBiome: biome-specific override or global, priority-sorted).
+	for (const FBiomeDefinition& Biome : Biomes)
+	{
+		TArray<FOreVeinConfig> Ores;
+		GetOreVeinsForBiome(Biome.BiomeID, Ores);
+
+		const int32 OreStart = BakedGpuOreVeins.Num() / GPU_OREVEIN_FLOAT4_STRIDE;
+		for (const FOreVeinConfig& Ore : Ores)
+		{
+			BakedGpuOreVeins.Add(FVector4f(static_cast<float>(Ore.MaterialID), Ore.MinDepth, Ore.MaxDepth, static_cast<float>(static_cast<uint8>(Ore.Shape))));
+			BakedGpuOreVeins.Add(FVector4f(Ore.Frequency, Ore.Threshold, static_cast<float>(Ore.SeedOffset), Ore.Rarity));
+			BakedGpuOreVeins.Add(FVector4f(Ore.StreakStretch, 0.0f, 0.0f, 0.0f));
+		}
+		const int32 OreCount = Ores.Num();
+
+		BakedGpuBiomes.Add(FVector4f(Biome.TemperatureRange.X, Biome.TemperatureRange.Y, Biome.MoistureRange.X, Biome.MoistureRange.Y));
+		BakedGpuBiomes.Add(FVector4f(Biome.ContinentalnessRange.X, Biome.ContinentalnessRange.Y, Biome.SurfaceDepth, Biome.SubsurfaceDepth));
+		BakedGpuBiomes.Add(FVector4f(static_cast<float>(Biome.SurfaceMaterial), static_cast<float>(Biome.SubsurfaceMaterial), static_cast<float>(Biome.DeepMaterial), static_cast<float>(Biome.UnderwaterSurfaceMaterial)));
+		BakedGpuBiomes.Add(FVector4f(static_cast<float>(Biome.UnderwaterSubsurfaceMaterial), static_cast<float>(Biome.SelectionPriority), static_cast<float>(OreStart), static_cast<float>(OreCount)));
+		BakedGpuBiomes.Add(FVector4f(static_cast<float>(Biome.BiomeID), 0.0f, 0.0f, 0.0f));
+	}
+
+	// Height rules — priority-sorted mirror of ApplyHeightMaterialRules (first applicable wins).
+	if (bHeightRulesCacheDirty)
+	{
+		RebuildHeightRulesCache();
+	}
+	for (const FHeightMaterialRule& Rule : SortedHeightRules)
+	{
+		BakedGpuHeightRules.Add(FVector4f(Rule.MinHeight, Rule.MaxHeight, Rule.MaxDepthBelowSurface, static_cast<float>(Rule.MaterialID)));
+		BakedGpuHeightRules.Add(FVector4f(Rule.bSurfaceOnly ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f));
+	}
+
+	BakedGpuBiomeCount = Biomes.Num();
+	BakedGpuHeightRuleCount = SortedHeightRules.Num();
+	BakedGpuOreVeinCount = BakedGpuOreVeins.Num() / GPU_OREVEIN_FLOAT4_STRIDE;
 }
 
 void UVoxelBiomeConfiguration::GetContinentalnessTerrainParams(float Continentalness, float& OutHeightOffset, float& OutHeightScaleMultiplier) const
@@ -717,5 +765,6 @@ void UVoxelBiomeConfiguration::PostEditChangeProperty(FPropertyChangedEvent& Pro
 	RebuildHeightRulesCache();
 	RebuildOreVeinsCache();
 	RebuildBakedCurves();
+	BuildGpuData();
 }
 #endif

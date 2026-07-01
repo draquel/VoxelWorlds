@@ -109,6 +109,14 @@ public:
 	 */
 	static void Voronoi3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2, float& OutCellID);
 
+	/**
+	 * Run the post-generation passes (water fill + underground classification) on already-generated
+	 * voxel data. The GPU generation path calls this after readback to apply the same whole-chunk passes
+	 * that GenerateChunkCPU runs inline, so GPU and CPU produce identical water/underground metadata.
+	 * Static + state-free.
+	 */
+	static void ApplyPostReadbackPasses(const FVoxelNoiseGenerationRequest& Request, TArray<FVoxelData>& OutVoxelData);
+
 private:
 	bool bIsInitialized = false;
 

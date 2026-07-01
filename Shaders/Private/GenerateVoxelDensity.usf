@@ -15,6 +15,11 @@
 #include "/Plugin/VoxelWorlds/Private/WorldModeSDF.ush"
 #include "/Plugin/VoxelWorlds/Private/CaveGeneration.ush"
 
+// Voxel metadata flag bits — match FVoxelData::VOXEL_FLAG_* (stored in the high nibble of Metadata).
+#define VOXEL_FLAG_WATER 0x01u
+#define VOXEL_FLAG_CAVE 0x02u
+#define VOXEL_FLAG_UNDERGROUND 0x04u
+
 // ==================== Shader Parameters ====================
 
 // Chunk world position (origin of this chunk)
@@ -75,8 +80,34 @@ float4 CaveLayerVerticalScale;
 int WaterLevelEnabled;
 float WaterLevelHeight;
 
+// Biome / material parameters (Phase B) — see BiomeMaterial.ush + UVoxelBiomeConfiguration::BuildGpuData.
+// BiomeCount == 0 falls back to the legacy depth-based material.
+int BiomeCount;
+float BiomeBlendWidth;
+int TemperatureSeed;
+float TemperatureFrequency;
+int MoistureSeed;
+float MoistureFrequency;
+int EnableUnderwaterMaterials;
+uint DefaultUnderwaterMaterial;
+StructuredBuffer<float4> BiomeData;
+
+// Height rules / ore veins / cave-wall / conditioning (Phase B) — layouts in BiomeMaterial.ush.
+int HeightRuleCount;
+StructuredBuffer<float4> HeightRuleData;
+int OreVeinCount;
+StructuredBuffer<float4> OreVeinData;
+int CaveWallOverrideEnabled;
+uint CaveWallMaterialID;
+float CaveWallMaterialMinDepth;
+int ConditioningZoneCount;
+StructuredBuffer<float4> ConditioningZoneData;
+
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;
+
+// Per-voxel biome selection + material pipeline (references the biome globals declared above).
+#include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
 
 // ==================== Main Compute Shader ====================
 
@@ -121,6 +152,7 @@ void MainCS(
         // Apply continentalness height modulation
         float EffectiveBaseHeight = BaseHeight;
         float EffectiveHeightScale = HeightScale;
+        float ContinentalnessValue = 0.0; // reused for the biome blend below (CPU: shared with height path)
 
         if (ContinentalnessEnabled != 0)
         {
@@ -136,6 +168,7 @@ void MainCS(
                 2.0,
                 0.5
             );
+            ContinentalnessValue = ContinentalnessNoise;
 
             // Curve-based height offset lookup from baked samples (packed as float4[8])
             float FIdx = (ContinentalnessNoise + 1.0) * 0.5 * float(ContinentalnessCurveSamples - 1);
@@ -154,96 +187,123 @@ void MainCS(
             EffectiveHeightScale *= ScaleMult;
         }
 
-        // Infinite Plane: 2D heightmap-based terrain
-        float TerrainHeight;
-        Density = ApplyInfinitePlaneSDF(
-            WorldPos,
-            EffectiveVoxelSize,
-            NoiseType,
-            NoiseSeed,
-            NoiseOctaves,
-            NoiseFrequency,
-            NoiseAmplitude,
-            NoiseLacunarity,
-            NoisePersistence,
-            SeaLevel,
-            EffectiveHeightScale,
-            EffectiveBaseHeight,
-            TerrainHeight
-        );
-
-        // Assign material based on depth below surface
-        MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
-
-        // Cave carving: subtract density for underground cavities
-        if (CaveEnabled != 0 && Density >= 127u)
+        // Infinite Plane: 2D heightmap-based terrain. Decomposed (vs the monolithic ApplyInfinitePlaneSDF)
+        // so terrain conditioning can flatten the height BEFORE the density is derived — matches the CPU
+        // order: SampleTerrainNoise2D -> NoiseToTerrainHeight -> ApplyToHeight -> CalculateSignedDistance -> density.
+        float TerrainNoise = SampleTerrainHeight2D(
+            WorldPos.x, WorldPos.y,
+            NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
+        float TerrainHeight = NoiseToTerrainHeight(TerrainNoise, SeaLevel, EffectiveHeightScale, EffectiveBaseHeight);
+        if (ConditioningZoneCount > 0)
         {
-            float DepthBelowSurface = (TerrainHeight - WorldPos.z) / EffectiveVoxelSize;
+            TerrainHeight = GpuApplyConditioning(WorldPos.x, WorldPos.y, TerrainHeight);
+        }
+        Density = SignedDistanceToDensity(CalculateSignedDistance(WorldPos.z, TerrainHeight), EffectiveVoxelSize);
 
-            if (DepthBelowSurface > 0.0f)
+        // Depth below the terrain surface, in voxels (matches CPU: (TerrainHeight - WorldPos.Z) / VoxelSize).
+        float DepthBelowSurface = (TerrainHeight - WorldPos.z) / EffectiveVoxelSize;
+
+        // Cave carving BEFORE material selection (matches CPU order). Keep the max carve amount for the
+        // cave-wall material override and the solid->air transition flag.
+        uint PreCaveDensity = Density;
+        float MaxCarveDensity = 0.0f;
+        if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
+        {
+            for (int ci = 0; ci < CaveLayerCount; ++ci)
             {
-                float MaxCarveDensity = 0.0f;
+                // Apply vertical scale to flatten caves horizontally
+                float3 CavePos = float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]);
 
-                for (int ci = 0; ci < CaveLayerCount; ++ci)
+                float LayerCarve = 0.0f;
+
+                if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
                 {
-                    // Apply vertical scale to flatten caves horizontally
-                    float3 CavePos = float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]);
-
-                    float LayerCarve = 0.0f;
-
-                    if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
-                    {
-                        LayerCarve = SampleCheeseCave(
-                            CavePos,
-                            CaveLayerSeed[ci],
-                            CaveLayerFrequency[ci],
-                            CaveLayerOctaves[ci],
-                            CaveLayerPersistence[ci],
-                            CaveLayerLacunarity[ci],
-                            CaveLayerThreshold[ci],
-                            CaveLayerCarveFalloff[ci],
-                            CaveLayerCarveStrength[ci]);
-                    }
-                    else
-                    {
-                        LayerCarve = SampleTunnelCave(
-                            CavePos,
-                            CaveLayerSeed[ci],
-                            CaveLayerSeed2[ci],
-                            CaveLayerFrequency[ci],
-                            CaveLayerFrequency2[ci],
-                            CaveLayerOctaves[ci],
-                            CaveLayerPersistence[ci],
-                            CaveLayerLacunarity[ci],
-                            CaveLayerThreshold[ci],
-                            CaveLayerCarveFalloff[ci],
-                            CaveLayerCarveStrength[ci]);
-                    }
-
-                    // Apply depth fade
-                    LayerCarve *= CalculateDepthFade(
-                        DepthBelowSurface,
-                        CaveLayerMinDepth[ci],
-                        CaveLayerMaxDepth[ci],
-                        CaveLayerDepthFadeWidth[ci]);
-
-                    MaxCarveDensity = max(MaxCarveDensity, LayerCarve);
+                    LayerCarve = SampleCheeseCave(
+                        CavePos,
+                        CaveLayerSeed[ci],
+                        CaveLayerFrequency[ci],
+                        CaveLayerOctaves[ci],
+                        CaveLayerPersistence[ci],
+                        CaveLayerLacunarity[ci],
+                        CaveLayerThreshold[ci],
+                        CaveLayerCarveFalloff[ci],
+                        CaveLayerCarveStrength[ci]);
+                }
+                else
+                {
+                    LayerCarve = SampleTunnelCave(
+                        CavePos,
+                        CaveLayerSeed[ci],
+                        CaveLayerSeed2[ci],
+                        CaveLayerFrequency[ci],
+                        CaveLayerFrequency2[ci],
+                        CaveLayerOctaves[ci],
+                        CaveLayerPersistence[ci],
+                        CaveLayerLacunarity[ci],
+                        CaveLayerThreshold[ci],
+                        CaveLayerCarveFalloff[ci],
+                        CaveLayerCarveStrength[ci]);
                 }
 
-                // Subtract cave density from terrain density
-                if (MaxCarveDensity > 0.0f)
-                {
-                    float NewDensity = max(0.0f, float(Density) - MaxCarveDensity * 255.0f);
-                    Density = (uint)clamp(NewDensity, 0.0f, 255.0f);
-                }
+                // Apply depth fade
+                LayerCarve *= CalculateDepthFade(
+                    DepthBelowSurface,
+                    CaveLayerMinDepth[ci],
+                    CaveLayerMaxDepth[ci],
+                    CaveLayerDepthFadeWidth[ci]);
+
+                MaxCarveDensity = max(MaxCarveDensity, LayerCarve);
+            }
+
+            if (MaxCarveDensity > 0.0f)
+            {
+                float NewDensity = max(0.0f, float(Density) - MaxCarveDensity * 255.0f);
+                Density = (uint)clamp(NewDensity, 0.0f, 255.0f);
             }
         }
 
-        // Water flag: mark air voxels between terrain surface and water level
-        if (WaterLevelEnabled != 0 && Density < 127u
-            && WorldPos.z < WaterLevelHeight && WorldPos.z > TerrainHeight)
+        // Assign material: biome pipeline (Phase B) when biomes are configured, else legacy depth-based.
+        if (BiomeCount > 0)
         {
-            Metadata = Metadata | 0x10u; // Set bit 4 = water flag
+            float3 ClimateSamplePos = float3(WorldPos.x, WorldPos.y, 0.0);
+            float Temperature = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0, 2.0, 0.5);
+            float Moisture = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0, 2.0, 0.5);
+            uint OutBiome = 0u;
+            uint OreStart = 0u;
+            uint OreCount = 0u;
+            MaterialID = ComputeBiomeMaterial(Temperature, Moisture, ContinentalnessValue, DepthBelowSurface, TerrainHeight, OutBiome, OreStart, OreCount);
+            BiomeID = OutBiome;
+
+            // Height-based material overrides (snow at peaks, rock at altitude, etc.)
+            MaterialID = ApplyGpuHeightRules(MaterialID, WorldPos.z, DepthBelowSurface);
+
+            // Cave-wall material override (still-solid voxels partially carved near a cave boundary)
+            if (CaveWallOverrideEnabled != 0 && MaxCarveDensity > 0.0f && MaxCarveDensity < 1.0f
+                && Density >= 127u && DepthBelowSurface >= CaveWallMaterialMinDepth)
+            {
+                MaterialID = CaveWallMaterialID;
+            }
+
+            // Ore vein overrides (solid voxels well below surface; depth > 10 matches the CPU guard).
+            if (Density >= 127u && DepthBelowSurface > 10.0f)
+            {
+                uint OreMat;
+                if (GpuCheckOreVein(WorldPos, DepthBelowSurface, OreStart, OreCount, NoiseSeed, OreMat))
+                {
+                    MaterialID = OreMat;
+                }
+            }
+        }
+        else
+        {
+            MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
+        }
+
+        // Per-voxel cave/underground flag when cave carving turned solid -> air (matches CPU). The CPU
+        // ApplyWaterFillPass + ApplyUndergroundClassificationPass run after readback and refine these.
+        if (PreCaveDensity >= 127u && Density < 127u)
+        {
+            Metadata = Metadata | ((VOXEL_FLAG_CAVE | VOXEL_FLAG_UNDERGROUND) << 4);
         }
     }
     else

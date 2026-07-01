@@ -1,0 +1,326 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// GPU port of the per-voxel biome selection + material pipeline (Phase B). Mirrors
+// UVoxelBiomeConfiguration::GetBiomeBlend / GetBlendedMaterial[WithWater] and
+// FBiomeDefinition::GetMaterialAtDepth so GPU generation == CPU generation on materials + biomes.
+//
+// Include AFTER the loose shader-parameter globals are declared in GenerateVoxelDensity.usf — this
+// file reads them directly: StructuredBuffer<float4> BiomeData; int BiomeCount; float BiomeBlendWidth;
+// int EnableUnderwaterMaterials; uint DefaultUnderwaterMaterial; int WaterLevelEnabled; float WaterLevelHeight.
+//
+// BiomeData layout (GPU_BIOME_STRIDE float4s per biome, see UVoxelBiomeConfiguration::BuildGpuData):
+//   [b*5+0]=(TempMin,TempMax,MoistMin,MoistMax) [b*5+1]=(ContMin,ContMax,SurfaceDepth,SubsurfaceDepth)
+//   [b*5+2]=(SurfMat,SubMat,DeepMat,UwSurfMat)  [b*5+3]=(UwSubMat,Priority,OreStart,OreCount)
+//   [b*5+4]=(BiomeID,0,0,0)
+
+#define GPU_BIOME_STRIDE 5
+
+struct GpuBiome
+{
+    float2 TempRange;
+    float2 MoistRange;
+    float2 ContRange;
+    float  SurfaceDepth;
+    float  SubsurfaceDepth;
+    uint   SurfaceMat;
+    uint   SubsurfaceMat;
+    uint   DeepMat;
+    uint   UwSurfMat;
+    uint   UwSubMat;
+    float  Priority;
+    uint   OreStart;
+    uint   OreCount;
+    uint   BiomeID;
+};
+
+GpuBiome LoadGpuBiome(uint b)
+{
+    float4 a = BiomeData[b * GPU_BIOME_STRIDE + 0];
+    float4 c = BiomeData[b * GPU_BIOME_STRIDE + 1];
+    float4 m = BiomeData[b * GPU_BIOME_STRIDE + 2];
+    float4 n = BiomeData[b * GPU_BIOME_STRIDE + 3];
+    float4 p = BiomeData[b * GPU_BIOME_STRIDE + 4];
+
+    GpuBiome bio;
+    bio.TempRange = a.xy;
+    bio.MoistRange = a.zw;
+    bio.ContRange = c.xy;
+    bio.SurfaceDepth = c.z;
+    bio.SubsurfaceDepth = c.w;
+    bio.SurfaceMat = (uint)(m.x + 0.5);
+    bio.SubsurfaceMat = (uint)(m.y + 0.5);
+    bio.DeepMat = (uint)(m.z + 0.5);
+    bio.UwSurfMat = (uint)(m.w + 0.5);
+    bio.UwSubMat = (uint)(n.x + 0.5);
+    bio.Priority = n.y;
+    bio.OreStart = (uint)(n.z + 0.5);
+    bio.OreCount = (uint)(n.w + 0.5);
+    bio.BiomeID = (uint)(p.x + 0.5);
+    return bio;
+}
+
+struct BiomeBlendResult
+{
+    uint  Indices[4];   // indices into BiomeData
+    float Weights[4];   // normalized
+    int   Count;
+};
+
+// Mirror of UVoxelBiomeConfiguration::GetBiomeBlend: tiered continentalness gate + temp/moisture
+// smoothstep + priority boost -> top-4 by weight -> normalize.
+BiomeBlendResult SampleGpuBiomeBlend(float Temperature, float Moisture, float Continentalness)
+{
+    BiomeBlendResult R;
+    R.Count = 0;
+    [unroll] for (int k = 0; k < 4; ++k) { R.Indices[k] = 0u; R.Weights[k] = 0.0; }
+
+    if (BiomeCount <= 0)
+    {
+        R.Count = 1; // caller loads biome 0
+        return R;
+    }
+
+    float T = clamp(Temperature, -1.0, 1.0);
+    float M = clamp(Moisture, -1.0, 1.0);
+    float C = clamp(Continentalness, -1.0, 1.0);
+    float BW = max(BiomeBlendWidth, 0.01);
+
+    for (uint b = 0; b < (uint)BiomeCount; ++b)
+    {
+        GpuBiome bio = LoadGpuBiome(b);
+
+        // Step 1/2: continentalness hard gate + smoothstep factor
+        float contDist = min(C - bio.ContRange.x, bio.ContRange.y - C);
+        if (contDist < -BW) { continue; }
+        float contFactor;
+        if (contDist >= BW) { contFactor = 1.0; }
+        else { float t = (contDist + BW) / (2.0 * BW); contFactor = t * t * (3.0 - 2.0 * t); }
+
+        // Step 3: temperature/moisture 2D signed distance + smoothstep weight
+        float tmDist = min(min(T - bio.TempRange.x, bio.TempRange.y - T),
+                           min(M - bio.MoistRange.x, bio.MoistRange.y - M));
+        float tmWeight;
+        if (tmDist >= BW) { tmWeight = 1.0; }
+        else if (tmDist > -BW) { float t = (tmDist + BW) / (2.0 * BW); tmWeight = t * t * (3.0 - 2.0 * t); }
+        else { tmWeight = 0.0; }
+
+        // Step 4: combined weight with priority boost (Priority 0 -> 1x, 10 -> 4x)
+        float priorityBoost = pow(2.0, bio.Priority * 0.2);
+        float finalWeight = tmWeight * contFactor * priorityBoost;
+
+        if (finalWeight <= 0.001) { continue; }
+
+        // Insert into descending top-4 (keeps the highest-weight biomes, like the CPU sort+truncate)
+        [unroll] for (int i = 0; i < 4; ++i)
+        {
+            if (finalWeight > R.Weights[i])
+            {
+                [unroll] for (int j = 3; j > i; --j) { R.Weights[j] = R.Weights[j - 1]; R.Indices[j] = R.Indices[j - 1]; }
+                R.Weights[i] = finalWeight;
+                R.Indices[i] = b;
+                break;
+            }
+        }
+        R.Count = min(R.Count + 1, 4);
+    }
+
+    if (R.Count == 0)
+    {
+        R.Count = 1;
+        R.Indices[0] = 0u;
+        R.Weights[0] = 1.0;
+        return R;
+    }
+
+    // Normalize (empty slots hold weight 0 and don't affect the sum)
+    float total = R.Weights[0] + R.Weights[1] + R.Weights[2] + R.Weights[3];
+    if (total > 1e-4)
+    {
+        [unroll] for (int i = 0; i < 4; ++i) { R.Weights[i] /= total; }
+    }
+    return R;
+}
+
+// FBiomeDefinition::GetMaterialAtDepth (surface/subsurface/deep bands, + underwater variant).
+uint GpuMaterialAtDepth(GpuBiome bio, float DepthBelowSurface, bool bUnderwater)
+{
+    if (bUnderwater)
+    {
+        if (DepthBelowSurface <= bio.SurfaceDepth) { return bio.UwSurfMat; }
+        else if (DepthBelowSurface <= bio.SubsurfaceDepth) { return bio.UwSubMat; }
+        else { return bio.DeepMat; }
+    }
+    if (DepthBelowSurface <= bio.SurfaceDepth) { return bio.SurfaceMat; }
+    else if (DepthBelowSurface <= bio.SubsurfaceDepth) { return bio.SubsurfaceMat; }
+    else { return bio.DeepMat; }
+}
+
+// UVoxelBiomeConfiguration::GetBlendedMaterial[WithWater]: dominant, or frac-dithered weighted pick.
+uint GpuBlendedMaterial(BiomeBlendResult blend, float DepthBelowSurface, bool bUnderwater)
+{
+    if (blend.Count == 1 || blend.Weights[0] > 0.9)
+    {
+        return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
+    }
+
+    float randomValue = frac(blend.Weights[0] * 17.3 + blend.Weights[1] * 31.7 + DepthBelowSurface * 0.1);
+    float cumulative = 0.0;
+    [unroll] for (int i = 0; i < 4; ++i)
+    {
+        if (i < blend.Count)
+        {
+            cumulative += blend.Weights[i];
+            if (randomValue < cumulative)
+            {
+                return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[i]), DepthBelowSurface, bUnderwater);
+            }
+        }
+    }
+    return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
+}
+
+// Top-level: blend the biomes, output the dominant BiomeID + its ore range, return the blended material.
+uint ComputeBiomeMaterial(float Temperature, float Moisture, float Continentalness,
+                          float DepthBelowSurface, float TerrainHeight,
+                          out uint OutBiomeID, out uint OutOreStart, out uint OutOreCount)
+{
+    BiomeBlendResult blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
+    GpuBiome dominant = LoadGpuBiome(blend.Indices[0]);
+    OutBiomeID = dominant.BiomeID;
+    OutOreStart = dominant.OreStart;   // ore lookup uses the dominant biome (CPU: GetOreVeinsForBiome(BiomeID))
+    OutOreCount = dominant.OreCount;
+    bool bUnderwater = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainHeight < WaterLevelHeight);
+    return GpuBlendedMaterial(blend, DepthBelowSurface, bUnderwater);
+}
+
+// UVoxelBiomeConfiguration::ApplyHeightMaterialRules — first priority-sorted rule that applies wins.
+// HeightRuleData: 2 float4s per rule: [MinHeight,MaxHeight,MaxDepthBelowSurface,MaterialID][bSurfaceOnly,0,0,0].
+uint ApplyGpuHeightRules(uint CurrentMaterial, float WorldHeight, float DepthBelowSurface)
+{
+    for (int r = 0; r < HeightRuleCount; ++r)
+    {
+        float4 a = HeightRuleData[r * 2 + 0];
+        float4 b = HeightRuleData[r * 2 + 1];
+        float minH = a.x;
+        float maxH = a.y;
+        float maxDepth = a.z;
+        uint matID = (uint)(a.w + 0.5);
+        bool surfaceOnly = b.x > 0.5;
+
+        if (WorldHeight < minH || WorldHeight > maxH) { continue; }
+        if (surfaceOnly && DepthBelowSurface > maxDepth) { continue; }
+        return matID;
+    }
+    return CurrentMaterial;
+}
+
+// FVoxelCPUNoiseGenerator::SampleOreVeinNoise — Simplex FBM (2 octaves) with optional streak stretch.
+// Ore record (3 float4s): [MaterialID,MinDepth,MaxDepth,Shape][Frequency,Threshold,SeedOffset,Rarity][StreakStretch,0,0,0].
+float SampleGpuOreVeinNoise(float3 WorldPos, uint OreIdx, int WorldSeed)
+{
+    float4 o0 = OreVeinData[OreIdx * 3 + 0];
+    float4 o1 = OreVeinData[OreIdx * 3 + 1];
+    float4 o2 = OreVeinData[OreIdx * 3 + 2];
+
+    uint shape = (uint)(o0.w + 0.5);
+    float frequency = o1.x;
+    int seedOffset = (int)o1.z;
+    float streakStretch = o2.x;
+
+    float3 samplePos = WorldPos;
+    if (shape == 1u) // Streak — stretch along a position-derived pseudo-random direction
+    {
+        float streakSeed = (float)seedOffset * 0.1;
+        float3 streakDir;
+        streakDir.x = sin(WorldPos.y * 0.0001 + streakSeed);
+        streakDir.y = cos(WorldPos.x * 0.0001 + streakSeed * 1.5);
+        streakDir.z = sin(WorldPos.z * 0.0002 + streakSeed * 2.0);
+        streakDir = normalize(streakDir);
+        float proj = dot(WorldPos, streakDir);
+        float3 projected = WorldPos - streakDir * proj;
+        samplePos = projected + streakDir * (proj / streakStretch);
+    }
+
+    float noiseValue = FBM3D(samplePos, NOISE_TYPE_SIMPLEX, WorldSeed + seedOffset, 2, frequency, 1.0, 2.0, 0.5);
+    return (noiseValue + 1.0) * 0.5;
+}
+
+// FVoxelCPUNoiseGenerator::CheckOreVeinPlacement over [OreStart, OreStart+OreCount). First match wins.
+bool GpuCheckOreVein(float3 WorldPos, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, out uint OutMat)
+{
+    OutMat = 0u;
+    for (uint i = 0; i < OreCount; ++i)
+    {
+        uint idx = OreStart + i;
+        float4 o0 = OreVeinData[idx * 3 + 0];
+        float4 o1 = OreVeinData[idx * 3 + 1];
+        uint matID = (uint)(o0.x + 0.5);
+        float minDepth = o0.y;
+        float maxDepth = o0.z;
+        float threshold = o1.y;
+        float rarity = o1.w;
+
+        // IsValidDepth
+        if (DepthBelowSurface < minDepth) { continue; }
+        if (maxDepth > 0.0 && DepthBelowSurface > maxDepth) { continue; }
+
+        float oreNoise = SampleGpuOreVeinNoise(WorldPos, idx, WorldSeed);
+        if (oreNoise >= threshold)
+        {
+            if (rarity < 1.0)
+            {
+                // NOTE: this position hash is precision-sensitive; the CPU computes it in double, the GPU
+                // in float, so ores with rarity < 1 may differ by a few voxels GPU vs CPU.
+                float randomValue = frac(sin(WorldPos.x * 12.9898 + WorldPos.y * 78.233 + WorldPos.z * 45.164) * 43758.5453);
+                if (randomValue > rarity) { continue; }
+            }
+            OutMat = matID;
+            return true;
+        }
+    }
+    return false;
+}
+
+// FVoxelTerrainConditioning::ApplyToHeight — blend the height toward each zone's target by its weight.
+// ConditioningZoneData: 2 float4s per zone: [CenterX,CenterY,InnerRadius,FalloffWidth][TargetHeight,Strength,0,0].
+float GpuApplyConditioning(float WorldX, float WorldY, float BaseHeight)
+{
+    float H = BaseHeight;
+    for (int z = 0; z < ConditioningZoneCount; ++z)
+    {
+        float4 c0 = ConditioningZoneData[z * 2 + 0];
+        float4 c1 = ConditioningZoneData[z * 2 + 1];
+        float2 center = c0.xy;
+        float innerRadius = c0.z;
+        float falloffWidth = c0.w;
+        float targetHeight = c1.x;
+        float strength = c1.y;
+
+        float dx = WorldX - center.x;
+        float dy = WorldY - center.y;
+        float dist = sqrt(dx * dx + dy * dy);
+
+        float w;
+        if (dist <= innerRadius)
+        {
+            w = strength;
+        }
+        else
+        {
+            float falloff = max(1.0, falloffWidth);
+            if (dist >= innerRadius + falloff)
+            {
+                w = 0.0;
+            }
+            else
+            {
+                float t = (dist - innerRadius) / falloff;
+                float s = 1.0 - (t * t * (3.0 - 2.0 * t)); // smoothstep 1 -> 0
+                w = strength * s;
+            }
+        }
+
+        if (w > 0.0) { H = lerp(H, targetHeight, w); }
+    }
+    return H;
+}

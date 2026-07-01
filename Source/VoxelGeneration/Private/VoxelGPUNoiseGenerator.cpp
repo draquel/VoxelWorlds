@@ -68,6 +68,34 @@ public:
 		// Water level parameters
 		SHADER_PARAMETER(int32, WaterLevelEnabled)
 		SHADER_PARAMETER(float, WaterLevelHeight)
+		// Biome / material parameters (Phase B). BiomeData: StructuredBuffer<float4>, GPU_BIOME_FLOAT4_STRIDE(4)
+		// float4s per biome; layout mirrors UVoxelBiomeConfiguration::BuildGpuData. BiomeCount==0 → shader
+		// falls back to the legacy depth-based material.
+		SHADER_PARAMETER(int32, BiomeCount)
+		SHADER_PARAMETER(float, BiomeBlendWidth)
+		SHADER_PARAMETER(int32, TemperatureSeed)
+		SHADER_PARAMETER(float, TemperatureFrequency)
+		SHADER_PARAMETER(int32, MoistureSeed)
+		SHADER_PARAMETER(float, MoistureFrequency)
+		SHADER_PARAMETER(int32, EnableUnderwaterMaterials)
+		SHADER_PARAMETER(uint32, DefaultUnderwaterMaterial)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, BiomeData)
+		// Height material rules (Phase B) — GPU_HEIGHTRULE_FLOAT4_STRIDE(2) float4s each, priority-sorted;
+		// HeightRuleCount 0 = disabled.
+		SHADER_PARAMETER(int32, HeightRuleCount)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, HeightRuleData)
+		// Ore veins (Phase B) — GPU_OREVEIN_FLOAT4_STRIDE(3) float4s each; the dominant biome's
+		// [OreStart,OreCount] range (from BiomeData) indexes into this flat buffer.
+		SHADER_PARAMETER(int32, OreVeinCount)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, OreVeinData)
+		// Cave-wall material override (Phase B)
+		SHADER_PARAMETER(int32, CaveWallOverrideEnabled)
+		SHADER_PARAMETER(uint32, CaveWallMaterialID)
+		SHADER_PARAMETER(float, CaveWallMaterialMinDepth)
+		// Terrain conditioning zones (Phase B) — 2 float4s each:
+		// [CenterX,CenterY,InnerRadius,FalloffWidth][TargetHeight,Strength,0,0]
+		SHADER_PARAMETER(int32, ConditioningZoneCount)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConditioningZoneData)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -94,6 +122,17 @@ IMPLEMENT_GLOBAL_SHADER(FGenerateVoxelDensityCS, "/Plugin/VoxelWorlds/Private/Ge
  * GPUvsCPU parity test transitively validate the streaming path.
  * Must be called on the render thread (allocates RDG parameters + creates the output UAV).
  */
+// Create a StructuredBuffer<float4> SRV from a baked float4 array (Phase B biome/material data).
+// Empty input → a 1-element dummy so RDG always has a valid resource (the shader gates on the count param).
+static FRDGBufferSRVRef CreateFloat4StructuredSRV(FRDGBuilder& GraphBuilder, const TArray<FVector4f>& Data, const TCHAR* Name)
+{
+	static const FVector4f Dummy(0.0f, 0.0f, 0.0f, 0.0f);
+	const int32 Num = FMath::Max(Data.Num(), 1);
+	const void* Src = Data.Num() > 0 ? static_cast<const void*>(Data.GetData()) : static_cast<const void*>(&Dummy);
+	FRDGBufferRef Buffer = CreateStructuredBuffer(GraphBuilder, Name, sizeof(FVector4f), Num, Src, static_cast<uint64>(Num) * sizeof(FVector4f));
+	return GraphBuilder.CreateSRV(Buffer);
+}
+
 static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	FRDGBuilder& GraphBuilder,
 	const FVoxelNoiseGenerationRequest& Request,
@@ -205,6 +244,65 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 			Parameters->CaveLayerCount = LayerIdx;
 		}
 	}
+
+	// ==================== Biome / material (Phase B) ====================
+	// Defaults mirror the CPU no-config fallback (VoxelCPUNoiseGenerator: seeds +1234/+5678, default freqs).
+	Parameters->BiomeCount = 0;
+	Parameters->BiomeBlendWidth = 0.15f;
+	Parameters->TemperatureSeed = Request.NoiseParams.Seed + 1234;
+	Parameters->TemperatureFrequency = 0.00005f;
+	Parameters->MoistureSeed = Request.NoiseParams.Seed + 5678;
+	Parameters->MoistureFrequency = 0.00007f;
+	Parameters->EnableUnderwaterMaterials = 0;
+	Parameters->DefaultUnderwaterMaterial = 3;
+
+	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+	const bool bUseBiomes = Request.bEnableBiomes && BiomeConfig && BiomeConfig->BakedGpuBiomeCount > 0;
+	if (bUseBiomes)
+	{
+		Parameters->BiomeCount = BiomeConfig->BakedGpuBiomeCount;
+		Parameters->BiomeBlendWidth = FMath::Max(BiomeConfig->BiomeBlendWidth, 0.01f);
+		Parameters->TemperatureSeed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
+		Parameters->TemperatureFrequency = BiomeConfig->TemperatureNoiseFrequency;
+		Parameters->MoistureSeed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
+		Parameters->MoistureFrequency = BiomeConfig->MoistureNoiseFrequency;
+		Parameters->EnableUnderwaterMaterials = BiomeConfig->bEnableUnderwaterMaterials ? 1 : 0;
+		Parameters->DefaultUnderwaterMaterial = BiomeConfig->DefaultUnderwaterMaterial;
+	}
+	Parameters->BiomeData = CreateFloat4StructuredSRV(
+		GraphBuilder, bUseBiomes ? BiomeConfig->BakedGpuBiomes : TArray<FVector4f>(), TEXT("VoxelBiomeData"));
+
+	// Height material rules + ore veins (Phase B). Baked into BakedGpu* by BuildGpuData; height rules
+	// gated by bEnableHeightMaterials, ore ranges already zeroed per-biome when ore veins are disabled.
+	Parameters->HeightRuleCount = (bUseBiomes && BiomeConfig->bEnableHeightMaterials) ? BiomeConfig->BakedGpuHeightRuleCount : 0;
+	Parameters->OreVeinCount = bUseBiomes ? BiomeConfig->BakedGpuOreVeinCount : 0;
+	Parameters->HeightRuleData = CreateFloat4StructuredSRV(
+		GraphBuilder, bUseBiomes ? BiomeConfig->BakedGpuHeightRules : TArray<FVector4f>(), TEXT("VoxelHeightRuleData"));
+	Parameters->OreVeinData = CreateFloat4StructuredSRV(
+		GraphBuilder, bUseBiomes ? BiomeConfig->BakedGpuOreVeins : TArray<FVector4f>(), TEXT("VoxelOreVeinData"));
+
+	// Cave-wall material override (Phase B) — from the cave configuration.
+	Parameters->CaveWallOverrideEnabled = 0;
+	Parameters->CaveWallMaterialID = 0;
+	Parameters->CaveWallMaterialMinDepth = 0.0f;
+	if (Request.bEnableCaves && Request.CaveConfiguration && Request.CaveConfiguration->bOverrideCaveWallMaterial)
+	{
+		Parameters->CaveWallOverrideEnabled = 1;
+		Parameters->CaveWallMaterialID = Request.CaveConfiguration->CaveWallMaterialID;
+		Parameters->CaveWallMaterialMinDepth = Request.CaveConfiguration->CaveWallMaterialMinDepth;
+	}
+
+	// Terrain conditioning zones (Phase B) — gathered game-side per chunk and copied onto the request;
+	// flatten the terrain height toward each zone's target before the SDF (matches the CPU order).
+	TArray<FVector4f> ConditioningData;
+	ConditioningData.Reserve(Request.ConditioningZones.Num() * 2);
+	for (const FVoxelConditioningZone& Zone : Request.ConditioningZones)
+	{
+		ConditioningData.Add(FVector4f(static_cast<float>(Zone.Center.X), static_cast<float>(Zone.Center.Y), Zone.InnerRadius, Zone.FalloffWidth));
+		ConditioningData.Add(FVector4f(Zone.TargetHeight, Zone.Strength, 0.0f, 0.0f));
+	}
+	Parameters->ConditioningZoneCount = Request.ConditioningZones.Num();
+	Parameters->ConditioningZoneData = CreateFloat4StructuredSRV(GraphBuilder, ConditioningData, TEXT("VoxelConditioningData"));
 
 	return Parameters;
 }

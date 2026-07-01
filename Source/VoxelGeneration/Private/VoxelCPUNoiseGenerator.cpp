@@ -1539,6 +1539,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 // ==================== Water Fill Pass ====================
 
+void FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(
+	const FVoxelNoiseGenerationRequest& Request,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	// Same order as GenerateChunkCPU: water fill first (uses the per-voxel cave flags as barriers and
+	// clears them), then underground classification.
+	ApplyWaterFillPass(Request, OutVoxelData);
+	ApplyUndergroundClassificationPass(Request, OutVoxelData);
+}
+
 void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	const FVoxelNoiseGenerationRequest& Request,
 	TArray<FVoxelData>& OutVoxelData)
