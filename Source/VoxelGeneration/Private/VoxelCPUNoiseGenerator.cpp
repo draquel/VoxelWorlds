@@ -860,27 +860,15 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
-	// Set up continentalness noise parameters
-	FVoxelNoiseParams ContinentalnessNoiseParamsIB;
-	ContinentalnessNoiseParamsIB.NoiseType = EVoxelNoiseType::Simplex;
-	ContinentalnessNoiseParamsIB.Octaves = 2;
-	ContinentalnessNoiseParamsIB.Persistence = 0.5f;
-	ContinentalnessNoiseParamsIB.Lacunarity = 2.0f;
-	ContinentalnessNoiseParamsIB.Amplitude = 1.0f;
-
-	// Use configuration values if available, otherwise use defaults
+	// Use configuration values if available, otherwise use defaults. (Continentalness noise params are built
+	// inside FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams — the single source of truth shared with
+	// the analytic GetTerrainHeightAt query and applied per voxel below.)
 	if (BiomeConfig)
 	{
 		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
 		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
-
-		if (BiomeConfig->bEnableContinentalness)
-		{
-			ContinentalnessNoiseParamsIB.Seed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
-			ContinentalnessNoiseParamsIB.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
-		}
 	}
 	else
 	{
@@ -889,8 +877,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
-
-	const bool bUseContinentalnessIB = BiomeConfig && BiomeConfig->bEnableContinentalness;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -905,42 +891,41 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					Z * VoxelSize
 				);
 
-				// Sample continentalness for biome selection (height modulation
-				// is not applied for IslandBowl since it has its own falloff system)
+				// Continentalness height modulation (internal oceans/mountains) — the SAME shared source of
+				// truth as InfinitePlane, reused for biome selection below; then the island edge falloff.
+				// The two compose (continentalness shapes terrain inside the island, falloff fades it toward
+				// EdgeHeight at the world edge). Matches the analytic FIslandBowlWorldMode::GetTerrainHeightAt.
 				float Continentalness = 0.0f;
-				if (bUseContinentalnessIB)
+				const FWorldModeTerrainParams EffectiveParams = FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
+					WorldPos.X, WorldPos.Y, WorldMode.GetTerrainParams(), Request.NoiseParams, BiomeConfig, Continentalness);
+
+				const float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
+					WorldPos.X, WorldPos.Y, Request.NoiseParams);
+				const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, EffectiveParams);
+
+				const FIslandBowlParams& IslandParams = WorldMode.GetIslandParams();
+				float TerrainHeight;
+				if (!FIslandBowlWorldMode::IsWithinIslandBounds(WorldPos.X, WorldPos.Y, IslandParams))
 				{
-					FVector BiomeSamplePos2D(WorldPos.X, WorldPos.Y, 0.0f);
-					Continentalness = FBM3D(BiomeSamplePos2D, ContinentalnessNoiseParamsIB);
+					TerrainHeight = IslandParams.EdgeHeight - 1000.0f; // outside the island -> below any terrain (air)
+				}
+				else
+				{
+					const float FalloffFactor = FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
+						WorldPos.X, WorldPos.Y, IslandParams);
+					TerrainHeight = FIslandBowlWorldMode::ApplyFalloffToHeight(
+						BaseTerrainHeight, FalloffFactor, IslandParams.EdgeHeight);
 				}
 
-				// Sample 2D noise at X,Y (same as InfinitePlane base)
-				float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
-					WorldPos.X, WorldPos.Y, Request.NoiseParams);
-
-				// Get density from island bowl world mode (handles falloff)
-				float SignedDistance = WorldMode.GetDensityAt(WorldPos, Request.LODLevel, NoiseValue);
-
-				// Convert signed distance to density
-				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
-
-				// Get terrain height for material assignment (includes island falloff)
-				float TerrainHeight = WorldMode.GetTerrainHeightAt(WorldPos.X, WorldPos.Y, Request.NoiseParams);
-
-				// Phase 6c: terrain conditioning (heightmap modes). Blend the island surface toward any
-				// conditioning zones and recompute density/SDF where it changes; outside zones the island's
-				// own GetDensityAt result is left untouched.
+				// Terrain conditioning (POI / claim flatten) — blend toward zones, then derive density.
 				if (Request.ConditioningZones.Num() > 0)
 				{
-					const float Conditioned = FVoxelTerrainConditioning::ApplyToHeight(
+					TerrainHeight = FVoxelTerrainConditioning::ApplyToHeight(
 						WorldPos.X, WorldPos.Y, TerrainHeight, Request.ConditioningZones);
-					if (Conditioned != TerrainHeight)
-					{
-						TerrainHeight = Conditioned;
-						SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(WorldPos.Z, TerrainHeight);
-						Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
-					}
 				}
+
+				const float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(WorldPos.Z, TerrainHeight);
+				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
 
 				// Calculate depth below surface for material assignment
 				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / VoxelSize;

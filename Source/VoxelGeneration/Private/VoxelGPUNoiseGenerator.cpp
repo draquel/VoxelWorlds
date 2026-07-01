@@ -96,6 +96,17 @@ public:
 		// [CenterX,CenterY,InnerRadius,FalloffWidth][TargetHeight,Strength,0,0]
 		SHADER_PARAMETER(int32, ConditioningZoneCount)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConditioningZoneData)
+		// IslandBowl world-mode params (Phase C) — applied when WorldMode == ISLAND_BOWL (2): edge falloff
+		// on the continentalness-modulated height. IslandShape 0=circular/1=rectangle;
+		// IslandFalloffType 0=Linear/1=Smooth/2=Squared/3=Exponential.
+		SHADER_PARAMETER(int32, IslandShape)
+		SHADER_PARAMETER(int32, IslandFalloffType)
+		SHADER_PARAMETER(float, IslandRadius)
+		SHADER_PARAMETER(float, IslandSizeY)
+		SHADER_PARAMETER(float, IslandFalloffWidth)
+		SHADER_PARAMETER(float, IslandCenterX)
+		SHADER_PARAMETER(float, IslandCenterY)
+		SHADER_PARAMETER(float, IslandEdgeHeight)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -303,6 +314,16 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	}
 	Parameters->ConditioningZoneCount = Request.ConditioningZones.Num();
 	Parameters->ConditioningZoneData = CreateFloat4StructuredSRV(GraphBuilder, ConditioningData, TEXT("VoxelConditioningData"));
+
+	// IslandBowl world-mode params (Phase C) — from the request; ignored by the shader unless WorldMode==IslandBowl.
+	Parameters->IslandShape = static_cast<int32>(Request.IslandParams.Shape);
+	Parameters->IslandFalloffType = static_cast<int32>(Request.IslandParams.FalloffType);
+	Parameters->IslandRadius = Request.IslandParams.IslandRadius;
+	Parameters->IslandSizeY = Request.IslandParams.SizeY;
+	Parameters->IslandFalloffWidth = Request.IslandParams.FalloffWidth;
+	Parameters->IslandCenterX = Request.IslandParams.CenterX;
+	Parameters->IslandCenterY = Request.IslandParams.CenterY;
+	Parameters->IslandEdgeHeight = Request.IslandParams.EdgeHeight;
 
 	return Parameters;
 }

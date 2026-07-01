@@ -66,12 +66,28 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 	// Sample base terrain noise (reusing InfinitePlane method)
 	const float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(X, Y, NoiseParams);
 
-	// Get base terrain height
-	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
-		NoiseValue, TerrainParams);
+	// Continentalness height modulation (internal oceans/mountains) — the SAME shared source of truth as
+	// InfinitePlane; then the island edge falloff. The two compose: continentalness shapes the terrain
+	// inside the island, the falloff fades it toward EdgeHeight at the world edge. Matches generation.
+	float Continentalness = 0.0f;
+	const FWorldModeTerrainParams EffectiveParams = FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
+		X, Y, TerrainParams, NoiseParams, BiomeContext, Continentalness);
+
+	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, EffectiveParams);
 
 	// Apply falloff and return
 	return ApplyFalloffToHeight(BaseTerrainHeight, FalloffFactor, IslandParams.EdgeHeight);
+}
+
+void FIslandBowlWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) const
+{
+	// Base continentalness extent (same as InfinitePlane), then floor the minimum to EdgeHeight — the
+	// island fades toward EdgeHeight at the edges, which can be below the base terrain minimum.
+	float BaseMin = 0.0f;
+	float BaseMax = 0.0f;
+	FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, BiomeContext, BaseMin, BaseMax);
+	OutMin = FMath::Min(BaseMin, IslandParams.EdgeHeight);
+	OutMax = BaseMax;
 }
 
 FIntVector FIslandBowlWorldMode::WorldToChunkCoord(

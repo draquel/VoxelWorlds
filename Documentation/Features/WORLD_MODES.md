@@ -365,4 +365,57 @@ All modes benefit from the streaming optimizations:
 
 ---
 
-**Status**: All three world modes implemented and tested with mode-specific LOD culling
+## GPU Generation Parity & World-Mode Review (Phase A–C, 2026-07-01)
+
+`bUseGPUGeneration` runs terrain generation on the GPU (render-thread compute dispatch + async readback).
+The GPU `GenerateVoxelDensity.usf` is verified bit-close to the CPU `FVoxelCPUNoiseGenerator` by the
+`VoxelWorlds.Generation.GPUvsCPU*` automation tests (full `FVoxelData` — density + material + biome +
+metadata — at LOD 0/1/2). Per-mode status:
+
+| Mode | Analytic (`GetTerrainHeightAt`) | GPU generation | Parity result |
+|------|--------------------------------|----------------|---------------|
+| **InfinitePlane** | ✅ continentalness-modulated (matches gen) | ✅ full | density 99.9%, biome/metadata 100%, material 99.8% (0.2% = frac-dithered biome-blend-boundary voxels) |
+| **IslandBowl** | ✅ continentalness + edge falloff (matches gen) | ✅ full | density 99.9%, biome/material/metadata 100% |
+| **SphericalPlanet** | ⚠️ radial — analytic consumers assume Z-up (see gap analysis) | ❌ generic 3D-noise branch (RESERVED) | not GPU-parity; see gap analysis |
+
+**Cached analytic world mode (fixed Phase C):** the chunk manager now builds the analytic
+`IVoxelWorldMode` matching `config->WorldMode` (was always `FInfinitePlaneWorldMode`). So spawn / nav /
+POI placement / `GetGeneratedSurfaceHeight` / `QueryEditMergedSurface` use the correct terrain math for
+every mode. `SetBiomeContext` is promoted to `IVoxelWorldMode` (InfinitePlane + IslandBowl apply
+continentalness; other modes no-op).
+
+**IslandBowl height = continentalness ∘ falloff (Phase C):** continentalness (internal oceans/mountains)
+and the island edge falloff are orthogonal and compose — `ApplyFalloffToHeight(continentalness-modulated
+height, falloff, EdgeHeight)`. Applied identically in CPU generation, the analytic query, and the GPU
+shader (parity-locked). Small islands are ~unchanged (continentalness is near-constant at its ~50 km
+wavelength); large islands gain internal terrain variation while still fading at the world edge.
+
+## Spherical Planet — GPU / Analytic Gap Analysis (RESERVATION)
+
+Spherical mode is **not** GPU-generation-parity or analytic-correct yet. The core mismatch: on a sphere,
+"terrain height" is a **radial displacement from `PlanetCenter` along a direction**, not `Z(X, Y)`. Every
+`IVoxelWorldMode` analytic consumer (spawn, nav, POI, `GetGeneratedSurfaceHeight`,
+`QueryEditMergedSurface`) assumes a Z-up heightmap, so they are ill-defined on a sphere. Prioritized gap
+list (implementation reserved):
+
+1. **Ray/direction surface query** — replace `GetTerrainHeightAt(X, Y) → Z` with
+   `GetSurfacePoint(Direction) → (point on shell, radial normal)`. Foundational: every other analytic
+   consumer needs it.
+2. **GPU radial SDF** — port the spherical SDF into `GenerateVoxelDensity.usf` (currently the generic
+   3D-noise `else` branch): `density = (PlanetRadius + radialNoise·HeightScale) − |WorldPos − PlanetCenter|`,
+   with noise sampled by **direction** (`normalize(WorldPos − PlanetCenter)`) for seamless wrapping.
+3. **Radial culling & streaming** — cull to the shell band `[PlanetRadius − MaxDepth, PlanetRadius +
+   MaxHeight]` instead of a Z min/max; `GetTerrainHeightBounds` (Z-extent) is the wrong shape here.
+4. **Gravity, orientation & movement** — the pawn's "down" is toward `PlanetCenter`, not −Z; movement,
+   collision orientation, and camera need a radial-up frame (game-side, outside VoxelWorlds).
+5. **Biome/continentalness by direction** — sample the temp/moisture/continentalness fields on the sphere
+   surface (by direction) rather than planar X/Y so bands wrap coherently around the planet.
+
+Recommended sequencing if Spherical is picked up: (1) → (2) → (3) unlock a correct, GPU-generated,
+streamable planet; (4) → (5) make it playable and natural. Until then, Spherical worlds should use CPU
+generation (`voxel.GPUGeneration.Enable 0`) and treat the analytic queries as approximate.
+
+---
+
+**Status**: All three world modes implemented and tested with mode-specific LOD culling.
+GPU generation parity: InfinitePlane + IslandBowl verified (Phase A–C); SphericalPlanet reserved (see gap analysis).

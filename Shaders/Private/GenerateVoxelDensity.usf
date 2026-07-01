@@ -103,11 +103,23 @@ float CaveWallMaterialMinDepth;
 int ConditioningZoneCount;
 StructuredBuffer<float4> ConditioningZoneData;
 
+// IslandBowl world-mode params (Phase C) — see IslandFalloff.ush.
+int IslandShape;
+int IslandFalloffType;
+float IslandRadius;
+float IslandSizeY;
+float IslandFalloffWidth;
+float IslandCenterX;
+float IslandCenterY;
+float IslandEdgeHeight;
+
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;
 
 // Per-voxel biome selection + material pipeline (references the biome globals declared above).
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
+// IslandBowl edge falloff (references the IslandBowl globals declared above).
+#include "/Plugin/VoxelWorlds/Private/IslandFalloff.ush"
 
 // ==================== Main Compute Shader ====================
 
@@ -146,8 +158,9 @@ void MainCS(
     uint BiomeID = 0u;
     uint Metadata = 0u;
 
-    // Branch based on world mode
-    if (WorldMode == WORLD_MODE_INFINITE_PLANE)
+    // Branch based on world mode. InfinitePlane and IslandBowl share the heightmap path (both apply
+    // continentalness -> height); IslandBowl additionally applies its edge falloff below.
+    if (WorldMode == WORLD_MODE_INFINITE_PLANE || WorldMode == WORLD_MODE_ISLAND_BOWL)
     {
         // Apply continentalness height modulation
         float EffectiveBaseHeight = BaseHeight;
@@ -194,6 +207,11 @@ void MainCS(
             WorldPos.x, WorldPos.y,
             NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
         float TerrainHeight = NoiseToTerrainHeight(TerrainNoise, SeaLevel, EffectiveHeightScale, EffectiveBaseHeight);
+        // IslandBowl: fade the (continentalness-modulated) height toward EdgeHeight at the world edge.
+        if (WorldMode == WORLD_MODE_ISLAND_BOWL)
+        {
+            TerrainHeight = ApplyIslandFalloffToHeight(WorldPos.x, WorldPos.y, TerrainHeight);
+        }
         if (ConditioningZoneCount > 0)
         {
             TerrainHeight = GpuApplyConditioning(WorldPos.x, WorldPos.y, TerrainHeight);

@@ -11,6 +11,8 @@
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "IVoxelWorldMode.h"
+#include "IslandBowlWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
@@ -512,9 +514,45 @@ void UVoxelChunkManager::Initialize(
 	TerrainParams.SeaLevel = Configuration->SeaLevel;
 	TerrainParams.HeightScale = Configuration->HeightScale;
 	TerrainParams.BaseHeight = Configuration->BaseHeight;
-	WorldMode = MakeUnique<FInfinitePlaneWorldMode>(TerrainParams);
-	// Give the world mode the biome config so the analytic height query (GetTerrainHeightAt) applies the
-	// same continentalness modulation as generation — spawn / nav / POI heights match the real surface.
+	// Build the analytic world mode matching config->WorldMode so spawn / nav / POI / GetGeneratedSurfaceHeight
+	// use the correct terrain math for every mode (was always InfinitePlane — flat for island/planet worlds).
+	switch (Configuration->WorldMode)
+	{
+	case EWorldMode::IslandBowl:
+	{
+		FIslandBowlParams IslandParams;
+		IslandParams.Shape = static_cast<EIslandShape>(Configuration->IslandShape);
+		IslandParams.IslandRadius = Configuration->IslandRadius;
+		IslandParams.SizeY = Configuration->IslandSizeY;
+		IslandParams.FalloffWidth = Configuration->IslandFalloffWidth;
+		IslandParams.FalloffType = static_cast<EIslandFalloffType>(Configuration->IslandFalloffType);
+		IslandParams.CenterX = Configuration->IslandCenterX;
+		IslandParams.CenterY = Configuration->IslandCenterY;
+		IslandParams.EdgeHeight = Configuration->IslandEdgeHeight;
+		IslandParams.bBowlShape = Configuration->bIslandBowlShape;
+		WorldMode = MakeUnique<FIslandBowlWorldMode>(TerrainParams, IslandParams);
+		break;
+	}
+	case EWorldMode::SphericalPlanet:
+	{
+		FWorldModeTerrainParams PlanetTerrainParams(0.0f, Configuration->PlanetHeightScale, Configuration->BaseHeight);
+		FSphericalPlanetParams PlanetParams;
+		PlanetParams.PlanetRadius = Configuration->WorldRadius;
+		PlanetParams.MaxTerrainHeight = Configuration->PlanetMaxTerrainHeight;
+		PlanetParams.MaxTerrainDepth = Configuration->PlanetMaxTerrainDepth;
+		PlanetParams.PlanetCenter = Configuration->WorldOrigin;
+		WorldMode = MakeUnique<FSphericalPlanetWorldMode>(PlanetTerrainParams, PlanetParams);
+		break;
+	}
+	case EWorldMode::InfinitePlane:
+	default:
+		WorldMode = MakeUnique<FInfinitePlaneWorldMode>(TerrainParams);
+		break;
+	}
+
+	// Give the world mode the biome config so the analytic height query (GetTerrainHeightAt) applies the same
+	// continentalness modulation as generation (InfinitePlane + IslandBowl; other modes no-op) — spawn / nav /
+	// POI heights match the real surface.
 	WorldMode->SetBiomeContext(Configuration->BiomeConfiguration);
 
 	// -VoxelForceCPU (headless/benchmark, e.g. under -nullrhi where GPU compute can't dispatch) forces

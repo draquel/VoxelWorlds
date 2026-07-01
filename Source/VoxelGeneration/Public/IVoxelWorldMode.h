@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
 
+class UVoxelBiomeConfiguration;
+
 /**
  * Abstract interface for world generation modes.
  *
@@ -152,6 +154,28 @@ public:
 		const FVector& WorldPos,
 		float SurfaceHeight,
 		float DepthBelowSurface) const = 0;
+
+	// ==================== Analytic Height Context (optional) ====================
+
+	/**
+	 * Provide the biome configuration used for continentalness height modulation in the analytic height
+	 * query (GetTerrainHeightAt). Heightmap modes that apply continentalness (InfinitePlane, IslandBowl)
+	 * use it so the analytic surface matches generation; other modes ignore it. Non-owning — the caller
+	 * keeps the configuration alive. Default: no-op.
+	 */
+	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* /*InBiomeConfig*/) {}
+
+	/**
+	 * Worst-case terrain-height bounds [OutMin, OutMax] over all (X,Y) for this mode — the authority for
+	 * vertical chunk-culling (VoxelLOD). A conservative superset that CONTAINS every value the generator can
+	 * produce, so culling to it never removes a chunk holding real terrain. Default: a very wide range (no
+	 * vertical culling). Heightmap modes override with tight bounds.
+	 */
+	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const
+	{
+		OutMin = -1.0e9f;
+		OutMax = 1.0e9f;
+	}
 };
 
 /**

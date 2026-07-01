@@ -1,0 +1,84 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// GPU port of FIslandBowlWorldMode's edge-falloff (Phase C). Applied to the continentalness-modulated
+// terrain height (so continentalness shapes the terrain inside the island, and this fades it toward
+// EdgeHeight at the world edge). Include AFTER the loose IslandBowl globals are declared in
+// GenerateVoxelDensity.usf:
+//   int IslandShape (0=circular,1=rectangle); int IslandFalloffType (0=Linear,1=Smooth,2=Squared,3=Exponential);
+//   float IslandRadius, IslandSizeY, IslandFalloffWidth, IslandCenterX, IslandCenterY, IslandEdgeHeight.
+
+// FIslandBowlWorldMode::CalculateFalloffFactor curve — t is the normalized position in the falloff zone [0,1].
+float ApplyIslandFalloffCurve(float t)
+{
+    if (IslandFalloffType == 0) // Linear
+    {
+        return 1.0 - t;
+    }
+    else if (IslandFalloffType == 1) // Smooth (smoothstep on 1-t)
+    {
+        float invT = 1.0 - t;
+        return invT * invT * (3.0 - 2.0 * invT);
+    }
+    else if (IslandFalloffType == 2) // Squared
+    {
+        float invT = 1.0 - t;
+        return invT * invT;
+    }
+    else // Exponential
+    {
+        return exp(-t * 3.0);
+    }
+}
+
+// FIslandBowlWorldMode::CalculateFalloffFactorForPoint (circular + rectangle).
+float IslandFalloffFactor(float X, float Y)
+{
+    if (IslandShape == 1) // Rectangle
+    {
+        float dx = abs(X - IslandCenterX);
+        float dy = abs(Y - IslandCenterY);
+        float tx = (dx > IslandRadius) ? clamp((dx - IslandRadius) / IslandFalloffWidth, 0.0, 1.0) : 0.0;
+        float ty = (dy > IslandSizeY) ? clamp((dy - IslandSizeY) / IslandFalloffWidth, 0.0, 1.0) : 0.0;
+        float t = max(tx, ty);
+        if (t <= 0.0) { return 1.0; }
+        return ApplyIslandFalloffCurve(t);
+    }
+    else // Circular
+    {
+        float dx = X - IslandCenterX;
+        float dy = Y - IslandCenterY;
+        float dist = sqrt(dx * dx + dy * dy);
+        if (dist <= IslandRadius) { return 1.0; }
+        if (dist >= IslandRadius + IslandFalloffWidth) { return 0.0; }
+        float t = (dist - IslandRadius) / IslandFalloffWidth;
+        return ApplyIslandFalloffCurve(t);
+    }
+}
+
+// FIslandBowlWorldMode::IsWithinIslandBounds.
+bool IsWithinIslandBounds(float X, float Y)
+{
+    float dx = abs(X - IslandCenterX);
+    float dy = abs(Y - IslandCenterY);
+    if (IslandShape == 1) // Rectangle
+    {
+        return dx <= (IslandRadius + IslandFalloffWidth) && dy <= (IslandSizeY + IslandFalloffWidth);
+    }
+    else // Circular: total extent = IslandRadius + FalloffWidth
+    {
+        float dist = sqrt(dx * dx + dy * dy);
+        return dist <= (IslandRadius + IslandFalloffWidth);
+    }
+}
+
+// Compose the island edge falloff onto a base terrain height. Returns EdgeHeight-1000 (air) outside the
+// island bounds — matches FIslandBowlWorldMode::GetTerrainHeightAt.
+float ApplyIslandFalloffToHeight(float X, float Y, float BaseHeight)
+{
+    if (!IsWithinIslandBounds(X, Y))
+    {
+        return IslandEdgeHeight - 1000.0; // below any terrain -> air
+    }
+    float falloff = IslandFalloffFactor(X, Y);
+    return lerp(IslandEdgeHeight, BaseHeight, falloff); // ApplyFalloffToHeight
+}

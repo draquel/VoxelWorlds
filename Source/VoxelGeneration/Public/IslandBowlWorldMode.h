@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "IVoxelWorldMode.h"
 
+class UVoxelBiomeConfiguration;
+
 /**
  * Island shape types for boundary calculation.
  */
@@ -179,6 +181,16 @@ public:
 	const FIslandBowlParams& GetIslandParams() const { return IslandParams; }
 	void SetIslandParams(const FIslandBowlParams& InParams) { IslandParams = InParams; }
 
+	/**
+	 * Provide the biome configuration for continentalness height modulation (IVoxelWorldMode). IslandBowl
+	 * applies continentalness (internal oceans/mountains) to the base height, THEN the island edge falloff,
+	 * so a large island gets internal variation while still fading at the world edges. Non-owning.
+	 */
+	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) override { BiomeContext = InBiomeConfig; }
+
+	/** Per-mode vertical-cull bounds (IVoxelWorldMode): base continentalness extent, floored to EdgeHeight. */
+	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override;
+
 	// ==================== Static Helpers ====================
 
 	/**
@@ -266,6 +278,12 @@ private:
 
 	/** Island-specific parameters */
 	FIslandBowlParams IslandParams;
+
+	/**
+	 * Optional biome configuration for continentalness height modulation (GetTerrainHeightAt). Non-owning
+	 * (kept alive by the world configuration). Null => raw base terrain height (no continentalness).
+	 */
+	const UVoxelBiomeConfiguration* BiomeContext = nullptr;
 
 	/** Practical vertical limits for chunk generation */
 	static constexpr int32 MIN_Z_CHUNKS = -4;

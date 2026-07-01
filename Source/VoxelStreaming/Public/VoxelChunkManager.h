@@ -917,7 +917,7 @@ protected:
 	bool bUseGPUGenerationActive = false;
 
 	/** World mode for terrain generation (Infinite Plane) */
-	TUniquePtr<FInfinitePlaneWorldMode> WorldMode;
+	TUniquePtr<IVoxelWorldMode> WorldMode;
 
 	/** Static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c). */
 	TArray<FVoxelConditioningZone> ConditioningZones;
