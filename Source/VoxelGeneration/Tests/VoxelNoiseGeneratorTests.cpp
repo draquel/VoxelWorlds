@@ -442,6 +442,121 @@ bool FVoxelGPUvsCPUMaterialParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Phase C: GPU==CPU parity for IslandBowl mode (continentalness-modulated height + edge falloff), with
+// biomes, at LOD 0/1/2. Verifies the shared heightmap path + the island falloff on the GPU match CPU.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUIslandBowlParityTest, "VoxelWorlds.Generation.GPUvsCPUIslandBowlParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
+{
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+
+	// Enable continentalness (internal oceans/mountains) so we exercise the continentalness->height +
+	// island-falloff composition. Give it non-trivial curves so the modulation is meaningful.
+	BiomeConfig->bEnableContinentalness = true;
+	if (FRichCurve* HC = BiomeConfig->ContinentalnessHeightCurve.GetRichCurve())
+	{
+		HC->Reset(); HC->AddKey(-1.0f, -2000.0f); HC->AddKey(0.0f, 0.0f); HC->AddKey(1.0f, 1000.0f);
+	}
+	if (FRichCurve* SC = BiomeConfig->ContinentalnessHeightScaleCurve.GetRichCurve())
+	{
+		SC->Reset(); SC->AddKey(-1.0f, 0.3f); SC->AddKey(1.0f, 1.0f);
+	}
+	BiomeConfig->RebuildBakedCurves();
+	BiomeConfig->BuildGpuData();
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+
+	FVoxelNoiseGenerationRequest Request;
+	Request.ChunkCoord = FIntVector(2, 0, 0);
+	Request.ChunkSize = 16;
+	Request.VoxelSize = 100.0f;
+	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Request.NoiseParams.Seed = 4325;
+	Request.NoiseParams.Frequency = 0.0025f;
+	Request.NoiseParams.Amplitude = 1.0f;
+	Request.NoiseParams.Octaves = 4;
+	Request.NoiseParams.Lacunarity = 2.0f;
+	Request.NoiseParams.Persistence = 0.5f;
+	Request.WorldMode = EWorldMode::IslandBowl;
+	Request.SeaLevel = 0.0f;
+	Request.HeightScale = 3000.0f;
+	Request.BaseHeight = 0.0f;
+	Request.bEnableBiomes = true;
+	Request.BiomeConfiguration = BiomeConfig;
+	// Circular island whose falloff edge (radius 3500 + falloff 1500) crosses the test chunk (world ~3200-4800).
+	Request.IslandParams.Shape = 0;
+	Request.IslandParams.IslandRadius = 3500.0f;
+	Request.IslandParams.SizeY = 3500.0f;
+	Request.IslandParams.FalloffWidth = 1500.0f;
+	Request.IslandParams.FalloffType = 1; // Smooth
+	Request.IslandParams.CenterX = 0.0f;
+	Request.IslandParams.CenterY = 0.0f;
+	Request.IslandParams.EdgeHeight = -1000.0f;
+
+	bool bAllPass = true;
+	const int32 LODs[3] = { 0, 1, 2 };
+	for (int32 li = 0; li < 3; ++li)
+	{
+		Request.LODLevel = LODs[li];
+
+		TArray<FVoxelData> CPUData;
+		GPUGenerator.GenerateChunkCPU(Request, CPUData);
+
+		volatile bool bCompleted = false;
+		FVoxelGenerationHandle Handle = GPUGenerator.GenerateChunkAsync(Request,
+			FOnVoxelGenerationComplete::CreateLambda([&bCompleted](FVoxelGenerationHandle, bool) { bCompleted = true; }));
+		const double StartTime = FPlatformTime::Seconds();
+		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 10.0)
+		{
+			FPlatformProcess::Sleep(0.01f);
+			FlushRenderingCommands();
+		}
+		TArray<FVoxelData> GPUData;
+		GPUGenerator.ReadbackToCPU(Handle, GPUData);
+		GPUGenerator.ReleaseHandle(Handle);
+		FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, GPUData);
+
+		if (CPUData.Num() != GPUData.Num() || CPUData.Num() == 0)
+		{
+			AddError(FString::Printf(TEXT("IslandBowl LOD%d: size mismatch/empty CPU=%d GPU=%d"), LODs[li], CPUData.Num(), GPUData.Num()));
+			bAllPass = false;
+			continue;
+		}
+
+		const int32 Total = CPUData.Num();
+		int32 DensityClose = 0, MatMatch = 0, BiomeMatch = 0, DensityEq = 0, MatWhenEq = 0;
+		for (int32 i = 0; i < Total; ++i)
+		{
+			const FVoxelData& C = CPUData[i];
+			const FVoxelData& G = GPUData[i];
+			if (FMath::Abs((int32)C.Density - (int32)G.Density) <= 2) { DensityClose++; }
+			if (C.MaterialID == G.MaterialID) { MatMatch++; }
+			if (C.BiomeID == G.BiomeID) { BiomeMatch++; }
+			if (C.Density == G.Density) { DensityEq++; if (C.MaterialID == G.MaterialID) { MatWhenEq++; } }
+		}
+		const float DC = 100.0f * DensityClose / Total;
+		const float MP = 100.0f * MatMatch / Total;
+		const float BP = 100.0f * BiomeMatch / Total;
+		const float MWE = DensityEq > 0 ? 100.0f * MatWhenEq / DensityEq : 100.0f;
+		AddInfo(FString::Printf(TEXT("IslandBowl LOD%d [%d]: density~%.1f%%, material %.1f%%, biome %.1f%%, material(density==) %.2f%%"),
+			LODs[li], Total, DC, MP, BP, MWE));
+
+		if (DC < 99.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d density %.1f%% < 99%%"), LODs[li], DC)); bAllPass = false; }
+		if (MP < 95.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d material %.1f%% < 95%%"), LODs[li], MP)); bAllPass = false; }
+		if (BP < 98.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d biome %.1f%% < 98%%"), LODs[li], BP)); bAllPass = false; }
+		if (MWE < 99.0f) { AddError(FString::Printf(TEXT("IslandBowl LOD%d material(density==) %.2f%% < 99%%"), LODs[li], MWE)); bAllPass = false; }
+	}
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU IslandBowl parity (continentalness + falloff) across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNoiseGeneratorPerformanceTest, "VoxelWorlds.Generation.Performance",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::MediumPriority)
 

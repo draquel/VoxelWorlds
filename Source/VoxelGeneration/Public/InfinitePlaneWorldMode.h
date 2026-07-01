@@ -104,7 +104,13 @@ public:
 	 *
 	 * @param InBiomeConfig Biome configuration, or null to use raw (un-modulated) base terrain height.
 	 */
-	void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) { BiomeContext = InBiomeConfig; }
+	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) override { BiomeContext = InBiomeConfig; }
+
+	/** Per-mode vertical-cull bounds (IVoxelWorldMode): wraps the static using this mode's params + biome context. */
+	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override
+	{
+		FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, BiomeContext, OutMin, OutMax);
+	}
 
 	/**
 	 * Get sea level height.
