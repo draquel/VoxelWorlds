@@ -553,6 +553,12 @@ protected:
 	FLODQueryContext BuildQueryContext() const;
 
 	/**
+	 * Resolve the per-frame chunk load/submit budget: voxel.Stream.MaxLoadPerFrame override when > 0,
+	 * else the configured MaxChunksToLoadPerFrame. Raise for fast/far traversal (high-speed regime).
+	 */
+	int32 ResolveMaxLoadPerFrame() const;
+
+	/**
 	 * Update LOAD decisions based on LOD strategy.
 	 * Called only when viewer chunk changes (expensive operation).
 	 */
@@ -1032,6 +1038,12 @@ protected:
 
 	/** Latest viewer world position, cached each tick for the stale-cull distance test. */
 	FVector CurrentViewerPosition = FVector::ZeroVector;
+
+	/** Previous-tick viewer position for horizontal-speed estimation (FLT_MAX until first tick). */
+	FVector LastViewerPosForSpeed = FVector(FLT_MAX);
+
+	/** Smoothed viewer horizontal speed (uu/s); drives the speed-adaptive load budget. */
+	float ViewerHorizSpeed = 0.0f;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;
