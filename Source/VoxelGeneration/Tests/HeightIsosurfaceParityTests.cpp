@@ -372,3 +372,72 @@ bool FVoxelHeightUnclampedParityTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("Unclamped: peak=%.1f valley=%.1f (old clamp would have capped at +/-10000)"), Peak, Valley));
 	return true;
 }
+
+// ---------------------------------------------------------------------------
+// HT5: GetTerrainHeightBounds (the authority for VoxelLOD vertical culling) CONTAINS every terrain
+// height the generator can produce — base amplitude AND continentalness. Guards against culling chunks
+// that hold real terrain. Also pins the fix to the former inline LOD estimate, whose min side omitted
+// the -HeightScale valley depth.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelHeightBoundsContainmentTest,
+	"VoxelWorlds.Generation.HeightParity.Bounds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelHeightBoundsContainmentTest::RunTest(const FString& Parameters)
+{
+	const FVoxelNoiseParams Noise = MakeTerrainNoise();
+	const FWorldModeTerrainParams Base = MakeBaseParams(); // HeightScale 8000, base 0
+	const float Center = Base.SeaLevel + Base.BaseHeight;
+
+	// --- No continentalness: bounds must reach a FULL HeightScale below/above base. The old inline LOD
+	// estimate used base - ChunkWorldSize for the min, which sat ~HeightScale above the deepest valley. ---
+	{
+		float Min = 0.f, Max = 0.f;
+		FInfinitePlaneWorldMode::GetTerrainHeightBounds(Base, nullptr, Min, Max);
+
+		TestTrue(TEXT("No-cont min reaches a full HeightScale below base (deep valleys covered)"),
+			Min <= Center - Base.HeightScale + 0.1f);
+		TestTrue(TEXT("No-cont max reaches a full HeightScale above base"),
+			Max >= Center + Base.HeightScale - 0.1f);
+
+		FInfinitePlaneWorldMode WM(Base); // no biome context => raw base noise
+		float SMin = FLT_MAX, SMax = -FLT_MAX;
+		for (int32 i = -60; i <= 60; ++i)
+		{
+			for (int32 j = -60; j <= 60; ++j)
+			{
+				const float H = WM.GetTerrainHeightAt(i * 2000.0f, j * 2000.0f, Noise);
+				SMin = FMath::Min(SMin, H);
+				SMax = FMath::Max(SMax, H);
+			}
+		}
+		AddInfo(FString::Printf(TEXT("No-cont: bounds [%.0f, %.0f] contain sampled [%.0f, %.0f]"), Min, Max, SMin, SMax));
+		TestTrue(TEXT("All sampled no-cont heights are within the bounds"), SMin >= Min && SMax <= Max);
+	}
+
+	// --- With continentalness: bounds must contain the modulated heights over a wide grid. ---
+	{
+		UVoxelBiomeConfiguration* Config = MakeContinentalnessConfig();
+		float Min = 0.f, Max = 0.f;
+		FInfinitePlaneWorldMode::GetTerrainHeightBounds(Base, Config, Min, Max);
+
+		FInfinitePlaneWorldMode WM(Base);
+		WM.SetBiomeContext(Config);
+		float SMin = FLT_MAX, SMax = -FLT_MAX;
+		for (int32 i = -80; i <= 80; ++i)
+		{
+			for (int32 j = -80; j <= 80; ++j)
+			{
+				const float H = WM.GetTerrainHeightAt(i * 2500.0f, j * 2500.0f, Noise);
+				SMin = FMath::Min(SMin, H);
+				SMax = FMath::Max(SMax, H);
+			}
+		}
+		AddInfo(FString::Printf(TEXT("Cont: bounds [%.0f, %.0f] contain sampled [%.0f, %.0f]"), Min, Max, SMin, SMax));
+		TestTrue(TEXT("All sampled continentalness heights are within the bounds"), SMin >= Min && SMax <= Max);
+
+		Config->RemoveFromRoot();
+	}
+
+	return true;
+}

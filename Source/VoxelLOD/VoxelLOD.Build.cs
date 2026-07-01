@@ -31,6 +31,9 @@ public class VoxelLOD : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				// Vertical terrain-culling bounds come from the generation height math
+				// (FInfinitePlaneWorldMode::GetTerrainHeightBounds) — the single source of truth.
+				"VoxelGeneration",
 			}
 		);
 

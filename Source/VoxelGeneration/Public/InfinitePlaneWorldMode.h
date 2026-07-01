@@ -173,6 +173,27 @@ public:
 		float& OutContinentalness);
 
 	/**
+	 * Worst-case terrain-height bounds [OutMin, OutMax] over ALL (X,Y) for this heightmap mode — the
+	 * authority for vertical chunk-culling bounds (VoxelLOD). Co-located with the height math so it
+	 * stays in sync as height-affecting features are added (add a feature -> update it here, next to
+	 * NoiseToTerrainHeight / ComputeEffectiveTerrainParams).
+	 *
+	 * Accounts for the base noise amplitude (BaseHeight ± HeightScale) AND continentalness (height
+	 * offset range + max scale multiplier). The returned range is a conservative superset that CONTAINS
+	 * every value the generator can produce at any (X,Y), so culling to it can never remove a chunk that
+	 * holds real terrain. Callers add their own per-chunk buffer for meshing / edit slack.
+	 *
+	 * @param BaseParams  Un-modulated terrain params (SeaLevel, BaseHeight, HeightScale)
+	 * @param BiomeConfig Biome configuration for the continentalness extent, or null (base range only)
+	 * @param OutMin,OutMax  Guaranteed-containing terrain height range (world Z)
+	 */
+	static void GetTerrainHeightBounds(
+		const FWorldModeTerrainParams& BaseParams,
+		const UVoxelBiomeConfiguration* BiomeConfig,
+		float& OutMin,
+		float& OutMax);
+
+	/**
 	 * Calculate signed distance to terrain surface.
 	 *
 	 * @param WorldZ World Z coordinate of sample point

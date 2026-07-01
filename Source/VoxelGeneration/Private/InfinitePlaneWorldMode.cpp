@@ -193,6 +193,37 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 	return Effective;
 }
 
+void FInfinitePlaneWorldMode::GetTerrainHeightBounds(
+	const FWorldModeTerrainParams& BaseParams,
+	const UVoxelBiomeConfiguration* BiomeConfig,
+	float& OutMin,
+	float& OutMax)
+{
+	// Height at any (X,Y): SeaLevel + (BaseHeight + Offset(cont)) + Noise * (HeightScale * Mult(cont)),
+	// with Noise in [-1,1]. Bound each modulated term by its extreme over the continentalness curves.
+	float MinOffset = 0.0f;
+	float MaxOffset = 0.0f;
+	float MaxScaleMult = 1.0f; // no continentalness => full HeightScale amplitude
+
+	if (BiomeConfig && BiomeConfig->bEnableContinentalness
+		&& BiomeConfig->BakedHeightCurve.Num() > 0 && BiomeConfig->BakedHeightScaleCurve.Num() > 0)
+	{
+		MinOffset = FMath::Min(BiomeConfig->BakedHeightCurve);
+		MaxOffset = FMath::Max(BiomeConfig->BakedHeightCurve);
+		// Amplitude scales by the LARGEST multiplier any point can take. Guard a degenerate curve.
+		MaxScaleMult = FMath::Max(0.0f, FMath::Max(BiomeConfig->BakedHeightScaleCurve));
+	}
+
+	const float Center = BaseParams.SeaLevel + BaseParams.BaseHeight;
+	const float Amplitude = BaseParams.HeightScale * MaxScaleMult; // Noise = +/-1 reaches +/- this
+
+	// Conservative decoupled bounds: the true extremes are within these (offset and multiplier are
+	// correlated via the same continentalness value, so decoupling only widens the range — never
+	// clips real terrain).
+	OutMin = Center + MinOffset - Amplitude;
+	OutMax = Center + MaxOffset + Amplitude;
+}
+
 float FInfinitePlaneWorldMode::CalculateSignedDistance(
 	float WorldZ,
 	float TerrainHeight)

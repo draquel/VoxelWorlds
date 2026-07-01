@@ -4,6 +4,7 @@
 #include "VoxelLOD.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
+#include "InfinitePlaneWorldMode.h"
 #include "VoxelCoordinates.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
@@ -94,36 +95,27 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	// Cache world-mode-specific parameters first (needed for vertical range calculation)
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 
-	// Cache terrain bounds for vertical culling (applies to Infinite Plane and Island modes)
-	// Both modes use the same 2D heightmap terrain generation with SeaLevel, BaseHeight, HeightScale
+	// Cache terrain bounds for vertical culling (applies to Infinite Plane and Island modes — both use
+	// the same 2D heightmap terrain). The height EXTENT is owned by the generation height math
+	// (FInfinitePlaneWorldMode::GetTerrainHeightBounds), the single source of truth that already
+	// accounts for the full noise amplitude AND continentalness — so these culling bounds can never
+	// drift from what the generator actually produces. (A former inline estimate omitted the
+	// -HeightScale valley depth on the min side and could cull chunks holding real terrain.)
 	if (WorldMode == EWorldMode::InfinitePlane || WorldMode == EWorldMode::IslandBowl)
 	{
-		// Terrain extends from SeaLevel + BaseHeight (minimum) to SeaLevel + BaseHeight + HeightScale (maximum)
-		// Add one chunk as buffer for terrain variation and meshing
-		const float TerrainBase = WorldConfig->SeaLevel + WorldConfig->BaseHeight;
-		TerrainMinHeight = TerrainBase - ChunkWorldSize; // One chunk below base for safety
-		TerrainMaxHeight = TerrainBase + WorldConfig->HeightScale + ChunkWorldSize; // One chunk above max
+		const FWorldModeTerrainParams TerrainParams(
+			WorldConfig->SeaLevel, WorldConfig->HeightScale, WorldConfig->BaseHeight);
 
-		// Extend bounds for continentalness height modulation (scan baked curve arrays)
-		if (WorldConfig->BiomeConfiguration && WorldConfig->BiomeConfiguration->bEnableContinentalness)
-		{
-			const UVoxelBiomeConfiguration* BiomeConfig = WorldConfig->BiomeConfiguration;
-			if (BiomeConfig->BakedHeightCurve.Num() > 0 && BiomeConfig->BakedHeightScaleCurve.Num() > 0)
-			{
-				// Find min/max height offset from the baked height curve
-				const float CurveHeightMin = FMath::Min(BiomeConfig->BakedHeightCurve);
-				const float CurveHeightMax = FMath::Max(BiomeConfig->BakedHeightCurve);
-				// Find max height scale multiplier for computing full terrain range
-				const float MaxScaleMult = FMath::Max(BiomeConfig->BakedHeightScaleCurve);
+		float BoundsMin = 0.0f;
+		float BoundsMax = 0.0f;
+		FInfinitePlaneWorldMode::GetTerrainHeightBounds(
+			TerrainParams, WorldConfig->BiomeConfiguration, BoundsMin, BoundsMax);
 
-				TerrainMinHeight = FMath::Min(TerrainMinHeight,
-					TerrainBase + CurveHeightMin - ChunkWorldSize);
-				TerrainMaxHeight = FMath::Max(TerrainMaxHeight,
-					TerrainBase + CurveHeightMax + WorldConfig->HeightScale * MaxScaleMult + ChunkWorldSize);
-			}
-		}
+		// One chunk of buffer on each side for terrain variation / meshing / edit slack.
+		TerrainMinHeight = BoundsMin - ChunkWorldSize;
+		TerrainMaxHeight = BoundsMax + ChunkWorldSize;
 
-		// For Island mode, also consider the edge height (can be negative for bowl shapes)
+		// Island mode can drop terrain to its (possibly negative) edge height for bowl shapes.
 		if (WorldMode == EWorldMode::IslandBowl)
 		{
 			TerrainMinHeight = FMath::Min(TerrainMinHeight, WorldConfig->IslandEdgeHeight - ChunkWorldSize);
