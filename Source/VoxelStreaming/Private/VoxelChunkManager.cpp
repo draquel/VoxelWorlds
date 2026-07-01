@@ -18,6 +18,7 @@
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelGPUDualContourMesher.h"
 #include "VoxelGPUMarchingCubesMesher.h"
+#include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelWaterPropagation.h"
@@ -54,6 +55,15 @@ static TAutoConsoleVariable<int32> CVarLogBoundaryResidency(
 	TEXT("voxel.LogBoundaryResidency"),
 	0,
 	TEXT("Log per-face neighbor-slice residency + all-Air state for each meshed chunk (LOD seam diagnosis)."),
+	ECVF_Default);
+
+// Runtime master-enable for GPU terrain generation. Lets you force CPU generation without editing the
+// config asset or restarting the build: 1 = honor bUseGPUGeneration; 0 = force CPU. Read at chunk-manager
+// Initialize (generator selection), so re-initialize the voxel world after toggling for it to take effect.
+static TAutoConsoleVariable<int32> CVarGPUGenerationEnable(
+	TEXT("voxel.GPUGeneration.Enable"),
+	1,
+	TEXT("Master enable for GPU terrain generation. 1 = use bUseGPUGeneration from config; 0 = force CPU generation."),
 	ECVF_Default);
 
 // ==================== High-speed traversal: stream throughput overrides ====================
@@ -260,6 +270,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	SectionStart = FPlatformTime::Seconds();
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
 	ProcessGenerationQueue(TimeSlice * 0.4f);
+	ProcessPendingGPUReadbacks();
 	ProcessCompletedAsyncGenerations();
 	Timing.GenerationMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
@@ -506,17 +517,37 @@ void UVoxelChunkManager::Initialize(
 	// same continentalness modulation as generation — spawn / nav / POI heights match the real surface.
 	WorldMode->SetBiomeContext(Configuration->BiomeConfiguration);
 
-	NoiseGenerator = MakeUnique<FVoxelCPUNoiseGenerator>();
-	NoiseGenerator->Initialize();
-
-	// Headless/benchmark override: force the CPU mesher path (e.g. under -nullrhi where GPU
-	// compute dispatch is unavailable, such as a headless streaming-benchmark run). Enabled by
-	// the -VoxelForceCPU command-line switch, evaluated here at mesher creation.
+	// -VoxelForceCPU (headless/benchmark, e.g. under -nullrhi where GPU compute can't dispatch) forces
+	// BOTH the CPU generator and the CPU mesher. Evaluated once here and reused for the mesher below.
 	const bool bForceCPU = FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU"));
+
+	// Select the voxel data generator. bUseGPUGeneration was historically a dead flag — this is where it
+	// becomes real. The runtime cvar voxel.GPUGeneration.Enable can force CPU without an editor restart.
+	const bool bUseGPUGen = Configuration->bUseGPUGeneration && !bForceCPU
+		&& CVarGPUGenerationEnable.GetValueOnGameThread() != 0;
+	if (bUseGPUGen)
+	{
+		TUniquePtr<FVoxelGPUNoiseGenerator> GPUGen = MakeUnique<FVoxelGPUNoiseGenerator>();
+		GPUGen->Initialize();
+		GPUGeneratorPtr = GPUGen.Get();
+		NoiseGenerator = MoveTemp(GPUGen);
+		bUseGPUGenerationActive = true;
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using GPU noise generator (bUseGPUGeneration=true)"));
+	}
+	else
+	{
+		NoiseGenerator = MakeUnique<FVoxelCPUNoiseGenerator>();
+		NoiseGenerator->Initialize();
+		GPUGeneratorPtr = nullptr;
+		bUseGPUGenerationActive = false;
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU noise generator (bUseGPUGeneration=%s, ForceCPU=%s)"),
+			Configuration->bUseGPUGeneration ? TEXT("true") : TEXT("false"),
+			bForceCPU ? TEXT("true") : TEXT("false"));
+	}
 	const bool bUseGPU = Configuration->bUseGPUMeshing && !bForceCPU;
 	if (bForceCPU)
 	{
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelForceCPU: forcing CPU mesher (GPU meshing disabled)"));
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelForceCPU: forcing CPU generation + CPU mesher (GPU disabled)"));
 	}
 
 	// Create mesher based on configuration
@@ -795,6 +826,12 @@ void UVoxelChunkManager::Shutdown()
 		Mesher->Shutdown();
 		Mesher.Reset();
 	}
+
+	// Drop any in-flight GPU readbacks before the generator's Shutdown (which flushes rendering commands
+	// and frees the readback staging buffers). Clearing the map here only releases the tracking handles.
+	PendingGPUReadbacks.Empty();
+	GPUGeneratorPtr = nullptr;
+	bUseGPUGenerationActive = false;
 
 	if (NoiseGenerator)
 	{
@@ -1701,6 +1738,31 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	IVoxelNoiseGenerator* GeneratorPtr = NoiseGenerator.Get();
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 
+	// GPU generation path: dispatch on the render thread + async readback (no thread-pool worker, no
+	// stall). The readback is polled each frame in ProcessPendingGPUReadbacks, where CPU post-passes
+	// (tree injection) run before the result is handed to the shared completion queue.
+	if (bUseGPUGenerationActive && GPUGeneratorPtr)
+	{
+		FVoxelGenerationHandle Handle = GPUGeneratorPtr->BeginGenerateChunkGPU(GenRequest);
+		if (Handle.IsValid())
+		{
+			FPendingGPUGeneration Pending;
+			Pending.Handle = Handle;
+			Pending.GenRequest = MoveTemp(GenRequest);
+			PendingGPUReadbacks.Add(ChunkCoord, MoveTemp(Pending));
+		}
+		else
+		{
+			// Dispatch failed (generator not initialized) — report failure via the normal completion queue
+			// so ProcessCompletedAsyncGenerations clears in-progress tracking and resets the chunk state.
+			FAsyncGenerationResult FailResult;
+			FailResult.ChunkCoord = ChunkCoord;
+			FailResult.bSuccess = false;
+			CompletedGenerationQueue.Enqueue(MoveTemp(FailResult));
+		}
+		return;
+	}
+
 	// Tree injection captures (value copies for thread safety)
 	const bool bInjectTrees = Configuration &&
 		Configuration->MeshingMode == EMeshingMode::Cubic &&
@@ -1821,6 +1883,86 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations()
 
 		++ProcessedCount;
 	}
+}
+
+void UVoxelChunkManager::ProcessPendingGPUReadbacks()
+{
+	if (PendingGPUReadbacks.Num() == 0 || !GPUGeneratorPtr)
+	{
+		return;
+	}
+
+	// Poll each in-flight GPU readback. Completed results feed the SAME CompletedGenerationQueue as the
+	// CPU path, so ProcessCompletedAsyncGenerations (called immediately after this in Tick) applies the
+	// state check + storage uniformly and clears AsyncGenerationInProgress.
+	TArray<FIntVector> Finished;
+	for (TPair<FIntVector, FPendingGPUGeneration>& Pair : PendingGPUReadbacks)
+	{
+		const FIntVector ChunkCoord = Pair.Key;
+		FPendingGPUGeneration& Pending = Pair.Value;
+
+		TArray<FVoxelData> VoxelData;
+		const EVoxelGPUReadbackStatus Status = GPUGeneratorPtr->PollGenerateChunkGPU(Pending.Handle, VoxelData);
+		if (Status == EVoxelGPUReadbackStatus::Pending)
+		{
+			continue;
+		}
+
+		const int32 ExpectedVoxels = Pending.GenRequest.ChunkSize * Pending.GenRequest.ChunkSize * Pending.GenRequest.ChunkSize;
+
+		FAsyncGenerationResult Result;
+		Result.ChunkCoord = ChunkCoord;
+		if (Status == EVoxelGPUReadbackStatus::Ready && VoxelData.Num() == ExpectedVoxels)
+		{
+			// CPU post-pass on the game thread (mirrors the CPU worker path's tree injection).
+			InjectTreesIfNeeded(ChunkCoord, Pending.GenRequest, VoxelData);
+			Result.bSuccess = true;
+			Result.VoxelData = MoveTemp(VoxelData);
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d,%d,%d) GPU generation failed (status=%d, voxels=%d/%d)"),
+				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, static_cast<int32>(Status), VoxelData.Num(), ExpectedVoxels);
+			Result.bSuccess = false;
+		}
+
+		CompletedGenerationQueue.Enqueue(MoveTemp(Result));
+		GPUGeneratorPtr->ReleaseHandle(Pending.Handle);
+		Finished.Add(ChunkCoord);
+	}
+
+	for (const FIntVector& ChunkCoord : Finished)
+	{
+		PendingGPUReadbacks.Remove(ChunkCoord);
+	}
+}
+
+void UVoxelChunkManager::InjectTreesIfNeeded(const FIntVector& ChunkCoord, const FVoxelNoiseGenerationRequest& GenRequest, TArray<FVoxelData>& VoxelData)
+{
+	const bool bInjectTrees = Configuration &&
+		Configuration->MeshingMode == EMeshingMode::Cubic &&
+		Configuration->TreeMode != EVoxelTreeMode::HISM &&
+		Configuration->TreeTemplates.Num() > 0 &&
+		Configuration->TreeDensity > 0.0f;
+	if (!bInjectTrees || !WorldMode)
+	{
+		return;
+	}
+
+	FVoxelTreeInjector::InjectTrees(
+		ChunkCoord,
+		GenRequest.ChunkSize,
+		GenRequest.VoxelSize,
+		Configuration->WorldOrigin,
+		Configuration->WorldSeed,
+		Configuration->TreeTemplates,
+		Configuration->NoiseParams,
+		*WorldMode,
+		Configuration->TreeDensity,
+		Configuration->BiomeConfiguration,
+		Configuration->bEnableWaterLevel,
+		Configuration->WaterLevel,
+		VoxelData);
 }
 
 void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)

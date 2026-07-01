@@ -98,8 +98,14 @@ void MainCS(
     // Calculate linear index for output buffer
     uint LinearIndex = VoxelCoord.x + VoxelCoord.y * ChunkSize + VoxelCoord.z * ChunkSize * ChunkSize;
 
-    // Calculate effective voxel size at this LOD level
-    float EffectiveVoxelSize = VoxelSize * (float)(1u << LODLevel);
+    // Generate at BASE voxel size regardless of LOD — this MUST match the CPU generator
+    // (VoxelCPUNoiseGenerator: "Always generate at base VoxelSize regardless of LOD level;
+    // LOD stride is applied during meshing, not generation"). The chunk grid is flat: every
+    // chunk spans ChunkSize*VoxelSize world units at all LODs, and the mesher sub-samples the
+    // base-resolution voxel data with a 2^LOD stride. Scaling sample spacing by 2^LOD here (the
+    // old behaviour) made GPU LOD>0 chunks span 2^LOD chunks of world area, desyncing them from
+    // the mesher's base-resolution expectation → torn / cracked LOD bands.
+    float EffectiveVoxelSize = VoxelSize;
 
     // Calculate world position for this voxel
     float3 WorldPos = ChunkWorldPosition + float3(VoxelCoord) * EffectiveVoxelSize;
