@@ -144,14 +144,15 @@ float FInfinitePlaneWorldMode::NoiseToTerrainHeight(
 	float NoiseValue,
 	const FWorldModeTerrainParams& TerrainParams)
 {
-	// Noise value is in range [-1, 1]
-	// Map to terrain height:
-	// TerrainHeight = SeaLevel + BaseHeight + (NoiseValue * HeightScale)
-
-	float Height = TerrainParams.SeaLevel + TerrainParams.BaseHeight + (NoiseValue * TerrainParams.HeightScale);
-
-	// Clamp to configured limits
-	return FMath::Clamp(Height, TerrainParams.MinHeight, TerrainParams.MaxHeight);
+	// Noise value is in range [-1, 1]:
+	//   TerrainHeight = SeaLevel + BaseHeight + (NoiseValue * HeightScale)
+	//
+	// Intentionally UNCLAMPED, to stay bit-identical with the GPU generator's NoiseToTerrainHeight
+	// (Shaders/Private/WorldModeSDF.ush), which applies no height clamp. A former CPU-only clamp to
+	// [MinHeight,MaxHeight] silently clipped peaks/valleys the GPU still generated, so the analytic
+	// height diverged from the real (GPU) surface above ~10000 uu. The height range is bounded by the
+	// caller's HeightScale (+ continentalness); chunk generation is bounded by GetMinZ()/GetMaxZ().
+	return TerrainParams.SeaLevel + TerrainParams.BaseHeight + (NoiseValue * TerrainParams.HeightScale);
 }
 
 FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(

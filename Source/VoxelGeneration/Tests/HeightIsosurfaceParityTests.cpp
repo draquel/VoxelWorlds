@@ -333,3 +333,42 @@ bool FVoxelHeightConditioningParityTest::RunTest(const FString& Parameters)
 	Config->RemoveFromRoot();
 	return true;
 }
+
+// ---------------------------------------------------------------------------
+// HT4: NoiseToTerrainHeight is UNCLAMPED and matches the GPU generator's formula. A former CPU-only
+// clamp to +/-10000 clipped peaks the GPU still generated, diverging the analytic height from the real
+// surface above ~10000 uu. (CPU generation and the analytic query share this function, so the
+// generated-surface tests above can't catch the clamp — only a direct comparison to the GPU formula.)
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelHeightUnclampedParityTest,
+	"VoxelWorlds.Generation.HeightParity.Unclamped",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelHeightUnclampedParityTest::RunTest(const FString& Parameters)
+{
+	// The GPU generator (Shaders/Private/WorldModeSDF.ush::NoiseToTerrainHeight) computes exactly this,
+	// with no clamp:
+	auto GpuFormula = [](float N, const FWorldModeTerrainParams& P)
+	{
+		return P.SeaLevel + P.BaseHeight + N * P.HeightScale;
+	};
+
+	// HeightScale 15000 => full-scale noise reaches +/-15000, well past the old +/-10000 CPU clamp.
+	const FWorldModeTerrainParams P(/*SeaLevel*/ 0.0f, /*HeightScale*/ 15000.0f, /*BaseHeight*/ 0.0f);
+
+	const float Peak = FInfinitePlaneWorldMode::NoiseToTerrainHeight(1.0f, P);
+	const float Valley = FInfinitePlaneWorldMode::NoiseToTerrainHeight(-1.0f, P);
+
+	TestEqual(TEXT("Peak matches the GPU (unclamped) formula"), Peak, GpuFormula(1.0f, P));
+	TestEqual(TEXT("Valley matches the GPU (unclamped) formula"), Valley, GpuFormula(-1.0f, P));
+	TestTrue(TEXT("Peak exceeds the old +10000 CPU clamp"), Peak > 10000.0f);
+	TestTrue(TEXT("Valley is below the old -10000 CPU clamp"), Valley < -10000.0f);
+
+	// BaseHeight + SeaLevel offsets also pass through unclamped (5000 + 8000 = 13000 > 10000).
+	const FWorldModeTerrainParams P2(/*SeaLevel*/ 1000.0f, /*HeightScale*/ 8000.0f, /*BaseHeight*/ 4000.0f);
+	TestEqual(TEXT("Offset peak matches the GPU (unclamped) formula"),
+		FInfinitePlaneWorldMode::NoiseToTerrainHeight(1.0f, P2), GpuFormula(1.0f, P2));
+
+	AddInfo(FString::Printf(TEXT("Unclamped: peak=%.1f valley=%.1f (old clamp would have capped at +/-10000)"), Peak, Valley));
+	return true;
+}
