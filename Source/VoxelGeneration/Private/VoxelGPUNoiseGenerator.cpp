@@ -85,6 +85,130 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FGenerateVoxelDensityCS, "/Plugin/VoxelWorlds/Private/GenerateVoxelDensity.usf", "MainCS", SF_Compute);
 
+// ==================== Shared Shader Parameter Setup ====================
+
+/**
+ * Allocate and populate the density compute shader parameters from a generation request.
+ * Shared by both the delegate-based DispatchComputeShader (test/editor) and the poll-based
+ * BeginGenerateChunkGPU (streaming) paths so they dispatch bit-identically — this is what lets the
+ * GPUvsCPU parity test transitively validate the streaming path.
+ * Must be called on the render thread (allocates RDG parameters + creates the output UAV).
+ */
+static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
+	FRDGBuilder& GraphBuilder,
+	const FVoxelNoiseGenerationRequest& Request,
+	FRDGBufferRef VoxelBuffer)
+{
+	FGenerateVoxelDensityCS::FParameters* Parameters = GraphBuilder.AllocParameters<FGenerateVoxelDensityCS::FParameters>();
+	Parameters->ChunkWorldPosition = FVector3f(Request.GetChunkWorldPosition());
+	Parameters->ChunkSize = Request.ChunkSize;
+	Parameters->VoxelSize = Request.VoxelSize;
+	Parameters->LODLevel = Request.LODLevel;
+	Parameters->NoiseType = static_cast<int32>(Request.NoiseParams.NoiseType);
+	Parameters->NoiseSeed = Request.NoiseParams.Seed;
+	Parameters->NoiseOctaves = Request.NoiseParams.Octaves;
+	Parameters->NoiseFrequency = Request.NoiseParams.Frequency;
+	Parameters->NoiseAmplitude = Request.NoiseParams.Amplitude;
+	Parameters->NoiseLacunarity = Request.NoiseParams.Lacunarity;
+	Parameters->NoisePersistence = Request.NoiseParams.Persistence;
+	Parameters->WorldMode = static_cast<int32>(Request.WorldMode);
+	Parameters->SeaLevel = Request.SeaLevel;
+	Parameters->HeightScale = Request.HeightScale;
+	Parameters->BaseHeight = Request.BaseHeight;
+	Parameters->OutputVoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+
+	// Continentalness parameters — zero-initialize curve arrays
+	Parameters->ContinentalnessEnabled = 0;
+	Parameters->ContinentalnessSeed = 0;
+	Parameters->ContinentalnessFrequency = 0.00002f;
+	Parameters->ContinentalnessCurveSamples = 0;
+	// SHADER_PARAMETER_SCALAR_ARRAY packs floats into FVector4f (4 per element)
+	for (int32 i = 0; i < 8; ++i)
+	{
+		Parameters->ContinentalnessHeightCurve[i] = FVector4f(0.0f);
+		Parameters->ContinentalnessHeightScaleCurve[i] = FVector4f(0.0f);
+	}
+
+	if (Request.BiomeConfiguration && Request.BiomeConfiguration->bEnableContinentalness)
+	{
+		const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+		Parameters->ContinentalnessEnabled = 1;
+		Parameters->ContinentalnessSeed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
+		Parameters->ContinentalnessFrequency = BiomeConfig->ContinentalnessNoiseFrequency;
+
+		// Upload baked curve arrays to shader — pack 4 floats per FVector4f
+		const int32 NumSamples = FMath::Min(BiomeConfig->BakedHeightCurve.Num(), 32);
+		Parameters->ContinentalnessCurveSamples = NumSamples;
+		for (int32 i = 0; i < NumSamples; ++i)
+		{
+			const int32 VecIdx = i / 4;
+			const int32 CompIdx = i % 4;
+			reinterpret_cast<float*>(&Parameters->ContinentalnessHeightCurve[VecIdx])[CompIdx] = BiomeConfig->BakedHeightCurve[i];
+			reinterpret_cast<float*>(&Parameters->ContinentalnessHeightScaleCurve[VecIdx])[CompIdx] = BiomeConfig->BakedHeightScaleCurve[i];
+		}
+	}
+
+	// Water level parameters
+	Parameters->WaterLevelEnabled = Request.bEnableWaterLevel ? 1 : 0;
+	Parameters->WaterLevelHeight = Request.WaterLevel;
+
+	// Cave parameters — zero-initialize packed vectors
+	Parameters->CaveEnabled = 0;
+	Parameters->CaveLayerCount = 0;
+	Parameters->CaveLayerType = FIntVector4(0, 0, 0, 0);
+	Parameters->CaveLayerSeed = FIntVector4(0, 0, 0, 0);
+	Parameters->CaveLayerSeed2 = FIntVector4(0, 0, 0, 0);
+	Parameters->CaveLayerFrequency = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerFrequency2 = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerOctaves = FIntVector4(0, 0, 0, 0);
+	Parameters->CaveLayerPersistence = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerLacunarity = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerThreshold = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerCarveStrength = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerCarveFalloff = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerMinDepth = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerMaxDepth = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerDepthFadeWidth = FVector4f(0, 0, 0, 0);
+	Parameters->CaveLayerVerticalScale = FVector4f(0, 0, 0, 0);
+
+	if (Request.bEnableCaves && Request.CaveConfiguration)
+	{
+		const UVoxelCaveConfiguration* CaveConfig = Request.CaveConfiguration;
+		if (CaveConfig->bEnableCaves && CaveConfig->HasEnabledLayers())
+		{
+			Parameters->CaveEnabled = 1;
+			int32 LayerIdx = 0;
+			for (const FCaveLayerConfig& Layer : CaveConfig->CaveLayers)
+			{
+				if (!Layer.bEnabled || LayerIdx >= 4)
+				{
+					continue;
+				}
+				// Pack into vector components: [0]=X, [1]=Y, [2]=Z, [3]=W
+				reinterpret_cast<int32*>(&Parameters->CaveLayerType)[LayerIdx] = static_cast<int32>(Layer.CaveType);
+				reinterpret_cast<int32*>(&Parameters->CaveLayerSeed)[LayerIdx] = Request.NoiseParams.Seed + Layer.SeedOffset;
+				reinterpret_cast<int32*>(&Parameters->CaveLayerSeed2)[LayerIdx] = Request.NoiseParams.Seed + Layer.SecondNoiseSeedOffset;
+				reinterpret_cast<float*>(&Parameters->CaveLayerFrequency)[LayerIdx] = Layer.Frequency;
+				reinterpret_cast<float*>(&Parameters->CaveLayerFrequency2)[LayerIdx] = Layer.Frequency * Layer.SecondNoiseFrequencyScale;
+				reinterpret_cast<int32*>(&Parameters->CaveLayerOctaves)[LayerIdx] = Layer.Octaves;
+				reinterpret_cast<float*>(&Parameters->CaveLayerPersistence)[LayerIdx] = Layer.Persistence;
+				reinterpret_cast<float*>(&Parameters->CaveLayerLacunarity)[LayerIdx] = Layer.Lacunarity;
+				reinterpret_cast<float*>(&Parameters->CaveLayerThreshold)[LayerIdx] = Layer.Threshold;
+				reinterpret_cast<float*>(&Parameters->CaveLayerCarveStrength)[LayerIdx] = Layer.CarveStrength;
+				reinterpret_cast<float*>(&Parameters->CaveLayerCarveFalloff)[LayerIdx] = Layer.CarveFalloff;
+				reinterpret_cast<float*>(&Parameters->CaveLayerMinDepth)[LayerIdx] = Layer.MinDepth;
+				reinterpret_cast<float*>(&Parameters->CaveLayerMaxDepth)[LayerIdx] = Layer.MaxDepth;
+				reinterpret_cast<float*>(&Parameters->CaveLayerDepthFadeWidth)[LayerIdx] = Layer.DepthFadeWidth;
+				reinterpret_cast<float*>(&Parameters->CaveLayerVerticalScale)[LayerIdx] = Layer.VerticalScale;
+				++LayerIdx;
+			}
+			Parameters->CaveLayerCount = LayerIdx;
+		}
+	}
+
+	return Parameters;
+}
+
 // ==================== FVoxelGPUNoiseGenerator Implementation ====================
 
 FVoxelGPUNoiseGenerator::FVoxelGPUNoiseGenerator()
@@ -173,113 +297,9 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 			);
 			FRDGBufferRef VoxelBuffer = GraphBuilder.CreateBuffer(VoxelBufferDesc, TEXT("VoxelDensityBuffer"));
 
-			// Allocate and set up shader parameters
-			FGenerateVoxelDensityCS::FParameters* Parameters = GraphBuilder.AllocParameters<FGenerateVoxelDensityCS::FParameters>();
-			Parameters->ChunkWorldPosition = FVector3f(CapturedRequest.GetChunkWorldPosition());
-			Parameters->ChunkSize = ChunkSize;
-			Parameters->VoxelSize = CapturedRequest.VoxelSize;
-			Parameters->LODLevel = CapturedRequest.LODLevel;
-			Parameters->NoiseType = static_cast<int32>(CapturedRequest.NoiseParams.NoiseType);
-			Parameters->NoiseSeed = CapturedRequest.NoiseParams.Seed;
-			Parameters->NoiseOctaves = CapturedRequest.NoiseParams.Octaves;
-			Parameters->NoiseFrequency = CapturedRequest.NoiseParams.Frequency;
-			Parameters->NoiseAmplitude = CapturedRequest.NoiseParams.Amplitude;
-			Parameters->NoiseLacunarity = CapturedRequest.NoiseParams.Lacunarity;
-			Parameters->NoisePersistence = CapturedRequest.NoiseParams.Persistence;
-			Parameters->WorldMode = static_cast<int32>(CapturedRequest.WorldMode);
-			Parameters->SeaLevel = CapturedRequest.SeaLevel;
-			Parameters->HeightScale = CapturedRequest.HeightScale;
-			Parameters->BaseHeight = CapturedRequest.BaseHeight;
-			Parameters->OutputVoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
-
-			// Continentalness parameters — zero-initialize curve arrays
-			Parameters->ContinentalnessEnabled = 0;
-			Parameters->ContinentalnessSeed = 0;
-			Parameters->ContinentalnessFrequency = 0.00002f;
-			Parameters->ContinentalnessCurveSamples = 0;
-			// SHADER_PARAMETER_SCALAR_ARRAY packs floats into FVector4f (4 per element)
-			for (int32 i = 0; i < 8; ++i)
-			{
-				Parameters->ContinentalnessHeightCurve[i] = FVector4f(0.0f);
-				Parameters->ContinentalnessHeightScaleCurve[i] = FVector4f(0.0f);
-			}
-
-			if (CapturedRequest.BiomeConfiguration && CapturedRequest.BiomeConfiguration->bEnableContinentalness)
-			{
-				const UVoxelBiomeConfiguration* BiomeConfig = CapturedRequest.BiomeConfiguration;
-				Parameters->ContinentalnessEnabled = 1;
-				Parameters->ContinentalnessSeed = CapturedRequest.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
-				Parameters->ContinentalnessFrequency = BiomeConfig->ContinentalnessNoiseFrequency;
-
-				// Upload baked curve arrays to shader — pack 4 floats per FVector4f
-				const int32 NumSamples = FMath::Min(BiomeConfig->BakedHeightCurve.Num(), 32);
-				Parameters->ContinentalnessCurveSamples = NumSamples;
-				for (int32 i = 0; i < NumSamples; ++i)
-				{
-					const int32 VecIdx = i / 4;
-					const int32 CompIdx = i % 4;
-					reinterpret_cast<float*>(&Parameters->ContinentalnessHeightCurve[VecIdx])[CompIdx] = BiomeConfig->BakedHeightCurve[i];
-					reinterpret_cast<float*>(&Parameters->ContinentalnessHeightScaleCurve[VecIdx])[CompIdx] = BiomeConfig->BakedHeightScaleCurve[i];
-				}
-			}
-
-			// Water level parameters
-			Parameters->WaterLevelEnabled = CapturedRequest.bEnableWaterLevel ? 1 : 0;
-			Parameters->WaterLevelHeight = CapturedRequest.WaterLevel;
-
-			// Cave parameters — zero-initialize packed vectors
-			Parameters->CaveEnabled = 0;
-			Parameters->CaveLayerCount = 0;
-			Parameters->CaveLayerType = FIntVector4(0, 0, 0, 0);
-			Parameters->CaveLayerSeed = FIntVector4(0, 0, 0, 0);
-			Parameters->CaveLayerSeed2 = FIntVector4(0, 0, 0, 0);
-			Parameters->CaveLayerFrequency = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerFrequency2 = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerOctaves = FIntVector4(0, 0, 0, 0);
-			Parameters->CaveLayerPersistence = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerLacunarity = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerThreshold = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerCarveStrength = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerCarveFalloff = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerMinDepth = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerMaxDepth = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerDepthFadeWidth = FVector4f(0, 0, 0, 0);
-			Parameters->CaveLayerVerticalScale = FVector4f(0, 0, 0, 0);
-
-			if (CapturedRequest.bEnableCaves && CapturedRequest.CaveConfiguration)
-			{
-				const UVoxelCaveConfiguration* CaveConfig = CapturedRequest.CaveConfiguration;
-				if (CaveConfig->bEnableCaves && CaveConfig->HasEnabledLayers())
-				{
-					Parameters->CaveEnabled = 1;
-					int32 LayerIdx = 0;
-					for (const FCaveLayerConfig& Layer : CaveConfig->CaveLayers)
-					{
-						if (!Layer.bEnabled || LayerIdx >= 4)
-						{
-							continue;
-						}
-						// Pack into vector components: [0]=X, [1]=Y, [2]=Z, [3]=W
-						reinterpret_cast<int32*>(&Parameters->CaveLayerType)[LayerIdx] = static_cast<int32>(Layer.CaveType);
-						reinterpret_cast<int32*>(&Parameters->CaveLayerSeed)[LayerIdx] = CapturedRequest.NoiseParams.Seed + Layer.SeedOffset;
-						reinterpret_cast<int32*>(&Parameters->CaveLayerSeed2)[LayerIdx] = CapturedRequest.NoiseParams.Seed + Layer.SecondNoiseSeedOffset;
-						reinterpret_cast<float*>(&Parameters->CaveLayerFrequency)[LayerIdx] = Layer.Frequency;
-						reinterpret_cast<float*>(&Parameters->CaveLayerFrequency2)[LayerIdx] = Layer.Frequency * Layer.SecondNoiseFrequencyScale;
-						reinterpret_cast<int32*>(&Parameters->CaveLayerOctaves)[LayerIdx] = Layer.Octaves;
-						reinterpret_cast<float*>(&Parameters->CaveLayerPersistence)[LayerIdx] = Layer.Persistence;
-						reinterpret_cast<float*>(&Parameters->CaveLayerLacunarity)[LayerIdx] = Layer.Lacunarity;
-						reinterpret_cast<float*>(&Parameters->CaveLayerThreshold)[LayerIdx] = Layer.Threshold;
-						reinterpret_cast<float*>(&Parameters->CaveLayerCarveStrength)[LayerIdx] = Layer.CarveStrength;
-						reinterpret_cast<float*>(&Parameters->CaveLayerCarveFalloff)[LayerIdx] = Layer.CarveFalloff;
-						reinterpret_cast<float*>(&Parameters->CaveLayerMinDepth)[LayerIdx] = Layer.MinDepth;
-						reinterpret_cast<float*>(&Parameters->CaveLayerMaxDepth)[LayerIdx] = Layer.MaxDepth;
-						reinterpret_cast<float*>(&Parameters->CaveLayerDepthFadeWidth)[LayerIdx] = Layer.DepthFadeWidth;
-						reinterpret_cast<float*>(&Parameters->CaveLayerVerticalScale)[LayerIdx] = Layer.VerticalScale;
-						++LayerIdx;
-					}
-					Parameters->CaveLayerCount = LayerIdx;
-				}
-			}
+			// Populate shader parameters (shared with the streaming BeginGenerateChunkGPU path via
+			// BuildDensityShaderParameters — single source of truth so both dispatch bit-identically).
+			FGenerateVoxelDensityCS::FParameters* Parameters = BuildDensityShaderParameters(GraphBuilder, CapturedRequest, VoxelBuffer);
 
 			// Get shader
 			TShaderMapRef<FGenerateVoxelDensityCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
@@ -322,6 +342,139 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 			}
 		}
 	);
+}
+
+FVoxelGenerationHandle FVoxelGPUNoiseGenerator::BeginGenerateChunkGPU(const FVoxelNoiseGenerationRequest& Request)
+{
+	if (!bIsInitialized)
+	{
+		return FVoxelGenerationHandle();
+	}
+
+	const uint64 RequestId = NextRequestId++;
+
+	TSharedPtr<FGenerationResult> Result = MakeShared<FGenerationResult>();
+	Result->ChunkSize = Request.ChunkSize;
+	Result->TotalVoxels = Request.ChunkSize * Request.ChunkSize * Request.ChunkSize;
+	{
+		FScopeLock Lock(&ResultsLock);
+		GenerationResults.Add(RequestId, Result);
+	}
+
+	FVoxelNoiseGenerationRequest CapturedRequest = Request;
+	const int32 TotalVoxels = Result->TotalVoxels;
+	const uint32 BufferSize = static_cast<uint32>(TotalVoxels) * sizeof(uint32);
+
+	// Dispatch the compute pass and enqueue a non-blocking readback in a single render-graph pass.
+	ENQUEUE_RENDER_COMMAND(GenerateVoxelDensityAsync)(
+		[CapturedRequest, Result, TotalVoxels, BufferSize](FRHICommandListImmediate& RHICmdList)
+		{
+			const int32 ChunkSize = CapturedRequest.ChunkSize;
+
+			FRDGBuilder GraphBuilder(RHICmdList);
+
+			FRDGBufferDesc VoxelBufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TotalVoxels);
+			FRDGBufferRef VoxelBuffer = GraphBuilder.CreateBuffer(VoxelBufferDesc, TEXT("VoxelDensityBufferAsync"));
+
+			FGenerateVoxelDensityCS::FParameters* Parameters = BuildDensityShaderParameters(GraphBuilder, CapturedRequest, VoxelBuffer);
+
+			TShaderMapRef<FGenerateVoxelDensityCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+
+			const int32 ThreadGroupSize = 4;
+			FIntVector GroupCount(
+				FMath::DivideAndRoundUp(ChunkSize, ThreadGroupSize),
+				FMath::DivideAndRoundUp(ChunkSize, ThreadGroupSize),
+				FMath::DivideAndRoundUp(ChunkSize, ThreadGroupSize));
+
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GenerateVoxelDensityAsync"),
+				ComputeShader,
+				Parameters,
+				GroupCount);
+
+			// Enqueue the async GPU→CPU copy into a readback within the same graph (no CPU stall).
+			Result->DensityReadback = new FRHIGPUBufferReadback(TEXT("VoxelDensityReadback"));
+			AddEnqueueCopyPass(GraphBuilder, Result->DensityReadback, VoxelBuffer, BufferSize);
+
+			GraphBuilder.Execute();
+
+			// Signal readiness AFTER the copy is recorded, so the game-thread poll never calls
+			// IsReady() on a readback with no pending fence yet (would spuriously read true → empty data).
+			Result->bReadbackEnqueued.store(true, std::memory_order_release);
+		});
+
+	return FVoxelGenerationHandle(RequestId);
+}
+
+EVoxelGPUReadbackStatus FVoxelGPUNoiseGenerator::PollGenerateChunkGPU(
+	const FVoxelGenerationHandle& Handle,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	if (!Handle.IsValid())
+	{
+		return EVoxelGPUReadbackStatus::Failed;
+	}
+
+	TSharedPtr<FGenerationResult> Result;
+	{
+		FScopeLock Lock(&ResultsLock);
+		if (TSharedPtr<FGenerationResult>* Found = GenerationResults.Find(Handle.RequestId))
+		{
+			Result = *Found;
+		}
+	}
+	if (!Result.IsValid())
+	{
+		return EVoxelGPUReadbackStatus::Failed;
+	}
+
+	// Data already unpacked on the render thread — hand it to the caller.
+	if (Result->bDataReady.load(std::memory_order_acquire))
+	{
+		OutVoxelData = MoveTemp(Result->CachedData);
+		return EVoxelGPUReadbackStatus::Ready;
+	}
+
+	// The copy hasn't been recorded on the render thread yet — still dispatching.
+	if (!Result->bReadbackEnqueued.load(std::memory_order_acquire))
+	{
+		return EVoxelGPUReadbackStatus::Pending;
+	}
+
+	// Readback enqueued; once the GPU fence signals, enqueue a one-shot Lock/Unpack/Unlock on the
+	// render thread (mirrors the GPU-DC mesher readback pattern). bLockInFlight is game-thread-only.
+	if (!Result->bLockInFlight && Result->DensityReadback && Result->DensityReadback->IsReady())
+	{
+		Result->bLockInFlight = true;
+		const int32 TotalVoxels = Result->TotalVoxels;
+		const uint32 BufferSize = static_cast<uint32>(TotalVoxels) * sizeof(uint32);
+		TSharedPtr<FGenerationResult> SharedResult = Result;
+		ENQUEUE_RENDER_COMMAND(LockVoxelDensityReadback)(
+			[SharedResult, TotalVoxels, BufferSize](FRHICommandListImmediate& RHICmdList)
+			{
+				const void* MappedData = SharedResult->DensityReadback->Lock(BufferSize);
+				if (MappedData)
+				{
+					const uint32* PackedData = static_cast<const uint32*>(MappedData);
+					SharedResult->CachedData.SetNum(TotalVoxels);
+					for (int32 i = 0; i < TotalVoxels; ++i)
+					{
+						SharedResult->CachedData[i] = FVoxelData::Unpack(PackedData[i]);
+					}
+				}
+				else
+				{
+					UE_LOG(LogVoxelGeneration, Warning, TEXT("GPU generation: density readback Lock() returned null"));
+				}
+				SharedResult->DensityReadback->Unlock();
+				delete SharedResult->DensityReadback;
+				SharedResult->DensityReadback = nullptr;
+				SharedResult->bDataReady.store(true, std::memory_order_release);
+			});
+	}
+
+	return EVoxelGPUReadbackStatus::Pending;
 }
 
 bool FVoxelGPUNoiseGenerator::GenerateChunkCPU(

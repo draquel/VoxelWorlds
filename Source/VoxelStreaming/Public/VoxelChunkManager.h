@@ -9,6 +9,7 @@
 #include "ChunkDescriptor.h"
 #include "ChunkRenderData.h"
 #include "LODTypes.h"
+#include "IVoxelNoiseGenerator.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
@@ -19,6 +20,7 @@
 
 // Forward declarations
 class UVoxelWorldConfiguration;
+class FVoxelGPUNoiseGenerator;
 class IVoxelLODStrategy;
 class IVoxelMeshRenderer;
 class FVoxelCPUMarchingCubesMesher;
@@ -905,8 +907,14 @@ protected:
 
 	// ==================== Generation Components ====================
 
-	/** CPU noise generator for voxel data generation */
-	TUniquePtr<FVoxelCPUNoiseGenerator> NoiseGenerator;
+	/** Voxel data generator — CPU (FVoxelCPUNoiseGenerator) or GPU (FVoxelGPUNoiseGenerator) per config. */
+	TUniquePtr<IVoxelNoiseGenerator> NoiseGenerator;
+
+	/** Non-owning alias to NoiseGenerator when GPU generation is active (for the poll-based readback API). */
+	FVoxelGPUNoiseGenerator* GPUGeneratorPtr = nullptr;
+
+	/** True when bUseGPUGeneration resolved on (config flag && !-VoxelForceCPU && voxel.GPUGeneration.Enable). */
+	bool bUseGPUGenerationActive = false;
 
 	/** World mode for terrain generation (Infinite Plane) */
 	TUniquePtr<FInfinitePlaneWorldMode> WorldMode;
@@ -965,6 +973,24 @@ protected:
 
 	/** Launch async noise generation for a chunk */
 	void LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest);
+
+	// ==================== GPU generation (poll-based async readback) ====================
+
+	/** A chunk whose GPU density generation was dispatched and is awaiting async readback. */
+	struct FPendingGPUGeneration
+	{
+		FVoxelGenerationHandle Handle;
+		FVoxelNoiseGenerationRequest GenRequest;  // retained for CPU post-passes (tree injection)
+	};
+
+	/** GPU generations in flight, keyed by chunk coord; polled each frame in ProcessPendingGPUReadbacks. */
+	TMap<FIntVector, FPendingGPUGeneration> PendingGPUReadbacks;
+
+	/** Poll in-flight GPU readbacks; on completion run CPU post-passes + feed CompletedGenerationQueue. */
+	void ProcessPendingGPUReadbacks();
+
+	/** CPU post-pass (game thread): inject voxel trees into freshly generated data if the config requires it. */
+	void InjectTreesIfNeeded(const FIntVector& ChunkCoord, const FVoxelNoiseGenerationRequest& GenRequest, TArray<FVoxelData>& VoxelData);
 
 	// ==================== Async Mesh Generation ====================
 
