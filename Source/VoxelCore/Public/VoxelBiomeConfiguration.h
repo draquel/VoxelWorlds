@@ -189,6 +189,42 @@ public:
 	/** Baked height scale curve samples (CONTINENTALNESS_CURVE_SAMPLE_COUNT entries, evenly spaced over [-1,1]) */
 	TArray<float> BakedHeightScaleCurve;
 
+	// ==================== GPU Generation Data (Phase B) ====================
+	// Baked, GPU-uploadable mirror of the biome/height-rule/ore-vein data for the density compute shader.
+	// Each record is a fixed run of FVector4f (float4) so it can upload as StructuredBuffer<float4> with a
+	// bulletproof layout (material IDs 0-255 round-trip exactly through float). Kept in the SAME order and
+	// sort as the CPU path (Biomes array order; height rules + ores pre-sorted by priority) so the shader's
+	// blend/selection matches VoxelCPUNoiseGenerator bit-for-bit. Read on the render thread by
+	// FVoxelGPUNoiseGenerator::BuildDensityShaderParameters (config outlives generation, like BakedHeightCurve).
+
+	/** float4s per baked record. Biome layout (5): [TempMin,TempMax,MoistMin,MoistMax][ContMin,ContMax,
+	 *  SurfaceDepth,SubsurfaceDepth][SurfMat,SubMat,DeepMat,UwSurfMat][UwSubMat,Priority,OreStart,OreCount]
+	 *  [BiomeID,0,0,0]. */
+	static constexpr int32 GPU_BIOME_FLOAT4_STRIDE = 5;
+	/** Height-rule layout (2): [MinHeight,MaxHeight,MaxDepthBelowSurface,MaterialID][bSurfaceOnly,0,0,0]. */
+	static constexpr int32 GPU_HEIGHTRULE_FLOAT4_STRIDE = 2;
+	/** Ore-vein layout (3): [MaterialID,MinDepth,MaxDepth,Shape][Frequency,Threshold,SeedOffset,Rarity][StreakStretch,0,0,0]. */
+	static constexpr int32 GPU_OREVEIN_FLOAT4_STRIDE = 3;
+
+	/** Baked biomes (Biomes.Num() records × GPU_BIOME_FLOAT4_STRIDE float4s), in Biomes array order. */
+	TArray<FVector4f> BakedGpuBiomes;
+	/** Baked height rules (priority-sorted), GPU_HEIGHTRULE_FLOAT4_STRIDE float4s each. */
+	TArray<FVector4f> BakedGpuHeightRules;
+	/** Baked ore veins, flattened per-biome (each biome's OreStart/OreCount indexes into here). */
+	TArray<FVector4f> BakedGpuOreVeins;
+
+	/** Element counts (records, not float4s) for the baked GPU arrays above. */
+	int32 BakedGpuBiomeCount = 0;
+	int32 BakedGpuHeightRuleCount = 0;
+	int32 BakedGpuOreVeinCount = 0;
+
+	/**
+	 * Bake Biomes / HeightMaterialRules / ore veins into the BakedGpu* float4 arrays for GPU generation.
+	 * Mirrors the CPU order + sort + per-biome ore resolution (GetOreVeinsForBiome) so GPU == CPU.
+	 * Call after the biome/ore/height caches are rebuilt (PostLoad / PostEditChangeProperty).
+	 */
+	void BuildGpuData();
+
 	// ==================== API ====================
 
 	/**

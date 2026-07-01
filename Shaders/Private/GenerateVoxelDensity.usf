@@ -75,8 +75,23 @@ float4 CaveLayerVerticalScale;
 int WaterLevelEnabled;
 float WaterLevelHeight;
 
+// Biome / material parameters (Phase B) — see BiomeMaterial.ush + UVoxelBiomeConfiguration::BuildGpuData.
+// BiomeCount == 0 falls back to the legacy depth-based material.
+int BiomeCount;
+float BiomeBlendWidth;
+int TemperatureSeed;
+float TemperatureFrequency;
+int MoistureSeed;
+float MoistureFrequency;
+int EnableUnderwaterMaterials;
+uint DefaultUnderwaterMaterial;
+StructuredBuffer<float4> BiomeData;
+
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;
+
+// Per-voxel biome selection + material pipeline (references the biome globals declared above).
+#include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
 
 // ==================== Main Compute Shader ====================
 
@@ -121,6 +136,7 @@ void MainCS(
         // Apply continentalness height modulation
         float EffectiveBaseHeight = BaseHeight;
         float EffectiveHeightScale = HeightScale;
+        float ContinentalnessValue = 0.0; // reused for the biome blend below (CPU: shared with height path)
 
         if (ContinentalnessEnabled != 0)
         {
@@ -136,6 +152,7 @@ void MainCS(
                 2.0,
                 0.5
             );
+            ContinentalnessValue = ContinentalnessNoise;
 
             // Curve-based height offset lookup from baked samples (packed as float4[8])
             float FIdx = (ContinentalnessNoise + 1.0) * 0.5 * float(ContinentalnessCurveSamples - 1);
@@ -172,14 +189,27 @@ void MainCS(
             TerrainHeight
         );
 
-        // Assign material based on depth below surface
-        MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
+        // Depth below the terrain surface, in voxels (matches CPU: (TerrainHeight - WorldPos.Z) / VoxelSize).
+        float DepthBelowSurface = (TerrainHeight - WorldPos.z) / EffectiveVoxelSize;
+
+        // Assign material: biome pipeline (Phase B) when biomes are configured, else legacy depth-based.
+        if (BiomeCount > 0)
+        {
+            float3 ClimateSamplePos = float3(WorldPos.x, WorldPos.y, 0.0);
+            float Temperature = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0, 2.0, 0.5);
+            float Moisture = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0, 2.0, 0.5);
+            uint OutBiome = 0u;
+            MaterialID = ComputeBiomeMaterial(Temperature, Moisture, ContinentalnessValue, DepthBelowSurface, TerrainHeight, OutBiome);
+            BiomeID = OutBiome;
+        }
+        else
+        {
+            MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
+        }
 
         // Cave carving: subtract density for underground cavities
         if (CaveEnabled != 0 && Density >= 127u)
         {
-            float DepthBelowSurface = (TerrainHeight - WorldPos.z) / EffectiveVoxelSize;
-
             if (DepthBelowSurface > 0.0f)
             {
                 float MaxCarveDensity = 0.0f;

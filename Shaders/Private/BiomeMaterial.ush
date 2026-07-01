@@ -1,0 +1,190 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// GPU port of the per-voxel biome selection + material pipeline (Phase B). Mirrors
+// UVoxelBiomeConfiguration::GetBiomeBlend / GetBlendedMaterial[WithWater] and
+// FBiomeDefinition::GetMaterialAtDepth so GPU generation == CPU generation on materials + biomes.
+//
+// Include AFTER the loose shader-parameter globals are declared in GenerateVoxelDensity.usf — this
+// file reads them directly: StructuredBuffer<float4> BiomeData; int BiomeCount; float BiomeBlendWidth;
+// int EnableUnderwaterMaterials; uint DefaultUnderwaterMaterial; int WaterLevelEnabled; float WaterLevelHeight.
+//
+// BiomeData layout (GPU_BIOME_STRIDE float4s per biome, see UVoxelBiomeConfiguration::BuildGpuData):
+//   [b*5+0]=(TempMin,TempMax,MoistMin,MoistMax) [b*5+1]=(ContMin,ContMax,SurfaceDepth,SubsurfaceDepth)
+//   [b*5+2]=(SurfMat,SubMat,DeepMat,UwSurfMat)  [b*5+3]=(UwSubMat,Priority,OreStart,OreCount)
+//   [b*5+4]=(BiomeID,0,0,0)
+
+#define GPU_BIOME_STRIDE 5
+
+struct GpuBiome
+{
+    float2 TempRange;
+    float2 MoistRange;
+    float2 ContRange;
+    float  SurfaceDepth;
+    float  SubsurfaceDepth;
+    uint   SurfaceMat;
+    uint   SubsurfaceMat;
+    uint   DeepMat;
+    uint   UwSurfMat;
+    uint   UwSubMat;
+    float  Priority;
+    uint   OreStart;
+    uint   OreCount;
+    uint   BiomeID;
+};
+
+GpuBiome LoadGpuBiome(uint b)
+{
+    float4 a = BiomeData[b * GPU_BIOME_STRIDE + 0];
+    float4 c = BiomeData[b * GPU_BIOME_STRIDE + 1];
+    float4 m = BiomeData[b * GPU_BIOME_STRIDE + 2];
+    float4 n = BiomeData[b * GPU_BIOME_STRIDE + 3];
+    float4 p = BiomeData[b * GPU_BIOME_STRIDE + 4];
+
+    GpuBiome bio;
+    bio.TempRange = a.xy;
+    bio.MoistRange = a.zw;
+    bio.ContRange = c.xy;
+    bio.SurfaceDepth = c.z;
+    bio.SubsurfaceDepth = c.w;
+    bio.SurfaceMat = (uint)(m.x + 0.5);
+    bio.SubsurfaceMat = (uint)(m.y + 0.5);
+    bio.DeepMat = (uint)(m.z + 0.5);
+    bio.UwSurfMat = (uint)(m.w + 0.5);
+    bio.UwSubMat = (uint)(n.x + 0.5);
+    bio.Priority = n.y;
+    bio.OreStart = (uint)(n.z + 0.5);
+    bio.OreCount = (uint)(n.w + 0.5);
+    bio.BiomeID = (uint)(p.x + 0.5);
+    return bio;
+}
+
+struct BiomeBlendResult
+{
+    uint  Indices[4];   // indices into BiomeData
+    float Weights[4];   // normalized
+    int   Count;
+};
+
+// Mirror of UVoxelBiomeConfiguration::GetBiomeBlend: tiered continentalness gate + temp/moisture
+// smoothstep + priority boost -> top-4 by weight -> normalize.
+BiomeBlendResult SampleGpuBiomeBlend(float Temperature, float Moisture, float Continentalness)
+{
+    BiomeBlendResult R;
+    R.Count = 0;
+    [unroll] for (int k = 0; k < 4; ++k) { R.Indices[k] = 0u; R.Weights[k] = 0.0; }
+
+    if (BiomeCount <= 0)
+    {
+        R.Count = 1; // caller loads biome 0
+        return R;
+    }
+
+    float T = clamp(Temperature, -1.0, 1.0);
+    float M = clamp(Moisture, -1.0, 1.0);
+    float C = clamp(Continentalness, -1.0, 1.0);
+    float BW = max(BiomeBlendWidth, 0.01);
+
+    for (uint b = 0; b < (uint)BiomeCount; ++b)
+    {
+        GpuBiome bio = LoadGpuBiome(b);
+
+        // Step 1/2: continentalness hard gate + smoothstep factor
+        float contDist = min(C - bio.ContRange.x, bio.ContRange.y - C);
+        if (contDist < -BW) { continue; }
+        float contFactor;
+        if (contDist >= BW) { contFactor = 1.0; }
+        else { float t = (contDist + BW) / (2.0 * BW); contFactor = t * t * (3.0 - 2.0 * t); }
+
+        // Step 3: temperature/moisture 2D signed distance + smoothstep weight
+        float tmDist = min(min(T - bio.TempRange.x, bio.TempRange.y - T),
+                           min(M - bio.MoistRange.x, bio.MoistRange.y - M));
+        float tmWeight;
+        if (tmDist >= BW) { tmWeight = 1.0; }
+        else if (tmDist > -BW) { float t = (tmDist + BW) / (2.0 * BW); tmWeight = t * t * (3.0 - 2.0 * t); }
+        else { tmWeight = 0.0; }
+
+        // Step 4: combined weight with priority boost (Priority 0 -> 1x, 10 -> 4x)
+        float priorityBoost = pow(2.0, bio.Priority * 0.2);
+        float finalWeight = tmWeight * contFactor * priorityBoost;
+
+        if (finalWeight <= 0.001) { continue; }
+
+        // Insert into descending top-4 (keeps the highest-weight biomes, like the CPU sort+truncate)
+        [unroll] for (int i = 0; i < 4; ++i)
+        {
+            if (finalWeight > R.Weights[i])
+            {
+                [unroll] for (int j = 3; j > i; --j) { R.Weights[j] = R.Weights[j - 1]; R.Indices[j] = R.Indices[j - 1]; }
+                R.Weights[i] = finalWeight;
+                R.Indices[i] = b;
+                break;
+            }
+        }
+        R.Count = min(R.Count + 1, 4);
+    }
+
+    if (R.Count == 0)
+    {
+        R.Count = 1;
+        R.Indices[0] = 0u;
+        R.Weights[0] = 1.0;
+        return R;
+    }
+
+    // Normalize (empty slots hold weight 0 and don't affect the sum)
+    float total = R.Weights[0] + R.Weights[1] + R.Weights[2] + R.Weights[3];
+    if (total > 1e-4)
+    {
+        [unroll] for (int i = 0; i < 4; ++i) { R.Weights[i] /= total; }
+    }
+    return R;
+}
+
+// FBiomeDefinition::GetMaterialAtDepth (surface/subsurface/deep bands, + underwater variant).
+uint GpuMaterialAtDepth(GpuBiome bio, float DepthBelowSurface, bool bUnderwater)
+{
+    if (bUnderwater)
+    {
+        if (DepthBelowSurface <= bio.SurfaceDepth) { return bio.UwSurfMat; }
+        else if (DepthBelowSurface <= bio.SubsurfaceDepth) { return bio.UwSubMat; }
+        else { return bio.DeepMat; }
+    }
+    if (DepthBelowSurface <= bio.SurfaceDepth) { return bio.SurfaceMat; }
+    else if (DepthBelowSurface <= bio.SubsurfaceDepth) { return bio.SubsurfaceMat; }
+    else { return bio.DeepMat; }
+}
+
+// UVoxelBiomeConfiguration::GetBlendedMaterial[WithWater]: dominant, or frac-dithered weighted pick.
+uint GpuBlendedMaterial(BiomeBlendResult blend, float DepthBelowSurface, bool bUnderwater)
+{
+    if (blend.Count == 1 || blend.Weights[0] > 0.9)
+    {
+        return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
+    }
+
+    float randomValue = frac(blend.Weights[0] * 17.3 + blend.Weights[1] * 31.7 + DepthBelowSurface * 0.1);
+    float cumulative = 0.0;
+    [unroll] for (int i = 0; i < 4; ++i)
+    {
+        if (i < blend.Count)
+        {
+            cumulative += blend.Weights[i];
+            if (randomValue < cumulative)
+            {
+                return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[i]), DepthBelowSurface, bUnderwater);
+            }
+        }
+    }
+    return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
+}
+
+// Top-level: blend the biomes, output the dominant BiomeID, and return the blended material.
+uint ComputeBiomeMaterial(float Temperature, float Moisture, float Continentalness,
+                          float DepthBelowSurface, float TerrainHeight, out uint OutBiomeID)
+{
+    BiomeBlendResult blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
+    OutBiomeID = LoadGpuBiome(blend.Indices[0]).BiomeID;
+    bool bUnderwater = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainHeight < WaterLevelHeight);
+    return GpuBlendedMaterial(blend, DepthBelowSurface, bUnderwater);
+}
