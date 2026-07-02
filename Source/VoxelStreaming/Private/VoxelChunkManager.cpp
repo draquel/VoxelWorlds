@@ -597,6 +597,16 @@ void UVoxelChunkManager::Initialize(
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
 		MeshConfig.UVScale = Configuration->UVScale;
 
+		// Marching Cubes is triangle-soup (3 verts/tri, no vertex sharing) — a chunk needs far more
+		// vertices than Dual Contouring (~1 vert/cell). Scale the GPU output-buffer budget with chunk
+		// volume so cave-dense chunks (lots of interior surface) fit at large chunk sizes (e.g. 64^3)
+		// instead of overflowing the default 65536 cap and vanishing (the reported invisible-cave-chunk
+		// bug). 32^3 stays at 65536; 64^3 -> 524288. The shader's overflow guard still truncates any
+		// pathological chunk safely (visible, no corruption). Soup => index count == vertex count.
+		const int64 ChunkCells = (int64)Configuration->ChunkSize * Configuration->ChunkSize * Configuration->ChunkSize;
+		MeshConfig.MaxVerticesPerChunk = (uint32)FMath::Clamp<int64>(ChunkCells * 2, 65536, 1048576);
+		MeshConfig.MaxIndicesPerChunk = MeshConfig.MaxVerticesPerChunk;
+
 		// Disable LOD seam handling if configured
 		if (!Configuration->bEnableLODSeams)
 		{
