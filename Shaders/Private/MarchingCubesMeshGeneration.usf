@@ -107,6 +107,13 @@ uint LODStride;  // 2^LODLevel (1, 2, 4, 8...)
 uint MCBoundaryMorph;        // 1 = ramp the fine surface to the coarse height near transition faces
 float MCBoundaryMorphWidth;  // ramp width in coarse cells
 
+// Output buffer capacities (overflow protection — mirrors the DC mesher). Cave-riddled chunks have far
+// more interior surface than the fixed triangle-soup buffers hold; without this guard the atomic counters
+// run past the buffer end, out-of-bounds writes are dropped, and in-bounds index slots end up referencing
+// vertices past the clamped count -> the renderer discards the whole section (invisible-but-collidable chunk).
+uint MaxVertexCount;
+uint MaxIndexCount;
+
 // ==================== Helper Functions ====================
 
 /** Check if face neighbor data is available for a direction. */
@@ -550,6 +557,14 @@ void MainCS(
     InterlockedAdd(MeshCounters[0], TriCount * 3, VertexStart);
     InterlockedAdd(MeshCounters[1], TriCount * 3, IndexStart);
 
+    // Overflow guard (mirrors the DC mesher): if this cube's geometry would exceed either output buffer,
+    // emit nothing. The counters stay incremented (clamped on readback), but writing nothing means the
+    // index buffer never references vertices past the buffer end -> no dangling indices, no dropped chunk.
+    if (VertexStart + TriCount * 3u > MaxVertexCount || IndexStart + TriCount * 3u > MaxIndexCount)
+    {
+        return;
+    }
+
     uint CurrentVertex = VertexStart;
     uint CurrentIndex = IndexStart;
 
@@ -800,6 +815,12 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     uint IndexStart;
     InterlockedAdd(MeshCounters[0], ValidTriCount * 3, VertexStart);
     InterlockedAdd(MeshCounters[1], ValidTriCount * 3, IndexStart);
+
+    // Overflow guard (mirrors the main pass): drop this ribbon cell if it would exceed either buffer.
+    if (VertexStart + ValidTriCount * 3u > MaxVertexCount || IndexStart + ValidTriCount * 3u > MaxIndexCount)
+    {
+        return;
+    }
 
     uint CurrentVertex = VertexStart;
     uint CurrentIndex = IndexStart;
