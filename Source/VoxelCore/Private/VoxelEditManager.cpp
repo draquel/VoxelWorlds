@@ -116,12 +116,24 @@ void UVoxelEditManager::EndEditOperation()
 	// Clear redo stack when new edits are made
 	RedoStack.Empty();
 
+	// Capture the affected chunks before moving the operation. ApplyEditInternal defers its
+	// per-voxel notification during a batch op; we fire ONE OnChunkEdited per affected chunk here
+	// (deduped set), so the chunk-manager handler's scatter-clear + dirty cascade runs a handful of
+	// times instead of once per edited voxel (the max-brush freeze).
+	const TArray<FIntVector> AffectedChunks = CurrentOperation->AffectedChunks;
+
 	// Add to undo stack
 	UndoStack.Add(MoveTemp(*CurrentOperation));
 	CurrentOperation.Reset();
 
 	// Trim if necessary
 	TrimUndoStack();
+
+	// Batched edit notification: one broadcast per affected chunk (operation-level source/center/radius).
+	for (const FIntVector& ChunkCoord : AffectedChunks)
+	{
+		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+	}
 
 	// Notify listeners
 	OnUndoRedoStateChanged.Broadcast();
@@ -886,8 +898,14 @@ void UVoxelEditManager::ApplyEditInternal(
 		CurrentOperation->AddEdit(Edit, ChunkCoord);
 	}
 
-	// Notify listeners with current edit source and location
-	OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+	// Notify listeners — but only for standalone edits. During a Begin/End batch operation (brush),
+	// defer to EndEditOperation, which broadcasts ONCE per affected chunk. Broadcasting per voxel made
+	// the chunk-manager handler run its full-radius scatter clear + chunk/neighbour dirty cascade once
+	// per edited voxel — a large brush (hundreds of thousands of voxels) froze the game thread.
+	if (!CurrentOperation.IsValid())
+	{
+		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+	}
 }
 
 void UVoxelEditManager::ApplyEditInternal(
@@ -958,8 +976,11 @@ void UVoxelEditManager::ApplyEditInternal(
 						CurrentOperation->AddEdit(RemovalEdit, ChunkCoord);
 					}
 
-					// Notify listeners that chunk changed
-					OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+					// Notify listeners that chunk changed (standalone edit only; batch defers to EndEditOperation)
+					if (!CurrentOperation.IsValid())
+					{
+						OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+					}
 					return;
 				}
 			}
@@ -1000,8 +1021,14 @@ void UVoxelEditManager::ApplyEditInternal(
 		CurrentOperation->AddEdit(EditCopy, ChunkCoord);
 	}
 
-	// Notify listeners with current edit source and location
-	OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+	// Notify listeners — but only for standalone edits. During a Begin/End batch operation (brush),
+	// defer to EndEditOperation, which broadcasts ONCE per affected chunk. Broadcasting per voxel made
+	// the chunk-manager handler run its full-radius scatter clear + chunk/neighbour dirty cascade once
+	// per edited voxel — a large brush (hundreds of thousands of voxels) froze the game thread.
+	if (!CurrentOperation.IsValid())
+	{
+		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+	}
 }
 
 FVoxelData UVoxelEditManager::GetOriginalVoxelData(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const
