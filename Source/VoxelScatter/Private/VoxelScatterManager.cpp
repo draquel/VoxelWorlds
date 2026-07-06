@@ -586,8 +586,7 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
 		FMath::FloorToInt((MaxWorld.Z - WorldOrigin.Z) / ChunkWorldSize)
 	);
 
-	// Track which scatter types need rebuilding
-	TSet<int32> ScatterTypesToRebuild;
+	const float RadiusSq = Radius * Radius;
 	int32 TotalRemoved = 0;
 
 	// Process each potentially affected chunk
@@ -603,21 +602,58 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
 				TArray<FClearedScatterVolume>& ClearedVolumes = ClearedVolumesPerChunk.FindOrAdd(ChunkCoord);
 				ClearedVolumes.Add(FClearedScatterVolume(WorldPosition, Radius));
 
+				// Scrub cached surface points inside the radius so distance streaming
+				// can't resurrect scatter here from pre-edit surface data (placement
+				// never consults cleared volumes; the cache must not contain them)
+				if (FChunkSurfaceData* SurfaceData = SurfaceDataCache.Find(ChunkCoord))
+				{
+					SurfaceData->SurfacePoints.RemoveAll([&WorldPosition, RadiusSq](const FVoxelSurfacePoint& Point)
+					{
+						return FVector::DistSquared(Point.Position, WorldPosition) <= RadiusSq;
+					});
+				}
+
 				// Remove spawn points that fall within the radius
+				TSet<int32> AffectedTypes;
 				FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
 				if (ScatterData && ScatterData->bIsValid)
 				{
-					const float RadiusSq = Radius * Radius;
-
 					for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
 					{
 						const FScatterSpawnPoint& Point = ScatterData->SpawnPoints[i];
 						if (FVector::DistSquared(Point.Position, WorldPosition) <= RadiusSq)
 						{
-							ScatterTypesToRebuild.Add(Point.ScatterTypeID);
+							AffectedTypes.Add(Point.ScatterTypeID);
 							ScatterData->SpawnPoints.RemoveAt(i);
 							++TotalRemoved;
 						}
+					}
+				}
+
+				// Replace this chunk's instances for the affected types with the surviving
+				// points — immediate release + re-add via the per-frame add budget, which
+				// runs every Tick. A full-type rebuild would wait for a stationary viewer
+				// AND an idle generation pipeline, leaving cleared scatter visible
+				// (floating/clipped) for as long as the player keeps moving.
+				if (AffectedTypes.Num() > 0 && ScatterRenderer && ScatterRenderer->IsInitialized())
+				{
+					for (int32 TypeID : AffectedTypes)
+					{
+						const FScatterDefinition* Def = GetScatterDefinition(TypeID);
+						if (!Def)
+						{
+							continue;
+						}
+
+						TArray<FTransform> RemainingTransforms;
+						for (const FScatterSpawnPoint& Point : ScatterData->SpawnPoints)
+						{
+							if (Point.ScatterTypeID == TypeID)
+							{
+								RemainingTransforms.Add(Point.GetTransform(Def->bAlignToSurfaceNormal, Def->SurfaceOffset));
+							}
+						}
+						ScatterRenderer->UpdateChunkTypeInstances(ChunkCoord, TypeID, MoveTemp(RemainingTransforms));
 					}
 				}
 
@@ -631,15 +667,6 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
 					});
 				}
 			}
-		}
-	}
-
-	// Queue rebuilds for affected scatter types
-	if (ScatterRenderer && ScatterRenderer->IsInitialized())
-	{
-		for (int32 ScatterTypeID : ScatterTypesToRebuild)
-		{
-			ScatterRenderer->QueueRebuild(ScatterTypeID);
 		}
 	}
 
@@ -960,6 +987,43 @@ void UVoxelScatterManager::RemoveChunkScatter(const FIntVector& ChunkCoord)
 
 		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Scatter data removed"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+	}
+}
+
+void UVoxelScatterManager::ApplyClearedVolumesToResult(const FIntVector& ChunkCoord, FChunkScatterData* ScatterData, FChunkSurfaceData* SurfaceData) const
+{
+	const TArray<FClearedScatterVolume>* Volumes = ClearedVolumesPerChunk.Find(ChunkCoord);
+	if (!Volumes || Volumes->Num() == 0)
+	{
+		return;
+	}
+
+	auto InAnyVolume = [Volumes](const FVector& Position)
+	{
+		for (const FClearedScatterVolume& Volume : *Volumes)
+		{
+			if (Volume.ContainsPoint(Position))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	if (ScatterData)
+	{
+		ScatterData->SpawnPoints.RemoveAll([&InAnyVolume](const FScatterSpawnPoint& Point)
+		{
+			return InAnyVolume(Point.Position);
+		});
+	}
+
+	if (SurfaceData)
+	{
+		SurfaceData->SurfacePoints.RemoveAll([&InAnyVolume](const FVoxelSurfacePoint& Point)
+		{
+			return InAnyVolume(Point.Position);
+		});
 	}
 }
 
@@ -1413,6 +1477,10 @@ void UVoxelScatterManager::ProcessCompletedDistanceStream()
 			continue;
 		}
 
+		// Filter against cleared volumes registered AFTER the task launched (player
+		// edits during flight) — the launch-time surface snapshot can't have seen them
+		ApplyClearedVolumesToResult(Result.ChunkCoord, &Result.ScatterData, nullptr);
+
 		const int32 SpawnCount = Result.ScatterData.SpawnPoints.Num();
 
 		// Send to renderer for budget-limited HISM addition
@@ -1743,6 +1811,10 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 		{
 			continue;
 		}
+
+		// Filter against cleared volumes registered AFTER the task launched (player
+		// edits during flight) — the launch-time snapshot can't have seen them
+		ApplyClearedVolumesToResult(Result.ChunkCoord, &Result.ScatterData, &Result.SurfaceData);
 
 		const int32 SurfacePointCount = Result.SurfaceData.SurfacePoints.Num();
 		const int32 SpawnCount = Result.ScatterData.SpawnPoints.Num();

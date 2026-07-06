@@ -281,6 +281,36 @@ void UVoxelScatterRenderer::AddSupplementalInstances(const FIntVector& ChunkCoor
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NewScatterData.SpawnPoints.Num());
 }
 
+void UVoxelScatterRenderer::UpdateChunkTypeInstances(const FIntVector& ChunkCoord, int32 ScatterTypeID, TArray<FTransform> Transforms)
+{
+	if (!bIsInitialized)
+	{
+		return;
+	}
+
+	// Zero-scale current instances for this chunk+type and return them to the pool
+	ReleaseChunkScatterType(ChunkCoord, ScatterTypeID);
+
+	// Drop queued adds for this pair so they don't stack on top of the replacement
+	PendingInstanceAdds.RemoveAll([&ChunkCoord, ScatterTypeID](const FPendingInstanceAdd& Add)
+	{
+		return Add.ChunkCoord == ChunkCoord && Add.ScatterTypeID == ScatterTypeID;
+	});
+
+	if (Transforms.Num() == 0)
+	{
+		return;
+	}
+
+	ChunkScatterTypes.FindOrAdd(ChunkCoord).Add(ScatterTypeID);
+
+	FPendingInstanceAdd PendingAdd;
+	PendingAdd.ScatterTypeID = ScatterTypeID;
+	PendingAdd.ChunkCoord = ChunkCoord;
+	PendingAdd.Transforms = MoveTemp(Transforms);
+	PendingInstanceAdds.Add(MoveTemp(PendingAdd));
+}
+
 void UVoxelScatterRenderer::RemoveChunkInstances(const FIntVector& ChunkCoord)
 {
 	if (!bIsInitialized)

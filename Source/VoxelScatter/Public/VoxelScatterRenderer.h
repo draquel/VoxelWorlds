@@ -109,6 +109,20 @@ public:
 	void AddSupplementalInstances(const FIntVector& ChunkCoord, const FChunkScatterData& NewScatterData);
 
 	/**
+	 * Replace all instances for one scatter type in one chunk with the given transforms.
+	 * Releases the chunk+type's current instances back to the pool immediately (zero-scale),
+	 * drops any queued adds for the pair, and queues the new transforms for budget-limited
+	 * re-add via FlushPendingInstanceAdds — which runs every Tick, unlike full-type rebuilds
+	 * that wait for a stationary viewer and a quiet generation pipeline.
+	 * Used by edit-driven scatter clearing so removals render immediately during play.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param ScatterTypeID Scatter type to replace instances for
+	 * @param Transforms Remaining instance transforms (empty = release only)
+	 */
+	void UpdateChunkTypeInstances(const FIntVector& ChunkCoord, int32 ScatterTypeID, TArray<FTransform> Transforms);
+
+	/**
 	 * Remove all instances for a chunk.
 	 *
 	 * Called when a chunk is unloaded.
