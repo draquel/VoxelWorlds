@@ -94,9 +94,9 @@ private:
 	{
 		FVector3f Position;     // QEF-solved vertex position
 		FVector3f Normal;       // Averaged normal from edge crossings
-		uint8 MaterialID = 0;
-		uint8 BiomeID = 0;
-		int32 MeshVertexIndex = -1;  // Index in output FChunkMeshData (-1 = not emitted yet)
+		uint8 EmittedMaterialID = 0; // Material of the primary emission (valid when MeshVertexIndex >= 0)
+		uint8 EmittedBiomeID = 0;    // Biome of the primary emission (valid when MeshVertexIndex >= 0)
+		int32 MeshVertexIndex = -1;  // Primary emission index in output FChunkMeshData (-1 = not emitted yet)
 		bool bValid = false;         // Whether this cell has a QEF vertex
 	};
 
@@ -202,29 +202,23 @@ private:
 		TArray<FDCCellVertex>& CellVertices);
 
 	/**
-	 * Get the dominant material for a cell by voting across solid voxels.
-	 */
-	uint8 GetCellMaterial(
-		const FVoxelMeshingRequest& Request,
-		int32 CellX, int32 CellY, int32 CellZ,
-		int32 Stride) const;
-
-	/**
-	 * Get the dominant biome for a cell by voting across solid voxels.
-	 */
-	uint8 GetCellBiome(
-		const FVoxelMeshingRequest& Request,
-		int32 CellX, int32 CellY, int32 CellZ,
-		int32 Stride) const;
-
-	/**
-	 * Emit a vertex into the mesh data if not already emitted.
-	 * Returns the vertex index in the output mesh.
+	 * Append a mesh vertex for a cell, carrying explicit material data.
+	 *
+	 * Material/biome are per-QUAD, not per-cell: every triangle must be
+	 * material-uniform because the pixel shader rounds the hardware-interpolated
+	 * UV1.x back to an integer atlas index — a triangle with mixed IDs sweeps
+	 * through every intermediate index, rendering stripes of unrelated materials
+	 * at borders. GenerateQuads owns the caching, and duplicates a cell vertex
+	 * (same position/normal) when quads of different materials share it.
+	 *
+	 * Always appends; returns the new vertex index in the output mesh.
 	 */
 	int32 EmitVertex(
 		const FVoxelMeshingRequest& Request,
-		FDCCellVertex& Vertex,
-		FChunkMeshData& OutMeshData);
+		const FDCCellVertex& Vertex,
+		uint8 MaterialID,
+		uint8 BiomeID,
+		FChunkMeshData& OutMeshData) const;
 
 	/** Generate vertical skirt geometry at LOD transition boundaries to hide seams. */
 	void GenerateSkirts(
