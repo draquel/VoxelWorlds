@@ -1393,7 +1393,9 @@ void UVoxelScatterManager::ProcessCompletedDistanceStream()
 	FDistanceStreamResult Result;
 	int32 ProcessedCount = 0;
 
-	while (DistanceStreamQueue.Dequeue(Result) && ProcessedCount < MaxDistanceStreamResultsPerFrame)
+	// Count check BEFORE dequeue — see ProcessCompletedAsyncScatter: dequeue-first
+	// drops one result on the exiting iteration and leaks its in-progress entry.
+	while (ProcessedCount < MaxDistanceStreamResultsPerFrame && DistanceStreamQueue.Dequeue(Result))
 	{
 		++ProcessedCount;
 
@@ -1714,12 +1716,23 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 	int32 ProcessedCount = 0;
 	const int32 MaxProcessPerFrame = 2;
 
-	while (CompletedScatterQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
+	// Count check BEFORE dequeue: dequeuing first would pop a result on the
+	// iteration that exits the loop and silently drop it, leaving its chunk
+	// stuck in AsyncScatterInProgress forever.
+	while (ProcessedCount < MaxProcessPerFrame && CompletedScatterQueue.Dequeue(Result))
 	{
 		++ProcessedCount;
 
-		// Remove from in-progress tracking
-		AsyncScatterInProgress.Remove(Result.ChunkCoord);
+		// Remove from in-progress tracking. If the chunk is no longer tracked,
+		// it was unloaded or regeneration was requested while the task was in
+		// flight — discard the stale result rather than resurrecting scatter
+		// (cache entries + HISM instances) for a chunk that no longer exists.
+		if (AsyncScatterInProgress.Remove(Result.ChunkCoord) == 0)
+		{
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Async scatter result discarded - chunk no longer tracked"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+			continue;
+		}
 
 		if (!Configuration)
 		{
@@ -1810,7 +1823,9 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 	int32 ProcessedCount = 0;
 	const int32 MaxGPUProcessPerFrame = 4;
 
-	while (CompletedGPUExtractionQueue.Dequeue(GPUResult) && ProcessedCount < MaxGPUProcessPerFrame)
+	// Count check BEFORE dequeue — see ProcessCompletedAsyncScatter: dequeue-first
+	// drops one result on the exiting iteration and leaks its in-progress entry.
+	while (ProcessedCount < MaxGPUProcessPerFrame && CompletedGPUExtractionQueue.Dequeue(GPUResult))
 	{
 		++ProcessedCount;
 
