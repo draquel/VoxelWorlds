@@ -324,6 +324,16 @@ protected:
 	void RemoveChunkScatter(const FIntVector& ChunkCoord);
 
 	/**
+	 * Remove spawn/surface points that fall inside any cleared volume registered for
+	 * the chunk. Applied to async results at consumption time (game thread): a result
+	 * may have been generated from a snapshot taken before a player edit registered a
+	 * new cleared volume, so launch-time filtering alone is not sufficient.
+	 * Either pointer may be null. (The GPU extraction consumer already does this for
+	 * surface points; this generalizes the pattern to the CPU and distance-stream paths.)
+	 */
+	void ApplyClearedVolumesToResult(const FIntVector& ChunkCoord, FChunkScatterData* ScatterData, FChunkSurfaceData* SurfaceData) const;
+
+	/**
 	 * Get chunk world origin for coordinate conversion.
 	 */
 	FVector GetChunkWorldOrigin(const FIntVector& ChunkCoord) const;
