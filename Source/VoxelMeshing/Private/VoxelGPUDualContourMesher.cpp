@@ -289,7 +289,9 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, DCValidEdgeIndices)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDCEdgeCrossingGPU>, DCEdgeCrossings)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDCCellVertexGPU>, DCCellVertices)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVoxelVertex>, OutputVertices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputIndices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, MeshCounters)
 		SHADER_PARAMETER(uint32, ChunkSize)
@@ -297,6 +299,7 @@ public:
 		SHADER_PARAMETER(float, IsoLevel)
 		SHADER_PARAMETER(uint32, LODStride)
 		SHADER_PARAMETER(uint32, GridDim)
+		SHADER_PARAMETER(uint32, MaxVertexCount)
 		SHADER_PARAMETER(uint32, MaxIndexCount)
 		// Voxel access for winding determination
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InputVoxelData)
@@ -919,7 +922,9 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				FDCQuadGenerationCS::FParameters* QuadParams = GraphBuilder.AllocParameters<FDCQuadGenerationCS::FParameters>();
 
 				QuadParams->DCValidEdgeIndices = GraphBuilder.CreateUAV(ValidEdgeBuffer);
+				QuadParams->DCEdgeCrossings = GraphBuilder.CreateUAV(EdgeCrossingBuffer);
 				QuadParams->DCCellVertices = GraphBuilder.CreateUAV(CellVertexBuffer);
+				QuadParams->OutputVertices = GraphBuilder.CreateUAV(VertexBuffer);
 				QuadParams->OutputIndices = GraphBuilder.CreateUAV(IndexBuffer);
 				QuadParams->MeshCounters = MeshCountersUAV;
 				QuadParams->ChunkSize = ChunkSize;
@@ -927,6 +932,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				QuadParams->IsoLevel = CapturedConfig.IsoLevel;
 				QuadParams->LODStride = LODStride;
 				QuadParams->GridDim = GridDim;
+				QuadParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				QuadParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
 				BindVoxelAccess(QuadParams);
 

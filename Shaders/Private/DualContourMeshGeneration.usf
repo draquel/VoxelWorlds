@@ -1250,6 +1250,40 @@ void DCQuadGenerationCS(
         return;
     }
 
+    // Per-quad material from the owned crossing's solid endpoint (parity with CPU
+    // GenerateQuads): all 4 vertices must carry the quad's material so every
+    // triangle is material-uniform — the pixel shader rounds the hardware-
+    // interpolated UV1.x back to an integer atlas index, and a triangle with mixed
+    // IDs sweeps through every intermediate index, striping material borders.
+    // A cell vertex whose canonical emission carries a different material gets a
+    // DUPLICATE output vertex: a bit-identical copy of the canonical vertex
+    // (position/normal/UV, incl. any weld from Pass 2.6) with only the material
+    // swapped, so duplication can never open a crack.
+    uint QuadPackedMat = DCEdgeCrossings[EIdx].PackedMaterial & 0xFFFFu;
+    uint QuadMatID = QuadPackedMat & 0xFFu;
+    uint QuadBiomeID = (QuadPackedMat >> 8) & 0xFFu;
+
+    [unroll]
+    for (int i = 0; i < 4; i++)
+    {
+        if ((DCCellVertices[CellIndices[i]].PackedMaterial & 0xFFFFu) == QuadPackedMat)
+        {
+            continue; // canonical emission already carries the quad's material
+        }
+
+        uint DupIdx;
+        InterlockedAdd(MeshCounters[0], 1, DupIdx);
+        if (DupIdx >= MaxVertexCount)
+        {
+            continue; // buffer full — fall back to the canonical vertex (local striping beats a hole)
+        }
+
+        FVoxelVertexGPU Dup = OutputVertices[VertIndices[i]];
+        Dup.PackedMaterialData = PackMaterialData(QuadMatID, QuadBiomeID, 0);
+        OutputVertices[DupIdx] = Dup;
+        VertIndices[i] = DupIdx;
+    }
+
     // Triangulation order per (bFlip, bUse13) matches FVoxelCPUDualContourMesher::GenerateQuads.
     int Tri[6];
     if (bFlip)

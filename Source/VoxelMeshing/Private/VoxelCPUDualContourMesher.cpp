@@ -331,9 +331,8 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 					AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
 				}
 				Vertex.Normal = AvgNormal;
-
-				Vertex.MaterialID = GetCellMaterial(Request, CX * Stride, CY * Stride, CZ * Stride, Stride);
-				Vertex.BiomeID = GetCellBiome(Request, CX * Stride, CY * Stride, CZ * Stride, Stride);
+				// Material/biome are assigned per-quad in GenerateQuads (from the owned
+				// edge's solid endpoint) so triangles stay material-uniform.
 			}
 		}
 	}
@@ -368,6 +367,11 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		{{0, 0, 0}, {-1, 0, 0}, {-1, -1, 0}, {0, -1, 0}},
 	};
 
+	// Duplicate-emission cache for cell vertices shared by quads of different
+	// materials: key = (cell index << 16) | (material << 8) | biome.
+	// Only material-border cells ever land here, so the map stays small.
+	TMap<uint64, int32> DuplicateVertexCache;
+
 	// Iterate only edges with actual crossings
 	for (const int32 EIdx : ValidEdgeIndices)
 	{
@@ -392,6 +396,7 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 
 		// Look up the 4 cell vertices via flat array
 		FDCCellVertex* Verts[4];
+		int32 CellIdxs[4];
 		bool bAllValid = true;
 
 		for (int32 i = 0; i < 4; i++)
@@ -404,6 +409,7 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 				break;
 			}
 			Verts[i] = &V;
+			CellIdxs[i] = CIdx;
 		}
 
 		if (!bAllValid)
@@ -411,16 +417,60 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 			continue;
 		}
 
-		// Emit vertices if not already emitted
-		int32 Indices[4];
-		for (int32 i = 0; i < 4; i++)
-		{
-			Indices[i] = EmitVertex(Request, *Verts[i], OutMeshData);
-		}
-
 		// Determine winding order from density sign at the edge start
 		const float D0 = GetDensityAt(Request, CX * Stride, CY * Stride, CZ * Stride);
 		const bool bFlip = (D0 < IsoLevel);
+
+		// Per-quad material: the quad is dual to this sign-change edge, so its
+		// surface material is the material of the edge's SOLID endpoint (the voxel
+		// the surface bounds). All 4 vertices carry this ID — triangles must be
+		// material-uniform because the pixel shader rounds the hardware-interpolated
+		// UV1.x back to an integer atlas index; a triangle with mixed IDs sweeps
+		// through every intermediate index and stripes material borders.
+		int32 SolidX = CX * Stride, SolidY = CY * Stride, SolidZ = CZ * Stride;
+		if (bFlip) // edge start is empty — the solid endpoint is the +Axis end
+		{
+			if (Axis == 0) { SolidX += Stride; }
+			else if (Axis == 1) { SolidY += Stride; }
+			else { SolidZ += Stride; }
+		}
+		const FVoxelData SolidVoxel = GetVoxelAt(Request, SolidX, SolidY, SolidZ);
+		const uint8 QuadMaterial = SolidVoxel.MaterialID;
+		const uint8 QuadBiome = SolidVoxel.BiomeID;
+
+		// Emit vertices. A cell vertex already emitted with a different material is
+		// duplicated (same position/normal, different material data) via the cache.
+		int32 Indices[4];
+		for (int32 i = 0; i < 4; i++)
+		{
+			FDCCellVertex& V = *Verts[i];
+			if (V.MeshVertexIndex >= 0 && V.EmittedMaterialID == QuadMaterial && V.EmittedBiomeID == QuadBiome)
+			{
+				Indices[i] = V.MeshVertexIndex;
+			}
+			else if (V.MeshVertexIndex < 0)
+			{
+				Indices[i] = EmitVertex(Request, V, QuadMaterial, QuadBiome, OutMeshData);
+				V.MeshVertexIndex = Indices[i];
+				V.EmittedMaterialID = QuadMaterial;
+				V.EmittedBiomeID = QuadBiome;
+			}
+			else
+			{
+				const uint64 DupKey = (static_cast<uint64>(CellIdxs[i]) << 16)
+					| (static_cast<uint64>(QuadMaterial) << 8)
+					| static_cast<uint64>(QuadBiome);
+				if (const int32* Found = DuplicateVertexCache.Find(DupKey))
+				{
+					Indices[i] = *Found;
+				}
+				else
+				{
+					Indices[i] = EmitVertex(Request, V, QuadMaterial, QuadBiome, OutMeshData);
+					DuplicateVertexCache.Add(DupKey, Indices[i]);
+				}
+			}
+		}
 
 		// Split the quad along the diagonal that maximises the smaller of the two triangle
 		// areas (a max-min-area / Delaunay-like choice). The boundary weld can pull the four
@@ -654,86 +704,9 @@ void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 		for (int32 A = 0; A < 3; A++) { if (Pinned[A]) { NEff = FMath::Max(NEff, Eff[A]); } }
 		Welded.Normal = CalculateGradientNormalLOD(Request,
 			Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize, NEff);
-		// Material/biome left as solved — geometry coincidence is what seals the seam.
+		// Material/biome are per-quad (assigned in GenerateQuads) — geometry
+		// coincidence is what seals the seam.
 	}
-}
-
-// ============================================================================
-// Material & Biome Voting
-// ============================================================================
-
-uint8 FVoxelCPUDualContourMesher::GetCellMaterial(
-	const FVoxelMeshingRequest& Request,
-	int32 CellX, int32 CellY, int32 CellZ,
-	int32 Stride) const
-{
-	// Find the solid voxel closest to the isosurface (density nearest 0.5)
-	constexpr uint8 IsosurfaceThreshold = 128;
-	uint8 BestMaterial = 0;
-	int32 ClosestDistance = INT32_MAX;
-
-	// Check the 8 corners of the cell
-	for (int32 dz = 0; dz <= 1; dz++)
-	{
-		for (int32 dy = 0; dy <= 1; dy++)
-		{
-			for (int32 dx = 0; dx <= 1; dx++)
-			{
-				const int32 VX = CellX + dx * Stride;
-				const int32 VY = CellY + dy * Stride;
-				const int32 VZ = CellZ + dz * Stride;
-				const FVoxelData Voxel = GetVoxelAt(Request, VX, VY, VZ);
-
-				if (Voxel.IsSolid())
-				{
-					const int32 Dist = FMath::Abs(static_cast<int32>(Voxel.Density) - IsosurfaceThreshold);
-					if (Dist < ClosestDistance)
-					{
-						ClosestDistance = Dist;
-						BestMaterial = Voxel.MaterialID;
-					}
-				}
-			}
-		}
-	}
-
-	return BestMaterial;
-}
-
-uint8 FVoxelCPUDualContourMesher::GetCellBiome(
-	const FVoxelMeshingRequest& Request,
-	int32 CellX, int32 CellY, int32 CellZ,
-	int32 Stride) const
-{
-	constexpr uint8 IsosurfaceThreshold = 128;
-	uint8 BestBiome = 0;
-	int32 ClosestDistance = INT32_MAX;
-
-	for (int32 dz = 0; dz <= 1; dz++)
-	{
-		for (int32 dy = 0; dy <= 1; dy++)
-		{
-			for (int32 dx = 0; dx <= 1; dx++)
-			{
-				const int32 VX = CellX + dx * Stride;
-				const int32 VY = CellY + dy * Stride;
-				const int32 VZ = CellZ + dz * Stride;
-				const FVoxelData Voxel = GetVoxelAt(Request, VX, VY, VZ);
-
-				if (Voxel.IsSolid())
-				{
-					const int32 Dist = FMath::Abs(static_cast<int32>(Voxel.Density) - IsosurfaceThreshold);
-					if (Dist < ClosestDistance)
-					{
-						ClosestDistance = Dist;
-						BestBiome = Voxel.BiomeID;
-					}
-				}
-			}
-		}
-	}
-
-	return BestBiome;
 }
 
 // ============================================================================
@@ -742,20 +715,15 @@ uint8 FVoxelCPUDualContourMesher::GetCellBiome(
 
 int32 FVoxelCPUDualContourMesher::EmitVertex(
 	const FVoxelMeshingRequest& Request,
-	FDCCellVertex& Vertex,
-	FChunkMeshData& OutMeshData)
+	const FDCCellVertex& Vertex,
+	uint8 MaterialID,
+	uint8 BiomeID,
+	FChunkMeshData& OutMeshData) const
 {
-	// Return existing index if already emitted
-	if (Vertex.MeshVertexIndex >= 0)
-	{
-		return Vertex.MeshVertexIndex;
-	}
-
 	const float VoxelSize = Request.VoxelSize;
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
 
 	const int32 Index = OutMeshData.Positions.Num();
-	Vertex.MeshVertexIndex = Index;
 
 	OutMeshData.Positions.Add(Vertex.Position);
 	OutMeshData.Normals.Add(Vertex.Normal);
@@ -782,10 +750,10 @@ int32 FVoxelCPUDualContourMesher::EmitVertex(
 	OutMeshData.UVs.Add(UV);
 
 	// UV1: MaterialID + reserved (same format as smooth mesher)
-	OutMeshData.UV1s.Add(FVector2f(static_cast<float>(Vertex.MaterialID), 0.0f));
+	OutMeshData.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
 
 	// Vertex color: R=MaterialID, G=BiomeID (same format as smooth mesher)
-	OutMeshData.Colors.Add(FColor(Vertex.MaterialID, Vertex.BiomeID, 0, 255));
+	OutMeshData.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
 
 	return Index;
 }
