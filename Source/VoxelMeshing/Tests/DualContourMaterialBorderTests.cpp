@@ -1,6 +1,6 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-// Material-border tests for the CPU Dual Contouring mesher.
+// Material-border tests for the Dual Contouring meshers (CPU + GPU).
 //
 // Regression tests for the material-border striping bug: MaterialID travels to
 // the pixel shader as a float in UV1.x, which the hardware interpolates across
@@ -9,16 +9,23 @@
 // every intermediate index, rendering stripes of unrelated materials along the
 // border. The fix assigns materials per-QUAD (from the owned edge's solid
 // endpoint) and duplicates cell vertices shared by quads of different
-// materials, so every emitted triangle is material-uniform.
+// materials, so every emitted triangle is material-uniform. The GPU mesher
+// mirrors this in DualContourMeshGeneration.usf Pass 3 (crossing-stored
+// material + duplicate allocation).
 //
-//   MB1  LOD0 two-material split  -> every triangle uniform, only source IDs emitted
-//   MB2  LOD1 (stride 2) split    -> same invariants under LOD striding
+//   MB1  CPU LOD0 two-material split  -> every triangle uniform, only source IDs emitted
+//   MB2  CPU LOD1 (stride 2) split    -> same invariants under LOD striding
+//   MB3  GPU LOD0 two-material split  -> GPU parity (requires real RHI)
+//   MB4  GPU LOD1 (stride 2) split    -> GPU parity under LOD striding
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelGPUDualContourMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
+#include "RenderingThread.h" // FlushRenderingCommands — driving the GPU mesher's async readback
+#include "RHI.h"             // GUsingNullRHI — skip GPU tests under -nullrhi
 
 namespace DualContourMaterialBorderTestHelpers
 {
@@ -69,16 +76,82 @@ namespace DualContourMaterialBorderTestHelpers
 		return Request;
 	}
 
-	/** Mesh the chunk and run all material-uniformity invariants. */
-	bool RunMaterialBorderInvariants(FAutomationTestBase& Test, int32 LODLevel)
+	FVoxelMeshingConfig MakeConfig()
+	{
+		FVoxelMeshingConfig Config;
+		Config.bUseSmoothMeshing = true;
+		Config.IsoLevel = 0.5f;
+		Config.bGenerateUVs = true;
+		Config.bCalculateAO = false;
+		Config.bGenerateSkirts = false;
+		Config.QEFSVDThreshold = 0.1f;
+		Config.QEFBiasStrength = 0.5f;
+		return Config;
+	}
+
+	/** Mesh via the CPU Dual Contouring mesher. */
+	bool MeshChunkCPU(const FVoxelMeshingRequest& Request, FChunkMeshData& OutMesh)
 	{
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();
+		Mesher.SetConfig(MakeConfig());
+		const bool bOk = Mesher.GenerateMeshCPU(Request, OutMesh);
+		Mesher.Shutdown();
+		return bOk;
+	}
 
+	/**
+	 * Mesh via the GPU Dual Contouring mesher and block until the async readback
+	 * completes (same Sleep + FlushRenderingCommands + Tick pump as the GT tests
+	 * in DualContourLODBoundaryTests). Requires a real RHI — callers gate on
+	 * GUsingNullRHI before invoking this.
+	 */
+	bool MeshChunkGPU(const FVoxelMeshingRequest& Request, FChunkMeshData& OutMesh)
+	{
+		FVoxelGPUDualContourMesher Mesher;
+		Mesher.Initialize();
+		Mesher.SetConfig(MakeConfig());
+
+		volatile bool bCompleted = false;
+		volatile bool bSucceeded = false;
+		FVoxelMeshingHandle Handle = Mesher.GenerateMeshAsync(Request,
+			FOnVoxelMeshingComplete::CreateLambda([&bCompleted, &bSucceeded](FVoxelMeshingHandle, bool bSuccess)
+			{
+				bSucceeded = bSuccess;
+				bCompleted = true;
+			}));
+
+		if (!Handle.IsValid())
+		{
+			Mesher.Shutdown();
+			return false;
+		}
+
+		// 30s budget: the first GPU DC dispatch after a .usf change pays PSO/shader
+		// cold-start costs; subsequent dispatches are sub-100ms.
+		const double StartTime = FPlatformTime::Seconds();
+		const double TimeoutSeconds = 30.0;
+		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < TimeoutSeconds)
+		{
+			FlushRenderingCommands();
+			Mesher.Tick(0.0f);
+			FPlatformProcess::Sleep(0.002f);
+		}
+
+		const bool bOk = bCompleted && bSucceeded && Mesher.ReadbackToCPU(Handle, OutMesh);
+		Mesher.ReleaseHandle(Handle);
+		Mesher.Shutdown();
+		return bOk;
+	}
+
+	using FDCMeshFn = bool(*)(const FVoxelMeshingRequest&, FChunkMeshData&);
+
+	/** Mesh the two-material chunk and run all material-uniformity invariants. */
+	bool RunMaterialBorderInvariants(FAutomationTestBase& Test, int32 LODLevel, FDCMeshFn MeshFn)
+	{
 		const FVoxelMeshingRequest Request = MakeRequest(LODLevel);
 		FChunkMeshData MeshData;
-		const bool bSuccess = Mesher.GenerateMeshCPU(Request, MeshData);
-		Mesher.Shutdown();
+		const bool bSuccess = MeshFn(Request, MeshData);
 
 		Test.TestTrue(TEXT("Meshing succeeded"), bSuccess);
 		Test.TestTrue(TEXT("Mesh has vertices"), MeshData.Positions.Num() > 0);
@@ -157,7 +230,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB1LOD0Test, "VoxelWorlds.Mesh
 bool FDCMaterialBorderMB1LOD0Test::RunTest(const FString& Parameters)
 {
 	using namespace DualContourMaterialBorderTestHelpers;
-	RunMaterialBorderInvariants(*this, 0);
+	RunMaterialBorderInvariants(*this, 0, &MeshChunkCPU);
 	return true;
 }
 
@@ -167,6 +240,28 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB2LOD1Test, "VoxelWorlds.Mesh
 bool FDCMaterialBorderMB2LOD1Test::RunTest(const FString& Parameters)
 {
 	using namespace DualContourMaterialBorderTestHelpers;
-	RunMaterialBorderInvariants(*this, 1);
+	RunMaterialBorderInvariants(*this, 1, &MeshChunkCPU);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB3GPULOD0Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB3_GPU_LOD0_UniformTriangles",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMaterialBorderMB3GPULOD0Test::RunTest(const FString& Parameters)
+{
+	using namespace DualContourMaterialBorderTestHelpers;
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU DC tests require a real RHI (run without -nullrhi)")); return true; }
+	RunMaterialBorderInvariants(*this, 0, &MeshChunkGPU);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB4GPULOD1Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB4_GPU_LOD1_UniformTriangles",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMaterialBorderMB4GPULOD1Test::RunTest(const FString& Parameters)
+{
+	using namespace DualContourMaterialBorderTestHelpers;
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU DC tests require a real RHI (run without -nullrhi)")); return true; }
+	RunMaterialBorderInvariants(*this, 1, &MeshChunkGPU);
 	return true;
 }
