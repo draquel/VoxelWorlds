@@ -465,6 +465,16 @@ public:
 		float LODMs = 0.0f;
 		float StreamingMs = 0.0f;
 		float TotalMs = 0.0f;
+
+		// Generation sub-phases (GenerationMs = launch + poll + apply). Added to attribute the
+		// residual game-thread generation cost after the post-passes moved to the GPU.
+		float GenLaunchMs = 0.0f;   // ProcessGenerationQueue: build requests + dispatch
+		float GenPollMs = 0.0f;     // ProcessPendingGPUReadbacks: poll fences + hand off ready data
+		float GenApplyMs = 0.0f;    // ProcessCompletedAsyncGenerations total
+		float GenStoreMs = 0.0f;    // apply: move result into chunk state (frees any old data)
+		float GenNotifyMs = 0.0f;   // apply: OnChunkGenerationComplete (queues + neighbors + delegates)
+		float GenNeighborMs = 0.0f; // subset of notify: QueueNeighborsForRemesh
+		int32 GenApplyCount = 0;    // completions applied this tick
 	};
 
 	/** Get voxel-specific memory usage breakdown */
@@ -968,8 +978,11 @@ protected:
 	/** Set of chunks currently being generated asynchronously */
 	TSet<FIntVector> AsyncGenerationInProgress;
 
-	/** Process completed async generation tasks (called from game thread) */
-	void ProcessCompletedAsyncGenerations();
+	/** Process completed async generation tasks (called from game thread; fills the gen-apply sub-timers) */
+	void ProcessCompletedAsyncGenerations(FVoxelTimingStats& Timing);
+
+	/** QueueNeighborsForRemesh time accumulated across this tick (attribution; reset each tick) */
+	double NeighborRemeshSecondsThisTick = 0.0;
 
 	/** Launch async noise generation for a chunk */
 	void LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest);

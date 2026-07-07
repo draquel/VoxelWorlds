@@ -958,9 +958,13 @@ void FVoxelGPUNoiseGenerator::ReleaseHandle(const FVoxelGenerationHandle& Handle
 		return;
 	}
 
-	// Wait for any pending render commands before releasing
-	FlushRenderingCommands();
-
+	// No FlushRenderingCommands here: render commands capture the FGenerationResult as a
+	// TSharedPtr, so removing the map entry cannot destroy an object an in-flight command still
+	// references (same lifetime pattern as the GPU meshers' ReleaseHandle). The flush this used
+	// to do was a full game→render thread sync per released handle — the streaming path releases
+	// several per frame, which serialized the game thread against a busy render thread and was
+	// the dominant generation-phase frame cost (~2.5ms per release under load). Shutdown and
+	// ReleaseAllHandles-style teardown paths still flush.
 	FScopeLock Lock(&ResultsLock);
 	GenerationResults.Remove(Handle.RequestId);
 }

@@ -120,9 +120,12 @@ private:
 		FGenerationResult() = default;
 
 		/**
-		 * Safety net for an abandoned readback. Shutdown / ReleaseHandle call FlushRenderingCommands()
-		 * before dropping their reference, so any pending GPU copy is complete before this runs; the
-		 * normal completion path in PollGenerateChunkGPU deletes + nulls DensityReadback itself.
+		 * Safety net for an abandoned readback. The normal completion path (the Lock render command
+		 * enqueued by PollGenerateChunkGPU) deletes + nulls DensityReadback itself. If a handle is
+		 * released while that command is still in flight, the command's captured TSharedPtr keeps
+		 * this result alive and this destructor then runs on the render thread after it completes —
+		 * so ReleaseHandle needs no FlushRenderingCommands. Shutdown still flushes before dropping
+		 * all references at once.
 		 */
 		~FGenerationResult()
 		{
