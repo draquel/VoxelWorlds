@@ -124,6 +124,227 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FGenerateVoxelDensityCS, "/Plugin/VoxelWorlds/Private/GenerateVoxelDensity.usf", "MainCS", SF_Compute);
 
+// ==================== Post-pass compute shaders ====================
+// GPU ports of the CPU generation post-passes (FVoxelCPUNoiseGenerator::ApplyWaterFillPass /
+// ApplyUndergroundClassificationPass). Dispatched in the same render graph as the density pass so
+// the readback returns finished voxel data — the CPU-side post-passes previously ran per readback
+// batch and were the traversal frame-spike source. Kernels in VoxelPostPasses.usf; semantics must
+// stay bit-identical to the CPU passes (validated by the GPUvsCPU parity tests).
+
+class FVoxelWaterColumnSeedCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterColumnSeedCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterColumnSeedCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(float, VoxelSize)
+		SHADER_PARAMETER(float, ChunkWorldZ)
+		SHADER_PARAMETER(float, WaterLevel)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+class FVoxelWaterFloodSweepCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterFloodSweepCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterFloodSweepCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(float, VoxelSize)
+		SHADER_PARAMETER(float, ChunkWorldZ)
+		SHADER_PARAMETER(float, WaterLevel)
+		SHADER_PARAMETER(uint32, SweepAxis)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+class FVoxelUndergroundColumnCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelUndergroundColumnCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelUndergroundColumnCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(uint32, ClearCaveFlags)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+class FVoxelUndergroundMarkCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelUndergroundMarkCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelUndergroundMarkCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, ScratchFlags)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+class FVoxelUndergroundApplyCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelUndergroundApplyCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelUndergroundApplyCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, ScratchFlags)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterColumnSeedCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterColumnSeedCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterFloodSweepCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterFloodSweepCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundColumnCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundColumnCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundMarkCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundMarkCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundApplyCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundApplyCS", SF_Compute);
+
+/**
+ * Append the post-pass dispatches (water fill + underground classification) to the render graph,
+ * after the density pass has written VoxelBuffer. Shared by DispatchComputeShader (test/editor)
+ * and BeginGenerateChunkGPU (streaming) so both paths produce bit-identical finished data —
+ * the GPUvsCPU parity tests transitively validate the streaming path.
+ *
+ * Gating mirrors FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses:
+ * - Water pass: only when water is enabled and the world mode is not SphericalPlanet (radial water).
+ *   Column seeding + flood only when the chunk straddles the water level (no seeds otherwise);
+ *   the cave-flag clear (CPU phase 3) runs whenever the water pass ran, folded into the
+ *   underground column kernel via ClearCaveFlags.
+ * - Underground classification: always.
+ */
+static void AddVoxelPostPassDispatches(
+	FRDGBuilder& GraphBuilder,
+	const FVoxelNoiseGenerationRequest& Request,
+	FRDGBufferRef VoxelBuffer)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	const int32 TotalVoxels = ChunkSize * ChunkSize * ChunkSize;
+	const FIntVector ColumnGroups(
+		FMath::DivideAndRoundUp(ChunkSize, 8),
+		FMath::DivideAndRoundUp(ChunkSize, 8),
+		1);
+	const FIntVector VoxelGroups(
+		FMath::DivideAndRoundUp(ChunkSize, 4),
+		FMath::DivideAndRoundUp(ChunkSize, 4),
+		FMath::DivideAndRoundUp(ChunkSize, 4));
+
+	// The CPU pass intentionally uses the base VoxelSize (not the LOD-effective size) — mirror it.
+	const float ChunkWorldZ = static_cast<float>(Request.GetChunkWorldPosition().Z);
+	const float ChunkTopZ = ChunkWorldZ + ChunkSize * Request.VoxelSize;
+
+	const bool bWaterPass = Request.bEnableWaterLevel && Request.WorldMode != EWorldMode::SphericalPlanet;
+	const bool bChunkContainsWaterLevel = bWaterPass
+		&& Request.WaterLevel >= ChunkWorldZ && Request.WaterLevel < ChunkTopZ;
+
+	const auto& ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+
+	if (bChunkContainsWaterLevel)
+	{
+		// Phase 1: column seed
+		{
+			FVoxelWaterColumnSeedCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelWaterColumnSeedCS::FParameters>();
+			Params->ChunkSize = ChunkSize;
+			Params->VoxelSize = Request.VoxelSize;
+			Params->ChunkWorldZ = ChunkWorldZ;
+			Params->WaterLevel = Request.WaterLevel;
+			Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+			TShaderMapRef<FVoxelWaterColumnSeedCS> Shader(ShaderMap);
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterColumnSeed"), Shader, Params, ColumnGroups);
+		}
+
+		// Phase 2: flood — repeated bidirectional axis sweeps converge to the same 6-connected
+		// fixpoint as the CPU BFS (monotone flag spread). Each round can carry the flood around
+		// one more "corner" per axis; ocean-pocket topology converges in 1-2 rounds, 8 is margin.
+		constexpr int32 FloodSweepRounds = 8;
+		TShaderMapRef<FVoxelWaterFloodSweepCS> SweepShader(ShaderMap);
+		for (int32 Round = 0; Round < FloodSweepRounds; ++Round)
+		{
+			for (const uint32 Axis : { 2u, 0u, 1u }) // Z first: seeds spread down/laterally fastest
+			{
+				FVoxelWaterFloodSweepCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelWaterFloodSweepCS::FParameters>();
+				Params->ChunkSize = ChunkSize;
+				Params->VoxelSize = Request.VoxelSize;
+				Params->ChunkWorldZ = ChunkWorldZ;
+				Params->WaterLevel = Request.WaterLevel;
+				Params->SweepAxis = Axis;
+				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterFloodSweep"), SweepShader, Params, ColumnGroups);
+			}
+		}
+	}
+
+	// Underground pass 1 (column scan) + the water pass's cave-flag clear (phase 3) folded in.
+	{
+		FVoxelUndergroundColumnCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelUndergroundColumnCS::FParameters>();
+		Params->ChunkSize = ChunkSize;
+		Params->ClearCaveFlags = bWaterPass ? 1 : 0;
+		Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+		TShaderMapRef<FVoxelUndergroundColumnCS> Shader(ShaderMap);
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelUndergroundColumn"), Shader, Params, ColumnGroups);
+	}
+
+	// Underground pass 2: PropagationDepth two-phase (Jacobi) iterations — mark into scratch from
+	// a consistent snapshot, then apply, matching the CPU pass exactly.
+	{
+		FRDGBufferRef ScratchBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TotalVoxels), TEXT("VoxelUndergroundScratch"));
+		TShaderMapRef<FVoxelUndergroundMarkCS> MarkShader(ShaderMap);
+		TShaderMapRef<FVoxelUndergroundApplyCS> ApplyShader(ShaderMap);
+
+		constexpr int32 PropagationDepth = 2;
+		for (int32 Iteration = 0; Iteration < PropagationDepth; ++Iteration)
+		{
+			{
+				FVoxelUndergroundMarkCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelUndergroundMarkCS::FParameters>();
+				Params->ChunkSize = ChunkSize;
+				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+				Params->ScratchFlags = GraphBuilder.CreateUAV(ScratchBuffer);
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelUndergroundMark"), MarkShader, Params, VoxelGroups);
+			}
+			{
+				FVoxelUndergroundApplyCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelUndergroundApplyCS::FParameters>();
+				Params->ChunkSize = ChunkSize;
+				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+				Params->ScratchFlags = GraphBuilder.CreateUAV(ScratchBuffer);
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelUndergroundApply"), ApplyShader, Params, VoxelGroups);
+			}
+		}
+	}
+}
+
 // ==================== Shared Shader Parameter Setup ====================
 
 /**
@@ -440,6 +661,9 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 				GroupCount
 			);
 
+			// Post-passes (water fill + underground classification) — finished data on the GPU
+			AddVoxelPostPassDispatches(GraphBuilder, CapturedRequest, VoxelBuffer);
+
 			// Extract the buffer to persist it beyond graph execution
 			GraphBuilder.QueueBufferExtraction(VoxelBuffer, &Result->OutputBuffer);
 
@@ -511,6 +735,10 @@ FVoxelGenerationHandle FVoxelGPUNoiseGenerator::BeginGenerateChunkGPU(const FVox
 				ComputeShader,
 				Parameters,
 				GroupCount);
+
+			// Post-passes (water fill + underground classification) — the readback below returns
+			// finished voxel data, so the game thread / workers do no per-voxel post-processing.
+			AddVoxelPostPassDispatches(GraphBuilder, CapturedRequest, VoxelBuffer);
 
 			// Enqueue the async GPU→CPU copy into a readback within the same graph (no CPU stall).
 			Result->DensityReadback = new FRHIGPUBufferReadback(TEXT("VoxelDensityReadback"));

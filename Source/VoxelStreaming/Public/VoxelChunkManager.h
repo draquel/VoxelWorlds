@@ -990,10 +990,11 @@ protected:
 	void ProcessPendingGPUReadbacks();
 
 	/**
-	 * Run the CPU post-passes (water fill + underground classification + tree injection) for a ready
-	 * GPU readback on a thread-pool worker, then feed CompletedGenerationQueue. The passes touch the
-	 * full chunk volume and GPU dispatches complete in batches, so running them inline on the game
-	 * thread caused multi-chunk frame spikes during traversal.
+	 * Finish a ready GPU readback and feed CompletedGenerationQueue. The water/underground
+	 * post-passes already ran on the GPU inside the generation graph (AddVoxelPostPassDispatches),
+	 * so this only runs cubic-mode voxel-tree injection — on a thread-pool worker, never the game
+	 * thread (per-chunk volume work there caused multi-chunk frame spikes; readbacks arrive in
+	 * batches). Without tree injection the result is enqueued directly.
 	 */
 	void LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData);
 

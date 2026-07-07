@@ -214,9 +214,10 @@ bool FVoxelGPUNoiseGeneratorAsyncTest::RunTest(const FString& Parameters)
 // ==================== Shared GPU==CPU parity harness (Phase D) ====================
 //
 // The strict parity tests (InfinitePlane, IslandBowl, caves, noise types, water, ore) all follow the same
-// shape: for each LOD, generate the same request on CPU and GPU, run the CPU post-passes on the GPU
-// readback (as the streaming path does), then compare the full FVoxelData. This helper is that loop, so
-// each scenario is just "build a Request + call RunGpuCpuParity".
+// shape: for each LOD, generate the same request on CPU and GPU, then compare the full FVoxelData.
+// The GPU path runs the water/underground post-passes as compute shaders inside the generation graph
+// (AddVoxelPostPassDispatches), the CPU path runs them inside GenerateChunkCPU — so this comparison
+// validates the shader ports bit-for-bit. Each scenario is just "build a Request + call RunGpuCpuParity".
 namespace VoxelParityHarness
 {
 	/** Per-channel pass thresholds (percent). Defaults match the Phase B/C parity acceptance. */
@@ -262,8 +263,8 @@ namespace VoxelParityHarness
 			Generator.ReadbackToCPU(Handle, GPUData);
 			Generator.ReleaseHandle(Handle);
 
-			// Apply the same post-passes the streaming path runs on GPU readback (water + underground).
-			FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, GPUData);
+			// No CPU post-passes here: the GPU graph already ran them (AddVoxelPostPassDispatches),
+			// so GPUData arrives finished and the comparison validates the shader ports.
 
 			if (CPUData.Num() != GPUData.Num() || CPUData.Num() == 0)
 			{

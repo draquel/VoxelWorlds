@@ -1,0 +1,323 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+/**
+ * GPU ports of the CPU generation post-passes (water fill + underground classification).
+ *
+ * These run in the same render graph as GenerateVoxelDensity.usf, operating in-place on the
+ * packed voxel buffer, so the readback returns finished voxel data and the game thread /
+ * worker threads do no per-voxel work. Semantics mirror FVoxelCPUNoiseGenerator::
+ * ApplyWaterFillPass / ApplyUndergroundClassificationPass exactly — any change here must be
+ * mirrored there (the GPUvsCPU parity tests compare the two paths bit-for-bit).
+ *
+ * Packed voxel layout (FVoxelData::Pack): byte0 material, byte1 density, byte2 biome,
+ * byte3 metadata (AO low nibble, flags high nibble).
+ */
+
+#include "/Engine/Public/Platform.ush"
+
+// Voxel metadata flag bits — match FVoxelData::VOXEL_FLAG_* (stored in the high nibble of Metadata).
+#define VOXEL_FLAG_WATER 0x01u
+#define VOXEL_FLAG_CAVE 0x02u
+#define VOXEL_FLAG_UNDERGROUND 0x04u
+
+// Packed-word bit positions of the flag nibble (metadata byte 3, flags in its high nibble).
+#define PACKED_WATER_BIT (VOXEL_FLAG_WATER << 28)
+#define PACKED_CAVE_BIT (VOXEL_FLAG_CAVE << 28)
+#define PACKED_UNDERGROUND_BIT (VOXEL_FLAG_UNDERGROUND << 28)
+
+// FVoxelData::IsSolid — density byte >= VOXEL_SURFACE_THRESHOLD (127)
+#define VOXEL_SURFACE_THRESHOLD 127u
+
+uint ChunkSize;
+float VoxelSize;          // Base voxel size — the CPU passes intentionally use Request.VoxelSize, not the LOD-effective size
+float ChunkWorldZ;        // Chunk origin Z (world units)
+float WaterLevel;
+uint SweepAxis;           // WaterFloodSweepCS: 0 = X, 1 = Y, 2 = Z
+uint ClearCaveFlags;      // UndergroundColumnCS: 1 = clear cave flags while scanning (water pass phase 3)
+
+RWStructuredBuffer<uint> VoxelData;
+RWStructuredBuffer<uint> ScratchFlags;   // UndergroundMark/Apply: 1 uint per voxel, 1 = flag this voxel
+
+uint LinearIndex(uint X, uint Y, uint Z)
+{
+    return X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+}
+
+bool IsSolid(uint Packed)
+{
+    return ((Packed >> 8) & 0xFFu) >= VOXEL_SURFACE_THRESHOLD;
+}
+
+// ==================== Water fill: phase 1 — column seed ====================
+// One thread per XY column. Mirrors ApplyWaterFillPass phase 1: if the column is open from the
+// chunk top down to the water level (no solid / cave-flagged voxels), flag water from the water
+// level downward until a solid or cave barrier. Dispatched only when the chunk contains the
+// water level (matching the CPU bChunkContainsWaterLevel gate).
+[numthreads(8, 8, 1)]
+void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    const uint X = ThreadId.x;
+    const uint Y = ThreadId.y;
+    if (X >= ChunkSize || Y >= ChunkSize)
+    {
+        return;
+    }
+
+    const int WaterZ = clamp((int)floor((WaterLevel - ChunkWorldZ) / VoxelSize), 0, (int)ChunkSize - 1);
+
+    // Openness check from the chunk top down to (exclusive) the water level.
+    if (WaterZ < (int)ChunkSize - 1)
+    {
+        for (int Z = (int)ChunkSize - 1; Z > WaterZ; --Z)
+        {
+            const uint Packed = VoxelData[LinearIndex(X, Y, (uint)Z)];
+            if (IsSolid(Packed) || (Packed & PACKED_CAVE_BIT) != 0)
+            {
+                return; // column blocked above water level — underground, no seeding
+            }
+        }
+    }
+
+    // Flag water from the water level downward, stopping at a solid or cave barrier.
+    for (int Z = WaterZ; Z >= 0; --Z)
+    {
+        const uint Index = LinearIndex(X, Y, (uint)Z);
+        const uint Packed = VoxelData[Index];
+        if (IsSolid(Packed) || (Packed & PACKED_CAVE_BIT) != 0)
+        {
+            break;
+        }
+        VoxelData[Index] = Packed | PACKED_WATER_BIT;
+    }
+}
+
+// ==================== Water fill: phase 2 — flood sweep ====================
+// One thread per line along SweepAxis; bidirectional carry scan. Water spreads to a voxel if it
+// is non-solid, non-cave, and its bottom world Z is at or below the water level — the exact
+// eligibility of the CPU BFS. Water propagation is a monotone fixpoint (order-independent), so
+// repeated axis sweeps converge to the same result as the CPU's BFS; the C++ side dispatches
+// enough rounds for convergence on real terrain topology.
+[numthreads(8, 8, 1)]
+void WaterFloodSweepCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    if (ThreadId.x >= ChunkSize || ThreadId.y >= ChunkSize)
+    {
+        return;
+    }
+
+    const uint N = ChunkSize;
+
+    // Map (ThreadId.xy) to the two fixed axes for this sweep direction.
+    // SweepAxis 0: line along X, fixed (Y=t.x, Z=t.y)
+    // SweepAxis 1: line along Y, fixed (X=t.x, Z=t.y)
+    // SweepAxis 2: line along Z, fixed (X=t.x, Y=t.y)
+
+    bool bCarry;
+
+    // Forward pass
+    bCarry = false;
+    for (uint I = 0; I < N; ++I)
+    {
+        uint X = (SweepAxis == 0) ? I : ThreadId.x;
+        uint Y = (SweepAxis == 1) ? I : ((SweepAxis == 0) ? ThreadId.x : ThreadId.y);
+        uint Z = (SweepAxis == 2) ? I : ThreadId.y;
+
+        const uint Index = LinearIndex(X, Y, Z);
+        const uint Packed = VoxelData[Index];
+
+        if ((Packed & PACKED_WATER_BIT) != 0)
+        {
+            bCarry = true;
+        }
+        else if (bCarry
+            && !IsSolid(Packed)
+            && (Packed & PACKED_CAVE_BIT) == 0
+            && (ChunkWorldZ + (float)Z * VoxelSize) <= WaterLevel)
+        {
+            VoxelData[Index] = Packed | PACKED_WATER_BIT;
+        }
+        else
+        {
+            bCarry = false;
+        }
+    }
+
+    // Backward pass
+    bCarry = false;
+    for (int J = (int)N - 1; J >= 0; --J)
+    {
+        const uint I = (uint)J;
+        uint X = (SweepAxis == 0) ? I : ThreadId.x;
+        uint Y = (SweepAxis == 1) ? I : ((SweepAxis == 0) ? ThreadId.x : ThreadId.y);
+        uint Z = (SweepAxis == 2) ? I : ThreadId.y;
+
+        const uint Index = LinearIndex(X, Y, Z);
+        const uint Packed = VoxelData[Index];
+
+        if ((Packed & PACKED_WATER_BIT) != 0)
+        {
+            bCarry = true;
+        }
+        else if (bCarry
+            && !IsSolid(Packed)
+            && (Packed & PACKED_CAVE_BIT) == 0
+            && (ChunkWorldZ + (float)Z * VoxelSize) <= WaterLevel)
+        {
+            VoxelData[Index] = Packed | PACKED_WATER_BIT;
+        }
+        else
+        {
+            bCarry = false;
+        }
+    }
+}
+
+// ==================== Underground classification: pass 1 — column scan ====================
+// One thread per XY column, top-down state machine. Mirrors ApplyUndergroundClassificationPass
+// pass 1: [optional solid at top] → air → solid (>= MinSolidThickness) → air = underground.
+// When ClearCaveFlags is set (i.e. the water pass ran), also clears the temporary cave flag on
+// every voxel — the CPU water pass phase 3 — which is safe to fold in here because this pass
+// never reads cave flags.
+[numthreads(8, 8, 1)]
+void UndergroundColumnCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    const uint X = ThreadId.x;
+    const uint Y = ThreadId.y;
+    if (X >= ChunkSize || Y >= ChunkSize)
+    {
+        return;
+    }
+
+    const int MinSolidThickness = 3;
+
+    bool bSeenAir = false;
+    bool bUnderground = false;
+    int ConsecutiveSolid = 0;
+
+    for (int Z = (int)ChunkSize - 1; Z >= 0; --Z)
+    {
+        const uint Index = LinearIndex(X, Y, (uint)Z);
+        uint Packed = VoxelData[Index];
+        bool bDirty = false;
+
+        if (ClearCaveFlags != 0 && (Packed & PACKED_CAVE_BIT) != 0)
+        {
+            Packed &= ~PACKED_CAVE_BIT;
+            bDirty = true;
+        }
+
+        if (IsSolid(Packed))
+        {
+            if (bSeenAir)
+            {
+                ++ConsecutiveSolid;
+            }
+        }
+        else
+        {
+            bSeenAir = true;
+
+            if (!bUnderground && ConsecutiveSolid >= MinSolidThickness)
+            {
+                bUnderground = true;
+            }
+
+            if (bUnderground && (Packed & PACKED_WATER_BIT) == 0)
+            {
+                Packed |= PACKED_UNDERGROUND_BIT;
+                bDirty = true;
+            }
+
+            if (!bUnderground)
+            {
+                ConsecutiveSolid = 0;
+            }
+        }
+
+        if (bDirty)
+        {
+            VoxelData[Index] = Packed;
+        }
+    }
+}
+
+// ==================== Underground classification: pass 2 — boundary propagation ====================
+// Two-phase Jacobi iteration (mark into scratch, then apply) so the parallel result is
+// deterministic and matches the CPU's two-phase pass exactly. One iteration extends the
+// underground flag onto solid voxels adjacent to underground air, guarded against voxels that
+// also touch surface air. The C++ side dispatches Mark+Apply PropagationDepth (2) times.
+[numthreads(4, 4, 4)]
+void UndergroundMarkCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    const uint X = ThreadId.x;
+    const uint Y = ThreadId.y;
+    const uint Z = ThreadId.z;
+    if (X >= ChunkSize || Y >= ChunkSize || Z >= ChunkSize)
+    {
+        return;
+    }
+
+    const uint Index = LinearIndex(X, Y, Z);
+    const uint Packed = VoxelData[Index];
+
+    uint Mark = 0;
+    if (IsSolid(Packed) && (Packed & PACKED_UNDERGROUND_BIT) == 0)
+    {
+        bool bAdjacentToUnderground = false;
+        bool bAdjacentToSurfaceAir = false;
+
+        const int3 Offsets[6] =
+        {
+            int3(-1, 0, 0), int3(1, 0, 0),
+            int3(0, -1, 0), int3(0, 1, 0),
+            int3(0, 0, -1), int3(0, 0, 1)
+        };
+
+        [unroll]
+        for (int N = 0; N < 6; ++N)
+        {
+            const int3 P = int3((int)X, (int)Y, (int)Z) + Offsets[N];
+            if (P.x < 0 || P.x >= (int)ChunkSize ||
+                P.y < 0 || P.y >= (int)ChunkSize ||
+                P.z < 0 || P.z >= (int)ChunkSize)
+            {
+                continue;
+            }
+
+            const uint NbrPacked = VoxelData[LinearIndex((uint)P.x, (uint)P.y, (uint)P.z)];
+            if ((NbrPacked & PACKED_UNDERGROUND_BIT) != 0)
+            {
+                bAdjacentToUnderground = true;
+            }
+            else if (!IsSolid(NbrPacked))
+            {
+                bAdjacentToSurfaceAir = true;
+            }
+        }
+
+        if (bAdjacentToUnderground && !bAdjacentToSurfaceAir)
+        {
+            Mark = 1;
+        }
+    }
+
+    ScratchFlags[Index] = Mark;
+}
+
+[numthreads(4, 4, 4)]
+void UndergroundApplyCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    const uint X = ThreadId.x;
+    const uint Y = ThreadId.y;
+    const uint Z = ThreadId.z;
+    if (X >= ChunkSize || Y >= ChunkSize || Z >= ChunkSize)
+    {
+        return;
+    }
+
+    const uint Index = LinearIndex(X, Y, Z);
+    if (ScratchFlags[Index] != 0)
+    {
+        VoxelData[Index] |= PACKED_UNDERGROUND_BIT;
+    }
+}
