@@ -7,6 +7,7 @@
 #include "VoxelCaveConfiguration.h"
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
+#include "Misc/ScopeExit.h"
 #include "VoxelCoordinates.h"
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
@@ -269,12 +270,24 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	Timing.StreamingMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
 	// === Generation queue (async launch + completed result processing) ===
+	// Sub-timed per function so the benchmark CSV can attribute generation-phase cost.
 	SectionStart = FPlatformTime::Seconds();
+	NeighborRemeshSecondsThisTick = 0.0;
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
+	double SubStart = SectionStart;
 	ProcessGenerationQueue(TimeSlice * 0.4f);
+	double SubEnd = FPlatformTime::Seconds();
+	Timing.GenLaunchMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	SubStart = SubEnd;
 	ProcessPendingGPUReadbacks();
-	ProcessCompletedAsyncGenerations();
-	Timing.GenerationMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	SubEnd = FPlatformTime::Seconds();
+	Timing.GenPollMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	SubStart = SubEnd;
+	ProcessCompletedAsyncGenerations(Timing);
+	SubEnd = FPlatformTime::Seconds();
+	Timing.GenApplyMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	Timing.GenNeighborMs = static_cast<float>(NeighborRemeshSecondsThisTick * 1000.0);
+	Timing.GenerationMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
 
 	// === Meshing queue ===
 	SectionStart = FPlatformTime::Seconds();
@@ -1886,11 +1899,14 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	});
 }
 
-void UVoxelChunkManager::ProcessCompletedAsyncGenerations()
+void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Timing)
 {
 	FAsyncGenerationResult Result;
 	int32 ProcessedCount = 0;
 	const int32 MaxProcessPerFrame = 8;
+
+	double StoreSeconds = 0.0;
+	double NotifySeconds = 0.0;
 
 	while (CompletedGenerationQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
 	{
@@ -1912,8 +1928,12 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations()
 			FVoxelChunkState* State = ChunkStates.Find(Result.ChunkCoord);
 			if (State)
 			{
+				double T0 = FPlatformTime::Seconds();
 				State->Descriptor.VoxelData = MoveTemp(Result.VoxelData);
+				double T1 = FPlatformTime::Seconds();
 				OnChunkGenerationComplete(Result.ChunkCoord);
+				NotifySeconds += FPlatformTime::Seconds() - T1;
+				StoreSeconds += T1 - T0;
 			}
 		}
 		else
@@ -1931,6 +1951,10 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations()
 
 		++ProcessedCount;
 	}
+
+	Timing.GenStoreMs = static_cast<float>(StoreSeconds * 1000.0);
+	Timing.GenNotifyMs = static_cast<float>(NotifySeconds * 1000.0);
+	Timing.GenApplyCount = ProcessedCount;
 }
 
 void UVoxelChunkManager::ProcessPendingGPUReadbacks()
@@ -3149,6 +3173,10 @@ bool UVoxelChunkManager::ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoor
 
 void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
 {
+	// Attribution timer: accumulated across the tick, reported as Timing.GenNeighborMs
+	const double QnStart = FPlatformTime::Seconds();
+	ON_SCOPE_EXIT { NeighborRemeshSecondsThisTick += FPlatformTime::Seconds() - QnStart; };
+
 	// For Marching Cubes, we need to remesh all 26 neighbors (faces, edges, corners)
 	// because diagonal chunks may use our voxel data at their boundaries.
 	// Build list of all neighbor offsets: 6 faces + 12 edges + 8 corners = 26 total

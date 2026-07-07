@@ -116,6 +116,16 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.LODMs = T.LODMs;
 	S.StreamMs = T.StreamingMs;
 	S.TotalMs = T.TotalMs;
+	S.RenderMs = T.RenderSubmitMs;
+	S.CollMs = T.CollisionMs;
+	S.ScatMs = T.ScatterMs;
+	S.GenLaunchMs = T.GenLaunchMs;
+	S.GenPollMs = T.GenPollMs;
+	S.GenApplyMs = T.GenApplyMs;
+	S.GenStoreMs = T.GenStoreMs;
+	S.GenNotifyMs = T.GenNotifyMs;
+	S.GenNeighborMs = T.GenNeighborMs;
+	S.GenApplyCount = T.GenApplyCount;
 	S.RemeshCount = ChunkManager->GetBenchRemeshCount();
 	Samples.Add(S);
 }
@@ -214,12 +224,15 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,Remesh\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,Remesh\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%lld\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
-			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs, S.RemeshCount);
+			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
+			S.RenderMs, S.CollMs, S.ScatMs,
+			S.GenLaunchMs, S.GenPollMs, S.GenApplyMs, S.GenStoreMs, S.GenNotifyMs, S.GenNeighborMs, S.GenApplyCount,
+			S.RemeshCount);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 

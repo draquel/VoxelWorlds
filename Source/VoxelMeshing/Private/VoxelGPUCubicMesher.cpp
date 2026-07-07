@@ -731,8 +731,9 @@ void FVoxelGPUCubicMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
 		return;
 	}
 
-	FlushRenderingCommands();
-
+	// No per-handle FlushRenderingCommands (a full game→render thread sync): this mesher's
+	// dispatch/readback paths flush at generate time, so nothing is pending by release, and
+	// results are shared-pointer owned. Matches the DC/MC meshers' ReleaseHandle.
 	FScopeLock Lock(&ResultsLock);
 	MeshingResults.Remove(Handle.RequestId);
 }

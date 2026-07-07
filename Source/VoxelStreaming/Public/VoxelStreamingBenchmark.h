@@ -67,6 +67,10 @@ private:
 		int32 LoadedChunks, TotalChunks;
 		float FrameMs;
 		float GenMs, MeshMs, LODMs, StreamMs, TotalMs;
+		// Previously-unsampled tick sections + generation sub-phases (spike attribution)
+		float RenderMs, CollMs, ScatMs;
+		float GenLaunchMs, GenPollMs, GenApplyMs, GenStoreMs, GenNotifyMs, GenNeighborMs;
+		int32 GenApplyCount;
 		int64 RemeshCount;
 	};
 
