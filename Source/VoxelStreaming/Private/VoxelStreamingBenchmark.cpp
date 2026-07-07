@@ -129,6 +129,10 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.MeshTickMs = T.MeshTickMs;
 	S.MeshLaunchMs = T.MeshLaunchMs;
 	S.MeshApplyMs = T.MeshApplyMs;
+	S.MeshSnapMs = T.MeshSnapshotMs;
+	S.MeshSliceMs = T.MeshSlicesMs;
+	S.MeshDispMs = T.MeshDispatchMs;
+	S.MeshLaunchCount = T.MeshLaunchCount;
 	S.RemeshCount = ChunkManager->GetBenchRemeshCount();
 	Samples.Add(S);
 }
@@ -227,15 +231,16 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,Remesh\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,Remesh\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%lld\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
 			S.GenLaunchMs, S.GenPollMs, S.GenApplyMs, S.GenStoreMs, S.GenNotifyMs, S.GenNeighborMs, S.GenApplyCount,
 			S.MeshTickMs, S.MeshLaunchMs, S.MeshApplyMs,
+			S.MeshSnapMs, S.MeshSliceMs, S.MeshDispMs, S.MeshLaunchCount,
 			S.RemeshCount);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);

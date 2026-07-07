@@ -72,6 +72,8 @@ private:
 		float GenLaunchMs, GenPollMs, GenApplyMs, GenStoreMs, GenNotifyMs, GenNeighborMs;
 		int32 GenApplyCount;
 		float MeshTickMs, MeshLaunchMs, MeshApplyMs;
+		float MeshSnapMs, MeshSliceMs, MeshDispMs;
+		int32 MeshLaunchCount;
 		int64 RemeshCount;
 	};
 

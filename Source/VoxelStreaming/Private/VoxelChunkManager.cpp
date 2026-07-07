@@ -300,7 +300,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	SubEnd = FPlatformTime::Seconds();
 	Timing.MeshTickMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
 	SubStart = SubEnd;
-	ProcessMeshingQueue(TimeSlice * 0.4f);
+	ProcessMeshingQueue(TimeSlice * 0.4f, Timing);
 	SubEnd = FPlatformTime::Seconds();
 	Timing.MeshLaunchMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
 	SubStart = SubEnd;
@@ -2087,7 +2087,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 	});
 }
 
-void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
+void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStats& Timing)
 {
 	if (MeshingQueue.Num() == 0 || !Mesher || !Configuration)
 	{
@@ -2103,6 +2103,11 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 	{
 		return;
 	}
+
+	// Per-launch cost attribution (reported via the benchmark CSV)
+	double SnapshotSeconds = 0.0;
+	double SlicesSeconds = 0.0;
+	double DispatchSeconds = 0.0;
 
 	// Limit new dispatches per frame to avoid flooding the render thread.
 	// Each GPU dispatch builds an RDG graph + uploads ~150KB + 4 compute passes.
@@ -2194,6 +2199,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		SetChunkState(Request.ChunkCoord, EChunkState::Meshing);
 
 		// Build meshing request
+		double SubT0 = FPlatformTime::Seconds();
 		FVoxelMeshingRequest MeshRequest;
 		MeshRequest.ChunkCoord = Request.ChunkCoord;
 		// Force LOD 0 when LOD system is disabled (defense-in-depth)
@@ -2226,9 +2232,12 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, EditLayer->GetEditCount());
 			}
 		}
+		double SubT1 = FPlatformTime::Seconds();
+		SnapshotSeconds += SubT1 - SubT0;
 
 		// Extract neighbor edge slices for seamless boundaries
 		ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
+		SlicesSeconds += FPlatformTime::Seconds() - SubT1;
 
 		// Calculate transition faces for Transvoxel LOD seam handling
 		// Per Lengyel's Transvoxel algorithm, transition cells are generated on the FINER chunk
@@ -2460,7 +2469,9 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 		// Launch async mesh generation instead of blocking. Move the request — it carries the
 		// full chunk volume + neighbor slices (~1.3MB at 64^3); copying it into the by-value
 		// parameter was a per-launch game-thread cost.
+		const double DispatchT0 = FPlatformTime::Seconds();
 		LaunchAsyncMeshGeneration(Request, MoveTemp(MeshRequest));
+		DispatchSeconds += FPlatformTime::Seconds() - DispatchT0;
 
 		++ProcessedCount;
 	}
@@ -2471,6 +2482,11 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 	{
 		AddToMeshingQueue(Deferred);
 	}
+
+	Timing.MeshSnapshotMs = static_cast<float>(SnapshotSeconds * 1000.0);
+	Timing.MeshSlicesMs = static_cast<float>(SlicesSeconds * 1000.0);
+	Timing.MeshDispatchMs = static_cast<float>(DispatchSeconds * 1000.0);
+	Timing.MeshLaunchCount = ProcessedCount;
 }
 
 void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest)
@@ -2491,7 +2507,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 
 	if (bUseGPUPath)
 	{
-		// GPU path: dispatch from game thread via render thread, async callback enqueues result
+		// GPU path: async callback (fired from the mesher's game-thread Tick) enqueues the result
 		FOnVoxelMeshingComplete OnComplete;
 		OnComplete.BindLambda([WeakThis, MesherPtr, ChunkCoord, LODLevel](
 			FVoxelMeshingHandle Handle, bool bSuccess)
@@ -2525,7 +2541,24 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 			This->CompletedMeshQueue.Enqueue(MoveTemp(AsyncResult));
 		});
 
-		MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
+		// Dispatch from a thread-pool worker: GenerateMeshAsync's CPU side (packing the chunk
+		// volume + neighbor slices into upload buffers, ~1.3MB of copies + allocations per chunk)
+		// was a per-launch game-thread cost. The DC/MC meshers are worker-safe here (atomic
+		// request ids, lock-guarded result maps, and their render command is self-contained).
+		// The GPU cubic mesher is NOT — its dispatch path performs blocking readback flushes,
+		// which are game-thread-only — so it keeps the inline dispatch.
+		const bool bWorkerDispatch = !MesherPtr->GetMesherTypeName().Contains(TEXT("Cubic"));
+		if (bWorkerDispatch)
+		{
+			Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete]() mutable
+			{
+				MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
+			});
+		}
+		else
+		{
+			MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
+		}
 	}
 	else
 	{
@@ -3601,11 +3634,22 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 		return NeighborCaches.Add(NeighborCoord, Cache);
 	};
 
-	// Optimized helper lambda to get a single voxel from a neighbor chunk
-	// Uses cached state and edit layer to avoid repeated TMap lookups
-	auto GetNeighborVoxel = [ChunkSize, &GetNeighborCache](const FIntVector& NeighborCoord, int32 X, int32 Y, int32 Z) -> FVoxelData
+	// Optimized helper lambda to get a single voxel from a neighbor chunk.
+	// Every extraction loop below reads from ONE neighbor at a time, so memoize the
+	// last-resolved cache entry: without this, the per-voxel TMap::Find (FIntVector hash +
+	// probe) across the ~25-125k slice/deep voxels per launch dominated the whole meshing
+	// section (~3.4ms/frame of the 4ms measured by MeshSliceMs). The memoized pointer is
+	// refreshed whenever the coord changes, so it never outlives a map rehash from Add().
+	FIntVector MemoCoord(INT32_MAX, INT32_MAX, INT32_MAX);
+	const FNeighborCache* MemoCache = nullptr;
+	auto GetNeighborVoxel = [ChunkSize, &GetNeighborCache, &MemoCoord, &MemoCache](const FIntVector& NeighborCoord, int32 X, int32 Y, int32 Z) -> FVoxelData
 	{
-		const FNeighborCache& Cache = GetNeighborCache(NeighborCoord);
+		if (NeighborCoord != MemoCoord)
+		{
+			MemoCache = &GetNeighborCache(NeighborCoord);
+			MemoCoord = NeighborCoord;
+		}
+		const FNeighborCache& Cache = *MemoCache;
 		if (!Cache.bHasData)
 		{
 			return FVoxelData::Air();
