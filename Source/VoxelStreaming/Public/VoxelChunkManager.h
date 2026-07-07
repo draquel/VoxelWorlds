@@ -478,8 +478,14 @@ public:
 
 		// Meshing sub-phases (MeshingMs = tick + launch + apply)
 		float MeshTickMs = 0.0f;    // Mesher->Tick: GPU meshers poll readbacks here
-		float MeshLaunchMs = 0.0f;  // ProcessMeshingQueue: snapshot + slices + pack + dispatch
+		float MeshLaunchMs = 0.0f;  // ProcessMeshingQueue: snapshot + slices + dispatch
 		float MeshApplyMs = 0.0f;   // ProcessCompletedAsyncMeshes
+
+		// Launch-path breakdown (subsets of MeshLaunchMs)
+		float MeshSnapshotMs = 0.0f;  // voxel-data snapshot copy + edit merge
+		float MeshSlicesMs = 0.0f;    // ExtractNeighborEdgeSlices
+		float MeshDispatchMs = 0.0f;  // LaunchAsyncMeshGeneration (worker handoff for DC/MC GPU)
+		int32 MeshLaunchCount = 0;    // mesh jobs launched this tick
 	};
 
 	/** Get voxel-specific memory usage breakdown */
@@ -613,11 +619,12 @@ protected:
 	void ProcessGenerationQueue(float TimeSliceMS);
 
 	/**
-	 * Process the meshing queue (time-sliced).
+	 * Process the meshing queue (time-sliced; fills the mesh-launch sub-timers).
 	 *
 	 * @param TimeSliceMS Maximum time to spend in milliseconds
+	 * @param Timing Receives the launch-path cost breakdown for this tick
 	 */
-	void ProcessMeshingQueue(float TimeSliceMS);
+	void ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStats& Timing);
 
 	/**
 	 * Process the unload queue.

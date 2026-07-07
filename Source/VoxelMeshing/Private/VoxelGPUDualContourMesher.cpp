@@ -601,7 +601,9 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		const uint32 NL = static_cast<uint32>(FMath::Clamp(Request.NeighborLODLevels[Face], 0, 7));
 		NeighborLODPacked |= (NL << (Face * 3));
 	}
-	const bool bDoBoundaryWeld = CVarDCBoundaryWeld.GetValueOnGameThread() != 0;
+	// AnyThread: DispatchComputeShader is called from a thread-pool worker (the chunk manager
+	// off-threads GPU mesh dispatch); the cvar is a debug toggle, a stale read is harmless.
+	const bool bDoBoundaryWeld = CVarDCBoundaryWeld.GetValueOnAnyThread() != 0;
 
 	ENQUEUE_RENDER_COMMAND(GenerateDCMesh)(
 		[PackedVoxels = MoveTemp(PackedVoxels),
