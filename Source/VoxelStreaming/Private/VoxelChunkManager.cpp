@@ -290,14 +290,24 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	Timing.GenerationMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
 
 	// === Meshing queue ===
+	// Sub-timed per function so the benchmark CSV can attribute meshing-phase cost.
 	SectionStart = FPlatformTime::Seconds();
+	SubStart = SectionStart;
 	if (Mesher)
 	{
 		Mesher->Tick(DeltaTime);
 	}
+	SubEnd = FPlatformTime::Seconds();
+	Timing.MeshTickMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	SubStart = SubEnd;
 	ProcessMeshingQueue(TimeSlice * 0.4f);
+	SubEnd = FPlatformTime::Seconds();
+	Timing.MeshLaunchMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	SubStart = SubEnd;
 	ProcessCompletedAsyncMeshes();
-	Timing.MeshingMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	SubEnd = FPlatformTime::Seconds();
+	Timing.MeshApplyMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	Timing.MeshingMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
 
 	// === Render submit (time-budgeted) ===
 	SectionStart = FPlatformTime::Seconds();
@@ -2447,8 +2457,10 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)
 			}
 		}
 
-		// Launch async mesh generation instead of blocking
-		LaunchAsyncMeshGeneration(Request, MeshRequest);
+		// Launch async mesh generation instead of blocking. Move the request — it carries the
+		// full chunk volume + neighbor slices (~1.3MB at 64^3); copying it into the by-value
+		// parameter was a per-launch game-thread cost.
+		LaunchAsyncMeshGeneration(Request, MoveTemp(MeshRequest));
 
 		++ProcessedCount;
 	}
