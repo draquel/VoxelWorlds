@@ -1940,9 +1940,12 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 		return;
 	}
 
-	// Poll each in-flight GPU readback. Completed results feed the SAME CompletedGenerationQueue as the
-	// CPU path, so ProcessCompletedAsyncGenerations (called immediately after this in Tick) applies the
-	// state check + storage uniformly and clears AsyncGenerationInProgress.
+	// Poll each in-flight GPU readback. Ready results are handed to a thread-pool worker for the CPU
+	// post-passes, which then feed the SAME CompletedGenerationQueue as the CPU path, so
+	// ProcessCompletedAsyncGenerations applies the state check + storage uniformly and clears
+	// AsyncGenerationInProgress. The post-passes must NOT run here: dispatches complete in batches,
+	// and each pass touches the full chunk volume, so processing them inline on the game thread
+	// stacked several chunks' work into single frames (20-35ms generation spikes during traversal).
 	TArray<FIntVector> Finished;
 	for (TPair<FIntVector, FPendingGPUGeneration>& Pair : PendingGPUReadbacks)
 	{
@@ -1958,26 +1961,20 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 
 		const int32 ExpectedVoxels = Pending.GenRequest.ChunkSize * Pending.GenRequest.ChunkSize * Pending.GenRequest.ChunkSize;
 
-		FAsyncGenerationResult Result;
-		Result.ChunkCoord = ChunkCoord;
 		if (Status == EVoxelGPUReadbackStatus::Ready && VoxelData.Num() == ExpectedVoxels)
 		{
-			// CPU post-passes on the readback data — same order + effect as GenerateChunkCPU:
-			// water fill + underground classification (whole-chunk passes, not ported to the shader),
-			// then tree injection.
-			FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Pending.GenRequest, VoxelData);
-			InjectTreesIfNeeded(ChunkCoord, Pending.GenRequest, VoxelData);
-			Result.bSuccess = true;
-			Result.VoxelData = MoveTemp(VoxelData);
+			LaunchPostReadbackProcessing(ChunkCoord, MoveTemp(Pending.GenRequest), MoveTemp(VoxelData));
 		}
 		else
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("Chunk (%d,%d,%d) GPU generation failed (status=%d, voxels=%d/%d)"),
 				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, static_cast<int32>(Status), VoxelData.Num(), ExpectedVoxels);
-			Result.bSuccess = false;
+			FAsyncGenerationResult FailResult;
+			FailResult.ChunkCoord = ChunkCoord;
+			FailResult.bSuccess = false;
+			CompletedGenerationQueue.Enqueue(MoveTemp(FailResult));
 		}
 
-		CompletedGenerationQueue.Enqueue(MoveTemp(Result));
 		GPUGeneratorPtr->ReleaseHandle(Pending.Handle);
 		Finished.Add(ChunkCoord);
 	}
@@ -1988,32 +1985,77 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 	}
 }
 
-void UVoxelChunkManager::InjectTreesIfNeeded(const FIntVector& ChunkCoord, const FVoxelNoiseGenerationRequest& GenRequest, TArray<FVoxelData>& VoxelData)
+void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData)
 {
+	// Tree injection captures (value copies for thread safety — same pattern as LaunchAsyncGeneration)
 	const bool bInjectTrees = Configuration &&
 		Configuration->MeshingMode == EMeshingMode::Cubic &&
 		Configuration->TreeMode != EVoxelTreeMode::HISM &&
 		Configuration->TreeTemplates.Num() > 0 &&
 		Configuration->TreeDensity > 0.0f;
-	if (!bInjectTrees || !WorldMode)
+	TArray<FVoxelTreeTemplate> CapturedTreeTemplates;
+	float CapturedTreeDensity = 0.0f;
+	int32 CapturedWorldSeed = 0;
+	FVector CapturedWorldOrigin = FVector::ZeroVector;
+	FVoxelNoiseParams CapturedNoiseParams;
+	IVoxelWorldMode* WorldModePtr = nullptr;
+	UVoxelBiomeConfiguration* CapturedBiomeConfig = nullptr;
+	bool CapturedEnableWaterLevel = false;
+	float CapturedWaterLevel = 0.0f;
+
+	if (bInjectTrees)
 	{
-		return;
+		CapturedTreeTemplates = Configuration->TreeTemplates;
+		CapturedTreeDensity = Configuration->TreeDensity;
+		CapturedWorldSeed = Configuration->WorldSeed;
+		CapturedWorldOrigin = Configuration->WorldOrigin;
+		CapturedNoiseParams = Configuration->NoiseParams;
+		WorldModePtr = WorldMode.Get(); // Raw ptr, same lifetime as NoiseGenerator
+		CapturedBiomeConfig = Configuration->BiomeConfiguration;
+		CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;
+		CapturedWaterLevel = Configuration->WaterLevel;
 	}
 
-	FVoxelTreeInjector::InjectTrees(
-		ChunkCoord,
-		GenRequest.ChunkSize,
-		GenRequest.VoxelSize,
-		Configuration->WorldOrigin,
-		Configuration->WorldSeed,
-		Configuration->TreeTemplates,
-		Configuration->NoiseParams,
-		*WorldMode,
-		Configuration->TreeDensity,
-		Configuration->BiomeConfiguration,
-		Configuration->bEnableWaterLevel,
-		Configuration->WaterLevel,
-		VoxelData);
+	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
+
+	Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord,
+		GenRequest = MoveTemp(GenRequest), VoxelData = MoveTemp(VoxelData),
+		bInjectTrees, CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
+		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
+		CapturedNoiseParams, WorldModePtr,
+		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel]() mutable
+	{
+		// Same order + effect as GenerateChunkCPU: water fill + underground classification
+		// (whole-chunk passes, not ported to the shader), then tree injection.
+		FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(GenRequest, VoxelData);
+
+		if (bInjectTrees && WorldModePtr)
+		{
+			FVoxelTreeInjector::InjectTrees(
+				ChunkCoord,
+				GenRequest.ChunkSize,
+				GenRequest.VoxelSize,
+				CapturedWorldOrigin,
+				CapturedWorldSeed,
+				CapturedTreeTemplates,
+				CapturedNoiseParams,
+				*WorldModePtr,
+				CapturedTreeDensity,
+				CapturedBiomeConfig,
+				CapturedEnableWaterLevel,
+				CapturedWaterLevel,
+				VoxelData);
+		}
+
+		if (UVoxelChunkManager* This = WeakThis.Get())
+		{
+			FAsyncGenerationResult Result;
+			Result.ChunkCoord = ChunkCoord;
+			Result.bSuccess = true;
+			Result.VoxelData = MoveTemp(VoxelData);
+			This->CompletedGenerationQueue.Enqueue(MoveTemp(Result));
+		}
+	});
 }
 
 void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS)

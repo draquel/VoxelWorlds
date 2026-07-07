@@ -986,11 +986,16 @@ protected:
 	/** GPU generations in flight, keyed by chunk coord; polled each frame in ProcessPendingGPUReadbacks. */
 	TMap<FIntVector, FPendingGPUGeneration> PendingGPUReadbacks;
 
-	/** Poll in-flight GPU readbacks; on completion run CPU post-passes + feed CompletedGenerationQueue. */
+	/** Poll in-flight GPU readbacks; ready results are handed to a thread-pool worker for CPU post-passes. */
 	void ProcessPendingGPUReadbacks();
 
-	/** CPU post-pass (game thread): inject voxel trees into freshly generated data if the config requires it. */
-	void InjectTreesIfNeeded(const FIntVector& ChunkCoord, const FVoxelNoiseGenerationRequest& GenRequest, TArray<FVoxelData>& VoxelData);
+	/**
+	 * Run the CPU post-passes (water fill + underground classification + tree injection) for a ready
+	 * GPU readback on a thread-pool worker, then feed CompletedGenerationQueue. The passes touch the
+	 * full chunk volume and GPU dispatches complete in batches, so running them inline on the game
+	 * thread caused multi-chunk frame spikes during traversal.
+	 */
+	void LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData);
 
 	// ==================== Async Mesh Generation ====================
 
