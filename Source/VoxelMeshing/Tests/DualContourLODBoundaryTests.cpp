@@ -355,8 +355,8 @@ namespace DualContourLODBoundaryTestHelpers
 
 	/**
 	 * GPU equivalent of MeshChunk: dispatch the GPU Dual Contouring mesher and block until
-	 * its async readback completes, then hand back the CPU-side mesh. Mirrors the proven
-	 * pattern in MarchingCubesMeshingTests (GenerateMeshAsync -> Sleep+FlushRenderingCommands
+	 * its async readback completes, then hand back the CPU-side mesh. Same pattern as the GPU
+	 * tests in MarchingCubesMeshingTests (GenerateMeshAsync -> Flush+Tick+Sleep
 	 * poll -> ReadbackToCPU). The DC weld cvar is read on the game thread inside
 	 * GenerateMeshAsync, so an enclosing FScopedWeld is captured correctly. Requires a real
 	 * RHI — callers gate on GUsingNullRHI before invoking this. Same signature as MeshChunk so
@@ -387,8 +387,8 @@ namespace DualContourLODBoundaryTestHelpers
 		// commands; Mesher.Tick advances the async readback state machine (WaitingForCounters
 		// -> ... -> Complete) and fires the completion callback. The engine's normal tick loop
 		// does NOT run during a synchronous RunTest, so we must tick the mesher ourselves —
-		// unlike the MC GPU mesher, the DC mesher's readback is Tick-driven, not render-command
-		// driven, so flushing alone never completes it.
+		// the DC and MC GPU meshers' readbacks are both Tick-driven, so flushing alone never
+		// completes them.
 		const double StartTime = FPlatformTime::Seconds();
 		// 30s, not 10s: the VERY FIRST GPU DC dispatch in a process pays a cold-start cost
 		// (compute PSO creation for all DC passes, driver shader-cache warmup) that is several

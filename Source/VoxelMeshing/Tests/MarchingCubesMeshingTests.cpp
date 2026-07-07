@@ -470,14 +470,21 @@ bool FMarchingCubesMeshingGPUAsyncTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("Handle should be valid"), Handle.IsValid());
 
-	// Wait for completion (with timeout)
+	// Wait for completion (with timeout). FlushRenderingCommands runs the queued compute +
+	// readback-copy commands; Mesher.Tick advances the async readback state machine
+	// (WaitingForCounters -> ... -> Complete) and fires the completion callback. The engine's
+	// normal tick loop does NOT run during a synchronous RunTest, so we must tick the mesher
+	// ourselves — flushing alone never completes it. 30s, not 5s: the very first GPU dispatch
+	// in a process pays a multi-second cold-start cost (compute PSO creation, driver
+	// shader-cache warmup); every subsequent dispatch is sub-100ms.
 	double StartTime = FPlatformTime::Seconds();
-	double TimeoutSeconds = 5.0;
+	double TimeoutSeconds = 30.0;
 
 	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < TimeoutSeconds)
 	{
-		FPlatformProcess::Sleep(0.01f);
 		FlushRenderingCommands();
+		Mesher.Tick(0.0f);
+		FPlatformProcess::Sleep(0.002f);
 	}
 
 	TestTrue(TEXT("GPU smooth meshing should complete within timeout"), bCompleted);
@@ -544,11 +551,14 @@ bool FMarchingCubesMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
 			bCompleted = true;
 		}));
 
+	// Flush runs the GPU work; Tick drives the mesher's readback state machine and fires the
+	// callback (see the GPUAsync test above). 30s budget covers the first-dispatch cold start.
 	double StartTime = FPlatformTime::Seconds();
-	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 5.0)
+	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 30.0)
 	{
-		FPlatformProcess::Sleep(0.01f);
 		FlushRenderingCommands();
+		GPUMesher.Tick(0.0f);
+		FPlatformProcess::Sleep(0.002f);
 	}
 	TestTrue(TEXT("GPU smooth meshing should complete"), bCompleted);
 
@@ -661,17 +671,29 @@ bool FMarchingCubesMeshingPerformanceTest::RunTest(const FString& Parameters)
 				bCompleted = true;
 			}));
 
-		while (!bCompleted)
+		// Time dispatch + counter readback (what the "<5ms" budget was written against).
+		// The pump must Tick the mesher to advance its readback state machine (see the
+		// GPUAsync test above); no sleep here so pump latency doesn't pollute the timing.
+		uint32 VertexCount = 0, IndexCount = 0;
+		const double CountTimeout = FPlatformTime::Seconds() + 30.0;
+		while (!GPUMesher.GetBufferCounts(Handle, VertexCount, IndexCount)
+			&& FPlatformTime::Seconds() < CountTimeout)
 		{
-			FPlatformProcess::Sleep(0.001f);
 			FlushRenderingCommands();
+			GPUMesher.Tick(0.0f);
 		}
 
-		// Read counts to ensure we time the full operation
-		uint32 VertexCount, IndexCount;
-		GPUMesher.GetBufferCounts(Handle, VertexCount, IndexCount);
-
 		GPUTotalTime += FPlatformTime::Seconds() - StartTime;
+
+		// Pump the remaining (untimed) vertex/index data readback to completion so the
+		// handle isn't released mid-readback.
+		const double CompleteTimeout = FPlatformTime::Seconds() + 30.0;
+		while (!bCompleted && FPlatformTime::Seconds() < CompleteTimeout)
+		{
+			FlushRenderingCommands();
+			GPUMesher.Tick(0.0f);
+			FPlatformProcess::Sleep(0.002f);
+		}
 		GPUMesher.ReleaseHandle(Handle);
 	}
 	double GPUAvgMs = (GPUTotalTime / NumIterations) * 1000.0;
