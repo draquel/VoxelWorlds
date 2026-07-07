@@ -146,14 +146,16 @@ bool FVoxelGPUCubicMesher::GenerateMeshCPU(
 
 TArray<uint32> FVoxelGPUCubicMesher::PackVoxelDataForGPU(const TArray<FVoxelData>& VoxelData)
 {
+	// FVoxelData::Pack() matches the struct's little-endian in-memory layout — bulk copy instead
+	// of a per-voxel loop (runs on the game thread per mesh dispatch).
+	static_assert(PLATFORM_LITTLE_ENDIAN, "PackVoxelDataForGPU bulk copy assumes little-endian FVoxelData layout");
+	static_assert(sizeof(FVoxelData) == sizeof(uint32), "PackVoxelDataForGPU bulk copy assumes 4-byte FVoxelData");
 	TArray<uint32> PackedData;
-	PackedData.SetNum(VoxelData.Num());
-
-	for (int32 i = 0; i < VoxelData.Num(); ++i)
+	PackedData.SetNumUninitialized(VoxelData.Num());
+	if (VoxelData.Num() > 0)
 	{
-		PackedData[i] = VoxelData[i].Pack();
+		FMemory::Memcpy(PackedData.GetData(), VoxelData.GetData(), VoxelData.Num() * sizeof(uint32));
 	}
-
 	return PackedData;
 }
 

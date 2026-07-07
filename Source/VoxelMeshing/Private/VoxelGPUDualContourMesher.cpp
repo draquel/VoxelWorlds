@@ -410,14 +410,18 @@ bool FVoxelGPUDualContourMesher::GenerateMeshCPU(
 
 TArray<uint32> FVoxelGPUDualContourMesher::PackVoxelDataForGPU(const TArray<FVoxelData>& VoxelData)
 {
+	// FVoxelData::Pack() (Material | Density<<8 | Biome<<16 | Metadata<<24) is exactly the struct's
+	// little-endian in-memory layout, so packing is a bulk copy. This runs on the game thread per
+	// mesh dispatch (chunk volume + neighbor slices/edges/deep data) — the per-voxel loop it
+	// replaces was a measurable per-frame cost during streaming.
+	static_assert(PLATFORM_LITTLE_ENDIAN, "PackVoxelDataForGPU bulk copy assumes little-endian FVoxelData layout");
+	static_assert(sizeof(FVoxelData) == sizeof(uint32), "PackVoxelDataForGPU bulk copy assumes 4-byte FVoxelData");
 	TArray<uint32> PackedData;
-	PackedData.SetNum(VoxelData.Num());
-
-	for (int32 i = 0; i < VoxelData.Num(); ++i)
+	PackedData.SetNumUninitialized(VoxelData.Num());
+	if (VoxelData.Num() > 0)
 	{
-		PackedData[i] = VoxelData[i].Pack();
+		FMemory::Memcpy(PackedData.GetData(), VoxelData.GetData(), VoxelData.Num() * sizeof(uint32));
 	}
-
 	return PackedData;
 }
 
@@ -530,8 +534,8 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			const TArray<FVoxelData>& Arr = *DeepArrays[Face];
 			if (Arr.Num() == FaceStride)
 			{
-				const TArray<uint32> Packed = PackVoxelDataForGPU(Arr);
-				FMemory::Memcpy(&PackedFaceDeep[Face * FaceStride], Packed.GetData(), FaceStride * sizeof(uint32));
+				// FVoxelData packs as its own memory layout — copy straight from the source
+				FMemory::Memcpy(&PackedFaceDeep[Face * FaceStride], Arr.GetData(), FaceStride * sizeof(uint32));
 			}
 		}
 	}
@@ -555,8 +559,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			const TArray<FVoxelData>& Arr = *EdgeDeepArrays[Edge];
 			if (Arr.Num() == EdgeDeepStride)
 			{
-				const TArray<uint32> Packed = PackVoxelDataForGPU(Arr);
-				FMemory::Memcpy(&PackedEdgeDeep[Edge * EdgeDeepStride], Packed.GetData(), EdgeDeepStride * sizeof(uint32));
+				FMemory::Memcpy(&PackedEdgeDeep[Edge * EdgeDeepStride], Arr.GetData(), EdgeDeepStride * sizeof(uint32));
 			}
 		}
 
@@ -570,8 +573,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 			const TArray<FVoxelData>& Arr = *CornerDeepArrays[Corner];
 			if (Arr.Num() == CornerDeepStride)
 			{
-				const TArray<uint32> Packed = PackVoxelDataForGPU(Arr);
-				FMemory::Memcpy(&PackedCornerDeep[Corner * CornerDeepStride], Packed.GetData(), CornerDeepStride * sizeof(uint32));
+				FMemory::Memcpy(&PackedCornerDeep[Corner * CornerDeepStride], Arr.GetData(), CornerDeepStride * sizeof(uint32));
 			}
 		}
 	}

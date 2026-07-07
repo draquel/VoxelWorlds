@@ -475,6 +475,11 @@ public:
 		float GenNotifyMs = 0.0f;   // apply: OnChunkGenerationComplete (queues + neighbors + delegates)
 		float GenNeighborMs = 0.0f; // subset of notify: QueueNeighborsForRemesh
 		int32 GenApplyCount = 0;    // completions applied this tick
+
+		// Meshing sub-phases (MeshingMs = tick + launch + apply)
+		float MeshTickMs = 0.0f;    // Mesher->Tick: GPU meshers poll readbacks here
+		float MeshLaunchMs = 0.0f;  // ProcessMeshingQueue: snapshot + slices + pack + dispatch
+		float MeshApplyMs = 0.0f;   // ProcessCompletedAsyncMeshes
 	};
 
 	/** Get voxel-specific memory usage breakdown */
