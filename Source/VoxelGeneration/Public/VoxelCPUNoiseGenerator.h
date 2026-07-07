@@ -111,9 +111,10 @@ public:
 
 	/**
 	 * Run the post-generation passes (water fill + underground classification) on already-generated
-	 * voxel data. The GPU generation path calls this after readback to apply the same whole-chunk passes
-	 * that GenerateChunkCPU runs inline, so GPU and CPU produce identical water/underground metadata.
-	 * Static + state-free.
+	 * voxel data. GenerateChunkCPU runs these inline; the GPU path runs shader ports of the same
+	 * passes inside its generation graph (VoxelPostPasses.usf / AddVoxelPostPassDispatches), so this
+	 * is the CPU reference implementation the shaders must stay bit-identical to (enforced by the
+	 * GPUvsCPU parity tests). Static + state-free.
 	 */
 	static void ApplyPostReadbackPasses(const FVoxelNoiseGenerationRequest& Request, TArray<FVoxelData>& OutVoxelData);
 

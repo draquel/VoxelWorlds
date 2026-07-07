@@ -1747,9 +1747,17 @@ void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
 	// Guard: never flag a solid voxel that has a non-underground air neighbor.
 	// Such voxels are surface-exposed (terrain face, cliff, overhang) and
 	// flagging them would cause surface scatter to be classified underground.
+	//
+	// Each iteration is two-phase (collect, then apply) so it reads a consistent
+	// pre-iteration snapshot: in-place flagging would let flags set earlier in the
+	// same iteration cascade along the scan direction, making the effective depth
+	// scan-order dependent — and impossible for the parallel GPU port
+	// (VoxelPostPasses.usf UndergroundMark/Apply) to reproduce.
 	const int32 PropagationDepth = 2;
+	TArray<int32> ToFlag;
 	for (int32 Iteration = 0; Iteration < PropagationDepth; ++Iteration)
 	{
+		ToFlag.Reset();
 		for (int32 Z = 0; Z < ChunkSize; ++Z)
 		{
 			for (int32 Y = 0; Y < ChunkSize; ++Y)
@@ -1757,7 +1765,7 @@ void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
 				for (int32 X = 0; X < ChunkSize; ++X)
 				{
 					const int32 Index = X + Y * ChunkSize + Z * SliceSize;
-					FVoxelData& Voxel = OutVoxelData[Index];
+					const FVoxelData& Voxel = OutVoxelData[Index];
 
 					if (!Voxel.IsSolid() || Voxel.HasUndergroundFlag())
 						continue;
@@ -1793,10 +1801,15 @@ void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
 
 					if (bAdjacentToUnderground && !bAdjacentToSurfaceAir)
 					{
-						Voxel.SetUndergroundFlag(true);
+						ToFlag.Add(Index);
 					}
 				}
 			}
+		}
+
+		for (const int32 Index : ToFlag)
+		{
+			OutVoxelData[Index].SetUndergroundFlag(true);
 		}
 	}
 }
