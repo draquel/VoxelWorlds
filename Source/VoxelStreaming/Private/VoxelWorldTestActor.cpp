@@ -47,14 +47,20 @@ void AVoxelWorldTestActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 {
+	// Tick-cost attribution: the whole actor tick showed up as one opaque 100+ms block in
+	// standalone-game hitch dumps; these timers split it. Logged (throttled) when slow.
+	const double TickT0 = FPlatformTime::Seconds();
 	Super::Tick(DeltaSeconds);
+	const double SuperSec = FPlatformTime::Seconds() - TickT0;
 
 	if (!bIsVoxelWorldInitialized)
 	{
 		return;
 	}
 
+	const double WaterT0 = FPlatformTime::Seconds();
 	UpdateWaterPlanePosition();
+	const double WaterSec = FPlatformTime::Seconds() - WaterT0;
 
 	// Debug visualization
 	if (bDrawDebugVisualization && ChunkManager)
@@ -102,21 +108,39 @@ void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 	}
 
 	// Process edit inputs if enabled
+	const double EditT0 = FPlatformTime::Seconds();
 	if (bEnableEditInputs)
 	{
 		ProcessEditInputs();
 	}
+	const double EditSec = FPlatformTime::Seconds() - EditT0;
 
 	// Draw edit crosshair (can be enabled independently of edit inputs)
+	const double CrossT0 = FPlatformTime::Seconds();
 	if (bShowEditCrosshair)
 	{
 		DrawEditCrosshair();
 	}
+	const double CrossSec = FPlatformTime::Seconds() - CrossT0;
 
 	// Draw performance HUD
+	const double HudT0 = FPlatformTime::Seconds();
 	if (bShowPerformanceHUD)
 	{
 		DrawPerformanceHUD();
+	}
+	const double HudSec = FPlatformTime::Seconds() - HudT0;
+
+	// Attribution log: fires when the actor tick is heavy, at most once per second
+	const double TotalSec = FPlatformTime::Seconds() - TickT0;
+	static double LastSlowTickLogTime = 0.0;
+	if (TotalSec > 0.020 && (FPlatformTime::Seconds() - LastSlowTickLogTime) > 1.0)
+	{
+		LastSlowTickLogTime = FPlatformTime::Seconds();
+		UE_LOG(LogVoxelStreaming, Warning,
+			TEXT("[TestActorTick] total=%.1fms super(BP)=%.1f water=%.1f editInputs=%.1f crosshair=%.1f hud=%.1f other=%.1f"),
+			TotalSec * 1000.0, SuperSec * 1000.0, WaterSec * 1000.0, EditSec * 1000.0, CrossSec * 1000.0, HudSec * 1000.0,
+			(TotalSec - SuperSec - WaterSec - EditSec - CrossSec - HudSec) * 1000.0);
 	}
 }
 

@@ -79,6 +79,14 @@ struct FChunkCollisionData
 	/** Distance from viewer when last updated (for prioritization) */
 	float LastDistance = 0.0f;
 
+	/**
+	 * Estimated cooked-trimesh memory, set when a cook result is applied. Used by
+	 * GetTotalMemoryUsage instead of BodySetup->GetResourceSizeEx: walking the Chaos
+	 * geometry per body cost ~1ms each, which made the per-frame debug HUD's memory
+	 * readout take 80-100ms with a settled collision shell.
+	 */
+	int64 EstimatedBytes = 0;
+
 	FChunkCollisionData() = default;
 
 	explicit FChunkCollisionData(const FIntVector& InChunkCoord)

@@ -539,17 +539,13 @@ int64 UVoxelCollisionManager::GetTotalMemoryUsage() const
 	// Collision data map overhead
 	Total += CollisionData.GetAllocatedSize();
 
-	// Per-chunk: BodySetup resource size estimate
+	// Per-chunk: cooked-trimesh estimate captured at apply time. Do NOT call
+	// BodySetup->GetResourceSizeEx here — it walks the Chaos triangle-mesh geometry
+	// (~1ms per body), and this getter is called per frame by the debug HUD; with a
+	// settled collision shell that walk alone was 80-100ms/frame (6 fps in standalone).
 	for (const auto& Pair : CollisionData)
 	{
-		Total += sizeof(FChunkCollisionData);
-		if (Pair.Value.BodySetup)
-		{
-			// Approximate: BodySetup stores cooked tri-mesh data
-			FResourceSizeEx ResSize;
-			Pair.Value.BodySetup->GetResourceSizeEx(ResSize);
-			Total += ResSize.GetTotalMemoryBytes();
-		}
+		Total += sizeof(FChunkCollisionData) + Pair.Value.EstimatedBytes;
 	}
 
 	// Cooking queue (lightweight — no mesh data stored in requests)
@@ -893,6 +889,12 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 	// Mark as cooked so InitBody uses our TriMeshGeometries directly
 	BS->bCreatedPhysicsMeshes = true;
 	BS->bHasCookedCollisionData = true;
+
+	// Estimated cooked-trimesh footprint: positions (12B/vert) + indices (12B/tri) + Chaos
+	// BVH/metadata (~16B/tri). Cheap arithmetic stand-in for GetResourceSizeEx, which walks
+	// the Chaos geometry and is far too slow to call per frame (see GetTotalMemoryUsage).
+	Data->EstimatedBytes = static_cast<int64>(Result.NumVertices) * 12
+		+ static_cast<int64>(Result.NumTriangles) * 28;
 
 	// Mark cooking complete
 	Data->bIsCooking = false;
