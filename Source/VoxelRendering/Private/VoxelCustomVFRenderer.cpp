@@ -231,6 +231,36 @@ void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
 	int32 LODLevel,
 	const FChunkMeshData& MeshData)
 {
+	if (!MeshData.IsValid())
+	{
+		RemoveChunk(ChunkCoord);
+		return;
+	}
+	// Caller keeps the mesh data — copy the index buffer
+	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MeshData, TArray<uint32>(MeshData.Indices));
+}
+
+void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
+	const FIntVector& ChunkCoord,
+	int32 LODLevel,
+	FChunkMeshData&& MeshData)
+{
+	if (!MeshData.IsValid())
+	{
+		RemoveChunk(ChunkCoord);
+		return;
+	}
+	// Caller is done with the mesh data — move the index buffer straight into the pending
+	// batch. (Vertices always need converting to FVoxelVertex, so only indices benefit.)
+	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MeshData, MoveTemp(MeshData.Indices));
+}
+
+void FVoxelCustomVFRenderer::SubmitChunkMeshInternal(
+	const FIntVector& ChunkCoord,
+	int32 LODLevel,
+	const FChunkMeshData& MeshData,
+	TArray<uint32>&& Indices)
+{
 	check(IsInGameThread());
 
 	if (!IsInitialized())
@@ -239,25 +269,11 @@ void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
 		return;
 	}
 
-	if (!MeshData.IsValid())
-	{
-		RemoveChunk(ChunkCoord);
-		return;
-	}
-
-	// Convert CPU mesh data to FVoxelVertex array
+	// Convert CPU mesh data to FVoxelVertex array; local bounds are computed in the same pass
+	// (this used to be a second full sweep over the positions)
 	TArray<FVoxelVertex> Vertices;
-	ConvertToVoxelVertices(MeshData, Vertices);
-
-	// Copy indices
-	TArray<uint32> Indices = MeshData.Indices;
-
-	// Calculate bounds
 	FBox LocalBounds(ForceInit);
-	for (const FVector3f& Pos : MeshData.Positions)
-	{
-		LocalBounds += FVector(Pos);
-	}
+	ConvertToVoxelVertices(MeshData, Vertices, LocalBounds);
 
 	// Update statistics
 	FChunkStats* ExistingStats = ChunkStatsMap.Find(ChunkCoord);
@@ -480,9 +496,10 @@ void FVoxelCustomVFRenderer::UpdateWaterTileMesh(
 		return;
 	}
 
-	// Convert CPU mesh data to FVoxelVertex array
+	// Convert CPU mesh data to FVoxelVertex array (bounds unused for water tiles)
 	TArray<FVoxelVertex> Vertices;
-	ConvertToVoxelVertices(WaterMeshData, Vertices);
+	FBox UnusedBounds(ForceInit);
+	ConvertToVoxelVertices(WaterMeshData, Vertices, UnusedBounds);
 
 	// Copy indices
 	TArray<uint32> Indices = WaterMeshData.Indices;
@@ -683,40 +700,38 @@ FString FVoxelCustomVFRenderer::GetRendererTypeName() const
 
 void FVoxelCustomVFRenderer::ConvertToVoxelVertices(
 	const FChunkMeshData& MeshData,
-	TArray<FVoxelVertex>& OutVertices)
+	TArray<FVoxelVertex>& OutVertices,
+	FBox& OutLocalBounds)
 {
 	const int32 VertexCount = MeshData.Positions.Num();
 	OutVertices.SetNumUninitialized(VertexCount);
+	OutLocalBounds.Init();
+
+	// Attribute arrays are either full-size or absent — decide once, not per vertex.
+	// (The per-vertex `i < Num()` checks this replaces also handled partially-filled arrays,
+	// which no mesher produces; short arrays now fall back to defaults wholesale.)
+	const bool bHasNormals = MeshData.Normals.Num() >= VertexCount;
+	const bool bHasUVs = MeshData.UVs.Num() >= VertexCount;
+	const bool bHasColors = MeshData.Colors.Num() >= VertexCount;
+
+	FVector3f BoundsMin(FLT_MAX, FLT_MAX, FLT_MAX);
+	FVector3f BoundsMax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 
 	for (int32 i = 0; i < VertexCount; ++i)
 	{
 		FVoxelVertex& Vertex = OutVertices[i];
 
-		// Position
-		Vertex.Position = MeshData.Positions[i];
+		// Position + bounds (fused — this loop runs per submitted chunk on the game thread)
+		const FVector3f& Pos = MeshData.Positions[i];
+		Vertex.Position = Pos;
+		BoundsMin = FVector3f::Min(BoundsMin, Pos);
+		BoundsMax = FVector3f::Max(BoundsMax, Pos);
 
-		// Normal
-		if (i < MeshData.Normals.Num())
-		{
-			Vertex.SetNormal(MeshData.Normals[i]);
-		}
-		else
-		{
-			Vertex.SetNormal(FVector3f::UpVector);
-		}
-
-		// UV
-		if (i < MeshData.UVs.Num())
-		{
-			Vertex.UV = MeshData.UVs[i];
-		}
-		else
-		{
-			Vertex.UV = FVector2f::ZeroVector;
-		}
+		Vertex.SetNormal(bHasNormals ? MeshData.Normals[i] : FVector3f::UpVector);
+		Vertex.UV = bHasUVs ? MeshData.UVs[i] : FVector2f::ZeroVector;
 
 		// Extract material data from vertex color
-		if (i < MeshData.Colors.Num())
+		if (bHasColors)
 		{
 			const FColor& Color = MeshData.Colors[i];
 			Vertex.SetMaterialID(Color.R);
@@ -729,6 +744,12 @@ void FVoxelCustomVFRenderer::ConvertToVoxelVertices(
 			Vertex.SetBiomeID(0);
 			Vertex.SetAO(0);
 		}
+	}
+
+	if (VertexCount > 0)
+	{
+		OutLocalBounds += FVector(BoundsMin);
+		OutLocalBounds += FVector(BoundsMax);
 	}
 }
 

@@ -486,6 +486,16 @@ public:
 		float MeshSlicesMs = 0.0f;    // ExtractNeighborEdgeSlices
 		float MeshDispatchMs = 0.0f;  // LaunchAsyncMeshGeneration (worker handoff for DC/MC GPU)
 		int32 MeshLaunchCount = 0;    // mesh jobs launched this tick
+
+		// Render-submit breakdown (RenderSubmitMs = mesh drain + unload + water tiles; flush is separate)
+		float RenderMeshMs = 0.0f;       // OnChunkMeshingComplete drain loop total
+		float RenderSubRendererMs = 0.0f; // subset: renderer UpdateChunkMeshFromCPU (vertex convert + handoff)
+		float RenderSubScatterMs = 0.0f; // subset: ScatterManager OnChunkMeshDataReady
+		float RenderSubWaterMs = 0.0f;   // subset: PropagateWaterFromNeighbors + UpdateWaterTileContribution
+		float RenderUnloadMs = 0.0f;     // ProcessUnloadQueue
+		float RenderWaterTileMs = 0.0f;  // ProcessDirtyWaterTiles (water tile mesh rebuilds)
+		float RenderFlushMs = 0.0f;      // MeshRenderer FlushPendingOperations (end of tick)
+		int32 RenderSubmitCount = 0;     // meshes submitted to the renderer this tick
 	};
 
 	/** Get voxel-specific memory usage breakdown */
@@ -995,6 +1005,12 @@ protected:
 
 	/** QueueNeighborsForRemesh time accumulated across this tick (attribution; reset each tick) */
 	double NeighborRemeshSecondsThisTick = 0.0;
+
+	/** Render-submit sub-cost accumulators (attribution; reset each tick, filled in OnChunkMeshingComplete) */
+	double SubmitRendererSecondsThisTick = 0.0;
+	double SubmitScatterSecondsThisTick = 0.0;
+	double SubmitWaterSecondsThisTick = 0.0;
+	int32 SubmitsThisTick = 0;
 
 	/** Launch async noise generation for a chunk */
 	void LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest);

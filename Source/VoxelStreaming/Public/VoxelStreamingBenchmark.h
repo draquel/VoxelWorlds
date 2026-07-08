@@ -74,6 +74,9 @@ private:
 		float MeshTickMs, MeshLaunchMs, MeshApplyMs;
 		float MeshSnapMs, MeshSliceMs, MeshDispMs;
 		int32 MeshLaunchCount;
+		float RendMeshMs, RendSubRendMs, RendSubScatMs, RendSubWatMs;
+		float RendUnloadMs, RendWTileMs, RendFlushMs;
+		int32 RendSubmitCount;
 		int64 RemeshCount;
 	};
 
