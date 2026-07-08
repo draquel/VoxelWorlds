@@ -309,8 +309,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	Timing.MeshApplyMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
 	Timing.MeshingMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
 
-	// === Render submit (time-budgeted) ===
+	// === Render submit (time-budgeted; sub-timed for the benchmark CSV) ===
 	SectionStart = FPlatformTime::Seconds();
+	SubmitRendererSecondsThisTick = 0.0;
+	SubmitScatterSecondsThisTick = 0.0;
+	SubmitWaterSecondsThisTick = 0.0;
+	SubmitsThisTick = 0;
 	const int32 MaxRenderSubmitsPerFrame = ResolveMaxLoadPerFrame();
 	constexpr double RenderSubmitBudgetSec = 0.004; // 4ms budget — leaves headroom for other systems
 	if (PendingMeshQueue.Num() > 0)
@@ -329,18 +333,31 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 				break;
 			}
 		}
+		SubmitsThisTick = RenderSubmitCount;
 	}
+	SubEnd = FPlatformTime::Seconds();
+	Timing.RenderMeshMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
+	Timing.RenderSubRendererMs = static_cast<float>(SubmitRendererSecondsThisTick * 1000.0);
+	Timing.RenderSubScatterMs = static_cast<float>(SubmitScatterSecondsThisTick * 1000.0);
+	Timing.RenderSubWaterMs = static_cast<float>(SubmitWaterSecondsThisTick * 1000.0);
+	Timing.RenderSubmitCount = SubmitsThisTick;
 
+	SubStart = SubEnd;
 	const int32 MaxUnloadsPerFrame = Configuration ? Configuration->MaxChunksToUnloadPerFrame : 8;
 	ProcessUnloadQueue(MaxUnloadsPerFrame);
+	SubEnd = FPlatformTime::Seconds();
+	Timing.RenderUnloadMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
 
 	// === Process dirty water tiles (2D water grid) ===
+	SubStart = SubEnd;
 	if (Configuration && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
 	{
 		ProcessDirtyWaterTiles(8);
 	}
+	SubEnd = FPlatformTime::Seconds();
+	Timing.RenderWaterTileMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
 
-	Timing.RenderSubmitMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	Timing.RenderSubmitMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
 
 	// === Water propagation (bounded BFS per frame) ===
 	if (WaterPropagation && WaterPropagation->HasPendingWork())
@@ -422,7 +439,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Flush all pending render operations as a single batched command
 	if (MeshRenderer)
 	{
+		const double FlushStart = FPlatformTime::Seconds();
 		MeshRenderer->FlushPendingOperations();
+		Timing.RenderFlushMs = static_cast<float>((FPlatformTime::Seconds() - FlushStart) * 1000.0);
 	}
 	Timing.TotalMs = static_cast<float>((FPlatformTime::Seconds() - TickStartTime) * 1000.0);
 	LastTimingStats = Timing;
@@ -2983,10 +3002,13 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			{
 				if (MeshRenderer && State)
 				{
+					// Entry is discarded right after — move the mesh data into the renderer
+					const double RendT0 = FPlatformTime::Seconds();
 					MeshRenderer->UpdateChunkMeshFromCPU(
 						ChunkCoord,
 						PendingMeshQueue[i].LODLevel,
-						PendingMeshQueue[i].MeshData);
+						MoveTemp(PendingMeshQueue[i].MeshData));
+					SubmitRendererSecondsThisTick += FPlatformTime::Seconds() - RendT0;
 					State->MeshedLODLevel = PendingMeshQueue[i].LODLevel;
 					if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 					SubmittedLOD = PendingMeshQueue[i].LODLevel;
@@ -3066,32 +3088,39 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	if (PendingIndex != INDEX_NONE && MeshRenderer)
 	{
-		const FPendingMeshData& PendingMesh = PendingMeshQueue[PendingIndex];
+		FPendingMeshData& PendingMesh = PendingMeshQueue[PendingIndex];
 		const int32 PreviousMeshedLOD = State->MeshedLODLevel;
 
-		// Send mesh to renderer
+		// Notify scatter manager with voxel data for LOD-independent surface extraction.
+		// Runs BEFORE the renderer submit: scatter reads MeshData, and the submit below
+		// moves it into the renderer.
+		if (ScatterManager && Configuration && Configuration->bEnableScatter)
+		{
+			const double ScatT0 = FPlatformTime::Seconds();
+			ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
+				State->Descriptor.VoxelData, State->Descriptor.ChunkSize, Configuration->VoxelSize);
+			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
+		}
+
+		// Send mesh to renderer (entry is discarded below — move the mesh data in)
+		const double RendT0 = FPlatformTime::Seconds();
 		MeshRenderer->UpdateChunkMeshFromCPU(
 			ChunkCoord,
 			PendingMesh.LODLevel,
-			PendingMesh.MeshData
+			MoveTemp(PendingMesh.MeshData)
 		);
+		SubmitRendererSecondsThisTick += FPlatformTime::Seconds() - RendT0;
 
 		// Track which LOD is actually rendered so neighbors can read the correct
 		// LOD level for MergeLODBoundaryCells and transition face setup.
 		State->MeshedLODLevel = PendingMesh.LODLevel;
 		if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 
-		// Notify scatter manager with voxel data for LOD-independent surface extraction
-		if (ScatterManager && Configuration && Configuration->bEnableScatter)
-		{
-			ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
-				State->Descriptor.VoxelData, State->Descriptor.ChunkSize, Configuration->VoxelSize);
-		}
-
 		// Propagate water flags from loaded neighbors into this chunk's voxel data
 		// so caves connected across chunk boundaries receive consistent water flags.
 		if (Configuration && Configuration->bEnableWaterLevel)
 		{
+			const double WaterT0 = FPlatformTime::Seconds();
 			PropagateWaterFromNeighbors(ChunkCoord);
 
 			// Update this chunk's contribution to its 2D water tile
@@ -3099,6 +3128,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			{
 				UpdateWaterTileContribution(ChunkCoord);
 			}
+			SubmitWaterSecondsThisTick += FPlatformTime::Seconds() - WaterT0;
 		}
 
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
@@ -3298,6 +3328,18 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		return false;
 	}
 
+	// Entirely above the water level — no voxel can qualify as a seed (the per-voxel check
+	// below rejects everything), so skip the 6-face boundary scan outright. This runs per
+	// mesh submit and most submitted chunks are above the water level.
+	if (ChunkWorldPos.Z > WaterLevel)
+	{
+		return false;
+	}
+
+	// Voxels above the water level never seed — clamp the Z iteration up front instead of
+	// rejecting them one by one. For the X/Y faces, loop axis B is Z.
+	const int32 MaxSeedZ = FMath::Clamp(FMath::FloorToInt32((WaterLevel - ChunkWorldPos.Z) / VS), 0, CS - 1);
+
 	TArray<FVoxelData>& VoxelData = State->Descriptor.VoxelData;
 
 	// Collect seed voxels from 6 face neighbors
@@ -3323,10 +3365,19 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		// e.g. +X neighbor: our X=CS-1 face vs neighbor's X=0 face
 		const int32 MaxIdx = CS - 1;
 
+		// +Z face: the whole plane sits at Z=MaxIdx — skip it when that plane is above water
+		if (F == 4 && (ChunkWorldPos.Z + MaxIdx * VS) > WaterLevel)
+		{
+			continue;
+		}
+
+		// X/Y faces iterate Z on axis B — only the underwater band can seed
+		const int32 MaxB = (F < 4) ? MaxSeedZ : MaxIdx;
+
 		// Iterate boundary face voxels (2D loop over the two axes perpendicular to this face)
 		for (int32 A = 0; A < CS; ++A)
 		{
-			for (int32 B = 0; B < CS; ++B)
+			for (int32 B = 0; B <= MaxB; ++B)
 			{
 				int32 OurX, OurY, OurZ;
 				int32 NbrX, NbrY, NbrZ;
@@ -3462,6 +3513,19 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	}
 
 	const int32 CS = State->Descriptor.ChunkSize;
+
+	// Chunks entirely above the water level cannot hold water flags — skip the full-volume
+	// column scan (this runs per mesh submit) and just clear any stale contribution.
+	if (Configuration)
+	{
+		const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(ChunkCoord, CS, Configuration->VoxelSize);
+		if (ChunkWorldPos.Z > Configuration->WaterLevel)
+		{
+			RemoveWaterTileContribution(ChunkCoord);
+			return;
+		}
+	}
+
 	TArray<bool> PartialMask;
 	PartialMask.SetNumZeroed(CS * CS);
 
@@ -3469,23 +3533,26 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 		State->Descriptor.VoxelData, CS, PartialMask);
 
 	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
-	FWaterTileState& Tile = WaterTiles.FindOrAdd(TileCoord);
 
 	if (bAnyWater)
 	{
+		FWaterTileState& Tile = WaterTiles.FindOrAdd(TileCoord);
 		Tile.PartialMasks.Add(ChunkCoord.Z, MoveTemp(PartialMask));
+
+		// Mark dirty and queue
+		Tile.bDirty = true;
+		if (!DirtyWaterTileSet.Contains(TileCoord))
+		{
+			DirtyWaterTileQueue.Add(TileCoord);
+			DirtyWaterTileSet.Add(TileCoord);
+		}
 	}
 	else
 	{
-		Tile.PartialMasks.Remove(ChunkCoord.Z);
-	}
-
-	// Mark dirty and queue
-	Tile.bDirty = true;
-	if (!DirtyWaterTileSet.Contains(TileCoord))
-	{
-		DirtyWaterTileQueue.Add(TileCoord);
-		DirtyWaterTileSet.Add(TileCoord);
+		// No water in this chunk — only touch the tile if a stale contribution needs removing.
+		// (Previously this dirtied the tile unconditionally, so every dry-chunk remesh forced a
+		// spurious water tile rebuild in ProcessDirtyWaterTiles.)
+		RemoveWaterTileContribution(ChunkCoord);
 	}
 }
 
@@ -3498,7 +3565,11 @@ void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoor
 		return;
 	}
 
-	Tile->PartialMasks.Remove(ChunkCoord.Z);
+	if (Tile->PartialMasks.Remove(ChunkCoord.Z) == 0)
+	{
+		// This chunk contributed nothing — the tile's combined mask is unchanged
+		return;
+	}
 
 	if (Tile->PartialMasks.IsEmpty())
 	{

@@ -50,6 +50,10 @@ public:
 		const FIntVector& ChunkCoord,
 		int32 LODLevel,
 		const FChunkMeshData& MeshData) override;
+	virtual void UpdateChunkMeshFromCPU(
+		const FIntVector& ChunkCoord,
+		int32 LODLevel,
+		FChunkMeshData&& MeshData) override;
 	virtual void RemoveChunk(const FIntVector& ChunkCoord) override;
 	virtual void ClearAllChunks() override;
 
@@ -118,10 +122,18 @@ private:
 		FBufferRHIRef& OutVertexBuffer,
 		FBufferRHIRef& OutIndexBuffer);
 
-	/** Convert FChunkMeshData to FVoxelVertex array */
+	/** Convert FChunkMeshData to FVoxelVertex array, computing local bounds in the same pass */
 	void ConvertToVoxelVertices(
 		const FChunkMeshData& MeshData,
-		TArray<FVoxelVertex>& OutVertices);
+		TArray<FVoxelVertex>& OutVertices,
+		FBox& OutLocalBounds);
+
+	/** Shared submit body for the copy/move UpdateChunkMeshFromCPU variants */
+	void SubmitChunkMeshInternal(
+		const FIntVector& ChunkCoord,
+		int32 LODLevel,
+		const FChunkMeshData& MeshData,
+		TArray<uint32>&& Indices);
 
 	/** Calculate chunk bounds from mesh data */
 	FBox CalculateChunkBounds(const FIntVector& ChunkCoord) const;

@@ -97,6 +97,21 @@ public:
 	) = 0;
 
 	/**
+	 * Move-enabled variant of UpdateChunkMeshFromCPU for callers that are done with the mesh
+	 * data. Renderers that can consume the arrays directly (e.g. the custom-VF renderer moves
+	 * the index buffer straight into its pending batch) override this to avoid copying; the
+	 * default forwards to the const& version.
+	 */
+	virtual void UpdateChunkMeshFromCPU(
+		const FIntVector& ChunkCoord,
+		int32 LODLevel,
+		FChunkMeshData&& MeshData
+	)
+	{
+		UpdateChunkMeshFromCPU(ChunkCoord, LODLevel, static_cast<const FChunkMeshData&>(MeshData));
+	}
+
+	/**
 	 * Remove chunk mesh from rendering.
 	 *
 	 * Releases all resources associated with the chunk.
