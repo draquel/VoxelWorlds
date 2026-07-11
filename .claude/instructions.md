@@ -126,8 +126,10 @@ VoxelWorlds/
 │   ├── VoxelGeneration/    # Noise, biomes, depends on VoxelCore
 │   ├── VoxelMeshing/       # Meshing algorithms, depends on VoxelCore
 │   ├── VoxelStreaming/     # Chunk management, depends on VoxelCore + VoxelLOD
-│   └── VoxelRuntime/       # UE integration, depends on all
+│   ├── VoxelWorlds/        # UE integration module ("VoxelRuntime" in older docs), depends on all
+│   └── VoxelWorldsEditor/  # EDITOR-ONLY authoring tools (Type "Editor"), stripped from shipping; see Documentation/Features/EDITOR_TOOLS.md
 ```
+(Additional runtime modules also exist: VoxelScatter, VoxelMap, VoxelPCG.)
 
 ### Naming Conventions
 - **Interfaces**: `IVoxelXxx` (e.g., `IVoxelLODStrategy`)
@@ -255,7 +257,8 @@ See: `Documentation/TESTING_STRATEGY.md`
 - [x] Cave generation — multi-layer (Cheese, Spaghetti, Noodle) via `UVoxelCaveConfiguration`. See `Documentation/CAVE_SYSTEM.md`
 - [x] Advanced noise (Cellular, Voronoi) — GPU + CPU implementations. See `Documentation/NOISE_LIBRARY.md`
 - [x] Dual Contouring mesher — CPU + GPU implementations with QEF solver and LOD boundary merging. See `Documentation/DUAL_CONTOURING.md`
-- [ ] Quadtree/Octree LOD, improved water, editor tools, etc.
+- [~] Editor tools — **Milestone 1 DONE**: `VoxelWorldsEditor` module (Type "Editor", stripped from shipping) + field-sampler core + 8 built-in fields + dockable "Voxel Field Preview" panel + `AVoxelFieldPreviewActor`; runtime `FVoxelCaveQuery` added. See `Documentation/Features/EDITOR_TOOLS.md`
+- [ ] Quadtree/Octree LOD, improved water, etc.
 
 See: `Documentation/IMPLEMENTATION_PHASES.md` for full roadmap
 
