@@ -1,0 +1,860 @@
+<style>
+  :root {
+    --f-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --f-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+    /* dark "basalt cross-section" — default */
+    --bg: #0f1317;
+    --bg-grid: #161d24;
+    --surface: #161c22;
+    --surface-2: #1b232b;
+    --border: #2a333d;
+    --border-soft: #212a32;
+    --ink: #e7ece9;
+    --ink-dim: #9aa7a5;
+    --ink-faint: #6a7880;
+
+    --rock: #9aa4b0;   /* foundation   */
+    --grass: #7db95f;  /* gpu / domain */
+    --ore: #d6a24e;    /* coordination */
+    --water: #55a8cc;  /* integration  */
+    --edit: #d0765a;   /* editor-only  */
+    --compute: #93e7a6;/* gpu glow     */
+
+    --rock-bg: rgba(154,164,176,0.10);
+    --grass-bg: rgba(125,185,95,0.12);
+    --ore-bg: rgba(214,162,78,0.12);
+    --water-bg: rgba(85,168,204,0.12);
+    --edit-bg: rgba(208,118,90,0.12);
+
+    --shadow: 0 1px 0 rgba(255,255,255,0.03), 0 18px 40px -24px rgba(0,0,0,0.7);
+    --maxw: 1080px;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #eceee9;
+      --bg-grid: #e3e7df;
+      --surface: #f6f7f3;
+      --surface-2: #eaece5;
+      --border: #cdd3c8;
+      --border-soft: #dbe0d5;
+      --ink: #1b2320;
+      --ink-dim: #55605c;
+      --ink-faint: #8b948d;
+
+      --rock: #5f6a76;
+      --grass: #4c8a3c;
+      --ore: #a9781f;
+      --water: #2c7fa1;
+      --edit: #b0503a;
+      --compute: #2f8a4a;
+
+      --rock-bg: rgba(95,106,118,0.10);
+      --grass-bg: rgba(76,138,60,0.12);
+      --ore-bg: rgba(169,120,31,0.12);
+      --water-bg: rgba(44,127,161,0.12);
+      --edit-bg: rgba(176,80,58,0.12);
+
+      --shadow: 0 1px 0 rgba(255,255,255,0.6), 0 16px 36px -26px rgba(31,42,36,0.4);
+    }
+  }
+
+  /* explicit theme overrides (viewer toggle wins in both directions) */
+  :root[data-theme="dark"] {
+    --bg: #0f1317; --bg-grid: #161d24; --surface: #161c22; --surface-2: #1b232b;
+    --border: #2a333d; --border-soft: #212a32; --ink: #e7ece9; --ink-dim: #9aa7a5; --ink-faint: #6a7880;
+    --rock: #9aa4b0; --grass: #7db95f; --ore: #d6a24e; --water: #55a8cc; --edit: #d0765a; --compute: #93e7a6;
+    --rock-bg: rgba(154,164,176,0.10); --grass-bg: rgba(125,185,95,0.12); --ore-bg: rgba(214,162,78,0.12);
+    --water-bg: rgba(85,168,204,0.12); --edit-bg: rgba(208,118,90,0.12);
+    --shadow: 0 1px 0 rgba(255,255,255,0.03), 0 18px 40px -24px rgba(0,0,0,0.7);
+  }
+  :root[data-theme="light"] {
+    --bg: #eceee9; --bg-grid: #e3e7df; --surface: #f6f7f3; --surface-2: #eaece5;
+    --border: #cdd3c8; --border-soft: #dbe0d5; --ink: #1b2320; --ink-dim: #55605c; --ink-faint: #8b948d;
+    --rock: #5f6a76; --grass: #4c8a3c; --ore: #a9781f; --water: #2c7fa1; --edit: #b0503a; --compute: #2f8a4a;
+    --rock-bg: rgba(95,106,118,0.10); --grass-bg: rgba(76,138,60,0.12); --ore-bg: rgba(169,120,31,0.12);
+    --water-bg: rgba(44,127,161,0.12); --edit-bg: rgba(176,80,58,0.12);
+    --shadow: 0 1px 0 rgba(255,255,255,0.6), 0 16px 36px -26px rgba(31,42,36,0.4);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--f-sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .page {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 72px) clamp(18px, 4vw, 40px) 88px;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(56px, 8vw, 92px);
+  }
+
+  .mono { font-family: var(--f-mono); }
+
+  /* ---------- eyebrow / labels ---------- */
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0;
+  }
+
+  /* ---------- hero ---------- */
+  .hero { display: flex; flex-direction: column; gap: 20px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-name {
+    font-family: var(--f-mono);
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: 0.02em;
+    color: var(--ink);
+  }
+  .cube { width: 30px; height: 30px; display: block; flex: none; }
+  .hero h1 {
+    font-size: clamp(34px, 6vw, 58px);
+    line-height: 1.02;
+    font-weight: 800;
+    letter-spacing: -0.028em;
+    text-wrap: balance;
+    margin: 6px 0 0;
+    max-width: 18ch;
+  }
+  .hero h1 .accent { color: var(--grass); }
+  .lead {
+    font-size: clamp(16px, 2.1vw, 19px);
+    color: var(--ink-dim);
+    max-width: 62ch;
+    margin: 0;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .chip {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    color: var(--ink-dim);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 11px;
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- figure block ---------- */
+  .figure { display: flex; flex-direction: column; gap: 22px; }
+  .fig-head { display: flex; flex-direction: column; gap: 7px; }
+  .fig-tag {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--grass);
+  }
+  .fig-head h2 {
+    font-size: clamp(24px, 3.6vw, 34px);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .fig-head p { margin: 0; color: var(--ink-dim); max-width: 66ch; font-size: 16px; }
+
+  .plate {
+    position: relative;
+    background:
+      linear-gradient(var(--surface), var(--surface)) padding-box,
+      var(--border) border-box;
+    border: 1px solid transparent;
+    border-radius: 16px;
+    padding: clamp(18px, 3vw, 30px);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .plate::before {
+    /* faint voxel grid */
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--bg-grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
+    background-size: 26px 26px;
+    opacity: 0.5;
+    pointer-events: none;
+    mask-image: radial-gradient(120% 120% at 100% 0%, #000 0%, transparent 62%);
+    -webkit-mask-image: radial-gradient(120% 120% at 100% 0%, #000 0%, transparent 62%);
+  }
+  .plate > * { position: relative; }
+
+  /* ---------- module strata (Fig A) ---------- */
+  .strata { display: flex; flex-direction: column; gap: 12px; }
+  .tier { display: grid; grid-template-columns: 118px 1fr; gap: 16px; align-items: stretch; }
+  .tier-label {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    justify-content: center;
+    padding-right: 8px;
+    border-right: 1px dashed var(--border);
+    text-align: right;
+  }
+  .tier-label b { color: var(--ink-dim); font-weight: 600; letter-spacing: 0.06em; }
+  .tier-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+
+  .mod {
+    position: relative;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--cat, var(--rock));
+    border-radius: 10px;
+    padding: 13px 14px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    min-width: 0;
+  }
+  .mod.hub {
+    border-color: color-mix(in srgb, var(--ore) 55%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--ore) 34%, transparent),
+                0 14px 30px -22px color-mix(in srgb, var(--ore) 60%, transparent);
+  }
+  .mod-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .mod-name { font-family: var(--f-mono); font-weight: 600; font-size: 14.5px; letter-spacing: -0.01em; }
+  .mod-role { font-size: 12.5px; color: var(--ink-dim); line-height: 1.45; }
+  .mod-dep { font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-faint); letter-spacing: 0.01em; }
+  .badges { display: flex; flex-wrap: wrap; gap: 5px; }
+  .badge {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+  }
+  .badge.gpu { color: var(--compute); background: var(--grass-bg); border-color: color-mix(in srgb, var(--grass) 40%, transparent); }
+  .badge.hub { color: var(--ore); background: var(--ore-bg); border-color: color-mix(in srgb, var(--ore) 40%, transparent); }
+  .badge.phase { color: var(--ink-faint); background: transparent; border-color: var(--border); }
+
+  .editor-rail {
+    margin-top: 4px;
+    display: grid;
+    grid-template-columns: 118px 1fr;
+    gap: 16px;
+  }
+  .editor-aside {
+    border: 1px dashed color-mix(in srgb, var(--edit) 55%, var(--border));
+    background: var(--edit-bg);
+    border-radius: 10px;
+    padding: 13px 15px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+  }
+  .editor-aside .mod-name { color: var(--ink); }
+  .editor-aside .tag {
+    font-family: var(--f-mono); font-size: 11px; color: var(--edit); letter-spacing: 0.04em;
+  }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 6px; }
+  .lg { display: flex; align-items: center; gap: 7px; font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-dim); }
+  .sw { width: 11px; height: 11px; border-radius: 3px; flex: none; background: var(--c); }
+
+  /* ---------- pipeline (Fig B) ---------- */
+  .pipe-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(216px, 1fr)); }
+  .stage {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 14px 14px 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    min-width: 0;
+  }
+  .stage-idx { font-family: var(--f-mono); font-size: 11px; color: var(--ink-faint); letter-spacing: 0.08em; }
+  .stage-title { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; line-height: 1.2; }
+  .stage-desc { font-size: 12.5px; color: var(--ink-dim); line-height: 1.45; }
+  .stage-mod { display: flex; align-items: center; gap: 7px; margin-top: auto; }
+  .stage-mod .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--cat, var(--rock)); flex: none; }
+  .stage-mod .nm { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-dim); }
+  .stage.gpu { border-color: color-mix(in srgb, var(--grass) 42%, var(--border)); background: color-mix(in srgb, var(--grass-bg) 60%, var(--surface-2)); }
+  .stage .gpu-tag {
+    align-self: flex-start;
+    font-family: var(--f-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--compute); background: var(--grass-bg);
+    border: 1px solid color-mix(in srgb, var(--grass) 40%, transparent);
+    border-radius: 5px; padding: 2px 6px;
+  }
+  .pipe-end {
+    display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 5px;
+    background: var(--grass-bg);
+    border: 1px solid color-mix(in srgb, var(--grass) 45%, transparent);
+    border-radius: 11px; padding: 14px;
+    text-align: center;
+  }
+  .pipe-end .big { font-weight: 800; font-size: 16px; color: var(--ink); letter-spacing: -0.01em; }
+  .pipe-end .sm { font-family: var(--f-mono); font-size: 10.5px; color: var(--grass); letter-spacing: 0.06em; }
+
+  /* ---------- feature map (Fig C) ---------- */
+  .feat-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); }
+  .feat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 17px 17px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .feat-head { display: flex; align-items: center; gap: 10px; }
+  .feat-ico {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    display: grid; place-items: center;
+    background: var(--cat-bg, var(--rock-bg));
+    color: var(--cat, var(--rock));
+    border: 1px solid color-mix(in srgb, var(--cat, var(--rock)) 30%, transparent);
+  }
+  .feat-ico svg { width: 17px; height: 17px; display: block; }
+  .feat h3 { margin: 0; font-size: 15.5px; font-weight: 700; letter-spacing: -0.01em; }
+  .feat ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .feat li { position: relative; padding-left: 15px; font-size: 13px; color: var(--ink-dim); line-height: 1.45; }
+  .feat li::before {
+    content: ""; position: absolute; left: 0; top: 8px;
+    width: 6px; height: 6px; border-radius: 2px;
+    background: var(--cat, var(--rock)); opacity: 0.85;
+  }
+  .feat li b { color: var(--ink); font-weight: 600; }
+  .feat code { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+  /* ---------- presentation kit ---------- */
+  .kit { display: flex; flex-direction: column; gap: 22px; }
+  .through {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--grass);
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .through p { margin: 0; font-size: 16px; color: var(--ink); }
+  .through p .q { color: var(--grass); font-weight: 700; }
+  .slides { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); counter-reset: slide; }
+  .slide {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 15px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .slide-no {
+    font-family: var(--f-mono);
+    font-size: 11px; letter-spacing: 0.1em;
+    color: var(--ink-faint);
+  }
+  .slide h4 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+  .slide p { margin: 0; font-size: 12.5px; color: var(--ink-dim); line-height: 1.45; }
+  .slide .ref { font-family: var(--f-mono); font-size: 10.5px; color: var(--grass); letter-spacing: 0.04em; }
+
+  /* ---------- footer ---------- */
+  .foot {
+    border-top: 1px solid var(--border);
+    padding-top: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .foot p { margin: 0; font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-faint); letter-spacing: 0.01em; max-width: 60ch; line-height: 1.6; }
+
+  /* ---------- reveal ---------- */
+  .reveal { opacity: 0; transform: translateY(16px); transition: opacity .6s ease, transform .6s ease; }
+  .reveal.in { opacity: 1; transform: none; }
+
+  a { color: var(--grass); }
+  :focus-visible { outline: 2px solid var(--grass); outline-offset: 3px; border-radius: 4px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { opacity: 1; transform: none; transition: none; }
+    * { scroll-behavior: auto; }
+  }
+
+  @media (max-width: 640px) {
+    .tier, .editor-rail { grid-template-columns: 1fr; }
+    .tier-label { border-right: none; border-bottom: 1px dashed var(--border); text-align: left; padding: 0 0 6px; flex-direction: row; gap: 8px; align-items: baseline; }
+  }
+</style>
+
+<div class="page">
+
+  <!-- ======================= HERO ======================= -->
+  <header class="hero reveal">
+    <div class="brand">
+      <svg class="cube" viewBox="0 0 100 100" aria-hidden="true">
+        <polygon points="50,6 92,30 50,54 8,30" fill="var(--grass)"/>
+        <polygon points="8,30 50,54 50,96 8,72" fill="var(--rock)"/>
+        <polygon points="92,30 50,54 50,96 92,72" fill="var(--ore)"/>
+      </svg>
+      <span class="brand-name">VoxelWorlds</span>
+    </div>
+    <p class="eyebrow">Engine architecture · Unreal Engine 5.8 · C++ + compute shaders</p>
+    <h1>Eleven modules that turn noise into <span class="accent">worlds</span>.</h1>
+    <p class="lead">A GPU-driven voxel terrain engine — procedural generation, three meshing algorithms, watertight LOD streaming, and hybrid rendering. Every capability lives in a small module that does one job and cooperates with the rest through interfaces, never direct coupling.</p>
+    <div class="chips">
+      <span class="chip"><b>11</b>&nbsp;modules</span>
+      <span class="chip"><b>3</b>&nbsp;meshers · CPU + GPU</span>
+      <span class="chip"><b>3</b>&nbsp;world modes</span>
+      <span class="chip">GPU-first pipeline</span>
+      <span class="chip">watertight LOD seams</span>
+    </div>
+  </header>
+
+  <!-- ======================= FIG A — MODULE MAP ======================= -->
+  <section class="figure reveal">
+    <div class="fig-head">
+      <span class="fig-tag">Fig. A — Dependency layers</span>
+      <h2>The module map</h2>
+      <p>Eleven modules stacked like terrain strata: each tier is built only on the ones beneath it, and dependency arrows never point upward. The stripe on every card marks its layer; <code style="font-family:var(--f-mono);color:var(--ore)">HUB</code> is the coordinator that wires the domain systems together.</p>
+    </div>
+
+    <div class="plate">
+      <div class="strata">
+
+        <!-- Tier: integration -->
+        <div class="tier">
+          <div class="tier-label"><b>Surface</b><span>integration</span></div>
+          <div class="tier-cards">
+            <div class="mod" style="--cat:var(--water)">
+              <div class="mod-top"><span class="mod-name">VoxelWorlds</span></div>
+              <div class="mod-role">Plugin entry / thin integration facade over the runtime modules.</div>
+              <div class="badges"><span class="badge phase">Default</span></div>
+              <div class="mod-dep">← Core</div>
+            </div>
+            <div class="mod" style="--cat:var(--water)">
+              <div class="mod-top"><span class="mod-name">VoxelPCG</span></div>
+              <div class="mod-role">Runtime PCG decoration — biome-driven scatter through UE's PCG graph.</div>
+              <div class="badges"><span class="badge phase">PostEngineInit</span></div>
+              <div class="mod-dep">← Gen · Streaming · Map · <span style="color:var(--water)">PCG</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tier: coordination -->
+        <div class="tier">
+          <div class="tier-label"><b>Coordination</b><span>streaming</span></div>
+          <div class="tier-cards">
+            <div class="mod hub" style="--cat:var(--ore)">
+              <div class="mod-top"><span class="mod-name">VoxelStreaming</span></div>
+              <div class="mod-role">Chunk manager — the coordinator. Load/unload queues, async Chaos collision, water propagation, benchmarking.</div>
+              <div class="badges"><span class="badge hub">Hub</span><span class="badge phase">PostEngineInit</span></div>
+              <div class="mod-dep">← LOD · Rendering · Gen · Meshing · Scatter</div>
+            </div>
+            <div class="mod" style="--cat:var(--ore)">
+              <div class="mod-top"><span class="mod-name">VoxelMap</span></div>
+              <div class="mod-role">Map / minimap subsystem — samples the world for a top-down view.</div>
+              <div class="badges"><span class="badge phase">PostEngineInit</span></div>
+              <div class="mod-dep">← Gen · Streaming</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tier: domain systems -->
+        <div class="tier">
+          <div class="tier-label"><b>Domain</b><span>systems</span></div>
+          <div class="tier-cards">
+            <div class="mod" style="--cat:var(--grass)">
+              <div class="mod-top"><span class="mod-name">VoxelGeneration</span></div>
+              <div class="mod-role">Noise, world modes, biomes, caves, ore, tree injection.</div>
+              <div class="badges"><span class="badge gpu">GPU</span><span class="badge phase">PostConfigInit</span></div>
+              <div class="mod-dep">← Core</div>
+            </div>
+            <div class="mod" style="--cat:var(--grass)">
+              <div class="mod-top"><span class="mod-name">VoxelMeshing</span></div>
+              <div class="mod-role">Cubic / Marching Cubes / Dual Contouring meshers + water mesher.</div>
+              <div class="badges"><span class="badge gpu">GPU</span><span class="badge phase">PostConfigInit</span></div>
+              <div class="mod-dep">← Core</div>
+            </div>
+            <div class="mod" style="--cat:var(--grass)">
+              <div class="mod-top"><span class="mod-name">VoxelRendering</span></div>
+              <div class="mod-role">Scene proxy, custom vertex-factory renderer + PMC fallback.</div>
+              <div class="badges"><span class="badge gpu">GPU</span><span class="badge phase">PostConfigInit</span></div>
+              <div class="mod-dep">← Core</div>
+            </div>
+            <div class="mod" style="--cat:var(--grass)">
+              <div class="mod-top"><span class="mod-name">VoxelLOD</span></div>
+              <div class="mod-role">Pluggable LOD strategy — distance bands with hysteresis.</div>
+              <div class="badges"><span class="badge phase">Default</span></div>
+              <div class="mod-dep">← Core · Gen</div>
+            </div>
+            <div class="mod" style="--cat:var(--grass)">
+              <div class="mod-top"><span class="mod-name">VoxelScatter</span></div>
+              <div class="mod-role">Foliage / scatter placement + HISM instanced rendering.</div>
+              <div class="badges"><span class="badge phase">PostEngineInit</span></div>
+              <div class="mod-dep">← Core · Gen · Meshing</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tier: foundation -->
+        <div class="tier">
+          <div class="tier-label"><b>Foundation</b><span>bedrock</span></div>
+          <div class="tier-cards">
+            <div class="mod" style="--cat:var(--rock)">
+              <div class="mod-top"><span class="mod-name">VoxelCore</span></div>
+              <div class="mod-role">Shared data structures, world configuration, material + biome registries, and the edit-layer manager. Zero dependencies on other voxel modules — the whole engine rests on it.</div>
+              <div class="badges"><span class="badge phase">Default</span></div>
+              <div class="mod-dep">← (no internal dependencies)</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- editor rail -->
+      <div class="editor-rail">
+        <div class="tier-label"><b>Tooling</b><span>editor</span></div>
+        <div class="editor-aside" style="--cat:var(--edit)">
+          <span class="mod-name">VoxelWorldsEditor</span>
+          <span class="tag">EDITOR TARGET ONLY — stripped from shipping builds</span>
+          <span class="mod-role" style="flex:1 1 220px">Field-visualization panel &amp; preview actor; samples the runtime modules for authoring. Depends downward only — never the reverse.</span>
+        </div>
+      </div>
+
+      <!-- legend -->
+      <div class="legend">
+        <span class="lg"><span class="sw" style="--c:var(--rock)"></span>Foundation</span>
+        <span class="lg"><span class="sw" style="--c:var(--grass)"></span>Domain system&nbsp;·&nbsp;<span style="color:var(--compute)">GPU = compute</span></span>
+        <span class="lg"><span class="sw" style="--c:var(--ore)"></span>Coordination</span>
+        <span class="lg"><span class="sw" style="--c:var(--water)"></span>Integration</span>
+        <span class="lg"><span class="sw" style="--c:var(--edit)"></span>Editor-only</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= FIG B — PIPELINE ======================= -->
+  <section class="figure reveal">
+    <div class="fig-head">
+      <span class="fig-tag">Fig. B — Chunk lifecycle</span>
+      <h2>From viewer to visible terrain</h2>
+      <p>The path a single chunk travels every time the camera moves far enough to change what's on screen. The coordinator (<span class="mono" style="color:var(--ore)">VoxelStreaming</span>) drives it; the three green stages run on the GPU, each with a CPU fallback.</p>
+    </div>
+
+    <div class="plate">
+      <div class="pipe-grid">
+
+        <div class="stage">
+          <span class="stage-idx">01</span>
+          <span class="stage-title">Camera moves</span>
+          <span class="stage-desc">Viewer crosses a chunk boundary and the streaming tick wakes up.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--ore)"></span><span class="nm">VoxelStreaming</span></span>
+        </div>
+
+        <div class="stage">
+          <span class="stage-idx">02</span>
+          <span class="stage-title">Pick chunks</span>
+          <span class="stage-desc">Distance bands choose the load / unload set and a LOD level per chunk.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelLOD</span></span>
+        </div>
+
+        <div class="stage gpu">
+          <span class="gpu-tag">GPU · CPU fallback</span>
+          <span class="stage-idx">03</span>
+          <span class="stage-title">Generate voxels</span>
+          <span class="stage-desc">Noise → world mode → biome → caves → ore → water flags, into a packed <code style="font-family:var(--f-mono)">FVoxelData</code> grid.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelGeneration</span></span>
+        </div>
+
+        <div class="stage">
+          <span class="stage-idx">04</span>
+          <span class="stage-title">Apply edits</span>
+          <span class="stage-desc">Sparse add / subtract / paint overlay is merged over the generated field.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--rock)"></span><span class="nm">VoxelCore · EditLayer</span></span>
+        </div>
+
+        <div class="stage gpu">
+          <span class="gpu-tag">GPU · CPU fallback</span>
+          <span class="stage-idx">05</span>
+          <span class="stage-title">Mesh</span>
+          <span class="stage-desc">Cubic, Marching Cubes, or Dual Contouring — plus a watertight LOD-seam weld at chunk borders.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelMeshing</span></span>
+        </div>
+
+        <div class="stage gpu">
+          <span class="gpu-tag">GPU · CPU fallback</span>
+          <span class="stage-idx">06</span>
+          <span class="stage-title">Render + collide</span>
+          <span class="stage-desc">GPU-driven custom vertex factory (or PMC), while collision cooks async on Chaos.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelRendering + Streaming</span></span>
+        </div>
+
+        <div class="stage">
+          <span class="stage-idx">07</span>
+          <span class="stage-title">Decorate</span>
+          <span class="stage-desc">Foliage &amp; trees, water tiles, minimap, and runtime PCG scatter fill the chunk in.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--water)"></span><span class="nm">Scatter · Map · PCG</span></span>
+        </div>
+
+        <div class="pipe-end">
+          <span class="big">Visible world</span>
+          <span class="sm">on screen</span>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= FIG C — FEATURE MAP ======================= -->
+  <section class="figure reveal">
+    <div class="fig-head">
+      <span class="fig-tag">Fig. C — Capability map</span>
+      <h2>What the engine ships</h2>
+      <p>The shipping feature surface, grouped by system. Colour follows the same layer coding as the module map.</p>
+    </div>
+
+    <div class="feat-grid">
+
+      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg></span>
+          <h3>Meshing</h3>
+        </div>
+        <ul>
+          <li><b>Cubic</b> — greedy, face-culled, ambient occlusion</li>
+          <li><b>Marching Cubes</b> — smooth isosurface + geomorph seams</li>
+          <li><b>Dual Contouring</b> — sharp features via QEF solver</li>
+          <li>Each with a <b>CPU and GPU compute</b> path</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 17c3-4 5-4 7 0s5 4 7-1M3 11c3-4 5-4 7 0s5 4 7-1"/></svg></span>
+          <h3>Generation</h3>
+        </div>
+        <ul>
+          <li>CPU / GPU noise — Perlin, Simplex, Cellular, Voronoi</li>
+          <li>FBM fractals + domain warping</li>
+          <li>Caves — cheese, spaghetti, noodle layers</li>
+          <li>Ore veins &amp; column-scan water fill</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg></span>
+          <h3>World modes</h3>
+        </div>
+        <ul>
+          <li><b>Infinite plane</b> — heightfield, extends forever</li>
+          <li><b>Island / bowl</b> — radial falloff, ocean level</li>
+          <li><b>Spherical planet</b> — radius-based, curved</li>
+          <li>Swappable via <code>IVoxelWorldMode</code></li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="14" y="6" width="6" height="6" rx="1"/><rect x="4" y="15" width="5" height="5" rx="1"/></svg></span>
+          <h3>LOD &amp; seams</h3>
+        </div>
+        <ul>
+          <li>Pluggable strategy via <code>IVoxelLODStrategy</code></li>
+          <li>Distance bands + refine/coarsen hysteresis</li>
+          <li>Vertex-shader LOD morphing</li>
+          <li><b>Watertight</b> seams (GPU ↔ CPU parity)</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></span>
+          <h3>Rendering</h3>
+        </div>
+        <ul>
+          <li>GPU-driven custom vertex factory</li>
+          <li>ProceduralMeshComponent fallback for tools</li>
+          <li>Runtime Virtual Texture integration</li>
+          <li>Second-pass water tile rendering</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--ore);--cat-bg:var(--ore-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="1.6" fill="currentColor"/><circle cx="15" cy="12" r="1.6" fill="currentColor"/><circle cx="10" cy="18" r="1.6" fill="currentColor"/></svg></span>
+          <h3>Streaming</h3>
+        </div>
+        <ul>
+          <li>Distance-based load / unload queues</li>
+          <li>Async mesh generation + stale-cull</li>
+          <li>Async Chaos collision cooking</li>
+          <li>Thrash instrumentation + benchmark</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--rock);--cat-bg:var(--rock-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span>
+          <h3>Editing</h3>
+        </div>
+        <ul>
+          <li>Sparse edit-layer overlay</li>
+          <li>Add / subtract / paint brushes</li>
+          <li>Discrete block editing + undo/redo</li>
+          <li>Binary persistence</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--rock);--cat-bg:var(--rock-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+          <h3>Materials</h3>
+        </div>
+        <ul>
+          <li>Material registry — up to 256 types</li>
+          <li>Texture-array atlas (triplanar / cubic)</li>
+          <li>Unified <code>M_VoxelMaster</code></li>
+          <li>Per-quad materials at borders</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22V12M12 12C12 7 9 4 5 4c0 5 3 8 7 8zM12 10c0-4 3-7 7-7 0 4-3 7-7 7z"/></svg></span>
+          <h3>Scatter &amp; foliage</h3>
+        </div>
+        <ul>
+          <li>Biome-driven placement</li>
+          <li>HISM / ISM instanced rendering</li>
+          <li>Deterministic cross-chunk tree injection</li>
+          <li>Edit-aware cleanup</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--ore);--cat-bg:var(--ore-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3 3 6v15l6-3 6 3 6-3V3l-6 3-6-3z"/><path d="M9 3v15M15 6v15"/></svg></span>
+          <h3>Map</h3>
+        </div>
+        <ul>
+          <li>Map / minimap subsystem</li>
+          <li>Samples world height &amp; biome</li>
+          <li>Blueprint-exposed queries</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--water);--cat-bg:var(--water-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h6a3 3 0 0 1 3 3v6M6 9v6"/></svg></span>
+          <h3>PCG decoration</h3>
+        </div>
+        <ul>
+          <li>Runtime PCG scatter over voxel surface</li>
+          <li>Per-biome graph dispatcher</li>
+          <li>Edit-aware surface sampler</li>
+          <li>Isolated behind the PCG plugin</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--edit);--cat-bg:var(--edit-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 3h6v6H2zM16 3h6v6h-6zM9 15h6v6H9z"/><path d="M5 9v3h14V9M12 12v3"/></svg></span>
+          <h3>Editor tools</h3>
+        </div>
+        <ul>
+          <li>Dockable field-visualization panel</li>
+          <li>8 built-in sampled fields</li>
+          <li>Field preview actor in-viewport</li>
+          <li>Stripped from shipping builds</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ======================= PRESENTATION KIT ======================= -->
+  <section class="kit reveal">
+    <div class="fig-head">
+      <span class="fig-tag">Using this in a deck</span>
+      <h2>A five-slide arc</h2>
+      <p>One way to sequence these figures so the story lands: hook, structure, motion, breadth, payoff.</p>
+    </div>
+
+    <div class="through">
+      <p><span class="q">The through-line to say out loud:</span> "The architecture is layered like the terrain it generates — bedrock at the bottom, surface systems on top, and nothing ever reaches upward." It ties the diagram's shape to the product and gives every slide the same spine.</p>
+    </div>
+
+    <div class="slides">
+      <div class="slide">
+        <span class="slide-no">Slide 1</span>
+        <h4>The hook</h4>
+        <p>One sentence + a live terrain shot: "eleven modules that turn noise into worlds." Set the scale before the structure.</p>
+        <span class="ref">use the hero line</span>
+      </div>
+      <div class="slide">
+        <span class="slide-no">Slide 2</span>
+        <h4>The structure</h4>
+        <p>The strata map. Land the one idea: small modules, interface boundaries, one hub. Point at <span class="mono">VoxelStreaming</span>.</p>
+        <span class="ref">Fig. A</span>
+      </div>
+      <div class="slide">
+        <span class="slide-no">Slide 3</span>
+        <h4>The motion</h4>
+        <p>The pipeline. Walk one chunk from camera-move to on-screen; pause on the two GPU compute stages.</p>
+        <span class="ref">Fig. B</span>
+      </div>
+      <div class="slide">
+        <span class="slide-no">Slide 4</span>
+        <h4>The breadth</h4>
+        <p>The capability map. Don't read it — let it wash over the room as proof of surface area, then highlight two favourites.</p>
+        <span class="ref">Fig. C</span>
+      </div>
+      <div class="slide">
+        <span class="slide-no">Slide 5</span>
+        <h4>The payoff</h4>
+        <p>Why the shape matters: swap a mesher or LOD strategy without touching the core; ship simple, optimise later.</p>
+        <span class="ref">design decisions</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= FOOTER ======================= -->
+  <footer class="foot reveal">
+    <p>Generated from the plugin's actual <span style="color:var(--ink-dim)">.uplugin</span> module table, every module's <span style="color:var(--ink-dim)">Build.cs</span> dependency list, and the <span style="color:var(--ink-dim)">Documentation/</span> set — not from memory. Dependency edges reflect the real build graph.</p>
+    <p>VoxelWorlds · UE 5.8 · 11 modules</p>
+  </footer>
+
+</div>
+
+<script>
+  (function () {
+    var els = document.querySelectorAll('.reveal');
+    if (!('IntersectionObserver' in window) || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      els.forEach(function (e) { e.classList.add('in'); });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
+    els.forEach(function (e) { io.observe(e); });
+  })();
+</script>
