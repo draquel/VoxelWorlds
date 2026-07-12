@@ -198,9 +198,14 @@ private:
 	 */
 	static float SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed);
 
+public:
 	/**
 	 * Calculate total cave carve density at a position from all enabled layers.
 	 * Applies depth constraints, biome scaling, and union composition (max).
+	 *
+	 * Public + static + state-free so FVoxelCaveQuery (the chunk-independent cave sampling facade)
+	 * and any gameplay/AI caller can query cave presence without a loaded chunk. Keep bit-identical
+	 * to the generation-time carving so the cave-presence heatmap matches real terrain.
 	 *
 	 * @param WorldPos World position to sample
 	 * @param DepthBelowSurface Depth below terrain surface in voxels
@@ -217,6 +222,7 @@ private:
 		int32 WorldSeed,
 		bool bIsUnderwater = false);
 
+private:
 	// ==================== Ore Vein Helpers ====================
 
 	/**
