@@ -296,10 +296,12 @@ UTexture2D* UVoxelMaterialAtlas::CreatePlaceholderTexture(FColor Color, int32 Si
 
 	// Configure texture
 	Texture->SRGB = true;
-	Texture->Filter = TF_Bilinear;
+	Texture->Filter = TF_Default;
 	Texture->CompressionSettings = TC_Default;
 #if WITH_EDITORONLY_DATA
-	Texture->MipGenSettings = TMGS_NoMipmaps;
+	// Generate a mip chain: a placeholder slice with no mips would drag the whole array
+	// down to a single mip (UpdateSourceFromSourceTextures takes the min mip count).
+	Texture->MipGenSettings = TMGS_FromTextureGroup;
 #endif
 
 	// Fill with solid color
@@ -396,7 +398,7 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 			{
 				SourceFormat = SourceTextures[i]->GetPlatformData()->PixelFormat;
 			}
-			UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Detected texture size %dx%d format %d from slot %d"),
+			UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Source textures are %dx%d, format %d (from slot %d)"),
 				*ArrayName, ActualTextureSize, ActualTextureSize, (int32)SourceFormat, i);
 			break;
 		}
@@ -461,10 +463,16 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 		return false;
 	}
 
-	// Configure array settings
-	OutArray->Filter = TF_Bilinear;
+	// Configure array settings.
+	// TF_Default (NOT TF_Bilinear) so the array inherits the World texture group's
+	// anisotropic + trilinear filtering (respects r.MaxAnisotropy). TF_Bilinear disables
+	// anisotropy and uses point mip selection, which produces crawling minification
+	// shimmer on triplanar terrain viewed at grazing angles.
+	OutArray->Filter = TF_Default;
 	OutArray->SRGB = (ArrayName != TEXT("Normal")); // Normal maps should not be sRGB
 	OutArray->LODGroup = TEXTUREGROUP_World;
+	// NOTE: MipGenSettings is (re)set AFTER UpdateSourceFromSourceTextures() below - that call
+	// force-resets it to TMGS_NoMipmaps, so setting it here would be silently overwritten.
 
 #if WITH_EDITOR
 	// In editor, we can use the source textures directly
@@ -519,9 +527,18 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Calling UpdateSourceFromSourceTextures with %d textures..."), *ArrayName, OutArray->SourceTextures.Num());
 	OutArray->UpdateSourceFromSourceTextures();
 
-	// Check dimensions after update
-	int32 ResultSizeX = OutArray->GetSizeX();
-	int32 ResultSizeY = OutArray->GetSizeY();
+	// CRITICAL: UpdateSourceFromSourceTextures() forces MipGenSettings to TMGS_NoMipmaps.
+	// Re-enable mip generation AFTER it (setting it earlier is silently overwritten) so the
+	// built array gets a full mip chain. Without this the 2048px slices are single-mip and
+	// minify into severe crawling shimmer on distant terrain, regardless of the filter.
+#if WITH_EDITORONLY_DATA
+	OutArray->MipGenSettings = TMGS_FromTextureGroup;
+#endif
+
+	// Report the array's SOURCE dimensions. GetSizeX() reads platform data that is rebuilt
+	// asynchronously by UpdateResource(), so right after the call it under-reports (e.g. 32).
+	int32 ResultSizeX = static_cast<int32>(OutArray->Source.GetSizeX());
+	int32 ResultSizeY = static_cast<int32>(OutArray->Source.GetSizeY());
 
 	if (ResultSizeX == 0 || ResultSizeY == 0)
 	{
@@ -530,10 +547,16 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	}
 	else
 	{
-		// Upload to GPU
+		// Build the platform data - this generates the full mip chain per MipGenSettings above.
 		OutArray->UpdateResource();
-		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): SUCCESS - Array dimensions: %dx%dx%d"),
-			*ArrayName, ResultSizeX, ResultSizeY, OutArray->SourceTextures.Num());
+
+		// Report reliable, editor-side facts. The platform mip count is built asynchronously
+		// and is not readable synchronously here; verify the final chain via the built asset if
+		// needed. MipGen must read 0 (TMGS_FromTextureGroup); 13 (TMGS_NoMipmaps) => shimmer.
+		UE_LOG(LogVoxelMaterialAtlas, Log,
+			TEXT("BuildSingleTextureArray(%s): SUCCESS - source %dx%dx%d, MipGen=%d (0=FromGroup good, 13=NoMipmaps bad), Filter=%d (3=Default/Aniso)"),
+			*ArrayName, ResultSizeX, ResultSizeY, OutArray->SourceTextures.Num(),
+			static_cast<int32>(OutArray->MipGenSettings), static_cast<int32>(OutArray->Filter));
 	}
 #endif
 
