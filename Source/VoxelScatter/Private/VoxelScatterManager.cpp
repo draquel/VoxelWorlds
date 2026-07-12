@@ -2078,6 +2078,14 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	{
 		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
 		{
+			// The topmost solid-air transition in a column is the open-sky surface; any
+			// transition below it necessarily has solid terrain above (a cave floor, or the
+			// ground under an overhang), so it must be classified underground. This closes the
+			// gap where ApplyUndergroundClassificationPass leaves a covered floor unflagged
+			// (ceiling < MinSolidThickness, or a cave spanning a chunk boundary) — without it,
+			// tall surface scatter (trees) lands on those floors and pokes up through the roof.
+			// Slope-safe: on a slope each column's terrain surface IS the topmost transition.
+			bool bFoundColumnTop = false;
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
 				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -2174,18 +2182,17 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
 				Point.ComputeSlopeAngle();
 
-				// Underground classification: use the air voxel's flag directly.
-				// The flag is set by cave carving (generation time) and
-				// ApplyUndergroundClassificationPass (column scan with solid
-				// thickness threshold). This replaces the old column-based
-				// heuristic that falsely flagged exposed slope faces.
-				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
+				// Underground if the cave/air flag says so (set by cave carving +
+				// ApplyUndergroundClassificationPass), OR if this is not the topmost surface in
+				// the column — a lower transition is always covered by solid terrain above.
+				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag() || bFoundColumnTop;
 
 				// Submerged surface: open water sits directly on it (water flag on the air
 				// voxel above). Underground takes precedence — a flooded cave stays underground.
 				Point.bIsUnderwater = bAirAboveIsWater && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
+				bFoundColumnTop = true;
 			}
 		}
 	}
@@ -2246,6 +2253,10 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 	{
 		for (int32 Y = 0; Y < ChunkSize; ++Y)
 		{
+			// Topmost transition in the column = open-sky surface; anything below it is
+			// covered by solid above (cave floor / under an overhang) → underground. Closes
+			// the same covered-floor gap as the smooth extractor (see ExtractSurfacePointsFromVoxelData).
+			bool bFoundColumnTop = false;
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
 				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -2303,14 +2314,15 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
 				Point.SlopeAngle = 0.0f; // Flat top face
 
-				// Use voxel underground flag directly
-				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
+				// Underground if flagged, OR if not the topmost surface in the column (covered).
+				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag() || bFoundColumnTop;
 
 				// Submerged surface: open water sits on this block face (water flag on the
 				// air voxel above). Underground takes precedence over underwater.
 				Point.bIsUnderwater = bAirAboveIsWater && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
+				bFoundColumnTop = true;
 			}
 		}
 	}

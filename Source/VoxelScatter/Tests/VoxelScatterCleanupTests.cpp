@@ -127,6 +127,37 @@ namespace VoxelScatterCleanupTestUtils
 		return Voxels;
 	}
 
+	/**
+	 * Two solid layers with an air gap (a cave) between them and NO underground flags set:
+	 * an upper terrain surface (open sky) and a lower "cave floor" that is covered by the
+	 * upper layer. Exercises the geometric "not the topmost transition in the column =
+	 * underground" rule that classifies covered floors correctly even when
+	 * ApplyUndergroundClassificationPass left them unflagged (thin/cross-chunk ceilings).
+	 */
+	static TArray<FVoxelData> MakeCoveredCaveChunk()
+	{
+		TArray<FVoxelData> Voxels;
+		Voxels.Init(FVoxelData::Air(), TestChunkSize * TestChunkSize * TestChunkSize);
+
+		auto SetSolidLayer = [&](int32 Z)
+		{
+			for (int32 Y = 0; Y < TestChunkSize; ++Y)
+			{
+				for (int32 X = 0; X < TestChunkSize; ++X)
+				{
+					Voxels[X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize] =
+						FVoxelData::Solid(EVoxelMaterial::Grass);
+				}
+			}
+		};
+
+		// Lower layer (cave floor top at Z=3); air gap Z=[4,8) with NO flags; upper terrain
+		// layer (surface top at Z=11); sky above. Assumes TestChunkSize >= 12.
+		for (int32 Z = 0; Z < 4; ++Z)  { SetSolidLayer(Z); }
+		for (int32 Z = 8; Z < 12; ++Z) { SetSolidLayer(Z); }
+		return Voxels;
+	}
+
 	/** Submit a chunk to the scatter manager as if its mesh just arrived. */
 	static void SubmitChunk(UVoxelScatterManager* Manager, const FIntVector& ChunkCoord)
 	{
@@ -542,6 +573,72 @@ bool FVoxelScatterClassificationTest::RunTest(const FString& Parameters)
 			TestEqual(FString::Printf(TEXT("%s: no points underwater"), C.Name), UnderwaterCount, 0);
 			TestEqual(FString::Printf(TEXT("%s: no points underground"), C.Name), UndergroundCount, 0);
 		}
+	}
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Covered-floor classification: a cave floor that has solid terrain above it is
+// classified underground even when no underground FLAG is set on the cave air
+// (the gap ApplyUndergroundClassificationPass leaves for thin/cross-chunk
+// ceilings). The extractor's geometric "not the topmost transition = covered"
+// rule is what prevents tall surface scatter (trees) from being placed on those
+// floors and poking up through the roof.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterCoveredFloorTest,
+	"VoxelWorlds.Scatter.Classification.CoveredFloorIsUnderground",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterCoveredFloorTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	FScatterTestHarness Harness(2);
+	const FIntVector Coord(0, 0, 0);
+
+	const FChunkMeshData EmptyMesh;
+	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeCoveredCaveChunk(), TestChunkSize, TestVoxelSize);
+
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		return Harness.Manager->GetPendingGenerationCount() == 0
+			&& Harness.Manager->GetChunkSurfaceData(Coord) != nullptr;
+	});
+	TestTrue(TEXT("Surface data extracted"), bReady);
+
+	const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(Coord);
+	if (!Surface || Surface->SurfacePoints.Num() == 0)
+	{
+		AddError(TEXT("No surface points extracted from covered-cave chunk"));
+		return true;
+	}
+
+	int32 SurfaceCount = 0;
+	int32 UndergroundCount = 0;
+	float MaxSurfaceZ = -FLT_MAX;
+	float MaxUndergroundZ = -FLT_MAX;
+	for (const FVoxelSurfacePoint& P : Surface->SurfacePoints)
+	{
+		if (P.bIsUnderground)
+		{
+			++UndergroundCount;
+			MaxUndergroundZ = FMath::Max(MaxUndergroundZ, P.Position.Z);
+		}
+		else
+		{
+			++SurfaceCount;
+			MaxSurfaceZ = FMath::Max(MaxSurfaceZ, P.Position.Z);
+		}
+	}
+
+	// The upper terrain top is open sky (surface); the lower cave floor is covered
+	// (underground) — even though no underground flag was ever set on the cave air.
+	TestTrue(TEXT("Open-sky upper surface points exist"), SurfaceCount > 0);
+	TestTrue(TEXT("Covered lower floor classified underground with no flag set"), UndergroundCount > 0);
+	if (SurfaceCount > 0 && UndergroundCount > 0)
+	{
+		TestTrue(TEXT("The underground floor sits below the open-sky surface"), MaxUndergroundZ < MaxSurfaceZ);
 	}
 
 	return true;
