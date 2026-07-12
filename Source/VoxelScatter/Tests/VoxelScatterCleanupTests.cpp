@@ -6,6 +6,7 @@
 #include "Engine/World.h"
 #include "VoxelScatterManager.h"
 #include "VoxelWorldConfiguration.h"
+#include "IVoxelWorldMode.h"
 #include "VoxelData.h"
 #include "VoxelMaterialRegistry.h"
 #include "ChunkRenderData.h"
@@ -157,6 +158,26 @@ namespace VoxelScatterCleanupTestUtils
 		for (int32 Z = 8; Z < 12; ++Z) { SetSolidLayer(Z); }
 		return Voxels;
 	}
+
+	/**
+	 * Minimal heightmap world mode that reports a fixed terrain-surface height. Lets a test chunk's
+	 * local surface sit BELOW the analytic terrain height (as if the real surface / cave roof is in a
+	 * neighboring chunk above), exercising the cross-chunk bCoveredByTerrain classification.
+	 */
+	struct FFixedHeightWorldMode : public IVoxelWorldMode
+	{
+		float Height = 0.0f;
+		explicit FFixedHeightWorldMode(float InHeight) : Height(InHeight) {}
+		virtual float GetTerrainHeightAt(float, float, const FVoxelNoiseParams&) const override { return Height; }
+		virtual bool IsHeightmapBased() const override { return true; }
+		virtual float GetDensityAt(const FVector&, int32, float) const override { return 0.0f; }
+		virtual FIntVector WorldToChunkCoord(const FVector&, int32, float) const override { return FIntVector::ZeroValue; }
+		virtual FVector ChunkCoordToWorld(const FIntVector&, int32, float, int32) const override { return FVector::ZeroVector; }
+		virtual int32 GetMinZ() const override { return -100000; }
+		virtual int32 GetMaxZ() const override { return 100000; }
+		virtual EWorldMode GetWorldModeType() const override { return EWorldMode::InfinitePlane; }
+		virtual uint8 GetMaterialAtDepth(const FVector&, float, float) const override { return 0; }
+	};
 
 	/** Submit a chunk to the scatter manager as if its mesh just arrived. */
 	static void SubmitChunk(UVoxelScatterManager* Manager, const FIntVector& ChunkCoord)
@@ -641,6 +662,113 @@ bool FVoxelScatterCoveredFloorTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("The underground floor sits below the open-sky surface"), MaxUndergroundZ < MaxSurfaceZ);
 	}
 
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Water-level classification: a terrain surface below the world water level is
+// classified underwater even when the per-voxel water flag never propagated to
+// it — keeping Surface-only scatter (e.g. trees) off submerged seabeds so it can't
+// poke up through the water. Uses config WaterLevel only (no world mode needed).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterBelowWaterTest,
+	"VoxelWorlds.Scatter.Classification.BelowWaterLevelIsUnderwater",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterBelowWaterTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	FScatterTestHarness Harness(2);
+	// Water surface far above the flat-grass chunk's ~800 surface; the grass carries NO water flag.
+	Harness.Config->bEnableWaterLevel = true;
+	Harness.Config->WaterLevel = 100000.0f;
+
+	const FIntVector Coord(0, 0, 0);
+	const FChunkMeshData EmptyMesh;
+	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		return Harness.Manager->GetPendingGenerationCount() == 0
+			&& Harness.Manager->GetChunkSurfaceData(Coord) != nullptr;
+	});
+	TestTrue(TEXT("Surface data extracted"), bReady);
+
+	const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(Coord);
+	if (!Surface || Surface->SurfacePoints.Num() == 0)
+	{
+		AddError(TEXT("No surface points extracted"));
+		return true;
+	}
+
+	int32 UnderwaterCount = 0;
+	int32 DryCount = 0;
+	int32 UndergroundCount = 0;
+	for (const FVoxelSurfacePoint& P : Surface->SurfacePoints)
+	{
+		if (P.bIsUnderground) { ++UndergroundCount; }
+		else if (P.bIsUnderwater) { ++UnderwaterCount; }
+		else { ++DryCount; }
+	}
+	TestEqual(TEXT("All submerged surface points are underwater"), UnderwaterCount, Surface->SurfacePoints.Num());
+	TestEqual(TEXT("No dry surface points below the water line"), DryCount, 0);
+	TestEqual(TEXT("Nothing classified underground"), UndergroundCount, 0);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-chunk coverage: a surface point well below the ANALYTIC terrain height at
+// its (X,Y) is covered by terrain living in a neighboring chunk, so it is
+// classified underground even though it is the topmost transition in its own chunk
+// and carries no underground flag. This is the fix for surface scatter on
+// cross-chunk cave floors poking up through the terrain / water above.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterCrossChunkCoverTest,
+	"VoxelWorlds.Scatter.Classification.CoveredByNeighborChunkIsUnderground",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	// Declared before the harness so it outlives the manager that holds a raw pointer to it.
+	// Analytic terrain surface far ABOVE this chunk's local ~800 surface: the chunk is effectively
+	// buried, so its surface points are covered by terrain in the chunk(s) above.
+	FFixedHeightWorldMode WorldMode(100000.0f);
+
+	FScatterTestHarness Harness(2);
+	Harness.Manager->SetWorldMode(&WorldMode);
+
+	const FIntVector Coord(0, 0, 0);
+	const FChunkMeshData EmptyMesh;
+	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		return Harness.Manager->GetPendingGenerationCount() == 0
+			&& Harness.Manager->GetChunkSurfaceData(Coord) != nullptr;
+	});
+	TestTrue(TEXT("Surface data extracted"), bReady);
+
+	const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(Coord);
+	if (!Surface || Surface->SurfacePoints.Num() == 0)
+	{
+		AddError(TEXT("No surface points extracted"));
+		return true;
+	}
+
+	int32 UndergroundCount = 0;
+	for (const FVoxelSurfacePoint& P : Surface->SurfacePoints)
+	{
+		if (P.bIsUnderground) { ++UndergroundCount; }
+	}
+	// Every topmost-in-chunk surface point is below the analytic surface → covered → underground.
+	TestEqual(TEXT("Points below the analytic terrain surface are classified underground"),
+		UndergroundCount, Surface->SurfacePoints.Num());
+
+	Harness.Manager->SetWorldMode(nullptr);
 	return true;
 }
 

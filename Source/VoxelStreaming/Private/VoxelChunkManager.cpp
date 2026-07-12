@@ -823,6 +823,9 @@ void UVoxelChunkManager::Initialize(
 		ScatterManager->Initialize(Configuration, GetWorld());
 		ScatterManager->SetScatterRadius(Configuration->ScatterRadius);
 		ScatterManager->SetWorldSeed(static_cast<uint32>(Configuration->WorldSeed));
+		// Give scatter the analytic world mode so surface extraction can classify points covered by
+		// terrain in a neighboring chunk (cross-chunk cave floors / overhangs) as underground.
+		ScatterManager->SetWorldMode(WorldMode.Get());
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
 			Configuration->ScatterRadius);

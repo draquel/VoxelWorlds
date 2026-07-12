@@ -11,7 +11,27 @@
 
 class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
+class IVoxelWorldMode;
 struct FChunkMeshData;
+
+/**
+ * Global signals used to classify extracted surface points as underground / underwater — the things a
+ * single chunk's voxel data cannot know on its own. A surface point can be covered by terrain that lives
+ * in a NEIGHBORING chunk (a cave floor, or ground under an overhang, whose roof is in the chunk above),
+ * or it can be submerged; per-chunk data can't see either. These provide the cross-chunk answers: the
+ * analytic terrain-height query (solid terrain above the point → underground) and the world water level.
+ */
+struct FScatterExtractionContext
+{
+	/** World mode for the analytic terrain-height query. Null = coverage check skipped. Non-owning. */
+	const IVoxelWorldMode* WorldMode = nullptr;
+	/** Noise params for IVoxelWorldMode::GetTerrainHeightAt. */
+	FVoxelNoiseParams NoiseParams;
+	/** Whether the world has a water level (enables classifying below-water surfaces as underwater). */
+	bool bEnableWaterLevel = false;
+	/** World Z of the water surface — points below this that are not underground are underwater. */
+	float WaterLevel = 0.0f;
+};
 
 /**
  * Delegate fired when scatter data is ready for a chunk.
@@ -263,6 +283,14 @@ public:
 	 */
 	void SetWorldSeed(uint32 Seed);
 
+	/**
+	 * Provide the world mode for the analytic terrain-height coverage check during surface extraction.
+	 * Lets the extractor classify surface points that are covered by terrain in a neighboring chunk
+	 * (cross-chunk cave floors / overhangs) as underground. Non-owning — the ChunkManager owns the world
+	 * mode and outlives this manager. Optional: when null, only the per-chunk/flag classification is used.
+	 */
+	void SetWorldMode(const IVoxelWorldMode* InWorldMode) { WorldMode = InWorldMode; }
+
 	// ==================== Debug ====================
 
 	/**
@@ -360,6 +388,12 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UWorld> CachedWorld;
 
+	/** World mode for analytic terrain-height coverage queries during extraction (non-owning; see SetWorldMode). */
+	const IVoxelWorldMode* WorldMode = nullptr;
+
+	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */
+	FScatterExtractionContext MakeExtractionContext() const;
+
 	/** Whether the manager is initialized */
 	bool bIsInitialized = false;
 
@@ -423,6 +457,7 @@ protected:
 		float VoxelSize,
 		float SurfacePointSpacing,
 		const TArray<FClearedScatterVolume>& ClearedVolumes,
+		const FScatterExtractionContext& Context,
 		FChunkSurfaceData& OutSurfaceData);
 
 	/**
@@ -437,6 +472,7 @@ protected:
 		int32 ChunkSize,
 		float VoxelSize,
 		const TArray<FClearedScatterVolume>& ClearedVolumes,
+		const FScatterExtractionContext& Context,
 		FChunkSurfaceData& OutSurfaceData);
 
 	// ==================== Debug ====================
@@ -604,13 +640,15 @@ protected:
 	};
 	TMap<FIntVector, FGPUExtractionVoxelInfo> GPUExtractionPendingVoxelInfo;
 
-	/** Classify GPU-extracted surface points as underground and/or underwater using voxel data */
+	/** Classify GPU-extracted surface points as underground and/or underwater using voxel data plus
+	 *  the analytic terrain height + water level from the context (cross-chunk coverage + submerged seabeds). */
 	static void ClassifySurfacePointsUnderground(
 		TArray<FVoxelSurfacePoint>& SurfacePoints,
 		const TArray<FVoxelData>& VoxelData,
 		const FVector& ChunkWorldOrigin,
 		int32 ChunkSize,
-		float VoxelSize);
+		float VoxelSize,
+		const FScatterExtractionContext& Context);
 
 	/** Process completed GPU extractions and launch placement on thread pool */
 	void ProcessCompletedGPUExtractions();
