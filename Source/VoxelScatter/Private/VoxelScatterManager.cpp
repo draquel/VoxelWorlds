@@ -1075,154 +1075,6 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 	}
 }
 
-void UVoxelScatterManager::PerformDistanceCleanup()
-{
-	if (!Configuration || ScatterDataCache.Num() == 0)
-	{
-		return;
-	}
-
-	// Collect chunks that need cleanup (can't modify ScatterDataCache while iterating)
-	struct FChunkCleanupInfo
-	{
-		FIntVector ChunkCoord;
-		TArray<int32> ScatterTypesToRemove;
-	};
-	TArray<FChunkCleanupInfo> ChunksToClean;
-
-	for (auto& Pair : ScatterDataCache)
-	{
-		const FIntVector& ChunkCoord = Pair.Key;
-		const FChunkScatterData& ScatterData = Pair.Value;
-
-		if (!ScatterData.bIsValid || ScatterData.SpawnPoints.Num() == 0)
-		{
-			continue;
-		}
-
-		// Skip chunks that are still being processed asynchronously
-		if (AsyncScatterInProgress.Contains(ChunkCoord) || PendingQueueSet.Contains(ChunkCoord))
-		{
-			continue;
-		}
-
-		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
-			FVector(Configuration->GetChunkWorldSize() * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
-
-		// Check each active scatter type in this chunk
-		TSet<int32> ActiveTypes;
-		for (const FScatterSpawnPoint& Point : ScatterData.SpawnPoints)
-		{
-			ActiveTypes.Add(Point.ScatterTypeID);
-		}
-
-		TArray<int32> OutOfRangeTypes;
-		for (int32 TypeID : ActiveTypes)
-		{
-			const FScatterDefinition* Def = GetScatterDefinition(TypeID);
-			if (!Def)
-			{
-				continue;
-			}
-
-			// SpawnDistance=0 means use global ScatterRadius (matches chunk streaming)
-			if (Def->SpawnDistance <= 0.0f)
-			{
-				continue; // These clean up naturally with chunk unloading
-			}
-
-			// Apply hysteresis: remove at SpawnDistance * (1 + Hysteresis)
-			const float RemovalDistance = Def->SpawnDistance * (1.0f + DistanceCleanupHysteresis);
-			if (ChunkDistance > RemovalDistance)
-			{
-				OutOfRangeTypes.Add(TypeID);
-			}
-		}
-
-		if (OutOfRangeTypes.Num() > 0)
-		{
-			FChunkCleanupInfo Info;
-			Info.ChunkCoord = ChunkCoord;
-			Info.ScatterTypesToRemove = MoveTemp(OutOfRangeTypes);
-			ChunksToClean.Add(MoveTemp(Info));
-		}
-	}
-
-	if (ChunksToClean.Num() == 0)
-	{
-		return;
-	}
-
-	// Perform cleanup
-	int32 TotalTypesRemoved = 0;
-	int32 TotalPointsRemoved = 0;
-
-	for (const FChunkCleanupInfo& Info : ChunksToClean)
-	{
-		FChunkScatterData* ScatterData = ScatterDataCache.Find(Info.ChunkCoord);
-		if (!ScatterData)
-		{
-			continue;
-		}
-
-		// Build set for fast lookup
-		TSet<int32> RemoveSet;
-		for (int32 TypeID : Info.ScatterTypesToRemove)
-		{
-			RemoveSet.Add(TypeID);
-		}
-
-		// Remove spawn points for out-of-range types
-		const int32 PointsBefore = ScatterData->SpawnPoints.Num();
-		ScatterData->SpawnPoints.RemoveAll([&RemoveSet](const FScatterSpawnPoint& Point)
-		{
-			return RemoveSet.Contains(Point.ScatterTypeID);
-		});
-		const int32 PointsRemoved = PointsBefore - ScatterData->SpawnPoints.Num();
-		TotalPointsRemoved += PointsRemoved;
-
-		// Clear completion tracking for removed types so they can regenerate
-		TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(Info.ChunkCoord);
-		if (CompletedTypes)
-		{
-			for (int32 TypeID : Info.ScatterTypesToRemove)
-			{
-				CompletedTypes->Remove(TypeID);
-			}
-		}
-
-		// Release instances for out-of-range types back to the pool
-		// Instances are zero-scaled (hidden) — no rebuild needed
-		if (ScatterRenderer && ScatterRenderer->IsInitialized())
-		{
-			for (int32 TypeID : Info.ScatterTypesToRemove)
-			{
-				ScatterRenderer->ReleaseChunkScatterType(Info.ChunkCoord, TypeID);
-			}
-		}
-
-		TotalTypesRemoved += Info.ScatterTypesToRemove.Num();
-
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Distance cleanup removed %d types (%d points)"),
-			Info.ChunkCoord.X, Info.ChunkCoord.Y, Info.ChunkCoord.Z,
-			Info.ScatterTypesToRemove.Num(), PointsRemoved);
-
-		// If all spawn points removed, clean up the empty scatter data
-		if (ScatterData->SpawnPoints.Num() == 0)
-		{
-			ScatterDataCache.Remove(Info.ChunkCoord);
-			SurfaceDataCache.Remove(Info.ChunkCoord);
-		}
-	}
-
-	if (TotalTypesRemoved > 0)
-	{
-		UE_LOG(LogVoxelScatter, Log, TEXT("Distance cleanup: %d chunks, %d types, %d points removed"),
-			ChunksToClean.Num(), TotalTypesRemoved, TotalPointsRemoved);
-	}
-}
-
 void UVoxelScatterManager::PerformDistanceSpawn()
 {
 	if (!Configuration || SurfaceDataCache.Num() == 0)
@@ -1825,9 +1677,12 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 
 		// Append or create scatter/surface data
 		FChunkScatterData* ExistingScatter = ScatterDataCache.Find(Result.ChunkCoord);
-		if (ExistingScatter && ExistingScatter->bIsValid)
+		const bool bSupplementalPass = (ExistingScatter && ExistingScatter->bIsValid);
+		if (bSupplementalPass)
 		{
-			// Supplemental pass: append new spawn points to existing data
+			// Supplemental pass: append new spawn points to existing data. CompletedScatterTypes
+			// guarantees this pass only generated types NOT already on the chunk, so the render
+			// update below is append-only and never disturbs existing instances.
 			ExistingScatter->SpawnPoints.Append(Result.ScatterData.SpawnPoints);
 
 			// Update surface data with the better LOD mesh if applicable
@@ -1852,10 +1707,22 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 		TotalSpawnPointsGenerated += SpawnCount;
 		++TotalChunksProcessed;
 
-		// Update HISM instances (normal chunk generation path — full update)
+		// Update HISM instances. A first pass adds the whole chunk via the deferred-add budget;
+		// a supplemental pass appends ONLY the newly generated points, leaving every existing
+		// instance (this chunk and all others) in place. Routing supplemental updates through
+		// AddSupplementalInstances instead of UpdateChunkInstances is what prevents a per-chunk
+		// streaming update from triggering a world-wide per-type rebuild — the cause of the
+		// "everything blinks out and streams back" refresh flash.
 		if (ScatterRenderer && ScatterRenderer->IsInitialized())
 		{
-			ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, ScatterDataCache[Result.ChunkCoord]);
+			if (bSupplementalPass)
+			{
+				ScatterRenderer->AddSupplementalInstances(Result.ChunkCoord, Result.ScatterData);
+			}
+			else
+			{
+				ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, ScatterDataCache[Result.ChunkCoord]);
+			}
 		}
 
 		OnChunkScatterReady.Broadcast(Result.ChunkCoord, SpawnCount);
@@ -2146,6 +2013,21 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 			Point.bIsUnderground = true;
 			++UndergroundCount;
 		}
+		else
+		{
+			// Underwater classification: sample the voxel just above the surface point.
+			// Open water lives in air voxels flagged with the water bit (see VoxelWaterMesher).
+			// Underground takes precedence, so only non-underground points are classified here.
+			const FVector AboveLocal = (Point.Position + FVector(0.0f, 0.0f, VoxelSize * 0.5f) - ChunkWorldOrigin) / VoxelSize;
+			const int32 UX = FMath::Clamp(FMath::FloorToInt(AboveLocal.X), 0, ChunkSize - 1);
+			const int32 UY = FMath::Clamp(FMath::FloorToInt(AboveLocal.Y), 0, ChunkSize - 1);
+			const int32 UZ = FMath::Clamp(FMath::FloorToInt(AboveLocal.Z), 0, ChunkSize - 1);
+			const int32 UIdx = UX + UY * ChunkSize + UZ * SliceSize;
+			if (VoxelData[UIdx].IsAir() && VoxelData[UIdx].HasWaterFlag())
+			{
+				Point.bIsUnderwater = true;
+			}
+		}
 	}
 
 	UE_LOG(LogVoxelScatter, Log, TEXT("ClassifyUnderground: %d/%d surface points marked underground"),
@@ -2209,6 +2091,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				// Found solid voxel — check if there's air above
 				float AirDensity = 0.0f; // Above chunk boundary = air
 				bool bAirAboveIsUnderground = false;
+				bool bAirAboveIsWater = false;
 				if (Z + 1 < ChunkSize)
 				{
 					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
@@ -2219,6 +2102,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 					}
 					AirDensity = static_cast<float>(AboveVoxel.Density);
 					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
+					bAirAboveIsWater = AboveVoxel.HasWaterFlag();
 				}
 
 				// Interpolate exact Z position (same formula as Marching Cubes edge interpolation)
@@ -2297,6 +2181,10 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				// heuristic that falsely flagged exposed slope faces.
 				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
 
+				// Submerged surface: open water sits directly on it (water flag on the air
+				// voxel above). Underground takes precedence — a flooded cave stays underground.
+				Point.bIsUnderwater = bAirAboveIsWater && !Point.bIsUnderground;
+
 				OutSurfaceData.SurfacePoints.Add(Point);
 			}
 		}
@@ -2370,6 +2258,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 
 				// Check air above
 				bool bAirAboveIsUnderground = false;
+				bool bAirAboveIsWater = false;
 				if (Z + 1 < ChunkSize)
 				{
 					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
@@ -2379,6 +2268,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 						continue; // Not a surface
 					}
 					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
+					bAirAboveIsWater = AboveVoxel.HasWaterFlag();
 				}
 
 				// Block face center: center of block XY, top of block Z
@@ -2415,6 +2305,10 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 
 				// Use voxel underground flag directly
 				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
+
+				// Submerged surface: open water sits on this block face (water flag on the
+				// air voxel above). Underground takes precedence over underwater.
+				Point.bIsUnderwater = bAirAboveIsWater && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
 			}

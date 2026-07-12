@@ -528,13 +528,6 @@ protected:
 	// ==================== Distance-Based Streaming ====================
 
 	/**
-	 * Remove scatter instances for definitions that have gone out of SpawnDistance range.
-	 * Called periodically from Update() to keep scatter data in sync with viewer position.
-	 * Uses hysteresis to prevent thrashing at boundaries.
-	 */
-	void PerformDistanceCleanup();
-
-	/**
 	 * Generate scatter for definitions that have come into SpawnDistance range.
 	 * Launches async tasks on the thread pool using cached surface data.
 	 * Fully decoupled from the chunk generation async pipeline — uses its own
@@ -611,7 +604,7 @@ protected:
 	};
 	TMap<FIntVector, FGPUExtractionVoxelInfo> GPUExtractionPendingVoxelInfo;
 
-	/** Classify GPU-extracted surface points as underground using voxel data */
+	/** Classify GPU-extracted surface points as underground and/or underwater using voxel data */
 	static void ClassifySurfacePointsUnderground(
 		TArray<FVoxelSurfacePoint>& SurfacePoints,
 		const TArray<FVoxelData>& VoxelData,

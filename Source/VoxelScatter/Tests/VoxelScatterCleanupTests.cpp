@@ -94,6 +94,39 @@ namespace VoxelScatterCleanupTestUtils
 		return Voxels;
 	}
 
+	/**
+	 * Flat grass slab whose air-above voxels carry the water and/or underground flags.
+	 * The surface extractor reads these flags off the air voxel directly above each column
+	 * to classify a surface point as underwater / underground.
+	 */
+	static TArray<FVoxelData> MakeFlaggedGrassChunk(bool bWater, bool bUnderground)
+	{
+		TArray<FVoxelData> Voxels;
+		Voxels.Init(FVoxelData::Air(), TestChunkSize * TestChunkSize * TestChunkSize);
+
+		const int32 SurfaceZ = TestChunkSize / 2;
+		for (int32 Z = 0; Z < TestChunkSize; ++Z)
+		{
+			for (int32 Y = 0; Y < TestChunkSize; ++Y)
+			{
+				for (int32 X = 0; X < TestChunkSize; ++X)
+				{
+					const int32 Idx = X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize;
+					if (Z < SurfaceZ)
+					{
+						Voxels[Idx] = FVoxelData::Solid(EVoxelMaterial::Grass);
+					}
+					else
+					{
+						if (bWater) { Voxels[Idx].SetWaterFlag(true); }
+						if (bUnderground) { Voxels[Idx].SetUndergroundFlag(true); }
+					}
+				}
+			}
+		}
+		return Voxels;
+	}
+
 	/** Submit a chunk to the scatter manager as if its mesh just arrived. */
 	static void SubmitChunk(UVoxelScatterManager* Manager, const FIntVector& ChunkCoord)
 	{
@@ -350,6 +383,166 @@ bool FVoxelScatterQueueDrainTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("All chunks generated scatter and the pipeline fully drained (no dropped results)"),
 		bAllGenerated);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Placement filter: FScatterDefinition::SurfaceLocationMask selects which of the
+// three surface categories (dry Surface / Underwater / Underground) a definition
+// spawns on. Categories are mutually exclusive per point; the mask opts into any
+// combination. Pure logic — no world needed.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterMaskFilterTest,
+	"VoxelWorlds.Scatter.Placement.SurfaceLocationMaskFilters",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterMaskFilterTest::RunTest(const FString& Parameters)
+{
+	// Flat top-facing point in each category (constructor computes slope 0 for an up normal,
+	// so only the surface-location mask differentiates these under a default definition).
+	auto MakePoint = [](bool bUnderground, bool bUnderwater)
+	{
+		FVoxelSurfacePoint P(FVector::ZeroVector, FVector::UpVector, /*Material=*/0, /*Biome=*/0, EVoxelFaceType::Top);
+		P.bIsUnderground = bUnderground;
+		P.bIsUnderwater = bUnderwater;
+		return P;
+	};
+	const FVoxelSurfacePoint Dry = MakePoint(false, false);
+	const FVoxelSurfacePoint Underwater = MakePoint(false, true);
+	const FVoxelSurfacePoint Underground = MakePoint(true, false);
+
+	auto DefWithMask = [](int32 Mask)
+	{
+		FScatterDefinition Def;
+		Def.SurfaceLocationMask = Mask;
+		return Def;
+	};
+
+	const int32 SurfaceBit = static_cast<int32>(EScatterSurfaceLocationFlags::Surface);
+	const int32 UnderwaterBit = static_cast<int32>(EScatterSurfaceLocationFlags::Underwater);
+	const int32 UndergroundBit = static_cast<int32>(EScatterSurfaceLocationFlags::Underground);
+
+	// Surface-only (the default mask)
+	{
+		const FScatterDefinition Def = DefWithMask(SurfaceBit);
+		TestTrue(TEXT("Surface mask accepts dry"), Def.CanSpawnAt(Dry));
+		TestFalse(TEXT("Surface mask rejects underwater"), Def.CanSpawnAt(Underwater));
+		TestFalse(TEXT("Surface mask rejects underground"), Def.CanSpawnAt(Underground));
+	}
+	// Underwater-only
+	{
+		const FScatterDefinition Def = DefWithMask(UnderwaterBit);
+		TestFalse(TEXT("Underwater mask rejects dry"), Def.CanSpawnAt(Dry));
+		TestTrue(TEXT("Underwater mask accepts underwater"), Def.CanSpawnAt(Underwater));
+		TestFalse(TEXT("Underwater mask rejects underground"), Def.CanSpawnAt(Underground));
+	}
+	// Underground-only
+	{
+		const FScatterDefinition Def = DefWithMask(UndergroundBit);
+		TestFalse(TEXT("Underground mask rejects dry"), Def.CanSpawnAt(Dry));
+		TestFalse(TEXT("Underground mask rejects underwater"), Def.CanSpawnAt(Underwater));
+		TestTrue(TEXT("Underground mask accepts underground"), Def.CanSpawnAt(Underground));
+	}
+	// Surface + Underwater (e.g. an amphibious rock)
+	{
+		const FScatterDefinition Def = DefWithMask(SurfaceBit | UnderwaterBit);
+		TestTrue(TEXT("Surface|Underwater accepts dry"), Def.CanSpawnAt(Dry));
+		TestTrue(TEXT("Surface|Underwater accepts underwater"), Def.CanSpawnAt(Underwater));
+		TestFalse(TEXT("Surface|Underwater rejects underground"), Def.CanSpawnAt(Underground));
+	}
+	// All three
+	{
+		const FScatterDefinition Def = DefWithMask(SurfaceBit | UnderwaterBit | UndergroundBit);
+		TestTrue(TEXT("All accepts dry"), Def.CanSpawnAt(Dry));
+		TestTrue(TEXT("All accepts underwater"), Def.CanSpawnAt(Underwater));
+		TestTrue(TEXT("All accepts underground"), Def.CanSpawnAt(Underground));
+	}
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Classification: the CPU voxel extractor tags each surface point as underwater
+// or underground from the water/underground flag on the air voxel above it, with
+// underground taking precedence. Drives the real async pipeline and inspects the
+// cached surface data (independent of whether any definition spawns there).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterClassificationTest,
+	"VoxelWorlds.Scatter.Classification.WaterAndUndergroundFlags",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterClassificationTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	FScatterTestHarness Harness(2);
+
+	struct FCase { FIntVector Coord; bool bWater; bool bUnderground; const TCHAR* Name; };
+	const FCase Cases[] = {
+		{ FIntVector(0, 0, 0), false, false, TEXT("dry") },
+		{ FIntVector(1, 0, 0), true,  false, TEXT("submerged") },
+		{ FIntVector(2, 0, 0), false, true,  TEXT("underground") },
+	};
+
+	for (const FCase& C : Cases)
+	{
+		const FChunkMeshData EmptyMesh;
+		Harness.Manager->OnChunkMeshDataReady(C.Coord, 0, EmptyMesh,
+			MakeFlaggedGrassChunk(C.bWater, C.bUnderground), TestChunkSize, TestVoxelSize);
+	}
+
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		if (Harness.Manager->GetPendingGenerationCount() != 0)
+		{
+			return false;
+		}
+		for (const FCase& C : Cases)
+		{
+			if (Harness.Manager->GetChunkSurfaceData(C.Coord) == nullptr)
+			{
+				return false;
+			}
+		}
+		return true;
+	});
+	TestTrue(TEXT("All classification chunks extracted surface data"), bReady);
+
+	for (const FCase& C : Cases)
+	{
+		const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(C.Coord);
+		if (!Surface || Surface->SurfacePoints.Num() == 0)
+		{
+			AddError(FString::Printf(TEXT("No surface points for %s chunk"), C.Name));
+			continue;
+		}
+
+		int32 UnderwaterCount = 0;
+		int32 UndergroundCount = 0;
+		for (const FVoxelSurfacePoint& P : Surface->SurfacePoints)
+		{
+			if (P.bIsUnderwater) { ++UnderwaterCount; }
+			if (P.bIsUnderground) { ++UndergroundCount; }
+		}
+		const int32 Total = Surface->SurfacePoints.Num();
+
+		if (C.bUnderground)
+		{
+			TestEqual(FString::Printf(TEXT("%s: all points underground"), C.Name), UndergroundCount, Total);
+			TestEqual(FString::Printf(TEXT("%s: underground wins over water"), C.Name), UnderwaterCount, 0);
+		}
+		else if (C.bWater)
+		{
+			TestEqual(FString::Printf(TEXT("%s: all points underwater"), C.Name), UnderwaterCount, Total);
+			TestEqual(FString::Printf(TEXT("%s: no points underground"), C.Name), UndergroundCount, 0);
+		}
+		else
+		{
+			TestEqual(FString::Printf(TEXT("%s: no points underwater"), C.Name), UnderwaterCount, 0);
+			TestEqual(FString::Printf(TEXT("%s: no points underground"), C.Name), UndergroundCount, 0);
+		}
+	}
 
 	return true;
 }
