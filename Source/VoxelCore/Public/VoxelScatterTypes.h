@@ -11,7 +11,11 @@ class UStaticMesh;
 class UTexture2D;
 class UMaterialInterface;
 
-/** Where a scatter type can spawn relative to the terrain surface */
+/**
+ * DEPRECATED — retained only so existing assets can be migrated in
+ * UVoxelScatterConfiguration::PostLoad. Superseded by EScatterSurfaceLocationFlags,
+ * which lets a scatter type opt into any combination of surface categories.
+ */
 UENUM(BlueprintType)
 enum class EScatterSurfaceLocation : uint8
 {
@@ -22,6 +26,31 @@ enum class EScatterSurfaceLocation : uint8
 	/** Only spawn underground (caves, enclosed spaces) */
 	UndergroundOnly UMETA(DisplayName = "Underground Only")
 };
+
+/**
+ * Which surface categories a scatter type may spawn on, as an independent bitmask.
+ *
+ * Every surface point falls into exactly one category, chosen by precedence
+ * Underground > Underwater > Surface (see FVoxelSurfacePoint classification). A
+ * definition opts into any combination of these, so e.g. a rock can be allowed on
+ * both dry land and underwater, or a mushroom restricted to underground only.
+ *
+ * Underwater/Underground classification depends on the water/cave systems: when the
+ * world has no water level, no point is ever Underwater, so those flags are simply inert.
+ */
+UENUM(BlueprintType, meta = (Bitflags, UseEnumValuesAsMaskValuesInEditor = "true"))
+enum class EScatterSurfaceLocationFlags : uint8
+{
+	/** No categories (required 0-entry for default-initialized bitmask properties) */
+	None        = 0 UMETA(Hidden),
+	/** Dry land: open-sky surface at or above the water level */
+	Surface     = 0x01 UMETA(DisplayName = "Surface (dry land)"),
+	/** Submerged: open-sky surface below the water level (seabeds, lakebeds) */
+	Underwater  = 0x02 UMETA(DisplayName = "Underwater"),
+	/** Underground: cave floors and enclosed voids */
+	Underground = 0x04 UMETA(DisplayName = "Underground")
+};
+ENUM_CLASS_FLAGS(EScatterSurfaceLocationFlags);
 
 /**
  * A single extracted surface point from mesh data.
@@ -58,6 +87,9 @@ struct VOXELCORE_API FVoxelSurfacePoint
 
 	/** Whether this surface point is underground (cave interior, below terrain) */
 	bool bIsUnderground = false;
+
+	/** Whether this surface point is submerged (open-sky surface below the water level) */
+	bool bIsUnderwater = false;
 
 	/** Pre-computed slope angle in degrees (0 = flat, 90 = vertical). Computed during surface extraction. */
 	float SlopeAngle = -1.0f;
@@ -287,8 +319,20 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
 	bool bTopFacesOnly = true;
 
-	/** Where this scatter type can spawn relative to terrain surface */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
+	/**
+	 * Which surface categories this scatter type may spawn on — independent toggles
+	 * for Surface (dry land), Underwater, and Underground. Enable any combination.
+	 * Defaults to dry-land surface only (matches the pre-bitmask "Surface Only" behavior).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement", meta = (Bitmask, BitmaskEnum = "/Script/VoxelCore.EScatterSurfaceLocationFlags"))
+	int32 SurfaceLocationMask = static_cast<int32>(EScatterSurfaceLocationFlags::Surface);
+
+	/**
+	 * DEPRECATED — legacy single-choice surface location. Retained (hidden) only so assets
+	 * saved before the bitmask change deserialize their old value; migrated into
+	 * SurfaceLocationMask by UVoxelScatterConfiguration::PostLoad, then reset.
+	 */
+	UPROPERTY()
 	EScatterSurfaceLocation SurfaceLocation = EScatterSurfaceLocation::SurfaceOnly;
 
 	/** Avoid placement in shadowed areas (high AO) */
@@ -456,12 +500,14 @@ struct VOXELCORE_API FScatterDefinition
 			return false;
 		}
 
-		// Check surface location filter (underground vs surface)
-		if (SurfaceLocation == EScatterSurfaceLocation::SurfaceOnly && Point.bIsUnderground)
-		{
-			return false;
-		}
-		if (SurfaceLocation == EScatterSurfaceLocation::UndergroundOnly && !Point.bIsUnderground)
+		// Check surface location filter (dry surface vs underwater vs underground).
+		// Each point falls into exactly one category by precedence (Underground >
+		// Underwater > Surface); the definition opts into any combination via the mask.
+		const EScatterSurfaceLocationFlags PointCategory =
+			Point.bIsUnderground ? EScatterSurfaceLocationFlags::Underground
+			: Point.bIsUnderwater ? EScatterSurfaceLocationFlags::Underwater
+			: EScatterSurfaceLocationFlags::Surface;
+		if ((SurfaceLocationMask & static_cast<int32>(PointCategory)) == 0)
 		{
 			return false;
 		}

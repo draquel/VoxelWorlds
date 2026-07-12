@@ -142,14 +142,6 @@ public:
 	void ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID);
 
 	/**
-	 * Release all active instances for a scatter type back to the pool.
-	 * Used by RebuildScatterType before re-adding fresh transforms.
-	 *
-	 * @param ScatterTypeID Scatter type to release all instances for
-	 */
-	void ReleaseAllForScatterType(int32 ScatterTypeID);
-
-	/**
 	 * Clear all instances from all HISM components.
 	 */
 	void ClearAllInstances();
@@ -200,14 +192,6 @@ public:
 	 * Get debug statistics string.
 	 */
 	FString GetDebugStats() const;
-
-	/**
-	 * Queue a scatter type for deferred rebuild.
-	 * Actual rebuild happens in Tick() to batch multiple chunk updates.
-	 *
-	 * @param ScatterTypeID The scatter type to queue for rebuild
-	 */
-	void QueueRebuild(int32 ScatterTypeID);
 
 protected:
 	// ==================== Internal Methods ====================
@@ -263,20 +247,6 @@ protected:
 	 */
 	TMap<int32, FHISMInstancePool> InstancePools;
 
-	/**
-	 * Rebuild a scatter type's HISM from all cached scatter data.
-	 * Clears all instances and re-adds from manager's cache.
-	 *
-	 * @param ScatterTypeID The scatter type to rebuild
-	 */
-	void RebuildScatterType(int32 ScatterTypeID);
-
-	/**
-	 * Process all pending rebuilds.
-	 * Called by Tick() or can be called manually to force immediate processing.
-	 */
-	void FlushPendingRebuilds();
-
 	// ==================== Deferred Instance Additions ====================
 
 	/** Pending instance additions queued by UpdateChunkInstances for budget-limited flushing */
@@ -294,26 +264,6 @@ protected:
 
 	/** Flush pending instance additions within the per-frame budget. Called by Tick(). */
 	void FlushPendingInstanceAdds();
-
-	// ==================== Pending Rebuilds ====================
-
-	/** Scatter types pending rebuild - processed in FlushPendingRebuilds() */
-	TSet<int32> PendingRebuildScatterTypes;
-
-	/** Maximum number of scatter types to rebuild per frame (0 = unlimited) */
-	int32 MaxRebuildsPerFrame = 0;
-
-	/** Minimum time since last viewer movement before processing rebuilds (seconds) */
-	float RebuildStationaryDelay = 0.5f;
-
-	/** Time since viewer last moved significantly */
-	float TimeSinceViewerMoved = 0.0f;
-
-	/** Last known viewer position for movement detection */
-	FVector LastViewerPosition = FVector::ZeroVector;
-
-	/** Movement threshold to consider viewer as "moving" */
-	float ViewerMovementThreshold = 50.0f;
 
 	// ==================== References ====================
 

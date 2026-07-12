@@ -823,6 +823,9 @@ void UVoxelChunkManager::Initialize(
 		ScatterManager->Initialize(Configuration, GetWorld());
 		ScatterManager->SetScatterRadius(Configuration->ScatterRadius);
 		ScatterManager->SetWorldSeed(static_cast<uint32>(Configuration->WorldSeed));
+		// Give scatter the analytic world mode so surface extraction can classify points covered by
+		// terrain in a neighboring chunk (cross-chunk cave floors / overhangs) as underground.
+		ScatterManager->SetWorldMode(WorldMode.Get());
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
 			Configuration->ScatterRadius);
@@ -4407,6 +4410,50 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 			TotalDirtied += Loaded.Num();
 		}
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.RemeshAll: re-meshing %d chunk(s) across %d manager(s)"), TotalDirtied, Managers);
+	}));
+
+// Console: voxel.Scatter.Stats
+// Dump scatter manager + renderer statistics (HISM counts, pool active/pooled/util, pending
+// adds, chunk/surface/spawn totals, memory) for perf and config profiling. Read the output
+// with unreal-mcp LogsToolset.GetLogEntries (category LogVoxelStreaming) since Claudius
+// get_output_log fails while PIE holds the log file open.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
+	TEXT("voxel.Scatter.Stats"),
+	TEXT("Log scatter manager + renderer statistics for the running game world."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+
+		int32 Managers = 0;
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			if (!CM) { continue; }
+			UVoxelScatterManager* ScatterMgr = CM->GetScatterManager();
+			if (!ScatterMgr) { continue; }
+			++Managers;
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats:\n%s"), *ScatterMgr->GetDebugStats());
+		}
+		if (Managers == 0)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats: no UVoxelChunkManager with a scatter manager found"));
+		}
 	}));
 
 // ==================== Queue Re-Prioritization ====================

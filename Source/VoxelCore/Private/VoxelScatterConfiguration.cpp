@@ -65,6 +65,47 @@ bool UVoxelScatterConfiguration::ValidateConfiguration() const
 	return bValid;
 }
 
+void UVoxelScatterConfiguration::PostLoad()
+{
+	Super::PostLoad();
+
+	// Migrate legacy single-choice SurfaceLocation → SurfaceLocationMask (bitmask).
+	// Only migrate defs whose legacy value is non-default AND whose new mask is still at
+	// its default — i.e. authored before the bitmask change and not yet re-toggled. After
+	// migrating we reset the legacy value so PostLoad is idempotent and never clobbers a
+	// later hand-edited mask (which self-heals on the next asset save).
+	const int32 DefaultMask = static_cast<int32>(EScatterSurfaceLocationFlags::Surface);
+	for (FScatterDefinition& Def : ScatterDefinitions)
+	{
+		if (Def.SurfaceLocation == EScatterSurfaceLocation::SurfaceOnly ||
+			Def.SurfaceLocationMask != DefaultMask)
+		{
+			continue;
+		}
+
+		switch (Def.SurfaceLocation)
+		{
+		case EScatterSurfaceLocation::Any:
+			Def.SurfaceLocationMask =
+				static_cast<int32>(EScatterSurfaceLocationFlags::Surface) |
+				static_cast<int32>(EScatterSurfaceLocationFlags::Underwater) |
+				static_cast<int32>(EScatterSurfaceLocationFlags::Underground);
+			break;
+		case EScatterSurfaceLocation::UndergroundOnly:
+			Def.SurfaceLocationMask = static_cast<int32>(EScatterSurfaceLocationFlags::Underground);
+			break;
+		default:
+			break;
+		}
+
+		UE_LOG(LogVoxelCore, Log, TEXT("Migrated scatter '%s' legacy SurfaceLocation -> mask 0x%02X"),
+			*Def.Name, Def.SurfaceLocationMask);
+
+		// Reset legacy value so migration does not run again for this definition.
+		Def.SurfaceLocation = EScatterSurfaceLocation::SurfaceOnly;
+	}
+}
+
 #if WITH_EDITOR
 void UVoxelScatterConfiguration::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {

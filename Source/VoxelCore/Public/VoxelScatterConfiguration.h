@@ -67,6 +67,9 @@ public:
 	 */
 	bool ValidateConfiguration() const;
 
+	/** Migrate legacy per-definition SurfaceLocation enum values into SurfaceLocationMask. */
+	virtual void PostLoad() override;
+
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif

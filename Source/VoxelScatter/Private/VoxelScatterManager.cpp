@@ -6,6 +6,7 @@
 #include "VoxelSurfaceExtractor.h"
 #include "VoxelScatterPlacement.h"
 #include "VoxelWorldConfiguration.h"
+#include "IVoxelWorldMode.h"
 #include "ChunkRenderData.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeRegistry.h"
@@ -1075,154 +1076,6 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 	}
 }
 
-void UVoxelScatterManager::PerformDistanceCleanup()
-{
-	if (!Configuration || ScatterDataCache.Num() == 0)
-	{
-		return;
-	}
-
-	// Collect chunks that need cleanup (can't modify ScatterDataCache while iterating)
-	struct FChunkCleanupInfo
-	{
-		FIntVector ChunkCoord;
-		TArray<int32> ScatterTypesToRemove;
-	};
-	TArray<FChunkCleanupInfo> ChunksToClean;
-
-	for (auto& Pair : ScatterDataCache)
-	{
-		const FIntVector& ChunkCoord = Pair.Key;
-		const FChunkScatterData& ScatterData = Pair.Value;
-
-		if (!ScatterData.bIsValid || ScatterData.SpawnPoints.Num() == 0)
-		{
-			continue;
-		}
-
-		// Skip chunks that are still being processed asynchronously
-		if (AsyncScatterInProgress.Contains(ChunkCoord) || PendingQueueSet.Contains(ChunkCoord))
-		{
-			continue;
-		}
-
-		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
-			FVector(Configuration->GetChunkWorldSize() * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
-
-		// Check each active scatter type in this chunk
-		TSet<int32> ActiveTypes;
-		for (const FScatterSpawnPoint& Point : ScatterData.SpawnPoints)
-		{
-			ActiveTypes.Add(Point.ScatterTypeID);
-		}
-
-		TArray<int32> OutOfRangeTypes;
-		for (int32 TypeID : ActiveTypes)
-		{
-			const FScatterDefinition* Def = GetScatterDefinition(TypeID);
-			if (!Def)
-			{
-				continue;
-			}
-
-			// SpawnDistance=0 means use global ScatterRadius (matches chunk streaming)
-			if (Def->SpawnDistance <= 0.0f)
-			{
-				continue; // These clean up naturally with chunk unloading
-			}
-
-			// Apply hysteresis: remove at SpawnDistance * (1 + Hysteresis)
-			const float RemovalDistance = Def->SpawnDistance * (1.0f + DistanceCleanupHysteresis);
-			if (ChunkDistance > RemovalDistance)
-			{
-				OutOfRangeTypes.Add(TypeID);
-			}
-		}
-
-		if (OutOfRangeTypes.Num() > 0)
-		{
-			FChunkCleanupInfo Info;
-			Info.ChunkCoord = ChunkCoord;
-			Info.ScatterTypesToRemove = MoveTemp(OutOfRangeTypes);
-			ChunksToClean.Add(MoveTemp(Info));
-		}
-	}
-
-	if (ChunksToClean.Num() == 0)
-	{
-		return;
-	}
-
-	// Perform cleanup
-	int32 TotalTypesRemoved = 0;
-	int32 TotalPointsRemoved = 0;
-
-	for (const FChunkCleanupInfo& Info : ChunksToClean)
-	{
-		FChunkScatterData* ScatterData = ScatterDataCache.Find(Info.ChunkCoord);
-		if (!ScatterData)
-		{
-			continue;
-		}
-
-		// Build set for fast lookup
-		TSet<int32> RemoveSet;
-		for (int32 TypeID : Info.ScatterTypesToRemove)
-		{
-			RemoveSet.Add(TypeID);
-		}
-
-		// Remove spawn points for out-of-range types
-		const int32 PointsBefore = ScatterData->SpawnPoints.Num();
-		ScatterData->SpawnPoints.RemoveAll([&RemoveSet](const FScatterSpawnPoint& Point)
-		{
-			return RemoveSet.Contains(Point.ScatterTypeID);
-		});
-		const int32 PointsRemoved = PointsBefore - ScatterData->SpawnPoints.Num();
-		TotalPointsRemoved += PointsRemoved;
-
-		// Clear completion tracking for removed types so they can regenerate
-		TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(Info.ChunkCoord);
-		if (CompletedTypes)
-		{
-			for (int32 TypeID : Info.ScatterTypesToRemove)
-			{
-				CompletedTypes->Remove(TypeID);
-			}
-		}
-
-		// Release instances for out-of-range types back to the pool
-		// Instances are zero-scaled (hidden) — no rebuild needed
-		if (ScatterRenderer && ScatterRenderer->IsInitialized())
-		{
-			for (int32 TypeID : Info.ScatterTypesToRemove)
-			{
-				ScatterRenderer->ReleaseChunkScatterType(Info.ChunkCoord, TypeID);
-			}
-		}
-
-		TotalTypesRemoved += Info.ScatterTypesToRemove.Num();
-
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Distance cleanup removed %d types (%d points)"),
-			Info.ChunkCoord.X, Info.ChunkCoord.Y, Info.ChunkCoord.Z,
-			Info.ScatterTypesToRemove.Num(), PointsRemoved);
-
-		// If all spawn points removed, clean up the empty scatter data
-		if (ScatterData->SpawnPoints.Num() == 0)
-		{
-			ScatterDataCache.Remove(Info.ChunkCoord);
-			SurfaceDataCache.Remove(Info.ChunkCoord);
-		}
-	}
-
-	if (TotalTypesRemoved > 0)
-	{
-		UE_LOG(LogVoxelScatter, Log, TEXT("Distance cleanup: %d chunks, %d types, %d points removed"),
-			ChunksToClean.Num(), TotalTypesRemoved, TotalPointsRemoved);
-	}
-}
-
 void UVoxelScatterManager::PerformDistanceSpawn()
 {
 	if (!Configuration || SurfaceDataCache.Num() == 0)
@@ -1533,6 +1386,7 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 	}
 
 	FChunkSurfaceData SurfaceData;
+	const FScatterExtractionContext ExtractionContext = MakeExtractionContext();
 	const bool bUseCubicExtraction = Configuration && Configuration->MeshingMode == EMeshingMode::Cubic;
 	if (bUseCubicExtraction)
 	{
@@ -1543,6 +1397,7 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 			PendingData.ChunkSize,
 			PendingData.VoxelSize,
 			ClearedVolumes,
+			ExtractionContext,
 			SurfaceData
 		);
 	}
@@ -1556,6 +1411,7 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 			PendingData.VoxelSize,
 			SurfacePointSpacing,
 			ClearedVolumes,
+			ExtractionContext,
 			SurfaceData
 		);
 	}
@@ -1686,6 +1542,10 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 	}
 
 	const bool bCubicExtraction = Configuration && Configuration->MeshingMode == EMeshingMode::Cubic;
+	// Build the classification context on the game thread and capture it by value. It holds a
+	// non-owning world-mode pointer (same lifetime as the owning ChunkManager, per its async-gen
+	// pattern) plus water level and noise params.
+	const FScatterExtractionContext ExtractionContext = MakeExtractionContext();
 	TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 
 	Async(EAsyncExecution::ThreadPool,
@@ -1693,7 +1553,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 		 CapturedSurfacePointSpacing, CapturedWorldSeed, ChunkCoord,
 		 FilteredDefinitions = MoveTemp(FilteredDefinitions),
 		 CapturedClearedVolumes = MoveTemp(CapturedClearedVolumes),
-		 bCubicExtraction]() mutable
+		 ExtractionContext, bCubicExtraction]() mutable
 	{
 		// === THREAD POOL: Voxel-based surface extraction + placement ===
 
@@ -1723,6 +1583,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 				PendingData.ChunkSize,
 				PendingData.VoxelSize,
 				CapturedClearedVolumes,
+				ExtractionContext,
 				SurfaceData
 			);
 		}
@@ -1736,6 +1597,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 				PendingData.VoxelSize,
 				CapturedSurfacePointSpacing,
 				CapturedClearedVolumes,
+				ExtractionContext,
 				SurfaceData
 			);
 		}
@@ -1825,9 +1687,12 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 
 		// Append or create scatter/surface data
 		FChunkScatterData* ExistingScatter = ScatterDataCache.Find(Result.ChunkCoord);
-		if (ExistingScatter && ExistingScatter->bIsValid)
+		const bool bSupplementalPass = (ExistingScatter && ExistingScatter->bIsValid);
+		if (bSupplementalPass)
 		{
-			// Supplemental pass: append new spawn points to existing data
+			// Supplemental pass: append new spawn points to existing data. CompletedScatterTypes
+			// guarantees this pass only generated types NOT already on the chunk, so the render
+			// update below is append-only and never disturbs existing instances.
 			ExistingScatter->SpawnPoints.Append(Result.ScatterData.SpawnPoints);
 
 			// Update surface data with the better LOD mesh if applicable
@@ -1852,10 +1717,22 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 		TotalSpawnPointsGenerated += SpawnCount;
 		++TotalChunksProcessed;
 
-		// Update HISM instances (normal chunk generation path — full update)
+		// Update HISM instances. A first pass adds the whole chunk via the deferred-add budget;
+		// a supplemental pass appends ONLY the newly generated points, leaving every existing
+		// instance (this chunk and all others) in place. Routing supplemental updates through
+		// AddSupplementalInstances instead of UpdateChunkInstances is what prevents a per-chunk
+		// streaming update from triggering a world-wide per-type rebuild — the cause of the
+		// "everything blinks out and streams back" refresh flash.
 		if (ScatterRenderer && ScatterRenderer->IsInitialized())
 		{
-			ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, ScatterDataCache[Result.ChunkCoord]);
+			if (bSupplementalPass)
+			{
+				ScatterRenderer->AddSupplementalInstances(Result.ChunkCoord, Result.ScatterData);
+			}
+			else
+			{
+				ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, ScatterDataCache[Result.ChunkCoord]);
+			}
 		}
 
 		OnChunkScatterReady.Broadcast(Result.ChunkCoord, SpawnCount);
@@ -1983,15 +1860,17 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 		// Launch placement on thread pool (same as CPU async path from here)
 		const uint32 CapturedWorldSeed = WorldSeed;
 		const int32 GPUSurfacePointCount = SurfaceData.SurfacePoints.Num();
+		const FScatterExtractionContext ExtractionContext = MakeExtractionContext();
 		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 
 		Async(EAsyncExecution::ThreadPool,
 			[WeakThis, SurfaceData = MoveTemp(SurfaceData), FilteredDefinitions = MoveTemp(FilteredDefinitions),
 			 CapturedWorldSeed, ChunkCoord,
 			 CapturedVoxelData = MoveTemp(CapturedVoxelData), CapturedChunkSize, CapturedVoxelSize,
-			 CapturedChunkWorldOrigin]() mutable
+			 CapturedChunkWorldOrigin, ExtractionContext]() mutable
 		{
-			// Classify GPU-extracted surface points as underground using voxel data
+			// Classify GPU-extracted surface points as underground / underwater using voxel data plus
+			// the analytic terrain height and water level (the cross-chunk coverage + water-level fixes).
 			if (CapturedVoxelData.Num() == CapturedChunkSize * CapturedChunkSize * CapturedChunkSize && CapturedChunkSize > 0)
 			{
 				ClassifySurfacePointsUnderground(
@@ -1999,7 +1878,8 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 					CapturedVoxelData,
 					CapturedChunkWorldOrigin,
 					CapturedChunkSize,
-					CapturedVoxelSize);
+					CapturedVoxelSize,
+					ExtractionContext);
 			}
 
 			// Count underground points for diagnostic
@@ -2051,7 +1931,8 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 	const TArray<FVoxelData>& VoxelData,
 	const FVector& ChunkWorldOrigin,
 	int32 ChunkSize,
-	float VoxelSize)
+	float VoxelSize,
+	const FScatterExtractionContext& Context)
 {
 	const int32 ExpectedVoxels = ChunkSize * ChunkSize * ChunkSize;
 	if (VoxelData.Num() != ExpectedVoxels || ChunkSize <= 0 || VoxelSize <= 0.0f)
@@ -2141,10 +2022,40 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 			}
 		}
 
+		// Cross-chunk coverage: a point well below the analytic terrain surface at its (X,Y) is
+		// covered by terrain that lives in a neighboring chunk — the per-chunk flag / column scan
+		// above cannot see it. Same fix as the CPU extractor's bCoveredByTerrain.
+		if (!bFlaggedUnderground && Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
+		{
+			const float TerrainHeight = Context.WorldMode->GetTerrainHeightAt(
+				static_cast<float>(Point.Position.X), static_cast<float>(Point.Position.Y), Context.NoiseParams);
+			if (Point.Position.Z < TerrainHeight - VoxelSize * 1.5f)
+			{
+				bFlaggedUnderground = true;
+			}
+		}
+
 		if (bFlaggedUnderground)
 		{
 			Point.bIsUnderground = true;
 			++UndergroundCount;
+		}
+		else
+		{
+			// Underwater: open water above the point (water flag on the air voxel above) OR the
+			// point is below the world water level. The water-level test catches submerged seabeds
+			// even where the per-voxel water flag never propagated. Underground takes precedence.
+			const FVector AboveLocal = (Point.Position + FVector(0.0f, 0.0f, VoxelSize * 0.5f) - ChunkWorldOrigin) / VoxelSize;
+			const int32 UX = FMath::Clamp(FMath::FloorToInt(AboveLocal.X), 0, ChunkSize - 1);
+			const int32 UY = FMath::Clamp(FMath::FloorToInt(AboveLocal.Y), 0, ChunkSize - 1);
+			const int32 UZ = FMath::Clamp(FMath::FloorToInt(AboveLocal.Z), 0, ChunkSize - 1);
+			const int32 UIdx = UX + UY * ChunkSize + UZ * SliceSize;
+			const bool bWaterAbove = VoxelData[UIdx].IsAir() && VoxelData[UIdx].HasWaterFlag();
+			const bool bBelowWater = Context.bEnableWaterLevel && (Point.Position.Z < Context.WaterLevel);
+			if (bWaterAbove || bBelowWater)
+			{
+				Point.bIsUnderwater = true;
+			}
 		}
 	}
 
@@ -2160,6 +2071,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	float VoxelSize,
 	float SurfacePointSpacing,
 	const TArray<FClearedScatterVolume>& ClearedVolumes,
+	const FScatterExtractionContext& Context,
 	FChunkSurfaceData& OutSurfaceData)
 {
 	OutSurfaceData = FChunkSurfaceData(ChunkCoord);
@@ -2177,6 +2089,10 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	const int32 Stride = FMath::Max(1, FMath::RoundToInt(SurfacePointSpacing / VoxelSize));
 	const int32 ColumnsPerAxis = (ChunkSize + Stride - 1) / Stride;
 	OutSurfaceData.SurfacePoints.Reserve(ColumnsPerAxis * ColumnsPerAxis);
+
+	// A surface point more than this far below the analytic terrain surface is treated as covered
+	// (underground). ~1.5 voxels absorbs isosurface-interpolation jitter around the real surface.
+	const float CoverThreshold = VoxelSize * 1.5f;
 
 	// Helper lambda: get density at voxel position with bounds clamping
 	auto GetDensity = [&](int32 X, int32 Y, int32 Z) -> float
@@ -2196,6 +2112,29 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	{
 		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
 		{
+			// The topmost solid-air transition in a column is the open-sky surface; any
+			// transition below it necessarily has solid terrain above (a cave floor, or the
+			// ground under an overhang), so it must be classified underground. This closes the
+			// gap where ApplyUndergroundClassificationPass leaves a covered floor unflagged
+			// (ceiling < MinSolidThickness, or a cave spanning a chunk boundary) — without it,
+			// tall surface scatter (trees) lands on those floors and pokes up through the roof.
+			// Slope-safe: on a slope each column's terrain surface IS the topmost transition.
+			bool bFoundColumnTop = false;
+
+			// Analytic terrain-surface height at this column (computed once) for the cross-chunk
+			// coverage check below: a point well below this has solid terrain above it even when that
+			// terrain lives in a neighboring chunk. Only heightmap-based world modes provide a height.
+			float ColumnTerrainHeight = 0.0f;
+			bool bHaveColumnHeight = false;
+			if (Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
+			{
+				ColumnTerrainHeight = Context.WorldMode->GetTerrainHeightAt(
+					static_cast<float>(ChunkWorldOrigin.X + X * VoxelSize),
+					static_cast<float>(ChunkWorldOrigin.Y + Y * VoxelSize),
+					Context.NoiseParams);
+				bHaveColumnHeight = true;
+			}
+
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
 				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -2209,6 +2148,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				// Found solid voxel — check if there's air above
 				float AirDensity = 0.0f; // Above chunk boundary = air
 				bool bAirAboveIsUnderground = false;
+				bool bAirAboveIsWater = false;
 				if (Z + 1 < ChunkSize)
 				{
 					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
@@ -2219,6 +2159,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 					}
 					AirDensity = static_cast<float>(AboveVoxel.Density);
 					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
+					bAirAboveIsWater = AboveVoxel.HasWaterFlag();
 				}
 
 				// Interpolate exact Z position (same formula as Marching Cubes edge interpolation)
@@ -2290,14 +2231,21 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
 				Point.ComputeSlopeAngle();
 
-				// Underground classification: use the air voxel's flag directly.
-				// The flag is set by cave carving (generation time) and
-				// ApplyUndergroundClassificationPass (column scan with solid
-				// thickness threshold). This replaces the old column-based
-				// heuristic that falsely flagged exposed slope faces.
-				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
+				// Underground if: the cave/air flag says so; OR this is not the topmost surface in the
+				// column (a lower transition is always covered by solid above); OR the point sits well
+				// below the analytic terrain surface at its (X,Y) — solid terrain covers it even from a
+				// NEIGHBORING chunk (the cross-chunk cave floor / overhang the flag and column scan miss).
+				const bool bCoveredByTerrain = bHaveColumnHeight && (WorldPos.Z < ColumnTerrainHeight - CoverThreshold);
+				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag() || bFoundColumnTop || bCoveredByTerrain;
+
+				// Submerged: open water above it (water flag on the air voxel above) OR the point is below
+				// the world water level. The water-level test catches submerged seabeds even where the
+				// per-voxel water flag did not propagate. Underground takes precedence.
+				const bool bBelowWater = Context.bEnableWaterLevel && (WorldPos.Z < Context.WaterLevel);
+				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
+				bFoundColumnTop = true;
 			}
 		}
 	}
@@ -2337,6 +2285,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 	int32 ChunkSize,
 	float VoxelSize,
 	const TArray<FClearedScatterVolume>& ClearedVolumes,
+	const FScatterExtractionContext& Context,
 	FChunkSurfaceData& OutSurfaceData)
 {
 	OutSurfaceData = FChunkSurfaceData(ChunkCoord);
@@ -2351,13 +2300,32 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 	}
 
 	// Surface points per exposed top face — scans all solid-air transitions per column.
-	// Underground classification uses voxel flags rather than column-based heuristic.
 	OutSurfaceData.SurfacePoints.Reserve(ChunkSize * ChunkSize);
+
+	// Points more than this far below the analytic terrain surface are covered (underground).
+	const float CoverThreshold = VoxelSize * 1.5f;
 
 	for (int32 X = 0; X < ChunkSize; ++X)
 	{
 		for (int32 Y = 0; Y < ChunkSize; ++Y)
 		{
+			// Topmost transition in the column = open-sky surface; anything below it is
+			// covered by solid above (cave floor / under an overhang) → underground. Closes
+			// the same covered-floor gap as the smooth extractor (see ExtractSurfacePointsFromVoxelData).
+			bool bFoundColumnTop = false;
+
+			// Analytic terrain height at this column for the cross-chunk coverage check (below).
+			float ColumnTerrainHeight = 0.0f;
+			bool bHaveColumnHeight = false;
+			if (Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
+			{
+				ColumnTerrainHeight = Context.WorldMode->GetTerrainHeightAt(
+					static_cast<float>(ChunkWorldOrigin.X + (X + 0.5f) * VoxelSize),
+					static_cast<float>(ChunkWorldOrigin.Y + (Y + 0.5f) * VoxelSize),
+					Context.NoiseParams);
+				bHaveColumnHeight = true;
+			}
+
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
 				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -2370,6 +2338,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 
 				// Check air above
 				bool bAirAboveIsUnderground = false;
+				bool bAirAboveIsWater = false;
 				if (Z + 1 < ChunkSize)
 				{
 					const int32 AboveIndex = X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize;
@@ -2379,6 +2348,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 						continue; // Not a surface
 					}
 					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
+					bAirAboveIsWater = AboveVoxel.HasWaterFlag();
 				}
 
 				// Block face center: center of block XY, top of block Z
@@ -2413,10 +2383,18 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
 				Point.SlopeAngle = 0.0f; // Flat top face
 
-				// Use voxel underground flag directly
-				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag();
+				// Underground if flagged, OR not the topmost surface in the column (covered within this
+				// chunk), OR well below the analytic terrain surface (covered by a neighboring chunk).
+				const bool bCoveredByTerrain = bHaveColumnHeight && (WorldPos.Z < ColumnTerrainHeight - CoverThreshold);
+				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag() || bFoundColumnTop || bCoveredByTerrain;
+
+				// Submerged: open water above (water flag) OR below the world water level (catches
+				// seabeds the water flag missed). Underground takes precedence.
+				const bool bBelowWater = Context.bEnableWaterLevel && (WorldPos.Z < Context.WaterLevel);
+				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
+				bFoundColumnTop = true;
 			}
 		}
 	}
@@ -2434,6 +2412,19 @@ FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) 
 
 	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
 	return Configuration->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
+}
+
+FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext() const
+{
+	FScatterExtractionContext Context;
+	Context.WorldMode = WorldMode;
+	if (Configuration)
+	{
+		Context.NoiseParams = Configuration->NoiseParams;
+		Context.bEnableWaterLevel = Configuration->bEnableWaterLevel;
+		Context.WaterLevel = Configuration->WaterLevel;
+	}
+	return Context;
 }
 
 void UVoxelScatterManager::CreateDefaultDefinitions()

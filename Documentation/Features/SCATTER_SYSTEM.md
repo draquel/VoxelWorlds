@@ -91,10 +91,9 @@ public:
 
     // Instance pool operations
     void ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID);
-    void ReleaseAllForScatterType(int32 ScatterTypeID);
 
-    // Deferred rebuilds (prevents flicker)
-    void QueueRebuild(int32 ScatterTypeID);
+    // Replace one chunk+type's instances in place (empty = release). No global rebuild.
+    void UpdateChunkTypeInstances(const FIntVector& ChunkCoord, int32 ScatterTypeID, TArray<FTransform> Transforms);
 
 protected:
     // One HISM per scatter type
@@ -103,10 +102,9 @@ protected:
     // Per-scatter-type instance pool for recycling
     TMap<int32, FHISMInstancePool> InstancePools;
 
-    // Pending rebuilds (processed when viewer is stationary)
-    TSet<int32> PendingRebuildScatterTypes;
-    float RebuildStationaryDelay = 0.5f;
-    float TimeSinceViewerMoved = 0.0f;
+    // Deferred per-frame instance adds (budget-limited, flushed every Tick)
+    TArray<FPendingInstanceAdd> PendingInstanceAdds;
+    int32 MaxInstanceAddsPerFrame = 2000;
 };
 ```
 
@@ -159,8 +157,10 @@ struct FScatterDefinition
     float MaxElevation = FLT_MAX;
     bool bTopFacesOnly = true;
     float SpawnDistance = 0.0f;              // 0 = use global ScatterRadius
-    EScatterSurfaceLocation SurfaceLocation = EScatterSurfaceLocation::SurfaceOnly;
-    // Any, SurfaceOnly, UndergroundOnly — see UNDERGROUND_CLASSIFICATION.md
+    int32 SurfaceLocationMask = Surface;     // bitmask of EScatterSurfaceLocationFlags
+    // Surface (dry land) | Underwater | Underground — enable any combination.
+    // See UNDERGROUND_CLASSIFICATION.md. Underwater = open-sky surface below WaterLevel
+    // (air voxel above carries VOXEL_FLAG_WATER); Underground takes precedence.
 
     // Instance Variation
     FVector2D ScaleRange = FVector2D(0.8f, 1.2f);
@@ -421,27 +421,32 @@ For each PendingInstanceAdd entry:
 
 Both recycled and newly added instances count toward the per-frame budget (`MaxInstanceAddsPerFrame`).
 
-#### Rebuild Strategy
+#### Per-Chunk-Type Updates (no global rebuilds)
 
-Rebuilds (triggered by chunk edits/regeneration) now work through the pool:
+All instance updates are scoped to a single (chunk, scatter type) pair — the renderer
+**never** releases and re-streams a whole scatter type across the world. That whole-type
+rebuild used to zero-scale every instance of a type in one frame and re-add them budget-limited
+over many frames, and because it was deferred until the viewer was stationary AND the generation
+pipeline was idle, it produced a world-wide "refresh flash" whenever the player stopped moving.
+It (and `QueueRebuild`/`RebuildScatterType`/`FlushPendingRebuilds`/`ReleaseAllForScatterType`)
+has been removed.
 
-1. `ReleaseAllForScatterType()` — all instances go to free list (zero-scaled)
-2. Collect transforms from `ScatterDataCache` for all chunks with this type
-3. Queue as `PendingInstanceAdd` entries — `FlushPendingInstanceAdds` recycles from free list
+Updates flow through two localized primitives, both flushed every `Tick()` via the per-frame
+add budget (no viewer-stationary / world-stable gate):
 
-This means rebuilds reuse existing pool capacity — no net HISM growth.
-
-#### Deferred Rebuilds
-
-- Rebuilds are queued via `QueueRebuild()`, not immediate
-- Processed in `Tick()` when BOTH conditions met:
-  - Viewer stationary for 0.5s (`RebuildStationaryDelay`)
-  - World stable (`GetPendingGenerationCount() == 0`)
-- Prevents flickering during movement and initial world loading
+- `AddSupplementalInstances(chunk, newData)` — append only the newly generated points for a
+  chunk (used by distance streaming and by supplemental chunk-generation passes, which only
+  ever add types the chunk doesn't already have).
+- `UpdateChunkTypeInstances(chunk, type, transforms)` — replace just this chunk+type's
+  instances (empty transforms = release). Used by edits and by re-mesh/regen of a chunk that
+  already has scatter.
 
 ### New Chunk Optimization
 
-New chunks (no existing scatter) go directly through the deferred add pipeline:
+New chunks (no existing scatter) group their spawn points by type and queue them as
+`PendingInstanceAdd` entries; `FlushPendingInstanceAdds` recycles from the free list first,
+then grows the pool. A chunk that already has scatter takes the per-chunk-type path above —
+each affected type is replaced in place, so only that one chunk's instances ever move:
 
 ```cpp
 void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData)
@@ -455,10 +460,10 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
     }
     else
     {
-        // Existing chunk update - queue rebuild
+        // Existing chunk: replace each affected type in place (local, no global rebuild)
         for (int32 ScatterTypeID : AffectedTypes)
         {
-            QueueRebuild(ScatterTypeID);
+            UpdateChunkTypeInstances(ChunkCoord, ScatterTypeID, ThisChunkTransformsForType);
         }
     }
 }
@@ -519,25 +524,27 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
     // Find affected chunks
     for (each affected chunk)
     {
-        // Track cleared volume (prevents regeneration)
+        // Track cleared volume (prevents regeneration) and scrub cached surface points in
+        // the radius (so distance streaming can't resurrect scatter from pre-edit data)
         ClearedVolumesPerChunk.FindOrAdd(ChunkCoord).Add(FClearedScatterVolume(WorldPosition, Radius));
 
-        // Remove spawn points within radius
+        // Remove spawn points within radius, collecting the affected types
         FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
         for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
         {
             if (FVector::DistSquared(ScatterData->SpawnPoints[i].Position, WorldPosition) <= Radius * Radius)
             {
-                ScatterTypesToRebuild.Add(ScatterData->SpawnPoints[i].ScatterTypeID);
+                AffectedTypes.Add(ScatterData->SpawnPoints[i].ScatterTypeID);
                 ScatterData->SpawnPoints.RemoveAt(i);
             }
         }
-    }
 
-    // Queue rebuilds for affected scatter types only
-    for (int32 ScatterTypeID : ScatterTypesToRebuild)
-    {
-        ScatterRenderer->QueueRebuild(ScatterTypeID);
+        // Replace just this chunk's affected types with the surviving transforms —
+        // immediate, local, flushed every Tick. No whole-type rebuild, so no refresh flash.
+        for (int32 TypeID : AffectedTypes)
+        {
+            ScatterRenderer->UpdateChunkTypeInstances(ChunkCoord, TypeID, SurvivingTransformsForType);
+        }
     }
 }
 ```
@@ -610,10 +617,7 @@ Created automatically if no configuration is provided:
 ### Throttling
 
 - `MaxScatterGenerationsPerFrame = 2`: Limits surface extraction per frame
-- `MaxInstanceAddsPerFrame = 2000`: Budget for instance additions/recycling per frame
-- `MaxRebuildsPerFrame = 0` (unlimited): Rebuilds are fast once transforms are collected
-- `RebuildStationaryDelay = 0.5s`: Prevents flicker during movement
-- World stability check: Rebuilds wait for `GetPendingGenerationCount() == 0` (prevents initial load flicker)
+- `MaxInstanceAddsPerFrame = 2000`: Budget for instance additions/recycling per frame — the single knob for streaming smoothness now that whole-type rebuilds are gone
 
 ### Memory
 
