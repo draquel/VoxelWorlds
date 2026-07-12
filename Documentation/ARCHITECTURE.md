@@ -209,31 +209,25 @@ struct FVoxelVertex {
 
 ### Dependency Graph
 ```
-VoxelRuntime
-    ├── depends on → VoxelStreaming
-    ├── depends on → VoxelRendering
-    ├── depends on → VoxelEditing
-    └── depends on → VoxelScatter
-
-VoxelStreaming
-    ├── depends on → VoxelLOD
-    ├── depends on → VoxelGeneration
-    └── depends on → VoxelMeshing
-
-VoxelRendering
-    └── depends on → VoxelCore
-
-VoxelLOD
-    └── depends on → VoxelCore
-
-VoxelGeneration
-    └── depends on → VoxelCore
-
-VoxelMeshing
-    └── depends on → VoxelCore
-
 VoxelCore
-    └── (no dependencies - shared foundation)
+    └── (no internal dependencies — shared foundation)
+
+VoxelGeneration   → VoxelCore
+VoxelMeshing      → VoxelCore
+VoxelRendering    → VoxelCore
+VoxelLOD          → VoxelCore, VoxelGeneration
+VoxelScatter      → VoxelCore, VoxelGeneration, VoxelMeshing
+
+VoxelStreaming    → VoxelCore, VoxelLOD, VoxelRendering, VoxelGeneration,
+                    VoxelMeshing, VoxelScatter      ◄── streaming coordinator / hub
+
+VoxelMap          → VoxelCore, VoxelGeneration, VoxelStreaming
+VoxelPCG          → VoxelCore, VoxelGeneration, VoxelStreaming, VoxelMap   (+ PCG engine plugin)
+
+VoxelWorlds       → VoxelCore                        ◄── plugin-entry integration facade (thin)
+
+VoxelWorldsEditor → VoxelCore, VoxelGeneration, VoxelMeshing, VoxelRendering,
+                    VoxelStreaming, VoxelMap         ◄── Editor target only (stripped from shipping)
 ```
 
 ### Module Responsibilities
@@ -242,13 +236,15 @@ VoxelCore
 - Core data structures (FVoxelData, FChunkDescriptor)
 - Math utilities (coordinate conversions)
 - Configuration types (UVoxelWorldConfiguration)
-- No dependencies on other modules
+- Material + biome registries
+- Edit-layer manager (UVoxelEditManager) — sparse add/subtract/paint overlay, undo/redo, serialization
+- No dependencies on other voxel modules
 
 **VoxelLOD**
 - IVoxelLODStrategy interface
-- LOD implementations (DistanceBand, Quadtree, Octree)
+- LOD implementations (DistanceBand; Quadtree/Octree planned)
 - FLODQueryContext and related types
-- Depends only on VoxelCore
+- Depends on VoxelCore and VoxelGeneration (terrain-height culling bounds)
 
 **VoxelGeneration** *(LoadingPhase: PostConfigInit)*
 - Noise generation (GPU compute shaders)
@@ -272,39 +268,50 @@ VoxelCore
 - Collision manager
 
 **VoxelStreaming**
-- ChunkManager (main streaming coordinator)
-- Chunk state machine
-- Load/unload queue management
-- Integrates LOD, generation, and meshing
-
-**VoxelEditing**
-- Edit layer system
-- Editing tools (add, subtract, paint)
-- Serialization
+- ChunkManager (main streaming coordinator / hub)
+- Chunk state machine, load/unload queue management
+- Collision manager (async Chaos cooking) and water propagation
+- Integrates LOD, rendering, generation, meshing, and scatter
 
 **VoxelScatter**
-- Vegetation placement
-- HISM/ISM management
-- GPU scatter generation
+- Vegetation / foliage placement (biome-driven)
+- HISM/ISM instanced rendering
+- Deterministic cross-chunk tree injection
 
-**VoxelRuntime**
-- AVoxelWorld actor
-- UVoxelWorldSubsystem
-- Blueprint integration
-- Editor tools
+**VoxelMap**
+- Map / minimap subsystem
+- Samples world height and biome for a top-down view
+
+**VoxelPCG**
+- Runtime PCG decoration over the voxel surface (per-biome graph dispatch)
+- Isolated behind the PCG engine plugin so no other module hard-depends on PCG
+
+**VoxelWorlds**
+- Plugin-entry / integration facade (the plugin's namesake module)
+- Thin: depends only on VoxelCore
+- *(Editing is not a separate module — the edit layer lives in VoxelCore)*
+
+**VoxelWorldsEditor** *(Type: Editor — stripped from shipping)*
+- Authoring tools: dockable field-visualization panel, field preview actor
+- Depends downward on the runtime voxel modules only
 
 ### Module Loading Phases
 
-Modules that use global shaders (`IMPLEMENT_GLOBAL_SHADER` macro) must use `PostConfigInit` loading phase in the `.uplugin` file. This ensures the shader system is fully initialized before shader registration occurs.
+Two rationales drive the non-default phases. Modules that register global shaders (`IMPLEMENT_GLOBAL_SHADER`) or rendering / vertex-factory types load at `PostConfigInit`, so the shader system is ready before registration occurs. Modules that create world subsystems and depend on the full runtime load at `PostEngineInit`, after the engine and their dependency modules are initialized.
 
 | Module | LoadingPhase | Reason |
 |--------|--------------|--------|
-| VoxelCore | Default | No shaders |
+| VoxelCore | Default | Data + types; no shaders |
 | VoxelLOD | Default | No shaders |
-| VoxelGeneration | **PostConfigInit** | GPU compute shaders |
-| VoxelMeshing | **PostConfigInit** | GPU compute shaders |
-| VoxelRendering | Default | Uses shaders but no IMPLEMENT_GLOBAL_SHADER |
-| VoxelStreaming | Default | No shaders |
+| VoxelWorlds | Default | Thin plugin-entry facade |
+| VoxelGeneration | **PostConfigInit** | GPU global shaders (`IMPLEMENT_GLOBAL_SHADER`) |
+| VoxelMeshing | **PostConfigInit** | GPU global shaders (`IMPLEMENT_GLOBAL_SHADER`) |
+| VoxelRendering | **PostConfigInit** | Vertex factory + render shader registration |
+| VoxelStreaming | **PostEngineInit** | World subsystem; needs engine + runtime modules ready |
+| VoxelScatter | **PostEngineInit** | World subsystem / components |
+| VoxelMap | **PostEngineInit** | World subsystem |
+| VoxelPCG | **PostEngineInit** | Runtime PCG bridge; needs PCG + streaming |
+| VoxelWorldsEditor | Default (Editor) | Editor tooling; stripped from shipping |
 
 **Failure to set correct LoadingPhase** will cause editor crashes during startup with access violations in `CreatePackage` or `ProcessNewlyLoadedUObjects`.
 
