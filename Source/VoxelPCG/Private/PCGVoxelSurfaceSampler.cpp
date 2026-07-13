@@ -27,7 +27,28 @@
 
 namespace
 {
-	/** Resolved voxel-world generator context needed to re-sample the terrain surface. */
+	/**
+	 * Resolved voxel-world generator context needed to re-sample the terrain surface.
+	 *
+	 * LIFETIME CONTRACT — this struct BORROWS, it does not own. WorldMode aliases the chunk
+	 * manager's TUniquePtr<IVoxelWorldMode>, which UVoxelChunkManager::EndPlay -> Shutdown()
+	 * frees (WorldMode.Reset()); BiomeConfig/ChunkManager are UObjects kept alive by the world.
+	 * Borrowing is safe here ONLY because resolve and every use are confined to one synchronous
+	 * game-thread ExecuteInternal invocation:
+	 *  - FPCGVoxelSurfaceSamplerElement::CanExecuteOnlyOnMainThread() returns true, and the PCG
+	 *    executor assert-enforces it (IPCGElement::Execute), so this runs on the game thread —
+	 *    the same thread that tears the chunk manager down, which therefore cannot interleave.
+	 *  - Every ExecuteInternal path returns true (never time-sliced/paused), so this stack-local
+	 *    context never outlives the invocation that resolved it. A manager torn down before the
+	 *    task runs fails ResolveVoxelContext's IsInitialized()/null checks instead.
+	 *
+	 * Do NOT capture this struct (or its pointers) into async/background work, store it on the
+	 * FPCGContext across frames, or return false from ExecuteInternal while holding one — that
+	 * recreates the PIE-stop use-after-free fixed in the VoxelMap tile generator (PR #29). An
+	 * async/time-sliced sampler must instead OWN its generator state: see
+	 * UVoxelMapSubsystem::CachedWorldMode (standalone, UObject-free
+	 * TSharedPtr<const IVoxelWorldMode> captured by value into each task).
+	 */
 	struct FVoxelPCGSampleContext
 	{
 		const IVoxelWorldMode* WorldMode = nullptr;
@@ -44,8 +65,11 @@ namespace
 
 	/**
 	 * Resolve the active voxel world's generator context (world mode + noise/biome/water
-	 * config) by finding an initialized UVoxelChunkManager in the world. Mirrors
-	 * UVoxelMapSubsystem::ResolveChunkManager. Game-thread only (actor iteration).
+	 * config) by finding an initialized UVoxelChunkManager in the world. Mirrors how
+	 * UVoxelMapSubsystem::ResolveChunkManager locates the manager — but unlike that subsystem
+	 * (which feeds async tile tasks and must OWN a standalone world mode, see PR #29), this
+	 * borrows the manager's instance under the synchronous same-call contract documented on
+	 * FVoxelPCGSampleContext. Game-thread only (actor iteration).
 	 */
 	FVoxelPCGSampleContext ResolveVoxelContext(UWorld* World)
 	{
