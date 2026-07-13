@@ -3,6 +3,7 @@
 #include "VoxelScatterManager.h"
 #include "VoxelScatterRenderer.h"
 #include "VoxelScatterConfiguration.h"
+#include "VoxelScatterExclusionSubsystem.h"
 #include "VoxelSurfaceExtractor.h"
 #include "VoxelScatterPlacement.h"
 #include "VoxelWorldConfiguration.h"
@@ -14,6 +15,7 @@
 #include "DrawDebugHelpers.h"
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
+#include "Engine/World.h"
 #include "VoxelGPUSurfaceExtractor.h"
 
 UVoxelScatterManager::UVoxelScatterManager()
@@ -133,6 +135,14 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 
 	bIsInitialized = true;
 
+	// Register with the world's exclusion subsystem, which replays any volumes registered before
+	// this manager existed (e.g. claims placed during world startup) — initialization order between
+	// volume producers and the voxel world never matters.
+	if (UVoxelScatterExclusionSubsystem* ExclusionSubsystem = World->GetSubsystem<UVoxelScatterExclusionSubsystem>())
+	{
+		ExclusionSubsystem->NotifyManagerInitialized(this);
+	}
+
 	UE_LOG(LogVoxelScatter, Log, TEXT("VoxelScatterManager initialized (Radius=%.0f, PointSpacing=%.0f, Definitions=%d)"),
 		ScatterRadius, SurfacePointSpacing, ScatterDefinitions.Num());
 }
@@ -142,6 +152,15 @@ void UVoxelScatterManager::Shutdown()
 	if (!bIsInitialized)
 	{
 		return;
+	}
+
+	// Detach from the exclusion subsystem while the world reference is still valid
+	if (CachedWorld)
+	{
+		if (UVoxelScatterExclusionSubsystem* ExclusionSubsystem = CachedWorld->GetSubsystem<UVoxelScatterExclusionSubsystem>())
+		{
+			ExclusionSubsystem->NotifyManagerShutdown(this);
+		}
 	}
 
 	// Shutdown scatter renderer first
@@ -184,6 +203,8 @@ void UVoxelScatterManager::Shutdown()
 	CompletedScatterTypes.Empty();
 	ScatterDefinitions.Empty();
 	ClearedVolumesPerChunk.Empty();
+	ExclusionVolumes.Empty();
+	PendingExclusionRegrow.Empty();
 
 	Configuration = nullptr;
 	CachedWorld = nullptr;
@@ -212,6 +233,10 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 
 	// Process completed async scatter results (game thread only: cache + HISM update)
 	ProcessCompletedAsyncScatter();
+
+	// Launch regrow placements for chunks uncovered by an unregistered exclusion volume
+	// (throttled; runs right after completions so freed async slots are usable this tick)
+	ProcessPendingExclusionRegrow();
 
 	// Launch new async scatter tasks from pending queue (throttled)
 	ProcessPendingGenerationQueue();
@@ -704,6 +729,319 @@ bool UVoxelScatterManager::IsPointInClearedVolume(const FIntVector& ChunkCoord, 
 	return false;
 }
 
+// ==================== Exclusion Volumes ====================
+
+bool UVoxelScatterManager::RegisterScatterExclusionVolume(const FScatterExclusionVolume& Volume)
+{
+	if (!Volume.IsUsable())
+	{
+		UE_LOG(LogVoxelScatter, Warning, TEXT("RegisterScatterExclusionVolume rejected: invalid Id or non-positive extent"));
+		return false;
+	}
+
+	// Replacing a volume: the old footprint may extend beyond the new one, so queue it for regrow.
+	// Regrow placement is filtered against the post-replace volume set at consumption, so any area
+	// still covered stays bare and only the newly uncovered part regrows.
+	if (const FScatterExclusionVolume* Existing = ExclusionVolumes.Find(Volume.Id))
+	{
+		QueueExclusionRegrowForBounds(Existing->GetWorldBounds());
+	}
+
+	ExclusionVolumes.Add(Volume.Id, Volume);
+
+	// Clear existing foliage inside the volume right away via the smooth per-(chunk,type) replace
+	// path. In-flight async results are filtered at consumption (ApplyClearedVolumesToResult), and
+	// chunks that stream in later are born bare — so this immediate pass is the only catch-up needed.
+	ClearSpawnPointsInExclusionVolume(Volume);
+
+	UE_LOG(LogVoxelScatter, Log, TEXT("Registered scatter exclusion volume %s (half-extent %.0fx%.0fx%.0f at %s)"),
+		*Volume.Id.ToString(), Volume.HalfExtent.X, Volume.HalfExtent.Y, Volume.HalfExtent.Z,
+		*Volume.Frame.GetLocation().ToCompactString());
+	return true;
+}
+
+bool UVoxelScatterManager::UnregisterScatterExclusionVolume(const FGuid& VolumeId)
+{
+	FScatterExclusionVolume Removed;
+	if (!ExclusionVolumes.RemoveAndCopyValue(VolumeId, Removed))
+	{
+		return false;
+	}
+
+	// Regrow foliage where the volume used to be: overlapped chunks re-run placement from cached
+	// surface data (throttled in Update). Deterministic chunk seeds reproduce the identical points
+	// outside the removed volume, so the per-type replace is visually a no-op there.
+	QueueExclusionRegrowForBounds(Removed.GetWorldBounds());
+
+	UE_LOG(LogVoxelScatter, Log, TEXT("Unregistered scatter exclusion volume %s (%d chunk(s) queued to regrow)"),
+		*VolumeId.ToString(), PendingExclusionRegrow.Num());
+	return true;
+}
+
+bool UVoxelScatterManager::IsPointInExclusionVolume(const FVector& WorldPosition) const
+{
+	return IsPointExcluded(WorldPosition);
+}
+
+bool UVoxelScatterManager::IsPointExcluded(const FVector& Position) const
+{
+	// Flat scan: exclusion volumes are few and long-lived (claim footprints), matching the
+	// claim registry's own MVP storage judgment. Revisit with an AABB pre-filter if counts grow.
+	for (const auto& Pair : ExclusionVolumes)
+	{
+		if (Pair.Value.ContainsPoint(Position))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void UVoxelScatterManager::ClearSpawnPointsInExclusionVolume(const FScatterExclusionVolume& Volume)
+{
+	if (!bIsInitialized || !Configuration)
+	{
+		return;
+	}
+
+	const FBox Bounds = Volume.GetWorldBounds();
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const FVector WorldOrigin = Configuration->WorldOrigin;
+
+	const FIntVector MinChunk(
+		FMath::FloorToInt((Bounds.Min.X - WorldOrigin.X) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Min.Y - WorldOrigin.Y) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Min.Z - WorldOrigin.Z) / ChunkWorldSize));
+	const FIntVector MaxChunk(
+		FMath::FloorToInt((Bounds.Max.X - WorldOrigin.X) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Max.Y - WorldOrigin.Y) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Max.Z - WorldOrigin.Z) / ChunkWorldSize));
+
+	int32 TotalRemoved = 0;
+	for (int32 CX = MinChunk.X; CX <= MaxChunk.X; ++CX)
+	{
+		for (int32 CY = MinChunk.Y; CY <= MaxChunk.Y; ++CY)
+		{
+			for (int32 CZ = MinChunk.Z; CZ <= MaxChunk.Z; ++CZ)
+			{
+				const FIntVector ChunkCoord(CX, CY, CZ);
+				FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+				if (!ScatterData || !ScatterData->bIsValid)
+				{
+					continue;
+				}
+
+				// Remove spawn points inside the oriented box; note which types lost instances.
+				// The surface cache is deliberately left whole — unregister regrows from it.
+				TSet<int32> AffectedTypes;
+				for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
+				{
+					if (Volume.ContainsPoint(ScatterData->SpawnPoints[i].Position))
+					{
+						AffectedTypes.Add(ScatterData->SpawnPoints[i].ScatterTypeID);
+						ScatterData->SpawnPoints.RemoveAt(i);
+						++TotalRemoved;
+					}
+				}
+
+				// Replace each affected type's instances with the survivors — immediate release +
+				// budgeted re-add per (chunk,type), the same flash-free path player edits use.
+				if (AffectedTypes.Num() > 0 && ScatterRenderer && ScatterRenderer->IsInitialized())
+				{
+					for (int32 TypeID : AffectedTypes)
+					{
+						const FScatterDefinition* Def = GetScatterDefinition(TypeID);
+						if (!Def)
+						{
+							continue;
+						}
+
+						TArray<FTransform> RemainingTransforms;
+						for (const FScatterSpawnPoint& Point : ScatterData->SpawnPoints)
+						{
+							if (Point.ScatterTypeID == TypeID)
+							{
+								RemainingTransforms.Add(Point.GetTransform(Def->bAlignToSurfaceNormal, Def->SurfaceOffset));
+							}
+						}
+						ScatterRenderer->UpdateChunkTypeInstances(ChunkCoord, TypeID, MoveTemp(RemainingTransforms));
+					}
+				}
+			}
+		}
+	}
+
+	if (TotalRemoved > 0)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Exclusion volume %s cleared %d spawn point(s)"),
+			*Volume.Id.ToString(), TotalRemoved);
+	}
+}
+
+void UVoxelScatterManager::QueueExclusionRegrowForBounds(const FBox& Bounds)
+{
+	if (!bIsInitialized || !Configuration)
+	{
+		return;
+	}
+
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const FVector WorldOrigin = Configuration->WorldOrigin;
+
+	const FIntVector MinChunk(
+		FMath::FloorToInt((Bounds.Min.X - WorldOrigin.X) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Min.Y - WorldOrigin.Y) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Min.Z - WorldOrigin.Z) / ChunkWorldSize));
+	const FIntVector MaxChunk(
+		FMath::FloorToInt((Bounds.Max.X - WorldOrigin.X) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Max.Y - WorldOrigin.Y) / ChunkWorldSize),
+		FMath::FloorToInt((Bounds.Max.Z - WorldOrigin.Z) / ChunkWorldSize));
+
+	for (int32 CX = MinChunk.X; CX <= MaxChunk.X; ++CX)
+	{
+		for (int32 CY = MinChunk.Y; CY <= MaxChunk.Y; ++CY)
+		{
+			for (int32 CZ = MinChunk.Z; CZ <= MaxChunk.Z; ++CZ)
+			{
+				const FIntVector ChunkCoord(CX, CY, CZ);
+				// Only chunks with cached surface data can regrow in place. Anything else
+				// (unloaded, awaiting re-mesh) regenerates naturally on its next fresh pass,
+				// which consults the current volume set anyway.
+				if (SurfaceDataCache.Contains(ChunkCoord))
+				{
+					PendingExclusionRegrow.Add(ChunkCoord);
+				}
+			}
+		}
+	}
+}
+
+void UVoxelScatterManager::ProcessPendingExclusionRegrow()
+{
+	if (PendingExclusionRegrow.Num() == 0)
+	{
+		return;
+	}
+
+	int32 Launched = 0;
+	TArray<FIntVector> Processed;
+
+	for (const FIntVector& ChunkCoord : PendingExclusionRegrow)
+	{
+		if (Launched >= MaxExclusionRegrowLaunchesPerTick || AsyncScatterInProgress.Num() >= MaxAsyncScatterTasks)
+		{
+			break;
+		}
+
+		// A busy chunk stays queued for a later tick: the replacement result must not
+		// interleave with an in-flight (or queued) extraction/stream for the same chunk.
+		if (AsyncScatterInProgress.Contains(ChunkCoord)
+			|| DistanceStreamInProgress.Contains(ChunkCoord)
+			|| PendingQueueSet.Contains(ChunkCoord))
+		{
+			continue;
+		}
+
+		const FChunkSurfaceData* Surface = SurfaceDataCache.Find(ChunkCoord);
+		if (!Surface || !Surface->bIsValid || Surface->SurfacePoints.Num() == 0)
+		{
+			// Surface cache gone (chunk unloaded or a regenerate dropped it) — the next fresh
+			// generation is volume-aware, so this entry is obsolete.
+			Processed.Add(ChunkCoord);
+			continue;
+		}
+
+		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(Configuration->GetChunkWorldSize() * 0.5f);
+		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		TArray<FScatterDefinition> Definitions = BuildEligibleDefinitionsForDistance(ChunkDistance);
+		if (Definitions.Num() == 0)
+		{
+			Processed.Add(ChunkCoord);
+			continue;
+		}
+
+		// Reset bookkeeping so the completed result goes through the FIRST-PASS route of
+		// ProcessCompletedAsyncScatter (full replace via the smooth UpdateChunkInstances path)
+		// instead of appending. Rendered instances stay up until the result swaps them per type.
+		CompletedScatterTypes.Remove(ChunkCoord);
+		ScatterDataCache.Remove(ChunkCoord);
+		AsyncScatterInProgress.Add(ChunkCoord);
+
+		FChunkSurfaceData SurfaceCopy = *Surface;
+		const uint32 ChunkSeed = FVoxelScatterPlacement::ComputeChunkSeed(ChunkCoord, WorldSeed);
+		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
+
+		Async(EAsyncExecution::ThreadPool,
+			[WeakThis, ChunkCoord, ChunkSeed, SurfaceCopy = MoveTemp(SurfaceCopy),
+			 Definitions = MoveTemp(Definitions)]() mutable
+		{
+			// === THREAD POOL: placement-only relaunch from cached surface data ===
+			FAsyncScatterResult Result;
+			Result.ChunkCoord = ChunkCoord;
+			FVoxelScatterPlacement::GenerateSpawnPoints(SurfaceCopy, Definitions, ChunkSeed, Result.ScatterData);
+			for (const FScatterDefinition& Def : Definitions)
+			{
+				Result.GeneratedTypeIDs.Add(Def.ScatterID);
+			}
+			Result.SurfaceData = MoveTemp(SurfaceCopy);
+			Result.bSuccess = true;
+
+			if (UVoxelScatterManager* This = WeakThis.Get())
+			{
+				This->CompletedScatterQueue.Enqueue(MoveTemp(Result));
+			}
+		});
+
+		Processed.Add(ChunkCoord);
+		++Launched;
+	}
+
+	for (const FIntVector& ChunkCoord : Processed)
+	{
+		PendingExclusionRegrow.Remove(ChunkCoord);
+	}
+}
+
+TArray<FScatterDefinition> UVoxelScatterManager::BuildEligibleDefinitionsForDistance(float ChunkDistance) const
+{
+	TArray<FScatterDefinition> Result;
+	if (!Configuration)
+	{
+		return Result;
+	}
+
+	// Same eligibility rules as the OnChunkMeshDataReady hand-off (minus the per-chunk
+	// completed-types check — regrow clears that set before launching).
+	const EVoxelTreeMode TreeMode = Configuration->TreeMode;
+	const float VoxelTreeMaxDist = Configuration->VoxelTreeMaxDistance;
+
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		if (!Def.bEnabled)
+		{
+			continue;
+		}
+		if (Def.MeshType == EScatterMeshType::VoxelInjection)
+		{
+			if (TreeMode == EVoxelTreeMode::VoxelData)
+			{
+				continue;
+			}
+			if (TreeMode == EVoxelTreeMode::Both && ChunkDistance <= VoxelTreeMaxDist)
+			{
+				continue;
+			}
+		}
+		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
+		if (ChunkDistance > EffectiveSpawnDistance)
+		{
+			continue;
+		}
+		Result.Add(Def);
+	}
+	return Result;
+}
+
 // ==================== Configuration ====================
 
 void UVoxelScatterManager::SetScatterRadius(float Radius)
@@ -812,6 +1150,10 @@ int64 UVoxelScatterManager::GetTotalMemoryUsage() const
 	{
 		Total += Pair.Value.GetAllocatedSize();
 	}
+
+	// Exclusion volumes + pending regrow queue
+	Total += ExclusionVolumes.GetAllocatedSize();
+	Total += PendingExclusionRegrow.GetAllocatedSize();
 
 	// Scatter renderer
 	if (ScatterRenderer)
@@ -960,6 +1302,16 @@ void UVoxelScatterManager::GenerateChunkScatter(const FIntVector& ChunkCoord, co
 		ScatterData
 	);
 
+	// Persistent exclusion volumes suppress spawn points on this direct-placement path too
+	// (async completion paths are covered by ApplyClearedVolumesToResult).
+	if (ExclusionVolumes.Num() > 0)
+	{
+		ScatterData.SpawnPoints.RemoveAll([this](const FScatterSpawnPoint& Point)
+		{
+			return IsPointExcluded(Point.Position);
+		});
+	}
+
 	const int32 SpawnCount = ScatterData.SpawnPoints.Num();
 
 	// Cache scatter data
@@ -1000,6 +1352,18 @@ void UVoxelScatterManager::RemoveChunkScatter(const FIntVector& ChunkCoord)
 
 void UVoxelScatterManager::ApplyClearedVolumesToResult(const FIntVector& ChunkCoord, FChunkScatterData* ScatterData, FChunkSurfaceData* SurfaceData) const
 {
+	// Persistent exclusion volumes suppress SPAWN points on every async completion path (CPU,
+	// GPU-placement, distance stream) — this is what makes a chunk that streams in while a volume
+	// is active born bare. Surface points are deliberately left whole: the surface cache must
+	// survive so unregistering a volume can regrow foliage from it.
+	if (ScatterData && ExclusionVolumes.Num() > 0)
+	{
+		ScatterData->SpawnPoints.RemoveAll([this](const FScatterSpawnPoint& Point)
+		{
+			return IsPointExcluded(Point.Position);
+		});
+	}
+
 	const TArray<FClearedScatterVolume>* Volumes = ClearedVolumesPerChunk.Find(ChunkCoord);
 	if (!Volumes || Volumes->Num() == 0)
 	{
@@ -1193,6 +1557,15 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 		// Skip chunks already being processed by distance streaming
 		if (DistanceStreamInProgress.Contains(ChunkCoord))
+		{
+			continue;
+		}
+
+		// Skip chunks with a chunk-generation-pipeline task in flight. Matters for the exclusion
+		// regrow relaunch, which clears CompletedScatterTypes while KEEPING the surface cache: a
+		// distance-spawn here would see every type as un-generated and append a duplicate set on
+		// top of the regrow's full replace. The skip just delays this chunk to a later pass.
+		if (AsyncScatterInProgress.Contains(ChunkCoord))
 		{
 			continue;
 		}
@@ -1442,6 +1815,16 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 		ChunkSeed,
 		ScatterData
 	);
+
+	// Persistent exclusion volumes suppress spawn points on this direct-placement path too
+	// (async completion paths are covered by ApplyClearedVolumesToResult).
+	if (ExclusionVolumes.Num() > 0)
+	{
+		ScatterData.SpawnPoints.RemoveAll([this](const FScatterSpawnPoint& Point)
+		{
+			return IsPointExcluded(Point.Position);
+		});
+	}
 
 	const int32 SpawnCount = ScatterData.SpawnPoints.Num();
 

@@ -5,6 +5,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "VoxelScatterManager.h"
+#include "VoxelScatterExclusionSubsystem.h"
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelWorldMode.h"
 #include "VoxelData.h"
@@ -895,6 +896,216 @@ bool FVoxelScatterExposedFloorTest::RunTest(const FString& Parameters)
 		UndergroundCount, 0);
 
 	Harness.Manager->SetWorldMode(nullptr);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion volumes: oriented-box containment. A yaw-rotated volume must accept
+// points inside the rotated box and reject points that are inside its AABB but
+// outside the oriented box (the case an AABB test would get wrong).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterExclusionOrientedBoxTest,
+	"VoxelWorlds.Scatter.Exclusion.OrientedBoxContainment",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterExclusionOrientedBoxTest::RunTest(const FString& Parameters)
+{
+	FScatterExclusionVolume Volume;
+	Volume.Id = FGuid::NewGuid();
+	Volume.Frame = FTransform(FRotator(0.0f, 45.0f, 0.0f), FVector(1000.0f, 1000.0f, 0.0f));
+	Volume.HalfExtent = FVector(200.0f, 100.0f, 50.0f);
+
+	TestTrue(TEXT("Volume with valid Id and extent is usable"), Volume.IsUsable());
+	TestTrue(TEXT("Centre is inside"), Volume.ContainsPoint(FVector(1000.0f, 1000.0f, 0.0f)));
+
+	// Along the rotated local +X axis (45° yaw): world dir (0.707, 0.707, 0). 190 units out stays
+	// inside (|localX| = 190 <= 200); 210 units out is outside.
+	const FVector DiagX = FVector(FMath::Sqrt(0.5f), FMath::Sqrt(0.5f), 0.0f);
+	TestTrue(TEXT("Point 190 along rotated +X is inside"),
+		Volume.ContainsPoint(FVector(1000.0f, 1000.0f, 0.0f) + DiagX * 190.0f));
+	TestFalse(TEXT("Point 210 along rotated +X is outside"),
+		Volume.ContainsPoint(FVector(1000.0f, 1000.0f, 0.0f) + DiagX * 210.0f));
+
+	// A point along world +X at 190: local coords are (134, -134, 0) — inside the 200x100 box? No:
+	// |localY| = 134 > 100, so the ORIENTED test rejects it even though it is inside the AABB.
+	TestFalse(TEXT("AABB-inside but oriented-outside point is rejected"),
+		Volume.ContainsPoint(FVector(1190.0f, 1000.0f, 0.0f)));
+
+	// Z extent respected
+	TestFalse(TEXT("Point above the box is outside"), Volume.ContainsPoint(FVector(1000.0f, 1000.0f, 60.0f)));
+
+	// AABB encloses the rotated box: rotated corners reach ±(150+70.7...) ≈ ±212 on X/Y
+	const FBox Bounds = Volume.GetWorldBounds();
+	TestTrue(TEXT("AABB contains a rotated corner"),
+		Bounds.IsInside(FVector(1000.0f, 1000.0f, 0.0f) + DiagX * 199.0f));
+
+	// Invalid configurations are rejected
+	FScatterExclusionVolume NoId = Volume;
+	NoId.Id.Invalidate();
+	TestFalse(TEXT("Volume without Id is unusable"), NoId.IsUsable());
+	FScatterExclusionVolume FlatExtent = Volume;
+	FlatExtent.HalfExtent.Z = 0.0f;
+	TestFalse(TEXT("Volume with zero extent is unusable"), FlatExtent.IsUsable());
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion volumes: a chunk generated WHILE a volume covers it is born bare —
+// the fresh async result's spawn points are filtered at consumption, while its
+// surface points are cached untouched (so a later unregister could regrow).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterExclusionBornBareTest,
+	"VoxelWorlds.Scatter.Exclusion.ChunkBornBareInsideVolume",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterExclusionBornBareTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	FScatterTestHarness Harness(2);
+	const FIntVector Coord(0, 0, 0);
+
+	// Volume covering the whole test chunk (world extent [0,1600] per axis)
+	FScatterExclusionVolume Volume;
+	Volume.Id = FGuid::NewGuid();
+	Volume.Frame = FTransform(FVector(800.0f, 800.0f, 800.0f));
+	Volume.HalfExtent = FVector(800.0f, 800.0f, 800.0f);
+	TestTrue(TEXT("Volume registered"), Harness.Manager->RegisterScatterExclusionVolume(Volume));
+
+	// Submit the chunk AFTER the volume exists — the fresh generation must come out bare
+	const FChunkMeshData EmptyMesh;
+	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		return Harness.Manager->GetPendingGenerationCount() == 0
+			&& Harness.Manager->GetChunkSurfaceData(Coord) != nullptr;
+	});
+	TestTrue(TEXT("Surface data extracted"), bReady);
+
+	const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(Coord);
+	TestTrue(TEXT("Surface points cached untouched (exclusion never strips surface data)"),
+		Surface && Surface->SurfacePoints.Num() > 0);
+
+	const FChunkScatterData* Scatter = Harness.Manager->GetChunkScatterData(Coord);
+	const int32 SpawnCount = Scatter ? Scatter->SpawnPoints.Num() : 0;
+	TestEqual(TEXT("Chunk born bare: no spawn points inside the volume"), SpawnCount, 0);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion volumes: registering over an already-populated chunk clears its
+// cached spawn points immediately (live suppression), and unregistering regrows
+// them from the cached surface data. Deterministic chunk seeds make the regrown
+// set identical to the original — the count must match exactly.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterExclusionClearRegrowTest,
+	"VoxelWorlds.Scatter.Exclusion.RegisterClearsUnregisterRegrows",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterExclusionClearRegrowTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	FScatterTestHarness Harness(2);
+	const FIntVector Coord(0, 0, 0);
+
+	// Generate scatter normally first
+	SubmitChunk(Harness.Manager, Coord);
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		return Harness.Manager->GetPendingGenerationCount() == 0
+			&& Harness.Manager->HasScatterData(Coord);
+	});
+	TestTrue(TEXT("Initial scatter generated"), bReady);
+
+	const FChunkScatterData* Scatter = Harness.Manager->GetChunkScatterData(Coord);
+	const int32 OriginalCount = Scatter ? Scatter->SpawnPoints.Num() : 0;
+	if (OriginalCount == 0)
+	{
+		AddError(TEXT("Fixture produced no spawn points — cannot exercise clear/regrow"));
+		return true;
+	}
+
+	// Register a whole-chunk volume: cached spawn points must clear synchronously
+	FScatterExclusionVolume Volume;
+	Volume.Id = FGuid::NewGuid();
+	Volume.Frame = FTransform(FVector(800.0f, 800.0f, 800.0f));
+	Volume.HalfExtent = FVector(800.0f, 800.0f, 800.0f);
+	TestTrue(TEXT("Volume registered"), Harness.Manager->RegisterScatterExclusionVolume(Volume));
+	TestTrue(TEXT("Manager reports the volume"), Harness.Manager->HasScatterExclusionVolume(Volume.Id));
+
+	Scatter = Harness.Manager->GetChunkScatterData(Coord);
+	TestEqual(TEXT("Register cleared the chunk's spawn points immediately"),
+		Scatter ? Scatter->SpawnPoints.Num() : 0, 0);
+
+	// Surface data must survive the clear — it is what regrow replays from
+	const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(Coord);
+	TestTrue(TEXT("Surface cache survives the clear"), Surface && Surface->SurfacePoints.Num() > 0);
+
+	// Unregister: the chunk regrows via async placement from the cached surface data.
+	// Deterministic seeds → the regrown count matches the original exactly.
+	TestTrue(TEXT("Volume unregistered"), Harness.Manager->UnregisterScatterExclusionVolume(Volume.Id));
+	TestFalse(TEXT("Manager no longer reports the volume"), Harness.Manager->HasScatterExclusionVolume(Volume.Id));
+
+	const bool bRegrown = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		const FChunkScatterData* Data = Harness.Manager->GetChunkScatterData(Coord);
+		return Data && Data->SpawnPoints.Num() == OriginalCount;
+	});
+	TestTrue(FString::Printf(TEXT("Foliage regrew to the original %d spawn points"), OriginalCount), bRegrown);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion volumes: the world-subsystem facade forwards to live managers and
+// REPLAYS its cached volumes to managers that initialize later — registration
+// order between volume producers (claims) and the voxel world must not matter.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterExclusionSubsystemReplayTest,
+	"VoxelWorlds.Scatter.Exclusion.SubsystemForwardsAndReplays",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterExclusionSubsystemReplayTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	FScatterTestHarness Harness(2);
+
+	UVoxelScatterExclusionSubsystem* Subsystem = Harness.World->GetSubsystem<UVoxelScatterExclusionSubsystem>();
+	if (!Subsystem)
+	{
+		AddError(TEXT("World has no UVoxelScatterExclusionSubsystem"));
+		return true;
+	}
+
+	FScatterExclusionVolume Volume;
+	Volume.Id = FGuid::NewGuid();
+	Volume.Frame = FTransform(FVector(800.0f, 800.0f, 800.0f));
+	Volume.HalfExtent = FVector(800.0f, 800.0f, 800.0f);
+
+	// Forward: the harness manager registered itself on Initialize, so it receives the volume live
+	TestTrue(TEXT("Subsystem accepted the volume"), Subsystem->RegisterVolume(Volume));
+	TestTrue(TEXT("Live manager received the forwarded volume"),
+		Harness.Manager->HasScatterExclusionVolume(Volume.Id));
+
+	// Replay: a manager that initializes AFTER the volume was registered receives it on init
+	UVoxelScatterManager* LateManager = NewObject<UVoxelScatterManager>();
+	LateManager->AddToRoot();
+	LateManager->Initialize(Harness.Config, Harness.World);
+	TestTrue(TEXT("Late-initializing manager received the replayed volume"),
+		LateManager->HasScatterExclusionVolume(Volume.Id));
+
+	// Unregister reaches both managers
+	TestTrue(TEXT("Subsystem removed the volume"), Subsystem->UnregisterVolume(Volume.Id));
+	TestFalse(TEXT("Live manager volume removed"), Harness.Manager->HasScatterExclusionVolume(Volume.Id));
+	TestFalse(TEXT("Late manager volume removed"), LateManager->HasScatterExclusionVolume(Volume.Id));
+
+	LateManager->Shutdown();
+	LateManager->RemoveFromRoot();
 	return true;
 }
 

@@ -252,6 +252,47 @@ public:
 	 */
 	bool IsPointInClearedVolume(const FIntVector& ChunkCoord, const FVector& WorldPosition) const;
 
+	// ==================== Exclusion Volumes ====================
+
+	/**
+	 * Register (or replace, by Id) a persistent scatter exclusion volume: an oriented box inside
+	 * which scatter never spawns. Existing spawn points inside the volume are cleared immediately
+	 * via the smooth per-(chunk,type) replace path (no flash), in-flight async results are filtered
+	 * at consumption, and chunks that stream in later are born bare inside the volume. Unlike
+	 * ClearScatterInRadius (transient, resets on chunk reload), exclusion volumes persist until
+	 * unregistered. The canonical external entry point is UVoxelScatterExclusionSubsystem, which
+	 * replays volumes to managers that initialize later.
+	 *
+	 * @param Volume The volume to register. Must have a valid Id and positive extents.
+	 * @return True if the volume was accepted.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
+	bool RegisterScatterExclusionVolume(const FScatterExclusionVolume& Volume);
+
+	/**
+	 * Remove a previously registered exclusion volume. Foliage regrows inside it: overlapped chunks
+	 * re-run placement from their cached surface data (async, deterministic seeds) and replace their
+	 * instances per type through the smooth update path — identical points outside the volume come
+	 * back unchanged, points inside reappear.
+	 *
+	 * @param VolumeId Id the volume was registered under.
+	 * @return True if a volume with this Id existed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
+	bool UnregisterScatterExclusionVolume(const FGuid& VolumeId);
+
+	/** True if a volume with this Id is currently registered. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
+	bool HasScatterExclusionVolume(const FGuid& VolumeId) const { return ExclusionVolumes.Contains(VolumeId); }
+
+	/** Number of registered exclusion volumes. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
+	int32 GetScatterExclusionVolumeCount() const { return ExclusionVolumes.Num(); }
+
+	/** True if WorldPosition lies inside any registered exclusion volume. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
+	bool IsPointInExclusionVolume(const FVector& WorldPosition) const;
+
 	// ==================== Configuration ====================
 
 	/**
@@ -353,11 +394,12 @@ protected:
 
 	/**
 	 * Remove spawn/surface points that fall inside any cleared volume registered for
-	 * the chunk. Applied to async results at consumption time (game thread): a result
-	 * may have been generated from a snapshot taken before a player edit registered a
-	 * new cleared volume, so launch-time filtering alone is not sufficient.
-	 * Either pointer may be null. (The GPU extraction consumer already does this for
-	 * surface points; this generalizes the pattern to the CPU and distance-stream paths.)
+	 * the chunk, and spawn points inside any persistent exclusion volume. Applied to
+	 * async results at consumption time (game thread): a result may have been generated
+	 * from a snapshot taken before a player edit registered a new cleared volume (or a
+	 * new exclusion volume arrived), so launch-time filtering alone is not sufficient.
+	 * Exclusion volumes never remove SURFACE points — the surface cache must stay whole
+	 * so unregistering a volume can regrow foliage from it. Either pointer may be null.
 	 */
 	void ApplyClearedVolumesToResult(const FIntVector& ChunkCoord, FChunkScatterData* ScatterData, FChunkSurfaceData* SurfaceData) const;
 
@@ -442,6 +484,45 @@ protected:
 
 	/** Per-chunk list of cleared volumes from player edits */
 	TMap<FIntVector, TArray<FClearedScatterVolume>> ClearedVolumesPerChunk;
+
+	// ==================== Exclusion Volumes (persistent, world-level) ====================
+
+	/**
+	 * Registered exclusion volumes by Id. Persistent across chunk streaming — deliberately NOT
+	 * per-chunk and NOT cleared on chunk unload/regeneration (unlike ClearedVolumesPerChunk,
+	 * which models transient player-edit clears).
+	 */
+	TMap<FGuid, FScatterExclusionVolume> ExclusionVolumes;
+
+	/**
+	 * Chunks queued to regrow after an exclusion volume was unregistered. Processed a few per
+	 * Update tick, and only when the chunk is quiet (no async extraction/stream in flight) so
+	 * the replacement result can't interleave with another pipeline's append. Entries for
+	 * chunks whose surface cache is gone (unloaded / awaiting re-mesh) drop out harmlessly.
+	 */
+	TSet<FIntVector> PendingExclusionRegrow;
+
+	/** Max regrow placements to launch per Update tick. */
+	int32 MaxExclusionRegrowLaunchesPerTick = 2;
+
+	/** Remove cached spawn points inside Volume and release their instances (smooth per-type replace). */
+	void ClearSpawnPointsInExclusionVolume(const FScatterExclusionVolume& Volume);
+
+	/** Queue every loaded chunk overlapping Bounds for a regrow placement pass. */
+	void QueueExclusionRegrowForBounds(const FBox& Bounds);
+
+	/** Launch queued regrow placements (throttled; skips chunks with work in flight). */
+	void ProcessPendingExclusionRegrow();
+
+	/** True if Position is inside any registered exclusion volume (hot-path helper). */
+	bool IsPointExcluded(const FVector& Position) const;
+
+	/**
+	 * Definitions eligible at ChunkDistance under the same rules as a fresh mesh hand-off
+	 * (enabled, tree-mode HISM gating, per-definition spawn distance). Used by the exclusion
+	 * regrow relaunch, which re-places every eligible type from cached surface data.
+	 */
+	TArray<FScatterDefinition> BuildEligibleDefinitionsForDistance(float ChunkDistance) const;
 
 	/**
 	 * Extract surface points from voxel data (LOD-independent).
