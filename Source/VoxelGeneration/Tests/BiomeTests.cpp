@@ -86,6 +86,8 @@ bool FBiomeBlendingTest::RunTest(const FString& Parameters)
 		CenterPlains.GetDominantBiome(), EVoxelBiome::Plains);
 	TestTrue(TEXT("Center Plains should have high weight for Plains"),
 		CenterPlains.Weights[0] > 0.8f);
+	TestEqual(TEXT("Center Plains should be a single-biome blend"),
+		CenterPlains.BiomeCount, 1);
 
 	// Near Mountain boundary (temperature ~-0.1)
 	FBiomeBlend NearMountain = FVoxelBiomeRegistry::GetBiomeBlend(-0.05f, 0.0f, 0.15f);
@@ -100,6 +102,8 @@ bool FBiomeBlendingTest::RunTest(const FString& Parameters)
 	FBiomeBlend CenterMountain = FVoxelBiomeRegistry::GetBiomeBlend(-0.8f, 0.0f, 0.1f);
 	TestEqual(TEXT("Center Mountain should have dominant Mountain"),
 		CenterMountain.GetDominantBiome(), EVoxelBiome::Mountain);
+	TestEqual(TEXT("Center Mountain should be a single-biome blend"),
+		CenterMountain.BiomeCount, 1);
 
 	// Verify blend weights sum to 1.0
 	float TotalWeight = 0.0f;
@@ -109,6 +113,26 @@ bool FBiomeBlendingTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("Blend weights should sum to 1.0"),
 		FMath::IsNearlyEqual(TotalWeight, 1.0f, 0.01f));
+
+	// Regression: the Ocean placeholder spans the entire (temperature, moisture) space
+	// and must never be selected by the registry's climate-driven blend — ocean is
+	// continentalness-gated and only reachable via UVoxelBiomeConfiguration.
+	for (float Temperature = -1.0f; Temperature <= 1.0f; Temperature += 0.5f)
+	{
+		for (float Moisture = -1.0f; Moisture <= 1.0f; Moisture += 0.5f)
+		{
+			FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+			for (int32 i = 0; i < Blend.BiomeCount; ++i)
+			{
+				if (Blend.BiomeIDs[i] == EVoxelBiome::Ocean && Blend.Weights[i] > 0.0f)
+				{
+					AddError(FString::Printf(
+						TEXT("Ocean placeholder selected by registry blend at T=%.2f M=%.2f (weight %.2f)"),
+						Temperature, Moisture, Blend.Weights[i]));
+				}
+			}
+		}
+	}
 
 	return true;
 }

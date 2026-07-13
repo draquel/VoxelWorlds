@@ -66,6 +66,8 @@ public:
 	 * @param Moisture Normalized moisture (-1 to 1)
 	 * @param BlendWidth Width of the blend zone (in temperature/moisture units, default 0.1)
 	 * @return Blend result with up to MAX_BIOME_BLEND biomes and their weights
+	 * @note The Ocean placeholder is never part of the blend — ocean selection requires
+	 *       continentalness, which only UVoxelBiomeConfiguration::GetBiomeBlend samples.
 	 */
 	static FBiomeBlend GetBiomeBlend(float Temperature, float Moisture, float BlendWidth = 0.1f);
 
