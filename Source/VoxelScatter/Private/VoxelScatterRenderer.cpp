@@ -36,9 +36,13 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 	ScatterManager = Manager;
 	CachedWorld = World;
 
-	// Create container actor for HISM components
+	// Create container actor for HISM components. Requested name mode: keep the recognizable
+	// name when free, but auto-uniquify instead of the default fatal error when a container
+	// already exists (a second scatter manager in the same world — e.g. two voxel worlds, or
+	// a manager cycled before GC reclaimed the old container).
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Name = TEXT("VoxelScatterContainer");
+	SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
 	SpawnParams.ObjectFlags |= RF_Transient;
 
 	ContainerActor = World->SpawnActor<AActor>(AActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);

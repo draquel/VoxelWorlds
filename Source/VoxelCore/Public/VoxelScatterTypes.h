@@ -703,3 +703,62 @@ struct VOXELCORE_API FScatterStatistics
 		return ChunksWithScatter > 0 ? static_cast<float>(TotalSpawnPoints) / ChunksWithScatter : 0.0f;
 	}
 };
+
+/**
+ * A persistent, world-level scatter exclusion region: an oriented box inside which scatter
+ * spawn points are suppressed (no foliage), while the terrain surface itself is untouched.
+ *
+ * Unlike the transient per-chunk cleared volumes (player-edit spheres that reset when a chunk
+ * reloads), exclusion volumes persist across chunk streaming: a chunk that streams in while a
+ * volume is active is born bare inside it, and unregistering the volume regrows the foliage.
+ * Registered externally (e.g. a game-level bridge mapping claim footprints to volumes) via
+ * UVoxelScatterExclusionSubsystem or UVoxelScatterManager directly — VoxelWorlds itself
+ * attaches no semantics to who owns a volume.
+ */
+USTRUCT(BlueprintType)
+struct VOXELCORE_API FScatterExclusionVolume
+{
+	GENERATED_BODY()
+
+	/** Stable identity. Registering a volume with an existing Id replaces it; unregister removes by Id. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Exclusion")
+	FGuid Id;
+
+	/** World transform of the box centre (rotation + translation). Scale is IGNORED — bake scale into HalfExtent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Exclusion")
+	FTransform Frame = FTransform::Identity;
+
+	/** Oriented-box half-extents in world units. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Exclusion")
+	FVector HalfExtent = FVector(500.0f, 500.0f, 500.0f);
+
+	/**
+	 * Reserved: width of a soft-edge falloff band at the box rim (probabilistic thinning instead of a
+	 * hard cut). Unused for now — 0 means a hard edge; keep 0 until the falloff pass is implemented.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Exclusion")
+	float EdgeFalloff = 0.0f;
+
+	/** Usable = has a valid Id and a positive extent on every axis. */
+	bool IsUsable() const
+	{
+		return Id.IsValid() && HalfExtent.X > 0.0f && HalfExtent.Y > 0.0f && HalfExtent.Z > 0.0f;
+	}
+
+	/** True if WorldPoint lies inside the oriented box (Frame scale ignored). */
+	bool ContainsPoint(const FVector& WorldPoint) const
+	{
+		const FVector Local = Frame.InverseTransformPositionNoScale(WorldPoint);
+		return FMath::Abs(Local.X) <= HalfExtent.X
+			&& FMath::Abs(Local.Y) <= HalfExtent.Y
+			&& FMath::Abs(Local.Z) <= HalfExtent.Z;
+	}
+
+	/** World-space AABB of the oriented box — used to pre-filter which chunks a volume can affect. */
+	FBox GetWorldBounds() const
+	{
+		FTransform NoScaleFrame = Frame;
+		NoScaleFrame.SetScale3D(FVector::OneVector);
+		return FBox(-HalfExtent, HalfExtent).TransformBy(NoScaleFrame);
+	}
+};
