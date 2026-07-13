@@ -59,6 +59,9 @@ void FVoxelBiomeRegistry::EnsureInitialized()
 	));
 
 	// Ocean - Deep water (placeholder for registry, full support via BiomeConfiguration)
+	// Registered for GetBiome() ID/material lookups only. Ocean selection is
+	// continentalness-driven, and the registry's 2D climate queries do not sample
+	// continentalness, so SelectBiome() and GetBiomeBlend() never return it.
 	// Temperature: -1.0 to 1.0 (any)
 	// Moisture: -1.0 to 1.0 (any)
 	Biomes.Add(FBiomeDefinition(
@@ -151,6 +154,15 @@ FBiomeBlend FVoxelBiomeRegistry::GetBiomeBlend(float Temperature, float Moisture
 
 	for (const FBiomeDefinition& Biome : Biomes)
 	{
+		// Skip the Ocean placeholder: its ranges span the entire climate space, so it
+		// would reach full weight everywhere and dominate every blend. Ocean selection
+		// is continentalness-driven and only available via UVoxelBiomeConfiguration;
+		// the registry's climate queries (like SelectBiome) never return it.
+		if (Biome.BiomeID == EVoxelBiome::Ocean)
+		{
+			continue;
+		}
+
 		// Get signed distance to biome edge (positive = inside, negative = outside)
 		float SignedDist = Biome.GetSignedDistanceToEdge(Temperature, Moisture);
 
