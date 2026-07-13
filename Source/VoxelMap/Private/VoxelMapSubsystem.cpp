@@ -10,8 +10,67 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "IVoxelWorldMode.h"
+#include "InfinitePlaneWorldMode.h"
+#include "IslandBowlWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
 #include "EngineUtils.h"
 #include "Async/Async.h"
+
+namespace
+{
+	/**
+	 * Build a standalone analytic world mode from the configuration — mirrors the construction switch
+	 * in UVoxelChunkManager::Initialize (the canonical version; keep in sync when adding world modes).
+	 *
+	 * The map subsystem owns its OWN instance instead of borrowing the chunk manager's: background
+	 * tile tasks capture it by TSharedPtr, and the chunk manager destroys its instance in
+	 * EndPlay->Shutdown() while tile tasks can still be running — the PIE-stop use-after-free.
+	 *
+	 * SetBiomeContext is deliberately NOT called: the instance must stay UObject-free so a task that
+	 * outlives the world's GC purge touches no engine-managed memory. GetTerrainHeightAt therefore
+	 * returns the RAW base height, and GenerateTileAsync applies continentalness from value-captured
+	 * baked curves (this also removes the former double-modulation, where a context-carrying instance
+	 * already applied the height offset and the tile task then added it a second time).
+	 */
+	TSharedPtr<const IVoxelWorldMode> CreateStandaloneWorldMode(const UVoxelWorldConfiguration& Config)
+	{
+		FWorldModeTerrainParams TerrainParams;
+		TerrainParams.SeaLevel = Config.SeaLevel;
+		TerrainParams.HeightScale = Config.HeightScale;
+		TerrainParams.BaseHeight = Config.BaseHeight;
+
+		switch (Config.WorldMode)
+		{
+		case EWorldMode::IslandBowl:
+		{
+			FIslandBowlParams IslandParams;
+			IslandParams.Shape = static_cast<EIslandShape>(Config.IslandShape);
+			IslandParams.IslandRadius = Config.IslandRadius;
+			IslandParams.SizeY = Config.IslandSizeY;
+			IslandParams.FalloffWidth = Config.IslandFalloffWidth;
+			IslandParams.FalloffType = static_cast<EIslandFalloffType>(Config.IslandFalloffType);
+			IslandParams.CenterX = Config.IslandCenterX;
+			IslandParams.CenterY = Config.IslandCenterY;
+			IslandParams.EdgeHeight = Config.IslandEdgeHeight;
+			IslandParams.bBowlShape = Config.bIslandBowlShape;
+			return MakeShared<FIslandBowlWorldMode>(TerrainParams, IslandParams);
+		}
+		case EWorldMode::SphericalPlanet:
+		{
+			const FWorldModeTerrainParams PlanetTerrainParams(0.0f, Config.PlanetHeightScale, Config.BaseHeight);
+			FSphericalPlanetParams PlanetParams;
+			PlanetParams.PlanetRadius = Config.WorldRadius;
+			PlanetParams.MaxTerrainHeight = Config.PlanetMaxTerrainHeight;
+			PlanetParams.MaxTerrainDepth = Config.PlanetMaxTerrainDepth;
+			PlanetParams.PlanetCenter = Config.WorldOrigin;
+			return MakeShared<FSphericalPlanetWorldMode>(PlanetTerrainParams, PlanetParams);
+		}
+		case EWorldMode::InfinitePlane:
+		default:
+			return MakeShared<FInfinitePlaneWorldMode>(TerrainParams);
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Key packing (FIntPoint -> uint64)
@@ -57,12 +116,28 @@ void UVoxelMapSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UVoxelMapSubsystem::Deinitialize()
 {
+	// Block new task launches and mark in-flight completions for discard before anything else.
+	bShuttingDown = true;
+
 	// Unbind delegates
 	if (bDelegatesBound && CachedChunkManagerWeak.IsValid())
 	{
 		CachedChunkManagerWeak->OnChunkGenerated.RemoveDynamic(this, &UVoxelMapSubsystem::OnChunkGenerated);
 		bDelegatesBound = false;
 	}
+
+	const int32 InFlight = ActiveAsyncTasks.Load();
+	if (InFlight > 0)
+	{
+		// In-flight background tasks own their world mode (TSharedPtr capture) and every other input
+		// by value, so they finish safely after this point; their game-thread completions see
+		// bShuttingDown and discard.
+		UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem deinitializing with %d async tile task(s) in flight — completions will be discarded"),
+			InFlight);
+	}
+
+	// Drop our reference to the standalone world mode; any running task holds its own.
+	CachedWorldMode.Reset();
 
 	TileCache.Empty();
 	ExploredTiles.Empty();
@@ -115,7 +190,9 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 		return false;
 	}
 
-	CachedWorldMode = ChunkMgr->GetWorldMode();
+	// Build our own analytic world mode from the configuration (see CreateStandaloneWorldMode for
+	// why we don't borrow the chunk manager's instance).
+	CachedWorldMode = CreateStandaloneWorldMode(*Config);
 	if (!CachedWorldMode)
 	{
 		return false;
@@ -270,6 +347,11 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 
 void UVoxelMapSubsystem::QueueTileGeneration(FIntPoint TileCoord)
 {
+	if (bShuttingDown)
+	{
+		return;
+	}
+
 	const uint64 Key = PackTileKey(TileCoord);
 	PendingTiles.Add(Key);
 
@@ -289,9 +371,19 @@ void UVoxelMapSubsystem::QueueTileGeneration(FIntPoint TileCoord)
 
 void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 {
-	// Capture all values needed on the background thread by value.
-	// CachedWorldMode and CachedNoiseParams are read-only after Initialize().
-	const IVoxelWorldMode* WorldMode = CachedWorldMode;
+	// Capture all values needed on the background thread by value. The world mode is OUR standalone
+	// instance shared into the task: the task keeps it alive for however long it runs, so PIE
+	// teardown order cannot invalidate it. (Capturing the chunk manager's raw pointer here is what
+	// crashed on PIE stop — EndPlay->Shutdown() freed it under running tasks.)
+	TSharedPtr<const IVoxelWorldMode> WorldMode = CachedWorldMode;
+	if (!WorldMode)
+	{
+		// Caller already incremented the in-flight counter; undo it and drop the request cleanly.
+		ActiveAsyncTasks--;
+		PendingTiles.Remove(PackTileKey(TileCoord));
+		return;
+	}
+
 	const FVoxelNoiseParams NoiseParams = CachedNoiseParams;
 	const int32 ChunkSize = CachedChunkSize;
 	const float VoxelSize = CachedVoxelSize;
@@ -379,11 +471,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		 bUseContinentalness, ContinentalnessNoiseParams,
 		 BakedHeightCurve = MoveTemp(BakedHeightCurve), BakedScaleCurve = MoveTemp(BakedScaleCurve)]()
 	{
-		if (!WorldMode)
-		{
-			return;
-		}
-
+		// WorldMode is a TSharedPtr capture, validated non-null before launch — this task co-owns
+		// the instance, so it stays valid even if the subsystem and world are torn down while we run.
 		const int32 Resolution = ChunkSize;
 		TArray<FColor> PixelData;
 		PixelData.SetNumUninitialized(Resolution * Resolution);
@@ -404,7 +493,11 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 					const FVector ContSamplePos(WorldX, WorldY, 0.0f);
 					Continentalness = FVoxelCPUNoiseGenerator::FBM3D(ContSamplePos, ContinentalnessNoiseParams);
 
-					// Modulate terrain height using baked curve lookup (matches CPU/GPU generator)
+					// Modulate terrain height using baked curve lookup (matches CPU/GPU generator).
+					// Height already holds the RAW base height — our standalone world mode carries no
+					// biome context — so the offset applies exactly once here. (The chunk manager's
+					// context-carrying instance already modulates inside GetTerrainHeightAt, which is
+					// why it must not be used for this.)
 					const int32 N = BakedHeightCurve.Num();
 					if (N >= 2)
 					{
@@ -413,8 +506,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 						const float Frac = FIdx - static_cast<float>(Idx0);
 						const float HeightOffset = FMath::Lerp(BakedHeightCurve[Idx0], BakedHeightCurve[Idx0 + 1], Frac);
 
-						float BaseTerrainHeight = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
-						Height = BaseTerrainHeight + HeightOffset;
+						Height += HeightOffset;
 					}
 				}
 
@@ -519,6 +611,15 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 			}
 
 			Self->ActiveAsyncTasks--;
+
+			if (Self->bShuttingDown)
+			{
+				// Deinitialize() already ran (PIE stop / world teardown): don't resurrect cache
+				// state, don't broadcast into a dying world, and don't start new tasks.
+				UE_LOG(LogVoxelMap, Verbose, TEXT("Discarded tile (%d,%d) completion after shutdown"),
+					TileCoord.X, TileCoord.Y);
+				return;
+			}
 
 			const uint64 Key = PackTileKey(TileCoord);
 
