@@ -751,24 +751,31 @@ void UVoxelChunkManager::Initialize(
 			if (Source == EEditSource::Player && EditRadius > 0.0f)
 			{
 				// Player edits: surgically remove scatter in the affected radius immediately, so it
-				// disappears the same frame as the dig/build (no async wait). Pad by half a VoxelSize
-				// so scatter on block faces above/around the edit center is also cleared (block-face-
-				// snapped scatter sits at the face center, 0.5*VoxelSize from the block center).
+				// disappears the same frame as the dig/build. Pad by half a VoxelSize so scatter on block
+				// faces above/around the edit center is also cleared (block-face-snapped scatter sits at
+				// the face center, 0.5*VoxelSize from the block center).
+				//
+				// A live player edit ONLY clears — it never re-extracts, so foliage never regrows or
+				// reshuffles under the player while they edit. Correctness against the new terrain is
+				// deferred to the chunk's next fresh generation (player leaves and returns / chunk reloads),
+				// which reads edit-merged voxels at the scatter hand-off (see OnChunkMeshCompleted), so
+				// regrown foliage lands on the edited surface instead of floating over holes.
 				const float ScatterClearRadius = EditRadius + Configuration->VoxelSize * 0.6f;
 				ScatterManager->ClearScatterInRadius(EditCenter, ScatterClearRadius);
 			}
-
-			// Re-extract the edited chunk from edit-merged voxels so scatter is RECLASSIFIED against the
-			// terrain the player now sees: mushrooms on a carved-open cave floor become surface (removed),
-			// grass is dropped from a dug-through opening, and a flattened POI pad loses buried cover. The
-			// immediate ClearScatterInRadius above handles the dig sphere itself; this catches the
-			// reclassification beyond it. RegenerateChunkScatter keeps the current instances rendered until
-			// the re-extraction smoothly replaces them per type, so it adds no flash. Zero-radius player
-			// undo/redo needs nothing — the targeted removal already happened at original-edit time.
-			if (Source != EEditSource::Player || EditRadius > 0.0f)
+			else if (Source != EEditSource::Player)
 			{
+				// System / Editor edits (e.g. POI terraforming) re-extract the chunk so scatter matches the
+				// new surface. RegenerateChunkScatter keeps the current instances rendered until the
+				// re-extraction smoothly replaces them per type, so it adds no flash.
+				//
+				// TODO(scatter-claims): a POI often wants foliage SUPPRESSED — either across its whole
+				// claimed zone or just under a static-asset (building) footprint — rather than re-extracted.
+				// Drive that from the claim covering the region once VoxelScatter consumes claims.
 				ScatterManager->RegenerateChunkScatter(ChunkCoord);
 			}
+			// Zero-radius player undo/redo needs no scatter handling — the targeted removal already
+			// happened at original-edit time.
 		}
 
 		// Notify water propagation system of the edit
