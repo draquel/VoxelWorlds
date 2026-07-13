@@ -116,6 +116,20 @@ public:
 	EEditSource GetEditSource() const { return CurrentEditSource; }
 
 	/**
+	 * Install an edit validator — a pluggable veto consulted per voxel (see IVoxelEditValidator).
+	 * Non-owning, like SetTerrainConditioner: the game-level owner must outlive this manager or
+	 * clear it. Null disables validation.
+	 */
+	void SetEditValidator(const class IVoxelEditValidator* Validator) { EditValidator = Validator; }
+
+	/**
+	 * Voxels skipped by the validator during the most recent ApplyEdit/ApplyBrushEdit call.
+	 * Zero when no validator is installed. Lets callers/UI message "protected area" later.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	int32 GetLastRejectedEditCount() const { return LastRejectedEditCount; }
+
+	/**
 	 * Apply a single voxel edit at a world position.
 	 *
 	 * @param WorldPos World-space position to edit
@@ -362,6 +376,12 @@ protected:
 
 	/** Current edit source - determines how scatter and other systems respond */
 	EEditSource CurrentEditSource = EEditSource::Player;
+
+	/** Pluggable per-voxel edit veto (non-owning; see SetEditValidator). */
+	const class IVoxelEditValidator* EditValidator = nullptr;
+
+	/** Voxels the validator skipped in the most recent apply call. */
+	int32 LastRejectedEditCount = 0;
 
 	/** Current edit center in world space (for scatter removal) */
 	FVector CurrentEditCenter = FVector::ZeroVector;

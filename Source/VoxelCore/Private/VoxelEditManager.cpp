@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelEditManager.h"
+#include "IVoxelEditValidator.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelCoordinates.h"
 #include "Serialization/MemoryWriter.h"
@@ -195,6 +196,16 @@ bool UVoxelEditManager::ApplyEdit(const FVector& WorldPos, const FVoxelData& New
 		return false;
 	}
 
+	// Edit-protection veto (see IVoxelEditValidator).
+	LastRejectedEditCount = 0;
+	if (EditValidator && !EditValidator->CanApplyEdit(WorldPos, CurrentEditSource))
+	{
+		LastRejectedEditCount = 1;
+		UE_LOG(LogVoxelEdit, Verbose, TEXT("ApplyEdit at (%.0f, %.0f, %.0f) rejected by edit protection"),
+			WorldPos.X, WorldPos.Y, WorldPos.Z);
+		return false;
+	}
+
 	// Auto-start operation if none in progress
 	const bool bAutoOperation = !CurrentOperation.IsValid();
 	if (bAutoOperation)
@@ -245,6 +256,7 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 	// Track edit center and radius for scatter removal
 	CurrentEditCenter = WorldPos;
 	CurrentEditRadius = Brush.Radius;
+	LastRejectedEditCount = 0;
 
 	const float VoxelSize = Configuration->VoxelSize;
 	const int32 ChunkSize = Configuration->ChunkSize;
@@ -336,6 +348,15 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 					continue;
 				}
 
+				// Edit-protection veto (per voxel): a brush overlapping a protected region edits
+				// only the unprotected part. Skipped voxels are counted, not errored — the UI can
+				// message "protected" from GetLastRejectedEditCount.
+				if (EditValidator && !EditValidator->CanApplyEdit(VoxelWorldPos, CurrentEditSource))
+				{
+					++LastRejectedEditCount;
+					continue;
+				}
+
 				// Calculate density delta for this voxel (affected by falloff)
 				const int32 DensityChange = FMath::RoundToInt(Brush.DensityDelta * EffectiveStrength);
 
@@ -368,7 +389,15 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 		EndEditOperation();
 	}
 
-	UE_LOG(LogVoxelEdit, Verbose, TEXT("Brush edit: %d voxels modified"), ModifiedCount);
+	if (LastRejectedEditCount > 0)
+	{
+		UE_LOG(LogVoxelEdit, Log, TEXT("Brush edit: %d voxels modified, %d rejected by edit protection"),
+			ModifiedCount, LastRejectedEditCount);
+	}
+	else
+	{
+		UE_LOG(LogVoxelEdit, Verbose, TEXT("Brush edit: %d voxels modified"), ModifiedCount);
+	}
 	return ModifiedCount;
 }
 
