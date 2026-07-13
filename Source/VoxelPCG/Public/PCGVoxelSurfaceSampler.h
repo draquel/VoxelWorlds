@@ -84,7 +84,10 @@ protected:
  * Forced to the game thread (resolves the voxel chunk manager by iterating world actors,
  * which is not thread-safe) and marked non-cacheable (output depends on live world state).
  * The surface-query math itself is thread-safe; a time-sliced/async version is a later
- * optimization.
+ * optimization — but it must OWN its generator state rather than borrow the chunk manager's:
+ * the borrowed IVoxelWorldMode dies at PIE stop (EndPlay -> Shutdown) while async work can
+ * still be in flight. See the FVoxelPCGSampleContext lifetime contract in the .cpp and the
+ * UVoxelMapSubsystem shutdown-crash fix (PR #29) for the owning pattern.
  */
 class FPCGVoxelSurfaceSamplerElement : public IPCGElement
 {
