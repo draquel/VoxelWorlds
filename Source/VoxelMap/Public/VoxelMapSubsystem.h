@@ -108,7 +108,20 @@ private:
 
 	// Cached references (resolved in Initialize or lazily)
 	TWeakObjectPtr<UVoxelChunkManager> CachedChunkManagerWeak;
-	const IVoxelWorldMode* CachedWorldMode = nullptr;
+
+	/**
+	 * Standalone analytic world mode OWNED by this subsystem (built from the world configuration in
+	 * ResolveChunkManager — never borrowed from the chunk manager). Async tile tasks capture this
+	 * TSharedPtr by value, so the instance outlives any in-flight task regardless of PIE-teardown
+	 * order. The chunk manager frees ITS instance in EndPlay->Shutdown() while background tasks can
+	 * still be running — capturing that raw pointer is what crashed on PIE stop.
+	 *
+	 * Deliberately has NO biome context: the instance stays UObject-free (safe on a worker thread
+	 * even after the world is GC'd) and returns the RAW base height; GenerateTileAsync applies
+	 * continentalness itself from value-captured baked curves.
+	 */
+	TSharedPtr<const IVoxelWorldMode> CachedWorldMode;
+
 	FVoxelNoiseParams CachedNoiseParams;
 	int32 CachedChunkSize = 32;
 	float CachedVoxelSize = 100.0f;
@@ -138,4 +151,10 @@ private:
 
 	/** Whether the subsystem has bound to chunk manager delegates. */
 	bool bDelegatesBound = false;
+
+	/**
+	 * Set in Deinitialize(). In-flight async completions arriving after this are discarded
+	 * (no cache writes, no broadcasts) and no new generation tasks may start.
+	 */
+	bool bShuttingDown = false;
 };
