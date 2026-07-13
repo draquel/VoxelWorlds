@@ -553,8 +553,15 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
 	CompletedScatterTypes.Remove(ChunkCoord);
 
-	// Remove existing scatter data
-	RemoveChunkScatter(ChunkCoord);
+	// Drop cached surface/scatter data so the re-extraction is treated as a fresh first pass (a full
+	// replace, not a supplemental append). Deliberately keep the rendered HISM instances: the completed
+	// re-extraction replaces this chunk's instances per-type via the smooth UpdateChunkInstances path
+	// (release + budgeted re-add), so an edit reclassifies scatter with no visible gap — unlike
+	// RemoveChunkScatter (used on unload), which blinks the chunk's scatter out until async
+	// re-extraction repopulates it. Stale in-flight results are dropped by the completion paths'
+	// AsyncScatterInProgress / cache checks (both cleared above).
+	SurfaceDataCache.Remove(ChunkCoord);
+	ScatterDataCache.Remove(ChunkCoord);
 
 	// Regeneration requires new mesh data - the caller should provide it via OnChunkMeshDataReady
 	UE_LOG(LogVoxelScatter, Verbose, TEXT("Regenerate scatter requested for chunk (%d,%d,%d) - awaiting new mesh data"),
@@ -1941,6 +1948,9 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 	const int32 SliceSize = ChunkSize * ChunkSize;
 	int32 UndergroundCount = 0;
 
+	// World Z of this chunk's top, for the edit-independent cross-chunk coverage test below.
+	const float ChunkTopWorldZ = ChunkWorldOrigin.Z + ChunkSize * VoxelSize;
+
 	for (FVoxelSurfacePoint& Point : SurfacePoints)
 	{
 		const FVector LocalPos = (Point.Position - ChunkWorldOrigin) / VoxelSize;
@@ -2022,14 +2032,17 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 			}
 		}
 
-		// Cross-chunk coverage: a point well below the analytic terrain surface at its (X,Y) is
-		// covered by terrain that lives in a neighboring chunk — the per-chunk flag / column scan
-		// above cannot see it. Same fix as the CPU extractor's bCoveredByTerrain.
+		// Cross-chunk coverage: if the whole chunk sits below the analytic terrain surface it is buried
+		// under terrain that lives in a neighboring chunk — the per-chunk flag / column scan above cannot
+		// see it. Comparing the CHUNK top (not the per-point Z) keeps this edit-independent: carving into a
+		// surface chunk exposes floors to sky that the per-point flag / column scan (run on edit-merged
+		// voxels) classify as surface, instead of this analytic height pinning them underground.
+		// Same fix as the CPU extractor's bCoveredByTerrain.
 		if (!bFlaggedUnderground && Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
 		{
 			const float TerrainHeight = Context.WorldMode->GetTerrainHeightAt(
 				static_cast<float>(Point.Position.X), static_cast<float>(Point.Position.Y), Context.NoiseParams);
-			if (Point.Position.Z < TerrainHeight - VoxelSize * 1.5f)
+			if (ChunkTopWorldZ < TerrainHeight - VoxelSize * 1.5f)
 			{
 				bFlaggedUnderground = true;
 			}
@@ -2090,9 +2103,17 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	const int32 ColumnsPerAxis = (ChunkSize + Stride - 1) / Stride;
 	OutSurfaceData.SurfacePoints.Reserve(ColumnsPerAxis * ColumnsPerAxis);
 
-	// A surface point more than this far below the analytic terrain surface is treated as covered
-	// (underground). ~1.5 voxels absorbs isosurface-interpolation jitter around the real surface.
+	// A chunk whose top sits more than this far below the analytic terrain surface is treated as
+	// buried (its surface points are covered by terrain in the chunk(s) above). ~1.5 voxels absorbs
+	// isosurface-interpolation jitter around the real surface.
 	const float CoverThreshold = VoxelSize * 1.5f;
+
+	// World Z of this chunk's top. The cross-chunk coverage test below compares the CHUNK top (not the
+	// per-point Z) against the analytic surface, so it only fires when the whole chunk is buried under a
+	// neighbor. Comparing the chunk top keeps the test edit-independent: when the player carves into a
+	// surface chunk (exposing a cave floor to sky), the now-topmost points reclassify to surface via
+	// bFoundColumnTop instead of staying underground against an edit-blind analytic height.
+	const float ChunkTopWorldZ = ChunkWorldOrigin.Z + ChunkSize * VoxelSize;
 
 	// Helper lambda: get density at voxel position with bounds clamping
 	auto GetDensity = [&](int32 X, int32 Y, int32 Z) -> float
@@ -2232,10 +2253,12 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				Point.ComputeSlopeAngle();
 
 				// Underground if: the cave/air flag says so; OR this is not the topmost surface in the
-				// column (a lower transition is always covered by solid above); OR the point sits well
-				// below the analytic terrain surface at its (X,Y) — solid terrain covers it even from a
-				// NEIGHBORING chunk (the cross-chunk cave floor / overhang the flag and column scan miss).
-				const bool bCoveredByTerrain = bHaveColumnHeight && (WorldPos.Z < ColumnTerrainHeight - CoverThreshold);
+				// column (a lower transition is always covered by solid above); OR the whole chunk is
+				// buried beneath the analytic terrain surface — solid terrain covers it from a NEIGHBORING
+				// chunk (the cross-chunk cave floor the flag and column scan miss). The buried-chunk test is
+				// edit-independent (see ChunkTopWorldZ), so carving into a surface chunk reclassifies
+				// exposed floors to surface instead of pinning them underground.
+				const bool bCoveredByTerrain = bHaveColumnHeight && (ChunkTopWorldZ < ColumnTerrainHeight - CoverThreshold);
 				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag() || bFoundColumnTop || bCoveredByTerrain;
 
 				// Submerged: open water above it (water flag on the air voxel above) OR the point is below
@@ -2302,8 +2325,10 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 	// Surface points per exposed top face — scans all solid-air transitions per column.
 	OutSurfaceData.SurfacePoints.Reserve(ChunkSize * ChunkSize);
 
-	// Points more than this far below the analytic terrain surface are covered (underground).
+	// A chunk whose top sits more than this far below the analytic terrain surface is buried
+	// (its surface points are covered by terrain above). See ExtractSurfacePointsFromVoxelData.
 	const float CoverThreshold = VoxelSize * 1.5f;
+	const float ChunkTopWorldZ = ChunkWorldOrigin.Z + ChunkSize * VoxelSize;
 
 	for (int32 X = 0; X < ChunkSize; ++X)
 	{
@@ -2384,8 +2409,9 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				Point.SlopeAngle = 0.0f; // Flat top face
 
 				// Underground if flagged, OR not the topmost surface in the column (covered within this
-				// chunk), OR well below the analytic terrain surface (covered by a neighboring chunk).
-				const bool bCoveredByTerrain = bHaveColumnHeight && (WorldPos.Z < ColumnTerrainHeight - CoverThreshold);
+				// chunk), OR the whole chunk is buried below the analytic terrain surface (covered by a
+				// neighboring chunk). The chunk-level test is edit-independent (see smooth extractor).
+				const bool bCoveredByTerrain = bHaveColumnHeight && (ChunkTopWorldZ < ColumnTerrainHeight - CoverThreshold);
 				Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag() || bFoundColumnTop || bCoveredByTerrain;
 
 				// Submerged: open water above (water flag) OR below the world water level (catches

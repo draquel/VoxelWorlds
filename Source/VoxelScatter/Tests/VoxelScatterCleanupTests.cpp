@@ -772,4 +772,130 @@ bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Edit-aware coverage is CHUNK-level, not per-point: a chunk whose TOP sits above the
+// analytic terrain height is a surface chunk and must NOT be classified underground,
+// even when its local (meshed) surface dips below that analytic height. The old
+// per-point test buried such points, which pinned edit-exposed surfaces (a cave floor
+// uncovered by carving the ceiling away) as underground against an edit-blind analytic
+// height. Only a chunk entirely below the analytic surface is buried.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterSurfaceChunkNotBuriedTest,
+	"VoxelWorlds.Scatter.Classification.SurfaceChunkNotBuriedByLocalHeight",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterSurfaceChunkNotBuriedTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	// Analytic height above the flat chunk's ~800 surface (would trip the OLD per-point cover test:
+	// 800 < 1000 - 150) but well below the chunk top (16 * 100 = 1600). Chunk-level test: not buried.
+	FFixedHeightWorldMode WorldMode(1000.0f);
+
+	FScatterTestHarness Harness(2);
+	Harness.Manager->SetWorldMode(&WorldMode);
+
+	const FIntVector Coord(0, 0, 0);
+	const FChunkMeshData EmptyMesh;
+	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		return Harness.Manager->GetPendingGenerationCount() == 0
+			&& Harness.Manager->GetChunkSurfaceData(Coord) != nullptr;
+	});
+	TestTrue(TEXT("Surface data extracted"), bReady);
+
+	const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(Coord);
+	if (!Surface || Surface->SurfacePoints.Num() == 0)
+	{
+		AddError(TEXT("No surface points extracted"));
+		Harness.Manager->SetWorldMode(nullptr);
+		return true;
+	}
+
+	int32 UndergroundCount = 0;
+	for (const FVoxelSurfacePoint& P : Surface->SurfacePoints)
+	{
+		if (P.bIsUnderground) { ++UndergroundCount; }
+	}
+	// The chunk top (1600) is above the analytic height (1000): the chunk is not buried, so its
+	// open-sky surface stays surface despite sitting below the analytic height locally.
+	TestEqual(TEXT("Surface chunk not buried by an analytic height below its top"), UndergroundCount, 0);
+
+	Harness.Manager->SetWorldMode(nullptr);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Edit reclassification through the extractor: carving a cave ceiling away (modeled by
+// removing the upper solid layer of the covered-cave chunk before extraction, exactly
+// as edit-merged voxels would present it) leaves the former cave floor as the topmost
+// transition. With the chunk-level coverage test it reclassifies to SURFACE instead of
+// staying underground, so underground-only scatter (mushrooms) on a now-open floor is
+// dropped. Guards the "mushrooms appear on the surface after an edit" report.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterExposedFloorTest,
+	"VoxelWorlds.Scatter.Classification.ExposedFloorReclassifiesToSurface",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterExposedFloorTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	// Analytic height above the cave floor (~350) but below the chunk top (1600): the edit-blind
+	// procedural height a world reports where a cave once had a roof — what the old per-point test
+	// wrongly buried the floor against.
+	FFixedHeightWorldMode WorldMode(1000.0f);
+
+	FScatterTestHarness Harness(2);
+	Harness.Manager->SetWorldMode(&WorldMode);
+
+	// Covered-cave chunk with its UPPER solid layer (Z=[8,12)) removed — the edit-merged voxels a
+	// player sees after carving the ceiling away. The lower floor (top at Z=3) is now open sky.
+	TArray<FVoxelData> Voxels = MakeCoveredCaveChunk();
+	for (int32 Z = 8; Z < 12; ++Z)
+	{
+		for (int32 Y = 0; Y < TestChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < TestChunkSize; ++X)
+			{
+				Voxels[X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize] = FVoxelData::Air();
+			}
+		}
+	}
+
+	const FIntVector Coord(0, 0, 0);
+	const FChunkMeshData EmptyMesh;
+	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, Voxels, TestChunkSize, TestVoxelSize);
+
+	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
+	{
+		return Harness.Manager->GetPendingGenerationCount() == 0
+			&& Harness.Manager->GetChunkSurfaceData(Coord) != nullptr;
+	});
+	TestTrue(TEXT("Surface data extracted"), bReady);
+
+	const FChunkSurfaceData* Surface = Harness.Manager->GetChunkSurfaceData(Coord);
+	if (!Surface || Surface->SurfacePoints.Num() == 0)
+	{
+		AddError(TEXT("No surface points extracted from exposed-floor chunk"));
+		Harness.Manager->SetWorldMode(nullptr);
+		return true;
+	}
+
+	int32 UndergroundCount = 0;
+	for (const FVoxelSurfacePoint& P : Surface->SurfacePoints)
+	{
+		if (P.bIsUnderground) { ++UndergroundCount; }
+	}
+	// The ceiling is gone: the former cave floor is now the topmost, open-sky transition in every
+	// column and the chunk is not buried, so nothing is classified underground.
+	TestEqual(TEXT("Exposed cave floor reclassifies to surface after the ceiling is carved away"),
+		UndergroundCount, 0);
+
+	Harness.Manager->SetWorldMode(nullptr);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -750,20 +750,25 @@ void UVoxelChunkManager::Initialize(
 			// Handle scatter based on edit source
 			if (Source == EEditSource::Player && EditRadius > 0.0f)
 			{
-				// Player edits: surgically remove scatter in the affected radius only
-				// Pad by half a VoxelSize so scatter on block faces above/around the
-				// edit center is also cleared (block-face-snapped scatter sits at the
-				// face center, which is 0.5*VoxelSize from the block center)
+				// Player edits: surgically remove scatter in the affected radius immediately, so it
+				// disappears the same frame as the dig/build (no async wait). Pad by half a VoxelSize
+				// so scatter on block faces above/around the edit center is also cleared (block-face-
+				// snapped scatter sits at the face center, 0.5*VoxelSize from the block center).
 				const float ScatterClearRadius = EditRadius + Configuration->VoxelSize * 0.6f;
 				ScatterManager->ClearScatterInRadius(EditCenter, ScatterClearRadius);
 			}
-			else if (Source != EEditSource::Player)
+
+			// Re-extract the edited chunk from edit-merged voxels so scatter is RECLASSIFIED against the
+			// terrain the player now sees: mushrooms on a carved-open cave floor become surface (removed),
+			// grass is dropped from a dug-through opening, and a flattened POI pad loses buried cover. The
+			// immediate ClearScatterInRadius above handles the dig sphere itself; this catches the
+			// reclassification beyond it. RegenerateChunkScatter keeps the current instances rendered until
+			// the re-extraction smoothly replaces them per type, so it adds no flash. Zero-radius player
+			// undo/redo needs nothing — the targeted removal already happened at original-edit time.
+			if (Source != EEditSource::Player || EditRadius > 0.0f)
 			{
-				// System/Editor edits allow scatter to regenerate with new mesh
 				ScatterManager->RegenerateChunkScatter(ChunkCoord);
 			}
-			// Note: Player edits with zero radius (undo/redo) don't need scatter handling
-			// since the targeted removal already happened during the original edit
 		}
 
 		// Notify water propagation system of the edit
@@ -3100,8 +3105,23 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		if (ScatterManager && Configuration && Configuration->bEnableScatter)
 		{
 			const double ScatT0 = FPlatformTime::Seconds();
-			ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
-				State->Descriptor.VoxelData, State->Descriptor.ChunkSize, Configuration->VoxelSize);
+
+			// Scatter must classify against the terrain the player actually sees. When the
+			// chunk has edits (player dig/build, POI, editor), merge them into a scratch copy
+			// so scatter extracts from edit-merged voxels — otherwise grass can cover a dug
+			// cave opening or mushrooms can appear on a carved-flat surface.
+			if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+			{
+				TArray<FVoxelData> EditMergedVoxels = State->Descriptor.VoxelData;
+				EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
+				ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
+					EditMergedVoxels, State->Descriptor.ChunkSize, Configuration->VoxelSize);
+			}
+			else
+			{
+				ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
+					State->Descriptor.VoxelData, State->Descriptor.ChunkSize, Configuration->VoxelSize);
+			}
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
 

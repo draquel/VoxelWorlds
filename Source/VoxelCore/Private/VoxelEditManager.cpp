@@ -523,6 +523,26 @@ bool UVoxelEditManager::ChunkHasEdits(const FIntVector& ChunkCoord) const
 	return false;
 }
 
+void UVoxelEditManager::ApplyEditsToVoxelData(const FIntVector& ChunkCoord, TArray<FVoxelData>& VoxelData) const
+{
+	const FChunkEditLayer* EditLayer = EditLayers.Find(ChunkCoord);
+	if (!EditLayer || EditLayer->IsEmpty())
+	{
+		return;
+	}
+
+	// Mirror the merge meshing performs (see VoxelChunkManager mesh request build):
+	// apply each sparse edit on top of the procedural voxel at its linear index.
+	for (const auto& EditPair : EditLayer->Edits)
+	{
+		const int32 Index = EditPair.Key;
+		if (VoxelData.IsValidIndex(Index))
+		{
+			VoxelData[Index] = EditPair.Value.ApplyToProceduralData(VoxelData[Index]);
+		}
+	}
+}
+
 int32 UVoxelEditManager::GetTotalEditCount() const
 {
 	int32 Total = 0;

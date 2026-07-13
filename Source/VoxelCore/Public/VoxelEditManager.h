@@ -213,6 +213,17 @@ public:
 	bool ChunkHasEdits(const FIntVector& ChunkCoord) const;
 
 	/**
+	 * Apply this chunk's edit layer to a voxel array in place (procedural -> edit-merged),
+	 * matching the merge meshing performs. No-op if the chunk has no edits. Lets scatter
+	 * classify surface points against the terrain the player actually sees, so digging a
+	 * hole removes grass over it and carving into a hill reclassifies buried scatter.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param VoxelData Voxel array (chunk-local index order) mutated in place
+	 */
+	void ApplyEditsToVoxelData(const FIntVector& ChunkCoord, TArray<FVoxelData>& VoxelData) const;
+
+	/**
 	 * Get total number of chunks with edits.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
