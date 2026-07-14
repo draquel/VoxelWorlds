@@ -1127,7 +1127,13 @@ FIntVector UVoxelChunkManager::WorldToChunkCoord(const FVector& WorldPosition) c
 		return FIntVector::ZeroValue;
 	}
 
-	return FVoxelCoordinates::WorldToChunk(WorldPosition, Configuration->ChunkSize, Configuration->VoxelSize);
+	// Chunk keys are origin-relative: every chunk->world conversion in this class adds
+	// Configuration->WorldOrigin, and GetVoxelAtWorldPosition/UVoxelEditManager subtract it.
+	// Skipping the subtraction here returned coords shifted by WorldOrigin/ChunkWorldSize
+	// chunks on any world with a non-zero origin — callers keying HasCollision /
+	// RequestCollision / MarkChunkDirty off this hit phantom chunks (~556 m off in the demo).
+	const FVector RelativePos = WorldPosition - Configuration->WorldOrigin;
+	return FVoxelCoordinates::WorldToChunk(RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
 }
 
 FVoxelData UVoxelChunkManager::GetVoxelAtWorldPosition(const FVector& WorldPosition) const
