@@ -131,6 +131,30 @@ enum class EChunkState : uint8
 	PendingUnload
 };
 
+/**
+ * Residency of a chunk's voxel payload — the form the ChunkSize^3 FVoxelData array is held in.
+ *
+ * Far-chunk compression keeps a settled far chunk's voxel data in a compact form and
+ * materializes the raw array on demand through FChunkDescriptor::EnsureResident(). This accessor
+ * funnel (PR A) is established up front so later tiers add states without re-touching call sites;
+ * until the uniform (PR B) and compressed (PR C) tiers land, only Empty and Resident occur.
+ */
+UENUM()
+enum class EVoxelDataResidency : uint8
+{
+	/** No voxel payload (never generated, or unloaded/freed). */
+	Empty,
+
+	/** Raw ChunkSize^3 FVoxelData array is present in FChunkDescriptor::VoxelData. */
+	Resident,
+
+	/** Uniform chunk collapsed to a single value (PR B); raw array is empty. */
+	Uniform,
+
+	/** Payload held compressed in a side buffer (PR C); raw array is empty. */
+	Compressed
+};
+
 /** Voxel density threshold - values below are air, at or above are solid */
 constexpr uint8 VOXEL_SURFACE_THRESHOLD = 127;
 

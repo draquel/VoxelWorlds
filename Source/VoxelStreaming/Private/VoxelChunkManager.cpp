@@ -1148,7 +1148,7 @@ FVoxelData UVoxelChunkManager::GetVoxelAtWorldPosition(const FVector& WorldPosit
 		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
 
 	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
-	if (!State || !State->Descriptor.HasVoxelData())
+	if (!State || !State->Descriptor.HasVoxelDataAvailable())
 	{
 		return FVoxelData::Air();
 	}
@@ -1156,7 +1156,7 @@ FVoxelData UVoxelChunkManager::GetVoxelAtWorldPosition(const FVector& WorldPosit
 	const FIntVector LocalPos = FVoxelCoordinates::WorldToLocalVoxel(
 		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
 
-	return State->Descriptor.GetVoxel(LocalPos);
+	return State->Descriptor.GetVoxelResident(LocalPos);
 }
 
 FVoxelData UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition(const FVector& WorldPosition) const
@@ -1171,7 +1171,7 @@ FVoxelData UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition(const FVector& 
 		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
 
 	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
-	if (!State || !State->Descriptor.HasVoxelData())
+	if (!State || !State->Descriptor.HasVoxelDataAvailable())
 	{
 		return FVoxelData::Air();
 	}
@@ -1179,7 +1179,7 @@ FVoxelData UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition(const FVector& 
 	const FIntVector LocalPos = FVoxelCoordinates::WorldToLocalVoxel(
 		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
 
-	FVoxelData Voxel = State->Descriptor.GetVoxel(LocalPos);
+	FVoxelData Voxel = State->Descriptor.GetVoxelResident(LocalPos);
 
 	// Apply the chunk's edit layer (same index convention as the descriptor / collision merge).
 	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
@@ -1979,7 +1979,7 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Tim
 			if (State)
 			{
 				double T0 = FPlatformTime::Seconds();
-				State->Descriptor.VoxelData = MoveTemp(Result.VoxelData);
+				State->Descriptor.SetResidentVoxelData(MoveTemp(Result.VoxelData));
 				double T1 = FPlatformTime::Seconds();
 				OnChunkGenerationComplete(Result.ChunkCoord);
 				NotifySeconds += FPlatformTime::Seconds() - T1;
@@ -1994,7 +1994,7 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Tim
 			FVoxelChunkState* State = ChunkStates.Find(Result.ChunkCoord);
 			if (State)
 			{
-				State->Descriptor.VoxelData.Empty();
+				State->Descriptor.ClearVoxelData();
 			}
 			SetChunkState(Result.ChunkCoord, EChunkState::Unloaded);
 		}
@@ -2209,7 +2209,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 
 		// Get chunk state for voxel data
 		FVoxelChunkState* State = ChunkStates.Find(Request.ChunkCoord);
-		if (!State || State->Descriptor.VoxelData.Num() == 0)
+		if (!State || !State->Descriptor.HasVoxelDataAvailable())
 		{
 			// No voxel data available - skip
 			continue;
@@ -2247,7 +2247,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		MeshRequest.ChunkSize = Configuration->ChunkSize;
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
 		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
-		MeshRequest.VoxelData = State->Descriptor.VoxelData;
+		MeshRequest.VoxelData = State->Descriptor.GetVoxelDataForRead();
 
 		// Merge edit layer if present
 		if (EditManager && EditManager->ChunkHasEdits(Request.ChunkCoord))
@@ -3125,7 +3125,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			// cave opening or mushrooms can appear on a carved-flat surface.
 			if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
 			{
-				TArray<FVoxelData> EditMergedVoxels = State->Descriptor.VoxelData;
+				TArray<FVoxelData> EditMergedVoxels = State->Descriptor.GetVoxelDataForRead();
 				EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
 				ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
 					EditMergedVoxels, State->Descriptor.ChunkSize, Configuration->VoxelSize);
@@ -3133,7 +3133,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			else
 			{
 				ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
-					State->Descriptor.VoxelData, State->Descriptor.ChunkSize, Configuration->VoxelSize);
+					State->Descriptor.GetVoxelDataForRead(), State->Descriptor.ChunkSize, Configuration->VoxelSize);
 			}
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
@@ -3259,12 +3259,12 @@ bool UVoxelChunkManager::ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoor
 			continue;
 		}
 
-		if (Neighbor->Descriptor.VoxelData.Num() == VolumeSize)
+		if (Neighbor->Descriptor.HasVoxelDataAvailable())
 		{
-			continue; // resident — fine to mesh against
+			continue; // data available (resident or decompressable) — fine to mesh against
 		}
 
-		// Neighbor exists but its voxel data is not resident.
+		// Neighbor exists but its voxel data is not available.
 		if (Neighbor->State == EChunkState::PendingGeneration ||
 			Neighbor->State == EChunkState::Generating)
 		{
@@ -3347,7 +3347,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	}
 
 	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
-	if (!State || State->Descriptor.VoxelData.Num() == 0)
+	if (!State || !State->Descriptor.HasVoxelDataAvailable())
 	{
 		return false;
 	}
@@ -3359,7 +3359,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	const float WaterLevel = Configuration->WaterLevel;
 	const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(ChunkCoord, CS, VS);
 
-	if (State->Descriptor.VoxelData.Num() != VolumeSize)
+	if (!State->Descriptor.HasVoxelDataAvailable())
 	{
 		return false;
 	}
@@ -3376,7 +3376,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	// rejecting them one by one. For the X/Y faces, loop axis B is Z.
 	const int32 MaxSeedZ = FMath::Clamp(FMath::FloorToInt32((WaterLevel - ChunkWorldPos.Z) / VS), 0, CS - 1);
 
-	TArray<FVoxelData>& VoxelData = State->Descriptor.VoxelData;
+	TArray<FVoxelData>& VoxelData = State->Descriptor.GetVoxelDataMutable();
 
 	// Collect seed voxels from 6 face neighbors
 	TArray<int32> Seeds;
@@ -3389,12 +3389,12 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	{
 		const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[F];
 		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
-		if (!NeighborState || NeighborState->Descriptor.VoxelData.Num() != VolumeSize)
+		if (!NeighborState || !NeighborState->Descriptor.HasVoxelDataAvailable())
 		{
 			continue;
 		}
 
-		const TArray<FVoxelData>& NeighborData = NeighborState->Descriptor.VoxelData;
+		const TArray<FVoxelData>& NeighborData = NeighborState->Descriptor.GetVoxelDataForRead();
 
 		// Determine which boundary face to check on each chunk
 		// For face direction F, check our boundary face and the neighbor's opposite face
@@ -3543,7 +3543,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoord)
 {
 	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
-	if (!State || State->Descriptor.VoxelData.Num() == 0)
+	if (!State || !State->Descriptor.HasVoxelDataAvailable())
 	{
 		return;
 	}
@@ -3566,7 +3566,7 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	PartialMask.SetNumZeroed(CS * CS);
 
 	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
-		State->Descriptor.VoxelData, CS, PartialMask);
+		State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
 
 	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
 
@@ -3729,9 +3729,13 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 
 		FNeighborCache Cache;
 		Cache.State = ChunkStates.Find(NeighborCoord);
-		if (Cache.State && Cache.State->Descriptor.VoxelData.Num() == VolumeSize)
+		if (Cache.State && Cache.State->Descriptor.HasVoxelDataAvailable())
 		{
 			Cache.bHasData = true;
+			// Materialize the neighbor's raw array ONCE here (const overload; no-op when already
+			// resident). The per-voxel GetNeighborVoxel reads below then hit a guaranteed-resident
+			// array — never decompress on the ~25-125k-voxel per-launch hot path.
+			Cache.State->Descriptor.GetVoxelDataForRead();
 			// Cache edit layer lookup (only once per neighbor)
 			if (EditManager)
 			{
@@ -3763,6 +3767,8 @@ void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord,
 		}
 
 		const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+		// Residency was forced once at cache fill (bHasData ⇒ resident), so read the raw array
+		// directly here — the memoized per-voxel hot path must not route through an accessor.
 		const TArray<FVoxelData>& Voxels = Cache.State->Descriptor.VoxelData;
 		if (!Voxels.IsValidIndex(Index))
 		{
@@ -4611,7 +4617,7 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	// Verify we have voxel data
 	const int32 ChunkSize = Configuration->ChunkSize;
 	const int32 VolumeSize = ChunkSize * ChunkSize * ChunkSize;
-	if (State->Descriptor.VoxelData.Num() != VolumeSize)
+	if (!State->Descriptor.HasVoxelDataAvailable())
 	{
 		return false;
 	}
@@ -4624,7 +4630,7 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	OutMeshRequest.WorldOrigin = Configuration->WorldOrigin;
 
 	// Copy voxel data
-	OutMeshRequest.VoxelData = State->Descriptor.VoxelData;
+	OutMeshRequest.VoxelData = State->Descriptor.GetVoxelDataForRead();
 
 	// Merge edit layer if present
 	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
