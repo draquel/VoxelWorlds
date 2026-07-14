@@ -125,6 +125,23 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 			TerrainMinHeight, TerrainMaxHeight);
 	}
 
+	// Far-band surface-slab culling: per-column analytic surface sampling needs the generation
+	// params. InfinitePlane only — its 2D height math (SampleTerrainNoise2D + NoiseToTerrainHeight)
+	// is the verified canonical natural surface (POI placement stands pads on it); IslandBowl's
+	// falloff-composed height is not exposed the same way, so it stays on global bounds.
+	bSurfaceSlabCulling = WorldConfig->bFarBandSurfaceSlabCulling && WorldMode == EWorldMode::InfinitePlane;
+	if (bSurfaceSlabCulling)
+	{
+		SlabNoiseParams = WorldConfig->NoiseParams;
+		SlabSeaLevel = WorldConfig->SeaLevel;
+		SlabHeightScale = WorldConfig->HeightScale;
+		SlabBaseHeight = WorldConfig->BaseHeight;
+		bSlabHasWater = WorldConfig->bEnableWaterLevel;
+		SlabWaterLevel = WorldConfig->WaterLevel;
+		ColumnSurfaceCache.Reset();
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Far-band surface-slab culling ENABLED (beyond the first LOD band, columns keep surface ±1.5 chunks)"));
+	}
+
 	// Cache Island mode parameters for boundary culling
 	if (WorldMode == EWorldMode::IslandBowl)
 	{
@@ -927,7 +944,83 @@ bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
 		return true;
 	}
 
+	// Far-band surface slab: beyond the first (full-detail) band, a column only keeps chunks
+	// around its OWN surface — the global range above spans the whole world's min–max and loads
+	// ~7 layers per column everywhere. Gate a couple of chunk-widths past the near band's edge
+	// so full-depth columns don't churn as the viewer wanders the boundary; slab-culled chunks
+	// are never tracked, so neighbour meshing treats them as the loaded-region edge (their
+	// clamped boundary planes are uniform solid/air — no seam artifacts).
+	if (bSurfaceSlabCulling && LODBands.Num() > 0)
+	{
+		const FVector2D ChunkCentreXY(
+			Context.WorldOrigin.X + (ChunkCoord.X + 0.5f) * ChunkWorldSize,
+			Context.WorldOrigin.Y + (ChunkCoord.Y + 0.5f) * ChunkWorldSize);
+		const float HorizDist = FVector2D::Distance(
+			ChunkCentreXY, FVector2D(Context.ViewerPosition.X, Context.ViewerPosition.Y));
+		if (HorizDist > LODBands[0].MaxDistance + 2.0f * ChunkWorldSize)
+		{
+			float SurfMin = 0.0f, SurfMax = 0.0f;
+			GetColumnSurfaceRange(ChunkCoord.X, ChunkCoord.Y, Context.WorldOrigin, SurfMin, SurfMax);
+			// 1.5 chunks of slack: covers surface variation between the 5 footprint samples,
+			// POI flatten deltas from the natural height, and meshing skirt, while keeping the
+			// per-column cost at ~3-4 layers instead of the global range's ~7.
+			const float Slack = 1.5f * ChunkWorldSize;
+			if (ChunkMaxZ < SurfMin - Slack || ChunkMinZ > SurfMax + Slack)
+			{
+				return true;
+			}
+		}
+	}
+
 	return false;
+}
+
+void FDistanceBandLODStrategy::GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY,
+	const FVector& WorldOrigin, float& OutMin, float& OutMax) const
+{
+	const FIntPoint Key(ChunkX, ChunkY);
+	if (const FFloatInterval* Cached = ColumnSurfaceCache.Find(Key))
+	{
+		OutMin = Cached->Min;
+		OutMax = Cached->Max;
+		return;
+	}
+
+	// 5-point sample over the chunk footprint (corners + centre). The ±2-chunk slack the caller
+	// applies covers surface variation between samples, POI flatten deltas from the natural
+	// height, and meshing skirt. Generation params are immutable per world → memoize forever.
+	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+	const float MinX = WorldOrigin.X + ChunkX * ChunkWorldSize;
+	const float MinY = WorldOrigin.Y + ChunkY * ChunkWorldSize;
+	const FVector2D Samples[5] = {
+		{ MinX,                          MinY },
+		{ MinX + ChunkWorldSize,         MinY },
+		{ MinX,                          MinY + ChunkWorldSize },
+		{ MinX + ChunkWorldSize,         MinY + ChunkWorldSize },
+		{ MinX + 0.5f * ChunkWorldSize,  MinY + 0.5f * ChunkWorldSize },
+	};
+
+	const FWorldModeTerrainParams TerrainParams(SlabSeaLevel, SlabHeightScale, SlabBaseHeight);
+	float SurfMin = TNumericLimits<float>::Max();
+	float SurfMax = TNumericLimits<float>::Lowest();
+	for (const FVector2D& Sample : Samples)
+	{
+		const float Noise = FInfinitePlaneWorldMode::SampleTerrainNoise2D(Sample.X, Sample.Y, SlabNoiseParams);
+		const float Height = FInfinitePlaneWorldMode::NoiseToTerrainHeight(Noise, TerrainParams);
+		SurfMin = FMath::Min(SurfMin, Height);
+		SurfMax = FMath::Max(SurfMax, Height);
+	}
+
+	// Underwater columns reach up to the water plane: the far ocean's SURFACE (and the water
+	// volume above its floor) must stay loaded, not just the seabed.
+	if (bSlabHasWater)
+	{
+		SurfMax = FMath::Max(SurfMax, SlabWaterLevel);
+	}
+
+	ColumnSurfaceCache.Add(Key, FFloatInterval(SurfMin, SurfMax));
+	OutMin = SurfMin;
+	OutMax = SurfMax;
 }
 
 bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(

@@ -280,6 +280,17 @@ public:
 	float ViewDistance = 10000.0f;
 
 	/**
+	 * Far-band surface-slab culling: beyond the FIRST (full-detail) LOD band, a column only
+	 * loads the chunks intersecting its OWN analytic surface height (± 2 chunks of slack)
+	 * instead of the world's full min–max height range — cutting the per-column chunk count
+	 * roughly 3× at distance, which is what makes long view distances affordable. Distant cave
+	 * interiors and deep player edits stay unloaded until the full-detail band reaches them
+	 * (they are not visible from afar). InfinitePlane worlds only; other modes ignore this.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	bool bFarBandSurfaceSlabCulling = true;
+
+	/**
 	 * LOD refine (detail-increasing) hysteresis deadband, in chunk-width units. A chunk
 	 * upgrades to a finer LOD once the viewer crosses the band's inner edge by this many
 	 * chunk widths. Keep small (eager) so detail lands at/just-before you reach a chunk;

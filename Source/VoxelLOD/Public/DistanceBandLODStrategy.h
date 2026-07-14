@@ -296,6 +296,39 @@ protected:
 	/** Maximum terrain height (SeaLevel + BaseHeight + HeightScale + buffer) */
 	float TerrainMaxHeight = 0.0f;
 
+	// ==================== Far-Band Surface-Slab Culling ====================
+
+	/**
+	 * When enabled (config bFarBandSurfaceSlabCulling, InfinitePlane only), columns beyond the
+	 * first LOD band only keep chunks intersecting their OWN analytic surface height ± slack —
+	 * the global height range above loads ~7 layers per column everywhere, which is what makes
+	 * long view distances explode. Distant cave interiors / deep edits stay unloaded (invisible
+	 * from afar); the full-detail band keeps whole columns.
+	 */
+	bool bSurfaceSlabCulling = false;
+
+	/** Cached generation params for the per-column analytic surface sample. */
+	FVoxelNoiseParams SlabNoiseParams;
+	float SlabSeaLevel = 0.0f;
+	float SlabHeightScale = 0.0f;
+	float SlabBaseHeight = 0.0f;
+
+	/** Water plane: underwater columns extend their slab up to the water surface (the far ocean
+	 *  must keep the chunks that mesh its surface, not just its floor). */
+	bool bSlabHasWater = false;
+	float SlabWaterLevel = 0.0f;
+
+	/**
+	 * Column (chunk XY) -> [min, max] analytic surface height over the chunk footprint
+	 * (5-point sample: corners + centre). Memoized for the strategy's lifetime — generation
+	 * params are immutable per world. Game-thread only.
+	 */
+	mutable TMap<FIntPoint, FFloatInterval> ColumnSurfaceCache;
+
+	/** The memoized per-column surface range (world Z) over the chunk footprint. */
+	void GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY, const FVector& WorldOrigin,
+		float& OutMin, float& OutMax) const;
+
 	// ==================== Island Mode Culling ====================
 
 	/** Island shape type: 0 = Circular, 1 = Rectangle */
