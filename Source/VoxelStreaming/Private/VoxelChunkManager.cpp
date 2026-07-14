@@ -126,8 +126,17 @@ static TAutoConsoleVariable<int32> CVarFarCompressionIdleFrames(
 static TAutoConsoleVariable<int32> CVarFarCompressionMaxScansPerTick(
 	TEXT("voxel.FarCompression.MaxScansPerTick"),
 	4,
-	TEXT("Budget: max full uniform-detection scans per tick (each ~O(chunk) = ~0.1ms). Free "
-	     "re-collapses and skips of already-evaluated chunks are not counted against this."),
+	TEXT("Budget: max fresh compress attempts per tick (uniform scan + general encode, each ~0.1-1ms). "
+	     "Free re-collapses/re-compresses and skips of already-evaluated chunks are not counted against this."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarCompressionCodec(
+	TEXT("voxel.FarCompression.Codec"),
+	3, // Oodle — bake-off winner (best ratio + fastest encode/decode; de-interleave hurts on
+	   // run-heavy far chunks because the thin gradient band leaves long AoS tuple runs Oodle handles well)
+	TEXT("Encode codec for non-uniform far chunks (EVoxelChunkCodec): 0=uniform-only (no general "
+	     "codec), 2=LZ4, 3=Oodle, 4=LZ4Planar, 5=OodlePlanar. Uniform collapse always applies. "
+	     "Buffers written by any codec still decode (codec id is stored in the buffer header)."),
 	ECVF_Default);
 
 UVoxelChunkManager::UVoxelChunkManager()
@@ -1396,9 +1405,8 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 			Stats.CompressionSavedBytes += FullBytes; // raw array dropped; UniformValue is in the struct
 			break;
 		case EVoxelDataResidency::Compressed:
-			// PR C: subtract the compressed side-buffer size from FullBytes. Unreachable in PR B.
 			++Stats.CompressedChunks;
-			Stats.CompressionSavedBytes += FullBytes;
+			Stats.CompressionSavedBytes += FullBytes - static_cast<int64>(D.CompressedVoxelData.GetAllocatedSize());
 			break;
 		case EVoxelDataResidency::Empty:
 		default:
@@ -3055,8 +3063,9 @@ void UVoxelChunkManager::ProcessFarCompressionSweep()
 	const int32 MinStride = FMath::Max(1, CVarFarCompressionMinStride.GetValueOnGameThread());
 	const int64 IdleFrames = FMath::Max(0, CVarFarCompressionIdleFrames.GetValueOnGameThread());
 	const int32 MaxScans = FMath::Max(1, CVarFarCompressionMaxScansPerTick.GetValueOnGameThread());
+	const EVoxelChunkCodec Codec = static_cast<EVoxelChunkCodec>(FMath::Clamp(CVarFarCompressionCodec.GetValueOnGameThread(), 0, 5));
 
-	int32 ScansUsed = 0;
+	int32 Budget = 0;
 	for (auto& Pair : ChunkStates)
 	{
 		FVoxelChunkState& S = Pair.Value;
@@ -3071,24 +3080,25 @@ void UVoxelChunkManager::ProcessFarCompressionSweep()
 		// settled and resets on any remesh (Loaded -> PendingMeshing -> ... -> Loaded).
 		if ((CurrentFrame - S.LastStateChangeFrame) < IdleFrames) continue;
 
-		if (D.bUniformValueValid)
+		if (D.bUniformValueValid || D.CompressedVoxelData.Num() > 0)
 		{
-			// Free re-collapse (array is known == UniformValue, unmutated) — not budgeted.
-			D.TryCollapseUniform();
+			// A compact form is already cached (the chunk was expanded by access); re-apply it for
+			// free — no scan, no re-encode. Not budgeted.
+			D.TryCompress(Codec);
 			continue;
 		}
 		if (D.bCompressionEvaluated)
 		{
-			// Already scanned and found non-uniform; skip until its content changes.
+			// Already attempted; neither uniform nor the codec beat raw. Skip until content changes.
 			continue;
 		}
-		if (ScansUsed >= MaxScans)
+		if (Budget >= MaxScans)
 		{
-			// Out of scan budget this tick; retry next tick (bCompressionEvaluated stays false).
+			// Out of budget this tick; retry next tick (bCompressionEvaluated stays false).
 			continue;
 		}
-		++ScansUsed;
-		D.TryCollapseUniform();
+		++Budget;
+		D.TryCompress(Codec);
 	}
 }
 
