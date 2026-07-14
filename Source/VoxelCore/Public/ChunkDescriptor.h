@@ -75,9 +75,25 @@ struct VOXELCORE_API FChunkDescriptor
 	/**
 	 * The resident array has been written since it was last (de)compressed. When a chunk
 	 * re-qualifies for compression, a clean (!bDataMutated) chunk can drop its raw array and reuse
-	 * a still-valid compressed buffer instead of re-encoding. PR A: set, never read.
+	 * a still-valid compressed buffer instead of re-encoding.
 	 */
 	bool bDataMutated = false;
+
+	/** The single value a Uniform chunk collapses to (valid when bUniformValueValid). */
+	FVoxelData UniformValue;
+
+	/**
+	 * UniformValue faithfully represents the current logical content — i.e. the chunk is (or, while
+	 * temporarily Resident, was) all-UniformValue and nothing has mutated it since. Lets a re-qualifying
+	 * chunk re-collapse to Uniform for free (drop the raw array, no re-scan). Cleared on any content write.
+	 */
+	bool bUniformValueValid = false;
+
+	/**
+	 * A resident chunk has already been evaluated for compression and is NOT collapsible (non-uniform),
+	 * so the sweep skips re-scanning it until its content changes. Cleared on any content write.
+	 */
+	bool bCompressionEvaluated = false;
 
 	/** Default constructor */
 	FChunkDescriptor() = default;
@@ -97,6 +113,8 @@ struct VOXELCORE_API FChunkDescriptor
 		VoxelData.SetNumZeroed(TotalVoxels);
 		Residency = EVoxelDataResidency::Resident;
 		bDataMutated = false;
+		bUniformValueValid = false;
+		bCompressionEvaluated = false;
 	}
 
 	/** Install a freshly generated resident voxel array (the sole population point). */
@@ -105,6 +123,8 @@ struct VOXELCORE_API FChunkDescriptor
 		VoxelData = MoveTemp(InData);
 		Residency = EVoxelDataResidency::Resident;
 		bDataMutated = false;
+		bUniformValueValid = false;
+		bCompressionEvaluated = false;
 	}
 
 	/** Clear voxel data to free memory */
@@ -113,6 +133,8 @@ struct VOXELCORE_API FChunkDescriptor
 		VoxelData.Empty();
 		Residency = EVoxelDataResidency::Empty;
 		bDataMutated = false;
+		bUniformValueValid = false;
+		bCompressionEvaluated = false;
 	}
 
 	/** Get total number of voxels in this chunk */
@@ -157,6 +179,8 @@ struct VOXELCORE_API FChunkDescriptor
 			VoxelData[Index] = Data;
 			bIsDirty = true;
 			bDataMutated = true;
+			bUniformValueValid = false;
+			bCompressionEvaluated = false;
 		}
 	}
 
@@ -174,6 +198,8 @@ struct VOXELCORE_API FChunkDescriptor
 			VoxelData[Index] = Data;
 			bIsDirty = true;
 			bDataMutated = true;
+			bUniformValueValid = false;
+			bCompressionEvaluated = false;
 		}
 	}
 
@@ -213,9 +239,68 @@ struct VOXELCORE_API FChunkDescriptor
 	 */
 	TArray<FVoxelData>& EnsureResident()
 	{
-		// PR B: if (Residency == Uniform)    { expand UniformValue -> VoxelData; Residency = Resident; }
+		if (Residency == EVoxelDataResidency::Uniform)
+		{
+			// Expand the single value back into a full array. UniformValue stays valid — the array is
+			// exactly UniformValue everywhere until mutated — so re-collapsing is free (see TryCollapseUniform).
+			VoxelData.Init(UniformValue, GetTotalVoxels());
+			Residency = EVoxelDataResidency::Resident;
+			bDataMutated = false;
+			bUniformValueValid = true;
+		}
 		// PR C: if (Residency == Compressed) { decompress CompressedVoxelData -> VoxelData; Residency = Resident; }
 		return VoxelData;
+	}
+
+	/**
+	 * Sweep-side compression: collapse a resident chunk whose voxels are all identical into
+	 * Residency::Uniform + UniformValue, dropping the ~1MB raw array. Returns true if collapsed.
+	 * A chunk with a still-valid UniformValue (expanded-but-unmutated) re-collapses for free; a
+	 * non-uniform chunk is marked evaluated so the sweep won't re-scan it until its content changes.
+	 * Game-thread only.
+	 */
+	bool TryCollapseUniform()
+	{
+		if (Residency != EVoxelDataResidency::Resident)
+		{
+			return false;
+		}
+		if (bUniformValueValid)
+		{
+			VoxelData.Empty();
+			Residency = EVoxelDataResidency::Uniform;
+			return true;
+		}
+		bCompressionEvaluated = true;
+		FVoxelData Value;
+		if (ComputeUniformValue(VoxelData, Value))
+		{
+			UniformValue = Value;
+			bUniformValueValid = true;
+			VoxelData.Empty();
+			Residency = EVoxelDataResidency::Uniform;
+			return true;
+		}
+		return false;
+	}
+
+	/** True iff every voxel in Data is identical; writes that value to Out. False for an empty array. */
+	static bool ComputeUniformValue(const TArray<FVoxelData>& Data, FVoxelData& Out)
+	{
+		if (Data.Num() == 0)
+		{
+			return false;
+		}
+		const FVoxelData First = Data[0];
+		for (int32 i = 1; i < Data.Num(); ++i)
+		{
+			if (Data[i] != First)
+			{
+				return false;
+			}
+		}
+		Out = First;
+		return true;
 	}
 
 	/** Read access: guarantees residency, returns the array. Callers copy or read without mutating. */
@@ -242,6 +327,8 @@ struct VOXELCORE_API FChunkDescriptor
 	{
 		TArray<FVoxelData>& Data = EnsureResident();
 		bDataMutated = true;
+		bUniformValueValid = false;
+		bCompressionEvaluated = false;
 		return Data;
 	}
 
