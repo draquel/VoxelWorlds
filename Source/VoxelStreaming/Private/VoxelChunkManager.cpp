@@ -96,6 +96,40 @@ static TAutoConsoleVariable<int32> CVarStreamSpeedAdaptive(
 	     "Covers realistic fast movement; extreme speeds (~40 m/s+) still need forward-biased generation."),
 	ECVF_Default);
 
+// ==================== Far-chunk voxel-data compression ====================
+// Settled far chunks keep a resident ~1MB voxel array purely to serve rare events (neighbor-plane
+// reads, LOD upgrades, edits, queries). A budgeted sweep compacts idle far chunks; any access
+// transparently re-materializes the array via FChunkDescriptor::EnsureResident(). PR B ships the
+// uniform tier only (all-air/all-solid chunks collapse to one value); PR C adds the general codec.
+
+static TAutoConsoleVariable<int32> CVarFarCompression(
+	TEXT("voxel.FarCompression"),
+	1,
+	TEXT("Master enable for far-chunk voxel-data compression sweep. 1 = on, 0 = off. "
+	     "Access transparently decompresses regardless; this only gates the compress sweep."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarCompressionMinStride(
+	TEXT("voxel.FarCompression.MinStride"),
+	4,
+	TEXT("Minimum LOD stride (1<<LODLevel) a chunk must be at to qualify for compression. "
+	     "4 = stride-4 far band only (LOD>=2). 2 = also stride-2 (LOD>=1). Clamped to a power of two."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarCompressionIdleFrames(
+	TEXT("voxel.FarCompression.IdleFrames"),
+	300,
+	TEXT("Frames a chunk must sit settled (Loaded, unchanged) before it qualifies for compression. "
+	     "Primary thrash guard; ~300 = 5s @ 60fps. Keep >= ~180."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarCompressionMaxScansPerTick(
+	TEXT("voxel.FarCompression.MaxScansPerTick"),
+	4,
+	TEXT("Budget: max full uniform-detection scans per tick (each ~O(chunk) = ~0.1ms). Free "
+	     "re-collapses and skips of already-evaluated chunks are not counted against this."),
+	ECVF_Default);
+
 UVoxelChunkManager::UVoxelChunkManager()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -402,6 +436,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		}
 	}
 	Timing.LODMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+
+	// === Far-chunk voxel-data compression sweep ===
+	// Runs after LOD evaluation so a chunk just queued for an LOD remesh (now dirty) is excluded.
+	ProcessFarCompressionSweep();
 
 	// === Subsystem deferral check ===
 	const int32 DeferThreshold = Configuration ? Configuration->DeferSubsystemsThreshold : 20;
@@ -1316,6 +1354,18 @@ FString UVoxelChunkManager::GetDebugStats() const
 	Stats += FString::Printf(TEXT("Loaded: %d\n"), StateCounts[(int32)EChunkState::Loaded]);
 	Stats += FString::Printf(TEXT("PendingUnload: %d\n"), StateCounts[(int32)EChunkState::PendingUnload]);
 
+	// Far-chunk compression residency breakdown + memory reclaimed.
+	{
+		const FVoxelMemoryStats Mem = GetVoxelMemoryStats();
+		Stats += TEXT("\n--- Voxel Data Residency ---\n");
+		Stats += FString::Printf(TEXT("Resident: %d\n"), Mem.ResidentChunks);
+		Stats += FString::Printf(TEXT("Uniform: %d\n"), Mem.UniformChunks);
+		Stats += FString::Printf(TEXT("Compressed: %d\n"), Mem.CompressedChunks);
+		Stats += FString::Printf(TEXT("Empty: %d\n"), Mem.EmptyChunks);
+		Stats += FString::Printf(TEXT("Resident voxel data: %.1f MB\n"), Mem.VoxelDataBytes / (1024.0 * 1024.0));
+		Stats += FString::Printf(TEXT("Reclaimed by compression: %.1f MB\n"), Mem.CompressionSavedBytes / (1024.0 * 1024.0));
+	}
+
 	if (LODStrategy)
 	{
 		Stats += TEXT("\n");
@@ -1332,7 +1382,29 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 	// Voxel data in chunk states
 	for (const auto& Pair : ChunkStates)
 	{
-		Stats.VoxelDataBytes += Pair.Value.Descriptor.GetMemoryUsage();
+		const FChunkDescriptor& D = Pair.Value.Descriptor;
+		Stats.VoxelDataBytes += D.GetMemoryUsage();
+
+		const int64 FullBytes = static_cast<int64>(D.GetTotalVoxels()) * sizeof(FVoxelData);
+		switch (D.Residency)
+		{
+		case EVoxelDataResidency::Resident:
+			++Stats.ResidentChunks;
+			break;
+		case EVoxelDataResidency::Uniform:
+			++Stats.UniformChunks;
+			Stats.CompressionSavedBytes += FullBytes; // raw array dropped; UniformValue is in the struct
+			break;
+		case EVoxelDataResidency::Compressed:
+			// PR C: subtract the compressed side-buffer size from FullBytes. Unreachable in PR B.
+			++Stats.CompressedChunks;
+			Stats.CompressionSavedBytes += FullBytes;
+			break;
+		case EVoxelDataResidency::Empty:
+		default:
+			++Stats.EmptyChunks;
+			break;
+		}
 	}
 
 	// Edit manager
@@ -2973,6 +3045,53 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 	ChunkStates.Remove(ChunkCoord);
 }
 
+void UVoxelChunkManager::ProcessFarCompressionSweep()
+{
+	if (CVarFarCompression.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+
+	const int32 MinStride = FMath::Max(1, CVarFarCompressionMinStride.GetValueOnGameThread());
+	const int64 IdleFrames = FMath::Max(0, CVarFarCompressionIdleFrames.GetValueOnGameThread());
+	const int32 MaxScans = FMath::Max(1, CVarFarCompressionMaxScansPerTick.GetValueOnGameThread());
+
+	int32 ScansUsed = 0;
+	for (auto& Pair : ChunkStates)
+	{
+		FVoxelChunkState& S = Pair.Value;
+		FChunkDescriptor& D = S.Descriptor;
+
+		// Only settled, currently-resident far chunks that aren't pending a remesh.
+		if (S.State != EChunkState::Loaded) continue;
+		if (D.Residency != EVoxelDataResidency::Resident) continue;
+		if (D.bIsDirty) continue;
+		if ((1 << FMath::Clamp(S.LODLevel, 0, 7)) < MinStride) continue;
+		// Idle: LastStateChangeFrame is the frame the chunk entered Loaded; it stays fixed while
+		// settled and resets on any remesh (Loaded -> PendingMeshing -> ... -> Loaded).
+		if ((CurrentFrame - S.LastStateChangeFrame) < IdleFrames) continue;
+
+		if (D.bUniformValueValid)
+		{
+			// Free re-collapse (array is known == UniformValue, unmutated) — not budgeted.
+			D.TryCollapseUniform();
+			continue;
+		}
+		if (D.bCompressionEvaluated)
+		{
+			// Already scanned and found non-uniform; skip until its content changes.
+			continue;
+		}
+		if (ScansUsed >= MaxScans)
+		{
+			// Out of scan budget this tick; retry next tick (bCompressionEvaluated stays false).
+			continue;
+		}
+		++ScansUsed;
+		D.TryCollapseUniform();
+	}
+}
+
 // ==================== Generation/Meshing Callbacks ====================
 
 void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
@@ -4492,6 +4611,52 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
 		if (Managers == 0)
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats: no UVoxelChunkManager with a scatter manager found"));
+		}
+	}));
+
+// Console: voxel.FarCompression.Stats
+// Dump the chunk manager's voxel-data residency breakdown (Resident/Uniform/Compressed/Empty
+// chunk counts + resident MB + MB reclaimed by compression). Read with unreal-mcp
+// LogsToolset.GetLogEntries (category LogVoxelStreaming) since Claudius get_output_log fails
+// while PIE holds the log file open.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelFarCompressionStatsCmd(
+	TEXT("voxel.FarCompression.Stats"),
+	TEXT("Log voxel-data residency + compression memory stats for the running game world."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.FarCompression.Stats: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+
+		int32 Managers = 0;
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			if (!CM) { continue; }
+			++Managers;
+			const UVoxelChunkManager::FVoxelMemoryStats M = CM->GetVoxelMemoryStats();
+			UE_LOG(LogVoxelStreaming, Warning,
+				TEXT("voxel.FarCompression.Stats: Resident=%d Uniform=%d Compressed=%d Empty=%d | ResidentVoxelData=%.1fMB Reclaimed=%.1fMB"),
+				M.ResidentChunks, M.UniformChunks, M.CompressedChunks, M.EmptyChunks,
+				M.VoxelDataBytes / (1024.0 * 1024.0), M.CompressionSavedBytes / (1024.0 * 1024.0));
+		}
+		if (Managers == 0)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.FarCompression.Stats: no UVoxelChunkManager found"));
 		}
 	}));
 

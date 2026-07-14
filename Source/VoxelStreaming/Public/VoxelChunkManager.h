@@ -452,6 +452,13 @@ public:
 		int64 CollisionBytes = 0;      // Collision manager memory
 		int64 ScatterBytes = 0;        // Scatter manager + renderer memory
 		int64 TotalBytes = 0;          // Sum of above
+
+		// Far-chunk compression residency breakdown (chunk counts + bytes reclaimed).
+		int32 ResidentChunks = 0;      // raw array in memory
+		int32 UniformChunks = 0;       // collapsed to a single value
+		int32 CompressedChunks = 0;    // held in a compressed side buffer (PR C)
+		int32 EmptyChunks = 0;         // no voxel payload
+		int64 CompressionSavedBytes = 0; // raw bytes NOT resident thanks to uniform/compressed tiers
 	};
 
 	/** Per-system timing breakdown (milliseconds) */
@@ -672,6 +679,13 @@ protected:
 	 * Remove chunk state tracking.
 	 */
 	void RemoveChunkState(const FIntVector& ChunkCoord);
+
+	/**
+	 * Budgeted per-tick far-chunk voxel-data compression sweep. Compacts idle, settled far chunks
+	 * (see voxel.FarCompression.* cvars); access transparently re-materializes via EnsureResident().
+	 * PR B: uniform-chunk collapse only.
+	 */
+	void ProcessFarCompressionSweep();
 
 	// ==================== Generation/Meshing Callbacks ====================
 
