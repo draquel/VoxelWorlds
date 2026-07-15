@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelData.h"
+#include "VoxelChunkCodec.h"
 #include "ChunkDescriptor.generated.h"
 
 /**
@@ -90,10 +91,19 @@ struct VOXELCORE_API FChunkDescriptor
 	bool bUniformValueValid = false;
 
 	/**
-	 * A resident chunk has already been evaluated for compression and is NOT collapsible (non-uniform),
-	 * so the sweep skips re-scanning it until its content changes. Cleared on any content write.
+	 * A resident chunk has already been evaluated for compression and neither the uniform nor the
+	 * general codec beat the raw size, so the sweep skips re-attempting it until its content changes.
+	 * Cleared on any content write.
 	 */
 	bool bCompressionEvaluated = false;
+
+	/**
+	 * Compressed voxel side buffer ([header][payload], see FVoxelChunkCodec) — valid when
+	 * Residency == Compressed, or retained as a still-valid cache after EnsureResident() expands a
+	 * compressed chunk that hasn't been mutated (enables a free re-compress). Non-UPROPERTY: runtime
+	 * cache, not reflected/serialized. The format is persistence-ready for the future world-save epic.
+	 */
+	TArray<uint8> CompressedVoxelData;
 
 	/** Default constructor */
 	FChunkDescriptor() = default;
@@ -115,6 +125,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bDataMutated = false;
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
+		CompressedVoxelData.Empty();
 	}
 
 	/** Install a freshly generated resident voxel array (the sole population point). */
@@ -125,6 +136,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bDataMutated = false;
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
+		CompressedVoxelData.Empty();
 	}
 
 	/** Clear voxel data to free memory */
@@ -135,6 +147,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bDataMutated = false;
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
+		CompressedVoxelData.Empty();
 	}
 
 	/** Get total number of voxels in this chunk */
@@ -181,6 +194,7 @@ struct VOXELCORE_API FChunkDescriptor
 			bDataMutated = true;
 			bUniformValueValid = false;
 			bCompressionEvaluated = false;
+			CompressedVoxelData.Empty();
 		}
 	}
 
@@ -200,6 +214,7 @@ struct VOXELCORE_API FChunkDescriptor
 			bDataMutated = true;
 			bUniformValueValid = false;
 			bCompressionEvaluated = false;
+			CompressedVoxelData.Empty();
 		}
 	}
 
@@ -248,7 +263,14 @@ struct VOXELCORE_API FChunkDescriptor
 			bDataMutated = false;
 			bUniformValueValid = true;
 		}
-		// PR C: if (Residency == Compressed) { decompress CompressedVoxelData -> VoxelData; Residency = Resident; }
+		else if (Residency == EVoxelDataResidency::Compressed)
+		{
+			// Decompress in place. CompressedVoxelData is retained (still valid until mutated) so a
+			// re-qualifying chunk re-compresses for free by just dropping the raw array again.
+			FVoxelChunkCodec::Decompress(CompressedVoxelData, VoxelData);
+			Residency = EVoxelDataResidency::Resident;
+			bDataMutated = false;
+		}
 		return VoxelData;
 	}
 
@@ -280,6 +302,55 @@ struct VOXELCORE_API FChunkDescriptor
 			VoxelData.Empty();
 			Residency = EVoxelDataResidency::Uniform;
 			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Sweep-side compression entry point. Compacts a resident chunk into the smallest available form:
+	 * a free re-collapse/re-compress if a compact form is already cached (chunk was expanded but not
+	 * mutated), else a uniform collapse, else the general codec. Non-collapsible, poorly-compressing
+	 * chunks stay Resident and are marked evaluated so the sweep skips them. Returns true if compacted.
+	 * Game-thread only.
+	 */
+	bool TryCompress(EVoxelChunkCodec Codec)
+	{
+		if (Residency != EVoxelDataResidency::Resident)
+		{
+			return false;
+		}
+		// Free re-collapse to Uniform (cached single value, unmutated) — no scan.
+		if (bUniformValueValid)
+		{
+			VoxelData.Empty();
+			Residency = EVoxelDataResidency::Uniform;
+			return true;
+		}
+		// Free re-compress (cached buffer, unmutated) — no re-encode.
+		if (CompressedVoxelData.Num() > 0)
+		{
+			VoxelData.Empty();
+			Residency = EVoxelDataResidency::Compressed;
+			return true;
+		}
+		// Fresh chunk: try the cheap uniform collapse first (also marks non-uniform as evaluated).
+		if (TryCollapseUniform())
+		{
+			return true;
+		}
+		// General codec for a non-uniform chunk (skipped in uniform-only mode).
+		if (Codec != EVoxelChunkCodec::Uniform && Codec != EVoxelChunkCodec::Raw)
+		{
+			const int32 RawBytes = VoxelData.Num() * sizeof(FVoxelData);
+			TArray<uint8> Buffer;
+			if (FVoxelChunkCodec::Compress(VoxelData, Codec, ChunkSize, Buffer) && Buffer.Num() < RawBytes)
+			{
+				CompressedVoxelData = MoveTemp(Buffer);
+				VoxelData.Empty();
+				Residency = EVoxelDataResidency::Compressed;
+				bDataMutated = false;
+				return true;
+			}
 		}
 		return false;
 	}
@@ -329,6 +400,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bDataMutated = true;
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
+		CompressedVoxelData.Empty();
 		return Data;
 	}
 
@@ -342,7 +414,7 @@ struct VOXELCORE_API FChunkDescriptor
 	/** Get memory usage in bytes */
 	SIZE_T GetMemoryUsage() const
 	{
-		return sizeof(FChunkDescriptor) + VoxelData.GetAllocatedSize();
+		return sizeof(FChunkDescriptor) + VoxelData.GetAllocatedSize() + CompressedVoxelData.GetAllocatedSize();
 	}
 
 	/** Unique identifier combining coords and LOD */
