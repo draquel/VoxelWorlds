@@ -96,6 +96,35 @@ static TAutoConsoleVariable<int32> CVarStreamSpeedAdaptive(
 	     "Covers realistic fast movement; extreme speeds (~40 m/s+) still need forward-biased generation."),
 	ECVF_Default);
 
+// ==================== Streaming admission control ====================
+// The producer (chunk discovery in UpdateLoadDecisions) enqueues every visible chunk with no feedback
+// from consumer queue depth, so during traversal the meshing/generation queues grow unbounded ->
+// thousands of pending jobs, GBs of pinned voxel data, minutes of drain on stop. Admission control
+// caps total in-flight work: far chunks are deferred (re-evaluated later) once the backlog is full,
+// while the near ring is always admitted so it never starves. Bounds the queue into a self-healing
+// steady state; the only cost is bounded far pop-in when the player outruns the consumer.
+
+static TAutoConsoleVariable<int32> CVarStreamAdmissionControl(
+	TEXT("voxel.Stream.AdmissionControl"),
+	1,
+	TEXT("Bound in-flight streaming work: defer far-chunk enqueues when the backlog is full. "
+	     "1 = on, 0 = off (legacy unbounded, for A/B)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamMaxInFlight(
+	TEXT("voxel.Stream.MaxInFlight"),
+	512,
+	TEXT("Max total in-flight chunks (gen queue + async gen + mesh queue + async mesh + pending mesh) "
+	     "before FAR enqueues are deferred. Caps the pinned working set + drain time. Tune vs far pop-in."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamAdmissionNearMaxLOD(
+	TEXT("voxel.Stream.AdmissionNearMaxLOD"),
+	1,
+	TEXT("Chunks at LOD <= this are 'near' and are ALWAYS admitted (never deferred) so the near ring "
+	     "never starves; higher-LOD 'far' chunks are gated by MaxInFlight. Near is bounded by geometry."),
+	ECVF_Default);
+
 // ==================== Far-chunk voxel-data compression ====================
 // Settled far chunks keep a resident ~1MB voxel array purely to serve rare events (neighbor-plane
 // reads, LOD upgrades, edits, queries). A budgeted sweep compacts idle far chunks; any access
@@ -1661,6 +1690,16 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 	int32 ChunksAddedThisFrame = 0;
 	int32 ChunksRemaining = 0;
 
+	// Admission control: cap total in-flight work so the producer can't outrun the consumer without
+	// bound. Far chunks are deferred (re-evaluated next frame) once in-flight hits MaxInFlight; the
+	// near ring (LOD <= NearMaxLOD) is always admitted so it never starves. In-flight is tracked as we
+	// admit this frame so a single frame can't blow past the cap.
+	const bool bAdmissionOn = CVarStreamAdmissionControl.GetValueOnGameThread() != 0;
+	const int32 MaxInFlight = FMath::Max(1, CVarStreamMaxInFlight.GetValueOnGameThread());
+	const int32 NearMaxLOD = CVarStreamAdmissionNearMaxLOD.GetValueOnGameThread();
+	int32 InFlightRunning = GenerationQueue.Num() + AsyncGenerationInProgress.Num()
+		+ MeshingQueue.Num() + AsyncMeshingInProgress.Num() + PendingMeshQueue.Num();
+
 	// Debug: Log streaming decisions periodically
 	static int32 DebugFrameCounter = 0;
 	if (++DebugFrameCounter % 60 == 0)
@@ -1684,6 +1723,16 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 				continue;  // Count remaining but don't add yet
 			}
 
+			// Admission control: defer FAR chunks once the in-flight backlog is full. The near ring is
+			// always admitted (bounded by geometry). Deferred chunks re-evaluate next frame via
+			// bForceStreamingUpdate below, so nothing is dropped — only paced to the consumer.
+			const bool bIsNear = FMath::Clamp(Request.LODLevel, 0, 7) <= NearMaxLOD;
+			if (bAdmissionOn && !bIsNear && InFlightRunning >= MaxInFlight)
+			{
+				++ChunksRemaining;
+				continue;
+			}
+
 			FVoxelChunkState& State = GetOrCreateChunkState(Request.ChunkCoord);
 			State.LODLevel = Request.LODLevel;
 			State.Priority = Request.Priority;
@@ -1692,6 +1741,7 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 			{
 				SetChunkState(Request.ChunkCoord, EChunkState::PendingGeneration);
 				++ChunksAddedThisFrame;
+				++InFlightRunning;  // count toward the in-flight cap for this frame's admissions
 			}
 		}
 	}
