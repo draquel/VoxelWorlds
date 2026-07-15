@@ -16,6 +16,8 @@
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
 #include "Engine/World.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "VoxelGPUSurfaceExtractor.h"
 
 UVoxelScatterManager::UVoxelScatterManager()
@@ -117,11 +119,16 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	// Async scatter configuration
 	MaxAsyncScatterTasks = FMath::Clamp(Config->MaxAsyncScatterTasks, 1, 4);
 
-	// GPU extraction: enabled only if config says so AND platform supports SM5
-	bUseGPUExtraction = Config->bUseGPUScatterExtraction && FVoxelGPUSurfaceExtractor::IsGPUExtractionSupported();
+	// GPU extraction: enabled only if config says so AND platform supports SM5.
+	// -VoxelForceCPU (headless perf benchmark under -nullrhi, where GPU compute can't dispatch) forces
+	// the CPU path here too — matching the CPU-gen + CPU-mesh forcing in the chunk manager — so the whole
+	// pipeline runs on the CPU and the headless streaming bench works instead of crashing on a missing
+	// GPU shader (FResetSurfaceCounterCS) when the demo config has bUseGPUScatterExtraction=true.
+	const bool bForceCPU = FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU"));
+	bUseGPUExtraction = Config->bUseGPUScatterExtraction && !bForceCPU && FVoxelGPUSurfaceExtractor::IsGPUExtractionSupported();
 	if (Config->bUseGPUScatterExtraction && !bUseGPUExtraction)
 	{
-		UE_LOG(LogVoxelScatter, Warning, TEXT("GPU scatter extraction requested but SM5 not supported, falling back to CPU"));
+		UE_LOG(LogVoxelScatter, Warning, TEXT("GPU scatter extraction unavailable (SM5 unsupported or -VoxelForceCPU), falling back to CPU"));
 	}
 
 	// Reset statistics
