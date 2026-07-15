@@ -68,6 +68,14 @@ struct FVoxelChunkState
 	/** Priority for processing queues */
 	float Priority = 0.0f;
 
+	/**
+	 * Frame of the most recent pending neighbor-remesh request (0 = none). A newly generated chunk
+	 * asks its 26 loaded neighbors to re-mesh; instead of re-meshing each one immediately (which
+	 * re-meshes a chunk repeatedly as its neighborhood fills in), the request is debounced — this
+	 * stamp is bumped on each request and the chunk is enqueued once, after the neighborhood settles.
+	 */
+	int64 NeighborRemeshRequestFrame = 0;
+
 	FVoxelChunkState() = default;
 
 	explicit FVoxelChunkState(const FIntVector& InChunkCoord)
@@ -709,6 +717,13 @@ protected:
 	 * @param ChunkCoord The chunk that just finished generation
 	 */
 	void QueueNeighborsForRemesh(const FIntVector& ChunkCoord);
+
+	/**
+	 * Debounced dispatch of coalesced neighbor-remesh requests (see NeighborRemeshRequestFrame):
+	 * enqueue a chunk for a single neighbor-remesh once its neighborhood has settled, instead of
+	 * re-meshing it once per neighbor arrival. Collapses the fan-out churn during traversal.
+	 */
+	void ProcessPendingNeighborRemeshes();
 
 	/**
 	 * Propagate water flags from loaded neighbor chunks into this chunk.
