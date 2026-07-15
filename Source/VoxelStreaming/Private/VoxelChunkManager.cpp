@@ -151,6 +151,18 @@ static TAutoConsoleVariable<int32> CVarStreamNeighborDebounceFrames(
 	     "on far chunks near the load edge."),
 	ECVF_Default);
 
+// A chunk bakes its boundary against a snapshot of its 26 neighbours taken at mesh-launch. If a
+// neighbour gains/changes data or changes rendered LOD before the async mesh completes, the baked
+// boundary is stale — a persistent seam, because the generation-complete and LOD-transition cascades
+// both skip a mid-mesh chunk with no retry. Completion-time revalidation re-meshes such a chunk.
+static TAutoConsoleVariable<int32> CVarStreamMeshDepRevalidate(
+	TEXT("voxel.Stream.MeshDepRevalidate"),
+	1,
+	TEXT("On mesh completion, re-mesh a chunk if a neighbour's voxel content or rendered LOD changed "
+	     "while it was in flight (fixes chunk-boundary seams that persist past streaming equilibrium and "
+	     "otherwise clear only on player movement). 1 = on, 0 = legacy (no revalidation) for A/B."),
+	ECVF_Default);
+
 // ==================== Far-chunk voxel-data compression ====================
 // Settled far chunks keep a resident ~1MB voxel array purely to serve rare events (neighbor-plane
 // reads, LOD upgrades, edits, queries). A budgeted sweep compacts idle far chunks; any access
@@ -2391,6 +2403,15 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		// Mark as meshing
 		SetChunkState(Request.ChunkCoord, EChunkState::Meshing);
 
+		// Snapshot the neighbourhood we are about to bake our boundary against. If any neighbour
+		// changes (gains data, changes content, or changes rendered LOD) before this async mesh
+		// completes, the completion handler re-meshes us — closing the stale-boundary seam race.
+		// When disabled, no snapshot is stored and the completion-time revalidation is a no-op.
+		if (CVarStreamMeshDepRevalidate.GetValueOnGameThread() != 0)
+		{
+			CaptureMeshDeps(Request.ChunkCoord);
+		}
+
 		// Build meshing request
 		double SubT0 = FPlatformTime::Seconds();
 		FVoxelMeshingRequest MeshRequest;
@@ -2823,6 +2844,9 @@ void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 			}
 			else
 			{
+				// Discarded (chunk unloading / gone) — OnChunkMeshingComplete won't run for this launch,
+				// so drop its dependency snapshot now instead of waiting for RemoveChunkState.
+				ClearMeshDeps(Result.ChunkCoord);
 				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async mesh discarded - state changed to %d"),
 					Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
 			}
@@ -3124,6 +3148,8 @@ void UVoxelChunkManager::SetChunkState(const FIntVector& ChunkCoord, EChunkState
 void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 {
 	ChunkStates.Remove(ChunkCoord);
+	// Drop any in-flight mesh-dependency snapshot so an unloaded-while-meshing chunk can't leak it.
+	InFlightMeshDeps.Remove(ChunkCoord);
 }
 
 void UVoxelChunkManager::ProcessFarCompressionSweep()
@@ -3293,6 +3319,10 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			OnChunkLoaded.Broadcast(ChunkCoord);
 		}
 
+		// This chunk left Meshing while its mesh sat in the pending queue (re-queued or unloaded);
+		// it won't reach the revalidation path below, so drop its launch snapshot. A re-queue will
+		// capture a fresh one when it next dispatches.
+		ClearMeshDeps(ChunkCoord);
 		return;
 	}
 
@@ -3428,6 +3458,25 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 	// Fire event
 	OnChunkLoaded.Broadcast(ChunkCoord);
 
+	// Completion-time boundary revalidation. While this chunk was in flight, a neighbour may have
+	// gained/changed voxel data or changed its rendered LOD versus the snapshot taken at launch
+	// (CaptureMeshDeps). If so, the boundary we just submitted is stale — the persistent-seam race
+	// that no other trigger fixes (the generation-complete and LOD cascades both skip a mid-mesh
+	// chunk with no retry). The chunk is now Loaded (visible, collision-ready); re-queue a boundary
+	// correction the same way a normal neighbour-remesh does (Loaded -> PendingMeshing, re-fires
+	// OnChunkLoaded on completion). RevalidateMeshDeps consumed the launch snapshot.
+	if (RevalidateMeshDeps(ChunkCoord))
+	{
+		FChunkLODRequest Request;
+		Request.ChunkCoord = ChunkCoord;
+		Request.LODLevel = State->LODLevel;
+		Request.Priority = 60.0f; // above first-time mesh (50) so seam corrections resolve promptly
+		if (AddToMeshingQueue(Request, EVoxelRemeshReason::NeighborRemesh))
+		{
+			SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
+		}
+	}
+
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) loaded"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 }
@@ -3482,6 +3531,97 @@ bool UVoxelChunkManager::ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoor
 	}
 
 	return bDefer;
+}
+
+// Shared 26-neighbour offset table (6 faces + 12 edges + 8 corners). CaptureMeshDeps and
+// RevalidateMeshDeps MUST iterate this in the SAME order — the snapshot is compared index-by-index.
+static const FIntVector GMeshDepNeighborOffsets[26] = {
+	FIntVector(1, 0, 0),   FIntVector(-1, 0, 0),
+	FIntVector(0, 1, 0),   FIntVector(0, -1, 0),
+	FIntVector(0, 0, 1),   FIntVector(0, 0, -1),
+	FIntVector(1, 1, 0),   FIntVector(1, -1, 0),   FIntVector(-1, 1, 0),   FIntVector(-1, -1, 0),
+	FIntVector(1, 0, 1),   FIntVector(1, 0, -1),   FIntVector(-1, 0, 1),   FIntVector(-1, 0, -1),
+	FIntVector(0, 1, 1),   FIntVector(0, 1, -1),   FIntVector(0, -1, 1),   FIntVector(0, -1, -1),
+	FIntVector(1, 1, 1),   FIntVector(1, 1, -1),   FIntVector(1, -1, 1),   FIntVector(1, -1, -1),
+	FIntVector(-1, 1, 1),  FIntVector(-1, 1, -1),  FIntVector(-1, -1, 1),  FIntVector(-1, -1, -1)
+};
+
+void UVoxelChunkManager::CaptureMeshDeps(const FIntVector& ChunkCoord)
+{
+	// Snapshot each of the 26 neighbours' boundary-relevant state at the instant this chunk launches
+	// to mesh. Consumed at completion by RevalidateMeshDeps to detect a mid-flight neighbour change.
+	// KNOWN LIMIT: ContentVersion tracks the neighbour's Descriptor voxels (generation + direct
+	// writes), not its UVoxelEditManager edit layer — so a player/system EDIT to a neighbour while
+	// this chunk is in flight is not detected here (an edit-boundary seam in that window persists until
+	// an unrelated remesh, as it did before this fix). The reported streaming-equilibrium seam is
+	// generation/LOD-driven, which IS covered; edit-layer versioning is a follow-up (also needed by
+	// the boundary-slice memoization work).
+	TArray<FMeshBoundaryDep>& Deps = InFlightMeshDeps.FindOrAdd(ChunkCoord);
+	Deps.SetNum(26, EAllowShrinking::No);
+	for (int32 i = 0; i < 26; ++i)
+	{
+		FMeshBoundaryDep& Dep = Deps[i];
+		if (const FVoxelChunkState* NeighborState = ChunkStates.Find(ChunkCoord + GMeshDepNeighborOffsets[i]))
+		{
+			Dep.ContentVersion = NeighborState->Descriptor.ContentVersion;
+			Dep.MeshedLODLevel = NeighborState->MeshedLODLevel;
+			Dep.bHadData = NeighborState->Descriptor.HasVoxelDataAvailable();
+		}
+		else
+		{
+			Dep = FMeshBoundaryDep{};
+		}
+	}
+}
+
+bool UVoxelChunkManager::RevalidateMeshDeps(const FIntVector& ChunkCoord)
+{
+	TArray<FMeshBoundaryDep> Snapshot;
+	if (!InFlightMeshDeps.RemoveAndCopyValue(ChunkCoord, Snapshot) || Snapshot.Num() != 26)
+	{
+		return false;
+	}
+	for (int32 i = 0; i < 26; ++i)
+	{
+		const FMeshBoundaryDep& Was = Snapshot[i];
+
+		FMeshBoundaryDep Now;
+		if (const FVoxelChunkState* NeighborState = ChunkStates.Find(ChunkCoord + GMeshDepNeighborOffsets[i]))
+		{
+			Now.ContentVersion = NeighborState->Descriptor.ContentVersion;
+			Now.MeshedLODLevel = NeighborState->MeshedLODLevel;
+			Now.bHadData = NeighborState->Descriptor.HasVoxelDataAvailable();
+		}
+
+		// A neighbour with no data now (never generated, or unloaded) can't improve our boundary —
+		// re-meshing against it would only clamp.
+		if (!Now.bHadData)
+		{
+			continue;
+		}
+		// Voxel-content change (a neighbour that gained data or whose content changed) restales the
+		// boundary for ANY of the 26 neighbours — every neighbour contributes raw boundary voxels via
+		// ExtractNeighborEdgeSlices (faces, edge strips, corners).
+		if (!Was.bHadData || Now.ContentVersion != Was.ContentVersion)
+		{
+			return true;
+		}
+		// A neighbour's RENDERED LOD only reaches our boundary through transition faces, which are set
+		// up against the 6 FACE neighbours only (offsets 0-5). Edge/corner neighbours contribute raw
+		// voxels regardless of their rendered LOD, so their LOD changing does NOT restale us — checking
+		// it there would trigger a remesh every time an edge/corner meshes during our flight (pure churn
+		// across the streaming front). Only a face neighbour's rendered-LOD change matters.
+		if (i < 6 && Now.MeshedLODLevel != Was.MeshedLODLevel)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void UVoxelChunkManager::ClearMeshDeps(const FIntVector& ChunkCoord)
+{
+	InFlightMeshDeps.Remove(ChunkCoord);
 }
 
 void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)

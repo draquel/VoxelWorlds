@@ -85,6 +85,19 @@ struct FVoxelChunkState
 };
 
 /**
+ * One neighbour's boundary-relevant state, snapshotted when a chunk is dispatched to mesh. A chunk's
+ * baked boundary depends on each neighbour's voxel content (ContentVersion), its rendered LOD
+ * (MeshedLODLevel, which sets transition faces), and whether it had data at all (bHadData; an absent
+ * neighbour bakes as clamped/Air). If any of these differs at mesh completion, the boundary is stale.
+ */
+struct FMeshBoundaryDep
+{
+	uint32 ContentVersion = 0;
+	int32 MeshedLODLevel = -1;
+	bool bHadData = false;
+};
+
+/**
  * Delegate fired when a chunk completes generation.
  */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkGenerated, FIntVector, ChunkCoord);
@@ -726,6 +739,26 @@ protected:
 	void ProcessPendingNeighborRemeshes();
 
 	/**
+	 * Snapshot the 26 neighbours' boundary-relevant state (content version, rendered LOD, data
+	 * availability) at the instant a chunk is dispatched to mesh. Stored in InFlightMeshDeps so the
+	 * completion handler can detect a neighbour that changed WHILE this chunk was in flight — the
+	 * race that bakes a stale/Air boundary (a persistent seam) with no other trigger to fix it.
+	 */
+	void CaptureMeshDeps(const FIntVector& ChunkCoord);
+
+	/**
+	 * Compare a just-completed chunk's neighbours against the snapshot taken at mesh launch
+	 * (CaptureMeshDeps). Returns true if any neighbour's voxel content changed, its rendered LOD
+	 * changed, or its data became available since launch — i.e. the boundary we just baked is stale
+	 * and the chunk must re-mesh. Removes the snapshot entry. Safe to call for a chunk with no entry
+	 * (returns false).
+	 */
+	bool RevalidateMeshDeps(const FIntVector& ChunkCoord);
+
+	/** Discard a chunk's in-flight mesh-dependency snapshot (on unload / abandoned mesh). */
+	void ClearMeshDeps(const FIntVector& ChunkCoord);
+
+	/**
 	 * Propagate water flags from loaded neighbor chunks into this chunk.
 	 *
 	 * Checks 6 face-neighbor chunks for water-flagged voxels at their shared
@@ -881,6 +914,14 @@ protected:
 	/** Map of chunk coordinates to their state */
 	UPROPERTY()
 	TMap<FIntVector, FVoxelChunkState> ChunkStates;
+
+	/**
+	 * Per in-flight-mesh snapshot of the 26 neighbours' boundary state, taken when a chunk is
+	 * dispatched to mesh (CaptureMeshDeps) and consumed at completion (RevalidateMeshDeps) to detect
+	 * a neighbour that changed mid-flight and left a stale boundary. Bounded by the async-mesh
+	 * in-flight cap (a handful of entries); not a UPROPERTY (transient, non-reflected).
+	 */
+	TMap<FIntVector, TArray<FMeshBoundaryDep>> InFlightMeshDeps;
 
 	/** Set of loaded chunk coordinates (for fast lookup) */
 	TSet<FIntVector> LoadedChunkCoords;
