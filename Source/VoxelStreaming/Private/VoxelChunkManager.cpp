@@ -96,6 +96,38 @@ static TAutoConsoleVariable<int32> CVarStreamSpeedAdaptive(
 	     "Covers realistic fast movement; extreme speeds (~40 m/s+) still need forward-biased generation."),
 	ECVF_Default);
 
+// ==================== Mesh-consumer throughput (A/B ceiling knobs) ====================
+// The mesh consumer is bounded by three limits: (1) a hardcoded per-frame GPU mesh-DISPATCH cap
+// (min(MaxChunksToLoadPerFrame, 2)), (2) the in-flight async-mesh cap, and (3) the pending-mesh
+// (awaiting-render-submit) cap. During sustained traversal the mesh queue does not drain because
+// mesh work arrives faster than this consumer completes it. These cvars expose all three so the
+// true throughput ceiling can be found live: raising the dispatch cap trades render-thread frame
+// time (each dispatch = an RDG graph + ~150KB upload + 4 compute passes) and game-thread launch
+// cost (26-neighbor slice extraction) for a higher drain rate. Raise all three together — the
+// dispatch loop also stops at the in-flight and pending caps. 0 = keep the shipped/config value.
+static TAutoConsoleVariable<int32> CVarStreamMaxMeshDispatch(
+	TEXT("voxel.Stream.MaxMeshDispatchPerFrame"),
+	0,
+	TEXT("Override the per-frame GPU mesh-dispatch cap (shipped: min(MaxChunksToLoadPerFrame, 2)). "
+	     "0 = shipped behavior. Clamped [1,32]. Raising trades render/game-thread frame time for mesh "
+	     "drain rate; raise MaxAsyncMeshTasks + MaxPendingMeshes alongside it or the in-flight caps bind."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamMaxAsyncMeshTasks(
+	TEXT("voxel.Stream.MaxAsyncMeshTasks"),
+	0,
+	TEXT("Override max concurrent async chunk-meshing tasks (mesh pipeline depth). 0 = use "
+	     "configuration/-VoxelMaxAsyncMesh. Clamped [1,32]. Adaptive throttling still halves it under "
+	     "frame pressure (disable with voxel.Stream.SpeedAdaptive 0 / -VoxelPinScheduler for a clean A/B)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamMaxPendingMeshes(
+	TEXT("voxel.Stream.MaxPendingMeshes"),
+	0,
+	TEXT("Override max meshes awaiting render submit before mesh dispatch stalls. 0 = use "
+	     "configuration/-VoxelMaxPending. Clamped [2,64]. Raise together with MaxMeshDispatchPerFrame."),
+	ECVF_Default);
+
 // ==================== Neighbor-remesh coalescing ====================
 // A newly generated chunk asks its 26 loaded neighbors to re-mesh so they incorporate its boundary
 // data. Doing that immediately re-meshes a chunk once PER neighbor arrival — during traversal a chunk
@@ -234,9 +266,13 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		const int32 CvarAsyncGen = CVarStreamMaxAsyncGenTasks.GetValueOnGameThread();
 		const int32 ConfigMaxAsyncGen = (CvarAsyncGen > 0) ? FMath::Clamp(CvarAsyncGen, 1, 16)
 			: (SchedOverrideAsyncGen >= 0) ? SchedOverrideAsyncGen : (Configuration ? Configuration->MaxAsyncGenerationTasks : 2);
-		const int32 ConfigMaxAsync = (SchedOverrideAsyncMesh >= 0) ? SchedOverrideAsyncMesh : (Configuration ? Configuration->MaxAsyncMeshTasks : 4);
+		const int32 CvarAsyncMesh = CVarStreamMaxAsyncMeshTasks.GetValueOnGameThread();
+		const int32 ConfigMaxAsync = (CvarAsyncMesh > 0) ? FMath::Clamp(CvarAsyncMesh, 1, 32)
+			: (SchedOverrideAsyncMesh >= 0) ? SchedOverrideAsyncMesh : (Configuration ? Configuration->MaxAsyncMeshTasks : 4);
 		const int32 ConfigMaxLODRemesh = (SchedOverrideLODRemesh >= 0) ? SchedOverrideLODRemesh : (Configuration ? Configuration->MaxLODRemeshPerFrame : 4);
-		const int32 ConfigMaxPending = (SchedOverridePending >= 0) ? SchedOverridePending : (Configuration ? Configuration->MaxPendingMeshes : 4);
+		const int32 CvarPending = CVarStreamMaxPendingMeshes.GetValueOnGameThread();
+		const int32 ConfigMaxPending = (CvarPending > 0) ? FMath::Clamp(CvarPending, 2, 64)
+			: (SchedOverridePending >= 0) ? SchedOverridePending : (Configuration ? Configuration->MaxPendingMeshes : 4);
 
 		if (bAdaptive && TargetFPS > 0.0f)
 		{
@@ -2262,7 +2298,10 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 	// Dispatching too many in one frame causes a render thread stall at frame sync.
 	// The in-flight cap (EffectiveMaxAsyncMeshTasks) still controls pipeline depth;
 	// this cap just prevents burst-refilling the pipeline in a single frame.
-	const int32 MaxNewDispatches = FMath::Min(Configuration->MaxChunksToLoadPerFrame, 2);
+	const int32 CvarMeshDispatch = CVarStreamMaxMeshDispatch.GetValueOnGameThread();
+	const int32 MaxNewDispatches = (CvarMeshDispatch > 0)
+		? FMath::Clamp(CvarMeshDispatch, 1, 32)
+		: FMath::Min(Configuration->MaxChunksToLoadPerFrame, 2);
 	int32 ProcessedCount = 0;
 
 	// P2-A: chunks deferred this frame because a face neighbor's voxel data is
