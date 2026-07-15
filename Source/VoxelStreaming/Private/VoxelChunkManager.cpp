@@ -279,11 +279,15 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			const float TargetMs = 1000.0f / TargetFPS;
 			if (SmoothedFrameTimeMs > TargetMs * 1.2f)
 			{
-				// Over budget: halve effective limits (min 1)
+				// Over budget: reduce PRODUCER work (generation + LOD-remesh inflow) to relieve
+				// frame pressure — but do NOT halve the mesh CONSUMER caps. A/B showed halving
+				// async-mesh / pending under load throttles the drain exactly when the mesh backlog
+				// is worst (an inverted throttle), slowing catch-up with no frame benefit; keep the
+				// consumer at its configured depth so the queue keeps draining out of the spike.
 				EffectiveMaxAsyncGenerationTasks = FMath::Max(1, ConfigMaxAsyncGen / 2);
-				EffectiveMaxAsyncMeshTasks = FMath::Max(1, ConfigMaxAsync / 2);
 				EffectiveMaxLODRemeshPerFrame = FMath::Max(1, ConfigMaxLODRemesh / 2);
-				EffectiveMaxPendingMeshes = FMath::Max(2, ConfigMaxPending / 2);
+				EffectiveMaxAsyncMeshTasks = ConfigMaxAsync;
+				EffectiveMaxPendingMeshes = ConfigMaxPending;
 			}
 			else if (SmoothedFrameTimeMs < TargetMs * 0.8f)
 			{
@@ -2293,15 +2297,17 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 	double SlicesSeconds = 0.0;
 	double DispatchSeconds = 0.0;
 
-	// Limit new dispatches per frame to avoid flooding the render thread.
-	// Each GPU dispatch builds an RDG graph + uploads ~150KB + 4 compute passes.
-	// Dispatching too many in one frame causes a render thread stall at frame sync.
-	// The in-flight cap (EffectiveMaxAsyncMeshTasks) still controls pipeline depth;
-	// this cap just prevents burst-refilling the pipeline in a single frame.
+	// Cap new mesh dispatches per frame — the mesh-consumer drain rate. Each GPU dispatch builds
+	// an RDG graph + uploads ~150KB + 4 compute passes, so a very high cap can stall the render
+	// thread at frame sync; the in-flight cap (EffectiveMaxAsyncMeshTasks) also bounds pipeline
+	// depth. This was hardcoded to min(MaxChunksToLoadPerFrame, 2), which A/B showed was far too
+	// conservative (2->6 cut post-traverse drain ~2.5x and peak backlog ~35% at zero frame cost at
+	// moderate traversal). Now config-driven (MaxMeshDispatchPerFrame, default 6) with a runtime
+	// override (voxel.Stream.MaxMeshDispatchPerFrame, 0 = use config).
 	const int32 CvarMeshDispatch = CVarStreamMaxMeshDispatch.GetValueOnGameThread();
 	const int32 MaxNewDispatches = (CvarMeshDispatch > 0)
 		? FMath::Clamp(CvarMeshDispatch, 1, 32)
-		: FMath::Min(Configuration->MaxChunksToLoadPerFrame, 2);
+		: FMath::Max(1, Configuration->MaxMeshDispatchPerFrame);
 	int32 ProcessedCount = 0;
 
 	// P2-A: chunks deferred this frame because a face neighbor's voxel data is

@@ -475,7 +475,7 @@ public:
 
 	/** Maximum concurrent async mesh generation tasks (1-16) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "16"))
-	int32 MaxAsyncMeshTasks = 4;
+	int32 MaxAsyncMeshTasks = 8;
 
 	/** Maximum LOD level change remeshes queued per frame (1-8) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "8"))
@@ -483,7 +483,20 @@ public:
 
 	/** Maximum pending meshes before throttling generation (2-16) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "2", ClampMax = "16"))
-	int32 MaxPendingMeshes = 4;
+	int32 MaxPendingMeshes = 8;
+
+	/**
+	 * Maximum GPU mesh DISPATCHES launched per frame — the mesh-consumer drain rate (1-32).
+	 * Was hardcoded to 2, which was far too conservative: A/B on the demo showed 2->6 cuts
+	 * post-traverse queue drain ~2.5x and peak mesh backlog ~35% at zero frame cost (the
+	 * per-dispatch render/game-thread cost is small vs frame time at moderate traversal).
+	 * Each dispatch builds an RDG graph + ~150KB upload + 4 compute passes, so very high
+	 * values trade render-thread frame time for drain rate — raise MaxAsyncMeshTasks /
+	 * MaxPendingMeshes alongside it or the in-flight caps bind first. Runtime override:
+	 * voxel.Stream.MaxMeshDispatchPerFrame.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "32"))
+	int32 MaxMeshDispatchPerFrame = 6;
 
 	/** Target frame rate for adaptive throttling (0 = disabled) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "0", ClampMax = "240"))
