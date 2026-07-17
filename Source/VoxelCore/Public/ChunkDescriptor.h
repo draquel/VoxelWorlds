@@ -80,6 +80,17 @@ struct VOXELCORE_API FChunkDescriptor
 	 */
 	bool bDataMutated = false;
 
+	/**
+	 * Monotonic content-identity counter: bumped on every change to the LOGICAL voxel content
+	 * (generation-install, allocate, clear, per-voxel edit), and deliberately NOT on residency
+	 * (de)compression (EnsureResident / TryCollapse* preserve content). Unlike bDataMutated (a flag
+	 * that toggles) this only ever increases, so a reader can snapshot it and later detect "did this
+	 * chunk's content change since?" — used by the mesh completion-time boundary revalidation (a
+	 * neighbour that gained/changed data while a chunk was in-flight meshing) and reserved as the
+	 * invalidation key for neighbour boundary-slice memoization. Transient, not serialized.
+	 */
+	uint32 ContentVersion = 0;
+
 	/** The single value a Uniform chunk collapses to (valid when bUniformValueValid). */
 	FVoxelData UniformValue;
 
@@ -126,6 +137,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		++ContentVersion;
 	}
 
 	/** Install a freshly generated resident voxel array (the sole population point). */
@@ -137,6 +149,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		++ContentVersion;
 	}
 
 	/** Clear voxel data to free memory */
@@ -148,6 +161,9 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		// NOTE: no ContentVersion bump — clearing is a memory teardown, not a logical content change.
+		// Boundary revalidation ignores a neighbour that no longer has data (re-meshing against a
+		// gone neighbour would only clamp), so a version bump here would cause pointless remeshes.
 	}
 
 	/** Get total number of voxels in this chunk */
@@ -195,6 +211,7 @@ struct VOXELCORE_API FChunkDescriptor
 			bUniformValueValid = false;
 			bCompressionEvaluated = false;
 			CompressedVoxelData.Empty();
+			++ContentVersion;
 		}
 	}
 
@@ -215,6 +232,7 @@ struct VOXELCORE_API FChunkDescriptor
 			bUniformValueValid = false;
 			bCompressionEvaluated = false;
 			CompressedVoxelData.Empty();
+			++ContentVersion;
 		}
 	}
 
@@ -401,6 +419,12 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		// NOTE: deliberately no ContentVersion bump here. The only streaming caller is water-flag
+		// propagation, which (a) is a material change, not the density change that causes geometric
+		// boundary seams, and (b) calls this unconditionally on every coastal mesh submit — bumping
+		// would churn neighbour boundary revalidation for no geometric benefit. ContentVersion tracks
+		// generation + explicit voxel edits (the geometry that boundary meshing depends on). If a future
+		// caller mutates density through this accessor, bump ContentVersion at that call site.
 		return Data;
 	}
 
