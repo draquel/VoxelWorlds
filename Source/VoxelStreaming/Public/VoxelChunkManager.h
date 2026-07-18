@@ -1206,6 +1206,13 @@ protected:
 	/** Latest viewer world position, cached each tick for the stale-cull distance test. */
 	FVector CurrentViewerPosition = FVector::ZeroVector;
 
+	/**
+	 * True when the chunk's center is within voxel.Stream.NearCorrectionDistance of the viewer.
+	 * Near chunks take the boundary-correction fast path: short coalesce debounce and meshing-queue
+	 * priority above the streaming wave, so a stale seam next to the player resolves in frames.
+	 */
+	bool IsChunkNearViewer(const FIntVector& ChunkCoord) const;
+
 	/** Previous-tick viewer position for horizontal-speed estimation (FLT_MAX until first tick). */
 	FVector LastViewerPosForSpeed = FVector(FLT_MAX);
 
