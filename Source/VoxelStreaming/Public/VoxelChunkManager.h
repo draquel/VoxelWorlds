@@ -28,6 +28,7 @@ class UVoxelEditManager;
 class UVoxelCollisionManager;
 class UVoxelScatterManager;
 class UVoxelWaterPropagation;
+class FVoxelSeamRegistry;
 
 /**
  * Internal chunk state tracking.
@@ -149,6 +150,8 @@ class VOXELSTREAMING_API UVoxelChunkManager : public UActorComponent
 
 public:
 	UVoxelChunkManager();
+	/** Out-of-line (defaulted in .cpp) so the TUniquePtr<FVoxelSeamRegistry> deleter sees the complete type. */
+	virtual ~UVoxelChunkManager() override;
 
 	// ==================== UActorComponent Interface ====================
 
@@ -922,6 +925,19 @@ protected:
 	 * in-flight cap (a handful of entries); not a UPROPERTY (transient, non-reflected).
 	 */
 	TMap<FIntVector, TArray<FMeshBoundaryDep>> InFlightMeshDeps;
+
+	/**
+	 * Single-owner seam registry (seam-ownership refactor P0 — SEAM_OWNERSHIP_ARCHITECTURE.md §2).
+	 * Tracks which physical chunk boundary (face/edge/corner) is owned by which chunk, dirty-tracks
+	 * seams off the same content-version/rendered-LOD change points the #42 revalidation uses, and
+	 * schedules seam jobs. In P0 the seam job is a stub that produces NO geometry, so this runs
+	 * alongside the existing per-chunk meshing with no visual/behavioural change. Gated by
+	 * voxel.Seam.Registry. Non-UPROPERTY (plain C++ helper, not reflected/serialized).
+	 */
+	TUniquePtr<FVoxelSeamRegistry> SeamRegistry;
+
+	/** Push this-tick seam enable/debug flags from cvars, then run the seam scheduler + stub processor. */
+	void TickSeamScheduler();
 
 	/** Set of loaded chunk coordinates (for fast lookup) */
 	TSet<FIntVector> LoadedChunkCoords;

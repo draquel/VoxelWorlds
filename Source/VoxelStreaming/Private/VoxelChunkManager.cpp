@@ -2,6 +2,7 @@
 
 #include "VoxelChunkManager.h"
 #include "VoxelStreaming.h"
+#include "VoxelSeamRegistry.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCaveConfiguration.h"
@@ -178,6 +179,47 @@ static TAutoConsoleVariable<int32> CVarStreamNearCorrectionDebounceFrames(
 // the queue pops highest priority first.
 static constexpr float GNearCorrectionPriority = 65.0f;
 
+// ==================== Seam-ownership registry (P0 scaffolding) ====================
+// P0 of the single-owner seam-meshing refactor (Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md
+// §2). The registry tracks canonical (min-coordinate) ownership of every chunk boundary, dirty-tracks
+// seams off the same content-version / rendered-LOD change points the #42 revalidation fires from, and
+// schedules seam jobs by priority. In P0 the seam job is a STUB — it produces NO geometry — so the
+// registry runs alongside the existing per-chunk meshing pipeline with no visual or behavioural change.
+// The default-on gate lets it be exercised live (proving the no-op) while remaining instantly A/B-able.
+static TAutoConsoleVariable<int32> CVarSeamRegistry(
+	TEXT("voxel.Seam.Registry"),
+	1,
+	TEXT("Enable the P0 seam-ownership registry + scheduler (scaffolding; seam jobs produce no geometry "
+	     "yet, so 1 vs 0 is a no-op visually). 1 = on, 0 = off (clears registry state)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarSeamDebug(
+	TEXT("voxel.Seam.Debug"),
+	0,
+	TEXT("Log each scheduled seam stub job at Log level (otherwise Verbose). Diagnostic for the seam "
+	     "scheduler; no effect on geometry."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarSeamNearChunkRadius(
+	TEXT("voxel.Seam.NearChunkRadius"),
+	3,
+	TEXT("Chebyshev chunk radius within which a seam is prioritised at the near-correction tier (65). "
+	     "Mirrors the near-field boundary-correction fast path in seam space."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarSeamMaxSchedulePerTick(
+	TEXT("voxel.Seam.MaxSchedulePerTick"),
+	64,
+	TEXT("Max dirty seams EXAMINED for scheduling per tick (0 = all). Bounds the per-tick seam "
+	     "scheduler cost under a heavy streaming frontier; unexamined/not-yet-ready seams retry later."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarSeamMaxJobsPerTick(
+	TEXT("voxel.Seam.MaxJobsPerTick"),
+	64,
+	TEXT("Max seam jobs processed (P0: stub, no geometry) per tick (0 = unlimited)."),
+	ECVF_Default);
+
 // A chunk bakes its boundary against a snapshot of its 26 neighbours taken at mesh-launch. If a
 // neighbour gains/changes data or changes rendered LOD before the async mesh completes, the baked
 // boundary is stale — a persistent seam, because the generation-complete and LOD-transition cascades
@@ -237,7 +279,13 @@ UVoxelChunkManager::UVoxelChunkManager()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+
+	// Seam-ownership registry (P0 scaffolding). A plain C++ helper; enabled per-tick from a cvar.
+	SeamRegistry = MakeUnique<FVoxelSeamRegistry>();
 }
+
+// Defaulted here (not in the header) so ~TUniquePtr<FVoxelSeamRegistry> sees the complete type.
+UVoxelChunkManager::~UVoxelChunkManager() = default;
 
 int32 UVoxelChunkManager::ResolveMaxLoadPerFrame() const
 {
@@ -278,6 +326,15 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	}
 
 	++CurrentFrame;
+
+	// Seam-ownership P0: sync the registry enable/debug flags at the TOP of the tick so this tick's
+	// generation/meshing completions register into it (the scheduler itself runs late in the tick).
+	// SetEnabled clears registry state on a true->false transition (clean A/B toggle).
+	if (SeamRegistry.IsValid())
+	{
+		SeamRegistry->SetEnabled(CVarSeamRegistry.GetValueOnGameThread() != 0);
+		SeamRegistry->SetDebugLogging(CVarSeamDebug.GetValueOnGameThread() != 0);
+	}
 
 	// Drive an active streaming benchmark: advances the bench view position + samples this frame,
 	// before BuildQueryContext picks the position up below. Cleared when the run completes.
@@ -552,6 +609,11 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Enqueue coalesced neighbor-remeshes whose neighborhood has settled (see QueueNeighborsForRemesh).
 	// After LOD eval so a chunk already queued for an LOD remesh this frame is skipped.
 	ProcessPendingNeighborRemeshes();
+
+	// === Seam-ownership scheduler (P0 scaffolding; produces no geometry) ===
+	// Runs after the generation/meshing/LOD sections so this-tick residency and rendered-LOD changes
+	// are already pushed into the registry. The seam job is a stub in P0 — no visual/behavioural change.
+	TickSeamScheduler();
 
 	// === Far-chunk voxel-data compression sweep ===
 	// Runs after LOD evaluation so a chunk just queued for an LOD remesh (now dirty) is excluded.
@@ -1041,6 +1103,11 @@ void UVoxelChunkManager::Shutdown()
 	// Clear state
 	ChunkStates.Empty();
 	LoadedChunkCoords.Empty();
+	// Seam-ownership P0: drop all tracked seams/jobs alongside the chunk state they mirror.
+	if (SeamRegistry.IsValid())
+	{
+		SeamRegistry->Reset();
+	}
 	GenerationQueue.Empty();
 	GenerationQueueSet.Empty();
 	MeshingQueue.Empty();
@@ -1232,6 +1299,13 @@ void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 		if (State->State == EChunkState::Loaded)
 		{
 			State->Descriptor.bIsDirty = true;
+
+			// Seam-ownership P0: an explicit dirty (voxel edit / forced remesh) may have changed the
+			// chunk's content — restale its incident seams. ContentVersion is bumped by the edit itself.
+			if (SeamRegistry.IsValid())
+			{
+				SeamRegistry->UpdateChunkContent(ChunkCoord, State->Descriptor.ContentVersion);
+			}
 
 			// Add to meshing queue for remeshing with sorted insertion
 			FChunkLODRequest Request;
@@ -1480,6 +1554,18 @@ FString UVoxelChunkManager::GetDebugStats() const
 		Stats += FString::Printf(TEXT("Empty: %d\n"), Mem.EmptyChunks);
 		Stats += FString::Printf(TEXT("Resident voxel data: %.1f MB\n"), Mem.VoxelDataBytes / (1024.0 * 1024.0));
 		Stats += FString::Printf(TEXT("Reclaimed by compression: %.1f MB\n"), Mem.CompressionSavedBytes / (1024.0 * 1024.0));
+	}
+
+	// Seam-ownership registry (P0 scaffolding; seam jobs produce no geometry yet).
+	if (SeamRegistry.IsValid())
+	{
+		const FVoxelSeamRegistryStats S = SeamRegistry->GetStats();
+		Stats += TEXT("\n--- Seam Registry (P0) ---\n");
+		Stats += FString::Printf(TEXT("Enabled: %s\n"), SeamRegistry->IsEnabled() ? TEXT("Yes") : TEXT("No"));
+		Stats += FString::Printf(TEXT("Chunks/Seams/Dirty/Queued: %d / %d / %d / %d\n"),
+			S.ChunkCount, S.SeamCount, S.DirtyCount, S.JobQueueDepth);
+		Stats += FString::Printf(TEXT("Lifetime seams/scheduled/processed: %lld / %lld / %lld\n"),
+			S.TotalSeamsCreated, S.TotalSeamJobsScheduled, S.TotalSeamJobsProcessed);
 	}
 
 	if (LODStrategy)
@@ -3177,6 +3263,28 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 	ChunkStates.Remove(ChunkCoord);
 	// Drop any in-flight mesh-dependency snapshot so an unloaded-while-meshing chunk can't leak it.
 	InFlightMeshDeps.Remove(ChunkCoord);
+	// Seam-ownership P0: this chunk's voxel data is gone — restale/prune its incident seams.
+	if (SeamRegistry.IsValid())
+	{
+		SeamRegistry->UnregisterChunk(ChunkCoord);
+	}
+}
+
+void UVoxelChunkManager::TickSeamScheduler()
+{
+	if (!SeamRegistry.IsValid() || !SeamRegistry->IsEnabled())
+	{
+		return;
+	}
+
+	// Enable/debug flags were synced early in TickComponent so this tick's generation/meshing
+	// completions already registered into the registry. Here we only schedule + process.
+	// Move dirty+all-resident seams into the priority-sorted job queue (near-viewer first), then run
+	// the P0 stub processor. Both are budget-capped so the per-tick cost stays bounded.
+	const FIntVector ViewerChunk = WorldToChunkCoord(CurrentViewerPosition);
+	const int32 NearRadius = FMath::Max(0, CVarSeamNearChunkRadius.GetValueOnGameThread());
+	SeamRegistry->ScheduleReadySeams(ViewerChunk, NearRadius, FMath::Max(0, CVarSeamMaxSchedulePerTick.GetValueOnGameThread()));
+	SeamRegistry->ProcessSeamJobQueue(FMath::Max(0, CVarSeamMaxJobsPerTick.GetValueOnGameThread()));
 }
 
 void UVoxelChunkManager::ProcessFarCompressionSweep()
@@ -3253,6 +3361,13 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 	// This ensures seamless boundaries when chunks load in different orders
 	QueueNeighborsForRemesh(ChunkCoord);
 
+	// Seam-ownership P0: this chunk's voxel data is now available — register it (restales its incident
+	// seams). ContentVersion is the seam-invalidation key; rendered LOD is not set yet (mesh follows).
+	if (SeamRegistry.IsValid())
+	{
+		SeamRegistry->RegisterChunk(ChunkCoord, State->Descriptor.ContentVersion, State->MeshedLODLevel);
+	}
+
 	// Fire event
 	OnChunkGenerated.Broadcast(ChunkCoord);
 
@@ -3286,6 +3401,11 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 						MoveTemp(PendingMeshQueue[i].MeshData));
 					SubmitRendererSecondsThisTick += FPlatformTime::Seconds() - RendT0;
 					State->MeshedLODLevel = PendingMeshQueue[i].LODLevel;
+					// Seam-ownership P0: rendered LOD known — refresh the seam registry (no-op if unchanged).
+					if (SeamRegistry.IsValid())
+					{
+						SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
+					}
 					if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 					SubmittedLOD = PendingMeshQueue[i].LODLevel;
 					bMeshSubmitted = true;
@@ -3412,6 +3532,11 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// Track which LOD is actually rendered so neighbors can read the correct
 		// LOD level for MergeLODBoundaryCells and transition face setup.
 		State->MeshedLODLevel = PendingMesh.LODLevel;
+		// Seam-ownership P0: rendered LOD known — refresh the seam registry (no-op if unchanged).
+		if (SeamRegistry.IsValid())
+		{
+			SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
+		}
 		if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 
 		// Propagate water flags from loaded neighbors into this chunk's voxel data

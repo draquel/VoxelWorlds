@@ -143,6 +143,36 @@ Estimated effort: P0-P1 ~1 week; P2 the risk center ~1-2 weeks; P3-P4 ~1 week. T
 categorical, not incremental: the seam bug class closes, and boundary correction cost drops by
 ~64× making Fact B windows sub-frame-budget near the player.
 
+#### P0 as implemented (branch `feature/seam-ownership-p0`)
+
+Landed as pure scaffolding — **no geometry produced, no visual/behavioural change** (DC suite stays
+19/19 green). What shipped:
+
+- **`FVoxelSeamRegistry`** (`Source/VoxelStreaming/{Public,Private}/VoxelSeamRegistry.{h,cpp}`) — a
+  plain C++ (no UObject/RHI) registry. Canonical seam identity `FVoxelSeamKey{Owner, Type, Axis}`
+  where the owner is the **minimum-coordinate participant** (§2.2), so both sides of any boundary map
+  to the same key — no duplication, no gaps. A chunk is incident to 26 seams (6 face / 12 edge / 8
+  corner) and owns 7 (the positive-direction seams: 3 face + 3 edge + 1 corner). Holds a per-chunk
+  residency/content/LOD mirror, per-seam dirty flag + participant snapshot (mirroring
+  `FMeshBoundaryDep`), and a priority-sorted seam job queue with a **stub processor** (logs/counts,
+  emits nothing).
+- **Wiring into `UVoxelChunkManager`** — dirty tracking hooks the *same* change points the #42
+  revalidation fires from: `OnChunkGenerationComplete` (data available → `RegisterChunk`),
+  `OnChunkMeshingComplete` (rendered-LOD change → `UpdateChunkRenderedLOD`), `MarkChunkDirty` (edits →
+  `UpdateChunkContent`), `RemoveChunkState` (unload → `UnregisterChunk`). A per-tick scheduler
+  (`TickSeamScheduler`) moves dirty+all-resident seams into the job queue (near-viewer first) and runs
+  the stub processor. Gated by `voxel.Seam.Registry` (default on; scaffolding is a no-op either way),
+  with `voxel.Seam.Debug` / `voxel.Seam.NearChunkRadius` / `voxel.Seam.Max{Schedule,Jobs}PerTick`.
+- **Tests** — `VoxelWorlds.Streaming.SeamRegistry.{Ownership,Coverage,DirtyPropagation,Scheduling}`
+  (headless, pure-logic): min-coordinate ownership determinism, exactly-once boundary coverage across
+  a lattice incl. mixed LOD, dirty propagation to precisely the 26 incident seams, and the
+  all-participants-resident scheduling gate.
+
+**P1 entry point:** replace the stub body in `FVoxelSeamRegistry::ProcessSeamJobQueue` with the DC
+face-seam mesher (same-LOD pairs first), restrict the interior DC pass to interior cells, remove the
+face weld, and rewrite GT/DT to assert seam-mesh closure. The scheduler, ownership, dirty tracking,
+and job queue are already in place.
+
 ### 2.6 Risks / open questions
 
 - Seam mesher at mixed LOD is genuinely novel code (P2). Mitigation: it replaces an approach
