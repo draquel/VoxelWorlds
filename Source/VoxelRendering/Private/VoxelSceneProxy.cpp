@@ -171,6 +171,8 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 	// Release all chunk resources
 	FScopeLock Lock(&ChunkDataLock);
 
+	ReleaseAllChunkFadeStates_AssumesLocked();
+
 	for (auto& Pair : ChunkRenderData)
 	{
 		Pair.Value.ReleaseResources();
@@ -302,6 +304,9 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	// The Non-Nanite job queue overflow was caused by Virtual Shadow Maps, not mesh count
 	constexpr int32 MaxMeshBatchesPerFrame = 500;
 
+	// Crossfade lookups only happen while at least one chunk is actually transitioning
+	const bool bAnyFades = ChunkPreviousMeshes.Num() > 0 && ChunkFadeStates.Num() > 0;
+
 	// Process each view
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 	{
@@ -376,10 +381,69 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				}
 			}
 
+			// ==================== Mesh-Swap Crossfade ====================
+			// While a swap fade is active this chunk draws twice: the retained previous mesh
+			// dithering out and the current mesh dithering in. Both use pooled MIDs of the
+			// masked fade material whose FadeAlpha is the same t with complementary masks
+			// (FadeInvert), so every pixel is covered by exactly one of the two surfaces.
+			// Fading requires BOTH the previous mesh set and the attached fade state — any
+			// other combination renders the current mesh with the shared material as before.
+			// See Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §5.
+			const FVoxelChunkFadeState* FadeState = nullptr;
+			const FVoxelChunkPreviousMesh* PreviousMesh = nullptr;
+			if (bAnyFades && !bWireframe)
+			{
+				FadeState = ChunkFadeStates.Find(ChunkCoord);
+				if (FadeState)
+				{
+					PreviousMesh = ChunkPreviousMeshes.Find(ChunkCoord);
+				}
+			}
+			const bool bFading = FadeState && PreviousMesh
+				&& FadeState->FadeInProxy && FadeState->FadeOutProxy
+				&& PreviousMesh->RenderData.HasValidBuffers()
+				&& PreviousMesh->RenderData.IndexCount >= 3
+				&& PreviousMesh->VertexFactory.IsValid()
+				&& PreviousMesh->IndexBuffer.IsValid();
+
+			if (bFading)
+			{
+				// Previous mesh — dithers out via the FadeInvert=1 MID. Culled with the current
+				// mesh's bounds above (the two differ by at most one LOD's worth of surface
+				// motion, inside the ExpandBy margin).
+				FMeshBatch& PrevBatch = Collector.AllocateMesh();
+				PrevBatch.VertexFactory = PreviousMesh->VertexFactory.Get();
+				PrevBatch.MaterialRenderProxy = FadeState->FadeOutProxy;
+				PrevBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
+				PrevBatch.bDisableBackfaceCulling = false;
+				PrevBatch.Type = PT_TriangleList;
+				PrevBatch.DepthPriorityGroup = SDPG_World;
+				PrevBatch.bCanApplyViewModeOverrides = true;
+				PrevBatch.bUseWireframeSelectionColoring = IsSelected();
+				PrevBatch.bUseAsOccluder = true;
+				PrevBatch.bWireframe = false;
+				PrevBatch.CastShadow = true;
+				PrevBatch.bUseForMaterial = true;
+				PrevBatch.bUseForDepthPass = true;
+				PrevBatch.LODIndex = PreviousMesh->RenderData.LODLevel;
+				PrevBatch.SegmentIndex = 0;
+
+				FMeshBatchElement& PrevElement = PrevBatch.Elements[0];
+				PrevElement.IndexBuffer = PreviousMesh->IndexBuffer.Get();
+				PrevElement.FirstIndex = 0;
+				PrevElement.NumPrimitives = PreviousMesh->RenderData.IndexCount / 3;
+				PrevElement.MinVertexIndex = 0;
+				PrevElement.MaxVertexIndex = PreviousMesh->RenderData.VertexCount - 1;
+				PrevElement.PrimitiveUniformBuffer = GetUniformBuffer();
+
+				Collector.AddMesh(ViewIndex, PrevBatch);
+				TotalMeshesAdded++;
+			}
+
 			// Allocate mesh batch
 			FMeshBatch& MeshBatch = Collector.AllocateMesh();
 			MeshBatch.VertexFactory = VertexFactoryPtr->Get();
-			MeshBatch.MaterialRenderProxy = MaterialProxy;
+			MeshBatch.MaterialRenderProxy = bFading ? FadeState->FadeInProxy : MaterialProxy;
 			MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
 			MeshBatch.bDisableBackfaceCulling = false;
 			MeshBatch.Type = PT_TriangleList;
@@ -413,6 +477,9 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			{
 				FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
 				VirtualMeshBatch = MeshBatch;
+				// RVT always samples the shared (opaque) material — a dithered fade mask would
+				// punch transient holes into the cached virtual texture pages.
+				VirtualMeshBatch.MaterialRenderProxy = MaterialProxy;
 				VirtualMeshBatch.CastShadow = false;
 				VirtualMeshBatch.bUseAsOccluder = false;
 				VirtualMeshBatch.bUseForDepthPass = false;
@@ -567,6 +634,10 @@ FPrimitiveViewRelevance FVoxelSceneProxy::GetViewRelevance(const FSceneView* Vie
 	{
 		WaterMaterialRelevance.SetPrimitiveViewRelevance(Result);
 	}
+	if (FadeMaterial)
+	{
+		FadeMaterialRelevance.SetPrimitiveViewRelevance(Result);
+	}
 	return Result;
 }
 
@@ -577,7 +648,79 @@ uint32 FVoxelSceneProxy::GetMemoryFootprint() const
 
 // ==================== Chunk Management ====================
 
-void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FIntVector& ChunkCoord, const FVoxelChunkGPUData& GPUData)
+void FVoxelSceneProxy::ReleaseChunkFadeState_AssumesLocked(const FIntVector& ChunkCoord)
+{
+	if (FVoxelChunkPreviousMesh* Previous = ChunkPreviousMeshes.Find(ChunkCoord))
+	{
+		Previous->ReleaseResources();
+		ChunkPreviousMeshes.Remove(ChunkCoord);
+	}
+	ChunkFadeStates.Remove(ChunkCoord);
+}
+
+void FVoxelSceneProxy::ReleaseAllChunkFadeStates_AssumesLocked()
+{
+	for (auto& Pair : ChunkPreviousMeshes)
+	{
+		Pair.Value.ReleaseResources();
+	}
+	ChunkPreviousMeshes.Empty();
+	ChunkFadeStates.Empty();
+}
+
+void FVoxelSceneProxy::RetireOrReleaseChunk_AssumesLocked(const FIntVector& ChunkCoord, bool bMoveToPrevious)
+{
+	// Cap at one retained generation: any older Previous goes now, whatever happens next.
+	if (FVoxelChunkPreviousMesh* OldPrevious = ChunkPreviousMeshes.Find(ChunkCoord))
+	{
+		OldPrevious->ReleaseResources();
+		ChunkPreviousMeshes.Remove(ChunkCoord);
+	}
+
+	FVoxelChunkRenderData ExistingData;
+	const bool bHadData = ChunkRenderData.RemoveAndCopyValue(ChunkCoord, ExistingData);
+
+	TSharedPtr<FVoxelLocalVertexBuffer> ExistingVB;
+	ChunkVertexBuffers.RemoveAndCopyValue(ChunkCoord, ExistingVB);
+
+	TSharedPtr<FVoxelLocalIndexBuffer> ExistingIB;
+	ChunkIndexBuffers.RemoveAndCopyValue(ChunkCoord, ExistingIB);
+
+	TSharedPtr<FLocalVertexFactory> ExistingVF;
+	ChunkVertexFactories.RemoveAndCopyValue(ChunkCoord, ExistingVF);
+
+	if (bMoveToPrevious && bHadData && ExistingData.HasValidBuffers()
+		&& ExistingVB.IsValid() && ExistingIB.IsValid() && ExistingVF.IsValid())
+	{
+		// Retain the outgoing mesh alive (buffers stay initialized) for the crossfade.
+		FVoxelChunkPreviousMesh Previous;
+		Previous.RenderData = MoveTemp(ExistingData);
+		Previous.VertexBuffer = ExistingVB;
+		Previous.IndexBuffer = ExistingIB;
+		Previous.VertexFactory = ExistingVF;
+		ChunkPreviousMeshes.Add(ChunkCoord, MoveTemp(Previous));
+		return;
+	}
+
+	if (bHadData)
+	{
+		ExistingData.ReleaseResources();
+	}
+	if (ExistingVF.IsValid())
+	{
+		ExistingVF->ReleaseResource();
+	}
+	if (ExistingIB.IsValid())
+	{
+		ExistingIB->ReleaseResource();
+	}
+	if (ExistingVB.IsValid())
+	{
+		ExistingVB->ReleaseResource();
+	}
+}
+
+void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FIntVector& ChunkCoord, const FVoxelChunkGPUData& GPUData, bool bCrossfade)
 {
 	check(IsInRenderingThread());
 
@@ -600,32 +743,8 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 
 	FScopeLock Lock(&ChunkDataLock);
 
-	// Remove existing data if any
-	if (FVoxelChunkRenderData* ExistingData = ChunkRenderData.Find(ChunkCoord))
-	{
-		ExistingData->ReleaseResources();
-	}
-	if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = ChunkVertexBuffers.Find(ChunkCoord))
-	{
-		if (ExistingVB->IsValid())
-		{
-			(*ExistingVB)->ReleaseResource();
-		}
-	}
-	if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = ChunkIndexBuffers.Find(ChunkCoord))
-	{
-		if (ExistingIB->IsValid())
-		{
-			(*ExistingIB)->ReleaseResource();
-		}
-	}
-	if (TSharedPtr<FLocalVertexFactory>* ExistingVF = ChunkVertexFactories.Find(ChunkCoord))
-	{
-		if (ExistingVF->IsValid())
-		{
-			(*ExistingVF)->ReleaseResource();
-		}
-	}
+	// Retire (crossfade) or release any existing mesh for this chunk
+	RetireOrReleaseChunk_AssumesLocked(ChunkCoord, bCrossfade);
 
 	// Read source vertices from the GPU buffer
 	const uint32 SourceVertexCount = GPUData.VertexCount;
@@ -848,7 +967,8 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 	TArray<uint32>&& Indices,
 	int32 LODLevel,
 	const FBox& ChunkLocalBounds,
-	const FVector& ChunkWorldPosition)
+	const FVector& ChunkWorldPosition,
+	bool bCrossfade)
 {
 	check(IsInRenderingThread());
 
@@ -866,32 +986,8 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 
 	FScopeLock Lock(&ChunkDataLock);
 
-	// Remove existing data if any
-	if (FVoxelChunkRenderData* ExistingData = ChunkRenderData.Find(ChunkCoord))
-	{
-		ExistingData->ReleaseResources();
-	}
-	if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = ChunkVertexBuffers.Find(ChunkCoord))
-	{
-		if (ExistingVB->IsValid())
-		{
-			(*ExistingVB)->ReleaseResource();
-		}
-	}
-	if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = ChunkIndexBuffers.Find(ChunkCoord))
-	{
-		if (ExistingIB->IsValid())
-		{
-			(*ExistingIB)->ReleaseResource();
-		}
-	}
-	if (TSharedPtr<FLocalVertexFactory>* ExistingVF = ChunkVertexFactories.Find(ChunkCoord))
-	{
-		if (ExistingVF->IsValid())
-		{
-			(*ExistingVF)->ReleaseResource();
-		}
-	}
+	// Retire (crossfade) or release any existing mesh for this chunk
+	RetireOrReleaseChunk_AssumesLocked(ChunkCoord, bCrossfade);
 
 	// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data (NO GPU READBACK!)
 	const FVector3f ChunkOffset = FVector3f(ChunkWorldPosition);
@@ -1046,6 +1142,9 @@ void FVoxelSceneProxy::RemoveChunk_RenderThread(const FIntVector& ChunkCoord)
 
 	FScopeLock Lock(&ChunkDataLock);
 
+	// Drop any crossfade state along with the chunk
+	ReleaseChunkFadeState_AssumesLocked(ChunkCoord);
+
 	if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
 	{
 		RenderData->ReleaseResources();
@@ -1087,6 +1186,8 @@ void FVoxelSceneProxy::ClearAllChunks_RenderThread()
 	check(IsInRenderingThread());
 
 	FScopeLock Lock(&ChunkDataLock);
+
+	ReleaseAllChunkFadeStates_AssumesLocked();
 
 	for (auto& Pair : ChunkRenderData)
 	{
@@ -1142,9 +1243,17 @@ void FVoxelSceneProxy::UpdateChunkMorphFactor_RenderThread(const FIntVector& Chu
 
 	FScopeLock Lock(&ChunkDataLock);
 
+	const float Clamped = FMath::Clamp(MorphFactor, 0.0f, 1.0f);
+
 	if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
 	{
-		RenderData->MorphFactor = FMath::Clamp(MorphFactor, 0.0f, 1.0f);
+		RenderData->MorphFactor = Clamped;
+	}
+
+	// Repurposed as the crossfade alpha carrier (SEAM_OWNERSHIP_ARCHITECTURE.md §5)
+	if (FVoxelChunkFadeState* FadeState = ChunkFadeStates.Find(ChunkCoord))
+	{
+		FadeState->FadeAlpha = Clamped;
 	}
 }
 
@@ -1153,6 +1262,66 @@ void FVoxelSceneProxy::SetMaterial_RenderThread(UMaterialInterface* InMaterial, 
 	check(IsInRenderingThread());
 	Material = InMaterial;
 	MaterialRelevance = InMaterialRelevance;
+}
+
+// ==================== Mesh-Swap Crossfade ====================
+
+void FVoxelSceneProxy::SetFadeMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InRelevance)
+{
+	check(IsInRenderingThread());
+	FadeMaterial = InMaterial;
+	FadeMaterialRelevance = InRelevance;
+}
+
+void FVoxelSceneProxy::SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	FVoxelChunkFadeState& FadeState = ChunkFadeStates.FindOrAdd(ChunkCoord);
+	FadeState.FadeAlpha = 0.0f;
+	FadeState.FadeInProxy = InFadeInProxy;
+	FadeState.FadeOutProxy = InFadeOutProxy;
+}
+
+void FVoxelSceneProxy::UpdateChunkFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector, float>>& Alphas)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	for (const TPair<FIntVector, float>& Pair : Alphas)
+	{
+		const float Clamped = FMath::Clamp(Pair.Value, 0.0f, 1.0f);
+
+		if (FVoxelChunkFadeState* FadeState = ChunkFadeStates.Find(Pair.Key))
+		{
+			FadeState->FadeAlpha = Clamped;
+		}
+		if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(Pair.Key))
+		{
+			RenderData->MorphFactor = Clamped;
+		}
+	}
+}
+
+void FVoxelSceneProxy::ClearChunkFadeState_RenderThread(const FIntVector& ChunkCoord)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	ReleaseChunkFadeState_AssumesLocked(ChunkCoord);
+}
+
+void FVoxelSceneProxy::ClearAllChunkFadeStates_RenderThread()
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	ReleaseAllChunkFadeStates_AssumesLocked();
 }
 
 // ==================== Water Tile Management ====================
@@ -1449,6 +1618,9 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 	{
 		FScopeLock Lock(&ChunkDataLock);
 
+		// Drop any crossfade state along with the chunk
+		ReleaseChunkFadeState_AssumesLocked(ChunkCoord);
+
 		if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
 		{
 			RenderData->ReleaseResources();
@@ -1497,32 +1669,8 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 
 		FScopeLock Lock(&ChunkDataLock);
 
-		// Remove existing data if any
-		if (FVoxelChunkRenderData* ExistingData = ChunkRenderData.Find(ChunkCoord))
-		{
-			ExistingData->ReleaseResources();
-		}
-		if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = ChunkVertexBuffers.Find(ChunkCoord))
-		{
-			if (ExistingVB->IsValid())
-			{
-				(*ExistingVB)->ReleaseResource();
-			}
-		}
-		if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = ChunkIndexBuffers.Find(ChunkCoord))
-		{
-			if (ExistingIB->IsValid())
-			{
-				(*ExistingIB)->ReleaseResource();
-			}
-		}
-		if (TSharedPtr<FLocalVertexFactory>* ExistingVF = ChunkVertexFactories.Find(ChunkCoord))
-		{
-			if (ExistingVF->IsValid())
-			{
-				(*ExistingVF)->ReleaseResource();
-			}
-		}
+		// Retire (crossfade) or release any existing mesh for this chunk
+		RetireOrReleaseChunk_AssumesLocked(ChunkCoord, Add.bCrossfade);
 
 		// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data
 		const FVector3f ChunkOffset = FVector3f(Add.ChunkWorldPosition);
@@ -1738,6 +1886,11 @@ SIZE_T FVoxelSceneProxy::GetGPUMemoryUsage() const
 	for (const auto& Pair : ChunkRenderData)
 	{
 		Total += Pair.Value.GetGPUMemoryUsage();
+	}
+	// Meshes retained for active crossfades (transient, released when each fade ends)
+	for (const auto& Pair : ChunkPreviousMeshes)
+	{
+		Total += Pair.Value.RenderData.GetGPUMemoryUsage();
 	}
 	return Total;
 }

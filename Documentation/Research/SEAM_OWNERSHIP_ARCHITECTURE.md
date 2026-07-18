@@ -1,7 +1,7 @@
 # Seam Ownership Architecture — making chunk boundaries structurally watertight
 
 Status: **DRAFT for review** (2026-07-18). Companion work landed on `feature/lod-transition-polish`:
-near-field correction latency tuning (shipped), swap-crossfade design (specced below, not yet built).
+near-field correction latency tuning (shipped), swap crossfade (§5, **implemented** on this branch).
 The DC boundary-weld series (#43/#44) is held in draft — its findings are inputs to this document.
 
 ## 1. Problem statement
@@ -175,7 +175,7 @@ The Fact-B window, attacked directly where it hurts (all cvar-tunable):
 Expected effect: a stale boundary within ~2.5 chunks of the player re-meshes within a few frames
 plus one mesh dispatch, instead of `1.5 s + queue`. This does not fix Fact A — it shortens Fact B.
 
-## 5. Swap crossfade — design (not yet implemented)
+## 5. Swap crossfade — design (IMPLEMENTED on this branch)
 
 Goal: soften every per-chunk mesh swap (LOD flips AND correction remeshes), mesher-agnostic.
 
@@ -200,6 +200,30 @@ Therefore the design is material-driven:
 
 Interaction with §2: unchanged and still wanted — seam ownership removes the *artifacts*, the
 crossfade removes the *pop* of legitimate LOD resolution changes.
+
+### 5.1 As implemented (this branch)
+
+- **Cvars**: `voxel.MeshFade` (1 = crossfade, 0 = instant swap for A/B) and
+  `voxel.MeshFade.Duration` (seconds, default 0.35).
+- **Fade material contract**: a Masked duplicate of the terrain master with two scalar params —
+  `FadeAlpha` (shared fade progress t) and `FadeInvert` — wired
+  `OpacityMask = lerp(DTAA, 1 − DTAA, FadeInvert)` where `DTAA = DitherTemporalAA(FadeAlpha)`.
+  Both draws use the SAME t with complementary masks, so every pixel is covered by exactly one
+  surface at all times. (The naive "previous gets 1−t" version samples the same dither pattern
+  and leaves up to half the pixels uncovered at mid-fade — see-through terrain.)
+  Asset: `M_VoxelMaster_Fade` next to the master; `UVoxelWorldComponent` auto-derives
+  `<Master>_Fade` by name (or `SetFadeMaterial` explicitly). No fade asset = legacy instant swap.
+- **Proxy** (`FVoxelSceneProxy`): all three update paths take a game-thread-decided `bCrossfade`
+  flag; a swap moves the outgoing buffers/factory into a `ChunkPreviousMeshes` slot (capped at
+  one generation) instead of releasing. `GetDynamicMeshElements` draws previous(out-MID) +
+  current(in-MID) while a chunk has both a Previous slot and an attached fade state; RVT clones
+  always keep the shared opaque material so dither never punches holes into cached RVT pages.
+- **Game thread** (`UVoxelWorldComponent`): swap detection at the three submit entry points; two
+  MID pools (in/out — pool split so FadeInvert never needs rewriting on reuse), atlas parameters
+  copied per acquisition from the live atlas MID; a tick (enabled only while fades are active)
+  advances FadeAlpha on the MIDs, batches bookkeeping alphas through the repurposed
+  MorphFactor carrier, and releases each Previous set at t = 1.
+- Mesh→empty transitions (chunk remeshed to nothing) still pop — removal is not a swap.
 
 ## 6. Recommended sequence
 
