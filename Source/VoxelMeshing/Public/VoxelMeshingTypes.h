@@ -472,8 +472,19 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 	/** Face normal axis: 0 = X, 1 = Y, 2 = Z. Neighbour B = Owner + unit(Axis). */
 	uint8 Axis = 0;
 
-	/** Shared LOD level (P1 handles same-LOD pairs only; mixed LOD is P2). */
+	/** Owner-side LOD level. */
 	int32 LODLevel = 0;
+
+	/**
+	 * Neighbour-side LOD level, or -1 for a same-LOD pair (== LODLevel). When the LODs differ
+	 * (seam-ownership P2c) the seam meshes the owner's slab at the owner's stride, recomputes
+	 * each ring at ITS side's stride, and stitches the face plane at the finer granularity
+	 * (T-junction fans onto the coarser side's ring vertices).
+	 */
+	int32 LODLevelB = -1;
+
+	/** Resolved neighbour-side LOD. */
+	int32 GetLODLevelB() const { return (LODLevelB < 0) ? LODLevel : LODLevelB; }
 
 	/** Voxels per chunk edge. */
 	int32 ChunkSize = 32;

@@ -1367,6 +1367,404 @@ namespace VoxelDCFaceSeam
 		Out.Normal = AvgNormal;
 		return true;
 	}
+
+	/**
+	 * Mixed-LOD face seam (seam-ownership P2c — the §2.3 cross-resolution mesher).
+	 *
+	 * The slab is ALWAYS the owner's last cell layer at the OWNER's stride (the interior domain
+	 * [0, Grid-1) covers the neighbour's first layer but not the owner's last — regardless of
+	 * which side is finer). Rings recompute at each side's OWN stride with that side's sampler,
+	 * bit-identical to its Interior pass. The face plane stitches at the FINER granularity:
+	 * every fine crossing gets a fan onto the coarser side's ring vertices, quads collapsing to
+	 * triangles when their two coarse-side slots fall in the same coarse cell (the T-junction).
+	 * All positions are surface-derived QEF output clamped to their own cells (#44 laws hold by
+	 * construction); a fine crossing facing an invalid coarse cell is skipped — degrading to a
+	 * crack, never a protrusion.
+	 */
+	static bool GenerateMixedFaceSeam(
+		const FVoxelFaceSeamRequest& Req,
+		const FVoxelMeshingConfig& Config,
+		FChunkMeshData& Out)
+	{
+		const int32 ChunkSize = Req.ChunkSize;
+		const int32 LODA = FMath::Clamp(Req.LODLevel, 0, 7);
+		const int32 LODB = FMath::Clamp(Req.GetLODLevelB(), 0, 7);
+		const int32 SA = 1 << LODA;
+		const int32 SB = 1 << LODB;
+		if ((ChunkSize % SA) != 0 || (ChunkSize % SB) != 0)
+		{
+			UE_LOG(LogVoxelMeshing, Error, TEXT("GenerateMixedFaceSeam: ChunkSize %d not divisible by strides %d/%d"), ChunkSize, SA, SB);
+			return false;
+		}
+		const int32 GridA = ChunkSize / SA;
+		const int32 GridB = ChunkSize / SB;
+		if (GridA < 3 || GridB < 3)
+		{
+			return true; // degenerate resolution — valid empty seam
+		}
+		const int32 SLA = GridA - 1;
+		const int32 SLB = GridB - 1;
+		const int32 MinS = FMath::Min(SA, SB);
+		const int32 RA = SA / MinS; // fine steps per owner-side cell (1 when the owner is finer)
+		const int32 RB = SB / MinS; // fine steps per neighbour-side cell
+		const int32 FaceGrid = ChunkSize / MinS;
+
+		const int32 U = Req.Axis;
+		const int32 V = (U + 1) % 3;
+		const int32 W = (U + 2) % 3;
+		const float VoxelSize = Req.VoxelSize;
+		const float IsoLevel = Config.IsoLevel;
+		const float SVDThreshold = Config.QEFSVDThreshold;
+		const float BiasStrength = Config.QEFBiasStrength;
+		const float FrameOffsetU = static_cast<float>(ChunkSize) * VoxelSize;
+
+		const FSeamSampler SamplerA(Req, FSeamSampler::EMode::AOnly);
+		const FSeamSampler SamplerB(Req, FSeamSampler::EMode::BOnly);
+		const FSeamSampler SamplerC(Req, FSeamSampler::EMode::Combined);
+
+		// ---- Cell layers: rings at their side's stride, slab at the owner's ----------------
+		TArray<FSeamCellVertex> RingA; RingA.SetNum(SLA * SLA);
+		TArray<FSeamCellVertex> Slab;  Slab.SetNum(SLA * SLA);
+		TArray<FSeamCellVertex> RingB; RingB.SetNum(SLB * SLB);
+
+		for (int32 w = 0; w < SLA; ++w)
+		{
+			for (int32 v = 0; v < SLA; ++v)
+			{
+				const int32 Idx = v + w * SLA;
+				int32 C[3];
+				C[V] = v;
+				C[W] = w;
+				C[U] = SLA - 1;
+				ComputeCellVertex(SamplerA, C[0], C[1], C[2], SA, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, RingA[Idx]);
+				C[U] = SLA;
+				ComputeCellVertex(SamplerC, C[0], C[1], C[2], SA, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, Slab[Idx]);
+			}
+		}
+		for (int32 w = 0; w < SLB; ++w)
+		{
+			for (int32 v = 0; v < SLB; ++v)
+			{
+				const int32 Idx = v + w * SLB;
+				int32 C[3];
+				C[V] = v;
+				C[W] = w;
+				C[U] = 0;
+				if (ComputeCellVertex(SamplerB, C[0], C[1], C[2], SB, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, RingB[Idx]))
+				{
+					RingB[Idx].Position[U] += FrameOffsetU;
+				}
+			}
+		}
+
+		// ---- Vertex emission (identical projection/material carry to the other seam paths) --
+		const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
+		auto EmitSeamVertex = [&Out, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID) -> int32
+		{
+			const int32 Index = Out.Positions.Num();
+			Out.Positions.Add(Vertex.Position);
+			Out.Normals.Add(Vertex.Normal);
+
+			const float AbsX = FMath::Abs(Vertex.Normal.X);
+			const float AbsY = FMath::Abs(Vertex.Normal.Y);
+			const float AbsZ = FMath::Abs(Vertex.Normal.Z);
+			FVector2f UV;
+			if (AbsZ >= AbsX && AbsZ >= AbsY)
+			{
+				UV = FVector2f(Vertex.Position.X * UVScale / VoxelSize, Vertex.Position.Y * UVScale / VoxelSize);
+			}
+			else if (AbsX >= AbsY)
+			{
+				UV = FVector2f(Vertex.Position.Y * UVScale / VoxelSize, Vertex.Position.Z * UVScale / VoxelSize);
+			}
+			else
+			{
+				UV = FVector2f(Vertex.Position.X * UVScale / VoxelSize, Vertex.Position.Z * UVScale / VoxelSize);
+			}
+			Out.UVs.Add(UV);
+			Out.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
+			Out.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+			return Index;
+		};
+
+		constexpr int32 KeyStride = 1 << 20; // layer id * KeyStride + cell index (unique across layers)
+		TMap<uint64, int32> DuplicateVertexCache;
+		uint32 TriangleCount = 0;
+
+		// Fan emitter over up to 4 cyclic cell refs: adjacent duplicates (the T-junction's
+		// coincident coarse slots) collapse the quad to a triangle. Quad case keeps the
+		// adaptive max-min-area diagonal.
+		struct FRef { FSeamCellVertex* Cell = nullptr; int32 Key = 0; };
+		auto EmitFan = [&](FRef (&Refs)[4], bool bFlip, uint8 QuadMaterial, uint8 QuadBiome)
+		{
+			FRef Uniq[4];
+			int32 N = 0;
+			for (int32 i = 0; i < 4; ++i)
+			{
+				if (N > 0 && Refs[i].Cell == Uniq[N - 1].Cell)
+				{
+					continue;
+				}
+				Uniq[N++] = Refs[i];
+			}
+			if (N > 1 && Uniq[N - 1].Cell == Uniq[0].Cell)
+			{
+				--N;
+			}
+			if (N < 3)
+			{
+				return; // fully degenerate (both sides coarse-coincident) — nothing to emit
+			}
+
+			int32 Indices[4];
+			for (int32 i = 0; i < N; ++i)
+			{
+				FSeamCellVertex& Cell = *Uniq[i].Cell;
+				if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome)
+				{
+					Indices[i] = Cell.MeshVertexIndex;
+				}
+				else if (Cell.MeshVertexIndex < 0)
+				{
+					Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
+					Cell.MeshVertexIndex = Indices[i];
+					Cell.EmittedMaterialID = QuadMaterial;
+					Cell.EmittedBiomeID = QuadBiome;
+				}
+				else
+				{
+					const uint64 DupKey = (static_cast<uint64>(Uniq[i].Key) << 16)
+						| (static_cast<uint64>(QuadMaterial) << 8)
+						| static_cast<uint64>(QuadBiome);
+					if (const int32* Found = DuplicateVertexCache.Find(DupKey))
+					{
+						Indices[i] = *Found;
+					}
+					else
+					{
+						Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
+						DuplicateVertexCache.Add(DupKey, Indices[i]);
+					}
+				}
+			}
+
+			auto AddTri = [&](int32 a, int32 b, int32 c)
+			{
+				Out.Indices.Add(Indices[a]);
+				Out.Indices.Add(Indices[b]);
+				Out.Indices.Add(Indices[c]);
+			};
+
+			if (N == 3)
+			{
+				if (bFlip) { AddTri(0, 1, 2); }
+				else       { AddTri(0, 2, 1); }
+				TriangleCount += 1;
+				return;
+			}
+
+			auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
+			{
+				return 0.5f * FVector3f::CrossProduct(B - A, C - A).Size();
+			};
+			const FVector3f& P0 = Uniq[0].Cell->Position;
+			const FVector3f& P1 = Uniq[1].Cell->Position;
+			const FVector3f& P2 = Uniq[2].Cell->Position;
+			const FVector3f& P3 = Uniq[3].Cell->Position;
+			const float MinArea02 = FMath::Min(TriArea(P0, P1, P2), TriArea(P0, P2, P3));
+			const float MinArea13 = FMath::Min(TriArea(P1, P2, P3), TriArea(P1, P3, P0));
+			const bool bUse13 = MinArea13 > MinArea02;
+
+			if (bFlip)
+			{
+				if (bUse13) { AddTri(1, 2, 3); AddTri(1, 3, 0); }
+				else        { AddTri(0, 1, 2); AddTri(0, 2, 3); }
+			}
+			else
+			{
+				if (bUse13) { AddTri(1, 3, 2); AddTri(1, 0, 3); }
+				else        { AddTri(0, 2, 1); AddTri(0, 3, 2); }
+			}
+			TriangleCount += 2;
+		};
+
+		// ---- Owner-side groups at stride SA (identical structure to the same-LOD path) ------
+		auto EmitAQuad = [&](const int32 EdgeCellA[3], int32 EdgeAbsAxis)
+		{
+			const int32 VX = EdgeCellA[0] * SA;
+			const int32 VY = EdgeCellA[1] * SA;
+			const int32 VZ = EdgeCellA[2] * SA;
+
+			const float D0 = SamplerC.GetDensity(VX, VY, VZ);
+			int32 NX = VX, NY = VY, NZ = VZ;
+			if (EdgeAbsAxis == 0) NX += SA;
+			else if (EdgeAbsAxis == 1) NY += SA;
+			else NZ += SA;
+			const float D1 = SamplerC.GetDensity(NX, NY, NZ);
+
+			const bool bSolid0 = (D0 >= IsoLevel);
+			const bool bSolid1 = (D1 >= IsoLevel);
+			if (bSolid0 == bSolid1)
+			{
+				return;
+			}
+
+			FRef Refs[4];
+			for (int32 i = 0; i < 4; ++i)
+			{
+				const FCellOffset& Off = GAxisOffsets[EdgeAbsAxis][i];
+				const int32 CellC[3] = { EdgeCellA[0] + Off.DX, EdgeCellA[1] + Off.DY, EdgeCellA[2] + Off.DZ };
+				const int32 CU = CellC[U];
+				const int32 TV = CellC[V];
+				const int32 TW = CellC[W];
+				if (TV < 0 || TV >= SLA || TW < 0 || TW >= SLA)
+				{
+					return;
+				}
+				TArray<FSeamCellVertex>* Layer = (CU == SLA) ? &Slab : (CU == SLA - 1) ? &RingA : nullptr;
+				if (!Layer)
+				{
+					return;
+				}
+				FSeamCellVertex& Cell = (*Layer)[TV + TW * SLA];
+				if (!Cell.bValid)
+				{
+					return;
+				}
+				Refs[i] = { &Cell, ((CU == SLA) ? KeyStride : 0) + TV + TW * SLA };
+			}
+
+			const bool bFlip = (D0 < IsoLevel);
+			int32 SolidX = VX, SolidY = VY, SolidZ = VZ;
+			if (bFlip)
+			{
+				if (EdgeAbsAxis == 0) { SolidX += SA; }
+				else if (EdgeAbsAxis == 1) { SolidY += SA; }
+				else { SolidZ += SA; }
+			}
+			const FVoxelData SolidVoxel = SamplerC.GetVoxel(SolidX, SolidY, SolidZ);
+			EmitFan(Refs, bFlip, SolidVoxel.MaterialID, SolidVoxel.BiomeID);
+		};
+
+		int32 EdgeCell[3];
+		// G1: face-crossing U-edges (4 slab cells).
+		for (int32 w = 1; w <= SLA - 1; ++w)
+		{
+			for (int32 v = 1; v <= SLA - 1; ++v)
+			{
+				EdgeCell[U] = SLA;
+				EdgeCell[V] = v;
+				EdgeCell[W] = w;
+				EmitAQuad(EdgeCell, U);
+			}
+		}
+		// G2/G3: slab <-> ring-A stitching at the owner's stride.
+		for (int32 Sel = 1; Sel <= SLA - 1; ++Sel)
+		{
+			for (int32 Run = 0; Run <= SLA - 1; ++Run)
+			{
+				EdgeCell[U] = SLA;
+				EdgeCell[V] = Run;
+				EdgeCell[W] = Sel;
+				EmitAQuad(EdgeCell, V);
+
+				EdgeCell[V] = Sel;
+				EdgeCell[W] = Run;
+				EmitAQuad(EdgeCell, W);
+			}
+		}
+
+		// ---- Face-plane stitching at the FINE granularity (the T-junction fans) -------------
+		auto EmitFaceEdge = [&](int32 FV, int32 FW, int32 EdgeAbsAxis)
+		{
+			int32 BaseVox[3];
+			BaseVox[U] = ChunkSize;
+			BaseVox[V] = FV * MinS;
+			BaseVox[W] = FW * MinS;
+			int32 EndVox[3] = { BaseVox[0], BaseVox[1], BaseVox[2] };
+			EndVox[EdgeAbsAxis] += MinS;
+
+			const float D0 = SamplerC.GetDensity(BaseVox[0], BaseVox[1], BaseVox[2]);
+			const float D1 = SamplerC.GetDensity(EndVox[0], EndVox[1], EndVox[2]);
+			const bool bSolid0 = (D0 >= IsoLevel);
+			const bool bSolid1 = (D1 >= IsoLevel);
+			if (bSolid0 == bSolid1)
+			{
+				return;
+			}
+
+			FRef Refs[4];
+			for (int32 i = 0; i < 4; ++i)
+			{
+				const FCellOffset& Off = GAxisOffsets[EdgeAbsAxis][i];
+				const int32 OffXYZ[3] = { Off.DX, Off.DY, Off.DZ };
+				const int32 OffU = OffXYZ[U];
+				const int32 FineV = FV + OffXYZ[V];
+				const int32 FineW = FW + OffXYZ[W];
+				if (FineV < 0 || FineW < 0)
+				{
+					return;
+				}
+				if (OffU == 0)
+				{
+					// Neighbour-side slot: that side's ring at ITS stride.
+					const int32 BV = FineV / RB;
+					const int32 BW = FineW / RB;
+					if (BV >= SLB || BW >= SLB)
+					{
+						return;
+					}
+					FSeamCellVertex& Cell = RingB[BV + BW * SLB];
+					if (!Cell.bValid)
+					{
+						return; // fine crossing with no coarse vertex to fan onto -> crack, never a protrusion
+					}
+					Refs[i] = { &Cell, 2 * KeyStride + BV + BW * SLB };
+				}
+				else
+				{
+					// Owner-side slot: the slab at the owner's stride.
+					const int32 AV = FineV / RA;
+					const int32 AW = FineW / RA;
+					if (AV >= SLA || AW >= SLA)
+					{
+						return;
+					}
+					FSeamCellVertex& Cell = Slab[AV + AW * SLA];
+					if (!Cell.bValid)
+					{
+						return;
+					}
+					Refs[i] = { &Cell, KeyStride + AV + AW * SLA };
+				}
+			}
+
+			const bool bFlip = (D0 < IsoLevel);
+			int32 SolidVox[3] = { BaseVox[0], BaseVox[1], BaseVox[2] };
+			if (bFlip)
+			{
+				SolidVox[EdgeAbsAxis] += MinS;
+			}
+			const FVoxelData SolidVoxel = SamplerC.GetVoxel(SolidVox[0], SolidVox[1], SolidVox[2]);
+			EmitFan(Refs, bFlip, SolidVoxel.MaterialID, SolidVoxel.BiomeID);
+		};
+
+		for (int32 FW = 0; FW < FaceGrid; ++FW)
+		{
+			for (int32 FV = 0; FV < FaceGrid; ++FV)
+			{
+				EmitFaceEdge(FV, FW, V);
+				EmitFaceEdge(FV, FW, W);
+			}
+		}
+
+		UE_LOG(LogVoxelMeshing, Verbose,
+			TEXT("DC mixed face seam %s axis=%d LOD %d|%d: %d verts, %d tris"),
+			*Req.OwnerChunkCoord.ToString(), U, LODA, LODB,
+			Out.Positions.Num(), TriangleCount);
+
+		return true;
+	}
 }
 
 bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
@@ -1387,6 +1785,13 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 		UE_LOG(LogVoxelMeshing, Error, TEXT("GenerateFaceSeamMeshCPU: invalid seam request (axis=%d, chunkSize=%d, A=%d, B=%d voxels)"),
 			SeamRequest.Axis, SeamRequest.ChunkSize, SeamRequest.VoxelDataA.Num(), SeamRequest.VoxelDataB.Num());
 		return false;
+	}
+
+	// Mixed-LOD pair (seam-ownership P2c): a dedicated path — the same-LOD path below stays
+	// bit-frozen (its ring identities are asserted by the SC tests and relied on by P2a/P2b).
+	if (SeamRequest.GetLODLevelB() != SeamRequest.LODLevel)
+	{
+		return GenerateMixedFaceSeam(SeamRequest, Config, OutMeshData);
 	}
 
 	const int32 ChunkSize = SeamRequest.ChunkSize;

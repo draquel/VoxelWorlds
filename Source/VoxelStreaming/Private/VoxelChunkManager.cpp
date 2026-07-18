@@ -3411,16 +3411,25 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			return; // a participant vanished between schedule and drain; the unregister path re-dirties
 		}
 	}
-	const int32 SharedLOD = States[0]->MeshedLODLevel;
-	if (SharedLOD < 0)
+	// Every participant needs a rendered mesh. FACE pairs may differ in LOD (the P2c mixed-LOD
+	// mesher stitches them); EDGE/CORNER tuples still require one shared LOD (mixed-LOD tuples
+	// are P2d — a later LOD change re-dirties and re-schedules them).
+	for (int32 i = 0; i < ExpectedParticipants; ++i)
 	{
-		return;
-	}
-	for (int32 i = 1; i < ExpectedParticipants; ++i)
-	{
-		if (States[i]->MeshedLODLevel != SharedLOD)
+		if (States[i]->MeshedLODLevel < 0)
 		{
 			return;
+		}
+	}
+	const int32 SharedLOD = States[0]->MeshedLODLevel;
+	if (Job.Key.Type != EVoxelSeamType::Face)
+	{
+		for (int32 i = 1; i < ExpectedParticipants; ++i)
+		{
+			if (States[i]->MeshedLODLevel != SharedLOD)
+			{
+				return;
+			}
 		}
 	}
 
@@ -3446,15 +3455,17 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		FVoxelFaceSeamRequest SeamRequest;
 		SeamRequest.OwnerChunkCoord = Key.Owner;
 		SeamRequest.Axis = Key.Axis;
-		SeamRequest.LODLevel = SharedLOD;
+		SeamRequest.LODLevel = States[0]->MeshedLODLevel;
+		SeamRequest.LODLevelB = States[1]->MeshedLODLevel; // may differ (P2c mixed-LOD path)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
 		CopyMergedVoxels(Job.Participants[0].Coord, *States[0], SeamRequest.VoxelDataA);
 		CopyMergedVoxels(Job.Participants[1].Coord, *States[1], SeamRequest.VoxelDataB);
 
+		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel]() mutable
 		{
 			FChunkMeshData MeshData;
 			const bool bSuccess = DCMesher->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
