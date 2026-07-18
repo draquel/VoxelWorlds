@@ -452,6 +452,54 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 };
 
 /**
+ * Request for a single-owner FACE-SEAM meshing job (seam-ownership P1,
+ * SEAM_OWNERSHIP_ARCHITECTURE.md §2.2).
+ *
+ * Same-LOD chunk pair: owner A (the min-coordinate participant) + neighbour B = A + unit(Axis).
+ * The seam job meshes the one-world-cell slab straddling the shared face from BOTH sides' full
+ * voxel arrays — no slices, no deep planes, no clamping across the face — and terminates
+ * bit-exactly on the two interior meshes' boundary vertex rings (each ring recomputed with that
+ * side's own data + the same absent-neighbour Air clamp its interior pass used). Output positions
+ * are in the OWNER's local frame (B-side content sits at +ChunkSize*VoxelSize along Axis).
+ *
+ * Plain struct (not USTRUCT): an internal job payload, never reflected/serialized.
+ */
+struct VOXELMESHING_API FVoxelFaceSeamRequest
+{
+	/** Owner chunk (min-coordinate participant; the seam registry's canonical owner). */
+	FIntVector OwnerChunkCoord = FIntVector::ZeroValue;
+
+	/** Face normal axis: 0 = X, 1 = Y, 2 = Z. Neighbour B = Owner + unit(Axis). */
+	uint8 Axis = 0;
+
+	/** Shared LOD level (P1 handles same-LOD pairs only; mixed LOD is P2). */
+	int32 LODLevel = 0;
+
+	/** Voxels per chunk edge. */
+	int32 ChunkSize = 32;
+
+	/** World-space size of each voxel. */
+	float VoxelSize = 100.0f;
+
+	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
+	FVector WorldOrigin = FVector::ZeroVector;
+
+	/** Owner-side voxels (ChunkSize^3, edit-merged by the caller). */
+	TArray<FVoxelData> VoxelDataA;
+
+	/** Neighbour-side voxels (ChunkSize^3, edit-merged by the caller). */
+	TArray<FVoxelData> VoxelDataB;
+
+	/** Both voxel arrays present and parameters sane. */
+	bool IsValid() const
+	{
+		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
+		return Axis <= 2 && LODLevel >= 0 && ChunkSize > 0
+			&& VoxelDataA.Num() == Total && VoxelDataB.Num() == Total;
+	}
+};
+
+/**
  * Handle for tracking async meshing operations.
  *
  * Returned by async meshing calls, used to query status
