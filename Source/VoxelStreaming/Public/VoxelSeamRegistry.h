@@ -234,8 +234,9 @@ public:
 	 * @param ViewerChunk     Viewer's current chunk coord (for near-first prioritisation).
 	 * @param NearChunkRadius Chebyshev chunk radius considered "near the viewer" (near seams get the
 	 *                        near-correction priority tier so they'd beat the streaming wave).
-	 * @param MaxToSchedule   Cap on dirty seams EXAMINED this call (0 = all). Bounds per-tick cost; any
-	 *                        not examined (or examined-but-not-yet-ready) are retried on a later tick.
+	 * @param MaxToSchedule   Cap on seams SCHEDULED this call (0 = unlimited). The scan examines up
+	 *                        to 4x that (min 64) candidates in ROUND-ROBIN order — not-yet-ready
+	 *                        seams rotate to the back so they can't starve schedulable ones.
 	 * @return Number of seams scheduled.
 	 */
 	int32 ScheduleReadySeams(const FIntVector& ViewerChunk, int32 NearChunkRadius, int32 MaxToSchedule);
@@ -359,8 +360,18 @@ private:
 	/** All tracked seams keyed by canonical identity. */
 	TMap<FVoxelSeamKey, FVoxelSeamState> Seams;
 
-	/** Worklist of dirty seam keys (subset of Seams with bDirty) — scanned by the scheduler. */
+	/** Worklist of dirty seam keys (subset of Seams with bDirty) — membership/dedup. */
 	TSet<FVoxelSeamKey> DirtySeams;
+
+	/**
+	 * Round-robin scan order over DirtySeams (head index + lazy compaction). A bounded per-tick
+	 * scan MUST rotate: iterating the set from the start each tick re-examines the same
+	 * not-yet-ready frontier seams forever and starves every schedulable seam behind them
+	 * (observed live: thousands dirty, 2 scheduled). Examined-but-not-ready keys go to the back;
+	 * keys no longer in DirtySeams are skipped lazily.
+	 */
+	TArray<FVoxelSeamKey> DirtyQueue;
+	int32 DirtyQueueHead = 0;
 
 	/** Priority-sorted pending seam jobs (ascending; highest priority at the back for O(1) pop). */
 	TArray<FVoxelSeamJob> JobQueue;

@@ -210,6 +210,8 @@ void FVoxelSeamRegistry::Reset()
 	ChunkMirror.Reset();
 	Seams.Reset();
 	DirtySeams.Reset();
+	DirtyQueue.Reset();
+	DirtyQueueHead = 0;
 	JobQueue.Reset();
 	JobQueueSet.Reset();
 	// Lifetime counters intentionally retained across Reset for session-cumulative debug stats.
@@ -242,7 +244,14 @@ FVoxelSeamState& FVoxelSeamRegistry::FindOrCreateSeam(const FVoxelSeamKey& Key)
 void FVoxelSeamRegistry::MarkSeamDirty(FVoxelSeamState& Seam)
 {
 	Seam.bDirty = true;
-	DirtySeams.Add(Seam.Key);
+	bool bAlreadyInSet = false;
+	DirtySeams.Add(Seam.Key, &bAlreadyInSet);
+	if (!bAlreadyInSet)
+	{
+		// First transition to dirty: join the round-robin scan queue. Re-dirtying while already
+		// queued adds nothing (the existing entry still gets examined).
+		DirtyQueue.Add(Seam.Key);
+	}
 }
 
 void FVoxelSeamRegistry::DirtyIncidentSeams(const FIntVector& ChunkCoord)
@@ -377,36 +386,52 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		return 0;
 	}
 
-	// Examine at most a bounded number of dirty seams per tick (MaxToSchedule; 0 = all). Bounds the
-	// per-tick cost — the full-set copy AND the per-candidate residency work — even when a large
-	// frontier of not-yet-ready seams accumulates during heavy streaming; the rest are retried on
-	// later ticks. Scheduling mutates DirtySeams, so we snapshot the candidates first (read-only
-	// iteration, early-out at the budget) before evaluating.
-	const int32 ScanBudget = (MaxToSchedule > 0) ? MaxToSchedule : DirtySeams.Num();
-	TArray<FVoxelSeamKey> Candidates;
-	Candidates.Reserve(FMath::Min(ScanBudget, DirtySeams.Num()));
-	for (const FVoxelSeamKey& Key : DirtySeams)
-	{
-		Candidates.Add(Key);
-		if (Candidates.Num() >= ScanBudget)
-		{
-			break;
-		}
-	}
+	// Round-robin scan: pop candidates from the head of DirtyQueue; a candidate that cannot
+	// schedule yet (participant missing, or still in flight) is re-appended at the BACK so the
+	// next tick examines DIFFERENT seams. A bounded scan from a fixed starting point would
+	// re-examine the same not-yet-ready frontier every tick and starve everything behind it
+	// (observed live: thousands dirty, 2 scheduled). Scan budget exceeds the schedule budget so
+	// ready seams hiding behind unready ones are still found within a tick.
+	const int32 ScheduleBudget = (MaxToSchedule > 0) ? MaxToSchedule : MAX_int32;
+	const int32 ScanBudget = (MaxToSchedule > 0)
+		? FMath::Max(64, MaxToSchedule * 4)
+		: (DirtyQueue.Num() - DirtyQueueHead);
 
 	int32 Scheduled = 0;
-	for (const FVoxelSeamKey& Key : Candidates)
+	int32 Examined = 0;
+	TArray<FVoxelSeamKey> Requeue;
+
+	while (DirtyQueueHead < DirtyQueue.Num() && Examined < ScanBudget && Scheduled < ScheduleBudget)
 	{
-		FVoxelSeamState* Seam = Seams.Find(Key);
-		if (!Seam || !Seam->bDirty || Seam->bScheduled)
+		const FVoxelSeamKey Key = DirtyQueue[DirtyQueueHead++];
+
+		// Lazy deletion: entries whose seam was cleaned/scheduled/removed since queuing.
+		if (!DirtySeams.Contains(Key))
 		{
+			continue;
+		}
+
+		FVoxelSeamState* Seam = Seams.Find(Key);
+		if (!Seam || !Seam->bDirty)
+		{
+			DirtySeams.Remove(Key); // stale set entry — drop it
+			continue;
+		}
+
+		++Examined;
+
+		// Re-dirtied while its previous job is still in flight — retry once the job completes.
+		if (Seam->bScheduled)
+		{
+			Requeue.Add(Key);
 			continue;
 		}
 		// Gate: only schedule a seam once ALL its participants are resident (both/all sides' data
 		// present) — the same "wait for neighbours" the meshing scheduler enforces.
 		if (!AreAllParticipantsResident(Key))
 		{
-			continue; // stays dirty; retried on a later tick when the missing participant arrives
+			Requeue.Add(Key); // stays dirty; back of the rotation
+			continue;
 		}
 
 		// Capture the launch-time participant snapshot (mirrors FMeshBoundaryDep per participant).
@@ -434,6 +459,14 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		DirtySeams.Remove(Key);
 		++Scheduled;
 		++TotalSeamJobsScheduled;
+	}
+
+	// Still-dirty candidates rejoin at the back; compact the consumed head region once it dominates.
+	DirtyQueue.Append(Requeue);
+	if (DirtyQueueHead > 1024 && DirtyQueueHead * 2 > DirtyQueue.Num())
+	{
+		DirtyQueue.RemoveAt(0, DirtyQueueHead);
+		DirtyQueueHead = 0;
 	}
 	return Scheduled;
 }
@@ -551,4 +584,6 @@ void FVoxelSeamRegistry::MarkAllSeamsClean()
 		Pair.Value.bDirty = false;
 	}
 	DirtySeams.Reset();
+	DirtyQueue.Reset();
+	DirtyQueueHead = 0;
 }
