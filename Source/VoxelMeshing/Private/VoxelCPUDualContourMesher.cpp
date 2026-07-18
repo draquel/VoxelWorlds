@@ -1220,6 +1220,69 @@ namespace VoxelDCFaceSeam
 	};
 
 	/**
+	 * Octant-visibility sampler over a corner-seam request (seam-ownership P2b).
+	 *
+	 * The 3D generalization of FQuadSampler: eight participants around the shared corner, an
+	 * 8-bit visibility mask (bit = dx + dy*2 + dz*4, matching FVoxelCornerSeamRequest::VoxelData
+	 * order), and a frame offset mapping frame-local coords into owner-frame octant space. With
+	 * the right mask+frame this reproduces EXACTLY every earlier job's sampler — an interior view
+	 * (1 octant), a face job's pair view (2 octants), and an edge job's quad view (4 octants,
+	 * whose parallel-axis clamp falls out of the octant masking for free).
+	 */
+	struct FOctSampler
+	{
+		const FVoxelCornerSeamRequest& Req;
+		uint8 OctantMask;             // visible octants, bit = dx + dy*2 + dz*4
+		FIntVector FrameOffsetVoxels; // frame-local -> owner-frame voxel offset
+
+		FVoxelData GetVoxel(int32 X, int32 Y, int32 Z) const
+		{
+			const int32 CS = Req.ChunkSize;
+			const int32 C[3] = { X + FrameOffsetVoxels.X, Y + FrameOffsetVoxels.Y, Z + FrameOffsetVoxels.Z };
+			if (C[0] < 0 || C[0] >= 2 * CS || C[1] < 0 || C[1] >= 2 * CS || C[2] < 0 || C[2] >= 2 * CS)
+			{
+				return FVoxelData::Air();
+			}
+			const int32 Dx = (C[0] >= CS) ? 1 : 0;
+			const int32 Dy = (C[1] >= CS) ? 1 : 0;
+			const int32 Dz = (C[2] >= CS) ? 1 : 0;
+			const int32 Octant = Dx + Dy * 2 + Dz * 4;
+			if (!(OctantMask & (1 << Octant)))
+			{
+				return FVoxelData::Air();
+			}
+			const int32 LX = C[0] - Dx * CS;
+			const int32 LY = C[1] - Dy * CS;
+			const int32 LZ = C[2] - Dz * CS;
+			return Req.VoxelData[Octant][LX + LY * CS + LZ * CS * CS];
+		}
+
+		float GetDensity(int32 X, int32 Y, int32 Z) const
+		{
+			return static_cast<float>(GetVoxel(X, Y, Z).Density) / 255.0f;
+		}
+
+		/** Replicates CalculateGradientNormal(/LOD) exactly — see FSeamSampler::GradientNormal. */
+		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
+		{
+			const int32 IX = FMath::FloorToInt(X);
+			const int32 IY = FMath::FloorToInt(Y);
+			const int32 IZ = FMath::FloorToInt(Z);
+
+			float gx = GetDensity(IX + Stride, IY, IZ) - GetDensity(IX - Stride, IY, IZ);
+			float gy = GetDensity(IX, IY + Stride, IZ) - GetDensity(IX, IY - Stride, IZ);
+			float gz = GetDensity(IX, IY, IZ + Stride) - GetDensity(IX, IY, IZ - Stride);
+
+			FVector3f Normal(-gx, -gy, -gz);
+			if (!Normal.Normalize())
+			{
+				return FVector3f(0.0f, 0.0f, 1.0f);
+			}
+			return Normal;
+		}
+	};
+
+	/**
 	 * Compute one DC cell vertex against a sampler, replicating DetectEdgeCrossings +
 	 * SolveCellVertices op-for-op: per-edge crossing formula (t clamp, P0/P1 construction),
 	 * gradient normal at the crossing, QEF.Add in GCellEdges order, the same Solve call, and
@@ -1932,6 +1995,289 @@ bool FVoxelCPUDualContourMesher::GenerateEdgeSeamMeshCPU(
 	UE_LOG(LogVoxelMeshing, Verbose,
 		TEXT("DC edge seam %s axis=%d LOD=%d: %d verts, %d tris"),
 		*SeamRequest.OwnerChunkCoord.ToString(), U, LODLevel,
+		OutMeshData.Positions.Num(), TriangleCount);
+
+	return true;
+}
+
+bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
+	const FVoxelCornerSeamRequest& SeamRequest,
+	FChunkMeshData& OutMeshData)
+{
+	using namespace VoxelDCFaceSeam;
+
+	OutMeshData.Reset();
+
+	if (!bIsInitialized)
+	{
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("GenerateCornerSeamMeshCPU called before Initialize"));
+		return false;
+	}
+	if (!SeamRequest.IsValid())
+	{
+		UE_LOG(LogVoxelMeshing, Error, TEXT("GenerateCornerSeamMeshCPU: invalid seam request (chunkSize=%d)"),
+			SeamRequest.ChunkSize);
+		return false;
+	}
+
+	const int32 ChunkSize = SeamRequest.ChunkSize;
+	const int32 LODLevel = FMath::Clamp(SeamRequest.LODLevel, 0, 7);
+	const int32 Stride = 1 << LODLevel;
+	if ((ChunkSize % Stride) != 0)
+	{
+		UE_LOG(LogVoxelMeshing, Error, TEXT("GenerateCornerSeamMeshCPU: ChunkSize %d not divisible by stride %d"), ChunkSize, Stride);
+		return false;
+	}
+	const int32 GridSize = ChunkSize / Stride;
+	if (GridSize < 3)
+	{
+		return true; // degenerate resolution — valid empty seam
+	}
+
+	const int32 SL = GridSize - 1;
+	const float VoxelSize = SeamRequest.VoxelSize;
+	const float IsoLevel = Config.IsoLevel;
+	const float SVDThreshold = Config.QEFSVDThreshold;
+	const float BiasStrength = Config.QEFBiasStrength;
+	const float ChunkWorldSpan = static_cast<float>(ChunkSize) * VoxelSize;
+
+	// ---- The 3x3x3 cell block around the corner cell (per-axis state s in {-1,0,+1} relative
+	// to SL). One unified rule generates every original job's exact configuration:
+	//   mask:  s == 0 -> both halves visible on that axis; s == -1 -> lower only; +1 -> upper only
+	//   frame: s == +1 computes in the far chunk's frame on that axis (offset +ChunkSize)
+	//   cell:  frame-local coord = (s == +1) ? 0 : SL + s
+	// This reproduces: the corner cell itself (all 8 octants, owner frame), the six edge-column
+	// end cells (4-octant masks == the edge jobs' quad samplers), the twelve face-slab corner
+	// cells (2-octant masks == the face jobs' pair samplers), and the participant-interior
+	// corner cells (single octants == the Interior passes). Cells whose state has no zero
+	// component are never referenced by an owned quad; they are computed harmlessly.
+	FSeamCellVertex Cells[27];
+	auto CellIndexOf = [](int32 SX, int32 SY, int32 SZ) { return (SX + 1) + (SY + 1) * 3 + (SZ + 1) * 9; };
+
+	for (int32 SZ = -1; SZ <= 1; ++SZ)
+	{
+		for (int32 SY = -1; SY <= 1; ++SY)
+		{
+			for (int32 SX = -1; SX <= 1; ++SX)
+			{
+				const int32 S[3] = { SX, SY, SZ };
+				uint8 Mask = 0;
+				for (int32 Oct = 0; Oct < 8; ++Oct)
+				{
+					const int32 D[3] = { Oct & 1, (Oct >> 1) & 1, (Oct >> 2) & 1 };
+					bool bAllowed = true;
+					for (int32 Axis = 0; Axis < 3; ++Axis)
+					{
+						if ((S[Axis] == -1 && D[Axis] != 0) || (S[Axis] == 1 && D[Axis] != 1))
+						{
+							bAllowed = false;
+							break;
+						}
+					}
+					if (bAllowed)
+					{
+						Mask |= (1 << Oct);
+					}
+				}
+
+				FIntVector FrameOffset(
+					(SX == 1) ? ChunkSize : 0,
+					(SY == 1) ? ChunkSize : 0,
+					(SZ == 1) ? ChunkSize : 0);
+				const int32 CellX = (SX == 1) ? 0 : (SL + SX);
+				const int32 CellY = (SY == 1) ? 0 : (SL + SY);
+				const int32 CellZ = (SZ == 1) ? 0 : (SL + SZ);
+
+				const FOctSampler Sampler{ SeamRequest, Mask, FrameOffset };
+				FSeamCellVertex& Cell = Cells[CellIndexOf(SX, SY, SZ)];
+				if (ComputeCellVertex(Sampler, CellX, CellY, CellZ, Stride, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, Cell))
+				{
+					Cell.Position.X += (SX == 1) ? ChunkWorldSpan : 0.0f;
+					Cell.Position.Y += (SY == 1) ? ChunkWorldSpan : 0.0f;
+					Cell.Position.Z += (SZ == 1) ? ChunkWorldSpan : 0.0f;
+				}
+			}
+		}
+	}
+
+	// ---- Vertex emission (identical to the face/edge seam paths) ---------------------------
+	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
+	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID) -> int32
+	{
+		const int32 Index = OutMeshData.Positions.Num();
+		OutMeshData.Positions.Add(Vertex.Position);
+		OutMeshData.Normals.Add(Vertex.Normal);
+
+		const float AbsX = FMath::Abs(Vertex.Normal.X);
+		const float AbsY = FMath::Abs(Vertex.Normal.Y);
+		const float AbsZ = FMath::Abs(Vertex.Normal.Z);
+		FVector2f UV;
+		if (AbsZ >= AbsX && AbsZ >= AbsY)
+		{
+			UV = FVector2f(Vertex.Position.X * UVScale / VoxelSize, Vertex.Position.Y * UVScale / VoxelSize);
+		}
+		else if (AbsX >= AbsY)
+		{
+			UV = FVector2f(Vertex.Position.Y * UVScale / VoxelSize, Vertex.Position.Z * UVScale / VoxelSize);
+		}
+		else
+		{
+			UV = FVector2f(Vertex.Position.X * UVScale / VoxelSize, Vertex.Position.Z * UVScale / VoxelSize);
+		}
+		OutMeshData.UVs.Add(UV);
+		OutMeshData.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
+		OutMeshData.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+		return Index;
+	};
+
+	const FOctSampler FullSampler{ SeamRequest, 0xFF, FIntVector::ZeroValue };
+
+	TMap<uint64, int32> DuplicateVertexCache;
+	uint32 TriangleCount = 0;
+
+	auto EmitQuadForEdge = [&](const int32 EdgeCell[3], int32 EdgeAxis) -> void
+	{
+		const int32 VX = EdgeCell[0] * Stride;
+		const int32 VY = EdgeCell[1] * Stride;
+		const int32 VZ = EdgeCell[2] * Stride;
+
+		const float D0 = FullSampler.GetDensity(VX, VY, VZ);
+		int32 NX = VX, NY = VY, NZ = VZ;
+		if (EdgeAxis == 0) NX += Stride;
+		else if (EdgeAxis == 1) NY += Stride;
+		else NZ += Stride;
+		const float D1 = FullSampler.GetDensity(NX, NY, NZ);
+
+		const bool bSolid0 = (D0 >= IsoLevel);
+		const bool bSolid1 = (D1 >= IsoLevel);
+		if (bSolid0 == bSolid1)
+		{
+			return;
+		}
+
+		FSeamCellVertex* Verts[4];
+		int32 CellKeys[4];
+		for (int32 i = 0; i < 4; ++i)
+		{
+			const FCellOffset& Off = GAxisOffsets[EdgeAxis][i];
+			const int32 SX = (EdgeCell[0] + Off.DX) - SL;
+			const int32 SY = (EdgeCell[1] + Off.DY) - SL;
+			const int32 SZ = (EdgeCell[2] + Off.DZ) - SL;
+			if (SX < -1 || SX > 1 || SY < -1 || SY > 1 || SZ < -1 || SZ > 1)
+			{
+				return; // outside the corner block (owned elsewhere)
+			}
+			const int32 Idx = CellIndexOf(SX, SY, SZ);
+			FSeamCellVertex& Cell = Cells[Idx];
+			if (!Cell.bValid)
+			{
+				return;
+			}
+			Verts[i] = &Cell;
+			CellKeys[i] = Idx;
+		}
+
+		const bool bFlip = (D0 < IsoLevel);
+
+		int32 SolidX = VX, SolidY = VY, SolidZ = VZ;
+		if (bFlip)
+		{
+			if (EdgeAxis == 0) { SolidX += Stride; }
+			else if (EdgeAxis == 1) { SolidY += Stride; }
+			else { SolidZ += Stride; }
+		}
+		const FVoxelData SolidVoxel = FullSampler.GetVoxel(SolidX, SolidY, SolidZ);
+		const uint8 QuadMaterial = SolidVoxel.MaterialID;
+		const uint8 QuadBiome = SolidVoxel.BiomeID;
+
+		int32 Indices[4];
+		for (int32 i = 0; i < 4; ++i)
+		{
+			FSeamCellVertex& Cell = *Verts[i];
+			if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome)
+			{
+				Indices[i] = Cell.MeshVertexIndex;
+			}
+			else if (Cell.MeshVertexIndex < 0)
+			{
+				Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
+				Cell.MeshVertexIndex = Indices[i];
+				Cell.EmittedMaterialID = QuadMaterial;
+				Cell.EmittedBiomeID = QuadBiome;
+			}
+			else
+			{
+				const uint64 DupKey = (static_cast<uint64>(CellKeys[i]) << 16)
+					| (static_cast<uint64>(QuadMaterial) << 8)
+					| static_cast<uint64>(QuadBiome);
+				if (const int32* Found = DuplicateVertexCache.Find(DupKey))
+				{
+					Indices[i] = *Found;
+				}
+				else
+				{
+					Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
+					DuplicateVertexCache.Add(DupKey, Indices[i]);
+				}
+			}
+		}
+
+		auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
+		{
+			return 0.5f * FVector3f::CrossProduct(B - A, C - A).Size();
+		};
+		const FVector3f& P0 = Verts[0]->Position;
+		const FVector3f& P1 = Verts[1]->Position;
+		const FVector3f& P2 = Verts[2]->Position;
+		const FVector3f& P3 = Verts[3]->Position;
+		const float MinArea02 = FMath::Min(TriArea(P0, P1, P2), TriArea(P0, P2, P3));
+		const float MinArea13 = FMath::Min(TriArea(P1, P2, P3), TriArea(P1, P3, P0));
+		const bool bUse13 = MinArea13 > MinArea02;
+
+		auto AddTri = [&](int32 a, int32 b, int32 c)
+		{
+			OutMeshData.Indices.Add(Indices[a]);
+			OutMeshData.Indices.Add(Indices[b]);
+			OutMeshData.Indices.Add(Indices[c]);
+		};
+
+		if (bFlip)
+		{
+			if (bUse13) { AddTri(1, 2, 3); AddTri(1, 3, 0); }
+			else        { AddTri(0, 1, 2); AddTri(0, 2, 3); }
+		}
+		else
+		{
+			if (bUse13) { AddTri(1, 3, 2); AddTri(1, 0, 3); }
+			else        { AddTri(0, 2, 1); AddTri(0, 3, 2); }
+		}
+
+		TriangleCount += 2;
+	};
+
+	// ---- Owned edges: the 12 DC edges whose surrounding cells include the corner cell — for
+	// each axis, the 2x2 fan at the corner (exactly-once: face jobs exclude multi-slab cells,
+	// edge jobs exclude cells beyond their column's [0, SL) extent).
+	for (int32 EdgeAxis = 0; EdgeAxis < 3; ++EdgeAxis)
+	{
+		const int32 A1 = (EdgeAxis + 1) % 3;
+		const int32 A2 = (EdgeAxis + 2) % 3;
+		for (int32 VB = SL; VB <= SL + 1; ++VB)
+		{
+			for (int32 VA = SL; VA <= SL + 1; ++VA)
+			{
+				int32 EdgeCell[3];
+				EdgeCell[EdgeAxis] = SL;
+				EdgeCell[A1] = VA;
+				EdgeCell[A2] = VB;
+				EmitQuadForEdge(EdgeCell, EdgeAxis);
+			}
+		}
+	}
+
+	UE_LOG(LogVoxelMeshing, Verbose,
+		TEXT("DC corner seam %s LOD=%d: %d verts, %d tris"),
+		*SeamRequest.OwnerChunkCoord.ToString(), LODLevel,
 		OutMeshData.Positions.Num(), TriangleCount);
 
 	return true;

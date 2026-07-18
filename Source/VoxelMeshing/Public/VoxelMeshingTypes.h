@@ -561,6 +561,58 @@ struct VOXELMESHING_API FVoxelEdgeSeamRequest
 };
 
 /**
+ * Request for a single-owner CORNER-SEAM meshing job (seam-ownership P2b,
+ * SEAM_OWNERSHIP_ARCHITECTURE.md "P2 plan").
+ *
+ * Same-LOD 8-tuple sharing the chunk corner at Owner + (1,1,1) chunks. Participants are in octant
+ * order index = dx + dy*2 + dz*4 (X innermost) — matching FVoxelSeamRegistry::GetParticipants.
+ * The job meshes the single corner cell (the one cell lying in all three face slabs) from all
+ * eight sides' data and terminates bit-exactly on the surrounding interior meshes, face-seam
+ * meshes, and edge-seam meshes (their ring cells are recomputed with the same restricted octant
+ * masks those jobs' samplers used). Output positions are in the OWNER's local frame.
+ *
+ * Plain struct (not USTRUCT): an internal job payload, never reflected/serialized.
+ */
+struct VOXELMESHING_API FVoxelCornerSeamRequest
+{
+	/** Owner chunk (min-coordinate participant; octant (0,0,0)). */
+	FIntVector OwnerChunkCoord = FIntVector::ZeroValue;
+
+	/** Shared LOD level (P2b handles same-LOD tuples only). */
+	int32 LODLevel = 0;
+
+	/** Voxels per chunk edge. */
+	int32 ChunkSize = 32;
+
+	/** World-space size of each voxel. */
+	float VoxelSize = 100.0f;
+
+	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
+	FVector WorldOrigin = FVector::ZeroVector;
+
+	/** Participant voxel arrays (ChunkSize^3 each, edit-merged), octant order dx + dy*2 + dz*4. */
+	TArray<FVoxelData> VoxelData[8];
+
+	/** All eight voxel arrays present and parameters sane. */
+	bool IsValid() const
+	{
+		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
+		if (LODLevel < 0 || ChunkSize <= 0)
+		{
+			return false;
+		}
+		for (int32 i = 0; i < 8; ++i)
+		{
+			if (VoxelData[i].Num() != Total)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
+/**
  * Handle for tracking async meshing operations.
  *
  * Returned by async meshing calls, used to query status
