@@ -151,6 +151,33 @@ static TAutoConsoleVariable<int32> CVarStreamNeighborDebounceFrames(
 	     "on far chunks near the load edge."),
 	ECVF_Default);
 
+// Near-field boundary-correction latency. A stale boundary NEXT TO THE PLAYER is the worst UX in the
+// game (a visible seam you can walk onto and wait on); the same staleness at 30k units is invisible.
+// Within NearCorrectionDistance of the viewer, corrective remeshes (coalesced neighbor remeshes and
+// the LOD-transition cascades) skip most of the debounce and jump the meshing queue above the
+// streaming wave's first-time meshes (priority 50) so they resolve within a few frames instead of
+// waiting out the whole load front. Far corrections keep the legacy debounce/priorities — the
+// coalescing throughput win (#40) is a far-field property.
+static TAutoConsoleVariable<float> CVarStreamNearCorrectionDistance(
+	TEXT("voxel.Stream.NearCorrectionDistance"),
+	12000.0f,
+	TEXT("Distance (world units, chunk center to viewer) within which boundary corrections use the "
+	     "fast path: short debounce + queue priority above first-time meshes. 0 disables the fast path."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamNearCorrectionDebounceFrames(
+	TEXT("voxel.Stream.NearCorrectionDebounceFrames"),
+	5,
+	TEXT("Debounce frames for coalesced neighbor-remeshes within NearCorrectionDistance (replaces "
+	     "NeighborRemeshDebounceFrames there). Small: near corrections should land in fractions of a "
+	     "second; a few frames still absorb same-burst arrivals."),
+	ECVF_Default);
+
+// Priority for near-field corrective remeshes: above first-time meshes (50) and the completion-time
+// revalidation requeue (60), below the invisible-chunk safety net (80). See AddToMeshingQueue —
+// the queue pops highest priority first.
+static constexpr float GNearCorrectionPriority = 65.0f;
+
 // A chunk bakes its boundary against a snapshot of its 26 neighbours taken at mesh-launch. If a
 // neighbour gains/changes data or changes rendered LOD before the async mesh completes, the baked
 // boundary is stale — a persistent seam, because the generation-complete and LOD-transition cascades
@@ -3291,7 +3318,10 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 							FChunkLODRequest Request;
 							Request.ChunkCoord = NeighborCoord;
 							Request.LODLevel = NeighborState->LODLevel;
-							Request.Priority = 20.0f;
+							// Near the viewer, boundary re-alignment must beat the streaming
+							// wave's first-time meshes (50) or the seam stays visible while
+							// the whole load front drains.
+							Request.Priority = IsChunkNearViewer(NeighborCoord) ? GNearCorrectionPriority : 20.0f;
 							if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
 							{
 								SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
@@ -3423,7 +3453,9 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 						FChunkLODRequest Request;
 						Request.ChunkCoord = NeighborCoord;
 						Request.LODLevel = NeighborState->LODLevel;
-						Request.Priority = 20.0f; // Low priority — refinement pass
+						// Refinement pass; near the viewer it must beat first-time meshes (50)
+						// so the LOD-boundary seam re-aligns in frames, not after the load front.
+						Request.Priority = IsChunkNearViewer(NeighborCoord) ? GNearCorrectionPriority : 20.0f;
 						if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
 						{
 							SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
@@ -3470,7 +3502,9 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		FChunkLODRequest Request;
 		Request.ChunkCoord = ChunkCoord;
 		Request.LODLevel = State->LODLevel;
-		Request.Priority = 60.0f; // above first-time mesh (50) so seam corrections resolve promptly
+		// Above first-time mesh (50) so seam corrections resolve promptly; near the viewer,
+		// align with the near-correction tier for consistent ordering.
+		Request.Priority = IsChunkNearViewer(ChunkCoord) ? GNearCorrectionPriority : 60.0f;
 		if (AddToMeshingQueue(Request, EVoxelRemeshReason::NeighborRemesh))
 		{
 			SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
@@ -3692,6 +3726,20 @@ void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
 	}
 }
 
+bool UVoxelChunkManager::IsChunkNearViewer(const FIntVector& ChunkCoord) const
+{
+	const float NearDist = CVarStreamNearCorrectionDistance.GetValueOnGameThread();
+	if (NearDist <= 0.0f || !Configuration)
+	{
+		return false;
+	}
+	const float ChunkWorldSize = Configuration->ChunkSize * Configuration->VoxelSize;
+	const FVector ChunkCenter = Configuration->WorldOrigin
+		+ FVector(ChunkCoord) * ChunkWorldSize
+		+ FVector(ChunkWorldSize * 0.5f);
+	return FVector::DistSquared(ChunkCenter, CurrentViewerPosition) <= FMath::Square(NearDist);
+}
+
 void UVoxelChunkManager::ProcessPendingNeighborRemeshes()
 {
 	if (CVarStreamNeighborCoalesce.GetValueOnGameThread() == 0)
@@ -3699,6 +3747,7 @@ void UVoxelChunkManager::ProcessPendingNeighborRemeshes()
 		return;
 	}
 	const int64 DebounceFrames = FMath::Max<int64>(0, CVarStreamNeighborDebounceFrames.GetValueOnGameThread());
+	const int64 NearDebounceFrames = FMath::Max<int64>(0, CVarStreamNearCorrectionDebounceFrames.GetValueOnGameThread());
 
 	for (auto& Pair : ChunkStates)
 	{
@@ -3714,7 +3763,11 @@ void UVoxelChunkManager::ProcessPendingNeighborRemeshes()
 		{
 			continue;
 		}
-		if ((CurrentFrame - S.NeighborRemeshRequestFrame) < DebounceFrames)
+		// A stale boundary NEXT TO the player is the worst-visible artifact in the game — take the
+		// fast path there (short debounce, queue priority above the streaming wave). Far corrections
+		// keep the full coalescing window; the throughput win is a far-field property.
+		const bool bNear = IsChunkNearViewer(Pair.Key);
+		if ((CurrentFrame - S.NeighborRemeshRequestFrame) < (bNear ? NearDebounceFrames : DebounceFrames))
 		{
 			continue; // neighborhood still settling — keep coalescing
 		}
@@ -3722,7 +3775,9 @@ void UVoxelChunkManager::ProcessPendingNeighborRemeshes()
 		FChunkLODRequest Request;
 		Request.ChunkCoord = Pair.Key;
 		Request.LODLevel = S.LODLevel;
-		Request.Priority = S.Priority * 0.5f; // refinement, lower than new chunks
+		// Near: above first-time meshes (50) so the visible seam resolves in frames.
+		// Far: refinement, lower than new chunks (legacy behavior).
+		Request.Priority = bNear ? GNearCorrectionPriority : S.Priority * 0.5f;
 		if (AddToMeshingQueue(Request, EVoxelRemeshReason::NeighborRemesh))
 		{
 			SetChunkState(Pair.Key, EChunkState::PendingMeshing);

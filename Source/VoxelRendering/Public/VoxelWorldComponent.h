@@ -39,6 +39,7 @@ public:
 
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	virtual UMaterialInterface* GetMaterial(int32 ElementIndex) const override;
 	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* Material) override;
@@ -113,12 +114,39 @@ public:
 
 	/**
 	 * Update LOD morph factor for a chunk.
+	 * Repurposed as the crossfade alpha carrier: when the chunk has an active mesh-swap
+	 * crossfade this drives its render-side FadeAlpha (see SEAM_OWNERSHIP_ARCHITECTURE.md §5).
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 * @param MorphFactor Blend factor 0-1
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel")
 	void UpdateChunkMorphFactor(const FIntVector& ChunkCoord, float MorphFactor);
+
+	// ==================== Mesh-Swap Crossfade ====================
+	// Softens every chunk mesh swap (LOD flips AND correction remeshes) by drawing the old
+	// and new mesh together for a short dithered crossfade, mesher-agnostic. Controlled by
+	// cvars voxel.MeshFade (kill-switch) and voxel.MeshFade.Duration.
+
+	/**
+	 * Set the masked fade material used for crossfade draws.
+	 * The material must be a Masked-blend variant of the terrain material with scalar
+	 * parameters "FadeAlpha" (dither threshold) and "FadeInvert" (0 = dither in, 1 = dither
+	 * out) driving OpacityMask via DitherTemporalAA.
+	 *
+	 * If never called, the component auto-derives it when SetMaterial runs: base material
+	 * "<Path>/M_Foo" looks for "<Path>/M_Foo_Fade". No fade material = instant swaps (legacy).
+	 * Note: name-derived materials are soft references — packaged games should either assign
+	 * this explicitly or ensure the _Fade asset is cooked.
+	 *
+	 * @param InFadeMaterial Masked fade material, or nullptr to disable crossfading
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|LOD")
+	void SetFadeMaterial(UMaterialInterface* InFadeMaterial);
+
+	/** Get the active fade material (explicit or auto-derived), null if crossfade unavailable */
+	UFUNCTION(BlueprintPure, Category = "Voxel|LOD")
+	UMaterialInterface* GetFadeMaterial() const { return FadeMaterial; }
 
 	// ==================== Water Tile Management ====================
 
@@ -402,6 +430,8 @@ private:
 		int32 LODLevel;
 		FBox LocalBounds;
 		FVector ChunkWorldPosition;
+		/** Crossfade this swap (chunk already had a mesh and fading is enabled) */
+		bool bCrossfade = false;
 	};
 	TArray<FPendingChunkAdd> PendingAdds;
 
@@ -410,6 +440,65 @@ private:
 
 	/** Whether we have pending operations to flush */
 	bool HasPendingOperations() const { return PendingAdds.Num() > 0 || PendingRemovals.Num() > 0; }
+
+	// ==================== Mesh-Swap Crossfade State ====================
+
+	/** Masked fade material (explicit via SetFadeMaterial, or auto-derived from the base material name) */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> FadeMaterial;
+
+	/** True once SetFadeMaterial was called explicitly — auto-derivation stops overriding it */
+	bool bExplicitFadeMaterial = false;
+
+	/** MID pools (GC owners). "In" MIDs have FadeInvert=0, "Out" MIDs FadeInvert=1. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> FadeInMIDPool;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> FadeOutMIDPool;
+
+	/** Currently unused pool entries, ready for reuse */
+	TArray<UMaterialInstanceDynamic*> FreeFadeInMIDs;
+	TArray<UMaterialInstanceDynamic*> FreeFadeOutMIDs;
+
+	/** Entries retired this tick — reusable next tick, after the render thread stops referencing them */
+	TArray<UMaterialInstanceDynamic*> CoolingFadeInMIDs;
+	TArray<UMaterialInstanceDynamic*> CoolingFadeOutMIDs;
+
+	/** One active mesh-swap crossfade */
+	struct FActiveChunkFade
+	{
+		double StartTime = 0.0;
+		UMaterialInstanceDynamic* InMID = nullptr;   // owned by FadeInMIDPool
+		UMaterialInstanceDynamic* OutMID = nullptr;  // owned by FadeOutMIDPool
+	};
+
+	/** Active crossfades by chunk coordinate (transitioning chunks only — expect a few dozen) */
+	TMap<FIntVector, FActiveChunkFade> ActiveFades;
+
+	/** True if crossfading is possible right now (cvar on, fade material set, proxy alive) */
+	bool CanCrossfade() const;
+
+	/** Start (or restart) a crossfade for a chunk whose mesh was just resubmitted. Enqueues the fade-state attach. */
+	void StartChunkCrossfade(const FIntVector& ChunkCoord);
+
+	/** Drop a chunk's crossfade without waiting for completion (chunk removed / fade disabled). */
+	void CancelChunkCrossfade(const FIntVector& ChunkCoord, bool bClearRenderState);
+
+	/** Per-tick fade driver: advances FadeAlpha on the MIDs, batches alphas to the proxy, completes finished fades. */
+	void AdvanceChunkCrossfades();
+
+	/** Get a pooled fade MID (creating if needed), atlas parameters freshly copied, FadeInvert/FadeAlpha initialized. */
+	UMaterialInstanceDynamic* AcquireFadeMID(bool bInvert);
+
+	/** Return a fade's MIDs to the cooling lists */
+	void RetireFadeMIDs(FActiveChunkFade& Fade);
+
+	/** Auto-derive FadeMaterial from the current material's base ("M_Foo" -> "M_Foo_Fade") unless explicitly set */
+	void RefreshDerivedFadeMaterial();
+
+	/** Send the fade material + its relevance to a scene proxy (explicit target — CreateSceneProxy syncs before SceneProxy is assigned) */
+	void PushFadeMaterialToProxy(FVoxelSceneProxy* TargetProxy);
 
 	/** Critical section for chunk info access */
 	mutable FCriticalSection ChunkInfoLock;
