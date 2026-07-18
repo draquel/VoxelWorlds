@@ -68,6 +68,51 @@ public:
 		const FVoxelFaceSeamRequest& SeamRequest,
 		FChunkMeshData& OutMeshData);
 
+	/**
+	 * Seam-ownership P2a: mesh the single-owner EDGE seam of a same-LOD chunk 4-tuple.
+	 *
+	 * Emits the quads dual to edges whose surrounding cells include an edge-column cell
+	 * (owner-frame column at both face-slab layers, excluding the corner cells at its ends).
+	 * The edge column solves against all four participants (quadrant sampler, full hermite
+	 * reach); the eight surrounding ring columns are recomputed with the SAME restricted
+	 * samplers their original jobs used — participant-interior columns with that chunk's
+	 * single sampler, face-slab columns with the face jobs' pair samplers, each in its
+	 * original computation frame — so the edge seam terminates bit-exactly on the interior
+	 * meshes and the face-seam meshes with no communication (§2.2, composed).
+	 * The corner cells at the column ends belong to the P2b corner-seam jobs and stay open.
+	 *
+	 * Output positions are in the OWNER's local frame. Thread-safety matches GenerateMeshCPU.
+	 *
+	 * @param SeamRequest Edge-seam job payload (four participants' voxels, parallel axis, LOD)
+	 * @param OutMeshData Output seam mesh (reset first; empty output with true = valid no-op)
+	 * @return true unless the request is invalid or the mesher is uninitialized
+	 */
+	bool GenerateEdgeSeamMeshCPU(
+		const FVoxelEdgeSeamRequest& SeamRequest,
+		FChunkMeshData& OutMeshData);
+
+	/**
+	 * Seam-ownership P2b: mesh the single-owner CORNER seam of a same-LOD chunk 8-tuple.
+	 *
+	 * Emits the quads dual to the 12 edges touching the corner cell (the one cell lying in all
+	 * three face slabs). The corner cell solves against all eight participants (octant sampler,
+	 * full hermite reach); the surrounding ring cells — participant-interior corner cells, the
+	 * twelve face-slab corner cells, and the six adjacent edge-column end cells — are recomputed
+	 * with the SAME restricted octant masks their original jobs' samplers used, in those jobs'
+	 * frames, so the corner seam terminates bit-exactly on every neighbouring mesh with no
+	 * communication (§2.2, fully composed). With face (P1), edge (P2a), and corner seams, a
+	 * uniform-LOD region is completely watertight under voxel.Seam.Meshing.
+	 *
+	 * Output positions are in the OWNER's local frame. Thread-safety matches GenerateMeshCPU.
+	 *
+	 * @param SeamRequest Corner-seam job payload (eight participants' voxels, shared LOD)
+	 * @param OutMeshData Output seam mesh (reset first; empty output with true = valid no-op)
+	 * @return true unless the request is invalid or the mesher is uninitialized
+	 */
+	bool GenerateCornerSeamMeshCPU(
+		const FVoxelCornerSeamRequest& SeamRequest,
+		FChunkMeshData& OutMeshData);
+
 	virtual FVoxelMeshingHandle GenerateMeshAsync(
 		const FVoxelMeshingRequest& Request,
 		FOnVoxelMeshingComplete OnComplete) override;

@@ -229,6 +229,43 @@ and `...DualContour.SeamClosure.*` (interior A + interior B + face seam is close
 interior — zero open edges except the P1-permitted slab rim; seam ring vertices bit-match interior
 ring vertices). Existing DT/GT suites unchanged (they guard the flag-off path until P4).
 
+**P1 shipped** (PR #47): P1a interior domain, P1b face-seam mesher + closure tests, P1c runtime
+pipeline (registry jobs → async face-seam meshing → per-(owner,axis) renderer seam buckets with RVT
+clones) + a round-robin dirty-queue scheduler (a bounded fixed-start scan starved scheduling — 2300
+dirty/2 scheduled observed live). Live-verified in the demo (`-VoxelForceCPU`, flag on): 8148/8148
+seam jobs at equilibrium, same-LOD face interiors watertight, openings confined to P2 scope.
+
+#### P2 plan (branch `feature/seam-ownership-p2`, in progress)
+
+P2 closes the remaining openings: the edge/corner lattice and mixed-LOD faces. Internal sequencing
+(each increment suite-green and live-checkable):
+
+1. **P2a — same-LOD edge seams.** The edge-exclusive region is the cell column in exactly two face
+   slabs (owner frame: `C[V]==SL && C[W]==SL`, `u ∈ [0, SL)` along the parallel axis; the `u`
+   endpoints are corner-seam cells). The job reads all 4 participants via a **quadrant-visibility
+   sampler** (generalizing P1's A-only/B-only/combined: a (V,W)-plane quadrant mask + Air outside),
+   and its rings recompute BIT-IDENTICALLY what the neighbouring jobs computed, using each ring
+   cell's own sampler: interior corner-columns with the single-chunk sampler, and **face-slab
+   columns with the same 2-chunk pair sampler the face jobs used** — the stitching contract now
+   composes (edge seam ⟂ face seams ⟂ interiors) with no communication, by the same argument.
+   Ownership partition extends exactly-once: an edge belongs to the edge seam iff its 4 cells
+   include ≥1 edge-column cell and no corner cell.
+2. **P2b — same-LOD corner seams.** The single corner cell (8 participants, octant sampler);
+   rings = the three adjacent edge-columns + three face-slabs + interior corner cells of all 8.
+   Completes same-LOD closure: with a/b, a uniform-LOD region is fully watertight under the flag.
+3. **P2c — mixed-LOD face seams.** The hard piece: the slab between strides S_fine and S_coarse,
+   meshed at the FINER resolution with the coarse side's cell decomposition respected (§2.3),
+   under the #44 laws (surface-derived positions only; distortion budget ≤ 2 own-resolution
+   cells; prefer cracks over protrusions). Ring recompute on each side matches that side's
+   interior pass at its OWN stride. Developed against the DT harness with exact-zero closure
+   asserts before touching the live path.
+4. **P2d — mixed-LOD edges/corners** (compose a+c machinery), then flip evaluation: bench + live
+   soak with `voxel.Seam.Meshing 1` to qualify the default flip.
+
+**Renderer/bucket encoding:** the seam bucket key generalizes from face axis to a **SeamSlot**
+byte — 0/1/2 = +X/+Y/+Z face, 3/4/5 = edge parallel to X/Y/Z, 6 = corner — so the existing
+(owner, slot) keyspace and unload cleanup (slots 0-6) carry P2 without interface churn.
+
 ### 2.6 Risks / open questions
 
 - Seam mesher at mixed LOD is genuinely novel code (P2). Mitigation: it replaces an approach

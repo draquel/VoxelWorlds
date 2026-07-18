@@ -472,8 +472,19 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 	/** Face normal axis: 0 = X, 1 = Y, 2 = Z. Neighbour B = Owner + unit(Axis). */
 	uint8 Axis = 0;
 
-	/** Shared LOD level (P1 handles same-LOD pairs only; mixed LOD is P2). */
+	/** Owner-side LOD level. */
 	int32 LODLevel = 0;
+
+	/**
+	 * Neighbour-side LOD level, or -1 for a same-LOD pair (== LODLevel). When the LODs differ
+	 * (seam-ownership P2c) the seam meshes the owner's slab at the owner's stride, recomputes
+	 * each ring at ITS side's stride, and stitches the face plane at the finer granularity
+	 * (T-junction fans onto the coarser side's ring vertices).
+	 */
+	int32 LODLevelB = -1;
+
+	/** Resolved neighbour-side LOD. */
+	int32 GetLODLevelB() const { return (LODLevelB < 0) ? LODLevel : LODLevelB; }
 
 	/** Voxels per chunk edge. */
 	int32 ChunkSize = 32;
@@ -496,6 +507,171 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
 		return Axis <= 2 && LODLevel >= 0 && ChunkSize > 0
 			&& VoxelDataA.Num() == Total && VoxelDataB.Num() == Total;
+	}
+};
+
+/**
+ * Request for a single-owner EDGE-SEAM meshing job (seam-ownership P2a,
+ * SEAM_OWNERSHIP_ARCHITECTURE.md §2.2 / "P2 plan").
+ *
+ * Same-LOD 4-tuple sharing the chunk edge parallel to EdgeAxis. Participants sit in the plane of
+ * the two perpendicular axes taken in ASCENDING order (PerpA < PerpB) — matching
+ * FVoxelSeamRegistry::GetParticipants order:
+ *   [0] Owner (quadrant 0,0)   [1] Owner+unit(PerpA) (1,0)
+ *   [2] Owner+unit(PerpB) (0,1)   [3] Owner+unit(PerpA)+unit(PerpB) (1,1)
+ * The job meshes the edge-exclusive cell column (in both face slabs, excluding the corner cells at
+ * the column's ends) from all four sides' data, and terminates bit-exactly on the surrounding
+ * interior meshes AND face-seam meshes (their ring cells are recomputed with the same restricted
+ * samplers those jobs used). Output positions are in the OWNER's local frame.
+ *
+ * Plain struct (not USTRUCT): an internal job payload, never reflected/serialized.
+ */
+struct VOXELMESHING_API FVoxelEdgeSeamRequest
+{
+	/** Owner chunk (min-coordinate participant; quadrant (0,0)). */
+	FIntVector OwnerChunkCoord = FIntVector::ZeroValue;
+
+	/** The axis the edge runs PARALLEL to: 0 = X, 1 = Y, 2 = Z. */
+	uint8 EdgeAxis = 0;
+
+	/** Owner-side LOD level (participant 0), and the shared LOD for same-LOD tuples. */
+	int32 LODLevel = 0;
+
+	/**
+	 * Per-participant LOD levels (quadrant order), or all -1 for a same-LOD tuple (== LODLevel).
+	 * When any differ (seam-ownership P2d) the mixed-LOD edge mesher runs: each ring/slab column
+	 * computes at its OWNING job's stride, and stitching enumerates at the finest granularity
+	 * with T-junction fans.
+	 */
+	int32 LODLevels[4] = { -1, -1, -1, -1 };
+
+	/** Resolved LOD of participant q. */
+	int32 GetLODLevelOf(int32 Quadrant) const
+	{
+		return (LODLevels[Quadrant] < 0) ? LODLevel : LODLevels[Quadrant];
+	}
+
+	/** True when every participant renders at the same LOD. */
+	bool IsUniformLOD() const
+	{
+		for (int32 q = 0; q < 4; ++q)
+		{
+			if (GetLODLevelOf(q) != GetLODLevelOf(0))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** Voxels per chunk edge. */
+	int32 ChunkSize = 32;
+
+	/** World-space size of each voxel. */
+	float VoxelSize = 100.0f;
+
+	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
+	FVector WorldOrigin = FVector::ZeroVector;
+
+	/**
+	 * Participant voxel arrays (ChunkSize^3 each, edit-merged by the caller), in quadrant order
+	 * [(0,0), (1,0), (0,1), (1,1)] over (PerpA, PerpB) — see the struct comment.
+	 */
+	TArray<FVoxelData> VoxelData[4];
+
+	/** All four voxel arrays present and parameters sane. */
+	bool IsValid() const
+	{
+		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
+		if (EdgeAxis > 2 || LODLevel < 0 || ChunkSize <= 0)
+		{
+			return false;
+		}
+		for (int32 i = 0; i < 4; ++i)
+		{
+			if (VoxelData[i].Num() != Total)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
+/**
+ * Request for a single-owner CORNER-SEAM meshing job (seam-ownership P2b,
+ * SEAM_OWNERSHIP_ARCHITECTURE.md "P2 plan").
+ *
+ * Same-LOD 8-tuple sharing the chunk corner at Owner + (1,1,1) chunks. Participants are in octant
+ * order index = dx + dy*2 + dz*4 (X innermost) — matching FVoxelSeamRegistry::GetParticipants.
+ * The job meshes the single corner cell (the one cell lying in all three face slabs) from all
+ * eight sides' data and terminates bit-exactly on the surrounding interior meshes, face-seam
+ * meshes, and edge-seam meshes (their ring cells are recomputed with the same restricted octant
+ * masks those jobs' samplers used). Output positions are in the OWNER's local frame.
+ *
+ * Plain struct (not USTRUCT): an internal job payload, never reflected/serialized.
+ */
+struct VOXELMESHING_API FVoxelCornerSeamRequest
+{
+	/** Owner chunk (min-coordinate participant; octant (0,0,0)). */
+	FIntVector OwnerChunkCoord = FIntVector::ZeroValue;
+
+	/** Owner-side LOD level (octant 0), and the shared LOD for same-LOD tuples. */
+	int32 LODLevel = 0;
+
+	/**
+	 * Per-participant LOD levels (octant order), or all -1 for a same-LOD tuple (== LODLevel).
+	 * When any differ (seam-ownership P2d) the mixed-LOD corner mesher runs.
+	 */
+	int32 LODLevels[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+
+	/** Resolved LOD of octant o. */
+	int32 GetLODLevelOf(int32 Octant) const
+	{
+		return (LODLevels[Octant] < 0) ? LODLevel : LODLevels[Octant];
+	}
+
+	/** True when every participant renders at the same LOD. */
+	bool IsUniformLOD() const
+	{
+		for (int32 o = 0; o < 8; ++o)
+		{
+			if (GetLODLevelOf(o) != GetLODLevelOf(0))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** Voxels per chunk edge. */
+	int32 ChunkSize = 32;
+
+	/** World-space size of each voxel. */
+	float VoxelSize = 100.0f;
+
+	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
+	FVector WorldOrigin = FVector::ZeroVector;
+
+	/** Participant voxel arrays (ChunkSize^3 each, edit-merged), octant order dx + dy*2 + dz*4. */
+	TArray<FVoxelData> VoxelData[8];
+
+	/** All eight voxel arrays present and parameters sane. */
+	bool IsValid() const
+	{
+		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
+		if (LODLevel < 0 || ChunkSize <= 0)
+		{
+			return false;
+		}
+		for (int32 i = 0; i < 8; ++i)
+		{
+			if (VoxelData[i].Num() != Total)
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 };
 
