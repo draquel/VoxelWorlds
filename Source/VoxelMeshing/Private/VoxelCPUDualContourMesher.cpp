@@ -142,11 +142,17 @@ bool FVoxelCPUDualContourMesher::GenerateMeshCPU(
 	CellVertices.SetNumZeroed(TotalCells);
 	SolveCellVertices(Request, Stride, GridDim, EdgeCrossings, CellVertices);
 
+	// Seam-ownership P1 (SEAM_OWNERSHIP_ARCHITECTURE.md §2.1): the Interior domain meshes only
+	// cells with zero neighbor dependence — boundary geometry is produced by single-owner seam
+	// jobs instead, so the boundary weld and skirts (both boundary-reconciliation mechanisms)
+	// do not apply to an interior-only pass.
+	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+
 	// Pass 3.5: Weld strided boundary cells onto the shared chunk-face plane so both
 	// sides of every stride>1 boundary (same-LOD strided AND fine|coarse LOD
 	// transitions) derive the boundary vertex from the same shared face-plane data
 	// and coincide. Stride-1 boundaries are left untouched (already watertight).
-	if (CVarDCBoundaryWeld.GetValueOnAnyThread() != 0)
+	if (!bInteriorDomain && CVarDCBoundaryWeld.GetValueOnAnyThread() != 0)
 	{
 		WeldStridedBoundaryCells(Request, Stride, GridDim, CellVertices);
 	}
@@ -155,7 +161,7 @@ bool FVoxelCPUDualContourMesher::GenerateMeshCPU(
 	GenerateQuads(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices, CellVertices, OutMeshData, TriangleCount);
 
 	// Generate skirts at LOD transition boundaries (when Transvoxel is disabled)
-	if (Config.bGenerateSkirts && Request.TransitionFaces != 0)
+	if (!bInteriorDomain && Config.bGenerateSkirts && Request.TransitionFaces != 0)
 	{
 		GenerateSkirts(Request, Stride, OutMeshData, TriangleCount);
 	}
@@ -287,11 +293,17 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 	// generates these boundary quads using ITS CX=-1 cells (which work correctly).
 	// Edge detection still iterates to GridSize so cells at GridSize-1 get full
 	// boundary edge data from their +1 neighbor edges.
-	for (int32 CZ = -1; CZ < GridSize; CZ++)
+	//
+	// Interior domain (seam-ownership P1): solve only the interior cells [0, GridSize-1) —
+	// the -1 and GridSize-1 boundary layers belong to the single-owner seam jobs.
+	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+	const int32 CellMin = bInteriorDomain ? 0 : -1;
+	const int32 CellMaxEx = bInteriorDomain ? (GridSize - 1) : GridSize;
+	for (int32 CZ = CellMin; CZ < CellMaxEx; CZ++)
 	{
-		for (int32 CY = -1; CY < GridSize; CY++)
+		for (int32 CY = CellMin; CY < CellMaxEx; CY++)
 		{
-			for (int32 CX = -1; CX < GridSize; CX++)
+			for (int32 CX = CellMin; CX < CellMaxEx; CX++)
 			{
 				FQEFSolver QEF;
 				FVector3f AvgNormal = FVector3f::ZeroVector;
@@ -372,6 +384,11 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 	// Only material-border cells ever land here, so the map stays small.
 	TMap<uint64, int32> DuplicateVertexCache;
 
+	// Interior domain (seam-ownership P1): quads may only reference interior cells
+	// ([0, GridSize-1) per axis). Any quad touching a -1/GridSize-1 boundary-layer cell
+	// belongs to a face/edge/corner seam job.
+	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+
 	// Iterate only edges with actual crossings
 	for (const int32 EIdx : ValidEdgeIndices)
 	{
@@ -392,6 +409,31 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		if (!bOwned)
 		{
 			continue;
+		}
+
+		// Interior domain: skip any quad whose 4 cells are not all interior. (The surrounding
+		// cells sit at offsets 0/-1 from the edge, so this bounds-checks each against
+		// [0, GridSize-1) — boundary-layer cells were not solved in this domain.)
+		if (bInteriorDomain)
+		{
+			bool bAllCellsInterior = true;
+			for (int32 i = 0; i < 4; i++)
+			{
+				const int32 ACX = CX + Offsets[i].DX;
+				const int32 ACY = CY + Offsets[i].DY;
+				const int32 ACZ = CZ + Offsets[i].DZ;
+				if (ACX < 0 || ACX >= GridSize - 1 ||
+					ACY < 0 || ACY >= GridSize - 1 ||
+					ACZ < 0 || ACZ >= GridSize - 1)
+				{
+					bAllCellsInterior = false;
+					break;
+				}
+			}
+			if (!bAllCellsInterior)
+			{
+				continue;
+			}
 		}
 
 		// Look up the 4 cell vertices via flat array

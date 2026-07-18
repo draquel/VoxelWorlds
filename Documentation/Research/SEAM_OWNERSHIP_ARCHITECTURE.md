@@ -173,6 +173,62 @@ face-seam mesher (same-LOD pairs first), restrict the interior DC pass to interi
 face weld, and rewrite GT/DT to assert seam-mesh closure. The scheduler, ownership, dirty tracking,
 and job queue are already in place.
 
+#### P1 plan (branch `feature/seam-ownership-p1`, in progress)
+
+**Delivery mode — cvar-gated parallel path.** P1 lands behind `voxel.Seam.Meshing` (default **0**).
+At 0 the legacy per-chunk pipeline (boundary layers + weld + cascades) is bit-identical to today and
+the existing DT/GT suites keep guarding it. At 1 (dev/test) chunks mesh interior-only and face-seam
+jobs fill same-LOD boundaries. The default flips only when seam coverage is complete (P2: mixed-LOD
+faces + edge/corner seams) — flipping earlier would leave visible holes at edge/corner rims. The weld
+is therefore *bypassed* by the seam path in P1, not deleted (deletion is P4). "Each phase shippable"
+= mergeable with zero regression, not default-on.
+
+**Scope.** CPU DC first (headless `-VoxelForceCPU` exercises it end-to-end); the GPU mirror follows
+before any default flip. MC = P3. Same-LOD face seams only; mixed-LOD + edges/corners = P2.
+
+**Cell domains** (grounded in `VoxelCPUDualContourMesher.cpp`; `GridSize = ChunkSize/Stride`; cells
+`-1..GridSize-1` get QEF vertices; an edge is owned iff its coord ∈ `[0,GridSize)`³; quads reference
+the 4 cells at offsets 0/−1 around the edge):
+
+- **Interior domain**: quad-emitting edges restricted to those whose 4 surrounding cells all lie in
+  `[0, GridSize-1)`³ — i.e. no quad references a boundary-layer cell (−1 or GridSize−1). Cell solve
+  restricted to the same range; weld and skirts skipped. The interior request carries **no neighbour
+  data at all**: positions never sample past own voxels (cell GridSize−2's far corner reads voxel
+  `ChunkSize−Stride`), and crossing NORMALS whose gradient taps would exit the chunk use the existing
+  absent-neighbour Air fallback — one-sided rim normals, the same trade the default geometry-only
+  deep depth (`stride+1`) already accepts at boundaries today. Consequence: the interior mesh is a
+  pure function of own-chunk content — never invalidated by any neighbour event (Fact B kill).
+- **Face-seam domain** (per same-LOD pair, one world-cell slab): the shared cell layer, owner-side
+  `C[axis] == GridSize−1` ≡ neighbour-side `C[axis] == −1`. The seam job owns the edges whose
+  surrounding cells include ≥1 slab cell of that face **and** no cell of another face's slab (edges
+  whose cells span two/three slabs are edge/corner-seam territory — P2; unmeshed under the flag in
+  P1, asserted as the only permitted opening). Quads at the slab's inner boundary reference ring
+  vertices (owner cells `GridSize−2`, neighbour cells `0`) which the seam job **recomputes
+  bit-identically** from each side's own data with the same Air-fallback clamp rule the interior pass
+  used — same code, same inputs, same stride ⇒ positional identity without communication (the
+  stitching contract of §2.2). Slab-cell QEF/normals read BOTH chunks' full arrays directly (no
+  slices, no deep planes, no clamping across the face) — the #43/#44 problem class cannot arise.
+
+**Runtime pipeline** (P0 scaffolding filled in): the stub in `ProcessSeamJobQueue` is replaced by a
+callback into the chunk manager, which builds a seam meshing request (both descriptors resident via
+`EnsureResident`, edit-merged), dispatches it on the async worker pool, and submits the completed
+seam mesh to the renderer as a per-owner seam bucket, independently swappable from the interior mesh
+(§2.4). Registry dirty→schedule→process flow is unchanged from P0. Renderer facts that bind the
+bucket design (verified in `FVoxelSceneProxy`/`UVoxelWorldComponent`): every proxy/component/fade map
+is keyed by bare `FIntVector` with a hard 1:1 chunk→mesh assumption, so seam buckets need their own
+parallel keyspace (the water-tile maps are the working precedent) — sharing the chunk key would
+collide with `ChunkPreviousMeshes`/`ChunkFadeStates`; seam batches must replicate the per-chunk RVT
+clone loop (terrain writes RVT — seams that skip it would crack the RVT-baked ground) and count
+against `MaxMeshBatchesPerFrame`, which motivates §2.4's one-merged-bucket-per-owner batching; the
+crossfade is opt-in per submit (`bCrossfade`), so seam swaps can simply not fade in v1. The seam
+mesher must preserve the adaptive-diagonal quad split (the DT7 T-junction sliver fix).
+
+**Tests.** New `VoxelWorlds.Meshing.DualContour.InteriorDomain.*` (domain restriction: interior mesh
+≡ full mesh when the surface avoids boundaries; no interior quad references a slab cell; determinism)
+and `...DualContour.SeamClosure.*` (interior A + interior B + face seam is closed over the face
+interior — zero open edges except the P1-permitted slab rim; seam ring vertices bit-match interior
+ring vertices). Existing DT/GT suites unchanged (they guard the flag-off path until P4).
+
 ### 2.6 Risks / open questions
 
 - Seam mesher at mixed LOD is genuinely novel code (P2). Mitigation: it replaces an approach
