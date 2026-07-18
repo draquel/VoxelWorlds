@@ -3125,11 +3125,12 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 		if (MeshRenderer)
 		{
 			MeshRenderer->RemoveChunk(ChunkCoord);
-			// Seam-ownership P1: drop this chunk's owned seam buckets (+X/+Y/+Z) with it.
-			// Cheap no-ops when absent (flag off / never meshed).
-			MeshRenderer->RemoveSeamMesh(ChunkCoord, 0);
-			MeshRenderer->RemoveSeamMesh(ChunkCoord, 1);
-			MeshRenderer->RemoveSeamMesh(ChunkCoord, 2);
+			// Seam-ownership: drop this chunk's owned seam buckets with it — SeamSlots 0-2 (faces
+			// +X/+Y/+Z), 3-5 (edges parallel to X/Y/Z), 6 (corner). Cheap no-ops when absent.
+			for (uint8 SeamSlot = 0; SeamSlot <= 6; ++SeamSlot)
+			{
+				MeshRenderer->RemoveSeamMesh(ChunkCoord, SeamSlot);
+			}
 		}
 
 		// Remove from loaded set
@@ -3383,10 +3384,13 @@ void UVoxelChunkManager::TickSeamScheduler()
 
 void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 {
-	// P1 scope: same-LOD FACE seams only. Edge/corner seams and mixed-LOD faces are P2 — drop
-	// the job (the seam stays clean until a participant changes, which re-schedules it; the
-	// same filter will drop it again until P2 lands the missing meshers).
-	if (Job.Key.Type != EVoxelSeamType::Face || Job.Participants.Num() != 2)
+	// P2a scope: same-LOD FACE (2 participants) and EDGE (4 participants) seams. Corner seams
+	// are P2b and mixed-LOD is P2c/d — dropped jobs stay clean until a participant changes,
+	// which re-schedules them (and the filter drops them again until the missing mesher lands).
+	const int32 ExpectedParticipants =
+		(Job.Key.Type == EVoxelSeamType::Face) ? 2 :
+		(Job.Key.Type == EVoxelSeamType::Edge) ? 4 : -1;
+	if (ExpectedParticipants < 0 || Job.Participants.Num() != ExpectedParticipants)
 	{
 		return;
 	}
@@ -3395,77 +3399,113 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		return; // an older build of this seam is still in flight; the registry will re-dirty if needed
 	}
 
-	const FIntVector OwnerCoord = Job.Key.Owner;
-	const FIntVector NeighborCoord = Job.Participants[1].Coord;
-
-	FVoxelChunkState* OwnerState = ChunkStates.Find(OwnerCoord);
-	FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
-	if (!OwnerState || !NeighborState
-		|| !OwnerState->Descriptor.HasVoxelDataAvailable()
-		|| !NeighborState->Descriptor.HasVoxelDataAvailable())
+	// Gather live states: every participant must have voxel data and share one rendered LOD.
+	// (Mixed-LOD tuples wait for P2c/d; a later LOD change re-dirties and re-schedules.)
+	FVoxelChunkState* States[4] = { nullptr, nullptr, nullptr, nullptr };
+	for (int32 i = 0; i < ExpectedParticipants; ++i)
 	{
-		return; // a participant vanished between schedule and drain; the unregister path re-dirties
+		States[i] = ChunkStates.Find(Job.Participants[i].Coord);
+		if (!States[i] || !States[i]->Descriptor.HasVoxelDataAvailable())
+		{
+			return; // a participant vanished between schedule and drain; the unregister path re-dirties
+		}
 	}
-
-	// Same-LOD gate: the seam must match the two RENDERED meshes. A mixed-LOD pair waits for P2's
-	// cross-LOD seam mesher; when either side's LOD changes later, the registry re-schedules.
-	const int32 OwnerLOD = OwnerState->MeshedLODLevel;
-	if (OwnerLOD < 0 || OwnerLOD != NeighborState->MeshedLODLevel)
+	const int32 SharedLOD = States[0]->MeshedLODLevel;
+	if (SharedLOD < 0)
 	{
 		return;
 	}
-
-	// Build the face-seam request from both sides' resident, edit-merged voxels.
-	FVoxelFaceSeamRequest SeamRequest;
-	SeamRequest.OwnerChunkCoord = OwnerCoord;
-	SeamRequest.Axis = Job.Key.Axis;
-	SeamRequest.LODLevel = OwnerLOD;
-	SeamRequest.ChunkSize = Configuration->ChunkSize;
-	SeamRequest.VoxelSize = Configuration->VoxelSize;
-	SeamRequest.WorldOrigin = Configuration->WorldOrigin;
-	SeamRequest.VoxelDataA = OwnerState->Descriptor.GetVoxelDataForRead();
-	SeamRequest.VoxelDataB = NeighborState->Descriptor.GetVoxelDataForRead();
-
-	// Merge edit layers so the seam reflects player digs/builds, matching the chunk-mesh path.
-	if (EditManager)
+	for (int32 i = 1; i < ExpectedParticipants; ++i)
 	{
-		if (EditManager->ChunkHasEdits(OwnerCoord))
+		if (States[i]->MeshedLODLevel != SharedLOD)
 		{
-			EditManager->ApplyEditsToVoxelData(OwnerCoord, SeamRequest.VoxelDataA);
-		}
-		if (EditManager->ChunkHasEdits(NeighborCoord))
-		{
-			EditManager->ApplyEditsToVoxelData(NeighborCoord, SeamRequest.VoxelDataB);
+			return;
 		}
 	}
 
-	SeamJobsInFlight.Add(Job.Key);
+	// Copy one participant's voxels with its edit layer merged (matches the chunk-mesh path).
+	auto CopyMergedVoxels = [this](const FIntVector& Coord, FVoxelChunkState& State, TArray<FVoxelData>& Out)
+	{
+		Out = State.Descriptor.GetVoxelDataForRead();
+		if (EditManager && EditManager->ChunkHasEdits(Coord))
+		{
+			EditManager->ApplyEditsToVoxelData(Coord, Out);
+		}
+	};
 
 	// Worker dispatch mirrors the chunk-mesh CPU path: raw mesher pointer + weak manager for the
-	// result enqueue. GenerateFaceSeamMeshCPU reads only the request + Config (thread-safe).
+	// result enqueue. The seam meshers read only the request + Config (thread-safe).
 	FVoxelCPUDualContourMesher* DCMesher = static_cast<FVoxelCPUDualContourMesher*>(Mesher.Get());
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
-	const int32 LODLevel = OwnerLOD;
+	const int32 LODLevel = SharedLOD;
 
-	Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel]() mutable
+	if (Job.Key.Type == EVoxelSeamType::Face)
 	{
-		FChunkMeshData MeshData;
-		const bool bSuccess = DCMesher->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
+		FVoxelFaceSeamRequest SeamRequest;
+		SeamRequest.OwnerChunkCoord = Key.Owner;
+		SeamRequest.Axis = Key.Axis;
+		SeamRequest.LODLevel = SharedLOD;
+		SeamRequest.ChunkSize = Configuration->ChunkSize;
+		SeamRequest.VoxelSize = Configuration->VoxelSize;
+		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		CopyMergedVoxels(Job.Participants[0].Coord, *States[0], SeamRequest.VoxelDataA);
+		CopyMergedVoxels(Job.Participants[1].Coord, *States[1], SeamRequest.VoxelDataB);
 
-		if (UVoxelChunkManager* This = WeakThis.Get())
+		SeamJobsInFlight.Add(Job.Key);
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel]() mutable
 		{
-			FCompletedSeamMesh Result;
-			Result.Key = Key;
-			Result.LODLevel = LODLevel;
-			Result.bSuccess = bSuccess;
-			if (bSuccess)
+			FChunkMeshData MeshData;
+			const bool bSuccess = DCMesher->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
+			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
-				Result.MeshData = MoveTemp(MeshData);
+				FCompletedSeamMesh Result;
+				Result.Key = Key;
+				Result.LODLevel = LODLevel;
+				Result.bSuccess = bSuccess;
+				if (bSuccess)
+				{
+					Result.MeshData = MoveTemp(MeshData);
+				}
+				This->CompletedSeamMeshQueue.Enqueue(MoveTemp(Result));
 			}
-			This->CompletedSeamMeshQueue.Enqueue(MoveTemp(Result));
+		});
+	}
+	else // EVoxelSeamType::Edge
+	{
+		FVoxelEdgeSeamRequest SeamRequest;
+		SeamRequest.OwnerChunkCoord = Key.Owner;
+		SeamRequest.EdgeAxis = Key.Axis;
+		SeamRequest.LODLevel = SharedLOD;
+		SeamRequest.ChunkSize = Configuration->ChunkSize;
+		SeamRequest.VoxelSize = Configuration->VoxelSize;
+		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		// Registry participant order [Owner, +PerpA, +PerpB, +PerpA+PerpB] (ascending perps)
+		// matches the request's quadrant order [(0,0),(1,0),(0,1),(1,1)] by construction.
+		for (int32 i = 0; i < 4; ++i)
+		{
+			CopyMergedVoxels(Job.Participants[i].Coord, *States[i], SeamRequest.VoxelData[i]);
 		}
-	});
+
+		SeamJobsInFlight.Add(Job.Key);
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel]() mutable
+		{
+			FChunkMeshData MeshData;
+			const bool bSuccess = DCMesher->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
+			if (UVoxelChunkManager* This = WeakThis.Get())
+			{
+				FCompletedSeamMesh Result;
+				Result.Key = Key;
+				Result.LODLevel = LODLevel;
+				Result.bSuccess = bSuccess;
+				if (bSuccess)
+				{
+					Result.MeshData = MoveTemp(MeshData);
+				}
+				This->CompletedSeamMeshQueue.Enqueue(MoveTemp(Result));
+			}
+		});
+	}
 }
 
 void UVoxelChunkManager::ProcessCompletedSeamMeshes()
@@ -3486,7 +3526,11 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 		}
 
 		// Submit (an empty/invalid mesh removes the bucket — the seam dissolved).
-		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, Result.Key.Axis, Result.LODLevel, MoveTemp(Result.MeshData));
+		// SeamSlot encoding: 0-2 = face +X/+Y/+Z, 3-5 = edge parallel to X/Y/Z, 6 = corner.
+		const uint8 SeamSlot =
+			(Result.Key.Type == EVoxelSeamType::Face) ? Result.Key.Axis :
+			(Result.Key.Type == EVoxelSeamType::Edge) ? static_cast<uint8>(3 + Result.Key.Axis) : static_cast<uint8>(6);
+		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, SeamSlot, Result.LODLevel, MoveTemp(Result.MeshData));
 	}
 }
 

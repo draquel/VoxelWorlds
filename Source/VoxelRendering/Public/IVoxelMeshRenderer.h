@@ -216,25 +216,27 @@ public:
 		// Default: no-op (renderer doesn't support water tiles)
 	}
 
-	// ==================== Seam Meshes (seam-ownership P1) ====================
-	// Single-owner face-seam meshes (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2/§2.4): small
-	// independently-swappable meshes covering the boundary between chunk pairs, keyed by
-	// (owner chunk, face axis) — a chunk owns its +X/+Y/+Z face seams. Rendered with the
-	// terrain material (including RVT passes) but outside the per-chunk mesh / crossfade
-	// machinery. Positions are OWNER-LOCAL (the renderer applies the owner's world offset).
+	// ==================== Seam Meshes (seam-ownership P1/P2) ====================
+	// Single-owner seam meshes (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2/§2.4): small
+	// independently-swappable meshes covering the boundaries a chunk OWNS, keyed by
+	// (owner chunk, SeamSlot). SeamSlot encoding: 0-2 = face seams (+X/+Y/+Z), 3-5 = edge
+	// seams (parallel to X/Y/Z), 6 = the corner seam — up to 7 buckets per chunk. Rendered
+	// with the terrain material (including RVT passes) but outside the per-chunk mesh /
+	// crossfade machinery. Positions are OWNER-LOCAL (the renderer applies the owner's
+	// world offset).
 
 	/**
-	 * Update (or create) the face-seam mesh owned by a chunk along one axis.
+	 * Update (or create) one seam mesh owned by a chunk.
 	 * An invalid/empty mesh removes the bucket (a seam whose surface vanished).
 	 *
 	 * @param OwnerChunkCoord Owning (min-coordinate) chunk
-	 * @param Axis Face axis of the owner's seam: 0 = +X, 1 = +Y, 2 = +Z
+	 * @param SeamSlot Bucket slot: 0-2 face +X/+Y/+Z, 3-5 edge parallel X/Y/Z, 6 corner
 	 * @param LODLevel Shared LOD the seam was meshed at
 	 * @param MeshData Seam mesh in owner-local space (moved)
 	 */
 	virtual void UpdateSeamMeshFromCPU(
 		const FIntVector& OwnerChunkCoord,
-		uint8 Axis,
+		uint8 SeamSlot,
 		int32 LODLevel,
 		FChunkMeshData&& MeshData)
 	{
@@ -242,12 +244,12 @@ public:
 	}
 
 	/**
-	 * Remove one owned face-seam mesh (owner unloaded or seam dissolved).
+	 * Remove one owned seam mesh (owner unloaded or seam dissolved).
 	 *
 	 * @param OwnerChunkCoord Owning chunk
-	 * @param Axis Face axis: 0 = +X, 1 = +Y, 2 = +Z
+	 * @param SeamSlot Bucket slot: 0-2 face +X/+Y/+Z, 3-5 edge parallel X/Y/Z, 6 corner
 	 */
-	virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis)
+	virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot)
 	{
 		// Default: no-op (renderer doesn't support seam meshes)
 	}

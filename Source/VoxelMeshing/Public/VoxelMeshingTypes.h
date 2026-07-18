@@ -500,6 +500,67 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 };
 
 /**
+ * Request for a single-owner EDGE-SEAM meshing job (seam-ownership P2a,
+ * SEAM_OWNERSHIP_ARCHITECTURE.md §2.2 / "P2 plan").
+ *
+ * Same-LOD 4-tuple sharing the chunk edge parallel to EdgeAxis. Participants sit in the plane of
+ * the two perpendicular axes taken in ASCENDING order (PerpA < PerpB) — matching
+ * FVoxelSeamRegistry::GetParticipants order:
+ *   [0] Owner (quadrant 0,0)   [1] Owner+unit(PerpA) (1,0)
+ *   [2] Owner+unit(PerpB) (0,1)   [3] Owner+unit(PerpA)+unit(PerpB) (1,1)
+ * The job meshes the edge-exclusive cell column (in both face slabs, excluding the corner cells at
+ * the column's ends) from all four sides' data, and terminates bit-exactly on the surrounding
+ * interior meshes AND face-seam meshes (their ring cells are recomputed with the same restricted
+ * samplers those jobs used). Output positions are in the OWNER's local frame.
+ *
+ * Plain struct (not USTRUCT): an internal job payload, never reflected/serialized.
+ */
+struct VOXELMESHING_API FVoxelEdgeSeamRequest
+{
+	/** Owner chunk (min-coordinate participant; quadrant (0,0)). */
+	FIntVector OwnerChunkCoord = FIntVector::ZeroValue;
+
+	/** The axis the edge runs PARALLEL to: 0 = X, 1 = Y, 2 = Z. */
+	uint8 EdgeAxis = 0;
+
+	/** Shared LOD level (P2a handles same-LOD tuples only). */
+	int32 LODLevel = 0;
+
+	/** Voxels per chunk edge. */
+	int32 ChunkSize = 32;
+
+	/** World-space size of each voxel. */
+	float VoxelSize = 100.0f;
+
+	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
+	FVector WorldOrigin = FVector::ZeroVector;
+
+	/**
+	 * Participant voxel arrays (ChunkSize^3 each, edit-merged by the caller), in quadrant order
+	 * [(0,0), (1,0), (0,1), (1,1)] over (PerpA, PerpB) — see the struct comment.
+	 */
+	TArray<FVoxelData> VoxelData[4];
+
+	/** All four voxel arrays present and parameters sane. */
+	bool IsValid() const
+	{
+		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
+		if (EdgeAxis > 2 || LODLevel < 0 || ChunkSize <= 0)
+		{
+			return false;
+		}
+		for (int32 i = 0; i < 4; ++i)
+		{
+			if (VoxelData[i].Num() != Total)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
+/**
  * Handle for tracking async meshing operations.
  *
  * Returned by async meshing calls, used to query status

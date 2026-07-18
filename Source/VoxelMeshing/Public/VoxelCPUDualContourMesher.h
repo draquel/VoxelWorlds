@@ -68,6 +68,29 @@ public:
 		const FVoxelFaceSeamRequest& SeamRequest,
 		FChunkMeshData& OutMeshData);
 
+	/**
+	 * Seam-ownership P2a: mesh the single-owner EDGE seam of a same-LOD chunk 4-tuple.
+	 *
+	 * Emits the quads dual to edges whose surrounding cells include an edge-column cell
+	 * (owner-frame column at both face-slab layers, excluding the corner cells at its ends).
+	 * The edge column solves against all four participants (quadrant sampler, full hermite
+	 * reach); the eight surrounding ring columns are recomputed with the SAME restricted
+	 * samplers their original jobs used — participant-interior columns with that chunk's
+	 * single sampler, face-slab columns with the face jobs' pair samplers, each in its
+	 * original computation frame — so the edge seam terminates bit-exactly on the interior
+	 * meshes and the face-seam meshes with no communication (§2.2, composed).
+	 * The corner cells at the column ends belong to the P2b corner-seam jobs and stay open.
+	 *
+	 * Output positions are in the OWNER's local frame. Thread-safety matches GenerateMeshCPU.
+	 *
+	 * @param SeamRequest Edge-seam job payload (four participants' voxels, parallel axis, LOD)
+	 * @param OutMeshData Output seam mesh (reset first; empty output with true = valid no-op)
+	 * @return true unless the request is invalid or the mesher is uninitialized
+	 */
+	bool GenerateEdgeSeamMeshCPU(
+		const FVoxelEdgeSeamRequest& SeamRequest,
+		FChunkMeshData& OutMeshData);
+
 	virtual FVoxelMeshingHandle GenerateMeshAsync(
 		const FVoxelMeshingRequest& Request,
 		FOnVoxelMeshingComplete OnComplete) override;
