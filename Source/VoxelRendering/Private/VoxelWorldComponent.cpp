@@ -405,7 +405,7 @@ void UVoxelWorldComponent::ClearAllChunks()
 	PendingAdds.Empty();
 	PendingRemovals.Empty();
 
-	// Enqueue render thread clear (chunks + water tiles)
+	// Enqueue render thread clear (chunks + water tiles + seam meshes)
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -414,6 +414,7 @@ void UVoxelWorldComponent::ClearAllChunks()
 			{
 				Proxy->ClearAllChunks_RenderThread();
 				Proxy->ClearAllWaterTiles_RenderThread();
+				Proxy->ClearAllSeamMeshes_RenderThread();
 			}
 		);
 	}
@@ -511,6 +512,68 @@ void UVoxelWorldComponent::ClearAllWaterTiles()
 			[Proxy](FRHICommandListImmediate& RHICmdList)
 			{
 				Proxy->ClearAllWaterTiles_RenderThread();
+			}
+		);
+	}
+}
+
+// ==================== Seam Meshes (seam-ownership P1) ====================
+
+void UVoxelWorldComponent::UpdateSeamMeshFromCPUData(
+	const FIntVector& OwnerChunkCoord,
+	uint8 Axis,
+	int32 LODLevel,
+	TArray<FVoxelVertex>&& Vertices,
+	TArray<uint32>&& Indices,
+	const FVector& OwnerWorldPosition)
+{
+	check(IsInGameThread());
+
+	if (Vertices.Num() == 0 || Indices.Num() == 0)
+	{
+		RemoveSeamMesh(OwnerChunkCoord, Axis);
+		return;
+	}
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(UpdateVoxelSeamMesh)(
+			[Proxy, OwnerChunkCoord, Axis, LODLevel, Verts = MoveTemp(Vertices), Idxs = MoveTemp(Indices), OwnerWorldPosition](FRHICommandListImmediate& RHICmdList) mutable
+			{
+				Proxy->UpdateSeamMeshFromCPUData_RenderThread(RHICmdList, OwnerChunkCoord, Axis, LODLevel, MoveTemp(Verts), MoveTemp(Idxs), OwnerWorldPosition);
+			}
+		);
+	}
+}
+
+void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis)
+{
+	check(IsInGameThread());
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(RemoveVoxelSeamMesh)(
+			[Proxy, OwnerChunkCoord, Axis](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->RemoveSeamMesh_RenderThread(OwnerChunkCoord, Axis);
+			}
+		);
+	}
+}
+
+void UVoxelWorldComponent::ClearAllSeamMeshes()
+{
+	check(IsInGameThread());
+
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(ClearVoxelSeamMeshes)(
+			[Proxy](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->ClearAllSeamMeshes_RenderThread();
 			}
 		);
 	}

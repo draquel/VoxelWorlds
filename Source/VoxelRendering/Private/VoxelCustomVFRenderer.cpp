@@ -535,6 +535,66 @@ void FVoxelCustomVFRenderer::ClearAllWaterTiles()
 	}
 }
 
+// ==================== Seam Meshes (seam-ownership P1) ====================
+
+void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
+	const FIntVector& OwnerChunkCoord,
+	uint8 Axis,
+	int32 LODLevel,
+	FChunkMeshData&& MeshData)
+{
+	check(IsInGameThread());
+
+	if (!IsInitialized())
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU called before initialization"));
+		return;
+	}
+
+	if (!MeshData.IsValid())
+	{
+		// Seam dissolved (no surface crosses the face anymore) — drop the bucket.
+		RemoveSeamMesh(OwnerChunkCoord, Axis);
+		return;
+	}
+
+	// Convert CPU mesh data to FVoxelVertex array (bounds computed in the proxy for seams)
+	TArray<FVoxelVertex> Vertices;
+	FBox UnusedBounds(ForceInit);
+	ConvertToVoxelVertices(MeshData, Vertices, UnusedBounds);
+
+	// Owner chunk world position — same layout the chunk path uses (WorldOrigin + coord * chunk size)
+	const FVector WorldOrigin = CachedConfig.IsValid() ? CachedConfig->WorldOrigin : FVector::ZeroVector;
+	const FVector OwnerWorldPos = WorldOrigin + FVector(OwnerChunkCoord) * ChunkWorldSize;
+
+	WorldComponent->UpdateSeamMeshFromCPUData(
+		OwnerChunkCoord, Axis, LODLevel,
+		MoveTemp(Vertices), MoveTemp(MeshData.Indices), OwnerWorldPos);
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated seam mesh %s axis=%d - %d verts"),
+		*OwnerChunkCoord.ToString(), Axis, MeshData.Positions.Num());
+}
+
+void FVoxelCustomVFRenderer::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->RemoveSeamMesh(OwnerChunkCoord, Axis);
+	}
+}
+
+void FVoxelCustomVFRenderer::ClearAllSeamMeshes()
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->ClearAllSeamMeshes();
+	}
+}
+
 // ==================== LOD Transitions ====================
 
 void FVoxelCustomVFRenderer::UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor)

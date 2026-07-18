@@ -76,6 +76,15 @@ public:
 	virtual void RemoveWaterTile(const FIntVector2& TileCoord) override;
 	virtual void ClearAllWaterTiles() override;
 
+	// Seam Meshes (seam-ownership P1)
+	virtual void UpdateSeamMeshFromCPU(
+		const FIntVector& OwnerChunkCoord,
+		uint8 Axis,
+		int32 LODLevel,
+		FChunkMeshData&& MeshData) override;
+	virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis) override;
+	virtual void ClearAllSeamMeshes() override;
+
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;
 	virtual void UpdateLODTransitionsBatch(const TArray<TPair<FIntVector, float>>& Transitions) override;

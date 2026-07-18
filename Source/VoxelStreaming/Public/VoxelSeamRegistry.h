@@ -243,12 +243,25 @@ public:
 	/**
 	 * Process up to MaxJobs seam jobs (highest priority first). P0: the job is a STUB — it produces no
 	 * geometry, only logs (when voxel.Seam.Debug is on) and increments counters, then marks the seam
-	 * clean. P1+ replaces the stub body with the actual seam mesher.
+	 * clean. Used when seam MESHING is off (voxel.Seam.Meshing 0); the meshing path drains jobs via
+	 * DrainSeamJobs instead and executes them in the chunk manager.
 	 *
 	 * @param MaxJobs Cap on jobs processed this call (0 = unlimited).
 	 * @return Number of jobs processed.
 	 */
 	int32 ProcessSeamJobQueue(int32 MaxJobs);
+
+	/**
+	 * Pop up to MaxJobs seam jobs (highest priority first) for external execution (P1 runtime
+	 * pipeline: the chunk manager builds seam meshing requests from them and dispatches async).
+	 * Each popped seam is marked not-scheduled — if a participant changes while the job is in
+	 * flight, the normal dirty->schedule flow re-queues it and the newer result wins.
+	 *
+	 * @param OutJobs Receives the popped jobs (appended).
+	 * @param MaxJobs Cap on jobs popped this call (0 = none — callers pass a positive budget).
+	 * @return Number of jobs popped.
+	 */
+	int32 DrainSeamJobs(TArray<FVoxelSeamJob>& OutJobs, int32 MaxJobs);
 
 	// ==================== Queries (debug + tests) ====================
 

@@ -480,6 +480,34 @@ int32 FVoxelSeamRegistry::ProcessSeamJobQueue(int32 MaxJobs)
 	return Processed;
 }
 
+int32 FVoxelSeamRegistry::DrainSeamJobs(TArray<FVoxelSeamJob>& OutJobs, int32 MaxJobs)
+{
+	if (!bEnabled || JobQueue.Num() == 0 || MaxJobs <= 0)
+	{
+		return 0;
+	}
+
+	int32 Drained = 0;
+	while (JobQueue.Num() > 0 && Drained < MaxJobs)
+	{
+		// Pop highest priority (back of the ascending-sorted array).
+		FVoxelSeamJob Job = JobQueue.Pop(EAllowShrinking::No);
+		JobQueueSet.Remove(Job.Key);
+
+		// Mark not-scheduled: a participant change during the external job's flight re-dirties and
+		// re-schedules the seam through the normal flow (the newer result simply resubmits).
+		if (FVoxelSeamState* Seam = Seams.Find(Job.Key))
+		{
+			Seam->bScheduled = false;
+		}
+
+		OutJobs.Add(MoveTemp(Job));
+		++Drained;
+		++TotalSeamJobsProcessed;
+	}
+	return Drained;
+}
+
 // ==================== Queries ====================
 
 FVoxelSeamRegistryStats FVoxelSeamRegistry::GetStats() const

@@ -239,6 +239,40 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 		}
 	}
 	WaterTileVertexFactories.Empty();
+
+	// Release all seam mesh resources (seam-ownership P1)
+	for (auto& Pair : SeamRenderData)
+	{
+		Pair.Value.ReleaseResources();
+	}
+	SeamRenderData.Empty();
+
+	for (auto& Pair : SeamVertexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	SeamVertexBuffers.Empty();
+
+	for (auto& Pair : SeamIndexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	SeamIndexBuffers.Empty();
+
+	for (auto& Pair : SeamVertexFactories)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	SeamVertexFactories.Empty();
 }
 
 SIZE_T FVoxelSceneProxy::GetTypeHash() const
@@ -493,6 +527,116 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			// Add mesh to collector
 			Collector.AddMesh(ViewIndex, MeshBatch);
 			TotalMeshesAdded++;
+		}
+	}
+
+	// ==================== Seam Mesh Pass (seam-ownership P1) ====================
+	// Single-owner face-seam buckets: terrain geometry, so they draw with the terrain material
+	// and emit RVT clones like chunk batches (a seam missing from RVT would crack the cached
+	// ground). No crossfade participation (seam swaps are strip-sized; v1 swaps instantly).
+
+	if (SeamRenderData.Num() > 0)
+	{
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+		{
+			if (!(VisibilityMap & (1 << ViewIndex)))
+			{
+				continue;
+			}
+
+			const FSceneView* View = Views[ViewIndex];
+
+			for (const auto& Pair : SeamRenderData)
+			{
+				if (TotalMeshesAdded >= MaxMeshBatchesPerFrame)
+				{
+					SkippedOverLimit++;
+					continue;
+				}
+
+				const FVoxelSeamMeshKey& SeamKey = Pair.Key;
+				const FVoxelChunkRenderData& RenderData = Pair.Value;
+
+				if (!RenderData.bIsVisible || !RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
+				{
+					SkippedInvisible++;
+					continue;
+				}
+
+				const TSharedPtr<FLocalVertexFactory>* VertexFactoryPtr = SeamVertexFactories.Find(SeamKey);
+				if (!VertexFactoryPtr || !VertexFactoryPtr->IsValid())
+				{
+					SkippedInvisible++;
+					continue;
+				}
+
+				const TSharedPtr<FVoxelLocalIndexBuffer>* IndexBufferPtr = SeamIndexBuffers.Find(SeamKey);
+				if (!IndexBufferPtr || !IndexBufferPtr->IsValid())
+				{
+					SkippedInvisible++;
+					continue;
+				}
+
+				// Frustum culling (same conservative box test as chunks)
+				{
+					FBox WorldBounds = RenderData.WorldBounds;
+					if (WorldBounds.IsValid)
+					{
+						WorldBounds = WorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
+						const FConvexVolume& ViewFrustum = View->ViewFrustum;
+						if (!ViewFrustum.IntersectBox(WorldBounds.GetCenter(), WorldBounds.GetExtent()))
+						{
+							SkippedFrustum++;
+							continue;
+						}
+					}
+				}
+
+				FMeshBatch& MeshBatch = Collector.AllocateMesh();
+				MeshBatch.VertexFactory = VertexFactoryPtr->Get();
+				MeshBatch.MaterialRenderProxy = MaterialProxy;
+				MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
+				MeshBatch.bDisableBackfaceCulling = false;
+				MeshBatch.Type = PT_TriangleList;
+				MeshBatch.DepthPriorityGroup = SDPG_World;
+				MeshBatch.bCanApplyViewModeOverrides = true;
+				MeshBatch.bUseWireframeSelectionColoring = IsSelected();
+				MeshBatch.bUseAsOccluder = true;
+				MeshBatch.bWireframe = bWireframe;
+				MeshBatch.CastShadow = true;
+				MeshBatch.bUseForMaterial = true;
+				MeshBatch.bUseForDepthPass = true;
+				MeshBatch.LODIndex = RenderData.LODLevel;
+				MeshBatch.SegmentIndex = 0;
+
+				FMeshBatchElement& BatchElement = MeshBatch.Elements[0];
+				BatchElement.IndexBuffer = IndexBufferPtr->Get();
+				BatchElement.FirstIndex = 0;
+				BatchElement.NumPrimitives = RenderData.IndexCount / 3;
+				BatchElement.MinVertexIndex = 0;
+				BatchElement.MaxVertexIndex = RenderData.VertexCount - 1;
+				BatchElement.PrimitiveUniformBuffer = GetUniformBuffer();
+
+				// RVT clone pass — mirrors the chunk batch loop (terrain writes RVT; a seam that
+				// skipped it would leave cracks in RVT-derived ground rendering).
+				for (ERuntimeVirtualTextureMaterialType RVTMaterialType : RuntimeVirtualTextureMaterialTypes)
+				{
+					FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
+					VirtualMeshBatch = MeshBatch;
+					VirtualMeshBatch.MaterialRenderProxy = MaterialProxy;
+					VirtualMeshBatch.CastShadow = false;
+					VirtualMeshBatch.bUseAsOccluder = false;
+					VirtualMeshBatch.bUseForDepthPass = false;
+					VirtualMeshBatch.bUseForMaterial = false;
+					VirtualMeshBatch.bDitheredLODTransition = false;
+					VirtualMeshBatch.bRenderToVirtualTexture = true;
+					VirtualMeshBatch.RuntimeVirtualTextureMaterialType = (uint32)RVTMaterialType;
+					Collector.AddMesh(ViewIndex, VirtualMeshBatch);
+				}
+
+				Collector.AddMesh(ViewIndex, MeshBatch);
+				TotalMeshesAdded++;
+			}
 		}
 	}
 
@@ -1601,6 +1745,284 @@ void FVoxelSceneProxy::ClearAllWaterTiles_RenderThread()
 	WaterTileVertexFactories.Empty();
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all water tiles"));
+}
+
+// ==================== Seam Meshes (seam-ownership P1) ====================
+
+void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
+	FRHICommandListBase& RHICmdList,
+	const FIntVector& OwnerChunkCoord,
+	uint8 Axis,
+	int32 LODLevel,
+	TArray<FVoxelVertex>&& Vertices,
+	TArray<uint32>&& Indices,
+	const FVector& OwnerWorldPosition)
+{
+	check(IsInRenderingThread());
+
+	const uint32 VertexCount = Vertices.Num();
+	const uint32 IndexCount = Indices.Num();
+
+	if (VertexCount == 0 || IndexCount == 0)
+	{
+		RemoveSeamMesh_RenderThread(OwnerChunkCoord, Axis);
+		return;
+	}
+
+	const FVoxelSeamMeshKey Key{ OwnerChunkCoord, Axis };
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	// Remove existing data if any (a seam rebuild swaps only this bucket — §2.4)
+	if (FVoxelChunkRenderData* ExistingData = SeamRenderData.Find(Key))
+	{
+		ExistingData->ReleaseResources();
+	}
+	if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = SeamVertexBuffers.Find(Key))
+	{
+		if (ExistingVB->IsValid())
+		{
+			(*ExistingVB)->ReleaseResource();
+		}
+	}
+	if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = SeamIndexBuffers.Find(Key))
+	{
+		if (ExistingIB->IsValid())
+		{
+			(*ExistingIB)->ReleaseResource();
+		}
+	}
+	if (TSharedPtr<FLocalVertexFactory>* ExistingVF = SeamVertexFactories.Find(Key))
+	{
+		if (ExistingVF->IsValid())
+		{
+			(*ExistingVF)->ReleaseResource();
+		}
+	}
+
+	// Convert FVoxelVertex to FVoxelLocalVertex format (same pipeline as terrain chunks)
+	const FVector3f SeamOffset = FVector3f(OwnerWorldPosition);
+
+	TArray<FVoxelLocalVertex> ConvertedVertices;
+	ConvertedVertices.SetNumUninitialized(VertexCount);
+
+	TArray<FColor> ColorData;
+	ColorData.SetNumUninitialized(VertexCount);
+
+	struct FPackedTangentPair
+	{
+		FPackedNormal TangentX;
+		FPackedNormal TangentZ;
+	};
+	TArray<FPackedTangentPair> TangentData;
+	TangentData.SetNumUninitialized(VertexCount);
+
+	TArray<FVector4f> TexCoordData;
+	TexCoordData.SetNumUninitialized(VertexCount);
+
+	// (Named SeamBounds — FPrimitiveSceneProxy already has a LocalBounds member.)
+	FBox SeamBounds(ForceInit);
+
+	for (uint32 i = 0; i < VertexCount; i++)
+	{
+		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Vertices[i]);
+		ConvertedVertices[i].Position += SeamOffset;
+		ColorData[i] = ConvertedVertices[i].Color;
+
+		TangentData[i].TangentX = ConvertedVertices[i].TangentX;
+		TangentData[i].TangentZ = ConvertedVertices[i].TangentZ;
+
+		TexCoordData[i] = FVector4f(
+			ConvertedVertices[i].TexCoord.X,
+			ConvertedVertices[i].TexCoord.Y,
+			ConvertedVertices[i].TexCoord1.X,
+			ConvertedVertices[i].TexCoord1.Y
+		);
+
+		SeamBounds += FVector(Vertices[i].Position);
+	}
+
+	// Create new render data
+	FVoxelChunkRenderData NewRenderData;
+	NewRenderData.ChunkCoord = OwnerChunkCoord;
+	NewRenderData.LODLevel = LODLevel;
+	NewRenderData.VertexCount = VertexCount;
+	NewRenderData.IndexCount = IndexCount;
+	NewRenderData.WorldBounds = SeamBounds.ShiftBy(OwnerWorldPosition);
+	NewRenderData.ChunkWorldPosition = OwnerWorldPosition;
+	NewRenderData.MorphFactor = 0.0f;
+	NewRenderData.bIsVisible = true;
+
+	// Create vertex buffer
+	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
+	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
+		FRHIBufferCreateDesc::Create(TEXT("VoxelSeamVertexBuffer"), ConvertedVertexSize, sizeof(FVoxelLocalVertex), BUF_Static | BUF_VertexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
+
+	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
+	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
+	RHICmdList.UnlockBuffer(NewRenderData.VertexBufferRHI);
+
+	// Create color buffer for SRV
+	const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
+	NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
+		FRHIBufferCreateDesc::Create(TEXT("VoxelSeamColorBuffer"), ColorBufferSize, sizeof(FColor), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
+
+	void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
+
+	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
+
+	// Create tangent buffer for SRV
+	const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
+	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
+		FRHIBufferCreateDesc::Create(TEXT("VoxelSeamTangentBuffer"), TangentBufferSize, sizeof(FPackedTangentPair), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
+
+	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
+
+	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R8G8B8A8_SNORM));
+
+	// Create TexCoord buffer for SRV
+	const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
+	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
+		FRHIBufferCreateDesc::Create(TEXT("VoxelSeamTexCoordBuffer"), TexCoordBufferSize, sizeof(FVector4f), BUF_Static | BUF_ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask));
+
+	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
+
+	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
+
+	// Create index buffer
+	const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
+	NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
+		FRHIBufferCreateDesc::Create(TEXT("VoxelSeamIndexBuffer"), IndexBufferSize, sizeof(uint32), BUF_Static | BUF_IndexBuffer)
+			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
+
+	void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
+	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
+	RHICmdList.UnlockBuffer(NewRenderData.IndexBufferRHI);
+
+	// Store render data
+	SeamRenderData.Add(Key, NewRenderData);
+
+	// Create and initialize vertex buffer wrapper
+	TSharedPtr<FVoxelLocalVertexBuffer> VertexBufferWrapper = MakeShared<FVoxelLocalVertexBuffer>();
+	VertexBufferWrapper->InitWithRHIBuffer(NewRenderData.VertexBufferRHI);
+	VertexBufferWrapper->InitResource(RHICmdList);
+	SeamVertexBuffers.Add(Key, VertexBufferWrapper);
+
+	// Create and initialize index buffer wrapper
+	TSharedPtr<FVoxelLocalIndexBuffer> IndexBufferWrapper = MakeShared<FVoxelLocalIndexBuffer>();
+	IndexBufferWrapper->InitWithRHIBuffer(NewRenderData.IndexBufferRHI, IndexCount);
+	IndexBufferWrapper->InitResource(RHICmdList);
+	SeamIndexBuffers.Add(Key, IndexBufferWrapper);
+
+	// Create and initialize per-seam vertex factory
+	TSharedPtr<FLocalVertexFactory> SeamVertexFactory = MakeShared<FLocalVertexFactory>(FeatureLevel, "FVoxelSeamMeshVertexFactory");
+	InitVoxelLocalVertexFactory(
+		RHICmdList,
+		SeamVertexFactory.Get(),
+		VertexBufferWrapper.Get(),
+		NewRenderData.ColorSRV,
+		NewRenderData.TangentsSRV,
+		NewRenderData.TexCoordSRV
+	);
+	SeamVertexFactory->InitResource(RHICmdList);
+	SeamVertexFactories.Add(Key, SeamVertexFactory);
+
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Updated seam mesh %s axis=%d - %d vertices, %d indices"),
+		*OwnerChunkCoord.ToString(), Axis, VertexCount, IndexCount);
+}
+
+void FVoxelSceneProxy::RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis)
+{
+	check(IsInRenderingThread());
+
+	const FVoxelSeamMeshKey Key{ OwnerChunkCoord, Axis };
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	if (FVoxelChunkRenderData* RenderData = SeamRenderData.Find(Key))
+	{
+		RenderData->ReleaseResources();
+		SeamRenderData.Remove(Key);
+	}
+
+	if (TSharedPtr<FVoxelLocalVertexBuffer>* VB = SeamVertexBuffers.Find(Key))
+	{
+		if (VB->IsValid())
+		{
+			(*VB)->ReleaseResource();
+		}
+		SeamVertexBuffers.Remove(Key);
+	}
+
+	if (TSharedPtr<FVoxelLocalIndexBuffer>* IB = SeamIndexBuffers.Find(Key))
+	{
+		if (IB->IsValid())
+		{
+			(*IB)->ReleaseResource();
+		}
+		SeamIndexBuffers.Remove(Key);
+	}
+
+	if (TSharedPtr<FLocalVertexFactory>* VF = SeamVertexFactories.Find(Key))
+	{
+		if (VF->IsValid())
+		{
+			(*VF)->ReleaseResource();
+		}
+		SeamVertexFactories.Remove(Key);
+	}
+}
+
+void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	for (auto& Pair : SeamRenderData)
+	{
+		Pair.Value.ReleaseResources();
+	}
+	SeamRenderData.Empty();
+
+	for (auto& Pair : SeamVertexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	SeamVertexBuffers.Empty();
+
+	for (auto& Pair : SeamIndexBuffers)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	SeamIndexBuffers.Empty();
+
+	for (auto& Pair : SeamVertexFactories)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ReleaseResource();
+		}
+	}
+	SeamVertexFactories.Empty();
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all seam meshes"));
 }
 
 void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
