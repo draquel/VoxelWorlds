@@ -1041,6 +1041,10 @@ int32 MeshBlockHoles(int32 LOD, FDCMeshFn MeshFn = &MeshChunk)
 		FVoxelMeshingRequest Req = MakeChunkRequest(FIntVector(cx, cy, 0), LOD);
 		FillAllNeighborData(Req);
 		for (int32 i = 0; i < 6; ++i) { Req.NeighborLODLevels[i] = LOD; }
+		// Uniform-LOD edge/corner diagonals too — see MeshCornerBlockHoles: unset (-1 -> 0)
+		// diagonals against LOD>0 faces would fake a mixed sharer set at uniform corners.
+		for (int32 i = 0; i < 12; ++i) { Req.EdgeLODLevels[i] = LOD; }
+		for (int32 i = 0; i < 8; ++i) { Req.CornerLODLevels[i] = LOD; }
 		// Isolate the block: faces with no IN-BLOCK neighbor get no neighbor data, so
 		// their outward boundary cells don't weld to voxels outside the block (which
 		// would be counted as spurious holes). Only the internal seams are exercised.
@@ -1083,6 +1087,12 @@ int32 MeshCornerBlockHoles(int32 LOD, FDCMeshFn MeshFn = &MeshChunk)
 		FVoxelMeshingRequest Req = MakeChunkRequest(FIntVector(cx, cy, 0), LOD);
 		FillAllNeighborData(Req);
 		for (int32 i = 0; i < 6; ++i) { Req.NeighborLODLevels[i] = LOD; }
+		// Declare the edge/corner diagonals at the same uniform LOD: the weld's sharer-set
+		// mixedness test reads them, and leaving them -1 (clamped to 0) against LOD>0 faces
+		// fakes a MIXED corner out of a uniform block (routing uniform cells into the
+		// mixed-only feature fallbacks). The live extraction always fills them.
+		for (int32 i = 0; i < 12; ++i) { Req.EdgeLODLevels[i] = LOD; }
+		for (int32 i = 0; i < 8; ++i) { Req.CornerLODLevels[i] = LOD; }
 		FChunkMeshData Mesh;
 		MeshFn(Req, Mesh);
 		Meshes.Add(MoveTemp(Mesh));
@@ -1090,6 +1100,141 @@ int32 MeshCornerBlockHoles(int32 LOD, FDCMeshFn MeshFn = &MeshChunk)
 	}
 	const FBox3f Outer(FVector3f(0, 0, 0), FVector3f(2 * CW, 2 * CW, CW));
 	return CountAssemblyHoles(Meshes, Offsets, Outer, 2);
+}
+
+/** Mesh a Dims.X x Dims.Y x Dims.Z lattice of chunks with PER-CHUNK LODs and full analytic
+ *  neighbour data, wiring every chunk's face/edge/corner neighbor-LOD fields from the lattice
+ *  (out-of-lattice neighbors: the chunk's own LOD — a virtual same-LOD surrounding world, as
+ *  MeshCornerBlockHoles does). Fuses the meshes and counts interior open edges near internal
+ *  X/Y chunk boundaries via CountAssemblyHoles — requires Dims.X == Dims.Y (the metric's
+ *  internal-boundary scan covers X and Y; Z rims are excluded, and internal Z boundaries are
+ *  counted where they meet an X/Y seam, i.e. the X-face∩Z-face edge columns).
+ *  This is the harness for ASYMMETRIC-LOD corners: DT7/GT7 only ever mesh uniform-LOD corner
+ *  blocks, which is exactly why the live demo's mixed-LOD corner holes had no failing test.
+ *  LODAt maps lattice coord -> LOD. MeshFn selects the CPU (&MeshChunk) or GPU mesher. */
+int32 MeshLODLatticeHoles(const FIntVector& Dims, TFunctionRef<int32(const FIntVector&)> LODAt,
+	FDCMeshFn MeshFn = &MeshChunk)
+{
+	const float CW = TestChunkSize * TestVoxelSize; // 3200
+	// Neighbor offsets in the FVoxelMeshingRequest index orders: NeighborLODLevels
+	// (-X,+X,-Y,+Y,-Z,+Z), EdgeLODLevels (EDGE_* order), CornerLODLevels (CORNER_* order).
+	static const FIntVector FaceOffs[6] = {
+		FIntVector(-1, 0, 0), FIntVector(1, 0, 0), FIntVector(0, -1, 0),
+		FIntVector(0, 1, 0),  FIntVector(0, 0, -1), FIntVector(0, 0, 1)
+	};
+	static const FIntVector EdgeOffs[12] = {
+		FIntVector(1, 1, 0), FIntVector(1, -1, 0), FIntVector(-1, 1, 0), FIntVector(-1, -1, 0),
+		FIntVector(1, 0, 1), FIntVector(1, 0, -1), FIntVector(-1, 0, 1), FIntVector(-1, 0, -1),
+		FIntVector(0, 1, 1), FIntVector(0, 1, -1), FIntVector(0, -1, 1), FIntVector(0, -1, -1)
+	};
+	static const FIntVector CornerOffs[8] = {
+		FIntVector(1, 1, 1),  FIntVector(1, 1, -1),  FIntVector(1, -1, 1),  FIntVector(1, -1, -1),
+		FIntVector(-1, 1, 1), FIntVector(-1, 1, -1), FIntVector(-1, -1, 1), FIntVector(-1, -1, -1)
+	};
+	auto InLattice = [&](const FIntVector& C) -> bool
+	{
+		return C.X >= 0 && C.X < Dims.X && C.Y >= 0 && C.Y < Dims.Y && C.Z >= 0 && C.Z < Dims.Z;
+	};
+
+	TArray<FChunkMeshData> Meshes;
+	TArray<FVector3f> Offsets;
+	for (int32 cz = 0; cz < Dims.Z; ++cz)
+	for (int32 cy = 0; cy < Dims.Y; ++cy)
+	for (int32 cx = 0; cx < Dims.X; ++cx)
+	{
+		const FIntVector CC(cx, cy, cz);
+		const int32 SelfLOD = LODAt(CC);
+		FVoxelMeshingRequest Req = MakeChunkRequest(CC, SelfLOD);
+		FillAllNeighborData(Req);
+		for (int32 i = 0; i < 6; ++i)
+		{
+			const FIntVector N = CC + FaceOffs[i];
+			Req.NeighborLODLevels[i] = InLattice(N) ? LODAt(N) : SelfLOD;
+		}
+		for (int32 i = 0; i < 12; ++i)
+		{
+			const FIntVector N = CC + EdgeOffs[i];
+			Req.EdgeLODLevels[i] = InLattice(N) ? LODAt(N) : SelfLOD;
+		}
+		for (int32 i = 0; i < 8; ++i)
+		{
+			const FIntVector N = CC + CornerOffs[i];
+			Req.CornerLODLevels[i] = InLattice(N) ? LODAt(N) : SelfLOD;
+		}
+		FChunkMeshData Mesh;
+		MeshFn(Req, Mesh);
+		Meshes.Add(MoveTemp(Mesh));
+		Offsets.Add(FVector3f(cx * CW, cy * CW, cz * CW));
+	}
+	const FBox3f Outer(FVector3f::ZeroVector, FVector3f(Dims.X * CW, Dims.Y * CW, Dims.Z * CW));
+	return CountAssemblyHoles(Meshes, Offsets, Outer, Dims.X);
+}
+
+/** Shared DT9/GT9 body: asymmetric-LOD 2x2 corners + a coarse|fine column 2x2x2 lattice.
+ *  Returns true when every case is within its documented residual. */
+bool RunAsymmetricLODCornerCases(FAutomationTestBase& Test, FDCMeshFn MeshFn, const TCHAR* Tag)
+{
+	// The 2x2 (z=0) corner patterns the uniform-LOD DT7/GT7 never cover. [2,0/0,0] is the
+	// exact configuration confirmed live in the demo (chunk corner (-16350,1650): holes
+	// SURVIVED voxel.RemeshAll with full neighbor data — deterministic, not stale streaming).
+	// [1,0/0,0] is the legal-balance flavor at every LOD ring corner. Layout: L[y][x].
+	//
+	// KnownResidual: with the feature-consistent weld (26-neighbor LOD pin rule + mixed-only
+	// shared-feature fallbacks), the pre-fix 300-600u see-through corner TRIANGLES (11-14 open
+	// edges per corner) are gone. What remains is a thin T-JUNCTION SLIVER per corner: the fine
+	// side subdivides the seam edge where the coarse side spans it straight (intermediate verts
+	// deviate ~10-20u — hairline at the >=7000u distances where LOD corners exist, vs the
+	// see-through holes before). The residual open-edge loop is that sliver's rim. Closing it
+	// exactly needs every sharer to sample the OTHER side's descent patches — cross-side
+	// on-plane data beyond one voxel, i.e. neighbor-LOD-driven deep extraction (a fine chunk
+	// bordering a coarse one must carry E-deep slices) — the tracked follow-up. The counts are
+	// pinned exactly so ANY regression (or improvement) shows up.
+	struct FCase { ETestField Field; int32 L00, L10, L01, L11; int32 KnownResidual; const TCHAR* Name; };
+	const FCase Cases[] = {
+		{ ETestField::Smooth, 1, 0, 0, 0, 3, TEXT("Smooth [1,0/0,0]") },
+		{ ETestField::Cliff,  1, 0, 0, 0, 3, TEXT("Cliff [1,0/0,0]") },
+		{ ETestField::Smooth, 2, 0, 0, 0, 5, TEXT("Smooth [2,0/0,0] live-repro") },
+		{ ETestField::Smooth, 2, 1, 1, 1, 5, TEXT("Smooth [2,1/1,1]") },
+	};
+
+	TGuardValue<bool> DumpGuard(GDumpWorstUnmatched, true);
+	FScopedWeld WeldOn(1);
+	bool bAllSealed = true;
+	for (const FCase& C : Cases)
+	{
+		FScopedTestField Scoped(C.Field);
+		const int32 LMap[2][2] = { { C.L00, C.L10 }, { C.L01, C.L11 } };
+		const int32 Holes = MeshLODLatticeHoles(FIntVector(2, 2, 1),
+			[&LMap](const FIntVector& CC) { return LMap[CC.Y][CC.X]; }, MeshFn);
+		Test.AddInfo(FString::Printf(TEXT("%s %s: interior open edges=%d (known T-junction sliver residual=%d)"),
+			Tag, C.Name, Holes, C.KnownResidual));
+		if (Holes > C.KnownResidual)
+		{
+			bAllSealed = false;
+			Test.AddError(FString::Printf(TEXT("%s %s: asymmetric-LOD corner regressed (%d open edges > known sliver residual %d)"),
+				Tag, C.Name, Holes, C.KnownResidual));
+		}
+	}
+
+	// Coarse|fine column split replicated across Y and Z (2x2x2): exercises the X-face∩Z-face
+	// edge columns (the live "row of notches" along a coarse|fine face where the surface
+	// crosses a Z chunk boundary) and the 8-chunk corner points. Cliff's slope crosses the
+	// internal Z plane inside the lattice, which Smooth does not.
+	{
+		FScopedTestField Scoped(ETestField::Cliff);
+		const int32 KnownResidual = 3; // same T-junction sliver class at the X∩Z edge columns
+		const int32 Holes = MeshLODLatticeHoles(FIntVector(2, 2, 2),
+			[](const FIntVector& CC) { return CC.X == 0 ? 2 : 0; }, MeshFn);
+		Test.AddInfo(FString::Printf(TEXT("%s Cliff column [2|0] 2x2x2: interior open edges=%d (known T-junction sliver residual=%d)"),
+			Tag, Holes, KnownResidual));
+		if (Holes > KnownResidual)
+		{
+			bAllSealed = false;
+			Test.AddError(FString::Printf(TEXT("%s Cliff column [2|0] 2x2x2: coarse|fine lattice regressed (%d open edges > known sliver residual %d)"),
+				Tag, Holes, KnownResidual));
+		}
+	}
+	return bAllSealed;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCLODBoundaryDT6AssemblyTest, "VoxelWorlds.Meshing.DualContour.LODBoundary.DT6_AssemblyWatertight",
@@ -1190,6 +1335,18 @@ bool FDCLODBoundaryDT7CornerTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestFalse(TEXT("DC boundary weld must seal 4-chunk corner watertightness (weld-on must not exceed the un-welded baseline)"), bWorse);
+	return true;
+}
+
+// ==================== DT9: asymmetric-LOD corners (CPU) ====================
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCLODBoundaryDT9AsymmetricCornerTest, "VoxelWorlds.Meshing.DualContour.LODBoundary.DT9_AsymmetricLODCorner",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCLODBoundaryDT9AsymmetricCornerTest::RunTest(const FString& Parameters)
+{
+	const bool bSealed = RunAsymmetricLODCornerCases(*this, &MeshChunk, TEXT("DT9"));
+	TestTrue(TEXT("CPU DC weld must keep asymmetric-LOD chunk corners within the documented T-junction sliver residual"), bSealed);
 	return true;
 }
 
@@ -1622,6 +1779,19 @@ bool FDCGPULODBoundaryGT8Test::RunTest(const FString& Parameters)
 		}
 	}
 	TestFalse(TEXT("GPU DC must seal absent-neighbor boundaries like the CPU (no see-through boundary holes)"), bAnyHole);
+	return true;
+}
+
+// ==================== GT9: asymmetric-LOD corners (GPU mirror of DT9) ====================
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCGPULODBoundaryGT9Test, "VoxelWorlds.Meshing.DualContour.GPULODBoundary.GT9_AsymmetricLODCorner",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCGPULODBoundaryGT9Test::RunTest(const FString& Parameters)
+{
+	DC_GPU_SKIP_IF_NO_RHI(*this);
+	const bool bSealed = RunAsymmetricLODCornerCases(*this, &MeshChunkGPU, TEXT("GT9"));
+	TestTrue(TEXT("GPU DC weld must keep asymmetric-LOD chunk corners within the documented T-junction sliver residual"), bSealed);
 	return true;
 }
 

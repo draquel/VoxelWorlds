@@ -213,6 +213,13 @@ public:
 		SHADER_PARAMETER(uint32, GridDim)
 		SHADER_PARAMETER(uint32, MaxVertexCount)
 		SHADER_PARAMETER(uint32, NeighborLODPacked)
+		// Edge/corner-diagonal neighbor LODs (3 bits each; EDGE_*/CORNER_* order) so the weld
+		// pins each boundary cell at the stride agreed by every chunk sharing its feature —
+		// face LODs alone cannot tell a chunk that a coarse neighbor touches only its corner
+		// (the asymmetric-LOD corner hole, DT9/GT9).
+		SHADER_PARAMETER(uint32, EdgeLODPackedA)
+		SHADER_PARAMETER(uint32, EdgeLODPackedB)
+		SHADER_PARAMETER(uint32, CornerLODPacked)
 		// Voxel access for density sampling at the boundary slab
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InputVoxelData)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborXPos)
@@ -601,6 +608,21 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		const uint32 NL = static_cast<uint32>(FMath::Clamp(Request.NeighborLODLevels[Face], 0, 7));
 		NeighborLODPacked |= (NL << (Face * 3));
 	}
+	// Edge/corner-diagonal LODs, same 3-bit encoding (EDGE_*/CORNER_* order; A = edges 0-7,
+	// B = edges 8-11). The weld needs them for feature-consistent pin decisions at chunk
+	// edge/corner cells (the asymmetric-LOD corner hole fix).
+	uint32 EdgeLODPackedA = 0, EdgeLODPackedB = 0, CornerLODPacked = 0;
+	for (int32 EdgeIdx = 0; EdgeIdx < 12; EdgeIdx++)
+	{
+		const uint32 L = static_cast<uint32>(FMath::Clamp(Request.EdgeLODLevels[EdgeIdx], 0, 7));
+		if (EdgeIdx < 8) { EdgeLODPackedA |= (L << (EdgeIdx * 3)); }
+		else             { EdgeLODPackedB |= (L << ((EdgeIdx - 8) * 3)); }
+	}
+	for (int32 CornerIdx = 0; CornerIdx < 8; CornerIdx++)
+	{
+		const uint32 L = static_cast<uint32>(FMath::Clamp(Request.CornerLODLevels[CornerIdx], 0, 7));
+		CornerLODPacked |= (L << (CornerIdx * 3));
+	}
 	// AnyThread: DispatchComputeShader is called from a thread-pool worker (the chunk manager
 	// off-threads GPU mesh dispatch); the cvar is a debug toggle, a stale read is harmless.
 	const bool bDoBoundaryWeld = CVarDCBoundaryWeld.GetValueOnAnyThread() != 0;
@@ -641,6 +663,9 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		 GridDim,
 		 TotalCells,
 		 NeighborLODPacked,
+		 EdgeLODPackedA,
+		 EdgeLODPackedB,
+		 CornerLODPacked,
 		 bDoBoundaryWeld,
 		 RequestId,
 		 Result,
@@ -903,6 +928,9 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				WeldParams->GridDim = GridDim;
 				WeldParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				WeldParams->NeighborLODPacked = NeighborLODPacked;
+				WeldParams->EdgeLODPackedA = EdgeLODPackedA;
+				WeldParams->EdgeLODPackedB = EdgeLODPackedB;
+				WeldParams->CornerLODPacked = CornerLODPacked;
 				BindVoxelAccess(WeldParams);
 
 				FIntVector WeldGroupCount(

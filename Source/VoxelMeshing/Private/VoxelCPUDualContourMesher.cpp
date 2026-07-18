@@ -532,28 +532,53 @@ void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 	const float IsoLevel = Config.IsoLevel;
 	const int32 SelfLOD = FMath::Clamp(Request.LODLevel, 0, 7);
 
-	// Per-axis, per-side effective stride and whether that boundary needs welding.
-	// EffStride = 1<<max(self, neighbor) = the coarser of the two sides. Both
-	// neighbors compute the same value (each knows the other's LOD), so they weld
-	// at the same stride. Stride-1 boundaries (the one-plane neighbor data is
-	// exactly what the cell needs) are left floating — already watertight (DT1).
-	int32 NegEff[3], PosEff[3];
-	bool NegWeld[3], PosWeld[3];
-	bool bAny = false;
-	for (int32 A = 0; A < 3; A++)
+	// Clamped rendered LODs of every neighbor that can share a boundary feature with this
+	// chunk: 6 faces + 12 edge diagonals + 8 corner diagonals. -1 (absent) clamps to 0 — an
+	// absent neighbor is not coarser (and the GetVoxelAt Air fallback seals it regardless).
+	//
+	// A boundary FEATURE's effective weld stride must be agreed by EVERY chunk sharing it:
+	// a face by 2 chunks, a chunk-edge line by 4 (self + 2 face neighbors + the edge
+	// diagonal), a chunk-corner point by 8. The previous per-axis rule consulted face LODs
+	// only, so at an asymmetric-LOD corner (e.g. [coarse,fine/fine,fine]) the chunk DIAGONAL
+	// to the coarse one had no way to know it and kept raw fine vertices at a corner the
+	// other three chunks welded coarse — the deterministic see-through corner hole confirmed
+	// live in the demo (survives voxel.RemeshAll; DT9/GT9 reproduce it).
+	int32 FaceL[6], EdgeL[12], CornerL[8];
+	int32 MaxAnyLOD = SelfLOD;
+	for (int32 i = 0; i < 6; i++)
 	{
-		const int32 NLneg = Request.NeighborLODLevels[2 * A];
-		const int32 NLpos = Request.NeighborLODLevels[2 * A + 1];
-		NegEff[A] = 1 << FMath::Max(SelfLOD, FMath::Max(NLneg, 0));
-		PosEff[A] = 1 << FMath::Max(SelfLOD, FMath::Max(NLpos, 0));
-		NegWeld[A] = NegEff[A] > 1;
-		PosWeld[A] = PosEff[A] > 1;
-		bAny = bAny || NegWeld[A] || PosWeld[A];
+		FaceL[i] = FMath::Max(Request.NeighborLODLevels[i], 0);
+		MaxAnyLOD = FMath::Max(MaxAnyLOD, FaceL[i]);
 	}
-	if (!bAny)
+	for (int32 i = 0; i < 12; i++)
 	{
-		return; // pure stride-1 chunk on all faces — boundaries already watertight
+		EdgeL[i] = FMath::Max(Request.EdgeLODLevels[i], 0);
+		MaxAnyLOD = FMath::Max(MaxAnyLOD, EdgeL[i]);
 	}
+	for (int32 i = 0; i < 8; i++)
+	{
+		CornerL[i] = FMath::Max(Request.CornerLODLevels[i], 0);
+		MaxAnyLOD = FMath::Max(MaxAnyLOD, CornerL[i]);
+	}
+	if (MaxAnyLOD <= 0)
+	{
+		return; // every sharer of every boundary feature is LOD 0 — stride-1 boundaries are already watertight (DT1)
+	}
+
+	// EDGE_*-order index of the edge diagonal across boundary axes (A1,Side1) x (A2,Side2):
+	// groups XY=0..3, XZ=4..7, YZ=8..11; within a group [PosPos, PosNeg, NegPos, NegNeg]
+	// on the (lower axis, higher axis) sides.
+	auto EdgeIndexOf = [](int32 A1, int32 S1, int32 A2, int32 S2) -> int32
+	{
+		if (A1 > A2) { Swap(A1, A2); Swap(S1, S2); }
+		const int32 Group = (A1 == 0) ? ((A2 == 1) ? 0 : 4) : 8;
+		return Group + ((S1 > 0) ? 0 : 2) + ((S2 > 0) ? 0 : 1);
+	};
+	// CORNER_*-order index from the three boundary sides.
+	auto CornerIndexOf = [](int32 SX, int32 SY, int32 SZ) -> int32
+	{
+		return ((SX > 0) ? 0 : 4) + ((SY > 0) ? 0 : 2) + ((SZ > 0) ? 0 : 1);
+	};
 
 	auto Dens = [&](int32 X, int32 Y, int32 Z) -> float { return GetDensityAt(Request, X, Y, Z); };
 	// Iso-crossing along one axis between two samples; returns the interpolated
@@ -581,16 +606,74 @@ void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 		if (!CellVertices[CIdx].bValid) { continue; }
 
 		const int32 C[3] = { CX, CY, CZ };
-		bool Pinned[3] = { false, false, false };
-		int32 PlaneV[3] = { 0, 0, 0 };
-		int32 Eff[3] = { Stride, Stride, Stride };
+
+		// Boundary side per axis: -1 at the negative-face layer, +1 at the positive, 0 interior.
+		int32 Side[3];
+		int32 NumBoundary = 0;
 		for (int32 A = 0; A < 3; A++)
 		{
-			if (C[A] == -1 && NegWeld[A]) { Pinned[A] = true; PlaneV[A] = 0; Eff[A] = NegEff[A]; }
-			else if (C[A] == GridSize - 1 && PosWeld[A]) { Pinned[A] = true; PlaneV[A] = ChunkSize; Eff[A] = PosEff[A]; }
+			Side[A] = (C[A] == -1) ? -1 : ((C[A] == GridSize - 1) ? 1 : 0);
+			if (Side[A] != 0) { NumBoundary++; }
 		}
-		const int32 NP = (Pinned[0] ? 1 : 0) + (Pinned[1] ? 1 : 0) + (Pinned[2] ? 1 : 0);
-		if (NP == 0) { continue; } // interior cell — keep its floating QEF vertex
+		if (NumBoundary == 0) { continue; } // interior cell — keep its floating QEF vertex
+
+		// Effective stride of this cell's boundary feature = 1 << max LOD over EVERY chunk
+		// sharing it (self, the face neighbor across each boundary axis, the edge diagonal
+		// across each boundary axis pair, and — for a 3-axis cell — the corner diagonal).
+		// Every sharer evaluates the same chunk set, so all of them pin (or don't) at the
+		// same stride and their welded vertices coincide.
+		int32 FeatureLOD = SelfLOD;
+		int32 MinSharerLOD = SelfLOD;
+		for (int32 A = 0; A < 3; A++)
+		{
+			if (Side[A] != 0)
+			{
+				const int32 L = FaceL[2 * A + ((Side[A] > 0) ? 1 : 0)];
+				FeatureLOD = FMath::Max(FeatureLOD, L);
+				MinSharerLOD = FMath::Min(MinSharerLOD, L);
+			}
+		}
+		for (int32 A1 = 0; A1 < 3; A1++)
+		{
+			for (int32 A2 = A1 + 1; A2 < 3; A2++)
+			{
+				if (Side[A1] != 0 && Side[A2] != 0)
+				{
+					const int32 L = EdgeL[EdgeIndexOf(A1, Side[A1], A2, Side[A2])];
+					FeatureLOD = FMath::Max(FeatureLOD, L);
+					MinSharerLOD = FMath::Min(MinSharerLOD, L);
+				}
+			}
+		}
+		if (NumBoundary == 3)
+		{
+			const int32 L = CornerL[CornerIndexOf(Side[0], Side[1], Side[2])];
+			FeatureLOD = FMath::Max(FeatureLOD, L);
+			MinSharerLOD = FMath::Min(MinSharerLOD, L);
+		}
+
+		// Uniform-stride sharer sets keep their RAW vertices when no feature crossing exists:
+		// every sharer holds an identical duplicate of the boundary cell (same world cube, same
+		// boundary data), so the raws already coincide — while any side-local fallback would
+		// DE-synchronize them (descent patches quantize on each chunk's own side). Mixed-stride
+		// sharers are the opposite: a coarse cell's raw can never coincide with the fine cells'
+		// raws, so ONLY the shared-feature fallbacks below can seal them (DT9/GT9).
+		const bool bMixedSharers = (MinSharerLOD != FeatureLOD);
+
+		const int32 CellE = 1 << FeatureLOD;
+		if (CellE <= 1) { continue; } // all sharers at LOD 0 — full-res boundary, already watertight
+
+		// Pin every boundary axis of the cell at the agreed feature stride.
+		bool Pinned[3];
+		int32 PlaneV[3];
+		int32 Eff[3];
+		for (int32 A = 0; A < 3; A++)
+		{
+			Pinned[A] = (Side[A] != 0);
+			PlaneV[A] = (Side[A] > 0) ? ChunkSize : 0;
+			Eff[A] = CellE;
+		}
+		const int32 NP = NumBoundary;
 
 		FVector3f Pos = FVector3f::ZeroVector;
 		bool bHas = false;
@@ -626,6 +709,73 @@ void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 				Pos[A2] = PlaneV[A2] * VoxelSize;
 				Pos[F] = Crossed * VoxelSize;
 				bHas = true;
+			}
+			else if (bMixedSharers)
+			{
+				// No iso-crossing on the shared edge line near this cell: the surface passes
+				// through the cell OFF the line — typically it meets one of the two FACE
+				// planes instead (a coarse corner cell spans several fine face patches, and
+				// its surface may cross a face patch whose fine cells welded onto that plane).
+				// Descend the feature hierarchy: try an NP==1-style on-plane crossing weld on
+				// each pinned plane (at this cell's quantized patch — shared with the sharer
+				// across that plane), lowest axis first so every sharer attempts the same
+				// order. Only if no feature near this cell carries the surface, snap to the
+				// line window's midpoint — deterministic and identical for every sharer.
+				// Uniform-stride cells skip this (see bMixedSharers above): their raws
+				// already coincide and the side-local patches here would break that.
+				auto TryPlaneCrossings = [&](int32 DAxis) -> bool
+				{
+					const int32 PAa = (DAxis == 0) ? 1 : 0;
+					const int32 PBb = (DAxis == 2) ? 1 : 2;
+					const int32 PE = Eff[DAxis];
+					const int32 PPlane = PlaneV[DAxis];
+					const int32 PUv = C[PAa] * Stride;
+					const int32 PVv = C[PBb] * Stride;
+					const int32 PU = FMath::Clamp((PUv >= 0 ? (PUv / PE) * PE : 0), 0, ChunkSize - PE);
+					const int32 PV = FMath::Clamp((PVv >= 0 ? (PVv / PE) * PE : 0), 0, ChunkSize - PE);
+					auto PSD = [&](int32 P1, int32 P2) -> float
+					{
+						int32 Vc[3]; Vc[DAxis] = PPlane; Vc[PAa] = P1; Vc[PBb] = P2;
+						return Dens(Vc[0], Vc[1], Vc[2]);
+					};
+					auto PWD = [&](float P1, float P2) -> FVector3f
+					{
+						FVector3f W;
+						W[DAxis] = PPlane * VoxelSize; W[PAa] = P1 * VoxelSize; W[PBb] = P2 * VoxelSize;
+						return W;
+					};
+					FVector3f PSum = FVector3f::ZeroVector;
+					int32 PCount = 0;
+					auto PAdd = [&](float Da, float Db, const FVector3f& Pa, const FVector3f& Pb)
+					{
+						if ((Da >= IsoLevel) == (Db >= IsoLevel)) { return; }
+						const float t = FMath::Clamp((IsoLevel - Da) / (Db - Da), 0.0f, 1.0f);
+						PSum += FMath::Lerp(Pa, Pb, t);
+						++PCount;
+					};
+					const float PD00 = PSD(PU, PV);
+					const float PD10 = PSD(PU + PE, PV);
+					const float PD01 = PSD(PU, PV + PE);
+					const float PD11 = PSD(PU + PE, PV + PE);
+					PAdd(PD00, PD10, PWD(PU, PV), PWD(PU + PE, PV));
+					PAdd(PD01, PD11, PWD(PU, PV + PE), PWD(PU + PE, PV + PE));
+					PAdd(PD00, PD01, PWD(PU, PV), PWD(PU, PV + PE));
+					PAdd(PD10, PD11, PWD(PU + PE, PV), PWD(PU + PE, PV + PE));
+					if (PCount == 0) { return false; }
+					Pos = PSum / static_cast<float>(PCount);
+					return true;
+				};
+				if (TryPlaneCrossings(A1) || TryPlaneCrossings(A2))
+				{
+					bHas = true;
+				}
+				else
+				{
+					Pos[A1] = PlaneV[A1] * VoxelSize;
+					Pos[A2] = PlaneV[A2] * VoxelSize;
+					Pos[F] = ((float)F0 + (float)E * 0.5f) * VoxelSize;
+					bHas = true;
+				}
 			}
 		}
 		else // NP == 1: face plane
@@ -686,14 +836,24 @@ void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 				Pos = Sum / static_cast<float>(Count);
 				bHas = true;
 			}
+			else if (bMixedSharers)
+			{
+				// No crossing on the plane patch or its one-voxel slab: snap to the patch
+				// center on the plane — deterministic and identical for both sharers of the
+				// face. A raw QEF keep at a coarse|fine face guarantees a mismatch (only a
+				// SAME-stride pair's raws coincide — those keep raw via the !bHas tail).
+				Pos = WD((float)Plane, (float)U + (float)E * 0.5f, (float)V + (float)E * 0.5f);
+				bHas = true;
+			}
 		}
 
 		if (!bHas)
 		{
-			// No shared-feature crossing — keep the cell's original QEF vertex rather
-			// than dropping it: a dropped boundary cell punches a hole (missing
-			// geometry, see-through), which is far more visible than the thin vertex
-			// mismatch that keeping it may leave. Geometry stays present.
+			// Uniform-stride sharers with no feature crossing near this cell: every sharer
+			// holds an identical duplicate of the cell, so the raw QEF vertices already
+			// coincide — keep them (a side-local fallback would de-synchronize the duplicates:
+			// the GT7 uniform-corner regression). Mixed-stride cells never reach here — every
+			// mixed branch above resolves to a shared feature position.
 			continue;
 		}
 

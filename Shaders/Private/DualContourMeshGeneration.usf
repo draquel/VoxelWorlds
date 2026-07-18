@@ -127,6 +127,16 @@ RWStructuredBuffer<FDCCellVertexGPU> DCCellVertices;
 // each = clamp(NeighborLODLevels[face], 0, 7). Replaces the old LOD merge map.
 uint NeighborLODPacked;
 
+// Packed rendered LODs of the 12 EDGE-diagonal neighbors (3 bits each, EDGE_* order:
+// PackedA = edges 0-7, PackedB = edges 8-11) and the 8 CORNER-diagonal neighbors
+// (CORNER_* order). The weld pins each boundary cell at the stride agreed by EVERY
+// chunk sharing its boundary feature (see DCWeldBoundaryCS): face LODs alone cannot
+// tell a chunk that a coarse neighbor touches only its corner — the asymmetric-LOD
+// corner hole. -1 (absent) is packed as 0 (not coarser), same as NeighborLODPacked.
+uint EdgeLODPackedA;
+uint EdgeLODPackedB;
+uint CornerLODPacked;
+
 // Output buffers
 RWStructuredBuffer<FVoxelVertexGPU> OutputVertices;
 RWStructuredBuffer<uint> OutputIndices;
@@ -997,6 +1007,28 @@ void DCQEFSolveCS(
 
 int NbrLODClamped(int Face) { return (int)((NeighborLODPacked >> (uint)(Face * 3)) & 7u); }
 
+// Clamped rendered LOD of an edge/corner-diagonal neighbor (EDGE_*/CORNER_* index order).
+int EdgeLODClamped(int EdgeIdx)
+{
+    uint Packed = (EdgeIdx < 8) ? EdgeLODPackedA : EdgeLODPackedB;
+    return (int)((Packed >> (uint)((EdgeIdx & 7) * 3)) & 7u);
+}
+int CornerLODClamped(int CornerIdx) { return (int)((CornerLODPacked >> (uint)(CornerIdx * 3)) & 7u); }
+
+// EDGE_*-order index of the edge diagonal across boundary axes (A1,S1) x (A2,S2), A1 < A2:
+// groups XY=0..3, XZ=4..7, YZ=8..11; within a group [PosPos, PosNeg, NegPos, NegNeg] on the
+// (lower axis, higher axis) sides. Mirrors the CPU weld's EdgeIndexOf.
+int WeldEdgeIndexOf(int A1, int S1, int A2, int S2)
+{
+    int Group = (A1 == 0) ? ((A2 == 1) ? 0 : 4) : 8;
+    return Group + ((S1 > 0) ? 0 : 2) + ((S2 > 0) ? 0 : 1);
+}
+// CORNER_*-order index from the three boundary sides. Mirrors the CPU weld's CornerIndexOf.
+int WeldCornerIndexOf(int SX, int SY, int SZ)
+{
+    return ((SX > 0) ? 0 : 4) + ((SY > 0) ? 0 : 2) + ((SZ > 0) ? 0 : 1);
+}
+
 // Density / world position at axis-indexed (depth, perp1, perp2) voxel coords.
 float WeldDens(int DepthAxis, int PA, int PB, int Depth, int P1, int P2)
 {
@@ -1036,18 +1068,62 @@ void DCWeldBoundaryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     int SelfLOD = (int)firstbithigh(LODStride); // log2(stride); stride is a power of two
 
     int C[3]; C[0] = CX; C[1] = CY; C[2] = CZ;
-    bool Pinned[3]; int PlaneV[3]; int Eff[3];
+
+    // Boundary side per axis: -1 at the negative-face layer, +1 at the positive, 0 interior.
+    int Side[3];
     int NP = 0;
     [unroll]
     for (int A = 0; A < 3; A++)
     {
-        Pinned[A] = false; PlaneV[A] = 0; Eff[A] = Stride;
-        int NegEff = 1 << max(SelfLOD, NbrLODClamped(2 * A));
-        int PosEff = 1 << max(SelfLOD, NbrLODClamped(2 * A + 1));
-        if (C[A] == -1 && NegEff > 1) { Pinned[A] = true; PlaneV[A] = 0; Eff[A] = NegEff; NP++; }
-        else if (C[A] == GridSize - 1 && PosEff > 1) { Pinned[A] = true; PlaneV[A] = (int)ChunkSize; Eff[A] = PosEff; NP++; }
+        Side[A] = (C[A] == -1) ? -1 : ((C[A] == GridSize - 1) ? 1 : 0);
+        if (Side[A] != 0) { NP++; }
     }
     if (NP == 0) { return; }
+
+    // Effective stride of this cell's boundary feature = 1 << max LOD over EVERY chunk sharing
+    // it: self, the face neighbor across each boundary axis, the edge diagonal across each
+    // boundary axis PAIR, and — for a 3-axis cell — the corner diagonal. Every sharer evaluates
+    // the same chunk set, so all of them pin (or don't) at the same stride and their welded
+    // vertices coincide. The previous face-only rule let the chunk DIAGONAL to a coarse
+    // neighbor keep raw fine vertices at a corner the other three chunks welded coarse — the
+    // deterministic asymmetric-LOD corner hole (DT9/GT9). Mirrors
+    // FVoxelCPUDualContourMesher::WeldStridedBoundaryCells.
+    int FeatureLOD = SelfLOD;
+    int MinSharerLOD = SelfLOD;
+    [unroll]
+    for (int AF = 0; AF < 3; AF++)
+    {
+        if (Side[AF] != 0)
+        {
+            int LF = NbrLODClamped(2 * AF + ((Side[AF] > 0) ? 1 : 0));
+            FeatureLOD = max(FeatureLOD, LF);
+            MinSharerLOD = min(MinSharerLOD, LF);
+        }
+    }
+    if (Side[0] != 0 && Side[1] != 0) { int LE = EdgeLODClamped(WeldEdgeIndexOf(0, Side[0], 1, Side[1])); FeatureLOD = max(FeatureLOD, LE); MinSharerLOD = min(MinSharerLOD, LE); }
+    if (Side[0] != 0 && Side[2] != 0) { int LE = EdgeLODClamped(WeldEdgeIndexOf(0, Side[0], 2, Side[2])); FeatureLOD = max(FeatureLOD, LE); MinSharerLOD = min(MinSharerLOD, LE); }
+    if (Side[1] != 0 && Side[2] != 0) { int LE = EdgeLODClamped(WeldEdgeIndexOf(1, Side[1], 2, Side[2])); FeatureLOD = max(FeatureLOD, LE); MinSharerLOD = min(MinSharerLOD, LE); }
+    if (NP == 3) { int LC = CornerLODClamped(WeldCornerIndexOf(Side[0], Side[1], Side[2])); FeatureLOD = max(FeatureLOD, LC); MinSharerLOD = min(MinSharerLOD, LC); }
+
+    int CellE = 1 << FeatureLOD;
+    if (CellE <= 1) { return; } // all sharers at LOD 0 — full-res boundary, already watertight
+
+    // Uniform-stride sharer sets keep RAW vertices when no feature crossing exists: every
+    // sharer holds an identical duplicate of the cell (same world cube, same data), so the
+    // raws already coincide — a side-local fallback would DE-synchronize them (the GT7
+    // uniform-corner regression). Mixed-stride sharers are the opposite: a coarse raw can
+    // never coincide with fine raws, so only shared-feature fallbacks seal them (DT9/GT9).
+    bool bMixedSharers = (MinSharerLOD != FeatureLOD);
+
+    // Pin every boundary axis of the cell at the agreed feature stride.
+    bool Pinned[3]; int PlaneV[3]; int Eff[3];
+    [unroll]
+    for (int AP = 0; AP < 3; AP++)
+    {
+        Pinned[AP] = (Side[AP] != 0);
+        PlaneV[AP] = (Side[AP] > 0) ? (int)ChunkSize : 0;
+        Eff[AP] = CellE;
+    }
 
     float Iso = IsoLevel;
     float3 Pos = float3(0, 0, 0);
@@ -1078,6 +1154,50 @@ void DCWeldBoundaryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             Pos[A2] = (float)PlaneV[A2] * VoxelSize;
             Pos[F] = lerp((float)F0, (float)(F0 + E), t) * VoxelSize;
             bHas = true;
+        }
+        else if (bMixedSharers)
+        {
+            // No iso-crossing on the shared edge line near this cell: the surface passes
+            // through the cell OFF the line — typically meeting one of the two FACE planes
+            // instead (a coarse corner cell spans several fine face patches whose fine cells
+            // welded onto that plane). Descend the feature hierarchy: try an NP==1-style
+            // on-plane crossing weld on each pinned plane at this cell's quantized patch
+            // (shared with the sharer across that plane), lowest axis first so every sharer
+            // attempts the same order; only then snap to the line window's midpoint. Uniform
+            // cells skip this (bMixedSharers above) — their raws already coincide and the
+            // side-local patches here would break that. Mirrors the CPU weld fallback.
+            [loop]
+            for (int Attempt = 0; Attempt < 2 && !bHas; Attempt++)
+            {
+                int DAx = (Attempt == 0) ? A1 : A2;
+                int PAa = (DAx == 0) ? 1 : 0;
+                int PBb = (DAx == 2) ? 1 : 2;
+                int PE = Eff[DAx];
+                int PPlane = PlaneV[DAx];
+                int PUv = C[PAa] * Stride;
+                int PVv = C[PBb] * Stride;
+                int PU = clamp((PUv >= 0 ? (PUv / PE) * PE : 0), 0, (int)ChunkSize - PE);
+                int PV = clamp((PVv >= 0 ? (PVv / PE) * PE : 0), 0, (int)ChunkSize - PE);
+                float PD00 = WeldDens(DAx, PAa, PBb, PPlane, PU, PV);
+                float PD10 = WeldDens(DAx, PAa, PBb, PPlane, PU + PE, PV);
+                float PD01 = WeldDens(DAx, PAa, PBb, PPlane, PU, PV + PE);
+                float PD11 = WeldDens(DAx, PAa, PBb, PPlane, PU + PE, PV + PE);
+                float3 PSum = float3(0, 0, 0);
+                int PCount = 0;
+                float pt;
+                if (WeldCrossT(PD00, PD10, Iso, pt)) { PSum += WeldWorld(DAx, PAa, PBb, (float)PPlane, lerp((float)PU, (float)(PU + PE), pt), (float)PV); PCount++; }
+                if (WeldCrossT(PD01, PD11, Iso, pt)) { PSum += WeldWorld(DAx, PAa, PBb, (float)PPlane, lerp((float)PU, (float)(PU + PE), pt), (float)(PV + PE)); PCount++; }
+                if (WeldCrossT(PD00, PD01, Iso, pt)) { PSum += WeldWorld(DAx, PAa, PBb, (float)PPlane, (float)PU, lerp((float)PV, (float)(PV + PE), pt)); PCount++; }
+                if (WeldCrossT(PD10, PD11, Iso, pt)) { PSum += WeldWorld(DAx, PAa, PBb, (float)PPlane, (float)(PU + PE), lerp((float)PV, (float)(PV + PE), pt)); PCount++; }
+                if (PCount > 0) { Pos = PSum / (float)PCount; bHas = true; }
+            }
+            if (!bHas)
+            {
+                Pos[A1] = (float)PlaneV[A1] * VoxelSize;
+                Pos[A2] = (float)PlaneV[A2] * VoxelSize;
+                Pos[F] = ((float)F0 + (float)E * 0.5f) * VoxelSize;
+                bHas = true;
+            }
         }
     }
     else // NP == 1
@@ -1121,14 +1241,23 @@ void DCWeldBoundaryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             if (WeldCrossT(Di11, D11, Iso, t)) { Sum += WeldWorld(D, PA, PB, lerp((float)In, (float)Plane, t), (float)(U + E), (float)(V + E)); Count++; }
         }
         if (Count > 0) { Pos = Sum / (float)Count; bHas = true; }
+        else if (bMixedSharers)
+        {
+            // No crossing on the plane patch or its one-voxel slab: snap to the patch center
+            // on the plane — deterministic and identical for both sharers of the face (a raw
+            // QEF keep at a coarse|fine face guarantees a mismatch; SAME-stride pairs keep
+            // raw via the !bHas tail below). Mirrors the CPU weld.
+            Pos = WeldWorld(D, PA, PB, (float)Plane, (float)U + (float)E * 0.5f, (float)V + (float)E * 0.5f);
+            bHas = true;
+        }
     }
 
     if (!bHas)
     {
-        // Keep the cell's original QEF vertex rather than dropping it: a dropped boundary
-        // cell punches a hole (missing geometry, see-through), far more visible than the
-        // thin vertex mismatch keeping it may leave. Mirrors the CPU WeldStridedBoundaryCells
-        // (no invalidation) — fixes the GPU equivalent of the LOD-seam invalidation regression.
+        // Uniform-stride sharers with no feature crossing near this cell: every sharer holds
+        // an identical duplicate of the cell, so the raw QEF vertices already coincide — keep
+        // them (a side-local fallback would de-synchronize the duplicates: the GT7 uniform-
+        // corner regression). Mixed-stride cells never reach here. Mirrors the CPU weld.
         return;
     }
 

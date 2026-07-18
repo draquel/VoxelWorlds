@@ -262,6 +262,30 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	UPROPERTY()
 	int32 NeighborLODLevels[6] = {-1, -1, -1, -1, -1, -1};
 
+	/**
+	 * Rendered LOD levels of the 12 EDGE-diagonal neighbor chunks, in the same EDGE_* index
+	 * order as the edge slice arrays (XPosYPos..YNegZNeg). -1 = no neighbor.
+	 *
+	 * The Dual Contouring boundary weld needs these for CONSISTENT pin decisions at chunk-edge
+	 * cells: a boundary EDGE feature is shared by 4 chunks (self + the 2 face neighbors + this
+	 * edge diagonal), and all 4 must weld it at the same effective stride or their welded
+	 * vertices land apart — the asymmetric-LOD corner hole (e.g. a [coarse,fine/fine,fine] 2x2
+	 * corner, where face LODs alone cannot tell the chunk DIAGONAL to the coarse one that a
+	 * coarse chunk touches its corner, so it keeps raw fine vertices there while the other
+	 * three weld coarse).
+	 */
+	UPROPERTY()
+	int32 EdgeLODLevels[12] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
+	/**
+	 * Rendered LOD levels of the 8 CORNER-diagonal neighbor chunks, in the same CORNER_* order
+	 * (XPosYPosZPos..XNegYNegZNeg). -1 = no neighbor. Completes the sharer set for 3-axis
+	 * boundary cells: a chunk-corner feature is shared by 8 chunks, and all 8 must make the
+	 * same weld decision at it.
+	 */
+	UPROPERTY()
+	int32 CornerLODLevels[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+
 	// Transition face flag bits
 	static constexpr uint8 TRANSITION_XNEG = 1 << 0;
 	static constexpr uint8 TRANSITION_XPOS = 1 << 1;

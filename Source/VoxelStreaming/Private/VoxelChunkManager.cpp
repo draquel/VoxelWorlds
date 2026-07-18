@@ -60,6 +60,21 @@ static TAutoConsoleVariable<int32> CVarLogBoundaryResidency(
 	TEXT("Log per-face neighbor-slice residency + all-Air state for each meshed chunk (LOD seam diagnosis)."),
 	ECVF_Default);
 
+// Shared 26-neighbour offset table: 6 faces first, then 12 edges, then 8 corners.
+// CaptureMeshDeps and RevalidateMeshDeps MUST iterate this in the SAME order (the snapshot is
+// compared index-by-index), and the LOD-transition cascades iterate a faces-only (6) or full
+// (26) prefix of it depending on the meshing mode.
+static const FIntVector GMeshDepNeighborOffsets[26] = {
+	FIntVector(1, 0, 0),   FIntVector(-1, 0, 0),
+	FIntVector(0, 1, 0),   FIntVector(0, -1, 0),
+	FIntVector(0, 0, 1),   FIntVector(0, 0, -1),
+	FIntVector(1, 1, 0),   FIntVector(1, -1, 0),   FIntVector(-1, 1, 0),   FIntVector(-1, -1, 0),
+	FIntVector(1, 0, 1),   FIntVector(1, 0, -1),   FIntVector(-1, 0, 1),   FIntVector(-1, 0, -1),
+	FIntVector(0, 1, 1),   FIntVector(0, 1, -1),   FIntVector(0, -1, 1),   FIntVector(0, -1, -1),
+	FIntVector(1, 1, 1),   FIntVector(1, 1, -1),   FIntVector(1, -1, 1),   FIntVector(1, -1, -1),
+	FIntVector(-1, 1, 1),  FIntVector(-1, 1, -1),  FIntVector(-1, -1, 1),  FIntVector(-1, -1, -1)
+};
+
 // Runtime master-enable for GPU terrain generation. Lets you force CPU generation without editing the
 // config asset or restarting the build: 1 = honor bUseGPUGeneration; 0 = force CPU. Read at chunk-manager
 // Initialize (generator selection), so re-initialize the voxel world after toggling for it to take effect.
@@ -2585,6 +2600,33 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 				}
 				// If neighbor doesn't exist, no transition needed (will be at chunk boundary anyway)
 			}
+
+			// Edge/corner-diagonal rendered LODs for the DC boundary weld. A boundary EDGE
+			// feature is shared by 4 chunks (self + 2 face neighbors + the edge diagonal) and a
+			// corner point by 8; every sharer must weld it at the same effective stride or their
+			// vertices land apart — the asymmetric-LOD corner hole (a [coarse,fine/fine,fine]
+			// corner leaves the chunk DIAGONAL to the coarse one blind via face LODs alone).
+			// Same rendered-LOD source (MeshedLODLevel) as the face loop above; orders match
+			// FVoxelMeshingRequest::EdgeLODLevels (EDGE_*) / CornerLODLevels (CORNER_*).
+			static const FIntVector EdgeLODOffsets[12] = {
+				FIntVector(1, 1, 0), FIntVector(1, -1, 0), FIntVector(-1, 1, 0), FIntVector(-1, -1, 0),
+				FIntVector(1, 0, 1), FIntVector(1, 0, -1), FIntVector(-1, 0, 1), FIntVector(-1, 0, -1),
+				FIntVector(0, 1, 1), FIntVector(0, 1, -1), FIntVector(0, -1, 1), FIntVector(0, -1, -1)
+			};
+			static const FIntVector CornerLODOffsets[8] = {
+				FIntVector(1, 1, 1),  FIntVector(1, 1, -1),  FIntVector(1, -1, 1),  FIntVector(1, -1, -1),
+				FIntVector(-1, 1, 1), FIntVector(-1, 1, -1), FIntVector(-1, -1, 1), FIntVector(-1, -1, -1)
+			};
+			for (int32 i = 0; i < 12; i++)
+			{
+				const FVoxelChunkState* DiagState = ChunkStates.Find(Request.ChunkCoord + EdgeLODOffsets[i]);
+				MeshRequest.EdgeLODLevels[i] = DiagState ? DiagState->MeshedLODLevel : -1;
+			}
+			for (int32 i = 0; i < 8; i++)
+			{
+				const FVoxelChunkState* DiagState = ChunkStates.Find(Request.ChunkCoord + CornerLODOffsets[i]);
+				MeshRequest.CornerLODLevels[i] = DiagState ? DiagState->MeshedLODLevel : -1;
+			}
 		}
 		// else: LOD disabled — NeighborLODLevels stays all -1 (default), TransitionFaces stays 0
 
@@ -3276,14 +3318,16 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		{
 			if (Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
 			{
-				static const FIntVector FaceOffsets[6] = {
-					FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
-					FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
-					FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
-				};
-				for (const FIntVector& Offset : FaceOffsets)
+				// DC's boundary weld reads the rendered LODs of ALL 26 neighbours (every boundary
+				// feature's weld stride is agreed across the chunks sharing it — face, edge AND
+				// corner diagonals), so an LOD change must re-align the diagonals' welds too or
+				// their corner features stay welded at a stale stride (the asymmetric-LOD corner
+				// hole, DT9/GT9). MC transition strips read face LODs only — keep the 6-face fan.
+				const int32 NumLODNeighbors =
+					(Configuration->MeshingMode == EMeshingMode::DualContouring) ? 26 : 6;
+				for (int32 NIdx = 0; NIdx < NumLODNeighbors; ++NIdx)
 				{
-					const FIntVector NeighborCoord = ChunkCoord + Offset;
+					const FIntVector NeighborCoord = ChunkCoord + GMeshDepNeighborOffsets[NIdx];
 					if (FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
 					{
 						if (NeighborState->State == EChunkState::Loaded)
@@ -3402,20 +3446,20 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
 		PendingMeshQueue.RemoveAtSwap(PendingIndex, EAllowShrinking::No);
 
-		// When MeshedLODLevel changed, face neighbors need to remesh so their
-		// MergeLODBoundaryCells and TransitionFaces align with our new rendered LOD.
+		// When MeshedLODLevel changed, neighbors need to remesh so their boundary handling
+		// aligns with our new rendered LOD. MC transition strips depend on the 6 FACE LODs;
+		// DC's boundary weld depends on ALL 26 neighbour LODs (each boundary feature's weld
+		// stride is agreed across every chunk sharing it, including edge/corner diagonals —
+		// the asymmetric-LOD corner hole, DT9/GT9), so DC fans out to the full 26.
 		// This closes the "break" phase of LOD transitions: without this, neighbors
 		// retain stale boundary alignment until some other trigger re-meshes them.
 		if (Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
 		{
-			static const FIntVector FaceOffsets[6] = {
-				FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
-				FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
-				FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
-			};
-			for (const FIntVector& Offset : FaceOffsets)
+			const int32 NumLODNeighbors =
+				(Configuration->MeshingMode == EMeshingMode::DualContouring) ? 26 : 6;
+			for (int32 NIdx = 0; NIdx < NumLODNeighbors; ++NIdx)
 			{
-				const FIntVector NeighborCoord = ChunkCoord + Offset;
+				const FIntVector NeighborCoord = ChunkCoord + GMeshDepNeighborOffsets[NIdx];
 				if (FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
 				{
 					if (NeighborState->State == EChunkState::Loaded)
@@ -3533,19 +3577,6 @@ bool UVoxelChunkManager::ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoor
 	return bDefer;
 }
 
-// Shared 26-neighbour offset table (6 faces + 12 edges + 8 corners). CaptureMeshDeps and
-// RevalidateMeshDeps MUST iterate this in the SAME order — the snapshot is compared index-by-index.
-static const FIntVector GMeshDepNeighborOffsets[26] = {
-	FIntVector(1, 0, 0),   FIntVector(-1, 0, 0),
-	FIntVector(0, 1, 0),   FIntVector(0, -1, 0),
-	FIntVector(0, 0, 1),   FIntVector(0, 0, -1),
-	FIntVector(1, 1, 0),   FIntVector(1, -1, 0),   FIntVector(-1, 1, 0),   FIntVector(-1, -1, 0),
-	FIntVector(1, 0, 1),   FIntVector(1, 0, -1),   FIntVector(-1, 0, 1),   FIntVector(-1, 0, -1),
-	FIntVector(0, 1, 1),   FIntVector(0, 1, -1),   FIntVector(0, -1, 1),   FIntVector(0, -1, -1),
-	FIntVector(1, 1, 1),   FIntVector(1, 1, -1),   FIntVector(1, -1, 1),   FIntVector(1, -1, -1),
-	FIntVector(-1, 1, 1),  FIntVector(-1, 1, -1),  FIntVector(-1, -1, 1),  FIntVector(-1, -1, -1)
-};
-
 void UVoxelChunkManager::CaptureMeshDeps(const FIntVector& ChunkCoord)
 {
 	// Snapshot each of the 26 neighbours' boundary-relevant state at the instant this chunk launches
@@ -3606,12 +3637,14 @@ bool UVoxelChunkManager::RevalidateMeshDeps(const FIntVector& ChunkCoord)
 		{
 			return true;
 		}
-		// A neighbour's RENDERED LOD only reaches our boundary through transition faces, which are set
-		// up against the 6 FACE neighbours only (offsets 0-5). Edge/corner neighbours contribute raw
-		// voxels regardless of their rendered LOD, so their LOD changing does NOT restale us — checking
-		// it there would trigger a remesh every time an edge/corner meshes during our flight (pure churn
-		// across the streaming front). Only a face neighbour's rendered-LOD change matters.
-		if (i < 6 && Now.MeshedLODLevel != Was.MeshedLODLevel)
+		// A neighbour's rendered-LOD change restales us whenever that LOD feeds our boundary:
+		// transition faces read the 6 FACE LODs, and the DC boundary weld reads ALL 26 — each
+		// boundary feature's weld stride is agreed across every chunk sharing it (face + edge +
+		// corner LODs), so a stale DIAGONAL LOD leaves the two sides of a chunk edge/corner
+		// welded at different strides — the asymmetric-LOD corner hole (DT9/GT9). Churn stays
+		// bounded: this fires only when the neighbour's rendered LOD actually CHANGED during our
+		// mesh flight, not on every neighbouring remesh.
+		if (Now.MeshedLODLevel != Was.MeshedLODLevel)
 		{
 			return true;
 		}
