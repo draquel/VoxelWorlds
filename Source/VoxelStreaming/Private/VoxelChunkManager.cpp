@@ -3411,27 +3411,18 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			return; // a participant vanished between schedule and drain; the unregister path re-dirties
 		}
 	}
-	// Every participant needs a rendered mesh. FACE pairs may differ in LOD (the P2c mixed-LOD
-	// mesher stitches them); EDGE/CORNER tuples still require one shared LOD (mixed-LOD tuples
-	// are P2d — a later LOD change re-dirties and re-schedules them).
+	// Every participant needs a rendered mesh. Participants may differ in LOD — the P2c/P2d
+	// mixed-LOD meshers stitch across resolutions; the same-LOD fast paths run when uniform.
+	int32 MinParticipantLOD = TNumericLimits<int32>::Max();
 	for (int32 i = 0; i < ExpectedParticipants; ++i)
 	{
 		if (States[i]->MeshedLODLevel < 0)
 		{
 			return;
 		}
+		MinParticipantLOD = FMath::Min(MinParticipantLOD, States[i]->MeshedLODLevel);
 	}
 	const int32 SharedLOD = States[0]->MeshedLODLevel;
-	if (Job.Key.Type != EVoxelSeamType::Face)
-	{
-		for (int32 i = 1; i < ExpectedParticipants; ++i)
-		{
-			if (States[i]->MeshedLODLevel != SharedLOD)
-			{
-				return;
-			}
-		}
-	}
 
 	// Copy one participant's voxels with its edit layer merged (matches the chunk-mesh path).
 	auto CopyMergedVoxels = [this](const FIntVector& Coord, FVoxelChunkState& State, TArray<FVoxelData>& Out)
@@ -3448,7 +3439,6 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	FVoxelCPUDualContourMesher* DCMesher = static_cast<FVoxelCPUDualContourMesher*>(Mesher.Get());
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
-	const int32 LODLevel = SharedLOD;
 
 	if (Job.Key.Type == EVoxelSeamType::Face)
 	{
@@ -3496,11 +3486,12 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		// matches the request's quadrant order [(0,0),(1,0),(0,1),(1,1)] by construction.
 		for (int32 i = 0; i < 4; ++i)
 		{
+			SeamRequest.LODLevels[i] = States[i]->MeshedLODLevel; // may differ (P2d mixed path)
 			CopyMergedVoxels(Job.Participants[i].Coord, *States[i], SeamRequest.VoxelData[i]);
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD]() mutable
 		{
 			FChunkMeshData MeshData;
 			const bool bSuccess = DCMesher->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
@@ -3530,11 +3521,12 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		// order dx + dy*2 + dz*4 by construction.
 		for (int32 i = 0; i < 8; ++i)
 		{
+			SeamRequest.LODLevels[i] = States[i]->MeshedLODLevel; // may differ (P2d mixed path)
 			CopyMergedVoxels(Job.Participants[i].Coord, *States[i], SeamRequest.VoxelData[i]);
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD]() mutable
 		{
 			FChunkMeshData MeshData;
 			const bool bSuccess = DCMesher->GenerateCornerSeamMeshCPU(SeamRequest, MeshData);

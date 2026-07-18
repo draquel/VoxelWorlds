@@ -534,8 +534,35 @@ struct VOXELMESHING_API FVoxelEdgeSeamRequest
 	/** The axis the edge runs PARALLEL to: 0 = X, 1 = Y, 2 = Z. */
 	uint8 EdgeAxis = 0;
 
-	/** Shared LOD level (P2a handles same-LOD tuples only). */
+	/** Owner-side LOD level (participant 0), and the shared LOD for same-LOD tuples. */
 	int32 LODLevel = 0;
+
+	/**
+	 * Per-participant LOD levels (quadrant order), or all -1 for a same-LOD tuple (== LODLevel).
+	 * When any differ (seam-ownership P2d) the mixed-LOD edge mesher runs: each ring/slab column
+	 * computes at its OWNING job's stride, and stitching enumerates at the finest granularity
+	 * with T-junction fans.
+	 */
+	int32 LODLevels[4] = { -1, -1, -1, -1 };
+
+	/** Resolved LOD of participant q. */
+	int32 GetLODLevelOf(int32 Quadrant) const
+	{
+		return (LODLevels[Quadrant] < 0) ? LODLevel : LODLevels[Quadrant];
+	}
+
+	/** True when every participant renders at the same LOD. */
+	bool IsUniformLOD() const
+	{
+		for (int32 q = 0; q < 4; ++q)
+		{
+			if (GetLODLevelOf(q) != GetLODLevelOf(0))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 
 	/** Voxels per chunk edge. */
 	int32 ChunkSize = 32;
@@ -589,8 +616,33 @@ struct VOXELMESHING_API FVoxelCornerSeamRequest
 	/** Owner chunk (min-coordinate participant; octant (0,0,0)). */
 	FIntVector OwnerChunkCoord = FIntVector::ZeroValue;
 
-	/** Shared LOD level (P2b handles same-LOD tuples only). */
+	/** Owner-side LOD level (octant 0), and the shared LOD for same-LOD tuples. */
 	int32 LODLevel = 0;
+
+	/**
+	 * Per-participant LOD levels (octant order), or all -1 for a same-LOD tuple (== LODLevel).
+	 * When any differ (seam-ownership P2d) the mixed-LOD corner mesher runs.
+	 */
+	int32 LODLevels[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+
+	/** Resolved LOD of octant o. */
+	int32 GetLODLevelOf(int32 Octant) const
+	{
+		return (LODLevels[Octant] < 0) ? LODLevel : LODLevels[Octant];
+	}
+
+	/** True when every participant renders at the same LOD. */
+	bool IsUniformLOD() const
+	{
+		for (int32 o = 0; o < 8; ++o)
+		{
+			if (GetLODLevelOf(o) != GetLODLevelOf(0))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 
 	/** Voxels per chunk edge. */
 	int32 ChunkSize = 32;
