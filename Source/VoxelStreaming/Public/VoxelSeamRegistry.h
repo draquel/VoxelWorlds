@@ -234,8 +234,9 @@ public:
 	 * @param ViewerChunk     Viewer's current chunk coord (for near-first prioritisation).
 	 * @param NearChunkRadius Chebyshev chunk radius considered "near the viewer" (near seams get the
 	 *                        near-correction priority tier so they'd beat the streaming wave).
-	 * @param MaxToSchedule   Cap on dirty seams EXAMINED this call (0 = all). Bounds per-tick cost; any
-	 *                        not examined (or examined-but-not-yet-ready) are retried on a later tick.
+	 * @param MaxToSchedule   Cap on seams SCHEDULED this call (0 = unlimited). The scan examines up
+	 *                        to 4x that (min 64) candidates in ROUND-ROBIN order — not-yet-ready
+	 *                        seams rotate to the back so they can't starve schedulable ones.
 	 * @return Number of seams scheduled.
 	 */
 	int32 ScheduleReadySeams(const FIntVector& ViewerChunk, int32 NearChunkRadius, int32 MaxToSchedule);
@@ -243,12 +244,25 @@ public:
 	/**
 	 * Process up to MaxJobs seam jobs (highest priority first). P0: the job is a STUB — it produces no
 	 * geometry, only logs (when voxel.Seam.Debug is on) and increments counters, then marks the seam
-	 * clean. P1+ replaces the stub body with the actual seam mesher.
+	 * clean. Used when seam MESHING is off (voxel.Seam.Meshing 0); the meshing path drains jobs via
+	 * DrainSeamJobs instead and executes them in the chunk manager.
 	 *
 	 * @param MaxJobs Cap on jobs processed this call (0 = unlimited).
 	 * @return Number of jobs processed.
 	 */
 	int32 ProcessSeamJobQueue(int32 MaxJobs);
+
+	/**
+	 * Pop up to MaxJobs seam jobs (highest priority first) for external execution (P1 runtime
+	 * pipeline: the chunk manager builds seam meshing requests from them and dispatches async).
+	 * Each popped seam is marked not-scheduled — if a participant changes while the job is in
+	 * flight, the normal dirty->schedule flow re-queues it and the newer result wins.
+	 *
+	 * @param OutJobs Receives the popped jobs (appended).
+	 * @param MaxJobs Cap on jobs popped this call (0 = none — callers pass a positive budget).
+	 * @return Number of jobs popped.
+	 */
+	int32 DrainSeamJobs(TArray<FVoxelSeamJob>& OutJobs, int32 MaxJobs);
 
 	// ==================== Queries (debug + tests) ====================
 
@@ -346,8 +360,18 @@ private:
 	/** All tracked seams keyed by canonical identity. */
 	TMap<FVoxelSeamKey, FVoxelSeamState> Seams;
 
-	/** Worklist of dirty seam keys (subset of Seams with bDirty) — scanned by the scheduler. */
+	/** Worklist of dirty seam keys (subset of Seams with bDirty) — membership/dedup. */
 	TSet<FVoxelSeamKey> DirtySeams;
+
+	/**
+	 * Round-robin scan order over DirtySeams (head index + lazy compaction). A bounded per-tick
+	 * scan MUST rotate: iterating the set from the start each tick re-examines the same
+	 * not-yet-ready frontier seams forever and starves every schedulable seam behind them
+	 * (observed live: thousands dirty, 2 scheduled). Examined-but-not-ready keys go to the back;
+	 * keys no longer in DirtySeams are skipped lazily.
+	 */
+	TArray<FVoxelSeamKey> DirtyQueue;
+	int32 DirtyQueueHead = 0;
 
 	/** Priority-sorted pending seam jobs (ascending; highest priority at the back for O(1) pop). */
 	TArray<FVoxelSeamJob> JobQueue;

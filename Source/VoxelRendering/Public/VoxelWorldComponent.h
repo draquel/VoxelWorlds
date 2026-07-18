@@ -183,6 +183,33 @@ public:
 	 */
 	void ClearAllWaterTiles();
 
+	// ==================== Seam Meshes (seam-ownership P1) ====================
+
+	/**
+	 * Update a single-owner face-seam mesh from CPU vertex data. Enqueues render command.
+	 * Positions are owner-local; the proxy applies OwnerWorldPosition.
+	 *
+	 * @param OwnerChunkCoord Owning (min-coordinate) chunk
+	 * @param Axis Face axis: 0 = +X, 1 = +Y, 2 = +Z
+	 * @param LODLevel Shared LOD the seam was meshed at
+	 * @param Vertices CPU vertex array (will be moved)
+	 * @param Indices CPU index array (will be moved)
+	 * @param OwnerWorldPosition World position of the owner chunk's origin
+	 */
+	void UpdateSeamMeshFromCPUData(
+		const FIntVector& OwnerChunkCoord,
+		uint8 Axis,
+		int32 LODLevel,
+		TArray<FVoxelVertex>&& Vertices,
+		TArray<uint32>&& Indices,
+		const FVector& OwnerWorldPosition);
+
+	/** Remove one face-seam mesh. Enqueues render command. */
+	void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis);
+
+	/** Clear all seam meshes. Enqueues render command. */
+	void ClearAllSeamMeshes();
+
 	// ==================== Configuration ====================
 
 	/**

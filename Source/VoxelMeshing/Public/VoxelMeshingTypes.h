@@ -7,6 +7,25 @@
 #include "VoxelMeshingTypes.generated.h"
 
 /**
+ * Cell-domain restriction for seam-ownership meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2, P1+).
+ *
+ * Full = legacy whole-chunk meshing: the chunk meshes its own cells plus the -1 boundary layer
+ * against neighbor slices, and the strided-boundary weld reconciles LOD boundaries. Interior =
+ * the seam-ownership interior pass: only cells with zero neighbor dependence are meshed
+ * ([0, GridSize-1) per axis — no quad references a -1 or GridSize-1 boundary-layer cell), the
+ * weld and skirts are skipped, and the request deliberately carries NO neighbor data (gradient
+ * taps that would exit the chunk use the absent-neighbor Air fallback -> one-sided rim normals,
+ * the same trade the default geometry-only deep depth already accepts). Boundary geometry is
+ * produced separately by single-owner seam jobs. Currently honored by the CPU DC mesher only.
+ */
+UENUM()
+enum class EVoxelMeshCellDomain : uint8
+{
+	Full = 0,
+	Interior = 1,
+};
+
+/**
  * Request structure for mesh generation.
  *
  * Contains all data needed to generate a mesh from voxel data.
@@ -262,6 +281,14 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	UPROPERTY()
 	int32 NeighborLODLevels[6] = {-1, -1, -1, -1, -1, -1};
 
+	/**
+	 * Cell-domain restriction (seam-ownership P1). Full = legacy whole-chunk meshing (default,
+	 * bit-identical to pre-P1 behavior). Interior = interior-only pass with zero neighbor deps;
+	 * see EVoxelMeshCellDomain. Honored by the CPU DC mesher; other meshers ignore it.
+	 */
+	UPROPERTY()
+	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::Full;
+
 	// Transition face flag bits
 	static constexpr uint8 TRANSITION_XNEG = 1 << 0;
 	static constexpr uint8 TRANSITION_XPOS = 1 << 1;
@@ -421,6 +448,54 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	FORCEINLINE int32 GetEdgeStripSize() const
 	{
 		return ChunkSize;
+	}
+};
+
+/**
+ * Request for a single-owner FACE-SEAM meshing job (seam-ownership P1,
+ * SEAM_OWNERSHIP_ARCHITECTURE.md §2.2).
+ *
+ * Same-LOD chunk pair: owner A (the min-coordinate participant) + neighbour B = A + unit(Axis).
+ * The seam job meshes the one-world-cell slab straddling the shared face from BOTH sides' full
+ * voxel arrays — no slices, no deep planes, no clamping across the face — and terminates
+ * bit-exactly on the two interior meshes' boundary vertex rings (each ring recomputed with that
+ * side's own data + the same absent-neighbour Air clamp its interior pass used). Output positions
+ * are in the OWNER's local frame (B-side content sits at +ChunkSize*VoxelSize along Axis).
+ *
+ * Plain struct (not USTRUCT): an internal job payload, never reflected/serialized.
+ */
+struct VOXELMESHING_API FVoxelFaceSeamRequest
+{
+	/** Owner chunk (min-coordinate participant; the seam registry's canonical owner). */
+	FIntVector OwnerChunkCoord = FIntVector::ZeroValue;
+
+	/** Face normal axis: 0 = X, 1 = Y, 2 = Z. Neighbour B = Owner + unit(Axis). */
+	uint8 Axis = 0;
+
+	/** Shared LOD level (P1 handles same-LOD pairs only; mixed LOD is P2). */
+	int32 LODLevel = 0;
+
+	/** Voxels per chunk edge. */
+	int32 ChunkSize = 32;
+
+	/** World-space size of each voxel. */
+	float VoxelSize = 100.0f;
+
+	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
+	FVector WorldOrigin = FVector::ZeroVector;
+
+	/** Owner-side voxels (ChunkSize^3, edit-merged by the caller). */
+	TArray<FVoxelData> VoxelDataA;
+
+	/** Neighbour-side voxels (ChunkSize^3, edit-merged by the caller). */
+	TArray<FVoxelData> VoxelDataB;
+
+	/** Both voxel arrays present and parameters sane. */
+	bool IsValid() const
+	{
+		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
+		return Axis <= 2 && LODLevel >= 0 && ChunkSize > 0
+			&& VoxelDataA.Num() == Total && VoxelDataB.Num() == Total;
 	}
 };
 

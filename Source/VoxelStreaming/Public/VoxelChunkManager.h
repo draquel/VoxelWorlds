@@ -16,6 +16,7 @@
 #include "IVoxelMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelStreamingBenchmark.h"
+#include "VoxelSeamRegistry.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -938,6 +939,44 @@ protected:
 
 	/** Push this-tick seam enable/debug flags from cvars, then run the seam scheduler + stub processor. */
 	void TickSeamScheduler();
+
+	// ==================== Seam meshing runtime pipeline (seam-ownership P1) ====================
+	// When voxel.Seam.Meshing is on AND the active mesher is the CPU DC mesher, chunks mesh
+	// interior-only (EVoxelMeshCellDomain::Interior — zero neighbor deps, no slices/defer/weld)
+	// and drained seam-registry jobs execute the single-owner face-seam mesher async, submitting
+	// per-owner seam buckets to the renderer. Off by default: the legacy path is untouched.
+
+	/** A finished async face-seam mesh awaiting game-thread submit to the renderer. */
+	struct FCompletedSeamMesh
+	{
+		FVoxelSeamKey Key;
+		int32 LODLevel = 0;
+		FChunkMeshData MeshData;
+		bool bSuccess = false;
+	};
+
+	/** Thread-safe queue for completed async seam meshes. */
+	TQueue<FCompletedSeamMesh, EQueueMode::Mpsc> CompletedSeamMeshQueue;
+
+	/** Seam jobs currently meshing on the worker pool (bounds pipeline depth; prevents dupes). */
+	TSet<FVoxelSeamKey> SeamJobsInFlight;
+
+	/** This-tick resolved state of the seam-meshing pipeline (cvar + registry + CPU-DC mesher). */
+	bool bSeamMeshingActive = false;
+
+	/** Previous-tick value, to detect on/off transitions (deactivation clears seam buckets). */
+	bool bSeamMeshingWasActive = false;
+
+	/**
+	 * Validate + dispatch one drained seam job: P1 executes same-LOD FACE seams only (edge/corner
+	 * and mixed-LOD jobs are dropped — P2). Builds the FVoxelFaceSeamRequest from both resident
+	 * descriptors (edit-merged) and hands it to a thread-pool worker running the DC face-seam
+	 * mesher; the result lands in CompletedSeamMeshQueue.
+	 */
+	void DispatchSeamJob(const FVoxelSeamJob& Job);
+
+	/** Drain completed seam meshes (game thread) and submit them to the renderer's seam buckets. */
+	void ProcessCompletedSeamMeshes();
 
 	/** Set of loaded chunk coordinates (for fast lookup) */
 	TSet<FIntVector> LoadedChunkCoords;

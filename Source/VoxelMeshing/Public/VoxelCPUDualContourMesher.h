@@ -44,6 +44,30 @@ public:
 		FChunkMeshData& OutMeshData,
 		FVoxelMeshingStats& OutStats) override;
 
+	/**
+	 * Seam-ownership P1 (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2): mesh the single-owner FACE seam
+	 * between a same-LOD chunk pair, from BOTH sides' full voxel data.
+	 *
+	 * Emits ONLY the seam geometry: quads dual to the edges whose surrounding cells include a
+	 * slab cell (owner-side cell GridSize-1 ≡ neighbour-side cell -1). Slab cells solve their QEF
+	 * against the combined two-chunk data (full hermite reach, nothing clamped); the adjacent
+	 * interior "ring" cells (owner GridSize-2 / neighbour 0) are recomputed with each side's OWN
+	 * data + Air clamp, bit-identical to what that side's Interior-domain pass produced — so the
+	 * seam terminates exactly on both interior meshes with no communication. Edges that also touch
+	 * another face's slab (the transverse rim) are left open — they belong to the P2 edge/corner
+	 * seam jobs. Pair with EVoxelMeshCellDomain::Interior chunk meshes.
+	 *
+	 * Output positions are in the OWNER's local frame. Thread-safety matches GenerateMeshCPU
+	 * (reads only the request + Config).
+	 *
+	 * @param SeamRequest Face-seam job payload (both sides' voxels, axis, shared LOD)
+	 * @param OutMeshData Output seam mesh (reset first; empty output with true = valid no-op)
+	 * @return true unless the request is invalid or the mesher is uninitialized
+	 */
+	bool GenerateFaceSeamMeshCPU(
+		const FVoxelFaceSeamRequest& SeamRequest,
+		FChunkMeshData& OutMeshData);
+
 	virtual FVoxelMeshingHandle GenerateMeshAsync(
 		const FVoxelMeshingRequest& Request,
 		FOnVoxelMeshingComplete OnComplete) override;

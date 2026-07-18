@@ -216,6 +216,50 @@ public:
 		// Default: no-op (renderer doesn't support water tiles)
 	}
 
+	// ==================== Seam Meshes (seam-ownership P1) ====================
+	// Single-owner face-seam meshes (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2/§2.4): small
+	// independently-swappable meshes covering the boundary between chunk pairs, keyed by
+	// (owner chunk, face axis) — a chunk owns its +X/+Y/+Z face seams. Rendered with the
+	// terrain material (including RVT passes) but outside the per-chunk mesh / crossfade
+	// machinery. Positions are OWNER-LOCAL (the renderer applies the owner's world offset).
+
+	/**
+	 * Update (or create) the face-seam mesh owned by a chunk along one axis.
+	 * An invalid/empty mesh removes the bucket (a seam whose surface vanished).
+	 *
+	 * @param OwnerChunkCoord Owning (min-coordinate) chunk
+	 * @param Axis Face axis of the owner's seam: 0 = +X, 1 = +Y, 2 = +Z
+	 * @param LODLevel Shared LOD the seam was meshed at
+	 * @param MeshData Seam mesh in owner-local space (moved)
+	 */
+	virtual void UpdateSeamMeshFromCPU(
+		const FIntVector& OwnerChunkCoord,
+		uint8 Axis,
+		int32 LODLevel,
+		FChunkMeshData&& MeshData)
+	{
+		// Default: no-op (renderer doesn't support seam meshes)
+	}
+
+	/**
+	 * Remove one owned face-seam mesh (owner unloaded or seam dissolved).
+	 *
+	 * @param OwnerChunkCoord Owning chunk
+	 * @param Axis Face axis: 0 = +X, 1 = +Y, 2 = +Z
+	 */
+	virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis)
+	{
+		// Default: no-op (renderer doesn't support seam meshes)
+	}
+
+	/**
+	 * Remove all seam meshes. Called during Shutdown/ClearAllChunks.
+	 */
+	virtual void ClearAllSeamMeshes()
+	{
+		// Default: no-op (renderer doesn't support seam meshes)
+	}
+
 	/**
 	 * Set material atlas for texture lookup.
 	 *

@@ -294,6 +294,39 @@ public:
 	 */
 	void ClearAllWaterTiles_RenderThread();
 
+	// ==================== Seam Meshes (seam-ownership P1, Render Thread) ====================
+	// Single-owner face-seam buckets keyed by (owner chunk, axis) — a parallel keyspace beside
+	// the per-chunk maps (the water-tile pattern), deliberately OUTSIDE the chunk crossfade
+	// machinery (seam swaps are tiny and don't fade in v1). Drawn with the terrain material,
+	// including the RVT clone pass (seams must write RVT or the cached ground would crack).
+
+	/**
+	 * Update (or create) a face-seam mesh's GPU data. Must be called on render thread.
+	 * Uses the same vertex conversion pipeline as terrain chunks.
+	 *
+	 * @param RHICmdList RHI command list for resource creation
+	 * @param OwnerChunkCoord Owning (min-coordinate) chunk
+	 * @param Axis Face axis: 0 = +X, 1 = +Y, 2 = +Z
+	 * @param LODLevel Shared LOD the seam was meshed at
+	 * @param Vertices CPU vertex array in owner-local space (moved)
+	 * @param Indices CPU index array (moved)
+	 * @param OwnerWorldPosition World position of the owner chunk's origin
+	 */
+	void UpdateSeamMeshFromCPUData_RenderThread(
+		FRHICommandListBase& RHICmdList,
+		const FIntVector& OwnerChunkCoord,
+		uint8 Axis,
+		int32 LODLevel,
+		TArray<FVoxelVertex>&& Vertices,
+		TArray<uint32>&& Indices,
+		const FVector& OwnerWorldPosition);
+
+	/** Remove one face-seam bucket. Must be called on render thread. */
+	void RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis);
+
+	/** Clear all face-seam buckets. Must be called on render thread. */
+	void ClearAllSeamMeshes_RenderThread();
+
 	// ==================== Statistics ====================
 
 	/** Get number of loaded chunks */
@@ -344,6 +377,42 @@ private:
 
 	/** Release every retained Previous mesh and all fade states. Caller must hold ChunkDataLock. */
 	void ReleaseAllChunkFadeStates_AssumesLocked();
+
+	// ==================== Seam Mesh Data (seam-ownership P1) ====================
+
+	/** Key for a single-owner face-seam bucket: owning chunk + face axis (0=+X, 1=+Y, 2=+Z). */
+	struct FVoxelSeamMeshKey
+	{
+		FIntVector Owner = FIntVector::ZeroValue;
+		uint8 Axis = 0;
+
+		FORCEINLINE bool operator==(const FVoxelSeamMeshKey& Other) const
+		{
+			return Owner == Other.Owner && Axis == Other.Axis;
+		}
+		friend FORCEINLINE uint32 GetTypeHash(const FVoxelSeamMeshKey& Key)
+		{
+			// Component-wise scalar hashing: FVoxelSceneProxy's own GetTypeHash() member hides the
+			// unqualified overload set here, and ::-qualification would break ADL for FIntVector.
+			uint32 Hash = ::GetTypeHash(Key.Owner.X);
+			Hash = HashCombine(Hash, ::GetTypeHash(Key.Owner.Y));
+			Hash = HashCombine(Hash, ::GetTypeHash(Key.Owner.Z));
+			Hash = HashCombine(Hash, ::GetTypeHash(static_cast<uint32>(Key.Axis)));
+			return Hash;
+		}
+	};
+
+	/** Per-seam render data (parallel keyspace beside the per-chunk maps — the water-tile pattern) */
+	TMap<FVoxelSeamMeshKey, FVoxelChunkRenderData> SeamRenderData;
+
+	/** Per-seam vertex buffer wrappers */
+	TMap<FVoxelSeamMeshKey, TSharedPtr<FVoxelLocalVertexBuffer>> SeamVertexBuffers;
+
+	/** Per-seam index buffer wrappers */
+	TMap<FVoxelSeamMeshKey, TSharedPtr<FVoxelLocalIndexBuffer>> SeamIndexBuffers;
+
+	/** Per-seam vertex factories */
+	TMap<FVoxelSeamMeshKey, TSharedPtr<FLocalVertexFactory>> SeamVertexFactories;
 
 	// ==================== Water Tile Data ====================
 

@@ -220,6 +220,23 @@ static TAutoConsoleVariable<int32> CVarSeamMaxJobsPerTick(
 	TEXT("Max seam jobs processed (P0: stub, no geometry) per tick (0 = unlimited)."),
 	ECVF_Default);
 
+// P1 runtime pipeline: execute drained seam jobs with the single-owner DC face-seam mesher and
+// mesh chunks interior-only. DEV FLAG (default 0): P1 covers same-LOD FACE seams only — edge/corner
+// rims and mixed-LOD faces stay open until P2 — so this is for validating the seam path, not for
+// shipping visuals. Requires the CPU DC mesher (run with -VoxelForceCPU or a CPU-DC config); with
+// any other mesher the flag is ignored. Toggling OFF clears seam buckets but chunks keep their
+// interior-only meshes until they naturally remesh — run voxel.RemeshAll after an A/B flip.
+static TAutoConsoleVariable<int32> CVarSeamMeshing(
+	TEXT("voxel.Seam.Meshing"),
+	0,
+	TEXT("Seam-ownership P1: 1 = interior-only chunk meshes + single-owner face-seam jobs (CPU DC "
+	     "only; same-LOD faces; dev flag). 0 = legacy whole-chunk meshing (default). Run "
+	     "voxel.RemeshAll after toggling."),
+	ECVF_Default);
+
+/** In-flight cap for async seam-mesh jobs (small: seam jobs are strip-sized and fast). */
+static constexpr int32 GMaxSeamJobsInFlight = 8;
+
 // A chunk bakes its boundary against a snapshot of its 26 neighbours taken at mesh-launch. If a
 // neighbour gains/changes data or changes rendered LOD before the async mesh completes, the baked
 // boundary is stale — a persistent seam, because the generation-complete and LOD-transition cascades
@@ -334,6 +351,25 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		SeamRegistry->SetEnabled(CVarSeamRegistry.GetValueOnGameThread() != 0);
 		SeamRegistry->SetDebugLogging(CVarSeamDebug.GetValueOnGameThread() != 0);
+	}
+
+	// Seam-ownership P1: resolve whether the seam-meshing pipeline is active this tick. It requires
+	// the registry AND the CPU DC mesher — the interior/seam decomposition is implemented there
+	// only (the GPU meshers would keep meshing full chunks and double-cover the boundary).
+	bSeamMeshingWasActive = bSeamMeshingActive;
+	bSeamMeshingActive = SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
+		&& CVarSeamMeshing.GetValueOnGameThread() != 0
+		&& Mesher.IsValid() && Mesher->GetMesherTypeName() == TEXT("CPU Dual Contouring");
+	if (bSeamMeshingWasActive != bSeamMeshingActive)
+	{
+		UE_LOG(LogVoxelStreaming, Warning,
+			TEXT("Seam meshing %s — existing chunk meshes keep their previous domain until they remesh; run voxel.RemeshAll for a clean A/B."),
+			bSeamMeshingActive ? TEXT("ACTIVATED (interior-only chunks + face-seam jobs)") : TEXT("DEACTIVATED (legacy whole-chunk meshing)"));
+		if (!bSeamMeshingActive && MeshRenderer)
+		{
+			// Drop all seam buckets — the legacy whole-chunk meshes cover the boundary themselves.
+			MeshRenderer->ClearAllSeamMeshes();
+		}
 	}
 
 	// Drive an active streaming benchmark: advances the bench view position + samples this frame,
@@ -1093,20 +1129,28 @@ void UVoxelChunkManager::Shutdown()
 	DirtyWaterTileQueue.Empty();
 	DirtyWaterTileSet.Empty();
 
-	// Clear all chunks and water tiles from renderer
+	// Clear all chunks, water tiles, and seam meshes from renderer
 	if (MeshRenderer)
 	{
 		MeshRenderer->ClearAllWaterTiles();
+		MeshRenderer->ClearAllSeamMeshes();
 		MeshRenderer->ClearAllChunks();
 	}
 
 	// Clear state
 	ChunkStates.Empty();
 	LoadedChunkCoords.Empty();
-	// Seam-ownership P0: drop all tracked seams/jobs alongside the chunk state they mirror.
+	// Seam-ownership: drop all tracked seams/jobs alongside the chunk state they mirror, and
+	// discard the async seam pipeline's transient state (in-flight results will no-op via the
+	// weak manager pointer; late results drain harmlessly next session).
 	if (SeamRegistry.IsValid())
 	{
 		SeamRegistry->Reset();
+	}
+	SeamJobsInFlight.Empty();
+	{
+		FCompletedSeamMesh DiscardedSeamResult;
+		while (CompletedSeamMeshQueue.Dequeue(DiscardedSeamResult)) {}
 	}
 	GenerationQueue.Empty();
 	GenerationQueueSet.Empty();
@@ -2499,18 +2543,23 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		// tear that is never refreshed once the neighbor arrives. Defer instead and
 		// retry next frame; if a neighbor's data will never arrive (freed/unloading)
 		// proceed with a one-line warning so we never stall permanently.
-		bool bClampUnavoidable = false;
-		if (ShouldDeferMeshForNeighbors(Request.ChunkCoord, bClampUnavoidable))
+		// Seam-ownership P1: interior meshes have ZERO neighbor dependence, so there is
+		// nothing to wait for — mesh immediately (a structural Fact-B win).
+		if (!bSeamMeshingActive)
 		{
-			// Leave the chunk in PendingMeshing; re-queue after the loop.
-			DeferredThisFrame.Add(Request);
-			continue;
-		}
-		if (bClampUnavoidable)
-		{
-			UE_LOG(LogVoxelStreaming, Warning,
-				TEXT("Chunk (%d,%d,%d) meshing against a non-resident face neighbor whose data is not coming - boundary may clamp"),
-				Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
+			bool bClampUnavoidable = false;
+			if (ShouldDeferMeshForNeighbors(Request.ChunkCoord, bClampUnavoidable))
+			{
+				// Leave the chunk in PendingMeshing; re-queue after the loop.
+				DeferredThisFrame.Add(Request);
+				continue;
+			}
+			if (bClampUnavoidable)
+			{
+				UE_LOG(LogVoxelStreaming, Warning,
+					TEXT("Chunk (%d,%d,%d) meshing against a non-resident face neighbor whose data is not coming - boundary may clamp"),
+					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
+			}
 		}
 
 		// Mark as meshing
@@ -2520,7 +2569,10 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		// changes (gains data, changes content, or changes rendered LOD) before this async mesh
 		// completes, the completion handler re-meshes us — closing the stale-boundary seam race.
 		// When disabled, no snapshot is stored and the completion-time revalidation is a no-op.
-		if (CVarStreamMeshDepRevalidate.GetValueOnGameThread() != 0)
+		// Seam-ownership P1: interior meshes never bake neighbour state, so the whole race this
+		// revalidation closes cannot occur — skip the snapshot (boundary staleness is now a SEAM
+		// concern, handled by the registry's dirty tracking).
+		if (!bSeamMeshingActive && CVarStreamMeshDepRevalidate.GetValueOnGameThread() != 0)
 		{
 			CaptureMeshDeps(Request.ChunkCoord);
 		}
@@ -2562,8 +2614,20 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		double SubT1 = FPlatformTime::Seconds();
 		SnapshotSeconds += SubT1 - SubT0;
 
-		// Extract neighbor edge slices for seamless boundaries
-		ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
+		// Extract neighbor edge slices for seamless boundaries.
+		// Seam-ownership P1: the Interior domain must carry NO neighbor data — with slices
+		// present the mesher would read them for rim-crossing normals, breaking both the
+		// "pure function of own content" property and the bit-exact ring match with the
+		// seam jobs (which recompute rings with the Air clamp). Boundary geometry comes
+		// from the single-owner face-seam jobs instead.
+		if (bSeamMeshingActive)
+		{
+			MeshRequest.MeshCellDomain = EVoxelMeshCellDomain::Interior;
+		}
+		else
+		{
+			ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
+		}
 		SlicesSeconds += FPlatformTime::Seconds() - SubT1;
 
 		// Calculate transition faces for Transvoxel LOD seam handling
@@ -3061,6 +3125,11 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 		if (MeshRenderer)
 		{
 			MeshRenderer->RemoveChunk(ChunkCoord);
+			// Seam-ownership P1: drop this chunk's owned seam buckets (+X/+Y/+Z) with it.
+			// Cheap no-ops when absent (flag off / never meshed).
+			MeshRenderer->RemoveSeamMesh(ChunkCoord, 0);
+			MeshRenderer->RemoveSeamMesh(ChunkCoord, 1);
+			MeshRenderer->RemoveSeamMesh(ChunkCoord, 2);
 		}
 
 		// Remove from loaded set
@@ -3277,14 +3346,148 @@ void UVoxelChunkManager::TickSeamScheduler()
 		return;
 	}
 
+	// Drain finished async seam meshes first — frees in-flight slots for this tick's dispatches.
+	ProcessCompletedSeamMeshes();
+
 	// Enable/debug flags were synced early in TickComponent so this tick's generation/meshing
 	// completions already registered into the registry. Here we only schedule + process.
 	// Move dirty+all-resident seams into the priority-sorted job queue (near-viewer first), then run
-	// the P0 stub processor. Both are budget-capped so the per-tick cost stays bounded.
+	// the job processor. Both are budget-capped so the per-tick cost stays bounded.
 	const FIntVector ViewerChunk = WorldToChunkCoord(CurrentViewerPosition);
 	const int32 NearRadius = FMath::Max(0, CVarSeamNearChunkRadius.GetValueOnGameThread());
 	SeamRegistry->ScheduleReadySeams(ViewerChunk, NearRadius, FMath::Max(0, CVarSeamMaxSchedulePerTick.GetValueOnGameThread()));
-	SeamRegistry->ProcessSeamJobQueue(FMath::Max(0, CVarSeamMaxJobsPerTick.GetValueOnGameThread()));
+
+	const int32 MaxJobs = FMath::Max(0, CVarSeamMaxJobsPerTick.GetValueOnGameThread());
+	if (bSeamMeshingActive)
+	{
+		// P1 runtime pipeline: pop jobs (bounded by the free in-flight slots) and execute the
+		// single-owner face-seam mesher on the worker pool.
+		const int32 FreeSlots = GMaxSeamJobsInFlight - SeamJobsInFlight.Num();
+		const int32 DrainBudget = (MaxJobs > 0) ? FMath::Min(MaxJobs, FreeSlots) : FreeSlots;
+		if (DrainBudget > 0)
+		{
+			TArray<FVoxelSeamJob> Jobs;
+			SeamRegistry->DrainSeamJobs(Jobs, DrainBudget);
+			for (const FVoxelSeamJob& Job : Jobs)
+			{
+				DispatchSeamJob(Job);
+			}
+		}
+	}
+	else
+	{
+		// P0 scaffolding path: the stub processor (produces no geometry).
+		SeamRegistry->ProcessSeamJobQueue(MaxJobs);
+	}
+}
+
+void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
+{
+	// P1 scope: same-LOD FACE seams only. Edge/corner seams and mixed-LOD faces are P2 — drop
+	// the job (the seam stays clean until a participant changes, which re-schedules it; the
+	// same filter will drop it again until P2 lands the missing meshers).
+	if (Job.Key.Type != EVoxelSeamType::Face || Job.Participants.Num() != 2)
+	{
+		return;
+	}
+	if (SeamJobsInFlight.Contains(Job.Key))
+	{
+		return; // an older build of this seam is still in flight; the registry will re-dirty if needed
+	}
+
+	const FIntVector OwnerCoord = Job.Key.Owner;
+	const FIntVector NeighborCoord = Job.Participants[1].Coord;
+
+	FVoxelChunkState* OwnerState = ChunkStates.Find(OwnerCoord);
+	FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
+	if (!OwnerState || !NeighborState
+		|| !OwnerState->Descriptor.HasVoxelDataAvailable()
+		|| !NeighborState->Descriptor.HasVoxelDataAvailable())
+	{
+		return; // a participant vanished between schedule and drain; the unregister path re-dirties
+	}
+
+	// Same-LOD gate: the seam must match the two RENDERED meshes. A mixed-LOD pair waits for P2's
+	// cross-LOD seam mesher; when either side's LOD changes later, the registry re-schedules.
+	const int32 OwnerLOD = OwnerState->MeshedLODLevel;
+	if (OwnerLOD < 0 || OwnerLOD != NeighborState->MeshedLODLevel)
+	{
+		return;
+	}
+
+	// Build the face-seam request from both sides' resident, edit-merged voxels.
+	FVoxelFaceSeamRequest SeamRequest;
+	SeamRequest.OwnerChunkCoord = OwnerCoord;
+	SeamRequest.Axis = Job.Key.Axis;
+	SeamRequest.LODLevel = OwnerLOD;
+	SeamRequest.ChunkSize = Configuration->ChunkSize;
+	SeamRequest.VoxelSize = Configuration->VoxelSize;
+	SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+	SeamRequest.VoxelDataA = OwnerState->Descriptor.GetVoxelDataForRead();
+	SeamRequest.VoxelDataB = NeighborState->Descriptor.GetVoxelDataForRead();
+
+	// Merge edit layers so the seam reflects player digs/builds, matching the chunk-mesh path.
+	if (EditManager)
+	{
+		if (EditManager->ChunkHasEdits(OwnerCoord))
+		{
+			EditManager->ApplyEditsToVoxelData(OwnerCoord, SeamRequest.VoxelDataA);
+		}
+		if (EditManager->ChunkHasEdits(NeighborCoord))
+		{
+			EditManager->ApplyEditsToVoxelData(NeighborCoord, SeamRequest.VoxelDataB);
+		}
+	}
+
+	SeamJobsInFlight.Add(Job.Key);
+
+	// Worker dispatch mirrors the chunk-mesh CPU path: raw mesher pointer + weak manager for the
+	// result enqueue. GenerateFaceSeamMeshCPU reads only the request + Config (thread-safe).
+	FVoxelCPUDualContourMesher* DCMesher = static_cast<FVoxelCPUDualContourMesher*>(Mesher.Get());
+	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
+	const FVoxelSeamKey Key = Job.Key;
+	const int32 LODLevel = OwnerLOD;
+
+	Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel]() mutable
+	{
+		FChunkMeshData MeshData;
+		const bool bSuccess = DCMesher->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
+
+		if (UVoxelChunkManager* This = WeakThis.Get())
+		{
+			FCompletedSeamMesh Result;
+			Result.Key = Key;
+			Result.LODLevel = LODLevel;
+			Result.bSuccess = bSuccess;
+			if (bSuccess)
+			{
+				Result.MeshData = MoveTemp(MeshData);
+			}
+			This->CompletedSeamMeshQueue.Enqueue(MoveTemp(Result));
+		}
+	});
+}
+
+void UVoxelChunkManager::ProcessCompletedSeamMeshes()
+{
+	FCompletedSeamMesh Result;
+	while (CompletedSeamMeshQueue.Dequeue(Result))
+	{
+		SeamJobsInFlight.Remove(Result.Key);
+
+		if (!bSeamMeshingActive || !MeshRenderer)
+		{
+			continue; // pipeline turned off mid-flight — buckets were cleared on deactivation
+		}
+		if (!Result.bSuccess)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Seam job %s failed to mesh"), *Result.Key.ToString());
+			continue;
+		}
+
+		// Submit (an empty/invalid mesh removes the bucket — the seam dissolved).
+		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, Result.Key.Axis, Result.LODLevel, MoveTemp(Result.MeshData));
+	}
 }
 
 void UVoxelChunkManager::ProcessFarCompressionSweep()
@@ -3358,8 +3561,13 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 	SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
 
 	// Queue neighbors for remeshing so they can incorporate this chunk's edge data
-	// This ensures seamless boundaries when chunks load in different orders
-	QueueNeighborsForRemesh(ChunkCoord);
+	// This ensures seamless boundaries when chunks load in different orders.
+	// Seam-ownership P1: interior meshes never incorporate neighbor data, so this fan-out is
+	// pure churn under the seam pipeline — boundary updates flow through the seam registry.
+	if (!bSeamMeshingActive)
+	{
+		QueueNeighborsForRemesh(ChunkCoord);
+	}
 
 	// Seam-ownership P0: this chunk's voxel data is now available — register it (restales its incident
 	// seams). ContentVersion is the seam-invalidation key; rendered LOD is not set yet (mesh follows).
@@ -3419,9 +3627,11 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 		// If the chunk is already Loaded (e.g., neighbor remesh submitted a new mesh for it),
 		// still trigger neighbor remesh cascade since MeshedLODLevel may have changed.
+		// (Seam-ownership P1: transition-face realignment is a legacy-boundary concern — the
+		// seam registry already restaled this chunk's seams via UpdateChunkRenderedLOD above.)
 		if (bMeshSubmitted && State && State->State == EChunkState::Loaded)
 		{
-			if (Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
+			if (!bSeamMeshingActive && Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
 			{
 				static const FIntVector FaceOffsets[6] = {
 					FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
@@ -3561,7 +3771,9 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// MergeLODBoundaryCells and TransitionFaces align with our new rendered LOD.
 		// This closes the "break" phase of LOD transitions: without this, neighbors
 		// retain stale boundary alignment until some other trigger re-meshes them.
-		if (Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
+		// (Seam-ownership P1: interior meshes carry no boundary alignment to re-agree —
+		// the rendered-LOD change reached the seam registry above and restales the seams.)
+		if (!bSeamMeshingActive && Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
 		{
 			static const FIntVector FaceOffsets[6] = {
 				FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
