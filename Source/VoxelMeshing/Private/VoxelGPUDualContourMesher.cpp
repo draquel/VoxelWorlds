@@ -1013,6 +1013,18 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 							if (Data)
 							{
 								const uint32* Counts = static_cast<const uint32*>(Data);
+								// A chunk whose surface exceeds the output-buffer caps has its overflowing
+								// cells/quads dropped by the shader's guard (silent see-through holes). This
+								// does not fire for the shipping demo (its densest chunks stay well under the
+								// caps), but warn if a future dense or heavily-edited chunk ever crosses them
+								// so the dropped geometry is diagnosable rather than a silent hole.
+								if (Counts[0] > SharedResult->CapturedMaxVertices || Counts[1] > SharedResult->CapturedMaxIndices)
+								{
+									UE_LOG(LogVoxelMeshing, Warning,
+										TEXT("GPU DC chunk %s output-buffer overflow: verts %u/%u indices %u/%u -> geometry dropped"),
+										*SharedResult->ChunkCoord.ToString(), Counts[0], SharedResult->CapturedMaxVertices,
+										Counts[1], SharedResult->CapturedMaxIndices);
+								}
 								SharedResult->VertexCount = FMath::Min(Counts[0], SharedResult->CapturedMaxVertices);
 								SharedResult->IndexCount = FMath::Min(Counts[1], SharedResult->CapturedMaxIndices);
 								SharedResult->Stats.VertexCount = SharedResult->VertexCount;

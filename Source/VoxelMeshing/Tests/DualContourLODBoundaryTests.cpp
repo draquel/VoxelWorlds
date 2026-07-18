@@ -1199,18 +1199,21 @@ bool FDCLODBoundaryDT7CornerTest::RunTest(const FString& Parameters)
 // shader path gets the same coverage as the CPU path — including the max-min-area
 // quad-diagonal corner fix. They require a real RHI; under -nullrhi each test logs a
 // skip and passes, so the headless CPU automation flow is unaffected. Run with e.g.
-//   UnrealEditor-Cmd <proj> -ExecCmds="Automation RunTests VoxelWorlds.Meshing.DualContour.GPULODBoundary;Quit" -unattended -nopause -nosplash -nosound -log
+//   UnrealEditor-Cmd <proj> -ExecCmds="Automation RunTests VoxelWorlds.Meshing.DualContour.GPULODBoundary" -TestExit="Automation Test Queue Empty" -unattended -nopause -nosplash -nosound -stdout
+//   (use -TestExit, not ";Quit" — Quit can fire before the automation controller registers the tests.)
 // (note: NO -nullrhi).
 //
-// CURRENT STATUS (real RHI): GT2, GT3, GT5, GT6, GT7 PASS — the max-min-area diagonal
-// fix carries to the shader path (GT7's welded 4-chunk corner is far better than the
-// un-welded baseline, e.g. Smooth LOD1 weld-off=88 -> weld-on=31). GT1 and GT4 FAIL BY
-// DESIGN: they assert CPU-LEVEL watertightness, but the GPU mesher is not yet at CPU
-// parity — its base mesh is much holier than the CPU's (GT7 Smooth LOD1 GPU weld-on=31
-// vs CPU=0; GT1 shows a ~37-unit boundary mismatch at a plain LOD0 same-LOD seam the CPU
-// nails exactly). GT1/GT4 are intentionally left red as the tracked GPU-parity TODO —
-// they are the failing checklist for bringing the GPU DC mesher up to the CPU's
-// watertightness, NOT flaky/broken tests.
+// CURRENT STATUS (real RHI, verified 2026-07-17): GT0-GT8 all PASS. 49ec301's shader work
+// brought the GPU base mesh to CPU watertightness for these analytic fields with full neighbor
+// data: GT1 (LOD0 same-LOD seam) is bit-exact (unmatched=0, maxDist=0.00) and GT7's welded
+// 4-chunk corner is fully sealed (weld-on=0) — NOT the ~37u / weld-on=31 that an earlier revision
+// of this comment claimed (that "GT1/GT4 fail by design" note was stale; the shader fix landed).
+// GT4's LOD0|LOD1 merge passes within the small documented AcceptedEdgeResidual.
+//
+// These analytic tests do NOT cover a boundary whose neighbor chunk has not streamed in yet — the
+// harness always supplies every neighbor slice. That gap is exactly what produced the deterministic
+// see-through boundary holes in the demo (GPU read the clamped interior at an absent neighbor instead
+// of Air, so the boundary never closed). GT8 below reproduces and guards that case.
 // ============================================================================
 
 /** Shared null-RHI gate: returns true (and logs) when GPU work can't run, so the caller
@@ -1304,8 +1307,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCGPULODBoundaryGT1Test, "VoxelWorlds.Meshing.
 bool FDCGPULODBoundaryGT1Test::RunTest(const FString& Parameters)
 {
 	DC_GPU_SKIP_IF_NO_RHI(*this);
-	// KNOWN-RED (GPU parity TODO): asserts CPU-level exact match. The GPU mesher currently
-	// leaves a couple of LOD0 boundary verts unmatched (maxDist ~37u) where the CPU is exact.
+	// Asserts CPU-level exact match at a plain LOD0 same-LOD seam. Passes: the GPU mesher matches
+	// the CPU bit-exactly here (unmatched=0, maxDist=0.00) with full neighbor data supplied.
 	FVoxelMeshingRequest RequestA = MakeChunkRequest(FIntVector(0, 0, 0), 0);
 	FVoxelMeshingRequest RequestB = MakeChunkRequest(FIntVector(1, 0, 0), 0);
 	FillAllNeighborData(RequestA);
@@ -1398,8 +1401,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCGPULODBoundaryGT4Test, "VoxelWorlds.Meshing.
 bool FDCGPULODBoundaryGT4Test::RunTest(const FString& Parameters)
 {
 	DC_GPU_SKIP_IF_NO_RHI(*this);
-	// KNOWN-RED (GPU parity TODO): asserts CPU-level fine|coarse seal. The GPU LOD-transition
-	// merge is well short of the CPU here (e.g. Cliff LOD0|LOD1 ~24/71 coarse verts unmatched).
+	// Asserts CPU-level fine|coarse seal. Passes: the GPU LOD-transition merge seals the dominant
+	// seam within the small documented AcceptedEdgeResidual (a few verts at LOD-patch chunk edges).
 	struct FCase { ETestField Field; int32 FineLOD; int32 CoarseLOD; float CoarseCell; const TCHAR* Name; };
 	const FCase Cases[] = {
 		{ ETestField::Smooth,     0, 1, 200.0f, TEXT("Smooth LOD0|LOD1") },
@@ -1562,6 +1565,63 @@ bool FDCGPULODBoundaryGT7Test::RunTest(const FString& Parameters)
 		}
 	}
 	TestFalse(TEXT("GPU DC boundary weld must seal 4-chunk corner watertightness (weld-on must not exceed the un-welded baseline)"), bWorse);
+	return true;
+}
+
+// ==================== GT8: absent-neighbor boundary must seal (the demo see-through hole) ====================
+//
+// Reproduces the deterministic demo boundary hole: a chunk that meshed before its neighbors had
+// streamed in. UVoxelChunkManager::ExtractNeighborEdgeSlices fills a neighbor slice (and sets its
+// presence flag) ONLY when that neighbor is resident, so a not-yet-loaded neighbor leaves the flag
+// clear. The CPU GetVoxelAt returns Air there so the boundary edge sees a solid->Air crossing and DC
+// seals the seam; the GPU shader used to read the clamped interior voxel instead (solid->solid, no
+// crossing) and left the boundary open — a see-through hole + trailing crack along the seam that
+// persisted until the chunk happened to remesh. GT1..GT7 above never expose this because their harness
+// always supplies every neighbor slice (FillAllNeighborData); the demo streams neighbors in over time.
+//
+// Mesh one chunk with NO neighbor data (all presence flags clear) on both meshers and require the GPU
+// to be no holier than the watertight CPU reference for the identical request.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCGPULODBoundaryGT8Test, "VoxelWorlds.Meshing.DualContour.GPULODBoundary.GT8_AbsentNeighborSeal",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCGPULODBoundaryGT8Test::RunTest(const FString& Parameters)
+{
+	DC_GPU_SKIP_IF_NO_RHI(*this);
+	struct FCase { ETestField Field; const TCHAR* Name; };
+	const FCase Cases[] = {
+		{ ETestField::Smooth,     TEXT("Smooth") },
+		{ ETestField::NonLinearZ, TEXT("NonLinearZ") },
+		{ ETestField::Cliff,      TEXT("Cliff") },
+	};
+
+	bool bAnyHole = false;
+	for (const FCase& C : Cases)
+	{
+		FScopedTestField Scoped(C.Field);
+		// Deliberately DO NOT call FillAllNeighborData: every neighbor presence flag stays clear,
+		// exactly as when a chunk meshes before its neighbors have streamed in.
+		FVoxelMeshingRequest Req = MakeChunkRequest(FIntVector(0, 0, 0), 0);
+
+		FChunkMeshData CpuMesh, GpuMesh;
+		TestTrue(TEXT("CPU chunk meshing should succeed"), MeshChunk(Req, CpuMesh));
+		TestTrue(TEXT("GPU chunk meshing should succeed"), MeshChunkGPU(Req, GpuMesh));
+
+		const int32 CpuHoles = CountInteriorOpenEdges(CpuMesh);
+		const int32 GpuHoles = CountInteriorOpenEdges(GpuMesh);
+		AddInfo(FString::Printf(TEXT("GT8 %s (absent neighbors): interior open edges CPU=%d GPU=%d; tris CPU=%d GPU=%d"),
+			C.Name, CpuHoles, GpuHoles, CpuMesh.Indices.Num() / 3, GpuMesh.Indices.Num() / 3));
+
+		// The GPU must not be materially holier than the watertight CPU reference. Before the shader
+		// Air fallback the GPU left the whole absent-neighbor boundary open (GpuHoles far exceeded
+		// CpuHoles); the small tolerance only absorbs QEF-position differences at the boundary walls.
+		if (GpuHoles > CpuHoles + AcceptedEdgeResidual)
+		{
+			bAnyHole = true;
+			AddError(FString::Printf(TEXT("%s: GPU left %d interior open edges vs CPU %d (unsealed absent-neighbor boundary = see-through hole)"),
+				C.Name, GpuHoles, CpuHoles));
+		}
+	}
+	TestFalse(TEXT("GPU DC must seal absent-neighbor boundaries like the CPU (no see-through boundary holes)"), bAnyHole);
 	return true;
 }
 

@@ -281,7 +281,15 @@ uint GetVoxelAt(int3 Position)
             uint InIdx = (uint)Position.x + (uint)Position.y * ChunkSize;
             return FaceDeepVoxel(5, InIdx, -Position.z - 1, NeighborZNeg[InIdx]);
         }
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+        // Neighbor not resident (its presence flag is unset): return Air, exactly as the CPU
+        // GetVoxelAt does (VoxelCPUDualContourMesher.cpp). A boundary edge then sees a solid->Air
+        // sign change, so DC seals the seam with a closed boundary (refined to real cross-chunk
+        // geometry once the neighbor streams in and the chunk remeshes). Reading the clamped
+        // interior voxel instead made the boundary solid->solid (no crossing) -> the surface simply
+        // stopped at the chunk edge, punching the see-through hole + trailing crack seen whenever a
+        // chunk meshed before its face/edge/corner neighbor had loaded. GT* never hit this because
+        // the test harness always supplies every neighbor slice.
+        return 0; // packed Air (density 0)
     }
 
     if (OutCount == 2)
@@ -312,7 +320,15 @@ uint GetVoxelAt(int3 Position)
             return EdgeDeepVoxelGPU(10, (uint)Position.x, DepthY, DepthZ, EdgeYNegZPos[(uint)Position.x]);
         if (bYNeg && bZNeg && HasEdgeData(EDGE_YNEG_ZNEG))
             return EdgeDeepVoxelGPU(11, (uint)Position.x, DepthY, DepthZ, EdgeYNegZNeg[(uint)Position.x]);
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+        // Neighbor not resident (its presence flag is unset): return Air, exactly as the CPU
+        // GetVoxelAt does (VoxelCPUDualContourMesher.cpp). A boundary edge then sees a solid->Air
+        // sign change, so DC seals the seam with a closed boundary (refined to real cross-chunk
+        // geometry once the neighbor streams in and the chunk remeshes). Reading the clamped
+        // interior voxel instead made the boundary solid->solid (no crossing) -> the surface simply
+        // stopped at the chunk edge, punching the see-through hole + trailing crack seen whenever a
+        // chunk meshed before its face/edge/corner neighbor had loaded. GT* never hit this because
+        // the test harness always supplies every neighbor slice.
+        return 0; // packed Air (density 0)
     }
 
     if (OutCount == 3)
@@ -335,7 +351,15 @@ uint GetVoxelAt(int3 Position)
             return CornerDeepVoxelGPU(6, DepthX, DepthY, DepthZ, CornerData[6]);
         if (bXNeg && bYNeg && bZNeg && HasCornerData(CORNER_XNEG_YNEG_ZNEG))
             return CornerDeepVoxelGPU(7, DepthX, DepthY, DepthZ, CornerData[7]);
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+        // Neighbor not resident (its presence flag is unset): return Air, exactly as the CPU
+        // GetVoxelAt does (VoxelCPUDualContourMesher.cpp). A boundary edge then sees a solid->Air
+        // sign change, so DC seals the seam with a closed boundary (refined to real cross-chunk
+        // geometry once the neighbor streams in and the chunk remeshes). Reading the clamped
+        // interior voxel instead made the boundary solid->solid (no crossing) -> the surface simply
+        // stopped at the chunk edge, punching the see-through hole + trailing crack seen whenever a
+        // chunk meshed before its face/edge/corner neighbor had loaded. GT* never hit this because
+        // the test harness always supplies every neighbor slice.
+        return 0; // packed Air (density 0)
     }
 
     return 0;
