@@ -769,13 +769,12 @@ void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 				{
 					bHas = true;
 				}
-				else
-				{
-					Pos[A1] = PlaneV[A1] * VoxelSize;
-					Pos[A2] = PlaneV[A2] * VoxelSize;
-					Pos[F] = ((float)F0 + (float)E * 0.5f) * VoxelSize;
-					bHas = true;
-				}
+				// No crossing on the line OR either plane patch: keep the raw vertex (the
+				// !bHas tail). Snapping to a fabricated feature point here (e.g. the line
+				// window's midpoint) placed vertices up to E voxels OFF the surface, and the
+				// triangles fanning to them stretched into protruding FINS — far more visible
+				// in practice than the small surface-anchored T-junction crack keep-raw
+				// leaves (which scatter covers). Every weld position must be surface-derived.
 			}
 		}
 		else // NP == 1: face plane
@@ -836,25 +835,37 @@ void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
 				Pos = Sum / static_cast<float>(Count);
 				bHas = true;
 			}
-			else if (bMixedSharers)
-			{
-				// No crossing on the plane patch or its one-voxel slab: snap to the patch
-				// center on the plane — deterministic and identical for both sharers of the
-				// face. A raw QEF keep at a coarse|fine face guarantees a mismatch (only a
-				// SAME-stride pair's raws coincide — those keep raw via the !bHas tail).
-				Pos = WD((float)Plane, (float)U + (float)E * 0.5f, (float)V + (float)E * 0.5f);
-				bHas = true;
-			}
+			// else: no crossing on the patch or its slab — keep the raw vertex (the !bHas
+			// tail). See the NP==2 note: fabricated positions (patch center) protrude FINS.
 		}
 
 		if (!bHas)
 		{
-			// Uniform-stride sharers with no feature crossing near this cell: every sharer
-			// holds an identical duplicate of the cell, so the raw QEF vertices already
-			// coincide — keep them (a side-local fallback would de-synchronize the duplicates:
-			// the GT7 uniform-corner regression). Mixed-stride cells never reach here — every
-			// mixed branch above resolves to a shared feature position.
+			// No surface crossing on any shared feature near this cell — keep the raw QEF
+			// vertex. For UNIFORM-stride sharers the raws already coincide (identical
+			// duplicated cells; a side-local fallback would de-synchronize them — the GT7
+			// uniform-corner regression). For MIXED-stride sharers keep-raw can leave a small
+			// surface-anchored T-junction crack, which is the accepted residual: every
+			// fabricated on-feature position we tried (line midpoint, patch center) placed
+			// vertices off the surface and stretched protruding fins — worse in practice
+			// than a crack that scatter covers.
 			continue;
+		}
+
+		// DISTORTION BUDGET: a weld may never move a vertex more than ~2 cells of its OWN
+		// resolution. A same-stride weld's snap is bounded by ~sqrt(3) own cells, so normal
+		// strided boundaries (DT2/DT3/DT7) are unaffected — but a FINE cell being dragged to
+		// a much coarser feature (E >> own stride, up to E voxels away) flattened whole fine
+		// regions into visible pinch-PLATES at LOD-transition corners (live: the plate at the
+		// (-16350,1650) corner). Beyond the budget, shape fidelity wins over watertightness:
+		// keep the raw vertex and accept the small surface-anchored crack instead.
+		{
+			const FVector3f RawPos = CellVertices[CIdx].Position;
+			const float MoveCap = 2.0f * static_cast<float>(Stride) * VoxelSize;
+			if (FVector3f::DistSquared(Pos, RawPos) > MoveCap * MoveCap)
+			{
+				continue;
+			}
 		}
 
 		FDCCellVertex& Welded = CellVertices[CIdx];

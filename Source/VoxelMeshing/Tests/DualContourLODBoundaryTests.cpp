@@ -1180,20 +1180,22 @@ bool RunAsymmetricLODCornerCases(FAutomationTestBase& Test, FDCMeshFn MeshFn, co
 	// [1,0/0,0] is the legal-balance flavor at every LOD ring corner. Layout: L[y][x].
 	//
 	// KnownResidual: with the feature-consistent weld (26-neighbor LOD pin rule + mixed-only
-	// shared-feature fallbacks), the pre-fix 300-600u see-through corner TRIANGLES (11-14 open
-	// edges per corner) are gone. What remains is a thin T-JUNCTION SLIVER per corner: the fine
-	// side subdivides the seam edge where the coarse side spans it straight (intermediate verts
-	// deviate ~10-20u — hairline at the >=7000u distances where LOD corners exist, vs the
-	// see-through holes before). The residual open-edge loop is that sliver's rim. Closing it
-	// exactly needs every sharer to sample the OTHER side's descent patches — cross-side
-	// on-plane data beyond one voxel, i.e. neighbor-LOD-driven deep extraction (a fine chunk
-	// bordering a coarse one must carry E-deep slices) — the tracked follow-up. The counts are
-	// pinned exactly so ANY regression (or improvement) shows up.
+	// SURFACE-DERIVED fallbacks), the pre-fix 300-600u see-through corner TRIANGLES (11-14
+	// open edges per corner) are gone. What remains is a small surface-anchored T-junction
+	// crack per corner from cells whose surface crosses NO shared feature — those keep their
+	// raw vertex. We deliberately do NOT snap such cells onto a fabricated feature point
+	// (line-window midpoint / patch center): that sealed the metric tighter (3/3/5/5) but
+	// placed vertices up to E voxels OFF the surface, and the triangles fanning to them
+	// stretched into protruding FINS — live-verified to be far MORE visible than the cracks,
+	// which scatter covers in practice. Closing the cracks properly needs every sharer to
+	// sample the OTHER side's descent patches — cross-side on-plane data beyond one voxel,
+	// i.e. neighbor-LOD-driven deep extraction — the tracked follow-up. Counts pinned exactly
+	// so ANY regression (or improvement) shows up.
 	struct FCase { ETestField Field; int32 L00, L10, L01, L11; int32 KnownResidual; const TCHAR* Name; };
 	const FCase Cases[] = {
-		{ ETestField::Smooth, 1, 0, 0, 0, 3, TEXT("Smooth [1,0/0,0]") },
+		{ ETestField::Smooth, 1, 0, 0, 0, 6, TEXT("Smooth [1,0/0,0]") },
 		{ ETestField::Cliff,  1, 0, 0, 0, 3, TEXT("Cliff [1,0/0,0]") },
-		{ ETestField::Smooth, 2, 0, 0, 0, 5, TEXT("Smooth [2,0/0,0] live-repro") },
+		{ ETestField::Smooth, 2, 0, 0, 0, 9, TEXT("Smooth [2,0/0,0] live-repro") },
 		{ ETestField::Smooth, 2, 1, 1, 1, 5, TEXT("Smooth [2,1/1,1]") },
 	};
 
