@@ -220,18 +220,19 @@ static TAutoConsoleVariable<int32> CVarSeamMaxJobsPerTick(
 	TEXT("Max seam jobs processed (P0: stub, no geometry) per tick (0 = unlimited)."),
 	ECVF_Default);
 
-// P1 runtime pipeline: execute drained seam jobs with the single-owner DC face-seam mesher and
-// mesh chunks interior-only. DEV FLAG (default 0): P1 covers same-LOD FACE seams only — edge/corner
-// rims and mixed-LOD faces stay open until P2 — so this is for validating the seam path, not for
-// shipping visuals. Requires the CPU DC mesher (run with -VoxelForceCPU or a CPU-DC config); with
-// any other mesher the flag is ignored. Toggling OFF clears seam buckets but chunks keep their
-// interior-only meshes until they naturally remesh — run voxel.RemeshAll after an A/B flip.
+// Seam-ownership meshing (DEFAULT ON since the flip): interior-only chunk meshes (zero neighbor
+// dependence) + single-owner seam jobs covering all faces/edges/corners at same and mixed LOD.
+// Requires a Dual Contouring mesher (CPU, or GPU DC — see voxel.Seam.CPUInteriorRouting); with any
+// other mesher the flag is ignored and legacy whole-chunk meshing runs. Qualified vs legacy:
+// thrash -96/-98%, catch-up 31.9->11.8s and GT MeshMs 8.5->0.6ms on GPU RHI (see
+// SEAM_OWNERSHIP_ARCHITECTURE.md section 7.1). 0 = legacy whole-chunk meshing (rollback path until
+// P4 deletes it). Toggling clears/keeps meshes asymmetrically — run voxel.RemeshAll after an A/B flip.
 static TAutoConsoleVariable<int32> CVarSeamMeshing(
 	TEXT("voxel.Seam.Meshing"),
-	0,
-	TEXT("Seam-ownership P1: 1 = interior-only chunk meshes + single-owner face-seam jobs (CPU DC "
-	     "only; same-LOD faces; dev flag). 0 = legacy whole-chunk meshing (default). Run "
-	     "voxel.RemeshAll after toggling."),
+	1,
+	TEXT("Seam-ownership meshing: 1 = interior-only chunk meshes + single-owner seam jobs, full "
+	     "same/mixed-LOD coverage (default; DC meshers only). 0 = legacy whole-chunk meshing "
+	     "(rollback). Run voxel.RemeshAll after toggling."),
 	ECVF_Default);
 
 // With a GPU DC main mesher, seam junctions are only bit-exact if interiors are CPU-meshed too
