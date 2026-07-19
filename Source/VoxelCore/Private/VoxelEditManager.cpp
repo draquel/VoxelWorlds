@@ -552,6 +552,18 @@ bool UVoxelEditManager::ChunkHasEdits(const FIntVector& ChunkCoord) const
 	return false;
 }
 
+void UVoxelEditManager::GetEditedChunkCoords(TArray<FIntVector>& OutChunkCoords) const
+{
+	OutChunkCoords.Reset();
+	for (const auto& Pair : EditLayers)
+	{
+		if (!Pair.Value.IsEmpty())
+		{
+			OutChunkCoords.Add(Pair.Key);
+		}
+	}
+}
+
 void UVoxelEditManager::ApplyEditsToVoxelData(const FIntVector& ChunkCoord, TArray<FVoxelData>& VoxelData) const
 {
 	const FChunkEditLayer* EditLayer = EditLayers.Find(ChunkCoord);

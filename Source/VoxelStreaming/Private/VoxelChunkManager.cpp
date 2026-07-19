@@ -1016,6 +1016,23 @@ void UVoxelChunkManager::Initialize(
 	// Subscribe to edit events - mark chunks dirty when edited
 	EditManager->OnChunkEdited.AddLambda([this](const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
 	{
+		// The edit changed this chunk's LOGICAL voxel content, but it lives in the edit-manager
+		// layer — the descriptor array is untouched, so nothing else advances ContentVersion.
+		// Bump it before MarkChunkDirty so the seam registry restales against the NEW version and
+		// the shared voxel-snapshot cache (seam jobs + async collision cooks key edit-merged
+		// snapshots off ContentVersion) rebuilds instead of re-serving the pre-edit snapshot.
+		if (FVoxelChunkState* EditedState = ChunkStates.Find(ChunkCoord))
+		{
+			EditedState->Descriptor.BumpContentVersion();
+		}
+		else
+		{
+			// Edit landed in an UNTRACKED chunk (e.g. building up into the all-air chunk above the
+			// analytic streaming band). Force a streaming update so the edit-pinned load pass in
+			// UpdateLoadDecisions picks it up this tick instead of waiting for viewer movement.
+			bForceStreamingUpdate = true;
+		}
+
 		// Mark the edited chunk dirty
 		MarkChunkDirty(ChunkCoord);
 		if (CollisionManager)
@@ -1965,6 +1982,57 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 		}
 	}
 
+	// Edit-pinned loading: chunks whose only content is EDITS are invisible to the LOD strategy —
+	// its vertical range and surface-slab culls derive from the ANALYTIC terrain, so a chunk holding
+	// a player build above the surface band never qualifies on its own. Left unloaded, its edits
+	// never generate/mesh and its incident seams can't schedule (participant not resident): build
+	// tops get cut off flat at the chunk boundary. Pin every edited chunk within the unload radius.
+	if (EditManager)
+	{
+		TArray<FIntVector> EditedChunks;
+		EditManager->GetEditedChunkCoords(EditedChunks);
+		if (EditedChunks.Num() > 0)
+		{
+			const float PinDistance = LODStrategy->GetUnloadDistance();
+			const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+			for (const FIntVector& Coord : EditedChunks)
+			{
+				if (GetChunkState(Coord) != EChunkState::Unloaded)
+				{
+					continue;
+				}
+				const FVector ChunkCenter = Configuration->WorldOrigin
+					+ FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+				if (FVector::Dist(ChunkCenter, Context.ViewerPosition) > PinDistance)
+				{
+					continue; // Too far — re-pins automatically when the viewer returns.
+				}
+				if (ChunksAddedThisFrame >= MaxChunksToAddPerFrame)
+				{
+					++ChunksRemaining;
+					continue;
+				}
+
+				FChunkLODRequest Request;
+				Request.ChunkCoord = Coord;
+				Request.LODLevel = LODStrategy->GetLODForChunk(Coord, Context);
+				Request.Priority = 900.0f; // The player is actively building here — near-dirty priority.
+
+				FVoxelChunkState& State = GetOrCreateChunkState(Coord);
+				State.LODLevel = Request.LODLevel;
+				State.Priority = Request.Priority;
+
+				if (AddToGenerationQueue(Request))
+				{
+					SetChunkState(Coord, EChunkState::PendingGeneration);
+					++ChunksAddedThisFrame;
+					UE_LOG(LogVoxelStreaming, Log, TEXT("Edit-pinned chunk (%d,%d,%d) queued for load (outside analytic streaming bounds)"),
+						Coord.X, Coord.Y, Coord.Z);
+				}
+			}
+		}
+	}
+
 	// If we hit the limit and there are still chunks to add, force an update next frame
 	if (ChunksRemaining > 0)
 	{
@@ -1985,12 +2053,28 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 	LODStrategy->GetChunksToUnload(ChunksToUnload, LoadedChunkCoords, Context);
 
 	// Add to unload queue with O(1) duplicate check
+	const float EditPinDistance = LODStrategy->GetUnloadDistance();
+	const float ChunkWorldSize = Configuration ? Configuration->GetChunkWorldSize() : 0.0f;
 	for (const FIntVector& ChunkCoord : ChunksToUnload)
 	{
 		const EChunkState CurrentState = GetChunkState(ChunkCoord);
 
 		if (CurrentState == EChunkState::Loaded)
 		{
+			// Edit-pinned: the strategy's analytic culls (vertical band / surface slab) would evict a
+			// chunk that exists only because of its edit layer, immediately undoing the edit-pinned
+			// load above — the two would flap load/unload forever. Keep edited chunks resident until
+			// they leave the distance-based unload radius.
+			if (EditManager && ChunkWorldSize > 0.0f && EditManager->ChunkHasEdits(ChunkCoord))
+			{
+				const FVector ChunkCenter = Configuration->WorldOrigin
+					+ FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+				if (FVector::Dist(ChunkCenter, Context.ViewerPosition) <= EditPinDistance)
+				{
+					continue;
+				}
+			}
+
 			if (AddToUnloadQueue(ChunkCoord))
 			{
 				SetChunkState(ChunkCoord, EChunkState::PendingUnload);

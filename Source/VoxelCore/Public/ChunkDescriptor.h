@@ -82,7 +82,8 @@ struct VOXELCORE_API FChunkDescriptor
 
 	/**
 	 * Monotonic content-identity counter: bumped on every change to the LOGICAL voxel content
-	 * (generation-install, allocate, clear, per-voxel edit), and deliberately NOT on residency
+	 * (generation-install, allocate, per-voxel edit, and — via BumpContentVersion() at the
+	 * chunk-manager edit hook — edit-layer changes), and deliberately NOT on residency
 	 * (de)compression (EnsureResident / TryCollapse* preserve content). Unlike bDataMutated (a flag
 	 * that toggles) this only ever increases, so a reader can snapshot it and later detect "did this
 	 * chunk's content change since?" — used by the mesh completion-time boundary revalidation (a
@@ -213,6 +214,19 @@ struct VOXELCORE_API FChunkDescriptor
 			CompressedVoxelData.Empty();
 			++ContentVersion;
 		}
+	}
+
+	/**
+	 * Advance ContentVersion for a LOGICAL content change that lives OUTSIDE this descriptor's own
+	 * array — i.e. the edit-manager's edit layer. Consumers key edit-MERGED content off ContentVersion
+	 * (seam registry staleness, the shared seam/collision voxel-snapshot cache, completion-time
+	 * boundary revalidation), so an edit-layer change must bump it even though VoxelData is untouched.
+	 * Deliberately does NOT set bDataMutated / clear the uniform+compression caches: the procedural
+	 * array really is unchanged, and edits are merged over it at snapshot-build time.
+	 */
+	FORCEINLINE void BumpContentVersion()
+	{
+		++ContentVersion;
 	}
 
 	/** Get voxel by linear index */
