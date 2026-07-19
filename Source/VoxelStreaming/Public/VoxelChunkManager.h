@@ -994,6 +994,20 @@ protected:
 	 */
 	TUniquePtr<FVoxelCPUDualContourMesher> SeamMesher;
 
+	/**
+	 * Per-owner seam slot meshes, kept CPU-side so the renderer receives ONE merged bucket per
+	 * owner instead of up to 7 (3 face + 3 edge + 1 corner). With per-slot buckets the scene
+	 * proxy's per-frame batch cap was exhausted by near geometry and far seams never drew —
+	 * seams appeared to vanish at distance. Re-merging on a slot update is a cheap concat of
+	 * strip meshes. Slots: 0-2 face +X/+Y/+Z, 3-5 edge parallel X/Y/Z, 6 corner.
+	 */
+	struct FSeamOwnerSlots
+	{
+		FChunkMeshData Slots[7];
+		int32 SlotLOD[7] = { -1, -1, -1, -1, -1, -1, -1 };
+	};
+	TMap<FIntVector, FSeamOwnerSlots> SeamOwnerSlots;
+
 	/** Get (building at most once per content version) the shared edit-merged snapshot of a chunk. */
 	TSharedPtr<const TArray<FVoxelData>> GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State);
 

@@ -370,12 +370,13 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		if (!bSeamMeshingActive)
 		{
 			// Drop all seam buckets — the legacy whole-chunk meshes cover the boundary themselves —
-			// and release the snapshot cache (its memory is only justified while dispatching).
+			// and release the snapshot cache + stored slot meshes.
 			if (MeshRenderer)
 			{
 				MeshRenderer->ClearAllSeamMeshes();
 			}
 			SeamSnapshotCache.Empty();
+			SeamOwnerSlots.Empty();
 		}
 	}
 
@@ -1159,6 +1160,7 @@ void UVoxelChunkManager::Shutdown()
 	}
 	SeamJobsInFlight.Empty();
 	SeamSnapshotCache.Empty();
+	SeamOwnerSlots.Empty();
 	{
 		FCompletedSeamMesh DiscardedSeamResult;
 		while (CompletedSeamMeshQueue.Dequeue(DiscardedSeamResult)) {}
@@ -3148,8 +3150,10 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 				MeshRenderer->RemoveSeamMesh(ChunkCoord, SeamSlot);
 			}
 		}
-		// Drop the chunk's shared seam snapshot with it (workers holding refs stay safe).
+		// Drop the chunk's shared seam snapshot and its stored slot meshes with it
+		// (workers holding snapshot refs stay safe).
 		SeamSnapshotCache.Remove(ChunkCoord);
+		SeamOwnerSlots.Remove(ChunkCoord);
 
 		// Remove from loaded set
 		LoadedChunkCoords.Remove(ChunkCoord);
@@ -3604,12 +3608,44 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 			continue;
 		}
 
-		// Submit (an empty/invalid mesh removes the bucket — the seam dissolved).
-		// SeamSlot encoding: 0-2 = face +X/+Y/+Z, 3-5 = edge parallel to X/Y/Z, 6 = corner.
+		// Store the slot mesh, then submit ONE merged bucket per owner. Per-slot render buckets
+		// (up to 7/chunk) exhausted the scene proxy's per-frame batch cap on near geometry, so
+		// far seams never drew ("seams vanish at distance"). Merging is a cheap strip concat;
+		// an all-empty merge removes the bucket. Slot: 0-2 face +X/+Y/+Z, 3-5 edge, 6 corner.
 		const uint8 SeamSlot =
 			(Result.Key.Type == EVoxelSeamType::Face) ? Result.Key.Axis :
 			(Result.Key.Type == EVoxelSeamType::Edge) ? static_cast<uint8>(3 + Result.Key.Axis) : static_cast<uint8>(6);
-		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, SeamSlot, Result.LODLevel, MoveTemp(Result.MeshData));
+		FSeamOwnerSlots& OwnerSlots = SeamOwnerSlots.FindOrAdd(Result.Key.Owner);
+		OwnerSlots.Slots[SeamSlot] = MoveTemp(Result.MeshData); // may be empty = seam dissolved
+		OwnerSlots.SlotLOD[SeamSlot] = Result.LODLevel;
+
+		FChunkMeshData Merged;
+		int32 MinLOD = TNumericLimits<int32>::Max();
+		for (int32 s = 0; s < 7; ++s)
+		{
+			const FChunkMeshData& SlotMesh = OwnerSlots.Slots[s];
+			if (!SlotMesh.IsValid())
+			{
+				continue;
+			}
+			MinLOD = FMath::Min(MinLOD, FMath::Max(OwnerSlots.SlotLOD[s], 0));
+			const uint32 Base = static_cast<uint32>(Merged.Positions.Num());
+			Merged.Positions.Append(SlotMesh.Positions);
+			Merged.Normals.Append(SlotMesh.Normals);
+			Merged.UVs.Append(SlotMesh.UVs);
+			Merged.UV1s.Append(SlotMesh.UV1s);
+			Merged.Colors.Append(SlotMesh.Colors);
+			Merged.Indices.Reserve(Merged.Indices.Num() + SlotMesh.Indices.Num());
+			for (const uint32 Idx : SlotMesh.Indices)
+			{
+				Merged.Indices.Add(Base + Idx);
+			}
+		}
+		if (MinLOD == TNumericLimits<int32>::Max())
+		{
+			MinLOD = Result.LODLevel;
+		}
+		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, 0, MinLOD, MoveTemp(Merged));
 	}
 }
 

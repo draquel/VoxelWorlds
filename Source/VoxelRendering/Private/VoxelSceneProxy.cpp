@@ -335,8 +335,11 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	int32 SkippedOverLimit = 0;
 
 	// Safety limit for mesh batches - should rarely be hit with proper frustum culling
-	// The Non-Nanite job queue overflow was caused by Virtual Shadow Maps, not mesh count
-	constexpr int32 MaxMeshBatchesPerFrame = 500;
+	// The Non-Nanite job queue overflow was caused by Virtual Shadow Maps, not mesh count.
+	// Raised 500 -> 2000: the original value was tuned for a chunks-only world; with RVT
+	// clones (x2 per chunk) plus the seam-ownership seam buckets (one per owner) drawn AFTER
+	// chunks, 500 was routinely exhausted by near geometry and far seams never rendered.
+	constexpr int32 MaxMeshBatchesPerFrame = 2000;
 
 	// Crossfade lookups only happen while at least one chunk is actually transitioning
 	const bool bAnyFades = ChunkPreviousMeshes.Num() > 0 && ChunkFadeStates.Num() > 0;
