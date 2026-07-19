@@ -227,6 +227,19 @@ public:
 	bool ChunkHasEdits(const FIntVector& ChunkCoord) const;
 
 	/**
+	 * Collect the coordinates of every chunk with a NON-EMPTY edit layer.
+	 *
+	 * Streaming consumes this to pin edited chunks resident: the LOD strategy's load/cull decisions
+	 * derive from the ANALYTIC terrain, so a chunk whose only content is edits (e.g. a player build
+	 * reaching into the all-air chunk above the surface band) never qualifies on its own — without
+	 * the pin its edits would never generate, mesh, or cook.
+	 *
+	 * @param OutChunkCoords Filled with the edited chunk coordinates (reset first).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	void GetEditedChunkCoords(TArray<FIntVector>& OutChunkCoords) const;
+
+	/**
 	 * Apply this chunk's edit layer to a voxel array in place (procedural -> edit-merged),
 	 * matching the merge meshing performs. No-op if the chunk has no edits. Lets scatter
 	 * classify surface points against the terrain the player actually sees, so digging a
