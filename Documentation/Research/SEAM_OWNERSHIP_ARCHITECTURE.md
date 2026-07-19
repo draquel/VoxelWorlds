@@ -144,10 +144,19 @@ categorical, not incremental: the seam bug class closes, and boundary correction
 ~64× making Fact B windows sub-frame-budget near the player.
 
 **Status (2026-07-19): P0 (#46), P1 (#47), P2 (#48) shipped; flip qualification + GPU parity
-(#49, #50, §7) shipped; `voxel.Seam.Meshing` DEFAULT FLIPPED ON (this branch).** The flag
-activates only for DC meshers — MC configs run legacy meshing until P3, which therefore gates
-any P4 deletion of machinery MC still uses (slices, transition faces, boundary cascades);
-DC-only machinery (two-sided weld) can go first.
+(#49, #50, §7) shipped; `voxel.Seam.Meshing` DEFAULT FLIPPED ON (#51).** The flag activates
+only for DC meshers — MC configs run legacy meshing until P3, which therefore gates any P4
+deletion of machinery MC still uses (slices, transition faces, boundary cascades); DC-only
+machinery (two-sided weld) can go first.
+
+**P4a shipped (this branch): the DC two-sided weld is DELETED** (CPU Pass 3.5 + GPU Pass 2.6 +
+`voxel.DCBoundaryWeld` + the DT1-7/GT0-7 legacy boundary suite). The flag-0 rollback path now
+shows cracks at stride>1 DC boundaries (skirts remain as the only softener) — expected until
+P4b removes the rollback entirely. Rode along: the collision cook game-thread cost pass —
+volume copies AND the 26-neighbor slice extraction moved off the game thread (shared voxel
+snapshots + the extraction body refactored source-agnostic into `VoxelNeighborSliceExtraction`);
+CollMs 9.7→0.4 ms traverse mean (P95 28.8→2.0), manager-tick TotalMs P95 33→18 ms. New bench
+columns CollPrepMs/CollApplyMs.
 
 #### P0 as implemented (branch `feature/seam-ownership-p0`)
 

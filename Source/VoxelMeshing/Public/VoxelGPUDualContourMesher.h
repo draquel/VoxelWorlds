@@ -18,12 +18,11 @@ class FRDGPooledBuffer;
  *   Pass 0:   ResetCountersCS    - Zero all atomic counters
  *   Pass 1:   EdgeCrossingCS     - Detect density sign changes, store hermite data
  *   Pass 2:   QEFSolveCS         - Solve 3x3 QEF per cell via Jacobi SVD
- *   Pass 2.6: WeldBoundaryCS     - Weld strided-boundary cell vertices onto the
- *                                  shared face/edge/corner feature (LOD seam fix)
  *   Pass 3:   QuadGenerationCS   - Emit quads from 4-cell edge sharing
  *
- * LOD boundaries are sealed by the Pass 2.6 weld (mirrors the CPU
- * WeldStridedBoundaryCells), which replaced the old CPU-built merge map.
+ * Boundaries: under seam-ownership meshing (the default) requests arrive with the
+ * Interior cell domain and boundary geometry comes from the CPU seam jobs. The
+ * legacy Pass 2.6 two-sided boundary weld was deleted in P4a.
  *
  * Performance: Target < 3ms per 32^3 chunk on modern GPUs
  * Thread Safety: Must be called from game thread, work dispatched to render thread

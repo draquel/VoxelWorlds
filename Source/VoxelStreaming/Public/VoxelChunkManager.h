@@ -447,18 +447,33 @@ public:
 	/**
 	 * Prepare a meshing request for collision (game thread only).
 	 *
-	 * Copies voxel data, merges edits, and extracts neighbor slices.
-	 * The returned request can then be dispatched to GenerateMeshCPU on a background thread.
+	 * Voxel data handling depends on the optional out params (P4a: the full-volume copy and the
+	 * strided 26-neighbor slice extraction were the dominant per-cook game-thread costs):
+	 * - OutSharedVoxels non-null: the (edit-merged, content-version-keyed) shared snapshot from
+	 *   the seam cache is returned there; OutMeshRequest.VoxelData is left EMPTY for the async
+	 *   worker to materialize off the game thread.
+	 * - OutNeighborSnapshots non-null: neighbor snapshots for the 26-neighborhood are returned
+	 *   there (map lookups, build-on-miss) and NO slice extraction happens on the game thread —
+	 *   the worker runs VoxelNeighborSlices::Extract over the snapshots instead.
+	 * - Both null: fully materialized inline (synchronous callers), original behavior.
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 * @param LODLevel LOD level for collision mesh
 	 * @param OutMeshRequest Output meshing request ready for GenerateMeshCPU
+	 * @param OutSharedVoxels Optional: receive the shared voxel snapshot instead of an inline copy
+	 * @param OutNeighborSnapshots Optional: receive neighbor snapshots instead of inline slices
 	 * @return True if request was prepared successfully
 	 */
 	bool PrepareCollisionMeshRequest(
 		const FIntVector& ChunkCoord,
 		int32 LODLevel,
-		FVoxelMeshingRequest& OutMeshRequest);
+		FVoxelMeshingRequest& OutMeshRequest,
+		TSharedPtr<const TArray<FVoxelData>>* OutSharedVoxels = nullptr,
+		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>* OutNeighborSnapshots = nullptr);
+
+	/** Whether -VoxelDeepOff / -VoxelDeepFull were set (worker-side slice extraction needs them). */
+	bool IsDeepSliceOff() const { return bDeepDepthOff; }
+	bool IsDeepSliceFull() const { return bDeepDepthFull; }
 
 	/**
 	 * Get raw pointer to the mesher (for async dispatch).
@@ -494,6 +509,10 @@ public:
 		float MeshingMs = 0.0f;
 		float RenderSubmitMs = 0.0f;
 		float CollisionMs = 0.0f;
+		// Collision sub-phases (P4a attribution): cook-launch preparation (request build +
+		// neighbor slices) vs completed-cook application (BodySetup + component recreation).
+		float CollisionPrepMs = 0.0f;
+		float CollisionApplyMs = 0.0f;
 		float ScatterMs = 0.0f;
 		float LODMs = 0.0f;
 		float StreamingMs = 0.0f;
