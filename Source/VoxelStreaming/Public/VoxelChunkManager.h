@@ -1006,15 +1006,16 @@ protected:
 	uint64 SeamTickCounter = 0;
 
 	/**
-	 * Dedicated CPU DC mesher for seam jobs (created lazily when the pipeline activates).
-	 * Seam jobs ALWAYS mesh on the CPU worker pool — with the GPU hybrid, the main mesher is
-	 * the GPU DC mesher (interior-domain chunk meshes) and cannot serve them. Seam strips are
-	 * tiny, so CPU meshing them is cheap; a dedicated instance also keeps their Config stable.
+	 * Dedicated CPU mesher for seam jobs (created lazily when the pipeline activates), matching
+	 * the configured meshing mode (CPU DC for Dual Contouring configs, CPU MC for Marching
+	 * Cubes — P3). Seam jobs ALWAYS mesh on the CPU worker pool — with a GPU main mesher the
+	 * interior meshes route here too (voxel.Seam.CPUInteriorRouting). Seam strips are tiny, so
+	 * CPU meshing them is cheap; a dedicated instance also keeps their Config stable.
 	 */
-	TUniquePtr<FVoxelCPUDualContourMesher> SeamMesher;
+	TUniquePtr<IVoxelMesher> SeamMesher;
 
-	/** Lazily create (config-matched to the main mesher) and return the dedicated CPU DC mesher. */
-	FVoxelCPUDualContourMesher* EnsureSeamMesher();
+	/** Lazily create (mode + config matched to the main mesher) and return the CPU seam mesher. */
+	IVoxelMesher* EnsureSeamMesher();
 
 	/**
 	 * Per-owner seam slot meshes, kept CPU-side so the renderer receives ONE merged bucket per

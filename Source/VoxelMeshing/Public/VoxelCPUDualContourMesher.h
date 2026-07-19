@@ -64,9 +64,9 @@ public:
 	 * @param OutMeshData Output seam mesh (reset first; empty output with true = valid no-op)
 	 * @return true unless the request is invalid or the mesher is uninitialized
 	 */
-	bool GenerateFaceSeamMeshCPU(
+	virtual bool GenerateFaceSeamMeshCPU(
 		const FVoxelFaceSeamRequest& SeamRequest,
-		FChunkMeshData& OutMeshData);
+		FChunkMeshData& OutMeshData) override;
 
 	/**
 	 * Seam-ownership P2a: mesh the single-owner EDGE seam of a same-LOD chunk 4-tuple.
@@ -87,9 +87,9 @@ public:
 	 * @param OutMeshData Output seam mesh (reset first; empty output with true = valid no-op)
 	 * @return true unless the request is invalid or the mesher is uninitialized
 	 */
-	bool GenerateEdgeSeamMeshCPU(
+	virtual bool GenerateEdgeSeamMeshCPU(
 		const FVoxelEdgeSeamRequest& SeamRequest,
-		FChunkMeshData& OutMeshData);
+		FChunkMeshData& OutMeshData) override;
 
 	/**
 	 * Seam-ownership P2b: mesh the single-owner CORNER seam of a same-LOD chunk 8-tuple.
@@ -109,9 +109,9 @@ public:
 	 * @param OutMeshData Output seam mesh (reset first; empty output with true = valid no-op)
 	 * @return true unless the request is invalid or the mesher is uninitialized
 	 */
-	bool GenerateCornerSeamMeshCPU(
+	virtual bool GenerateCornerSeamMeshCPU(
 		const FVoxelCornerSeamRequest& SeamRequest,
-		FChunkMeshData& OutMeshData);
+		FChunkMeshData& OutMeshData) override;
 
 	virtual FVoxelMeshingHandle GenerateMeshAsync(
 		const FVoxelMeshingRequest& Request,

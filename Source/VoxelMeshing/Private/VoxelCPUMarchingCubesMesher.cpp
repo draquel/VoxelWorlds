@@ -149,8 +149,17 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 		}
 	}
 
-	// Get transition face mask for Transvoxel
-	const uint8 TransitionMask = Config.bUseTransvoxel ? GetTransitionFaces(Request) : 0;
+	// Seam-ownership (SEAM_OWNERSHIP_ARCHITECTURE.md §2.1, P3): the Interior domain meshes only
+	// cells with zero neighbor dependence. MC cells sample their own 8 corners plus gradient
+	// normals reaching ±stride, so excluding the FIRST and LAST cell layer per axis leaves every
+	// remaining cell (corners AND normal taps) entirely inside own voxel data — no clamping, no
+	// neighbor slices. The excluded two-layer band per face (plus the transvoxel ribbon and the
+	// boundary geomorph at mixed LOD) is produced by the single-owner seam jobs.
+	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+
+	// Get transition face mask for Transvoxel (baked neighbor LODs — a launch-time snapshot, the
+	// legacy boundary mechanism; inapplicable to the interior-only pass)
+	const uint8 TransitionMask = (Config.bUseTransvoxel && !bInteriorDomain) ? GetTransitionFaces(Request) : 0;
 	const bool bHasTransitions = TransitionMask != 0;
 
 	// Debug logging for transition cell processing
@@ -240,11 +249,15 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	// (Previously the boundary slab was skipped and owned by a thick transition cell,
 	// which left holes on the fine-interior side and depth-offset slivers near coarse
 	// corners — see LOD_SEAM_INVESTIGATION.md.)
-	for (int32 Z = 0; Z < ChunkSize; Z += Stride)
+	// Interior domain: cells [Stride, ChunkSize-2*Stride] per axis (exclude the first and last
+	// cell layer — the seam-job band). Full domain: all cells [0, ChunkSize).
+	const int32 CellLo = bInteriorDomain ? Stride : 0;
+	const int32 CellHiEx = bInteriorDomain ? (ChunkSize - Stride) : ChunkSize;
+	for (int32 Z = CellLo; Z < CellHiEx; Z += Stride)
 	{
-		for (int32 Y = 0; Y < ChunkSize; Y += Stride)
+		for (int32 Y = CellLo; Y < CellHiEx; Y += Stride)
 		{
-			for (int32 X = 0; X < ChunkSize; X += Stride)
+			for (int32 X = CellLo; X < CellHiEx; X += Stride)
 			{
 				ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount,
 					FColor(0, 0, 0, 0), TransitionMask);
@@ -252,8 +265,9 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 		}
 	}
 
-	// Generate skirts as fallback when Transvoxel is disabled
-	if (!Config.bUseTransvoxel && Config.bGenerateSkirts)
+	// Generate skirts as fallback when Transvoxel is disabled (a boundary-reconciliation
+	// mechanism — inapplicable to the interior-only pass)
+	if (!bInteriorDomain && !Config.bUseTransvoxel && Config.bGenerateSkirts)
 	{
 		GenerateSkirts(Request, Stride, OutMeshData, TriangleCount);
 	}
@@ -1053,7 +1067,11 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 	const float VoxelSize = Request.VoxelSize;
 	const int32 ChunkSize = Request.ChunkSize;
 	const int32 SelfLOD = Request.LODLevel;
-	const float MorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
+	// Seam jobs pass a band-confined ramp width (zero exactly at the band's inner edge) so
+	// morphed band vertices stay coincident with the unmorphed interior mesh at the junction.
+	const float MorphWidth = (Request.MorphWidthOverride > 0.0f)
+		? Request.MorphWidthOverride
+		: FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 
 	const float Vx = Vertex.X / VoxelSize;
 	const float Vy = Vertex.Y / VoxelSize;

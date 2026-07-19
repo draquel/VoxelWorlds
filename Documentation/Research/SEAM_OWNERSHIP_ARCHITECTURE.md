@@ -149,7 +149,20 @@ only for DC meshers — MC configs run legacy meshing until P3, which therefore 
 deletion of machinery MC still uses (slices, transition faces, boundary cascades); DC-only
 machinery (two-sided weld) can go first.
 
-**P4a shipped (this branch): the DC two-sided weld is DELETED** (CPU Pass 3.5 + GPU Pass 2.6 +
+**P3 shipped (this branch): MC parity.** Seam meshing became a mesher-agnostic IVoxelMesher
+interface; the CPU MC mesher implements Interior domain (cells [1, N-2] per axis — corners AND
+±stride normal taps stay in own data, so no clamping is needed) and all three seam-job kinds via
+per-participant SYNTHETIC requests (own volume + real neighbor slices extracted from sibling
+snapshots) driven through the unmodified ProcessCubeLOD / transvoxel / geomorph code — junctions
+are bit-identical by construction. Mixed LOD: the face job emits the transvoxel ribbon in the
+finer frame (full face; positive-perimeter cells self-skip where they would need edge data — v1
+limitation) and the geomorph runs BAND-CONFINED (FVoxelMeshingRequest::MorphWidthOverride: ramp
+reaches zero at the band's inner edge; the legacy 2-coarse-cell ramp would move vertices shared
+with the unmorphed interior mesh — architecturally banned by Fact A). The activation gate accepts
+MC mesher names; GPU MC interiors ride voxel.Seam.CPUInteriorRouting. MCS0-3 suites (interior
+subset, face closure, 2x2x2 assembly closure, mixed-LOD parity vs legacy).
+
+**P4a shipped: the DC two-sided weld is DELETED** (CPU Pass 3.5 + GPU Pass 2.6 +
 `voxel.DCBoundaryWeld` + the DT1-7/GT0-7 legacy boundary suite). The flag-0 rollback path now
 shows cracks at stride>1 DC boundaries (skirts remain as the only softener) — expected until
 P4b removes the rollback entirely. Rode along: the collision cook game-thread cost pass —
