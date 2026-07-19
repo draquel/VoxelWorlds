@@ -1017,6 +1017,12 @@ protected:
 	/** Lazily create (mode + config matched to the main mesher) and return the CPU seam mesher. */
 	IVoxelMesher* EnsureSeamMesher();
 
+public:
+	/** Seam registry access for diagnostics (performance HUD, tests). May be null. */
+	const FVoxelSeamRegistry* GetSeamRegistry() const { return SeamRegistry.Get(); }
+
+private:
+
 	/**
 	 * Per-owner seam slot meshes, kept CPU-side so the renderer receives ONE merged bucket per
 	 * owner instead of up to 7 (3 face + 3 edge + 1 corner). With per-slot buckets the scene

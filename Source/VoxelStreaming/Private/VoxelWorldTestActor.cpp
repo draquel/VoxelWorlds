@@ -1823,23 +1823,36 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FPSColor,
 		FString::Printf(TEXT("FPS: %.1f (%.2f ms) [Target: %.0f]"), FPS, FrameTimeMs, TargetFPS));
 
-	// Per-system timing
+	// Per-system timing (game-thread manager-tick sections). Seam = the seam-ownership pipeline
+	// (scheduling + job dispatch + merged-bucket submits); Coll splits into cook-launch prep vs
+	// completed-cook apply (P4a attribution).
 	const auto& Timing = ChunkManager->GetTimingStats();
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-		FString::Printf(TEXT("  Gen=%.1fms Mesh=%.1fms Render=%.1fms Coll=%.1fms Scat=%.1fms LOD=%.1fms"),
-			Timing.GenerationMs, Timing.MeshingMs, Timing.RenderSubmitMs,
-			Timing.CollisionMs, Timing.ScatterMs, Timing.LODMs));
+		FString::Printf(TEXT("  Gen=%.1fms Mesh=%.1fms Seam=%.1fms Render=%.1fms LOD=%.1fms Scat=%.1fms"),
+			Timing.GenerationMs, Timing.MeshingMs, Timing.SeamMs, Timing.RenderSubmitMs,
+			Timing.LODMs, Timing.ScatterMs));
+	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
+		FString::Printf(TEXT("  Coll=%.1fms (prep=%.1f apply=%.1f)  Total=%.1fms"),
+			Timing.CollisionMs, Timing.CollisionPrepMs, Timing.CollisionApplyMs, Timing.TotalMs));
 
 	// Chunks
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, ChunkColor,
 		FString::Printf(TEXT("Loaded Chunks: %d / %d tracked [Target: %d+]"), LoadedChunks, TotalTracked, TargetChunks));
 
-	// Queue depths
+	// Queue depths + seam pipeline state (registry seams tracked/dirty; dirty seams are waiting
+	// for all participants to be resident — a standing tail at the streaming frontier is normal)
 	const int32 GenQueue = ChunkManager->GetPendingGenerationCount();
 	const int32 GenInFlight = ChunkManager->GetAsyncGenerationInProgressCount();
 	const int32 MeshQueue = ChunkManager->GetPendingMeshingCount();
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
 		FString::Printf(TEXT("Queues: Gen=%d (async=%d), Mesh=%d"), GenQueue, GenInFlight, MeshQueue));
+	if (const FVoxelSeamRegistry* Seams = ChunkManager->GetSeamRegistry())
+	{
+		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
+			FString::Printf(TEXT("Seams: %d tracked, %d dirty, %d queued (lifetime processed=%lld)"),
+				Seams->GetSeamCount(), Seams->GetDirtyCount(), Seams->GetJobQueueDepth(),
+				Seams->GetStats().TotalSeamJobsProcessed));
+	}
 
 	// Voxel-specific memory breakdown
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, MemColor,
