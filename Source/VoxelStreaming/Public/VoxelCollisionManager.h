@@ -159,6 +159,14 @@ class VOXELSTREAMING_API UVoxelCollisionManager : public UObject
 public:
 	UVoxelCollisionManager();
 
+	/**
+	 * Per-Update game-thread sub-phase attribution (milliseconds), read by the chunk manager
+	 * into FVoxelTimingStats after Update(): cook-launch preparation (request build + neighbor
+	 * slices) vs completed-cook application (BodySetup + collision component recreation).
+	 */
+	float LastPrepMs = 0.0f;
+	float LastApplyMs = 0.0f;
+
 	// ==================== Lifecycle ====================
 
 	/**

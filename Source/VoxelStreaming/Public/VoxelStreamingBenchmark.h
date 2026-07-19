@@ -80,6 +80,8 @@ private:
 		int64 RemeshCount;
 		// Seam-ownership pipeline (TickSeamScheduler total: scheduling + dispatch + submits)
 		float SeamMs;
+		// Collision sub-phases (P4a): cook-launch prep vs completed-cook apply (both GT)
+		float CollPrepMs, CollApplyMs;
 	};
 
 	void TakeSample(float DeltaTime);

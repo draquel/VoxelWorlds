@@ -5,16 +5,6 @@
 #include "QEFSolver.h"
 #include "HAL/IConsoleManager.h"
 
-// Toggles the strided-boundary weld that seals DC LOD seams (Pass 3.5 on CPU /
-// Pass 2.6 on GPU). Default on; set 0 + remesh for an A/B comparison showing the
-// pre-fix cracks. Read on the worker/game thread; the GPU mesher reads the same
-// CVar at dispatch time.
-TAutoConsoleVariable<int32> CVarDCBoundaryWeld(
-	TEXT("voxel.DCBoundaryWeld"),
-	1,
-	TEXT("Dual Contouring: weld strided LOD-boundary cells onto the shared chunk-face feature to seal seams (1=on, 0=off)."),
-	ECVF_Default);
-
 FVoxelCPUDualContourMesher::FVoxelCPUDualContourMesher()
 {
 }
@@ -142,20 +132,12 @@ bool FVoxelCPUDualContourMesher::GenerateMeshCPU(
 	CellVertices.SetNumZeroed(TotalCells);
 	SolveCellVertices(Request, Stride, GridDim, EdgeCrossings, CellVertices);
 
-	// Seam-ownership P1 (SEAM_OWNERSHIP_ARCHITECTURE.md §2.1): the Interior domain meshes only
+	// Seam-ownership (SEAM_OWNERSHIP_ARCHITECTURE.md §2.1): the Interior domain meshes only
 	// cells with zero neighbor dependence — boundary geometry is produced by single-owner seam
-	// jobs instead, so the boundary weld and skirts (both boundary-reconciliation mechanisms)
-	// do not apply to an interior-only pass.
+	// jobs instead, so skirts (a boundary-reconciliation mechanism) do not apply. The legacy
+	// two-sided boundary weld was deleted in P4a; the Full-domain rollback path relies on
+	// skirts alone and shows cracks at stride>1 boundaries.
 	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
-
-	// Pass 3.5: Weld strided boundary cells onto the shared chunk-face plane so both
-	// sides of every stride>1 boundary (same-LOD strided AND fine|coarse LOD
-	// transitions) derive the boundary vertex from the same shared face-plane data
-	// and coincide. Stride-1 boundaries are left untouched (already watertight).
-	if (!bInteriorDomain && CVarDCBoundaryWeld.GetValueOnAnyThread() != 0)
-	{
-		WeldStridedBoundaryCells(Request, Stride, GridDim, CellVertices);
-	}
 
 	// Pass 3: Generate quads
 	GenerateQuads(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices, CellVertices, OutMeshData, TriangleCount);
@@ -515,15 +497,10 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		}
 
 		// Split the quad along the diagonal that maximises the smaller of the two triangle
-		// areas (a max-min-area / Delaunay-like choice). The boundary weld can pull the four
-		// cell vertices of a boundary quad onto the near-1D seam contour; the fixed 0-2
-		// diagonal then makes one triangle a near-zero-area sliver that spans a neighbouring
-		// welded vertex. The renderer (and the watertightness metric) drop that sliver,
-		// un-sealing the seam — the T-junction that cracked shallow 4-chunk corners (DT7
-		// Smooth LOD1). Choosing the diagonal whose worst triangle is largest avoids the
-		// sliver and steps through the intermediate vertex, matching the neighbour's tiling.
-		// For a well-shaped quad whose 0-2 split is already fine this leaves it untouched, so
-		// it does not disturb corners that were already sealed (e.g. Smooth LOD2).
+		// areas (a max-min-area / Delaunay-like choice). A fixed 0-2 diagonal can produce a
+		// near-zero-area sliver on quads whose four vertices approach collinearity (the
+		// renderer drops such slivers, punching pinholes); choosing the better diagonal is
+		// cheap, leaves well-shaped quads untouched, and improves shading on skewed quads.
 		auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
 		{
 			return 0.5f * FVector3f::CrossProduct(B - A, C - A).Size();
@@ -555,199 +532,6 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		}
 
 		OutTriangleCount += 2;
-	}
-}
-
-// ============================================================================
-// Pass 4: Strided Boundary Cell Welding
-// ============================================================================
-
-void FVoxelCPUDualContourMesher::WeldStridedBoundaryCells(
-	const FVoxelMeshingRequest& Request,
-	int32 Stride,
-	int32 GridDim,
-	TArray<FDCCellVertex>& CellVertices)
-{
-	const int32 ChunkSize = Request.ChunkSize;
-	const int32 GridSize = ChunkSize / Stride;
-	const float VoxelSize = Request.VoxelSize;
-	const float IsoLevel = Config.IsoLevel;
-	const int32 SelfLOD = FMath::Clamp(Request.LODLevel, 0, 7);
-
-	// Per-axis, per-side effective stride and whether that boundary needs welding.
-	// EffStride = 1<<max(self, neighbor) = the coarser of the two sides. Both
-	// neighbors compute the same value (each knows the other's LOD), so they weld
-	// at the same stride. Stride-1 boundaries (the one-plane neighbor data is
-	// exactly what the cell needs) are left floating — already watertight (DT1).
-	int32 NegEff[3], PosEff[3];
-	bool NegWeld[3], PosWeld[3];
-	bool bAny = false;
-	for (int32 A = 0; A < 3; A++)
-	{
-		const int32 NLneg = Request.NeighborLODLevels[2 * A];
-		const int32 NLpos = Request.NeighborLODLevels[2 * A + 1];
-		NegEff[A] = 1 << FMath::Max(SelfLOD, FMath::Max(NLneg, 0));
-		PosEff[A] = 1 << FMath::Max(SelfLOD, FMath::Max(NLpos, 0));
-		NegWeld[A] = NegEff[A] > 1;
-		PosWeld[A] = PosEff[A] > 1;
-		bAny = bAny || NegWeld[A] || PosWeld[A];
-	}
-	if (!bAny)
-	{
-		return; // pure stride-1 chunk on all faces — boundaries already watertight
-	}
-
-	auto Dens = [&](int32 X, int32 Y, int32 Z) -> float { return GetDensityAt(Request, X, Y, Z); };
-	// Iso-crossing along one axis between two samples; returns the interpolated
-	// coordinate. The crossing depends only on the two sampled densities, so any
-	// neighbor sampling the same world positions gets the identical result.
-	auto Cross1D = [&](float Da, float Db, float Pa, float Pb, float& Out) -> bool
-	{
-		if ((Da >= IsoLevel) == (Db >= IsoLevel)) { return false; }
-		const float t = FMath::Clamp((IsoLevel - Da) / (Db - Da), 0.0f, 1.0f);
-		Out = FMath::Lerp(Pa, Pb, t);
-		return true;
-	};
-
-	// Single per-cell pass. Each boundary cell is snapped onto the shared
-	// sub-feature of the boundary faces it touches: one face -> the face plane
-	// (free in the two perpendicular axes), two faces -> the shared edge line
-	// (free along the third axis), three faces -> the shared corner point. Every
-	// chunk that touches a given feature derives it from the same shared data, so
-	// the welded vertices coincide and the seam (including its edges) is sealed.
-	for (int32 CZ = -1; CZ < GridSize; CZ++)
-	for (int32 CY = -1; CY < GridSize; CY++)
-	for (int32 CX = -1; CX < GridSize; CX++)
-	{
-		const int32 CIdx = CellIndex(CX, CY, CZ, GridDim);
-		if (!CellVertices[CIdx].bValid) { continue; }
-
-		const int32 C[3] = { CX, CY, CZ };
-		bool Pinned[3] = { false, false, false };
-		int32 PlaneV[3] = { 0, 0, 0 };
-		int32 Eff[3] = { Stride, Stride, Stride };
-		for (int32 A = 0; A < 3; A++)
-		{
-			if (C[A] == -1 && NegWeld[A]) { Pinned[A] = true; PlaneV[A] = 0; Eff[A] = NegEff[A]; }
-			else if (C[A] == GridSize - 1 && PosWeld[A]) { Pinned[A] = true; PlaneV[A] = ChunkSize; Eff[A] = PosEff[A]; }
-		}
-		const int32 NP = (Pinned[0] ? 1 : 0) + (Pinned[1] ? 1 : 0) + (Pinned[2] ? 1 : 0);
-		if (NP == 0) { continue; } // interior cell — keep its floating QEF vertex
-
-		FVector3f Pos = FVector3f::ZeroVector;
-		bool bHas = false;
-
-		if (NP == 3)
-		{
-			// Shared chunk corner point.
-			Pos = FVector3f(PlaneV[0] * VoxelSize, PlaneV[1] * VoxelSize, PlaneV[2] * VoxelSize);
-			bHas = true;
-		}
-		else if (NP == 2)
-		{
-			// Shared edge line: two axes pinned to their planes; the vertex slides
-			// along the free axis to the iso-crossing of the shared edge column.
-			int32 A1 = -1, A2 = -1, F = -1;
-			for (int32 A = 0; A < 3; A++)
-			{
-				if (Pinned[A]) { if (A1 < 0) { A1 = A; } else { A2 = A; } }
-				else { F = A; }
-			}
-			const int32 E = FMath::Max(Eff[A1], Eff[A2]);
-			const int32 FV = C[F] * Stride;
-			const int32 F0 = FMath::Clamp((FV >= 0 ? (FV / E) * E : 0), 0, ChunkSize - E);
-			auto EdgeDens = [&](int32 Fc) -> float
-			{
-				int32 V[3]; V[A1] = PlaneV[A1]; V[A2] = PlaneV[A2]; V[F] = Fc;
-				return Dens(V[0], V[1], V[2]);
-			};
-			float Crossed;
-			if (Cross1D(EdgeDens(F0), EdgeDens(F0 + E), (float)F0, (float)(F0 + E), Crossed))
-			{
-				Pos[A1] = PlaneV[A1] * VoxelSize;
-				Pos[A2] = PlaneV[A2] * VoxelSize;
-				Pos[F] = Crossed * VoxelSize;
-				bHas = true;
-			}
-		}
-		else // NP == 1: face plane
-		{
-			int32 D = 0;
-			for (int32 A = 0; A < 3; A++) { if (Pinned[A]) { D = A; } }
-			const int32 PAa = (D == 0) ? 1 : 0;
-			const int32 PBb = (D == 2) ? 1 : 2;
-			const int32 E = Eff[D];
-			const int32 Plane = PlaneV[D];
-			const int32 In = Plane - 1; // one fine voxel into the shared slab (world plane-1)
-			const int32 Uv = C[PAa] * Stride;
-			const int32 Vv = C[PBb] * Stride;
-			const int32 U = FMath::Clamp((Uv >= 0 ? (Uv / E) * E : 0), 0, ChunkSize - E);
-			const int32 V = FMath::Clamp((Vv >= 0 ? (Vv / E) * E : 0), 0, ChunkSize - E);
-			auto SD = [&](int32 Depth, int32 P1, int32 P2) -> float
-			{
-				int32 Vc[3]; Vc[D] = Depth; Vc[PAa] = P1; Vc[PBb] = P2;
-				return Dens(Vc[0], Vc[1], Vc[2]);
-			};
-			auto WD = [&](float Depth, float P1, float P2) -> FVector3f
-			{
-				FVector3f W; W[D] = Depth * VoxelSize; W[PAa] = P1 * VoxelSize; W[PBb] = P2 * VoxelSize;
-				return W;
-			};
-			FVector3f Sum = FVector3f::ZeroVector;
-			int32 Count = 0;
-			auto AddV = [&](float Da, float Db, const FVector3f& Pa, const FVector3f& Pb)
-			{
-				if ((Da >= IsoLevel) == (Db >= IsoLevel)) { return; }
-				const float t = FMath::Clamp((IsoLevel - Da) / (Db - Da), 0.0f, 1.0f);
-				Sum += FMath::Lerp(Pa, Pb, t);
-				++Count;
-			};
-			const float D00 = SD(Plane, U, V);
-			const float D10 = SD(Plane, U + E, V);
-			const float D01 = SD(Plane, U, V + E);
-			const float D11 = SD(Plane, U + E, V + E);
-			// Prefer the iso-crossings ON the face plane (the clean, exact-coincidence
-			// case — used whenever the surface meets the face). Both neighbors get the
-			// identical crossings from the shared plane densities.
-			AddV(D00, D10, WD(Plane, U, V), WD(Plane, U + E, V));
-			AddV(D01, D11, WD(Plane, U, V + E), WD(Plane, U + E, V + E));
-			AddV(D00, D01, WD(Plane, U, V), WD(Plane, U, V + E));
-			AddV(D10, D11, WD(Plane, U + E, V), WD(Plane, U + E, V + E));
-			if (Count == 0)
-			{
-				// No on-plane crossing: a steep cell whose surface crosses perpendicular
-				// to the plane. Fall back to the 4 corner edges crossing one fine voxel
-				// into the shared slab (plane-1 -> plane) so the cell is not dropped.
-				AddV(SD(In, U, V), D00, WD(In, U, V), WD(Plane, U, V));
-				AddV(SD(In, U + E, V), D10, WD(In, U + E, V), WD(Plane, U + E, V));
-				AddV(SD(In, U, V + E), D01, WD(In, U, V + E), WD(Plane, U, V + E));
-				AddV(SD(In, U + E, V + E), D11, WD(In, U + E, V + E), WD(Plane, U + E, V + E));
-			}
-			if (Count > 0)
-			{
-				Pos = Sum / static_cast<float>(Count);
-				bHas = true;
-			}
-		}
-
-		if (!bHas)
-		{
-			// No shared-feature crossing — keep the cell's original QEF vertex rather
-			// than dropping it: a dropped boundary cell punches a hole (missing
-			// geometry, see-through), which is far more visible than the thin vertex
-			// mismatch that keeping it may leave. Geometry stays present.
-			continue;
-		}
-
-		FDCCellVertex& Welded = CellVertices[CIdx];
-		Welded.Position = Pos;
-		Welded.MeshVertexIndex = -1;
-		int32 NEff = Stride;
-		for (int32 A = 0; A < 3; A++) { if (Pinned[A]) { NEff = FMath::Max(NEff, Eff[A]); } }
-		Welded.Normal = CalculateGradientNormalLOD(Request,
-			Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize, NEff);
-		// Material/biome are per-quad (assigned in GenerateQuads) — geometry
-		// coincidence is what seals the seam.
 	}
 }
 

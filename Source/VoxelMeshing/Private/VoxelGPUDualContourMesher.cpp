@@ -17,7 +17,6 @@
 #include "HAL/IConsoleManager.h"
 
 // Defined in VoxelCPUDualContourMesher.cpp — toggles the strided-boundary weld.
-extern TAutoConsoleVariable<int32> CVarDCBoundaryWeld;
 
 // ==================== GPU DC Intermediate Structures ====================
 // Must match HLSL struct layout in DualContourMeshGeneration.usf
@@ -194,72 +193,6 @@ public:
 };
 
 /**
- * Pass 2.6: Weld strided boundary cells onto the shared chunk-face feature.
- * Mirrors FVoxelCPUDualContourMesher::WeldStridedBoundaryCells (replaces the old
- * LOD merge map). Overwrites boundary-layer cell + output vertex positions so both
- * sides of every stride>1 boundary coincide.
- */
-class FDCWeldBoundaryCS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FDCWeldBoundaryCS);
-	SHADER_USE_PARAMETER_STRUCT(FDCWeldBoundaryCS, FGlobalShader);
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDCCellVertexGPU>, DCCellVertices)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVoxelVertex>, OutputVertices)
-		SHADER_PARAMETER(uint32, ChunkSize)
-		SHADER_PARAMETER(float, VoxelSize)
-		SHADER_PARAMETER(float, IsoLevel)
-		SHADER_PARAMETER(uint32, LODStride)
-		SHADER_PARAMETER(uint32, GridDim)
-		SHADER_PARAMETER(uint32, MaxVertexCount)
-		SHADER_PARAMETER(uint32, NeighborLODPacked)
-		SHADER_PARAMETER(uint32, MeshCellDomain)
-		// Voxel access for density sampling at the boundary slab
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InputVoxelData)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborXPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborXNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborYPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborYNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborZPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborZNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosYPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosYNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegYPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegYNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosZPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXPosZNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegZPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeXNegZNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYPosZPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYPosZNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZPos)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeYNegZNeg)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerData)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FaceDeep)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EdgeDeep)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, CornerDeep)
-		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
-		SHADER_PARAMETER(uint32, NeighborFlags)
-		SHADER_PARAMETER(uint32, EdgeCornerFlags)
-	END_SHADER_PARAMETER_STRUCT()
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-	}
-
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_X"), 8);
-		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_Y"), 8);
-		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_Z"), 4);
-	}
-};
-
-/**
  * Pass 2.5: Prepare indirect dispatch arguments for Pass 3.
  * Reads ValidEdgeCount from MeshCounters[2] and writes thread group counts.
  */
@@ -343,7 +276,6 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FDCResetCountersCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCResetCountersCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCEdgeCrossingCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCEdgeCrossingCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCQEFSolveCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCQEFSolveCS", SF_Compute);
-IMPLEMENT_GLOBAL_SHADER(FDCWeldBoundaryCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCWeldBoundaryCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCPrepareIndirectArgsCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCPrepareIndirectArgsCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FDCQuadGenerationCS, "/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf", "DCQuadGenerationCS", SF_Compute);
 
@@ -596,23 +528,10 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 	const int32 GridDim = LODChunkSize + 3;
 	const int32 TotalCells = GridDim * GridDim * GridDim;
 
-	// Pack the 6 neighbor LOD levels for the strided boundary weld (Pass 2.6):
-	// 3 bits per face = clamp(NeighborLODLevels[face], 0, 7). The weld only uses
-	// max(NeighborLOD, 0), so encoding -1 (no neighbor) as 0 is equivalent.
-	uint32 NeighborLODPacked = 0;
-	for (int32 Face = 0; Face < 6; Face++)
-	{
-		const uint32 NL = static_cast<uint32>(FMath::Clamp(Request.NeighborLODLevels[Face], 0, 7));
-		NeighborLODPacked |= (NL << (Face * 3));
-	}
 	// Seam-ownership: the Interior domain restricts quad emission to interior cells (boundary
-	// geometry comes from the CPU seam jobs) and makes the boundary weld inapplicable — the
-	// GPU half of the seam-meshing hybrid. Mirrors the CPU mesher's Interior handling.
-	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+	// geometry comes from the CPU seam jobs) — the GPU half of the seam-meshing hybrid.
+	// Mirrors the CPU mesher's Interior handling.
 	const uint32 MeshCellDomainU = static_cast<uint32>(Request.MeshCellDomain);
-	// AnyThread: DispatchComputeShader is called from a thread-pool worker (the chunk manager
-	// off-threads GPU mesh dispatch); the cvar is a debug toggle, a stale read is harmless.
-	const bool bDoBoundaryWeld = CVarDCBoundaryWeld.GetValueOnAnyThread() != 0 && !bInteriorDomain;
 
 	ENQUEUE_RENDER_COMMAND(GenerateDCMesh)(
 		[PackedVoxels = MoveTemp(PackedVoxels),
@@ -649,8 +568,6 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		 LODStride,
 		 GridDim,
 		 TotalCells,
-		 NeighborLODPacked,
-		 bDoBoundaryWeld,
 		 MeshCellDomainU,
 		 RequestId,
 		 Result,
@@ -893,43 +810,6 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 					QEFShader,
 					QEFParams,
 					GroupCount
-				);
-			}
-
-			// ===== Pass 2.6: Weld Strided Boundary Cells =====
-			// Replaces the old LOD merge map: welds boundary-layer cell + output
-			// vertices onto the shared face/edge/corner feature so both sides of every
-			// stride>1 boundary coincide. Mirrors the CPU WeldStridedBoundaryCells.
-			// Gated by voxel.DCBoundaryWeld (off = pre-fix cracks, for A/B verify).
-			if (bDoBoundaryWeld)
-			{
-				TShaderMapRef<FDCWeldBoundaryCS> WeldShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-				FDCWeldBoundaryCS::FParameters* WeldParams = GraphBuilder.AllocParameters<FDCWeldBoundaryCS::FParameters>();
-
-				WeldParams->DCCellVertices = GraphBuilder.CreateUAV(CellVertexBuffer);
-				WeldParams->OutputVertices = GraphBuilder.CreateUAV(VertexBuffer);
-				WeldParams->ChunkSize = ChunkSize;
-				WeldParams->VoxelSize = VoxelSize;
-				WeldParams->IsoLevel = CapturedConfig.IsoLevel;
-				WeldParams->LODStride = LODStride;
-				WeldParams->GridDim = GridDim;
-				WeldParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
-				WeldParams->NeighborLODPacked = NeighborLODPacked;
-				WeldParams->MeshCellDomain = MeshCellDomainU;
-				BindVoxelAccess(WeldParams);
-
-				FIntVector WeldGroupCount(
-					FMath::DivideAndRoundUp(GridDim, 8),
-					FMath::DivideAndRoundUp(GridDim, 8),
-					FMath::DivideAndRoundUp(GridDim, 4)
-				);
-
-				FComputeShaderUtils::AddPass(
-					GraphBuilder,
-					RDG_EVENT_NAME("DCWeldBoundary"),
-					WeldShader,
-					WeldParams,
-					WeldGroupCount
 				);
 			}
 
