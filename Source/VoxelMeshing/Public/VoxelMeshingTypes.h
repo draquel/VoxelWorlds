@@ -495,18 +495,24 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
 	FVector WorldOrigin = FVector::ZeroVector;
 
-	/** Owner-side voxels (ChunkSize^3, edit-merged by the caller). */
-	TArray<FVoxelData> VoxelDataA;
+	/**
+	 * Owner-side voxels (ChunkSize^3, edit-merged), as a SHARED IMMUTABLE snapshot: the chunk
+	 * manager builds one snapshot per (chunk, content version) and every seam job touching that
+	 * chunk shares it — dispatch stops copying 128KB per participant per job (the traverse-phase
+	 * game-thread cost found by the flip-qualification bench). Never mutate through this pointer.
+	 */
+	TSharedPtr<const TArray<FVoxelData>> VoxelDataA;
 
-	/** Neighbour-side voxels (ChunkSize^3, edit-merged by the caller). */
-	TArray<FVoxelData> VoxelDataB;
+	/** Neighbour-side voxels (shared immutable snapshot — see VoxelDataA). */
+	TSharedPtr<const TArray<FVoxelData>> VoxelDataB;
 
 	/** Both voxel arrays present and parameters sane. */
 	bool IsValid() const
 	{
 		const int32 Total = ChunkSize * ChunkSize * ChunkSize;
 		return Axis <= 2 && LODLevel >= 0 && ChunkSize > 0
-			&& VoxelDataA.Num() == Total && VoxelDataB.Num() == Total;
+			&& VoxelDataA.IsValid() && VoxelDataA->Num() == Total
+			&& VoxelDataB.IsValid() && VoxelDataB->Num() == Total;
 	}
 };
 
@@ -574,10 +580,11 @@ struct VOXELMESHING_API FVoxelEdgeSeamRequest
 	FVector WorldOrigin = FVector::ZeroVector;
 
 	/**
-	 * Participant voxel arrays (ChunkSize^3 each, edit-merged by the caller), in quadrant order
-	 * [(0,0), (1,0), (0,1), (1,1)] over (PerpA, PerpB) — see the struct comment.
+	 * Participant voxel arrays (ChunkSize^3 each, edit-merged), in quadrant order
+	 * [(0,0), (1,0), (0,1), (1,1)] over (PerpA, PerpB) — see the struct comment. Shared
+	 * immutable snapshots (see FVoxelFaceSeamRequest::VoxelDataA); never mutate through them.
 	 */
-	TArray<FVoxelData> VoxelData[4];
+	TSharedPtr<const TArray<FVoxelData>> VoxelData[4];
 
 	/** All four voxel arrays present and parameters sane. */
 	bool IsValid() const
@@ -589,7 +596,7 @@ struct VOXELMESHING_API FVoxelEdgeSeamRequest
 		}
 		for (int32 i = 0; i < 4; ++i)
 		{
-			if (VoxelData[i].Num() != Total)
+			if (!VoxelData[i].IsValid() || VoxelData[i]->Num() != Total)
 			{
 				return false;
 			}
@@ -653,8 +660,11 @@ struct VOXELMESHING_API FVoxelCornerSeamRequest
 	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
 	FVector WorldOrigin = FVector::ZeroVector;
 
-	/** Participant voxel arrays (ChunkSize^3 each, edit-merged), octant order dx + dy*2 + dz*4. */
-	TArray<FVoxelData> VoxelData[8];
+	/**
+	 * Participant voxel arrays (ChunkSize^3 each, edit-merged), octant order dx + dy*2 + dz*4.
+	 * Shared immutable snapshots (see FVoxelFaceSeamRequest::VoxelDataA).
+	 */
+	TSharedPtr<const TArray<FVoxelData>> VoxelData[8];
 
 	/** All eight voxel arrays present and parameters sane. */
 	bool IsValid() const
@@ -666,7 +676,7 @@ struct VOXELMESHING_API FVoxelCornerSeamRequest
 		}
 		for (int32 i = 0; i < 8; ++i)
 		{
-			if (VoxelData[i].Num() != Total)
+			if (!VoxelData[i].IsValid() || VoxelData[i]->Num() != Total)
 			{
 				return false;
 			}

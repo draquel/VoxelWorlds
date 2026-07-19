@@ -1067,7 +1067,7 @@ namespace VoxelDCFaceSeam
 			const int32 CS = Req.ChunkSize;
 			if (X >= 0 && X < CS && Y >= 0 && Y < CS && Z >= 0 && Z < CS)
 			{
-				const TArray<FVoxelData>& Data = (Mode == EMode::BOnly) ? Req.VoxelDataB : Req.VoxelDataA;
+				const TArray<FVoxelData>& Data = (Mode == EMode::BOnly) ? *Req.VoxelDataB : *Req.VoxelDataA;
 				return Data[X + Y * CS + Z * CS * CS];
 			}
 			if (Mode == EMode::Combined)
@@ -1079,7 +1079,7 @@ namespace VoxelDCFaceSeam
 					C[U] -= CS;
 					if (C[0] >= 0 && C[0] < CS && C[1] >= 0 && C[1] < CS && C[2] >= 0 && C[2] < CS)
 					{
-						return Req.VoxelDataB[C[0] + C[1] * CS + C[2] * CS * CS];
+						return (*Req.VoxelDataB)[C[0] + C[1] * CS + C[2] * CS * CS];
 					}
 				}
 			}
@@ -1190,7 +1190,7 @@ namespace VoxelDCFaceSeam
 			L[UAxis] = C[UAxis];
 			L[PerpA] = CA - Dv * CS;
 			L[PerpB] = CB - Dw * CS;
-			const TArray<FVoxelData>& Data = Req.VoxelData[Dv + Dw * 2];
+			const TArray<FVoxelData>& Data = *Req.VoxelData[Dv + Dw * 2];
 			return Data[L[0] + L[1] * CS + L[2] * CS * CS];
 		}
 
@@ -1254,7 +1254,7 @@ namespace VoxelDCFaceSeam
 			const int32 LX = C[0] - Dx * CS;
 			const int32 LY = C[1] - Dy * CS;
 			const int32 LZ = C[2] - Dz * CS;
-			return Req.VoxelData[Octant][LX + LY * CS + LZ * CS * CS];
+			return (*Req.VoxelData[Octant])[LX + LY * CS + LZ * CS * CS];
 		}
 
 		float GetDensity(int32 X, int32 Y, int32 Z) const
@@ -2435,7 +2435,9 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 	if (!SeamRequest.IsValid())
 	{
 		UE_LOG(LogVoxelMeshing, Error, TEXT("GenerateFaceSeamMeshCPU: invalid seam request (axis=%d, chunkSize=%d, A=%d, B=%d voxels)"),
-			SeamRequest.Axis, SeamRequest.ChunkSize, SeamRequest.VoxelDataA.Num(), SeamRequest.VoxelDataB.Num());
+			SeamRequest.Axis, SeamRequest.ChunkSize,
+			SeamRequest.VoxelDataA.IsValid() ? SeamRequest.VoxelDataA->Num() : 0,
+			SeamRequest.VoxelDataB.IsValid() ? SeamRequest.VoxelDataB->Num() : 0);
 		return false;
 	}
 

@@ -42,6 +42,13 @@ namespace VoxelCornerSeamTestUtils
 		return Data;
 	}
 
+	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
+	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
+		TFunctionRef<bool(int32, int32, int32)> SolidFn)
+	{
+		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
+	}
+
 	static FVoxelMeshingConfig MakeConfig()
 	{
 		FVoxelMeshingConfig Config;
@@ -132,8 +139,8 @@ namespace VoxelCornerSeamTestUtils
 					Seam.LODLevel = LOD;
 					Seam.ChunkSize = TestChunkSize;
 					Seam.VoxelSize = TestVoxelSize;
-					Seam.VoxelDataA = FillVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
-					Seam.VoxelDataB = FillVoxels(FIntVector(NeighborIJK) * TestChunkSize, SolidFn);
+					Seam.VoxelDataA = SharedVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
+					Seam.VoxelDataB = SharedVoxels(FIntVector(NeighborIJK) * TestChunkSize, SolidFn);
 					FChunkMeshData& Mesh = Out.Meshes[MeshIdx];
 					if (!RunMesher([&](FVoxelCPUDualContourMesher& M) { return M.GenerateFaceSeamMeshCPU(Seam, Mesh); }))
 					{
@@ -167,7 +174,7 @@ namespace VoxelCornerSeamTestUtils
 						IJK[U] = iu;
 						IJK[PerpA] = dv;
 						IJK[PerpB] = dw;
-						Seam.VoxelData[dv + dw * 2] = FillVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
+						Seam.VoxelData[dv + dw * 2] = SharedVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
 					}
 				}
 				int32 OwnerIJK[3];
@@ -197,7 +204,7 @@ namespace VoxelCornerSeamTestUtils
 				{
 					for (int32 i = 0; i <= 1; ++i)
 					{
-						Seam.VoxelData[i + j * 2 + k * 4] = FillVoxels(ChunkVoxelOffset(i, j, k), SolidFn);
+						Seam.VoxelData[i + j * 2 + k * 4] = SharedVoxels(ChunkVoxelOffset(i, j, k), SolidFn);
 					}
 				}
 			}
@@ -427,7 +434,7 @@ bool FDCCornerSeamEmptyTest::RunTest(const FString& Parameters)
 			{
 				for (int32 i = 0; i <= 1; ++i)
 				{
-					Seam.VoxelData[i + j * 2 + k * 4] = FillVoxels(FIntVector(i, j, k) * TestChunkSize, SolidFn);
+					Seam.VoxelData[i + j * 2 + k * 4] = SharedVoxels(FIntVector(i, j, k) * TestChunkSize, SolidFn);
 				}
 			}
 		}

@@ -44,6 +44,13 @@ namespace VoxelFaceSeamTestUtils
 		return Data;
 	}
 
+	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
+	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
+		TFunctionRef<bool(int32, int32, int32)> SolidFn)
+	{
+		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
+	}
+
 	/** DC mesher config matching the DT harness: smooth meshing, default QEF params, skirts off. */
 	static FVoxelMeshingConfig MakeConfig()
 	{
@@ -86,8 +93,8 @@ namespace VoxelFaceSeamTestUtils
 		Seam.LODLevel = LOD;
 		Seam.ChunkSize = TestChunkSize;
 		Seam.VoxelSize = TestVoxelSize;
-		Seam.VoxelDataA = FillVoxels(FIntVector::ZeroValue, SolidFn);
-		Seam.VoxelDataB = FillVoxels(FIntVector(TestChunkSize, 0, 0), SolidFn);
+		Seam.VoxelDataA = SharedVoxels(FIntVector::ZeroValue, SolidFn);
+		Seam.VoxelDataB = SharedVoxels(FIntVector(TestChunkSize, 0, 0), SolidFn);
 
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();

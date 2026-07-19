@@ -519,6 +519,10 @@ public:
 		float MeshDispatchMs = 0.0f;  // LaunchAsyncMeshGeneration (worker handoff for DC/MC GPU)
 		int32 MeshLaunchCount = 0;    // mesh jobs launched this tick
 
+		// Seam pipeline (seam-ownership P1+): TickSeamScheduler total — registry scheduling,
+		// job drain/dispatch (snapshot lookups), and completed-seam submits to the renderer.
+		float SeamMs = 0.0f;
+
 		// Render-submit breakdown (RenderSubmitMs = mesh drain + unload + water tiles; flush is separate)
 		float RenderMeshMs = 0.0f;       // OnChunkMeshingComplete drain loop total
 		float RenderSubRendererMs = 0.0f; // subset: renderer UpdateChunkMeshFromCPU (vertex convert + handoff)
@@ -960,6 +964,29 @@ protected:
 
 	/** Seam jobs currently meshing on the worker pool (bounds pipeline depth; prevents dupes). */
 	TSet<FVoxelSeamKey> SeamJobsInFlight;
+
+	/**
+	 * Version-keyed shared voxel snapshots for seam jobs. A chunk participates in up to 26 seams;
+	 * without sharing, every dispatch copied 128KB per participant on the game thread — the
+	 * traverse-phase cost found by the flip-qualification bench. One immutable snapshot is built
+	 * per (chunk, ContentVersion) and shared by every job; workers keep the data alive via their
+	 * TSharedPtr refs, so eviction here is always safe. Entries are dropped on unload, on
+	 * deactivation, and by an age sweep in TickSeamScheduler (the cache is only useful while a
+	 * chunk's seam wave is dispatching).
+	 */
+	struct FSeamVoxelSnapshot
+	{
+		uint32 ContentVersion = 0;
+		uint64 LastUsedTick = 0;
+		TSharedPtr<const TArray<FVoxelData>> Data;
+	};
+	TMap<FIntVector, FSeamVoxelSnapshot> SeamSnapshotCache;
+
+	/** Monotonic TickSeamScheduler counter (drives the snapshot age sweep). */
+	uint64 SeamTickCounter = 0;
+
+	/** Get (building at most once per content version) the shared edit-merged snapshot of a chunk. */
+	TSharedPtr<const TArray<FVoxelData>> GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State);
 
 	/** This-tick resolved state of the seam-meshing pipeline (cvar + registry + CPU-DC mesher). */
 	bool bSeamMeshingActive = false;

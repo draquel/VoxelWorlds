@@ -44,6 +44,13 @@ namespace VoxelEdgeSeamTestUtils
 		return Data;
 	}
 
+	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
+	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
+		TFunctionRef<bool(int32, int32, int32)> SolidFn)
+	{
+		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
+	}
+
 	static FVoxelMeshingConfig MakeConfig()
 	{
 		FVoxelMeshingConfig Config;
@@ -86,8 +93,8 @@ namespace VoxelEdgeSeamTestUtils
 		Seam.LODLevel = LOD;
 		Seam.ChunkSize = TestChunkSize;
 		Seam.VoxelSize = TestVoxelSize;
-		Seam.VoxelDataA = FillVoxels(OwnerOffsetVoxels, SolidFn);
-		Seam.VoxelDataB = FillVoxels(NeighborOffset, SolidFn);
+		Seam.VoxelDataA = SharedVoxels(OwnerOffsetVoxels, SolidFn);
+		Seam.VoxelDataB = SharedVoxels(NeighborOffset, SolidFn);
 
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();
@@ -105,10 +112,10 @@ namespace VoxelEdgeSeamTestUtils
 		Seam.LODLevel = LOD;
 		Seam.ChunkSize = TestChunkSize;
 		Seam.VoxelSize = TestVoxelSize;
-		Seam.VoxelData[0] = FillVoxels(FIntVector(0, 0, 0), SolidFn);                              // (0,0) owner
-		Seam.VoxelData[1] = FillVoxels(FIntVector(TestChunkSize, 0, 0), SolidFn);                  // (1,0) +X
-		Seam.VoxelData[2] = FillVoxels(FIntVector(0, TestChunkSize, 0), SolidFn);                  // (0,1) +Y
-		Seam.VoxelData[3] = FillVoxels(FIntVector(TestChunkSize, TestChunkSize, 0), SolidFn);      // (1,1)
+		Seam.VoxelData[0] = SharedVoxels(FIntVector(0, 0, 0), SolidFn);                            // (0,0) owner
+		Seam.VoxelData[1] = SharedVoxels(FIntVector(TestChunkSize, 0, 0), SolidFn);                // (1,0) +X
+		Seam.VoxelData[2] = SharedVoxels(FIntVector(0, TestChunkSize, 0), SolidFn);                // (0,1) +Y
+		Seam.VoxelData[3] = SharedVoxels(FIntVector(TestChunkSize, TestChunkSize, 0), SolidFn);    // (1,1)
 
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();

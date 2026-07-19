@@ -42,6 +42,13 @@ namespace VoxelMixedTupleTestUtils
 		return Data;
 	}
 
+	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
+	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
+		TFunctionRef<bool(int32, int32, int32)> SolidFn)
+	{
+		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
+	}
+
 	static FVoxelMeshingConfig MakeConfig()
 	{
 		FVoxelMeshingConfig Config;
@@ -137,8 +144,8 @@ namespace VoxelMixedTupleTestUtils
 					Seam.LODLevelB = LODOf(NJK[0], NJK[1], NJK[2]);
 					Seam.ChunkSize = TestChunkSize;
 					Seam.VoxelSize = TestVoxelSize;
-					Seam.VoxelDataA = FillVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
-					Seam.VoxelDataB = FillVoxels(ChunkVoxelOffset(NJK[0], NJK[1], NJK[2]), SolidFn);
+					Seam.VoxelDataA = SharedVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
+					Seam.VoxelDataB = SharedVoxels(ChunkVoxelOffset(NJK[0], NJK[1], NJK[2]), SolidFn);
 					FChunkMeshData& Mesh = Out.Meshes[MeshIdx];
 					if (!RunMesher([&](FVoxelCPUDualContourMesher& M) { return M.GenerateFaceSeamMeshCPU(Seam, Mesh); }))
 					{
@@ -172,7 +179,7 @@ namespace VoxelMixedTupleTestUtils
 						IJK[PerpB] = dw;
 						const int32 Q = dv + dw * 2;
 						Seam.LODLevels[Q] = LODOf(IJK[0], IJK[1], IJK[2]);
-						Seam.VoxelData[Q] = FillVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
+						Seam.VoxelData[Q] = SharedVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
 					}
 				}
 				Seam.LODLevel = Seam.LODLevels[0];
@@ -205,7 +212,7 @@ namespace VoxelMixedTupleTestUtils
 					{
 						const int32 O = i + j * 2 + k * 4;
 						Seam.LODLevels[O] = LODOf(i, j, k);
-						Seam.VoxelData[O] = FillVoxels(ChunkVoxelOffset(i, j, k), SolidFn);
+						Seam.VoxelData[O] = SharedVoxels(ChunkVoxelOffset(i, j, k), SolidFn);
 					}
 				}
 			}

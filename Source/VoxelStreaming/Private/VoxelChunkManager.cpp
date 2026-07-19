@@ -365,10 +365,15 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		UE_LOG(LogVoxelStreaming, Warning,
 			TEXT("Seam meshing %s — existing chunk meshes keep their previous domain until they remesh; run voxel.RemeshAll for a clean A/B."),
 			bSeamMeshingActive ? TEXT("ACTIVATED (interior-only chunks + face-seam jobs)") : TEXT("DEACTIVATED (legacy whole-chunk meshing)"));
-		if (!bSeamMeshingActive && MeshRenderer)
+		if (!bSeamMeshingActive)
 		{
-			// Drop all seam buckets — the legacy whole-chunk meshes cover the boundary themselves.
-			MeshRenderer->ClearAllSeamMeshes();
+			// Drop all seam buckets — the legacy whole-chunk meshes cover the boundary themselves —
+			// and release the snapshot cache (its memory is only justified while dispatching).
+			if (MeshRenderer)
+			{
+				MeshRenderer->ClearAllSeamMeshes();
+			}
+			SeamSnapshotCache.Empty();
 		}
 	}
 
@@ -646,10 +651,13 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// After LOD eval so a chunk already queued for an LOD remesh this frame is skipped.
 	ProcessPendingNeighborRemeshes();
 
-	// === Seam-ownership scheduler (P0 scaffolding; produces no geometry) ===
+	// === Seam-ownership scheduler ===
 	// Runs after the generation/meshing/LOD sections so this-tick residency and rendered-LOD changes
-	// are already pushed into the registry. The seam job is a stub in P0 — no visual/behavioural change.
+	// are already pushed into the registry. Timed into its own bench column (SeamMs) — the flip
+	// qualification found the seam pipeline's GT cost was invisible inside TotalMs.
+	SectionStart = FPlatformTime::Seconds();
 	TickSeamScheduler();
+	Timing.SeamMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
 	// === Far-chunk voxel-data compression sweep ===
 	// Runs after LOD evaluation so a chunk just queued for an LOD remesh (now dirty) is excluded.
@@ -1148,6 +1156,7 @@ void UVoxelChunkManager::Shutdown()
 		SeamRegistry->Reset();
 	}
 	SeamJobsInFlight.Empty();
+	SeamSnapshotCache.Empty();
 	{
 		FCompletedSeamMesh DiscardedSeamResult;
 		while (CompletedSeamMeshQueue.Dequeue(DiscardedSeamResult)) {}
@@ -3132,6 +3141,8 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 				MeshRenderer->RemoveSeamMesh(ChunkCoord, SeamSlot);
 			}
 		}
+		// Drop the chunk's shared seam snapshot with it (workers holding refs stay safe).
+		SeamSnapshotCache.Remove(ChunkCoord);
 
 		// Remove from loaded set
 		LoadedChunkCoords.Remove(ChunkCoord);
@@ -3347,6 +3358,21 @@ void UVoxelChunkManager::TickSeamScheduler()
 		return;
 	}
 
+	// Snapshot-cache age sweep: entries are only useful while a chunk's seam wave dispatches;
+	// drop anything unused for ~2s. Workers keep in-flight data alive via their own refs, so
+	// eviction is always safe. Bounds the cache to the active streaming front (tens of MB peak).
+	++SeamTickCounter;
+	if ((SeamTickCounter & 63) == 0)
+	{
+		for (auto It = SeamSnapshotCache.CreateIterator(); It; ++It)
+		{
+			if (SeamTickCounter - It->Value.LastUsedTick > 128)
+			{
+				It.RemoveCurrent();
+			}
+		}
+	}
+
 	// Drain finished async seam meshes first — frees in-flight slots for this tick's dispatches.
 	ProcessCompletedSeamMeshes();
 
@@ -3424,18 +3450,10 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	}
 	const int32 SharedLOD = States[0]->MeshedLODLevel;
 
-	// Copy one participant's voxels with its edit layer merged (matches the chunk-mesh path).
-	auto CopyMergedVoxels = [this](const FIntVector& Coord, FVoxelChunkState& State, TArray<FVoxelData>& Out)
-	{
-		Out = State.Descriptor.GetVoxelDataForRead();
-		if (EditManager && EditManager->ChunkHasEdits(Coord))
-		{
-			EditManager->ApplyEditsToVoxelData(Coord, Out);
-		}
-	};
-
 	// Worker dispatch mirrors the chunk-mesh CPU path: raw mesher pointer + weak manager for the
-	// result enqueue. The seam meshers read only the request + Config (thread-safe).
+	// result enqueue. The seam meshers read only the request + Config (thread-safe). Voxel data
+	// is attached as SHARED snapshots (built at most once per chunk content version) — dispatch
+	// itself no longer copies voxel arrays.
 	FVoxelCPUDualContourMesher* DCMesher = static_cast<FVoxelCPUDualContourMesher*>(Mesher.Get());
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
@@ -3450,8 +3468,8 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
-		CopyMergedVoxels(Job.Participants[0].Coord, *States[0], SeamRequest.VoxelDataA);
-		CopyMergedVoxels(Job.Participants[1].Coord, *States[1], SeamRequest.VoxelDataB);
+		SeamRequest.VoxelDataA = GetSeamVoxelSnapshot(Job.Participants[0].Coord, *States[0]);
+		SeamRequest.VoxelDataB = GetSeamVoxelSnapshot(Job.Participants[1].Coord, *States[1]);
 
 		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
@@ -3487,7 +3505,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		for (int32 i = 0; i < 4; ++i)
 		{
 			SeamRequest.LODLevels[i] = States[i]->MeshedLODLevel; // may differ (P2d mixed path)
-			CopyMergedVoxels(Job.Participants[i].Coord, *States[i], SeamRequest.VoxelData[i]);
+			SeamRequest.VoxelData[i] = GetSeamVoxelSnapshot(Job.Participants[i].Coord, *States[i]);
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
@@ -3522,7 +3540,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		for (int32 i = 0; i < 8; ++i)
 		{
 			SeamRequest.LODLevels[i] = States[i]->MeshedLODLevel; // may differ (P2d mixed path)
-			CopyMergedVoxels(Job.Participants[i].Coord, *States[i], SeamRequest.VoxelData[i]);
+			SeamRequest.VoxelData[i] = GetSeamVoxelSnapshot(Job.Participants[i].Coord, *States[i]);
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
@@ -3548,9 +3566,16 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 {
+	// Budget the per-tick submits: each one converts vertices on the game thread and enqueues a
+	// render command. Leftovers keep their in-flight slots, so dispatch backpressures naturally
+	// and the work spreads across ticks instead of spiking the traverse frame.
+	constexpr int32 MaxSeamSubmitsPerTick = 16;
+	int32 Processed = 0;
+
 	FCompletedSeamMesh Result;
-	while (CompletedSeamMeshQueue.Dequeue(Result))
+	while (Processed < MaxSeamSubmitsPerTick && CompletedSeamMeshQueue.Dequeue(Result))
 	{
+		++Processed;
 		SeamJobsInFlight.Remove(Result.Key);
 
 		if (!bSeamMeshingActive || !MeshRenderer)
@@ -3570,6 +3595,34 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 			(Result.Key.Type == EVoxelSeamType::Edge) ? static_cast<uint8>(3 + Result.Key.Axis) : static_cast<uint8>(6);
 		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, SeamSlot, Result.LODLevel, MoveTemp(Result.MeshData));
 	}
+}
+
+TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State)
+{
+	const uint32 Version = State.Descriptor.ContentVersion;
+	if (FSeamVoxelSnapshot* Cached = SeamSnapshotCache.Find(Coord))
+	{
+		if (Cached->ContentVersion == Version && Cached->Data.IsValid())
+		{
+			Cached->LastUsedTick = SeamTickCounter;
+			return Cached->Data;
+		}
+	}
+
+	// Build once per (chunk, content version) — the only remaining game-thread voxel copy in the
+	// seam pipeline. ContentVersion covers edits (bumped on explicit voxel edits), so the merged
+	// snapshot stays valid exactly as long as the seams that would read it.
+	TSharedPtr<TArray<FVoxelData>> Built = MakeShared<TArray<FVoxelData>>(State.Descriptor.GetVoxelDataForRead());
+	if (EditManager && EditManager->ChunkHasEdits(Coord))
+	{
+		EditManager->ApplyEditsToVoxelData(Coord, *Built);
+	}
+
+	FSeamVoxelSnapshot& Entry = SeamSnapshotCache.FindOrAdd(Coord);
+	Entry.ContentVersion = Version;
+	Entry.LastUsedTick = SeamTickCounter;
+	Entry.Data = Built;
+	return Entry.Data;
 }
 
 void UVoxelChunkManager::ProcessFarCompressionSweep()
