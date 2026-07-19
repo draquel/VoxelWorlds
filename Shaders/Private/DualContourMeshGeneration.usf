@@ -354,6 +354,30 @@ float GetDensityAt(int3 Position)
 
 float3 CalculateGradientNormalLOD(int3 Position, int Stride)
 {
+    // Interior domain (seam-ownership): gradient taps that would exit the chunk CLAMP to the
+    // nearest edge voxel ("the terrain continues") instead of the absent-neighbour Air fallback
+    // ("the terrain cliffs"). The Air tilt shaded every chunk's rim ring differently — a
+    // per-chunk checkerboard at world scale. Mirrors the CPU Interior-domain clamp so the
+    // CPU seam jobs' ring shading agrees with the GPU interior meshes.
+    if (MeshCellDomain != 0)
+    {
+        int MaxC = (int)ChunkSize - 1;
+        float gxc = GetDensityAt(clamp(Position + int3(Stride, 0, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
+                  - GetDensityAt(clamp(Position + int3(-Stride, 0, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
+        float gyc = GetDensityAt(clamp(Position + int3(0, Stride, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
+                  - GetDensityAt(clamp(Position + int3(0, -Stride, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
+        float gzc = GetDensityAt(clamp(Position + int3(0, 0, Stride), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
+                  - GetDensityAt(clamp(Position + int3(0, 0, -Stride), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
+
+        float3 NormalC = float3(-gxc, -gyc, -gzc);
+        float LenC = length(NormalC);
+        if (LenC > 0.0001f)
+        {
+            return NormalC / LenC;
+        }
+        return float3(0, 0, 1);
+    }
+
     float gx = GetDensityAt(Position + int3(Stride, 0, 0)) - GetDensityAt(Position + int3(-Stride, 0, 0));
     float gy = GetDensityAt(Position + int3(0, Stride, 0)) - GetDensityAt(Position + int3(0, -Stride, 0));
     float gz = GetDensityAt(Position + int3(0, 0, Stride)) - GetDensityAt(Position + int3(0, 0, -Stride));

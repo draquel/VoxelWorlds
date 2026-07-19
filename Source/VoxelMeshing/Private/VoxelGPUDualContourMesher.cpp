@@ -100,6 +100,7 @@ public:
 		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
+		SHADER_PARAMETER(uint32, MeshCellDomain)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FDCEdgeCrossingGPU>, DCEdgeCrossings)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, DCValidEdgeIndices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, MeshCounters)
@@ -214,6 +215,7 @@ public:
 		SHADER_PARAMETER(uint32, GridDim)
 		SHADER_PARAMETER(uint32, MaxVertexCount)
 		SHADER_PARAMETER(uint32, NeighborLODPacked)
+		SHADER_PARAMETER(uint32, MeshCellDomain)
 		// Voxel access for density sampling at the boundary slab
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InputVoxelData)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NeighborXPos)
@@ -840,6 +842,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				EdgeParams->IsoLevel = CapturedConfig.IsoLevel;
 				EdgeParams->LODStride = LODStride;
 				EdgeParams->GridDim = GridDim;
+				EdgeParams->MeshCellDomain = MeshCellDomainU;
 
 				// Dispatch covers [-1, GridSize] in each axis → GridDim threads per axis
 				// Thread groups: [8,8,4]
@@ -912,6 +915,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				WeldParams->GridDim = GridDim;
 				WeldParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				WeldParams->NeighborLODPacked = NeighborLODPacked;
+				WeldParams->MeshCellDomain = MeshCellDomainU;
 				BindVoxelAccess(WeldParams);
 
 				FIntVector WeldGroupCount(
