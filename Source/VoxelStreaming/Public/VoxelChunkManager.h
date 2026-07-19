@@ -570,6 +570,15 @@ public:
 	/** Get count of async generation tasks in flight */
 	int32 GetAsyncGenerationInProgressCount() const { return AsyncGenerationInProgress.Num(); }
 
+	/** Get count of async mesh tasks in flight */
+	int32 GetAsyncMeshingInProgressCount() const { return AsyncMeshingInProgress.Num(); }
+
+	/** Get count of async seam-mesh jobs in flight */
+	int32 GetSeamJobsInFlightCount() const { return SeamJobsInFlight.Num(); }
+
+	/** Total chunks meshed this session (monotonic — drives HUD throughput display) */
+	int64 GetTotalChunksMeshed() const { return TotalChunksMeshed; }
+
 	// ==================== Streaming Benchmark ====================
 
 	/** Drive streaming from a fixed position instead of the camera (deterministic benchmark). */

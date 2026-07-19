@@ -1844,13 +1844,59 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 	const int32 GenQueue = ChunkManager->GetPendingGenerationCount();
 	const int32 GenInFlight = ChunkManager->GetAsyncGenerationInProgressCount();
 	const int32 MeshQueue = ChunkManager->GetPendingMeshingCount();
-	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-		FString::Printf(TEXT("Queues: Gen=%d (async=%d), Mesh=%d"), GenQueue, GenInFlight, MeshQueue));
+	const int32 MeshInFlight = ChunkManager->GetAsyncMeshingInProgressCount();
+
+	// Mesh jobs drain faster than the HUD samples (the interior pipeline clears its queue within a
+	// tick or two), so an instantaneous read shows 0 even while churning. Track a short rolling
+	// peak of in-flight+queued work and a completions/sec rate so activity stays visible.
+	// File-local state (not actor members): debug-HUD-only, and keeps the class layout stable.
+	{
+		static double PeakWindowStart = 0.0;
+		static int32 WindowPeak = 0;
+		static int32 DisplayedPeak = 0;
+		static double RateWindowStart = 0.0;
+		static int64 RateWindowBaseMeshed = -1;
+		static float DisplayedRate = 0.0f;
+
+		const double Now = FPlatformTime::Seconds();
+		const int64 TotalMeshed = ChunkManager->GetTotalChunksMeshed();
+
+		// Peak: max of (queued + in-flight) over 2-second windows, displayed one window behind
+		WindowPeak = FMath::Max(WindowPeak, MeshQueue + MeshInFlight);
+		if (Now - PeakWindowStart >= 2.0)
+		{
+			DisplayedPeak = WindowPeak;
+			WindowPeak = 0;
+			PeakWindowStart = Now;
+			// Log breadcrumb at the same cadence — the HUD text itself isn't visible in
+			// screenshots/logs, so this is the greppable record of meshing activity.
+			UE_LOG(LogVoxelStreaming, Verbose, TEXT("[HUD] Mesh queue=%d inflight=%d peak=%d rate=%.0f/s"),
+				MeshQueue, MeshInFlight, DisplayedPeak, DisplayedRate);
+		}
+
+		// Rate: completed meshes per second over 1-second windows
+		if (RateWindowBaseMeshed < 0)
+		{
+			RateWindowBaseMeshed = TotalMeshed;
+			RateWindowStart = Now;
+		}
+		else if (Now - RateWindowStart >= 1.0)
+		{
+			DisplayedRate = static_cast<float>(TotalMeshed - RateWindowBaseMeshed) / static_cast<float>(Now - RateWindowStart);
+			RateWindowBaseMeshed = TotalMeshed;
+			RateWindowStart = Now;
+		}
+
+		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
+			FString::Printf(TEXT("Queues: Gen=%d (async=%d), Mesh=%d (async=%d, peak %d, %.0f/s)"),
+				GenQueue, GenInFlight, MeshQueue, MeshInFlight, DisplayedPeak, DisplayedRate));
+	}
 	if (const FVoxelSeamRegistry* Seams = ChunkManager->GetSeamRegistry())
 	{
 		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-			FString::Printf(TEXT("Seams: %d tracked, %d dirty, %d queued (lifetime processed=%lld)"),
+			FString::Printf(TEXT("Seams: %d tracked, %d dirty, %d queued, %d in-flight (lifetime processed=%lld)"),
 				Seams->GetSeamCount(), Seams->GetDirtyCount(), Seams->GetJobQueueDepth(),
+				ChunkManager->GetSeamJobsInFlightCount(),
 				Seams->GetStats().TotalSeamJobsProcessed));
 	}
 
