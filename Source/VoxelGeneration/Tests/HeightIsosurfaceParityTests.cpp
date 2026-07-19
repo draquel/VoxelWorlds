@@ -419,7 +419,8 @@ bool FVoxelHeightBoundsContainmentTest::RunTest(const FString& Parameters)
 	{
 		UVoxelBiomeConfiguration* Config = MakeContinentalnessConfig();
 		float Min = 0.f, Max = 0.f;
-		FInfinitePlaneWorldMode::GetTerrainHeightBounds(Base, Config, Min, Max);
+		const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Config);
+		FInfinitePlaneWorldMode::GetTerrainHeightBounds(Base, &Snapshot, Min, Max);
 
 		FInfinitePlaneWorldMode WM(Base);
 		WM.SetBiomeContext(Config);
