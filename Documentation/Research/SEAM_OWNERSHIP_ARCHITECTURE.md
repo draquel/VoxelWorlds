@@ -162,6 +162,16 @@ with the unmorphed interior mesh — architecturally banned by Fact A). The acti
 MC mesher names; GPU MC interiors ride voxel.Seam.CPUInteriorRouting. MCS0-3 suites (interior
 subset, face closure, 2x2x2 assembly closure, mixed-LOD parity vs legacy).
 
+**P4b shipped (this branch): the `voxel.Seam.Meshing` rollback flag is RETIRED** — the pipeline
+is unconditional for seam-capable meshers (DC + MC, CPU or GPU). The legacy whole-chunk path
+(neighbor slices, transition-face baking, boundary revalidation/coalesce cascades) remains ONLY
+for meshers without seam support: cubic still needs slices for boundary face culling and the
+revalidation machinery for late-arriving neighbors. Deleting that shared machinery outright is
+therefore gated on either cubic gaining seam support or cubic being dropped as a supported
+config — an explicit product decision, not part of P4b. The performance HUD now surfaces the
+new machinery: SeamMs in the timing row, the collision prep/apply split (P4a), and a seam
+registry line (tracked / dirty / queued / lifetime processed).
+
 **P4a shipped: the DC two-sided weld is DELETED** (CPU Pass 3.5 + GPU Pass 2.6 +
 `voxel.DCBoundaryWeld` + the DT1-7/GT0-7 legacy boundary suite). The flag-0 rollback path now
 shows cracks at stride>1 DC boundaries (skirts remain as the only softener) — expected until

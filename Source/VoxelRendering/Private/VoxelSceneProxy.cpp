@@ -776,15 +776,21 @@ FPrimitiveViewRelevance FVoxelSceneProxy::GetViewRelevance(const FSceneView* Vie
 	Result.bRenderCustomDepth = ShouldRenderCustomDepth();
 	Result.bTranslucentSelfShadow = false;
 	Result.bVelocityRelevance = false;
-	MaterialRelevance.SetPrimitiveViewRelevance(Result);
+	// SetPrimitiveViewRelevance OVERWRITES the relevance bits (Raw = Raw), so the
+	// per-material relevances must be OR-combined first. Calling it per material let
+	// whichever material came last win — the always-present masked fade material
+	// clobbered the water material's translucent relevance, so the translucent pass
+	// never collected this proxy's water tile batches (invisible water).
+	FMaterialRelevance CombinedRelevance = MaterialRelevance;
 	if (WaterMaterial)
 	{
-		WaterMaterialRelevance.SetPrimitiveViewRelevance(Result);
+		CombinedRelevance |= WaterMaterialRelevance;
 	}
 	if (FadeMaterial)
 	{
-		FadeMaterialRelevance.SetPrimitiveViewRelevance(Result);
+		CombinedRelevance |= FadeMaterialRelevance;
 	}
+	CombinedRelevance.SetPrimitiveViewRelevance(Result);
 	return Result;
 }
 

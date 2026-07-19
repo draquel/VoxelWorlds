@@ -570,6 +570,15 @@ public:
 	/** Get count of async generation tasks in flight */
 	int32 GetAsyncGenerationInProgressCount() const { return AsyncGenerationInProgress.Num(); }
 
+	/** Get count of async mesh tasks in flight */
+	int32 GetAsyncMeshingInProgressCount() const { return AsyncMeshingInProgress.Num(); }
+
+	/** Get count of async seam-mesh jobs in flight */
+	int32 GetSeamJobsInFlightCount() const { return SeamJobsInFlight.Num(); }
+
+	/** Total chunks meshed this session (monotonic — drives HUD throughput display) */
+	int64 GetTotalChunksMeshed() const { return TotalChunksMeshed; }
+
 	// ==================== Streaming Benchmark ====================
 
 	/** Drive streaming from a fixed position instead of the camera (deterministic benchmark). */
@@ -1016,6 +1025,12 @@ protected:
 
 	/** Lazily create (mode + config matched to the main mesher) and return the CPU seam mesher. */
 	IVoxelMesher* EnsureSeamMesher();
+
+public:
+	/** Seam registry access for diagnostics (performance HUD, tests). May be null. */
+	const FVoxelSeamRegistry* GetSeamRegistry() const { return SeamRegistry.Get(); }
+
+private:
 
 	/**
 	 * Per-owner seam slot meshes, kept CPU-side so the renderer receives ONE merged bucket per

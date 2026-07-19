@@ -221,20 +221,12 @@ static TAutoConsoleVariable<int32> CVarSeamMaxJobsPerTick(
 	TEXT("Max seam jobs processed (P0: stub, no geometry) per tick (0 = unlimited)."),
 	ECVF_Default);
 
-// Seam-ownership meshing (DEFAULT ON since the flip): interior-only chunk meshes (zero neighbor
-// dependence) + single-owner seam jobs covering all faces/edges/corners at same and mixed LOD.
-// Requires a Dual Contouring mesher (CPU, or GPU DC — see voxel.Seam.CPUInteriorRouting); with any
-// other mesher the flag is ignored and legacy whole-chunk meshing runs. Qualified vs legacy:
-// thrash -96/-98%, catch-up 31.9->11.8s and GT MeshMs 8.5->0.6ms on GPU RHI (see
-// SEAM_OWNERSHIP_ARCHITECTURE.md section 7.1). 0 = legacy whole-chunk meshing (rollback path until
-// P4 deletes it). Toggling clears/keeps meshes asymmetrically — run voxel.RemeshAll after an A/B flip.
-static TAutoConsoleVariable<int32> CVarSeamMeshing(
-	TEXT("voxel.Seam.Meshing"),
-	1,
-	TEXT("Seam-ownership meshing: 1 = interior-only chunk meshes + single-owner seam jobs, full "
-	     "same/mixed-LOD coverage (default; DC meshers only). 0 = legacy whole-chunk meshing "
-	     "(rollback). Run voxel.RemeshAll after toggling."),
-	ECVF_Default);
+// Seam-ownership meshing is UNCONDITIONAL for seam-capable meshers (P4b retired the
+// voxel.Seam.Meshing rollback flag): DC and MC configurations always run interior-only chunk
+// meshes + single-owner seam jobs; the legacy whole-chunk path remains ONLY for meshers without
+// seam support (cubic — its boundary face culling still uses neighbor slices + revalidation).
+// Qualified vs legacy: thrash -96/-98%, catch-up 31.9->11.8s, GT MeshMs 8.5->0.6ms on GPU RHI
+// (SEAM_OWNERSHIP_ARCHITECTURE.md §7.1).
 
 // With a GPU DC main mesher, seam junctions are only bit-exact if interiors are CPU-meshed too
 // (GPU QEF solves diverge from the CPU seam rings — visible cracks). 1 = route interior chunk
@@ -367,15 +359,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		SeamRegistry->SetDebugLogging(CVarSeamDebug.GetValueOnGameThread() != 0);
 	}
 
-	// Seam-ownership: resolve whether the seam-meshing pipeline is active this tick. It requires
-	// the registry AND a Dual Contouring mesher configuration (CPU or GPU DC). While active, BOTH
-	// interior chunk meshes and seam jobs run on the dedicated CPU SeamMesher instance — seam
-	// rings terminate bit-exactly only on CPU-computed interior rims (GPU QEF solves diverge →
-	// junction cracks), so a GPU DC main mesher idles for chunk meshes until the flag turns off.
+	// Seam-ownership: the pipeline is UNCONDITIONALLY active for seam-capable mesher
+	// configurations (DC and MC, CPU or GPU) — P4b retired the rollback flag. Interior chunk
+	// meshes and seam jobs run on the dedicated CPU SeamMesher instance (GPU main meshers idle
+	// for chunk meshes; see voxel.Seam.CPUInteriorRouting). Meshers without seam support
+	// (cubic) keep the legacy whole-chunk path.
 	bSeamMeshingWasActive = bSeamMeshingActive;
 	const FString MesherName = Mesher.IsValid() ? Mesher->GetMesherTypeName() : FString();
 	bSeamMeshingActive = SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
-		&& CVarSeamMeshing.GetValueOnGameThread() != 0
 		&& (MesherName == TEXT("CPU Dual Contouring") || MesherName == TEXT("GPU Dual Contouring")
 			|| MesherName == TEXT("CPU MarchingCubes") || MesherName == TEXT("GPU MarchingCubes"));
 	if (bSeamMeshingWasActive != bSeamMeshingActive)
