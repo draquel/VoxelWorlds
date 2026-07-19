@@ -143,6 +143,12 @@ Estimated effort: P0-P1 ~1 week; P2 the risk center ~1-2 weeks; P3-P4 ~1 week. T
 categorical, not incremental: the seam bug class closes, and boundary correction cost drops by
 ~64× making Fact B windows sub-frame-budget near the player.
 
+**Status (2026-07-19): P0 (#46), P1 (#47), P2 (#48) shipped; flip qualification + GPU parity
+(#49, #50, §7) shipped; `voxel.Seam.Meshing` DEFAULT FLIPPED ON (this branch).** The flag
+activates only for DC meshers — MC configs run legacy meshing until P3, which therefore gates
+any P4 deletion of machinery MC still uses (slices, transition faces, boundary cascades);
+DC-only machinery (two-sided weld) can go first.
+
 #### P0 as implemented (branch `feature/seam-ownership-p0`)
 
 Landed as pure scaffolding — **no geometry produced, no visual/behavioural change** (DC suite stays
