@@ -234,6 +234,18 @@ static TAutoConsoleVariable<int32> CVarSeamMeshing(
 	     "voxel.RemeshAll after toggling."),
 	ECVF_Default);
 
+// With a GPU DC main mesher, seam junctions are only bit-exact if interiors are CPU-meshed too
+// (GPU QEF solves diverge from the CPU seam rings — visible cracks). 1 = route interior chunk
+// meshes to the CPU SeamMesher while seam meshing is active (watertight). 0 = keep GPU interior
+// meshes (junction cracks; A/B lever for measuring the GPU interior-meshing advantage).
+static TAutoConsoleVariable<int32> CVarSeamCPUInteriorRouting(
+	TEXT("voxel.Seam.CPUInteriorRouting"),
+	1,
+	TEXT("When seam meshing is active with a GPU DC mesher: 1 = interior chunk meshes run on the "
+	     "CPU DC mesher (bit-exact seam junctions, default), 0 = GPU interior meshes (FP junction "
+	     "cracks; perf A/B only). Run voxel.RemeshAll after toggling."),
+	ECVF_Default);
+
 /** In-flight cap for async seam-mesh jobs (small: seam jobs are strip-sized and fast). */
 static constexpr int32 GMaxSeamJobsInFlight = 8;
 
@@ -354,9 +366,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	}
 
 	// Seam-ownership: resolve whether the seam-meshing pipeline is active this tick. It requires
-	// the registry AND a Dual Contouring mesher that honors EVoxelMeshCellDomain::Interior —
-	// the CPU DC mesher, or the GPU DC mesher under the hybrid (GPU interior-domain chunk
-	// meshes + CPU seam jobs on the dedicated SeamMesher instance).
+	// the registry AND a Dual Contouring mesher configuration (CPU or GPU DC). While active, BOTH
+	// interior chunk meshes and seam jobs run on the dedicated CPU SeamMesher instance — seam
+	// rings terminate bit-exactly only on CPU-computed interior rims (GPU QEF solves diverge →
+	// junction cracks), so a GPU DC main mesher idles for chunk meshes until the flag turns off.
 	bSeamMeshingWasActive = bSeamMeshingActive;
 	const FString MesherName = Mesher.IsValid() ? Mesher->GetMesherTypeName() : FString();
 	bSeamMeshingActive = SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
@@ -367,6 +380,11 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		UE_LOG(LogVoxelStreaming, Warning,
 			TEXT("Seam meshing %s — existing chunk meshes keep their previous domain until they remesh; run voxel.RemeshAll for a clean A/B."),
 			bSeamMeshingActive ? TEXT("ACTIVATED (interior-only chunks + face-seam jobs)") : TEXT("DEACTIVATED (legacy whole-chunk meshing)"));
+		if (bSeamMeshingActive && MesherName == TEXT("GPU Dual Contouring"))
+		{
+			UE_LOG(LogVoxelStreaming, Warning,
+				TEXT("Seam meshing: chunk meshes route to the CPU DC mesher while active (GPU QEF solves are not bit-exact with the CPU seam rings — junction cracks); the GPU DC mesher idles."));
+		}
 		if (!bSeamMeshingActive)
 		{
 			// Drop all seam buckets — the legacy whole-chunk meshes cover the boundary themselves —
@@ -2898,6 +2916,19 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 	Timing.MeshLaunchCount = ProcessedCount;
 }
 
+FVoxelCPUDualContourMesher* UVoxelChunkManager::EnsureSeamMesher()
+{
+	if (!SeamMesher.IsValid())
+	{
+		SeamMesher = MakeUnique<FVoxelCPUDualContourMesher>();
+		SeamMesher->Initialize();
+		// Match the main mesher's config: iso level and QEF parameters must agree with the
+		// interior meshes for the seam rings to terminate on them.
+		SeamMesher->SetConfig(Mesher->GetConfig());
+	}
+	return SeamMesher.Get();
+}
+
 void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest)
 {
 	// Mark as in-progress
@@ -2905,6 +2936,19 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 
 	// Capture mesher pointer (it's a TUniquePtr, so we need raw pointer for lambda)
 	IVoxelMesher* MesherPtr = Mesher.Get();
+
+	// Seam-ownership junction exactness: while seam meshing is active, interior chunk meshes run
+	// on the same CPU DC instance that meshes the seams. Seam rings recompute rim vertices
+	// bit-exactly only against the CPU op sequence — the GPU QEF solve diverges (cell-relative
+	// coordinate formulation, and SVD threshold flips that can move a vertex by up to a cell),
+	// which rendered as boundary cracks growing with LOD. One mesher computes both sides; the
+	// GPU DC mesher idles for chunk meshes while the flag is on. The routing cvar exists so the
+	// GPU interior-meshing advantage stays measurable (0 = GPU interiors, cracked junctions).
+	if (bSeamMeshingActive && MesherPtr->GetMesherTypeName().Contains(TEXT("GPU"))
+		&& CVarSeamCPUInteriorRouting.GetValueOnGameThread() != 0)
+	{
+		MesherPtr = EnsureSeamMesher();
+	}
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 	const int32 LODLevel = Request.LODLevel;
 
@@ -3466,15 +3510,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	// is attached as SHARED snapshots (built at most once per chunk content version) — dispatch
 	// itself no longer copies voxel arrays. Seam jobs ALWAYS run on the CPU via the dedicated
 	// SeamMesher — under the GPU hybrid the main mesher is the GPU DC and cannot serve them.
-	if (!SeamMesher.IsValid())
-	{
-		SeamMesher = MakeUnique<FVoxelCPUDualContourMesher>();
-		SeamMesher->Initialize();
-		// Match the main mesher's config: iso level and QEF parameters must agree with the
-		// interior meshes for the seam rings to terminate on them.
-		SeamMesher->SetConfig(Mesher->GetConfig());
-	}
-	FVoxelCPUDualContourMesher* DCMesher = SeamMesher.Get();
+	FVoxelCPUDualContourMesher* DCMesher = EnsureSeamMesher();
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
 

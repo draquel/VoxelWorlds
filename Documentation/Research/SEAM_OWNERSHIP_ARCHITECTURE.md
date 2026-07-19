@@ -355,3 +355,84 @@ crossfade removes the *pop* of legitimate LOD resolution changes.
 3. LOD0-extension decision: bench `voxel.Bench.Run` with bands 12000/22000/40000 (the live trial
    felt better; cost ~2.9× LOD0 chunks — commit the asset if acceptable).
 4. Review this document; if approved, schedule §2 phases P0–P2 as the next major engine effort.
+
+## 7. GPU parity — the junction-exactness problem and options (2026-07-19)
+
+§2 is implemented through P2 (PRs #46–#49, cvar `voxel.Seam.Meshing`). Under the GPU hybrid
+(GPU DC interior-domain chunk meshes + CPU seam jobs), live inspection showed **thin cracks at
+every seam↔interior junction, growing with LOD**. Root cause — not simple float noise:
+
+- The CPU seam meshers *recompute* each participant's ring cells and rely on bit-identical
+  results so seam rings terminate exactly on interior rim vertices. This holds CPU-vs-CPU
+  (proven by the SC2/ES2/CS2/MS2/MT2 ring bit-match tests).
+- The GPU QEF solve is a different formulation (cell-relative coordinates vs the CPU's
+  chunk-local accumulation) executed by a different compiler/FPU (FMA contraction, SVD
+  iteration differences). Worse than ulp drift: the QEF pseudo-inverse **threshold is
+  discontinuous** — a singular value near the cutoff kept by one implementation and rejected
+  by the other snaps the solved vertex to a different position, up to ~a cell apart. Divergence
+  scales with cell size → cracks grow with LOD. Cross-device bit-exactness through an SVD is
+  not reliably achievable; a fix must remove the *need* for it.
+
+### 7.1 Measurements (PIE, GPU RHI, demo map, 2026-07-19)
+
+First GPU-RHI benchmark of the seam architecture (previous qualification was headless
+`-VoxelForceCPU`). `voxel.Bench.Run`, v1500/20000uu and v6000/60000uu, fresh PIE per config.
+
+| Config | catchUp v1500 | catchUp v6000 | peakMeshQ v6000 | frameP95 | thrash v6000 | GT MeshMs (trav mean) |
+|---|---|---|---|---|---|---|
+| Legacy (flag off, GPU meshing) | 7.4 s | 31.9 s | 413 | 75–77 ms | 3017 | 8.5 ms |
+| Seam ON + GPU interiors | 0.5 s | 11.8 s | 29 | ~58 ms | 490 | 0.6–1.5 ms |
+| Seam ON + CPU interiors (routed) | 0.5 s | 12.0 s | 6 | ~56–63 ms | 507 | 0.6–1.5 ms |
+
+- **GPU vs CPU interior meshing under the seam architecture: indistinguishable** (11.8 vs
+  12.0 s catch-up; traverse TotalMs 16.05 vs 16.16 ms mean; MeshMs 1.48 vs 1.49). The CPU
+  config drains a *shallower* mesh queue (6 vs 29): interior-domain CPU meshing (no neighbor
+  slices, no weld, no marshaling — the costs the GPU path was built to beat) completes inside
+  the GPU dispatch→readback latency at 32³. The pipeline is **generation-bound** at v6000
+  (peakGenQ ≈ 730 in both), and generation stays GPU in every scenario.
+- The often-recalled **"6× GPU advantage" is generation, not meshing**: GPU noise gen 3.6 ms vs
+  CPU 23.5 ms per 32³ chunk (GPU-generation epic, phase D). It is unaffected by seam direction.
+- The seam architecture itself is the big win on GPU RHI: catch-up 31.9→11.8 s, thrash
+  3017→~500, GT MeshMs 8.5→0.6 ms, frameP95 75→57 ms.
+
+### 7.2 Options
+
+**C — route interior meshes to the CPU DC mesher while the flag is on** *(implemented,
+cvar `voxel.Seam.CPUInteriorRouting`, default 1)*.
+One mesher instance computes interiors and seams → bit-exactness by construction (the property
+the test suite proves). Measured cost: none at demo scale (table above). Con: the GPU DC
+mesher idles while the flag is on — the GPU meshing capability is unused, not deleted; the
+cvar keeps the A/B measurable forever. Revisit if target hardware/chunk size (64³) or a
+weaker CPU shifts the balance.
+
+**R — GPU ring readback (keep GPU interiors; seams consume GPU vertices).**
+The GPU interior pass appends its outermost-ring cell vertices (pos+normal) to a side buffer,
+read back with the existing machinery; seam jobs *look up* participant rim vertices instead of
+recomputing. Exact by definition (junction vertices ARE the GPU's). Pros: preserves GPU
+interior meshing; no HLSL port of the seam logic. Cons: ring tables must persist for the life
+of each mesh (any later neighbor LOD flip re-runs the seam) — ~10–50 KB/chunk quantized ⇒
+~80–300 MB at 6 k chunks unless aggressively compressed/scoped (real cost in a project that
+just fought for 2.2 GB); mesh-versioned invalidation; a second vertex-source path inside the
+seam meshers. Buys nothing measurable today (C is free).
+
+**G — full GPU seam meshing (two complete parallel pipelines).**
+Port face/edge/corner + mixed-LOD seam meshing to compute. Pros: all-GPU pipeline symmetry;
+frees CPU workers of seam work (measured sub-ms — negligible); scales if seam volume ever
+explodes. Cons: (1) **upload economics** — a face job needs 2 full chunk volumes uploaded to
+solve ~2 k cells (edge 4, corner 8); interior jobs amortize 1 volume over ~30 k cells. Without
+a resident-GPU voxel cache (major new subsystem interacting with far-compression and edits),
+GPU seams do more PCIe traffic than the interiors they stitch. (2) **Exactness is only safe if
+ring solves reuse the interior pass's exact PSO** (same pipeline ⇒ same codegen ⇒
+deterministic same-device); a "similar function" in a new kernel can re-diverge via compiler
+FMA scheduling — today's bug one level down. (3) The seam meshers are the subtlest code in the
+plugin (samplers, masks, T-junction fans, band logic); an HLSL port doubles maintenance and
+needs its own GPU-vs-CPU-seam parity suite. (4) Readback latency on crack-filling jobs.
+Measured upside today: zero (system is generation-bound).
+
+### 7.3 Recommendation
+
+Ship **C** now (default 1 = watertight on GPU configs immediately; the cvar preserves the
+comparison lever). Treat **R** as the targeted follow-up *if and only if* profiling on target
+hardware/chunk sizes shows CPU interior meshing as a limiter. **G** is not justified by any
+current measurement; reconsider only alongside a resident-GPU voxel cache built for other
+reasons.

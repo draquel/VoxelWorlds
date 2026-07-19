@@ -994,6 +994,9 @@ protected:
 	 */
 	TUniquePtr<FVoxelCPUDualContourMesher> SeamMesher;
 
+	/** Lazily create (config-matched to the main mesher) and return the dedicated CPU DC mesher. */
+	FVoxelCPUDualContourMesher* EnsureSeamMesher();
+
 	/**
 	 * Per-owner seam slot meshes, kept CPU-side so the renderer receives ONE merged bucket per
 	 * owner instead of up to 7 (3 face + 3 edge + 1 corner). With per-slot buckets the scene
