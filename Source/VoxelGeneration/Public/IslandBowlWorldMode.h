@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "IVoxelWorldMode.h"
+#include "VoxelBiomeSnapshot.h"
 
 class UVoxelBiomeConfiguration;
 
@@ -184,9 +185,14 @@ public:
 	/**
 	 * Provide the biome configuration for continentalness height modulation (IVoxelWorldMode). IslandBowl
 	 * applies continentalness (internal oceans/mountains) to the base height, THEN the island edge falloff,
-	 * so a large island gets internal variation while still fading at the world edges. Non-owning.
+	 * so a large island gets internal variation while still fading at the world edges.
+	 * Snapshotted BY VALUE at this call (game thread) — no UObject reference is retained, so the mode is
+	 * safe to share into background tasks that may outlive the world.
 	 */
-	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) override { BiomeContext = InBiomeConfig; }
+	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) override
+	{
+		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
+	}
 
 	/** Per-mode vertical-cull bounds (IVoxelWorldMode): base continentalness extent, floored to EdgeHeight. */
 	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override;
@@ -280,10 +286,11 @@ private:
 	FIslandBowlParams IslandParams;
 
 	/**
-	 * Optional biome configuration for continentalness height modulation (GetTerrainHeightAt). Non-owning
-	 * (kept alive by the world configuration). Null => raw base terrain height (no continentalness).
+	 * Value-captured biome data for continentalness height modulation (GetTerrainHeightAt), snapshotted
+	 * from the config in SetBiomeContext. Plain data, no UObject reference — safe on any thread and for
+	 * tasks that outlive the world. Default (never set) => raw base terrain height (no continentalness).
 	 */
-	const UVoxelBiomeConfiguration* BiomeContext = nullptr;
+	FVoxelBiomeSnapshot BiomeSnapshot;
 
 	/** Practical vertical limits for chunk generation */
 	static constexpr int32 MIN_Z_CHUNKS = -4;

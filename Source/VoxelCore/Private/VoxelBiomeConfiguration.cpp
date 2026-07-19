@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelBiomeSnapshot.h"
 #include "VoxelCore.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeDefinition.h"
@@ -272,23 +273,10 @@ void UVoxelBiomeConfiguration::BuildGpuData()
 
 void UVoxelBiomeConfiguration::GetContinentalnessTerrainParams(float Continentalness, float& OutHeightOffset, float& OutHeightScaleMultiplier) const
 {
-	const int32 N = CONTINENTALNESS_CURVE_SAMPLE_COUNT;
-
-	// Fallback if baked arrays are empty (shouldn't happen after proper init)
-	if (BakedHeightCurve.Num() < N || BakedHeightScaleCurve.Num() < N)
-	{
-		OutHeightOffset = 0.0f;
-		OutHeightScaleMultiplier = 1.0f;
-		return;
-	}
-
-	// Map continentalness [-1,1] to float index [0, N-1], lerp between adjacent samples
-	const float FIdx = (Continentalness + 1.0f) * 0.5f * static_cast<float>(N - 1);
-	const int32 Idx0 = FMath::Clamp(FMath::FloorToInt(FIdx), 0, N - 2);
-	const float Frac = FIdx - static_cast<float>(Idx0);
-
-	OutHeightOffset = FMath::Lerp(BakedHeightCurve[Idx0], BakedHeightCurve[Idx0 + 1], Frac);
-	OutHeightScaleMultiplier = FMath::Lerp(BakedHeightScaleCurve[Idx0], BakedHeightScaleCurve[Idx0 + 1], Frac);
+	// Shared curve-lerp core (FVoxelBiomeSnapshot uses the same one, so the UObject and snapshot
+	// paths cannot drift).
+	FVoxelBiomeSnapshot::EvalBakedCurves(
+		BakedHeightCurve, BakedHeightScaleCurve, Continentalness, OutHeightOffset, OutHeightScaleMultiplier);
 }
 
 void UVoxelBiomeConfiguration::RebuildBiomeIndexCache() const

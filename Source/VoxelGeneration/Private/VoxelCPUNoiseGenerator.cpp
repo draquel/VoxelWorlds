@@ -8,6 +8,7 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelBiomeSnapshot.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelMaterialRegistry.h"
 #include "Async/Async.h"
@@ -194,6 +195,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
 
+	// Hoisted continentalness snapshot for the per-voxel height modulation below (plain data; the
+	// per-voxel ComputeEffectiveTerrainParams call takes this instead of the UObject).
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(BiomeConfig);
+
 	// Set up biome noise parameters from configuration
 	FVoxelNoiseParams TempNoiseParams;
 	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
@@ -252,7 +257,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				const FWorldModeTerrainParams EffectiveParams =
 					FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 						WorldPos.X, WorldPos.Y, WorldMode.GetTerrainParams(),
-						Request.NoiseParams, BiomeConfig, Continentalness);
+						Request.NoiseParams, &BiomeSnapshot, Continentalness);
 
 				// Get terrain height from noise (using potentially modulated params)
 				float TerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
@@ -845,6 +850,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
 
+	// Hoisted continentalness snapshot for the per-voxel height modulation below (plain data; the
+	// per-voxel ComputeEffectiveTerrainParams call takes this instead of the UObject).
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(BiomeConfig);
+
 	// Set up biome noise parameters from configuration
 	FVoxelNoiseParams TempNoiseParams;
 	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
@@ -897,7 +906,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 				// EdgeHeight at the world edge). Matches the analytic FIslandBowlWorldMode::GetTerrainHeightAt.
 				float Continentalness = 0.0f;
 				const FWorldModeTerrainParams EffectiveParams = FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
-					WorldPos.X, WorldPos.Y, WorldMode.GetTerrainParams(), Request.NoiseParams, BiomeConfig, Continentalness);
+					WorldPos.X, WorldPos.Y, WorldMode.GetTerrainParams(), Request.NoiseParams, &BiomeSnapshot, Continentalness);
 
 				const float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
 					WorldPos.X, WorldPos.Y, Request.NoiseParams);

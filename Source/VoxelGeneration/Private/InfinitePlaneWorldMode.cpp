@@ -51,7 +51,7 @@ float FInfinitePlaneWorldMode::GetTerrainHeightAt(
 	// Match generation: modulate the terrain params by continentalness so the analytic height equals
 	// the real generated surface (spawn / nav / POI placement). Gated so it can be reverted at runtime.
 	// Generation applies continentalness whenever a biome config has it enabled; mirror that here.
-	const UVoxelBiomeConfiguration* Ctx = (GVoxelAnalyticContinentalness != 0) ? BiomeContext : nullptr;
+	const FVoxelBiomeSnapshot* Ctx = (GVoxelAnalyticContinentalness != 0) ? &BiomeSnapshot : nullptr;
 	float Continentalness = 0.0f;
 	const FWorldModeTerrainParams EffectiveParams =
 		ComputeEffectiveTerrainParams(X, Y, TerrainParams, NoiseParams, Ctx, Continentalness);
@@ -160,7 +160,7 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 	float Y,
 	const FWorldModeTerrainParams& BaseParams,
 	const FVoxelNoiseParams& BaseNoiseParams,
-	const UVoxelBiomeConfiguration* BiomeConfig,
+	const FVoxelBiomeSnapshot* BiomeSnapshot,
 	float& OutContinentalness)
 {
 	OutContinentalness = 0.0f;
@@ -168,7 +168,7 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 
 	// Continentalness modulates height independently of biome material selection (matches
 	// FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane, which gates only on bEnableContinentalness).
-	if (BiomeConfig && BiomeConfig->bEnableContinentalness)
+	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness)
 	{
 		// Same continentalness noise field as generation: 2-octave Simplex, seed offset from the config.
 		FVoxelNoiseParams ContinentalnessNoiseParams;
@@ -177,15 +177,15 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 		ContinentalnessNoiseParams.Persistence = 0.5f;
 		ContinentalnessNoiseParams.Lacunarity = 2.0f;
 		ContinentalnessNoiseParams.Amplitude = 1.0f;
-		ContinentalnessNoiseParams.Seed = BaseNoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
-		ContinentalnessNoiseParams.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
+		ContinentalnessNoiseParams.Seed = BaseNoiseParams.Seed + BiomeSnapshot->ContinentalnessSeedOffset;
+		ContinentalnessNoiseParams.Frequency = BiomeSnapshot->ContinentalnessNoiseFrequency;
 
 		const FVector SamplePos(X, Y, 0.0f);
 		OutContinentalness = FVoxelCPUNoiseGenerator::FBM3D(SamplePos, ContinentalnessNoiseParams);
 
 		float HeightOffset = 0.0f;
 		float HeightScaleMult = 1.0f;
-		BiomeConfig->GetContinentalnessTerrainParams(OutContinentalness, HeightOffset, HeightScaleMult);
+		BiomeSnapshot->GetContinentalnessTerrainParams(OutContinentalness, HeightOffset, HeightScaleMult);
 		Effective.BaseHeight += HeightOffset;
 		Effective.HeightScale *= HeightScaleMult;
 	}
@@ -195,7 +195,7 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 
 void FInfinitePlaneWorldMode::GetTerrainHeightBounds(
 	const FWorldModeTerrainParams& BaseParams,
-	const UVoxelBiomeConfiguration* BiomeConfig,
+	const FVoxelBiomeSnapshot* BiomeSnapshot,
 	float& OutMin,
 	float& OutMax)
 {
@@ -205,13 +205,13 @@ void FInfinitePlaneWorldMode::GetTerrainHeightBounds(
 	float MaxOffset = 0.0f;
 	float MaxScaleMult = 1.0f; // no continentalness => full HeightScale amplitude
 
-	if (BiomeConfig && BiomeConfig->bEnableContinentalness
-		&& BiomeConfig->BakedHeightCurve.Num() > 0 && BiomeConfig->BakedHeightScaleCurve.Num() > 0)
+	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness
+		&& BiomeSnapshot->BakedHeightCurve.Num() > 0 && BiomeSnapshot->BakedHeightScaleCurve.Num() > 0)
 	{
-		MinOffset = FMath::Min(BiomeConfig->BakedHeightCurve);
-		MaxOffset = FMath::Max(BiomeConfig->BakedHeightCurve);
+		MinOffset = FMath::Min(BiomeSnapshot->BakedHeightCurve);
+		MaxOffset = FMath::Max(BiomeSnapshot->BakedHeightCurve);
 		// Amplitude scales by the LARGEST multiplier any point can take. Guard a degenerate curve.
-		MaxScaleMult = FMath::Max(0.0f, FMath::Max(BiomeConfig->BakedHeightScaleCurve));
+		MaxScaleMult = FMath::Max(0.0f, FMath::Max(BiomeSnapshot->BakedHeightScaleCurve));
 	}
 
 	const float Center = BaseParams.SeaLevel + BaseParams.BaseHeight;

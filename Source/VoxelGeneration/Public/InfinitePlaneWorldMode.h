@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "IVoxelWorldMode.h"
+#include "VoxelBiomeSnapshot.h"
 
 class UVoxelBiomeConfiguration;
 
@@ -100,16 +101,23 @@ public:
 	 * When set (and continentalness is enabled on the config), GetTerrainHeightAt applies the SAME
 	 * height modulation (BaseHeight offset + HeightScale multiplier) that generation applies, so the
 	 * analytic height used for spawn / nav / POI placement matches the real generated surface.
-	 * Non-owning: the caller (the chunk manager) keeps the configuration alive.
+	 *
+	 * The config is snapshotted BY VALUE at this call (game thread) — the mode holds no UObject
+	 * reference afterwards, so the instance is safe to share into background tasks that may outlive
+	 * the world (e.g. VoxelMap tile generation). Config changes after this call are not picked up
+	 * (configs are static after world init).
 	 *
 	 * @param InBiomeConfig Biome configuration, or null to use raw (un-modulated) base terrain height.
 	 */
-	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) override { BiomeContext = InBiomeConfig; }
+	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) override
+	{
+		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
+	}
 
-	/** Per-mode vertical-cull bounds (IVoxelWorldMode): wraps the static using this mode's params + biome context. */
+	/** Per-mode vertical-cull bounds (IVoxelWorldMode): wraps the static using this mode's params + biome snapshot. */
 	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override
 	{
-		FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, BiomeContext, OutMin, OutMax);
+		FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, &BiomeSnapshot, OutMin, OutMax);
 	}
 
 	/**
@@ -159,14 +167,15 @@ public:
 	 * shared by chunk generation and the analytic GetTerrainHeightAt query.
 	 *
 	 * Samples the continentalness noise field at (X,Y) (same params as generation: 2-octave Simplex,
-	 * seed = BaseNoiseParams.Seed + config seed offset) and offsets BaseHeight / scales HeightScale via
-	 * the config's continentalness curves. Returns BaseParams unchanged when BiomeConfig is null or
-	 * continentalness is disabled. Pure and thread-safe.
+	 * seed = BaseNoiseParams.Seed + snapshot seed offset) and offsets BaseHeight / scales HeightScale via
+	 * the snapshot's baked continentalness curves. Returns BaseParams unchanged when BiomeSnapshot is
+	 * null or continentalness is disabled. Pure and thread-safe (the snapshot is plain data — build it
+	 * once per batch with FVoxelBiomeSnapshot::FromConfig, on the game thread).
 	 *
 	 * @param X,Y             World XY sample position
 	 * @param BaseParams      Un-modulated terrain params
 	 * @param BaseNoiseParams Terrain noise params (only Seed is used, to derive the continentalness seed)
-	 * @param BiomeConfig     Biome configuration providing continentalness curves, or null
+	 * @param BiomeSnapshot   Value-captured biome data providing continentalness curves, or null
 	 * @param OutContinentalness Sampled continentalness in [-1,1] (0 when disabled) — reusable by callers
 	 * @return Effective terrain params with continentalness applied
 	 */
@@ -175,7 +184,7 @@ public:
 		float Y,
 		const FWorldModeTerrainParams& BaseParams,
 		const FVoxelNoiseParams& BaseNoiseParams,
-		const UVoxelBiomeConfiguration* BiomeConfig,
+		const FVoxelBiomeSnapshot* BiomeSnapshot,
 		float& OutContinentalness);
 
 	/**
@@ -189,13 +198,13 @@ public:
 	 * every value the generator can produce at any (X,Y), so culling to it can never remove a chunk that
 	 * holds real terrain. Callers add their own per-chunk buffer for meshing / edit slack.
 	 *
-	 * @param BaseParams  Un-modulated terrain params (SeaLevel, BaseHeight, HeightScale)
-	 * @param BiomeConfig Biome configuration for the continentalness extent, or null (base range only)
+	 * @param BaseParams    Un-modulated terrain params (SeaLevel, BaseHeight, HeightScale)
+	 * @param BiomeSnapshot Value-captured biome data for the continentalness extent, or null (base range only)
 	 * @param OutMin,OutMax  Guaranteed-containing terrain height range (world Z)
 	 */
 	static void GetTerrainHeightBounds(
 		const FWorldModeTerrainParams& BaseParams,
-		const UVoxelBiomeConfiguration* BiomeConfig,
+		const FVoxelBiomeSnapshot* BiomeSnapshot,
 		float& OutMin,
 		float& OutMax);
 
@@ -227,10 +236,11 @@ private:
 	FWorldModeTerrainParams TerrainParams;
 
 	/**
-	 * Optional biome configuration for continentalness height modulation in GetTerrainHeightAt.
-	 * Non-owning (kept alive by the world configuration). Null => raw base terrain height.
+	 * Value-captured biome data for continentalness height modulation in GetTerrainHeightAt
+	 * (snapshotted from the config in SetBiomeContext). Plain data, no UObject reference — safe on
+	 * any thread and for tasks that outlive the world. Default (never set) => raw base terrain height.
 	 */
-	const UVoxelBiomeConfiguration* BiomeContext = nullptr;
+	FVoxelBiomeSnapshot BiomeSnapshot;
 
 	/** Practical vertical limits for chunk generation */
 	static constexpr int32 MIN_Z_CHUNKS = -64;

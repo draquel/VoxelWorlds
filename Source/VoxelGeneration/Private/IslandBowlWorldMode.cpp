@@ -71,7 +71,7 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 	// inside the island, the falloff fades it toward EdgeHeight at the world edge. Matches generation.
 	float Continentalness = 0.0f;
 	const FWorldModeTerrainParams EffectiveParams = FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
-		X, Y, TerrainParams, NoiseParams, BiomeContext, Continentalness);
+		X, Y, TerrainParams, NoiseParams, &BiomeSnapshot, Continentalness);
 
 	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, EffectiveParams);
 
@@ -85,7 +85,7 @@ void FIslandBowlWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) 
 	// island fades toward EdgeHeight at the edges, which can be below the base terrain minimum.
 	float BaseMin = 0.0f;
 	float BaseMax = 0.0f;
-	FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, BiomeContext, BaseMin, BaseMax);
+	FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, &BiomeSnapshot, BaseMin, BaseMax);
 	OutMin = FMath::Min(BaseMin, IslandParams.EdgeHeight);
 	OutMax = BaseMax;
 }

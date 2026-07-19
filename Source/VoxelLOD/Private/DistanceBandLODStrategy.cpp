@@ -108,8 +108,9 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 
 		float BoundsMin = 0.0f;
 		float BoundsMax = 0.0f;
+		const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(WorldConfig->BiomeConfiguration);
 		FInfinitePlaneWorldMode::GetTerrainHeightBounds(
-			TerrainParams, WorldConfig->BiomeConfiguration, BoundsMin, BoundsMax);
+			TerrainParams, &BiomeSnapshot, BoundsMin, BoundsMax);
 
 		// One chunk of buffer on each side for terrain variation / meshing / edit slack.
 		TerrainMinHeight = BoundsMin - ChunkWorldSize;

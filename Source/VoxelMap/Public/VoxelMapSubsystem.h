@@ -116,9 +116,10 @@ private:
 	 * order. The chunk manager frees ITS instance in EndPlay->Shutdown() while background tasks can
 	 * still be running — capturing that raw pointer is what crashed on PIE stop.
 	 *
-	 * Deliberately has NO biome context: the instance stays UObject-free (safe on a worker thread
-	 * even after the world is GC'd) and returns the RAW base height; GenerateTileAsync applies
-	 * continentalness itself from value-captured baked curves.
+	 * Carries the biome context as a VALUE snapshot (FVoxelBiomeSnapshot, set once on the game thread
+	 * in CreateStandaloneWorldMode): still UObject-free — safe on a worker thread even after the world
+	 * is GC'd — while GetTerrainHeightAt returns the TRUE generated surface height (continentalness
+	 * offset + height-scale modulation, composed correctly per world mode).
 	 */
 	TSharedPtr<const IVoxelWorldMode> CachedWorldMode;
 

@@ -26,11 +26,12 @@ namespace
 	 * tile tasks capture it by TSharedPtr, and the chunk manager destroys its instance in
 	 * EndPlay->Shutdown() while tile tasks can still be running — the PIE-stop use-after-free.
 	 *
-	 * SetBiomeContext is deliberately NOT called: the instance must stay UObject-free so a task that
-	 * outlives the world's GC purge touches no engine-managed memory. GetTerrainHeightAt therefore
-	 * returns the RAW base height, and GenerateTileAsync applies continentalness from value-captured
-	 * baked curves (this also removes the former double-modulation, where a context-carrying instance
-	 * already applied the height offset and the tile task then added it a second time).
+	 * SetBiomeContext IS called (unlike the pre-map-accuracy version): world modes snapshot the biome
+	 * config BY VALUE (FVoxelBiomeSnapshot — plain data, no UObject reference), so the instance stays
+	 * safe for tasks that outlive the world's GC purge while GetTerrainHeightAt returns the TRUE
+	 * generated surface height (continentalness offset AND height-scale modulation, composed correctly
+	 * per mode — the former hand-rolled offset-only reapplication in GenerateTileAsync was the map's
+	 * water-placement bug; see Documentation/Research/MAP_ACCURACY_PLAN.md).
 	 */
 	TSharedPtr<const IVoxelWorldMode> CreateStandaloneWorldMode(const UVoxelWorldConfiguration& Config)
 	{
@@ -39,6 +40,7 @@ namespace
 		TerrainParams.HeightScale = Config.HeightScale;
 		TerrainParams.BaseHeight = Config.BaseHeight;
 
+		TSharedPtr<IVoxelWorldMode> Mode;
 		switch (Config.WorldMode)
 		{
 		case EWorldMode::IslandBowl:
@@ -53,7 +55,8 @@ namespace
 			IslandParams.CenterY = Config.IslandCenterY;
 			IslandParams.EdgeHeight = Config.IslandEdgeHeight;
 			IslandParams.bBowlShape = Config.bIslandBowlShape;
-			return MakeShared<FIslandBowlWorldMode>(TerrainParams, IslandParams);
+			Mode = MakeShared<FIslandBowlWorldMode>(TerrainParams, IslandParams);
+			break;
 		}
 		case EWorldMode::SphericalPlanet:
 		{
@@ -63,12 +66,19 @@ namespace
 			PlanetParams.MaxTerrainHeight = Config.PlanetMaxTerrainHeight;
 			PlanetParams.MaxTerrainDepth = Config.PlanetMaxTerrainDepth;
 			PlanetParams.PlanetCenter = Config.WorldOrigin;
-			return MakeShared<FSphericalPlanetWorldMode>(PlanetTerrainParams, PlanetParams);
+			Mode = MakeShared<FSphericalPlanetWorldMode>(PlanetTerrainParams, PlanetParams);
+			break;
 		}
 		case EWorldMode::InfinitePlane:
 		default:
-			return MakeShared<FInfinitePlaneWorldMode>(TerrainParams);
+			Mode = MakeShared<FInfinitePlaneWorldMode>(TerrainParams);
+			break;
 		}
+
+		// Value-snapshot the biome config into the mode (game thread; the UObject is not retained).
+		// Matches UVoxelChunkManager::Initialize, which sets the context unconditionally.
+		Mode->SetBiomeContext(Config.BiomeConfiguration);
+		return Mode;
 	}
 }
 
@@ -415,7 +425,9 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
-	// Continentalness captured params
+	// Continentalness captured params — used ONLY for biome selection here. Height modulation is
+	// applied inside WorldMode->GetTerrainHeightAt via the mode's value-captured biome snapshot
+	// (offset AND height-scale curves, composed correctly per world mode).
 	bool bUseContinentalness = false;
 	FVoxelNoiseParams ContinentalnessNoiseParams;
 	ContinentalnessNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
@@ -423,8 +435,6 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	ContinentalnessNoiseParams.Persistence = 0.5f;
 	ContinentalnessNoiseParams.Lacunarity = 2.0f;
 	ContinentalnessNoiseParams.Amplitude = 1.0f;
-	TArray<float> BakedHeightCurve;
-	TArray<float> BakedScaleCurve;
 
 	if (bUseBiomes && CachedBiomeConfig && CachedBiomeConfig->IsValid())
 	{
@@ -434,7 +444,12 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		bEnableHeightMaterials = CachedBiomeConfig->bEnableHeightMaterials;
 		if (bEnableHeightMaterials)
 		{
+			// Priority-sorted to match ApplyHeightMaterialRules (first applicable wins in priority
+			// order; the raw array order gave a different winner when rules overlap).
 			HeightRules = CachedBiomeConfig->HeightMaterialRules;
+			HeightRules.Sort([](const FHeightMaterialRule& A, const FHeightMaterialRule& B) {
+				return A.Priority > B.Priority;
+			});
 		}
 		TempNoiseParams.Seed = NoiseParams.Seed + CachedBiomeConfig->TemperatureSeedOffset;
 		TempNoiseParams.Frequency = CachedBiomeConfig->TemperatureNoiseFrequency;
@@ -446,8 +461,6 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 			bUseContinentalness = true;
 			ContinentalnessNoiseParams.Seed = NoiseParams.Seed + CachedBiomeConfig->ContinentalnessSeedOffset;
 			ContinentalnessNoiseParams.Frequency = CachedBiomeConfig->ContinentalnessNoiseFrequency;
-			BakedHeightCurve = CachedBiomeConfig->BakedHeightCurve;
-			BakedScaleCurve = CachedBiomeConfig->BakedHeightScaleCurve;
 		}
 	}
 	else if (bUseBiomes)
@@ -468,8 +481,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		 bHasBiomeConfig, BiomeDefs = MoveTemp(BiomeDefs), BiomeBlendWidth,
 		 bEnableHeightMaterials, HeightRules = MoveTemp(HeightRules),
 		 TempNoiseParams, MoistureNoiseParams,
-		 bUseContinentalness, ContinentalnessNoiseParams,
-		 BakedHeightCurve = MoveTemp(BakedHeightCurve), BakedScaleCurve = MoveTemp(BakedScaleCurve)]()
+		 bUseContinentalness, ContinentalnessNoiseParams]()
 	{
 		// WorldMode is a TSharedPtr capture, validated non-null before launch — this task co-owns
 		// the instance, so it stays valid even if the subsystem and world are torn down while we run.
@@ -484,30 +496,17 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 				const float WorldX = (TileCoord.X * ChunkSize + PX) * VoxelSize + WorldOrigin.X;
 				const float WorldY = (TileCoord.Y * ChunkSize + PY) * VoxelSize + WorldOrigin.Y;
 
-				float Height = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+				// TRUE generated surface height: the standalone mode carries a value-captured biome
+				// snapshot, so this applies the same continentalness modulation (offset + height-scale)
+				// and per-mode composition (e.g. IslandBowl falloff) as chunk generation.
+				const float Height = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
 
-				// Sample continentalness for biome selection and height modulation
+				// Sample continentalness for biome selection (height modulation already applied above)
 				float Continentalness = 0.0f;
 				if (bUseContinentalness)
 				{
 					const FVector ContSamplePos(WorldX, WorldY, 0.0f);
 					Continentalness = FVoxelCPUNoiseGenerator::FBM3D(ContSamplePos, ContinentalnessNoiseParams);
-
-					// Modulate terrain height using baked curve lookup (matches CPU/GPU generator).
-					// Height already holds the RAW base height — our standalone world mode carries no
-					// biome context — so the offset applies exactly once here. (The chunk manager's
-					// context-carrying instance already modulates inside GetTerrainHeightAt, which is
-					// why it must not be used for this.)
-					const int32 N = BakedHeightCurve.Num();
-					if (N >= 2)
-					{
-						const float FIdx = (Continentalness + 1.0f) * 0.5f * static_cast<float>(N - 1);
-						const int32 Idx0 = FMath::Clamp(FMath::FloorToInt(FIdx), 0, N - 2);
-						const float Frac = FIdx - static_cast<float>(Idx0);
-						const float HeightOffset = FMath::Lerp(BakedHeightCurve[Idx0], BakedHeightCurve[Idx0 + 1], Frac);
-
-						Height += HeightOffset;
-					}
 				}
 
 				// Determine surface material using biome system (matches VoxelCPUNoiseGenerator)
