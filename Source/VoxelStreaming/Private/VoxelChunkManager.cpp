@@ -353,13 +353,15 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		SeamRegistry->SetDebugLogging(CVarSeamDebug.GetValueOnGameThread() != 0);
 	}
 
-	// Seam-ownership P1: resolve whether the seam-meshing pipeline is active this tick. It requires
-	// the registry AND the CPU DC mesher — the interior/seam decomposition is implemented there
-	// only (the GPU meshers would keep meshing full chunks and double-cover the boundary).
+	// Seam-ownership: resolve whether the seam-meshing pipeline is active this tick. It requires
+	// the registry AND a Dual Contouring mesher that honors EVoxelMeshCellDomain::Interior —
+	// the CPU DC mesher, or the GPU DC mesher under the hybrid (GPU interior-domain chunk
+	// meshes + CPU seam jobs on the dedicated SeamMesher instance).
 	bSeamMeshingWasActive = bSeamMeshingActive;
+	const FString MesherName = Mesher.IsValid() ? Mesher->GetMesherTypeName() : FString();
 	bSeamMeshingActive = SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
 		&& CVarSeamMeshing.GetValueOnGameThread() != 0
-		&& Mesher.IsValid() && Mesher->GetMesherTypeName() == TEXT("CPU Dual Contouring");
+		&& (MesherName == TEXT("CPU Dual Contouring") || MesherName == TEXT("GPU Dual Contouring"));
 	if (bSeamMeshingWasActive != bSeamMeshingActive)
 	{
 		UE_LOG(LogVoxelStreaming, Warning,
@@ -1204,6 +1206,11 @@ void UVoxelChunkManager::Shutdown()
 	{
 		Mesher->Shutdown();
 		Mesher.Reset();
+	}
+	if (SeamMesher)
+	{
+		SeamMesher->Shutdown();
+		SeamMesher.Reset();
 	}
 
 	// Drop any in-flight GPU readbacks before the generator's Shutdown (which flushes rendering commands
@@ -3453,8 +3460,17 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	// Worker dispatch mirrors the chunk-mesh CPU path: raw mesher pointer + weak manager for the
 	// result enqueue. The seam meshers read only the request + Config (thread-safe). Voxel data
 	// is attached as SHARED snapshots (built at most once per chunk content version) — dispatch
-	// itself no longer copies voxel arrays.
-	FVoxelCPUDualContourMesher* DCMesher = static_cast<FVoxelCPUDualContourMesher*>(Mesher.Get());
+	// itself no longer copies voxel arrays. Seam jobs ALWAYS run on the CPU via the dedicated
+	// SeamMesher — under the GPU hybrid the main mesher is the GPU DC and cannot serve them.
+	if (!SeamMesher.IsValid())
+	{
+		SeamMesher = MakeUnique<FVoxelCPUDualContourMesher>();
+		SeamMesher->Initialize();
+		// Match the main mesher's config: iso level and QEF parameters must agree with the
+		// interior meshes for the seam rings to terminate on them.
+		SeamMesher->SetConfig(Mesher->GetConfig());
+	}
+	FVoxelCPUDualContourMesher* DCMesher = SeamMesher.Get();
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
 

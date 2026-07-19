@@ -14,6 +14,7 @@
 #include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IVoxelMesher.h"
+#include "VoxelCPUDualContourMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelSeamRegistry.h"
@@ -984,6 +985,14 @@ protected:
 
 	/** Monotonic TickSeamScheduler counter (drives the snapshot age sweep). */
 	uint64 SeamTickCounter = 0;
+
+	/**
+	 * Dedicated CPU DC mesher for seam jobs (created lazily when the pipeline activates).
+	 * Seam jobs ALWAYS mesh on the CPU worker pool — with the GPU hybrid, the main mesher is
+	 * the GPU DC mesher (interior-domain chunk meshes) and cannot serve them. Seam strips are
+	 * tiny, so CPU meshing them is cheap; a dedicated instance also keeps their Config stable.
+	 */
+	TUniquePtr<FVoxelCPUDualContourMesher> SeamMesher;
 
 	/** Get (building at most once per content version) the shared edit-merged snapshot of a chunk. */
 	TSharedPtr<const TArray<FVoxelData>> GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State);

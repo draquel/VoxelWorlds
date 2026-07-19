@@ -175,6 +175,7 @@ public:
 		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
+		SHADER_PARAMETER(uint32, MeshCellDomain)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -328,6 +329,7 @@ public:
 		SHADER_PARAMETER(uint32, NeighborPlaneDepth)
 		SHADER_PARAMETER(uint32, NeighborFlags)
 		SHADER_PARAMETER(uint32, EdgeCornerFlags)
+		SHADER_PARAMETER(uint32, MeshCellDomain)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -601,9 +603,14 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		const uint32 NL = static_cast<uint32>(FMath::Clamp(Request.NeighborLODLevels[Face], 0, 7));
 		NeighborLODPacked |= (NL << (Face * 3));
 	}
+	// Seam-ownership: the Interior domain restricts quad emission to interior cells (boundary
+	// geometry comes from the CPU seam jobs) and makes the boundary weld inapplicable — the
+	// GPU half of the seam-meshing hybrid. Mirrors the CPU mesher's Interior handling.
+	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+	const uint32 MeshCellDomainU = static_cast<uint32>(Request.MeshCellDomain);
 	// AnyThread: DispatchComputeShader is called from a thread-pool worker (the chunk manager
 	// off-threads GPU mesh dispatch); the cvar is a debug toggle, a stale read is harmless.
-	const bool bDoBoundaryWeld = CVarDCBoundaryWeld.GetValueOnAnyThread() != 0;
+	const bool bDoBoundaryWeld = CVarDCBoundaryWeld.GetValueOnAnyThread() != 0 && !bInteriorDomain;
 
 	ENQUEUE_RENDER_COMMAND(GenerateDCMesh)(
 		[PackedVoxels = MoveTemp(PackedVoxels),
@@ -642,6 +649,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 		 TotalCells,
 		 NeighborLODPacked,
 		 bDoBoundaryWeld,
+		 MeshCellDomainU,
 		 RequestId,
 		 Result,
 		 OnComplete](FRHICommandListImmediate& RHICmdList)
@@ -867,6 +875,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				QEFParams->QEFThreshold = CapturedConfig.QEFSVDThreshold;
 				QEFParams->QEFBias = CapturedConfig.QEFBiasStrength;
 				QEFParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
+				QEFParams->MeshCellDomain = MeshCellDomainU;
 				BindVoxelAccess(QEFParams);
 
 				FIntVector GroupCount(
@@ -938,6 +947,7 @@ void FVoxelGPUDualContourMesher::DispatchComputeShader(
 				QuadParams->GridDim = GridDim;
 				QuadParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				QuadParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
+				QuadParams->MeshCellDomain = MeshCellDomainU;
 				BindVoxelAccess(QuadParams);
 
 				// Fixed dispatch: worst-case thread groups for all possible edges
