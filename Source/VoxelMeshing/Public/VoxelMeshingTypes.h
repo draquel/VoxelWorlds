@@ -284,10 +284,18 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	/**
 	 * Cell-domain restriction (seam-ownership P1). Full = legacy whole-chunk meshing (default,
 	 * bit-identical to pre-P1 behavior). Interior = interior-only pass with zero neighbor deps;
-	 * see EVoxelMeshCellDomain. Honored by the CPU DC mesher; other meshers ignore it.
+	 * see EVoxelMeshCellDomain. Honored by the CPU/GPU DC and CPU MC meshers.
 	 */
 	UPROPERTY()
 	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::Full;
+
+	/**
+	 * MC seam jobs only (P3): overrides voxel.MCBoundaryMorphWidth (units: coarse cells) for
+	 * the boundary geomorph. Seam-band cells morph with a ramp that reaches ZERO exactly at
+	 * the band's inner edge — a wider (legacy) ramp would move vertices shared with the
+	 * unmorphed interior mesh and crack the junction. <= 0 uses the cvar (legacy meshing).
+	 */
+	float MorphWidthOverride = -1.0f;
 
 	// Transition face flag bits
 	static constexpr uint8 TRANSITION_XNEG = 1 << 0;

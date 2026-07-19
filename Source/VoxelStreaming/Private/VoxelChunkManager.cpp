@@ -376,16 +376,17 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	const FString MesherName = Mesher.IsValid() ? Mesher->GetMesherTypeName() : FString();
 	bSeamMeshingActive = SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
 		&& CVarSeamMeshing.GetValueOnGameThread() != 0
-		&& (MesherName == TEXT("CPU Dual Contouring") || MesherName == TEXT("GPU Dual Contouring"));
+		&& (MesherName == TEXT("CPU Dual Contouring") || MesherName == TEXT("GPU Dual Contouring")
+			|| MesherName == TEXT("CPU MarchingCubes") || MesherName == TEXT("GPU MarchingCubes"));
 	if (bSeamMeshingWasActive != bSeamMeshingActive)
 	{
 		UE_LOG(LogVoxelStreaming, Warning,
 			TEXT("Seam meshing %s — existing chunk meshes keep their previous domain until they remesh; run voxel.RemeshAll for a clean A/B."),
 			bSeamMeshingActive ? TEXT("ACTIVATED (interior-only chunks + face-seam jobs)") : TEXT("DEACTIVATED (legacy whole-chunk meshing)"));
-		if (bSeamMeshingActive && MesherName == TEXT("GPU Dual Contouring"))
+		if (bSeamMeshingActive && MesherName.Contains(TEXT("GPU")))
 		{
 			UE_LOG(LogVoxelStreaming, Warning,
-				TEXT("Seam meshing: chunk meshes route to the CPU DC mesher while active (GPU QEF solves are not bit-exact with the CPU seam rings — junction cracks); the GPU DC mesher idles."));
+				TEXT("Seam meshing: chunk meshes route to the CPU seam mesher while active (GPU results are not bit-exact with the CPU seam geometry — junction cracks); the GPU mesher idles."));
 		}
 		if (!bSeamMeshingActive)
 		{
@@ -2920,14 +2921,22 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 	Timing.MeshLaunchCount = ProcessedCount;
 }
 
-FVoxelCPUDualContourMesher* UVoxelChunkManager::EnsureSeamMesher()
+IVoxelMesher* UVoxelChunkManager::EnsureSeamMesher()
 {
 	if (!SeamMesher.IsValid())
 	{
-		SeamMesher = MakeUnique<FVoxelCPUDualContourMesher>();
+		// Match the configured meshing mode: seam geometry must terminate exactly on the
+		// interior meshes, which requires the same algorithm family AND the same config
+		// (iso level + QEF parameters for DC; transvoxel/morph settings for MC).
+		if (Configuration && Configuration->MeshingMode == EMeshingMode::MarchingCubes)
+		{
+			SeamMesher = MakeUnique<FVoxelCPUMarchingCubesMesher>();
+		}
+		else
+		{
+			SeamMesher = MakeUnique<FVoxelCPUDualContourMesher>();
+		}
 		SeamMesher->Initialize();
-		// Match the main mesher's config: iso level and QEF parameters must agree with the
-		// interior meshes for the seam rings to terminate on them.
 		SeamMesher->SetConfig(Mesher->GetConfig());
 	}
 	return SeamMesher.Get();
@@ -3513,8 +3522,8 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	// result enqueue. The seam meshers read only the request + Config (thread-safe). Voxel data
 	// is attached as SHARED snapshots (built at most once per chunk content version) — dispatch
 	// itself no longer copies voxel arrays. Seam jobs ALWAYS run on the CPU via the dedicated
-	// SeamMesher — under the GPU hybrid the main mesher is the GPU DC and cannot serve them.
-	FVoxelCPUDualContourMesher* DCMesher = EnsureSeamMesher();
+	// SeamMesher (mode-matched: CPU DC or CPU MC) — a GPU main mesher cannot serve them.
+	IVoxelMesher* DCMesher = EnsureSeamMesher();
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
 

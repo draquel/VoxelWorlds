@@ -80,7 +80,39 @@ public:
 
 	virtual FString GetMesherTypeName() const override { return TEXT("CPU MarchingCubes"); }
 
+	// ============================================================================
+	// Seam-Ownership Meshing (P3 — implemented in VoxelCPUMarchingCubesSeams.cpp)
+	// ============================================================================
+
+	/**
+	 * Single-owner MC seam meshing. Each participant's boundary band (its first/last cell
+	 * layer toward the seam) is meshed with a per-participant SYNTHETIC request — the
+	 * participant's own volume plus real neighbor slices extracted from the other
+	 * participants' snapshots — driven through the same ProcessCubeLOD / transvoxel /
+	 * geomorph code as legacy whole-chunk meshing. MC vertices and normals are pure
+	 * functions of local samples, so junctions with the interior meshes are bit-identical
+	 * by construction (same functions, same values). Mixed-LOD faces additionally emit the
+	 * transvoxel ribbon (full face extent, in the finer participant's frame) and apply the
+	 * boundary geomorph with full-depth coarse data.
+	 */
+	virtual bool GenerateFaceSeamMeshCPU(const FVoxelFaceSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
+	virtual bool GenerateEdgeSeamMeshCPU(const FVoxelEdgeSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
+	virtual bool GenerateCornerSeamMeshCPU(const FVoxelCornerSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
+
 private:
+	/**
+	 * Seam helper: mesh one participant's boundary-band cells from a synthetic request.
+	 * BandMin/BandMaxEx are inclusive/exclusive voxel-coordinate cell bounds per axis (cells
+	 * step by the request's stride). TransitionMask enables the boundary geomorph toward
+	 * coarser facing neighbors (mixed LOD).
+	 */
+	void MeshSeamBandCells(
+		const FVoxelMeshingRequest& SyntheticRequest,
+		const FIntVector& BandMin,
+		const FIntVector& BandMaxEx,
+		uint8 TransitionMask,
+		FChunkMeshData& OutMeshData,
+		uint32& TriangleCount);
 	// ============================================================================
 	// Marching Cubes Core
 	// ============================================================================

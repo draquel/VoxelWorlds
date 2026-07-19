@@ -227,6 +227,21 @@ public:
 	virtual FString GetMesherTypeName() const = 0;
 
 	// ============================================================================
+	// Seam-Ownership Meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2)
+	// ============================================================================
+
+	/**
+	 * Single-owner seam meshing entry points (CPU, worker-thread safe). A mesher that
+	 * participates in the seam-ownership pipeline overrides these to produce the boundary
+	 * geometry between interior-domain chunk meshes. Defaults return false (no seam
+	 * support) — the chunk manager's activation gate only enables the pipeline for
+	 * mesher types known to implement them.
+	 */
+	virtual bool GenerateFaceSeamMeshCPU(const FVoxelFaceSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) { return false; }
+	virtual bool GenerateEdgeSeamMeshCPU(const FVoxelEdgeSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) { return false; }
+	virtual bool GenerateCornerSeamMeshCPU(const FVoxelCornerSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) { return false; }
+
+	// ============================================================================
 	// Per-Frame Update
 	// ============================================================================
 
