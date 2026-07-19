@@ -14,6 +14,7 @@
 #include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IVoxelMesher.h"
+#include "VoxelCPUDualContourMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelSeamRegistry.h"
@@ -519,6 +520,10 @@ public:
 		float MeshDispatchMs = 0.0f;  // LaunchAsyncMeshGeneration (worker handoff for DC/MC GPU)
 		int32 MeshLaunchCount = 0;    // mesh jobs launched this tick
 
+		// Seam pipeline (seam-ownership P1+): TickSeamScheduler total — registry scheduling,
+		// job drain/dispatch (snapshot lookups), and completed-seam submits to the renderer.
+		float SeamMs = 0.0f;
+
 		// Render-submit breakdown (RenderSubmitMs = mesh drain + unload + water tiles; flush is separate)
 		float RenderMeshMs = 0.0f;       // OnChunkMeshingComplete drain loop total
 		float RenderSubRendererMs = 0.0f; // subset: renderer UpdateChunkMeshFromCPU (vertex convert + handoff)
@@ -960,6 +965,51 @@ protected:
 
 	/** Seam jobs currently meshing on the worker pool (bounds pipeline depth; prevents dupes). */
 	TSet<FVoxelSeamKey> SeamJobsInFlight;
+
+	/**
+	 * Version-keyed shared voxel snapshots for seam jobs. A chunk participates in up to 26 seams;
+	 * without sharing, every dispatch copied 128KB per participant on the game thread — the
+	 * traverse-phase cost found by the flip-qualification bench. One immutable snapshot is built
+	 * per (chunk, ContentVersion) and shared by every job; workers keep the data alive via their
+	 * TSharedPtr refs, so eviction here is always safe. Entries are dropped on unload, on
+	 * deactivation, and by an age sweep in TickSeamScheduler (the cache is only useful while a
+	 * chunk's seam wave is dispatching).
+	 */
+	struct FSeamVoxelSnapshot
+	{
+		uint32 ContentVersion = 0;
+		uint64 LastUsedTick = 0;
+		TSharedPtr<const TArray<FVoxelData>> Data;
+	};
+	TMap<FIntVector, FSeamVoxelSnapshot> SeamSnapshotCache;
+
+	/** Monotonic TickSeamScheduler counter (drives the snapshot age sweep). */
+	uint64 SeamTickCounter = 0;
+
+	/**
+	 * Dedicated CPU DC mesher for seam jobs (created lazily when the pipeline activates).
+	 * Seam jobs ALWAYS mesh on the CPU worker pool — with the GPU hybrid, the main mesher is
+	 * the GPU DC mesher (interior-domain chunk meshes) and cannot serve them. Seam strips are
+	 * tiny, so CPU meshing them is cheap; a dedicated instance also keeps their Config stable.
+	 */
+	TUniquePtr<FVoxelCPUDualContourMesher> SeamMesher;
+
+	/**
+	 * Per-owner seam slot meshes, kept CPU-side so the renderer receives ONE merged bucket per
+	 * owner instead of up to 7 (3 face + 3 edge + 1 corner). With per-slot buckets the scene
+	 * proxy's per-frame batch cap was exhausted by near geometry and far seams never drew —
+	 * seams appeared to vanish at distance. Re-merging on a slot update is a cheap concat of
+	 * strip meshes. Slots: 0-2 face +X/+Y/+Z, 3-5 edge parallel X/Y/Z, 6 corner.
+	 */
+	struct FSeamOwnerSlots
+	{
+		FChunkMeshData Slots[7];
+		int32 SlotLOD[7] = { -1, -1, -1, -1, -1, -1, -1 };
+	};
+	TMap<FIntVector, FSeamOwnerSlots> SeamOwnerSlots;
+
+	/** Get (building at most once per content version) the shared edit-merged snapshot of a chunk. */
+	TSharedPtr<const TArray<FVoxelData>> GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State);
 
 	/** This-tick resolved state of the seam-meshing pipeline (cvar + registry + CPU-DC mesher). */
 	bool bSeamMeshingActive = false;

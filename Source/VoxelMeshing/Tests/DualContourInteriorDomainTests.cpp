@@ -178,21 +178,42 @@ bool FDCInteriorDomainBoundaryTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// Subset: every interior triangle exists (bit-exact positions, same winding) in the Full mesh —
-	// interior cells receive identical crossings/QEF in both domains at stride 1 (weld inert).
+	// Subset (deep interior only): triangles whose vertices sit >= 2 cells from every boundary
+	// bit-match the Full mesh — their gradient taps never exit the chunk, so both domains
+	// compute them identically. RIM-adjacent interior triangles legitimately differ: the
+	// Interior domain CLAMPS out-of-chunk gradient taps ("terrain continues") while the
+	// Full-without-neighbors run uses the Air fallback — the deliberate fix for the
+	// per-chunk rim-shading checkerboard.
+	const float DeepMin = 2.0f * Stride * TestVoxelSize;
+	const float DeepMax = HullMax - 2.0f * Stride * TestVoxelSize;
 	TSet<FString> FullTriangles;
 	for (int32 T = 0; T < Full.GetTriangleCount(); ++T)
 	{
 		FullTriangles.Add(TriangleKey(Full, T));
 	}
+	int32 DeepChecked = 0;
 	for (int32 T = 0; T < Interior.GetTriangleCount(); ++T)
 	{
+		bool bDeep = true;
+		for (int32 i = 0; i < 3 && bDeep; ++i)
+		{
+			const FVector3f& P = Interior.Positions[Interior.Indices[T * 3 + i]];
+			bDeep = P.X >= DeepMin && P.X <= DeepMax &&
+				P.Y >= DeepMin && P.Y <= DeepMax &&
+				P.Z >= DeepMin && P.Z <= DeepMax;
+		}
+		if (!bDeep)
+		{
+			continue;
+		}
+		++DeepChecked;
 		if (!FullTriangles.Contains(TriangleKey(Interior, T)))
 		{
-			AddError(FString::Printf(TEXT("interior triangle %d not found in the full mesh"), T));
+			AddError(FString::Printf(TEXT("deep-interior triangle %d not found in the full mesh"), T));
 			return true;
 		}
 	}
+	TestTrue(TEXT("deep-interior subset check covered triangles"), DeepChecked > 0);
 	return true;
 }
 

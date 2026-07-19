@@ -42,6 +42,13 @@ namespace VoxelMixedSeamTestUtils
 		return Data;
 	}
 
+	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
+	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
+		TFunctionRef<bool(int32, int32, int32)> SolidFn)
+	{
+		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
+	}
+
 	static FVoxelMeshingConfig MakeConfig()
 	{
 		FVoxelMeshingConfig Config;
@@ -82,8 +89,8 @@ namespace VoxelMixedSeamTestUtils
 		Seam.LODLevelB = LODB;
 		Seam.ChunkSize = TestChunkSize;
 		Seam.VoxelSize = TestVoxelSize;
-		Seam.VoxelDataA = FillVoxels(FIntVector::ZeroValue, SolidFn);
-		Seam.VoxelDataB = FillVoxels(FIntVector(TestChunkSize, 0, 0), SolidFn);
+		Seam.VoxelDataA = SharedVoxels(FIntVector::ZeroValue, SolidFn);
+		Seam.VoxelDataB = SharedVoxels(FIntVector(TestChunkSize, 0, 0), SolidFn);
 
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();

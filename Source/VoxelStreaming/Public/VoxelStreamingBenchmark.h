@@ -78,6 +78,8 @@ private:
 		float RendUnloadMs, RendWTileMs, RendFlushMs;
 		int32 RendSubmitCount;
 		int64 RemeshCount;
+		// Seam-ownership pipeline (TickSeamScheduler total: scheduling + dispatch + submits)
+		float SeamMs;
 	};
 
 	void TakeSample(float DeltaTime);

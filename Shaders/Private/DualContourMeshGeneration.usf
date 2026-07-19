@@ -68,6 +68,11 @@ uint EdgeCornerFlags;
 // Total neighbor planes supplied per face (1 = legacy single plane / LOD0; >1 = deep).
 uint NeighborPlaneDepth;
 
+// Cell-domain restriction (seam-ownership): 0 = Full (legacy whole-chunk meshing),
+// 1 = Interior (quads only where all 4 cells are interior; boundary geometry comes from
+// the single-owner CPU seam jobs). Mirrors EVoxelMeshCellDomain.
+uint MeshCellDomain;
+
 // Edge flag bit positions (same as MarchingCubesMeshGeneration.usf)
 #define EDGE_XPOS_YPOS (1u << 0)
 #define EDGE_XPOS_YNEG (1u << 1)
@@ -349,6 +354,30 @@ float GetDensityAt(int3 Position)
 
 float3 CalculateGradientNormalLOD(int3 Position, int Stride)
 {
+    // Interior domain (seam-ownership): gradient taps that would exit the chunk CLAMP to the
+    // nearest edge voxel ("the terrain continues") instead of the absent-neighbour Air fallback
+    // ("the terrain cliffs"). The Air tilt shaded every chunk's rim ring differently — a
+    // per-chunk checkerboard at world scale. Mirrors the CPU Interior-domain clamp so the
+    // CPU seam jobs' ring shading agrees with the GPU interior meshes.
+    if (MeshCellDomain != 0)
+    {
+        int MaxC = (int)ChunkSize - 1;
+        float gxc = GetDensityAt(clamp(Position + int3(Stride, 0, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
+                  - GetDensityAt(clamp(Position + int3(-Stride, 0, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
+        float gyc = GetDensityAt(clamp(Position + int3(0, Stride, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
+                  - GetDensityAt(clamp(Position + int3(0, -Stride, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
+        float gzc = GetDensityAt(clamp(Position + int3(0, 0, Stride), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
+                  - GetDensityAt(clamp(Position + int3(0, 0, -Stride), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
+
+        float3 NormalC = float3(-gxc, -gyc, -gzc);
+        float LenC = length(NormalC);
+        if (LenC > 0.0001f)
+        {
+            return NormalC / LenC;
+        }
+        return float3(0, 0, 1);
+    }
+
     float gx = GetDensityAt(Position + int3(Stride, 0, 0)) - GetDensityAt(Position + int3(-Stride, 0, 0));
     float gy = GetDensityAt(Position + int3(0, Stride, 0)) - GetDensityAt(Position + int3(0, -Stride, 0));
     float gz = GetDensityAt(Position + int3(0, 0, Stride)) - GetDensityAt(Position + int3(0, 0, -Stride));
@@ -681,7 +710,7 @@ static const int3 AxisQuadOffsets[3][4] = {
 // crossings sit on neighbour-owned edges became isolated, unreferenced output verts; the
 // coarse-side watertightness metric counts those as extra, unmatched boundary verts (the GT4
 // failure). "Owned" uses the same rule as DCQuadGenerationCS: the edge's own cell is in [0,GridSize).
-bool IsCellReferencedByOwnedEdge(int CX, int CY, int CZ, int GridSize)
+bool IsCellReferencedByOwnedEdge(int CX, int CY, int CZ, int GridSize, int InteriorDomain)
 {
     [unroll]
     for (int axis = 0; axis < 3; axis++)
@@ -694,6 +723,22 @@ bool IsCellReferencedByOwnedEdge(int CX, int CY, int CZ, int GridSize)
             int ex = CX - Off.x, ey = CY - Off.y, ez = CZ - Off.z;
             if (ex >= 0 && ex < GridSize && ey >= 0 && ey < GridSize && ez >= 0 && ez < GridSize)
             {
+                if (InteriorDomain != 0)
+                {
+                    // Interior domain (seam-ownership): an edge emits only when its 4 cells
+                    // are all interior ([0, GridSize-1) per axis). Closed form on the edge
+                    // coords: own-axis in [0, GS-1), the two varying axes in [1, GS-1).
+                    // Mirrors the CPU Interior-domain quad rule.
+                    int OwnC = (axis == 0) ? ex : ((axis == 1) ? ey : ez);
+                    int VarA = (axis == 0) ? ey : ex;
+                    int VarB = (axis == 2) ? ey : ez;
+                    if (OwnC >= GridSize - 1 ||
+                        VarA < 1 || VarA >= GridSize - 1 ||
+                        VarB < 1 || VarB >= GridSize - 1)
+                    {
+                        continue;
+                    }
+                }
                 uint EIdx = DCEdgeIndex(ex, ey, ez, axis);
                 if (DCEdgeCrossings[EIdx].Flags & 1) { return true; }
             }
@@ -917,7 +962,7 @@ void DCQEFSolveCS(
     // EmitVertex). A valid-but-unreferenced cell — a boundary cell whose crossings all lie on
     // neighbour-owned edges — is kept in DCCellVertices but produces NO isolated output vertex,
     // which is what made the GPU coarse side carry extra unmatched boundary verts vs the CPU.
-    if (!IsCellReferencedByOwnedEdge(CX, CY, CZ, GridSize))
+    if (!IsCellReferencedByOwnedEdge(CX, CY, CZ, GridSize, (int)MeshCellDomain))
     {
         DCCellVertices[CIdx] = Vert;
         return;
@@ -1178,6 +1223,23 @@ void DCQuadGenerationCS(
     if (!bOwned)
     {
         return;
+    }
+
+    // Interior domain (seam-ownership): only edges whose 4 cells are all interior
+    // ([0, GridSize-1) per axis) — boundary geometry comes from the single-owner CPU
+    // seam jobs. Closed form: own-axis in [0, GS-1), varying axes in [1, GS-1).
+    // Mirrors the CPU Interior-domain quad rule.
+    if (MeshCellDomain != 0)
+    {
+        int OwnC = (Axis == 0) ? CX : ((Axis == 1) ? CY : CZ);
+        int VarA = (Axis == 0) ? CY : CX;
+        int VarB = (Axis == 2) ? CY : CZ;
+        if (OwnC >= GridSize - 1 ||
+            VarA < 1 || VarA >= GridSize - 1 ||
+            VarB < 1 || VarB >= GridSize - 1)
+        {
+            return;
+        }
     }
 
     // Look up 4 cell vertices

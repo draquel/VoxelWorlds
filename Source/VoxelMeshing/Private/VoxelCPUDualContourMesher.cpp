@@ -997,22 +997,7 @@ FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormal(
 	const FVoxelMeshingRequest& Request,
 	float X, float Y, float Z) const
 {
-	const int32 IX = FMath::FloorToInt(X);
-	const int32 IY = FMath::FloorToInt(Y);
-	const int32 IZ = FMath::FloorToInt(Z);
-
-	float gx = GetDensityAt(Request, IX + 1, IY, IZ) - GetDensityAt(Request, IX - 1, IY, IZ);
-	float gy = GetDensityAt(Request, IX, IY + 1, IZ) - GetDensityAt(Request, IX, IY - 1, IZ);
-	float gz = GetDensityAt(Request, IX, IY, IZ + 1) - GetDensityAt(Request, IX, IY, IZ - 1);
-
-	FVector3f Normal(-gx, -gy, -gz);
-
-	if (!Normal.Normalize())
-	{
-		return FVector3f(0.0f, 0.0f, 1.0f);
-	}
-
-	return Normal;
+	return CalculateGradientNormalLOD(Request, X, Y, Z, 1);
 }
 
 FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormalLOD(
@@ -1023,6 +1008,33 @@ FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormalLOD(
 	const int32 IX = FMath::FloorToInt(X);
 	const int32 IY = FMath::FloorToInt(Y);
 	const int32 IZ = FMath::FloorToInt(Z);
+
+	// Interior domain (seam-ownership): gradient taps that would exit the chunk CLAMP to the
+	// nearest edge voxel ("the terrain continues") instead of reading the absent-neighbour Air
+	// fallback ("the terrain cliffs"). The Air tilt biased every rim crossing's normal toward
+	// the boundary, shading each chunk's rim ring differently — a per-chunk checkerboard at
+	// world scale. Clamping keeps the zero-neighbour-dependence property (pure function of own
+	// content); the seam samplers apply the same rule so ring recomputes still match bit-exactly.
+	// Full-domain (legacy) behaviour is unchanged.
+	if (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior)
+	{
+		const int32 Max = Request.ChunkSize - 1;
+		auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
+		{
+			return GetDensityAt(Request,
+				FMath::Clamp(TX, 0, Max), FMath::Clamp(TY, 0, Max), FMath::Clamp(TZ, 0, Max));
+		};
+		float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
+		float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
+		float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
+
+		FVector3f Normal(-gx, -gy, -gz);
+		if (!Normal.Normalize())
+		{
+			return FVector3f(0.0f, 0.0f, 1.0f);
+		}
+		return Normal;
+	}
 
 	float gx = GetDensityAt(Request, IX + Stride, IY, IZ) - GetDensityAt(Request, IX - Stride, IY, IZ);
 	float gy = GetDensityAt(Request, IX, IY + Stride, IZ) - GetDensityAt(Request, IX, IY - Stride, IZ);
@@ -1067,7 +1079,7 @@ namespace VoxelDCFaceSeam
 			const int32 CS = Req.ChunkSize;
 			if (X >= 0 && X < CS && Y >= 0 && Y < CS && Z >= 0 && Z < CS)
 			{
-				const TArray<FVoxelData>& Data = (Mode == EMode::BOnly) ? Req.VoxelDataB : Req.VoxelDataA;
+				const TArray<FVoxelData>& Data = (Mode == EMode::BOnly) ? *Req.VoxelDataB : *Req.VoxelDataA;
 				return Data[X + Y * CS + Z * CS * CS];
 			}
 			if (Mode == EMode::Combined)
@@ -1079,7 +1091,7 @@ namespace VoxelDCFaceSeam
 					C[U] -= CS;
 					if (C[0] >= 0 && C[0] < CS && C[1] >= 0 && C[1] < CS && C[2] >= 0 && C[2] < CS)
 					{
-						return Req.VoxelDataB[C[0] + C[1] * CS + C[2] * CS * CS];
+						return (*Req.VoxelDataB)[C[0] + C[1] * CS + C[2] * CS * CS];
 					}
 				}
 			}
@@ -1092,18 +1104,35 @@ namespace VoxelDCFaceSeam
 		}
 
 		/**
-		 * Replicates CalculateGradientNormal / CalculateGradientNormalLOD exactly (the two are
-		 * numerically identical at Stride 1, which is when the interior pass picks the former).
+		 * Gradient normal with taps CLAMPED into the sampler's valid data box (frame-local),
+		 * matching the Interior pass's clamp rule — "the terrain continues" past the data edge
+		 * instead of the Air cliff that checkerboarded chunk-rim shading. The box derives from
+		 * the mode: own chunk only, or both chunks along the face axis for Combined.
 		 */
 		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
 		{
+			const int32 CS = Req.ChunkSize;
+			int32 Lo[3] = { 0, 0, 0 };
+			int32 Hi[3] = { CS - 1, CS - 1, CS - 1 };
+			if (Mode == EMode::Combined)
+			{
+				Hi[Req.Axis] = 2 * CS - 1;
+			}
+
 			const int32 IX = FMath::FloorToInt(X);
 			const int32 IY = FMath::FloorToInt(Y);
 			const int32 IZ = FMath::FloorToInt(Z);
+			auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
+			{
+				return GetDensity(
+					FMath::Clamp(TX, Lo[0], Hi[0]),
+					FMath::Clamp(TY, Lo[1], Hi[1]),
+					FMath::Clamp(TZ, Lo[2], Hi[2]));
+			};
 
-			float gx = GetDensity(IX + Stride, IY, IZ) - GetDensity(IX - Stride, IY, IZ);
-			float gy = GetDensity(IX, IY + Stride, IZ) - GetDensity(IX, IY - Stride, IZ);
-			float gz = GetDensity(IX, IY, IZ + Stride) - GetDensity(IX, IY, IZ - Stride);
+			float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
+			float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
+			float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
 
 			FVector3f Normal(-gx, -gy, -gz);
 			if (!Normal.Normalize())
@@ -1190,7 +1219,7 @@ namespace VoxelDCFaceSeam
 			L[UAxis] = C[UAxis];
 			L[PerpA] = CA - Dv * CS;
 			L[PerpB] = CB - Dw * CS;
-			const TArray<FVoxelData>& Data = Req.VoxelData[Dv + Dw * 2];
+			const TArray<FVoxelData>& Data = *Req.VoxelData[Dv + Dw * 2];
 			return Data[L[0] + L[1] * CS + L[2] * CS * CS];
 		}
 
@@ -1199,16 +1228,41 @@ namespace VoxelDCFaceSeam
 			return static_cast<float>(GetVoxel(X, Y, Z).Density) / 255.0f;
 		}
 
-		/** Replicates CalculateGradientNormal(/LOD) exactly — see FSeamSampler::GradientNormal. */
+		/**
+		 * Gradient normal with taps clamped into the mask's valid box (frame-local) — the same
+		 * "terrain continues" rule as the Interior pass and FSeamSampler. Masks are always
+		 * boxes by construction (per-axis allowed halves), so the box is derivable per axis.
+		 */
 		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
 		{
+			const int32 CS = Req.ChunkSize;
+			int32 Lo[3];
+			int32 Hi[3];
+			Lo[UAxis] = -FrameOffsetVoxels[UAxis];
+			Hi[UAxis] = CS - 1 - FrameOffsetVoxels[UAxis];
+			const bool bDv0 = (QuadrantMask & 0b0101) != 0;
+			const bool bDv1 = (QuadrantMask & 0b1010) != 0;
+			const bool bDw0 = (QuadrantMask & 0b0011) != 0;
+			const bool bDw1 = (QuadrantMask & 0b1100) != 0;
+			Lo[PerpA] = (bDv0 ? 0 : CS) - FrameOffsetVoxels[PerpA];
+			Hi[PerpA] = (bDv1 ? 2 * CS - 1 : CS - 1) - FrameOffsetVoxels[PerpA];
+			Lo[PerpB] = (bDw0 ? 0 : CS) - FrameOffsetVoxels[PerpB];
+			Hi[PerpB] = (bDw1 ? 2 * CS - 1 : CS - 1) - FrameOffsetVoxels[PerpB];
+
 			const int32 IX = FMath::FloorToInt(X);
 			const int32 IY = FMath::FloorToInt(Y);
 			const int32 IZ = FMath::FloorToInt(Z);
+			auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
+			{
+				return GetDensity(
+					FMath::Clamp(TX, Lo[0], Hi[0]),
+					FMath::Clamp(TY, Lo[1], Hi[1]),
+					FMath::Clamp(TZ, Lo[2], Hi[2]));
+			};
 
-			float gx = GetDensity(IX + Stride, IY, IZ) - GetDensity(IX - Stride, IY, IZ);
-			float gy = GetDensity(IX, IY + Stride, IZ) - GetDensity(IX, IY - Stride, IZ);
-			float gz = GetDensity(IX, IY, IZ + Stride) - GetDensity(IX, IY, IZ - Stride);
+			float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
+			float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
+			float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
 
 			FVector3f Normal(-gx, -gy, -gz);
 			if (!Normal.Normalize())
@@ -1254,7 +1308,7 @@ namespace VoxelDCFaceSeam
 			const int32 LX = C[0] - Dx * CS;
 			const int32 LY = C[1] - Dy * CS;
 			const int32 LZ = C[2] - Dz * CS;
-			return Req.VoxelData[Octant][LX + LY * CS + LZ * CS * CS];
+			return (*Req.VoxelData[Octant])[LX + LY * CS + LZ * CS * CS];
 		}
 
 		float GetDensity(int32 X, int32 Y, int32 Z) const
@@ -1262,16 +1316,41 @@ namespace VoxelDCFaceSeam
 			return static_cast<float>(GetVoxel(X, Y, Z).Density) / 255.0f;
 		}
 
-		/** Replicates CalculateGradientNormal(/LOD) exactly — see FSeamSampler::GradientNormal. */
+		/**
+		 * Gradient normal with taps clamped into the octant mask's valid box (frame-local) —
+		 * the same "terrain continues" rule as the other samplers. Octant masks are always
+		 * boxes by construction (per-axis allowed halves).
+		 */
 		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
 		{
+			const int32 CS = Req.ChunkSize;
+			// Per-axis half presence: low/high octant-mask bits per axis (X, Y, Z).
+			static const uint8 LowHalf[3] = { 0x55, 0x33, 0x0F };
+			static const uint8 HighHalf[3] = { 0xAA, 0xCC, 0xF0 };
+			int32 Lo[3];
+			int32 Hi[3];
+			for (int32 Axis = 0; Axis < 3; ++Axis)
+			{
+				const bool bLow = (OctantMask & LowHalf[Axis]) != 0;
+				const bool bHigh = (OctantMask & HighHalf[Axis]) != 0;
+				Lo[Axis] = (bLow ? 0 : CS) - FrameOffsetVoxels[Axis];
+				Hi[Axis] = (bHigh ? 2 * CS - 1 : CS - 1) - FrameOffsetVoxels[Axis];
+			}
+
 			const int32 IX = FMath::FloorToInt(X);
 			const int32 IY = FMath::FloorToInt(Y);
 			const int32 IZ = FMath::FloorToInt(Z);
+			auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
+			{
+				return GetDensity(
+					FMath::Clamp(TX, Lo[0], Hi[0]),
+					FMath::Clamp(TY, Lo[1], Hi[1]),
+					FMath::Clamp(TZ, Lo[2], Hi[2]));
+			};
 
-			float gx = GetDensity(IX + Stride, IY, IZ) - GetDensity(IX - Stride, IY, IZ);
-			float gy = GetDensity(IX, IY + Stride, IZ) - GetDensity(IX, IY - Stride, IZ);
-			float gz = GetDensity(IX, IY, IZ + Stride) - GetDensity(IX, IY, IZ - Stride);
+			float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
+			float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
+			float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
 
 			FVector3f Normal(-gx, -gy, -gz);
 			if (!Normal.Normalize())
@@ -2435,7 +2514,9 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 	if (!SeamRequest.IsValid())
 	{
 		UE_LOG(LogVoxelMeshing, Error, TEXT("GenerateFaceSeamMeshCPU: invalid seam request (axis=%d, chunkSize=%d, A=%d, B=%d voxels)"),
-			SeamRequest.Axis, SeamRequest.ChunkSize, SeamRequest.VoxelDataA.Num(), SeamRequest.VoxelDataB.Num());
+			SeamRequest.Axis, SeamRequest.ChunkSize,
+			SeamRequest.VoxelDataA.IsValid() ? SeamRequest.VoxelDataA->Num() : 0,
+			SeamRequest.VoxelDataB.IsValid() ? SeamRequest.VoxelDataB->Num() : 0);
 		return false;
 	}
 
