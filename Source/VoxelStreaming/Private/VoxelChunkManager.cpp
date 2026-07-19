@@ -1016,6 +1016,16 @@ void UVoxelChunkManager::Initialize(
 	// Subscribe to edit events - mark chunks dirty when edited
 	EditManager->OnChunkEdited.AddLambda([this](const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
 	{
+		// The edit changed this chunk's LOGICAL voxel content, but it lives in the edit-manager
+		// layer — the descriptor array is untouched, so nothing else advances ContentVersion.
+		// Bump it before MarkChunkDirty so the seam registry restales against the NEW version and
+		// the shared voxel-snapshot cache (seam jobs + async collision cooks key edit-merged
+		// snapshots off ContentVersion) rebuilds instead of re-serving the pre-edit snapshot.
+		if (FVoxelChunkState* EditedState = ChunkStates.Find(ChunkCoord))
+		{
+			EditedState->Descriptor.BumpContentVersion();
+		}
+
 		// Mark the edited chunk dirty
 		MarkChunkDirty(ChunkCoord);
 		if (CollisionManager)
