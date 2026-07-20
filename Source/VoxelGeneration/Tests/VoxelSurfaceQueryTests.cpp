@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelSurfaceQuery.h"
+#include "VoxelBiomeSnapshot.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelNoiseTypes.h"
 
@@ -37,9 +38,10 @@ bool FVoxelSurfaceQueryConsistencyTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("GetSurfaceHeight matches IVoxelWorldMode::GetTerrainHeightAt"), QueryHeight, DirectHeight);
 
 	// 2. SampleSurface aggregates the individual queries consistently.
+	// Default (invalid) snapshot = the former null-BiomeConfig case.
 	const FVoxelSurfaceSample Sample = FVoxelSurfaceQuery::SampleSurface(
 		WorldMode, WorldX, WorldY, VoxelSize, NoiseParams,
-		/*BiomeConfig*/ nullptr, /*WorldSeed*/ 12345,
+		FVoxelBiomeSnapshot(), /*WorldSeed*/ 12345,
 		/*bEnableWaterLevel*/ false, /*WaterLevel*/ 0.0f);
 
 	TestEqual(TEXT("SampleSurface.Height matches GetSurfaceHeight"), Sample.Height, QueryHeight);

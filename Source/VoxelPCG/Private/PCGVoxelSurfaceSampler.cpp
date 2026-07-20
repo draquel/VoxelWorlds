@@ -16,6 +16,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelBiomeSnapshot.h"
 #include "VoxelNoiseTypes.h"
 #include "IVoxelWorldMode.h"
 
@@ -236,6 +237,10 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 	Samples.Reserve(NumCells);
 	CellIndices.Reserve(NumCells);
 
+	// Hoisted biome snapshot for the per-cell surface queries (plain data — the UObject is read
+	// once here on the PCG execution thread, per the sampler's synchronous execution contract).
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(VoxelCtx.BiomeConfig);
+
 	for (int32 IX = MinX; IX <= MaxX; ++IX)
 	{
 		const double WorldX = static_cast<double>(IX) * Spacing;
@@ -271,7 +276,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 					*VoxelCtx.WorldMode,
 					static_cast<float>(WorldX), static_cast<float>(WorldY),
 					VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-					VoxelCtx.BiomeConfig, VoxelCtx.WorldSeed,
+					BiomeSnapshot, VoxelCtx.WorldSeed,
 					VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel);
 			}
 

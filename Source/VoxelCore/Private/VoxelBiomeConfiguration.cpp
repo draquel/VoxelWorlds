@@ -408,188 +408,23 @@ uint8 UVoxelBiomeConfiguration::SelectBiomeID(float Temperature, float Moisture,
 
 FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moisture, float Continentalness) const
 {
-	if (Biomes.Num() == 0)
-	{
-		return FBiomeBlend(0);
-	}
-
-	// Clamp values to valid range
-	Temperature = FMath::Clamp(Temperature, -1.0f, 1.0f);
-	Moisture = FMath::Clamp(Moisture, -1.0f, 1.0f);
-	Continentalness = FMath::Clamp(Continentalness, -1.0f, 1.0f);
-
-	// Ensure minimum blend width
-	const float EffectiveBlendWidth = FMath::Max(BiomeBlendWidth, 0.01f);
-
-	// Tiered blending: continentalness is a hard gate with soft edges,
-	// temperature/moisture is the selector within the filtered set.
-	struct FBiomeWeight
-	{
-		uint8 BiomeID;
-		float Weight;
-	};
-	TArray<FBiomeWeight> CandidateBiomes;
-	CandidateBiomes.Reserve(Biomes.Num());
-
-	for (const FBiomeDefinition& Biome : Biomes)
-	{
-		// Step 1: Continentalness gate — hard exclusion outside blend zone
-		const float ContDist = Biome.GetContinentalnessSignedDistance(Continentalness);
-		if (ContDist < -EffectiveBlendWidth)
-		{
-			continue; // Excluded by continentalness gate
-		}
-
-		// Step 2: Continentalness factor — smoothstep from 0 at -BlendWidth to 1 at +BlendWidth
-		float ContFactor;
-		if (ContDist >= EffectiveBlendWidth)
-		{
-			ContFactor = 1.0f;
-		}
-		else
-		{
-			const float T = (ContDist + EffectiveBlendWidth) / (2.0f * EffectiveBlendWidth);
-			ContFactor = T * T * (3.0f - 2.0f * T); // smoothstep
-		}
-
-		// Step 3: Temperature/Moisture weight — 2D signed distance with smoothstep
-		const float TMDist = Biome.GetSignedDistanceToEdge2D(Temperature, Moisture);
-		float TMWeight;
-		if (TMDist >= EffectiveBlendWidth)
-		{
-			TMWeight = 1.0f;
-		}
-		else if (TMDist > -EffectiveBlendWidth)
-		{
-			const float T = (TMDist + EffectiveBlendWidth) / (2.0f * EffectiveBlendWidth);
-			TMWeight = T * T * (3.0f - 2.0f * T); // smoothstep
-		}
-		else
-		{
-			TMWeight = 0.0f;
-		}
-
-		// Step 4: Combined weight = TM selection * continentalness gate * priority boost
-		// Priority boost ensures higher-priority biomes dominate in blend zones.
-		// Uses exponential scaling so high-priority biomes strongly outweigh low-priority
-		// in contested blend regions. Priority 0 → 1.0x, Priority 10 → 4.0x.
-		const float PriorityBoost = FMath::Pow(2.0f, Biome.SelectionPriority * 0.2f);
-		const float FinalWeight = TMWeight * ContFactor * PriorityBoost;
-
-		if (FinalWeight > 0.001f)
-		{
-			CandidateBiomes.Add({ Biome.BiomeID, FinalWeight });
-		}
-	}
-
-	// If no biomes match, return the first biome
-	if (CandidateBiomes.Num() == 0)
-	{
-		return FBiomeBlend(Biomes[0].BiomeID);
-	}
-
-	// Sort by weight (descending)
-	CandidateBiomes.Sort([](const FBiomeWeight& A, const FBiomeWeight& B) {
-		return A.Weight > B.Weight;
-	});
-
-	// Build the blend result (limited to MAX_BIOME_BLEND)
-	FBiomeBlend Result;
-	Result.BiomeCount = FMath::Min(CandidateBiomes.Num(), MAX_BIOME_BLEND);
-
-	for (int32 i = 0; i < Result.BiomeCount; ++i)
-	{
-		Result.BiomeIDs[i] = CandidateBiomes[i].BiomeID;
-		Result.Weights[i] = CandidateBiomes[i].Weight;
-	}
-
-	// Normalize weights to sum to 1.0
-	Result.NormalizeWeights();
-
-	return Result;
+	// Shared algorithm core (FVoxelBiomeSnapshot uses the same one, so the UObject and snapshot
+	// paths cannot drift).
+	return FVoxelBiomeSnapshot::ComputeBiomeBlend(Biomes, BiomeBlendWidth, Temperature, Moisture, Continentalness);
 }
 
 uint8 UVoxelBiomeConfiguration::GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface) const
 {
-	// For single biome or dominant biome, use simple lookup
-	if (Blend.BiomeCount == 1 || Blend.Weights[0] > 0.9f)
-	{
-		const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
-		return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
-	}
-
-	// For blended biomes, use weighted random selection
-	// This creates a dithered blend effect that looks more natural than hard edges
-	float RandomValue = FMath::Frac(
-		Blend.Weights[0] * 17.3f +
-		Blend.Weights[1] * 31.7f +
-		DepthBelowSurface * 0.1f
-	);
-
-	// Walk through weights to select biome
-	float CumulativeWeight = 0.0f;
-	for (int32 i = 0; i < Blend.BiomeCount; ++i)
-	{
-		CumulativeWeight += Blend.Weights[i];
-		if (RandomValue < CumulativeWeight)
-		{
-			const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[i]);
-			return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
-		}
-	}
-
-	// Fallback to dominant biome
-	const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
-	return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
+	// Shared algorithm core — see FVoxelBiomeSnapshot.
+	return FVoxelBiomeSnapshot::SelectBlendedMaterial(Biomes, Blend, DepthBelowSurface);
 }
 
 uint8 UVoxelBiomeConfiguration::GetBlendedMaterialWithWater(const FBiomeBlend& Blend, float DepthBelowSurface,
 	float TerrainSurfaceHeight, float WaterLevel) const
 {
-	// Determine if terrain surface is underwater
-	const bool bIsUnderwater = bEnableUnderwaterMaterials && (TerrainSurfaceHeight < WaterLevel);
-
-	// For single biome or dominant biome, use simple lookup
-	if (Blend.BiomeCount == 1 || Blend.Weights[0] > 0.9f)
-	{
-		const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
-		if (Biome)
-		{
-			return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
-		}
-		return bIsUnderwater ? DefaultUnderwaterMaterial : 0;
-	}
-
-	// For blended biomes, use weighted random selection
-	float RandomValue = FMath::Frac(
-		Blend.Weights[0] * 17.3f +
-		Blend.Weights[1] * 31.7f +
-		DepthBelowSurface * 0.1f
-	);
-
-	// Walk through weights to select biome
-	float CumulativeWeight = 0.0f;
-	for (int32 i = 0; i < Blend.BiomeCount; ++i)
-	{
-		CumulativeWeight += Blend.Weights[i];
-		if (RandomValue < CumulativeWeight)
-		{
-			const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[i]);
-			if (Biome)
-			{
-				return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
-			}
-			return bIsUnderwater ? DefaultUnderwaterMaterial : 0;
-		}
-	}
-
-	// Fallback to dominant biome
-	const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
-	if (Biome)
-	{
-		return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
-	}
-	return bIsUnderwater ? DefaultUnderwaterMaterial : 0;
+	// Shared algorithm core — see FVoxelBiomeSnapshot.
+	return FVoxelBiomeSnapshot::SelectBlendedMaterialWithWater(Biomes, Blend, DepthBelowSurface,
+		TerrainSurfaceHeight, WaterLevel, bEnableUnderwaterMaterials, DefaultUnderwaterMaterial);
 }
 
 uint8 UVoxelBiomeConfiguration::ApplyHeightMaterialRules(uint8 CurrentMaterial, float WorldHeight, float DepthBelowSurface) const
@@ -604,16 +439,8 @@ uint8 UVoxelBiomeConfiguration::ApplyHeightMaterialRules(uint8 CurrentMaterial, 
 		RebuildHeightRulesCache();
 	}
 
-	// Check rules in priority order (cached sorted)
-	for (const FHeightMaterialRule& Rule : SortedHeightRules)
-	{
-		if (Rule.Applies(WorldHeight, DepthBelowSurface))
-		{
-			return Rule.MaterialID;
-		}
-	}
-
-	return CurrentMaterial;
+	// Shared algorithm core (priority order guaranteed by the sorted cache) — see FVoxelBiomeSnapshot.
+	return FVoxelBiomeSnapshot::ApplyHeightRules(SortedHeightRules, CurrentMaterial, WorldHeight, DepthBelowSurface);
 }
 
 bool UVoxelBiomeConfiguration::IsValid() const

@@ -84,6 +84,9 @@ FVoxelFieldSampleContext FVoxelFieldSampleContext::FromConfiguration(const UVoxe
 	// Continentalness-aware analytic height (InfinitePlane + IslandBowl); no-op for other modes.
 	Ctx.WorldMode->SetBiomeContext(Ctx.BiomeConfig);
 
+	// Value snapshot for the material/biome surface queries (same data the world mode captured).
+	Ctx.BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(Ctx.BiomeConfig);
+
 	// Derive the biome-climate noise params — mirrors FVoxelCPUNoiseGenerator / UVoxelMapSubsystem.
 	auto InitClimate = [](FVoxelNoiseParams& P)
 	{
@@ -299,7 +302,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 			const float H = FVoxelSurfaceQuery::GetSurfaceHeight(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.NoiseParams);
 			uint8 Mat = 0, Biome = 0;
 			FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(X), static_cast<float>(Y), H, C.VoxelSize,
-				C.BiomeConfig, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
+				C.BiomeSnapshot, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
 			return static_cast<float>(Mat);
 		};
 		RegisterField(F);
@@ -317,7 +320,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 			const float H = FVoxelSurfaceQuery::GetSurfaceHeight(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.NoiseParams);
 			uint8 Mat = 0, Biome = 0;
 			FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(X), static_cast<float>(Y), H, C.VoxelSize,
-				C.BiomeConfig, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
+				C.BiomeSnapshot, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
 			return static_cast<float>(Biome);
 		};
 		RegisterField(F);
@@ -395,7 +398,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 			const float H = FVoxelSurfaceQuery::GetSurfaceHeight(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.NoiseParams);
 			uint8 Mat = 0, Biome = 0;
 			FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(X), static_cast<float>(Y), H, C.VoxelSize,
-				C.BiomeConfig, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
+				C.BiomeSnapshot, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
 			const bool bUnderwater = C.bEnableWaterLevel && H < C.WaterLevel;
 			return FVoxelCaveQuery::SampleCaveDensityAt(FVector(X, Y, Z), H, C.VoxelSize, Biome, C.CaveConfig, C.GetSeed(), bUnderwater);
 		};
