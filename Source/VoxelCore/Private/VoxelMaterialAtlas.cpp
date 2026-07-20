@@ -3,6 +3,7 @@
 #include "VoxelMaterialAtlas.h"
 #include "VoxelMaterialRegistry.h"
 #include "Engine/Texture2DArray.h"
+#include "ImageCore.h"
 #include "TextureResource.h"
 
 #if WITH_EDITOR
@@ -616,6 +617,122 @@ void UVoxelMaterialAtlas::BuildTextureArrays()
 	else
 	{
 		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("No texture arrays were built - check that MaterialConfigs have source textures assigned"));
+	}
+
+	// Refresh the 2D map colors from the same source textures we just packed.
+	BakeMapColors();
+}
+
+// ---------------------------------------------------------------------------
+// 2D map colors
+// ---------------------------------------------------------------------------
+
+void UVoxelMaterialAtlas::BakeMapColors()
+{
+#if WITH_EDITOR
+	int32 BakedCount = 0;
+
+	for (FVoxelMaterialTextureConfig& Config : MaterialConfigs)
+	{
+		if (Config.AlbedoTexture.IsNull())
+		{
+			continue;
+		}
+
+		UTexture2D* Texture = Config.AlbedoTexture.LoadSynchronous();
+		if (!Texture || !Texture->Source.IsValid())
+		{
+			UE_LOG(LogVoxelMaterialAtlas, Warning,
+				TEXT("BakeMapColors: MaterialID %d (%s) has no readable source texture — keeping registry palette color"),
+				Config.MaterialID, *Config.MaterialName);
+			continue;
+		}
+
+		// Read mip 0 and convert to linear float; averaging sRGB bytes directly would bias the
+		// result (gamma is non-linear), which is why we go through RGBA32F/Linear here.
+		FImage SourceImage;
+		if (!Texture->Source.GetMipImage(SourceImage, 0))
+		{
+			UE_LOG(LogVoxelMaterialAtlas, Warning,
+				TEXT("BakeMapColors: failed to read mip 0 for MaterialID %d (%s)"),
+				Config.MaterialID, *Config.MaterialName);
+			continue;
+		}
+
+		FImage LinearImage;
+		SourceImage.CopyTo(LinearImage, ERawImageFormat::RGBA32F, EGammaSpace::Linear);
+
+		const TArrayView64<FLinearColor> Pixels = LinearImage.AsRGBA32F();
+
+		FLinearColor Sum(0.0f, 0.0f, 0.0f, 0.0f);
+		int64 Counted = 0;
+		for (const FLinearColor& Pixel : Pixels)
+		{
+			// Skip fully transparent texels: for masked materials (leaves) the cutout background
+			// would otherwise drag the average away from the actual foliage color.
+			if (Pixel.A <= 0.0f)
+			{
+				continue;
+			}
+			Sum += FLinearColor(Pixel.R, Pixel.G, Pixel.B, 0.0f);
+			++Counted;
+		}
+
+		if (Counted == 0)
+		{
+			UE_LOG(LogVoxelMaterialAtlas, Warning,
+				TEXT("BakeMapColors: MaterialID %d (%s) albedo is fully transparent — keeping registry palette color"),
+				Config.MaterialID, *Config.MaterialName);
+			continue;
+		}
+
+		const float InvCount = 1.0f / static_cast<float>(Counted);
+		const FLinearColor Average(Sum.R * InvCount, Sum.G * InvCount, Sum.B * InvCount, 1.0f);
+
+		// Back to sRGB bytes — the map texture is an sRGB FColor buffer.
+		Config.MapColor = Average.ToFColor(/*bSRGB=*/true);
+		Config.MapColor.A = 255; // alpha 255 marks "baked"
+		++BakedCount;
+
+		UE_LOG(LogVoxelMaterialAtlas, Verbose, TEXT("BakeMapColors: MaterialID %d (%s) -> (%d,%d,%d) from %lld texels"),
+			Config.MaterialID, *Config.MaterialName,
+			Config.MapColor.R, Config.MapColor.G, Config.MapColor.B, Counted);
+	}
+
+	if (BakedCount > 0)
+	{
+		MarkPackageDirty();
+	}
+
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BakeMapColors: baked %d of %d material map colors"),
+		BakedCount, MaterialConfigs.Num());
+#else
+	// Cooked builds have no texture source data; the colors baked in the editor are already
+	// serialized into the asset, so this is a no-op by design.
+	UE_LOG(LogVoxelMaterialAtlas, Verbose, TEXT("BakeMapColors: editor-only (using colors baked into the asset)"));
+#endif
+}
+
+FColor UVoxelMaterialAtlas::GetMapColor(uint8 MaterialID) const
+{
+	if (const FVoxelMaterialTextureConfig* Config = GetMaterialConfig(MaterialID))
+	{
+		// Alpha 0 = never baked (or bake failed) -> fall through to the registry palette.
+		if (Config->MapColor.A > 0)
+		{
+			return Config->MapColor;
+		}
+	}
+
+	return FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
+}
+
+void UVoxelMaterialAtlas::BuildMapPalette(TArray<FColor>& OutPalette) const
+{
+	OutPalette.SetNumUninitialized(256);
+	for (int32 i = 0; i < 256; ++i)
+	{
+		OutPalette[i] = GetMapColor(static_cast<uint8>(i));
 	}
 }
 

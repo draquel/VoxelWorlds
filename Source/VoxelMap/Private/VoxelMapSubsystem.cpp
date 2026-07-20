@@ -7,7 +7,9 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelBiomeSnapshot.h"
+#include "VoxelMaterialAtlas.h"
 #include "VoxelSurfaceQuery.h"
+#include "VoxelWorldTestActor.h"
 #include "VoxelCoordinates.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelCPUNoiseGenerator.h"
@@ -218,6 +220,48 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	CachedBiomeConfig = Config->BiomeConfiguration;
 	bWaterEnabled = Config->bEnableWaterLevel;
 	CachedWaterLevel = Config->WaterLevel;
+
+	// Map palette: prefer the material atlas' baked per-material colors (average albedo of the
+	// actual terrain textures) over the material registry's hardcoded debug palette, so map
+	// colors read like the world does. Falls back per-material inside GetMapColor.
+	{
+		const UVoxelMaterialAtlas* Atlas = nullptr;
+		if (const AVoxelWorldTestActor* WorldActor = Cast<AVoxelWorldTestActor>(ChunkMgr->GetOwner()))
+		{
+			Atlas = WorldActor->MaterialAtlas;
+		}
+
+		if (Atlas)
+		{
+			Atlas->BuildMapPalette(CachedMaterialPalette);
+		}
+		else
+		{
+			// No atlas reachable (custom world actor): registry palette for every material.
+			CachedMaterialPalette.SetNumUninitialized(256);
+			for (int32 i = 0; i < 256; ++i)
+			{
+				CachedMaterialPalette[i] = FVoxelMaterialRegistry::GetMaterialColor(static_cast<uint8>(i));
+			}
+		}
+	}
+
+	// Elevation/depth shading ranges from the world mode's own height bounds (the generation
+	// authority) instead of hardcoded constants, so the gradient spans the terrain this config
+	// actually produces.
+	CachedWorldMode->GetTerrainHeightBounds(CachedTerrainMinHeight, CachedTerrainMaxHeight);
+
+	// Modes without real bounds (IVoxelWorldMode's default is a deliberately huge no-cull range,
+	// e.g. SphericalPlanet) would flatten the gradient to a constant. Fall back to the config's own
+	// noise envelope so shading still spans something meaningful.
+	if (!FMath::IsFinite(CachedTerrainMinHeight) || !FMath::IsFinite(CachedTerrainMaxHeight) ||
+		(CachedTerrainMaxHeight - CachedTerrainMinHeight) > 1.0e6f)
+	{
+		const float Center = Config->SeaLevel + Config->BaseHeight;
+		CachedTerrainMinHeight = Center - Config->HeightScale;
+		CachedTerrainMaxHeight = Center + Config->HeightScale;
+	}
+
 	bCacheResolved = true;
 
 	// Bind to chunk generation events
@@ -404,6 +448,11 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	const bool bUseWater = bWaterEnabled;
 	const float WaterLevel = CachedWaterLevel;
 
+	// Atlas-derived map palette + config-derived shading range (both plain data, captured by value).
+	TArray<FColor> MaterialPalette = CachedMaterialPalette;
+	const float TerrainMinHeight = CachedTerrainMinHeight;
+	const float TerrainMaxHeight = CachedTerrainMaxHeight;
+
 	// Value snapshot of the biome configuration — the background thread never touches the UObject.
 	// Carries everything the shared surface-material pipeline needs (biome defs, blend width,
 	// underwater + priority-sorted height rules, climate noise settings).
@@ -430,7 +479,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
 		[WeakThis, TileCoord, WorldMode, NoiseParams, ChunkSize, VoxelSize, WorldOrigin,
 		 bUseBiomes, bUseWater, WaterLevel, BiomeSnapshot,
-		 FallbackTempNoiseParams, FallbackMoistureNoiseParams]()
+		 FallbackTempNoiseParams, FallbackMoistureNoiseParams,
+		 MaterialPalette = MoveTemp(MaterialPalette), TerrainMinHeight, TerrainMaxHeight]()
 	{
 		// WorldMode is a TSharedPtr capture, validated non-null before launch — this task co-owns
 		// the instance, so it stays valid even if the subsystem and world are torn down while we run.
@@ -438,6 +488,39 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		TArray<FColor> PixelData;
 		PixelData.SetNumUninitialized(Resolution * Resolution);
 
+		// --- Pass 1: height grid, with a 1-pixel apron on every side ---
+		// The apron lets the hillshade gradient use real neighbor heights at the tile border, so
+		// shading is continuous across tile seams instead of flattening at the edges.
+		const int32 GridSize = Resolution + 2;
+		TArray<float> Heights;
+		Heights.SetNumUninitialized(GridSize * GridSize);
+
+		for (int32 GY = 0; GY < GridSize; ++GY)
+		{
+			for (int32 GX = 0; GX < GridSize; ++GX)
+			{
+				// Grid index (GX,GY) maps to pixel (GX-1, GY-1)
+				const float WorldX = (TileCoord.X * ChunkSize + GX - 1) * VoxelSize + WorldOrigin.X;
+				const float WorldY = (TileCoord.Y * ChunkSize + GY - 1) * VoxelSize + WorldOrigin.Y;
+
+				// TRUE generated surface height: the standalone mode carries a value-captured biome
+				// snapshot, so this applies the same continentalness modulation (offset + height-scale)
+				// and per-mode composition (e.g. IslandBowl falloff) as chunk generation.
+				Heights[GY * GridSize + GX] = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+			}
+		}
+
+		// Shading ranges derived from the world mode's real height bounds (see ResolveChunkManager).
+		// Land spans [reference .. max], water depth spans [water level .. min]; both guard against
+		// degenerate configs where the bounds collapse.
+		const float LandBase = bUseWater ? WaterLevel : TerrainMinHeight;
+		const float LandSpan = FMath::Max(TerrainMaxHeight - LandBase, 1.0f);
+		const float DepthSpan = FMath::Max(LandBase - TerrainMinHeight, 1.0f);
+
+		// Hillshade light: classic cartographic NW key light at ~45 degrees altitude.
+		const FVector LightDir = FVector(-0.707f, -0.707f, 1.0f).GetSafeNormal();
+
+		// --- Pass 2: color ---
 		for (int32 PY = 0; PY < Resolution; ++PY)
 		{
 			for (int32 PX = 0; PX < Resolution; ++PX)
@@ -445,10 +528,9 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 				const float WorldX = (TileCoord.X * ChunkSize + PX) * VoxelSize + WorldOrigin.X;
 				const float WorldY = (TileCoord.Y * ChunkSize + PY) * VoxelSize + WorldOrigin.Y;
 
-				// TRUE generated surface height: the standalone mode carries a value-captured biome
-				// snapshot, so this applies the same continentalness modulation (offset + height-scale)
-				// and per-mode composition (e.g. IslandBowl falloff) as chunk generation.
-				const float Height = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+				const int32 GX = PX + 1;
+				const int32 GY = PY + 1;
+				const float Height = Heights[GY * GridSize + GX];
 
 				// Surface material — the SAME shared pipeline as chunk generation, tree placement and
 				// PCG (temperature/moisture/continentalness noise -> tiered biome blend -> blended
@@ -483,10 +565,11 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 
 				if (bUseWater && Height < WaterLevel)
 				{
-					// Submerged terrain — render as water.
-					// Deeper water is darker blue for a depth effect.
+					// Submerged terrain — render as water, deeper = darker blue. Depth is
+					// normalized against the config's own terrain floor rather than a fixed
+					// constant, so shallow-water configs still get a readable gradient.
 					const float Depth = WaterLevel - Height;
-					const float DepthFactor = FMath::Clamp(1.0f - Depth / 3000.0f, 0.3f, 1.0f);
+					const float DepthFactor = FMath::Lerp(1.0f, 0.3f, FMath::Clamp(Depth / DepthSpan, 0.0f, 1.0f));
 					Color.R = FMath::Clamp(static_cast<int32>(20 * DepthFactor), 0, 255);
 					Color.G = FMath::Clamp(static_cast<int32>(80 * DepthFactor), 0, 255);
 					Color.B = FMath::Clamp(static_cast<int32>(180 * DepthFactor), 0, 255);
@@ -494,15 +577,33 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 				}
 				else
 				{
-					Color = FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
+					// Atlas-baked average albedo of the real terrain texture (registry palette
+					// where a material has no baked color).
+					Color = MaterialPalette[MaterialID];
 
-					// Height-based shading — elevation above the reference level
-					// (water level if enabled, otherwise 0) drives a gradient from
-					// dark at low land to bright at peaks, matching the water depth effect.
-					const float LandBase = bUseWater ? WaterLevel : 0.0f;
-					const float Elevation = Height - LandBase;
-					const float ElevationFactor = FMath::Clamp(Elevation / 4000.0f, 0.0f, 1.0f);
-					const float Brightness = FMath::Lerp(0.45f, 1.0f, ElevationFactor);
+					// Elevation tint — subtle darkening of low land toward the reference level,
+					// spanning the config's actual height range.
+					const float ElevationFactor = FMath::Clamp((Height - LandBase) / LandSpan, 0.0f, 1.0f);
+					const float Elevation = FMath::Lerp(0.75f, 1.0f, ElevationFactor);
+
+					// Hillshade — lambert N.L from the height gradient (central differences over the
+					// apron grid). This is what makes ridges and valleys legible; the elevation tint
+					// alone reads flat because terrain at one altitude is one flat color.
+					const float HL = Heights[GY * GridSize + (GX - 1)];
+					const float HR = Heights[GY * GridSize + (GX + 1)];
+					const float HD = Heights[(GY - 1) * GridSize + GX];
+					const float HU = Heights[(GY + 1) * GridSize + GX];
+
+					const float DX = (HR - HL) / (2.0f * VoxelSize);
+					const float DY = (HU - HD) / (2.0f * VoxelSize);
+					const FVector Normal = FVector(-DX, -DY, 1.0f).GetSafeNormal();
+
+					// Remap N.L into a gentle range: flat ground stays near its base color, slopes
+					// facing the light brighten and away-facing slopes fall into shadow.
+					const float NdotL = FMath::Clamp(static_cast<float>(FVector::DotProduct(Normal, LightDir)), 0.0f, 1.0f);
+					const float Shade = FMath::Lerp(0.55f, 1.25f, NdotL);
+
+					const float Brightness = Elevation * Shade;
 					Color.R = FMath::Clamp(static_cast<int32>(Color.R * Brightness), 0, 255);
 					Color.G = FMath::Clamp(static_cast<int32>(Color.G * Brightness), 0, 255);
 					Color.B = FMath::Clamp(static_cast<int32>(Color.B * Brightness), 0, 255);
