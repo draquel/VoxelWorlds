@@ -6,6 +6,8 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeRegistry.h"
+#include "VoxelBiomeSnapshot.h"
+#include "VoxelSurfaceQuery.h"
 #include "VoxelCoordinates.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelCPUNoiseGenerator.h"
@@ -402,86 +404,33 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	const bool bUseWater = bWaterEnabled;
 	const float WaterLevel = CachedWaterLevel;
 
-	// Capture biome config data by value for thread safety.
-	// We copy the biome array and noise settings so the background thread
-	// never touches the UObject. All biome APIs used below are stateless.
-	TArray<FBiomeDefinition> BiomeDefs;
-	float BiomeBlendWidth = 0.15f;
-	bool bHasBiomeConfig = false;
-	TArray<FHeightMaterialRule> HeightRules;
-	bool bEnableHeightMaterials = false;
+	// Value snapshot of the biome configuration — the background thread never touches the UObject.
+	// Carries everything the shared surface-material pipeline needs (biome defs, blend width,
+	// underwater + priority-sorted height rules, climate noise settings).
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(CachedBiomeConfig);
 
-	FVoxelNoiseParams TempNoiseParams;
-	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	TempNoiseParams.Octaves = 2;
-	TempNoiseParams.Persistence = 0.5f;
-	TempNoiseParams.Lacunarity = 2.0f;
-	TempNoiseParams.Amplitude = 1.0f;
+	// Fallback climate noise for "biomes on, but no valid config" — matches the CPU generator's
+	// hardcoded fallback (static registry biomes with default temperature/moisture fields).
+	FVoxelNoiseParams FallbackTempNoiseParams;
+	FallbackTempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	FallbackTempNoiseParams.Octaves = 2;
+	FallbackTempNoiseParams.Persistence = 0.5f;
+	FallbackTempNoiseParams.Lacunarity = 2.0f;
+	FallbackTempNoiseParams.Amplitude = 1.0f;
+	FallbackTempNoiseParams.Seed = NoiseParams.Seed + 1234;
+	FallbackTempNoiseParams.Frequency = 0.00005f;
 
-	FVoxelNoiseParams MoistureNoiseParams;
-	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	MoistureNoiseParams.Octaves = 2;
-	MoistureNoiseParams.Persistence = 0.5f;
-	MoistureNoiseParams.Lacunarity = 2.0f;
-	MoistureNoiseParams.Amplitude = 1.0f;
-
-	// Continentalness captured params — used ONLY for biome selection here. Height modulation is
-	// applied inside WorldMode->GetTerrainHeightAt via the mode's value-captured biome snapshot
-	// (offset AND height-scale curves, composed correctly per world mode).
-	bool bUseContinentalness = false;
-	FVoxelNoiseParams ContinentalnessNoiseParams;
-	ContinentalnessNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	ContinentalnessNoiseParams.Octaves = 2;
-	ContinentalnessNoiseParams.Persistence = 0.5f;
-	ContinentalnessNoiseParams.Lacunarity = 2.0f;
-	ContinentalnessNoiseParams.Amplitude = 1.0f;
-
-	if (bUseBiomes && CachedBiomeConfig && CachedBiomeConfig->IsValid())
-	{
-		bHasBiomeConfig = true;
-		BiomeDefs = CachedBiomeConfig->Biomes;
-		BiomeBlendWidth = CachedBiomeConfig->BiomeBlendWidth;
-		bEnableHeightMaterials = CachedBiomeConfig->bEnableHeightMaterials;
-		if (bEnableHeightMaterials)
-		{
-			// Priority-sorted to match ApplyHeightMaterialRules (first applicable wins in priority
-			// order; the raw array order gave a different winner when rules overlap).
-			HeightRules = CachedBiomeConfig->HeightMaterialRules;
-			HeightRules.Sort([](const FHeightMaterialRule& A, const FHeightMaterialRule& B) {
-				return A.Priority > B.Priority;
-			});
-		}
-		TempNoiseParams.Seed = NoiseParams.Seed + CachedBiomeConfig->TemperatureSeedOffset;
-		TempNoiseParams.Frequency = CachedBiomeConfig->TemperatureNoiseFrequency;
-		MoistureNoiseParams.Seed = NoiseParams.Seed + CachedBiomeConfig->MoistureSeedOffset;
-		MoistureNoiseParams.Frequency = CachedBiomeConfig->MoistureNoiseFrequency;
-
-		if (CachedBiomeConfig->bEnableContinentalness)
-		{
-			bUseContinentalness = true;
-			ContinentalnessNoiseParams.Seed = NoiseParams.Seed + CachedBiomeConfig->ContinentalnessSeedOffset;
-			ContinentalnessNoiseParams.Frequency = CachedBiomeConfig->ContinentalnessNoiseFrequency;
-		}
-	}
-	else if (bUseBiomes)
-	{
-		// Fallback defaults matching VoxelCPUNoiseGenerator behavior
-		TempNoiseParams.Seed = NoiseParams.Seed + 1234;
-		TempNoiseParams.Frequency = 0.00005f;
-		MoistureNoiseParams.Seed = NoiseParams.Seed + 5678;
-		MoistureNoiseParams.Frequency = 0.00007f;
-	}
+	FVoxelNoiseParams FallbackMoistureNoiseParams = FallbackTempNoiseParams;
+	FallbackMoistureNoiseParams.Seed = NoiseParams.Seed + 5678;
+	FallbackMoistureNoiseParams.Frequency = 0.00007f;
 
 	// Use a weak pointer to safely call back to the subsystem
 	TWeakObjectPtr<UVoxelMapSubsystem> WeakThis(this);
 
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
 		[WeakThis, TileCoord, WorldMode, NoiseParams, ChunkSize, VoxelSize, WorldOrigin,
-		 bUseBiomes, bUseWater, WaterLevel,
-		 bHasBiomeConfig, BiomeDefs = MoveTemp(BiomeDefs), BiomeBlendWidth,
-		 bEnableHeightMaterials, HeightRules = MoveTemp(HeightRules),
-		 TempNoiseParams, MoistureNoiseParams,
-		 bUseContinentalness, ContinentalnessNoiseParams]()
+		 bUseBiomes, bUseWater, WaterLevel, BiomeSnapshot,
+		 FallbackTempNoiseParams, FallbackMoistureNoiseParams]()
 	{
 		// WorldMode is a TSharedPtr capture, validated non-null before launch — this task co-owns
 		// the instance, so it stays valid even if the subsystem and world are torn down while we run.
@@ -501,63 +450,27 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 				// and per-mode composition (e.g. IslandBowl falloff) as chunk generation.
 				const float Height = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
 
-				// Sample continentalness for biome selection (height modulation already applied above)
-				float Continentalness = 0.0f;
-				if (bUseContinentalness)
-				{
-					const FVector ContSamplePos(WorldX, WorldY, 0.0f);
-					Continentalness = FVoxelCPUNoiseGenerator::FBM3D(ContSamplePos, ContinentalnessNoiseParams);
-				}
-
-				// Determine surface material using biome system (matches VoxelCPUNoiseGenerator)
+				// Surface material — the SAME shared pipeline as chunk generation, tree placement and
+				// PCG (temperature/moisture/continentalness noise -> tiered biome blend -> blended
+				// material -> priority-sorted height rules), via FVoxelSurfaceQuery + the snapshot.
 				uint8 MaterialID = 0;
 
-				if (bUseBiomes)
+				if (bUseBiomes && BiomeSnapshot.bIsValid)
 				{
-					// Sample temperature and moisture noise at this XY position
+					uint8 BiomeID = 0;
+					FVoxelSurfaceQuery::QuerySurfaceConditions(
+						WorldX, WorldY, Height, VoxelSize,
+						BiomeSnapshot, NoiseParams.Seed, bUseWater, WaterLevel,
+						MaterialID, BiomeID);
+				}
+				else if (bUseBiomes)
+				{
+					// No valid biome config: static registry fallback (matches the CPU generator).
 					const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
-					const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, TempNoiseParams);
-					const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, MoistureNoiseParams);
-
-					if (bHasBiomeConfig)
-					{
-						// Use captured biome definitions for blend selection.
-						// Replicate the blend logic locally since we can't call UObject methods
-						// from a background thread. Select dominant biome by closest center.
-						const FBiomeDefinition* BestBiome = BiomeDefs.Num() > 0 ? &BiomeDefs[0] : nullptr;
-						int32 BestPriority = INT_MIN;
-						for (const FBiomeDefinition& Biome : BiomeDefs)
-						{
-							if (Biome.Contains(Temperature, Moisture, Continentalness) && Biome.SelectionPriority > BestPriority)
-							{
-								BestPriority = Biome.SelectionPriority;
-								BestBiome = &Biome;
-							}
-						}
-						if (BestBiome)
-						{
-							MaterialID = BestBiome->GetMaterialAtDepth(0.0f);
-						}
-
-						// Apply height material rules (snow on peaks, etc.)
-						if (bEnableHeightMaterials)
-						{
-							for (const FHeightMaterialRule& Rule : HeightRules)
-							{
-								if (Rule.Applies(Height, 0.0f))
-								{
-									MaterialID = Rule.MaterialID;
-									break;
-								}
-							}
-						}
-					}
-					else
-					{
-						// Fallback to static biome registry
-						FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
-						MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
-					}
+					const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackTempNoiseParams);
+					const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackMoistureNoiseParams);
+					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
 				}
 				else
 				{

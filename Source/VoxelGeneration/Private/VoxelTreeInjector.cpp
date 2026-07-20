@@ -4,6 +4,7 @@
 #include "VoxelCoreTypes.h"
 #include "IVoxelWorldMode.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelBiomeSnapshot.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelSurfaceQuery.h"
 
@@ -170,6 +171,10 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 	// Chunk origin in global voxel coordinates
 	const FIntVector ChunkVoxelOrigin = SourceChunkCoord * ChunkSize;
 
+	// Hoisted biome snapshot for the per-tree surface queries below (plain data; same lifetime
+	// contract as the generator's own use of the config — it outlives generation).
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(BiomeConfig);
+
 	for (int32 TreeIdx = 0; TreeIdx < NumTrees; ++TreeIdx)
 	{
 		// Random X,Y within source chunk (in local voxel coords)
@@ -207,7 +212,7 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		uint8 SurfaceMaterial = 0;
 		uint8 BiomeID = 0;
 		FVoxelSurfaceQuery::QuerySurfaceConditions(WorldX, WorldY, TerrainHeight, VoxelSize,
-			BiomeConfig, WorldSeed, bEnableWaterLevel, WaterLevel,
+			BiomeSnapshot, WorldSeed, bEnableWaterLevel, WaterLevel,
 			SurfaceMaterial, BiomeID);
 
 		// Check per-template placement rules

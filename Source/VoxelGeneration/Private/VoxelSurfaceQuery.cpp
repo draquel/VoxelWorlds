@@ -2,7 +2,7 @@
 
 #include "VoxelSurfaceQuery.h"
 #include "IVoxelWorldMode.h"
-#include "VoxelBiomeConfiguration.h"
+#include "VoxelBiomeSnapshot.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelNoiseTypes.h"
 
@@ -57,7 +57,7 @@ FVector FVoxelSurfaceQuery::ComputeSurfaceNormal(
 
 void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	float WorldX, float WorldY, float TerrainHeight, float VoxelSize,
-	const UVoxelBiomeConfiguration* BiomeConfig,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	int32 WorldSeed,
 	bool bEnableWaterLevel, float WaterLevel,
 	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
@@ -65,7 +65,7 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	OutSurfaceMaterial = 0;
 	OutBiomeID = 0;
 
-	if (!BiomeConfig || !BiomeConfig->IsValid())
+	if (!BiomeSnapshot.bIsValid)
 	{
 		return;
 	}
@@ -77,8 +77,8 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	TempNoiseParams.Persistence = 0.5f;
 	TempNoiseParams.Lacunarity = 2.0f;
 	TempNoiseParams.Amplitude = 1.0f;
-	TempNoiseParams.Seed = WorldSeed + BiomeConfig->TemperatureSeedOffset;
-	TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
+	TempNoiseParams.Seed = WorldSeed + BiomeSnapshot.TemperatureSeedOffset;
+	TempNoiseParams.Frequency = BiomeSnapshot.TemperatureNoiseFrequency;
 
 	FVoxelNoiseParams MoistureNoiseParams;
 	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
@@ -86,8 +86,8 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	MoistureNoiseParams.Persistence = 0.5f;
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
-	MoistureNoiseParams.Seed = WorldSeed + BiomeConfig->MoistureSeedOffset;
-	MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
+	MoistureNoiseParams.Seed = WorldSeed + BiomeSnapshot.MoistureSeedOffset;
+	MoistureNoiseParams.Frequency = BiomeSnapshot.MoistureNoiseFrequency;
 
 	// Sample at this world position (Z=0 for 2D biome sampling)
 	const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
@@ -96,7 +96,7 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 
 	// Sample continentalness noise if enabled
 	float Continentalness = 0.0f;
-	if (BiomeConfig->bEnableContinentalness)
+	if (BiomeSnapshot.bEnableContinentalness)
 	{
 		FVoxelNoiseParams ContNoiseParams;
 		ContNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
@@ -104,38 +104,35 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 		ContNoiseParams.Persistence = 0.5f;
 		ContNoiseParams.Lacunarity = 2.0f;
 		ContNoiseParams.Amplitude = 1.0f;
-		ContNoiseParams.Seed = WorldSeed + BiomeConfig->ContinentalnessSeedOffset;
-		ContNoiseParams.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
+		ContNoiseParams.Seed = WorldSeed + BiomeSnapshot.ContinentalnessSeedOffset;
+		ContNoiseParams.Frequency = BiomeSnapshot.ContinentalnessNoiseFrequency;
 		Continentalness = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ContNoiseParams);
 	}
 
 	// Select biome (now with continentalness for proper tiered gating)
-	FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
+	FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	OutBiomeID = Blend.GetDominantBiome();
 
 	// Get surface material (depth = 0 for surface)
 	const bool bIsUnderwater = bEnableWaterLevel && TerrainHeight < WaterLevel;
 	if (bIsUnderwater)
 	{
-		OutSurfaceMaterial = BiomeConfig->GetBlendedMaterialWithWater(Blend, 0.0f, TerrainHeight, WaterLevel);
+		OutSurfaceMaterial = BiomeSnapshot.GetBlendedMaterialWithWater(Blend, 0.0f, TerrainHeight, WaterLevel);
 	}
 	else
 	{
-		OutSurfaceMaterial = BiomeConfig->GetBlendedMaterial(Blend, 0.0f);
+		OutSurfaceMaterial = BiomeSnapshot.GetBlendedMaterial(Blend, 0.0f);
 	}
 
 	// Apply height material rules (snow on peaks, etc.)
-	if (BiomeConfig->bEnableHeightMaterials)
-	{
-		OutSurfaceMaterial = BiomeConfig->ApplyHeightMaterialRules(OutSurfaceMaterial, TerrainHeight, 0.0f);
-	}
+	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, TerrainHeight, 0.0f);
 }
 
 FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurface(
 	const IVoxelWorldMode& WorldMode,
 	float WorldX, float WorldY, float VoxelSize,
 	const FVoxelNoiseParams& NoiseParams,
-	const UVoxelBiomeConfiguration* BiomeConfig,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	int32 WorldSeed,
 	bool bEnableWaterLevel, float WaterLevel)
 {
@@ -159,7 +156,7 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurface(
 
 	QuerySurfaceConditions(
 		WorldX, WorldY, Sample.Height, VoxelSize,
-		BiomeConfig, WorldSeed, bEnableWaterLevel, WaterLevel,
+		BiomeSnapshot, WorldSeed, bEnableWaterLevel, WaterLevel,
 		Sample.MaterialID, Sample.BiomeID);
 
 	return Sample;

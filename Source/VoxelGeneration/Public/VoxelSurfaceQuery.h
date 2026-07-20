@@ -5,9 +5,9 @@
 #include "CoreMinimal.h"
 #include "VoxelData.h"
 
+struct FVoxelBiomeSnapshot;
 struct FVoxelNoiseParams;
 class IVoxelWorldMode;
-class UVoxelBiomeConfiguration;
 
 /**
  * A sampled terrain surface point, derived purely from the procedural generator
@@ -74,15 +74,21 @@ public:
 
 	/**
 	 * Query surface material and biome at a world position.
-	 * Replicates the CPU noise generator's biome pipeline
-	 * (temperature/moisture/continentalness noise -> biome selection -> surface material).
+	 * Uses the SAME biome pipeline as the CPU noise generator (temperature/moisture/continentalness
+	 * noise -> tiered biome blend -> blended surface material -> height rules), via the shared
+	 * FVoxelBiomeSnapshot algorithm cores.
 	 *
-	 * @param OutSurfaceMaterial Surface material ID (0 when BiomeConfig is null/invalid)
-	 * @param OutBiomeID Dominant biome ID (0 when BiomeConfig is null/invalid)
+	 * Takes a value snapshot instead of the UVoxelBiomeConfiguration UObject: build it once per
+	 * batch with FVoxelBiomeSnapshot::FromConfig (game thread), then call this freely from any
+	 * thread — including tasks that may outlive the world.
+	 *
+	 * @param BiomeSnapshot Value-captured biome data (FVoxelBiomeSnapshot::FromConfig)
+	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
+	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
 	 */
 	static void QuerySurfaceConditions(
 		float WorldX, float WorldY, float TerrainHeight, float VoxelSize,
-		const UVoxelBiomeConfiguration* BiomeConfig,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		int32 WorldSeed,
 		bool bEnableWaterLevel, float WaterLevel,
 		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
@@ -90,12 +96,13 @@ public:
 	/**
 	 * Convenience: sample everything (height, normal, slope, material, biome) at a world X,Y.
 	 * Computes the height gradient once and derives both slope and normal from it.
+	 * BiomeSnapshot as in QuerySurfaceConditions — hoist one per batch via FromConfig.
 	 */
 	static FVoxelSurfaceSample SampleSurface(
 		const IVoxelWorldMode& WorldMode,
 		float WorldX, float WorldY, float VoxelSize,
 		const FVoxelNoiseParams& NoiseParams,
-		const UVoxelBiomeConfiguration* BiomeConfig,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		int32 WorldSeed,
 		bool bEnableWaterLevel, float WaterLevel);
 

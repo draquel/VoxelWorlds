@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"   // FVoxelNoiseParams, EVoxelNoiseType, EWorldMode
+#include "VoxelBiomeSnapshot.h"
 
 class IVoxelWorldMode;
 class UVoxelWorldConfiguration;
@@ -58,6 +59,9 @@ struct FVoxelFieldSampleContext
 	/** Biome config (non-owning; kept alive by the source config asset). Null when biomes disabled. */
 	const UVoxelBiomeConfiguration* BiomeConfig = nullptr;
 	bool bEnableBiomes = false;
+
+	/** Value snapshot of BiomeConfig (captured in FromConfiguration) — what the surface queries consume. */
+	FVoxelBiomeSnapshot BiomeSnapshot;
 
 	/** Cave config (non-owning). Null when caves disabled. */
 	const UVoxelCaveConfiguration* CaveConfig = nullptr;
