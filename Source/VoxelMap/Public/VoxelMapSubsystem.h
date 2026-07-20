@@ -138,6 +138,21 @@ private:
 	bool bWaterEnabled = false;
 	float CachedWaterLevel = 0.0f;
 
+	/**
+	 * Map color per MaterialID (256 entries), resolved once in ResolveChunkManager: the material
+	 * atlas' baked average-albedo colors where available, the material registry's palette otherwise.
+	 * Plain data — captured by value by tile tasks.
+	 */
+	TArray<FColor> CachedMaterialPalette;
+
+	/**
+	 * Terrain height bounds from the world mode (IVoxelWorldMode::GetTerrainHeightBounds) — the
+	 * elevation-tint and water-depth gradients are scaled to this range instead of hardcoded
+	 * constants, so shading adapts to the world configuration.
+	 */
+	float CachedTerrainMinHeight = 0.0f;
+	float CachedTerrainMaxHeight = 0.0f;
+
 	// Tile storage
 	TMap<uint64, FVoxelMapTile> TileCache;
 	TSet<uint64> ExploredTiles;

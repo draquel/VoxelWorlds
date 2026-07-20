@@ -32,6 +32,9 @@ public class VoxelCore : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				// FImage / ERawImageFormat — used by UVoxelMaterialAtlas::BakeMapColors to average
+				// albedo source textures in linear space.
+				"ImageCore",
 			}
 		);
 

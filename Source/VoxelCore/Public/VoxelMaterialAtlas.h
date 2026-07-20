@@ -125,6 +125,18 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
 	bool bNonOccluding = false;
 
+	// ===== 2D Map Representation =====
+
+	/**
+	 * Representative color for this material on the 2D world map, baked from AlbedoTexture by
+	 * BakeMapColors() (editor-time — texture source data does not exist in packaged builds, so the
+	 * value is stored here and saved with the asset).
+	 *
+	 * Alpha 0 = not baked: map rendering falls back to the material registry's hardcoded palette.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Map")
+	FColor MapColor = FColor(0, 0, 0, 0);
+
 	FVoxelMaterialTextureConfig() = default;
 
 	/** Get the atlas tile for a specific face type */
@@ -356,6 +368,37 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
 	bool AreTextureArraysDirty() const { return bTextureArraysDirty; }
+
+	// ===== 2D Map Colors =====
+
+	/**
+	 * Bake each material's representative map color (average albedo) into its config's MapColor.
+	 *
+	 * Editor-only: reads the albedo textures' SOURCE data, which is stripped from cooked builds —
+	 * hence the bake-and-save design (the runtime map reads the stored FColor). Averaging happens
+	 * in LINEAR space and fully transparent texels are skipped, so masked materials (leaves) get
+	 * their foliage color rather than a wash toward the cutout background.
+	 *
+	 * Called automatically at the end of BuildTextureArrays(); also exposed as a button so colors
+	 * can be refreshed without rebuilding the arrays.
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Voxel|Material Atlas")
+	void BakeMapColors();
+
+	/**
+	 * Representative map color for a material: the baked MapColor when present, otherwise the
+	 * material registry's palette entry. Safe at runtime and in cooked builds.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
+	FColor GetMapColor(uint8 MaterialID) const;
+
+	/**
+	 * Fill a 256-entry map palette (index = MaterialID) from GetMapColor.
+	 *
+	 * Built once on the game thread and captured by value by map tile tasks — plain data, so the
+	 * background thread never touches this UObject.
+	 */
+	void BuildMapPalette(TArray<FColor>& OutPalette) const;
 
 	/**
 	 * Get the atlas tile for a material and face type.

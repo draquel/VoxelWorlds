@@ -1,6 +1,6 @@
 # Map Accuracy Plan — Making VoxelMap Tiles Match the Generated Terrain
 
-**Status:** Phase 1 in progress
+**Status:** COMPLETE — Phase 1 (VoxelWorlds#56), Phase 2 (#57), Phase 3 (#58)
 **Problem:** The 2D map (UVoxelMapSubsystem tiles) does not match the generated world.
 Water placement is wildly wrong; land materials are close but diverge at biome
 boundaries and altitude bands.
@@ -107,16 +107,33 @@ validity flag.
 Test: map-pixel material == `FVoxelSurfaceQuery::SampleSurface` material at random
 points on demo-like configs.
 
-## Phase 3 — Visual quality (optional)
+## Phase 3 — Visual quality (DONE)
 
-- **Palette from the atlas:** per-material map color derived from the material atlas
-  (editor-time average-albedo bake into the atlas/registry config, falling back to
-  the registry table) instead of the hardcoded palette. (Runtime texture-source reads
-  don't work in packaged builds — bake at author time.)
-- **Hillshading:** lambert N·L from the tile height grid (fixed NW light, subtle),
-  replacing/augmenting the flat elevation ramp.
-- **Config-derived ramps:** water-depth and elevation gradients scaled from
-  `GetTerrainHeightBounds` instead of hardcoded 3000/4000.
+- **Palette from the atlas:** `FVoxelMaterialTextureConfig::MapColor`, baked by
+  `UVoxelMaterialAtlas::BakeMapColors()` (CallInEditor + auto-run at the end of
+  `BuildTextureArrays`). Editor-only by necessity — texture SOURCE data is stripped
+  from cooked builds — so the averaged color is stored in the asset and read at
+  runtime. Averaging runs in LINEAR space (`FImage` → RGBA32F/Linear) and skips fully
+  transparent texels so masked materials keep their foliage color. `GetMapColor()`
+  falls back per-material to the registry palette (alpha 0 = never baked).
+  Demo result: grass baked to olive (144,143,76) vs the registry's Forest Green
+  (34,139,34) — the palette was the single biggest "map doesn't look like the world"
+  contributor after materials were correct.
+- **Hillshading:** tile generation now runs a height-grid pass (with a 1-pixel apron
+  so gradients stay continuous across tile seams) then a color pass; lambert N·L from
+  central differences, NW key light at 45°, remapped to a 0.55–1.25 multiplier.
+- **Config-derived ramps:** elevation tint and water-depth gradients scale from the
+  world mode's `GetTerrainHeightBounds` instead of hardcoded 4000/3000, with a
+  fallback to the config's noise envelope for modes reporting unbounded ranges
+  (SphericalPlanet's default no-cull bounds would otherwise flatten the ramp).
+
+### Not done / possible follow-ups
+
+- Map palette is resolved from `AVoxelWorldTestActor::MaterialAtlas`. Custom world
+  actors (a bare `UVoxelWorldComponent` on a non-test actor) fall back to the registry
+  palette; if that becomes common, add an atlas-provider interface in VoxelCore.
+- Tile resolution is still one pixel per voxel column (`ChunkSize`); supersampling
+  would smooth the dithered material blend at high zoom.
 
 ## Verification & logistics
 
