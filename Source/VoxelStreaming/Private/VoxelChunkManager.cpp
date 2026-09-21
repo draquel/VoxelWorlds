@@ -236,8 +236,11 @@ static TAutoConsoleVariable<int32> CVarSeamCPUInteriorRouting(
 	TEXT("voxel.Seam.CPUInteriorRouting"),
 	1,
 	TEXT("When seam meshing is active with a GPU DC mesher: 1 = interior chunk meshes run on the "
-	     "CPU DC mesher (bit-exact seam junctions, default), 0 = GPU interior meshes (FP junction "
-	     "cracks; perf A/B only). Run voxel.RemeshAll after toggling."),
+	     "CPU DC mesher (bit-exact seam junctions, default and the only supported setting).\n"
+	     "0 is RETIRED and NON-FUNCTIONAL: the GPU DC interior path produces zero geometry "
+	     "(Pass 3 readback race), so setting 0 leaves only the CPU seam ribbons and the terrain "
+	     "disappears. Kept solely so the setting is discoverable rather than silently missing. "
+	     "See SEAM_OWNERSHIP_ARCHITECTURE.md 7.2 option C."),
 	ECVF_Default);
 
 /** In-flight cap for async seam-mesh jobs (small: seam jobs are strip-sized and fast). */

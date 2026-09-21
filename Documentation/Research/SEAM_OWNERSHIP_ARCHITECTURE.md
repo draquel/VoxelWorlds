@@ -438,10 +438,46 @@ First GPU-RHI benchmark of the seam architecture (previous qualification was hea
 **C — route interior meshes to the CPU DC mesher while the flag is on** *(implemented,
 cvar `voxel.Seam.CPUInteriorRouting`, default 1)*.
 One mesher instance computes interiors and seams → bit-exactness by construction (the property
-the test suite proves). Measured cost: none at demo scale (table above). Con: the GPU DC
-mesher idles while the flag is on — the GPU meshing capability is unused, not deleted; the
-cvar keeps the A/B measurable forever. Revisit if target hardware/chunk size (64³) or a
-weaker CPU shifts the balance.
+the test suite proves). Measured cost: none at demo scale (table above).
+
+> **GPU DC interior meshing is RETIRED (2026-09-20).** This option's original con read "the GPU
+> meshing capability is unused, not deleted; the cvar keeps the A/B measurable forever."
+> That is no longer true, and the sentence is preserved here only so the change of state is
+> legible. The GPU DC interior path is **non-functional**: it produces zero geometry.
+> `voxel.Seam.CPUInteriorRouting 0` is therefore **not a working A/B lever** — setting it
+> leaves the world with nothing but the CPU seam ribbons (verified live: terrain disappears,
+> scatter is left unsupported in the void).
+>
+> Diagnosis, from per-stage GPU counters on a 32³ two-material chunk: Pass 1 (edge crossings)
+> and Pass 2 (QEF solve) are correct — 1800 valid edges, 1716 cell vertices, stable across
+> runs. Pass 3 (quad generation) contributes nothing, and its counters are **non-deterministic**
+> between identical runs (threads-entered read 128,640 once and 1,248 another; a probe of
+> `DCValidEdgeIndices[0]` read 0) while Pass 1/2 counters are byte-stable. That signature is a
+> read-before-write race: the counter readback observes the buffer before Pass 3's writes land.
+> `IndexCount` is written by Pass 3, so it is always 0, and `VertexCount` sits at exactly the
+> pre-duplicate figure. A zero index count takes the "empty mesh" branch, which reports
+> **success** — which is why this was silent. The interior-domain rule, the edge-ownership test
+> and the P4a weld deletion were all checked and are NOT implicated.
+>
+> Most likely origin is `9aca245` (off-thread GPU mesh dispatch), which moved dispatch to a
+> worker thread. `3ca9851` reported GPU interiors working afterwards, but validated them live,
+> where an intermittent race can appear to succeed.
+>
+> Why it stayed hidden: (1) `CPUInteriorRouting` defaults to 1, so the path never runs in
+> production; (2) the demo config sets `bUseGPUMeshing=false`; (3) the only two tests covering
+> GPU DC (`MaterialBorder.MB3/MB4_GPU_*`) self-skip under `-nullrhi`, and the seam-ownership
+> series was validated headless — P4a's own message records "Suites 25/25 headless". The
+> `GT0–GT7` GPU suite that would have caught it was deleted in P4a along with the weld.
+>
+> **Caveat on the evidence for this decision:** §7.1's benchmark was measured at **32³**
+> ("interior-domain CPU meshing … completes inside the GPU dispatch→readback latency at 32³"),
+> and the demo now runs **64³** — the very chunk size this option named as a reason to revisit.
+> That comparison was never re-run at 64³ and cannot be until the path is repaired. The
+> expectation is that the conclusion holds (the pipeline is generation-bound, and generation
+> stays GPU either way), but it is an expectation, not a measurement.
+>
+> Reviving this requires fixing the Pass 3 readback race first; `MB3/MB4` are the guard and are
+> currently skipped with a pointer to this note.
 
 **R — GPU ring readback (keep GPU interiors; seams consume GPU vertices).**
 The GPU interior pass appends its outermost-ring cell vertices (pos+normal) to a side buffer,

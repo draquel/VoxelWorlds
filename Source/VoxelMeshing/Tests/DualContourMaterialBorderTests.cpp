@@ -15,8 +15,14 @@
 //
 //   MB1  CPU LOD0 two-material split  -> every triangle uniform, only source IDs emitted
 //   MB2  CPU LOD1 (stride 2) split    -> same invariants under LOD striding
-//   MB3  GPU LOD0 two-material split  -> GPU parity (requires real RHI)
-//   MB4  GPU LOD1 (stride 2) split    -> GPU parity under LOD striding
+//   MB3  GPU LOD0 two-material split  -> SKIPPED: GPU DC interior meshing retired
+//   MB4  GPU LOD1 (stride 2) split    -> SKIPPED: GPU DC interior meshing retired
+//
+// MB3/MB4 are retained but skipped. The GPU DC path produces zero geometry (Pass 3's writes
+// are not visible to the counter readback), and CPU interior routing is the shipped
+// configuration. They are kept rather than deleted so a revival inherits the parity check
+// instead of rebuilding it — the GT0-GT7 suite was deleted along with the weld in P4a, and
+// its absence is why this regression went unnoticed for so long.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -144,6 +150,27 @@ namespace DualContourMaterialBorderTestHelpers
 		return bOk;
 	}
 
+	/**
+	 * GPU DC interior meshing is retired: the path produces zero geometry (Pass 3's writes are
+	 * not visible to the counter readback, so IndexCount is always 0 and the empty-mesh branch
+	 * reports success). MB3/MB4 are the guard for it and stay in the suite, skipped, so a
+	 * revival has a ready-made parity check rather than starting from nothing.
+	 * See Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md 7.2 option C.
+	 */
+	/**
+	 * Flip to false together with the Pass 3 readback repair to re-arm MB3/MB4. Kept as a
+	 * constant rather than deleting the calls so the GPU harness below stays compiled and
+	 * referenced — a revival flips one line instead of reconstructing the test.
+	 */
+	constexpr bool bGPUDualContourRetired = true;
+
+	FString GPUDCRetiredSkipReason()
+	{
+		return TEXT("Skipped: GPU DC interior meshing is retired and produces no geometry ")
+			   TEXT("(Pass 3 readback race). Re-enable this test with the repair — see ")
+			   TEXT("SEAM_OWNERSHIP_ARCHITECTURE.md 7.2 option C.");
+	}
+
 	using FDCMeshFn = bool(*)(const FVoxelMeshingRequest&, FChunkMeshData&);
 
 	/** Mesh the two-material chunk and run all material-uniformity invariants. */
@@ -250,6 +277,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB3GPULOD0Test, "VoxelWorlds.M
 bool FDCMaterialBorderMB3GPULOD0Test::RunTest(const FString& Parameters)
 {
 	using namespace DualContourMaterialBorderTestHelpers;
+	if (bGPUDualContourRetired) { AddInfo(GPUDCRetiredSkipReason()); return true; }
 	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU DC tests require a real RHI (run without -nullrhi)")); return true; }
 	RunMaterialBorderInvariants(*this, 0, &MeshChunkGPU);
 	return true;
@@ -261,6 +289,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB4GPULOD1Test, "VoxelWorlds.M
 bool FDCMaterialBorderMB4GPULOD1Test::RunTest(const FString& Parameters)
 {
 	using namespace DualContourMaterialBorderTestHelpers;
+	if (bGPUDualContourRetired) { AddInfo(GPUDCRetiredSkipReason()); return true; }
 	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU DC tests require a real RHI (run without -nullrhi)")); return true; }
 	RunMaterialBorderInvariants(*this, 1, &MeshChunkGPU);
 	return true;
