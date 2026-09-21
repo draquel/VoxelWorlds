@@ -412,6 +412,16 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		constexpr float Alpha = 0.1f;
 		SmoothedFrameTimeMs = SmoothedFrameTimeMs + Alpha * (FrameTimeMs - SmoothedFrameTimeMs);
 
+		// Track the lowest frame time actually observed, drifting slowly back up so a single
+		// unusually fast frame can't pin the floor for the session. On a vsync-capped display
+		// this settles at the present interval -- the fastest this loop can ever see.
+		ObservedFrameFloorMs += DeltaTime * 0.5f;
+		if (FrameTimeMs > 0.0f)
+		{
+			ObservedFrameFloorMs = FMath::Min(ObservedFrameFloorMs, FrameTimeMs);
+		}
+		ObservedFrameFloorMs = FMath::Clamp(ObservedFrameFloorMs, 1.0f, 100.0f);
+
 		const float TargetFPS = Configuration ? Configuration->TargetFrameRate : 60.0f;
 		// -VoxelPinScheduler forces non-adaptive so the override/config limits hold for the run.
 		const bool bAdaptive = bSchedPinned ? false : (Configuration ? Configuration->bAdaptiveThrottling : true);
@@ -429,27 +439,40 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		if (bAdaptive && TargetFPS > 0.0f)
 		{
 			const float TargetMs = 1000.0f / TargetFPS;
-			if (SmoothedFrameTimeMs > TargetMs * 1.2f)
+
+			// Both thresholds are measured against a budget that can never be faster than the
+			// frame times this machine actually produces. A target above the present rate makes
+			// the RELEASE test unreachable and the throttle latches on for the rest of the
+			// session: measured on a 60 Hz display, the frame-time floor is 16.667 ms while the
+			// old release test demanded < 13.333 ms -- 0 of 339 sampled frames could satisfy it,
+			// so one loading hitch halved generation permanently while FPS looked perfectly fine.
+			const float BudgetMs = FMath::Max(TargetMs, ObservedFrameFloorMs);
+
+			if (SmoothedFrameTimeMs > BudgetMs * 1.2f)
 			{
-				// Over budget: reduce PRODUCER work (generation + LOD-remesh inflow) to relieve
-				// frame pressure — but do NOT halve the mesh CONSUMER caps. A/B showed halving
-				// async-mesh / pending under load throttles the drain exactly when the mesh backlog
-				// is worst (an inverted throttle), slowing catch-up with no frame benefit; keep the
-				// consumer at its configured depth so the queue keeps draining out of the spike.
+				// Over budget: reduce generation INFLOW to relieve frame pressure. Two caps are
+				// deliberately NOT reduced here:
+				//   - the mesh CONSUMER caps (async-mesh / pending): A/B showed halving them
+				//     throttles the drain exactly when the backlog is worst (an inverted
+				//     throttle), slowing catch-up with no frame benefit.
+				//   - MaxLODRemeshPerFrame: LOD remeshes are the visible-detail consumer for
+				//     chunks that are already resident. Halving it delays terrain reaching full
+				//     detail underneath the player without meaningfully reducing frame cost.
 				EffectiveMaxAsyncGenerationTasks = FMath::Max(1, ConfigMaxAsyncGen / 2);
-				EffectiveMaxLODRemeshPerFrame = FMath::Max(1, ConfigMaxLODRemesh / 2);
 				EffectiveMaxAsyncMeshTasks = ConfigMaxAsync;
+				EffectiveMaxLODRemeshPerFrame = ConfigMaxLODRemesh;
 				EffectiveMaxPendingMeshes = ConfigMaxPending;
 			}
-			else if (SmoothedFrameTimeMs < TargetMs * 0.8f)
+			else if (SmoothedFrameTimeMs < BudgetMs * 1.05f)
 			{
-				// Under budget: restore configured limits
+				// Back within budget: restore configured limits. The 1.05 margin sits above the
+				// achievable floor (unlike the old 0.8), so this branch is actually reachable.
 				EffectiveMaxAsyncGenerationTasks = ConfigMaxAsyncGen;
 				EffectiveMaxAsyncMeshTasks = ConfigMaxAsync;
 				EffectiveMaxLODRemeshPerFrame = ConfigMaxLODRemesh;
 				EffectiveMaxPendingMeshes = ConfigMaxPending;
 			}
-			// else: in the 80-120% band, keep current values
+			// else: between 105% and 120% of budget, keep current values (hysteresis band)
 		}
 		else
 		{
@@ -821,6 +844,7 @@ void UVoxelChunkManager::Initialize(
 
 	// Reset adaptive throttle state
 	SmoothedFrameTimeMs = 16.67f;
+	ObservedFrameFloorMs = 16.67f;
 	bSubsystemsDeferred = false;
 	EffectiveMaxAsyncGenerationTasks = (SchedOverrideAsyncGen >= 0) ? SchedOverrideAsyncGen : Configuration->MaxAsyncGenerationTasks;
 	EffectiveMaxAsyncMeshTasks = (SchedOverrideAsyncMesh >= 0) ? SchedOverrideAsyncMesh : Configuration->MaxAsyncMeshTasks;

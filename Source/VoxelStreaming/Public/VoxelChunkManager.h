@@ -1365,6 +1365,14 @@ private:
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;
 
+	/**
+	 * Lowest frame time observed recently (ms), drifting slowly upward. Floors the adaptive
+	 * throttle's budget so its release test stays reachable: on a vsync-capped display the
+	 * frame time can never drop below the present interval, and a TargetFrameRate faster than
+	 * that would otherwise make the throttle a one-way latch for the whole session.
+	 */
+	float ObservedFrameFloorMs = 16.67f;
+
 	/** Whether collision/scatter updates are deferred due to heavy gen queue */
 	bool bSubsystemsDeferred = false;
 
