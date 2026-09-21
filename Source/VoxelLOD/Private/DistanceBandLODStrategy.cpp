@@ -59,6 +59,19 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	if (FParse::Value(FCommandLine::Get(), TEXT("VoxelLODRefineHyst="), HystOverride)) { RefineHysteresisFraction = FMath::Max(0.0f, HystOverride); }
 	if (FParse::Value(FCommandLine::Get(), TEXT("VoxelLODCoarsenHyst="), HystOverride)) { CoarsenHysteresisFraction = FMath::Max(0.0f, HystOverride); }
 
+	// Stability invariant. Adjacent bands share an edge E, so ApplyLODHysteresis refines at
+	// E + Refine*ChunkW and coarsens at E + Coarsen*ChunkW. Refine > Coarsen would order those
+	// thresholds the wrong way round and a chunk sitting between them would flip LOD every
+	// frame. Nothing else enforces this, and both values are freely editable on the config.
+	if (RefineHysteresisFraction > CoarsenHysteresisFraction)
+	{
+		UE_LOG(LogVoxelLOD, Warning,
+			TEXT("LODRefineHysteresis (%.2f) exceeds LODCoarsenHysteresis (%.2f); clamping refine to coarsen. ")
+			TEXT("Refine must not exceed coarsen or LOD transitions oscillate at band edges."),
+			RefineHysteresisFraction, CoarsenHysteresisFraction);
+		RefineHysteresisFraction = CoarsenHysteresisFraction;
+	}
+
 	// Copy LOD bands
 	LODBands = WorldConfig->LODBands;
 
@@ -698,9 +711,18 @@ int32 FDistanceBandLODStrategy::ApplyLODHysteresis(int32 CommittedLOD, int32 Raw
 		return (Distance > CommittedBand->MaxDistance + CoarsenHysteresisFraction * ChunkW) ? RawLOD : CommittedLOD;
 	}
 
-	// Refining (moving closer): accept as soon as just inside the inner edge. Eager (small
-	// margin) so a chunk reaches full detail at/just-before you enter it, not halfway across.
-	return (Distance < CommittedBand->MinDistance - RefineHysteresisFraction * ChunkW) ? RawLOD : CommittedLOD;
+	// Refining (moving closer): accept slightly BEFORE the inner edge, so a chunk reaches full
+	// detail just before you enter it rather than after you are already standing on it.
+	//
+	// The margin is ADDED here, unlike the coarsen case which adds it on the far side. Both
+	// margins used to subtract from / add to the same direction, which made refine trail the
+	// band edge instead of anticipating it: with a 4800uu chunk and the shipped 0.25/0.5
+	// fractions, a chunk coarsened at edge+2400 but only refined at edge-1200, a 3600uu band
+	// in which the committed LOD never changed and detail arrived 1200uu after it was due.
+	// Anticipating shrinks that to (Coarsen - Refine) * ChunkW and matches the documented
+	// eager-refine / damped-coarsen intent. Initialize() enforces Refine <= Coarsen, which is
+	// what keeps the two thresholds ordered and the transition stable.
+	return (Distance < CommittedBand->MinDistance + RefineHysteresisFraction * ChunkW) ? RawLOD : CommittedLOD;
 }
 
 void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& Context)
