@@ -150,8 +150,49 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 		ExclusionSubsystem->NotifyManagerInitialized(this);
 	}
 
+	ValidateScatterDistances();
+
 	UE_LOG(LogVoxelScatter, Log, TEXT("VoxelScatterManager initialized (Radius=%.0f, PointSpacing=%.0f, Definitions=%d)"),
 		ScatterRadius, SurfacePointSpacing, ScatterDefinitions.Num());
+}
+
+void UVoxelScatterManager::ValidateScatterDistances() const
+{
+	// Two distance relationships have to hold per definition or instances pop instead of fading.
+	// Neither is enforced anywhere, both are freely editable per definition in the config asset,
+	// and a violation is invisible in the editor — it only shows up as popping while moving.
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		if (!Def.bEnabled)
+		{
+			continue;
+		}
+
+		// A definition with no explicit spawn distance falls back to the manager-wide radius.
+		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
+
+		// 1. HISM fades instances between LODStartDistance and CullDistance. Collapsing that
+		//    range to zero leaves no fade at all, so instances vanish/appear in a hard step.
+		if (Def.LODStartDistance >= Def.CullDistance)
+		{
+			UE_LOG(LogVoxelScatter, Warning,
+				TEXT("Scatter '%s': LODStartDistance (%.0f) >= CullDistance (%.0f) — no fade range, ")
+				TEXT("instances will pop at the cull edge. Set LODStartDistance below CullDistance."),
+				*Def.Name, Def.LODStartDistance, Def.CullDistance);
+		}
+
+		// 2. Instances only exist out to the spawn distance. If they are still being drawn at
+		//    that radius, the spawn ring itself is visible and any streaming latency shows up
+		//    directly at the visible edge, with no already-generated margin hiding it.
+		if (Def.CullDistance >= EffectiveSpawnDistance)
+		{
+			UE_LOG(LogVoxelScatter, Warning,
+				TEXT("Scatter '%s': CullDistance (%.0f) >= effective SpawnDistance (%.0f) — instances are ")
+				TEXT("drawn out to the radius where they stop being generated, so the spawn ring is visible. ")
+				TEXT("Keep CullDistance below SpawnDistance."),
+				*Def.Name, Def.CullDistance, EffectiveSpawnDistance);
+		}
+	}
 }
 
 void UVoxelScatterManager::Shutdown()

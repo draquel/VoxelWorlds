@@ -92,6 +92,14 @@ public:
 	void Shutdown();
 
 	/**
+	 * Warn about scatter definitions whose distance settings guarantee visible popping:
+	 * LODStartDistance >= CullDistance (no fade range) or CullDistance >= the effective
+	 * SpawnDistance (instances drawn out to where they stop being generated). Run once at
+	 * Initialize; these relationships are otherwise unenforced and only show up in motion.
+	 */
+	void ValidateScatterDistances() const;
+
+	/**
 	 * Check if manager is initialized.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")

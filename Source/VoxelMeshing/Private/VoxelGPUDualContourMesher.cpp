@@ -912,6 +912,21 @@ void FVoxelGPUDualContourMesher::TickReadbacks()
 								SharedResult->Stats.VertexCount = SharedResult->VertexCount;
 								SharedResult->Stats.IndexCount = SharedResult->IndexCount;
 								SharedResult->Stats.FaceCount = SharedResult->IndexCount / 3;
+
+								// An empty result is reported as SUCCESS downstream (a chunk with no
+								// surface is legitimate), so a pipeline that has stopped producing
+								// geometry is indistinguishable from empty terrain. Log the per-stage
+								// counters, which localize the failure: ValidEdge=0 means the crossing
+								// pass found nothing; ValidEdge>0 with Vertex=0 means the QEF pass
+								// produced no cell vertices; Vertex>0 with Index=0 means quad
+								// generation contributed nothing (see the Pass 3 visibility note in
+								// DispatchComputeShader).
+								if (SharedResult->VertexCount == 0 || SharedResult->IndexCount == 0)
+								{
+									UE_LOG(LogVoxelMeshing, Warning,
+										TEXT("GPU DC produced an empty mesh for chunk %s: ValidEdge=%u Vertex=%u Index=%u"),
+										*SharedResult->ChunkCoord.ToString(), Counts[2], Counts[0], Counts[1]);
+								}
 							}
 							else
 							{
