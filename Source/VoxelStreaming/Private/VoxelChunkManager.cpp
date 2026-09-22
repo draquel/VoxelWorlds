@@ -215,12 +215,13 @@ static TAutoConsoleVariable<int32> CVarSeamMaxSchedulePerTick(
 	     "scheduler cost under a heavy streaming frontier; unexamined/not-yet-ready seams retry later."),
 	ECVF_Default);
 
-// Latency instrumentation for the seam scheduler. The dirty-seam scan is FIFO round-robin while
-// priority is only applied at drain, so a freshly-dirtied NEAR seam can wait behind every
-// never-schedulable far one (the outer shell whose neighbours are not loaded). This logs, every N
-// ticks, how long near seams actually wait dirty->scheduled and dirty->completed, alongside the
-// dirty-set size, so "does near latency grow with the dirty set?" is answered from data rather than
-// argued from the code. Parse [SeamLat] lines from LogVoxelStreaming.
+// Latency instrumentation for the seam scheduler. It was built to test (and confirmed) that the
+// dirty-seam scan rotation, which used to hold every dirty seam, made a freshly-ready NEAR seam
+// wait ~dirty/scan-rate (~300 ms) behind never-schedulable far ones; the rotation now holds only
+// ready seams (scan wait p50 318 -> 18 ms) and the remaining near ready->done latency sits in the
+// job queue / in-flight stage. It logs, every N ticks, dirty/ready->scheduled->completed windows
+// for near seams alongside the dirty-set size and per-interval counters. Parse [SeamLat] lines
+// from LogVoxelStreaming.
 static TAutoConsoleVariable<int32> CVarSeamLogLatency(
 	TEXT("voxel.Seam.LogLatency"),
 	0,
