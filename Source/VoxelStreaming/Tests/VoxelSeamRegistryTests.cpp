@@ -443,11 +443,17 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 
 	// t=7: the job completes. End-to-end is 7 - 1 = 6 s; from ready it is 7 - 5 = 2 s (the part
 	// the player can actually see, since the boundary could not exist before B arrived).
+	// The job left the queue at t=5.5 and the mesher itself took 100 ms: the post-schedule 2 s
+	// splits into 500 ms queue wait + 1500 ms async, with the worker window carrying the 100 ms.
 	Clock = 7.0;
-	Reg.RecordSeamCompleted(/*dirtied*/ 1.0, /*ready*/ 5.0, /*scheduled*/ 5.0, /*bNear*/ true);
+	Reg.RecordSeamCompleted(/*dirtied*/ 1.0, /*ready*/ 5.0, /*scheduled*/ 5.0, /*bNear*/ true, /*dispatched*/ 5.5, /*workerMs*/ 100.0);
 	{
 		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
 		TestEqual(TEXT("interval completed == 1"), L.Completed, 1);
+		TestEqual(TEXT("queue wait is scheduled->dispatched = 500 ms"), L.NearQueueP50Ms, 500.0f);
+		TestEqual(TEXT("async is dispatched->completed = 1500 ms"), L.NearAsyncP50Ms, 1500.0f);
+		TestEqual(TEXT("worker window carries the mesher time"), L.NearWorkerP50Ms, 100.0f);
+		TestEqual(TEXT("job queue is empty after the drain"), L.JobQueueDepth, 0);
 		TestEqual(TEXT("near dirty->completed is 6000 ms"), L.NearEndToEndP50Ms, 6000.0f);
 		TestEqual(TEXT("near ready->completed is 2000 ms"), L.NearReadyToDoneP50Ms, 2000.0f);
 		TestEqual(TEXT("near scheduled->completed is 2000 ms"), L.NearPostScheduleP50Ms, 2000.0f);
@@ -477,6 +483,28 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("two near scan samples"), L.NearScanN, 2);
 		TestEqual(TEXT("scan wait for an already-buildable seam is the full 1000 ms"), L.NearScanMaxMs, 1000.0f);
 		TestEqual(TEXT("total wait window max is still the earlier 4000 ms"), L.NearScheduleMaxMs, 4000.0f);
+		TestEqual(TEXT("4 s after the previous schedule: not a within-1s reschedule"), L.RescheduledWithin1s, 0);
+		TestEqual(TEXT("job queue holds the new job"), L.JobQueueDepth, 1);
+	}
+
+	// A re-dirty + schedule 500 ms after the previous schedule is the "lost coalescing" case.
+	Jobs.Reset();
+	Reg.DrainSeamJobs(Jobs, /*max*/ 8);
+	Clock = 9.2;
+	Reg.UpdateChunkContent(A, /*version*/ 4);
+	Clock = 9.5;
+	TestEqual(TEXT("Face(A,X) schedules a third time"), Reg.ScheduleReadySeams(/*viewer*/ A, /*nearRadius*/ 3, /*max*/ 0), 1);
+	Reg.RecordSeamJobDropped(/*bOlderJobInFlight*/ true);
+	Reg.RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
+	{
+		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestEqual(TEXT("scheduled 500 ms after the previous schedule counts as a within-1s reschedule"), L.RescheduledWithin1s, 1);
+		TestEqual(TEXT("in-flight drop counted"), L.DroppedInFlight, 1);
+		TestEqual(TEXT("participant drop counted"), L.DroppedParticipant, 1);
+	}
+	{
+		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestEqual(TEXT("job-stage interval counters reset on take"), L.RescheduledWithin1s + L.DroppedInFlight + L.DroppedParticipant, 0);
 	}
 
 	return true;

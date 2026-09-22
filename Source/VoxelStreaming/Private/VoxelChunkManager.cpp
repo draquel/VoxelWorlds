@@ -3576,6 +3576,13 @@ void UVoxelChunkManager::TickSeamScheduler()
 		// single-owner face-seam mesher on the worker pool.
 		const int32 FreeSlots = GMaxSeamJobsInFlight - SeamJobsInFlight.Num();
 		const int32 DrainBudget = (MaxJobs > 0) ? FMath::Min(MaxJobs, FreeSlots) : FreeSlots;
+		// Ticks on which the per-tick drain (in-flight cap minus what is still on workers) could not
+		// empty the queue — i.e. the cap, not job supply, bounded throughput. Seam jobs finish within
+		// a frame (worker p50 ~0.2 ms), so "no free slot" never happens; the cap binds as 8 jobs/tick.
+		if (SeamRegistry->GetJobQueueDepth() > DrainBudget)
+		{
+			++SeamSlotStarvedTicks;
+		}
 		if (DrainBudget > 0)
 		{
 			TArray<FVoxelSeamJob> Jobs;
@@ -3604,7 +3611,10 @@ void UVoxelChunkManager::TickSeamScheduler()
 			TEXT(" | nearSched n=%d p50=%.1f p95=%.1f max=%.1f | farSched n=%d p50=%.1f p95=%.1f max=%.1f")
 			TEXT(" | nearScan n=%d p50=%.1f p95=%.1f max=%.1f | farScan n=%d p50=%.1f p95=%.1f max=%.1f")
 			TEXT(" | nearE2E n=%d p50=%.1f p95=%.1f max=%.1f | nearReadyDone n=%d p50=%.1f p95=%.1f max=%.1f")
-			TEXT(" | nearPostSched n=%d p50=%.1f p95=%.1f max=%.1f"),
+			TEXT(" | nearPostSched n=%d p50=%.1f p95=%.1f max=%.1f")
+			TEXT(" | jobQ=%d inFlight=%d peak=%d/%d capped=%d resched1s=%d dropInFlight=%d dropPart=%d")
+			TEXT(" | nearQueue n=%d p50=%.1f p95=%.1f max=%.1f | nearAsync n=%d p50=%.1f p95=%.1f max=%.1f")
+			TEXT(" | nearWorker n=%d p50=%.1f p95=%.1f max=%.1f"),
 			T, L.DirtyCount, L.NearDirtyCount,
 			L.Examined, L.RequeuedNotResident, L.RequeuedInFlight, L.Scheduled, L.Completed,
 			L.NearScheduleN, L.NearScheduleP50Ms, L.NearScheduleP95Ms, L.NearScheduleMaxMs,
@@ -3613,7 +3623,14 @@ void UVoxelChunkManager::TickSeamScheduler()
 			L.FarScanN, L.FarScanP50Ms, L.FarScanP95Ms, L.FarScanMaxMs,
 			L.NearEndToEndN, L.NearEndToEndP50Ms, L.NearEndToEndP95Ms, L.NearEndToEndMaxMs,
 			L.NearReadyToDoneN, L.NearReadyToDoneP50Ms, L.NearReadyToDoneP95Ms, L.NearReadyToDoneMaxMs,
-			L.NearPostScheduleN, L.NearPostScheduleP50Ms, L.NearPostScheduleP95Ms, L.NearPostScheduleMaxMs);
+			L.NearPostScheduleN, L.NearPostScheduleP50Ms, L.NearPostScheduleP95Ms, L.NearPostScheduleMaxMs,
+			L.JobQueueDepth, SeamJobsInFlight.Num(), SeamInFlightPeak, GMaxSeamJobsInFlight, SeamSlotStarvedTicks,
+			L.RescheduledWithin1s, L.DroppedInFlight, L.DroppedParticipant,
+			L.NearQueueN, L.NearQueueP50Ms, L.NearQueueP95Ms, L.NearQueueMaxMs,
+			L.NearAsyncN, L.NearAsyncP50Ms, L.NearAsyncP95Ms, L.NearAsyncMaxMs,
+			L.NearWorkerN, L.NearWorkerP50Ms, L.NearWorkerP95Ms, L.NearWorkerMaxMs);
+		SeamInFlightPeak = SeamJobsInFlight.Num();
+		SeamSlotStarvedTicks = 0;
 	}
 }
 
@@ -3628,11 +3645,16 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		(Job.Key.Type == EVoxelSeamType::Corner) ? 8 : -1;
 	if (ExpectedParticipants < 0 || Job.Participants.Num() != ExpectedParticipants)
 	{
+		SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
 		return;
 	}
 	if (SeamJobsInFlight.Contains(Job.Key))
 	{
-		return; // an older build of this seam is still in flight; the registry will re-dirty if needed
+		// An older build of this seam is still on a worker. The seam was marked clean when this job
+		// was scheduled, so dropping it leaves the older geometry until something re-dirties the
+		// seam — counted so the rate is measurable (see [SeamLat] dropInFlight).
+		SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ true);
+		return;
 	}
 
 	// Gather live states: every participant must have voxel data and share one rendered LOD.
@@ -3643,6 +3665,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		States[i] = ChunkStates.Find(Job.Participants[i].Coord);
 		if (!States[i] || !States[i]->Descriptor.HasVoxelDataAvailable())
 		{
+			SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
 			return; // a participant vanished between schedule and drain; the unregister path re-dirties
 		}
 	}
@@ -3653,6 +3676,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	{
 		if (States[i]->MeshedLODLevel < 0)
 		{
+			SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
 			return;
 		}
 		MinParticipantLOD = FMath::Min(MinParticipantLOD, States[i]->MeshedLODLevel);
@@ -3667,6 +3691,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	IVoxelMesher* DCMesher = EnsureSeamMesher();
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
+	const double DispatchedAt = SeamRegistry->NowSeconds(); // same clock as the job's schedule stamp
 
 	if (Job.Key.Type == EVoxelSeamType::Face)
 	{
@@ -3683,10 +3708,13 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds]() mutable
+		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt]() mutable
 		{
 			FChunkMeshData MeshData;
+			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = DCMesher->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
+			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -3696,6 +3724,8 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 				Result.DirtiedAtSeconds = DirtiedAt;
 				Result.ReadyAtSeconds = ReadyAt;
 				Result.ScheduledAtSeconds = ScheduledAt;
+				Result.DispatchedAtSeconds = DispatchedAt;
+				Result.WorkerMs = WorkerMs;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -3722,10 +3752,13 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds]() mutable
+		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt]() mutable
 		{
 			FChunkMeshData MeshData;
+			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = DCMesher->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
+			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -3735,6 +3768,8 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 				Result.DirtiedAtSeconds = DirtiedAt;
 				Result.ReadyAtSeconds = ReadyAt;
 				Result.ScheduledAtSeconds = ScheduledAt;
+				Result.DispatchedAtSeconds = DispatchedAt;
+				Result.WorkerMs = WorkerMs;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -3760,10 +3795,13 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds]() mutable
+		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt]() mutable
 		{
 			FChunkMeshData MeshData;
+			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = DCMesher->GenerateCornerSeamMeshCPU(SeamRequest, MeshData);
+			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -3773,6 +3811,8 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 				Result.DirtiedAtSeconds = DirtiedAt;
 				Result.ReadyAtSeconds = ReadyAt;
 				Result.ScheduledAtSeconds = ScheduledAt;
+				Result.DispatchedAtSeconds = DispatchedAt;
+				Result.WorkerMs = WorkerMs;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -3814,7 +3854,8 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 			const bool bNear = FVoxelSeamRegistry::IsNearViewer(
 				Result.Key.Owner, WorldToChunkCoord(CurrentViewerPosition),
 				FMath::Max(0, CVarSeamNearChunkRadius.GetValueOnGameThread()));
-			SeamRegistry->RecordSeamCompleted(Result.DirtiedAtSeconds, Result.ReadyAtSeconds, Result.ScheduledAtSeconds, bNear);
+			SeamRegistry->RecordSeamCompleted(Result.DirtiedAtSeconds, Result.ReadyAtSeconds, Result.ScheduledAtSeconds, bNear,
+				Result.DispatchedAtSeconds, Result.WorkerMs);
 		}
 
 		// Store the slot mesh, then submit ONE merged bucket per owner. Per-slot render buckets

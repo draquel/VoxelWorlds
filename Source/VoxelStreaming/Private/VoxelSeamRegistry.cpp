@@ -225,6 +225,7 @@ void FVoxelSeamRegistry::Reset()
 	// Latency windows are NOT retained: they describe a timeline that no longer exists.
 	IntervalExamined = IntervalRequeuedNotResident = IntervalRequeuedInFlight = 0;
 	IntervalScheduled = IntervalCompleted = 0;
+	IntervalRescheduledWithin1s = IntervalDroppedInFlight = IntervalDroppedParticipant = 0;
 	NearScheduleWindow.Reset();
 	FarScheduleWindow.Reset();
 	NearScanWindow.Reset();
@@ -232,6 +233,9 @@ void FVoxelSeamRegistry::Reset()
 	NearEndToEndWindow.Reset();
 	NearReadyToDoneWindow.Reset();
 	NearPostScheduleWindow.Reset();
+	NearQueueWindow.Reset();
+	NearAsyncWindow.Reset();
+	NearWorkerWindow.Reset();
 }
 
 // ==================== Latency instrumentation ====================
@@ -269,7 +273,20 @@ void FVoxelSeamRegistry::FLatencyWindow::Percentiles(float& OutP50, float& OutP9
 	OutMax = Sorted[Count - 1];
 }
 
-void FVoxelSeamRegistry::RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear)
+void FVoxelSeamRegistry::RecordSeamJobDropped(bool bOlderJobInFlight)
+{
+	if (bOlderJobInFlight)
+	{
+		++IntervalDroppedInFlight;
+	}
+	else
+	{
+		++IntervalDroppedParticipant;
+	}
+}
+
+void FVoxelSeamRegistry::RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear,
+	double DispatchedAtSeconds, double WorkerMs)
 {
 	++IntervalCompleted;
 	if (!bNear)
@@ -286,6 +303,12 @@ void FVoxelSeamRegistry::RecordSeamCompleted(double DirtiedAtSeconds, double Rea
 	if (ScheduledAtSeconds > 0.0)
 	{
 		NearPostScheduleWindow.Add(static_cast<float>((CompletedAt - ScheduledAtSeconds) * 1000.0));
+		if (DispatchedAtSeconds > 0.0)
+		{
+			NearQueueWindow.Add(static_cast<float>((DispatchedAtSeconds - ScheduledAtSeconds) * 1000.0));
+			NearAsyncWindow.Add(static_cast<float>((CompletedAt - DispatchedAtSeconds) * 1000.0));
+			NearWorkerWindow.Add(static_cast<float>(WorkerMs));
+		}
 	}
 }
 
@@ -308,6 +331,11 @@ FVoxelSeamLatencyStats FVoxelSeamRegistry::TakeLatencyStats(const FIntVector& Vi
 	S.Completed = IntervalCompleted;
 	IntervalExamined = IntervalRequeuedNotResident = IntervalRequeuedInFlight = 0;
 	IntervalScheduled = IntervalCompleted = 0;
+	S.JobQueueDepth = JobQueue.Num();
+	S.RescheduledWithin1s = IntervalRescheduledWithin1s;
+	S.DroppedInFlight = IntervalDroppedInFlight;
+	S.DroppedParticipant = IntervalDroppedParticipant;
+	IntervalRescheduledWithin1s = IntervalDroppedInFlight = IntervalDroppedParticipant = 0;
 
 	S.NearScheduleN = NearScheduleWindow.Count;
 	NearScheduleWindow.Percentiles(S.NearScheduleP50Ms, S.NearScheduleP95Ms, S.NearScheduleMaxMs);
@@ -323,6 +351,12 @@ FVoxelSeamLatencyStats FVoxelSeamRegistry::TakeLatencyStats(const FIntVector& Vi
 	NearEndToEndWindow.Percentiles(S.NearEndToEndP50Ms, S.NearEndToEndP95Ms, S.NearEndToEndMaxMs);
 	S.NearPostScheduleN = NearPostScheduleWindow.Count;
 	NearPostScheduleWindow.Percentiles(S.NearPostScheduleP50Ms, S.NearPostScheduleP95Ms, S.NearPostScheduleMaxMs);
+	S.NearQueueN = NearQueueWindow.Count;
+	NearQueueWindow.Percentiles(S.NearQueueP50Ms, S.NearQueueP95Ms, S.NearQueueMaxMs);
+	S.NearAsyncN = NearAsyncWindow.Count;
+	NearAsyncWindow.Percentiles(S.NearAsyncP50Ms, S.NearAsyncP95Ms, S.NearAsyncMaxMs);
+	S.NearWorkerN = NearWorkerWindow.Count;
+	NearWorkerWindow.Percentiles(S.NearWorkerP50Ms, S.NearWorkerP95Ms, S.NearWorkerMaxMs);
 	return S;
 }
 
@@ -612,6 +646,14 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		Job.DirtiedAtSeconds = Seam->DirtiedAtSeconds;
 		Job.ReadyAtSeconds = Seam->ReadyAtSeconds;
 		Job.ScheduledAtSeconds = ScheduledAt;
+		// A seam scheduled again within 1 s of its previous build is a rebuild that the old ~300 ms
+		// scan rotation would usually have coalesced into one job; count them so the throughput
+		// cost of scheduling promptly is visible.
+		if (Seam->LastScheduledAtSeconds > 0.0 && (ScheduledAt - Seam->LastScheduledAtSeconds) < 1.0)
+		{
+			++IntervalRescheduledWithin1s;
+		}
+		Seam->LastScheduledAtSeconds = ScheduledAt;
 
 		// Insert priority-sorted (ascending; highest priority at the back for O(1) pop) — matches the
 		// meshing queue. Dedup is guaranteed by the bScheduled flag below, so no set lookup needed here.

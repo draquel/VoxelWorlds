@@ -129,6 +129,10 @@ struct FVoxelSeamState
 	/** In the scan rotation (DirtyQueue). Only READY dirty seams are queued — see MarkSeamDirty. */
 	bool bQueued = false;
 
+	/** Wall-clock of the most recent schedule (0 = never). Instrumentation: detects a seam being
+	 *  scheduled again shortly after its previous build — a rebuild the old slow rotation coalesced. */
+	double LastScheduledAtSeconds = 0.0;
+
 	/**
 	 * Wall-clock (FPlatformTime::Seconds) of the clean->dirty transition that started the CURRENT
 	 * wait. Preserved across re-dirtying while already dirty (the wait began at the first dirtying,
@@ -214,6 +218,12 @@ struct FVoxelSeamLatencyStats
 	int32 Scheduled = 0;             // jobs actually queued
 	int32 Completed = 0;             // completions reported via RecordSeamCompleted
 
+	// ---- Job stage ----
+	int32 JobQueueDepth = 0;         // snapshot: scheduled jobs not yet drained to a worker
+	int32 RescheduledWithin1s = 0;   // interval: scheduled again < 1 s after the previous schedule (a rebuild the 300 ms rotation used to coalesce)
+	int32 DroppedInFlight = 0;       // interval: drained then dropped because an older job for the same seam was still in flight (seam stays CLEAN — stale until re-dirtied)
+	int32 DroppedParticipant = 0;    // interval: drained then dropped because a participant lost its data / mesh, or the participant tuple had the wrong shape
+
 	// ---- Rolling windows, milliseconds ----
 	// dirty -> scheduled: the TOTAL wait, which includes time spent waiting for an absent
 	// participant to load. Player-relevant, but not attributable to the scheduler alone.
@@ -230,6 +240,11 @@ struct FVoxelSeamLatencyStats
 	int32 NearReadyToDoneN = 0; float NearReadyToDoneP50Ms = 0, NearReadyToDoneP95Ms = 0, NearReadyToDoneMaxMs = 0;
 	// scheduled -> completed (job queue + async), near only; attributes the e2e between scan and job
 	int32 NearPostScheduleN = 0; float NearPostScheduleP50Ms = 0, NearPostScheduleP95Ms = 0, NearPostScheduleMaxMs = 0;
+	// Post-schedule split, near only: scheduled -> dispatched (waiting for an in-flight slot),
+	// dispatched -> completed (worker pool latency + result-queue pickup), and the mesher's own time.
+	int32 NearQueueN = 0;  float NearQueueP50Ms = 0,  NearQueueP95Ms = 0,  NearQueueMaxMs = 0;
+	int32 NearAsyncN = 0;  float NearAsyncP50Ms = 0,  NearAsyncP95Ms = 0,  NearAsyncMaxMs = 0;
+	int32 NearWorkerN = 0; float NearWorkerP50Ms = 0, NearWorkerP95Ms = 0, NearWorkerMaxMs = 0;
 };
 
 /**
@@ -398,8 +413,22 @@ public:
 	 * Report a seam job's completion so dirty->completed latency is recorded. Timestamps are the
 	 * ones the job carried (FVoxelSeamJob::DirtiedAtSeconds / ScheduledAtSeconds); zero is ignored.
 	 * @param bNear Whether the seam's owner is near the viewer at completion time.
+	 * @param DispatchedAtSeconds When the job left the queue for a worker (0 = unknown: skips the split windows).
+	 * @param WorkerMs The mesher's own wall time on the worker (only recorded when DispatchedAtSeconds > 0).
 	 */
-	void RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear);
+	void RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear,
+		double DispatchedAtSeconds = 0.0, double WorkerMs = 0.0);
+
+	/**
+	 * Report a drained job the dispatcher discarded. The seam was marked clean at schedule time, so a
+	 * drop leaves stale geometry until something re-dirties it — worth counting.
+	 * @param bOlderJobInFlight true = an older build of the same seam was still on a worker; false = a
+	 *        participant lost its data/mesh or the tuple shape was wrong.
+	 */
+	void RecordSeamJobDropped(bool bOlderJobInFlight);
+
+	/** The registry's clock (FPlatformTime::Seconds unless a test overrides it) so callers stamp on the same timeline. */
+	double NowSeconds() const { return Now(); }
 
 	/**
 	 * Snapshot the latency instrumentation and reset the interval counters (rolling percentile
@@ -506,4 +535,10 @@ private:
 	FLatencyWindow NearEndToEndWindow;
 	FLatencyWindow NearReadyToDoneWindow;
 	FLatencyWindow NearPostScheduleWindow;
+	int32 IntervalRescheduledWithin1s = 0;
+	int32 IntervalDroppedInFlight = 0;
+	int32 IntervalDroppedParticipant = 0;
+	FLatencyWindow NearQueueWindow;
+	FLatencyWindow NearAsyncWindow;
+	FLatencyWindow NearWorkerWindow;
 };

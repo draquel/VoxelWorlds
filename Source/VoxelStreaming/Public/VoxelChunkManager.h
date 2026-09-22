@@ -990,6 +990,9 @@ protected:
 		double DirtiedAtSeconds = 0.0;
 		double ReadyAtSeconds = 0.0;
 		double ScheduledAtSeconds = 0.0;
+		/** Stamped at dispatch (registry clock) and measured on the worker: splits scheduled->completed. */
+		double DispatchedAtSeconds = 0.0;
+		double WorkerMs = 0.0;
 	};
 
 	/** Thread-safe queue for completed async seam meshes. */
@@ -997,6 +1000,11 @@ protected:
 
 	/** Seam jobs currently meshing on the worker pool (bounds pipeline depth; prevents dupes). */
 	TSet<FVoxelSeamKey> SeamJobsInFlight;
+
+	/** Instrumentation (voxel.Seam.LogLatency): in-flight high-water mark and ticks on which the
+	 *  per-tick drain budget (in-flight cap) could not empty the job queue, both since the previous readout. */
+	int32 SeamInFlightPeak = 0;
+	int32 SeamSlotStarvedTicks = 0;
 
 	/**
 	 * Version-keyed shared voxel snapshots for seam jobs. A chunk participates in up to 26 seams;
