@@ -357,19 +357,30 @@ void FVoxelSeamRegistry::MarkSeamDirty(FVoxelSeamState& Seam)
 	DirtySeams.Add(Seam.Key, &bAlreadyInSet);
 	if (!bAlreadyInSet)
 	{
-		// First transition to dirty: join the round-robin scan queue. Re-dirtying while already
-		// queued adds nothing (the existing entry still gets examined).
-		DirtyQueue.Add(Seam.Key);
 		// The wait starts here. A later re-dirty while still waiting must NOT restart the clock —
 		// the player has been looking at stale geometry since this moment, not since the latest bump.
 		Seam.DirtiedAtSeconds = Now();
 	}
-	// Readiness is stamped the first time the seam is dirty with every participant resident. A seam
-	// becomes fully resident exactly when its last participant registers, and RegisterChunk dirties
-	// every incident seam (after inserting itself into the mirror), so this hook always sees it.
-	if (Seam.ReadyAtSeconds == 0.0 && AreAllParticipantsResident(Seam.Key))
+	// Readiness: a seam becomes fully resident exactly when its last participant registers, and
+	// RegisterChunk/UpdateChunk* dirty every incident seam AFTER inserting the chunk into the mirror,
+	// so this is the one place readiness can flip to true. Only a READY seam joins the scan rotation:
+	// a seam whose neighbour has not loaded (or never will — the air above / solid below the surface
+	// band) would otherwise sit in the rotation for its owner's whole residency, and the scan would
+	// spend its per-tick budget re-examining it (measured: 99.6% of the budget, ~300 ms of wait for
+	// every near seam before it was even looked at). It stays in DirtySeams meanwhile, and the
+	// arrival that makes it buildable re-dirties it through this same path and enqueues it then.
+	if (!AreAllParticipantsResident(Seam.Key))
+	{
+		return;
+	}
+	if (Seam.ReadyAtSeconds == 0.0)
 	{
 		Seam.ReadyAtSeconds = Now();
+	}
+	if (!Seam.bQueued)
+	{
+		DirtyQueue.Add(Seam.Key);
+		Seam.bQueued = true;
 	}
 }
 
@@ -505,12 +516,14 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		return 0;
 	}
 
-	// Round-robin scan: pop candidates from the head of DirtyQueue; a candidate that cannot
-	// schedule yet (participant missing, or still in flight) is re-appended at the BACK so the
-	// next tick examines DIFFERENT seams. A bounded scan from a fixed starting point would
-	// re-examine the same not-yet-ready frontier every tick and starve everything behind it
-	// (observed live: thousands dirty, 2 scheduled). Scan budget exceeds the schedule budget so
-	// ready seams hiding behind unready ones are still found within a tick.
+	// The rotation holds READY dirty seams only (MarkSeamDirty enqueues iff all participants are
+	// resident), so nearly everything examined here schedules. Two exceptions are handled in the
+	// loop: a seam whose previous job is still in flight is re-appended at the BACK and retried
+	// next tick; a seam that LOST a participant since it was enqueued is dropped from the rotation
+	// (it stays dirty in DirtySeams — that participant's return re-dirties and re-enqueues it).
+	// Rotating rather than rescanning from the head keeps a burst of in-flight seams from starving
+	// the ones behind them. Scan budget exceeds the schedule budget so ready seams behind in-flight
+	// ones are still found within a tick.
 	const int32 ScheduleBudget = (MaxToSchedule > 0) ? MaxToSchedule : MAX_int32;
 	const int32 ScanBudget = (MaxToSchedule > 0)
 		? FMath::Max(64, MaxToSchedule * 4)
@@ -527,6 +540,10 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		// Lazy deletion: entries whose seam was cleaned/scheduled/removed since queuing.
 		if (!DirtySeams.Contains(Key))
 		{
+			if (FVoxelSeamState* Stale = Seams.Find(Key))
+			{
+				Stale->bQueued = false; // it has left the rotation; a future dirty may enqueue it again
+			}
 			continue;
 		}
 
@@ -534,6 +551,10 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		if (!Seam || !Seam->bDirty)
 		{
 			DirtySeams.Remove(Key); // stale set entry — drop it
+			if (Seam)
+			{
+				Seam->bQueued = false;
+			}
 			continue;
 		}
 
@@ -547,12 +568,15 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 			++IntervalRequeuedInFlight;
 			continue;
 		}
-		// Gate: only schedule a seam once ALL its participants are resident (both/all sides' data
-		// present) — the same "wait for neighbours" the meshing scheduler enforces.
+		// A participant left after this seam was enqueued (UnregisterChunk re-dirties survivors but
+		// cannot un-enqueue). Drop it from the rotation rather than requeue: it stays in DirtySeams,
+		// and the participant's return re-dirties it through MarkSeamDirty, which enqueues it again.
+		// The ready stamp is cleared so that return re-stamps it (scan wait must not include the gap).
 		if (!AreAllParticipantsResident(Key))
 		{
-			Requeue.Add(Key); // stays dirty; back of the rotation
-			++IntervalRequeuedNotResident;
+			Seam->bQueued = false;
+			Seam->ReadyAtSeconds = 0.0;
+			++IntervalRequeuedNotResident; // counts drops now; the log token stays "notResident"
 			continue;
 		}
 
@@ -599,6 +623,7 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		Seam->bDirty = false;
 		Seam->DirtiedAtSeconds = 0.0; // no longer waiting; a re-dirty starts a fresh wait
 		Seam->ReadyAtSeconds = 0.0;
+		Seam->bQueued = false; // out of the rotation until the next dirty
 		DirtySeams.Remove(Key);
 		++Scheduled;
 		++IntervalScheduled;
@@ -726,6 +751,7 @@ void FVoxelSeamRegistry::MarkAllSeamsClean()
 	for (auto& Pair : Seams)
 	{
 		Pair.Value.bDirty = false;
+		Pair.Value.bQueued = false;
 	}
 	DirtySeams.Reset();
 	DirtyQueue.Reset();

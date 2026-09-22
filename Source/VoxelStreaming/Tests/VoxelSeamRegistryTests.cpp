@@ -389,15 +389,17 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 	Reg.UpdateChunkContent(A, /*version*/ 2);
 	TestEqual(TEXT("re-dirty preserves the original dirtied-at"), Seam->DirtiedAtSeconds, 1.0);
 
-	// A scan while B is absent examines but cannot schedule: counted as not-resident requeues.
+	// A scan while B is absent has NOTHING to examine: none of A's seams is buildable, so none is
+	// in the rotation (they stay dirty in the set). This is the scheduler fix's central invariant.
 	Clock = 3.0;
 	Reg.ScheduleReadySeams(/*viewer*/ A, /*nearRadius*/ 3, /*max*/ 0);
 	{
 		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
-		TestTrue(TEXT("scan examined A's dirty seams"), L.Examined > 0);
-		TestEqual(TEXT("everything examined was requeued as not-resident"), L.RequeuedNotResident, L.Examined);
+		TestEqual(TEXT("unready seams never enter the rotation: nothing examined"), L.Examined, 0);
+		TestEqual(TEXT("nothing dropped"), L.RequeuedNotResident, 0);
 		TestEqual(TEXT("nothing scheduled"), L.Scheduled, 0);
 		TestEqual(TEXT("no latency samples yet"), L.NearScheduleN, 0);
+		TestEqual(TEXT("all 26 of A's seams still dirty in the set"), L.DirtyCount, 26);
 		TestTrue(TEXT("near dirty count sees A's seams (owner at the viewer)"), L.NearDirtyCount > 0);
 	}
 
@@ -427,6 +429,7 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 
 	{
 		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestEqual(TEXT("only the one ready seam was examined"), L.Examined, 1);
 		TestEqual(TEXT("interval scheduled == 1"), L.Scheduled, 1);
 		TestEqual(TEXT("one near schedule sample"), L.NearScheduleN, 1);
 		TestEqual(TEXT("no far schedule samples"), L.FarScheduleN, 0);
@@ -476,6 +479,74 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("total wait window max is still the earlier 4000 ms"), L.NearScheduleMaxMs, 4000.0f);
 	}
 
+	return true;
+}
+
+// ===========================================================================
+// 6. Only READY seams enter the scan rotation; a participant leaving drops
+//    its seams from the rotation (not requeued), and its return re-enqueues.
+// ===========================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSeamReadyRotationTest,
+	"VoxelWorlds.Streaming.SeamRegistry.ReadyRotation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSeamReadyRotationTest::RunTest(const FString& Parameters)
+{
+	FVoxelSeamRegistry Reg; Reg.SetEnabled(true);
+	const FIntVector A(0, 0, 0);
+	const FIntVector B(1, 0, 0);
+	const FVoxelSeamKey FaceAB(A, EVoxelSeamType::Face, /*axis X*/ 0);
+	auto Take = [&Reg, &A]() { return Reg.TakeLatencyStats(A, /*nearRadius*/ 3); };
+
+	// A alone: 26 dirty seams, zero buildable, zero in the rotation.
+	Reg.RegisterChunk(A, /*version*/ 1, /*lod*/ 0);
+	TestEqual(TEXT("A alone: nothing schedules"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 0);
+	{
+		const FVoxelSeamLatencyStats L = Take();
+		TestEqual(TEXT("A alone: nothing examined"), L.Examined, 0);
+		TestEqual(TEXT("A alone: 26 dirty"), L.DirtyCount, 26);
+	}
+
+	// B arrives: exactly Face(A,X) becomes buildable, so it is the only rotation entry. A and B
+	// share 9 seams (1 face + 4 edges + 4 corners along their common face), so the distinct dirty
+	// set is 26 + 26 - 9 = 43, minus the one just scheduled = 42.
+	Reg.RegisterChunk(B, /*version*/ 1, /*lod*/ 0);
+	TestEqual(TEXT("B arrives: one seam schedules"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 1);
+	{
+		const FVoxelSeamLatencyStats L = Take();
+		TestEqual(TEXT("B arrives: exactly one examined"), L.Examined, 1);
+		TestEqual(TEXT("B arrives: nothing dropped"), L.RequeuedNotResident, 0);
+		TestEqual(TEXT("B arrives: 42 dirty remain"), L.DirtyCount, 42);
+	}
+	TArray<FVoxelSeamJob> Jobs;
+	Reg.DrainSeamJobs(Jobs, /*max*/ 8);
+	TestEqual(TEXT("drained the job"), Jobs.Num(), 1);
+
+	// Re-dirty while both resident -> enqueued; then B leaves before the scan runs.
+	Reg.UpdateChunkContent(A, /*version*/ 2);
+	TestTrue(TEXT("re-dirtied"), Reg.IsSeamDirty(FaceAB));
+	Reg.UnregisterChunk(B);
+	TestTrue(TEXT("still dirty after B left (A remains a participant)"), Reg.IsSeamDirty(FaceAB));
+	TestEqual(TEXT("B gone: nothing schedules"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 0);
+	{
+		const FVoxelSeamLatencyStats L = Take();
+		TestEqual(TEXT("B gone: the stale entry examined once"), L.Examined, 1);
+		TestEqual(TEXT("B gone: ...and dropped"), L.RequeuedNotResident, 1);
+	}
+	// Dropped, not requeued: a second scan finds an empty rotation.
+	TestEqual(TEXT("B gone: second scan schedules nothing"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 0);
+	{
+		const FVoxelSeamLatencyStats L = Take();
+		TestEqual(TEXT("B gone: second scan examines nothing"), L.Examined, 0);
+	}
+
+	// B returns: its RegisterChunk re-dirties Face(A,X), which is buildable again -> enqueued.
+	Reg.RegisterChunk(B, /*version*/ 1, /*lod*/ 0);
+	TestEqual(TEXT("B returns: schedules again"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 1);
+	{
+		const FVoxelSeamLatencyStats L = Take();
+		TestEqual(TEXT("B returns: exactly one examined"), L.Examined, 1);
+	}
 	return true;
 }
 

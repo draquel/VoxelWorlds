@@ -126,6 +126,9 @@ struct FVoxelSeamState
 	/** A seam job for this seam is currently enqueued/in flight (guards against double-scheduling). */
 	bool bScheduled = false;
 
+	/** In the scan rotation (DirtyQueue). Only READY dirty seams are queued — see MarkSeamDirty. */
+	bool bQueued = false;
+
 	/**
 	 * Wall-clock (FPlatformTime::Seconds) of the clean->dirty transition that started the CURRENT
 	 * wait. Preserved across re-dirtying while already dirty (the wait began at the first dirtying,
@@ -206,7 +209,7 @@ struct FVoxelSeamLatencyStats
 
 	// ---- Interval counters (since the previous take) ----
 	int32 Examined = 0;              // dirty entries the scan looked at
-	int32 RequeuedNotResident = 0;   // examined but a participant is not resident (never schedulable yet)
+	int32 RequeuedNotResident = 0;   // examined but a participant LEFT since enqueue: dropped from the rotation (log token stays "notResident")
 	int32 RequeuedInFlight = 0;      // examined but a previous job is still in flight
 	int32 Scheduled = 0;             // jobs actually queued
 	int32 Completed = 0;             // completions reported via RecordSeamCompleted
@@ -464,11 +467,14 @@ private:
 	TSet<FVoxelSeamKey> DirtySeams;
 
 	/**
-	 * Round-robin scan order over DirtySeams (head index + lazy compaction). A bounded per-tick
-	 * scan MUST rotate: iterating the set from the start each tick re-examines the same
-	 * not-yet-ready frontier seams forever and starves every schedulable seam behind them
-	 * (observed live: thousands dirty, 2 scheduled). Examined-but-not-ready keys go to the back;
-	 * keys no longer in DirtySeams are skipped lazily.
+	 * Scan rotation over the READY subset of DirtySeams (head index + lazy compaction). Invariant:
+	 * a key is here only if MarkSeamDirty saw every participant resident (FVoxelSeamState::bQueued
+	 * tracks membership). Seams whose neighbour has not loaded — or never will, e.g. the air above
+	 * and solid below the surface band, up to 18 of a chunk's 26 seams — are NOT queued; they wait
+	 * in DirtySeams and are enqueued by the arrival that makes them buildable. Before this, the
+	 * whole dirty set rotated here and 99.6% of the per-tick scan budget was spent re-examining
+	 * never-ready seams, so a near seam waited ~(dirty / scan rate) ≈ 300 ms just to be looked at.
+	 * In-flight seams rotate to the back; keys no longer dirty are skipped lazily.
 	 */
 	TArray<FVoxelSeamKey> DirtyQueue;
 	int32 DirtyQueueHead = 0;
