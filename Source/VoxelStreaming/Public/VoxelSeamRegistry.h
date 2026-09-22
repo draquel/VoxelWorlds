@@ -125,6 +125,23 @@ struct FVoxelSeamState
 
 	/** A seam job for this seam is currently enqueued/in flight (guards against double-scheduling). */
 	bool bScheduled = false;
+
+	/**
+	 * Wall-clock (FPlatformTime::Seconds) of the clean->dirty transition that started the CURRENT
+	 * wait. Preserved across re-dirtying while already dirty (the wait began at the first dirtying,
+	 * not the latest), cleared when the seam is scheduled. 0 = not waiting. Feeds the scan-latency
+	 * instrumentation (see FVoxelSeamLatencyStats).
+	 */
+	double DirtiedAtSeconds = 0.0;
+
+	/**
+	 * Wall-clock at which ALL participants were resident while this seam was dirty — the moment
+	 * it became buildable. A seam first dirtied with a participant still absent gets this stamped
+	 * only when that participant's RegisterChunk re-dirties it. Scan wait is measured from here,
+	 * so neighbour-arrival latency (a streaming property) is not mistaken for scheduler latency.
+	 * 0 = not buildable yet during the current wait; cleared when scheduled.
+	 */
+	double ReadyAtSeconds = 0.0;
 };
 
 /**
@@ -142,6 +159,12 @@ struct FVoxelSeamJob
 
 	/** Participant snapshot captured at schedule time (mirrors FMeshBoundaryDep per participant). */
 	TArray<FVoxelSeamParticipant> Participants;
+
+	/** Latency instrumentation: when the seam went dirty and when this job was scheduled. Carried
+	 *  through the async job so completion can report dirty->visible end to end. */
+	double DirtiedAtSeconds = 0.0;
+	double ReadyAtSeconds = 0.0;
+	double ScheduledAtSeconds = 0.0;
 
 	/** Ascending sort (lowest priority first, highest at the back for O(1) pop) — matches FChunkLODRequest. */
 	FORCEINLINE bool operator<(const FVoxelSeamJob& Other) const { return Priority < Other.Priority; }
@@ -164,6 +187,46 @@ struct FVoxelSeamRegistryStats
 	int64 TotalSeamJobsScheduled = 0;
 	/** Lifetime seam jobs processed by the (P0: stub) processor. */
 	int64 TotalSeamJobsProcessed = 0;
+};
+
+/**
+ * Scheduler latency instrumentation. Answers "how long does a seam that goes dirty wait before it
+ * is scheduled, and before its geometry lands?" — split NEAR the viewer (the seams a player can
+ * see change under them) vs FAR. The scan over dirty seams is FIFO round-robin while priority is
+ * only applied at drain, so a near seam can queue behind every never-schedulable far seam; this
+ * is the measurement that confirms or refutes that as a visible-latency source.
+ *
+ * Interval counters reset each TakeLatencyStats; the percentile windows are rolling.
+ */
+struct FVoxelSeamLatencyStats
+{
+	// ---- Snapshot at take time ----
+	int32 DirtyCount = 0;        // all seams currently dirty
+	int32 NearDirtyCount = 0;    // dirty seams whose owner is within NearChunkRadius of the viewer
+
+	// ---- Interval counters (since the previous take) ----
+	int32 Examined = 0;              // dirty entries the scan looked at
+	int32 RequeuedNotResident = 0;   // examined but a participant is not resident (never schedulable yet)
+	int32 RequeuedInFlight = 0;      // examined but a previous job is still in flight
+	int32 Scheduled = 0;             // jobs actually queued
+	int32 Completed = 0;             // completions reported via RecordSeamCompleted
+
+	// ---- Rolling windows, milliseconds ----
+	// dirty -> scheduled: the TOTAL wait, which includes time spent waiting for an absent
+	// participant to load. Player-relevant, but not attributable to the scheduler alone.
+	int32 NearScheduleN = 0;  float NearScheduleP50Ms = 0, NearScheduleP95Ms = 0, NearScheduleMaxMs = 0;
+	int32 FarScheduleN = 0;   float FarScheduleP50Ms = 0,  FarScheduleP95Ms = 0,  FarScheduleMaxMs = 0;
+	// ready -> scheduled: the pure SCAN wait (the quantity the FIFO theory is about). Measured
+	// from the moment the seam became buildable, so an absent neighbour cannot inflate it.
+	int32 NearScanN = 0;      float NearScanP50Ms = 0, NearScanP95Ms = 0, NearScanMaxMs = 0;
+	int32 FarScanN = 0;       float FarScanP50Ms = 0,  FarScanP95Ms = 0,  FarScanMaxMs = 0;
+	// dirty -> completed, near only (total, incl. neighbour arrival)
+	int32 NearEndToEndN = 0;  float NearEndToEndP50Ms = 0, NearEndToEndP95Ms = 0, NearEndToEndMaxMs = 0;
+	// ready -> completed, near only: what the player sees once the neighbour is there — the
+	// delay between "this boundary CAN be built" and "it is on screen"
+	int32 NearReadyToDoneN = 0; float NearReadyToDoneP50Ms = 0, NearReadyToDoneP95Ms = 0, NearReadyToDoneMaxMs = 0;
+	// scheduled -> completed (job queue + async), near only; attributes the e2e between scan and job
+	int32 NearPostScheduleN = 0; float NearPostScheduleP50Ms = 0, NearPostScheduleP95Ms = 0, NearPostScheduleMaxMs = 0;
 };
 
 /**
@@ -323,7 +386,44 @@ public:
 	 */
 	static float ComputeSeamPriority(const FIntVector& OwnerChunk, const FIntVector& ViewerChunk, int32 NearChunkRadius);
 
+	/** True when OwnerChunk is within NearChunkRadius (Chebyshev) of ViewerChunk — the near-correction tier. */
+	static bool IsNearViewer(const FIntVector& OwnerChunk, const FIntVector& ViewerChunk, int32 NearChunkRadius);
+
+	// ==================== Latency instrumentation ====================
+
+	/**
+	 * Report a seam job's completion so dirty->completed latency is recorded. Timestamps are the
+	 * ones the job carried (FVoxelSeamJob::DirtiedAtSeconds / ScheduledAtSeconds); zero is ignored.
+	 * @param bNear Whether the seam's owner is near the viewer at completion time.
+	 */
+	void RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear);
+
+	/**
+	 * Snapshot the latency instrumentation and reset the interval counters (rolling percentile
+	 * windows are kept). Counts NearDirtyCount against the given viewer.
+	 */
+	FVoxelSeamLatencyStats TakeLatencyStats(const FIntVector& ViewerChunk, int32 NearChunkRadius);
+
+	/** Tests: substitute a controllable clock for FPlatformTime::Seconds. */
+	void SetClockOverride(TFunction<double()> InClock) { ClockOverride = MoveTemp(InClock); }
+
 private:
+	/** Wall clock for latency stamps (overridable in tests). */
+	double Now() const;
+
+	/** Fixed-capacity rolling sample window with percentile readout. */
+	struct FLatencyWindow
+	{
+		static constexpr int32 Capacity = 512;
+		TArray<float> Samples;
+		int32 Next = 0;
+		int32 Count = 0;
+		void Add(float Ms);
+		void Reset() { Samples.Reset(); Next = 0; Count = 0; }
+		/** Fills p50/p95/max in ms; all zero when empty. */
+		void Percentiles(float& OutP50, float& OutP95, float& OutMax) const;
+	};
+
 	/** The mirrored boundary-relevant state of one registered chunk. */
 	struct FChunkMirrorState
 	{
@@ -384,4 +484,20 @@ private:
 	int64 TotalSeamsCreated = 0;
 	int64 TotalSeamJobsScheduled = 0;
 	int64 TotalSeamJobsProcessed = 0;
+
+	// ---- Latency instrumentation (see FVoxelSeamLatencyStats) ----
+
+	TFunction<double()> ClockOverride;
+	int32 IntervalExamined = 0;
+	int32 IntervalRequeuedNotResident = 0;
+	int32 IntervalRequeuedInFlight = 0;
+	int32 IntervalScheduled = 0;
+	int32 IntervalCompleted = 0;
+	FLatencyWindow NearScheduleWindow;
+	FLatencyWindow FarScheduleWindow;
+	FLatencyWindow NearScanWindow;
+	FLatencyWindow FarScanWindow;
+	FLatencyWindow NearEndToEndWindow;
+	FLatencyWindow NearReadyToDoneWindow;
+	FLatencyWindow NearPostScheduleWindow;
 };

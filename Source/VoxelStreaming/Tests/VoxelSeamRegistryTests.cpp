@@ -351,4 +351,132 @@ bool FVoxelSeamSchedulingGateTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ===========================================================================
+// 5. Latency instrumentation: the dirty->scheduled wait is measured from the
+//    FIRST dirtying, preserved across re-dirties, classified near/far against
+//    the viewer, and the interval counters attribute the scan's work.
+// ===========================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSeamDirtyLatencyTest,
+	"VoxelWorlds.Streaming.SeamRegistry.DirtyLatency",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
+{
+	FVoxelSeamRegistry Reg; Reg.SetEnabled(true);
+	double Clock = 0.0;
+	Reg.SetClockOverride([&Clock]() { return Clock; });
+
+	const FIntVector A(0, 0, 0);
+	const FIntVector B(1, 0, 0);
+	const FVoxelSeamKey FaceAB(A, EVoxelSeamType::Face, /*axis X*/ 0);
+
+	// Near/far classification is Chebyshev distance against the viewer.
+	TestTrue(TEXT("owner at the viewer is near"), FVoxelSeamRegistry::IsNearViewer(A, A, 3));
+	TestTrue(TEXT("owner 3 chunks away is near at radius 3"), FVoxelSeamRegistry::IsNearViewer(FIntVector(3, -3, 3), A, 3));
+	TestFalse(TEXT("owner 4 chunks away is far at radius 3"), FVoxelSeamRegistry::IsNearViewer(FIntVector(4, 0, 0), A, 3));
+
+	// t=1: A registers, dirtying Face(A,X). The wait starts now.
+	Clock = 1.0;
+	Reg.RegisterChunk(A, /*version*/ 1, /*lod*/ 0);
+	const FVoxelSeamState* Seam = Reg.FindSeam(FaceAB);
+	TestNotNull(TEXT("Face(A,X) exists"), Seam);
+	if (!Seam) { return false; }
+	TestEqual(TEXT("dirtied-at stamped on first dirty"), Seam->DirtiedAtSeconds, 1.0);
+
+	// t=2: A's content changes, re-dirtying the same seam. The clock must NOT restart — the
+	// player has been looking at stale geometry since t=1.
+	Clock = 2.0;
+	Reg.UpdateChunkContent(A, /*version*/ 2);
+	TestEqual(TEXT("re-dirty preserves the original dirtied-at"), Seam->DirtiedAtSeconds, 1.0);
+
+	// A scan while B is absent examines but cannot schedule: counted as not-resident requeues.
+	Clock = 3.0;
+	Reg.ScheduleReadySeams(/*viewer*/ A, /*nearRadius*/ 3, /*max*/ 0);
+	{
+		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestTrue(TEXT("scan examined A's dirty seams"), L.Examined > 0);
+		TestEqual(TEXT("everything examined was requeued as not-resident"), L.RequeuedNotResident, L.Examined);
+		TestEqual(TEXT("nothing scheduled"), L.Scheduled, 0);
+		TestEqual(TEXT("no latency samples yet"), L.NearScheduleN, 0);
+		TestTrue(TEXT("near dirty count sees A's seams (owner at the viewer)"), L.NearDirtyCount > 0);
+	}
+
+	// t=5: B registers (re-dirtying Face(A,X) again — still no restart), then the scan schedules
+	// it. The recorded wait must be 5 - 1 = 4 s, in the NEAR window since A is at the viewer.
+	Clock = 5.0;
+	Reg.RegisterChunk(B, /*version*/ 1, /*lod*/ 0);
+	TestEqual(TEXT("B's registration re-dirty preserves dirtied-at"), Seam->DirtiedAtSeconds, 1.0);
+	// ...but it is the moment the seam became BUILDABLE, so ready-at is stamped now, not at t=1.
+	TestEqual(TEXT("ready-at stamped when the last participant registers"), Seam->ReadyAtSeconds, 5.0);
+	const int32 Scheduled = Reg.ScheduleReadySeams(/*viewer*/ A, /*nearRadius*/ 3, /*max*/ 0);
+	TestEqual(TEXT("exactly Face(A,X) schedules"), Scheduled, 1);
+	TestEqual(TEXT("dirtied-at cleared once scheduled"), Seam->DirtiedAtSeconds, 0.0);
+	TestEqual(TEXT("ready-at cleared once scheduled"), Seam->ReadyAtSeconds, 0.0);
+
+	// NB: unlike ScheduleReadySeams/ProcessSeamJobQueue, DrainSeamJobs treats MaxJobs <= 0 as
+	// "drain nothing" (it mirrors the chunk manager's always-positive in-flight budget).
+	TArray<FVoxelSeamJob> Jobs;
+	Reg.DrainSeamJobs(Jobs, /*max*/ 8);
+	TestEqual(TEXT("one job drained"), Jobs.Num(), 1);
+	if (Jobs.Num() == 1)
+	{
+		TestEqual(TEXT("job carries dirtied-at"), Jobs[0].DirtiedAtSeconds, 1.0);
+		TestEqual(TEXT("job carries ready-at"), Jobs[0].ReadyAtSeconds, 5.0);
+		TestEqual(TEXT("job carries scheduled-at"), Jobs[0].ScheduledAtSeconds, 5.0);
+	}
+
+	{
+		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestEqual(TEXT("interval scheduled == 1"), L.Scheduled, 1);
+		TestEqual(TEXT("one near schedule sample"), L.NearScheduleN, 1);
+		TestEqual(TEXT("no far schedule samples"), L.FarScheduleN, 0);
+		TestEqual(TEXT("near dirty->scheduled wait is 4000 ms"), L.NearScheduleP50Ms, 4000.0f);
+		TestEqual(TEXT("p95 of a single sample is that sample"), L.NearScheduleP95Ms, 4000.0f);
+		TestEqual(TEXT("max of a single sample is that sample"), L.NearScheduleMaxMs, 4000.0f);
+		// The 4 s were spent waiting for B, not for the scheduler: the pure scan wait is zero.
+		TestEqual(TEXT("one near scan sample"), L.NearScanN, 1);
+		TestEqual(TEXT("scan wait excludes the time waiting for B"), L.NearScanMaxMs, 0.0f);
+	}
+
+	// t=7: the job completes. End-to-end is 7 - 1 = 6 s; from ready it is 7 - 5 = 2 s (the part
+	// the player can actually see, since the boundary could not exist before B arrived).
+	Clock = 7.0;
+	Reg.RecordSeamCompleted(/*dirtied*/ 1.0, /*ready*/ 5.0, /*scheduled*/ 5.0, /*bNear*/ true);
+	{
+		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestEqual(TEXT("interval completed == 1"), L.Completed, 1);
+		TestEqual(TEXT("near dirty->completed is 6000 ms"), L.NearEndToEndP50Ms, 6000.0f);
+		TestEqual(TEXT("near ready->completed is 2000 ms"), L.NearReadyToDoneP50Ms, 2000.0f);
+		TestEqual(TEXT("near scheduled->completed is 2000 ms"), L.NearPostScheduleP50Ms, 2000.0f);
+		// Interval counters reset on take; rolling windows persist.
+		TestEqual(TEXT("interval scheduled reset by the previous take"), L.Scheduled, 0);
+		TestEqual(TEXT("near schedule window persists across takes"), L.NearScheduleN, 1);
+	}
+
+	// A far completion contributes to the interval count but not to the near windows.
+	Reg.RecordSeamCompleted(/*dirtied*/ 1.0, /*ready*/ 5.0, /*scheduled*/ 5.0, /*bNear*/ false);
+	{
+		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestEqual(TEXT("far completion counted"), L.Completed, 1);
+		TestEqual(TEXT("far completion does not enter the near e2e window"), L.NearEndToEndN, 1);
+	}
+
+	// A seam re-dirtied while BOTH participants are resident is buildable immediately: its scan
+	// wait is the whole wait. t=8 content change, t=9 scheduled -> 1000 ms on both windows.
+	Clock = 8.0;
+	Reg.UpdateChunkContent(A, /*version*/ 3);
+	TestEqual(TEXT("re-dirty with all resident: dirtied-at restarts"), Seam->DirtiedAtSeconds, 8.0);
+	TestEqual(TEXT("re-dirty with all resident: ready-at == dirtied-at"), Seam->ReadyAtSeconds, 8.0);
+	Clock = 9.0;
+	TestEqual(TEXT("Face(A,X) schedules again"), Reg.ScheduleReadySeams(/*viewer*/ A, /*nearRadius*/ 3, /*max*/ 0), 1);
+	{
+		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
+		TestEqual(TEXT("two near scan samples"), L.NearScanN, 2);
+		TestEqual(TEXT("scan wait for an already-buildable seam is the full 1000 ms"), L.NearScanMaxMs, 1000.0f);
+		TestEqual(TEXT("total wait window max is still the earlier 4000 ms"), L.NearScheduleMaxMs, 4000.0f);
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -986,6 +986,10 @@ protected:
 		int32 LODLevel = 0;
 		FChunkMeshData MeshData;
 		bool bSuccess = false;
+		/** Carried from the FVoxelSeamJob so completion can report dirty->visible latency. */
+		double DirtiedAtSeconds = 0.0;
+		double ReadyAtSeconds = 0.0;
+		double ScheduledAtSeconds = 0.0;
 	};
 
 	/** Thread-safe queue for completed async seam meshes. */
