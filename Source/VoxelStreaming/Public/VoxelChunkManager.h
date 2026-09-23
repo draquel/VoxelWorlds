@@ -1005,6 +1005,15 @@ protected:
 	 *  per-tick drain budget (in-flight cap) could not empty the job queue, both since the previous readout. */
 	int32 SeamInFlightPeak = 0;
 	int32 SeamSlotStarvedTicks = 0;
+	/** Instrumentation: game-thread cost of ProcessCompletedSeamMeshes (ticks that submitted >= 1
+	 *  mesh) and the frame time seen by the seam scheduler tick, both since the previous readout. */
+	double SeamSubmitMsAccum = 0.0;
+	double SeamSubmitMsMax = 0.0;
+	int32 SeamSubmitTicks = 0;
+	int32 SeamSubmitCount = 0;
+	double SeamFrameMsAccum = 0.0;
+	double SeamFrameMsMax = 0.0;
+	int32 SeamFrameTicks = 0;
 
 	/**
 	 * Version-keyed shared voxel snapshots for seam jobs. A chunk participates in up to 26 seams;
