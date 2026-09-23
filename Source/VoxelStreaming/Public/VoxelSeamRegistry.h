@@ -125,6 +125,30 @@ struct FVoxelSeamState
 
 	/** A seam job for this seam is currently enqueued/in flight (guards against double-scheduling). */
 	bool bScheduled = false;
+
+	/** In the scan rotation (DirtyQueue). Only READY dirty seams are queued — see MarkSeamDirty. */
+	bool bQueued = false;
+
+	/** Wall-clock of the most recent schedule (0 = never). Instrumentation: detects a seam being
+	 *  scheduled again shortly after its previous build — a rebuild the old slow rotation coalesced. */
+	double LastScheduledAtSeconds = 0.0;
+
+	/**
+	 * Wall-clock (FPlatformTime::Seconds) of the clean->dirty transition that started the CURRENT
+	 * wait. Preserved across re-dirtying while already dirty (the wait began at the first dirtying,
+	 * not the latest), cleared when the seam is scheduled. 0 = not waiting. Feeds the scan-latency
+	 * instrumentation (see FVoxelSeamLatencyStats).
+	 */
+	double DirtiedAtSeconds = 0.0;
+
+	/**
+	 * Wall-clock at which ALL participants were resident while this seam was dirty — the moment
+	 * it became buildable. A seam first dirtied with a participant still absent gets this stamped
+	 * only when that participant's RegisterChunk re-dirties it. Scan wait is measured from here,
+	 * so neighbour-arrival latency (a streaming property) is not mistaken for scheduler latency.
+	 * 0 = not buildable yet during the current wait; cleared when scheduled.
+	 */
+	double ReadyAtSeconds = 0.0;
 };
 
 /**
@@ -142,6 +166,12 @@ struct FVoxelSeamJob
 
 	/** Participant snapshot captured at schedule time (mirrors FMeshBoundaryDep per participant). */
 	TArray<FVoxelSeamParticipant> Participants;
+
+	/** Latency instrumentation: when the seam went dirty and when this job was scheduled. Carried
+	 *  through the async job so completion can report dirty->visible end to end. */
+	double DirtiedAtSeconds = 0.0;
+	double ReadyAtSeconds = 0.0;
+	double ScheduledAtSeconds = 0.0;
 
 	/** Ascending sort (lowest priority first, highest at the back for O(1) pop) — matches FChunkLODRequest. */
 	FORCEINLINE bool operator<(const FVoxelSeamJob& Other) const { return Priority < Other.Priority; }
@@ -164,6 +194,57 @@ struct FVoxelSeamRegistryStats
 	int64 TotalSeamJobsScheduled = 0;
 	/** Lifetime seam jobs processed by the (P0: stub) processor. */
 	int64 TotalSeamJobsProcessed = 0;
+};
+
+/**
+ * Scheduler latency instrumentation. Answers "how long does a seam that goes dirty wait before it
+ * is scheduled, and before its geometry lands?" — split NEAR the viewer (the seams a player can
+ * see change under them) vs FAR. The scan over dirty seams is FIFO round-robin while priority is
+ * only applied at drain, so a near seam can queue behind every never-schedulable far seam; this
+ * is the measurement that confirms or refutes that as a visible-latency source.
+ *
+ * Interval counters reset each TakeLatencyStats; the percentile windows are rolling.
+ */
+struct FVoxelSeamLatencyStats
+{
+	// ---- Snapshot at take time ----
+	int32 DirtyCount = 0;        // all seams currently dirty
+	int32 NearDirtyCount = 0;    // dirty seams whose owner is within NearChunkRadius of the viewer
+
+	// ---- Interval counters (since the previous take) ----
+	int32 Examined = 0;              // dirty entries the scan looked at
+	int32 RequeuedNotResident = 0;   // examined but a participant LEFT since enqueue: dropped from the rotation (log token stays "notResident")
+	int32 RequeuedInFlight = 0;      // examined but a previous job is still in flight
+	int32 Scheduled = 0;             // jobs actually queued
+	int32 Completed = 0;             // completions reported via RecordSeamCompleted
+
+	// ---- Job stage ----
+	int32 JobQueueDepth = 0;         // snapshot: scheduled jobs not yet drained to a worker
+	int32 RescheduledWithin1s = 0;   // interval: scheduled again < 1 s after the previous schedule (a rebuild the 300 ms rotation used to coalesce)
+	int32 DroppedInFlight = 0;       // interval: drained then dropped because an older job for the same seam was still in flight (seam stays CLEAN — stale until re-dirtied)
+	int32 DroppedParticipant = 0;    // interval: drained then dropped because a participant lost its data / mesh, or the participant tuple had the wrong shape
+
+	// ---- Rolling windows, milliseconds ----
+	// dirty -> scheduled: the TOTAL wait, which includes time spent waiting for an absent
+	// participant to load. Player-relevant, but not attributable to the scheduler alone.
+	int32 NearScheduleN = 0;  float NearScheduleP50Ms = 0, NearScheduleP95Ms = 0, NearScheduleMaxMs = 0;
+	int32 FarScheduleN = 0;   float FarScheduleP50Ms = 0,  FarScheduleP95Ms = 0,  FarScheduleMaxMs = 0;
+	// ready -> scheduled: the pure SCAN wait (the quantity the FIFO theory is about). Measured
+	// from the moment the seam became buildable, so an absent neighbour cannot inflate it.
+	int32 NearScanN = 0;      float NearScanP50Ms = 0, NearScanP95Ms = 0, NearScanMaxMs = 0;
+	int32 FarScanN = 0;       float FarScanP50Ms = 0,  FarScanP95Ms = 0,  FarScanMaxMs = 0;
+	// dirty -> completed, near only (total, incl. neighbour arrival)
+	int32 NearEndToEndN = 0;  float NearEndToEndP50Ms = 0, NearEndToEndP95Ms = 0, NearEndToEndMaxMs = 0;
+	// ready -> completed, near only: what the player sees once the neighbour is there — the
+	// delay between "this boundary CAN be built" and "it is on screen"
+	int32 NearReadyToDoneN = 0; float NearReadyToDoneP50Ms = 0, NearReadyToDoneP95Ms = 0, NearReadyToDoneMaxMs = 0;
+	// scheduled -> completed (job queue + async), near only; attributes the e2e between scan and job
+	int32 NearPostScheduleN = 0; float NearPostScheduleP50Ms = 0, NearPostScheduleP95Ms = 0, NearPostScheduleMaxMs = 0;
+	// Post-schedule split, near only: scheduled -> dispatched (waiting for an in-flight slot),
+	// dispatched -> completed (worker pool latency + result-queue pickup), and the mesher's own time.
+	int32 NearQueueN = 0;  float NearQueueP50Ms = 0,  NearQueueP95Ms = 0,  NearQueueMaxMs = 0;
+	int32 NearAsyncN = 0;  float NearAsyncP50Ms = 0,  NearAsyncP95Ms = 0,  NearAsyncMaxMs = 0;
+	int32 NearWorkerN = 0; float NearWorkerP50Ms = 0, NearWorkerP95Ms = 0, NearWorkerMaxMs = 0;
 };
 
 /**
@@ -323,7 +404,58 @@ public:
 	 */
 	static float ComputeSeamPriority(const FIntVector& OwnerChunk, const FIntVector& ViewerChunk, int32 NearChunkRadius);
 
+	/** True when OwnerChunk is within NearChunkRadius (Chebyshev) of ViewerChunk — the near-correction tier. */
+	static bool IsNearViewer(const FIntVector& OwnerChunk, const FIntVector& ViewerChunk, int32 NearChunkRadius);
+
+	// ==================== Latency instrumentation ====================
+
+	/**
+	 * Report a seam job's completion so dirty->completed latency is recorded. Timestamps are the
+	 * ones the job carried (FVoxelSeamJob::DirtiedAtSeconds / ScheduledAtSeconds); zero is ignored.
+	 * @param bNear Whether the seam's owner is near the viewer at completion time.
+	 * @param DispatchedAtSeconds When the job left the queue for a worker (0 = unknown: skips the split windows).
+	 * @param WorkerMs The mesher's own wall time on the worker (only recorded when DispatchedAtSeconds > 0).
+	 */
+	void RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear,
+		double DispatchedAtSeconds = 0.0, double WorkerMs = 0.0);
+
+	/**
+	 * Report a drained job the dispatcher discarded. The seam was marked clean at schedule time, so a
+	 * drop leaves stale geometry until something re-dirties it — worth counting.
+	 * @param bOlderJobInFlight true = an older build of the same seam was still on a worker; false = a
+	 *        participant lost its data/mesh or the tuple shape was wrong.
+	 */
+	void RecordSeamJobDropped(bool bOlderJobInFlight);
+
+	/** The registry's clock (FPlatformTime::Seconds unless a test overrides it) so callers stamp on the same timeline. */
+	double NowSeconds() const { return Now(); }
+
+	/**
+	 * Snapshot the latency instrumentation and reset the interval counters (rolling percentile
+	 * windows are kept). Counts NearDirtyCount against the given viewer.
+	 */
+	FVoxelSeamLatencyStats TakeLatencyStats(const FIntVector& ViewerChunk, int32 NearChunkRadius);
+
+	/** Tests: substitute a controllable clock for FPlatformTime::Seconds. */
+	void SetClockOverride(TFunction<double()> InClock) { ClockOverride = MoveTemp(InClock); }
+
 private:
+	/** Wall clock for latency stamps (overridable in tests). */
+	double Now() const;
+
+	/** Fixed-capacity rolling sample window with percentile readout. */
+	struct FLatencyWindow
+	{
+		static constexpr int32 Capacity = 512;
+		TArray<float> Samples;
+		int32 Next = 0;
+		int32 Count = 0;
+		void Add(float Ms);
+		void Reset() { Samples.Reset(); Next = 0; Count = 0; }
+		/** Fills p50/p95/max in ms; all zero when empty. */
+		void Percentiles(float& OutP50, float& OutP95, float& OutMax) const;
+	};
+
 	/** The mirrored boundary-relevant state of one registered chunk. */
 	struct FChunkMirrorState
 	{
@@ -364,11 +496,14 @@ private:
 	TSet<FVoxelSeamKey> DirtySeams;
 
 	/**
-	 * Round-robin scan order over DirtySeams (head index + lazy compaction). A bounded per-tick
-	 * scan MUST rotate: iterating the set from the start each tick re-examines the same
-	 * not-yet-ready frontier seams forever and starves every schedulable seam behind them
-	 * (observed live: thousands dirty, 2 scheduled). Examined-but-not-ready keys go to the back;
-	 * keys no longer in DirtySeams are skipped lazily.
+	 * Scan rotation over the READY subset of DirtySeams (head index + lazy compaction). Invariant:
+	 * a key is here only if MarkSeamDirty saw every participant resident (FVoxelSeamState::bQueued
+	 * tracks membership). Seams whose neighbour has not loaded — or never will, e.g. the air above
+	 * and solid below the surface band, up to 18 of a chunk's 26 seams — are NOT queued; they wait
+	 * in DirtySeams and are enqueued by the arrival that makes them buildable. Before this, the
+	 * whole dirty set rotated here and 99.6% of the per-tick scan budget was spent re-examining
+	 * never-ready seams, so a near seam waited ~(dirty / scan rate) ≈ 300 ms just to be looked at.
+	 * In-flight seams rotate to the back; keys no longer dirty are skipped lazily.
 	 */
 	TArray<FVoxelSeamKey> DirtyQueue;
 	int32 DirtyQueueHead = 0;
@@ -384,4 +519,26 @@ private:
 	int64 TotalSeamsCreated = 0;
 	int64 TotalSeamJobsScheduled = 0;
 	int64 TotalSeamJobsProcessed = 0;
+
+	// ---- Latency instrumentation (see FVoxelSeamLatencyStats) ----
+
+	TFunction<double()> ClockOverride;
+	int32 IntervalExamined = 0;
+	int32 IntervalRequeuedNotResident = 0;
+	int32 IntervalRequeuedInFlight = 0;
+	int32 IntervalScheduled = 0;
+	int32 IntervalCompleted = 0;
+	FLatencyWindow NearScheduleWindow;
+	FLatencyWindow FarScheduleWindow;
+	FLatencyWindow NearScanWindow;
+	FLatencyWindow FarScanWindow;
+	FLatencyWindow NearEndToEndWindow;
+	FLatencyWindow NearReadyToDoneWindow;
+	FLatencyWindow NearPostScheduleWindow;
+	int32 IntervalRescheduledWithin1s = 0;
+	int32 IntervalDroppedInFlight = 0;
+	int32 IntervalDroppedParticipant = 0;
+	FLatencyWindow NearQueueWindow;
+	FLatencyWindow NearAsyncWindow;
+	FLatencyWindow NearWorkerWindow;
 };

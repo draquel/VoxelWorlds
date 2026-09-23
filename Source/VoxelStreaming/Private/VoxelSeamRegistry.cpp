@@ -173,11 +173,18 @@ FIntVector FVoxelSeamRegistry::ComputeOwner(const TArray<FIntVector>& Participan
 	return Min;
 }
 
+bool FVoxelSeamRegistry::IsNearViewer(const FIntVector& OwnerChunk, const FIntVector& ViewerChunk, int32 NearChunkRadius)
+{
+	const FIntVector Delta = OwnerChunk - ViewerChunk;
+	const int32 Cheb = FMath::Max3(FMath::Abs(Delta.X), FMath::Abs(Delta.Y), FMath::Abs(Delta.Z));
+	return Cheb <= NearChunkRadius;
+}
+
 float FVoxelSeamRegistry::ComputeSeamPriority(const FIntVector& OwnerChunk, const FIntVector& ViewerChunk, int32 NearChunkRadius)
 {
 	const FIntVector Delta = OwnerChunk - ViewerChunk;
 	const int32 Cheb = FMath::Max3(FMath::Abs(Delta.X), FMath::Abs(Delta.Y), FMath::Abs(Delta.Z));
-	if (Cheb <= NearChunkRadius)
+	if (IsNearViewer(OwnerChunk, ViewerChunk, NearChunkRadius))
 	{
 		// Near-correction tier: matches GNearCorrectionPriority (above first-time meshes at 50), so
 		// a near seam would beat the streaming wave — the same intent as the near-field fast path.
@@ -215,6 +222,142 @@ void FVoxelSeamRegistry::Reset()
 	JobQueue.Reset();
 	JobQueueSet.Reset();
 	// Lifetime counters intentionally retained across Reset for session-cumulative debug stats.
+	// Latency windows are NOT retained: they describe a timeline that no longer exists.
+	IntervalExamined = IntervalRequeuedNotResident = IntervalRequeuedInFlight = 0;
+	IntervalScheduled = IntervalCompleted = 0;
+	IntervalRescheduledWithin1s = IntervalDroppedInFlight = IntervalDroppedParticipant = 0;
+	NearScheduleWindow.Reset();
+	FarScheduleWindow.Reset();
+	NearScanWindow.Reset();
+	FarScanWindow.Reset();
+	NearEndToEndWindow.Reset();
+	NearReadyToDoneWindow.Reset();
+	NearPostScheduleWindow.Reset();
+	NearQueueWindow.Reset();
+	NearAsyncWindow.Reset();
+	NearWorkerWindow.Reset();
+}
+
+// ==================== Latency instrumentation ====================
+
+double FVoxelSeamRegistry::Now() const
+{
+	return ClockOverride ? ClockOverride() : FPlatformTime::Seconds();
+}
+
+void FVoxelSeamRegistry::FLatencyWindow::Add(float Ms)
+{
+	if (Samples.Num() < Capacity)
+	{
+		Samples.Add(Ms);
+	}
+	else
+	{
+		Samples[Next] = Ms;
+	}
+	Next = (Next + 1) % Capacity;
+	Count = FMath::Min(Count + 1, Capacity);
+}
+
+void FVoxelSeamRegistry::FLatencyWindow::Percentiles(float& OutP50, float& OutP95, float& OutMax) const
+{
+	OutP50 = OutP95 = OutMax = 0.0f;
+	if (Count == 0)
+	{
+		return;
+	}
+	TArray<float> Sorted(Samples.GetData(), Count);
+	Sorted.Sort();
+	OutP50 = Sorted[FMath::Clamp(Count / 2, 0, Count - 1)];
+	OutP95 = Sorted[FMath::Clamp((Count * 95) / 100, 0, Count - 1)];
+	OutMax = Sorted[Count - 1];
+}
+
+void FVoxelSeamRegistry::RecordSeamJobDropped(bool bOlderJobInFlight)
+{
+	if (bOlderJobInFlight)
+	{
+		++IntervalDroppedInFlight;
+	}
+	else
+	{
+		++IntervalDroppedParticipant;
+	}
+}
+
+void FVoxelSeamRegistry::RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear,
+	double DispatchedAtSeconds, double WorkerMs)
+{
+	++IntervalCompleted;
+	if (!bNear)
+	{
+		return; // far seams: the scan-wait window already tells the story; e2e is a near-tier question
+	}
+	const double CompletedAt = Now();
+	if (DirtiedAtSeconds > 0.0)
+	{
+		NearEndToEndWindow.Add(static_cast<float>((CompletedAt - DirtiedAtSeconds) * 1000.0));
+		const double From = (ReadyAtSeconds > 0.0) ? FMath::Max(DirtiedAtSeconds, ReadyAtSeconds) : DirtiedAtSeconds;
+		NearReadyToDoneWindow.Add(static_cast<float>((CompletedAt - From) * 1000.0));
+	}
+	if (ScheduledAtSeconds > 0.0)
+	{
+		NearPostScheduleWindow.Add(static_cast<float>((CompletedAt - ScheduledAtSeconds) * 1000.0));
+		if (DispatchedAtSeconds > 0.0)
+		{
+			NearQueueWindow.Add(static_cast<float>((DispatchedAtSeconds - ScheduledAtSeconds) * 1000.0));
+			NearAsyncWindow.Add(static_cast<float>((CompletedAt - DispatchedAtSeconds) * 1000.0));
+			NearWorkerWindow.Add(static_cast<float>(WorkerMs));
+		}
+	}
+}
+
+FVoxelSeamLatencyStats FVoxelSeamRegistry::TakeLatencyStats(const FIntVector& ViewerChunk, int32 NearChunkRadius)
+{
+	FVoxelSeamLatencyStats S;
+	S.DirtyCount = DirtySeams.Num();
+	for (const FVoxelSeamKey& Key : DirtySeams)
+	{
+		if (IsNearViewer(Key.Owner, ViewerChunk, NearChunkRadius))
+		{
+			++S.NearDirtyCount;
+		}
+	}
+
+	S.Examined = IntervalExamined;
+	S.RequeuedNotResident = IntervalRequeuedNotResident;
+	S.RequeuedInFlight = IntervalRequeuedInFlight;
+	S.Scheduled = IntervalScheduled;
+	S.Completed = IntervalCompleted;
+	IntervalExamined = IntervalRequeuedNotResident = IntervalRequeuedInFlight = 0;
+	IntervalScheduled = IntervalCompleted = 0;
+	S.JobQueueDepth = JobQueue.Num();
+	S.RescheduledWithin1s = IntervalRescheduledWithin1s;
+	S.DroppedInFlight = IntervalDroppedInFlight;
+	S.DroppedParticipant = IntervalDroppedParticipant;
+	IntervalRescheduledWithin1s = IntervalDroppedInFlight = IntervalDroppedParticipant = 0;
+
+	S.NearScheduleN = NearScheduleWindow.Count;
+	NearScheduleWindow.Percentiles(S.NearScheduleP50Ms, S.NearScheduleP95Ms, S.NearScheduleMaxMs);
+	S.FarScheduleN = FarScheduleWindow.Count;
+	FarScheduleWindow.Percentiles(S.FarScheduleP50Ms, S.FarScheduleP95Ms, S.FarScheduleMaxMs);
+	S.NearScanN = NearScanWindow.Count;
+	NearScanWindow.Percentiles(S.NearScanP50Ms, S.NearScanP95Ms, S.NearScanMaxMs);
+	S.FarScanN = FarScanWindow.Count;
+	FarScanWindow.Percentiles(S.FarScanP50Ms, S.FarScanP95Ms, S.FarScanMaxMs);
+	S.NearReadyToDoneN = NearReadyToDoneWindow.Count;
+	NearReadyToDoneWindow.Percentiles(S.NearReadyToDoneP50Ms, S.NearReadyToDoneP95Ms, S.NearReadyToDoneMaxMs);
+	S.NearEndToEndN = NearEndToEndWindow.Count;
+	NearEndToEndWindow.Percentiles(S.NearEndToEndP50Ms, S.NearEndToEndP95Ms, S.NearEndToEndMaxMs);
+	S.NearPostScheduleN = NearPostScheduleWindow.Count;
+	NearPostScheduleWindow.Percentiles(S.NearPostScheduleP50Ms, S.NearPostScheduleP95Ms, S.NearPostScheduleMaxMs);
+	S.NearQueueN = NearQueueWindow.Count;
+	NearQueueWindow.Percentiles(S.NearQueueP50Ms, S.NearQueueP95Ms, S.NearQueueMaxMs);
+	S.NearAsyncN = NearAsyncWindow.Count;
+	NearAsyncWindow.Percentiles(S.NearAsyncP50Ms, S.NearAsyncP95Ms, S.NearAsyncMaxMs);
+	S.NearWorkerN = NearWorkerWindow.Count;
+	NearWorkerWindow.Percentiles(S.NearWorkerP50Ms, S.NearWorkerP95Ms, S.NearWorkerMaxMs);
+	return S;
 }
 
 // ==================== Internal helpers ====================
@@ -248,9 +391,30 @@ void FVoxelSeamRegistry::MarkSeamDirty(FVoxelSeamState& Seam)
 	DirtySeams.Add(Seam.Key, &bAlreadyInSet);
 	if (!bAlreadyInSet)
 	{
-		// First transition to dirty: join the round-robin scan queue. Re-dirtying while already
-		// queued adds nothing (the existing entry still gets examined).
+		// The wait starts here. A later re-dirty while still waiting must NOT restart the clock —
+		// the player has been looking at stale geometry since this moment, not since the latest bump.
+		Seam.DirtiedAtSeconds = Now();
+	}
+	// Readiness: a seam becomes fully resident exactly when its last participant registers, and
+	// RegisterChunk/UpdateChunk* dirty every incident seam AFTER inserting the chunk into the mirror,
+	// so this is the one place readiness can flip to true. Only a READY seam joins the scan rotation:
+	// a seam whose neighbour has not loaded (or never will — the air above / solid below the surface
+	// band) would otherwise sit in the rotation for its owner's whole residency, and the scan would
+	// spend its per-tick budget re-examining it (measured: 99.6% of the budget, ~300 ms of wait for
+	// every near seam before it was even looked at). It stays in DirtySeams meanwhile, and the
+	// arrival that makes it buildable re-dirties it through this same path and enqueues it then.
+	if (!AreAllParticipantsResident(Seam.Key))
+	{
+		return;
+	}
+	if (Seam.ReadyAtSeconds == 0.0)
+	{
+		Seam.ReadyAtSeconds = Now();
+	}
+	if (!Seam.bQueued)
+	{
 		DirtyQueue.Add(Seam.Key);
+		Seam.bQueued = true;
 	}
 }
 
@@ -386,12 +550,14 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		return 0;
 	}
 
-	// Round-robin scan: pop candidates from the head of DirtyQueue; a candidate that cannot
-	// schedule yet (participant missing, or still in flight) is re-appended at the BACK so the
-	// next tick examines DIFFERENT seams. A bounded scan from a fixed starting point would
-	// re-examine the same not-yet-ready frontier every tick and starve everything behind it
-	// (observed live: thousands dirty, 2 scheduled). Scan budget exceeds the schedule budget so
-	// ready seams hiding behind unready ones are still found within a tick.
+	// The rotation holds READY dirty seams only (MarkSeamDirty enqueues iff all participants are
+	// resident), so nearly everything examined here schedules. Two exceptions are handled in the
+	// loop: a seam whose previous job is still in flight is re-appended at the BACK and retried
+	// next tick; a seam that LOST a participant since it was enqueued is dropped from the rotation
+	// (it stays dirty in DirtySeams — that participant's return re-dirties and re-enqueues it).
+	// Rotating rather than rescanning from the head keeps a burst of in-flight seams from starving
+	// the ones behind them. Scan budget exceeds the schedule budget so ready seams behind in-flight
+	// ones are still found within a tick.
 	const int32 ScheduleBudget = (MaxToSchedule > 0) ? MaxToSchedule : MAX_int32;
 	const int32 ScanBudget = (MaxToSchedule > 0)
 		? FMath::Max(64, MaxToSchedule * 4)
@@ -408,6 +574,10 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		// Lazy deletion: entries whose seam was cleaned/scheduled/removed since queuing.
 		if (!DirtySeams.Contains(Key))
 		{
+			if (FVoxelSeamState* Stale = Seams.Find(Key))
+			{
+				Stale->bQueued = false; // it has left the rotation; a future dirty may enqueue it again
+			}
 			continue;
 		}
 
@@ -415,23 +585,49 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		if (!Seam || !Seam->bDirty)
 		{
 			DirtySeams.Remove(Key); // stale set entry — drop it
+			if (Seam)
+			{
+				Seam->bQueued = false;
+			}
 			continue;
 		}
 
 		++Examined;
+		++IntervalExamined;
 
 		// Re-dirtied while its previous job is still in flight — retry once the job completes.
 		if (Seam->bScheduled)
 		{
 			Requeue.Add(Key);
+			++IntervalRequeuedInFlight;
 			continue;
 		}
-		// Gate: only schedule a seam once ALL its participants are resident (both/all sides' data
-		// present) — the same "wait for neighbours" the meshing scheduler enforces.
+		// A participant left after this seam was enqueued (UnregisterChunk re-dirties survivors but
+		// cannot un-enqueue). Drop it from the rotation rather than requeue: it stays in DirtySeams,
+		// and the participant's return re-dirties it through MarkSeamDirty, which enqueues it again.
+		// The ready stamp is cleared so that return re-stamps it (scan wait must not include the gap).
 		if (!AreAllParticipantsResident(Key))
 		{
-			Requeue.Add(Key); // stays dirty; back of the rotation
+			Seam->bQueued = false;
+			Seam->ReadyAtSeconds = 0.0;
+			++IntervalRequeuedNotResident; // counts drops now; the log token stays "notResident"
 			continue;
+		}
+
+		// Latency instrumentation: how long this seam sat dirty before the scan reached it in a
+		// schedulable state. Split near/far so the player-visible tier is readable on its own.
+		const double ScheduledAt = Now();
+		if (Seam->DirtiedAtSeconds > 0.0)
+		{
+			const bool bNear = IsNearViewer(Key.Owner, ViewerChunk, NearChunkRadius);
+			// Total wait since first dirtied (includes any time spent waiting for a participant).
+			const float WaitMs = static_cast<float>((ScheduledAt - Seam->DirtiedAtSeconds) * 1000.0);
+			(bNear ? NearScheduleWindow : FarScheduleWindow).Add(WaitMs);
+			// Pure scan wait: from the moment the seam was buildable. Guard against a missing
+			// ready stamp (it is set on the same dirty call that made the seam schedulable).
+			const double From = (Seam->ReadyAtSeconds > 0.0) ? FMath::Max(Seam->DirtiedAtSeconds, Seam->ReadyAtSeconds) : Seam->DirtiedAtSeconds;
+			const float ScanMs = static_cast<float>((ScheduledAt - From) * 1000.0);
+			(bNear ? NearScanWindow : FarScanWindow).Add(ScanMs);
 		}
 
 		// Capture the launch-time participant snapshot (mirrors FMeshBoundaryDep per participant).
@@ -447,6 +643,17 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		Job.Key = Key;
 		Job.Priority = ComputeSeamPriority(Key.Owner, ViewerChunk, NearChunkRadius);
 		Job.Participants = Seam->Participants;
+		Job.DirtiedAtSeconds = Seam->DirtiedAtSeconds;
+		Job.ReadyAtSeconds = Seam->ReadyAtSeconds;
+		Job.ScheduledAtSeconds = ScheduledAt;
+		// A seam scheduled again within 1 s of its previous build is a rebuild that the old ~300 ms
+		// scan rotation would usually have coalesced into one job; count them so the throughput
+		// cost of scheduling promptly is visible.
+		if (Seam->LastScheduledAtSeconds > 0.0 && (ScheduledAt - Seam->LastScheduledAtSeconds) < 1.0)
+		{
+			++IntervalRescheduledWithin1s;
+		}
+		Seam->LastScheduledAtSeconds = ScheduledAt;
 
 		// Insert priority-sorted (ascending; highest priority at the back for O(1) pop) — matches the
 		// meshing queue. Dedup is guaranteed by the bScheduled flag below, so no set lookup needed here.
@@ -456,8 +663,12 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 
 		Seam->bScheduled = true;
 		Seam->bDirty = false;
+		Seam->DirtiedAtSeconds = 0.0; // no longer waiting; a re-dirty starts a fresh wait
+		Seam->ReadyAtSeconds = 0.0;
+		Seam->bQueued = false; // out of the rotation until the next dirty
 		DirtySeams.Remove(Key);
 		++Scheduled;
+		++IntervalScheduled;
 		++TotalSeamJobsScheduled;
 	}
 
@@ -582,6 +793,7 @@ void FVoxelSeamRegistry::MarkAllSeamsClean()
 	for (auto& Pair : Seams)
 	{
 		Pair.Value.bDirty = false;
+		Pair.Value.bQueued = false;
 	}
 	DirtySeams.Reset();
 	DirtyQueue.Reset();
