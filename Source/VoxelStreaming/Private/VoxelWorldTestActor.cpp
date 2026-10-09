@@ -21,6 +21,19 @@
 #include "GameFramework/PlayerController.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "HAL/IConsoleManager.h"
+
+/**
+ * Runtime switch for the mouse-driven test editing (LMB dig / RMB build, brush sphere, crosshair).
+ * bEnableEditInputs says the actor *offers* editing; this says whether it is *active right now*.
+ * Gameplay code drives it (AVCCharacterBase mirrors its edit-mode toggle here) so attack / interact
+ * clicks never reach the test brush while edit mode is off.
+ */
+static TAutoConsoleVariable<int32> CVarVoxelEditPlayerInputs(
+	TEXT("voxel.Edit.PlayerInputs"),
+	1,
+	TEXT("1 = AVoxelWorldTestActor processes mouse edits and draws its brush/crosshair (when bEnableEditInputs is set); 0 = suppressed at runtime."),
+	ECVF_Default);
 
 AVoxelWorldTestActor::AVoxelWorldTestActor()
 {
@@ -107,17 +120,18 @@ void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 		}
 	}
 
-	// Process edit inputs if enabled
+	// Process edit inputs if enabled and not suppressed at runtime (voxel.Edit.PlayerInputs)
+	const bool bPlayerEditInputsActive = CVarVoxelEditPlayerInputs.GetValueOnGameThread() != 0;
 	const double EditT0 = FPlatformTime::Seconds();
-	if (bEnableEditInputs)
+	if (bEnableEditInputs && bPlayerEditInputsActive)
 	{
 		ProcessEditInputs();
 	}
 	const double EditSec = FPlatformTime::Seconds() - EditT0;
 
-	// Draw edit crosshair (can be enabled independently of edit inputs)
+	// Draw edit crosshair + brush sphere (can be enabled independently of edit inputs, but obeys the same runtime switch)
 	const double CrossT0 = FPlatformTime::Seconds();
-	if (bShowEditCrosshair)
+	if (bShowEditCrosshair && bPlayerEditInputsActive)
 	{
 		DrawEditCrosshair();
 	}

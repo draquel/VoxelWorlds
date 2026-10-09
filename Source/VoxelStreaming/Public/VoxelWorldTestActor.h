@@ -193,6 +193,8 @@ public:
 	 * Enable mouse-based terrain editing.
 	 * Left click = Dig, Right click = Build, Mouse wheel = Adjust radius.
 	 * Requires being in PIE with a player controller.
+	 * Runtime switch: console variable voxel.Edit.PlayerInputs (0 suppresses the edits, brush sphere and
+	 * crosshair without touching this flag); the character's edit-mode toggle drives it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit")
 	bool bEnableEditInputs = false;
