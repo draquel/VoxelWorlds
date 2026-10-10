@@ -301,6 +301,35 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
 	bool IsPointInExclusionVolume(const FVector& WorldPosition) const;
 
+	// ==================== Harvest (gameplay) ====================
+
+	/**
+	 * Find the nearest harvestable scatter instance (a definition with a HarvestCategory) within
+	 * Radius of a world point, and optionally remove it for good.
+	 *
+	 * Removal registers an exclusion volume around the instance base (MakeHarvestExclusionVolume),
+	 * which clears the instance now, keeps it from regrowing when its chunk re-scatters, and is
+	 * replayed to managers created later. Call with bRemove on every machine that renders scatter
+	 * (scatter is local): the server decides, then tells the clients.
+	 *
+	 * @param WorldLocation  Query point (an aim point in front of the player, typically).
+	 * @param Radius         Search radius (world units).
+	 * @param bRemove        Remove the found instance (exclusion volume).
+	 * @param OutResult      What was found.
+	 * @return True when a harvestable instance was within Radius.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Harvest")
+	bool HarvestScatterNear(const FVector& WorldLocation, float Radius, bool bRemove, FScatterHarvestResult& OutResult);
+
+	/**
+	 * Pure: the exclusion volume a harvested instance leaves behind — a thin box around its base,
+	 * with an Id derived from the base position so every machine builds the same volume.
+	 * @param InstanceBase  World position of the instance base.
+	 * @param TrunkRadius   Half-extent in X / Y (keeps neighbouring grass).
+	 * @param Height        Box height above the base.
+	 */
+	static FScatterExclusionVolume MakeHarvestExclusionVolume(const FVector& InstanceBase, float TrunkRadius = 60.0f, float Height = 400.0f);
+
 	// ==================== Configuration ====================
 
 	/**
