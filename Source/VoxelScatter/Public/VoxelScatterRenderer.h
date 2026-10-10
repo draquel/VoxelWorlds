@@ -176,6 +176,19 @@ public:
 	 */
 	int64 GetTotalMemoryUsage() const;
 
+	// ==================== Queries ====================
+
+	/**
+	 * Nearest active (non-hidden) instance of a scatter type within Radius of Location.
+	 * @param ScatterTypeID  The scatter type whose HISM is searched.
+	 * @param Location       World query point.
+	 * @param Radius         Search radius (world units).
+	 * @param OutIndex       Instance index in the type's HISM.
+	 * @param OutTransform   Instance world transform.
+	 * @return True when an instance was found.
+	 */
+	bool FindNearestInstance(int32 ScatterTypeID, const FVector& Location, float Radius, int32& OutIndex, FTransform& OutTransform) const;
+
 	// ==================== Visibility ====================
 
 	/**

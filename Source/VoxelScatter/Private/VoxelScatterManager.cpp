@@ -779,6 +779,63 @@ bool UVoxelScatterManager::IsPointInClearedVolume(const FIntVector& ChunkCoord, 
 
 // ==================== Exclusion Volumes ====================
 
+// ==================== Harvest ====================
+
+FScatterExclusionVolume UVoxelScatterManager::MakeHarvestExclusionVolume(const FVector& InstanceBase, float TrunkRadius, float Height)
+{
+	FScatterExclusionVolume Volume;
+	// Deterministic identity: the same base (to the centimetre) on every machine yields the same Id.
+	const FIntVector Key(FMath::RoundToInt(InstanceBase.X), FMath::RoundToInt(InstanceBase.Y), FMath::RoundToInt(InstanceBase.Z));
+	const uint32 A = GetTypeHash(Key);
+	const uint32 B = HashCombine(static_cast<uint32>(Key.X), static_cast<uint32>(Key.Y));
+	const uint32 C = HashCombine(static_cast<uint32>(Key.Z), 0x48A7Fu);
+	Volume.Id = FGuid(0x48415256u /*HARV*/, A, B, C);
+	Volume.HalfExtent = FVector(FMath::Max(TrunkRadius, 1.0f), FMath::Max(TrunkRadius, 1.0f), FMath::Max(Height, 1.0f) * 0.5f);
+	Volume.Frame = FTransform(InstanceBase + FVector(0.0f, 0.0f, Volume.HalfExtent.Z - 50.0f));
+	return Volume;
+}
+
+bool UVoxelScatterManager::HarvestScatterNear(const FVector& WorldLocation, float Radius, bool bRemove, FScatterHarvestResult& OutResult)
+{
+	OutResult = FScatterHarvestResult();
+	if (!ScatterRenderer || Radius <= 0.0f)
+	{
+		return false;
+	}
+	float BestDist = Radius;
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		if (Def.HarvestCategory.IsNone())
+		{
+			continue;
+		}
+		int32 Index = INDEX_NONE;
+		FTransform Xf;
+		if (!ScatterRenderer->FindNearestInstance(Def.ScatterID, WorldLocation, BestDist, Index, Xf))
+		{
+			continue;
+		}
+		const float Dist = FVector::Dist(Xf.GetLocation(), WorldLocation);
+		if (Dist <= BestDist)
+		{
+			BestDist = Dist;
+			OutResult.bValid = true;
+			OutResult.ScatterID = Def.ScatterID;
+			OutResult.Name = Def.Name;
+			OutResult.HarvestCategory = Def.HarvestCategory;
+			OutResult.InstanceTransform = Xf;
+			OutResult.Distance = Dist;
+		}
+	}
+	if (OutResult.bValid && bRemove)
+	{
+		RegisterScatterExclusionVolume(MakeHarvestExclusionVolume(OutResult.InstanceTransform.GetLocation()));
+		UE_LOG(LogVoxelScatter, Log, TEXT("Harvested scatter '%s' (%s) at %s"), *OutResult.Name, *OutResult.HarvestCategory.ToString(),
+			*OutResult.InstanceTransform.GetLocation().ToCompactString());
+	}
+	return OutResult.bValid;
+}
+
 bool UVoxelScatterManager::RegisterScatterExclusionVolume(const FScatterExclusionVolume& Volume)
 {
 	if (!Volume.IsUsable())

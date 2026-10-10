@@ -273,6 +273,14 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Identity")
 	FString Name = TEXT("Unnamed");
 
+	/**
+	 * Gameplay harvest category ("Tree", "Bush", "Rock"...). None = not harvestable. Consumers ask
+	 * UVoxelScatterManager::HarvestScatterNear for the nearest harvestable instance; what the
+	 * category yields is the game's business.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Identity")
+	FName HarvestCategory;
+
 	/** Debug visualization color */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	FColor DebugColor = FColor::Green;
@@ -761,4 +769,37 @@ struct VOXELCORE_API FScatterExclusionVolume
 		NoScaleFrame.SetScale3D(FVector::OneVector);
 		return FBox(-HalfExtent, HalfExtent).TransformBy(NoScaleFrame);
 	}
+};
+
+/**
+ * One harvestable scatter instance found by UVoxelScatterManager::HarvestScatterNear.
+ */
+USTRUCT(BlueprintType)
+struct VOXELCORE_API FScatterHarvestResult
+{
+	GENERATED_BODY()
+
+	/** False when nothing harvestable was in range. */
+	UPROPERTY(BlueprintReadOnly, Category = "Scatter|Harvest")
+	bool bValid = false;
+
+	/** The scatter type (FScatterDefinition::ScatterID). */
+	UPROPERTY(BlueprintReadOnly, Category = "Scatter|Harvest")
+	int32 ScatterID = 0;
+
+	/** The definition's display name. */
+	UPROPERTY(BlueprintReadOnly, Category = "Scatter|Harvest")
+	FString Name;
+
+	/** The definition's harvest category. */
+	UPROPERTY(BlueprintReadOnly, Category = "Scatter|Harvest")
+	FName HarvestCategory;
+
+	/** World transform of the instance (its base). */
+	UPROPERTY(BlueprintReadOnly, Category = "Scatter|Harvest")
+	FTransform InstanceTransform;
+
+	/** Distance from the query point to the instance base. */
+	UPROPERTY(BlueprintReadOnly, Category = "Scatter|Harvest")
+	float Distance = 0.0f;
 };

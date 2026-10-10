@@ -542,6 +542,39 @@ int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 	return Total;
 }
 
+// ==================== Queries ====================
+
+bool UVoxelScatterRenderer::FindNearestInstance(int32 ScatterTypeID, const FVector& Location, float Radius, int32& OutIndex, FTransform& OutTransform) const
+{
+	OutIndex = INDEX_NONE;
+	const TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMComponents.Find(ScatterTypeID);
+	UHierarchicalInstancedStaticMeshComponent* HISM = Found ? Found->Get() : nullptr;
+	if (!HISM || Radius <= 0.0f)
+	{
+		return false;
+	}
+	// The sphere overlap uses instance bounds; a tall tree whose base is a little outside the radius
+	// still reports, so the base distance is re-checked below.
+	const TArray<int32> Candidates = HISM->GetInstancesOverlappingSphere(Location, Radius, /*bSphereInWorldSpace=*/true);
+	float BestDist = Radius;
+	for (int32 Index : Candidates)
+	{
+		FTransform Xf;
+		if (!HISM->GetInstanceTransform(Index, Xf, /*bWorldSpace=*/true) || Xf.GetScale3D().IsNearlyZero())
+		{
+			continue; // hidden (free-list) instance
+		}
+		const float Dist = FVector::Dist(Xf.GetLocation(), Location);
+		if (Dist <= BestDist)
+		{
+			BestDist = Dist;
+			OutIndex = Index;
+			OutTransform = Xf;
+		}
+	}
+	return OutIndex != INDEX_NONE;
+}
+
 void UVoxelScatterRenderer::SetSurfaceScatterVisible(bool bVisible)
 {
 	if (!ScatterManager)
