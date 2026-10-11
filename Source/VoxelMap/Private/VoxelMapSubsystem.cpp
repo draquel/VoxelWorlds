@@ -19,6 +19,8 @@
 #include "SphericalPlanetWorldMode.h"
 #include "EngineUtils.h"
 #include "Async/Async.h"
+#include "Misc/Base64.h"
+#include "Misc/Compression.h"
 
 namespace
 {
@@ -156,6 +158,7 @@ void UVoxelMapSubsystem::Deinitialize()
 	TileCache.Empty();
 	ExploredTiles.Empty();
 	PendingTiles.Empty();
+	InFlightTiles.Empty();
 
 	UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem deinitialized"));
 	Super::Deinitialize();
@@ -304,6 +307,107 @@ bool UVoxelMapSubsystem::IsTileExplored(FIntPoint TileCoord) const
 	return ExploredTiles.Contains(PackTileKey(TileCoord));
 }
 
+FString UVoxelMapSubsystem::EncodeTileCoords(const TArray<FIntPoint>& Tiles)
+{
+	if (Tiles.Num() == 0)
+	{
+		return FString();
+	}
+	TArray<int32> Raw;
+	Raw.Reserve(Tiles.Num() * 2);
+	for (const FIntPoint& Tile : Tiles)
+	{
+		Raw.Add(Tile.X);
+		Raw.Add(Tile.Y);
+	}
+	const int32 RawBytes = Raw.Num() * sizeof(int32);
+	TArray<uint8> Compressed;
+	int32 CompressedBytes = FCompression::CompressMemoryBound(NAME_Zlib, RawBytes);
+	Compressed.SetNumUninitialized(CompressedBytes);
+	if (!FCompression::CompressMemory(NAME_Zlib, Compressed.GetData(), CompressedBytes, Raw.GetData(), RawBytes))
+	{
+		UE_LOG(LogVoxelMap, Warning, TEXT("EncodeTileCoords: compressing %d tiles failed."), Tiles.Num());
+		return FString();
+	}
+	Compressed.SetNum(CompressedBytes);
+	return FBase64::Encode(Compressed);
+}
+
+bool UVoxelMapSubsystem::DecodeTileCoords(const FString& Encoded, int32 Count, TArray<FIntPoint>& OutTiles)
+{
+	OutTiles.Reset();
+	if (Encoded.IsEmpty() || Count <= 0)
+	{
+		return Encoded.IsEmpty() && Count <= 0;
+	}
+	TArray<uint8> Compressed;
+	if (!FBase64::Decode(Encoded, Compressed))
+	{
+		return false;
+	}
+	TArray<int32> Raw;
+	Raw.SetNumUninitialized(Count * 2);
+	if (!FCompression::UncompressMemory(NAME_Zlib, Raw.GetData(), Raw.Num() * sizeof(int32), Compressed.GetData(), Compressed.Num()))
+	{
+		return false;
+	}
+	OutTiles.Reserve(Count);
+	for (int32 i = 0; i < Count; ++i)
+	{
+		OutTiles.Add(FIntPoint(Raw[i * 2], Raw[i * 2 + 1]));
+	}
+	return true;
+}
+
+FString UVoxelMapSubsystem::ExportExploredTiles(int32& OutCount) const
+{
+	TArray<FIntPoint> Tiles;
+	Tiles.Reserve(ExploredTiles.Num());
+	for (const uint64 Key : ExploredTiles)
+	{
+		Tiles.Add(UnpackTileKey(Key));
+	}
+	// Row-major order: neighbouring tiles become near-identical byte runs, which is what makes the blob small.
+	Tiles.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.Y != B.Y ? A.Y < B.Y : A.X < B.X; });
+	FString Encoded = EncodeTileCoords(Tiles);
+	OutCount = Encoded.IsEmpty() ? 0 : Tiles.Num();
+	return Encoded;
+}
+
+int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Count)
+{
+	TArray<FIntPoint> Tiles;
+	if (!DecodeTileCoords(Encoded, Count, Tiles))
+	{
+		UE_LOG(LogVoxelMap, Warning, TEXT("ImportExploredTiles: malformed explored-tile data (%d tiles claimed); map exploration not restored."), Count);
+		return 0;
+	}
+	for (const FIntPoint& Tile : Tiles)
+	{
+		ExploredTiles.Add(PackTileKey(Tile));
+	}
+
+	// Explored tiles draw from the tile cache: queue the images (four run at a time; the rest wait in PendingTiles).
+	if (ResolveChunkManager())
+	{
+		for (const FIntPoint& Tile : Tiles)
+		{
+			const uint64 Key = PackTileKey(Tile);
+			if (!TileCache.Contains(Key) && !PendingTiles.Contains(Key))
+			{
+				QueueTileGeneration(Tile);
+			}
+		}
+	}
+	else
+	{
+		bGenerateExploredWhenReady = true;
+	}
+
+	UE_LOG(LogVoxelMap, Log, TEXT("Restored %d explored map tile(s) (%d explored now)."), Tiles.Num(), ExploredTiles.Num());
+	return Tiles.Num();
+}
+
 // ---------------------------------------------------------------------------
 // Coordinate Helpers
 // ---------------------------------------------------------------------------
@@ -388,6 +492,19 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 	const FIntPoint TileCoord(ChunkCoord.X, ChunkCoord.Y);
 	const uint64 Key = PackTileKey(TileCoord);
 
+	// Exploration restored before the map could resolve its world: queue those images now.
+	if (bGenerateExploredWhenReady)
+	{
+		bGenerateExploredWhenReady = false;
+		for (const uint64 ExploredKey : ExploredTiles)
+		{
+			if (!TileCache.Contains(ExploredKey) && !PendingTiles.Contains(ExploredKey))
+			{
+				QueueTileGeneration(UnpackTileKey(ExploredKey));
+			}
+		}
+	}
+
 	// Mark as explored (chunks that generate are in the player's vicinity)
 	ExploredTiles.Add(Key);
 
@@ -410,6 +527,10 @@ void UVoxelMapSubsystem::QueueTileGeneration(FIntPoint TileCoord)
 
 	const uint64 Key = PackTileKey(TileCoord);
 	PendingTiles.Add(Key);
+	if (InFlightTiles.Contains(Key))
+	{
+		return;
+	}
 
 	// Throttle concurrent tasks
 	if (ActiveAsyncTasks.Load() >= MaxConcurrentTileGenTasks)
@@ -439,6 +560,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		PendingTiles.Remove(PackTileKey(TileCoord));
 		return;
 	}
+	InFlightTiles.Add(PackTileKey(TileCoord));
 
 	const FVoxelNoiseParams NoiseParams = CachedNoiseParams;
 	const int32 ChunkSize = CachedChunkSize;
@@ -624,6 +746,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 			}
 
 			Self->ActiveAsyncTasks--;
+			Self->InFlightTiles.Remove(PackTileKey(TileCoord));
 
 			if (Self->bShuttingDown)
 			{
@@ -656,7 +779,9 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 				// Find a pending tile that isn't in the cache yet
 				for (const uint64 PendingKey : Self->PendingTiles)
 				{
-					if (!Self->TileCache.Contains(PendingKey))
+					// Skip tiles already running: with a large backlog (restored exploration) the drain would
+					// otherwise keep restarting the same in-flight tile.
+					if (!Self->TileCache.Contains(PendingKey) && !Self->InFlightTiles.Contains(PendingKey))
 					{
 						const FIntPoint PendingCoord = UnpackTileKey(PendingKey);
 						Self->ActiveAsyncTasks++;

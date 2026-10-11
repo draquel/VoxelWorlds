@@ -61,6 +61,43 @@ public:
 	/** Get all explored tile coords. */
 	const TSet<uint64>& GetExploredTiles() const { return ExploredTiles; }
 
+	/**
+	 * The explored tiles as a compact blob for a save: zlib-compressed int32 (X, Y) pairs, base64-encoded. A string
+	 * keeps it JSON-safe (packed 64-bit keys would lose precision as JSON numbers) and small (neighbouring tiles
+	 * compress well).
+	 * @param OutCount Receives the number of tiles encoded (needed to decode)
+	 * @return The encoded tiles; empty when nothing is explored
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	FString ExportExploredTiles(int32& OutCount) const;
+
+	/**
+	 * Restore explored tiles saved by ExportExploredTiles and queue their map images. Merges into the current set:
+	 * exploration only grows, and tiles already explored this session (the spawn area streams in before a save
+	 * loads) stay explored.
+	 * @param Encoded The blob from ExportExploredTiles
+	 * @param Count   The tile count ExportExploredTiles reported
+	 * @return Number of tiles restored (0 for an empty or malformed blob)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	int32 ImportExploredTiles(const FString& Encoded, int32 Count);
+
+	/**
+	 * Pure: encode tile coordinates (see ExportExploredTiles).
+	 * @param Tiles Tile coordinates to encode
+	 * @return Base64 of the zlib-compressed int32 (X, Y) pairs; empty for no tiles or a compression failure
+	 */
+	static FString EncodeTileCoords(const TArray<FIntPoint>& Tiles);
+
+	/**
+	 * Pure: decode EncodeTileCoords output.
+	 * @param Encoded  The encoded blob
+	 * @param Count    Number of tiles it holds
+	 * @param OutTiles Receives the coordinates (emptied first)
+	 * @return False for a malformed blob (OutTiles left empty)
+	 */
+	static bool DecodeTileCoords(const FString& Encoded, int32 Count, TArray<FIntPoint>& OutTiles);
+
 	// --- Coordinate Helpers ---
 
 	/** Convert a world position to a tile coordinate (chunk XY). */
@@ -156,6 +193,12 @@ private:
 	// Tile storage
 	TMap<uint64, FVoxelMapTile> TileCache;
 	TSet<uint64> ExploredTiles;
+
+	/** Tiles whose generation task is running (game thread): the pending-queue drain never starts one twice. */
+	TSet<uint64> InFlightTiles;
+
+	/** Explored tiles were imported before the map could resolve its world: queue their images once it can. */
+	bool bGenerateExploredWhenReady = false;
 	TSet<uint64> PendingTiles;		// Tiles queued for generation (prevents duplicates)
 	FCriticalSection TileMutex;		// Protects TileCache writes from async tasks
 

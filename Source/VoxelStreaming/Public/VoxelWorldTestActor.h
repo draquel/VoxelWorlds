@@ -392,6 +392,16 @@ protected:
 	FVector GetAdjacentVoxelPosition(const FVector& HitLocation, const FVector& HitNormal) const;
 
 	/**
+	 * Whether adding terrain in a shape would close it around a pawn (any actor on the Pawn object channel). The
+	 * interactive build and place inputs refuse such edits: a pawn engulfed by new solid voxels drops through the
+	 * inside of the new geometry once its collision cooks.
+	 * @param Center Shape centre in world space
+	 * @param Shape  Query shape, already grown by any surface margin
+	 * @return True if the shape overlaps a pawn
+	 */
+	bool WouldTrapPawn(const FVector& Center, const FCollisionShape& Shape) const;
+
+	/**
 	 * Get the solid voxel position from a hit point based on hit normal (for removing/painting blocks).
 	 * @param HitLocation Location on terrain surface
 	 * @param HitNormal Normal of the hit face

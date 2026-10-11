@@ -975,6 +975,12 @@ int32 AVoxelWorldTestActor::TestDigAt(FVector WorldLocation, float Radius)
 	return VoxelsModified;
 }
 
+bool AVoxelWorldTestActor::WouldTrapPawn(const FVector& Center, const FCollisionShape& Shape) const
+{
+	const UWorld* World = GetWorld();
+	return World && World->OverlapAnyTestByObjectType(Center, FQuat::Identity, FCollisionObjectQueryParams(ECC_Pawn), Shape);
+}
+
 int32 AVoxelWorldTestActor::TestBuildAt(FVector WorldLocation, float Radius, uint8 MaterialID)
 {
 	if (!ChunkManager)
@@ -1485,7 +1491,17 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 		if (bRightMousePressed)
 		{
 			FVector HitLocation, HitNormal;
-			if (TraceTerrainFromCamera(HitLocation, HitNormal))
+			const float HalfVoxel = Configuration ? Configuration->VoxelSize * 0.5f : 50.0f;
+			const bool bPlaceHit = TraceTerrainFromCamera(HitLocation, HitNormal);
+			if (bPlaceHit
+				&& WouldTrapPawn(GetAdjacentVoxelPosition(HitLocation, HitNormal), FCollisionShape::MakeBox(FVector(HalfVoxel + 10.0f))))
+			{
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Orange, TEXT("Place blocked: too close to a pawn"));
+				}
+			}
+			else if (bPlaceHit)
 			{
 				const bool bSuccess = TestPlaceBlock(HitLocation, HitNormal, EditMaterialID);
 				if (GEngine)
@@ -1553,7 +1569,20 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 		if (bRightMousePressed)
 		{
 			FVector HitLocation;
-			if (TraceTerrainFromCamera(HitLocation))
+			// The smooth surface of a built sphere lands up to half a voxel outside the brush radius.
+			const float BuildMargin = Configuration ? Configuration->VoxelSize * 0.5f : 50.0f;
+			const bool bBuildHit = TraceTerrainFromCamera(HitLocation);
+			if (bBuildHit
+				&& WouldTrapPawn(HitLocation, FCollisionShape::MakeSphere(EditBrushRadius + BuildMargin)))
+			{
+				UE_LOG(LogVoxelStreaming, Log, TEXT("RIGHT CLICK: Build at (%.0f, %.0f, %.0f) refused - a pawn is inside the brush"),
+					HitLocation.X, HitLocation.Y, HitLocation.Z);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Orange, TEXT("Build blocked: a pawn is inside the brush"));
+				}
+			}
+			else if (bBuildHit)
 			{
 				UE_LOG(LogVoxelStreaming, Log, TEXT("RIGHT CLICK: Build at (%.0f, %.0f, %.0f)"),
 					HitLocation.X, HitLocation.Y, HitLocation.Z);
