@@ -829,7 +829,17 @@ bool UVoxelScatterManager::HarvestScatterNear(const FVector& WorldLocation, floa
 	}
 	if (OutResult.bValid && bRemove)
 	{
-		RegisterScatterExclusionVolume(MakeHarvestExclusionVolume(OutResult.InstanceTransform.GetLocation()));
+		// Through the world's exclusion subsystem when there is one: cached there, replayed to managers
+		// created later, and exported by the save system. Standalone managers (tests) register directly.
+		const FScatterExclusionVolume Volume = MakeHarvestExclusionVolume(OutResult.InstanceTransform.GetLocation());
+		if (UVoxelScatterExclusionSubsystem* Exclusions = UVoxelScatterExclusionSubsystem::Get(this))
+		{
+			Exclusions->RegisterVolume(Volume);
+		}
+		else
+		{
+			RegisterScatterExclusionVolume(Volume);
+		}
 		UE_LOG(LogVoxelScatter, Log, TEXT("Harvested scatter '%s' (%s) at %s"), *OutResult.Name, *OutResult.HarvestCategory.ToString(),
 			*OutResult.InstanceTransform.GetLocation().ToCompactString());
 	}

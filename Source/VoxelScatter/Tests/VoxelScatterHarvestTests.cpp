@@ -29,6 +29,11 @@ bool FVoxelScatterHarvestVolumeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Box starts just below the base"), A.Frame.GetLocation().Z - A.HalfExtent.Z < Base.Z);
 	TestTrue(TEXT("Box reaches up the trunk"), A.Frame.GetLocation().Z + A.HalfExtent.Z > Base.Z + 300.0f);
 
+	TestTrue(TEXT("Harvest volumes are recognisable"), UVoxelScatterManager::IsHarvestVolume(A));
+	FScatterExclusionVolume Other;
+	Other.Id = FGuid::NewGuid();
+	TestFalse(TEXT("Other volumes are not"), UVoxelScatterManager::IsHarvestVolume(Other));
+
 	FScatterHarvestResult Empty;
 	TestFalse(TEXT("Default result is invalid"), Empty.bValid);
 	return true;
