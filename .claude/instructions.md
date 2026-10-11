@@ -129,7 +129,11 @@ VoxelWorlds/
 │   ├── VoxelWorlds/        # UE integration module ("VoxelRuntime" in older docs), depends on all
 │   └── VoxelWorldsEditor/  # EDITOR-ONLY authoring tools (Type "Editor"), stripped from shipping; see Documentation/Features/EDITOR_TOOLS.md
 ```
-(Additional runtime modules also exist: VoxelScatter, VoxelMap, VoxelPCG.)
+(Additional runtime modules also exist: VoxelScatter, VoxelMap, VoxelPCG, VoxelNavigation — surface pathfinding over the
+terrain without a navmesh: `FVoxelSurfacePathfinder` (pure A* over a 2.5-D cell grid, height-sampler driven) +
+`UVoxelSurfaceNavigationSubsystem` (tile cache over the chunk manager's edit-merged / analytic surface, blocked boxes,
+`voxel.Nav.*` cvars, debug draw); see Documentation/Features/SURFACE_NAVIGATION.md. Depends on VoxelCore + VoxelStreaming only;
+nothing in VoxelWorlds depends on it.)
 
 ### Naming Conventions
 - **Interfaces**: `IVoxelXxx` (e.g., `IVoxelLODStrategy`)

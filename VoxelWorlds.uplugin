@@ -50,6 +50,11 @@
 			"LoadingPhase": "PostEngineInit"
 		},
 		{
+			"Name": "VoxelNavigation",
+			"Type": "Runtime",
+			"LoadingPhase": "PostEngineInit"
+		},
+		{
 			"Name": "VoxelMap",
 			"Type": "Runtime",
 			"LoadingPhase": "PostEngineInit"

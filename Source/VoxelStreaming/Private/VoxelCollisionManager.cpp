@@ -50,6 +50,13 @@ static TAutoConsoleVariable<float> CVarCollisionLeadSeconds(
 	TEXT("(effective radius = base + speed * LeadSeconds)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarCollisionResweepSeconds(
+	TEXT("voxel.Collision.ResweepSeconds"),
+	1.0f,
+	TEXT("Re-run the collision decision sweep at least this often (seconds) even when the focus is stationary, so ")
+	TEXT("chunks that finish loading around a pawn that stopped after a teleport still get collision. 0 = movement only."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarCollisionMoveUpdateThreshold(
 	TEXT("voxel.Collision.MoveUpdateThreshold"),
 	200.0f,
@@ -313,10 +320,14 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		: UpdateThreshold;
 	const bool bStartedMoving = bLeadFix && bWasStationary && FocusSpeed > StationarySpeedThreshold;
 	const float DistanceMoved = FVector::Dist(FocusPosition, LastViewerPosition);
-	if (DistanceMoved > MoveThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate || bStartedMoving)
+	SecondsSinceDecisions += DeltaTime;
+	const float ResweepSeconds = CVarCollisionResweepSeconds.GetValueOnGameThread();
+	const bool bPeriodicResweep = ResweepSeconds > 0.0f && SecondsSinceDecisions >= ResweepSeconds;
+	if (DistanceMoved > MoveThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate || bStartedMoving || bPeriodicResweep)
 	{
 		UpdateCollisionDecisions(FocusPosition);
 		LastViewerPosition = FocusPosition;
+		SecondsSinceDecisions = 0.0f;
 
 		// Once we've queued or generated any collision, initial load is complete
 		if (bPendingInitialUpdate && (CookingQueue.Num() > 0 || AsyncCollisionInProgress.Num() > 0 || CollisionData.Num() > 0))

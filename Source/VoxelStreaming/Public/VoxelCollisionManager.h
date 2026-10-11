@@ -492,6 +492,13 @@ protected:
 	/** True until we've successfully queued initial collision (chunks may not be loaded on first frame) */
 	bool bPendingInitialUpdate = true;
 
+	/**
+	 * Seconds since the last collision decision sweep. Sweeps only consider LOADED chunks, so a pawn that stops
+	 * right after a teleport (save restore, vox.TP) would otherwise never get collision for the chunks that
+	 * finish loading around it; voxel.Collision.ResweepSeconds re-runs the sweep while stationary.
+	 */
+	float SecondsSinceDecisions = 0.0f;
+
 	// ==================== Tier 0: pawn-centered, speed-aware collision (voxel.Collision.LeadFix) ====================
 
 	/** Last focus (pawn) position, for velocity estimation. FLT_MAX until the first Update(). */
