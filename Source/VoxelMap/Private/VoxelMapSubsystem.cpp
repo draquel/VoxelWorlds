@@ -13,6 +13,7 @@
 #include "VoxelCoordinates.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelTerrainConditioning.h"
 #include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
@@ -139,6 +140,8 @@ void UVoxelMapSubsystem::Deinitialize()
 	if (bDelegatesBound && CachedChunkManagerWeak.IsValid())
 	{
 		CachedChunkManagerWeak->OnChunkGenerated.RemoveDynamic(this, &UVoxelMapSubsystem::OnChunkGenerated);
+		CachedChunkManagerWeak->OnTerrainConditioningChanged.Remove(ConditioningChangedHandle);
+		ConditioningChangedHandle.Reset();
 		bDelegatesBound = false;
 	}
 
@@ -271,6 +274,8 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	if (!bDelegatesBound)
 	{
 		ChunkMgr->OnChunkGenerated.AddDynamic(this, &UVoxelMapSubsystem::OnChunkGenerated);
+		ConditioningChangedHandle = ChunkMgr->OnTerrainConditioningChanged.AddUObject(
+			this, &UVoxelMapSubsystem::HandleTerrainConditioningChanged);
 		bDelegatesBound = true;
 	}
 
@@ -514,6 +519,31 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 	}
 }
 
+void UVoxelMapSubsystem::HandleTerrainConditioningChanged()
+{
+	if (bShuttingDown)
+	{
+		return;
+	}
+	// Tiles drawn before the POI conditioner registered show the unflattened terrain (QA W-05): drop
+	// them, let running tasks discard their now-stale result, and redraw everything explored.
+	++TileContentGeneration;
+	const int32 Dropped = TileCache.Num();
+	{
+		FScopeLock Lock(&TileMutex);
+		TileCache.Empty();
+	}
+	for (const uint64 Key : ExploredTiles)
+	{
+		if (!PendingTiles.Contains(Key))
+		{
+			QueueTileGeneration(UnpackTileKey(Key));
+		}
+	}
+	UE_LOG(LogVoxelMap, Log, TEXT("Terrain conditioning changed: rebuilding %d map tile(s) (%d cached dropped)."),
+		ExploredTiles.Num(), Dropped);
+}
+
 // ---------------------------------------------------------------------------
 // Async Tile Generation
 // ---------------------------------------------------------------------------
@@ -595,6 +625,19 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	FallbackMoistureNoiseParams.Seed = NoiseParams.Seed + 5678;
 	FallbackMoistureNoiseParams.Frequency = 0.00007f;
 
+	// Terrain conditioning over the tile and its 1-voxel apron (POI pads, campsites): generation layers these
+	// onto the base height, so the map must too (QA W-05). Gathered here on the game thread; plain data.
+	TArray<FVoxelConditioningZone> Zones;
+	if (UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get())
+	{
+		const FVector2D TileMin(
+			(TileCoord.X * ChunkSize - 1) * VoxelSize + WorldOrigin.X,
+			(TileCoord.Y * ChunkSize - 1) * VoxelSize + WorldOrigin.Y);
+		const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * VoxelSize);
+		ChunkMgr->GatherConditioningZones(FBox2D(TileMin, TileMax), Zones);
+	}
+	const uint32 Generation = TileContentGeneration;
+
 	// Use a weak pointer to safely call back to the subsystem
 	TWeakObjectPtr<UVoxelMapSubsystem> WeakThis(this);
 
@@ -602,7 +645,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		[WeakThis, TileCoord, WorldMode, NoiseParams, ChunkSize, VoxelSize, WorldOrigin,
 		 bUseBiomes, bUseWater, WaterLevel, BiomeSnapshot,
 		 FallbackTempNoiseParams, FallbackMoistureNoiseParams,
-		 MaterialPalette = MoveTemp(MaterialPalette), TerrainMinHeight, TerrainMaxHeight]()
+		 MaterialPalette = MoveTemp(MaterialPalette), TerrainMinHeight, TerrainMaxHeight,
+		 Zones = MoveTemp(Zones), Generation]()
 	{
 		// WorldMode is a TSharedPtr capture, validated non-null before launch — this task co-owns
 		// the instance, so it stays valid even if the subsystem and world are torn down while we run.
@@ -628,7 +672,12 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 				// TRUE generated surface height: the standalone mode carries a value-captured biome
 				// snapshot, so this applies the same continentalness modulation (offset + height-scale)
 				// and per-mode composition (e.g. IslandBowl falloff) as chunk generation.
-				Heights[GY * GridSize + GX] = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+				float Height = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+				if (Zones.Num() > 0)
+				{
+					Height = FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Height, Zones);
+				}
+				Heights[GY * GridSize + GX] = Height;
 			}
 		}
 
@@ -737,7 +786,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		}
 
 		// Marshal back to game thread
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, TileCoord, PixelData = MoveTemp(PixelData), Resolution]() mutable
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, TileCoord, PixelData = MoveTemp(PixelData), Resolution, Generation]() mutable
 		{
 			UVoxelMapSubsystem* Self = WeakThis.Get();
 			if (!Self)
@@ -759,19 +808,28 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 
 			const uint64 Key = PackTileKey(TileCoord);
 
-			FVoxelMapTile Tile;
-			Tile.TileCoord = TileCoord;
-			Tile.Resolution = Resolution;
-			Tile.PixelData = MoveTemp(PixelData);
-			Tile.bIsReady = true;
-
+			// Conditioning changed while this tile was drawing: the image is stale. The tile stays pending, so
+			// the drain below redraws it.
+			if (Generation != Self->TileContentGeneration)
 			{
-				FScopeLock Lock(&Self->TileMutex);
-				Self->TileCache.Add(Key, MoveTemp(Tile));
-				Self->PendingTiles.Remove(Key);
+				Self->PendingTiles.Add(Key);
 			}
+			else
+			{
+				FVoxelMapTile Tile;
+				Tile.TileCoord = TileCoord;
+				Tile.Resolution = Resolution;
+				Tile.PixelData = MoveTemp(PixelData);
+				Tile.bIsReady = true;
 
-			Self->OnMapTileReady.Broadcast(TileCoord);
+				{
+					FScopeLock Lock(&Self->TileMutex);
+					Self->TileCache.Add(Key, MoveTemp(Tile));
+					Self->PendingTiles.Remove(Key);
+				}
+
+				Self->OnMapTileReady.Broadcast(TileCoord);
+			}
 
 			// Check if there are more pending tiles to process
 			if (Self->ActiveAsyncTasks.Load() < MaxConcurrentTileGenTasks)

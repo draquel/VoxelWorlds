@@ -423,8 +423,31 @@ public:
 	/**
 	 * Register a dynamic terrain conditioner (game-side, boundary-safe — e.g. supplying zones from POI
 	 * claims). Queried per chunk at generation-request build time. Not owned; caller manages lifetime.
+	 * Broadcasts OnTerrainConditioningChanged.
 	 */
-	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner) { TerrainConditioner = InConditioner; }
+	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
+	{
+		TerrainConditioner = InConditioner;
+		OnTerrainConditioningChanged.Broadcast();
+	}
+
+	/**
+	 * Append the conditioning zones (static + the dynamic conditioner's) whose influence overlaps a world XY
+	 * region — what generation layers onto the base height there (apply with FVoxelTerrainConditioning::
+	 * ApplyToHeight). Game thread. Used by height consumers outside chunk generation, e.g. map tiles.
+	 * @param Region   World-space XY region
+	 * @param OutZones Appended with the overlapping zones
+	 */
+	void GatherConditioningZones(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const
+	{
+		GatherConditioningZonesForRegion(Region, OutZones);
+	}
+
+	/**
+	 * Fired when the terrain conditioning changes (a conditioner registered or zones added / cleared). Chunks
+	 * generated earlier keep their terrain; caches of analytic heights (map tiles) should rebuild.
+	 */
+	FSimpleMulticastDelegate OnTerrainConditioningChanged;
 
 	// ==================== Collision Mesh Generation ====================
 

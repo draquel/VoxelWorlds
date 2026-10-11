@@ -134,6 +134,9 @@ private:
 	UFUNCTION()
 	void OnChunkGenerated(FIntVector ChunkCoord);
 
+	/** Terrain conditioning changed (POI pads registered after the first tiles): rebuild every tile image. */
+	void HandleTerrainConditioningChanged();
+
 	/** Queue a tile for background generation. */
 	void QueueTileGeneration(FIntPoint TileCoord);
 
@@ -196,6 +199,12 @@ private:
 
 	/** Tiles whose generation task is running (game thread): the pending-queue drain never starts one twice. */
 	TSet<uint64> InFlightTiles;
+
+	/** Bumped when cached tile images go stale; a task that started under an older value drops its result. */
+	uint32 TileContentGeneration = 0;
+
+	/** Binding on the chunk manager's OnTerrainConditioningChanged. */
+	FDelegateHandle ConditioningChangedHandle;
 
 	/** Explored tiles were imported before the map could resolve its world: queue their images once it can. */
 	bool bGenerateExploredWhenReady = false;
