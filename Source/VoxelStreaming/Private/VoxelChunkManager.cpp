@@ -1971,7 +1971,7 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 	static int32 ContextDebugCounter = 0;
 	if (++ContextDebugCounter % 180 == 0)  // Every 3 seconds at 60fps
 	{
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("BuildQueryContext: Source=%s, Pos=(%.0f, %.0f, %.0f), Found=%s"),
+		UE_LOG(LogVoxelStreaming, Verbose, TEXT("BuildQueryContext: Source=%s, Pos=(%.0f, %.0f, %.0f), Found=%s"),
 			*ViewerSource, Context.ViewerPosition.X, Context.ViewerPosition.Y, Context.ViewerPosition.Z,
 			bFoundViewer ? TEXT("Yes") : TEXT("No"));
 	}

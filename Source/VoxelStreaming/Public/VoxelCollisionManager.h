@@ -76,6 +76,12 @@ struct FChunkCollisionData
 	/** Whether collision needs to be regenerated (e.g., after edit) */
 	bool bNeedsUpdate = false;
 
+	/**
+	 * The last cook produced no geometry: the chunk is entirely solid or entirely air, so there is
+	 * nothing to collide with and no component. Counts as ready; an edit (bNeedsUpdate) re-cooks it.
+	 */
+	bool bEmpty = false;
+
 	/** Distance from viewer when last updated (for prioritization) */
 	float LastDistance = 0.0f;
 
@@ -94,8 +100,15 @@ struct FChunkCollisionData
 	{
 	}
 
-	/** Check if collision data is valid and ready to use */
-	bool IsReady() const { return BodySetup != nullptr && !bIsCooking && CollisionComponent != nullptr; }
+	/**
+	 * The chunk has usable collision right now: a registered body, or a cook that found no geometry.
+	 * Stays true while a re-cook is in flight, because the previous body remains registered (and
+	 * supporting pawns) until the new one replaces it in a single game-thread step.
+	 */
+	bool HasLiveCollision() const { return bEmpty || (BodySetup != nullptr && CollisionComponent != nullptr); }
+
+	/** The collision matches the chunk's latest content: live and no cook in flight. */
+	bool IsReady() const { return !bIsCooking && HasLiveCollision(); }
 };
 
 /**
@@ -130,6 +143,8 @@ struct FAsyncCollisionResult
 	int32 NumVertices = 0;
 	int32 NumTriangles = 0;
 	bool bSuccess = false;
+	/** Meshing succeeded but produced no triangles (all-solid or all-air chunk). Implies bSuccess. */
+	bool bEmpty = false;
 };
 
 /**
@@ -224,13 +239,26 @@ public:
 	// ==================== Queries ====================
 
 	/**
-	 * Check if a chunk has collision data.
+	 * Check whether a chunk has usable collision right now.
+	 *
+	 * True for a chunk with a registered collision body (including while a re-cook after an edit is in
+	 * flight, since the previous body stays live until replaced) and for a chunk whose cook found no
+	 * geometry (entirely solid or entirely air). False only when nothing has been cooked yet.
 	 *
 	 * @param ChunkCoord Chunk coordinate
-	 * @return True if chunk has valid collision
+	 * @return True if a pawn in this chunk is supported by its current collision state
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Collision")
 	bool HasCollision(const FIntVector& ChunkCoord) const;
+
+	/**
+	 * Check whether a chunk's collision matches its latest content (live and no cook in flight).
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @return True if the chunk's collision is cooked from its current voxel data
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Collision")
+	bool IsCollisionUpToDate(const FIntVector& ChunkCoord) const;
 
 	/**
 	 * Get a chunk's body setup.
@@ -339,6 +367,17 @@ public:
 	 */
 	void DrawDebugVisualization(UWorld* World, const FVector& ViewerPosition) const;
 
+	/**
+	 * Convert a render-order triangle list into the winding Chaos expects for a triangle mesh body.
+	 * Physics winds triangles opposite to rendering: the engine cooker swaps the first two indices of
+	 * every render-derived triangle (bFlipNormals), and this does the same for the voxel trimesh, which
+	 * is built directly as an implicit object and so skips the cooker.
+	 *
+	 * @param RenderIndices Triangle list in render order (3 indices per triangle; a trailing partial triangle is ignored)
+	 * @param OutTriangles  Receives one physics triangle per render triangle (replaced, not appended)
+	 */
+	static void BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, TArray<Chaos::TVector<int32, 3>>& OutTriangles);
+
 protected:
 	// ==================== Internal Methods ====================
 
@@ -393,6 +432,14 @@ protected:
 	 * @param Result The async result containing the trimesh
 	 */
 	void ApplyCollisionResult(FAsyncCollisionResult& Result);
+
+	/**
+	 * Apply a cook that found no geometry: drop any previous body and mark the chunk ready-empty, so
+	 * neither the decision sweep nor the path look-ahead re-requests it until an edit dirties it.
+	 *
+	 * @param ChunkCoord The chunk whose cook produced no triangles
+	 */
+	void ApplyEmptyCollisionResult(const FIntVector& ChunkCoord);
 
 	/**
 	 * Remove collision data for a chunk.

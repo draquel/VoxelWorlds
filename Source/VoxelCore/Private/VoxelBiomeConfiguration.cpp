@@ -450,12 +450,12 @@ bool UVoxelBiomeConfiguration::IsValid() const
 
 void UVoxelBiomeConfiguration::LogConfiguration() const
 {
-	UE_LOG(LogVoxelCore, Warning, TEXT("========== BiomeConfiguration Dump =========="));
-	UE_LOG(LogVoxelCore, Warning, TEXT("Asset: %s"), *GetPathName());
-	UE_LOG(LogVoxelCore, Warning, TEXT("BlendWidth=%.3f, HeightMaterials=%s, OreVeins=%s, UnderwaterMaterials=%s"),
+	UE_LOG(LogVoxelCore, Log, TEXT("========== BiomeConfiguration Dump =========="));
+	UE_LOG(LogVoxelCore, Log, TEXT("Asset: %s"), *GetPathName());
+	UE_LOG(LogVoxelCore, Log, TEXT("BlendWidth=%.3f, HeightMaterials=%s, OreVeins=%s, UnderwaterMaterials=%s"),
 		BiomeBlendWidth, bEnableHeightMaterials ? TEXT("ON") : TEXT("OFF"),
 		bEnableOreVeins ? TEXT("ON") : TEXT("OFF"), bEnableUnderwaterMaterials ? TEXT("ON") : TEXT("OFF"));
-	UE_LOG(LogVoxelCore, Warning, TEXT("TempFreq=%.7f, MoistFreq=%.7f, TempSeed=%d, MoistSeed=%d"),
+	UE_LOG(LogVoxelCore, Log, TEXT("TempFreq=%.7f, MoistFreq=%.7f, TempSeed=%d, MoistSeed=%d"),
 		TemperatureNoiseFrequency, MoistureNoiseFrequency, TemperatureSeedOffset, MoistureSeedOffset);
 	if (bEnableContinentalness)
 	{
@@ -474,44 +474,44 @@ void UVoxelBiomeConfiguration::LogConfiguration() const
 			SMin = FMath::Min(BakedHeightScaleCurve);
 			SMax = FMath::Max(BakedHeightScaleCurve);
 		}
-		UE_LOG(LogVoxelCore, Warning, TEXT("Continentalness: Freq=%.7f, Seed=%d, HeightCurve(%d keys, range %.0f..%.0f), ScaleCurve(%d keys, range %.2f..%.2f)"),
+		UE_LOG(LogVoxelCore, Log, TEXT("Continentalness: Freq=%.7f, Seed=%d, HeightCurve(%d keys, range %.0f..%.0f), ScaleCurve(%d keys, range %.2f..%.2f)"),
 			ContinentalnessNoiseFrequency, ContinentalnessSeedOffset,
 			HKeys, HMin, HMax, SKeys, SMin, SMax);
 	}
 
-	UE_LOG(LogVoxelCore, Warning, TEXT("--- Biomes (%d) ---"), Biomes.Num());
+	UE_LOG(LogVoxelCore, Log, TEXT("--- Biomes (%d) ---"), Biomes.Num());
 	for (const FBiomeDefinition& B : Biomes)
 	{
-		UE_LOG(LogVoxelCore, Warning, TEXT("  [%d] %s (Pri=%d): Temp(%.2f..%.2f) Moist(%.2f..%.2f) Cont(%.2f..%.2f)"),
+		UE_LOG(LogVoxelCore, Log, TEXT("  [%d] %s (Pri=%d): Temp(%.2f..%.2f) Moist(%.2f..%.2f) Cont(%.2f..%.2f)"),
 			B.BiomeID, *B.Name, B.SelectionPriority, B.TemperatureRange.X, B.TemperatureRange.Y,
 			B.MoistureRange.X, B.MoistureRange.Y,
 			B.ContinentalnessRange.X, B.ContinentalnessRange.Y);
-		UE_LOG(LogVoxelCore, Warning, TEXT("       Surface=%d Subsurface=%d Deep=%d  SurfDepth=%.1f SubDepth=%.1f"),
+		UE_LOG(LogVoxelCore, Log, TEXT("       Surface=%d Subsurface=%d Deep=%d  SurfDepth=%.1f SubDepth=%.1f"),
 			B.SurfaceMaterial, B.SubsurfaceMaterial, B.DeepMaterial,
 			B.SurfaceDepth, B.SubsurfaceDepth);
-		UE_LOG(LogVoxelCore, Warning, TEXT("       UnderwaterSurf=%d UnderwaterSub=%d  BiomeOres=%d AddToGlobal=%s"),
+		UE_LOG(LogVoxelCore, Log, TEXT("       UnderwaterSurf=%d UnderwaterSub=%d  BiomeOres=%d AddToGlobal=%s"),
 			B.UnderwaterSurfaceMaterial, B.UnderwaterSubsurfaceMaterial,
 			B.BiomeOreVeins.Num(), B.bAddToGlobalOres ? TEXT("Y") : TEXT("N"));
 	}
 
-	UE_LOG(LogVoxelCore, Warning, TEXT("--- Height Rules (%d) ---"), HeightMaterialRules.Num());
+	UE_LOG(LogVoxelCore, Log, TEXT("--- Height Rules (%d) ---"), HeightMaterialRules.Num());
 	for (const FHeightMaterialRule& R : HeightMaterialRules)
 	{
-		UE_LOG(LogVoxelCore, Warning, TEXT("  Mat=%d Height(%.0f..%.0f) SurfOnly=%s MaxDepth=%.1f Priority=%d"),
+		UE_LOG(LogVoxelCore, Log, TEXT("  Mat=%d Height(%.0f..%.0f) SurfOnly=%s MaxDepth=%.1f Priority=%d"),
 			R.MaterialID, R.MinHeight, R.MaxHeight,
 			R.bSurfaceOnly ? TEXT("Y") : TEXT("N"), R.MaxDepthBelowSurface, R.Priority);
 	}
 
-	UE_LOG(LogVoxelCore, Warning, TEXT("--- Global Ore Veins (%d) ---"), GlobalOreVeins.Num());
+	UE_LOG(LogVoxelCore, Log, TEXT("--- Global Ore Veins (%d) ---"), GlobalOreVeins.Num());
 	for (const FOreVeinConfig& O : GlobalOreVeins)
 	{
-		UE_LOG(LogVoxelCore, Warning, TEXT("  %s: Mat=%d Depth(%.0f..%.0f) Shape=%s Freq=%.4f Thresh=%.3f Seed=%d Pri=%d"),
+		UE_LOG(LogVoxelCore, Log, TEXT("  %s: Mat=%d Depth(%.0f..%.0f) Shape=%s Freq=%.4f Thresh=%.3f Seed=%d Pri=%d"),
 			*O.Name, O.MaterialID, O.MinDepth, O.MaxDepth,
 			O.Shape == EOreVeinShape::Blob ? TEXT("Blob") : TEXT("Streak"),
 			O.Frequency, O.Threshold, O.SeedOffset, O.Priority);
 	}
 
-	UE_LOG(LogVoxelCore, Warning, TEXT("========== End BiomeConfiguration Dump =========="));
+	UE_LOG(LogVoxelCore, Log, TEXT("========== End BiomeConfiguration Dump =========="));
 }
 
 #if WITH_EDITOR
