@@ -725,7 +725,9 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					MeshBatch.VertexFactory = VertexFactoryPtr->Get();
 					MeshBatch.MaterialRenderProxy = WaterMaterialProxy;
 					MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
-					MeshBatch.bDisableBackfaceCulling = false;
+					// The water mesher emits up-facing quads only: with back faces culled the surface vanished from
+					// below, so a diver could not see where the air is (QA R11). Draw both sides.
+					MeshBatch.bDisableBackfaceCulling = true;
 					MeshBatch.Type = PT_TriangleList;
 					MeshBatch.DepthPriorityGroup = SDPG_World;
 					MeshBatch.bCanApplyViewModeOverrides = true;
