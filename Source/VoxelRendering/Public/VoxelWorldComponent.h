@@ -534,6 +534,12 @@ private:
 	mutable FBox CachedTotalBounds;
 	mutable bool bTotalBoundsDirty = true;
 
+	/** CalcBounds produced new bounds that the render scene has not received yet (sent once per tick). */
+	mutable bool bRenderBoundsStale = false;
+
+	/** The bounds last pushed to the render scene (MarkRenderTransformDirty), to skip no-op updates. */
+	FBox LastSentRenderBounds = FBox(ForceInit);
+
 	/** Statistics */
 	int64 CachedVertexCount = 0;
 	int64 CachedTriangleCount = 0;

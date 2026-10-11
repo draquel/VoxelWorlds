@@ -134,22 +134,57 @@ void UVoxelWorldComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	AdvanceChunkCrossfades();
+
+	// Chunks stream in and out every frame: refresh the bounds and hand them to the render scene at most once per
+	// tick, and only when they actually moved (UpdateBounds alone does not reach the scene).
+	if (bTotalBoundsDirty || bRenderBoundsStale)
+	{
+		UpdateBounds();
+		bRenderBoundsStale = false;
+		const FBox NewBox = Bounds.GetBox();
+		if (!NewBox.Equals(LastSentRenderBounds, 1.0))
+		{
+			LastSentRenderBounds = NewBox;
+			MarkRenderTransformDirty();
+		}
+	}
 }
 
 FBoxSphereBounds UVoxelWorldComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	// Use very large bounds to prevent the component from being culled
-	// Individual chunks are culled in GetDynamicMeshElements
-	// This is standard practice for infinite/streaming terrain systems
-	const float HalfWorldSize = 500000.0f;  // 5km in each direction
-	const float VerticalExtent = 100000.0f;  // 1km up/down
+	// The whole terrain is ONE primitive, so the engine frustum- and occlusion-culls it as one box (individual chunks
+	// are culled again in GetDynamicMeshElements). This used to be a fixed +-5 km box around the origin: once the
+	// player travelled past it, the entire terrain vanished whenever the camera looked away from that box -- in a
+	// flash with camera motion, or held still (QA, 2026-10-11, player at X -615,000). Bound what is actually loaded
+	// instead: the union of the chunk bounds, padded by a chunk so water tiles, seam strips and crossfades stay inside.
+	FBox Total(ForceInit);
+	{
+		FScopeLock Lock(&ChunkInfoLock);
+		if (bTotalBoundsDirty)
+		{
+			CachedTotalBounds = FBox(ForceInit);
+			for (const TPair<FIntVector, FChunkInfo>& Pair : ChunkInfoMap)
+			{
+				if (Pair.Value.Bounds.IsValid)
+				{
+					// Chunk bounds are chunk-local (the proxy shifts them the same way for its per-chunk culling).
+					CachedTotalBounds += Pair.Value.Bounds.ShiftBy(WorldOrigin + FVector(Pair.Key) * ChunkWorldSize);
+				}
+			}
+			bTotalBoundsDirty = false;
+			bRenderBoundsStale = true;
+		}
+		Total = CachedTotalBounds;
+	}
 
-	FBox LargeBounds(
-		FVector(-HalfWorldSize, -HalfWorldSize, -VerticalExtent),
-		FVector(HalfWorldSize, HalfWorldSize, VerticalExtent)
-	);
+	if (!Total.IsValid)
+	{
+		// Nothing loaded yet, so nothing to draw: a chunk-sized box at the component.
+		return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(ChunkWorldSize), ChunkWorldSize * UE_SQRT_3);
+	}
 
-	return FBoxSphereBounds(LargeBounds.TransformBy(LocalToWorld));
+	// The union is in world space; the component sits at the world origin with identity transform.
+	return FBoxSphereBounds(Total.ExpandBy(ChunkWorldSize));
 }
 
 UMaterialInterface* UVoxelWorldComponent::GetMaterial(int32 ElementIndex) const
@@ -236,7 +271,7 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& G
 		bChunkExisted = ChunkInfoMap.Contains(ChunkCoord);
 		FChunkInfo& Info = ChunkInfoMap.FindOrAdd(ChunkCoord);
 
-		// Bounds are already in world space (vertices include chunk world position)
+		// Chunk-local bounds (CalcBounds and the proxy shift them by the chunk's world position)
 		Info.Bounds = GPUData.LocalBounds;
 		Info.LODLevel = GPUData.LODLevel;
 		Info.bIsVisible = GPUData.bIsVisible;
