@@ -23,6 +23,7 @@ Documentation for the VoxelWorlds plugin (Unreal Engine 5.8), organized by purpo
 ### Rendering & GPU
 - [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md) — hybrid renderer (FLocalVertexFactory + PMC fallback), scene proxy, water, collision
 - [GPU_PIPELINE.md](Features/GPU_PIPELINE.md) — RDG compute pipeline for generation and meshing
+- [SURFACE_NAVIGATION.md](Features/SURFACE_NAVIGATION.md) — VoxelNavigation module: A* over the voxel surface (no navmesh), tile cache, cvars, debug draw
 - [DATA_STRUCTURES.md](Features/DATA_STRUCTURES.md) — core types and memory layouts
 - [LOD_SYSTEM.md](Features/LOD_SYSTEM.md) — pluggable LOD strategy, distance bands, morphing
 
