@@ -67,6 +67,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
 	int32 GetVolumeCount() const { return Volumes.Num(); }
 
+	/** Every cached volume (for persistence: save the harvest ones, replay them at load). */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
+	void GetVolumes(TArray<FScatterExclusionVolume>& OutVolumes) const { Volumes.GenerateValueArray(OutVolumes); }
+
 	/**
 	 * Called by UVoxelScatterManager::Initialize. Tracks the manager and replays every cached
 	 * volume to it, so volumes registered before the voxel world spun up still apply.

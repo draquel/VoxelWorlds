@@ -330,6 +330,10 @@ public:
 	 */
 	static FScatterExclusionVolume MakeHarvestExclusionVolume(const FVector& InstanceBase, float TrunkRadius = 60.0f, float Height = 400.0f);
 
+	/** Pure: was this volume made by MakeHarvestExclusionVolume (a felled instance, worth persisting). */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Scatter|Harvest")
+	static bool IsHarvestVolume(const FScatterExclusionVolume& Volume) { return Volume.Id.A == 0x48415256u; }
+
 	// ==================== Configuration ====================
 
 	/**
