@@ -494,6 +494,15 @@ bool UVoxelCollisionManager::HasCollision(const FIntVector& ChunkCoord) const
 {
 	if (const FChunkCollisionData* Data = CollisionData.Find(ChunkCoord))
 	{
+		return Data->HasLiveCollision();
+	}
+	return false;
+}
+
+bool UVoxelCollisionManager::IsCollisionUpToDate(const FIntVector& ChunkCoord) const
+{
+	if (const FChunkCollisionData* Data = CollisionData.Find(ChunkCoord))
+	{
 		return Data->IsReady();
 	}
 	return false;
@@ -832,7 +841,16 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 		FChunkMeshData MeshData;
 		const bool bMeshSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
 
-		if (bMeshSuccess && MeshData.IsValid())
+		if (bMeshSuccess && !MeshData.IsValid())
+		{
+			// An entirely solid or entirely air chunk has no surface: nothing to collide with. That is a
+			// result, not a failure -- reporting it as a failure left the chunk never ready, and the path
+			// look-ahead re-requested it every frame at top priority (one chunk under a dungeon was
+			// re-cooked 11,340 times in a single session, holding a cook slot the whole time).
+			Result.bSuccess = true;
+			Result.bEmpty = true;
+		}
+		else if (bMeshSuccess && MeshData.IsValid())
 		{
 			const TArray<FVector3f>& Vertices = MeshData.Positions;
 			const TArray<uint32>& Indices = MeshData.Indices;
@@ -850,16 +868,8 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 				ChaosVertices.Add(Chaos::TVec3<Chaos::FRealSingle>(V.X, V.Y, V.Z));
 			}
 
-			const int32 NumTriangles = Indices.Num() / 3;
-			ChaosTriangles.Reserve(NumTriangles);
-			for (int32 i = 0; i < NumTriangles; ++i)
-			{
-				ChaosTriangles.Add(Chaos::TVector<int32, 3>(
-					static_cast<int32>(Indices[i * 3 + 0]),
-					static_cast<int32>(Indices[i * 3 + 1]),
-					static_cast<int32>(Indices[i * 3 + 2])
-				));
-			}
+			// Render winding -> physics winding (see BuildPhysicsTriangles).
+			BuildPhysicsTriangles(Indices, ChaosTriangles);
 
 			// Create the Chaos trimesh implicit object (thread-safe — pure data construction)
 			TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = new Chaos::FTriangleMeshImplicitObject(
@@ -906,7 +916,12 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 			continue;
 		}
 
-		if (Result.bSuccess)
+		if (Result.bSuccess && Result.bEmpty)
+		{
+			// Cheap (no physics registration): does not count against the per-frame apply budget.
+			ApplyEmptyCollisionResult(Result.ChunkCoord);
+		}
+		else if (Result.bSuccess)
 		{
 			ApplyCollisionResult(Result);
 			++AppliedCount;
@@ -918,6 +933,56 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 			Data->bIsCooking = false;
 		}
 	}
+}
+
+void UVoxelCollisionManager::BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, TArray<Chaos::TVector<int32, 3>>& OutTriangles)
+{
+	// Physics expects the opposite winding to rendering. The engine cooker swaps the first two indices of
+	// every render-derived triangle (ChaosCooking.cpp; bFlipNormals = true for static, skeletal, dynamic and
+	// MR meshes). The voxel trimesh is built directly as an implicit object and skips the cooker, so it does
+	// the same swap here. Without it every face points into the terrain: queries only hit thanks to
+	// bDoubleSidedGeometry (and report downward normals), and rigid bodies such as ragdolls fall through,
+	// because Chaos treats mesh triangles as one-sided for contacts (p.Chaos.Collision.OneSidedTriangleMesh).
+	const int32 NumTriangles = RenderIndices.Num() / 3;
+	OutTriangles.Reset(NumTriangles);
+	for (int32 i = 0; i < NumTriangles; ++i)
+	{
+		OutTriangles.Add(Chaos::TVector<int32, 3>(
+			static_cast<int32>(RenderIndices[i * 3 + 1]),
+			static_cast<int32>(RenderIndices[i * 3 + 0]),
+			static_cast<int32>(RenderIndices[i * 3 + 2])));
+	}
+}
+
+void UVoxelCollisionManager::ApplyEmptyCollisionResult(const FIntVector& ChunkCoord)
+{
+	FChunkCollisionData* Data = CollisionData.Find(ChunkCoord);
+	if (!Data)
+	{
+		return;
+	}
+
+	// An edit can hollow a chunk out completely: drop the body that described the old surface.
+	if (Data->CollisionComponent)
+	{
+		Data->CollisionComponent->DestroyComponent();
+		Data->CollisionComponent = nullptr;
+	}
+	if (Data->BodySetup)
+	{
+		Data->BodySetup->MarkAsGarbage();
+		Data->BodySetup = nullptr;
+	}
+
+	Data->bIsCooking = false;
+	Data->bEmpty = true;
+	Data->EstimatedBytes = 0;
+
+	// Waiters (spawn settle, NPC ground checks) treat "nothing to collide with" as ready too.
+	OnCollisionReady.Broadcast(ChunkCoord);
+
+	UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) cooked empty (no surface)"),
+		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 }
 
 void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
@@ -971,6 +1036,7 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 
 	// Mark cooking complete
 	Data->bIsCooking = false;
+	Data->bEmpty = false;
 
 	// Destroy old collision component if it exists (from previous cook/edit)
 	if (Data->CollisionComponent)

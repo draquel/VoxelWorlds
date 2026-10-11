@@ -60,7 +60,7 @@ void FVoxelScatterPlacement::GenerateSpawnPoints(
 
 	if (OutScatterData.SpawnPoints.Num() == 0 && SurfaceData.SurfacePoints.Num() > 0)
 	{
-		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): 0 spawn from %d defs (%d enabled), %d surface pts (%d underground)"),
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): 0 spawn from %d defs (%d enabled), %d surface pts (%d underground)"),
 			SurfaceData.ChunkCoord.X, SurfaceData.ChunkCoord.Y, SurfaceData.ChunkCoord.Z,
 			Definitions.Num(), EnabledDefCount, SurfaceData.SurfacePoints.Num(), UGSurfacePts);
 	}

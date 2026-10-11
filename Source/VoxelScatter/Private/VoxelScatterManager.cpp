@@ -2792,7 +2792,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	}
 	if (UGCount > 0)
 	{
-		UE_LOG(LogVoxelScatter, Warning, TEXT("DIAG Extract chunk(%d,%d,%d): %d/%d underground. SurfMaxZ=%.0f, UGMinZ=%.0f (gap=%.0f)"),
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("DIAG Extract chunk(%d,%d,%d): %d/%d underground. SurfMaxZ=%.0f, UGMinZ=%.0f (gap=%.0f)"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
 			UGCount, OutSurfaceData.SurfacePoints.Num(),
 			MaxSurfZ, MinUGZ, MaxSurfZ - MinUGZ);

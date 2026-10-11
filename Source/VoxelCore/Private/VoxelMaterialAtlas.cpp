@@ -504,7 +504,7 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 			else if (TexFormat != ExpectedFormat)
 			{
 				bFormatMismatch = true;
-				UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("  Slice[%d]: %s (%dx%d) FORMAT MISMATCH: %d vs expected %d"),
+				UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("  Slice[%d]: %s (%dx%d) compressed format %d differs from slice 0 (%d)"),
 					i, *Texture->GetName(), Texture->GetSizeX(), Texture->GetSizeY(), (int32)TexFormat, (int32)ExpectedFormat);
 			}
 
@@ -521,7 +521,10 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 
 	if (bFormatMismatch)
 	{
-		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): FORMAT MISMATCH detected! All textures must have the same compression format. Array may fail to build."), *ArrayName);
+		// Informational only: UpdateSourceFromSourceTextures() builds the array from the slices' SOURCE
+		// pixels (converted to a common source format) and the array is compressed with its own settings
+		// below, so differing per-texture platform formats do not affect the result.
+		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): slices use different compressed formats; the array re-encodes them from source."), *ArrayName);
 	}
 
 	// Update the array resource from source textures
@@ -535,6 +538,14 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 #if WITH_EDITORONLY_DATA
 	OutArray->MipGenSettings = TMGS_FromTextureGroup;
 #endif
+	// UpdateSourceFromSourceTextures() also copies slice 0's CompressionSettings onto the array. Pin the
+	// normal array to Normalmap (BC5) so it never inherits a colour setting from whichever texture happens
+	// to be first (the demo atlas's first normal slice is a TC_Default Fab texture -> DXT1 normals).
+	if (ArrayName == TEXT("Normal"))
+	{
+		OutArray->CompressionSettings = TC_Normalmap;
+		OutArray->SRGB = false;
+	}
 
 	// Report the array's SOURCE dimensions. GetSizeX() reads platform data that is rebuilt
 	// asynchronously by UpdateResource(), so right after the call it under-reports (e.g. 32).
