@@ -22,7 +22,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 |----|------|-------|---------------------|-------|------|
 | R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
 | R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
-| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed (see "R24 as built"), P3 open | VoxelWorlds | L |
+| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 open | VoxelWorlds | L |
 
 ## R23 Lingering distant chunk
 
@@ -363,7 +363,7 @@ better hidden. The streaming itself is very robust."
 - A material-relevance regression like the water bug of #45: the proxy must keep OR-ing the fade material's
   relevance once, never calling `SetPrimitiveViewRelevance` per material.
 
-### R24 as built (2026-10-12)
+### R24 as built (VoxelWorlds#71, 2026-10-12)
 
 **Scope.** P1 (seam crossfade) and P2 (coordinated LOD transitions) in one PR, with the in-flight re-dirty fix and
 the concurrent-fade cap. One addition the measurements forced: deferred seam bucket submits (below). Not done: P3

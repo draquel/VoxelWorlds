@@ -402,7 +402,7 @@ makes the boundary fade with it:
   retained). Its submit waits for the running fade to end (`DeferBucket`), and a transition holding
   the bucket waits for that submit.
 
-Details, measurements and limits: `VOXEL_QA_FOLLOWUPS_PLAN.md`, "R24 as built".
+Details, measurements and limits: `VOXEL_QA_FOLLOWUPS_PLAN.md`, "R24 as built" (VoxelWorlds#71).
 
 ## 6. Recommended sequence
 
