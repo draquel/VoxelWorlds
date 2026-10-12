@@ -20,13 +20,27 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 
 | ID | Item | Cause | Status of the cause | Repos | Size |
 |----|------|-------|---------------------|-------|------|
-| R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12 | VoxelWorlds | S-M |
+| R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
 | R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
 | R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Traced in code | VoxelWorlds | L |
 
 ## R23 Lingering distant chunk
 
 **Report:** "Noticed a distant chunk which should be unloaded was still visible" (finding, 2026-10-11 15:32 UTC).
+
+**Status (2026-10-12): implemented, R23a-R23f as specified below** (VoxelWorlds#70; verification results in the PR). As built:
+- R23a: `FVoxelSeamRegistry::GetResidencyEpoch` / `IsResidencyCurrent`; `FVoxelSeamJob::OwnerResidencyEpoch` travels with
+  the job, `DispatchSeamJob` and `ProcessCompletedSeamMeshes` drop stale ones (`[SeamLat] rejectDeparted`).
+- R23b: `VoxelDrainBounded` (`VoxelStreaming/Public/VoxelBoundedDrain.h`) for the generation, mesh, seam and collision drains.
+- R23c: `AsyncGenerationInProgress` / `AsyncMeshingInProgress` hold dispatch stamps (time, frame, serial); results carry
+  the serial, so a superseded result is discarded. Unloads release the slot. `voxel.Stream.MeshStuckSeconds` (10 s, and
+  at least 60 manager ticks so a PIE pause is not "stuck") re-queues stranded chunks. The in-flight skip in the
+  generation and meshing queues defers a waiting request instead of dropping it.
+- R23d: `GetChunksToUnload` returns every candidate farthest first; `IVoxelLODStrategy::SelectUnloadCandidates` applies
+  the manager's veto, then the cap.
+- R23e: `IVoxelLODStrategy::GetLoadDistance` (= view distance for distance bands); the "Edit-pinned" line logs the distance.
+- R23f: `voxel.Stream.AuditResidency` (and `UVoxelChunkManager::AuditResidency` for scripts). Seam buckets are checked
+  against a game-thread mirror in `UVoxelWorldComponent` (`IVoxelMeshRenderer::GetSeamMeshOwners`).
 
 **The original hypothesis does not hold up.** Edit-pinned streaming (VoxelWorlds#55) loads any edited chunk inside
 the unload radius (`VoxelStreaming/Private/VoxelChunkManager.cpp:2048-2097`, radius = `GetUnloadDistance()` =

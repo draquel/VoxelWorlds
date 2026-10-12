@@ -84,6 +84,7 @@ public:
 		FChunkMeshData&& MeshData) override;
 	virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis) override;
 	virtual void ClearAllSeamMeshes() override;
+	virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override;
 
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;

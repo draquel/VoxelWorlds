@@ -100,7 +100,10 @@ public:
     ) const = 0;
     
     /**
-     * Get chunks that should be unloaded (no longer needed).
+     * Get EVERY chunk that is out of range, farthest first. No per-frame cap here: the chunk
+     * manager vetoes candidates it must keep (mid-pipeline, edit-pinned) and only then applies
+     * MaxChunksToUnloadPerFrame via SelectUnloadCandidates, so refused chunks never use up the
+     * budget (R23d, VOXEL_QA_FOLLOWUPS_PLAN.md).
      * @param OutUnload Output array of chunks to unload
      * @param Context Query context with viewer state
      */
@@ -108,6 +111,17 @@ public:
         TArray<FIntVector>& OutUnload, 
         const FLODQueryContext& Context
     ) const = 0;
+
+    /** Veto first, cap second: pick this frame's unloads from a farthest-first candidate list. */
+    static int32 SelectUnloadCandidates(const TArray<FIntVector>& Candidates,
+        TFunctionRef<bool(const FIntVector&)> CanUnload, int32 MaxPerFrame, TArray<FIntVector>& OutSelected);
+
+    /** Unload horizon (ViewDistance * UnloadDistanceMultiplier for distance bands; -1 = none). */
+    virtual float GetUnloadDistance() const;
+
+    /** Load horizon (the view distance; -1 = none). Edit-pinned chunks pin-load within it and stay
+     *  resident out to GetUnloadDistance(), so they never appear alone past the terrain edge. */
+    virtual float GetLoadDistance() const;
     
     // ==================== Lifecycle ====================
     

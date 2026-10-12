@@ -595,6 +595,15 @@ void FVoxelCustomVFRenderer::ClearAllSeamMeshes()
 	}
 }
 
+void FVoxelCustomVFRenderer::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const
+{
+	OutOwners.Reset();
+	if (WorldComponent)
+	{
+		WorldComponent->GetSeamMeshOwners(OutOwners);
+	}
+}
+
 // ==================== LOD Transitions ====================
 
 void FVoxelCustomVFRenderer::UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor)

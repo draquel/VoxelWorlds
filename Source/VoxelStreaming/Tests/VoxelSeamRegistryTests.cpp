@@ -578,4 +578,87 @@ bool FVoxelSeamReadyRotationTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ===========================================================================
+// 7. Residency epochs (R23a): a seam result only applies to the owner residency
+//    it was scheduled against. A late result for an owner that unloaded — or
+//    unloaded and came back — must be rejected, or it recreates a seam bucket
+//    for a chunk that no longer has one (floating strips after a teleport).
+// ===========================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSeamResultEpochRejectsDepartedOwnerTest,
+	"VoxelWorlds.Streaming.SeamRegistry.ResultEpochRejectsDepartedOwner",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSeamResultEpochRejectsDepartedOwnerTest::RunTest(const FString& Parameters)
+{
+	FVoxelSeamRegistry Reg; Reg.SetEnabled(true);
+
+	const FIntVector Owner(0, 0, 0);
+	const FIntVector Neighbour(1, 0, 0);
+	const FVoxelSeamKey FaceKey(Owner, EVoxelSeamType::Face, /*axis X*/ 0); // participants {Owner, Neighbour}
+
+	TestEqual(TEXT("unregistered chunk has epoch 0"), Reg.GetResidencyEpoch(Owner), 0u);
+	TestFalse(TEXT("epoch 0 is never current"), Reg.IsResidencyCurrent(Owner, 0));
+
+	// Register both participants and schedule the face seam: the job carries the owner's epoch.
+	Reg.RegisterChunk(Owner, /*version*/ 1, /*lod*/ 0);
+	Reg.RegisterChunk(Neighbour, /*version*/ 1, /*lod*/ 0);
+	const uint32 FirstEpoch = Reg.GetResidencyEpoch(Owner);
+	TestNotEqual(TEXT("registered owner has a non-zero epoch"), FirstEpoch, 0u);
+	TestNotEqual(TEXT("each chunk gets its own epoch"), Reg.GetResidencyEpoch(Neighbour), FirstEpoch);
+
+	Reg.ScheduleReadySeams(/*viewer*/ Owner, /*nearRadius*/ 4, /*max*/ 0);
+	TArray<FVoxelSeamJob> Jobs;
+	Reg.DrainSeamJobs(Jobs, /*max*/ 64);
+	const FVoxelSeamJob* FaceJob = Jobs.FindByPredicate([&FaceKey](const FVoxelSeamJob& J) { return J.Key == FaceKey; });
+	TestNotNull(TEXT("the face seam was scheduled"), FaceJob);
+	if (!FaceJob)
+	{
+		return false;
+	}
+	const uint32 CapturedEpoch = FaceJob->OwnerResidencyEpoch;
+	TestEqual(TEXT("job captured the owner's epoch"), CapturedEpoch, FirstEpoch);
+	TestTrue(TEXT("result is current while the owner stays"), Reg.IsResidencyCurrent(Owner, CapturedEpoch));
+
+	// Content and LOD changes within one residency do not invalidate in-flight results.
+	Reg.UpdateChunkContent(Owner, /*version*/ 2);
+	Reg.UpdateChunkRenderedLOD(Owner, /*lod*/ 1);
+	TestTrue(TEXT("content/LOD updates keep the residency"), Reg.IsResidencyCurrent(Owner, CapturedEpoch));
+
+	// The owner unloads while the job is "in flight": its result must be rejected.
+	Reg.UnregisterChunk(Owner);
+	TestEqual(TEXT("departed owner has epoch 0"), Reg.GetResidencyEpoch(Owner), 0u);
+	TestFalse(TEXT("result for a departed owner is rejected"), Reg.IsResidencyCurrent(Owner, CapturedEpoch));
+
+	// The owner comes back: the OLD result is still rejected, a new residency's result is accepted.
+	Reg.RegisterChunk(Owner, /*version*/ 1, /*lod*/ 0);
+	const uint32 SecondEpoch = Reg.GetResidencyEpoch(Owner);
+	TestNotEqual(TEXT("reload gets a new epoch"), SecondEpoch, FirstEpoch);
+	TestFalse(TEXT("old result stays rejected after the owner reloads"), Reg.IsResidencyCurrent(Owner, CapturedEpoch));
+	TestTrue(TEXT("new residency's epoch is current"), Reg.IsResidencyCurrent(Owner, SecondEpoch));
+
+	// The reload re-dirtied the seam, so the new residency schedules it again with the new epoch.
+	TestTrue(TEXT("reload re-dirtied the face seam"), Reg.IsSeamDirty(FaceKey));
+	Reg.ScheduleReadySeams(Owner, 4, 0);
+	Jobs.Reset();
+	Reg.DrainSeamJobs(Jobs, 64);
+	FaceJob = Jobs.FindByPredicate([&FaceKey](const FVoxelSeamJob& J) { return J.Key == FaceKey; });
+	TestNotNull(TEXT("the face seam was rescheduled"), FaceJob);
+	if (FaceJob)
+	{
+		TestEqual(TEXT("rescheduled job carries the new epoch"), FaceJob->OwnerResidencyEpoch, SecondEpoch);
+	}
+
+	// Epochs are never reused, not even across a reset.
+	Reg.Reset();
+	TestFalse(TEXT("reset ends every residency"), Reg.IsResidencyCurrent(Owner, SecondEpoch));
+	Reg.RegisterChunk(Owner, 1, 0);
+	const uint32 ThirdEpoch = Reg.GetResidencyEpoch(Owner);
+	TestTrue(TEXT("epoch after reset differs from every earlier one"), ThirdEpoch != FirstEpoch && ThirdEpoch != SecondEpoch && ThirdEpoch != 0u);
+
+	// Instrumentation: rejected results are counted.
+	Reg.RecordSeamResultRejected();
+	TestEqual(TEXT("rejections counted"), (int32)Reg.GetStats().TotalSeamResultsRejected, 1);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

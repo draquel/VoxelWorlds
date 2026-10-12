@@ -98,12 +98,16 @@ public:
 	) const = 0;
 
 	/**
-	 * Get chunks that should be unloaded (no longer needed).
+	 * Get every chunk that is out of range and may be unloaded, farthest first.
 	 *
-	 * Called by ChunkManager to free memory from distant chunks.
-	 * Should respect MaxChunksToUnloadPerFrame from context.
+	 * Called by ChunkManager to free memory from distant chunks. Return ALL candidates and do NOT
+	 * apply MaxChunksToUnloadPerFrame here: the caller first drops candidates it must keep (chunks
+	 * still in the generation/meshing pipeline, edit-pinned chunks) and only then applies the
+	 * per-frame cap (see SelectUnloadCandidates). A strategy-side cap let refused candidates use up
+	 * the budget; because the loaded set iterates in a stable order, a handful of them could stop
+	 * every later chunk from ever unloading (VOXEL_QA_FOLLOWUPS_PLAN.md R23d).
 	 *
-	 * @param OutUnload Output array of chunk coordinates to unload
+	 * @param OutUnload Output array of chunk coordinates to unload, sorted farthest first
 	 * @param LoadedChunks Set of currently loaded chunk coordinates
 	 * @param Context Query context with viewer and world state
 	 */
@@ -112,6 +116,42 @@ public:
 		const TSet<FIntVector>& LoadedChunks,
 		const FLODQueryContext& Context
 	) const = 0;
+
+	/**
+	 * Pick this frame's unloads from a candidate list (as returned by GetChunksToUnload).
+	 *
+	 * Candidates the caller refuses are skipped WITHOUT spending budget; selection stops once
+	 * MaxPerFrame candidates have been accepted. Candidate order is kept, so a farthest-first
+	 * list stays farthest first.
+	 *
+	 * Performance: O(n) in the number of candidates, one CanUnload call each until the cap.
+	 *
+	 * @param Candidates  Unload candidates in priority order (farthest first).
+	 * @param CanUnload   Caller veto: return false to keep a candidate resident this frame.
+	 * @param MaxPerFrame Cap on accepted candidates (<= 0 = no cap).
+	 * @param OutSelected Receives the accepted candidates (reset first).
+	 * @return Number of candidates selected.
+	 */
+	static int32 SelectUnloadCandidates(
+		const TArray<FIntVector>& Candidates,
+		TFunctionRef<bool(const FIntVector&)> CanUnload,
+		int32 MaxPerFrame,
+		TArray<FIntVector>& OutSelected)
+	{
+		OutSelected.Reset();
+		for (const FIntVector& Coord : Candidates)
+		{
+			if (MaxPerFrame > 0 && OutSelected.Num() >= MaxPerFrame)
+			{
+				break;
+			}
+			if (CanUnload(Coord))
+			{
+				OutSelected.Add(Coord);
+			}
+		}
+		return OutSelected.Num();
+	}
 
 	// ==================== Lifecycle ====================
 
@@ -188,6 +228,22 @@ public:
 	 * @return Unload horizon distance in world units, or <= 0 to disable.
 	 */
 	virtual float GetUnloadDistance() const
+	{
+		return -1.0f;
+	}
+
+	/**
+	 * Get the load horizon (world units): the distance within which the strategy streams chunks in
+	 * (the view edge). Smaller than GetUnloadDistance(), whose margin is hysteresis, not view range.
+	 * The chunk manager pin-loads chunks that exist only because of edits within this radius, so an
+	 * edited chunk never appears on its own beyond the rest of the terrain, and keeps them resident
+	 * out to GetUnloadDistance().
+	 *
+	 * Default: -1 (no load horizon; callers fall back to GetUnloadDistance()).
+	 *
+	 * @return Load horizon distance in world units, or <= 0 when the strategy defines none.
+	 */
+	virtual float GetLoadDistance() const
 	{
 		return -1.0f;
 	}
