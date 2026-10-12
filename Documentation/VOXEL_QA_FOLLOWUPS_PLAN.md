@@ -20,7 +20,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 
 | ID | Item | Cause | Status of the cause | Repos | Size |
 |----|------|-------|---------------------|-------|------|
-| R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12 | VoxelWorlds | S-M |
+| R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
 | R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
 | R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Traced in code | VoxelWorlds | L |
 
@@ -28,7 +28,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 
 **Report:** "Noticed a distant chunk which should be unloaded was still visible" (finding, 2026-10-11 15:32 UTC).
 
-**Status (2026-10-12): implemented, R23a-R23f as specified below** (branch `fix/r23-residency`). As built:
+**Status (2026-10-12): implemented, R23a-R23f as specified below** (VoxelWorlds#70; verification results in the PR). As built:
 - R23a: `FVoxelSeamRegistry::GetResidencyEpoch` / `IsResidencyCurrent`; `FVoxelSeamJob::OwnerResidencyEpoch` travels with
   the job, `DispatchSeamJob` and `ProcessCompletedSeamMeshes` drop stale ones (`[SeamLat] rejectDeparted`).
 - R23b: `VoxelDrainBounded` (`VoxelStreaming/Public/VoxelBoundedDrain.h`) for the generation, mesh, seam and collision drains.
