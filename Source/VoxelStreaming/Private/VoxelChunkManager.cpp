@@ -317,6 +317,17 @@ static TAutoConsoleVariable<int32> CVarSeamHoldMs(
 	     "0 = no hold (the interior fades at once and seams fade as they land)."),
 	ECVF_Default);
 
+// First appearances (R24 P3): beyond voxel.MeshFade.AppearMinDistance a new chunk fades in from
+// nothing. Its seams land a tick or more later and would fade in behind it, leaving its boundary
+// open while the interior is already showing; holding the new interior (invisible) until its ready
+// seams land, under the same voxel.MeshFade.SeamHoldMs cap, fades them in together.
+static TAutoConsoleVariable<int32> CVarAppearHold(
+	TEXT("voxel.MeshFade.AppearHold"),
+	1,
+	TEXT("Hold a new chunk that fades in (voxel.MeshFade.Appear) until its ready seams land, then fade them in together "
+	     "(capped by voxel.MeshFade.SeamHoldMs). 1 = on (default), 0 = the interior fades in at once and its seams follow."),
+	ECVF_Default);
+
 // A chunk bakes its boundary against a snapshot of its 26 neighbours taken at mesh-launch. If a
 // neighbour gains/changes data or changes rendered LOD before the async mesh completes, the baked
 // boundary is stale — a persistent seam, because the generation-complete and LOD-transition cascades
@@ -567,6 +578,11 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Cache the current viewer position for the stale-cull distance test used by the queue
 	// processors (which don't build their own context). Reflects the benchmark view override.
 	CurrentViewerPosition = Context.ViewerPosition;
+	// R24 P3: the renderer fades new geometry in only away from the viewer.
+	if (MeshRenderer)
+	{
+		MeshRenderer->SetViewerPosition(CurrentViewerPosition);
+	}
 
 	// Track viewer HORIZONTAL speed for the speed-adaptive load budget (ResolveMaxLoadPerFrame).
 	// Smoothed so a teleport spike doesn't blow the budget out for a frame.
@@ -4153,21 +4169,28 @@ void UVoxelChunkManager::TickSeamScheduler()
 
 bool UVoxelChunkManager::ShouldHoldForSeams(const FIntVector& ChunkCoord, int32 PreviousMeshedLOD, int32 NewLOD, const FChunkMeshData& NewMesh) const
 {
-	// Only an LOD change of a chunk that is on screen: the interior crossfades from its old mesh
-	// and every incident seam is rebuilt for the new LOD. Edits (same LOD) never hold — a dig must
-	// show at once — and a first appearance has nothing to fade from.
-	return bSeamMeshingActive && MeshRenderer && SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
-		&& CVarSeamHoldMs.GetValueOnGameThread() > 0
-		&& PreviousMeshedLOD >= 0 && PreviousMeshedLOD != NewLOD
-		&& NewMesh.IsValid()
-		&& MeshRenderer->IsChunkLoaded(ChunkCoord);
+	if (!bSeamMeshingActive || !MeshRenderer || !SeamRegistry.IsValid() || !SeamRegistry->IsEnabled()
+		|| CVarSeamHoldMs.GetValueOnGameThread() <= 0 || !NewMesh.IsValid())
+	{
+		return false;
+	}
+	// An LOD change of a chunk that is on screen: the interior crossfades from its old mesh and every
+	// incident seam is rebuilt for the new LOD. Edits (same LOD) never hold — a dig must show at once.
+	if (MeshRenderer->IsChunkLoaded(ChunkCoord))
+	{
+		return PreviousMeshedLOD >= 0 && PreviousMeshedLOD != NewLOD;
+	}
+	// A first appearance that the renderer fades in (R24 P3, beyond voxel.MeshFade.AppearMinDistance):
+	// it stays invisible until its ready seams land, then fades in with them. Near the viewer a new
+	// chunk appears at once and never waits.
+	return CVarAppearHold.GetValueOnGameThread() != 0 && MeshRenderer->WillFadeInChunk(ChunkCoord);
 }
 
 void UVoxelChunkManager::BeginSeamHold(const FIntVector& ChunkCoord)
 {
-	// The LOD change (UpdateChunkRenderedLOD) just dirtied every incident seam; the buildable ones
-	// are rebuilt within a few ticks. Seams with an absent participant cannot land, so they are
-	// not waited for.
+	// The LOD change or first mesh (UpdateChunkRenderedLOD) just dirtied every incident seam; the
+	// buildable ones are rebuilt within a few ticks. Seams with an absent participant cannot land, so
+	// they are not waited for, and one whose participant has no mesh yet is abandoned at dispatch.
 	TArray<FVoxelSeamKey> Rebuilding;
 	SeamRegistry->GetReadyIncidentSeams(ChunkCoord, Rebuilding);
 	SeamHolds.BeginTransition(ChunkCoord, Rebuilding, SeamRegistry->NowSeconds());
@@ -4724,7 +4747,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			{
 				if (MeshRenderer && State)
 				{
-					// R24: an LOD change holds the swap until its rebuilt seams land (see BeginSeamHold).
+					// R24: an LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold).
 					const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD,
 						PendingMeshQueue[i].LODLevel, PendingMeshQueue[i].MeshData);
 					if (bHoldForSeams)
@@ -4865,7 +4888,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
 
-		// R24: an LOD change holds the swap until its rebuilt seams land (see BeginSeamHold).
+		// R24: an LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold).
 		const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD, PendingMesh.LODLevel, PendingMesh.MeshData);
 		if (bHoldForSeams)
 		{

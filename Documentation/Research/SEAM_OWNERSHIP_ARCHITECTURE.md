@@ -384,7 +384,8 @@ crossfade removes the *pop* of legitimate LOD resolution changes.
   copied per acquisition from the live atlas MID; a tick (enabled only while fades are active)
   advances FadeAlpha on the MIDs, batches bookkeeping alphas through the repurposed
   MorphFactor carrier, and releases each Previous set at t = 1.
-- Mesh→empty transitions (chunk remeshed to nothing) still pop — removal is not a swap.
+- Mesh→empty transitions (chunk remeshed to nothing) still pop — removal is not a swap. (Empty→mesh,
+  a first appearance, fades in beyond a distance since R24 P3; see §5.2.)
 
 ### 5.2 Seam buckets and LOD transitions (R24, 2026-10-12)
 
@@ -401,6 +402,12 @@ makes the boundary fade with it:
 - A merged bucket is never replaced mid-fade: that drops the generation it fades out of (one is
   retained). Its submit waits for the running fade to end (`DeferBucket`), and a transition holding
   the bucket waits for that submit.
+- First appearances (R24 P3): a fade state may have no Previous set. A new chunk interior or a new
+  seam bucket whose chunk cell lies at least `voxel.MeshFade.AppearMinDistance` (default 7000, the
+  LOD 0 band edge) from the streaming viewer fades in from nothing (`voxel.MeshFade.Appear`); nearer
+  geometry still appears at once. A new interior that fades in is held, invisible, until its ready
+  seams land and then fades in with them (`voxel.MeshFade.AppearHold`, same holds and cap as an LOD
+  change). A resubmit during an appearance replaces the mesh in place on the same alpha.
 
 Details, measurements and limits: `VOXEL_QA_FOLLOWUPS_PLAN.md`, "R24 as built" (VoxelWorlds#71).
 

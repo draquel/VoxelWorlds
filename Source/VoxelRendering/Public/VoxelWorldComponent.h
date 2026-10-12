@@ -196,8 +196,9 @@ public:
 	 * @param Vertices CPU vertex array (will be moved)
 	 * @param Indices CPU index array (will be moved)
 	 * @param OwnerWorldPosition World position of the owner chunk's origin
-	 * @param bCrossfade Crossfade from the bucket it replaces (R24). Also fades a NEW bucket in when
-	 *        its owner is held by an LOD transition, so it stays hidden until the transition releases.
+	 * @param bCrossfade Crossfade from the bucket it replaces (R24). Also fades a NEW bucket in from
+	 *        nothing: when its owner is held by a transition (it stays hidden until the release), or
+	 *        when the owner lies beyond voxel.MeshFade.AppearMinDistance (R24 P3).
 	 */
 	void UpdateSeamMeshFromCPUData(
 		const FIntVector& OwnerChunkCoord,
@@ -244,6 +245,33 @@ public:
 
 	/** True if seam bucket swaps crossfade right now (voxel.MeshFade.Seams and the chunk crossfade prerequisites). */
 	bool CanCrossfadeSeams() const;
+
+	// ==================== First-Appearance Fades (R24 P3) ====================
+
+	/**
+	 * Set the viewer position that gates first-appearance fades (the chunk manager's streaming
+	 * viewer, sent every tick). Until it is set, new geometry appears at once.
+	 *
+	 * @param ViewerPosition World-space viewer position
+	 */
+	void SetFadeViewerPosition(const FVector& ViewerPosition);
+
+	/**
+	 * True if a first mesh submitted for this chunk now would fade in from nothing: appearance fades
+	 * on (voxel.MeshFade.Appear), the chunk has no mesh yet, a viewer is known, the fade cap has room,
+	 * and the chunk's cell is at least voxel.MeshFade.AppearMinDistance from the viewer. The chunk
+	 * manager holds such a chunk for its seams (SetChunkFadeHold) before submitting it.
+	 *
+	 * @param ChunkCoord Chunk about to receive its first mesh
+	 * @return True if it would appear with a fade
+	 */
+	bool WillFadeInChunk(const FIntVector& ChunkCoord) const;
+
+	/**
+	 * Lifetime first-appearance fade count, for diagnostics.
+	 * @param bSeams True for seam buckets, false for chunk interiors
+	 */
+	int64 GetFadeAppearCount(bool bSeams) const { return FadeAppearCounts[bSeams ? 1 : 0]; }
 
 	/**
 	 * Seconds until the owner's seam bucket finishes its running crossfade (0 when not fading, held,
@@ -576,6 +604,13 @@ private:
 	int64 FadeStartCounts[2] = { 0, 0 };
 	int64 FadeMidRestartCounts[2] = { 0, 0 };
 
+	/** See GetFadeAppearCount: [0] chunk interiors, [1] seam buckets. */
+	int64 FadeAppearCounts[2] = { 0, 0 };
+
+	/** Streaming viewer for the appearance distance gate (SetFadeViewerPosition). */
+	FVector FadeViewerPosition = FVector::ZeroVector;
+	bool bHasFadeViewer = false;
+
 	/** Fade timing (start, hold, release, alpha) for every entry in ActiveFades. */
 	FVoxelCrossfadeScheduler FadeScheduler;
 
@@ -597,6 +632,27 @@ private:
 	 * @return False if no fade was started (cap reached or MIDs unavailable) — swap instantly.
 	 */
 	bool StartFade(const FIntVector4& Key);
+
+	/**
+	 * Fade decision for a chunk interior submit: a swap crossfades (an appearing chunk keeps fading in
+	 * with its new mesh in place), a first mesh tries an appearance fade.
+	 * @param Key          Interior fade key
+	 * @param bMeshExisted The chunk already had a mesh
+	 * @return True if the submit carries a fade (the proxy keeps the fade state through the swap)
+	 */
+	bool StartChunkMeshFade(const FIntVector4& Key, bool bMeshExisted);
+
+	/**
+	 * Start a first-appearance fade (R24 P3) for geometry that has no mesh yet: only a fade-in MID,
+	 * held if a hold is requested for it. Enqueues the fade-state attach before the mesh lands.
+	 * @param Key         Interior or seam bucket key
+	 * @param bBypassGate Fade regardless of distance and voxel.MeshFade.Appear (a bucket joining a held transition)
+	 * @return False if refused (near the viewer, fades off, cap, MID failure) — show the mesh at once.
+	 */
+	bool StartAppearFade(const FIntVector4& Key, bool bBypassGate);
+
+	/** Distance from the fade viewer to the nearest point of a chunk's cell (the appearance gate's measure). */
+	double GetFadeViewerDistance(const FIntVector& ChunkCoord) const;
 
 	/** Drop a fade without waiting for completion (geometry removed / fade disabled). */
 	void CancelFade(const FIntVector4& Key, bool bClearRenderState);

@@ -86,6 +86,8 @@ public:
 	virtual void SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold) override;
 	virtual void SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold) override;
 	virtual float GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const override;
+	virtual void SetViewerPosition(const FVector& ViewerPosition) override;
+	virtual bool WillFadeInChunk(const FIntVector& ChunkCoord) const override;
 	virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis) override;
 	virtual void ClearAllSeamMeshes() override;
 	virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override;

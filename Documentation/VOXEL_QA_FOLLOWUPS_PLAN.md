@@ -22,7 +22,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 |----|------|-------|---------------------|-------|------|
 | R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
 | R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
-| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 open | VoxelWorlds | L |
+| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 in VoxelWorlds#PRNUM | VoxelWorlds | L |
 
 ## R23 Lingering distant chunk
 
@@ -406,8 +406,81 @@ RHI), the same plus MarchingCubes, Cubic and the Generation GPU-vs-CPU parity te
 
 **Known limits.**
 - An interior resubmitted while its own fade runs still restarts (one retained generation). Measured 0 times.
-- New chunks and new buckets at the frontier still pop (P3).
+- New chunks and new buckets at the frontier still pop (P3, done below).
 - `voxel.Bench.Run` A/B and a W-04 run at normal duration were not done. The user's W-04 re-run is the check.
+
+### R24 P3 as built (first-appearance fade, VoxelWorlds#PRNUM, 2026-10-12)
+
+**Scope.** P3 as designed (a fade without a previous mesh, the distance gate, the optional hold), plus the
+`voxel.Bench.Run` A/B of P4. Not done: the batch budget and HUD skip count (the proxy's over-limit count stayed
+0 in every run below, so nothing forced it), P0's counters, and water tiles, which still pop at the frontier.
+
+**What the code does.**
+- A fade can have no previous mesh. `FVoxelCrossfadeScheduler::StartAppear` starts one only when the
+  geometry's chunk cell is at least `voxel.MeshFade.AppearMinDistance` (default 7,000, the LOD 0 band edge)
+  from the streaming viewer, measured to the nearest point of the cell. A seam bucket is measured by its
+  owner's cell, which it lies on. Nearer geometry appears at once, so nothing near the player turns
+  see-through.
+- `UVoxelWorldComponent` tries an appearance for a first interior submit and for a new seam bucket. The
+  proxy draws the current mesh with the fade-in MID alone (`FVoxelChunkFadeState::bAppear`, no fade-out MID).
+  A resubmit during an appearance replaces the mesh in place on the same alpha; retaining the half-shown
+  mesh as a Previous would snap it back to solid. A bucket removed while it appears goes at once.
+- The chunk manager sends its viewer to the renderer every tick (`IVoxelMeshRenderer::SetViewerPosition`).
+  `ShouldHoldForSeams` also holds a first appearance that the renderer will fade (`WillFadeInChunk`,
+  `voxel.MeshFade.AppearHold`): the new interior stays invisible until its ready seams land, then fades in
+  with them, in the same `FVoxelSeamTransitionHolds` groups and under the same `SeamHoldMs` cap as an LOD
+  change. Seams whose other participants have no mesh yet are abandoned at dispatch, so a frontier chunk
+  waits only for neighbours that are already on screen.
+- New buckets joining a held transition already faded in from nothing (P2). They are now appearances too,
+  which fixes a P2 case: a second slot landing for a held new bucket retained the never-shown first version
+  as the Previous, which then popped in at the release.
+- The deferral rule is unchanged: `GetSeamFadeRemainingSeconds` counts a running appearance, so a new bucket
+  is not replaced mid-fade either.
+- Cvars: `voxel.MeshFade.Appear` 1, `voxel.MeshFade.AppearMinDistance` 7000, `voxel.MeshFade.AppearHold` 1.
+  The renderer stats (chunk manager debug dump) count appearance fades.
+
+**Measured** (VoxelDemo, real RHI).
+- Arrival: the survey camera parked 300 km away, then moved to x −470,286, y −300,332, z 2,500 looking +Y,
+  with `voxel.MeshFade.Duration 2`; same frames with `voxel.MeshFade.Appear` 0 and 1. Off: far chunks pop in
+  solid, one floating piece at a time. On: the same chunks dither in on the same frames, and a held chunk
+  stays hidden until its seams land. The settled frames are pixel-identical, so no chunk is left hidden.
+  `Images/R24/appear_before_after.jpg`.
+- PIE start (initial load): 357 interior and 372 bucket appearances, 341 hold groups, 0 timeouts, longest
+  hold 521 ms. Whole session: 0 mid-fade restarts, 0 over-limit frames, 0 failsafe releases.
+- Bench: `voxel.Bench.Run p3 3000 40000` heading +X from the land site (pawn at the lake surface), one fresh
+  PIE per run, alternating `voxel.MeshFade 0` and the defaults. Unfocused editor with the background throttle
+  off; the PIE viewport is 3440×1408, hence the ~25 ms median.
+
+  | Run | `voxel.MeshFade` | Frame P50 ms | Frame P95 ms | Frame P99 ms | Manager P95 ms | Catch-up s | Over-limit frames |
+  |-----|------------------|--------------|--------------|--------------|----------------|------------|-------------------|
+  | off A | 0 | 25.7 | 46.0 | 58.3 | 20.6 | 3.0 | 0 |
+  | off B | 0 | 25.4 | 43.2 | 51.8 | 19.4 | 2.8 | 0 |
+  | on A | 1 | 29.0 | 46.1 | 54.3 | 18.8 | 3.4 | 0 |
+  | on B | 1 | 25.1 | 43.2 | 55.9 | 19.9 | 2.5 | 0 |
+  | on C | 1 | 26.1 | 45.6 | 58.6 | 20.9 | 2.9 | 0 |
+
+  Mean frame P95: 44.6 ms off, 45.0 ms on (+0.4 ms, inside the ±1.5 ms spread between runs). A first
+  fades-off run with the background throttle still on (P95 48.8 ms) is left out. Holds during the traverse
+  with fades on average 90-200 ms per log interval, the longest about 1 s, with 4 cap timeouts in about 750
+  groups. With fades off (LOD holds only) they average 40-75 ms with none. The longer holds come from the
+  deferral rule: a held group waits for buckets that are still appearing.
+- Why no 40 km frontier shot: around the demo spawn the frontier is mostly open sea, and water tiles do not
+  take this fade. The arrival exercises the same path in view. A survey camera also has to stay below
+  z 4,800: InfinitePlane loads chunk layers from the viewer's layer −2 to +8, so a camera in layer 1 or
+  higher drops the lowest terrain layer and shows only a sliver of terrain.
+
+**Tests.** New: `VoxelWorlds.Rendering.Crossfade.AppearFadeRespectsDistanceGate`. Headless (`-nullrhi`):
+Streaming, LOD, Rendering, DualContour, MC SeamClosure, 54/54. In-editor (real RHI), the same plus
+MarchingCubes, Cubic and the Generation GPU tests (GPU noise and GPU-vs-CPU parity), 93/93.
+
+**Known limits.**
+- Inside the gate a new chunk still pops by design, for example around the player after a teleport, and its
+  boundary shows open until its seams land.
+- Water tiles still pop at the frontier.
+- A hold that reaches the `SeamHoldMs` cap (about 0.5% of groups in the bench) fades its interiors in
+  before their seams, as with an LOD change.
+- A fade MID copies every terrain material parameter when it is acquired, and appearances acquire more of
+  them. The bench shows no cost; if one appears, track a parameter version per pooled MID.
 
 ## Order and pull requests
 
