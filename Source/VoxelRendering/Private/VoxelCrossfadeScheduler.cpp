@@ -16,6 +16,24 @@ bool FVoxelCrossfadeScheduler::Start(const FIntVector4& Key, double NowSeconds, 
 	Entry->StartSeconds = NowSeconds;
 	Entry->bHeld = bHold;
 	Entry->HeldSinceSeconds = bHold ? NowSeconds : 0.0;
+	// A swap now has a previous mesh to fade from, whatever this entry was doing before.
+	Entry->bAppear = false;
+	return true;
+}
+
+bool FVoxelCrossfadeScheduler::StartAppear(const FIntVector4& Key, double NowSeconds, bool bHold, double DistanceToViewer)
+{
+	// Near geometry appears at once: a see-through patch in front of the player reads as a glitch,
+	// while at the frontier a fade only replaces a pop.
+	if (!PassesAppearGate(DistanceToViewer) || Entries.Contains(Key) || Entries.Num() >= MaxConcurrent)
+	{
+		return false;
+	}
+	FEntry& Entry = Entries.Add(Key);
+	Entry.StartSeconds = NowSeconds;
+	Entry.bHeld = bHold;
+	Entry.HeldSinceSeconds = bHold ? NowSeconds : 0.0;
+	Entry.bAppear = true;
 	return true;
 }
 

@@ -1158,10 +1158,10 @@ private:
 	int64 TotalSeamHoldTimeouts = 0;
 	double SeamHoldSecondsMaxLifetime = 0.0;
 
-	/** True when an interior swap from PreviousMeshedLOD to NewLOD should wait for its rebuilt seams. */
+	/** True when an interior submit should wait for its seams: an LOD change of a visible chunk (PreviousMeshedLOD -> NewLOD), or a first appearance the renderer fades in (R24 P3, voxel.MeshFade.AppearHold). */
 	bool ShouldHoldForSeams(const FIntVector& ChunkCoord, int32 PreviousMeshedLOD, int32 NewLOD, const FChunkMeshData& NewMesh) const;
 
-	/** Start waiting for the seams a just-submitted LOD change of ChunkCoord rebuilds (its fade is already held). */
+	/** Start waiting for the seams a just-submitted LOD change or first appearance of ChunkCoord builds (its fade is already held). */
 	void BeginSeamHold(const FIntVector& ChunkCoord);
 
 	/** Release held fades in the renderer and record the hold stats. */

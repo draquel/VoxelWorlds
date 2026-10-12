@@ -617,6 +617,23 @@ float FVoxelCustomVFRenderer::GetSeamFadeRemainingSeconds(const FIntVector& Owne
 	return WorldComponent ? WorldComponent->GetSeamFadeRemainingSeconds(OwnerChunkCoord) : 0.0f;
 }
 
+void FVoxelCustomVFRenderer::SetViewerPosition(const FVector& ViewerPosition)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->SetFadeViewerPosition(ViewerPosition);
+	}
+}
+
+bool FVoxelCustomVFRenderer::WillFadeInChunk(const FIntVector& ChunkCoord) const
+{
+	check(IsInGameThread());
+
+	return WorldComponent && WorldComponent->WillFadeInChunk(ChunkCoord);
+}
+
 void FVoxelCustomVFRenderer::ClearAllSeamMeshes()
 {
 	check(IsInGameThread());
@@ -770,10 +787,13 @@ FBox FVoxelCustomVFRenderer::GetTotalBounds() const
 FString FVoxelCustomVFRenderer::GetDebugStats() const
 {
 	int64 InteriorStarts = 0, InteriorRestarts = 0, SeamStarts = 0, SeamRestarts = 0;
+	int64 InteriorAppears = 0, SeamAppears = 0;
 	if (WorldComponent)
 	{
 		WorldComponent->GetFadeCounters(/*bSeams*/ false, InteriorStarts, InteriorRestarts);
 		WorldComponent->GetFadeCounters(/*bSeams*/ true, SeamStarts, SeamRestarts);
+		InteriorAppears = WorldComponent->GetFadeAppearCount(/*bSeams*/ false);
+		SeamAppears = WorldComponent->GetFadeAppearCount(/*bSeams*/ true);
 	}
 	return FString::Printf(
 		TEXT("Custom VF Renderer Stats:\n")
@@ -783,14 +803,16 @@ FString FVoxelCustomVFRenderer::GetDebugStats() const
 		TEXT("  GPU Memory: %.2f MB\n")
 		TEXT("  Voxel Size: %.1f\n")
 		TEXT("  Chunk Size: %.1f\n")
-		TEXT("  Crossfades: interior %lld (mid-fade restarts %lld), seam bucket %lld (mid-fade restarts %lld)"),
+		TEXT("  Crossfades: interior %lld (mid-fade restarts %lld), seam bucket %lld (mid-fade restarts %lld)\n")
+		TEXT("  Appearance fades: interior %lld, seam bucket %lld (active fades %d)"),
 		ChunkStatsMap.Num(),
 		TotalVertexCount,
 		TotalTriangleCount,
 		TotalGPUMemory / (1024.0 * 1024.0),
 		VoxelSize,
 		ChunkWorldSize,
-		InteriorStarts, InteriorRestarts, SeamStarts, SeamRestarts
+		InteriorStarts, InteriorRestarts, SeamStarts, SeamRestarts,
+		InteriorAppears, SeamAppears, WorldComponent ? WorldComponent->GetActiveFadeCount() : 0
 	);
 }
 

@@ -73,7 +73,7 @@ struct FVoxelChunkFadeState
 	/** Masked MID proxy for the incoming (current) mesh — FadeInvert=0, dithers in as alpha rises */
 	const FMaterialRenderProxy* FadeInProxy = nullptr;
 
-	/** Masked MID proxy for the outgoing (previous) mesh — FadeInvert=1, dithers out as alpha rises */
+	/** Masked MID proxy for the outgoing (previous) mesh — FadeInvert=1, dithers out as alpha rises (null for an appearance) */
 	const FMaterialRenderProxy* FadeOutProxy = nullptr;
 
 	/**
@@ -82,6 +82,14 @@ struct FVoxelChunkFadeState
 	 * on screen stays the one the transition started from.
 	 */
 	bool bHeld = false;
+
+	/**
+	 * First appearance (R24 P3): there is no Previous mesh and the current one fades in from nothing
+	 * (invisible while held). A resubmit replaces the current mesh in place on the same alpha —
+	 * there is nothing behind it to crossfade from, and retaining the half-shown mesh would pop it
+	 * back to solid.
+	 */
+	bool bAppear = false;
 };
 
 /**
@@ -237,10 +245,14 @@ public:
 	/**
 	 * Attach crossfade material proxies for a chunk. Fading starts rendering once both this
 	 * state and the chunk's Previous mesh set exist (order-independent: the CPU batch path
-	 * attaches before its swap lands, the GPU path after).
+	 * attaches before its swap lands, the GPU path after). An appearance (bAppear) needs no
+	 * Previous set: the current mesh draws with the fade-in proxy from the moment it lands.
 	 * Must be called on render thread.
+	 *
+	 * @param bHeld   Hold at alpha 0 until ReleaseFadeHolds_RenderThread.
+	 * @param bAppear First appearance: fade the current mesh in from nothing (InFadeOutProxy may be null).
 	 */
-	void SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld = false);
+	void SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld = false, bool bAppear = false);
 
 	/**
 	 * Clear the held flag of chunk and seam fades that were just released (their alphas start
@@ -355,7 +367,7 @@ public:
 	 * Must be called on render thread.
 	 */
 	void SetSeamFadeState_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis,
-		const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld = false);
+		const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld = false, bool bAppear = false);
 
 	/** Per-tick seam fade alphas (bookkeeping copies; keys are FVoxelCrossfadeScheduler seam keys). Render thread. */
 	void UpdateSeamFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector4, float>>& Alphas);

@@ -162,6 +162,66 @@ bool FVoxelCrossfadeResubmitRestartsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeAppearGateTest,
+	"VoxelWorlds.Rendering.Crossfade.AppearFadeRespectsDistanceGate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCrossfadeAppearGateTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCrossfadeTestUtils;
+	FVoxelCrossfadeScheduler S;
+	TestEqual(TEXT("default gate is the LOD 0 band edge"), S.GetAppearMinDistance(), 7000.0);
+
+	// Inside the gate a new chunk appears at once: nothing near the player turns see-through.
+	const FIntVector4 Near = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(1, 0, 0));
+	TestFalse(TEXT("refused just inside the gate"), S.StartAppear(Near, /*now*/ 0.0, /*hold*/ false, /*distance*/ 6999.0));
+	TestFalse(TEXT("refused appearance is not tracked"), S.Contains(Near));
+
+	// At the gate and beyond it fades in from nothing on the usual clock.
+	const FIntVector4 Far = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(9, 0, 0));
+	TestTrue(TEXT("accepted at the gate"), S.StartAppear(Far, /*now*/ 0.0, /*hold*/ false, /*distance*/ 7000.0));
+	TestTrue(TEXT("appearing"), S.IsAppearing(Far));
+	FVoxelCrossfadeScheduler::FAdvanceResult R;
+	S.Advance(/*now*/ 0.0, 0.4f, 0.0, R);
+	TestEqual(TEXT("starts invisible"), AlphaOf(R, Far), 0.0f, 1e-5f);
+	S.Advance(/*now*/ 0.2, 0.4f, 0.0, R);
+	TestEqual(TEXT("half way in"), AlphaOf(R, Far), 0.5f, 1e-4f);
+	TestEqual(TEXT("seam pipeline waits out an appearance like a swap"), S.GetRemainingSeconds(Far, 0.2, 0.4f), 0.2f, 1e-4f);
+	TestFalse(TEXT("a second appearance of a fading key is refused"), S.StartAppear(Far, 0.2, false, 1.0e6));
+	S.Advance(/*now*/ 0.4, 0.4f, 0.0, R);
+	TestTrue(TEXT("completes at the duration"), R.Completed.Contains(Far));
+	TestFalse(TEXT("no longer appearing"), S.IsAppearing(Far));
+
+	// Seam buckets use the same gate (the caller measures to the owner chunk's cell).
+	const FIntVector4 Seam = FVoxelCrossfadeScheduler::SeamKey(FIntVector(9, 0, 0), 0);
+	TestFalse(TEXT("near seam bucket refused"), S.StartAppear(Seam, 1.0, false, 100.0));
+	TestTrue(TEXT("far seam bucket accepted"), S.StartAppear(Seam, 1.0, false, 50000.0));
+
+	// A held appearance stays invisible until released (the optional hold for ready seams).
+	const FIntVector4 Held = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(12, 0, 0));
+	TestTrue(TEXT("held appearance accepted"), S.StartAppear(Held, /*now*/ 2.0, /*hold*/ true, 9000.0));
+	S.Advance(/*now*/ 2.5, 0.4f, 5.0, R);
+	TestEqual(TEXT("held appearance stays invisible"), AlphaOf(R, Held), 0.0f);
+	TestEqual(TEXT("held appearance: nothing on screen to wait for"), S.GetRemainingSeconds(Held, 2.5, 0.4f), 0.0f);
+	TestTrue(TEXT("released"), S.Release(Held, 2.5));
+	S.Advance(/*now*/ 2.6, 0.4f, 5.0, R);
+	TestEqual(TEXT("fades in from the release"), AlphaOf(R, Held), 0.25f, 1e-4f);
+	TestTrue(TEXT("still an appearance after the release"), S.IsAppearing(Held));
+
+	// A swap restart turns the appearance into a crossfade (there is now a mesh to fade from).
+	TestTrue(TEXT("swap restart"), S.Start(Held, 2.6, false));
+	TestFalse(TEXT("no longer an appearance"), S.IsAppearing(Held));
+
+	// The gate can be moved or switched off; the concurrent cap applies to appearances too.
+	S.SetAppearMinDistance(-1.0);
+	TestFalse(TEXT("negative distance disables appearances"), S.StartAppear(FVoxelCrossfadeScheduler::ChunkKey(FIntVector(20, 0, 0)), 3.0, false, 1.0e9));
+	S.SetAppearMinDistance(0.0);
+	TestTrue(TEXT("zero distance fades everything in"), S.StartAppear(FVoxelCrossfadeScheduler::ChunkKey(FIntVector(21, 0, 0)), 3.0, false, 0.0));
+	S.SetMaxConcurrent(S.Num());
+	TestFalse(TEXT("over the cap: appears at once"), S.StartAppear(FVoxelCrossfadeScheduler::ChunkKey(FIntVector(22, 0, 0)), 3.0, false, 1.0e6));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeCapFallsBackTest,
 	"VoxelWorlds.Rendering.Crossfade.ConcurrentFadeCapFallsBackToSwap",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

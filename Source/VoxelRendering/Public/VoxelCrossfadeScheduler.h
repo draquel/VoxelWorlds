@@ -17,6 +17,10 @@
  * uploaded but dithered out) until Release, or until it has been held for the failsafe timeout.
  * Releasing restarts its clock, so everything released together fades together.
  *
+ * Appearances (R24 P3): a fade may have no previous mesh at all — a new chunk interior or a new seam
+ * bucket at the streaming frontier fades in from nothing instead of popping. Only geometry at least
+ * the appear distance from the viewer qualifies, so nothing near the player turns see-through.
+ *
  * Pure C++ (no UObject, no RHI); game-thread only.
  *
  * @see UVoxelWorldComponent::AdvanceCrossfades
@@ -46,7 +50,8 @@ public:
 
 	/**
 	 * Start a fade, or restart one already running (a resubmit during a fade). A restart keeps
-	 * the entry and resets its clock; bHold applies to the restarted fade.
+	 * the entry and resets its clock; bHold applies to the restarted fade. Restarting an appearance
+	 * turns it into a swap crossfade.
 	 *
 	 * @param Key        Interior or seam bucket key.
 	 * @param NowSeconds Current time.
@@ -55,6 +60,33 @@ public:
 	 *         caller should swap instantly instead (fade MIDs are pooled but not free).
 	 */
 	bool Start(const FIntVector4& Key, double NowSeconds, bool bHold);
+
+	/**
+	 * Start a first-appearance fade (R24 P3): the key has no previous mesh, and its first one fades in
+	 * from nothing (dithered out at alpha 0, solid at 1). A held appearance stays invisible until
+	 * Release. Refused inside the appear distance, so geometry near the viewer appears at once.
+	 *
+	 * @param Key              Interior or seam bucket key.
+	 * @param NowSeconds       Current time.
+	 * @param bHold            Start held at alpha 0 (invisible) until Release.
+	 * @param DistanceToViewer Distance from the viewer to the nearest point of the geometry's chunk cell.
+	 * @return False when refused (inside the appear distance, the key already fades, or MaxConcurrent
+	 *         fades are running): the caller shows the mesh at once.
+	 */
+	bool StartAppear(const FIntVector4& Key, double NowSeconds, bool bHold, double DistanceToViewer);
+
+	/**
+	 * True if geometry this far from the viewer may fade in (see StartAppear).
+	 * @param DistanceToViewer Distance from the viewer to the nearest point of the geometry's chunk cell.
+	 */
+	bool PassesAppearGate(double DistanceToViewer) const { return AppearMinDistance >= 0.0 && DistanceToViewer >= AppearMinDistance; }
+
+	/** Nearest distance at which new geometry fades in instead of appearing at once (< 0 = never). Default 7000. */
+	void SetAppearMinDistance(double InMinDistance) { AppearMinDistance = InMinDistance; }
+	double GetAppearMinDistance() const { return AppearMinDistance; }
+
+	/** True while the key fades in from nothing (an appearance not yet complete, held or running). */
+	bool IsAppearing(const FIntVector4& Key) const { const FEntry* E = Entries.Find(Key); return E && E->bAppear; }
 
 	/**
 	 * Release a held fade: it starts fading from alpha 0 now.
@@ -105,8 +137,11 @@ private:
 		/** When the current hold began (failsafe timeout reference). */
 		double HeldSinceSeconds = 0.0;
 		bool bHeld = false;
+		/** Fading in from nothing (no previous mesh), see StartAppear. */
+		bool bAppear = false;
 	};
 
 	TMap<FIntVector4, FEntry> Entries;
 	int32 MaxConcurrent = 512;
+	double AppearMinDistance = 7000.0;
 };

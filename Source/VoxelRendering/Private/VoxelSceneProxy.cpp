@@ -342,8 +342,9 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	// chunks, 500 was routinely exhausted by near geometry and far seams never rendered.
 	constexpr int32 MaxMeshBatchesPerFrame = 2000;
 
-	// Crossfade lookups only happen while at least one chunk is actually transitioning
-	const bool bAnyFades = ChunkPreviousMeshes.Num() > 0 && ChunkFadeStates.Num() > 0;
+	// Crossfade lookups only happen while at least one chunk is actually transitioning (a swap with a
+	// retained Previous mesh, or an appearance, which has none)
+	const bool bAnyFades = ChunkFadeStates.Num() > 0;
 
 	// Process each view
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
@@ -426,6 +427,8 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			// (FadeInvert), so every pixel is covered by exactly one of the two surfaces.
 			// Fading requires BOTH the previous mesh set and the attached fade state — any
 			// other combination renders the current mesh with the shared material as before.
+			// The exception is an appearance (R24 P3): no previous mesh, the current one alone
+			// dithers in from nothing.
 			// See Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §5.
 			const FVoxelChunkFadeState* FadeState = nullptr;
 			const FVoxelChunkPreviousMesh* PreviousMesh = nullptr;
@@ -443,6 +446,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				&& PreviousMesh->RenderData.IndexCount >= 3
 				&& PreviousMesh->VertexFactory.IsValid()
 				&& PreviousMesh->IndexBuffer.IsValid();
+			const bool bAppearing = !bFading && FadeState && FadeState->bAppear && FadeState->FadeInProxy;
 
 			if (bFading)
 			{
@@ -481,7 +485,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			// Allocate mesh batch
 			FMeshBatch& MeshBatch = Collector.AllocateMesh();
 			MeshBatch.VertexFactory = VertexFactoryPtr->Get();
-			MeshBatch.MaterialRenderProxy = bFading ? FadeState->FadeInProxy : MaterialProxy;
+			MeshBatch.MaterialRenderProxy = (bFading || bAppearing) ? FadeState->FadeInProxy : MaterialProxy;
 			MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
 			MeshBatch.bDisableBackfaceCulling = false;
 			MeshBatch.Type = PT_TriangleList;
@@ -662,9 +666,10 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					continue;
 				}
 
+				// A crossfade has both MIDs; an appearance (R24 P3) has only the fade-in one.
 				const FVoxelChunkFadeState* FadeState = bAnySeamFades ? SeamFadeStates.Find(SeamKey) : nullptr;
-				const bool bFading = FadeState && FadeState->FadeInProxy && FadeState->FadeOutProxy;
-				if (bFading)
+				const bool bFading = FadeState && FadeState->FadeInProxy && (FadeState->FadeOutProxy || FadeState->bAppear);
+				if (bFading && FadeState->FadeOutProxy)
 				{
 					const FVoxelChunkPreviousMesh* Previous = SeamPreviousMeshes.Find(SeamKey);
 					if (IsDrawablePrevious(Previous))
@@ -896,6 +901,12 @@ void FVoxelSceneProxy::RetireOrReleaseChunk_AssumesLocked(const FIntVector& Chun
 	// releasing Previous here would change the visible surface in the middle of the hold.
 	const FVoxelChunkFadeState* HeldFade = bMoveToPrevious ? ChunkFadeStates.Find(ChunkCoord) : nullptr;
 	const bool bKeepPrevious = HeldFade && HeldFade->bHeld && ChunkPreviousMeshes.Contains(ChunkCoord);
+
+	// An appearance has nothing to fade from: the replaced mesh goes, the new one continues the fade-in.
+	if (HeldFade && HeldFade->bAppear)
+	{
+		bMoveToPrevious = false;
+	}
 
 	// Otherwise cap at one retained generation: any older Previous goes now, whatever happens next.
 	if (!bKeepPrevious)
@@ -1503,7 +1514,7 @@ void FVoxelSceneProxy::SetFadeMaterial_RenderThread(UMaterialInterface* InMateri
 	FadeMaterialRelevance = InRelevance;
 }
 
-void FVoxelSceneProxy::SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld)
+void FVoxelSceneProxy::SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld, bool bAppear)
 {
 	check(IsInRenderingThread());
 
@@ -1514,6 +1525,7 @@ void FVoxelSceneProxy::SetChunkFadeState_RenderThread(const FIntVector& ChunkCoo
 	FadeState.FadeInProxy = InFadeInProxy;
 	FadeState.FadeOutProxy = InFadeOutProxy;
 	FadeState.bHeld = bHeld;
+	FadeState.bAppear = bAppear;
 }
 
 void FVoxelSceneProxy::ReleaseFadeHolds_RenderThread(const TArray<FIntVector4>& Keys)
@@ -2052,6 +2064,12 @@ void FVoxelSceneProxy::RetireOrReleaseSeam_AssumesLocked(const FVoxelSeamMeshKey
 	// Seams add one case: a bucket that is fading out to nothing has a Previous and no current, and
 	// a new bucket arriving for it keeps that remnant as the outgoing half of the restarted fade.
 	const FVoxelChunkFadeState* HeldFade = bMoveToPrevious ? SeamFadeStates.Find(Key) : nullptr;
+	// An appearance has nothing to fade from: the replaced bucket goes, the new one continues the fade-in.
+	if (HeldFade && HeldFade->bAppear)
+	{
+		bMoveToPrevious = false;
+		HeldFade = nullptr;
+	}
 	const bool bHasPrevious = SeamPreviousMeshes.Contains(Key);
 	const bool bKeepPrevious = bHasPrevious && bMoveToPrevious
 		&& ((HeldFade && HeldFade->bHeld) || !SeamRenderData.Contains(Key));
@@ -2172,7 +2190,7 @@ void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
 }
 
 void FVoxelSceneProxy::SetSeamFadeState_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis,
-	const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld)
+	const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld, bool bAppear)
 {
 	check(IsInRenderingThread());
 
@@ -2183,6 +2201,7 @@ void FVoxelSceneProxy::SetSeamFadeState_RenderThread(const FIntVector& OwnerChun
 	FadeState.FadeInProxy = InFadeInProxy;
 	FadeState.FadeOutProxy = InFadeOutProxy;
 	FadeState.bHeld = bHeld;
+	FadeState.bAppear = bAppear;
 }
 
 void FVoxelSceneProxy::UpdateSeamFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector4, float>>& Alphas)

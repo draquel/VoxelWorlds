@@ -273,7 +273,8 @@ public:
 	/**
 	 * Seconds until an owner's seam bucket finishes the crossfade it is running (0 when it is not
 	 * fading, is held, or this renderer does not crossfade). A bucket replaced mid-fade loses the
-	 * mesh it was fading out of, so the seam pipeline defers a resubmit until this reaches 0.
+	 * mesh it was fading out of, so the seam pipeline defers a resubmit until this reaches 0. A
+	 * bucket fading in from nothing (R24 P3) counts as fading too.
 	 *
 	 * @param OwnerChunkCoord Seam bucket owner
 	 * @return Remaining fade time in seconds
@@ -281,6 +282,31 @@ public:
 	virtual float GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
 	{
 		return 0.0f;
+	}
+
+	/**
+	 * Tell the renderer where the streaming viewer is (sent every tick). A renderer that fades new
+	 * chunks and seam buckets in from nothing (R24 P3) does so only beyond a distance from it, so
+	 * nothing near the player turns see-through.
+	 *
+	 * @param ViewerPosition World-space viewer position
+	 */
+	virtual void SetViewerPosition(const FVector& ViewerPosition)
+	{
+		// Default: no-op (renderer doesn't fade new geometry in)
+	}
+
+	/**
+	 * True if a first mesh submitted for this chunk now would fade in from nothing (R24 P3). The
+	 * chunk manager then holds it (SetChunkFadeHold) until its ready seams land, so the interior and
+	 * its seams fade in together.
+	 *
+	 * @param ChunkCoord Chunk about to receive its first mesh
+	 * @return True if its appearance would fade
+	 */
+	virtual bool WillFadeInChunk(const FIntVector& ChunkCoord) const
+	{
+		return false;
 	}
 
 	/**

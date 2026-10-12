@@ -52,6 +52,21 @@ static TAutoConsoleVariable<int32> CVarVoxelMeshFadeMaxConcurrent(
 	TEXT("the fade MID pools grow with this number."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelMeshFadeAppear(
+	TEXT("voxel.MeshFade.Appear"),
+	1,
+	TEXT("Fade new chunks and new seam buckets in from nothing instead of popping them in (R24 P3), beyond\n")
+	TEXT("voxel.MeshFade.AppearMinDistance: 1 = on (default), 0 = they appear at once (for A/B). Requires voxel.MeshFade\n")
+	TEXT("(and voxel.MeshFade.Seams for seam buckets)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarVoxelMeshFadeAppearMinDistance(
+	TEXT("voxel.MeshFade.AppearMinDistance"),
+	7000.0f,
+	TEXT("Nearest distance (uu, viewer to the closest point of the chunk cell) at which new geometry fades in. Nearer\n")
+	TEXT("geometry appears at once, so nothing near the player turns briefly see-through (default 7000, the LOD 0 band edge)."),
+	ECVF_Default);
+
 /** Failsafe for a fade hold nobody releases (the chunk manager's own cap, voxel.MeshFade.SeamHoldMs, is 1 s). */
 static constexpr double VoxelFadeHoldFailsafeSeconds = 3.0;
 
@@ -301,11 +316,11 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& G
 	CachedTriangleCount += GPUData.IndexCount / 3;
 	CachedGPUMemory += GPUData.GetGPUMemoryUsage();
 
-	// Mesh replacement -> crossfade (decided here on the game thread; the flag travels with
-	// the swap so game and render side can never disagree about it). The fade-state attach is
-	// enqueued BEFORE the swap so a held fade's flag is in place when the swap lands.
+	// Mesh replacement -> crossfade, first mesh -> appearance fade (decided here on the game thread;
+	// the flag travels with the swap so game and render side can never disagree about it). The
+	// fade-state attach is enqueued BEFORE the swap so a held fade's flag is in place when the swap lands.
 	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
-	const bool bCrossfade = bChunkExisted && CanCrossfade() && StartFade(FadeKey);
+	const bool bCrossfade = StartChunkMeshFade(FadeKey, bChunkExisted);
 	if (!bCrossfade && ActiveFades.Contains(FadeKey))
 	{
 		// Mesh replaced without fading (e.g. kill-switch flipped mid-fade) — drop the stale fade
@@ -370,11 +385,11 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 	// Calculate chunk world position (includes WorldOrigin offset)
 	FVector ChunkWorldPos = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 
-	// Mesh replacement -> crossfade. The flag rides the pending add into the batched swap; the
-	// fade-state attach (StartFade) lands BEFORE the flush, so a held fade's flag is in place when
-	// the swap retires the old mesh.
+	// Mesh replacement -> crossfade, first mesh -> appearance fade. The flag rides the pending add
+	// into the batched swap; the fade-state attach lands BEFORE the flush, so a held fade's flag is
+	// in place when the swap retires the old mesh.
 	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
-	const bool bCrossfade = bChunkExisted && CanCrossfade() && StartFade(FadeKey);
+	const bool bCrossfade = StartChunkMeshFade(FadeKey, bChunkExisted);
 
 	// Queue for batched submission instead of immediate render command
 	FPendingChunkAdd PendingAdd;
@@ -587,14 +602,31 @@ void UVoxelWorldComponent::UpdateSeamMeshFromCPUData(
 	const bool bExisted = (SlotMask & SlotBit) != 0;
 	SlotMask |= SlotBit;
 
-	// Crossfade a replaced bucket like a chunk swap (R24). A NEW bucket fades in too when its owner
-	// is held by an LOD transition: it belongs to the incoming surface and must stay hidden until the
-	// transition releases, then fade in with the interior it meets. Otherwise new buckets appear at
-	// once (frontier seams are far from the player; fading them in is out of scope here).
+	// Crossfade a replaced bucket like a chunk swap (R24). A NEW bucket fades in from nothing: always
+	// when its owner is held by a transition (it belongs to the incoming surface and must stay hidden
+	// until the transition releases, then fade in with the interior it meets), otherwise when it lies
+	// beyond voxel.MeshFade.AppearMinDistance (R24 P3: frontier seams stop popping in). A bucket that is
+	// still appearing keeps fading in on the same alpha, the new merge replacing it in place.
 	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Axis);
-	const bool bFade = bCrossfade && CanCrossfadeSeams()
-		&& (bExisted || SeamFadeHolds.Contains(OwnerChunkCoord))
-		&& StartFade(FadeKey);
+	const bool bOwnerHeld = SeamFadeHolds.Contains(OwnerChunkCoord);
+	bool bFade = false;
+	if (bCrossfade && CanCrossfadeSeams())
+	{
+		if (bExisted)
+		{
+			bFade = FadeScheduler.IsAppearing(FadeKey) || StartFade(FadeKey);
+		}
+		else if (ActiveFades.Contains(FadeKey))
+		{
+			// The slot's previous bucket is still fading out to nothing. A held owner keeps that remnant
+			// as the outgoing half of the restarted fade; otherwise the new bucket replaces it at once.
+			bFade = bOwnerHeld && StartFade(FadeKey);
+		}
+		else
+		{
+			bFade = StartAppearFade(FadeKey, /*bBypassGate*/ bOwnerHeld);
+		}
+	}
 	if (!bFade && ActiveFades.Contains(FadeKey))
 	{
 		CancelFade(FadeKey, /*bClearRenderState=*/true);
@@ -629,9 +661,10 @@ void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uin
 	}
 
 	// Fade to nothing (R24): a seam that dissolves during a fade-enabled rebuild dithers out with
-	// the surface it belonged to instead of vanishing on the spot.
+	// the surface it belonged to instead of vanishing on the spot. A bucket still appearing just goes
+	// (it is not fully shown; fading it out would first snap it to solid).
 	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Axis);
-	const bool bFade = bFadeOut && bExisted && CanCrossfadeSeams() && StartFade(FadeKey);
+	const bool bFade = bFadeOut && bExisted && CanCrossfadeSeams() && !FadeScheduler.IsAppearing(FadeKey) && StartFade(FadeKey);
 	if (!bFade && ActiveFades.Contains(FadeKey))
 	{
 		// The removal command below releases the proxy-side fade state with the bucket.
@@ -783,6 +816,132 @@ bool UVoxelWorldComponent::CanCrossfade() const
 bool UVoxelWorldComponent::CanCrossfadeSeams() const
 {
 	return CVarVoxelMeshFadeSeams.GetValueOnGameThread() != 0 && CanCrossfade();
+}
+
+void UVoxelWorldComponent::SetFadeViewerPosition(const FVector& ViewerPosition)
+{
+	FadeViewerPosition = ViewerPosition;
+	bHasFadeViewer = true;
+}
+
+/** voxel.MeshFade.AppearMinDistance, never negative (the cvar voxel.MeshFade.Appear is the off switch). */
+static double GetVoxelAppearMinDistance()
+{
+	return FMath::Max(0.0, static_cast<double>(CVarVoxelMeshFadeAppearMinDistance.GetValueOnGameThread()));
+}
+
+double UVoxelWorldComponent::GetFadeViewerDistance(const FIntVector& ChunkCoord) const
+{
+	// Nearest point of the chunk's cell: a seam bucket lies on its owner's max faces, so the owner's
+	// cell bounds it from below too. Nothing inside the gate ever fades, wherever its vertices are.
+	const FVector CellMin = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
+	const FBox Cell(CellMin, CellMin + FVector(ChunkWorldSize));
+	return FMath::Sqrt(Cell.ComputeSquaredDistanceToPoint(FadeViewerPosition));
+}
+
+bool UVoxelWorldComponent::WillFadeInChunk(const FIntVector& ChunkCoord) const
+{
+	if (!bHasFadeViewer || CVarVoxelMeshFadeAppear.GetValueOnGameThread() == 0 || !CanCrossfade() || IsChunkLoaded(ChunkCoord))
+	{
+		return false;
+	}
+	const FIntVector4 Key = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
+	return !FadeScheduler.Contains(Key)
+		&& FadeScheduler.Num() < CVarVoxelMeshFadeMaxConcurrent.GetValueOnGameThread()
+		&& GetFadeViewerDistance(ChunkCoord) >= GetVoxelAppearMinDistance();
+}
+
+bool UVoxelWorldComponent::StartChunkMeshFade(const FIntVector4& Key, bool bMeshExisted)
+{
+	if (!CanCrossfade())
+	{
+		return false;
+	}
+	if (bMeshExisted)
+	{
+		// A chunk still appearing keeps fading in: the new mesh replaces the half-shown one in place,
+		// on the same alpha (there is nothing behind it to crossfade from).
+		return FadeScheduler.IsAppearing(Key) || StartFade(Key);
+	}
+	return StartAppearFade(Key, /*bBypassGate*/ false);
+}
+
+bool UVoxelWorldComponent::StartAppearFade(const FIntVector4& Key, bool bBypassGate)
+{
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	UWorld* World = GetWorld();
+	if (!Proxy || !World)
+	{
+		return false;
+	}
+
+	const bool bSeam = FVoxelCrossfadeScheduler::IsSeamKey(Key);
+	const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
+	if (bSeam ? !CanCrossfadeSeams() : !CanCrossfade())
+	{
+		return false;
+	}
+
+	// A bucket joining a held transition fades in with it wherever it is (it must stay hidden until the
+	// release). Anything else needs the appear switch, a known viewer and the distance gate.
+	double Distance = TNumericLimits<double>::Max();
+	if (!bBypassGate)
+	{
+		if (CVarVoxelMeshFadeAppear.GetValueOnGameThread() == 0 || !bHasFadeViewer)
+		{
+			return false;
+		}
+		Distance = GetFadeViewerDistance(Coord);
+	}
+
+	const bool bHold = bSeam ? SeamFadeHolds.Contains(Coord) : ChunkFadeHolds.Contains(Coord);
+	FadeScheduler.SetMaxConcurrent(CVarVoxelMeshFadeMaxConcurrent.GetValueOnGameThread());
+	FadeScheduler.SetAppearMinDistance(GetVoxelAppearMinDistance());
+	if (!FadeScheduler.StartAppear(Key, World->GetRealTimeSeconds(), bHold, Distance))
+	{
+		return false;
+	}
+
+	// Only the fade-in MID: there is no previous mesh to dither out (a later swap acquires the other).
+	FActiveChunkFade& Fade = ActiveFades.FindOrAdd(Key);
+	if (!Fade.InMID)
+	{
+		Fade.InMID = AcquireFadeMID(/*bInvert=*/false);
+	}
+	if (!Fade.InMID)
+	{
+		UE_LOG(LogVoxelRendering, Warning,
+			TEXT("StartAppearFade: failed to create a fade MID for %s %s — showing it at once"),
+			bSeam ? TEXT("seam bucket") : TEXT("chunk"), *Coord.ToString());
+		CancelFade(Key, /*bClearRenderState=*/true);
+		return false;
+	}
+	Fade.InMID->SetScalarParameterValue(VoxelFadeAlphaParamName, 0.0f);
+	const FMaterialRenderProxy* FadeInProxy = Fade.InMID->GetRenderProxy();
+
+	if (bSeam)
+	{
+		const uint8 Slot = static_cast<uint8>(Key.W);
+		ENQUEUE_RENDER_COMMAND(AttachVoxelSeamAppearFade)(
+			[Proxy, Coord, Slot, FadeInProxy, bHold](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->SetSeamFadeState_RenderThread(Coord, Slot, FadeInProxy, nullptr, bHold, /*bAppear*/ true);
+			}
+		);
+	}
+	else
+	{
+		ENQUEUE_RENDER_COMMAND(AttachVoxelChunkAppearFade)(
+			[Proxy, Coord, FadeInProxy, bHold](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->SetChunkFadeState_RenderThread(Coord, FadeInProxy, nullptr, bHold, /*bAppear*/ true);
+			}
+		);
+	}
+
+	++FadeAppearCounts[bSeam ? 1 : 0];
+	SetComponentTickEnabled(true);
+	return true;
 }
 
 float UVoxelWorldComponent::GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
