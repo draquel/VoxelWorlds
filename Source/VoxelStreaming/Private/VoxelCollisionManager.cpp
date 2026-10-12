@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelCollisionManager.h"
+#include "VoxelBoundedDrain.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelChunkManager.h"
 #include "VoxelCoordinates.h"
@@ -895,13 +896,14 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 
 void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 {
-	FAsyncCollisionResult Result;
-	int32 AppliedCount = 0;
-
 	// Tier 1: cvar-tunable applies-per-frame (was a hardcoded 2 — a throughput bottleneck during
 	// sustained traversal). Clamped so a bad value can't stall the game thread.
 	const int32 MaxApplies = FMath::Clamp(CVarCollisionMaxApplies.GetValueOnGameThread(), 1, 16);
-	while (CompletedCollisionQueue.Dequeue(Result) && AppliedCount < MaxApplies)
+
+	// Bounded drain: the budget is checked before each dequeue, so a cook beyond it stays queued for
+	// the next tick. The old `while (Dequeue(Result) && Applied < Max)` popped one extra result per
+	// capped tick and dropped it, leaving that chunk marked as cooking with no result coming (R23b).
+	VoxelDrainBounded(CompletedCollisionQueue, MaxApplies, [this](FAsyncCollisionResult& Result) -> bool
 	{
 		// Remove from in-progress tracking
 		AsyncCollisionInProgress.Remove(Result.ChunkCoord);
@@ -913,26 +915,26 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 			// Chunk was unloaded while we were cooking — discard result
 			UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) async collision discarded - chunk removed"),
 				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
-			continue;
+			return false;
 		}
 
 		if (Result.bSuccess && Result.bEmpty)
 		{
 			// Cheap (no physics registration): does not count against the per-frame apply budget.
 			ApplyEmptyCollisionResult(Result.ChunkCoord);
+			return false;
 		}
-		else if (Result.bSuccess)
+		if (Result.bSuccess)
 		{
 			ApplyCollisionResult(Result);
-			++AppliedCount;
+			return true;
 		}
-		else
-		{
-			UE_LOG(LogVoxelCollision, Warning, TEXT("Chunk (%d,%d,%d) async collision cooking failed"),
-				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
-			Data->bIsCooking = false;
-		}
-	}
+
+		UE_LOG(LogVoxelCollision, Warning, TEXT("Chunk (%d,%d,%d) async collision cooking failed"),
+			Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+		Data->bIsCooking = false;
+		return false;
+	});
 }
 
 void UVoxelCollisionManager::BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, TArray<Chaos::TVector<int32, 3>>& OutTriangles)

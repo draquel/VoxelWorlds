@@ -226,6 +226,9 @@ void FVoxelSeamRegistry::Reset()
 	IntervalExamined = IntervalRequeuedNotResident = IntervalRequeuedInFlight = 0;
 	IntervalScheduled = IntervalCompleted = 0;
 	IntervalRescheduledWithin1s = IntervalDroppedInFlight = IntervalDroppedParticipant = 0;
+	IntervalRejectedDepartedOwner = 0;
+	// NextResidencyEpoch is intentionally NOT reset: an in-flight result from before the reset must
+	// never match a residency handed out after it.
 	NearScheduleWindow.Reset();
 	FarScheduleWindow.Reset();
 	NearScanWindow.Reset();
@@ -285,6 +288,12 @@ void FVoxelSeamRegistry::RecordSeamJobDropped(bool bOlderJobInFlight)
 	}
 }
 
+void FVoxelSeamRegistry::RecordSeamResultRejected()
+{
+	++IntervalRejectedDepartedOwner;
+	++TotalSeamResultsRejected;
+}
+
 void FVoxelSeamRegistry::RecordSeamCompleted(double DirtiedAtSeconds, double ReadyAtSeconds, double ScheduledAtSeconds, bool bNear,
 	double DispatchedAtSeconds, double WorkerMs)
 {
@@ -335,7 +344,9 @@ FVoxelSeamLatencyStats FVoxelSeamRegistry::TakeLatencyStats(const FIntVector& Vi
 	S.RescheduledWithin1s = IntervalRescheduledWithin1s;
 	S.DroppedInFlight = IntervalDroppedInFlight;
 	S.DroppedParticipant = IntervalDroppedParticipant;
+	S.RejectedDepartedOwner = IntervalRejectedDepartedOwner;
 	IntervalRescheduledWithin1s = IntervalDroppedInFlight = IntervalDroppedParticipant = 0;
+	IntervalRejectedDepartedOwner = 0;
 
 	S.NearScheduleN = NearScheduleWindow.Count;
 	NearScheduleWindow.Percentiles(S.NearScheduleP50Ms, S.NearScheduleP95Ms, S.NearScheduleMaxMs);
@@ -361,6 +372,27 @@ FVoxelSeamLatencyStats FVoxelSeamRegistry::TakeLatencyStats(const FIntVector& Vi
 }
 
 // ==================== Internal helpers ====================
+
+uint32 FVoxelSeamRegistry::AllocateResidencyEpoch()
+{
+	const uint32 Epoch = NextResidencyEpoch++;
+	if (NextResidencyEpoch == 0)
+	{
+		NextResidencyEpoch = 1; // 0 is reserved for "not registered" (wraps after ~4 billion loads)
+	}
+	return Epoch;
+}
+
+FVoxelSeamRegistry::FChunkMirrorState& FVoxelSeamRegistry::FindOrAddMirror(const FIntVector& ChunkCoord)
+{
+	if (FChunkMirrorState* Existing = ChunkMirror.Find(ChunkCoord))
+	{
+		return *Existing;
+	}
+	FChunkMirrorState& Added = ChunkMirror.Add(ChunkCoord);
+	Added.ResidencyEpoch = AllocateResidencyEpoch();
+	return Added;
+}
 
 FVoxelSeamState& FVoxelSeamRegistry::FindOrCreateSeam(const FVoxelSeamKey& Key)
 {
@@ -470,6 +502,10 @@ void FVoxelSeamRegistry::RegisterChunk(const FIntVector& ChunkCoord, uint32 Cont
 	FChunkMirrorState& M = ChunkMirror.FindOrAdd(ChunkCoord);
 	M.ContentVersion = ContentVersion;
 	M.MeshedLODLevel = MeshedLODLevel;
+	// Every registration starts a new residency: results scheduled against an earlier one (an owner
+	// that unloaded and came back, or whose data was replaced) are rejected at completion. Its
+	// incident seams are re-dirtied just below, so the new residency rebuilds them.
+	M.ResidencyEpoch = AllocateResidencyEpoch();
 	// A newly resident participant restales every boundary it touches.
 	DirtyIncidentSeams(ChunkCoord);
 }
@@ -480,7 +516,7 @@ void FVoxelSeamRegistry::UpdateChunkContent(const FIntVector& ChunkCoord, uint32
 	{
 		return;
 	}
-	FChunkMirrorState& M = ChunkMirror.FindOrAdd(ChunkCoord);
+	FChunkMirrorState& M = FindOrAddMirror(ChunkCoord);
 	M.ContentVersion = ContentVersion;
 	DirtyIncidentSeams(ChunkCoord);
 }
@@ -491,7 +527,7 @@ void FVoxelSeamRegistry::UpdateChunkRenderedLOD(const FIntVector& ChunkCoord, in
 	{
 		return;
 	}
-	FChunkMirrorState& M = ChunkMirror.FindOrAdd(ChunkCoord);
+	FChunkMirrorState& M = FindOrAddMirror(ChunkCoord);
 	if (M.MeshedLODLevel != MeshedLODLevel)
 	{
 		M.MeshedLODLevel = MeshedLODLevel;
@@ -539,6 +575,19 @@ void FVoxelSeamRegistry::UnregisterChunk(const FIntVector& ChunkCoord)
 			RemoveSeam(Key);
 		}
 	}
+}
+
+// ==================== Residency epochs ====================
+
+uint32 FVoxelSeamRegistry::GetResidencyEpoch(const FIntVector& ChunkCoord) const
+{
+	const FChunkMirrorState* M = ChunkMirror.Find(ChunkCoord);
+	return M ? M->ResidencyEpoch : 0;
+}
+
+bool FVoxelSeamRegistry::IsResidencyCurrent(const FIntVector& ChunkCoord, uint32 Epoch) const
+{
+	return Epoch != 0 && GetResidencyEpoch(ChunkCoord) == Epoch;
 }
 
 // ==================== Per-tick scheduler ====================
@@ -643,6 +692,9 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 		Job.Key = Key;
 		Job.Priority = ComputeSeamPriority(Key.Owner, ViewerChunk, NearChunkRadius);
 		Job.Participants = Seam->Participants;
+		// The owner is participant 0 and resident (checked above); its epoch ties the result to
+		// this residency.
+		Job.OwnerResidencyEpoch = ChunkMirror.FindChecked(Key.Owner).ResidencyEpoch;
 		Job.DirtiedAtSeconds = Seam->DirtiedAtSeconds;
 		Job.ReadyAtSeconds = Seam->ReadyAtSeconds;
 		Job.ScheduledAtSeconds = ScheduledAt;
@@ -764,6 +816,7 @@ FVoxelSeamRegistryStats FVoxelSeamRegistry::GetStats() const
 	S.TotalSeamsCreated = TotalSeamsCreated;
 	S.TotalSeamJobsScheduled = TotalSeamJobsScheduled;
 	S.TotalSeamJobsProcessed = TotalSeamJobsProcessed;
+	S.TotalSeamResultsRejected = TotalSeamResultsRejected;
 	return S;
 }
 

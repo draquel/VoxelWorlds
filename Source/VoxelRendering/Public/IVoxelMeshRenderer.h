@@ -263,6 +263,17 @@ public:
 	}
 
 	/**
+	 * List the owners that currently have at least one seam bucket (diagnostics: the chunk
+	 * manager's residency audit flags buckets whose owner is no longer tracked).
+	 *
+	 * @param OutOwners Receives the owner chunk coordinates (reset first; empty when unsupported)
+	 */
+	virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const
+	{
+		OutOwners.Reset(); // Default: renderer doesn't support seam meshes
+	}
+
+	/**
 	 * Set material atlas for texture lookup.
 	 *
 	 * The material atlas defines how MaterialIDs map to atlas positions

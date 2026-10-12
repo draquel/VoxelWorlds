@@ -3,6 +3,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelStreaming.h"
 #include "VoxelSeamRegistry.h"
+#include "VoxelBoundedDrain.h"
 #include "VoxelNeighborSliceExtraction.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
@@ -128,6 +129,22 @@ static TAutoConsoleVariable<int32> CVarStreamMaxPendingMeshes(
 	0,
 	TEXT("Override max meshes awaiting render submit before mesh dispatch stalls. 0 = use "
 	     "configuration/-VoxelMaxPending. Clamped [2,64]. Raise together with MaxMeshDispatchPerFrame."),
+	ECVF_Default);
+
+// ==================== Stranded-job safety net (R23c) ====================
+// An async generation or mesh job whose result never comes back leaves its chunk in Generating /
+// Meshing for the rest of the session: it never unloads (only Loaded chunks unload), never remeshes
+// (every later request for it is skipped while it is "in flight"), and holds one async slot. That is
+// how a result dropped by the old drain loop produced a terrain chunk that stayed visible wherever
+// the player went (VOXEL_QA_FOLLOWUPS_PLAN.md R23). The drains are fixed; this watchdog makes sure
+// any other lost request (a GPU readback, a mesher bug) cannot strand a chunk either.
+static TAutoConsoleVariable<float> CVarStreamMeshStuckSeconds(
+	TEXT("voxel.Stream.MeshStuckSeconds"),
+	10.0f,
+	TEXT("Seconds an async chunk mesh or generation job may stay in flight before the watchdog logs a "
+	     "warning, frees its slot and re-queues the chunk (a late result is then discarded). Must stay "
+	     "well above real dispatch-to-complete times, including hitches and GPU readback queues; "
+	     "voxel.Stream.AuditResidency reports the worst seen this session. 0 = disable the watchdog."),
 	ECVF_Default);
 
 // ==================== Neighbor-remesh coalescing ====================
@@ -625,6 +642,8 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	Timing.MeshLaunchMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
 	SubStart = SubEnd;
 	ProcessCompletedAsyncMeshes();
+	// After both drains, so a result that landed this tick is never mistaken for a stuck job.
+	CheckStuckAsyncJobs();
 	SubEnd = FPlatformTime::Seconds();
 	Timing.MeshApplyMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
 	Timing.MeshingMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
@@ -1722,7 +1741,17 @@ FString UVoxelChunkManager::GetDebugStats() const
 			S.ChunkCount, S.SeamCount, S.DirtyCount, S.JobQueueDepth);
 		Stats += FString::Printf(TEXT("Lifetime seams/scheduled/processed: %lld / %lld / %lld\n"),
 			S.TotalSeamsCreated, S.TotalSeamJobsScheduled, S.TotalSeamJobsProcessed);
+		Stats += FString::Printf(TEXT("Late results rejected (owner left): %lld\n"), S.TotalSeamResultsRejected);
 	}
+
+	// Async pipeline health (R23c): in-flight counts, worst dispatch->complete, watchdog re-queues.
+	Stats += TEXT("\n--- Async Jobs ---\n");
+	Stats += FString::Printf(TEXT("In flight gen/mesh/seam: %d / %d / %d\n"),
+		AsyncGenerationInProgress.Num(), AsyncMeshingInProgress.Num(), SeamJobsInFlight.Num());
+	Stats += FString::Printf(TEXT("Worst dispatch->complete gen/mesh: %.0f / %.0f ms\n"),
+		WorstGenerationAsyncSeconds * 1000.0, WorstMeshAsyncSeconds * 1000.0);
+	Stats += FString::Printf(TEXT("Stuck re-queues gen/mesh: %lld / %lld\n"),
+		TotalStuckGenerationRequeues, TotalStuckMeshRequeues);
 
 	if (LODStrategy)
 	{
@@ -1731,6 +1760,180 @@ FString UVoxelChunkManager::GetDebugStats() const
 	}
 
 	return Stats;
+}
+
+int32 UVoxelChunkManager::AuditResidency(FString& OutReport) const
+{
+	OutReport.Reset();
+	if (!bIsInitialized || !Configuration)
+	{
+		OutReport = TEXT("residency audit: chunk manager not initialized");
+		return 0;
+	}
+
+	static const TCHAR* StateNames[] = {
+		TEXT("Unloaded"), TEXT("PendingGeneration"), TEXT("Generating"), TEXT("PendingMeshing"),
+		TEXT("Meshing"), TEXT("Loaded"), TEXT("PendingUnload") };
+	constexpr int32 NumStates = UE_ARRAY_COUNT(StateNames);
+	static_assert(NumStates == static_cast<int32>(EChunkState::PendingUnload) + 1, "StateNames must cover EChunkState");
+	auto StateName = [](EChunkState State)
+	{
+		const int32 Index = static_cast<int32>(State);
+		return (Index >= 0 && Index < NumStates) ? StateNames[Index] : TEXT("?");
+	};
+
+	constexpr int32 MaxListed = 8;
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	auto DistanceToViewer = [this, ChunkWorldSize](const FIntVector& Coord)
+	{
+		const FVector Center = Configuration->WorldOrigin + FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+		return FVector::Dist(Center, CurrentViewerPosition);
+	};
+	auto ListFarthest = [&](TArray<TPair<float, FIntVector>>& Entries, const TCHAR* Label, TFunctionRef<FString(const FIntVector&)> Extra, FString& Out)
+	{
+		Entries.Sort([](const TPair<float, FIntVector>& A, const TPair<float, FIntVector>& B) { return A.Key > B.Key; });
+		for (int32 i = 0; i < FMath::Min(Entries.Num(), MaxListed); ++i)
+		{
+			const FIntVector& C = Entries[i].Value;
+			Out += FString::Printf(TEXT("\n  %s (%d,%d,%d) dist=%.0f%s"), Label, C.X, C.Y, C.Z, Entries[i].Key, *Extra(C));
+		}
+	};
+
+	FString Details;
+
+	// 1. Chunks the manager still tracks beyond the unload radius, by state.
+	int32 BeyondByState[NumStates] = {};
+	int32 BeyondTotal = 0;
+	const float UnloadDistance = LODStrategy ? LODStrategy->GetUnloadDistance() : -1.0f;
+	if (UnloadDistance > 0.0f)
+	{
+		TArray<TPair<float, FIntVector>> Beyond;
+		for (const TPair<FIntVector, FVoxelChunkState>& Pair : ChunkStates)
+		{
+			const float Distance = DistanceToViewer(Pair.Key);
+			if (Distance > UnloadDistance)
+			{
+				const int32 StateIndex = static_cast<int32>(Pair.Value.State);
+				if (StateIndex >= 0 && StateIndex < NumStates)
+				{
+					++BeyondByState[StateIndex];
+				}
+				++BeyondTotal;
+				Beyond.Emplace(Distance, Pair.Key);
+			}
+		}
+		ListFarthest(Beyond, TEXT("beyond-unload"), [this, &StateName](const FIntVector& C)
+		{
+			const FVoxelChunkState& S = ChunkStates.FindChecked(C);
+			return FString::Printf(TEXT(" state=%s edited=%d rendered=%d meshInFlight=%d genInFlight=%d"),
+				StateName(S.State),
+				(EditManager && EditManager->ChunkHasEdits(C)) ? 1 : 0,
+				(MeshRenderer && MeshRenderer->IsChunkLoaded(C)) ? 1 : 0,
+				AsyncMeshingInProgress.Contains(C) ? 1 : 0,
+				AsyncGenerationInProgress.Contains(C) ? 1 : 0);
+		}, Details);
+	}
+
+	// 2. Renderer chunks the manager no longer tracks (geometry with no owner to remove it).
+	int32 RenderOrphans = 0;
+	if (MeshRenderer)
+	{
+		TArray<FIntVector> RenderChunks;
+		MeshRenderer->GetLoadedChunks(RenderChunks);
+		TArray<TPair<float, FIntVector>> Orphans;
+		for (const FIntVector& C : RenderChunks)
+		{
+			if (!ChunkStates.Contains(C))
+			{
+				Orphans.Emplace(DistanceToViewer(C), C);
+			}
+		}
+		RenderOrphans = Orphans.Num();
+		ListFarthest(Orphans, TEXT("render-orphan"), [](const FIntVector&) { return FString(); }, Details);
+	}
+
+	// 3. Seam buckets whose owner is not tracked: the renderer's buckets (what is drawn) and the
+	// manager's per-owner slot store (what a later merge would resubmit). R23a's floating strips.
+	int32 SeamBucketOrphans = 0;
+	if (MeshRenderer)
+	{
+		TArray<FIntVector> SeamOwners;
+		MeshRenderer->GetSeamMeshOwners(SeamOwners);
+		TArray<TPair<float, FIntVector>> Orphans;
+		for (const FIntVector& C : SeamOwners)
+		{
+			if (!ChunkStates.Contains(C))
+			{
+				Orphans.Emplace(DistanceToViewer(C), C);
+			}
+		}
+		SeamBucketOrphans = Orphans.Num();
+		ListFarthest(Orphans, TEXT("seam-bucket-orphan"), [](const FIntVector&) { return FString(); }, Details);
+	}
+	int32 SeamSlotOrphans = 0;
+	{
+		TArray<TPair<float, FIntVector>> Orphans;
+		for (const TPair<FIntVector, FSeamOwnerSlots>& Pair : SeamOwnerSlots)
+		{
+			if (!ChunkStates.Contains(Pair.Key))
+			{
+				Orphans.Emplace(DistanceToViewer(Pair.Key), Pair.Key);
+			}
+		}
+		SeamSlotOrphans = Orphans.Num();
+		ListFarthest(Orphans, TEXT("seam-slot-orphan"), [](const FIntVector&) { return FString(); }, Details);
+	}
+
+	// 4. Async jobs in flight longer than the stuck threshold (the watchdog should have released them).
+	const double Now = FPlatformTime::Seconds();
+	const float StuckSeconds = CVarStreamMeshStuckSeconds.GetValueOnGameThread();
+	const double StuckThreshold = (StuckSeconds > 0.0f) ? StuckSeconds : 10.0;
+	auto CountStuck = [&](const TMap<FIntVector, FAsyncJobStamp>& InFlight, const TCHAR* Label) -> int32
+	{
+		int32 Count = 0;
+		for (const TPair<FIntVector, FAsyncJobStamp>& Pair : InFlight)
+		{
+			const double Age = Now - Pair.Value.DispatchedAtSeconds;
+			if (Age > StuckThreshold)
+			{
+				if (Count < MaxListed)
+				{
+					const FVoxelChunkState* S = ChunkStates.Find(Pair.Key);
+					Details += FString::Printf(TEXT("\n  %s (%d,%d,%d) age=%.1fs state=%s"), Label,
+						Pair.Key.X, Pair.Key.Y, Pair.Key.Z, Age, S ? StateName(S->State) : TEXT("untracked"));
+				}
+				++Count;
+			}
+		}
+		return Count;
+	};
+	const int32 StuckGen = CountStuck(AsyncGenerationInProgress, TEXT("stuck-gen"));
+	const int32 StuckMesh = CountStuck(AsyncMeshingInProgress, TEXT("stuck-mesh"));
+
+	const int32 Findings = BeyondTotal + RenderOrphans + SeamBucketOrphans + SeamSlotOrphans + StuckGen + StuckMesh;
+
+	FString ByState;
+	for (int32 i = 0; i < NumStates; ++i)
+	{
+		if (BeyondByState[i] > 0)
+		{
+			ByState += FString::Printf(TEXT(" %s=%d"), StateNames[i], BeyondByState[i]);
+		}
+	}
+	const int64 SeamRejected = SeamRegistry.IsValid() ? SeamRegistry->GetStats().TotalSeamResultsRejected : 0;
+	OutReport = FString::Printf(
+		TEXT("residency audit: findings=%d | beyondUnload=%d (radius %.0f)%s | renderOrphans=%d | seamBucketOrphans=%d seamSlotOrphans=%d")
+		TEXT(" | stuckJobs gen=%d mesh=%d (>%.1fs) | viewer=(%.0f,%.0f,%.0f) tracked=%d loaded=%d")
+		TEXT(" | inFlight gen=%d mesh=%d seam=%d | worst dispatch->complete gen=%.0fms mesh=%.0fms")
+		TEXT(" | stuckRequeues gen=%lld mesh=%lld | lateSeamResultsRejected=%lld"),
+		Findings, BeyondTotal, UnloadDistance, *ByState, RenderOrphans, SeamBucketOrphans, SeamSlotOrphans,
+		StuckGen, StuckMesh, StuckThreshold,
+		CurrentViewerPosition.X, CurrentViewerPosition.Y, CurrentViewerPosition.Z, ChunkStates.Num(), LoadedChunkCoords.Num(),
+		AsyncGenerationInProgress.Num(), AsyncMeshingInProgress.Num(), SeamJobsInFlight.Num(),
+		WorstGenerationAsyncSeconds * 1000.0, WorstMeshAsyncSeconds * 1000.0,
+		TotalStuckGenerationRequeues, TotalStuckMeshRequeues, SeamRejected);
+	OutReport += Details;
+	return Findings;
 }
 
 UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() const
@@ -2049,14 +2252,18 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 	// its vertical range and surface-slab culls derive from the ANALYTIC terrain, so a chunk holding
 	// a player build above the surface band never qualifies on its own. Left unloaded, its edits
 	// never generate/mesh and its incident seams can't schedule (participant not resident): build
-	// tops get cut off flat at the chunk boundary. Pin every edited chunk within the unload radius.
+	// tops get cut off flat at the chunk boundary. Pin-load every edited chunk within the LOAD
+	// radius (the view edge) — pinning out to the unload radius loaded an edited chunk on its own
+	// beyond the rest of the terrain (R23e). UpdateUnloadDecisions keeps a pinned chunk resident out
+	// to the unload radius, so the 1.0-1.2x band is hysteresis, as for every other chunk.
 	if (EditManager)
 	{
 		TArray<FIntVector> EditedChunks;
 		EditManager->GetEditedChunkCoords(EditedChunks);
 		if (EditedChunks.Num() > 0)
 		{
-			const float PinDistance = LODStrategy->GetUnloadDistance();
+			const float LoadDistance = LODStrategy->GetLoadDistance();
+			const float PinDistance = (LoadDistance > 0.0f) ? LoadDistance : LODStrategy->GetUnloadDistance();
 			const float ChunkWorldSize = Configuration->GetChunkWorldSize();
 			for (const FIntVector& Coord : EditedChunks)
 			{
@@ -2066,7 +2273,8 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 				}
 				const FVector ChunkCenter = Configuration->WorldOrigin
 					+ FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-				if (FVector::Dist(ChunkCenter, Context.ViewerPosition) > PinDistance)
+				const float PinCandidateDistance = FVector::Dist(ChunkCenter, Context.ViewerPosition);
+				if (PinCandidateDistance > PinDistance)
 				{
 					continue; // Too far — re-pins automatically when the viewer returns.
 				}
@@ -2089,8 +2297,8 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 				{
 					SetChunkState(Coord, EChunkState::PendingGeneration);
 					++ChunksAddedThisFrame;
-					UE_LOG(LogVoxelStreaming, Log, TEXT("Edit-pinned chunk (%d,%d,%d) queued for load (outside analytic streaming bounds)"),
-						Coord.X, Coord.Y, Coord.Z);
+					UE_LOG(LogVoxelStreaming, Log, TEXT("Edit-pinned chunk (%d,%d,%d) queued for load at %.0f uu (pin radius %.0f; outside analytic streaming bounds)"),
+						Coord.X, Coord.Y, Coord.Z, PinCandidateDistance, PinDistance);
 				}
 			}
 		}
@@ -2111,37 +2319,53 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 		return;
 	}
 
-	// Get chunks to unload (cheap operation - just iterates loaded chunks)
-	TArray<FIntVector> ChunksToUnload;
-	LODStrategy->GetChunksToUnload(ChunksToUnload, LoadedChunkCoords, Context);
+	// Every out-of-range chunk, farthest first (cheap operation - just iterates loaded chunks).
+	TArray<FIntVector> Candidates;
+	LODStrategy->GetChunksToUnload(Candidates, LoadedChunkCoords, Context);
+	if (Candidates.Num() == 0)
+	{
+		return;
+	}
 
-	// Add to unload queue with O(1) duplicate check
+	// Veto first, cap second (R23d): a candidate this manager refuses must not use up the per-frame
+	// budget, or a few refused chunks early in the loaded set's stable order would stop every later
+	// chunk from ever unloading.
 	const float EditPinDistance = LODStrategy->GetUnloadDistance();
 	const float ChunkWorldSize = Configuration ? Configuration->GetChunkWorldSize() : 0.0f;
+	auto CanUnload = [this, &Context, EditPinDistance, ChunkWorldSize](const FIntVector& ChunkCoord) -> bool
+	{
+		// Only settled chunks unload here: anything mid-pipeline finishes first, and PendingUnload
+		// chunks are already queued.
+		if (GetChunkState(ChunkCoord) != EChunkState::Loaded)
+		{
+			return false;
+		}
+
+		// Edit-pinned: the strategy's analytic culls (vertical band / surface slab) would evict a
+		// chunk that exists only because of its edit layer, immediately undoing the edit-pinned
+		// load in UpdateLoadDecisions — the two would flap load/unload forever. Keep edited chunks
+		// resident until they leave the distance-based unload radius.
+		if (EditManager && ChunkWorldSize > 0.0f && EditManager->ChunkHasEdits(ChunkCoord))
+		{
+			const FVector ChunkCenter = Configuration->WorldOrigin
+				+ FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+			if (FVector::Dist(ChunkCenter, Context.ViewerPosition) <= EditPinDistance)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+
+	TArray<FIntVector> ChunksToUnload;
+	IVoxelLODStrategy::SelectUnloadCandidates(Candidates, CanUnload, Context.MaxChunksToUnloadPerFrame, ChunksToUnload);
+
+	// Add to unload queue with O(1) duplicate check
 	for (const FIntVector& ChunkCoord : ChunksToUnload)
 	{
-		const EChunkState CurrentState = GetChunkState(ChunkCoord);
-
-		if (CurrentState == EChunkState::Loaded)
+		if (AddToUnloadQueue(ChunkCoord))
 		{
-			// Edit-pinned: the strategy's analytic culls (vertical band / surface slab) would evict a
-			// chunk that exists only because of its edit layer, immediately undoing the edit-pinned
-			// load above — the two would flap load/unload forever. Keep edited chunks resident until
-			// they leave the distance-based unload radius.
-			if (EditManager && ChunkWorldSize > 0.0f && EditManager->ChunkHasEdits(ChunkCoord))
-			{
-				const FVector ChunkCenter = Configuration->WorldOrigin
-					+ FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-				if (FVector::Dist(ChunkCenter, Context.ViewerPosition) <= EditPinDistance)
-				{
-					continue;
-				}
-			}
-
-			if (AddToUnloadQueue(ChunkCoord))
-			{
-				SetChunkState(ChunkCoord, EChunkState::PendingUnload);
-			}
+			SetChunkState(ChunkCoord, EChunkState::PendingUnload);
 		}
 	}
 }
@@ -2162,14 +2386,26 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 	const int32 MaxChunks = ResolveMaxLoadPerFrame();
 	int32 ProcessedCount = 0;
 
-	while (GenerationQueue.Num() > 0 && ProcessedCount < MaxChunks &&
+	// Requests for a chunk that still owns an in-flight generation slot, re-queued after the loop.
+	// Dropping them (the old behaviour) left the chunk in PendingGeneration with no queue entry for
+	// good. Unloads and the stuck-job watchdog release the slot, so this should not occur; it is a
+	// guard, bounded per frame so a queue of such requests cannot spin.
+	TArray<FChunkLODRequest> DeferredInFlight;
+	constexpr int32 MaxDeferredInFlight = 48;
+
+	while (GenerationQueue.Num() > 0 && ProcessedCount < MaxChunks && DeferredInFlight.Num() < MaxDeferredInFlight &&
 	       AsyncGenerationInProgress.Num() < EffectiveMaxAsyncGenerationTasks)
 	{
 		// Skip chunks already being generated asynchronously
 		if (AsyncGenerationInProgress.Contains(GenerationQueue.Last().ChunkCoord))
 		{
-			GenerationQueueSet.Remove(GenerationQueue.Last().ChunkCoord);
+			const FChunkLODRequest InFlightRequest = GenerationQueue.Last();
+			GenerationQueueSet.Remove(InFlightRequest.ChunkCoord);
 			GenerationQueue.Pop(EAllowShrinking::No);
+			if (GetChunkState(InFlightRequest.ChunkCoord) == EChunkState::PendingGeneration)
+			{
+				DeferredInFlight.Add(InFlightRequest);
+			}
 			continue;
 		}
 
@@ -2246,6 +2482,11 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		LaunchAsyncGeneration(Request, MoveTemp(GenRequest));
 
 		++ProcessedCount;
+	}
+
+	for (const FChunkLODRequest& Deferred : DeferredInFlight)
+	{
+		AddToGenerationQueue(Deferred);
 	}
 }
 
@@ -2340,8 +2581,8 @@ float UVoxelChunkManager::GetGeneratedSurfaceHeight(double WorldX, double WorldY
 
 void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest)
 {
-	// Mark as in-progress
-	AsyncGenerationInProgress.Add(Request.ChunkCoord);
+	// Mark as in-progress (stamped: the serial travels with the result, see FAsyncJobStamp)
+	const uint32 DispatchSerial = StampAsyncDispatch(AsyncGenerationInProgress, Request.ChunkCoord);
 
 	// Capture raw pointer (TUniquePtr, safe because ChunkManager outlives tasks)
 	IVoxelNoiseGenerator* GeneratorPtr = NoiseGenerator.Get();
@@ -2358,6 +2599,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 			FPendingGPUGeneration Pending;
 			Pending.Handle = Handle;
 			Pending.GenRequest = MoveTemp(GenRequest);
+			Pending.DispatchSerial = DispatchSerial;
 			PendingGPUReadbacks.Add(ChunkCoord, MoveTemp(Pending));
 		}
 		else
@@ -2367,6 +2609,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 			FAsyncGenerationResult FailResult;
 			FailResult.ChunkCoord = ChunkCoord;
 			FailResult.bSuccess = false;
+			FailResult.DispatchSerial = DispatchSerial;
 			CompletedGenerationQueue.Enqueue(MoveTemp(FailResult));
 		}
 		return;
@@ -2403,7 +2646,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
-	Async(EAsyncExecution::ThreadPool, [WeakThis, GeneratorPtr, GenRequest = MoveTemp(GenRequest), ChunkCoord,
+	Async(EAsyncExecution::ThreadPool, [WeakThis, GeneratorPtr, GenRequest = MoveTemp(GenRequest), ChunkCoord, DispatchSerial,
 		bInjectTrees, CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
 		CapturedNoiseParams, WorldModePtr,
@@ -2438,6 +2681,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 			FAsyncGenerationResult Result;
 			Result.ChunkCoord = ChunkCoord;
 			Result.bSuccess = bSuccess;
+			Result.DispatchSerial = DispatchSerial;
 			if (bSuccess)
 			{
 				Result.VoxelData = MoveTemp(VoxelData);
@@ -2449,17 +2693,23 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 
 void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Timing)
 {
-	FAsyncGenerationResult Result;
 	int32 ProcessedCount = 0;
 	const int32 MaxProcessPerFrame = 8;
 
 	double StoreSeconds = 0.0;
 	double NotifySeconds = 0.0;
 
-	while (CompletedGenerationQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
+	// Bounded drain: results beyond this tick's budget stay queued (see VoxelDrainBounded).
+	VoxelDrainBounded(CompletedGenerationQueue, MaxProcessPerFrame, [&](FAsyncGenerationResult& Result) -> bool
 	{
-		// Remove from in-progress tracking
-		AsyncGenerationInProgress.Remove(Result.ChunkCoord);
+		// Only the dispatch that owns the chunk's in-flight slot may complete it; this also removes
+		// the slot. A superseded result (unloaded chunk, watchdog re-queue) is discarded.
+		if (!AcceptAsyncResult(AsyncGenerationInProgress, Result.ChunkCoord, Result.DispatchSerial, WorstGenerationAsyncSeconds))
+		{
+			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async generation discarded - superseded dispatch"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+			return false;
+		}
 
 		// Check if chunk is still in valid state
 		const EChunkState CurrentState = GetChunkState(Result.ChunkCoord);
@@ -2467,7 +2717,7 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Tim
 		{
 			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async generation discarded - state changed to %d"),
 				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
-			continue;
+			return false;
 		}
 
 		if (Result.bSuccess)
@@ -2498,7 +2748,8 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Tim
 		}
 
 		++ProcessedCount;
-	}
+		return true;
+	});
 
 	Timing.GenStoreMs = static_cast<float>(StoreSeconds * 1000.0);
 	Timing.GenNotifyMs = static_cast<float>(NotifySeconds * 1000.0);
@@ -2536,7 +2787,7 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 
 		if (Status == EVoxelGPUReadbackStatus::Ready && VoxelData.Num() == ExpectedVoxels)
 		{
-			LaunchPostReadbackProcessing(ChunkCoord, MoveTemp(Pending.GenRequest), MoveTemp(VoxelData));
+			LaunchPostReadbackProcessing(ChunkCoord, MoveTemp(Pending.GenRequest), MoveTemp(VoxelData), Pending.DispatchSerial);
 		}
 		else
 		{
@@ -2545,6 +2796,7 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 			FAsyncGenerationResult FailResult;
 			FailResult.ChunkCoord = ChunkCoord;
 			FailResult.bSuccess = false;
+			FailResult.DispatchSerial = Pending.DispatchSerial;
 			CompletedGenerationQueue.Enqueue(MoveTemp(FailResult));
 		}
 
@@ -2558,7 +2810,7 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 	}
 }
 
-void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData)
+void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData, uint32 DispatchSerial)
 {
 	// The water/underground post-passes already ran on the GPU (AddVoxelPostPassDispatches), so the
 	// readback data is finished except for cubic-mode voxel-tree injection. Without trees there is
@@ -2575,6 +2827,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 		Result.ChunkCoord = ChunkCoord;
 		Result.bSuccess = true;
 		Result.VoxelData = MoveTemp(VoxelData);
+		Result.DispatchSerial = DispatchSerial;
 		CompletedGenerationQueue.Enqueue(MoveTemp(Result));
 		return;
 	}
@@ -2592,7 +2845,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
-	Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord,
+	Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, DispatchSerial,
 		GenRequest = MoveTemp(GenRequest), VoxelData = MoveTemp(VoxelData),
 		CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
@@ -2620,6 +2873,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 			Result.ChunkCoord = ChunkCoord;
 			Result.bSuccess = true;
 			Result.VoxelData = MoveTemp(VoxelData);
+			Result.DispatchSerial = DispatchSerial;
 			This->CompletedGenerationQueue.Enqueue(MoveTemp(Result));
 		}
 	});
@@ -2677,11 +2931,19 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 	{
 		++Examined;
 
-		// Skip chunks already being meshed asynchronously
+		// Skip chunks already being meshed asynchronously. A chunk waiting to mesh (PendingMeshing)
+		// keeps its request for a later frame instead of losing it: dropping it left the chunk in
+		// PendingMeshing with no queue entry, so it never meshed again (R23). Unloads and the
+		// stuck-job watchdog release the slot, so the wait is bounded.
 		if (AsyncMeshingInProgress.Contains(MeshingQueue.Last().ChunkCoord))
 		{
-			MeshingQueueSet.Remove(MeshingQueue.Last().ChunkCoord);
+			const FChunkLODRequest InFlightRequest = MeshingQueue.Last();
+			MeshingQueueSet.Remove(InFlightRequest.ChunkCoord);
 			MeshingQueue.Pop(EAllowShrinking::No);
+			if (GetChunkState(InFlightRequest.ChunkCoord) == EChunkState::PendingMeshing)
+			{
+				DeferredThisFrame.Add(InFlightRequest);
+			}
 			continue;
 		}
 
@@ -3084,8 +3346,8 @@ IVoxelMesher* UVoxelChunkManager::EnsureSeamMesher()
 
 void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest)
 {
-	// Mark as in-progress
-	AsyncMeshingInProgress.Add(Request.ChunkCoord);
+	// Mark as in-progress (stamped: the serial travels with the result, see FAsyncJobStamp)
+	const uint32 DispatchSerial = StampAsyncDispatch(AsyncMeshingInProgress, Request.ChunkCoord);
 
 	// Capture mesher pointer (it's a TUniquePtr, so we need raw pointer for lambda)
 	IVoxelMesher* MesherPtr = Mesher.Get();
@@ -3115,7 +3377,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	{
 		// GPU path: async callback (fired from the mesher's game-thread Tick) enqueues the result
 		FOnVoxelMeshingComplete OnComplete;
-		OnComplete.BindLambda([WeakThis, MesherPtr, ChunkCoord, LODLevel](
+		OnComplete.BindLambda([WeakThis, MesherPtr, ChunkCoord, LODLevel, DispatchSerial](
 			FVoxelMeshingHandle Handle, bool bSuccess)
 		{
 			UVoxelChunkManager* This = WeakThis.Get();
@@ -3127,6 +3389,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 			FAsyncMeshResult AsyncResult;
 			AsyncResult.ChunkCoord = ChunkCoord;
 			AsyncResult.LODLevel = LODLevel;
+			AsyncResult.DispatchSerial = DispatchSerial;
 
 			if (bSuccess)
 			{
@@ -3169,7 +3432,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	else
 	{
 		// CPU path: existing thread pool dispatch (unchanged)
-		Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial]() mutable
 		{
 			// Generate mesh on background thread
 			FChunkMeshData MeshData;
@@ -3182,6 +3445,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 				Result.ChunkCoord = ChunkCoord;
 				Result.LODLevel = LODLevel;
 				Result.bSuccess = bSuccess;
+				Result.DispatchSerial = DispatchSerial;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -3194,14 +3458,21 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 
 void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 {
-	FAsyncMeshResult Result;
-	int32 ProcessedCount = 0;
 	const int32 MaxProcessPerFrame = 8; // Limit how many we process to spread render uploads
 
-	while (CompletedMeshQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)
+	// Bounded drain: results beyond this tick's budget stay queued. The old
+	// `while (Dequeue(Result) && Count < Max)` popped the 9th result and dropped it, stranding its
+	// chunk in Meshing for the session (R23b; the demo allows 16 async meshes in flight).
+	VoxelDrainBounded(CompletedMeshQueue, MaxProcessPerFrame, [this](FAsyncMeshResult& Result) -> bool
 	{
-		// Remove from in-progress tracking
-		AsyncMeshingInProgress.Remove(Result.ChunkCoord);
+		// Only the dispatch that owns the chunk's in-flight slot may complete it; this also removes
+		// the slot. A superseded result (unloaded chunk, watchdog re-queue) is discarded.
+		if (!AcceptAsyncResult(AsyncMeshingInProgress, Result.ChunkCoord, Result.DispatchSerial, WorstMeshAsyncSeconds))
+		{
+			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async mesh discarded - superseded dispatch"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
+			return false;
+		}
 
 		// Check if chunk is still in a valid state (might have been unloaded while meshing)
 		const EChunkState CurrentState = GetChunkState(Result.ChunkCoord);
@@ -3242,7 +3513,7 @@ void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async mesh discarded - state changed to %d"),
 					Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
 			}
-			continue;
+			return false;
 		}
 
 		if (Result.bSuccess)
@@ -3272,7 +3543,140 @@ void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 			SetChunkState(Result.ChunkCoord, EChunkState::PendingMeshing);
 		}
 
-		++ProcessedCount;
+		return true;
+	});
+}
+
+// ==================== In-flight async job tracking (R23c) ====================
+
+uint32 UVoxelChunkManager::StampAsyncDispatch(TMap<FIntVector, FAsyncJobStamp>& InFlight, const FIntVector& ChunkCoord)
+{
+	FAsyncJobStamp& Stamp = InFlight.FindOrAdd(ChunkCoord);
+	Stamp.DispatchedAtSeconds = FPlatformTime::Seconds();
+	Stamp.DispatchFrame = CurrentFrame;
+	Stamp.Serial = NextAsyncJobSerial++;
+	if (NextAsyncJobSerial == 0)
+	{
+		NextAsyncJobSerial = 1; // 0 is never issued
+	}
+	return Stamp.Serial;
+}
+
+bool UVoxelChunkManager::AcceptAsyncResult(TMap<FIntVector, FAsyncJobStamp>& InFlight, const FIntVector& ChunkCoord, uint32 Serial, double& WorstSeconds)
+{
+	const FAsyncJobStamp* Stamp = InFlight.Find(ChunkCoord);
+	if (!Stamp || Stamp->Serial != Serial)
+	{
+		return false;
+	}
+	WorstSeconds = FMath::Max(WorstSeconds, FPlatformTime::Seconds() - Stamp->DispatchedAtSeconds);
+	InFlight.Remove(ChunkCoord);
+	return true;
+}
+
+void UVoxelChunkManager::CancelInFlightGeneration(const FIntVector& ChunkCoord)
+{
+	AsyncGenerationInProgress.Remove(ChunkCoord);
+	// A GPU dispatch also holds a readback handle polled each tick; release it so the poll stops
+	// (ReleaseHandle is safe while the render thread still holds the result: it is shared).
+	if (FPendingGPUGeneration* Pending = PendingGPUReadbacks.Find(ChunkCoord))
+	{
+		if (GPUGeneratorPtr)
+		{
+			GPUGeneratorPtr->ReleaseHandle(Pending->Handle);
+		}
+		PendingGPUReadbacks.Remove(ChunkCoord);
+	}
+}
+
+void UVoxelChunkManager::CancelInFlightMesh(const FIntVector& ChunkCoord)
+{
+	AsyncMeshingInProgress.Remove(ChunkCoord);
+}
+
+void UVoxelChunkManager::CheckStuckAsyncJobs()
+{
+	const float StuckSeconds = CVarStreamMeshStuckSeconds.GetValueOnGameThread();
+	if (StuckSeconds <= 0.0f)
+	{
+		return;
+	}
+	const double Now = FPlatformTime::Seconds();
+	// Wall time alone would flag every in-flight job after a PIE pause or a debugger break (the
+	// manager did not tick, results sat in the queue); a stranded job also misses many ticks.
+	constexpr int64 MinStuckTicks = 60;
+	auto IsStuck = [this, Now, StuckSeconds](const FAsyncJobStamp& Stamp, double& OutAge)
+	{
+		OutAge = Now - Stamp.DispatchedAtSeconds;
+		return OutAge > StuckSeconds && (CurrentFrame - Stamp.DispatchFrame) >= MinStuckTicks;
+	};
+
+	// Meshing: give the slot back and send the chunk round again. A late result for the old
+	// dispatch is rejected by its serial.
+	TArray<TPair<FIntVector, double>> Stuck;
+	for (const TPair<FIntVector, FAsyncJobStamp>& Pair : AsyncMeshingInProgress)
+	{
+		double Age = 0.0;
+		if (IsStuck(Pair.Value, Age))
+		{
+			Stuck.Emplace(Pair.Key, Age);
+		}
+	}
+	for (const TPair<FIntVector, double>& Entry : Stuck)
+	{
+		const FIntVector& ChunkCoord = Entry.Key;
+		CancelInFlightMesh(ChunkCoord);
+		ClearMeshDeps(ChunkCoord); // the re-dispatch captures a fresh snapshot
+		++TotalStuckMeshRequeues;
+
+		FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+		const bool bRequeue = State && State->State == EChunkState::Meshing;
+		UE_LOG(LogVoxelStreaming, Warning,
+			TEXT("Chunk (%d,%d,%d) async mesh in flight %.1f s (> voxel.Stream.MeshStuckSeconds %.1f): slot released%s"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, Entry.Value, StuckSeconds,
+			bRequeue ? TEXT(", re-queued for meshing") : TEXT(""));
+		if (bRequeue)
+		{
+			FChunkLODRequest Request;
+			Request.ChunkCoord = ChunkCoord;
+			Request.LODLevel = State->LODLevel;
+			Request.Priority = 80.0f; // the invisible-chunk safety-net tier
+			SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
+			AddToMeshingQueue(Request);
+		}
+	}
+
+	// Generation: same treatment (a lost GPU readback would otherwise hold the chunk in Generating).
+	Stuck.Reset();
+	for (const TPair<FIntVector, FAsyncJobStamp>& Pair : AsyncGenerationInProgress)
+	{
+		double Age = 0.0;
+		if (IsStuck(Pair.Value, Age))
+		{
+			Stuck.Emplace(Pair.Key, Age);
+		}
+	}
+	for (const TPair<FIntVector, double>& Entry : Stuck)
+	{
+		const FIntVector& ChunkCoord = Entry.Key;
+		CancelInFlightGeneration(ChunkCoord);
+		++TotalStuckGenerationRequeues;
+
+		FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+		const bool bRequeue = State && State->State == EChunkState::Generating;
+		UE_LOG(LogVoxelStreaming, Warning,
+			TEXT("Chunk (%d,%d,%d) async generation in flight %.1f s (> voxel.Stream.MeshStuckSeconds %.1f): slot released%s"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, Entry.Value, StuckSeconds,
+			bRequeue ? TEXT(", re-queued for generation") : TEXT(""));
+		if (bRequeue)
+		{
+			FChunkLODRequest Request;
+			Request.ChunkCoord = ChunkCoord;
+			Request.LODLevel = State->LODLevel;
+			Request.Priority = State->Priority;
+			SetChunkState(ChunkCoord, EChunkState::PendingGeneration);
+			AddToGenerationQueue(Request);
+		}
 	}
 }
 
@@ -3552,6 +3956,11 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 	ChunkStates.Remove(ChunkCoord);
 	// Drop any in-flight mesh-dependency snapshot so an unloaded-while-meshing chunk can't leak it.
 	InFlightMeshDeps.Remove(ChunkCoord);
+	// Release any in-flight generation / mesh slot: its result belongs to the residency that just
+	// ended and is rejected on arrival (serial mismatch), so a reload dispatches fresh work instead
+	// of waiting on — or being completed by — the old job.
+	CancelInFlightGeneration(ChunkCoord);
+	CancelInFlightMesh(ChunkCoord);
 	// Seam-ownership P0: this chunk's voxel data is gone — restale/prune its incident seams.
 	if (SeamRegistry.IsValid())
 	{
@@ -3644,7 +4053,7 @@ void UVoxelChunkManager::TickSeamScheduler()
 			TEXT(" | nearScan n=%d p50=%.1f p95=%.1f max=%.1f | farScan n=%d p50=%.1f p95=%.1f max=%.1f")
 			TEXT(" | nearE2E n=%d p50=%.1f p95=%.1f max=%.1f | nearReadyDone n=%d p50=%.1f p95=%.1f max=%.1f")
 			TEXT(" | nearPostSched n=%d p50=%.1f p95=%.1f max=%.1f")
-			TEXT(" | jobQ=%d inFlight=%d peak=%d/%d capped=%d resched1s=%d dropInFlight=%d dropPart=%d")
+			TEXT(" | jobQ=%d inFlight=%d peak=%d/%d capped=%d resched1s=%d dropInFlight=%d dropPart=%d rejectDeparted=%d")
 			TEXT(" | nearQueue n=%d p50=%.1f p95=%.1f max=%.1f | nearAsync n=%d p50=%.1f p95=%.1f max=%.1f")
 			TEXT(" | nearWorker n=%d p50=%.1f p95=%.1f max=%.1f")
 			TEXT(" | submit n=%d ticks=%d avgMs=%.2f maxMs=%.2f | frame avgMs=%.2f maxMs=%.2f caps=%d/%d"),
@@ -3658,7 +4067,7 @@ void UVoxelChunkManager::TickSeamScheduler()
 			L.NearReadyToDoneN, L.NearReadyToDoneP50Ms, L.NearReadyToDoneP95Ms, L.NearReadyToDoneMaxMs,
 			L.NearPostScheduleN, L.NearPostScheduleP50Ms, L.NearPostScheduleP95Ms, L.NearPostScheduleMaxMs,
 			L.JobQueueDepth, SeamJobsInFlight.Num(), SeamInFlightPeak, CVarSeamMaxInFlight.GetValueOnGameThread(), SeamSlotStarvedTicks,
-			L.RescheduledWithin1s, L.DroppedInFlight, L.DroppedParticipant,
+			L.RescheduledWithin1s, L.DroppedInFlight, L.DroppedParticipant, L.RejectedDepartedOwner,
 			L.NearQueueN, L.NearQueueP50Ms, L.NearQueueP95Ms, L.NearQueueMaxMs,
 			L.NearAsyncN, L.NearAsyncP50Ms, L.NearAsyncP95Ms, L.NearAsyncMaxMs,
 			L.NearWorkerN, L.NearWorkerP50Ms, L.NearWorkerP95Ms, L.NearWorkerMaxMs,
@@ -3694,6 +4103,14 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		// was scheduled, so dropping it leaves the older geometry until something re-dirties the
 		// seam — counted so the rate is measurable (see [SeamLat] dropInFlight).
 		SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ true);
+		return;
+	}
+	if (!SeamRegistry->IsResidencyCurrent(Job.Key.Owner, Job.OwnerResidencyEpoch))
+	{
+		// The owner left (or left and reloaded) while the job waited in the queue. Its result could
+		// never be applied (ProcessCompletedSeamMeshes rejects it), and a reload's RegisterChunk has
+		// already re-dirtied the seam for the new residency.
+		SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
 		return;
 	}
 
@@ -3749,7 +4166,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
 		{
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
@@ -3766,6 +4183,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 				Result.ScheduledAtSeconds = ScheduledAt;
 				Result.DispatchedAtSeconds = DispatchedAt;
 				Result.WorkerMs = WorkerMs;
+				Result.OwnerResidencyEpoch = OwnerEpoch;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -3793,7 +4211,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
 		{
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
@@ -3810,6 +4228,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 				Result.ScheduledAtSeconds = ScheduledAt;
 				Result.DispatchedAtSeconds = DispatchedAt;
 				Result.WorkerMs = WorkerMs;
+				Result.OwnerResidencyEpoch = OwnerEpoch;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -3836,7 +4255,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
 		{
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
@@ -3853,6 +4272,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 				Result.ScheduledAtSeconds = ScheduledAt;
 				Result.DispatchedAtSeconds = DispatchedAt;
 				Result.WorkerMs = WorkerMs;
+				Result.OwnerResidencyEpoch = OwnerEpoch;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -3872,20 +4292,35 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 	int32 Processed = 0;
 	const double SubmitStart = FPlatformTime::Seconds();
 
-	FCompletedSeamMesh Result;
-	while (Processed < MaxSeamSubmitsPerTick && CompletedSeamMeshQueue.Dequeue(Result))
+	VoxelDrainBounded(CompletedSeamMeshQueue, MaxSeamSubmitsPerTick, [&](FCompletedSeamMesh& Result) -> bool
 	{
 		++Processed;
 		SeamJobsInFlight.Remove(Result.Key);
 
 		if (!bSeamMeshingActive || !MeshRenderer)
 		{
-			continue; // pipeline turned off mid-flight — buckets were cleared on deactivation
+			return true; // pipeline turned off mid-flight — buckets were cleared on deactivation
+		}
+		// R23a: a result applies only to the owner residency it was scheduled against. A job
+		// dispatched just before its owner unloaded completes afterwards; without this check the
+		// FindOrAdd below recreated the owner's slot entry and submitted a bucket for a chunk that no
+		// longer exists. The unload had already removed the owner's buckets, so nothing ever removed
+		// that one: seam strips floating over empty terrain after a teleport. The epoch also rejects
+		// a result from an EARLIER residency of an owner that has since reloaded; that reload's
+		// RegisterChunk re-dirtied every incident seam, so the new residency rebuilds them.
+		if (!SeamRegistry.IsValid() || !SeamRegistry->IsResidencyCurrent(Result.Key.Owner, Result.OwnerResidencyEpoch))
+		{
+			if (SeamRegistry.IsValid())
+			{
+				SeamRegistry->RecordSeamResultRejected();
+			}
+			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Seam result %s rejected: owner left while the job was in flight"), *Result.Key.ToString());
+			return true;
 		}
 		if (!Result.bSuccess)
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("Seam job %s failed to mesh"), *Result.Key.ToString());
-			continue;
+			return true;
 		}
 
 		// Latency instrumentation: this is the moment the seam's geometry becomes visible, so
@@ -3937,7 +4372,8 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 			MinLOD = Result.LODLevel;
 		}
 		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, 0, MinLOD, MoveTemp(Merged));
-	}
+		return true;
+	});
 
 	// Instrumentation: the game-thread cost of this tick's submits (only ticks that submitted).
 	if (Processed > 0)
@@ -5383,6 +5819,57 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelFarCompressionStatsCmd(
 		if (Managers == 0)
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.FarCompression.Stats: no UVoxelChunkManager found"));
+		}
+	}));
+
+// Console: voxel.Stream.AuditResidency
+// One-line QA check for "a distant chunk that should have unloaded is still visible" (R23): chunks
+// tracked beyond the unload radius (by state), renderer chunks and seam buckets with no tracked
+// owner, and async jobs stuck past voxel.Stream.MeshStuckSeconds. findings=0 after streaming has
+// settled = healthy. Logged at Warning on LogVoxelStreaming; read it with unreal-mcp
+// LogsToolset.GetLogEntries (Claudius get_output_log fails while PIE holds the log file open).
+static FAutoConsoleCommandWithWorldAndArgs GVoxelAuditResidencyCmd(
+	TEXT("voxel.Stream.AuditResidency"),
+	TEXT("Audit voxel chunk residency: tracked chunks beyond the unload radius by state, renderer chunks and seam buckets ")
+	TEXT("with no tracked owner, and stuck async jobs. findings=0 after streaming settles = healthy."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Stream.AuditResidency: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+
+		int32 Managers = 0;
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			const UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			if (!CM) { continue; }
+			++Managers;
+			FString Report;
+			CM->AuditResidency(Report);
+			TArray<FString> Lines;
+			Report.ParseIntoArrayLines(Lines);
+			for (const FString& Line : Lines)
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Stream.AuditResidency [%s] %s"), *It->GetName(), *Line);
+			}
+		}
+		if (Managers == 0)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Stream.AuditResidency: no UVoxelChunkManager found"));
 		}
 	}));
 

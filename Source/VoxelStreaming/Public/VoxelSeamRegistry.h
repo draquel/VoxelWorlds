@@ -167,6 +167,13 @@ struct FVoxelSeamJob
 	/** Participant snapshot captured at schedule time (mirrors FMeshBoundaryDep per participant). */
 	TArray<FVoxelSeamParticipant> Participants;
 
+	/**
+	 * The owner's residency epoch at schedule time (FVoxelSeamRegistry::GetResidencyEpoch). Carried
+	 * through the async job: a result is only applied while the owner is still in that same residency
+	 * (IsResidencyCurrent), so a late result can never recreate a bucket for an owner that unloaded.
+	 */
+	uint32 OwnerResidencyEpoch = 0;
+
 	/** Latency instrumentation: when the seam went dirty and when this job was scheduled. Carried
 	 *  through the async job so completion can report dirty->visible end to end. */
 	double DirtiedAtSeconds = 0.0;
@@ -194,6 +201,8 @@ struct FVoxelSeamRegistryStats
 	int64 TotalSeamJobsScheduled = 0;
 	/** Lifetime seam jobs processed by the (P0: stub) processor. */
 	int64 TotalSeamJobsProcessed = 0;
+	/** Lifetime seam results rejected because their owner left (or left and reloaded) while in flight. */
+	int64 TotalSeamResultsRejected = 0;
 };
 
 /**
@@ -223,6 +232,7 @@ struct FVoxelSeamLatencyStats
 	int32 RescheduledWithin1s = 0;   // interval: scheduled again < 1 s after the previous schedule (a rebuild the 300 ms rotation used to coalesce)
 	int32 DroppedInFlight = 0;       // interval: drained then dropped because an older job for the same seam was still in flight (seam stays CLEAN — stale until re-dirtied)
 	int32 DroppedParticipant = 0;    // interval: drained then dropped because a participant lost its data / mesh, or the participant tuple had the wrong shape
+	int32 RejectedDepartedOwner = 0; // interval: completed but discarded because the owner unloaded (or reloaded) while the job was in flight
 
 	// ---- Rolling windows, milliseconds ----
 	// dirty -> scheduled: the TOTAL wait, which includes time spent waiting for an absent
@@ -304,6 +314,32 @@ public:
 	 * (a participant left), and prunes any seam that now has no remaining participant.
 	 */
 	void UnregisterChunk(const FIntVector& ChunkCoord);
+
+	// ==================== Residency epochs ====================
+
+	/**
+	 * The chunk's residency epoch: a non-zero number, unique for the registry's lifetime, assigned
+	 * by every RegisterChunk (and when an Update* call first mirrors a chunk after a disable/enable).
+	 * 0 = the chunk is not registered. ScheduleReadySeams stamps the owner's epoch into each job, and
+	 * a completed result is applied only while the epoch is still current. Comparing epochs rather
+	 * than asking "is the owner loaded" also rejects a result from an EARLIER residency of an owner
+	 * that has since reloaded (VOXEL_QA_FOLLOWUPS_PLAN.md R23a).
+	 *
+	 * Epochs are never reused, not even across Reset/SetEnabled(false), so a result that outlives a
+	 * reset cannot match a later residency.
+	 */
+	uint32 GetResidencyEpoch(const FIntVector& ChunkCoord) const;
+
+	/**
+	 * True when Epoch is non-zero and still ChunkCoord's current residency epoch.
+	 * @param ChunkCoord The seam owner (or any chunk) the result was built for.
+	 * @param Epoch      The epoch captured when the job was scheduled (FVoxelSeamJob::OwnerResidencyEpoch).
+	 * @return Whether a result built for that residency may still be applied.
+	 */
+	bool IsResidencyCurrent(const FIntVector& ChunkCoord, uint32 Epoch) const;
+
+	/** Count a completed seam result discarded because IsResidencyCurrent failed (instrumentation). */
+	void RecordSeamResultRejected();
 
 	// ==================== Per-tick scheduler ====================
 
@@ -461,7 +497,18 @@ private:
 	{
 		uint32 ContentVersion = 0;
 		int32 MeshedLODLevel = -1;
+		/** Residency epoch (see GetResidencyEpoch); assigned when the chunk enters the mirror or re-registers. */
+		uint32 ResidencyEpoch = 0;
 	};
+
+	/** Find the chunk's mirror entry, creating it with a fresh residency epoch when absent. */
+	FChunkMirrorState& FindOrAddMirror(const FIntVector& ChunkCoord);
+
+	/** Next residency epoch to hand out (starts at 1: 0 means "not registered"). Survives Reset. */
+	uint32 NextResidencyEpoch = 1;
+
+	/** Hand out a fresh, never-zero epoch. */
+	uint32 AllocateResidencyEpoch();
 
 	/** Ensure the seam entry exists (creating it with derived participants); returns it. */
 	FVoxelSeamState& FindOrCreateSeam(const FVoxelSeamKey& Key);
@@ -519,6 +566,7 @@ private:
 	int64 TotalSeamsCreated = 0;
 	int64 TotalSeamJobsScheduled = 0;
 	int64 TotalSeamJobsProcessed = 0;
+	int64 TotalSeamResultsRejected = 0;
 
 	// ---- Latency instrumentation (see FVoxelSeamLatencyStats) ----
 
@@ -538,6 +586,7 @@ private:
 	int32 IntervalRescheduledWithin1s = 0;
 	int32 IntervalDroppedInFlight = 0;
 	int32 IntervalDroppedParticipant = 0;
+	int32 IntervalRejectedDepartedOwner = 0;
 	FLatencyWindow NearQueueWindow;
 	FLatencyWindow NearAsyncWindow;
 	FLatencyWindow NearWorkerWindow;

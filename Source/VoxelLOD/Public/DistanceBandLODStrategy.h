@@ -103,6 +103,9 @@ public:
 	/** Unload horizon: chunks beyond MaxViewDistance * UnloadDistanceMultiplier are out of range. */
 	virtual float GetUnloadDistance() const override { return MaxViewDistance * UnloadDistanceMultiplier; }
 
+	/** Load horizon: the configured view distance (chunks are requested within it). */
+	virtual float GetLoadDistance() const override { return MaxViewDistance; }
+
 protected:
 	// ==================== Internal Helpers ====================
 

@@ -210,6 +210,9 @@ public:
 	/** Clear all seam meshes. Enqueues render command. */
 	void ClearAllSeamMeshes();
 
+	/** Owners with at least one seam bucket, from the game-thread mirror of the proxy's seam map. */
+	void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const;
+
 	// ==================== Configuration ====================
 
 	/**
@@ -443,6 +446,12 @@ private:
 
 	/** Game thread chunk tracking */
 	TMap<FIntVector, FChunkInfo> ChunkInfoMap;
+
+	/**
+	 * Game-thread mirror of the seam buckets submitted to the proxy: owner -> bitmask of live slots.
+	 * Lets diagnostics ask which owners have seam geometry without touching render-thread state.
+	 */
+	TMap<FIntVector, uint8> SeamBucketSlotMasks;
 
 	// ==================== Batched Render Operations ====================
 	// Instead of sending individual render commands, we batch operations

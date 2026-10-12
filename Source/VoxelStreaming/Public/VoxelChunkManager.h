@@ -659,6 +659,23 @@ public:
 	FString GetDebugStats() const;
 
 	/**
+	 * Residency audit (voxel.Stream.AuditResidency): finds geometry or pipeline state that outlived
+	 * the chunk it belongs to. Counts, by category:
+	 *  - chunks the manager still tracks beyond the unload radius, by state;
+	 *  - renderer chunks the manager no longer tracks;
+	 *  - seam buckets (renderer, and the manager's per-owner slot store) whose owner is not tracked;
+	 *  - async generation / mesh jobs in flight longer than voxel.Stream.MeshStuckSeconds.
+	 * After streaming settles every count must be zero (transient non-zero counts right after a
+	 * teleport are expected). The report also carries the worst dispatch-to-complete time seen this
+	 * session for generation and meshing, which is what the stuck threshold must stay well above.
+	 *
+	 * @param OutReport Multi-line human-readable report (counts plus the first offenders).
+	 * @return Total number of findings (0 = healthy).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Debug")
+	int32 AuditResidency(FString& OutReport) const;
+
+	/**
 	 * Draw debug visualization.
 	 */
 	void DrawDebugVisualization() const;
@@ -1016,6 +1033,8 @@ protected:
 		/** Stamped at dispatch (registry clock) and measured on the worker: splits scheduled->completed. */
 		double DispatchedAtSeconds = 0.0;
 		double WorkerMs = 0.0;
+		/** The owner's residency epoch the job was scheduled against (FVoxelSeamJob::OwnerResidencyEpoch). */
+		uint32 OwnerResidencyEpoch = 0;
 	};
 
 	/** Thread-safe queue for completed async seam meshes. */
@@ -1243,19 +1262,71 @@ private:
 
 	// ==================== Async Noise Generation ====================
 
+	/**
+	 * Dispatch stamp of one in-flight async job (generation or meshing). The serial ties a result to
+	 * the dispatch that currently owns the chunk's in-flight slot: a result whose serial no longer
+	 * matches was superseded (its slot was reclaimed by the stuck-job watchdog, or the chunk unloaded)
+	 * and is discarded. The dispatch time feeds the watchdog and the dispatch-to-complete stats.
+	 */
+	struct FAsyncJobStamp
+	{
+		double DispatchedAtSeconds = 0.0;
+		/** CurrentFrame at dispatch: the watchdog also requires a minimum number of manager ticks, so
+		 *  time the manager did not tick (PIE pause, a debugger break, one long hitch) is not "stuck". */
+		int64 DispatchFrame = 0;
+		uint32 Serial = 0;
+	};
+
+	/** Next async job serial (0 is never issued). */
+	uint32 NextAsyncJobSerial = 1;
+
+	/** Stamp a new dispatch for ChunkCoord in InFlight (replacing any stale entry) and return its serial. */
+	uint32 StampAsyncDispatch(TMap<FIntVector, FAsyncJobStamp>& InFlight, const FIntVector& ChunkCoord);
+
+	/**
+	 * Accept a completed result if it belongs to the dispatch that owns ChunkCoord's in-flight slot:
+	 * removes the entry, records dispatch-to-complete time into WorstSeconds, returns true. Returns
+	 * false (entry untouched) for a superseded result.
+	 */
+	bool AcceptAsyncResult(TMap<FIntVector, FAsyncJobStamp>& InFlight, const FIntVector& ChunkCoord, uint32 Serial, double& WorstSeconds);
+
+	/** Release ChunkCoord's in-flight generation slot (and its pending GPU readback, if any); a late result is then rejected. */
+	void CancelInFlightGeneration(const FIntVector& ChunkCoord);
+
+	/** Release ChunkCoord's in-flight mesh slot; a late result is then rejected. */
+	void CancelInFlightMesh(const FIntVector& ChunkCoord);
+
+	/**
+	 * Stuck-job watchdog (voxel.Stream.MeshStuckSeconds): an async generation or mesh job in flight
+	 * longer than the threshold logs a warning, gives up its slot and its chunk goes back to the
+	 * pending queue. A mesher or readback that loses a request can then no longer strand a chunk
+	 * (state Meshing / Generating forever: never unloads, never remeshes, holds a slot).
+	 */
+	void CheckStuckAsyncJobs();
+
+	/** Worst dispatch-to-complete time seen this session (seconds), generation and meshing. */
+	double WorstGenerationAsyncSeconds = 0.0;
+	double WorstMeshAsyncSeconds = 0.0;
+
+	/** Jobs the stuck watchdog re-queued this session. */
+	int64 TotalStuckGenerationRequeues = 0;
+	int64 TotalStuckMeshRequeues = 0;
+
 	/** Result of an async noise generation task */
 	struct FAsyncGenerationResult
 	{
 		FIntVector ChunkCoord;
 		TArray<FVoxelData> VoxelData;
 		bool bSuccess = false;
+		/** FAsyncJobStamp::Serial of the dispatch that produced this result. */
+		uint32 DispatchSerial = 0;
 	};
 
 	/** Thread-safe queue for completed async generation results */
 	TQueue<FAsyncGenerationResult, EQueueMode::Mpsc> CompletedGenerationQueue;
 
-	/** Set of chunks currently being generated asynchronously */
-	TSet<FIntVector> AsyncGenerationInProgress;
+	/** Chunks currently being generated asynchronously, with their dispatch stamps */
+	TMap<FIntVector, FAsyncJobStamp> AsyncGenerationInProgress;
 
 	/** Process completed async generation tasks (called from game thread; fills the gen-apply sub-timers) */
 	void ProcessCompletedAsyncGenerations(FVoxelTimingStats& Timing);
@@ -1279,6 +1350,7 @@ private:
 	{
 		FVoxelGenerationHandle Handle;
 		FVoxelNoiseGenerationRequest GenRequest;  // retained for CPU post-passes (tree injection)
+		uint32 DispatchSerial = 0;                // carried into the result (see FAsyncJobStamp)
 	};
 
 	/** GPU generations in flight, keyed by chunk coord; polled each frame in ProcessPendingGPUReadbacks. */
@@ -1294,7 +1366,7 @@ private:
 	 * thread (per-chunk volume work there caused multi-chunk frame spikes; readbacks arrive in
 	 * batches). Without tree injection the result is enqueued directly.
 	 */
-	void LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData);
+	void LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData, uint32 DispatchSerial);
 
 	// ==================== Async Mesh Generation ====================
 
@@ -1305,13 +1377,15 @@ private:
 		int32 LODLevel;
 		FChunkMeshData MeshData;
 		bool bSuccess = false;
+		/** FAsyncJobStamp::Serial of the dispatch that produced this result. */
+		uint32 DispatchSerial = 0;
 	};
 
 	/** Thread-safe queue for completed async mesh results */
 	TQueue<FAsyncMeshResult, EQueueMode::Mpsc> CompletedMeshQueue;
 
-	/** Set of chunks currently being meshed asynchronously */
-	TSet<FIntVector> AsyncMeshingInProgress;
+	/** Chunks currently being meshed asynchronously, with their dispatch stamps */
+	TMap<FIntVector, FAsyncJobStamp> AsyncMeshingInProgress;
 
 	/** Note: MaxAsyncMeshTasks is now in VoxelWorldConfiguration; runtime value in EffectiveMaxAsyncMeshTasks */
 

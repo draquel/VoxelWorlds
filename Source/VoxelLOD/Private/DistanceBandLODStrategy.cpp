@@ -447,49 +447,35 @@ void FDistanceBandLODStrategy::GetChunksToUnload(
 
 	const float UnloadDistance = MaxViewDistance * UnloadDistanceMultiplier;
 
-	// Check each loaded chunk
+	// Every candidate, no per-frame cap: the chunk manager vetoes some (mid-pipeline, edit-pinned)
+	// and applies MaxChunksToUnloadPerFrame after that (IVoxelLODStrategy::SelectUnloadCandidates).
+	// Capping here let vetoed chunks early in the set's stable iteration order use up the budget.
+	TArray<TPair<float, FIntVector>> Candidates;
 	for (const FIntVector& ChunkCoord : LoadedChunks)
 	{
-		bool bShouldUnload = false;
+		const float Distance = GetDistanceToViewer(ChunkCoordToWorldCenter(ChunkCoord), Context);
 
-		// Check world-mode-specific culling first (these should be unloaded immediately)
+		// World-mode-specific culls unload regardless of distance; otherwise the unload horizon.
 		if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context) ||
 			ShouldCullIslandBoundary(ChunkCoord, Context) ||
-			ShouldCullBeyondHorizon(ChunkCoord, Context))
+			ShouldCullBeyondHorizon(ChunkCoord, Context) ||
+			Distance > UnloadDistance)
 		{
-			bShouldUnload = true;
-		}
-		else
-		{
-			// Standard distance-based unloading
-			const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-			const float Distance = GetDistanceToViewer(ChunkCenter, Context);
-
-			if (Distance > UnloadDistance)
-			{
-				bShouldUnload = true;
-			}
-		}
-
-		if (bShouldUnload)
-		{
-			OutUnload.Add(ChunkCoord);
-
-			// Respect per-frame limit
-			if (OutUnload.Num() >= Context.MaxChunksToUnloadPerFrame)
-			{
-				break;
-			}
+			Candidates.Emplace(Distance, ChunkCoord);
 		}
 	}
 
-	// Sort by distance (farthest first for unloading)
-	OutUnload.Sort([this, &Context](const FIntVector& A, const FIntVector& B)
+	// Farthest first. Distances are computed once: after a teleport every loaded chunk is a
+	// candidate for several frames, so the comparator must not recompute them.
+	Candidates.Sort([](const TPair<float, FIntVector>& A, const TPair<float, FIntVector>& B)
 	{
-		const float DistA = GetDistanceToViewer(ChunkCoordToWorldCenter(A), Context);
-		const float DistB = GetDistanceToViewer(ChunkCoordToWorldCenter(B), Context);
-		return DistA > DistB;
+		return A.Key > B.Key;
 	});
+	OutUnload.Reserve(Candidates.Num());
+	for (const TPair<float, FIntVector>& Candidate : Candidates)
+	{
+		OutUnload.Add(Candidate.Value);
+	}
 }
 
 float FDistanceBandLODStrategy::GetChunkPriority(

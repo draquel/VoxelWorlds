@@ -439,6 +439,7 @@ void UVoxelWorldComponent::ClearAllChunks()
 	// Clear any pending batched operations - they're now obsolete
 	PendingAdds.Empty();
 	PendingRemovals.Empty();
+	SeamBucketSlotMasks.Empty(); // the render command below clears the seam meshes too
 
 	// Enqueue render thread clear (chunks + water tiles + seam meshes)
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
@@ -570,6 +571,8 @@ void UVoxelWorldComponent::UpdateSeamMeshFromCPUData(
 		return;
 	}
 
+	SeamBucketSlotMasks.FindOrAdd(OwnerChunkCoord) |= static_cast<uint8>(1u << (Axis & 7));
+
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -586,6 +589,15 @@ void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uin
 {
 	check(IsInGameThread());
 
+	if (uint8* Mask = SeamBucketSlotMasks.Find(OwnerChunkCoord))
+	{
+		*Mask &= static_cast<uint8>(~(1u << (Axis & 7)));
+		if (*Mask == 0)
+		{
+			SeamBucketSlotMasks.Remove(OwnerChunkCoord);
+		}
+	}
+
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -601,6 +613,8 @@ void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uin
 void UVoxelWorldComponent::ClearAllSeamMeshes()
 {
 	check(IsInGameThread());
+
+	SeamBucketSlotMasks.Empty();
 
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
@@ -1296,6 +1310,12 @@ int32 UVoxelWorldComponent::GetLoadedChunkCount() const
 {
 	FScopeLock Lock(&ChunkInfoLock);
 	return ChunkInfoMap.Num();
+}
+
+void UVoxelWorldComponent::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const
+{
+	check(IsInGameThread());
+	SeamBucketSlotMasks.GetKeys(OutOwners);
 }
 
 void UVoxelWorldComponent::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
