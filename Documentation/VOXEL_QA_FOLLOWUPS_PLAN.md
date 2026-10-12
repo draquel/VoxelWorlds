@@ -22,7 +22,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 |----|------|-------|---------------------|-------|------|
 | R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
 | R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
-| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Traced in code | VoxelWorlds | L |
+| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 open | VoxelWorlds | L |
 
 ## R23 Lingering distant chunk
 
@@ -362,6 +362,52 @@ better hidden. The streaming itself is very robust."
   at the frontier.
 - A material-relevance regression like the water bug of #45: the proxy must keep OR-ing the fade material's
   relevance once, never calling `SetPrimitiveViewRelevance` per material.
+
+### R24 as built (VoxelWorlds#71, 2026-10-12)
+
+**Scope.** P1 (seam crossfade) and P2 (coordinated LOD transitions) in one PR, with the in-flight re-dirty fix and
+the concurrent-fade cap. One addition the measurements forced: deferred seam bucket submits (below). Not done: P3
+(first-appearance fade), the batch budget and HUD skip count, and P0's rebuild-reason counters and crack-window
+metric. The `[SeamLat]` `lodHold` and `bucketDefer` fields and the renderer's crossfade counters stand in for P0.
+
+**What the code does.**
+- `FVoxelCrossfadeScheduler` (VoxelRendering) owns fade timing for interiors and seam buckets in one keyspace, so a
+  release can start any mix of them on the same clock. The proxy keeps `SeamPreviousMeshes` and `SeamFadeStates`
+  beside the chunk maps. A bucket emptied by a rebuild fades out instead of vanishing.
+- On an LOD change of a visible chunk (`ShouldHoldForSeams`), the new interior is submitted held at alpha 0.
+  `FVoxelSeamTransitionHolds` waits for the chunk's buildable incident seams. Each result holds its owner's
+  bucket, and transitions sharing a chunk, seam or bucket merge into one group. A group releases when its seams
+  have landed and its buckets have been submitted, or at `voxel.MeshFade.SeamHoldMs`.
+- A seam result for a bucket that is still fading is stored, and the merged bucket is submitted when that fade
+  ends (`DeferBucket` / `FlushDueSeamBuckets`). Replacing it mid-fade dropped the generation it was fading out
+  of, so the other slots' transitions snapped to their end state.
+- A seam re-dirtied while its job is in flight stays scheduled until `NotifySeamJobFinished`, then rebuilds.
+- Defaults: `voxel.MeshFade.Seams 1`, `voxel.MeshFade.SeamHoldMs 1000` (was planned at 150), and
+  `voxel.MeshFade.MaxConcurrent 512` (beyond it swaps are instant). The renderer's failsafe for a hold nobody
+  releases is 3 s.
+
+**Measured** (VoxelDemo; survey camera at x −470,286, z 2,500, looking north, moved y −300,332 → −287,332 →
+−284,332; the last step sweeps 35-37 chunks through LOD 2 → 1 → 0; `voxel.MeshFade.Duration 2` for slow motion).
+- Before (seam fade and hold off): a dark opening along a chunk boundary for about a second (burst frames 07-10).
+  With `voxel.MeshFade 0` no opening was caught at all. The interior crossfade itself exposes the old seam ring.
+- Hold cap 150 ms: about half the groups timed out. During a sweep, the transitions merge into large groups that
+  need 0.2-0.6 s for all their seams, so the opening stayed.
+- Cap 2 s, no deferral: no timeouts, but a fainter dithered remnant. A third of seam bucket fades (904 of 2,703)
+  were restarts of a fade still running.
+- After (defaults): no opening in any frame, at Duration 2 or 0.35. At 0.35 s: 0 timeouts, holds 0.2-0.63 s, and
+  0 mid-fade restarts out of 2,156 seam fades (interiors: 0). At Duration 2 a few groups reach the 1 s cap, because
+  a deferred bucket waits up to the fade duration. Raise `SeamHoldMs` along with the fade duration.
+- Images: `Images/R24/seam_gap_before_after.jpg` (same frames before and after), `Images/R24/before_context.jpg`.
+
+**Tests.** Headless (`-nullrhi`): Streaming, LOD, Rendering, DualContour, MC SeamClosure, 53/53. In-editor (real
+RHI), the same plus MarchingCubes, Cubic and the Generation GPU-vs-CPU parity tests, 92/92. New tests:
+`Rendering.Crossfade.*` (5), `Streaming.SeamRegistry.LODChangeHold{Set,TimesOut,GroupsMerge,DeferredBucket}`,
+`Streaming.SeamRegistry.InFlightRedirtyRebuilds`.
+
+**Known limits.**
+- An interior resubmitted while its own fade runs still restarts (one retained generation). Measured 0 times.
+- New chunks and new buckets at the frontier still pop (P3).
+- `voxel.Bench.Run` A/B and a W-04 run at normal duration were not done. The user's W-04 re-run is the check.
 
 ## Order and pull requests
 

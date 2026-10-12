@@ -4,6 +4,7 @@
 #include "VoxelStreaming.h"
 #include "VoxelSeamRegistry.h"
 #include "VoxelBoundedDrain.h"
+#include "VoxelSeamTransitionHolds.h"
 #include "VoxelNeighborSliceExtraction.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
@@ -299,6 +300,23 @@ static TAutoConsoleVariable<int32> CVarSeamMaxSubmitsPerTick(
 	     "convert + render command, ~0.01 ms). Leftovers keep their in-flight slot, backpressuring dispatch."),
 	ECVF_Default);
 
+// Coordinated LOD transitions (R24): an LOD change swaps the interior with a crossfade, but its
+// rebuilt seams land later (a few frames for one chunk, up to ~0.6 s while an LOD ring sweeps and
+// its transitions merge) and, until then, the seams shown match the OLD interior while the fade is
+// already showing the new one — the old rim and the new seam ring do not meet, and the player sees
+// a brief opening at the chunk boundary. Holding the interior's fade at alpha 0 until its incident
+// seams land, then fading interior and seams together, closes it. This caps the wait so a seam that
+// never lands only delays detail.
+static TAutoConsoleVariable<int32> CVarSeamHoldMs(
+	TEXT("voxel.MeshFade.SeamHoldMs"),
+	1000,
+	TEXT("Max milliseconds an LOD-change interior swap waits (fully showing the old mesh) for its rebuilt "
+	     "seams before fading in with them. A failsafe, not the normal release: a transition releases as soon "
+	     "as its seams land (measured 0.2-0.6 s while an LOD ring sweeps, since the transitions of a sweep "
+	     "merge). A release by this cap fades the interior before its seams and can open a gap. "
+	     "0 = no hold (the interior fades at once and seams fade as they land)."),
+	ECVF_Default);
+
 // A chunk bakes its boundary against a snapshot of its 26 neighbours taken at mesh-launch. If a
 // neighbour gains/changes data or changes rendered LOD before the async mesh completes, the baked
 // boundary is stale — a persistent seam, because the generation-complete and LOD-transition cascades
@@ -445,6 +463,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			}
 			SeamSnapshotCache.Empty();
 			SeamOwnerSlots.Empty();
+			FVoxelSeamTransitionHolds::FRelease Released;
+			SeamHolds.ReleaseAll(Released);
+			ApplySeamHoldReleases(Released);
+			SeamRedirtyAfterFlight.Empty();
 		}
 	}
 
@@ -1275,6 +1297,11 @@ void UVoxelChunkManager::Shutdown()
 	SeamSnapshotCache.Empty();
 	SeamOwnerSlots.Empty();
 	{
+		FVoxelSeamTransitionHolds::FRelease Discarded; // the renderer is cleared above
+		SeamHolds.ReleaseAll(Discarded);
+	}
+	SeamRedirtyAfterFlight.Empty();
+	{
 		FCompletedSeamMesh DiscardedSeamResult;
 		while (CompletedSeamMeshQueue.Dequeue(DiscardedSeamResult)) {}
 	}
@@ -1742,6 +1769,9 @@ FString UVoxelChunkManager::GetDebugStats() const
 		Stats += FString::Printf(TEXT("Lifetime seams/scheduled/processed: %lld / %lld / %lld\n"),
 			S.TotalSeamsCreated, S.TotalSeamJobsScheduled, S.TotalSeamJobsProcessed);
 		Stats += FString::Printf(TEXT("Late results rejected (owner left): %lld\n"), S.TotalSeamResultsRejected);
+		Stats += FString::Printf(TEXT("LOD transition holds: open %d (seams pending %d) | lifetime %lld, timeouts %lld, max %.0f ms | deferred buckets %d\n"),
+			SeamHolds.NumGroups(), SeamHolds.NumPendingSeams(), TotalSeamHoldGroups, TotalSeamHoldTimeouts, SeamHoldSecondsMaxLifetime * 1000.0,
+			SeamHolds.NumDeferredBuckets());
 	}
 
 	// Async pipeline health (R23c): in-flight counts, worst dispatch->complete, watchdog re-queues.
@@ -1757,6 +1787,12 @@ FString UVoxelChunkManager::GetDebugStats() const
 	{
 		Stats += TEXT("\n");
 		Stats += LODStrategy->GetDebugInfo();
+	}
+
+	if (MeshRenderer)
+	{
+		Stats += TEXT("\n");
+		Stats += MeshRenderer->GetDebugStats();
 	}
 
 	return Stats;
@@ -3961,6 +3997,14 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 	// of waiting on — or being completed by — the old job.
 	CancelInFlightGeneration(ChunkCoord);
 	CancelInFlightMesh(ChunkCoord);
+	// R24: a departed chunk cannot finish an LOD transition. Drop any hold request it left in the
+	// renderer (its meshes are gone) and stop waiting for seams it participates in.
+	if (MeshRenderer && (SeamHolds.IsChunkHeld(ChunkCoord) || SeamHolds.IsSeamOwnerHeld(ChunkCoord)))
+	{
+		MeshRenderer->SetChunkFadeHold(ChunkCoord, false);
+		MeshRenderer->SetSeamFadeHold(ChunkCoord, false);
+	}
+	SeamHolds.OnChunkRemoved(ChunkCoord);
 	// Seam-ownership P0: this chunk's voxel data is gone — restale/prune its incident seams.
 	if (SeamRegistry.IsValid())
 	{
@@ -4040,6 +4084,20 @@ void UVoxelChunkManager::TickSeamScheduler()
 		SeamRegistry->ProcessSeamJobQueue(MaxJobs);
 	}
 
+	// R24: release LOD transitions whose seams have all landed (results were submitted at the top
+	// of this tick, deferred buckets just below), or that hit the hold cap. Everything released here
+	// starts fading on one clock.
+	if (bSeamMeshingActive)
+	{
+		FlushDueSeamBuckets();
+	}
+	{
+		FVoxelSeamTransitionHolds::FRelease Released;
+		const double HoldSeconds = FMath::Max(0, CVarSeamHoldMs.GetValueOnGameThread()) / 1000.0;
+		SeamHolds.CollectReleases(SeamRegistry->NowSeconds(), HoldSeconds, Released);
+		ApplySeamHoldReleases(Released);
+	}
+
 	// Latency instrumentation readout (see CVarSeamLogLatency). Taken AFTER drain so this tick's
 	// completions are included in the interval counters.
 	const int32 LogEvery = CVarSeamLogLatency.GetValueOnGameThread();
@@ -4056,7 +4114,8 @@ void UVoxelChunkManager::TickSeamScheduler()
 			TEXT(" | jobQ=%d inFlight=%d peak=%d/%d capped=%d resched1s=%d dropInFlight=%d dropPart=%d rejectDeparted=%d")
 			TEXT(" | nearQueue n=%d p50=%.1f p95=%.1f max=%.1f | nearAsync n=%d p50=%.1f p95=%.1f max=%.1f")
 			TEXT(" | nearWorker n=%d p50=%.1f p95=%.1f max=%.1f")
-			TEXT(" | submit n=%d ticks=%d avgMs=%.2f maxMs=%.2f | frame avgMs=%.2f maxMs=%.2f caps=%d/%d"),
+			TEXT(" | submit n=%d ticks=%d avgMs=%.2f maxMs=%.2f | frame avgMs=%.2f maxMs=%.2f caps=%d/%d")
+			TEXT(" | lodHold groups=%d avgMs=%.1f maxMs=%.1f timeouts=%d leftPending=%d open=%d pending=%d | bucketDefer n=%d open=%d"),
 			T, L.DirtyCount, L.NearDirtyCount,
 			L.Examined, L.RequeuedNotResident, L.RequeuedInFlight, L.Scheduled, L.Completed,
 			L.NearScheduleN, L.NearScheduleP50Ms, L.NearScheduleP95Ms, L.NearScheduleMaxMs,
@@ -4073,13 +4132,87 @@ void UVoxelChunkManager::TickSeamScheduler()
 			L.NearWorkerN, L.NearWorkerP50Ms, L.NearWorkerP95Ms, L.NearWorkerMaxMs,
 			SeamSubmitCount, SeamSubmitTicks, (SeamSubmitTicks > 0) ? SeamSubmitMsAccum / SeamSubmitTicks : 0.0, SeamSubmitMsMax,
 			(SeamFrameTicks > 0) ? SeamFrameMsAccum / SeamFrameTicks : 0.0, SeamFrameMsMax,
-			CVarSeamMaxInFlight.GetValueOnGameThread(), CVarSeamMaxSubmitsPerTick.GetValueOnGameThread());
+			CVarSeamMaxInFlight.GetValueOnGameThread(), CVarSeamMaxSubmitsPerTick.GetValueOnGameThread(),
+			SeamHoldGroupsInterval, (SeamHoldGroupsInterval > 0) ? SeamHoldSecondsSumInterval * 1000.0 / SeamHoldGroupsInterval : 0.0,
+			SeamHoldSecondsMaxInterval * 1000.0, SeamHoldTimeoutsInterval, SeamHoldLeftPendingInterval,
+			SeamHolds.NumGroups(), SeamHolds.NumPendingSeams(),
+			SeamBucketDeferralsInterval, SeamHolds.NumDeferredBuckets());
 		SeamInFlightPeak = SeamJobsInFlight.Num();
 		SeamSlotStarvedTicks = 0;
 		SeamSubmitMsAccum = SeamSubmitMsMax = 0.0;
 		SeamSubmitTicks = SeamSubmitCount = 0;
 		SeamFrameMsAccum = SeamFrameMsMax = 0.0;
 		SeamFrameTicks = 0;
+		SeamHoldGroupsInterval = SeamHoldTimeoutsInterval = SeamHoldLeftPendingInterval = 0;
+		SeamBucketDeferralsInterval = 0;
+		SeamHoldSecondsSumInterval = SeamHoldSecondsMaxInterval = 0.0;
+	}
+}
+
+// ==================== Coordinated LOD transitions (R24) ====================
+
+bool UVoxelChunkManager::ShouldHoldForSeams(const FIntVector& ChunkCoord, int32 PreviousMeshedLOD, int32 NewLOD, const FChunkMeshData& NewMesh) const
+{
+	// Only an LOD change of a chunk that is on screen: the interior crossfades from its old mesh
+	// and every incident seam is rebuilt for the new LOD. Edits (same LOD) never hold — a dig must
+	// show at once — and a first appearance has nothing to fade from.
+	return bSeamMeshingActive && MeshRenderer && SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
+		&& CVarSeamHoldMs.GetValueOnGameThread() > 0
+		&& PreviousMeshedLOD >= 0 && PreviousMeshedLOD != NewLOD
+		&& NewMesh.IsValid()
+		&& MeshRenderer->IsChunkLoaded(ChunkCoord);
+}
+
+void UVoxelChunkManager::BeginSeamHold(const FIntVector& ChunkCoord)
+{
+	// The LOD change (UpdateChunkRenderedLOD) just dirtied every incident seam; the buildable ones
+	// are rebuilt within a few ticks. Seams with an absent participant cannot land, so they are
+	// not waited for.
+	TArray<FVoxelSeamKey> Rebuilding;
+	SeamRegistry->GetReadyIncidentSeams(ChunkCoord, Rebuilding);
+	SeamHolds.BeginTransition(ChunkCoord, Rebuilding, SeamRegistry->NowSeconds());
+}
+
+void UVoxelChunkManager::ApplySeamHoldReleases(const FVoxelSeamTransitionHolds::FRelease& Release)
+{
+	if (MeshRenderer)
+	{
+		for (const FIntVector& Chunk : Release.Chunks)
+		{
+			MeshRenderer->SetChunkFadeHold(Chunk, false);
+		}
+		for (const FIntVector& Owner : Release.SeamOwners)
+		{
+			MeshRenderer->SetSeamFadeHold(Owner, false);
+		}
+	}
+
+	SeamHoldGroupsInterval += Release.HoldSeconds.Num();
+	TotalSeamHoldGroups += Release.HoldSeconds.Num();
+	SeamHoldTimeoutsInterval += Release.TimedOut;
+	TotalSeamHoldTimeouts += Release.TimedOut;
+	SeamHoldLeftPendingInterval += Release.SeamsLeftPending;
+	for (const float Seconds : Release.HoldSeconds)
+	{
+		SeamHoldSecondsSumInterval += Seconds;
+		SeamHoldSecondsMaxInterval = FMath::Max(SeamHoldSecondsMaxInterval, static_cast<double>(Seconds));
+		SeamHoldSecondsMaxLifetime = FMath::Max(SeamHoldSecondsMaxLifetime, static_cast<double>(Seconds));
+	}
+}
+
+void UVoxelChunkManager::FinishSeamJob(const FVoxelSeamKey& Key, bool bAbandoned)
+{
+	if (SeamRegistry.IsValid())
+	{
+		SeamRegistry->NotifySeamJobFinished(Key);
+		if (SeamRedirtyAfterFlight.Remove(Key) > 0)
+		{
+			SeamRegistry->RedirtySeam(Key);
+		}
+	}
+	if (bAbandoned)
+	{
+		SeamHolds.OnSeamAbandoned(Key);
 	}
 }
 
@@ -4095,14 +4228,16 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	if (ExpectedParticipants < 0 || Job.Participants.Num() != ExpectedParticipants)
 	{
 		SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
+		FinishSeamJob(Job.Key, /*bAbandoned*/ true);
 		return;
 	}
 	if (SeamJobsInFlight.Contains(Job.Key))
 	{
-		// An older build of this seam is still on a worker. The seam was marked clean when this job
-		// was scheduled, so dropping it leaves the older geometry until something re-dirties the
-		// seam — counted so the rate is measurable (see [SeamLat] dropInFlight).
+		// An older build of this seam is still on a worker. The registry keeps a seam scheduled until
+		// its job finishes, so this only happens after a registry reset; rebuild the seam once the
+		// older job lands rather than leaving its geometry stale (see [SeamLat] dropInFlight).
 		SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ true);
+		SeamRedirtyAfterFlight.Add(Job.Key);
 		return;
 	}
 	if (!SeamRegistry->IsResidencyCurrent(Job.Key.Owner, Job.OwnerResidencyEpoch))
@@ -4111,6 +4246,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		// never be applied (ProcessCompletedSeamMeshes rejects it), and a reload's RegisterChunk has
 		// already re-dirtied the seam for the new residency.
 		SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
+		FinishSeamJob(Job.Key, /*bAbandoned*/ true);
 		return;
 	}
 
@@ -4123,6 +4259,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		if (!States[i] || !States[i]->Descriptor.HasVoxelDataAvailable())
 		{
 			SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
+			FinishSeamJob(Job.Key, /*bAbandoned*/ true);
 			return; // a participant vanished between schedule and drain; the unregister path re-dirties
 		}
 	}
@@ -4134,6 +4271,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		if (States[i]->MeshedLODLevel < 0)
 		{
 			SeamRegistry->RecordSeamJobDropped(/*bOlderJobInFlight*/ false);
+			FinishSeamJob(Job.Key, /*bAbandoned*/ true);
 			return;
 		}
 		MinParticipantLOD = FMath::Min(MinParticipantLOD, States[i]->MeshedLODLevel);
@@ -4299,6 +4437,7 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 
 		if (!bSeamMeshingActive || !MeshRenderer)
 		{
+			FinishSeamJob(Result.Key, /*bAbandoned*/ true);
 			return true; // pipeline turned off mid-flight — buckets were cleared on deactivation
 		}
 		// R23a: a result applies only to the owner residency it was scheduled against. A job
@@ -4315,11 +4454,13 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 				SeamRegistry->RecordSeamResultRejected();
 			}
 			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Seam result %s rejected: owner left while the job was in flight"), *Result.Key.ToString());
+			FinishSeamJob(Result.Key, /*bAbandoned*/ true);
 			return true;
 		}
 		if (!Result.bSuccess)
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("Seam job %s failed to mesh"), *Result.Key.ToString());
+			FinishSeamJob(Result.Key, /*bAbandoned*/ true);
 			return true;
 		}
 
@@ -4345,33 +4486,26 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 		OwnerSlots.Slots[SeamSlot] = MoveTemp(Result.MeshData); // may be empty = seam dissolved
 		OwnerSlots.SlotLOD[SeamSlot] = Result.LODLevel;
 
-		FChunkMeshData Merged;
-		int32 MinLOD = TNumericLimits<int32>::Max();
-		for (int32 s = 0; s < 7; ++s)
+		// R24: the bucket crossfades from the one it replaces. If an LOD transition is waiting for
+		// this seam (or already holds this owner's bucket), the submit holds the new bucket at alpha 0
+		// so it fades in with the interior it meets when the transition releases.
+		SeamHolds.OnSeamResult(Result.Key);
+
+		// A bucket still fading from an earlier submit would lose the mesh it fades out of if replaced
+		// now (one retained generation), snapping the other slots' transitions to their end state. Its
+		// slots are stored; submit the merged bucket once that fade ends (FlushDueSeamBuckets), which
+		// also folds any further results that land meanwhile into the same swap.
+		const float FadeRemaining = MeshRenderer->GetSeamFadeRemainingSeconds(Result.Key.Owner);
+		if (FadeRemaining > 0.0f || SeamHolds.IsBucketDeferred(Result.Key.Owner))
 		{
-			const FChunkMeshData& SlotMesh = OwnerSlots.Slots[s];
-			if (!SlotMesh.IsValid())
-			{
-				continue;
-			}
-			MinLOD = FMath::Min(MinLOD, FMath::Max(OwnerSlots.SlotLOD[s], 0));
-			const uint32 Base = static_cast<uint32>(Merged.Positions.Num());
-			Merged.Positions.Append(SlotMesh.Positions);
-			Merged.Normals.Append(SlotMesh.Normals);
-			Merged.UVs.Append(SlotMesh.UVs);
-			Merged.UV1s.Append(SlotMesh.UV1s);
-			Merged.Colors.Append(SlotMesh.Colors);
-			Merged.Indices.Reserve(Merged.Indices.Num() + SlotMesh.Indices.Num());
-			for (const uint32 Idx : SlotMesh.Indices)
-			{
-				Merged.Indices.Add(Base + Idx);
-			}
+			SeamHolds.DeferBucket(Result.Key.Owner, SeamRegistry->NowSeconds() + FadeRemaining);
+			++SeamBucketDeferralsInterval;
 		}
-		if (MinLOD == TNumericLimits<int32>::Max())
+		else
 		{
-			MinLOD = Result.LODLevel;
+			SubmitSeamOwnerBucket(Result.Key.Owner);
 		}
-		MeshRenderer->UpdateSeamMeshFromCPU(Result.Key.Owner, 0, MinLOD, MoveTemp(Merged));
+		FinishSeamJob(Result.Key, /*bAbandoned*/ false);
 		return true;
 	});
 
@@ -4383,6 +4517,71 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 		SeamSubmitMsMax = FMath::Max(SeamSubmitMsMax, Ms);
 		++SeamSubmitTicks;
 		SeamSubmitCount += Processed;
+	}
+}
+
+void UVoxelChunkManager::SubmitSeamOwnerBucket(const FIntVector& Owner)
+{
+	const FSeamOwnerSlots* OwnerSlots = SeamOwnerSlots.Find(Owner);
+	if (!OwnerSlots || !MeshRenderer)
+	{
+		return;
+	}
+
+	FChunkMeshData Merged;
+	int32 MinLOD = TNumericLimits<int32>::Max();
+	for (int32 s = 0; s < 7; ++s)
+	{
+		const FChunkMeshData& SlotMesh = OwnerSlots->Slots[s];
+		if (!SlotMesh.IsValid())
+		{
+			continue;
+		}
+		MinLOD = FMath::Min(MinLOD, FMath::Max(OwnerSlots->SlotLOD[s], 0));
+		const uint32 Base = static_cast<uint32>(Merged.Positions.Num());
+		Merged.Positions.Append(SlotMesh.Positions);
+		Merged.Normals.Append(SlotMesh.Normals);
+		Merged.UVs.Append(SlotMesh.UVs);
+		Merged.UV1s.Append(SlotMesh.UV1s);
+		Merged.Colors.Append(SlotMesh.Colors);
+		Merged.Indices.Reserve(Merged.Indices.Num() + SlotMesh.Indices.Num());
+		for (const uint32 Idx : SlotMesh.Indices)
+		{
+			Merged.Indices.Add(Base + Idx);
+		}
+	}
+	if (MinLOD == TNumericLimits<int32>::Max())
+	{
+		MinLOD = 0; // all slots empty: the submit removes the bucket, the LOD is unused
+	}
+
+	if (SeamHolds.IsSeamOwnerHeld(Owner))
+	{
+		MeshRenderer->SetSeamFadeHold(Owner, true);
+	}
+	MeshRenderer->UpdateSeamMeshFromCPU(Owner, 0, MinLOD, MoveTemp(Merged), /*bCrossfade*/ true);
+}
+
+void UVoxelChunkManager::FlushDueSeamBuckets()
+{
+	if (SeamHolds.NumDeferredBuckets() == 0)
+	{
+		return;
+	}
+	const double Now = SeamRegistry->NowSeconds();
+	TArray<FIntVector> Due;
+	SeamHolds.CollectDueBuckets(Now, Due);
+	for (const FIntVector& Owner : Due)
+	{
+		// The renderer's fade clock is authoritative: if it has not quite finished (clock skew of a
+		// frame), wait for it rather than replace the bucket at alpha 0.99.
+		const float Remaining = MeshRenderer ? MeshRenderer->GetSeamFadeRemainingSeconds(Owner) : 0.0f;
+		if (Remaining > 0.0f)
+		{
+			SeamHolds.DeferBucket(Owner, Now + Remaining);
+			continue;
+		}
+		SubmitSeamOwnerBucket(Owner);
 	}
 }
 
@@ -4525,6 +4724,14 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			{
 				if (MeshRenderer && State)
 				{
+					// R24: an LOD change holds the swap until its rebuilt seams land (see BeginSeamHold).
+					const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD,
+						PendingMeshQueue[i].LODLevel, PendingMeshQueue[i].MeshData);
+					if (bHoldForSeams)
+					{
+						MeshRenderer->SetChunkFadeHold(ChunkCoord, true);
+					}
+
 					// Entry is discarded right after — move the mesh data into the renderer
 					const double RendT0 = FPlatformTime::Seconds();
 					MeshRenderer->UpdateChunkMeshFromCPU(
@@ -4537,6 +4744,10 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 					if (SeamRegistry.IsValid())
 					{
 						SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
+					}
+					if (bHoldForSeams)
+					{
+						BeginSeamHold(ChunkCoord);
 					}
 					if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 					SubmittedLOD = PendingMeshQueue[i].LODLevel;
@@ -4654,6 +4865,13 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
 
+		// R24: an LOD change holds the swap until its rebuilt seams land (see BeginSeamHold).
+		const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD, PendingMesh.LODLevel, PendingMesh.MeshData);
+		if (bHoldForSeams)
+		{
+			MeshRenderer->SetChunkFadeHold(ChunkCoord, true);
+		}
+
 		// Send mesh to renderer (entry is discarded below — move the mesh data in)
 		const double RendT0 = FPlatformTime::Seconds();
 		MeshRenderer->UpdateChunkMeshFromCPU(
@@ -4670,6 +4888,10 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		if (SeamRegistry.IsValid())
 		{
 			SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
+		}
+		if (bHoldForSeams)
+		{
+			BeginSeamHold(ChunkCoord);
 		}
 		if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
 

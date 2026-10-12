@@ -240,7 +240,8 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 	}
 	WaterTileVertexFactories.Empty();
 
-	// Release all seam mesh resources (seam-ownership P1)
+	// Release all seam mesh resources (seam-ownership P1), including buckets retained for fades
+	ReleaseAllSeamFadeStates_AssumesLocked();
 	for (auto& Pair : SeamRenderData)
 	{
 		Pair.Value.ReleaseResources();
@@ -534,12 +535,86 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	}
 
 	// ==================== Seam Mesh Pass (seam-ownership P1) ====================
-	// Single-owner face-seam buckets: terrain geometry, so they draw with the terrain material
-	// and emit RVT clones like chunk batches (a seam missing from RVT would crack the cached
-	// ground). No crossfade participation (seam swaps are strip-sized; v1 swaps instantly).
+	// Seam buckets: terrain geometry, so they draw with the terrain material and emit RVT clones like
+	// chunk batches (a seam missing from RVT would crack the cached ground). Since R24 they crossfade
+	// like chunks: a retained Previous bucket dithers out under the FadeOut MID while the current one
+	// dithers in; a bucket with a fade state but no Previous fades in from nothing; a Previous with no
+	// current bucket fades out to nothing. During a coordinated LOD transition these fades run on the
+	// same alpha as the chunk interiors they meet, so old interior + old seams and new interior + new
+	// seams each cover every pixel the dither gives them. RVT always takes the current bucket with the
+	// shared opaque material (a dither mask would punch transient holes into cached pages).
 
-	if (SeamRenderData.Num() > 0)
+	const bool bAnySeamFades = !bWireframe && SeamFadeStates.Num() > 0;
+	if (SeamRenderData.Num() > 0 || (bAnySeamFades && SeamPreviousMeshes.Num() > 0))
 	{
+		auto IsFrustumCulled = [this](const FSceneView* View, const FBox& SeamWorldBounds)
+		{
+			if (!SeamWorldBounds.IsValid)
+			{
+				return false;
+			}
+			const FBox Expanded = SeamWorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
+			return !View->ViewFrustum.IntersectBox(Expanded.GetCenter(), Expanded.GetExtent());
+		};
+
+		auto EmitSeamBatch = [&](int32 ViewIndex, const FLocalVertexFactory* VertexFactory, const FIndexBuffer* IndexBuffer,
+			const FVoxelChunkRenderData& RenderData, const FMaterialRenderProxy* DrawMaterial, bool bWithRVT)
+		{
+			FMeshBatch& MeshBatch = Collector.AllocateMesh();
+			MeshBatch.VertexFactory = VertexFactory;
+			MeshBatch.MaterialRenderProxy = DrawMaterial;
+			MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
+			MeshBatch.bDisableBackfaceCulling = false;
+			MeshBatch.Type = PT_TriangleList;
+			MeshBatch.DepthPriorityGroup = SDPG_World;
+			MeshBatch.bCanApplyViewModeOverrides = true;
+			MeshBatch.bUseWireframeSelectionColoring = IsSelected();
+			MeshBatch.bUseAsOccluder = true;
+			MeshBatch.bWireframe = bWireframe;
+			MeshBatch.CastShadow = true;
+			MeshBatch.bUseForMaterial = true;
+			MeshBatch.bUseForDepthPass = true;
+			MeshBatch.LODIndex = RenderData.LODLevel;
+			MeshBatch.SegmentIndex = 0;
+
+			FMeshBatchElement& BatchElement = MeshBatch.Elements[0];
+			BatchElement.IndexBuffer = IndexBuffer;
+			BatchElement.FirstIndex = 0;
+			BatchElement.NumPrimitives = RenderData.IndexCount / 3;
+			BatchElement.MinVertexIndex = 0;
+			BatchElement.MaxVertexIndex = RenderData.VertexCount - 1;
+			BatchElement.PrimitiveUniformBuffer = GetUniformBuffer();
+
+			// RVT clone pass — mirrors the chunk batch loop (terrain writes RVT; a seam that
+			// skipped it would leave cracks in RVT-derived ground rendering).
+			if (bWithRVT)
+			{
+				for (ERuntimeVirtualTextureMaterialType RVTMaterialType : RuntimeVirtualTextureMaterialTypes)
+				{
+					FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
+					VirtualMeshBatch = MeshBatch;
+					VirtualMeshBatch.MaterialRenderProxy = MaterialProxy;
+					VirtualMeshBatch.CastShadow = false;
+					VirtualMeshBatch.bUseAsOccluder = false;
+					VirtualMeshBatch.bUseForDepthPass = false;
+					VirtualMeshBatch.bUseForMaterial = false;
+					VirtualMeshBatch.bDitheredLODTransition = false;
+					VirtualMeshBatch.bRenderToVirtualTexture = true;
+					VirtualMeshBatch.RuntimeVirtualTextureMaterialType = (uint32)RVTMaterialType;
+					Collector.AddMesh(ViewIndex, VirtualMeshBatch);
+				}
+			}
+
+			Collector.AddMesh(ViewIndex, MeshBatch);
+			TotalMeshesAdded++;
+		};
+
+		auto IsDrawablePrevious = [](const FVoxelChunkPreviousMesh* Previous)
+		{
+			return Previous && Previous->RenderData.HasValidBuffers() && Previous->RenderData.IndexCount >= 3
+				&& Previous->VertexFactory.IsValid() && Previous->IndexBuffer.IsValid();
+		};
+
 		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 		{
 			if (!(VisibilityMap & (1 << ViewIndex)))
@@ -581,64 +656,55 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				}
 
 				// Frustum culling (same conservative box test as chunks)
+				if (IsFrustumCulled(View, RenderData.WorldBounds))
 				{
-					FBox WorldBounds = RenderData.WorldBounds;
-					if (WorldBounds.IsValid)
+					SkippedFrustum++;
+					continue;
+				}
+
+				const FVoxelChunkFadeState* FadeState = bAnySeamFades ? SeamFadeStates.Find(SeamKey) : nullptr;
+				const bool bFading = FadeState && FadeState->FadeInProxy && FadeState->FadeOutProxy;
+				if (bFading)
+				{
+					const FVoxelChunkPreviousMesh* Previous = SeamPreviousMeshes.Find(SeamKey);
+					if (IsDrawablePrevious(Previous))
 					{
-						WorldBounds = WorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
-						const FConvexVolume& ViewFrustum = View->ViewFrustum;
-						if (!ViewFrustum.IntersectBox(WorldBounds.GetCenter(), WorldBounds.GetExtent()))
-						{
-							SkippedFrustum++;
-							continue;
-						}
+						EmitSeamBatch(ViewIndex, Previous->VertexFactory.Get(), Previous->IndexBuffer.Get(),
+							Previous->RenderData, FadeState->FadeOutProxy, /*bWithRVT*/ false);
 					}
 				}
 
-				FMeshBatch& MeshBatch = Collector.AllocateMesh();
-				MeshBatch.VertexFactory = VertexFactoryPtr->Get();
-				MeshBatch.MaterialRenderProxy = MaterialProxy;
-				MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
-				MeshBatch.bDisableBackfaceCulling = false;
-				MeshBatch.Type = PT_TriangleList;
-				MeshBatch.DepthPriorityGroup = SDPG_World;
-				MeshBatch.bCanApplyViewModeOverrides = true;
-				MeshBatch.bUseWireframeSelectionColoring = IsSelected();
-				MeshBatch.bUseAsOccluder = true;
-				MeshBatch.bWireframe = bWireframe;
-				MeshBatch.CastShadow = true;
-				MeshBatch.bUseForMaterial = true;
-				MeshBatch.bUseForDepthPass = true;
-				MeshBatch.LODIndex = RenderData.LODLevel;
-				MeshBatch.SegmentIndex = 0;
+				EmitSeamBatch(ViewIndex, VertexFactoryPtr->Get(), IndexBufferPtr->Get(), RenderData,
+					bFading ? FadeState->FadeInProxy : MaterialProxy, /*bWithRVT*/ true);
+			}
 
-				FMeshBatchElement& BatchElement = MeshBatch.Elements[0];
-				BatchElement.IndexBuffer = IndexBufferPtr->Get();
-				BatchElement.FirstIndex = 0;
-				BatchElement.NumPrimitives = RenderData.IndexCount / 3;
-				BatchElement.MinVertexIndex = 0;
-				BatchElement.MaxVertexIndex = RenderData.VertexCount - 1;
-				BatchElement.PrimitiveUniformBuffer = GetUniformBuffer();
-
-				// RVT clone pass — mirrors the chunk batch loop (terrain writes RVT; a seam that
-				// skipped it would leave cracks in RVT-derived ground rendering).
-				for (ERuntimeVirtualTextureMaterialType RVTMaterialType : RuntimeVirtualTextureMaterialTypes)
+			// Buckets fading out to nothing (removed during a fade): only their Previous set remains.
+			if (bAnySeamFades)
+			{
+				for (const auto& Pair : SeamPreviousMeshes)
 				{
-					FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
-					VirtualMeshBatch = MeshBatch;
-					VirtualMeshBatch.MaterialRenderProxy = MaterialProxy;
-					VirtualMeshBatch.CastShadow = false;
-					VirtualMeshBatch.bUseAsOccluder = false;
-					VirtualMeshBatch.bUseForDepthPass = false;
-					VirtualMeshBatch.bUseForMaterial = false;
-					VirtualMeshBatch.bDitheredLODTransition = false;
-					VirtualMeshBatch.bRenderToVirtualTexture = true;
-					VirtualMeshBatch.RuntimeVirtualTextureMaterialType = (uint32)RVTMaterialType;
-					Collector.AddMesh(ViewIndex, VirtualMeshBatch);
+					if (SeamRenderData.Contains(Pair.Key))
+					{
+						continue; // drawn above as the outgoing half of a crossfade
+					}
+					const FVoxelChunkFadeState* FadeState = SeamFadeStates.Find(Pair.Key);
+					if (!FadeState || !FadeState->FadeOutProxy || !IsDrawablePrevious(&Pair.Value))
+					{
+						continue;
+					}
+					if (TotalMeshesAdded >= MaxMeshBatchesPerFrame)
+					{
+						SkippedOverLimit++;
+						continue;
+					}
+					if (IsFrustumCulled(View, Pair.Value.RenderData.WorldBounds))
+					{
+						SkippedFrustum++;
+						continue;
+					}
+					EmitSeamBatch(ViewIndex, Pair.Value.VertexFactory.Get(), Pair.Value.IndexBuffer.Get(),
+						Pair.Value.RenderData, FadeState->FadeOutProxy, /*bWithRVT*/ false);
 				}
-
-				Collector.AddMesh(ViewIndex, MeshBatch);
-				TotalMeshesAdded++;
 			}
 		}
 	}
@@ -825,11 +891,20 @@ void FVoxelSceneProxy::ReleaseAllChunkFadeStates_AssumesLocked()
 
 void FVoxelSceneProxy::RetireOrReleaseChunk_AssumesLocked(const FIntVector& ChunkCoord, bool bMoveToPrevious)
 {
-	// Cap at one retained generation: any older Previous goes now, whatever happens next.
-	if (FVoxelChunkPreviousMesh* OldPrevious = ChunkPreviousMeshes.Find(ChunkCoord))
+	// Held at alpha 0 by a coordinated LOD transition: the surface on screen is the retained
+	// Previous mesh and the current one was uploaded but never shown. Replace only the current —
+	// releasing Previous here would change the visible surface in the middle of the hold.
+	const FVoxelChunkFadeState* HeldFade = bMoveToPrevious ? ChunkFadeStates.Find(ChunkCoord) : nullptr;
+	const bool bKeepPrevious = HeldFade && HeldFade->bHeld && ChunkPreviousMeshes.Contains(ChunkCoord);
+
+	// Otherwise cap at one retained generation: any older Previous goes now, whatever happens next.
+	if (!bKeepPrevious)
 	{
-		OldPrevious->ReleaseResources();
-		ChunkPreviousMeshes.Remove(ChunkCoord);
+		if (FVoxelChunkPreviousMesh* OldPrevious = ChunkPreviousMeshes.Find(ChunkCoord))
+		{
+			OldPrevious->ReleaseResources();
+			ChunkPreviousMeshes.Remove(ChunkCoord);
+		}
 	}
 
 	FVoxelChunkRenderData ExistingData;
@@ -844,7 +919,7 @@ void FVoxelSceneProxy::RetireOrReleaseChunk_AssumesLocked(const FIntVector& Chun
 	TSharedPtr<FLocalVertexFactory> ExistingVF;
 	ChunkVertexFactories.RemoveAndCopyValue(ChunkCoord, ExistingVF);
 
-	if (bMoveToPrevious && bHadData && ExistingData.HasValidBuffers()
+	if (bMoveToPrevious && !bKeepPrevious && bHadData && ExistingData.HasValidBuffers()
 		&& ExistingVB.IsValid() && ExistingIB.IsValid() && ExistingVF.IsValid())
 	{
 		// Retain the outgoing mesh alive (buffers stay initialized) for the crossfade.
@@ -1428,7 +1503,7 @@ void FVoxelSceneProxy::SetFadeMaterial_RenderThread(UMaterialInterface* InMateri
 	FadeMaterialRelevance = InRelevance;
 }
 
-void FVoxelSceneProxy::SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy)
+void FVoxelSceneProxy::SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld)
 {
 	check(IsInRenderingThread());
 
@@ -1438,6 +1513,26 @@ void FVoxelSceneProxy::SetChunkFadeState_RenderThread(const FIntVector& ChunkCoo
 	FadeState.FadeAlpha = 0.0f;
 	FadeState.FadeInProxy = InFadeInProxy;
 	FadeState.FadeOutProxy = InFadeOutProxy;
+	FadeState.bHeld = bHeld;
+}
+
+void FVoxelSceneProxy::ReleaseFadeHolds_RenderThread(const TArray<FIntVector4>& Keys)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	for (const FIntVector4& Key : Keys)
+	{
+		// W = -1: chunk interior; 0..6: seam bucket slot (FVoxelCrossfadeScheduler layout).
+		FVoxelChunkFadeState* FadeState = (Key.W < 0)
+			? ChunkFadeStates.Find(FIntVector(Key.X, Key.Y, Key.Z))
+			: SeamFadeStates.Find(FVoxelSeamMeshKey{ FIntVector(Key.X, Key.Y, Key.Z), static_cast<uint8>(Key.W) });
+		if (FadeState)
+		{
+			FadeState->bHeld = false;
+		}
+	}
 }
 
 void FVoxelSceneProxy::UpdateChunkFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector, float>>& Alphas)
@@ -1477,6 +1572,7 @@ void FVoxelSceneProxy::ClearAllChunkFadeStates_RenderThread()
 	FScopeLock Lock(&ChunkDataLock);
 
 	ReleaseAllChunkFadeStates_AssumesLocked();
+	ReleaseAllSeamFadeStates_AssumesLocked();
 }
 
 // ==================== Water Tile Management ====================
@@ -1767,7 +1863,8 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 	int32 LODLevel,
 	TArray<FVoxelVertex>&& Vertices,
 	TArray<uint32>&& Indices,
-	const FVector& OwnerWorldPosition)
+	const FVector& OwnerWorldPosition,
+	bool bCrossfade)
 {
 	check(IsInRenderingThread());
 
@@ -1776,7 +1873,7 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 
 	if (VertexCount == 0 || IndexCount == 0)
 	{
-		RemoveSeamMesh_RenderThread(OwnerChunkCoord, Axis);
+		RemoveSeamMesh_RenderThread(OwnerChunkCoord, Axis, /*bFadeOut*/ bCrossfade);
 		return;
 	}
 
@@ -1784,32 +1881,8 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 
 	FScopeLock Lock(&ChunkDataLock);
 
-	// Remove existing data if any (a seam rebuild swaps only this bucket — §2.4)
-	if (FVoxelChunkRenderData* ExistingData = SeamRenderData.Find(Key))
-	{
-		ExistingData->ReleaseResources();
-	}
-	if (TSharedPtr<FVoxelLocalVertexBuffer>* ExistingVB = SeamVertexBuffers.Find(Key))
-	{
-		if (ExistingVB->IsValid())
-		{
-			(*ExistingVB)->ReleaseResource();
-		}
-	}
-	if (TSharedPtr<FVoxelLocalIndexBuffer>* ExistingIB = SeamIndexBuffers.Find(Key))
-	{
-		if (ExistingIB->IsValid())
-		{
-			(*ExistingIB)->ReleaseResource();
-		}
-	}
-	if (TSharedPtr<FLocalVertexFactory>* ExistingVF = SeamVertexFactories.Find(Key))
-	{
-		if (ExistingVF->IsValid())
-		{
-			(*ExistingVF)->ReleaseResource();
-		}
-	}
+	// Retire (crossfade) or release the existing bucket — a seam rebuild swaps only this bucket (§2.4)
+	RetireOrReleaseSeam_AssumesLocked(Key, bCrossfade);
 
 	// Convert FVoxelVertex to FVoxelLocalVertex format (same pipeline as terrain chunks)
 	const FVector3f SeamOffset = FVector3f(OwnerWorldPosition);
@@ -1952,7 +2025,89 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 		*OwnerChunkCoord.ToString(), Axis, VertexCount, IndexCount);
 }
 
-void FVoxelSceneProxy::RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis)
+void FVoxelSceneProxy::ReleaseSeamFadeState_AssumesLocked(const FVoxelSeamMeshKey& Key)
+{
+	if (FVoxelChunkPreviousMesh* Previous = SeamPreviousMeshes.Find(Key))
+	{
+		Previous->ReleaseResources();
+		SeamPreviousMeshes.Remove(Key);
+	}
+	SeamFadeStates.Remove(Key);
+}
+
+void FVoxelSceneProxy::ReleaseAllSeamFadeStates_AssumesLocked()
+{
+	for (auto& Pair : SeamPreviousMeshes)
+	{
+		Pair.Value.ReleaseResources();
+	}
+	SeamPreviousMeshes.Empty();
+	SeamFadeStates.Empty();
+}
+
+void FVoxelSceneProxy::RetireOrReleaseSeam_AssumesLocked(const FVoxelSeamMeshKey& Key, bool bMoveToPrevious)
+{
+	// Same rules as RetireOrReleaseChunk_AssumesLocked: a held fade keeps its (visible) Previous and
+	// only the never-shown current bucket is replaced; otherwise one retained generation at most.
+	// Seams add one case: a bucket that is fading out to nothing has a Previous and no current, and
+	// a new bucket arriving for it keeps that remnant as the outgoing half of the restarted fade.
+	const FVoxelChunkFadeState* HeldFade = bMoveToPrevious ? SeamFadeStates.Find(Key) : nullptr;
+	const bool bHasPrevious = SeamPreviousMeshes.Contains(Key);
+	const bool bKeepPrevious = bHasPrevious && bMoveToPrevious
+		&& ((HeldFade && HeldFade->bHeld) || !SeamRenderData.Contains(Key));
+
+	if (!bKeepPrevious)
+	{
+		if (FVoxelChunkPreviousMesh* OldPrevious = SeamPreviousMeshes.Find(Key))
+		{
+			OldPrevious->ReleaseResources();
+			SeamPreviousMeshes.Remove(Key);
+		}
+	}
+
+	FVoxelChunkRenderData ExistingData;
+	const bool bHadData = SeamRenderData.RemoveAndCopyValue(Key, ExistingData);
+
+	TSharedPtr<FVoxelLocalVertexBuffer> ExistingVB;
+	SeamVertexBuffers.RemoveAndCopyValue(Key, ExistingVB);
+
+	TSharedPtr<FVoxelLocalIndexBuffer> ExistingIB;
+	SeamIndexBuffers.RemoveAndCopyValue(Key, ExistingIB);
+
+	TSharedPtr<FLocalVertexFactory> ExistingVF;
+	SeamVertexFactories.RemoveAndCopyValue(Key, ExistingVF);
+
+	if (bMoveToPrevious && !bKeepPrevious && bHadData && ExistingData.HasValidBuffers()
+		&& ExistingVB.IsValid() && ExistingIB.IsValid() && ExistingVF.IsValid())
+	{
+		FVoxelChunkPreviousMesh Previous;
+		Previous.RenderData = MoveTemp(ExistingData);
+		Previous.VertexBuffer = ExistingVB;
+		Previous.IndexBuffer = ExistingIB;
+		Previous.VertexFactory = ExistingVF;
+		SeamPreviousMeshes.Add(Key, MoveTemp(Previous));
+		return;
+	}
+
+	if (bHadData)
+	{
+		ExistingData.ReleaseResources();
+	}
+	if (ExistingVF.IsValid())
+	{
+		ExistingVF->ReleaseResource();
+	}
+	if (ExistingIB.IsValid())
+	{
+		ExistingIB->ReleaseResource();
+	}
+	if (ExistingVB.IsValid())
+	{
+		ExistingVB->ReleaseResource();
+	}
+}
+
+void FVoxelSceneProxy::RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis, bool bFadeOut)
 {
 	check(IsInRenderingThread());
 
@@ -1960,38 +2115,16 @@ void FVoxelSceneProxy::RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkC
 
 	FScopeLock Lock(&ChunkDataLock);
 
-	if (FVoxelChunkRenderData* RenderData = SeamRenderData.Find(Key))
+	if (bFadeOut)
 	{
-		RenderData->ReleaseResources();
-		SeamRenderData.Remove(Key);
+		// Fade to nothing: the bucket becomes a Previous set that dithers out under its fade state
+		// (attached by the game thread just before this command) and is released on completion.
+		RetireOrReleaseSeam_AssumesLocked(Key, /*bMoveToPrevious*/ true);
+		return;
 	}
 
-	if (TSharedPtr<FVoxelLocalVertexBuffer>* VB = SeamVertexBuffers.Find(Key))
-	{
-		if (VB->IsValid())
-		{
-			(*VB)->ReleaseResource();
-		}
-		SeamVertexBuffers.Remove(Key);
-	}
-
-	if (TSharedPtr<FVoxelLocalIndexBuffer>* IB = SeamIndexBuffers.Find(Key))
-	{
-		if (IB->IsValid())
-		{
-			(*IB)->ReleaseResource();
-		}
-		SeamIndexBuffers.Remove(Key);
-	}
-
-	if (TSharedPtr<FLocalVertexFactory>* VF = SeamVertexFactories.Find(Key))
-	{
-		if (VF->IsValid())
-		{
-			(*VF)->ReleaseResource();
-		}
-		SeamVertexFactories.Remove(Key);
-	}
+	ReleaseSeamFadeState_AssumesLocked(Key);
+	RetireOrReleaseSeam_AssumesLocked(Key, /*bMoveToPrevious*/ false);
 }
 
 void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
@@ -1999,6 +2132,8 @@ void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
 	check(IsInRenderingThread());
 
 	FScopeLock Lock(&ChunkDataLock);
+
+	ReleaseAllSeamFadeStates_AssumesLocked();
 
 	for (auto& Pair : SeamRenderData)
 	{
@@ -2034,6 +2169,45 @@ void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
 	SeamVertexFactories.Empty();
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all seam meshes"));
+}
+
+void FVoxelSceneProxy::SetSeamFadeState_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis,
+	const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	FVoxelChunkFadeState& FadeState = SeamFadeStates.FindOrAdd(FVoxelSeamMeshKey{ OwnerChunkCoord, Axis });
+	FadeState.FadeAlpha = 0.0f;
+	FadeState.FadeInProxy = InFadeInProxy;
+	FadeState.FadeOutProxy = InFadeOutProxy;
+	FadeState.bHeld = bHeld;
+}
+
+void FVoxelSceneProxy::UpdateSeamFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector4, float>>& Alphas)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	for (const TPair<FIntVector4, float>& Pair : Alphas)
+	{
+		const FVoxelSeamMeshKey Key{ FIntVector(Pair.Key.X, Pair.Key.Y, Pair.Key.Z), static_cast<uint8>(Pair.Key.W) };
+		if (FVoxelChunkFadeState* FadeState = SeamFadeStates.Find(Key))
+		{
+			FadeState->FadeAlpha = FMath::Clamp(Pair.Value, 0.0f, 1.0f);
+		}
+	}
+}
+
+void FVoxelSceneProxy::ClearSeamFadeState_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis)
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	ReleaseSeamFadeState_AssumesLocked(FVoxelSeamMeshKey{ OwnerChunkCoord, Axis });
 }
 
 void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
@@ -2322,6 +2496,10 @@ SIZE_T FVoxelSceneProxy::GetGPUMemoryUsage() const
 	}
 	// Meshes retained for active crossfades (transient, released when each fade ends)
 	for (const auto& Pair : ChunkPreviousMeshes)
+	{
+		Total += Pair.Value.RenderData.GetGPUMemoryUsage();
+	}
+	for (const auto& Pair : SeamPreviousMeshes)
 	{
 		Total += Pair.Value.RenderData.GetGPUMemoryUsage();
 	}

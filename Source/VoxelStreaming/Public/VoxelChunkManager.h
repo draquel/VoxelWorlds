@@ -18,6 +18,7 @@
 #include "VoxelMeshingTypes.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelSeamRegistry.h"
+#include "VoxelSeamTransitionHolds.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -1128,6 +1129,60 @@ private:
 
 	/** Drain completed seam meshes (game thread) and submit them to the renderer's seam buckets. */
 	void ProcessCompletedSeamMeshes();
+
+	// ==================== Coordinated LOD transitions (R24) ====================
+
+	/**
+	 * Held LOD transitions: chunk interiors submitted at a new LOD with their crossfade held at
+	 * alpha 0, plus the seam buckets their rebuilt seams landed in, released together once those
+	 * seams have landed (or voxel.MeshFade.SeamHoldMs passes) so old interior + old seams fade to
+	 * new interior + new seams on one alpha — no opening at the chunk boundary during the swap.
+	 * Also defers seam buckets that are still fading from an earlier submit (see DeferBucket).
+	 */
+	FVoxelSeamTransitionHolds SeamHolds;
+
+	/** Seams whose build was dropped because an older job was still in flight: rebuilt when that job finishes. */
+	TSet<FVoxelSeamKey> SeamRedirtyAfterFlight;
+
+	/** Hold instrumentation since the previous [SeamLat] readout. */
+	int32 SeamHoldGroupsInterval = 0;
+	double SeamHoldSecondsSumInterval = 0.0;
+	double SeamHoldSecondsMaxInterval = 0.0;
+	int32 SeamHoldTimeoutsInterval = 0;
+	int32 SeamHoldLeftPendingInterval = 0;
+	/** Seam bucket submits deferred behind a running fade since the previous readout. */
+	int32 SeamBucketDeferralsInterval = 0;
+
+	/** Hold instrumentation, lifetime. */
+	int64 TotalSeamHoldGroups = 0;
+	int64 TotalSeamHoldTimeouts = 0;
+	double SeamHoldSecondsMaxLifetime = 0.0;
+
+	/** True when an interior swap from PreviousMeshedLOD to NewLOD should wait for its rebuilt seams. */
+	bool ShouldHoldForSeams(const FIntVector& ChunkCoord, int32 PreviousMeshedLOD, int32 NewLOD, const FChunkMeshData& NewMesh) const;
+
+	/** Start waiting for the seams a just-submitted LOD change of ChunkCoord rebuilds (its fade is already held). */
+	void BeginSeamHold(const FIntVector& ChunkCoord);
+
+	/** Release held fades in the renderer and record the hold stats. */
+	void ApplySeamHoldReleases(const FVoxelSeamTransitionHolds::FRelease& Release);
+
+	/**
+	 * Merge the owner's stored seam slots into its bucket and submit it (crossfading from the one it
+	 * replaces; held at alpha 0 while an open LOD transition holds the owner). An all-empty merge
+	 * removes the bucket.
+	 */
+	void SubmitSeamOwnerBucket(const FIntVector& Owner);
+
+	/** Submit the deferred seam buckets whose running fade has ended (see FVoxelSeamTransitionHolds::DeferBucket). */
+	void FlushDueSeamBuckets();
+
+	/**
+	 * A dispatched (or drained) seam job ended: tell the registry so a seam re-dirtied in flight is
+	 * rebuilt, rebuild a seam whose newer build was dropped behind it, and stop holding a transition
+	 * for a seam that will not land.
+	 */
+	void FinishSeamJob(const FVoxelSeamKey& Key, bool bAbandoned);
 
 	/** Set of loaded chunk coordinates (for fast lookup) */
 	TSet<FIntVector> LoadedChunkCoords;

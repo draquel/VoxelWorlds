@@ -386,6 +386,24 @@ crossfade removes the *pop* of legitimate LOD resolution changes.
   MorphFactor carrier, and releases each Previous set at t = 1.
 - Mesh→empty transitions (chunk remeshed to nothing) still pop — removal is not a swap.
 
+### 5.2 Seam buckets and LOD transitions (R24, 2026-10-12)
+
+The interior crossfade above had a side effect under the seam pipeline: during an LOD change the
+interior fades to the new LOD while the seam ring around it is still the one built for the old LOD,
+so the fade itself exposes a gap along the boundary until the rebuilt seams land ("the seam
+disappears and reappears"). With `voxel.MeshFade 0` no gap was caught. R24 keeps the crossfade and
+makes the boundary fade with it:
+
+- Seam buckets crossfade like interiors (`voxel.MeshFade.Seams`, default 1); an emptied bucket fades
+  out. Fade timing for interiors and buckets lives in `FVoxelCrossfadeScheduler`, one keyspace.
+- An LOD change holds the new interior at alpha 0 until its rebuilt seams land, holds those buckets
+  too, and releases them together (`FVoxelSeamTransitionHolds`, cap `voxel.MeshFade.SeamHoldMs`).
+- A merged bucket is never replaced mid-fade: that drops the generation it fades out of (one is
+  retained). Its submit waits for the running fade to end (`DeferBucket`), and a transition holding
+  the bucket waits for that submit.
+
+Details, measurements and limits: `VOXEL_QA_FOLLOWUPS_PLAN.md`, "R24 as built" (VoxelWorlds#71).
+
 ## 6. Recommended sequence
 
 1. (done) Near-field latency tuning — branch `feature/lod-transition-polish`.
