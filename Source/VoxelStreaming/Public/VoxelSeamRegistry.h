@@ -123,7 +123,12 @@ struct FVoxelSeamState
 	 *  seam was last meshed — it needs a (re)build. */
 	bool bDirty = false;
 
-	/** A seam job for this seam is currently enqueued/in flight (guards against double-scheduling). */
+	/**
+	 * A job for this seam is queued or on a worker: set when scheduled, cleared only by
+	 * NotifySeamJobFinished (or the P0 stub processor). A seam re-dirtied meanwhile stays dirty and
+	 * is rebuilt once the job finishes, so the newest content always gets built (R24 P0: a re-dirty
+	 * during flight used to be dropped and left the seam stale until something else changed it).
+	 */
 	bool bScheduled = false;
 
 	/** In the scan rotation (DirtyQueue). Only READY dirty seams are queued — see MarkSeamDirty. */
@@ -372,14 +377,42 @@ public:
 	/**
 	 * Pop up to MaxJobs seam jobs (highest priority first) for external execution (P1 runtime
 	 * pipeline: the chunk manager builds seam meshing requests from them and dispatches async).
-	 * Each popped seam is marked not-scheduled — if a participant changes while the job is in
-	 * flight, the normal dirty->schedule flow re-queues it and the newer result wins.
+	 * Each popped seam stays marked scheduled until the caller reports NotifySeamJobFinished: if a
+	 * participant changes while the job is in flight, the seam is re-dirtied, waits for the job,
+	 * and is then rebuilt, so the newer content always wins.
 	 *
 	 * @param OutJobs Receives the popped jobs (appended).
 	 * @param MaxJobs Cap on jobs popped this call (0 = none — callers pass a positive budget).
 	 * @return Number of jobs popped.
 	 */
 	int32 DrainSeamJobs(TArray<FVoxelSeamJob>& OutJobs, int32 MaxJobs);
+
+	/**
+	 * A drained job ended: its result was applied or rejected, or the dispatcher dropped it. The
+	 * seam may schedule again; if it was re-dirtied while in flight it is rebuilt by the next scan.
+	 * Safe to call for a seam that has since been pruned (no-op).
+	 *
+	 * @param Key The seam whose job ended.
+	 */
+	void NotifySeamJobFinished(const FVoxelSeamKey& Key);
+
+	/**
+	 * Mark one existing seam dirty again (no-op if untracked). For callers that discarded a build
+	 * for reasons the registry cannot see, so the seam does not stay stale.
+	 *
+	 * @param Key The seam to rebuild.
+	 */
+	void RedirtySeam(const FVoxelSeamKey& Key);
+
+	/**
+	 * The seams incident to a chunk that are buildable right now (tracked, every participant
+	 * resident): the set an LOD change of that chunk will rebuild. Seams with an absent
+	 * participant are left out, since they cannot land until it arrives.
+	 *
+	 * @param ChunkCoord The chunk whose incident seams to list.
+	 * @param OutSeams   Receives the keys (reset first).
+	 */
+	void GetReadyIncidentSeams(const FIntVector& ChunkCoord, TArray<FVoxelSeamKey>& OutSeams) const;
 
 	// ==================== Queries (debug + tests) ====================
 

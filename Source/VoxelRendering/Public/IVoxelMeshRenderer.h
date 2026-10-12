@@ -233,14 +233,54 @@ public:
 	 * @param SeamSlot Bucket slot: 0-2 face +X/+Y/+Z, 3-5 edge parallel X/Y/Z, 6 corner
 	 * @param LODLevel Shared LOD the seam was meshed at
 	 * @param MeshData Seam mesh in owner-local space (moved)
+	 * @param bCrossfade Crossfade from the bucket being replaced (or to nothing, for an empty mesh)
+	 *        instead of swapping instantly, where the renderer supports it (R24)
 	 */
 	virtual void UpdateSeamMeshFromCPU(
 		const FIntVector& OwnerChunkCoord,
 		uint8 SeamSlot,
 		int32 LODLevel,
-		FChunkMeshData&& MeshData)
+		FChunkMeshData&& MeshData,
+		bool bCrossfade = false)
 	{
 		// Default: no-op (renderer doesn't support seam meshes)
+	}
+
+	/**
+	 * Hold a chunk's next (or current) mesh-swap crossfade at alpha 0 — the previous mesh stays
+	 * fully visible, the new one is uploaded but hidden — until released with bHold = false, which
+	 * starts the fade. Used to swap an LOD-changed interior together with its rebuilt seams (R24).
+	 *
+	 * @param ChunkCoord Chunk whose swap to hold
+	 * @param bHold True to hold, false to release
+	 */
+	virtual void SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold)
+	{
+		// Default: no-op (renderer doesn't crossfade)
+	}
+
+	/**
+	 * Hold an owner's seam bucket crossfades at alpha 0 until released (see SetChunkFadeHold).
+	 *
+	 * @param OwnerChunkCoord Seam bucket owner
+	 * @param bHold True to hold, false to release
+	 */
+	virtual void SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold)
+	{
+		// Default: no-op (renderer doesn't crossfade)
+	}
+
+	/**
+	 * Seconds until an owner's seam bucket finishes the crossfade it is running (0 when it is not
+	 * fading, is held, or this renderer does not crossfade). A bucket replaced mid-fade loses the
+	 * mesh it was fading out of, so the seam pipeline defers a resubmit until this reaches 0.
+	 *
+	 * @param OwnerChunkCoord Seam bucket owner
+	 * @return Remaining fade time in seconds
+	 */
+	virtual float GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
+	{
+		return 0.0f;
 	}
 
 	/**

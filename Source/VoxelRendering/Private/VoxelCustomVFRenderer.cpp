@@ -541,7 +541,8 @@ void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
 	const FIntVector& OwnerChunkCoord,
 	uint8 Axis,
 	int32 LODLevel,
-	FChunkMeshData&& MeshData)
+	FChunkMeshData&& MeshData,
+	bool bCrossfade)
 {
 	check(IsInGameThread());
 
@@ -553,8 +554,12 @@ void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
 
 	if (!MeshData.IsValid())
 	{
-		// Seam dissolved (no surface crosses the face anymore) — drop the bucket.
-		RemoveSeamMesh(OwnerChunkCoord, Axis);
+		// Seam dissolved (no surface crosses the face anymore) — drop the bucket (fading it out
+		// with the surface it belonged to when the caller asked for a crossfade).
+		if (WorldComponent)
+		{
+			WorldComponent->RemoveSeamMesh(OwnerChunkCoord, Axis, /*bFadeOut*/ bCrossfade);
+		}
 		return;
 	}
 
@@ -569,7 +574,7 @@ void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
 
 	WorldComponent->UpdateSeamMeshFromCPUData(
 		OwnerChunkCoord, Axis, LODLevel,
-		MoveTemp(Vertices), MoveTemp(MeshData.Indices), OwnerWorldPos);
+		MoveTemp(Vertices), MoveTemp(MeshData.Indices), OwnerWorldPos, bCrossfade);
 
 	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated seam mesh %s axis=%d - %d verts"),
 		*OwnerChunkCoord.ToString(), Axis, MeshData.Positions.Num());
@@ -583,6 +588,33 @@ void FVoxelCustomVFRenderer::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, u
 	{
 		WorldComponent->RemoveSeamMesh(OwnerChunkCoord, Axis);
 	}
+}
+
+void FVoxelCustomVFRenderer::SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->SetChunkFadeHold(ChunkCoord, bHold);
+	}
+}
+
+void FVoxelCustomVFRenderer::SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold)
+{
+	check(IsInGameThread());
+
+	if (WorldComponent)
+	{
+		WorldComponent->SetSeamFadeHold(OwnerChunkCoord, bHold);
+	}
+}
+
+float FVoxelCustomVFRenderer::GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
+{
+	check(IsInGameThread());
+
+	return WorldComponent ? WorldComponent->GetSeamFadeRemainingSeconds(OwnerChunkCoord) : 0.0f;
 }
 
 void FVoxelCustomVFRenderer::ClearAllSeamMeshes()
@@ -737,6 +769,12 @@ FBox FVoxelCustomVFRenderer::GetTotalBounds() const
 
 FString FVoxelCustomVFRenderer::GetDebugStats() const
 {
+	int64 InteriorStarts = 0, InteriorRestarts = 0, SeamStarts = 0, SeamRestarts = 0;
+	if (WorldComponent)
+	{
+		WorldComponent->GetFadeCounters(/*bSeams*/ false, InteriorStarts, InteriorRestarts);
+		WorldComponent->GetFadeCounters(/*bSeams*/ true, SeamStarts, SeamRestarts);
+	}
 	return FString::Printf(
 		TEXT("Custom VF Renderer Stats:\n")
 		TEXT("  Chunks: %d\n")
@@ -744,13 +782,15 @@ FString FVoxelCustomVFRenderer::GetDebugStats() const
 		TEXT("  Triangles: %lld\n")
 		TEXT("  GPU Memory: %.2f MB\n")
 		TEXT("  Voxel Size: %.1f\n")
-		TEXT("  Chunk Size: %.1f"),
+		TEXT("  Chunk Size: %.1f\n")
+		TEXT("  Crossfades: interior %lld (mid-fade restarts %lld), seam bucket %lld (mid-fade restarts %lld)"),
 		ChunkStatsMap.Num(),
 		TotalVertexCount,
 		TotalTriangleCount,
 		TotalGPUMemory / (1024.0 * 1024.0),
 		VoxelSize,
-		ChunkWorldSize
+		ChunkWorldSize,
+		InteriorStarts, InteriorRestarts, SeamStarts, SeamRestarts
 	);
 }
 

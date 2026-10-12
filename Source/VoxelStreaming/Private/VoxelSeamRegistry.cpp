@@ -790,18 +790,48 @@ int32 FVoxelSeamRegistry::DrainSeamJobs(TArray<FVoxelSeamJob>& OutJobs, int32 Ma
 		FVoxelSeamJob Job = JobQueue.Pop(EAllowShrinking::No);
 		JobQueueSet.Remove(Job.Key);
 
-		// Mark not-scheduled: a participant change during the external job's flight re-dirties and
-		// re-schedules the seam through the normal flow (the newer result simply resubmits).
-		if (FVoxelSeamState* Seam = Seams.Find(Job.Key))
-		{
-			Seam->bScheduled = false;
-		}
-
+		// The seam stays scheduled while the job is out (NotifySeamJobFinished clears it). A
+		// participant change during the flight re-dirties it; the scan holds it in the rotation
+		// until the job ends and then rebuilds it — the newer content always gets built.
 		OutJobs.Add(MoveTemp(Job));
 		++Drained;
 		++TotalSeamJobsProcessed;
 	}
 	return Drained;
+}
+
+void FVoxelSeamRegistry::NotifySeamJobFinished(const FVoxelSeamKey& Key)
+{
+	if (FVoxelSeamState* Seam = Seams.Find(Key))
+	{
+		Seam->bScheduled = false;
+	}
+}
+
+void FVoxelSeamRegistry::RedirtySeam(const FVoxelSeamKey& Key)
+{
+	if (!bEnabled)
+	{
+		return;
+	}
+	if (FVoxelSeamState* Seam = Seams.Find(Key))
+	{
+		MarkSeamDirty(*Seam);
+	}
+}
+
+void FVoxelSeamRegistry::GetReadyIncidentSeams(const FIntVector& ChunkCoord, TArray<FVoxelSeamKey>& OutSeams) const
+{
+	OutSeams.Reset();
+	TArray<FVoxelSeamKey> Incident;
+	EnumerateIncidentSeams(ChunkCoord, Incident);
+	for (const FVoxelSeamKey& Key : Incident)
+	{
+		if (Seams.Contains(Key) && AreAllParticipantsResident(Key))
+		{
+			OutSeams.Add(Key);
+		}
+	}
 }
 
 // ==================== Queries ====================

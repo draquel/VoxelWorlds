@@ -6,6 +6,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "VoxelChunkGPUData.h"
 #include "ChunkRenderData.h"
+#include "VoxelCrossfadeScheduler.h"
 #include "VoxelWorldComponent.generated.h"
 
 class FVoxelSceneProxy;
@@ -195,6 +196,8 @@ public:
 	 * @param Vertices CPU vertex array (will be moved)
 	 * @param Indices CPU index array (will be moved)
 	 * @param OwnerWorldPosition World position of the owner chunk's origin
+	 * @param bCrossfade Crossfade from the bucket it replaces (R24). Also fades a NEW bucket in when
+	 *        its owner is held by an LOD transition, so it stays hidden until the transition releases.
 	 */
 	void UpdateSeamMeshFromCPUData(
 		const FIntVector& OwnerChunkCoord,
@@ -202,16 +205,71 @@ public:
 		int32 LODLevel,
 		TArray<FVoxelVertex>&& Vertices,
 		TArray<uint32>&& Indices,
-		const FVector& OwnerWorldPosition);
+		const FVector& OwnerWorldPosition,
+		bool bCrossfade = false);
 
-	/** Remove one face-seam mesh. Enqueues render command. */
-	void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis);
+	/**
+	 * Remove one seam bucket. Enqueues render command.
+	 * @param bFadeOut Dither the bucket out instead of dropping it (an empty rebuild during a fade-enabled swap).
+	 */
+	void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis, bool bFadeOut = false);
 
 	/** Clear all seam meshes. Enqueues render command. */
 	void ClearAllSeamMeshes();
 
 	/** Owners with at least one seam bucket, from the game-thread mirror of the proxy's seam map. */
 	void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const;
+
+	// ==================== Coordinated LOD Transitions (R24) ====================
+
+	/**
+	 * Hold a chunk interior's crossfade at alpha 0 (previous mesh fully visible, new mesh uploaded
+	 * but dithered out). Set before submitting the new mesh; clearing it starts the fade now. A
+	 * release on the same tick as other releases keeps them on one alpha. A failsafe releases holds
+	 * older than three seconds on its own (the chunk manager's own cap, voxel.MeshFade.SeamHoldMs,
+	 * is shorter; this only catches a hold nobody releases).
+	 *
+	 * @param ChunkCoord Chunk whose interior swap to hold
+	 * @param bHold True to hold, false to release
+	 */
+	void SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold);
+
+	/**
+	 * Hold every seam bucket fade of an owner at alpha 0 (see SetChunkFadeHold).
+	 *
+	 * @param OwnerChunkCoord Seam bucket owner
+	 * @param bHold True to hold, false to release
+	 */
+	void SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold);
+
+	/** True if seam bucket swaps crossfade right now (voxel.MeshFade.Seams and the chunk crossfade prerequisites). */
+	bool CanCrossfadeSeams() const;
+
+	/**
+	 * Seconds until the owner's seam bucket finishes its running crossfade (0 when not fading, held,
+	 * or seam crossfades are off).
+	 *
+	 * @param OwnerChunkCoord Seam bucket owner
+	 * @return Remaining fade time in seconds
+	 */
+	float GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const;
+
+	/** Active fades (chunk interiors + seam buckets), for diagnostics. */
+	int32 GetActiveFadeCount() const { return ActiveFades.Num(); }
+
+	/**
+	 * Lifetime crossfade counters, for diagnostics: fades started and, of those, restarts of a fade
+	 * that was still running unheld (each drops the mesh it was fading out of).
+	 *
+	 * @param bSeams True for seam buckets, false for chunk interiors
+	 * @param OutStarts Fades started (including restarts)
+	 * @param OutMidFadeRestarts Restarts of a running, unheld fade
+	 */
+	void GetFadeCounters(bool bSeams, int64& OutStarts, int64& OutMidFadeRestarts) const
+	{
+		OutStarts = FadeStartCounts[bSeams ? 1 : 0];
+		OutMidFadeRestarts = FadeMidRestartCounts[bSeams ? 1 : 0];
+	}
 
 	// ==================== Configuration ====================
 
@@ -501,28 +559,62 @@ private:
 	TArray<UMaterialInstanceDynamic*> CoolingFadeInMIDs;
 	TArray<UMaterialInstanceDynamic*> CoolingFadeOutMIDs;
 
-	/** One active mesh-swap crossfade */
+	/** The fade MIDs of one active mesh-swap crossfade (its clock lives in FadeScheduler) */
 	struct FActiveChunkFade
 	{
-		double StartTime = 0.0;
 		UMaterialInstanceDynamic* InMID = nullptr;   // owned by FadeInMIDPool
 		UMaterialInstanceDynamic* OutMID = nullptr;  // owned by FadeOutMIDPool
 	};
 
-	/** Active crossfades by chunk coordinate (transitioning chunks only — expect a few dozen) */
-	TMap<FIntVector, FActiveChunkFade> ActiveFades;
+	/**
+	 * Active crossfades — chunk interiors and seam buckets — keyed like FadeScheduler
+	 * (FVoxelCrossfadeScheduler::ChunkKey / SeamKey). Transitioning geometry only: a few dozen.
+	 */
+	TMap<FIntVector4, FActiveChunkFade> ActiveFades;
+
+	/** See GetFadeCounters: [0] chunk interiors, [1] seam buckets. */
+	int64 FadeStartCounts[2] = { 0, 0 };
+	int64 FadeMidRestartCounts[2] = { 0, 0 };
+
+	/** Fade timing (start, hold, release, alpha) for every entry in ActiveFades. */
+	FVoxelCrossfadeScheduler FadeScheduler;
+
+	/** Hold requests (R24): a fade that starts for one of these starts held at alpha 0. */
+	TSet<FIntVector> ChunkFadeHolds;
+
+	/** Seam bucket owners whose fades start held (every slot of the owner). */
+	TSet<FIntVector> SeamFadeHolds;
+
+	/** Fades released this tick, waiting for one batched proxy command (sent by FlushPendingOperations / the fade tick). */
+	TArray<FIntVector4> PendingHoldReleases;
 
 	/** True if crossfading is possible right now (cvar on, fade material set, proxy alive) */
 	bool CanCrossfade() const;
 
-	/** Start (or restart) a crossfade for a chunk whose mesh was just resubmitted. Enqueues the fade-state attach. */
-	void StartChunkCrossfade(const FIntVector& ChunkCoord);
+	/**
+	 * Start (or restart) a crossfade for a chunk interior or seam bucket whose mesh is about to be
+	 * replaced. Enqueues the fade-state attach, which must precede the swap command.
+	 * @return False if no fade was started (cap reached or MIDs unavailable) — swap instantly.
+	 */
+	bool StartFade(const FIntVector4& Key);
 
-	/** Drop a chunk's crossfade without waiting for completion (chunk removed / fade disabled). */
-	void CancelChunkCrossfade(const FIntVector& ChunkCoord, bool bClearRenderState);
+	/** Drop a fade without waiting for completion (geometry removed / fade disabled). */
+	void CancelFade(const FIntVector4& Key, bool bClearRenderState);
+
+	/** Drop every fade (material change, clear-all). Render-side state is cleared by the caller's command. */
+	void CancelAllFades();
+
+	/** Release one held fade (it starts fading now) and queue the proxy-side held-flag clear. */
+	void ReleaseHeldFade(const FIntVector4& Key);
+
+	/** Send queued hold releases to the proxy in one command. */
+	void FlushHoldReleases();
+
+	/** Enqueue the proxy command that ends a fade (releases the retained previous mesh). */
+	void EnqueueClearFadeState(const FIntVector4& Key);
 
 	/** Per-tick fade driver: advances FadeAlpha on the MIDs, batches alphas to the proxy, completes finished fades. */
-	void AdvanceChunkCrossfades();
+	void AdvanceCrossfades();
 
 	/** Get a pooled fade MID (creating if needed), atlas parameters freshly copied, FadeInvert/FadeAlpha initialized. */
 	UMaterialInstanceDynamic* AcquireFadeMID(bool bInvert);

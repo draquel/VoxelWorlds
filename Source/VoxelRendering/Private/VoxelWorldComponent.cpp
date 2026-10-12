@@ -38,6 +38,23 @@ static TAutoConsoleVariable<float> CVarVoxelMeshFadeDuration(
 	TEXT("Chunk mesh-swap crossfade duration in seconds (default 0.35)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelMeshFadeSeams(
+	TEXT("voxel.MeshFade.Seams"),
+	1,
+	TEXT("Crossfade seam bucket swaps like chunk swaps (R24): 1 = on (default), 0 = seams swap instantly\n")
+	TEXT("(the pre-R24 behaviour, for A/B). Requires voxel.MeshFade."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelMeshFadeMaxConcurrent(
+	TEXT("voxel.MeshFade.MaxConcurrent"),
+	512,
+	TEXT("Cap on concurrent mesh-swap fades (chunk interiors + seam buckets). Swaps beyond it are instant;\n")
+	TEXT("the fade MID pools grow with this number."),
+	ECVF_Default);
+
+/** Failsafe for a fade hold nobody releases (the chunk manager's own cap, voxel.MeshFade.SeamHoldMs, is 1 s). */
+static constexpr double VoxelFadeHoldFailsafeSeconds = 3.0;
+
 /** Scalar parameter names on the fade material */
 static const FName VoxelFadeAlphaParamName(TEXT("FadeAlpha"));
 static const FName VoxelFadeInvertParamName(TEXT("FadeInvert"));
@@ -48,7 +65,7 @@ UVoxelWorldComponent::UVoxelWorldComponent(const FObjectInitializer& ObjectIniti
 	: Super(ObjectInitializer)
 {
 	// Component settings. Tick exists only to advance mesh-swap crossfades and stays
-	// disabled while no fade is active (StartChunkCrossfade enables it on demand).
+	// disabled while no fade is active (StartFade enables it on demand).
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
 	bTickInEditor = true;
@@ -133,7 +150,7 @@ void UVoxelWorldComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	AdvanceChunkCrossfades();
+	AdvanceCrossfades();
 
 	// Chunks stream in and out every frame: refresh the bounds and hand them to the render scene at most once per
 	// tick, and only when they actually moved (UpdateBounds alone does not reach the scene).
@@ -285,8 +302,15 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& G
 	CachedGPUMemory += GPUData.GetGPUMemoryUsage();
 
 	// Mesh replacement -> crossfade (decided here on the game thread; the flag travels with
-	// the swap so game and render side can never disagree about it)
-	const bool bCrossfade = bChunkExisted && CanCrossfade();
+	// the swap so game and render side can never disagree about it). The fade-state attach is
+	// enqueued BEFORE the swap so a held fade's flag is in place when the swap lands.
+	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
+	const bool bCrossfade = bChunkExisted && CanCrossfade() && StartFade(FadeKey);
+	if (!bCrossfade && ActiveFades.Contains(FadeKey))
+	{
+		// Mesh replaced without fading (e.g. kill-switch flipped mid-fade) — drop the stale fade
+		CancelFade(FadeKey, /*bClearRenderState=*/true);
+	}
 
 	// Enqueue render thread update
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
@@ -300,17 +324,6 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& G
 				Proxy->UpdateChunkBuffers_RenderThread(RHICmdList, ChunkCoord, GPUDataCopy, bCrossfade);
 			}
 		);
-	}
-
-	if (bCrossfade)
-	{
-		// Attach enqueued after the swap command — ordering is deterministic
-		StartChunkCrossfade(ChunkCoord);
-	}
-	else if (ActiveFades.Contains(ChunkCoord))
-	{
-		// Mesh replaced without fading (e.g. kill-switch flipped mid-fade) — drop the stale fade
-		CancelChunkCrossfade(ChunkCoord, /*bClearRenderState=*/true);
 	}
 
 	// Update bounds
@@ -357,10 +370,11 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 	// Calculate chunk world position (includes WorldOrigin offset)
 	FVector ChunkWorldPos = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 
-	// Mesh replacement -> crossfade. The flag rides the pending add into the batched swap;
-	// the fade-state attach below lands BEFORE the flush, which is fine — fading only renders
-	// once both the attach and the retained Previous mesh exist (order-independent).
-	const bool bCrossfade = bChunkExisted && CanCrossfade();
+	// Mesh replacement -> crossfade. The flag rides the pending add into the batched swap; the
+	// fade-state attach (StartFade) lands BEFORE the flush, so a held fade's flag is in place when
+	// the swap retires the old mesh.
+	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
+	const bool bCrossfade = bChunkExisted && CanCrossfade() && StartFade(FadeKey);
 
 	// Queue for batched submission instead of immediate render command
 	FPendingChunkAdd PendingAdd;
@@ -373,13 +387,9 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 	PendingAdd.bCrossfade = bCrossfade;
 	PendingAdds.Add(MoveTemp(PendingAdd));
 
-	if (bCrossfade)
+	if (!bCrossfade && ActiveFades.Contains(FadeKey))
 	{
-		StartChunkCrossfade(ChunkCoord);
-	}
-	else if (ActiveFades.Contains(ChunkCoord))
-	{
-		CancelChunkCrossfade(ChunkCoord, /*bClearRenderState=*/true);
+		CancelFade(FadeKey, /*bClearRenderState=*/true);
 	}
 
 	// Update bounds
@@ -402,9 +412,11 @@ void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
 
 	// A removed chunk cannot keep fading. Clear the proxy-side state immediately (the batched
 	// removal would too, but its flush cadence should not gate MID recycling safety).
-	if (ActiveFades.Contains(ChunkCoord))
+	ChunkFadeHolds.Remove(ChunkCoord);
+	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
+	if (ActiveFades.Contains(FadeKey))
 	{
-		CancelChunkCrossfade(ChunkCoord, /*bClearRenderState=*/true);
+		CancelFade(FadeKey, /*bClearRenderState=*/true);
 	}
 
 	// Queue for batched submission instead of immediate render command
@@ -424,12 +436,10 @@ void UVoxelWorldComponent::ClearAllChunks()
 		bTotalBoundsDirty = true;
 	}
 
-	// Drop all crossfades (ClearAllChunks_RenderThread clears the proxy-side state)
-	for (auto& FadePair : ActiveFades)
-	{
-		RetireFadeMIDs(FadePair.Value);
-	}
-	ActiveFades.Empty();
+	// Drop all crossfades, chunk and seam (the clear commands below release the proxy-side state)
+	CancelAllFades();
+	ChunkFadeHolds.Empty();
+	SeamFadeHolds.Empty();
 
 	// Reset statistics
 	CachedVertexCount = 0;
@@ -561,50 +571,80 @@ void UVoxelWorldComponent::UpdateSeamMeshFromCPUData(
 	int32 LODLevel,
 	TArray<FVoxelVertex>&& Vertices,
 	TArray<uint32>&& Indices,
-	const FVector& OwnerWorldPosition)
+	const FVector& OwnerWorldPosition,
+	bool bCrossfade)
 {
 	check(IsInGameThread());
 
 	if (Vertices.Num() == 0 || Indices.Num() == 0)
 	{
-		RemoveSeamMesh(OwnerChunkCoord, Axis);
+		RemoveSeamMesh(OwnerChunkCoord, Axis, /*bFadeOut*/ bCrossfade);
 		return;
 	}
 
-	SeamBucketSlotMasks.FindOrAdd(OwnerChunkCoord) |= static_cast<uint8>(1u << (Axis & 7));
+	const uint8 SlotBit = static_cast<uint8>(1u << (Axis & 7));
+	uint8& SlotMask = SeamBucketSlotMasks.FindOrAdd(OwnerChunkCoord);
+	const bool bExisted = (SlotMask & SlotBit) != 0;
+	SlotMask |= SlotBit;
+
+	// Crossfade a replaced bucket like a chunk swap (R24). A NEW bucket fades in too when its owner
+	// is held by an LOD transition: it belongs to the incoming surface and must stay hidden until the
+	// transition releases, then fade in with the interior it meets. Otherwise new buckets appear at
+	// once (frontier seams are far from the player; fading them in is out of scope here).
+	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Axis);
+	const bool bFade = bCrossfade && CanCrossfadeSeams()
+		&& (bExisted || SeamFadeHolds.Contains(OwnerChunkCoord))
+		&& StartFade(FadeKey);
+	if (!bFade && ActiveFades.Contains(FadeKey))
+	{
+		CancelFade(FadeKey, /*bClearRenderState=*/true);
+	}
 
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
 		ENQUEUE_RENDER_COMMAND(UpdateVoxelSeamMesh)(
-			[Proxy, OwnerChunkCoord, Axis, LODLevel, Verts = MoveTemp(Vertices), Idxs = MoveTemp(Indices), OwnerWorldPosition](FRHICommandListImmediate& RHICmdList) mutable
+			[Proxy, OwnerChunkCoord, Axis, LODLevel, Verts = MoveTemp(Vertices), Idxs = MoveTemp(Indices), OwnerWorldPosition, bFade](FRHICommandListImmediate& RHICmdList) mutable
 			{
-				Proxy->UpdateSeamMeshFromCPUData_RenderThread(RHICmdList, OwnerChunkCoord, Axis, LODLevel, MoveTemp(Verts), MoveTemp(Idxs), OwnerWorldPosition);
+				Proxy->UpdateSeamMeshFromCPUData_RenderThread(RHICmdList, OwnerChunkCoord, Axis, LODLevel, MoveTemp(Verts), MoveTemp(Idxs), OwnerWorldPosition, bFade);
 			}
 		);
 	}
 }
 
-void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis)
+void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis, bool bFadeOut)
 {
 	check(IsInGameThread());
 
+	bool bExisted = false;
 	if (uint8* Mask = SeamBucketSlotMasks.Find(OwnerChunkCoord))
 	{
-		*Mask &= static_cast<uint8>(~(1u << (Axis & 7)));
+		const uint8 SlotBit = static_cast<uint8>(1u << (Axis & 7));
+		bExisted = (*Mask & SlotBit) != 0;
+		*Mask &= static_cast<uint8>(~SlotBit);
 		if (*Mask == 0)
 		{
 			SeamBucketSlotMasks.Remove(OwnerChunkCoord);
 		}
 	}
 
+	// Fade to nothing (R24): a seam that dissolves during a fade-enabled rebuild dithers out with
+	// the surface it belonged to instead of vanishing on the spot.
+	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Axis);
+	const bool bFade = bFadeOut && bExisted && CanCrossfadeSeams() && StartFade(FadeKey);
+	if (!bFade && ActiveFades.Contains(FadeKey))
+	{
+		// The removal command below releases the proxy-side fade state with the bucket.
+		CancelFade(FadeKey, /*bClearRenderState=*/false);
+	}
+
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
 		ENQUEUE_RENDER_COMMAND(RemoveVoxelSeamMesh)(
-			[Proxy, OwnerChunkCoord, Axis](FRHICommandListImmediate& RHICmdList)
+			[Proxy, OwnerChunkCoord, Axis, bFade](FRHICommandListImmediate& RHICmdList)
 			{
-				Proxy->RemoveSeamMesh_RenderThread(OwnerChunkCoord, Axis);
+				Proxy->RemoveSeamMesh_RenderThread(OwnerChunkCoord, Axis, bFade);
 			}
 		);
 	}
@@ -615,6 +655,21 @@ void UVoxelWorldComponent::ClearAllSeamMeshes()
 	check(IsInGameThread());
 
 	SeamBucketSlotMasks.Empty();
+	SeamFadeHolds.Empty();
+
+	// Seam fades end with their buckets (ClearAllSeamMeshes_RenderThread releases the proxy side).
+	TArray<FIntVector4> SeamFadeKeys;
+	for (const TPair<FIntVector4, FActiveChunkFade>& Pair : ActiveFades)
+	{
+		if (FVoxelCrossfadeScheduler::IsSeamKey(Pair.Key))
+		{
+			SeamFadeKeys.Add(Pair.Key);
+		}
+	}
+	for (const FIntVector4& Key : SeamFadeKeys)
+	{
+		CancelFade(Key, /*bClearRenderState=*/false);
+	}
 
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
@@ -689,11 +744,7 @@ void UVoxelWorldComponent::SetFadeMaterial(UMaterialInterface* InFadeMaterial)
 	// Active fades reference MIDs of the old material — finish them instantly
 	if (ActiveFades.Num() > 0)
 	{
-		for (auto& FadePair : ActiveFades)
-		{
-			RetireFadeMIDs(FadePair.Value);
-		}
-		ActiveFades.Empty();
+		CancelAllFades();
 
 		if (FVoxelSceneProxy* Proxy = GetVoxelSceneProxy())
 		{
@@ -729,19 +780,61 @@ bool UVoxelWorldComponent::CanCrossfade() const
 		&& GetVoxelSceneProxy() != nullptr;
 }
 
-void UVoxelWorldComponent::StartChunkCrossfade(const FIntVector& ChunkCoord)
+bool UVoxelWorldComponent::CanCrossfadeSeams() const
+{
+	return CVarVoxelMeshFadeSeams.GetValueOnGameThread() != 0 && CanCrossfade();
+}
+
+float UVoxelWorldComponent::GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
+{
+	const UWorld* World = GetWorld();
+	if (!World || !CanCrossfadeSeams())
+	{
+		return 0.0f;
+	}
+	const double Now = World->GetRealTimeSeconds();
+	const float Duration = CVarVoxelMeshFadeDuration.GetValueOnGameThread();
+	float Remaining = 0.0f;
+	for (uint8 Slot = 0; Slot <= 6; ++Slot)
+	{
+		Remaining = FMath::Max(Remaining, FadeScheduler.GetRemainingSeconds(FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Slot), Now, Duration));
+	}
+	return Remaining;
+}
+
+bool UVoxelWorldComponent::StartFade(const FIntVector4& Key)
 {
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	UWorld* World = GetWorld();
 	if (!Proxy || !World)
 	{
-		return;
+		return false;
 	}
 
-	// A resubmit during an active fade restarts it (the proxy released the older Previous
-	// and retained the just-replaced mesh) — same MIDs, alpha snaps back to 0.
-	FActiveChunkFade& Fade = ActiveFades.FindOrAdd(ChunkCoord);
-	Fade.StartTime = World->GetRealTimeSeconds();
+	const bool bSeam = FVoxelCrossfadeScheduler::IsSeamKey(Key);
+	const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
+	const bool bHold = bSeam ? SeamFadeHolds.Contains(Coord) : ChunkFadeHolds.Contains(Coord);
+
+	// A resubmit during an active fade restarts it (the proxy keeps one retained generation) —
+	// same MIDs, alpha back to 0. Over the concurrent cap a NEW fade is refused: swap instantly.
+	FadeScheduler.SetMaxConcurrent(CVarVoxelMeshFadeMaxConcurrent.GetValueOnGameThread());
+	// Diagnostics: a resubmit while the key fades unheld (alpha < 1) restarts it and drops the mesh it was
+	// fading out of (one retained generation). The seam pipeline defers such resubmits; this shows if any
+	// slip through. A fade at alpha 1 that AdvanceCrossfades has not retired yet has nothing left to drop.
+	{
+		const int32 Kind = bSeam ? 1 : 0;
+		++FadeStartCounts[Kind];
+		if (FadeScheduler.GetRemainingSeconds(Key, World->GetRealTimeSeconds(), CVarVoxelMeshFadeDuration.GetValueOnGameThread()) > 0.0f)
+		{
+			++FadeMidRestartCounts[Kind];
+		}
+	}
+	if (!FadeScheduler.Start(Key, World->GetRealTimeSeconds(), bHold))
+	{
+		return false;
+	}
+
+	FActiveChunkFade& Fade = ActiveFades.FindOrAdd(Key);
 	if (!Fade.InMID)
 	{
 		Fade.InMID = AcquireFadeMID(/*bInvert=*/false);
@@ -752,21 +845,13 @@ void UVoxelWorldComponent::StartChunkCrossfade(const FIntVector& ChunkCoord)
 	}
 	if (!Fade.InMID || !Fade.OutMID)
 	{
-		// MID creation failed — abort the fade and release the mesh the swap already
-		// retained, so nothing lingers on chunks that never remesh again.
+		// MID creation failed — no fade; the caller swaps instantly. Clear any render-side state a
+		// previous fade of this key left, so nothing lingers.
 		UE_LOG(LogVoxelRendering, Warning,
-			TEXT("StartChunkCrossfade: failed to create fade MIDs for chunk %s — swapping instantly"),
-			*ChunkCoord.ToString());
-		RetireFadeMIDs(Fade);
-		ActiveFades.Remove(ChunkCoord);
-
-		ENQUEUE_RENDER_COMMAND(AbortVoxelChunkFade)(
-			[Proxy, ChunkCoord](FRHICommandListImmediate& RHICmdList)
-			{
-				Proxy->ClearChunkFadeState_RenderThread(ChunkCoord);
-			}
-		);
-		return;
+			TEXT("StartFade: failed to create fade MIDs for %s %s — swapping instantly"),
+			bSeam ? TEXT("seam bucket") : TEXT("chunk"), *Coord.ToString());
+		CancelFade(Key, /*bClearRenderState=*/true);
+		return false;
 	}
 
 	Fade.InMID->SetScalarParameterValue(VoxelFadeAlphaParamName, 0.0f);
@@ -775,41 +860,148 @@ void UVoxelWorldComponent::StartChunkCrossfade(const FIntVector& ChunkCoord)
 	const FMaterialRenderProxy* FadeInProxy = Fade.InMID->GetRenderProxy();
 	const FMaterialRenderProxy* FadeOutProxy = Fade.OutMID->GetRenderProxy();
 
-	ENQUEUE_RENDER_COMMAND(AttachVoxelChunkFade)(
-		[Proxy, ChunkCoord, FadeInProxy, FadeOutProxy](FRHICommandListImmediate& RHICmdList)
-		{
-			Proxy->SetChunkFadeState_RenderThread(ChunkCoord, FadeInProxy, FadeOutProxy);
-		}
-	);
+	if (bSeam)
+	{
+		const uint8 Slot = static_cast<uint8>(Key.W);
+		ENQUEUE_RENDER_COMMAND(AttachVoxelSeamFade)(
+			[Proxy, Coord, Slot, FadeInProxy, FadeOutProxy, bHold](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->SetSeamFadeState_RenderThread(Coord, Slot, FadeInProxy, FadeOutProxy, bHold);
+			}
+		);
+	}
+	else
+	{
+		ENQUEUE_RENDER_COMMAND(AttachVoxelChunkFade)(
+			[Proxy, Coord, FadeInProxy, FadeOutProxy, bHold](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->SetChunkFadeState_RenderThread(Coord, FadeInProxy, FadeOutProxy, bHold);
+			}
+		);
+	}
 
 	SetComponentTickEnabled(true);
+	return true;
 }
 
-void UVoxelWorldComponent::CancelChunkCrossfade(const FIntVector& ChunkCoord, bool bClearRenderState)
+void UVoxelWorldComponent::EnqueueClearFadeState(const FIntVector4& Key)
 {
-	FActiveChunkFade Fade;
-	if (!ActiveFades.RemoveAndCopyValue(ChunkCoord, Fade))
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (!Proxy)
 	{
 		return;
 	}
-
-	RetireFadeMIDs(Fade);
-
-	if (bClearRenderState)
+	const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
+	if (FVoxelCrossfadeScheduler::IsSeamKey(Key))
 	{
-		if (FVoxelSceneProxy* Proxy = GetVoxelSceneProxy())
-		{
-			ENQUEUE_RENDER_COMMAND(ClearVoxelChunkFade)(
-				[Proxy, ChunkCoord](FRHICommandListImmediate& RHICmdList)
-				{
-					Proxy->ClearChunkFadeState_RenderThread(ChunkCoord);
-				}
-			);
-		}
+		const uint8 Slot = static_cast<uint8>(Key.W);
+		ENQUEUE_RENDER_COMMAND(ClearVoxelSeamFade)(
+			[Proxy, Coord, Slot](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->ClearSeamFadeState_RenderThread(Coord, Slot);
+			}
+		);
+	}
+	else
+	{
+		ENQUEUE_RENDER_COMMAND(ClearVoxelChunkFade)(
+			[Proxy, Coord](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->ClearChunkFadeState_RenderThread(Coord);
+			}
+		);
 	}
 }
 
-void UVoxelWorldComponent::AdvanceChunkCrossfades()
+void UVoxelWorldComponent::CancelFade(const FIntVector4& Key, bool bClearRenderState)
+{
+	FadeScheduler.Cancel(Key);
+
+	FActiveChunkFade Fade;
+	if (ActiveFades.RemoveAndCopyValue(Key, Fade))
+	{
+		RetireFadeMIDs(Fade);
+	}
+
+	if (bClearRenderState)
+	{
+		EnqueueClearFadeState(Key);
+	}
+}
+
+void UVoxelWorldComponent::CancelAllFades()
+{
+	for (auto& FadePair : ActiveFades)
+	{
+		RetireFadeMIDs(FadePair.Value);
+	}
+	ActiveFades.Empty();
+
+	TArray<FIntVector4> Cancelled;
+	FadeScheduler.CancelAll(Cancelled);
+	PendingHoldReleases.Reset();
+}
+
+void UVoxelWorldComponent::ReleaseHeldFade(const FIntVector4& Key)
+{
+	UWorld* World = GetWorld();
+	if (World && FadeScheduler.Release(Key, World->GetRealTimeSeconds()))
+	{
+		PendingHoldReleases.Add(Key);
+	}
+}
+
+void UVoxelWorldComponent::FlushHoldReleases()
+{
+	if (PendingHoldReleases.Num() == 0)
+	{
+		return;
+	}
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (!Proxy)
+	{
+		PendingHoldReleases.Reset();
+		return;
+	}
+	ENQUEUE_RENDER_COMMAND(ReleaseVoxelFadeHolds)(
+		[Proxy, Keys = MoveTemp(PendingHoldReleases)](FRHICommandListImmediate& RHICmdList)
+		{
+			Proxy->ReleaseFadeHolds_RenderThread(Keys);
+		}
+	);
+	PendingHoldReleases.Reset();
+}
+
+void UVoxelWorldComponent::SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold)
+{
+	check(IsInGameThread());
+
+	if (bHold)
+	{
+		ChunkFadeHolds.Add(ChunkCoord);
+		return;
+	}
+	ChunkFadeHolds.Remove(ChunkCoord);
+	ReleaseHeldFade(FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord));
+}
+
+void UVoxelWorldComponent::SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold)
+{
+	check(IsInGameThread());
+
+	if (bHold)
+	{
+		SeamFadeHolds.Add(OwnerChunkCoord);
+		return;
+	}
+	SeamFadeHolds.Remove(OwnerChunkCoord);
+	for (uint8 Slot = 0; Slot <= 6; ++Slot)
+	{
+		ReleaseHeldFade(FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Slot));
+	}
+}
+
+void UVoxelWorldComponent::AdvanceCrossfades()
 {
 	check(IsInGameThread());
 
@@ -819,6 +1011,8 @@ void UVoxelWorldComponent::AdvanceChunkCrossfades()
 	CoolingFadeInMIDs.Reset();
 	FreeFadeOutMIDs.Append(CoolingFadeOutMIDs);
 	CoolingFadeOutMIDs.Reset();
+
+	FlushHoldReleases();
 
 	if (ActiveFades.Num() == 0)
 	{
@@ -830,67 +1024,99 @@ void UVoxelWorldComponent::AdvanceChunkCrossfades()
 	UWorld* World = GetWorld();
 	if (!Proxy || !World)
 	{
-		for (auto& FadePair : ActiveFades)
-		{
-			RetireFadeMIDs(FadePair.Value);
-		}
-		ActiveFades.Empty();
+		CancelAllFades();
 		SetComponentTickEnabled(false);
 		return;
 	}
 
-	const bool bFadeEnabled = CVarVoxelMeshFade.GetValueOnGameThread() != 0;
-	const float Duration = FMath::Max(0.02f, CVarVoxelMeshFadeDuration.GetValueOnGameThread());
-	const double Now = World->GetRealTimeSeconds();
-
-	TArray<TPair<FIntVector, float>> AlphaBatch;
-	AlphaBatch.Reserve(ActiveFades.Num());
-	TArray<FIntVector> Completed;
-
-	for (auto& FadePair : ActiveFades)
+	TArray<FIntVector4> Completed;
+	if (CVarVoxelMeshFade.GetValueOnGameThread() == 0)
 	{
 		// Kill-switch mid-fade completes everything instantly (releases retained meshes)
-		const float Alpha = bFadeEnabled
-			? static_cast<float>((Now - FadePair.Value.StartTime) / Duration)
-			: 1.0f;
+		FadeScheduler.CancelAll(Completed);
+	}
+	else
+	{
+		const float Duration = FMath::Max(0.02f, CVarVoxelMeshFadeDuration.GetValueOnGameThread());
+		FVoxelCrossfadeScheduler::FAdvanceResult Result;
+		FadeScheduler.Advance(World->GetRealTimeSeconds(), Duration, VoxelFadeHoldFailsafeSeconds, Result);
 
-		if (Alpha >= 1.0f)
+		// Holds nobody released: drop the request too, and tell the proxy they are no longer held.
+		for (const FIntVector4& Key : Result.TimedOutHolds)
 		{
-			Completed.Add(FadePair.Key);
-			continue;
+			const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
+			if (FVoxelCrossfadeScheduler::IsSeamKey(Key))
+			{
+				SeamFadeHolds.Remove(Coord);
+			}
+			else
+			{
+				ChunkFadeHolds.Remove(Coord);
+			}
+			PendingHoldReleases.Add(Key);
+		}
+		if (Result.TimedOutHolds.Num() > 0)
+		{
+			UE_LOG(LogVoxelRendering, Verbose, TEXT("AdvanceCrossfades: %d fade hold(s) released by the failsafe"), Result.TimedOutHolds.Num());
+			FlushHoldReleases();
 		}
 
-		// The MIDs carry the visually-effective parameter to both fade batches
-		FadePair.Value.InMID->SetScalarParameterValue(VoxelFadeAlphaParamName, Alpha);
-		FadePair.Value.OutMID->SetScalarParameterValue(VoxelFadeAlphaParamName, Alpha);
-		AlphaBatch.Emplace(FadePair.Key, Alpha);
-	}
-
-	// One batched render command per tick for the proxy-side bookkeeping copies
-	if (AlphaBatch.Num() > 0)
-	{
-		ENQUEUE_RENDER_COMMAND(UpdateVoxelFadeAlphas)(
-			[Proxy, Batch = MoveTemp(AlphaBatch)](FRHICommandListImmediate& RHICmdList)
+		// The MIDs carry the visually-effective parameter to both fade batches; the proxy keeps
+		// bookkeeping copies (one batched command per kind per tick).
+		TArray<TPair<FIntVector, float>> ChunkAlphas;
+		TArray<TPair<FIntVector4, float>> SeamAlphas;
+		for (const TPair<FIntVector4, float>& Pair : Result.Alphas)
+		{
+			if (FActiveChunkFade* Fade = ActiveFades.Find(Pair.Key))
 			{
-				Proxy->UpdateChunkFadeAlphasBatch_RenderThread(Batch);
+				if (Fade->InMID)
+				{
+					Fade->InMID->SetScalarParameterValue(VoxelFadeAlphaParamName, Pair.Value);
+				}
+				if (Fade->OutMID)
+				{
+					Fade->OutMID->SetScalarParameterValue(VoxelFadeAlphaParamName, Pair.Value);
+				}
 			}
-		);
+			if (FVoxelCrossfadeScheduler::IsSeamKey(Pair.Key))
+			{
+				SeamAlphas.Add(Pair);
+			}
+			else
+			{
+				ChunkAlphas.Emplace(FVoxelCrossfadeScheduler::KeyCoord(Pair.Key), Pair.Value);
+			}
+		}
+		if (ChunkAlphas.Num() > 0)
+		{
+			ENQUEUE_RENDER_COMMAND(UpdateVoxelFadeAlphas)(
+				[Proxy, Batch = MoveTemp(ChunkAlphas)](FRHICommandListImmediate& RHICmdList)
+				{
+					Proxy->UpdateChunkFadeAlphasBatch_RenderThread(Batch);
+				}
+			);
+		}
+		if (SeamAlphas.Num() > 0)
+		{
+			ENQUEUE_RENDER_COMMAND(UpdateVoxelSeamFadeAlphas)(
+				[Proxy, Batch = MoveTemp(SeamAlphas)](FRHICommandListImmediate& RHICmdList)
+				{
+					Proxy->UpdateSeamFadeAlphasBatch_RenderThread(Batch);
+				}
+			);
+		}
+
+		Completed = MoveTemp(Result.Completed);
 	}
 
-	for (const FIntVector& ChunkCoord : Completed)
+	for (const FIntVector4& Key : Completed)
 	{
 		FActiveChunkFade Fade;
-		if (ActiveFades.RemoveAndCopyValue(ChunkCoord, Fade))
+		if (ActiveFades.RemoveAndCopyValue(Key, Fade))
 		{
 			RetireFadeMIDs(Fade);
 		}
-
-		ENQUEUE_RENDER_COMMAND(CompleteVoxelChunkFade)(
-			[Proxy, ChunkCoord](FRHICommandListImmediate& RHICmdList)
-			{
-				Proxy->ClearChunkFadeState_RenderThread(ChunkCoord);
-			}
-		);
+		EnqueueClearFadeState(Key);
 	}
 
 	if (ActiveFades.Num() == 0 && CoolingFadeInMIDs.Num() == 0 && CoolingFadeOutMIDs.Num() == 0)
@@ -1383,6 +1609,9 @@ FVoxelSceneProxy* UVoxelWorldComponent::GetVoxelSceneProxy() const
 void UVoxelWorldComponent::FlushPendingOperations()
 {
 	check(IsInGameThread());
+
+	// Fade holds released this tick (coordinated LOD transitions) reach the proxy in one command.
+	FlushHoldReleases();
 
 	// Early out if nothing to do
 	if (!HasPendingOperations())

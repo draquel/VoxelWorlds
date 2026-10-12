@@ -75,6 +75,13 @@ struct FVoxelChunkFadeState
 
 	/** Masked MID proxy for the outgoing (previous) mesh — FadeInvert=1, dithers out as alpha rises */
 	const FMaterialRenderProxy* FadeOutProxy = nullptr;
+
+	/**
+	 * Held at alpha 0 by a coordinated LOD transition (R24): only the Previous mesh is visible. A
+	 * resubmit while held replaces the never-shown current mesh and keeps Previous, so the surface
+	 * on screen stays the one the transition started from.
+	 */
+	bool bHeld = false;
 };
 
 /**
@@ -233,7 +240,15 @@ public:
 	 * attaches before its swap lands, the GPU path after).
 	 * Must be called on render thread.
 	 */
-	void SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy);
+	void SetChunkFadeState_RenderThread(const FIntVector& ChunkCoord, const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld = false);
+
+	/**
+	 * Clear the held flag of chunk and seam fades that were just released (their alphas start
+	 * rising with the next alpha batch). Keys use FVoxelCrossfadeScheduler's layout (W = -1 for a
+	 * chunk interior, 0..6 for a seam bucket slot).
+	 * Must be called on render thread.
+	 */
+	void ReleaseFadeHolds_RenderThread(const TArray<FIntVector4>& Keys);
 
 	/**
 	 * Per-tick fade alpha updates for all transitioning chunks (bookkeeping copy — the MIDs
@@ -249,7 +264,7 @@ public:
 	void ClearChunkFadeState_RenderThread(const FIntVector& ChunkCoord);
 
 	/**
-	 * End all crossfades (kill-switch flips, material changes, shutdown).
+	 * End all crossfades, chunk and seam (kill-switch flips, material changes, shutdown).
 	 * Must be called on render thread.
 	 */
 	void ClearAllChunkFadeStates_RenderThread();
@@ -295,10 +310,11 @@ public:
 	void ClearAllWaterTiles_RenderThread();
 
 	// ==================== Seam Meshes (seam-ownership P1, Render Thread) ====================
-	// Single-owner face-seam buckets keyed by (owner chunk, axis) — a parallel keyspace beside
-	// the per-chunk maps (the water-tile pattern), deliberately OUTSIDE the chunk crossfade
-	// machinery (seam swaps are tiny and don't fade in v1). Drawn with the terrain material,
-	// including the RVT clone pass (seams must write RVT or the cached ground would crack).
+	// Single-owner seam buckets keyed by (owner chunk, slot) — a parallel keyspace beside the
+	// per-chunk maps (the water-tile pattern). Drawn with the terrain material, including the RVT
+	// clone pass (seams must write RVT or the cached ground would crack). Since R24 they crossfade
+	// like chunks: a swap can retain the previous bucket and both draw with complementary dither,
+	// a bucket can fade in from nothing or out to nothing, and a fade can be held at alpha 0.
 
 	/**
 	 * Update (or create) a face-seam mesh's GPU data. Must be called on render thread.
@@ -311,6 +327,7 @@ public:
 	 * @param Vertices CPU vertex array in owner-local space (moved)
 	 * @param Indices CPU index array (moved)
 	 * @param OwnerWorldPosition World position of the owner chunk's origin
+	 * @param bCrossfade Retain the replaced bucket as the crossfade Previous set instead of releasing it
 	 */
 	void UpdateSeamMeshFromCPUData_RenderThread(
 		FRHICommandListBase& RHICmdList,
@@ -319,13 +336,32 @@ public:
 		int32 LODLevel,
 		TArray<FVoxelVertex>&& Vertices,
 		TArray<uint32>&& Indices,
-		const FVector& OwnerWorldPosition);
+		const FVector& OwnerWorldPosition,
+		bool bCrossfade = false);
 
-	/** Remove one face-seam bucket. Must be called on render thread. */
-	void RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis);
+	/**
+	 * Remove one seam bucket. Must be called on render thread.
+	 * @param bFadeOut Keep the bucket as a Previous set that dithers out under its fade state
+	 *                 (fade to nothing) instead of releasing it now.
+	 */
+	void RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis, bool bFadeOut = false);
 
-	/** Clear all face-seam buckets. Must be called on render thread. */
+	/** Clear all seam buckets (and their fades). Must be called on render thread. */
 	void ClearAllSeamMeshes_RenderThread();
+
+	/**
+	 * Attach crossfade material proxies for a seam bucket (same contract as SetChunkFadeState_RenderThread;
+	 * with no Previous set the bucket fades in from nothing).
+	 * Must be called on render thread.
+	 */
+	void SetSeamFadeState_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis,
+		const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld = false);
+
+	/** Per-tick seam fade alphas (bookkeeping copies; keys are FVoxelCrossfadeScheduler seam keys). Render thread. */
+	void UpdateSeamFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector4, float>>& Alphas);
+
+	/** End a seam bucket's fade: release its Previous set and detach fade state. Render thread. */
+	void ClearSeamFadeState_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis);
 
 	// ==================== Statistics ====================
 
@@ -413,6 +449,21 @@ private:
 
 	/** Per-seam vertex factories */
 	TMap<FVoxelSeamMeshKey, TSharedPtr<FLocalVertexFactory>> SeamVertexFactories;
+
+	/** Retained pre-swap seam buckets mid-crossfade (or fading out to nothing) */
+	TMap<FVoxelSeamMeshKey, FVoxelChunkPreviousMesh> SeamPreviousMeshes;
+
+	/** Fade state for seam buckets mid-crossfade */
+	TMap<FVoxelSeamMeshKey, FVoxelChunkFadeState> SeamFadeStates;
+
+	/** Seam counterpart of RetireOrReleaseChunk_AssumesLocked. Caller must hold ChunkDataLock. */
+	void RetireOrReleaseSeam_AssumesLocked(const FVoxelSeamMeshKey& Key, bool bMoveToPrevious);
+
+	/** Release a seam bucket's retained Previous set and detach its fade state. Caller must hold ChunkDataLock. */
+	void ReleaseSeamFadeState_AssumesLocked(const FVoxelSeamMeshKey& Key);
+
+	/** Release every seam Previous set and fade state. Caller must hold ChunkDataLock. */
+	void ReleaseAllSeamFadeStates_AssumesLocked();
 
 	// ==================== Water Tile Data ====================
 

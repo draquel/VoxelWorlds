@@ -447,6 +447,7 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 	// splits into 500 ms queue wait + 1500 ms async, with the worker window carrying the 100 ms.
 	Clock = 7.0;
 	Reg.RecordSeamCompleted(/*dirtied*/ 1.0, /*ready*/ 5.0, /*scheduled*/ 5.0, /*bNear*/ true, /*dispatched*/ 5.5, /*workerMs*/ 100.0);
+	Reg.NotifySeamJobFinished(FaceAB);
 	{
 		const FVoxelSeamLatencyStats L = Reg.TakeLatencyStats(/*viewer*/ A, /*nearRadius*/ 3);
 		TestEqual(TEXT("interval completed == 1"), L.Completed, 1);
@@ -492,6 +493,7 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 	Reg.DrainSeamJobs(Jobs, /*max*/ 8);
 	Clock = 9.2;
 	Reg.UpdateChunkContent(A, /*version*/ 4);
+	Reg.NotifySeamJobFinished(FaceAB); // the t=9 job lands; the re-dirty above rebuilds it
 	Clock = 9.5;
 	TestEqual(TEXT("Face(A,X) schedules a third time"), Reg.ScheduleReadySeams(/*viewer*/ A, /*nearRadius*/ 3, /*max*/ 0), 1);
 	Reg.RecordSeamJobDropped(/*bOlderJobInFlight*/ true);
@@ -549,6 +551,7 @@ bool FVoxelSeamReadyRotationTest::RunTest(const FString& Parameters)
 	TArray<FVoxelSeamJob> Jobs;
 	Reg.DrainSeamJobs(Jobs, /*max*/ 8);
 	TestEqual(TEXT("drained the job"), Jobs.Num(), 1);
+	Reg.NotifySeamJobFinished(FaceAB); // the job completes
 
 	// Re-dirty while both resident -> enqueued; then B leaves before the scan runs.
 	Reg.UpdateChunkContent(A, /*version*/ 2);
@@ -624,8 +627,10 @@ bool FVoxelSeamResultEpochRejectsDepartedOwnerTest::RunTest(const FString& Param
 	Reg.UpdateChunkRenderedLOD(Owner, /*lod*/ 1);
 	TestTrue(TEXT("content/LOD updates keep the residency"), Reg.IsResidencyCurrent(Owner, CapturedEpoch));
 
-	// The owner unloads while the job is "in flight": its result must be rejected.
+	// The owner unloads while the job is "in flight": its result must be rejected (and the job
+	// reported finished, as the chunk manager does for a rejected result).
 	Reg.UnregisterChunk(Owner);
+	Reg.NotifySeamJobFinished(FaceKey);
 	TestEqual(TEXT("departed owner has epoch 0"), Reg.GetResidencyEpoch(Owner), 0u);
 	TestFalse(TEXT("result for a departed owner is rejected"), Reg.IsResidencyCurrent(Owner, CapturedEpoch));
 
@@ -658,6 +663,61 @@ bool FVoxelSeamResultEpochRejectsDepartedOwnerTest::RunTest(const FString& Param
 	// Instrumentation: rejected results are counted.
 	Reg.RecordSeamResultRejected();
 	TestEqual(TEXT("rejections counted"), (int32)Reg.GetStats().TotalSeamResultsRejected, 1);
+	return true;
+}
+
+// ===========================================================================
+// 8. In-flight re-dirty (R24 P0): a seam whose participant changes while its job
+//    is on a worker is rebuilt once that job finishes. The scheduler used to
+//    drop the newer job and leave the seam clean, so the stale strip stayed
+//    until something else re-dirtied it.
+// ===========================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSeamInFlightRedirtyRebuildsTest,
+	"VoxelWorlds.Streaming.SeamRegistry.InFlightRedirtyRebuilds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSeamInFlightRedirtyRebuildsTest::RunTest(const FString& Parameters)
+{
+	FVoxelSeamRegistry Reg; Reg.SetEnabled(true);
+	const FIntVector A(0, 0, 0);
+	const FIntVector B(1, 0, 0);
+	const FVoxelSeamKey FaceAB(A, EVoxelSeamType::Face, /*axis X*/ 0);
+
+	Reg.RegisterChunk(A, /*version*/ 1, /*lod*/ 0);
+	Reg.RegisterChunk(B, /*version*/ 1, /*lod*/ 0);
+	TestEqual(TEXT("face seam schedules"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 1);
+	TArray<FVoxelSeamJob> Jobs;
+	Reg.DrainSeamJobs(Jobs, /*max*/ 8);
+	TestEqual(TEXT("job handed to a worker"), Jobs.Num(), 1);
+
+	// B changes LOD while the job is out: the seam is dirty again but must not schedule a second,
+	// concurrent job (the manager would have to drop it).
+	Reg.UpdateChunkRenderedLOD(B, /*lod*/ 1);
+	TestTrue(TEXT("re-dirtied during flight"), Reg.IsSeamDirty(FaceAB));
+	TestEqual(TEXT("no second job while the first is in flight"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 0);
+	TestEqual(TEXT("job queue empty"), Reg.GetJobQueueDepth(), 0);
+	TestTrue(TEXT("still dirty, waiting for the job"), Reg.IsSeamDirty(FaceAB));
+
+	// The job lands: the very next scan rebuilds the seam with B's new LOD.
+	Reg.NotifySeamJobFinished(FaceAB);
+	TestEqual(TEXT("rebuilt after the in-flight job finished"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 1);
+	Jobs.Reset();
+	Reg.DrainSeamJobs(Jobs, 8);
+	TestEqual(TEXT("one rebuild job"), Jobs.Num(), 1);
+	if (Jobs.Num() == 1 && Jobs[0].Participants.Num() == 2)
+	{
+		TestEqual(TEXT("rebuild snapshot sees B's new LOD"), Jobs[0].Participants[1].MeshedLODLevel, 1);
+	}
+	TestFalse(TEXT("clean once rescheduled"), Reg.IsSeamDirty(FaceAB));
+
+	// A job that ends with nothing pending leaves the seam clean (no spurious rebuild).
+	Reg.NotifySeamJobFinished(FaceAB);
+	TestEqual(TEXT("nothing to rebuild"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 0);
+
+	// RedirtySeam rebuilds a seam the caller discarded for its own reasons.
+	Reg.RedirtySeam(FaceAB);
+	TestTrue(TEXT("redirtied on request"), Reg.IsSeamDirty(FaceAB));
+	TestEqual(TEXT("and schedules"), Reg.ScheduleReadySeams(A, 3, /*max*/ 0), 1);
 	return true;
 }
 
