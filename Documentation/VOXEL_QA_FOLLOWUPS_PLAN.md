@@ -22,7 +22,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 |----|------|-------|---------------------|-------|------|
 | R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
 | R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
-| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 in VoxelWorlds#PRNUM | VoxelWorlds | L |
+| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 in VoxelWorlds#72 | VoxelWorlds | L |
 
 ## R23 Lingering distant chunk
 
@@ -409,7 +409,7 @@ RHI), the same plus MarchingCubes, Cubic and the Generation GPU-vs-CPU parity te
 - New chunks and new buckets at the frontier still pop (P3, done below).
 - `voxel.Bench.Run` A/B and a W-04 run at normal duration were not done. The user's W-04 re-run is the check.
 
-### R24 P3 as built (first-appearance fade, VoxelWorlds#PRNUM, 2026-10-12)
+### R24 P3 as built (first-appearance fade, VoxelWorlds#72, 2026-10-12)
 
 **Scope.** P3 as designed (a fade without a previous mesh, the distance gate, the optional hold), plus the
 `voxel.Bench.Run` A/B of P4. Not done: the batch budget and HUD skip count (the proxy's over-limit count stayed
