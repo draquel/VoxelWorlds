@@ -1,0 +1,368 @@
+# Voxel QA follow-ups plan (R22-R24)
+
+The first VoxelDemo QA pass (2026-10-11) left three voxel engine items out of the refinement milestones:
+R22 (the map ignores voxel edits), R23 (a distant chunk stayed visible) and R24 (seam pop-in). This plan traces
+each to its cause, proposes a design, and records the decisions taken. The parent plan is
+`Plugins/VoxelWorldPOI/Documentation/QA_REFINEMENT_PLAN.md` in UE5_PluginDev. File references are relative to
+`Plugins/VoxelWorlds/Source/` unless noted; line numbers are as of VoxelWorlds `ebeaefb`.
+
+## Decisions (2026-10-12)
+
+- **Order:** R23, then R22, then R24.
+- **R24:** crossfade seam strips and coordinate LOD transitions: a chunk whose LOD changes keeps its old mesh
+  until its rebuilt seams land (capped wait), then old and new fade together. New frontier chunks fade in.
+- **R22:** the map keeps a per-tile edit overlay that is saved with the world, so edits show right after loading.
+  Areas from saves made before this change update the next time they load.
+- **R22 scope (default, not asked):** every edit source (player digs and builds, POI stamps, shafts, campsite pads).
+  Edits that do not change the top-down surface, such as dungeon interiors, produce no overlay.
+
+## Summary
+
+| ID | Item | Cause | Status of the cause | Repos | Size |
+|----|------|-------|---------------------|-------|------|
+| R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12 | VoxelWorlds | S-M |
+| R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
+| R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Traced in code | VoxelWorlds | L |
+
+## R23 Lingering distant chunk
+
+**Report:** "Noticed a distant chunk which should be unloaded was still visible" (finding, 2026-10-11 15:32 UTC).
+
+**The original hypothesis does not hold up.** Edit-pinned streaming (VoxelWorlds#55) loads any edited chunk inside
+the unload radius (`VoxelStreaming/Private/VoxelChunkManager.cpp:2048-2097`, radius = `GetUnloadDistance()` =
+1.2 × ViewDistance = 48,000 in the demo) and vetoes analytic unloads for edited chunks (`:2127-2139`). That can load
+an edited chunk past the 40,000 view edge, but it logs "Edit-pinned chunk ... queued for load" every time, and no
+surviving editor log from 2026-10-11 or 2026-10-12 contains that line. The log for 15:32 UTC was rotated out (the
+oldest surviving log opens at 15:50 UTC), so this cannot be ruled out for that moment, but it is not needed to
+explain the report. A live repro found two real defects instead.
+
+**Live repro (2026-10-12, VoxelDemo, real RHI).** Start PIE, let streaming settle, then `vox.TP` 70 km east (site
+B), wait 2.5 s while B streams in and its seam jobs are in flight, and `vox.TP` another 70 km (site C). Then run
+`Saved/ClaudeScripts/r23_residency_probe.py`, freeze streaming (`vox.Freeze 1 streaming`) and fly `pie_camera` over B.
+
+1. **Orphaned seam strips (confirmed).** Over site B, with no chunk loaded within about 17 km, an L-shaped pair of
+   seam strips and several fragments float in empty space (`Saved/Screenshots/Claudius/r23_siteB_oblique.png`).
+   Site A, which had settled before the first teleport, shows only a stray fragment.
+   - Cause: `ProcessCompletedSeamMeshes` (`VoxelChunkManager.cpp:3866-3940`) never checks that the owner is still
+     resident. A job dispatched just before its owner unloads completes afterwards; `SeamOwnerSlots.FindOrAdd`
+     (`:3909`) recreates the owner's slot entry and `UpdateSeamMeshFromCPU` (`:3939`) submits a bucket for a chunk
+     that no longer exists. The unload already ran `RemoveSeamMesh` (`:3340-3353`), so nothing ever removes it.
+     The bucket is only replaced if that owner loads again.
+   - Most likely after teleports, respawns and fast travel, when many owners unload while jobs are in flight. It
+     can also happen at the trailing edge of normal travel.
+2. **Mesh results dropped by the completion drain (confirmed).** The probe found chunk (-124,-71,0) still loaded
+   110 km from the pawn, in state `Meshing`, not rendered and not edited, and still there 75 s later with an empty
+   meshing queue (`Meshing: 1` in `GetDebugStats`).
+   - Cause: `while (CompletedMeshQueue.Dequeue(Result) && ProcessedCount < MaxProcessPerFrame)` (`:3201`, cap 8)
+     evaluates `Dequeue` first. When nine or more results are waiting, the ninth is popped and then thrown away.
+     The demo config allows 16 async meshes (`MaxAsyncMeshTasks = 16`, gate at `:2636`/`:2675`), so bursts reach it.
+   - The chunk then stays in `Meshing` and in `AsyncMeshingInProgress` for the rest of the session:
+     - `UpdateUnloadDecisions` only unloads `Loaded` chunks (`:2125`), so it never unloads.
+     - The in-progress skip in `ProcessMeshingQueue` (`:2681-2686`) silently drops every later remesh request, so it
+       never remeshes.
+     - It permanently holds one of the 16 async-mesh slots.
+   - If the dropped result was an LOD remesh of a rendered chunk, the old mesh stays on screen wherever the player
+     goes. That is exactly "a distant chunk that should have unloaded".
+   - The slot leak also fits the open "aged-session throughput loss / worse over long runs" note in the pop-in epic:
+     each leak permanently narrows the mesh pipeline. Not yet measured; see verification.
+   - The same pattern exists in `ProcessCompletedAsyncGenerations` (`:2459`, cap 8 against `MaxAsyncGenerationTasks`
+     8 in the demo, so not reachable today) and `VoxelCollisionManager::ProcessCompletedCollisionCooks`
+     (`VoxelCollisionManager.cpp:904`, cap `voxel.Collision.MaxAppliesPerFrame`, default 4).
+
+**Also found in code (not observed).**
+
+3. **The unload cap counts chunks the manager then refuses.** `FDistanceBandLODStrategy::GetChunksToUnload`
+   (`VoxelLOD/Private/DistanceBandLODStrategy.cpp:441-493`) walks `LoadedChunkCoords` in set order and stops at
+   `MaxChunksToUnloadPerFrame` (16). The manager then skips edit-pinned chunks and chunks not in `Loaded` (such as
+   the stranded chunk above), but they have already used the budget. Set order is stable, so 16 such chunks early
+   in the set would stop every later chunk from unloading. Loaded counts in the 2026-10-11 logs stay at 1,050-1,300,
+   so it did not happen there, but every stranded chunk now costs one slot per frame.
+4. **Edit-pinned loads reach past the view edge.** The original hypothesis: an edited chunk at 1.0-1.2× view
+   distance is loaded on its own, beyond the rest of the terrain.
+
+**Fixes (one PR, VoxelWorlds).**
+
+- **R23a Seam results for departed owners.** Drop a completed seam result unless its owner is still tracked and in
+  the same residency as when the job was dispatched. Add a per-chunk residency epoch to `FVoxelSeamRegistry`
+  (bumped in `RegisterChunk`); the job captures the owner's epoch, and `ProcessCompletedSeamMeshes` compares it before
+  touching `SeamOwnerSlots`. An epoch, not just "is loaded", also rejects a result from an earlier residency of an
+  owner that has since reloaded.
+- **R23b Bounded drains.** Swap the operands in all three loops (`ProcessedCount < Max && Queue.Dequeue(...)`), via
+  one small helper so the pattern cannot come back.
+- **R23c Stranded-state safety net.** Stamp `AsyncMeshingInProgress` with a dispatch time. A chunk in flight for more
+  than `voxel.Stream.MeshStuckSeconds` (default 10) logs a warning, leaves the set and goes back to `PendingMeshing`,
+  so a mesher that loses a request (for example the GPU readback path) cannot strand a chunk either. Give generation
+  the same treatment.
+- **R23d Unload cap after the veto.** The strategy returns every unload candidate; the manager applies the
+  `Loaded`-state and edit-pin filters and only then the per-frame cap. Alternatively it passes a filter callback. The
+  candidates stay sorted farthest first.
+- **R23e Edit-pin distance.** Pin-load edited chunks only within ViewDistance (new `IVoxelLODStrategy::GetLoadDistance()`)
+  and keep them to the 1.2× unload radius. Add the distance to the "Edit-pinned" log line.
+- **R23f Audit command.** `voxel.Stream.AuditResidency` logs:
+  - manager chunks beyond the unload radius, by state;
+  - renderer chunks the manager no longer tracks;
+  - seam buckets whose owner is not tracked;
+  - async jobs older than the stuck threshold.
+
+  This replaces the Python probe and gives QA a one-line check.
+
+**Tests (headless, pure logic).**
+- `VoxelWorlds.Streaming.Residency.BoundedDrainKeepsOverflow`: 20 queued, cap 8: 8 processed, 12 left, none lost.
+- `VoxelWorlds.Streaming.SeamRegistry.ResultEpochRejectsDepartedOwner`: register, capture epoch, unregister: rejected;
+  re-register: the old epoch is still rejected and a new one accepted.
+- `VoxelWorlds.LOD.UnloadCandidates.VetoDoesNotStarve`: 20 refused candidates ahead of one far chunk; the far chunk
+  still unloads within the frame cap.
+
+**Verification.**
+- Rerun the A→B→C teleport repro. `voxel.Stream.AuditResidency` must report zero in every category, and the survey
+  camera over sites A and B must show empty space.
+- Soak: W-04 (`vox.SetSpeed 3000`, `vox.AutoRun 1 0 0`) for 20 minutes with periodic teleports. Log the async-mesh
+  in-flight count at idle before and after the fix: a leak shows as a non-zero idle count that grows. Compare
+  `voxel.Bench.Run` catch-up at minute 1 and minute 20 to settle the aged-session question.
+- In-editor suites: `VoxelWorlds.Streaming`, `VoxelWorlds.LOD`, the DualContour seam suites.
+
+**Risks.** The safety-net timeout must sit well above real mesh times, including hitches and GPU readback queues;
+measure the worst dispatch-to-completion time during a teleport burst before settling on 10 s. Rejecting late seam results can briefly leave a reloaded owner without its seams until
+they are re-dirtied; `RegisterChunk` already dirties all incident seams, so the rebuild is scheduled anyway.
+
+## R22 Map shows player edits
+
+**Report (W-05):** "terrain modifications for POIs are not recognized in the map." R17 made POI pads show through
+conditioning zones; digs, builds, shafts and campsite pads are voxel edits and still do not show.
+
+**What the code does.**
+- Tiles are built analytically on background tasks (`VoxelMap/Private/VoxelMapSubsystem.cpp:579-853`).
+  - Pass 1 samples `WorldMode->GetTerrainHeightAt` plus conditioning zones into a height grid with a 1-pixel apron.
+  - Pass 2 colours each pixel through `FVoxelSurfaceQuery::QuerySurfaceConditions`, with hillshade and analytic
+    water (height < `WaterLevel`).
+  - No chunk voxel data and no edit-layer data are read.
+- One tile is one chunk column: 64 × 64 pixels for 4,800 uu, so one pixel is one voxel column (75 uu).
+- Edits live in `UVoxelEditManager::EditLayers`, a `TMap<FIntVector, FChunkEditLayer>` of sparse per-voxel edits
+  (`VoxelCore/Public/VoxelEditManager.h:408`). The manager is game-thread only.
+  - Add and Subtract edits store a density delta relative to the procedural voxel (`VoxelEditTypes.h:202-247`), so
+    the edited surface cannot be computed from the edit layer alone. It needs the procedural data, which in practice
+    means the chunk is loaded.
+- `OnChunkEdited(ChunkCoord, Source, Center, Radius)` fires on the game thread once per chunk per edit operation.
+  - Undo, redo, clear and load send a zero centre and radius, so key on the chunk coordinate.
+  - Water propagation fires it every propagation frame (System `Set` edits that add the water flag), so listeners
+    must coalesce.
+- The edit-merged chunk data already exists as a shared immutable snapshot: `UVoxelChunkManager::GetSeamVoxelSnapshot`
+  (`VoxelChunkManager.cpp:3953-3979`), private, cached per (chunk, ContentVersion).
+- `FVoxelSurfaceQuery::ExtractSurfaceFromColumn` (`VoxelGeneration/Private/VoxelSurfaceQuery.cpp:165-201`) is the pure,
+  thread-safe surface kernel.
+- The map saves only explored tile coordinates (R25); every tile is regenerated after load. `LoadWorld` applies the
+  document, which queues map tiles, before `LoadEditsFromFile` (`Plugins/VoxelWorldSave/.../VoxelWorldSaveSubsystem.cpp:486, 495`).
+
+**Existing map bugs this work must fix.**
+- A tile re-queued while it is still cached and four tasks are running stays in `PendingTiles` for good. The drain
+  skips cached keys (`VoxelMapSubsystem.cpp:842`), so it never redraws and also blocks later re-queues.
+- A tile re-queued while its task is in flight loses the request: the completion removes it from `PendingTiles`.
+- `HandleTerrainConditioningChanged` (`:522-545`) empties the whole cache, so the map flashes blank until redraws
+  land. Edits must keep the old tile visible until the new one arrives.
+
+**Design: an edit overlay per tile.**
+- A new plain struct `FVoxelMapEditOverlay` (VoxelMap) holds, for one tile:
+  - a column mask of where edits change the top surface;
+  - per masked column: surface height, material ID and a water bit (water-flagged voxel directly above the surface).
+- **Building an overlay (worker).** `FVoxelMapEditOverlay::Build` takes the tile's edited chunk stack and the analytic
+  heights, and returns the overlay:
+  - Edited chunks arrive as (Z, shared snapshot), plus the edit-layer keys, from which it derives the edited columns.
+  - For each edited column it scans top-down from the top of the highest edited chunk with `ExtractSurfaceFromColumn`.
+  - Unedited chunks in that range come from their resident data if loaded, otherwise from the analytic height
+    (solid below it).
+  - A column whose surface and material match the analytic result is left out. This is how buried edits, such as
+    dungeon interiors, produce nothing.
+  - If the scan falls through the bottom of the stack (dug through into an unloaded chunk), the column stays
+    pending.
+- **Gathering (game thread).**
+  - `OnChunkEdited` marks the tile (chunk X, Y) dirty.
+  - A coalescing pass every `voxel.Map.EditRefreshSeconds` (default 0.5) builds the inputs for up to N dirty tiles.
+  - A new public `UVoxelChunkManager::GetEditMergedSnapshot(Coord)` wraps the snapshot cache, so the copy is shared
+    with the seam pipeline and built at most once per content version.
+  - Only edited chunks at or above one chunk below the analytic surface are required. If one of them is not loaded,
+    the tile keeps its current overlay and waits for that chunk's `OnChunkGenerated`, which the map already binds.
+- **Composing tiles.**
+  - The existing tile task captures a copy of the tile's overlay, and of its neighbours' border columns for the
+    hillshade apron.
+  - It uses overlay heights and materials where the mask is set, and the voxel water bit instead of the analytic
+    water test there. A pit dug below the water line therefore stays land-coloured until water actually floods it.
+  - Conditioning changes regenerate tiles from the stored overlays with no chunk data.
+- **Staleness.**
+  - A per-tile generation counter replaces the global one for edit refreshes; stale results re-pend only their tile.
+  - The old tile stays cached until the new one lands.
+  - If an overlay's border columns change, the neighbour tiles are re-queued so the hillshade stays continuous.
+- **Saving (UE5_PluginDev, VoxelWorldSave).**
+  - Overlays go into the world document as `MapEditOverlays`: tile key, mask, then height, material and water for
+    the masked columns, zlib + base64 as in R25, with a format version.
+  - On load they are imported before `LoadEditsFromFile`. That call's `OnChunkEdited` broadcasts then only mark tiles
+    pending, and the saved overlay stays on screen until each chunk loads and the overlay is rebuilt.
+  - Saves made before this change have no overlays and update area by area as chunks load (decision above).
+
+**Alternatives considered.**
+- *Reconstruct from the edit layer alone:* wrong for brush Add/Subtract, which are deltas.
+- *Regenerate procedural data for every edited chunk after load:* exact, but costs a full chunk generation per edited
+  chunk at load, and saves can hold thousands of edited chunks. The user chose the saved overlay instead.
+- *Top-down scene capture of loaded terrain:* lighting-dependent, heavy, and needs the area loaded anyway.
+- *Per-column `QueryEditMergedSurface`:* about 135 point lookups per column on the game thread, roughly 550k per tile.
+
+**Phases.**
+1. Overlay kernel and tests; map queue fixes (drain, in-flight re-queue, keep-cached refresh, per-tile generation).
+2. Live refresh: `GetEditMergedSnapshot`, `OnChunkEdited` coalescing, gather and compose, neighbour apron, water bit.
+3. Persistence: overlay encode/decode, save document field, load ordering, pending-on-load reconciliation
+   (UE5_PluginDev for VoxelWorldSave).
+
+**Tests (headless).**
+- `VoxelWorlds.Map.EditOverlay.DigLowersSurface`: a carved column reports the lower surface and the exposed material.
+- `VoxelWorlds.Map.EditOverlay.BuildRaisesSurface`: an added column reports the new top and the brush material, also
+  when the build crosses into the chunk above.
+- `VoxelWorlds.Map.EditOverlay.BuriedEditIsIgnored`: a cavity under an intact surface produces no mask bits.
+- `VoxelWorlds.Map.EditOverlay.DugThroughStaysPending`: a scan that falls through the stack reports the column pending.
+- `VoxelWorlds.Map.EditOverlay.WaterBitFromVoxels`: a dry pit below the water line stays land; a flooded one is water.
+- `VoxelWorlds.Map.EditOverlay.EncodeDecodeRoundTrip`
+- `VoxelWorlds.Map.Tiles.RequeueWhileCachedRedraws` and `VoxelWorlds.Map.Tiles.PerTileGenerationDiscardsStale`, with
+  the queue policy factored into a static helper so it runs without a world.
+
+**Verification.**
+1. Back up the world save, start PIE in VoxelDemo, open the map and capture it (`EditorAppToolset.CaptureEditorImage`;
+   `pie_screenshot` does not capture UMG).
+2. Dig a crater (`vox.EditMode 1`, or `vox.Dig 20` at the crosshair) and build a three-layer pillar. Within about a
+   second the map shows the crater darker and lower-shaded, and the pillar in its brush material.
+3. Visit a campsite and a dungeon entrance (`vox.Campsite`, `vox.TPPOI Tiled`): the pad and shaft edits show.
+4. Stop and restart PIE: the overlays are on the map before the area loads.
+5. Undo an edit: the tile returns to its previous look.
+6. Restore the save, comparing `savedAtUtc` first.
+
+**Risks.**
+- The voxel surface and the analytic surface differ slightly (height parity is exact, but conditioning and
+  interpolation are not). Overlay columns could show a faint outline against analytic neighbours. If they do, compute
+  every column of an edited tile from voxels while its chunks are loaded.
+- Water-propagation churn is handled by coalescing; the overlay changes only when a water bit flips.
+- Larger saves: only edited tiles with surface changes are stored, typically a few KB each.
+
+## R24 Seam pop-in
+
+**Report (W-04, streaming at speed):** "the only note is related to seam pop-in. If we can get this to blend or be
+better hidden. The streaming itself is very robust."
+
+**What the code does.**
+- Interiors crossfade only on a mesh-to-mesh swap.
+  - `bCrossfade = bChunkExisted && CanCrossfade()` (`VoxelRendering/Private/VoxelWorldComponent.cpp:343, 363`).
+  - The proxy keeps one previous generation (`RetireOrReleaseChunk_AssumesLocked`, `VoxelSceneProxy.cpp:826-876`).
+  - It draws the previous mesh with a fade-out MID and the current with a fade-in MID, using one alpha and the
+    `FadeInvert` complementary dither (`VoxelSceneProxy.cpp:429-483`).
+  - Alpha advances on the game thread (`AdvanceChunkCrossfades`, `VoxelWorldComponent.cpp:798-886`; 0.35 s).
+  - A new chunk (none → mesh) pops, and so does a removal.
+- Seams have no fade path at all.
+  - `UpdateSeamMeshFromCPU` carries no crossfade flag (`IVoxelMeshRenderer.h:219-263`).
+  - The seam draw always uses the shared material (`VoxelSceneProxy.cpp:536-644`).
+  - A rebuild replaces the bucket inside one render command, so it pops.
+- **Ordering.**
+  - A seam is built only after all of its participants' interiors have been submitted (`DispatchSeamJob` drops jobs
+    while any `MeshedLODLevel < 0`, `VoxelChunkManager.cpp:3714-3721`), and lands at least one tick later.
+  - Measured near ready → visible is p50 35 ms, p95 68 ms; frontier seams also wait for the neighbours to load.
+  - So a new chunk appears with open boundaries, then its seams pop in.
+- **LOD changes.**
+  - The new interior is submitted and starts crossfading. `UpdateChunkRenderedLOD` dirties all 26 incident seams
+    (`VoxelSeamRegistry.cpp:488-501`).
+  - Until each rebuilt seam lands, the proxy shows the new interior (fading in), the old interior (fading out) and
+    the old seam strips built for the old LOD.
+  - If a seam lands after the 0.35 s fade, the result is a plain crack or overlap until it does. At 3,000 uu/s the
+    LOD rings move about 0.6 chunks a second, so this happens continuously around the player.
+- **A stale-seam hazard.** A seam re-dirtied while its previous job is still in flight is dropped and left clean
+  (`VoxelChunkManager.cpp:3691-3698`). The stale strip then stays until some later change re-dirties it. This
+  contradicts the "newer result wins" comment in `VoxelSeamRegistry.h:339-341`.
+- **Batch cap.** `MaxMeshBatchesPerFrame = 2000` (`VoxelSceneProxy.cpp:337-342`) covers chunks first, then seams, then
+  water, and a fading chunk counts twice. Seams are therefore the first casualties when the cap is hit.
+
+**Design (decision: crossfade plus coordinated transitions).**
+- **Seam crossfade.**
+  - The proxy gets `SeamPreviousMeshes` and `SeamFadeStates` keyed by `FVoxelSeamMeshKey`, mirroring the chunk maps
+    in their own keyspace (sharing the chunk key collides, as the P1 renderer notes found).
+  - `UpdateSeamMeshFromCPU` gains `bCrossfade`, set when the owner's bucket already exists.
+  - The component reuses the fade MID pools and advances seam fades in the same tick.
+  - RVT clones keep the shared opaque material, as for chunks.
+- **Coordinated LOD transitions.**
+  - When a chunk's interior swap comes from an LOD change, its crossfade starts with alpha held at 0: the old mesh
+    stays fully visible and the new one is uploaded but dithered out.
+  - The manager records the seam keys that change dirtied. As their results land (or are dropped because a
+    participant left), the set empties and the hold releases. `voxel.MeshFade.SeamHoldMs` (default 150) caps the wait.
+  - Rebuilt seams start their own crossfade when they land, so old and new seams blend over the same window as the
+    interior.
+  - Edits do not hold: a dig must show immediately and fades as today.
+- **First appearance.**
+  - A fade state may exist without a previous mesh: the current mesh draws with the fade-in MID until alpha reaches 1.
+  - Used for new chunks and new seam buckets beyond `voxel.MeshFade.AppearMinDistance` (default 7,000, the LOD 0
+    band edge), so nothing near the player turns briefly see-through.
+  - Optionally the same hold applies: a new interior waits (capped) for its ready seams before fading in.
+- **Prerequisite fix.** Instead of dropping a job whose seam is still in flight, mark the seam to re-dirty when the
+  in-flight result completes, so the newest content always gets built.
+- **Batch budget.** Draw seams before far fading chunks, or reserve part of the cap for seams. Show the existing
+  `SkippedOverLimit` count on the Performance HUD so it is visible when the cap binds. Cap concurrent fades (for
+  example 512) and fall back to an instant swap beyond it, because the MID pools are unbounded today.
+
+**Alternatives considered.**
+- *Seam swap crossfade only:* cheaper (M), but leaves the new-interior-beside-old-seam window on every LOD change,
+  which is the main pop at W-04 speed.
+- *Skirts under interior rims:* hide late seams without fading, but poke through in caves and overhangs, and hang
+  below seams that have landed.
+- *Hold the new interior until every incident seam lands, with no fade:* removes cracks but still pops, and frontier
+  seams can wait seconds for neighbours.
+
+**Phases.**
+- **P0 Measure and fix (S).** Seam rebuild reason counters (first build, LOD change, edit, neighbour content) and a
+  "crack window" metric (time an interior is visible while an incident seam is stale or missing) in the `[SeamLat]`
+  log. Fix the in-flight re-dirty, add the proxy's `SkippedOverLimit` count to the HUD, and record a W-04 run with
+  `voxel.MeshFade.Duration 2` as the before reference.
+- **P1 Seam crossfade (M).** Proxy, component and renderer interface changes above.
+- **P2 Coordinated LOD transitions (M).** Hold set in the manager, `SetChunkFadeHold` on the renderer, and the
+  timeout cvar.
+- **P3 First-appearance fade (S-M).** Fade state without a previous mesh, distance gate, optional hold for new chunks.
+- **P4 Qualification.** Bench A/B with `voxel.Bench.Run` (MeshFade off vs on), a W-04 soak, and in-editor suites.
+
+**Tests.**
+- Factor the game-thread fade scheduling into a plain `FVoxelCrossfadeScheduler` in VoxelRendering (which has no
+  tests today):
+  - `VoxelWorlds.Rendering.Crossfade.SwapStartsFade`
+  - `.HoldFreezesAlphaUntilRelease`
+  - `.HoldTimesOut`
+  - `.ResubmitDuringFadeRestarts`
+  - `.AppearFadeRespectsDistanceGate`
+  - `.ConcurrentFadeCapFallsBackToSwap`
+- `VoxelWorlds.Streaming.SeamRegistry.InFlightRedirtyRebuilds`: a seam re-dirtied while in flight is scheduled
+  again after the in-flight result completes.
+- `VoxelWorlds.Streaming.SeamRegistry.LODChangeHoldSet`: an LOD change reports exactly the incident seam keys, and the
+  set empties as they complete or a participant leaves.
+
+**Verification (in-editor, real RHI).**
+- W-04 at 3,000 uu/s with `voxel.MeshFade.Duration 2` (slow motion): no hard-edged strip pops at the LOD rings; the
+  crack-window p95 for LOD changes drops below one frame.
+- Normal duration: the user re-runs W-04.
+- `voxel.Bench.Run` frame P95 within about 1 ms of fade-off; the HUD batch-skip count stays at 0.
+- DualContour seam suites and `VoxelWorlds.Streaming.SeamRegistry.*` green in-editor.
+
+**Risks.**
+- Dithering mismatched old and new geometry is noisy, though less so than a pop. It is the trade already accepted for
+  interiors.
+- More batches during transitions (fading seams count twice): watch the cap.
+- Holding interiors delays detail by up to the hold cap. Near seams land in about 35 ms, so the cap mostly matters
+  at the frontier.
+- A material-relevance regression like the water bug of #45: the proxy must keep OR-ing the fade material's
+  relevance once, never calling `SetPrimitiveViewRelevance` per material.
+
+## Order and pull requests
+
+1. **R23:** one VoxelWorlds PR plus the parent bump.
+2. **R22:** VoxelWorlds (map, snapshot accessor) and UE5_PluginDev (VoxelWorldSave), phases 1-2 in one PR pair,
+   phase 3 in a second.
+3. **R24:** P0 first (it may change the P2 hold cap), then P1-P3, one VoxelWorlds PR per phase.
+
+## Follow-ups found on the way (not in scope)
+
+- `UVoxelSurfaceNavigationSubsystem::HandleChunkEdited` invalidates by edit centre and radius, so undo, redo, clear
+  and load (zero centre) never invalidate the nav grid. Single-voxel `ApplyEdit` also carries a stale centre and
+  radius from the last brush.
+- `FChunkEditLayer::GetMergedVoxel` ignores Add/Subtract deltas; any caller gets the wrong voxel for brush edits.
+- When a non-owner participant unloads, the owner keeps that seam's strip until the neighbour returns. It is at the
+  loaded edge and was not seen, but it is the same "geometry with no live participant" class as R23a.
+- The seam bucket comments in `VoxelSceneProxy.h` still describe per-axis buckets; the manager merges all seven slots
+  into one bucket per owner.
