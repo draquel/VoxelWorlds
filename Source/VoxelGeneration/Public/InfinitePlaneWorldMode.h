@@ -152,6 +152,31 @@ public:
 		const FVoxelNoiseParams& NoiseParams);
 
 	/**
+	 * The terrain height generation produces at (X,Y): base noise with continentalness applied. The one
+	 * analytic height for code that runs off the chunk manager's world mode (POI placement and the pad
+	 * conditioner, which must stay pure and thread-safe); GetTerrainHeightAt wraps it.
+	 *
+	 * @param X,Y           World XY sample position
+	 * @param BaseParams    Un-modulated terrain params (SeaLevel, HeightScale, BaseHeight)
+	 * @param NoiseParams   Terrain noise params
+	 * @param BiomeSnapshot Value-captured biome data for continentalness, or null for the raw base height
+	 * @return World Z of the generated terrain surface (before conditioning zones and edits)
+	 */
+	static float SampleTerrainHeight(
+		float X,
+		float Y,
+		const FWorldModeTerrainParams& BaseParams,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot* BiomeSnapshot);
+
+	/**
+	 * Whether analytic height queries apply continentalness (cvar voxel.Height.AnalyticContinentalness,
+	 * default on). Callers that capture their own biome snapshot honour it the way GetTerrainHeightAt does.
+	 * @return False when the cvar reverts analytic heights to the raw base terrain
+	 */
+	static bool IsAnalyticContinentalnessEnabled();
+
+	/**
 	 * Convert terrain noise to height.
 	 *
 	 * @param NoiseValue Noise sample in range [-1, 1]

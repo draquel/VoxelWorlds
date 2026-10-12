@@ -2255,11 +2255,13 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 	UE_LOG(LogVoxelStreaming, Log,
 		TEXT("Added terrain conditioning zone at (%.0f,%.0f) inner=%.0f falloff=%.0f target=%.0f strength=%.2f; %d total."),
 		Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningZones.Num());
+	OnTerrainConditioningChanged.Broadcast();
 }
 
 void UVoxelChunkManager::ClearConditioningZones()
 {
 	ConditioningZones.Reset();
+	OnTerrainConditioningChanged.Broadcast();
 }
 
 void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const

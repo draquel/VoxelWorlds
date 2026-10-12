@@ -45,19 +45,30 @@ float FInfinitePlaneWorldMode::GetTerrainHeightAt(
 	float Y,
 	const FVoxelNoiseParams& NoiseParams) const
 {
-	// Sample 2D noise at this X,Y position
-	float NoiseValue = SampleTerrainNoise2D(X, Y, NoiseParams);
-
 	// Match generation: modulate the terrain params by continentalness so the analytic height equals
 	// the real generated surface (spawn / nav / POI placement). Gated so it can be reverted at runtime.
 	// Generation applies continentalness whenever a biome config has it enabled; mirror that here.
-	const FVoxelBiomeSnapshot* Ctx = (GVoxelAnalyticContinentalness != 0) ? &BiomeSnapshot : nullptr;
+	const FVoxelBiomeSnapshot* Ctx = IsAnalyticContinentalnessEnabled() ? &BiomeSnapshot : nullptr;
+	return SampleTerrainHeight(X, Y, TerrainParams, NoiseParams, Ctx);
+}
+
+float FInfinitePlaneWorldMode::SampleTerrainHeight(
+	float X,
+	float Y,
+	const FWorldModeTerrainParams& BaseParams,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot* BiomeSnapshot)
+{
+	const float NoiseValue = SampleTerrainNoise2D(X, Y, NoiseParams);
 	float Continentalness = 0.0f;
 	const FWorldModeTerrainParams EffectiveParams =
-		ComputeEffectiveTerrainParams(X, Y, TerrainParams, NoiseParams, Ctx, Continentalness);
-
-	// Convert to terrain height
+		ComputeEffectiveTerrainParams(X, Y, BaseParams, NoiseParams, BiomeSnapshot, Continentalness);
 	return NoiseToTerrainHeight(NoiseValue, EffectiveParams);
+}
+
+bool FInfinitePlaneWorldMode::IsAnalyticContinentalnessEnabled()
+{
+	return GVoxelAnalyticContinentalness != 0;
 }
 
 FIntVector FInfinitePlaneWorldMode::WorldToChunkCoord(
