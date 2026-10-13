@@ -51,7 +51,8 @@ the review's outputs.
 
 Four read-only code surveys (2026-10-12) found the items below. The review confirms or dismisses each one. IDs are
 stable, so the follow-up plan can refer to them. Review A has ruled on KC1-KC9 and added KC10-KC14 and G1-G6 (§12.3, §12.4).
-Review B has ruled on KI1-KI11 and added KI12-KI15 and G7-G9 (§13.6, §13.7).
+Review B has ruled on KI1-KI11 and added KI12-KI15 and G7-G9 (§13.6, §13.7); KI12 was explained and fixed, and G10
+found, in §13.10.
 
 ### Cubic
 
@@ -258,7 +259,8 @@ code sites).
 2. **Review A: cubic** (C1-C7): done 2026-10-13, results in §12 (D1 recommendation: terrain-only). D7 and KC11
    implemented the same day (§12.7), and the compression encode moved to a worker thread (G6, §12.8).
 3. **Review B: island** (I1-I10): done 2026-10-13, results in §13 (I10 not run). KI1-KI3, KI5-KI7 and KI10-KI11
-   confirmed, KI4, KI8 and KI9 partly; new KI12-KI15.
+   confirmed, KI4, KI8 and KI9 partly; new KI12-KI15. KI12 (bimodal LOD re-meshing) explained and fixed the same day:
+   a latch in LOD evaluation, in every world mode (§13.10).
 4. **Second revision of this plan:** confirmed findings become work items with sizes and an order, alongside the
    spherical phasing.
 
@@ -824,7 +826,7 @@ Pass = meets the §5 "pass when"; Refine = works, but needs design or tuning; Bu
 | I1 | **Bug** (KI1, KI3), KI4 partly | The three probes pass headless (`Saved/Logs/ReviewB_I1_probes.log`); numbers in §13.2. The island's own height query matches generation within one voxel in every zone. The InfinitePlane height that POI placement samples is right inside R and up to 7,138 uu wrong past it. Every placed POI past R is wrong: on M, 9 of the 12 POIs in the island's box sit in the falloff band or beyond R+F, and 8 of those 9 stand in the sea or over the void floor, on pads raised 1,900-5,900 uu above the island's surface. The cull probe reproduces KI3: with the demo's origin, 1,098 land columns are culled and 1,347 floor-only columns kept. The two existing island tests were not re-run separately; the full suites last passed in §12.8 |
 | I2 | **Refine** | S reads as an island on the map and from the air (`rbI2_islandS_map`, `rbI2_S_lagoon_oblique`): lagoons, inner seas and coastline all come from the noise inside a circle. Problems: a round plateau stands in the sea at the north edge (a campsite pad, KI1), visible on the map; from outside the loaded ring the island is a slab floating in the void, with the water plane, the −4,500 floor and the cave-cut bottom layer showing (`rbI2_S_edge_outside`, KI2); under water a vertical 1,000 uu wall rings the island at R+F (`rbI2_S_edge_cliff_underwater`). Rectangle shape with Exponential falloff (`RB_S_RectExp`, temporary): a rectangular island with straight coasts and diagonal creases from the Chebyshev falloff (`rbI2_S_RectExp_map`, `rbI2_S_RectExp_oblique`). Map exploration runs past the coast (KI9). A survey from a camera 48,000 uu up shows chunk-sized blank rectangles in the lagoon; at 4,500 uu the same water renders whole, so they are a camera artefact |
 | I3 | **Pass** | The whole of S is resident from the centre: 1,518 chunks, settled 247 MB voxel data, 23 MB renderer, audit 0, 9 s to drain. After visits to three coasts the centre holds 1,878 chunks and 266 MB: the outer ring stays loaded, bounded by the island cull (§13.4). Memory returns to the same level |
-| I4 | **Refine** (inside the island) / **Bug** (along the coast) | Inside the island frame P95 is within +10% of the control and the island keeps up at v1500; manager P95 is +17-21% and the generation queue backs up at v3000, from the 35-55% more chunks per view (KI5). Along the coast (orbit at R) the island misses every threshold: frame +14-30%, manager +23-38%, catch-up 2.6-3.5× at v1500-v3000. The island's LOD re-meshing is **bimodal** between identical cold runs (KI12, new): 12,344-12,500 or 1,341-1,372 LOD re-meshes on the same route; in the low mode the island beats the control. Headless (CPU generation) the island lands in the high mode twice out of two: frame P95 +24%, manager P95 +28%. L's interior chord equals M's: per-frame cost does not depend on island size. §13.3 |
+| I4 | **Refine** (inside the island) / **Bug** (along the coast) | Inside the island frame P95 is within +10% of the control and the island keeps up at v1500; manager P95 is +17-21% and the generation queue backs up at v3000, from the 35-55% more chunks per view (KI5). Along the coast (orbit at R) the island misses every threshold: frame +14-30%, manager +23-38%, catch-up 2.6-3.5× at v1500-v3000. The island's LOD re-meshing is **bimodal** between identical cold runs (KI12, new): 12,344-12,500 or 1,341-1,372 LOD re-meshes on the same route; in the low mode the island beats the control. Headless (CPU generation) the island lands in the high mode twice out of two: frame P95 +24%, manager P95 +28%. L's interior chord equals M's: per-frame cost does not depend on island size. §13.3. *(§13.10: the low mode skipped LOD work it owed; the high-mode rows are the island's numbers, and KI12 is fixed)* |
 | I5 | **Bug** (KI2) | Water on: the pawn walks into the sea at 36,000 uu (S), swims past R+F at 171 uu/s to the end of the loaded water at 48,000 uu (the island cull edge), drops out of the water and falls at 4,000 uu/s. About 260 s later KillZ (−1,048,575) destroys it and nothing respawns it: the player is left with no pawn. Water off: the pawn walks down the falloff slope, drops 1,000 uu off the cliff at R+F onto the floor, crosses the floor ring and falls off its edge at 48,000 uu. `vox.Debug.Capture` never logs READY→NOT-READY, because the chunks past the edge were never loaded. The minimap keeps exploring the sea |
 | I6 | **Bug** (KI1, KI9) | M, every band and off-island POI from the probe visited. The City in the falloff band stands on a cylinder 3,800 uu tall rising out of the sea (`rbI6_M_city_band`); a tiled dungeon's pad makes a round islet with the elevator on top (`rbI6_M_dungeon_band`); a campsite pad lifts 1,900 uu above the sea floor. The dungeon itself is dry and works (entrance room walkable, boss alive and lethal, respawn on the pad). The Tower 297,696 uu out streams its claim volume over the void, with no ground below it. Map markers: 20 within 400,000 uu, of which 3 inside R, 5 in the band and 12 past R+F. Map exploration: 1,497 tiles after the tour, 786 in the band and 124 past R+F (out to 268,000 uu). Working: scatter stops at the coast (all 13,689 instances inside R), surface NPCs never spawn off the island and despawn deer that wade into deep water (5 in the session, no log spam), `vox.NavPath` returns a partial path to the shore and NO PATH to a point past the coast, and a full day/night cycle ran (day 1 12:00 to day 2 12:55, every phase). VoxelDemo has no PCG components, so the PCG part of KI9 is code-only |
 | I7 | **Refine** (KI8) | Spawn at the centre (no PlayerStart, origin): stands on land. Origin in the falloff band under water (`RB_S_SpawnCoast`): the spiral finds land one ring (4,800 uu) away and the pawn stands. Origin 30,000 uu past R+F with water on (`RB_S_SpawnOff`): land found at ring 8 (38,400 uu) and the pawn stands; past the 50,000 uu search it would fail. Origin off the island with water off (`RB_S_SpawnOffNoWater`): the spawn takes the floor height −4,500 as dry land at (0, 0), 70,000 uu from the centre, where nothing is generated; the character waits for collision that never comes and stays frozen (MOVE_NONE) |
@@ -936,7 +938,9 @@ What the numbers say:
 - **The coast is the worst place.** On the perimeter at R the view holds sea, falloff band and void floor, all at full column
   depth; the island misses every threshold there.
 - **LOD re-meshing is bimodal (KI12).** Four island chord runs at v3000 from identical cold starts gave 12,500, 12,344,
-  1,341 and 1,372 LOD re-meshes; the two control runs gave 7,168 each. See §13.6.
+  1,341 and 1,372 LOD re-meshes; the two control runs gave 7,168 each. See §13.6. *(Explained and fixed in §13.10: a
+  latch decided at the start of the route whether LOD was evaluated every tick or only at chunk changes. The low-mode
+  runs left about 285 chunks at the wrong LOD. Use the high-mode rows.)*
 
 **L** (scale check; its chord lies inside the island, so its catch-up is a real interior one):
 
@@ -962,7 +966,8 @@ up (6.48 vs 2.84 s), with 62% more chunks at peak.
 CPU generation keeps up with v3000 on neither side (about half the view is loaded on average), so these runs measure a
 generation-starved frontier. The two island runs agree within 1%: headless the island lands in KI12's high mode every
 time, with 8× the control's LOD re-meshes, 2.3× its meshes, frame P95 +24% and manager P95 +28%, the direction PIE's high
-mode shows. Peak voxel data is +70%; systems memory is −5% because the island carries less scatter.
+mode shows. *(§13.10: the control's headless run was in the low mode, so this compares the two regimes; §13.10 has both
+sides in the same regime.)* Peak voxel data is +70%; systems memory is −5% because the island carries less scatter.
 
 ### 13.4 Full residency on S (I3)
 
@@ -1023,7 +1028,8 @@ render orphans or seam orphans.
   and then holds at 7.0-7.1 GB.
 - **The re-mesh rate doubled at minute 10** (12,500 to 24,500 requests per window) and stayed there, with no frame cost.
   The run's totals are 62,373 LOD re-meshes and 36,600 "other" re-queues; the chord runs had 0-3 "other". Not isolated;
-  it may be KI12's switch happening inside one session.
+  it may be KI12's switch happening inside one session. *(§13.10: not KI12. Minute 10 is the start of the second lap, and
+  the bench counted every reloaded chunk's first mesh as a re-mesh (G10, fixed). Executed meshes stayed flat.)*
 - **After the bench** the pawn went back to its start, 150,000 uu from any loaded terrain, and fell through the world to
   KillZ before collision arrived (G9; not island-specific).
 - The bench flies the pawn, so this run cannot see walking fall-throughs; I5's capture walked the island to its edge with
@@ -1049,7 +1055,7 @@ render orphans or seam orphans.
 
 | ID | Finding | Evidence | Impact |
 |----|---------|----------|--------|
-| KI12 | **Island LOD re-meshing is bimodal between identical cold runs.** M's v3000 chord gave 12,500, 12,344, 1,341 and 1,372 LOD re-meshes in four runs (same command, fresh world, same path to within 31 uu of height). In the high mode chunks mesh at LOD 1 five times as often (5,020 vs 987 meshes) and frame / manager P95 are 41 / 14.2-14.5 ms; in the low mode 32 / 9.7-10.0 ms. Headless (CPU generation) both island runs landed in the high mode (9,269 and 9,304 against the control's 1,142, §13.3), so the high mode may be the island's normal state and the PIE low mode the variant. Judging by the LOD counts, the PIE mode held for whole stretches of the session (the M batch high, the L batch low), and it may also switch inside a run (the soak's re-mesh rate doubled at minute 10, §13.5). It is not explained by a save load, the override, the island parameters or Python state, all checked. The control gave 7,168 twice | Bench JSON `rbI4_M_chord_v3000{,b,c,d}`; meshing log LOD counts | The island's streaming numbers have two values; its threshold verdicts depend on which mode a run lands in. Likely an ordering- or timing-dependent path in LOD evaluation, which only runs on a viewer chunk change or a drained-queue sweep (`VoxelChunkManager.cpp:768-791`) and drops candidates past the per-frame cap. Needs an instrumented run |
+| KI12 | **Island LOD re-meshing is bimodal between identical cold runs.** M's v3000 chord gave 12,500, 12,344, 1,341 and 1,372 LOD re-meshes in four runs (same command, fresh world, same path to within 31 uu of height). In the high mode chunks mesh at LOD 1 five times as often (5,020 vs 987 meshes) and frame / manager P95 are 41 / 14.2-14.5 ms; in the low mode 32 / 9.7-10.0 ms. Headless (CPU generation) both island runs landed in the high mode (9,269 and 9,304 against the control's 1,142, §13.3), so the high mode may be the island's normal state and the PIE low mode the variant. Judging by the LOD counts, the PIE mode held for whole stretches of the session (the M batch high, the L batch low), and it may also switch inside a run (the soak's re-mesh rate doubled at minute 10, §13.5). It is not explained by a save load, the override, the island parameters or Python state, all checked. The control gave 7,168 twice | Bench JSON `rbI4_M_chord_v3000{,b,c,d}`; meshing log LOD counts | The island's streaming numbers have two values; its threshold verdicts depend on which mode a run lands in. Likely an ordering- or timing-dependent path in LOD evaluation, which only runs on a viewer chunk change or a drained-queue sweep (`VoxelChunkManager.cpp:768-791`) and drops candidates past the per-frame cap. Needs an instrumented run. **Explained and fixed (§13.10):** the sweep flag froze in whatever state it had when the queues last emptied, near the start of the route; set, LOD was evaluated every tick, clear, only at chunk changes, 8 at a time. The low mode was the broken one. It affected every world mode; the control's headless run was in it |
 | KI13 | **Island LOD distance is 2D everywhere, so whole columns sit in the near bands.** InfinitePlane measures 3D distance, so deep and high chunks fall into the far band and compress; the island keeps them uncompressed | At the same spawn: 224 resident (uncompressed) chunks vs the control's 113; settled voxel data 247 vs 135 MB (`DistanceBandLODStrategy.cpp:644-648`) | Memory, alongside KI5; the reason KI11's audit disagrees |
 | KI14 | **No recovery when the pawn leaves the generated world.** KillZ destroys the pawn and nothing respawns it: nothing in the project overrides `FellOutOfWorld`, so the engine default destroys the actor and the death and respawn path never runs. The character's chunk-based wait has no timeout, so a spawn or a restored save position where no terrain will ever generate freezes the pawn for good | I5 (water on: no pawn after KillZ), I7 (water off, off the island), I8 (radius change) | Soft locks; any world edge design needs this |
 | KI15 | **Map tile images are never evicted.** Each explored tile keeps a 64×64 `FColor` image (16 KB) for the session | `VoxelMapSubsystem.cpp:1648` (`TileCache.Add`, no removal outside `Deinitialize`); `VoxelMapTypes.h:27` | Mode-independent, but in a finite world it is the first cost that grows with the world: a fully explored L is about 0.55 GB of map tiles (§13.8) |
@@ -1061,6 +1067,7 @@ Tooling found on the way:
 | G7 | Streaming follows the view target, not the pawn: a `pie_camera` survey camera left in place starves the pawn's own chunks (a `vox.TP` settle then times out after 45 s). Release the camera (`pie_camera release:true`) before moving the pawn |
 | G8 | `follow=` routes over the sea drown the pawn (G4); a drowned pawn respawns at the spawn and invalidates the run. Workaround used here: zero `DrowningDamagePerSecond` on the player Blueprint's CDO in memory (`rb_nodrown_cdo.py`). The bench could make its fly pawn immune instead |
 | G9 | When a bench ends it puts the pawn back at its start position without a settle hold. Far from loaded terrain (here 150,000 uu) the pawn falls through the world before collision arrives |
+| G10 | *(found with §13.10)* The bench's re-mesh ("thrash") counter remembered every chunk it had meshed and never forgot one on unload, so on a route that revisits terrain each reloaded chunk's first mesh counted as a re-mesh ("other"). It made §13.5's soak look as if its re-mesh rate doubled at the start of lap 2. **Fixed (§13.10):** the chunk is forgotten when it unloads |
 
 ### 13.8 How large an island the streaming-only model holds
 
@@ -1091,6 +1098,149 @@ The critical list in §6 stands, with this evidence and these additions:
   fallback for the chunk-based wait.
 - **Slab culling for islands** (KI5) and **3D-aware LOD distance for islands, or a per-column vertical band** (KI13) are the
   performance items: together they explain the chunk excess, the generation backlog and most of the coast misses.
-- **Find the cause of KI12** before the next island bench; until then island benches need at least two runs per route.
+- ~~**Find the cause of KI12** before the next island bench; until then island benches need at least two runs per route.~~
+  Done (§13.10): KI12 was a latch in LOD evaluation, in every world mode. It is fixed, and one run per route is enough
+  again. Island numbers to use are the high-mode rows of §13.3.
 - **Save fingerprint** (KI7), **one island-centre definition** (KI3) and **the bounds query** (KI9) as already listed.
 - Add: **evict or downsample map tiles** (KI15) before islands larger than about 10 km.
+
+### 13.10 KI12 explained and fixed: when LOD levels are evaluated (2026-10-13)
+
+**Cause.** `UVoxelChunkManager::EvaluateLODLevelChanges` walks every loaded chunk, compares its committed LOD with the
+strategy's current answer, and queues at most `MaxLODRemeshPerFrame` of the differences (8 in the demo); the rest wait for
+the next evaluation. The evaluation ran only on a tick where the viewer entered another chunk, or while a sweep flag
+was set (`VoxelChunkManager.cpp:765-791` as of `e1066ef`). The flag was set on any tick where all five queues (generation
+queued and in flight, meshing queued and in flight, upload) were empty, and cleared only by an evaluation on such a tick
+that left the meshing queue empty. While streaming the queues are never empty, so the flag kept whatever state it had at
+the last tick they were:
+
+- **Flag set: LOD evaluated every tick** ("high mode"). Every LOD change is queued within a frame or two.
+- **Flag clear: LOD evaluated only at viewer-chunk changes**, about 121 on the 500,000 uu chord, 8 re-meshes each
+  ("low mode"). Everything past those 8 waits for the next chunk change, so the backlog never drains.
+
+The island chord starts at R+F, where little loads, so the queues go empty dozens of times in its first 25,000 uu (47-136
+ticks in the four §13.3 runs) and then not again until the route leaves the island. The flag's state at the last of
+those ticks, set if an LOD re-mesh was still queued and clear if not, decided the whole run. That is a race between
+meshing latency and the viewer's advance, hence two modes from identical starts.
+
+**Evidence in the §13.3 CSVs**, before any new code:
+
+- **Low runs (b, d):** 944 and 948 of their 1,343 and 1,372 re-meshes were queued on the tick after a viewer-chunk change,
+  and 160 of run b's 176 increments are exactly 8. The rest came at the end of the route, past the island, where the
+  queues drain and the flag sets.
+- **High runs (a, c):** re-meshes on 1,873 and 1,853 ticks of the traverse, spread along the whole route at 570-830 per
+  25,000 uu.
+- **The control is exposed to the same race.** Its PIE runs happened to latch (7,168 twice). Its headless run did not:
+  921 of its 1,142 re-meshes came the tick after a chunk change, and 120 of its 136 increments were batches of 8. So
+  the headless "8× the control" in §13.3 compared the two regimes, not the two world modes.
+- **The soak's doubling at minute 10 (§13.5) is not KI12.** Its log shows executed DC meshes flat at about 6,000 a minute
+  and "LOD level changes" lines flat at about 400 a minute for all 25 minutes. The extra ~2,400 re-queues a minute from
+  minute 10 on add up to its 36,600 "other" re-queues, and minute 10 is when the orbit starts its second lap
+  (2π × 150,000 uu at 1,500 uu/s = 628 s, the view reaching lap-1 terrain 27 s earlier). The bench remembered every
+  chunk it had meshed and never forgot one on unload, so each chunk reloaded on lap 2 counted as a re-mesh (G10, fixed
+  below).
+
+**The high mode is the intended one.** New bench columns count, every sample, the Loaded chunks whose committed LOD
+differs from the strategy's answer with nothing queued for them: LOD changes the manager has not even queued, and the
+subset the strategy puts at LOD 0 (near the viewer, shown coarser than they should be). In the low mode about 285 chunks
+were at the wrong LOD on average, 32 of them near the viewer, on 99% of ticks. With the fix below the backlog averages
+1.7-2.1 chunks, and the near ones are a one-tick blip at each chunk change (the sample is taken before that tick's
+evaluation). The low mode was cheaper only because it skipped LOD work it owed.
+
+**Fix** (`VoxelStreaming/Public/VoxelLODEvalSchedule.h`, used by `UVoxelChunkManager::TickComponent`). The flag is
+replaced by `FVoxelLODEvalSchedule`. No trigger depends on what the queues held at some earlier moment. LOD levels are
+evaluated when:
+
+- the viewer entered another chunk, or moved 100 uu since the last evaluation (LOD bands are distances from the viewer's
+  position, not its chunk);
+- the last evaluation stopped at the per-frame cap with candidates left;
+- the pipeline went from busy to idle since the last evaluation that queued nothing. This sweep keeps the old flag's
+  purpose (a still viewer gets chunks that became Loaded with a stale LOD), ends at the first evaluation that queues
+  nothing, idle or not, and costs nothing while the viewer stands still in a settled world (the flag re-evaluated every
+  idle tick).
+
+`EvaluateLODLevelChanges` now returns its candidate count, the number queued and whether it hit the cap.
+
+**Bench.** CSV `LODCand` (candidates found by this tick's evaluation, −1 when none ran), `LODQueued`, `LODStale`, `LODStaleNear`;
+JSON `lodEvalFrameFraction`, `lodStaleMean/P95/Max`, `lodStaleNearMean/Max` over the traverse. `LODStale` walks the loaded
+chunks each sample (`GetBenchLODBacklog`), outside the manager's timed sections. G10: the "ever meshed" set forgets a chunk
+when it unloads, so a reloaded chunk's first mesh is not counted as a re-mesh. Tests:
+`VoxelWorlds.Streaming.LODEvalSchedule.SameRegimeWhateverTheIdleHistory` (models the old flag too: the same busy traverse
+evaluates every tick or only at chunk changes depending on one idle tick, and the schedule evaluates the same ticks
+either way), `.CapLeftoversEvaluateNextTick`, `.Triggers`. The `VoxelWorlds+VoxelWorldSave` suites pass 218/218 headless
+on the final commit. No meshing or generation code changed, so the GPU tests that only run in the editor were not re-run.
+
+**Method.** VoxelWorlds `285cf3c` (branch `fix/ki12-island-lod-bimodal`), built in a worktree. That commit carries a
+temporary cvar, `voxel.LOD.LegacySweep 1`, that ran the old flag (removed in the next commit), so legacy and fixed rows
+come from one binary; the legacy path logged the flag's state each time the pipeline turned busy. PIE in the level viewport, background throttle off, one cold fresh
+world per run, `DrowningDamagePerSecond` 0 in memory, the §13.3 chord: `voxel.Bench.Run <tag> 3000 500000 warmup=120
+start=-250000:0 dir=1:0 follow=300`, legacy and fixed runs interleaved. Unlike §13.3, this editor was not the foreground
+window and the main checkout's editor stayed open beside it, so frame and manager times compare only within these tables.
+JSON reports are in [Research/Bench/KI12/](Research/Bench/KI12/).
+
+**PIE, island M chord v3000:**
+
+| Run | LOD re-meshes | Ticks evaluating LOD | Ticks at the cap | Candidates per evaluation, mean | Stale LOD, mean / max | Stale near the viewer, mean / max | Frame P95 ms | Manager P95 ms | JSON |
+|-----|---------------|----------------------|------------------|---------------------------------|-----------------------|-----------------------------------|--------------|----------------|------|
+| Legacy a | 1,288 | 3% | 126 | 214 | 284 / 394 | 32.6 / 44 | 47.0 | 13.5 | `20261013_085644_ki12_L_M_v3000a` |
+| Legacy b | 1,308 | 3% | 126 | 229 | 291 / 394 | 31.8 / 44 | 53.0 | 15.1 | `20261013_090330_ki12_L_M_v3000b` |
+| Legacy c | 1,300 | 3% | 126 | 222 | 286 / 394 | 32.4 / 44 | 48.6 | 14.6 | `20261013_091022_ki12_L_M_v3000c` |
+| Legacy d | 1,306 | 3% | 126 | 221 | 287 / 394 | 32.4 / 44 | 49.5 | 14.5 | `20261013_091716_ki12_L_M_v3000d` |
+| **Fixed a** | **11,231** | 80% | 1,027 | 4.8 | 2.1 / 30 | 0.25 / 16 | 54.9 | 18.1 | `20261013_090006_ki12_N_M_v3000a` |
+| **Fixed b** | **10,683** | 86% | 920 | 4.4 | 1.7 / 26 | 0.25 / 16 | 58.4 | 19.3 | `20261013_090655_ki12_N_M_v3000b` |
+| **Fixed c** | **10,295** | 86% | 888 | 4.4 | 1.7 / 24 | 0.23 / 16 | 60.4 | 19.4 | `20261013_091350_ki12_N_M_v3000c` |
+| **Fixed d** | **10,621** | 85% | 918 | 4.5 | 1.7 / 28 | 0.23 / 16 | 58.0 | 19.0 | `20261013_092040_ki12_N_M_v3000d` |
+| Control, fixed a | 7,145 | 85% | 29 | 2.0 | 0.2 / 8 | 0.02 / 2 | 58.7 | 19.2 | `20261013_092416_ki12_N_C_v3000a` |
+| Control, fixed b | 7,166 | 83% | 34 | 2.0 | 0.2 / 8 | 0.03 / 2 | 56.3 | 18.9 | `20261013_092752_ki12_N_C_v3000b` |
+
+- **The legacy flag decided every run the same way here:** in all four the log shows it set at one or two busy turns
+  in the first 1,100 ticks and clear at the last (ticks 710, 1,043, 1,045, 1,055), so all four ran low. The §13.3 session
+  drew high in its M batch. The race is the same, only the odds differ with the machine's state.
+- **Fixed: one regime, run after run.** 10,295-11,231 island LOD re-meshes, within 5% of their mean. The spread follows the
+  number of ticks (4,204-4,632): the island hits the cap of 8 on about 21% of ticks, and the slower a run, the more LOD
+  changes fold into requests that are still queued. The control's two runs land within 0.3% of each other and of
+  §13.3's 7,168, which was the latched regime: the fix leaves the control where it already was.
+- **The island needs more LOD throughput than the control** (cap reached on 888-1,027 ticks against 29-34), because its
+  2D LOD distance changes whole columns at once (KI13). Its backlog still stays near zero.
+- **The owed LOD work has a cost:** fixed vs legacy (low) island, frame P95 57.9 vs 49.5 ms (+17%) and manager P95 19.0 vs
+  14.4 ms (+32%), means of the four runs each. §13.3's high and low runs differed the same way (+28%, +46%).
+- **Same regime, same cost (this setup):** fixed island vs fixed control, frame P95 57.9 vs 57.5 ms and manager P95 19.0 vs
+  19.1 ms, for 1.5× the LOD re-meshes. §13.3's foreground high-mode rows (+9% frame, +17% manager) remain the island's
+  threshold numbers; its low-mode rows (−14%, −20%) are not valid, because they owed the LOD work they skipped.
+
+**Headless CPU** (`voxel_bench_sweep.ps1 -PreCmds "voxel.LOD.LegacySweep 1"` or `0`, the same chord, the worktree
+editor idle and the main editor open; the first row's build label reads `73613df-dirty` because the sweep took it before
+`285cf3c` was committed, from the same binary):
+
+| Run | LOD re-meshes | Ticks evaluating LOD | Stale LOD, mean / max | Stale near the viewer, mean / max | Frame P50 / P95 / P99 ms | Manager P95 ms | JSON |
+|-----|---------------|----------------------|-----------------------|-----------------------------------|---------------------------|----------------|------|
+| Island, legacy | 6,895 | 99.4% | 0.3 / 48 | 0.10 / 14 | 4.0 / 11.0 / 17.4 | 7.2 | `20261013_093217_ki12HL_L_M_v3000` |
+| **Island, fixed** | **7,149** | 14.9% | 0.8 / 28 | 0.10 / 14 | 3.8 / 10.7 / 16.9 | 6.9 | `20261013_093619_ki12HL_N_M_v3000` |
+| **Island, fixed, repeat** | **6,908** | 15.1% | 0.7 / 28 | 0.10 / 14 | 3.9 / 10.8 / 17.1 | 7.0 | `20261013_094930_ki12HL_N_M2_v3000` |
+| Control, legacy | 1,129 | 1.2% | 159 / 245 | 4.0 / 9 | 4.6 / 9.5 / 13.7 | 5.5 | `20261013_094050_ki12HL_L_C_v3000` |
+| **Control, fixed** | **5,996** | 16.5% | 0.5 / 8 | 0.10 / 3 | 5.1 / 10.4 / 14.1 | 6.6 | `20261013_094522_ki12HL_N_C_v3000` |
+| **Control, fixed, repeat** | **5,888** | 16.6% | 0.5 / 8 | 0.10 / 3 | 5.2 / 10.5 / 14.2 | 6.6 | `20261013_095401_ki12HL_N_C2_v3000` |
+| Island, final commit, one editor open | 9,162 | 12.1% | 0.9 / 28 | 0.10 / 14 | 3.0 / 8.9 / 15.3 | 5.6 | `20261013_100839_ki12HL_F_M_v3000` |
+
+- **The old flag gave both regimes from one binary:** high for the island and low for the control, as in §13.3's headless
+  runs (9,269 / 9,304 and 1,142 there). With the old flag, the PIE island here was low four times and the headless island
+  high.
+- **Fixed: one regime, both world modes.** Island 7,149 and 6,908 (3.4% apart), equal to the latched island run; control
+  5,996 and 5,888 (1.8% apart). Headless ticks take about 3 ms, so the 100 uu trigger evaluates every 6-7 ticks, and the
+  backlog stays below one chunk on average.
+- **Island vs control in the same regime:** 1.2× the LOD re-meshes (not §13.3's 8×), frame P95 +3% (10.7-10.8 vs
+  10.4-10.5 ms) and manager P95 +5% (6.9-7.0 vs 6.6 ms). §13.3's headless "+24% frame / +28% manager" set the island's
+  high regime against the control's low one; here the low-regime control's manager P95 is 5.5 ms against 6.6 ms fixed.
+- **Headless counts follow machine load, not the regime.** The last row is the final commit (the cvar removed; label
+  `285cf3c-dirty`), run after this session's editor was closed, so one editor was open as in §13.3. It ran 44,202 ticks
+  with 577 chunks loaded on average, against about 34,000 ticks and 440 chunks for the rows above (two editors open), and
+  §13.3's headless island runs, 44,255-45,613 ticks and 580-587 chunks. Its 9,162 LOD re-meshes match §13.3's 9,269 and
+  9,304. Headless CPU generation cannot keep up at v3000; the slower it is, the closer to the viewer chunks first load,
+  already at their final LOD, so fewer of them pass through the transitions. Compare headless counts only within one
+  batch; the regime shows in the stale-LOD columns.
+- **G10:** a two-lap PIE orbit on M with the fix (`orbit=0:0:60000`, v6000, 753,982 uu): 4,845 chunks unloaded and
+  reloaded, 6,638 LOD re-meshes and 0 "other" (`20261013_095738_ki12_G10_orbit2`).
+
+**What changes in §13.** I4's chord verdict stands on the high-mode rows. KI12 no longer splits island benches, so one run
+per route is enough again. The §13.3 headless comparison should be re-read against a control in the same regime (above).
+§13.5's re-mesh doubling is G10, not an island effect.

@@ -1332,10 +1332,6 @@ private:
 	/** When EvaluateLODLevelChanges runs (viewer movement, cap left-overs, idle sweep); see FVoxelLODEvalSchedule. */
 	FVoxelLODEvalSchedule LODEvalSchedule;
 
-	/** TEMPORARY (KI12 A/B, removed before merge): the old sweep latch, used while voxel.LOD.LegacySweep is 1. */
-	bool bLegacyLODSweep = false;
-	bool bLegacyPrevQueuesEmpty = false;
-
 	/**
 	 * Threshold for LOD morph factor update position delta (squared).
 	 * Morph factors should update when viewer moves ~100 units.

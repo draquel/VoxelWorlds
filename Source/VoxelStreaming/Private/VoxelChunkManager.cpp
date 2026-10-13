@@ -401,15 +401,6 @@ static TAutoConsoleVariable<int32> CVarFarCompressionCodec(
 	     "Buffers written by any codec still decode (codec id is stored in the buffer header)."),
 	ECVF_Default);
 
-// TEMPORARY (KI12 A/B in one build; removed before merge): 1 = the old LOD sweep latch.
-static TAutoConsoleVariable<int32> CVarLODLegacySweep(
-	TEXT("voxel.LOD.LegacySweep"),
-	0,
-	TEXT("KI12 A/B only. 1 = evaluate LOD levels on a viewer-chunk change or while the old sweep latch is set "
-	     "(set when every queue is empty, cleared only by an evaluation with every queue empty that queued nothing). "
-	     "0 = FVoxelLODEvalSchedule."),
-	ECVF_Default);
-
 UVoxelChunkManager::UVoxelChunkManager()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -781,35 +772,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			&& AsyncMeshingInProgress.Num() == 0
 			&& PendingMeshQueue.Num() == 0;
 
-		if (CVarLODLegacySweep.GetValueOnGameThread() != 0)
-		{
-			// TEMPORARY (KI12 A/B): the old latch. Its state when the pipeline turns busy decides the regime
-			// until the pipeline is next idle, so that moment is logged.
-			if (!bQueuesEmpty && bLegacyPrevQueuesEmpty)
-			{
-				UE_LOG(LogVoxelStreaming, Log, TEXT("KI12 legacy LOD sweep: pipeline busy at frame %lld with the latch %s"),
-					CurrentFrame, bLegacyLODSweep ? TEXT("SET (LOD evaluated every frame)") : TEXT("clear (LOD evaluated on chunk changes only)"));
-			}
-			bLegacyPrevQueuesEmpty = bQueuesEmpty;
-			if (bQueuesEmpty && !bLegacyLODSweep)
-			{
-				bLegacyLODSweep = true;
-			}
-			if (bViewerChunkChanged || bLegacyLODSweep)
-			{
-				int32 Queued = 0;
-				bool bCapReached = false;
-				Timing.LODEvalCandidates = EvaluateLODLevelChanges(Context, Queued, bCapReached);
-				Timing.LODEvalQueued = Queued;
-				if (bLegacyLODSweep && bQueuesEmpty && MeshingQueue.Num() == 0)
-				{
-					bLegacyLODSweep = false;
-				}
-			}
-		}
 		// LOD level evaluation (KI12): viewer movement, left-overs from the per-frame cap, or an idle
 		// sweep. See FVoxelLODEvalSchedule for why it is not tied to queue state.
-		else if (LODEvalSchedule.ShouldEvaluate(bViewerChunkChanged, Context.ViewerPosition, bQueuesEmpty))
+		if (LODEvalSchedule.ShouldEvaluate(bViewerChunkChanged, Context.ViewerPosition, bQueuesEmpty))
 		{
 			int32 Queued = 0;
 			bool bCapReached = false;
@@ -997,8 +962,6 @@ void UVoxelChunkManager::Initialize(
 	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
 	LODEvalSchedule.Reset();
-	bLegacyLODSweep = false;
-	bLegacyPrevQueuesEmpty = false;
 
 	// Reset adaptive throttle state
 	SmoothedFrameTimeMs = 16.67f;
@@ -1419,8 +1382,6 @@ void UVoxelChunkManager::Shutdown()
 	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
 	LODEvalSchedule.Reset();
-	bLegacyLODSweep = false;
-	bLegacyPrevQueuesEmpty = false;
 	bSubsystemsDeferred = false;
 
 	// Clean up LOD strategy (we own it)
