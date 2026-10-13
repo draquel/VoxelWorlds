@@ -116,6 +116,9 @@ private:
 		float SeamMs;
 		// Collision sub-phases (P4a): cook-launch prep vs completed-cook apply (both GT)
 		float CollPrepMs, CollApplyMs;
+		// Far-compression sweep (G6): GT time, encodes started, async results installed this tick
+		float FarCompMs;
+		int32 FarCompDispatchN, FarCompApplyN;
 		// Memory (MB) and far-compression residency, refreshed every MemorySampleIntervalSec
 		float VoxelMB, EditMB, RendCPUMB, RendGPUMB, CollMB, ScatMB, ProcessMB;
 		int32 ResidentN, UniformN, CompressedN, EmptyN;

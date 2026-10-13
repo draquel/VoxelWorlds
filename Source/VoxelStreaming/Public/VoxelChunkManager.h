@@ -598,6 +598,13 @@ public:
 		// job drain/dispatch (snapshot lookups), and completed-seam submits to the renderer.
 		float SeamMs = 0.0f;
 
+		// Far-chunk compression sweep (ProcessFarCompressionSweep total): the candidate scan, free
+		// re-applies, copies for async encodes and installs of finished ones. With
+		// voxel.FarCompression.Async 0 it also holds the encodes themselves.
+		float FarCompressMs = 0.0f;
+		int32 FarCompressDispatchCount = 0; // fresh encodes started (async) or run (sync) this tick
+		int32 FarCompressApplyCount = 0;    // finished async encodes installed this tick
+
 		// Render-submit breakdown (RenderSubmitMs = mesh drain + unload + water tiles; flush is separate)
 		float RenderMeshMs = 0.0f;       // OnChunkMeshingComplete drain loop total
 		float RenderSubRendererMs = 0.0f; // subset: renderer UpdateChunkMeshFromCPU (vertex convert + handoff)
@@ -647,6 +654,18 @@ public:
 	/** Thrash: chunks re-queued for meshing after they already had a mesh. */
 	int64 GetBenchRemeshCount() const { return BenchRemeshCount; }
 	int64 GetBenchRemeshByReason(EVoxelRemeshReason Reason) const { return BenchRemeshByReason[static_cast<int32>(Reason)]; }
+
+	/**
+	 * Far-compression encodes this session: fresh encodes started (async or sync), async results
+	 * installed into their chunk, and async results discarded because the chunk's array changed or the
+	 * chunk went away while the worker ran.
+	 */
+	void GetBenchFarCompressionCounts(int64& OutEncodes, int64& OutInstalled, int64& OutStale) const
+	{
+		OutEncodes = FarCompressEncodes;
+		OutInstalled = FarCompressInstalled;
+		OutStale = FarCompressStale;
+	}
 
 	/** Unload-lag (enqueue -> actual unload), in milliseconds. */
 	void GetBenchUnloadLagStats(double& OutMeanMs, double& OutMaxMs, int64& OutCount) const
@@ -816,10 +835,23 @@ protected:
 	 * "Far" means the chunk's distance band has reached voxel.FarCompression.MinStride, which also
 	 * holds with the LOD system off (cubic worlds). On the legacy boundary path a chunk expanded by a
 	 * read stays resident for IdleFrames before it is compacted again (see FarExpandedSeenFrame).
+	 * A fresh encode runs on a background worker from a copy of the array (voxel.FarCompression.Async);
+	 * the sweep installs finished encodes whose chunk array is unchanged (FChunkDescriptor::AsyncCompactTicket).
 	 *
 	 * @param Context This tick's query context, used to place LOD-off chunks in a distance band.
+	 * @param Timing  Receives this tick's dispatch and install counts.
 	 */
-	void ProcessFarCompressionSweep(const FLODQueryContext& Context);
+	void ProcessFarCompressionSweep(const FLODQueryContext& Context, FVoxelTimingStats& Timing);
+
+	/**
+	 * Start an async encode of a resident far chunk: copy its array into a pooled scratch array, stamp
+	 * the descriptor with a new ticket and hand the copy to a background worker.
+	 *
+	 * @param ChunkCoord Chunk to encode
+	 * @param Descriptor Its descriptor (Resident, no encode in flight)
+	 * @param Codec      General codec for a non-uniform array
+	 */
+	void DispatchFarCompression(const FIntVector& ChunkCoord, FChunkDescriptor& Descriptor, EVoxelChunkCodec Codec);
 
 	// ==================== Generation/Meshing Callbacks ====================
 
@@ -1457,6 +1489,50 @@ private:
 	 * batches). Without tree injection the result is enqueued directly.
 	 */
 	void LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData, uint32 DispatchSerial);
+
+	// ==================== Async far-chunk compression ====================
+
+	/** A finished far-compression encode, waiting for the game thread to install it. */
+	struct FFarCompressResult
+	{
+		FIntVector ChunkCoord;
+		/** FChunkDescriptor::AsyncCompactTicket of the dispatch; a mismatch means the array changed. */
+		uint32 Ticket = 0;
+		FVoxelChunkCompactForm Form;
+		/** The copy the worker encoded, handed back for reuse by a later dispatch. */
+		TArray<FVoxelData> Scratch;
+	};
+	using FFarCompressResultQueue = TQueue<FFarCompressResult, EQueueMode::Mpsc>;
+
+	/**
+	 * Finished encodes. The workers hold their own reference and never touch this UObject; Shutdown
+	 * swaps in a fresh queue, so a late result from the old session lands in the orphaned one.
+	 */
+	TSharedPtr<FFarCompressResultQueue, ESPMode::ThreadSafe> FarCompressResults;
+
+	/** Encodes dispatched and not yet drained (capped by voxel.FarCompression.MaxInFlight). */
+	int32 FarCompressJobsInFlight = 0;
+
+	/** Bytes of the copies those encodes hold (counted in the voxel data memory stats). */
+	int64 FarCompressBytesInFlight = 0;
+
+	/**
+	 * Scratch arrays for the next dispatches' copies, reused so a copy is a memcpy into pages that are
+	 * already committed. Together with the in-flight copies there are never more than MaxInFlight;
+	 * freed once the sweep has dispatched nothing for IdleFrames.
+	 */
+	TArray<TArray<FVoxelData>> FarCompressScratchPool;
+
+	/** Last frame the sweep dispatched an encode or still had one in flight (drives the pool release). */
+	int64 FarCompressLastBusyFrame = 0;
+
+	/** Ticket source for FChunkDescriptor::AsyncCompactTicket (0 is never issued). */
+	uint32 NextFarCompressTicket = 0;
+
+	/** Session counters (see GetBenchFarCompressionCounts). */
+	int64 FarCompressEncodes = 0;
+	int64 FarCompressInstalled = 0;
+	int64 FarCompressStale = 0;
 
 	// ==================== Async Mesh Generation ====================
 

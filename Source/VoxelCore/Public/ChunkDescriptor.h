@@ -9,6 +9,32 @@
 #include "ChunkDescriptor.generated.h"
 
 /**
+ * The compact form a chunk's voxel array reduces to (far-chunk compression). Computed from the
+ * array by FChunkDescriptor::ComputeCompactForm, which is pure and runs on any thread, and installed
+ * on the game thread by FChunkDescriptor::InstallCompactForm.
+ */
+struct FVoxelChunkCompactForm
+{
+	enum class EKind : uint8
+	{
+		/** Neither the uniform collapse nor the codec beat the raw size: the chunk stays resident. */
+		Incompressible,
+		/** Every voxel equals UniformValue. */
+		Uniform,
+		/** Buffer holds an FVoxelChunkCodec buffer smaller than the raw array. */
+		Compressed,
+	};
+
+	EKind Kind = EKind::Incompressible;
+
+	/** The single value of a Uniform array. */
+	FVoxelData UniformValue;
+
+	/** [header][payload] codec buffer of a Compressed array. */
+	TArray<uint8> Buffer;
+};
+
+/**
  * Chunk metadata and voxel storage.
  *
  * Contains all data needed to describe a chunk's state and contents.
@@ -117,6 +143,15 @@ struct VOXELCORE_API FChunkDescriptor
 	 */
 	TArray<uint8> CompressedVoxelData;
 
+	/**
+	 * Non-zero while an async far-compression job is encoding a copy of the resident array (the
+	 * job's ticket). Every write to the array and every residency change clears it, so the job's
+	 * result is installed only if the array is still exactly the copy it encoded. ContentVersion is
+	 * not enough for that: water-flag propagation writes through GetVoxelDataMutable() without
+	 * bumping it, and a reloaded chunk starts its count again. Transient, not serialized.
+	 */
+	uint32 AsyncCompactTicket = 0;
+
 	/** Default constructor */
 	FChunkDescriptor() = default;
 
@@ -138,6 +173,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		AsyncCompactTicket = 0;
 		++ContentVersion;
 	}
 
@@ -150,6 +186,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		AsyncCompactTicket = 0;
 		++ContentVersion;
 	}
 
@@ -162,6 +199,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		AsyncCompactTicket = 0;
 		// NOTE: no ContentVersion bump — clearing is a memory teardown, not a logical content change.
 		// Boundary revalidation ignores a neighbour that no longer has data (re-meshing against a
 		// gone neighbour would only clamp), so a version bump here would cause pointless remeshes.
@@ -212,6 +250,7 @@ struct VOXELCORE_API FChunkDescriptor
 			bUniformValueValid = false;
 			bCompressionEvaluated = false;
 			CompressedVoxelData.Empty();
+			AsyncCompactTicket = 0;
 			++ContentVersion;
 		}
 	}
@@ -246,6 +285,7 @@ struct VOXELCORE_API FChunkDescriptor
 			bUniformValueValid = false;
 			bCompressionEvaluated = false;
 			CompressedVoxelData.Empty();
+			AsyncCompactTicket = 0;
 			++ContentVersion;
 		}
 	}
@@ -323,6 +363,7 @@ struct VOXELCORE_API FChunkDescriptor
 		{
 			VoxelData.Empty();
 			Residency = EVoxelDataResidency::Uniform;
+			AsyncCompactTicket = 0;
 			return true;
 		}
 		bCompressionEvaluated = true;
@@ -333,6 +374,7 @@ struct VOXELCORE_API FChunkDescriptor
 			bUniformValueValid = true;
 			VoxelData.Empty();
 			Residency = EVoxelDataResidency::Uniform;
+			AsyncCompactTicket = 0;
 			return true;
 		}
 		return false;
@@ -343,7 +385,11 @@ struct VOXELCORE_API FChunkDescriptor
 	 * a free re-collapse/re-compress if a compact form is already cached (chunk was expanded but not
 	 * mutated), else a uniform collapse, else the general codec. Non-collapsible, poorly-compressing
 	 * chunks stay Resident and are marked evaluated so the sweep skips them. Returns true if compacted.
-	 * Game-thread only.
+	 * Game-thread only; the async sweep runs the encode on a worker instead (ComputeCompactForm on a
+	 * copy, then InstallCompactForm).
+	 *
+	 * @param Codec General codec for a non-uniform chunk
+	 * @return True if the raw array was dropped
 	 */
 	bool TryCompress(EVoxelChunkCodec Codec)
 	{
@@ -351,40 +397,110 @@ struct VOXELCORE_API FChunkDescriptor
 		{
 			return false;
 		}
-		// Free re-collapse to Uniform (cached single value, unmutated) — no scan.
+		// Free re-collapse / re-compress (cached form, unmutated): no scan, no re-encode.
+		if (bUniformValueValid || CompressedVoxelData.Num() > 0)
+		{
+			return DropResidentForCachedForm();
+		}
+		// Fresh chunk: the uniform scan, then the general codec.
+		return InstallCompactForm(ComputeCompactForm(VoxelData, Codec, ChunkSize));
+	}
+
+	/**
+	 * Reduce a voxel array to its smallest compact form: Uniform if every voxel is identical, else the
+	 * general codec's buffer if it beats the raw size (no codec for EVoxelChunkCodec::Uniform / Raw).
+	 * Pure: it reads only Data, so it runs on any thread.
+	 *
+	 * @param Data      Voxel array to reduce (ChunkSize^3 elements)
+	 * @param Codec     General codec for non-uniform data
+	 * @param ChunkSize Chunk edge length, recorded in the codec buffer's header
+	 * @return The compact form (Incompressible when neither beats the raw array)
+	 */
+	static FVoxelChunkCompactForm ComputeCompactForm(const TArray<FVoxelData>& Data, EVoxelChunkCodec Codec, int32 ChunkSize)
+	{
+		FVoxelChunkCompactForm Form;
+		if (ComputeUniformValue(Data, Form.UniformValue))
+		{
+			Form.Kind = FVoxelChunkCompactForm::EKind::Uniform;
+			return Form;
+		}
+		if (Codec != EVoxelChunkCodec::Uniform && Codec != EVoxelChunkCodec::Raw)
+		{
+			const int32 RawBytes = Data.Num() * sizeof(FVoxelData);
+			if (FVoxelChunkCodec::Compress(Data, Codec, ChunkSize, Form.Buffer) && Form.Buffer.Num() < RawBytes)
+			{
+				Form.Kind = FVoxelChunkCompactForm::EKind::Compressed;
+				return Form;
+			}
+			Form.Buffer.Empty();
+		}
+		return Form;
+	}
+
+	/**
+	 * Install a compact form computed from this chunk's current resident array. The form becomes the
+	 * chunk's cached compact form (the uniform value, the retained buffer, or the "evaluated" mark when
+	 * nothing beat raw), valid until the array is next written; with bDropResident the raw array is then
+	 * dropped, as TryCompress does. The caller guarantees Form was computed from exactly the current
+	 * array: TryCompress computes it in place, the async sweep checks AsyncCompactTicket. Game-thread only.
+	 *
+	 * @param Form          Compact form of the current resident array
+	 * @param bDropResident Drop the raw array now; false only caches the form (TryCompress applies it later for free)
+	 * @return True if the raw array was dropped
+	 */
+	bool InstallCompactForm(FVoxelChunkCompactForm&& Form, bool bDropResident = true)
+	{
+		if (Residency != EVoxelDataResidency::Resident)
+		{
+			return false;
+		}
+		AsyncCompactTicket = 0;
+		bCompressionEvaluated = true;
+		switch (Form.Kind)
+		{
+		case FVoxelChunkCompactForm::EKind::Uniform:
+			UniformValue = Form.UniformValue;
+			bUniformValueValid = true;
+			break;
+		case FVoxelChunkCompactForm::EKind::Compressed:
+			CompressedVoxelData = MoveTemp(Form.Buffer);
+			// The retained buffer now matches the array, as after a decompress.
+			bDataMutated = false;
+			break;
+		default:
+			return false;
+		}
+		return bDropResident && DropResidentForCachedForm();
+	}
+
+	/**
+	 * Drop the raw array in favour of the cached compact form (bUniformValueValid or a retained
+	 * CompressedVoxelData), which writes clear, so it still matches the array. Game-thread only.
+	 *
+	 * @return True if the raw array was dropped; false when no compact form is cached
+	 */
+	bool DropResidentForCachedForm()
+	{
+		if (Residency != EVoxelDataResidency::Resident)
+		{
+			return false;
+		}
 		if (bUniformValueValid)
 		{
 			VoxelData.Empty();
 			Residency = EVoxelDataResidency::Uniform;
-			return true;
 		}
-		// Free re-compress (cached buffer, unmutated) — no re-encode.
-		if (CompressedVoxelData.Num() > 0)
+		else if (CompressedVoxelData.Num() > 0)
 		{
 			VoxelData.Empty();
 			Residency = EVoxelDataResidency::Compressed;
-			return true;
 		}
-		// Fresh chunk: try the cheap uniform collapse first (also marks non-uniform as evaluated).
-		if (TryCollapseUniform())
+		else
 		{
-			return true;
+			return false;
 		}
-		// General codec for a non-uniform chunk (skipped in uniform-only mode).
-		if (Codec != EVoxelChunkCodec::Uniform && Codec != EVoxelChunkCodec::Raw)
-		{
-			const int32 RawBytes = VoxelData.Num() * sizeof(FVoxelData);
-			TArray<uint8> Buffer;
-			if (FVoxelChunkCodec::Compress(VoxelData, Codec, ChunkSize, Buffer) && Buffer.Num() < RawBytes)
-			{
-				CompressedVoxelData = MoveTemp(Buffer);
-				VoxelData.Empty();
-				Residency = EVoxelDataResidency::Compressed;
-				bDataMutated = false;
-				return true;
-			}
-		}
-		return false;
+		AsyncCompactTicket = 0;
+		return true;
 	}
 
 	/** True iff every voxel in Data is identical; writes that value to Out. False for an empty array. */
@@ -433,6 +549,7 @@ struct VOXELCORE_API FChunkDescriptor
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
 		CompressedVoxelData.Empty();
+		AsyncCompactTicket = 0;
 		// NOTE: deliberately no ContentVersion bump here. The only streaming caller is water-flag
 		// propagation, which (a) is a material change, not the density change that causes geometric
 		// boundary seams, and (b) calls this unconditionally on every coastal mesh submit — bumping

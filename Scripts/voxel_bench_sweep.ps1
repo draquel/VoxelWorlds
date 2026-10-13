@@ -12,6 +12,8 @@
 #   # island chord with terrain following (bench args use ':' and '/', never commas):
 #   powershell -File ...\voxel_bench_sweep.ps1 -Prefix islandM -Config /Game/PluginTesting/Review/Review_Island_M `
 #     -Distance 500000 -BenchArgs "start=-250000:0 dir=1:0 follow=300"
+#   # cvar A/B (run in-process with & so -Velocities binds as int[]):
+#   & ...\voxel_bench_sweep.ps1 -Prefix sync -PreCmds "voxel.FarCompression.Async 0"
 #
 # Paths self-locate from the script location; override -EditorCmd if your engine lives elsewhere.
 param(
@@ -28,10 +30,14 @@ param(
   [string]$EditorCmd = "D:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe",
   # Extra command-line args appended to every run, e.g. scheduler A/B overrides:
   #   -ExtraArgs "-VoxelMaxAsyncMesh=16 -VoxelMaxAsyncGen=8 -VoxelPinScheduler"
-  [string]$ExtraArgs = ""
+  [string]$ExtraArgs = "",
+  # Console commands run before the bench starts, e.g. a cvar A/B:
+  #   -PreCmds "voxel.FarCompression.Async 0"
+  [string[]]$PreCmds = @()
 )
 
 if ($BenchArgs -match ",") { Write-Error "-BenchArgs must not contain commas: -ExecCmds splits commands on them. Use ':' and '/'."; exit 1 }
+if (($PreCmds -join "") -match ",") { Write-Error "-PreCmds entries must not contain commas: -ExecCmds splits commands on them."; exit 1 }
 if (-not (Test-Path $EditorCmd)) { Write-Error "UnrealEditor-Cmd not found at $EditorCmd (pass -EditorCmd)"; exit 1 }
 
 # .../Plugins/VoxelWorlds/Scripts -> project root is three levels up.
@@ -54,7 +60,7 @@ foreach ($v in $Velocities) {
   $tag  = "${Prefix}_v$v"
   $log  = Join-Path $projectRoot "Saved\sweep_$tag.log"
   $before = @(Get-ChildItem "$benchDir\*_$tag.json" -ErrorAction SilentlyContinue | Select-Object -Expand FullName)
-  $benchCmd = "voxel.Bench.Run $tag $v $dist build=$build $BenchArgs".Trim()
+  $benchCmd = (@($PreCmds) + @("voxel.Bench.Run $tag $v $dist build=$build $BenchArgs".Trim())) -join ","
   $cmdArgs = "`"$uproject`" $Map -game -nullrhi -VoxelForceCPU -unattended -nosplash $configArg $ExtraArgs -ExecCmds=`"$benchCmd`" -abslog=`"$log`""
   Write-Host "=== $tag (velocity=$v dist=$dist build=$build $configArg) ==="
   $p = Start-Process $EditorCmd -ArgumentList $cmdArgs -PassThru

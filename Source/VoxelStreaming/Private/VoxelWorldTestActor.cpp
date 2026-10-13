@@ -1887,15 +1887,15 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 
 	// Per-system timing (game-thread manager-tick sections). Seam = the seam-ownership pipeline
 	// (scheduling + job dispatch + merged-bucket submits); Coll splits into cook-launch prep vs
-	// completed-cook apply (P4a attribution).
+	// completed-cook apply (P4a attribution); FarComp = the far-compression sweep.
 	const auto& Timing = ChunkManager->GetTimingStats();
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
 		FString::Printf(TEXT("  Gen=%.1fms Mesh=%.1fms Seam=%.1fms Render=%.1fms LOD=%.1fms Scat=%.1fms"),
 			Timing.GenerationMs, Timing.MeshingMs, Timing.SeamMs, Timing.RenderSubmitMs,
 			Timing.LODMs, Timing.ScatterMs));
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-		FString::Printf(TEXT("  Coll=%.1fms (prep=%.1f apply=%.1f)  Total=%.1fms"),
-			Timing.CollisionMs, Timing.CollisionPrepMs, Timing.CollisionApplyMs, Timing.TotalMs));
+		FString::Printf(TEXT("  Coll=%.1fms (prep=%.1f apply=%.1f)  FarComp=%.1fms  Total=%.1fms"),
+			Timing.CollisionMs, Timing.CollisionPrepMs, Timing.CollisionApplyMs, Timing.FarCompressMs, Timing.TotalMs));
 
 	// Chunks
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, ChunkColor,
