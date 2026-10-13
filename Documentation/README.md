@@ -49,6 +49,11 @@ Documentation for the VoxelWorlds plugin (Unreal Engine 5.8), organized by purpo
 - [MASTER_MATERIAL_SETUP.md](Guides/MASTER_MATERIAL_SETUP.md) — M_VoxelMaster setup walkthrough
 - [PCG_BIOME_DECORATION_SETUP.md](Guides/PCG_BIOME_DECORATION_SETUP.md) — how to set up biome-keyed runtime PCG decoration (sampler → biome dispatcher → per-biome subgraphs)
 
+## Plans (current)
+- [VOXEL_QA_FOLLOWUPS_PLAN.md](VOXEL_QA_FOLLOWUPS_PLAN.md) — R22 map edit overlay, R23 residency, R24 seam crossfade (first QA pass follow-ups)
+- [WORLD_MODES_REVIEW_PLAN.md](WORLD_MODES_REVIEW_PLAN.md) — review of cubic meshing and island mode against InfinitePlane: findings traced in code, tooling, scenarios, acceptance criteria, mode-specific features
+- [SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) — what spherical mode needs to reach parity: current state, scope decisions, requirements by area, Z-up audit
+
 ## Research (historical / process)
 - [ENGINE_INTEGRATION.md](Research/ENGINE_INTEGRATION.md) — which UE 5.8 systems to adopt (RVT, runtime PCG, World Partition) vs. keep hand-built; why Nanite is build-time only; RVT spike plan; Mesh Terrain as secondary bake bridge
 - [PCG_DECORATION_ARCHITECTURE.md](Research/PCG_DECORATION_ARCHITECTURE.md) — PCG runtime decoration design: biome-keyed per-biome subgraphs, edit-aware hybrid sampler, POI/construction priority stack, standalone Claims/World-Annotation system; revised phase plan
