@@ -251,11 +251,17 @@ public:
 	 * Enable Level of Detail system.
 	 * When disabled, all chunks render at LOD 0 (full detail).
 	 * Useful for debugging LOD seams or when view distance is small.
+	 * Ignored in cubic meshing mode, which always runs without LOD: greedy meshing is cubic's
+	 * answer to distance. Read the effective value through IsLODEnabled().
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "MeshingMode != EMeshingMode::Cubic"))
 	bool bEnableLOD = true;
 
-	/** LOD distance bands configuration */
+	/**
+	 * LOD distance bands configuration. With the LOD system off (bEnableLOD off, or cubic meshing)
+	 * the bands still describe distance: the far-band surface slab starts past band 0, and far-chunk
+	 * compression applies from the band whose stride reaches voxel.FarCompression.MinStride.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLOD"))
 	TArray<FLODBand> LODBands;
 
@@ -525,6 +531,19 @@ public:
 	FORCEINLINE float GetChunkWorldSize() const
 	{
 		return ChunkSize * VoxelSize;
+	}
+
+	/**
+	 * Whether the LOD system runs for this world: bEnableLOD, except that cubic meshing always runs
+	 * without LOD (greedy meshing is its LOD mechanism, so cubic chunks mesh at full detail at every
+	 * distance). Read this instead of bEnableLOD.
+	 *
+	 * @return True when chunks get distance-band LOD levels, false when every chunk is LOD 0.
+	 */
+	UFUNCTION(BlueprintPure, Category = "LOD")
+	bool IsLODEnabled() const
+	{
+		return bEnableLOD && MeshingMode != EMeshingMode::Cubic;
 	}
 
 	/** Get the world size of a single chunk at a specific LOD */

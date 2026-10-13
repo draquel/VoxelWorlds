@@ -80,6 +80,13 @@ struct FVoxelChunkState
 	 */
 	int64 NeighborRemeshRequestFrame = 0;
 
+	/**
+	 * Frame the far-compression sweep first found this chunk expanded from its cached compact form
+	 * (-1 = not seen expanded). On the legacy boundary path the sweep holds such a chunk resident for
+	 * voxel.FarCompression.IdleFrames from this frame before compacting it again.
+	 */
+	int64 FarExpandedSeenFrame = -1;
+
 	FVoxelChunkState() = default;
 
 	explicit FVoxelChunkState(const FIntVector& InChunkCoord)
@@ -806,9 +813,13 @@ protected:
 	/**
 	 * Budgeted per-tick far-chunk voxel-data compression sweep. Compacts idle, settled far chunks
 	 * (see voxel.FarCompression.* cvars); access transparently re-materializes via EnsureResident().
-	 * PR B: uniform-chunk collapse only.
+	 * "Far" means the chunk's distance band has reached voxel.FarCompression.MinStride, which also
+	 * holds with the LOD system off (cubic worlds). On the legacy boundary path a chunk expanded by a
+	 * read stays resident for IdleFrames before it is compacted again (see FarExpandedSeenFrame).
+	 *
+	 * @param Context This tick's query context, used to place LOD-off chunks in a distance band.
 	 */
-	void ProcessFarCompressionSweep();
+	void ProcessFarCompressionSweep(const FLODQueryContext& Context);
 
 	// ==================== Generation/Meshing Callbacks ====================
 

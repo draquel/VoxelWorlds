@@ -47,7 +47,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	VoxelSize = WorldConfig->VoxelSize;
 	BaseChunkSize = WorldConfig->ChunkSize;
 	WorldMode = WorldConfig->WorldMode;
-	bEnableLOD = WorldConfig->bEnableLOD;
+	bEnableLOD = WorldConfig->IsLODEnabled(); // off for cubic regardless of bEnableLOD
 	bEnableMorphing = WorldConfig->bEnableLODMorphing;
 	bEnableFrustumCulling = WorldConfig->bEnableFrustumCulling;
 
@@ -294,6 +294,19 @@ int32 FDistanceBandLODStrategy::GetLODForChunk(
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 	const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 	return GetRawLODForDistance(Distance);
+}
+
+int32 FDistanceBandLODStrategy::GetDistanceBandLOD(
+	const FIntVector& ChunkCoord,
+	const FLODQueryContext& Context) const
+{
+	if (bEnableLOD)
+	{
+		return GetLODForChunk(ChunkCoord, Context);
+	}
+
+	// LOD off: no balance or hysteresis runs, so read the bands as a plain distance table.
+	return GetRawLODForDistance(GetDistanceToViewer(ChunkCoordToWorldCenter(ChunkCoord), Context));
 }
 
 float FDistanceBandLODStrategy::GetLODMorphFactor(

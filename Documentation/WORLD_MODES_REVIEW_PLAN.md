@@ -188,7 +188,7 @@ plan sizes and orders it.
 
 | Feature | Class | Notes |
 |---------|-------|-------|
-| Cubic without the LOD system (D7) | Critical | KC1, KC11. Decided 2026-10-13: cubic forces LOD off, and greedy meshing is its LOD mechanism until there is a good reason to change it. Key far compression on distance so the LOD-off path keeps it. Measured in §12.2: LOD off already beats smooth per frame. A far representation (coarse mesh or impostor) or a shorter cubic view distance is the only route to renderer-memory parity, and is not planned |
+| Cubic without the LOD system (D7) | Critical, **done 2026-10-13 (§12.7)** | KC1, KC11. Decided 2026-10-13: cubic forces LOD off, and greedy meshing is its LOD mechanism until there is a good reason to change it. Key far compression on distance so the LOD-off path keeps it. Measured in §12.2: LOD off already beats smooth per frame (before compression; §12.7 has the numbers with it). A far representation (coarse mesh or impostor) or a shorter cubic view distance is the only route to renderer-memory parity, and is not planned |
 | Block-accurate player editing | Critical | KC5. Dig at `ImpactPoint − ½·VoxelSize·normal`, place at `+ ½·VoxelSize·normal`, set whole voxels (0/255) so one click equals one block. Port the test actor's discrete editing into the player path when the mode is cubic |
 | Block-top surface query | Critical | KC6. A cubic surface height that snaps to the top of the solid voxel, used by spawn, NPCs, POIs, campsites and world items |
 | Step policy | Critical | KC7. Keep "every block is a jump" and make nav and NPC auto-jump agree with block heights, or auto-step one block (decision D5) |
@@ -250,12 +250,13 @@ code sites).
 | D4 | Build T1-T5 before the review? | Yes, as one small PR. T6 optional |
 | D5 | Cubic step policy | Keep "every block is a jump" (current design) and make nav and NPC auto-jump agree with block heights |
 | D6 | Spherical scope (planet size, cubic on planets, game systems, orbit) | See the requirements doc, §2 |
-| D7 | Cubic LOD *(decided 2026-10-13, after Review A)* | Cubic forces the LOD system off (`MeshingMode == Cubic` overrides `bEnableLOD`). Greedy meshing is cubic's LOD mechanism until there is a good reason to change it, so block downsampling and other cubic LOD schemes are out of scope. Pair it with far compression keyed on distance (KC11): forcing LOD off alone trades the LOD cost for uncompressed voxel memory (§12.2) |
+| D7 | Cubic LOD *(decided 2026-10-13, after Review A; implemented the same day, §12.7)* | Cubic forces the LOD system off (`MeshingMode == Cubic` overrides `bEnableLOD`). Greedy meshing is cubic's LOD mechanism until there is a good reason to change it, so block downsampling and other cubic LOD schemes are out of scope. Pair it with far compression keyed on distance (KC11): forcing LOD off alone trades the LOD cost for uncompressed voxel memory (§12.2) |
 
 ## 9. Order of work
 
 1. **T1-T5** and the review content: done 2026-10-12 (VoxelWorlds#76, UE5_PluginDev#94).
-2. **Review A: cubic** (C1-C7): done 2026-10-13, results in §12 (D1 recommendation: terrain-only).
+2. **Review A: cubic** (C1-C7): done 2026-10-13, results in §12 (D1 recommendation: terrain-only). D7 and KC11
+   implemented the same day (§12.7).
 3. **Review B: island** (I1-I10): one to two sessions. A and B share tooling and can run in either order;
    cubic first is quicker because it has fewer unknowns.
 4. **Second revision of this plan:** confirmed findings become work items with sizes and an order, alongside the
@@ -285,7 +286,8 @@ Collected by the surveys. These get fixed with the follow-up work, or sooner if 
 - `Research/IMPLEMENTATION_PHASES.md:160` ("Spherical planet has correct curvature ✓") and `:326` ("water for
   all three modes") overstate the spherical state.
 - `Features/LOD_SYSTEM.md:502-509` describes geodesic distance; the code uses Euclidean distance.
-  `:1062-1064` ("cubic needs no special seam handling") holds only because cubic ignores LOD.
+  `:1062-1064` ("cubic needs no special seam handling") held only because cubic ignored LOD. *Fixed with D7
+  (§12.7): the section now says cubic runs without LOD and names the legacy boundary path.*
 - `Features/MAP_SYSTEM.md:183-185` says the map data layer works unchanged on a planet. It does not: heights are
   radii, and the XY projection merges the two hemispheres.
 - `Features/CAVE_SYSTEM.md:149` says GPU caves are InfinitePlane-only (stale: IslandBowl shares the branch).
@@ -437,7 +439,7 @@ A near cubic chunk costs about the same as a near smooth chunk, but every cubic 
 
 | ID | Verdict | Evidence |
 |----|---------|----------|
-| KC1 | **Confirmed as traced, but reframed**: the cubic mesher was never meant to use LOD, and the cost comes from the content shipping with the LOD system on | Cubic's design answer to distance is greedy meshing with `bEnableLOD` off, and both cubic configs ship with it on (§12 intro). As shipped: far terrain is meshed block by block at every distance (`rc_w04x_1`, `rc_c2_bands_north`), yet LOD changes still re-mesh it, 4,942-6,792 LOD re-meshes per 40,000 uu run against 279-293 for the control, each crossfading an identical mesh (4,788 interior crossfades in the first 155 s of play, about 16,700 by t = 670 s). The initial load meshes each chunk 4.6 times and takes 33 s. **With `bEnableLOD` off** that cost disappears: 0 LOD re-meshes, 2.0 meshes per chunk, a 17 s load, and frame and manager time below the control at every speed (§12.2). What remains is inherent to full-detail cubic and not a LOD bug: a settled frame holds 3.9× the triangles and 9× the renderer GPU memory, and the median cubic mesh job costs 19× the smooth median, because every chunk is a full-detail chunk. Greedy meshing is what keeps that at 9× and not 38× (greedy off: 987 MB at the land site). One trap: turning LOD off also turns far compression off (KC11) |
+| KC1 | **Confirmed as traced, but reframed**: the cubic mesher was never meant to use LOD, and the cost comes from the content shipping with the LOD system on. **Fixed by D7 (§12.7)**: cubic ignores `bEnableLOD` | Cubic's design answer to distance is greedy meshing with `bEnableLOD` off, and both cubic configs ship with it on (§12 intro). As shipped: far terrain is meshed block by block at every distance (`rc_w04x_1`, `rc_c2_bands_north`), yet LOD changes still re-mesh it, 4,942-6,792 LOD re-meshes per 40,000 uu run against 279-293 for the control, each crossfading an identical mesh (4,788 interior crossfades in the first 155 s of play, about 16,700 by t = 670 s). The initial load meshes each chunk 4.6 times and takes 33 s. **With `bEnableLOD` off** that cost disappears: 0 LOD re-meshes, 2.0 meshes per chunk, a 17 s load, and frame and manager time below the control at every speed (§12.2). What remains is inherent to full-detail cubic and not a LOD bug: a settled frame holds 3.9× the triangles and 9× the renderer GPU memory, and the median cubic mesh job costs 19× the smooth median, because every chunk is a full-detail chunk. Greedy meshing is what keeps that at 9× and not 38× (greedy off: 987 MB at the land site). One trap: turning LOD off also turns far compression off (KC11) |
 | KC2 | **Confirmed** as a cost, and on the intended path it is the main remaining streaming cost; the correctness risk is **dismissed** for what this session exercised | The legacy whole-chunk path runs for cubic and is correct: no hole, missing or stale face in any survey, R23 clean, audits 0, chunk-corner edits closed. Cost: with LOD off, its neighbour re-mesh cascade is the real re-mesh cost left: 1,329-2,540 neighbour re-meshes per run against 0 for the control, 2.0 meshes per chunk on the initial load, and catch-up 1.6-3.2× the control's in PIE (as shipped it adds 2,039-2,302 on top of the LOD re-meshes). Its per-frame deferral, waiting for neighbour data, is what inflates the bench's "other" count (KC14). The seam registry still tracks every cubic chunk (1,237 chunks, 10,774 seams, 4,040 dirty) and its P0 stub processor drains the jobs with no geometry (`VoxelChunkManager.cpp:4110-4114`): 6,140 jobs on the initial load with LOD off, 23,246 with LOD on (smooth: 10,898 real ones). No streaming test covers the path (C1) |
 | KC3 | **Confirmed** (dead path); the test hazard is **fixed** by T5 | The cubic branch always builds `FVoxelCPUCubicMesher` and never reads `bUseGPUMeshing` (`VoxelChunkManager.cpp:1110-1126`); every PIE logged "Using Cubic mesher". The GPU cubic tests pass in-editor, skip headless, and `Performance` returns |
 | KC4 | **Confirmed** | Same site, LOD0, instances within 6,000 uu. `Review_Cubic` (CPU extraction): every instance on a block top, rocks 100% on face centres, grass and mushrooms jittered inside the face (median 7-31 uu from the centre, maximum 36 < 37.5). `Review_Cubic_GPUScatter`: every instance still on a block top, but 24-25% of rocks sit on block corners (greedy-quad vertices); grass and mushrooms are pushed to face edges (median 25-33 uu); and density falls to about a third for grass (217-247 instances vs 655-725) and half for rocks (151-177 vs 288-317). All 8 definitions are forced to `BlockFaceSnap` (logged), but the GPU branch runs before the cubic check |
@@ -454,7 +456,7 @@ Cubic:
 | ID | Finding | Evidence | Impact |
 |----|---------|----------|--------|
 | KC10 | **`DemoSmoothWorldConfig`'s voxel tree templates use material IDs that do not exist.** Leaves are 22 and 23, but the registry has 22 materials (0-21: Wood 20, Leaves 21), and template 2's trunk is 21 (Leaves). The templates are inert in smooth (voxel trees are cubic-only), so this only shows when the config is meshed cubic, as `Review_Cubic` is: canopies render as opaque clay and brick blocks. `DemoCubicWorldConfig` uses 20 and 21 correctly. Nothing validates template material IDs against the registry | `Review_Cubic` / `DemoSmoothWorldConfig` / `DemoCubicWorldConfig` tree templates; `VoxelCore/Public/VoxelMaterialRegistry.h:30-34`; `rc_c6_tree_found` | Latent content bug; the review's tree screenshots show it. The canopies are not treated as leaves (not masked, not non-occluding) |
-| KC11 | **Far compression is keyed on the LOD level, so the intended cubic path has none.** Compression skips chunks below `voxel.FarCompression.MinStride`, and with `bEnableLOD` off every chunk is LOD 0. The far-band slab is keyed on band 0's distance instead, so it survives `bEnableLOD` off (but not a one-band config) | `VoxelChunkManager.cpp:4677`; `DistanceBandLODStrategy.cpp:956-962`. LOD off: 0 compressed, 1,123-1,245 MB resident voxel data against 215 MB (spawn) and 600-760 MB (bench peak) for the control, loaded chunks unchanged. One band: no slab either, +47% chunks, 1,803 MB | The intended cubic path's main memory cost |
+| KC11 | **Far compression is keyed on the LOD level, so the intended cubic path has none.** Compression skips chunks below `voxel.FarCompression.MinStride`, and with `bEnableLOD` off every chunk is LOD 0. The far-band slab is keyed on band 0's distance instead, so it survives `bEnableLOD` off (but not a one-band config) | `VoxelChunkManager.cpp:4677`; `DistanceBandLODStrategy.cpp:956-962`. LOD off: 0 compressed, 1,123-1,245 MB resident voxel data against 215 MB (spawn) and 600-760 MB (bench peak) for the control, loaded chunks unchanged. One band: no slab either, +47% chunks, 1,803 MB | The intended cubic path's main memory cost. **Fixed (§12.7)**: compression keys on the distance band |
 | KC12 | **Melee misses across a one-block height difference.** From a one-block pit, 10 swings at a dummy on the rim did no damage; on the same level it died in 4 | C5 | Common in cubic terrain |
 | KC13 | **The edge of the loaded region shows vertical walls.** A missing neighbour counts as air, so boundary faces are emitted. Visible only from beyond the view distance | `VoxelCPUCubicMesher.cpp:930-1001`; `rc_r23_siteB_east` | Cosmetic |
 | KC14 | **The legacy path re-queues waiting chunks every frame, and the bench counts each one as a re-mesh.** When a chunk's face neighbour has no voxel data yet, the legacy path (cubic only; the seam path never waits) defers it and re-queues it at the end of every frame with the default reason "other". The bench's thrash counter counts queue insertions of already-meshed chunks, so each frame's wait counts once. Traced after the bench runs | `ShouldDeferMeshForNeighbors` under `!bSeamMeshingActive`, `VoxelChunkManager.cpp:3051-3066`; re-queue at `:3383-3386`; counter at `:5798-5803`. "Other" is 0 for smooth in every run; for cubic 0-1,074 in PIE and up to 91,074 headless, where CPU generation keeps neighbours waiting longer. The verbose run that counted 53,799 cubic re-meshes executed 5,729 meshes | Mostly a measurement artefact: queue churn and delayed re-meshes rather than wasted meshing. The wait itself is part of KC2's catch-up cost |
@@ -468,6 +470,7 @@ Mode-independent, found on the way:
 | G3 | Gathering pays out on every dig whose brush modifies anything, and a dug voxel keeps its material ID, so one voxel yields without limit (6 digs at one trunk voxel, 6 Wood) | `VoxelCharacterPlugin/.../VCPlayerController.cpp:1344-1350`, `:1419-1431` |
 | G4 | `voxel.Bench.Run … follow=` follows the seabed under lakes, so a long follow run drowns the pawn mid-run (tooling) | `c2_w04_follow` run |
 | G5 | The bench's thrash counter counts meshing-queue insertions of already-meshed chunks, including deferral re-queues, so on a path that defers it reports many times the meshes actually run (KC14). Smooth does not defer, so its numbers are unaffected (tooling) | `VoxelChunkManager.cpp:5798-5803` |
+| G6 | *(found with §12.7)* **Far-compression encoding is the largest single item in the chunk manager's P95 while moving, in both modes.** The sweep encodes up to `voxel.FarCompression.MaxScansPerTick` (4) chunks per tick on the game thread, and an Oodle encode of a 1 MB chunk costs about 3.5 ms in PIE. It is not timed separately, so it shows as the unattributed manager time: during the v3000 traverse, P95 14.9 ms for the smooth control, 13.9 ms for cubic with compression and 0.1 ms for cubic without it. A time budget, or encoding on a worker thread, would take it off the frame for both modes | `ProcessFarCompressionSweep`; the per-frame CSVs of the §12.7 runs (unattributed = `TotalMs` minus the timed sections) |
 
 ### 12.5 Recommendation for D1
 
@@ -482,10 +485,11 @@ needs it. Do not drop it.
   trees as gameplay (KC9). Each is bounded, but together they double the QA surface of every game feature for a mode no
   game uses yet.
 - **Terrain-only work list** (for the second revision to size):
-  - *Force LOD off for cubic* (D7): `MeshingMode == Cubic` overrides `bEnableLOD`, so a cubic config cannot pay for
-    LOD it does not use (KC1). Do it together with the next item, or voxel memory rises. Refresh or delete
-    `DemoCubicWorldConfig` and the orphaned scatter config (KC8).
-  - *Far compression keyed on distance, not LOD level*, so the LOD-off path keeps it (KC11). This is the main memory lever.
+  - ~~*Force LOD off for cubic* (D7): `MeshingMode == Cubic` overrides `bEnableLOD`, so a cubic config cannot pay for
+    LOD it does not use (KC1). Do it together with the next item, or voxel memory rises.~~ **Done 2026-10-13, §12.7.**
+    Still open: refresh or delete `DemoCubicWorldConfig` and the orphaned scatter config (KC8).
+  - ~~*Far compression keyed on distance, not LOD level*, so the LOD-off path keeps it (KC11). This is the main memory
+    lever.~~ **Done 2026-10-13, §12.7:** settled cubic voxel data 1,123 → 127 MB (smooth control 134 MB).
   - *Take cubic off the legacy neighbour cascade:* move it onto the seam path (face culling across a chunk pair is
     "trivially compatible") or give it a cheaper boundary rule, and stop the seam registry scheduling stub jobs for it;
     add a cubic streaming test (KC2). This is the main catch-up lever, and it removes the per-frame deferral loop (KC14).
@@ -498,11 +502,12 @@ needs it. Do not drop it.
   voxel trees (KC9).
 - **Performance on the intended path:** frame and manager time and load time already meet the thresholds. Catch-up is
   within 9% of the control headless, where CPU generation sets the pace, but 1.6-3.2× in PIE, where the cubic neighbour
-  cascade is left as the bottleneck: that waits on the KC2 work. Voxel memory waits on KC11. Renderer GPU memory stays
+  cascade is left as the bottleneck: that waits on the KC2 work. Voxel memory waits on KC11 *(done, §12.7; compression
+  brings smooth's encode cost with it, so cubic's frame-time lead over smooth is gone at v3000, see there)*. Renderer GPU memory stays
   about 9× smooth however the pipeline is tuned, because every cubic chunk is full detail; greedy already takes it down
   from about 38×. Parity on that metric would need a far representation for cubic (a coarse far mesh or impostor) or a
   shorter cubic view distance. Both are design choices for the second revision, not bugs.
-- **Mode-independent findings** G1-G3 apply to smooth as well and can be fixed independently of D1; G4-G5 are bench tooling.
+- **Mode-independent findings** G1-G3 and G6 apply to smooth as well and can be fixed independently of D1; G4-G5 are bench tooling.
 
 ### 12.6 Where cubic and smooth separate
 
@@ -519,8 +524,8 @@ assume the density isosurface, while the cubic surface is the block tops above i
 | Mesher | CPU Dual Contouring interiors (GPU DC retired) | CPU cubic, greedy or simple; never reads the LOD level | `VoxelChunkManager.cpp:1031-1126` | KC1, KC3 |
 | Chunk boundaries | Seam-ownership pipeline: single-owner seam jobs | Legacy whole-chunk path: neighbour slices and a re-mesh cascade when neighbours load; a missing neighbour counts as air | Gate by mesher name, `VoxelChunkManager.cpp:447-456`; `VoxelCPUCubicMesher.cpp:930-1001` | KC2, KC13 |
 | Seam registry | Drives the seam jobs | Still tracks every chunk; a P0 stub drains its jobs with no geometry | `VoxelChunkManager.cpp:4110-4114` | KC2 |
-| LOD system | Distance bands, stride per band, 2:1 balance, seam holds, crossfades | **Off by design** (D7: to be forced off; greedy meshing is cubic's LOD mechanism). Today it still runs in full when `bEnableLOD` is on, with morphing forced off | `bEnableLOD` gates in `DistanceBandLODStrategy.cpp:281`, `:719` and `VoxelChunkManager.cpp:3238`, `:3863`; morphing `:906` | KC1 |
-| Far-chunk compression | Keyed on LOD stride | Off on the intended path (all chunks LOD 0) | `VoxelChunkManager.cpp:4677` | KC11 |
+| LOD system | Distance bands, stride per band, 2:1 balance, seam holds, crossfades | **Off** (D7, done §12.7): `UVoxelWorldConfiguration::IsLODEnabled()` is false for cubic whatever `bEnableLOD` says; greedy meshing is cubic's LOD mechanism. Before D7 it ran in full when `bEnableLOD` was on, with morphing forced off | `IsLODEnabled()` read by every `bEnableLOD` gate (`DistanceBandLODStrategy::Initialize`, `VoxelChunkManager.cpp`) | KC1 |
+| Far-chunk compression | Keyed on the chunk's distance band (its LOD level) | Keyed on the distance band its distance falls in (`GetDistanceBandLOD`, done §12.7). Before: off on the intended path (all chunks LOD 0) | `ProcessFarCompressionSweep` | KC11 |
 | Far-band slab | Beyond band 0's distance | Same; works with LOD off | `DistanceBandLODStrategy.cpp:956-962` | KC11 |
 | Collision | Cooked from the main mesher | Same code; cooks the greedy mesh (4× smaller than simple) | `VoxelCollisionManager.cpp:775-843` | — |
 | Rendering | Triplanar material | Atlas material (per-face UVs) | `VoxelCustomVFRenderer.cpp:85` | — |
@@ -530,6 +535,95 @@ assume the density isosurface, while the cubic surface is the block tops above i
 | Movement | Slopes walkable | 75 uu steps over a 50 uu `MaxStepHeight` (jump per block, by design) | Not split | KC7, KC12 |
 
 So the separation points to design deliberately are three. **Distance**: cubic opts out of LOD, so the systems that ride
-on LOD (compression, and the slab in one-band setups) need a distance key of their own. **Boundaries**: cubic needs a
-boundary rule of its own (seam jobs or a cheaper face-cull exchange) instead of the legacy cascade. **The surface**: a
+on LOD (compression, and the slab in one-band setups) need a distance key of their own. Since §12.7 compression has
+one; the slab is keyed on band 0's distance already and only needs a band 0 that ends before the view distance.
+**Boundaries**: cubic needs a boundary rule of its own (seam jobs or a cheaper face-cull exchange) instead of the
+legacy cascade. **The surface**: a
 cubic surface query (block top) and block-accurate editing for the consumers that today read the density surface.
+
+### 12.7 D7 and KC11 implemented (2026-10-13)
+
+**What changed.**
+
+- **Cubic forces LOD off (D7).** `UVoxelWorldConfiguration::IsLODEnabled()` returns `bEnableLOD && MeshingMode != Cubic`,
+  and every reader of `bEnableLOD` now calls it: `FDistanceBandLODStrategy::Initialize` and the seven gates in
+  `VoxelChunkManager.cpp`. The asset is not modified, so the same config meshed smooth keeps its LOD; in the editor
+  `bEnableLOD` is greyed out for cubic. The chunk manager logs `LOD system disabled for cubic mode (bEnableLOD is
+  ignored; greedy meshing replaces LOD)` once at initialisation. The bands stay in use as distances.
+- **Far compression keyed on distance (KC11).** New `IVoxelLODStrategy::GetDistanceBandLOD`: with LOD on it is the
+  chunk's LOD, with LOD off the band the chunk's distance falls in. The sweep uses the chunk's LOD level exactly as before
+  when LOD is on, so smooth is unchanged, and `GetDistanceBandLOD` when it is off. A chunk compresses once its band's
+  stride reaches `voxel.FarCompression.MinStride` (4): beyond 14,000 uu with the demo bands, in both modes.
+- **Hold for the legacy path.** The first pass showed the legacy boundary path (cubic only) decoding the same compressed
+  neighbours on every job of a re-mesh cascade: it reads up to 26 neighbours straight from their descriptors, and the
+  sweep compacted them again on the next tick. Neighbour-slice time rose from P95 1.4 to 4.8 ms and manager P95 from 4.7
+  to 12.7 ms (headless v3000). The sweep now holds a chunk expanded from its cached compact form resident for
+  `voxel.FarCompression.IdleFrames` before compacting it again, on the legacy path only (the seam pipeline reads through
+  its snapshot cache). With the hold: 1.8 ms and 8.4 ms (smooth control 8.1 ms). It costs about 230 MB of peak voxel
+  data headless and nothing once settled.
+- The bench report's `run{}` gains `lodEnabled` (the effective value). Tests: `VoxelWorlds.LOD.LODOff.CubicForcesOff` and
+  `.DistanceBands`. Full `VoxelWorlds+VoxelWorldSave` suites 209/209, headless and in-editor (where the GPU tests ran).
+
+**Method.** As in §12.2: a single editor in the foreground, background throttle off, PIE in the level viewport, one
+cold fresh world per run, `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0 warmup=120`. Cubic is `Review_Cubic`,
+whose asset still has `bEnableLOD` on: before this change it ran the LOD system (§12.2 "LOD on (as shipped)"), and now
+it must behave like `Review_Cubic_NoLOD`. The JSON reports are in [Research/Bench/D7/](Research/Bench/D7/).
+
+**PIE** (§12.2 rows for comparison, in italics):
+
+| Run | Warmup s | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | Peak mesh queue | Thrash (LOD / neighbour / other) | Peak / end voxel MB | End resident / uniform / compressed | Systems MB | JSON |
+|-----|----------|---------------------------|----------------|------------|-----------------|----------------------------------|---------------------|-------------------------------------|------------|------|
+| *Control v3000 (§12.2)* | *6.8* | *25.2 / 40.5 / 47.9* | *20.4* | *2.1* | *6* | *280 (280 / 0 / 0)* | *651 / 607* | *592 / 62 / 535* | *896* | *`20261013_004433_rcA_ctrl_v3000`* |
+| *Control v3000 re-run (§12.2)* | *4.6* | *24.2 / 38.4 / 44.8* | *21.4* | *1.9* | *7* | *280 (280 / 0 / 0)* | *758 / 599* | *584 / 62 / 543* | *967* | *`20261013_012612_rcB_ctrl_v3000`* |
+| Control v3000 | 5.5 | 25.7 / 41.0 / 49.2 | 22.8 | 2.4 | 7 | 280 (280 / 0 / 0) | 709 / 595 | 580 / 63 / 546 | 916 | `20261013_022543_d7_ctrl_v3000` |
+| Control v3000 re-run | 5.7 | 25.2 / 42.0 / 48.4 | 21.1 | 2.1 | 7 | 280 (280 / 0 / 0) | 679 / 611 | 596 / 62 / 531 | 890 | `20261013_022843_d7_ctrl_v3000b` |
+| *Cubic LOD off v1500 (§12.2)* | *6.6* | *16.7 / 23.8 / 32.4* | *10.4* | *0.54* | *75* | *2,540 (0 / 2,540 / 0)* | *1,245 / 1,189* | *1,189 / 0 / 0* | *1,757* | *`20261013_012338_rcB_nolod_v1500`* |
+| **`Review_Cubic` v1500** | 8.3 | 16.7 / 28.1 / 36.1 | 16.2 | 0.77 | 74 | 3,286 (0 / 2,686 / 600) | 1,082 / 724 | 706 / 53 / 430 | 1,518 | `20261013_022723_d7_cubic_v1500` |
+| *Cubic LOD on v3000 (§12.2, as shipped)* | *22.8* | *35.5 / 62.0 / 78.9* | *32.4* | *20.3* | *618* | *7,650 (5,574 / 2,061 / 15)* | *1,045 / 828* | *818 / 29 / 342* | *1,674* | *`20261013_004357_rcA_cubic_v3000`* |
+| *Cubic LOD off v3000 (§12.2)* | *6.4* | *16.7 / 36.5 / 66.0* | *12.8* | *4.0* | *135* | *2,659 (0 / 1,585 / 1,074)* | *1,199 / 1,189* | *1,189 / 0 / 0* | *1,801* | *`20261013_012418_rcB_nolod_v3000`* |
+| **`Review_Cubic` v3000** | 8.3 | 19.6 / 43.8 / 64.8 | 20.5 | 5.4 | 193 | 2,540 (0 / 1,508 / 1,032) | 1,070 / 852 | 840 / 42 / 307 | 1,530 | `20261013_022629_d7_cubic_v3000` |
+| *Cubic LOD off v6000 (§12.2)* | *6.8* | *16.8 / 50.9 / 63.2* | *16.9* | *9.7* | *121* | *1,895 (0 / 1,329 / 566)* | *1,197 / 1,189* | *1,189 / 0 / 0* | *1,813* | *`20261013_012456_rcB_nolod_v6000`* |
+| **`Review_Cubic` v6000** | 7.7 | 22.9 / 46.3 / 58.7 | 23.1 | 11.4 | 145 | 1,959 (0 / 1,360 / 599) | 1,088 / 1,034 | 1,023 / 24 / 143 | 1,645 | `20261013_022803_d7_cubic_v6000` |
+
+All audits reported 0. Every cubic run logged the force-off line, and its report says `lodEnabled: false`.
+
+**Settled state** (fresh world at the spawn, `voxel.FarCompression.Stats` after the initial load drains):
+
+| | Smooth control | Cubic before (LOD off, §12.2) | **Cubic after** |
+|---|---|---|---|
+| Time to settle | 14 s | 17 s | 17 s |
+| Resident voxel data 2-3 s after the drain | 453 MB (439 resident, 619 compressed) | 1,123 MB (0 compressed) | 718 MB (709 resident, 366 compressed) |
+| Resident voxel data 10 s later / 45 s later | 134 / **134 MB** (112 / 79 / 932) | 1,123 MB | 129 / **127 MB** (105 / 81 / 937) |
+
+After a 22,000 uu move from a settled cubic world, the audit reports 0 and the survey shows no holes or missing faces
+where new chunks meshed against compressed neighbours.
+
+**Headless CPU sweep** (VoxelWorldsTest, `-VoxelForceCPU`, the §12.2 arguments). No editor was open during these runs,
+so frame and catch-up times are lower than §12.2's across the board, the control's included; compare memory and counts.
+
+| Run | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Thrash (LOD / neighbour / other) | Peak / end voxel MB | End resident / uniform / compressed | Systems MB | JSON |
+|-----|--------------------|----------------|------------|----------------------------------|---------------------|-------------------------------------|------------|------|
+| *Control v3000 (§12.2)* | *6.3 / 14.3* | *11.2* | *14.1* | *537 (537 / 0 / 0)* | *251 / 196* | *172 / 103 / 914* | *572* | *`20261013_005631_rcA_hl_ctrl_v3000`* |
+| Control v3000 | 3.6 / 10.8 | 8.1 | 8.5 | 535 (535 / 0 / 0) | 236 / 192 | 168 / 103 / 918 | 572 | `20261013_020144_d7_hl_ctrl_v3000` |
+| `Review_Cubic` v1500 | 1.3 / 8.8 | 6.9 | 0.6 | 151,665 (0 / 4,669 / 146,996) | 924 / 437 | 413 / 83 / 693 | 1,379 | `20261013_021932_d7h_hl_cubic_v1500` |
+| `Review_Cubic` v3000 | 1.5 / 11.2 | 8.4 | 10.1 | 52,149 (0 / 3,126 / 49,023) | 954 / 640 | 621 / 61 / 507 | 1,423 | `20261013_022045_d7h_hl_cubic_v3000` |
+| `Review_Cubic` v6000 | 2.0 / 15.2 | 11.9 | 16.0 | 29,626 (0 / 2,708 / 26,918) | 937 / 760 | 745 / 56 / 388 | 1,519 | `20261013_022156_d7h_hl_cubic_v6000` |
+| `Review_Cubic` v3000, no hold (first pass) | 1.9 / 15.4 | 12.7 | 11.4 | 40,612 (0 / 2,914 / 37,698) | 700 / 596 | 581 / 76 / 532 | 1,289 | `20261013_021355_d7_hl_cubic_v3000` |
+
+The §12.2 headless cubic LOD-off rows held 1,189 MB of voxel data from start to end with nothing compressed. The headless
+"other" thrash is KC14's per-frame deferral re-queue, not executed meshes.
+
+**Verdict.**
+
+- **D7 works as intended.** A cubic config with `bEnableLOD` on now runs the intended path: 0 LOD re-meshes, a
+  neighbour/other thrash split that matches `Review_Cubic_NoLOD`, and the same loaded chunk count and renderer memory.
+- **KC11 is fixed.** Settled cubic voxel data is 127 MB against the control's 134 MB (it was 1,123 MB). While moving, cubic
+  still holds more than smooth (end of run 724-1,034 vs 595-611 MB): the legacy path keeps chunks in its mesh queue and
+  re-meshes them through the neighbour cascade (KC2), and a chunk compresses only after `IdleFrames` settled.
+- **Smooth is unchanged.** The control's compressed, uniform and resident counts, thrash and peak memory sit inside the
+  spread of the two §12.2 control runs, in PIE and headless.
+- **The cost: compression brings its encode with it (G6).** Cubic now pays the encode that smooth already pays, about
+  14 ms of manager P95 while moving. Against the first-pass control, cubic's frame P95 is −12% (v1500), +8% (v3000) and
+  −18% (v6000), inside the +10% threshold, and its manager P95 is +4%, 0% and −27%. Most of §12.2's −10% to −25%
+  frame-time lead is gone; taking the encode off the game thread (G6) would restore it, for smooth as well. Catch-up rises
+  by 0.2-1.7 s and still misses its threshold, which is KC2's to fix.
