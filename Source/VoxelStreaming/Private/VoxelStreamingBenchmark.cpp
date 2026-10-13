@@ -1,5 +1,13 @@
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelChunkManager.h"
+#include "VoxelWorldConfiguration.h"
+#include "IVoxelMesher.h"
+#include "Misc/App.h"
+#include "Misc/CommandLine.h"
+#include "Misc/EngineVersion.h"
+#include "HAL/PlatformMemory.h"
+#include "Engine/GameViewportClient.h"
+#include "UnrealClient.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/DateTime.h"
@@ -21,7 +29,43 @@ FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InCo
 	{
 		Config.Direction = FVector::ForwardVector;
 	}
-	CurrentPos = Config.StartPosition;
+
+	// Route: StartPosition is the first vertex; cache cumulative arc lengths for EvaluatePath.
+	if (Config.PathType == EVoxelBenchPath::Route)
+	{
+		RouteVertices.Add(Config.StartPosition);
+		RouteVertices.Append(Config.RoutePoints);
+		RouteCumulative.Add(0.0);
+		for (int32 i = 1; i < RouteVertices.Num(); ++i)
+		{
+			RouteCumulative.Add(RouteCumulative.Last() + FVector::Dist(RouteVertices[i - 1], RouteVertices[i]));
+		}
+		if (RouteVertices.Num() < 2)
+		{
+			UE_LOG(LogVoxelBench, Warning, TEXT("Benchmark '%s': route has no waypoints, falling back to a straight path"), *Config.Tag);
+			Config.PathType = EVoxelBenchPath::Straight;
+		}
+	}
+	// Orbit: start at the circle point nearest the start position.
+	if (Config.PathType == EVoxelBenchPath::Orbit)
+	{
+		if (Config.OrbitRadius <= 0.0f)
+		{
+			UE_LOG(LogVoxelBench, Warning, TEXT("Benchmark '%s': orbit radius <= 0, falling back to a straight path"), *Config.Tag);
+			Config.PathType = EVoxelBenchPath::Straight;
+		}
+		else
+		{
+			OrbitStartAngle = FMath::Atan2(Config.StartPosition.Y - Config.OrbitCenter.Y, Config.StartPosition.X - Config.OrbitCenter.X);
+		}
+	}
+	// Route and orbit default to the whole path (one lap); a straight path needs an explicit length.
+	if (Config.TraverseDistance <= 0.0f)
+	{
+		Config.TraverseDistance = static_cast<float>(GetPathLength());
+	}
+
+	CurrentPos = ApplyAltitude(EvaluatePath(0.0));
 
 	if (ChunkManager)
 	{
@@ -30,8 +74,68 @@ FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InCo
 	}
 	Samples.Reserve(4096);
 	SetupFlyPawn();
-	UE_LOG(LogVoxelBench, Log, TEXT("Benchmark '%s' started: start=(%.0f,%.0f,%.0f) vel=%.0f dist=%.0f"),
-		*Config.Tag, CurrentPos.X, CurrentPos.Y, CurrentPos.Z, Config.VelocityUU, Config.TraverseDistance);
+	SampleMemory();
+	UE_LOG(LogVoxelBench, Log, TEXT("Benchmark '%s' started: path=%d start=(%.0f,%.0f,%.0f) vel=%.0f dist=%.0f follow=%.0f"),
+		*Config.Tag, static_cast<int32>(Config.PathType), CurrentPos.X, CurrentPos.Y, CurrentPos.Z, Config.VelocityUU,
+		Config.TraverseDistance, Config.FollowTerrainAltitude);
+}
+
+double FVoxelStreamingBenchmark::GetPathLength() const
+{
+	switch (Config.PathType)
+	{
+	case EVoxelBenchPath::Route:
+		return RouteCumulative.Num() > 0 ? RouteCumulative.Last() : 0.0;
+	case EVoxelBenchPath::Orbit:
+		return 2.0 * UE_DOUBLE_PI * Config.OrbitRadius;
+	default:
+		return Config.TraverseDistance;
+	}
+}
+
+FVector FVoxelStreamingBenchmark::EvaluatePath(double S) const
+{
+	switch (Config.PathType)
+	{
+	case EVoxelBenchPath::Route:
+	{
+		// Past the last vertex the viewer holds at the end of the route.
+		const int32 Last = RouteVertices.Num() - 1;
+		if (S >= RouteCumulative[Last])
+		{
+			return RouteVertices[Last];
+		}
+		for (int32 i = 1; i <= Last; ++i)
+		{
+			if (S <= RouteCumulative[i])
+			{
+				const double SegLen = RouteCumulative[i] - RouteCumulative[i - 1];
+				const double Alpha = SegLen > UE_KINDA_SMALL_NUMBER ? (S - RouteCumulative[i - 1]) / SegLen : 1.0;
+				return FMath::Lerp(RouteVertices[i - 1], RouteVertices[i], Alpha);
+			}
+		}
+		return RouteVertices[Last];
+	}
+	case EVoxelBenchPath::Orbit:
+	{
+		const double Angle = OrbitStartAngle + S / Config.OrbitRadius;
+		return FVector(
+			Config.OrbitCenter.X + Config.OrbitRadius * FMath::Cos(Angle),
+			Config.OrbitCenter.Y + Config.OrbitRadius * FMath::Sin(Angle),
+			Config.StartPosition.Z);
+	}
+	default:
+		return Config.StartPosition + Config.Direction * S;
+	}
+}
+
+FVector FVoxelStreamingBenchmark::ApplyAltitude(const FVector& Pos) const
+{
+	if (Config.FollowTerrainAltitude < 0.0f || !ChunkManager)
+	{
+		return Pos;
+	}
+	return FVector(Pos.X, Pos.Y, ChunkManager->GetGeneratedSurfaceHeight(Pos.X, Pos.Y) + Config.FollowTerrainAltitude);
 }
 
 void FVoxelStreamingBenchmark::SetupFlyPawn()
@@ -145,7 +249,43 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.SeamMs = T.SeamMs;
 	S.CollPrepMs = T.CollisionPrepMs;
 	S.CollApplyMs = T.CollisionApplyMs;
+
+	MemorySampleTimer += DeltaTime;
+	if (MemorySampleTimer >= Config.MemorySampleIntervalSec)
+	{
+		MemorySampleTimer = 0.0f;
+		SampleMemory();
+	}
+	S.VoxelMB = LastMemory.VoxelMB;
+	S.EditMB = LastMemory.EditMB;
+	S.RendCPUMB = LastMemory.RendCPUMB;
+	S.RendGPUMB = LastMemory.RendGPUMB;
+	S.CollMB = LastMemory.CollMB;
+	S.ScatMB = LastMemory.ScatMB;
+	S.ProcessMB = LastMemory.ProcessMB;
+	S.ResidentN = LastMemory.ResidentN;
+	S.UniformN = LastMemory.UniformN;
+	S.CompressedN = LastMemory.CompressedN;
+	S.EmptyN = LastMemory.EmptyN;
 	Samples.Add(S);
+}
+
+void FVoxelStreamingBenchmark::SampleMemory()
+{
+	if (!ChunkManager) { return; }
+	constexpr double ToMB = 1.0 / (1024.0 * 1024.0);
+	const UVoxelChunkManager::FVoxelMemoryStats M = ChunkManager->GetVoxelMemoryStats();
+	LastMemory.VoxelMB = static_cast<float>(M.VoxelDataBytes * ToMB);
+	LastMemory.EditMB = static_cast<float>(M.EditDataBytes * ToMB);
+	LastMemory.RendCPUMB = static_cast<float>(M.RendererCPUBytes * ToMB);
+	LastMemory.RendGPUMB = static_cast<float>(M.RendererGPUBytes * ToMB);
+	LastMemory.CollMB = static_cast<float>(M.CollisionBytes * ToMB);
+	LastMemory.ScatMB = static_cast<float>(M.ScatterBytes * ToMB);
+	LastMemory.ProcessMB = static_cast<float>(FPlatformMemory::GetStats().UsedPhysical * ToMB);
+	LastMemory.ResidentN = M.ResidentChunks;
+	LastMemory.UniformN = M.UniformChunks;
+	LastMemory.CompressedN = M.CompressedChunks;
+	LastMemory.EmptyN = M.EmptyChunks;
 }
 
 void FVoxelStreamingBenchmark::Tick(float DeltaTime)
@@ -158,8 +298,8 @@ void FVoxelStreamingBenchmark::Tick(float DeltaTime)
 	// Advance the streaming origin before sampling so the sample reflects the current position.
 	if (Phase == EPhase::Traverse)
 	{
-		DistanceTraversed += Config.VelocityUU * DeltaTime;
-		CurrentPos = Config.StartPosition + Config.Direction * DistanceTraversed;
+		DistanceTraversed = FMath::Min(DistanceTraversed + Config.VelocityUU * DeltaTime, Config.TraverseDistance);
+		CurrentPos = ApplyAltitude(EvaluatePath(DistanceTraversed));
 	}
 	ChunkManager->SetBenchmarkView(true, CurrentPos);
 	UpdateFlyPawn();
@@ -172,6 +312,7 @@ void FVoxelStreamingBenchmark::Tick(float DeltaTime)
 		DrainedStreak = QueuesDrained() ? (DrainedStreak + 1) : 0;
 		if (DrainedStreak >= Config.EquilibriumStreak || PhaseElapsed >= Config.WarmupTimeoutSec)
 		{
+			bWarmupDrained = DrainedStreak >= Config.EquilibriumStreak;
 			Phase = EPhase::Traverse;
 			PhaseElapsed = 0.0f;
 			DistanceTraversed = 0.0f;
@@ -217,6 +358,10 @@ void FVoxelStreamingBenchmark::Finish(bool bReachedEquilibrium)
 	Phase = EPhase::Done;
 	if (ChunkManager)
 	{
+		// Audit while the benchmark view is still the streaming origin, so "beyond the unload
+		// radius" is measured from where the run ended rather than from the restored pawn.
+		AuditFindings = ChunkManager->AuditResidency(AuditReport);
+		SampleMemory();
 		ChunkManager->SetBenchmarkView(false, FVector::ZeroVector);
 	}
 	RestoreFlyPawn();
@@ -232,6 +377,130 @@ static float Percentile(TArray<float>& Values, float P)
 	return Values[Idx];
 }
 
+// Minimal JSON string escaping for paths, tags and the multi-line audit report.
+static FString JsonEscape(const FString& In)
+{
+	FString Out;
+	Out.Reserve(In.Len() + 8);
+	for (const TCHAR C : In)
+	{
+		switch (C)
+		{
+		case TEXT('"'): Out += TEXT("\\\""); break;
+		case TEXT('\\'): Out += TEXT("\\\\"); break;
+		case TEXT('\n'): Out += TEXT("\\n"); break;
+		case TEXT('\r'): break;
+		case TEXT('\t'): Out += TEXT("\\t"); break;
+		default: Out.AppendChar(C); break;
+		}
+	}
+	return Out;
+}
+
+FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
+{
+	TArray<FString> Fields;
+	auto Str = [&Fields](const TCHAR* Key, const FString& Value) { Fields.Add(FString::Printf(TEXT("    \"%s\": \"%s\""), Key, *JsonEscape(Value))); };
+	auto Num = [&Fields](const TCHAR* Key, double Value) { Fields.Add(FString::Printf(TEXT("    \"%s\": %.3f"), Key, Value)); };
+	auto Int = [&Fields](const TCHAR* Key, int64 Value) { Fields.Add(FString::Printf(TEXT("    \"%s\": %lld"), Key, Value)); };
+	auto Bool = [&Fields](const TCHAR* Key, bool bValue) { Fields.Add(FString::Printf(TEXT("    \"%s\": %s"), Key, bValue ? TEXT("true") : TEXT("false"))); };
+	auto Vec = [&Fields](const TCHAR* Key, const FVector& V) { Fields.Add(FString::Printf(TEXT("    \"%s\": [%.1f, %.1f, %.1f]"), Key, V.X, V.Y, V.Z)); };
+
+	const UWorld* World = ChunkManager ? ChunkManager->GetWorld() : nullptr;
+	FString MapName = World ? World->GetMapName() : FString();
+	if (World) { MapName.RemoveFromStart(World->StreamingLevelsPrefix); }
+	Str(TEXT("map"), MapName);
+	Str(TEXT("worldType"), World ? (World->WorldType == EWorldType::PIE ? TEXT("PIE") : World->WorldType == EWorldType::Game ? TEXT("Game") : TEXT("Other")) : TEXT("none"));
+	Str(TEXT("build"), Config.BuildLabel);
+	Str(TEXT("engine"), FEngineVersion::Current().ToString());
+	Str(TEXT("rhi"), FApp::CanEverRender() ? FApp::GetGraphicsRHI() : FString(TEXT("null")));
+	if (const UGameViewportClient* Viewport = World ? World->GetGameViewport() : nullptr)
+	{
+		FVector2D Size = FVector2D::ZeroVector;
+		Viewport->GetViewportSize(Size);
+		Fields.Add(FString::Printf(TEXT("    \"viewport\": [%.0f, %.0f]"), Size.X, Size.Y));
+	}
+
+	// The -Voxel* switches on the command line (scheduler / LOD / force-CPU / config overrides).
+	FString VoxelSwitches;
+	{
+		TArray<FString> Tokens, Switches;
+		FCommandLine::Parse(FCommandLine::Get(), Tokens, Switches);
+		for (const FString& Switch : Switches)
+		{
+			if (Switch.StartsWith(TEXT("Voxel"), ESearchCase::IgnoreCase))
+			{
+				VoxelSwitches += (VoxelSwitches.IsEmpty() ? TEXT("-") : TEXT(" -")) + Switch;
+			}
+		}
+	}
+	Str(TEXT("voxelSwitches"), VoxelSwitches);
+	Str(TEXT("configOverride"), UVoxelWorldConfiguration::GetOverridePath());
+
+	if (const UVoxelWorldConfiguration* Cfg = ChunkManager ? ChunkManager->GetConfiguration() : nullptr)
+	{
+		Str(TEXT("config"), Cfg->GetPathName());
+		Str(TEXT("worldMode"), StaticEnum<EWorldMode>()->GetNameStringByValue(static_cast<int64>(Cfg->WorldMode)));
+		Str(TEXT("meshingMode"), StaticEnum<EMeshingMode>()->GetNameStringByValue(static_cast<int64>(Cfg->MeshingMode)));
+		const IVoxelMesher* Mesher = ChunkManager->GetMesherPtr();
+		Str(TEXT("mesher"), Mesher ? Mesher->GetMesherTypeName() : FString(TEXT("none")));
+		Bool(TEXT("gpuGenerationConfigured"), Cfg->bUseGPUGeneration);
+		Bool(TEXT("gpuGenerationActive"), ChunkManager->IsUsingGPUGeneration());
+		Bool(TEXT("gpuMeshingConfigured"), Cfg->bUseGPUMeshing);
+		Bool(TEXT("gpuScatterExtraction"), Cfg->bUseGPUScatterExtraction);
+		Bool(TEXT("forceCPU"), FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU")));
+		Int(TEXT("worldSeed"), Cfg->WorldSeed);
+		Num(TEXT("voxelSize"), Cfg->VoxelSize);
+		Int(TEXT("chunkSize"), Cfg->ChunkSize);
+		Num(TEXT("chunkWorldSize"), Cfg->GetChunkWorldSize());
+		Num(TEXT("viewDistance"), Cfg->ViewDistance);
+		Int(TEXT("lodBands"), Cfg->LODBands.Num());
+		Vec(TEXT("worldOrigin"), Cfg->WorldOrigin);
+		if (Cfg->WorldMode == EWorldMode::IslandBowl)
+		{
+			Int(TEXT("islandShape"), Cfg->IslandShape);
+			Num(TEXT("islandRadius"), Cfg->IslandRadius);
+			Num(TEXT("islandSizeY"), Cfg->IslandSizeY);
+			Num(TEXT("islandFalloffWidth"), Cfg->IslandFalloffWidth);
+			Int(TEXT("islandFalloffType"), Cfg->IslandFalloffType);
+			Fields.Add(FString::Printf(TEXT("    \"islandCenter\": [%.1f, %.1f]"), Cfg->IslandCenterX, Cfg->IslandCenterY));
+			Num(TEXT("islandEdgeHeight"), Cfg->IslandEdgeHeight);
+		}
+		else if (Cfg->WorldMode == EWorldMode::SphericalPlanet)
+		{
+			Num(TEXT("worldRadius"), Cfg->WorldRadius);
+		}
+	}
+
+	static const TCHAR* PathNames[] = { TEXT("straight"), TEXT("route"), TEXT("orbit") };
+	Str(TEXT("path"), PathNames[static_cast<int32>(Config.PathType)]);
+	Vec(TEXT("start"), Config.StartPosition);
+	if (Config.PathType == EVoxelBenchPath::Straight)
+	{
+		Vec(TEXT("direction"), Config.Direction);
+	}
+	else if (Config.PathType == EVoxelBenchPath::Route)
+	{
+		FString Points;
+		for (const FVector& P : Config.RoutePoints)
+		{
+			Points += FString::Printf(TEXT("%s[%.0f, %.0f, %.0f]"), Points.IsEmpty() ? TEXT("") : TEXT(", "), P.X, P.Y, P.Z);
+		}
+		Fields.Add(FString::Printf(TEXT("    \"route\": [%s]"), *Points));
+	}
+	else
+	{
+		Fields.Add(FString::Printf(TEXT("    \"orbitCenter\": [%.1f, %.1f]"), Config.OrbitCenter.X, Config.OrbitCenter.Y));
+		Num(TEXT("orbitRadius"), Config.OrbitRadius);
+	}
+	Num(TEXT("pathLength"), GetPathLength());
+	Num(TEXT("followTerrainAltitude"), Config.FollowTerrainAltitude);
+	Num(TEXT("warmupTimeoutSec"), Config.WarmupTimeoutSec);
+	Num(TEXT("catchUpTimeoutSec"), Config.CatchUpTimeoutSec);
+
+	return FString::Join(Fields, TEXT(",\n"));
+}
+
 void FVoxelStreamingBenchmark::WriteReport()
 {
 	const FString Dir = FPaths::ProjectSavedDir() / TEXT("VoxelBench");
@@ -242,10 +511,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
@@ -254,16 +523,27 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.MeshSnapMs, S.MeshSliceMs, S.MeshDispMs, S.MeshLaunchCount,
 			S.RendMeshMs, S.RendSubRendMs, S.RendSubScatMs, S.RendSubWatMs,
 			S.RendUnloadMs, S.RendWTileMs, S.RendFlushMs, S.RendSubmitCount,
-			S.RemeshCount, S.SeamMs, S.CollPrepMs, S.CollApplyMs);
+			S.RemeshCount, S.SeamMs, S.CollPrepMs, S.CollApplyMs,
+			S.VoxelMB, S.EditMB, S.RendCPUMB, S.RendGPUMB, S.CollMB, S.ScatMB, S.ProcessMB,
+			S.ResidentN, S.UniformN, S.CompressedN, S.EmptyN);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 
 	// ---- summary over the traverse phase (the loaded window) ----
 	int32 PeakGen = 0, PeakMesh = 0, PeakUnload = 0, MaxLoaded = 0;
+	float PeakVoxelMB = 0.0f, PeakRendGPUMB = 0.0f, PeakRendCPUMB = 0.0f, PeakCollMB = 0.0f, PeakScatMB = 0.0f, PeakProcessMB = 0.0f;
+	float PeakVoxelTotalMB = 0.0f;
 	TArray<float> FrameMsArr, TotalMsArr;
 	for (const FSample& S : Samples)
 	{
 		MaxLoaded = FMath::Max(MaxLoaded, S.LoadedChunks); // retention peak across all phases
+		PeakVoxelMB = FMath::Max(PeakVoxelMB, S.VoxelMB);
+		PeakRendGPUMB = FMath::Max(PeakRendGPUMB, S.RendGPUMB);
+		PeakRendCPUMB = FMath::Max(PeakRendCPUMB, S.RendCPUMB);
+		PeakCollMB = FMath::Max(PeakCollMB, S.CollMB);
+		PeakScatMB = FMath::Max(PeakScatMB, S.ScatMB);
+		PeakProcessMB = FMath::Max(PeakProcessMB, S.ProcessMB);
+		PeakVoxelTotalMB = FMath::Max(PeakVoxelTotalMB, S.VoxelMB + S.EditMB + S.RendCPUMB + S.RendGPUMB + S.CollMB + S.ScatMB);
 		if (S.Phase != static_cast<uint8>(EPhase::Traverse)) { continue; }
 		PeakGen = FMath::Max(PeakGen, S.GenQueue);
 		PeakMesh = FMath::Max(PeakMesh, S.MeshQueue);
@@ -285,10 +565,13 @@ void FVoxelStreamingBenchmark::WriteReport()
 
 	FString Json;
 	Json += TEXT("{\n");
-	Json += FString::Printf(TEXT("  \"tag\": \"%s\",\n"), *Config.Tag);
+	Json += FString::Printf(TEXT("  \"tag\": \"%s\",\n"), *JsonEscape(Config.Tag));
+	Json += FString::Printf(TEXT("  \"run\": {\n%s\n  },\n"), *BuildRunMetadataJson());
 	Json += FString::Printf(TEXT("  \"velocityUU\": %.1f,\n"), Config.VelocityUU);
 	Json += FString::Printf(TEXT("  \"traverseDistance\": %.1f,\n"), Config.TraverseDistance);
 	Json += FString::Printf(TEXT("  \"samples\": %d,\n"), Samples.Num());
+	Json += FString::Printf(TEXT("  \"warmupSec\": %.2f,\n"), TraverseStartSimTime);
+	Json += FString::Printf(TEXT("  \"warmupDrained\": %s,\n"), bWarmupDrained ? TEXT("true") : TEXT("false"));
 	Json += FString::Printf(TEXT("  \"traverseDurationSec\": %.2f,\n"), TraverseDur);
 	Json += FString::Printf(TEXT("  \"catchUpSec\": %.2f,\n"), CatchUpDurationSec);
 	Json += FString::Printf(TEXT("  \"reachedEquilibrium\": %s,\n"), CatchUpDurationSec >= 0.0 ? TEXT("true") : TEXT("false"));
@@ -315,10 +598,29 @@ void FVoxelStreamingBenchmark::WriteReport()
 	Json += FString::Printf(TEXT("  \"effMaxAsyncGen\": %d,\n"), ChunkManager->GetEffectiveMaxAsyncGenerationTasks());
 	Json += FString::Printf(TEXT("  \"effMaxAsyncMesh\": %d,\n"), ChunkManager->GetEffectiveMaxAsyncMeshTasks());
 	Json += FString::Printf(TEXT("  \"effMaxLODRemeshPerFrame\": %d,\n"), ChunkManager->GetEffectiveMaxLODRemeshPerFrame());
-	Json += FString::Printf(TEXT("  \"effMaxPendingMeshes\": %d\n"), ChunkManager->GetEffectiveMaxPendingMeshes());
+	Json += FString::Printf(TEXT("  \"effMaxPendingMeshes\": %d,\n"), ChunkManager->GetEffectiveMaxPendingMeshes());
+	// Memory: peaks over the whole run and the values when it finished (after catch-up).
+	Json += TEXT("  \"memory\": {\n");
+	Json += FString::Printf(TEXT("    \"peakVoxelMB\": %.1f, \"endVoxelMB\": %.1f,\n"), PeakVoxelMB, LastMemory.VoxelMB);
+	Json += FString::Printf(TEXT("    \"peakRendererGPUMB\": %.1f, \"endRendererGPUMB\": %.1f,\n"), PeakRendGPUMB, LastMemory.RendGPUMB);
+	Json += FString::Printf(TEXT("    \"peakRendererCPUMB\": %.1f, \"endRendererCPUMB\": %.1f,\n"), PeakRendCPUMB, LastMemory.RendCPUMB);
+	Json += FString::Printf(TEXT("    \"peakCollisionMB\": %.1f, \"endCollisionMB\": %.1f,\n"), PeakCollMB, LastMemory.CollMB);
+	Json += FString::Printf(TEXT("    \"peakScatterMB\": %.1f, \"endScatterMB\": %.1f,\n"), PeakScatMB, LastMemory.ScatMB);
+	Json += FString::Printf(TEXT("    \"endEditMB\": %.1f,\n"), LastMemory.EditMB);
+	Json += FString::Printf(TEXT("    \"peakVoxelSystemsMB\": %.1f,\n"), PeakVoxelTotalMB);
+	Json += FString::Printf(TEXT("    \"peakProcessMB\": %.0f, \"endProcessMB\": %.0f,\n"), PeakProcessMB, LastMemory.ProcessMB);
+	Json += FString::Printf(TEXT("    \"endResidentChunks\": %d, \"endUniformChunks\": %d, \"endCompressedChunks\": %d, \"endEmptyChunks\": %d\n"),
+		LastMemory.ResidentN, LastMemory.UniformN, LastMemory.CompressedN, LastMemory.EmptyN);
+	Json += TEXT("  },\n");
+	// Residency audit taken at the end of catch-up (0 findings = healthy).
+	Json += FString::Printf(TEXT("  \"auditFindings\": %d,\n"), AuditFindings);
+	Json += FString::Printf(TEXT("  \"auditReport\": \"%s\"\n"), *JsonEscape(AuditReport));
 	Json += TEXT("}\n");
 	FFileHelper::SaveStringToFile(Json, *(Base + TEXT(".json")));
 
+	UE_LOG(LogVoxelBench, Warning,
+		TEXT("Benchmark '%s' memory: peakVoxelSystems=%.0fMB (voxel %.0f, rendGPU %.0f, rendCPU %.0f, coll %.0f, scatter %.0f) peakProcess=%.0fMB; audit findings=%d"),
+		*Config.Tag, PeakVoxelTotalMB, PeakVoxelMB, PeakRendGPUMB, PeakRendCPUMB, PeakCollMB, PeakScatMB, PeakProcessMB, AuditFindings);
 	UE_LOG(LogVoxelBench, Warning,
 		TEXT("Benchmark '%s' DONE: traverse=%.1fs catchUp=%.1fs peakMeshQ=%d peakGenQ=%d peakUnloadQ=%d frameP95=%.1fms totalP95=%.1fms thrash=%lld(nbr=%lld lod=%lld dirty=%lld other=%lld) unloadLag(mean/max)=%.0f/%.0fms unloadDist(mean/max)=%.0f/%.0fuu -> %s"),
 		*Config.Tag, TraverseDur, CatchUpDurationSec, PeakMesh, PeakGen, PeakUnload,

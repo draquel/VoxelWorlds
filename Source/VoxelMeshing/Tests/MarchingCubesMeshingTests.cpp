@@ -8,6 +8,7 @@
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
 #include "RenderingThread.h"
+#include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
 // ==================== Helper Functions ====================
 
@@ -445,6 +446,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingGPUAsyncTest, "VoxelWorlds
 
 bool FMarchingCubesMeshingGPUAsyncTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelGPUMarchingCubesMesher Mesher;
 	Mesher.Initialize();
 	Mesher.SetConfig(CreateMCConfig());
@@ -524,6 +527,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingCPUvsGPUTest, "VoxelWorlds
 
 bool FMarchingCubesMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelCPUMarchingCubesMesher CPUMesher;
 	FVoxelGPUMarchingCubesMesher GPUMesher;
 
@@ -627,6 +632,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingPerformanceTest, "VoxelWor
 
 bool FMarchingCubesMeshingPerformanceTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelCPUMarchingCubesMesher CPUMesher;
 	FVoxelGPUMarchingCubesMesher GPUMesher;
 

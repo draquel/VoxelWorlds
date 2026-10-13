@@ -9,6 +9,7 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCaveConfiguration.h"
 #include "RenderingThread.h"
+#include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCPUNoiseGeneratorTest, "VoxelWorlds.Generation.CPUNoiseGenerator",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -125,6 +126,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUNoiseGeneratorAsyncTest, "VoxelWorlds.
 
 bool FVoxelGPUNoiseGeneratorAsyncTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	// Create GPU generator
 	FVoxelGPUNoiseGenerator Generator;
 	Generator.Initialize();
@@ -326,6 +329,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUMaterialParityTest, "VoxelWorlds.
 
 bool FVoxelGPUvsCPUMaterialParityTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
 	BiomeConfig->InitializeDefaults(); // Plains / Forest / Mountain / Ocean
@@ -392,6 +397,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUIslandBowlParityTest, "VoxelWorld
 
 bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
 	BiomeConfig->InitializeDefaults();
@@ -458,6 +465,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUCavesParityTest, "VoxelWorlds.Gen
 
 bool FVoxelGPUvsCPUCavesParityTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
 	BiomeConfig->InitializeDefaults();
@@ -554,6 +563,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUNoiseTypeParityTest, "VoxelWorlds
 
 bool FVoxelGPUvsCPUNoiseTypeParityTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
 	BiomeConfig->InitializeDefaults();
@@ -610,6 +621,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUWaterParityTest, "VoxelWorlds.Gen
 
 bool FVoxelGPUvsCPUWaterParityTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
 	BiomeConfig->InitializeDefaults();
@@ -683,6 +696,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUOreVariantParityTest, "VoxelWorld
 
 bool FVoxelGPUvsCPUOreVariantParityTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
 	BiomeConfig->InitializeDefaults();
@@ -764,6 +779,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNoiseGeneratorPerformanceTest, "VoxelWorl
 
 bool FVoxelNoiseGeneratorPerformanceTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelGPUNoiseGenerator Generator;
 	Generator.Initialize();
 

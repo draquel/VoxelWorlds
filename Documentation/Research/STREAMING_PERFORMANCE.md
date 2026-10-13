@@ -17,10 +17,11 @@ A deterministic, repeatable measurement of the chunk manager's queue/scheduler
 dynamics under motion plus a catch-up phase after the viewer stops. Built to
 iterate on streaming perf intelligently rather than by feel.
 
-**Scenario:** a fixed-velocity straight traverse at low altitude (so the leading
+**Scenario:** a fixed-velocity traverse at low altitude (so the leading
 edge streams at LOD0), longer than the initially loaded radius, followed by a
 **catch-up** phase that waits for the queues to drain to equilibrium after the
-viewer stops. The benchmark teleports the player pawn along the path each tick
+viewer stops. The path is a straight line by default; it can also be a waypoint
+route or an orbit, at a fixed altitude or following the terrain. The benchmark teleports the player pawn along the path each tick
 (with flying movement) so it never falls through un-meshed terrain.
 
 **Code:** `Source/VoxelStreaming/{Public,Private}/VoxelStreamingBenchmark.{h,cpp}`
@@ -33,10 +34,34 @@ lag/distance instrumentation), ticked from `TickComponent`.
 
 **PIE (in-editor):**
 ```
-voxel.Bench.Run [tag] [velocityUU] [distanceUU]
+voxel.Bench.Run [tag] [velocityUU] [distanceUU] [key=value ...]
 ```
 A console command; targets the PIE/Game world's chunk manager and starts from the
 player view. Example: `voxel.Bench.Run mytest 6000 60000` (6000 uu/s over 60000 uu).
+
+Optional `key=value` arguments. Components are separated by `:` and route points by `/`,
+because `-ExecCmds` splits on commas:
+
+| Argument | Effect |
+|----------|--------|
+| `dir=X:Y[:Z]` | Straight-path direction (default +X) |
+| `start=X:Y[:Z]` | Start here instead of the player view; Z defaults to 500 uu above the analytic surface |
+| `route=X:Y[:Z]/X:Y[:Z]/...` | Fly a polyline from the start through these points. Distance 0 or omitted = the whole route |
+| `orbit=CX:CY:R` | Fly a circle of radius R around (CX, CY), from the point nearest the start. Distance 0 or omitted = one lap |
+| `follow=Alt` | Fly Alt uu above the analytic surface (`GetGeneratedSurfaceHeight`) instead of at a fixed Z. Heightmap world modes only |
+| `warmup=Sec` | Max settle time before the traverse (default 10). The report's `warmupSec` is how long the initial load took, so a long warmup with distance 0 measures how long a whole finite world takes to build |
+| `catchup=Sec` | Max drain time after the traverse (default 90) |
+| `build=Label` | Build label recorded in the report (the sweep runner passes the VoxelWorlds commit) |
+
+Examples: an island chord, `voxel.Bench.Run chord 3000 500000 start=-250000:0 dir=1:0 follow=300`;
+a perimeter loop, `voxel.Bench.Run loop 3000 0 orbit=0:0:200000 follow=300`; a full-residency
+settle, `voxel.Bench.Run settle 0 0 warmup=300`.
+
+**Config override (A/B world modes and meshing modes on one map):** `-VoxelConfig=<ObjectPath>`
+on the command line, or the `voxel.ConfigOverride <ObjectPath>` console variable set in the editor
+before pressing Play, replaces the voxel world actor's configuration at initialize
+(`UVoxelWorldConfiguration::GetOverridePath`). While an override is active the world save key gets
+the config's name appended, so override runs never load or overwrite the map's normal save.
 
 **Headless (focus-immune, CPU mesher):**
 ```
@@ -48,7 +73,10 @@ Let it run, then read the report. **Note:** `-ExecCmds` separates multiple comma
 with **commas**, not semicolons.
 
 **Sweep runner:** `Scripts/voxel_bench_sweep.ps1` runs a fresh headless process per
-velocity (cold + focus-immune) with `-ExtraArgs` pass-through.
+velocity (cold + focus-immune). `-Config` passes `-VoxelConfig=`, `-BenchArgs` passes
+`key=value` bench arguments, `-Distance` fixes the traverse length, and `-ExtraArgs` passes
+anything else. It records the VoxelWorlds commit as the report's build label and defaults to
+the UE 5.8 install on D:.
 
 **Report:** `Saved/VoxelBench/<timestamp>_<tag>.{csv,json}`.
 
@@ -64,6 +92,13 @@ velocity (cold + focus-immune) with `-ExtraArgs` pass-through.
 | `unloadLagMean/MaxMs` | Enqueue -> actual-unload dwell (drain latency) |
 | `unloadDistMean/MaxUU` | Viewer distance when a chunk is finally removed (lingering) |
 | `effMax*` | Resulting scheduler caps (after overrides/adaptive throttle) |
+| `run` | What was measured: map, world type, build label, engine, RHI, viewport, `-Voxel*` switches, config path and override, world and meshing mode, mesher, GPU generation/meshing/scatter flags, seed, voxel and chunk size, view distance, LOD band count, `WorldOrigin`, island or planet params, path shape and parameters |
+| `warmupSec` / `warmupDrained` | How long the initial load took to settle, and whether it drained (vs hit the warmup timeout) |
+| `memory` | Peak and end-of-run MB for voxel data, renderer GPU/CPU, collision, scatter and the process; `peakVoxelSystemsMB` (all voxel systems together); end-of-run resident/uniform/compressed/empty chunk counts |
+| `auditFindings` / `auditReport` | `AuditResidency` at the end of catch-up, taken from where the run ended (0 = healthy) |
+
+The CSV adds per-sample memory columns (`VoxelMB`, `EditMB`, `RendCPUMB`, `RendGPUMB`, `CollMB`,
+`ScatMB`, `ProcessMB`, `ResidentN`, `UniformN`, `CompressedN`, `EmptyN`), refreshed every 0.25 s.
 
 ### Methodology notes (important)
 
@@ -76,9 +111,8 @@ velocity (cold + focus-immune) with `-ExtraArgs` pass-through.
 - **Each velocity needs a cold start.** Back-to-back same-path runs are confounded:
   the first run's not-yet-deleted chunks still serve the re-traverse. Use a fresh
   process per velocity (the sweep runner does this).
-- Headless uses the map's **saved** config (runtime config assignment doesn't
-  persist to `-game`), so PIE(GPU) vs headless(CPU) compare scheduler/queue
-  dynamics, not identical per-job cost.
+- Headless uses the map's **saved** config unless `-VoxelConfig=` overrides it, so
+  PIE(GPU) vs headless(CPU) compare scheduler/queue dynamics, not identical per-job cost.
 
 ---
 
@@ -90,6 +124,7 @@ editor/game command line. Defaults reflect shipped behaviour.
 | Flag | Effect |
 |------|--------|
 | `-VoxelForceCPU` | Force the CPU mesher (needed under `-nullrhi`). |
+| `-VoxelConfig=<ObjectPath>` | Run a different `UVoxelWorldConfiguration` than the map's own (see "Config override" above). |
 | `-VoxelMaxAsyncGen/Mesh/LODRemesh/Pending=N` | Override the scheduler caps. |
 | `-VoxelPinScheduler` | Disable adaptive throttling (pin the caps). |
 | `-VoxelLODScale=N` | Scale the LOD band boundaries within a fixed view distance (A/B the detail/thrash tradeoff). N<1 pulls fine-LOD reach in. |

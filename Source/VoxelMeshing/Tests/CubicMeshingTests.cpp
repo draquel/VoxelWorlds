@@ -8,6 +8,7 @@
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
 #include "RenderingThread.h"
+#include "RHI.h"             // GUsingNullRHI: GPU cubic tests skip under -nullrhi
 
 // ==================== Helper Functions ====================
 
@@ -312,6 +313,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingGPUAsyncTest, "VoxelWorlds.Meshing
 
 bool FCubicMeshingGPUAsyncTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU cubic tests require a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelGPUCubicMesher Mesher;
 	Mesher.Initialize();
 
@@ -379,6 +382,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingGPUReadbackTest, "VoxelWorlds.Mesh
 
 bool FCubicMeshingGPUReadbackTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU cubic tests require a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelGPUCubicMesher Mesher;
 	Mesher.Initialize();
 
@@ -428,6 +433,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingCPUvsGPUTest, "VoxelWorlds.Meshing
 
 bool FCubicMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU cubic tests require a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelCPUCubicMesher CPUMesher;
 	FVoxelGPUCubicMesher GPUMesher;
 
@@ -548,9 +555,15 @@ bool FCubicMeshingPerformanceTest::RunTest(const FString& Parameters)
 	}
 	double CPUAvgMs = (CPUTotalTime / NumIterations) * 1000.0;
 
-	// Benchmark GPU meshing (including count readback)
+	// Benchmark GPU meshing (including count readback). Needs a real RHI: under -nullrhi the
+	// completion callback never fires.
 	double GPUTotalTime = 0.0;
-	for (int32 i = 0; i < NumIterations; ++i)
+	const bool bRunGPU = !GUsingNullRHI;
+	if (!bRunGPU)
+	{
+		AddInfo(TEXT("GPU half skipped: requires a real RHI (run without -nullrhi)"));
+	}
+	for (int32 i = 0; bRunGPU && i < NumIterations; ++i)
 	{
 		Request.ChunkCoord = FIntVector(i + 100, 0, 0);
 
@@ -563,10 +576,16 @@ bool FCubicMeshingPerformanceTest::RunTest(const FString& Parameters)
 				bCompleted = true;
 			}));
 
-		while (!bCompleted)
+		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 5.0)
 		{
 			FPlatformProcess::Sleep(0.001f);
 			FlushRenderingCommands();
+		}
+		if (!bCompleted)
+		{
+			AddError(TEXT("GPU meshing did not complete within 5 s"));
+			GPUMesher.ReleaseHandle(Handle);
+			break;
 		}
 
 		// Read counts to ensure we time the full operation
@@ -584,7 +603,10 @@ bool FCubicMeshingPerformanceTest::RunTest(const FString& Parameters)
 
 	// Performance targets: CPU < 50ms, GPU < 5ms (meshing is simpler than noise generation)
 	TestTrue(TEXT("CPU meshing should complete in < 50ms"), CPUAvgMs < 50.0);
-	TestTrue(TEXT("GPU meshing should complete in < 5ms"), GPUAvgMs < 5.0);
+	if (bRunGPU)
+	{
+		TestTrue(TEXT("GPU meshing should complete in < 5ms"), GPUAvgMs < 5.0);
+	}
 
 	CPUMesher.Shutdown();
 	GPUMesher.Shutdown();

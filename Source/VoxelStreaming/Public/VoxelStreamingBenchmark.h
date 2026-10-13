@@ -10,23 +10,50 @@
 class UVoxelChunkManager;
 class APawn;
 
+/** Shape of the path the benchmark viewer flies during the traverse phase. */
+enum class EVoxelBenchPath : uint8
+{
+	/** StartPosition + Direction * distance. */
+	Straight,
+	/** StartPosition, then each of RoutePoints in order (a polyline). */
+	Route,
+	/** A circle of OrbitRadius around OrbitCenter, starting at the point nearest StartPosition. */
+	Orbit
+};
+
 /** Scenario + equilibrium parameters for a benchmark run. */
 struct FVoxelBenchConfig
 {
 	/** Label written into the report filename + header (use to tag A/B runs). */
 	FString Tag = TEXT("bench");
 
-	/** Where the traverse starts (the driver lowers Z to keep the leading edge at LOD0). */
+	/** Where the traverse starts. Its Z is the flight altitude unless FollowTerrainAltitude is set. */
 	FVector StartPosition = FVector::ZeroVector;
 
-	/** Straight traverse direction (normalized) and speed. */
+	/** Path shape; see EVoxelBenchPath. */
+	EVoxelBenchPath PathType = EVoxelBenchPath::Straight;
+
+	/** Straight traverse direction (normalized) and speed along any path. */
 	FVector Direction = FVector::ForwardVector;
 	float VelocityUU = 1500.0f;
 
-	/** Traverse length — should exceed the initial load radius so new terrain must stream. */
+	/** Route waypoints, visited after StartPosition (Route only). Z is used unless FollowTerrainAltitude is set. */
+	TArray<FVector> RoutePoints;
+
+	/** Orbit centre (XY) and radius (Orbit only). */
+	FVector2D OrbitCenter = FVector2D::ZeroVector;
+	float OrbitRadius = 0.0f;
+
+	/** Traverse length along the path. Must exceed the initial load radius so new terrain streams.
+	 *  <= 0 means the whole route (Route) or one lap (Orbit); a Straight path needs a positive length. */
 	float TraverseDistance = 20000.0f;
 
-	/** Max time to wait for the initial load to settle before the traverse begins. */
+	/** >= 0: fly this many uu above the analytic surface (UVoxelChunkManager::GetGeneratedSurfaceHeight)
+	 *  instead of at a fixed Z. Heightmap world modes only (InfinitePlane, IslandBowl). */
+	float FollowTerrainAltitude = -1.0f;
+
+	/** Max time to wait for the initial load to settle before the traverse begins. Raise it to measure
+	 *  how long a whole finite world takes to build (the report records the settle time). */
 	float WarmupTimeoutSec = 10.0f;
 
 	/** Max time to wait for the queues to drain after the traverse stops. */
@@ -35,6 +62,13 @@ struct FVoxelBenchConfig
 	/** Queues are "drained" when gen+mesh+unload+in-flight+upload <= this for EquilibriumStreak samples. */
 	int32 DrainedThreshold = 0;
 	int32 EquilibriumStreak = 10;
+
+	/** Seconds between memory samples. GetVoxelMemoryStats walks every tracked chunk, so it is not
+	 *  taken every frame; samples in between repeat the last value. */
+	float MemorySampleIntervalSec = 0.25f;
+
+	/** Free-form build label recorded in the report (the sweep script passes the VoxelWorlds commit). */
+	FString BuildLabel;
 };
 
 /**
@@ -82,9 +116,21 @@ private:
 		float SeamMs;
 		// Collision sub-phases (P4a): cook-launch prep vs completed-cook apply (both GT)
 		float CollPrepMs, CollApplyMs;
+		// Memory (MB) and far-compression residency, refreshed every MemorySampleIntervalSec
+		float VoxelMB, EditMB, RendCPUMB, RendGPUMB, CollMB, ScatMB, ProcessMB;
+		int32 ResidentN, UniformN, CompressedN, EmptyN;
 	};
 
 	void TakeSample(float DeltaTime);
+	void SampleMemory();
+	/** Position along the configured path at arc length S (before terrain following). */
+	FVector EvaluatePath(double S) const;
+	/** Apply FollowTerrainAltitude to a path position. */
+	FVector ApplyAltitude(const FVector& Pos) const;
+	/** Total path length for Route/Orbit (Straight returns TraverseDistance). */
+	double GetPathLength() const;
+	/** Run metadata (map, config, modes, flags, sizes, path) as a JSON object body. */
+	FString BuildRunMetadataJson() const;
 	bool QueuesDrained() const;
 	void Finish(bool bReachedEquilibrium);
 	void WriteReport();
@@ -108,6 +154,20 @@ private:
 	double TraverseStartSimTime = 0.0;
 	double CatchUpStartSimTime = 0.0;
 	double CatchUpDurationSec = -1.0; // <0 == did not reach equilibrium before timeout
+	bool bWarmupDrained = false;      // warmup ended because the queues drained (not on timeout)
+
+	// Route: cumulative arc length at each vertex (StartPosition first). Orbit: start angle.
+	TArray<FVector> RouteVertices;
+	TArray<double> RouteCumulative;
+	double OrbitStartAngle = 0.0;
+
+	// Latest memory sample (carried between MemorySampleIntervalSec refreshes) and its timer.
+	FSample LastMemory = {};
+	float MemorySampleTimer = 0.0f;
+
+	// Residency audit taken when the run finishes (after catch-up).
+	int32 AuditFindings = -1;
+	FString AuditReport;
 
 	TArray<FSample> Samples;
 	FString ReportCsvPath;

@@ -8,6 +8,7 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelData.h"
 #include "RenderingThread.h"
+#include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
 // ==================== Basic Tests ====================
 
@@ -281,6 +282,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FInfinitePlaneWorldModeGPUConsistencyTest, "Vox
 
 bool FInfinitePlaneWorldModeGPUConsistencyTest::RunTest(const FString& Parameters)
 {
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
 	FVoxelGPUNoiseGenerator GPUGenerator;
 	GPUGenerator.Initialize();
 
