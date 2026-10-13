@@ -21,7 +21,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 | ID | Item | Cause | Status of the cause | Repos | Size |
 |----|------|-------|---------------------|-------|------|
 | R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
-| R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
+| R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code; phases 1-2 (live overlays) in VoxelWorlds#73 | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
 | R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 in VoxelWorlds#72 | VoxelWorlds | L |
 
 ## R23 Lingering distant chunk
@@ -252,6 +252,84 @@ conditioning zones; digs, builds, shafts and campsite pads are voxel edits and s
   every column of an edited tile from voxels while its chunks are loaded.
 - Water-propagation churn is handled by coalescing; the overlay changes only when a water bit flips.
 - Larger saves: only edited tiles with surface changes are stored, typically a few KB each.
+
+### R22 as built, phases 1-2 (VoxelWorlds#73, 2026-10-12)
+
+**Scope.** The overlay kernel, the map queue fixes and the live refresh. Persistence (phase 3) follows in a second
+PR pair; until then overlays are rebuilt each session as the edited chunks load. Line numbers below are as of
+VoxelWorlds `a85b8c6`.
+
+**What the code does.**
+- `FVoxelMapEditOverlay` (VoxelMap, plain struct): sorted masked column indices with a height, material and flags
+  byte per column, plus `PendingColumns` as build output only. `Serialize` writes a version byte, the resolution, a
+  Resolution² bit mask, then the values of the masked columns.
+- `FVoxelMapEditOverlay::Build` takes the tile's chunk stack: per chunk Z, a shared edit-merged snapshot (null if
+  not loaded) and the highest edited local Z per column, derived from the edit layer's keys. For each edited column
+  it assembles the voxel column and calls `FVoxelSurfaceQuery::ExtractSurfaceFromColumn`.
+  - The scan runs from one chunk above the highest edited (or analytic surface) chunk down to one chunk below the
+    lowest. It stops above the first chunk the column edits but cannot read. Unlisted chunks read as the analytic
+    terrain (a linear density across the analytic height, so the crossing lands on it).
+  - A column is masked when an edited voxel lies at or above the surface voxel and the surface differs from the
+    analytic one: height by more than half a voxel, material, or water. This replaced the plan's "compare against
+    analytic" alone: edits under the surface (dungeon interiors) never enter the comparison, so a natural voxel
+    surface that differs slightly from the analytic one cannot leak into the overlay.
+  - A surface found in an analytic chunk under real air, below the analytic height, is pending (dug into a chunk
+    that is not loaded), as is a scan that falls through. `MergePending` keeps the previous value there.
+  - Water: a water-flagged voxel anywhere in the air run above the surface, not only the voxel directly on it. A
+    pit dug into the seabed opens unflagged voxels under the sea, and drew as a dry patch in the sea with the
+    one-voxel rule. A pit dug on land below the water line still has only dry air above it and stays land.
+- `FVoxelMapTileQueue` (VoxelMap) holds the queue policy: waiting tiles, drawing tiles with the generation they
+  started under, per-tile generations, priority waiting. A request is independent of the tile cache, so a cached
+  tile can be redrawn (the old drain skipped cached keys, stranding the tile). An invalidating request during a
+  drawing bumps that tile's generation, the stale result is discarded on completion and the tile is drawn again
+  (the old completion dropped the re-queue). A non-invalidating request during a drawing is satisfied by it.
+- `UVoxelChunkManager::GetEditMergedSnapshot` wraps the seam snapshot cache (built at most once per
+  `ContentVersion`); `HasChunkVoxelData` is the cheap availability check.
+- `UVoxelMapSubsystem`:
+  - binds `UVoxelEditManager::OnChunkEdited`, keeps the edited chunk Zs per tile, and seeds them from the edit
+    layers when it resolves (edits made before the map existed);
+  - coalesces dirty tiles on a one-shot timer (`voxel.Map.EditRefreshSeconds`, 0.5). A tile whose edited chunks
+    at or above one chunk below its lowest analytic surface are all loaded is queued for a rebuild, priority and
+    invalidating, at most `voxel.Map.EditRefreshMaxTiles` (8) per refresh; the others keep their overlay and
+    retry when a chunk of theirs generates;
+  - gathers the stack when the drawing starts, at most one gather per frame (a skipped rebuild retries next
+    tick), and the tile task builds the overlay after its analytic height pass, then draws edited columns
+    (including the apron cells from the eight neighbours' overlays) with their own height, material and water;
+  - redraws cached neighbours when an overlay's border columns change, so hillshade stays continuous;
+  - no longer empties the cache on a conditioning change: every explored tile is redrawn and the old images
+    stay until the new ones land.
+- Debug: `voxel.Map.EditOverlay` (0 draws the analytic map only), `voxel.Map.Redraw [1 = rebuild overlays]`,
+  `voxel.Map.Stats`, `voxel.Map.Capture [radius] [name] [highlight]` (cached tiles around the pawn to
+  `Saved/Screenshots/VoxelMap/<name>.png`, north up, overlay columns tinted magenta with highlight 1).
+
+**Measured** (VoxelDemo, the user's world save copied into the worktree, real RHI).
+- Crater and pillar on land beside the pawn (x −470,285, y −295,534; brushes through
+  `UVoxelEditManager::ApplyBrushEdit`): both tiles rebuilt at the 0.5 s refresh and drawn by 0.9 s. The crater
+  draws as a shaded stone bowl, the three-layer snow pillar as a white block with a lit and a shaded face. A
+  scripted pit in the seabed reads as water (after the water rule above). `vox.Dig 20` (the gameplay dig path)
+  showed at the next refresh. `Images/R22/crater_pillar_before_after.png`.
+- Undo of the pillar: the region is pixel-identical to the before image at the next refresh; the crater stays.
+- `vox.TPPOI Tiled`: the dungeon re-stamped on approach (209k voxels); its rooms produce no overlay and the
+  entrance shaft shows as a 30-column hole on the conditioning pad. `Images/R22/dungeon_shaft.png`.
+- `vox.Campsite`: the saved edits around it (a dungeon entrance, earlier QA digs) rebuild as their chunks load,
+  with no visible outline against analytic neighbours. `Images/R22/campsite_overlays_off_on.png`.
+- Gather cost on the game thread: 0.03-0.6 ms per tile when the snapshots are shared with the seam pipeline,
+  up to 2.3 ms on a dungeon tile with large edit layers; hence the one-gather-per-frame budget. Nine overlays with
+  553 masked columns used 4.4 KB.
+- Edits far from the player (38 tiles in this save) stay pending without any chunk work until visited.
+
+**Tests.** New: `VoxelWorlds.Map.EditOverlay.{DigLowersSurface, BuildRaisesSurface, BuriedEditIsIgnored,
+DugThroughStaysPending, WaterBitFromVoxels, EncodeDecodeRoundTrip, BorderChangesDetected}`,
+`VoxelWorlds.Map.Tiles.{RequeueWhileCachedRedraws, PerTileGenerationDiscardsStale}`. Headless (`-nullrhi`): Map,
+Streaming, LOD, Rendering, DualContour, MC SeamClosure, 65/65. In-editor (real RHI): the same plus MC CPUvsGPU,
+Cubic and Generation (GPU noise and GPU-vs-CPU parity), 95/95.
+
+**Known limits.**
+- Until phase 3, overlays are not saved: after a restart an edited area draws analytically until its chunks load.
+- A pit scripted into the seabed was not flooded by water propagation within a minute; not investigated (the map
+  reads it as water through the sea above it either way).
+- Tiles with very large edit layers (dungeon stamps) cost up to ~2.3 ms to gather; an incremental per-chunk
+  top-edit table would remove the walk if it ever shows in a profile.
 
 ## R24 Seam pop-in
 

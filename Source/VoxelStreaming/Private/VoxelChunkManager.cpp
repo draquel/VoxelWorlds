@@ -1644,6 +1644,22 @@ FVoxelData UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition(const FVector& 
 	return Voxel;
 }
 
+TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetEditMergedSnapshot(const FIntVector& ChunkCoord)
+{
+	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!bIsInitialized || !State || !State->Descriptor.HasVoxelDataAvailable())
+	{
+		return nullptr;
+	}
+	return GetSeamVoxelSnapshot(ChunkCoord, *State);
+}
+
+bool UVoxelChunkManager::HasChunkVoxelData(const FIntVector& ChunkCoord) const
+{
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	return State && State->Descriptor.HasVoxelDataAvailable();
+}
+
 bool UVoxelChunkManager::QueryEditMergedSurface(
 	double WorldX, double WorldY,
 	float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
