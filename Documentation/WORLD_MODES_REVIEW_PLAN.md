@@ -188,7 +188,7 @@ plan sizes and orders it.
 
 | Feature | Class | Notes |
 |---------|-------|-------|
-| Cubic without the LOD system, by default | Critical | KC1, KC11. Design intent (confirmed 2026-10-13): cubic uses greedy meshing instead of LOD, with `bEnableLOD` off. Make that the default for cubic and key far compression on distance so the LOD-off path keeps it. Measured in §12.2: LOD off already beats smooth per frame. A far representation (coarse mesh or impostor) or a shorter cubic view distance is the only route to renderer-memory parity |
+| Cubic without the LOD system (D7) | Critical | KC1, KC11. Decided 2026-10-13: cubic forces LOD off, and greedy meshing is its LOD mechanism until there is a good reason to change it. Key far compression on distance so the LOD-off path keeps it. Measured in §12.2: LOD off already beats smooth per frame. A far representation (coarse mesh or impostor) or a shorter cubic view distance is the only route to renderer-memory parity, and is not planned |
 | Block-accurate player editing | Critical | KC5. Dig at `ImpactPoint − ½·VoxelSize·normal`, place at `+ ½·VoxelSize·normal`, set whole voxels (0/255) so one click equals one block. Port the test actor's discrete editing into the player path when the mode is cubic |
 | Block-top surface query | Critical | KC6. A cubic surface height that snaps to the top of the solid voxel, used by spawn, NPCs, POIs, campsites and world items |
 | Step policy | Critical | KC7. Keep "every block is a jump" and make nav and NPC auto-jump agree with block heights, or auto-step one block (decision D5) |
@@ -250,6 +250,7 @@ code sites).
 | D4 | Build T1-T5 before the review? | Yes, as one small PR. T6 optional |
 | D5 | Cubic step policy | Keep "every block is a jump" (current design) and make nav and NPC auto-jump agree with block heights |
 | D6 | Spherical scope (planet size, cubic on planets, game systems, orbit) | See the requirements doc, §2 |
+| D7 | Cubic LOD *(decided 2026-10-13, after Review A)* | Cubic forces the LOD system off (`MeshingMode == Cubic` overrides `bEnableLOD`). Greedy meshing is cubic's LOD mechanism until there is a good reason to change it, so block downsampling and other cubic LOD schemes are out of scope. Pair it with far compression keyed on distance (KC11): forcing LOD off alone trades the LOD cost for uncompressed voxel memory (§12.2) |
 
 ## 9. Order of work
 
@@ -311,7 +312,8 @@ The cubic content does not ship that way: `Review_Cubic` (copied from the smooth
 `DemoCubicWorldConfig` both have `bEnableLOD` on with three LOD bands. The first pass therefore measured cubic **as
 shipped** (LOD on, greedy on). A second pass the same day measured the **intended path**, `Review_Cubic_NoLOD`
 (`bEnableLOD` off, greedy on), plus `Review_Cubic_NoLOD_Simple` (greedy off) to show what greedy saves. Where the two
-differ, both are reported; §12.6 maps where cubic and smooth separate in the code.
+differ, both are reported; §12.6 maps where cubic and smooth separate in the code. Decided after the review (D7): cubic
+forces LOD off, and greedy meshing is its LOD mechanism.
 
 **The control** is VoxelDemo's own config, `DemoSmoothWorldConfig`, applied through the same override rather than run
 with no override. The config is identical, but through the override the control gets its own save key, so both sides start
@@ -480,8 +482,8 @@ needs it. Do not drop it.
   trees as gameplay (KC9). Each is bounded, but together they double the QA surface of every game feature for a mode no
   game uses yet.
 - **Terrain-only work list** (for the second revision to size):
-  - *Make the intended path the default:* cubic runs with `bEnableLOD` off, either in the cubic content or forced by
-    `MeshingMode == Cubic`, so a cubic config cannot silently pay for LOD it does not use (KC1, KC8). Refresh or delete
+  - *Force LOD off for cubic* (D7): `MeshingMode == Cubic` overrides `bEnableLOD`, so a cubic config cannot pay for
+    LOD it does not use (KC1). Do it together with the next item, or voxel memory rises. Refresh or delete
     `DemoCubicWorldConfig` and the orphaned scatter config (KC8).
   - *Far compression keyed on distance, not LOD level*, so the LOD-off path keeps it (KC11). This is the main memory lever.
   - *Take cubic off the legacy neighbour cascade:* move it onto the seam path (face culling across a chunk pair is
@@ -517,7 +519,7 @@ assume the density isosurface, while the cubic surface is the block tops above i
 | Mesher | CPU Dual Contouring interiors (GPU DC retired) | CPU cubic, greedy or simple; never reads the LOD level | `VoxelChunkManager.cpp:1031-1126` | KC1, KC3 |
 | Chunk boundaries | Seam-ownership pipeline: single-owner seam jobs | Legacy whole-chunk path: neighbour slices and a re-mesh cascade when neighbours load; a missing neighbour counts as air | Gate by mesher name, `VoxelChunkManager.cpp:447-456`; `VoxelCPUCubicMesher.cpp:930-1001` | KC2, KC13 |
 | Seam registry | Drives the seam jobs | Still tracks every chunk; a P0 stub drains its jobs with no geometry | `VoxelChunkManager.cpp:4110-4114` | KC2 |
-| LOD system | Distance bands, stride per band, 2:1 balance, seam holds, crossfades | **Designed to be off** (`bEnableLOD`); runs in full when on, and morphing is forced off | `bEnableLOD` gates in `DistanceBandLODStrategy.cpp:281`, `:719` and `VoxelChunkManager.cpp:3238`, `:3863`; morphing `:906` | KC1 |
+| LOD system | Distance bands, stride per band, 2:1 balance, seam holds, crossfades | **Off by design** (D7: to be forced off; greedy meshing is cubic's LOD mechanism). Today it still runs in full when `bEnableLOD` is on, with morphing forced off | `bEnableLOD` gates in `DistanceBandLODStrategy.cpp:281`, `:719` and `VoxelChunkManager.cpp:3238`, `:3863`; morphing `:906` | KC1 |
 | Far-chunk compression | Keyed on LOD stride | Off on the intended path (all chunks LOD 0) | `VoxelChunkManager.cpp:4677` | KC11 |
 | Far-band slab | Beyond band 0's distance | Same; works with LOD off | `DistanceBandLODStrategy.cpp:956-962` | KC11 |
 | Collision | Cooked from the main mesher | Same code; cooks the greedy mesh (4× smaller than simple) | `VoxelCollisionManager.cpp:775-843` | — |
