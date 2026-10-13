@@ -31,6 +31,8 @@
 #include "Misc/Compression.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/MemoryWriter.h"
 
 static TAutoConsoleVariable<int32> CVarMapEditOverlay(
 	TEXT("voxel.Map.EditOverlay"),
@@ -108,8 +110,8 @@ namespace
 
 	FAutoConsoleCommandWithWorldAndArgs GVoxelMapCaptureCmd(
 		TEXT("voxel.Map.Capture"),
-		TEXT("Write the explored map tiles around the player to Saved/Screenshots/VoxelMap/<name>.png (north up, player ")
-		TEXT("marked). Args: [radiusTiles=6] [name=timestamp] [highlightOverlays=0]."),
+		TEXT("Write the explored map tiles around the player to Saved/Screenshots/VoxelMap/<name>.png (north up, centre ")
+		TEXT("marked). Args: [radiusTiles=6] [name=timestamp] [highlightOverlays=0] [centreX centreY] (default: the pawn)."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			UWorld* Target = FindPlayWorld(World);
@@ -124,11 +126,15 @@ namespace
 			const int32 Radius = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 6;
 			const FString Name = Args.Num() > 1 ? Args[1] : FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 			const bool bHighlight = Args.Num() > 2 && FCString::Atoi(*Args[2]) != 0;
+			const FVector Centre = Args.Num() > 4
+				? FVector(FCString::Atod(*Args[3]), FCString::Atod(*Args[4]), 0.0)
+				: Pawn->GetActorLocation();
 			const FString Path = FPaths::ConvertRelativePathToFull(
 				FPaths::ProjectSavedDir() / TEXT("Screenshots/VoxelMap") / (Name + TEXT(".png")));
-			const bool bOk = Map->CaptureMapImage(Pawn->GetActorLocation(), Radius, Path, bHighlight);
-			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.Capture: %s %s (radius %d, pawn %s)"),
-				bOk ? TEXT("wrote") : TEXT("FAILED to write"), *Path, Radius, *Pawn->GetActorLocation().ToCompactString());
+			const bool bOk = Map->CaptureMapImage(Centre, Radius, Path, bHighlight);
+			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.Capture: %s %s (radius %d, centre %s, pawn %s)"),
+				bOk ? TEXT("wrote") : TEXT("FAILED to write"), *Path, Radius, *Centre.ToCompactString(),
+				*Pawn->GetActorLocation().ToCompactString());
 		}));
 
 	/**
@@ -686,6 +692,183 @@ const FVoxelMapEditOverlay* UVoxelMapSubsystem::GetEditOverlay(FIntPoint TileCoo
 {
 	const TSharedPtr<const FVoxelMapEditOverlay>* Found = EditOverlays.Find(PackTileKey(TileCoord));
 	return Found ? Found->Get() : nullptr;
+}
+
+namespace
+{
+	/** 'VMEO': map edit overlays. */
+	constexpr uint32 EditOverlayBlobMagic = 0x4F454D56;
+
+	/** Bump when the blob layout around the per-overlay data changes. */
+	constexpr uint8 EditOverlayBlobVersion = 1;
+
+	/** Refuse to inflate a claimed payload beyond this (a corrupt size field). */
+	constexpr uint32 MaxEditOverlayBlobBytes = 256u * 1024u * 1024u;
+}
+
+FString UVoxelMapSubsystem::EncodeEditOverlays(const TArray<FVoxelMapTileOverlay>& Overlays)
+{
+	if (Overlays.Num() == 0)
+	{
+		return FString();
+	}
+	TArray<uint8> Raw;
+	{
+		FMemoryWriter Writer(Raw);
+		uint32 Magic = EditOverlayBlobMagic;
+		uint8 Version = EditOverlayBlobVersion;
+		int32 Count = Overlays.Num();
+		Writer << Magic << Version << Count;
+		for (const FVoxelMapTileOverlay& Entry : Overlays)
+		{
+			int32 X = Entry.Tile.X;
+			int32 Y = Entry.Tile.Y;
+			Writer << X << Y;
+			FVoxelMapEditOverlay Copy = Entry.Overlay;
+			Copy.Serialize(Writer);
+		}
+	}
+
+	int32 CompressedBytes = FCompression::CompressMemoryBound(NAME_Zlib, Raw.Num());
+	TArray<uint8> Compressed;
+	Compressed.SetNumUninitialized(CompressedBytes);
+	if (!FCompression::CompressMemory(NAME_Zlib, Compressed.GetData(), CompressedBytes, Raw.GetData(), Raw.Num()))
+	{
+		UE_LOG(LogVoxelMap, Warning, TEXT("EncodeEditOverlays: compressing %d tile overlay(s) failed."), Overlays.Num());
+		return FString();
+	}
+
+	// The uncompressed size travels in front of the zlib stream: decoding needs it.
+	TArray<uint8> Blob;
+	{
+		FMemoryWriter Writer(Blob);
+		uint32 RawSize = static_cast<uint32>(Raw.Num());
+		Writer << RawSize;
+		Writer.Serialize(Compressed.GetData(), CompressedBytes);
+	}
+	return FBase64::Encode(Blob);
+}
+
+bool UVoxelMapSubsystem::DecodeEditOverlays(const FString& Encoded, TArray<FVoxelMapTileOverlay>& OutOverlays)
+{
+	OutOverlays.Reset();
+	if (Encoded.IsEmpty())
+	{
+		return true;
+	}
+	TArray<uint8> Blob;
+	if (!FBase64::Decode(Encoded, Blob) || Blob.Num() <= static_cast<int32>(sizeof(uint32)))
+	{
+		return false;
+	}
+	uint32 RawSize = 0;
+	{
+		FMemoryReader Header(Blob);
+		Header << RawSize;
+	}
+	if (RawSize == 0 || RawSize > MaxEditOverlayBlobBytes)
+	{
+		return false;
+	}
+	TArray<uint8> Raw;
+	Raw.SetNumUninitialized(RawSize);
+	if (!FCompression::UncompressMemory(NAME_Zlib, Raw.GetData(), RawSize, Blob.GetData() + sizeof(uint32), Blob.Num() - sizeof(uint32)))
+	{
+		return false;
+	}
+
+	FMemoryReader Reader(Raw);
+	uint32 Magic = 0;
+	uint8 Version = 0;
+	int32 Count = 0;
+	Reader << Magic << Version << Count;
+	// Each tile takes at least its coordinates plus an overlay header, so Count cannot exceed the payload.
+	if (Reader.IsError() || Magic != EditOverlayBlobMagic || Version != EditOverlayBlobVersion || Count < 0
+		|| Count > static_cast<int32>(RawSize / 8))
+	{
+		return false;
+	}
+	OutOverlays.Reserve(Count);
+	for (int32 i = 0; i < Count; ++i)
+	{
+		FVoxelMapTileOverlay& Entry = OutOverlays.AddDefaulted_GetRef();
+		Reader << Entry.Tile.X << Entry.Tile.Y;
+		if (Reader.IsError() || !Entry.Overlay.Serialize(Reader))
+		{
+			OutOverlays.Reset();
+			return false;
+		}
+	}
+	return true;
+}
+
+FString UVoxelMapSubsystem::ExportEditOverlays(int32& OutCount) const
+{
+	TArray<FVoxelMapTileOverlay> Tiles;
+	Tiles.Reserve(EditOverlays.Num());
+	for (const TPair<uint64, TSharedPtr<const FVoxelMapEditOverlay>>& Pair : EditOverlays)
+	{
+		if (Pair.Value.IsValid() && !Pair.Value->IsEmpty())
+		{
+			FVoxelMapTileOverlay& Entry = Tiles.AddDefaulted_GetRef();
+			Entry.Tile = UnpackTileKey(Pair.Key);
+			Entry.Overlay = *Pair.Value;
+		}
+	}
+	// Row-major order keeps the blob deterministic for an unchanged world.
+	Tiles.Sort([](const FVoxelMapTileOverlay& A, const FVoxelMapTileOverlay& B)
+	{
+		return A.Tile.Y != B.Tile.Y ? A.Tile.Y < B.Tile.Y : A.Tile.X < B.Tile.X;
+	});
+	FString Encoded = EncodeEditOverlays(Tiles);
+	OutCount = Encoded.IsEmpty() ? 0 : Tiles.Num();
+	return Encoded;
+}
+
+int32 UVoxelMapSubsystem::ImportEditOverlays(const FString& Encoded)
+{
+	if (bShuttingDown)
+	{
+		return 0;
+	}
+	TArray<FVoxelMapTileOverlay> Tiles;
+	if (!DecodeEditOverlays(Encoded, Tiles))
+	{
+		UE_LOG(LogVoxelMap, Warning, TEXT("ImportEditOverlays: malformed map edit overlay data; edits show on the map as their areas load."));
+		Tiles.Reset();
+	}
+
+	// The save replaces the overlays. Every tile whose overlay changes is redrawn, and refreshed once the edits that
+	// load next are in: rebuilt where its edited chunks are loaded, cleared where no edits remain, kept otherwise.
+	TSet<uint64> Touched;
+	for (const TPair<uint64, TSharedPtr<const FVoxelMapEditOverlay>>& Pair : EditOverlays)
+	{
+		Touched.Add(Pair.Key);
+	}
+	EditOverlays.Reset();
+	int32 Restored = 0;
+	for (FVoxelMapTileOverlay& Entry : Tiles)
+	{
+		const bool bResolutionMatches = !bCacheResolved || Entry.Overlay.Resolution == CachedChunkSize;
+		if (Entry.Overlay.IsEmpty() || !bResolutionMatches)
+		{
+			continue;
+		}
+		const uint64 Key = PackTileKey(Entry.Tile);
+		EditOverlays.Add(Key, MakeShared<const FVoxelMapEditOverlay>(MoveTemp(Entry.Overlay)));
+		Touched.Add(Key);
+		++Restored;
+	}
+	for (const uint64 Key : Touched)
+	{
+		MarkOverlayDirty(Key);
+		if (bCacheResolved && (TileCache.Contains(Key) || TileQueue.IsQueued(Key)))
+		{
+			QueueTileGeneration(UnpackTileKey(Key), /*bInvalidate*/ true);
+		}
+	}
+	UE_LOG(LogVoxelMap, Log, TEXT("Restored %d map edit overlay(s) (%d tile(s) refreshed)."), Restored, Touched.Num());
+	return Restored;
 }
 
 void UVoxelMapSubsystem::RedrawAllTiles(bool bRebuildOverlays)

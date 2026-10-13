@@ -123,6 +123,42 @@ public:
 	int32 GetEditOverlayCount() const { return EditOverlays.Num(); }
 
 	/**
+	 * The edit overlays as a compact blob for a save (R22 phase 3), so edits show on the map after a load before
+	 * their areas load again. See EncodeEditOverlays for the format.
+	 * @param OutCount Receives the number of tiles encoded
+	 * @return The encoded overlays; empty when no tile has one
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	FString ExportEditOverlays(int32& OutCount) const;
+
+	/**
+	 * Restore overlays saved by ExportEditOverlays. They replace the current overlays. Every tile whose overlay
+	 * changes is redrawn and marked for a refresh, which reconciles it with the edits loaded next: a tile whose
+	 * edited chunks are loaded is rebuilt from them, a tile with no edits left is cleared, and any other tile keeps
+	 * the saved overlay until its chunks load. Call it before loading the edits.
+	 * @param Encoded The blob from ExportEditOverlays (empty clears every overlay)
+	 * @return Number of tiles restored (0 for an empty or malformed blob)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	int32 ImportEditOverlays(const FString& Encoded);
+
+	/**
+	 * Pure: encode tile overlays. Binary payload: magic 'VMEO', format version, tile count, then per tile its X, Y
+	 * and FVoxelMapEditOverlay::Serialize data; zlib-compressed behind its uncompressed size, base64-encoded.
+	 * @param Overlays Tiles and overlays to encode
+	 * @return The blob; empty for no tiles or a compression failure
+	 */
+	static FString EncodeEditOverlays(const TArray<FVoxelMapTileOverlay>& Overlays);
+
+	/**
+	 * Pure: decode EncodeEditOverlays output.
+	 * @param Encoded     The blob
+	 * @param OutOverlays Receives the tiles (emptied first)
+	 * @return False for a malformed blob (OutOverlays left empty); true for an empty blob
+	 */
+	static bool DecodeEditOverlays(const FString& Encoded, TArray<FVoxelMapTileOverlay>& OutOverlays);
+
+	/**
 	 * Redraw every explored tile, keeping the current images until the new ones land.
 	 * @param bRebuildOverlays Also rebuild the edit overlay of every tile with edits (from loaded chunks)
 	 */
