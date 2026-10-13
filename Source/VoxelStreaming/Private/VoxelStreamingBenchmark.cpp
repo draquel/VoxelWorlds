@@ -455,6 +455,7 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 		Num(TEXT("chunkWorldSize"), Cfg->GetChunkWorldSize());
 		Num(TEXT("viewDistance"), Cfg->ViewDistance);
 		Int(TEXT("lodBands"), Cfg->LODBands.Num());
+		Bool(TEXT("lodEnabled"), Cfg->IsLODEnabled()); // effective: off for cubic whatever bEnableLOD says
 		Vec(TEXT("worldOrigin"), Cfg->WorldOrigin);
 		if (Cfg->WorldMode == EWorldMode::IslandBowl)
 		{

@@ -14,9 +14,11 @@ water, ore, scatter).
   coarse contour at the boundary); DC LOD seams and 4-chunk corner seams sealed. The GPU DC path has
   reached **CPU watertightness parity** (verified by the `GT1–GT7` LOD-boundary test suite).
 - **Pluggable LOD** — swappable strategies via `IVoxelLODStrategy` (distance-band default) with
-  asymmetric refine/coarsen hysteresis and material-parameter-collection LOD morphing.
+  asymmetric refine/coarsen hysteresis and material-parameter-collection LOD morphing. Cubic meshing
+  runs without LOD: greedy meshing is its answer to distance.
 - **Streaming** — distance-based chunk load/unload with async mesh generation, stale-cull, thrash
-  instrumentation, and async Chaos collision cooking.
+  instrumentation, async Chaos collision cooking, and far-chunk voxel-data compression (keyed on
+  distance, so it also covers LOD-off and cubic worlds).
 - **Hybrid rendering** — a GPU-driven renderer built on UE's `FLocalVertexFactory`
   (`FVoxelCustomVFRenderer`) plus a `ProceduralMeshComponent` fallback (`FVoxelPMCRenderer`).
 - **Procedural generation** — CPU/GPU noise library, multiple world modes (infinite plane, spherical

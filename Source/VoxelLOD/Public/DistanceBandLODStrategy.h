@@ -39,6 +39,12 @@ public:
 		const FLODQueryContext& Context
 	) const override;
 
+	/** With LOD on, GetLODForChunk; with it off, the raw band for the chunk's distance. */
+	virtual int32 GetDistanceBandLOD(
+		const FIntVector& ChunkCoord,
+		const FLODQueryContext& Context
+	) const override;
+
 	virtual float GetLODMorphFactor(
 		const FIntVector& ChunkCoord,
 		const FLODQueryContext& Context

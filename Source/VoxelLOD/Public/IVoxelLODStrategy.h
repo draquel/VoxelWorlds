@@ -52,6 +52,27 @@ public:
 	) const = 0;
 
 	/**
+	 * Get the LOD level of the distance band a chunk falls in, even when the LOD system is off.
+	 *
+	 * With LOD off every chunk renders at LOD 0, but the bands still describe distance. Systems
+	 * that key on how far a chunk is rather than how coarse it is (far-chunk compression) use this
+	 * so they keep working on LOD-off worlds, which includes every cubic world.
+	 *
+	 * Default: GetLODForChunk (a strategy without a LOD-off mode has nothing to add).
+	 *
+	 * @param ChunkCoord Chunk position in chunk coordinate space
+	 * @param Context Query context with viewer and world state
+	 * @return LOD level of the chunk's distance band (0 = nearest band)
+	 */
+	virtual int32 GetDistanceBandLOD(
+		const FIntVector& ChunkCoord,
+		const FLODQueryContext& Context
+	) const
+	{
+		return GetLODForChunk(ChunkCoord, Context);
+	}
+
+	/**
 	 * Get morph factor for LOD transition blending.
 	 *
 	 * Used to smoothly blend between LOD levels in the vertex shader.

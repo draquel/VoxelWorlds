@@ -356,7 +356,8 @@ static TAutoConsoleVariable<int32> CVarFarCompression(
 static TAutoConsoleVariable<int32> CVarFarCompressionMinStride(
 	TEXT("voxel.FarCompression.MinStride"),
 	4,
-	TEXT("Minimum LOD stride (1<<LODLevel) a chunk must be at to qualify for compression. "
+	TEXT("Minimum stride (1<<LODLevel) of a chunk's distance band for it to qualify for compression: its LOD "
+	     "level, or with the LOD system off (cubic) the band its distance falls in. "
 	     "4 = stride-4 far band only (LOD>=2). 2 = also stride-2 (LOD>=1). Clamped to a power of two."),
 	ECVF_Default);
 
@@ -795,7 +796,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Far-chunk voxel-data compression sweep ===
 	// Runs after LOD evaluation so a chunk just queued for an LOD remesh (now dirty) is excluded.
-	ProcessFarCompressionSweep();
+	ProcessFarCompressionSweep(Context);
 
 	// === Subsystem deferral check ===
 	const int32 DeferThreshold = Configuration ? Configuration->DeferSubsystemsThreshold : 20;
@@ -902,11 +903,20 @@ void UVoxelChunkManager::Initialize(
 	}
 
 	// Disable LOD morphing for cubic mode - vertices cannot interpolate with hard edges
-	// LOD bands and levels still apply (for distance-based loading and potential stride use)
 	if (Configuration->MeshingMode == EMeshingMode::Cubic && Configuration->bEnableLODMorphing)
 	{
 		Configuration->bEnableLODMorphing = false;
 		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD morphing disabled for cubic mode (hard-edged vertices cannot interpolate)"));
+	}
+
+	// Cubic runs without the LOD system (decision D7): greedy meshing is its answer to distance and
+	// the cubic mesher never reads the LOD level, so LOD changes would only re-mesh and crossfade
+	// identical geometry. IsLODEnabled() applies the rule for every reader, including the LOD
+	// strategy below; the asset is not written, so the same config meshed smooth keeps its LOD.
+	// The bands still apply as distances (far-band slab, far-chunk compression).
+	if (Configuration->MeshingMode == EMeshingMode::Cubic && Configuration->bEnableLOD)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD system disabled for cubic mode (bEnableLOD is ignored; greedy meshing replaces LOD)"));
 	}
 
 	// Initialize LOD strategy
@@ -2495,7 +2505,7 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		FVoxelNoiseGenerationRequest GenRequest;
 		GenRequest.ChunkCoord = Request.ChunkCoord;
 		// Force LOD 0 when LOD system is disabled (defense-in-depth)
-		GenRequest.LODLevel = (Configuration->bEnableLOD) ? Request.LODLevel : 0;
+		GenRequest.LODLevel = (Configuration->IsLODEnabled()) ? Request.LODLevel : 0;
 		GenRequest.ChunkSize = Configuration->ChunkSize;
 		GenRequest.VoxelSize = Configuration->VoxelSize;
 		GenRequest.NoiseParams = Configuration->NoiseParams;
@@ -3093,7 +3103,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		FVoxelMeshingRequest MeshRequest;
 		MeshRequest.ChunkCoord = Request.ChunkCoord;
 		// Force LOD 0 when LOD system is disabled (defense-in-depth)
-		MeshRequest.LODLevel = (Configuration->bEnableLOD) ? Request.LODLevel : 0;
+		MeshRequest.LODLevel = (Configuration->IsLODEnabled()) ? Request.LODLevel : 0;
 		MeshRequest.ChunkSize = Configuration->ChunkSize;
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
 		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
@@ -3235,7 +3245,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		};
 
 		// When LOD is disabled, skip all transition/neighbor LOD logic — all chunks are LOD 0
-		if (Configuration->bEnableLOD)
+		if (Configuration->IsLODEnabled())
 		{
 			for (int32 i = 0; i < 6; i++)
 			{
@@ -3860,7 +3870,7 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 		return;
 	}
 
-	if (Configuration && !Configuration->bEnableLOD)
+	if (Configuration && !Configuration->IsLODEnabled())
 	{
 		return;
 	}
@@ -3967,7 +3977,7 @@ void UVoxelChunkManager::UpdateLODMorphFactors(const FLODQueryContext& Context)
 		return;
 	}
 
-	if (Configuration && !Configuration->bEnableLOD)
+	if (Configuration && !Configuration->IsLODEnabled())
 	{
 		return;
 	}
@@ -4652,7 +4662,7 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(co
 	return Entry.Data;
 }
 
-void UVoxelChunkManager::ProcessFarCompressionSweep()
+void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Context)
 {
 	if (CVarFarCompression.GetValueOnGameThread() == 0)
 	{
@@ -4664,6 +4674,12 @@ void UVoxelChunkManager::ProcessFarCompressionSweep()
 	const int32 MaxScans = FMath::Max(1, CVarFarCompressionMaxScansPerTick.GetValueOnGameThread());
 	const EVoxelChunkCodec Codec = static_cast<EVoxelChunkCodec>(FMath::Clamp(CVarFarCompressionCodec.GetValueOnGameThread(), 0, 5));
 
+	// "Far" is keyed on distance: the chunk's distance band must have reached MinStride. With the
+	// LOD system running, the chunk's LOD level is that band (distance plus hysteresis and 2:1
+	// balance). With it off, as in every cubic world, all chunks are LOD 0, so the strategy maps the
+	// chunk's distance onto the same bands instead; without that, nothing would ever compress.
+	const bool bLODActive = Configuration && Configuration->IsLODEnabled();
+
 	int32 Budget = 0;
 	for (auto& Pair : ChunkStates)
 	{
@@ -4674,15 +4690,33 @@ void UVoxelChunkManager::ProcessFarCompressionSweep()
 		if (S.State != EChunkState::Loaded) continue;
 		if (D.Residency != EVoxelDataResidency::Resident) continue;
 		if (D.bIsDirty) continue;
-		if ((1 << FMath::Clamp(S.LODLevel, 0, 7)) < MinStride) continue;
 		// Idle: LastStateChangeFrame is the frame the chunk entered Loaded; it stays fixed while
 		// settled and resets on any remesh (Loaded -> PendingMeshing -> ... -> Loaded).
 		if ((CurrentFrame - S.LastStateChangeFrame) < IdleFrames) continue;
+		const int32 BandLOD = (bLODActive || !LODStrategy) ? S.LODLevel : LODStrategy->GetDistanceBandLOD(Pair.Key, Context);
+		if ((1 << FMath::Clamp(BandLOD, 0, 7)) < MinStride) continue;
 
 		if (D.bUniformValueValid || D.CompressedVoxelData.Num() > 0)
 		{
 			// A compact form is already cached (the chunk was expanded by access); re-apply it for
 			// free — no scan, no re-encode. Not budgeted.
+			// The legacy boundary path (cubic) reads up to 26 neighbours straight from their
+			// descriptors on every mesh job, so in a neighbour re-mesh cascade a chunk compacted
+			// again on the next tick is decoded again by the next job. Hold it resident for
+			// IdleFrames first. The seam pipeline reads through its snapshot cache (one decode per
+			// content version), so it re-applies at once.
+			if (!bSeamMeshingActive)
+			{
+				if (S.FarExpandedSeenFrame < 0)
+				{
+					S.FarExpandedSeenFrame = CurrentFrame;
+				}
+				if ((CurrentFrame - S.FarExpandedSeenFrame) < IdleFrames)
+				{
+					continue;
+				}
+			}
+			S.FarExpandedSeenFrame = -1;
 			D.TryCompress(Codec);
 			continue;
 		}
@@ -4697,6 +4731,7 @@ void UVoxelChunkManager::ProcessFarCompressionSweep()
 			continue;
 		}
 		++Budget;
+		S.FarExpandedSeenFrame = -1;
 		D.TryCompress(Codec);
 	}
 }
@@ -4805,7 +4840,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// seam registry already restaled this chunk's seams via UpdateChunkRenderedLOD above.)
 		if (bMeshSubmitted && State && State->State == EChunkState::Loaded)
 		{
-			if (!bSeamMeshingActive && Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
+			if (!bSeamMeshingActive && Configuration && Configuration->IsLODEnabled() && PreviousMeshedLOD != State->MeshedLODLevel)
 			{
 				static const FIntVector FaceOffsets[6] = {
 					FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
@@ -4958,7 +4993,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// retain stale boundary alignment until some other trigger re-meshes them.
 		// (Seam-ownership P1: interior meshes carry no boundary alignment to re-agree —
 		// the rendered-LOD change reached the seam registry above and restales the seams.)
-		if (!bSeamMeshingActive && Configuration && Configuration->bEnableLOD && PreviousMeshedLOD != State->MeshedLODLevel)
+		if (!bSeamMeshingActive && Configuration && Configuration->IsLODEnabled() && PreviousMeshedLOD != State->MeshedLODLevel)
 		{
 			static const FIntVector FaceOffsets[6] = {
 				FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),

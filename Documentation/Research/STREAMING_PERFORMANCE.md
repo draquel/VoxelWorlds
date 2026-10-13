@@ -92,7 +92,7 @@ the UE 5.8 install on D:.
 | `unloadLagMean/MaxMs` | Enqueue -> actual-unload dwell (drain latency) |
 | `unloadDistMean/MaxUU` | Viewer distance when a chunk is finally removed (lingering) |
 | `effMax*` | Resulting scheduler caps (after overrides/adaptive throttle) |
-| `run` | What was measured: map, world type, build label, engine, RHI, viewport, `-Voxel*` switches, config path and override, world and meshing mode, mesher, GPU generation/meshing/scatter flags, seed, voxel and chunk size, view distance, LOD band count, `WorldOrigin`, island or planet params, path shape and parameters |
+| `run` | What was measured: map, world type, build label, engine, RHI, viewport, `-Voxel*` switches, config path and override, world and meshing mode, mesher, GPU generation/meshing/scatter flags, seed, voxel and chunk size, view distance, LOD band count, `lodEnabled` (effective: false for cubic), `WorldOrigin`, island or planet params, path shape and parameters |
 | `warmupSec` / `warmupDrained` | How long the initial load took to settle, and whether it drained (vs hit the warmup timeout) |
 | `memory` | Peak and end-of-run MB for voxel data, renderer GPU/CPU, collision, scatter and the process; `peakVoxelSystemsMB` (all voxel systems together); end-of-run resident/uniform/compressed/empty chunk counts |
 | `auditFindings` / `auditReport` | `AuditResidency` at the end of catch-up, taken from where the run ended (0 = healthy) |
@@ -149,6 +149,7 @@ Measured headless at v6000 (a deliberately punishing fast low traverse).
 | Scheduler caps | Not the bottleneck | work-bound, not cap-bound (Mesh 4 vs 32 = no change) |
 | LOD 2:1 balance + hysteresis | Already a damper | turning it off *raises* thrash +33% |
 | Proactive queue sweep | Deferred | would bound peak queue *during* motion |
+| **Far-chunk compression** (memory, not speed) | ✅ Shipped (default on; keyed on distance band, so cubic too) | settled voxel data ~1.1 GB -> ~130 MB at 400 m; encode costs ~14 ms manager P95 while moving (PIE) |
 
 ### Stale-cull (the headline win)
 
@@ -194,6 +195,33 @@ All three shipped levers together, vs the pre-session baseline (headless v6000):
 | Catch-up after stop | 10.9s | 4.65s | **-57%** |
 | Re-mesh thrash | 3590 | 2961 | -18% |
 | Peak resident chunks | 883 | 685 | -22% |
+
+### Far-chunk compression (memory)
+
+Settled far chunks keep their ~1 MB voxel array only for rare reads (neighbour planes, re-meshes,
+edits, point queries), so a budgeted sweep in `ProcessFarCompressionSweep` compacts them: all-air and
+all-solid chunks collapse to one value, the rest are Oodle-encoded (`voxel.FarCompression.Codec`).
+Any access decompresses transparently (`FChunkDescriptor::EnsureResident`) and keeps the encoded
+buffer, so compacting the chunk again is free. Inspect with `voxel.FarCompression.Stats`; the bench
+report's `memory{}` records end-of-run resident / uniform / compressed counts.
+
+A chunk qualifies when it is `Loaded`, clean, settled for `voxel.FarCompression.IdleFrames` (300) and
+**far**: its distance band's stride (`1 << LODLevel`) reaches `voxel.FarCompression.MinStride` (4).
+With the LOD system on, the band is the chunk's LOD level; with it off (every cubic world) the LOD
+strategy maps the chunk's distance onto the same bands (`IVoxelLODStrategy::GetDistanceBandLOD`). With
+the demo bands that is everything beyond 14,000 uu, in both modes. See
+[LOD_SYSTEM.md](../Features/LOD_SYSTEM.md) "LOD Off and Cubic Meshing".
+
+The legacy boundary path (cubic) reads up to 26 neighbours straight from their descriptors on every
+mesh job, so on that path the sweep holds a chunk expanded by such a read resident for `IdleFrames`
+before compacting it again; otherwise a neighbour re-mesh cascade decodes the same chunks job after
+job. The seam pipeline reads through its snapshot cache and compacts again at once.
+
+Measured on VoxelDemo's 400 m config ([WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md)
+§12.7): settled resident voxel data 134 MB smooth, 127 MB cubic (1,123 MB uncompressed). The cost is
+the encode: up to `voxel.FarCompression.MaxScansPerTick` (4) encodes per tick on the game thread,
+about 14 ms of chunk-manager P95 while moving, in both modes (finding G6 there). It is not timed in a
+section of its own, so the bench shows it as unattributed manager time.
 
 ### Deferred
 

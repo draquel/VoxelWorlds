@@ -68,6 +68,17 @@ public:
     ) const = 0;
     
     /**
+     * Get the LOD level of the distance band a chunk falls in, even with the LOD
+     * system off (then GetLODForChunk is 0 everywhere). Used by systems keyed on
+     * distance rather than detail: far-chunk compression. See "LOD Off and Cubic Meshing".
+     * Default: GetLODForChunk.
+     */
+    virtual int32 GetDistanceBandLOD(
+        FIntVector ChunkCoord, 
+        const FLODQueryContext& Context
+    ) const;
+    
+    /**
      * Get morph factor for LOD transition blending.
      * @param ChunkCoord Chunk position in chunk space
      * @param Context Query context with viewer state
@@ -517,6 +528,31 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
     }
 }
 ```
+
+### LOD Off and Cubic Meshing
+
+`bEnableLOD` off turns the LOD system off: every chunk is LOD 0 (full detail), and there are no LOD
+re-meshes, crossfades, 2:1 balance or seam holds. Read the effective value through
+`UVoxelWorldConfiguration::IsLODEnabled()`, not the property: **cubic meshing always runs with LOD
+off**, whatever `bEnableLOD` says (decision D7 in
+[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §8). The cubic mesher never reads the
+LOD level, so LOD changes would only re-mesh and crossfade identical geometry; greedy meshing is
+cubic's answer to distance instead. The chunk manager logs `LOD system disabled for cubic mode` once
+at initialisation when a cubic config has `bEnableLOD` on. The asset is not modified, so the same
+config meshed smooth keeps its LOD.
+
+With LOD off the bands stay in use as a distance table, for the two systems keyed on *how far* a
+chunk is rather than *how coarse* it is:
+
+| System | Rule | With LOD on | With LOD off |
+|--------|------|-------------|--------------|
+| Far-band surface slab (`bFarBandSurfaceSlabCulling`, InfinitePlane) | Beyond band 0's `MaxDistance` plus two chunk widths, a column loads only the chunks around its own analytic surface | Same | Same: keyed on band 0's distance, not the LOD level |
+| Far-chunk compression (`voxel.FarCompression.*`) | A settled, idle chunk is compressed once its distance band's stride (`1 << LODLevel`) reaches `voxel.FarCompression.MinStride` (default 4) | The band is the chunk's LOD level (distance plus hysteresis and 2:1 balance), as before | The band its distance falls in, from `GetDistanceBandLOD` (no hysteresis) |
+
+So with the demo bands (stride 1 to 7,000 uu, stride 2 to 14,000 uu, stride 4 beyond) and the default
+`MinStride` of 4, chunks more than 14,000 uu away compress in both modes. The slab needs a band 0 that
+ends before the view distance: a one-band config (band 0 out to the view distance) gets neither the
+slab nor, with `MinStride` above 1, compression.
 
 ---
 
@@ -1061,7 +1097,7 @@ When adjacent chunks render at different LOD levels, their boundary vertices may
 
 ### Cubic Meshing
 
-Cubic meshes naturally align at boundaries because voxel faces are axis-aligned. No special seam handling is required.
+Cubic runs without the LOD system (see [LOD Off and Cubic Meshing](#lod-off-and-cubic-meshing)), so every chunk is LOD 0 and there are no LOD boundaries to stitch. Chunk boundaries still need neighbour data for face culling: cubic uses the legacy whole-chunk path (neighbour slices, and a re-mesh when a neighbour loads), not the seam-ownership pipeline (finding KC2 in [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md)).
 
 ### Marching Cubes (Transvoxel)
 
