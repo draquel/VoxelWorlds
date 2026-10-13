@@ -21,7 +21,7 @@ each to its cause, proposes a design, and records the decisions taken. The paren
 | ID | Item | Cause | Status of the cause | Repos | Size |
 |----|------|-------|---------------------|-------|------|
 | R23 | Lingering distant chunk | Seam strips submitted after their owner unloaded; mesh results dropped by the completion drain | Both reproduced live 2026-10-12; fixed in VoxelWorlds#70 | VoxelWorlds | S-M |
-| R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code; phases 1-2 (live overlays) in VoxelWorlds#73 | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
+| R22 | Map shows edits | Map tiles are built from analytic noise only; nothing reads chunk or edit data | Traced in code; phases 1-2 (live overlays) in VoxelWorlds#73, phase 3 (saved with the world) in VoxelWorlds#74 | VoxelWorlds, UE5_PluginDev (VoxelWorldSave) | M-L |
 | R24 | Seam pop-in | Seams have no fade path; LOD changes show the new interior beside the old seam until the rebuild lands | Reproduced live 2026-10-12; P1+P2 fixed in VoxelWorlds#71, P3 in VoxelWorlds#72 | VoxelWorlds | L |
 
 ## R23 Lingering distant chunk
@@ -325,11 +325,49 @@ Streaming, LOD, Rendering, DualContour, MC SeamClosure, 65/65. In-editor (real R
 Cubic and Generation (GPU noise and GPU-vs-CPU parity), 95/95.
 
 **Known limits.**
-- Until phase 3, overlays are not saved: after a restart an edited area draws analytically until its chunks load.
+- Until phase 3 (below), overlays are not saved: after a restart an edited area draws analytically until its
+  chunks load.
 - A pit scripted into the seabed was not flooded by water propagation within a minute; not investigated (the map
   reads it as water through the sea above it either way).
 - Tiles with very large edit layers (dungeon stamps) cost up to ~2.3 ms to gather; an incremental per-chunk
   top-edit table would remove the walk if it ever shows in a profile.
+
+### R22 as built, phase 3 (VoxelWorlds#74, 2026-10-12)
+
+**What the code does.**
+- `UVoxelMapSubsystem::ExportEditOverlays` / `ImportEditOverlays` (VoxelMap), with the pure
+  `EncodeEditOverlays` / `DecodeEditOverlays`. The blob: magic `VMEO`, a format version, the tile count, then per
+  tile its X, Y and `FVoxelMapEditOverlay::Serialize` data (which has its own version byte); zlib-compressed behind
+  its uncompressed size, base64-encoded. Malformed data restores nothing and logs a warning.
+- The world document (UE5_PluginDev, VoxelWorldSave) gains `MapEditOverlays` and `MapEditOverlayCount`.
+  `ApplyDocument` imports the overlays first, then the explored tiles (so their first drawings include the
+  overlays), and `LoadWorld` loads the edits after that, as planned.
+- Pending-on-load reconciliation: an import replaces the overlays and marks every touched tile for the next
+  coalesced refresh, which runs after the edits are in. A tile whose edited chunks are loaded is rebuilt from them,
+  a tile with no edits left is cleared (a save whose edits sidecar is missing cannot leave stale overlays), and any
+  other tile keeps the saved overlay until one of its chunks generates.
+- Saves from before R22 carry no overlays: their edited areas update as their chunks load (user decision).
+- `vox.SaveInfo` and the save log report the overlay count; `voxel.Map.Capture` takes an optional centre X Y.
+
+**Measured** (VoxelDemo, worktree copy of the user's save).
+- First load of the pre-R22 save: "Restored 0 map edit overlay(s)"; the overlays rebuilt as their chunks loaded.
+- Nine overlays (553 columns) after visiting the crater site and the campsite: 2,796 base64 characters in the
+  document (the explored-tile blob next to it, 3,719 tiles, is 10,920).
+- PIE restart with the pawn at the campsite, about 690 km from the crater, whose chunks were confirmed unloaded
+  (`HasChunkVoxelData` false for Z −2..0): "Restored 9 map edit overlay(s)" at load, and the map around the crater
+  is pixel-identical to the capture taken while the area was loaded (157 overlay columns).
+  `Images/R22/restored_before_area_loads.png`.
+- Mid-session `vox.Load`: the same 9 overlays restore, the loaded tiles rebuild one per frame (0.03-1.1 ms), and
+  the crater area is again identical.
+
+**Tests.** New: `VoxelWorlds.Map.EditOverlay.SaveBlobRoundTrip`; `VoxelWorldSave.Document.RoundTrip` covers the new
+fields. Headless: Map, VoxelWorldSave, Streaming, LOD, Rendering, DualContour, MC SeamClosure, 67/67. In-editor: the
+same plus MC CPUvsGPU, Cubic and Generation (GPU noise, GPU-vs-CPU parity), 97/97.
+
+**Known limits.**
+- Only the server saves; a client's map rebuilds its overlays as chunks load (as before phase 3).
+- Overlays of areas never revisited keep their saved look; edits made by other means while the world is not loaded
+  (none exist today) would not show until the area loads.
 
 ## R24 Seam pop-in
 

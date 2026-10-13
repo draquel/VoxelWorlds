@@ -174,3 +174,13 @@ struct VOXELMAP_API FVoxelMapEditOverlay
 	/** Value equality of the saved fields (pending columns ignored). */
 	bool operator==(const FVoxelMapEditOverlay& Other) const;
 };
+
+/** A tile coordinate with its edit overlay: the unit UVoxelMapSubsystem saves and restores (R22 phase 3). */
+struct VOXELMAP_API FVoxelMapTileOverlay
+{
+	/** Tile coordinate (chunk X, Y). */
+	FIntPoint Tile = FIntPoint::ZeroValue;
+
+	/** The tile's overlay. */
+	FVoxelMapEditOverlay Overlay;
+};

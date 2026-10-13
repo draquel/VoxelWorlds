@@ -4,7 +4,9 @@
 #include "Misc/AutomationTest.h"
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
+#include "Misc/Base64.h"
 #include "VoxelMapEditOverlay.h"
+#include "VoxelMapSubsystem.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -431,6 +433,57 @@ bool FVoxelMapEditOverlayRoundTripTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("an empty overlay deserializes"), EmptyDecoded.Serialize(Reader));
 	}
 	TestTrue(TEXT("and stays empty"), EmptyDecoded == Empty);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapEditOverlaySaveBlobTest,
+	"VoxelWorlds.Map.EditOverlay.SaveBlobRoundTrip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelMapEditOverlaySaveBlobTest::RunTest(const FString& Parameters)
+{
+	// Phase 3: the overlays travel in the world document as one base64 blob (magic, version, tiles, zlib).
+	auto MakeOverlay = [](int32 FirstColumn, int32 NumColumns, float Height)
+	{
+		FVoxelMapEditOverlay O;
+		O.Resolution = 64;
+		for (int32 i = 0; i < NumColumns; ++i)
+		{
+			O.Columns.Add(static_cast<uint16>(FirstColumn + i));
+			O.Heights.Add(Height - i * 75.0f);
+			O.Materials.Add(static_cast<uint8>(2 + i % 3));
+			O.Flags.Add(i % 4 == 0 ? FVoxelMapEditOverlay::FlagWater : 0);
+		}
+		return O;
+	};
+	TArray<FVoxelMapTileOverlay> Tiles;
+	Tiles.Add({ FIntPoint(-101, -74), MakeOverlay(1000, 120, -1863.5f) });
+	Tiles.Add({ FIntPoint(-93, -19), MakeOverlay(2016, 30, 2170.25f) });
+	Tiles.Add({ FIntPoint(2147480000, -2147480000), MakeOverlay(0, 1, 0.0f) });
+
+	const FString Encoded = UVoxelMapSubsystem::EncodeEditOverlays(Tiles);
+	TestFalse(TEXT("encodes to a non-empty blob"), Encoded.IsEmpty());
+	TArray<FVoxelMapTileOverlay> Decoded;
+	TestTrue(TEXT("decodes"), UVoxelMapSubsystem::DecodeEditOverlays(Encoded, Decoded));
+	bool bSame = Decoded.Num() == Tiles.Num();
+	for (int32 i = 0; bSame && i < Tiles.Num(); ++i)
+	{
+		bSame = Decoded[i].Tile == Tiles[i].Tile && Decoded[i].Overlay == Tiles[i].Overlay;
+	}
+	TestTrue(TEXT("every tile, column and value survives, extreme coordinates included"), bSame);
+
+	TArray<FVoxelMapTileOverlay> None;
+	TestTrue(TEXT("no overlays encode to an empty string"), UVoxelMapSubsystem::EncodeEditOverlays(None).IsEmpty());
+	TestTrue(TEXT("an empty blob decodes to nothing"), UVoxelMapSubsystem::DecodeEditOverlays(FString(), Decoded) && Decoded.Num() == 0);
+	TestFalse(TEXT("text that is not base64 is malformed"), UVoxelMapSubsystem::DecodeEditOverlays(TEXT("@@not-base64@@"), Decoded));
+
+	// A truncated zlib stream fails (the engine logs the failed uncompress as an Error: expected here).
+	TArray<uint8> Bytes;
+	FBase64::Decode(Encoded, Bytes);
+	Bytes.SetNum(Bytes.Num() / 2);
+	AddExpectedError(TEXT("Failed to uncompress memory"), EAutomationExpectedErrorFlags::Contains, 1);
+	TestFalse(TEXT("a truncated blob is malformed"), UVoxelMapSubsystem::DecodeEditOverlays(FBase64::Encode(Bytes), Decoded));
+	TestEqual(TEXT("a failed decode leaves no tiles"), Decoded.Num(), 0);
 	return true;
 }
 
