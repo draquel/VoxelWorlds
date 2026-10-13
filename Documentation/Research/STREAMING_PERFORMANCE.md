@@ -74,7 +74,8 @@ with **commas**, not semicolons.
 
 **Sweep runner:** `Scripts/voxel_bench_sweep.ps1` runs a fresh headless process per
 velocity (cold + focus-immune). `-Config` passes `-VoxelConfig=`, `-BenchArgs` passes
-`key=value` bench arguments, `-Distance` fixes the traverse length, and `-ExtraArgs` passes
+`key=value` bench arguments, `-Distance` fixes the traverse length, `-PreCmds` runs console commands
+before the bench (a cvar A/B, e.g. `-PreCmds "voxel.FarCompression.Async 0"`), and `-ExtraArgs` passes
 anything else. It records the VoxelWorlds commit as the report's build label and defaults to
 the UE 5.8 install on D:.
 
@@ -87,18 +88,22 @@ the UE 5.8 install on D:.
 | `peak{Gen,Mesh,Unload}Queue` | Deepest each queue reached |
 | `peakLoadedChunks` | Peak resident chunk count |
 | `frameMsP50/95/99`, `totalMsP50/95/99` | Frame time / chunk-manager work per frame |
+| `farCompressMsP50/95/99` | The far-compression sweep's share of `totalMs` (traverse phase) |
+| `farCompressEncodes` / `Installed` / `Stale` | Fresh compression encodes this session, async results installed (raw array dropped or form cached), and async results discarded because the chunk's array changed or the chunk left |
 | `catchUpSec` | Time to drain to equilibrium after the viewer stops (the key UX metric) |
 | `thrashRemeshCount` + `thrashLOD`/`thrashNeighbor`/`thrashDirty` | Re-mesh requests, attributed by source |
 | `unloadLagMean/MaxMs` | Enqueue -> actual-unload dwell (drain latency) |
 | `unloadDistMean/MaxUU` | Viewer distance when a chunk is finally removed (lingering) |
 | `effMax*` | Resulting scheduler caps (after overrides/adaptive throttle) |
-| `run` | What was measured: map, world type, build label, engine, RHI, viewport, `-Voxel*` switches, config path and override, world and meshing mode, mesher, GPU generation/meshing/scatter flags, seed, voxel and chunk size, view distance, LOD band count, `lodEnabled` (effective: false for cubic), `WorldOrigin`, island or planet params, path shape and parameters |
+| `run` | What was measured: map, world type, build label, engine, RHI, viewport, `-Voxel*` switches, config path and override, world and meshing mode, mesher, GPU generation/meshing/scatter flags, seed, voxel and chunk size, view distance, LOD band count, `lodEnabled` (effective: false for cubic), `farCompression` / `farCompressionAsync` (the cvars), `WorldOrigin`, island or planet params, path shape and parameters |
 | `warmupSec` / `warmupDrained` | How long the initial load took to settle, and whether it drained (vs hit the warmup timeout) |
 | `memory` | Peak and end-of-run MB for voxel data, renderer GPU/CPU, collision, scatter and the process; `peakVoxelSystemsMB` (all voxel systems together); end-of-run resident/uniform/compressed/empty chunk counts |
 | `auditFindings` / `auditReport` | `AuditResidency` at the end of catch-up, taken from where the run ended (0 = healthy) |
 
 The CSV adds per-sample memory columns (`VoxelMB`, `EditMB`, `RendCPUMB`, `RendGPUMB`, `CollMB`,
-`ScatMB`, `ProcessMB`, `ResidentN`, `UniformN`, `CompressedN`, `EmptyN`), refreshed every 0.25 s.
+`ScatMB`, `ProcessMB`, `ResidentN`, `UniformN`, `CompressedN`, `EmptyN`), refreshed every 0.25 s, and
+per-tick far-compression columns (`FarCompMs`, `FarCompDispN` encodes started, `FarCompApplyN` async
+results installed).
 
 ### Methodology notes (important)
 
@@ -217,11 +222,26 @@ mesh job, so on that path the sweep holds a chunk expanded by such a read reside
 before compacting it again; otherwise a neighbour re-mesh cascade decodes the same chunks job after
 job. The seam pipeline reads through its snapshot cache and compacts again at once.
 
+**The encode runs on a worker thread** (`voxel.FarCompression.Async`, default 1). An Oodle encode of
+a 1 MB chunk costs about 3.5 ms in PIE and cannot be split, so the sweep does not run it on the game
+thread. For each chunk that needs a fresh encode (at most `voxel.FarCompression.MaxScansPerTick`, 4,
+per tick) it copies the array into a pooled scratch array and starts a background `UE::Tasks` task
+that runs `FChunkDescriptor::ComputeCompactForm` on the copy. At most
+`voxel.FarCompression.MaxInFlight` (8) encodes are in flight. The next sweep installs each result
+with `InstallCompactForm`, but only if the chunk's array is still the one that was copied: dispatch
+stamps the descriptor with a ticket (`AsyncCompactTicket`), and every write path and residency change
+clears it. If the chunk stopped qualifying meanwhile (a re-mesh started, or it came closer), it keeps
+its raw array and the result is cached as its compact form, which the sweep applies for free later.
+The copies, in flight or pooled, count as voxel data in the memory stats. `Async 0` runs the encode
+on the game thread, as before, for A/B.
+
 Measured on VoxelDemo's 400 m config ([WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md)
-§12.7): settled resident voxel data 134 MB smooth, 127 MB cubic (1,123 MB uncompressed). The cost is
-the encode: up to `voxel.FarCompression.MaxScansPerTick` (4) encodes per tick on the game thread,
-about 14 ms of chunk-manager P95 while moving, in both modes (finding G6 there). It is not timed in a
-section of its own, so the bench shows it as unattributed manager time.
+§12.7, §12.8): settled resident voxel data 134 MB smooth, 127 MB cubic (1,123 MB uncompressed). With
+the encode on the game thread the sweep cost 10-14 ms of chunk-manager P95 while moving, in both
+modes (finding G6 there). On a worker it costs 0.6-0.9 ms (one 1 MB copy per dispatch, about 0.2 ms
+each in PIE), and manager P95 at 3,000 uu/s fell from 21.9 to 13.5 ms (smooth) and from 21.0 to
+about 16 ms (cubic), with the same settled memory. The sweep is a bench section of its own
+(`FarCompMs`, `farCompressMsP95`).
 
 ### Deferred
 

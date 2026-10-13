@@ -256,7 +256,7 @@ code sites).
 
 1. **T1-T5** and the review content: done 2026-10-12 (VoxelWorlds#76, UE5_PluginDev#94).
 2. **Review A: cubic** (C1-C7): done 2026-10-13, results in §12 (D1 recommendation: terrain-only). D7 and KC11
-   implemented the same day (§12.7).
+   implemented the same day (§12.7), and the compression encode moved to a worker thread (G6, §12.8).
 3. **Review B: island** (I1-I10): one to two sessions. A and B share tooling and can run in either order;
    cubic first is quicker because it has fewer unknowns.
 4. **Second revision of this plan:** confirmed findings become work items with sizes and an order, alongside the
@@ -470,7 +470,7 @@ Mode-independent, found on the way:
 | G3 | Gathering pays out on every dig whose brush modifies anything, and a dug voxel keeps its material ID, so one voxel yields without limit (6 digs at one trunk voxel, 6 Wood) | `VoxelCharacterPlugin/.../VCPlayerController.cpp:1344-1350`, `:1419-1431` |
 | G4 | `voxel.Bench.Run … follow=` follows the seabed under lakes, so a long follow run drowns the pawn mid-run (tooling) | `c2_w04_follow` run |
 | G5 | The bench's thrash counter counts meshing-queue insertions of already-meshed chunks, including deferral re-queues, so on a path that defers it reports many times the meshes actually run (KC14). Smooth does not defer, so its numbers are unaffected (tooling) | `VoxelChunkManager.cpp:5798-5803` |
-| G6 | *(found with §12.7)* **Far-compression encoding is the largest single item in the chunk manager's P95 while moving, in both modes.** The sweep encodes up to `voxel.FarCompression.MaxScansPerTick` (4) chunks per tick on the game thread, and an Oodle encode of a 1 MB chunk costs about 3.5 ms in PIE. It is not timed separately, so it shows as the unattributed manager time: during the v3000 traverse, P95 14.9 ms for the smooth control, 13.9 ms for cubic with compression and 0.1 ms for cubic without it. A time budget, or encoding on a worker thread, would take it off the frame for both modes | `ProcessFarCompressionSweep`; the per-frame CSVs of the §12.7 runs (unattributed = `TotalMs` minus the timed sections) |
+| G6 | *(found with §12.7)* **Far-compression encoding is the largest single item in the chunk manager's P95 while moving, in both modes.** The sweep encodes up to `voxel.FarCompression.MaxScansPerTick` (4) chunks per tick on the game thread, and an Oodle encode of a 1 MB chunk costs about 3.5 ms in PIE. It is not timed separately, so it shows as the unattributed manager time: during the v3000 traverse, P95 14.9 ms for the smooth control, 13.9 ms for cubic with compression and 0.1 ms for cubic without it. A time budget, or encoding on a worker thread, would take it off the frame for both modes. **Fixed (§12.8)**: the encode runs on a worker; the sweep's P95 is 0.6-0.9 ms in PIE | `ProcessFarCompressionSweep`; the per-frame CSVs of the §12.7 runs (unattributed = `TotalMs` minus the timed sections) |
 
 ### 12.5 Recommendation for D1
 
@@ -503,11 +503,13 @@ needs it. Do not drop it.
 - **Performance on the intended path:** frame and manager time and load time already meet the thresholds. Catch-up is
   within 9% of the control headless, where CPU generation sets the pace, but 1.6-3.2× in PIE, where the cubic neighbour
   cascade is left as the bottleneck: that waits on the KC2 work. Voxel memory waits on KC11 *(done, §12.7; compression
-  brings smooth's encode cost with it, so cubic's frame-time lead over smooth is gone at v3000, see there)*. Renderer GPU memory stays
+  brings smooth's encode cost with it, so cubic's frame-time lead over smooth is gone at v3000, see there; the encode moved
+  to a worker in §12.8, which helped smooth more than cubic)*. Renderer GPU memory stays
   about 9× smooth however the pipeline is tuned, because every cubic chunk is full detail; greedy already takes it down
   from about 38×. Parity on that metric would need a far representation for cubic (a coarse far mesh or impostor) or a
   shorter cubic view distance. Both are design choices for the second revision, not bugs.
-- **Mode-independent findings** G1-G3 and G6 apply to smooth as well and can be fixed independently of D1; G4-G5 are bench tooling.
+- **Mode-independent findings** G1-G3 and G6 apply to smooth as well and can be fixed independently of D1 (G6 is fixed,
+  §12.8); G4-G5 are bench tooling.
 
 ### 12.6 Where cubic and smooth separate
 
@@ -626,4 +628,155 @@ The §12.2 headless cubic LOD-off rows held 1,189 MB of voxel data from start to
   14 ms of manager P95 while moving. Against the first-pass control, cubic's frame P95 is −12% (v1500), +8% (v3000) and
   −18% (v6000), inside the +10% threshold, and its manager P95 is +4%, 0% and −27%. Most of §12.2's −10% to −25%
   frame-time lead is gone; taking the encode off the game thread (G6) would restore it, for smooth as well. Catch-up rises
-  by 0.2-1.7 s and still misses its threshold, which is KC2's to fix.
+  by 0.2-1.7 s and still misses its threshold, which is KC2's to fix. *(G6 done in §12.8: it helped smooth more than
+  cubic, so the lead did not come back.)*
+
+### 12.8 G6 fixed: the compression encode runs on a worker (2026-10-13)
+
+**What changed.**
+
+- **The encode runs on a worker thread.** For a chunk that needs a fresh encode, the sweep copies its array into a
+  pooled scratch array and starts a background `UE::Tasks` task (`BackgroundNormal`, outside the thread pool that runs
+  generation, meshing and seam jobs). The task runs `FChunkDescriptor::ComputeCompactForm` on the copy: the uniform scan,
+  then Oodle. At the start of the next sweep the game thread installs each finished result with `InstallCompactForm`.
+  `TryCompress` is now those two calls in sequence, so the in-place path behaves as before.
+- **Install only an unchanged array.** At dispatch the descriptor gets a ticket (`AsyncCompactTicket`). Every write path
+  (`SetVoxel`, `SetVoxelByIndex`, `GetVoxelDataMutable`, `SetResidentVoxelData`, `AllocateVoxelData`, `ClearVoxelData`)
+  and every residency change clears it. A result whose ticket no longer matches is discarded and counted as stale.
+  `ContentVersion` alone would not do: water-flag propagation writes through `GetVoxelDataMutable()` without bumping it,
+  and a reloaded chunk starts its count again.
+- **A chunk that stopped qualifying keeps the result.** If the chunk started a re-mesh or moved inside the stride band
+  while its encode ran, the result still matches the array. It is stored as the chunk's cached compact form (the uniform
+  value or the retained buffer), and the sweep re-applies it for free once the chunk qualifies again. The legacy-path
+  hold (`FarExpandedSeenFrame`) and the free re-apply path are unchanged.
+- **Limits.** `voxel.FarCompression.MaxScansPerTick` (4) now limits encodes started per tick. The new
+  `voxel.FarCompression.MaxInFlight` (8) limits encodes in flight, and with them the copies (1 MB each). Copies in flight
+  or in the pool count as voxel data in the memory stats, and the pool is freed after `IdleFrames` with nothing
+  dispatched. `voxel.FarCompression.Async 0` restores the game-thread encode for A/B.
+- **Bench.** The sweep is a timed section of its own: CSV `FarCompMs`, `FarCompDispN`, `FarCompApplyN`; JSON
+  `farCompressMsP50/P95/P99` over the traverse, `farCompressEncodes/Installed/Stale` for the session, and
+  `run.farCompression` / `run.farCompressionAsync`. The HUD and `voxel.FarCompression.Stats` show it too.
+  `voxel_bench_sweep.ps1` takes `-PreCmds` for cvar A/B runs. Tests: `VoxelWorlds.Compression.Async.MatchesSyncCompress`,
+  `.TicketVoidedByWrites`, `.CacheOnlyInstall`. The `VoxelWorlds+VoxelWorldSave` suites pass 212/212, headless and
+  in the editor, where the GPU tests run.
+
+**Why a worker and no time budget.** One encode costs about 3.5 ms and cannot be split. A time budget alone could
+therefore get the sweep down to one encode per tick at best, at a quarter of the throughput, and while moving that would
+give back part of the memory win. On a worker the encode leaves the frame entirely. What stays on the game thread is a
+1 MB copy per dispatch: 0.2 ms in PIE (CSV, mean by dispatch count), about 0.8-1.1 ms on a tick with 4 dispatches. A
+time budget on top would save about 0.5 ms at P95 and slow compression down, so there is none. In PIE an encode is
+installed one or two ticks after its dispatch. Headless, where CPU generation and meshing keep every core busy, the
+background encodes queue and cubic sometimes reaches the 8 in flight; that delays compression, not the frame, and the
+headless memory columns below still match or beat §12.7.
+
+**Method.** As in §12.7: one editor (the worktree build, no other editor open) in the foreground, background
+throttle off, PIE in the level viewport, a cold fresh world per run, `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0
+warmup=120`. The sync rows are the same build with `voxel.FarCompression.Async 0`. "Sweep" is the new `FarCompressMs`
+section, and "unattributed" is what remains of `TotalMs` after every timed section. JSON reports are in
+[Research/Bench/G6/](Research/Bench/G6/).
+
+**PIE** (§12.7 rows for comparison, in italics; their sweep was untimed and measured about 14 ms of unattributed P95
+at v3000, §12.4):
+
+| Run | Warmup s | Frame P50 / P95 / P99 ms | Manager P95 ms | Sweep P50 / P95 / P99 ms | Catch-up s | Peak mesh queue | Thrash (LOD / neighbour / other) | Peak / end voxel MB | End resident / uniform / compressed | Systems MB | JSON |
+|-----|----------|---------------------------|----------------|--------------------------|------------|-----------------|----------------------------------|---------------------|-------------------------------------|------------|------|
+| *Control v3000 (§12.7)* | *5.5* | *25.7 / 41.0 / 49.2* | *22.8* | *untimed* | *2.4* | *7* | *280 (280 / 0 / 0)* | *709 / 595* | *580 / 63 / 546* | *916* | *`20261013_022543_d7_ctrl_v3000`* |
+| *Control v3000 re-run (§12.7)* | *5.7* | *25.2 / 42.0 / 48.4* | *21.1* | *untimed* | *2.1* | *7* | *280 (280 / 0 / 0)* | *679 / 611* | *596 / 62 / 531* | *890* | *`20261013_022843_d7_ctrl_v3000b`* |
+| Control v1500 | 4.1 | 16.7 / 27.4 / 34.5 | 8.6 | 0.06 / 0.73 / 1.27 | 0.17 | 4 | 280 (280 / 0 / 0) | 828 / 398 | 374 / 78 / 737 | 1,039 | `20261013_032658_g6_ctrl_v1500` |
+| **Control v3000** | 11.2 | 22.7 / 35.7 / 42.5 | **13.5** | 0.26 / **0.91** / 1.34 | 0.93 | 5 | 537 (537 / 0 / 0) | 777 / 630 | 611 / 60 / 519 | 987 | `20261013_030923_g6_ctrl_v3000` |
+| **Control v3000 re-run** | 3.8 | 22.7 / 35.9 / 42.2 | **13.5** | 0.26 / **0.90** / 1.34 | 1.07 | 7 | 280 (280 / 0 / 0) | 782 / 637 | 618 / 59 / 513 | 994 | `20261013_031208_g6_ctrl_v3000b` |
+| Control v3000, sync encode | 5.5 | 24.8 / 40.9 / 47.5 | 21.9 | 2.44 / 13.28 / 16.99 | 2.20 | 7 | 280 (280 / 0 / 0) | 684 / 596 | 581 / 63 / 546 | 891 | `20261013_031246_g6_ctrl_sync_v3000` |
+| Control v6000 | 4.5 | 33.3 / 47.5 / 54.7 | 20.0 | 0.21 / 0.60 / 0.83 | 5.0 | 9 | 280 (280 / 0 / 0) | 764 / 751 | 736 / 48 / 406 | 1,053 | `20261013_032732_g6_ctrl_v6000` |
+| *`Review_Cubic` v1500 (§12.7)* | *8.3* | *16.7 / 28.1 / 36.1* | *16.2* | *untimed* | *0.77* | *74* | *3,286 (0 / 2,686 / 600)* | *1,082 / 724* | *706 / 53 / 430* | *1,518* | *`20261013_022723_d7_cubic_v1500`* |
+| **`Review_Cubic` v1500** | 7.9 | 16.7 / 24.1 / 32.2 | **10.9** | 0.03 / **0.60** / 0.98 | 0.71 | 75 | 2,680 (0 / 2,680 / 0) | 1,102 / 729 | 707 / 53 / 429 | 1,534 | `20261013_031056_g6_cubic_v1500` |
+| *`Review_Cubic` v3000 (§12.7)* | *8.3* | *19.6 / 43.8 / 64.8* | *20.5* | *untimed* | *5.4* | *193* | *2,540 (0 / 1,508 / 1,032)* | *1,070 / 852* | *840 / 42 / 307* | *1,530* | *`20261013_022629_d7_cubic_v3000`* |
+| **`Review_Cubic` v3000** | 7.9 | 16.7 / 40.0 / 67.5 | **15.9** | 0.15 / **0.88** / 1.37 | 5.2 | 176 | 3,173 (0 / 1,577 / 1,596) | 1,076 / 838 | 821 / 42 / 326 | 1,529 | `20261013_031003_g6_cubic_v3000` |
+| **`Review_Cubic` v3000 re-run** | 8.8 | 17.5 / 44.3 / 59.1 | **16.3** | 0.13 / **0.88** / 1.23 | 5.1 | 194 | 3,677 (0 / 1,671 / 2,006) | 1,082 / 849 | 833 / 42 / 314 | 1,532 | `20261013_032818_g6_cubic_v3000b` |
+| `Review_Cubic` v3000, sync encode | 8.3 | 19.7 / 44.9 / 61.7 | 21.0 | 1.90 / 14.02 / 16.15 | 5.4 | 182 | 2,809 (0 / 1,497 / 1,312) | 1,072 / 858 | 846 / 41 / 302 | 1,529 | `20261013_031331_g6_cubic_sync_v3000` |
+| *`Review_Cubic` v6000 (§12.7)* | *7.7* | *22.9 / 46.3 / 58.7* | *23.1* | *untimed* | *11.4* | *145* | *1,959 (0 / 1,360 / 599)* | *1,088 / 1,034* | *1,023 / 24 / 143* | *1,645* | *`20261013_022803_d7_cubic_v6000`* |
+| **`Review_Cubic` v6000** | 7.4 | 19.7 / 51.8 / 65.2 | **16.4** | 0.26 / **0.82** / 1.07 | 9.7 | 153 | 1,871 (0 / 1,373 / 498) | 1,098 / 989 | 974 / 29 / 187 | 1,614 | `20261013_031134_g6_cubic_v6000` |
+
+All audits reported 0. Stale results: 0-8 per run out of 800-1,650 encodes. The first control run logged 537 LOD
+re-meshes against 278-280 in every other control run. Its warmup started almost at PIE start (24 chunks loaded), so the
+initial load's LOD settling fell inside the run.
+
+**Settled-start A/B** (control v3000). In the runs above the memory columns depend on how far the initial load had got
+when the bench started: a 3.8 s warmup begins the traverse with the initial load's chunks not yet compressed, an 11.2 s
+one with most of them done. For these four runs each bench started only after the initial load had drained and 15 s
+more had passed, from 133.7 MB and 932 compressed chunks every time, with the encode alternating async, sync, async,
+sync:
+
+| Encode | Frame P95 ms | Manager P95 ms | Sweep P95 ms | Catch-up s | Voxel MB: peak / traverse mean / end | Compressed: traverse mean / end | JSON |
+|--------|--------------|----------------|--------------|------------|--------------------------------------|---------------------------------|------|
+| Async | 35.1 | 13.8 | 0.61 | 1.07 | 633 / 444 / 623 | 668 / 526 | `20261013_032031_g6s_ctrl_a1_577` |
+| Sync | 37.2 | 19.1 | 10.78 | 1.71 | 631 / 434 / 610 | 671 / 534 | `20261013_032127_g6s_ctrl_a0_4891` |
+| Async | 35.0 | 14.0 | 0.57 | 0.99 | 646 / 444 / 638 | 661 / 511 | `20261013_032216_g6s_ctrl_a1_20899` |
+| Sync | 37.9 | 18.6 | 10.33 | 1.89 | 632 / 432 / 607 | 673 / 537 | `20261013_032313_g6s_ctrl_a0_19768` |
+
+Peak memory is the same. While traversing, the async runs average 10 more resident chunks (+2.5%, about 10 MB) and
+3-12 fewer compressed ones: a result is installed one or two ticks after its dispatch. They end 13-31 MB higher
+because their catch-up ends about 0.8 s sooner, before the last chunks of the traverse have been idle for
+`IdleFrames`. In catch-up the async runs pull ahead (1.0 s in: 515 and 501 compressed against 479 and 464); the sync
+runs just get 0.7-0.9 s longer to compress before the report is written.
+
+**Settled state** (fresh world at the spawn, `voxel.FarCompression.Stats` after the initial load drains):
+
+| | Smooth control, async | Smooth control, sync | `Review_Cubic`, async | §12.7 (sync): control / cubic |
+|---|---|---|---|---|
+| Time to settle (polled every 4 s) | 13 s | 19 s | 18 s | 14 s / 17 s |
+| 2-3 s after the drain | 230 MB (207 resident, 842 compressed) | 134 MB | 131 MB (105 resident, 937 compressed) | 453 / 718 MB |
+| 10 s later / 45 s later | **134 / 134 MB** (112 / 79 / 932) | 134 / 134 MB (112 / 79 / 932) | **128 / 127 MB** (105 / 81 / 937) | 134 / 127 MB |
+
+The settled resident, uniform and compressed counts match §12.7 exactly in both modes. Audits 0.
+
+**Headless CPU sweep** (VoxelWorldsTest, `-VoxelForceCPU`, the §12.2 arguments; no editor was open, as in §12.7's
+headless rows):
+
+| Run | Frame P50 / P95 ms | Manager P95 ms | Sweep P95 ms | Catch-up s | Thrash (LOD / neighbour / other) | Peak / end voxel MB | End resident / uniform / compressed | Systems MB | JSON |
+|-----|--------------------|----------------|--------------|------------|----------------------------------|---------------------|-------------------------------------|------------|------|
+| *Control v3000 (§12.7)* | *3.6 / 10.8* | *8.1* | *untimed* | *8.5* | *535 (535 / 0 / 0)* | *236 / 192* | *168 / 103 / 918* | *572* | *`20261013_020144_d7_hl_ctrl_v3000`* |
+| **Control v3000** | 3.3 / 8.5 | **5.8** | **0.15** | 8.5 | 535 (535 / 0 / 0) | 230 / 193 | 163 / 103 / 923 | 566 | `20261013_030125_g6_hl_ctrl_v3000` |
+| Control v3000, sync encode | 3.8 / 10.7 | 8.2 | 4.27 | 8.9 | 535 (535 / 0 / 0) | 239 / 193 | 169 / 103 / 917 | 570 | `20261013_030602_g6_hl_ctrl_sync_v3000` |
+| *`Review_Cubic` v1500 (§12.7)* | *1.3 / 8.8* | *6.9* | *untimed* | *0.6* | *151,665 (0 / 4,669 / 146,996)* | *924 / 437* | *413 / 83 / 693* | *1,379* | *`20261013_021932_d7h_hl_cubic_v1500`* |
+| **`Review_Cubic` v1500** | 1.3 / 5.9 | **3.9** | **0.15** | 1.3 | 200,422 (0 / 4,696 / 195,726) | 884 / 420 | 389 / 84 / 716 | 1,332 | `20261013_030239_g6_hl_cubic_v1500` |
+| *`Review_Cubic` v3000 (§12.7)* | *1.5 / 11.2* | *8.4* | *untimed* | *10.1* | *52,149 (0 / 3,126 / 49,023)* | *954 / 640* | *621 / 61 / 507* | *1,423* | *`20261013_022045_d7h_hl_cubic_v3000`* |
+| **`Review_Cubic` v3000** | 1.4 / 6.9 | **4.5** | **0.16** | 10.0 | 70,723 (0 / 3,154 / 67,569) | 893 / 626 | 599 / 62 / 528 | 1,394 | `20261013_030347_g6_hl_cubic_v3000` |
+| `Review_Cubic` v3000, sync encode | 1.6 / 11.8 | 9.2 | 5.50 | 10.6 | 50,107 (0 / 3,045 / 47,062) | 924 / 642 | 623 / 62 / 504 | 1,397 | `20261013_030712_g6_hl_cubic_sync_v3000` |
+| *`Review_Cubic` v6000 (§12.7)* | *2.0 / 15.2* | *11.9* | *untimed* | *16.0* | *29,626 (0 / 2,708 / 26,918)* | *937 / 760* | *745 / 56 / 388* | *1,519* | *`20261013_022156_d7h_hl_cubic_v6000`* |
+| **`Review_Cubic` v6000** | 1.7 / 7.8 | **5.0** | **0.23** | 15.9 | 51,077 (0 / 2,843 / 48,234) | 870 / 659 | 633 / 59 / 497 | 1,475 | `20261013_030457_g6_hl_cubic_v6000` |
+
+The "other" thrash is KC14's per-frame deferral re-queue. It counts frames, so it rises when frames get shorter.
+
+**What is left on the manager's P95.** Averaged over the slowest 5% of traverse ticks at v3000, the sweep is now 0.5 ms
+(control) and 0.2 ms (cubic), against 13.2 and 10.4 ms with the sync encode. What remains:
+
+- Control: collision 4.6 ms, seam pipeline 3.8, render submit 3.0, scatter 2.2, meshing 1.7.
+- Cubic: render submit 9.7 ms, scatter 5.6, meshing 3.4 (of which the legacy neighbour slices are 2.6).
+
+The smooth control also keeps about 2 ms of unattributed P95 with the encode on either thread. That is not the sweep:
+it is one of the sections that are still untimed (water propagation, the debounced neighbour-remesh dispatch, the
+deferral check), not identified here.
+
+**Verdict.**
+
+- **G6 is fixed for both modes.** The sweep's P95 falls from 10-14 ms to 0.6-0.9 ms in PIE and from 4-6 ms to
+  0.15-0.23 ms headless. Same-build A/B at v3000: manager P95 21.9 → 13.5 ms (control) and 21.0 → 15.9/16.3 ms (cubic);
+  frame P95 40.9 → 35.7/35.9 ms and 44.9 → 40.0/44.3 ms. Against §12.7, manager P95 is 36-41% lower for the control and
+  20-33% lower for cubic at every speed. Catch-up is shorter or the same.
+- **The memory win is kept.** Settled voxel data is unchanged: 134 MB smooth, 127 MB cubic, the same resident, uniform
+  and compressed counts as §12.7. Peak memory is the same. While moving, the install lag of a tick or two holds
+  about 10 MB (2.5%) more in the control. End-of-run numbers are within §12.7's spread for cubic. The control's end of
+  run is +13 to +31 MB (+2-5%) in the settled-start A/B, because its shorter catch-up writes the report sooner. Headless, every
+  memory and count column matches §12.7 or improves on it.
+- **Cubic's lead over smooth did not come back.** The control gained more than cubic: its slowest ticks were dominated
+  by the encode, while cubic's are dominated by render submit, scatter and the legacy neighbour slices.
+
+  | Cubic vs a same-build control (2 runs at v3000) | v1500 | v3000 | v6000 |
+  |-------------------------------------------------|-------|-------|-------|
+  | Frame P95 (threshold +10%) | −12% ✓ | +18% ✗ | +9% ✓ |
+  | Manager P95 (threshold +15%) | +27% ✗ | +19% ✗ | −18% ✓ |
+
+  Against the first-pass control (§12.2), which the §12.7 verdict used, cubic is −24%, +4% and −9% on frame P95 and
+  −30%, −21% and −48% on manager P95 (v3000: mean of the two runs). Closing what is left on cubic's P95 is KC2 work
+  (the legacy neighbour cascade, slices and re-meshes) and KC4 work (scatter); its render submit cost comes from
+  carrying 3-4× smooth's triangles.
