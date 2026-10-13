@@ -11,6 +11,7 @@
 #include "VoxelCaveConfiguration.h"
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
+#include "Tasks/Task.h"
 #include "Misc/ScopeExit.h"
 #include "VoxelCoordinates.h"
 #include "IVoxelLODStrategy.h"
@@ -371,8 +372,24 @@ static TAutoConsoleVariable<int32> CVarFarCompressionIdleFrames(
 static TAutoConsoleVariable<int32> CVarFarCompressionMaxScansPerTick(
 	TEXT("voxel.FarCompression.MaxScansPerTick"),
 	4,
-	TEXT("Budget: max fresh compress attempts per tick (uniform scan + general encode, each ~0.1-1ms). "
+	TEXT("Budget: max fresh compress attempts per tick (uniform scan + general encode, ~3.5ms per 1MB chunk "
+	     "in PIE). Async: encodes handed to workers; sync: encodes run on the game thread. "
 	     "Free re-collapses/re-compresses and skips of already-evaluated chunks are not counted against this."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarCompressionAsync(
+	TEXT("voxel.FarCompression.Async"),
+	1,
+	TEXT("1 = encode on a background worker from a copy of the chunk's array; the game thread installs the "
+	     "result only if the array is unchanged (FChunkDescriptor::AsyncCompactTicket). 0 = encode on the game "
+	     "thread inside the sweep, as before (for A/B)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
+	TEXT("voxel.FarCompression.MaxInFlight"),
+	8,
+	TEXT("Async encodes in flight at most. Each holds a copy of its chunk's array (1MB for a 64^3 chunk), "
+	     "so this also caps the copies' memory."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarFarCompressionCodec(
@@ -391,6 +408,8 @@ UVoxelChunkManager::UVoxelChunkManager()
 
 	// Seam-ownership registry (P0 scaffolding). A plain C++ helper; enabled per-tick from a cvar.
 	SeamRegistry = MakeUnique<FVoxelSeamRegistry>();
+
+	FarCompressResults = MakeShared<FFarCompressResultQueue, ESPMode::ThreadSafe>();
 }
 
 // Defaulted here (not in the header) so ~TUniquePtr<FVoxelSeamRegistry> sees the complete type.
@@ -796,7 +815,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Far-chunk voxel-data compression sweep ===
 	// Runs after LOD evaluation so a chunk just queued for an LOD remesh (now dirty) is excluded.
-	ProcessFarCompressionSweep(Context);
+	// Timed into its own bench column (FarCompressMs): it used to show only as unattributed TotalMs (G6).
+	SectionStart = FPlatformTime::Seconds();
+	ProcessFarCompressionSweep(Context, Timing);
+	Timing.FarCompressMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
 	// === Subsystem deferral check ===
 	const int32 DeferThreshold = Configuration ? Configuration->DeferSubsystemsThreshold : 20;
@@ -1353,6 +1375,13 @@ void UVoxelChunkManager::Shutdown()
 		FAsyncMeshResult DiscardedMeshResult;
 		while (CompletedMeshQueue.Dequeue(DiscardedMeshResult)) {}
 	}
+
+	// Far compression: encodes still running finish into the old queue, which is freed with the last
+	// of them. The descriptors that carried their tickets are gone with ChunkStates.
+	FarCompressResults = MakeShared<FFarCompressResultQueue, ESPMode::ThreadSafe>();
+	FarCompressJobsInFlight = 0;
+	FarCompressBytesInFlight = 0;
+	FarCompressScratchPool.Empty();
 
 	// Reset streaming decision caching
 	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
@@ -2043,6 +2072,13 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 			++Stats.EmptyChunks;
 			break;
 		}
+	}
+
+	// Copies held by async far-compression encodes, in flight or pooled for the next dispatch.
+	Stats.VoxelDataBytes += FarCompressBytesInFlight;
+	for (const TArray<FVoxelData>& Scratch : FarCompressScratchPool)
+	{
+		Stats.VoxelDataBytes += static_cast<int64>(Scratch.GetAllocatedSize());
 	}
 
 	// Edit manager
@@ -4662,16 +4698,14 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(co
 	return Entry.Data;
 }
 
-void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Context)
+void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Context, FVoxelTimingStats& Timing)
 {
-	if (CVarFarCompression.GetValueOnGameThread() == 0)
-	{
-		return;
-	}
-
+	const bool bEnabled = CVarFarCompression.GetValueOnGameThread() != 0;
+	const bool bAsync = CVarFarCompressionAsync.GetValueOnGameThread() != 0;
 	const int32 MinStride = FMath::Max(1, CVarFarCompressionMinStride.GetValueOnGameThread());
 	const int64 IdleFrames = FMath::Max(0, CVarFarCompressionIdleFrames.GetValueOnGameThread());
 	const int32 MaxScans = FMath::Max(1, CVarFarCompressionMaxScansPerTick.GetValueOnGameThread());
+	const int32 MaxInFlight = FMath::Max(1, CVarFarCompressionMaxInFlight.GetValueOnGameThread());
 	const EVoxelChunkCodec Codec = static_cast<EVoxelChunkCodec>(FMath::Clamp(CVarFarCompressionCodec.GetValueOnGameThread(), 0, 5));
 
 	// "Far" is keyed on distance: the chunk's distance band must have reached MinStride. With the
@@ -4680,21 +4714,70 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 	// chunk's distance onto the same bands instead; without that, nothing would ever compress.
 	const bool bLODActive = Configuration && Configuration->IsLODEnabled();
 
+	// Only settled, currently-resident far chunks that aren't pending a remesh.
+	auto IsFarCandidate = [&](const FIntVector& Coord, const FVoxelChunkState& S) -> bool
+	{
+		if (S.State != EChunkState::Loaded) return false;
+		if (S.Descriptor.Residency != EVoxelDataResidency::Resident) return false;
+		if (S.Descriptor.bIsDirty) return false;
+		// Idle: LastStateChangeFrame is the frame the chunk entered Loaded; it stays fixed while
+		// settled and resets on any remesh (Loaded -> PendingMeshing -> ... -> Loaded).
+		if ((CurrentFrame - S.LastStateChangeFrame) < IdleFrames) return false;
+		const int32 BandLOD = (bLODActive || !LODStrategy) ? S.LODLevel : LODStrategy->GetDistanceBandLOD(Coord, Context);
+		return (1 << FMath::Clamp(BandLOD, 0, 7)) >= MinStride;
+	};
+
+	// Install finished async encodes. Drained even with the sweep off, so their copies come back.
+	int32 Applied = 0;
+	FFarCompressResult Result;
+	while (FarCompressResults->Dequeue(Result))
+	{
+		--FarCompressJobsInFlight;
+		FarCompressBytesInFlight -= Result.Scratch.GetAllocatedSize();
+		if (FarCompressScratchPool.Num() + FarCompressJobsInFlight < MaxInFlight)
+		{
+			FarCompressScratchPool.Add(MoveTemp(Result.Scratch));
+		}
+		Result.Scratch.Empty(); // frees a copy the pool had no room for
+
+		// A mismatched ticket means the chunk unloaded, or its array was written or changed residency
+		// after the copy was taken (every write path clears the ticket): the form no longer describes it.
+		FVoxelChunkState* S = ChunkStates.Find(Result.ChunkCoord);
+		if (!S || S->Descriptor.AsyncCompactTicket != Result.Ticket)
+		{
+			++FarCompressStale;
+			continue;
+		}
+		// The form matches the array, so keep it either way. Drop the raw array only if the chunk still
+		// qualifies; one that started a re-mesh or came closer meanwhile keeps it, and the sweep
+		// re-applies the cached form for free once it qualifies again.
+		const bool bDrop = bEnabled && IsFarCandidate(Result.ChunkCoord, *S);
+		if (bDrop)
+		{
+			S->FarExpandedSeenFrame = -1;
+		}
+		S->Descriptor.InstallCompactForm(MoveTemp(Result.Form), bDrop);
+		++FarCompressInstalled;
+		++Applied;
+	}
+	Timing.FarCompressApplyCount = Applied;
+
+	if (!bEnabled)
+	{
+		if (FarCompressJobsInFlight == 0)
+		{
+			FarCompressScratchPool.Empty();
+		}
+		return;
+	}
+
 	int32 Budget = 0;
 	for (auto& Pair : ChunkStates)
 	{
 		FVoxelChunkState& S = Pair.Value;
 		FChunkDescriptor& D = S.Descriptor;
 
-		// Only settled, currently-resident far chunks that aren't pending a remesh.
-		if (S.State != EChunkState::Loaded) continue;
-		if (D.Residency != EVoxelDataResidency::Resident) continue;
-		if (D.bIsDirty) continue;
-		// Idle: LastStateChangeFrame is the frame the chunk entered Loaded; it stays fixed while
-		// settled and resets on any remesh (Loaded -> PendingMeshing -> ... -> Loaded).
-		if ((CurrentFrame - S.LastStateChangeFrame) < IdleFrames) continue;
-		const int32 BandLOD = (bLODActive || !LODStrategy) ? S.LODLevel : LODStrategy->GetDistanceBandLOD(Pair.Key, Context);
-		if ((1 << FMath::Clamp(BandLOD, 0, 7)) < MinStride) continue;
+		if (!IsFarCandidate(Pair.Key, S)) continue;
 
 		if (D.bUniformValueValid || D.CompressedVoxelData.Num() > 0)
 		{
@@ -4725,15 +4808,73 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 			// Already attempted; neither uniform nor the codec beat raw. Skip until content changes.
 			continue;
 		}
-		if (Budget >= MaxScans)
+		if (D.AsyncCompactTicket != 0)
+		{
+			// An encode of exactly this array is in flight.
+			continue;
+		}
+		if (Budget >= MaxScans || (bAsync && FarCompressJobsInFlight >= MaxInFlight))
 		{
 			// Out of budget this tick; retry next tick (bCompressionEvaluated stays false).
 			continue;
 		}
 		++Budget;
-		S.FarExpandedSeenFrame = -1;
-		D.TryCompress(Codec);
+		++FarCompressEncodes;
+		if (bAsync)
+		{
+			DispatchFarCompression(Pair.Key, D, Codec);
+		}
+		else
+		{
+			S.FarExpandedSeenFrame = -1;
+			D.TryCompress(Codec);
+		}
 	}
+	Timing.FarCompressDispatchCount = Budget;
+
+	// Keep the scratch arrays while encodes keep coming; release them once the sweep has been idle.
+	if (Budget > 0 || FarCompressJobsInFlight > 0)
+	{
+		FarCompressLastBusyFrame = CurrentFrame;
+	}
+	else if (FarCompressScratchPool.Num() > 0 && (CurrentFrame - FarCompressLastBusyFrame) >= IdleFrames)
+	{
+		FarCompressScratchPool.Empty();
+	}
+}
+
+void UVoxelChunkManager::DispatchFarCompression(const FIntVector& ChunkCoord, FChunkDescriptor& Descriptor, EVoxelChunkCodec Codec)
+{
+	if (++NextFarCompressTicket == 0)
+	{
+		++NextFarCompressTicket; // 0 means "no encode in flight"
+	}
+	const uint32 Ticket = NextFarCompressTicket;
+	Descriptor.AsyncCompactTicket = Ticket;
+
+	// Encode from a copy: the resident array stays readable (neighbour reads, seam snapshots, point
+	// queries) and writable while the worker runs, and a write clears the ticket, which voids the result.
+	// The game-thread cost is one memcpy into a pooled array, against ~3.5 ms for the encode.
+	TArray<FVoxelData> Copy = FarCompressScratchPool.Num() > 0 ? FarCompressScratchPool.Pop(EAllowShrinking::No) : TArray<FVoxelData>();
+	const int32 Num = Descriptor.VoxelData.Num();
+	Copy.SetNumUninitialized(Num, EAllowShrinking::No);
+	FMemory::Memcpy(Copy.GetData(), Descriptor.VoxelData.GetData(), static_cast<SIZE_T>(Num) * sizeof(FVoxelData));
+	++FarCompressJobsInFlight;
+	FarCompressBytesInFlight += Copy.GetAllocatedSize();
+
+	// Background priority, outside the thread pool that runs generation, meshing and seam jobs:
+	// compression only saves memory, so it never delays the streaming front.
+	UE::Tasks::Launch(UE_SOURCE_LOCATION,
+		[Results = FarCompressResults, ChunkCoord, Ticket, Codec, ChunkSize = Descriptor.ChunkSize, Copy = MoveTemp(Copy)]() mutable
+		{
+			FFarCompressResult Done;
+			Done.ChunkCoord = ChunkCoord;
+			Done.Ticket = Ticket;
+			Done.Form = FChunkDescriptor::ComputeCompactForm(Copy, Codec, ChunkSize);
+			Done.Scratch = MoveTemp(Copy);
+			Results->Enqueue(MoveTemp(Done));
+		},
+		UE::Tasks::ETaskPriority::BackgroundNormal);
 }
 
 // ==================== Generation/Meshing Callbacks ====================
@@ -6205,10 +6346,13 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelFarCompressionStatsCmd(
 			if (!CM) { continue; }
 			++Managers;
 			const UVoxelChunkManager::FVoxelMemoryStats M = CM->GetVoxelMemoryStats();
+			int64 Encodes = 0, Installed = 0, Stale = 0;
+			CM->GetBenchFarCompressionCounts(Encodes, Installed, Stale);
 			UE_LOG(LogVoxelStreaming, Warning,
-				TEXT("voxel.FarCompression.Stats: Resident=%d Uniform=%d Compressed=%d Empty=%d | ResidentVoxelData=%.1fMB Reclaimed=%.1fMB"),
+				TEXT("voxel.FarCompression.Stats: Resident=%d Uniform=%d Compressed=%d Empty=%d | ResidentVoxelData=%.1fMB Reclaimed=%.1fMB | encodes=%lld installed=%lld stale=%lld"),
 				M.ResidentChunks, M.UniformChunks, M.CompressedChunks, M.EmptyChunks,
-				M.VoxelDataBytes / (1024.0 * 1024.0), M.CompressionSavedBytes / (1024.0 * 1024.0));
+				M.VoxelDataBytes / (1024.0 * 1024.0), M.CompressionSavedBytes / (1024.0 * 1024.0),
+				Encodes, Installed, Stale);
 		}
 		if (Managers == 0)
 		{

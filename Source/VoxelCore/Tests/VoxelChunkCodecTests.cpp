@@ -4,6 +4,8 @@
 #include "Misc/AutomationTest.h"
 #include "VoxelChunkCodec.h"
 #include "ChunkDescriptor.h"
+#include "Tasks/Task.h"
+#include "Templates/Function.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -180,6 +182,175 @@ bool FVoxelChunkCodecDescriptorTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("compressed buffer dropped on mutation"), D.CompressedVoxelData.Num(), 0);
 	TestTrue(TEXT("mutation preserved"), D.GetVoxel(FIntVector(0, 0, 0)) == FVoxelData::Solid(9, 4));
 
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Async far compression (WORLD_MODES_REVIEW_PLAN.md G6). The chunk manager encodes a copy of a far
+// chunk's array on a background worker (FChunkDescriptor::ComputeCompactForm) and installs the result
+// on the game thread (InstallCompactForm) only while the descriptor still carries the job's ticket.
+// These tests pin the two halves: the split path gives exactly what TryCompress gives, and every
+// write or residency change voids an in-flight ticket.
+// ---------------------------------------------------------------------------
+
+namespace VoxelChunkCodecTestUtils
+{
+	static void MakeResident(FChunkDescriptor& D, const TArray<FVoxelData>& Data)
+	{
+		TArray<FVoxelData> Copy = Data;
+		D.SetResidentVoxelData(MoveTemp(Copy));
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkAsyncCompactMatchesSyncTest,
+	"VoxelWorlds.Compression.Async.MatchesSyncCompress",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelChunkAsyncCompactMatchesSyncTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelChunkCodecTestUtils;
+	const int32 CS = 32;
+
+	TArray<FVoxelData> Air;
+	Air.Init(FVoxelData::Air(), CS * CS * CS);
+
+	struct FCase { const TCHAR* Name; TArray<FVoxelData> Data; EVoxelDataResidency Expected; };
+	TArray<FCase> Cases;
+	Cases.Add({ TEXT("terrain"), MakeTerrainChunk(CS), EVoxelDataResidency::Compressed });
+	Cases.Add({ TEXT("flagged"), MakeFlaggedChunk(CS), EVoxelDataResidency::Compressed });
+	Cases.Add({ TEXT("noise"),   MakeNoiseChunk(CS),   EVoxelDataResidency::Resident });
+	Cases.Add({ TEXT("air"),     Air,                  EVoxelDataResidency::Uniform });
+
+	for (const FCase& C : Cases)
+	{
+		// Sync: the encode inside TryCompress.
+		FChunkDescriptor Sync(FIntVector::ZeroValue, CS);
+		MakeResident(Sync, C.Data);
+		Sync.TryCompress(EVoxelChunkCodec::Oodle);
+
+		// Async: encode a copy on a worker, install on this thread.
+		FChunkDescriptor Async(FIntVector::ZeroValue, CS);
+		MakeResident(Async, C.Data);
+		const TArray<FVoxelData> Copy = Async.VoxelData;
+		FVoxelChunkCompactForm Form;
+		UE::Tasks::Launch(UE_SOURCE_LOCATION, [&Form, &Copy, CS]()
+		{
+			Form = FChunkDescriptor::ComputeCompactForm(Copy, EVoxelChunkCodec::Oodle, CS);
+		}).Wait();
+		Async.InstallCompactForm(MoveTemp(Form));
+
+		TestEqual(FString::Printf(TEXT("%s: residency as expected"), C.Name), (int32)Async.Residency, (int32)C.Expected);
+		TestEqual(FString::Printf(TEXT("%s: residency matches sync"), C.Name), (int32)Async.Residency, (int32)Sync.Residency);
+		TestTrue(FString::Printf(TEXT("%s: buffer matches sync"), C.Name), Async.CompressedVoxelData == Sync.CompressedVoxelData);
+		TestTrue(FString::Printf(TEXT("%s: uniform flag matches sync"), C.Name), Async.bUniformValueValid == Sync.bUniformValueValid);
+		TestTrue(FString::Printf(TEXT("%s: evaluated"), C.Name), Async.bCompressionEvaluated);
+		TestTrue(FString::Printf(TEXT("%s: lossless"), C.Name), Async.GetVoxelDataForRead() == C.Data);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkAsyncCompactTicketTest,
+	"VoxelWorlds.Compression.Async.TicketVoidedByWrites",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelChunkAsyncCompactTicketTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelChunkCodecTestUtils;
+	const int32 CS = 32;
+	const TArray<FVoxelData> Terrain = MakeTerrainChunk(CS);
+	const uint32 Ticket = 7;
+
+	struct FCase { const TCHAR* Name; TFunction<void(FChunkDescriptor&)> Op; bool bVoids; };
+	const FCase Cases[] = {
+		// Writes and residency changes void the ticket...
+		{ TEXT("SetVoxel"),            [](FChunkDescriptor& D) { D.SetVoxel(FIntVector(1, 2, 3), FVoxelData::Solid(9, 1)); }, true },
+		{ TEXT("SetVoxelByIndex"),     [](FChunkDescriptor& D) { D.SetVoxelByIndex(5, FVoxelData::Solid(9, 1)); }, true },
+		{ TEXT("GetVoxelDataMutable"), [](FChunkDescriptor& D) { D.GetVoxelDataMutable(); }, true },
+		{ TEXT("SetResidentVoxelData"), [&Terrain](FChunkDescriptor& D) { TArray<FVoxelData> Copy = Terrain; D.SetResidentVoxelData(MoveTemp(Copy)); }, true },
+		{ TEXT("AllocateVoxelData"),   [](FChunkDescriptor& D) { D.AllocateVoxelData(); }, true },
+		{ TEXT("ClearVoxelData"),      [](FChunkDescriptor& D) { D.ClearVoxelData(); }, true },
+		{ TEXT("TryCompress"),         [](FChunkDescriptor& D) { D.TryCompress(EVoxelChunkCodec::Oodle); }, true },
+		{ TEXT("TryCollapseUniform"),  [](FChunkDescriptor& D) { D.VoxelData.Init(FVoxelData::Air(), D.GetTotalVoxels()); D.TryCollapseUniform(); }, true },
+		// ...reads and edit-layer version bumps do not (the procedural array is unchanged).
+		{ TEXT("GetVoxelDataForRead"), [](FChunkDescriptor& D) { D.GetVoxelDataForRead(); }, false },
+		{ TEXT("GetVoxelResident"),    [](FChunkDescriptor& D) { D.GetVoxelResident(FIntVector(1, 2, 3)); }, false },
+		{ TEXT("BumpContentVersion"),  [](FChunkDescriptor& D) { D.BumpContentVersion(); }, false },
+	};
+
+	for (const FCase& C : Cases)
+	{
+		FChunkDescriptor D(FIntVector::ZeroValue, CS);
+		MakeResident(D, Terrain);
+		D.AsyncCompactTicket = Ticket;
+		C.Op(D);
+		if (C.bVoids)
+		{
+			TestTrue(FString::Printf(TEXT("%s voids the ticket"), C.Name), D.AsyncCompactTicket == 0);
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("%s keeps the ticket"), C.Name), D.AsyncCompactTicket == Ticket);
+		}
+	}
+
+	// A write while the worker runs: the result must not be installed (the manager compares tickets).
+	FChunkDescriptor D(FIntVector::ZeroValue, CS);
+	MakeResident(D, Terrain);
+	D.AsyncCompactTicket = Ticket;
+	const TArray<FVoxelData> Copy = D.VoxelData;
+	UE::Tasks::FTask Encode = UE::Tasks::Launch(UE_SOURCE_LOCATION, [&Copy, CS]()
+	{
+		(void)FChunkDescriptor::ComputeCompactForm(Copy, EVoxelChunkCodec::Oodle, CS);
+	});
+	D.SetVoxel(FIntVector(4, 4, 4), FVoxelData::Solid(9, 1));
+	Encode.Wait();
+	TestTrue(TEXT("a write during the encode voids its result"), D.AsyncCompactTicket != Ticket);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkAsyncCompactCacheOnlyTest,
+	"VoxelWorlds.Compression.Async.CacheOnlyInstall",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelChunkAsyncCompactCacheOnlyTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelChunkCodecTestUtils;
+	const int32 CS = 32;
+	const TArray<FVoxelData> Terrain = MakeTerrainChunk(CS);
+
+	// A chunk that stopped qualifying while its encode ran keeps the raw array and caches the form.
+	FChunkDescriptor D(FIntVector::ZeroValue, CS);
+	MakeResident(D, Terrain);
+	D.AsyncCompactTicket = 3;
+	const bool bDropped = D.InstallCompactForm(FChunkDescriptor::ComputeCompactForm(Terrain, EVoxelChunkCodec::Oodle, CS), /*bDropResident*/ false);
+	TestFalse(TEXT("cache-only install keeps the raw array"), bDropped);
+	TestEqual(TEXT("still Resident"), (int32)D.Residency, (int32)EVoxelDataResidency::Resident);
+	TestTrue(TEXT("raw array intact"), D.VoxelData == Terrain);
+	TestTrue(TEXT("buffer cached"), D.CompressedVoxelData.Num() > 0);
+	TestTrue(TEXT("ticket consumed"), D.AsyncCompactTicket == 0);
+
+	// Re-qualifying later re-applies the cached form for free (no encode), losslessly.
+	const TArray<uint8> Cached = D.CompressedVoxelData;
+	TestTrue(TEXT("free re-apply"), D.TryCompress(EVoxelChunkCodec::Oodle));
+	TestEqual(TEXT("now Compressed"), (int32)D.Residency, (int32)EVoxelDataResidency::Compressed);
+	TestTrue(TEXT("same buffer"), D.CompressedVoxelData == Cached);
+	TestTrue(TEXT("lossless"), D.GetVoxelDataForRead() == Terrain);
+
+	// A write drops the cached form.
+	FChunkDescriptor W(FIntVector::ZeroValue, CS);
+	MakeResident(W, Terrain);
+	W.InstallCompactForm(FChunkDescriptor::ComputeCompactForm(Terrain, EVoxelChunkCodec::Oodle, CS), false);
+	W.SetVoxel(FIntVector(0, 0, 0), FVoxelData::Solid(9, 1));
+	TestEqual(TEXT("write drops the cached buffer"), W.CompressedVoxelData.Num(), 0);
+	TestFalse(TEXT("write clears evaluated"), W.bCompressionEvaluated);
+
+	// Incompressible: stays resident, marked evaluated so the sweep skips it.
+	FChunkDescriptor N(FIntVector::ZeroValue, CS);
+	const TArray<FVoxelData> Noise = MakeNoiseChunk(CS);
+	MakeResident(N, Noise);
+	TestFalse(TEXT("noise does not compact"), N.InstallCompactForm(FChunkDescriptor::ComputeCompactForm(Noise, EVoxelChunkCodec::Oodle, CS)));
+	TestEqual(TEXT("noise stays Resident"), (int32)N.Residency, (int32)EVoxelDataResidency::Resident);
+	TestTrue(TEXT("noise marked evaluated"), N.bCompressionEvaluated);
 	return true;
 }
 
