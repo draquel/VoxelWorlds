@@ -80,6 +80,7 @@ confirms or dismisses each one. IDs are stable, so the follow-up plan can refer 
 | KI8 | **Spawn is only water-aware.** It searches an 8-direction spiral up to 50,000 uu. With water off, an off-island start lands on the void floor. `WaterLevel` is compared without `WorldOrigin.Z` in some places. `GetPlanetSpawnPosition` ignores `IslandCenter`. | `VoxelCharacterPlugin/.../Movement/VCVoxelNavigationHelper.cpp:173-255`; `VoxelWorldTestActor.cpp:510-520` | Bad starts on some configs |
 | KI9 | **Consumers have no island mask.** The PCG sampler emits points off-island. The minimap marks off-island tiles as explored and saves them. The world-map pan is unclamped. With water off, navigation treats the off-island floor as walkable. | `VoxelPCG/Private/PCGVoxelSurfaceSampler.cpp:244-291`; `VoxelMapSubsystem.cpp:453-484`; `VoxelSurfaceNavigationSubsystem.cpp:191-192` | Content and UI leak past the coast |
 | KI10 | **Island test coverage is minimal.** The only island map (`WorldPartition/WP_VoxelCoexistTest`) is currently bound to the smooth InfinitePlane `DemoWorldConfig`, and `WP_IslandBowlConfig` is untuned. No island bench has ever been run. Only two tests use IslandBowl (`GPUvsCPUIslandBowlParity`, `Conditioning.FlattensIslandBowl`). | Asset references; `VoxelGeneration/Tests/*` | Nothing to test with yet |
+| KI11 | **The residency audit and island LOD measure distance differently.** Found while verifying the tooling: after a PIE bench on island S ended 4,700 uu past the coast, `AuditResidency` reported 49 loaded, unrendered top-layer chunks 50,000-52,000 uu away, beyond the 48,000 uu unload radius. Island LOD measures distance in 2D; the audit measures it in 3D. To confirm in I4, then align the two | `VoxelStreaming/Private/VoxelChunkManager.cpp` (`AuditResidency`, `FVector::Dist`); `DistanceBandLODStrategy.cpp:631-635` | False audit findings, or chunks kept too long |
 
 Island features that are expected to work and only need confirming: campsites (world-mode aware, clamp the pad
 above water), surface NPC spawning (needs a loaded surface, collision and dry land), scatter (works from loaded
@@ -92,6 +93,11 @@ The review needs measurements the current tools cannot produce. These items are 
 (decision D4) is to ship them as one PR before any review run, so every run produces comparable,
 self-describing reports.
 
+**Status (2026-10-12): T1-T5 built and verified** in VoxelWorlds#76 and UE5_PluginDev#94; T6 not started.
+Usage and report keys: `Research/STREAMING_PERFORMANCE.md`. T5 went further than planned: every GPU test now skips
+under `-nullrhi`, not just the cubic ones. Before, `WorldModes.InfinitePlane.GPUConsistency` crashed a full
+headless run, and a full headless `VoxelWorlds` run now passes (207 tests).
+
 | ID | Tool change | Why |
 |----|-------------|-----|
 | T1 | **Self-describing bench reports.** Add map, config asset path, `WorldMode`, `MeshingMode`, GPU generation/meshing/scatter flags, `-VoxelForceCPU`, RHI, voxel size, chunk size, view distance, `WorldOrigin`, island params and viewport size to the JSON. | Today no report says what it measured (`VoxelStreaming/Private/VoxelStreamingBenchmark.cpp:286-319`). |
@@ -101,7 +107,8 @@ self-describing reports.
 | T5 | **Headless hygiene.** Point `Scripts/voxel_bench_sweep.ps1` at `D:\Program Files\Epic Games\UE_5.8` (it still defaults to UE_5.7 on C:). Give the cubic GPU tests a `GUsingNullRHI` skip and a bounded wait. | KC3; avoids a hung headless suite. |
 | T6 | *(optional)* `STATGROUP_Voxel` cycle counters around generation, meshing, seams, collision and scatter. | Unreal Insights currently shows the voxel work only as coarse task names. |
 
-Content for the review (local scaffolds; `Content/` is gitignored):
+Content for the review. `Scripts/setup_world_modes_review.py` creates it; the configs are committed under
+`Content/PluginTesting/Review/` (UE5_PluginDev#94):
 
 - **Configs, all duplicated from `DemoSmoothWorldConfig`** so they share seed, biomes, caves, water and POI
   tables, and differ only in the field under test:
@@ -109,19 +116,25 @@ Content for the review (local scaffolds; `Content/` is gitignored):
   - `Review_Cubic_GPUScatter`: the same with GPU scatter extraction on, for KC4.
   - `Review_Island_S/M/L`: IslandBowl at the sizes in §5, with `WorldOrigin` 0 and water on.
   - `Review_Island_M_DemoOrigin`: island M with the demo's `WorldOrigin`, to reproduce KI3.
-- **Maps:** `VoxelDemo_Cubic` and `VoxelDemo_Island`, duplicates of `VoxelDemo` with the config swapped, so every
-  game system is present.
-- **Saves:** back up `Saved/SaveGames/Worlds/` before each map's first PIE and restore it after every stop. PIE
-  stop auto-saves, and the user may play between sessions, so check `savedAtUtc` first.
+- **No duplicate maps.** T4 runs any review config on `VoxelDemo` itself, so every game system is present.
+  - In PIE: `voxel.ConfigOverride /Game/PluginTesting/Review/<Name>` in the editor console, then Play. Clear it
+    with `voxel.ConfigOverride ""` afterwards.
+  - Headless: `-VoxelConfig=`, or `-Config` on the sweep script.
+- **Saves:** while an override is active the world save key gets the config's name appended
+  (`World_VoxelDemo_<Seed>_<Config>`), so the demo's normal save is never loaded or overwritten. Start each tier
+  from a fresh world with `vox.DeleteSave`, Stop, Play. Runs without an override still follow the usual rule: back
+  up `Saved/SaveGames/Worlds/` first, and check `savedAtUtc` before restoring, since the user may play between
+  sessions.
 
 ## 4. Review A: cubic meshing
 
-**Setup:** `VoxelDemo_Cubic` with `Review_Cubic`; `VoxelDemo` as the control. Build from
+**Setup:** `VoxelDemo` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Cubic`; `VoxelDemo` without an
+override as the control. Build from
 `D:\Program Files\Epic Games\UE_5.8`. Disable the editor's background throttle for PIE timing runs.
 
 | ID | Scenario | How | Pass when |
 |----|----------|-----|-----------|
-| C1 | Automated suites | In-editor `AutomationTestToolset`: `Meshing.Cubic.*`, `Scatter.*`, plus the full headless suite (no GPU tests) | All green; record the cubic GPU tests separately (KC3) |
+| C1 | Automated suites | In-editor `AutomationTestToolset`: `Meshing.Cubic.*` and `Scatter.*` (real RHI, so the GPU cubic tests run), plus the full headless suite | All green; record the cubic GPU tests separately (KC3) |
 | C2 | Streaming correctness | PIE: spawn, walk, then W-04 (`vox.SetSpeed 3000`, `vox.AutoRun 1 0 0`, 1 min). Survey with `pie_camera` and `pie_screenshot` at chunk boundaries and at the config's LOD band edges. Repeat the R23 teleport repro (A→B→C), then run `voxel.Stream.AuditResidency` and `voxel.FarCompression.Stats` | No holes, missing faces or stale faces at chunk boundaries after late neighbours load. Fades render with the atlas material. Audit reports 0 findings. No chunk left in `Meshing` |
 | C3 | Streaming performance | Focused-PIE bench at v1500, v3000 and v6000 over 40,000 uu, a cold start per velocity, cubic vs smooth control. Headless CPU sweep with `-VoxelConfig`. One extra cubic run with a single LOD band, to price KC1 | §1 thresholds vs control. Also record per-chunk mesh ms, vertex and triangle counts, renderer GPU MB, and the thrash breakdown |
 | C4 | Editing | W-06 by hand: edit mode B, LMB/RMB on +X/+Y/+Z/−Z faces, at a chunk corner, and with a pickaxe (`vox.Dig`). Walk into the hole. Save, stop, play: the edits come back | One click removes or places exactly the targeted block (expected to fail today, KC5). No seams. No fall-through |
@@ -142,7 +155,11 @@ Content for the review (local scaffolds; `Content/` is gitignored):
 | M | 200,000 / 50,000 uu | 5 km | ~8,500 | **Main target**, "large but finite": a 15-minute walk across |
 | L | 450,000 / 50,000 uu | 10 km | ~34,000 | Scale check; still far inside the ~100 km float-precision limit (`Research/TRAVERSAL_LIMITS.md`) |
 
-**Setup:** `VoxelDemo_Island` with `Review_Island_*`. The control is `VoxelDemo` running the same bench routes.
+**Setup:** `VoxelDemo` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Island_<Tier>`. The control is
+`VoxelDemo` without an override, running the same bench routes. Bench routes, for example:
+- Chord: `voxel.Bench.Run islandM_chord 3000 500000 start=-250000:0 dir=1:0 follow=300`
+- Perimeter: `voxel.Bench.Run islandM_loop 3000 0 orbit=0:0:200000 follow=300`
+- Full residency (S): `voxel.Bench.Run islandS_settle 0 0 warmup=300`
 
 | ID | Scenario | How | Pass when |
 |----|----------|-----|-----------|
@@ -235,14 +252,25 @@ code sites).
 
 ## 9. Order of work
 
-1. **T1-T5** (one VoxelWorlds PR plus a parent bump) and the review content (local).
+1. **T1-T5** and the review content: done 2026-10-12 (VoxelWorlds#76, UE5_PluginDev#94).
 2. **Review A: cubic** (C1-C7): one session.
 3. **Review B: island** (I1-I10): one to two sessions. A and B share tooling and can run in either order;
    cubic first is quicker because it has fewer unknowns.
 4. **Second revision of this plan:** confirmed findings become work items with sizes and an order, alongside the
    spherical phasing.
 
-## 10. Documentation that disagrees with the code
+## 10. Early signals from the tooling verification
+
+These are not review results; the runs were short and only checked the tooling. They point where to look first.
+
+- **Cubic** (headless CPU, VoxelWorldsTest, `-VoxelConfig=DemoCubicWorldConfig`, v3000 over 18,000 uu): 5,497 remeshes
+  vs 201 for the same run in smooth, 1,427 MB peak voxel-system memory vs 580, frame P95 24.7 vs 12.3 ms. That fits
+  KC1: cubic meshes at full detail everywhere and still pays for LOD changes.
+- **Island S** (PIE, `Review_Island_S`, v3000 over 45,000 uu with `follow=400`): the whole world built in 19 s
+  (warmup drained); peak 1,579 loaded chunks vs ~1,230 for InfinitePlane runs (fits KI5); audit 49 findings (KI11).
+  A fresh island world saved 4 MB of edits on its first stop, probably POI stamps landing off-island (KI1).
+
+## 11. Documentation that disagrees with the code
 
 Collected by the surveys. These get fixed with the follow-up work, or sooner if cheap.
 
@@ -263,5 +291,7 @@ Collected by the surveys. These get fixed with the follow-up work, or sooner if 
 - `VoxelWorlds/README.md:96` claims GPU cubic meshing; it is test-only (KC3).
 - `Research/TRAVERSAL_LIMITS.md:14` lists the analytic height mismatch as open; the height-parity and GPU work
   fixed it.
-- Project `CLAUDE.md` says headless runs "silently skip" GPU tests. Nothing in the code skips them; the
-  headless suite filter leaves them out.
+- Project `CLAUDE.md` said headless runs "silently skip" GPU tests. Nothing in the code skipped them; the
+  headless suite filter left them out, and `InfinitePlane.GPUConsistency` crashed a full headless run. Since
+  VoxelWorlds#76 every GPU test does skip under `-nullrhi`, which makes the statement true; the GPU tests still need
+  an in-editor run to actually execute.
