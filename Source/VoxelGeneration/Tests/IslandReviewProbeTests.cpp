@@ -1,0 +1,242 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+// Review B probes (Documentation/WORLD_MODES_REVIEW_PLAN.md §5 I1): island height queries against the real generated
+// surface, in the island, in the falloff band and beyond it. They load the review configs
+// (/Game/PluginTesting/Review/Review_Island_*) so the numbers are the demo's seed, biomes and water line.
+//
+// These tests record what the code does today and pass; the numbers go to the review (KI1, KI2, KI4). The checks that
+// would fail today are logged as "PROBE" lines instead of being asserted, so the suite stays green until the findings
+// are fixed. Turn them into assertions with the fix.
+
+#include "CoreMinimal.h"
+#include "Misc/AutomationTest.h"
+#include "IslandBowlWorldMode.h"
+#include "InfinitePlaneWorldMode.h"
+#include "VoxelCPUNoiseGenerator.h"
+#include "VoxelNoiseTypes.h"
+#include "VoxelSurfaceQuery.h"
+#include "VoxelWorldConfiguration.h"
+#include "VoxelData.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
+
+namespace IslandProbe
+{
+	UVoxelWorldConfiguration* LoadReviewConfig(const TCHAR* Name)
+	{
+		return LoadObject<UVoxelWorldConfiguration>(nullptr, *FString::Printf(TEXT("/Game/PluginTesting/Review/%s.%s"), Name, Name));
+	}
+
+	FIslandBowlParams MakeIslandParams(const UVoxelWorldConfiguration& Config)
+	{
+		FIslandBowlParams P;
+		P.Shape = static_cast<EIslandShape>(Config.IslandShape);
+		P.IslandRadius = Config.IslandRadius;
+		P.SizeY = Config.IslandSizeY;
+		P.FalloffWidth = Config.IslandFalloffWidth;
+		P.FalloffType = static_cast<EIslandFalloffType>(Config.IslandFalloffType);
+		P.CenterX = Config.IslandCenterX;
+		P.CenterY = Config.IslandCenterY;
+		P.EdgeHeight = Config.IslandEdgeHeight;
+		P.bBowlShape = Config.bIslandBowlShape;
+		return P;
+	}
+
+	/** The surface generation produces at (X, Y): a CPU island chunk stack around ExpectedZ, caves off. FLT_MAX if none. */
+	float GenerateIslandSurfaceZ(FVoxelCPUNoiseGenerator& Generator, const UVoxelWorldConfiguration& Config,
+		const FIslandBowlParams& Island, float X, float Y, float ExpectedZ)
+	{
+		const int32 ChunkSize = Config.ChunkSize;
+		const float VoxelSize = Config.VoxelSize;
+		const float ChunkWorldSize = ChunkSize * VoxelSize;
+		const FVector Origin = Config.WorldOrigin;
+		const int32 ChunkX = FMath::FloorToInt((X - Origin.X) / ChunkWorldSize);
+		const int32 ChunkY = FMath::FloorToInt((Y - Origin.Y) / ChunkWorldSize);
+		const int32 CentreChunkZ = FMath::FloorToInt((ExpectedZ - Origin.Z) / ChunkWorldSize);
+		const int32 Lx = FMath::Clamp(FMath::RoundToInt((X - Origin.X - ChunkX * ChunkWorldSize) / VoxelSize), 0, ChunkSize - 1);
+		const int32 Ly = FMath::Clamp(FMath::RoundToInt((Y - Origin.Y - ChunkY * ChunkWorldSize) / VoxelSize), 0, ChunkSize - 1);
+
+		constexpr int32 StackHalf = 2;
+		const int32 BaseChunkZ = CentreChunkZ - StackHalf;
+		TArray<FVoxelData> Column;
+		Column.Reserve(ChunkSize * (2 * StackHalf + 1));
+		for (int32 Cz = 0; Cz <= 2 * StackHalf; ++Cz)
+		{
+			FVoxelNoiseGenerationRequest Request;
+			Request.ChunkCoord = FIntVector(ChunkX, ChunkY, BaseChunkZ + Cz);
+			Request.ChunkSize = ChunkSize;
+			Request.VoxelSize = VoxelSize;
+			Request.LODLevel = 0;
+			Request.WorldOrigin = Origin;
+			Request.WorldMode = EWorldMode::IslandBowl;
+			Request.SeaLevel = Config.SeaLevel;
+			Request.HeightScale = Config.HeightScale;
+			Request.BaseHeight = Config.BaseHeight;
+			Request.bEnableBiomes = false; // the height path only; continentalness applies regardless
+			Request.bEnableCaves = false;
+			Request.BiomeConfiguration = Config.BiomeConfiguration;
+			Request.NoiseParams = Config.NoiseParams;
+			Request.IslandParams.Shape = static_cast<uint8>(Island.Shape);
+			Request.IslandParams.IslandRadius = Island.IslandRadius;
+			Request.IslandParams.SizeY = Island.SizeY;
+			Request.IslandParams.FalloffWidth = Island.FalloffWidth;
+			Request.IslandParams.FalloffType = static_cast<uint8>(Island.FalloffType);
+			Request.IslandParams.CenterX = Island.CenterX;
+			Request.IslandParams.CenterY = Island.CenterY;
+			Request.IslandParams.EdgeHeight = Island.EdgeHeight;
+			Request.IslandParams.bBowlShape = Island.bBowlShape;
+
+			TArray<FVoxelData> ChunkData;
+			if (!Generator.GenerateChunkCPU(Request, ChunkData))
+			{
+				return FLT_MAX;
+			}
+			for (int32 Lz = 0; Lz < ChunkSize; ++Lz)
+			{
+				Column.Add(ChunkData[Lx + Ly * ChunkSize + Lz * ChunkSize * ChunkSize]);
+			}
+		}
+
+		float Height = 0.0f;
+		uint8 Material = 0, Biome = 0;
+		const float BaseZ = Origin.Z + BaseChunkZ * ChunkWorldSize;
+		return FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, VoxelSize, Height, Material, Biome) ? Height : FLT_MAX;
+	}
+
+	struct FZoneStats
+	{
+		int32 Samples = 0;
+		float MaxIslandGap = 0.0f;      // |island analytic - generated|
+		float MaxPlaneGap = 0.0f;       // |InfinitePlane analytic (POI placement) - generated|
+		float MeanPlaneGap = 0.0f;
+		int32 PlaneDryIslandWet = 0;    // POI math says land, the island is under water there
+	};
+}
+
+/**
+ * KI1, KI2, KI4: along 16 rays from the island centre, compare the island's analytic height
+ * (FIslandBowlWorldMode::GetTerrainHeightAt, used by the chunk manager's surface queries) and the InfinitePlane height
+ * POI placement samples (FInfinitePlaneWorldMode::SampleTerrainHeight) with the surface CPU generation produces.
+ * Zones: inside IslandRadius, the falloff band, and the generated ring beyond R+F.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FIslandReviewHeightProbeTest,
+	"VoxelWorlds.Review.Island.HeightProbe",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
+{
+	using namespace IslandProbe;
+
+	for (const TCHAR* Name : { TEXT("Review_Island_S"), TEXT("Review_Island_M") })
+	{
+		UVoxelWorldConfiguration* Config = LoadReviewConfig(Name);
+		if (!Config)
+		{
+			AddWarning(FString::Printf(TEXT("%s not found: run Scripts/setup_world_modes_review.py"), Name));
+			continue;
+		}
+		const FIslandBowlParams Island = MakeIslandParams(*Config);
+		const FWorldModeTerrainParams Terrain(Config->SeaLevel, Config->HeightScale, Config->BaseHeight);
+		FIslandBowlWorldMode IslandMode(Terrain, Island);
+		IslandMode.SetBiomeContext(Config->BiomeConfiguration);
+		const FVoxelBiomeSnapshot Biome = FInfinitePlaneWorldMode::IsAnalyticContinentalnessEnabled()
+			? FVoxelBiomeSnapshot::FromConfig(Config->BiomeConfiguration) : FVoxelBiomeSnapshot();
+		const float WaterLine = Config->bEnableWaterLevel ? Config->WaterLevel : Config->SeaLevel;
+
+		FVoxelCPUNoiseGenerator Generator;
+		Generator.Initialize();
+
+		const float R = Island.IslandRadius;
+		const float F = Island.FalloffWidth;
+		// Fractions of the distance from the centre: inner area, falloff band, beyond R+F (still inside the
+		// one-chunk-diagonal ring the LOD cull keeps).
+		const float ChunkDiagonal = Config->ChunkSize * Config->VoxelSize * UE_SQRT_2;
+		struct FZone { const TCHAR* Key; TArray<float> Value; };
+		const FZone Zones[] = {
+			{ TEXT("inner"), { 0.1f * R, 0.4f * R, 0.7f * R, 0.95f * R } },
+			{ TEXT("band"), { R + 0.1f * F, R + 0.3f * F, R + 0.5f * F, R + 0.7f * F, R + 0.9f * F } },
+			{ TEXT("beyond"), { R + F + 300.0f, R + F + 0.5f * ChunkDiagonal } },
+		};
+
+		for (const FZone& Zone : Zones)
+		{
+			FZoneStats Stats;
+			for (int32 Ray = 0; Ray < 16; ++Ray)
+			{
+				const float Angle = UE_TWO_PI * Ray / 16.0f + 0.1f;
+				for (const float Distance : Zone.Value)
+				{
+					const float X = Island.CenterX + Distance * FMath::Cos(Angle);
+					const float Y = Island.CenterY + Distance * FMath::Sin(Angle);
+					const float IslandH = IslandMode.GetTerrainHeightAt(X, Y, Config->NoiseParams);
+					const float PlaneH = FInfinitePlaneWorldMode::SampleTerrainHeight(X, Y, Terrain, Config->NoiseParams, &Biome);
+					const float GenH = GenerateIslandSurfaceZ(Generator, *Config, Island, X, Y, IslandH);
+					if (GenH == FLT_MAX)
+					{
+						AddWarning(FString::Printf(TEXT("%s %s: no generated surface at (%.0f, %.0f), analytic %.0f"), Name, Zone.Key, X, Y, IslandH));
+						continue;
+					}
+					++Stats.Samples;
+					Stats.MaxIslandGap = FMath::Max(Stats.MaxIslandGap, FMath::Abs(IslandH - GenH));
+					Stats.MaxPlaneGap = FMath::Max(Stats.MaxPlaneGap, FMath::Abs(PlaneH - GenH));
+					Stats.MeanPlaneGap += FMath::Abs(PlaneH - GenH);
+					Stats.PlaneDryIslandWet += (PlaneH >= WaterLine && GenH < WaterLine) ? 1 : 0;
+				}
+			}
+			if (Stats.Samples > 0)
+			{
+				Stats.MeanPlaneGap /= Stats.Samples;
+			}
+			AddInfo(FString::Printf(TEXT("PROBE %s %s: %d samples | island analytic vs generated max %.1f uu | POI (InfinitePlane) vs generated max %.0f mean %.0f uu | POI says land where the island is under water: %d"),
+				Name, Zone.Key, Stats.Samples, Stats.MaxIslandGap, Stats.MaxPlaneGap, Stats.MeanPlaneGap, Stats.PlaneDryIslandWet));
+
+			// The island's own analytic height must match generation everywhere it generates (one voxel of slack).
+			TestTrue(FString::Printf(TEXT("%s %s: island analytic height within one voxel of the generated surface (max %.1f)"), Name, Zone.Key, Stats.MaxIslandGap),
+				Stats.MaxIslandGap <= Config->VoxelSize);
+		}
+
+		// KI2 / KI4: the step at R+F. Just inside, the falloff leaves EdgeHeight + factor * relief; just outside,
+		// generation writes a flat floor at EdgeHeight - 1000.
+		for (const EIslandFalloffType Falloff : { Island.FalloffType, EIslandFalloffType::Exponential })
+		{
+			FIslandBowlParams Variant = Island;
+			Variant.FalloffType = Falloff;
+			FIslandBowlWorldMode VariantMode(Terrain, Variant);
+			VariantMode.SetBiomeContext(Config->BiomeConfiguration);
+			float MaxStep = 0.0f, MinStep = FLT_MAX;
+			for (int32 Ray = 0; Ray < 16; ++Ray)
+			{
+				const float Angle = UE_TWO_PI * Ray / 16.0f + 0.1f;
+				const FVector2D Dir(FMath::Cos(Angle), FMath::Sin(Angle));
+				const FVector2D Inside = FVector2D(Variant.CenterX, Variant.CenterY) + Dir * (R + F - 40.0f);
+				const FVector2D Outside = FVector2D(Variant.CenterX, Variant.CenterY) + Dir * (R + F + 40.0f);
+				const float InsideGen = GenerateIslandSurfaceZ(Generator, *Config, Variant, Inside.X, Inside.Y,
+					VariantMode.GetTerrainHeightAt(Inside.X, Inside.Y, Config->NoiseParams));
+				const float OutsideGen = GenerateIslandSurfaceZ(Generator, *Config, Variant, Outside.X, Outside.Y,
+					VariantMode.GetTerrainHeightAt(Outside.X, Outside.Y, Config->NoiseParams));
+				if (InsideGen != FLT_MAX && OutsideGen != FLT_MAX)
+				{
+					MaxStep = FMath::Max(MaxStep, InsideGen - OutsideGen);
+					MinStep = FMath::Min(MinStep, InsideGen - OutsideGen);
+				}
+			}
+			AddInfo(FString::Printf(TEXT("PROBE %s edge step at R+F (falloff type %d): generated surface drops %.0f to %.0f uu across 80 uu (EdgeHeight %.0f, floor beyond %.0f)"),
+				Name, static_cast<int32>(Falloff), MinStep, MaxStep, Variant.EdgeHeight, Variant.EdgeHeight - 1000.0f));
+		}
+
+		// KI4: the world mode's height bounds leave out the floor generation writes beyond R+F.
+		float BoundsMin = 0.0f, BoundsMax = 0.0f;
+		IslandMode.GetTerrainHeightBounds(BoundsMin, BoundsMax);
+		AddInfo(FString::Printf(TEXT("PROBE %s GetTerrainHeightBounds [%.0f, %.0f]; generated floor beyond R+F at %.0f is %s the bounds"),
+			Name, BoundsMin, BoundsMax, Island.EdgeHeight - 1000.0f, (Island.EdgeHeight - 1000.0f) < BoundsMin ? TEXT("below") : TEXT("inside")));
+
+		// The island world mode's own density query calls everything beyond R+F air, where generation writes a floor.
+		const FVector Beyond(Island.CenterX + R + F + 300.0f, Island.CenterY, Island.EdgeHeight - 1500.0f);
+		AddInfo(FString::Printf(TEXT("PROBE %s GetDensityAt 500 uu under the generated floor beyond R+F = %.0f (negative = air)"),
+			Name, IslandMode.GetDensityAt(Beyond, 0, 0.0f)));
+	}
+
+	return true;
+}
+
+#endif // WITH_DEV_AUTOMATION_TESTS
