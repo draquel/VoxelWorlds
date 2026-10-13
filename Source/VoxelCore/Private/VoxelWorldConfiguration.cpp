@@ -4,6 +4,18 @@
 #include "VoxelCore.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelTreeTypes.h"
+#include "HAL/IConsoleManager.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+
+/** Editor-side half of UVoxelWorldConfiguration::GetOverridePath (the command line wins). */
+static TAutoConsoleVariable<FString> CVarVoxelConfigOverride(
+	TEXT("voxel.ConfigOverride"),
+	TEXT(""),
+	TEXT("Object path of a UVoxelWorldConfiguration that replaces the voxel world actor's own on the next ")
+	TEXT("initialize (e.g. /Game/PluginTesting/Review/Review_Cubic). Empty = use the actor's config. ")
+	TEXT("The -VoxelConfig=<path> command-line switch takes priority."),
+	ECVF_Default);
 
 UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 {
@@ -256,6 +268,16 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 	// Calculate spawn position: center + direction * (radius + altitude)
 	const float SpawnRadius = WorldRadius + PlanetSpawnAltitude;
 	return WorldOrigin + SpawnDirection * SpawnRadius;
+}
+
+FString UVoxelWorldConfiguration::GetOverridePath()
+{
+	FString Path;
+	if (FParse::Value(FCommandLine::Get(), TEXT("VoxelConfig="), Path) && !Path.IsEmpty())
+	{
+		return Path;
+	}
+	return CVarVoxelConfigOverride.GetValueOnGameThread().TrimStartAndEnd();
 }
 
 #if WITH_EDITOR

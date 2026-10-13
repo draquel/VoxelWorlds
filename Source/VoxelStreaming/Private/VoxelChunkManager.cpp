@@ -5881,12 +5881,35 @@ void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)
 	ActiveBenchmark = MakeUnique<FVoxelStreamingBenchmark>(InConfig, this);
 }
 
-// Console: voxel.Bench.Run [tag] [velocityUU] [distanceUU]
-// Starts a deterministic fixed-velocity traverse from the current view position (kept near the
-// ground so the leading edge streams at LOD0) and writes a report under Saved/VoxelBench/.
+// Console: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [key=value ...]
+// Starts a deterministic traverse from the current view position and writes a report under
+// Saved/VoxelBench/. Optional key=value arguments (':' separates components and '/' separates route
+// points, because -ExecCmds splits commands on commas):
+//   dir=X:Y[:Z]            straight-path direction (default +X)
+//   start=X:Y[:Z]          start point instead of the player view; Z defaults to 500 above the surface
+//   route=X:Y[:Z]/X:Y/...  fly a polyline from the start through these points (distance 0 = whole route)
+//   orbit=CX:CY:R          fly a circle around (CX, CY) (distance 0 = one lap)
+//   follow=Alt             fly Alt uu above the analytic surface (heightmap world modes)
+//   warmup=Sec             max settle time before the traverse (record how long a world takes to build)
+//   catchup=Sec            max drain time after the traverse
+//   build=Label            free-form build label for the report (the sweep script passes the commit)
+static bool ParseBenchVector(const FString& Value, FVector& Out, bool& bOutHasZ)
+{
+	TArray<FString> Parts;
+	Value.ParseIntoArray(Parts, TEXT(":"), true);
+	if (Parts.Num() < 2 || Parts.Num() > 3)
+	{
+		return false;
+	}
+	Out = FVector(FCString::Atod(*Parts[0]), FCString::Atod(*Parts[1]), Parts.Num() == 3 ? FCString::Atod(*Parts[2]) : 0.0);
+	bOutHasZ = Parts.Num() == 3;
+	return true;
+}
+
 static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 	TEXT("voxel.Bench.Run"),
-	TEXT("Run a streaming benchmark traverse: voxel.Bench.Run [tag] [velocityUU] [distanceUU]"),
+	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]] [start=X:Y[:Z]] ")
+	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		// Target the ticking game/PIE world, not the editor world the command may arrive on.
@@ -5924,28 +5947,103 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 		}
 
 		FVoxelBenchConfig Config;
-		if (Args.Num() > 0) { Config.Tag = Args[0]; }
-		if (Args.Num() > 1) { Config.VelocityUU = FCString::Atof(*Args[1]); }
-		if (Args.Num() > 2) { Config.TraverseDistance = FCString::Atof(*Args[2]); }
+		TArray<FString> Positional;
+		bool bHasStart = false, bStartHasZ = false, bDistanceGiven = false;
+		FVector StartArg = FVector::ZeroVector;
+		for (const FString& Arg : Args)
+		{
+			FString Key, Value;
+			if (!Arg.Split(TEXT("="), &Key, &Value))
+			{
+				Positional.Add(Arg);
+				continue;
+			}
+			Key = Key.ToLower();
+			bool bHasZ = false;
+			FVector Vec;
+			if (Key == TEXT("dir") && ParseBenchVector(Value, Vec, bHasZ))
+			{
+				Config.Direction = Vec;
+			}
+			else if (Key == TEXT("start") && ParseBenchVector(Value, StartArg, bStartHasZ))
+			{
+				bHasStart = true;
+			}
+			else if (Key == TEXT("route"))
+			{
+				TArray<FString> Points;
+				Value.ParseIntoArray(Points, TEXT("/"), true);
+				for (const FString& Point : Points)
+				{
+					if (ParseBenchVector(Point, Vec, bHasZ))
+					{
+						// No Z given: a sentinel, replaced by the start altitude once the start is known.
+						Config.RoutePoints.Add(FVector(Vec.X, Vec.Y, bHasZ ? Vec.Z : TNumericLimits<double>::Max()));
+					}
+				}
+				Config.PathType = EVoxelBenchPath::Route;
+			}
+			else if (Key == TEXT("orbit"))
+			{
+				TArray<FString> Parts;
+				Value.ParseIntoArray(Parts, TEXT(":"), true);
+				if (Parts.Num() == 3)
+				{
+					Config.OrbitCenter = FVector2D(FCString::Atod(*Parts[0]), FCString::Atod(*Parts[1]));
+					Config.OrbitRadius = FCString::Atof(*Parts[2]);
+					Config.PathType = EVoxelBenchPath::Orbit;
+				}
+			}
+			else if (Key == TEXT("follow")) { Config.FollowTerrainAltitude = FCString::Atof(*Value); }
+			else if (Key == TEXT("warmup")) { Config.WarmupTimeoutSec = FCString::Atof(*Value); }
+			else if (Key == TEXT("catchup")) { Config.CatchUpTimeoutSec = FCString::Atof(*Value); }
+			else if (Key == TEXT("build")) { Config.BuildLabel = Value; }
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: ignoring unrecognised argument '%s'"), *Arg);
+			}
+		}
+		if (Positional.Num() > 0) { Config.Tag = Positional[0]; }
+		if (Positional.Num() > 1) { Config.VelocityUU = FCString::Atof(*Positional[1]); }
+		if (Positional.Num() > 2) { Config.TraverseDistance = FCString::Atof(*Positional[2]); bDistanceGiven = true; }
+		// Route and orbit default to the whole path; FVoxelStreamingBenchmark resolves <= 0 to its length.
+		if (Config.PathType != EVoxelBenchPath::Straight && !bDistanceGiven)
+		{
+			Config.TraverseDistance = 0.0f;
+		}
 
-		// Start from the player view (on the ground -> leading edge stays LOD0); fall back to the
-		// chunk-manager owner if no valid player view is available.
+		// Start: an explicit start= (Z defaults to 500 above the analytic surface), else the player view
+		// (on the ground, so the leading edge stays at LOD0), else the chunk-manager owner.
 		FVector Start = FVector::ZeroVector;
-		if (APlayerController* PC = TargetWorld->GetFirstPlayerController())
+		if (bHasStart)
+		{
+			Start = StartArg;
+			if (!bStartHasZ)
+			{
+				Start.Z = CM->GetGeneratedSurfaceHeight(Start.X, Start.Y) + 500.0;
+			}
+		}
+		else if (APlayerController* PC = TargetWorld->GetFirstPlayerController())
 		{
 			FVector Loc; FRotator Rot;
 			PC->GetPlayerViewPoint(Loc, Rot);
 			Start = Loc;
 		}
-		if (Start.IsNearlyZero())
+		if (!bHasStart && Start.IsNearlyZero())
 		{
 			if (const AActor* Owner = CM->GetOwner()) { Start = Owner->GetActorLocation(); }
 			Start.Z += 500.0f; // keep slightly above the surface
 		}
 		Config.StartPosition = Start;
+		for (FVector& Point : Config.RoutePoints)
+		{
+			if (Point.Z == TNumericLimits<double>::Max()) { Point.Z = Start.Z; }
+		}
+
 		CM->StartBenchmark(Config);
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run '%s': world=%s start=(%.0f,%.0f,%.0f) vel=%.0f dist=%.0f"),
-			*Config.Tag, *TargetWorld->GetName(), Start.X, Start.Y, Start.Z, Config.VelocityUU, Config.TraverseDistance);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run '%s': world=%s start=(%.0f,%.0f,%.0f) vel=%.0f dist=%.0f path=%d follow=%.0f"),
+			*Config.Tag, *TargetWorld->GetName(), Start.X, Start.Y, Start.Z, Config.VelocityUU, Config.TraverseDistance,
+			static_cast<int32>(Config.PathType), Config.FollowTerrainAltitude);
 	}));
 
 // Console: voxel.RemeshAll

@@ -526,6 +526,9 @@ public:
 	 */
 	IVoxelMesher* GetMesherPtr() const { return Mesher.Get(); }
 
+	/** True when terrain generation runs on the GPU (bUseGPUGeneration, and not forced to the CPU). */
+	bool IsUsingGPUGeneration() const { return GPUGeneratorPtr != nullptr; }
+
 	// ==================== Performance Stats ====================
 
 	/** Voxel-specific memory breakdown */

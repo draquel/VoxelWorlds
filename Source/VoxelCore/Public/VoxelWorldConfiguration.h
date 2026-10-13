@@ -565,6 +565,19 @@ public:
 	 */
 	FVector GetPlanetSpawnPosition() const;
 
+	/**
+	 * Object path of a configuration that replaces the one assigned to the voxel world actor, or an
+	 * empty string when none is set. Lets benchmarks and reviews A/B world modes and meshing modes on
+	 * one map without editing it.
+	 *
+	 * Sources, in priority order: the -VoxelConfig=<ObjectPath> command-line switch (headless and
+	 * standalone runs), then the voxel.ConfigOverride console variable (set it in the editor before
+	 * pressing Play). Read when a voxel world initializes, so a change applies to the next PIE session.
+	 *
+	 * @return Object path such as /Game/PluginTesting/Review/Review_Cubic, or empty.
+	 */
+	static FString GetOverridePath();
+
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
