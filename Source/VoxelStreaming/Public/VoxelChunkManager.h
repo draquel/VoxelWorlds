@@ -321,6 +321,27 @@ public:
 	FVoxelData GetEditMergedVoxelAtWorldPosition(const FVector& WorldPosition) const;
 
 	/**
+	 * A chunk's edit-merged voxels as a shared, immutable snapshot (ChunkSize^3, chunk-local index
+	 * X + Y*CS + Z*CS*CS). Built at most once per chunk content version and shared with the seam pipeline and the
+	 * async collision cooks, so readers outside streaming (the map's edit overlay, QA R22) get edit-aware data
+	 * without another full copy. Workers may keep the snapshot alive for as long as they need it. Game thread only.
+	 * Not a UFUNCTION: TSharedPtr cannot be exposed to Blueprint.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @return The snapshot, or null when the chunk has no voxel data
+	 */
+	TSharedPtr<const TArray<FVoxelData>> GetEditMergedSnapshot(const FIntVector& ChunkCoord);
+
+	/**
+	 * Whether a chunk has voxel data (resident or compressed), i.e. whether GetEditMergedSnapshot would return one.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @return True if the chunk is tracked and its voxel data is available
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
+	bool HasChunkVoxelData(const FIntVector& ChunkCoord) const;
+
+	/**
 	 * EDIT-AWARE surface query at a world X,Y (the near band for PCG decoration).
 	 *
 	 * Locates the surface from edit-merged voxel data of loaded chunks, so it reflects player

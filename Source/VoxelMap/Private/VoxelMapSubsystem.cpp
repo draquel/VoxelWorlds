@@ -18,13 +18,119 @@
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
+#include "VoxelEditManager.h"
 #include "EngineUtils.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "Async/Async.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "HAL/IConsoleManager.h"
+#include "ImageUtils.h"
 #include "Misc/Base64.h"
 #include "Misc/Compression.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+
+static TAutoConsoleVariable<int32> CVarMapEditOverlay(
+	TEXT("voxel.Map.EditOverlay"),
+	1,
+	TEXT("Draw voxel edits (digs, builds, POI stamps) on the map from per-tile edit overlays (QA R22). 0 = analytic ")
+	TEXT("terrain only. Takes effect on the next tile redraw (voxel.Map.Redraw)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarMapEditRefreshSeconds(
+	TEXT("voxel.Map.EditRefreshSeconds"),
+	0.5f,
+	TEXT("Seconds the map coalesces chunk edits before rebuilding the edited tiles' overlays. Water propagation edits ")
+	TEXT("every frame, so this bounds the rebuild rate."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarMapEditRefreshMaxTiles(
+	TEXT("voxel.Map.EditRefreshMaxTiles"),
+	8,
+	TEXT("Max edited tiles whose overlay rebuild one coalesced refresh starts; the rest wait for the next refresh. ")
+	TEXT("Each rebuild shares the chunks' edit-merged snapshots with the seam pipeline."),
+	ECVF_Default);
 
 namespace
 {
+	/** The PIE / Game world a console command should act on. */
+	UWorld* FindPlayWorld(UWorld* World)
+	{
+		if (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game))
+		{
+			return World;
+		}
+		if (GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					return Ctx.World();
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs GVoxelMapRedrawCmd(
+		TEXT("voxel.Map.Redraw"),
+		TEXT("Redraw every explored map tile (current images stay until the new ones land). voxel.Map.Redraw 1 also ")
+		TEXT("rebuilds the edit overlay of every edited tile from loaded chunks."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			UWorld* Target = FindPlayWorld(World);
+			UVoxelMapSubsystem* Map = Target ? Target->GetSubsystem<UVoxelMapSubsystem>() : nullptr;
+			if (!Map)
+			{
+				UE_LOG(LogVoxelMap, Warning, TEXT("voxel.Map.Redraw: no PIE/Game world with a map subsystem (start PIE first)"));
+				return;
+			}
+			Map->RedrawAllTiles(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs GVoxelMapStatsCmd(
+		TEXT("voxel.Map.Stats"),
+		TEXT("Log the map's tile, queue and edit-overlay state."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			UWorld* Target = FindPlayWorld(World);
+			const UVoxelMapSubsystem* Map = Target ? Target->GetSubsystem<UVoxelMapSubsystem>() : nullptr;
+			if (!Map)
+			{
+				UE_LOG(LogVoxelMap, Warning, TEXT("voxel.Map.Stats: no PIE/Game world with a map subsystem (start PIE first)"));
+				return;
+			}
+			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.Stats: %s"), *Map->GetDebugStats());
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs GVoxelMapCaptureCmd(
+		TEXT("voxel.Map.Capture"),
+		TEXT("Write the explored map tiles around the player to Saved/Screenshots/VoxelMap/<name>.png (north up, player ")
+		TEXT("marked). Args: [radiusTiles=6] [name=timestamp] [highlightOverlays=0]."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			UWorld* Target = FindPlayWorld(World);
+			const UVoxelMapSubsystem* Map = Target ? Target->GetSubsystem<UVoxelMapSubsystem>() : nullptr;
+			const APlayerController* PC = Target ? Target->GetFirstPlayerController() : nullptr;
+			const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+			if (!Map || !Pawn)
+			{
+				UE_LOG(LogVoxelMap, Warning, TEXT("voxel.Map.Capture: no PIE/Game world with a map subsystem and a pawn (start PIE first)"));
+				return;
+			}
+			const int32 Radius = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 6;
+			const FString Name = Args.Num() > 1 ? Args[1] : FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+			const bool bHighlight = Args.Num() > 2 && FCString::Atoi(*Args[2]) != 0;
+			const FString Path = FPaths::ConvertRelativePathToFull(
+				FPaths::ProjectSavedDir() / TEXT("Screenshots/VoxelMap") / (Name + TEXT(".png")));
+			const bool bOk = Map->CaptureMapImage(Pawn->GetActorLocation(), Radius, Path, bHighlight);
+			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.Capture: %s %s (radius %d, pawn %s)"),
+				bOk ? TEXT("wrote") : TEXT("FAILED to write"), *Path, Radius, *Pawn->GetActorLocation().ToCompactString());
+		}));
+
 	/**
 	 * Build a standalone analytic world mode from the configuration — mirrors the construction switch
 	 * in UVoxelChunkManager::Initialize (the canonical version; keep in sync when adding world modes).
@@ -144,8 +250,17 @@ void UVoxelMapSubsystem::Deinitialize()
 		ConditioningChangedHandle.Reset();
 		bDelegatesBound = false;
 	}
+	if (UVoxelEditManager* EditManager = CachedEditManagerWeak.Get())
+	{
+		EditManager->OnChunkEdited.Remove(ChunkEditedHandle);
+	}
+	ChunkEditedHandle.Reset();
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(OverlayRefreshTimer);
+	}
 
-	const int32 InFlight = ActiveAsyncTasks.Load();
+	const int32 InFlight = TileQueue.NumDrawing();
 	if (InFlight > 0)
 	{
 		// In-flight background tasks own their world mode (TSharedPtr capture) and every other input
@@ -160,8 +275,13 @@ void UVoxelMapSubsystem::Deinitialize()
 
 	TileCache.Empty();
 	ExploredTiles.Empty();
-	PendingTiles.Empty();
-	InFlightTiles.Empty();
+	TileQueue.Reset();
+	EditOverlays.Empty();
+	TileEditedChunkZ.Empty();
+	OverlayDirtyTiles.Empty();
+	OverlayAwaitingTiles.Empty();
+	OverlayRebuildTiles.Empty();
+	TileAnalyticRange.Empty();
 
 	UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem deinitialized"));
 	Super::Deinitialize();
@@ -277,6 +397,21 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 		ConditioningChangedHandle = ChunkMgr->OnTerrainConditioningChanged.AddUObject(
 			this, &UVoxelMapSubsystem::HandleTerrainConditioningChanged);
 		bDelegatesBound = true;
+
+		// Edits drive the map's edit overlays (R22). Edits made before the map resolved (POI stamps at world start)
+		// are seeded from the edit layers and rebuilt as their chunks load.
+		if (UVoxelEditManager* EditManager = ChunkMgr->GetEditManager())
+		{
+			CachedEditManagerWeak = EditManager;
+			ChunkEditedHandle = EditManager->OnChunkEdited.AddUObject(this, &UVoxelMapSubsystem::HandleChunkEdited);
+			TArray<FIntVector> EditedChunks;
+			EditManager->GetEditedChunkCoords(EditedChunks);
+			for (const FIntVector& Coord : EditedChunks)
+			{
+				RecordChunkEdits(Coord);
+				MarkOverlayDirty(PackTileKey(FIntPoint(Coord.X, Coord.Y)));
+			}
+		}
 	}
 
 	UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem: Resolved chunk manager. ChunkSize=%d, VoxelSize=%.0f"),
@@ -392,13 +527,13 @@ int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Coun
 		ExploredTiles.Add(PackTileKey(Tile));
 	}
 
-	// Explored tiles draw from the tile cache: queue the images (four run at a time; the rest wait in PendingTiles).
+	// Explored tiles draw from the tile cache: queue the images (four run at a time; the rest wait in the queue).
 	if (ResolveChunkManager())
 	{
 		for (const FIntPoint& Tile : Tiles)
 		{
 			const uint64 Key = PackTileKey(Tile);
-			if (!TileCache.Contains(Key) && !PendingTiles.Contains(Key))
+			if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
 			{
 				QueueTileGeneration(Tile);
 			}
@@ -475,7 +610,7 @@ void UVoxelMapSubsystem::RequestTilesInRadius(const FVector& WorldPos, float Rad
 
 			ExploredTiles.Add(Key);
 
-			if (!TileCache.Contains(Key) && !PendingTiles.Contains(Key))
+			if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
 			{
 				QueueTileGeneration(TileCoord);
 			}
@@ -503,7 +638,7 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 		bGenerateExploredWhenReady = false;
 		for (const uint64 ExploredKey : ExploredTiles)
 		{
-			if (!TileCache.Contains(ExploredKey) && !PendingTiles.Contains(ExploredKey))
+			if (!TileCache.Contains(ExploredKey) && !TileQueue.IsQueued(ExploredKey))
 			{
 				QueueTileGeneration(UnpackTileKey(ExploredKey));
 			}
@@ -513,9 +648,15 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 	// Mark as explored (chunks that generate are in the player's vicinity)
 	ExploredTiles.Add(Key);
 
-	if (!TileCache.Contains(Key) && !PendingTiles.Contains(Key))
+	if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
 	{
 		QueueTileGeneration(TileCoord);
+	}
+
+	// A tile whose overlay waits for its chunks: this may be one of them.
+	if (OverlayAwaitingTiles.Contains(Key))
+	{
+		MarkOverlayDirty(Key);
 	}
 }
 
@@ -525,59 +666,400 @@ void UVoxelMapSubsystem::HandleTerrainConditioningChanged()
 	{
 		return;
 	}
-	// Tiles drawn before the POI conditioner registered show the unflattened terrain (QA W-05): drop
-	// them, let running tasks discard their now-stale result, and redraw everything explored.
-	++TileContentGeneration;
-	const int32 Dropped = TileCache.Num();
+	// Tiles drawn before the POI conditioner registered show the unflattened terrain (QA W-05): redraw everything
+	// explored, discarding drawings already running. The current images stay until the new ones land (R22: the map
+	// used to flash blank here), and the redraws reuse the stored edit overlays without reading chunk data.
+	for (const uint64 Key : ExploredTiles)
 	{
-		FScopeLock Lock(&TileMutex);
-		TileCache.Empty();
+		TileQueue.Request(Key, /*bInvalidate*/ true);
+	}
+	LaunchWaitingTiles();
+	UE_LOG(LogVoxelMap, Log, TEXT("Terrain conditioning changed: redrawing %d map tile(s) (%d cached kept until redrawn)."),
+		ExploredTiles.Num(), TileCache.Num());
+}
+
+// ---------------------------------------------------------------------------
+// Edit overlays (R22)
+// ---------------------------------------------------------------------------
+
+const FVoxelMapEditOverlay* UVoxelMapSubsystem::GetEditOverlay(FIntPoint TileCoord) const
+{
+	const TSharedPtr<const FVoxelMapEditOverlay>* Found = EditOverlays.Find(PackTileKey(TileCoord));
+	return Found ? Found->Get() : nullptr;
+}
+
+void UVoxelMapSubsystem::RedrawAllTiles(bool bRebuildOverlays)
+{
+	if (bShuttingDown || !ResolveChunkManager())
+	{
+		return;
+	}
+	if (bRebuildOverlays)
+	{
+		for (const TPair<uint64, TArray<int32>>& Pair : TileEditedChunkZ)
+		{
+			MarkOverlayDirty(Pair.Key);
+		}
+		// Tiles with an overlay but no edits left rebuild to empty.
+		for (const TPair<uint64, TSharedPtr<const FVoxelMapEditOverlay>>& Pair : EditOverlays)
+		{
+			MarkOverlayDirty(Pair.Key);
+		}
 	}
 	for (const uint64 Key : ExploredTiles)
 	{
-		if (!PendingTiles.Contains(Key))
+		TileQueue.Request(Key, /*bInvalidate*/ true);
+	}
+	LaunchWaitingTiles();
+	UE_LOG(LogVoxelMap, Log, TEXT("Redrawing %d explored map tile(s)%s."), ExploredTiles.Num(),
+		bRebuildOverlays ? TEXT(" and rebuilding edit overlays") : TEXT(""));
+}
+
+FString UVoxelMapSubsystem::GetDebugStats() const
+{
+	int32 MaskedColumns = 0;
+	int32 Bytes = 0;
+	for (const TPair<uint64, TSharedPtr<const FVoxelMapEditOverlay>>& Pair : EditOverlays)
+	{
+		if (Pair.Value.IsValid())
 		{
-			QueueTileGeneration(UnpackTileKey(Key));
+			MaskedColumns += Pair.Value->Num();
+			Bytes += Pair.Value->Columns.GetAllocatedSize() + Pair.Value->Heights.GetAllocatedSize()
+				+ Pair.Value->Materials.GetAllocatedSize() + Pair.Value->Flags.GetAllocatedSize();
 		}
 	}
-	UE_LOG(LogVoxelMap, Log, TEXT("Terrain conditioning changed: rebuilding %d map tile(s) (%d cached dropped)."),
-		ExploredTiles.Num(), Dropped);
+	return FString::Printf(
+		TEXT("tiles cached=%d explored=%d waiting=%d drawing=%d | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d | overlay=%s"),
+		TileCache.Num(), ExploredTiles.Num(), TileQueue.NumWaiting(), TileQueue.NumDrawing(),
+		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunkZ.Num(), OverlayDirtyTiles.Num(),
+		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num(),
+		CVarMapEditOverlay.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"));
+}
+
+bool UVoxelMapSubsystem::CaptureMapImage(const FVector& Center, int32 RadiusTiles, const FString& FilePath, bool bHighlightOverlay) const
+{
+	const int32 Res = CachedChunkSize;
+	if (!bCacheResolved || Res <= 0 || RadiusTiles < 0 || RadiusTiles > 64 || CachedVoxelSize <= 0.0f)
+	{
+		return false;
+	}
+	const FIntPoint CenterTile = WorldToTileCoord(Center);
+	const FIntPoint MinTile = CenterTile - FIntPoint(RadiusTiles, RadiusTiles);
+	const int32 Size = (2 * RadiusTiles + 1) * Res;
+
+	// Image rows run along world -X (north up), columns along world +Y (east right), like UVCWorldMapWidget.
+	TArray64<FColor> Image;
+	Image.Init(FColor(10, 10, 10, 255), static_cast<int64>(Size) * Size);
+	auto Put = [&Image, Size](int32 GX, int32 GY, const FColor& Color)
+	{
+		if (GX >= 0 && GY >= 0 && GX < Size && GY < Size)
+		{
+			Image[static_cast<int64>(Size - 1 - GX) * Size + GY] = Color;
+		}
+	};
+	for (int32 TXi = 0; TXi <= 2 * RadiusTiles; ++TXi)
+	{
+		for (int32 TYi = 0; TYi <= 2 * RadiusTiles; ++TYi)
+		{
+			const FIntPoint Tile = MinTile + FIntPoint(TXi, TYi);
+			const FVoxelMapTile* Cached = IsTileExplored(Tile) ? GetTile(Tile) : nullptr;
+			if (!Cached || Cached->Resolution != Res || Cached->PixelData.Num() != Res * Res)
+			{
+				continue;
+			}
+			const FVoxelMapEditOverlay* Overlay = bHighlightOverlay ? GetEditOverlay(Tile) : nullptr;
+			for (int32 PY = 0; PY < Res; ++PY)
+			{
+				for (int32 PX = 0; PX < Res; ++PX)
+				{
+					FColor Color = Cached->PixelData[PY * Res + PX];
+					if (Overlay && Overlay->FindColumn(PX, PY) != INDEX_NONE)
+					{
+						Color = FColor((Color.R + 255) / 2, Color.G / 2, (Color.B + 255) / 2, 255);
+					}
+					Put(TXi * Res + PX, TYi * Res + PY, Color);
+				}
+			}
+		}
+	}
+
+	// Mark the centre position with a small red cross.
+	const int32 CX = FMath::FloorToInt((Center.X - CachedWorldOrigin.X) / CachedVoxelSize) - MinTile.X * Res;
+	const int32 CY = FMath::FloorToInt((Center.Y - CachedWorldOrigin.Y) / CachedVoxelSize) - MinTile.Y * Res;
+	for (int32 D = -3; D <= 3; ++D)
+	{
+		Put(CX + D, CY, FColor::Red);
+		Put(CX, CY + D, FColor::Red);
+	}
+
+	TArray64<uint8> Png;
+	FImageUtils::PNGCompressImageArray(Size, Size, Image, Png);
+	return Png.Num() > 0 && FFileHelper::SaveArrayToFile(Png, *FilePath);
+}
+
+void UVoxelMapSubsystem::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
+{
+	if (bShuttingDown)
+	{
+		return;
+	}
+	// Undo, redo, clear and load report a zero centre and radius: key on the chunk only.
+	RecordChunkEdits(ChunkCoord);
+	MarkOverlayDirty(PackTileKey(FIntPoint(ChunkCoord.X, ChunkCoord.Y)));
+}
+
+void UVoxelMapSubsystem::RecordChunkEdits(const FIntVector& ChunkCoord)
+{
+	const UVoxelEditManager* EditManager = CachedEditManagerWeak.Get();
+	const uint64 Key = PackTileKey(FIntPoint(ChunkCoord.X, ChunkCoord.Y));
+	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	{
+		TileEditedChunkZ.FindOrAdd(Key).AddUnique(ChunkCoord.Z);
+	}
+	else if (TArray<int32>* Zs = TileEditedChunkZ.Find(Key))
+	{
+		Zs->Remove(ChunkCoord.Z);
+		if (Zs->Num() == 0)
+		{
+			TileEditedChunkZ.Remove(Key);
+		}
+	}
+}
+
+void UVoxelMapSubsystem::MarkOverlayDirty(uint64 TileKey)
+{
+	if (bShuttingDown)
+	{
+		return;
+	}
+	OverlayDirtyTiles.Add(TileKey);
+	ArmOverlayRefresh();
+}
+
+void UVoxelMapSubsystem::ArmOverlayRefresh()
+{
+	UWorld* World = GetWorld();
+	if (!World || bShuttingDown)
+	{
+		return;
+	}
+	FTimerManager& Timers = World->GetTimerManager();
+	if (!Timers.IsTimerActive(OverlayRefreshTimer))
+	{
+		Timers.SetTimer(OverlayRefreshTimer, this, &UVoxelMapSubsystem::FlushOverlayRefresh,
+			FMath::Max(0.01f, CVarMapEditRefreshSeconds.GetValueOnGameThread()), false);
+	}
+}
+
+void UVoxelMapSubsystem::FlushOverlayRefresh()
+{
+	if (bShuttingDown || OverlayDirtyTiles.Num() == 0)
+	{
+		return;
+	}
+	if (!ResolveChunkManager())
+	{
+		ArmOverlayRefresh();
+		return;
+	}
+
+	// Tiles whose edited chunks are not loaded keep their overlay (the saved one after a load) and wait for those
+	// chunks; the check is cheap, so every dirty tile gets it. Rebuilds are capped per refresh.
+	const int32 MaxRebuilds = FMath::Max(1, CVarMapEditRefreshMaxTiles.GetValueOnGameThread());
+	int32 Rebuilds = 0;
+	int32 Awaiting = 0;
+	const TArray<uint64> Dirty = OverlayDirtyTiles.Array();
+	for (const uint64 Key : Dirty)
+	{
+		if (!CanRebuildOverlay(Key))
+		{
+			OverlayDirtyTiles.Remove(Key);
+			OverlayAwaitingTiles.Add(Key);
+			++Awaiting;
+			continue;
+		}
+		if (Rebuilds >= MaxRebuilds)
+		{
+			continue;
+		}
+		OverlayDirtyTiles.Remove(Key);
+		OverlayAwaitingTiles.Remove(Key);
+		OverlayRebuildTiles.Add(Key);
+		TileQueue.Request(Key, /*bInvalidate*/ true, /*bPriority*/ true);
+		++Rebuilds;
+	}
+	LaunchWaitingTiles();
+	UE_LOG(LogVoxelMap, Verbose, TEXT("Map edit refresh: %d overlay rebuild(s), %d tile(s) awaiting chunks, %d left for the next refresh."),
+		Rebuilds, Awaiting, OverlayDirtyTiles.Num());
+
+	if (OverlayDirtyTiles.Num() > 0)
+	{
+		ArmOverlayRefresh();
+	}
+}
+
+bool UVoxelMapSubsystem::CanRebuildOverlay(uint64 TileKey) const
+{
+	const TArray<int32>* EditedZs = TileEditedChunkZ.Find(TileKey);
+	if (!EditedZs)
+	{
+		// No edits left (undone or cleared): the rebuild clears the overlay without chunk data.
+		return true;
+	}
+	const UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get();
+	if (!ChunkMgr)
+	{
+		return false;
+	}
+
+	// Edits more than a chunk below the analytic surface cannot reach the top surface without the chunks above them
+	// being edited too, so they need not be loaded (dungeon interiors under a loaded entrance).
+	int32 MinRequiredZ = MIN_int32;
+	if (const FVector2f* Range = TileAnalyticRange.Find(TileKey))
+	{
+		const float ChunkWorldSize = CachedChunkSize * CachedVoxelSize;
+		MinRequiredZ = FMath::FloorToInt((Range->X - CachedWorldOrigin.Z) / ChunkWorldSize) - 1;
+	}
+	const FIntPoint Tile = UnpackTileKey(TileKey);
+	for (const int32 Z : *EditedZs)
+	{
+		if (Z >= MinRequiredZ && !ChunkMgr->HasChunkVoxelData(FIntVector(Tile.X, Tile.Y, Z)))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+TSharedPtr<FVoxelMapOverlayBuildInput> UVoxelMapSubsystem::GatherOverlayInput(FIntPoint TileCoord) const
+{
+	UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get();
+	const UVoxelEditManager* EditManager = CachedEditManagerWeak.Get();
+	if (!ChunkMgr || !EditManager)
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<FVoxelMapOverlayBuildInput> Input = MakeShared<FVoxelMapOverlayBuildInput>();
+	const int32 CS = CachedChunkSize;
+	Input->ChunkSize = CS;
+	Input->VoxelSize = CachedVoxelSize;
+	Input->WorldOriginZ = CachedWorldOrigin.Z;
+	Input->bUseWater = bWaterEnabled;
+	Input->WaterLevel = CachedWaterLevel;
+
+	const int32 VolumeSize = CS * CS * CS;
+	auto Snapshot = [ChunkMgr, VolumeSize](const FIntVector& Coord) -> TSharedPtr<const TArray<FVoxelData>>
+	{
+		TSharedPtr<const TArray<FVoxelData>> Voxels = ChunkMgr->GetEditMergedSnapshot(Coord);
+		return (Voxels.IsValid() && Voxels->Num() == VolumeSize) ? Voxels : nullptr;
+	};
+
+	const TArray<int32>* EditedZs = TileEditedChunkZ.Find(PackTileKey(TileCoord));
+	if (!EditedZs)
+	{
+		return Input;
+	}
+
+	// Edited chunks: shared edit-merged snapshot (if loaded) plus the highest edited voxel per column, which tells
+	// the build which columns to scan and whether an edit reaches their surface.
+	int32 MinZ = MAX_int32;
+	int32 MaxZ = MIN_int32;
+	for (const int32 Z : *EditedZs)
+	{
+		const FIntVector Coord(TileCoord.X, TileCoord.Y, Z);
+		FVoxelMapOverlayChunk& Chunk = Input->Chunks.AddDefaulted_GetRef();
+		Chunk.ChunkZ = Z;
+		Chunk.Voxels = Snapshot(Coord);
+		const FChunkEditLayer* Layer = EditManager->GetEditLayer(Coord);
+		if (Layer && !Layer->IsEmpty() && Layer->ChunkSize == CS)
+		{
+			Chunk.TopEditedZ.Init(-1, CS * CS);
+			for (const TPair<int32, FVoxelEdit>& Edit : Layer->Edits)
+			{
+				const int32 Index = Edit.Key;
+				if (Index < 0 || Index >= VolumeSize)
+				{
+					continue;
+				}
+				const int32 Column = Index % (CS * CS);
+				const int16 LocalZ = static_cast<int16>(Index / (CS * CS));
+				Chunk.TopEditedZ[Column] = FMath::Max(Chunk.TopEditedZ[Column], LocalZ);
+			}
+		}
+		MinZ = FMath::Min(MinZ, Z);
+		MaxZ = FMath::Max(MaxZ, Z);
+	}
+
+	// Loaded unedited chunks between and just below the edited ones: a dig through the bottom of the edited range
+	// meets their real voxels instead of the analytic estimate. Anything else reads as the analytic terrain.
+	for (int32 Z = MinZ - 1; Z <= MaxZ; ++Z)
+	{
+		if (!EditedZs->Contains(Z))
+		{
+			const FIntVector Coord(TileCoord.X, TileCoord.Y, Z);
+			if (TSharedPtr<const TArray<FVoxelData>> Voxels = Snapshot(Coord))
+			{
+				FVoxelMapOverlayChunk& Chunk = Input->Chunks.AddDefaulted_GetRef();
+				Chunk.ChunkZ = Z;
+				Chunk.Voxels = MoveTemp(Voxels);
+			}
+		}
+	}
+	return Input;
 }
 
 // ---------------------------------------------------------------------------
 // Async Tile Generation
 // ---------------------------------------------------------------------------
 
-void UVoxelMapSubsystem::QueueTileGeneration(FIntPoint TileCoord)
+void UVoxelMapSubsystem::QueueTileGeneration(FIntPoint TileCoord, bool bInvalidate, bool bPriority)
 {
 	if (bShuttingDown)
 	{
 		return;
 	}
-
-	const uint64 Key = PackTileKey(TileCoord);
-	PendingTiles.Add(Key);
-	if (InFlightTiles.Contains(Key))
-	{
-		return;
-	}
-
-	// Throttle concurrent tasks
-	if (ActiveAsyncTasks.Load() >= MaxConcurrentTileGenTasks)
-	{
-		// Leave in PendingTiles — will be picked up when a running task completes.
-		// For simplicity, we rely on the next RequestTilesInRadius or OnChunkGenerated
-		// call to re-check pending tiles. This is acceptable since map tile gen
-		// is not latency-critical.
-		return;
-	}
-
-	ActiveAsyncTasks++;
-	GenerateTileAsync(TileCoord);
+	// The queue keeps the tile until a slot frees; every completion drains it (LaunchWaitingTiles), so a tile queued
+	// while all slots are busy is never stranded (R22: a cached tile re-queued then used to stay pending for good).
+	TileQueue.Request(PackTileKey(TileCoord), bInvalidate, bPriority);
+	LaunchWaitingTiles();
 }
 
-void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
+void UVoxelMapSubsystem::LaunchWaitingTiles()
 {
+	// At most one overlay rebuild gathers chunk data per frame: a gather shares snapshots and walks edit layers on the
+	// game thread (0.1-2.5 ms per tile measured in VoxelDemo), and four in one frame would hitch. A skipped rebuild
+	// keeps waiting; a next-tick retry starts it (a completion cannot be relied on: it may land in this same frame).
+	const bool bOverlaysOn = CVarMapEditOverlay.GetValueOnGameThread() != 0;
+	bool bDeferredRebuild = false;
+	auto CanStart = [this, bOverlaysOn, &bDeferredRebuild](uint64 Key)
+	{
+		if (bOverlaysOn && LastOverlayGatherFrame == GFrameCounter && OverlayRebuildTiles.Contains(Key))
+		{
+			bDeferredRebuild = true;
+			return false;
+		}
+		return true;
+	};
+	uint64 Key = 0;
+	uint32 Generation = 0;
+	while (!bShuttingDown && TileQueue.NumDrawing() < MaxConcurrentTileGenTasks && TileQueue.StartNext(Key, Generation, CanStart))
+	{
+		GenerateTileAsync(UnpackTileKey(Key), Generation);
+	}
+	if (bDeferredRebuild && !bShuttingDown)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateUObject(this, &UVoxelMapSubsystem::LaunchWaitingTiles));
+		}
+	}
+}
+
+void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generation)
+{
+	const uint64 TileKey = PackTileKey(TileCoord);
+
 	// Capture all values needed on the background thread by value. The world mode is OUR standalone
 	// instance shared into the task: the task keeps it alive for however long it runs, so PIE
 	// teardown order cannot invalidate it. (Capturing the chunk manager's raw pointer here is what
@@ -585,12 +1067,10 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 	TSharedPtr<const IVoxelWorldMode> WorldMode = CachedWorldMode;
 	if (!WorldMode)
 	{
-		// Caller already incremented the in-flight counter; undo it and drop the request cleanly.
-		ActiveAsyncTasks--;
-		PendingTiles.Remove(PackTileKey(TileCoord));
+		// Drop the request cleanly; the tile is queued again by the next exploration or chunk event.
+		TileQueue.Cancel(TileKey);
 		return;
 	}
-	InFlightTiles.Add(PackTileKey(TileCoord));
 
 	const FVoxelNoiseParams NoiseParams = CachedNoiseParams;
 	const int32 ChunkSize = CachedChunkSize;
@@ -636,7 +1116,33 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * VoxelSize);
 		ChunkMgr->GatherConditioningZones(FBox2D(TileMin, TileMax), Zones);
 	}
-	const uint32 Generation = TileContentGeneration;
+
+	// Edit overlays (R22): this tile's and its eight neighbours' (index (DY + 1) * 3 + DX + 1; the hillshade apron
+	// reads their border columns), plus, when the tile is due an overlay rebuild, its chunk stack gathered now.
+	const bool bUseOverlays = CVarMapEditOverlay.GetValueOnGameThread() != 0;
+	TArray<TSharedPtr<const FVoxelMapEditOverlay>, TFixedAllocator<9>> TileOverlays;
+	TileOverlays.SetNum(9);
+	TSharedPtr<FVoxelMapOverlayBuildInput> RebuildInput;
+	if (bUseOverlays)
+	{
+		for (int32 DY = -1; DY <= 1; ++DY)
+		{
+			for (int32 DX = -1; DX <= 1; ++DX)
+			{
+				TileOverlays[(DY + 1) * 3 + DX + 1] = EditOverlays.FindRef(PackTileKey(TileCoord + FIntPoint(DX, DY)));
+			}
+		}
+		if (OverlayRebuildTiles.Remove(TileKey) > 0)
+		{
+			const double GatherStart = FPlatformTime::Seconds();
+			LastOverlayGatherFrame = GFrameCounter;
+			RebuildInput = GatherOverlayInput(TileCoord);
+			UE_LOG(LogVoxelMap, Verbose, TEXT("Overlay gather (%d,%d): %d chunk(s) in %.3f ms on the game thread."),
+				TileCoord.X, TileCoord.Y, RebuildInput.IsValid() ? RebuildInput->Chunks.Num() : 0,
+				(FPlatformTime::Seconds() - GatherStart) * 1000.0);
+		}
+	}
+	const bool bRebuild = RebuildInput.IsValid();
 
 	// Use a weak pointer to safely call back to the subsystem
 	TWeakObjectPtr<UVoxelMapSubsystem> WeakThis(this);
@@ -646,7 +1152,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		 bUseBiomes, bUseWater, WaterLevel, BiomeSnapshot,
 		 FallbackTempNoiseParams, FallbackMoistureNoiseParams,
 		 MaterialPalette = MoveTemp(MaterialPalette), TerrainMinHeight, TerrainMaxHeight,
-		 Zones = MoveTemp(Zones), Generation]()
+		 Zones = MoveTemp(Zones), Generation, TileOverlays, RebuildInput, bRebuild]() mutable
 	{
 		// WorldMode is a TSharedPtr capture, validated non-null before launch — this task co-owns
 		// the instance, so it stays valid even if the subsystem and world are torn down while we run.
@@ -681,6 +1187,108 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 			}
 		}
 
+		// Surface material — the SAME shared pipeline as chunk generation, tree placement and
+		// PCG (temperature/moisture/continentalness noise -> tiered biome blend -> blended
+		// material -> priority-sorted height rules), via FVoxelSurfaceQuery + the snapshot.
+		auto AnalyticMaterialAt = [&](float WorldX, float WorldY, float Height) -> uint8
+		{
+			uint8 MaterialID = 0;
+			if (bUseBiomes && BiomeSnapshot.bIsValid)
+			{
+				uint8 BiomeID = 0;
+				FVoxelSurfaceQuery::QuerySurfaceConditions(
+					WorldX, WorldY, Height, VoxelSize,
+					BiomeSnapshot, NoiseParams.Seed, bUseWater, WaterLevel,
+					MaterialID, BiomeID);
+			}
+			else if (bUseBiomes)
+			{
+				// No valid biome config: static registry fallback (matches the CPU generator).
+				const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
+				const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackTempNoiseParams);
+				const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackMoistureNoiseParams);
+				FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+				MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
+			}
+			else
+			{
+				// Legacy: use world mode's hardcoded material
+				MaterialID = WorldMode->GetMaterialAtDepth(
+					FVector(WorldX, WorldY, Height), Height, 0.0f);
+			}
+			return MaterialID;
+		};
+		auto PixelWorldX = [&](int32 PX) { return static_cast<float>((TileCoord.X * ChunkSize + PX) * VoxelSize + WorldOrigin.X); };
+		auto PixelWorldY = [&](int32 PY) { return static_cast<float>((TileCoord.Y * ChunkSize + PY) * VoxelSize + WorldOrigin.Y); };
+
+		// The analytic surface of the tile itself: the overlay build compares against it, and the game thread keeps
+		// its range to decide which edited chunks an overlay rebuild needs loaded.
+		TArray<float> AnalyticHeights;
+		AnalyticHeights.SetNumUninitialized(Resolution * Resolution);
+		float AnalyticMin = TNumericLimits<float>::Max();
+		float AnalyticMax = TNumericLimits<float>::Lowest();
+		for (int32 PY = 0; PY < Resolution; ++PY)
+		{
+			for (int32 PX = 0; PX < Resolution; ++PX)
+			{
+				const float Height = Heights[(PY + 1) * GridSize + PX + 1];
+				AnalyticHeights[PY * Resolution + PX] = Height;
+				AnalyticMin = FMath::Min(AnalyticMin, Height);
+				AnalyticMax = FMath::Max(AnalyticMax, Height);
+			}
+		}
+
+		// --- Edit overlay (R22) ---
+		// Rebuild from the gathered chunk stack when due; columns that wait on an unloaded chunk keep their previous
+		// value. Then draw edited columns at their edited height, material and water instead of the analytic ones,
+		// including the apron cells that belong to neighbouring tiles' overlays.
+		bool bOverlayPending = false;
+		if (RebuildInput.IsValid())
+		{
+			const FVoxelMapEditOverlay Built = FVoxelMapEditOverlay::Build(*RebuildInput, AnalyticHeights,
+				[&](int32 PX, int32 PY)
+				{
+					return AnalyticMaterialAt(PixelWorldX(PX), PixelWorldY(PY), AnalyticHeights[PY * Resolution + PX]);
+				});
+			bOverlayPending = Built.PendingColumns.Num() > 0;
+			FVoxelMapEditOverlay Merged = FVoxelMapEditOverlay::MergePending(Built, TileOverlays[4].Get());
+			Merged.PendingColumns.Empty();
+			TileOverlays[4].Reset();
+			if (!Merged.IsEmpty())
+			{
+				TileOverlays[4] = MakeShared<const FVoxelMapEditOverlay>(MoveTemp(Merged));
+			}
+			RebuildInput.Reset(); // release the snapshots before drawing
+		}
+		const TSharedPtr<const FVoxelMapEditOverlay> Overlay = TileOverlays[4];
+
+		TArray<int32> OverlaySlot;
+		OverlaySlot.Init(INDEX_NONE, Resolution * Resolution);
+		for (int32 GY = 0; GY < GridSize; ++GY)
+		{
+			for (int32 GX = 0; GX < GridSize; ++GX)
+			{
+				const int32 PX = GX - 1;
+				const int32 PY = GY - 1;
+				const int32 DX = PX < 0 ? -1 : (PX >= Resolution ? 1 : 0);
+				const int32 DY = PY < 0 ? -1 : (PY >= Resolution ? 1 : 0);
+				const FVoxelMapEditOverlay* Source = TileOverlays[(DY + 1) * 3 + DX + 1].Get();
+				if (!Source || Source->Resolution != Resolution)
+				{
+					continue;
+				}
+				const int32 Slot = Source->FindColumn(PX - DX * Resolution, PY - DY * Resolution);
+				if (Slot != INDEX_NONE)
+				{
+					Heights[GY * GridSize + GX] = Source->Heights[Slot];
+					if (DX == 0 && DY == 0)
+					{
+						OverlaySlot[PY * Resolution + PX] = Slot;
+					}
+				}
+			}
+		}
+
 		// Shading ranges derived from the world mode's real height bounds (see ResolveChunkManager).
 		// Land spans [reference .. max], water depth spans [water level .. min]; both guard against
 		// degenerate configs where the bounds collapse.
@@ -696,45 +1304,29 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		{
 			for (int32 PX = 0; PX < Resolution; ++PX)
 			{
-				const float WorldX = (TileCoord.X * ChunkSize + PX) * VoxelSize + WorldOrigin.X;
-				const float WorldY = (TileCoord.Y * ChunkSize + PY) * VoxelSize + WorldOrigin.Y;
-
 				const int32 GX = PX + 1;
 				const int32 GY = PY + 1;
 				const float Height = Heights[GY * GridSize + GX];
 
-				// Surface material — the SAME shared pipeline as chunk generation, tree placement and
-				// PCG (temperature/moisture/continentalness noise -> tiered biome blend -> blended
-				// material -> priority-sorted height rules), via FVoxelSurfaceQuery + the snapshot.
+				// Edited columns carry their own material and water: water there comes from the voxels (a pit dug
+				// below the water line stays land until water floods it), not from the analytic height test.
 				uint8 MaterialID = 0;
-
-				if (bUseBiomes && BiomeSnapshot.bIsValid)
+				bool bWater = false;
+				const int32 Slot = OverlaySlot[PY * Resolution + PX];
+				if (Slot != INDEX_NONE)
 				{
-					uint8 BiomeID = 0;
-					FVoxelSurfaceQuery::QuerySurfaceConditions(
-						WorldX, WorldY, Height, VoxelSize,
-						BiomeSnapshot, NoiseParams.Seed, bUseWater, WaterLevel,
-						MaterialID, BiomeID);
-				}
-				else if (bUseBiomes)
-				{
-					// No valid biome config: static registry fallback (matches the CPU generator).
-					const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
-					const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackTempNoiseParams);
-					const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackMoistureNoiseParams);
-					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
-					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
+					MaterialID = Overlay->Materials[Slot];
+					bWater = (Overlay->Flags[Slot] & FVoxelMapEditOverlay::FlagWater) != 0;
 				}
 				else
 				{
-					// Legacy: use world mode's hardcoded material
-					MaterialID = WorldMode->GetMaterialAtDepth(
-						FVector(WorldX, WorldY, Height), Height, 0.0f);
+					MaterialID = AnalyticMaterialAt(PixelWorldX(PX), PixelWorldY(PY), Height);
+					bWater = bUseWater && Height < WaterLevel;
 				}
 
 				FColor Color;
 
-				if (bUseWater && Height < WaterLevel)
+				if (bWater)
 				{
 					// Submerged terrain — render as water, deeper = darker blue. Depth is
 					// normalized against the config's own terrain floor rather than a fixed
@@ -786,16 +1378,15 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 		}
 
 		// Marshal back to game thread
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, TileCoord, PixelData = MoveTemp(PixelData), Resolution, Generation]() mutable
+		AsyncTask(ENamedThreads::GameThread,
+			[WeakThis, TileCoord, PixelData = MoveTemp(PixelData), Resolution, Generation, bRebuild, Overlay,
+			 bOverlayPending, AnalyticMin, AnalyticMax]() mutable
 		{
 			UVoxelMapSubsystem* Self = WeakThis.Get();
 			if (!Self)
 			{
 				return;
 			}
-
-			Self->ActiveAsyncTasks--;
-			Self->InFlightTiles.Remove(PackTileKey(TileCoord));
 
 			if (Self->bShuttingDown)
 			{
@@ -808,14 +1399,61 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 
 			const uint64 Key = PackTileKey(TileCoord);
 
-			// Conditioning changed while this tile was drawing: the image is stale. The tile stays pending, so
-			// the drain below redraws it.
-			if (Generation != Self->TileContentGeneration)
+			if (!Self->TileQueue.Complete(Key, Generation))
 			{
-				Self->PendingTiles.Add(Key);
+				// Invalidated while drawing (an edit refresh or a conditioning change): this result is stale. The tile
+				// is waiting again and its cached image stays until the redraw lands; a discarded overlay rebuild runs
+				// again with it.
+				if (bRebuild)
+				{
+					Self->OverlayRebuildTiles.Add(Key);
+				}
 			}
 			else
 			{
+				if (bRebuild)
+				{
+					const TSharedPtr<const FVoxelMapEditOverlay> Previous = Self->EditOverlays.FindRef(Key);
+					if (Overlay.IsValid())
+					{
+						Self->EditOverlays.Add(Key, Overlay);
+					}
+					else
+					{
+						Self->EditOverlays.Remove(Key);
+					}
+					if (bOverlayPending)
+					{
+						Self->OverlayAwaitingTiles.Add(Key);
+					}
+
+					// Neighbours draw this tile's border columns into their hillshade apron: redraw the cached ones
+					// when those changed, so shading stays continuous across the tile edge.
+					if (!FVoxelMapEditOverlay::BordersEqual(Previous.Get(), Overlay.Get()))
+					{
+						for (int32 DY = -1; DY <= 1; ++DY)
+						{
+							for (int32 DX = -1; DX <= 1; ++DX)
+							{
+								const FIntPoint Neighbour = TileCoord + FIntPoint(DX, DY);
+								if ((DX != 0 || DY != 0) && Self->TileCache.Contains(PackTileKey(Neighbour)))
+								{
+									Self->TileQueue.Request(PackTileKey(Neighbour), /*bInvalidate*/ true, /*bPriority*/ true);
+								}
+							}
+						}
+					}
+				}
+
+				// The tile's analytic range decides which edited chunks a rebuild needs; an overlay that waited
+				// without it may be able to rebuild now.
+				const bool bRangeWasKnown = Self->TileAnalyticRange.Contains(Key);
+				Self->TileAnalyticRange.Add(Key, FVector2f(AnalyticMin, AnalyticMax));
+				if (!bRangeWasKnown && Self->OverlayAwaitingTiles.Contains(Key))
+				{
+					Self->MarkOverlayDirty(Key);
+				}
+
 				FVoxelMapTile Tile;
 				Tile.TileCoord = TileCoord;
 				Tile.Resolution = Resolution;
@@ -825,29 +1463,13 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord)
 				{
 					FScopeLock Lock(&Self->TileMutex);
 					Self->TileCache.Add(Key, MoveTemp(Tile));
-					Self->PendingTiles.Remove(Key);
 				}
 
 				Self->OnMapTileReady.Broadcast(TileCoord);
 			}
 
-			// Check if there are more pending tiles to process
-			if (Self->ActiveAsyncTasks.Load() < MaxConcurrentTileGenTasks)
-			{
-				// Find a pending tile that isn't in the cache yet
-				for (const uint64 PendingKey : Self->PendingTiles)
-				{
-					// Skip tiles already running: with a large backlog (restored exploration) the drain would
-					// otherwise keep restarting the same in-flight tile.
-					if (!Self->TileCache.Contains(PendingKey) && !Self->InFlightTiles.Contains(PendingKey))
-					{
-						const FIntPoint PendingCoord = UnpackTileKey(PendingKey);
-						Self->ActiveAsyncTasks++;
-						Self->GenerateTileAsync(PendingCoord);
-						break;
-					}
-				}
-			}
+			// Every completion drains the queue, so tiles queued while all slots were busy start now.
+			Self->LaunchWaitingTiles();
 		});
 	});
 }
