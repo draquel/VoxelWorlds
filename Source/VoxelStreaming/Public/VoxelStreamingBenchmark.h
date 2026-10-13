@@ -100,7 +100,7 @@ private:
 		int32 GenQueue, MeshQueue, UnloadQueue, PendingUpload, GenInFlight;
 		int32 LoadedChunks, TotalChunks;
 		float FrameMs;
-		float GenMs, MeshMs, LODMs, StreamMs, TotalMs;
+		float GenMs, MeshMs, LODMs, LODUpdateMs, StreamMs, TotalMs;
 		// Previously-unsampled tick sections + generation/meshing sub-phases (spike attribution)
 		float RenderMs, CollMs, ScatMs;
 		float GenLaunchMs, GenPollMs, GenApplyMs, GenStoreMs, GenNotifyMs, GenNeighborMs;
@@ -167,6 +167,11 @@ private:
 	TArray<FVector> RouteVertices;
 	TArray<double> RouteCumulative;
 	double OrbitStartAngle = 0.0;
+
+	// Loaded chunks per layer (Z), taken with each traverse memory sample: running sum and max (§13.11).
+	TMap<int32, int64> LayerLoadedSum;
+	TMap<int32, int32> LayerLoadedMax;
+	int32 LayerSamples = 0;
 
 	// Latest memory sample (carried between MemorySampleIntervalSec refreshes) and its timer.
 	FSample LastMemory = {};

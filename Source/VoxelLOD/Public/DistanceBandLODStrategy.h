@@ -192,7 +192,12 @@ protected:
 	) const;
 
 	/**
-	 * Get the vertical range of chunks to consider.
+	 * Get the vertical range of chunks to consider: absolute chunk layers, the viewer's layer plus
+	 * MinVerticalChunks..MaxVerticalChunks. Callers iterate these layers directly (they used to add the
+	 * viewer's layer a second time; WORLD_MODES_REVIEW_PLAN.md §13.11).
+	 * @param Context Query context (viewer position).
+	 * @param OutMinZ Lowest chunk layer, inclusive.
+	 * @param OutMaxZ Highest chunk layer, inclusive.
 	 */
 	void GetVerticalChunkRange(
 		const FLODQueryContext& Context,
@@ -293,7 +298,7 @@ protected:
 	/** Maximum view distance for chunk loading (from Configuration->ViewDistance) */
 	float MaxViewDistance = 0.0f;
 
-	/** Vertical chunk range for infinite plane mode */
+	/** Vertical candidate window, in chunk layers relative to the viewer's layer (set per world mode in Initialize) */
 	int32 MinVerticalChunks = -2;
 	int32 MaxVerticalChunks = 4;
 

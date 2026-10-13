@@ -571,6 +571,7 @@ public:
 		float CollisionApplyMs = 0.0f;
 		float ScatterMs = 0.0f;
 		float LODMs = 0.0f;
+		float LODUpdateMs = 0.0f;   // LOD strategy Update (balanced-LOD cache rebuild), before the streaming section
 		float StreamingMs = 0.0f;
 		float TotalMs = 0.0f;
 
@@ -696,6 +697,12 @@ public:
 	 * @param OutStaleNear The subset the strategy puts at LOD 0 (shown coarser than they should be, near the viewer).
 	 */
 	void GetBenchLODBacklog(int32& OutStale, int32& OutStaleNear) const;
+
+	/**
+	 * Loaded chunks per chunk layer (Z), for benchmark sampling (§13.11). Walks every loaded chunk.
+	 * @param OutByLayer Receives layer -> count (reset first).
+	 */
+	void GetBenchLoadedByLayer(TMap<int32, int32>& OutByLayer) const;
 
 	/** Start a deterministic streaming benchmark run (drives the streaming origin, samples each
 	 *  frame from TickComponent, and writes a CSV + JSON report on completion). */
