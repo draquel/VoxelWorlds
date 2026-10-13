@@ -253,6 +253,9 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.FarCompMs = T.FarCompressMs;
 	S.FarCompDispatchN = T.FarCompressDispatchCount;
 	S.FarCompApplyN = T.FarCompressApplyCount;
+	S.LODCand = T.LODEvalCandidates;
+	S.LODQueued = T.LODEvalQueued;
+	ChunkManager->GetBenchLODBacklog(S.LODStale, S.LODStaleNear);
 
 	MemorySampleTimer += DeltaTime;
 	if (MemorySampleTimer >= Config.MemorySampleIntervalSec)
@@ -468,6 +471,7 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 		};
 		Int(TEXT("farCompression"), CVarInt(TEXT("voxel.FarCompression")));
 		Int(TEXT("farCompressionAsync"), CVarInt(TEXT("voxel.FarCompression.Async")));
+		Int(TEXT("lodLegacySweep"), CVarInt(TEXT("voxel.LOD.LegacySweep"))); // TEMPORARY (KI12 A/B)
 		Vec(TEXT("worldOrigin"), Cfg->WorldOrigin);
 		if (Cfg->WorldMode == EWorldMode::IslandBowl)
 		{
@@ -524,10 +528,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
@@ -539,7 +543,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.RemeshCount, S.SeamMs, S.CollPrepMs, S.CollApplyMs,
 			S.VoxelMB, S.EditMB, S.RendCPUMB, S.RendGPUMB, S.CollMB, S.ScatMB, S.ProcessMB,
 			S.ResidentN, S.UniformN, S.CompressedN, S.EmptyN,
-			S.FarCompMs, S.FarCompDispatchN, S.FarCompApplyN);
+			S.FarCompMs, S.FarCompDispatchN, S.FarCompApplyN,
+			S.LODCand, S.LODQueued, S.LODStale, S.LODStaleNear);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 
@@ -547,7 +552,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 	int32 PeakGen = 0, PeakMesh = 0, PeakUnload = 0, MaxLoaded = 0;
 	float PeakVoxelMB = 0.0f, PeakRendGPUMB = 0.0f, PeakRendCPUMB = 0.0f, PeakCollMB = 0.0f, PeakScatMB = 0.0f, PeakProcessMB = 0.0f;
 	float PeakVoxelTotalMB = 0.0f;
-	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr;
+	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr, LODStaleArr, LODStaleNearArr;
+	int32 LODEvalFrames = 0;
 	for (const FSample& S : Samples)
 	{
 		MaxLoaded = FMath::Max(MaxLoaded, S.LoadedChunks); // retention peak across all phases
@@ -565,7 +571,19 @@ void FVoxelStreamingBenchmark::WriteReport()
 		FrameMsArr.Add(S.FrameMs);
 		TotalMsArr.Add(S.TotalMs);
 		FarCompMsArr.Add(S.FarCompMs);
+		LODStaleArr.Add(static_cast<float>(S.LODStale));
+		LODStaleNearArr.Add(static_cast<float>(S.LODStaleNear));
+		LODEvalFrames += S.LODCand >= 0 ? 1 : 0;
 	}
+	auto Mean = [](const TArray<float>& Values)
+	{
+		double Sum = 0.0;
+		for (const float V : Values) { Sum += V; }
+		return Values.Num() > 0 ? static_cast<float>(Sum / Values.Num()) : 0.0f;
+	};
+	const float LODStaleMean = Mean(LODStaleArr);
+	const float LODStaleNearMean = Mean(LODStaleNearArr);
+	const float LODEvalFraction = FrameMsArr.Num() > 0 ? static_cast<float>(LODEvalFrames) / FrameMsArr.Num() : 0.0f;
 	int64 FarCompEncodes = 0, FarCompInstalled = 0, FarCompStale = 0;
 	ChunkManager->GetBenchFarCompressionCounts(FarCompEncodes, FarCompInstalled, FarCompStale);
 
@@ -614,6 +632,14 @@ void FVoxelStreamingBenchmark::WriteReport()
 	Json += FString::Printf(TEXT("  \"thrashLOD\": %lld,\n"), ThrashLOD);
 	Json += FString::Printf(TEXT("  \"thrashDirty\": %lld,\n"), ThrashDirty);
 	Json += FString::Printf(TEXT("  \"thrashOther\": %lld,\n"), ThrashOther);
+	// LOD evaluation over the traverse (KI12): share of frames that evaluated LOD levels, and the LOD
+	// backlog (Loaded chunks whose LOD change is not queued; "near" = the strategy puts them at LOD 0).
+	Json += FString::Printf(TEXT("  \"lodEvalFrameFraction\": %.3f,\n"), LODEvalFraction);
+	Json += FString::Printf(TEXT("  \"lodStaleMean\": %.1f,\n"), LODStaleMean);
+	Json += FString::Printf(TEXT("  \"lodStaleP95\": %.0f,\n"), Percentile(LODStaleArr, 0.95f));
+	Json += FString::Printf(TEXT("  \"lodStaleMax\": %.0f,\n"), Percentile(LODStaleArr, 1.0f));
+	Json += FString::Printf(TEXT("  \"lodStaleNearMean\": %.1f,\n"), LODStaleNearMean);
+	Json += FString::Printf(TEXT("  \"lodStaleNearMax\": %.0f,\n"), Percentile(LODStaleNearArr, 1.0f));
 	Json += FString::Printf(TEXT("  \"unloadLagMeanMs\": %.1f,\n"), UnloadLagMean);
 	Json += FString::Printf(TEXT("  \"unloadLagMaxMs\": %.1f,\n"), UnloadLagMax);
 	Json += FString::Printf(TEXT("  \"unloadCount\": %lld,\n"), UnloadLagCount);

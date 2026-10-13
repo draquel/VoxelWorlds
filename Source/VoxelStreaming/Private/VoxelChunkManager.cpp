@@ -401,6 +401,15 @@ static TAutoConsoleVariable<int32> CVarFarCompressionCodec(
 	     "Buffers written by any codec still decode (codec id is stored in the buffer header)."),
 	ECVF_Default);
 
+// TEMPORARY (KI12 A/B in one build; removed before merge): 1 = the old LOD sweep latch.
+static TAutoConsoleVariable<int32> CVarLODLegacySweep(
+	TEXT("voxel.LOD.LegacySweep"),
+	0,
+	TEXT("KI12 A/B only. 1 = evaluate LOD levels on a viewer-chunk change or while the old sweep latch is set "
+	     "(set when every queue is empty, cleared only by an evaluation with every queue empty that queued nothing). "
+	     "0 = FVoxelLODEvalSchedule."),
+	ECVF_Default);
+
 UVoxelChunkManager::UVoxelChunkManager()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -765,29 +774,48 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// === LOD level changes and morph factor updates ===
 	SectionStart = FPlatformTime::Seconds();
 	{
-		// Detect when all queues drain — signal that a LOD sweep is needed
+		// Pipeline idle: no generation or meshing work queued, in flight or awaiting upload.
 		const bool bQueuesEmpty = GenerationQueue.Num() == 0
 			&& AsyncGenerationInProgress.Num() == 0
 			&& MeshingQueue.Num() == 0
 			&& AsyncMeshingInProgress.Num() == 0
 			&& PendingMeshQueue.Num() == 0;
 
-		if (bQueuesEmpty && !bPendingLODSweep)
+		if (CVarLODLegacySweep.GetValueOnGameThread() != 0)
 		{
-			bPendingLODSweep = true;
-		}
-
-		// LOD level evaluation: runs on viewer chunk change OR pending sweep
-		if (bViewerChunkChanged || bPendingLODSweep)
-		{
-			EvaluateLODLevelChanges(Context);
-
-			// Clear sweep flag only if queues are still empty after evaluation
-			// (no new work was generated)
-			if (bPendingLODSweep && bQueuesEmpty && MeshingQueue.Num() == 0)
+			// TEMPORARY (KI12 A/B): the old latch. Its state when the pipeline turns busy decides the regime
+			// until the pipeline is next idle, so that moment is logged.
+			if (!bQueuesEmpty && bLegacyPrevQueuesEmpty)
 			{
-				bPendingLODSweep = false;
+				UE_LOG(LogVoxelStreaming, Log, TEXT("KI12 legacy LOD sweep: pipeline busy at frame %lld with the latch %s"),
+					CurrentFrame, bLegacyLODSweep ? TEXT("SET (LOD evaluated every frame)") : TEXT("clear (LOD evaluated on chunk changes only)"));
 			}
+			bLegacyPrevQueuesEmpty = bQueuesEmpty;
+			if (bQueuesEmpty && !bLegacyLODSweep)
+			{
+				bLegacyLODSweep = true;
+			}
+			if (bViewerChunkChanged || bLegacyLODSweep)
+			{
+				int32 Queued = 0;
+				bool bCapReached = false;
+				Timing.LODEvalCandidates = EvaluateLODLevelChanges(Context, Queued, bCapReached);
+				Timing.LODEvalQueued = Queued;
+				if (bLegacyLODSweep && bQueuesEmpty && MeshingQueue.Num() == 0)
+				{
+					bLegacyLODSweep = false;
+				}
+			}
+		}
+		// LOD level evaluation (KI12): viewer movement, left-overs from the per-frame cap, or an idle
+		// sweep. See FVoxelLODEvalSchedule for why it is not tied to queue state.
+		else if (LODEvalSchedule.ShouldEvaluate(bViewerChunkChanged, Context.ViewerPosition, bQueuesEmpty))
+		{
+			int32 Queued = 0;
+			bool bCapReached = false;
+			Timing.LODEvalCandidates = EvaluateLODLevelChanges(Context, Queued, bCapReached);
+			Timing.LODEvalQueued = Queued;
+			LODEvalSchedule.OnEvaluated(Context.ViewerPosition, Queued, bCapReached);
 		}
 
 		// Morph factor updates: gated by movement threshold
@@ -968,7 +996,9 @@ void UVoxelChunkManager::Initialize(
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
-	bPendingLODSweep = false;
+	LODEvalSchedule.Reset();
+	bLegacyLODSweep = false;
+	bLegacyPrevQueuesEmpty = false;
 
 	// Reset adaptive throttle state
 	SmoothedFrameTimeMs = 16.67f;
@@ -1388,7 +1418,9 @@ void UVoxelChunkManager::Shutdown()
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
-	bPendingLODSweep = false;
+	LODEvalSchedule.Reset();
+	bLegacyLODSweep = false;
+	bLegacyPrevQueuesEmpty = false;
 	bSubsystemsDeferred = false;
 
 	// Clean up LOD strategy (we own it)
@@ -3852,6 +3884,9 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 				}
 				UnloadEnqueueTimeSeconds.Remove(ChunkCoord);
 			}
+			// A chunk loaded again later meshes for the first time again: not a re-mesh. Without this a
+			// route that revisits terrain counted every reload as thrash (the I9 soak's lap 2, §13.10).
+			BenchEverMeshed.Remove(ChunkCoord);
 		}
 
 		// Remove from renderer
@@ -3899,16 +3934,19 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 	}
 }
 
-void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context)
+int32 UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context, int32& OutQueued, bool& OutCapReached)
 {
+	OutQueued = 0;
+	OutCapReached = false;
+
 	if (!LODStrategy || !MeshRenderer)
 	{
-		return;
+		return 0;
 	}
 
 	if (Configuration && !Configuration->IsLODEnabled())
 	{
-		return;
+		return 0;
 	}
 
 	// Use effective (adaptive) throttle value as a true per-frame cap
@@ -3966,6 +4004,9 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 	{
 		if (QueuedThisFrame >= MaxLODRemeshThisFrame)
 		{
+			// Candidates left over: the schedule evaluates again next tick instead of waiting for the
+			// viewer to move (KI12). A cap of 0 disables LOD re-meshing, so it leaves nothing "over".
+			OutCapReached = MaxLODRemeshThisFrame > 0;
 			break;
 		}
 
@@ -4003,6 +4044,38 @@ void UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context
 	{
 		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD level changes: %d candidates, queued %d/%d this frame"),
 			RemeshCandidates.Num(), QueuedThisFrame, MaxLODRemeshThisFrame);
+	}
+
+	OutQueued = QueuedThisFrame;
+	return RemeshCandidates.Num();
+}
+
+void UVoxelChunkManager::GetBenchLODBacklog(int32& OutStale, int32& OutStaleNear) const
+{
+	OutStale = 0;
+	OutStaleNear = 0;
+	if (!LODStrategy || (Configuration && !Configuration->IsLODEnabled()))
+	{
+		return;
+	}
+
+	const FLODQueryContext Context = BuildQueryContext();
+	for (const FIntVector& ChunkCoord : LoadedChunkCoords)
+	{
+		const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+		if (!State || State->State != EChunkState::Loaded)
+		{
+			continue; // queued or in flight: its LOD is already on its way
+		}
+		const int32 TargetLOD = LODStrategy->GetLODForChunk(ChunkCoord, Context);
+		if (State->LODLevel != TargetLOD)
+		{
+			++OutStale;
+			if (TargetLOD == 0)
+			{
+				++OutStaleNear;
+			}
+		}
 	}
 }
 
