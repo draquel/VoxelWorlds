@@ -19,6 +19,7 @@
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelSeamRegistry.h"
 #include "VoxelSeamTransitionHolds.h"
+#include "VoxelLODEvalSchedule.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -614,6 +615,10 @@ public:
 		float RenderWaterTileMs = 0.0f;  // ProcessDirtyWaterTiles (water tile mesh rebuilds)
 		float RenderFlushMs = 0.0f;      // MeshRenderer FlushPendingOperations (end of tick)
 		int32 RenderSubmitCount = 0;     // meshes submitted to the renderer this tick
+
+		// LOD level evaluation (KI12): whether EvaluateLODLevelChanges ran this tick and what it found.
+		int32 LODEvalCandidates = -1;    // chunks whose committed LOD differs from the strategy; -1 = no evaluation
+		int32 LODEvalQueued = 0;         // LOD re-meshes it queued (at most the per-frame cap)
 	};
 
 	/** Get voxel-specific memory usage breakdown */
@@ -682,6 +687,15 @@ public:
 		OutMeanUU = (BenchUnloadLagCount > 0) ? (BenchUnloadDistSumUU / static_cast<double>(BenchUnloadLagCount)) : 0.0;
 		OutMaxUU = BenchUnloadDistMaxUU;
 	}
+
+	/**
+	 * LOD backlog for benchmark sampling (KI12): Loaded chunks (none of their work queued or in flight)
+	 * whose committed LOD differs from the LOD strategy's current answer, i.e. LOD changes the manager
+	 * has not queued yet. Walks every loaded chunk; call from the benchmark only.
+	 * @param OutStale     All such chunks.
+	 * @param OutStaleNear The subset the strategy puts at LOD 0 (shown coarser than they should be, near the viewer).
+	 */
+	void GetBenchLODBacklog(int32& OutStale, int32& OutStaleNear) const;
 
 	/** Start a deterministic streaming benchmark run (drives the streaming origin, samples each
 	 *  frame from TickComponent, and writes a CSV + JSON report on completion). */
@@ -800,11 +814,15 @@ protected:
 	void ProcessUnloadQueue(int32 MaxChunks);
 
 	/**
-	 * Evaluate LOD level changes for loaded chunks and queue remeshes.
-	 * Separated from morph updates so it can run when queues drain,
-	 * not just when the viewer moves.
+	 * Evaluate LOD level changes for loaded chunks and queue remeshes (at most the per-frame cap).
+	 * Separated from morph updates; LODEvalSchedule decides when it runs.
+	 *
+	 * @param Context      This tick's query context.
+	 * @param OutQueued    LOD re-meshes queued.
+	 * @param OutCapReached True when it stopped at the per-frame cap with candidates left over.
+	 * @return Number of candidates: tracked chunks whose committed LOD differs from the strategy's.
 	 */
-	void EvaluateLODLevelChanges(const FLODQueryContext& Context);
+	int32 EvaluateLODLevelChanges(const FLODQueryContext& Context, int32& OutQueued, bool& OutCapReached);
 
 	/**
 	 * Update LOD morph factors for loaded chunks.
@@ -1311,12 +1329,8 @@ private:
 	 */
 	bool bForceStreamingUpdate = false;
 
-	/**
-	 * Flag indicating that a LOD level sweep is pending.
-	 * Set when all queues drain to zero, cleared after a successful sweep
-	 * discovers no new work. Ensures stationary viewers eventually get correct LOD.
-	 */
-	bool bPendingLODSweep = false;
+	/** When EvaluateLODLevelChanges runs (viewer movement, cap left-overs, idle sweep); see FVoxelLODEvalSchedule. */
+	FVoxelLODEvalSchedule LODEvalSchedule;
 
 	/**
 	 * Threshold for LOD morph factor update position delta (squared).
