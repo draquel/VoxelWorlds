@@ -52,7 +52,7 @@ the review's outputs.
 Four read-only code surveys (2026-10-12) found the items below. The review confirms or dismisses each one. IDs are
 stable, so the follow-up plan can refer to them. Review A has ruled on KC1-KC9 and added KC10-KC14 and G1-G6 (§12.3, §12.4).
 Review B has ruled on KI1-KI11 and added KI12-KI15 and G7-G9 (§13.6, §13.7); KI12 was explained and fixed, and G10
-found, in §13.10.
+found, in §13.10; the vertical-window bug in §13.11.
 
 ### Cubic
 
@@ -1097,7 +1097,12 @@ The critical list in §6 stands, with this evidence and these additions:
 - **A world edge** (KI2) must include recovery (KI14): a respawn when the pawn falls out of the world, and a timeout or
   fallback for the chunk-based wait.
 - **Slab culling for islands** (KI5) and **3D-aware LOD distance for islands, or a per-column vertical band** (KI13) are the
-  performance items: together they explain the chunk excess, the generation backlog and most of the coast misses.
+  performance items: together they explain the chunk excess, the generation backlog and most of the coast misses. §13.11
+  measured KI5 per layer: on the chord the island's ~340 extra chunks are layers −3, 2 and 3, the layers the control's
+  slab trims.
+- Add from §13.11: **rebuild the balanced-LOD cache only when the viewer moves** (1.3-1.9 ms a tick on the control, every
+  tick), and decide whether heightmap modes should take the **vertical range from the terrain** instead of the viewer's
+  altitude (the −2 floor).
 - ~~**Find the cause of KI12** before the next island bench; until then island benches need at least two runs per route.~~
   Done (§13.10): KI12 was a latch in LOD evaluation, in every world mode. It is fixed, and one run per route is enough
   again. Island numbers to use are the high-mode rows of §13.3.
@@ -1244,3 +1249,84 @@ editor idle and the main editor open; the first row's build label reads `73613df
 **What changes in §13.** I4's chord verdict stands on the high-mode rows. KI12 no longer splits island benches, so one run
 per route is enough again. The §13.3 headless comparison should be re-read against a control in the same regime (above).
 §13.5's re-mesh doubling is G10, not an island effect.
+
+### 13.11 The vertical candidate window counted the viewer's layer twice (2026-10-13)
+
+Found while tracing KI12 (§13.10). Not an island finding: every world mode had it.
+
+**Bug.** Each world mode streams a window of chunk layers around the viewer's layer: InfinitePlane −2 to +8,
+IslandBowl −2 to +4, SphericalPlanet ±10 in the demo geometry. The terrain-bounds cull clips the window to the world's
+height range (−16,800 to 14,800 uu here, layers −4 to 3). `FDistanceBandLODStrategy::GetVerticalChunkRange` already
+returns absolute layers (viewer layer + offsets), and both candidate loops (`GetVisibleChunks` and
+`RebuildBalancedLODCache`) added the viewer's layer again. A viewer on layer L streamed 2L−2 to 2L+8. On layer 0, where
+most play and every review bench start sits, that is the same window, which is why it went unnoticed since the VoxelLOD
+module was created (`13c3672`). Off layer 0 the window slid twice as far as the viewer:
+
+| Viewer | Island window, old / fixed | InfinitePlane window, old / fixed |
+|--------|----------------------------|-----------------------------------|
+| Layer −1 (island chord over the sea, z −3,200) | −4 to 2 / −3 to 3 | −4 to 3 / −3 to 3 |
+| Layer 0 | −2 to 3 / same | −2 to 3 / same |
+| Layer 1 (camera or flight at z 4,800-9,600) | 0 to 3 / −1 to 3 | 0 to 3 / −1 to 3 |
+
+(All clipped to layers −4 to 3; unclipped, InfinitePlane's old window on layer −1 was −4 to 6. Its 3D view distance also
+stops the top at +8.) The R24 survey note that "a
+camera at z ≥ 4,800 drops the lowest terrain layer" was this. Spherical would be worse: a viewer at the pole of a
+100 km planet sits near layer 20, so its window centred near layer 40, entirely above the surface. That belongs on the
+spherical requirements list when spherical streaming is picked up.
+
+**Fix.** Both loops iterate the absolute layers `GetVerticalChunkRange` returns; the offsets themselves are unchanged.
+Test: `VoxelWorlds.LOD.VerticalWindow.FollowsViewerLayer` (viewer on layers −3, −1, 0, 1 and 5, both heightmap modes). It
+fails on the old window, e.g. "viewer on layer −3: lowest candidate layer expected −5, was −8".
+
+**Also timed: the LOD cache rebuild.** `LODStrategy->Update`, which rebuilds the balanced-LOD cache over the whole
+candidate volume every tick, ran outside every timed section. It is now `LODUpdateMs` (CSV `LODUpdMs`, JSON
+`lodUpdateMsP50/P95`). It matches the ~2 ms of unattributed manager P95 noted for the control in §12.8: 1.3-1.4 ms P50 and 1.7-1.9 ms P95
+on the control's chord, 0.7 / 1.0 ms on the island's, and 0.6-0.7 ms every tick on a still viewer in a settled world. It
+depends only on the viewer's position and last tick's result, so it could run only when the viewer moves, like the LOD
+evaluation in §13.10. That is a candidate work item, not done here.
+
+**Bench.** New JSON `loadedByLayerMeanMax`: loaded chunks per layer over the traverse, mean and max, sampled with the
+memory stats.
+
+**Method.** VoxelWorlds `bdfd37a` on top of §13.10, with a temporary `voxel.LOD.LegacyVerticalWindow 1` that restored the
+old window (removed in the next commit), so both windows come from one binary. This time the worktree editor was the only
+editor open (not in the foreground), background throttle off, cold fresh world per run, drowning off in memory, legacy and
+fixed interleaved. Routes: the §13.3 chord (`follow=300`); a straight flight at z 7,200 (layer 1, `start=-250000:0:7200
+dir=1:0`, 150,000 uu at v3000); and S at its spawn (`warmup=300`, zero distance, as in §13.4). JSON reports are in
+[Research/Bench/VerticalWindow/](Research/Bench/VerticalWindow/).
+
+| Run | Window | Loaded chunks per layer, mean over the traverse | Loaded mean / peak | LOD re-meshes | Audit | Frame P95 / manager P95 ms | LOD cache rebuild P50 / P95 ms | JSON |
+|-----|--------|-------------------------------------------------|--------------------|---------------|-------|----------------------------|--------------------------------|------|
+| Island M chord a | old | −4: 168, −3: 180, −2: 190, −1: 194, 0: 194, 1: 187, 2: 176, 3: 100 | 1,390 / 1,646 | 12,628 | 64 | 32.5 / 11.9 | 0.71 / 1.01 | `20261013_195518_vw_L_M_chorda` |
+| Island M chord b | old | −4: 168, −3: 180, −2: 189, −1: 193, 0: 193, 1: 186, 2: 176, 3: 102 | 1,386 / 1,598 | 12,630 | 64 | 31.8 / 11.7 | 0.71 / 1.01 | `20261013_200140_vw_L_M_chordb` |
+| **Island M chord a** | **fixed** | −3: 203, −2: 213, −1: 217, 0: 217, 1: 211, 2: 202, 3: 191 | 1,454 / 1,666 | 11,522 | 52 | 31.7 / 11.9 | 0.71 / 1.03 | `20261013_195828_vw_N_M_chorda` |
+| **Island M chord b** | **fixed** | −3: 211, −2: 220, −1: 224, 0: 223, 1: 220, 2: 212, 3: 200 | 1,510 / 1,662 | 11,522 | 52 | 31.1 / 11.8 | 0.71 / 1.01 | `20261013_200452_vw_N_M_chordb` |
+| Control chord | old | −4: 29, −3: 117, −2: 227, −1: 234, 0: 233, 1: 223, 2: 56, 3: 33 | 1,152 / 1,247 | 7,168 | 0 | 29.2 / 10.0 | 1.38 / 1.85 | `20261013_200803_vw_L_C_chord` |
+| **Control chord** | **fixed** | −3: 119, −2: 231, −1: 239, 0: 238, 1: 228, 2: 57, 3: 33 | 1,144 / 1,219 | 7,123 | 0 | 28.3 / 9.6 | 1.27 / 1.73 | `20261013_201115_vw_N_C_chord` |
+| Control at z 7,200 | old | 0: 241, 1: 244, 2: 42, 3: 33 | 561 / 806 | 1,611 | 0 | 17.7 / 4.2 | 1.03 / 1.19 | `20261013_201227_vw_L_C_high` |
+| **Control at z 7,200** | **fixed** | −1: 228, 0: 240, 1: 244, 2: 42, 3: 33 | 787 / 847 | 1,861 | 0 | 21.3 / 6.0 | 1.22 / 1.44 | `20261013_201338_vw_N_C_high` |
+| Island M at z 7,200 | old | 0: 222, 1: 223, 2: 222, 3: 222 | 889 / 984 | 1,960 | 6 | 19.4 / 5.0 | 0.64 / 0.76 | `20261013_201446_vw_L_M_high` |
+| **Island M at z 7,200** | **fixed** | −1: 220, 0: 221, 1: 222, 2: 221, 3: 220 | 1,106 / 1,230 | 2,450 | 8 | 24.1 / 7.5 | 0.70 / 0.91 | `20261013_201557_vw_N_M_high` |
+| Island S at spawn | old | — | — / 1,512 | 0 | 0 | 16.7 / 0.9 | 0.64 / 0.64 | `20261013_201617_vw_L_S_settle` |
+| **Island S at spawn** | **fixed** | — | — / 1,518 | 0 | 0 | 16.7 / 0.9 | 0.73 / 0.73 | `20261013_201641_vw_N_S_settle` |
+
+What the numbers say:
+
+- **Off layer 0 the old window lost terrain.** Flying at z 7,200 it streamed nothing below layer 0: no sea floor on the
+  island and no terrain below z 0 on the control. Fixed, layer −1 loads (220-228 chunks); the cost is the work the old
+  window skipped (manager P95 +1.8 / +2.5 ms on these flights).
+- **It does not explain KI5 or KI11.** S at its spawn is unchanged (1,512 / 1,518, layer 0). On the chord the island
+  keeps seven full layers with either window; the fix only trades layer −4 for a full layer 3 (loaded mean +7%, peak
+  about the same, LOD re-meshes −9%). The audit still lists only KI11's top and bottom layer chunks (52 instead of 64).
+- **KI5, measured per layer.** On the same chord the island keeps 191-224 chunks in every layer from −3 to 3. The control
+  keeps 228-239 in layers −2 to 1 and only 33-119 in layers −3, 2 and 3, where its far-band slab culling trims columns to
+  their surface. The island's ~340 extra chunks (+30% on this route) are those three layers: +84, +145 and +158 in run a. Slab
+  culling for islands (§13.9) would remove most of them.
+- **The −2 floor is still a design question.** At z 7,200 the fixed window starts at layer −1, while the control's
+  ground-level run keeps 231 chunks in layer −2 and 119 in layer −3. For heightmap worlds the vertical range could come
+  from the terrain (the global bounds and per-column slab already bound it) instead of the viewer's altitude. The §13.1
+  I2 survey "from a camera 48,000 uu up" had a window entirely above the terrain (layer 10 ± offsets) with either window,
+  so its chunk-sized blank rectangles may be chunks that never streamed rather than a camera artefact; not re-checked.
+- **One regime, one editor:** the island chord gave 11,522 LOD re-meshes twice with the fixed window and 12,628 / 12,630
+  with the old one, so §13.10's schedule holds run to run. With one editor open the counts sit nearer §13.3's high mode
+  than §13.10's two-editor runs, as §13.10 predicted.

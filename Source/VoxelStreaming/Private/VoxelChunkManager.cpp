@@ -629,10 +629,13 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	const bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
 	const bool bNeedStreamingUpdate = bForceStreamingUpdate || bViewerChunkChanged;
 
-	// Update LOD strategy (always update for morph factor interpolation)
+	// Update LOD strategy (always update for morph factor interpolation). Timed on its own: it rebuilds
+	// the balanced LOD cache over the whole candidate volume and sat outside every section (§13.11).
 	if (LODStrategy)
 	{
+		const double LODUpdateStart = FPlatformTime::Seconds();
 		LODStrategy->Update(Context, DeltaTime);
+		Timing.LODUpdateMs = static_cast<float>((FPlatformTime::Seconds() - LODUpdateStart) * 1000.0);
 	}
 
 	// === Streaming decisions ===
@@ -4009,6 +4012,15 @@ int32 UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Contex
 
 	OutQueued = QueuedThisFrame;
 	return RemeshCandidates.Num();
+}
+
+void UVoxelChunkManager::GetBenchLoadedByLayer(TMap<int32, int32>& OutByLayer) const
+{
+	OutByLayer.Reset();
+	for (const FIntVector& ChunkCoord : LoadedChunkCoords)
+	{
+		++OutByLayer.FindOrAdd(ChunkCoord.Z);
+	}
 }
 
 void UVoxelChunkManager::GetBenchLODBacklog(int32& OutStale, int32& OutStaleNear) const

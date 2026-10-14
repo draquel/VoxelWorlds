@@ -219,6 +219,7 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.GenMs = T.GenerationMs;
 	S.MeshMs = T.MeshingMs;
 	S.LODMs = T.LODMs;
+	S.LODUpdateMs = T.LODUpdateMs;
 	S.StreamMs = T.StreamingMs;
 	S.TotalMs = T.TotalMs;
 	S.RenderMs = T.RenderSubmitMs;
@@ -262,6 +263,18 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	{
 		MemorySampleTimer = 0.0f;
 		SampleMemory();
+		if (Phase == EPhase::Traverse)
+		{
+			TMap<int32, int32> ByLayer;
+			ChunkManager->GetBenchLoadedByLayer(ByLayer);
+			for (const TPair<int32, int32>& Layer : ByLayer)
+			{
+				LayerLoadedSum.FindOrAdd(Layer.Key) += Layer.Value;
+				int32& Max = LayerLoadedMax.FindOrAdd(Layer.Key);
+				Max = FMath::Max(Max, Layer.Value);
+			}
+			++LayerSamples;
+		}
 	}
 	S.VoxelMB = LastMemory.VoxelMB;
 	S.EditMB = LastMemory.EditMB;
@@ -527,10 +540,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
@@ -543,7 +556,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.VoxelMB, S.EditMB, S.RendCPUMB, S.RendGPUMB, S.CollMB, S.ScatMB, S.ProcessMB,
 			S.ResidentN, S.UniformN, S.CompressedN, S.EmptyN,
 			S.FarCompMs, S.FarCompDispatchN, S.FarCompApplyN,
-			S.LODCand, S.LODQueued, S.LODStale, S.LODStaleNear);
+			S.LODCand, S.LODQueued, S.LODStale, S.LODStaleNear, S.LODUpdateMs);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 
@@ -551,7 +564,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 	int32 PeakGen = 0, PeakMesh = 0, PeakUnload = 0, MaxLoaded = 0;
 	float PeakVoxelMB = 0.0f, PeakRendGPUMB = 0.0f, PeakRendCPUMB = 0.0f, PeakCollMB = 0.0f, PeakScatMB = 0.0f, PeakProcessMB = 0.0f;
 	float PeakVoxelTotalMB = 0.0f;
-	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr, LODStaleArr, LODStaleNearArr;
+	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr, LODStaleArr, LODStaleNearArr, LODUpdateMsArr;
 	int32 LODEvalFrames = 0;
 	for (const FSample& S : Samples)
 	{
@@ -572,6 +585,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 		FarCompMsArr.Add(S.FarCompMs);
 		LODStaleArr.Add(static_cast<float>(S.LODStale));
 		LODStaleNearArr.Add(static_cast<float>(S.LODStaleNear));
+		LODUpdateMsArr.Add(S.LODUpdateMs);
 		LODEvalFrames += S.LODCand >= 0 ? 1 : 0;
 	}
 	auto Mean = [](const TArray<float>& Values)
@@ -639,6 +653,22 @@ void FVoxelStreamingBenchmark::WriteReport()
 	Json += FString::Printf(TEXT("  \"lodStaleMax\": %.0f,\n"), Percentile(LODStaleArr, 1.0f));
 	Json += FString::Printf(TEXT("  \"lodStaleNearMean\": %.1f,\n"), LODStaleNearMean);
 	Json += FString::Printf(TEXT("  \"lodStaleNearMax\": %.0f,\n"), Percentile(LODStaleNearArr, 1.0f));
+	// LOD strategy Update (balanced-LOD cache rebuild), a subset of totalMs timed since §13.11.
+	Json += FString::Printf(TEXT("  \"lodUpdateMsP50\": %.3f,\n"), Percentile(LODUpdateMsArr, 0.50f));
+	Json += FString::Printf(TEXT("  \"lodUpdateMsP95\": %.3f,\n"), Percentile(LODUpdateMsArr, 0.95f));
+	// Loaded chunks per layer over the traverse (memory-sample cadence): mean and max.
+	{
+		TArray<int32> Layers;
+		LayerLoadedSum.GetKeys(Layers);
+		Layers.Sort();
+		FString LayerJson;
+		for (const int32 Layer : Layers)
+		{
+			const double LayerMean = LayerSamples > 0 ? static_cast<double>(LayerLoadedSum[Layer]) / LayerSamples : 0.0;
+			LayerJson += FString::Printf(TEXT("%s\"%d\": [%.1f, %d]"), LayerJson.IsEmpty() ? TEXT("") : TEXT(", "), Layer, LayerMean, LayerLoadedMax.FindRef(Layer));
+		}
+		Json += FString::Printf(TEXT("  \"loadedByLayerMeanMax\": {%s},\n"), *LayerJson);
+	}
 	Json += FString::Printf(TEXT("  \"unloadLagMeanMs\": %.1f,\n"), UnloadLagMean);
 	Json += FString::Printf(TEXT("  \"unloadLagMaxMs\": %.1f,\n"), UnloadLagMax);
 	Json += FString::Printf(TEXT("  \"unloadCount\": %lld,\n"), UnloadLagCount);

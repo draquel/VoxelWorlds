@@ -346,6 +346,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 	const int32 MaxChunkRadius = FMath::CeilToInt(MaxViewDistance / ChunkWorldSize) + 1;
 
+	// Absolute chunk layers (the viewer's layer + the mode's vertical offsets).
 	int32 MinZ, MaxZ;
 	GetVerticalChunkRange(Context, MinZ, MaxZ);
 
@@ -356,7 +357,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 		{
 			for (int32 Z = MinZ; Z <= MaxZ; ++Z)
 			{
-				const FIntVector ChunkCoord = ViewerChunk + FIntVector(X, Y, Z);
+				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, Z);
 				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 
@@ -745,6 +746,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 	const int32 MaxChunkRadius = FMath::CeilToInt(MaxViewDistance / FMath::Max(ChunkWorldSize, 1.0f)) + 1;
 
+	// Absolute chunk layers, as in GetVisibleChunks.
 	int32 MinZ, MaxZ;
 	GetVerticalChunkRange(Context, MinZ, MaxZ);
 
@@ -756,7 +758,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		{
 			for (int32 Z = MinZ; Z <= MaxZ; ++Z)
 			{
-				const FIntVector ChunkCoord = ViewerChunk + FIntVector(X, Y, Z);
+				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, Z);
 				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 
