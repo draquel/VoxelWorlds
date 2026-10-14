@@ -13,7 +13,9 @@ meant to be supported, and records what spherical mode still needs:
   [SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md). This plan only summarises them (§7).
 
 The review runs the scenarios in §4 and §5 and records results against the acceptance criteria in §1. A second
-revision of this document will then turn the confirmed findings into work items.
+revision of this document then turns the confirmed findings into work items. **Second revision, 2026-10-14: §14**
+(the status of every finding, work items with sizes and dependencies, milestones M1-M6, and where spherical starts),
+with the decisions it needed in §8.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -52,7 +54,8 @@ the review's outputs.
 Four read-only code surveys (2026-10-12) found the items below. The review confirms or dismisses each one. IDs are
 stable, so the follow-up plan can refer to them. Review A has ruled on KC1-KC9 and added KC10-KC14 and G1-G6 (§12.3, §12.4).
 Review B has ruled on KI1-KI11 and added KI12-KI15 and G7-G9 (§13.6, §13.7); KI12 was explained and fixed, and G10
-found, in §13.10; the vertical-window bug in §13.11.
+found, in §13.10; the vertical-window bug in §13.11. §14.1 gives every finding's current status and its work item; it
+names the §13.11 findings G11-G13.
 
 ### Cubic
 
@@ -183,21 +186,23 @@ estimate of the largest island the current streaming-only model can hold. **Done
 
 "Critical" means needed to call the mode on par with InfinitePlane for this project's game. "Nice to have" means
 it would make the mode better without blocking parity. The review confirms the critical list; the follow-up
-plan sizes and orders it.
+plan sizes and orders it. *(Second revision, 2026-10-14: §14 sizes and orders it. With D1 decided as terrain-only,
+the cubic rows that serve the game systems are first-class only and deferred; the work item for each row is in its
+class column.)*
 
 ### Cubic
 
 | Feature | Class | Notes |
 |---------|-------|-------|
 | Cubic without the LOD system (D7) | Critical, **done 2026-10-13 (§12.7)** | KC1, KC11. Decided 2026-10-13: cubic forces LOD off, and greedy meshing is its LOD mechanism until there is a good reason to change it. Key far compression on distance so the LOD-off path keeps it. Measured in §12.2: LOD off already beats smooth per frame (before compression; §12.7 has the numbers with it). A far representation (coarse mesh or impostor) or a shorter cubic view distance is the only route to renderer-memory parity, and is not planned |
-| Block-accurate player editing | Critical | KC5. Dig at `ImpactPoint − ½·VoxelSize·normal`, place at `+ ½·VoxelSize·normal`, set whole voxels (0/255) so one click equals one block. Port the test actor's discrete editing into the player path when the mode is cubic |
-| Block-top surface query | Critical | KC6. A cubic surface height that snaps to the top of the solid voxel, used by spawn, NPCs, POIs, campsites and world items |
-| Step policy | Critical | KC7. Keep "every block is a jump" and make nav and NPC auto-jump agree with block heights, or auto-step one block (decision D5) |
-| Cubic-aware pads and aprons | Critical | KC6. Flat whole-voxel pads and stepped aprons for POIs and campsites |
-| Correct scatter on block faces | Critical | KC4. Route cubic to the CPU extractor (or teach GPU extraction about block faces) and make `BlockFaceSnap` real |
-| Seam support for cubic, or keep the legacy path | Critical (decision) | KC2. Cubic seam jobs are "trivially compatible" per the seam doc (face culling across the pair). Doing it lets the legacy neighbour-slice and revalidation machinery be deleted. The alternative is keeping that machinery for cubic alone. See D1. Measured in §12: with LOD off, the legacy cascade is the main remaining catch-up cost (2.0 meshes per chunk, catch-up 1.6-3.2× smooth) |
-| GPU cubic meshing in streaming, or delete it | Nice | KC3. Today it is dead weight that only tests use |
-| Choppable voxel trees | Nice | KC9. Felling removes connected log and leaf voxels and yields wood like HISM trees do |
+| Block-accurate player editing | Critical, **WM-C2** | KC5. Dig at `ImpactPoint − ½·VoxelSize·normal`, place at `+ ½·VoxelSize·normal`, set whole voxels (0/255) so one click equals one block. Port the test actor's discrete editing into the player path when the mode is cubic |
+| Block-top surface query | First-class only, **deferred (D1)** | KC6. A cubic surface height that snaps to the top of the solid voxel, used by spawn, NPCs, POIs, campsites and world items |
+| Step policy | First-class only, **deferred (D1)** | KC7, KC12. Keep "every block is a jump" and make nav and NPC auto-jump agree with block heights, or auto-step one block (decision D5) |
+| Cubic-aware pads and aprons | First-class only, **deferred (D1)** | KC6. Flat whole-voxel pads and stepped aprons for POIs and campsites |
+| Correct scatter on block faces | Critical, **WM-C3** | KC4. Route cubic to the CPU extractor (or teach GPU extraction about block faces) and make `BlockFaceSnap` real |
+| Seam support for cubic, or keep the legacy path | Critical, **decided with D1: seam support (WM-C1)** | KC2. Cubic seam jobs are "trivially compatible" per the seam doc (face culling across the pair). Doing it lets the legacy neighbour-slice and revalidation machinery be deleted. The alternative is keeping that machinery for cubic alone. See D1. Measured in §12: with LOD off, the legacy cascade is the main remaining catch-up cost (2.0 meshes per chunk, catch-up 1.6-3.2× smooth) |
+| GPU cubic meshing in streaming, or delete it | Nice, **decided with D1: delete (WM-C4)** | KC3. Today it is dead weight that only tests use |
+| Choppable voxel trees | Nice, first-class only, **deferred (D1)** | KC9. Felling removes connected log and leaf voxels and yields wood like HISM trees do |
 | Block highlight and placement preview | Nice | Outline of the targeted block and a ghost of the block to place |
 | Per-material hardness and break time | Nice | Mining feel; drops per material |
 
@@ -205,23 +210,26 @@ plan sizes and orders it.
 
 | Feature | Class | Notes |
 |---------|-------|-------|
-| A world edge | Critical | KI2. An ocean that continues to the horizon beyond the loaded ring (far water plane or ring), a seabed that slopes down instead of the `EdgeHeight - 1000` cliff, and a boundary rule. The rule can be soft (current pushes back, swim limit with a warning) or hard (blocking volume) |
-| A world-bounds query on `IVoxelWorldMode` | Critical | KI1, KI9. `IsInsideWorld(X, Y)` / `GetWorldBounds()`, used by POI placement, PCG, NPC spawning, spawn, map exploration and navigation |
-| World-mode-aware POI height sampling | Critical | KI1. Sample through `IVoxelWorldMode` instead of `FInfinitePlaneWorldMode` |
-| One definition of the island centre | Critical | KI3, KI4. `WorldOrigin` plus offset everywhere, built by a single params builder |
-| Save-key fingerprint | Critical | KI7. World mode, shape params and a generation version in the key or the save header |
-| Slab culling for islands | Critical (perf) | KI5. Use the analytic height for the far-band slab |
+| A world edge | Critical, **WM-I4/WM-I5 (recovery, boundary), WM-E1 (the visible edge)** | KI2, KI14. An ocean that continues to the horizon beyond the loaded ring (far water plane or ring), a seabed that slopes down instead of the `EdgeHeight - 1000` cliff, and a boundary rule. The rule can be soft (current pushes back, swim limit with a warning) or hard (blocking volume). *Decided with D9: hard at R+F, with a soft push-back before it, and a respawn as the safety net* |
+| A world-bounds query on `IVoxelWorldMode` | Critical, **WM-A2** | KI1, KI9. `IsInsideWorld(X, Y)` / `GetWorldBounds()`, used by POI placement, PCG, NPC spawning, spawn, map exploration and navigation |
+| World-mode-aware POI height sampling | Critical, **WM-A3 + WM-I1** | KI1. Sample through `IVoxelWorldMode` instead of `FInfinitePlaneWorldMode` |
+| One definition of the island centre | Critical, **WM-A1** | KI3, KI4. `WorldOrigin` plus offset everywhere, built by a single params builder |
+| Save-key fingerprint | Critical, **WM-A4** | KI7. World mode, shape params and a generation version in the key or the save header |
+| Slab culling for islands | Critical (perf), **WM-S1** | KI5. Use the analytic height for the far-band slab. *Widened by D8: every heightmap world takes its vertical range from the terrain* |
+| 3D LOD distance for islands | Critical (perf), **WM-S2** *(added 2026-10-14)* | KI13, KI11. Measure LOD distance in 3D like InfinitePlane; the island boundary cull stays 2D |
 | Whole-island map | Nice | A finite world can pre-render its whole map at load, clamp the world map to the island, and stop exploration at the coast |
 | Distant island silhouette | Nice | A low-resolution whole-island mesh so the island stays visible from the sea beyond the view distance |
 | Pre-generation for small islands | Nice | Generate everything at load, keep it compressed and resident, optionally cache it on disk. Builds on I3's numbers |
 | Coastline shaping | Nice | A noise-perturbed coastline instead of a perfect circle, a beach band material rule, and optional cliffs |
-| Bowl shape | Nice | KI4. Implement `bIslandBowlShape` or remove it |
+| Bowl shape | Nice | KI4. Implement `bIslandBowlShape` or remove it. *WM-H6 removes the unread flag; a real bowl shape stays a nice-to-have* |
+| Map tile eviction | Critical past ~10 km, **WM-E2** *(added 2026-10-14)* | KI15. The first cost that grows with the island (§13.8) |
 | Archipelago | Nice | Several islands per world |
 | WP placed-actor POI clusters | Nice | Deferred until POIs become placed actors (`Research/ENGINE_INTEGRATION.md`) |
 
 ### Spherical
 
-See §7 and [SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md).
+See §7 and [SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md). §14.4 places its phases in this
+plan's milestones.
 
 ## 7. Spherical planet (summary)
 
@@ -241,17 +249,20 @@ code sites).
 ## 8. Decisions
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
-(SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR.
+(SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended.
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
-| D1 | How far is cubic supported: first-class (every game system), terrain-only (meshing, streaming, editing), or dropped? | Decide **after** Review A, using its numbers. The review is scoped to gather the evidence. **Review A recommends terrain-only (§12.5); awaiting the decision** |
+| D1 | How far is cubic supported: first-class (every game system), terrain-only (meshing, streaming, editing), or dropped? | Decide **after** Review A, using its numbers. The review is scoped to gather the evidence. Review A recommended terrain-only (§12.5). **Decided 2026-10-14: terrain-only.** Cubic gets meshing, streaming, editing and CPU scatter (milestone M5): it moves onto the seam path, so the legacy neighbour path can be deleted (WM-C1), block-accurate editing (WM-C2), cubic scatter on the CPU extractor (WM-C3), and the GPU cubic mesher is deleted (WM-C4). The game-system items (block-top surface query and cubic pads, KC6; two-block rises, KC7; melee height, KC12; choppable voxel trees, KC9) wait until a game needs cubic |
 | D2 | Island sizes for Review B | S / M / L as in §5 |
-| D3 | Performance acceptance and memory budget | Relative to the InfinitePlane control (§1). Set the absolute memory budget after I3 measures full residency on S. **Proposed in §13.4:** 0.6 GB of voxel systems memory settled for a fully resident S-class island; at most 1.5 GB peak while streaming at any speed and tier |
+| D3 | Performance acceptance and memory budget | Relative to the InfinitePlane control (§1). Set the absolute memory budget after I3 measures full residency on S. Proposed in §13.4. **Accepted 2026-10-14:** 0.6 GB of voxel systems memory settled for a fully resident S-class island; at most 1.5 GB peak while streaming at any speed and tier. Benches report against it from now on |
 | D4 | Build T1-T5 before the review? | Yes, as one small PR. T6 optional |
 | D5 | Cubic step policy | Keep "every block is a jump" (current design) and make nav and NPC auto-jump agree with block heights |
 | D6 | Spherical scope (planet size, cubic on planets, game systems, orbit) | See the requirements doc, §2 |
 | D7 | Cubic LOD *(decided 2026-10-13, after Review A; implemented the same day, §12.7)* | Cubic forces the LOD system off (`MeshingMode == Cubic` overrides `bEnableLOD`). Greedy meshing is cubic's LOD mechanism until there is a good reason to change it, so block downsampling and other cubic LOD schemes are out of scope. Pair it with far compression keyed on distance (KC11): forcing LOD off alone trades the LOD cost for uncompressed voxel memory (§12.2) |
+| D8 | Where heightmap worlds (InfinitePlane, IslandBowl) take their vertical streaming range from *(decided 2026-10-14, from §13.11)*. Today it is the viewer's layer −2 to +8 (island +4), clipped to the world's height range, so a viewer above layer 0 loses the ground below | **From the terrain.** Every column loads its own surface slab (the world mode's analytic surface ± 1.5 chunks, and up to the water plane) at every distance, islands included. Near the viewer (band 0) the viewer's own layer ± 2 is also loaded, for caves, dungeons and digging. The viewer's altitude only adds layers; it never removes the ground. This is WM-S1 and subsumes slab culling for islands (KI5). Keep the window a per-column interval supplied by the world mode, so the planet version (a shell around the surface, SP-C1/SP-C5) has the same shape |
+| D9 | Order of work, island priorities and where spherical starts *(decided 2026-10-14)* | **Island first, then cubic, then spherical** (§14.3): M1 hygiene, M2 the world-mode API, M3 island correctness, M4 the streaming window, M5 cubic terrain-only, M6 the visible island edge and map tile eviction, then spherical Phase 1. Correctness before performance on the island. The island's boundary is **hard at R+F**, with a soft push-back in the sea before it, and falling out of the world respawns the pawn (KI14). Spherical Phase 0 (guardrails) rides in M1, and the heightmap side of its API (SP-A1, SP-A2, SP-A6, SP-G9) in M2; Phase 1 starts after M4 (the window shape SP-C1 needs) and M5 (the legacy path is gone before spherical touches streaming). The order is a priority, not a strict sequence: §14.3 lists what can run in parallel |
 
 ## 9. Order of work
 
@@ -260,9 +271,10 @@ code sites).
    implemented the same day (§12.7), and the compression encode moved to a worker thread (G6, §12.8).
 3. **Review B: island** (I1-I10): done 2026-10-13, results in §13 (I10 not run). KI1-KI3, KI5-KI7 and KI10-KI11
    confirmed, KI4, KI8 and KI9 partly; new KI12-KI15. KI12 (bimodal LOD re-meshing) explained and fixed the same day:
-   a latch in LOD evaluation, in every world mode (§13.10).
+   a latch in LOD evaluation, in every world mode (§13.10); the vertical candidate window was fixed with it (§13.11).
 4. **Second revision of this plan:** confirmed findings become work items with sizes and an order, alongside the
-   spherical phasing.
+   spherical phasing. Done 2026-10-14: §14, with D1, D3, D8 and D9 decided (§8).
+5. **The work items** in the order of §14.3: M1 → M2 → M3 → M4 → M5 → M6, then spherical Phase 1.
 
 ## 10. Early signals from the tooling verification
 
@@ -277,7 +289,8 @@ These are not review results; the runs were short and only checked the tooling. 
 
 ## 11. Documentation that disagrees with the code
 
-Collected by the surveys. These get fixed with the follow-up work, or sooner if cheap.
+Collected by the surveys. These get fixed with the follow-up work, or sooner if cheap. *(§14: the ones still open are
+work item WM-H9 in M1; the spherical ones go with spherical Phase 0.)*
 
 - `Features/WORLD_MODES.md:402-406` says POI placement uses the correct math in every mode (false, KI1). The
   `:163-167` cull description omits the chunk-diagonal ring and the floor in it. The `:343-347` chunk-count table
@@ -1109,6 +1122,8 @@ The critical list in §6 stands, with this evidence and these additions:
 - **Save fingerprint** (KI7), **one island-centre definition** (KI3) and **the bounds query** (KI9) as already listed.
 - Add: **evict or downsample map tiles** (KI15) before islands larger than about 10 km.
 
+§14 turns this list into work items (M2-M4 and M6).
+
 ### 13.10 KI12 explained and fixed: when LOD levels are evaluated (2026-10-13)
 
 **Cause.** `UVoxelChunkManager::EvaluateLODLevelChanges` walks every loaded chunk, compares its committed LOD with the
@@ -1330,3 +1345,195 @@ What the numbers say:
 - **One regime, one editor:** the island chord gave 11,522 LOD re-meshes twice with the fixed window and 12,628 / 12,630
   with the old one, so §13.10's schedule holds run to run. With one editor open the counts sit nearer §13.3's high mode
   than §13.10's two-editor runs, as §13.10 predicted.
+
+## 14. Second revision: work items (2026-10-14)
+
+This section turns the findings of §12 and §13 into work items. It was written after the review and fix PRs merged
+(VoxelWorlds `630e4a5`, UE5_PluginDev `0bc5ee2`; the `VoxelWorlds+VoxelWorldSave` suites pass 219/219 headless on
+that build) and follows the decisions of 2026-10-14 in §8: D1 (cubic is terrain-only), the D3 memory budget, D8 (the
+vertical range comes from the terrain) and D9 (the order of work).
+
+Sizes are as in the QA refinement plan: S = a few hours, M = a day or two, L = several days. Work item IDs (`WM-*`)
+are stable. Repos: VoxelWorlds; parent = UE5_PluginDev, which holds the game module, VoxelWorldPOI and
+VoxelWorldSave; VCP = VoxelCharacterPlugin.
+
+### 14.1 Status of every finding
+
+Fixed; Open (confirmed, with a work item); Partly (some clauses confirmed, the rest dismissed); Deferred (confirmed,
+no work until a decision changes); Dismissed (not a defect, or not worth the work).
+
+Three findings from §13.11 get IDs here:
+
+- **G11:** the vertical candidate window counted the viewer's layer twice. Fixed in §13.11.
+- **G12:** the balanced-LOD cache is rebuilt over the whole candidate volume every tick, even for a still viewer:
+  1.3-1.4 ms P50 and 1.7-1.9 ms P95 on the control's chord, 0.6-0.7 ms standing still.
+- **G13:** the vertical range follows the viewer's altitude. Above layer 0 the lowest terrain layers are not streamed:
+  at z 7,200 nothing below layer −1 loads, where the control on the ground keeps 231 chunks in layer −2. The I2 blank
+  rectangles seen from 48,000 uu up (§13.1) are probably this; not re-checked.
+
+**Cubic:**
+
+| ID | Finding | Status | Work item |
+|----|---------|--------|-----------|
+| KC1 | Cubic paid for a LOD system it does not use | Fixed (D7, §12.7) | — |
+| KC2 | Cubic is the last user of the legacy whole-chunk path | Open. On the intended path it is cubic's main remaining cost: PIE catch-up 1.6-3.2× the control, legacy neighbour slices 2.6 ms of the manager's slowest ticks (§12.8) | WM-C1 |
+| KC3 | GPU cubic meshing is test-only | Open as dead code (D1: delete it). The test hazard was fixed by T5 | WM-C4 |
+| KC4 | Cubic scatter is wrong with GPU extraction | Open | WM-C3 |
+| KC5 | Player dig and place are tuned for smooth terrain | Open | WM-C2 |
+| KC6 | Surface queries return the smooth surface, so props sink into blocks | Deferred (D1: first-class only) | — |
+| KC7 | Two-block rises strand NPCs | Partly confirmed; deferred (D1) | — |
+| KC8 | No content exercises cubic | Partly fixed: the review configs exist. `DemoCubicWorldConfig` is stale and `Config/CubicScatterConfig` orphaned | WM-H5 |
+| KC9 | Voxel trees are not gameplay | Deferred (D1). The unlimited yield from one voxel is G3 | — |
+| KC10 | The smooth config's tree templates use material IDs that do not exist | Open | WM-H4 |
+| KC11 | Far compression was keyed on the LOD level | Fixed (§12.7) | — |
+| KC12 | Melee misses across a one-block height difference | Deferred (D1) | — |
+| KC13 | Vertical walls at the edge of the loaded region | Dismissed: cosmetic, visible only from beyond the view distance. WM-C1 changes how cubic meshes chunk boundaries; recheck it there | (WM-C1) |
+| KC14 | The legacy path re-queues a waiting chunk every frame | Dismissed as a defect: it inflates a bench counter, not the meshing. The loop goes away with WM-C1 | (WM-C1) |
+
+**Island:**
+
+| ID | Finding | Status | Work item |
+|----|---------|--------|-----------|
+| KI1 | POI placement samples InfinitePlane height in every mode | Open | WM-A3, WM-I1 |
+| KI2 | No world edge | Open | WM-I5 (boundary), WM-E1 (visible edge) |
+| KI3 | The island centre means two different things | Open | WM-A1 |
+| KI4 | Shape-parameter defects | Partly: the unread `bIslandBowlShape`, the Exponential falloff's residual step and the four param builders are open; `GetDensityAt` calling the floor air is latent; the `GetTerrainHeightBounds` clause is dismissed | WM-H6, WM-A1 |
+| KI5 | No far-band slab culling on islands | Open: +30-55% loaded chunks; on the chord the excess sits in layers −3, 2 and 3 (§13.11) | WM-S1 |
+| KI6 | No finite-world concept; `MaxLoadedChunks` is read nowhere | Open for the setting. Pre-generation and baking stay nice-to-haves (§6) | WM-S3 |
+| KI7 | The save key ignores world shape | Open | WM-A4 |
+| KI8 | Spawn is only water-aware | Partly: off the island with water off, the floor counts as land and the pawn freezes | WM-I3 |
+| KI9 | Consumers have no island mask | Partly: open for map exploration, the world map and markers, and by code for PCG and water-off navigation; dismissed for scatter and surface NPCs | WM-I2 |
+| KI10 | Island test coverage is minimal | Partly fixed: three probe tests (§13). The probes become assertions with the fixes; `WP_IslandBowlConfig` is unused | WM-I6 |
+| KI11 | The residency audit and island LOD measure distance differently | Open (false findings) | WM-S2 |
+| KI12 | Bimodal LOD re-meshing | Fixed (§13.10), in every world mode | — |
+| KI13 | Island LOD distance is 2D, so whole columns stay in the near bands | Open | WM-S2 |
+| KI14 | No recovery when the pawn leaves the generated world | Open; not island-specific | WM-I4 |
+| KI15 | Map tile images are never evicted | Open; not island-specific, but it is what limits islands past about 10 km (§13.8) | WM-E2 |
+
+**Mode-independent and tooling:**
+
+| ID | Finding | Status | Work item |
+|----|---------|--------|-----------|
+| G1 | The world component's vertex, triangle and GPU memory stats only ever add | Open | WM-H2 |
+| G2 | A Subtract on a Set voxel replaces the Set | Open | WM-H3 |
+| G3 | Gathering pays out on every dig, without limit on one voxel | Open | WM-H7 |
+| G4, G8 | `follow=` routes over the sea drown the pawn | Open (tooling) | WM-H8 |
+| G5 | The bench's thrash counter counts deferral re-queues | Open (tooling) | WM-H8 |
+| G6 | The compression encode ran on the game thread | Fixed (§12.8) | — |
+| G7 | Streaming follows the view target, not the pawn | Dismissed: by design (a survey camera is a viewer). Release `pie_camera` before moving the pawn | — |
+| G9 | The bench puts the pawn back at its start with no settle | Open (tooling) | WM-H8 |
+| G10 | The bench's re-mesh counter counted reloads | Fixed (§13.10) | — |
+| G11 | The vertical window counted the viewer's layer twice | Fixed (§13.11) | — |
+| G12 | The balanced-LOD cache is rebuilt every tick | Open | WM-H1 |
+| G13 | The vertical range follows the viewer's altitude | Open (D8) | WM-S1; recheck in WM-S4 |
+| T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
+| §11 | Documentation that disagrees with the code | Partly fixed (the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note) | WM-H9, WM-H10 |
+| I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
+
+### 14.2 Work items
+
+**M1. Hygiene.** Small and independent: any order, in parallel, one PR each or a few bundled.
+
+| ID | Work item | Findings | Repos | Size | Needs |
+|----|-----------|----------|-------|------|-------|
+| WM-H1 | **Rebuild the balanced-LOD cache only when the viewer moves.** Trigger it the way `FVoxelLODEvalSchedule` triggers LOD evaluation (viewer chunk change or 100 uu of movement), plus config and bounds changes. `LODUpdateMs` shows the result: about 0 for a still viewer, with the control chord's LOD re-meshes and stale-LOD columns unchanged within one batch | G12 | VoxelWorlds | S | — |
+| WM-H2 | **Renderer stats report current values.** `GetTotalVertexCount`, `GetTotalTriangleCount` and `GetGPUMemoryUsage` subtract on unload and replace, or read the renderer's `GetDebugStats` | G1 | VoxelWorlds | S | — |
+| WM-H3 | **A Subtract composes with a Set.** A dig under a POI pad removes only what the brush reaches. Edit-layer test plus a save round trip | G2 | VoxelWorlds | M | — |
+| WM-H4 | **Valid tree templates.** Fix `DemoSmoothWorldConfig`'s leaf and trunk IDs (Wood 20, Leaves 21), and warn at config load when a template uses a material ID the registry does not have | KC10 | VoxelWorlds, parent (content) | S | — |
+| WM-H5 | **Cubic content.** Bring `DemoCubicWorldConfig` to the intended path (greedy; LOD is forced off since D7) or replace it with `Review_Cubic`; delete the orphaned `Config/CubicScatterConfig` | KC8 | parent (content) | S | — |
+| WM-H6 | **Island shape parameters.** Remove the unread `bIslandBowlShape` (a real bowl shape stays a nice-to-have in §6), make Exponential falloff reach 0 at R+F, and make `FIslandBowlWorldMode::GetDensityAt` agree with generation beyond R+F | KI4 | VoxelWorlds | S | — |
+| WM-H7 | **Gathering yields once per voxel.** Pay out only when a dig turns a solid voxel to air | G3 | VCP | S | — |
+| WM-H8 | **Bench tooling.** A pawn the bench is flying cannot drown (G4, G8); the end-of-run restore holds the pawn until collision under it is ready (G9); the thrash counter counts executed meshes, not queue insertions (G5) | G4, G5, G8, G9 | VoxelWorlds | S | — |
+| WM-H9 | **Docs.** The §11 items still open (the spherical ones go with WM-H10); refresh `Research/PERFORMANCE_TARGETS.md` from the review's control numbers, as §1 asked; `Features/WORLD_MODES.md`'s island sections from §13's numbers | §11 | VoxelWorlds | S | — |
+| WM-H10 | **Spherical Phase 0, guardrails.** SP-A5 (config validation and honest UI), SP-B3 (spherical worlds generate on the CPU and log why) and SP-I1 (a planet config and test map), plus the spherical doc corrections in §11 | — | VoxelWorlds, parent (content) | M | — |
+
+**M2. The world-mode API.** Shared by the island work and spherical. VoxelWorlds stays independent of the game plugins:
+game-side callers (VoxelWorldPOI, VCP, the game module) reach the API through the world actor, as they already reach
+the chunk manager's surface queries.
+
+| ID | Work item | Findings | Repos | Size | Needs |
+|----|-----------|----------|-------|------|-------|
+| WM-A1 | **One params builder per world mode.** Generation (CPU and GPU), the LOD cull, the map, the editor field viewer and the chunk manager build island params (and planet params, SP-A6) with one function, and the island centre is `WorldOrigin` plus the offset everywhere. `CullCentreProbe` becomes an assertion: no land column culled with the demo's origin | KI3, KI4 | VoxelWorlds | M | WM-H6 (same code; do it first or together) |
+| WM-A2 | **Bounds and a local frame on `IVoxelWorldMode`.** `IsInsideWorld(X, Y)` and `GetWorldBounds()` (island: the R+F footprint; plane: unbounded; planet: the shell), and SP-A1/SP-A2 with their heightmap implementations: `GetUpVector` is +Z, `GetAltitude` is Z above the datum, `WorldToSurface` is (0, X, Y). The planet implementations come with spherical Phase 1. Blueprint-callable through the world actor | KI1, KI9 | VoxelWorlds | M | WM-A1 |
+| WM-A3 | **Height through the world mode.** The LOD strategy's slab sampling and POI placement call the configured world mode instead of `FInfinitePlaneWorldMode`'s static height math | KI1, KI5 | VoxelWorlds, parent (VoxelWorldPOI) | S-M | WM-A1 |
+| WM-A4 | **Save fingerprint.** The save header records the world mode, the shape params and a generation version. On a mismatch the save is not loaded: logged, kept on disk, and the world starts fresh. Shared with SP-G9 | KI7 | parent (VoxelWorldSave) | S-M | WM-A1 |
+
+**M3. Island correctness.** Afterwards nothing is placed, explored or spawned past the coast, and leaving the world
+cannot soft-lock the player.
+
+| ID | Work item | Findings | Repos | Size | Needs |
+|----|-----------|----------|-------|------|-------|
+| WM-I1 | **POI placement on the island.** Sites outside the bounds are not placed. Sites in the falloff band are judged on the island's height (RequireLand, the water check, the dungeon cover rule), so pads no longer raise plateaus out of the sea. `POIPlacementProbe` becomes an assertion on S, M and L: no POI past R+F, no land POI under water | KI1 | parent (VoxelWorldPOI) | M | WM-A2, WM-A3 |
+| WM-I2 | **Consumers respect the bounds.** Map exploration stops at the bounds and the world map's pan is clamped to them; markers only inside; the PCG sampler skips points outside; navigation treats outside as blocked, water on or off | KI9 | VoxelWorlds (map, PCG, navigation), parent (markers) | M | WM-A2 |
+| WM-I3 | **Spawn inside the world.** The spawn search rejects points outside the bounds, so the off-island floor is never taken for land | KI8 | VCP | S | WM-A2 |
+| WM-I4 | **Recovery.** Falling out of the world (KillZ) runs the death and respawn path instead of destroying the pawn, and the chunk-based collision wait gives up after a timeout and moves the pawn to the respawn point. Every world mode | KI14 | VCP, parent (game module) | S-M | — |
+| WM-I5 | **The boundary (D9).** A hard boundary at R+F, taken from the bounds query, and a soft push-back in the last stretch of sea before it, with a HUD hint | KI2 | VoxelWorlds (boundary), VCP (push-back), parent (HUD) | M | WM-A2, WM-I4 |
+| WM-I6 | **Island tests and content.** The probe assertions above; delete or tune `WP_IslandBowlConfig` | KI10 | VoxelWorlds, parent | S | WM-A1, WM-I1 |
+
+**M4. The streaming window.** Every heightmap world; the island's performance items.
+
+| ID | Work item | Findings | Repos | Size | Needs |
+|----|-----------|----------|-------|------|-------|
+| WM-S1 | **Vertical range from the terrain (D8).** In heightmap modes a column's candidates are its surface slab (the world mode's height ± 1.5 chunks, up to the water plane) at every distance, plus the viewer's layer ± 2 within band 0. The viewer-relative −2 to +8 offsets go. The slab samples the world mode (WM-A3), so islands get it. Check caves, dungeon rooms and edited chunks below the slab near the viewer, the island's floor ring, and a flight at z 7,200 | KI5, G13 | VoxelWorlds | M | WM-A3, WM-H1 (same function) |
+| WM-S2 | **3D LOD distance for islands.** Islands measure LOD distance in 3D like InfinitePlane, and the island boundary cull stays 2D. The residency audit then agrees with the unload rule | KI13, KI11 | VoxelWorlds | S | — |
+| WM-S3 | **Remove `MaxLoadedChunks`.** The view distance and the island cull already bound residency (§13.4); document what does | KI6 | VoxelWorlds | S | — |
+| WM-S4 | **Re-bench, one batch, one build.** Island M chord, perimeter and coast at v1500-v6000, S at its spawn, flights at z 7,200 and the I2 survey from 48,000 uu, each with the control. Check §1's thresholds and the D3 budget, and update §13's verdicts | KI5, KI11, KI13, G13 | VoxelWorlds (docs) | M | WM-S1, WM-S2 |
+
+**M5. Cubic, terrain-only (D1).**
+
+| ID | Work item | Findings | Repos | Size | Needs |
+|----|-----------|----------|-------|------|-------|
+| WM-C1 | **Cubic on the seam path.** The faces on a chunk boundary belong to the pair's seam job, which culls them against both chunks' voxels (the seam doc's "trivially compatible" case), so a chunk no longer waits for its neighbours' data to mesh its interior. Then delete the legacy neighbour-slice extraction, the deferral, `CaptureMeshDeps`/revalidate, the 26-neighbour re-mesh on generation and the seam registry's stub jobs. Add a cubic streaming test, and re-run C2 and §12.8's benches against a same-build control. Recheck KC13 | KC2, KC13, KC14 | VoxelWorlds | L | — |
+| WM-C2 | **Block-accurate editing.** In cubic the player digs at `ImpactPoint − ½·VoxelSize·normal`, places at `+ ½·VoxelSize·normal` and sets whole voxels, so one click is one block; the demo brush runs with `bUseDiscreteEditing` in cubic | KC5 | VCP, VoxelWorlds | M | — |
+| WM-C3 | **Cubic scatter on the CPU extractor.** Cubic skips the GPU extraction branch, and `PlacementMode = BlockFaceSnap` is read | KC4 | VoxelWorlds | S | — |
+| WM-C4 | **Delete the GPU cubic mesher** and its tests; the README stops claiming it | KC3 | VoxelWorlds | S | — |
+
+**M6. The island's visible edge and scale.**
+
+| ID | Work item | Findings | Repos | Size | Needs |
+|----|-----------|----------|-------|------|-------|
+| WM-E1 | **A visible world edge.** An ocean plane or ring that continues to the horizon beyond the loaded ring, and a seabed that slopes down from the coast instead of the 1,000 uu cliff at R+F, so the island no longer floats in a void seen from outside | KI2 | VoxelWorlds | M-L | WM-A2, WM-I5 |
+| WM-E2 | **Map tile eviction.** Evict tile images by distance or least recent use and regenerate them on demand (the explored keys stay in the save), or keep far tiles at a coarser resolution | KI15 | VoxelWorlds (map) | M | — |
+
+**Not scheduled.** The island nice-to-haves of §6 (whole-island map, distant silhouette, pre-generation, coastline
+shaping, a real bowl shape, archipelago, World Partition POI clusters) and the cubic first-class items (KC6, KC7,
+KC9, KC12, block highlight, hardness) until D1 changes.
+
+### 14.3 Milestones and order
+
+D9's order is a priority, not a strict sequence. Rough totals assume S ≈ half a day, M ≈ 1.5 days, L ≈ 4 days.
+
+| Milestone | Work items | Rough total | Needs | Done when |
+|-----------|------------|-------------|-------|-----------|
+| M1 Hygiene | WM-H1 to WM-H10 | ~7 days, mostly in parallel | — | Each item's check; a still viewer's `LODUpdateMs` ≈ 0; headless suites and the in-editor GPU tests green |
+| M2 World-mode API | WM-A1 to WM-A4 | ~5 days | WM-H6 | Island params come from one builder; `CullCentreProbe` asserts; a save from a different radius is refused and the world starts fresh; the control's bench unchanged within batch noise |
+| M3 Island correctness | WM-I1 to WM-I6 | ~6.5 days | M2 | `POIPlacementProbe` asserts; I5-I8 re-run: swimming out stops at R+F, falling out respawns, an off-island spawn stands on land, a radius change starts fresh; the I6 tour finds no marker or explored tile past the bounds |
+| M4 Streaming window | WM-S1 to WM-S4 | ~4 days | WM-A3, WM-H1 | WM-S4: island M within §1's thresholds on chord, perimeter and coast; peak loaded chunks within +25% of the control; the D3 budget met on every run, M's v6000 chord included; island audits 0; the control no worse |
+| M5 Cubic terrain-only | WM-C1 to WM-C4 | ~6.5 days | — | Cubic against a same-build control: catch-up within +25% and manager P95 within +15% (§12.8's misses); C2 and C4 pass; the legacy path is deleted |
+| M6 Edge and scale | WM-E1, WM-E2 | ~4.5 days | WM-A2, WM-I5 | From past R+F the sea reaches the horizon with no void; a fully explored L keeps its map tiles under a fixed budget |
+| Spherical | Phases 1-5 (§14.4) | several weeks | M4, M5 | The requirements doc's exit checks |
+
+**What can run in parallel.** M1's items with each other and with M2, except WM-H6 before or with WM-A1 (both touch
+the island params). WM-I4 and WM-E2 need nothing and can start any time. M5 works in the chunk manager's legacy path and
+the mesher, not in the LOD strategy or the world-mode API, so a separate session can take it alongside M3 and M4.
+Sequence these, because they edit the same code: WM-H1 before WM-S1 (`RebuildBalancedLODCache`), WM-A3 before WM-S1 (the
+slab sampling), WM-H6 with or before WM-A1.
+
+**Benches.** Every before/after compares against a same-build control in one batch: LOD re-mesh counts vary with frame
+rate and machine load (§13.10), and the control itself moved with G6 (§12.8). Report memory against the D3 budget.
+
+### 14.4 Where spherical fits
+
+The requirements doc's phases ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4), placed in
+this plan:
+
+| Spherical phase | Placed | Size | Notes |
+|-----------------|--------|------|-------|
+| 0. Guardrails (SP-A5, SP-B3, SP-I1, doc corrections) | M1, WM-H10 | M | Stops a spherical config from producing the GPU's generic noise by default |
+| The API it shares with the island (SP-A1 and SP-A2 heightmap side, SP-A6, SP-G9) | M2, WM-A1/A2/A4 | — | Designed so the planet implementations slot in, as the requirements doc asks (phases 3 and 4 depend on the review) |
+| 1. A correct planet on the CPU | After M4 and M5 | L | SP-C1 (candidates cover the shell) takes WM-S1's shape: a per-column interval around the surface plus the viewer's neighbourhood, which for a planet is a shell. §13.11's fix already keeps a pole viewer's window at its own layer instead of near layer 40. WM-C1 removes the legacy path before planets test seams at mid latitudes (SP-D4) |
+| 2. GPU | After Phase 1 | L | As in the requirements doc |
+| 3. Walkable | After Phase 1; can run beside Phase 2 (game side) | L | SP-F5 (KillZ) builds on WM-I4's recovery |
+| 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers |
+| 5. Places | After Phase 4 | M-L | Builds on WM-I1's world-mode-aware placement |
+| 6. Big planets and orbit | Not planned | — | SD1, SD5 |
