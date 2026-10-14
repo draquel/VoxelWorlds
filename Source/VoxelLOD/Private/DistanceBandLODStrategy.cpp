@@ -30,14 +30,6 @@ static TAutoConsoleVariable<int32> CVarLODBalanceDiagonal(
 	TEXT("2:1 LOD balance across all 26 neighbours (edges+corners), not just 6 faces. Prevents 3-LOD corner junctions. 1=on (default), 0=face-only."),
 	ECVF_Default);
 
-// TEMPORARY (vertical-window A/B in one build; removed before merge): 1 = add the viewer's chunk layer to
-// the vertical range a second time, as the candidate loops did before WORLD_MODES_REVIEW_PLAN.md §13.11.
-static TAutoConsoleVariable<int32> CVarLODLegacyVerticalWindow(
-	TEXT("voxel.LOD.LegacyVerticalWindow"),
-	0,
-	TEXT("A/B only. 1 = the old candidate window (viewer chunk layer counted twice), 0 = viewer layer + [Min, Max]."),
-	ECVF_Default);
-
 FDistanceBandLODStrategy::FDistanceBandLODStrategy()
 {
 	// Default LOD bands will be set during Initialize()
@@ -357,7 +349,6 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 	// Absolute chunk layers (the viewer's layer + the mode's vertical offsets).
 	int32 MinZ, MaxZ;
 	GetVerticalChunkRange(Context, MinZ, MaxZ);
-	const int32 LegacyZ = CVarLODLegacyVerticalWindow.GetValueOnAnyThread() != 0 ? ViewerChunk.Z : 0;
 
 	// Iterate over potential chunk positions
 	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius; ++X)
@@ -366,7 +357,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 		{
 			for (int32 Z = MinZ; Z <= MaxZ; ++Z)
 			{
-				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, LegacyZ + Z);
+				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, Z);
 				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 
@@ -758,7 +749,6 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 	// Absolute chunk layers, as in GetVisibleChunks.
 	int32 MinZ, MaxZ;
 	GetVerticalChunkRange(Context, MinZ, MaxZ);
-	const int32 LegacyZ = CVarLODLegacyVerticalWindow.GetValueOnAnyThread() != 0 ? ViewerChunk.Z : 0;
 
 	// Pass 1: raw band LOD + hysteresis (vs last frame's committed LOD).
 	BalancedLODCache.Reserve((2 * MaxChunkRadius + 1) * (2 * MaxChunkRadius + 1) * (MaxZ - MinZ + 1));
@@ -768,7 +758,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		{
 			for (int32 Z = MinZ; Z <= MaxZ; ++Z)
 			{
-				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, LegacyZ + Z);
+				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, Z);
 				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 
