@@ -15,7 +15,8 @@ meant to be supported, and records what spherical mode still needs:
 The review runs the scenarios in §4 and §5 and records results against the acceptance criteria in §1. A second
 revision of this document then turns the confirmed findings into work items. **Second revision, 2026-10-14: §14**
 (the status of every finding, work items with sizes and dependencies, milestones M1-M6, and where spherical starts),
-with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API) results: §14.6.
+with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API) results: §14.6. M3 (island correctness)
+results: §14.7.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -1394,20 +1395,20 @@ Three findings from §13.11 get IDs here:
 
 | ID | Finding | Status | Work item |
 |----|---------|--------|-----------|
-| KI1 | POI placement samples InfinitePlane height in every mode | Partly fixed in M2 (WM-A3, §14.6): placement samples the configured world mode, so land sites are judged on the island's ground; with the project catalog no POI is placed past R+F or in the sea on S, M or L (`POIPlacementProbe` asserts the second). Open: a site of a type that may place anywhere, past R+F; the bounds test (WM-I1) | WM-I1 |
-| KI2 | No world edge | Open | WM-I5 (boundary), WM-E1 (visible edge) |
+| KI1 | POI placement samples InfinitePlane height in every mode | Fixed in M2 and M3 (WM-A3, WM-I1; §14.6, §14.7): placement samples the configured world mode, and only sites wholly inside the bounds, falloff ring included, are placed, whatever the type's surface filter. `POIPlacementProbe` asserts on S, M and L | WM-I1 |
+| KI2 | No world edge | Partly fixed in M3 (WM-I5, §14.7): a hard boundary at R+F with a push-back before it. Open: the visible edge | WM-I5 (boundary), WM-E1 (visible edge) |
 | KI3 | The island centre means two different things | Fixed in M2 (WM-A1, §14.6): one builder, the centre is `WorldOrigin` + offset everywhere; `CullCentreProbe` asserts | — |
 | KI4 | Shape-parameter defects | Fixed: `bIslandBowlShape` removed, the Exponential falloff reaches 0 at R+F and `GetDensityAt` agrees with the floor beyond it (M1, WM-H6); the param builders are one (M2, WM-A1), and `GetTerrainHeightBounds` now includes the floor beyond the edge (M2, WM-A2) | — |
 | KI5 | No far-band slab culling on islands | Open: +30-55% loaded chunks; on the chord the excess sits in layers −3, 2 and 3 (§13.11). The slab now samples the world mode's height (M2, WM-A3), so WM-S1 only has to lift its InfinitePlane-only gate | WM-S1 |
 | KI6 | No finite-world concept; `MaxLoadedChunks` is read nowhere | Open for the setting. Pre-generation and baking stay nice-to-haves (§6) | WM-S3 |
 | KI7 | The save key ignores world shape | Fixed in M2 (WM-A4, §14.6): the save records the world's fingerprint; a save from a different radius is refused, kept on disk, and the world starts fresh | — |
-| KI8 | Spawn is only water-aware | Partly: off the island with water off, the floor counts as land and the pawn freezes | WM-I3 |
-| KI9 | Consumers have no island mask | Partly: open for map exploration, the world map and markers, and by code for PCG and water-off navigation; dismissed for scatter and surface NPCs. The mask exists since M2 (`IsInsideWorld`, `GetWorldBounds`, WM-A2); the consumers adopt it in WM-I2 | WM-I2 |
-| KI10 | Island test coverage is minimal | Partly fixed: three probe tests (§13); `CullCentreProbe` asserts and `POIPlacementProbe` asserts land sites (M2); `VoxelWorlds.WorldModes.Api.*` cover the bounds, frame, params and fingerprint. `WP_IslandBowlConfig` is unused | WM-I6 |
+| KI8 | Spawn is only water-aware | Fixed in M3 (WM-I3, §14.7): the spawn search takes only points inside the bounds, and the water level includes `WorldOrigin.Z` | WM-I3 |
+| KI9 | Consumers have no island mask | Fixed in M3 (WM-I2, §14.7): map exploration and the world map's pan, markers, the PCG sampler and navigation use the bounds; dismissed for scatter and surface NPCs | WM-I2 |
+| KI10 | Island test coverage is minimal | Fixed in M3 (WM-I6, §14.7): the probes assert (`CullCentreProbe` since M2, `POIPlacementProbe` in full); `VoxelWorlds.WorldModes.Api.*`, `.Boundary.*`, `POI.Placement.WorldBounds`, `Navigation.WorldBounds` and `VoxelCharacter.WorldEdge.*` cover the bounds and their consumers. `WP_IslandBowlConfig` deleted | WM-I6 |
 | KI11 | The residency audit and island LOD measure distance differently | Open (false findings) | WM-S2 |
 | KI12 | Bimodal LOD re-meshing | Fixed (§13.10), in every world mode | — |
 | KI13 | Island LOD distance is 2D, so whole columns stay in the near bands | Open | WM-S2 |
-| KI14 | No recovery when the pawn leaves the generated world | Open; not island-specific | WM-I4 |
+| KI14 | No recovery when the pawn leaves the generated world | Fixed in M3 (WM-I4, §14.7), in every world mode | WM-I4 |
 | KI15 | Map tile images are never evicted | Open; not island-specific, but it is what limits islands past about 10 km (§13.8) | WM-E2 |
 
 **Mode-independent and tooling:**
@@ -1464,7 +1465,10 @@ docs; stacked on #89); draquel/UE5_PluginDev#103 (WM-A3 in VoxelWorldPOI, WM-A4 
 | WM-A4 | **Save fingerprint.** The save header records the world mode, the shape params and a generation version. On a mismatch the save is not loaded: logged, kept on disk, and the world starts fresh. Shared with SP-G9 | KI7 | parent (VoxelWorldSave) | S-M | WM-A1 |
 
 **M3. Island correctness.** Afterwards nothing is placed, explored or spawned past the coast, and leaving the world
-cannot soft-lock the player.
+cannot soft-lock the player. **Status 2026-10-15: all six implemented and verified, PRs open** (results in §14.7):
+draquel/VoxelWorlds#91 (WM-I2: map, PCG, navigation, and the bounds geometry), draquel/VoxelWorlds#92 (WM-I5's
+boundary and these docs; stacked on #91); draquel/VoxelCharacterPlugin#22 (WM-I3, WM-I4, WM-I5's push-back and HUD hint,
+WM-I2's world map); draquel/UE5_PluginDev#104 (WM-I1, WM-I2's markers, WM-I6, `vox.Edge`, the gitlinks).
 
 | ID | Work item | Findings | Repos | Size | Needs |
 |----|-----------|----------|-------|------|-------|
@@ -1512,7 +1516,7 @@ D9's order is a priority, not a strict sequence. Rough totals assume S ≈ half 
 |-----------|------------|-------------|-------|-----------|
 | M1 Hygiene | WM-H1 to WM-H10 | ~7 days, mostly in parallel | — | Each item's check; a still viewer's `LODUpdateMs` ≈ 0; headless suites and the in-editor GPU tests green. **Met 2026-10-14, merged 2026-10-15 (§14.5)** |
 | M2 World-mode API | WM-A1 to WM-A4 | ~5 days | WM-H6 | Island params come from one builder; `CullCentreProbe` asserts; a save from a different radius is refused and the world starts fresh; the control's bench unchanged within batch noise. **Met 2026-10-15, in review (§14.6)** |
-| M3 Island correctness | WM-I1 to WM-I6 | ~6.5 days | M2 | `POIPlacementProbe` asserts; I5-I8 re-run: swimming out stops at R+F, falling out respawns, an off-island spawn stands on land, a radius change starts fresh; the I6 tour finds no marker or explored tile past the bounds |
+| M3 Island correctness | WM-I1 to WM-I6 | ~6.5 days | M2 | `POIPlacementProbe` asserts; I5-I8 re-run: swimming out stops at R+F, falling out respawns, an off-island spawn stands on land, a radius change starts fresh; the I6 tour finds no marker or explored tile past the bounds. **Met 2026-10-15, in review (§14.7)** |
 | M4 Streaming window | WM-S1 to WM-S4 | ~4 days | WM-A3, WM-H1 | WM-S4: island M within §1's thresholds on chord, perimeter and coast; peak loaded chunks within +25% of the control; the D3 budget met on every run, M's v6000 chord included; island audits 0; the control no worse |
 | M5 Cubic terrain-only | WM-C1 to WM-C4 | ~6.5 days | — | Cubic against a same-build control: catch-up within +25% and manager P95 within +15% (§12.8's misses); C2 and C4 pass; the legacy path is deleted |
 | M6 Edge and scale | WM-E1, WM-E2 | ~4.5 days | WM-A2, WM-I5 | From past R+F the sea reaches the horizon with no void; a fully explored L keeps its map tiles under a fixed budget |
@@ -1613,3 +1617,44 @@ navigation, WM-I3 spawn, WM-I5 boundary), the island slab and 3D LOD distance (M
 consumer (spherical Phase 1). Two things to know: a save written from now on carries a fingerprint, so bumping
 `FVoxelWorldModeFactory::GenerationVersion` invalidates every save made before it (on purpose); and terrain tuning
 (noise, height scale, biomes) is not in the fingerprint, so a save still loads after a tuning change.
+
+### 14.7 M3 results (2026-10-15)
+
+All six M3 items are implemented and verified; PRs open. Built from VoxelWorlds `feature/wm-i5-world-boundary` (stacked on
+`feature/wm-i2-bounds-consumers`, base `e0e6e39`), VoxelCharacterPlugin `feature/wm-i3-i5-spawn-recovery-boundary` (base
+`39d7071`) and UE5_PluginDev `claude/m3-island-correctness-49311a` (base `127959f`), editor 5.8.3 from
+`D:\Program Files\Epic Games\UE_5.8`, in a worktree editor with background throttling off. Live checks ran on `VoxelDemo`
+with the review configs through `voxel.ConfigOverride`, from a fresh world unless a save was the point (I8, the terrain
+wait); shape changes (water off, an island moved off the world origin, a smaller radius) were made in memory and
+reverted, never saved. Screenshots: `Saved/Screenshots/Claudius/m3_*` in the M3 worktree (not committed).
+
+**Suites.** Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter` 268/268 (260 before M3 plus 8 new). In the editor, where the GPU tests run, 268/268, every `Generation.GPUvsCPU*Parity` (IslandBowl included), `GPUNoiseGeneratorAsync`, `Meshing.Cubic.CPUvsGPU`, `Meshing.MarchingCubes.CPUvsGPU` and `WorldModes.InfinitePlane.GPUConsistency` among them; M3 does not change generation or meshing.
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| WM-I1 | Done, in review | UE5_PluginDev#104 | `FPOIPlacement::GeneratePOIs` places only sites wholly inside the world mode's bounds, falloff ring included (`FVoxelWorldBounds::ContainsCircleXY`, counted as `RejectedOutsideWorld`); a cell whose centre is outside places nothing. `POIPlacementProbe` asserts on S, M and L: no POI past R+F, no site whose falloff ring crosses it, no land POI under water. The catalog's types all require land, so the probe places a second time with every type allowed anywhere: S 1 POI, M 18 (9 centred in the sea), L 60 (27 in the sea), none reaching past R+F. `POI.Placement.WorldBounds` (no content): with one place-anywhere type over an island of R+F 250,000, unbounded placement puts 401 of 568 sites outside; bounded, 167 sites, 59 in the sea, none outside (circle and rectangle). Live: island S's registration survey places 1 POI within 5 km (review B: 32); M's four (three inside R, the Tower in the falloff band) all stand on land, and the band Tower sits on the natural coast (`m3_I6_M_tower_band`) |
+| WM-I2 | Done, in review | VoxelWorlds#91 (map, PCG, navigation), VoxelCharacterPlugin#22 (world map), UE5_PluginDev#104 (markers) | `FVoxelWorldBounds` answers the footprint geometry (`GetDistanceToEdgeXY`, `ContainsCircleXY`, `IntersectsBox2D`, `ClampXY`, `GetOutwardNormalXY`). Map: only tiles that overlap the bounds are explored, from the minimap and from generated chunks; explored tiles from an older save that lie outside are dropped; `voxel.Map.Stats` counts tiles outside. The world map clamps its pan to the bounds' box. Markers: the POI marker source drops anything outside. PCG: the surface sampler skips points outside. Navigation: every cell outside is blocked, water on or off. Live, island M from a fresh world: a bench from 150,000 to 300,000 uu (50,000 past R+F) at v6000, then the four POIs: 635, then 1,408 explored tiles, 0 outside (review B's tour: 124 of 1,497 past R+F); 4 markers within 400 km, all inside (review B: 20, 12 past R+F); `vox.NavPath` to a point past R+F: NO PATH. Island S with water off: a goal on the floor past the edge gives NO PATH, a goal 150 uu past it snaps inside, an inland goal is found. VoxelDemo has no PCG components, so the sampler is checked by code only (as in review B); the pan clamp is checked by code, not driven live. Tests `WorldModes.Api.BoundsGeometry`, `Navigation.WorldBounds` |
+| WM-I3 | Done, in review | VoxelCharacterPlugin#22 | The spawn search takes only points inside the bounds; a start outside searches from a chunk inside the edge; the water level now includes `WorldOrigin.Z`. Live, review B's I7 again on S with the island moved 70,000 uu from the world origin, so the spawn at the origin is 30,000 uu past R+F: water off, the search starts at (34,800, 0) and the pawn stands walking at (34,829, −3) (review B: it took the floor at (0, 0) for land and froze); water on, in four directions, the start a chunk inside the edge is in the sea three times, the spiral finds land one ring away, and the pawn stands every time |
+| WM-I4 | Done, in review | VoxelCharacterPlugin#22 | `AVCCharacterBase::FellOutOfWorld` puts the body back on the last ground it stood on inside the world (`GetLastSafeLocation`, sampled four times a second on the server), kills it through the combat pipeline and lets the game mode respawn it; a corpse or an unpossessed body keeps the engine default (destroy). A player 20,000 uu under the world's lowest terrain (`OutOfWorldDepth`) counts as fallen out without the minutes-long fall to KillZ. A terrain wait that times out with nothing under the pawn moves it to the respawn point (rest point, player start, the world's centre) and waits there, at most twice. Live on S: walls off, flown past the floor ring and dropped at 48,800 uu: "out of the world" at −32,000, the body back at its last safe ground (36,696, 0), death, respawn 5 s later standing on land at (31,883, 4,799) (review B: KillZ destroyed the pawn about 260 s later and nothing respawned it). KillZ itself, with the early check off on the pawn and a teleport to z −1,100,000: the same path, respawn standing. The terrain wait: a save whose player stands 30,000 uu under S's terrain, loaded mid-session (`vox.Load`, an exact-location resume): after the 60 s timeout "no terrain under (5000, 5000, -30000); moving to the respawn point (0, 0, 0)" (no rest point was set), a new wait there, and the pawn stands walking. Test `VoxelCharacter.WorldEdge.UnpossessedFallsOut` |
+| WM-I5 | Done, in review | VoxelWorlds#92 (boundary), VoxelCharacterPlugin#22 (push-back, HUD hint) | Hard boundary: invisible walls on the bounds (`FVoxelWorldBoundary`, `UVoxelChunkManager::RebuildWorldBoundary`): an inscribed polygon with its chords within 50 uu of R+F (63 walls for S, 158 for M, 223 for L; 55 after S's radius went to 20,000), four walls for a rectangle; they block pawns, NPCs and physics bodies and let sight, interaction and camera traces through. `bWorldBoundary` (default on) and `voxel.World.Boundary 0|1`. Soft push-back: `UVCMovementComponent` caps the outward speed in the last 4,000 uu before the edge, from the full speed to drifting back at 250 uu/s at the edge, inside `CalcVelocity` (client prediction and server agree); flying is exempt. HUD: "A strong current pushes you back: this is the edge of the world" while in the band. Live on S, water on: walking east from (34,000, 0) into the sea and swimming out at full speed, the pawn stalls at 38,358 uu, 1,642 uu inside R+F (the formula gives 1,639), with the hint on (`m3_I5_S_pushback_hint_ui`); in debug flight, which the current ignores, it stops on the wall at 39,966 uu (R+F less the capsule radius). Water off, walking out over the falloff slope, it stalls 1,185 uu inside (formula 1,176). Tests `WorldModes.Boundary.CircleWalls`, `.OtherShapes`, `VoxelCharacter.WorldEdge.PushBack`, `.VitalsHint` |
+| WM-I6 | Done, in review | UE5_PluginDev#104 | The probe assertions above. `Content/PluginTesting/WorldPartition/WP_IslandBowlConfig` deleted: no map, script, config or external actor references it (`WP_VoxelCoexistTest` binds `DemoWorldConfig`) |
+
+**Scenarios I5-I8 again** (§13.1 has review B's results):
+
+| ID | Result | What happened |
+|----|--------|---------------|
+| I5 | **Pass** | Water on: the swimmer stalls 1,642 uu before R+F with the hint on, and nothing passes the wall; with the walls' collision off, falling past the floor ring respawns the player on land within 10 s. Water off: the walker stalls 1,185 uu before the edge |
+| I6 | **Pass** (markers, map, POIs, navigation) | M: no marker or explored tile past the bounds after a run 50,000 uu past R+F; every POI on land; NO PATH to the sea past R+F; `vox.NPCs` normal. Not repeated: the dungeon visit, the day/night cycle and scatter, which review B passed and M3 does not touch |
+| I7 | **Pass** | Off-island spawns stand on land with water off and on, in four directions |
+| I8 | **Pass** | S saved, `IslandRadius` 30,000 → 20,000 in memory, Play: `NOT loaded` (`IslandRadius=30000.0 vs 20000.0`), a fresh world, and the walls rebuilt on the new edge. Moving the island centre was refused the same way |
+
+**Left for later milestones**, as planned: the streaming window (M4), the visible edge (WM-E1: from outside the loaded ring
+the island still floats in the void, and the walls are invisible) and map tile eviction (WM-E2). Things to know:
+
+- The walls exist in every bounded world unless `bWorldBoundary` is off; the streaming benchmark flies through them (it
+  teleports the pawn each frame), and debug flight stops at them.
+- Placement on an island changed: a site whose falloff ring crossed R+F is no longer placed. Only the review islands are
+  affected; an island save from before M3 with such a POI keeps that POI's edits in its edit layer. The generation
+  version (§14.6) was not bumped: InfinitePlane worlds are unchanged.
+- The HUD hint lives in VoxelCharacterPlugin's vitals widget, where every other HUD line is; §14.2 had put the HUD in the
+  parent repo.
