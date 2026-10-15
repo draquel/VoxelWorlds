@@ -257,7 +257,11 @@ void FVoxelStreamingBenchmark::ReleasePawn(bool bGrounded)
 	}
 	Pawn->SetCanBeDamaged(bOriginalCanBeDamaged);
 
-	if (bGrounded)
+	if (Phase != EPhase::Restore)
+	{
+		UE_LOG(LogVoxelBench, Warning, TEXT("Benchmark '%s': stopped before it finished; pawn released where it is"), *Config.Tag);
+	}
+	else if (bGrounded)
 	{
 		UE_LOG(LogVoxelBench, Log, TEXT("Benchmark '%s': pawn restored at its start (ground ready after %.1fs)"),
 			*Config.Tag, RestoreElapsed);
