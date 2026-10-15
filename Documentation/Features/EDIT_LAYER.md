@@ -22,6 +22,21 @@ The actual implementation uses an **overlay architecture**:
 - Input-based testing via `VoxelWorldTestActor` with mouse/keyboard controls
 - Discrete editing mode (`bUseDiscreteEditing`) for single-block operations
 
+### How a new edit combines with the edit already on a voxel
+
+`UVoxelEditManager::ApplyEditInternal` keeps one edit per voxel. When a voxel already has one:
+
+| Existing edit | New edit | Result |
+|---------------|----------|--------|
+| Add / Subtract | Add / Subtract | One relative edit with the summed delta; a sum of 0 removes the edit (or becomes a Paint when the new Add carries a material) |
+| Set / Smooth (absolute) | Add / Subtract / Paint | A Set whose voxel is the new edit applied to the existing voxel: a dig under a POI pad takes density from the pad, not from the procedural terrain under it. `OriginalData` keeps the previous voxel, so undo restores it |
+| anything | Set / Smooth | The new absolute edit replaces it |
+| Add / Subtract | Paint | The Paint replaces it (the delta is lost) |
+
+Until 2026-10-14 a relative edit on a Set voxel replaced the Set, so the voxel fell back to procedural data minus
+the delta; one dig under a pad standing over air removed the aimed voxel and its four face neighbours, which had
+only received the brush falloff (WORLD_MODES_REVIEW_PLAN.md G2). Tests: `VoxelWorlds.Edit.Composition.*`.
+
 ## Original Design Specification
 
 ## Edit Operations
