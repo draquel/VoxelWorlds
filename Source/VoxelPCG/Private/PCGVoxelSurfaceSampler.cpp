@@ -248,6 +248,13 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		{
 			const double WorldY = static_cast<double>(IY) * Spacing;
 
+			// No points past the world's edge (an island's R + falloff, where generation writes only a flat floor):
+			// world modes review WM-I2, KI9.
+			if (!VoxelCtx.WorldMode->IsInsideWorld(WorldX, WorldY))
+			{
+				continue;
+			}
+
 			// Hybrid surface source: edit-merged voxel data near loaded chunks (edit-aware + exact
 			// surface), the procedural generator beyond them (stream-independent reach).
 			FVoxelSurfaceSample Sample;

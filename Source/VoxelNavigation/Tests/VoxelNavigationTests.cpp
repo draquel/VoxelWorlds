@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelSurfacePathfinder.h"
+#include "VoxelWorldModeTypes.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -153,6 +154,46 @@ bool FVoxelNavBudgetBlockTest::RunTest(const FString& Parameters)
 		const int32 CX = FMath::FloorToInt(Pt.X / 100.f), CY = FMath::FloorToInt(Pt.Y / 100.f);
 		return CX >= 5 && CX <= 7 && CY < 10;
 	}));
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// World bounds (world modes review WM-I2): the subsystem blocks every cell outside the world mode's bounds, water on
+// or off. With water off an island's floor beyond R + falloff is flat, dry ground the walker must not take: a goal out
+// there fails (one just past the edge snaps back onto the island), and no route leaves the footprint.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavWorldBoundsTest, "VoxelWorlds.Navigation.WorldBounds", VOXEL_NAV_TEST_FLAGS)
+bool FVoxelNavWorldBoundsTest::RunTest(const FString& Parameters)
+{
+	FVoxelWorldBounds Island;
+	Island.Shape = EVoxelWorldBoundsShape::Circle;
+	Island.Center = FVector(0.0, 0.0, 0.0);
+	Island.OuterRadius = 2000.0f;
+	Island.HalfExtent = FVector2D(2000.0, 2000.0);
+
+	// Water off: the island and the floor beyond it are the same flat ground.
+	auto Flat = [](double, double) { return 0.f; };
+	auto Outside = [&Island](const FIntPoint& Cell)
+	{
+		return !Island.ContainsXY((Cell.X + 0.5) * 100.0, (Cell.Y + 0.5) * 100.0);
+	};
+	FVoxelSurfaceNavParams P = VoxelNavTest::Params();
+	P.GoalSnapCells = 0;
+	P.bAllowPartial = false;
+	TArray<FVector> Points;
+	FVoxelSurfacePathStats Stats;
+
+	FVoxelSurfacePathfinder Strict(P, Flat, Outside);
+	TestFalse(TEXT("A goal on the floor beyond the edge fails"), Strict.FindPath(FVector(50, 50, 0), FVector(3050, 50, 0), Points, &Stats));
+	TestTrue(TEXT("A goal across the island succeeds"), Strict.FindPath(FVector(-1450, 50, 0), FVector(1450, 50, 0), Points, &Stats) && !Stats.bPartial);
+	TestFalse(TEXT("Never past the edge"), VoxelNavTest::PathTouches(Points, FVector(-1450, 50, 0),
+		[&Island](const FVector& Pt) { return !Island.ContainsXY(Pt.X, Pt.Y); }));
+
+	// A goal just past the edge snaps back onto the island, like a lake goal onto its shore.
+	P.GoalSnapCells = 3;
+	FVoxelSurfacePathfinder Snap(P, Flat, Outside);
+	TestTrue(TEXT("A goal just past the edge snaps inside"), Snap.FindPath(FVector(50, 50, 0), FVector(2150, 50, 0), Points, &Stats) && Stats.bGoalSnapped);
+	TestTrue(TEXT("The snapped goal is inside the world"), Points.Num() > 0 && Island.ContainsXY(Points.Last().X, Points.Last().Y));
 	return true;
 }
 

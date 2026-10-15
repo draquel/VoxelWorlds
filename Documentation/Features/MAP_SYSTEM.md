@@ -164,6 +164,12 @@ The `ExploredTiles` set tracks which tile coordinates the player has visited or 
 1. `RequestTilesInRadius()` is called (minimap/world map visibility)
 2. `OnChunkGenerated` fires (chunk streaming proximity)
 
+Only tiles that overlap the world mode's bounds are explored (`IsTileInsideWorld`, world modes review WM-I2): on an
+island, exploration stops at `R + FalloffWidth`, and the ring of floor chunks the island streams past its edge is not
+mapped. Explored tiles restored from a save that lie outside (explored before 2026-10-15) are dropped when the map
+resolves its world. `GetWorldBounds()` returns the bounds the map resolved; `UVCWorldMapWidget` clamps its pan to their
+box. `voxel.Map.Stats` reports how many explored tiles lie outside the world (0 once this applies).
+
 The world map widget uses exploration state for fog of war — unexplored tiles render as dark areas.
 
 ## Key Packing

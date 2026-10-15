@@ -19,6 +19,8 @@
 // - Bounds: plane unbounded, island the R + falloff footprint, planet the shell (WM-A2).
 // - Frame: up, altitude above the datum, surface coordinate and its inverse, in every mode (WM-A2).
 // - Fingerprint: equal configs match, a shape change does not, and the log names what changed (WM-A4).
+// - Footprint geometry: distance to the edge, discs and boxes against the footprint, clamping and the outward
+//   normal, which placement, the map, spawn and the boundary use (M3: WM-I1, WM-I2, WM-I3, WM-I5).
 // ---------------------------------------------------------------------------
 
 namespace WorldModeApiTest
@@ -168,6 +170,64 @@ bool FWorldModeBoundsTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Planet: a point in orbit is outside"), Bounds.Contains(Config->WorldOrigin + FVector(0, 300000, 0)));
 		TestTrue(TEXT("Planet: the column over the centre meets the shell"), Planet->IsInsideWorld(Config->WorldOrigin.X, Config->WorldOrigin.Y));
 		TestFalse(TEXT("Planet: a column past the outer radius does not"), Planet->IsInsideWorld(Config->WorldOrigin.X + 260000.0, Config->WorldOrigin.Y));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWorldModeBoundsGeometryTest,
+	"VoxelWorlds.WorldModes.Api.BoundsGeometry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldModeBoundsGeometryTest::RunTest(const FString& Parameters)
+{
+	using namespace WorldModeApiTest;
+
+	// Circle: the island's R + F = 40,000 around its absolute centre.
+	{
+		const TSharedRef<IVoxelWorldMode> Island = FVoxelWorldModeFactory::Create(*MakeConfig(EWorldMode::IslandBowl));
+		const FVoxelWorldBounds B = Island->GetWorldBounds();
+		const double CX = B.Center.X, CY = B.Center.Y;
+		TestTrue(TEXT("Circle: distance at the centre = R + F"), FMath::IsNearlyEqual(B.GetDistanceToEdgeXY(CX, CY), 40000.0, 0.01));
+		TestTrue(TEXT("Circle: 1,000 inside the edge"), FMath::IsNearlyEqual(B.GetDistanceToEdgeXY(CX + 39000.0, CY), 1000.0, 0.01));
+		TestTrue(TEXT("Circle: 500 past the edge is negative"), FMath::IsNearlyEqual(B.GetDistanceToEdgeXY(CX, CY - 40500.0), -500.0, 0.01));
+		TestTrue(TEXT("Circle: a site wholly inside"), B.ContainsCircleXY(CX + 30000.0, CY, 9000.0));
+		TestFalse(TEXT("Circle: a site whose ring crosses the edge"), B.ContainsCircleXY(CX + 30000.0, CY, 11000.0));
+		TestFalse(TEXT("Circle: a site centred outside"), B.ContainsCircleXY(CX + 45000.0, CY, 100.0));
+		TestTrue(TEXT("Circle: a box straddling the edge overlaps"), B.IntersectsBox2D(FBox2D(FVector2D(CX + 39000.0, CY - 100.0), FVector2D(CX + 41000.0, CY + 100.0))));
+		TestTrue(TEXT("Circle: a box over the centre overlaps"), B.IntersectsBox2D(FBox2D(FVector2D(CX - 10.0, CY - 10.0), FVector2D(CX + 10.0, CY + 10.0))));
+		TestFalse(TEXT("Circle: a box past the edge does not"), B.IntersectsBox2D(FBox2D(FVector2D(CX + 40100.0, CY), FVector2D(CX + 44900.0, CY + 4800.0))));
+		TestFalse(TEXT("Circle: a box at the footprint box's corner does not"), B.IntersectsBox2D(FBox2D(FVector2D(CX + 30000.0, CY + 30000.0), FVector2D(CX + 39000.0, CY + 39000.0))));
+		const FVector2D Clamped = B.ClampXY(CX + 60000.0, CY, 2000.0);
+		TestTrue(TEXT("Circle: a point outside clamps to the margin inside the edge"), Clamped.Equals(FVector2D(CX + 38000.0, CY), 0.01));
+		TestTrue(TEXT("Circle: a point inside stays"), B.ClampXY(CX + 100.0, CY - 200.0, 2000.0).Equals(FVector2D(CX + 100.0, CY - 200.0)));
+		TestTrue(TEXT("Circle: outward normal is radial"), B.GetOutwardNormalXY(CX, CY + 123.0).Equals(FVector2D(0.0, 1.0), 1.0e-6));
+		TestTrue(TEXT("Circle: outward normal at the centre is defined"), FMath::IsNearlyEqual(B.GetOutwardNormalXY(CX, CY).Size(), 1.0, 1.0e-6));
+	}
+
+	// Rectangle: half sizes 40,000 x 30,000.
+	{
+		UVoxelWorldConfiguration* Config = MakeConfig(EWorldMode::IslandBowl);
+		Config->IslandShape = 1;
+		const FVoxelWorldBounds B = FVoxelWorldModeFactory::Create(*Config)->GetWorldBounds();
+		const double CX = B.Center.X, CY = B.Center.Y;
+		TestTrue(TEXT("Rectangle: distance at the centre = the short half size"), FMath::IsNearlyEqual(B.GetDistanceToEdgeXY(CX, CY), 30000.0, 0.01));
+		TestTrue(TEXT("Rectangle: past a corner = the diagonal"), FMath::IsNearlyEqual(B.GetDistanceToEdgeXY(CX + 40300.0, CY + 30400.0), -500.0, 0.01));
+		TestTrue(TEXT("Rectangle: a disc inside"), B.ContainsCircleXY(CX + 35000.0, CY, 4000.0));
+		TestFalse(TEXT("Rectangle: a disc over the short side"), B.ContainsCircleXY(CX, CY + 28000.0, 4000.0));
+		TestTrue(TEXT("Rectangle: the corner box overlaps"), B.IntersectsBox2D(FBox2D(FVector2D(CX + 39000.0, CY + 29000.0), FVector2D(CX + 41000.0, CY + 31000.0))));
+		TestTrue(TEXT("Rectangle: clamp per axis"), B.ClampXY(CX + 90000.0, CY - 90000.0, 1000.0).Equals(FVector2D(CX + 39000.0, CY - 29000.0), 0.01));
+		TestTrue(TEXT("Rectangle: inside, the nearest side's normal"), B.GetOutwardNormalXY(CX + 100.0, CY + 29000.0).Equals(FVector2D(0.0, 1.0)));
+		TestTrue(TEXT("Rectangle: past a corner, diagonal"), B.GetOutwardNormalXY(CX + 40100.0, CY - 30100.0).Equals(FVector2D(1.0, -1.0).GetSafeNormal(), 1.0e-6));
+	}
+
+	// Unbounded: everything inside, nothing to clamp.
+	{
+		const FVoxelWorldBounds B = FVoxelWorldModeFactory::Create(*MakeConfig(EWorldMode::InfinitePlane))->GetWorldBounds();
+		TestTrue(TEXT("Plane: no edge"), B.GetDistanceToEdgeXY(1.0e9, 1.0e9) > 1.0e30);
+		TestTrue(TEXT("Plane: any disc fits"), B.ContainsCircleXY(1.0e9, 0.0, 1.0e6));
+		TestTrue(TEXT("Plane: any box overlaps"), B.IntersectsBox2D(FBox2D(FVector2D(1.0e9, 1.0e9), FVector2D(1.0e9 + 1.0, 1.0e9 + 1.0))));
+		TestTrue(TEXT("Plane: clamp is the identity"), B.ClampXY(1.0e9, -1.0e9, 100.0).Equals(FVector2D(1.0e9, -1.0e9)));
+		TestTrue(TEXT("Plane: no outward normal"), B.GetOutwardNormalXY(5.0, 5.0).IsZero());
 	}
 	return true;
 }

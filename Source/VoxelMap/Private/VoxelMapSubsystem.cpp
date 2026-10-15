@@ -233,6 +233,7 @@ void UVoxelMapSubsystem::Deinitialize()
 
 	// Drop our reference to the standalone world mode; any running task holds its own.
 	CachedWorldMode.Reset();
+	CachedWorldBounds = FVoxelWorldBounds();
 
 	TileCache.Empty();
 	ExploredTiles.Empty();
@@ -349,7 +350,12 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 		CachedTerrainMaxHeight = Center + Config->HeightScale;
 	}
 
+	// The world's edge: exploration stops there (WM-I2). Tiles a save restored before the world resolved are
+	// checked now.
+	CachedWorldBounds = CachedWorldMode->GetWorldBounds();
+
 	bCacheResolved = true;
+	PruneExploredOutsideWorld();
 
 	// Bind to chunk generation events
 	if (!bDelegatesBound)
@@ -406,6 +412,39 @@ bool UVoxelMapSubsystem::HasTile(FIntPoint TileCoord) const
 bool UVoxelMapSubsystem::IsTileExplored(FIntPoint TileCoord) const
 {
 	return ExploredTiles.Contains(PackTileKey(TileCoord));
+}
+
+bool UVoxelMapSubsystem::IsTileInsideWorld(FIntPoint TileCoord) const
+{
+	if (!CachedWorldBounds.IsBounded())
+	{
+		return true;
+	}
+	const FVector Min = TileCoordToWorld(TileCoord);
+	const double Size = GetTileWorldSize();
+	return CachedWorldBounds.IntersectsBox2D(FBox2D(FVector2D(Min.X, Min.Y), FVector2D(Min.X + Size, Min.Y + Size)));
+}
+
+int32 UVoxelMapSubsystem::PruneExploredOutsideWorld()
+{
+	if (!CachedWorldBounds.IsBounded())
+	{
+		return 0;
+	}
+	int32 Dropped = 0;
+	for (auto It = ExploredTiles.CreateIterator(); It; ++It)
+	{
+		if (!IsTileInsideWorld(UnpackTileKey(*It)))
+		{
+			It.RemoveCurrent();
+			++Dropped;
+		}
+	}
+	if (Dropped > 0)
+	{
+		UE_LOG(LogVoxelMap, Log, TEXT("Dropped %d explored map tile(s) outside the world's bounds (%d explored now)."), Dropped, ExploredTiles.Num());
+	}
+	return Dropped;
 }
 
 FString UVoxelMapSubsystem::EncodeTileCoords(const TArray<FIntPoint>& Tiles)
@@ -489,11 +528,18 @@ int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Coun
 	}
 
 	// Explored tiles draw from the tile cache: queue the images (four run at a time; the rest wait in the queue).
+	// Tiles outside the world (explored before exploration stopped at the edge, WM-I2) are dropped first; without a
+	// resolved world they are dropped when it resolves.
 	if (ResolveChunkManager())
 	{
+		PruneExploredOutsideWorld();
 		for (const FIntPoint& Tile : Tiles)
 		{
 			const uint64 Key = PackTileKey(Tile);
+			if (!ExploredTiles.Contains(Key))
+			{
+				continue;
+			}
 			if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
 			{
 				QueueTileGeneration(Tile);
@@ -567,6 +613,11 @@ void UVoxelMapSubsystem::RequestTilesInRadius(const FVector& WorldPos, float Rad
 		for (int32 TX = CenterTile.X - TileRadius; TX <= CenterTile.X + TileRadius; ++TX)
 		{
 			const FIntPoint TileCoord(TX, TY);
+			// Exploration stops at the world's edge (WM-I2): the sea past an island's R + falloff is not mapped.
+			if (!IsTileInsideWorld(TileCoord))
+			{
+				continue;
+			}
 			const uint64 Key = PackTileKey(TileCoord);
 
 			ExploredTiles.Add(Key);
@@ -606,12 +657,16 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 		}
 	}
 
-	// Mark as explored (chunks that generate are in the player's vicinity)
-	ExploredTiles.Add(Key);
-
-	if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
+	// Mark as explored (chunks that generate are in the player's vicinity), inside the world only: an island also
+	// generates a ring of floor chunks past its edge (WM-I2).
+	if (IsTileInsideWorld(TileCoord))
 	{
-		QueueTileGeneration(TileCoord);
+		ExploredTiles.Add(Key);
+
+		if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
+		{
+			QueueTileGeneration(TileCoord);
+		}
 	}
 
 	// A tile whose overlay waits for its chunks: this may be one of them.
@@ -866,9 +921,14 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 				+ Pair.Value->Materials.GetAllocatedSize() + Pair.Value->Flags.GetAllocatedSize();
 		}
 	}
+	int32 ExploredOutside = 0;
+	for (const uint64 Key : ExploredTiles)
+	{
+		ExploredOutside += IsTileInsideWorld(UnpackTileKey(Key)) ? 0 : 1;
+	}
 	return FString::Printf(
-		TEXT("tiles cached=%d explored=%d waiting=%d drawing=%d | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d | overlay=%s"),
-		TileCache.Num(), ExploredTiles.Num(), TileQueue.NumWaiting(), TileQueue.NumDrawing(),
+		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d | overlay=%s"),
+		TileCache.Num(), ExploredTiles.Num(), ExploredOutside, TileQueue.NumWaiting(), TileQueue.NumDrawing(),
 		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunkZ.Num(), OverlayDirtyTiles.Num(),
 		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num(),
 		CVarMapEditOverlay.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"));
