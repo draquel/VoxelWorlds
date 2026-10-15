@@ -18,7 +18,8 @@ enum class EEditSource : uint8;
  *   stamped dungeons, placed pads), the analytic generated surface otherwise, cached per cell in 32 × 32
  *   tiles. Cells sampled analytically are re-sampled when their chunk loads; edited chunks drop the cells
  *   the edit touched.
- * - Blocked boxes (POI structures, campsites …) and temporary blocked cells (a stuck walker's repath).
+ * - Blocked boxes (POI structures, campsites …), temporary blocked cells (a stuck walker's repath) and every cell
+ *   outside the world mode's bounds (an island's R + falloff; world modes review WM-I2), water on or off.
  * - Tunables through cvars (voxel.Nav.*), stats for logs, debug drawing (voxel.Nav.Debug).
  *
  * Game / PIE worlds only. Game thread only. Searches are synchronous and budgeted (MaxNodes), so callers

@@ -93,6 +93,56 @@ struct VOXELCORE_API FVoxelWorldBounds
 	 * @return The box; an invalid box (IsValid false) for an unbounded world
 	 */
 	FBox2D GetBox2D() const;
+
+	// ==================== Footprint geometry (world modes review M3: WM-I1, WM-I2, WM-I5) ====================
+	// All in X and Y; a shell is treated as the disc of its outer radius, like ContainsXY.
+
+	/**
+	 * Signed distance in X and Y from (X, Y) to the footprint's edge.
+	 *
+	 * @param X World X
+	 * @param Y World Y
+	 * @return Positive inside, negative outside; TNumericLimits<double>::Max() for an unbounded world
+	 */
+	double GetDistanceToEdgeXY(double X, double Y) const;
+
+	/**
+	 * Whether a disc lies wholly inside the footprint: a site, its pad and its falloff ring all stay in the world.
+	 *
+	 * @param X Disc centre X
+	 * @param Y Disc centre Y
+	 * @param Radius Disc radius
+	 * @return True when the whole disc is inside (always for an unbounded world)
+	 */
+	bool ContainsCircleXY(double X, double Y, double Radius) const;
+
+	/**
+	 * Whether a box in X and Y overlaps the footprint: a map tile or a grid cell that holds some of the world.
+	 *
+	 * @param Box World-space box in X and Y
+	 * @return True when any part of the box is inside (always for an unbounded world)
+	 */
+	bool IntersectsBox2D(const FBox2D& Box) const;
+
+	/**
+	 * The nearest point in X and Y at least Margin inside the edge: (X, Y) itself when it already is.
+	 *
+	 * @param X World X
+	 * @param Y World Y
+	 * @param Margin How far inside the edge the result stays (clamped so the footprint does not vanish)
+	 * @return The clamped point; (X, Y) for an unbounded world
+	 */
+	FVector2D ClampXY(double X, double Y, double Margin = 0.0) const;
+
+	/**
+	 * The unit direction in X and Y out of the world across the nearest edge: radial for a circle, the nearest side's
+	 * normal for a rectangle.
+	 *
+	 * @param X World X
+	 * @param Y World Y
+	 * @return Unit vector; zero for an unbounded world
+	 */
+	FVector2D GetOutwardNormalXY(double X, double Y) const;
 };
 
 /**

@@ -285,6 +285,16 @@ bool UVoxelSurfaceNavigationSubsystem::IsCellBlocked(const FIntPoint& Cell) cons
 	{
 		return true;
 	}
+	// Outside the world is blocked, water on or off (WM-I2, KI9): past an island's R + falloff generation writes only
+	// a flat floor, which with water off would otherwise read as walkable ground.
+	if (const UVoxelChunkManager* ChunkMgr = ChunkManager.Get())
+	{
+		const FVector2D Centre = CellCentre(Cell);
+		if (!ChunkMgr->IsInsideWorld(Centre.X, Centre.Y))
+		{
+			return true;
+		}
+	}
 	if (BlockedBoxes.Num() > 0)
 	{
 		const FVector2D Centre = CellCentre(Cell);
@@ -544,13 +554,13 @@ void UVoxelSurfaceNavigationSubsystem::DrawDebug()
 			const int32 Index = (Cell.Y - TileKey.Y * TileSize) * TileSize + (Cell.X - TileKey.X * TileSize);
 			const bool bLoaded = Tile && *Tile && (*Tile)->FromLoaded[Index];
 			FColor Color = bLoaded ? FColor::Green : FColor::Yellow;
-			if (Params.bHasWater && H < Params.WaterLevel - Params.MaxWadeDepth)
-			{
-				Color = FColor::Red;
-			}
-			else if (IsCellBlocked(Cell))
+			if (IsCellBlocked(Cell)) // blocked boxes, repath blocks, outside the world
 			{
 				Color = FColor::Magenta;
+			}
+			else if (Params.bHasWater && H < Params.WaterLevel - Params.MaxWadeDepth)
+			{
+				Color = FColor::Red;
 			}
 			const FVector2D C = CellCentre(Cell);
 			DrawDebugBox(World, FVector(C.X, C.Y, H + 10.f), FVector(Params.CellSize * 0.45f, Params.CellSize * 0.45f, 2.f), Color, false, 0.f, 0, 1.f);

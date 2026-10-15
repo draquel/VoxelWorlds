@@ -9,6 +9,7 @@
 #include "VoxelMapTileQueue.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelEditTypes.h"
+#include "VoxelWorldModeTypes.h"
 #include "TimerManager.h"
 #include "VoxelMapSubsystem.generated.h"
 
@@ -68,6 +69,26 @@ public:
 
 	/** Check if a tile has been explored. */
 	bool IsTileExplored(FIntPoint TileCoord) const;
+
+	/**
+	 * Whether a tile holds any of the world: it overlaps the world mode's footprint (an island's R + falloff; every
+	 * tile on a plane). Only such tiles are explored, so exploration stops at the world's edge (world modes review
+	 * WM-I2, KI9). True before the map has resolved its world.
+	 *
+	 * @param TileCoord Tile coordinate (chunk X, Y)
+	 * @return True when the tile overlaps the world
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	bool IsTileInsideWorld(FIntPoint TileCoord) const;
+
+	/**
+	 * The world's bounds as the map resolved them (unbounded before the map has resolved its world). The world map
+	 * clamps its pan to them.
+	 *
+	 * @return The bounds
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	FVoxelWorldBounds GetWorldBounds() const { return CachedWorldBounds; }
 
 	/** Get all explored tile coords. */
 	const TSet<uint64>& GetExploredTiles() const { return ExploredTiles; }
@@ -245,6 +266,12 @@ private:
 	/** Resolve the chunk manager and cache configuration. Returns true if ready. */
 	bool ResolveChunkManager();
 
+	/**
+	 * Drop explored tiles outside the world (a save explored before exploration stopped at the edge).
+	 * @return Number of tiles dropped
+	 */
+	int32 PruneExploredOutsideWorld();
+
 	/** UVoxelEditManager::OnChunkEdited: update the edited-chunk index and mark the tile's overlay dirty. */
 	void HandleChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius);
 
@@ -291,6 +318,9 @@ private:
 	float CachedVoxelSize = 100.0f;
 	FVector CachedWorldOrigin = FVector::ZeroVector;
 	bool bCacheResolved = false;
+
+	/** The world mode's bounds (WM-I2): exploration only marks tiles that overlap them */
+	FVoxelWorldBounds CachedWorldBounds;
 
 	// Biome configuration (cached from VoxelWorldConfiguration)
 	UPROPERTY()

@@ -22,7 +22,9 @@ loaded (`QueryEditMergedSurface`). A 2.5-D grid over those two queries gives a c
 ### Walkability rule
 
 A step between neighbouring cells is allowed when both cells are above `WaterLevel − MaxWadeDepth`, neither is
-blocked, and `|Δheight| ≤ MaxStepRise` (× √2 on diagonals). Diagonals additionally need both orthogonal neighbours
+blocked, and `|Δheight| ≤ MaxStepRise` (× √2 on diagonals). Every cell outside the world mode's bounds is blocked
+(`UVoxelChunkManager::IsInsideWorld`; world modes review WM-I2), water on or off: past an island's `R + FalloffWidth`
+generation writes only a flat floor, which with water off would otherwise read as walkable ground. Diagonals additionally need both orthogonal neighbours
 steppable. Cost = run × (1 + SlopeCostScale × rise / run). Surface only: caves, overhangs and bridges do not exist
 for the pathfinder (one height per column).
 
@@ -33,7 +35,7 @@ for the pathfinder (one height per column).
 - `ProjectToSurface`, `IsWalkableAt`, `AddBlockedBox` / `RemoveBlockedBox`, `BlockCellsTemporarily` (a stuck walker
   marks where it failed for a few seconds), `InvalidateAll` / `InvalidateBox`.
 - `SetDebugFocus` + `voxel.Nav.Debug 1` draws the grid (green = loaded surface, yellow = analytic, red = water,
-  magenta = blocked); `DrawPath` draws a route for N seconds.
+  magenta = blocked or outside the world); `DrawPath` draws a route for N seconds.
 
 ### CVars
 
@@ -55,8 +57,9 @@ grid provider. The surface spawner uses `IsWalkableAt` to reject spawn points.
 
 ### Tests
 
-`VoxelWorlds.Navigation.Flat`, `CliffDetour`, `Water`, `BudgetAndBlocks` (`Tests/VoxelNavigationTests.cpp`): pure
-pathfinder over lambda heightfields.
+`VoxelWorlds.Navigation.Flat`, `CliffDetour`, `Water`, `BudgetAndBlocks`, `WorldBounds` (`Tests/VoxelNavigationTests.cpp`):
+pure pathfinder over lambda heightfields; `WorldBounds` blocks the cells outside an island footprint over flat dry ground
+(water off), as the subsystem does.
 
 ### Related streaming fix
 

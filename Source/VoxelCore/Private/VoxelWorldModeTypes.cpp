@@ -40,6 +40,110 @@ FBox2D FVoxelWorldBounds::GetBox2D() const
 	return FBox2D(C - HalfExtent, C + HalfExtent);
 }
 
+double FVoxelWorldBounds::GetDistanceToEdgeXY(double X, double Y) const
+{
+	const double DX = X - Center.X;
+	const double DY = Y - Center.Y;
+	switch (Shape)
+	{
+	case EVoxelWorldBoundsShape::Circle:
+	case EVoxelWorldBoundsShape::Shell:
+		return static_cast<double>(OuterRadius) - FMath::Sqrt(DX * DX + DY * DY);
+	case EVoxelWorldBoundsShape::Rectangle:
+	{
+		// Box signed distance, sign flipped so inside is positive.
+		const double QX = FMath::Abs(DX) - HalfExtent.X;
+		const double QY = FMath::Abs(DY) - HalfExtent.Y;
+		const double Outside = FMath::Sqrt(FMath::Square(FMath::Max(QX, 0.0)) + FMath::Square(FMath::Max(QY, 0.0)));
+		const double Inside = FMath::Min(FMath::Max(QX, QY), 0.0);
+		return -(Outside + Inside);
+	}
+	case EVoxelWorldBoundsShape::Unbounded:
+	default:
+		return TNumericLimits<double>::Max();
+	}
+}
+
+bool FVoxelWorldBounds::ContainsCircleXY(double X, double Y, double Radius) const
+{
+	if (!IsBounded())
+	{
+		return true;
+	}
+	if (Shape == EVoxelWorldBoundsShape::Rectangle)
+	{
+		return FMath::Abs(X - Center.X) + Radius <= HalfExtent.X && FMath::Abs(Y - Center.Y) + Radius <= HalfExtent.Y;
+	}
+	return GetDistanceToEdgeXY(X, Y) >= Radius;
+}
+
+bool FVoxelWorldBounds::IntersectsBox2D(const FBox2D& Box) const
+{
+	if (!IsBounded())
+	{
+		return true;
+	}
+	if (Shape == EVoxelWorldBoundsShape::Rectangle)
+	{
+		return Box.Intersect(GetBox2D());
+	}
+	// Circle (and a shell's disc): the box's nearest point to the centre is within the radius.
+	const double NX = FMath::Clamp(static_cast<double>(Center.X), Box.Min.X, Box.Max.X);
+	const double NY = FMath::Clamp(static_cast<double>(Center.Y), Box.Min.Y, Box.Max.Y);
+	return ContainsXY(NX, NY);
+}
+
+FVector2D FVoxelWorldBounds::ClampXY(double X, double Y, double Margin) const
+{
+	if (!IsBounded())
+	{
+		return FVector2D(X, Y);
+	}
+	if (Shape == EVoxelWorldBoundsShape::Rectangle)
+	{
+		const double MX = FMath::Max(HalfExtent.X - Margin, 0.0);
+		const double MY = FMath::Max(HalfExtent.Y - Margin, 0.0);
+		return FVector2D(
+			FMath::Clamp(X, Center.X - MX, Center.X + MX),
+			FMath::Clamp(Y, Center.Y - MY, Center.Y + MY));
+	}
+	const double Radius = FMath::Max(static_cast<double>(OuterRadius) - Margin, 0.0);
+	const FVector2D C(Center.X, Center.Y);
+	const FVector2D Offset = FVector2D(X, Y) - C;
+	const double Length = Offset.Size();
+	return Length <= Radius ? FVector2D(X, Y) : C + Offset * (Radius / Length);
+}
+
+FVector2D FVoxelWorldBounds::GetOutwardNormalXY(double X, double Y) const
+{
+	const double DX = X - Center.X;
+	const double DY = Y - Center.Y;
+	switch (Shape)
+	{
+	case EVoxelWorldBoundsShape::Circle:
+	case EVoxelWorldBoundsShape::Shell:
+	{
+		const FVector2D Offset(DX, DY);
+		return Offset.IsNearlyZero() ? FVector2D(1.0, 0.0) : Offset.GetSafeNormal();
+	}
+	case EVoxelWorldBoundsShape::Rectangle:
+	{
+		const double QX = FMath::Abs(DX) - HalfExtent.X;
+		const double QY = FMath::Abs(DY) - HalfExtent.Y;
+		if (QX > 0.0 || QY > 0.0)
+		{
+			// Outside: away from the nearest point of the box (a side, or a corner).
+			return FVector2D(FMath::Max(QX, 0.0) * FMath::Sign(DX), FMath::Max(QY, 0.0) * FMath::Sign(DY)).GetSafeNormal();
+		}
+		// Inside: the normal of the nearest side.
+		return QX >= QY ? FVector2D(DX >= 0.0 ? 1.0 : -1.0, 0.0) : FVector2D(0.0, DY >= 0.0 ? 1.0 : -1.0);
+	}
+	case EVoxelWorldBoundsShape::Unbounded:
+	default:
+		return FVector2D::ZeroVector;
+	}
+}
+
 // ==================== FVoxelWorldFingerprint ====================
 
 namespace VoxelWorldFingerprintPrivate
