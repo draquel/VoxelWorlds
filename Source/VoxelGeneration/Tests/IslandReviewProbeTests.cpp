@@ -6,7 +6,8 @@
 //
 // These tests record what the code does today and pass; the numbers go to the review (KI1, KI2, KI4). The checks that
 // would fail today are logged as "PROBE" lines instead of being asserted, so the suite stays green until the findings
-// are fixed. Turn them into assertions with the fix.
+// are fixed. Turn them into assertions with the fix. KI4's are asserted since WM-H6 (2026-10-14): no falloff curve
+// leaves a step at R+F beyond the floor's own, and GetDensityAt agrees with the floor beyond R+F.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -38,7 +39,6 @@ namespace IslandProbe
 		P.CenterX = Config.IslandCenterX;
 		P.CenterY = Config.IslandCenterY;
 		P.EdgeHeight = Config.IslandEdgeHeight;
-		P.bBowlShape = Config.bIslandBowlShape;
 		return P;
 	}
 
@@ -84,7 +84,6 @@ namespace IslandProbe
 			Request.IslandParams.CenterX = Island.CenterX;
 			Request.IslandParams.CenterY = Island.CenterY;
 			Request.IslandParams.EdgeHeight = Island.EdgeHeight;
-			Request.IslandParams.bBowlShape = Island.bBowlShape;
 
 			TArray<FVoxelData> ChunkData;
 			if (!Generator.GenerateChunkCPU(Request, ChunkData))
@@ -196,7 +195,8 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 		}
 
 		// KI2 / KI4: the step at R+F. Just inside, the falloff leaves EdgeHeight + factor * relief; just outside,
-		// generation writes a flat floor at EdgeHeight - 1000.
+		// generation writes a flat floor at EdgeHeight - 1000. Every curve now reaches EdgeHeight at the edge, so the
+		// step is the floor's 1,000 uu (KI2, WM-E1) and nothing more: Exponential used to add ~5% of the relief (KI4).
 		for (const EIslandFalloffType Falloff : { Island.FalloffType, EIslandFalloffType::Exponential })
 		{
 			FIslandBowlParams Variant = Island;
@@ -222,6 +222,9 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 			}
 			AddInfo(FString::Printf(TEXT("PROBE %s edge step at R+F (falloff type %d): generated surface drops %.0f to %.0f uu across 80 uu (EdgeHeight %.0f, floor beyond %.0f)"),
 				Name, static_cast<int32>(Falloff), MinStep, MaxStep, Variant.EdgeHeight, Variant.EdgeHeight - 1000.0f));
+			TestTrue(FString::Printf(TEXT("%s falloff type %d: no step at R+F beyond the floor's %.0f uu (max %.0f)"),
+				Name, static_cast<int32>(Falloff), FIslandBowlWorldMode::OutsideFloorDepth, MaxStep),
+				MaxStep <= FIslandBowlWorldMode::OutsideFloorDepth + 1.5f * Config->VoxelSize);
 		}
 
 		// KI4: the world mode's height bounds leave out the floor generation writes beyond R+F.
@@ -230,10 +233,13 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 		AddInfo(FString::Printf(TEXT("PROBE %s GetTerrainHeightBounds [%.0f, %.0f]; generated floor beyond R+F at %.0f is %s the bounds"),
 			Name, BoundsMin, BoundsMax, Island.EdgeHeight - 1000.0f, (Island.EdgeHeight - 1000.0f) < BoundsMin ? TEXT("below") : TEXT("inside")));
 
-		// The island world mode's own density query calls everything beyond R+F air, where generation writes a floor.
+		// The island world mode's own density query agrees with the floor generation writes beyond R+F (it used to
+		// call everything there air).
 		const FVector Beyond(Island.CenterX + R + F + 300.0f, Island.CenterY, Island.EdgeHeight - 1500.0f);
+		const float BeyondDensity = IslandMode.GetDensityAt(Beyond, 0, 0.0f);
 		AddInfo(FString::Printf(TEXT("PROBE %s GetDensityAt 500 uu under the generated floor beyond R+F = %.0f (negative = air)"),
-			Name, IslandMode.GetDensityAt(Beyond, 0, 0.0f)));
+			Name, BeyondDensity));
+		TestTrue(FString::Printf(TEXT("%s GetDensityAt is solid under the floor beyond R+F"), Name), BeyondDensity > 0.0f);
 	}
 
 	return true;

@@ -173,7 +173,6 @@ namespace
 			IslandParams.CenterX = Config.IslandCenterX;
 			IslandParams.CenterY = Config.IslandCenterY;
 			IslandParams.EdgeHeight = Config.IslandEdgeHeight;
-			IslandParams.bBowlShape = Config.bIslandBowlShape;
 			Mode = MakeShared<FIslandBowlWorldMode>(TerrainParams, IslandParams);
 			break;
 		}

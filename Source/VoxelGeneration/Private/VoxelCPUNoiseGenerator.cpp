@@ -145,7 +145,6 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		IslandParams.CenterX = Request.IslandParams.CenterX;
 		IslandParams.CenterY = Request.IslandParams.CenterY;
 		IslandParams.EdgeHeight = Request.IslandParams.EdgeHeight;
-		IslandParams.bBowlShape = Request.IslandParams.bBowlShape;
 
 		FIslandBowlWorldMode WorldMode(TerrainParams, IslandParams);
 
@@ -912,19 +911,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					WorldPos.X, WorldPos.Y, Request.NoiseParams);
 				const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, EffectiveParams);
 
-				const FIslandBowlParams& IslandParams = WorldMode.GetIslandParams();
-				float TerrainHeight;
-				if (!FIslandBowlWorldMode::IsWithinIslandBounds(WorldPos.X, WorldPos.Y, IslandParams))
-				{
-					TerrainHeight = IslandParams.EdgeHeight - 1000.0f; // outside the island -> below any terrain (air)
-				}
-				else
-				{
-					const float FalloffFactor = FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
-						WorldPos.X, WorldPos.Y, IslandParams);
-					TerrainHeight = FIslandBowlWorldMode::ApplyFalloffToHeight(
-						BaseTerrainHeight, FalloffFactor, IslandParams.EdgeHeight);
-				}
+				float TerrainHeight = FIslandBowlWorldMode::ComposeTerrainHeight(
+					WorldPos.X, WorldPos.Y, BaseTerrainHeight, WorldMode.GetIslandParams());
 
 				// Terrain conditioning (POI / claim flatten) — blend toward zones, then derive density.
 				if (Request.ConditioningZones.Num() > 0)

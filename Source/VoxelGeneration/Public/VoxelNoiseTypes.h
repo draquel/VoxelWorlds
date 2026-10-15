@@ -67,11 +67,8 @@ struct FIslandModeParams
 	/** Center of the island in world Y coordinate (relative to WorldOrigin) */
 	float CenterY = 0.0f;
 
-	/** Minimum terrain height at island edges (can be negative for bowl effect) */
+	/** Terrain height the falloff fades to at the edge; the floor beyond it is 1,000 uu lower */
 	float EdgeHeight = -1000.0f;
-
-	/** Whether to create a bowl (lowered edges) or plateau (raised center) */
-	bool bBowlShape = false;
 
 	FIslandModeParams() = default;
 

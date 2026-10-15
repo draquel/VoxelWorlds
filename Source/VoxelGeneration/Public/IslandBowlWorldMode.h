@@ -34,7 +34,7 @@ enum class EIslandFalloffType : uint8
 	/** Squared falloff (faster transition near edge) */
 	Squared,
 
-	/** Exponential falloff (very gradual then sharp drop) */
+	/** Exponential falloff (steep near the island, flattening toward the edge; rescaled to reach 0 at the edge) */
 	Exponential
 };
 
@@ -64,11 +64,8 @@ struct VOXELGENERATION_API FIslandBowlParams
 	/** Center of the island in world Y coordinate (relative to WorldOrigin) */
 	float CenterY = 0.0f;
 
-	/** Minimum terrain height at island edges (can be negative for bowl effect) */
+	/** Terrain height the falloff fades to at the edge (R + FalloffWidth); the floor beyond it is OutsideFloorDepth lower */
 	float EdgeHeight = -1000.0f;
-
-	/** Whether to create a bowl (lowered edges) or plateau (raised center) */
-	bool bBowlShape = false;
 
 	FIslandBowlParams() = default;
 
@@ -108,8 +105,8 @@ struct VOXELGENERATION_API FIslandBowlParams
  *
  * Island Shape:
  * - Center to IslandRadius: Full terrain height (no falloff)
- * - IslandRadius to IslandRadius+FalloffWidth: Gradual falloff
- * - Beyond FalloffWidth: Air only (or minimum edge height)
+ * - IslandRadius to IslandRadius+FalloffWidth: Gradual falloff, reaching EdgeHeight at the edge
+ * - Beyond the edge: a flat floor at EdgeHeight - OutsideFloorDepth (ComposeTerrainHeight)
  *
  * Density Calculation:
  * - Sample base terrain height (same as InfinitePlane)
@@ -167,6 +164,9 @@ public:
 	virtual int32 GetMaxZ() const override;
 
 	virtual EWorldMode GetWorldModeType() const override { return EWorldMode::IslandBowl; }
+
+	/** Depth of the flat floor generation writes beyond the island's edge, below EdgeHeight (uu). */
+	static constexpr float OutsideFloorDepth = 1000.0f;
 	virtual bool IsHeightmapBased() const override { return true; }
 
 	virtual uint8 GetMaterialAtDepth(
@@ -251,6 +251,32 @@ public:
 	 */
 	static float CalculateFalloffFactorForPoint(
 		float X, float Y,
+		const FIslandBowlParams& IslandParams);
+
+	/**
+	 * The falloff curve on the normalized position in the falloff zone (shared by both shapes, and mirrored by
+	 * ApplyIslandFalloffCurve in Shaders/Private/IslandFalloff.ush).
+	 *
+	 * @param T Position in the falloff zone: 0 at IslandRadius, 1 at the edge (clamped)
+	 * @param FalloffType Type of falloff curve
+	 * @return Falloff factor: 1 at T = 0, exactly 0 at T = 1 for every curve
+	 */
+	static float ApplyFalloffCurve(float T, EIslandFalloffType FalloffType);
+
+	/**
+	 * The island terrain height at (X, Y) for a base (continentalness-modulated) terrain height: the falloff
+	 * toward EdgeHeight inside the island's extent, the flat floor at EdgeHeight - OutsideFloorDepth beyond it.
+	 * The one composition generation (CPU and GPU), GetTerrainHeightAt and GetDensityAt share.
+	 *
+	 * @param X World X coordinate
+	 * @param Y World Y coordinate
+	 * @param BaseHeight Terrain height before the island falloff
+	 * @param IslandParams Island configuration
+	 * @return Island terrain height
+	 */
+	static float ComposeTerrainHeight(
+		float X, float Y,
+		float BaseHeight,
 		const FIslandBowlParams& IslandParams);
 
 	/**

@@ -449,9 +449,14 @@ bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 
 	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl"));
 
+	// The Exponential curve (rescaled to reach 0 at the edge, KI4) has its own branch in IslandFalloff.ush.
+	Request.IslandParams.FalloffType = 3; // Exponential
+	const bool bExponentialPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl Exponential"));
+
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
 	TestTrue(TEXT("GPU==CPU IslandBowl parity (continentalness + falloff) across LOD 0/1/2"), bAllPass);
+	TestTrue(TEXT("GPU==CPU IslandBowl parity with Exponential falloff across LOD 0/1/2"), bExponentialPass);
 	return true;
 }
 
