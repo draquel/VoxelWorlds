@@ -1,16 +1,18 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 // Review B probe (Documentation/WORLD_MODES_REVIEW_PLAN.md §5 I1, finding KI3): where the LOD strategy's island cull
-// keeps chunks, against where generation puts the island. Generation tests the absolute voxel position against the
-// raw IslandCenterX/Y (FIslandBowlWorldMode::IsWithinIslandBounds); the cull centres the island on
-// WorldOrigin + IslandCenterX/Y. The probe records the disagreement and passes; turn the PROBE lines into assertions
-// with the fix.
+// keeps chunks, against where generation puts the island. Until WM-A1 generation tested the absolute voxel position
+// against the raw IslandCenterX/Y while the cull centred the island on WorldOrigin + IslandCenterX/Y, so with the
+// demo's origin 1,098 land columns were culled. Both now take their params from FVoxelWorldModeFactory, and the
+// probe asserts: no column that holds island terrain is culled, whatever WorldOrigin is.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "DistanceBandLODStrategy.h"
 #include "IslandBowlWorldMode.h"
+#include "VoxelNoiseTypes.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelWorldModeFactory.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -51,6 +53,7 @@ namespace IslandCullProbe
 		int32 CulledWithLand = 0;    // cull drops a column that holds island terrain: missing terrain
 		int32 KeptWithoutLand = 0;   // cull keeps a column generation leaves as the outer floor
 		float MaxMissingDistance = 0.0f; // farthest-in culled land column, distance from the generation centre
+		FVector2D GenerationCentre = FVector2D::ZeroVector; // where generation centres the island
 	};
 
 	/** Every chunk column within 300,000 uu of the generation centre, classified by the cull and by generation. */
@@ -65,11 +68,10 @@ namespace IslandCullProbe
 		Context.ViewerPosition = Config.WorldOrigin;
 		Strategy.Update(Context, 1.0f / 60.0f);
 
-		FIslandBowlParams Island;
-		Island.IslandRadius = Config.IslandRadius;
-		Island.FalloffWidth = Config.IslandFalloffWidth;
-		Island.CenterX = Config.IslandCenterX;
-		Island.CenterY = Config.IslandCenterY;
+		// Generation's island: the params a chunk's generation request carries.
+		FVoxelNoiseGenerationRequest Request;
+		FVoxelWorldModeFactory::FillGenerationRequest(Config, Request);
+		const FIslandBowlParams& Island = Request.IslandParams;
 
 		const float ChunkWorldSize = Config.ChunkSize * Config.VoxelSize;
 		const FVector2D GenCentre(Island.CenterX, Island.CenterY);
@@ -78,6 +80,7 @@ namespace IslandCullProbe
 		const int32 CY = FMath::FloorToInt((GenCentre.Y - Config.WorldOrigin.Y) / ChunkWorldSize);
 
 		FCullCounts Counts;
+		Counts.GenerationCentre = GenCentre;
 		for (int32 X = CX - Range; X <= CX + Range; ++X)
 		{
 			for (int32 Y = CY - Range; Y <= CY + Range; ++Y)
@@ -124,13 +127,29 @@ bool FIslandCullCentreProbeTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("WorldOrigin 0: the cull never drops a column that holds island terrain"), Counts.CulledWithLand, 0);
 	}
 
-	// The demo's origin with the offset Review_Island_M_DemoOrigin uses: (-12345, -54321), so WorldOrigin + offset is (0, 0).
+	// The demo's origin with the offset Review_Island_M_DemoOrigin uses: (-12345, -54321), so WorldOrigin + offset is
+	// (0, 0). Before WM-A1 generation centred the island at (-12345, -54321) and the cull at (0, 0), 55,706 uu apart,
+	// and 1,098 land columns were culled.
 	{
 		const FVector DemoOrigin(12345.0f, 54321.0f, 0.0f);
 		const FCullCounts Counts = Classify(*MakeIslandConfig(DemoOrigin, -12345.0f, -54321.0f));
-		const float CentreGap = FVector2D(DemoOrigin.X, DemoOrigin.Y).Size();
-		AddInfo(FString::Printf(TEXT("PROBE demo origin (12345, 54321), offset (-12345, -54321): generation centres the island at (-12345, -54321), the cull at (0, 0), %.0f uu apart. Kept with land %d, culled with land %d (up to %.0f uu inside the outer edge), kept without land %d"),
-			CentreGap, Counts.KeptWithLand, Counts.CulledWithLand, Counts.MaxMissingDistance, Counts.KeptWithoutLand));
+		AddInfo(FString::Printf(TEXT("PROBE demo origin (12345, 54321), offset (-12345, -54321): generation centres the island at (%.0f, %.0f). Kept with land %d, culled with land %d (up to %.0f uu inside the outer edge), kept without land %d"),
+			Counts.GenerationCentre.X, Counts.GenerationCentre.Y, Counts.KeptWithLand, Counts.CulledWithLand,
+			Counts.MaxMissingDistance, Counts.KeptWithoutLand));
+		TestTrue(TEXT("Demo origin: generation centres the island on WorldOrigin + offset"),
+			Counts.GenerationCentre.Equals(FVector2D::ZeroVector, 1.0));
+		TestEqual(TEXT("Demo origin: the cull never drops a column that holds island terrain"), Counts.CulledWithLand, 0);
+		TestTrue(TEXT("Demo origin: the cull keeps the island"), Counts.KeptWithLand > 8000);
+	}
+
+	// An island off the origin: WorldOrigin (20000, -30000) and offset (100000, 50000).
+	{
+		const FCullCounts Counts = Classify(*MakeIslandConfig(FVector(20000.0f, -30000.0f, 0.0f), 100000.0f, 50000.0f));
+		AddInfo(FString::Printf(TEXT("PROBE origin (20000, -30000), offset (100000, 50000): generation centre (%.0f, %.0f), kept with land %d, culled with land %d, kept without land %d"),
+			Counts.GenerationCentre.X, Counts.GenerationCentre.Y, Counts.KeptWithLand, Counts.CulledWithLand, Counts.KeptWithoutLand));
+		TestTrue(TEXT("Offset island: generation centres the island on WorldOrigin + offset"),
+			Counts.GenerationCentre.Equals(FVector2D(120000.0, 20000.0), 1.0));
+		TestEqual(TEXT("Offset island: the cull never drops a column that holds island terrain"), Counts.CulledWithLand, 0);
 	}
 
 	return true;

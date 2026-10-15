@@ -136,17 +136,8 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		// Create island bowl world mode with terrain and island parameters
 		FWorldModeTerrainParams TerrainParams(Request.SeaLevel, Request.HeightScale, Request.BaseHeight);
 
-		FIslandBowlParams IslandParams;
-		IslandParams.Shape = static_cast<EIslandShape>(Request.IslandParams.Shape);
-		IslandParams.IslandRadius = Request.IslandParams.IslandRadius;
-		IslandParams.SizeY = Request.IslandParams.SizeY;
-		IslandParams.FalloffWidth = Request.IslandParams.FalloffWidth;
-		IslandParams.FalloffType = static_cast<EIslandFalloffType>(Request.IslandParams.FalloffType);
-		IslandParams.CenterX = Request.IslandParams.CenterX;
-		IslandParams.CenterY = Request.IslandParams.CenterY;
-		IslandParams.EdgeHeight = Request.IslandParams.EdgeHeight;
-
-		FIslandBowlWorldMode WorldMode(TerrainParams, IslandParams);
+		// The request carries the island params as FVoxelWorldModeFactory built them (absolute centre).
+		FIslandBowlWorldMode WorldMode(TerrainParams, Request.IslandParams);
 
 		GenerateChunkIslandBowl(Request, WorldMode, OutVoxelData);
 	}
@@ -155,13 +146,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		// Create spherical planet world mode
 		FWorldModeTerrainParams TerrainParams(0.0f, Request.HeightScale, Request.BaseHeight);
 
-		FSphericalPlanetParams PlanetParams;
-		PlanetParams.PlanetRadius = Request.SphericalPlanetParams.PlanetRadius;
-		PlanetParams.MaxTerrainHeight = Request.SphericalPlanetParams.MaxTerrainHeight;
-		PlanetParams.MaxTerrainDepth = Request.SphericalPlanetParams.MaxTerrainDepth;
-		PlanetParams.PlanetCenter = Request.SphericalPlanetParams.PlanetCenter;
-
-		FSphericalPlanetWorldMode WorldMode(TerrainParams, PlanetParams);
+		FSphericalPlanetWorldMode WorldMode(TerrainParams, Request.SphericalPlanetParams);
 
 		GenerateChunkSphericalPlanet(Request, WorldMode, OutVoxelData);
 	}

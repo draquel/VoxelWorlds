@@ -5,6 +5,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
 #include "InfinitePlaneWorldMode.h"
+#include "VoxelWorldModeFactory.h"
 #include "VoxelCoordinates.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
@@ -156,26 +157,30 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Far-band surface-slab culling ENABLED (beyond the first LOD band, columns keep surface ±1.5 chunks)"));
 	}
 
-	// Cache Island mode parameters for boundary culling
+	// Cache Island mode parameters for boundary culling, from the builder generation uses (WM-A1): the centre is
+	// absolute, so the cull and the generated island can no longer disagree when WorldOrigin is not zero (KI3).
 	if (WorldMode == EWorldMode::IslandBowl)
 	{
-		IslandShape = WorldConfig->IslandShape;
-		IslandTotalExtentX = WorldConfig->IslandRadius + WorldConfig->IslandFalloffWidth;
-		IslandTotalExtentY = (IslandShape == 1 ? WorldConfig->IslandSizeY : WorldConfig->IslandRadius) + WorldConfig->IslandFalloffWidth;
-		IslandCenterOffset = FVector2D(WorldConfig->IslandCenterX, WorldConfig->IslandCenterY);
+		const FIslandBowlParams Island = FVoxelWorldModeFactory::MakeIslandParams(*WorldConfig);
+		IslandShape = static_cast<int32>(Island.Shape);
+		IslandTotalExtentX = Island.GetTotalExtentX();
+		IslandTotalExtentY = Island.GetTotalExtentY();
+		IslandCenter = FVector2D(Island.CenterX, Island.CenterY);
 
-		UE_LOG(LogVoxelLOD, Log, TEXT("  Island culling enabled: Shape=%s, ExtentX=%.0f, ExtentY=%.0f, CenterOffset=(%.0f, %.0f)"),
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Island culling enabled: Shape=%s, ExtentX=%.0f, ExtentY=%.0f, Center=(%.0f, %.0f)"),
 			IslandShape == 1 ? TEXT("Rectangle") : TEXT("Circular"),
 			IslandTotalExtentX, IslandTotalExtentY,
-			IslandCenterOffset.X, IslandCenterOffset.Y);
+			IslandCenter.X, IslandCenter.Y);
 	}
 
-	// Cache Spherical Planet parameters for shell culling
+	// Cache Spherical Planet parameters for shell culling (SP-A6: the same builder)
 	if (WorldMode == EWorldMode::SphericalPlanet)
 	{
-		PlanetRadius = WorldConfig->WorldRadius;
-		PlanetMaxTerrainHeight = WorldConfig->PlanetMaxTerrainHeight;
-		PlanetMaxTerrainDepth = WorldConfig->PlanetMaxTerrainDepth;
+		const FSphericalPlanetParams Planet = FVoxelWorldModeFactory::MakePlanetParams(*WorldConfig);
+		PlanetRadius = Planet.PlanetRadius;
+		PlanetMaxTerrainHeight = Planet.MaxTerrainHeight;
+		PlanetMaxTerrainDepth = Planet.MaxTerrainDepth;
+		PlanetCenter = Planet.PlanetCenter;
 
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Shell culling enabled: Radius=%.0f, Height=%.0f, Depth=%.0f"),
 			PlanetRadius, PlanetMaxTerrainHeight, PlanetMaxTerrainDepth);
@@ -535,7 +540,7 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 		Info += FString::Printf(TEXT("  Island Boundary Culling: Shape=%s, ExtentX=%.0f, ExtentY=%.0f, Center=(%.0f, %.0f)\n"),
 			IslandShape == 1 ? TEXT("Rectangle") : TEXT("Circular"),
 			IslandTotalExtentX, IslandTotalExtentY,
-			IslandCenterOffset.X, IslandCenterOffset.Y);
+			IslandCenter.X, IslandCenter.Y);
 	}
 	if (WorldMode == EWorldMode::SphericalPlanet && PlanetRadius > 0.0f)
 	{
@@ -1083,11 +1088,9 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 	// Get chunk center in world space
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 
-	// Calculate offset from island center (WorldOrigin + IslandCenterOffset)
-	const float IslandCenterX = Context.WorldOrigin.X + IslandCenterOffset.X;
-	const float IslandCenterY = Context.WorldOrigin.Y + IslandCenterOffset.Y;
-	const float DX = FMath::Abs(ChunkCenter.X - IslandCenterX);
-	const float DY = FMath::Abs(ChunkCenter.Y - IslandCenterY);
+	// Offset from the island centre (absolute, as generation uses it)
+	const float DX = FMath::Abs(ChunkCenter.X - IslandCenter.X);
+	const float DY = FMath::Abs(ChunkCenter.Y - IslandCenter.Y);
 
 	// Add chunk half-size as buffer (chunk could overlap island boundary)
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
@@ -1124,7 +1127,7 @@ bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
 
 	// Get chunk bounds for shell intersection tests
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-	const FVector ToChunkFromPlanet = ChunkCenter - Context.WorldOrigin;
+	const FVector ToChunkFromPlanet = ChunkCenter - PlanetCenter;
 	const float ChunkDistanceFromCenter = ToChunkFromPlanet.Size();
 
 	// Calculate inner and outer shell radii
@@ -1149,7 +1152,7 @@ bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
 
 	// HORIZON CULLING: For chunks that intersect the shell, check if they're beyond the horizon
 	// Calculate viewer's altitude above planet surface
-	const FVector ToViewerFromPlanet = Context.ViewerPosition - Context.WorldOrigin;
+	const FVector ToViewerFromPlanet = Context.ViewerPosition - PlanetCenter;
 	const float ViewerDistanceFromCenter = ToViewerFromPlanet.Size();
 	const float ViewerAltitude = ViewerDistanceFromCenter - PlanetRadius;
 

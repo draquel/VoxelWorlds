@@ -5,108 +5,12 @@
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelTerrainConditioning.h"
+#include "IslandBowlWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
 #include "VoxelNoiseTypes.generated.h"
 
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
-
-// Forward declaration for island falloff type
-enum class EIslandFalloffType : uint8;
-
-/**
- * Spherical planet parameters for generation request.
- * Lightweight copy of FSphericalPlanetParams for passing through the pipeline.
- */
-struct FSphericalPlanetModeParams
-{
-	/** Radius of the planet surface in world units */
-	float PlanetRadius = 100000.0f;
-
-	/** Maximum terrain height above PlanetRadius */
-	float MaxTerrainHeight = 5000.0f;
-
-	/** Maximum terrain depth below PlanetRadius */
-	float MaxTerrainDepth = 2000.0f;
-
-	/** Center of the planet in world space (typically WorldOrigin) */
-	FVector PlanetCenter = FVector::ZeroVector;
-
-	FSphericalPlanetModeParams() = default;
-
-	/** Get the inner shell radius */
-	float GetInnerRadius() const { return PlanetRadius - MaxTerrainDepth; }
-
-	/** Get the outer shell radius */
-	float GetOuterRadius() const { return PlanetRadius + MaxTerrainHeight; }
-};
-
-/**
- * Island mode parameters for generation request.
- * Lightweight copy of FIslandBowlParams for passing through the pipeline.
- */
-struct FIslandModeParams
-{
-	/** Shape type: 0 = Circular, 1 = Rectangle */
-	uint8 Shape = 0;
-
-	/** Radius/SizeX of the island in world units (distance from center to edge start) */
-	float IslandRadius = 50000.0f;
-
-	/** Size Y of the island (only used for Rectangle shape) */
-	float SizeY = 50000.0f;
-
-	/** Width of the falloff zone where terrain fades to nothing */
-	float FalloffWidth = 10000.0f;
-
-	/** Type of falloff curve to use (cast from EIslandFalloffType) */
-	uint8 FalloffType = 1;  // Default: Smooth
-
-	/** Center of the island in world X coordinate (relative to WorldOrigin) */
-	float CenterX = 0.0f;
-
-	/** Center of the island in world Y coordinate (relative to WorldOrigin) */
-	float CenterY = 0.0f;
-
-	/** Terrain height the falloff fades to at the edge; the floor beyond it is 1,000 uu lower */
-	float EdgeHeight = -1000.0f;
-
-	FIslandModeParams() = default;
-
-	/** Get the total island extent in X (radius/sizeX + falloff) */
-	float GetTotalExtentX() const
-	{
-		return IslandRadius + FalloffWidth;
-	}
-
-	/** Get the total island extent in Y (sizeY + falloff, or same as X for circular) */
-	float GetTotalExtentY() const
-	{
-		return (Shape == 1 ? SizeY : IslandRadius) + FalloffWidth;
-	}
-
-	/** Get the maximum total extent (for compatibility) */
-	float GetTotalExtent() const
-	{
-		return FMath::Max(GetTotalExtentX(), GetTotalExtentY());
-	}
-
-	/** Check if a point is within island bounds */
-	bool IsWithinBounds(float X, float Y) const
-	{
-		const float DX = FMath::Abs(X - CenterX);
-		const float DY = FMath::Abs(Y - CenterY);
-
-		if (Shape == 1)  // Rectangle
-		{
-			return DX <= GetTotalExtentX() && DY <= GetTotalExtentY();
-		}
-		else  // Circular
-		{
-			const float Distance = FMath::Sqrt(DX * DX + DY * DY);
-			return Distance <= GetTotalExtent();
-		}
-	}
-};
 
 // Re-export EVoxelNoiseType and FVoxelNoiseParams from VoxelCoreTypes.h
 // These are defined in VoxelCore to avoid circular dependencies with VoxelWorldConfiguration
@@ -178,13 +82,16 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 
 	// ==================== Island Mode Parameters ====================
 
-	/** Island mode configuration (used when WorldMode == IslandBowl) */
-	FIslandModeParams IslandParams;
+	/**
+	 * Island mode configuration (used when WorldMode == IslandBowl). Built by FVoxelWorldModeFactory, so the
+	 * centre is absolute (WorldOrigin + the config's offset), the same as every other island consumer.
+	 */
+	FIslandBowlParams IslandParams;
 
 	// ==================== Spherical Planet Mode Parameters ====================
 
-	/** Spherical planet configuration (used when WorldMode == SphericalPlanet) */
-	FSphericalPlanetModeParams SphericalPlanetParams;
+	/** Spherical planet configuration (used when WorldMode == SphericalPlanet). Built by FVoxelWorldModeFactory */
+	FSphericalPlanetParams SphericalPlanetParams;
 
 	// ==================== Cave Parameters ====================
 

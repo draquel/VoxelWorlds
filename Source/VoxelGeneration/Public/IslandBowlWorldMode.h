@@ -39,7 +39,8 @@ enum class EIslandFalloffType : uint8
 };
 
 /**
- * Island-specific configuration parameters.
+ * Island-specific configuration parameters. Build them from a world configuration with
+ * FVoxelWorldModeFactory::MakeIslandParams, the one builder generation, the LOD cull, the map and the editor share.
  */
 struct VOXELGENERATION_API FIslandBowlParams
 {
@@ -58,10 +59,13 @@ struct VOXELGENERATION_API FIslandBowlParams
 	/** Type of falloff curve to use */
 	EIslandFalloffType FalloffType = EIslandFalloffType::Smooth;
 
-	/** Center of the island in world X coordinate (relative to WorldOrigin) */
+	/**
+	 * Centre of the island, world X. Absolute: FVoxelWorldModeFactory::MakeIslandParams resolves the config's
+	 * offset (UVoxelWorldConfiguration::IslandCenterX, relative to WorldOrigin) to WorldOrigin.X + offset.
+	 */
 	float CenterX = 0.0f;
 
-	/** Center of the island in world Y coordinate (relative to WorldOrigin) */
+	/** Centre of the island, world Y. Absolute, like CenterX */
 	float CenterY = 0.0f;
 
 	/** Terrain height the falloff fades to at the edge (R + FalloffWidth); the floor beyond it is OutsideFloorDepth lower */

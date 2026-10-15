@@ -16,8 +16,7 @@
 #include "VoxelTerrainConditioning.h"
 #include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
-#include "IslandBowlWorldMode.h"
-#include "SphericalPlanetWorldMode.h"
+#include "VoxelWorldModeFactory.h"
 #include "VoxelEditManager.h"
 #include "EngineUtils.h"
 #include "Engine/Engine.h"
@@ -138,65 +137,22 @@ namespace
 		}));
 
 	/**
-	 * Build a standalone analytic world mode from the configuration — mirrors the construction switch
-	 * in UVoxelChunkManager::Initialize (the canonical version; keep in sync when adding world modes).
+	 * A standalone analytic world mode for the configuration, from the factory every world-mode consumer uses
+	 * (FVoxelWorldModeFactory, WM-A1), so the map's island and planet match generation.
 	 *
 	 * The map subsystem owns its OWN instance instead of borrowing the chunk manager's: background
 	 * tile tasks capture it by TSharedPtr, and the chunk manager destroys its instance in
 	 * EndPlay->Shutdown() while tile tasks can still be running — the PIE-stop use-after-free.
 	 *
-	 * SetBiomeContext IS called (unlike the pre-map-accuracy version): world modes snapshot the biome
-	 * config BY VALUE (FVoxelBiomeSnapshot — plain data, no UObject reference), so the instance stays
-	 * safe for tasks that outlive the world's GC purge while GetTerrainHeightAt returns the TRUE
-	 * generated surface height (continentalness offset AND height-scale modulation, composed correctly
-	 * per mode — the former hand-rolled offset-only reapplication in GenerateTileAsync was the map's
-	 * water-placement bug; see Documentation/Research/MAP_ACCURACY_PLAN.md).
+	 * The factory sets the biome context: world modes snapshot the biome config BY VALUE
+	 * (FVoxelBiomeSnapshot — plain data, no UObject reference), so the instance stays safe for tasks
+	 * that outlive the world's GC purge while GetTerrainHeightAt returns the TRUE generated surface
+	 * height (continentalness offset AND height-scale modulation, composed correctly per mode; see
+	 * Documentation/Research/MAP_ACCURACY_PLAN.md).
 	 */
 	TSharedPtr<const IVoxelWorldMode> CreateStandaloneWorldMode(const UVoxelWorldConfiguration& Config)
 	{
-		FWorldModeTerrainParams TerrainParams;
-		TerrainParams.SeaLevel = Config.SeaLevel;
-		TerrainParams.HeightScale = Config.HeightScale;
-		TerrainParams.BaseHeight = Config.BaseHeight;
-
-		TSharedPtr<IVoxelWorldMode> Mode;
-		switch (Config.WorldMode)
-		{
-		case EWorldMode::IslandBowl:
-		{
-			FIslandBowlParams IslandParams;
-			IslandParams.Shape = static_cast<EIslandShape>(Config.IslandShape);
-			IslandParams.IslandRadius = Config.IslandRadius;
-			IslandParams.SizeY = Config.IslandSizeY;
-			IslandParams.FalloffWidth = Config.IslandFalloffWidth;
-			IslandParams.FalloffType = static_cast<EIslandFalloffType>(Config.IslandFalloffType);
-			IslandParams.CenterX = Config.IslandCenterX;
-			IslandParams.CenterY = Config.IslandCenterY;
-			IslandParams.EdgeHeight = Config.IslandEdgeHeight;
-			Mode = MakeShared<FIslandBowlWorldMode>(TerrainParams, IslandParams);
-			break;
-		}
-		case EWorldMode::SphericalPlanet:
-		{
-			const FWorldModeTerrainParams PlanetTerrainParams(0.0f, Config.PlanetHeightScale, Config.BaseHeight);
-			FSphericalPlanetParams PlanetParams;
-			PlanetParams.PlanetRadius = Config.WorldRadius;
-			PlanetParams.MaxTerrainHeight = Config.PlanetMaxTerrainHeight;
-			PlanetParams.MaxTerrainDepth = Config.PlanetMaxTerrainDepth;
-			PlanetParams.PlanetCenter = Config.WorldOrigin;
-			Mode = MakeShared<FSphericalPlanetWorldMode>(PlanetTerrainParams, PlanetParams);
-			break;
-		}
-		case EWorldMode::InfinitePlane:
-		default:
-			Mode = MakeShared<FInfinitePlaneWorldMode>(TerrainParams);
-			break;
-		}
-
-		// Value-snapshot the biome config into the mode (game thread; the UObject is not retained).
-		// Matches UVoxelChunkManager::Initialize, which sets the context unconditionally.
-		Mode->SetBiomeContext(Config.BiomeConfiguration);
-		return Mode;
+		return FVoxelWorldModeFactory::Create(Config);
 	}
 }
 

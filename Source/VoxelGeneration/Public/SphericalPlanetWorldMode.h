@@ -6,7 +6,8 @@
 #include "IVoxelWorldMode.h"
 
 /**
- * Spherical planet configuration parameters.
+ * Spherical planet configuration parameters. Build them from a world configuration with
+ * FVoxelWorldModeFactory::MakePlanetParams (SP-A6).
  */
 struct VOXELGENERATION_API FSphericalPlanetParams
 {

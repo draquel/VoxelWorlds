@@ -9,8 +9,7 @@
 
 #include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
-#include "IslandBowlWorldMode.h"
-#include "SphericalPlanetWorldMode.h"
+#include "VoxelWorldModeFactory.h"
 
 #include "VoxelSurfaceQuery.h"
 #include "VoxelCaveQuery.h"
@@ -40,48 +39,10 @@ FVoxelFieldSampleContext FVoxelFieldSampleContext::FromConfiguration(const UVoxe
 	Ctx.bEnableWaterLevel = Config->bEnableWaterLevel;
 	Ctx.WaterLevel = Config->WaterLevel;
 
-	// Build the analytic world mode matching the config — identical construction to
-	// UVoxelChunkManager::Initialize so sampled height/material/biome match generation.
-	FWorldModeTerrainParams TerrainParams;
-	TerrainParams.SeaLevel = Config->SeaLevel;
-	TerrainParams.HeightScale = Config->HeightScale;
-	TerrainParams.BaseHeight = Config->BaseHeight;
-
-	switch (Config->WorldMode)
-	{
-	case EWorldMode::IslandBowl:
-	{
-		FIslandBowlParams IslandParams;
-		IslandParams.Shape = static_cast<EIslandShape>(Config->IslandShape);
-		IslandParams.IslandRadius = Config->IslandRadius;
-		IslandParams.SizeY = Config->IslandSizeY;
-		IslandParams.FalloffWidth = Config->IslandFalloffWidth;
-		IslandParams.FalloffType = static_cast<EIslandFalloffType>(Config->IslandFalloffType);
-		IslandParams.CenterX = Config->IslandCenterX;
-		IslandParams.CenterY = Config->IslandCenterY;
-		IslandParams.EdgeHeight = Config->IslandEdgeHeight;
-		Ctx.WorldMode = MakeShareable(new FIslandBowlWorldMode(TerrainParams, IslandParams));
-		break;
-	}
-	case EWorldMode::SphericalPlanet:
-	{
-		FWorldModeTerrainParams PlanetTerrainParams(0.0f, Config->PlanetHeightScale, Config->BaseHeight);
-		FSphericalPlanetParams PlanetParams;
-		PlanetParams.PlanetRadius = Config->WorldRadius;
-		PlanetParams.MaxTerrainHeight = Config->PlanetMaxTerrainHeight;
-		PlanetParams.MaxTerrainDepth = Config->PlanetMaxTerrainDepth;
-		PlanetParams.PlanetCenter = Config->WorldOrigin;
-		Ctx.WorldMode = MakeShareable(new FSphericalPlanetWorldMode(PlanetTerrainParams, PlanetParams));
-		break;
-	}
-	case EWorldMode::InfinitePlane:
-	default:
-		Ctx.WorldMode = MakeShareable(new FInfinitePlaneWorldMode(TerrainParams));
-		break;
-	}
-
-	// Continentalness-aware analytic height (InfinitePlane + IslandBowl); no-op for other modes.
-	Ctx.WorldMode->SetBiomeContext(Ctx.BiomeConfig);
+	// The analytic world mode, from the factory generation and the chunk manager use (WM-A1), so sampled
+	// height/material/biome match generation. The factory sets the biome context the way generation applies
+	// continentalness: whenever the config has a biome configuration, whatever bEnableBiomes says.
+	Ctx.WorldMode = FVoxelWorldModeFactory::Create(*Config);
 
 	// Value snapshot for the material/biome surface queries (same data the world mode captured).
 	Ctx.BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(Ctx.BiomeConfig);
