@@ -102,8 +102,9 @@ float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos,
 ### Overview
 Bounded terrain with a falloff at the edges, for a contained world: an island in the sea, or a landmass ringed by a
 low floor. Reviewed as a "large but finite world" with every game system on in 2026-10 (WORLD_MODES_REVIEW_PLAN.md §5,
-§13). The terrain itself is correct; the gaps are around it (no world edge, POI placement, streaming cost), each with a
-work item in that plan's §14 (milestones M2-M4 and M6). See "Measured" and "Known gaps" below.
+§13). The terrain itself is correct; the gaps were around it. Milestone M3 (2026-10-15, that plan's §14.7) keeps placement,
+exploration, markers, PCG, navigation and spawning inside the island and gives it a hard edge with recovery; what is left
+is streaming cost (M4) and a visible edge (M6). See "Beyond the edge", "Measured" and "Known gaps" below.
 
 ### Configuration (UVoxelWorldConfiguration)
 ```cpp
@@ -133,7 +134,11 @@ centred on `WorldOrigin + offset`, which moves its terrain; saves record the gen
 
 **Bounds:** `GetWorldBounds()` is a circle of radius `R + FalloffWidth` (or a rectangle of half sizes `R + F` by
 `SizeY + F`) around that centre, and `IsInsideWorld(X, Y)` is the same footprint test generation uses
-(`IsWithinIslandBounds`). Consumers start using it in milestone M3 (WM-I1, WM-I2, WM-I3, WM-I5).
+(`IsWithinIslandBounds`). `FVoxelWorldBounds` also answers the footprint geometry its consumers need:
+`GetDistanceToEdgeXY`, `ContainsCircleXY` (a POI site with its falloff ring), `IntersectsBox2D` (a map tile),
+`ClampXY` (a spawn search start, the world map's pan) and `GetOutwardNormalXY` (the push-back). Since M3 every consumer
+uses them: POI placement and markers, map exploration and the world map, the PCG surface sampler, surface navigation,
+the spawn search and the boundary (WM-I1, WM-I2, WM-I3, WM-I5).
 
 ### Island Shape Types
 ```cpp
@@ -205,8 +210,28 @@ float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
 Past `R + FalloffWidth` generation writes a flat floor at `EdgeHeight - 1000` (`FIslandBowlWorldMode::OutsideFloorDepth`),
 so the terrain drops 1,000 uu at the edge in a vertical wall. The cull keeps a ring of chunks out to one chunk diagonal past
 the edge (6,788 uu with the demo's 4,800 uu chunks), so the floor and the water plane exist only in that ring; past it there
-is nothing: no terrain, water or collision. A pawn that swims or walks off the ring falls until KillZ destroys it, with no
-respawn (KI2, KI14; work items WM-I4 and WM-I5 add recovery and a boundary, WM-E1 a visible edge).
+is nothing: no terrain, water or collision.
+
+**The boundary (decision D9, M3).** Nothing gets there any more:
+
+- **Hard boundary at R + F (WM-I5).** The chunk manager builds invisible collision walls on the bounds
+  (`FVoxelWorldBoundary`, `UVoxelChunkManager::RebuildWorldBoundary`): an inscribed polygon for a circle, with its chords
+  within 50 uu of the circle (63 walls for island S, 158 for M, 223 for L), four walls for a rectangle; 5 m thick, from a
+  chunk under the lowest terrain to 50,000 uu over the highest. They block pawns, NPCs and physics bodies, and let sight,
+  interaction and camera traces through. `UVoxelWorldConfiguration::bWorldBoundary` (default on) builds them; the cvar
+  `voxel.World.Boundary 0` turns their collision off at runtime. Unbounded worlds and planets have none.
+- **Soft push-back before it (WM-I5, VoxelCharacterPlugin).** In the last 4,000 uu before the edge
+  (`UVCMovementComponent::WorldEdgePushBackDistance`) a current caps the pawn's outward speed, from its full speed at the
+  band's inner side to drifting back at 250 uu/s at the edge. A swimmer heading out stalls about 1,600 uu before the wall,
+  and the HUD says why ("A strong current pushes you back: this is the edge of the world"). Flying (debug flight, the
+  streaming benchmark) is exempt.
+- **Recovery (WM-I4, every world mode).** A player that falls out of the world (KillZ, or 20,000 uu under the world's
+  lowest terrain, `AVCCharacterBase::OutOfWorldDepth`) goes back to the last ground it stood on inside the world and dies
+  there through the combat pipeline, so the usual respawn follows; before, KillZ destroyed the pawn and nothing respawned
+  it. A terrain wait that times out with nothing under the pawn moves it to the respawn point (the rest point, else a
+  player start, else the world's centre) and waits there.
+
+The visible edge (an ocean to the horizon, a seabed that slopes instead of the cliff) is WM-E1, milestone M6.
 
 ### LOD Culling
 - **Terrain Bounds Culling**: Chunks above/below the terrain height range are skipped (same as Infinite Plane). The
@@ -248,16 +273,19 @@ WORLD_MODES_REVIEW_PLAN.md §13.3-13.5. Tiers: S, M and L are 0.8, 5 and 10 km a
 ### Known gaps
 Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
 
-- **POI placement** samples the island's own height since WM-A3 (2026-10-15), so land POIs are no longer placed in the
-  falloff band's sea or on the floor. Sites past R+F of types that may place anywhere are still placed, and still stream
-  and show on the map, until placement uses the bounds query (KI1; WM-I1).
-- **No world edge or recovery** (KI2, KI14; WM-I4, WM-I5, WM-E1).
-- **Map exploration and markers run past the coast**, the PCG sampler has no island mask, and water-off navigation walks
-  the floor (KI9; WM-I2). Scatter and surface NPCs already stop at the coast.
+- ~~**POI placement**~~ Fixed by WM-A3 and WM-I1 (2026-10-15): placement samples the island's own height, and only sites
+  wholly inside R + F, falloff ring included, are placed, whatever the type's surface filter (KI1).
+- ~~**No world edge or recovery**~~ Fixed by WM-I4 and WM-I5 (2026-10-15): see "Beyond the edge". The visible edge is
+  still open (KI2; WM-E1).
+- ~~**Map exploration and markers run past the coast**~~ Fixed by WM-I2 (2026-10-15): exploration and the world map's
+  pan stop at the bounds, markers show only inside, the PCG sampler skips points outside, and navigation blocks every
+  cell outside, water on or off (KI9). Scatter and surface NPCs already stopped at the coast.
 - ~~**A changed island shape loads the old save**~~ Fixed by WM-A4 (2026-10-15): the save records the world's
   fingerprint (mode, shape, voxel grid, generation version), and a save from a different radius is refused, kept on disk,
   and the world starts fresh (KI7).
-- **Spawn off the island with water off** takes the floor for land and freezes the pawn (KI8; WM-I3).
+- ~~**Spawn off the island with water off**~~ Fixed by WM-I3 (2026-10-15): the spawn search only accepts points inside
+  the bounds, and a start outside searches from a chunk inside the edge (KI8).
+- **Streaming cost** (no far-band slab, 2D LOD distance; KI5, KI13; M4) and **map tile eviction** (KI15; WM-E2).
 
 ### Use Cases
 - Floating islands
