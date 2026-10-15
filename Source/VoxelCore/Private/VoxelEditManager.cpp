@@ -988,8 +988,25 @@ void UVoxelEditManager::ApplyEditInternal(
 	// Check for existing edit at this location and accumulate if compatible
 	if (const FVoxelEdit* ExistingEdit = Layer->GetEdit(LocalPos))
 	{
+		const bool bExistingAbsolute = ExistingEdit->EditMode == EEditMode::Set || ExistingEdit->EditMode == EEditMode::Smooth;
+		const bool bNewRelative = EditCopy.EditMode == EEditMode::Add || EditCopy.EditMode == EEditMode::Subtract
+			|| EditCopy.EditMode == EEditMode::Paint;
+
+		// A relative edit on a voxel that holds an absolute one (a POI pad, a dungeon wall, a smoothed voxel)
+		// applies on top of it, and the result stays absolute. It used to replace the Set, so the voxel fell
+		// back to procedural data minus the delta: one dig under a Set slab removed the target and its four
+		// face neighbours, which had only received the brush falloff (G2).
+		if (bExistingAbsolute && bNewRelative)
+		{
+			const FVoxelData Composed = EditCopy.ApplyToProceduralData(ExistingEdit->NewData);
+			EditCopy.OriginalData = ExistingEdit->NewData; // undo restores the absolute voxel
+			EditCopy.NewData = Composed;
+			EditCopy.EditMode = EEditMode::Set;
+			EditCopy.DensityDelta = 0;
+			EditCopy.BrushMaterialID = Composed.MaterialID;
+		}
 		// For Add/Subtract modes, accumulate the density delta
-		if ((EditCopy.EditMode == EEditMode::Add || EditCopy.EditMode == EEditMode::Subtract) &&
+		else if ((EditCopy.EditMode == EEditMode::Add || EditCopy.EditMode == EEditMode::Subtract) &&
 			(ExistingEdit->EditMode == EEditMode::Add || ExistingEdit->EditMode == EEditMode::Subtract))
 		{
 			// Convert existing edit's effect to a signed delta
@@ -1070,7 +1087,7 @@ void UVoxelEditManager::ApplyEditInternal(
 				}
 			}
 		}
-		// For Set mode or mixed modes, the new edit replaces (current behavior)
+		// An absolute edit (Set, Smooth) replaces whatever was there; so does Paint over Add/Subtract (as before).
 	}
 
 	// Apply to layer
