@@ -2,7 +2,7 @@
 
 **Module**: VoxelGeneration
 **Dependencies**: VoxelCore
-**Last Updated**: 2026-02-06
+**Last Updated**: 2026-10-14 (island sections from the world modes review, WORLD_MODES_REVIEW_PLAN.md §13)
 
 ## Overview
 
@@ -75,7 +75,10 @@ float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos,
 ## Mode 2: Island/Bowl
 
 ### Overview
-Bounded terrain with smooth falloff at edges, creating floating island or mountain bowl effects. Ideal for contained game worlds.
+Bounded terrain with a falloff at the edges, for a contained world: an island in the sea, or a landmass ringed by a
+low floor. Reviewed as a "large but finite world" with every game system on in 2026-10 (WORLD_MODES_REVIEW_PLAN.md §5,
+§13). The terrain itself is correct; the gaps are around it (no world edge, POI placement, streaming cost), each with a
+work item in that plan's §14 (milestones M2-M4 and M6). See "Measured" and "Known gaps" below.
 
 ### Configuration (UVoxelWorldConfiguration)
 ```cpp
@@ -90,11 +93,16 @@ float IslandRadius = 50000.0f;       // Radius (circular) or SizeX (rectangle)
 float IslandSizeY = 50000.0f;        // SizeY (rectangle only, ignored for circular)
 float IslandFalloffWidth = 10000.0f; // Width of transition zone
 int32 IslandFalloffType = 1;         // 0=Linear, 1=Smooth, 2=Squared, 3=Exponential
-float IslandCenterX = 0.0f;          // Center offset from WorldOrigin
-float IslandCenterY = 0.0f;          // Center offset from WorldOrigin
-float IslandEdgeHeight = -1000.0f;   // Terrain height at island edge
-bool bIslandBowlShape = false;       // True for bowl (lowered center)
+float IslandCenterX = 0.0f;          // Island centre (see the note below)
+float IslandCenterY = 0.0f;
+float IslandEdgeHeight = -1000.0f;   // Terrain height the falloff reaches at R + FalloffWidth
 ```
+
+**Island centre:** generation and the analytic height read `IslandCenterX/Y` as absolute world coordinates; the LOD
+cull reads them as an offset from `WorldOrigin`. They agree only when `WorldOrigin` is 0 in X and Y, so keep it there
+for island worlds until WM-A1 gives every consumer one params builder (finding KI3: with the demo's origin the cull sat
+55,706 uu off centre and cut 1,098 land columns). `bIslandBowlShape` was removed on 2026-10-14: it was copied in four
+places and read nowhere (KI4).
 
 ### Island Shape Types
 ```cpp
@@ -110,9 +118,13 @@ enum class EIslandFalloffType : uint8 {
     Linear = 0,      // Simple linear fade
     Smooth = 1,      // Hermite interpolation (default, natural-looking)
     Squared = 2,     // Faster drop near edge
-    Exponential = 3  // Gradual then sharp drop
+    Exponential = 3  // Steep near the island, flattening toward the edge
 };
 ```
+
+Every curve runs from 1 at `IslandRadius` to exactly 0 at the edge (`IslandRadius + FalloffWidth`), so the terrain
+meets `EdgeHeight` there. Exponential is `(e^-3t - e^-3) / (1 - e^-3)`; before 2026-10-14 it was `e^-3t`, which ended at
+about 0.05 and left a step of 5% of the relief at the edge (KI4).
 
 ### Implementation (FIslandBowlWorldMode)
 
@@ -158,13 +170,59 @@ float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
 }
 ```
 
+### Beyond the edge
+Past `R + FalloffWidth` generation writes a flat floor at `EdgeHeight - 1000` (`FIslandBowlWorldMode::OutsideFloorDepth`),
+so the terrain drops 1,000 uu at the edge in a vertical wall. The cull keeps a ring of chunks out to one chunk diagonal past
+the edge (6,788 uu with the demo's 4,800 uu chunks), so the floor and the water plane exist only in that ring; past it there
+is nothing: no terrain, water or collision. A pawn that swims or walks off the ring falls until KillZ destroys it, with no
+respawn (KI2, KI14; work items WM-I4 and WM-I5 add recovery and a boundary, WM-E1 a visible edge).
+
 ### LOD Culling
-- **Terrain Bounds Culling**: Chunks above/below terrain height range are skipped (same as Infinite Plane)
-- **Island Boundary Culling**:
-  - Circular: Chunks beyond `IslandRadius + FalloffWidth` (Euclidean distance) are skipped
-  - Rectangle: Chunks beyond `IslandRadius + FalloffWidth` in X OR `IslandSizeY + FalloffWidth` in Y are skipped
-- Height range considers `IslandEdgeHeight` for bowl shapes with lowered edges
-- Adds chunk buffer to prevent edge popping
+- **Terrain Bounds Culling**: Chunks above/below the terrain height range are skipped (same as Infinite Plane), with
+  the range floored at `IslandEdgeHeight - 1 chunk`
+- **Island Boundary Culling** (by chunk centre, 2D):
+  - Circular: chunks whose centre is farther than `IslandRadius + FalloffWidth + chunk diagonal` are skipped
+  - Rectangle: chunks beyond `IslandRadius + FalloffWidth + half a chunk` in X, or `IslandSizeY + FalloffWidth + half a
+    chunk` in Y, are skipped
+- **No far-band surface slab.** `bFarBandSurfaceSlabCulling` is InfinitePlane-only, so every island column keeps the
+  whole height range (7-8 layers against the plane's 3-4 past band 0; KI5, work item WM-S1)
+- **LOD distance is 2D** (height ignored), so whole columns sit in the near bands and stay uncompressed (KI13); the
+  residency audit measures 3D and reports false findings in the top and bottom layers (KI11; work item WM-S2)
+- Vertical window: the viewer's layer -2 to +4 (InfinitePlane: -2 to +8)
+
+### Measured (review B, 2026-10-13)
+Focused PIE against the InfinitePlane control (`DemoSmoothWorldConfig`) on the same routes; details in
+WORLD_MODES_REVIEW_PLAN.md §13.3-13.5. Tiers: S, M and L are 0.8, 5 and 10 km across (R + F = 40,000, 250,000 and
+500,000 uu).
+
+| Measure | Island | Control |
+|---------|--------|---------|
+| Settled at the spawn: loaded chunks | S: 1,518 (the whole island) | 1,123 |
+| Settled at the spawn: voxel data / renderer GPU | S: 247 / 23 MB | 135 / 23 MB |
+| Peak loaded chunks on M's routes | 1,534-1,984 (+30-55%) | 1,177-1,282 |
+| Frame P95 inside the island, v1500-v6000 | within +10% | |
+| Manager P95, chord v1500-v3000 | +17-21% | |
+| Coast (orbit at R), v1500-v6000 | frame +14-30%, manager +23-38%, catch-up 2.6-3.5× | |
+| Peak systems memory while streaming | 1.0-1.55 GB | 1.05-1.27 GB |
+
+- **Per-frame cost does not depend on the island's size:** L's interior chord matches M's (frame P95 32.2 vs 32.0 ms).
+  The island-specific costs (no slab, 2D LOD distance, the coast) are per view.
+- **Memory budget (decision D3):** 0.6 GB of voxel systems memory settled for a fully resident S-class island, and at
+  most 1.5 GB at peak while streaming, at any speed and tier. The review met it in every run but M's v6000 chord (1.55 GB).
+- **Largest island** the streaming-only model holds without new memory work: about 10-20 km across. Map tile images grow
+  with the explored area and are never evicted (KI15: a fully explored L is about 0.55 GB of tiles; work item WM-E2).
+- A 25-minute soak on M held frame time and memory flat.
+
+### Known gaps
+Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
+
+- **POI placement** samples InfinitePlane height in every mode, so POIs past R stand in the sea or over the floor on pads
+  raised out of the water, and off-island POIs still stream and show on the map (KI1; WM-A3, WM-I1).
+- **No world edge or recovery** (KI2, KI14; WM-I4, WM-I5, WM-E1).
+- **Map exploration and markers run past the coast**, the PCG sampler has no island mask, and water-off navigation walks
+  the floor (KI9; WM-I2). Scatter and surface NPCs already stop at the coast.
+- **A changed island shape loads the old save** (the key is map + seed; KI7; WM-A4).
+- **Spawn off the island with water off** takes the floor for land and freezes the pawn (KI8; WM-I3).
 
 ### Use Cases
 - Floating islands
@@ -340,11 +398,15 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 
 ## Performance Comparison
 
-| Mode | Typical Chunk Count | Culling Effectiveness | Use Case |
-|------|--------------------|-----------------------|----------|
-| Infinite Plane | 200-500 | ~50% (vertical culling) | Large open worlds |
-| Island/Bowl | 100-300 | ~70% (boundary culling) | Contained areas |
-| Spherical Planet | 200-400 | ~60% (horizon + shell) | Planetary exploration |
+Measured on the demo's geometry (voxel 75 uu, 64-voxel chunks, view distance 40,000 uu) in the world modes review,
+2026-10-13 (WORLD_MODES_REVIEW_PLAN.md §12-§13). The old table here (200-500 chunks) was never measured.
+
+| Mode | Loaded chunks, settled at the spawn | Peak loaded while streaming | Notes |
+|------|-------------------------------------|-----------------------------|-------|
+| Infinite Plane (smooth) | 1,123 | 1,177-1,282 | Far-band surface slab: 3-4 layers per column past band 0 |
+| Infinite Plane, cubic | 1,123 | 1,194-1,246 | Same window; every chunk at full detail (LOD forced off, D7) |
+| Island/Bowl | S: 1,518 (the whole island) | M: 1,534-1,984 | No slab yet: 7-8 layers per column (KI5) |
+| Spherical Planet | not measured | not measured | CPU-only prototype |
 
 All modes benefit from the streaming optimizations:
 - O(1) duplicate detection in queues
@@ -360,8 +422,10 @@ All modes benefit from the streaming optimizations:
 ## Future Enhancements
 
 - **Octree LOD**: For orbital-scale spherical planet viewing
-- **Water/Ocean**: Sea level handling with underwater terrain
 - **Biome Transitions**: Smooth material blending between biomes
+
+(Water, an earlier entry here, is implemented: per-chunk water tiles, underwater materials and water flags for
+InfinitePlane and IslandBowl; see `WATER_SYSTEM.md`.)
 
 ---
 
@@ -401,8 +465,10 @@ CPU-only (the GPU cave loop carves the global layers). **Perf:** GPU single-chun
 
 **Cached analytic world mode (fixed Phase C):** the chunk manager now builds the analytic
 `IVoxelWorldMode` matching `config->WorldMode` (was always `FInfinitePlaneWorldMode`). So spawn / nav /
-POI placement / `GetGeneratedSurfaceHeight` / `QueryEditMergedSurface` use the correct terrain math for
-every mode. `SetBiomeContext` is promoted to `IVoxelWorldMode` (InfinitePlane + IslandBowl apply
+`GetGeneratedSurfaceHeight` / `QueryEditMergedSurface` use the correct terrain math for every mode. POI placement
+does **not**: it calls `FInfinitePlaneWorldMode::SampleTerrainHeight` directly in every mode, which is right inside an
+island's radius and up to 7,000 uu wrong past it (finding KI1; work items WM-A3 and WM-I1 route it through the world
+mode). `SetBiomeContext` is promoted to `IVoxelWorldMode` (InfinitePlane + IslandBowl apply
 continentalness; other modes no-op).
 
 **IslandBowl height = continentalness ∘ falloff (Phase C):** continentalness (internal oceans/mountains)

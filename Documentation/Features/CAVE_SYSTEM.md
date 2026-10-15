@@ -146,7 +146,8 @@ All three world mode generators call `CalculateCaveDensity()` after base density
 
 ### GPU Path
 
-Cave parameters are passed as flat arrays (up to 4 layers) to the compute shader. `CaveGeneration.ush` provides `SampleCheeseCave()` and `SampleTunnelCave()`. Currently implemented for InfinitePlane mode only.
+Cave parameters are passed as flat arrays (up to 4 layers) to the compute shader. `CaveGeneration.ush` provides `SampleCheeseCave()` and `SampleTunnelCave()`. Used by InfinitePlane and IslandBowl, which share the heightmap branch of
+`GenerateVoxelDensity.usf` (locked by `GPUvsCPUCavesParity`); spherical planets generate on the CPU.
 
 ## Tuning Guide
 

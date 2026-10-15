@@ -212,7 +212,7 @@ All three world modes are now fully implemented:
 2. **Island Bowl Mode (FIslandBowlWorldMode)**:
    - Bounded terrain with configurable edge falloff
    - Falloff types: Linear, Smooth (hermite), Squared, Exponential
-   - Parameters: IslandRadius, FalloffWidth, IslandCenterX/Y, EdgeHeight, bBowlShape
+   - Parameters: IslandRadius, FalloffWidth, IslandCenterX/Y, EdgeHeight (bBowlShape was removed in 2026-10: never read)
    - Island boundary culling: Chunks beyond IslandRadius + FalloffWidth are skipped
 
 3. **Spherical Planet Mode (FSphericalPlanetWorldMode)**:
