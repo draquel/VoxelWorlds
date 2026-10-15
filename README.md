@@ -95,7 +95,8 @@ meshing, and the Dual-Contouring / Marching-Cubes **LOD-boundary** suites — in
 - `FDistanceBandLODStrategy` — default LOD implementation
 - `FInfinitePlaneWorldMode` / `FIslandBowlWorldMode` / `FSphericalPlanetWorldMode` — world modes
 - `FVoxelCPUNoiseGenerator` / `FVoxelGPUNoiseGenerator` — noise generation
-- `FVoxelCPUCubicMesher` / `FVoxelGPUCubicMesher` — cubic meshing (CPU greedy + GPU compute)
+- `FVoxelCPUCubicMesher` — cubic meshing (CPU, greedy). `FVoxelGPUCubicMesher` exists only in tests: the chunk manager
+  always builds the CPU mesher for cubic (finding KC3; work item WM-C4 deletes it)
 - `FVoxelCPUMarchingCubesMesher` / `FVoxelGPUMarchingCubesMesher` — Marching Cubes meshing
 - `FVoxelCPUDualContourMesher` / `FVoxelGPUDualContourMesher` — Dual Contouring meshing
 - `FVoxelWaterMesher` — water surface meshing

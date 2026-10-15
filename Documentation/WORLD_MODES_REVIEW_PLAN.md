@@ -1382,9 +1382,9 @@ Three findings from §13.11 get IDs here:
 | KC5 | Player dig and place are tuned for smooth terrain | Open | WM-C2 |
 | KC6 | Surface queries return the smooth surface, so props sink into blocks | Deferred (D1: first-class only) | — |
 | KC7 | Two-block rises strand NPCs | Partly confirmed; deferred (D1) | — |
-| KC8 | No content exercises cubic | Partly fixed: the review configs exist. `DemoCubicWorldConfig` is stale and `Config/CubicScatterConfig` orphaned | WM-H5 |
+| KC8 | No content exercises cubic | Fixed in M1 (WM-H5; UE5_PluginDev#102, in review): `DemoCubicWorldConfig` is on the intended path and `Config/CubicScatterConfig` is deleted. The review configs exist | WM-H5 |
 | KC9 | Voxel trees are not gameplay | Deferred (D1). The unlimited yield from one voxel is G3 | — |
-| KC10 | The smooth config's tree templates use material IDs that do not exist | Open | WM-H4 |
+| KC10 | The smooth config's tree templates use material IDs that do not exist | Fixed in M1 (WM-H4; draquel/VoxelWorlds#85, UE5_PluginDev#102, in review) | WM-H4 |
 | KC11 | Far compression was keyed on the LOD level | Fixed (§12.7) | — |
 | KC12 | Melee misses across a one-block height difference | Deferred (D1) | — |
 | KC13 | Vertical walls at the edge of the loaded region | Dismissed: cosmetic, visible only from beyond the view distance. WM-C1 changes how cubic meshes chunk boundaries; recheck it there | (WM-C1) |
@@ -1397,7 +1397,7 @@ Three findings from §13.11 get IDs here:
 | KI1 | POI placement samples InfinitePlane height in every mode | Open | WM-A3, WM-I1 |
 | KI2 | No world edge | Open | WM-I5 (boundary), WM-E1 (visible edge) |
 | KI3 | The island centre means two different things | Open | WM-A1 |
-| KI4 | Shape-parameter defects | Partly: the unread `bIslandBowlShape`, the Exponential falloff's residual step and the four param builders are open; `GetDensityAt` calling the floor air is latent; the `GetTerrainHeightBounds` clause is dismissed | WM-H6, WM-A1 |
+| KI4 | Shape-parameter defects | Partly fixed: `bIslandBowlShape` removed, the Exponential falloff reaches 0 at R+F and `GetDensityAt` agrees with the floor beyond it (M1, WM-H6; draquel/VoxelWorlds#85, in review). The four param builders stay open for WM-A1; the `GetTerrainHeightBounds` clause is dismissed | WM-H6, WM-A1 |
 | KI5 | No far-band slab culling on islands | Open: +30-55% loaded chunks; on the chord the excess sits in layers −3, 2 and 3 (§13.11) | WM-S1 |
 | KI6 | No finite-world concept; `MaxLoadedChunks` is read nowhere | Open for the setting. Pre-generation and baking stay nice-to-haves (§6) | WM-S3 |
 | KI7 | The save key ignores world shape | Open | WM-A4 |
@@ -1414,25 +1414,28 @@ Three findings from §13.11 get IDs here:
 
 | ID | Finding | Status | Work item |
 |----|---------|--------|-----------|
-| G1 | The world component's vertex, triangle and GPU memory stats only ever add | Open | WM-H2 |
-| G2 | A Subtract on a Set voxel replaces the Set | Open | WM-H3 |
-| G3 | Gathering pays out on every dig, without limit on one voxel | Open | WM-H7 |
-| G4, G8 | `follow=` routes over the sea drown the pawn | Open (tooling) | WM-H8 |
-| G5 | The bench's thrash counter counts deferral re-queues | Open (tooling) | WM-H8 |
+| G1 | The world component's vertex, triangle and GPU memory stats only ever add | Fixed in M1 (WM-H2; draquel/VoxelWorlds#84, in review) | WM-H2 |
+| G2 | A Subtract on a Set voxel replaces the Set | Fixed in M1 (WM-H3; draquel/VoxelWorlds#86, in review) | WM-H3 |
+| G3 | Gathering pays out on every dig, without limit on one voxel | Fixed in M1 (WM-H7; VoxelCharacterPlugin#21, in review) | WM-H7 |
+| G4, G8 | `follow=` routes over the sea drown the pawn | Fixed in M1 (WM-H8; draquel/VoxelWorlds#84, VoxelCharacterPlugin#21, in review) | WM-H8 |
+| G5 | The bench's thrash counter counts deferral re-queues | Fixed in M1 (WM-H8; draquel/VoxelWorlds#84, in review) | WM-H8 |
 | G6 | The compression encode ran on the game thread | Fixed (§12.8) | — |
 | G7 | Streaming follows the view target, not the pawn | Dismissed: by design (a survey camera is a viewer). Release `pie_camera` before moving the pawn | — |
-| G9 | The bench puts the pawn back at its start with no settle | Open (tooling) | WM-H8 |
+| G9 | The bench puts the pawn back at its start with no settle | Fixed in M1 (WM-H8; draquel/VoxelWorlds#84, in review) | WM-H8 |
 | G10 | The bench's re-mesh counter counted reloads | Fixed (§13.10) | — |
 | G11 | The vertical window counted the viewer's layer twice | Fixed (§13.11) | — |
-| G12 | The balanced-LOD cache is rebuilt every tick | Open | WM-H1 |
+| G12 | The balanced-LOD cache is rebuilt every tick | Fixed in M1 (WM-H1; draquel/VoxelWorlds#84, in review) | WM-H1 |
 | G13 | The vertical range follows the viewer's altitude | Open (D8) | WM-S1; recheck in WM-S4 |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
-| §11 | Documentation that disagrees with the code | Partly fixed (the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note) | WM-H9, WM-H10 |
+| §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; in review). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
 
 ### 14.2 Work items
 
-**M1. Hygiene.** Small and independent: any order, in parallel, one PR each or a few bundled.
+**M1. Hygiene.** Small and independent: any order, in parallel, one PR each or a few bundled. **Status 2026-10-14: all ten
+implemented and verified, PRs open** (results in §14.5): draquel/VoxelWorlds#84 (WM-H1, H2, H8), draquel/VoxelWorlds#85 (WM-H6, H4 code), draquel/VoxelWorlds#86 (WM-H3), draquel/VoxelWorlds#87 (WM-H10,
+stacked on draquel/VoxelWorlds#85), draquel/VoxelWorlds#88 (WM-H9 and this status, stacked on #83); draquel/VoxelCharacterPlugin#21 (WM-H7); parent
+draquel/UE5_PluginDev#102 (content for WM-H4, H5, H10 and the gitlinks).
 
 | ID | Work item | Findings | Repos | Size | Needs |
 |----|-----------|----------|-------|------|-------|
@@ -1505,7 +1508,7 @@ D9's order is a priority, not a strict sequence. Rough totals assume S ≈ half 
 
 | Milestone | Work items | Rough total | Needs | Done when |
 |-----------|------------|-------------|-------|-----------|
-| M1 Hygiene | WM-H1 to WM-H10 | ~7 days, mostly in parallel | — | Each item's check; a still viewer's `LODUpdateMs` ≈ 0; headless suites and the in-editor GPU tests green |
+| M1 Hygiene | WM-H1 to WM-H10 | ~7 days, mostly in parallel | — | Each item's check; a still viewer's `LODUpdateMs` ≈ 0; headless suites and the in-editor GPU tests green. **Met 2026-10-14, in review (§14.5)** |
 | M2 World-mode API | WM-A1 to WM-A4 | ~5 days | WM-H6 | Island params come from one builder; `CullCentreProbe` asserts; a save from a different radius is refused and the world starts fresh; the control's bench unchanged within batch noise |
 | M3 Island correctness | WM-I1 to WM-I6 | ~6.5 days | M2 | `POIPlacementProbe` asserts; I5-I8 re-run: swimming out stops at R+F, falling out respawns, an off-island spawn stands on land, a radius change starts fresh; the I6 tour finds no marker or explored tile past the bounds |
 | M4 Streaming window | WM-S1 to WM-S4 | ~4 days | WM-A3, WM-H1 | WM-S4: island M within §1's thresholds on chord, perimeter and coast; peak loaded chunks within +25% of the control; the D3 budget met on every run, M's v6000 chord included; island audits 0; the control no worse |
@@ -1537,3 +1540,34 @@ this plan:
 | 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers |
 | 5. Places | After Phase 4 | M-L | Builds on WM-I1's world-mode-aware placement |
 | 6. Big planets and orbit | Not planned | — | SD1, SD5 |
+
+### 14.5 M1 results (2026-10-14)
+
+All ten M1 items are implemented, verified and in review. Built from VoxelWorlds `m1/integration` (a merge of the four
+code PRs) and UE5_PluginDev `claude/blissful-noether-7c99ae`, editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`,
+in a worktree editor with background throttling off.
+
+**Suites.** Headless `VoxelWorlds+VoxelWorldSave` 228/228 (219 before M1 plus 9 new tests), `VoxelCharacter` 26/26. In the
+editor, where the GPU tests run, `VoxelWorlds+VoxelWorldSave` 228/228, including every `Generation.GPUvsCPU*Parity`,
+`GPUNoiseGeneratorAsync`, `Meshing.Cubic.CPUvsGPU` and `Meshing.MarchingCubes.CPUvsGPU`; the island parity test now also
+runs the Exponential curve (100% density, material, biome and metadata at LOD 0/1/2).
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| WM-H1 | Done, in review | VoxelWorlds#84 | Same-build A/B on the control (v3000, 40,000 uu chord, two runs each way, the old behaviour behind a temporary cvar): a still viewer's `LODUpdateMs` 1.03-1.19 ms mean → **0.001 ms**; while moving, P50 1.28-1.29 → 0.73-0.78 ms, P95 unchanged (1.75-1.97 ms, the ticks that do rebuild); LOD re-meshes 280 in all four runs; stale-LOD backlog 0.0-0.5 chunks mean, 0 near; manager P95 13.6-14.6 → 12.6-14.2 ms (noise) |
+| WM-H2 | Done, in review | VoxelWorlds#84 | Live, control world: the component's vertices, triangles and GPU MB equal the renderer's own counters at the spawn (494,590 / 862,170 / 23.1 MB), after a teleport about 95,000 uu away (561,124 / 979,708 / 26.2) and after the teleport back (537,168 / 934,740 / 25.0); before, they only grew. Test `Rendering.WorldComponent.StatsReportCurrentMeshes` |
+| WM-H3 | Done, in review | VoxelWorlds#86 | `Edit.Composition.SubtractComposesWithSet`: under a Set slab over air, the player's dig takes the aimed voxel 255 → 175 → air and its face neighbours 255 → 234 → 213; two digs remove one slab voxel (it was five); undo restores it. `.SaveRoundTrip`: the edits file reloads the same voxels |
+| WM-H4 | Done, in review | VoxelWorlds#85, UE5_PluginDev#102 | The new load warning flagged 21 configs (`DemoSmoothWorldConfig` and every config duplicated from it: leaves 22/23, Birch's trunk 21); all now use Wood 20 / Leaves 21 and load silently. `DemoCubicWorldConfig` was already correct. Test `Configuration.TreeTemplateMaterials` |
+| WM-H5 | Done, in review | UE5_PluginDev#102 | `DemoCubicWorldConfig`: `bEnableLOD` off and GPU scatter extraction off; greedy, `DemoCubicScatterConfig`, tree ids and the demo's biomes/caves/noise were already right (water stays at −1,510, under a block top). `Config/CubicScatterConfig`, referenced by nothing, deleted |
+| WM-H6 | Done, in review | VoxelWorlds#85 | `HeightProbe` asserts: the generated surface drops 1,000-1,001 uu across R+F with Smooth and 1,000-1,006 with Exponential (was 1,016-1,307); `GetDensityAt` 500 uu under the floor beyond R+F = +500 (was −1,000, air). GPU island parity with Exponential 100%. Tests `Generation.IslandBowl.FalloffReachesEdge`, `.DensityMatchesGenerationBeyondEdge` |
+| WM-H7 | Done, in review | VoxelCharacterPlugin#21 | Live, cubic demo world: six digs at one Wood voxel pay 1 Wood (was 6). Test `VoxelCharacter.Gather.OncePerVoxel`. The payout no longer depends on the aimed voxel, which `floor(ImpactPoint)` sometimes puts in the air (KC5) |
+| WM-H8 | Done, in review | VoxelWorlds#84, VoxelCharacterPlugin#21 | Island S, `follow=300` from the centre out over the sea at v1500 with the player's drowning on (no CDO hack): the pawn spent 71 s under water, down to 2,700 uu deep, and did not die; back at its start, 110,000 uu from the end of the run, it was held until the ground was ready (1.1 s) and released walking with damage restored. Every run of the batch logged its restore (0.1-1.1 s). Cubic (`DemoCubicWorldConfig`) v3000: thrash 1,465, all neighbour re-meshes, `other` 0, below the 1,747 mesh jobs launched; the same route counted 1,577-1,671 neighbour plus 1,596-2,006 deferral re-queues as "other" before (§12.8) |
+| WM-H9 | Done, in review | VoxelWorlds#88 | §11's non-spherical items fixed (WORLD_MODES.md island sections and POI claim, CAVE_SYSTEM, SCATTER_SYSTEM, README, TRAVERSAL_LIMITS); `Research/PERFORMANCE_TARGETS.md` has a current baseline from the control; `Features/WORLD_MODES.md`'s island sections carry §13's numbers and the known gaps |
+| WM-H10 | Done, in review | VoxelWorlds#87, UE5_PluginDev#102 | Phase 0's exit check: `PlanetTest` (a 2.5 km planet from the demo config) generates on the CPU with the SP-B3 warning, the config raises no warnings, and the terrain stays inside its shell; the pawn spawns on the north pole (z 250,090). Test `Configuration.PlanetSettings` (the default spherical settings get the depth warning; water on a planet is flagged; `ShouldUseGPUGeneration` is false for planets). Doc corrections per §11 |
+
+JSON reports: [Research/Bench/M1/](Research/Bench/M1/) (`m1h1_*` the WM-H1 A/B, `m1h8_*` the WM-H8 runs).
+
+**Left for later milestones**, as planned: KI4's four island param builders (WM-A1), the edge, recovery and boundary
+(M3), slab culling and 3D LOD distance for islands (M4), cubic's legacy path (M5). M1 changed one shared behaviour on
+purpose: the bench's `thrashRemeshCount` now counts executed meshes, so it is lower than before on any path that defers
+(cubic); compare it only with runs from this build on.

@@ -749,7 +749,11 @@ When `MeshingMode == Cubic`, scatter uses `ExtractSurfacePointsCubic()` instead 
 - No density interpolation — exact block-face positions
 - Position jitter is skipped for `BlockFaceSnap` placement mode
 
-Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic` in both sync and async scatter paths.
+Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic` in both sync and async scatter paths, on
+the CPU extractor only. With `bUseGPUScatterExtraction` on, the GPU branch runs before the cubic check and extracts cubic
+chunks from the greedy mesh instead: a quarter of the rocks land on block corners, grass is pushed to face edges and
+density falls to a third (finding KC4; work item WM-C3 routes cubic to the CPU extractor). Keep GPU extraction off for
+cubic worlds until then.
 
 ### Scatter Mesh Types
 

@@ -2,6 +2,73 @@
 
 Performance budgets and optimization guidelines for VoxelWorlds.
 
+The first section is the measured baseline that changes are judged against today. The sections after it are the
+original design targets from 2026-02, written for 32³ chunks of 100 uu voxels and 1,000 chunks; the demo outgrew them
+(64³ chunks of 75 uu, a 40,000 uu view, about 1,100-1,300 chunks), so they are kept as history and are not pass/fail.
+
+## Current baseline: the demo (2026-10)
+
+From the InfinitePlane smooth control of the world modes review (WORLD_MODES_REVIEW_PLAN.md §12.2, §12.8, §13.3,
+§13.4, §13.11). **How changes are judged:** against a control run of the same build in the same batch, on the same
+machine, viewport and route, not against these absolute numbers. Re-mesh counts move with frame rate and machine load
+(§13.10), and the control itself moved with G6 (§12.8).
+
+**Setup.** `VoxelDemo` with `DemoSmoothWorldConfig` (Dual Contouring, voxel 75 uu, 64³ chunks = 4,800 uu, view distance
+40,000 uu, three LOD bands, GPU generation, CPU meshing), applied through `voxel.ConfigOverride` so every run starts from a
+fresh world. PIE in the level viewport (2874×1360, D3D12 SM6), editor in the foreground, background throttle off. Bench:
+`voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0 warmup=120`, one cold PIE per run (STREAMING_PERFORMANCE.md).
+
+**Settled at the spawn** (initial load drained, `voxel.FarCompression.Stats`):
+
+| Measure | Value |
+|---------|-------|
+| Loaded chunks | 1,123 (about 424 with geometry) |
+| Time to settle | 13-16 s |
+| Voxel data | 134 MB (112 resident, 79 uniform, 932 compressed chunks) |
+| Renderer GPU | 23 MB, 0.86-0.98 M triangles |
+| Collision / scatter | about 100 / 90 MB |
+| Voxel systems in all | about 0.35 GB |
+
+**Streaming** (focused PIE, 40,000 uu traverse; G6 build, `20261013_*_g6_ctrl_*`):
+
+| Speed | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | Peak mesh queue | LOD re-meshes | Peak voxel MB | Peak systems MB |
+|-------|---------------------------|----------------|------------|-----------------|---------------|---------------|-----------------|
+| v1500 | 16.7 / 27.4 / 34.5 | 8.6 | 0.17 | 4 | 280 | 828 | 1,039 |
+| v3000 | 22.7 / 35.7-35.9 / 42.2-42.5 | 13.5 | 0.9-1.1 | 5-7 | 280 | 777-782 | 987-994 |
+| v6000 | 33.3 / 47.5 / 54.7 | 20.0 | 5.0 | 9 | 280 | 764 | 1,053 |
+
+Headless (`-game -nullrhi -VoxelForceCPU`, VoxelWorldsTest, CPU generation and meshing), v3000: frame 3.3 / 8.5 ms,
+manager P95 5.8 ms, catch-up 8.5 s, peak voxel 230 MB, systems 566 MB. Headless runs are focus-immune and compare CPU
+work; their frame times are not comparable to PIE.
+
+**Where the manager's slowest ticks go** (v3000, mean over the slowest 5% of traverse ticks, §12.8): collision 4.6 ms,
+seam pipeline 3.8, render submit 3.0, scatter 2.2, meshing 1.7, far-compression sweep 0.5. The LOD cache rebuild
+(`LODUpdateMs`) measured 1.3-1.9 ms a tick on the control's chord and 0.6-0.7 ms standing still before WM-H1 (§13.11).
+
+**Thresholds for another configuration** (a world mode, meshing mode or tier, against the same-build control; §1):
+
+| Metric | Threshold |
+|--------|-----------|
+| Frame P95 (traverse) | within +10% |
+| Chunk-manager P95 | within +15% |
+| Catch-up after stopping | within +25% |
+| Peak loaded chunks, resident voxel and mesh MB | within +25%, or explained |
+| `voxel.Stream.AuditResidency` after settling | 0 findings |
+| Fall-throughs (`vox.Debug.Capture`) | none |
+
+**Memory budget (decision D3, 2026-10-14):** 0.6 GB of voxel systems memory (voxel data, renderer, collision, scatter)
+settled for a fully resident S-class island (0.8 km across), and at most 1.5 GB at peak while streaming, at any speed and
+tier. The control peaks at 1.05-1.27 GB.
+
+**Per chunk** at the demo's size: a 64³ chunk is 262,144 voxels, 1 MB of voxel data resident. Far chunks are compressed
+(Oodle) or collapsed to one uniform value, which is how 1,123 chunks fit in 134 MB settled. A rendered chunk's mesh averages
+about 55 KB of GPU memory (23 MB over about 424 chunks with geometry).
+
+## Original design targets (2026-02, 32³ chunks)
+
+Everything from here to the end is the original plan, unchanged apart from this note: budgets for 32³ chunks of
+100 uu voxels (128 KB of voxel data each) and 1,000 chunks.
+
 ## Target Specifications
 
 ### Hardware Baseline
