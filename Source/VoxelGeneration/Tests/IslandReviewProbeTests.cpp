@@ -17,6 +17,7 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelWorldModeFactory.h"
 #include "VoxelData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -26,20 +27,6 @@ namespace IslandProbe
 	UVoxelWorldConfiguration* LoadReviewConfig(const TCHAR* Name)
 	{
 		return LoadObject<UVoxelWorldConfiguration>(nullptr, *FString::Printf(TEXT("/Game/PluginTesting/Review/%s.%s"), Name, Name));
-	}
-
-	FIslandBowlParams MakeIslandParams(const UVoxelWorldConfiguration& Config)
-	{
-		FIslandBowlParams P;
-		P.Shape = static_cast<EIslandShape>(Config.IslandShape);
-		P.IslandRadius = Config.IslandRadius;
-		P.SizeY = Config.IslandSizeY;
-		P.FalloffWidth = Config.IslandFalloffWidth;
-		P.FalloffType = static_cast<EIslandFalloffType>(Config.IslandFalloffType);
-		P.CenterX = Config.IslandCenterX;
-		P.CenterY = Config.IslandCenterY;
-		P.EdgeHeight = Config.IslandEdgeHeight;
-		return P;
 	}
 
 	/** The surface generation produces at (X, Y): a CPU island chunk stack around ExpectedZ, caves off. FLT_MAX if none. */
@@ -67,23 +54,12 @@ namespace IslandProbe
 			Request.ChunkSize = ChunkSize;
 			Request.VoxelSize = VoxelSize;
 			Request.LODLevel = 0;
-			Request.WorldOrigin = Origin;
-			Request.WorldMode = EWorldMode::IslandBowl;
-			Request.SeaLevel = Config.SeaLevel;
-			Request.HeightScale = Config.HeightScale;
-			Request.BaseHeight = Config.BaseHeight;
+			FVoxelWorldModeFactory::FillGenerationRequest(Config, Request);
 			Request.bEnableBiomes = false; // the height path only; continentalness applies regardless
 			Request.bEnableCaves = false;
 			Request.BiomeConfiguration = Config.BiomeConfiguration;
 			Request.NoiseParams = Config.NoiseParams;
-			Request.IslandParams.Shape = static_cast<uint8>(Island.Shape);
-			Request.IslandParams.IslandRadius = Island.IslandRadius;
-			Request.IslandParams.SizeY = Island.SizeY;
-			Request.IslandParams.FalloffWidth = Island.FalloffWidth;
-			Request.IslandParams.FalloffType = static_cast<uint8>(Island.FalloffType);
-			Request.IslandParams.CenterX = Island.CenterX;
-			Request.IslandParams.CenterY = Island.CenterY;
-			Request.IslandParams.EdgeHeight = Island.EdgeHeight;
+			Request.IslandParams = Island; // the config's, or a variant of it
 
 			TArray<FVoxelData> ChunkData;
 			if (!Generator.GenerateChunkCPU(Request, ChunkData))
@@ -134,7 +110,7 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 			AddWarning(FString::Printf(TEXT("%s not found: run Scripts/setup_world_modes_review.py"), Name));
 			continue;
 		}
-		const FIslandBowlParams Island = MakeIslandParams(*Config);
+		const FIslandBowlParams Island = FVoxelWorldModeFactory::MakeIslandParams(*Config);
 		const FWorldModeTerrainParams Terrain(Config->SeaLevel, Config->HeightScale, Config->BaseHeight);
 		FIslandBowlWorldMode IslandMode(Terrain, Island);
 		IslandMode.SetBiomeContext(Config->BiomeConfiguration);

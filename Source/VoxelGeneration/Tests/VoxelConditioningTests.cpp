@@ -155,7 +155,7 @@ bool FVoxelConditioningIslandBowlTest::RunTest(const FString& Parameters)
 	Request.BaseHeight = 800.0f;
 	Request.bEnableBiomes = false;
 	Request.bEnableCaves = false;
-	Request.IslandParams.Shape = 0;            // circular
+	Request.IslandParams.Shape = EIslandShape::Circular;
 	Request.IslandParams.IslandRadius = 200000.0f;
 	Request.IslandParams.CenterX = 0.0f;
 	Request.IslandParams.CenterY = 0.0f;

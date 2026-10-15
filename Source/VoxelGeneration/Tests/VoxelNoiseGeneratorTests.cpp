@@ -438,11 +438,11 @@ bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 	Request.bEnableBiomes = true;
 	Request.BiomeConfiguration = BiomeConfig;
 	// Circular island whose falloff edge (radius 3500 + falloff 1500) crosses the test chunk (world ~3200-4800).
-	Request.IslandParams.Shape = 0;
+	Request.IslandParams.Shape = EIslandShape::Circular;
 	Request.IslandParams.IslandRadius = 3500.0f;
 	Request.IslandParams.SizeY = 3500.0f;
 	Request.IslandParams.FalloffWidth = 1500.0f;
-	Request.IslandParams.FalloffType = 1; // Smooth
+	Request.IslandParams.FalloffType = EIslandFalloffType::Smooth;
 	Request.IslandParams.CenterX = 0.0f;
 	Request.IslandParams.CenterY = 0.0f;
 	Request.IslandParams.EdgeHeight = -1000.0f;
@@ -450,7 +450,7 @@ bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl"));
 
 	// The Exponential curve (rescaled to reach 0 at the edge, KI4) has its own branch in IslandFalloff.ush.
-	Request.IslandParams.FalloffType = 3; // Exponential
+	Request.IslandParams.FalloffType = EIslandFalloffType::Exponential;
 	const bool bExponentialPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl Exponential"));
 
 	GPUGenerator.Shutdown();

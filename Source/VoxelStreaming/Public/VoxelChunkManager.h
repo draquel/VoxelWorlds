@@ -1368,8 +1368,8 @@ private:
 	/** True when bUseGPUGeneration resolved on (config flag && !-VoxelForceCPU && voxel.GPUGeneration.Enable). */
 	bool bUseGPUGenerationActive = false;
 
-	/** World mode for terrain generation (Infinite Plane) */
-	TUniquePtr<IVoxelWorldMode> WorldMode;
+	/** Analytic world mode matching the config's WorldMode (FVoxelWorldModeFactory::Create) */
+	TSharedPtr<IVoxelWorldMode> WorldMode;
 
 	/** Static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c). */
 	TArray<FVoxelConditioningZone> ConditioningZones;

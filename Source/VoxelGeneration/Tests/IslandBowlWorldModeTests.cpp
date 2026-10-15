@@ -98,12 +98,7 @@ bool FIslandDensityBeyondEdgeTest::RunTest(const FString& Parameters)
 	Request.bEnableBiomes = false;
 	Request.bEnableCaves = false;
 	Request.NoiseParams = Noise;
-	Request.IslandParams.Shape = 0;
-	Request.IslandParams.IslandRadius = Island.IslandRadius;
-	Request.IslandParams.SizeY = Island.SizeY;
-	Request.IslandParams.FalloffWidth = Island.FalloffWidth;
-	Request.IslandParams.FalloffType = static_cast<uint8>(Island.FalloffType);
-	Request.IslandParams.EdgeHeight = Island.EdgeHeight;
+	Request.IslandParams = Island;
 
 	FVoxelCPUNoiseGenerator Generator;
 	Generator.Initialize();

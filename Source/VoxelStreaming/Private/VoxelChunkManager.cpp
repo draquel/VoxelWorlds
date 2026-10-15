@@ -17,8 +17,7 @@
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "IVoxelWorldMode.h"
-#include "IslandBowlWorldMode.h"
-#include "SphericalPlanetWorldMode.h"
+#include "VoxelWorldModeFactory.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
@@ -983,50 +982,11 @@ void UVoxelChunkManager::Initialize(
 	EffectiveMaxPendingMeshes = (SchedOverridePending >= 0) ? SchedOverridePending : Configuration->MaxPendingMeshes;
 	LastTimingStats = FVoxelTimingStats();
 
-	// Create generation components
-	FWorldModeTerrainParams TerrainParams;
-	TerrainParams.SeaLevel = Configuration->SeaLevel;
-	TerrainParams.HeightScale = Configuration->HeightScale;
-	TerrainParams.BaseHeight = Configuration->BaseHeight;
-	// Build the analytic world mode matching config->WorldMode so spawn / nav / POI / GetGeneratedSurfaceHeight
-	// use the correct terrain math for every mode (was always InfinitePlane — flat for island/planet worlds).
-	switch (Configuration->WorldMode)
-	{
-	case EWorldMode::IslandBowl:
-	{
-		FIslandBowlParams IslandParams;
-		IslandParams.Shape = static_cast<EIslandShape>(Configuration->IslandShape);
-		IslandParams.IslandRadius = Configuration->IslandRadius;
-		IslandParams.SizeY = Configuration->IslandSizeY;
-		IslandParams.FalloffWidth = Configuration->IslandFalloffWidth;
-		IslandParams.FalloffType = static_cast<EIslandFalloffType>(Configuration->IslandFalloffType);
-		IslandParams.CenterX = Configuration->IslandCenterX;
-		IslandParams.CenterY = Configuration->IslandCenterY;
-		IslandParams.EdgeHeight = Configuration->IslandEdgeHeight;
-		WorldMode = MakeUnique<FIslandBowlWorldMode>(TerrainParams, IslandParams);
-		break;
-	}
-	case EWorldMode::SphericalPlanet:
-	{
-		FWorldModeTerrainParams PlanetTerrainParams(0.0f, Configuration->PlanetHeightScale, Configuration->BaseHeight);
-		FSphericalPlanetParams PlanetParams;
-		PlanetParams.PlanetRadius = Configuration->WorldRadius;
-		PlanetParams.MaxTerrainHeight = Configuration->PlanetMaxTerrainHeight;
-		PlanetParams.MaxTerrainDepth = Configuration->PlanetMaxTerrainDepth;
-		PlanetParams.PlanetCenter = Configuration->WorldOrigin;
-		WorldMode = MakeUnique<FSphericalPlanetWorldMode>(PlanetTerrainParams, PlanetParams);
-		break;
-	}
-	case EWorldMode::InfinitePlane:
-	default:
-		WorldMode = MakeUnique<FInfinitePlaneWorldMode>(TerrainParams);
-		break;
-	}
-
-	// Give the world mode the biome config so the analytic height query (GetTerrainHeightAt) applies the same
-	// continentalness modulation as generation (InfinitePlane + IslandBowl; other modes no-op) — spawn / nav /
-	// POI heights match the real surface.
-	WorldMode->SetBiomeContext(Configuration->BiomeConfiguration);
+	// Create generation components.
+	// The analytic world mode matching config->WorldMode, so spawn / nav / POI / GetGeneratedSurfaceHeight use the
+	// right terrain math for every mode. Built by the one factory every other consumer uses (WM-A1), with the biome
+	// context set, so its continentalness-modulated height matches generation.
+	WorldMode = FVoxelWorldModeFactory::Create(*Configuration);
 
 	// -VoxelForceCPU (headless/benchmark, e.g. under -nullrhi where GPU compute can't dispatch) forces
 	// BOTH the CPU generator and the CPU mesher. Evaluated once here and reused for the mesher below.
@@ -2554,39 +2514,12 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		GenRequest.ChunkSize = Configuration->ChunkSize;
 		GenRequest.VoxelSize = Configuration->VoxelSize;
 		GenRequest.NoiseParams = Configuration->NoiseParams;
-		GenRequest.WorldMode = Configuration->WorldMode;
-		GenRequest.SeaLevel = Configuration->SeaLevel;
-		GenRequest.HeightScale = Configuration->HeightScale;
-		GenRequest.BaseHeight = Configuration->BaseHeight;
-		GenRequest.WorldOrigin = Configuration->WorldOrigin;
+		// World mode, origin, terrain params and the island / planet params, from the one builder (WM-A1).
+		FVoxelWorldModeFactory::FillGenerationRequest(*Configuration, GenRequest);
 
 		// Biome configuration (contains biome definitions, blend settings, height rules)
 		GenRequest.bEnableBiomes = Configuration->bEnableBiomes;
 		GenRequest.BiomeConfiguration = Configuration->BiomeConfiguration;
-
-		// Island mode parameters (used when WorldMode == IslandBowl)
-		if (Configuration->WorldMode == EWorldMode::IslandBowl)
-		{
-			GenRequest.IslandParams.Shape = static_cast<uint8>(Configuration->IslandShape);
-			GenRequest.IslandParams.IslandRadius = Configuration->IslandRadius;
-			GenRequest.IslandParams.SizeY = Configuration->IslandSizeY;
-			GenRequest.IslandParams.FalloffWidth = Configuration->IslandFalloffWidth;
-			GenRequest.IslandParams.FalloffType = static_cast<uint8>(Configuration->IslandFalloffType);
-			GenRequest.IslandParams.CenterX = Configuration->IslandCenterX;
-			GenRequest.IslandParams.CenterY = Configuration->IslandCenterY;
-			GenRequest.IslandParams.EdgeHeight = Configuration->IslandEdgeHeight;
-		}
-
-		// Spherical planet mode parameters (used when WorldMode == SphericalPlanet)
-		if (Configuration->WorldMode == EWorldMode::SphericalPlanet)
-		{
-			GenRequest.SphericalPlanetParams.PlanetRadius = Configuration->WorldRadius;
-			GenRequest.SphericalPlanetParams.MaxTerrainHeight = Configuration->PlanetMaxTerrainHeight;
-			GenRequest.SphericalPlanetParams.MaxTerrainDepth = Configuration->PlanetMaxTerrainDepth;
-			GenRequest.SphericalPlanetParams.PlanetCenter = Configuration->WorldOrigin;
-			// Use PlanetHeightScale for terrain generation
-			GenRequest.HeightScale = Configuration->PlanetHeightScale;
-		}
 
 		// Cave parameters
 		GenRequest.bEnableCaves = Configuration->bEnableCaves;

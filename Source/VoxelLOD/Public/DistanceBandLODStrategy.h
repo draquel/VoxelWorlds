@@ -378,6 +378,7 @@ protected:
 		float& OutMin, float& OutMax) const;
 
 	// ==================== Island Mode Culling ====================
+	// Cached from FVoxelWorldModeFactory::MakeIslandParams, the params generation uses (WM-A1).
 
 	/** Island shape type: 0 = Circular, 1 = Rectangle */
 	int32 IslandShape = 0;
@@ -388,10 +389,11 @@ protected:
 	/** Total island extent Y (IslandSizeY + FalloffWidth) for rectangle culling */
 	float IslandTotalExtentY = 0.0f;
 
-	/** Island center offset from WorldOrigin */
-	FVector2D IslandCenterOffset = FVector2D::ZeroVector;
+	/** Island centre in world space: WorldOrigin + the config's IslandCenterX/Y, where generation puts it */
+	FVector2D IslandCenter = FVector2D::ZeroVector;
 
 	// ==================== Spherical Planet Mode Culling ====================
+	// Cached from FVoxelWorldModeFactory::MakePlanetParams (SP-A6).
 
 	/** Cached planet radius for horizon calculations */
 	float PlanetRadius = 0.0f;
@@ -401,6 +403,9 @@ protected:
 
 	/** Max terrain depth below planet radius (for inner shell culling) */
 	float PlanetMaxTerrainDepth = 0.0f;
+
+	/** Planet centre in world space (WorldOrigin) */
+	FVector PlanetCenter = FVector::ZeroVector;
 
 	// ==================== Runtime State ====================
 
