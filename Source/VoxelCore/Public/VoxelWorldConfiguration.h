@@ -44,6 +44,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World")
 	FVector WorldOrigin = FVector::ZeroVector;
 
+	/**
+	 * Block pawns, NPCs and physics bodies at the edge of a bounded world: invisible walls at the world mode's bounds
+	 * (an island's R + falloff), so nothing walks, swims or rolls off into the void beyond it (world modes review WM-I5,
+	 * decision D9). Unbounded worlds and planets have no walls. The cvar voxel.World.Boundary 0 turns their collision
+	 * off at runtime.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World")
+	bool bWorldBoundary = true;
+
 	/** World radius for spherical/island modes (world units) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World", meta = (ClampMin = "1000", EditCondition = "WorldMode != EWorldMode::InfinitePlane"))
 	float WorldRadius = 100000.0f;

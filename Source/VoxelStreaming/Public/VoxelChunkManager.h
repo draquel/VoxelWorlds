@@ -33,6 +33,7 @@ class UVoxelCollisionManager;
 class UVoxelScatterManager;
 class UVoxelWaterPropagation;
 class FVoxelSeamRegistry;
+class UBoxComponent;
 
 /**
  * Internal chunk state tracking.
@@ -458,6 +459,29 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	FVoxelWorldFingerprint GetWorldFingerprint() const;
+
+	/**
+	 * Distance in X and Y from a point to the world's edge (FVoxelWorldBounds::GetDistanceToEdgeXY): what a soft
+	 * push-back or a HUD hint near an island's R + falloff reads (WM-I5).
+	 *
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @return Positive inside, negative outside; a very large value for an unbounded world
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	double GetDistanceToWorldEdge(double WorldX, double WorldY) const;
+
+	/**
+	 * Number of invisible walls blocking the world's edge (WM-I5): one per chord of a circular island, four for a
+	 * rectangle, none when the world is unbounded or UVoxelWorldConfiguration::bWorldBoundary is off.
+	 *
+	 * @return Wall count
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	int32 GetWorldBoundaryWallCount() const { return WorldBoundaryWalls.Num(); }
+
+	/** Turn the edge walls' collision on or off (voxel.World.Boundary). The walls stay; only their collision changes. */
+	void SetWorldBoundaryCollisionEnabled(bool bEnabled);
 
 	// ==================== Configuration Access ====================
 
@@ -1671,6 +1695,18 @@ private:
 	/** Water propagation system for flooding caves on edit */
 	UPROPERTY()
 	TObjectPtr<UVoxelWaterPropagation> WaterPropagation;
+
+	// ==================== World Boundary (WM-I5) ====================
+
+	/** Invisible collision walls at the world's edge, owned by this component's actor (see FVoxelWorldBoundary) */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UBoxComponent>> WorldBoundaryWalls;
+
+	/** Build the edge walls from the world mode's bounds (game worlds, bounded worlds, bWorldBoundary on). */
+	void RebuildWorldBoundary();
+
+	/** Destroy the edge walls. */
+	void DestroyWorldBoundary();
 
 	// ==================== 2D Water Tile State ====================
 

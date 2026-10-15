@@ -34,6 +34,9 @@
 #include "VoxelScatterManager.h"
 #include "VoxelTreeInjector.h"
 #include "VoxelTreeTypes.h"
+#include "VoxelWorldBoundary.h"
+#include "Components/BoxComponent.h"
+#include "UObject/UObjectIterator.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
@@ -67,6 +70,22 @@ static TAutoConsoleVariable<int32> CVarLogBoundaryResidency(
 // Runtime master-enable for GPU terrain generation. Lets you force CPU generation without editing the
 // config asset or restarting the build: 1 = honor bUseGPUGeneration; 0 = force CPU. Read at chunk-manager
 // Initialize (generator selection), so re-initialize the voxel world after toggling for it to take effect.
+// World boundary (world modes review WM-I5): the edge walls' collision, for every live chunk manager.
+static TAutoConsoleVariable<int32> CVarWorldBoundary(
+	TEXT("voxel.World.Boundary"),
+	1,
+	TEXT("Invisible walls at a bounded world's edge (an island's R + falloff).\n")
+	TEXT("  1 = block pawns, NPCs and physics bodies there (default)\n")
+	TEXT("  0 = walls without collision (the world's edge is open; for repros)"),
+	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			It->SetWorldBoundaryCollisionEnabled(Var->GetInt() != 0);
+		}
+	}),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarGPUGenerationEnable(
 	TEXT("voxel.GPUGeneration.Enable"),
 	1,
@@ -1270,6 +1289,9 @@ void UVoxelChunkManager::Initialize(
 
 	bIsInitialized = true;
 
+	// The hard boundary at the world's edge (WM-I5, D9).
+	RebuildWorldBoundary();
+
 	// Dump biome configuration for diagnostics
 	if (Configuration->BiomeConfiguration)
 	{
@@ -1392,6 +1414,7 @@ void UVoxelChunkManager::Shutdown()
 	}
 
 	WorldMode.Reset();
+	DestroyWorldBoundary();
 
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
@@ -2580,6 +2603,108 @@ FVector UVoxelChunkManager::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, floa
 FVoxelWorldFingerprint UVoxelChunkManager::GetWorldFingerprint() const
 {
 	return Configuration ? FVoxelWorldModeFactory::MakeFingerprint(*Configuration) : FVoxelWorldFingerprint();
+}
+
+double UVoxelChunkManager::GetDistanceToWorldEdge(double WorldX, double WorldY) const
+{
+	return WorldMode ? WorldMode->GetWorldBounds().GetDistanceToEdgeXY(WorldX, WorldY) : TNumericLimits<double>::Max();
+}
+
+// ==================== World Boundary (WM-I5) ====================
+
+namespace VoxelWorldBoundaryPrivate
+{
+	/** Walls 5 m thick: a sweep cannot tunnel through, and the outer side never matters */
+	constexpr double WallThickness = 500.0;
+
+	/** A circle's chords stay within 50 uu of R + F (63 walls for island S, 158 for M, 223 for L) */
+	constexpr double MaxChordError = 50.0;
+
+	/** Height of the walls above the highest terrain: higher than a pawn can climb, build or jump */
+	constexpr double HeightAboveTerrain = 50000.0;
+
+	/** Keep a mode's "no bound" height range (IVoxelWorldMode's default) from making boxes millions of km tall */
+	constexpr double MaxAbsZ = 2.0e6;
+}
+
+void UVoxelChunkManager::RebuildWorldBoundary()
+{
+	using namespace VoxelWorldBoundaryPrivate;
+	DestroyWorldBoundary();
+
+	UWorld* World = GetWorld();
+	AActor* Owner = GetOwner();
+	if (!Configuration || !WorldMode || !World || !World->IsGameWorld() || !Owner || !Configuration->bWorldBoundary)
+	{
+		return;
+	}
+	const FVoxelWorldBounds Bounds = WorldMode->GetWorldBounds();
+	const double BottomZ = FMath::Max(static_cast<double>(Bounds.MinZ) - Configuration->GetChunkWorldSize(), -MaxAbsZ);
+	const double TopZ = FMath::Min(static_cast<double>(Bounds.MaxZ) + HeightAboveTerrain, MaxAbsZ);
+	TArray<FVoxelWorldBoundaryWall> Walls;
+	FVoxelWorldBoundary::BuildWalls(Bounds, WallThickness, MaxChordError, BottomZ, TopZ, Walls);
+	if (Walls.Num() == 0)
+	{
+		return;
+	}
+
+	const bool bCollision = CVarWorldBoundary.GetValueOnGameThread() != 0;
+	WorldBoundaryWalls.Reserve(Walls.Num());
+	for (int32 i = 0; i < Walls.Num(); ++i)
+	{
+		const FVoxelWorldBoundaryWall& Wall = Walls[i];
+		UBoxComponent* Box = NewObject<UBoxComponent>(Owner, *FString::Printf(TEXT("VoxelWorldBoundary_%d"), i), RF_Transient);
+		Box->SetUsingAbsoluteLocation(true);
+		Box->SetUsingAbsoluteRotation(true);
+		Box->SetUsingAbsoluteScale(true);
+		Box->SetupAttachment(Owner->GetRootComponent());
+		Box->SetBoxExtent(Wall.HalfExtent, /*bUpdateOverlaps=*/false);
+		Box->SetHiddenInGame(true);
+		Box->SetCanEverAffectNavigation(false);
+		Box->SetGenerateOverlapEvents(false);
+		// Blocks everything that moves (pawns, NPCs, ragdolls, dropped items); traces for sight, interaction and the
+		// camera pass, so nothing aimed at the sea stops on an invisible wall.
+		Box->SetCollisionObjectType(ECC_WorldStatic);
+		Box->SetCollisionResponseToAllChannels(ECR_Block);
+		Box->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+		Box->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+		Box->SetCollisionEnabled(bCollision ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+		Box->SetWorldLocationAndRotation(Wall.Center, Wall.Rotation);
+		Box->RegisterComponent();
+		WorldBoundaryWalls.Add(Box);
+	}
+
+	UE_LOG(LogVoxelStreaming, Log,
+		TEXT("World boundary: %d wall(s) at the world's edge (%s, centre (%.0f, %.0f), half extent (%.0f, %.0f)), Z %.0f to %.0f, collision %s"),
+		WorldBoundaryWalls.Num(), *StaticEnum<EVoxelWorldBoundsShape>()->GetNameStringByValue(static_cast<int64>(Bounds.Shape)),
+		Bounds.Center.X, Bounds.Center.Y, Bounds.HalfExtent.X, Bounds.HalfExtent.Y, BottomZ, TopZ, bCollision ? TEXT("on") : TEXT("off"));
+}
+
+void UVoxelChunkManager::DestroyWorldBoundary()
+{
+	for (UBoxComponent* Box : WorldBoundaryWalls)
+	{
+		if (IsValid(Box))
+		{
+			Box->DestroyComponent();
+		}
+	}
+	WorldBoundaryWalls.Reset();
+}
+
+void UVoxelChunkManager::SetWorldBoundaryCollisionEnabled(bool bEnabled)
+{
+	for (UBoxComponent* Box : WorldBoundaryWalls)
+	{
+		if (IsValid(Box))
+		{
+			Box->SetCollisionEnabled(bEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+		}
+	}
+	if (WorldBoundaryWalls.Num() > 0)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("World boundary: %d wall(s), collision %s"), WorldBoundaryWalls.Num(), bEnabled ? TEXT("on") : TEXT("off"));
+	}
 }
 
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
