@@ -120,6 +120,19 @@ public:
 		FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, &BiomeSnapshot, OutMin, OutMax);
 	}
 
+	// ==================== World Bounds and Local Frame (IVoxelWorldMode, WM-A2) ====================
+	// A plane has no edge (IsInsideWorld keeps the default: always inside), up is +Z and the surface coordinate is
+	// (0, X, Y) (the defaults); the datum is SeaLevel.
+
+	/** Unbounded, with the terrain's height bounds and the centre at (0, 0, SeaLevel). */
+	virtual FVoxelWorldBounds GetWorldBounds() const override;
+
+	/** Z above SeaLevel. */
+	virtual float GetAltitude(const FVector& WorldPos) const override;
+
+	/** (U, V, SeaLevel + Altitude). */
+	virtual FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const override;
+
 	/**
 	 * Get sea level height.
 	 */

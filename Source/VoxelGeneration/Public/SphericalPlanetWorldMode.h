@@ -118,6 +118,32 @@ public:
 		float SurfaceHeight,
 		float DepthBelowSurface) const override;
 
+	// ==================== World Bounds and Local Frame (IVoxelWorldMode, WM-A2; SP-A1, SP-A2) ====================
+	// The interface fits a planet: up is radial, altitude is above PlanetRadius, the surface coordinate is a cube face.
+	// Nothing consumes these on a planet yet; spherical Phase 1 moves the 2D systems onto them (and may swap the
+	// gnomonic cube mapping for an equal-area one: consumers should rely only on the round trip).
+
+	/** Whether the vertical line at (X, Y) meets the terrain shell (within its outer radius in XY). */
+	virtual bool IsInsideWorld(double X, double Y) const override;
+
+	/** The terrain shell: PlanetRadius - MaxTerrainDepth to PlanetRadius + MaxTerrainHeight around the planet centre. */
+	virtual FVoxelWorldBounds GetWorldBounds() const override;
+
+	/** The radial direction from the planet centre (+Z at the centre itself). */
+	virtual FVector GetUpVector(const FVector& WorldPos) const override;
+
+	/** Distance from the planet centre minus PlanetRadius. */
+	virtual float GetAltitude(const FVector& WorldPos) const override;
+
+	/**
+	 * The cube face the radial direction points through (0..5 = +X, -X, +Y, -Y, +Z, -Z) and (U, V) in [-1, 1] on it:
+	 * the gnomonic projection of the direction onto the face.
+	 */
+	virtual FVoxelSurfaceCoord WorldToSurface(const FVector& WorldPos) const override;
+
+	/** The point at Altitude above PlanetRadius along the direction through (Face, U, V). */
+	virtual FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const override;
+
 	// ==================== Configuration ====================
 
 	const FWorldModeTerrainParams& GetTerrainParams() const { return TerrainParams; }

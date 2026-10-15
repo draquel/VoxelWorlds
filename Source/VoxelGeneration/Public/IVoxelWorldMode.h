@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelWorldModeTypes.h"
 
 class UVoxelBiomeConfiguration;
 
@@ -20,6 +21,13 @@ class UVoxelBiomeConfiguration;
  * - Terrain height sampling for heightmap-based modes
  * - Coordinate transformations
  * - Vertical bounds for chunk streaming
+ * - Where the world ends (IsInsideWorld, GetWorldBounds) and a local frame (GetUpVector, GetAltitude,
+ *   WorldToSurface, SurfaceToWorld), so consumers work in any mode without assuming +Z is up or that the
+ *   world has no edge (world modes review WM-A2; spherical requirements SP-A1, SP-A2)
+ *
+ * Build a mode from a world configuration with FVoxelWorldModeFactory::Create. Game code reaches the configured
+ * mode's bounds and frame through UVoxelChunkManager (a component of the world actor), which exposes them to
+ * Blueprint.
  *
  * @see FInfinitePlaneWorldMode
  */
@@ -175,6 +183,79 @@ public:
 	{
 		OutMin = -1.0e9f;
 		OutMax = 1.0e9f;
+	}
+
+	// ==================== World Bounds (WM-A2) ====================
+	// The defaults describe an unbounded heightmap world with its datum at Z 0, so a mode that does not override them
+	// (a game plugin's own mode, a test mock) keeps working. The built-in modes override them.
+
+	/**
+	 * Whether the vertical line at (X, Y) passes through the world: the test for consumers that place, explore,
+	 * spawn or navigate. An island's footprint is R + falloff (beyond it generation writes only a flat floor); a plane
+	 * has no edge. On a planet it says whether the line meets the terrain shell; 2D consumers on a planet key on
+	 * WorldToSurface instead. Cheap: safe to call per sample.
+	 *
+	 * @param X World X
+	 * @param Y World Y
+	 * @return True when (X, Y) is inside the world's footprint
+	 */
+	virtual bool IsInsideWorld(double /*X*/, double /*Y*/) const { return true; }
+
+	/**
+	 * Where the world ends: unbounded for a plane, the R + falloff footprint for an island, the terrain shell for a
+	 * planet. IsInsideWorld agrees with FVoxelWorldBounds::ContainsXY.
+	 *
+	 * @return The world's bounds, with the terrain's vertical extent
+	 */
+	virtual FVoxelWorldBounds GetWorldBounds() const
+	{
+		FVoxelWorldBounds Bounds;
+		GetTerrainHeightBounds(Bounds.MinZ, Bounds.MaxZ);
+		return Bounds;
+	}
+
+	// ==================== Local Frame (SP-A1, SP-A2) ====================
+
+	/**
+	 * Local up at a world position: +Z in heightmap modes, the radial direction on a planet.
+	 *
+	 * @param WorldPos World position
+	 * @return Unit up vector
+	 */
+	virtual FVector GetUpVector(const FVector& /*WorldPos*/) const { return FVector::UpVector; }
+
+	/**
+	 * Signed height above the datum, the surface the terrain's noise displaces from: SeaLevel in heightmap modes (so
+	 * Z - SeaLevel), the planet radius on a planet. The water plane (WaterLevel / WaterRadius) is separate.
+	 *
+	 * @param WorldPos World position
+	 * @return Height above the datum along GetUpVector (negative below it)
+	 */
+	virtual float GetAltitude(const FVector& WorldPos) const { return static_cast<float>(WorldPos.Z); }
+
+	/**
+	 * A world position's coordinate on the surface parameterisation, the key 2D consumers use: (0, X, Y) in heightmap
+	 * modes, a cube face and (U, V) in [-1, 1] on a planet. Ignores altitude: every point on one up-line maps to the
+	 * same coordinate.
+	 *
+	 * @param WorldPos World position
+	 * @return Surface coordinate
+	 */
+	virtual FVoxelSurfaceCoord WorldToSurface(const FVector& WorldPos) const
+	{
+		return FVoxelSurfaceCoord(0, FVector2D(WorldPos.X, WorldPos.Y));
+	}
+
+	/**
+	 * Inverse of WorldToSurface: the world position at a surface coordinate and an altitude above the datum.
+	 *
+	 * @param Coord Surface coordinate
+	 * @param Altitude Height above the datum (see GetAltitude)
+	 * @return World position
+	 */
+	virtual FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
+	{
+		return FVector(Coord.UV.X, Coord.UV.Y, Altitude);
 	}
 };
 

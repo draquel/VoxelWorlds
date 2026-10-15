@@ -18,6 +18,89 @@ FSphericalPlanetWorldMode::FSphericalPlanetWorldMode(
 {
 }
 
+// ==================== World Bounds and Local Frame ====================
+
+namespace SphericalPlanetSurfacePrivate
+{
+	/** Cube face frames for the surface parameterisation: face normal N, U axis T, V axis B (a point on the face is N + U*T + V*B). */
+	struct FCubeFace
+	{
+		FVector N;
+		FVector T;
+		FVector B;
+	};
+
+	const FCubeFace GCubeFaces[6] = {
+		{ FVector( 1, 0, 0), FVector( 0, 1, 0), FVector(0, 0, 1) },  // 0: +X
+		{ FVector(-1, 0, 0), FVector( 0,-1, 0), FVector(0, 0, 1) },  // 1: -X
+		{ FVector( 0, 1, 0), FVector(-1, 0, 0), FVector(0, 0, 1) },  // 2: +Y
+		{ FVector( 0,-1, 0), FVector( 1, 0, 0), FVector(0, 0, 1) },  // 3: -Y
+		{ FVector( 0, 0, 1), FVector( 1, 0, 0), FVector(0, 1, 0) },  // 4: +Z
+		{ FVector( 0, 0,-1), FVector( 1, 0, 0), FVector(0,-1, 0) },  // 5: -Z
+	};
+}
+
+bool FSphericalPlanetWorldMode::IsInsideWorld(double X, double Y) const
+{
+	const double DX = X - PlanetParams.PlanetCenter.X;
+	const double DY = Y - PlanetParams.PlanetCenter.Y;
+	const double Outer = PlanetParams.GetOuterRadius();
+	return DX * DX + DY * DY <= Outer * Outer;
+}
+
+FVoxelWorldBounds FSphericalPlanetWorldMode::GetWorldBounds() const
+{
+	FVoxelWorldBounds Bounds;
+	Bounds.Shape = EVoxelWorldBoundsShape::Shell;
+	Bounds.Center = PlanetParams.PlanetCenter;
+	Bounds.InnerRadius = PlanetParams.GetInnerRadius();
+	Bounds.OuterRadius = PlanetParams.GetOuterRadius();
+	Bounds.HalfExtent = FVector2D(Bounds.OuterRadius, Bounds.OuterRadius);
+	Bounds.MinZ = static_cast<float>(PlanetParams.PlanetCenter.Z) - Bounds.OuterRadius;
+	Bounds.MaxZ = static_cast<float>(PlanetParams.PlanetCenter.Z) + Bounds.OuterRadius;
+	return Bounds;
+}
+
+FVector FSphericalPlanetWorldMode::GetUpVector(const FVector& WorldPos) const
+{
+	return GetDirectionFromCenter(WorldPos, PlanetParams.PlanetCenter);
+}
+
+float FSphericalPlanetWorldMode::GetAltitude(const FVector& WorldPos) const
+{
+	return CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter) - PlanetParams.PlanetRadius;
+}
+
+FVoxelSurfaceCoord FSphericalPlanetWorldMode::WorldToSurface(const FVector& WorldPos) const
+{
+	const FVector Dir = GetDirectionFromCenter(WorldPos, PlanetParams.PlanetCenter);
+	const FVector Abs = Dir.GetAbs();
+	int32 Face;
+	if (Abs.X >= Abs.Y && Abs.X >= Abs.Z)
+	{
+		Face = Dir.X >= 0.0 ? 0 : 1;
+	}
+	else if (Abs.Y >= Abs.Z)
+	{
+		Face = Dir.Y >= 0.0 ? 2 : 3;
+	}
+	else
+	{
+		Face = Dir.Z >= 0.0 ? 4 : 5;
+	}
+	const SphericalPlanetSurfacePrivate::FCubeFace& F = SphericalPlanetSurfacePrivate::GCubeFaces[Face];
+	// Scale the direction onto the face plane (N . P = 1), then read its coordinates along T and B.
+	const double Scale = 1.0 / FVector::DotProduct(Dir, F.N);
+	return FVoxelSurfaceCoord(Face, FVector2D(FVector::DotProduct(Dir, F.T) * Scale, FVector::DotProduct(Dir, F.B) * Scale));
+}
+
+FVector FSphericalPlanetWorldMode::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
+{
+	const SphericalPlanetSurfacePrivate::FCubeFace& F = SphericalPlanetSurfacePrivate::GCubeFaces[FMath::Clamp(Coord.Face, 0, 5)];
+	const FVector Dir = (F.N + Coord.UV.X * F.T + Coord.UV.Y * F.B).GetSafeNormal();
+	return PlanetParams.PlanetCenter + Dir * (PlanetParams.PlanetRadius + Altitude);
+}
+
 float FSphericalPlanetWorldMode::GetDensityAt(
 	const FVector& WorldPos,
 	int32 LODLevel,

@@ -204,6 +204,25 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 	return Effective;
 }
 
+FVoxelWorldBounds FInfinitePlaneWorldMode::GetWorldBounds() const
+{
+	FVoxelWorldBounds Bounds;
+	Bounds.Shape = EVoxelWorldBoundsShape::Unbounded;
+	Bounds.Center = FVector(0.0, 0.0, TerrainParams.SeaLevel);
+	GetTerrainHeightBounds(Bounds.MinZ, Bounds.MaxZ);
+	return Bounds;
+}
+
+float FInfinitePlaneWorldMode::GetAltitude(const FVector& WorldPos) const
+{
+	return static_cast<float>(WorldPos.Z) - TerrainParams.SeaLevel;
+}
+
+FVector FInfinitePlaneWorldMode::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
+{
+	return FVector(Coord.UV.X, Coord.UV.Y, TerrainParams.SeaLevel + Altitude);
+}
+
 void FInfinitePlaneWorldMode::GetTerrainHeightBounds(
 	const FWorldModeTerrainParams& BaseParams,
 	const FVoxelBiomeSnapshot* BiomeSnapshot,

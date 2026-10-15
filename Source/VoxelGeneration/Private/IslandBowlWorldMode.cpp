@@ -61,13 +61,47 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 
 void FIslandBowlWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) const
 {
-	// Base continentalness extent (same as InfinitePlane), then floor the minimum to EdgeHeight — the
-	// island fades toward EdgeHeight at the edges, which can be below the base terrain minimum.
+	// Base continentalness extent (same as InfinitePlane), then lower the minimum to the floor beyond the edge: the
+	// island fades toward EdgeHeight and the floor sits OutsideFloorDepth below it, which can be below the base
+	// terrain minimum (KI4's bounds clause).
 	float BaseMin = 0.0f;
 	float BaseMax = 0.0f;
 	FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, &BiomeSnapshot, BaseMin, BaseMax);
-	OutMin = FMath::Min(BaseMin, IslandParams.EdgeHeight);
+	OutMin = FMath::Min(BaseMin, IslandParams.EdgeHeight - OutsideFloorDepth);
 	OutMax = BaseMax;
+}
+
+bool FIslandBowlWorldMode::IsInsideWorld(double X, double Y) const
+{
+	return IsWithinIslandBounds(static_cast<float>(X), static_cast<float>(Y), IslandParams);
+}
+
+FVoxelWorldBounds FIslandBowlWorldMode::GetWorldBounds() const
+{
+	FVoxelWorldBounds Bounds;
+	Bounds.Center = FVector(IslandParams.CenterX, IslandParams.CenterY, TerrainParams.SeaLevel);
+	Bounds.HalfExtent = FVector2D(IslandParams.GetTotalExtentX(), IslandParams.GetTotalExtentY());
+	if (IslandParams.Shape == EIslandShape::Rectangle)
+	{
+		Bounds.Shape = EVoxelWorldBoundsShape::Rectangle;
+	}
+	else
+	{
+		Bounds.Shape = EVoxelWorldBoundsShape::Circle;
+		Bounds.OuterRadius = IslandParams.GetTotalExtent();
+	}
+	GetTerrainHeightBounds(Bounds.MinZ, Bounds.MaxZ);
+	return Bounds;
+}
+
+float FIslandBowlWorldMode::GetAltitude(const FVector& WorldPos) const
+{
+	return static_cast<float>(WorldPos.Z) - TerrainParams.SeaLevel;
+}
+
+FVector FIslandBowlWorldMode::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
+{
+	return FVector(Coord.UV.X, Coord.UV.Y, TerrainParams.SeaLevel + Altitude);
 }
 
 FIntVector FIslandBowlWorldMode::WorldToChunkCoord(
