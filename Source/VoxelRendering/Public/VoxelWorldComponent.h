@@ -448,15 +448,15 @@ public:
 
 	// ==================== Statistics ====================
 
-	/** Get total GPU memory usage in bytes */
+	/** Get the GPU memory, in bytes, of the chunk meshes currently held (seam meshes and water tiles not included) */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Stats")
 	int64 GetGPUMemoryUsage() const;
 
-	/** Get total vertex count */
+	/** Get the vertex count of the chunk meshes currently held */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Stats")
 	int64 GetTotalVertexCount() const;
 
-	/** Get total triangle count */
+	/** Get the triangle count of the chunk meshes currently held */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Stats")
 	int64 GetTotalTriangleCount() const;
 
@@ -528,7 +528,21 @@ private:
 		FBox Bounds;
 		int32 LODLevel = 0;
 		bool bIsVisible = true;
+
+		/** This chunk's share of the statistics, subtracted when its mesh is replaced or removed. */
+		int64 VertexCount = 0;
+		int64 TriangleCount = 0;
+		int64 GPUMemory = 0;
 	};
+
+	/**
+	 * Replace a chunk's contribution to the statistics with a new mesh's (game thread, ChunkInfoLock held).
+	 * @param Info          The chunk's tracking entry (fresh or existing)
+	 * @param VertexCount   New mesh vertex count
+	 * @param TriangleCount New mesh triangle count
+	 * @param GPUMemory     New mesh GPU bytes
+	 */
+	void SetChunkStats(FChunkInfo& Info, int64 VertexCount, int64 TriangleCount, int64 GPUMemory);
 
 	/** Game thread chunk tracking */
 	TMap<FIntVector, FChunkInfo> ChunkInfoMap;
@@ -697,7 +711,7 @@ private:
 	/** The bounds last pushed to the render scene (MarkRenderTransformDirty), to skip no-op updates. */
 	FBox LastSentRenderBounds = FBox(ForceInit);
 
-	/** Statistics */
+	/** Statistics: totals over the chunks in ChunkInfoMap (each mesh counted once, removed on unload) */
 	int64 CachedVertexCount = 0;
 	int64 CachedTriangleCount = 0;
 	int64 CachedGPUMemory = 0;

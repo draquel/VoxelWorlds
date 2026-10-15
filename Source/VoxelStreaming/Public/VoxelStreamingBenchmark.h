@@ -59,6 +59,9 @@ struct FVoxelBenchConfig
 	/** Max time to wait for the queues to drain after the traverse stops. */
 	float CatchUpTimeoutSec = 90.0f;
 
+	/** Max time the pawn is held at its start position after the run, waiting for collision under it (G9). */
+	float RestoreTimeoutSec = 30.0f;
+
 	/** Queues are "drained" when gen+mesh+unload+in-flight+upload <= this for EquilibriumStreak samples. */
 	int32 DrainedThreshold = 0;
 	int32 EquilibriumStreak = 10;
@@ -74,23 +77,33 @@ struct FVoxelBenchConfig
 /**
  * Deterministic streaming benchmark. Construct with a config + chunk manager, then call Tick()
  * once per frame (the chunk manager does this from TickComponent while a run is active). On
- * completion it releases the benchmark view override and writes the report to Saved/VoxelBench/.
+ * completion it releases the benchmark view override and writes the report to Saved/VoxelBench/,
+ * then puts the player pawn back where it started and holds it there until there is collision
+ * under it (IsDone stays false until the pawn is released).
+ *
+ * The pawn it flies cannot take damage for the whole run (AActor::SetCanBeDamaged), so a route over
+ * the sea cannot drown it (G4, G8). Game damage code must honour AActor::CanBeDamaged for this.
  */
 class VOXELSTREAMING_API FVoxelStreamingBenchmark
 {
 public:
 	FVoxelStreamingBenchmark(const FVoxelBenchConfig& InConfig, UVoxelChunkManager* InChunkManager);
 
+	/** Releases a pawn still held (run replaced, or the world shutting down). */
+	~FVoxelStreamingBenchmark();
+
 	/** Advance the scenario, drive the streaming origin, and take a sample. */
 	void Tick(float DeltaTime);
 
+	/** True once the report is written and the pawn is released. */
 	bool IsDone() const { return Phase == EPhase::Done; }
 
 	/** Absolute path of the written CSV once the run finishes (empty until then). */
 	const FString& GetReportPath() const { return ReportCsvPath; }
 
 private:
-	enum class EPhase : uint8 { Warmup, Traverse, CatchUp, Done };
+	/** Restore: the report is written; the pawn waits at its start position for collision under it. */
+	enum class EPhase : uint8 { Warmup, Traverse, CatchUp, Restore, Done };
 
 	struct FSample
 	{
@@ -142,11 +155,20 @@ private:
 	void Finish(bool bReachedEquilibrium);
 	void WriteReport();
 
-	/** Fly the player pawn along the path (teleport + no gravity) so it stays on loaded terrain
-	 *  and never falls through, and the rendered view follows the flight. Restored on finish. */
+	/** Fly the player pawn along the path (teleport + no gravity, no damage) so it stays on loaded
+	 *  terrain, never falls through or drowns, and the rendered view follows the flight. */
 	void SetupFlyPawn();
 	void UpdateFlyPawn();
-	void RestoreFlyPawn();
+
+	/** After the report: put the pawn back at its start position and hold it there (no gravity) until
+	 *  collision under it is ready (G9). Moves to Done when there is no pawn to hold. */
+	void BeginRestoreHold();
+
+	/** One tick of the restore hold: keep the collision request alive, release once the ground is there. */
+	void TickRestoreHold(float DeltaTime);
+
+	/** End the hold: original movement mode and damage flag back. Logs how the hold ended. */
+	void ReleasePawn(bool bGrounded);
 
 	FVoxelBenchConfig Config;
 	UVoxelChunkManager* ChunkManager = nullptr;
@@ -188,5 +210,10 @@ private:
 	TWeakObjectPtr<APawn> FlyPawn;
 	FVector OriginalPawnLocation = FVector::ZeroVector;
 	uint8 OriginalMovementMode = 0;
+	bool bOriginalCanBeDamaged = true;
 	bool bPawnConfigured = false;
+
+	// Restore hold (Phase == Restore): time held and the next collision-request nudge.
+	float RestoreElapsed = 0.0f;
+	float RestoreNextNudge = 0.0f;
 };

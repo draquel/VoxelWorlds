@@ -720,6 +720,7 @@ public:
 		BenchUnloadDistMaxUU = 0.0;
 		UnloadEnqueueTimeSeconds.Reset();
 		BenchEverMeshed.Reset();
+		BenchQueuedRemeshReason.Reset();
 	}
 
 	// ==================== Debug ====================
@@ -1693,7 +1694,11 @@ private:
 	bool bBenchmarkViewActive = false;
 	FVector BenchmarkViewPosition = FVector::ZeroVector;
 
-	/** Re-mesh churn: count of chunks re-queued for meshing after they already had a mesh. */
+	/**
+	 * Re-mesh churn: mesh jobs launched for chunks that already had a mesh. Counted at launch, not when a
+	 * chunk enters the meshing queue: the legacy whole-chunk path re-queues a chunk waiting for its
+	 * neighbours every frame, and counting insertions reported those waits as re-meshes (G5, KC14).
+	 */
 	int64 BenchRemeshCount = 0;
 
 	/** Re-mesh thrash attributed by source (see EVoxelRemeshReason). */
@@ -1701,6 +1706,13 @@ private:
 
 	/** Chunks meshed at least once during the active benchmark (to detect re-mesh churn). */
 	TSet<FIntVector> BenchEverMeshed;
+
+	/**
+	 * Why each queued chunk is waiting to mesh, recorded by AddToMeshingQueue while a benchmark runs and read
+	 * when its job launches. The first reason wins: a deferral re-queue (Other) does not hide the LOD change
+	 * or neighbour update that queued the chunk.
+	 */
+	TMap<FIntVector, EVoxelRemeshReason> BenchQueuedRemeshReason;
 
 	/** Active benchmark run, ticked from TickComponent; reset when it finishes. */
 	TUniquePtr<FVoxelStreamingBenchmark> ActiveBenchmark;

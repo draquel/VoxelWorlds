@@ -87,7 +87,7 @@ public:
 	/** Get the configured LOD bands */
 	const TArray<FLODBand>& GetLODBands() const { return LODBands; }
 
-	/** Set LOD bands configuration */
+	/** Set LOD bands configuration. The next Update rebuilds the balanced LOD cache. */
 	void SetLODBands(const TArray<FLODBand>& InBands);
 
 	/** Enable/disable LOD morphing */
@@ -102,9 +102,19 @@ public:
 	void SetUnloadDistanceMultiplier(float Multiplier) { UnloadDistanceMultiplier = Multiplier; }
 	float GetUnloadDistanceMultiplier() const { return UnloadDistanceMultiplier; }
 
-	/** Set the maximum view distance for chunk loading */
-	void SetViewDistance(float Distance) { MaxViewDistance = Distance; }
+	/** Set the maximum view distance for chunk loading. The next Update rebuilds the balanced LOD cache. */
+	void SetViewDistance(float Distance) { MaxViewDistance = Distance; bBalancedLODCacheDirty = true; }
 	float GetViewDistance() const { return MaxViewDistance; }
+
+	/**
+	 * Viewer travel (uu) since the last balanced-LOD cache rebuild that triggers a rebuild by itself. Matches
+	 * FVoxelLODEvalSchedule::MoveThreshold, the chunk manager's trigger for re-evaluating LOD levels, so the
+	 * cache is never staler than the evaluation that reads it.
+	 */
+	static constexpr float BalancedLODCacheMoveThreshold = 100.0f;
+
+	/** @return How many times the balanced LOD cache has been rebuilt (diagnostics and tests). */
+	int32 GetBalancedLODCacheRebuildCount() const { return BalancedLODCacheRebuildCount; }
 
 	/** Unload horizon: chunks beyond MaxViewDistance * UnloadDistanceMultiplier are out of range. */
 	virtual float GetUnloadDistance() const override { return MaxViewDistance * UnloadDistanceMultiplier; }
@@ -170,9 +180,20 @@ protected:
 	/**
 	 * Recompute BalancedLODCache for all candidate chunks: raw band LOD, then
 	 * hysteresis, then the 2:1 adjacency balance (no face-neighbor differs by more
-	 * than MaxNeighborLODDelta). Called from Update() each frame.
+	 * than MaxNeighborLODDelta). Called from Update() when ShouldRebuildBalancedLODCache says so.
 	 */
 	void RebuildBalancedLODCache(const FLODQueryContext& Context);
+
+	/**
+	 * Whether Update must rebuild the balanced LOD cache (WORLD_MODES_REVIEW_PLAN.md G12). The cache is a
+	 * function of the viewer position, the world origin, the configuration and the balance cvars, so a
+	 * still viewer would rebuild the same map every tick (1.3-1.9 ms on the demo). It rebuilds when the
+	 * viewer enters another chunk or moves BalancedLODCacheMoveThreshold, when the origin or a balance
+	 * cvar changes, and after Initialize, SetLODBands or SetViewDistance.
+	 * @param Context This tick's query context.
+	 * @return True when the cached map no longer matches Context.
+	 */
+	bool ShouldRebuildBalancedLODCache(const FLODQueryContext& Context) const;
 
 	/**
 	 * Check if a chunk is within the view frustum.
@@ -277,14 +298,27 @@ protected:
 	float CoarsenHysteresisFraction = 0.5f;
 
 	/**
-	 * Balanced LOD per chunk, recomputed every Update(). GetLODForChunk and
-	 * GetVisibleChunks read this so all consumers see the same balanced result.
+	 * Balanced LOD per chunk, recomputed when the viewer moves (ShouldRebuildBalancedLODCache).
+	 * GetLODForChunk and GetVisibleChunks read this so all consumers see the same balanced result.
 	 * Empty / missing entries fall back to the raw distance-band LOD.
 	 */
 	TMap<FIntVector, int32> BalancedLODCache;
 
-	/** LOD committed last frame per chunk; input to this frame's hysteresis. */
+	/** LOD committed by the last rebuild per chunk; input to the next rebuild's hysteresis. */
 	TMap<FIntVector, int32> CommittedLODCache;
+
+	/** What the last rebuild was computed for; ShouldRebuildBalancedLODCache compares against it. */
+	FVector LastRebuildViewerPosition = FVector::ZeroVector;
+	FIntVector LastRebuildViewerChunk = FIntVector::ZeroValue;
+	FVector LastRebuildWorldOrigin = FVector::ZeroVector;
+	int32 LastRebuildBalanceCVar = INDEX_NONE;
+	int32 LastRebuildDiagonalCVar = INDEX_NONE;
+
+	/** Set by Initialize, SetLODBands and SetViewDistance: the next Update rebuilds whatever the viewer did. */
+	bool bBalancedLODCacheDirty = true;
+
+	/** Rebuilds so far (GetBalancedLODCacheRebuildCount). */
+	int32 BalancedLODCacheRebuildCount = 0;
 
 	/** Cached voxel size from configuration */
 	float VoxelSize = 100.0f;

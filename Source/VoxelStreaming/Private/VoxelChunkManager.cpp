@@ -3410,6 +3410,19 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 			}
 		}
 
+		// Benchmark thrash: a mesh job for a chunk that already had a mesh is churn. Counted here, where the
+		// job is launched, and attributed to the reason the chunk was queued for (G5).
+		if (bBenchmarkViewActive)
+		{
+			EVoxelRemeshReason QueuedReason = EVoxelRemeshReason::Other;
+			BenchQueuedRemeshReason.RemoveAndCopyValue(Request.ChunkCoord, QueuedReason);
+			if (BenchEverMeshed.Contains(Request.ChunkCoord))
+			{
+				++BenchRemeshCount;
+				++BenchRemeshByReason[static_cast<int32>(QueuedReason)];
+			}
+		}
+
 		// Launch async mesh generation instead of blocking. Move the request — it carries the
 		// full chunk volume + neighbor slices (~1.3MB at 64^3); copying it into the by-value
 		// parameter was a per-launch game-thread cost.
@@ -3851,6 +3864,7 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 			// A chunk loaded again later meshes for the first time again: not a re-mesh. Without this a
 			// route that revisits terrain counted every reload as thrash (the I9 soak's lap 2, §13.10).
 			BenchEverMeshed.Remove(ChunkCoord);
+			BenchQueuedRemeshReason.Remove(ChunkCoord);
 		}
 
 		// Remove from renderer
@@ -6016,12 +6030,10 @@ bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request, EVox
 		return false;
 	}
 
-	// Benchmark thrash: a chunk re-entering the meshing queue after it already had a mesh is churn.
-	// Attribute it to its source so we know which driver to attack.
-	if (bBenchmarkViewActive && BenchEverMeshed.Contains(Request.ChunkCoord))
+	// Benchmark thrash is counted when the job launches (ProcessMeshingQueue); remember why it was queued.
+	if (bBenchmarkViewActive)
 	{
-		++BenchRemeshCount;
-		++BenchRemeshByReason[static_cast<int32>(Reason)];
+		BenchQueuedRemeshReason.FindOrAdd(Request.ChunkCoord, Reason);
 	}
 
 	// Add to tracking set
