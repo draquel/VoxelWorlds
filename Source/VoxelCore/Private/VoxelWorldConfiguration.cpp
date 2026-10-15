@@ -253,6 +253,37 @@ TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 		}
 	}
 
+	if (WorldMode == EWorldMode::SphericalPlanet)
+	{
+		// The surface sits at WorldRadius + BaseHeight + noise * PlanetHeightScale / 2, noise in [-1, 1]. The LOD
+		// strategy streams only chunks that meet the shell [WorldRadius - Depth, WorldRadius + Height], and the
+		// density query treats points well outside it as air or core, so terrain past the shell is cut off.
+		const float Highest = BaseHeight + 0.5f * PlanetHeightScale;
+		const float Deepest = 0.5f * PlanetHeightScale - BaseHeight;
+		if (Highest > PlanetMaxTerrainHeight)
+		{
+			Warnings.Add(FString::Printf(
+				TEXT("planet terrain reaches %.0f uu above WorldRadius (BaseHeight %.0f + PlanetHeightScale / 2) but PlanetMaxTerrainHeight is %.0f: peaks above the shell are cut off"),
+				Highest, BaseHeight, PlanetMaxTerrainHeight));
+		}
+		if (Deepest > PlanetMaxTerrainDepth)
+		{
+			Warnings.Add(FString::Printf(
+				TEXT("planet terrain reaches %.0f uu below WorldRadius (PlanetHeightScale / 2 - BaseHeight %.0f) but PlanetMaxTerrainDepth is %.0f: valleys below the shell are cut off"),
+				Deepest, BaseHeight, PlanetMaxTerrainDepth));
+		}
+
+		// Generation fills a planet's oceans by WaterRadius; everything else that asks "is this under water"
+		// (scatter, navigation, NPC spawning, swimming) still compares against the WaterLevel Z plane, which
+		// on a planet splits it into a wet and a dry hemisphere (SP-E1).
+		if (bEnableWaterLevel)
+		{
+			Warnings.Add(FString::Printf(
+				TEXT("water is enabled on a planet: generation uses WaterRadius (%.0f), but scatter, navigation, NPC spawning and swimming still read the Z plane WaterLevel (%.0f) until SP-E1"),
+				WaterRadius, WaterLevel));
+		}
+	}
+
 	return Warnings;
 }
 

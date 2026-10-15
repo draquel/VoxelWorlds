@@ -170,9 +170,11 @@ float FSphericalPlanetWorldMode::SampleSphericalNoise(
 	// We use the direction scaled by a large factor to get varied noise
 	// This creates coherent noise across the sphere surface
 
-	// Use spherical mapping: direction components directly as noise input
-	// Scale by a factor to control feature size on the sphere
-	const float NoiseScale = 10000.0f;  // Adjust for feature size
+	// Use spherical mapping: direction components directly as noise input, scaled by a fixed factor.
+	// Known defects, fixed by SP-B1 in spherical Phase 1 (SPHERICAL_PLANET_REQUIREMENTS.md): only X and Y are
+	// sampled, so the terrain is mirrored across the equator, and the fixed factor ties feature size to the
+	// radius. (FSphericalPlanetParams::NoiseScale, which was never read, is gone.)
+	const float NoiseScale = 10000.0f;
 	const FVector NoisePos = Direction * NoiseScale;
 
 	// Use the existing 2D terrain noise sampling, treating X,Y as the coords

@@ -511,23 +511,22 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
 {
     switch (Context.WorldMode) {
         case EWorldMode::SphericalPlanet:
-            // Distance along planet surface (geodesic), not euclidean
-            return CalculateSphericalDistance(
-                Position, 
-                Context.ViewerPosition, 
-                Context.WorldOrigin,
-                Context.WorldRadius
-            );
-            
+            // 3D Euclidean distance, as on a plane. Fine for surface play: near the viewer it matches
+            // the distance along the surface (SPHERICAL_PLANET_REQUIREMENTS.md SP-C3).
+            return FVector::Distance(Position, Context.ViewerPosition);
+
         case EWorldMode::IslandBowl:
-            // Could use 2D distance (ignore Z) for flatter LOD
+            // 2D distance (ignores Z); WM-S2 moves islands to 3D like InfinitePlane
             return FVector::Dist2D(Position, Context.ViewerPosition);
-            
+
         default: // Infinite plane
             return FVector::Distance(Position, Context.ViewerPosition);
     }
 }
 ```
+
+There is no geodesic (along-the-surface) distance for planets; an earlier version of this document described
+one. Euclidean distance is what the code uses and what the spherical requirements keep (SP-C3).
 
 ### LOD Off and Cubic Meshing
 

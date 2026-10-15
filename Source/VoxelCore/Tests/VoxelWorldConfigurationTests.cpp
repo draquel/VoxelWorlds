@@ -53,4 +53,56 @@ bool FVoxelConfigTreeTemplateMaterialsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * Spherical Phase 0 guardrails (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5, SP-B3): the terrain shell must cover the
+ * terrain's real amplitude, water on a planet is flagged while consumers still read the Z-plane WaterLevel, and a
+ * planet never generates on the GPU.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelConfigPlanetSettingsTest,
+	"VoxelWorlds.Configuration.PlanetSettings",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelConfigPlanetSettingsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelWorldConfigurationTestUtils;
+
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->bEnableWaterLevel = false;
+
+	// The defaults: PlanetHeightScale 5,000 puts the terrain 2,500 uu either side of the radius, and the shell
+	// is 5,000 up but only 2,000 down, so the deepest valleys are cut off.
+	TArray<FString> Warnings = Config->GetSettingsWarnings();
+	TestEqual(TEXT("Defaults: one warning"), Warnings.Num(), 1);
+	TestTrue(TEXT("Defaults: the depth does not cover the valleys"), AnyWarningContains(Warnings, TEXT("PlanetMaxTerrainDepth")));
+
+	Config->PlanetMaxTerrainDepth = 2500.0f;
+	TestEqual(TEXT("A shell that covers the amplitude raises nothing"), Config->GetSettingsWarnings().Num(), 0);
+
+	// BaseHeight shifts the whole surface: 3,000 lifts the peaks to 5,500 and the valleys to 500 above the radius.
+	Config->BaseHeight = 3000.0f;
+	Warnings = Config->GetSettingsWarnings();
+	TestTrue(TEXT("BaseHeight lifts the peaks past the shell"), AnyWarningContains(Warnings, TEXT("PlanetMaxTerrainHeight")));
+	TestFalse(TEXT("... and the valleys clear of the depth"), AnyWarningContains(Warnings, TEXT("PlanetMaxTerrainDepth")));
+	Config->BaseHeight = 0.0f;
+
+	Config->bEnableWaterLevel = true;
+	Warnings = Config->GetSettingsWarnings();
+	TestTrue(TEXT("Water on a planet is flagged"), AnyWarningContains(Warnings, TEXT("WaterLevel")));
+
+	// The same settings on a heightmap world raise none of the planet warnings.
+	Config->WorldMode = EWorldMode::InfinitePlane;
+	Config->PlanetMaxTerrainDepth = 100.0f;
+	TestEqual(TEXT("Planet checks are planet-only"), Config->GetSettingsWarnings().Num(), 0);
+
+	// SP-B3: GPU generation follows bUseGPUGeneration except on a planet.
+	Config->bUseGPUGeneration = true;
+	TestTrue(TEXT("InfinitePlane may generate on the GPU"), Config->ShouldUseGPUGeneration());
+	Config->WorldMode = EWorldMode::IslandBowl;
+	TestTrue(TEXT("IslandBowl may generate on the GPU"), Config->ShouldUseGPUGeneration());
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	TestFalse(TEXT("A planet generates on the CPU whatever bUseGPUGeneration says"), Config->ShouldUseGPUGeneration());
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

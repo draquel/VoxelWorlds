@@ -156,8 +156,9 @@ Configuration options in `UVoxelWorldConfiguration`:
 - Optimized streaming pipeline ✓
 
 ### Success Criteria
-- All 3 world modes functional ✓
-- Spherical planet has correct curvature ✓
+- All 3 world modes functional ✓ (spherical as a CPU-only prototype; see SPHERICAL_PLANET_REQUIREMENTS.md)
+- Spherical planet has correct curvature: partly. The shell is a sphere, but the noise is mirrored across the
+  equator and every surface turns to snow (SPHERICAL_PLANET_REQUIREMENTS.md §1, problems 2 and 3)
 - Island has smooth falloff ✓
 - LOD transitions without material pop-in ✓
 
@@ -323,7 +324,9 @@ Implemented elevation-based material overrides for effects like snow on peaks:
 
 ### Notes on Water Level Support
 
-Implemented water level for all three world modes:
+Implemented water level for InfinitePlane and IslandBowl. On a planet, generation picks underwater materials by
+`WaterRadius`, but the water-fill pass is skipped and every other consumer still reads the Z-plane `WaterLevel`
+(SPHERICAL_PLANET_REQUIREMENTS.md SP-B8, SP-E1):
 
 1. **Configuration (UVoxelWorldConfiguration)**:
    - `bEnableWaterLevel`: Master toggle

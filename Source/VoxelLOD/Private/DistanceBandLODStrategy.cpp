@@ -637,8 +637,8 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
 	{
 		case EWorldMode::SphericalPlanet:
 		{
-			// For spherical planets, use geodesic distance along surface
-			// Simplified: use 3D distance for now, can be improved later
+			// 3D Euclidean distance, as on a plane: near the viewer it matches the distance along the surface,
+			// which is all surface play needs (SPHERICAL_PLANET_REQUIREMENTS.md SP-C3).
 			return FVector::Distance(Position, Context.ViewerPosition);
 		}
 
