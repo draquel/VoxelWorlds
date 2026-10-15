@@ -109,48 +109,37 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	// Cache world-mode-specific parameters first (needed for vertical range calculation)
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 
+	// The configured world mode, from the builder generation uses (WM-A1). Height for the culls below comes from it
+	// (WM-A3), not from InfinitePlane's static math.
+	TerrainWorldMode = FVoxelWorldModeFactory::Create(*WorldConfig);
+
 	// Cache terrain bounds for vertical culling (applies to Infinite Plane and Island modes — both use
-	// the same 2D heightmap terrain). The height EXTENT is owned by the generation height math
-	// (FInfinitePlaneWorldMode::GetTerrainHeightBounds), the single source of truth that already
-	// accounts for the full noise amplitude AND continentalness — so these culling bounds can never
-	// drift from what the generator actually produces. (A former inline estimate omitted the
-	// -HeightScale valley depth on the min side and could cull chunks holding real terrain.)
+	// 2D heightmap terrain). The height EXTENT is owned by the world mode (IVoxelWorldMode::GetTerrainHeightBounds,
+	// the authority for vertical culling), which accounts for the full noise amplitude AND continentalness — and for
+	// an island, the floor beyond its edge — so these culling bounds can never drift from what the generator
+	// actually produces. (A former inline estimate omitted the -HeightScale valley depth on the min side and could
+	// cull chunks holding real terrain.)
 	if (WorldMode == EWorldMode::InfinitePlane || WorldMode == EWorldMode::IslandBowl)
 	{
-		const FWorldModeTerrainParams TerrainParams(
-			WorldConfig->SeaLevel, WorldConfig->HeightScale, WorldConfig->BaseHeight);
-
 		float BoundsMin = 0.0f;
 		float BoundsMax = 0.0f;
-		const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(WorldConfig->BiomeConfiguration);
-		FInfinitePlaneWorldMode::GetTerrainHeightBounds(
-			TerrainParams, &BiomeSnapshot, BoundsMin, BoundsMax);
+		TerrainWorldMode->GetTerrainHeightBounds(BoundsMin, BoundsMax);
 
 		// One chunk of buffer on each side for terrain variation / meshing / edit slack.
 		TerrainMinHeight = BoundsMin - ChunkWorldSize;
 		TerrainMaxHeight = BoundsMax + ChunkWorldSize;
 
-		// Island mode can drop terrain to its (possibly negative) edge height for bowl shapes.
-		if (WorldMode == EWorldMode::IslandBowl)
-		{
-			TerrainMinHeight = FMath::Min(TerrainMinHeight, WorldConfig->IslandEdgeHeight - ChunkWorldSize);
-		}
-
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Terrain bounds culling: Height range [%.0f - %.0f]"),
 			TerrainMinHeight, TerrainMaxHeight);
 	}
 
-	// Far-band surface-slab culling: per-column analytic surface sampling needs the generation
-	// params. InfinitePlane only — its 2D height math (SampleTerrainNoise2D + NoiseToTerrainHeight)
-	// is the verified canonical natural surface (POI placement stands pads on it); IslandBowl's
-	// falloff-composed height is not exposed the same way, so it stays on global bounds.
+	// Far-band surface-slab culling: per-column analytic surface height from the world mode (WM-A3), so the slab
+	// samples the height generation produces. Still InfinitePlane only: extending it to islands (KI5) is part of
+	// taking the vertical range from the terrain (D8, WM-S1).
 	bSurfaceSlabCulling = WorldConfig->bFarBandSurfaceSlabCulling && WorldMode == EWorldMode::InfinitePlane;
 	if (bSurfaceSlabCulling)
 	{
 		SlabNoiseParams = WorldConfig->NoiseParams;
-		SlabSeaLevel = WorldConfig->SeaLevel;
-		SlabHeightScale = WorldConfig->HeightScale;
-		SlabBaseHeight = WorldConfig->BaseHeight;
 		bSlabHasWater = WorldConfig->bEnableWaterLevel;
 		SlabWaterLevel = WorldConfig->WaterLevel;
 		ColumnSurfaceCache.Reset();
@@ -1053,13 +1042,12 @@ void FDistanceBandLODStrategy::GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY,
 		{ MinX + 0.5f * ChunkWorldSize,  MinY + 0.5f * ChunkWorldSize },
 	};
 
-	const FWorldModeTerrainParams TerrainParams(SlabSeaLevel, SlabHeightScale, SlabBaseHeight);
 	float SurfMin = TNumericLimits<float>::Max();
 	float SurfMax = TNumericLimits<float>::Lowest();
 	for (const FVector2D& Sample : Samples)
 	{
-		const float Noise = FInfinitePlaneWorldMode::SampleTerrainNoise2D(Sample.X, Sample.Y, SlabNoiseParams);
-		const float Height = FInfinitePlaneWorldMode::NoiseToTerrainHeight(Noise, TerrainParams);
+		// The configured world mode's analytic height (continentalness included), as generation produces it.
+		const float Height = TerrainWorldMode->GetTerrainHeightAt(Sample.X, Sample.Y, SlabNoiseParams);
 		SurfMin = FMath::Min(SurfMin, Height);
 		SurfMax = FMath::Max(SurfMax, Height);
 	}

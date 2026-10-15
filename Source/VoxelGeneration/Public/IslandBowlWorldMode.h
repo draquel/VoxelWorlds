@@ -198,8 +198,26 @@ public:
 		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
 	}
 
-	/** Per-mode vertical-cull bounds (IVoxelWorldMode): base continentalness extent, floored to EdgeHeight. */
+	/**
+	 * Per-mode vertical-cull bounds (IVoxelWorldMode): the base continentalness extent, with the minimum lowered to
+	 * the floor generation writes beyond the edge (EdgeHeight - OutsideFloorDepth) when that is deeper.
+	 */
 	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override;
+
+	// ==================== World Bounds and Local Frame (IVoxelWorldMode, WM-A2) ====================
+	// Up is +Z and the surface coordinate is (0, X, Y) (the defaults); the datum is SeaLevel.
+
+	/** Inside the island's R + falloff footprint (IsWithinIslandBounds): beyond it generation writes only the floor. */
+	virtual bool IsInsideWorld(double X, double Y) const override;
+
+	/** A circle (R + F) or a rectangle (R + F by SizeY + F) around the island centre, with the terrain's height bounds. */
+	virtual FVoxelWorldBounds GetWorldBounds() const override;
+
+	/** Z above SeaLevel. */
+	virtual float GetAltitude(const FVector& WorldPos) const override;
+
+	/** (U, V, SeaLevel + Altitude). */
+	virtual FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const override;
 
 	// ==================== Static Helpers ====================
 

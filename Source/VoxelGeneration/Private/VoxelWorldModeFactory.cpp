@@ -65,6 +65,75 @@ TSharedRef<IVoxelWorldMode> FVoxelWorldModeFactory::Create(const UVoxelWorldConf
 	return Mode.ToSharedRef();
 }
 
+namespace VoxelWorldModeFactoryPrivate
+{
+	FString Num(double Value)
+	{
+		return FString::SanitizeFloat(Value);
+	}
+
+	FString Vec2(double X, double Y)
+	{
+		return FString::Printf(TEXT("(%s,%s)"), *Num(X), *Num(Y));
+	}
+
+	FString Vec3(const FVector& V)
+	{
+		return FString::Printf(TEXT("(%s,%s,%s)"), *Num(V.X), *Num(V.Y), *Num(V.Z));
+	}
+
+	const TCHAR* FalloffName(EIslandFalloffType Type)
+	{
+		switch (Type)
+		{
+		case EIslandFalloffType::Linear: return TEXT("Linear");
+		case EIslandFalloffType::Smooth: return TEXT("Smooth");
+		case EIslandFalloffType::Squared: return TEXT("Squared");
+		case EIslandFalloffType::Exponential: return TEXT("Exponential");
+		default: return TEXT("Unknown");
+		}
+	}
+}
+
+FVoxelWorldFingerprint FVoxelWorldModeFactory::MakeFingerprint(const UVoxelWorldConfiguration& Config)
+{
+	using namespace VoxelWorldModeFactoryPrivate;
+
+	TArray<FString> Params;
+	if (Config.WorldMode == EWorldMode::IslandBowl)
+	{
+		const FIslandBowlParams Island = MakeIslandParams(Config);
+		const bool bRectangle = Island.Shape == EIslandShape::Rectangle;
+		Params.Add(FString::Printf(TEXT("IslandShape=%s"), bRectangle ? TEXT("Rectangle") : TEXT("Circular")));
+		Params.Add(TEXT("IslandRadius=") + Num(Island.IslandRadius));
+		if (bRectangle)
+		{
+			Params.Add(TEXT("IslandSizeY=") + Num(Island.SizeY)); // unread by a circular island
+		}
+		Params.Add(TEXT("IslandFalloffWidth=") + Num(Island.FalloffWidth));
+		Params.Add(FString::Printf(TEXT("IslandFalloff=%s"), FalloffName(Island.FalloffType)));
+		Params.Add(TEXT("IslandCenter=") + Vec2(Island.CenterX, Island.CenterY));
+		Params.Add(TEXT("IslandEdgeHeight=") + Num(Island.EdgeHeight));
+	}
+	else if (Config.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		const FSphericalPlanetParams Planet = MakePlanetParams(Config);
+		Params.Add(TEXT("PlanetRadius=") + Num(Planet.PlanetRadius));
+		Params.Add(TEXT("PlanetMaxTerrainHeight=") + Num(Planet.MaxTerrainHeight));
+		Params.Add(TEXT("PlanetMaxTerrainDepth=") + Num(Planet.MaxTerrainDepth));
+		Params.Add(TEXT("PlanetCenter=") + Vec3(Planet.PlanetCenter));
+	}
+	Params.Add(TEXT("VoxelSize=") + Num(Config.VoxelSize));
+	Params.Add(FString::Printf(TEXT("ChunkSize=%d"), Config.ChunkSize));
+	Params.Add(TEXT("WorldOrigin=") + Vec3(Config.WorldOrigin));
+
+	FVoxelWorldFingerprint Fingerprint;
+	Fingerprint.WorldMode = Config.WorldMode;
+	Fingerprint.Shape = FString::Join(Params, TEXT(";"));
+	Fingerprint.GenerationVersion = GenerationVersion;
+	return Fingerprint;
+}
+
 void FVoxelWorldModeFactory::FillGenerationRequest(const UVoxelWorldConfiguration& Config, FVoxelNoiseGenerationRequest& Request)
 {
 	Request.WorldMode = Config.WorldMode;

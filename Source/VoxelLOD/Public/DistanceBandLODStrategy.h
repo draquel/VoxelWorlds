@@ -7,6 +7,8 @@
 #include "LODTypes.h"
 #include "VoxelCoreTypes.h"
 
+class IVoxelWorldMode;
+
 /**
  * Distance-based LOD strategy using concentric rings.
  *
@@ -338,6 +340,13 @@ protected:
 
 	// ==================== Infinite Plane Mode Culling ====================
 
+	/**
+	 * The configured world mode, built by FVoxelWorldModeFactory (the builder generation uses). The terrain height
+	 * bounds and the far-band slab's per-column height come from it, so the culls sample the height the world actually
+	 * generates (WM-A3), continentalness included. Immutable after Initialize.
+	 */
+	TSharedPtr<IVoxelWorldMode> TerrainWorldMode;
+
 	/** Minimum terrain height (SeaLevel + BaseHeight - buffer) */
 	float TerrainMinHeight = 0.0f;
 
@@ -355,11 +364,8 @@ protected:
 	 */
 	bool bSurfaceSlabCulling = false;
 
-	/** Cached generation params for the per-column analytic surface sample. */
+	/** Noise params for the per-column analytic surface sample (TerrainWorldMode->GetTerrainHeightAt). */
 	FVoxelNoiseParams SlabNoiseParams;
-	float SlabSeaLevel = 0.0f;
-	float SlabHeightScale = 0.0f;
-	float SlabBaseHeight = 0.0f;
 
 	/** Water plane: underwater columns extend their slab up to the water surface (the far ocean
 	 *  must keep the chunks that mesh its surface, not just its floor). */

@@ -2545,6 +2545,43 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 	}
 }
 
+// ==================== World Bounds and Local Frame (WM-A2) ====================
+
+bool UVoxelChunkManager::IsInsideWorld(double WorldX, double WorldY) const
+{
+	return WorldMode ? WorldMode->IsInsideWorld(WorldX, WorldY) : true;
+}
+
+FVoxelWorldBounds UVoxelChunkManager::GetWorldBounds() const
+{
+	return WorldMode ? WorldMode->GetWorldBounds() : FVoxelWorldBounds();
+}
+
+FVector UVoxelChunkManager::GetUpVectorAt(const FVector& WorldPos) const
+{
+	return WorldMode ? WorldMode->GetUpVector(WorldPos) : FVector::UpVector;
+}
+
+float UVoxelChunkManager::GetAltitudeAt(const FVector& WorldPos) const
+{
+	return WorldMode ? WorldMode->GetAltitude(WorldPos) : static_cast<float>(WorldPos.Z);
+}
+
+FVoxelSurfaceCoord UVoxelChunkManager::WorldToSurface(const FVector& WorldPos) const
+{
+	return WorldMode ? WorldMode->WorldToSurface(WorldPos) : FVoxelSurfaceCoord(0, FVector2D(WorldPos.X, WorldPos.Y));
+}
+
+FVector UVoxelChunkManager::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
+{
+	return WorldMode ? WorldMode->SurfaceToWorld(Coord, Altitude) : FVector(Coord.UV.X, Coord.UV.Y, Altitude);
+}
+
+FVoxelWorldFingerprint UVoxelChunkManager::GetWorldFingerprint() const
+{
+	return Configuration ? FVoxelWorldModeFactory::MakeFingerprint(*Configuration) : FVoxelWorldFingerprint();
+}
+
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 {
 	ConditioningZones.Add(Zone);

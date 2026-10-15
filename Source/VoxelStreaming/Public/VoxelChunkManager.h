@@ -388,6 +388,77 @@ public:
 	 */
 	float GetGeneratedSurfaceHeight(double WorldX, double WorldY) const;
 
+	// ==================== World Bounds and Local Frame (WM-A2) ====================
+	// The configured world mode's bounds and frame (IVoxelWorldMode), for Blueprint and for game plugins, which reach
+	// them through the world actor's chunk manager like the surface queries above. Before Initialize (no world mode)
+	// they describe an unbounded heightmap world: inside everywhere, +Z up, altitude = Z, surface = (0, X, Y).
+
+	/**
+	 * Whether the vertical line at (X, Y) passes through the world (an island's R + falloff footprint; always on a
+	 * plane). Use it to keep placement, exploration, spawning and navigation inside the world.
+	 *
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @return True when (X, Y) is inside the world's footprint
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	bool IsInsideWorld(double WorldX, double WorldY) const;
+
+	/**
+	 * Where the world ends: unbounded (plane), a circle or rectangle footprint (island), a shell (planet).
+	 *
+	 * @return The world's bounds
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVoxelWorldBounds GetWorldBounds() const;
+
+	/**
+	 * Local up at a world position (+Z in heightmap modes, radial on a planet).
+	 *
+	 * @param WorldPos World position
+	 * @return Unit up vector
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVector GetUpVectorAt(const FVector& WorldPos) const;
+
+	/**
+	 * Signed height above the datum (SeaLevel in heightmap modes, the planet radius on a planet).
+	 *
+	 * @param WorldPos World position
+	 * @return Altitude along the local up
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	float GetAltitudeAt(const FVector& WorldPos) const;
+
+	/**
+	 * A world position's surface coordinate, the key for 2D systems: (0, X, Y) in heightmap modes, a cube face and
+	 * (U, V) on a planet.
+	 *
+	 * @param WorldPos World position
+	 * @return Surface coordinate
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVoxelSurfaceCoord WorldToSurface(const FVector& WorldPos) const;
+
+	/**
+	 * The world position at a surface coordinate and an altitude above the datum (inverse of WorldToSurface).
+	 *
+	 * @param Coord Surface coordinate
+	 * @param Altitude Height above the datum
+	 * @return World position
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const;
+
+	/**
+	 * What generated this world, for saves (WM-A4): world mode, shape params, voxel grid and generation version.
+	 * A save whose fingerprint differs is not loaded into this world.
+	 *
+	 * @return The fingerprint; an unrecorded one (GenerationVersion 0) before Initialize
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVoxelWorldFingerprint GetWorldFingerprint() const;
+
 	// ==================== Configuration Access ====================
 
 	/**

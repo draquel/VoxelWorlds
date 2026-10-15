@@ -28,6 +28,14 @@ struct FVoxelNoiseGenerationRequest;
 struct VOXELGENERATION_API FVoxelWorldModeFactory
 {
 	/**
+	 * Version of the generation code, recorded in every world save's fingerprint (WM-A4). Bump it when the same
+	 * configuration starts generating different terrain (noise, height composition, island falloff, caves, ...): saves
+	 * made before the bump are then refused, instead of loading their edits and records onto terrain that moved.
+	 * 1: the first recorded version (WM-A1 moved islands whose WorldOrigin is not zero onto WorldOrigin + offset).
+	 */
+	static constexpr int32 GenerationVersion = 1;
+
+	/**
 	 * Terrain params for the heightmap modes (InfinitePlane, IslandBowl).
 	 *
 	 * @param Config World configuration
@@ -77,4 +85,16 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * @param Request Generation request to fill
 	 */
 	static void FillGenerationRequest(const UVoxelWorldConfiguration& Config, FVoxelNoiseGenerationRequest& Request);
+
+	/**
+	 * The world's fingerprint for saves (WM-A4, KI7; SP-G9): the world mode, the mode's shape params (island: shape,
+	 * radius, size Y for a rectangle, falloff width and curve, centre, edge height; planet: radius, shell, centre), the
+	 * voxel grid (voxel size, chunk size, world origin: edits are stored per chunk) and GenerationVersion. Terrain
+	 * tuning (noise, height scale, biomes) is left out on purpose: the save key already holds the seed, and refusing a
+	 * save on every tuning change would get in the way more than it protects.
+	 *
+	 * @param Config World configuration
+	 * @return The fingerprint; equal configs give equal fingerprints
+	 */
+	static FVoxelWorldFingerprint MakeFingerprint(const UVoxelWorldConfiguration& Config);
 };
