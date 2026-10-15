@@ -43,15 +43,15 @@ What is wrong or missing:
 
 | # | Problem | Evidence |
 |---|---------|----------|
-| 1 | **GPU generation has no planet support and is on by default.** Spherical falls through to the generic 3D-noise branch, which produces blobs instead of a planet. Nothing forces CPU generation for this mode. | `Shaders/Private/GenerateVoxelDensity.usf:327-346`; `WorldModeSDF.ush:190-193` (placeholder only); `VoxelChunkManager.cpp:1003-1004`; `bUseGPUGeneration` defaults to true |
+| 1 | **GPU generation has no planet support and is on by default.** Spherical falls through to the generic 3D-noise branch, which produces blobs instead of a planet. Nothing forces CPU generation for this mode. | `Shaders/Private/GenerateVoxelDensity.usf:327-346`; `WorldModeSDF.ush:190-193` (placeholder only); `VoxelChunkManager.cpp:1003-1004`; `bUseGPUGeneration` defaults to true. **Guarded 2026-10-14 (SP-B3):** planets generate on the CPU and log why |
 | 2 | **The terrain is mirrored across the equator.** The noise samples `FBM(Direction.xy × 10000, 0)`, so z and −z get the same height, and features stretch north to south near the equator. The 10,000 factor is hard-coded, so feature size scales with the radius. `NoiseScale` is never read. | `SphericalPlanetWorldMode.cpp:165-181` |
 | 3 | **Every surface turns to snow.** Height-material rules are given the distance from the centre as "height", and the default rules put snow at ≥ 4,000. | `VoxelCPUNoiseGenerator.cpp:1458`; `VoxelBiomeConfiguration.cpp:111-132` |
 | 4 | **The analytic surface query is wrong.** `GetTerrainHeightAt(X, Y)` returns a radius, not a Z, and only for the equatorial direction (X, Y, 0). Every consumer reads it as a Z height. | `SphericalPlanetWorldMode.cpp:54-77`; `IVoxelWorldMode.h:54-68` |
 | 5 | **No water flags.** The water-fill pass is skipped for spherical, while the underground classification pass still scans world-Z columns. | `VoxelCPUNoiseGenerator.cpp:1553-1555`, `:1686-1747` |
 | 6 | **The chunk candidate set is an axis-aligned box** (XY radius × a Z range capped at ±16 chunks). At the equator, world Z is horizontal, so reach along it is cut short. | `DistanceBandLODStrategy.cpp:192-211` |
 | 7 | **The horizon cull under-buffers distant mountains.** It adds `PlanetMaxTerrainHeight` where `√(2R·Hmax + Hmax²)` is needed. | `DistanceBandLODStrategy.cpp:1074-1144` |
-| 8 | **Config hygiene.** `BaseHeight` is hidden in the UI for spherical but still used. Nothing checks that `PlanetMaxTerrainHeight`/`Depth` cover the real amplitude (`0.5·PlanetHeightScale + BaseHeight`), so terrain past the shell is clipped by the density quick-reject. `GetPlanetSpawnPosition` ignores terrain displacement, and no spawn code calls it. | `VoxelWorldConfiguration.h:99-191`; `VoxelWorldConfiguration.cpp:233-259` |
-| 9 | **No tests, config or map.** No automation test or content asset uses SphericalPlanet. | `*/Tests/*`, `Content/` |
+| 8 | **Config hygiene.** `BaseHeight` is hidden in the UI for spherical but still used. Nothing checks that `PlanetMaxTerrainHeight`/`Depth` cover the real amplitude (`0.5·PlanetHeightScale + BaseHeight`), so terrain past the shell is clipped by the density quick-reject. `GetPlanetSpawnPosition` ignores terrain displacement, and no spawn code calls it. **Partly fixed 2026-10-14 (SP-A5):** `BaseHeight` is shown, and the shell and water checks warn at load; the spawn clauses stay with SP-B11 and SP-F4 | `VoxelWorldConfiguration.h:99-191`; `VoxelWorldConfiguration.cpp:233-259` |
+| 9 | **No tests, config or map.** No automation test or content asset uses SphericalPlanet. **Partly fixed 2026-10-14:** a planet config and test map exist (SP-I1) and `VoxelWorlds.Configuration.PlanetSettings` tests the config checks; the generation tests are SP-I2 | `*/Tests/*`, `Content/` |
 | 10 | **Every system that reads the surface assumes +Z is up**: scatter, PCG, map, navigation, POIs, dungeons, campsites, NPCs, movement, camera, world items, water, sky, clock. See Appendix A. | Appendix A |
 
 Several docs overstate this state; they are listed in §10 of the review plan.
@@ -85,7 +85,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 | SP-A2 | `IVoxelWorldMode` exposes a 2D surface parameterisation. `WorldToSurface(WorldPos) → (Face, U, V)` and its inverse are a cube-sphere mapping for planets and `(0, X, Y)` for heightmap modes. This is the key for every 2D consumer | P0 | 2D systems key on XY |
 | SP-A3 | Callers migrate from `GetTerrainHeightAt` to SP-A1/SP-A2 (the list is Appendix A). On a planet, `GetTerrainHeightAt` logs once and returns a world Z on the upper hemisphere, so legacy callers degrade instead of reading a radius as a Z | P1 | Returns a radius |
 | SP-A4 | `GetTerrainHeightBounds` generalises to altitude bounds; the planet version is the radial shell | P1 | Z extent; the planet uses the ±1e9 default |
-| SP-A5 | Config validation and honest UI: `BaseHeight` is either shown or not used. The shell (`PlanetMaxTerrainHeight`/`Depth`) is checked against the real amplitude. `NoiseScale` is used or removed. Using `WaterLevel` on a planet logs a warning | P0 | Hidden fields are used; no checks |
+| SP-A5 | Config validation and honest UI: `BaseHeight` is either shown or not used. The shell (`PlanetMaxTerrainHeight`/`Depth`) is checked against the real amplitude. `NoiseScale` is used or removed. Using `WaterLevel` on a planet logs a warning | P0 | **Done 2026-10-14** (WM-H10, VoxelWorlds#87): `UVoxelWorldConfiguration::GetSettingsWarnings` checks the shell against `BaseHeight ± PlanetHeightScale/2` and flags water on a planet (logged at load and at world start); `BaseHeight` is shown; the unread `NoiseScale` is removed |
 | SP-A6 | One builder for planet params. They are rebuilt in several places today: the chunk manager, the map and the editor field viewer | P1 | `VoxelChunkManager.cpp:975-985`, `:2510-2519`; `VoxelMapSubsystem.cpp:70`; `VoxelFieldTypes.cpp:69` |
 
 ### B. Generation
@@ -94,7 +94,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 |----|-------------|-----|-------|
 | SP-B1 | Seamless noise sampled by 3D direction, `FBM3D(Direction × R_noise)`, with feature size set in world units and not tied to the radius | P0 | Mirrored 2D sampling (problem #2) |
 | SP-B2 | Height-material rules use altitude above the datum | P0 | Uses the radius; everything turns to snow (problem #3) |
-| SP-B3 | GPU guard: until SP-B4 lands, spherical worlds use CPU generation and log why | P0 | Wrong terrain by default (problem #1) |
+| SP-B3 | GPU guard: until SP-B4 lands, spherical worlds use CPU generation and log why | P0 | **Done 2026-10-14** (WM-H10, VoxelWorlds#87): `ShouldUseGPUGeneration()` is false for planets; the chunk manager logs a warning when `bUseGPUGeneration` is on |
 | SP-B4 | GPU radial SDF in `GenerateVoxelDensity.usf`: planet params uploaded; density = `(R + displacement) − |P − C|`; noise by direction; biomes, materials, caves and ores matching the CPU. Locked by a `GPUvsCPUSphericalParity` test at LOD 0/1/2 | P1 | Generic noise branch |
 | SP-B5 | Continentalness modulates radial height the way it does in heightmap modes | P1 | Used for biome selection only (`VoxelCPUNoiseGenerator.cpp:1386-1392`) |
 | SP-B6 | Caves: `VerticalScale` acts along local up, and the `bIsUnderwater` suppression is passed | P1 | Squashes along world Z (`:1071`); not passed (`:1437`) |
@@ -173,7 +173,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 
 | ID | Requirement | Pri | Today |
 |----|-------------|-----|-------|
-| SP-I1 | A planet config and test map (`PluginTesting/Planet`), derived from the demo config so biomes, caves and POI tables match | P0 | None |
+| SP-I1 | A planet config and test map (`PluginTesting/Planet`), derived from the demo config so biomes, caves and POI tables match | P0 | **Done 2026-10-14** (WM-H10, UE5_PluginDev#102): `PlanetWorldConfig` (a 2.5 km planet) and `PlanetTest` (VoxelDemo on it, PlayerStart over the north pole), from `Scripts/setup_planet_test.py` |
 | SP-I2 | Automation tests: analytic vs generated surface by direction; seamless noise (the hemispheres differ, no mirror, continuous across cube-face edges); shell and horizon cull; enumeration covers the shell at the equator; params validation | P0 | None |
 | SP-I3 | `GPUvsCPUSphericalParity` (with SP-B4) | P1 | None |
 | SP-I4 | A bench great-circle route at fixed altitude (extends review-plan T2) | P1 | Straight +X line only |
@@ -183,7 +183,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 
 | Phase | Content | Exit check |
 |-------|---------|------------|
-| 0. Guardrails | SP-A5, SP-B3, SP-I1, doc corrections | A spherical config generates on the CPU with a warning and no clipping |
+| 0. Guardrails | SP-A5, SP-B3, SP-I1, doc corrections | A spherical config generates on the CPU with a warning and no clipping. **Met 2026-10-14** (review plan §14.5): `PlanetTest` generates on the CPU with the SP-B3 warning, no config warnings, terrain inside its shell |
 | 1. A correct planet (CPU) | SP-A1, SP-A2, SP-B1, SP-B2, SP-B5-B8, SP-C1, SP-C2, SP-D4, SP-I2 | A survey camera shows a seamless, unmirrored planet with sensible materials and water at all latitudes |
 | 2. GPU | SP-B4, SP-I3 | GPU parity green; GPU default re-enabled for spherical |
 | 3. Walkable | SP-F1-F5, SP-C4, SP-B11, SP-E1-E3 | Walk and swim around the planet with no fall-through (`vox.Debug.Capture`) |
