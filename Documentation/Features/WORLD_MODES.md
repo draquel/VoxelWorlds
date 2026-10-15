@@ -2,7 +2,8 @@
 
 **Module**: VoxelGeneration
 **Dependencies**: VoxelCore
-**Last Updated**: 2026-10-14 (island sections from the world modes review, WORLD_MODES_REVIEW_PLAN.md §13)
+**Last Updated**: 2026-10-15 (the world-mode API of milestone M2: one params builder, bounds, a local frame, save
+fingerprints; WORLD_MODES_REVIEW_PLAN.md §14.6)
 
 ## Overview
 
@@ -10,22 +11,46 @@ The world mode system supports three terrain types, each optimized for different
 
 ## IVoxelWorldMode Interface
 
+`Source/VoxelGeneration/Public/IVoxelWorldMode.h` (abridged):
+
 ```cpp
 class IVoxelWorldMode {
 public:
-    virtual ~IVoxelWorldMode() = default;
+    // Generation and the analytic surface
+    virtual float GetDensityAt(const FVector& WorldPos, int32 LODLevel, float NoiseValue) const = 0;
+    virtual float GetTerrainHeightAt(float X, float Y, const FVoxelNoiseParams& NoiseParams) const = 0;
+    virtual void  GetTerrainHeightBounds(float& OutMin, float& OutMax) const;   // authority for vertical culling
+    virtual void  SetBiomeContext(const UVoxelBiomeConfiguration* BiomeConfig); // continentalness, by value
 
-    // Core density evaluation
-    virtual float GetDensityAt(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const = 0;
+    // Where the world ends (WM-A2)
+    virtual bool              IsInsideWorld(double X, double Y) const;  // island: R + F footprint; plane: always
+    virtual FVoxelWorldBounds GetWorldBounds() const;                   // Unbounded / Circle / Rectangle / Shell
 
-    // Material and biome selection
-    virtual uint8 GetMaterialAt(const FVector& WorldPos, float Density) const = 0;
-    virtual uint8 GetBiomeAt(const FVector& WorldPos) const = 0;
+    // Local frame (SP-A1, SP-A2)
+    virtual FVector            GetUpVector(const FVector& WorldPos) const;   // +Z; radial on a planet
+    virtual float              GetAltitude(const FVector& WorldPos) const;   // above SeaLevel; above PlanetRadius
+    virtual FVoxelSurfaceCoord WorldToSurface(const FVector& WorldPos) const; // (0, X, Y); cube face + UV
+    virtual FVector            SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const;
 
-    // Static helper for CPU/GPU consistency
-    static float ApplyWorldModeSDF(float BaseDensity, const FVector& WorldPos, const FWorldModeParams& Params);
+    // Coordinates, vertical limits, type, materials: WorldToChunkCoord, ChunkCoordToWorld, GetMinZ/GetMaxZ,
+    // GetWorldModeType, IsHeightmapBased, GetMaterialAtDepth
 };
 ```
+
+The bounds and frame functions have defaults for an unbounded heightmap world with its datum at Z 0, so a world mode
+outside VoxelWorlds (the dungeon plugin's, a test mock) keeps working; the three built-in modes override them.
+
+**One builder per mode (WM-A1).** `FVoxelWorldModeFactory` (`VoxelGeneration/Public/VoxelWorldModeFactory.h`) is the
+only place world-mode params are built from a `UVoxelWorldConfiguration`: `MakeIslandParams`, `MakePlanetParams`,
+`MakeTerrainParams`, `Create` (a world mode with its biome context) and `FillGenerationRequest`. Generation (CPU and GPU,
+through the request), the chunk manager, the LOD strategy's culls and slab, the map, the editor field viewer and POI
+placement all use it. `MakeFingerprint` and `GenerationVersion` describe the world for saves (WM-A4).
+
+**Reaching it from game code and Blueprint.** The chunk manager (a component of the world actor) exposes the configured
+mode's bounds and frame as `BlueprintPure` functions in the `Voxel|World` category: `IsInsideWorld`, `GetWorldBounds`,
+`GetUpVectorAt`, `GetAltitudeAt`, `WorldToSurface`, `SurfaceToWorld` and `GetWorldFingerprint`. VoxelWorlds does not
+depend on the game plugins; they call these through `AVoxelWorldTestActor::GetChunkManager()`, as they already do for
+the surface queries.
 
 ---
 
@@ -98,11 +123,17 @@ float IslandCenterY = 0.0f;
 float IslandEdgeHeight = -1000.0f;   // Terrain height the falloff reaches at R + FalloffWidth
 ```
 
-**Island centre:** generation and the analytic height read `IslandCenterX/Y` as absolute world coordinates; the LOD
-cull reads them as an offset from `WorldOrigin`. They agree only when `WorldOrigin` is 0 in X and Y, so keep it there
-for island worlds until WM-A1 gives every consumer one params builder (finding KI3: with the demo's origin the cull sat
-55,706 uu off centre and cut 1,098 land columns). `bIslandBowlShape` was removed on 2026-10-14: it was copied in four
-places and read nowhere (KI4).
+**Island centre:** `IslandCenterX/Y` is an offset from `WorldOrigin`. `FVoxelWorldModeFactory::MakeIslandParams`
+resolves it once to the absolute centre `WorldOrigin + offset`, and every consumer (generation on the CPU and the GPU,
+the analytic height, the LOD cull, the map, the field viewer, the bounds query) uses that (WM-A1, 2026-10-15). Before,
+generation read the offset as an absolute position and the cull added `WorldOrigin`: with the demo's origin the two sat
+55,706 uu apart and the cull cut 1,098 land columns (KI3). An island config with a non-zero `WorldOrigin` now generates
+centred on `WorldOrigin + offset`, which moves its terrain; saves record the generation version (WM-A4).
+`bIslandBowlShape` was removed on 2026-10-14: it was copied in four places and read nowhere (KI4).
+
+**Bounds:** `GetWorldBounds()` is a circle of radius `R + FalloffWidth` (or a rectangle of half sizes `R + F` by
+`SizeY + F`) around that centre, and `IsInsideWorld(X, Y)` is the same footprint test generation uses
+(`IsWithinIslandBounds`). Consumers start using it in milestone M3 (WM-I1, WM-I2, WM-I3, WM-I5).
 
 ### Island Shape Types
 ```cpp
@@ -178,8 +209,9 @@ is nothing: no terrain, water or collision. A pawn that swims or walks off the r
 respawn (KI2, KI14; work items WM-I4 and WM-I5 add recovery and a boundary, WM-E1 a visible edge).
 
 ### LOD Culling
-- **Terrain Bounds Culling**: Chunks above/below the terrain height range are skipped (same as Infinite Plane), with
-  the range floored at `IslandEdgeHeight - 1 chunk`
+- **Terrain Bounds Culling**: Chunks above/below the terrain height range are skipped (same as Infinite Plane). The
+  range is the world mode's `GetTerrainHeightBounds`, whose minimum includes the floor beyond the edge
+  (`IslandEdgeHeight - 1000`), plus one chunk
 - **Island Boundary Culling** (by chunk centre, 2D):
   - Circular: chunks whose centre is farther than `IslandRadius + FalloffWidth + chunk diagonal` are skipped
   - Rectangle: chunks beyond `IslandRadius + FalloffWidth + half a chunk` in X, or `IslandSizeY + FalloffWidth + half a
@@ -216,12 +248,15 @@ WORLD_MODES_REVIEW_PLAN.md §13.3-13.5. Tiers: S, M and L are 0.8, 5 and 10 km a
 ### Known gaps
 Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
 
-- **POI placement** samples InfinitePlane height in every mode, so POIs past R stand in the sea or over the floor on pads
-  raised out of the water, and off-island POIs still stream and show on the map (KI1; WM-A3, WM-I1).
+- **POI placement** samples the island's own height since WM-A3 (2026-10-15), so land POIs are no longer placed in the
+  falloff band's sea or on the floor. Sites past R+F of types that may place anywhere are still placed, and still stream
+  and show on the map, until placement uses the bounds query (KI1; WM-I1).
 - **No world edge or recovery** (KI2, KI14; WM-I4, WM-I5, WM-E1).
 - **Map exploration and markers run past the coast**, the PCG sampler has no island mask, and water-off navigation walks
   the floor (KI9; WM-I2). Scatter and surface NPCs already stop at the coast.
-- **A changed island shape loads the old save** (the key is map + seed; KI7; WM-A4).
+- ~~**A changed island shape loads the old save**~~ Fixed by WM-A4 (2026-10-15): the save records the world's
+  fingerprint (mode, shape, voxel grid, generation version), and a save from a different radius is refused, kept on disk,
+  and the world starts fresh (KI7).
 - **Spawn off the island with water off** takes the floor for land and freezes the pawn (KI8; WM-I3).
 
 ### Use Cases
@@ -322,6 +357,9 @@ Three types of culling are applied:
 - Water: generation compares against `WaterRadius`, every other consumer still reads the Z-plane `WaterLevel`
   (SP-E1); `GetSettingsWarnings` flags water on a planet
 - Designed for surface exploration; orbital viewing would need an octree or cube-sphere quadtree LOD (SD5)
+- The world-mode API has a planet side since M2 (2026-10-15): the shell as bounds, radial up, altitude above
+  `PlanetRadius`, and a gnomonic cube-sphere surface coordinate that round-trips. Nothing consumes it on a planet yet;
+  spherical Phase 1 moves the 2D systems onto it and may change the cube warp
 
 ---
 
@@ -438,9 +476,9 @@ CPU-only (the GPU cave loop carves the global layers). **Perf:** GPU single-chun
 **Cached analytic world mode (fixed Phase C):** the chunk manager now builds the analytic
 `IVoxelWorldMode` matching `config->WorldMode` (was always `FInfinitePlaneWorldMode`). So spawn / nav /
 `GetGeneratedSurfaceHeight` / `QueryEditMergedSurface` use the correct terrain math for every mode. POI placement
-does **not**: it calls `FInfinitePlaneWorldMode::SampleTerrainHeight` directly in every mode, which is right inside an
-island's radius and up to 7,000 uu wrong past it (finding KI1; work items WM-A3 and WM-I1 route it through the world
-mode). `SetBiomeContext` is promoted to `IVoxelWorldMode` (InfinitePlane + IslandBowl apply
+did not until WM-A3 (2026-10-15): it called `FInfinitePlaneWorldMode::SampleTerrainHeight` directly in every mode, which
+is right inside an island's radius and up to 7,000 uu wrong past it (finding KI1). It now samples the configured world
+mode, built by `FVoxelWorldModeFactory` and carried in the placement config. `SetBiomeContext` is promoted to `IVoxelWorldMode` (InfinitePlane + IslandBowl apply
 continentalness; other modes no-op).
 
 **IslandBowl height = continentalness ∘ falloff (Phase C):** continentalness (internal oceans/mountains)
@@ -459,7 +497,8 @@ list (implementation reserved):
 
 1. **Ray/direction surface query** — replace `GetTerrainHeightAt(X, Y) → Z` with
    `GetSurfacePoint(Direction) → (point on shell, radial normal)`. Foundational: every other analytic
-   consumer needs it.
+   consumer needs it. *(M2, 2026-10-15: the frame it builds on exists: `GetUpVector`, `GetAltitude`,
+   `WorldToSurface`/`SurfaceToWorld` with a planet implementation. `GetSurfacePoint` itself comes with Phase 1.)*
 2. **GPU radial SDF** — port the spherical SDF into `GenerateVoxelDensity.usf` (currently the generic
    3D-noise `else` branch): `density = (PlanetRadius + radialNoise·HeightScale) − |WorldPos − PlanetCenter|`,
    with noise sampled by **direction** (`normalize(WorldPos − PlanetCenter)`) for seamless wrapping.

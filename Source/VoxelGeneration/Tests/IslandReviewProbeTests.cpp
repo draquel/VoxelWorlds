@@ -7,7 +7,9 @@
 // These tests record what the code does today and pass; the numbers go to the review (KI1, KI2, KI4). The checks that
 // would fail today are logged as "PROBE" lines instead of being asserted, so the suite stays green until the findings
 // are fixed. Turn them into assertions with the fix. KI4's are asserted since WM-H6 (2026-10-14): no falloff curve
-// leaves a step at R+F beyond the floor's own, and GetDensityAt agrees with the floor beyond R+F.
+// leaves a step at R+F beyond the floor's own, and GetDensityAt agrees with the floor beyond R+F. The InfinitePlane
+// height column is what POI placement sampled before WM-A3 (2026-10-15); placement now samples the world mode, whose
+// height the "island analytic" column checks.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -162,7 +164,7 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 			{
 				Stats.MeanPlaneGap /= Stats.Samples;
 			}
-			AddInfo(FString::Printf(TEXT("PROBE %s %s: %d samples | island analytic vs generated max %.1f uu | POI (InfinitePlane) vs generated max %.0f mean %.0f uu | POI says land where the island is under water: %d"),
+			AddInfo(FString::Printf(TEXT("PROBE %s %s: %d samples | island analytic vs generated max %.1f uu | InfinitePlane height (POI placement before WM-A3) vs generated max %.0f mean %.0f uu | it says land where the island is under water: %d"),
 				Name, Zone.Key, Stats.Samples, Stats.MaxIslandGap, Stats.MaxPlaneGap, Stats.MeanPlaneGap, Stats.PlaneDryIslandWet));
 
 			// The island's own analytic height must match generation everywhere it generates (one voxel of slack).

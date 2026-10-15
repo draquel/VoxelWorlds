@@ -81,12 +81,12 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 
 | ID | Requirement | Pri | Today |
 |----|-------------|-----|-------|
-| SP-A1 | `IVoxelWorldMode` exposes a local frame. `GetUpVector(WorldPos)` returns +Z for heightmap modes and the radial direction for planets. `GetAltitude(WorldPos)` returns the signed height above the datum (sea level). `GetSurfacePoint(Direction)` returns the surface point plus its normal | P0 | Only `GetTerrainHeightAt(X, Y) → Z` |
-| SP-A2 | `IVoxelWorldMode` exposes a 2D surface parameterisation. `WorldToSurface(WorldPos) → (Face, U, V)` and its inverse are a cube-sphere mapping for planets and `(0, X, Y)` for heightmap modes. This is the key for every 2D consumer | P0 | 2D systems key on XY |
+| SP-A1 | `IVoxelWorldMode` exposes a local frame. `GetUpVector(WorldPos)` returns +Z for heightmap modes and the radial direction for planets. `GetAltitude(WorldPos)` returns the signed height above the datum (sea level). `GetSurfacePoint(Direction)` returns the surface point plus its normal | P0 | **Partly done 2026-10-15** (review plan WM-A2, §14.6): `GetUpVector` and `GetAltitude` exist in every mode (heightmaps: +Z, Z above `SeaLevel`; planet: radial, above `PlanetRadius`), Blueprint-callable through the chunk manager (`GetUpVectorAt`, `GetAltitudeAt`). `GetSurfacePoint` comes with Phase 1 (it needs the planet's radial height) |
+| SP-A2 | `IVoxelWorldMode` exposes a 2D surface parameterisation. `WorldToSurface(WorldPos) → (Face, U, V)` and its inverse are a cube-sphere mapping for planets and `(0, X, Y)` for heightmap modes. This is the key for every 2D consumer | P0 | **Interface done 2026-10-15** (WM-A2): `WorldToSurface` / `SurfaceToWorld` with `FVoxelSurfaceCoord` (face + UV); heightmaps `(0, X, Y)`; the planet has a gnomonic cube mapping (UV in [-1, 1]) that round-trips on all six faces (`VoxelWorlds.WorldModes.Api.Frame`). No 2D system uses it yet (they still key on XY); Phase 1 may swap in an equal-area warp |
 | SP-A3 | Callers migrate from `GetTerrainHeightAt` to SP-A1/SP-A2 (the list is Appendix A). On a planet, `GetTerrainHeightAt` logs once and returns a world Z on the upper hemisphere, so legacy callers degrade instead of reading a radius as a Z | P1 | Returns a radius |
 | SP-A4 | `GetTerrainHeightBounds` generalises to altitude bounds; the planet version is the radial shell | P1 | Z extent; the planet uses the ±1e9 default |
 | SP-A5 | Config validation and honest UI: `BaseHeight` is either shown or not used. The shell (`PlanetMaxTerrainHeight`/`Depth`) is checked against the real amplitude. `NoiseScale` is used or removed. Using `WaterLevel` on a planet logs a warning | P0 | **Done 2026-10-14** (WM-H10, VoxelWorlds#87): `UVoxelWorldConfiguration::GetSettingsWarnings` checks the shell against `BaseHeight ± PlanetHeightScale/2` and flags water on a planet (logged at load and at world start); `BaseHeight` is shown; the unread `NoiseScale` is removed |
-| SP-A6 | One builder for planet params. They are rebuilt in several places today: the chunk manager, the map and the editor field viewer | P1 | `VoxelChunkManager.cpp:975-985`, `:2510-2519`; `VoxelMapSubsystem.cpp:70`; `VoxelFieldTypes.cpp:69` |
+| SP-A6 | One builder for planet params. They are rebuilt in several places today: the chunk manager, the map and the editor field viewer | P1 | **Done 2026-10-15** (WM-A1): `FVoxelWorldModeFactory::MakePlanetParams` / `Create` / `FillGenerationRequest`, used by the chunk manager, the generation request, the LOD shell cull, the map and the field viewer |
 
 ### B. Generation
 
@@ -158,7 +158,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 | SP-G6 | Dungeons stamped in a rotated tangent frame (rotation in `DungeonVoxelStamper`, a tilted entrance stitcher) | P2 | Translation-only stamping; the stitcher sweeps Z from +10,000 to −10,000 and misses a planet's surface |
 | SP-G7 | World clock and sun: a single directional light fixed in space and a rotating planet give day and night sides naturally. The clock drives the planet rotation angle, and the HUD and NPC schedules use local solar time at the player | P1 | One global sun pitch and yaw in the world frame (`WorldClockMath.cpp:48-59`) |
 | SP-G8 | Sky: SkyAtmosphere centred on the planet (bottom radius = sea radius) instead of Z-height exponential fog | P1 | `DayNightController.cpp:80-90`, `:155-160` |
-| SP-G9 | Save: the key or header fingerprints world mode and planet params (shared with island KI7); explored tiles are keyed by surface parameters | P1 | Map + seed only |
+| SP-G9 | Save: the key or header fingerprints world mode and planet params (shared with island KI7); explored tiles are keyed by surface parameters | P1 | **Fingerprint done 2026-10-15** (WM-A4): the save document records the world mode, the planet's radius, shell and centre, the voxel grid and a generation version; a save from a different world is refused and kept on disk. Explored tiles are still keyed on XY (Phase 4, with SP-G1) |
 | SP-G10 | WorldClaims use the radial zone model from SP-B10. World Partition stays deferred for planets | P2 | Claims are oriented boxes (fine); conditioning is not applied |
 
 ### H. Precision and scale
@@ -196,7 +196,9 @@ from the island findings should be designed so the planet versions slot into the
 
 **Scheduled 2026-10-14** (review plan [§14.4](WORLD_MODES_REVIEW_PLAN.md), decision D9): Phase 0 is work item
 WM-H10 in milestone M1. The heightmap side of SP-A1 and SP-A2, plus SP-A6 and SP-G9, are built with the island's
-world-mode API in M2 (WM-A1, WM-A2, WM-A4), so Phase 1 adds the planet implementations. Phase 1 starts after M4 (the
+world-mode API in M2 (WM-A1, WM-A2, WM-A4), so Phase 1 adds the planet implementations. **M2 done 2026-10-15**
+(review plan §14.6): the interface carries the planet side already (shell bounds, radial up and altitude, a cube-face
+surface coordinate), so Phase 1 starts from consumers, not from the interface. Phase 1 starts after M4 (the
 per-column streaming window that SP-C1 builds on) and M5 (the legacy whole-chunk path is deleted before SP-D4 tests
 seams at mid latitudes).
 

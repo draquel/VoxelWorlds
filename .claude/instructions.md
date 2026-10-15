@@ -69,14 +69,26 @@ class IVoxelMeshRenderer {
 ### IVoxelWorldMode
 ```cpp
 // World mode interface - infinite, spherical, island implementations
-// Location: Source/VoxelGeneration/Public/VoxelWorldMode.h
+// Location: Source/VoxelGeneration/Public/IVoxelWorldMode.h (abridged; see Documentation/Features/WORLD_MODES.md)
 
 class IVoxelWorldMode {
-    virtual float GetDensityAt(FVector WorldPos, int32 LOD) = 0;
-    virtual FVector GetWorldSpacePosition(FIntVector ChunkCoord, FIntVector LocalVoxel) = 0;
-    virtual TArray<FIntVector> GetVisibleChunks(FVector ViewOrigin, float ViewDistance) = 0;
+    virtual float GetDensityAt(const FVector& WorldPos, int32 LODLevel, float NoiseValue) const = 0;
+    virtual float GetTerrainHeightAt(float X, float Y, const FVoxelNoiseParams& NoiseParams) const = 0;
+    virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const;   // authority for vertical culling
+    // Bounds and local frame (world modes review WM-A2; spherical SP-A1/SP-A2)
+    virtual bool IsInsideWorld(double X, double Y) const;
+    virtual FVoxelWorldBounds GetWorldBounds() const;
+    virtual FVector GetUpVector(const FVector& WorldPos) const;
+    virtual float GetAltitude(const FVector& WorldPos) const;
+    virtual FVoxelSurfaceCoord WorldToSurface(const FVector& WorldPos) const;
+    virtual FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const;
 };
 ```
+Build world-mode params and instances ONLY through `FVoxelWorldModeFactory` (`VoxelWorldModeFactory.h`:
+`MakeIslandParams`, `MakePlanetParams`, `MakeTerrainParams`, `Create`, `FillGenerationRequest`, `MakeFingerprint`); never
+copy config fields into `FIslandBowlParams` / `FSphericalPlanetParams` by hand (that is how the island centre came to
+mean two things, KI3). Positions in the built params are absolute (island centre = `WorldOrigin` + offset). Game code
+reaches the configured mode's bounds and frame through `UVoxelChunkManager` (`Voxel|World` BlueprintPure functions).
 
 ## Core Data Structures
 
