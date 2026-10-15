@@ -1,5 +1,6 @@
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelChunkManager.h"
+#include "VoxelCollisionManager.h"
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelMesher.h"
 #include "Misc/App.h"
@@ -149,6 +150,10 @@ void FVoxelStreamingBenchmark::SetupFlyPawn()
 	FlyPawn = Pawn;
 	OriginalPawnLocation = Pawn->GetActorLocation();
 	bPawnConfigured = true;
+	// A route over the sea or a follow= run over a lake keeps the pawn underwater; with damage on it
+	// drowns and respawns mid-run, which moves the streaming origin (G4, G8).
+	bOriginalCanBeDamaged = Pawn->CanBeDamaged();
+	Pawn->SetCanBeDamaged(false);
 	// A character would walk + fall through unloaded terrain; switch it to flying so it tracks
 	// the bench path cleanly. Non-character pawns just get teleported each tick.
 	if (ACharacter* Char = Cast<ACharacter>(Pawn))
@@ -170,20 +175,111 @@ void FVoxelStreamingBenchmark::UpdateFlyPawn()
 	}
 }
 
-void FVoxelStreamingBenchmark::RestoreFlyPawn()
+void FVoxelStreamingBenchmark::BeginRestoreHold()
 {
-	if (APawn* Pawn = FlyPawn.Get())
+	APawn* Pawn = FlyPawn.Get();
+	if (!Pawn)
 	{
-		Pawn->SetActorLocation(OriginalPawnLocation, false, nullptr, ETeleportType::TeleportPhysics);
-		if (ACharacter* Char = Cast<ACharacter>(Pawn))
+		Phase = EPhase::Done;
+		return;
+	}
+
+	// Back to the start, held without gravity. The run streamed the start out and back in, so its
+	// collision may still be cooking: restoring the movement mode at once dropped the pawn through (G9).
+	Pawn->SetActorLocation(OriginalPawnLocation, false, nullptr, ETeleportType::TeleportPhysics);
+	if (ACharacter* Char = Cast<ACharacter>(Pawn))
+	{
+		if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
 		{
-			if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
-			{
-				Move->SetMovementMode(static_cast<EMovementMode>(OriginalMovementMode));
-			}
+			Move->StopMovementImmediately();
+			Move->SetMovementMode(MOVE_None);
 		}
 	}
+	RestoreElapsed = 0.0f;
+	RestoreNextNudge = 0.0f;
+	Phase = EPhase::Restore;
+}
+
+void FVoxelStreamingBenchmark::TickRestoreHold(float DeltaTime)
+{
+	APawn* Pawn = FlyPawn.Get();
+	if (!Pawn || !ChunkManager)
+	{
+		Phase = EPhase::Done;
+		return;
+	}
+	RestoreElapsed += DeltaTime;
+
+	// The chunk under the pawn's feet: ask for its collision every half second (a request made while the
+	// chunk is still meshing is dropped), and release once it is cooked and a trace finds the ground.
+	const float HalfHeight = Pawn->GetSimpleCollisionHalfHeight();
+	const FVector Feet = Pawn->GetActorLocation() - FVector(0.0, 0.0, HalfHeight);
+	const FIntVector FeetChunk = ChunkManager->WorldToChunkCoord(Feet - FVector(0.0, 0.0, 1.0));
+	UVoxelCollisionManager* Collision = ChunkManager->GetCollisionManager();
+	if (Collision && RestoreElapsed >= RestoreNextNudge)
+	{
+		Collision->RequestCollision(FeetChunk, /*Priority*/ 1000.0f);
+		RestoreNextNudge = RestoreElapsed + 0.5f;
+	}
+
+	bool bGrounded = false;
+	if (Collision && Collision->HasCollision(FeetChunk))
+	{
+		const UWorld* World = Pawn->GetWorld();
+		FHitResult Hit;
+		FCollisionQueryParams Params(FName(TEXT("VoxelBenchRestore")), /*bTraceComplex*/ true, Pawn);
+		bGrounded = World && World->LineTraceSingleByChannel(Hit, Pawn->GetActorLocation(),
+			Feet - FVector(0.0, 0.0, 300.0), ECC_WorldStatic, Params);
+	}
+
+	if (bGrounded || RestoreElapsed >= Config.RestoreTimeoutSec)
+	{
+		ReleasePawn(bGrounded);
+		Phase = EPhase::Done;
+	}
+}
+
+void FVoxelStreamingBenchmark::ReleasePawn(bool bGrounded)
+{
+	APawn* Pawn = FlyPawn.Get();
 	FlyPawn = nullptr;
+	if (!IsValid(Pawn))
+	{
+		return;
+	}
+	if (ACharacter* Char = Cast<ACharacter>(Pawn))
+	{
+		if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
+		{
+			Move->StopMovementImmediately();
+			Move->SetMovementMode(static_cast<EMovementMode>(OriginalMovementMode));
+		}
+	}
+	Pawn->SetCanBeDamaged(bOriginalCanBeDamaged);
+
+	if (Phase != EPhase::Restore)
+	{
+		UE_LOG(LogVoxelBench, Warning, TEXT("Benchmark '%s': stopped before it finished; pawn released where it is"), *Config.Tag);
+	}
+	else if (bGrounded)
+	{
+		UE_LOG(LogVoxelBench, Log, TEXT("Benchmark '%s': pawn restored at its start (ground ready after %.1fs)"),
+			*Config.Tag, RestoreElapsed);
+	}
+	else
+	{
+		UE_LOG(LogVoxelBench, Warning, TEXT("Benchmark '%s': pawn released at its start after %.1fs without collision under it"),
+			*Config.Tag, RestoreElapsed);
+	}
+}
+
+FVoxelStreamingBenchmark::~FVoxelStreamingBenchmark()
+{
+	// A run replaced mid-hold, or the world going away: never leave the pawn frozen or invulnerable.
+	if (FlyPawn.IsValid())
+	{
+		ReleasePawn(/*bGrounded*/ false);
+	}
 }
 
 bool FVoxelStreamingBenchmark::QueuesDrained() const
@@ -312,6 +408,13 @@ void FVoxelStreamingBenchmark::Tick(float DeltaTime)
 {
 	if (Phase == EPhase::Done || !ChunkManager || DeltaTime <= 0.0f) { return; }
 
+	// After the report: no more samples and no bench view, only the pawn's way back to the ground.
+	if (Phase == EPhase::Restore)
+	{
+		TickRestoreHold(DeltaTime);
+		return;
+	}
+
 	SimTime += DeltaTime;
 	PhaseElapsed += DeltaTime;
 
@@ -375,7 +478,6 @@ void FVoxelStreamingBenchmark::Tick(float DeltaTime)
 void FVoxelStreamingBenchmark::Finish(bool bReachedEquilibrium)
 {
 	CatchUpDurationSec = bReachedEquilibrium ? (SimTime - CatchUpStartSimTime) : -1.0;
-	Phase = EPhase::Done;
 	if (ChunkManager)
 	{
 		// Audit while the benchmark view is still the streaming origin, so "beyond the unload
@@ -384,8 +486,8 @@ void FVoxelStreamingBenchmark::Finish(bool bReachedEquilibrium)
 		SampleMemory();
 		ChunkManager->SetBenchmarkView(false, FVector::ZeroVector);
 	}
-	RestoreFlyPawn();
 	WriteReport();
+	BeginRestoreHold();
 }
 
 // ---- percentile over an arbitrary float projection of the traverse-phase samples ----

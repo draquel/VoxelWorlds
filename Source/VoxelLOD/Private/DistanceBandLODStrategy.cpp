@@ -221,6 +221,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	}
 
 	bIsInitialized = true;
+	bBalancedLODCacheDirty = true; // bands, view distance or bounds may have changed
 
 	// Calculate expected chunk radius for reference (ChunkWorldSize already defined above)
 	const int32 ExpectedChunkRadius = FMath::CeilToInt(MaxViewDistance / ChunkWorldSize) + 1;
@@ -250,10 +251,23 @@ void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float Del
 	CachedWorldOrigin = Context.WorldOrigin;
 	CachedViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 
-	// Recompute the balanced LOD assignment for this frame. Must run before any
-	// GetLODForChunk / GetVisibleChunks query (the interface guarantees Update is
-	// called first each frame), so all consumers read a consistent, balanced map.
-	RebuildBalancedLODCache(Context);
+	// Recompute the balanced LOD assignment when the viewer has moved. Must run before any
+	// GetLODForChunk / GetVisibleChunks query (the interface guarantees Update is called
+	// first each frame), so all consumers read a consistent, balanced map.
+	if (ShouldRebuildBalancedLODCache(Context))
+	{
+		RebuildBalancedLODCache(Context);
+	}
+}
+
+bool FDistanceBandLODStrategy::ShouldRebuildBalancedLODCache(const FLODQueryContext& Context) const
+{
+	return bBalancedLODCacheDirty
+		|| CachedViewerChunk != LastRebuildViewerChunk
+		|| FVector::DistSquared(Context.ViewerPosition, LastRebuildViewerPosition) >= FMath::Square(BalancedLODCacheMoveThreshold)
+		|| !Context.WorldOrigin.Equals(LastRebuildWorldOrigin)
+		|| CVarLODBalance.GetValueOnGameThread() != LastRebuildBalanceCVar
+		|| CVarLODBalanceDiagonal.GetValueOnGameThread() != LastRebuildDiagonalCVar;
 }
 
 int32 FDistanceBandLODStrategy::GetRawLODForDistance(float Distance) const
@@ -604,6 +618,7 @@ void FDistanceBandLODStrategy::DrawDebugVisualization(
 void FDistanceBandLODStrategy::SetLODBands(const TArray<FLODBand>& InBands)
 {
 	LODBands = InBands;
+	bBalancedLODCacheDirty = true;
 
 	// Sort by distance
 	LODBands.Sort([](const FLODBand& A, const FLODBand& B)
@@ -729,6 +744,15 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 {
 	BalancedLODCache.Reset();
 
+	// Record what this map is computed for (ShouldRebuildBalancedLODCache).
+	bBalancedLODCacheDirty = false;
+	++BalancedLODCacheRebuildCount;
+	LastRebuildViewerPosition = Context.ViewerPosition;
+	LastRebuildViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
+	LastRebuildWorldOrigin = Context.WorldOrigin;
+	LastRebuildBalanceCVar = CVarLODBalance.GetValueOnGameThread();
+	LastRebuildDiagonalCVar = CVarLODBalanceDiagonal.GetValueOnGameThread();
+
 	// LOD disabled or no bands: nothing to balance; consumers fall back to raw (0).
 	if (!bEnableLOD || LODBands.Num() == 0)
 	{
@@ -736,7 +760,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		return;
 	}
 
-	const bool bBalance = CVarLODBalance.GetValueOnGameThread() != 0;
+	const bool bBalance = LastRebuildBalanceCVar != 0;
 
 	// Enumerate the same candidate volume GetVisibleChunks considers (radius +
 	// vertical range, within view distance), without per-world-mode culling. The
@@ -820,7 +844,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 			return Offs;
 		}();
 
-		const bool bDiagonal = CVarLODBalanceDiagonal.GetValueOnGameThread() != 0;
+		const bool bDiagonal = LastRebuildDiagonalCVar != 0;
 		const FIntVector* Offsets = bDiagonal ? AllOffsets.GetData() : FaceOffsets;
 		const int32 NumOffsets = bDiagonal ? AllOffsets.Num() : 6;
 
@@ -850,7 +874,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		}
 	}
 
-	// Commit for next frame's hysteresis.
+	// Commit for the next rebuild's hysteresis.
 	CommittedLODCache = BalancedLODCache;
 }
 

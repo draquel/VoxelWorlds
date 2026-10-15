@@ -22,10 +22,13 @@ edge streams at LOD0), longer than the initially loaded radius, followed by a
 **catch-up** phase that waits for the queues to drain to equilibrium after the
 viewer stops. The path is a straight line by default; it can also be a waypoint
 route or an orbit, at a fixed altitude or following the terrain. The benchmark teleports the player pawn along the path each tick
-(with flying movement) so it never falls through un-meshed terrain.
+(with flying movement) so it never falls through un-meshed terrain, and turns its damage off for the run
+(`AActor::SetCanBeDamaged`), so a route under water cannot drown it. After the report is written it puts the pawn
+back at its start and holds it there, without gravity, until the chunk under its feet has collision and a trace
+finds the ground (30 s at most); then it restores the movement mode and the damage flag.
 
 **Code:** `Source/VoxelStreaming/{Public,Private}/VoxelStreamingBenchmark.{h,cpp}`
-(`FVoxelStreamingBenchmark`: phases Warmup -> Traverse -> CatchUp, per-frame
+(`FVoxelStreamingBenchmark`: phases Warmup -> Traverse -> CatchUp -> Restore, per-frame
 sampler, CSV+JSON report). Chunk-manager hooks live in `VoxelChunkManager`
 (`SetBenchmarkView` deterministic streaming origin, thrash counters, unload
 lag/distance instrumentation), ticked from `TickComponent`.
@@ -91,7 +94,7 @@ the UE 5.8 install on D:.
 | `farCompressMsP50/95/99` | The far-compression sweep's share of `totalMs` (traverse phase) |
 | `farCompressEncodes` / `Installed` / `Stale` | Fresh compression encodes this session, async results installed (raw array dropped or form cached), and async results discarded because the chunk's array changed or the chunk left |
 | `catchUpSec` | Time to drain to equilibrium after the viewer stops (the key UX metric) |
-| `thrashRemeshCount` + `thrashLOD`/`thrashNeighbor`/`thrashDirty` | Re-mesh requests, attributed by source |
+| `thrashRemeshCount` + `thrashLOD`/`thrashNeighbor`/`thrashDirty`/`thrashOther` | Mesh jobs launched for chunks that already had a mesh, attributed to the reason the chunk was queued. Counted at launch since 2026-10-14 (WORLD_MODES_REVIEW_PLAN.md G5): before, it counted meshing-queue insertions, so the legacy whole-chunk path's per-frame re-queue of a chunk waiting for its neighbours (cubic) inflated `thrashOther` far past the meshes actually run |
 | `unloadLagMean/MaxMs` | Enqueue -> actual-unload dwell (drain latency) |
 | `unloadDistMean/MaxUU` | Viewer distance when a chunk is finally removed (lingering) |
 | `effMax*` | Resulting scheduler caps (after overrides/adaptive throttle) |

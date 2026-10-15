@@ -307,14 +307,10 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& G
 		Info.Bounds = GPUData.LocalBounds;
 		Info.LODLevel = GPUData.LODLevel;
 		Info.bIsVisible = GPUData.bIsVisible;
+		SetChunkStats(Info, GPUData.VertexCount, GPUData.IndexCount / 3, GPUData.GetGPUMemoryUsage());
 
 		bTotalBoundsDirty = true;
 	}
-
-	// Update statistics
-	CachedVertexCount += GPUData.VertexCount;
-	CachedTriangleCount += GPUData.IndexCount / 3;
-	CachedGPUMemory += GPUData.GetGPUMemoryUsage();
 
 	// Mesh replacement -> crossfade, first mesh -> appearance fade (decided here on the game thread;
 	// the flag travels with the swap so game and render side can never disagree about it). The
@@ -373,14 +369,11 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 		Info.Bounds = LocalBounds;
 		Info.LODLevel = LODLevel;
 		Info.bIsVisible = true;
+		SetChunkStats(Info, VertexCount, IndexCount / 3,
+			static_cast<int64>(VertexCount) * sizeof(FVoxelVertex) + static_cast<int64>(IndexCount) * sizeof(uint32));
 
 		bTotalBoundsDirty = true;
 	}
-
-	// Update statistics
-	CachedVertexCount += VertexCount;
-	CachedTriangleCount += IndexCount / 3;
-	CachedGPUMemory += (VertexCount * sizeof(FVoxelVertex)) + (IndexCount * sizeof(uint32));
 
 	// Calculate chunk world position (includes WorldOrigin offset)
 	FVector ChunkWorldPos = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
@@ -415,12 +408,14 @@ void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
 {
 	check(IsInGameThread());
 
-	// Update game thread tracking
+	// Update game thread tracking (and take the chunk's mesh out of the statistics)
 	{
 		FScopeLock Lock(&ChunkInfoLock);
 
-		if (ChunkInfoMap.Remove(ChunkCoord) > 0)
+		if (FChunkInfo* Info = ChunkInfoMap.Find(ChunkCoord))
 		{
+			SetChunkStats(*Info, 0, 0, 0);
+			ChunkInfoMap.Remove(ChunkCoord);
 			bTotalBoundsDirty = true;
 		}
 	}
@@ -1729,6 +1724,18 @@ bool UVoxelWorldComponent::GetChunkBounds(const FIntVector& ChunkCoord, FBox& Ou
 }
 
 // ==================== Statistics ====================
+
+void UVoxelWorldComponent::SetChunkStats(FChunkInfo& Info, int64 VertexCount, int64 TriangleCount, int64 GPUMemory)
+{
+	// Replace, not add: a re-meshed chunk used to count its old mesh too, so the totals only ever grew
+	// (54.7 M "vertices" where the renderer held 7.7 M; WORLD_MODES_REVIEW_PLAN.md G1).
+	CachedVertexCount += VertexCount - Info.VertexCount;
+	CachedTriangleCount += TriangleCount - Info.TriangleCount;
+	CachedGPUMemory += GPUMemory - Info.GPUMemory;
+	Info.VertexCount = VertexCount;
+	Info.TriangleCount = TriangleCount;
+	Info.GPUMemory = GPUMemory;
+}
 
 int64 UVoxelWorldComponent::GetGPUMemoryUsage() const
 {
