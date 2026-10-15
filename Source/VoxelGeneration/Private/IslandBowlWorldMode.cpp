@@ -23,27 +23,10 @@ float FIslandBowlWorldMode::GetDensityAt(
 	int32 LODLevel,
 	float NoiseValue) const
 {
-	// Check if completely outside island bounds
-	if (!IsWithinIslandBounds(WorldPos.X, WorldPos.Y, IslandParams))
-	{
-		// Return a large negative value (definitely air)
-		return -1000.0f;
-	}
-
-	// Calculate falloff factor (handles both circular and rectangle)
-	const float FalloffFactor = CalculateFalloffFactorForPoint(
-		WorldPos.X, WorldPos.Y,
-		IslandParams);
-
-	// Get base terrain height from noise (reusing InfinitePlane logic)
-	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
-		NoiseValue, TerrainParams);
-
-	// Apply falloff to terrain height
-	const float FinalTerrainHeight = ApplyFalloffToHeight(
-		BaseTerrainHeight,
-		FalloffFactor,
-		IslandParams.EdgeHeight);
+	// Base terrain height from noise (reusing InfinitePlane logic), then the island falloff, or the floor
+	// beyond the edge. This used to call everything beyond the edge air, where generation writes the floor.
+	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, TerrainParams);
+	const float FinalTerrainHeight = ComposeTerrainHeight(WorldPos.X, WorldPos.Y, BaseTerrainHeight, IslandParams);
 
 	// Calculate signed distance (positive = inside/solid)
 	return FInfinitePlaneWorldMode::CalculateSignedDistance(WorldPos.Z, FinalTerrainHeight);
@@ -54,14 +37,11 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 	float Y,
 	const FVoxelNoiseParams& NoiseParams) const
 {
-	// If outside island bounds, return edge height (or very low for air)
+	// Beyond the island's edge: the flat floor generation writes there (no noise needed).
 	if (!IsWithinIslandBounds(X, Y, IslandParams))
 	{
-		return IslandParams.EdgeHeight - 1000.0f; // Below any reasonable terrain
+		return IslandParams.EdgeHeight - OutsideFloorDepth;
 	}
-
-	// Calculate falloff factor (handles both circular and rectangle)
-	const float FalloffFactor = CalculateFalloffFactorForPoint(X, Y, IslandParams);
 
 	// Sample base terrain noise (reusing InfinitePlane method)
 	const float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(X, Y, NoiseParams);
@@ -76,7 +56,7 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, EffectiveParams);
 
 	// Apply falloff and return
-	return ApplyFalloffToHeight(BaseTerrainHeight, FalloffFactor, IslandParams.EdgeHeight);
+	return ComposeTerrainHeight(X, Y, BaseTerrainHeight, IslandParams);
 }
 
 void FIslandBowlWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) const
@@ -208,33 +188,38 @@ float FIslandBowlWorldMode::CalculateFalloffFactor(
 
 	// In the falloff zone - calculate based on falloff type
 	const float T = (Distance - IslandRadius) / FalloffWidth; // Normalized distance in falloff zone [0, 1]
+	return ApplyFalloffCurve(T, FalloffType);
+}
+
+float FIslandBowlWorldMode::ApplyFalloffCurve(float T, EIslandFalloffType FalloffType)
+{
+	T = FMath::Clamp(T, 0.0f, 1.0f);
+	const float InvT = 1.0f - T;
 
 	switch (FalloffType)
 	{
 	case EIslandFalloffType::Linear:
 		// Simple linear falloff
-		return 1.0f - T;
+		return InvT;
 
 	case EIslandFalloffType::Smooth:
 		// Smooth hermite (smoothstep) falloff
-		{
-			const float InvT = 1.0f - T;
-			return InvT * InvT * (3.0f - 2.0f * InvT);
-		}
+		return InvT * InvT * (3.0f - 2.0f * InvT);
 
 	case EIslandFalloffType::Squared:
 		// Squared falloff (faster drop near edge)
-		{
-			const float InvT = 1.0f - T;
-			return InvT * InvT;
-		}
+		return InvT * InvT;
 
 	case EIslandFalloffType::Exponential:
-		// Exponential falloff (gradual then sharp)
-		return FMath::Exp(-T * 3.0f); // e^(-3t) gives nice falloff curve
+	{
+		// e^(-3t), rescaled to run from 1 to exactly 0. Unscaled it ended at e^-3 (about 0.05), so the
+		// terrain stopped 5% of its relief short of EdgeHeight and stepped down at the edge (KI4).
+		const float End = FMath::Exp(-3.0f);
+		return (FMath::Exp(-3.0f * T) - End) / (1.0f - End);
+	}
 
 	default:
-		return 1.0f - T;
+		return InvT;
 	}
 }
 
@@ -277,29 +262,7 @@ float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
 		}
 
 		// Apply the falloff curve
-		switch (IslandParams.FalloffType)
-		{
-		case EIslandFalloffType::Linear:
-			return 1.0f - T;
-
-		case EIslandFalloffType::Smooth:
-			{
-				const float InvT = 1.0f - T;
-				return InvT * InvT * (3.0f - 2.0f * InvT);
-			}
-
-		case EIslandFalloffType::Squared:
-			{
-				const float InvT = 1.0f - T;
-				return InvT * InvT;
-			}
-
-		case EIslandFalloffType::Exponential:
-			return FMath::Exp(-T * 3.0f);
-
-		default:
-			return 1.0f - T;
-		}
+		return ApplyFalloffCurve(T, IslandParams.FalloffType);
 	}
 	else
 	{
@@ -314,6 +277,18 @@ float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
 			IslandParams.FalloffWidth,
 			IslandParams.FalloffType);
 	}
+}
+
+float FIslandBowlWorldMode::ComposeTerrainHeight(
+	float X, float Y,
+	float BaseHeight,
+	const FIslandBowlParams& IslandParams)
+{
+	if (!IsWithinIslandBounds(X, Y, IslandParams))
+	{
+		return IslandParams.EdgeHeight - OutsideFloorDepth;
+	}
+	return ApplyFalloffToHeight(BaseHeight, CalculateFalloffFactorForPoint(X, Y, IslandParams), IslandParams.EdgeHeight);
 }
 
 float FIslandBowlWorldMode::ApplyFalloffToHeight(

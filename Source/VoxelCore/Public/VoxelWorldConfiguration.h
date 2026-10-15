@@ -88,13 +88,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
 	float IslandCenterY = 0.0f;
 
-	/** Minimum terrain height at island edges (can be negative for bowl effect) */
+	/**
+	 * Terrain height the falloff fades to at the island's edge (R + falloff width). Beyond the edge, generation
+	 * writes a flat floor 1,000 uu below it (FIslandBowlWorldMode::OutsideFloorDepth).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
 	float IslandEdgeHeight = -1000.0f;
-
-	/** Create a bowl shape (lowered edges) instead of plateau (raised center) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
-	bool bIslandBowlShape = false;
 
 	// ==================== Spherical Planet Mode Settings ====================
 
@@ -555,8 +554,18 @@ public:
 	/** Get the LOD level for a given distance */
 	int32 GetLODLevelForDistance(float Distance) const;
 
-	/** Validate configuration and log any issues */
+	/** Validate configuration and log any issues (including GetSettingsWarnings) */
 	bool ValidateConfiguration() const;
+
+	/**
+	 * Settings that load and run but produce wrong results, one readable line each: a tree template using a
+	 * material id the material registry does not define (KC10). Logged as warnings when the asset loads
+	 * (PostLoad), when a voxel world initializes with it, and from ValidateConfiguration.
+	 *
+	 * @return The warnings; empty when nothing is wrong.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Configuration")
+	TArray<FString> GetSettingsWarnings() const;
 
 	/**
 	 * Get the start distance for material-based LOD morphing.
@@ -596,6 +605,9 @@ public:
 	 * @return Object path such as /Game/PluginTesting/Review/Review_Cubic, or empty.
 	 */
 	static FString GetOverridePath();
+
+	/** Logs GetSettingsWarnings, so a bad asset is reported when it loads. */
+	virtual void PostLoad() override;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;

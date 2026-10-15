@@ -216,7 +216,57 @@ bool UVoxelWorldConfiguration::ValidateConfiguration() const
 		bValid = false;
 	}
 
+	// Settings that run but give wrong results: warnings, not failures.
+	for (const FString& Warning : GetSettingsWarnings())
+	{
+		UE_LOG(LogVoxelCore, Warning, TEXT("VoxelWorldConfiguration %s: %s"), *GetName(), *Warning);
+	}
+
 	return bValid;
+}
+
+TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
+{
+	TArray<FString> Warnings;
+
+	// Tree templates: an id the registry does not define renders with whatever material slot it lands on
+	// and is not treated as leaves (not masked, not non-occluding). DemoSmoothWorldConfig shipped leaves
+	// 22 and 23 and a trunk of 21 (Leaves), which showed as clay and brick canopies when meshed cubic (KC10).
+	const int32 MaterialCount = FVoxelMaterialRegistry::GetMaterialCount();
+	auto CheckTreeMaterial = [&Warnings, MaterialCount](const FVoxelTreeTemplate& Template, const TCHAR* Field, uint8 MaterialID)
+	{
+		if (!FVoxelMaterialRegistry::GetMaterial(MaterialID))
+		{
+			Warnings.Add(FString::Printf(
+				TEXT("tree template %d (%s): %s %d is not a registered voxel material (ids 0-%d; Wood is %d, Leaves %d)"),
+				Template.TemplateID, *Template.Name, Field, MaterialID, MaterialCount - 1,
+				EVoxelMaterial::Wood, EVoxelMaterial::Leaves));
+		}
+	};
+	for (const FVoxelTreeTemplate& Template : TreeTemplates)
+	{
+		CheckTreeMaterial(Template, TEXT("TrunkMaterialID"), Template.TrunkMaterialID);
+		CheckTreeMaterial(Template, TEXT("LeafMaterialID"), Template.LeafMaterialID);
+		for (const uint8 Allowed : Template.AllowedMaterials)
+		{
+			CheckTreeMaterial(Template, TEXT("AllowedMaterials entry"), Allowed);
+		}
+	}
+
+	return Warnings;
+}
+
+void UVoxelWorldConfiguration::PostLoad()
+{
+	Super::PostLoad();
+
+	if (!HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
+	{
+		for (const FString& Warning : GetSettingsWarnings())
+		{
+			UE_LOG(LogVoxelCore, Warning, TEXT("VoxelWorldConfiguration %s: %s"), *GetPathName(), *Warning);
+		}
+	}
 }
 
 float UVoxelWorldConfiguration::GetMaterialLODStartDistance() const

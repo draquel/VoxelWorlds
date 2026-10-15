@@ -885,6 +885,13 @@ void UVoxelChunkManager::Initialize(
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
 
+	// Settings that run but give wrong results (tree template material ids, ...): say so at world start too,
+	// since an editor session loads the asset long before Play.
+	for (const FString& Warning : Configuration->GetSettingsWarnings())
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("World configuration %s: %s"), *Configuration->GetName(), *Warning);
+	}
+
 	// Benchmark scheduler overrides (command line) — pin specific concurrency limits for A/B runs.
 	// Absent keys leave the members at -1 (use the configuration value).
 	FParse::Value(FCommandLine::Get(), TEXT("VoxelMaxAsyncGen="), SchedOverrideAsyncGen);
@@ -996,7 +1003,6 @@ void UVoxelChunkManager::Initialize(
 		IslandParams.CenterX = Configuration->IslandCenterX;
 		IslandParams.CenterY = Configuration->IslandCenterY;
 		IslandParams.EdgeHeight = Configuration->IslandEdgeHeight;
-		IslandParams.bBowlShape = Configuration->bIslandBowlShape;
 		WorldMode = MakeUnique<FIslandBowlWorldMode>(TerrainParams, IslandParams);
 		break;
 	}
@@ -2562,7 +2568,6 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 			GenRequest.IslandParams.CenterX = Configuration->IslandCenterX;
 			GenRequest.IslandParams.CenterY = Configuration->IslandCenterY;
 			GenRequest.IslandParams.EdgeHeight = Configuration->IslandEdgeHeight;
-			GenRequest.IslandParams.bBowlShape = Configuration->bIslandBowlShape;
 		}
 
 		// Spherical planet mode parameters (used when WorldMode == SphericalPlanet)

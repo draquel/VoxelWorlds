@@ -160,7 +160,6 @@ bool FVoxelConditioningIslandBowlTest::RunTest(const FString& Parameters)
 	Request.IslandParams.CenterX = 0.0f;
 	Request.IslandParams.CenterY = 0.0f;
 	Request.IslandParams.EdgeHeight = 0.0f;
-	Request.IslandParams.bBowlShape = false;
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Perlin;
 	Request.NoiseParams.Seed = 909;
 	Request.NoiseParams.Frequency = 0.013f;

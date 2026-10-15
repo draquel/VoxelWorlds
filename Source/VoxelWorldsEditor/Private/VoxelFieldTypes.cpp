@@ -60,7 +60,6 @@ FVoxelFieldSampleContext FVoxelFieldSampleContext::FromConfiguration(const UVoxe
 		IslandParams.CenterX = Config->IslandCenterX;
 		IslandParams.CenterY = Config->IslandCenterY;
 		IslandParams.EdgeHeight = Config->IslandEdgeHeight;
-		IslandParams.bBowlShape = Config->bIslandBowlShape;
 		Ctx.WorldMode = MakeShareable(new FIslandBowlWorldMode(TerrainParams, IslandParams));
 		break;
 	}

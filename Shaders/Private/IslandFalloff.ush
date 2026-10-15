@@ -24,9 +24,10 @@ float ApplyIslandFalloffCurve(float t)
         float invT = 1.0 - t;
         return invT * invT;
     }
-    else // Exponential
+    else // Exponential: e^(-3t) rescaled to reach exactly 0 at the edge (KI4)
     {
-        return exp(-t * 3.0);
+        const float expEnd = exp(-3.0);
+        return (exp(-t * 3.0) - expEnd) / (1.0 - expEnd);
     }
 }
 
@@ -71,13 +72,14 @@ bool IsWithinIslandBounds(float X, float Y)
     }
 }
 
-// Compose the island edge falloff onto a base terrain height. Returns EdgeHeight-1000 (air) outside the
-// island bounds — matches FIslandBowlWorldMode::GetTerrainHeightAt.
+// Compose the island edge falloff onto a base terrain height. Returns the flat floor at EdgeHeight - 1000
+// (FIslandBowlWorldMode::OutsideFloorDepth) outside the island bounds — matches
+// FIslandBowlWorldMode::ComposeTerrainHeight.
 float ApplyIslandFalloffToHeight(float X, float Y, float BaseHeight)
 {
     if (!IsWithinIslandBounds(X, Y))
     {
-        return IslandEdgeHeight - 1000.0; // below any terrain -> air
+        return IslandEdgeHeight - 1000.0; // the floor beyond the edge
     }
     float falloff = IslandFalloffFactor(X, Y);
     return lerp(IslandEdgeHeight, BaseHeight, falloff); // ApplyFalloffToHeight
