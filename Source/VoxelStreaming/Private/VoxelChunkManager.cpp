@@ -1034,7 +1034,14 @@ void UVoxelChunkManager::Initialize(
 
 	// Select the voxel data generator. bUseGPUGeneration was historically a dead flag — this is where it
 	// becomes real. The runtime cvar voxel.GPUGeneration.Enable can force CPU without an editor restart.
-	const bool bUseGPUGen = Configuration->bUseGPUGeneration && !bForceCPU
+	// Spherical planets always generate on the CPU (ShouldUseGPUGeneration): the GPU shader has no planet
+	// branch and would generate generic 3D noise blobs instead of a planet (SP-B3, until SP-B4).
+	if (Configuration->WorldMode == EWorldMode::SphericalPlanet && Configuration->bUseGPUGeneration && !bForceCPU)
+	{
+		UE_LOG(LogVoxelStreaming, Warning,
+			TEXT("Spherical planet: generating on the CPU, bUseGPUGeneration ignored. The GPU generator has no planet support yet (SPHERICAL_PLANET_REQUIREMENTS.md SP-B3/SP-B4)."));
+	}
+	const bool bUseGPUGen = Configuration->ShouldUseGPUGeneration() && !bForceCPU
 		&& CVarGPUGenerationEnable.GetValueOnGameThread() != 0;
 	if (bUseGPUGen)
 	{

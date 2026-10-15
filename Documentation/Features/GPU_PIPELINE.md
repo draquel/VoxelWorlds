@@ -46,10 +46,9 @@ void GenerateVoxelData(uint3 DispatchThreadID : SV_DispatchThreadID) {
     // Sample noise for base terrain
     float Density = SampleNoise(WorldPos, NoiseParams);
     
-    // Apply world mode SDF
-    if (WorldMode == SPHERICAL_PLANET) {
-        Density = ApplySphericalSDF(WorldPos, PlanetCenter, PlanetRadius, Density);
-    }
+    // Apply world mode SDF (InfinitePlane / IslandBowl heightmap; there is no SphericalPlanet branch,
+    // planets generate on the CPU: WORLD_MODES.md "GPU Implementation", SP-B3)
+    Density = ApplyHeightmapWorldMode(WorldPos, Density);
     
     // Determine biome
     float Temperature = SampleNoise(WorldPos, TempNoiseParams);

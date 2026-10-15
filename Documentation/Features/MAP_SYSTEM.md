@@ -182,7 +182,9 @@ The subsystem is world-mode-agnostic by design:
 - Uses only `IVoxelWorldMode*` interface — never casts to a specific mode
 - `GetTerrainHeightAt()` is pure virtual, implemented by all modes (InfinitePlane, IslandBowl, SphericalPlanet)
 - Biome sampling uses the same noise functions regardless of world mode
-- For SphericalPlanet, tiles act as a flat map projection; the data layer works unchanged
+- **Not** SphericalPlanet: the tiles are a top-down XY projection, so a planet's two hemispheres land on the same
+  tiles, and `GetTerrainHeightAt` returns a radius there, not a height. A planet map needs tiles keyed by a
+  cube-sphere surface parameterisation (SPHERICAL_PLANET_REQUIREMENTS.md SP-A2, SP-G3)
 - For IslandBowl, areas beyond the island edge render based on their material (water/void)
 
 ## File Listing

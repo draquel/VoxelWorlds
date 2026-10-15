@@ -177,7 +177,12 @@ float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
 ## Mode 3: Spherical Planet
 
 ### Overview
-Radial terrain on a spherical surface, allowing seamless exploration around an entire planet. Uses cubic chunks with radial density calculation.
+Radial terrain on a spherical surface, on the same Cartesian chunk grid as the other modes, centred on the
+planet. **Status (2026-10-14): a prototype.** It generates on the CPU only, the terrain is mirrored across the
+equator, and the game systems assume +Z is up. What exists, what is wrong and what a playable planet needs are
+in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md); the work is scheduled in
+[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §14.4. A test config and map live in the parent
+project at `/Game/PluginTesting/Planet`.
 
 ### Configuration (UVoxelWorldConfiguration)
 ```cpp
@@ -186,9 +191,10 @@ EWorldMode WorldMode = EWorldMode::SphericalPlanet;
 float WorldRadius = 100000.0f;           // Planet base radius
 
 // Planet Parameters
-float PlanetMaxTerrainHeight = 5000.0f;  // Mountains above radius
-float PlanetMaxTerrainDepth = 2000.0f;   // Valleys below radius
-float PlanetHeightScale = 5000.0f;       // Terrain amplitude
+float PlanetMaxTerrainHeight = 5000.0f;  // Shell above the radius: must cover BaseHeight + PlanetHeightScale / 2
+float PlanetMaxTerrainDepth = 2000.0f;   // Shell below the radius: must cover PlanetHeightScale / 2 - BaseHeight
+float PlanetHeightScale = 5000.0f;       // Peak-to-trough terrain amplitude
+float BaseHeight = 0.0f;                 // Radial offset of the whole surface (shown for planets since SP-A5)
 
 // Spawn Configuration
 int32 PlanetSpawnLocation = 2;           // 0=+X, 1=+Y, 2=+Z (North Pole), 3=-Z
@@ -196,27 +202,28 @@ float PlanetSpawnAltitude = 500.0f;      // Height above surface
 ```
 
 ### Implementation (FSphericalPlanetWorldMode)
+
+What the code does today (CPU generation, `GenerateChunkSphericalPlanet`):
+
 ```cpp
-float FSphericalPlanetWorldMode::GetDensityAt(const FVector& WorldPos,
-                                               const FVoxelNoiseParams& NoiseParams) const
-{
-    // Vector from planet center to sample point
-    FVector ToPoint = WorldPos - WorldOrigin;
-    float DistFromCenter = ToPoint.Size();
+// FSphericalPlanetWorldMode::SampleSphericalNoise: the direction's X and Y only, scaled by a fixed 10,000.
+float Noise = FInfinitePlaneWorldMode::SampleTerrainNoise2D(Direction.X * 10000, Direction.Y * 10000, NoiseParams);
 
-    // Base sphere SDF (positive inside planet)
-    float SphereSDF = WorldRadius - DistFromCenter;
-
-    // Sample noise using direction vector (for seamless spherical wrapping)
-    FVector Direction = ToPoint.GetSafeNormal();
-    float NoiseValue = SampleSphericalFBM(Direction, NoiseParams);
-
-    // Apply terrain displacement
-    float TerrainOffset = NoiseValue * PlanetHeightScale;
-
-    return SphereSDF + TerrainOffset;
-}
+// FSphericalPlanetWorldMode::GetDensityAt: radial SDF, positive inside.
+float Dist = |WorldPos - PlanetCenter|;                 // PlanetCenter = WorldOrigin
+if (Dist > OuterRadius + 1000) return -1000;            // quick reject: air above the shell
+if (Dist < InnerRadius - 1000) return 1000;             // quick reject: core below the shell
+float TerrainRadius = WorldRadius + BaseHeight + Noise * PlanetHeightScale * 0.5;
+return TerrainRadius - Dist;
 ```
+
+Known defects, all listed with their fixes in the requirements doc (§1): `Direction.Z` is never sampled, so the
+northern and southern hemispheres are mirror images and features stretch north-south near the equator, and the
+fixed 10,000 ties feature size to the radius (SP-B1); height-material rules read the radius as a height, so the
+default rules turn every surface to snow (SP-B2); `GetTerrainHeightAt(X, Y)` returns a radius for the equatorial
+direction (X, Y, 0), not a Z (SP-A1, SP-A3). Terrain outside the shell `[WorldRadius - PlanetMaxTerrainDepth,
+WorldRadius + PlanetMaxTerrainHeight]` is not streamed and is cut off by the quick reject;
+`UVoxelWorldConfiguration::GetSettingsWarnings` reports a shell that does not cover the amplitude (SP-A5).
 
 ### Spawn Position
 ```cpp
@@ -248,68 +255,33 @@ Three types of culling are applied:
 - Any world requiring true spherical geometry
 
 ### Current Limitations
-- Designed for surface exploration (terrestrial gameplay)
-- Orbital-scale viewing would benefit from octree LOD (future enhancement)
-- Gravity/character controller integration not yet implemented
+- **CPU generation only.** The GPU generator has no planet branch, so `UVoxelWorldConfiguration::ShouldUseGPUGeneration()`
+  is false for planets and the chunk manager logs a warning when `bUseGPUGeneration` is on (SP-B3; SP-B4 adds the
+  GPU planet)
+- Mirrored, radius-scaled noise and all-snow materials (above); no tests beyond the config checks
+- Every surface consumer (scatter, PCG, map, navigation, POIs, NPCs, water, movement) assumes +Z is up
+  (requirements doc, Appendix A); gravity toward the centre is not implemented
+- Water: generation compares against `WaterRadius`, every other consumer still reads the Z-plane `WaterLevel`
+  (SP-E1); `GetSettingsWarnings` flags water on a planet
+- Designed for surface exploration; orbital viewing would need an octree or cube-sphere quadtree LOD (SD5)
 
 ---
 
 ## GPU Implementation
 
-All world modes share common GPU shader functions for consistency between CPU and GPU generation:
+`Shaders/Private/GenerateVoxelDensity.usf` mirrors the CPU generator for the two heightmap modes and is locked to
+it by the `VoxelWorlds.Generation.GPUvsCPU*` parity tests:
 
-```hlsl
-// WorldModeSDF.ush
-
-float ApplyWorldModeSDF(float3 WorldPos, float BaseDensity, WorldModeParams Params)
-{
-    if (Params.Mode == WORLD_MODE_INFINITE)
-    {
-        return BaseDensity;  // No modification needed
-    }
-    else if (Params.Mode == WORLD_MODE_SPHERICAL)
-    {
-        float3 ToCenter = WorldPos - Params.WorldOrigin;
-        float DistFromCenter = length(ToCenter);
-        float SphereSDF = Params.WorldRadius - DistFromCenter;
-
-        // Noise sampled via direction for seamless wrapping
-        float3 Dir = normalize(ToCenter);
-        float NoiseValue = SampleSphericalNoise(Dir, Params.NoiseParams);
-
-        return SphereSDF + NoiseValue * Params.HeightScale;
-    }
-    else if (Params.Mode == WORLD_MODE_ISLAND)
-    {
-        float2 ToCenter = WorldPos.xy - Params.IslandCenter.xy;
-        float Dist2D = length(ToCenter);
-
-        float FalloffFactor = 1.0;
-        if (Dist2D > Params.IslandRadius)
-        {
-            float T = saturate((Dist2D - Params.IslandRadius) / Params.FalloffWidth);
-            FalloffFactor = ApplyFalloffCurve(T, Params.FalloffType);
-        }
-
-        float EdgeDensity = Params.EdgeHeight - WorldPos.z;
-        return lerp(EdgeDensity, BaseDensity, FalloffFactor);
-    }
-
-    return BaseDensity;
-}
-
-float ApplyFalloffCurve(float T, int FalloffType)
-{
-    switch (FalloffType)
-    {
-        case 0: return 1.0 - T;                           // Linear
-        case 1: return 1.0 - T * T * (3.0 - 2.0 * T);     // Smooth (Hermite)
-        case 2: return 1.0 - T * T;                       // Squared
-        case 3: return exp(-T * 3.0);                     // Exponential
-    }
-    return 1.0 - T;
-}
-```
+- **InfinitePlane:** 2D terrain noise, continentalness, `NoiseToTerrainHeight` (`WorldModeSDF.ush`), then the
+  signed distance to that height.
+- **IslandBowl:** the same height, then `ApplyIslandFalloffToHeight` (`IslandFalloff.ush`, a port of
+  `FIslandBowlWorldMode::ComposeTerrainHeight`): the falloff toward `EdgeHeight` inside the island's extent, the
+  flat floor at `EdgeHeight - 1000` beyond it. The curves on `t` (0 at `IslandRadius`, 1 at the edge) are
+  Linear `1 - t`, Smooth `(1-t)^2 (3 - 2(1-t))`, Squared `(1-t)^2` and Exponential
+  `(e^-3t - e^-3) / (1 - e^-3)`; every curve reaches 0 at the edge.
+- **SphericalPlanet:** no branch. A planet request would fall through to the generic 3D-noise path and produce
+  blobs, which is why planets generate on the CPU (`ShouldUseGPUGeneration`, SP-B3). The GPU radial SDF is SP-B4,
+  spherical Phase 2.
 
 ---
 
@@ -433,12 +405,16 @@ list (implementation reserved):
    surface (by direction) rather than planar X/Y so bands wrap coherently around the planet.
 
 Recommended sequencing if Spherical is picked up: (1) → (2) → (3) unlock a correct, GPU-generated,
-streamable planet; (4) → (5) make it playable and natural. Until then, Spherical worlds should use CPU
-generation (`voxel.GPUGeneration.Enable 0`) and treat the analytic queries as approximate.
+streamable planet; (4) → (5) make it playable and natural. Until then spherical worlds generate on the CPU
+whatever `bUseGPUGeneration` says (`ShouldUseGPUGeneration`, since 2026-10-14), and the analytic queries are
+approximate. The full requirements list, superseding this summary, is
+[SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md).
 
 ---
 
-**Status**: All three world modes implemented and tested with mode-specific LOD culling.
+**Status**: InfinitePlane and IslandBowl are implemented and tested, with mode-specific LOD culling.
+SphericalPlanet is a CPU-only prototype with no tests beyond the configuration checks
+(`VoxelWorlds.Configuration.PlanetSettings`); see the gap analysis and the requirements doc.
 GPU generation parity: InfinitePlane + IslandBowl fully verified across the feature matrix — density,
 materials, biomes, metadata, caves, all four noise types, water/underwater, and ore variants at LOD 0/1/2
-(Phase A–D). SphericalPlanet reserved (see gap analysis).
+(Phase A–D).

@@ -22,9 +22,6 @@ struct VOXELGENERATION_API FSphericalPlanetParams
 	/** Center of the planet in world space */
 	FVector PlanetCenter = FVector::ZeroVector;
 
-	/** Scale for noise sampling on sphere surface (lower = larger features) */
-	float NoiseScale = 0.00005f;
-
 	FSphericalPlanetParams() = default;
 
 	FSphericalPlanetParams(float InRadius, const FVector& InCenter = FVector::ZeroVector)

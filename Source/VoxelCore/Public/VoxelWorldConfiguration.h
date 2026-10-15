@@ -99,21 +99,24 @@ public:
 
 	/**
 	 * Maximum terrain height above the planet's base radius.
-	 * Mountains and peaks can rise this high above WorldRadius.
+	 * Mountains and peaks can rise this high above WorldRadius. Must cover BaseHeight + PlanetHeightScale / 2,
+	 * the highest the terrain reaches: terrain above the shell is not streamed and is cut off
+	 * (GetSettingsWarnings checks it).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetMaxTerrainHeight = 5000.0f;
 
 	/**
 	 * Maximum terrain depth below the planet's base radius.
-	 * Valleys and caves can descend this deep below WorldRadius.
+	 * Valleys and caves can descend this deep below WorldRadius. Must cover PlanetHeightScale / 2 - BaseHeight,
+	 * the deepest the terrain reaches (GetSettingsWarnings checks it).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetMaxTerrainDepth = 2000.0f;
 
 	/**
-	 * Height scale for planetary terrain features.
-	 * Controls the magnitude of terrain displacement from the base radius.
+	 * Height scale for planetary terrain features: the surface sits at WorldRadius + BaseHeight + noise *
+	 * PlanetHeightScale / 2, with noise in [-1, 1]. Planets use this instead of HeightScale.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetHeightScale = 5000.0f;
@@ -146,6 +149,8 @@ public:
 	 * Water level height in world units.
 	 * Used for InfinitePlane and IslandBowl world modes.
 	 * Terrain surface below this height will use underwater materials.
+	 * On a planet, generation uses WaterRadius instead, but scatter, navigation, NPC spawning and swimming
+	 * still read this Z plane (SPHERICAL_PLANET_REQUIREMENTS.md SP-E1); GetSettingsWarnings says so.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel && WorldMode != EWorldMode::SphericalPlanet"))
 	float WaterLevel = 0.0f;
@@ -185,8 +190,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode != EWorldMode::SphericalPlanet"))
 	float HeightScale = 5000.0f;
 
-	/** Base height - additional offset added to terrain height (world units) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode != EWorldMode::SphericalPlanet"))
+	/**
+	 * Base height - additional offset added to terrain height (world units).
+	 * On a planet: a radial offset of the whole surface from WorldRadius (SeaLevel and HeightScale are not used there).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain")
 	float BaseHeight = 0.0f;
 
 	// ==================== Voxel Settings ====================
@@ -209,7 +217,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Generation")
 	FVoxelNoiseParams NoiseParams;
 
-	/** Use GPU compute shaders for terrain generation (true) or CPU fallback (false) */
+	/**
+	 * Use GPU compute shaders for terrain generation (true) or CPU fallback (false).
+	 * Ignored for spherical planets, which generate on the CPU until the GPU generator has a planet SDF
+	 * (ShouldUseGPUGeneration; SPHERICAL_PLANET_REQUIREMENTS.md SP-B3, SP-B4).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Generation")
 	bool bUseGPUGeneration = true;
 
@@ -545,6 +557,20 @@ public:
 		return bEnableLOD && MeshingMode != EMeshingMode::Cubic;
 	}
 
+	/**
+	 * Whether terrain generation can run on the GPU: bUseGPUGeneration, except that spherical planets always
+	 * generate on the CPU. The GPU generator has no planet branch yet and would fall through to generic 3D noise,
+	 * producing blobs instead of a planet (SPHERICAL_PLANET_REQUIREMENTS.md SP-B3; SP-B4 adds the GPU planet).
+	 * The chunk manager also honours -VoxelForceCPU and voxel.GPUGeneration.Enable on top of this.
+	 *
+	 * @return True when the configuration allows GPU generation.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Noise Generation")
+	bool ShouldUseGPUGeneration() const
+	{
+		return bUseGPUGeneration && WorldMode != EWorldMode::SphericalPlanet;
+	}
+
 	/** Get the world size of a single chunk at a specific LOD */
 	float GetChunkWorldSizeAtLOD(int32 LODLevel) const;
 
@@ -559,8 +585,10 @@ public:
 
 	/**
 	 * Settings that load and run but produce wrong results, one readable line each: a tree template using a
-	 * material id the material registry does not define (KC10). Logged as warnings when the asset loads
-	 * (PostLoad), when a voxel world initializes with it, and from ValidateConfiguration.
+	 * material id the material registry does not define (KC10); on a planet, a terrain shell that does not cover
+	 * the terrain's real amplitude, and water enabled while consumers still read the Z-plane WaterLevel
+	 * (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5). Logged as warnings when the asset loads (PostLoad), when a voxel
+	 * world initializes with it, and from ValidateConfiguration.
 	 *
 	 * @return The warnings; empty when nothing is wrong.
 	 */
