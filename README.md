@@ -1,15 +1,19 @@
 # VoxelWorlds — GPU-Driven Voxel Terrain System
 
 A high-performance voxel terrain engine for **Unreal Engine 5.8**, featuring three meshing
-algorithms (cubic, Marching Cubes, Dual Contouring) with CPU and GPU implementations, watertight
-LOD-seam handling, distance-based streaming, and a full procedural generation stack (biomes, caves,
+algorithms (cubic, Marching Cubes, Dual Contouring), watertight chunk and LOD seams through
+single-owner seam jobs, distance-based streaming, and a full procedural generation stack (biomes, caves,
 water, ore, scatter).
 
 ## Key Features
 
-- **Three meshing algorithms** — Cubic (Minecraft-style), **Marching Cubes** (smooth), and
-  **Dual Contouring** (smooth, sharp-feature-preserving via QEF). Each has a **CPU and a GPU compute**
-  implementation behind the `IVoxelMesher` interface.
+- **Three meshing algorithms** — Cubic (Minecraft-style, greedy), **Marching Cubes** (smooth), and
+  **Dual Contouring** (smooth, sharp-feature-preserving via QEF), behind the `IVoxelMesher` interface.
+  Marching Cubes and Dual Contouring also have GPU compute meshers; cubic meshes on the CPU (the GPU
+  cubic mesher was test-only and is deleted, world modes review WM-C4).
+- **Seam ownership** — every mode meshes chunk interiors only and gives each chunk boundary to one seam
+  job that reads both sides' voxels, so a chunk never waits for, or re-meshes on, a neighbour
+  (`Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md`; cubic since world modes review M5).
 - **Watertight LOD seams** — MC seams handled by **geomorph** (bending the fine surface toward the
   coarse contour at the boundary); DC LOD seams and 4-chunk corner seams sealed. The GPU DC path has
   reached **CPU watertightness parity** (verified by the `GT1–GT7` LOD-boundary test suite).
@@ -52,7 +56,7 @@ VoxelWorlds/
 ├── Source/
 │   ├── VoxelCore/         # Data structures, configs, material/biome registries, edit manager
 │   ├── VoxelGeneration/   # CPU/GPU noise, world modes, tree injection
-│   ├── VoxelMeshing/      # Cubic / Marching Cubes / Dual Contouring meshers (CPU+GPU); water mesher
+│   ├── VoxelMeshing/      # Cubic (CPU) / Marching Cubes / Dual Contouring (CPU+GPU) meshers; water mesher
 │   ├── VoxelLOD/          # Pluggable LOD strategy (distance band)
 │   ├── VoxelRendering/    # Scene proxy, FLocalVertexFactory renderer + PMC fallback, world component
 │   ├── VoxelStreaming/    # Chunk manager, collision manager, water propagation, benchmark, test actor
@@ -65,7 +69,7 @@ VoxelWorlds/
 
 ## Status
 
-Core engine is implemented and in active development. Meshing (cubic/MC/DC, CPU+GPU), LOD with
+Core engine is implemented and in active development. Meshing (cubic CPU, MC/DC CPU+GPU), LOD with
 watertight seams, streaming, generation (biomes/caves/water/ore/scatter), editing, materials, and the
 map subsystem are functional. See
 [Documentation/Research/IMPLEMENTATION_PHASES.md](Documentation/Research/IMPLEMENTATION_PHASES.md)
@@ -74,8 +78,8 @@ for the phase-by-phase roadmap.
 ## Testing
 
 Automation tests live in each module's `Tests/` folder: noise, biome, world-mode, cubic and MC
-meshing, and the Dual-Contouring / Marching-Cubes **LOD-boundary** suites — including the GPU
-`GT0–GT7` mirror that exercises the real-RHI meshing path. Run them via the editor's
+meshing, the Dual-Contouring / Marching-Cubes **seam** suites (closure and ring bit-match), the cubic
+seam-closure and streaming tests, and GPU/CPU parity tests that exercise the real-RHI path. Run them via the editor's
 **Session Frontend → Automation** tab (filter `VoxelWorlds`) or headless with
 `-ExecCmds="Automation RunTests VoxelWorlds; Quit"`. GPU/real-RHI boundary tests self-skip under
 `-nullrhi`. See [Documentation/Guides/TESTING_STRATEGY.md](Documentation/Guides/TESTING_STRATEGY.md).
@@ -95,8 +99,7 @@ meshing, and the Dual-Contouring / Marching-Cubes **LOD-boundary** suites — in
 - `FDistanceBandLODStrategy` — default LOD implementation
 - `FInfinitePlaneWorldMode` / `FIslandBowlWorldMode` / `FSphericalPlanetWorldMode` — world modes
 - `FVoxelCPUNoiseGenerator` / `FVoxelGPUNoiseGenerator` — noise generation
-- `FVoxelCPUCubicMesher` — cubic meshing (CPU, greedy). `FVoxelGPUCubicMesher` exists only in tests: the chunk manager
-  always builds the CPU mesher for cubic (finding KC3; work item WM-C4 deletes it)
+- `FVoxelCPUCubicMesher` — cubic meshing (CPU, greedy or simple), interior domain plus face seams
 - `FVoxelCPUMarchingCubesMesher` / `FVoxelGPUMarchingCubesMesher` — Marching Cubes meshing
 - `FVoxelCPUDualContourMesher` / `FVoxelGPUDualContourMesher` — Dual Contouring meshing
 - `FVoxelWaterMesher` — water surface meshing

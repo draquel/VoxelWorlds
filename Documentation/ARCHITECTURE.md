@@ -388,9 +388,9 @@ Output: RWStructuredBuffer<FVoxelData>
 **Phase 2: Meshing**
 ```
 Input: VoxelData buffer, MeshingMode
-Compute Shader: CubicMeshGeneration.usf
-             or MarchingCubesMeshGeneration.usf
+Compute Shader: MarchingCubesMeshGeneration.usf
              or DualContourMeshGeneration.usf (4-pass: edges → QEF → quads)
+             (cubic meshes on the CPU only: FVoxelCPUCubicMesher)
 Output: RWStructuredBuffer<FVoxelVertex>, RWStructuredBuffer<uint32>
 ```
 
