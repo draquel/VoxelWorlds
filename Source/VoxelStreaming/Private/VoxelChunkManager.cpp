@@ -1883,10 +1883,12 @@ int32 UVoxelChunkManager::AuditResidency(FString& OutReport) const
 
 	constexpr int32 MaxListed = 8;
 	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	// The strategy's horizon distance (horizontal in heightmap worlds), so "beyond the unload radius" here is the
+	// strategy's own unload rule (KI11: the island measured 2D while this audit measured 3D).
 	auto DistanceToViewer = [this, ChunkWorldSize](const FIntVector& Coord)
 	{
 		const FVector Center = Configuration->WorldOrigin + FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-		return FVector::Dist(Center, CurrentViewerPosition);
+		return LODStrategy ? LODStrategy->GetHorizonDistance(Center, CurrentViewerPosition) : static_cast<float>(FVector::Dist(Center, CurrentViewerPosition));
 	};
 	auto ListFarthest = [&](TArray<TPair<float, FIntVector>>& Entries, const TCHAR* Label, TFunctionRef<FString(const FIntVector&)> Extra, FString& Out)
 	{
@@ -2379,7 +2381,7 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 				}
 				const FVector ChunkCenter = Configuration->WorldOrigin
 					+ FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-				const float PinCandidateDistance = FVector::Dist(ChunkCenter, Context.ViewerPosition);
+				const float PinCandidateDistance = LODStrategy->GetHorizonDistance(ChunkCenter, Context.ViewerPosition);
 				if (PinCandidateDistance > PinDistance)
 				{
 					continue; // Too far — re-pins automatically when the viewer returns.
@@ -2455,7 +2457,7 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 		{
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-			if (FVector::Dist(ChunkCenter, Context.ViewerPosition) <= EditPinDistance)
+			if (LODStrategy->GetHorizonDistance(ChunkCenter, Context.ViewerPosition) <= EditPinDistance)
 			{
 				return false;
 			}
@@ -3924,7 +3926,7 @@ bool UVoxelChunkManager::IsChunkBeyondUnloadDistance(const FIntVector& ChunkCoor
 	const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(
 		ChunkCoord, Configuration->ChunkSize, Configuration->VoxelSize);
 	const FVector ChunkCenter = Bounds.GetCenter() + Configuration->WorldOrigin;
-	return FVector::DistSquared(CurrentViewerPosition, ChunkCenter) > FMath::Square(UnloadDist);
+	return LODStrategy->GetHorizonDistance(ChunkCenter, CurrentViewerPosition) > UnloadDist;
 }
 
 void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
@@ -6601,8 +6603,11 @@ void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 		FChunkLODRequest& Request = GenerationQueue[i];
 		const FVector ChunkCenter = WorldOrigin + FVector(Request.ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
 		const float DistSq = FVector::DistSquared(ChunkCenter, ViewerPosition);
+		// In range by the strategy's horizon (horizontal in heightmap worlds), not 3D: a viewer high above the terrain
+		// would otherwise evict the ground it just requested.
+		const float HorizonDistance = LODStrategy ? LODStrategy->GetHorizonDistance(ChunkCenter, ViewerPosition) : FMath::Sqrt(DistSq);
 
-		if (DistSq > EvictDistanceSq)
+		if (FMath::Square(HorizonDistance) > EvictDistanceSq)
 		{
 			// Beyond view distance — evict from queue and reset chunk state
 			GenerationQueueSet.Remove(Request.ChunkCoord);

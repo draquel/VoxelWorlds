@@ -133,6 +133,12 @@ public:
     /** Load horizon (the view distance; -1 = none). Edit-pinned chunks pin-load within it and stay
      *  resident out to GetUnloadDistance(), so they never appear alone past the terrain edge. */
     virtual float GetLoadDistance() const;
+
+    /** The distance both horizons are measured in, viewer to chunk centre. Default 3D; distance
+     *  bands: horizontal in heightmap worlds (see "The Vertical Window"). The chunk manager's queue
+     *  eviction, stale-cull, edit pins and residency audit all use it, so nothing disagrees with the
+     *  strategy's own unload rule (KI11 in WORLD_MODES_REVIEW_PLAN.md). */
+    virtual float GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const;
     
     // ==================== Lifecycle ====================
     
@@ -504,26 +510,30 @@ float FDistanceBandLODStrategy::CalculatePriority(
 
 ### Distance Calculation
 
+Two distances, for two questions:
+
 ```cpp
-float FDistanceBandLODStrategy::GetDistanceToViewer(
-    FVector Position, 
-    const FLODQueryContext& Context) const
+// How detailed: the LOD band. 3D in every world mode, so deep and high chunks fall into farther
+// bands (and compress) even under the viewer's feet.
+float FDistanceBandLODStrategy::GetDistanceToViewer(FVector Position, const FLODQueryContext& Context) const
 {
-    switch (Context.WorldMode) {
-        case EWorldMode::SphericalPlanet:
-            // 3D Euclidean distance, as on a plane. Fine for surface play: near the viewer it matches
-            // the distance along the surface (SPHERICAL_PLANET_REQUIREMENTS.md SP-C3).
-            return FVector::Distance(Position, Context.ViewerPosition);
+    return FVector::Distance(Position, Context.ViewerPosition);
+}
 
-        case EWorldMode::IslandBowl:
-            // 2D distance (ignores Z); WM-S2 moves islands to 3D like InfinitePlane
-            return FVector::Dist2D(Position, Context.ViewerPosition);
-
-        default: // Infinite plane
-            return FVector::Distance(Position, Context.ViewerPosition);
-    }
+// Whether in range at all: the load and unload horizons. Horizontal in heightmap worlds, where each
+// column's vertical extent is its window; 3D on a planet.
+float FDistanceBandLODStrategy::GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const
+{
+    return IsHeightmapWorld() ? FVector::Dist2D(ChunkCenter, ViewerPosition)
+                              : FVector::Dist(ChunkCenter, ViewerPosition);
 }
 ```
+
+Islands measured both in 2D until the world modes review's M4 (WM-S2): whole columns sat in the near bands,
+uncompressed (KI13), and the residency audit, which measured 3D, reported chunks the island's 2D rule kept
+(KI11). InfinitePlane measured both in 3D, so a viewer high above the terrain lost the ground at the edge of the view
+and, from 40,000 uu up, all of it. With the horizon horizontal the ground under any viewer stays in range (decision D8);
+the LOD distance keeps the far-away and the far-below coarse.
 
 There is no geodesic (along-the-surface) distance for planets; an earlier version of this document described
 one. Euclidean distance is what the code uses and what the spherical requirements keep (SP-C3).
@@ -545,13 +555,12 @@ chunk is rather than *how coarse* it is:
 
 | System | Rule | With LOD on | With LOD off |
 |--------|------|-------------|--------------|
-| Far-band surface slab (`bFarBandSurfaceSlabCulling`, InfinitePlane) | Beyond band 0's `MaxDistance` plus two chunk widths, a column loads only the chunks around its own analytic surface | Same | Same: keyed on band 0's distance, not the LOD level |
+| Near window (heightmap worlds, see "The Vertical Window") | Within band 0's `MaxDistance` plus two chunk widths, a column also loads the viewer's layer ± 2 | Same | Same: keyed on band 0's distance, not the LOD level |
 | Far-chunk compression (`voxel.FarCompression.*`) | A settled, idle chunk is compressed once its distance band's stride (`1 << LODLevel`) reaches `voxel.FarCompression.MinStride` (default 4) | The band is the chunk's LOD level (distance plus hysteresis and 2:1 balance), as before | The band its distance falls in, from `GetDistanceBandLOD` (no hysteresis) |
 
 So with the demo bands (stride 1 to 7,000 uu, stride 2 to 14,000 uu, stride 4 beyond) and the default
-`MinStride` of 4, chunks more than 14,000 uu away compress in both modes. The slab needs a band 0 that
-ends before the view distance: a one-band config (band 0 out to the view distance) gets neither the
-slab nor, with `MinStride` above 1, compression.
+`MinStride` of 4, chunks more than 14,000 uu away compress in both modes. A one-band config (band 0 out to
+the view distance) puts every column in the near window and, with `MinStride` above 1, compresses nothing.
 
 ---
 
@@ -559,36 +568,37 @@ slab nor, with `MinStride` above 1, compression.
 
 The LOD strategy includes mode-specific culling optimizations that skip chunks guaranteed to be empty or invisible, significantly reducing the number of chunks loaded.
 
-### Terrain Bounds Culling (Infinite Plane & Island/Bowl)
+### The Vertical Window (Infinite Plane & Island/Bowl)
 
-For infinite plane and island modes, chunks above or below the terrain height range are skipped. Both modes use the same 2D heightmap terrain generation:
+Heightmap worlds take their vertical streaming range from the terrain, not from the viewer's altitude (decision D8
+in [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §8, work item WM-S1). Each chunk column has its own window
+of layers (`FDistanceBandLODStrategy::GetColumnWindow`):
 
-```cpp
-bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
-    const FIntVector& ChunkCoord,
-    const FLODQueryContext& Context) const
-{
-    // Applies to both Infinite Plane and Island modes
-    if (WorldMode != EWorldMode::InfinitePlane &&
-        WorldMode != EWorldMode::IslandBowl) return false;
+| Part | Layers | Where |
+|------|--------|-------|
+| Surface slab | The world mode's surface over the column's footprint (`IVoxelWorldMode::GetSurfaceRange`, five height samples), ± 1.5 chunks, extended up to the water plane | Every column within the horizon, at every distance |
+| Near window | The viewer's own layer ± 2 (`NearWindowLayers`) | Columns within band 0's `MaxDistance` + two chunk widths, horizontally (`GetNearWindowRadius`: 16,600 uu on the demo) |
+| Height bounds | Both parts are clipped to the world mode's `GetTerrainHeightBounds` ± one chunk | Everywhere |
 
-    const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-    const float ChunkMinZ = Context.WorldOrigin.Z + (ChunkCoord.Z * ChunkWorldSize);
-    const float ChunkMaxZ = ChunkMinZ + ChunkWorldSize;
+So every column streams its own ground whatever the viewer's altitude: a viewer flying 7,200 uu up or a camera
+48,000 uu up keeps the terrain below it, and the viewer's altitude only adds layers near it (caves, dungeons, digging
+below the surface, a tower above it). The slab trims each column to the 4-5 layers around its surface; the demo's full height
+range is 8. Cave interiors and edits deeper than the slab load only near the viewer; edited chunks
+are also pin-loaded by the chunk manager within the view distance (dungeon stamps are edits).
 
-    // Skip chunks entirely above terrain max or below terrain min
-    if (ChunkMaxZ < TerrainMinHeight) return true;
-    if (ChunkMinZ > TerrainMaxHeight) return true;
+**Unloading uses a wider keep window** (`EWindowUse::Keep`): the slab, or the whole height range in columns within the
+near radius. Nothing the near window loaded unloads while the viewer changes layer (walking across a
+layer boundary, flying up); the extra layers go once their column leaves the near radius. The
+balanced-LOD cache covers the keep window, so every chunk the strategy keeps has a balanced LOD.
 
-    return false;
-}
-```
+With `bFarBandSurfaceSlabCulling` off every column streams its whole height range (the name predates D8, when the slab
+applied beyond band 0 only). Until M4 the window was the viewer's layer −2 to +8 (island −2 to +4), with the slab on
+InfinitePlane beyond band 0 only: a viewer above layer 0 lost the ground below it (G13), and islands kept every layer
+of every column (KI5). The planet keeps a viewer-relative window (`MinVerticalChunks` .. `MaxVerticalChunks`) until
+spherical Phase 1 gives it a shell around the surface (SP-C1), the same per-column shape.
 
-**Height Range Calculation**:
-- `TerrainMinHeight = SeaLevel + BaseHeight - Buffer`
-- `TerrainMaxHeight = SeaLevel + BaseHeight + HeightScale + Buffer`
-- For Island mode: `TerrainMinHeight = min(TerrainMinHeight, IslandEdgeHeight - Buffer)` to handle bowl shapes
-- Buffer (one chunk) accounts for noise variation and prevents popping
+**Height Range Calculation**: `IVoxelWorldMode::GetTerrainHeightBounds` (the full noise amplitude and continentalness;
+for an island, also the floor beyond its edge), plus one chunk of buffer on each side.
 
 ### Island Boundary Culling (Island/Bowl Mode)
 
@@ -684,25 +694,42 @@ bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
 
 ### Integration with Streaming
 
-Culling checks are applied in both load and unload decisions:
+Load and unload use the same pieces:
 
 ```cpp
-// In GetChunksToLoad(): Skip chunks that would be culled
-if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context) ||
-    ShouldCullIslandBoundary(ChunkCoord, Context) ||
-    ShouldCullBeyondHorizon(ChunkCoord, Context))
-{
-    continue;  // Don't add to load queue
-}
+// GetVisibleChunks / GetChunksToLoad: per column within the load horizon, the layers of its window
+for each column with GetHorizonDistance(column centre) <= ViewDistance:   // horizontal in heightmap worlds
+    GetColumnWindow(X, Y, Context, EWindowUse::Load).ForEachLayer(Z):
+        skip if ShouldCullIslandBoundary(...) || ShouldCullBeyondHorizon(...)
+        request (X, Y, Z) at its balanced LOD
 
-// In GetChunksToUnload(): Unload chunks that should now be culled
-if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context) ||
-    ShouldCullIslandBoundary(ChunkCoord, Context) ||
-    ShouldCullBeyondHorizon(ChunkCoord, Context))
+// GetChunksToUnload: every loaded chunk that is out of range, farthest first
+if (GetHorizonDistance(ChunkCenter, Viewer) > ViewDistance * UnloadDistanceMultiplier ||
+    !GetColumnWindow(X, Y, Context, EWindowUse::Keep).Contains(Z) ||   // heightmap worlds
+    ShouldCullIslandBoundary(...) || ShouldCullBeyondHorizon(...))
 {
     OutUnload.Add(ChunkCoord);
 }
 ```
+
+### What Bounds Residency
+
+There is no chunk-count cap (`MaxLoadedChunks` was never read and was removed in M4, WM-S3). What is resident is
+bounded by geometry:
+
+- **The horizon:** chunks load within the view distance and unload past it × `UnloadDistanceMultiplier` (1.2), measured
+  horizontally in heightmap worlds (a cylinder) and in 3D on a planet.
+- **The vertical window:** each column's slab, plus the near window's layers near the viewer (above); in all, the
+  world mode's height bounds.
+- **The world's footprint:** an island keeps only columns within R + falloff + a chunk diagonal of its centre; a planet
+  only chunks in its terrain shell and above its horizon.
+- **Edits:** edited chunks pin-load within the view distance and stay to the unload distance, outside the window too.
+- **The pipeline:** chunks mid-generation or mid-meshing finish before they unload; `MaxChunksToUnloadPerFrame` paces
+  unloading, not residency.
+
+On the demo geometry (4,800 uu chunks, 40,000 uu view) that is about 980 chunks settled and 1,080-1,220 at peak while
+moving, for InfinitePlane and an island alike; a fully resident island S (0.8 km across) holds about 1,020. Measured in
+[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §14.8.
 
 ---
 

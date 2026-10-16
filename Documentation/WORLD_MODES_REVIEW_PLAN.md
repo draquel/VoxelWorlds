@@ -16,7 +16,7 @@ The review runs the scenarios in §4 and §5 and records results against the acc
 revision of this document then turns the confirmed findings into work items. **Second revision, 2026-10-14: §14**
 (the status of every finding, work items with sizes and dependencies, milestones M1-M6, and where spherical starts),
 with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API) results: §14.6. M3 (island correctness)
-results: §14.7.
+results: §14.7. M4 (the streaming window) results: §14.8.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -839,8 +839,8 @@ Pass = meets the §5 "pass when"; Refine = works, but needs design or tuning; Bu
 |----|--------|---------------|
 | I1 | **Bug** (KI1, KI3), KI4 partly | The three probes pass headless (`Saved/Logs/ReviewB_I1_probes.log`); numbers in §13.2. The island's own height query matches generation within one voxel in every zone. The InfinitePlane height that POI placement samples is right inside R and up to 7,138 uu wrong past it. Every placed POI past R is wrong: on M, 9 of the 12 POIs in the island's box sit in the falloff band or beyond R+F, and 8 of those 9 stand in the sea or over the void floor, on pads raised 1,900-5,900 uu above the island's surface. The cull probe reproduces KI3: with the demo's origin, 1,098 land columns are culled and 1,347 floor-only columns kept. The two existing island tests were not re-run separately; the full suites last passed in §12.8 |
 | I2 | **Refine** | S reads as an island on the map and from the air (`rbI2_islandS_map`, `rbI2_S_lagoon_oblique`): lagoons, inner seas and coastline all come from the noise inside a circle. Problems: a round plateau stands in the sea at the north edge (a campsite pad, KI1), visible on the map; from outside the loaded ring the island is a slab floating in the void, with the water plane, the −4,500 floor and the cave-cut bottom layer showing (`rbI2_S_edge_outside`, KI2); under water a vertical 1,000 uu wall rings the island at R+F (`rbI2_S_edge_cliff_underwater`). Rectangle shape with Exponential falloff (`RB_S_RectExp`, temporary): a rectangular island with straight coasts and diagonal creases from the Chebyshev falloff (`rbI2_S_RectExp_map`, `rbI2_S_RectExp_oblique`). Map exploration runs past the coast (KI9). A survey from a camera 48,000 uu up shows chunk-sized blank rectangles in the lagoon; at 4,500 uu the same water renders whole, so they are a camera artefact |
-| I3 | **Pass** | The whole of S is resident from the centre: 1,518 chunks, settled 247 MB voxel data, 23 MB renderer, audit 0, 9 s to drain. After visits to three coasts the centre holds 1,878 chunks and 266 MB: the outer ring stays loaded, bounded by the island cull (§13.4). Memory returns to the same level |
-| I4 | **Refine** (inside the island) / **Bug** (along the coast) | Inside the island frame P95 is within +10% of the control and the island keeps up at v1500; manager P95 is +17-21% and the generation queue backs up at v3000, from the 35-55% more chunks per view (KI5). Along the coast (orbit at R) the island misses every threshold: frame +14-30%, manager +23-38%, catch-up 2.6-3.5× at v1500-v3000. The island's LOD re-meshing is **bimodal** between identical cold runs (KI12, new): 12,344-12,500 or 1,341-1,372 LOD re-meshes on the same route; in the low mode the island beats the control. Headless (CPU generation) the island lands in the high mode twice out of two: frame P95 +24%, manager P95 +28%. L's interior chord equals M's: per-frame cost does not depend on island size. §13.3. *(§13.10: the low mode skipped LOD work it owed; the high-mode rows are the island's numbers, and KI12 is fixed)* |
+| I3 | **Pass** | The whole of S is resident from the centre: 1,518 chunks, settled 247 MB voxel data, 23 MB renderer, audit 0, 9 s to drain. After visits to three coasts the centre holds 1,878 chunks and 266 MB: the outer ring stays loaded, bounded by the island cull (§13.4). Memory returns to the same level *(M4, §14.8: with the surface slab the whole of S is 1,020 chunks and 336 MB settled, the control's 352 MB at its spawn)* |
+| I4 | **Refine** (inside the island) / **Bug** (along the coast) | Inside the island frame P95 is within +10% of the control and the island keeps up at v1500; manager P95 is +17-21% and the generation queue backs up at v3000, from the 35-55% more chunks per view (KI5). Along the coast (orbit at R) the island misses every threshold: frame +14-30%, manager +23-38%, catch-up 2.6-3.5× at v1500-v3000. The island's LOD re-meshing is **bimodal** between identical cold runs (KI12, new): 12,344-12,500 or 1,341-1,372 LOD re-meshes on the same route; in the low mode the island beats the control. Headless (CPU generation) the island lands in the high mode twice out of two: frame P95 +24%, manager P95 +28%. L's interior chord equals M's: per-frame cost does not depend on island size. §13.3. *(§13.10: the low mode skipped LOD work it owed; the high-mode rows are the island's numbers, and KI12 is fixed)* *(M4, §14.8: **Pass except catch-up at v1500.** The island meets the frame, manager, peak-loaded and memory thresholds on the chord, the perimeter and the coast at every speed; catch-up at v1500 is 0.27-0.46 s against the control's 0.17-0.18 s)* |
 | I5 | **Bug** (KI2) | Water on: the pawn walks into the sea at 36,000 uu (S), swims past R+F at 171 uu/s to the end of the loaded water at 48,000 uu (the island cull edge), drops out of the water and falls at 4,000 uu/s. About 260 s later KillZ (−1,048,575) destroys it and nothing respawns it: the player is left with no pawn. Water off: the pawn walks down the falloff slope, drops 1,000 uu off the cliff at R+F onto the floor, crosses the floor ring and falls off its edge at 48,000 uu. `vox.Debug.Capture` never logs READY→NOT-READY, because the chunks past the edge were never loaded. The minimap keeps exploring the sea |
 | I6 | **Bug** (KI1, KI9) | M, every band and off-island POI from the probe visited. The City in the falloff band stands on a cylinder 3,800 uu tall rising out of the sea (`rbI6_M_city_band`); a tiled dungeon's pad makes a round islet with the elevator on top (`rbI6_M_dungeon_band`); a campsite pad lifts 1,900 uu above the sea floor. The dungeon itself is dry and works (entrance room walkable, boss alive and lethal, respawn on the pad). The Tower 297,696 uu out streams its claim volume over the void, with no ground below it. Map markers: 20 within 400,000 uu, of which 3 inside R, 5 in the band and 12 past R+F. Map exploration: 1,497 tiles after the tour, 786 in the band and 124 past R+F (out to 268,000 uu). Working: scatter stops at the coast (all 13,689 instances inside R), surface NPCs never spawn off the island and despawn deer that wade into deep water (5 in the session, no log spam), `vox.NavPath` returns a partial path to the shore and NO PATH to a point past the coast, and a full day/night cycle ran (day 1 12:00 to day 2 12:55, every phase). VoxelDemo has no PCG components, so the PCG part of KI9 is code-only |
 | I7 | **Refine** (KI8) | Spawn at the centre (no PlayerStart, origin): stands on land. Origin in the falloff band under water (`RB_S_SpawnCoast`): the spiral finds land one ring (4,800 uu) away and the pawn stands. Origin 30,000 uu past R+F with water on (`RB_S_SpawnOff`): land found at ring 8 (38,400 uu) and the pawn stands; past the 50,000 uu search it would fail. Origin off the island with water off (`RB_S_SpawnOffNoWater`): the spawn takes the floor height −4,500 as dry land at (0, 0), 70,000 uu from the centre, where nothing is generated; the character waits for collision that never comes and stays frozen (MOVE_NONE) |
@@ -1057,20 +1057,20 @@ render orphans or seam orphans.
 | KI2 | **Confirmed** | No edge: a 1,000 uu wall at R+F, a floor ring out to R+F + 6,788 uu (the cull's chunk diagonal), then nothing. Water ends with that ring. The pawn swims off it and falls about 4 minutes to KillZ, which destroys it without a respawn; with water off it walks off the floor's edge. From outside, the island floats in the void (I2, I5) |
 | KI3 | **Confirmed** | §13.2: 1,098 land columns culled and 1,347 floor-only columns kept with the demo's origin; in PIE the south coast is a straight cut through a hill. With `WorldOrigin` 0 the two agree exactly |
 | KI4 | **Partly confirmed** | `bIslandBowlShape` is copied (config, request, island params, chunk manager ×2, map, field viewer, CPU generator) and read nowhere, shaders included. Exponential falloff leaves a 1,016-1,307 uu step instead of 1,000 (a 5% residual on top of the floor cliff every falloff type has). Island params are built in four places (`VoxelChunkManager.cpp:994`, `:2561`; `VoxelMapSubsystem.cpp:176`; `VoxelFieldTypes.cpp:63`). **Dismissed for these configs:** `GetTerrainHeightBounds` already contains the floor ([−12,000, 10,000] vs −4,500); it would miss it only when `EdgeHeight − 1000` is below the continentalness minimum. The world mode's `GetDensityAt` calls the floor air, which generation does not use (latent) |
-| KI5 | **Confirmed** | +35% chunks at the spawn on S (1,518 vs 1,123), +30-55% peak loaded on the M routes, generation queue 2.7× the control's at v3000, +32-54% meshes, and the main reason for the manager and coast misses in §13.3 |
-| KI6 | **Confirmed** (code) | `MaxLoadedChunks` is read nowhere (only `VoxelWorldTestActor.cpp:490` sets it). The island cull bounds S at 2,400 chunks; nothing else bounds anything |
+| KI5 | **Confirmed** | +35% chunks at the spawn on S (1,518 vs 1,123), +30-55% peak loaded on the M routes, generation queue 2.7× the control's at v3000, +32-54% meshes, and the main reason for the manager and coast misses in §13.3 *(Fixed in M4, §14.8: islands keep the surface slab at every distance; M's peak loaded chunks are within −15% to +8% of the control on every route)* |
+| KI6 | **Confirmed** (code) | `MaxLoadedChunks` is read nowhere (only `VoxelWorldTestActor.cpp:490` sets it). The island cull bounds S at 2,400 chunks; nothing else bounds anything *(M4, §14.8: `MaxLoadedChunks` removed; `LOD_SYSTEM.md` says what bounds residency)* |
 | KI7 | **Confirmed** | I8: with the radius changed, the same save loaded silently: 30 edited chunks, 2 dungeon records, 1,499 explored tiles, and the player restored past the new edge, frozen |
 | KI8 | **Partly confirmed** | The 8-direction search finds land from the falloff band and from 30,000 uu past R+F (water on). Water off, off the island: the floor height counts as dry land and the pawn freezes over the void, waiting for collision. `WaterLevel` without `WorldOrigin.Z` and `GetPlanetSpawnPosition` were not exercised (Z origin 0, no planet) |
 | KI9 | **Confirmed** for the map and markers, **dismissed** for scatter and NPCs, **code-only** for PCG and water-off navigation | Map exploration: 393 tiles on S for 216 columns; 786 band and 124 beyond-R+F tiles of 1,497 on M, all saved. Markers: §13.1 I6. Scatter: none past the coast. Surface NPCs: spawn only on loaded, dry ground and despawn in deep water. Navigation with water on refuses the sea. PCG: no PCG components in VoxelDemo; the sampler has no island mask (`PCGVoxelSurfaceSampler.cpp:244-291`). Navigation with water off treats the floor as walkable by code; not run |
 | KI10 | **Confirmed** | `WP_VoxelCoexistTest`'s voxel world references `DemoWorldConfig` (InfinitePlane); `WP_IslandBowlConfig` is referenced by nothing. Island tests: the two existing ones plus the three probes added here. This review is the first island bench |
-| KI11 | **Confirmed**: false findings, not chunks kept too long | Every island audit finding in the session (4-64 per run) is a Loaded chunk in the top or bottom layer (z = 3 or −4), 48,000-52,000 uu away in 3D and 46,082-47,942 uu in 2D, inside the radius by the island's own 2D rule. The control's audits were 0 |
+| KI11 | **Confirmed**: false findings, not chunks kept too long | Every island audit finding in the session (4-64 per run) is a Loaded chunk in the top or bottom layer (z = 3 or −4), 48,000-52,000 uu away in 3D and 46,082-47,942 uu in 2D, inside the radius by the island's own 2D rule. The control's audits were 0 *(Fixed in M4, §14.8: the audit measures range with the strategy's horizon distance; island audits 0 in every M4 run)* |
 
 ### 13.7 New findings
 
 | ID | Finding | Evidence | Impact |
 |----|---------|----------|--------|
 | KI12 | **Island LOD re-meshing is bimodal between identical cold runs.** M's v3000 chord gave 12,500, 12,344, 1,341 and 1,372 LOD re-meshes in four runs (same command, fresh world, same path to within 31 uu of height). In the high mode chunks mesh at LOD 1 five times as often (5,020 vs 987 meshes) and frame / manager P95 are 41 / 14.2-14.5 ms; in the low mode 32 / 9.7-10.0 ms. Headless (CPU generation) both island runs landed in the high mode (9,269 and 9,304 against the control's 1,142, §13.3), so the high mode may be the island's normal state and the PIE low mode the variant. Judging by the LOD counts, the PIE mode held for whole stretches of the session (the M batch high, the L batch low), and it may also switch inside a run (the soak's re-mesh rate doubled at minute 10, §13.5). It is not explained by a save load, the override, the island parameters or Python state, all checked. The control gave 7,168 twice | Bench JSON `rbI4_M_chord_v3000{,b,c,d}`; meshing log LOD counts | The island's streaming numbers have two values; its threshold verdicts depend on which mode a run lands in. Likely an ordering- or timing-dependent path in LOD evaluation, which only runs on a viewer chunk change or a drained-queue sweep (`VoxelChunkManager.cpp:768-791`) and drops candidates past the per-frame cap. Needs an instrumented run. **Explained and fixed (§13.10):** the sweep flag froze in whatever state it had when the queues last emptied, near the start of the route; set, LOD was evaluated every tick, clear, only at chunk changes, 8 at a time. The low mode was the broken one. It affected every world mode; the control's headless run was in it |
-| KI13 | **Island LOD distance is 2D everywhere, so whole columns sit in the near bands.** InfinitePlane measures 3D distance, so deep and high chunks fall into the far band and compress; the island keeps them uncompressed | At the same spawn: 224 resident (uncompressed) chunks vs the control's 113; settled voxel data 247 vs 135 MB (`DistanceBandLODStrategy.cpp:644-648`) | Memory, alongside KI5; the reason KI11's audit disagrees |
+| KI13 | **Island LOD distance is 2D everywhere, so whole columns sit in the near bands.** InfinitePlane measures 3D distance, so deep and high chunks fall into the far band and compress; the island keeps them uncompressed | At the same spawn: 224 resident (uncompressed) chunks vs the control's 113; settled voxel data 247 vs 135 MB (`DistanceBandLODStrategy.cpp:644-648`) | Memory, alongside KI5; the reason KI11's audit disagrees. *(Fixed in M4, §14.8: LOD distance is 3D in every world mode)* |
 | KI14 | **No recovery when the pawn leaves the generated world.** KillZ destroys the pawn and nothing respawns it: nothing in the project overrides `FellOutOfWorld`, so the engine default destroys the actor and the death and respawn path never runs. The character's chunk-based wait has no timeout, so a spawn or a restored save position where no terrain will ever generate freezes the pawn for good | I5 (water on: no pawn after KillZ), I7 (water off, off the island), I8 (radius change) | Soft locks; any world edge design needs this |
 | KI15 | **Map tile images are never evicted.** Each explored tile keeps a 64×64 `FColor` image (16 KB) for the session | `VoxelMapSubsystem.cpp:1648` (`TileCache.Add`, no removal outside `Deinitialize`); `VoxelMapTypes.h:27` | Mode-independent, but in a finite world it is the first cost that grows with the world: a fully explored L is about 0.55 GB of map tiles (§13.8) |
 
@@ -1111,7 +1111,7 @@ The critical list in §6 stands, with this evidence and these additions:
 - **A world edge** (KI2) must include recovery (KI14): a respawn when the pawn falls out of the world, and a timeout or
   fallback for the chunk-based wait.
 - **Slab culling for islands** (KI5) and **3D-aware LOD distance for islands, or a per-column vertical band** (KI13) are the
-  performance items: together they explain the chunk excess, the generation backlog and most of the coast misses. §13.11
+  performance items *(both done in M4, §14.8: a per-column window from the terrain and 3D LOD distance)*: together they explain the chunk excess, the generation backlog and most of the coast misses. §13.11
   measured KI5 per layer: on the chord the island's ~340 extra chunks are layers −3, 2 and 3, the layers the control's
   slab trims.
 - Add from §13.11: **rebuild the balanced-LOD cache only when the viewer moves** (1.3-1.9 ms a tick on the control, every
@@ -1338,7 +1338,8 @@ What the numbers say:
   keeps 228-239 in layers −2 to 1 and only 33-119 in layers −3, 2 and 3, where its far-band slab culling trims columns to
   their surface. The island's ~340 extra chunks (+30% on this route) are those three layers: +84, +145 and +158 in run a. Slab
   culling for islands (§13.9) would remove most of them.
-- **The −2 floor is still a design question.** At z 7,200 the fixed window starts at layer −1, while the control's
+- **The −2 floor is still a design question.** *(Decided by D8 and built in M4, §14.8: the window comes from the terrain;
+  at z 7,200 layers −3 and −2 now load under the flight, and from 48,000 uu up island S streams whole.)* At z 7,200 the fixed window starts at layer −1, while the control's
   ground-level run keeps 231 chunks in layer −2 and 119 in layer −3. For heightmap worlds the vertical range could come
   from the terrain (the global bounds and per-column slab already bound it) instead of the viewer's altitude. The §13.1
   I2 survey "from a camera 48,000 uu up" had a window entirely above the terrain (layer 10 ± offsets) with either window,
@@ -1399,15 +1400,15 @@ Three findings from §13.11 get IDs here:
 | KI2 | No world edge | Partly fixed in M3 (WM-I5, §14.7): a hard boundary at R+F with a push-back before it. Open: the visible edge | WM-I5 (boundary), WM-E1 (visible edge) |
 | KI3 | The island centre means two different things | Fixed in M2 (WM-A1, §14.6): one builder, the centre is `WorldOrigin` + offset everywhere; `CullCentreProbe` asserts | — |
 | KI4 | Shape-parameter defects | Fixed: `bIslandBowlShape` removed, the Exponential falloff reaches 0 at R+F and `GetDensityAt` agrees with the floor beyond it (M1, WM-H6); the param builders are one (M2, WM-A1), and `GetTerrainHeightBounds` now includes the floor beyond the edge (M2, WM-A2) | — |
-| KI5 | No far-band slab culling on islands | Open: +30-55% loaded chunks; on the chord the excess sits in layers −3, 2 and 3 (§13.11). The slab now samples the world mode's height (M2, WM-A3), so WM-S1 only has to lift its InfinitePlane-only gate | WM-S1 |
-| KI6 | No finite-world concept; `MaxLoadedChunks` is read nowhere | Open for the setting. Pre-generation and baking stay nice-to-haves (§6) | WM-S3 |
+| KI5 | No far-band slab culling on islands | Fixed in M4 (WM-S1, §14.8): every column of every heightmap world keeps its surface slab at every distance; island M's peak loaded chunks are within −15% to +8% of the control on every route (were +29-55%) | WM-S1 |
+| KI6 | No finite-world concept; `MaxLoadedChunks` is read nowhere | Fixed for the setting in M4 (WM-S3, §14.8): removed, and `LOD_SYSTEM.md` says what bounds residency. Pre-generation and baking stay nice-to-haves (§6) | WM-S3 |
 | KI7 | The save key ignores world shape | Fixed in M2 (WM-A4, §14.6): the save records the world's fingerprint; a save from a different radius is refused, kept on disk, and the world starts fresh | — |
 | KI8 | Spawn is only water-aware | Fixed in M3 (WM-I3, §14.7): the spawn search takes only points inside the bounds, and the water level includes `WorldOrigin.Z` | WM-I3 |
 | KI9 | Consumers have no island mask | Fixed in M3 (WM-I2, §14.7): map exploration and the world map's pan, markers, the PCG sampler and navigation use the bounds; dismissed for scatter and surface NPCs | WM-I2 |
 | KI10 | Island test coverage is minimal | Fixed in M3 (WM-I6, §14.7): the probes assert (`CullCentreProbe` since M2, `POIPlacementProbe` in full); `VoxelWorlds.WorldModes.Api.*`, `.Boundary.*`, `POI.Placement.WorldBounds`, `Navigation.WorldBounds` and `VoxelCharacter.WorldEdge.*` cover the bounds and their consumers. `WP_IslandBowlConfig` deleted | WM-I6 |
-| KI11 | The residency audit and island LOD measure distance differently | Open (false findings) | WM-S2 |
+| KI11 | The residency audit and island LOD measure distance differently | Fixed in M4 (WM-S2, §14.8): the audit, the queue eviction and the edit pins measure range with the strategy's own horizon distance; island audits 0 in every M4 run | WM-S2 |
 | KI12 | Bimodal LOD re-meshing | Fixed (§13.10), in every world mode | — |
-| KI13 | Island LOD distance is 2D, so whole columns stay in the near bands | Open | WM-S2 |
+| KI13 | Island LOD distance is 2D, so whole columns stay in the near bands | Fixed in M4 (WM-S2, §14.8): LOD distance is 3D in every world mode | WM-S2 |
 | KI14 | No recovery when the pawn leaves the generated world | Fixed in M3 (WM-I4, §14.7), in every world mode | WM-I4 |
 | KI15 | Map tile images are never evicted | Open; not island-specific, but it is what limits islands past about 10 km (§13.8) | WM-E2 |
 
@@ -1426,7 +1427,8 @@ Three findings from §13.11 get IDs here:
 | G10 | The bench's re-mesh counter counted reloads | Fixed (§13.10) | — |
 | G11 | The vertical window counted the viewer's layer twice | Fixed (§13.11) | — |
 | G12 | The balanced-LOD cache is rebuilt every tick | Fixed in M1 (WM-H1; draquel/VoxelWorlds#84, merged) | WM-H1 |
-| G13 | The vertical range follows the viewer's altitude | Open (D8) | WM-S1; recheck in WM-S4 |
+| G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole | WM-S1, WM-S4 |
+| G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -1479,7 +1481,9 @@ WM-I2's world map); draquel/UE5_PluginDev#104 (WM-I1, WM-I2's markers, WM-I6, `v
 | WM-I5 | **The boundary (D9).** A hard boundary at R+F, taken from the bounds query, and a soft push-back in the last stretch of sea before it, with a HUD hint | KI2 | VoxelWorlds (boundary), VCP (push-back), parent (HUD) | M | WM-A2, WM-I4 |
 | WM-I6 | **Island tests and content.** The probe assertions above; delete or tune `WP_IslandBowlConfig` | KI10 | VoxelWorlds, parent | S | WM-A1, WM-I1 |
 
-**M4. The streaming window.** Every heightmap world; the island's performance items.
+**M4. The streaming window.** Every heightmap world; the island's performance items. **Status 2026-10-15: all four
+implemented and verified, PRs open** (results in §14.8): draquel/VoxelWorlds#93 (WM-S1, S2, S3 and these docs);
+draquel/UE5_PluginDev#105 (the gitlink and the doc map).
 
 | ID | Work item | Findings | Repos | Size | Needs |
 |----|-----------|----------|-------|------|-------|
@@ -1517,7 +1521,7 @@ D9's order is a priority, not a strict sequence. Rough totals assume S ≈ half 
 | M1 Hygiene | WM-H1 to WM-H10 | ~7 days, mostly in parallel | — | Each item's check; a still viewer's `LODUpdateMs` ≈ 0; headless suites and the in-editor GPU tests green. **Met 2026-10-14, merged 2026-10-15 (§14.5)** |
 | M2 World-mode API | WM-A1 to WM-A4 | ~5 days | WM-H6 | Island params come from one builder; `CullCentreProbe` asserts; a save from a different radius is refused and the world starts fresh; the control's bench unchanged within batch noise. **Met 2026-10-15, in review (§14.6)** |
 | M3 Island correctness | WM-I1 to WM-I6 | ~6.5 days | M2 | `POIPlacementProbe` asserts; I5-I8 re-run: swimming out stops at R+F, falling out respawns, an off-island spawn stands on land, a radius change starts fresh; the I6 tour finds no marker or explored tile past the bounds. **Met 2026-10-15, in review (§14.7)** |
-| M4 Streaming window | WM-S1 to WM-S4 | ~4 days | WM-A3, WM-H1 | WM-S4: island M within §1's thresholds on chord, perimeter and coast; peak loaded chunks within +25% of the control; the D3 budget met on every run, M's v6000 chord included; island audits 0; the control no worse |
+| M4 Streaming window | WM-S1 to WM-S4 | ~4 days | WM-A3, WM-H1 | WM-S4: island M within §1's thresholds on chord, perimeter and coast; peak loaded chunks within +25% of the control; the D3 budget met on every run, M's v6000 chord included; island audits 0; the control no worse. **Met 2026-10-15 but for one threshold, in review (§14.8):** frame, manager, peak loaded, memory and audits hold on every route and speed, D3 on every run (M's v6000 chord 1,066 MB), the control no worse; catch-up misses at v1500 on the chord and the perimeter (0.27-0.46 s against 0.17-0.18 s) and on the perimeter at v3000 (means 0.47 vs 0.25 s): the island's sea-heavy view leaves a 20-50 chunk generation queue at the stop |
 | M5 Cubic terrain-only | WM-C1 to WM-C4 | ~6.5 days | — | Cubic against a same-build control: catch-up within +25% and manager P95 within +15% (§12.8's misses); C2 and C4 pass; the legacy path is deleted |
 | M6 Edge and scale | WM-E1, WM-E2 | ~4.5 days | WM-A2, WM-I5 | From past R+F the sea reaches the horizon with no void; a fully explored L keeps its map tiles under a fixed budget |
 | Spherical | Phases 1-5 (§14.4) | several weeks | M4, M5 | The requirements doc's exit checks |
@@ -1658,3 +1662,247 @@ the island still floats in the void, and the walls are invisible) and map tile e
   version (§14.6) was not bumped: InfinitePlane worlds are unchanged.
 - The HUD hint lives in VoxelCharacterPlugin's vitals widget, where every other HUD line is; §14.2 had put the HUD in the
   parent repo.
+
+### 14.8 M4 results (2026-10-15)
+
+All four M4 items are implemented and verified; PRs open. Built from VoxelWorlds `feature/wm-s1-s3-streaming-window`
+(base `a029006`) and UE5_PluginDev `claude/m4-streaming-window-e34c9f` (base `eb178c0`), editor 5.8.3 from
+`D:\Program Files\Epic Games\UE_5.8`, in a worktree editor with background throttling off.
+
+**The window, as built (WM-S1, D8).** Heightmap worlds (InfinitePlane and IslandBowl) take their vertical range from
+the terrain. Each chunk column has its own window (`FDistanceBandLODStrategy::GetColumnWindow`), clipped to the world
+mode's height bounds plus a chunk:
+
+| Part | Layers | Where |
+|------|--------|-------|
+| Surface slab | The world mode's surface over the column's footprint (`IVoxelWorldMode::GetSurfaceRange`, new: five height samples in heightmap modes, the height bounds otherwise) ± 1.5 chunks, extended up to the water plane | Every column in range, at every distance, islands included |
+| Near window | The viewer's own layer ± 2 | Columns within band 0 + two chunk widths, measured horizontally (16,600 uu on the demo) |
+| Keep window (unloading) | The slab; in a near column, the whole height range | So a viewer changing layer unloads nothing near it; the extra layers go when their column leaves the near radius |
+
+The viewer-relative −2 to +8 (island +4) window is gone. The planet keeps its viewer-relative window, now one branch of
+the same per-column function, until spherical Phase 1 gives it a shell around the surface (SP-C1). The balanced-LOD cache
+covers the keep window, so every chunk the strategy keeps has a balanced LOD; with the smaller volume its rebuild got
+cheaper (below).
+
+**Two distances (WM-S2 and D8).** LOD levels use 3D distance in every world mode; islands used 2D (KI13). The load and
+unload horizons are measured horizontally in heightmap worlds (`IVoxelLODStrategy::GetHorizonDistance`, new; 3D on a
+planet). §14.2 put WM-S2 as "3D like InfinitePlane", but with a 3D horizon a viewer 40,000 uu above the terrain loads
+nothing at all (the old control at 48,000 uu: everything unloads), which D8 rules out: the viewer's altitude never
+removes the ground. So both heightmap modes now share a cylinder for the horizon and a sphere for the LOD bands.
+Everything in the chunk manager that asks whether a chunk is in range uses the strategy's horizon distance: the
+generation queue's eviction, the stale-chunk cull, edit pins and their unload veto, and `AuditResidency`. The audit
+cannot disagree with the unload rule any more (KI11).
+
+**G14, found on the way: the first PIE of an editor session.** It re-meshes far more for LOD than every later run on
+the same route: on the control's 40,000 uu chord from (0, 0) at v3000, 533 LOD re-meshes in the first PIE of two editor
+sessions against 287-304 in every later run, old window or new (frame and manager time look normal). An early smoke run
+blamed it on a keep margin the first build had (the near window's extra layers kept one chunk past the near radius); the
+final build, without that margin, gave 533 again in its first PIE and 287 in the next two. Not investigated further. Every
+batch in this section ran after several PIE sessions in the same editor; start any bench batch with a throwaway PIE.
+
+**WM-S3.** `MaxLoadedChunks` is removed from `UVoxelWorldConfiguration` (it was read nowhere; the test actor set it).
+What bounds residency is now written down in `Features/LOD_SYSTEM.md` ("What Bounds Residency") and on the config: the
+horizon, each column's window, the world's footprint, edit pins, and the pipeline (chunks mid-job finish first).
+
+**Suites.** Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter` 271/271 (268 before M4, plus four new
+`LOD.VerticalWindow.*` tests, less `.FollowsViewerLayer`, which tested the old window). In the editor, where the GPU tests
+run, 271/271, every `Generation.GPUvsCPU*Parity` (IslandBowl included), `GPUNoiseGeneratorAsync`, `Meshing.Cubic.CPUvsGPU`,
+`Meshing.MarchingCubes.CPUvsGPU` and `WorldModes.InfinitePlane.GPUConsistency` among them. Both on the final build, with
+the temporary cvar removed; M4 does not change generation or meshing.
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| WM-S1 | Done, in review | VoxelWorlds#93 | The window above; tests `LOD.VerticalWindow.FromTerrain` (the candidates are exactly each column's slab, plus the viewer's layer ± 2 near it, for a viewer on layers −3 to 10, both heightmap modes; far columns do not depend on the viewer's altitude) and `.KeepWindow` (a viewer one layer up, one down or 48,000 uu up unloads nothing; 20,000 uu away the extra layers go and nothing else does). Live, the WM-S1 checks: **a dungeon room below the slab** (the control's tiled dungeon, boss room floor at z −5,343, layer −2): the pawn lands walking and the room renders (`m4_S1_dungeon_boss3`); **caves below the slab near the viewer**: a survey camera 12,500 uu underground (layer −3) holds layers −4 to 1 in the columns within 16,600 uu and the slab, −2 to 1, beyond; **edited chunks** are pinned by the chunk manager within the view distance, as before; **the island's floor ring**: S's floor and water stream out to the island cull's edge (`m4_S1_island_floor_ring`; the visible edge stays WM-E1); **a flight at z 7,200** and **the I2 survey from 48,000 uu**: the tables below |
+| WM-S2 | Done, in review | VoxelWorlds#93 | LOD distance is 3D in every mode; the island boundary cull stays 2D; the horizon is horizontal in heightmap worlds and the chunk manager asks the strategy for it. Island audits are 0 in all 32 island runs, old window and new (review B: KI11 findings in most island runs, 3-64 each). Settled at S's spawn the island keeps 105 chunks uncompressed, the control 106 (review B: 224 against 113, KI13). Tests `LOD.VerticalWindow.IslandLODDistance3D` (chunks one, two and three layers under the viewer get LOD 0, 1 and 2; a viewer 48,000 uu over an island S streams every island column, all at the coarsest band) and `.HorizonDistance` |
+| WM-S3 | Done, in review | VoxelWorlds#93 | `UVoxelWorldConfiguration::MaxLoadedChunks` removed (the test actor's assignment with it); nothing else referenced it. `Features/LOD_SYSTEM.md` "What Bounds Residency" |
+| WM-S4 | Done, in review | VoxelWorlds#93 (docs) | Below. Every threshold holds on every route and speed except catch-up at v1500 (and on the perimeter at v3000), by 0.2-0.3 s |
+
+**Bench method.** One build, one batch (VoxelWorlds at this PR's code plus a temporary `voxel.Temp.LegacyWindow` cvar that
+restored the old window and distances, latched when the world initializes, removed before the PR; the near radius's
+final form went into the running editor with Live Coding before the batch). For every route and speed, four cold fresh worlds back to
+back: control (old window), control, island M, island M (old window). PIE in the worktree editor's level viewport
+(1280×722), background throttle off, `vox.DeleteSave`, clock pinned at noon, `voxel.Bench.Run <tag> <v> <dist> warmup=120
+<route>`, Stop. Routes as in §13.3, all with `follow=300`: chord `start=-250000:0 dir=1:0` (250,000 uu to the centre at
+v1500, 500,000 coast to coast at v3000 and v6000), perimeter `orbit=0:0:200000` (150,000 uu along the coast at R), coast
+crossing `start=150000:0 dir=1:0` (150,000 uu, ending 50,000 uu past R + F). The control is `DemoSmoothWorldConfig`
+through the same override, as in §12-§13; the island is `Review_Island_M`. The legacy shim reproduces the old window,
+slab gate and distances exactly in the strategy; the chunk manager's range checks follow the strategy's horizon in both
+arms, so legacy island runs report audit 0 where review B saw KI11. JSON reports in
+[Research/Bench/M4/](Research/Bench/M4/).
+
+**Island M against the control** (this build; review B's numbers are in §13.3):
+
+| Route | Run | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | GenQ mean / peak | Peak mesh queue | Loaded mean / peak | Generated / meshed | LOD re-meshes | Peak voxel MB | Systems MB | Audit | JSON |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Chord v1500 | Control | 16.7 / 20.3 / 26.0 | 7.0 | 0.18 | 6 / 80 | 10 | 1,106 / 1,195 | 4,202 / 7,603 | 3,404 | 894 | 1,145 | 0 | `20261015_142602_m4_C_new_chord_v1500` |
+| Chord v1500 | **Island M** | 16.7 / 19.9 / 25.6 | 7.0 | 0.38 | 5 / 81 | 10 | 1,051 / 1,170 | 3,914 / 7,229 | 3,317 | 713 | 918 | 0 | `20261015_142911_m4_M_new_chord_v1500` |
+| Chord v1500 | Control, old window | 16.7 / 20.7 / 26.5 | 7.2 | 0.17 | 8 / 90 | 9 | 1,133 / 1,205 | 4,712 / 8,214 | 3,502 | 852 | 1,104 | 0 | `20261015_142248_m4_C_old_chord_v1500` |
+| Chord v1500 | Island M, old window | 16.7 / 23.6 / 34.5 | 9.8 | 1.11 | 14 / 140 | 22 | 1,598 / 1,750 | 5,718 / 11,458 | 5,768 | 926 | 1,135 | 0 | `20261015_143224_m4_M_old_chord_v1500` |
+| Chord v3000 | Control | 17.5 / 28.4 / 34.6 | 8.8 | 0.59 | 27 / 107 | 10 | 1,081 / 1,153 | 8,467 / 15,419 | 6,952 | 863 | 1,117 | 0 | `20261015_140243_m4_C_new_chord_v3000` |
+| Chord v3000 | **Island M** | 16.7 / 27.4 / 33.2 | 8.7 | 0.17 | 19 / 97 | 12 | 1,037 / 1,147 | 7,573 / 14,329 | 6,756 | 742 | 946 | 0 | `20261015_140554_m4_M_new_chord_v3000` |
+| Chord v3000 | Control, old window | 19.1 / 30.2 / 36.2 | 9.7 | 0.61 | 45 / 190 | 9 | 1,086 / 1,151 | 9,294 / 16,400 | 7,117 | 854 | 1,106 | 0 | `20261015_135930_m4_C_old_chord_v3000` |
+| Chord v3000 | Island M, old window | 19.5 / 36.3 / 49.7 | 12.0 | 0.17 | 302 / 605 | 38 | 1,326 / 1,644 | 9,848 / 21,344 | 11,522 | 934 | 1,150 | 0 | `20261015_140905_m4_M_old_chord_v3000` |
+| Chord v6000 | Control | 24.5 / 36.3 / 42.3 | 13.9 | 5.39 | 632 / 794 | 12 | 500 / 1,129 | 4,296 / 11,182 | 6,889 | 858 | 1,364 | 0 | `20261015_145319_m4_C_new_chord_v6000` |
+| Chord v6000 | **Island M** | 22.9 / 34.0 / 40.4 | 12.7 | 1.68 | 542 / 758 | 12 | 530 / 965 | 4,592 / 11,326 | 6,734 | 710 | 1,066 | 0 | `20261015_145507_m4_M_new_chord_v6000` |
+| Chord v6000 | Control, old window | 24.0 / 34.9 / 40.0 | 13.8 | 5.93 | 723 / 861 | 13 | 468 / 1,115 | 4,374 / 11,347 | 6,977 | 873 | 1,323 | 0 | `20261015_145123_m4_C_old_chord_v6000` |
+| Chord v6000 | Island M, old window | 24.2 / 39.7 / 51.8 | 14.7 | 4.22 | 1,112 / 1,336 | 22 | 543 / 1,165 | 4,267 / 12,443 | 8,176 | 970 | 1,250 | 0 | `20261015_145702_m4_M_old_chord_v6000` |
+| Orbit v1500 | Control | 16.7 / 20.2 / 25.5 | 6.7 | 0.17 | 5 / 93 | 10 | 1,089 / 1,167 | 2,393 / 4,472 | 2,079 | 838 | 1,075 | 0 | `20261015_143639_m4_C_new_orbit_v1500` |
+| Orbit v1500 | **Island M** | 16.7 / 20.2 / 24.9 | 6.9 | 0.46 | 6 / 97 | 10 | 1,127 / 1,213 | 2,475 / 4,540 | 2,067 | 891 | 1,127 | 0 | `20261015_143849_m4_M_new_orbit_v1500` |
+| Orbit v1500 | Control, old window | 16.7 / 21.0 / 26.9 | 7.1 | 0.17 | 8 / 102 | 10 | 1,121 / 1,175 | 2,697 / 4,805 | 2,108 | 859 | 1,095 | 0 | `20261015_143429_m4_C_old_orbit_v1500` |
+| Orbit v1500 | Island M, old window | 16.7 / 23.9 / 30.8 | 9.0 | 0.17 | 14 / 139 | 16 | 1,696 / 1,784 | 3,611 / 7,348 | 3,737 | 1,017 | 1,250 | 0 | `20261015_144101_m4_M_old_orbit_v1500` |
+| Orbit v3000 | Control | 17.3 / 27.2 / 32.7 | 8.6 | 0.17 | 22 / 103 | 10 | 1,069 / 1,138 | 2,393 / 4,472 | 2,082 | 827 | 1,065 | 0 | `20261015_141138_m4_C_new_orbit_v3000` |
+| Orbit v3000 | **Island M** | 16.7 / 27.9 / 34.6 | 9.6 | 0.48 | 26 / 101 | 10 | 1,106 / 1,165 | 2,504 / 4,603 | 2,100 | 893 | 1,118 | 0 | `20261015_141255_m4_M_new_orbit_v3000` |
+| Orbit v3000 | Control, old window | 19.5 / 31.7 / 38.5 | 10.1 | 0.55 | 41 / 133 | 10 | 1,086 / 1,131 | 2,660 / 4,793 | 2,134 | 823 | 1,048 | 0 | `20261015_141022_m4_C_old_orbit_v3000` |
+| Orbit v3000 | Island M, old window | 19.0 / 32.9 / 40.8 | 11.9 | 2.26 | 298 / 417 | 16 | 1,394 / 1,722 | 3,112 / 6,804 | 3,699 | 980 | 1,208 | 0 | `20261015_141417_m4_M_old_orbit_v3000` |
+| Orbit v6000 | Control | 23.9 / 33.7 / 39.3 | 12.9 | 4.01 | 438 / 675 | 10 | 663 / 1,081 | 1,312 / 3,390 | 2,081 | 860 | 1,187 | 0 | `20261015_145855_m4_C_new_orbit_v6000` |
+| Orbit v6000 | **Island M** | 23.7 / 33.5 / 39.9 | 13.0 | 4.48 | 456 / 699 | 10 | 683 / 1,166 | 1,308 / 3,374 | 2,066 | 878 | 1,214 | 0 | `20261015_145953_m4_M_new_orbit_v6000` |
+| Orbit v6000 | Control, old window | 24.3 / 33.4 / 39.7 | 13.3 | 5.38 | 551 / 805 | 10 | 604 / 1,128 | 1,303 / 3,405 | 2,106 | 844 | 1,157 | 0 | `20261015_145759_m4_C_old_orbit_v6000` |
+| Orbit v6000 | Island M, old window | 26.8 / 43.0 / 51.5 | 16.6 | 9.03 | 950 / 1,338 | 67 | 764 / 1,722 | 1,135 / 4,161 | 3,050 | 1,034 | 1,364 | 0 | `20261015_150059_m4_M_old_orbit_v6000` |
+| Coast v1500 | Control | 16.7 / 23.6 / 30.2 | 7.5 | 0.17 | 7 / 82 | 10 | 1,115 / 1,219 | 2,607 / 4,696 | 2,092 | 892 | 1,141 | 0 | `20261015_144513_m4_C_new_coast_v1500` |
+| Coast v1500 | **Island M** | 16.7 / 19.2 / 26.2 | 5.5 | 0.17 | 3 / 78 | 10 | 809 / 1,151 | 1,236 / 2,664 | 1,428 | 896 | 1,125 | 0 | `20261015_144718_m4_M_new_coast_v1500` |
+| Coast v1500 | Control, old window | 16.7 / 24.1 / 30.5 | 7.6 | 0.19 | 10 / 125 | 10 | 1,118 / 1,214 | 2,785 / 4,903 | 2,120 | 917 | 1,166 | 0 | `20261015_144308_m4_C_old_coast_v1500` |
+| Coast v1500 | Island M, old window | 16.7 / 22.3 / 31.9 | 8.2 | 0.17 | 8 / 172 | 22 | 1,197 / 1,736 | 1,680 / 4,096 | 2,416 | 1,012 | 1,243 | 0 | `20261015_144926_m4_M_old_coast_v1500` |
+| Coast v3000 | Control | 19.2 / 32.2 / 37.5 | 10.7 | 0.19 | 37 / 123 | 10 | 1,083 / 1,134 | 2,606 / 4,698 | 2,092 | 897 | 1,146 | 0 | `20261015_141652_m4_C_new_coast_v3000` |
+| Coast v3000 | **Island M** | 16.7 / 26.1 / 32.3 | 8.3 | 0.17 | 12 / 98 | 12 | 780 / 1,120 | 1,236 / 2,663 | 1,427 | 834 | 1,063 | 0 | `20261015_141810_m4_M_new_coast_v3000` |
+| Coast v3000 | Control, old window | 19.2 / 32.1 / 37.4 | 10.6 | 0.33 | 49 / 185 | 10 | 1,076 / 1,149 | 2,769 / 4,886 | 2,118 | 909 | 1,159 | 0 | `20261015_141535_m4_C_old_coast_v3000` |
+| Coast v3000 | Island M, old window | 16.7 / 35.0 / 48.5 | 12.3 | 0.17 | 119 / 461 | 18 | 1,013 / 1,612 | 1,606 / 4,008 | 2,416 | 1,014 | 1,246 | 0 | `20261015_141931_m4_M_old_coast_v3000` |
+| Coast v6000 | Control | 26.4 / 41.8 / 49.8 | 16.9 | 5.59 | 585 / 838 | 18 | 553 / 1,120 | 1,156 / 3,235 | 2,086 | 853 | 1,252 | 0 | `20261015_150254_m4_C_new_coast_v6000` |
+| Coast v6000 | **Island M** | 16.7 / 36.9 / 44.8 | 14.4 | 0.17 | 223 / 642 | 20 | 523 / 1,010 | 1,009 / 2,427 | 1,425 | 872 | 1,101 | 0 | `20261015_150346_m4_M_new_coast_v6000` |
+| Coast v6000 | Control, old window | 26.8 / 39.9 / 46.2 | 16.7 | 6.41 | 622 / 911 | 12 | 541 / 1,151 | 1,166 / 3,234 | 2,076 | 923 | 1,227 | 0 | `20261015_150157_m4_C_old_coast_v6000` |
+| Coast v6000 | Island M, old window | 16.7 / 43.9 / 55.8 | 18.7 | 0.17 | 416 / 1,102 | 217 | 646 / 1,518 | 1,100 / 3,036 | 1,958 | 1,016 | 1,248 | 0 | `20261015_150442_m4_M_old_coast_v6000` |
+
+**Against the §1 thresholds (island M vs the control, both with the new window):**
+
+| Metric (threshold) | Chord v1500 | Chord v3000 | Chord v6000 | Orbit v1500 | Orbit v3000 | Orbit v6000 | Coast v1500 | Coast v3000 | Coast v6000 |
+|---|---|---|---|---|---|---|---|---|---|
+| Frame P95 (+10%) | −2% ✓ | −4% ✓ | −6% ✓ | 0% ✓ | +3% ✓ | 0% ✓ | −19% ✓ | −19% ✓ | −12% ✓ |
+| Manager P95 (+15%) | 0% ✓ | −1% ✓ | −8% ✓ | +3% ✓ | +12% ✓ | +1% ✓ | −27% ✓ | −22% ✓ | −15% ✓ |
+| Catch-up (+25%) | 0.38 vs 0.18 s (+111% ✗) | ends off the island (0.17 vs 0.59 s) | ends off the island (1.68 vs 5.39 s) | 0.46 vs 0.17 s (+171% ✗) | 0.48 vs 0.17 s (+182% ✗) | 4.48 vs 4.01 s (+12% ✓) | ends off the island (0.17 vs 0.17 s) | ends off the island (0.17 vs 0.19 s) | ends off the island (0.17 vs 5.59 s) |
+| Peak loaded chunks (+25%) | −2% ✓ | −1% ✓ | −15% ✓ | +4% ✓ | +2% ✓ | +8% ✓ | −6% ✓ | −1% ✓ | −10% ✓ |
+| Peak voxel MB (+25%) | −20% ✓ | −14% ✓ | −17% ✓ | +6% ✓ | +8% ✓ | +2% ✓ | 0% ✓ | −7% ✓ | +2% ✓ |
+| Systems MB (D3: ≤ 1,500 MB) | 918 MB ✓ | 946 MB ✓ | 1,066 MB ✓ | 1,127 MB ✓ | 1,118 MB ✓ | 1,214 MB ✓ | 1,125 MB ✓ | 1,063 MB ✓ | 1,101 MB ✓ |
+| Audit after settling | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+The island's catch-up on the chord at v3000 and v6000 and on the coast crossing is not comparable: those routes end off
+the island, where nothing is left to load (as in §13.3). The comparable ones are the chord at v1500 (it stops at the
+island's centre) and the perimeter. Repeats, same build, three runs each (the batch's run first):
+
+| Route | Control catch-up s | Island M catch-up s | Island M queued at the stop |
+|-------|--------------------|---------------------|-----------------------------|
+| Chord v1500 (to the centre) | 0.18 / 0.17 / 0.17 | 0.38 / 0.27 / 0.43 | 9-25 chunks |
+| Perimeter v1500 | 0.17 / 0.17 / 0.17 | 0.46 / 0.46 / 0.46 | 46 chunks |
+| Perimeter v3000 | 0.17 / 0.17 / 0.42 | 0.48 / 0.76 / 0.17 | 20-30 chunks |
+| Perimeter v6000 (batch only) | 4.01 | 4.48 (+12%) | |
+
+**Catch-up is missed at low speed, by 0.2-0.3 s:** at v1500 on the chord and the perimeter in every run, and on the
+perimeter at v3000 on average (0.47 against 0.25 s over three runs each, with overlapping ranges). The control drains to
+nothing before it stops (catch-up 0.17 s is the
+metric's floor, ten ticks); the island stops with a standing generation queue and drains it at generation's rate. The
+island's view along the coast and over the lagoons is mostly sea, and a sea column's slab runs from 1.5 chunks under the
+seabed to 1.5 chunks over the water plane, one layer more than a land column's: on the perimeter at v1500 layer −3 holds
+141 chunks against the control's 107, and the island generates 3% more chunks on the route (2,475 against 2,393). v1500
+runs generation at capacity, so that 3% is a standing queue of 20-50 chunks. It is a property of a sea-heavy view, not of
+the window or the island's shape (the old window's island runs carried far larger queues: 1.11 s on the v1500 chord, 2.26 s
+on the v3000 perimeter). At v6000 both sides are generation-bound for seconds and the island is within +12%. Not tuned
+here; the levers would be a thinner slab under the water plane or more generation throughput.
+
+**The control is no worse.** Old window → new, same build:
+
+| Route | Frame P95 ms, old → new | Manager P95 ms | Catch-up s | Peak loaded | LOD re-meshes | Systems MB |
+|---|---|---|---|---|---|---|
+| Chord v1500 | 20.7 → 20.3 | 7.2 → 7.0 | 0.17 → 0.18 | 1,205 → 1,195 | 3,502 → 3,404 | 1,104 → 1,145 |
+| Chord v3000 | 30.2 → 28.4 | 9.7 → 8.8 | 0.61 → 0.59 | 1,151 → 1,153 | 7,117 → 6,952 | 1,106 → 1,117 |
+| Chord v6000 | 34.9 → 36.3 | 13.8 → 13.9 | 5.93 → 5.39 | 1,115 → 1,129 | 6,977 → 6,889 | 1,323 → 1,364 |
+| Orbit v1500 | 21.0 → 20.2 | 7.1 → 6.7 | 0.17 → 0.17 | 1,175 → 1,167 | 2,108 → 2,079 | 1,095 → 1,075 |
+| Orbit v3000 | 31.7 → 27.2 | 10.1 → 8.6 | 0.55 → 0.17 | 1,131 → 1,138 | 2,134 → 2,082 | 1,048 → 1,065 |
+| Orbit v6000 | 33.4 → 33.7 | 13.3 → 12.9 | 5.38 → 4.01 | 1,128 → 1,081 | 2,106 → 2,081 | 1,157 → 1,187 |
+| Coast v1500 | 24.1 → 23.6 | 7.6 → 7.5 | 0.19 → 0.17 | 1,214 → 1,219 | 2,120 → 2,092 | 1,166 → 1,141 |
+| Coast v3000 | 32.1 → 32.2 | 10.6 → 10.7 | 0.33 → 0.19 | 1,149 → 1,134 | 2,118 → 2,092 | 1,159 → 1,146 |
+| Coast v6000 | 39.9 → 41.8 | 16.7 → 16.9 | 6.41 → 5.59 | 1,151 → 1,120 | 2,076 → 2,086 | 1,227 → 1,252 |
+
+At v6000 the batch's single runs showed frame P95 +4-5% on the chord and the coast with manager time unchanged, so both
+were repeated twice more, old and new interleaved: chord frame P95 36.5 → 36.3 ms (means of three), manager P95 14.3 →
+13.9 ms, catch-up 6.30 → 5.68 s; coast 42.4 → 42.4 ms, 17.5 → 17.2 ms, 6.51 → 5.78 s. The control loses layer 3 and part of
+layer 2 near the viewer (air the old −2..+8 window kept within 16,600 uu) and gains a little ground at the edge of the view
+from the horizontal horizon; peak loaded moves −4% to +1%. Its balanced-LOD cache rebuild is cheaper (`LODUpdateMs` P50
+0.46 against 0.80 ms at v3000, 0.90 against 1.56 at v6000).
+
+**What M4 did for the island** (island M, old window → new, same build):
+
+| Route | Frame P95 ms, old → new | Manager P95 ms | Peak loaded | Loaded mean | Generated / meshed | LOD re-meshes | Peak voxel MB | Systems MB |
+|---|---|---|---|---|---|---|---|---|
+| Chord v1500 | 23.6 → 19.9 | 9.8 → 7.0 | 1,750 → 1,170 | 1,598 → 1,051 | 5,718 / 11,458 → 3,914 / 7,229 | 5,768 → 3,317 | 926 → 713 | 1,135 → 918 |
+| Chord v3000 | 36.3 → 27.4 | 12.0 → 8.7 | 1,644 → 1,147 | 1,326 → 1,037 | 9,848 / 21,344 → 7,573 / 14,329 | 11,522 → 6,756 | 934 → 742 | 1,150 → 946 |
+| Chord v6000 | 39.7 → 34.0 | 14.7 → 12.7 | 1,165 → 965 | 543 → 530 | 4,267 / 12,443 → 4,592 / 11,326 | 8,176 → 6,734 | 970 → 710 | 1,250 → 1,066 |
+| Orbit v1500 | 23.9 → 20.2 | 9.0 → 6.9 | 1,784 → 1,213 | 1,696 → 1,127 | 3,611 / 7,348 → 2,475 / 4,540 | 3,737 → 2,067 | 1,017 → 891 | 1,250 → 1,127 |
+| Orbit v3000 | 32.9 → 27.9 | 11.9 → 9.6 | 1,722 → 1,165 | 1,394 → 1,106 | 3,112 / 6,804 → 2,504 / 4,603 | 3,699 → 2,100 | 980 → 893 | 1,208 → 1,118 |
+| Orbit v6000 | 43.0 → 33.5 | 16.6 → 13.0 | 1,722 → 1,166 | 764 → 683 | 1,135 / 4,161 → 1,308 / 3,374 | 3,050 → 2,066 | 1,034 → 878 | 1,364 → 1,214 |
+| Coast v1500 | 22.3 → 19.2 | 8.2 → 5.5 | 1,736 → 1,151 | 1,197 → 809 | 1,680 / 4,096 → 1,236 / 2,664 | 2,416 → 1,428 | 1,012 → 896 | 1,243 → 1,125 |
+| Coast v3000 | 35.0 → 26.1 | 12.3 → 8.3 | 1,612 → 1,120 | 1,013 → 780 | 1,606 / 4,008 → 1,236 / 2,663 | 2,416 → 1,427 | 1,014 → 834 | 1,246 → 1,063 |
+| Coast v6000 | 43.9 → 36.9 | 18.7 → 14.4 | 1,518 → 1,010 | 646 → 523 | 1,100 / 3,036 → 1,009 / 2,427 | 1,958 → 1,425 | 1,016 → 872 | 1,248 → 1,101 |
+
+Loaded chunks per layer, mean over the v3000 chord: the old window kept every layer full (−3: 188, −2: 195, −1: 198, 0: 198,
+1: 192, 2: 185, 3: 169); the new one keeps the control's shape (−3: 100, −2: 227, −1: 230, 0: 230, 1: 228, 2: 24; the
+control: −3: 92, −2: 239, −1: 242, 0: 242, 1: 240, 2: 26). KI5's excess layers are gone.
+
+**Flights at z 7,200** (`start=-250000:0:7200 dir=1:0`, 150,000 uu at v3000, no `follow`):
+
+| Run | Window | Loaded per layer, mean | Peak loaded | Frame P95 / manager P95 ms | Catch-up s | Systems MB | JSON |
+|-----|--------|------------------------|-------------|----------------------------|------------|------------|------|
+| Control | old | −1: 228, 0: 240, 1: 243, 2: 34, 3: 33 | 1,026 | 21.3 / 5.9 | 0.17 | 1,006 | `20261015_150556_m4_C_old_fly` |
+| Control | **new** | −3: 96, −2: 241, −1: 242, 0: 243, 1: 244, 2: 34, 3: 33 | 1,212 | 23.1 / 7.2 | 0.18 | 1,066 | `20261015_150827_m4_C_new_fly` |
+| Island M | old | −1: 220, 0: 221, 1: 222, 2: 221, 3: 220 | 1,230 | 24.3 / 7.5 | 0.63 | 1,181 | `20261015_150709_m4_M_old_fly` |
+| **Island M** | **new** | −3: 114, −2: 219, −1: 220, 0: 221, 1: 222, 2: 30, 3: 30 | 1,218 | 24.4 / 7.5 | 0.63 | 904 | `20261015_150943_m4_M_new_fly` |
+
+G13 is fixed: with the old window neither side streamed anything below layer −1 at this altitude, the island kept full
+air layers 2 and 3, and the control lost its valleys. Now both keep the ground (layers −3 and −2) and only the air the
+slab or the mountains need. The flights cost the work the old window skipped (control manager P95 5.9 → 7.2 ms); island
+against control, frame +6% and manager +5%, peak loaded +0.5%. The flight ends 100,000 uu inside the island, so its
+catch-up is comparable: 0.63 s against 0.18, the same sea-view effect as above.
+
+**Fully resident S, and the views from 48,000 uu** (fresh world at the spawn; settled = 75 s idle so far compression has
+run, then `voxel.FarCompression.Stats` and a zero-length bench; "48,000 uu up" = a zero-length bench whose viewer is
+(0, 0, 48,000), started after the spawn's load):
+
+| Run | Window | Loaded chunks | Voxel MB settled (resident / uniform / compressed chunks) | Renderer GPU MB | Collision / scatter MB | Voxel systems MB settled | Audit | JSON |
+|-----|--------|---------------|-----------------------------------------------------------|-----------------|------------------------|--------------------------|-------|------|
+| Control at its spawn | old | 1,026 | 133.4 (112 / 63 / 851) | 23 | 102 / 92 | 359 | 0 | `20261015_155301_m4_C_old_settled` |
+| Control at its spawn | **new** | 979 | 127.3 (106 / 47 / 826) | 23 | 101 / 90 | 352 | 0 | `20261015_155612_m4_C_new_settled` |
+| S at its spawn | old | 1,512 | 248.1 (224 / 96 / 1,192) | 23 | 99 / 93 | 483 | 0 | `20261015_155436_m4_S_old_settled` |
+| **S at its spawn** | **new** | **1,020** | **125.7 (105 / 63 / 852)** | 21 | 96 / 93 | **336** | 0 | `20261015_155747_m4_S_new_settled` |
+| Control, 48,000 uu up | old | 626 mean, falling (3D horizon: everything unloads) | | | | | 248 (still unloading) | `20261015_151126_m4_C_old_high` |
+| Control, 48,000 uu up | **new** | 979 (the ground keeps the spawn's disk) | | | | | 0 | `20261015_151209_m4_C_new_high` |
+| S, 48,000 uu up | old | 1,512 (what the spawn loaded; the window, layers 8-14, held no terrain, so nothing new would load) | | | | | 0 | `20261015_151150_m4_S_old_high` |
+| **S, 48,000 uu up** | **new** | **1,020, the whole island** | | | | | 0 | `20261015_151230_m4_S_new_high` |
+
+- **I3 again:** the whole of S is resident from the centre in 1,020 chunks (review B: 1,518), 336 MB settled, the same as
+  the control at its spawn (352 MB). The near-band excess of KI13 is gone: 105 uncompressed chunks against the control's
+  106.
+- **I2 again:** a survey camera 48,000 uu over S's centre sees the whole island, lagoons included, with no blank chunk
+  rectangles (`m4_I2_S_from_48000_new`; review B's §13.1 I2 saw them). §13.11 suspected chunks that never streamed; with
+  the window above the terrain they could not.
+
+**The D3 budget is met on every run.**
+
+| Budget (D3) | Measured |
+|-------------|----------|
+| 0.6 GB of voxel systems memory settled for a fully resident S-class island | 336 MB (the old window: 483 MB; review B: about 0.5 GB) |
+| At most 1.5 GB at peak while streaming, any speed and tier | Island M 858-1,214 MB over its 16 runs with the new window (routes, repeats, the flight) and 1,135-1,364 MB with the old one; M's v6000 chord 1,066 MB (review B: 1,552, the one miss); the control 1,065-1,364 MB |
+
+**What changes in §13.** I3 passes with the numbers above. I4's verdict ("Refine inside the island, Bug along the coast")
+becomes **Pass except catch-up at v1500**: the island meets frame, manager, peak-loaded and memory thresholds on the chord,
+the perimeter and the coast at every speed, the coast included (frame −12% to −19% of the control there, manager −15% to
+−27%). KI5, KI11 and KI13 are fixed (§13.6), G13 too (§13.11); §13.4's budget is met with room; §13.8's "island-specific
+costs (KI5, KI13, the coast) are per view" now leaves only the sea-view generation cost above.
+
+**Left for later milestones**, as planned: cubic (M5), the visible edge and map tile eviction (M6), and spherical Phase 1,
+which takes the window's shape: `GetColumnWindow`'s planet branch becomes a shell around the surface (SP-C1). Things to
+know:
+
+- A viewer high over a heightmap world keeps and streams the ground disk under it (the horizon is horizontal), at the
+  coarsest LOD; a 3D horizon used to empty the world from 40,000 uu up.
+- `bFarBandSurfaceSlabCulling` keeps its name; it now means the slab at every distance. Off, every column streams the
+  whole height range.
+- `IVoxelWorldMode::GetSurfaceRange` has a default, so a world mode outside VoxelWorlds (the dungeon plugin's, a test
+  mock) works unchanged: heightmap modes sample their own height, others give the whole height range.
+- The near window's extra layers unload as soon as their column leaves the near radius, as the old slab gate did.

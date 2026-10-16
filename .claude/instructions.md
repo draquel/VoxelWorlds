@@ -75,6 +75,7 @@ class IVoxelWorldMode {
     virtual float GetDensityAt(const FVector& WorldPos, int32 LODLevel, float NoiseValue) const = 0;
     virtual float GetTerrainHeightAt(float X, float Y, const FVoxelNoiseParams& NoiseParams) const = 0;
     virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const;   // authority for vertical culling
+    virtual FFloatInterval GetSurfaceRange(const FVector2D& MinXY, const FVector2D& MaxXY, const FVoxelNoiseParams&) const; // per-column streaming window (D8)
     // Bounds and local frame (world modes review WM-A2; spherical SP-A1/SP-A2)
     virtual bool IsInsideWorld(double X, double Y) const;
     virtual FVoxelWorldBounds GetWorldBounds() const;

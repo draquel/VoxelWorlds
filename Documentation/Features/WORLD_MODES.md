@@ -20,6 +20,8 @@ public:
     virtual float GetDensityAt(const FVector& WorldPos, int32 LODLevel, float NoiseValue) const = 0;
     virtual float GetTerrainHeightAt(float X, float Y, const FVoxelNoiseParams& NoiseParams) const = 0;
     virtual void  GetTerrainHeightBounds(float& OutMin, float& OutMax) const;   // authority for vertical culling
+    virtual FFloatInterval GetSurfaceRange(const FVector2D& MinXY, const FVector2D& MaxXY,
+                                           const FVoxelNoiseParams& NoiseParams) const; // a column's slab (WM-S1)
     virtual void  SetBiomeContext(const UVoxelBiomeConfiguration* BiomeConfig); // continentalness, by value
 
     // Where the world ends (WM-A2)
@@ -86,9 +88,12 @@ float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos,
 }
 ```
 
-### LOD Culling
-- **Terrain Bounds Culling**: Chunks above `TerrainMaxHeight` or below `TerrainMinHeight` are skipped
-- Height range: `SeaLevel + BaseHeight ± HeightScale` with buffer for noise variation
+### Streaming window and LOD
+- **Vertical window from the terrain** (decision D8, M4): every chunk column streams its own surface slab (the world mode's
+  `GetSurfaceRange` over the footprint ± 1.5 chunks, up to the water plane) at every distance, plus the viewer's layer ± 2
+  in the columns within band 0 + two chunks; all clipped to `GetTerrainHeightBounds` + one chunk. The viewer's altitude
+  never removes the ground. Details: `Features/LOD_SYSTEM.md`, "The Vertical Window"
+- **Horizon** (load at the view distance, unload at 1.2×) is measured horizontally; **LOD distance** in 3D
 
 ### Use Cases
 - Traditional Minecraft-style worlds
@@ -104,7 +109,8 @@ Bounded terrain with a falloff at the edges, for a contained world: an island in
 low floor. Reviewed as a "large but finite world" with every game system on in 2026-10 (WORLD_MODES_REVIEW_PLAN.md §5,
 §13). The terrain itself is correct; the gaps were around it. Milestone M3 (2026-10-15, that plan's §14.7) keeps placement,
 exploration, markers, PCG, navigation and spawning inside the island and gives it a hard edge with recovery; what is left
-is streaming cost (M4) and a visible edge (M6). See "Beyond the edge", "Measured" and "Known gaps" below.
+was streaming cost, fixed by M4 (2026-10-15, §14.8: the island now streams like the plane), and a visible edge (M6). See
+"Beyond the edge", "Measured" and "Known gaps" below.
 
 ### Configuration (UVoxelWorldConfiguration)
 ```cpp
@@ -241,14 +247,34 @@ The visible edge (an ocean to the horizon, a seabed that slopes instead of the c
   - Circular: chunks whose centre is farther than `IslandRadius + FalloffWidth + chunk diagonal` are skipped
   - Rectangle: chunks beyond `IslandRadius + FalloffWidth + half a chunk` in X, or `IslandSizeY + FalloffWidth + half a
     chunk` in Y, are skipped
-- **No far-band surface slab.** `bFarBandSurfaceSlabCulling` is InfinitePlane-only, so every island column keeps the
-  whole height range (7-8 layers against the plane's 3-4 past band 0; KI5, work item WM-S1)
-- **LOD distance is 2D** (height ignored), so whole columns sit in the near bands and stay uncompressed (KI13); the
-  residency audit measures 3D and reports false findings in the top and bottom layers (KI11; work item WM-S2)
-- Vertical window: the viewer's layer -2 to +4 (InfinitePlane: -2 to +8)
+- **The same streaming window as Infinite Plane** (M4, 2026-10-15): each column's surface slab at every distance, the
+  viewer's layer ± 2 near the viewer, the horizon measured horizontally and LOD distance in 3D. Until M4 islands had no
+  slab (every column kept 7-8 layers; KI5), measured LOD distance in 2D (whole columns stayed in the near bands,
+  uncompressed; KI13), and the residency audit, measuring 3D, reported false findings (KI11). The floor ring beyond
+  R + F keeps its slab too: the floor, up to the water plane
+
+### Measured after M4 (2026-10-15)
+The same routes as review B, one batch on one build, island M against the control at v1500, v3000 and v6000
+(WORLD_MODES_REVIEW_PLAN.md §14.8):
+
+| Measure | Island | Control |
+|---------|--------|---------|
+| Settled at the spawn: loaded chunks | S: 1,020 (the whole island) | 979 |
+| Peak loaded chunks on M's routes | 965-1,218 (−15% to +8% of the control) | 1,081-1,219 |
+| Frame P95, chord / perimeter / coast | −19% to +3% | |
+| Manager P95, chord / perimeter / coast | −27% to +12% | |
+| Peak voxel systems memory while streaming | 0.86-1.21 GB | 1.07-1.36 GB |
+| Residency audit after every run | 0 | 0 |
+
+- **The island streams like the plane.** Every column keeps its surface slab, so the layers above and below the
+  terrain no longer load (on the v3000 chord the island held 169-198 chunks in each of layers −3 to 3; now 24-230,
+  the control's shape).
+- **Catch-up after stopping** is the one threshold missed: at v1500 the island stops with 10-50 chunks still queued
+  (0.27-0.46 s to drain against the control's 0.17-0.18 s), because its sea-heavy view needs about 3% more
+  generation than the control's route and v1500 sits at generation capacity. At v3000 and v6000 the two overlap.
 
 ### Measured (review B, 2026-10-13)
-Focused PIE against the InfinitePlane control (`DemoSmoothWorldConfig`) on the same routes; details in
+Before M4. Focused PIE against the InfinitePlane control (`DemoSmoothWorldConfig`) on the same routes; details in
 WORLD_MODES_REVIEW_PLAN.md §13.3-13.5. Tiers: S, M and L are 0.8, 5 and 10 km across (R + F = 40,000, 250,000 and
 500,000 uu).
 
@@ -285,7 +311,9 @@ Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
   and the world starts fresh (KI7).
 - ~~**Spawn off the island with water off**~~ Fixed by WM-I3 (2026-10-15): the spawn search only accepts points inside
   the bounds, and a start outside searches from a chunk inside the edge (KI8).
-- **Streaming cost** (no far-band slab, 2D LOD distance; KI5, KI13; M4) and **map tile eviction** (KI15; WM-E2).
+- ~~**Streaming cost**~~ Fixed by WM-S1 and WM-S2 (2026-10-15): the surface slab at every distance and 3D LOD distance
+  (KI5, KI13); the residency audit agrees with the unload rule (KI11). See "Measured after M4".
+- **Map tile eviction** (KI15; WM-E2).
 
 ### Use Cases
 - Floating islands
@@ -436,14 +464,14 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 
 ## Performance Comparison
 
-Measured on the demo's geometry (voxel 75 uu, 64-voxel chunks, view distance 40,000 uu) in the world modes review,
-2026-10-13 (WORLD_MODES_REVIEW_PLAN.md §12-§13). The old table here (200-500 chunks) was never measured.
+Measured on the demo's geometry (voxel 75 uu, 64-voxel chunks, view distance 40,000 uu) in the world modes review
+(WORLD_MODES_REVIEW_PLAN.md §12-§14). The old table here (200-500 chunks) was never measured.
 
 | Mode | Loaded chunks, settled at the spawn | Peak loaded while streaming | Notes |
 |------|-------------------------------------|-----------------------------|-------|
-| Infinite Plane (smooth) | 1,123 | 1,177-1,282 | Far-band surface slab: 3-4 layers per column past band 0 |
-| Infinite Plane, cubic | 1,123 | 1,194-1,246 | Same window; every chunk at full detail (LOD forced off, D7) |
-| Island/Bowl | S: 1,518 (the whole island) | M: 1,534-1,984 | No slab yet: 7-8 layers per column (KI5) |
+| Infinite Plane (smooth) | 979 (M4) | 1,081-1,219 (M4) | Each column's surface slab at every distance, the viewer's layer ± 2 nearby (§14.8) |
+| Infinite Plane, cubic | 1,123 (before M4) | 1,194-1,246 (before M4) | Same window as smooth; every chunk at full detail (LOD forced off, D7). Not re-measured since M4 |
+| Island/Bowl | S: 1,020, the whole island (M4; 1,518 before) | M: 965-1,218 (M4; 1,534-1,984 before) | The same window as Infinite Plane since M4 |
 | Spherical Planet | not measured | not measured | CPU-only prototype |
 
 All modes benefit from the streaming optimizations:
