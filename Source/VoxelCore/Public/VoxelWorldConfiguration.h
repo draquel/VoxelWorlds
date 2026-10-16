@@ -306,12 +306,14 @@ public:
 	float ViewDistance = 10000.0f;
 
 	/**
-	 * Far-band surface-slab culling: beyond the FIRST (full-detail) LOD band, a column only
-	 * loads the chunks intersecting its OWN analytic surface height (± 2 chunks of slack)
-	 * instead of the world's full min–max height range — cutting the per-column chunk count
-	 * roughly 3× at distance, which is what makes long view distances affordable. Distant cave
-	 * interiors and deep player edits stay unloaded until the full-detail band reaches them
-	 * (they are not visible from afar). InfinitePlane worlds only; other modes ignore this.
+	 * Surface-slab culling (heightmap worlds: InfinitePlane and IslandBowl): every column loads only the chunks around
+	 * its OWN analytic surface height (± 1.5 chunks of slack, and up to the water plane) at every distance, instead of
+	 * the world's full min–max height range, plus the viewer's own layer ± 2 in the columns near the viewer (the first
+	 * LOD band plus two chunk widths), for caves, dungeons and digging. That cuts a column from the 8 layers of the
+	 * demo's height range to 4-5 and keeps the ground streamed whatever the viewer's altitude (world modes review D8).
+	 * Cave interiors and edits deeper than the slab load only near the viewer (edited chunks are also pinned within the
+	 * view distance). Off: every column loads the whole height range. The name predates D8, when the slab applied
+	 * beyond the first band only.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	bool bFarBandSurfaceSlabCulling = true;
@@ -361,9 +363,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "0.5", ClampMax = "16"))
 	float StreamingTimeSliceMS = 4.0f;
 
-	/** Maximum number of chunks to keep loaded */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming", meta = (ClampMin = "100", ClampMax = "50000"))
-	int32 MaxLoadedChunks = 5000;
+	// There is no chunk-count cap (MaxLoadedChunks was never read; world modes review WM-S3). Residency is bounded by
+	// geometry: the view distance (unload at ViewDistance x 1.2, measured horizontally in heightmap worlds), each
+	// column's vertical window (its surface slab, plus the viewer's layer +-2 near the viewer; the terrain's height
+	// bounds), the island's footprint (R + falloff + a chunk diagonal), and edited chunks pinned out to the unload
+	// distance. See Documentation/Features/LOD_SYSTEM.md, "What Bounds Residency".
 
 	// ==================== Meshing Settings ====================
 

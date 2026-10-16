@@ -185,6 +185,41 @@ public:
 		OutMax = 1.0e9f;
 	}
 
+	/**
+	 * The terrain surface's vertical extent over one patch of the world (a chunk column's footprint): the lowest and
+	 * highest surface height there, in world Z. The streaming window (VoxelLOD) keeps every column's chunks around this
+	 * range at every distance, so a column streams its own ground whatever the viewer's altitude (world modes review
+	 * D8, WM-S1). On a planet the same window is an altitude band around the surface (spherical SP-C1, Phase 1).
+	 *
+	 * Default: heightmap modes sample GetTerrainHeightAt at the footprint's four corners and its centre (variation
+	 * between the samples is the caller's slack); other modes return GetTerrainHeightBounds, the whole range. Cost: five
+	 * height samples, so callers memoize per column.
+	 *
+	 * @param MinXY Footprint minimum corner (world X, Y)
+	 * @param MaxXY Footprint maximum corner (world X, Y)
+	 * @param NoiseParams Terrain noise parameters, as for GetTerrainHeightAt
+	 * @return [lowest, highest] surface height over the footprint, world Z
+	 */
+	virtual FFloatInterval GetSurfaceRange(const FVector2D& MinXY, const FVector2D& MaxXY, const FVoxelNoiseParams& NoiseParams) const
+	{
+		if (!IsHeightmapBased())
+		{
+			float Min = 0.0f, Max = 0.0f;
+			GetTerrainHeightBounds(Min, Max);
+			return FFloatInterval(Min, Max);
+		}
+		const FVector2D Samples[5] = {
+			MinXY, FVector2D(MaxXY.X, MinXY.Y), FVector2D(MinXY.X, MaxXY.Y), MaxXY, (MinXY + MaxXY) * 0.5 };
+		FFloatInterval Range(TNumericLimits<float>::Max(), TNumericLimits<float>::Lowest());
+		for (const FVector2D& Sample : Samples)
+		{
+			const float Height = GetTerrainHeightAt(static_cast<float>(Sample.X), static_cast<float>(Sample.Y), NoiseParams);
+			Range.Min = FMath::Min(Range.Min, Height);
+			Range.Max = FMath::Max(Range.Max, Height);
+		}
+		return Range;
+	}
+
 	// ==================== World Bounds (WM-A2) ====================
 	// The defaults describe an unbounded heightmap world with its datum at Z 0, so a mode that does not override them
 	// (a game plugin's own mode, a test mock) keeps working. The built-in modes override them.

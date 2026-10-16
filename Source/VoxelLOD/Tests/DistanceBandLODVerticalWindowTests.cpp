@@ -3,28 +3,43 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "DistanceBandLODStrategy.h"
+#include "IVoxelWorldMode.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelWorldModeFactory.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 // ---------------------------------------------------------------------------
-// The vertical candidate window (WORLD_MODES_REVIEW_PLAN.md §13.11). Pure logic, runs headless.
+// The streaming window (WORLD_MODES_REVIEW_PLAN.md D8, WM-S1 and WM-S2). Pure logic, runs headless.
 //
-// Each world mode streams the chunk layers from the viewer's layer + MinVerticalChunks to the viewer's
-// layer + MaxVerticalChunks (InfinitePlane -2..+8, IslandBowl -2..+4), clipped to the terrain's height
-// bounds. GetVerticalChunkRange returns those layers as absolute values, and the candidate loops in
-// GetVisibleChunks and RebuildBalancedLODCache added the viewer's layer a second time: a viewer on
-// layer L got 2L-2..2L+8. On layer 0 that is the same window, so it went unnoticed; above or below it
-// the window slid twice as far as the viewer (a camera at z 4,800 lost every layer below 0).
+// Heightmap worlds (InfinitePlane, IslandBowl) used to stream the viewer's layer -2..+8 (island +4), so a viewer above
+// layer 0 lost the ground below it (G13) and islands kept every layer of every column (no slab, KI5). Now every column
+// streams its own surface slab at every distance (the world mode's surface ± 1.5 chunks, up to the water plane), plus
+// the viewer's layer ± 2 in the columns near the viewer; the horizon is horizontal, so altitude never removes the
+// ground. LOD distance is 3D in every mode (islands were 2D, KI13). §13.11's fix (absolute layers, the viewer's layer
+// added once) still shapes the planet's viewer-relative window.
 // ---------------------------------------------------------------------------
 
 namespace VerticalWindowTestHelpers
 {
+	/** Exposes the window and the bounds for the tests. */
+	class FProbeStrategy : public FDistanceBandLODStrategy
+	{
+	public:
+		using FDistanceBandLODStrategy::GetColumnWindow;
+		using FDistanceBandLODStrategy::MinVerticalChunks;
+		using FDistanceBandLODStrategy::MaxVerticalChunks;
+		using FDistanceBandLODStrategy::TerrainMinHeight;
+		using FDistanceBandLODStrategy::TerrainMaxHeight;
+	};
+
+	constexpr float ChunkWorldSize = 4800.0f;
+
 	/**
-	 * The demo's chunk geometry and bands, with a height scale so large that the terrain-bounds cull
-	 * covers hundreds of layers: the vertical window alone decides which layers are candidates.
+	 * The demo's chunk geometry, bands and water, with real terrain noise; an island far larger than the view, centred
+	 * on the viewer's column, so only the window decides.
 	 */
-	UVoxelWorldConfiguration* MakeConfig(EWorldMode WorldMode)
+	UVoxelWorldConfiguration* MakeConfig(EWorldMode WorldMode, bool bSlab = true)
 	{
 		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
 		Config->WorldMode = WorldMode;
@@ -39,10 +54,13 @@ namespace VerticalWindowTestHelpers
 			FLODBand(14000.0f, 40000.0f, 2, 4) };
 		Config->SeaLevel = 0.0f;
 		Config->BaseHeight = 0.0f;
-		Config->HeightScale = 1.0e6f;
-		Config->bFarBandSurfaceSlabCulling = false;
+		Config->HeightScale = 8000.0f;
+		Config->NoiseParams.Seed = 1337;
+		Config->NoiseParams.Frequency = 0.00005f;
+		Config->bEnableWaterLevel = true;
+		Config->WaterLevel = -1500.0f;
+		Config->bFarBandSurfaceSlabCulling = bSlab;
 		Config->bEnableFrustumCulling = false;
-		// Island: an island far larger than the view, centred on the viewer's column.
 		Config->IslandRadius = 1.0e6f;
 		Config->IslandFalloffWidth = 1000.0f;
 		Config->IslandCenterX = 0.0f;
@@ -50,67 +68,298 @@ namespace VerticalWindowTestHelpers
 		return Config;
 	}
 
-	/** Viewer at the centre of chunk (0, 0, Layer) of the 4,800 uu grid. */
-	FLODQueryContext MakeContext(EWorldMode WorldMode, int32 Layer)
+	/** Viewer above the centre of column (0, 0), in the middle of chunk layer Layer. */
+	FLODQueryContext MakeContext(EWorldMode WorldMode, int32 Layer, const FVector2D& XY = FVector2D(2400.0, 2400.0))
 	{
 		FLODQueryContext Context;
-		Context.ViewerPosition = FVector(2400.0f, 2400.0f, Layer * 4800.0f + 2400.0f);
+		Context.ViewerPosition = FVector(XY.X, XY.Y, Layer * ChunkWorldSize + 2400.0f);
 		Context.ViewDistance = 40000.0f;
 		Context.WorldMode = WorldMode;
 		return Context;
 	}
 
-	/** Lowest and highest chunk layer among the strategy's visible chunks. */
-	void VisibleLayerRange(FDistanceBandLODStrategy& Strategy, const FLODQueryContext& Context, int32& OutMin, int32& OutMax)
+	/** Layers overlapping [Lo, Hi] (touching counts), as the strategy defines them. */
+	void Layers(double Lo, double Hi, int32& OutMin, int32& OutMax)
+	{
+		OutMin = FMath::CeilToInt32(Lo / ChunkWorldSize) - 1;
+		OutMax = FMath::FloorToInt32(Hi / ChunkWorldSize);
+	}
+
+	TSet<FIntVector> Visible(FDistanceBandLODStrategy& Strategy, const FLODQueryContext& Context)
 	{
 		Strategy.Update(Context, 1.0f / 60.0f);
-		OutMin = INT32_MAX;
-		OutMax = INT32_MIN;
+		TSet<FIntVector> Result;
 		for (const FChunkLODRequest& Request : Strategy.GetVisibleChunks(Context))
 		{
-			OutMin = FMath::Min(OutMin, Request.ChunkCoord.Z);
-			OutMax = FMath::Max(OutMax, Request.ChunkCoord.Z);
+			Result.Add(Request.ChunkCoord);
 		}
+		return Result;
+	}
+
+	double ColumnDistance(int32 X, int32 Y, const FVector& Viewer)
+	{
+		return FVector2D::Distance(FVector2D((X + 0.5) * ChunkWorldSize, (Y + 0.5) * ChunkWorldSize), FVector2D(Viewer.X, Viewer.Y));
 	}
 }
 
 /**
- * The window follows the viewer one layer per layer: viewer layer L streams L-2..L+8 (InfinitePlane) and
- * L-2..L+4 (IslandBowl), on layer 0 and away from it, above and below.
+ * The candidates are exactly the terrain window, at every viewer altitude: every column within the horizon gets its own
+ * surface slab (computed here from the world mode, independently of the strategy), and the columns within band 0 plus
+ * two chunks also get the viewer's layer ± 2; both clipped to the terrain's height bounds. A viewer 48,000 uu up still
+ * streams the ground (G13).
  */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODVerticalWindowFollowsViewerTest,
-	"VoxelWorlds.LOD.VerticalWindow.FollowsViewerLayer",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODVerticalWindowFromTerrainTest,
+	"VoxelWorlds.LOD.VerticalWindow.FromTerrain",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FLODVerticalWindowFollowsViewerTest::RunTest(const FString& Parameters)
+bool FLODVerticalWindowFromTerrainTest::RunTest(const FString& Parameters)
 {
 	using namespace VerticalWindowTestHelpers;
 
-	struct FModeCase
-	{
-		EWorldMode Mode;
-		const TCHAR* Name;
-		int32 Below;
-		int32 Above;
-	};
-	const FModeCase Modes[] = {
-		{ EWorldMode::InfinitePlane, TEXT("InfinitePlane"), -2, 8 },
-		{ EWorldMode::IslandBowl, TEXT("IslandBowl"), -2, 4 },
-	};
-	const int32 ViewerLayers[] = { -3, -1, 0, 1, 5 };
+	const EWorldMode Modes[] = { EWorldMode::InfinitePlane, EWorldMode::IslandBowl };
+	const int32 ViewerLayers[] = { 0, -3, -1, 1, 10 }; // layer 0 first: the baseline for the far columns
+	const float NearRadius = 7000.0f + 2.0f * ChunkWorldSize;
+	const double Slack = 1.5 * ChunkWorldSize;
 
-	for (const FModeCase& Case : Modes)
+	for (const EWorldMode Mode : Modes)
 	{
-		FDistanceBandLODStrategy Strategy;
-		Strategy.Initialize(MakeConfig(Case.Mode));
+		const TCHAR* ModeName = (Mode == EWorldMode::IslandBowl) ? TEXT("IslandBowl") : TEXT("InfinitePlane");
+		UVoxelWorldConfiguration* Config = MakeConfig(Mode);
+		FProbeStrategy Strategy;
+		Strategy.Initialize(Config);
+		const TSharedRef<IVoxelWorldMode> World = FVoxelWorldModeFactory::Create(*Config);
+
+		int32 BoundsMin = 0, BoundsMax = -1;
+		Layers(Strategy.TerrainMinHeight, Strategy.TerrainMaxHeight, BoundsMin, BoundsMax);
+		TestTrue(*FString::Printf(TEXT("%s: the height bounds span several layers (%d..%d)"), ModeName, BoundsMin, BoundsMax), BoundsMax - BoundsMin >= 4);
+
+		TSet<FIntVector> FarAtLayer0;
 		for (const int32 Layer : ViewerLayers)
 		{
-			int32 MinZ = 0, MaxZ = 0;
-			VisibleLayerRange(Strategy, MakeContext(Case.Mode, Layer), MinZ, MaxZ);
-			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: lowest candidate layer"), Case.Name, Layer), MinZ, Layer + Case.Below);
-			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: highest candidate layer"), Case.Name, Layer), MaxZ, Layer + Case.Above);
+			const FLODQueryContext Context = MakeContext(Mode, Layer);
+			const TSet<FIntVector> Got = Visible(Strategy, Context);
+
+			TSet<FIntVector> Expected;
+			for (int32 X = -10; X <= 10; ++X)
+			{
+				for (int32 Y = -10; Y <= 10; ++Y)
+				{
+					const double Distance = ColumnDistance(X, Y, Context.ViewerPosition);
+					if (Distance > 40000.0)
+					{
+						continue;
+					}
+					const FFloatInterval Surface = World->GetSurfaceRange(
+						FVector2D(X * ChunkWorldSize, Y * ChunkWorldSize), FVector2D((X + 1) * ChunkWorldSize, (Y + 1) * ChunkWorldSize), Config->NoiseParams);
+					int32 SlabMin = 0, SlabMax = -1;
+					Layers(Surface.Min - Slack, FMath::Max(Surface.Max, Config->WaterLevel) + Slack, SlabMin, SlabMax);
+					for (int32 Z = FMath::Max(SlabMin, BoundsMin); Z <= FMath::Min(SlabMax, BoundsMax); ++Z)
+					{
+						Expected.Add(FIntVector(X, Y, Z));
+					}
+					if (Distance <= NearRadius)
+					{
+						for (int32 Z = FMath::Max(Layer - 2, BoundsMin); Z <= FMath::Min(Layer + 2, BoundsMax); ++Z)
+						{
+							Expected.Add(FIntVector(X, Y, Z));
+						}
+					}
+				}
+			}
+
+			int32 Missing = 0, Extra = 0;
+			for (const FIntVector& C : Expected) { Missing += Got.Contains(C) ? 0 : 1; }
+			for (const FIntVector& C : Got) { Extra += Expected.Contains(C) ? 0 : 1; }
+			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: window chunks not streamed"), ModeName, Layer), Missing, 0);
+			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: chunks streamed outside the window"), ModeName, Layer), Extra, 0);
+			TestTrue(*FString::Printf(TEXT("%s, viewer on layer %d: candidates"), ModeName, Layer), Got.Num() > 1000);
+
+			// What the far columns stream does not depend on the viewer's altitude at all.
+			TSet<FIntVector> Far;
+			for (const FIntVector& C : Got)
+			{
+				if (ColumnDistance(C.X, C.Y, Context.ViewerPosition) > NearRadius)
+				{
+					Far.Add(C);
+				}
+			}
+			if (Layer == 0)
+			{
+				FarAtLayer0 = Far;
+			}
+			else
+			{
+				int32 FarDiffers = 0;
+				for (const FIntVector& C : Far) { FarDiffers += FarAtLayer0.Contains(C) ? 0 : 1; }
+				FarDiffers += FMath::Abs(FarAtLayer0.Num() - Far.Num());
+				TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: far chunks that differ from a viewer on layer 0"), ModeName, Layer), FarDiffers, 0);
+			}
 		}
 	}
+	return true;
+}
+
+/**
+ * The keep window: what the near window loaded stays while the viewer changes layer (walking across a layer boundary,
+ * flying up), and goes once its column leaves the near radius; slab chunks within the horizon never unload. With the slab off every column keeps its whole height range.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODVerticalWindowKeepTest,
+	"VoxelWorlds.LOD.VerticalWindow.KeepWindow",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLODVerticalWindowKeepTest::RunTest(const FString& Parameters)
+{
+	using namespace VerticalWindowTestHelpers;
+
+	UVoxelWorldConfiguration* Config = MakeConfig(EWorldMode::InfinitePlane);
+	FProbeStrategy Strategy;
+	Strategy.Initialize(Config);
+	const float NearRadius = Strategy.GetNearWindowRadius();
+	TestEqual(TEXT("Near radius: band 0 plus two chunks"), NearRadius, 7000.0f + 2.0f * ChunkWorldSize);
+
+	const FLODQueryContext Ground = MakeContext(EWorldMode::InfinitePlane, 0);
+	const TSet<FIntVector> Loaded = Visible(Strategy, Ground);
+
+	auto UnloadCandidates = [&Strategy, &Loaded](const FLODQueryContext& Context)
+	{
+		Strategy.Update(Context, 1.0f / 60.0f);
+		TArray<FIntVector> Candidates;
+		Strategy.GetChunksToUnload(Candidates, Loaded, Context);
+		return TSet<FIntVector>(Candidates);
+	};
+
+	TestEqual(TEXT("Nothing the viewer just loaded is an unload candidate"), UnloadCandidates(Ground).Num(), 0);
+	TestEqual(TEXT("Viewer one layer up: nothing unloads"), UnloadCandidates(MakeContext(EWorldMode::InfinitePlane, 1)).Num(), 0);
+	TestEqual(TEXT("Viewer one layer down: nothing unloads"), UnloadCandidates(MakeContext(EWorldMode::InfinitePlane, -1)).Num(), 0);
+	TestEqual(TEXT("Viewer 48,000 uu up: nothing unloads"), UnloadCandidates(MakeContext(EWorldMode::InfinitePlane, 10)).Num(), 0);
+
+	// Move 20,000 uu along X: the old near columns are now far, so their chunks outside the slab go; nothing else does.
+	const FLODQueryContext Moved = MakeContext(EWorldMode::InfinitePlane, 0, FVector2D(22400.0, 2400.0));
+	const TSet<FIntVector> Gone = UnloadCandidates(Moved);
+	int32 WrongStays = 0, WrongGoes = 0, NearChunksGone = 0;
+	for (const FIntVector& C : Loaded)
+	{
+		const FProbeStrategy::FColumnWindow Slab = Strategy.GetColumnWindow(C.X, C.Y, Moved, FProbeStrategy::EWindowUse::Load);
+		const double Distance = ColumnDistance(C.X, C.Y, Moved.ViewerPosition);
+		const bool bInSlab = C.Z >= Slab.SlabMinZ && C.Z <= Slab.SlabMaxZ;
+		const bool bShouldGo = Distance > 48000.0 || (Distance > NearRadius && !bInSlab);
+		WrongStays += (bShouldGo && !Gone.Contains(C)) ? 1 : 0;
+		WrongGoes += (!bShouldGo && Gone.Contains(C)) ? 1 : 0;
+		NearChunksGone += (bShouldGo && Distance <= 48000.0) ? 1 : 0;
+	}
+	TestEqual(TEXT("After moving: chunks outside the keep window that stay"), WrongStays, 0);
+	TestEqual(TEXT("After moving: chunks inside the keep window that go"), WrongGoes, 0);
+	TestTrue(TEXT("After moving: the near window's extra layers behind the viewer go"), NearChunksGone > 0);
+
+	// Slab off: whole columns everywhere, whatever the viewer's layer.
+	UVoxelWorldConfiguration* NoSlab = MakeConfig(EWorldMode::InfinitePlane, false);
+	FProbeStrategy Whole;
+	Whole.Initialize(NoSlab);
+	int32 BoundsMin = 0, BoundsMax = -1;
+	Layers(Whole.TerrainMinHeight, Whole.TerrainMaxHeight, BoundsMin, BoundsMax);
+	const FProbeStrategy::FColumnWindow Far = Whole.GetColumnWindow(8, 0, MakeContext(EWorldMode::InfinitePlane, 5), FProbeStrategy::EWindowUse::Load);
+	TestEqual(TEXT("Slab off: a far column's window starts at the bounds"), Far.SlabMinZ, BoundsMin);
+	TestEqual(TEXT("Slab off: a far column's window ends at the bounds"), Far.SlabMaxZ, BoundsMax);
+	return true;
+}
+
+/**
+ * The horizon is horizontal in heightmap worlds and 3D on a planet, and the planet keeps its viewer-relative window
+ * (absolute layers, the viewer's layer added once, §13.11).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODHorizonDistanceTest,
+	"VoxelWorlds.LOD.VerticalWindow.HorizonDistance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLODHorizonDistanceTest::RunTest(const FString& Parameters)
+{
+	using namespace VerticalWindowTestHelpers;
+
+	const FVector Viewer(0.0f, 0.0f, 48000.0f);
+	const FVector Chunk(30000.0f, 0.0f, 2400.0f);
+	for (const EWorldMode Mode : { EWorldMode::InfinitePlane, EWorldMode::IslandBowl })
+	{
+		FDistanceBandLODStrategy Strategy;
+		Strategy.Initialize(MakeConfig(Mode));
+		TestEqual(TEXT("Heightmap world: horizon distance is horizontal"), Strategy.GetHorizonDistance(Chunk, Viewer), 30000.0f, 0.5f);
+	}
+
+	UVoxelWorldConfiguration* Planet = MakeConfig(EWorldMode::SphericalPlanet);
+	Planet->WorldRadius = 250000.0f;
+	FProbeStrategy Strategy;
+	Strategy.Initialize(Planet);
+	TestEqual(TEXT("Planet: horizon distance is 3D"), Strategy.GetHorizonDistance(Chunk, Viewer),
+		static_cast<float>(FVector::Dist(Chunk, Viewer)), 0.5f);
+
+	for (const int32 Layer : { -3, 0, 5 })
+	{
+		const FLODQueryContext Context = MakeContext(EWorldMode::SphericalPlanet, Layer);
+		Strategy.Update(Context, 1.0f / 60.0f);
+		const FProbeStrategy::FColumnWindow Window = Strategy.GetColumnWindow(0, 0, Context, FProbeStrategy::EWindowUse::Load);
+		TestEqual(*FString::Printf(TEXT("Planet, viewer on layer %d: lowest layer"), Layer), Window.SlabMinZ, Layer + Strategy.MinVerticalChunks);
+		TestEqual(*FString::Printf(TEXT("Planet, viewer on layer %d: highest layer"), Layer), Window.SlabMaxZ, Layer + Strategy.MaxVerticalChunks);
+	}
+	return true;
+}
+
+/**
+ * WM-S2: islands measure LOD distance in 3D like InfinitePlane, so a chunk deep below a viewer is coarser than the one
+ * beside it (it was LOD 0 with the island's 2D distance, KI13), and an island viewer far above its terrain streams the
+ * island's ground, coarse.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODIslandDistance3DTest,
+	"VoxelWorlds.LOD.VerticalWindow.IslandLODDistance3D",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLODIslandDistance3DTest::RunTest(const FString& Parameters)
+{
+	using namespace VerticalWindowTestHelpers;
+
+	UVoxelWorldConfiguration* Config = MakeConfig(EWorldMode::IslandBowl);
+	Config->HeightScale = 20000.0f; // height bounds well below layer -3
+	FProbeStrategy Strategy;
+	Strategy.Initialize(Config);
+	const FLODQueryContext Context = MakeContext(EWorldMode::IslandBowl, 0);
+	Strategy.Update(Context, 1.0f / 60.0f);
+
+	TestEqual(TEXT("Beside the viewer (4,800 uu): LOD 0"), Strategy.GetLODForChunk(FIntVector(1, 0, 0), Context), 0);
+	TestEqual(TEXT("One layer down (6,788 uu in 3D): LOD 0"), Strategy.GetLODForChunk(FIntVector(1, 0, -1), Context), 0);
+	TestEqual(TEXT("Two layers down (10,733 uu in 3D): LOD 1"), Strategy.GetLODForChunk(FIntVector(1, 0, -2), Context), 1);
+	TestEqual(TEXT("Three layers down (15,179 uu in 3D): LOD 2"), Strategy.GetLODForChunk(FIntVector(1, 0, -3), Context), 2);
+
+	// A small island (R + F = 40,000) and a viewer 48,000 uu above its centre: every island column streams.
+	UVoxelWorldConfiguration* Small = MakeConfig(EWorldMode::IslandBowl);
+	Small->IslandRadius = 30000.0f;
+	Small->IslandFalloffWidth = 10000.0f;
+	FProbeStrategy SmallStrategy;
+	SmallStrategy.Initialize(Small);
+	const FLODQueryContext High = MakeContext(EWorldMode::IslandBowl, 10);
+	SmallStrategy.Update(High, 1.0f / 60.0f);
+	TSet<FIntPoint> Columns;
+	int32 NotCoarsest = 0;
+	for (const FChunkLODRequest& Request : SmallStrategy.GetVisibleChunks(High))
+	{
+		Columns.Add(FIntPoint(Request.ChunkCoord.X, Request.ChunkCoord.Y));
+		NotCoarsest += (Request.LODLevel == 2) ? 0 : 1;
+	}
+	int32 IslandColumns = 0;
+	for (int32 X = -10; X <= 10; ++X)
+	{
+		for (int32 Y = -10; Y <= 10; ++Y)
+		{
+			IslandColumns += (ColumnDistance(X, Y, FVector::ZeroVector) <= 36000.0) ? 1 : 0;
+		}
+	}
+	int32 Covered = 0;
+	for (int32 X = -10; X <= 10; ++X)
+	{
+		for (int32 Y = -10; Y <= 10; ++Y)
+		{
+			Covered += (ColumnDistance(X, Y, FVector::ZeroVector) <= 36000.0 && Columns.Contains(FIntPoint(X, Y))) ? 1 : 0;
+		}
+	}
+	TestEqual(TEXT("Viewer 48,000 uu up: island columns within 36,000 uu that stream"), Covered, IslandColumns);
+	TestEqual(TEXT("Viewer 48,000 uu up: every chunk at the coarsest band"), NotCoarsest, 0);
 	return true;
 }
 

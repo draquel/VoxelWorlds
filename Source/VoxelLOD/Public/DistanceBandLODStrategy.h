@@ -124,6 +124,73 @@ public:
 	/** Load horizon: the configured view distance (chunks are requested within it). */
 	virtual float GetLoadDistance() const override { return MaxViewDistance; }
 
+	/**
+	 * Horizontal distance in heightmap worlds (InfinitePlane, IslandBowl): the horizons are a cylinder, and each column's
+	 * vertical extent is its window (GetColumnWindow), so the viewer's altitude never removes the ground (D8). 3D on a
+	 * planet. LOD levels use 3D distance in every mode (GetDistanceToViewer).
+	 */
+	virtual float GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const override;
+
+	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
+	static constexpr int32 NearWindowLayers = 2;
+
+	/**
+	 * Columns within this horizontal distance of the viewer add the viewer's layer ± NearWindowLayers to their surface
+	 * slab: the first LOD band's outer edge plus two chunk widths (the margin keeps the extra layers from churning while
+	 * the viewer wanders around the band edge). Within it they keep everything loaded in the height range, so a viewer
+	 * moving up or down a layer unloads nothing nearby.
+	 */
+	float GetNearWindowRadius() const { return NearWindowRadius; }
+
+	/**
+	 * One column's vertical window, as absolute chunk layers (a range is empty when Min > Max). Heightmap worlds (D8):
+	 * the column's surface slab, plus the viewer's layer ± NearWindowLayers in a column near the viewer; both clipped to
+	 * the terrain's height bounds. Planet: the viewer's layer + MinVerticalChunks..MaxVerticalChunks (until Phase 1
+	 * gives it a shell around the surface, SP-C1).
+	 */
+	struct FColumnWindow
+	{
+		int32 SlabMinZ = 0;
+		int32 SlabMaxZ = -1;
+		int32 NearMinZ = 0;
+		int32 NearMaxZ = -1;
+
+		bool Contains(int32 Z) const
+		{
+			return (Z >= SlabMinZ && Z <= SlabMaxZ) || (Z >= NearMinZ && Z <= NearMaxZ);
+		}
+
+		/** Calls Visit(Z) once for every layer in the window, slab first. */
+		template <typename FVisit>
+		void ForEachLayer(FVisit&& Visit) const
+		{
+			for (int32 Z = SlabMinZ; Z <= SlabMaxZ; ++Z)
+			{
+				Visit(Z);
+			}
+			for (int32 Z = NearMinZ; Z <= NearMaxZ; ++Z)
+			{
+				if (Z < SlabMinZ || Z > SlabMaxZ)
+				{
+					Visit(Z);
+				}
+			}
+		}
+	};
+
+	/** Which window GetColumnWindow builds. */
+	enum class EWindowUse : uint8
+	{
+		/** Chunks to stream in: the slab, plus the viewer's layer ± NearWindowLayers within GetNearWindowRadius. */
+		Load,
+		/**
+		 * Chunks to keep (the unload rule, and the balanced-LOD cache's volume): the slab, plus the whole height range
+		 * within GetNearWindowRadius. Wider than Load vertically, so nothing the near window loaded unloads when the
+		 * viewer changes layer; the same radius, so the extra layers unload as soon as their column leaves it.
+		 */
+		Keep,
+	};
+
 protected:
 	// ==================== Internal Helpers ====================
 
@@ -138,12 +205,37 @@ protected:
 	FIntVector WorldPosToChunkCoord(const FVector& WorldPos) const;
 
 	/**
-	 * Calculate distance from viewer to position based on world mode.
+	 * LOD distance from the viewer to a position: 3D in every world mode, so deep and high chunks fall into farther
+	 * bands and compress (world modes review WM-S2; islands measured 2D until then, KI13). Whether a chunk is in range
+	 * at all is GetHorizonDistance.
 	 */
 	float GetDistanceToViewer(
 		const FVector& Position,
 		const FLODQueryContext& Context
 	) const;
+
+	/** Whether the vertical window comes from the terrain (InfinitePlane, IslandBowl) rather than the viewer (planet). */
+	bool IsHeightmapWorld() const { return WorldMode != EWorldMode::SphericalPlanet; }
+
+	/**
+	 * The vertical window of chunk column (ChunkX, ChunkY) for this viewer.
+	 * @param ChunkX Column X, chunk coordinates
+	 * @param ChunkY Column Y, chunk coordinates
+	 * @param Context Query context (viewer position, world origin)
+	 * @param Use Load (stream in) or Keep (retain)
+	 * @return The column's window, absolute layers
+	 */
+	FColumnWindow GetColumnWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, EWindowUse Use) const;
+
+	/**
+	 * The chunk layers whose chunks overlap the world-Z interval [Lo, Hi] (touching counts).
+	 * @param Lo Interval bottom, world Z
+	 * @param Hi Interval top, world Z
+	 * @param OriginZ World origin Z (layer 0's bottom)
+	 * @param OutMin Lowest such layer
+	 * @param OutMax Highest such layer (below OutMin when none)
+	 */
+	void GetLayersOverlapping(double Lo, double Hi, double OriginZ, int32& OutMin, int32& OutMax) const;
 
 	/**
 	 * Find the LOD band containing the given distance.
@@ -215,32 +307,9 @@ protected:
 	) const;
 
 	/**
-	 * Get the vertical range of chunks to consider: absolute chunk layers, the viewer's layer plus
-	 * MinVerticalChunks..MaxVerticalChunks. Callers iterate these layers directly (they used to add the
-	 * viewer's layer a second time; WORLD_MODES_REVIEW_PLAN.md §13.11).
-	 * @param Context Query context (viewer position).
-	 * @param OutMinZ Lowest chunk layer, inclusive.
-	 * @param OutMaxZ Highest chunk layer, inclusive.
-	 */
-	void GetVerticalChunkRange(
-		const FLODQueryContext& Context,
-		int32& OutMinZ,
-		int32& OutMaxZ
-	) const;
-
-	/**
 	 * Get color for LOD level (for debug visualization).
 	 */
 	FColor GetLODDebugColor(int32 LODLevel) const;
-
-	/**
-	 * Check if chunk should be culled for Infinite Plane mode (outside terrain bounds).
-	 * Returns true if chunk should be CULLED (not rendered).
-	 */
-	bool ShouldCullOutsideTerrainBounds(
-		const FIntVector& ChunkCoord,
-		const FLODQueryContext& Context
-	) const;
 
 	/**
 	 * Check if chunk should be culled for Island mode (beyond island boundary).
@@ -334,11 +403,17 @@ protected:
 	/** Maximum view distance for chunk loading (from Configuration->ViewDistance) */
 	float MaxViewDistance = 0.0f;
 
-	/** Vertical candidate window, in chunk layers relative to the viewer's layer (set per world mode in Initialize) */
+	/**
+	 * SphericalPlanet only: the vertical candidate window, in chunk layers relative to the viewer's layer (set in
+	 * Initialize). Heightmap worlds take theirs from the terrain (GetColumnWindow, D8).
+	 */
 	int32 MinVerticalChunks = -2;
 	int32 MaxVerticalChunks = 4;
 
-	// ==================== Infinite Plane Mode Culling ====================
+	/** See GetNearWindowRadius. Set in Initialize from the first LOD band; 0 without bands. */
+	float NearWindowRadius = 0.0f;
+
+	// ==================== Heightmap Terrain Bounds ====================
 
 	/**
 	 * The configured world mode, built by FVoxelWorldModeFactory (the builder generation uses). The terrain height
@@ -353,18 +428,25 @@ protected:
 	/** Maximum terrain height (SeaLevel + BaseHeight + HeightScale + buffer) */
 	float TerrainMaxHeight = 0.0f;
 
-	// ==================== Far-Band Surface-Slab Culling ====================
+	// ==================== Surface Slab (heightmap worlds) ====================
 
 	/**
-	 * When enabled (config bFarBandSurfaceSlabCulling, InfinitePlane only), columns beyond the
-	 * first LOD band only keep chunks intersecting their OWN analytic surface height ± slack —
-	 * the global height range above loads ~7 layers per column everywhere, which is what makes
-	 * long view distances explode. Distant cave interiors / deep edits stay unloaded (invisible
-	 * from afar); the full-detail band keeps whole columns.
+	 * When enabled (config bFarBandSurfaceSlabCulling, heightmap worlds), every column streams the chunks around its OWN
+	 * surface (± SlabSlackChunks, up to the water plane) at every distance, plus the viewer's layer ± NearWindowLayers
+	 * near the viewer (D8, WM-S1). The global height range loads 8 layers per column everywhere (demo geometry), which
+	 * is what makes long view distances explode; cave interiors and edits deeper than the slab load only near the viewer
+	 * (edits are also pinned by the chunk manager). Off: every column streams the whole height range.
 	 */
 	bool bSurfaceSlabCulling = false;
 
-	/** Noise params for the per-column analytic surface sample (TerrainWorldMode->GetTerrainHeightAt). */
+	/**
+	 * Slab slack in chunk widths: covers surface variation between the 5 footprint samples, POI flatten deltas from the
+	 * natural height and the meshing skirt, while keeping the per-column cost at 4-5 layers instead of the height
+	 * range's 8 (demo geometry).
+	 */
+	static constexpr float SlabSlackChunks = 1.5f;
+
+	/** Noise params for the per-column analytic surface sample (TerrainWorldMode->GetSurfaceRange). */
 	FVoxelNoiseParams SlabNoiseParams;
 
 	/** Water plane: underwater columns extend their slab up to the water surface (the far ocean

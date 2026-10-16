@@ -269,6 +269,23 @@ public:
 		return -1.0f;
 	}
 
+	/**
+	 * The distance the load and unload horizons (GetLoadDistance, GetUnloadDistance) are measured in, from the viewer
+	 * to a chunk's centre. Everything that asks whether a chunk is in range (the strategy's own load and unload, the
+	 * chunk manager's queue eviction, edit pins and residency audit) uses it, so they cannot disagree (KI11).
+	 *
+	 * Default: 3D distance. FDistanceBandLODStrategy: horizontal distance in heightmap worlds, whose vertical extent is
+	 * each column's own window (world modes review D8), so the viewer's altitude never removes the ground under it.
+	 *
+	 * @param ChunkCenter Chunk centre, world space
+	 * @param ViewerPosition Viewer position, world space
+	 * @return Distance compared against the horizons, world units
+	 */
+	virtual float GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const
+	{
+		return static_cast<float>(FVector::Dist(ChunkCenter, ViewerPosition));
+	}
+
 	// ==================== Debugging ====================
 
 	/**

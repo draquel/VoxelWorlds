@@ -133,17 +133,18 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 			TerrainMinHeight, TerrainMaxHeight);
 	}
 
-	// Far-band surface-slab culling: per-column analytic surface height from the world mode (WM-A3), so the slab
-	// samples the height generation produces. Still InfinitePlane only: extending it to islands (KI5) is part of
-	// taking the vertical range from the terrain (D8, WM-S1).
-	bSurfaceSlabCulling = WorldConfig->bFarBandSurfaceSlabCulling && WorldMode == EWorldMode::InfinitePlane;
+	// The vertical window comes from the terrain in heightmap worlds (D8, WM-S1): every column streams its own surface
+	// slab, sampled from the world mode (WM-A3) so it follows the height generation produces, islands included (KI5).
+	// Near the viewer the viewer's layer ± NearWindowLayers is added (GetColumnWindow).
+	bSurfaceSlabCulling = WorldConfig->bFarBandSurfaceSlabCulling && IsHeightmapWorld();
+	ColumnSurfaceCache.Reset();
 	if (bSurfaceSlabCulling)
 	{
 		SlabNoiseParams = WorldConfig->NoiseParams;
 		bSlabHasWater = WorldConfig->bEnableWaterLevel;
-		SlabWaterLevel = WorldConfig->WaterLevel;
-		ColumnSurfaceCache.Reset();
-		UE_LOG(LogVoxelLOD, Log, TEXT("  Far-band surface-slab culling ENABLED (beyond the first LOD band, columns keep surface ±1.5 chunks)"));
+		SlabWaterLevel = WorldConfig->WaterLevel + WorldConfig->WorldOrigin.Z; // the water plane is relative to the origin
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Surface slab ENABLED: every column keeps its surface ±%.1f chunks%s at every distance"),
+			SlabSlackChunks, bSlabHasWater ? TEXT(" (up to the water plane)") : TEXT(""));
 	}
 
 	// Cache Island mode parameters for boundary culling, from the builder generation uses (WM-A1): the centre is
@@ -175,14 +176,17 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 			PlanetRadius, PlanetMaxTerrainHeight, PlanetMaxTerrainDepth);
 	}
 
-	// Set vertical range based on world mode
+	// The near window (heightmap worlds): band 0's outer edge plus two chunk widths, measured horizontally.
+	NearWindowRadius = (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f;
+	if (IsHeightmapWorld())
+	{
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Vertical window from the terrain: the viewer's layer ±%d within %.0f uu, horizon measured horizontally"),
+			NearWindowLayers, NearWindowRadius);
+	}
+
+	// The viewer-relative vertical window: SphericalPlanet only (heightmap worlds use GetColumnWindow's terrain window)
 	switch (WorldMode)
 	{
-		case EWorldMode::InfinitePlane:
-			MinVerticalChunks = -2;
-			MaxVerticalChunks = 8;
-			break;
-
 		case EWorldMode::SphericalPlanet:
 		{
 			// For spherical planets, calculate vertical range based on terrain shell thickness
@@ -204,16 +208,9 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 			break;
 		}
 
-		case EWorldMode::IslandBowl:
-		{
-			// Same as Infinite Plane - terrain bounds culling handles the actual limits
-			// Use a reasonable relative range that covers typical terrain variation
-			MinVerticalChunks = -2;
-			MaxVerticalChunks = 4;
+		default:
 			break;
-		}
 	}
-
 	bIsInitialized = true;
 	bBalancedLODCacheDirty = true; // bands, view distance or bounds may have changed
 
@@ -354,44 +351,43 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 	const int32 MaxChunkRadius = FMath::CeilToInt(MaxViewDistance / ChunkWorldSize) + 1;
 
-	// Absolute chunk layers (the viewer's layer + the mode's vertical offsets).
-	int32 MinZ, MaxZ;
-	GetVerticalChunkRange(Context, MinZ, MaxZ);
-
-	// Iterate over potential chunk positions
+	// Every column within the horizon, and in each column the layers of its vertical window (absolute layers: the
+	// terrain's in heightmap worlds, the viewer's on a planet).
 	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius; ++X)
 	{
 		for (int32 Y = -MaxChunkRadius; Y <= MaxChunkRadius; ++Y)
 		{
-			for (int32 Z = MinZ; Z <= MaxZ; ++Z)
+			const int32 ColumnX = ViewerChunk.X + X;
+			const int32 ColumnY = ViewerChunk.Y + Y;
+
+			// Heightmap worlds: the horizon is horizontal, so a whole column is in range or not.
+			if (IsHeightmapWorld() && GetHorizonDistance(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
 			{
-				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, Z);
+				continue;
+			}
+
+			const FColumnWindow Window = GetColumnWindow(ColumnX, ColumnY, Context, EWindowUse::Load);
+			Window.ForEachLayer([&](int32 Z)
+			{
+				const FIntVector ChunkCoord(ColumnX, ColumnY, Z);
 				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 
-				// Skip if beyond max view distance
-				if (Distance > MaxViewDistance)
+				// Skip if beyond the load horizon (per chunk on a planet)
+				if (GetHorizonDistance(ChunkCenter, Context.ViewerPosition) > MaxViewDistance)
 				{
-					continue;
-				}
-
-				// World-mode-specific culling
-				// Infinite plane: skip chunks outside terrain height bounds
-				if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context))
-				{
-					continue;
+					return;
 				}
 
 				// Island mode: skip chunks outside island boundary
 				if (ShouldCullIslandBoundary(ChunkCoord, Context))
 				{
-					continue;
+					return;
 				}
 
 				// Spherical planet mode: skip chunks beyond horizon/shell
 				if (ShouldCullBeyondHorizon(ChunkCoord, Context))
 				{
-					continue;
+					return;
 				}
 
 				// Determine LOD level
@@ -406,6 +402,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 					LODLevel = GetLODForChunk(ChunkCoord, Context);
 					if (bEnableMorphing)
 					{
+						const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 						if (const FLODBand* Band = FindBandForDistance(Distance))
 						{
 							MorphFactor = Band->GetMorphFactor(Distance);
@@ -417,7 +414,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 				// Frustum culling (optional)
 				if (bEnableFrustumCulling && !IsChunkInFrustum(ChunkCoord, Context))
 				{
-					continue;
+					return;
 				}
 
 				// Create request
@@ -428,7 +425,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 				Request.MorphFactor = MorphFactor;
 
 				Requests.Add(Request);
-			}
+			});
 		}
 	}
 
@@ -475,15 +472,17 @@ void FDistanceBandLODStrategy::GetChunksToUnload(
 	TArray<TPair<float, FIntVector>> Candidates;
 	for (const FIntVector& ChunkCoord : LoadedChunks)
 	{
-		const float Distance = GetDistanceToViewer(ChunkCoordToWorldCenter(ChunkCoord), Context);
+		const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 
-		// World-mode-specific culls unload regardless of distance; otherwise the unload horizon.
-		if (ShouldCullOutsideTerrainBounds(ChunkCoord, Context) ||
-			ShouldCullIslandBoundary(ChunkCoord, Context) ||
-			ShouldCullBeyondHorizon(ChunkCoord, Context) ||
-			Distance > UnloadDistance)
+		// Beyond the unload horizon; outside the column's keep window (heightmap worlds: the slab, or the height range
+		// near the viewer); or culled by the world mode, regardless of distance.
+		const bool bUnload = GetHorizonDistance(ChunkCenter, Context.ViewerPosition) > UnloadDistance
+			|| (IsHeightmapWorld() && !GetColumnWindow(ChunkCoord.X, ChunkCoord.Y, Context, EWindowUse::Keep).Contains(ChunkCoord.Z))
+			|| ShouldCullIslandBoundary(ChunkCoord, Context)
+			|| ShouldCullBeyondHorizon(ChunkCoord, Context);
+		if (bUnload)
 		{
-			Candidates.Emplace(Distance, ChunkCoord);
+			Candidates.Emplace(GetDistanceToViewer(ChunkCenter, Context), ChunkCoord);
 		}
 	}
 
@@ -523,6 +522,8 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 	{
 		Info += FString::Printf(TEXT("  Terrain Culling: Height=[%.0f - %.0f]\n"),
 			TerrainMinHeight, TerrainMaxHeight);
+		Info += FString::Printf(TEXT("  Vertical Window: %s, + viewer layer ±%d within %.0f uu (horizon measured horizontally)\n"),
+			bSurfaceSlabCulling ? TEXT("surface slab ±1.5 chunks") : TEXT("whole height range"), NearWindowLayers, NearWindowRadius);
 	}
 	if (WorldMode == EWorldMode::IslandBowl && IslandTotalExtentX > 0.0f)
 	{
@@ -620,6 +621,9 @@ void FDistanceBandLODStrategy::SetLODBands(const TArray<FLODBand>& InBands)
 		return A.MinDistance < B.MinDistance;
 	});
 
+	// The near window follows band 0 (see Initialize).
+	NearWindowRadius = (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * BaseChunkSize * VoxelSize : 0.0f;
+
 	// Note: MaxViewDistance is set from Configuration->ViewDistance during Initialize()
 	// and should not be overridden here. Call SetViewDistance() if needed.
 }
@@ -642,26 +646,19 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
 	const FVector& Position,
 	const FLODQueryContext& Context) const
 {
-	switch (Context.WorldMode)
-	{
-		case EWorldMode::SphericalPlanet:
-		{
-			// 3D Euclidean distance, as on a plane: near the viewer it matches the distance along the surface,
-			// which is all surface play needs (SPHERICAL_PLANET_REQUIREMENTS.md SP-C3).
-			return FVector::Distance(Position, Context.ViewerPosition);
-		}
+	// 3D Euclidean distance in every world mode. On a planet, near the viewer it matches the distance along the surface,
+	// which is all surface play needs (SPHERICAL_PLANET_REQUIREMENTS.md SP-C3). Islands used 2D distance until WM-S2,
+	// which kept whole columns in the near bands, uncompressed (KI13).
+	return FVector::Distance(Position, Context.ViewerPosition);
+}
 
-		case EWorldMode::IslandBowl:
-		{
-			// For islands, use 2D distance (ignore height difference)
-			return FVector::Dist2D(Position, Context.ViewerPosition);
-		}
-
-		default: // InfinitePlane
-		{
-			return FVector::Distance(Position, Context.ViewerPosition);
-		}
-	}
+float FDistanceBandLODStrategy::GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const
+{
+	// Heightmap worlds: a cylinder. The column's window decides its vertical extent (D8), so the viewer's altitude
+	// never takes the ground out of range; with a 3D horizon a viewer 40,000 uu up would load no terrain at all.
+	return IsHeightmapWorld()
+		? static_cast<float>(FVector::Dist2D(ChunkCenter, ViewerPosition))
+		: static_cast<float>(FVector::Dist(ChunkCenter, ViewerPosition));
 }
 
 const FLODBand* FDistanceBandLODStrategy::FindBandForDistance(float Distance) const
@@ -756,35 +753,37 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 
 	const bool bBalance = LastRebuildBalanceCVar != 0;
 
-	// Enumerate the same candidate volume GetVisibleChunks considers (radius +
-	// vertical range, within view distance), without per-world-mode culling. The
-	// resulting map is a superset of the chunks that will actually be meshed, so
-	// every meshed chunk has a balanced entry; culled chunks are harmless extras.
+	// Enumerate every chunk the strategy keeps within the load horizon: each column's keep window (GetColumnWindow),
+	// which contains its load window, without the other world-mode culls. The resulting map is a superset of the chunks
+	// that will actually be meshed, so every meshed chunk has a balanced entry, including chunks the near window loaded
+	// at an earlier viewer layer; culled chunks are harmless extras.
 	const FIntVector ViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 	const int32 MaxChunkRadius = FMath::CeilToInt(MaxViewDistance / FMath::Max(ChunkWorldSize, 1.0f)) + 1;
 
-	// Absolute chunk layers, as in GetVisibleChunks.
-	int32 MinZ, MaxZ;
-	GetVerticalChunkRange(Context, MinZ, MaxZ);
-
 	// Pass 1: raw band LOD + hysteresis (vs last frame's committed LOD).
-	BalancedLODCache.Reserve((2 * MaxChunkRadius + 1) * (2 * MaxChunkRadius + 1) * (MaxZ - MinZ + 1));
+	BalancedLODCache.Reserve((2 * MaxChunkRadius + 1) * (2 * MaxChunkRadius + 1) * 4);
 	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius; ++X)
 	{
 		for (int32 Y = -MaxChunkRadius; Y <= MaxChunkRadius; ++Y)
 		{
-			for (int32 Z = MinZ; Z <= MaxZ; ++Z)
+			const int32 ColumnX = ViewerChunk.X + X;
+			const int32 ColumnY = ViewerChunk.Y + Y;
+			if (IsHeightmapWorld() && GetHorizonDistance(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
 			{
-				const FIntVector ChunkCoord(ViewerChunk.X + X, ViewerChunk.Y + Y, Z);
-				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
+				continue;
+			}
 
-				if (Distance > MaxViewDistance)
+			GetColumnWindow(ColumnX, ColumnY, Context, EWindowUse::Keep).ForEachLayer([&](int32 Z)
+			{
+				const FIntVector ChunkCoord(ColumnX, ColumnY, Z);
+				const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
+				if (GetHorizonDistance(ChunkCenter, Context.ViewerPosition) > MaxViewDistance)
 				{
-					continue;
+					return;
 				}
 
+				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
 				const int32 RawLOD = GetRawLODForDistance(Distance);
 
 				int32 Committed = RawLOD;
@@ -797,7 +796,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 				}
 
 				BalancedLODCache.Add(ChunkCoord, Committed);
-			}
+			});
 		}
 	}
 
@@ -930,15 +929,80 @@ float FDistanceBandLODStrategy::CalculatePriority(
 	return Priority;
 }
 
-void FDistanceBandLODStrategy::GetVerticalChunkRange(
+FDistanceBandLODStrategy::FColumnWindow FDistanceBandLODStrategy::GetColumnWindow(
+	int32 ChunkX,
+	int32 ChunkY,
 	const FLODQueryContext& Context,
-	int32& OutMinZ,
-	int32& OutMaxZ) const
+	EWindowUse Use) const
 {
+	FColumnWindow Window;
 	const FIntVector ViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 
-	OutMinZ = ViewerChunk.Z + MinVerticalChunks;
-	OutMaxZ = ViewerChunk.Z + MaxVerticalChunks;
+	// Planet: the viewer's layer + the mode's offsets, absolute (callers no longer add the viewer's layer, §13.11).
+	if (!IsHeightmapWorld())
+	{
+		Window.SlabMinZ = ViewerChunk.Z + MinVerticalChunks;
+		Window.SlabMaxZ = ViewerChunk.Z + MaxVerticalChunks;
+		return Window;
+	}
+
+	// Heightmap worlds (D8): everything is clipped to the terrain's height bounds.
+	const double OriginZ = Context.WorldOrigin.Z;
+	int32 BoundsMinZ = 0, BoundsMaxZ = -1;
+	GetLayersOverlapping(TerrainMinHeight, TerrainMaxHeight, OriginZ, BoundsMinZ, BoundsMaxZ);
+
+	// Near the viewer: the column centre's horizontal distance. Load and keep share the radius, as the old slab gate
+	// did, so the extra layers unload as soon as their column leaves it; the radius sits two chunks past band 0, which
+	// keeps them from churning while the viewer wanders around band 0's edge.
+	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
+	const FVector2D ColumnCentre(
+		Context.WorldOrigin.X + (ChunkX + 0.5) * ChunkWorldSize,
+		Context.WorldOrigin.Y + (ChunkY + 0.5) * ChunkWorldSize);
+	const double HorizontalDistance = FVector2D::Distance(ColumnCentre, FVector2D(Context.ViewerPosition.X, Context.ViewerPosition.Y));
+	const bool bNear = HorizontalDistance <= NearWindowRadius;
+
+	// Keep, near the viewer: the whole height range, whatever the viewer's layer. A viewer moving up or down a layer
+	// (walking across a layer boundary, flying up) unloads nothing it loaded nearby.
+	if (bNear && Use == EWindowUse::Keep)
+	{
+		Window.SlabMinZ = BoundsMinZ;
+		Window.SlabMaxZ = BoundsMaxZ;
+		return Window;
+	}
+
+	// The column's own surface ± slack (up to the water plane), at every distance; the whole range with the slab off.
+	if (bSurfaceSlabCulling)
+	{
+		float SurfMin = 0.0f, SurfMax = 0.0f;
+		GetColumnSurfaceRange(ChunkX, ChunkY, Context.WorldOrigin, SurfMin, SurfMax);
+		const double Slack = SlabSlackChunks * ChunkWorldSize;
+		GetLayersOverlapping(SurfMin - Slack, SurfMax + Slack, OriginZ, Window.SlabMinZ, Window.SlabMaxZ);
+		Window.SlabMinZ = FMath::Max(Window.SlabMinZ, BoundsMinZ);
+		Window.SlabMaxZ = FMath::Min(Window.SlabMaxZ, BoundsMaxZ);
+	}
+	else
+	{
+		Window.SlabMinZ = BoundsMinZ;
+		Window.SlabMaxZ = BoundsMaxZ;
+	}
+
+	// Load, near the viewer: also the viewer's own layer ± NearWindowLayers, for caves, dungeons and digging below or
+	// above the surface. The viewer's altitude only adds layers here; the slab keeps the ground.
+	if (bNear)
+	{
+		Window.NearMinZ = FMath::Max(ViewerChunk.Z - NearWindowLayers, BoundsMinZ);
+		Window.NearMaxZ = FMath::Min(ViewerChunk.Z + NearWindowLayers, BoundsMaxZ);
+	}
+	return Window;
+}
+
+void FDistanceBandLODStrategy::GetLayersOverlapping(double Lo, double Hi, double OriginZ, int32& OutMin, int32& OutMax) const
+{
+	// Layer Z spans [OriginZ + Z * W, OriginZ + (Z + 1) * W]. It overlaps [Lo, Hi] when its top is not below Lo and its
+	// bottom is not above Hi (touching counts, as the old per-chunk bounds cull did).
+	const double ChunkWorldSize = FMath::Max(static_cast<double>(BaseChunkSize) * VoxelSize, 1.0);
+	OutMin = FMath::CeilToInt32((Lo - OriginZ) / ChunkWorldSize) - 1;
+	OutMax = FMath::FloorToInt32((Hi - OriginZ) / ChunkWorldSize);
 }
 
 FColor FDistanceBandLODStrategy::GetLODDebugColor(int32 LODLevel) const
@@ -959,64 +1023,6 @@ FColor FDistanceBandLODStrategy::GetLODDebugColor(int32 LODLevel) const
 	return LODColors[ColorIndex];
 }
 
-bool FDistanceBandLODStrategy::ShouldCullOutsideTerrainBounds(
-	const FIntVector& ChunkCoord,
-	const FLODQueryContext& Context) const
-{
-	// Applies to Infinite Plane and Island modes (both use 2D heightmap terrain)
-	if (WorldMode != EWorldMode::InfinitePlane && WorldMode != EWorldMode::IslandBowl)
-	{
-		return false;
-	}
-
-	// Get chunk's Z bounds in world space
-	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const float ChunkMinZ = Context.WorldOrigin.Z + (ChunkCoord.Z * ChunkWorldSize);
-	const float ChunkMaxZ = ChunkMinZ + ChunkWorldSize;
-
-	// Cull if chunk is entirely below terrain minimum
-	if (ChunkMaxZ < TerrainMinHeight)
-	{
-		return true;
-	}
-
-	// Cull if chunk is entirely above terrain maximum
-	if (ChunkMinZ > TerrainMaxHeight)
-	{
-		return true;
-	}
-
-	// Far-band surface slab: beyond the first (full-detail) band, a column only keeps chunks
-	// around its OWN surface — the global range above spans the whole world's min–max and loads
-	// ~7 layers per column everywhere. Gate a couple of chunk-widths past the near band's edge
-	// so full-depth columns don't churn as the viewer wanders the boundary; slab-culled chunks
-	// are never tracked, so neighbour meshing treats them as the loaded-region edge (their
-	// clamped boundary planes are uniform solid/air — no seam artifacts).
-	if (bSurfaceSlabCulling && LODBands.Num() > 0)
-	{
-		const FVector2D ChunkCentreXY(
-			Context.WorldOrigin.X + (ChunkCoord.X + 0.5f) * ChunkWorldSize,
-			Context.WorldOrigin.Y + (ChunkCoord.Y + 0.5f) * ChunkWorldSize);
-		const float HorizDist = FVector2D::Distance(
-			ChunkCentreXY, FVector2D(Context.ViewerPosition.X, Context.ViewerPosition.Y));
-		if (HorizDist > LODBands[0].MaxDistance + 2.0f * ChunkWorldSize)
-		{
-			float SurfMin = 0.0f, SurfMax = 0.0f;
-			GetColumnSurfaceRange(ChunkCoord.X, ChunkCoord.Y, Context.WorldOrigin, SurfMin, SurfMax);
-			// 1.5 chunks of slack: covers surface variation between the 5 footprint samples,
-			// POI flatten deltas from the natural height, and meshing skirt, while keeping the
-			// per-column cost at ~3-4 layers instead of the global range's ~7.
-			const float Slack = 1.5f * ChunkWorldSize;
-			if (ChunkMaxZ < SurfMin - Slack || ChunkMinZ > SurfMax + Slack)
-			{
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
 void FDistanceBandLODStrategy::GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY,
 	const FVector& WorldOrigin, float& OutMin, float& OutMax) const
 {
@@ -1028,29 +1034,15 @@ void FDistanceBandLODStrategy::GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY,
 		return;
 	}
 
-	// 5-point sample over the chunk footprint (corners + centre). The ±2-chunk slack the caller
-	// applies covers surface variation between samples, POI flatten deltas from the natural
-	// height, and meshing skirt. Generation params are immutable per world → memoize forever.
+	// The configured world mode's surface over the chunk footprint (a 5-point sample in heightmap modes, continentalness
+	// included, as generation produces it). The slack GetColumnWindow applies covers variation between the samples.
+	// Generation params are immutable per world, so memoize for the strategy's lifetime.
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const float MinX = WorldOrigin.X + ChunkX * ChunkWorldSize;
-	const float MinY = WorldOrigin.Y + ChunkY * ChunkWorldSize;
-	const FVector2D Samples[5] = {
-		{ MinX,                          MinY },
-		{ MinX + ChunkWorldSize,         MinY },
-		{ MinX,                          MinY + ChunkWorldSize },
-		{ MinX + ChunkWorldSize,         MinY + ChunkWorldSize },
-		{ MinX + 0.5f * ChunkWorldSize,  MinY + 0.5f * ChunkWorldSize },
-	};
-
-	float SurfMin = TNumericLimits<float>::Max();
-	float SurfMax = TNumericLimits<float>::Lowest();
-	for (const FVector2D& Sample : Samples)
-	{
-		// The configured world mode's analytic height (continentalness included), as generation produces it.
-		const float Height = TerrainWorldMode->GetTerrainHeightAt(Sample.X, Sample.Y, SlabNoiseParams);
-		SurfMin = FMath::Min(SurfMin, Height);
-		SurfMax = FMath::Max(SurfMax, Height);
-	}
+	const FVector2D MinXY(WorldOrigin.X + ChunkX * ChunkWorldSize, WorldOrigin.Y + ChunkY * ChunkWorldSize);
+	const FVector2D MaxXY = MinXY + FVector2D(ChunkWorldSize, ChunkWorldSize);
+	const FFloatInterval Surface = TerrainWorldMode->GetSurfaceRange(MinXY, MaxXY, SlabNoiseParams);
+	float SurfMin = Surface.Min;
+	float SurfMax = Surface.Max;
 
 	// Underwater columns reach up to the water plane: the far ocean's SURFACE (and the water
 	// volume above its floor) must stay loaded, not just the seabed.

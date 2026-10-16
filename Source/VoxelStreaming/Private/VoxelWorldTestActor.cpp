@@ -487,7 +487,6 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Config->MaxChunksToLoadPerFrame = 2;
 	Config->MaxChunksToUnloadPerFrame = 8;
 	Config->StreamingTimeSliceMS = 3.0f;
-	Config->MaxLoadedChunks = 1000;
 
 	// Rendering settings
 	Config->bUseGPURenderer = true;  // Use Custom Vertex Factory renderer
