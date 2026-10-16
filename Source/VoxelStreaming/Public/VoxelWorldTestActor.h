@@ -221,9 +221,18 @@ public:
 	 * Use discrete voxel editing (for cubic mode).
 	 * When enabled, edits snap to voxel grid and affect single blocks.
 	 * Building places blocks adjacent to the hit face.
+	 * A cubic world always edits discretely, whatever this says (world modes review WM-C2): see IsDiscreteEditing.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit", meta = (EditCondition = "bEnableEditInputs"))
 	bool bUseDiscreteEditing = false;
+
+	/**
+	 * Whether the mouse brush edits single blocks: bUseDiscreteEditing, or a cubic world (where a density
+	 * brush removes scattered blocks around the aim and leaves the aimed one, KC5).
+	 * @return True when LMB / RMB / MMB remove, place and paint one block
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Edit")
+	bool IsDiscreteEditing() const;
 
 	/**
 	 * Apply a test brush edit at the specified world location.

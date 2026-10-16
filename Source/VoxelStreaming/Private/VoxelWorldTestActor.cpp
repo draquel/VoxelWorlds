@@ -1071,6 +1071,11 @@ int32 AVoxelWorldTestActor::TestPaintAt(FVector WorldLocation, float Radius, uin
 
 // ==================== Discrete Voxel Editing ====================
 
+bool AVoxelWorldTestActor::IsDiscreteEditing() const
+{
+	return bUseDiscreteEditing || (Configuration && Configuration->MeshingMode == EMeshingMode::Cubic);
+}
+
 bool AVoxelWorldTestActor::TestRemoveBlock(FVector WorldLocation, FVector HitNormal)
 {
 	if (!ChunkManager)
@@ -1483,7 +1488,7 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 	bWasMiddleMouseDown = bMiddleMouseDown;
 
 	// Handle edit actions on press
-	if (bUseDiscreteEditing)
+	if (IsDiscreteEditing())
 	{
 		// Discrete voxel editing mode (for cubic terrain)
 		if (bLeftMousePressed)
@@ -1780,7 +1785,7 @@ void AVoxelWorldTestActor::DrawEditCrosshair() const
 	{
 		// Line 1: Mode and mouse controls
 		FString MouseText;
-		if (bUseDiscreteEditing)
+		if (IsDiscreteEditing())
 		{
 			MouseText = bHasTarget
 				? FString::Printf(TEXT("[Block Mode] LMB: Remove | RMB: Place | MMB: Paint | Mat: %d"), EditMaterialID)
@@ -1803,10 +1808,10 @@ void AVoxelWorldTestActor::DrawEditCrosshair() const
 	// Draw 3D target indicator at hit location
 	if (bHasTarget)
 	{
-		if (bUseDiscreteEditing)
+		if (IsDiscreteEditing())
 		{
-			// Discrete mode: Draw box outline around the targeted voxel
-			const FVector TargetVoxelCenter = SnapToVoxelCenter(HitLocation);
+			// Discrete mode: Draw box outline around the targeted voxel (the solid block behind the hit face)
+			const FVector TargetVoxelCenter = GetSolidVoxelPosition(HitLocation, HitNormal);
 			const FBox VoxelBox = GetVoxelBounds(TargetVoxelCenter);
 
 			// Draw the voxel being targeted for removal (cyan)
