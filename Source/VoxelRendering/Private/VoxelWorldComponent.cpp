@@ -136,6 +136,18 @@ FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
 
 	FVoxelSceneProxy* NewProxy = new FVoxelSceneProxy(this, MaterialToUse);
 
+	// A new proxy starts empty: whatever the previous one held (chunk meshes, seam buckets, water tiles) is
+	// gone with it. The engine recreates the proxy on material and render-state changes, including during
+	// the first second of play (a runtime material compile), after the first chunks are submitted. The owner
+	// sends the geometry again (ConsumeLostRenderData); the first proxy of a component has nothing to lose.
+	{
+		FScopeLock Lock(&ChunkInfoLock);
+		if (ChunkInfoMap.Num() > 0)
+		{
+			bRenderDataLost = true;
+		}
+	}
+
 	// Sync water material to the new proxy if already set
 	if (WaterMaterial)
 	{
@@ -1696,6 +1708,20 @@ void UVoxelWorldComponent::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) cons
 {
 	check(IsInGameThread());
 	SeamBucketSlotMasks.GetKeys(OutOwners);
+}
+
+bool UVoxelWorldComponent::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
+{
+	check(IsInGameThread());
+	OutChunks.Reset();
+	FScopeLock Lock(&ChunkInfoLock);
+	if (!bRenderDataLost)
+	{
+		return false;
+	}
+	bRenderDataLost = false;
+	ChunkInfoMap.GetKeys(OutChunks);
+	return true;
 }
 
 void UVoxelWorldComponent::GetLoadedChunks(TArray<FIntVector>& OutChunks) const

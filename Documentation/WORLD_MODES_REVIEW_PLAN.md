@@ -16,7 +16,7 @@ The review runs the scenarios in §4 and §5 and records results against the acc
 revision of this document then turns the confirmed findings into work items. **Second revision, 2026-10-14: §14**
 (the status of every finding, work items with sizes and dependencies, milestones M1-M6, and where spherical starts),
 with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API) results: §14.6. M3 (island correctness)
-results: §14.7. M4 (the streaming window) results: §14.8.
+results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-only) results: §14.9.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -351,9 +351,9 @@ Pass = meets the §4 "pass when"; Refine = works, but needs design or tuning to 
 | ID | Result | What happened |
 |----|--------|---------------|
 | C1 | **Pass** | Full headless `VoxelWorlds+VoxelWorldSave`: 207/207, with 18 GPU tests skipping under `-nullrhi` (`Saved/Logs/ReviewA_C1_headless_suite.log`). In-editor `Meshing.Cubic.*` + `Scatter.*`: 26/26, and the four GPU cubic tests really ran: `CPUvsGPU` matched 1,024/1,024 vertices, `Performance` measured 2.06 ms CPU vs 3.07 ms GPU per 32³ chunk and returned (no hang). Gap: nothing tests cubic *streaming*; the cubic tests are mesher unit tests only (KC2) |
-| C2 | **Refine** | Correct in both setups. As shipped (LOD on) it does not keep up; on the intended path (LOD off) a fresh world settles in 17 s like smooth (16 s) and the bench mesh queue peaks at 75-135 instead of 457-683, and the remaining lag is the neighbour cascade (KC2). The rest of this row is the as-shipped pass. A fresh world settles in 37 s (1,118 chunks loaded, 658 with geometry). Surveys at chunk faces, a chunk corner and both LOD band edges (7,000 and 14,000 uu) show no holes, missing or stale faces (`rc_c2_corner_near`, `rc_c2_bands_north`). Fades render with the atlas material (`rc_c2_fade_2`). R23 A→B→C: site C settles in 37 s, audit 0, nothing left over site B (`rc_r23_siteB_west`). After every settle `AuditResidency` reports 0 and no chunk is left in `Meshing`. `FarCompression.Stats`: 901 compressed, 253 uniform, 122 resident, 1,133 MB reclaimed. Problems: W-04 cannot be walked (C5). Flown instead at 3,000 uu/s following the terrain (`voxel.Bench.Run c2_w04_follow 3000 180000 dir=0:1 follow=300`), the frontier fell behind: rendered chunks dropped from about 720 to 315, the mesh queue peaked at 1,739, the terrain ahead was missing (`rc_c2_w04_follow_3`), catch-up took 28 s and thrash reached 13,698. That run's end-of-run audit listed 604 `PendingUnload` chunks beyond the unload radius; they drained within seconds, so it is an unload backlog, not a leak. The edge of the loaded region shows vertical walls (a missing neighbour is treated as air), visible only from outside the view distance (`rc_r23_siteB_east`) |
+| C2 | **Refine** | Correct in both setups. As shipped (LOD on) it does not keep up; on the intended path (LOD off) a fresh world settles in 17 s like smooth (16 s) and the bench mesh queue peaks at 75-135 instead of 457-683, and the remaining lag is the neighbour cascade (KC2). The rest of this row is the as-shipped pass. A fresh world settles in 37 s (1,118 chunks loaded, 658 with geometry). Surveys at chunk faces, a chunk corner and both LOD band edges (7,000 and 14,000 uu) show no holes, missing or stale faces (`rc_c2_corner_near`, `rc_c2_bands_north`). Fades render with the atlas material (`rc_c2_fade_2`). R23 A→B→C: site C settles in 37 s, audit 0, nothing left over site B (`rc_r23_siteB_west`). After every settle `AuditResidency` reports 0 and no chunk is left in `Meshing`. `FarCompression.Stats`: 901 compressed, 253 uniform, 122 resident, 1,133 MB reclaimed. Problems: W-04 cannot be walked (C5). Flown instead at 3,000 uu/s following the terrain (`voxel.Bench.Run c2_w04_follow 3000 180000 dir=0:1 follow=300`), the frontier fell behind: rendered chunks dropped from about 720 to 315, the mesh queue peaked at 1,739, the terrain ahead was missing (`rc_c2_w04_follow_3`), catch-up took 28 s and thrash reached 13,698. That run's end-of-run audit listed 604 `PendingUnload` chunks beyond the unload radius; they drained within seconds, so it is an unload backlog, not a leak. The edge of the loaded region shows vertical walls (a missing neighbour is treated as air), visible only from outside the view distance (`rc_r23_siteB_east`) *(M5, §14.9: **Pass.** On the seam path W-04 flown at 3,000 uu/s keeps up: catch-up 0.5 s, peak mesh queue 2, thrash 0; no walls at the loaded region's edge)* |
 | C3 | **Bug** as shipped, **Refine** on the intended path | As shipped (LOD on), cubic fails the §1 thresholds at every speed except v6000 frame time, where both sides are saturated. On the intended path (LOD off, greedy on) cubic beats the control on frame time (−5% to −25%) and manager time (−33% to −47%) and matches its warmup, but still misses catch-up (1.6-3.2×) and memory (systems +83% to +116%, renderer GPU 9×). See §12.2 |
-| C4 | **Bug** | KC5 confirmed, see §12.3. The aimed block often survives while neighbours disappear. Block-centre targeting would need 2 clicks per full-density block, and open-air placement takes 2 clicks. A 2×2×2 pit dug across a chunk corner closes cleanly (no seams, `rc_c4_corner_pit`). The pawn dropped into it and landed (z −810, no READY→NOT-READY). Save, Stop, Play: all 9 edited chunks and the pawn position came back, and three probed columns matched |
+| C4 | **Bug** | KC5 confirmed, see §12.3. The aimed block often survives while neighbours disappear. Block-centre targeting would need 2 clicks per full-density block, and open-air placement takes 2 clicks. A 2×2×2 pit dug across a chunk corner closes cleanly (no seams, `rc_c4_corner_pit`). The pawn dropped into it and landed (z −810, no READY→NOT-READY). Save, Stop, Play: all 9 edited chunks and the pawn position came back, and three probed columns matched *(M5, §14.9: **Pass.** One click is one block on all six face directions, at a chunk corner and with a pickaxe; edits survive a save and reload)* |
 | C5 | **Refine** | Steps behave as designed (D5) but the design hurts. `MaxStepHeight` 50 vs a 75 uu block, so `vox.AutoRun` stops at the first one-block rise (W-04 on foot is impossible). Holding Space jumps once (jump fires on press), so every block needs a tap. Jump apex ≈113 uu clears one block, not two. Tapping jump every 0.45 s, a hop-run covered 17,000 uu in 40 s at x ≈ 400,000 with `vox.Debug.Capture` on: 165 samples, collision under the feet every time, no READY→NOT-READY. A physics cube rests on a block top (gap 50 = its half height, speed 0). Swimming to the shore works when the shore block is at water level. Melee from a one-block pit at a dummy on the rim: 10 swings, 0 hits; on the same level it died in 4 (KC12). The player's corpse (`vox.Damage 1000`) rests on the blocks: pelvis 16 uu above the block top, the same as the smooth baseline after R1. (The training dummy despawns on death, and the wolf spawned for this wandered out of melee range, so the player's corpse is the only one tested.) |
 | C6 | **Bug** | Props sink and NPCs strand (KC6, KC7), trees are not gameplay (KC9). Working: deer and wolves stand on block tops (gap ≈2 uu) and cross one-block steps (auto-jump "73 uu obstacle"); wolves chased and killed the player across terraces; `vox.NavPath` finds paths (0.14-0.93 ms); a dropped world item rests on a block top (gap 1); a player-placed campfire kit lands exactly on the block top (−1,200); dungeon rooms (`vox.TPRoom Entrance/Boss/Treasure`) are walkable and match the control's same dungeon (both show the carved voxel ceiling above the tile walls; `rc_c6_boss_left` vs `rc_ctrl_boss_left`); the map (`voxel.Map.Capture`, built from analytic height and so mode-independent), save/load and the day/night lighting work |
 | C7 | **Bug** with GPU extraction, **Pass** with CPU | KC4 confirmed, see §12.3 (`rc_c7_cpu_scatter` vs `rc_c7_gpu_scatter`) |
@@ -456,10 +456,10 @@ A near cubic chunk costs about the same as a near smooth chunk, but every cubic 
 | ID | Verdict | Evidence |
 |----|---------|----------|
 | KC1 | **Confirmed as traced, but reframed**: the cubic mesher was never meant to use LOD, and the cost comes from the content shipping with the LOD system on. **Fixed by D7 (§12.7)**: cubic ignores `bEnableLOD` | Cubic's design answer to distance is greedy meshing with `bEnableLOD` off, and both cubic configs ship with it on (§12 intro). As shipped: far terrain is meshed block by block at every distance (`rc_w04x_1`, `rc_c2_bands_north`), yet LOD changes still re-mesh it, 4,942-6,792 LOD re-meshes per 40,000 uu run against 279-293 for the control, each crossfading an identical mesh (4,788 interior crossfades in the first 155 s of play, about 16,700 by t = 670 s). The initial load meshes each chunk 4.6 times and takes 33 s. **With `bEnableLOD` off** that cost disappears: 0 LOD re-meshes, 2.0 meshes per chunk, a 17 s load, and frame and manager time below the control at every speed (§12.2). What remains is inherent to full-detail cubic and not a LOD bug: a settled frame holds 3.9× the triangles and 9× the renderer GPU memory, and the median cubic mesh job costs 19× the smooth median, because every chunk is a full-detail chunk. Greedy meshing is what keeps that at 9× and not 38× (greedy off: 987 MB at the land site). One trap: turning LOD off also turns far compression off (KC11) |
-| KC2 | **Confirmed** as a cost, and on the intended path it is the main remaining streaming cost; the correctness risk is **dismissed** for what this session exercised | The legacy whole-chunk path runs for cubic and is correct: no hole, missing or stale face in any survey, R23 clean, audits 0, chunk-corner edits closed. Cost: with LOD off, its neighbour re-mesh cascade is the real re-mesh cost left: 1,329-2,540 neighbour re-meshes per run against 0 for the control, 2.0 meshes per chunk on the initial load, and catch-up 1.6-3.2× the control's in PIE (as shipped it adds 2,039-2,302 on top of the LOD re-meshes). Its per-frame deferral, waiting for neighbour data, is what inflates the bench's "other" count (KC14). The seam registry still tracks every cubic chunk (1,237 chunks, 10,774 seams, 4,040 dirty) and its P0 stub processor drains the jobs with no geometry (`VoxelChunkManager.cpp:4110-4114`): 6,140 jobs on the initial load with LOD off, 23,246 with LOD on (smooth: 10,898 real ones). No streaming test covers the path (C1) |
-| KC3 | **Confirmed** (dead path); the test hazard is **fixed** by T5 | The cubic branch always builds `FVoxelCPUCubicMesher` and never reads `bUseGPUMeshing` (`VoxelChunkManager.cpp:1110-1126`); every PIE logged "Using Cubic mesher". The GPU cubic tests pass in-editor, skip headless, and `Performance` returns |
-| KC4 | **Confirmed** | Same site, LOD0, instances within 6,000 uu. `Review_Cubic` (CPU extraction): every instance on a block top, rocks 100% on face centres, grass and mushrooms jittered inside the face (median 7-31 uu from the centre, maximum 36 < 37.5). `Review_Cubic_GPUScatter`: every instance still on a block top, but 24-25% of rocks sit on block corners (greedy-quad vertices); grass and mushrooms are pushed to face edges (median 25-33 uu); and density falls to about a third for grass (217-247 instances vs 655-725) and half for rocks (151-177 vs 288-317). All 8 definitions are forced to `BlockFaceSnap` (logged), but the GPU branch runs before the cubic check |
-| KC5 | **Confirmed**, worse than described | *Targeting:* `floor(ImpactPoint)` picked the air voxel for +X and +Z faces every time, and also for a −Y face: the impact lies exactly on the voxel boundary, so floating-point noise picks the side ("Voxel destroyed at [-6435,-4664,-16]" for a block at y −4663). *Brush:* digging is a density delta, not a block. A near-threshold surface block went in 1 click. On the next block down, the aimed block survived until click 4 while its +X neighbour went at click 1, and 4 blocks (a plus shape) were gone after 5 clicks. On a +X face the aimed block went at click 2 and a neighbour at click 3. Aiming at the block centre took 2 clicks with no collateral. Placement targets the right voxel (offset along the normal) but adds +80 density: 1 click beside terrain, 2 in open air (the first click is invisible). *Demo:* in edit mode LMB also fires `AVoxelWorldTestActor`'s mouse brush (radius 300, smooth, `bUseDiscreteEditing` off). One press removed 6 scattered blocks around the aim point and left the aimed block (`rc_c4_lmbkey1`) |
+| KC2 | **Confirmed** as a cost, and on the intended path it is the main remaining streaming cost; the correctness risk is **dismissed** for what this session exercised | The legacy whole-chunk path runs for cubic and is correct: no hole, missing or stale face in any survey, R23 clean, audits 0, chunk-corner edits closed. Cost: with LOD off, its neighbour re-mesh cascade is the real re-mesh cost left: 1,329-2,540 neighbour re-meshes per run against 0 for the control, 2.0 meshes per chunk on the initial load, and catch-up 1.6-3.2× the control's in PIE (as shipped it adds 2,039-2,302 on top of the LOD re-meshes). Its per-frame deferral, waiting for neighbour data, is what inflates the bench's "other" count (KC14). The seam registry still tracks every cubic chunk (1,237 chunks, 10,774 seams, 4,040 dirty) and its P0 stub processor drains the jobs with no geometry (`VoxelChunkManager.cpp:4110-4114`): 6,140 jobs on the initial load with LOD off, 23,246 with LOD on (smooth: 10,898 real ones). No streaming test covers the path (C1) *(Fixed in M5, §14.9: cubic meshes on the seam path and the legacy path is deleted; catch-up and manager P95 now within the control's)* |
+| KC3 | **Confirmed** (dead path); the test hazard is **fixed** by T5 | The cubic branch always builds `FVoxelCPUCubicMesher` and never reads `bUseGPUMeshing` (`VoxelChunkManager.cpp:1110-1126`); every PIE logged "Using Cubic mesher". The GPU cubic tests pass in-editor, skip headless, and `Performance` returns *(Fixed in M5, §14.9: the GPU cubic mesher and its tests are deleted)* |
+| KC4 | **Confirmed** | Same site, LOD0, instances within 6,000 uu. `Review_Cubic` (CPU extraction): every instance on a block top, rocks 100% on face centres, grass and mushrooms jittered inside the face (median 7-31 uu from the centre, maximum 36 < 37.5). `Review_Cubic_GPUScatter`: every instance still on a block top, but 24-25% of rocks sit on block corners (greedy-quad vertices); grass and mushrooms are pushed to face edges (median 25-33 uu); and density falls to about a third for grass (217-247 instances vs 655-725) and half for rocks (151-177 vs 288-317). All 8 definitions are forced to `BlockFaceSnap` (logged), but the GPU branch runs before the cubic check *(Fixed in M5, §14.9: cubic always extracts scatter on the CPU, and `BlockFaceSnap` is read)* |
+| KC5 | **Confirmed**, worse than described | *Targeting:* `floor(ImpactPoint)` picked the air voxel for +X and +Z faces every time, and also for a −Y face: the impact lies exactly on the voxel boundary, so floating-point noise picks the side ("Voxel destroyed at [-6435,-4664,-16]" for a block at y −4663). *Brush:* digging is a density delta, not a block. A near-threshold surface block went in 1 click. On the next block down, the aimed block survived until click 4 while its +X neighbour went at click 1, and 4 blocks (a plus shape) were gone after 5 clicks. On a +X face the aimed block went at click 2 and a neighbour at click 3. Aiming at the block centre took 2 clicks with no collateral. Placement targets the right voxel (offset along the normal) but adds +80 density: 1 click beside terrain, 2 in open air (the first click is invisible). *Demo:* in edit mode LMB also fires `AVoxelWorldTestActor`'s mouse brush (radius 300, smooth, `bUseDiscreteEditing` off). One press removed 6 scattered blocks around the aim point and left the aimed block (`rc_c4_lmbkey1`) *(Fixed in M5, §14.9: one target rule, `GetEditVoxelCoord`; whole-block edits)* |
 | KC6 | **Confirmed** | Anything placed from the smooth or analytic surface sits up to one block low. Tiled dungeon: pad height −223, block top −150; the brazier, stone pillar and elevator call post stand at −223, 73-74 uu inside the block (`rc_c6_brazier_sunk`, `rc_c6_pillar_sunk`). Generated campsite: actor at −1,244 on a −1,200 block top; the campfire mesh is entirely inside the block (its top is −1,213) and the bench shows 2 uu (`rc_c6_campsite_close`). The control places the same dungeon and campsite at the same heights, and there they sit on the ground: props 0.4-0.6 uu from a −223.5 pad, campsite 0.3 uu above −1,244.0. Not affected: anything placed by trace or physics (spawn, NPCs, world items, a player-placed campfire kit, the physics cube) |
 | KC7 | **Partly confirmed** | Player: every block is a jump (D5), so auto-run and a held jump stall at the first rise (C5). NPCs: one-block steps work (deer and wolves log "jumping a 73 uu obstacle"; wolves reached and killed the player across terraces). Two-block rises strand them: with the player on a 3×3 pillar two blocks high, two wolves stood at its base looping "stuck … blocking ahead and repathing" and never reached it. That is consistent with the nav/auto-jump mismatch (`voxel.Nav.MaxStepRise` 100 checked against interpolated heights), but the session did not isolate a path that nav accepted and movement refused. (At the one site checked, nav's surface sample under the player was identical in both modes, −1,215.85, so nav reads the same interpolated surface in cubic and smooth, not the block tops) |
 | KC8 | **Confirmed** | No map references `DemoCubicWorldConfig` or `Config/CubicScatterConfig` (each is referenced only by itself; `DemoCubicScatterConfig` is used by the review configs). Before this review no PIE bench had recorded a cubic run. `Review_Cubic`, `_GPUScatter` and `_SingleLOD` are now the cubic test content |
@@ -474,8 +474,8 @@ Cubic:
 | KC10 | **`DemoSmoothWorldConfig`'s voxel tree templates use material IDs that do not exist.** Leaves are 22 and 23, but the registry has 22 materials (0-21: Wood 20, Leaves 21), and template 2's trunk is 21 (Leaves). The templates are inert in smooth (voxel trees are cubic-only), so this only shows when the config is meshed cubic, as `Review_Cubic` is: canopies render as opaque clay and brick blocks. `DemoCubicWorldConfig` uses 20 and 21 correctly. Nothing validates template material IDs against the registry | `Review_Cubic` / `DemoSmoothWorldConfig` / `DemoCubicWorldConfig` tree templates; `VoxelCore/Public/VoxelMaterialRegistry.h:30-34`; `rc_c6_tree_found` | Latent content bug; the review's tree screenshots show it. The canopies are not treated as leaves (not masked, not non-occluding) |
 | KC11 | **Far compression is keyed on the LOD level, so the intended cubic path has none.** Compression skips chunks below `voxel.FarCompression.MinStride`, and with `bEnableLOD` off every chunk is LOD 0. The far-band slab is keyed on band 0's distance instead, so it survives `bEnableLOD` off (but not a one-band config) | `VoxelChunkManager.cpp:4677`; `DistanceBandLODStrategy.cpp:956-962`. LOD off: 0 compressed, 1,123-1,245 MB resident voxel data against 215 MB (spawn) and 600-760 MB (bench peak) for the control, loaded chunks unchanged. One band: no slab either, +47% chunks, 1,803 MB | The intended cubic path's main memory cost. **Fixed (§12.7)**: compression keys on the distance band |
 | KC12 | **Melee misses across a one-block height difference.** From a one-block pit, 10 swings at a dummy on the rim did no damage; on the same level it died in 4 | C5 | Common in cubic terrain |
-| KC13 | **The edge of the loaded region shows vertical walls.** A missing neighbour counts as air, so boundary faces are emitted. Visible only from beyond the view distance | `VoxelCPUCubicMesher.cpp:930-1001`; `rc_r23_siteB_east` | Cosmetic |
-| KC14 | **The legacy path re-queues waiting chunks every frame, and the bench counts each one as a re-mesh.** When a chunk's face neighbour has no voxel data yet, the legacy path (cubic only; the seam path never waits) defers it and re-queues it at the end of every frame with the default reason "other". The bench's thrash counter counts queue insertions of already-meshed chunks, so each frame's wait counts once. Traced after the bench runs | `ShouldDeferMeshForNeighbors` under `!bSeamMeshingActive`, `VoxelChunkManager.cpp:3051-3066`; re-queue at `:3383-3386`; counter at `:5798-5803`. "Other" is 0 for smooth in every run; for cubic 0-1,074 in PIE and up to 91,074 headless, where CPU generation keeps neighbours waiting longer. The verbose run that counted 53,799 cubic re-meshes executed 5,729 meshes | Mostly a measurement artefact: queue churn and delayed re-meshes rather than wasted meshing. The wait itself is part of KC2's catch-up cost |
+| KC13 | **The edge of the loaded region shows vertical walls.** A missing neighbour counts as air, so boundary faces are emitted. Visible only from beyond the view distance | `VoxelCPUCubicMesher.cpp:930-1001`; `rc_r23_siteB_east` | Cosmetic *(Fixed by WM-C1, §14.9: the edge is open, as on the control)* |
+| KC14 | **The legacy path re-queues waiting chunks every frame, and the bench counts each one as a re-mesh.** When a chunk's face neighbour has no voxel data yet, the legacy path (cubic only; the seam path never waits) defers it and re-queues it at the end of every frame with the default reason "other". The bench's thrash counter counts queue insertions of already-meshed chunks, so each frame's wait counts once. Traced after the bench runs | `ShouldDeferMeshForNeighbors` under `!bSeamMeshingActive`, `VoxelChunkManager.cpp:3051-3066`; re-queue at `:3383-3386`; counter at `:5798-5803`. "Other" is 0 for smooth in every run; for cubic 0-1,074 in PIE and up to 91,074 headless, where CPU generation keeps neighbours waiting longer. The verbose run that counted 53,799 cubic re-meshes executed 5,729 meshes | Mostly a measurement artefact: queue churn and delayed re-meshes rather than wasted meshing. The wait itself is part of KC2's catch-up cost *(Gone with the legacy path in M5, §14.9)* |
 
 Mode-independent, found on the way:
 
@@ -1378,10 +1378,10 @@ Three findings from §13.11 get IDs here:
 | ID | Finding | Status | Work item |
 |----|---------|--------|-----------|
 | KC1 | Cubic paid for a LOD system it does not use | Fixed (D7, §12.7) | — |
-| KC2 | Cubic is the last user of the legacy whole-chunk path | Open. On the intended path it is cubic's main remaining cost: PIE catch-up 1.6-3.2× the control, legacy neighbour slices 2.6 ms of the manager's slowest ticks (§12.8) | WM-C1 |
-| KC3 | GPU cubic meshing is test-only | Open as dead code (D1: delete it). The test hazard was fixed by T5 | WM-C4 |
-| KC4 | Cubic scatter is wrong with GPU extraction | Open | WM-C3 |
-| KC5 | Player dig and place are tuned for smooth terrain | Open | WM-C2 |
+| KC2 | Cubic is the last user of the legacy whole-chunk path | Fixed in M5 (WM-C1, §14.9): cubic meshes chunk boundaries in face-seam jobs; the legacy path is deleted. Against a same-build control, catch-up and manager P95 are within the thresholds at every speed | WM-C1 |
+| KC3 | GPU cubic meshing is test-only | Fixed in M5 (WM-C4, §14.9): deleted with its tests | WM-C4 |
+| KC4 | Cubic scatter is wrong with GPU extraction | Fixed in M5 (WM-C3, §14.9) | WM-C3 |
+| KC5 | Player dig and place are tuned for smooth terrain | Fixed in M5 (WM-C2, §14.9): one click is one block | WM-C2 |
 | KC6 | Surface queries return the smooth surface, so props sink into blocks | Deferred (D1: first-class only) | — |
 | KC7 | Two-block rises strand NPCs | Partly confirmed; deferred (D1) | — |
 | KC8 | No content exercises cubic | Fixed in M1 (WM-H5; UE5_PluginDev#102, merged): `DemoCubicWorldConfig` is on the intended path and `Config/CubicScatterConfig` is deleted. The review configs exist | WM-H5 |
@@ -1389,8 +1389,8 @@ Three findings from §13.11 get IDs here:
 | KC10 | The smooth config's tree templates use material IDs that do not exist | Fixed in M1 (WM-H4; draquel/VoxelWorlds#85, UE5_PluginDev#102, merged) | WM-H4 |
 | KC11 | Far compression was keyed on the LOD level | Fixed (§12.7) | — |
 | KC12 | Melee misses across a one-block height difference | Deferred (D1) | — |
-| KC13 | Vertical walls at the edge of the loaded region | Dismissed: cosmetic, visible only from beyond the view distance. WM-C1 changes how cubic meshes chunk boundaries; recheck it there | (WM-C1) |
-| KC14 | The legacy path re-queues a waiting chunk every frame | Dismissed as a defect: it inflates a bench counter, not the meshing. The loop goes away with WM-C1 | (WM-C1) |
+| KC13 | Vertical walls at the edge of the loaded region | Fixed by WM-C1 (§14.9): no boundary face is built without both chunks, so the edge is open as on the control | (WM-C1) |
+| KC14 | The legacy path re-queues a waiting chunk every frame | Gone with the legacy path (WM-C1, §14.9) | (WM-C1) |
 
 **Island:**
 
@@ -1429,6 +1429,7 @@ Three findings from §13.11 get IDs here:
 | G12 | The balanced-LOD cache is rebuilt every tick | Fixed in M1 (WM-H1; draquel/VoxelWorlds#84, merged) | WM-H1 |
 | G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole | WM-S1, WM-S4 |
 | G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
+| G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -1492,7 +1493,9 @@ draquel/UE5_PluginDev#105 (the gitlink and the doc map).
 | WM-S3 | **Remove `MaxLoadedChunks`.** The view distance and the island cull already bound residency (§13.4); document what does | KI6 | VoxelWorlds | S | — |
 | WM-S4 | **Re-bench, one batch, one build.** Island M chord, perimeter and coast at v1500-v6000, S at its spawn, flights at z 7,200 and the I2 survey from 48,000 uu, each with the control. Check §1's thresholds and the D3 budget, and update §13's verdicts | KI5, KI11, KI13, G13 | VoxelWorlds (docs) | M | WM-S1, WM-S2 |
 
-**M5. Cubic, terrain-only (D1).**
+**M5. Cubic, terrain-only (D1).** **Status 2026-10-16: all four implemented and verified, PRs open** (results in §14.9):
+draquel/VoxelWorlds#94 (WM-C1, WM-C3, WM-C4, WM-C2's demo brush, G15 and these docs); draquel/VoxelCharacterPlugin#23
+(WM-C2); draquel/UE5_PluginDev#106 (`vox.Dig`'s targeting, the gitlinks and the doc map).
 
 | ID | Work item | Findings | Repos | Size | Needs |
 |----|-----------|----------|-------|------|-------|
@@ -1522,7 +1525,7 @@ D9's order is a priority, not a strict sequence. Rough totals assume S ≈ half 
 | M2 World-mode API | WM-A1 to WM-A4 | ~5 days | WM-H6 | Island params come from one builder; `CullCentreProbe` asserts; a save from a different radius is refused and the world starts fresh; the control's bench unchanged within batch noise. **Met 2026-10-15, in review (§14.6)** |
 | M3 Island correctness | WM-I1 to WM-I6 | ~6.5 days | M2 | `POIPlacementProbe` asserts; I5-I8 re-run: swimming out stops at R+F, falling out respawns, an off-island spawn stands on land, a radius change starts fresh; the I6 tour finds no marker or explored tile past the bounds. **Met 2026-10-15, in review (§14.7)** |
 | M4 Streaming window | WM-S1 to WM-S4 | ~4 days | WM-A3, WM-H1 | WM-S4: island M within §1's thresholds on chord, perimeter and coast; peak loaded chunks within +25% of the control; the D3 budget met on every run, M's v6000 chord included; island audits 0; the control no worse. **Met 2026-10-15 but for one threshold, in review (§14.8):** frame, manager, peak loaded, memory and audits hold on every route and speed, D3 on every run (M's v6000 chord 1,066 MB), the control no worse; catch-up misses at v1500 on the chord and the perimeter (0.27-0.46 s against 0.17-0.18 s) and on the perimeter at v3000 (means 0.47 vs 0.25 s): the island's sea-heavy view leaves a 20-50 chunk generation queue at the stop |
-| M5 Cubic terrain-only | WM-C1 to WM-C4 | ~6.5 days | — | Cubic against a same-build control: catch-up within +25% and manager P95 within +15% (§12.8's misses); C2 and C4 pass; the legacy path is deleted |
+| M5 Cubic terrain-only | WM-C1 to WM-C4 | ~6.5 days | — | Cubic against a same-build control: catch-up within +25% and manager P95 within +15% (§12.8's misses); C2 and C4 pass; the legacy path is deleted. **Met 2026-10-16, in review (§14.9):** catch-up −38% to 0% and manager P95 −21% to −50% of the control at v1500-v6000; C2 and C4 pass (C4 after G15, a renderer fix); the legacy path is deleted |
 | M6 Edge and scale | WM-E1, WM-E2 | ~4.5 days | WM-A2, WM-I5 | From past R+F the sea reaches the horizon with no void; a fully explored L keeps its map tiles under a fixed budget |
 | Spherical | Phases 1-5 (§14.4) | several weeks | M4, M5 | The requirements doc's exit checks |
 
@@ -1906,3 +1909,196 @@ know:
 - `IVoxelWorldMode::GetSurfaceRange` has a default, so a world mode outside VoxelWorlds (the dungeon plugin's, a test
   mock) works unchanged: heightmap modes sample their own height, others give the whole height range.
 - The near window's extra layers unload as soon as their column leaves the near radius, as the old slab gate did.
+
+### 14.9 M5 results (2026-10-16)
+
+All four M5 items are implemented and verified; PRs open. Built from VoxelWorlds `feature/wm-c1-cubic-seam-path` (base
+`af0037b`), VoxelCharacterPlugin `feature/wm-c2-block-editing` (base `8bc5249`) and UE5_PluginDev
+`claude/m5-cubic-terrain-only-2f874f` (base `b781218`), editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`, in a
+worktree editor with background throttling off.
+
+**Cubic on the seam path, as built (WM-C1).** Cubic meshes through the seam-ownership pipeline like Dual Contouring and
+Marching Cubes (`SEAM_OWNERSHIP_ARCHITECTURE.md` §2.3, "trivially compatible"):
+
+| Part | What it meshes | Reads |
+|------|----------------|-------|
+| Chunk mesh (Interior domain) | Every face except those on the chunk's six boundary planes, greedy-merged as before | The chunk's own voxels only: a chunk never waits for a neighbour and is meshed once |
+| Face seam job (`FVoxelCPUCubicMesher::GenerateFaceSeamMeshCPU`) | The shared plane: A's faces toward +axis in its last layer and B's toward -axis in its first, each culled against the other side's voxel, greedy-merged in the plane; positions in the owner's frame | Both chunks' shared snapshots |
+| Edge and corner seams | Nothing: no cubic face lies only on a chunk edge or corner. The registry tracks face seams alone for cubic (`FVoxelSeamRegistry::SetFaceSeamsOnly`) | — |
+
+Vertex AO samples outside the chunk (interior) or the pair (seam) as air; no voxel material reads vertex AO. Collision
+is unchanged: it cooks whole chunks with neighbour slices, extracted on a worker from shared snapshots.
+
+**Deleted with the legacy whole-chunk path:** the game-thread neighbour-slice extraction for render meshes
+(`ExtractNeighborEdgeSlices`, and with it `GetChunkCollisionMesh` and the synchronous branch of
+`PrepareCollisionMeshRequest`), the deferral while a face neighbour generates (`ShouldDeferMeshForNeighbors`),
+`CaptureMeshDeps` / `RevalidateMeshDeps` and `voxel.Stream.MeshDepRevalidate`, the 26-neighbour re-mesh on generation
+and its coalescing (`QueueNeighborsForRemesh`, `ProcessPendingNeighborRemeshes`, `voxel.Stream.NeighborRemeshCoalesce`,
+`.NeighborRemeshDebounceFrames`, `.NearCorrectionDistance`, `.NearCorrectionDebounceFrames`), the legacy LOD face
+cascades, the transition-face and neighbour-LOD setup of chunk requests, `voxel.LogBoundaryResidency`, the
+far-compression hold for the legacy path (`FarExpandedSeenFrame`), the registry's P0 stub processor
+(`ProcessSeamJobQueue`) and `voxel.Seam.Registry` / `voxel.Seam.Debug` (the registry is always on). About 1,300 lines
+of the chunk manager. The bench CSV loses `GenNeighborMs` and `MeshSliceMs`, the JSON `thrashNeighbor` (no path
+produces neighbour re-meshes any more), and gains `meshMsP95`, `seamMsP50/P95`, `meshJobsLaunched` and
+`seamJobsCompleted`.
+
+**WM-C4.** `FVoxelGPUCubicMesher`, `CubicMeshGeneration.usf` and the `Meshing.Cubic.GPUAsync`, `.GPUReadback` and
+`.CPUvsGPU` tests are deleted; `Meshing.Cubic.Performance` is CPU-only. `CubicMeshCommon.ush` stays (the GPU Marching
+Cubes shader includes it). The README no longer claims a GPU cubic mesher.
+
+**Bench method.** One build, one batch (VoxelWorlds at this PR's code plus a temporary `voxel.Temp.CubicLegacyBoundary` cvar
+that kept cubic on the legacy whole-chunk path, latched when the world initializes, removed before the PR together with
+the path itself). §12's route: `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0 warmup=120`, one cold fresh world per
+run, interleaved per speed: control, cubic, cubic on the legacy path; v3000 twice. PIE in the worktree editor's level
+viewport (1280×722), background throttle off, `vox.DeleteSave`, clock pinned at noon, after two throwaway PIEs (G14). The
+control is `DemoSmoothWorldConfig` and cubic is `Review_Cubic`, both through `voxel.ConfigOverride`, as in §12. JSON reports
+in [Research/Bench/M5/](Research/Bench/M5/).
+
+**PIE** ("Mesh" is the meshing section's P95, "Seam" the seam scheduler's, "Slices" the legacy neighbour-slice extraction's;
+"Chunk / seam jobs" over the whole run; thrash = re-meshes of chunks that already had a mesh, by reason LOD / neighbour /
+other):
+
+| Run | Warmup s | Frame P50 / P95 / P99 ms | Manager P95 ms | Mesh / Seam / Slices P95 ms | Catch-up s | Peak mesh queue | Thrash (LOD / neighbour / other) | Chunk / seam jobs | Peak / end voxel MB | End resident / uniform / compressed | Renderer GPU MB | Systems MB | Audit | JSON |
+|-----|----------|---------------------------|----------------|-----------------------------|------------|-----------------|----------------------------------|-------------------|---------------------|-------------------------------------|-----------------|------------|-------|------|
+| Control v1500 | 1.2 | 16.7 / 24.9 / 31.5 | 7.3 | 1.20 / 2.72 / — | 0.17 | 7 | 251 (251 / 0 / 0) | 1,191 / 17,992 | 745 / 336 | 312 / 77 / 663 | 29 | 956 | 0 | `20261016_154526_m5_C_v1500a` |
+| **Cubic** v1500 | 1.4 | 16.7 / 20.4 / 34.6 | 5.8 | 0.59 / 1.30 / — | 0.17 | 2 | 0 (0 / 0 / 0) | 717 / 1,953 | 664 / 187 | 160 / 90 / 802 | 295 | 1,105 | 0 | `20261016_154613_m5_K_v1500a` |
+| Cubic, legacy path v1500 | 6.1 | 16.7 / 25.8 / 37.0 | 10.2 | 5.11 / 0.04 / 4.14 | 0.51 | 43 | 1,641 (0 / 1,641 / 0) | 3,041 / 0 | 932 / 518 | 495 / 59 / 498 | 301 | 1,386 | 0 | `20261016_154703_m5_L_v1500a` |
+| Control v3000 | 1.0 | 19.8 / 30.7 / 36.9 | 9.9 | 2.19 / 2.77 / — | 0.28 | 7 | 252 (252 / 0 / 0) | 1,177 / 17,708 | 779 / 528 | 509 / 57 / 486 | 29 | 992 | 0 | `20261016_154326_m5_C_v3000a` |
+| Control v3000, re-run | 2.3 | 22.6 / 37.4 / 44.1 | 12.4 | 2.42 / 3.67 / — | 0.45 | 7 | 252 (252 / 0 / 0) | 1,304 / 18,996 | 704 / 572 | 554 / 49 / 449 | 28 | 915 | 0 | `20261016_154920_m5_C_v3000b` |
+| **Cubic** v3000 | 2.7 | 16.7 / 26.7 / 44.7 | 7.5 | 0.81 / 1.67 / — | 0.17 | 2 | 0 (0 / 0 / 0) | 868 / 2,366 | 592 / 306 | 282 / 76 / 694 | 286 | 1,041 | 0 | `20261016_154358_m5_K_v3000a` |
+| **Cubic** v3000, re-run | 3.1 | 16.7 / 27.7 / 46.2 | 7.6 | 0.89 / 1.58 / — | 0.28 | 2 | 0 (0 / 0 / 0) | 896 / 2,435 | 600 / 311 | 288 / 76 / 688 | 289 | 1,045 | 0 | `20261016_154957_m5_K_v3000b` |
+| Cubic, legacy path v3000 | 5.6 | 17.4 / 46.9 / 75.3 | 15.3 | 5.19 / 0.05 / 4.16 | 4.11 | 132 | 1,092 (0 / 1,092 / 0) | 2,496 / 0 | 943 / 649 | 632 / 44 / 376 | 285 | 1,412 | 0 | `20261016_154441_m5_L_v3000a` |
+| Cubic, legacy path v3000, re-run | 7.2 | 17.7 / 54.2 / 77.4 | 18.6 | 5.73 / 0.06 / 4.44 | 4.90 | 140 | 1,101 (0 / 1,101 / 0) | 2,525 / 0 | 948 / 669 | 652 / 46 / 354 | 285 | 1,404 | 0 | `20261016_155041_m5_L_v3000b` |
+| Control v6000 | 0.9 | 38.0 / 50.2 / 54.9 | 21.2 | 4.94 / 5.66 / — | 3.73 | 51 | 252 (252 / 0 / 0) | 1,144 / 15,563 | 782 / 755 | 742 / 24 / 286 | 28 | 1,030 | 0 | `20261016_154732_m5_C_v6000a` |
+| **Cubic** v6000 | 3.9 | 17.5 / 35.2 / 47.6 | 10.6 | 0.85 / 1.56 / — | 2.87 | 0 | 0 (0 / 0 / 0) | 949 / 2,577 | 618 / 500 | 482 / 60 / 510 | 279 | 1,056 | 0 | `20261016_154805_m5_K_v6000a` |
+| Cubic, legacy path v6000 | 7.7 | 19.5 / 51.0 / 64.1 | 17.4 | 5.71 / 0.06 / 4.07 | 8.46 | 138 | 979 (0 / 979 / 0) | 2,406 / 0 | 953 / 760 | 745 / 43 / 264 | 287 | 1,423 | 0 | `20261016_154845_m5_L_v6000a` |
+
+All audits reported 0. The legacy rows reproduce §12.8's cubic (catch-up 0.71 / 5.2 / 9.7 s, manager P95 10.9 / 15.9 / 16.4
+ms at v1500 / v3000 / v6000), so the batch compares against the same baseline §12.8 measured.
+
+**Against §14.3's done-when (cubic vs the same-build control; v3000 = mean of the two runs each):**
+
+| Metric (threshold) | v1500 | v3000 | v6000 |
+|--------------------|-------|-------|-------|
+| Catch-up (+25%) | 0.17 vs 0.17 s (0%, both at the metric's floor) ✓ | 0.23 vs 0.37 s (−38%) ✓ | 2.87 vs 3.73 s (−23%) ✓ |
+| Manager P95 (+15%) | 5.8 vs 7.3 ms (−21%) ✓ | 7.6 vs 11.2 ms (−32%) ✓ | 10.6 vs 21.2 ms (−50%) ✓ |
+| Frame P95 (+10%) | 20.4 vs 24.9 ms (−18%) ✓ | 27.2 vs 34.1 ms (−20%) ✓ | 35.2 vs 50.2 ms (−30%) ✓ |
+| Peak loaded chunks (+25%) | 1,129 vs 1,123 (+1%) ✓ | 1,102 vs 1,076 (+2%) ✓ | 1,052 vs 1,052 (0%) ✓ |
+| Peak voxel MB (+25%) | 664 vs 745 (−11%) ✓ | 596 vs 742 (−20%) ✓ | 618 vs 782 (−21%) ✓ |
+| Systems MB (+25%; D3 ≤ 1,500) | 1,105 vs 956 (+16%) ✓ | 1,043 vs 954 (+9%) ✓ | 1,056 vs 1,030 (+3%) ✓ |
+| Audit after settling | 0 | 0 | 0 |
+
+§12.8's misses are closed: catch-up was 0.71 / 5.2 / 9.7 s against 0.17 / 0.93-1.07 / 5.0 s, and manager P95 +27% (v1500)
+and +19% (v3000). Renderer GPU memory stays about 10× the control's (279-295 against 28-29 MB): every cubic chunk is full
+detail, as §12.5 explained; it is in the systems total above and does not depend on how boundaries are meshed.
+
+**What WM-C1 did for cubic** (legacy path → seam path, same build):
+
+| Speed | Frame P95 ms | Manager P95 ms | Catch-up s | Peak mesh queue | Chunk mesh jobs | Re-meshes | Peak voxel MB | Systems MB |
+|-------|--------------|----------------|------------|-----------------|-----------------|-----------|---------------|------------|
+| v1500 | 25.8 → 20.4 | 10.2 → 5.8 | 0.51 → 0.17 | 43 → 2 | 3,041 → 717 | 1,641 → 0 | 932 → 664 | 1,386 → 1,105 |
+| v3000 (means) | 50.6 → 27.2 | 17.0 → 7.6 | 4.51 → 0.23 | 136 → 2 | 2,511 → 882 | 1,097 → 0 | 946 → 596 | 1,408 → 1,043 |
+| v6000 | 51.0 → 35.2 | 17.4 → 10.6 | 8.46 → 2.87 | 138 → 0 | 2,406 → 949 | 979 → 0 | 953 → 618 | 1,423 → 1,056 |
+
+Each chunk is meshed once. The legacy path meshed 2.5-4.2 times as many chunk jobs: the deferral held chunks back until
+their face neighbours had data, and every arrival re-meshed the loaded neighbours (the coalesced 26-neighbour cascade,
+KC2). Its neighbour-slice extraction alone was 4.1-4.4 ms of the meshing section's P95. The seam path runs 1,953-2,577 face
+seam jobs per run instead (the control: 15,563-18,996 face, edge and corner jobs at mixed LOD); the seam scheduler's P95
+is 1.3-1.7 ms against the control's 2.7-5.7 ms. Peak voxel data falls by about a third: the cascade kept chunks decompressed
+and queued. KC14's per-frame deferral loop is gone with the path; the M1 bench fix (WM-H8) had already stopped it from
+inflating the thrash counter.
+
+**What is left on cubic's manager P95.** Averaged over the slowest 5% of traverse ticks at v3000: render submit 5.8-6.5 ms
+(on its worst ticks the chunk unloads, 9-14 ms in single ticks), collision 4.0 ms (single cook applies of 15-34 ms), the
+seam scheduler 0.9-1.1, meshing 0.4-0.5 (control: render 3.2, seam 2.3, scatter 2.1, collision 1.8, meshing 1.5). Both are
+pre-existing costs of cubic's larger meshes (3-4× the control's triangles), not boundary work; neither is near a threshold.
+
+**Initial load and settled state** (fresh world at the spawn; "load" = a zero-length bench started as PIE came up, whose
+warmup is the initial load; settled = after 75 s idle, `voxel.FarCompression.Stats` and the renderer's own counters):
+
+| | Control (smooth) | **Cubic, seam path** | Cubic, legacy path |
+|---|---|---|---|
+| Load: warmup to drained (from bench start) | 7.6 s | 9.1 s | 12.0 s |
+| Load: chunk mesh jobs / re-meshes / seam jobs | 805 / 2 (LOD) / 7,775 | 783 / **0** / 2,125 | 1,834 / 882 (neighbour) / 0 |
+| Load: interior crossfades (renderer) | 3 | **0** | 592 (54 mid-fade restarts) |
+| Settled: loaded / chunks with geometry | 979 / 428 | 979 / 459 | 979 / 610 |
+| Settled: triangles / renderer GPU | 0.86 M / 23 MB | 3.80 M / 247 MB | 3.89 M / 252 MB |
+| Settled: voxel data (resident / uniform / compressed chunks) | 128.3 MB (107 / 47 / 825) | 120.4 MB (99 / 50 / 830) | 121.4 MB (100 / 50 / 829) |
+| Settled: seam registry (seams tracked / dirty, never-ready) | 8,578 / 3,288 | 3,348 / 822 | 8,578 / 3,288 (stub) |
+| Settled: voxel systems MB / audit | 355 / 0 | 578 / 0 | — / 0 |
+
+The 151 chunks that only the legacy path gives geometry are the walls at the loaded region's edge (KC13, below) and
+boundary-only faces; the seam path's settled triangle count is 2% lower for the same terrain.
+
+**Headless CPU sweep** (VoxelWorldsTest, `-VoxelForceCPU`, the same route; no editor open; whole-run job counts):
+
+| Run | Frame P50 / P95 ms | Manager P95 ms | Mesh / Seam P95 ms | Catch-up s | Thrash (LOD / neighbour / other) | Chunk / seam jobs | Peak / end voxel MB | End resident / uniform / compressed | Systems MB | JSON |
+|-----|--------------------|----------------|--------------------|------------|----------------------------------|-------------------|---------------------|-------------------------------------|------------|------|
+| Control v1500 | 1.1 / 3.9 | 1.9 | 0.03 / 0.66 | 0.0 | 497 (497 / 0 / 0) | 2,055 / 28,242 | 218 / 166 | 138 / 93 / 821 | 492 | `20261016_155836_m5h_C_v1500` |
+| Control v3000 | 1.3 / 5.6 | 3.3 | 0.14 / 1.08 | 4.7 | 498 (498 / 0 / 0) | 2,056 / 28,012 | 202 / 170 | 143 / 91 / 818 | 501 | `20261016_155934_m5h_C_v3000` |
+| Control v6000 | 2.5 / 8.4 | 5.0 | 0.62 / 1.15 | 10.7 | 499 (499 / 0 / 0) | 2,053 / 27,783 | 224 / 164 | 136 / 93 / 823 | 531 | `20261016_160033_m5h_C_v6000` |
+| **Cubic** v1500 | 0.9 / 1.6 | 0.2 | 0.00 / 0.01 | 0.0 | 0 (0 / 0 / 0) | 1,558 / 4,092 | 177 / 96 | 69 / 97 / 886 | 622 | `20261016_160142_m5h_K_v1500` |
+| **Cubic** v3000 | 1.0 / 2.5 | 1.0 | 0.00 / 0.03 | 4.2 | 0 (0 / 0 / 0) | 1,558 / 4,088 | 153 / 84 | 55 / 94 / 903 | 587 | `20261016_160239_m5h_K_v3000` |
+| **Cubic** v6000 | 1.2 / 3.5 | 1.8 | 0.00 / 0.04 | 10.2 | 0 (0 / 0 / 0) | 1,554 / 4,075 | 137 / 86 | 58 / 97 / 897 | 576 | `20261016_160339_m5h_K_v6000` |
+| Cubic, legacy path v3000 | 1.1 / 4.9 | 3.0 | 0.88 / 0.01 | 6.0 | 2,460 (0 / 2,460 / 0) | 4,018 / 0 | 812 / 454 | 425 / 60 / 567 | 1,210 | `20261016_160443_m5h_L_v3000` |
+
+Headless, cubic is within the control at every speed (catch-up 0.0 / 4.2 / 10.2 s against 0.0 / 4.7 / 10.7, manager P95
+0.2-1.8 ms against 1.9-5.0) and needs a third of the chunk mesh jobs it needed on the legacy path (1,558 against 4,018 at
+v3000; legacy thrash 2,460, systems 1,210 MB against 587).
+
+**Scenarios (§4), on the final build** (`Review_Cubic`, fresh world, after a throwaway PIE):
+
+| Scenario | Verdict | What was run |
+|----------|---------|--------------|
+| C2 Streaming | **Pass** | A fresh world settles at t = 15 s with the same geometry every start. A chunk corner (−2,055, 1,521) surveyed from both sides: no hole, missing or stale face (`m5_c2_corner_a`, `_b`). **W-04 flown** at 3,000 uu/s following the terrain (`voxel.Bench.Run m5_c2_w04_follow 3000 180000 dir=0:1 follow=300 warmup=60`): catch-up 0.5 s, peak mesh queue 2, thrash 0, frame P95 21.1 ms, manager P95 5.1 ms, peak systems 886 MB, audit 0, and the terrain ahead is there (`m5_c2_w04_mid`, `_mid2`; Review A as shipped: catch-up 28 s, mesh queue 1,739, thrash 13,698, the terrain ahead missing). **R23 A→B→C** (`vox.TP` to (80,000, 0), then (80,000, 80,000), then back to the spawn): every settle released on cooked collision; `AuditResidency` 0 findings, no render or seam orphans, no stuck jobs, no late seam results rejected; no chunk left in `Meshing`. `FarCompression.Stats`: 98 resident, 53 uniform, 953 compressed, 123.3 MB resident, 981 MB reclaimed, 0 stale. **KC13 rechecked:** with streaming paused and a camera 6,000-14,000 uu outside the loaded region, its edge is open, a cut-away into the caves like the control's; no walls (`m5_c2_kc13_frozen_high`, `_low`). **Fades** render with the atlas material: frontier chunks mid first-appearance fade, 35 active (`m5_c2_fade_4`). Scatter shows up to a second before the terrain it stands on fades in, on the control as well (`m5_ctrl_fade_2`): R24's first-appearance hold holds the terrain, not the scatter; unchanged here |
+| C4 Editing | **Pass** (after G15, below) | The player's own input (`IA_PrimaryAction` / `IA_SecondaryAction`, edit mode on, first-person view), measured by depth traces at block-face centres before and after each click: on **+Z, +X and −Y** faces of the terrain and on **+Y, −X** (a scaffold pillar) and **−Z** (under a scaffold slab; both written through the edit manager to have those faces in reach), one dig removes exactly the block under the crosshair and one place adds exactly one block against the aimed face. The old rule (the floor of the impact point) picks the air block in front on every +X, +Y and +Z face (KC5). A stone pickaxe digs with edit mode off: one block, the one hit; `vox.Dig` at the crosshair removes the block the camera ray hits. **A pit across a chunk corner** (2×2 columns, two blocks deep, four chunks, through the server path): walls and floor closed on both chunk planes (`m5_c4_corner_pit_a`, `_b`); the pawn dropped into it lands on its floor at the corner, no fall-through. **`vox.Save`, Stop, Play:** the pit and every dig come back (column tops 825 / 825 / 750 / 825, two blocks down), but the first reload rendered the terrain around the player wrongly: G15 |
+
+**G15, found in C4: a recreated scene proxy drops the geometry it held.** After the reload, a strip of terrain around the
+saved spot rendered as the caves under it, with the plants at the right height. Collision, scatter and the edits were
+right, and `voxel.RemeshAll` or re-meshing the one chunk brought it back. Temporary logs showed the chunk meshed once from
+the right data (1,865 solid voxels, 1,464 vertices, the same as its collision) and submitted, and then the world
+component's scene proxy recreated a moment later. The engine does this on material and render-state changes; here the
+scatter system's runtime billboard material compiles in the first second of play, after the first chunks went out. A new
+`FVoxelSceneProxy` starts empty, and nothing sent the old one's chunk meshes, seam buckets or water tiles again. A fresh
+world loses the same way (7 chunks at the spawn in the check below). Smooth worlds lose the same chunks but usually
+re-mesh them for LOD soon after; the legacy cubic path re-meshed them in the neighbour cascade. On the seam path a cubic
+chunk is meshed once, so the loss stayed.
+
+The fix: `UVoxelWorldComponent::CreateSceneProxy` flags a proxy that replaces one with chunks in it;
+`IVoxelMeshRenderer::ConsumeLostRenderData` (new, default no-op) reports it once with the chunks the renderer had; at the
+start of its tick the chunk manager re-meshes those that are `Loaded` (`RecoverLostRenderData`; chunks still in the
+pipeline submit to the new proxy anyway), sends every seam bucket again from the slots it keeps (no seam job re-runs),
+and marks every water tile dirty. Live, the reload logs `re-meshing 5 chunk(s), re-sending 4 seam bucket(s) and 2 water
+tile(s)` and renders whole (`m5_fix_reload8`, `m5_fix_corner_pit_reload`); a fresh world logs 7 / 1 / 1 and its spawn
+renders whole (`m5_fix_fresh_spawn`). Test `Streaming.Cubic.RendererProxyRecreated`: after the renderer drops everything,
+the 105 chunks are re-meshed once each, the 77 seam buckets come back and the rendered faces equal the ones before
+(88,321 of 88,321). Every meshing mode gets the fix. The benches above ran before it; it acts only when the engine
+recreates the proxy, and otherwise costs a lock and a flag check per tick.
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| WM-C1 | Done, in review | VoxelWorlds#94 | The tables above; tests `Meshing.Cubic.InteriorDomain` (no face on the six boundary planes; every other face as the whole-chunk mesher gives it), `.SeamClosure` (a 2×2×2 block of 8³ chunks, interiors plus the 12 face seams, equals the 16³ region meshed whole, in unit faces, greedy and simple), `Streaming.Cubic.SeamPath` (a real chunk manager into a recording renderer: 105 chunks, each meshed once and never re-meshed; the interiors and seam buckets equal the whole-chunk meshes against loaded neighbours, 88,321 unit faces, none missing, doubled or at the loaded region's edge; the legacy path fails it with 96 re-meshes and 18,669 extra faces, KC13's walls) and `.RendererProxyRecreated` (G15); C2 |
+| WM-C2 | Done, in review | VoxelCharacterPlugin#23, VoxelWorlds#94, UE5_PluginDev#106 | `AVCCharacterBase::GetEditVoxelCoord` (Blueprint-callable) is the one target rule: place at `ImpactPoint + ½·VoxelSize·normal`; in cubic, dig at `− ½·VoxelSize·normal`; smooth digs unchanged. Cubic edits are whole blocks (a cube brush at the block's centre, density 255); the placement overlap check boxes the block itself. The four dig and place sites, `vox.Dig` and the demo brush (`AVoxelWorldTestActor::IsDiscreteEditing`: always discrete in cubic) use it. Test `VoxelCharacter.Edit.BlockTargeting` (all six face directions, impact points a hair either side of the face, the demo's offset origin; smooth targets unchanged); C4 |
+| WM-C3 | Done, in review | VoxelWorlds#94 | `UVoxelScatterManager::WantsGPUExtraction`: cubic always extracts block-face centres on the CPU and logs that `bUseGPUScatterExtraction` is ignored. `BlockFaceSnap` keeps the jitter inside the face. Tests `Scatter.Cubic.CPUExtractionOnly`, `.BlockFaceSnapStaysOnFace` |
+| WM-C4 | Done, in review | VoxelWorlds#94 | `FVoxelGPUCubicMesher` and `CubicMeshGeneration.usf` deleted with three tests; `CubicMeshCommon.ush` stays (GPU Marching Cubes includes it); the README, `ARCHITECTURE.md` and `LOD_SYSTEM.md` describe the CPU mesher only |
+
+**Suites.** Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter` 275/275. In the editor, where the GPU tests run, 275/275, every
+`Generation.GPUvsCPU*Parity`, `GPUNoiseGeneratorAsync`, `Meshing.MarchingCubes.CPUvsGPU` and
+`WorldModes.InfinitePlane.GPUConsistency` among them. 271 before M5, less the three GPU cubic tests, plus seven new
+(`Meshing.Cubic.InteriorDomain`, `.SeamClosure`, `Streaming.Cubic.SeamPath`, `.RendererProxyRecreated`,
+`Scatter.Cubic.CPUExtractionOnly`, `.BlockFaceSnapStaysOnFace`, `VoxelCharacter.Edit.BlockTargeting`). Both on the final
+build, with the temporary cvar and the diagnostics removed.
+
+**What changes in §12.** C2 becomes **Pass**: the as-shipped problems (W-04 could not keep up, KC13's walls) are gone.
+C4 becomes **Pass**. KC2, KC3, KC4, KC5, KC13 and KC14 are fixed (§14.1). §12.6's account of where cubic and smooth
+separate loses its boundary row: both mesh chunk boundaries through single-owner seam jobs now. What still separates them
+is detail, not boundaries: every cubic chunk is full detail (D7), so its meshes carry 3-4× the control's triangles and
+about 10× its renderer memory, and its slowest ticks are render submits and collision applies of those meshes.
+
+**Left for later**, as planned: KC6, KC7, KC9 and KC12 stay deferred with D1 (cubic is terrain-only), and spherical
+Phase 1 can now test seams at mid latitudes without the legacy path (SP-D4). Things to know:
+
+- The bench CSV and JSON changed (see the deletions above); compare `thrashRemeshCount` and the meshing columns only with
+  runs from this build on.
+- Cubic now builds face seams only; `voxel.Seam.*` cvars apply to it as to the smooth meshers.
+- A renderer outside VoxelWorlds that keeps its geometry in a scene proxy should override `ConsumeLostRenderData`.

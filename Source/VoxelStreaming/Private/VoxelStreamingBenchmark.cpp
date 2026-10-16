@@ -326,13 +326,11 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.GenApplyMs = T.GenApplyMs;
 	S.GenStoreMs = T.GenStoreMs;
 	S.GenNotifyMs = T.GenNotifyMs;
-	S.GenNeighborMs = T.GenNeighborMs;
 	S.GenApplyCount = T.GenApplyCount;
 	S.MeshTickMs = T.MeshTickMs;
 	S.MeshLaunchMs = T.MeshLaunchMs;
 	S.MeshApplyMs = T.MeshApplyMs;
 	S.MeshSnapMs = T.MeshSnapshotMs;
-	S.MeshSliceMs = T.MeshSlicesMs;
 	S.MeshDispMs = T.MeshDispatchMs;
 	S.MeshLaunchCount = T.MeshLaunchCount;
 	S.RendMeshMs = T.RenderMeshMs;
@@ -642,16 +640,16 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenNeighborMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshSliceMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
-			S.GenLaunchMs, S.GenPollMs, S.GenApplyMs, S.GenStoreMs, S.GenNotifyMs, S.GenNeighborMs, S.GenApplyCount,
+			S.GenLaunchMs, S.GenPollMs, S.GenApplyMs, S.GenStoreMs, S.GenNotifyMs, S.GenApplyCount,
 			S.MeshTickMs, S.MeshLaunchMs, S.MeshApplyMs,
-			S.MeshSnapMs, S.MeshSliceMs, S.MeshDispMs, S.MeshLaunchCount,
+			S.MeshSnapMs, S.MeshDispMs, S.MeshLaunchCount,
 			S.RendMeshMs, S.RendSubRendMs, S.RendSubScatMs, S.RendSubWatMs,
 			S.RendUnloadMs, S.RendWTileMs, S.RendFlushMs, S.RendSubmitCount,
 			S.RemeshCount, S.SeamMs, S.CollPrepMs, S.CollApplyMs,
@@ -666,8 +664,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	int32 PeakGen = 0, PeakMesh = 0, PeakUnload = 0, MaxLoaded = 0;
 	float PeakVoxelMB = 0.0f, PeakRendGPUMB = 0.0f, PeakRendCPUMB = 0.0f, PeakCollMB = 0.0f, PeakScatMB = 0.0f, PeakProcessMB = 0.0f;
 	float PeakVoxelTotalMB = 0.0f;
-	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr, LODStaleArr, LODStaleNearArr, LODUpdateMsArr;
+	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr, LODStaleArr, LODStaleNearArr, LODUpdateMsArr, MeshMsArr, SeamMsArr;
 	int32 LODEvalFrames = 0;
+	// Chunk mesh jobs launched over the whole run (every phase).
+	int64 MeshJobsLaunched = 0;
 	for (const FSample& S : Samples)
 	{
 		MaxLoaded = FMath::Max(MaxLoaded, S.LoadedChunks); // retention peak across all phases
@@ -678,6 +678,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 		PeakScatMB = FMath::Max(PeakScatMB, S.ScatMB);
 		PeakProcessMB = FMath::Max(PeakProcessMB, S.ProcessMB);
 		PeakVoxelTotalMB = FMath::Max(PeakVoxelTotalMB, S.VoxelMB + S.EditMB + S.RendCPUMB + S.RendGPUMB + S.CollMB + S.ScatMB);
+		MeshJobsLaunched += S.MeshLaunchCount;
 		if (S.Phase != static_cast<uint8>(EPhase::Traverse)) { continue; }
 		PeakGen = FMath::Max(PeakGen, S.GenQueue);
 		PeakMesh = FMath::Max(PeakMesh, S.MeshQueue);
@@ -688,6 +689,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 		LODStaleArr.Add(static_cast<float>(S.LODStale));
 		LODStaleNearArr.Add(static_cast<float>(S.LODStaleNear));
 		LODUpdateMsArr.Add(S.LODUpdateMs);
+		MeshMsArr.Add(S.MeshMs);
+		SeamMsArr.Add(S.SeamMs);
 		LODEvalFrames += S.LODCand >= 0 ? 1 : 0;
 	}
 	auto Mean = [](const TArray<float>& Values)
@@ -707,7 +710,6 @@ void FVoxelStreamingBenchmark::WriteReport()
 	double UnloadDistMean = 0.0, UnloadDistMax = 0.0;
 	ChunkManager->GetBenchUnloadDistStats(UnloadDistMean, UnloadDistMax);
 	const int64 Thrash = ChunkManager->GetBenchRemeshCount();
-	const int64 ThrashNeighbor = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::NeighborRemesh);
 	const int64 ThrashLOD = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::LODTransition);
 	const int64 ThrashDirty = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::Dirty);
 	const int64 ThrashOther = ChunkManager->GetBenchRemeshByReason(EVoxelRemeshReason::Other);
@@ -742,8 +744,14 @@ void FVoxelStreamingBenchmark::WriteReport()
 	Json += FString::Printf(TEXT("  \"farCompressEncodes\": %lld,\n"), FarCompEncodes);
 	Json += FString::Printf(TEXT("  \"farCompressInstalled\": %lld,\n"), FarCompInstalled);
 	Json += FString::Printf(TEXT("  \"farCompressStale\": %lld,\n"), FarCompStale);
+	// Meshing and seam sections of totalMs over the traverse, and the run's chunk-mesh and seam jobs (M5: a
+	// cubic world moved its boundary work from chunk re-meshes to seam jobs).
+	Json += FString::Printf(TEXT("  \"meshMsP95\": %.3f,\n"), Percentile(MeshMsArr, 0.95f));
+	Json += FString::Printf(TEXT("  \"seamMsP50\": %.3f,\n"), Percentile(SeamMsArr, 0.50f));
+	Json += FString::Printf(TEXT("  \"seamMsP95\": %.3f,\n"), Percentile(SeamMsArr, 0.95f));
+	Json += FString::Printf(TEXT("  \"meshJobsLaunched\": %lld,\n"), MeshJobsLaunched);
+	Json += FString::Printf(TEXT("  \"seamJobsCompleted\": %lld,\n"), ChunkManager->GetBenchSeamJobsCompleted());
 	Json += FString::Printf(TEXT("  \"thrashRemeshCount\": %lld,\n"), Thrash);
-	Json += FString::Printf(TEXT("  \"thrashNeighbor\": %lld,\n"), ThrashNeighbor);
 	Json += FString::Printf(TEXT("  \"thrashLOD\": %lld,\n"), ThrashLOD);
 	Json += FString::Printf(TEXT("  \"thrashDirty\": %lld,\n"), ThrashDirty);
 	Json += FString::Printf(TEXT("  \"thrashOther\": %lld,\n"), ThrashOther);
@@ -803,7 +811,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 		TEXT("Benchmark '%s' memory: peakVoxelSystems=%.0fMB (voxel %.0f, rendGPU %.0f, rendCPU %.0f, coll %.0f, scatter %.0f) peakProcess=%.0fMB; audit findings=%d"),
 		*Config.Tag, PeakVoxelTotalMB, PeakVoxelMB, PeakRendGPUMB, PeakRendCPUMB, PeakCollMB, PeakScatMB, PeakProcessMB, AuditFindings);
 	UE_LOG(LogVoxelBench, Warning,
-		TEXT("Benchmark '%s' DONE: traverse=%.1fs catchUp=%.1fs peakMeshQ=%d peakGenQ=%d peakUnloadQ=%d frameP95=%.1fms totalP95=%.1fms thrash=%lld(nbr=%lld lod=%lld dirty=%lld other=%lld) unloadLag(mean/max)=%.0f/%.0fms unloadDist(mean/max)=%.0f/%.0fuu -> %s"),
+		TEXT("Benchmark '%s' DONE: traverse=%.1fs catchUp=%.1fs peakMeshQ=%d peakGenQ=%d peakUnloadQ=%d frameP95=%.1fms totalP95=%.1fms thrash=%lld(lod=%lld dirty=%lld other=%lld) unloadLag(mean/max)=%.0f/%.0fms unloadDist(mean/max)=%.0f/%.0fuu -> %s"),
 		*Config.Tag, TraverseDur, CatchUpDurationSec, PeakMesh, PeakGen, PeakUnload,
-		Percentile(FrameMsArr, 0.95f), Percentile(TotalMsArr, 0.95f), Thrash, ThrashNeighbor, ThrashLOD, ThrashDirty, ThrashOther, UnloadLagMean, UnloadLagMax, UnloadDistMean, UnloadDistMax, *ReportCsvPath);
+		Percentile(FrameMsArr, 0.95f), Percentile(TotalMsArr, 0.95f), Thrash, ThrashLOD, ThrashDirty, ThrashOther, UnloadLagMean, UnloadLagMax, UnloadDistMean, UnloadDistMax, *ReportCsvPath);
 }

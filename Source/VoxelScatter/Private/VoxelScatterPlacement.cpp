@@ -136,10 +136,19 @@ int32 FVoxelScatterPlacement::GenerateSpawnPointsForType(
 		// Apply position jitter
 		if (Definition.PositionJitter > 0.0f)
 		{
-			const FVector Jitter = Definition.ComputePositionJitter(
+			FVector Jitter = Definition.ComputePositionJitter(
 				RandomFromSeed(PointSeed),
 				RandomFromSeed(PointSeed)
 			);
+			// Block-face snap (cubic, WM-C3): the instance stays on the block face it was placed on. The
+			// cubic extractor puts one point at each top face's centre and reports the face size as the
+			// point spacing, so a jitter wider than half a face is scaled down to it (scaled, not clamped,
+			// so instances do not pile up on the face edges).
+			if (Definition.PlacementMode == EScatterPlacementMode::BlockFaceSnap)
+			{
+				const double HalfFace = 0.5 * SurfaceData.AveragePointSpacing;
+				Jitter *= FMath::Min(1.0, HalfFace / Definition.PositionJitter);
+			}
 			SpawnPoint.Position += Jitter;
 		}
 

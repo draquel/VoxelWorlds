@@ -339,10 +339,14 @@ bool FVoxelSeamSchedulingGateTest::RunTest(const FString& Parameters)
 	const float Prio = FVoxelSeamRegistry::ComputeSeamPriority(A, /*viewer*/ A, /*nearRadius*/ 4);
 	TestEqual(TEXT("near seam priority is the near-correction tier"), Prio, 65.0f);
 
-	// The (P0 stub) processor drains the queue and produces no geometry.
-	const int32 Processed = Reg.ProcessSeamJobQueue(/*max*/ 0);
-	TestEqual(TEXT("processed the one queued seam"), Processed, 1);
+	// The chunk manager drains the queue for execution and reports each job finished.
+	TArray<FVoxelSeamJob> Jobs;
+	const int32 Drained = Reg.DrainSeamJobs(Jobs, /*max*/ 8);
+	TestEqual(TEXT("drained the one queued seam"), Drained, 1);
+	TestTrue(TEXT("the drained job is Face(A,X)"), Jobs.Num() == 1 && Jobs[0].Key == FaceAB);
 	TestEqual(TEXT("job queue drained"), Reg.GetJobQueueDepth(), 0);
+	Reg.NotifySeamJobFinished(FaceAB);
+	TestTrue(TEXT("a finished seam is no longer scheduled"), Reg.FindSeam(FaceAB) && !Reg.FindSeam(FaceAB)->bScheduled);
 
 	const FVoxelSeamRegistryStats S = Reg.GetStats();
 	TestEqual(TEXT("lifetime scheduled == 1"), (int32)S.TotalSeamJobsScheduled, 1);
@@ -415,7 +419,7 @@ bool FVoxelSeamDirtyLatencyTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("dirtied-at cleared once scheduled"), Seam->DirtiedAtSeconds, 0.0);
 	TestEqual(TEXT("ready-at cleared once scheduled"), Seam->ReadyAtSeconds, 0.0);
 
-	// NB: unlike ScheduleReadySeams/ProcessSeamJobQueue, DrainSeamJobs treats MaxJobs <= 0 as
+	// NB: unlike ScheduleReadySeams, DrainSeamJobs treats MaxJobs <= 0 as
 	// "drain nothing" (it mirrors the chunk manager's always-positive in-flight budget).
 	TArray<FVoxelSeamJob> Jobs;
 	Reg.DrainSeamJobs(Jobs, /*max*/ 8);

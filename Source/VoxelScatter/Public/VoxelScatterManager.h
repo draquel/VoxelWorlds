@@ -87,6 +87,17 @@ public:
 	void Initialize(UVoxelWorldConfiguration* Config, UWorld* World);
 
 	/**
+	 * Pure: whether a configuration asks for GPU surface extraction that it may use. Cubic worlds never
+	 * do: the GPU extractor samples mesh vertices, which on greedy quads are block corners, so cubic
+	 * always extracts block-face centres on the CPU (world modes review WM-C3, KC4). Platform support and
+	 * -VoxelForceCPU are checked separately at Initialize.
+	 *
+	 * @param Config World configuration
+	 * @return bUseGPUScatterExtraction, unless the world is cubic
+	 */
+	static bool WantsGPUExtraction(const UVoxelWorldConfiguration& Config);
+
+	/**
 	 * Shutdown and cleanup all scatter resources.
 	 */
 	void Shutdown();

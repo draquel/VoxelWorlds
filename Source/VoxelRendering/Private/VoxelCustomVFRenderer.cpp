@@ -653,6 +653,12 @@ void FVoxelCustomVFRenderer::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) co
 	}
 }
 
+bool FVoxelCustomVFRenderer::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
+{
+	OutChunks.Reset();
+	return WorldComponent && WorldComponent->ConsumeLostRenderData(OutChunks);
+}
+
 // ==================== LOD Transitions ====================
 
 void FVoxelCustomVFRenderer::UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor)

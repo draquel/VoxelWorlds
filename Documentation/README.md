@@ -72,7 +72,8 @@ Documentation for the VoxelWorlds plugin (Unreal Engine 5.8), organized by purpo
 ---
 
 ## Known documentation gaps (future work)
-- **Cubic meshing** (`VoxelCPUCubicMesher` / `VoxelGPUCubicMesher`) has no dedicated feature doc;
-  it is covered only in ARCHITECTURE and the top-level README.
+- **Cubic meshing** (`VoxelCPUCubicMesher`) has no dedicated feature doc;
+  it is covered in ARCHITECTURE, the top-level README, LOD_SYSTEM ("Cubic Meshing": seams, LOD off),
+  SCATTER_SYSTEM ("Cubic Terrain Scatter") and WORLD_MODES_REVIEW_PLAN §12 and §14.9.
 - **Streaming as a feature** (`VoxelChunkManager`, `VoxelCollisionManager`) is documented only from a
   performance angle in `Research/STREAMING_PERFORMANCE.md`.

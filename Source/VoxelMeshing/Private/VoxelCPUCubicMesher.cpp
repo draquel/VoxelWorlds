@@ -183,6 +183,62 @@ const FIntVector FVoxelCPUCubicMesher::AONeighborOffsets[6][4][3] = {
 	}
 };
 
+// ============================================================================
+// Passes: what one meshing pass reads
+// ============================================================================
+
+FVoxelData FVoxelCPUCubicMesher::FCubicPass::GetVoxel(int32 X, int32 Y, int32 Z) const
+{
+	const int32 N = ChunkSize;
+	if (X >= 0 && X < N && Y >= 0 && Y < N && Z >= 0 && Z < N)
+	{
+		return Own[X + Y * N + Z * N * N];
+	}
+	if (Other)
+	{
+		// Face seam: B follows the owner along OtherAxis. Beyond the two chunks there is nothing
+		// (edge and corner neighbours are not participants), so the voxel reads as air.
+		int32 C[3] = { X, Y, Z };
+		C[OtherAxis] -= N;
+		if (C[0] >= 0 && C[0] < N && C[1] >= 0 && C[1] < N && C[2] >= 0 && C[2] < N)
+		{
+			return Other[C[0] + C[1] * N + C[2] * N * N];
+		}
+		return FVoxelData::Air();
+	}
+	if (Slices)
+	{
+		return GetSliceVoxel(*Slices, X, Y, Z);
+	}
+	return FVoxelData::Air();
+}
+
+FVoxelCPUCubicMesher::FCubicPass FVoxelCPUCubicMesher::MakeChunkPass(const FVoxelMeshingRequest& Request)
+{
+	FCubicPass Pass;
+	Pass.Own = Request.VoxelData.GetData();
+	// The Interior domain is a pure function of the chunk's own voxels: it never reads neighbour data,
+	// even if the request carries some, so it never needs re-meshing when a neighbour arrives.
+	Pass.Slices = (Request.MeshCellDomain == EVoxelMeshCellDomain::Full) ? &Request : nullptr;
+	Pass.ChunkSize = Request.ChunkSize;
+	Pass.VoxelSize = Request.VoxelSize;
+	return Pass;
+}
+
+bool FVoxelCPUCubicMesher::IsBoundaryFace(int32 Face, int32 X, int32 Y, int32 Z, int32 ChunkSize)
+{
+	switch (Face)
+	{
+	case 0: return X == ChunkSize - 1; // +X
+	case 1: return X == 0;             // -X
+	case 2: return Y == ChunkSize - 1; // +Y
+	case 3: return Y == 0;             // -Y
+	case 4: return Z == ChunkSize - 1; // +Z
+	case 5: return Z == 0;             // -Z
+	default: return false;
+	}
+}
+
 FVoxelCPUCubicMesher::FVoxelCPUCubicMesher()
 {
 }
@@ -298,14 +354,34 @@ void FVoxelCPUCubicMesher::GenerateMeshGreedy(
 
 	uint32 GeneratedFaces = 0;
 
-	// Process each face direction
+	const FCubicPass Pass = MakeChunkPass(Request);
+	const bool bInterior = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+	const int32 ChunkSize = Request.ChunkSize;
+	const int32 SliceSize = ChunkSize * ChunkSize;
+	TArray<uint16> FaceMask;
+	TArray<bool> Processed;
+	FaceMask.SetNumZeroed(SliceSize);
+	Processed.SetNumZeroed(SliceSize);
+
+	// Process each face direction, slice by slice along its axis
 	for (int32 Face = 0; Face < 6; Face++)
 	{
-		ProcessFaceDirectionGreedy(Face, Request, OutMeshData, GeneratedFaces);
+		int32 PrimaryAxis, UAxis, VAxis;
+		bool bPositive;
+		GetFaceAxes(Face, PrimaryAxis, UAxis, VAxis, bPositive);
+		// Interior domain: the slice whose faces lie on the chunk's boundary plane belongs to the face seam.
+		const int32 BoundarySlice = bPositive ? ChunkSize - 1 : 0;
+		for (int32 SliceIndex = 0; SliceIndex < ChunkSize; SliceIndex++)
+		{
+			if (bInterior && SliceIndex == BoundarySlice)
+			{
+				continue;
+			}
+			ProcessSliceGreedy(Face, SliceIndex, Pass, FaceMask, Processed, OutMeshData, GeneratedFaces);
+		}
 	}
 
 	// Count solid voxels for stats
-	const int32 ChunkSize = Request.ChunkSize;
 	uint32 SolidVoxels = 0;
 	for (int32 Z = 0; Z < ChunkSize; Z++)
 	{
@@ -362,6 +438,9 @@ void FVoxelCPUCubicMesher::GenerateMeshSimple(
 	uint32 GeneratedFaces = 0;
 	uint32 CulledFaces = 0;
 
+	const FCubicPass Pass = MakeChunkPass(Request);
+	const bool bInterior = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+
 	// Iterate through all voxels
 	for (int32 Z = 0; Z < ChunkSize; Z++)
 	{
@@ -382,9 +461,14 @@ void FVoxelCPUCubicMesher::GenerateMeshSimple(
 				// Check all 6 faces
 				for (int32 Face = 0; Face < 6; Face++)
 				{
-					if (ShouldRenderFace(Request, X, Y, Z, Face))
+					// Interior domain: faces on the chunk's boundary planes belong to the face seams.
+					if (bInterior && IsBoundaryFace(Face, X, Y, Z, ChunkSize))
 					{
-						EmitQuad(OutMeshData, Request, X, Y, Z, Face, Voxel);
+						continue;
+					}
+					if (ShouldRenderFace(Pass, X, Y, Z, Face))
+					{
+						EmitQuad(OutMeshData, Pass, X, Y, Z, Face, Voxel);
 						GeneratedFaces++;
 					}
 					else
@@ -440,13 +524,16 @@ void FVoxelCPUCubicMesher::GetFaceAxes(int32 Face, int32& OutPrimaryAxis, int32&
 	}
 }
 
-void FVoxelCPUCubicMesher::ProcessFaceDirectionGreedy(
+void FVoxelCPUCubicMesher::ProcessSliceGreedy(
 	int32 Face,
-	const FVoxelMeshingRequest& Request,
+	int32 SliceIndex,
+	const FCubicPass& Pass,
+	TArray<uint16>& FaceMask,
+	TArray<bool>& Processed,
 	FChunkMeshData& OutMeshData,
-	uint32& OutGeneratedFaces)
+	uint32& OutGeneratedFaces) const
 {
-	const int32 ChunkSize = Request.ChunkSize;
+	const int32 ChunkSize = Pass.ChunkSize;
 	const int32 SliceSize = ChunkSize * ChunkSize;
 
 	// Get axis mapping for this face
@@ -454,129 +541,215 @@ void FVoxelCPUCubicMesher::ProcessFaceDirectionGreedy(
 	bool bPositive;
 	GetFaceAxes(Face, PrimaryAxis, UAxis, VAxis, bPositive);
 
-	// Allocate mask and processed arrays
-	TArray<uint16> FaceMask;
-	TArray<bool> Processed;
-	FaceMask.SetNumZeroed(SliceSize);
-	Processed.SetNumZeroed(SliceSize);
+	// Build face mask for this slice
+	BuildFaceMask(Face, SliceIndex, Pass, FaceMask);
 
-	// Process each slice along the primary axis
-	for (int32 SliceIndex = 0; SliceIndex < ChunkSize; SliceIndex++)
+	// Reset processed array
+	FMemory::Memzero(Processed.GetData(), SliceSize * sizeof(bool));
+
+	// Pre-pass: emit non-occluding faces as individual 1x1 quads (not greedy-merged).
+	// These need per-voxel UV offsets for visual density, so they can't be merged.
+	for (int32 V = 0; V < ChunkSize; V++)
 	{
-		// Build face mask for this slice
-		BuildFaceMask(Face, SliceIndex, Request, FaceMask);
-
-		// Reset processed array
-		FMemory::Memzero(Processed.GetData(), SliceSize * sizeof(bool));
-
-		// Pre-pass: emit non-occluding faces as individual 1x1 quads (not greedy-merged).
-		// These need per-voxel UV offsets for visual density, so they can't be merged.
-		for (int32 V = 0; V < ChunkSize; V++)
+		for (int32 U = 0; U < ChunkSize; U++)
 		{
-			for (int32 U = 0; U < ChunkSize; U++)
+			const int32 Index = U + V * ChunkSize;
+			if (FaceMask[Index] == 0)
 			{
-				const int32 Index = U + V * ChunkSize;
-				if (FaceMask[Index] == 0)
-				{
-					continue;
-				}
+				continue;
+			}
 
-				const uint8 MatID = static_cast<uint8>((FaceMask[Index] & 0xFF) - 1);
-				if (FVoxelMaterialRegistry::IsNonOccluding(MatID))
-				{
-					// Recover XYZ from slice coordinates
-					int32 Coords[3];
-					Coords[PrimaryAxis] = SliceIndex;
-					Coords[UAxis] = U;
-					Coords[VAxis] = V;
+			const uint8 MatID = static_cast<uint8>((FaceMask[Index] & 0xFF) - 1);
+			if (FVoxelMaterialRegistry::IsNonOccluding(MatID))
+			{
+				// Recover XYZ from slice coordinates
+				int32 Coords[3];
+				Coords[PrimaryAxis] = SliceIndex;
+				Coords[UAxis] = U;
+				Coords[VAxis] = V;
 
-					const FVoxelData& Voxel = Request.GetVoxel(Coords[0], Coords[1], Coords[2]);
-					EmitQuad(OutMeshData, Request, Coords[0], Coords[1], Coords[2], Face, Voxel);
-					OutGeneratedFaces++;
+				const FVoxelData Voxel = Pass.GetVoxel(Coords[0], Coords[1], Coords[2]);
+				EmitQuad(OutMeshData, Pass, Coords[0], Coords[1], Coords[2], Face, Voxel);
+				OutGeneratedFaces++;
 
-					// Remove from mask so greedy merge skips it
-					FaceMask[Index] = 0;
-					Processed[Index] = true;
-				}
+				// Remove from mask so greedy merge skips it
+				FaceMask[Index] = 0;
+				Processed[Index] = true;
 			}
 		}
+	}
 
-		// Greedy merge algorithm
-		for (int32 V = 0; V < ChunkSize; V++)
+	// Greedy merge algorithm
+	for (int32 V = 0; V < ChunkSize; V++)
+	{
+		for (int32 U = 0; U < ChunkSize; U++)
 		{
-			for (int32 U = 0; U < ChunkSize; U++)
+			const int32 Index = U + V * ChunkSize;
+
+			// Skip if already processed or no face needed
+			if (Processed[Index] || FaceMask[Index] == 0)
 			{
-				const int32 Index = U + V * ChunkSize;
+				continue;
+			}
 
-				// Skip if already processed or no face needed
-				if (Processed[Index] || FaceMask[Index] == 0)
+			const uint16 CurrentMaterial = FaceMask[Index];
+
+			// Find maximum width (extend along U axis)
+			int32 Width = 1;
+			while (U + Width < ChunkSize)
+			{
+				const int32 NextIndex = (U + Width) + V * ChunkSize;
+				if (Processed[NextIndex] || FaceMask[NextIndex] != CurrentMaterial)
 				{
-					continue;
+					break;
 				}
+				Width++;
+			}
 
-				const uint16 CurrentMaterial = FaceMask[Index];
-
-				// Find maximum width (extend along U axis)
-				int32 Width = 1;
-				while (U + Width < ChunkSize)
+			// Find maximum height (extend along V axis) for this width
+			int32 Height = 1;
+			bool bCanExtend = true;
+			while (bCanExtend && V + Height < ChunkSize)
+			{
+				// Check if the entire row can be extended
+				for (int32 DU = 0; DU < Width; DU++)
 				{
-					const int32 NextIndex = (U + Width) + V * ChunkSize;
-					if (Processed[NextIndex] || FaceMask[NextIndex] != CurrentMaterial)
+					const int32 CheckIndex = (U + DU) + (V + Height) * ChunkSize;
+					if (Processed[CheckIndex] || FaceMask[CheckIndex] != CurrentMaterial)
 					{
+						bCanExtend = false;
 						break;
 					}
-					Width++;
 				}
-
-				// Find maximum height (extend along V axis) for this width
-				int32 Height = 1;
-				bool bCanExtend = true;
-				while (bCanExtend && V + Height < ChunkSize)
+				if (bCanExtend)
 				{
-					// Check if the entire row can be extended
-					for (int32 DU = 0; DU < Width; DU++)
-					{
-						const int32 CheckIndex = (U + DU) + (V + Height) * ChunkSize;
-						if (Processed[CheckIndex] || FaceMask[CheckIndex] != CurrentMaterial)
-						{
-							bCanExtend = false;
-							break;
-						}
-					}
-					if (bCanExtend)
-					{
-						Height++;
-					}
+					Height++;
 				}
+			}
 
-				// Mark all cells in this rectangle as processed
-				for (int32 DV = 0; DV < Height; DV++)
+			// Mark all cells in this rectangle as processed
+			for (int32 DV = 0; DV < Height; DV++)
+			{
+				for (int32 DU = 0; DU < Width; DU++)
 				{
-					for (int32 DU = 0; DU < Width; DU++)
-					{
-						const int32 MarkIndex = (U + DU) + (V + DV) * ChunkSize;
-						Processed[MarkIndex] = true;
-					}
+					const int32 MarkIndex = (U + DU) + (V + DV) * ChunkSize;
+					Processed[MarkIndex] = true;
 				}
+			}
 
-				// Extract MaterialID and BiomeID from packed mask value
-				// Lower 8 bits: MaterialID + 1, Upper 8 bits: BiomeID
-				const uint8 MaterialID = static_cast<uint8>((CurrentMaterial & 0xFF) - 1);
-				const uint8 BiomeID = static_cast<uint8>((CurrentMaterial >> 8) & 0xFF);
-				EmitMergedQuad(OutMeshData, Request, Face, SliceIndex, U, V, Width, Height, MaterialID, BiomeID);
+			// Extract MaterialID and BiomeID from packed mask value
+			// Lower 8 bits: MaterialID + 1, Upper 8 bits: BiomeID
+			const uint8 MaterialID = static_cast<uint8>((CurrentMaterial & 0xFF) - 1);
+			const uint8 BiomeID = static_cast<uint8>((CurrentMaterial >> 8) & 0xFF);
+			EmitMergedQuad(OutMeshData, Pass, Face, SliceIndex, U, V, Width, Height, MaterialID, BiomeID);
+			OutGeneratedFaces++;
+		}
+	}
+}
+
+void FVoxelCPUCubicMesher::ProcessSliceSimple(
+	int32 Face,
+	int32 SliceIndex,
+	const FCubicPass& Pass,
+	FChunkMeshData& OutMeshData,
+	uint32& OutGeneratedFaces) const
+{
+	const int32 ChunkSize = Pass.ChunkSize;
+	int32 PrimaryAxis, UAxis, VAxis;
+	bool bPositive;
+	GetFaceAxes(Face, PrimaryAxis, UAxis, VAxis, bPositive);
+
+	for (int32 V = 0; V < ChunkSize; V++)
+	{
+		for (int32 U = 0; U < ChunkSize; U++)
+		{
+			int32 Coords[3];
+			Coords[PrimaryAxis] = SliceIndex;
+			Coords[UAxis] = U;
+			Coords[VAxis] = V;
+
+			const FVoxelData Voxel = Pass.GetVoxel(Coords[0], Coords[1], Coords[2]);
+			if (Voxel.IsAir())
+			{
+				continue;
+			}
+			if (ShouldRenderFace(Pass, Coords[0], Coords[1], Coords[2], Face))
+			{
+				EmitQuad(OutMeshData, Pass, Coords[0], Coords[1], Coords[2], Face, Voxel);
 				OutGeneratedFaces++;
 			}
 		}
 	}
 }
 
+// ============================================================================
+// Seam-ownership meshing
+// ============================================================================
+
+bool FVoxelCPUCubicMesher::GenerateFaceSeamMeshCPU(const FVoxelFaceSeamRequest& SeamRequest, FChunkMeshData& OutMeshData)
+{
+	OutMeshData.Reset();
+	if (!bIsInitialized)
+	{
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("CPU Cubic Mesher not initialized"));
+		return false;
+	}
+	if (!SeamRequest.IsValid())
+	{
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("Invalid cubic face seam request %s axis %d"),
+			*SeamRequest.OwnerChunkCoord.ToString(), SeamRequest.Axis);
+		return false;
+	}
+
+	const int32 ChunkSize = SeamRequest.ChunkSize;
+	FCubicPass Pass;
+	Pass.Own = SeamRequest.VoxelDataA->GetData();
+	Pass.Other = SeamRequest.VoxelDataB->GetData();
+	Pass.OtherAxis = SeamRequest.Axis;
+	Pass.ChunkSize = ChunkSize;
+	Pass.VoxelSize = SeamRequest.VoxelSize;
+
+	// The shared plane lies at ChunkSize along Axis in the owner's frame. A's last layer (ChunkSize - 1)
+	// faces +Axis across it; B's first layer (ChunkSize in the owner's frame) faces -Axis.
+	const int32 PositiveFace = SeamRequest.Axis * 2;
+	const int32 NegativeFace = PositiveFace + 1;
+	uint32 GeneratedFaces = 0;
+	if (Config.bUseGreedyMeshing)
+	{
+		TArray<uint16> FaceMask;
+		TArray<bool> Processed;
+		FaceMask.SetNumZeroed(ChunkSize * ChunkSize);
+		Processed.SetNumZeroed(ChunkSize * ChunkSize);
+		ProcessSliceGreedy(PositiveFace, ChunkSize - 1, Pass, FaceMask, Processed, OutMeshData, GeneratedFaces);
+		ProcessSliceGreedy(NegativeFace, ChunkSize, Pass, FaceMask, Processed, OutMeshData, GeneratedFaces);
+	}
+	else
+	{
+		ProcessSliceSimple(PositiveFace, ChunkSize - 1, Pass, OutMeshData, GeneratedFaces);
+		ProcessSliceSimple(NegativeFace, ChunkSize, Pass, OutMeshData, GeneratedFaces);
+	}
+	return true;
+}
+
+bool FVoxelCPUCubicMesher::GenerateEdgeSeamMeshCPU(const FVoxelEdgeSeamRequest& SeamRequest, FChunkMeshData& OutMeshData)
+{
+	OutMeshData.Reset();
+	return bIsInitialized;
+}
+
+bool FVoxelCPUCubicMesher::GenerateCornerSeamMeshCPU(const FVoxelCornerSeamRequest& SeamRequest, FChunkMeshData& OutMeshData)
+{
+	OutMeshData.Reset();
+	return bIsInitialized;
+}
+
 void FVoxelCPUCubicMesher::BuildFaceMask(
 	int32 Face,
 	int32 SliceIndex,
-	const FVoxelMeshingRequest& Request,
+	const FCubicPass& Pass,
 	TArray<uint16>& OutMask) const
 {
-	const int32 ChunkSize = Request.ChunkSize;
+	const int32 ChunkSize = Pass.ChunkSize;
 
 	// Get axis mapping
 	int32 PrimaryAxis, UAxis, VAxis;
@@ -602,7 +775,7 @@ void FVoxelCPUCubicMesher::BuildFaceMask(
 			const int32 Y = Coords[1];
 			const int32 Z = Coords[2];
 
-			const FVoxelData& Voxel = Request.GetVoxel(X, Y, Z);
+			const FVoxelData Voxel = Pass.GetVoxel(X, Y, Z);
 
 			// Skip air voxels
 			if (Voxel.IsAir())
@@ -611,7 +784,7 @@ void FVoxelCPUCubicMesher::BuildFaceMask(
 			}
 
 			// Check if face should be rendered
-			if (ShouldRenderFace(Request, X, Y, Z, Face))
+			if (ShouldRenderFace(Pass, X, Y, Z, Face))
 			{
 				// Pack MaterialID and BiomeID into uint16:
 				// Lower 8 bits: MaterialID + 1 (so 0 means no face)
@@ -625,7 +798,7 @@ void FVoxelCPUCubicMesher::BuildFaceMask(
 
 void FVoxelCPUCubicMesher::EmitMergedQuad(
 	FChunkMeshData& MeshData,
-	const FVoxelMeshingRequest& Request,
+	const FCubicPass& Pass,
 	int32 Face,
 	int32 SliceIndex,
 	int32 U, int32 V,
@@ -633,8 +806,7 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 	uint8 MaterialID,
 	uint8 BiomeID) const
 {
-	const float VoxelSize = Request.VoxelSize;
-	const int32 ChunkSize = Request.ChunkSize;
+	const float VoxelSize = Pass.VoxelSize;
 
 	// Get axis mapping
 	int32 PrimaryAxis, UAxis, VAxis;
@@ -717,10 +889,10 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 		CornerCoords[3][VAxis] = V + Height - 1;
 
 		// Calculate AO for each corner vertex
-		VertexAO[0] = CalculateVertexAO(Request, CornerCoords[0][0], CornerCoords[0][1], CornerCoords[0][2], Face, 0);
-		VertexAO[1] = CalculateVertexAO(Request, CornerCoords[1][0], CornerCoords[1][1], CornerCoords[1][2], Face, 1);
-		VertexAO[2] = CalculateVertexAO(Request, CornerCoords[2][0], CornerCoords[2][1], CornerCoords[2][2], Face, 2);
-		VertexAO[3] = CalculateVertexAO(Request, CornerCoords[3][0], CornerCoords[3][1], CornerCoords[3][2], Face, 3);
+		VertexAO[0] = CalculateVertexAO(Pass, CornerCoords[0][0], CornerCoords[0][1], CornerCoords[0][2], Face, 0);
+		VertexAO[1] = CalculateVertexAO(Pass, CornerCoords[1][0], CornerCoords[1][1], CornerCoords[1][2], Face, 1);
+		VertexAO[2] = CalculateVertexAO(Pass, CornerCoords[2][0], CornerCoords[2][1], CornerCoords[2][2], Face, 2);
+		VertexAO[3] = CalculateVertexAO(Pass, CornerCoords[3][0], CornerCoords[3][1], CornerCoords[3][2], Face, 3);
 	}
 
 	// Adjust winding based on face direction to match the original QuadVertices patterns
@@ -883,7 +1055,7 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 }
 
 bool FVoxelCPUCubicMesher::ShouldRenderFace(
-	const FVoxelMeshingRequest& Request,
+	const FCubicPass& Pass,
 	int32 X, int32 Y, int32 Z,
 	int32 Face) const
 {
@@ -893,7 +1065,7 @@ bool FVoxelCPUCubicMesher::ShouldRenderFace(
 	const int32 NZ = Z + Offset.Z;
 
 	// Get neighbor voxel (handles chunk boundaries)
-	const FVoxelData Neighbor = GetVoxelAt(Request, NX, NY, NZ);
+	const FVoxelData Neighbor = Pass.GetVoxel(NX, NY, NZ);
 
 	// Always render face if neighbor is air
 	if (Neighbor.IsAir())
@@ -905,7 +1077,7 @@ bool FVoxelCPUCubicMesher::ShouldRenderFace(
 	// is non-occluding. This ensures:
 	// - Leaf renders all its own faces (internal density)
 	// - Neighbors render their face toward leaves (no void through alpha holes)
-	const FVoxelData& Voxel = Request.GetVoxel(X, Y, Z);
+	const FVoxelData Voxel = Pass.GetVoxel(X, Y, Z);
 	if (FVoxelMaterialRegistry::IsNonOccluding(Voxel.MaterialID) ||
 		FVoxelMaterialRegistry::IsNonOccluding(Neighbor.MaterialID))
 	{
@@ -915,17 +1087,11 @@ bool FVoxelCPUCubicMesher::ShouldRenderFace(
 	return false;
 }
 
-FVoxelData FVoxelCPUCubicMesher::GetVoxelAt(
+FVoxelData FVoxelCPUCubicMesher::GetSliceVoxel(
 	const FVoxelMeshingRequest& Request,
-	int32 X, int32 Y, int32 Z) const
+	int32 X, int32 Y, int32 Z)
 {
 	const int32 ChunkSize = Request.ChunkSize;
-
-	// Check if within chunk bounds
-	if (X >= 0 && X < ChunkSize && Y >= 0 && Y < ChunkSize && Z >= 0 && Z < ChunkSize)
-	{
-		return Request.GetVoxel(X, Y, Z);
-	}
 
 	// Handle neighbor chunk lookups
 	// Note: For AO calculations, we may need diagonal neighbors that span multiple chunks.
@@ -1003,7 +1169,7 @@ FVoxelData FVoxelCPUCubicMesher::GetVoxelAt(
 }
 
 uint8 FVoxelCPUCubicMesher::CalculateVertexAO(
-	const FVoxelMeshingRequest& Request,
+	const FCubicPass& Pass,
 	int32 X, int32 Y, int32 Z,
 	int32 Face, int32 VertexIndex) const
 {
@@ -1011,9 +1177,9 @@ uint8 FVoxelCPUCubicMesher::CalculateVertexAO(
 	const FIntVector& Side2 = AONeighborOffsets[Face][VertexIndex][1];
 	const FIntVector& Corner = AONeighborOffsets[Face][VertexIndex][2];
 
-	const bool bSide1 = !GetVoxelAt(Request, X + Side1.X, Y + Side1.Y, Z + Side1.Z).IsAir();
-	const bool bSide2 = !GetVoxelAt(Request, X + Side2.X, Y + Side2.Y, Z + Side2.Z).IsAir();
-	const bool bCorner = !GetVoxelAt(Request, X + Corner.X, Y + Corner.Y, Z + Corner.Z).IsAir();
+	const bool bSide1 = !Pass.GetVoxel(X + Side1.X, Y + Side1.Y, Z + Side1.Z).IsAir();
+	const bool bSide2 = !Pass.GetVoxel(X + Side2.X, Y + Side2.Y, Z + Side2.Z).IsAir();
+	const bool bCorner = !Pass.GetVoxel(X + Corner.X, Y + Corner.Y, Z + Corner.Z).IsAir();
 
 	// Standard voxel AO formula: if both sides are solid, corner is fully occluded
 	if (bSide1 && bSide2)
@@ -1024,24 +1190,24 @@ uint8 FVoxelCPUCubicMesher::CalculateVertexAO(
 }
 
 void FVoxelCPUCubicMesher::CalculateFaceAO(
-	const FVoxelMeshingRequest& Request,
+	const FCubicPass& Pass,
 	int32 X, int32 Y, int32 Z,
 	int32 Face, uint8 OutAO[4]) const
 {
 	for (int32 V = 0; V < 4; V++)
 	{
-		OutAO[V] = CalculateVertexAO(Request, X, Y, Z, Face, V);
+		OutAO[V] = CalculateVertexAO(Pass, X, Y, Z, Face, V);
 	}
 }
 
 void FVoxelCPUCubicMesher::EmitQuad(
 	FChunkMeshData& MeshData,
-	const FVoxelMeshingRequest& Request,
+	const FCubicPass& Pass,
 	int32 X, int32 Y, int32 Z,
 	int32 Face,
 	const FVoxelData& Voxel) const
 {
-	const float VoxelSize = Request.VoxelSize;
+	const float VoxelSize = Pass.VoxelSize;
 	// Calculate local voxel position within chunk (chunk offset added by scene proxy)
 	const FVector3f VoxelPos = FVector3f(
 		static_cast<float>(X) * VoxelSize,
@@ -1056,7 +1222,7 @@ void FVoxelCPUCubicMesher::EmitQuad(
 	uint8 VertexAO[4] = {0, 0, 0, 0};
 	if (Config.bCalculateAO)
 	{
-		CalculateFaceAO(Request, X, Y, Z, Face, VertexAO);
+		CalculateFaceAO(Pass, X, Y, Z, Face, VertexAO);
 	}
 
 	// Convert 6-face index to 3-face type: 0-3=sides(1), 4=top(0), 5=bottom(2)

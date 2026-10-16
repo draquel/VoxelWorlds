@@ -116,10 +116,10 @@ private:
 		float GenMs, MeshMs, LODMs, LODUpdateMs, StreamMs, TotalMs;
 		// Previously-unsampled tick sections + generation/meshing sub-phases (spike attribution)
 		float RenderMs, CollMs, ScatMs;
-		float GenLaunchMs, GenPollMs, GenApplyMs, GenStoreMs, GenNotifyMs, GenNeighborMs;
+		float GenLaunchMs, GenPollMs, GenApplyMs, GenStoreMs, GenNotifyMs;
 		int32 GenApplyCount;
 		float MeshTickMs, MeshLaunchMs, MeshApplyMs;
-		float MeshSnapMs, MeshSliceMs, MeshDispMs;
+		float MeshSnapMs, MeshDispMs;
 		int32 MeshLaunchCount;
 		float RendMeshMs, RendSubRendMs, RendSubScatMs, RendSubWatMs;
 		float RendUnloadMs, RendWTileMs, RendFlushMs;

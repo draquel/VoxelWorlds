@@ -337,7 +337,6 @@ See: `Documentation/PERFORMANCE_TARGETS.md`
 
 ### Shaders
 - `Shaders/VoxelGeneration.usf` - Voxel generation compute shader
-- `Shaders/VoxelCubicMeshing.usf` - Cubic meshing compute shader
 - `Shaders/MarchingCubesMeshGeneration.usf` - Marching Cubes meshing compute shader
 - `Shaders/DualContourMeshGeneration.usf` - Dual Contouring 4-pass compute shader
 

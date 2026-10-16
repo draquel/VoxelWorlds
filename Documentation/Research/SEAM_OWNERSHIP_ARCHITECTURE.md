@@ -115,7 +115,12 @@ Chunk mesh  =  Interior mesh                    (cells strictly inside the chunk
 - **MC**: identical decomposition; transvoxel transition cells become an implementation detail of
   the face-seam job (which is where they always logically belonged — they exist to stitch two
   known resolutions).
-- **Cubic**: trivially compatible (face culling across the pair inside the seam job).
+- **Cubic**: trivially compatible (face culling across the pair inside the seam job). *Built in world modes
+  review M5 (WM-C1, 2026-10-16):* the cubic Interior domain emits every face except those on the chunk's
+  six boundary planes and reads nothing outside the chunk; the face seam job emits the shared plane's faces
+  (A's +axis faces of its last layer, B's -axis faces of its first) culled against both chunks; edge and
+  corner seams carry no cubic geometry, so the registry tracks face seams only for cubic. Vertex AO samples
+  outside the chunk (interior) or the pair (seam) as air; no voxel material reads it.
 
 ### 2.4 Renderer
 
@@ -168,7 +173,15 @@ is unconditional for seam-capable meshers (DC + MC, CPU or GPU). The legacy whol
 for meshers without seam support: cubic still needs slices for boundary face culling and the
 revalidation machinery for late-arriving neighbors. Deleting that shared machinery outright is
 therefore gated on either cubic gaining seam support or cubic being dropped as a supported
-config — an explicit product decision, not part of P4b. The performance HUD now surfaces the
+config — an explicit product decision, not part of P4b. *Update (world modes review M5, 2026-10-16):
+decision D1 kept cubic (terrain-only) and WM-C1 gave it seam support, so the legacy path is deleted:
+the game-thread neighbour-slice extraction for render meshes, the deferral while a face neighbour
+generates, `CaptureMeshDeps`/`RevalidateMeshDeps` (`voxel.Stream.MeshDepRevalidate`), the 26-neighbour
+re-mesh on generation and its coalescing (`voxel.Stream.NeighborRemesh*`, the near-correction fast path
+of §4), the legacy LOD face cascades, `voxel.LogBoundaryResidency`, the registry's P0 stub processor and
+its `voxel.Seam.Registry` / `voxel.Seam.Debug` switches (the registry is always on). Collision still
+cooks whole chunks with neighbour slices, extracted on a worker from shared snapshots
+(`VoxelNeighborSliceExtraction.h`).* The performance HUD now surfaces the
 new machinery: SeamMs in the timing row, the collision prep/apply split (P4a), and a seam
 registry line (tracked / dirty / queued / lifetime processed).
 
@@ -201,6 +214,7 @@ Landed as pure scaffolding — **no geometry produced, no visual/behavioural cha
   (`TickSeamScheduler`) moves dirty+all-resident seams into the job queue (near-viewer first) and runs
   the stub processor. Gated by `voxel.Seam.Registry` (default on; scaffolding is a no-op either way),
   with `voxel.Seam.Debug` / `voxel.Seam.NearChunkRadius` / `voxel.Seam.Max{Schedule,Jobs}PerTick`.
+  *(The stub processor and the two switches were retired in M5; the registry is always on.)*
 - **Tests** — `VoxelWorlds.Streaming.SeamRegistry.{Ownership,Coverage,DirtyPropagation,Scheduling}`
   (headless, pure-logic): min-coordinate ownership determinism, exactly-once boundary coverage across
   a lattice incl. mixed LOD, dirty propagation to precisely the 26 incident seams, and the
@@ -323,6 +337,9 @@ independently if live testing clears it — it aligns both sides' *reads*, which
 either architecture.
 
 ## 4. Shipped on this branch — near-field correction latency
+
+*Retired in world modes review M5 (2026-10-16) with the legacy whole-chunk path it served: seams carry
+their own near tier (`voxel.Seam.NearChunkRadius`).*
 
 The Fact-B window, attacked directly where it hurts (all cvar-tunable):
 

@@ -4,7 +4,7 @@
 //
 // Builds two adjacent 32^3 chunks A (chunk coord 0,0,0) and B (1,0,0) from the
 // same analytic world-space density field, fills neighbor face/edge/corner data
-// exactly the way UVoxelChunkManager::ExtractNeighborEdgeSlices does, meshes
+// exactly the way VoxelNeighborSlices::Extract (VoxelStreaming) does, meshes
 // both chunks, and checks that the geometry each side produces on the shared
 // face (world x = ChunkSize * VoxelSize) is watertight.
 //
@@ -151,7 +151,7 @@ namespace MarchingCubesLODBoundaryTestHelpers
 
 	/**
 	 * Fill all 6 face slices, 12 edge strips, and 8 corners from the analytic
-	 * field, using the same layout UVoxelChunkManager::ExtractNeighborEdgeSlices
+	 * field, using the same layout VoxelNeighborSlices::Extract (VoxelStreaming)
 	 * produces (face plane index +ChunkSize maps to neighbor plane 0, etc).
 	 */
 	void FillAllNeighborData(FVoxelMeshingRequest& Request)
@@ -811,7 +811,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT5NoNeighborDataTest, "VoxelWorld
 bool FMCLODBoundaryT5NoNeighborDataTest::RunTest(const FString& Parameters)
 {
 	// Same as T2 but neighbor face/edge/corner arrays are deliberately left
-	// empty. This is the CONFIRMED production fallback: ExtractNeighborEdgeSlices
+	// empty. This is the CONFIRMED production fallback: VoxelNeighborSlices::Extract
 	// guards every slice with HasNeighborData, so a non-resident neighbor leaves
 	// the slice empty (Num()==0). GetVoxelAt then clamps the out-of-bounds plane
 	// to the chunk's own edge voxel (duplicate plane), NOT to Air. On this gentle
@@ -885,7 +885,7 @@ bool FMCLODBoundaryT5bAirSliceTest::RunTest(const FString& Parameters)
 {
 	// PLAUSIBLE-but-unconfirmed production hazard (distinct from T5's confirmed
 	// clamp path): a neighbor whose VoxelData array is allocated (so it passes
-	// ExtractNeighborEdgeSlices' HasNeighborData check, Num()==VolumeSize) but
+	// VoxelNeighborSlices::Extract's HasNeighborData check, Num()==VolumeSize) but
 	// has not yet been populated by generation - its contents are still Air. The
 	// extractor then copies a real-but-all-Air slice, and GetNeighborVoxel's
 	// Air() branch (VoxelChunkManager.cpp:2779) is the same value. The mesher

@@ -125,8 +125,12 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	// pipeline runs on the CPU and the headless streaming bench works instead of crashing on a missing
 	// GPU shader (FResetSurfaceCounterCS) when the demo config has bUseGPUScatterExtraction=true.
 	const bool bForceCPU = FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU"));
-	bUseGPUExtraction = Config->bUseGPUScatterExtraction && !bForceCPU && FVoxelGPUSurfaceExtractor::IsGPUExtractionSupported();
-	if (Config->bUseGPUScatterExtraction && !bUseGPUExtraction)
+	bUseGPUExtraction = WantsGPUExtraction(*Config) && !bForceCPU && FVoxelGPUSurfaceExtractor::IsGPUExtractionSupported();
+	if (Config->bUseGPUScatterExtraction && Config->MeshingMode == EMeshingMode::Cubic)
+	{
+		UE_LOG(LogVoxelScatter, Log, TEXT("Cubic mode: scatter extracts block-face centres on the CPU (bUseGPUScatterExtraction is ignored)"));
+	}
+	else if (Config->bUseGPUScatterExtraction && !bUseGPUExtraction)
 	{
 		UE_LOG(LogVoxelScatter, Warning, TEXT("GPU scatter extraction unavailable (SM5 unsupported or -VoxelForceCPU), falling back to CPU"));
 	}
@@ -2925,6 +2929,11 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 
 	OutSurfaceData.SurfaceAreaEstimate = OutSurfaceData.SurfacePoints.Num() * VoxelSize * VoxelSize;
 	OutSurfaceData.bIsValid = true;
+}
+
+bool UVoxelScatterManager::WantsGPUExtraction(const UVoxelWorldConfiguration& Config)
+{
+	return Config.bUseGPUScatterExtraction && Config.MeshingMode != EMeshingMode::Cubic;
 }
 
 FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) const

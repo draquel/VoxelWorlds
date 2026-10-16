@@ -1123,7 +1123,7 @@ When adjacent chunks render at different LOD levels, their boundary vertices may
 
 ### Cubic Meshing
 
-Cubic runs without the LOD system (see [LOD Off and Cubic Meshing](#lod-off-and-cubic-meshing)), so every chunk is LOD 0 and there are no LOD boundaries to stitch. Chunk boundaries still need neighbour data for face culling: cubic uses the legacy whole-chunk path (neighbour slices, and a re-mesh when a neighbour loads), not the seam-ownership pipeline (finding KC2 in [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md)).
+Cubic runs without the LOD system (see [LOD Off and Cubic Meshing](#lod-off-and-cubic-meshing)), so every chunk is LOD 0 and there are no LOD boundaries to stitch. Chunk boundaries go through the seam-ownership pipeline like every other mode (world modes review WM-C1, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §14.9): a chunk mesh is the Interior domain, every face except those on the chunk's six boundary planes, read from the chunk's own voxels only; the faces on a shared plane belong to that pair's face seam job, which culls them against both chunks' voxels. No cubic face lies only on a chunk edge or corner, so the seam registry tracks face seams alone for cubic (`FVoxelSeamRegistry::SetFaceSeamsOnly`). A chunk never waits for a neighbour's data and is meshed once; a neighbour arriving or changing rebuilds a face seam, not the chunk. At the edge of the loaded region a plane whose other side is not loaded has no seam yet, so it shows no faces (the legacy path drew walls there, KC13).
 
 ### Marching Cubes (Transvoxel)
 

@@ -747,13 +747,16 @@ When `MeshingMode == Cubic`, scatter uses `ExtractSurfacePointsCubic()` instead 
 - Position at face center: `(X + 0.5) * VoxelSize, (Y + 0.5) * VoxelSize, (Z + 1) * VoxelSize`
 - Normal always `FVector::UpVector`, SlopeAngle always 0
 - No density interpolation — exact block-face positions
-- Position jitter is skipped for `BlockFaceSnap` placement mode
+- `BlockFaceSnap` placement keeps an instance on the block face it was placed on: a definition's `PositionJitter` wider
+  than half a face is scaled down to half a face (scaled, not clamped, so instances do not pile up on the face edges);
+  a smaller jitter is unchanged. `bAutoCubicScatterDefaults` sets every definition to `BlockFaceSnap` in cubic worlds.
 
-Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic` in both sync and async scatter paths, on
-the CPU extractor only. With `bUseGPUScatterExtraction` on, the GPU branch runs before the cubic check and extracts cubic
-chunks from the greedy mesh instead: a quarter of the rocks land on block corners, grass is pushed to face edges and
-density falls to a third (finding KC4; work item WM-C3 routes cubic to the CPU extractor). Keep GPU extraction off for
-cubic worlds until then.
+Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic` in both sync and async scatter paths.
+Cubic worlds always extract on the CPU: `bUseGPUScatterExtraction` is ignored for them
+(`UVoxelScatterManager::WantsGPUExtraction`, logged once at initialisation), because the GPU extractor samples mesh
+vertices, which on greedy quads are block corners (finding KC4, fixed by work item WM-C3). The CPU extractor reads voxels,
+not the mesh, so it is unaffected by cubic chunk meshes being interior-only (the faces on chunk planes are seam meshes).
+Tests: `VoxelWorlds.Scatter.Cubic.CPUExtractionOnly`, `.BlockFaceSnapStaysOnFace`.
 
 ### Scatter Mesh Types
 

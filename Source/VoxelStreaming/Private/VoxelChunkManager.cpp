@@ -5,7 +5,6 @@
 #include "VoxelSeamRegistry.h"
 #include "VoxelBoundedDrain.h"
 #include "VoxelSeamTransitionHolds.h"
-#include "VoxelNeighborSliceExtraction.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCaveConfiguration.h"
@@ -50,22 +49,6 @@
 #include "Editor.h"
 #include "LevelEditorViewport.h"
 #endif
-
-// P1 LOD-seam diagnostic (see Documentation/LOD_SEAM_INVESTIGATION.md).
-// Logs, per meshed chunk at request-assembly time, which boundary faces carry a
-// surface crossing and whether the neighbor data for that face is (a) absent
-// (-> GetVoxelAt clamps the duplicate edge plane = the confirmed clamp hazard)
-// or (b) present but all-Air (-> the plausible allocated-but-ungenerated race).
-// This is what turns the two candidate request-assembly hazards into an
-// observation on a live torn chunk. Enable with `voxel.LogBoundaryResidency 1`.
-//   0 = off
-//   1 = log only chunks with at least one at-risk boundary face
-//   2 = log every chunk's boundary faces
-static TAutoConsoleVariable<int32> CVarLogBoundaryResidency(
-	TEXT("voxel.LogBoundaryResidency"),
-	0,
-	TEXT("Log per-face neighbor-slice residency + all-Air state for each meshed chunk (LOD seam diagnosis)."),
-	ECVF_Default);
 
 // Runtime master-enable for GPU terrain generation. Lets you force CPU generation without editing the
 // config asset or restarting the build: 1 = honor bUseGPUGeneration; 0 = force CPU. Read at chunk-manager
@@ -167,76 +150,13 @@ static TAutoConsoleVariable<float> CVarStreamMeshStuckSeconds(
 	     "voxel.Stream.AuditResidency reports the worst seen this session. 0 = disable the watchdog."),
 	ECVF_Default);
 
-// ==================== Neighbor-remesh coalescing ====================
-// A newly generated chunk asks its 26 loaded neighbors to re-mesh so they incorporate its boundary
-// data. Doing that immediately re-meshes a chunk once PER neighbor arrival — during traversal a chunk
-// near the load front is re-meshed repeatedly (and prematurely, before its whole neighborhood has data),
-// inflating the mesh queue. Coalescing debounces the request: bump a per-chunk stamp on each request and
-// enqueue the chunk ONCE after its neighborhood settles. Measured ~13% smaller peak mesh queue and ~28%
-// fewer neighbor remeshes at debounce ~90 on the demo traverse.
-static TAutoConsoleVariable<int32> CVarStreamNeighborCoalesce(
-	TEXT("voxel.Stream.NeighborRemeshCoalesce"),
-	1,
-	TEXT("Debounce/coalesce neighbor-remesh requests so a chunk re-meshes once after its neighborhood "
-	     "settles instead of once per neighbor arrival. 1 = on, 0 = legacy immediate enqueue (A/B)."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarStreamNeighborDebounceFrames(
-	TEXT("voxel.Stream.NeighborRemeshDebounceFrames"),
-	90,
-	TEXT("Frames a coalesced neighbor-remesh waits with no new request before dispatching (bursts of "
-	     "neighbor arrivals keep resetting it). Neighbor requests span the load-front transit (~1-2s), so "
-	     "short windows barely coalesce; higher = more coalescing but longer transient boundary staleness "
-	     "on far chunks near the load edge."),
-	ECVF_Default);
-
-// Near-field boundary-correction latency. A stale boundary NEXT TO THE PLAYER is the worst UX in the
-// game (a visible seam you can walk onto and wait on); the same staleness at 30k units is invisible.
-// Within NearCorrectionDistance of the viewer, corrective remeshes (coalesced neighbor remeshes and
-// the LOD-transition cascades) skip most of the debounce and jump the meshing queue above the
-// streaming wave's first-time meshes (priority 50) so they resolve within a few frames instead of
-// waiting out the whole load front. Far corrections keep the legacy debounce/priorities — the
-// coalescing throughput win (#40) is a far-field property.
-static TAutoConsoleVariable<float> CVarStreamNearCorrectionDistance(
-	TEXT("voxel.Stream.NearCorrectionDistance"),
-	12000.0f,
-	TEXT("Distance (world units, chunk center to viewer) within which boundary corrections use the "
-	     "fast path: short debounce + queue priority above first-time meshes. 0 disables the fast path."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarStreamNearCorrectionDebounceFrames(
-	TEXT("voxel.Stream.NearCorrectionDebounceFrames"),
-	5,
-	TEXT("Debounce frames for coalesced neighbor-remeshes within NearCorrectionDistance (replaces "
-	     "NeighborRemeshDebounceFrames there). Small: near corrections should land in fractions of a "
-	     "second; a few frames still absorb same-burst arrivals."),
-	ECVF_Default);
-
-// Priority for near-field corrective remeshes: above first-time meshes (50) and the completion-time
-// revalidation requeue (60), below the invisible-chunk safety net (80). See AddToMeshingQueue —
-// the queue pops highest priority first.
-static constexpr float GNearCorrectionPriority = 65.0f;
-
-// ==================== Seam-ownership registry (P0 scaffolding) ====================
-// P0 of the single-owner seam-meshing refactor (Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md
-// §2). The registry tracks canonical (min-coordinate) ownership of every chunk boundary, dirty-tracks
-// seams off the same content-version / rendered-LOD change points the #42 revalidation fires from, and
-// schedules seam jobs by priority. In P0 the seam job is a STUB — it produces NO geometry — so the
-// registry runs alongside the existing per-chunk meshing pipeline with no visual or behavioural change.
-// The default-on gate lets it be exercised live (proving the no-op) while remaining instantly A/B-able.
-static TAutoConsoleVariable<int32> CVarSeamRegistry(
-	TEXT("voxel.Seam.Registry"),
-	1,
-	TEXT("Enable the P0 seam-ownership registry + scheduler (scaffolding; seam jobs produce no geometry "
-	     "yet, so 1 vs 0 is a no-op visually). 1 = on, 0 = off (clears registry state)."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarSeamDebug(
-	TEXT("voxel.Seam.Debug"),
-	0,
-	TEXT("Log each scheduled seam stub job at Log level (otherwise Verbose). Diagnostic for the seam "
-	     "scheduler; no effect on geometry."),
-	ECVF_Default);
+// ==================== Seam-ownership pipeline ====================
+// Every mesher meshes chunk interiors only and gives each chunk boundary to one single-owner seam job
+// (Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §2). FVoxelSeamRegistry tracks canonical
+// (min-coordinate) ownership of every boundary, dirty-tracks seams off content-version and rendered-LOD
+// changes, and schedules seam jobs by priority; the chunk manager runs them on workers and submits the
+// results as per-owner seam buckets. Cubic joined in world modes review M5 (WM-C1), which deleted the
+// legacy whole-chunk boundary path (neighbour slices, deferral, revalidation, neighbour re-mesh cascades).
 
 static TAutoConsoleVariable<int32> CVarSeamNearChunkRadius(
 	TEXT("voxel.Seam.NearChunkRadius"),
@@ -270,15 +190,13 @@ static TAutoConsoleVariable<int32> CVarSeamLogLatency(
 static TAutoConsoleVariable<int32> CVarSeamMaxJobsPerTick(
 	TEXT("voxel.Seam.MaxJobsPerTick"),
 	64,
-	TEXT("Max seam jobs processed (P0: stub, no geometry) per tick (0 = unlimited)."),
+	TEXT("Max seam jobs dispatched per tick (0 = only the in-flight cap, voxel.Seam.MaxInFlight, limits it)."),
 	ECVF_Default);
 
-// Seam-ownership meshing is UNCONDITIONAL for seam-capable meshers (P4b retired the
-// voxel.Seam.Meshing rollback flag): DC and MC configurations always run interior-only chunk
-// meshes + single-owner seam jobs; the legacy whole-chunk path remains ONLY for meshers without
-// seam support (cubic — its boundary face culling still uses neighbor slices + revalidation).
+// Seam-ownership meshing is UNCONDITIONAL (P4b retired the voxel.Seam.Meshing rollback flag; M5 brought cubic
+// onto it): every configuration runs interior-only chunk meshes + single-owner seam jobs.
 // Qualified vs legacy: thrash -96/-98%, catch-up 31.9->11.8s, GT MeshMs 8.5->0.6ms on GPU RHI
-// (SEAM_OWNERSHIP_ARCHITECTURE.md §7.1).
+// (SEAM_OWNERSHIP_ARCHITECTURE.md §7.1); cubic in WORLD_MODES_REVIEW_PLAN.md §14.9.
 
 // With a GPU DC main mesher, seam junctions are only bit-exact if interiors are CPU-meshed too
 // (GPU QEF solves diverge from the CPU seam rings — visible cracks). 1 = route interior chunk
@@ -347,18 +265,6 @@ static TAutoConsoleVariable<int32> CVarAppearHold(
 	     "(capped by voxel.MeshFade.SeamHoldMs). 1 = on (default), 0 = the interior fades in at once and its seams follow."),
 	ECVF_Default);
 
-// A chunk bakes its boundary against a snapshot of its 26 neighbours taken at mesh-launch. If a
-// neighbour gains/changes data or changes rendered LOD before the async mesh completes, the baked
-// boundary is stale — a persistent seam, because the generation-complete and LOD-transition cascades
-// both skip a mid-mesh chunk with no retry. Completion-time revalidation re-meshes such a chunk.
-static TAutoConsoleVariable<int32> CVarStreamMeshDepRevalidate(
-	TEXT("voxel.Stream.MeshDepRevalidate"),
-	1,
-	TEXT("On mesh completion, re-mesh a chunk if a neighbour's voxel content or rendered LOD changed "
-	     "while it was in flight (fixes chunk-boundary seams that persist past streaming equilibrium and "
-	     "otherwise clear only on player movement). 1 = on, 0 = legacy (no revalidation) for A/B."),
-	ECVF_Default);
-
 // ==================== Far-chunk voxel-data compression ====================
 // Settled far chunks keep a resident ~1MB voxel array purely to serve rare events (neighbor-plane
 // reads, LOD upgrades, edits, queries). A budgeted sweep compacts idle far chunks; any access
@@ -424,8 +330,9 @@ UVoxelChunkManager::UVoxelChunkManager()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 
-	// Seam-ownership registry (P0 scaffolding). A plain C++ helper; enabled per-tick from a cvar.
+	// Seam-ownership registry: a plain C++ helper, always on (every mesher meshes through seam jobs).
 	SeamRegistry = MakeUnique<FVoxelSeamRegistry>();
+	SeamRegistry->SetEnabled(true);
 
 	FarCompressResults = MakeShared<FFarCompressResultQueue, ESPMode::ThreadSafe>();
 }
@@ -473,52 +380,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	++CurrentFrame;
 
-	// Seam-ownership P0: sync the registry enable/debug flags at the TOP of the tick so this tick's
-	// generation/meshing completions register into it (the scheduler itself runs late in the tick).
-	// SetEnabled clears registry state on a true->false transition (clean A/B toggle).
-	if (SeamRegistry.IsValid())
-	{
-		SeamRegistry->SetEnabled(CVarSeamRegistry.GetValueOnGameThread() != 0);
-		SeamRegistry->SetDebugLogging(CVarSeamDebug.GetValueOnGameThread() != 0);
-	}
-
-	// Seam-ownership: the pipeline is UNCONDITIONALLY active for seam-capable mesher
-	// configurations (DC and MC, CPU or GPU) — P4b retired the rollback flag. Interior chunk
-	// meshes and seam jobs run on the dedicated CPU SeamMesher instance (GPU main meshers idle
-	// for chunk meshes; see voxel.Seam.CPUInteriorRouting). Meshers without seam support
-	// (cubic) keep the legacy whole-chunk path.
-	bSeamMeshingWasActive = bSeamMeshingActive;
-	const FString MesherName = Mesher.IsValid() ? Mesher->GetMesherTypeName() : FString();
-	bSeamMeshingActive = SeamRegistry.IsValid() && SeamRegistry->IsEnabled()
-		&& (MesherName == TEXT("CPU Dual Contouring") || MesherName == TEXT("GPU Dual Contouring")
-			|| MesherName == TEXT("CPU MarchingCubes") || MesherName == TEXT("GPU MarchingCubes"));
-	if (bSeamMeshingWasActive != bSeamMeshingActive)
-	{
-		UE_LOG(LogVoxelStreaming, Warning,
-			TEXT("Seam meshing %s — existing chunk meshes keep their previous domain until they remesh; run voxel.RemeshAll for a clean A/B."),
-			bSeamMeshingActive ? TEXT("ACTIVATED (interior-only chunks + face-seam jobs)") : TEXT("DEACTIVATED (legacy whole-chunk meshing)"));
-		if (bSeamMeshingActive && MesherName.Contains(TEXT("GPU")))
-		{
-			UE_LOG(LogVoxelStreaming, Warning,
-				TEXT("Seam meshing: chunk meshes route to the CPU seam mesher while active (GPU results are not bit-exact with the CPU seam geometry — junction cracks); the GPU mesher idles."));
-		}
-		if (!bSeamMeshingActive)
-		{
-			// Drop all seam buckets — the legacy whole-chunk meshes cover the boundary themselves —
-			// and release the snapshot cache + stored slot meshes.
-			if (MeshRenderer)
-			{
-				MeshRenderer->ClearAllSeamMeshes();
-			}
-			SeamSnapshotCache.Empty();
-			SeamOwnerSlots.Empty();
-			FVoxelSeamTransitionHolds::FRelease Released;
-			SeamHolds.ReleaseAll(Released);
-			ApplySeamHoldReleases(Released);
-			SeamRedirtyAfterFlight.Empty();
-		}
-	}
-
 	// Drive an active streaming benchmark: advances the bench view position + samples this frame,
 	// before BuildQueryContext picks the position up below. Cleared when the run completes.
 	if (ActiveBenchmark.IsValid())
@@ -529,6 +390,8 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			ActiveBenchmark.Reset();
 		}
 	}
+
+	RecoverLostRenderData();
 
 	const double TickStartTime = FPlatformTime::Seconds();
 	FVoxelTimingStats Timing;
@@ -688,7 +551,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// === Generation queue (async launch + completed result processing) ===
 	// Sub-timed per function so the benchmark CSV can attribute generation-phase cost.
 	SectionStart = FPlatformTime::Seconds();
-	NeighborRemeshSecondsThisTick = 0.0;
 	const float TimeSlice = Configuration ? Configuration->StreamingTimeSliceMS : 2.0f;
 	double SubStart = SectionStart;
 	ProcessGenerationQueue(TimeSlice * 0.4f);
@@ -702,7 +564,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	ProcessCompletedAsyncGenerations(Timing);
 	SubEnd = FPlatformTime::Seconds();
 	Timing.GenApplyMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
-	Timing.GenNeighborMs = static_cast<float>(NeighborRemeshSecondsThisTick * 1000.0);
 	Timing.GenerationMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
 
 	// === Meshing queue ===
@@ -813,11 +674,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		}
 	}
 	Timing.LODMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
-
-	// === Debounced neighbor-remesh dispatch ===
-	// Enqueue coalesced neighbor-remeshes whose neighborhood has settled (see QueueNeighborsForRemesh).
-	// After LOD eval so a chunk already queued for an LOD remesh this frame is skipped.
-	ProcessPendingNeighborRemeshes();
 
 	// === Seam-ownership scheduler ===
 	// Runs after the generation/meshing/LOD sections so this-tick residency and rendered-LOD changes
@@ -1144,6 +1000,18 @@ void UVoxelChunkManager::Initialize(
 			Configuration->bUseGreedyMeshing ? TEXT("true") : TEXT("false"),
 			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
 			Configuration->UVScale);
+	}
+
+	// Cubic boundary geometry lies entirely in face planes (WM-C1): its edge and corner seams would
+	// only schedule jobs that mesh nothing, so the registry tracks face seams alone.
+	if (SeamRegistry.IsValid())
+	{
+		SeamRegistry->SetFaceSeamsOnly(Configuration->MeshingMode == EMeshingMode::Cubic);
+	}
+	if (Mesher->GetMesherTypeName().Contains(TEXT("GPU")) && CVarSeamCPUInteriorRouting.GetValueOnGameThread() != 0)
+	{
+		UE_LOG(LogVoxelStreaming, Log,
+			TEXT("Seam meshing: chunk meshes route to the CPU seam mesher (GPU results are not bit-exact with the CPU seam geometry — junction cracks); the GPU mesher idles."));
 	}
 
 	// Clear pending mesh queue
@@ -1821,12 +1689,12 @@ FString UVoxelChunkManager::GetDebugStats() const
 		Stats += FString::Printf(TEXT("Reclaimed by compression: %.1f MB\n"), Mem.CompressionSavedBytes / (1024.0 * 1024.0));
 	}
 
-	// Seam-ownership registry (P0 scaffolding; seam jobs produce no geometry yet).
+	// Seam-ownership registry.
 	if (SeamRegistry.IsValid())
 	{
 		const FVoxelSeamRegistryStats S = SeamRegistry->GetStats();
-		Stats += TEXT("\n--- Seam Registry (P0) ---\n");
-		Stats += FString::Printf(TEXT("Enabled: %s\n"), SeamRegistry->IsEnabled() ? TEXT("Yes") : TEXT("No"));
+		Stats += TEXT("\n--- Seam Registry ---\n");
+		Stats += FString::Printf(TEXT("Seam types: %s\n"), SeamRegistry->IsFaceSeamsOnly() ? TEXT("faces (cubic)") : TEXT("faces, edges, corners"));
 		Stats += FString::Printf(TEXT("Chunks/Seams/Dirty/Queued: %d / %d / %d / %d\n"),
 			S.ChunkCount, S.SeamCount, S.DirtyCount, S.JobQueueDepth);
 		Stats += FString::Printf(TEXT("Lifetime seams/scheduled/processed: %lld / %lld / %lld\n"),
@@ -3117,7 +2985,6 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 
 	// Per-launch cost attribution (reported via the benchmark CSV)
 	double SnapshotSeconds = 0.0;
-	double SlicesSeconds = 0.0;
 	double DispatchSeconds = 0.0;
 
 	// Cap new mesh dispatches per frame — the mesh-consumer drain rate. Each GPU dispatch builds
@@ -3133,12 +3000,9 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		: FMath::Max(1, Configuration->MaxMeshDispatchPerFrame);
 	int32 ProcessedCount = 0;
 
-	// P2-A: chunks deferred this frame because a face neighbor's voxel data is
-	// still generating. They stay PendingMeshing and are re-queued after the loop
-	// so they retry next frame (when the neighbor's data should be resident),
-	// instead of meshing their boundary against a clamped duplicate plane.
-	// Examined bounds per-frame work so a queue full of deferrable chunks can't
-	// spin the whole queue every frame.
+	// Chunks whose previous mesh job is still on a worker. They stay PendingMeshing and are re-queued
+	// after the loop so they retry next frame. Examined bounds per-frame work so a queue full of them
+	// can't spin the whole queue every frame.
 	TArray<FChunkLODRequest> DeferredThisFrame;
 	int32 Examined = 0;
 	const int32 MaxExamined = MaxNewDispatches + 48;
@@ -3199,45 +3063,8 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 			continue;
 		}
 
-		// P2-A: don't mesh this boundary against a face neighbor whose voxel data
-		// is still in the generation pipeline. GetVoxelAt would clamp the missing
-		// plane to our own edge voxel (duplicate plane), producing the LOD-seam
-		// tear that is never refreshed once the neighbor arrives. Defer instead and
-		// retry next frame; if a neighbor's data will never arrive (freed/unloading)
-		// proceed with a one-line warning so we never stall permanently.
-		// Seam-ownership P1: interior meshes have ZERO neighbor dependence, so there is
-		// nothing to wait for — mesh immediately (a structural Fact-B win).
-		if (!bSeamMeshingActive)
-		{
-			bool bClampUnavoidable = false;
-			if (ShouldDeferMeshForNeighbors(Request.ChunkCoord, bClampUnavoidable))
-			{
-				// Leave the chunk in PendingMeshing; re-queue after the loop.
-				DeferredThisFrame.Add(Request);
-				continue;
-			}
-			if (bClampUnavoidable)
-			{
-				UE_LOG(LogVoxelStreaming, Warning,
-					TEXT("Chunk (%d,%d,%d) meshing against a non-resident face neighbor whose data is not coming - boundary may clamp"),
-					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
-			}
-		}
-
 		// Mark as meshing
 		SetChunkState(Request.ChunkCoord, EChunkState::Meshing);
-
-		// Snapshot the neighbourhood we are about to bake our boundary against. If any neighbour
-		// changes (gains data, changes content, or changes rendered LOD) before this async mesh
-		// completes, the completion handler re-meshes us — closing the stale-boundary seam race.
-		// When disabled, no snapshot is stored and the completion-time revalidation is a no-op.
-		// Seam-ownership P1: interior meshes never bake neighbour state, so the whole race this
-		// revalidation closes cannot occur — skip the snapshot (boundary staleness is now a SEAM
-		// concern, handled by the registry's dirty tracking).
-		if (!bSeamMeshingActive && CVarStreamMeshDepRevalidate.GetValueOnGameThread() != 0)
-		{
-			CaptureMeshDeps(Request.ChunkCoord);
-		}
 
 		// Build meshing request
 		double SubT0 = FPlatformTime::Seconds();
@@ -3276,248 +3103,10 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		double SubT1 = FPlatformTime::Seconds();
 		SnapshotSeconds += SubT1 - SubT0;
 
-		// Extract neighbor edge slices for seamless boundaries.
-		// Seam-ownership P1: the Interior domain must carry NO neighbor data — with slices
-		// present the mesher would read them for rim-crossing normals, breaking both the
-		// "pure function of own content" property and the bit-exact ring match with the
-		// seam jobs (which recompute rings with the Air clamp). Boundary geometry comes
-		// from the single-owner face-seam jobs instead.
-		if (bSeamMeshingActive)
-		{
-			MeshRequest.MeshCellDomain = EVoxelMeshCellDomain::Interior;
-		}
-		else
-		{
-			ExtractNeighborEdgeSlices(Request.ChunkCoord, MeshRequest);
-		}
-		SlicesSeconds += FPlatformTime::Seconds() - SubT1;
-
-		// Calculate transition faces for Transvoxel LOD seam handling
-		// Per Lengyel's Transvoxel algorithm, transition cells are generated on the FINER chunk
-		// at faces that border a coarser neighbor. The transition cell's face corners (0,2,6,8)
-		// match the coarser neighbor's MC grid, ensuring shared edge crossings produce identical
-		// vertices. The 5 face midpoints add fine detail between coarse corners. The 4 interior
-		// corners connect to the finer chunk's own MC grid.
-		// A face needs transition cells if the neighbor is at a higher LOD level (coarser).
-		MeshRequest.TransitionFaces = 0;
-		const int32 CurrentLOD = Request.LODLevel;
-
-		// Check each of 6 faces for coarser (higher LOD level) neighbors
-		static const FIntVector NeighborOffsets[6] = {
-			FIntVector(-1, 0, 0),  // -X
-			FIntVector(1, 0, 0),   // +X
-			FIntVector(0, -1, 0),  // -Y
-			FIntVector(0, 1, 0),   // +Y
-			FIntVector(0, 0, -1),  // -Z
-			FIntVector(0, 0, 1),   // +Z
-		};
-		static const uint8 TransitionFlags[6] = {
-			FVoxelMeshingRequest::TRANSITION_XNEG,
-			FVoxelMeshingRequest::TRANSITION_XPOS,
-			FVoxelMeshingRequest::TRANSITION_YNEG,
-			FVoxelMeshingRequest::TRANSITION_YPOS,
-			FVoxelMeshingRequest::TRANSITION_ZNEG,
-			FVoxelMeshingRequest::TRANSITION_ZPOS,
-		};
-
-		// Helper to check if neighbor data was successfully extracted
-		const int32 SliceSize = Configuration->ChunkSize * Configuration->ChunkSize;
-		const int32 ChunkSize = Configuration->ChunkSize;
-		auto HasNeighborData = [&MeshRequest, SliceSize](int32 FaceIndex) -> bool
-		{
-			switch (FaceIndex)
-			{
-				case 0: return MeshRequest.NeighborXNeg.Num() == SliceSize;
-				case 1: return MeshRequest.NeighborXPos.Num() == SliceSize;
-				case 2: return MeshRequest.NeighborYNeg.Num() == SliceSize;
-				case 3: return MeshRequest.NeighborYPos.Num() == SliceSize;
-				case 4: return MeshRequest.NeighborZNeg.Num() == SliceSize;
-				case 5: return MeshRequest.NeighborZPos.Num() == SliceSize;
-				default: return false;
-			}
-		};
-
-		// Helper to check if ALL edge data needed for a transition face is available
-		// Transition cells at face edges need diagonal neighbor data
-		auto HasAllEdgeDataForFace = [&MeshRequest, ChunkSize](int32 FaceIndex) -> bool
-		{
-			// For each face, check if the edge neighbors that would be needed exist
-			// Face 0 (-X): needs edges with Y and Z neighbors
-			// Face 1 (+X): needs edges with Y and Z neighbors
-			// Face 2 (-Y): needs edges with X and Z neighbors
-			// Face 3 (+Y): needs edges with X and Z neighbors
-			// Face 4 (-Z): needs edges with X and Y neighbors
-			// Face 5 (+Z): needs edges with X and Y neighbors
-			switch (FaceIndex)
-			{
-				case 0: // -X face
-					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YPOS) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZPOS);
-				case 1: // +X face
-					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YPOS) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZPOS);
-				case 2: // -Y face
-					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZPOS);
-				case 3: // +Y face
-					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YPOS) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YPOS) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZPOS);
-				case 4: // -Z face
-					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZNEG) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZNEG);
-				case 5: // +Z face
-					return MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZPOS) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZPOS) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZPOS) &&
-					       MeshRequest.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZPOS);
-				default:
-					return false;
-			}
-		};
-
-		// When LOD is disabled, skip all transition/neighbor LOD logic — all chunks are LOD 0
-		if (Configuration->IsLODEnabled())
-		{
-			for (int32 i = 0; i < 6; i++)
-			{
-				const FIntVector NeighborCoord = Request.ChunkCoord + NeighborOffsets[i];
-				if (const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
-				{
-					// Store neighbor LOD level for transition cell stride calculation
-					// Use the neighbor's *rendered* LOD (not target LOD) so that
-					// MergeLODBoundaryCells and skirts align with the neighbor's actual mesh.
-					MeshRequest.NeighborLODLevels[i] = NeighborState->MeshedLODLevel;
-
-					// TransitionFaces drives Transvoxel transition cells, which are ONLY
-					// valid when the neighbor is genuinely COARSER (rendering at a higher
-					// LOD level). Generating them for a same-LOD (or finer) neighbor builds
-					// degenerate transition cells (CoarserStride == Stride) whose geometry
-					// replaces regular MC at the boundary (Pass-2 skip) and tears — the
-					// root cause of the live LOD-boundary fragments on steep terrain.
-					//
-					// A neighbor that is merely mid-LOD-transition (rendered != target) but
-					// NOT coarser than us must NOT get a transition strip; it is re-meshed
-					// via QueueNeighborsForRemesh once its LOD settles.
-					const bool bNeighborCoarser = NeighborState->MeshedLODLevel > CurrentLOD;
-					if (bNeighborCoarser)
-					{
-						if (HasNeighborData(i))
-						{
-							MeshRequest.TransitionFaces |= TransitionFlags[i];
-						}
-					}
-				}
-				else
-				{
-					// No neighbor - mark as -1
-					MeshRequest.NeighborLODLevels[i] = -1;
-				}
-				// If neighbor doesn't exist, no transition needed (will be at chunk boundary anyway)
-			}
-		}
-		// else: LOD disabled — NeighborLODLevels stays all -1 (default), TransitionFaces stays 0
-
-		// P1 LOD-seam diagnostic: classify boundary faces for this chunk before it
-		// meshes, distinguishing the confirmed clamp hazard from the Air-fill race.
-		if (const int32 DiagLevel = CVarLogBoundaryResidency.GetValueOnGameThread())
-		{
-			// Per-face: slice array (neighbor) + own boundary plane, in the
-			// -X,+X,-Y,+Y,-Z,+Z order used by NeighborLODLevels above.
-			const TArray<FVoxelData>* FaceSlices[6] = {
-				&MeshRequest.NeighborXNeg, &MeshRequest.NeighborXPos,
-				&MeshRequest.NeighborYNeg, &MeshRequest.NeighborYPos,
-				&MeshRequest.NeighborZNeg, &MeshRequest.NeighborZPos,
-			};
-			static const TCHAR* FaceNames[6] = { TEXT("-X"), TEXT("+X"), TEXT("-Y"), TEXT("+Y"), TEXT("-Z"), TEXT("+Z") };
-
-			auto CountSolid = [](const TArray<FVoxelData>& Arr) -> int32
-			{
-				int32 N = 0;
-				for (const FVoxelData& V : Arr) { if (V.IsSolid()) { ++N; } }
-				return N;
-			};
-
-			// Count solids on this chunk's own boundary plane for a face.
-			auto OwnPlaneSolid = [&MeshRequest, ChunkSize](int32 Face) -> int32
-			{
-				int32 N = 0;
-				for (int32 A = 0; A < ChunkSize; ++A)
-				{
-					for (int32 B = 0; B < ChunkSize; ++B)
-					{
-						int32 X = 0, Y = 0, Z = 0;
-						switch (Face)
-						{
-						case 0: X = 0;             Y = A; Z = B; break; // -X
-						case 1: X = ChunkSize - 1; Y = A; Z = B; break; // +X
-						case 2: Y = 0;             X = A; Z = B; break; // -Y
-						case 3: Y = ChunkSize - 1; X = A; Z = B; break; // +Y
-						case 4: Z = 0;             X = A; Y = B; break; // -Z
-						default: Z = ChunkSize - 1; X = A; Y = B; break; // +Z
-						}
-						if (MeshRequest.GetVoxel(X, Y, Z).IsSolid()) { ++N; }
-					}
-				}
-				return N;
-			};
-
-			FString FaceReport;
-			int32 ClampRiskFaces = 0;
-			int32 AirRaceFaces = 0;
-			int32 MissingTransitionFaces = 0;  // active boundary, coarser neighbor, but NO transition set
-			for (int32 i = 0; i < 6; ++i)
-			{
-				const bool bResident = FaceSlices[i]->Num() == SliceSize;
-				const int32 SliceSolid = bResident ? CountSolid(*FaceSlices[i]) : 0;
-				const int32 OwnSolid = OwnPlaneSolid(i);
-				// A face can tear only if its own plane straddles the surface
-				// (mix of solid and air). Fully-solid or fully-air planes are safe.
-				const bool bActive = OwnSolid > 0 && OwnSolid < SliceSize;
-				const bool bClampRisk = bActive && !bResident;
-				const bool bAirRaceRisk = bActive && bResident && SliceSolid == 0;
-				if (bClampRisk) { ++ClampRiskFaces; }
-				if (bAirRaceRisk) { ++AirRaceFaces; }
-
-				// Transvoxel engagement: TransitionFlags[i] == (1<<i). A face SHOULD get
-				// a transition strip when it has a surface crossing AND a coarser
-				// neighbor. If that's true but the bit is not set, transvoxel is not
-				// engaging at this boundary — the suspected root cause of the live seam.
-				const bool bNbrCoarser = MeshRequest.NeighborLODLevels[i] > CurrentLOD;
-				const bool bTransitionSet = (MeshRequest.TransitionFaces & (1u << i)) != 0;
-				const bool bMissingTransition = bActive && bNbrCoarser && !bTransitionSet;
-				if (bMissingTransition) { ++MissingTransitionFaces; }
-
-				if (DiagLevel >= 2 || bClampRisk || bAirRaceRisk || bMissingTransition)
-				{
-					FaceReport += FString::Printf(
-						TEXT(" [%s res=%s nbrLOD=%d sliceSolid=%d ownSolid=%d%s%s%s%s]"),
-						FaceNames[i], bResident ? TEXT("Y") : TEXT("N"),
-						MeshRequest.NeighborLODLevels[i], SliceSolid, OwnSolid,
-						bTransitionSet ? TEXT(" TF") : TEXT(""),
-						bMissingTransition ? TEXT(" NOTF!") : TEXT(""),
-						bClampRisk ? TEXT(" CLAMP") : TEXT(""),
-						bAirRaceRisk ? TEXT(" AIRRACE") : TEXT(""));
-				}
-			}
-
-			if (DiagLevel >= 2 || ClampRiskFaces > 0 || AirRaceFaces > 0 || MissingTransitionFaces > 0)
-			{
-				UE_LOG(LogVoxelStreaming, Warning,
-					TEXT("[BoundaryDiag] Chunk(%d,%d,%d) LOD=%d TF=0x%02X clampRiskFaces=%d airRaceFaces=%d missingTF=%d%s"),
-					Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
-					CurrentLOD, MeshRequest.TransitionFaces, ClampRiskFaces, AirRaceFaces, MissingTransitionFaces, *FaceReport);
-			}
-		}
+		// Seam ownership: a chunk mesh is the Interior domain, a pure function of the chunk's own voxels, so
+		// it never waits for a neighbour and never re-meshes when one arrives. Boundary geometry comes from
+		// the single-owner seam jobs (TickSeamScheduler). The request deliberately carries no neighbour data.
+		MeshRequest.MeshCellDomain = EVoxelMeshCellDomain::Interior;
 
 		// Benchmark thrash: a mesh job for a chunk that already had a mesh is churn. Counted here, where the
 		// job is launched, and attributed to the reason the chunk was queued for (G5).
@@ -3542,15 +3131,13 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		++ProcessedCount;
 	}
 
-	// P2-A: re-queue chunks deferred this frame so they retry once their neighbors'
-	// voxel data is resident. They are still in PendingMeshing state.
+	// Re-queue chunks whose previous mesh job was still in flight. They are still in PendingMeshing state.
 	for (const FChunkLODRequest& Deferred : DeferredThisFrame)
 	{
 		AddToMeshingQueue(Deferred);
 	}
 
 	Timing.MeshSnapshotMs = static_cast<float>(SnapshotSeconds * 1000.0);
-	Timing.MeshSlicesMs = static_cast<float>(SlicesSeconds * 1000.0);
 	Timing.MeshDispatchMs = static_cast<float>(DispatchSeconds * 1000.0);
 	Timing.MeshLaunchCount = ProcessedCount;
 }
@@ -3565,6 +3152,10 @@ IVoxelMesher* UVoxelChunkManager::EnsureSeamMesher()
 		if (Configuration && Configuration->MeshingMode == EMeshingMode::MarchingCubes)
 		{
 			SeamMesher = MakeUnique<FVoxelCPUMarchingCubesMesher>();
+		}
+		else if (Configuration && Configuration->MeshingMode == EMeshingMode::Cubic)
+		{
+			SeamMesher = MakeUnique<FVoxelCPUCubicMesher>();
 		}
 		else
 		{
@@ -3584,14 +3175,12 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	// Capture mesher pointer (it's a TUniquePtr, so we need raw pointer for lambda)
 	IVoxelMesher* MesherPtr = Mesher.Get();
 
-	// Seam-ownership junction exactness: while seam meshing is active, interior chunk meshes run
-	// on the same CPU DC instance that meshes the seams. Seam rings recompute rim vertices
-	// bit-exactly only against the CPU op sequence — the GPU QEF solve diverges (cell-relative
-	// coordinate formulation, and SVD threshold flips that can move a vertex by up to a cell),
-	// which rendered as boundary cracks growing with LOD. One mesher computes both sides; the
-	// GPU DC mesher idles for chunk meshes while the flag is on. The routing cvar exists so the
-	// GPU interior-meshing advantage stays measurable (0 = GPU interiors, cracked junctions).
-	if (bSeamMeshingActive && MesherPtr->GetMesherTypeName().Contains(TEXT("GPU"))
+	// Seam-ownership junction exactness: interior chunk meshes run on the same CPU instance that
+	// meshes the seams. Seam rings recompute rim vertices bit-exactly only against the CPU op
+	// sequence — the GPU QEF solve diverges (cell-relative coordinate formulation, and SVD threshold
+	// flips that can move a vertex by up to a cell), which rendered as boundary cracks growing with
+	// LOD. One mesher computes both sides; a GPU main mesher idles for chunk meshes.
+	if (MesherPtr->GetMesherTypeName().Contains(TEXT("GPU"))
 		&& CVarSeamCPUInteriorRouting.GetValueOnGameThread() != 0)
 	{
 		MesherPtr = EnsureSeamMesher();
@@ -3643,23 +3232,13 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		});
 
 		// Dispatch from a thread-pool worker: GenerateMeshAsync's CPU side (packing the chunk
-		// volume + neighbor slices into upload buffers, ~1.3MB of copies + allocations per chunk)
-		// was a per-launch game-thread cost. The DC/MC meshers are worker-safe here (atomic
-		// request ids, lock-guarded result maps, and their render command is self-contained).
-		// The GPU cubic mesher is NOT — its dispatch path performs blocking readback flushes,
-		// which are game-thread-only — so it keeps the inline dispatch.
-		const bool bWorkerDispatch = !MesherPtr->GetMesherTypeName().Contains(TEXT("Cubic"));
-		if (bWorkerDispatch)
-		{
-			Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete]() mutable
-			{
-				MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
-			});
-		}
-		else
+		// volume into upload buffers, copies + allocations per chunk) was a per-launch game-thread
+		// cost. The DC/MC meshers are worker-safe here (atomic request ids, lock-guarded result
+		// maps, and their render command is self-contained).
+		Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete]() mutable
 		{
 			MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
-		}
+		});
 	}
 	else
 	{
@@ -3739,9 +3318,6 @@ void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 			}
 			else
 			{
-				// Discarded (chunk unloading / gone) — OnChunkMeshingComplete won't run for this launch,
-				// so drop its dependency snapshot now instead of waiting for RemoveChunkState.
-				ClearMeshDeps(Result.ChunkCoord);
 				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d) async mesh discarded - state changed to %d"),
 					Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, static_cast<int32>(CurrentState));
 			}
@@ -3858,7 +3434,6 @@ void UVoxelChunkManager::CheckStuckAsyncJobs()
 	{
 		const FIntVector& ChunkCoord = Entry.Key;
 		CancelInFlightMesh(ChunkCoord);
-		ClearMeshDeps(ChunkCoord); // the re-dispatch captures a fresh snapshot
 		++TotalStuckMeshRequeues;
 
 		FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
@@ -4237,8 +3812,6 @@ void UVoxelChunkManager::SetChunkState(const FIntVector& ChunkCoord, EChunkState
 void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 {
 	ChunkStates.Remove(ChunkCoord);
-	// Drop any in-flight mesh-dependency snapshot so an unloaded-while-meshing chunk can't leak it.
-	InFlightMeshDeps.Remove(ChunkCoord);
 	// Release any in-flight generation / mesh slot: its result belongs to the residency that just
 	// ended and is rejected on arrival (serial mismatch), so a reload dispatches fresh work instead
 	// of waiting on — or being completed by — the old job.
@@ -4261,7 +3834,7 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 
 void UVoxelChunkManager::TickSeamScheduler()
 {
-	if (!SeamRegistry.IsValid() || !SeamRegistry->IsEnabled())
+	if (!SeamRegistry.IsValid())
 	{
 		return;
 	}
@@ -4302,42 +3875,31 @@ void UVoxelChunkManager::TickSeamScheduler()
 	SeamRegistry->ScheduleReadySeams(ViewerChunk, NearRadius, FMath::Max(0, CVarSeamMaxSchedulePerTick.GetValueOnGameThread()));
 
 	const int32 MaxJobs = FMath::Max(0, CVarSeamMaxJobsPerTick.GetValueOnGameThread());
-	if (bSeamMeshingActive)
+	// Pop jobs (bounded by the free in-flight slots) and run the mode-matched seam mesher on the
+	// worker pool.
+	const int32 FreeSlots = FMath::Max(1, CVarSeamMaxInFlight.GetValueOnGameThread()) - SeamJobsInFlight.Num();
+	const int32 DrainBudget = (MaxJobs > 0) ? FMath::Min(MaxJobs, FreeSlots) : FreeSlots;
+	// Ticks on which the per-tick drain (in-flight cap minus what is still on workers) could not
+	// empty the queue — i.e. the cap, not job supply, bounded throughput. Seam jobs finish within
+	// a frame (worker p50 ~0.2 ms), so "no free slot" never happens; the cap binds as 8 jobs/tick.
+	if (SeamRegistry->GetJobQueueDepth() > DrainBudget)
 	{
-		// P1 runtime pipeline: pop jobs (bounded by the free in-flight slots) and execute the
-		// single-owner face-seam mesher on the worker pool.
-		const int32 FreeSlots = FMath::Max(1, CVarSeamMaxInFlight.GetValueOnGameThread()) - SeamJobsInFlight.Num();
-		const int32 DrainBudget = (MaxJobs > 0) ? FMath::Min(MaxJobs, FreeSlots) : FreeSlots;
-		// Ticks on which the per-tick drain (in-flight cap minus what is still on workers) could not
-		// empty the queue — i.e. the cap, not job supply, bounded throughput. Seam jobs finish within
-		// a frame (worker p50 ~0.2 ms), so "no free slot" never happens; the cap binds as 8 jobs/tick.
-		if (SeamRegistry->GetJobQueueDepth() > DrainBudget)
-		{
-			++SeamSlotStarvedTicks;
-		}
-		if (DrainBudget > 0)
-		{
-			TArray<FVoxelSeamJob> Jobs;
-			SeamRegistry->DrainSeamJobs(Jobs, DrainBudget);
-			for (const FVoxelSeamJob& Job : Jobs)
-			{
-				DispatchSeamJob(Job);
-			}
-		}
+		++SeamSlotStarvedTicks;
 	}
-	else
+	if (DrainBudget > 0)
 	{
-		// P0 scaffolding path: the stub processor (produces no geometry).
-		SeamRegistry->ProcessSeamJobQueue(MaxJobs);
+		TArray<FVoxelSeamJob> Jobs;
+		SeamRegistry->DrainSeamJobs(Jobs, DrainBudget);
+		for (const FVoxelSeamJob& Job : Jobs)
+		{
+			DispatchSeamJob(Job);
+		}
 	}
 
 	// R24: release LOD transitions whose seams have all landed (results were submitted at the top
 	// of this tick, deferred buckets just below), or that hit the hold cap. Everything released here
 	// starts fading on one clock.
-	if (bSeamMeshingActive)
-	{
-		FlushDueSeamBuckets();
-	}
+	FlushDueSeamBuckets();
 	{
 		FVoxelSeamTransitionHolds::FRelease Released;
 		const double HoldSeconds = FMath::Max(0, CVarSeamHoldMs.GetValueOnGameThread()) / 1000.0;
@@ -4400,8 +3962,7 @@ void UVoxelChunkManager::TickSeamScheduler()
 
 bool UVoxelChunkManager::ShouldHoldForSeams(const FIntVector& ChunkCoord, int32 PreviousMeshedLOD, int32 NewLOD, const FChunkMeshData& NewMesh) const
 {
-	if (!bSeamMeshingActive || !MeshRenderer || !SeamRegistry.IsValid() || !SeamRegistry->IsEnabled()
-		|| CVarSeamHoldMs.GetValueOnGameThread() <= 0 || !NewMesh.IsValid())
+	if (!MeshRenderer || !SeamRegistry.IsValid() || CVarSeamHoldMs.GetValueOnGameThread() <= 0 || !NewMesh.IsValid())
 	{
 		return false;
 	}
@@ -4536,8 +4097,8 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	// result enqueue. The seam meshers read only the request + Config (thread-safe). Voxel data
 	// is attached as SHARED snapshots (built at most once per chunk content version) — dispatch
 	// itself no longer copies voxel arrays. Seam jobs ALWAYS run on the CPU via the dedicated
-	// SeamMesher (mode-matched: CPU DC or CPU MC) — a GPU main mesher cannot serve them.
-	IVoxelMesher* DCMesher = EnsureSeamMesher();
+	// SeamMesher (mode-matched: CPU DC, CPU MC or CPU cubic) — a GPU main mesher cannot serve them.
+	IVoxelMesher* SeamMesherPtr = EnsureSeamMesher();
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
 	const double DispatchedAt = SeamRegistry->NowSeconds(); // same clock as the job's schedule stamp
@@ -4558,11 +4119,11 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
 		{
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
-			const bool bSuccess = DCMesher->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
+			const bool bSuccess = SeamMesherPtr->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
 			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
@@ -4603,11 +4164,11 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
 		{
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
-			const bool bSuccess = DCMesher->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
+			const bool bSuccess = SeamMesherPtr->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
 			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
@@ -4647,11 +4208,11 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, DCMesher, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
 		{
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
-			const bool bSuccess = DCMesher->GenerateCornerSeamMeshCPU(SeamRequest, MeshData);
+			const bool bSuccess = SeamMesherPtr->GenerateCornerSeamMeshCPU(SeamRequest, MeshData);
 			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
@@ -4689,10 +4250,10 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 		++Processed;
 		SeamJobsInFlight.Remove(Result.Key);
 
-		if (!bSeamMeshingActive || !MeshRenderer)
+		if (!MeshRenderer)
 		{
 			FinishSeamJob(Result.Key, /*bAbandoned*/ true);
-			return true; // pipeline turned off mid-flight — buckets were cleared on deactivation
+			return true;
 		}
 		// R23a: a result applies only to the owner residency it was scheduled against. A job
 		// dispatched just before its owner unloaded completes afterwards; without this check the
@@ -4758,6 +4319,10 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 		else
 		{
 			SubmitSeamOwnerBucket(Result.Key.Owner);
+		}
+		if (bBenchmarkViewActive)
+		{
+			++BenchSeamJobsCompleted;
 		}
 		FinishSeamJob(Result.Key, /*bAbandoned*/ false);
 		return true;
@@ -4921,10 +4486,6 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 		// qualifies; one that started a re-mesh or came closer meanwhile keeps it, and the sweep
 		// re-applies the cached form for free once it qualifies again.
 		const bool bDrop = bEnabled && IsFarCandidate(Result.ChunkCoord, *S);
-		if (bDrop)
-		{
-			S->FarExpandedSeenFrame = -1;
-		}
 		S->Descriptor.InstallCompactForm(MoveTemp(Result.Form), bDrop);
 		++FarCompressInstalled;
 		++Applied;
@@ -4951,24 +4512,8 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 		if (D.bUniformValueValid || D.CompressedVoxelData.Num() > 0)
 		{
 			// A compact form is already cached (the chunk was expanded by access); re-apply it for
-			// free — no scan, no re-encode. Not budgeted.
-			// The legacy boundary path (cubic) reads up to 26 neighbours straight from their
-			// descriptors on every mesh job, so in a neighbour re-mesh cascade a chunk compacted
-			// again on the next tick is decoded again by the next job. Hold it resident for
-			// IdleFrames first. The seam pipeline reads through its snapshot cache (one decode per
-			// content version), so it re-applies at once.
-			if (!bSeamMeshingActive)
-			{
-				if (S.FarExpandedSeenFrame < 0)
-				{
-					S.FarExpandedSeenFrame = CurrentFrame;
-				}
-				if ((CurrentFrame - S.FarExpandedSeenFrame) < IdleFrames)
-				{
-					continue;
-				}
-			}
-			S.FarExpandedSeenFrame = -1;
+			// free — no scan, no re-encode. Not budgeted. The seam pipeline reads neighbours through
+			// its snapshot cache (one decode per content version), so re-compacting at once is safe.
 			D.TryCompress(Codec);
 			continue;
 		}
@@ -4995,7 +4540,6 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 		}
 		else
 		{
-			S.FarExpandedSeenFrame = -1;
 			D.TryCompress(Codec);
 		}
 	}
@@ -5067,16 +4611,10 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 	AddToMeshingQueue(Request);
 	SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
 
-	// Queue neighbors for remeshing so they can incorporate this chunk's edge data
-	// This ensures seamless boundaries when chunks load in different orders.
-	// Seam-ownership P1: interior meshes never incorporate neighbor data, so this fan-out is
-	// pure churn under the seam pipeline — boundary updates flow through the seam registry.
-	if (!bSeamMeshingActive)
-	{
-		QueueNeighborsForRemesh(ChunkCoord);
-	}
+	// No neighbour re-meshes: chunk meshes never read neighbour data. This chunk's arrival restales
+	// the seams it participates in, through the registry below.
 
-	// Seam-ownership P0: this chunk's voxel data is now available — register it (restales its incident
+	// Seam-ownership: this chunk's voxel data is now available — register it (restales its incident
 	// seams). ContentVersion is the seam-invalidation key; rendered LOD is not set yet (mesh follows).
 	if (SeamRegistry.IsValid())
 	{
@@ -5144,45 +4682,10 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			}
 		}
 
-		// If the chunk is already Loaded (e.g., neighbor remesh submitted a new mesh for it),
-		// still trigger neighbor remesh cascade since MeshedLODLevel may have changed.
-		// (Seam-ownership P1: transition-face realignment is a legacy-boundary concern — the
-		// seam registry already restaled this chunk's seams via UpdateChunkRenderedLOD above.)
-		if (bMeshSubmitted && State && State->State == EChunkState::Loaded)
-		{
-			if (!bSeamMeshingActive && Configuration && Configuration->IsLODEnabled() && PreviousMeshedLOD != State->MeshedLODLevel)
-			{
-				static const FIntVector FaceOffsets[6] = {
-					FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
-					FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
-					FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
-				};
-				for (const FIntVector& Offset : FaceOffsets)
-				{
-					const FIntVector NeighborCoord = ChunkCoord + Offset;
-					if (FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
-					{
-						if (NeighborState->State == EChunkState::Loaded)
-						{
-							FChunkLODRequest Request;
-							Request.ChunkCoord = NeighborCoord;
-							Request.LODLevel = NeighborState->LODLevel;
-							// Near the viewer, boundary re-alignment must beat the streaming
-							// wave's first-time meshes (50) or the seam stays visible while
-							// the whole load front drains.
-							Request.Priority = IsChunkNearViewer(NeighborCoord) ? GNearCorrectionPriority : 20.0f;
-							if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
-							{
-								SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
-							}
-						}
-					}
-				}
-			}
-		}
 		// Safety net: if chunk is in an unexpected state (not actively transitioning and not Loaded),
-		// force it to Loaded to avoid permanently invisible chunks.
-		else if (bMeshSubmitted && State &&
+		// force it to Loaded to avoid permanently invisible chunks. (A chunk already Loaded needs
+		// nothing more: the seam registry restaled its seams through UpdateChunkRenderedLOD above.)
+		if (bMeshSubmitted && State &&
 			State->State != EChunkState::PendingMeshing &&
 			State->State != EChunkState::Meshing &&
 			State->State != EChunkState::Loaded &&
@@ -5198,10 +4701,6 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			OnChunkLoaded.Broadcast(ChunkCoord);
 		}
 
-		// This chunk left Meshing while its mesh sat in the pending queue (re-queued or unloaded);
-		// it won't reach the revalidation path below, so drop its launch snapshot. A re-queue will
-		// capture a fresh one when it next dispatches.
-		ClearMeshDeps(ChunkCoord);
 		return;
 	}
 
@@ -5296,41 +4795,6 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
 		PendingMeshQueue.RemoveAtSwap(PendingIndex, EAllowShrinking::No);
-
-		// When MeshedLODLevel changed, face neighbors need to remesh so their
-		// MergeLODBoundaryCells and TransitionFaces align with our new rendered LOD.
-		// This closes the "break" phase of LOD transitions: without this, neighbors
-		// retain stale boundary alignment until some other trigger re-meshes them.
-		// (Seam-ownership P1: interior meshes carry no boundary alignment to re-agree —
-		// the rendered-LOD change reached the seam registry above and restales the seams.)
-		if (!bSeamMeshingActive && Configuration && Configuration->IsLODEnabled() && PreviousMeshedLOD != State->MeshedLODLevel)
-		{
-			static const FIntVector FaceOffsets[6] = {
-				FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
-				FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
-				FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
-			};
-			for (const FIntVector& Offset : FaceOffsets)
-			{
-				const FIntVector NeighborCoord = ChunkCoord + Offset;
-				if (FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord))
-				{
-					if (NeighborState->State == EChunkState::Loaded)
-					{
-						FChunkLODRequest Request;
-						Request.ChunkCoord = NeighborCoord;
-						Request.LODLevel = NeighborState->LODLevel;
-						// Refinement pass; near the viewer it must beat first-time meshes (50)
-						// so the LOD-boundary seam re-aligns in frames, not after the load front.
-						Request.Priority = IsChunkNearViewer(NeighborCoord) ? GNearCorrectionPriority : 20.0f;
-						if (AddToMeshingQueue(Request, EVoxelRemeshReason::LODTransition))
-						{
-							SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
-						}
-					}
-				}
-			}
-		}
 	}
 	else if (PendingIndex == INDEX_NONE)
 	{
@@ -5357,300 +4821,8 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 	// Fire event
 	OnChunkLoaded.Broadcast(ChunkCoord);
 
-	// Completion-time boundary revalidation. While this chunk was in flight, a neighbour may have
-	// gained/changed voxel data or changed its rendered LOD versus the snapshot taken at launch
-	// (CaptureMeshDeps). If so, the boundary we just submitted is stale — the persistent-seam race
-	// that no other trigger fixes (the generation-complete and LOD cascades both skip a mid-mesh
-	// chunk with no retry). The chunk is now Loaded (visible, collision-ready); re-queue a boundary
-	// correction the same way a normal neighbour-remesh does (Loaded -> PendingMeshing, re-fires
-	// OnChunkLoaded on completion). RevalidateMeshDeps consumed the launch snapshot.
-	if (RevalidateMeshDeps(ChunkCoord))
-	{
-		FChunkLODRequest Request;
-		Request.ChunkCoord = ChunkCoord;
-		Request.LODLevel = State->LODLevel;
-		// Above first-time mesh (50) so seam corrections resolve promptly; near the viewer,
-		// align with the near-correction tier for consistent ordering.
-		Request.Priority = IsChunkNearViewer(ChunkCoord) ? GNearCorrectionPriority : 60.0f;
-		if (AddToMeshingQueue(Request, EVoxelRemeshReason::NeighborRemesh))
-		{
-			SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
-		}
-	}
-
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) loaded"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-}
-
-bool UVoxelChunkManager::ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoord, bool& bOutClampUnavoidable) const
-{
-	bOutClampUnavoidable = false;
-
-	if (!Configuration)
-	{
-		return false;
-	}
-
-	const int32 VolumeSize = Configuration->ChunkSize * Configuration->ChunkSize * Configuration->ChunkSize;
-
-	static const FIntVector FaceOffsets[6] = {
-		FIntVector(1, 0, 0),  FIntVector(-1, 0, 0),
-		FIntVector(0, 1, 0),  FIntVector(0, -1, 0),
-		FIntVector(0, 0, 1),  FIntVector(0, 0, -1),
-	};
-
-	bool bDefer = false;
-	for (const FIntVector& Offset : FaceOffsets)
-	{
-		const FVoxelChunkState* Neighbor = ChunkStates.Find(ChunkCoord + Offset);
-		if (!Neighbor)
-		{
-			// No neighbor tracked here — this is the loaded-region edge, not a tear
-			// (the chunk will be re-meshed via QueueNeighborsForRemesh when/if the
-			// neighbor is later generated). Nothing to wait for.
-			continue;
-		}
-
-		if (Neighbor->Descriptor.HasVoxelDataAvailable())
-		{
-			continue; // data available (resident or decompressable) — fine to mesh against
-		}
-
-		// Neighbor exists but its voxel data is not available.
-		if (Neighbor->State == EChunkState::PendingGeneration ||
-			Neighbor->State == EChunkState::Generating)
-		{
-			// Data is in the pipeline and will arrive — wait for it.
-			bDefer = true;
-		}
-		else
-		{
-			// Loaded-but-freed, unloading, etc. — data is not coming. Don't stall
-			// forever; let the caller mesh (it will clamp) but flag it.
-			bOutClampUnavoidable = true;
-		}
-	}
-
-	return bDefer;
-}
-
-// Shared 26-neighbour offset table (6 faces + 12 edges + 8 corners). CaptureMeshDeps and
-// RevalidateMeshDeps MUST iterate this in the SAME order — the snapshot is compared index-by-index.
-static const FIntVector GMeshDepNeighborOffsets[26] = {
-	FIntVector(1, 0, 0),   FIntVector(-1, 0, 0),
-	FIntVector(0, 1, 0),   FIntVector(0, -1, 0),
-	FIntVector(0, 0, 1),   FIntVector(0, 0, -1),
-	FIntVector(1, 1, 0),   FIntVector(1, -1, 0),   FIntVector(-1, 1, 0),   FIntVector(-1, -1, 0),
-	FIntVector(1, 0, 1),   FIntVector(1, 0, -1),   FIntVector(-1, 0, 1),   FIntVector(-1, 0, -1),
-	FIntVector(0, 1, 1),   FIntVector(0, 1, -1),   FIntVector(0, -1, 1),   FIntVector(0, -1, -1),
-	FIntVector(1, 1, 1),   FIntVector(1, 1, -1),   FIntVector(1, -1, 1),   FIntVector(1, -1, -1),
-	FIntVector(-1, 1, 1),  FIntVector(-1, 1, -1),  FIntVector(-1, -1, 1),  FIntVector(-1, -1, -1)
-};
-
-void UVoxelChunkManager::CaptureMeshDeps(const FIntVector& ChunkCoord)
-{
-	// Snapshot each of the 26 neighbours' boundary-relevant state at the instant this chunk launches
-	// to mesh. Consumed at completion by RevalidateMeshDeps to detect a mid-flight neighbour change.
-	// KNOWN LIMIT: ContentVersion tracks the neighbour's Descriptor voxels (generation + direct
-	// writes), not its UVoxelEditManager edit layer — so a player/system EDIT to a neighbour while
-	// this chunk is in flight is not detected here (an edit-boundary seam in that window persists until
-	// an unrelated remesh, as it did before this fix). The reported streaming-equilibrium seam is
-	// generation/LOD-driven, which IS covered; edit-layer versioning is a follow-up (also needed by
-	// the boundary-slice memoization work).
-	TArray<FMeshBoundaryDep>& Deps = InFlightMeshDeps.FindOrAdd(ChunkCoord);
-	Deps.SetNum(26, EAllowShrinking::No);
-	for (int32 i = 0; i < 26; ++i)
-	{
-		FMeshBoundaryDep& Dep = Deps[i];
-		if (const FVoxelChunkState* NeighborState = ChunkStates.Find(ChunkCoord + GMeshDepNeighborOffsets[i]))
-		{
-			Dep.ContentVersion = NeighborState->Descriptor.ContentVersion;
-			Dep.MeshedLODLevel = NeighborState->MeshedLODLevel;
-			Dep.bHadData = NeighborState->Descriptor.HasVoxelDataAvailable();
-		}
-		else
-		{
-			Dep = FMeshBoundaryDep{};
-		}
-	}
-}
-
-bool UVoxelChunkManager::RevalidateMeshDeps(const FIntVector& ChunkCoord)
-{
-	TArray<FMeshBoundaryDep> Snapshot;
-	if (!InFlightMeshDeps.RemoveAndCopyValue(ChunkCoord, Snapshot) || Snapshot.Num() != 26)
-	{
-		return false;
-	}
-	for (int32 i = 0; i < 26; ++i)
-	{
-		const FMeshBoundaryDep& Was = Snapshot[i];
-
-		FMeshBoundaryDep Now;
-		if (const FVoxelChunkState* NeighborState = ChunkStates.Find(ChunkCoord + GMeshDepNeighborOffsets[i]))
-		{
-			Now.ContentVersion = NeighborState->Descriptor.ContentVersion;
-			Now.MeshedLODLevel = NeighborState->MeshedLODLevel;
-			Now.bHadData = NeighborState->Descriptor.HasVoxelDataAvailable();
-		}
-
-		// A neighbour with no data now (never generated, or unloaded) can't improve our boundary —
-		// re-meshing against it would only clamp.
-		if (!Now.bHadData)
-		{
-			continue;
-		}
-		// Voxel-content change (a neighbour that gained data or whose content changed) restales the
-		// boundary for ANY of the 26 neighbours — every neighbour contributes raw boundary voxels via
-		// ExtractNeighborEdgeSlices (faces, edge strips, corners).
-		if (!Was.bHadData || Now.ContentVersion != Was.ContentVersion)
-		{
-			return true;
-		}
-		// A neighbour's RENDERED LOD only reaches our boundary through transition faces, which are set
-		// up against the 6 FACE neighbours only (offsets 0-5). Edge/corner neighbours contribute raw
-		// voxels regardless of their rendered LOD, so their LOD changing does NOT restale us — checking
-		// it there would trigger a remesh every time an edge/corner meshes during our flight (pure churn
-		// across the streaming front). Only a face neighbour's rendered-LOD change matters.
-		if (i < 6 && Now.MeshedLODLevel != Was.MeshedLODLevel)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-void UVoxelChunkManager::ClearMeshDeps(const FIntVector& ChunkCoord)
-{
-	InFlightMeshDeps.Remove(ChunkCoord);
-}
-
-void UVoxelChunkManager::QueueNeighborsForRemesh(const FIntVector& ChunkCoord)
-{
-	// Attribution timer: accumulated across the tick, reported as Timing.GenNeighborMs
-	const double QnStart = FPlatformTime::Seconds();
-	ON_SCOPE_EXIT { NeighborRemeshSecondsThisTick += FPlatformTime::Seconds() - QnStart; };
-
-	const bool bCoalesce = CVarStreamNeighborCoalesce.GetValueOnGameThread() != 0;
-
-	// For Marching Cubes, we need to remesh all 26 neighbors (faces, edges, corners)
-	// because diagonal chunks may use our voxel data at their boundaries.
-	// Build list of all neighbor offsets: 6 faces + 12 edges + 8 corners = 26 total
-	static const FIntVector NeighborOffsets[26] = {
-		// 6 Face neighbors
-		FIntVector(1, 0, 0),   FIntVector(-1, 0, 0),
-		FIntVector(0, 1, 0),   FIntVector(0, -1, 0),
-		FIntVector(0, 0, 1),   FIntVector(0, 0, -1),
-		// 12 Edge neighbors
-		FIntVector(1, 1, 0),   FIntVector(1, -1, 0),   FIntVector(-1, 1, 0),   FIntVector(-1, -1, 0),
-		FIntVector(1, 0, 1),   FIntVector(1, 0, -1),   FIntVector(-1, 0, 1),   FIntVector(-1, 0, -1),
-		FIntVector(0, 1, 1),   FIntVector(0, 1, -1),   FIntVector(0, -1, 1),   FIntVector(0, -1, -1),
-		// 8 Corner neighbors
-		FIntVector(1, 1, 1),   FIntVector(1, 1, -1),   FIntVector(1, -1, 1),   FIntVector(1, -1, -1),
-		FIntVector(-1, 1, 1),  FIntVector(-1, 1, -1),  FIntVector(-1, -1, 1),  FIntVector(-1, -1, -1)
-	};
-
-	// Check each neighbor
-	for (int32 i = 0; i < 26; ++i)
-	{
-		const FIntVector NeighborCoord = ChunkCoord + NeighborOffsets[i];
-
-		FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
-		if (!NeighborState)
-		{
-			continue;
-		}
-
-		// Only remesh neighbors that are already in Loaded state
-		// Neighbors in earlier states will get correct data during their initial meshing
-		if (NeighborState->State == EChunkState::Loaded)
-		{
-			if (bCoalesce)
-			{
-				// Debounce: stamp the request; ProcessPendingNeighborRemeshes enqueues it once the
-				// neighborhood settles. Bursts of neighbor arrivals keep bumping the stamp, coalescing
-				// what would otherwise be one premature remesh per arrival.
-				NeighborState->NeighborRemeshRequestFrame = CurrentFrame;
-				continue;
-			}
-
-			// Legacy: queue for remeshing immediately - lower priority since it's a refinement
-			FChunkLODRequest Request;
-			Request.ChunkCoord = NeighborCoord;
-			Request.LODLevel = NeighborState->LODLevel;
-			Request.Priority = NeighborState->Priority * 0.5f; // Lower priority than new chunks
-
-			// O(1) duplicate check + sorted insertion
-			if (AddToMeshingQueue(Request, EVoxelRemeshReason::NeighborRemesh))
-			{
-				SetChunkState(NeighborCoord, EChunkState::PendingMeshing);
-
-				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) queued for remesh (neighbor of %d, %d, %d)"),
-					NeighborCoord.X, NeighborCoord.Y, NeighborCoord.Z,
-					ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-			}
-		}
-	}
-}
-
-bool UVoxelChunkManager::IsChunkNearViewer(const FIntVector& ChunkCoord) const
-{
-	const float NearDist = CVarStreamNearCorrectionDistance.GetValueOnGameThread();
-	if (NearDist <= 0.0f || !Configuration)
-	{
-		return false;
-	}
-	const float ChunkWorldSize = Configuration->ChunkSize * Configuration->VoxelSize;
-	const FVector ChunkCenter = Configuration->WorldOrigin
-		+ FVector(ChunkCoord) * ChunkWorldSize
-		+ FVector(ChunkWorldSize * 0.5f);
-	return FVector::DistSquared(ChunkCenter, CurrentViewerPosition) <= FMath::Square(NearDist);
-}
-
-void UVoxelChunkManager::ProcessPendingNeighborRemeshes()
-{
-	if (CVarStreamNeighborCoalesce.GetValueOnGameThread() == 0)
-	{
-		return;
-	}
-	const int64 DebounceFrames = FMath::Max<int64>(0, CVarStreamNeighborDebounceFrames.GetValueOnGameThread());
-	const int64 NearDebounceFrames = FMath::Max<int64>(0, CVarStreamNearCorrectionDebounceFrames.GetValueOnGameThread());
-
-	for (auto& Pair : ChunkStates)
-	{
-		FVoxelChunkState& S = Pair.Value;
-		if (S.NeighborRemeshRequestFrame == 0)
-		{
-			continue; // no pending neighbor-remesh
-		}
-		// Busy (being (re)meshed for another reason, or unloading): leave the request and retry once
-		// it settles back to Loaded — its next mesh incorporates current neighbor data anyway. Never
-		// dropped here, so no neighbor's contribution is lost to a race.
-		if (S.State != EChunkState::Loaded || S.Descriptor.bIsDirty)
-		{
-			continue;
-		}
-		// A stale boundary NEXT TO the player is the worst-visible artifact in the game — take the
-		// fast path there (short debounce, queue priority above the streaming wave). Far corrections
-		// keep the full coalescing window; the throughput win is a far-field property.
-		const bool bNear = IsChunkNearViewer(Pair.Key);
-		if ((CurrentFrame - S.NeighborRemeshRequestFrame) < (bNear ? NearDebounceFrames : DebounceFrames))
-		{
-			continue; // neighborhood still settling — keep coalescing
-		}
-
-		FChunkLODRequest Request;
-		Request.ChunkCoord = Pair.Key;
-		Request.LODLevel = S.LODLevel;
-		// Near: above first-time meshes (50) so the visible seam resolves in frames.
-		// Far: refinement, lower than new chunks (legacy behavior).
-		Request.Priority = bNear ? GNearCorrectionPriority : S.Priority * 0.5f;
-		if (AddToMeshingQueue(Request, EVoxelRemeshReason::NeighborRemesh))
-		{
-			SetChunkState(Pair.Key, EChunkState::PendingMeshing);
-		}
-		S.NeighborRemeshRequestFrame = 0;
-	}
 }
 
 bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoord)
@@ -5943,6 +5115,47 @@ void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoor
 	}
 }
 
+void UVoxelChunkManager::RecoverLostRenderData()
+{
+	TArray<FIntVector> LostChunks;
+	if (!MeshRenderer || !MeshRenderer->ConsumeLostRenderData(LostChunks))
+	{
+		return;
+	}
+
+	// Chunks still in the pipeline submit to the new proxy on their own; a Loaded chunk's mesh is the one lost.
+	int32 Remeshed = 0;
+	for (const FIntVector& Coord : LostChunks)
+	{
+		if (GetChunkState(Coord) == EChunkState::Loaded)
+		{
+			MarkChunkDirty(Coord);
+			++Remeshed;
+		}
+	}
+
+	// The merged seam buckets are rebuilt from the slots kept here; no seam job has to run again.
+	TArray<FIntVector> SeamOwners;
+	SeamOwnerSlots.GetKeys(SeamOwners);
+	for (const FIntVector& Owner : SeamOwners)
+	{
+		SubmitSeamOwnerBucket(Owner);
+	}
+
+	for (TPair<FIntVector2, FWaterTileState>& Tile : WaterTiles)
+	{
+		Tile.Value.bDirty = true;
+		if (!DirtyWaterTileSet.Contains(Tile.Key))
+		{
+			DirtyWaterTileQueue.Add(Tile.Key);
+			DirtyWaterTileSet.Add(Tile.Key);
+		}
+	}
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("Renderer lost its geometry (scene proxy recreated): re-meshing %d chunk(s), re-sending %d seam bucket(s) and %d water tile(s)"),
+		Remeshed, SeamOwners.Num(), WaterTiles.Num());
+}
+
 void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)
 {
 	if (!Configuration || !MeshRenderer)
@@ -6005,110 +5218,6 @@ void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)
 		}
 		++Processed;
 	}
-}
-
-void UVoxelChunkManager::ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest)
-{
-	if (!Configuration)
-	{
-		return;
-	}
-
-	const int32 ChunkSize = Configuration->ChunkSize;
-	const int32 VolumeSize = ChunkSize * ChunkSize * ChunkSize;
-
-	// Cache structure for neighbor chunk data to avoid repeated TMap lookups
-	struct FNeighborCache
-	{
-		const FVoxelChunkState* State = nullptr;
-		const FChunkEditLayer* EditLayer = nullptr;
-		bool bHasData = false;
-	};
-
-	// Pre-cache neighbor data (26 potential neighbors: 6 faces + 12 edges + 8 corners)
-	// Use a simple lambda to initialize cache on first access per neighbor
-	TMap<FIntVector, FNeighborCache> NeighborCaches;
-	NeighborCaches.Reserve(26);
-
-	auto GetNeighborCache = [this, VolumeSize, &NeighborCaches](const FIntVector& NeighborCoord) -> const FNeighborCache&
-	{
-		if (const FNeighborCache* Cached = NeighborCaches.Find(NeighborCoord))
-		{
-			return *Cached;
-		}
-
-		FNeighborCache Cache;
-		Cache.State = ChunkStates.Find(NeighborCoord);
-		if (Cache.State && Cache.State->Descriptor.HasVoxelDataAvailable())
-		{
-			Cache.bHasData = true;
-			// Materialize the neighbor's raw array ONCE here (const overload; no-op when already
-			// resident). The per-voxel GetNeighborVoxel reads below then hit a guaranteed-resident
-			// array — never decompress on the ~25-125k-voxel per-launch hot path.
-			Cache.State->Descriptor.GetVoxelDataForRead();
-			// Cache edit layer lookup (only once per neighbor)
-			if (EditManager)
-			{
-				Cache.EditLayer = EditManager->GetEditLayer(NeighborCoord);
-			}
-		}
-		return NeighborCaches.Add(NeighborCoord, Cache);
-	};
-
-	// Optimized helper lambda to get a single voxel from a neighbor chunk.
-	// Every extraction loop below reads from ONE neighbor at a time, so memoize the
-	// last-resolved cache entry: without this, the per-voxel TMap::Find (FIntVector hash +
-	// probe) across the ~25-125k slice/deep voxels per launch dominated the whole meshing
-	// section (~3.4ms/frame of the 4ms measured by MeshSliceMs). The memoized pointer is
-	// refreshed whenever the coord changes, so it never outlives a map rehash from Add().
-	FIntVector MemoCoord(INT32_MAX, INT32_MAX, INT32_MAX);
-	const FNeighborCache* MemoCache = nullptr;
-	auto GetNeighborVoxel = [ChunkSize, &GetNeighborCache, &MemoCoord, &MemoCache](const FIntVector& NeighborCoord, int32 X, int32 Y, int32 Z) -> FVoxelData
-	{
-		if (NeighborCoord != MemoCoord)
-		{
-			MemoCache = &GetNeighborCache(NeighborCoord);
-			MemoCoord = NeighborCoord;
-		}
-		const FNeighborCache& Cache = *MemoCache;
-		if (!Cache.bHasData)
-		{
-			return FVoxelData::Air();
-		}
-
-		const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-		// Residency was forced once at cache fill (bHasData ⇒ resident), so read the raw array
-		// directly here — the memoized per-voxel hot path must not route through an accessor.
-		const TArray<FVoxelData>& Voxels = Cache.State->Descriptor.VoxelData;
-		if (!Voxels.IsValidIndex(Index))
-		{
-			return FVoxelData::Air();
-		}
-
-		FVoxelData Result = Voxels[Index];
-
-		// Apply edit if present (using cached edit layer)
-		if (Cache.EditLayer)
-		{
-			if (const FVoxelEdit* Edit = Cache.EditLayer->GetEdit(FIntVector(X, Y, Z)))
-			{
-				Result = Edit->ApplyToProceduralData(Result);
-			}
-		}
-
-		return Result;
-	};
-
-	// Helper to check if neighbor chunk exists and has valid data (uses cache)
-	auto HasNeighborData = [&GetNeighborCache](const FIntVector& NeighborCoord) -> bool
-	{
-		return GetNeighborCache(NeighborCoord).bHasData;
-	};
-
-	// Shared extraction body (also used by the collision cook worker over voxel snapshots — P4a
-	// moved the strided 26-neighbor reads off the game thread for collision cooks).
-	VoxelNeighborSlices::Extract(ChunkSize, ChunkCoord, bDeepDepthOff, bDeepDepthFull,
-		HasNeighborData, GetNeighborVoxel, OutRequest);
 }
 
 // ==================== Queue Management ====================
@@ -6687,8 +5796,8 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,
 	FVoxelMeshingRequest& OutMeshRequest,
-	TSharedPtr<const TArray<FVoxelData>>* OutSharedVoxels,
-	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>* OutNeighborSnapshots)
+	TSharedPtr<const TArray<FVoxelData>>& OutSharedVoxels,
+	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots)
 {
 	if (!bIsInitialized || !Configuration || !Mesher)
 	{
@@ -6716,74 +5825,38 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	OutMeshRequest.VoxelSize = Configuration->VoxelSize;
 	OutMeshRequest.WorldOrigin = Configuration->WorldOrigin;
 
-	if (OutSharedVoxels)
+	// Hand out the shared edit-merged snapshot (built at most once per chunk content version, usually
+	// already cached by the seam pipeline). The worker copies it into the request off the game thread.
+	OutSharedVoxels = GetSeamVoxelSnapshot(ChunkCoord, *State);
+	if (!OutSharedVoxels.IsValid() || OutSharedVoxels->Num() == 0)
 	{
-		// Async path: hand out the shared edit-merged snapshot (built at most once per chunk
-		// content version, usually already cached by the seam pipeline). The worker copies it
-		// into the request off the game thread — skipping the full-volume copy + edit merge
-		// that dominated per-cook game-thread cost here.
-		*OutSharedVoxels = GetSeamVoxelSnapshot(ChunkCoord, *State);
-		if (!OutSharedVoxels->IsValid() || (*OutSharedVoxels)->Num() == 0)
-		{
-			return false;
-		}
-	}
-	else
-	{
-		// Synchronous path: materialize inline (copy + edit merge), original behavior.
-		OutMeshRequest.VoxelData = State->Descriptor.GetVoxelDataForRead();
-		if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
-		{
-			const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(ChunkCoord);
-			if (EditLayer && !EditLayer->IsEmpty())
-			{
-				for (const auto& EditPair : EditLayer->Edits)
-				{
-					const int32 Index = EditPair.Key;
-					const FVoxelEdit& Edit = EditPair.Value;
-					if (OutMeshRequest.VoxelData.IsValidIndex(Index))
-					{
-						const FVoxelData& ProceduralData = OutMeshRequest.VoxelData[Index];
-						OutMeshRequest.VoxelData[Index] = Edit.ApplyToProceduralData(ProceduralData);
-					}
-				}
-			}
-		}
+		return false;
 	}
 
-	if (OutNeighborSnapshots)
+	// Shared snapshots for the 26 neighbours that have data (map lookups; builds only on cache miss,
+	// which also seeds the seam pipeline's cache). The worker runs the slice extraction from these off
+	// the game thread: collision is cooked whole-chunk from the main mesher, boundary faces included.
+	OutNeighborSnapshots.Reserve(26);
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	for (int32 DY = -1; DY <= 1; ++DY)
+	for (int32 DX = -1; DX <= 1; ++DX)
 	{
-		// Async path: grab shared snapshots for the 26 neighbors that have data (map lookups;
-		// builds only on cache miss, which also seeds the seam pipeline's cache). The worker
-		// runs the full slice extraction from these off the game thread — the strided reads
-		// over ~1MB neighbor arrays were ~6 ms/cook of pure cache misses on the game thread.
-		OutNeighborSnapshots->Reserve(26);
-		for (int32 DZ = -1; DZ <= 1; ++DZ)
-		for (int32 DY = -1; DY <= 1; ++DY)
-		for (int32 DX = -1; DX <= 1; ++DX)
+		if (DX == 0 && DY == 0 && DZ == 0)
 		{
-			if (DX == 0 && DY == 0 && DZ == 0)
+			continue;
+		}
+		const FIntVector NCoord = ChunkCoord + FIntVector(DX, DY, DZ);
+		if (FVoxelChunkState* NState = ChunkStates.Find(NCoord))
+		{
+			if (NState->Descriptor.HasVoxelDataAvailable())
 			{
-				continue;
-			}
-			const FIntVector NCoord = ChunkCoord + FIntVector(DX, DY, DZ);
-			if (FVoxelChunkState* NState = ChunkStates.Find(NCoord))
-			{
-				if (NState->Descriptor.HasVoxelDataAvailable())
+				TSharedPtr<const TArray<FVoxelData>> Snap = GetSeamVoxelSnapshot(NCoord, *NState);
+				if (Snap.IsValid() && Snap->Num() > 0)
 				{
-					TSharedPtr<const TArray<FVoxelData>> Snap = GetSeamVoxelSnapshot(NCoord, *NState);
-					if (Snap.IsValid() && Snap->Num() > 0)
-					{
-						OutNeighborSnapshots->Add(NCoord, MoveTemp(Snap));
-					}
+					OutNeighborSnapshots.Add(NCoord, MoveTemp(Snap));
 				}
 			}
 		}
-	}
-	else
-	{
-		// Synchronous path: extract neighbor data for seamless boundaries inline.
-		ExtractNeighborEdgeSlices(ChunkCoord, OutMeshRequest);
 	}
 
 	// For collision, we don't need transition cells
@@ -6794,19 +5867,4 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	}
 
 	return true;
-}
-
-bool UVoxelChunkManager::GetChunkCollisionMesh(
-	const FIntVector& ChunkCoord,
-	int32 LODLevel,
-	FChunkMeshData& OutMeshData)
-{
-	FVoxelMeshingRequest MeshRequest;
-	if (!PrepareCollisionMeshRequest(ChunkCoord, LODLevel, MeshRequest))
-	{
-		return false;
-	}
-
-	OutMeshData.Reset();
-	return Mesher->GenerateMeshCPU(MeshRequest, OutMeshData);
 }
