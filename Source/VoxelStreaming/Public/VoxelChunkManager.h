@@ -20,6 +20,7 @@
 #include "VoxelSeamRegistry.h"
 #include "VoxelSeamTransitionHolds.h"
 #include "VoxelLODEvalSchedule.h"
+#include "VoxelFarOcean.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -34,6 +35,8 @@ class UVoxelScatterManager;
 class UVoxelWaterPropagation;
 class FVoxelSeamRegistry;
 class UBoxComponent;
+class UProceduralMeshComponent;
+struct FIslandBowlParams;
 
 /**
  * Internal chunk state tracking.
@@ -454,6 +457,53 @@ public:
 	/** Turn the edge walls' collision on or off (voxel.World.Boundary). The walls stay; only their collision changes. */
 	void SetWorldBoundaryCollisionEnabled(bool bEnabled);
 
+	// ==================== Far Ocean (WM-E1) ====================
+
+	/**
+	 * Whether this world draws a far ocean: the sea and the seabed past what is streamed, out to
+	 * UVoxelWorldConfiguration::IslandFarOceanDistance past the edge (islands with bIslandFarOcean; see FVoxelFarOcean).
+	 *
+	 * @return True when the far ocean's meshes exist (they may be hidden by voxel.World.FarOcean 0)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	bool HasFarOcean() const { return FarOceanStatic != nullptr; }
+
+	/**
+	 * Number of chunk columns the far ocean leaves open to the streaming now (columns holding loaded chunks or a water
+	 * tile); every other grid column is covered by the far ocean's water.
+	 *
+	 * @return Open column count
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	int32 GetFarOceanOpenColumnCount() const { return FarOceanOpenColumns.Num(); }
+
+	/** Show or hide the far ocean (voxel.World.FarOcean). */
+	void SetFarOceanVisible(bool bVisible);
+
+	/** One-line summary of the far ocean for logs (voxel.World.FarOceanStats). */
+	FString GetFarOceanDebugString() const;
+
+	/**
+	 * The far ocean's grid outside its window (rebuilt when the window moves): section 0 the water, 1 the floor under it,
+	 * 2 the water's underside (null without one).
+	 */
+	UProceduralMeshComponent* GetFarOceanGridComponent() const { return FarOceanGrid; }
+
+	/** The far ocean's grid inside its window around the open columns (rebuilt when they change): sections as the grid's. */
+	UProceduralMeshComponent* GetFarOceanWindowComponent() const { return FarOceanWindow; }
+
+	/** The window's columns (Min inclusive, Max exclusive): the open columns' bounds plus a margin when it last moved. */
+	const FIntRect& GetFarOceanWindowColumns() const { return FarOceanWindowColumns; }
+
+	/** The far ocean's static meshes: section 0 the seabed, 1 the open-sea water, 2 its underside (null without one). */
+	UProceduralMeshComponent* GetFarOceanStaticComponent() const { return FarOceanStatic; }
+
+	/** The settings the far ocean was built with. */
+	const FVoxelFarOceanSettings& GetFarOceanSettings() const { return FarOceanSettings; }
+
+	/** The columns the far ocean leaves open (see GetFarOceanOpenColumnCount). */
+	const TSet<FIntPoint>& GetFarOceanOpenColumns() const { return FarOceanOpenColumns; }
+
 	// ==================== Configuration Access ====================
 
 	/**
@@ -648,6 +698,10 @@ public:
 		// voxel.FarCompression.Async 0 it also holds the encodes themselves.
 		float FarCompressMs = 0.0f;
 		int32 FarCompressDispatchCount = 0; // fresh encodes started (async) or run (sync) this tick
+
+		// Far ocean (WM-E1): finding the open columns and, when they changed, rebuilding the grid water
+		float FarOceanMs = 0.0f;
+		int32 FarOceanRebuildCount = 0;     // grid water rebuilds this tick (0 or 1)
 		int32 FarCompressApplyCount = 0;    // finished async encodes installed this tick
 
 		// Render-submit breakdown (RenderSubmitMs = mesh drain + unload + water tiles; flush is separate)
@@ -1583,6 +1637,64 @@ private:
 
 	/** Destroy the edge walls. */
 	void DestroyWorldBoundary();
+
+	// ==================== Far Ocean (WM-E1) ====================
+
+	/**
+	 * The far ocean's grid water outside the window, the frame: rebuilt only when the window moves (owned by this
+	 * component's actor). Rebuilding the whole grid on every change cost about 1.3 ms on island M and grew with the island.
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UProceduralMeshComponent> FarOceanGrid;
+
+	/** The far ocean's grid water inside the window around the open columns: rebuilt whenever they change */
+	UPROPERTY(Transient)
+	TObjectPtr<UProceduralMeshComponent> FarOceanWindow;
+
+	/** The window's columns (Min inclusive, Max exclusive); empty until a column opens */
+	FIntRect FarOceanWindowColumns;
+
+	/** Columns of margin the window keeps around the open columns' bounds when it moves */
+	static constexpr int32 FarOceanWindowMarginColumns = 8;
+
+	/** The far ocean's static meshes: the seabed (section 0, terrain material) and the open sea (section 1, water) */
+	UPROPERTY(Transient)
+	TObjectPtr<UProceduralMeshComponent> FarOceanStatic;
+
+	/** What the far ocean was built with */
+	FVoxelFarOceanSettings FarOceanSettings;
+
+	/** Columns the grid water leaves open: they hold a chunk with voxel data or a water tile */
+	TSet<FIntPoint> FarOceanOpenColumns;
+
+	/** Grid water quads after the last rebuild (frame and window), and rebuilds this session (window; frame) */
+	int32 FarOceanFrameQuads = 0;
+	int32 FarOceanGridQuads = 0;
+	int32 FarOceanRebuilds = 0;
+	int32 FarOceanFrameRebuilds = 0;
+
+	/** Whether the water's undersides (sections 2) are shown: only while the viewer is under the water plane */
+	bool bFarOceanUndersideShown = false;
+
+	/** Show the water's undersides when the viewer is under the water plane, hide them when it is not. */
+	void UpdateFarOceanUnderside(const FVector& ViewerPosition);
+
+	/** Build the far ocean from the world mode's bounds and the island's seabed (game worlds, islands, bIslandFarOcean). */
+	void RebuildFarOcean();
+
+	/** Destroy the far ocean's components. */
+	void DestroyFarOcean();
+
+	/**
+	 * Find the open columns and rebuild the grid water when they changed: the window always, the frame only when the
+	 * open columns left the window (which then moves around them).
+	 * @param bForce Rebuild both even when nothing changed
+	 * @return True if the grid water was rebuilt
+	 */
+	bool UpdateFarOceanGrid(bool bForce);
+
+	/** The voxel material generation gives the seabed beyond the edge (the most common one around it). */
+	uint8 ResolveFarSeabedMaterial(const FIslandBowlParams& Island) const;
 
 	// ==================== 2D Water Tile State ====================
 

@@ -64,6 +64,7 @@ public:
 	// Material Management
 	virtual void SetMaterial(UMaterialInterface* Material) override;
 	virtual UMaterialInterface* GetMaterial() const override;
+	virtual UMaterialInterface* GetSurfaceMaterial() const override;
 	virtual void UpdateMaterialParameters() override;
 	virtual void SetWaterMaterial(UMaterialInterface* Material) override;
 	virtual void SetMaterialAtlas(UVoxelMaterialAtlas* Atlas) override;

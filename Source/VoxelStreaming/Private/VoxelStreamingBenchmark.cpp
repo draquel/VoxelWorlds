@@ -348,6 +348,8 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.FarCompMs = T.FarCompressMs;
 	S.FarCompDispatchN = T.FarCompressDispatchCount;
 	S.FarCompApplyN = T.FarCompressApplyCount;
+	S.FarOceanMs = T.FarOceanMs;
+	S.FarOceanRebuildN = T.FarOceanRebuildCount;
 	S.LODCand = T.LODEvalCandidates;
 	S.LODQueued = T.LODEvalQueued;
 	ChunkManager->GetBenchLODBacklog(S.LODStale, S.LODStaleNear);
@@ -594,6 +596,10 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 			Int(TEXT("islandFalloffType"), Cfg->IslandFalloffType);
 			Fields.Add(FString::Printf(TEXT("    \"islandCenter\": [%.1f, %.1f]"), Cfg->IslandCenterX, Cfg->IslandCenterY));
 			Num(TEXT("islandEdgeHeight"), Cfg->IslandEdgeHeight);
+			Num(TEXT("islandSeabedDepth"), Cfg->IslandSeabedDepth);
+			Num(TEXT("islandSeabedSlopeWidth"), Cfg->IslandSeabedSlopeWidth);
+			Bool(TEXT("islandFarOcean"), Cfg->bIslandFarOcean && CVarInt(TEXT("voxel.World.FarOcean")) != 0);
+			Bool(TEXT("islandFarOceanBuilt"), ChunkManager->HasFarOcean());
 		}
 		else if (Cfg->WorldMode == EWorldMode::SphericalPlanet)
 		{
@@ -640,10 +646,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
@@ -656,7 +662,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.VoxelMB, S.EditMB, S.RendCPUMB, S.RendGPUMB, S.CollMB, S.ScatMB, S.ProcessMB,
 			S.ResidentN, S.UniformN, S.CompressedN, S.EmptyN,
 			S.FarCompMs, S.FarCompDispatchN, S.FarCompApplyN,
-			S.LODCand, S.LODQueued, S.LODStale, S.LODStaleNear, S.LODUpdateMs);
+			S.LODCand, S.LODQueued, S.LODStale, S.LODStaleNear, S.LODUpdateMs, S.FarOceanMs, S.FarOceanRebuildN);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 
@@ -664,7 +670,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 	int32 PeakGen = 0, PeakMesh = 0, PeakUnload = 0, MaxLoaded = 0;
 	float PeakVoxelMB = 0.0f, PeakRendGPUMB = 0.0f, PeakRendCPUMB = 0.0f, PeakCollMB = 0.0f, PeakScatMB = 0.0f, PeakProcessMB = 0.0f;
 	float PeakVoxelTotalMB = 0.0f;
-	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr, LODStaleArr, LODStaleNearArr, LODUpdateMsArr, MeshMsArr, SeamMsArr;
+	TArray<float> FrameMsArr, TotalMsArr, FarCompMsArr, LODStaleArr, LODStaleNearArr, LODUpdateMsArr, MeshMsArr, SeamMsArr, FarOceanMsArr;
+	int64 FarOceanRebuilds = 0;
 	int32 LODEvalFrames = 0;
 	// Chunk mesh jobs launched over the whole run (every phase).
 	int64 MeshJobsLaunched = 0;
@@ -691,6 +698,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 		LODUpdateMsArr.Add(S.LODUpdateMs);
 		MeshMsArr.Add(S.MeshMs);
 		SeamMsArr.Add(S.SeamMs);
+		FarOceanMsArr.Add(S.FarOceanMs);
+		FarOceanRebuilds += S.FarOceanRebuildN;
 		LODEvalFrames += S.LODCand >= 0 ? 1 : 0;
 	}
 	auto Mean = [](const TArray<float>& Values)
@@ -744,6 +753,11 @@ void FVoxelStreamingBenchmark::WriteReport()
 	Json += FString::Printf(TEXT("  \"farCompressEncodes\": %lld,\n"), FarCompEncodes);
 	Json += FString::Printf(TEXT("  \"farCompressInstalled\": %lld,\n"), FarCompInstalled);
 	Json += FString::Printf(TEXT("  \"farCompressStale\": %lld,\n"), FarCompStale);
+	// Far ocean (WM-E1, a subset of totalMs): open-column scan and grid water rebuilds over the traverse.
+	Json += FString::Printf(TEXT("  \"farOceanMsP50\": %.3f,\n"), Percentile(FarOceanMsArr, 0.50f));
+	Json += FString::Printf(TEXT("  \"farOceanMsP95\": %.3f,\n"), Percentile(FarOceanMsArr, 0.95f));
+	Json += FString::Printf(TEXT("  \"farOceanMsMax\": %.3f,\n"), Percentile(FarOceanMsArr, 1.0f));
+	Json += FString::Printf(TEXT("  \"farOceanRebuilds\": %lld,\n"), FarOceanRebuilds);
 	// Meshing and seam sections of totalMs over the traverse, and the run's chunk-mesh and seam jobs (M5: a
 	// cubic world moved its boundary work from chunk re-meshes to seam jobs).
 	Json += FString::Printf(TEXT("  \"meshMsP95\": %.3f,\n"), Percentile(MeshMsArr, 0.95f));

@@ -40,6 +40,7 @@ public class VoxelStreaming : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"ProceduralMeshComponent", // the far ocean's meshes (WM-E1)
 			}
 		);
 

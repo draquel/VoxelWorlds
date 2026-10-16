@@ -117,6 +117,7 @@ public:
 	virtual UMaterialInterface* GetMaterial() const override;
 	virtual void UpdateMaterialParameters() override;
 	virtual void SetWaterMaterial(UMaterialInterface* Material) override;
+	virtual UMaterialInterface* GetSurfaceMaterial() const override;
 	virtual void UpdateWaterTileMesh(
 		const FIntVector2& TileCoord,
 		const FChunkMeshData& WaterMeshData) override;
