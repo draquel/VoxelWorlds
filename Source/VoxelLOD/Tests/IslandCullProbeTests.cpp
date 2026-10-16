@@ -53,6 +53,7 @@ namespace IslandCullProbe
 		int32 CulledWithLand = 0;    // cull drops a column that holds island terrain: missing terrain
 		int32 KeptWithoutLand = 0;   // cull keeps a column generation leaves as the outer floor
 		float MaxMissingDistance = 0.0f; // farthest-in culled land column, distance from the generation centre
+		int32 KeptOutsideFootprint = 0;  // kept columns whose box does not touch the footprint at all (WM-E1: none)
 		FVector2D GenerationCentre = FVector2D::ZeroVector; // where generation centres the island
 	};
 
@@ -105,6 +106,13 @@ namespace IslandCullProbe
 						(Island.IslandRadius + Island.FalloffWidth) - FVector2D::Distance(C, GenCentre));
 				}
 				if (!bLand && !bCulled) { ++Counts.KeptWithoutLand; }
+				// The exact test: the column's nearest point to the island centre lies inside R + F.
+				const FVector2D Nearest(FMath::Clamp(GenCentre.X, Min.X, Min.X + ChunkWorldSize),
+					FMath::Clamp(GenCentre.Y, Min.Y, Min.Y + ChunkWorldSize));
+				if (!bCulled && !FIslandBowlWorldMode::IsWithinIslandBounds(Nearest.X, Nearest.Y, Island))
+				{
+					++Counts.KeptOutsideFootprint;
+				}
 			}
 		}
 		return Counts;
@@ -125,6 +133,10 @@ bool FIslandCullCentreProbeTest::RunTest(const FString& Parameters)
 		AddInfo(FString::Printf(TEXT("PROBE origin 0: kept with land %d, culled with land %d, kept without land %d"),
 			Counts.KeptWithLand, Counts.CulledWithLand, Counts.KeptWithoutLand));
 		TestEqual(TEXT("WorldOrigin 0: the cull never drops a column that holds island terrain"), Counts.CulledWithLand, 0);
+		// WM-E1: only columns that touch the footprint stream (the ring out to a chunk diagonal past R + F is gone; the
+		// far ocean draws the sea there). Columns that touch it without a corner or the centre inside count as
+		// "kept without land" above.
+		TestEqual(TEXT("WorldOrigin 0: no column wholly outside R + F is kept"), Counts.KeptOutsideFootprint, 0);
 	}
 
 	// The demo's origin with the offset Review_Island_M_DemoOrigin uses: (-12345, -54321), so WorldOrigin + offset is
@@ -150,6 +162,7 @@ bool FIslandCullCentreProbeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Offset island: generation centres the island on WorldOrigin + offset"),
 			Counts.GenerationCentre.Equals(FVector2D(120000.0, 20000.0), 1.0));
 		TestEqual(TEXT("Offset island: the cull never drops a column that holds island terrain"), Counts.CulledWithLand, 0);
+		TestEqual(TEXT("Offset island: no column wholly outside R + F is kept"), Counts.KeptOutsideFootprint, 0);
 	}
 
 	return true;
