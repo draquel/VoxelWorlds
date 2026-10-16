@@ -16,8 +16,8 @@
 // layer 0 lost the ground below it (G13) and islands kept every layer of every column (no slab, KI5). Now every column
 // streams its own surface slab at every distance (the world mode's surface ± 1.5 chunks, up to the water plane), plus
 // the viewer's layer ± 2 in the columns near the viewer; the horizon is horizontal, so altitude never removes the
-// ground. LOD distance is 3D in every mode (islands were 2D, KI13). §13.11's fix (absolute layers, the viewer's layer
-// added once) still shapes the planet's viewer-relative window.
+// ground. LOD distance is 3D in every mode (islands were 2D, KI13). The planet's window is its shell crossing
+// (PlanetShellWindowTests.cpp, spherical SP-C1).
 // ---------------------------------------------------------------------------
 
 namespace VerticalWindowTestHelpers
@@ -27,8 +27,6 @@ namespace VerticalWindowTestHelpers
 	{
 	public:
 		using FDistanceBandLODStrategy::GetColumnWindow;
-		using FDistanceBandLODStrategy::MinVerticalChunks;
-		using FDistanceBandLODStrategy::MaxVerticalChunks;
 		using FDistanceBandLODStrategy::TerrainMinHeight;
 		using FDistanceBandLODStrategy::TerrainMaxHeight;
 	};
@@ -264,8 +262,7 @@ bool FLODVerticalWindowKeepTest::RunTest(const FString& Parameters)
 }
 
 /**
- * The horizon is horizontal in heightmap worlds and 3D on a planet, and the planet keeps its viewer-relative window
- * (absolute layers, the viewer's layer added once, §13.11).
+ * The horizon is horizontal in heightmap worlds and 3D on a planet.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODHorizonDistanceTest,
 	"VoxelWorlds.LOD.VerticalWindow.HorizonDistance",
@@ -290,15 +287,6 @@ bool FLODHorizonDistanceTest::RunTest(const FString& Parameters)
 	Strategy.Initialize(Planet);
 	TestEqual(TEXT("Planet: horizon distance is 3D"), Strategy.GetHorizonDistance(Chunk, Viewer),
 		static_cast<float>(FVector::Dist(Chunk, Viewer)), 0.5f);
-
-	for (const int32 Layer : { -3, 0, 5 })
-	{
-		const FLODQueryContext Context = MakeContext(EWorldMode::SphericalPlanet, Layer);
-		Strategy.Update(Context, 1.0f / 60.0f);
-		const FProbeStrategy::FColumnWindow Window = Strategy.GetColumnWindow(0, 0, Context, FProbeStrategy::EWindowUse::Load);
-		TestEqual(*FString::Printf(TEXT("Planet, viewer on layer %d: lowest layer"), Layer), Window.SlabMinZ, Layer + Strategy.MinVerticalChunks);
-		TestEqual(*FString::Printf(TEXT("Planet, viewer on layer %d: highest layer"), Layer), Window.SlabMaxZ, Layer + Strategy.MaxVerticalChunks);
-	}
 	return true;
 }
 

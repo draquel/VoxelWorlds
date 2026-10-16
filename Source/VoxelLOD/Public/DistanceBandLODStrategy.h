@@ -145,9 +145,10 @@ public:
 
 	/**
 	 * One column's vertical window, as absolute chunk layers (a range is empty when Min > Max). Heightmap worlds (D8):
-	 * the column's surface slab, plus the viewer's layer ± NearWindowLayers in a column near the viewer; both clipped to
-	 * the terrain's height bounds. Planet: the viewer's layer + MinVerticalChunks..MaxVerticalChunks (until Phase 1
-	 * gives it a shell around the surface, SP-C1).
+	 * the column's surface slab (Slab*), plus the viewer's layer ± NearWindowLayers in a column near the viewer (Near*);
+	 * both clipped to the terrain's height bounds. Planet (SP-C1): the column's crossings of the terrain shell
+	 * (GetPlanetShellWindow), the one above the planet centre in Slab* and the one below in Near* (or one range when
+	 * they meet), clipped to the view distance.
 	 */
 	struct FColumnWindow
 	{
@@ -227,6 +228,18 @@ protected:
 	 * @return The column's window, absolute layers
 	 */
 	FColumnWindow GetColumnWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, EWindowUse Use) const;
+
+	/**
+	 * A planet column's window (SP-C1): the layers whose chunks meet the shell from ShellWindowInnerRadius to
+	 * ShellWindowOuterRadius over the column's footprint, within the view distance of the viewer vertically. Exact for
+	 * the footprint: its nearest and farthest points from the planet's axis bound the crossing, so the window covers the
+	 * shell at every latitude (the old viewer-relative box, capped at 16 layers, cut the equator short).
+	 * @param ChunkX Column X, chunk coordinates
+	 * @param ChunkY Column Y, chunk coordinates
+	 * @param Context Query context (viewer position, world origin)
+	 * @param OutWindow Receives the crossings: above the centre in Slab*, below it in Near* (or one range in Slab*)
+	 */
+	void GetPlanetShellWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, FColumnWindow& OutWindow) const;
 
 	/**
 	 * The chunk layers whose chunks overlap the world-Z interval [Lo, Hi] (touching counts).
@@ -324,13 +337,27 @@ protected:
 	) const;
 
 	/**
-	 * Check if chunk should be culled for Spherical Planet mode (beyond horizon).
+	 * Check if chunk should be culled for Spherical Planet mode: wholly inside the shell window's inner radius or outside
+	 * its outer one, or past the horizon (GetPlanetHorizonDistance, SP-C2).
 	 * Returns true if chunk should be CULLED (not rendered).
 	 */
 	bool ShouldCullBeyondHorizon(
 		const FIntVector& ChunkCoord,
 		const FLODQueryContext& Context
 	) const;
+
+public:
+	/**
+	 * How far a planet viewer can see terrain (SP-C2): sqrt(2Rh + h^2) + sqrt(2RH + H^2), the viewer's tangent distance to
+	 * the datum sphere plus a peak's, so mountains past the viewer's own horizon still load.
+	 * @param PlanetRadius Datum radius R
+	 * @param ViewerAltitude Viewer height above the datum h (clamped at 0)
+	 * @param MaxTerrainHeight The terrain's highest point above the datum H (the shell's top)
+	 * @return Distance (uu) past which no terrain shows
+	 */
+	static double GetPlanetHorizonDistance(double PlanetRadius, double ViewerAltitude, double MaxTerrainHeight);
+
+protected:
 
 protected:
 	// ==================== Configuration State ====================
@@ -405,13 +432,6 @@ protected:
 
 	/** Maximum view distance for chunk loading (from Configuration->ViewDistance) */
 	float MaxViewDistance = 0.0f;
-
-	/**
-	 * SphericalPlanet only: the vertical candidate window, in chunk layers relative to the viewer's layer (set in
-	 * Initialize). Heightmap worlds take theirs from the terrain (GetColumnWindow, D8).
-	 */
-	int32 MinVerticalChunks = -2;
-	int32 MaxVerticalChunks = 4;
 
 	/** See GetNearWindowRadius. Set in Initialize from the first LOD band; 0 without bands. */
 	float NearWindowRadius = 0.0f;
@@ -500,6 +520,16 @@ protected:
 
 	/** Planet centre in world space (WorldOrigin) */
 	FVector PlanetCenter = FVector::ZeroVector;
+
+	/** The shell window's radii (SP-C1): the terrain shell widened by ShellSlackChunks on both sides. */
+	double ShellWindowInnerRadius = 0.0;
+	double ShellWindowOuterRadius = 0.0;
+
+	/**
+	 * Slack around the terrain shell in chunk widths: a chunk this close to the shell loads, so a seam job beside a peak
+	 * or valley at the shell's edge has its neighbour's voxels.
+	 */
+	static constexpr double ShellSlackChunks = 0.5;
 
 	// ==================== Runtime State ====================
 
