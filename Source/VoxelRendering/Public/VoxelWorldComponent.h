@@ -221,6 +221,15 @@ public:
 	/** Owners with at least one seam bucket, from the game-thread mirror of the proxy's seam map. */
 	void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const;
 
+	/**
+	 * Report (once) that a recreated scene proxy dropped the geometry the old one held. The proxy keeps no
+	 * copy of chunk meshes, seam buckets or water tiles, so the owner has to send them again. Game thread.
+	 *
+	 * @param OutChunks Receives the chunks that had a mesh (reset first)
+	 * @return True if a proxy was recreated with geometry in it since the last call
+	 */
+	bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks);
+
 	// ==================== Coordinated LOD Transitions (R24) ====================
 
 	/**
@@ -546,6 +555,12 @@ private:
 
 	/** Game thread chunk tracking */
 	TMap<FIntVector, FChunkInfo> ChunkInfoMap;
+
+	/**
+	 * Set by CreateSceneProxy when it replaces a proxy that held geometry (see ConsumeLostRenderData).
+	 * Guarded by ChunkInfoLock: CreateSceneProxy can run off the game thread during concurrent render-state creation.
+	 */
+	bool bRenderDataLost = false;
 
 	/**
 	 * Game-thread mirror of the seam buckets submitted to the proxy: owner -> bitmask of live slots.

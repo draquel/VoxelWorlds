@@ -978,6 +978,13 @@ protected:
 	 */
 	void ProcessDirtyWaterTiles(int32 MaxTilesPerFrame);
 
+	/**
+	 * The renderer lost its geometry (a recreated scene proxy starts empty): re-mesh every chunk whose mesh it
+	 * held, and send every seam bucket and water tile again. Each chunk is meshed once on the seam path, so
+	 * nothing else would ever replace a lost mesh. Called at the start of each tick.
+	 */
+	void RecoverLostRenderData();
+
 	// ==================== Queue Management ====================
 
 	/**

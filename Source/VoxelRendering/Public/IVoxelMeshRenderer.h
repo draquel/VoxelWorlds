@@ -340,6 +340,21 @@ public:
 	}
 
 	/**
+	 * Report (once) that the renderer lost the geometry it had been given, so the caller can send it again.
+	 * A renderer whose GPU data lives in a scene proxy loses every chunk mesh, seam bucket and water tile
+	 * when the engine recreates that proxy (a material or render-state change): the new proxy starts empty.
+	 * Game thread; the flag is cleared by the call.
+	 *
+	 * @param OutChunks Receives the chunks that had a mesh (reset first)
+	 * @return True if geometry was lost since the last call
+	 */
+	virtual bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
+	{
+		OutChunks.Reset(); // Default: the renderer keeps its geometry
+		return false;
+	}
+
+	/**
 	 * Set material atlas for texture lookup.
 	 *
 	 * The material atlas defines how MaterialIDs map to atlas positions

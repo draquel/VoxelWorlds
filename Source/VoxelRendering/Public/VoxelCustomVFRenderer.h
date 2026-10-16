@@ -91,6 +91,7 @@ public:
 	virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis) override;
 	virtual void ClearAllSeamMeshes() override;
 	virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override;
+	virtual bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks) override;
 
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;

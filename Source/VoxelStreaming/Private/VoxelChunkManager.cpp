@@ -391,6 +391,8 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		}
 	}
 
+	RecoverLostRenderData();
+
 	const double TickStartTime = FPlatformTime::Seconds();
 	FVoxelTimingStats Timing;
 
@@ -5111,6 +5113,47 @@ void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoor
 			DirtyWaterTileSet.Add(TileCoord);
 		}
 	}
+}
+
+void UVoxelChunkManager::RecoverLostRenderData()
+{
+	TArray<FIntVector> LostChunks;
+	if (!MeshRenderer || !MeshRenderer->ConsumeLostRenderData(LostChunks))
+	{
+		return;
+	}
+
+	// Chunks still in the pipeline submit to the new proxy on their own; a Loaded chunk's mesh is the one lost.
+	int32 Remeshed = 0;
+	for (const FIntVector& Coord : LostChunks)
+	{
+		if (GetChunkState(Coord) == EChunkState::Loaded)
+		{
+			MarkChunkDirty(Coord);
+			++Remeshed;
+		}
+	}
+
+	// The merged seam buckets are rebuilt from the slots kept here; no seam job has to run again.
+	TArray<FIntVector> SeamOwners;
+	SeamOwnerSlots.GetKeys(SeamOwners);
+	for (const FIntVector& Owner : SeamOwners)
+	{
+		SubmitSeamOwnerBucket(Owner);
+	}
+
+	for (TPair<FIntVector2, FWaterTileState>& Tile : WaterTiles)
+	{
+		Tile.Value.bDirty = true;
+		if (!DirtyWaterTileSet.Contains(Tile.Key))
+		{
+			DirtyWaterTileQueue.Add(Tile.Key);
+			DirtyWaterTileSet.Add(Tile.Key);
+		}
+	}
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("Renderer lost its geometry (scene proxy recreated): re-meshing %d chunk(s), re-sending %d seam bucket(s) and %d water tile(s)"),
+		Remeshed, SeamOwners.Num(), WaterTiles.Num());
 }
 
 void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)

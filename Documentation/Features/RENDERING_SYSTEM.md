@@ -153,6 +153,11 @@ AVoxelWorldTestActor
 - Performs frustum culling via ViewProjectionMatrix
 - Issues draw calls in `GetDynamicMeshElements()`
 - Handles game→render thread chunk buffer updates
+- Holds the only copy of the GPU geometry: the engine recreates the proxy on material and render-state changes
+  (also in the first second of play, when the scatter system compiles its runtime billboard material), and a new
+  proxy starts empty. `CreateSceneProxy` flags it, `IVoxelMeshRenderer::ConsumeLostRenderData` reports it once, and the
+  chunk manager re-meshes the chunks that had a mesh and re-sends every seam bucket and water tile
+  (`UVoxelChunkManager::RecoverLostRenderData`). Test `Streaming.Cubic.RendererProxyRecreated`
 
 **FVoxelLocalVertex** (`VoxelRendering/Public/VoxelLocalVertexFactory.h`)
 - 32-byte vertex format compatible with FLocalVertexFactory
