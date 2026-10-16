@@ -3,12 +3,9 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUCubicMesher.h"
-#include "VoxelGPUCubicMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
-#include "RenderingThread.h"
-#include "RHI.h"             // GUsingNullRHI: GPU cubic tests skip under -nullrhi
 
 // ==================== Helper Functions ====================
 
@@ -306,223 +303,6 @@ bool FCubicMeshingFullChunkTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// ==================== GPU Mesher Tests ====================
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingGPUAsyncTest, "VoxelWorlds.Meshing.Cubic.GPUAsync",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCubicMeshingGPUAsyncTest::RunTest(const FString& Parameters)
-{
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU cubic tests require a real RHI (run without -nullrhi)")); return true; }
-
-	FVoxelGPUCubicMesher Mesher;
-	Mesher.Initialize();
-
-	TestTrue(TEXT("GPU Mesher should be initialized"), Mesher.IsInitialized());
-
-	// Create single voxel request
-	FVoxelMeshingRequest Request = CreateSingleVoxelRequest(8);
-
-	// Track completion
-	volatile bool bCompleted = false;
-	volatile bool bSucceeded = false;
-	FVoxelMeshingHandle ResultHandle;
-
-	// Generate mesh asynchronously
-	FVoxelMeshingHandle Handle = Mesher.GenerateMeshAsync(Request,
-		FOnVoxelMeshingComplete::CreateLambda([&bCompleted, &bSucceeded, &ResultHandle](FVoxelMeshingHandle InHandle, bool bSuccess)
-		{
-			ResultHandle = InHandle;
-			bSucceeded = bSuccess;
-			bCompleted = true;
-		}));
-
-	TestTrue(TEXT("Handle should be valid"), Handle.IsValid());
-
-	// Wait for completion (with timeout)
-	double StartTime = FPlatformTime::Seconds();
-	double TimeoutSeconds = 5.0;
-
-	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < TimeoutSeconds)
-	{
-		FPlatformProcess::Sleep(0.01f);
-		FlushRenderingCommands();
-	}
-
-	TestTrue(TEXT("GPU meshing should complete within timeout"), bCompleted);
-	TestTrue(TEXT("GPU meshing should succeed"), bSucceeded);
-
-	if (bCompleted && bSucceeded)
-	{
-		// Get buffer counts
-		uint32 VertexCount, IndexCount;
-		bool bGotCounts = Mesher.GetBufferCounts(Handle, VertexCount, IndexCount);
-		TestTrue(TEXT("Should be able to get buffer counts"), bGotCounts);
-
-		// Single voxel = 24 vertices, 36 indices
-		TestEqual(TEXT("GPU single voxel should produce 24 vertices"), VertexCount, 24u);
-		TestEqual(TEXT("GPU single voxel should produce 36 indices"), IndexCount, 36u);
-
-		// Test vertex buffer access
-		FRHIBuffer* VertexBuffer = Mesher.GetVertexBuffer(Handle);
-		TestNotNull(TEXT("Should be able to get vertex buffer"), VertexBuffer);
-
-		FRHIBuffer* IndexBuffer = Mesher.GetIndexBuffer(Handle);
-		TestNotNull(TEXT("Should be able to get index buffer"), IndexBuffer);
-	}
-
-	Mesher.ReleaseHandle(Handle);
-	Mesher.Shutdown();
-
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingGPUReadbackTest, "VoxelWorlds.Meshing.Cubic.GPUReadback",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCubicMeshingGPUReadbackTest::RunTest(const FString& Parameters)
-{
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU cubic tests require a real RHI (run without -nullrhi)")); return true; }
-
-	FVoxelGPUCubicMesher Mesher;
-	Mesher.Initialize();
-
-	// Create single voxel request
-	FVoxelMeshingRequest Request = CreateSingleVoxelRequest(8);
-
-	// Generate mesh asynchronously
-	volatile bool bCompleted = false;
-	FVoxelMeshingHandle Handle = Mesher.GenerateMeshAsync(Request,
-		FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool)
-		{
-			bCompleted = true;
-		}));
-
-	// Wait for completion
-	double StartTime = FPlatformTime::Seconds();
-	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 5.0)
-	{
-		FPlatformProcess::Sleep(0.01f);
-		FlushRenderingCommands();
-	}
-
-	TestTrue(TEXT("GPU meshing should complete"), bCompleted);
-
-	// Readback to CPU
-	FChunkMeshData MeshData;
-	bool bReadbackSuccess = Mesher.ReadbackToCPU(Handle, MeshData);
-
-	TestTrue(TEXT("Readback should succeed"), bReadbackSuccess);
-	TestEqual(TEXT("Readback should have 24 vertices"), MeshData.GetVertexCount(), 24);
-	TestEqual(TEXT("Readback should have 36 indices"), MeshData.Indices.Num(), 36);
-
-	// Verify data integrity
-	TestEqual(TEXT("Positions and normals should match"), MeshData.Positions.Num(), MeshData.Normals.Num());
-	TestEqual(TEXT("Positions and UVs should match"), MeshData.Positions.Num(), MeshData.UVs.Num());
-
-	Mesher.ReleaseHandle(Handle);
-	Mesher.Shutdown();
-
-	return true;
-}
-
-// ==================== CPU vs GPU Consistency Test ====================
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingCPUvsGPUTest, "VoxelWorlds.Meshing.Cubic.CPUvsGPU",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCubicMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
-{
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU cubic tests require a real RHI (run without -nullrhi)")); return true; }
-
-	FVoxelCPUCubicMesher CPUMesher;
-	FVoxelGPUCubicMesher GPUMesher;
-
-	CPUMesher.Initialize();
-	GPUMesher.Initialize();
-
-	// Disable greedy meshing on CPU to match GPU output (GPU doesn't use greedy)
-	FVoxelMeshingConfig Config = CPUMesher.GetConfig();
-	Config.bUseGreedyMeshing = false;
-	CPUMesher.SetConfig(Config);
-
-	// Create terrain-like request for comparison
-	FVoxelMeshingRequest Request = CreateTerrainLikeRequest(8);
-
-	// Generate on CPU
-	FChunkMeshData CPUMeshData;
-	FVoxelMeshingStats CPUStats;
-	bool bCPUSuccess = CPUMesher.GenerateMeshCPU(Request, CPUMeshData, CPUStats);
-	TestTrue(TEXT("CPU meshing should succeed"), bCPUSuccess);
-
-	// Generate on GPU
-	volatile bool bCompleted = false;
-	FVoxelMeshingHandle Handle = GPUMesher.GenerateMeshAsync(Request,
-		FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool)
-		{
-			bCompleted = true;
-		}));
-
-	double StartTime = FPlatformTime::Seconds();
-	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 5.0)
-	{
-		FPlatformProcess::Sleep(0.01f);
-		FlushRenderingCommands();
-	}
-	TestTrue(TEXT("GPU meshing should complete"), bCompleted);
-
-	// Readback GPU data
-	FChunkMeshData GPUMeshData;
-	bool bReadbackSuccess = GPUMesher.ReadbackToCPU(Handle, GPUMeshData);
-	TestTrue(TEXT("GPU readback should succeed"), bReadbackSuccess);
-
-	// Compare vertex counts
-	AddInfo(FString::Printf(TEXT("CPU: %d vertices, %d indices"),
-		CPUMeshData.GetVertexCount(), CPUMeshData.Indices.Num()));
-	AddInfo(FString::Printf(TEXT("GPU: %d vertices, %d indices"),
-		GPUMeshData.GetVertexCount(), GPUMeshData.Indices.Num()));
-
-	// Counts should match exactly for deterministic meshing
-	TestEqual(TEXT("Vertex counts should match"), CPUMeshData.GetVertexCount(), GPUMeshData.GetVertexCount());
-	TestEqual(TEXT("Index counts should match"), CPUMeshData.Indices.Num(), GPUMeshData.Indices.Num());
-
-	// Compare vertex positions as SETS (GPU uses atomic counters, so order is non-deterministic)
-	// We check that each GPU vertex exists somewhere in the CPU vertex set
-	if (CPUMeshData.GetVertexCount() == GPUMeshData.GetVertexCount() && CPUMeshData.GetVertexCount() > 0)
-	{
-		int32 MatchCount = 0;
-		const float Tolerance = 0.1f;
-
-		// For each GPU vertex, search for a matching CPU vertex
-		for (int32 GPUIdx = 0; GPUIdx < GPUMeshData.GetVertexCount(); ++GPUIdx)
-		{
-			const FVector3f& GPUPos = GPUMeshData.Positions[GPUIdx];
-
-			for (int32 CPUIdx = 0; CPUIdx < CPUMeshData.GetVertexCount(); ++CPUIdx)
-			{
-				if (GPUPos.Equals(CPUMeshData.Positions[CPUIdx], Tolerance))
-				{
-					MatchCount++;
-					break;  // Found a match, move to next GPU vertex
-				}
-			}
-		}
-
-		float MatchPercent = (float)MatchCount / GPUMeshData.GetVertexCount() * 100.0f;
-		AddInfo(FString::Printf(TEXT("Vertex set match: %.1f%% (%d/%d GPU vertices found in CPU set)"),
-			MatchPercent, MatchCount, GPUMeshData.GetVertexCount()));
-
-		// At least 85% of GPU vertices should exist in the CPU vertex set
-		TestTrue(TEXT("At least 85% of GPU vertices should match CPU vertices"), MatchPercent >= 85.0f);
-	}
-
-	GPUMesher.ReleaseHandle(Handle);
-	CPUMesher.Shutdown();
-	GPUMesher.Shutdown();
-
-	return true;
-}
-
 // ==================== Performance Test ====================
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingPerformanceTest, "VoxelWorlds.Meshing.Cubic.Performance",
@@ -531,10 +311,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingPerformanceTest, "VoxelWorlds.Mesh
 bool FCubicMeshingPerformanceTest::RunTest(const FString& Parameters)
 {
 	FVoxelCPUCubicMesher CPUMesher;
-	FVoxelGPUCubicMesher GPUMesher;
-
 	CPUMesher.Initialize();
-	GPUMesher.Initialize();
 
 	// Create 32^3 terrain request (standard chunk size)
 	FVoxelMeshingRequest Request = CreateTerrainLikeRequest(32);
@@ -555,61 +332,13 @@ bool FCubicMeshingPerformanceTest::RunTest(const FString& Parameters)
 	}
 	double CPUAvgMs = (CPUTotalTime / NumIterations) * 1000.0;
 
-	// Benchmark GPU meshing (including count readback). Needs a real RHI: under -nullrhi the
-	// completion callback never fires.
-	double GPUTotalTime = 0.0;
-	const bool bRunGPU = !GUsingNullRHI;
-	if (!bRunGPU)
-	{
-		AddInfo(TEXT("GPU half skipped: requires a real RHI (run without -nullrhi)"));
-	}
-	for (int32 i = 0; bRunGPU && i < NumIterations; ++i)
-	{
-		Request.ChunkCoord = FIntVector(i + 100, 0, 0);
-
-		volatile bool bCompleted = false;
-		double StartTime = FPlatformTime::Seconds();
-
-		FVoxelMeshingHandle Handle = GPUMesher.GenerateMeshAsync(Request,
-			FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool)
-			{
-				bCompleted = true;
-			}));
-
-		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 5.0)
-		{
-			FPlatformProcess::Sleep(0.001f);
-			FlushRenderingCommands();
-		}
-		if (!bCompleted)
-		{
-			AddError(TEXT("GPU meshing did not complete within 5 s"));
-			GPUMesher.ReleaseHandle(Handle);
-			break;
-		}
-
-		// Read counts to ensure we time the full operation
-		uint32 VertexCount, IndexCount;
-		GPUMesher.GetBufferCounts(Handle, VertexCount, IndexCount);
-
-		GPUTotalTime += FPlatformTime::Seconds() - StartTime;
-		GPUMesher.ReleaseHandle(Handle);
-	}
-	double GPUAvgMs = (GPUTotalTime / NumIterations) * 1000.0;
-
 	AddInfo(FString::Printf(TEXT("32^3 chunk meshing performance:")));
 	AddInfo(FString::Printf(TEXT("  CPU average: %.2f ms"), CPUAvgMs));
-	AddInfo(FString::Printf(TEXT("  GPU average (with count readback): %.2f ms"), GPUAvgMs));
 
-	// Performance targets: CPU < 50ms, GPU < 5ms (meshing is simpler than noise generation)
+	// Performance target: CPU < 50ms
 	TestTrue(TEXT("CPU meshing should complete in < 50ms"), CPUAvgMs < 50.0);
-	if (bRunGPU)
-	{
-		TestTrue(TEXT("GPU meshing should complete in < 5ms"), GPUAvgMs < 5.0);
-	}
 
 	CPUMesher.Shutdown();
-	GPUMesher.Shutdown();
 
 	return true;
 }
@@ -684,6 +413,330 @@ bool FCubicMeshingChunkBoundaryTest::RunTest(const FString& Parameters)
 	// With solid neighbor: each edge voxel has 4 exposed faces (+X also culled)
 	TestTrue(TEXT("Neighbor data should reduce face count"),
 		FacesWithNeighbor < FacesWithoutNeighbor);
+
+	Mesher.Shutdown();
+	return true;
+}
+
+// ==================== Seam ownership (world modes review WM-C1) ====================
+//
+// Streaming meshes a cubic chunk in the Interior domain (every face except those on its six boundary
+// planes, reading nothing outside the chunk) and gives each shared plane to the pair's face seam job,
+// which culls it against both chunks. These tests check the decomposition against meshing the whole
+// region as one chunk: interiors + face seams must reproduce exactly the reference faces inside the
+// region (none missing, none twice), for greedy and simple meshing, with non-occluding leaves.
+
+namespace CubicSeamTestHelpers
+{
+	/** A unit face: (min corner of the unit square in region voxel units, Dir * 256 + MaterialID). */
+	using FUnitFace = FIntVector4;
+
+	/**
+	 * Region voxel content (Size^3): terrain with a sloped heightfield, steps, a tunnel, floating
+	 * blocks and a leaves blob, so faces land on every chunk plane in every direction.
+	 */
+	FVoxelData RegionVoxel(int32 X, int32 Y, int32 Z, int32 Size)
+	{
+		const int32 Height = Size / 2 + ((X * 3 + Y * 5) % 7) - 3 + ((X / 3 + Y / 2) % 2);
+		if (Z <= Height)
+		{
+			// A tunnel along X through the middle, a few voxels under the surface.
+			if (FMath::Abs(Y - Size / 2) <= 1 && Z >= Height - 4 && Z <= Height - 2)
+			{
+				return FVoxelData::Air();
+			}
+			const uint8 Mat = (Z == Height) ? EVoxelMaterial::Grass : ((Z + X) % 5 == 0 ? EVoxelMaterial::Stone : EVoxelMaterial::Dirt);
+			return FVoxelData::Solid(Mat, static_cast<uint8>((X / 4) % 2));
+		}
+		// A leaves blob straddling the region's centre planes, and a few floating blocks.
+		const FIntVector Centre(Size / 2, Size / 2, Size / 2 + 4);
+		if ((FIntVector(X, Y, Z) - Centre).GetAbsMax() <= 2)
+		{
+			return FVoxelData::Solid(EVoxelMaterial::Leaves);
+		}
+		if ((X * 7 + Y * 11 + Z * 13) % 29 == 0 && Z < Size - 1)
+		{
+			return FVoxelData::Solid(EVoxelMaterial::Wood);
+		}
+		return FVoxelData::Air();
+	}
+
+	/** One chunk (N^3) of the region at chunk offset Offset (in chunks). */
+	TArray<FVoxelData> ChunkOf(const FIntVector& Offset, int32 N, int32 RegionSize)
+	{
+		TArray<FVoxelData> Voxels;
+		Voxels.SetNum(N * N * N);
+		for (int32 Z = 0; Z < N; ++Z)
+		for (int32 Y = 0; Y < N; ++Y)
+		for (int32 X = 0; X < N; ++X)
+		{
+			Voxels[X + Y * N + Z * N * N] = RegionVoxel(Offset.X * N + X, Offset.Y * N + Y, Offset.Z * N + Z, RegionSize);
+		}
+		return Voxels;
+	}
+
+	/**
+	 * Split each emitted quad (4 vertices each) into unit faces, shifted by OffsetVoxels, and count them.
+	 * Returns false if a quad is not an axis-aligned rectangle on the voxel grid.
+	 */
+	bool CollectUnitFaces(const FChunkMeshData& Mesh, float VoxelSize, const FIntVector& OffsetVoxels, TMap<FUnitFace, int32>& OutFaces)
+	{
+		if (Mesh.Positions.Num() % 4 != 0)
+		{
+			return false;
+		}
+		for (int32 Base = 0; Base < Mesh.Positions.Num(); Base += 4)
+		{
+			FIntVector Min(INT32_MAX), Max(INT32_MIN);
+			for (int32 i = 0; i < 4; ++i)
+			{
+				const FVector3f& P = Mesh.Positions[Base + i];
+				const FIntVector V(FMath::RoundToInt(P.X / VoxelSize), FMath::RoundToInt(P.Y / VoxelSize), FMath::RoundToInt(P.Z / VoxelSize));
+				Min = FIntVector(FMath::Min(Min.X, V.X), FMath::Min(Min.Y, V.Y), FMath::Min(Min.Z, V.Z));
+				Max = FIntVector(FMath::Max(Max.X, V.X), FMath::Max(Max.Y, V.Y), FMath::Max(Max.Z, V.Z));
+			}
+			const FVector3f& Nrm = Mesh.Normals[Base];
+			const int32 Axis = FMath::Abs(Nrm.X) > 0.5f ? 0 : (FMath::Abs(Nrm.Y) > 0.5f ? 1 : 2);
+			const bool bPositive = Nrm[Axis] > 0.0f;
+			const int32 Dir = Axis * 2 + (bPositive ? 0 : 1);
+			if (Min[Axis] != Max[Axis])
+			{
+				return false;
+			}
+			const int32 U = (Axis + 1) % 3;
+			const int32 V = (Axis + 2) % 3;
+			const int32 Mat = FMath::RoundToInt(Mesh.UV1s[Base].X);
+			for (int32 a = Min[U]; a < Max[U]; ++a)
+			for (int32 b = Min[V]; b < Max[V]; ++b)
+			{
+				FIntVector Cell;
+				Cell[Axis] = Min[Axis];
+				Cell[U] = a;
+				Cell[V] = b;
+				Cell += OffsetVoxels;
+				OutFaces.FindOrAdd(FUnitFace(Cell.X, Cell.Y, Cell.Z, Dir * 256 + Mat))++;
+			}
+		}
+		return true;
+	}
+
+	/** Mesh one chunk in a domain (no neighbour slices). */
+	FChunkMeshData MeshChunk(FVoxelCPUCubicMesher& Mesher, TArray<FVoxelData> Voxels, int32 N, EVoxelMeshCellDomain Domain)
+	{
+		FVoxelMeshingRequest Request;
+		Request.ChunkSize = N;
+		Request.VoxelSize = 100.0f;
+		Request.VoxelData = MoveTemp(Voxels);
+		Request.MeshCellDomain = Domain;
+		FChunkMeshData Mesh;
+		Mesher.GenerateMeshCPU(Request, Mesh);
+		return Mesh;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingInteriorDomainTest, "VoxelWorlds.Meshing.Cubic.InteriorDomain",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCubicMeshingInteriorDomainTest::RunTest(const FString& Parameters)
+{
+	using namespace CubicSeamTestHelpers;
+	FVoxelCPUCubicMesher Mesher;
+	Mesher.Initialize();
+	const int32 N = 8;
+
+	// A solid chunk has only boundary faces: its interior mesh is empty.
+	FChunkMeshData Full = MeshChunk(Mesher, CreateFullChunkRequest(N).VoxelData, N, EVoxelMeshCellDomain::Full);
+	FChunkMeshData Interior = MeshChunk(Mesher, CreateFullChunkRequest(N).VoxelData, N, EVoxelMeshCellDomain::Interior);
+	TestTrue(TEXT("Solid chunk, Full domain: boundary walls"), Full.Positions.Num() > 0);
+	TestEqual(TEXT("Solid chunk, Interior domain: nothing"), Interior.Positions.Num(), 0);
+
+	// Interior = Full minus the faces on the chunk's boundary planes, and it never reads neighbour slices.
+	for (const bool bGreedy : { false, true })
+	{
+		FVoxelMeshingConfig Config = Mesher.GetConfig();
+		Config.bUseGreedyMeshing = bGreedy;
+		Mesher.SetConfig(Config);
+
+		const TArray<FVoxelData> Voxels = ChunkOf(FIntVector(0, 0, 0), N, 2 * N);
+		TMap<FUnitFace, int32> FullFaces, InteriorFaces;
+		TestTrue(TEXT("Full quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Voxels, N, EVoxelMeshCellDomain::Full), 100.0f, FIntVector::ZeroValue, FullFaces));
+		TestTrue(TEXT("Interior quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Voxels, N, EVoxelMeshCellDomain::Interior), 100.0f, FIntVector::ZeroValue, InteriorFaces));
+
+		int32 Expected = 0, Missing = 0, Extra = 0;
+		for (const TPair<FUnitFace, int32>& F : FullFaces)
+		{
+			const int32 Dir = F.Key.W / 256;
+			const int32 Axis = Dir / 2;
+			const int32 Plane = FIntVector(F.Key.X, F.Key.Y, F.Key.Z)[Axis];
+			if (Plane == 0 || Plane == N)
+			{
+				continue; // on a boundary plane: the face seam's
+			}
+			++Expected;
+			Missing += InteriorFaces.Contains(F.Key) ? 0 : 1;
+		}
+		for (const TPair<FUnitFace, int32>& F : InteriorFaces)
+		{
+			Extra += FullFaces.Contains(F.Key) && F.Value == 1 ? 0 : 1;
+		}
+		TestTrue(*FString::Printf(TEXT("Interior has faces to compare (greedy=%d)"), bGreedy), Expected > 0);
+		TestEqual(*FString::Printf(TEXT("Interior misses no off-boundary face (greedy=%d)"), bGreedy), Missing, 0);
+		TestEqual(*FString::Printf(TEXT("Interior adds nothing (greedy=%d)"), bGreedy), Extra, 0);
+
+		// Neighbour slices must not change the interior mesh.
+		FVoxelMeshingRequest WithSlices;
+		WithSlices.ChunkSize = N;
+		WithSlices.VoxelSize = 100.0f;
+		WithSlices.VoxelData = Voxels;
+		WithSlices.MeshCellDomain = EVoxelMeshCellDomain::Interior;
+		WithSlices.NeighborXPos.Init(FVoxelData::Solid(EVoxelMaterial::Stone), N * N);
+		WithSlices.NeighborZPos.Init(FVoxelData::Solid(EVoxelMaterial::Stone), N * N);
+		FChunkMeshData SliceMesh;
+		Mesher.GenerateMeshCPU(WithSlices, SliceMesh);
+		const FChunkMeshData NoSliceMesh = MeshChunk(Mesher, Voxels, N, EVoxelMeshCellDomain::Interior);
+		TestTrue(*FString::Printf(TEXT("Interior ignores neighbour slices (greedy=%d)"), bGreedy),
+			SliceMesh.Positions == NoSliceMesh.Positions && SliceMesh.Indices == NoSliceMesh.Indices && SliceMesh.Colors == NoSliceMesh.Colors);
+	}
+
+	// Edge and corner seams carry no cubic geometry.
+	FChunkMeshData EdgeMesh, CornerMesh;
+	TestTrue(TEXT("Edge seam succeeds"), Mesher.GenerateEdgeSeamMeshCPU(FVoxelEdgeSeamRequest(), EdgeMesh));
+	TestTrue(TEXT("Corner seam succeeds"), Mesher.GenerateCornerSeamMeshCPU(FVoxelCornerSeamRequest(), CornerMesh));
+	TestEqual(TEXT("Edge seam is empty"), EdgeMesh.Positions.Num(), 0);
+	TestEqual(TEXT("Corner seam is empty"), CornerMesh.Positions.Num(), 0);
+
+	Mesher.Shutdown();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubicMeshingSeamClosureTest, "VoxelWorlds.Meshing.Cubic.SeamClosure",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCubicMeshingSeamClosureTest::RunTest(const FString& Parameters)
+{
+	using namespace CubicSeamTestHelpers;
+	FVoxelCPUCubicMesher Mesher;
+	Mesher.Initialize();
+	const int32 N = 8;
+	const int32 R = 2 * N;
+	const float VoxelSize = 100.0f;
+
+	TArray<FVoxelData> Region;
+	Region.SetNum(R * R * R);
+	for (int32 Z = 0; Z < R; ++Z)
+	for (int32 Y = 0; Y < R; ++Y)
+	for (int32 X = 0; X < R; ++X)
+	{
+		Region[X + Y * R + Z * R * R] = RegionVoxel(X, Y, Z, R);
+	}
+
+	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> Chunks;
+	for (int32 k = 0; k < 2; ++k)
+	for (int32 j = 0; j < 2; ++j)
+	for (int32 i = 0; i < 2; ++i)
+	{
+		Chunks.Add(FIntVector(i, j, k), MakeShared<const TArray<FVoxelData>>(ChunkOf(FIntVector(i, j, k), N, R)));
+	}
+
+	for (const bool bGreedy : { false, true })
+	{
+		FVoxelMeshingConfig Config = Mesher.GetConfig();
+		Config.bUseGreedyMeshing = bGreedy;
+		Mesher.SetConfig(Config);
+
+		// Reference: the whole 2x2x2 region meshed as one chunk; keep the faces strictly inside it.
+		TMap<FUnitFace, int32> Reference;
+		TestTrue(TEXT("Reference quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Region, R, EVoxelMeshCellDomain::Full), VoxelSize, FIntVector::ZeroValue, Reference));
+		TSet<FUnitFace> Inside;
+		int32 OnChunkPlanes = 0;
+		for (const TPair<FUnitFace, int32>& F : Reference)
+		{
+			const int32 Axis = (F.Key.W / 256) / 2;
+			const int32 Plane = FIntVector(F.Key.X, F.Key.Y, F.Key.Z)[Axis];
+			if (Plane != 0 && Plane != R)
+			{
+				Inside.Add(F.Key);
+				OnChunkPlanes += (Plane == N) ? 1 : 0;
+			}
+		}
+
+		// Decomposed: 8 interiors + 12 face seams, each moved into the region's frame.
+		TMap<FUnitFace, int32> Decomposed;
+		bool bOnGrid = true;
+		int32 SeamFaces = 0;
+		for (const TPair<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& Chunk : Chunks)
+		{
+			bOnGrid &= CollectUnitFaces(MeshChunk(Mesher, *Chunk.Value, N, EVoxelMeshCellDomain::Interior), VoxelSize, Chunk.Key * N, Decomposed);
+			for (int32 Axis = 0; Axis < 3; ++Axis)
+			{
+				FIntVector BCoord = Chunk.Key;
+				BCoord[Axis] += 1;
+				if (!Chunks.Contains(BCoord))
+				{
+					continue;
+				}
+				FVoxelFaceSeamRequest Seam;
+				Seam.OwnerChunkCoord = Chunk.Key;
+				Seam.Axis = static_cast<uint8>(Axis);
+				Seam.ChunkSize = N;
+				Seam.VoxelSize = VoxelSize;
+				Seam.VoxelDataA = Chunk.Value;
+				Seam.VoxelDataB = Chunks[BCoord];
+				FChunkMeshData SeamMesh;
+				TestTrue(TEXT("Face seam succeeds"), Mesher.GenerateFaceSeamMeshCPU(Seam, SeamMesh));
+				SeamFaces += SeamMesh.Positions.Num() / 4;
+				bOnGrid &= CollectUnitFaces(SeamMesh, VoxelSize, Chunk.Key * N, Decomposed);
+			}
+		}
+		TestTrue(TEXT("Decomposed quads on grid"), bOnGrid);
+
+		int32 Missing = 0, Extra = 0, Twice = 0;
+		for (const FUnitFace& F : Inside)
+		{
+			Missing += Decomposed.Contains(F) ? 0 : 1;
+		}
+		for (const TPair<FUnitFace, int32>& F : Decomposed)
+		{
+			Extra += Inside.Contains(F.Key) ? 0 : 1;
+			Twice += F.Value > 1 ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("greedy=%d: %d unit faces inside the region, %d on the chunk planes, %d seam quads"),
+			bGreedy, Inside.Num(), OnChunkPlanes, SeamFaces));
+		TestTrue(*FString::Printf(TEXT("The chunk planes carry faces to check (greedy=%d)"), bGreedy), OnChunkPlanes > 20 && SeamFaces > 0);
+		TestEqual(*FString::Printf(TEXT("No face missing (greedy=%d)"), bGreedy), Missing, 0);
+		TestEqual(*FString::Printf(TEXT("No extra face (greedy=%d)"), bGreedy), Extra, 0);
+		TestEqual(*FString::Printf(TEXT("No face emitted twice (greedy=%d)"), bGreedy), Twice, 0);
+	}
+
+	// Seam positions are in the owner's frame: the shared plane sits at ChunkSize along the axis.
+	{
+		TArray<FVoxelData> A, B;
+		A.Init(FVoxelData::Air(), N * N * N);
+		B.Init(FVoxelData::Air(), N * N * N);
+		A[(N - 1) + 2 * N + 3 * N * N] = FVoxelData::Solid(EVoxelMaterial::Stone); // touches the +X plane, B side air
+		FVoxelFaceSeamRequest Seam;
+		Seam.Axis = 0;
+		Seam.ChunkSize = N;
+		Seam.VoxelSize = VoxelSize;
+		Seam.VoxelDataA = MakeShared<const TArray<FVoxelData>>(A);
+		Seam.VoxelDataB = MakeShared<const TArray<FVoxelData>>(B);
+		FChunkMeshData SeamMesh;
+		Mesher.GenerateFaceSeamMeshCPU(Seam, SeamMesh);
+		TestEqual(TEXT("One block against air across the plane: one quad"), SeamMesh.Positions.Num(), 4);
+		bool bOnPlane = SeamMesh.Positions.Num() == 4;
+		for (const FVector3f& P : SeamMesh.Positions)
+		{
+			bOnPlane &= FMath::IsNearlyEqual(P.X, N * VoxelSize);
+		}
+		TestTrue(TEXT("The quad lies on the shared plane in the owner's frame"), bOnPlane);
+		TestTrue(TEXT("It faces +X"), SeamMesh.Normals.Num() == 4 && SeamMesh.Normals[0].X > 0.5f);
+
+		// The same block with a solid voxel across the plane is culled; B's face toward A is not emitted.
+		B[0 + 2 * N + 3 * N * N] = FVoxelData::Solid(EVoxelMaterial::Dirt);
+		Seam.VoxelDataB = MakeShared<const TArray<FVoxelData>>(B);
+		Mesher.GenerateFaceSeamMeshCPU(Seam, SeamMesh);
+		TestEqual(TEXT("Solid against solid across the plane: no face"), SeamMesh.Positions.Num(), 0);
+	}
 
 	Mesher.Shutdown();
 	return true;

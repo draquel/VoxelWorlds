@@ -29,7 +29,7 @@
 namespace VoxelMCSeamDetail
 {
 
-// In-plane index layout must match ExtractNeighborEdgeSlices / GetVoxelAt:
+// In-plane index layout must match VoxelNeighborSlices::Extract (VoxelStreaming) / GetVoxelAt:
 // X faces -> [Y + Z*CS], Y faces -> [X + Z*CS], Z faces -> [X + Y*CS].
 static FORCEINLINE int32 PlaneIndex(int32 Axis, int32 X, int32 Y, int32 Z, int32 CS)
 {

@@ -5,15 +5,15 @@
 #include "CoreMinimal.h"
 
 /**
- * Seam ownership + scheduling registry (VoxelStreaming, seam-ownership refactor P0).
+ * Seam ownership + scheduling registry (VoxelStreaming, seam-ownership refactor).
  *
  * Part of the single-owner seam-meshing architecture
- * (Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §2). The end-state decomposes every chunk
- * mesh into an INTERIOR mesh (cells strictly inside the chunk — zero neighbour dependence) plus SEAM
- * meshes, where each physical boundary between chunks is meshed exactly ONCE by a single job that
- * reads both sides' data. This file implements the P0 groundwork: the data structures and scheduler
- * that decide WHICH seam gets meshed, by WHOM, and WHEN — without producing any geometry yet (the
- * seam job is a stub in P0, so there is deliberately no visual or behavioural change).
+ * (Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §2): every chunk mesh is an INTERIOR mesh
+ * (zero neighbour dependence) plus SEAM meshes, where each physical boundary between chunks is meshed
+ * exactly ONCE by a single job that reads both sides' data. This registry decides WHICH seam gets
+ * meshed, by WHOM, and WHEN; UVoxelChunkManager runs the jobs (DrainSeamJobs) with the mode-matched
+ * seam mesher and reports them finished. It serves every meshing mode (cubic since world modes review
+ * M5, which tracks face seams only: SetFaceSeamsOnly).
  *
  * The registry is pure C++ (no UObject/reflection, no RHI, no world access): all of its state is
  * pushed in through the lifecycle hooks below by UVoxelChunkManager, mirroring the exact change
@@ -21,7 +21,6 @@
  * headless and decoupled from the streaming component.
  *
  * @see UVoxelChunkManager (the caller that drives the hooks and the per-tick scheduler)
- * @see FMeshBoundaryDep (the per-neighbour dispatch-time snapshot this registry's participants mirror)
  * @see Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md
  */
 
@@ -83,12 +82,10 @@ struct FVoxelSeamKey
 };
 
 /**
- * One participant's boundary-relevant state as captured when a seam is scheduled.
- *
- * Deliberately mirrors FMeshBoundaryDep (ContentVersion + MeshedLODLevel + data-presence) plus the
- * participant coordinate. In P0 this is the launch-time snapshot the (future P1+) seam job will build
- * against; a change in any participant's ContentVersion or rendered LOD since capture is what restales
- * the seam — the same signal the #42 revalidation uses per chunk.
+ * One participant's boundary-relevant state as captured when a seam is scheduled: ContentVersion,
+ * rendered LOD and data presence, plus the participant coordinate. It is the launch-time snapshot the
+ * seam job builds against; a change in any participant's ContentVersion or rendered LOD since capture
+ * is what restales the seam.
  */
 struct FVoxelSeamParticipant
 {
@@ -125,7 +122,7 @@ struct FVoxelSeamState
 
 	/**
 	 * A job for this seam is queued or on a worker: set when scheduled, cleared only by
-	 * NotifySeamJobFinished (or the P0 stub processor). A seam re-dirtied meanwhile stays dirty and
+	 * NotifySeamJobFinished. A seam re-dirtied meanwhile stays dirty and
 	 * is rebuilt once the job finishes, so the newest content always gets built (R24 P0: a re-dirty
 	 * during flight used to be dropped and left the seam stale until something else changed it).
 	 */
@@ -157,9 +154,8 @@ struct FVoxelSeamState
 };
 
 /**
- * A scheduled unit of seam work. In P0 the job is a stub (the processor logs/counts and produces no
- * geometry); P1+ fills in the actual seam mesher. Priority mirrors the meshing queue's tiered model
- * (higher pops first) so near-viewer seams are meshed ahead of far ones.
+ * A scheduled unit of seam work, run by the chunk manager's seam mesher. Priority mirrors the meshing
+ * queue's tiered model (higher pops first) so near-viewer seams are meshed ahead of far ones.
  */
 struct FVoxelSeamJob
 {
@@ -169,7 +165,7 @@ struct FVoxelSeamJob
 	/** Scheduling priority (higher = sooner); see FVoxelSeamRegistry::ComputeSeamPriority. */
 	float Priority = 0.0f;
 
-	/** Participant snapshot captured at schedule time (mirrors FMeshBoundaryDep per participant). */
+	/** Participant snapshot captured at schedule time. */
 	TArray<FVoxelSeamParticipant> Participants;
 
 	/**
@@ -204,7 +200,7 @@ struct FVoxelSeamRegistryStats
 	int64 TotalSeamsCreated = 0;
 	/** Lifetime seam jobs scheduled (dirty + all-participants-resident). */
 	int64 TotalSeamJobsScheduled = 0;
-	/** Lifetime seam jobs processed by the (P0: stub) processor. */
+	/** Lifetime seam jobs drained for execution (DrainSeamJobs). */
 	int64 TotalSeamJobsProcessed = 0;
 	/** Lifetime seam results rejected because their owner left (or left and reloaded) while in flight. */
 	int64 TotalSeamResultsRejected = 0;
@@ -277,14 +273,20 @@ public:
 
 	/**
 	 * Toggle the registry. When disabled the lifecycle hooks and scheduler are no-ops; a true->false
-	 * transition clears all state so a re-enable starts clean (the manager re-registers loaded chunks
-	 * as they next change). Kept behind a cvar so P0 can be A/B'd off with zero residual cost.
+	 * transition clears all state so a re-enable starts clean. The chunk manager enables it once and
+	 * keeps it on (every mesher meshes through seam jobs); tests drive it directly.
 	 */
 	void SetEnabled(bool bInEnabled);
 	bool IsEnabled() const { return bEnabled; }
 
-	/** Enable per-seam-job trace logging (voxel.Seam.Debug). Off = only Verbose lines, filtered out. */
-	void SetDebugLogging(bool bInDebug) { bDebugLogging = bInDebug; }
+	/**
+	 * Track only each chunk's six face seams, not its edges and corners. For meshers whose boundary
+	 * geometry lies entirely in face planes (cubic, world modes review WM-C1): their edge and corner
+	 * jobs would only produce empty meshes. Changing it resets the registry, so set it before
+	 * chunks register.
+	 */
+	void SetFaceSeamsOnly(bool bInFaceSeamsOnly);
+	bool IsFaceSeamsOnly() const { return bFaceSeamsOnly; }
 
 	/** Drop all tracked chunks, seams, and queued jobs (Shutdown / EndPlay / disable). */
 	void Reset();
@@ -364,17 +366,6 @@ public:
 	int32 ScheduleReadySeams(const FIntVector& ViewerChunk, int32 NearChunkRadius, int32 MaxToSchedule);
 
 	/**
-	 * Process up to MaxJobs seam jobs (highest priority first). P0: the job is a STUB — it produces no
-	 * geometry, only logs (when voxel.Seam.Debug is on) and increments counters, then marks the seam
-	 * clean. Used when seam MESHING is off (voxel.Seam.Meshing 0); the meshing path drains jobs via
-	 * DrainSeamJobs instead and executes them in the chunk manager.
-	 *
-	 * @param MaxJobs Cap on jobs processed this call (0 = unlimited).
-	 * @return Number of jobs processed.
-	 */
-	int32 ProcessSeamJobQueue(int32 MaxJobs);
-
-	/**
 	 * Pop up to MaxJobs seam jobs (highest priority first) for external execution (P1 runtime
 	 * pipeline: the chunk manager builds seam meshing requests from them and dispatches async).
 	 * Each popped seam stays marked scheduled until the caller reports NotifySeamJobFinished: if a
@@ -452,6 +443,9 @@ public:
 	 */
 	static void EnumerateIncidentSeams(const FIntVector& ChunkCoord, TArray<FVoxelSeamKey>& OutSeams);
 	static TArray<FVoxelSeamKey> EnumerateIncidentSeams(const FIntVector& ChunkCoord);
+
+	/** The 6 face seams of the 26 (in +X, -X, +Y, -Y, +Z, -Z order), as canonical keys. */
+	static void EnumerateIncidentFaceSeams(const FIntVector& ChunkCoord, TArray<FVoxelSeamKey>& OutSeams);
 
 	/**
 	 * The chunks participating in a seam, derived from its key: 2 (face), 4 (edge), or 8 (corner). The
@@ -552,6 +546,9 @@ private:
 	/** Mark every seam incident to ChunkCoord dirty, creating entries as needed. */
 	void DirtyIncidentSeams(const FIntVector& ChunkCoord);
 
+	/** The incident seams this registry tracks: all 26, or the 6 faces when SetFaceSeamsOnly. */
+	void GetTrackedIncidentSeams(const FIntVector& ChunkCoord, TArray<FVoxelSeamKey>& OutSeams) const;
+
 	/** Remove a seam entirely (from the map, dirty set, and job queue). */
 	void RemoveSeam(const FVoxelSeamKey& Key);
 
@@ -560,11 +557,11 @@ private:
 
 	// ---- State ----
 
-	/** Whether the registry is active (cvar-driven). When false, all hooks/scheduler are no-ops. */
+	/** Whether the registry is active. When false, all hooks/scheduler are no-ops. */
 	bool bEnabled = false;
 
-	/** Emit per-seam-job trace at Log level (cvar-driven); otherwise seam jobs trace only at Verbose. */
-	bool bDebugLogging = false;
+	/** Track face seams only (see SetFaceSeamsOnly). */
+	bool bFaceSeamsOnly = false;
 
 	/** Registered chunks and their boundary-relevant state (residency == presence in this map). */
 	TMap<FIntVector, FChunkMirrorState> ChunkMirror;

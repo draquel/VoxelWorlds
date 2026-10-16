@@ -3,13 +3,12 @@
 // Source-agnostic neighbor slice/edge/corner extraction for FVoxelMeshingRequest.
 //
 // The 26-neighborhood extraction logic (face slices + deep planes, edge strips + deep grids,
-// corner voxels + deep boxes, EdgeCornerFlags, NeighborPlaneDepth) is shared between two data
-// sources through the two callables:
-//   - the game-thread path (UVoxelChunkManager::ExtractNeighborEdgeSlices) reads live chunk
-//     states + edit layers;
-//   - the collision cook worker path reads pre-grabbed shared voxel snapshots (edit-merged),
-//     moving the ~6 ms/cook of cache-missing strided reads off the game thread (P4a).
-// One body, two wrappers — behavior stays bit-identical between the paths.
+// corner voxels + deep boxes, EdgeCornerFlags, NeighborPlaneDepth), reading through two callables
+// so it is independent of where the voxels live. Its user is the collision cook worker, which reads
+// pre-grabbed shared voxel snapshots (edit-merged), off the game thread (P4a): collision is meshed
+// whole-chunk, boundary faces included. Render meshing needs no slices: chunk meshes are the Interior
+// domain and seam jobs read whole neighbour snapshots (the game-thread path that fed render meshes,
+// UVoxelChunkManager::ExtractNeighborEdgeSlices, went with the legacy boundary path in M5).
 
 #pragma once
 

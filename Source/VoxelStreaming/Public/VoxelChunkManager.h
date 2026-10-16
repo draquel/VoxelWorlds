@@ -74,40 +74,12 @@ struct FVoxelChunkState
 	/** Priority for processing queues */
 	float Priority = 0.0f;
 
-	/**
-	 * Frame of the most recent pending neighbor-remesh request (0 = none). A newly generated chunk
-	 * asks its 26 loaded neighbors to re-mesh; instead of re-meshing each one immediately (which
-	 * re-meshes a chunk repeatedly as its neighborhood fills in), the request is debounced — this
-	 * stamp is bumped on each request and the chunk is enqueued once, after the neighborhood settles.
-	 */
-	int64 NeighborRemeshRequestFrame = 0;
-
-	/**
-	 * Frame the far-compression sweep first found this chunk expanded from its cached compact form
-	 * (-1 = not seen expanded). On the legacy boundary path the sweep holds such a chunk resident for
-	 * voxel.FarCompression.IdleFrames from this frame before compacting it again.
-	 */
-	int64 FarExpandedSeenFrame = -1;
-
 	FVoxelChunkState() = default;
 
 	explicit FVoxelChunkState(const FIntVector& InChunkCoord)
 	{
 		Descriptor.ChunkCoord = InChunkCoord;
 	}
-};
-
-/**
- * One neighbour's boundary-relevant state, snapshotted when a chunk is dispatched to mesh. A chunk's
- * baked boundary depends on each neighbour's voxel content (ContentVersion), its rendered LOD
- * (MeshedLODLevel, which sets transition faces), and whether it had data at all (bHadData; an absent
- * neighbour bakes as clamped/Air). If any of these differs at mesh completion, the boundary is stale.
- */
-struct FMeshBoundaryDep
-{
-	uint32 ContentVersion = 0;
-	int32 MeshedLODLevel = -1;
-	bool bHadData = false;
 };
 
 /**
@@ -129,7 +101,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkUnloaded, FIntVector, ChunkC
 enum class EVoxelRemeshReason : uint8
 {
 	Other = 0,        // first-time mesh or uncategorised path
-	NeighborRemesh,   // a neighbour's voxel data became available (seam fix cascade)
 	LODTransition,    // the chunk's LOD level changed as the viewer moved
 	Dirty,            // explicit dirty (voxel edit, forced remesh)
 	Count
@@ -577,47 +548,26 @@ public:
 	// ==================== Collision Mesh Generation ====================
 
 	/**
-	 * Generate collision mesh data for a chunk at a specific LOD level.
-	 *
-	 * Used by VoxelCollisionManager to generate collision geometry.
-	 * The mesh is generated fresh from voxel data with edits applied.
-	 *
-	 * @param ChunkCoord Chunk coordinate to generate collision for
-	 * @param LODLevel LOD level for collision mesh (higher = simpler mesh)
-	 * @param OutMeshData Output mesh data (positions and indices)
-	 * @return True if mesh was generated successfully
-	 */
-	bool GetChunkCollisionMesh(
-		const FIntVector& ChunkCoord,
-		int32 LODLevel,
-		FChunkMeshData& OutMeshData);
-
-	/**
-	 * Prepare a meshing request for collision (game thread only).
-	 *
-	 * Voxel data handling depends on the optional out params (P4a: the full-volume copy and the
-	 * strided 26-neighbor slice extraction were the dominant per-cook game-thread costs):
-	 * - OutSharedVoxels non-null: the (edit-merged, content-version-keyed) shared snapshot from
-	 *   the seam cache is returned there; OutMeshRequest.VoxelData is left EMPTY for the async
-	 *   worker to materialize off the game thread.
-	 * - OutNeighborSnapshots non-null: neighbor snapshots for the 26-neighborhood are returned
-	 *   there (map lookups, build-on-miss) and NO slice extraction happens on the game thread —
-	 *   the worker runs VoxelNeighborSlices::Extract over the snapshots instead.
-	 * - Both null: fully materialized inline (synchronous callers), original behavior.
+	 * Prepare a meshing request for a collision cook (game thread only). Collision is meshed whole-chunk
+	 * by the main mesher on a worker (VoxelCollisionManager), so nothing heavy happens here (P4a: the
+	 * full-volume copy and the strided 26-neighbour slice extraction were the dominant per-cook
+	 * game-thread costs): the chunk's edit-merged shared snapshot and its neighbours' are handed out,
+	 * OutMeshRequest.VoxelData is left EMPTY, and the worker materializes it and runs
+	 * VoxelNeighborSlices::Extract over the neighbour snapshots.
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 * @param LODLevel LOD level for collision mesh
-	 * @param OutMeshRequest Output meshing request ready for GenerateMeshCPU
-	 * @param OutSharedVoxels Optional: receive the shared voxel snapshot instead of an inline copy
-	 * @param OutNeighborSnapshots Optional: receive neighbor snapshots instead of inline slices
+	 * @param OutMeshRequest Output meshing request (metadata; voxels come from OutSharedVoxels)
+	 * @param OutSharedVoxels Receives the chunk's shared voxel snapshot
+	 * @param OutNeighborSnapshots Receives the snapshots of the 26 neighbours that have data
 	 * @return True if request was prepared successfully
 	 */
 	bool PrepareCollisionMeshRequest(
 		const FIntVector& ChunkCoord,
 		int32 LODLevel,
 		FVoxelMeshingRequest& OutMeshRequest,
-		TSharedPtr<const TArray<FVoxelData>>* OutSharedVoxels = nullptr,
-		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>* OutNeighborSnapshots = nullptr);
+		TSharedPtr<const TArray<FVoxelData>>& OutSharedVoxels,
+		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots);
 
 	/** Whether -VoxelDeepOff / -VoxelDeepFull were set (worker-side slice extraction needs them). */
 	bool IsDeepSliceOff() const { return bDeepDepthOff; }
@@ -677,7 +627,6 @@ public:
 		float GenApplyMs = 0.0f;    // ProcessCompletedAsyncGenerations total
 		float GenStoreMs = 0.0f;    // apply: move result into chunk state (frees any old data)
 		float GenNotifyMs = 0.0f;   // apply: OnChunkGenerationComplete (queues + neighbors + delegates)
-		float GenNeighborMs = 0.0f; // subset of notify: QueueNeighborsForRemesh
 		int32 GenApplyCount = 0;    // completions applied this tick
 
 		// Meshing sub-phases (MeshingMs = tick + launch + apply)
@@ -687,7 +636,6 @@ public:
 
 		// Launch-path breakdown (subsets of MeshLaunchMs)
 		float MeshSnapshotMs = 0.0f;  // voxel-data snapshot copy + edit merge
-		float MeshSlicesMs = 0.0f;    // ExtractNeighborEdgeSlices
 		float MeshDispatchMs = 0.0f;  // LaunchAsyncMeshGeneration (worker handoff for DC/MC GPU)
 		int32 MeshLaunchCount = 0;    // mesh jobs launched this tick
 
@@ -756,6 +704,9 @@ public:
 	int64 GetBenchRemeshCount() const { return BenchRemeshCount; }
 	int64 GetBenchRemeshByReason(EVoxelRemeshReason Reason) const { return BenchRemeshByReason[static_cast<int32>(Reason)]; }
 
+	/** Seam meshes applied (submitted to the renderer) since the benchmark started. */
+	int64 GetBenchSeamJobsCompleted() const { return BenchSeamJobsCompleted; }
+
 	/**
 	 * Far-compression encodes this session: fresh encodes started (async or sync), async results
 	 * installed into their chunk, and async results discarded because the chunk's array changed or the
@@ -808,6 +759,7 @@ public:
 	{
 		BenchRemeshCount = 0;
 		for (int64& C : BenchRemeshByReason) { C = 0; }
+		BenchSeamJobsCompleted = 0;
 		BenchUnloadLagSumMs = 0.0;
 		BenchUnloadLagMaxMs = 0.0;
 		BenchUnloadLagCount = 0;
@@ -954,8 +906,7 @@ protected:
 	 * Budgeted per-tick far-chunk voxel-data compression sweep. Compacts idle, settled far chunks
 	 * (see voxel.FarCompression.* cvars); access transparently re-materializes via EnsureResident().
 	 * "Far" means the chunk's distance band has reached voxel.FarCompression.MinStride, which also
-	 * holds with the LOD system off (cubic worlds). On the legacy boundary path a chunk expanded by a
-	 * read stays resident for IdleFrames before it is compacted again (see FarExpandedSeenFrame).
+	 * holds with the LOD system off (cubic worlds).
 	 * A fresh encode runs on a background worker from a copy of the array (voxel.FarCompression.Async);
 	 * the sweep installs finished encodes whose chunk array is unchanged (FChunkDescriptor::AsyncCompactTicket).
 	 *
@@ -987,42 +938,6 @@ protected:
 	 * (Placeholder - actual implementation in Phase 2)
 	 */
 	void OnChunkMeshingComplete(const FIntVector& ChunkCoord);
-
-	/**
-	 * Queue neighbors for remeshing when a chunk's voxel data becomes available.
-	 * This ensures seamless boundaries when chunks load in different orders.
-	 * Only queues neighbors that are already in Loaded state.
-	 *
-	 * @param ChunkCoord The chunk that just finished generation
-	 */
-	void QueueNeighborsForRemesh(const FIntVector& ChunkCoord);
-
-	/**
-	 * Debounced dispatch of coalesced neighbor-remesh requests (see NeighborRemeshRequestFrame):
-	 * enqueue a chunk for a single neighbor-remesh once its neighborhood has settled, instead of
-	 * re-meshing it once per neighbor arrival. Collapses the fan-out churn during traversal.
-	 */
-	void ProcessPendingNeighborRemeshes();
-
-	/**
-	 * Snapshot the 26 neighbours' boundary-relevant state (content version, rendered LOD, data
-	 * availability) at the instant a chunk is dispatched to mesh. Stored in InFlightMeshDeps so the
-	 * completion handler can detect a neighbour that changed WHILE this chunk was in flight — the
-	 * race that bakes a stale/Air boundary (a persistent seam) with no other trigger to fix it.
-	 */
-	void CaptureMeshDeps(const FIntVector& ChunkCoord);
-
-	/**
-	 * Compare a just-completed chunk's neighbours against the snapshot taken at mesh launch
-	 * (CaptureMeshDeps). Returns true if any neighbour's voxel content changed, its rendered LOD
-	 * changed, or its data became available since launch — i.e. the boundary we just baked is stale
-	 * and the chunk must re-mesh. Removes the snapshot entry. Safe to call for a chunk with no entry
-	 * (returns false).
-	 */
-	bool RevalidateMeshDeps(const FIntVector& ChunkCoord);
-
-	/** Discard a chunk's in-flight mesh-dependency snapshot (on unload / abandoned mesh). */
-	void ClearMeshDeps(const FIntVector& ChunkCoord);
 
 	/**
 	 * Propagate water flags from loaded neighbor chunks into this chunk.
@@ -1063,18 +978,6 @@ protected:
 	 */
 	void ProcessDirtyWaterTiles(int32 MaxTilesPerFrame);
 
-	/**
-	 * Extract neighbor edge slices for seamless chunk boundaries.
-	 *
-	 * For each of 6 faces, checks if neighbor chunk is loaded and
-	 * extracts the edge slice (ChunkSize² voxels) from neighbor's voxel data.
-	 * Empty arrays indicate no neighbor (boundary faces will render).
-	 *
-	 * @param ChunkCoord Chunk coordinate to get neighbors for
-	 * @param OutRequest Meshing request to populate with neighbor data
-	 */
-	void ExtractNeighborEdgeSlices(const FIntVector& ChunkCoord, FVoxelMeshingRequest& OutRequest);
-
 	// ==================== Queue Management ====================
 
 	/**
@@ -1094,23 +997,6 @@ protected:
 	 * @return True if added, false if already in queue
 	 */
 	bool AddToMeshingQueue(const FChunkLODRequest& Request, EVoxelRemeshReason Reason = EVoxelRemeshReason::Other);
-
-	/**
-	 * P2-A: decide whether a chunk should defer meshing because a face neighbor's
-	 * voxel data is not yet resident.
-	 *
-	 * Meshing a boundary against a non-resident neighbor makes GetVoxelAt clamp the
-	 * missing plane to the chunk's own edge voxel, producing the LOD-seam tear that
-	 * is never refreshed once the neighbor arrives (see LOD_SEAM_INVESTIGATION.md).
-	 *
-	 * @param ChunkCoord The chunk about to mesh
-	 * @param bOutClampUnavoidable Set true when a neighbor lacks data but it is NOT
-	 *        coming (Loaded-but-freed / unloading) — caller should mesh anyway (to
-	 *        avoid a permanent stall) but may warn.
-	 * @return True if meshing should be deferred (a neighbor's data is still in the
-	 *         generation pipeline and will arrive).
-	 */
-	bool ShouldDeferMeshForNeighbors(const FIntVector& ChunkCoord, bool& bOutClampUnavoidable) const;
 
 	/**
 	 * Add a chunk to the unload queue.
@@ -1180,14 +1066,6 @@ protected:
 	/** Map of chunk coordinates to their state */
 	UPROPERTY()
 	TMap<FIntVector, FVoxelChunkState> ChunkStates;
-
-	/**
-	 * Per in-flight-mesh snapshot of the 26 neighbours' boundary state, taken when a chunk is
-	 * dispatched to mesh (CaptureMeshDeps) and consumed at completion (RevalidateMeshDeps) to detect
-	 * a neighbour that changed mid-flight and left a stale boundary. Bounded by the async-mesh
-	 * in-flight cap (a handful of entries); not a UPROPERTY (transient, non-reflected).
-	 */
-	TMap<FIntVector, TArray<FMeshBoundaryDep>> InFlightMeshDeps;
 
 	/**
 	 * Single-owner seam registry (seam-ownership refactor P0 — SEAM_OWNERSHIP_ARCHITECTURE.md §2).
@@ -1301,17 +1179,11 @@ private:
 	/** Get (building at most once per content version) the shared edit-merged snapshot of a chunk. */
 	TSharedPtr<const TArray<FVoxelData>> GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State);
 
-	/** This-tick resolved state of the seam-meshing pipeline (cvar + registry + CPU-DC mesher). */
-	bool bSeamMeshingActive = false;
-
-	/** Previous-tick value, to detect on/off transitions (deactivation clears seam buckets). */
-	bool bSeamMeshingWasActive = false;
-
 	/**
-	 * Validate + dispatch one drained seam job: P1 executes same-LOD FACE seams only (edge/corner
-	 * and mixed-LOD jobs are dropped — P2). Builds the FVoxelFaceSeamRequest from both resident
-	 * descriptors (edit-merged) and hands it to a thread-pool worker running the DC face-seam
-	 * mesher; the result lands in CompletedSeamMeshQueue.
+	 * Validate + dispatch one drained seam job (face, edge or corner, same or mixed LOD). Builds the
+	 * seam request from the participants' shared edit-merged snapshots and hands it to a thread-pool
+	 * worker running the mode-matched seam mesher (EnsureSeamMesher); the result lands in
+	 * CompletedSeamMeshQueue.
 	 */
 	void DispatchSeamJob(const FVoxelSeamJob& Job);
 
@@ -1570,9 +1442,6 @@ private:
 	/** Process completed async generation tasks (called from game thread; fills the gen-apply sub-timers) */
 	void ProcessCompletedAsyncGenerations(FVoxelTimingStats& Timing);
 
-	/** QueueNeighborsForRemesh time accumulated across this tick (attribution; reset each tick) */
-	double NeighborRemeshSecondsThisTick = 0.0;
-
 	/** Render-submit sub-cost accumulators (attribution; reset each tick, filled in OnChunkMeshingComplete) */
 	double SubmitRendererSecondsThisTick = 0.0;
 	double SubmitScatterSecondsThisTick = 0.0;
@@ -1751,7 +1620,7 @@ private:
 	/** Deep neighbour-data depth override for per-job cost (command line, parsed at Initialize).
 	 *  Default = stride+1 (geometry-only: watertight, one-sided boundary normals, the cheaper job).
 	 *  -VoxelDeepFull => 2*stride (adds central-difference boundary-normal reach, the old default);
-	 *  -VoxelDeepOff => 1 (no deep data). Applied in ExtractNeighborEdgeSlices. */
+	 *  -VoxelDeepOff => 1 (no deep data). Applied by the collision cook's slice extraction. */
 	bool bDeepDepthFull = false;
 	bool bDeepDepthOff = false;
 
@@ -1761,13 +1630,6 @@ private:
 
 	/** Latest viewer world position, cached each tick for the stale-cull distance test. */
 	FVector CurrentViewerPosition = FVector::ZeroVector;
-
-	/**
-	 * True when the chunk's center is within voxel.Stream.NearCorrectionDistance of the viewer.
-	 * Near chunks take the boundary-correction fast path: short coalesce debounce and meshing-queue
-	 * priority above the streaming wave, so a stale seam next to the player resolves in frames.
-	 */
-	bool IsChunkNearViewer(const FIntVector& ChunkCoord) const;
 
 	/** Previous-tick viewer position for horizontal-speed estimation (FLT_MAX until first tick). */
 	FVector LastViewerPosForSpeed = FVector(FLT_MAX);
@@ -1810,6 +1672,9 @@ private:
 
 	/** Re-mesh thrash attributed by source (see EVoxelRemeshReason). */
 	int64 BenchRemeshByReason[static_cast<int32>(EVoxelRemeshReason::Count)] = {};
+
+	/** Seam meshes applied during the active benchmark (see GetBenchSeamJobsCompleted). */
+	int64 BenchSeamJobsCompleted = 0;
 
 	/** Chunks meshed at least once during the active benchmark (to detect re-mesh churn). */
 	TSet<FIntVector> BenchEverMeshed;

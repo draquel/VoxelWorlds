@@ -7,10 +7,8 @@
 // ============================================================================
 // Seam ownership + scheduling registry (seam-ownership refactor P0).
 // Pure logic: no RHI, no world access, no reflection. All state is pushed in
-// by UVoxelChunkManager. In P0 the seam job is a stub — this file lands the
-// data structures + scheduler that P1+ build on, with no geometry produced and
-// therefore no visual/behavioural change. See VoxelSeamRegistry.h and
-// Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md.
+// by UVoxelChunkManager, which also runs the seam jobs this scheduler drains.
+// See VoxelSeamRegistry.h and Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md.
 // ============================================================================
 
 namespace VoxelSeamRegistryDetail
@@ -104,6 +102,29 @@ TArray<FVoxelSeamKey> FVoxelSeamRegistry::EnumerateIncidentSeams(const FIntVecto
 	TArray<FVoxelSeamKey> Out;
 	EnumerateIncidentSeams(ChunkCoord, Out);
 	return Out;
+}
+
+void FVoxelSeamRegistry::EnumerateIncidentFaceSeams(const FIntVector& ChunkCoord, TArray<FVoxelSeamKey>& OutSeams)
+{
+	using namespace VoxelSeamRegistryDetail;
+	OutSeams.Reset(6);
+	for (int32 Axis = 0; Axis < 3; ++Axis)
+	{
+		OutSeams.Add(KeyForDirection(ChunkCoord, AxisUnit(Axis)));
+		OutSeams.Add(KeyForDirection(ChunkCoord, AxisUnit(Axis) * -1));
+	}
+}
+
+void FVoxelSeamRegistry::GetTrackedIncidentSeams(const FIntVector& ChunkCoord, TArray<FVoxelSeamKey>& OutSeams) const
+{
+	if (bFaceSeamsOnly)
+	{
+		EnumerateIncidentFaceSeams(ChunkCoord, OutSeams);
+	}
+	else
+	{
+		EnumerateIncidentSeams(ChunkCoord, OutSeams);
+	}
 }
 
 void FVoxelSeamRegistry::GetParticipants(const FVoxelSeamKey& Key, TArray<FIntVector>& OutParticipants)
@@ -210,6 +231,17 @@ void FVoxelSeamRegistry::SetEnabled(bool bInEnabled)
 		// chunks as they next change/mesh). Avoids acting on a stale mirror after an A/B toggle.
 		Reset();
 	}
+}
+
+void FVoxelSeamRegistry::SetFaceSeamsOnly(bool bInFaceSeamsOnly)
+{
+	if (bInFaceSeamsOnly == bFaceSeamsOnly)
+	{
+		return;
+	}
+	bFaceSeamsOnly = bInFaceSeamsOnly;
+	// The tracked seam set changes shape; start clean (the manager registers chunks as they generate).
+	Reset();
 }
 
 void FVoxelSeamRegistry::Reset()
@@ -453,7 +485,7 @@ void FVoxelSeamRegistry::MarkSeamDirty(FVoxelSeamState& Seam)
 void FVoxelSeamRegistry::DirtyIncidentSeams(const FIntVector& ChunkCoord)
 {
 	TArray<FVoxelSeamKey> Incident;
-	EnumerateIncidentSeams(ChunkCoord, Incident);
+	GetTrackedIncidentSeams(ChunkCoord, Incident);
 	for (const FVoxelSeamKey& Key : Incident)
 	{
 		MarkSeamDirty(FindOrCreateSeam(Key));
@@ -549,7 +581,7 @@ void FVoxelSeamRegistry::UnregisterChunk(const FIntVector& ChunkCoord)
 	// The chunk left: each incident seam either loses a participant (restale) or, if no participant
 	// remains, is pruned entirely so the registry doesn't grow unbounded behind the streaming front.
 	TArray<FVoxelSeamKey> Incident;
-	EnumerateIncidentSeams(ChunkCoord, Incident);
+	GetTrackedIncidentSeams(ChunkCoord, Incident);
 	for (const FVoxelSeamKey& Key : Incident)
 	{
 		TArray<FIntVector> Coords;
@@ -679,7 +711,7 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 			(bNear ? NearScanWindow : FarScanWindow).Add(ScanMs);
 		}
 
-		// Capture the launch-time participant snapshot (mirrors FMeshBoundaryDep per participant).
+		// Capture the launch-time participant snapshot.
 		for (FVoxelSeamParticipant& P : Seam->Participants)
 		{
 			const FChunkMirrorState& M = ChunkMirror.FindChecked(P.Coord);
@@ -734,48 +766,6 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 	return Scheduled;
 }
 
-int32 FVoxelSeamRegistry::ProcessSeamJobQueue(int32 MaxJobs)
-{
-	if (!bEnabled || JobQueue.Num() == 0)
-	{
-		return 0;
-	}
-
-	int32 Processed = 0;
-	while (JobQueue.Num() > 0 && (MaxJobs <= 0 || Processed < MaxJobs))
-	{
-		// Pop highest priority (back of the ascending-sorted array).
-		FVoxelSeamJob Job = JobQueue.Pop(EAllowShrinking::No);
-		JobQueueSet.Remove(Job.Key);
-
-		// -------------------------------------------------------------------------------------------
-		// P0 STUB: a seam job produces NO geometry. This is where P1+ will run the actual seam mesher
-		// (DC face seam, then mixed-LOD edges/corners, then MC transvoxel) against Job.Participants.
-		// For now we only log/count so the scaffolding is observable and the no-op is provable.
-		// -------------------------------------------------------------------------------------------
-		if (bDebugLogging)
-		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("[Seam] stub job %s prio=%.1f participants=%d (no geometry — P0)"),
-				*Job.Key.ToString(), Job.Priority, Job.Participants.Num());
-		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Verbose, TEXT("[Seam] stub job %s prio=%.1f participants=%d"),
-				*Job.Key.ToString(), Job.Priority, Job.Participants.Num());
-		}
-
-		// The stub "completes" immediately: mark the seam not-scheduled (and it stays clean until a
-		// participant next changes). P1+ will instead submit a seam mesh section here.
-		if (FVoxelSeamState* Seam = Seams.Find(Job.Key))
-		{
-			Seam->bScheduled = false;
-		}
-		++Processed;
-		++TotalSeamJobsProcessed;
-	}
-	return Processed;
-}
-
 int32 FVoxelSeamRegistry::DrainSeamJobs(TArray<FVoxelSeamJob>& OutJobs, int32 MaxJobs)
 {
 	if (!bEnabled || JobQueue.Num() == 0 || MaxJobs <= 0)
@@ -824,7 +814,7 @@ void FVoxelSeamRegistry::GetReadyIncidentSeams(const FIntVector& ChunkCoord, TAr
 {
 	OutSeams.Reset();
 	TArray<FVoxelSeamKey> Incident;
-	EnumerateIncidentSeams(ChunkCoord, Incident);
+	GetTrackedIncidentSeams(ChunkCoord, Incident);
 	for (const FVoxelSeamKey& Key : Incident)
 	{
 		if (Seams.Contains(Key) && AreAllParticipantsResident(Key))

@@ -759,7 +759,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	FVoxelMeshingRequest MeshRequest;
 	TSharedPtr<const TArray<FVoxelData>> SharedVoxels;
 	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> NeighborSnapshots;
-	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest, &SharedVoxels, &NeighborSnapshots))
+	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest, SharedVoxels, NeighborSnapshots))
 	{
 		// Chunk may not be loaded yet or has no geometry — remove the CollisionData
 		// entry so UpdateCollisionDecisions() can re-request on a future sweep.

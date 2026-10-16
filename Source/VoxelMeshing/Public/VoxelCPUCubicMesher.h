@@ -6,21 +6,28 @@
 #include "IVoxelMesher.h"
 
 /**
- * CPU-based cubic mesher using face culling.
+ * CPU cubic mesher (blocky terrain), the only cubic mesher.
  *
- * Generates mesh geometry by checking each solid voxel and
- * emitting quad faces only where adjacent voxels are air.
- * This is the fallback path when GPU compute is unavailable.
+ * Emits a quad for every face of a solid voxel whose neighbour across that face is air (or where
+ * either side is a non-occluding material such as leaves), optionally greedy-merging coplanar faces
+ * of the same material and biome into larger quads.
  *
- * Algorithm:
- * - For each solid voxel, check all 6 neighbors
- * - If neighbor is air, emit a quad (4 vertices, 6 indices)
- * - Supports neighbor chunk data for seamless boundaries
+ * Seam ownership (SEAM_OWNERSHIP_ARCHITECTURE.md §2.3, "trivially compatible"; world modes review
+ * WM-C1): in streaming the chunk manager asks for the Interior domain, which emits every face except
+ * those lying on the chunk's six boundary planes, and reads nothing outside the chunk, so it never
+ * waits for or re-meshes on a neighbour. The faces on a boundary plane belong to that chunk pair's
+ * face seam job (GenerateFaceSeamMeshCPU), which culls them against both chunks' voxels. No cubic
+ * face lies only on a chunk edge or corner, so edge and corner seams carry no geometry.
+ * The Full domain (whole chunk, boundary faces culled against the request's face-neighbour slices)
+ * serves collision and tests.
  *
- * Performance: ~20-50ms for 32^3 chunk on typical CPU
+ * Vertex AO (colour channel B) samples outside the chunk as air in the Interior domain, and outside
+ * the two chunks in a face seam; no voxel material reads it today.
+ *
+ * Thread safety: GenerateMeshCPU and the seam entry points only read the request and Config, so they
+ * may run on worker threads concurrently.
  *
  * @see IVoxelMesher
- * @see FVoxelGPUCubicMesher
  */
 class VOXELMESHING_API FVoxelCPUCubicMesher : public IVoxelMesher
 {
@@ -78,29 +85,83 @@ public:
 
 	virtual FString GetMesherTypeName() const override { return TEXT("CPU Cubic"); }
 
-private:
-	/**
-	 * Check if a face should be rendered.
-	 * Returns true if the neighbor in the given direction is air.
-	 */
-	bool ShouldRenderFace(
-		const FVoxelMeshingRequest& Request,
-		int32 X, int32 Y, int32 Z,
-		int32 Face) const;
+	// ============================================================================
+	// Seam-Ownership Meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2.3)
+	// ============================================================================
 
 	/**
-	 * Get voxel data at position, handling chunk boundaries.
+	 * Mesh the faces on the plane shared by the owner A and B = A + unit(Axis): A's faces toward +Axis
+	 * in its last layer and B's faces toward -Axis in its first, each culled against the other side's
+	 * voxel. Positions are in the owner's local frame (the plane sits at ChunkSize * VoxelSize along
+	 * Axis). The LOD fields are ignored: cubic always meshes at full resolution (decision D7).
+	 *
+	 * @param SeamRequest Owner, axis and both chunks' edit-merged voxels
+	 * @param OutMeshData Receives the seam's quads (empty when no face is visible on the plane)
+	 * @return false only for an invalid request or an uninitialized mesher
 	 */
-	FVoxelData GetVoxelAt(
-		const FVoxelMeshingRequest& Request,
-		int32 X, int32 Y, int32 Z) const;
+	virtual bool GenerateFaceSeamMeshCPU(const FVoxelFaceSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
+
+	/**
+	 * Edge seams carry no cubic geometry (every face lies in a face plane): returns an empty mesh.
+	 * The chunk manager does not schedule them for cubic (FVoxelSeamRegistry::SetFaceSeamsOnly).
+	 */
+	virtual bool GenerateEdgeSeamMeshCPU(const FVoxelEdgeSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
+
+	/** Corner seams carry no cubic geometry: returns an empty mesh. See GenerateEdgeSeamMeshCPU. */
+	virtual bool GenerateCornerSeamMeshCPU(const FVoxelCornerSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
+
+	/**
+	 * Whether a face of the voxel at (X, Y, Z) lies on one of the chunk's six boundary planes (the
+	 * +X face of the last X layer, the -X face of the first, and so on): the faces the Interior domain
+	 * leaves to the face seams.
+	 */
+	static bool IsBoundaryFace(int32 Face, int32 X, int32 Y, int32 Z, int32 ChunkSize);
+
+private:
+	/**
+	 * The voxels one meshing pass reads, in the frame of the chunk whose mesh it emits (for a face
+	 * seam, the owner's). Own is that chunk. A face seam adds the neighbour B = Own + unit(OtherAxis),
+	 * whose voxels sit at [ChunkSize, 2 * ChunkSize) along OtherAxis. Whole-chunk (Full domain)
+	 * meshing reads one plane of each face neighbour from the request's slices instead. Anything
+	 * else reads as air.
+	 */
+	struct FCubicPass
+	{
+		const FVoxelData* Own = nullptr;
+		const FVoxelData* Other = nullptr;
+		int32 OtherAxis = -1;
+		const FVoxelMeshingRequest* Slices = nullptr;
+		int32 ChunkSize = 0;
+		float VoxelSize = 100.0f;
+
+		/** The voxel at (X, Y, Z) in the pass's frame. */
+		FVoxelData GetVoxel(int32 X, int32 Y, int32 Z) const;
+	};
+
+	/** Build the pass for a whole-chunk request: Full reads the face slices, Interior reads none. */
+	static FCubicPass MakeChunkPass(const FVoxelMeshingRequest& Request);
+
+	/**
+	 * Read a face neighbour's voxel from the request's slices (one plane per face; anything further,
+	 * or diagonal, is air). Used by the Full domain.
+	 */
+	static FVoxelData GetSliceVoxel(const FVoxelMeshingRequest& Request, int32 X, int32 Y, int32 Z);
+
+	/**
+	 * Check if a face should be rendered: the neighbour across it is air, or either side is a
+	 * non-occluding material.
+	 */
+	bool ShouldRenderFace(
+		const FCubicPass& Pass,
+		int32 X, int32 Y, int32 Z,
+		int32 Face) const;
 
 	/**
 	 * Emit a quad face to the mesh data.
 	 */
 	void EmitQuad(
 		FChunkMeshData& MeshData,
-		const FVoxelMeshingRequest& Request,
+		const FCubicPass& Pass,
 		int32 X, int32 Y, int32 Z,
 		int32 Face,
 		const FVoxelData& Voxel) const;
@@ -129,29 +190,51 @@ private:
 		FVoxelMeshingStats& OutStats);
 
 	/**
-	 * Process a single face direction using greedy meshing.
+	 * Greedy-mesh one slice of one face direction: build its face mask, emit its non-occluding faces
+	 * as 1x1 quads and merge the rest.
 	 * @param Face Face direction (0-5)
-	 * @param Request The meshing request
+	 * @param SliceIndex Position along the face's primary axis, in the pass's frame
+	 * @param Pass The voxels to read
+	 * @param FaceMask Scratch mask (ChunkSize^2)
+	 * @param Processed Scratch flags (ChunkSize^2)
+	 * @param OutMeshData Output mesh data
+	 * @param OutGeneratedFaces Counter for generated (merged) faces
+	 */
+	void ProcessSliceGreedy(
+		int32 Face,
+		int32 SliceIndex,
+		const FCubicPass& Pass,
+		TArray<uint16>& FaceMask,
+		TArray<bool>& Processed,
+		FChunkMeshData& OutMeshData,
+		uint32& OutGeneratedFaces) const;
+
+	/**
+	 * Mesh one slice of one face direction without merging (one quad per visible face).
+	 * @param Face Face direction (0-5)
+	 * @param SliceIndex Position along the face's primary axis, in the pass's frame
+	 * @param Pass The voxels to read
 	 * @param OutMeshData Output mesh data
 	 * @param OutGeneratedFaces Counter for generated faces
 	 */
-	void ProcessFaceDirectionGreedy(
+	void ProcessSliceSimple(
 		int32 Face,
-		const FVoxelMeshingRequest& Request,
+		int32 SliceIndex,
+		const FCubicPass& Pass,
 		FChunkMeshData& OutMeshData,
-		uint32& OutGeneratedFaces);
+		uint32& OutGeneratedFaces) const;
 
 	/**
 	 * Build a 2D face mask for a slice perpendicular to a face direction.
 	 * @param Face Face direction
 	 * @param SliceIndex Position along the primary axis
-	 * @param Request The meshing request
-	 * @param OutMask Output mask (ChunkSize x ChunkSize), 0 = no face, otherwise MaterialID + 1
+	 * @param Pass The voxels to read
+	 * @param OutMask Output mask (ChunkSize x ChunkSize), 0 = no face, otherwise (MaterialID + 1) | (BiomeID << 8)
 	 */
 	void BuildFaceMask(
 		int32 Face,
 		int32 SliceIndex,
-		const FVoxelMeshingRequest& Request,
+		const FCubicPass& Pass,
 		TArray<uint16>& OutMask) const;
 
 	/**
@@ -167,7 +250,7 @@ private:
 	 */
 	void EmitMergedQuad(
 		FChunkMeshData& MeshData,
-		const FVoxelMeshingRequest& Request,
+		const FCubicPass& Pass,
 		int32 Face,
 		int32 SliceIndex,
 		int32 U, int32 V,
@@ -233,26 +316,26 @@ private:
 	/**
 	 * Calculate AO for a single vertex of a face.
 	 * Uses the standard voxel AO algorithm checking side1, side2, and corner neighbors.
-	 * @param Request The meshing request with voxel data
+	 * @param Pass The voxels to read
 	 * @param X, Y, Z Voxel position
 	 * @param Face Face direction (0-5)
 	 * @param VertexIndex Vertex index within the face (0-3)
 	 * @return AO value 0-3 (0=unoccluded, 3=fully occluded)
 	 */
 	uint8 CalculateVertexAO(
-		const FVoxelMeshingRequest& Request,
+		const FCubicPass& Pass,
 		int32 X, int32 Y, int32 Z,
 		int32 Face, int32 VertexIndex) const;
 
 	/**
 	 * Calculate AO for all 4 vertices of a face.
-	 * @param Request The meshing request with voxel data
+	 * @param Pass The voxels to read
 	 * @param X, Y, Z Voxel position
 	 * @param Face Face direction (0-5)
 	 * @param OutAO Output array of 4 AO values (0-3 each)
 	 */
 	void CalculateFaceAO(
-		const FVoxelMeshingRequest& Request,
+		const FCubicPass& Pass,
 		int32 X, int32 Y, int32 Z,
 		int32 Face, uint8 OutAO[4]) const;
 };
