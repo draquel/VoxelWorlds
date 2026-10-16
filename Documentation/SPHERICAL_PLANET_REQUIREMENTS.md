@@ -108,11 +108,11 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 
 | ID | Requirement | Pri | Today |
 |----|-------------|-----|-------|
-| SP-C1 | Candidate enumeration covers every chunk that intersects the shell within the view distance, at any latitude | P0 | Axis-aligned box with a ±16-chunk Z cap (problem #6). Until 2026-10-13 the vertical window also added the viewer's layer twice, which would have centred a pole viewer's window near layer 40, above the surface; fixed in the review plan's §13.11. The review plan's D8 makes heightmap windows a per-column interval supplied by the world mode (WM-S1); the planet version of that interval is the shell around the surface |
+| SP-C1 | Candidate enumeration covers every chunk that intersects the shell within the view distance, at any latitude | P0 | Axis-aligned box with a ±16-chunk Z cap (problem #6). Until 2026-10-13 the vertical window also added the viewer's layer twice, which would have centred a pole viewer's window near layer 40, above the surface; fixed in the review plan's §13.11. The review plan's D8 makes heightmap windows a per-column interval supplied by the world mode (WM-S1); the planet version of that interval is the shell around the surface. **Heightmap side implemented in M4 (2026-10-15, in review; review plan §14.8):** `IVoxelWorldMode::GetSurfaceRange` supplies a column's surface range and `FDistanceBandLODStrategy::GetColumnWindow` builds the window (slab plus the viewer's layer ± 2 nearby); the planet still takes the viewer-relative branch there, which Phase 1 replaces with the shell |
 | SP-C2 | Horizon cull adds `√(2R·Hmax + Hmax²)`, so mountains beyond the horizon still load | P1 | Under-buffered (problem #7) |
 | SP-C3 | LOD distance stays 3D Euclidean (fine for surface play); `LOD_SYSTEM.md` stops claiming geodesic distance | P1 | Doc mismatch |
 | SP-C4 | The collision cook lead uses local down and the tangential heading | P1 | −Z and a horizontal heading (`VoxelCollisionManager.cpp:403-430`) |
-| SP-C5 | A planet equivalent of the far-band surface slab: far columns load only the altitude band around the analytic surface | P2 | Heightmap modes only |
+| SP-C5 | A planet equivalent of the far-band surface slab: far columns load only the altitude band around the analytic surface | P2 | Heightmap modes only; since M4 they keep the slab at every distance (WM-S1) |
 | SP-C6 | Orbital view: a quadtree-on-cube-sphere or octree LOD, plus a distant-planet impostor | P2 | Not started (SD5) |
 
 ### D. Meshing and rendering
@@ -199,7 +199,7 @@ WM-H10 in milestone M1. The heightmap side of SP-A1 and SP-A2, plus SP-A6 and SP
 world-mode API in M2 (WM-A1, WM-A2, WM-A4), so Phase 1 adds the planet implementations. **M2 done 2026-10-15**
 (review plan §14.6): the interface carries the planet side already (shell bounds, radial up and altitude, a cube-face
 surface coordinate), so Phase 1 starts from consumers, not from the interface. Phase 1 starts after M4 (the
-per-column streaming window that SP-C1 builds on) and M5 (the legacy whole-chunk path is deleted before SP-D4 tests
+per-column streaming window that SP-C1 builds on; **implemented 2026-10-15, in review**, review plan §14.8) and M5 (the legacy whole-chunk path is deleted before SP-D4 tests
 seams at mid latitudes).
 
 ## Appendix A. Z-up audit
