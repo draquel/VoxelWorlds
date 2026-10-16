@@ -98,11 +98,41 @@ public:
 	float IslandCenterY = 0.0f;
 
 	/**
-	 * Terrain height the falloff fades to at the island's edge (R + falloff width). Beyond the edge, generation
-	 * writes a flat floor 1,000 uu below it (FIslandBowlWorldMode::OutsideFloorDepth).
+	 * Terrain height the falloff fades to at the island's edge (R + falloff width). Beyond the edge the seabed keeps
+	 * sloping down (IslandSeabedDepth, IslandSeabedSlopeWidth) instead of dropping to a flat floor.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
 	float IslandEdgeHeight = -1000.0f;
+
+	/**
+	 * How far below IslandEdgeHeight the open sea's floor lies beyond the island's edge. Past R + falloff width the
+	 * seabed slopes down by this much over IslandSeabedSlopeWidth (a smoothstep, flat where it meets the falloff), then
+	 * stays flat, so the island stands on a slope into deep water instead of a cliff (world modes review WM-E1, KI2).
+	 * Generation (CPU and GPU), the analytic height and the far ocean's seabed (bIslandFarOcean) all use it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "0", EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	float IslandSeabedDepth = 6000.0f;
+
+	/**
+	 * Horizontal distance past the island's edge over which the seabed slopes down to IslandSeabedDepth (world units).
+	 * 0 gives a step at the edge (the floor 1,000 uu down was such a step before WM-E1).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "0", EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	float IslandSeabedSlopeWidth = 20000.0f;
+
+	/**
+	 * Draw the open sea beyond a bounded world's edge (world modes review WM-E1): a water surface from every chunk
+	 * column the streaming has not loaded out to IslandFarOceanDistance past the edge, over a seabed that continues
+	 * the generated slope. Without it the island floats in a void seen from outside the loaded ring. The water needs
+	 * bEnableWaterLevel and WaterMeshMaterial; the seabed is drawn either way. The cvar voxel.World.FarOcean 0 hides
+	 * it at runtime.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (EditCondition = "WorldMode == EWorldMode::IslandBowl"))
+	bool bIslandFarOcean = true;
+
+	/** How far past the island's edge the far ocean reaches (world units): far enough that its rim sits at the horizon */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Island", meta = (ClampMin = "10000", EditCondition = "WorldMode == EWorldMode::IslandBowl && bIslandFarOcean"))
+	float IslandFarOceanDistance = 2000000.0f;
 
 	// ==================== Spherical Planet Mode Settings ====================
 

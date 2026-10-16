@@ -7,7 +7,8 @@
 // These tests record what the code does today and pass; the numbers go to the review (KI1, KI2, KI4). The checks that
 // would fail today are logged as "PROBE" lines instead of being asserted, so the suite stays green until the findings
 // are fixed. Turn them into assertions with the fix. KI4's are asserted since WM-H6 (2026-10-14): no falloff curve
-// leaves a step at R+F beyond the floor's own, and GetDensityAt agrees with the floor beyond R+F. The InfinitePlane
+// leaves a step at R+F, and GetDensityAt agrees with the seabed beyond R+F; since WM-E1 (KI2) the seabed continues
+// from the falloff with no step at all (it was a 1,000 uu cliff to a flat floor). The InfinitePlane
 // height column is what POI placement sampled before WM-A3 (2026-10-15); placement now samples the world mode, whose
 // height the "island analytic" column checks.
 
@@ -173,8 +174,9 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 		}
 
 		// KI2 / KI4: the step at R+F. Just inside, the falloff leaves EdgeHeight + factor * relief; just outside,
-		// generation writes a flat floor at EdgeHeight - 1000. Every curve now reaches EdgeHeight at the edge, so the
-		// step is the floor's 1,000 uu (KI2, WM-E1) and nothing more: Exponential used to add ~5% of the relief (KI4).
+		// generation writes the seabed, which starts at EdgeHeight and slopes down (WM-E1). Every curve reaches
+		// EdgeHeight at the edge, so nothing steps there: the floor beyond used to drop 1,000 uu (KI2), and Exponential
+		// added ~5% of the relief on top (KI4).
 		for (const EIslandFalloffType Falloff : { Island.FalloffType, EIslandFalloffType::Exponential })
 		{
 			FIslandBowlParams Variant = Island;
@@ -198,26 +200,29 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 					MinStep = FMath::Min(MinStep, InsideGen - OutsideGen);
 				}
 			}
-			AddInfo(FString::Printf(TEXT("PROBE %s edge step at R+F (falloff type %d): generated surface drops %.0f to %.0f uu across 80 uu (EdgeHeight %.0f, floor beyond %.0f)"),
-				Name, static_cast<int32>(Falloff), MinStep, MaxStep, Variant.EdgeHeight, Variant.EdgeHeight - 1000.0f));
-			TestTrue(FString::Printf(TEXT("%s falloff type %d: no step at R+F beyond the floor's %.0f uu (max %.0f)"),
-				Name, static_cast<int32>(Falloff), FIslandBowlWorldMode::OutsideFloorDepth, MaxStep),
-				MaxStep <= FIslandBowlWorldMode::OutsideFloorDepth + 1.5f * Config->VoxelSize);
+			AddInfo(FString::Printf(TEXT("PROBE %s edge step at R+F (falloff type %d): generated surface drops %.0f to %.0f uu across 80 uu (EdgeHeight %.0f, seabed slopes %.0f uu down over %.0f uu beyond)"),
+				Name, static_cast<int32>(Falloff), MinStep, MaxStep, Variant.EdgeHeight, Variant.SeabedDepth, Variant.SeabedSlopeWidth));
+			TestTrue(FString::Printf(TEXT("%s falloff type %d: no step at R+F (max %.0f uu across 80 uu)"),
+				Name, static_cast<int32>(Falloff), MaxStep),
+				MaxStep <= 1.5f * Config->VoxelSize);
 		}
 
 		// KI4: the world mode's height bounds leave out the floor generation writes beyond R+F.
 		float BoundsMin = 0.0f, BoundsMax = 0.0f;
 		IslandMode.GetTerrainHeightBounds(BoundsMin, BoundsMax);
-		AddInfo(FString::Printf(TEXT("PROBE %s GetTerrainHeightBounds [%.0f, %.0f]; generated floor beyond R+F at %.0f is %s the bounds"),
-			Name, BoundsMin, BoundsMax, Island.EdgeHeight - 1000.0f, (Island.EdgeHeight - 1000.0f) < BoundsMin ? TEXT("below") : TEXT("inside")));
+		const float OpenSeaFloor = Island.EdgeHeight - Island.SeabedDepth;
+		AddInfo(FString::Printf(TEXT("PROBE %s GetTerrainHeightBounds [%.0f, %.0f]; the open-sea floor beyond R+F at %.0f is %s the bounds"),
+			Name, BoundsMin, BoundsMax, OpenSeaFloor, OpenSeaFloor < BoundsMin ? TEXT("below") : TEXT("inside")));
+		TestTrue(FString::Printf(TEXT("%s: the open-sea floor is inside the height bounds"), Name), OpenSeaFloor >= BoundsMin);
 
-		// The island world mode's own density query agrees with the floor generation writes beyond R+F (it used to
+		// The island world mode's own density query agrees with the seabed generation writes beyond R+F (it used to
 		// call everything there air).
-		const FVector Beyond(Island.CenterX + R + F + 300.0f, Island.CenterY, Island.EdgeHeight - 1500.0f);
-		const float BeyondDensity = IslandMode.GetDensityAt(Beyond, 0, 0.0f);
-		AddInfo(FString::Printf(TEXT("PROBE %s GetDensityAt 500 uu under the generated floor beyond R+F = %.0f (negative = air)"),
-			Name, BeyondDensity));
-		TestTrue(FString::Printf(TEXT("%s GetDensityAt is solid under the floor beyond R+F"), Name), BeyondDensity > 0.0f);
+		const float BeyondX = Island.CenterX + R + F + 300.0f;
+		const float SeabedZ = IslandMode.GetTerrainHeightAt(BeyondX, Island.CenterY, Config->NoiseParams);
+		const float BeyondDensity = IslandMode.GetDensityAt(FVector(BeyondX, Island.CenterY, SeabedZ - 500.0f), 0, 0.0f);
+		AddInfo(FString::Printf(TEXT("PROBE %s GetDensityAt 500 uu under the generated seabed beyond R+F (at %.0f) = %.0f (negative = air)"),
+			Name, SeabedZ, BeyondDensity));
+		TestTrue(FString::Printf(TEXT("%s GetDensityAt is solid under the seabed beyond R+F"), Name), BeyondDensity > 0.0f);
 	}
 
 	return true;
