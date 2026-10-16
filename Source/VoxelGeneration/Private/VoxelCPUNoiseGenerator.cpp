@@ -1038,10 +1038,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 
 // ==================== Cave Generation Helpers ====================
 
-float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed)
+float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed,
+	const FSphericalPlanetParams* Planet)
 {
-	// Apply vertical scale to flatten caves horizontally
-	FVector ScaledPos(WorldPos.X, WorldPos.Y, WorldPos.Z * LayerConfig.VerticalScale);
+	// Apply vertical scale to flatten caves horizontally: along world Z in heightmap modes, along local up on a planet
+	// (the altitude above the datum is scaled, the direction kept; SP-B6)
+	const FVector ScaledPos = Planet
+		? FSphericalPlanetWorldMode::ScaleAltitude(WorldPos, *Planet, LayerConfig.VerticalScale)
+		: FVector(WorldPos.X, WorldPos.Y, WorldPos.Z * LayerConfig.VerticalScale);
 
 	// Build noise params for first noise field
 	FVoxelNoiseParams CaveNoiseParams;
@@ -1114,7 +1118,8 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 	uint8 BiomeID,
 	const UVoxelCaveConfiguration* CaveConfig,
 	int32 WorldSeed,
-	bool bIsUnderwater)
+	bool bIsUnderwater,
+	const FSphericalPlanetParams* Planet)
 {
 	if (!CaveConfig || !CaveConfig->bEnableCaves)
 	{
@@ -1168,7 +1173,7 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 		}
 
 		// Sample this cave layer
-		float LayerCarve = SampleCaveLayer(WorldPos, Layer, WorldSeed);
+		float LayerCarve = SampleCaveLayer(WorldPos, Layer, WorldSeed, Planet);
 
 		if (LayerCarve <= 0.0f)
 		{
@@ -1366,6 +1371,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// Depth below surface is radial (terrain radius - distance from center)
 				float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
 
+				// Height-material rules read the voxel's altitude above the datum, as they read Z in the heightmap modes
+				// (SP-B2; the radius put every surface past the snow line). Caves under the sea keep their underwater
+				// minimum depth (SP-B6).
+				const float Altitude = DistFromCenter - PlanetRadius;
+				const bool bUnderwater = Request.bEnableWaterLevel && TerrainRadius < Request.WaterRadius;
+
+				// Temperature and moisture are sampled like the terrain, on the datum sphere, so biomes keep their size in
+				// uu whatever the radius (SP-B1).
+				const FVector BiomeSamplePos = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Direction, PlanetRadius);
+
 				// Save pre-cave density to detect cave carving (solid → air transition)
 				const uint8 PreCaveDensity = Density;
 
@@ -1375,9 +1390,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 				if (Request.bEnableBiomes && BiomeConfig && BiomeConfig->IsValid())
 				{
-					// For spherical planets, use direction for biome sampling
-					// Scale direction to get varied biome coordinates
-					FVector BiomeSamplePos = Direction * 10000.0f;
 					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
@@ -1388,7 +1400,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					float CaveDensity = 0.0f;
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1408,8 +1420,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
 					}
 
-					// Height rules use radial distance as "height" for spherical planets
-					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, DistFromCenter, DepthBelowSurface);
+					// Height rules by altitude above the datum (SP-B2)
+					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, Altitude, DepthBelowSurface);
 
 					// Cave wall material override (solid voxels near cave boundaries)
 					if (Request.bEnableCaves && Request.CaveConfiguration
@@ -1438,7 +1450,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				}
 				else if (Request.bEnableBiomes)
 				{
-					FVector BiomeSamplePos = Direction * 10000.0f;
 					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
@@ -1449,7 +1460,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1464,7 +1475,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);

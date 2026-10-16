@@ -7,6 +7,8 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeSnapshot.h"
+#include "VoxelCaveConfiguration.h"
+#include "VoxelMaterialRegistry.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
@@ -25,6 +27,8 @@
 // - The surface normal points out of the terrain and only the direction from the centre matters.
 // - The displacement bounds and the configuration's shell check agree, continentalness included.
 // - The surface coordinate's tangent warp keeps equal UV cells within 1.5x in area and round-trips.
+// - Height-material rules read the altitude above the datum, not the radius (SP-B2).
+// - Caves flatten along local up, and the sea above suppresses them to UnderwaterMinDepth (SP-B6).
 // ---------------------------------------------------------------------------
 
 namespace SphericalPlanetTestUtils
@@ -559,6 +563,175 @@ bool FPlanetSurfaceCoordWarpTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A corner is at |U| = |V| = 1"), FMath::Abs(Corner.UV.X) + FMath::Abs(Corner.UV.Y), 2.0, 1.0e-6);
 
 	Config->RemoveFromRoot();
+	return true;
+}
+
+/**
+ * SP-B2: height-material rules read the voxel's altitude above the datum. With the default rules (snow at the surface
+ * from 4,000 up), snow covers exactly the surface voxels at altitude 4,000 or more; the radius used as "height" put
+ * every surface of a 250,000 uu planet past the snow line.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetHeightMaterialsTest,
+	"VoxelWorlds.WorldModes.Planet.HeightMaterialsByAltitude",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetHeightMaterialsTest::RunTest(const FString& Parameters)
+{
+	using namespace SphericalPlanetTestUtils;
+
+	UVoxelBiomeConfiguration* Biomes = NewObject<UVoxelBiomeConfiguration>(); // default biomes and height rules
+	Biomes->AddToRoot();
+	UVoxelWorldConfiguration* Config = MakePlanetConfig(Biomes);
+	Config->PlanetHeightScale = 16000.0f; // terrain to +-8,000, so some peaks pass the snow line
+	Config->PlanetMaxTerrainHeight = 8500.0f;
+	Config->PlanetMaxTerrainDepth = 8500.0f;
+	Config->bEnableBiomes = true;
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+	const FWorldModeTerrainParams Terrain = FVoxelWorldModeFactory::MakePlanetTerrainParams(*Config);
+	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Biomes);
+	const FVector Center = Config->WorldOrigin;
+	FPlanetVoxels Voxels(Config);
+	const uint8 Snow = EVoxelMaterial::Snow;
+
+	// Surface voxels (0.05 to 0.95 voxels deep) around surface points spread over the sphere.
+	int32 SnowAbove = 0, Above = 0, SnowBelow = 0, Below = 0;
+	for (const FVector& Direction : FibonacciDirections(300))
+	{
+		const FVoxelTerrainSurfacePoint Surface = Mode->GetSurfacePoint(Center + Direction, Config->NoiseParams);
+		if (FMath::Abs(Surface.Altitude - 4000.0f) > 2500.0f && Surface.Altitude < 4000.0f && (Below > 400))
+		{
+			continue; // enough low samples; keep generating only where it matters
+		}
+		const FIntVector Base((Surface.Position - Center) / PlanetTestVoxelSize);
+		for (int32 dz = -1; dz <= 1; ++dz)
+		for (int32 dy = -1; dy <= 1; ++dy)
+		for (int32 dx = -1; dx <= 1; ++dx)
+		{
+			const FIntVector Index = Base + FIntVector(dx, dy, dz);
+			const FVector Position = Center + FVector(Index) * PlanetTestVoxelSize;
+			const FVector VoxelDir = (Position - Center).GetSafeNormal();
+			const double Dist = FVector::Dist(Position, Center);
+			const double Depth = (PlanetTestRadius + FSphericalPlanetWorldMode::SampleRadialDisplacement(
+				VoxelDir, PlanetTestRadius, Terrain, Config->NoiseParams, &Snapshot) - Dist) / PlanetTestVoxelSize;
+			const double Altitude = Dist - PlanetTestRadius;
+			if (Depth < 0.05 || Depth > 0.95 || FMath::Abs(Altitude - 4000.0) < 50.0)
+			{
+				continue;
+			}
+			const bool bSnow = Voxels.Voxel(Index).MaterialID == Snow;
+			if (Altitude >= 4000.0)
+			{
+				++Above;
+				SnowAbove += bSnow ? 1 : 0;
+			}
+			else
+			{
+				++Below;
+				SnowBelow += bSnow ? 1 : 0;
+			}
+		}
+	}
+	AddInfo(FString::Printf(TEXT("Surface voxels at altitude >= 4,000: %d of %d snow; below: %d of %d snow (%d chunks)"),
+		SnowAbove, Above, SnowBelow, Below, Voxels.Chunks.Num()));
+	TestTrue(TEXT("Surface voxels exist above the snow line"), Above >= 20);
+	TestTrue(TEXT("Surface voxels exist below it"), Below >= 100);
+	TestEqual(TEXT("Every surface voxel above the snow line is snow"), SnowAbove, Above);
+	TestEqual(TEXT("No surface voxel below the snow line is snow"), SnowBelow, 0);
+
+	Config->RemoveFromRoot();
+	Biomes->RemoveFromRoot();
+	return true;
+}
+
+/**
+ * SP-B6: caves on a planet. ScaleAltitude scales the altitude by VerticalScale along the direction from the centre and
+ * keeps the direction (so caves flatten along local up at any latitude); VerticalScale 1 changes nothing. Generation
+ * carves caves on the planet, and a sea above the terrain keeps them below the configuration's UnderwaterMinDepth.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetCavesTest,
+	"VoxelWorlds.WorldModes.Planet.Caves",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetCavesTest::RunTest(const FString& Parameters)
+{
+	using namespace SphericalPlanetTestUtils;
+
+	FSphericalPlanetParams Planet;
+	Planet.PlanetRadius = PlanetTestRadius;
+	Planet.PlanetCenter = FVector(1000.0, -2000.0, 500.0);
+	for (const FVector& Direction : SurveyDirections())
+	{
+		for (const double Altitude : { -3000.0, -250.0, 1200.0 })
+		{
+			const FVector P = Planet.PlanetCenter + Direction * (PlanetTestRadius + Altitude);
+			const FVector Scaled = FSphericalPlanetWorldMode::ScaleAltitude(P, Planet, 0.5f);
+			TestEqual(TEXT("ScaleAltitude halves the altitude"), FVector::Dist(Scaled, Planet.PlanetCenter) - PlanetTestRadius, Altitude * 0.5, 0.01);
+			TestTrue(TEXT("ScaleAltitude keeps the direction"), (Scaled - Planet.PlanetCenter).GetSafeNormal().Equals(Direction, 1.0e-9));
+			TestTrue(TEXT("VerticalScale 1 is the identity"), FSphericalPlanetWorldMode::ScaleAltitude(P, Planet, 1.0f).Equals(P, 1.0e-6));
+		}
+		// Two points 1,000 uu apart along the surface at the datum stay 1,000 uu apart (within the chord's curvature).
+		const FVector T = FVector::CrossProduct(FMath::Abs(Direction.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector, Direction).GetSafeNormal();
+		const FVector A = Planet.PlanetCenter + Direction * PlanetTestRadius;
+		const FVector B = Planet.PlanetCenter + (Direction + T * (1000.0 / PlanetTestRadius)).GetSafeNormal() * PlanetTestRadius;
+		TestEqual(TEXT("Horizontal distances at the datum are kept"),
+			FVector::Dist(FSphericalPlanetWorldMode::ScaleAltitude(A, Planet, 0.5f), FSphericalPlanetWorldMode::ScaleAltitude(B, Planet, 0.5f)),
+			FVector::Dist(A, B), 0.01);
+	}
+
+	// Generation: carved = solid without caves, air with them, in the chunks around surface points at many latitudes.
+	UVoxelCaveConfiguration* Caves = NewObject<UVoxelCaveConfiguration>(); // the default Cheese, Spaghetti and Noodle layers
+	Caves->AddToRoot();
+	auto CountCarved = [&](bool bSea, int32& OutShallowest)
+	{
+		UVoxelWorldConfiguration* Config = MakePlanetConfig(nullptr);
+		Config->CaveConfiguration = Caves;
+		Config->bEnableWaterLevel = bSea;
+		Config->WaterRadius = PlanetTestRadius + 20000.0f; // every surface under the sea
+		const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+		FPlanetVoxels Without(Config);
+		UVoxelWorldConfiguration* WithCaves = DuplicateObject(Config, nullptr);
+		WithCaves->AddToRoot();
+		WithCaves->bEnableCaves = true;
+		FPlanetVoxels With(WithCaves);
+		int32 Carved = 0;
+		OutShallowest = TNumericLimits<int32>::Max();
+		for (const FVector& Direction : SurveyDirections())
+		{
+			const FVoxelTerrainSurfacePoint Surface = Mode->GetSurfacePoint(Config->WorldOrigin + Direction, Config->NoiseParams);
+			const FIntVector ChunkCoord(FMath::FloorToInt((Surface.Position.X - Config->WorldOrigin.X) / (PlanetTestChunkSize * PlanetTestVoxelSize)),
+				FMath::FloorToInt((Surface.Position.Y - Config->WorldOrigin.Y) / (PlanetTestChunkSize * PlanetTestVoxelSize)),
+				FMath::FloorToInt((Surface.Position.Z - Config->WorldOrigin.Z) / (PlanetTestChunkSize * PlanetTestVoxelSize)));
+			const TArray<FVoxelData>& A = Without.Chunk(ChunkCoord);
+			const TArray<FVoxelData>& B = With.Chunk(ChunkCoord);
+			for (int32 i = 0; i < A.Num(); ++i)
+			{
+				if (A[i].IsSolid() && !B[i].IsSolid())
+				{
+					++Carved;
+					const int32 N = PlanetTestChunkSize;
+					const FIntVector Local(i % N, (i / N) % N, i / (N * N));
+					const FVector P = Config->WorldOrigin + FVector(ChunkCoord * N + Local) * PlanetTestVoxelSize;
+					const FVoxelTerrainSurfacePoint Above = Mode->GetSurfacePoint(P, Config->NoiseParams);
+					const int32 DepthVoxels = FMath::FloorToInt((FVector::Dist(Above.Position, Config->WorldOrigin) - FVector::Dist(P, Config->WorldOrigin)) / PlanetTestVoxelSize);
+					OutShallowest = FMath::Min(OutShallowest, DepthVoxels);
+				}
+			}
+		}
+		WithCaves->RemoveFromRoot();
+		Config->RemoveFromRoot();
+		return Carved;
+	};
+	int32 DryShallowest = 0, WetShallowest = 0;
+	const int32 DryCarved = CountCarved(false, DryShallowest);
+	Caves->UnderwaterMinDepth = 60.0f;
+	const int32 WetCarved = CountCarved(true, WetShallowest);
+	AddInfo(FString::Printf(TEXT("Carved voxels in %d surface chunks: dry %d (shallowest %d voxels deep); under the sea with UnderwaterMinDepth 60: %d (shallowest %d)"),
+		SurveyDirections().Num(), DryCarved, DryShallowest, WetCarved, WetCarved > 0 ? WetShallowest : -1));
+	TestTrue(TEXT("Generation carves caves on the planet"), DryCarved > 0);
+	TestTrue(TEXT("The sea keeps caves below UnderwaterMinDepth (less its fade)"), WetCarved == 0 || WetShallowest >= 60 - 6 - 1);
+	TestTrue(TEXT("The sea suppresses the shallow caves"), WetCarved < DryCarved);
+
+	Caves->RemoveFromRoot();
 	return true;
 }
 

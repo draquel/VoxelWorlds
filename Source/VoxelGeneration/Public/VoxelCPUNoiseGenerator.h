@@ -9,6 +9,7 @@
 class FInfinitePlaneWorldMode;
 class FIslandBowlWorldMode;
 class FSphericalPlanetWorldMode;
+struct FSphericalPlanetParams;
 class UVoxelCaveConfiguration;
 struct FCaveLayerConfig;
 
@@ -194,9 +195,12 @@ private:
 	 * @param WorldPos World position to sample
 	 * @param LayerConfig Configuration for this cave layer
 	 * @param WorldSeed Base world seed
+	 * @param Planet On a planet, VerticalScale acts along local up (FSphericalPlanetWorldMode::ScaleAltitude, SP-B6);
+	 *        null in heightmap modes, where it scales world Z
 	 * @return Carve density in range [0, 1] where 0 = no carving, 1 = full carving
 	 */
-	static float SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed);
+	static float SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed,
+		const FSphericalPlanetParams* Planet = nullptr);
 
 public:
 	/**
@@ -212,6 +216,8 @@ public:
 	 * @param BiomeID Current biome ID for per-biome overrides
 	 * @param CaveConfig Cave configuration data asset
 	 * @param WorldSeed Base world seed
+	 * @param bIsUnderwater The terrain surface above is under the water (caves keep UnderwaterMinDepth below it)
+	 * @param Planet On a planet, the layers' VerticalScale acts along local up (SP-B6); null in heightmap modes
 	 * @return Carve density in range [0, 1]
 	 */
 	static float CalculateCaveDensity(
@@ -220,7 +226,8 @@ public:
 		uint8 BiomeID,
 		const UVoxelCaveConfiguration* CaveConfig,
 		int32 WorldSeed,
-		bool bIsUnderwater = false);
+		bool bIsUnderwater = false,
+		const FSphericalPlanetParams* Planet = nullptr);
 
 private:
 	// ==================== Ore Vein Helpers ====================
