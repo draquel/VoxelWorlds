@@ -24,7 +24,7 @@ loaded (`QueryEditMergedSurface`). A 2.5-D grid over those two queries gives a c
 A step between neighbouring cells is allowed when both cells are above `WaterLevel − MaxWadeDepth`, neither is
 blocked, and `|Δheight| ≤ MaxStepRise` (× √2 on diagonals). Every cell outside the world mode's bounds is blocked
 (`UVoxelChunkManager::IsInsideWorld`; world modes review WM-I2), water on or off: past an island's `R + FalloffWidth`
-generation writes only a flat floor, which with water off would otherwise read as walkable ground. Diagonals additionally need both orthogonal neighbours
+generation writes only the seabed, which with water off would otherwise read as walkable ground. Diagonals additionally need both orthogonal neighbours
 steppable. Cost = run × (1 + SlopeCostScale × rise / run). Surface only: caves, overhangs and bridges do not exist
 for the pathfinder (one height per column).
 

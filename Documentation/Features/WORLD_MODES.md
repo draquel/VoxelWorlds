@@ -2,8 +2,8 @@
 
 **Module**: VoxelGeneration
 **Dependencies**: VoxelCore
-**Last Updated**: 2026-10-15 (the world-mode API of milestone M2: one params builder, bounds, a local frame, save
-fingerprints; WORLD_MODES_REVIEW_PLAN.md §14.6)
+**Last Updated**: 2026-10-16 (milestone M6: the island's seabed slopes into a far ocean that reaches the horizon, and
+the island streams only the columns that touch it; WORLD_MODES_REVIEW_PLAN.md §14.10)
 
 ## Overview
 
@@ -108,8 +108,9 @@ float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos,
 Bounded terrain with a falloff at the edges, for a contained world: an island in the sea, or a landmass ringed by a
 low floor. Reviewed as a "large but finite world" with every game system on in 2026-10 (WORLD_MODES_REVIEW_PLAN.md §5,
 §13). The terrain itself is correct; the gaps were around it. Milestone M3 (2026-10-15, that plan's §14.7) keeps placement,
-exploration, markers, PCG, navigation and spawning inside the island and gives it a hard edge with recovery; what is left
-was streaming cost, fixed by M4 (2026-10-15, §14.8: the island now streams like the plane), and a visible edge (M6). See
+exploration, markers, PCG, navigation and spawning inside the island and gives it a hard edge with recovery; what was
+left was streaming cost, fixed by M4 (2026-10-15, §14.8: the island now streams like the plane), and a visible edge,
+fixed by M6 (2026-10-16, §14.10: a seabed that slopes from the coast into a far ocean that reaches the horizon). See
 "Beyond the edge", "Measured" and "Known gaps" below.
 
 ### Configuration (UVoxelWorldConfiguration)
@@ -128,6 +129,10 @@ int32 IslandFalloffType = 1;         // 0=Linear, 1=Smooth, 2=Squared, 3=Exponen
 float IslandCenterX = 0.0f;          // Island centre (see the note below)
 float IslandCenterY = 0.0f;
 float IslandEdgeHeight = -1000.0f;   // Terrain height the falloff reaches at R + FalloffWidth
+float IslandSeabedDepth = 6000.0f;   // Beyond the edge the seabed slopes this far below EdgeHeight...
+float IslandSeabedSlopeWidth = 20000.0f; // ...over this distance past the edge (0 = a step), then stays flat
+bool  bIslandFarOcean = true;        // Draw the sea and the seabed past what is streamed (UVoxelChunkManager)
+float IslandFarOceanDistance = 2000000.0f; // How far past the edge the far ocean reaches
 ```
 
 **Island centre:** `IslandCenterX/Y` is an offset from `WorldOrigin`. `FVoxelWorldModeFactory::MakeIslandParams`
@@ -213,10 +218,40 @@ float FIslandBowlWorldMode::CalculateFalloffFactorForPoint(
 ```
 
 ### Beyond the edge
-Past `R + FalloffWidth` generation writes a flat floor at `EdgeHeight - 1000` (`FIslandBowlWorldMode::OutsideFloorDepth`),
-so the terrain drops 1,000 uu at the edge in a vertical wall. The cull keeps a ring of chunks out to one chunk diagonal past
-the edge (6,788 uu with the demo's 4,800 uu chunks), so the floor and the water plane exist only in that ring; past it there
-is nothing: no terrain, water or collision.
+**The seabed (M6, WM-E1).** Past `R + FalloffWidth` generation writes the seabed: from `EdgeHeight` at the edge it slopes
+down by `IslandSeabedDepth` over `IslandSeabedSlopeWidth` (a smoothstep, `FIslandBowlWorldMode::GetSeabedHeight`), then
+stays flat. Distance past the edge is measured as the falloff measures it: radially for a circle, the larger axis excess
+for a rectangle (`GetDistancePastEdge`). Generation on the CPU and the GPU (`IslandSeabedHeight` in `IslandFalloff.ush`,
+locked by `GPUvsCPUIslandBowlParity`'s seabed cases), the analytic height and `GetDensityAt` share it, and
+`GetTerrainHeightBounds` reaches its floor. Until M6 the terrain dropped 1,000 uu at the edge in a vertical wall to a flat
+floor (`OutsideFloorDepth`, removed); `IslandSeabedDepth` 1,000 with a slope width of 0 is that step.
+
+**What streams.** Only chunk columns that touch the footprint (`FVoxelWorldBounds::IntersectsBox2D`, the test the map
+uses for its tiles). The cull used to keep a ring out to a chunk diagonal past the edge (6,788 uu with the demo's 4,800 uu
+chunks) holding the floor and the water; nothing past the walls needs it now.
+
+**The far ocean (M6, WM-E1).** The chunk manager draws the sea and the seabed past what is streamed, out to
+`IslandFarOceanDistance` past the edge (`FVoxelFarOcean`; `UVoxelChunkManager::RebuildFarOcean`), on three procedural
+mesh components of the world actor (the static meshes, the grid's frame and the grid's window):
+
+| Mesh | Covers | Material | Updated |
+|------|--------|----------|---------|
+| Grid water | Every chunk column of the footprint's box (plus two columns) that the streaming has not opened: a column opens when it holds a chunk with voxel data or a water tile | `WaterMeshMaterial`, at `WaterLevel` like the water tiles | Whenever the open columns change (same tick, so a column's water tile and the far ocean never overlap: the water is translucent). Only the window around the open columns (their bounds plus 8 columns) is rebuilt then; the frame outside it is rebuilt when the open columns leave the window and it moves, so the cost does not grow with the island |
+| Grid floor | Under the grid water's columns that touch the footprint: flat at `EdgeHeight` inside the edge, the seabed outside | The terrain's material instance, with the seabed's material id | With the grid water |
+| Open sea | From the grid's rectangle out to the footprint's box plus `IslandFarOceanDistance`, in widening rings | `WaterMeshMaterial` | Built once |
+| Seabed | From the edge out to the open sea's corners, half a voxel under the seabed profile, so the loaded voxel seabed hides it | Terrain material, seabed material id (the most common one generation gives just past the edge) | Built once |
+
+The water's undersides are separate sections, shown only while the viewer is under the water plane. The components are
+their own primitives, so a recreated terrain scene proxy (G15) does not touch them. Inside the island, columns past the
+view distance also get the far ocean's water: unloaded land there reads as sea at the horizon (as the plane shows the
+void past its view distance); `voxel.World.FarOceanInland <uu>` limits the water to columns within that distance of the
+edge (0 = only those that reach it). `voxel.World.FarOcean 0` hides it, `voxel.World.FarOceanStats` logs its state; the
+water needs `bEnableWaterLevel` and `WaterMeshMaterial` (without them the world actor draws its fallback plane), the
+seabed is drawn either way. `GetSettingsWarnings` flags an `IslandEdgeHeight` at or above the water.
+
+**Saves.** The seabed shapes only terrain past `R + F`, where a save holds nothing (POIs, map tiles and edits stay inside
+the walls), so it is not part of the save fingerprint and `FVoxelWorldModeFactory::GenerationVersion` stays 1: saves
+from before M6 load.
 
 **The boundary (decision D9, M3).** Nothing gets there any more:
 
@@ -237,21 +272,20 @@ is nothing: no terrain, water or collision.
   it. A terrain wait that times out with nothing under the pawn moves it to the respawn point (the rest point, else a
   player start, else the world's centre) and waits there.
 
-The visible edge (an ocean to the horizon, a seabed that slopes instead of the cliff) is WM-E1, milestone M6.
+The visible edge (an ocean to the horizon, a seabed that slopes instead of the cliff) came with M6 (WM-E1, above).
 
 ### LOD Culling
 - **Terrain Bounds Culling**: Chunks above/below the terrain height range are skipped (same as Infinite Plane). The
   range is the world mode's `GetTerrainHeightBounds`, whose minimum includes the floor beyond the edge
   (`IslandEdgeHeight - 1000`), plus one chunk
-- **Island Boundary Culling** (by chunk centre, 2D):
-  - Circular: chunks whose centre is farther than `IslandRadius + FalloffWidth + chunk diagonal` are skipped
-  - Rectangle: chunks beyond `IslandRadius + FalloffWidth + half a chunk` in X, or `IslandSizeY + FalloffWidth + half a
-    chunk` in Y, are skipped
+- **Island Boundary Culling** (2D): a chunk streams only when its column touches the footprint
+  (`FVoxelWorldBounds::IntersectsBox2D`: the circle or the rectangle `R + F`). Until M6 a circle kept every chunk whose
+  centre was within `R + F + chunk diagonal`, a ring of columns wholly outside the edge
 - **The same streaming window as Infinite Plane** (M4, 2026-10-15): each column's surface slab at every distance, the
   viewer's layer ± 2 near the viewer, the horizon measured horizontally and LOD distance in 3D. Until M4 islands had no
   slab (every column kept 7-8 layers; KI5), measured LOD distance in 2D (whole columns stayed in the near bands,
-  uncompressed; KI13), and the residency audit, measuring 3D, reported false findings (KI11). The floor ring beyond
-  R + F keeps its slab too: the floor, up to the water plane
+  uncompressed; KI13), and the residency audit, measuring 3D, reported false findings (KI11). Columns that cross R + F
+  keep their slab too: the seabed, up to the water plane
 
 ### Measured after M4 (2026-10-15)
 The same routes as review B, one batch on one build, island M against the control at v1500, v3000 and v6000
@@ -292,8 +326,9 @@ WORLD_MODES_REVIEW_PLAN.md §13.3-13.5. Tiers: S, M and L are 0.8, 5 and 10 km a
   The island-specific costs (no slab, 2D LOD distance, the coast) are per view.
 - **Memory budget (decision D3):** 0.6 GB of voxel systems memory settled for a fully resident S-class island, and at
   most 1.5 GB at peak while streaming, at any speed and tier. The review met it in every run but M's v6000 chord (1.55 GB).
-- **Largest island** the streaming-only model holds without new memory work: about 10-20 km across. Map tile images grow
-  with the explored area and are never evicted (KI15: a fully explored L is about 0.55 GB of tiles; work item WM-E2).
+- **Largest island** the streaming-only model holds without new memory work: about 10-20 km across. Map tile images grew
+  with the explored area and were never evicted (KI15: a fully explored L is about 0.55 GB of tiles). *Fixed by WM-E2
+  (M6): the map keeps its images under a fixed 80 MB budget; a fully explored L holds 37 MB (MAP_SYSTEM.md).*
 - A 25-minute soak on M held frame time and memory flat.
 
 ### Known gaps
@@ -301,8 +336,8 @@ Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
 
 - ~~**POI placement**~~ Fixed by WM-A3 and WM-I1 (2026-10-15): placement samples the island's own height, and only sites
   wholly inside R + F, falloff ring included, are placed, whatever the type's surface filter (KI1).
-- ~~**No world edge or recovery**~~ Fixed by WM-I4 and WM-I5 (2026-10-15): see "Beyond the edge". The visible edge is
-  still open (KI2; WM-E1).
+- ~~**No world edge or recovery**~~ Fixed by WM-I4 and WM-I5 (2026-10-15), and the visible edge by WM-E1 (2026-10-16):
+  see "Beyond the edge" (KI2).
 - ~~**Map exploration and markers run past the coast**~~ Fixed by WM-I2 (2026-10-15): exploration and the world map's
   pan stop at the bounds, markers show only inside, the PCG sampler skips points outside, and navigation blocks every
   cell outside, water on or off (KI9). Scatter and surface NPCs already stopped at the coast.
@@ -313,7 +348,10 @@ Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
   the bounds, and a start outside searches from a chunk inside the edge (KI8).
 - ~~**Streaming cost**~~ Fixed by WM-S1 and WM-S2 (2026-10-15): the surface slab at every distance and 3D LOD distance
   (KI5, KI13); the residency audit agrees with the unload rule (KI11). See "Measured after M4".
-- **Map tile eviction** (KI15; WM-E2).
+- ~~**Map tile eviction**~~ Fixed by WM-E2 (2026-10-16): tile images live under a fixed budget, least recently used
+  first, and are drawn again when looked at; exploration is kept whole (KI15; MAP_SYSTEM.md).
+- **Unloaded island land past the view distance** reads as sea at the horizon (the far ocean stands in for it); a
+  distant silhouette of the island stays a nice-to-have (WORLD_MODES_REVIEW_PLAN.md §6).
 
 ### Use Cases
 - Floating islands
@@ -428,7 +466,7 @@ it by the `VoxelWorlds.Generation.GPUvsCPU*` parity tests:
   signed distance to that height.
 - **IslandBowl:** the same height, then `ApplyIslandFalloffToHeight` (`IslandFalloff.ush`, a port of
   `FIslandBowlWorldMode::ComposeTerrainHeight`): the falloff toward `EdgeHeight` inside the island's extent, the
-  flat floor at `EdgeHeight - 1000` beyond it. The curves on `t` (0 at `IslandRadius`, 1 at the edge) are
+  seabed beyond it (`IslandSeabedHeight`: a smoothstep down by `IslandSeabedDepth` over `IslandSeabedSlopeWidth`). The curves on `t` (0 at `IslandRadius`, 1 at the edge) are
   Linear `1 - t`, Smooth `(1-t)^2 (3 - 2(1-t))`, Squared `(1-t)^2` and Exponential
   `(e^-3t - e^-3) / (1 - e^-3)`; every curve reaches 0 at the edge.
 - **SphericalPlanet:** no branch. A planet request would fall through to the generic 3D-noise path and produce

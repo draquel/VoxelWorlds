@@ -16,7 +16,8 @@ The review runs the scenarios in §4 and §5 and records results against the acc
 revision of this document then turns the confirmed findings into work items. **Second revision, 2026-10-14: §14**
 (the status of every finding, work items with sizes and dependencies, milestones M1-M6, and where spherical starts),
 with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API) results: §14.6. M3 (island correctness)
-results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-only) results: §14.9.
+results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-only) results: §14.9. M6 (the island's
+visible edge and scale) results: §14.10.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -211,7 +212,7 @@ class column.)*
 
 | Feature | Class | Notes |
 |---------|-------|-------|
-| A world edge | Critical, **WM-I4/WM-I5 (recovery, boundary), WM-E1 (the visible edge)** | KI2, KI14. An ocean that continues to the horizon beyond the loaded ring (far water plane or ring), a seabed that slopes down instead of the `EdgeHeight - 1000` cliff, and a boundary rule. The rule can be soft (current pushes back, swim limit with a warning) or hard (blocking volume). *Decided with D9: hard at R+F, with a soft push-back before it, and a respawn as the safety net* |
+| A world edge | Critical, **WM-I4/WM-I5 (recovery, boundary), WM-E1 (the visible edge)** | KI2, KI14. An ocean that continues to the horizon beyond the loaded ring (far water plane or ring), a seabed that slopes down instead of the `EdgeHeight - 1000` cliff, and a boundary rule. The rule can be soft (current pushes back, swim limit with a warning) or hard (blocking volume). *Decided with D9: hard at R+F, with a soft push-back before it, and a respawn as the safety net.* *Done: the boundary and recovery in M3 (§14.7), the far ocean and the sloping seabed in M6 (§14.10)* |
 | A world-bounds query on `IVoxelWorldMode` | Critical, **WM-A2** | KI1, KI9. `IsInsideWorld(X, Y)` / `GetWorldBounds()`, used by POI placement, PCG, NPC spawning, spawn, map exploration and navigation |
 | World-mode-aware POI height sampling | Critical, **WM-A3 + WM-I1** | KI1. Sample through `IVoxelWorldMode` instead of `FInfinitePlaneWorldMode` |
 | One definition of the island centre | Critical, **WM-A1** | KI3, KI4. `WorldOrigin` plus offset everywhere, built by a single params builder |
@@ -223,7 +224,7 @@ class column.)*
 | Pre-generation for small islands | Nice | Generate everything at load, keep it compressed and resident, optionally cache it on disk. Builds on I3's numbers |
 | Coastline shaping | Nice | A noise-perturbed coastline instead of a perfect circle, a beach band material rule, and optional cliffs |
 | Bowl shape | Nice | KI4. Implement `bIslandBowlShape` or remove it. *WM-H6 removes the unread flag; a real bowl shape stays a nice-to-have* |
-| Map tile eviction | Critical past ~10 km, **WM-E2** *(added 2026-10-14)* | KI15. The first cost that grows with the island (§13.8) |
+| Map tile eviction | Critical past ~10 km, **WM-E2** *(added 2026-10-14)* | KI15. The first cost that grows with the island (§13.8). *Done in M6 (§14.10): tile images under an 80 MB budget* |
 | Archipelago | Nice | Several islands per world |
 | WP placed-actor POI clusters | Nice | Deferred until POIs become placed actors (`Research/ENGINE_INTEGRATION.md`) |
 
@@ -275,7 +276,8 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended.
    a latch in LOD evaluation, in every world mode (§13.10); the vertical candidate window was fixed with it (§13.11).
 4. **Second revision of this plan:** confirmed findings become work items with sizes and an order, alongside the
    spherical phasing. Done 2026-10-14: §14, with D1, D3, D8 and D9 decided (§8).
-5. **The work items** in the order of §14.3: M1 → M2 → M3 → M4 → M5 → M6, then spherical Phase 1.
+5. **The work items** in the order of §14.3: M1 → M2 → M3 → M4 → M5 → M6, then spherical Phase 1. M1-M5 merged by
+   2026-10-16; M6 done 2026-10-16 (§14.10).
 
 ## 10. Early signals from the tooling verification
 
@@ -838,7 +840,7 @@ Pass = meets the §5 "pass when"; Refine = works, but needs design or tuning; Bu
 | ID | Result | What happened |
 |----|--------|---------------|
 | I1 | **Bug** (KI1, KI3), KI4 partly | The three probes pass headless (`Saved/Logs/ReviewB_I1_probes.log`); numbers in §13.2. The island's own height query matches generation within one voxel in every zone. The InfinitePlane height that POI placement samples is right inside R and up to 7,138 uu wrong past it. Every placed POI past R is wrong: on M, 9 of the 12 POIs in the island's box sit in the falloff band or beyond R+F, and 8 of those 9 stand in the sea or over the void floor, on pads raised 1,900-5,900 uu above the island's surface. The cull probe reproduces KI3: with the demo's origin, 1,098 land columns are culled and 1,347 floor-only columns kept. The two existing island tests were not re-run separately; the full suites last passed in §12.8 |
-| I2 | **Refine** | S reads as an island on the map and from the air (`rbI2_islandS_map`, `rbI2_S_lagoon_oblique`): lagoons, inner seas and coastline all come from the noise inside a circle. Problems: a round plateau stands in the sea at the north edge (a campsite pad, KI1), visible on the map; from outside the loaded ring the island is a slab floating in the void, with the water plane, the −4,500 floor and the cave-cut bottom layer showing (`rbI2_S_edge_outside`, KI2); under water a vertical 1,000 uu wall rings the island at R+F (`rbI2_S_edge_cliff_underwater`). Rectangle shape with Exponential falloff (`RB_S_RectExp`, temporary): a rectangular island with straight coasts and diagonal creases from the Chebyshev falloff (`rbI2_S_RectExp_map`, `rbI2_S_RectExp_oblique`). Map exploration runs past the coast (KI9). A survey from a camera 48,000 uu up shows chunk-sized blank rectangles in the lagoon; at 4,500 uu the same water renders whole, so they are a camera artefact |
+| I2 | **Refine** | S reads as an island on the map and from the air (`rbI2_islandS_map`, `rbI2_S_lagoon_oblique`): lagoons, inner seas and coastline all come from the noise inside a circle. Problems: a round plateau stands in the sea at the north edge (a campsite pad, KI1), visible on the map; from outside the loaded ring the island is a slab floating in the void, with the water plane, the −4,500 floor and the cave-cut bottom layer showing (`rbI2_S_edge_outside`, KI2); under water a vertical 1,000 uu wall rings the island at R+F (`rbI2_S_edge_cliff_underwater`). Rectangle shape with Exponential falloff (`RB_S_RectExp`, temporary): a rectangular island with straight coasts and diagonal creases from the Chebyshev falloff (`rbI2_S_RectExp_map`, `rbI2_S_RectExp_oblique`). Map exploration runs past the coast (KI9). A survey from a camera 48,000 uu up shows chunk-sized blank rectangles in the lagoon; at 4,500 uu the same water renders whole, so they are a camera artefact *(M6, §14.10: from outside the loaded ring and from 48,000 uu up the island now sits in a sea that reaches the horizon, and the seabed slopes from the coast; the cliff and the void are gone)* |
 | I3 | **Pass** | The whole of S is resident from the centre: 1,518 chunks, settled 247 MB voxel data, 23 MB renderer, audit 0, 9 s to drain. After visits to three coasts the centre holds 1,878 chunks and 266 MB: the outer ring stays loaded, bounded by the island cull (§13.4). Memory returns to the same level *(M4, §14.8: with the surface slab the whole of S is 1,020 chunks and 336 MB settled, the control's 352 MB at its spawn)* |
 | I4 | **Refine** (inside the island) / **Bug** (along the coast) | Inside the island frame P95 is within +10% of the control and the island keeps up at v1500; manager P95 is +17-21% and the generation queue backs up at v3000, from the 35-55% more chunks per view (KI5). Along the coast (orbit at R) the island misses every threshold: frame +14-30%, manager +23-38%, catch-up 2.6-3.5× at v1500-v3000. The island's LOD re-meshing is **bimodal** between identical cold runs (KI12, new): 12,344-12,500 or 1,341-1,372 LOD re-meshes on the same route; in the low mode the island beats the control. Headless (CPU generation) the island lands in the high mode twice out of two: frame P95 +24%, manager P95 +28%. L's interior chord equals M's: per-frame cost does not depend on island size. §13.3. *(§13.10: the low mode skipped LOD work it owed; the high-mode rows are the island's numbers, and KI12 is fixed)* *(M4, §14.8: **Pass except catch-up at v1500.** The island meets the frame, manager, peak-loaded and memory thresholds on the chord, the perimeter and the coast at every speed; catch-up at v1500 is 0.27-0.46 s against the control's 0.17-0.18 s)* |
 | I5 | **Bug** (KI2) | Water on: the pawn walks into the sea at 36,000 uu (S), swims past R+F at 171 uu/s to the end of the loaded water at 48,000 uu (the island cull edge), drops out of the water and falls at 4,000 uu/s. About 260 s later KillZ (−1,048,575) destroys it and nothing respawns it: the player is left with no pawn. Water off: the pawn walks down the falloff slope, drops 1,000 uu off the cliff at R+F onto the floor, crosses the floor ring and falls off its edge at 48,000 uu. `vox.Debug.Capture` never logs READY→NOT-READY, because the chunks past the edge were never loaded. The minimap keeps exploring the sea |
@@ -1054,7 +1056,7 @@ render orphans or seam orphans.
 | ID | Verdict | Evidence |
 |----|---------|----------|
 | KI1 | **Confirmed** | §13.2: POI placement height is off by up to 7,138 uu past R, and on M 8 of the 9 POIs past R stand in the sea or over the floor, on pads raised 1,900-5,900 uu. In PIE: the City on a 3,800 uu cylinder out of the sea, a dungeon islet, a campsite plateau on the S map; the off-island Tower streams its claim over the void; 17 of 20 map markers lie past R (12 past R+F). Off-island dungeons are also stamped: a fresh S world, after a walk to its coast, saved 4.9 MB of voxel edits for a dungeon in POI cell (−1, 3), about 200,000 uu out over the void, in chunks that never load (the 4 MB seen in the tooling verification, §10). The band dungeon stays dry and playable, so "flooded" was not seen, but 1 of the 2 band dungeons on M and the one on L fail the cover rule against the island's real ground |
-| KI2 | **Confirmed** | No edge: a 1,000 uu wall at R+F, a floor ring out to R+F + 6,788 uu (the cull's chunk diagonal), then nothing. Water ends with that ring. The pawn swims off it and falls about 4 minutes to KillZ, which destroys it without a respawn; with water off it walks off the floor's edge. From outside, the island floats in the void (I2, I5) |
+| KI2 | **Confirmed** | No edge: a 1,000 uu wall at R+F, a floor ring out to R+F + 6,788 uu (the cull's chunk diagonal), then nothing. Water ends with that ring. The pawn swims off it and falls about 4 minutes to KillZ, which destroys it without a respawn; with water off it walks off the floor's edge. From outside, the island floats in the void (I2, I5) *(Fixed: the boundary and recovery in M3, §14.7; the visible edge in M6, §14.10: a seabed sloping from the coast and a far ocean to the horizon)* |
 | KI3 | **Confirmed** | §13.2: 1,098 land columns culled and 1,347 floor-only columns kept with the demo's origin; in PIE the south coast is a straight cut through a hill. With `WorldOrigin` 0 the two agree exactly |
 | KI4 | **Partly confirmed** | `bIslandBowlShape` is copied (config, request, island params, chunk manager ×2, map, field viewer, CPU generator) and read nowhere, shaders included. Exponential falloff leaves a 1,016-1,307 uu step instead of 1,000 (a 5% residual on top of the floor cliff every falloff type has). Island params are built in four places (`VoxelChunkManager.cpp:994`, `:2561`; `VoxelMapSubsystem.cpp:176`; `VoxelFieldTypes.cpp:63`). **Dismissed for these configs:** `GetTerrainHeightBounds` already contains the floor ([−12,000, 10,000] vs −4,500); it would miss it only when `EdgeHeight − 1000` is below the continentalness minimum. The world mode's `GetDensityAt` calls the floor air, which generation does not use (latent) |
 | KI5 | **Confirmed** | +35% chunks at the spawn on S (1,518 vs 1,123), +30-55% peak loaded on the M routes, generation queue 2.7× the control's at v3000, +32-54% meshes, and the main reason for the manager and coast misses in §13.3 *(Fixed in M4, §14.8: islands keep the surface slab at every distance; M's peak loaded chunks are within −15% to +8% of the control on every route)* |
@@ -1072,7 +1074,7 @@ render orphans or seam orphans.
 | KI12 | **Island LOD re-meshing is bimodal between identical cold runs.** M's v3000 chord gave 12,500, 12,344, 1,341 and 1,372 LOD re-meshes in four runs (same command, fresh world, same path to within 31 uu of height). In the high mode chunks mesh at LOD 1 five times as often (5,020 vs 987 meshes) and frame / manager P95 are 41 / 14.2-14.5 ms; in the low mode 32 / 9.7-10.0 ms. Headless (CPU generation) both island runs landed in the high mode (9,269 and 9,304 against the control's 1,142, §13.3), so the high mode may be the island's normal state and the PIE low mode the variant. Judging by the LOD counts, the PIE mode held for whole stretches of the session (the M batch high, the L batch low), and it may also switch inside a run (the soak's re-mesh rate doubled at minute 10, §13.5). It is not explained by a save load, the override, the island parameters or Python state, all checked. The control gave 7,168 twice | Bench JSON `rbI4_M_chord_v3000{,b,c,d}`; meshing log LOD counts | The island's streaming numbers have two values; its threshold verdicts depend on which mode a run lands in. Likely an ordering- or timing-dependent path in LOD evaluation, which only runs on a viewer chunk change or a drained-queue sweep (`VoxelChunkManager.cpp:768-791`) and drops candidates past the per-frame cap. Needs an instrumented run. **Explained and fixed (§13.10):** the sweep flag froze in whatever state it had when the queues last emptied, near the start of the route; set, LOD was evaluated every tick, clear, only at chunk changes, 8 at a time. The low mode was the broken one. It affected every world mode; the control's headless run was in it |
 | KI13 | **Island LOD distance is 2D everywhere, so whole columns sit in the near bands.** InfinitePlane measures 3D distance, so deep and high chunks fall into the far band and compress; the island keeps them uncompressed | At the same spawn: 224 resident (uncompressed) chunks vs the control's 113; settled voxel data 247 vs 135 MB (`DistanceBandLODStrategy.cpp:644-648`) | Memory, alongside KI5; the reason KI11's audit disagrees. *(Fixed in M4, §14.8: LOD distance is 3D in every world mode)* |
 | KI14 | **No recovery when the pawn leaves the generated world.** KillZ destroys the pawn and nothing respawns it: nothing in the project overrides `FellOutOfWorld`, so the engine default destroys the actor and the death and respawn path never runs. The character's chunk-based wait has no timeout, so a spawn or a restored save position where no terrain will ever generate freezes the pawn for good | I5 (water on: no pawn after KillZ), I7 (water off, off the island), I8 (radius change) | Soft locks; any world edge design needs this |
-| KI15 | **Map tile images are never evicted.** Each explored tile keeps a 64×64 `FColor` image (16 KB) for the session | `VoxelMapSubsystem.cpp:1648` (`TileCache.Add`, no removal outside `Deinitialize`); `VoxelMapTypes.h:27` | Mode-independent, but in a finite world it is the first cost that grows with the world: a fully explored L is about 0.55 GB of map tiles (§13.8) |
+| KI15 | **Map tile images are never evicted.** Each explored tile keeps a 64×64 `FColor` image (16 KB) for the session | `VoxelMapSubsystem.cpp:1648` (`TileCache.Add`, no removal outside `Deinitialize`); `VoxelMapTypes.h:27` | Mode-independent, but in a finite world it is the first cost that grows with the world: a fully explored L is about 0.55 GB of map tiles (§13.8). *(Fixed in M6, WM-E2, §14.10: 80 MB budget; a fully explored L holds 37 MB)* |
 
 Tooling found on the way:
 
@@ -1089,14 +1091,17 @@ Tooling found on the way:
   the cost is set by the view distance. The island-specific costs (KI5, KI13, the coast) are per view, not per island.
 - **What grows with the island:**
   - Map tile images, 16 KB per explored tile (KI15): fully explored M ≈ 8,500 island tiles ≈ 140 MB; L ≈ 34,000 tiles ≈
-    0.55 GB; a 20 km island ≈ 2.2 GB. Exploration past the coast (KI9) adds the sea ring on top.
+    0.55 GB; a 20 km island ≈ 2.2 GB. Exploration past the coast (KI9) adds the sea ring on top. *(M6, §14.10: the map
+    keeps its images under an 80 MB budget whatever the size; L measured 539 → 37 MB)*
   - The save: explored tiles are compressed coordinates (1,497 tiles in a few kB), edits and dungeon records grow with
     play, not with size.
   - Float precision: clean to about 100 km from the origin (`Research/TRAVERSAL_LIMITS.md`), so up to about 200 km
     across for a centred island.
 - **Estimate.** With the current streaming-only model, an island up to **about 10-20 km across** works without new
   memory work (L measured at 10 km; at 20 km the map tile cache reaches about 2 GB when fully explored). Past that the map
-  cache needs eviction or a coarser far map; streaming itself would hold to the ~200 km precision limit.
+  cache needs eviction or a coarser far map; streaming itself would hold to the ~200 km precision limit. *(M6, §14.10:
+  the map cache is now bounded, so the float-precision limit (~200 km across) is what remains; past about 12 km a fully
+  explored island's overviews no longer all fit and the world map draws far tiles again on demand)*
 - **Fully resident (pre-generated) islands** cost about 0.9 MB of voxel data per chunk column settled (S: 266 MB for 300
   columns) plus collision and scatter. 1 GB of voxel data holds about 1,100 columns, an island about 1.8 km across;
   M would need about 8 GB. Pre-generation (§6, nice to have) is realistic for S-class islands only, unless far columns
@@ -1121,7 +1126,7 @@ The critical list in §6 stands, with this evidence and these additions:
   Done (§13.10): KI12 was a latch in LOD evaluation, in every world mode. It is fixed, and one run per route is enough
   again. Island numbers to use are the high-mode rows of §13.3.
 - **Save fingerprint** (KI7), **one island-centre definition** (KI3) and **the bounds query** (KI9) as already listed.
-- Add: **evict or downsample map tiles** (KI15) before islands larger than about 10 km.
+- Add: **evict or downsample map tiles** (KI15) before islands larger than about 10 km. *(Done in M6, §14.10)*
 
 §14 turns this list into work items (M2-M4 and M6).
 
@@ -1397,7 +1402,7 @@ Three findings from §13.11 get IDs here:
 | ID | Finding | Status | Work item |
 |----|---------|--------|-----------|
 | KI1 | POI placement samples InfinitePlane height in every mode | Fixed in M2 and M3 (WM-A3, WM-I1; §14.6, §14.7): placement samples the configured world mode, and only sites wholly inside the bounds, falloff ring included, are placed, whatever the type's surface filter. `POIPlacementProbe` asserts on S, M and L | WM-I1 |
-| KI2 | No world edge | Partly fixed in M3 (WM-I5, §14.7): a hard boundary at R+F with a push-back before it. Open: the visible edge | WM-I5 (boundary), WM-E1 (visible edge) |
+| KI2 | No world edge | Fixed: a hard boundary at R+F with a push-back before it in M3 (WM-I5, §14.7); the visible edge in M6 (WM-E1, §14.10): the seabed slopes from the coast and a far ocean reaches the horizon | WM-I5 (boundary), WM-E1 (visible edge) |
 | KI3 | The island centre means two different things | Fixed in M2 (WM-A1, §14.6): one builder, the centre is `WorldOrigin` + offset everywhere; `CullCentreProbe` asserts | — |
 | KI4 | Shape-parameter defects | Fixed: `bIslandBowlShape` removed, the Exponential falloff reaches 0 at R+F and `GetDensityAt` agrees with the floor beyond it (M1, WM-H6); the param builders are one (M2, WM-A1), and `GetTerrainHeightBounds` now includes the floor beyond the edge (M2, WM-A2) | — |
 | KI5 | No far-band slab culling on islands | Fixed in M4 (WM-S1, §14.8): every column of every heightmap world keeps its surface slab at every distance; island M's peak loaded chunks are within −15% to +8% of the control on every route (were +29-55%) | WM-S1 |
@@ -1410,7 +1415,7 @@ Three findings from §13.11 get IDs here:
 | KI12 | Bimodal LOD re-meshing | Fixed (§13.10), in every world mode | — |
 | KI13 | Island LOD distance is 2D, so whole columns stay in the near bands | Fixed in M4 (WM-S2, §14.8): LOD distance is 3D in every world mode | WM-S2 |
 | KI14 | No recovery when the pawn leaves the generated world | Fixed in M3 (WM-I4, §14.7), in every world mode | WM-I4 |
-| KI15 | Map tile images are never evicted | Open; not island-specific, but it is what limits islands past about 10 km (§13.8) | WM-E2 |
+| KI15 | Map tile images are never evicted | Fixed in M6 (WM-E2, §14.10): detail and overview images under a fixed 80 MB budget, least recently used first, drawn again on demand; a fully explored L holds 37 MB (539 MB before) | WM-E2 |
 
 **Mode-independent and tooling:**
 
@@ -1430,6 +1435,7 @@ Three findings from §13.11 get IDs here:
 | G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole | WM-S1, WM-S4 |
 | G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
+| G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -1504,7 +1510,9 @@ draquel/VoxelWorlds#94 (WM-C1, WM-C3, WM-C4, WM-C2's demo brush, G15 and these d
 | WM-C3 | **Cubic scatter on the CPU extractor.** Cubic skips the GPU extraction branch, and `PlacementMode = BlockFaceSnap` is read | KC4 | VoxelWorlds | S | — |
 | WM-C4 | **Delete the GPU cubic mesher** and its tests; the README stops claiming it | KC3 | VoxelWorlds | S | — |
 
-**M6. The island's visible edge and scale.**
+**M6. The island's visible edge and scale.** **Status 2026-10-16: both implemented and verified, PRs open** (results in
+§14.10): draquel/VoxelWorlds#95 (WM-E1, WM-E2 and these docs); draquel/VoxelCharacterPlugin#24 (the world map's half of
+WM-E2); draquel/UE5_PluginDev#107 (the gitlinks and the doc map).
 
 | ID | Work item | Findings | Repos | Size | Needs |
 |----|-----------|----------|-------|------|-------|
@@ -1526,7 +1534,7 @@ D9's order is a priority, not a strict sequence. Rough totals assume S ≈ half 
 | M3 Island correctness | WM-I1 to WM-I6 | ~6.5 days | M2 | `POIPlacementProbe` asserts; I5-I8 re-run: swimming out stops at R+F, falling out respawns, an off-island spawn stands on land, a radius change starts fresh; the I6 tour finds no marker or explored tile past the bounds. **Met 2026-10-15, in review (§14.7)** |
 | M4 Streaming window | WM-S1 to WM-S4 | ~4 days | WM-A3, WM-H1 | WM-S4: island M within §1's thresholds on chord, perimeter and coast; peak loaded chunks within +25% of the control; the D3 budget met on every run, M's v6000 chord included; island audits 0; the control no worse. **Met 2026-10-15 but for one threshold, in review (§14.8):** frame, manager, peak loaded, memory and audits hold on every route and speed, D3 on every run (M's v6000 chord 1,066 MB), the control no worse; catch-up misses at v1500 on the chord and the perimeter (0.27-0.46 s against 0.17-0.18 s) and on the perimeter at v3000 (means 0.47 vs 0.25 s): the island's sea-heavy view leaves a 20-50 chunk generation queue at the stop |
 | M5 Cubic terrain-only | WM-C1 to WM-C4 | ~6.5 days | — | Cubic against a same-build control: catch-up within +25% and manager P95 within +15% (§12.8's misses); C2 and C4 pass; the legacy path is deleted. **Met 2026-10-16, in review (§14.9):** catch-up −38% to 0% and manager P95 −21% to −50% of the control at v1500-v6000; C2 and C4 pass (C4 after G15, a renderer fix); the legacy path is deleted |
-| M6 Edge and scale | WM-E1, WM-E2 | ~4.5 days | WM-A2, WM-I5 | From past R+F the sea reaches the horizon with no void; a fully explored L keeps its map tiles under a fixed budget |
+| M6 Edge and scale | WM-E1, WM-E2 | ~4.5 days | WM-A2, WM-I5 | From past R+F the sea reaches the horizon with no void; a fully explored L keeps its map tiles under a fixed budget. **Met 2026-10-16, in review (§14.10):** from 20,000-50,000 uu past R+F and from 48,000 uu up the island sits in a sea that reaches the horizon, on a seabed that slopes from the coast; a fully explored L holds 37 MB of map images (539 MB before) under an 80 MB budget; with the far ocean island M stays within the control's frame and manager P95 and D3 holds; perimeter catch-up is still missed by 0.3-0.5 s (M4's miss) |
 | Spherical | Phases 1-5 (§14.4) | several weeks | M4, M5 | The requirements doc's exit checks |
 
 **What can run in parallel.** M1's items with each other and with M2, except WM-H6 before or with WM-A1 (both touch
@@ -2102,3 +2110,249 @@ Phase 1 can now test seams at mid latitudes without the legacy path (SP-D4). Thi
   runs from this build on.
 - Cubic now builds face seams only; `voxel.Seam.*` cvars apply to it as to the smooth meshers.
 - A renderer outside VoxelWorlds that keeps its geometry in a scene proxy should override `ConsumeLostRenderData`.
+
+### 14.10 M6 results (2026-10-16)
+
+Both M6 items are implemented and verified; PRs open. Built from VoxelWorlds `feature/wm-e1-e2-island-edge-scale` (base
+`21779bc`), VoxelCharacterPlugin `feature/wm-e2-world-map-tiles` (base `288af96`) and UE5_PluginDev
+`claude/m6-island-edge-scale-e3d76e` (base `7b7e473`), editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`, in a
+worktree editor with background throttling off. Live checks ran on `VoxelDemo` with the review configs through
+`voxel.ConfigOverride`, from a fresh world. Screenshots: `Saved/Screenshots/Claudius/m6b_*` (before, on the unchanged
+build) and `m6a_*` (after) in the M6 worktree (not committed).
+
+**Design (written before building, as §14.2 asked).**
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Where the far ocean lives | **Its own components**: procedural mesh components on the world actor (the static meshes; the grid's frame and window), built and updated by the chunk manager (`FVoxelFarOcean` geometry, `UVoxelChunkManager::RebuildFarOcean` / `UpdateFarOceanGrid`), beside the boundary walls | Not the world component's scene proxy: a proxy recreation empties it (G15), so everything in it must be re-sent; a component of its own keeps its sections and rebuilds its own proxy. Not the water tiles: they are per chunk column and per tile a draw with its own buffers, and the sea to the horizon would be thousands of them. Works with both renderers (custom VF and PMC) |
+| How it meets the water tiles | The far ocean's **grid** covers every chunk column of the footprint's box (plus two) that the streaming has not **opened**; a column opens when it holds a chunk with voxel data or has a water tile. The grid is rebuilt in the tick the open set changes, after the water tiles are processed (a window around the open columns; the rest of the grid only when the window moves, below) | The water material is translucent: a far ocean under or over a water tile draws two layers. Exact per column, so no overlap and no gap, whatever loads |
+| What streams past the edge | **Only columns that touch the footprint** (`FVoxelWorldBounds::IntersectsBox2D`, the map's tile test); the ring out to a chunk diagonal past R+F is gone | Nothing past the walls (WM-I5) needs terrain or collision, and the ring's floor and water were what the far ocean replaces; it also makes the grid's open set and the cull the same rule |
+| The seabed | **Generation slopes it**: past R+F the height goes from `EdgeHeight` down by `IslandSeabedDepth` (6,000) over `IslandSeabedSlopeWidth` (20,000), a smoothstep, then flat. CPU (`FIslandBowlWorldMode::GetSeabedHeight`, shared by generation, the analytic height and `GetDensityAt`) and GPU (`IslandSeabedHeight` in `IslandFalloff.ush`) | The cliff was generated; only generation can remove it. A smoothstep starts flat, so it meets the falloff (Smooth ends flat) with no kink, and no step at R+F for any curve. Distance past the edge is the falloff's own metric (radial, or the larger axis excess for a rectangle), so the slope's contours follow the coast |
+| The seabed past what streams | A **static seabed mesh** on the same profile, half a voxel under it, from R+F out to the open sea's corners; and a **floor** under the grid's columns inside the footprint (flat at `EdgeHeight`), rebuilt with the grid | The voxel seabed past R+F is the analytic profile (no noise there), which MC and DC follow within a few uu, so the drawn seabed hides under it wherever it loads and continues it where it does not. Without the floor the far ocean's water over unloaded columns inside R+F showed the void through it (a light ring in the first views) |
+| With the boundary (WM-I5) | **Unchanged**: walls at R+F, push-back in the last 4,000 uu | The seabed starts at R+F at `EdgeHeight`, under the walls; the push-back keeps a swimmer about 1,600 uu inside them |
+| GPU parity | `GPUvsCPUIslandBowlParity` gains a seabed case for a circle and a rectangle, at LOD 0/1/2 | The shader port is the risk; the existing cases never reached the floor |
+| Save fingerprint | **No `GenerationVersion` bump; the seabed is not in the fingerprint** | Generation inside R+F is unchanged byte for byte; the seabed shapes only terrain past R+F, where a save holds nothing: POIs and map tiles stay inside the bounds (M3), and no edit reaches past R+F (the push-back stops a pawn 1,200-1,600 uu inside the walls and a dig reaches 500 uu; only debug flight gets to the wall). A bump would have refused every save, InfinitePlane's included, for a change none of them can see |
+
+**WM-E2: map tile images under a fixed budget.** §14.2 offered eviction with regeneration on demand, or coarser far
+tiles. Chosen: **both, as two tiers of one store** (`FVoxelMapTileStore`): every drawn tile keeps an overview (the image
+box-filtered to a quarter of the resolution a side: 1 KB on the demo), the detail image (16 KB) is kept only within its
+budget, least recently used first, and past the overview budget whole tiles go, least recently used first, to be drawn
+again when looked at. Budgets: `voxel.Map.DetailBudgetMB` 32 (2,048 detail tiles) and `voxel.Map.OverviewBudgetMB` 48
+(49,152 overviews), **80 MB in all**. Why:
+
+- The world map at its default zoom draws 16 texels per tile, exactly an overview, so a fully explored island stays fully
+  drawn from memory without regeneration; only the minimap's area (about 120 tiles) and a world map zoomed in past 1.5
+  (at most about 1,850 tiles in view) want detail, which fits the detail budget.
+- Least recently used rather than distance from the player: the map subsystem knows no player (it is used by the minimap
+  and the world map alike), what is on screen is by definition what was read last, and a distance rule would evict what
+  the world map shows when it pans away.
+- The overview budget holds a fully explored island about 12 km across; past that, overviews are dropped and drawn again
+  on demand (eight milliseconds of background work a tile).
+- Exploration is a separate set and never evicted; saves keep the explored keys as before. Tiles restored from a save are
+  drawn as overviews only.
+
+**The far ocean, as built.** On island M (a 110 × 110 column grid at 4,800 uu a column) the static seabed is 17,840
+triangles and the open sea 768 quads, built once in about 3 ms when the world starts; L's grid is 214 × 214 and its seabed
+25,200 triangles (about 5.5 ms). The grid water is a few dozen to a few hundred quads. The first version rebuilt the whole
+grid whenever a column opened or closed: about 1.3 ms a rebuild on M, on 14% of ticks at 1,500 uu/s and 34% at 3,000
+(the benches below, first batch), and the cost grew with the island's area. The final version splits the grid: a
+**window** around the open columns (their bounds plus 8 columns: about 31 × 31 columns, a twelfth of M's grid) is
+rebuilt on every change, and the **frame** outside it only when the open columns leave the window and it moves (3 times
+while S settles at its spawn, against 141 window rebuilds). Its cost no longer depends on the island's size.
+
+**Bench method.** §14.8's routes on island M against the smooth control, both through `voxel.ConfigOverride`, with
+`follow=300`: the perimeter (`orbit=0:0:200000`, 150,000 uu along the coast at R) at 1,500, 3,000 and 6,000 uu/s, the coast
+crossing (`start=150000:0 dir=1:0`, ending 50,000 uu past R + F) and the chord (`start=-250000:0 dir=1:0`, 500,000 uu coast
+to coast) at 3,000. PIE in the worktree editor's level viewport (1280×722), background throttle off, `vox.DeleteSave`,
+clock pinned at noon, `warmup=120`, a throwaway PIE first (G14). Three batches on two builds:
+
+- **First batch**, on a build with the first far ocean and a temporary `voxel.Temp.IslandCliff` cvar that restored the old
+  edge (the flat floor 1,000 uu down, the old ring cull, no far ocean; removed before the PR): control, island M, and
+  island M with the old edge. Two runs of each, the chord one for the island arms.
+- **Final build**, two batches of control and island M, one run each per route. The second batch ran while a game
+  controller in use elsewhere on the machine reached the unfocused PIE: the pawn wandered in its settled runs (gamepad
+  input reaches a PIE without focus). The bench sets the streaming viewer and teleports the pawn every tick, so only the
+  camera's rotation was exposed on the routes; the third batch blocked the player controller's move and look input after
+  every PIE start and is the primary below. The two agree within run-to-run noise; the second batch's settled runs are
+  discarded.
+
+JSON reports in [Research/Bench/M6/](Research/Bench/M6/) (`m6_*` first batch, `m6f_*` second, `m6g_*` third, `*s_*_settled`
+the settled runs).
+
+**Island M against the control, final build** (far ocean = its share of the manager's tick):
+
+| Route | Run | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | Loaded mean / peak | Peak voxel MB | Systems MB | LOD re-meshes | Far ocean P95 / max ms, rebuilds | Audit | JSON |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Perimeter v1500 | Control | 16.7 / 26.1 / 32.5 | 6.7 | 0.17 | 1,085 / 1,159 | 808 | 1,047 | 2,082 | 0.00 / 0.00, 0 | 0 | `20261016_171227_m6g_C_orbit_v1500` |
+| Perimeter v1500 | Control, repeat | 16.7 / 25.5 / 31.3 | 6.7 | 0.76 | 1,103 / 1,228 | 781 | 1,021 | 2,084 | 0.00 / 0.00, 0 | 0 | `20261016_164653_m6f_C_orbit_v1500` |
+| Perimeter v1500 | **Island M** | 16.7 / 26.2 / 32.2 | 7.0 | 0.92 | 1,122 / 1,213 | 825 | 1,065 | 2,067 | 0.39 / 1.74, 735 | 0 | `20261016_171437_m6g_M_orbit_v1500` |
+| Perimeter v1500 | **Island M**, repeat | 16.7 / 25.6 / 31.0 | 6.9 | 0.55 | 1,123 / 1,213 | 826 | 1,067 | 2,068 | 0.37 / 2.12, 734 | 0 | `20261016_164905_m6f_M_orbit_v1500` |
+| Perimeter v3000 | Control | 23.7 / 36.4 / 43.0 | 10.6 | 0.41 | 1,045 / 1,081 | 706 | 926 | 2,083 | 0.00 / 0.00, 0 | 0 | `20261016_171557_m6g_C_orbit_v3000` |
+| Perimeter v3000 | Control, repeat | 21.6 / 34.4 / 42.0 | 10.0 | 0.55 | 1,049 / 1,089 | 804 | 1,042 | 2,083 | 0.00 / 0.00, 0 | 0 | `20261016_165026_m6f_C_orbit_v3000` |
+| Perimeter v3000 | **Island M** | 23.1 / 36.0 / 43.3 | 10.7 | 1.07 | 1,069 / 1,166 | 793 | 1,033 | 2,066 | 0.65 / 2.02, 697 | 0 | `20261016_171720_m6g_M_orbit_v3000` |
+| Perimeter v3000 | **Island M**, repeat | 22.6 / 34.7 / 39.9 | 10.6 | 0.86 | 1,059 / 1,120 | 787 | 1,016 | 2,069 | 0.64 / 4.08, 720 | 0 | `20261016_165148_m6f_M_orbit_v3000` |
+| Perimeter v6000 | Control | 31.2 / 42.5 / 49.6 | 15.1 | 6.16 | 569 / 1,081 | 806 | 1,144 | 1,977 | 0.00 / 0.00, 0 | 0 | `20261016_171823_m6g_C_orbit_v6000` |
+| Perimeter v6000 | Control, repeat | 31.6 / 45.5 / 53.9 | 16.4 | 7.48 | 527 / 1,065 | 803 | 1,111 | 1,996 | 0.00 / 0.00, 0 | 0 | `20261016_165251_m6f_C_orbit_v6000` |
+| Perimeter v6000 | **Island M** | 31.9 / 45.5 / 53.0 | 15.9 | 6.38 | 555 / 1,123 | 841 | 1,167 | 1,974 | 0.73 / 1.52, 359 | 0 | `20261016_171925_m6g_M_orbit_v6000` |
+| Perimeter v6000 | **Island M**, repeat | 31.6 / 43.3 / 49.5 | 15.5 | 7.17 | 566 / 1,160 | 824 | 1,174 | 2,015 | 0.65 / 2.77, 365 | 0 | `20261016_165352_m6f_M_orbit_v6000` |
+| Coast v3000 | Control | 25.8 / 41.9 / 50.7 | 12.0 | 1.79 | 992 / 1,120 | 801 | 1,053 | 2,092 | 0.00 / 0.00, 0 | 0 | `20261016_172047_m6g_C_coast_v3000` |
+| Coast v3000 | Control, repeat | 24.7 / 39.5 / 47.4 | 12.1 | 1.27 | 1,034 / 1,120 | 805 | 1,060 | 2,092 | 0.00 / 0.00, 0 | 0 | `20261016_165512_m6f_C_coast_v3000` |
+| Coast v3000 | **Island M** | 16.7 / 31.9 / 41.0 | 9.0 | 0.17 | 721 / 1,107 | 823 | 1,055 | 1,432 | 0.33 / 2.40, 320 | 0 | `20261016_172208_m6g_M_coast_v3000` |
+| Coast v3000 | **Island M**, repeat | 16.7 / 33.0 / 40.1 | 9.2 | 0.17 | 720 / 1,107 | 830 | 1,064 | 1,432 | 0.35 / 1.60, 320 | 0 | `20261016_165632_m6f_M_coast_v3000` |
+| Chord v3000 | Control | 22.7 / 35.9 / 43.3 | 10.3 | 1.19 | 1,055 / 1,129 | 784 | 1,040 | 6,952 | 0.00 / 0.00, 0 | 0 | `20261016_172524_m6g_C_chord_v3000` |
+| Chord v3000 | Control, repeat | 22.7 / 36.2 / 44.5 | 10.2 | 1.26 | 1,054 / 1,129 | 794 | 1,046 | 6,955 | 0.00 / 0.00, 0 | 0 | `20261016_165946_m6f_C_chord_v3000` |
+| Chord v3000 | **Island M** | 21.2 / 33.9 / 40.8 | 9.8 | 0.17 | 1,014 / 1,129 | 776 | 988 | 6,755 | 0.45 / 1.99, 1,428 | 0 | `20261016_172837_m6g_M_chord_v3000` |
+| Chord v3000 | **Island M**, repeat | 20.1 / 32.6 / 39.3 | 9.7 | 0.17 | 1,018 / 1,129 | 732 | 963 | 6,754 | 0.43 / 2.15, 1,425 | 0 | `20261016_170256_m6f_M_chord_v3000` |
+
+**Against the §1 thresholds** (island M vs the control, mean of the two final-build runs each):
+
+| Metric (threshold) | Perimeter v1500 | Perimeter v3000 | Perimeter v6000 | Coast v3000 | Chord v3000 |
+|---|---|---|---|---|---|
+| Frame P95 (+10%) | 25.9 vs 25.8 ms (+1%) ✓ | 35.3 vs 35.4 ms (0%) ✓ | 44.4 vs 44.0 ms (+1%) ✓ | 32.4 vs 40.7 ms (−20%) ✓ | 33.2 vs 36.1 ms (−8%) ✓ |
+| Manager P95 (+15%) | 7.0 vs 6.7 ms (+4%) ✓ | 10.7 vs 10.3 ms (+3%) ✓ | 15.7 vs 15.7 ms (0%) ✓ | 9.1 vs 12.0 ms (−24%) ✓ | 9.7 vs 10.3 ms (−6%) ✓ |
+| Catch-up (+25%) | 0.74 vs 0.47 s (+58%) ✗ | 0.97 vs 0.48 s (+101%) ✗ | 6.78 vs 6.82 s (−1%) ✓ | ends off the island (0.17 vs 1.53 s) | ends off the island (0.17 vs 1.23 s) |
+| Peak loaded chunks (+25%) | 1,213 vs 1,194 (+2%) ✓ | 1,143 vs 1,085 (+5%) ✓ | 1,142 vs 1,073 (+6%) ✓ | 1,107 vs 1,120 (−1%) ✓ | 1,129 vs 1,129 (0%) ✓ |
+| Peak voxel MB (+25%) | 826 vs 795 (+4%) ✓ | 790 vs 755 (+5%) ✓ | 833 vs 805 (+3%) ✓ | 826 vs 803 (+3%) ✓ | 754 vs 789 (−4%) ✓ |
+| Systems MB, island M's highest (D3: ≤ 1,500 MB) | 1,067 MB ✓ | 1,033 MB ✓ | 1,174 MB ✓ | 1,064 MB ✓ | 988 MB ✓ |
+| Far ocean P95 / worst tick (third batch) | 0.39 / 1.74 ms | 0.65 / 2.02 ms | 0.73 / 1.52 ms | 0.33 / 2.40 ms | 0.45 / 1.99 ms |
+| Audit after settling | 0 | 0 | 0 | 0 | 0 |
+
+**Catch-up is missed on the perimeter at 1,500 and 3,000 uu/s, by 0.3-0.5 s** (0.74 vs 0.47 s and 0.97 vs 0.48 s; the
+control's own two runs are 0.17 and 0.76 s at 1,500). It is M4's miss (§14.8: the island stops with a standing generation
+queue along the coast) and not M6's: in the first batch the old edge on the same build caught up in 0.78 s and 1.22 s
+against the new edge's 0.77 s and 1.04 s. The routes that end off the island (coast, chord) are not comparable, as in
+§14.8.
+
+**What the edge costs** (first batch, same build; island M, old edge → M6's first far ocean, mean of two runs; the chord one):
+
+| Route | Frame P95 ms | Manager P95 ms | Catch-up s | Peak loaded | Peak voxel MB | Systems MB | Far ocean P95 / max ms, rebuilds |
+|-------|--------------|----------------|------------|-------------|---------------|------------|----------------------------------|
+| Perimeter v1500 | 26.5 → 27.5 | 7.3 → 8.1 | 0.78 → 0.77 | 1,213 → 1,210 | 801 → 795 | 1,042 → 1,036 | 1.49 / 4.90, 734 |
+| Perimeter v3000 | 35.6 → 36.8 | 10.7 → 11.7 | 1.22 → 1.04 | 1,166 → 1,166 | 788 → 803 | 1,013 → 1,043 | 2.33 / 5.44, 714 |
+| Perimeter v6000 | 45.5 → 46.5 | 15.8 → 16.9 | 6.63 → 6.86 | 1,166 → 1,166 | 840 → 834 | 1,168 → 1,160 | 2.74 / 4.61, 378 |
+| Coast v3000 | 32.7 → 34.4 | 9.2 → 10.4 | 0.17 → 0.17 | 1,100 → 1,090 | 792 → 798 | 1,025 → 1,032 | 1.39 / 4.35, 322 |
+| Chord v3000 | 36.5 → 34.1 | 10.7 → 10.8 | 0.17 → 0.17 | 1,139 → 1,129 | 765 → 720 | 982 → 979 | 1.86 / 8.04, 1,408 |
+
+The first far ocean added 0.6-1.2 ms to the manager's P95 (+14% against the control on the perimeter at 1,500 uu/s, at the
+threshold), all of it the grid's rebuilds; nothing else moved beyond noise. Streaming only the columns that touch the
+footprint changed peak loaded chunks by under 1%: on these routes the horizon, not the cull, bounds what loads past the
+coast. With the window (final build) the far ocean's P95 is 0.33-0.73 ms and its worst tick 1.5-2.4 ms, and island M's
+manager P95 is within 0-4% of the control on the perimeter.
+
+**Settled at the spawn, and D3** (fresh world; settled = 75 s idle, then `voxel.FarCompression.Stats` and a zero-length
+bench, as §14.8):
+
+| Run | Loaded chunks | Voxel data settled (resident / uniform / compressed chunks) | Voxel systems MB | Far ocean | Audit | JSON |
+|-----|---------------|-------------------------------------------------------------|------------------|-----------|-------|------|
+| Control | 979 | 127.3 MB (106 / 47 / 826) | 369 | — | 0 | `20261016_173019_m6gs_C_settled` |
+| **S, M6** | 1,020 | 127.7 MB (107 / 63 / 850) | **370** | 216 open columns, 20 grid quads, window 31 × 32 | 0 | `20261016_173200_m6gs_S_settled` |
+| S, old edge (first batch) | 1,020 | 127.7 MB (107 / 63 / 850) | 377 | — | 0 | `20261016_163653_m6s_So_settled` |
+
+| Budget (D3) | Measured |
+|-------------|----------|
+| 0.6 GB of voxel systems memory settled for a fully resident S | 370 MB (the control at its spawn: 369 MB) |
+| At most 1.5 GB at peak while streaming | Island M 963-1,174 MB over its final-build runs (the control 926-1,144) |
+
+The far ocean's meshes are not in the voxel systems total (they are the world actor's procedural mesh components, not the
+renderer's): on M about 18,000 seabed triangles, 768 open-sea quads and the grid, about 2 MB with the CPU copy the
+components keep.
+
+**The views, before and after** (the same cameras on the build before M6, `m6b_*`, and after, `m6a_*`; a fresh world
+with the pawn 6,000 uu inside the east coast; for the views from outside, streaming paused with what the pawn loaded):
+
+| View | Before (M5) | After (M6) |
+|------|-------------|------------|
+| S, from the coast at sea level, looking out (`*_S_in_sea`) | The loaded water ends about 10,000 uu out; at sea level that is a few pixels under the horizon | Sea to the horizon |
+| S, M, L from 20,000 uu past R+F at sea level (`*_out_sea`) | The island on a slab in the void: the water sheet, the 1,000 uu cliff, the floor ring and the open bottom of the loaded chunks under it | The island in a sea that reaches the horizon all round |
+| S, M, L from 50,000 uu past R+F and 30,000 up (`*_out_high`) | The loaded region as a floating plate, grey void around and under it | The loaded land in a sea to the horizon |
+| From 48,000 uu over the coast, looking out (`*_obl48k`) | All grey: nothing below the horizon | Sea to the horizon |
+| §13's I2 survey: 48,000 uu over S's centre, straight down, oblique and toward the horizon (`*_S_i2_*`) | The island in its staircase of loaded columns, void around it; from the side a plate in the void | The whole island in the sea, no staircase; from the side two islets in a sea |
+| A swimmer stalled by the push-back on S (`m6a_S_swimmer_pushback`) | (M3: the loaded water ended about 8,000 uu out) | Sea to the horizon, the edge hint on |
+
+On M and L the views from outside show the land the pawn had loaded, surrounded by sea: the far ocean stands in for the
+rest of the island, which is not streamed. From the ground inside a large island the same thing shows as sea at the
+horizon past the view distance (`m6inl_all_ground`, island M from its centre); on the plane that is the void.
+`voxel.World.FarOceanInland 0` leaves the unloaded interior empty instead (`m6inl_coast_*`); the default keeps it covered,
+so no view shows the void.
+
+Three artefacts found on the way and what came of them:
+
+- **A light ring** around the island seen from above: the far ocean's water over unloaded columns inside R+F had nothing
+  under it, so the fog showed through. Fixed with the grid floor.
+- **A thin dark line along the edge of the loaded seabed**, seen at grazing angles: the loaded voxel seabed sat 1.5 voxels
+  over the drawn one and shadowed it in a strip about that wide. The offset is now half a voxel; the line is faint.
+- **Dark bands just under the horizon** at sea level, at fixed screen rows from any position: not the far ocean. With the
+  far ocean hidden, the loaded water tiles over island M's coastal sea show the same bands (`mtiles_off`); fog, volumetric
+  fog, anti-aliasing and the sky sphere are not involved. The water material draws them at grazing angles; until M6 no
+  water reached that distance. Recorded as G16 (§14.1), cosmetic, not changed here.
+
+**The edge, `vox.Edge` checks on S** (fresh world, water on):
+
+| Check | Result |
+|-------|--------|
+| `vox.Edge` | Circle (0, 0), half extent 40,000, Z −12,000 to 10,000 (unchanged: the open-sea floor at −9,500 is inside the base bounds), 63 walls, boundary on |
+| Swim east from 6,000 inside the edge at full speed | Stalls at 38,358 uu, 1,642 inside R+F, hint on (M3: 38,358) |
+| Debug flight east | Stops on the wall at 39,966 (M3: 39,966) |
+| Walls off (`voxel.World.Boundary 0`), fly on to 55,037, walk | Falls (nothing streams past the footprint now), "out of the world" 20,000 under the lowest terrain, body back at its last safe ground, death, respawn on land at (31,893, 4,799) |
+
+**Map tiles, a fully explored L** (`ImportExploredTiles` with the 34,512 tiles of L's footprint, as a save restores a fully
+explored world; then the drawings drain, about 70-80 s at 480 tiles a second):
+
+| Build, budgets | Tiles with an image | Detail images | Overview images | Image memory |
+|----------------|---------------------|---------------|-----------------|--------------|
+| Before M6 | 34,512 | 34,512 × 16 KB | — | **539 MB** (34,512 × 16,384 B: the cache kept every image) |
+| M6, budgets unlimited (`voxel.Map.DetailBudgetMB 0`, `OverviewBudgetMB 0`: every image kept, as before) | 34,512 | 34,512 (539.2 MB) | 34,512 (33.7 MB) | 573 MB |
+| **M6, default budgets (32 / 48 MB)** | 34,512 | 216 (3.4 MB: the spawn's streamed area) | 34,512 (33.7 MB) | **37.1 MB** |
+
+The world map opened at zoom 1 on that L draws the whole view from overviews (`m6a_L_worldmap`). The editor's private bytes
+did not track the images (other memory is released while the tiles draw: they fell by 0.8 GB in two runs, the 539 MB run
+on the old build included, and stayed flat in the default-budget run), so the table uses the map's own count of image
+bytes, which `voxel.Map.Stats` now prints.
+The unit test `Map.TileStore.Budget` repeats the L case without a world: 34,512 tiles restored, 121 minimap tiles in
+detail, 35.6 MB.
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| WM-E1 | Done, in review | VoxelWorlds#95 | The benches, the views and the edge checks above. Tests `Generation.IslandBowl.SeabedSlopesFromEdge` (the slope's profile, continuity at R + F for every falloff curve and both shapes, the flat floor past the slope, the height bounds reaching it; density beyond the edge matches generation), `WorldModes.FarOcean.Geometry` (the grid's water covers every column that is not open exactly once and none that is, sampled off the quads' diagonals; the open sea's rings cover the rest out to the far distance without overlap; a window build plus its frame build cover exactly what the whole grid does; undersides mirror the tops; the floor lies under the grid inside the footprint only; the seabed lies under the generated profile by the offset; inland coverage leaves deep columns open), `Streaming.Island.FarOcean` (a real chunk manager on a small island into a recording renderer, two viewer positions: no water tile under the far ocean, every other column of the box covered once across the frame and the window, the window holds every open column, and the components keep their sections through a scene proxy recreation, G15); `GPUvsCPUIslandBowlParity` gains the seabed for a circle and a rectangle at LOD 0-2; `IslandCullProbe` checks that no kept column lies outside the footprint; the review probes check no step at R + F (0-6 uu between the falloff's last sample and the seabed's first) |
+| WM-E2 | Done, in review | VoxelWorlds#95, VoxelCharacterPlugin#24 | The table above. Tests `Map.TileStore.Budget` (the store alone: downsampling, both budgets held, least recently used first, a tile read all along keeps its detail, a redraw that wants detail gets it back, unlimited keeps everything; island L's 34,512 explored tiles with the minimap's 121 in detail in 35.6 MB) and `Map.TileStore.ExploredIslandUnderBudget` (the subsystem on a real island with tiny budgets: exploration kept whole, both budgets held while some tiles lose their images, a restored exploration keeps no detail, the minimap's centre tile in detail at full resolution, an evicted tile drawn again as an overview for a zoomed-out world map and in detail for a zoomed-in one). The world map (VoxelCharacterPlugin) asks for detail only when a tile spans more than 1.5 times its overview's resolution on screen, and draws evicted tiles again as they come into view |
+
+**Suites.** Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter` 280/280. In the editor, where the GPU tests run,
+280/280, every `Generation.GPUvsCPU*Parity` (the island's seabed cases included), `GPUNoiseGeneratorAsync`,
+`Meshing.MarchingCubes.CPUvsGPU` and `WorldModes.InfinitePlane.GPUConsistency` among them. 275 before M6, plus five new
+(`Generation.IslandBowl.SeabedSlopesFromEdge`, `WorldModes.FarOcean.Geometry`, `Streaming.Island.FarOcean`,
+`Map.TileStore.Budget`, `Map.TileStore.ExploredIslandUnderBudget`). Both on the final build, with the temporary cvar removed.
+
+**What changes in §13.** I2's "floats in a void" is gone from every view from outside and above (§13.1); I5's "walks or
+swims off the floor's edge" was closed by M3's walls and the far ocean now shows what lies past them. KI2 and KI15 are fixed
+(§14.1). §13.8's estimate loses the map: a fully explored island holds at most 80 MB of map images whatever its size, so the
+float-precision limit (about 200 km across) is what remains for streaming; the far ocean's cost does not grow with the
+island (only a window around the loaded columns is rebuilt when they change).
+
+**Left for later.** Nothing of M6 is deferred. Next in §14.3's order is spherical Phase 1. Open and recorded:
+
+- **G16** (§14.1): the water material's dark bands under the horizon at grazing angles. Cosmetic, the material's; the far
+  ocean made them visible by taking the water to the horizon.
+- **A distant island silhouette** (§6, not scheduled): with `voxel.World.FarOceanInland` at its default (−1) the far
+  ocean covers every unloaded column, the interior of a large island included, so from the ground the land past the view
+  distance reads as sea at the horizon instead of void; a coarse silhouette of the unloaded land would replace that.
+
+Things to know:
+
+- The far ocean is visual only: no collision (the walls stop everything at R + F) and nothing on a dedicated server. It
+  needs `bEnableWaterLevel` and a `WaterMeshMaterial` for its water; the seabed and the floor are drawn with the terrain's
+  material either way. `IslandEdgeHeight` must sit under the water level for the coast to read as sea; the configuration
+  warns otherwise.
+- The seabed past R + F changed from a 1,000 uu floor to a slope 6,000 uu deep: terrain there is different, but no save
+  holds anything there, so saves load unchanged (no `GenerationVersion` bump, the seabed not in the fingerprint).
+- The bench CSV gains `FarOceanMs` and `FarOceanRebuildN`, the JSON `farOceanMsP50/P95/Max` and `farOceanRebuilds`, and
+  the run block the island's seabed and far-ocean settings.
+- `voxel.Map.Stats` prints the map's image bytes (detail and overview); `voxel.Map.ExploreAll` explores every tile of a
+  bounded world as a fully explored save would restore it. Map images are no longer a session-long cost to plan around.
+- A renderer outside VoxelWorlds can override `IVoxelMeshRenderer::GetSurfaceMaterial` if its terrain material is not
+  `GetMaterial()`; the far ocean's seabed draws with it.
+- **A game controller in use elsewhere on the machine drives an unfocused PIE pawn** (XInput reaches it without focus).
+  Bench and live checks should block the player controller's move and look input (`SetIgnoreMoveInput`,
+  `SetIgnoreLookInput`) or confirm the pawn holds still.
+- One editor crash on the RHI thread (`(OldPacked & DeletingBit) == 0`, "Resource is being deleted"), right after the far
+  ocean and map tests ran in an editor launched seconds before. Not reproduced in four runs of the same tests afterwards,
+  in the full in-editor suite or in the 60-odd PIE sessions of the benches; recorded in case it comes back.

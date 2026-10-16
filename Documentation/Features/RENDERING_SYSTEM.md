@@ -1068,6 +1068,10 @@ Both renderer implementations support water tile rendering via the `IVoxelMeshRe
 
 See [WATER_SYSTEM.md](WATER_SYSTEM.md) for the full water system architecture (flag storage, propagation, meshing, tile management).
 
+An island's far ocean (WM-E1) is not drawn by the renderer: the chunk manager builds it on its own procedural mesh
+components, using `IVoxelMeshRenderer::GetSurfaceMaterial()` (the material terrain is drawn with: the world component's
+atlas instance for the custom VF renderer, the dynamic instance for the PMC renderer) for its seabed.
+
 ### Interface
 
 ```cpp

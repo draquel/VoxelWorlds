@@ -9,13 +9,15 @@ The Map System generates 2D top-down map tile data from voxel terrain. Each tile
 
 The system lives entirely within the VoxelWorlds plugin and has zero knowledge of players, characters, or UI. External consumers (such as minimap or world map widgets in VoxelCharacterPlugin) query the subsystem for tile data and drive exploration via `RequestTilesInRadius()`.
 
+Tile images live under a fixed memory budget (world modes review WM-E2, finding KI15; see [Tile Images and Memory](#tile-images-and-memory)): every drawn tile keeps a small overview, and its full-resolution image only while recently used. Exploration is kept whole and saved; a tile whose images were dropped is drawn again when something looks at it.
+
 ## Architecture
 
 ```
 UVoxelMapSubsystem (UWorldSubsystem)
-├── Tile Cache: TMap<uint64, FVoxelMapTile>
-├── Exploration Mask: TSet<uint64>
-├── Pending Queue: TSet<uint64>
+├── Tile Store: FVoxelMapTileStore (detail + overview images, LRU under two budgets)
+├── Exploration Mask: TSet<uint64> (never evicted; saved)
+├── Draw Queue: FVoxelMapTileQueue (+ DetailWanted: tiles whose drawing keeps its detail)
 │
 ├── Event-Driven Generation ──→ UVoxelChunkManager::OnChunkGenerated
 │   (auto-generates tiles as chunks stream in)
@@ -42,13 +44,13 @@ struct FVoxelMapTile
 {
     FIntPoint TileCoord;       // Chunk XY coordinate
     TArray<FColor> PixelData;  // Resolution x Resolution BGRA pixels
-    int32 Resolution;          // Pixels per edge (matches ChunkSize, e.g. 32)
+    int32 Resolution;          // Pixels per edge: ChunkSize (64 on the demo), or ChunkSize / 4 for an overview
     uint8 Version;             // Format version for future save/load
     bool bIsReady;             // Runtime flag: true when fully generated
 };
 ```
 
-Each tile maps 1:1 to a chunk's XY footprint. At `Resolution=32` (matching ChunkSize), each pixel represents one voxel column. At default settings (32 voxels * 100 units), one tile covers 3200 world units.
+Each tile maps 1:1 to a chunk's XY footprint. At full resolution (`Resolution` = ChunkSize) each pixel represents one voxel column: on the demo, 64 voxels of 75 uu, so a tile covers 4,800 uu. A tile's overview has a quarter of the resolution a side (16 × 16 on the demo); `GetTile` returns whichever the tile has, and consumers scale by its `Resolution`.
 
 All data fields use `UPROPERTY()` for future `FArchive` serialization. `bIsReady` is intentionally not serialized as it is runtime-only state.
 
@@ -60,9 +62,12 @@ World subsystem that manages tile generation, caching, and exploration tracking.
 
 | Method | Description |
 |--------|-------------|
-| `GetTile(FIntPoint)` | Get a generated tile, or nullptr if not ready |
-| `HasTile(FIntPoint)` | Check if a tile has been generated |
-| `GetTileCache()` | Get the full tile cache for bulk iteration |
+| `GetTile(FIntPoint)` | The tile's detail image, or its overview when the detail was dropped (its `Resolution` says which); nullptr if it has none. Counts as a use (LRU) |
+| `HasTile(FIntPoint)` / `HasTileDetail(FIntPoint)` | Whether the tile has any image / its full-resolution one |
+| `RequestTileImage(FIntPoint, bool bDetail)` | For an explored tile: draw it again if it has no image, or (bDetail) only its overview. The world map calls it for the tiles in view (BlueprintCallable) |
+| `GetTileOverviewResolution()` | Pixels a side of an overview (ChunkSize / 4); a view showing more texels per tile wants detail |
+| `GetTileStore()` | The images and their budgets (diagnostics, tests); replaces `GetTileCache()` (removed with WM-E2) |
+| `ExploreAllTiles(FVector, float)` | Debug (`voxel.Map.ExploreAll`): explore every tile of a bounded world, as a fully explored save restores it |
 | `RequestTilesInRadius(FVector, float)` | Mark tiles as explored and queue generation |
 | `IsTileExplored(FIntPoint)` | Check if a tile is in the explored set |
 | `GetExploredTiles()` | Get all explored tile coordinates |
@@ -133,12 +138,35 @@ Above-water terrain gets topographic shading based on elevation above the water 
 
 This creates a natural relief effect matching the water depth gradient.
 
-### Resolution and Memory
+### Tile Images and Memory
 
-- One 32x32 tile = 1024 pixels = 4KB
-- 1000 tiles = 4MB — negligible memory footprint
-- One tile takes ~1ms to generate (1024 noise samples at ~1us each)
-- All generation is async — zero game thread cost beyond result marshaling
+A full-resolution tile on the demo is 64 × 64 pixels, 16 KB. Until WM-E2 every drawn tile kept its image for the session
+(KI15): a fully explored island L (10 km across, 34,512 tiles) held 539 MB of images, a 20 km island would hold about
+2.2 GB. `FVoxelMapTileStore` (VoxelMap, world-free and unit-tested) now keeps two images per drawn tile and two budgets:
+
+| Image | Size (demo) | Kept | Budget (cvar, MB; 0 = unlimited) |
+|-------|-------------|------|----------------------------------|
+| Detail | 64 × 64, 16 KB | Where something asked for it: the minimap's area (`RequestTilesInRadius`), streamed chunks (`OnChunkGenerated`), a zoomed-in world map (`RequestTileImage(.., true)`), and any tile that already had it | `voxel.Map.DetailBudgetMB` 32 (2,048 tiles: the minimap's area and a world map zoomed in twice) |
+| Overview | 16 × 16, 1 KB, the detail box-filtered | Every drawn tile | `voxel.Map.OverviewBudgetMB` 48 (49,152 tiles: an island about 12 km across, fully explored) |
+
+Over a budget the least recently used images go first (a read through `GetTile` or a store counts as a use), down to 90%
+of the budget so trimming runs rarely: a detail image is dropped and its tile keeps the overview; past the overview budget,
+tiles without detail lose the overview too and stay explored. Tiles restored from a save are stored as overviews only
+(the minimap asks for detail where the player is). A detail budget of 0 keeps every detail image, as before WM-E2.
+
+Why least recently used rather than distance: the subsystem knows no player, and what the minimap and the world map show
+is by definition what was read last; distance from the player would evict what the world map is looking at when it pans
+away. Why a coarser image rather than dropping tiles outright: the world map at its default zoom shows 16 texels per tile,
+exactly an overview, so a fully explored island stays fully drawn without regeneration; only zooming in or the minimap
+asks for detail, a few hundred to two thousand tiles.
+
+Measured on a fully explored island L in one build (`voxel.Map.ExploreAll` / an imported save, WORLD_MODES_REVIEW_PLAN.md
+§14.10): 37.1 MB of images (3.4 MB detail for the 216 tiles around the spawn, 33.7 MB of overviews) against 573 MB with
+both budgets unlimited (539 MB of detail images, the pre-WM-E2 cost, plus the overviews). The world map at zoom 1 draws
+the whole view from overviews.
+
+Drawing: a 64 × 64 tile takes about 8 ms of background work (four run at a time, about 480 tiles a second while the game
+runs); all generation is async, with no game-thread cost beyond storing the result.
 
 ## Configuration
 
@@ -163,6 +191,7 @@ The `ExploredTiles` set tracks which tile coordinates the player has visited or 
 
 1. `RequestTilesInRadius()` is called (minimap/world map visibility)
 2. `OnChunkGenerated` fires (chunk streaming proximity)
+3. A save restores them (`ImportExploredTiles`), or `voxel.Map.ExploreAll` explores the whole world (debug)
 
 Only tiles that overlap the world mode's bounds are explored (`IsTileInsideWorld`, world modes review WM-I2): on an
 island, exploration stops at `R + FalloffWidth`, and the ring of floor chunks the island streams past its edge is not
@@ -201,6 +230,9 @@ The subsystem is world-mode-agnostic by design:
 | `Source/VoxelMap/Public/VoxelMap.h` | Module API header |
 | `Source/VoxelMap/Private/VoxelMap.cpp` | Module startup/shutdown |
 | `Source/VoxelMap/Public/VoxelMapTypes.h` | FVoxelMapTile struct |
+| `Source/VoxelMap/Public/VoxelMapTileStore.h` | FVoxelMapTileStore: detail and overview images under two budgets (WM-E2) |
+| `Source/VoxelMap/Public/VoxelMapTileQueue.h` | FVoxelMapTileQueue: which tiles wait for a drawing, per-tile generations (R22) |
+| `Source/VoxelMap/Public/VoxelMapEditOverlay.h` | FVoxelMapEditOverlay: edited columns drawn over the analytic terrain (R22) |
 | `Source/VoxelMap/Public/VoxelMapSubsystem.h` | UVoxelMapSubsystem declaration |
 | `Source/VoxelMap/Private/VoxelMapSubsystem.cpp` | Subsystem implementation |
 
