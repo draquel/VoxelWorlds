@@ -29,6 +29,7 @@
 // - The surface coordinate's tangent warp keeps equal UV cells within 1.5x in area and round-trips.
 // - Height-material rules read the altitude above the datum, not the radius (SP-B2).
 // - Caves flatten along local up, and the sea above suppresses them to UnderwaterMinDepth (SP-B6).
+// - Underground classification scans along local down (SP-B7).
 // ---------------------------------------------------------------------------
 
 namespace SphericalPlanetTestUtils
@@ -732,6 +733,141 @@ bool FPlanetCavesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The sea suppresses the shallow caves"), WetCarved < DryCarved);
 
 	Caves->RemoveFromRoot();
+	return true;
+}
+
+namespace SphericalPlanetTestUtils
+{
+	/** A post-pass request for one planet chunk (no water), voxels to be filled by the caller. */
+	FVoxelNoiseGenerationRequest MakePlanetPassRequest(const FIntVector& ChunkCoord, EWorldMode Mode)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.WorldMode = Mode;
+		Request.ChunkCoord = ChunkCoord;
+		Request.ChunkSize = PlanetTestChunkSize;
+		Request.VoxelSize = PlanetTestVoxelSize;
+		Request.SphericalPlanetParams.PlanetRadius = PlanetTestRadius;
+		Request.bEnableWaterLevel = false;
+		return Request;
+	}
+
+	int32 VoxelIndex(int32 X, int32 Y, int32 Z)
+	{
+		return X + Y * PlanetTestChunkSize + Z * PlanetTestChunkSize * PlanetTestChunkSize;
+	}
+}
+
+/**
+ * SP-B7: underground classification scans along local down on a planet. At 45 degrees, a cave under a slope whose
+ * world-Z column runs into the ground up to the chunk's top was missed by the column scan (no air above it in the
+ * chunk) and is found along local up, where the line reaches the sky inside the chunk; open air above the slope is
+ * never flagged. Near a pole, where down is world -Z, the result is the column scan's, voxel for voxel.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetUndergroundAlongUpTest,
+	"VoxelWorlds.WorldModes.Planet.UndergroundAlongLocalUp",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetUndergroundAlongUpTest::RunTest(const FString& Parameters)
+{
+	using namespace SphericalPlanetTestUtils;
+	const int32 N = PlanetTestChunkSize;
+
+	// A chunk at 45 degrees north on the +X meridian. The ground is a plane perpendicular to local up, x + z = 40 in
+	// local voxels (solid below it); a cave of radius 3 voxels is centred at x = 3, z = 16, 15 voxels under it along
+	// local up, where every world-Z column through the cave is solid to the chunk's top.
+	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+	const double ChunkWorld = N * PlanetTestVoxelSize;
+	const FIntVector Chunk(FMath::FloorToInt(PlanetTestRadius * C45 / ChunkWorld), 0, FMath::FloorToInt(PlanetTestRadius * C45 / ChunkWorld));
+	FVoxelNoiseGenerationRequest Request = MakePlanetPassRequest(Chunk, EWorldMode::SphericalPlanet);
+	const FVector CaveCentre(3.0, 16.0, 16.0);
+	auto Fill = [&](TArray<FVoxelData>& Data)
+	{
+		Data.SetNum(N * N * N);
+		for (int32 Z = 0; Z < N; ++Z)
+		for (int32 Y = 0; Y < N; ++Y)
+		for (int32 X = 0; X < N; ++X)
+		{
+			const bool bGround = X + Z < 40;
+			const bool bCave = FVector::Dist(FVector(X, Y, Z), CaveCentre) < 3.0;
+			Data[VoxelIndex(X, Y, Z)] = (bGround && !bCave) ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
+		}
+	};
+
+	TArray<FVoxelData> Planet;
+	Fill(Planet);
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, Planet);
+	TArray<FVoxelData> Column;
+	Fill(Column);
+	FVoxelNoiseGenerationRequest ColumnRequest = MakePlanetPassRequest(Chunk, EWorldMode::InfinitePlane);
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(ColumnRequest, Column);
+
+	int32 CaveVoxels = 0, CaveFlagged = 0, CaveFlaggedByColumns = 0, SkyVoxels = 0, SkyFlagged = 0;
+	for (int32 Z = 0; Z < N; ++Z)
+	for (int32 Y = 0; Y < N; ++Y)
+	for (int32 X = 0; X < N; ++X)
+	{
+		const int32 Index = VoxelIndex(X, Y, Z);
+		if (Planet[Index].IsSolid())
+		{
+			continue;
+		}
+		if (X + Z < 40)
+		{
+			++CaveVoxels;
+			CaveFlagged += Planet[Index].HasUndergroundFlag() ? 1 : 0;
+			CaveFlaggedByColumns += Column[Index].HasUndergroundFlag() ? 1 : 0;
+		}
+		else
+		{
+			++SkyVoxels;
+			SkyFlagged += Planet[Index].HasUndergroundFlag() ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("45 degrees: cave %d of %d voxels flagged along local up (world-Z columns: %d); sky %d of %d flagged"),
+		CaveFlagged, CaveVoxels, CaveFlaggedByColumns, SkyFlagged, SkyVoxels));
+	TestTrue(TEXT("The cave exists"), CaveVoxels > 50);
+	TestEqual(TEXT("Every cave voxel is underground along local up"), CaveFlagged, CaveVoxels);
+	TestEqual(TEXT("No open air above the slope is underground"), SkyFlagged, 0);
+	TestTrue(TEXT("The world-Z column scan misses this cave (the case the change is for)"), CaveFlaggedByColumns < CaveVoxels);
+
+	// Near the north pole local down is world -Z: the planet's lines are the columns, voxel for voxel.
+	const FIntVector PoleChunk(0, 0, FMath::FloorToInt(PlanetTestRadius / ChunkWorld));
+	auto FillPole = [&](TArray<FVoxelData>& Data)
+	{
+		Data.SetNum(N * N * N);
+		FRandomStream Random(77);
+		TArray<FVector> Caves;
+		for (int32 i = 0; i < 6; ++i)
+		{
+			Caves.Add(FVector(Random.FRandRange(4.0, 28.0), Random.FRandRange(4.0, 28.0), Random.FRandRange(3.0, 15.0)));
+		}
+		for (int32 Z = 0; Z < N; ++Z)
+		for (int32 Y = 0; Y < N; ++Y)
+		for (int32 X = 0; X < N; ++X)
+		{
+			bool bSolid = Z < 18 + 4.0 * FMath::Sin(X * 0.3) * FMath::Cos(Y * 0.2);
+			bSolid |= (Z > 24 && Z < 27 && X > 10 && X < 20); // an overhanging ledge
+			for (const FVector& Cave : Caves)
+			{
+				bSolid &= FVector::Dist(FVector(X, Y, Z), Cave) >= 3.0;
+			}
+			Data[VoxelIndex(X, Y, Z)] = bSolid ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
+		}
+	};
+	TArray<FVoxelData> PolePlanet, PoleColumns;
+	FillPole(PolePlanet);
+	FillPole(PoleColumns);
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(MakePlanetPassRequest(PoleChunk, EWorldMode::SphericalPlanet), PolePlanet);
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(MakePlanetPassRequest(PoleChunk, EWorldMode::InfinitePlane), PoleColumns);
+	int32 Differ = 0, Flagged = 0;
+	for (int32 i = 0; i < PolePlanet.Num(); ++i)
+	{
+		Differ += PolePlanet[i].HasUndergroundFlag() != PoleColumns[i].HasUndergroundFlag() ? 1 : 0;
+		Flagged += PoleColumns[i].HasUndergroundFlag() ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("Pole: %d underground voxels by world-Z columns, %d differ along local down"), Flagged, Differ));
+	TestTrue(TEXT("The pole case has underground voxels to compare"), Flagged > 100);
+	TestEqual(TEXT("At the pole the planet's scan equals the column scan"), Differ, 0);
 	return true;
 }
 

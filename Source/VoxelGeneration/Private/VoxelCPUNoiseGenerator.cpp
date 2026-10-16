@@ -1664,48 +1664,96 @@ void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
 	// This avoids falsely flagging surface air below ridges/overhangs as underground.
 	const int32 MinSolidThickness = 3;
 
-	for (int32 Y = 0; Y < ChunkSize; ++Y)
+	// One scan line's state, top-down.
+	struct FLineState
 	{
-		for (int32 X = 0; X < ChunkSize; ++X)
+		bool bSeenAir = false;
+		bool bUnderground = false;
+		int32 ConsecutiveSolid = 0;
+	};
+	auto Step = [MinSolidThickness](FLineState& Line, FVoxelData& Voxel)
+	{
+		if (Voxel.IsSolid())
 		{
-			bool bSeenAir = false;
-			bool bUnderground = false;
-			int32 ConsecutiveSolid = 0;
-
-			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
+			// Only count solid after we've seen air (sky/surface)
+			if (Line.bSeenAir)
 			{
-				const int32 Index = X + Y * ChunkSize + Z * SliceSize;
-				FVoxelData& Voxel = OutVoxelData[Index];
+				++Line.ConsecutiveSolid;
+			}
+			return;
+		}
 
-				if (Voxel.IsSolid())
+		Line.bSeenAir = true;
+
+		// Air voxel — decide if it's underground
+		if (!Line.bUnderground && Line.ConsecutiveSolid >= MinSolidThickness)
+		{
+			// Passed through thick terrain ceiling — everything below is underground
+			Line.bUnderground = true;
+		}
+
+		if (Line.bUnderground && !Voxel.HasWaterFlag())
+		{
+			Voxel.SetUndergroundFlag(true);
+		}
+
+		// Reset for next solid sequence (only matters while still above ground)
+		if (!Line.bUnderground)
+		{
+			Line.ConsecutiveSolid = 0;
+		}
+	};
+
+	if (Request.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		// A planet scans along local down (the chunk centre's), not world -Z (SP-B7): at mid latitudes down is up to 55
+		// degrees off every axis, and a world-Z scan reads a hillside as a cave ceiling, or misses a cave whose column
+		// runs into the ground to the chunk's top. The lines are digital lines sheared along the axis nearest to down:
+		// voxel (a, b, c), with a the step index along that axis from the chunk's upper side, is on line
+		// (b - round(a * SlopeB), c - round(a * SlopeC)), so every voxel is on exactly one line and each step moves at
+		// most one voxel sideways. The same state machine runs on each line from where it enters the chunk.
+		const FVector ChunkCenter = Request.GetChunkWorldPosition() + FVector(0.5 * ChunkSize * Request.VoxelSize);
+		const FVector Down = -FSphericalPlanetWorldMode::GetDirectionFromCenter(ChunkCenter, Request.SphericalPlanetParams.PlanetCenter);
+		const FVector AbsDown = Down.GetAbs();
+		const int32 AxisA = (AbsDown.X >= AbsDown.Y && AbsDown.X >= AbsDown.Z) ? 0 : (AbsDown.Y >= AbsDown.Z ? 1 : 2);
+		const int32 AxisB = (AxisA + 1) % 3;
+		const int32 AxisC = (AxisA + 2) % 3;
+		const bool bForward = Down[AxisA] > 0.0;
+		const double SlopeB = Down[AxisB] / AbsDown[AxisA];
+		const double SlopeC = Down[AxisC] / AbsDown[AxisA];
+
+		// Line ids span [-ChunkSize, 2 * ChunkSize) on each sheared axis.
+		const int32 Span = 3 * ChunkSize;
+		TArray<FLineState> Lines;
+		Lines.SetNum(Span * Span);
+		int32 Coord[3];
+		for (int32 K = 0; K < ChunkSize; ++K)
+		{
+			Coord[AxisA] = bForward ? K : ChunkSize - 1 - K;
+			const int32 ShiftB = FMath::RoundToInt32(K * SlopeB);
+			const int32 ShiftC = FMath::RoundToInt32(K * SlopeC);
+			for (int32 C = 0; C < ChunkSize; ++C)
+			{
+				Coord[AxisC] = C;
+				for (int32 B = 0; B < ChunkSize; ++B)
 				{
-					// Only count solid after we've seen air (sky/surface)
-					if (bSeenAir)
-					{
-						++ConsecutiveSolid;
-					}
+					Coord[AxisB] = B;
+					FLineState& Line = Lines[(B - ShiftB + ChunkSize) + (C - ShiftC + ChunkSize) * Span];
+					Step(Line, OutVoxelData[Coord[0] + Coord[1] * ChunkSize + Coord[2] * SliceSize]);
 				}
-				else
+			}
+		}
+	}
+	else
+	{
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				FLineState Line;
+				for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 				{
-					bSeenAir = true;
-
-					// Air voxel — decide if it's underground
-					if (!bUnderground && ConsecutiveSolid >= MinSolidThickness)
-					{
-						// Passed through thick terrain ceiling — everything below is underground
-						bUnderground = true;
-					}
-
-					if (bUnderground && !Voxel.HasWaterFlag())
-					{
-						Voxel.SetUndergroundFlag(true);
-					}
-
-					// Reset for next solid sequence (only matters while still above ground)
-					if (!bUnderground)
-					{
-						ConsecutiveSolid = 0;
-					}
+					Step(Line, OutVoxelData[X + Y * ChunkSize + Z * SliceSize]);
 				}
 			}
 		}
