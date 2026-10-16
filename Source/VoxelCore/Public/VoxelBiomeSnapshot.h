@@ -102,6 +102,18 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 	}
 
 	/**
+	 * The extremes continentalness can apply anywhere: the lowest and highest height offset and the largest height-scale
+	 * multiplier in the baked curves. The identity (0, 0, 1) when continentalness is off or a curve is missing. The
+	 * height bounds build on it: FInfinitePlaneWorldMode::GetTerrainHeightBounds, the planet's displacement bounds and
+	 * the world configuration's shell check (spherical SP-A5, SP-B5).
+	 *
+	 * @param OutMinOffset Lowest height offset
+	 * @param OutMaxOffset Highest height offset
+	 * @param OutMaxScaleMult Largest height-scale multiplier (at least 0)
+	 */
+	void GetContinentalnessExtremes(float& OutMinOffset, float& OutMaxOffset, float& OutMaxScaleMult) const;
+
+	/**
 	 * Shared baked-curve lerp core (the single implementation behind both this snapshot and
 	 * UVoxelBiomeConfiguration::GetContinentalnessTerrainParams). Returns the identity modulation
 	 * (offset 0, multiplier 1) when either curve has fewer than 2 samples.

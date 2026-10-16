@@ -127,6 +127,7 @@ FVoxelWorldFingerprint FVoxelWorldModeFactory::MakeFingerprint(const UVoxelWorld
 		Params.Add(TEXT("PlanetMaxTerrainHeight=") + Num(Planet.MaxTerrainHeight));
 		Params.Add(TEXT("PlanetMaxTerrainDepth=") + Num(Planet.MaxTerrainDepth));
 		Params.Add(TEXT("PlanetCenter=") + Vec3(Planet.PlanetCenter));
+		Params.Add(FString::Printf(TEXT("PlanetGeneration=%d"), PlanetGenerationVersion));
 	}
 	Params.Add(TEXT("VoxelSize=") + Num(Config.VoxelSize));
 	Params.Add(FString::Printf(TEXT("ChunkSize=%d"), Config.ChunkSize));

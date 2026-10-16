@@ -139,8 +139,8 @@ public:
 	/**
 	 * Maximum terrain height above the planet's base radius.
 	 * Mountains and peaks can rise this high above WorldRadius. Must cover BaseHeight + PlanetHeightScale / 2,
-	 * the highest the terrain reaches: terrain above the shell is not streamed and is cut off
-	 * (GetSettingsWarnings checks it).
+	 * plus continentalness's highest offset with the scale at its largest multiplier: the highest the terrain
+	 * reaches. Terrain above the shell is not streamed and is cut off (GetSettingsWarnings checks it).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetMaxTerrainHeight = 5000.0f;
@@ -148,14 +148,17 @@ public:
 	/**
 	 * Maximum terrain depth below the planet's base radius.
 	 * Valleys and caves can descend this deep below WorldRadius. Must cover PlanetHeightScale / 2 - BaseHeight,
-	 * the deepest the terrain reaches (GetSettingsWarnings checks it).
+	 * plus continentalness's lowest offset with the scale at its largest multiplier: the deepest the terrain
+	 * reaches (GetSettingsWarnings checks it).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetMaxTerrainDepth = 2000.0f;
 
 	/**
 	 * Height scale for planetary terrain features: the surface sits at WorldRadius + BaseHeight + noise *
-	 * PlanetHeightScale / 2, with noise in [-1, 1]. Planets use this instead of HeightScale.
+	 * PlanetHeightScale / 2, with noise in [-1, 1], and continentalness (the biome configuration's curves) offsets
+	 * BaseHeight and scales PlanetHeightScale as it does BaseHeight and HeightScale in heightmap modes. Planets use
+	 * this instead of HeightScale.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetHeightScale = 5000.0f;
@@ -252,7 +255,11 @@ public:
 
 	// ==================== Noise Generation Settings ====================
 
-	/** Parameters for noise-based terrain generation */
+	/**
+	 * Parameters for noise-based terrain generation. Frequency is per world unit in every mode: heightmap modes sample
+	 * the noise at (X, Y), a planet at the point on its datum sphere (direction from the centre x WorldRadius), so a
+	 * feature is about 1 / Frequency uu across whatever the planet's radius (spherical SP-B1).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Generation")
 	FVoxelNoiseParams NoiseParams;
 

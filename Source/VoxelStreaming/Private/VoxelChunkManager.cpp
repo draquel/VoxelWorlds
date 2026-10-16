@@ -2529,6 +2529,17 @@ FVector UVoxelChunkManager::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, floa
 	return WorldMode ? WorldMode->SurfaceToWorld(Coord, Altitude) : FVector(Coord.UV.X, Coord.UV.Y, Altitude);
 }
 
+FVoxelTerrainSurfacePoint UVoxelChunkManager::GetSurfacePointAt(const FVector& WorldPos) const
+{
+	if (!WorldMode || !Configuration)
+	{
+		FVoxelTerrainSurfacePoint Point;
+		Point.Position = WorldPos;
+		return Point;
+	}
+	return WorldMode->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
+}
+
 FVoxelWorldFingerprint UVoxelChunkManager::GetWorldFingerprint() const
 {
 	return Configuration ? FVoxelWorldModeFactory::MakeFingerprint(*Configuration) : FVoxelWorldFingerprint();

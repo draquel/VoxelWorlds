@@ -426,6 +426,17 @@ public:
 	FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const;
 
 	/**
+	 * The analytic terrain surface on the local up-line through a position, with its outward normal (spherical SP-A1):
+	 * the point at (X, Y) in heightmap modes, along the direction from the centre on a planet. No caves, conditioning
+	 * zones or edits (GetGeneratedSurfaceHeight and the edit-merged queries add those in heightmap modes).
+	 *
+	 * @param WorldPos Any position on the up-line
+	 * @return The surface point, its normal and its altitude
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVoxelTerrainSurfacePoint GetSurfacePointAt(const FVector& WorldPos) const;
+
+	/**
 	 * What generated this world, for saves (WM-A4): world mode, shape params, voxel grid and generation version.
 	 * A save whose fingerprint differs is not loaded into this world.
 	 *

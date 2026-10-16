@@ -1289,10 +1289,17 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
-	const FVector PlanetCenter = WorldMode.GetPlanetParams().PlanetCenter;
+	const FSphericalPlanetParams& PlanetParams = WorldMode.GetPlanetParams();
+	const FVector PlanetCenter = PlanetParams.PlanetCenter;
+	const float PlanetRadius = PlanetParams.PlanetRadius;
 
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+
+	// Hoisted continentalness snapshot for the per-voxel radial height (plain data), as in the heightmap modes: the
+	// planet's surface function (FSphericalPlanetWorldMode::SampleRadialDisplacement) takes it, and GetSurfacePoint
+	// applies the same.
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(BiomeConfig);
 
 	// Set up biome noise parameters
 	FVoxelNoiseParams TempNoiseParams;
@@ -1309,26 +1316,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
-	// Set up continentalness noise parameters
-	FVoxelNoiseParams ContinentalnessNoiseParamsSP;
-	ContinentalnessNoiseParamsSP.NoiseType = EVoxelNoiseType::Simplex;
-	ContinentalnessNoiseParamsSP.Octaves = 2;
-	ContinentalnessNoiseParamsSP.Persistence = 0.5f;
-	ContinentalnessNoiseParamsSP.Lacunarity = 2.0f;
-	ContinentalnessNoiseParamsSP.Amplitude = 1.0f;
-
 	if (BiomeConfig)
 	{
 		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
 		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
-
-		if (BiomeConfig->bEnableContinentalness)
-		{
-			ContinentalnessNoiseParamsSP.Seed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
-			ContinentalnessNoiseParamsSP.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
-		}
 	}
 	else
 	{
@@ -1337,8 +1330,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
-
-	const bool bUseContinentalnessSP = BiomeConfig && BiomeConfig->bEnableContinentalness;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -1356,31 +1347,21 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// Get direction from planet center for noise sampling
 				FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, PlanetCenter);
 
-				// Sample continentalness for biome selection (uses direction like other biome noise)
+				// The surface along this direction: terrain noise and continentalness sampled on the datum sphere, the
+				// displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5). The sampled
+				// continentalness is reused for the biome blend below.
 				float Continentalness = 0.0f;
-				if (bUseContinentalnessSP)
-				{
-					FVector BiomeSamplePosSP = Direction * 10000.0f;
-					Continentalness = FBM3D(BiomeSamplePosSP, ContinentalnessNoiseParamsSP);
-				}
-
-				// Sample spherical noise using direction
-				float NoiseValue = FSphericalPlanetWorldMode::SampleSphericalNoise(Direction, Request.NoiseParams);
-
-				// Get density from spherical planet world mode
-				float SignedDistance = WorldMode.GetDensityAt(WorldPos, Request.LODLevel, NoiseValue);
+				const float TerrainRadius = PlanetRadius + FSphericalPlanetWorldMode::SampleRadialDisplacement(
+					Direction, PlanetRadius, WorldMode.GetTerrainParams(), Request.NoiseParams, &BiomeSnapshot, &Continentalness);
 
 				// NOTE: terrain conditioning (Request.ConditioningZones) is intentionally NOT applied here.
 				// The zone model is heightmap (XY footprint + target Z height); a planet's surface is radial
 				// (a target RADIUS per direction), so flattening needs a separate radial-zone model. Deferred.
 
-				// Convert signed distance to density
+				// Signed distance to the surface (with the shell's quick reject), then density
+				const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);
+				const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(DistFromCenter, TerrainRadius, PlanetParams);
 				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
-
-				// Calculate radial distance for material assignment
-				float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);
-				float TerrainRadius = WorldMode.GetPlanetParams().PlanetRadius +
-					FSphericalPlanetWorldMode::NoiseToRadialDisplacement(NoiseValue, WorldMode.GetTerrainParams());
 
 				// Depth below surface is radial (terrain radius - distance from center)
 				float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;

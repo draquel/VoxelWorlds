@@ -17,7 +17,8 @@ revision of this document then turns the confirmed findings into work items. **S
 (the status of every finding, work items with sizes and dependencies, milestones M1-M6, and where spherical starts),
 with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API) results: §14.6. M3 (island correctness)
 results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-only) results: §14.9. M6 (the island's
-visible edge and scale) results: §14.10.
+visible edge and scale) results: §14.10. Spherical Phase 1 (a correct
+planet on the CPU): plan and results in §15.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -2356,3 +2357,54 @@ Things to know:
 - One editor crash on the RHI thread (`(OldPacked & DeletingBit) == 0`, "Resource is being deleted"), right after the far
   ocean and map tests ran in an editor launched seconds before. Not reproduced in four runs of the same tests afterwards,
   in the full in-editor suite or in the 60-odd PIE sessions of the benches; recorded in case it comes back.
+
+## 15. Spherical Phase 1: a correct planet on the CPU (2026-10-16)
+
+The requirements doc's Phase 1 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-A1, SP-A2,
+SP-B1, SP-B2, SP-B5 to SP-B8, SP-C1, SP-C2, SP-D4 and SP-I2, after M6 by D9 (§14.4). CPU generation only: GPU parity
+and the GPU default for planets (SP-B4, SP-I3) are Phase 2, walking (SP-F*) is Phase 3. Exit check: a survey camera
+shows a seamless, unmirrored planet with sensible materials and water at all latitudes.
+
+### 15.1 Plan
+
+Work items (IDs `WM-P*`, stable):
+
+| ID | Work item | Requirements | Repos | Size |
+|----|-----------|--------------|-------|------|
+| WM-P1 | **One radial height.** `FSphericalPlanetWorldMode` owns the planet's surface function: noise and continentalness sampled by 3D direction at the point on the datum sphere (`Direction × PlanetRadius`, planet-relative), and continentalness modulating the displacement as in the heightmap modes (height offset and height-scale multiplier). Generation, a new `IVoxelWorldMode::GetSurfacePoint` (the surface point and normal on the up-line through a position; on a planet, along the direction from the centre) and the config's shell check, which now counts continentalness's extremes, all use it | SP-A1, SP-B1, SP-B5 (SP-A5's check) | VoxelWorlds | M |
+| WM-P2 | **The surface coordinate's warp:** the tangent warp on each cube face (below) | SP-A2 | VoxelWorlds | S |
+| WM-P3 | **Materials and caves.** Height-material rules read the voxel's altitude above the datum; temperature and moisture are sampled like the terrain (by direction, in world units); caves apply `VerticalScale` along local up, and get `bIsUnderwater` from the sea radius | SP-B2, SP-B6 | VoxelWorlds | S |
+| WM-P4 | **Underground classification along local up** (below) | SP-B7 | VoxelWorlds | S-M |
+| WM-P5 | **Water by the sea radius:** a radial fill pass in generation, and the chunk manager's cross-chunk propagation and the edit-time propagation by radius; the Z-plane water tiles are off on planets | SP-B8 | VoxelWorlds | M |
+| WM-P6 | **The shell window and the horizon.** `FDistanceBandLODStrategy::GetColumnWindow`'s planet branch becomes the column's crossings of the shell; the horizon cull adds the mountain term | SP-C1, SP-C2 | VoxelWorlds | M |
+| WM-P7 | **Tests:** SP-I2's list, plus the automated half of SP-D4 (collision winding at 45°, a closed surface at 45° from a real chunk manager) | SP-I2, SP-D4 | VoxelWorlds | M |
+| WM-P8 | **Live verification and benches:** the exit check before and after, SP-D4's checks at 45°, benches against the control | SP-D4 | VoxelWorlds (docs), parent (review content) | M |
+
+Order: WM-P1 and WM-P2 (independent), then WM-P3, WM-P4 and WM-P5 (the generator, one commit each), WM-P6, WM-P7's
+streaming tests, WM-P8. Unit tests land with each item. PRs: VoxelWorlds, generation (WM-P1 to WM-P5) and streaming
+(WM-P6, the streaming tests and these docs) stacked on it; then UE5_PluginDev (a review planet config with water, its
+script, the gitlink and the doc map). No game-side change is needed.
+
+**Design (written before building).**
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| The shell window's shape | Per column, the layers whose chunks meet the shell from `R − MaxTerrainDepth − ½W` to `R + MaxTerrainHeight + ½W` (W a chunk's width): one interval, or two when the column passes inside the inner radius (one crossing on each side of the centre), clipped to the viewer's 3D view distance. Load and keep windows are the same; there is no near window | M4's per-column design (D8) with the shell as the column's range. The interval is exact for the column's footprint (its nearest and farthest points from the planet's axis bound the crossing), so it covers every latitude; the old box was capped at ±16 layers around the viewer, which at the equator, where world Z is horizontal, cut the reach short. The shell holds everything that generates, caves included, so no near window is needed. The ½-chunk slack loads the neighbours a seam job reads next to a peak or valley at the shell's edge. A band around the analytic surface (SP-C5) would hold fewer chunks; it is P2, and the benches measure what the shell costs |
+| Noise sampling | Terrain, continentalness, temperature and moisture: `FBM3D(Direction × PlanetRadius)`, relative to the planet centre. Caves: the voxel's position with its altitude scaled, `Centre + Direction × (R + Altitude × VerticalScale)` | The point on the datum sphere carries world units: a feature is about 1/Frequency uu across on any radius, as on the plane, and a 3D field has no seam and no mirror. The plane's `(X, Y, 0)` and the sphere are both 2D sections of the same 3D field, so the terrain keeps its character. Caves flatten along local up and keep their horizontal scale at the datum (within 1% for a cave 3,000 uu down on a 250,000 uu planet) |
+| Equal-area warp | **Switch now** to the tangent warp: on each face `u = (4/π)·atan(g)` per axis, g the gnomonic coordinate; UV stays in [−1, 1] | Equal UV cells cover areas within 1.41× of each other (gnomonic: 5.2×); the inverse is closed-form and exact; it is continuous at face edges. Nothing consumes the coordinate yet, but Phase 4's map tiles, nav tiles and explored-tile save keys will, and a change then would invalidate saves. An exactly equal-area map (a Lambert cube) costs more per query and no consumer needs exact areas |
+| Water fill | Generation: the plane's three phases with the sea sphere in place of the water plane. Chunks the sea surface crosses seed along digital lines in the chunk's local down direction, open from the line's top (as a column is open from the chunk top); a BFS spreads through non-cave air inside the sea radius; the cave flags clear. The chunk manager's cross-chunk propagation and the edit-time propagation take the same test (`FVoxelSeaSurface`, VoxelCore). The Z-plane water tiles skip planets; the ocean surface stays the test actor's water sphere at `WaterRadius` until SP-E2 (Phase 3) | The plane's rules carry over (the open sea fills, caves stay dry, chunks below the surface fill from their neighbours), with the comparison against a Z plane replaced by the radius. The tiles are XY grids at the Z-plane level and would draw in the wrong place on a planet |
+| Underground classification | The column scan's state machine on digital lines along the chunk centre's local down: lines sheared along the axis nearest to down, so every voxel is on exactly one line. Heightmap modes keep the column scan unchanged | At mid latitudes local down is up to 55° off every axis, and a world-Z scan reads hillsides as cave ceilings. Heightmap output stays bit-identical, so the GPU post-pass parity holds; the GPU port for planets is Phase 2 (`VoxelPostPasses.usf`) |
+| Horizon | Cull a chunk whose centre is farther than `√(2R·hv + hv²) + √(2R·Hmax + Hmax²) + ½√3·W` from the viewer (hv the viewer's altitude, at least 0; Hmax = `MaxTerrainHeight`); no cull for a viewer below the shell | SP-C2: a peak of height Hmax shows over the horizon until the two tangent distances add up. The old buffer (+Hmax) cut mountains just past the viewer's own horizon, and a viewer at or below the datum got no cull at all |
+
+**How each is verified.**
+
+| ID | Check |
+|----|-------|
+| WM-P1 | Tests: analytic against generated surface by direction (poles, equator, 45°, cube-face edges and corners): the generated isosurface along the radius within a voxel of `GetSurfacePoint`; the two hemispheres differ; no step across face edges; a feature's size in uu does not depend on the radius; the shell check counts continentalness |
+| WM-P2 | Round trip on every face; equal UV cells within 1.5× in area |
+| WM-P3 | A height rule applies by altitude (snow above its altitude, not everywhere); the live survey |
+| WM-P4 | A planet chunk at 45° with a cave under the ground: underground flags in the cave and none in the open air; the heightmap suites unchanged |
+| WM-P5 | A coastal chunk at 45°: water flags inside the sea radius only, caves dry; propagation by radius; live, water at every latitude |
+| WM-P6 | The candidates cover every chunk that meets the shell within the view distance at the pole, at 45° and on the equator (against brute force); the horizon cull keeps a peak past the viewer's own horizon; the benches |
+| WM-P7 | Collision faces point away from the planet at 45°; a real chunk manager streaming a small planet at 45°, LOD on, renders a closed surface (no open edge but at the loaded region's edge) |
+| WM-P8 | Survey screenshots before (this base) and after, at the poles, the equator, 45° and across cube-face edges; at 45°, crossfades and first-appearance fades running and a physics body landing on the slope; benches: the planet on its equator and its 45° and 80° circles of latitude at a fixed altitude against the control at a fixed altitude, one build, one batch, a throwaway PIE first (G14), settled at the spawn, against D3; headless and in-editor suites |

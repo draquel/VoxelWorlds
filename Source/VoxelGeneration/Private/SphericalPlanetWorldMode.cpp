@@ -2,6 +2,7 @@
 
 #include "SphericalPlanetWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
+#include "VoxelCPUNoiseGenerator.h"
 #include "VoxelMaterialRegistry.h"
 
 FSphericalPlanetWorldMode::FSphericalPlanetWorldMode()
@@ -38,6 +39,18 @@ namespace SphericalPlanetSurfacePrivate
 		{ FVector( 0, 0, 1), FVector( 1, 0, 0), FVector(0, 1, 0) },  // 4: +Z
 		{ FVector( 0, 0,-1), FVector( 1, 0, 0), FVector(0,-1, 0) },  // 5: -Z
 	};
+
+	// The tangent warp (WORLD_MODES_REVIEW_PLAN.md §15.1): u = (4 / pi) * atan(g) maps the gnomonic coordinate g in
+	// [-1, 1] to u in [-1, 1], uniform in angle along the face's centre lines; its inverse is g = tan(pi / 4 * u).
+	double WarpFromGnomonic(double G)
+	{
+		return FMath::Atan(G) * (4.0 / UE_DOUBLE_PI);
+	}
+
+	double GnomonicFromWarp(double U)
+	{
+		return FMath::Tan(U * (UE_DOUBLE_PI / 4.0));
+	}
 }
 
 bool FSphericalPlanetWorldMode::IsInsideWorld(double X, double Y) const
@@ -88,17 +101,50 @@ FVoxelSurfaceCoord FSphericalPlanetWorldMode::WorldToSurface(const FVector& Worl
 	{
 		Face = Dir.Z >= 0.0 ? 4 : 5;
 	}
-	const SphericalPlanetSurfacePrivate::FCubeFace& F = SphericalPlanetSurfacePrivate::GCubeFaces[Face];
-	// Scale the direction onto the face plane (N . P = 1), then read its coordinates along T and B.
+	using namespace SphericalPlanetSurfacePrivate;
+	const FCubeFace& F = GCubeFaces[Face];
+	// Scale the direction onto the face plane (N . P = 1), read its gnomonic coordinates along T and B, then warp them.
 	const double Scale = 1.0 / FVector::DotProduct(Dir, F.N);
-	return FVoxelSurfaceCoord(Face, FVector2D(FVector::DotProduct(Dir, F.T) * Scale, FVector::DotProduct(Dir, F.B) * Scale));
+	return FVoxelSurfaceCoord(Face, FVector2D(
+		WarpFromGnomonic(FVector::DotProduct(Dir, F.T) * Scale),
+		WarpFromGnomonic(FVector::DotProduct(Dir, F.B) * Scale)));
 }
 
 FVector FSphericalPlanetWorldMode::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
 {
-	const SphericalPlanetSurfacePrivate::FCubeFace& F = SphericalPlanetSurfacePrivate::GCubeFaces[FMath::Clamp(Coord.Face, 0, 5)];
-	const FVector Dir = (F.N + Coord.UV.X * F.T + Coord.UV.Y * F.B).GetSafeNormal();
+	using namespace SphericalPlanetSurfacePrivate;
+	const FCubeFace& F = GCubeFaces[FMath::Clamp(Coord.Face, 0, 5)];
+	const FVector Dir = (F.N + GnomonicFromWarp(Coord.UV.X) * F.T + GnomonicFromWarp(Coord.UV.Y) * F.B).GetSafeNormal();
 	return PlanetParams.PlanetCenter + Dir * (PlanetParams.PlanetRadius + Altitude);
+}
+
+FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const
+{
+	const FVector& Center = PlanetParams.PlanetCenter;
+	const float Radius = PlanetParams.PlanetRadius;
+	auto SurfaceAt = [&](const FVector& Direction)
+	{
+		return Center + Direction * (Radius + SampleRadialDisplacement(Direction, Radius, TerrainParams, NoiseParams, &BiomeSnapshot));
+	};
+
+	const FVector Dir = GetDirectionFromCenter(WorldPos, Center);
+	FVoxelTerrainSurfacePoint Point;
+	Point.Position = SurfaceAt(Dir);
+
+	// Central differences along two tangents, SurfaceNormalStep of arc either side on the datum sphere. (T1, T2, Dir) is
+	// right-handed, so the cross product of the two differences points out of the terrain.
+	const FVector T1 = FVector::CrossProduct(FMath::Abs(Dir.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector, Dir).GetSafeNormal();
+	const FVector T2 = FVector::CrossProduct(Dir, T1);
+	const double Angle = SurfaceNormalStep / FMath::Max(Radius, 1.0f);
+	const FVector D1 = SurfaceAt((Dir + T1 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T1 * Angle).GetSafeNormal());
+	const FVector D2 = SurfaceAt((Dir + T2 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T2 * Angle).GetSafeNormal());
+	Point.Normal = FVector::CrossProduct(D1, D2).GetSafeNormal();
+	if (FVector::DotProduct(Point.Normal, Dir) < 0.0)
+	{
+		Point.Normal = -Point.Normal;
+	}
+	Point.Altitude = GetAltitude(Point.Position);
+	return Point;
 }
 
 float FSphericalPlanetWorldMode::GetDensityAt(
@@ -106,32 +152,10 @@ float FSphericalPlanetWorldMode::GetDensityAt(
 	int32 LODLevel,
 	float NoiseValue) const
 {
-	// Calculate distance from planet center
+	// The terrain noise is the caller's; continentalness is not applied (SampleRadialDisplacement is the full surface).
 	const float DistFromCenter = CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter);
-
-	// Quick reject: if way outside or inside the terrain shell, return early
-	const float InnerRadius = PlanetParams.GetInnerRadius();
-	const float OuterRadius = PlanetParams.GetOuterRadius();
-
-	if (DistFromCenter > OuterRadius + 1000.0f)
-	{
-		// Far above surface - definitely air
-		return -1000.0f;
-	}
-	if (DistFromCenter < InnerRadius - 1000.0f)
-	{
-		// Deep inside core - definitely solid
-		return 1000.0f;
-	}
-
-	// Get radial displacement from noise
-	const float RadialDisplacement = NoiseToRadialDisplacement(NoiseValue, TerrainParams);
-
-	// Calculate terrain radius at this direction
-	const float TerrainRadius = PlanetParams.PlanetRadius + RadialDisplacement;
-
-	// Signed distance: positive inside solid, negative in air
-	return CalculateSignedDistance(DistFromCenter, TerrainRadius);
+	const float TerrainRadius = PlanetParams.PlanetRadius + NoiseToRadialDisplacement(NoiseValue, TerrainParams);
+	return ShellSignedDistance(DistFromCenter, TerrainRadius, PlanetParams);
 }
 
 float FSphericalPlanetWorldMode::GetTerrainHeightAt(
@@ -139,24 +163,16 @@ float FSphericalPlanetWorldMode::GetTerrainHeightAt(
 	float Y,
 	const FVoxelNoiseParams& NoiseParams) const
 {
-	// For spherical planets, this method doesn't make as much sense
-	// since "height" is radial. We interpret X,Y as a direction and return
-	// the terrain radius at that direction.
-
-	// Create a direction from X,Y (treating them as angles or normalized coords)
-	// This is a simplified approach - actual implementation might use proper spherical coords
+	// Legacy: interprets (X, Y) as the equatorial direction (X, Y, 0) and returns the terrain RADIUS there, not a Z.
+	// Heightmap consumers that call this on a planet read it wrongly; SP-A3 (Phase 4) moves them to GetSurfacePoint.
 	FVector Direction(X, Y, 0.0f);
 	Direction.Normalize();
 	if (Direction.IsNearlyZero())
 	{
 		Direction = FVector::UpVector;
 	}
-
-	// Sample noise at this direction
-	const float NoiseValue = SampleSphericalNoise(Direction, NoiseParams);
-
-	// Return terrain radius
-	return PlanetParams.PlanetRadius + NoiseToRadialDisplacement(NoiseValue, TerrainParams);
+	return PlanetParams.PlanetRadius
+		+ SampleRadialDisplacement(Direction, PlanetParams.PlanetRadius, TerrainParams, NoiseParams, &BiomeSnapshot);
 }
 
 FIntVector FSphericalPlanetWorldMode::WorldToChunkCoord(
@@ -247,22 +263,91 @@ FVector FSphericalPlanetWorldMode::GetDirectionFromCenter(
 
 float FSphericalPlanetWorldMode::SampleSphericalNoise(
 	const FVector& Direction,
+	float PlanetRadius,
 	const FVoxelNoiseParams& NoiseParams)
 {
-	// Convert direction to a position for noise sampling
-	// We use the direction scaled by a large factor to get varied noise
-	// This creates coherent noise across the sphere surface
+	// The full 3D point on the datum sphere: no hemisphere mirror, no seam, feature size in world units (SP-B1).
+	return FVoxelCPUNoiseGenerator::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius), NoiseParams);
+}
 
-	// Use spherical mapping: direction components directly as noise input, scaled by a fixed factor.
-	// Known defects, fixed by SP-B1 in spherical Phase 1 (SPHERICAL_PLANET_REQUIREMENTS.md): only X and Y are
-	// sampled, so the terrain is mirrored across the equator, and the fixed factor ties feature size to the
-	// radius. (FSphericalPlanetParams::NoiseScale, which was never read, is gone.)
-	const float NoiseScale = 10000.0f;
-	const FVector NoisePos = Direction * NoiseScale;
+FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams(
+	const FVector& Direction,
+	float PlanetRadius,
+	const FWorldModeTerrainParams& BaseParams,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot* BiomeSnapshot,
+	float& OutContinentalness)
+{
+	return FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt(
+		GetNoiseSamplePoint(Direction, PlanetRadius), BaseParams, NoiseParams, BiomeSnapshot, OutContinentalness);
+}
 
-	// Use the existing 2D terrain noise sampling, treating X,Y as the coords
-	// This gives us coherent features across the sphere
-	return FInfinitePlaneWorldMode::SampleTerrainNoise2D(NoisePos.X, NoisePos.Y, NoiseParams);
+float FSphericalPlanetWorldMode::SampleRadialDisplacement(
+	const FVector& Direction,
+	float PlanetRadius,
+	const FWorldModeTerrainParams& TerrainParams,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot* BiomeSnapshot,
+	float* OutContinentalness)
+{
+	float Continentalness = 0.0f;
+	const FWorldModeTerrainParams Effective = ComputeEffectiveTerrainParams(
+		Direction, PlanetRadius, TerrainParams, NoiseParams, BiomeSnapshot, Continentalness);
+	if (OutContinentalness)
+	{
+		*OutContinentalness = Continentalness;
+	}
+	return NoiseToRadialDisplacement(SampleSphericalNoise(Direction, PlanetRadius, NoiseParams), Effective);
+}
+
+void FSphericalPlanetWorldMode::GetDisplacementBounds(
+	const FWorldModeTerrainParams& TerrainParams,
+	const FVoxelBiomeSnapshot* BiomeSnapshot,
+	float& OutMin,
+	float& OutMax)
+{
+	// Displacement = (BaseHeight + Offset(c)) + Noise * HeightScale * Mult(c) / 2, Noise in [-1, 1]. Decoupled extremes,
+	// as FInfinitePlaneWorldMode::GetTerrainHeightBounds: a superset of what generation can produce.
+	float MinOffset = 0.0f, MaxOffset = 0.0f, MaxScaleMult = 1.0f;
+	if (BiomeSnapshot)
+	{
+		BiomeSnapshot->GetContinentalnessExtremes(MinOffset, MaxOffset, MaxScaleMult);
+	}
+	const float Amplitude = 0.5f * TerrainParams.HeightScale * MaxScaleMult;
+	OutMin = TerrainParams.BaseHeight + MinOffset - Amplitude;
+	OutMax = TerrainParams.BaseHeight + MaxOffset + Amplitude;
+}
+
+float FSphericalPlanetWorldMode::ShellSignedDistance(
+	float DistFromCenter,
+	float TerrainRadius,
+	const FSphericalPlanetParams& PlanetParams)
+{
+	// Quick reject well outside the terrain shell: definitely air above it, definitely core below it.
+	if (DistFromCenter > PlanetParams.GetOuterRadius() + 1000.0f)
+	{
+		return -1000.0f;
+	}
+	if (DistFromCenter < PlanetParams.GetInnerRadius() - 1000.0f)
+	{
+		return 1000.0f;
+	}
+	return CalculateSignedDistance(DistFromCenter, TerrainRadius);
+}
+
+FVector FSphericalPlanetWorldMode::ScaleAltitude(
+	const FVector& WorldPos,
+	const FSphericalPlanetParams& PlanetParams,
+	float VerticalScale)
+{
+	const FVector ToPoint = WorldPos - PlanetParams.PlanetCenter;
+	const double Dist = ToPoint.Size();
+	if (Dist < UE_KINDA_SMALL_NUMBER)
+	{
+		return WorldPos;
+	}
+	const double Altitude = Dist - PlanetParams.PlanetRadius;
+	return PlanetParams.PlanetCenter + ToPoint * ((PlanetParams.PlanetRadius + Altitude * VerticalScale) / Dist);
 }
 
 float FSphericalPlanetWorldMode::NoiseToRadialDisplacement(
