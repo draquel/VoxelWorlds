@@ -33,6 +33,8 @@ public class VoxelMap : ModuleRules
 			{
 				"VoxelGeneration",
 				"VoxelStreaming",
+				"VoxelLOD",       // tests: a chunk manager with the distance-band strategy
+				"VoxelRendering", // tests: a renderer stub (IVoxelMeshRenderer)
 			}
 		);
 
