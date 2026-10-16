@@ -409,6 +409,13 @@ UMaterialInterface* FVoxelCustomVFRenderer::GetMaterial() const
 	return CurrentMaterial.Get();
 }
 
+UMaterialInterface* FVoxelCustomVFRenderer::GetSurfaceMaterial() const
+{
+	// The world component draws with its atlas instance once SetMaterialAtlas made one.
+	UMaterialInterface* Drawn = WorldComponent ? WorldComponent->GetMaterial(0) : nullptr;
+	return Drawn ? Drawn : CurrentMaterial.Get();
+}
+
 void FVoxelCustomVFRenderer::UpdateMaterialParameters()
 {
 	// Material parameters update automatically through UMaterialInstanceDynamic

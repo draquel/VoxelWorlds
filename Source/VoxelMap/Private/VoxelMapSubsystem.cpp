@@ -47,6 +47,38 @@ static TAutoConsoleVariable<float> CVarMapEditRefreshSeconds(
 	TEXT("every frame, so this bounds the rebuild rate."),
 	ECVF_Default);
 
+namespace
+{
+	void ApplyMapBudgetsToAll(IConsoleVariable*)
+	{
+		for (TObjectIterator<UVoxelMapSubsystem> It; It; ++It)
+		{
+			It->ApplyTileBudgets();
+		}
+	}
+}
+
+// Map tile images under a fixed budget (world modes review WM-E2, KI15): 64 x 64 detail images are 16 KB each, and a
+// fully explored 10 km island has about 34,500 tiles (0.55 GB) when every image is kept.
+static TAutoConsoleVariable<float> CVarMapDetailBudgetMB(
+	TEXT("voxel.Map.DetailBudgetMB"),
+	32.0f,
+	TEXT("MB of full-resolution map tile images kept, least recently used dropped first (their tiles keep the overview ")
+	TEXT("and are drawn again in detail when the minimap or a zoomed-in world map asks). 0 = unlimited: every tile keeps ")
+	TEXT("its detail image, as before WM-E2. 32 MB holds 2,048 ")
+	TEXT("tiles of 64 x 64: the minimap's area and a world map zoomed in twice."),
+	FConsoleVariableDelegate::CreateStatic(&ApplyMapBudgetsToAll),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarMapOverviewBudgetMB(
+	TEXT("voxel.Map.OverviewBudgetMB"),
+	48.0f,
+	TEXT("MB of overview map tile images (a quarter of the resolution a side) kept for tiles without their detail image, ")
+	TEXT("least recently used dropped first (the tile stays explored and is drawn again when looked at). 0 = unlimited. ")
+	TEXT("48 MB holds 49,152 tiles of 16 x 16: an island about 12 km across, fully explored."),
+	FConsoleVariableDelegate::CreateStatic(&ApplyMapBudgetsToAll),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarMapEditRefreshMaxTiles(
 	TEXT("voxel.Map.EditRefreshMaxTiles"),
 	8,
@@ -105,6 +137,26 @@ namespace
 				return;
 			}
 			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.Stats: %s"), *Map->GetDebugStats());
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs GVoxelMapExploreAllCmd(
+		TEXT("voxel.Map.ExploreAll"),
+		TEXT("Mark every map tile of a bounded world explored (as a fully explored save restores it) and queue their images. ")
+		TEXT("Args: [radius=200000] (unbounded worlds: the tiles within this radius of the pawn)."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			UWorld* Target = FindPlayWorld(World);
+			UVoxelMapSubsystem* Map = Target ? Target->GetSubsystem<UVoxelMapSubsystem>() : nullptr;
+			const APlayerController* PC = Target ? Target->GetFirstPlayerController() : nullptr;
+			const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+			if (!Map)
+			{
+				UE_LOG(LogVoxelMap, Warning, TEXT("voxel.Map.ExploreAll: no PIE/Game world with a map subsystem (start PIE first)"));
+				return;
+			}
+			const float Radius = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 200000.0f;
+			const int32 Count = Map->ExploreAllTiles(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector, Radius);
+			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.ExploreAll: %d tile(s) explored; %s"), Count, *Map->GetDebugStats());
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs GVoxelMapCaptureCmd(
@@ -235,8 +287,9 @@ void UVoxelMapSubsystem::Deinitialize()
 	CachedWorldMode.Reset();
 	CachedWorldBounds = FVoxelWorldBounds();
 
-	TileCache.Empty();
+	TileStore.Reset();
 	ExploredTiles.Empty();
+	DetailWanted.Empty();
 	TileQueue.Reset();
 	EditOverlays.Empty();
 	TileEditedChunkZ.Empty();
@@ -355,6 +408,7 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	CachedWorldBounds = CachedWorldMode->GetWorldBounds();
 
 	bCacheResolved = true;
+	ApplyTileBudgets();
 	PruneExploredOutsideWorld();
 
 	// Bind to chunk generation events
@@ -393,20 +447,90 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 
 const FVoxelMapTile* UVoxelMapSubsystem::GetTile(FIntPoint TileCoord) const
 {
-	const uint64 Key = PackTileKey(TileCoord);
-	const FVoxelMapTile* Found = TileCache.Find(Key);
-	if (Found && Found->bIsReady)
-	{
-		return Found;
-	}
-	return nullptr;
+	const FVoxelMapTile* Found = TileStore.Find(PackTileKey(TileCoord), /*bTouch*/ true);
+	return (Found && Found->bIsReady) ? Found : nullptr;
 }
 
 bool UVoxelMapSubsystem::HasTile(FIntPoint TileCoord) const
 {
+	return TileStore.Contains(PackTileKey(TileCoord));
+}
+
+bool UVoxelMapSubsystem::HasTileDetail(FIntPoint TileCoord) const
+{
+	return TileStore.HasDetail(PackTileKey(TileCoord));
+}
+
+bool UVoxelMapSubsystem::RequestTileImage(FIntPoint TileCoord, bool bDetail)
+{
+	if (bShuttingDown || !ResolveChunkManager())
+	{
+		return false;
+	}
 	const uint64 Key = PackTileKey(TileCoord);
-	const FVoxelMapTile* Found = TileCache.Find(Key);
-	return Found && Found->bIsReady;
+	if (!ExploredTiles.Contains(Key))
+	{
+		return false;
+	}
+	if (bDetail ? TileStore.HasDetail(Key) : TileStore.Contains(Key))
+	{
+		return false;
+	}
+	if (bDetail)
+	{
+		DetailWanted.Add(Key);
+	}
+	if (!TileQueue.IsQueued(Key))
+	{
+		QueueTileGeneration(TileCoord);
+	}
+	return true;
+}
+
+void UVoxelMapSubsystem::ApplyTileBudgets()
+{
+	constexpr double MB = 1024.0 * 1024.0;
+	TileStore.SetBudgets(
+		static_cast<int64>(FMath::Max(0.0f, CVarMapDetailBudgetMB.GetValueOnGameThread()) * MB),
+		static_cast<int64>(FMath::Max(0.0f, CVarMapOverviewBudgetMB.GetValueOnGameThread()) * MB));
+}
+
+int32 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
+{
+	if (bShuttingDown || !ResolveChunkManager())
+	{
+		return 0;
+	}
+	const double Size = GetTileWorldSize();
+	if (Size <= 0.0)
+	{
+		return 0;
+	}
+	FBox2D Area = CachedWorldBounds.IsBounded() ? CachedWorldBounds.GetBox2D()
+		: FBox2D(FVector2D(Center.X - Radius, Center.Y - Radius), FVector2D(Center.X + Radius, Center.Y + Radius));
+	const FIntPoint Lo = WorldToTileCoord(FVector(Area.Min.X, Area.Min.Y, 0.0));
+	const FIntPoint Hi = WorldToTileCoord(FVector(Area.Max.X, Area.Max.Y, 0.0));
+	int32 Count = 0;
+	for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
+	{
+		for (int32 X = Lo.X; X <= Hi.X; ++X)
+		{
+			const FIntPoint Tile(X, Y);
+			if (!IsTileInsideWorld(Tile))
+			{
+				continue;
+			}
+			const uint64 Key = PackTileKey(Tile);
+			ExploredTiles.Add(Key);
+			++Count;
+			if (!TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
+			{
+				TileQueue.Request(Key, /*bInvalidate*/ false);
+			}
+		}
+	}
+	LaunchWaitingTiles();
+	return Count;
 }
 
 bool UVoxelMapSubsystem::IsTileExplored(FIntPoint TileCoord) const
@@ -540,7 +664,8 @@ int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Coun
 			{
 				continue;
 			}
-			if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
+			// Restored tiles keep only their overview (WM-E2): the minimap asks for detail where the player is.
+			if (!TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
 			{
 				QueueTileGeneration(Tile);
 			}
@@ -622,9 +747,14 @@ void UVoxelMapSubsystem::RequestTilesInRadius(const FVector& WorldPos, float Rad
 
 			ExploredTiles.Add(Key);
 
-			if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
+			// The minimap's area wants the detail image: drawn again if it was evicted (WM-E2).
+			if (!TileStore.HasDetail(Key))
 			{
-				QueueTileGeneration(TileCoord);
+				DetailWanted.Add(Key);
+				if (!TileQueue.IsQueued(Key))
+				{
+					QueueTileGeneration(TileCoord);
+				}
 			}
 		}
 	}
@@ -650,7 +780,7 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 		bGenerateExploredWhenReady = false;
 		for (const uint64 ExploredKey : ExploredTiles)
 		{
-			if (!TileCache.Contains(ExploredKey) && !TileQueue.IsQueued(ExploredKey))
+			if (!TileStore.Contains(ExploredKey) && !TileQueue.IsQueued(ExploredKey))
 			{
 				QueueTileGeneration(UnpackTileKey(ExploredKey));
 			}
@@ -663,9 +793,14 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 	{
 		ExploredTiles.Add(Key);
 
-		if (!TileCache.Contains(Key) && !TileQueue.IsQueued(Key))
+		// Streaming is the player's vicinity: keep the detail image (drawn again if it was evicted).
+		if (!TileStore.HasDetail(Key))
 		{
-			QueueTileGeneration(TileCoord);
+			DetailWanted.Add(Key);
+			if (!TileQueue.IsQueued(Key))
+			{
+				QueueTileGeneration(TileCoord);
+			}
 		}
 	}
 
@@ -685,13 +820,19 @@ void UVoxelMapSubsystem::HandleTerrainConditioningChanged()
 	// Tiles drawn before the POI conditioner registered show the unflattened terrain (QA W-05): redraw everything
 	// explored, discarding drawings already running. The current images stay until the new ones land (R22: the map
 	// used to flash blank here), and the redraws reuse the stored edit overlays without reading chunk data.
+	// Tiles without an image (evicted, WM-E2) are drawn fresh when asked for; queued ones are invalidated.
+	int32 Redrawn = 0;
 	for (const uint64 Key : ExploredTiles)
 	{
-		TileQueue.Request(Key, /*bInvalidate*/ true);
+		if (TileStore.Contains(Key) || TileQueue.IsQueued(Key))
+		{
+			TileQueue.Request(Key, /*bInvalidate*/ true);
+			++Redrawn;
+		}
 	}
 	LaunchWaitingTiles();
-	UE_LOG(LogVoxelMap, Log, TEXT("Terrain conditioning changed: redrawing %d map tile(s) (%d cached kept until redrawn)."),
-		ExploredTiles.Num(), TileCache.Num());
+	UE_LOG(LogVoxelMap, Log, TEXT("Terrain conditioning changed: redrawing %d map tile(s) (%d with an image kept until redrawn)."),
+		Redrawn, TileStore.Num());
 }
 
 // ---------------------------------------------------------------------------
@@ -872,7 +1013,7 @@ int32 UVoxelMapSubsystem::ImportEditOverlays(const FString& Encoded)
 	for (const uint64 Key : Touched)
 	{
 		MarkOverlayDirty(Key);
-		if (bCacheResolved && (TileCache.Contains(Key) || TileQueue.IsQueued(Key)))
+		if (bCacheResolved && (TileStore.Contains(Key) || TileQueue.IsQueued(Key)))
 		{
 			QueueTileGeneration(UnpackTileKey(Key), /*bInvalidate*/ true);
 		}
@@ -899,12 +1040,17 @@ void UVoxelMapSubsystem::RedrawAllTiles(bool bRebuildOverlays)
 			MarkOverlayDirty(Pair.Key);
 		}
 	}
+	int32 Redrawn = 0;
 	for (const uint64 Key : ExploredTiles)
 	{
-		TileQueue.Request(Key, /*bInvalidate*/ true);
+		if (TileStore.Contains(Key) || TileQueue.IsQueued(Key))
+		{
+			TileQueue.Request(Key, /*bInvalidate*/ true);
+			++Redrawn;
+		}
 	}
 	LaunchWaitingTiles();
-	UE_LOG(LogVoxelMap, Log, TEXT("Redrawing %d explored map tile(s)%s."), ExploredTiles.Num(),
+	UE_LOG(LogVoxelMap, Log, TEXT("Redrawing %d map tile(s) with an image%s."), Redrawn,
 		bRebuildOverlays ? TEXT(" and rebuilding edit overlays") : TEXT(""));
 }
 
@@ -926,9 +1072,13 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 	{
 		ExploredOutside += IsTileInsideWorld(UnpackTileKey(Key)) ? 0 : 1;
 	}
+	constexpr double MB = 1024.0 * 1024.0;
 	return FString::Printf(
-		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d | overlay=%s"),
-		TileCache.Num(), ExploredTiles.Num(), ExploredOutside, TileQueue.NumWaiting(), TileQueue.NumDrawing(),
+		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | images detail=%d %.1f/%.0f MB overview=%d %.1f/%.0f MB evicted detail=%lld overview=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d | overlay=%s"),
+		TileStore.Num(), ExploredTiles.Num(), ExploredOutside, TileQueue.NumWaiting(), TileQueue.NumDrawing(),
+		TileStore.NumDetail(), TileStore.GetDetailBytes() / MB, TileStore.GetDetailBudget() / MB,
+		TileStore.Num(), TileStore.GetOverviewBytes() / MB, TileStore.GetOverviewBudget() / MB,
+		TileStore.GetDetailEvictions(), TileStore.GetOverviewEvictions(),
 		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunkZ.Num(), OverlayDirtyTiles.Num(),
 		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num(),
 		CVarMapEditOverlay.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"));
@@ -960,8 +1110,9 @@ bool UVoxelMapSubsystem::CaptureMapImage(const FVector& Center, int32 RadiusTile
 		for (int32 TYi = 0; TYi <= 2 * RadiusTiles; ++TYi)
 		{
 			const FIntPoint Tile = MinTile + FIntPoint(TXi, TYi);
-			const FVoxelMapTile* Cached = IsTileExplored(Tile) ? GetTile(Tile) : nullptr;
-			if (!Cached || Cached->Resolution != Res || Cached->PixelData.Num() != Res * Res)
+			const FVoxelMapTile* Cached = IsTileExplored(Tile) ? TileStore.Find(PackTileKey(Tile), /*bTouch*/ false) : nullptr;
+			const int32 TileRes = Cached ? Cached->Resolution : 0;
+			if (!Cached || TileRes <= 0 || Cached->PixelData.Num() != TileRes * TileRes)
 			{
 				continue;
 			}
@@ -970,7 +1121,8 @@ bool UVoxelMapSubsystem::CaptureMapImage(const FVector& Center, int32 RadiusTile
 			{
 				for (int32 PX = 0; PX < Res; ++PX)
 				{
-					FColor Color = Cached->PixelData[PY * Res + PX];
+					// An overview (evicted detail, WM-E2) is scaled up: each of its pixels covers several here.
+					FColor Color = Cached->PixelData[(PY * TileRes / Res) * TileRes + (PX * TileRes / Res)];
 					if (Overlay && Overlay->FindColumn(PX, PY) != INDEX_NONE)
 					{
 						Color = FColor((Color.R + 255) / 2, Color.G / 2, (Color.B + 255) / 2, 255);
@@ -1634,7 +1786,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 							for (int32 DX = -1; DX <= 1; ++DX)
 							{
 								const FIntPoint Neighbour = TileCoord + FIntPoint(DX, DY);
-								if ((DX != 0 || DY != 0) && Self->TileCache.Contains(PackTileKey(Neighbour)))
+								if ((DX != 0 || DY != 0) && Self->TileStore.Contains(PackTileKey(Neighbour)))
 								{
 									Self->TileQueue.Request(PackTileKey(Neighbour), /*bInvalidate*/ true, /*bPriority*/ true);
 								}
@@ -1652,15 +1804,14 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 					Self->MarkOverlayDirty(Key);
 				}
 
-				FVoxelMapTile Tile;
-				Tile.TileCoord = TileCoord;
-				Tile.Resolution = Resolution;
-				Tile.PixelData = MoveTemp(PixelData);
-				Tile.bIsReady = true;
-
+				// Keep the detail image where something asked for it (the minimap's area, a zoomed-in world map) or the
+				// tile already had it; elsewhere only the overview (WM-E2). The store trims to its budgets. An unlimited
+				// detail budget (0) keeps every detail image, as the map did before WM-E2.
+				const bool bKeepDetail = Self->DetailWanted.Remove(Key) > 0 || Self->TileStore.HasDetail(Key)
+					|| Self->TileStore.GetDetailBudget() == 0;
 				{
 					FScopeLock Lock(&Self->TileMutex);
-					Self->TileCache.Add(Key, MoveTemp(Tile));
+					Self->TileStore.Store(Key, TileCoord, MoveTemp(PixelData), Resolution, bKeepDetail);
 				}
 
 				Self->OnMapTileReady.Broadcast(TileCoord);

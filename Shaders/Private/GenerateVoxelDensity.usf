@@ -112,6 +112,8 @@ float IslandFalloffWidth;
 float IslandCenterX;
 float IslandCenterY;
 float IslandEdgeHeight;
+float IslandSeabedDepth;      // WM-E1: the seabed beyond the edge slopes down by this much
+float IslandSeabedSlopeWidth; // ... over this horizontal distance (0 = a step)
 
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;

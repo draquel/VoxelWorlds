@@ -479,6 +479,15 @@ UMaterialInterface* FVoxelPMCRenderer::GetMaterial() const
 	return CurrentMaterial.Get();
 }
 
+UMaterialInterface* FVoxelPMCRenderer::GetSurfaceMaterial() const
+{
+	if (DynamicMaterialInstance.IsValid())
+	{
+		return DynamicMaterialInstance.Get();
+	}
+	return CurrentMaterial.Get();
+}
+
 void FVoxelPMCRenderer::UpdateMaterialParameters()
 {
 	// Update atlas parameters if we have a dynamic instance

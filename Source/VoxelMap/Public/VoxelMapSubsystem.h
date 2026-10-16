@@ -7,6 +7,7 @@
 #include "VoxelMapTypes.h"
 #include "VoxelMapEditOverlay.h"
 #include "VoxelMapTileQueue.h"
+#include "VoxelMapTileStore.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelEditTypes.h"
 #include "VoxelWorldModeTypes.h"
@@ -36,6 +37,11 @@ class UVoxelBiomeConfiguration;
  * edit-merged snapshots (UVoxelChunkManager::GetEditMergedSnapshot) and redraw, building the overlay in the tile
  * task. Tiles whose chunks are not loaded keep their current overlay until a chunk of theirs generates.
  *
+ * Tile images live under a fixed memory budget (world modes review WM-E2, finding KI15; FVoxelMapTileStore): every
+ * drawn tile keeps a small overview image, and the detail image only while recently used (voxel.Map.DetailBudgetMB,
+ * voxel.Map.OverviewBudgetMB). Exploration is separate and never evicted: a tile that lost its images is drawn again
+ * when the minimap (RequestTilesInRadius) or the world map (RequestTileImage) asks for it.
+ *
  * All tile generation runs on background threads. The subsystem has zero
  * knowledge of players, characters, or UI — purely manages tile data.
  */
@@ -47,14 +53,48 @@ class VOXELMAP_API UVoxelMapSubsystem : public UWorldSubsystem
 public:
 	// --- Tile Queries ---
 
-	/** Get a generated tile. Returns nullptr if not yet generated. */
+	/**
+	 * Get a generated tile: its detail image, or its overview when the detail was evicted (the tile's Resolution says
+	 * which; callers scale by it). Counts as a use, which keeps the tile's images from eviction.
+	 * @return The image, or nullptr if the tile has none (not drawn yet, or evicted)
+	 */
 	const FVoxelMapTile* GetTile(FIntPoint TileCoord) const;
 
-	/** Check if a tile has been generated (regardless of exploration state). */
+	/** Check if a tile has an image (detail or overview), regardless of exploration state. */
 	bool HasTile(FIntPoint TileCoord) const;
 
-	/** Get the full tile cache (for bulk iteration by UI). */
-	const TMap<uint64, FVoxelMapTile>& GetTileCache() const { return TileCache; }
+	/** Check if a tile has its full-resolution image. */
+	bool HasTileDetail(FIntPoint TileCoord) const;
+
+	/**
+	 * Ask for an explored tile's image when it has none (evicted), or its detail when bDetail and it only has the
+	 * overview. The world map calls this for the tiles it shows (WM-E2).
+	 * @param TileCoord Tile coordinate (chunk X, Y)
+	 * @param bDetail Want the full-resolution image (a zoomed-in view), not just the overview
+	 * @return True if a drawing was queued (or the tile's queued drawing now keeps its detail)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	bool RequestTileImage(FIntPoint TileCoord, bool bDetail);
+
+	/** The tile images and their budgets (diagnostics, tests). */
+	const FVoxelMapTileStore& GetTileStore() const { return TileStore; }
+
+	/**
+	 * Pixels a side of a tile's overview image: the detail resolution over FVoxelMapTileStore::OverviewDownsample.
+	 * A view that shows more texels per tile than this wants detail (RequestTileImage).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	int32 GetTileOverviewResolution() const { return FMath::Max(1, CachedChunkSize / FVoxelMapTileStore::OverviewDownsample); }
+
+	/** Apply voxel.Map.DetailBudgetMB / voxel.Map.OverviewBudgetMB (called when they change). */
+	void ApplyTileBudgets();
+
+	/**
+	 * Debug (voxel.Map.ExploreAll): mark every tile that overlaps the world's bounds explored, as a fully explored save
+	 * restores it, and queue their images (overview only). Unbounded worlds: the tiles within Radius of Center.
+	 * @return Number of tiles explored
+	 */
+	int32 ExploreAllTiles(const FVector& Center, float Radius);
 
 	// --- Exploration ---
 
@@ -346,9 +386,12 @@ private:
 	float CachedTerrainMinHeight = 0.0f;
 	float CachedTerrainMaxHeight = 0.0f;
 
-	// Tile storage
-	TMap<uint64, FVoxelMapTile> TileCache;
+	// Tile storage: images under the budgets (WM-E2), and the exploration set (never evicted; saved)
+	FVoxelMapTileStore TileStore;
 	TSet<uint64> ExploredTiles;
+
+	/** Tiles whose queued drawing should keep its detail image (the minimap's area, a zoomed-in world map) */
+	TSet<uint64> DetailWanted;
 
 	/** Which tiles wait for a (re)draw, which are drawing, and per-tile generations (game thread). */
 	FVoxelMapTileQueue TileQueue;
@@ -358,7 +401,7 @@ private:
 
 	/** Explored tiles were imported before the map could resolve its world: queue their images once it can. */
 	bool bGenerateExploredWhenReady = false;
-	FCriticalSection TileMutex;		// Protects TileCache writes from async tasks
+	FCriticalSection TileMutex;		// Guards TileStore writes (made on the game thread when a drawing completes)
 
 	/** Max concurrent async tile generation tasks. */
 	static constexpr int32 MaxConcurrentTileGenTasks = 4;

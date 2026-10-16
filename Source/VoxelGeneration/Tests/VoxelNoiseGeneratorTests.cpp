@@ -453,10 +453,25 @@ bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 	Request.IslandParams.FalloffType = EIslandFalloffType::Exponential;
 	const bool bExponentialPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl Exponential"));
 
+	// The seabed beyond the edge (WM-E1, IslandSeabedHeight in IslandFalloff.ush): a chunk past R + F (x 4,800-6,400,
+	// 0-1,400 uu past the edge for y 0-1,600) at z -1,600 to 0, where the seabed slopes from EdgeHeight -1,000 toward
+	// -2,200, with the slope ending inside the chunk. Then the rectangle's larger-axis distance.
+	Request.IslandParams.FalloffType = EIslandFalloffType::Smooth;
+	Request.IslandParams.SeabedDepth = 1200.0f;
+	Request.IslandParams.SeabedSlopeWidth = 1000.0f;
+	Request.ChunkCoord = FIntVector(3, 0, -1);
+	const bool bSeabedPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl seabed"));
+	Request.IslandParams.Shape = EIslandShape::Rectangle;
+	Request.IslandParams.SizeY = 2000.0f;
+	Request.ChunkCoord = FIntVector(3, 1, -1);
+	const bool bSeabedRectPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("IslandBowl seabed rectangle"));
+
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
 	TestTrue(TEXT("GPU==CPU IslandBowl parity (continentalness + falloff) across LOD 0/1/2"), bAllPass);
 	TestTrue(TEXT("GPU==CPU IslandBowl parity with Exponential falloff across LOD 0/1/2"), bExponentialPass);
+	TestTrue(TEXT("GPU==CPU IslandBowl parity on the seabed beyond the edge across LOD 0/1/2"), bSeabedPass);
+	TestTrue(TEXT("GPU==CPU IslandBowl parity on a rectangle's seabed across LOD 0/1/2"), bSeabedRectPass);
 	return true;
 }
 

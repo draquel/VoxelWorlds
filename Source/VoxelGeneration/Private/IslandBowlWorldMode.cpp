@@ -23,8 +23,8 @@ float FIslandBowlWorldMode::GetDensityAt(
 	int32 LODLevel,
 	float NoiseValue) const
 {
-	// Base terrain height from noise (reusing InfinitePlane logic), then the island falloff, or the floor
-	// beyond the edge. This used to call everything beyond the edge air, where generation writes the floor.
+	// Base terrain height from noise (reusing InfinitePlane logic), then the island falloff, or the seabed
+	// beyond the edge. This used to call everything beyond the edge air, where generation writes the seabed.
 	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, TerrainParams);
 	const float FinalTerrainHeight = ComposeTerrainHeight(WorldPos.X, WorldPos.Y, BaseTerrainHeight, IslandParams);
 
@@ -37,10 +37,10 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 	float Y,
 	const FVoxelNoiseParams& NoiseParams) const
 {
-	// Beyond the island's edge: the flat floor generation writes there (no noise needed).
+	// Beyond the island's edge: the seabed generation writes there (no noise needed).
 	if (!IsWithinIslandBounds(X, Y, IslandParams))
 	{
-		return IslandParams.EdgeHeight - OutsideFloorDepth;
+		return GetSeabedHeight(GetDistancePastEdge(X, Y, IslandParams), IslandParams);
 	}
 
 	// Sample base terrain noise (reusing InfinitePlane method)
@@ -61,13 +61,13 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 
 void FIslandBowlWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) const
 {
-	// Base continentalness extent (same as InfinitePlane), then lower the minimum to the floor beyond the edge: the
-	// island fades toward EdgeHeight and the floor sits OutsideFloorDepth below it, which can be below the base
-	// terrain minimum (KI4's bounds clause).
+	// Base continentalness extent (same as InfinitePlane), then lower the minimum to the seabed's floor beyond the
+	// edge: the island fades toward EdgeHeight and the seabed slopes SeabedDepth below it, which can be below the
+	// base terrain minimum (KI4's bounds clause).
 	float BaseMin = 0.0f;
 	float BaseMax = 0.0f;
 	FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, &BiomeSnapshot, BaseMin, BaseMax);
-	OutMin = FMath::Min(BaseMin, IslandParams.EdgeHeight - OutsideFloorDepth);
+	OutMin = FMath::Min(BaseMin, IslandParams.EdgeHeight - FMath::Max(IslandParams.SeabedDepth, 0.0f));
 	OutMax = BaseMax;
 }
 
@@ -320,7 +320,7 @@ float FIslandBowlWorldMode::ComposeTerrainHeight(
 {
 	if (!IsWithinIslandBounds(X, Y, IslandParams))
 	{
-		return IslandParams.EdgeHeight - OutsideFloorDepth;
+		return GetSeabedHeight(GetDistancePastEdge(X, Y, IslandParams), IslandParams);
 	}
 	return ApplyFalloffToHeight(BaseHeight, CalculateFalloffFactorForPoint(X, Y, IslandParams), IslandParams.EdgeHeight);
 }
@@ -353,4 +353,32 @@ bool FIslandBowlWorldMode::IsWithinIslandBounds(
 		const float Distance = FMath::Sqrt(DX * DX + DY * DY);
 		return Distance <= IslandParams.GetTotalExtent();
 	}
+}
+
+float FIslandBowlWorldMode::GetDistancePastEdge(
+	float X, float Y,
+	const FIslandBowlParams& IslandParams)
+{
+	const float DX = FMath::Abs(X - IslandParams.CenterX);
+	const float DY = FMath::Abs(Y - IslandParams.CenterY);
+	if (IslandParams.Shape == EIslandShape::Rectangle)
+	{
+		// The rectangle's falloff takes the larger axis (CalculateFalloffFactorForPoint), so its seabed does too.
+		return FMath::Max(DX - IslandParams.GetTotalExtentX(), DY - IslandParams.GetTotalExtentY());
+	}
+	return FMath::Sqrt(DX * DX + DY * DY) - IslandParams.GetTotalExtent();
+}
+
+float FIslandBowlWorldMode::GetSeabedHeight(
+	float DistancePastEdge,
+	const FIslandBowlParams& IslandParams)
+{
+	const float Depth = FMath::Max(IslandParams.SeabedDepth, 0.0f);
+	if (IslandParams.SeabedSlopeWidth <= 0.0f)
+	{
+		return IslandParams.EdgeHeight - Depth;
+	}
+	// Smoothstep: no kink where the seabed meets the falloff (which ends flat for Smooth), none where it levels out.
+	const float T = FMath::Clamp(DistancePastEdge / IslandParams.SeabedSlopeWidth, 0.0f, 1.0f);
+	return IslandParams.EdgeHeight - Depth * T * T * (3.0f - 2.0f * T);
 }

@@ -156,6 +156,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		IslandTotalExtentX = Island.GetTotalExtentX();
 		IslandTotalExtentY = Island.GetTotalExtentY();
 		IslandCenter = FVector2D(Island.CenterX, Island.CenterY);
+		IslandBounds = TerrainWorldMode->GetWorldBounds();
 
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Island culling enabled: Shape=%s, ExtentX=%.0f, ExtentY=%.0f, Center=(%.0f, %.0f)"),
 			IslandShape == 1 ? TEXT("Rectangle") : TEXT("Circular"),
@@ -1065,32 +1066,14 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 		return false;
 	}
 
-	// Get chunk center in world space
+	// The column streams when it holds any of the island's footprint. Beyond R + F nothing is reachable (the walls,
+	// WM-I5) and the far ocean draws the sea and the seabed (WM-E1); a circle's cull used to keep a ring of columns
+	// wholly outside, out to a chunk diagonal past the edge (6,788 uu on the demo).
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-
-	// Offset from the island centre (absolute, as generation uses it)
-	const float DX = FMath::Abs(ChunkCenter.X - IslandCenter.X);
-	const float DY = FMath::Abs(ChunkCenter.Y - IslandCenter.Y);
-
-	// Add chunk half-size as buffer (chunk could overlap island boundary)
-	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const float ChunkHalfSize = ChunkWorldSize * 0.5f;
-
-	if (IslandShape == 1)  // Rectangle
-	{
-		// For rectangle, check each axis independently
-		// Cull if chunk is entirely outside the island bounds on either axis
-		const bool bOutsideX = DX > (IslandTotalExtentX + ChunkHalfSize);
-		const bool bOutsideY = DY > (IslandTotalExtentY + ChunkHalfSize);
-		return bOutsideX || bOutsideY;
-	}
-	else  // Circular
-	{
-		// For circular, use 2D Euclidean distance
-		const float Distance2D = FMath::Sqrt(DX * DX + DY * DY);
-		const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_2;
-		return Distance2D > (IslandTotalExtentX + ChunkDiagonal);
-	}
+	const float ChunkHalfSize = BaseChunkSize * VoxelSize * 0.5f;
+	const FBox2D Column(FVector2D(ChunkCenter.X - ChunkHalfSize, ChunkCenter.Y - ChunkHalfSize),
+		FVector2D(ChunkCenter.X + ChunkHalfSize, ChunkCenter.Y + ChunkHalfSize));
+	return !IslandBounds.IntersectsBox2D(Column);
 }
 
 bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(

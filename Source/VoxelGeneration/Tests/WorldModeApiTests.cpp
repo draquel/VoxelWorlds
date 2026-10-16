@@ -149,9 +149,9 @@ bool FWorldModeBoundsTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("%s: IsInsideWorld, the bounds and generation agree"), Name), Disagreements, 0);
 		TestTrue(FString::Printf(TEXT("%s: some samples inside, some outside"), Name), Inside > 0 && Inside < 2400);
 
-		// The floor generation writes beyond the edge is inside the height bounds (KI4's bounds clause).
-		TestTrue(FString::Printf(TEXT("%s: the outside floor is within the height bounds"), Name),
-			Bounds.MinZ <= Params.EdgeHeight - FIslandBowlWorldMode::OutsideFloorDepth);
+		// The seabed generation writes beyond the edge is inside the height bounds (KI4's bounds clause, WM-E1).
+		TestTrue(FString::Printf(TEXT("%s: the open-sea floor is within the height bounds"), Name),
+			Bounds.MinZ <= Params.EdgeHeight - Params.SeabedDepth);
 		const FBox2D Box = Bounds.GetBox2D();
 		TestTrue(FString::Printf(TEXT("%s: footprint box"), Name), Box.bIsValid
 			&& FMath::IsNearlyEqual(Box.Max.X - Box.Min.X, 2.0 * Bounds.HalfExtent.X));

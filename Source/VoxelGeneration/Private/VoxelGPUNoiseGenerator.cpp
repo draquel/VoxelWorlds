@@ -107,6 +107,9 @@ public:
 		SHADER_PARAMETER(float, IslandCenterX)
 		SHADER_PARAMETER(float, IslandCenterY)
 		SHADER_PARAMETER(float, IslandEdgeHeight)
+		// The seabed beyond the edge (WM-E1): FIslandBowlParams::SeabedDepth / SeabedSlopeWidth.
+		SHADER_PARAMETER(float, IslandSeabedDepth)
+		SHADER_PARAMETER(float, IslandSeabedSlopeWidth)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -545,6 +548,8 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->IslandCenterX = Request.IslandParams.CenterX;
 	Parameters->IslandCenterY = Request.IslandParams.CenterY;
 	Parameters->IslandEdgeHeight = Request.IslandParams.EdgeHeight;
+	Parameters->IslandSeabedDepth = Request.IslandParams.SeabedDepth;
+	Parameters->IslandSeabedSlopeWidth = Request.IslandParams.SeabedSlopeWidth;
 
 	return Parameters;
 }

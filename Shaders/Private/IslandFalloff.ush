@@ -5,7 +5,8 @@
 // EdgeHeight at the world edge). Include AFTER the loose IslandBowl globals are declared in
 // GenerateVoxelDensity.usf:
 //   int IslandShape (0=circular,1=rectangle); int IslandFalloffType (0=Linear,1=Smooth,2=Squared,3=Exponential);
-//   float IslandRadius, IslandSizeY, IslandFalloffWidth, IslandCenterX, IslandCenterY, IslandEdgeHeight.
+//   float IslandRadius, IslandSizeY, IslandFalloffWidth, IslandCenterX, IslandCenterY, IslandEdgeHeight,
+//   IslandSeabedDepth, IslandSeabedSlopeWidth.
 
 // FIslandBowlWorldMode::CalculateFalloffFactor curve — t is the normalized position in the falloff zone [0,1].
 float ApplyIslandFalloffCurve(float t)
@@ -72,14 +73,38 @@ bool IsWithinIslandBounds(float X, float Y)
     }
 }
 
-// Compose the island edge falloff onto a base terrain height. Returns the flat floor at EdgeHeight - 1000
-// (FIslandBowlWorldMode::OutsideFloorDepth) outside the island bounds — matches
-// FIslandBowlWorldMode::ComposeTerrainHeight.
+// FIslandBowlWorldMode::GetDistancePastEdge: radial for a circle, the larger axis excess for a rectangle.
+float IslandDistancePastEdge(float X, float Y)
+{
+    float dx = abs(X - IslandCenterX);
+    float dy = abs(Y - IslandCenterY);
+    if (IslandShape == 1) // Rectangle
+    {
+        return max(dx - (IslandRadius + IslandFalloffWidth), dy - (IslandSizeY + IslandFalloffWidth));
+    }
+    return sqrt(dx * dx + dy * dy) - (IslandRadius + IslandFalloffWidth);
+}
+
+// FIslandBowlWorldMode::GetSeabedHeight (WM-E1): EdgeHeight at the edge, a smoothstep down by SeabedDepth over
+// SeabedSlopeWidth, flat beyond; a width of 0 is a step.
+float IslandSeabedHeight(float DistancePastEdge)
+{
+    float depth = max(IslandSeabedDepth, 0.0);
+    if (IslandSeabedSlopeWidth <= 0.0)
+    {
+        return IslandEdgeHeight - depth;
+    }
+    float t = clamp(DistancePastEdge / IslandSeabedSlopeWidth, 0.0, 1.0);
+    return IslandEdgeHeight - depth * t * t * (3.0 - 2.0 * t);
+}
+
+// Compose the island edge falloff onto a base terrain height. Returns the seabed (IslandSeabedHeight) outside the
+// island bounds — matches FIslandBowlWorldMode::ComposeTerrainHeight.
 float ApplyIslandFalloffToHeight(float X, float Y, float BaseHeight)
 {
     if (!IsWithinIslandBounds(X, Y))
     {
-        return IslandEdgeHeight - 1000.0; // the floor beyond the edge
+        return IslandSeabedHeight(IslandDistancePastEdge(X, Y)); // the seabed beyond the edge
     }
     float falloff = IslandFalloffFactor(X, Y);
     return lerp(IslandEdgeHeight, BaseHeight, falloff); // ApplyFalloffToHeight

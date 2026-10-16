@@ -161,6 +161,15 @@ public:
 	virtual UMaterialInterface* GetMaterial() const = 0;
 
 	/**
+	 * The material terrain is actually drawn with: the material instance carrying the atlas parameters when the
+	 * renderer made one, else GetMaterial(). Other meshes that continue the terrain (the far ocean's seabed, WM-E1)
+	 * use it with terrain vertex data (UV1.x = material id).
+	 *
+	 * @return The material, or null
+	 */
+	virtual UMaterialInterface* GetSurfaceMaterial() const { return GetMaterial(); }
+
+	/**
 	 * Force update of material parameters.
 	 *
 	 * Call after modifying material parameter values to ensure

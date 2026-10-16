@@ -68,8 +68,14 @@ struct VOXELGENERATION_API FIslandBowlParams
 	/** Centre of the island, world Y. Absolute, like CenterX */
 	float CenterY = 0.0f;
 
-	/** Terrain height the falloff fades to at the edge (R + FalloffWidth); the floor beyond it is OutsideFloorDepth lower */
+	/** Terrain height the falloff fades to at the edge (R + FalloffWidth); beyond it the seabed slopes down from here */
 	float EdgeHeight = -1000.0f;
+
+	/** How far below EdgeHeight the seabed beyond the edge ends up (GetSeabedHeight; WM-E1) */
+	float SeabedDepth = 6000.0f;
+
+	/** Horizontal distance past the edge over which the seabed slopes down by SeabedDepth; 0 is a step at the edge */
+	float SeabedSlopeWidth = 20000.0f;
 
 	FIslandBowlParams() = default;
 
@@ -110,7 +116,8 @@ struct VOXELGENERATION_API FIslandBowlParams
  * Island Shape:
  * - Center to IslandRadius: Full terrain height (no falloff)
  * - IslandRadius to IslandRadius+FalloffWidth: Gradual falloff, reaching EdgeHeight at the edge
- * - Beyond the edge: a flat floor at EdgeHeight - OutsideFloorDepth (ComposeTerrainHeight)
+ * - Beyond the edge: the seabed slopes from EdgeHeight down by SeabedDepth over SeabedSlopeWidth, then stays flat
+ *   (GetSeabedHeight; world modes review WM-E1: it was a flat floor 1,000 uu down, a cliff at the edge)
  *
  * Density Calculation:
  * - Sample base terrain height (same as InfinitePlane)
@@ -168,9 +175,6 @@ public:
 	virtual int32 GetMaxZ() const override;
 
 	virtual EWorldMode GetWorldModeType() const override { return EWorldMode::IslandBowl; }
-
-	/** Depth of the flat floor generation writes beyond the island's edge, below EdgeHeight (uu). */
-	static constexpr float OutsideFloorDepth = 1000.0f;
 	virtual bool IsHeightmapBased() const override { return true; }
 
 	virtual uint8 GetMaterialAtDepth(
@@ -200,14 +204,14 @@ public:
 
 	/**
 	 * Per-mode vertical-cull bounds (IVoxelWorldMode): the base continentalness extent, with the minimum lowered to
-	 * the floor generation writes beyond the edge (EdgeHeight - OutsideFloorDepth) when that is deeper.
+	 * the seabed's floor beyond the edge (EdgeHeight - SeabedDepth) when that is deeper.
 	 */
 	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override;
 
 	// ==================== World Bounds and Local Frame (IVoxelWorldMode, WM-A2) ====================
 	// Up is +Z and the surface coordinate is (0, X, Y) (the defaults); the datum is SeaLevel.
 
-	/** Inside the island's R + falloff footprint (IsWithinIslandBounds): beyond it generation writes only the floor. */
+	/** Inside the island's R + falloff footprint (IsWithinIslandBounds): beyond it generation writes only the seabed. */
 	virtual bool IsInsideWorld(double X, double Y) const override;
 
 	/** A circle (R + F) or a rectangle (R + F by SizeY + F) around the island centre, with the terrain's height bounds. */
@@ -287,7 +291,7 @@ public:
 
 	/**
 	 * The island terrain height at (X, Y) for a base (continentalness-modulated) terrain height: the falloff
-	 * toward EdgeHeight inside the island's extent, the flat floor at EdgeHeight - OutsideFloorDepth beyond it.
+	 * toward EdgeHeight inside the island's extent, the seabed (GetSeabedHeight) beyond it, which needs no noise.
 	 * The one composition generation (CPU and GPU), GetTerrainHeightAt and GetDensityAt share.
 	 *
 	 * @param X World X coordinate
@@ -324,6 +328,33 @@ public:
 	 */
 	static bool IsWithinIslandBounds(
 		float X, float Y,
+		const FIslandBowlParams& IslandParams);
+
+	/**
+	 * How far (X, Y) lies past the island's edge, measured the way the falloff measures it: radially for a circle,
+	 * the larger axis excess for a rectangle (so the seabed's contours are circles or rectangles around the island).
+	 *
+	 * @param X World X coordinate
+	 * @param Y World Y coordinate
+	 * @param IslandParams Island configuration
+	 * @return Distance past the edge; zero or negative inside the island's extent
+	 */
+	static float GetDistancePastEdge(
+		float X, float Y,
+		const FIslandBowlParams& IslandParams);
+
+	/**
+	 * The seabed beyond the island's edge (world modes review WM-E1): EdgeHeight at the edge, sloping down by
+	 * SeabedDepth over SeabedSlopeWidth with a smoothstep (flat where it meets the falloff, flat where it reaches the
+	 * open sea's floor), flat beyond. Mirrored by IslandSeabedHeight in Shaders/Private/IslandFalloff.ush; the far
+	 * ocean's seabed (FVoxelFarOcean) follows it.
+	 *
+	 * @param DistancePastEdge Distance past the edge (GetDistancePastEdge); clamped at 0
+	 * @param IslandParams Island configuration
+	 * @return Seabed height (world Z)
+	 */
+	static float GetSeabedHeight(
+		float DistancePastEdge,
 		const FIslandBowlParams& IslandParams);
 
 private:

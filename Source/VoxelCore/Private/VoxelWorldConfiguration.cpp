@@ -284,6 +284,15 @@ TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 		}
 	}
 
+	// The far ocean (WM-E1) is a flat sea at WaterLevel around an island whose edge lies under it. An edge above the
+	// water leaves a dry rim at R + falloff that the far ocean meets with no shore.
+	if (WorldMode == EWorldMode::IslandBowl && bEnableWaterLevel && bIslandFarOcean && IslandEdgeHeight >= WaterLevel)
+	{
+		Warnings.Add(FString::Printf(
+			TEXT("the island's edge (IslandEdgeHeight %.0f) is not under the water (WaterLevel %.0f): the far ocean meets a dry rim at the world's edge"),
+			IslandEdgeHeight, WaterLevel));
+	}
+
 	return Warnings;
 }
 

@@ -34,6 +34,11 @@
 #include "VoxelTreeInjector.h"
 #include "VoxelTreeTypes.h"
 #include "VoxelWorldBoundary.h"
+#include "VoxelFarOcean.h"
+#include "IslandBowlWorldMode.h"
+#include "VoxelSurfaceQuery.h"
+#include "VoxelBiomeSnapshot.h"
+#include "ProceduralMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/World.h"
@@ -68,6 +73,47 @@ static TAutoConsoleVariable<int32> CVarWorldBoundary(
 		}
 	}),
 	ECVF_Default);
+
+// Far ocean (world modes review WM-E1): its visibility, for every live chunk manager.
+static TAutoConsoleVariable<int32> CVarFarOcean(
+	TEXT("voxel.World.FarOcean"),
+	1,
+	TEXT("The open sea and the seabed past a bounded world's streamed columns (an island's far ocean).\n")
+	TEXT("  1 = drawn (default)\n")
+	TEXT("  0 = hidden (the island floats in the void again; for before/after views)"),
+	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			It->SetFarOceanVisible(Var->GetInt() != 0);
+		}
+	}),
+	ECVF_Default);
+
+// How far inside the edge the far ocean's water stands in for columns the streaming has not loaded. Read when the
+// far ocean is built.
+static TAutoConsoleVariable<float> CVarFarOceanInland(
+	TEXT("voxel.World.FarOceanInland"),
+	-1.0f,
+	TEXT("How far inside a bounded world's edge (uu) the far ocean's water covers chunk columns that are not loaded.\n")
+	TEXT("  < 0 = every unloaded column (default): no void anywhere around the loaded region\n")
+	TEXT("  >= 0 = only columns reaching within this distance of the edge; deeper unloaded land stays empty, as on a plane\n")
+	TEXT("Read when the world initializes."),
+	ECVF_Default);
+
+static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
+	TEXT("voxel.World.FarOceanStats"),
+	TEXT("Log the far ocean's state for every live chunk manager (open columns, grid quads, rebuilds, extent)."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld*)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			if (It->GetWorld() && It->GetWorld()->IsGameWorld())
+			{
+				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.FarOceanStats: %s"), *It->GetFarOceanDebugString());
+			}
+		}
+	}));
 
 static TAutoConsoleVariable<int32> CVarGPUGenerationEnable(
 	TEXT("voxel.GPUGeneration.Enable"),
@@ -638,6 +684,17 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	Timing.RenderSubmitMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
 
+	// === Far ocean (WM-E1) ===
+	// After this tick's generation results, unloads and water tiles: a column that just got data or a water tile
+	// leaves the far ocean in the same tick, so the two waters never overlap.
+	if (FarOceanGrid)
+	{
+		const double FarOceanStart = FPlatformTime::Seconds();
+		UpdateFarOceanUnderside(CurrentViewerPosition);
+		Timing.FarOceanRebuildCount = UpdateFarOceanGrid(false) ? 1 : 0;
+		Timing.FarOceanMs = static_cast<float>((FPlatformTime::Seconds() - FarOceanStart) * 1000.0);
+	}
+
 	// === Water propagation (bounded BFS per frame) ===
 	if (WaterPropagation && WaterPropagation->HasPendingWork())
 	{
@@ -1157,8 +1214,9 @@ void UVoxelChunkManager::Initialize(
 
 	bIsInitialized = true;
 
-	// The hard boundary at the world's edge (WM-I5, D9).
+	// The hard boundary at the world's edge (WM-I5, D9), and the sea beyond it (WM-E1).
 	RebuildWorldBoundary();
+	RebuildFarOcean();
 
 	// Dump biome configuration for diagnostics
 	if (Configuration->BiomeConfiguration)
@@ -1283,6 +1341,7 @@ void UVoxelChunkManager::Shutdown()
 
 	WorldMode.Reset();
 	DestroyWorldBoundary();
+	DestroyFarOcean();
 
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
@@ -2575,6 +2634,366 @@ void UVoxelChunkManager::SetWorldBoundaryCollisionEnabled(bool bEnabled)
 	{
 		UE_LOG(LogVoxelStreaming, Log, TEXT("World boundary: %d wall(s), collision %s"), WorldBoundaryWalls.Num(), bEnabled ? TEXT("on") : TEXT("off"));
 	}
+}
+
+// ==================== Far Ocean (WM-E1) ====================
+
+namespace VoxelFarOceanManagerPrivate
+{
+	/** Hand a mesh to a procedural mesh section (no collision). Clears the section when the mesh is empty. */
+	void SetSection(UProceduralMeshComponent* Component, int32 Section, const FChunkMeshData& Mesh, UMaterialInterface* Material)
+	{
+		if (!Component)
+		{
+			return;
+		}
+		if (Mesh.Positions.Num() == 0 || Mesh.Indices.Num() == 0)
+		{
+			Component->ClearMeshSection(Section);
+			return;
+		}
+		const int32 N = Mesh.Positions.Num();
+		TArray<FVector> Vertices;
+		TArray<FVector> Normals;
+		TArray<FVector2D> UV0;
+		TArray<FVector2D> UV1;
+		TArray<FProcMeshTangent> Tangents;
+		Vertices.SetNumUninitialized(N);
+		Normals.SetNumUninitialized(N);
+		UV0.SetNumUninitialized(N);
+		UV1.SetNumUninitialized(N);
+		Tangents.Init(FProcMeshTangent(1.0f, 0.0f, 0.0f), N);
+		for (int32 i = 0; i < N; ++i)
+		{
+			Vertices[i] = FVector(Mesh.Positions[i]);
+			Normals[i] = FVector(Mesh.Normals[i]);
+			UV0[i] = FVector2D(Mesh.UVs[i]);
+			UV1[i] = FVector2D(Mesh.UV1s[i]);
+		}
+		TArray<int32> Triangles;
+		Triangles.SetNumUninitialized(Mesh.Indices.Num());
+		for (int32 i = 0; i < Mesh.Indices.Num(); ++i)
+		{
+			Triangles[i] = static_cast<int32>(Mesh.Indices[i]);
+		}
+		const TArray<FVector2D> NoUV;
+		Component->CreateMeshSection(Section, Vertices, Triangles, Normals, UV0, UV1, NoUV, NoUV, Mesh.Colors, Tangents,
+			/*bCreateCollision=*/false);
+		if (Material)
+		{
+			Component->SetMaterial(Section, Material);
+		}
+	}
+
+	UProceduralMeshComponent* MakeComponent(AActor* Owner, const TCHAR* Name, const FVector& Location)
+	{
+		UProceduralMeshComponent* Component = NewObject<UProceduralMeshComponent>(Owner, Name, RF_Transient);
+		Component->SetUsingAbsoluteLocation(true);
+		Component->SetUsingAbsoluteRotation(true);
+		Component->SetUsingAbsoluteScale(true);
+		Component->SetupAttachment(Owner->GetRootComponent());
+		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Component->SetCanEverAffectNavigation(false);
+		Component->SetGenerateOverlapEvents(false);
+		Component->SetCastShadow(false);
+		Component->bUseAsyncCooking = false;
+		Component->SetWorldLocationAndRotation(Location, FRotator::ZeroRotator);
+		Component->RegisterComponent();
+		return Component;
+	}
+}
+
+uint8 UVoxelChunkManager::ResolveFarSeabedMaterial(const FIslandBowlParams& Island) const
+{
+	// The material generation gives the seabed a little past the edge, the most common one around the island: the
+	// same surface pipeline as the map and scatter (FVoxelSurfaceQuery).
+	if (!Configuration)
+	{
+		return 0;
+	}
+	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
+	const float Distance = FMath::Clamp(Island.SeabedSlopeWidth * 0.5f, 500.0f, 20000.0f);
+	TMap<uint8, int32> Votes;
+	constexpr int32 Samples = 48;
+	for (int32 i = 0; i < Samples; ++i)
+	{
+		const float Angle = UE_TWO_PI * (i + 0.5f) / Samples;
+		const FVector2D Dir(FMath::Cos(Angle), FMath::Sin(Angle));
+		// Out from the centre to the footprint's edge (a rectangle's too: its larger-axis distance grows along the ray).
+		float Edge = Island.GetTotalExtent();
+		if (Island.Shape == EIslandShape::Rectangle)
+		{
+			const float SX = FMath::Abs(Dir.X) > KINDA_SMALL_NUMBER ? Island.GetTotalExtentX() / FMath::Abs(Dir.X) : TNumericLimits<float>::Max();
+			const float SY = FMath::Abs(Dir.Y) > KINDA_SMALL_NUMBER ? Island.GetTotalExtentY() / FMath::Abs(Dir.Y) : TNumericLimits<float>::Max();
+			Edge = FMath::Min(SX, SY);
+		}
+		const FVector2D P = FVector2D(Island.CenterX, Island.CenterY) + Dir * (Edge + Distance);
+		const float Height = FIslandBowlWorldMode::GetSeabedHeight(
+			FIslandBowlWorldMode::GetDistancePastEdge(P.X, P.Y, Island), Island);
+		uint8 Material = 0;
+		if (Configuration->bEnableBiomes && Snapshot.bIsValid)
+		{
+			uint8 Biome = 0;
+			FVoxelSurfaceQuery::QuerySurfaceConditions(P.X, P.Y, Height, Configuration->VoxelSize, Snapshot,
+				Configuration->NoiseParams.Seed, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Material, Biome);
+		}
+		else if (WorldMode)
+		{
+			Material = WorldMode->GetMaterialAtDepth(FVector(P.X, P.Y, Height), Height, 0.0f);
+		}
+		++Votes.FindOrAdd(Material);
+	}
+	uint8 Best = 0;
+	int32 BestVotes = -1;
+	for (const TPair<uint8, int32>& Vote : Votes)
+	{
+		if (Vote.Value > BestVotes)
+		{
+			Best = Vote.Key;
+			BestVotes = Vote.Value;
+		}
+	}
+	return Best;
+}
+
+void UVoxelChunkManager::RebuildFarOcean()
+{
+	using namespace VoxelFarOceanManagerPrivate;
+	DestroyFarOcean();
+
+	UWorld* World = GetWorld();
+	AActor* Owner = GetOwner();
+	// Visual only: a dedicated server draws nothing.
+	if (!Configuration || !WorldMode || !World || !World->IsGameWorld() || !Owner || World->GetNetMode() == NM_DedicatedServer
+		|| Configuration->WorldMode != EWorldMode::IslandBowl || !Configuration->bIslandFarOcean)
+	{
+		return;
+	}
+	const FVoxelWorldBounds Bounds = WorldMode->GetWorldBounds();
+	if (Bounds.Shape != EVoxelWorldBoundsShape::Circle && Bounds.Shape != EVoxelWorldBoundsShape::Rectangle)
+	{
+		return;
+	}
+	const double StartTime = FPlatformTime::Seconds();
+	const FIslandBowlParams Island = FVoxelWorldModeFactory::MakeIslandParams(*Configuration);
+	FarOceanSettings = FVoxelFarOceanSettings();
+	FarOceanSettings.Bounds = Bounds;
+	FarOceanSettings.GridOrigin = FVector2D(Configuration->WorldOrigin.X, Configuration->WorldOrigin.Y);
+	FarOceanSettings.ColumnSize = Configuration->GetChunkWorldSize();
+	FarOceanSettings.VoxelSize = Configuration->VoxelSize;
+	FarOceanSettings.WaterZ = Configuration->WaterLevel; // where FVoxelWaterMesher puts the water tiles
+	FarOceanSettings.OuterDistance = Configuration->IslandFarOceanDistance;
+	FarOceanSettings.SeabedSlopeWidth = Island.SeabedSlopeWidth;
+	// Half a voxel under the profile: the voxel seabed past the edge is the profile itself (no noise there), which
+	// Marching Cubes and Dual Contouring follow within a few uu, so the drawn seabed stays hidden wherever the real one
+	// is loaded and shows where it is not. Kept small because the loaded seabed shadows it along its edge in a strip
+	// about this wide (1.5 voxels drew a dark line there).
+	FarOceanSettings.SeabedOffset = 0.5 * Configuration->VoxelSize;
+	FarOceanSettings.FloorDrop = Configuration->VoxelSize;
+	FarOceanSettings.EdgeZ = Island.EdgeHeight;
+	FarOceanSettings.SeabedHeight = [Island](double Distance)
+	{
+		return static_cast<double>(FIslandBowlWorldMode::GetSeabedHeight(static_cast<float>(Distance), Island));
+	};
+	FarOceanSettings.SeabedMaterialID = ResolveFarSeabedMaterial(Island);
+	FarOceanSettings.InlandCoverage = CVarFarOceanInland.GetValueOnGameThread();
+
+	const FVector Origin = FarOceanSettings.GetMeshOrigin();
+	const bool bVisible = CVarFarOcean.GetValueOnGameThread() != 0;
+
+	// The seabed and the open sea never change: one component. The seabed takes the terrain's own material instance
+	// (the atlas parameters), so it reads as the voxel seabed it continues.
+	FarOceanStatic = MakeComponent(Owner, TEXT("VoxelFarOceanStatic"), Origin);
+	FChunkMeshData Mesh;
+	const int32 SeabedTriangles = FVoxelFarOcean::BuildSeabed(FarOceanSettings, Mesh);
+	SetSection(FarOceanStatic, 0, Mesh, MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr);
+
+	// The water needs the water tiles' material (without it the world actor draws its fallback plane).
+	const bool bWater = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial;
+	int32 OpenSeaQuads = 0;
+	if (bWater)
+	{
+		FChunkMeshData Underside;
+		OpenSeaQuads = FVoxelFarOcean::BuildOpenSeaWater(FarOceanSettings, Mesh, &Underside);
+		SetSection(FarOceanStatic, 1, Mesh, Configuration->WaterMeshMaterial);
+		SetSection(FarOceanStatic, 2, Underside, Configuration->WaterMeshMaterial);
+		FarOceanStatic->SetTranslucentSortPriority(0);
+
+		FarOceanGrid = MakeComponent(Owner, TEXT("VoxelFarOceanGrid"), Origin);
+		FarOceanWindow = MakeComponent(Owner, TEXT("VoxelFarOceanWindow"), Origin);
+		UpdateFarOceanGrid(true);
+	}
+	for (UProceduralMeshComponent* Component : { FarOceanStatic.Get(), FarOceanGrid.Get(), FarOceanWindow.Get() })
+	{
+		if (Component)
+		{
+			Component->SetVisibility(bVisible);
+		}
+	}
+	bFarOceanUndersideShown = true; // force the first update to hide them
+	UpdateFarOceanUnderside(CurrentViewerPosition);
+
+	FIntPoint GridMin, GridMax;
+	FVoxelFarOcean::GetGridColumns(FarOceanSettings, GridMin, GridMax);
+	UE_LOG(LogVoxelStreaming, Log,
+		TEXT("Far ocean: seabed %d triangle(s) (material %d, %.0f uu under the profile), %s; grid %dx%d column(s), %d open; reaches %.0f uu past the edge; built in %.2f ms%s"),
+		SeabedTriangles, FarOceanSettings.SeabedMaterialID, FarOceanSettings.SeabedOffset,
+		bWater ? *FString::Printf(TEXT("open sea %d quad(s), grid %d quad(s) (%d in the window)"), OpenSeaQuads, FarOceanGridQuads,
+			FarOceanGridQuads - FarOceanFrameQuads)
+			: TEXT("no water (needs bEnableWaterLevel and WaterMeshMaterial)"),
+		GridMax.X - GridMin.X + 1, GridMax.Y - GridMin.Y + 1, FarOceanOpenColumns.Num(), FarOceanSettings.OuterDistance,
+		(FPlatformTime::Seconds() - StartTime) * 1000.0, bVisible ? TEXT("") : TEXT(" (hidden: voxel.World.FarOcean 0)"));
+}
+
+void UVoxelChunkManager::DestroyFarOcean()
+{
+	for (UProceduralMeshComponent* Component : { FarOceanGrid.Get(), FarOceanWindow.Get(), FarOceanStatic.Get() })
+	{
+		if (IsValid(Component))
+		{
+			Component->DestroyComponent();
+		}
+	}
+	FarOceanGrid = nullptr;
+	FarOceanWindow = nullptr;
+	FarOceanStatic = nullptr;
+	FarOceanOpenColumns.Reset();
+	FarOceanWindowColumns = FIntRect();
+	FarOceanFrameQuads = 0;
+	FarOceanGridQuads = 0;
+	bFarOceanUndersideShown = false;
+}
+
+bool UVoxelChunkManager::UpdateFarOceanGrid(bool bForce)
+{
+	if (!FarOceanGrid)
+	{
+		return false;
+	}
+	// Open: every column holding a chunk with voxel data (its terrain and water tile may render) or a water tile.
+	TSet<FIntPoint> Open;
+	Open.Reserve(FarOceanOpenColumns.Num() + 16);
+	for (const TPair<FIntVector, FVoxelChunkState>& Pair : ChunkStates)
+	{
+		switch (Pair.Value.State)
+		{
+		case EChunkState::PendingMeshing:
+		case EChunkState::Meshing:
+		case EChunkState::Loaded:
+		case EChunkState::PendingUnload:
+			Open.Add(FIntPoint(Pair.Key.X, Pair.Key.Y));
+			break;
+		default:
+			break;
+		}
+	}
+	for (const TPair<FIntVector2, FWaterTileState>& Pair : WaterTiles)
+	{
+		Open.Add(FIntPoint(Pair.Key.X, Pair.Key.Y));
+	}
+	if (!bForce && Open.Num() == FarOceanOpenColumns.Num() && Open.Includes(FarOceanOpenColumns))
+	{
+		return false;
+	}
+	FarOceanOpenColumns = MoveTemp(Open);
+
+	// The window follows the open columns: when they leave it, it moves to their bounds plus a margin and the frame
+	// outside it is rebuilt; otherwise only the window is (a few hundred columns instead of the whole grid).
+	bool bMoveWindow = bForce;
+	if (FarOceanOpenColumns.Num() > 0)
+	{
+		FIntPoint OpenMin(TNumericLimits<int32>::Max()), OpenMax(TNumericLimits<int32>::Lowest());
+		for (const FIntPoint& Column : FarOceanOpenColumns)
+		{
+			OpenMin = OpenMin.ComponentMin(Column);
+			OpenMax = OpenMax.ComponentMax(Column);
+		}
+		const FIntRect& W = FarOceanWindowColumns;
+		const bool bInside = OpenMin.X >= W.Min.X && OpenMin.Y >= W.Min.Y && OpenMax.X < W.Max.X && OpenMax.Y < W.Max.Y;
+		if (!bInside || bForce)
+		{
+			FarOceanWindowColumns = FIntRect(OpenMin - FIntPoint(FarOceanWindowMarginColumns),
+				OpenMax + FIntPoint(1 + FarOceanWindowMarginColumns));
+			bMoveWindow = true;
+		}
+	}
+
+	using VoxelFarOceanManagerPrivate::SetSection;
+	UMaterialInterface* WaterMaterial = Configuration ? Configuration->WaterMeshMaterial.Get() : nullptr;
+	UMaterialInterface* FloorMaterial = MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr;
+	FChunkMeshData Mesh;
+	FChunkMeshData Underside;
+	auto BuildPart = [&](UProceduralMeshComponent* Component, EVoxelFarOceanGridPart Part)
+	{
+		const int32 Quads = FVoxelFarOcean::BuildGridWater(FarOceanSettings, FarOceanOpenColumns, Mesh, &Underside, Part,
+			FarOceanWindowColumns);
+		SetSection(Component, 0, Mesh, WaterMaterial);
+		SetSection(Component, 2, Underside, WaterMaterial);
+		if (Component->GetNumSections() > 2)
+		{
+			Component->SetMeshSectionVisible(2, bFarOceanUndersideShown);
+		}
+		// The floor under the grid water's columns inside the footprint uses the terrain material, as the seabed.
+		FVoxelFarOcean::BuildGridFloor(FarOceanSettings, FarOceanOpenColumns, Mesh, Part, FarOceanWindowColumns);
+		SetSection(Component, 1, Mesh, FloorMaterial);
+		return Quads;
+	};
+	if (bMoveWindow)
+	{
+		FarOceanFrameQuads = BuildPart(FarOceanGrid, EVoxelFarOceanGridPart::Frame);
+		++FarOceanFrameRebuilds;
+	}
+	FarOceanGridQuads = FarOceanFrameQuads + (FarOceanWindow ? BuildPart(FarOceanWindow, EVoxelFarOceanGridPart::Window) : 0);
+	++FarOceanRebuilds;
+	return true;
+}
+
+void UVoxelChunkManager::UpdateFarOceanUnderside(const FVector& ViewerPosition)
+{
+	const bool bBelow = ViewerPosition.Z < FarOceanSettings.WaterZ;
+	if (bBelow == bFarOceanUndersideShown)
+	{
+		return;
+	}
+	bFarOceanUndersideShown = bBelow;
+	for (UProceduralMeshComponent* Component : { FarOceanGrid.Get(), FarOceanWindow.Get(), FarOceanStatic.Get() })
+	{
+		if (IsValid(Component) && Component->GetNumSections() > 2)
+		{
+			Component->SetMeshSectionVisible(2, bBelow);
+		}
+	}
+}
+
+void UVoxelChunkManager::SetFarOceanVisible(bool bVisible)
+{
+	for (UProceduralMeshComponent* Component : { FarOceanGrid.Get(), FarOceanWindow.Get(), FarOceanStatic.Get() })
+	{
+		if (IsValid(Component))
+		{
+			Component->SetVisibility(bVisible);
+		}
+	}
+	if (FarOceanStatic)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Far ocean %s"), bVisible ? TEXT("shown") : TEXT("hidden"));
+	}
+}
+
+FString UVoxelChunkManager::GetFarOceanDebugString() const
+{
+	if (!FarOceanStatic)
+	{
+		return TEXT("no far ocean (not an island, bIslandFarOcean off, or not a game world)");
+	}
+	FIntPoint GridMin, GridMax;
+	FVoxelFarOcean::GetGridColumns(FarOceanSettings, GridMin, GridMax);
+	const FIntRect& W = FarOceanWindowColumns;
+	return FString::Printf(TEXT("visible=%d open columns=%d grid %dx%d quads=%d (window %dx%d: %d) rebuilds=%d (frame %d) water=%s seabed material=%d reaches %.0f uu past the edge, inland coverage %.0f"),
+		FarOceanStatic->IsVisible() ? 1 : 0, FarOceanOpenColumns.Num(), GridMax.X - GridMin.X + 1, GridMax.Y - GridMin.Y + 1,
+		FarOceanGridQuads, W.Width(), W.Height(), FarOceanGridQuads - FarOceanFrameQuads, FarOceanRebuilds, FarOceanFrameRebuilds,
+		FarOceanGrid ? TEXT("yes") : TEXT("no"), FarOceanSettings.SeabedMaterialID,
+		FarOceanSettings.OuterDistance, FarOceanSettings.InlandCoverage);
 }
 
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)

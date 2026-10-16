@@ -6,6 +6,7 @@
 #include "IVoxelLODStrategy.h"
 #include "LODTypes.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelWorldModeTypes.h"
 
 class IVoxelWorldMode;
 
@@ -312,7 +313,9 @@ protected:
 	FColor GetLODDebugColor(int32 LODLevel) const;
 
 	/**
-	 * Check if chunk should be culled for Island mode (beyond island boundary).
+	 * Check if chunk should be culled for Island mode (beyond island boundary): its column does not overlap the
+	 * island's footprint (FVoxelWorldBounds::IntersectsBox2D), the same test the map's IsTileInsideWorld and the far
+	 * ocean use, so the columns that stream are exactly the ones the far ocean leaves open (WM-E1).
 	 * Returns true if chunk should be CULLED (not rendered).
 	 */
 	bool ShouldCullIslandBoundary(
@@ -479,6 +482,9 @@ protected:
 
 	/** Island centre in world space: WorldOrigin + the config's IslandCenterX/Y, where generation puts it */
 	FVector2D IslandCenter = FVector2D::ZeroVector;
+
+	/** The island's footprint (IVoxelWorldMode::GetWorldBounds): a column streams only when it overlaps it */
+	FVoxelWorldBounds IslandBounds;
 
 	// ==================== Spherical Planet Mode Culling ====================
 	// Cached from FVoxelWorldModeFactory::MakePlanetParams (SP-A6).

@@ -611,27 +611,19 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 {
     if (WorldMode != EWorldMode::IslandBowl) return false;
 
-    const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-    const FVector ChunkCenter = Context.WorldOrigin +
-        FVector(ChunkCoord) * ChunkWorldSize +
-        FVector(ChunkWorldSize * 0.5f);
-
-    // 2D distance from island center
-    const FVector2D ToCenter(
-        ChunkCenter.X - (Context.WorldOrigin.X + IslandCenterOffset.X),
-        ChunkCenter.Y - (Context.WorldOrigin.Y + IslandCenterOffset.Y)
-    );
-    const float Distance2D = ToCenter.Size();
-
-    // Add buffer for chunk diagonal
-    const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_2;
-    const float CullDistance = IslandTotalExtent + ChunkDiagonal;
-
-    return Distance2D > CullDistance;
+    // The column's box in X and Y, against the island's footprint (IVoxelWorldMode::GetWorldBounds): a circle or a
+    // rectangle R + F around WorldOrigin + the configured offset. The map's IsTileInsideWorld uses the same test.
+    const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
+    const float Half = BaseChunkSize * VoxelSize * 0.5f;
+    const FBox2D Column(FVector2D(ChunkCenter.X - Half, ChunkCenter.Y - Half),
+                        FVector2D(ChunkCenter.X + Half, ChunkCenter.Y + Half));
+    return !IslandBounds.IntersectsBox2D(Column);
 }
 ```
 
-**Island Extent**: `IslandRadius + FalloffWidth`
+**Island Extent**: `IslandRadius + FalloffWidth`. Until M6 (WORLD_MODES_REVIEW_PLAN.md §14.10) a circle kept every chunk
+whose centre was within the extent plus a chunk diagonal: a ring of columns wholly past the edge, holding the old floor and
+water there. The far ocean draws the sea past what streams now (WORLD_MODES.md, "Beyond the edge").
 
 ### Horizon and Shell Culling (Spherical Planet)
 
@@ -721,8 +713,8 @@ bounded by geometry:
   horizontally in heightmap worlds (a cylinder) and in 3D on a planet.
 - **The vertical window:** each column's slab, plus the near window's layers near the viewer (above); in all, the
   world mode's height bounds.
-- **The world's footprint:** an island keeps only columns within R + falloff + a chunk diagonal of its centre; a planet
-  only chunks in its terrain shell and above its horizon.
+- **The world's footprint:** an island keeps only columns that touch its R + falloff footprint (since M6; before, out to
+  a chunk diagonal past it); a planet only chunks in its terrain shell and above its horizon.
 - **Edits:** edited chunks pin-load within the view distance and stay to the unload distance, outside the window too.
 - **The pipeline:** chunks mid-generation or mid-meshing finish before they unload; `MaxChunksToUnloadPerFrame` paces
   unloading, not residency.

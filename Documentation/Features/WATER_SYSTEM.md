@@ -409,6 +409,30 @@ When `WaterMeshMaterial` is null, the system falls back to a static water plane 
 
 ---
 
+## Far Ocean (Islands)
+
+**Files**: `VoxelStreaming/Public/VoxelFarOcean.h` (geometry), `UVoxelChunkManager::RebuildFarOcean` / `UpdateFarOceanGrid`
+
+Water tiles exist only for loaded chunk columns, so an island's sea used to end at the edge of what was streamed and the
+island floated in a void seen from outside (world modes review KI2). Since milestone M6 (WM-E1) a bounded heightmap world
+with `bIslandFarOcean` draws the sea past that: procedural mesh components on the world actor, at `WaterLevel` with
+`WaterMeshMaterial` and world-space UVs as the tiles (one seamless surface), out to `IslandFarOceanDistance` past the edge.
+
+- **No overlap with the tiles.** The far ocean's grid covers every chunk column the streaming has not opened; a column
+  opens when it holds a chunk with voxel data or has a water tile. The grid is rebuilt in the same tick the open set
+  changes, after the water tiles are processed, so a tile and the far ocean never cover the same column (the material is
+  translucent: two layers would draw darker) and no column is left without water. Only a window around the open columns
+  is rebuilt each time; the rest of the grid only when the window moves.
+- **Under it:** a seabed that continues the island's (`FIslandBowlWorldMode::GetSeabedHeight`), half a voxel under it
+  so the loaded voxel seabed covers it, and a floor under unloaded columns inside the island's edge.
+- **From below:** the undersides are separate sections shown only while the viewer is under the water plane (the tiles
+  are drawn two-sided always).
+- **Proxy recreation (G15):** the far ocean's meshes live on their own components, so a recreated terrain scene proxy
+  does not lose them; nothing needs re-sending.
+
+Details, cvars (`voxel.World.FarOcean`, `voxel.World.FarOceanInland`, `voxel.World.FarOceanStats`) and the trade-offs:
+WORLD_MODES.md, "Beyond the edge".
+
 ## Design Decisions
 
 ### Why 2D Tiles Instead of Per-Chunk Water?
