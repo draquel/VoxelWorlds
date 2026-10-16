@@ -15,7 +15,7 @@ void UVoxelWaterPropagation::Initialize(UVoxelChunkManager* InChunkManager, UVox
 {
 	ChunkManager = InChunkManager;
 	EditManager = InEditManager;
-	WaterLevel = InWaterLevel;
+	Sea = FVoxelSeaSurface::MakePlane(InWaterLevel);
 
 	if (InChunkManager)
 	{
@@ -24,11 +24,21 @@ void UVoxelWaterPropagation::Initialize(UVoxelChunkManager* InChunkManager, UVox
 			ChunkSize = Config->ChunkSize;
 			VoxelSize = Config->VoxelSize;
 			WorldOrigin = Config->WorldOrigin;
+			Sea = FVoxelSeaSurface::FromConfig(*Config);
+			Sea.bEnabled = true; // created only when water is on
 		}
 	}
 
-	UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation initialized (WaterLevel=%.0f, ChunkSize=%d, VoxelSize=%.0f)"),
-		WaterLevel, ChunkSize, VoxelSize);
+	if (Sea.bRadial)
+	{
+		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation initialized (sea radius %.0f around (%.0f, %.0f, %.0f), ChunkSize=%d, VoxelSize=%.0f)"),
+			Sea.Radius, Sea.Center.X, Sea.Center.Y, Sea.Center.Z, ChunkSize, VoxelSize);
+	}
+	else
+	{
+		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation initialized (WaterLevel=%.0f, ChunkSize=%d, VoxelSize=%.0f)"),
+			Sea.PlaneZ, ChunkSize, VoxelSize);
+	}
 }
 
 void UVoxelWaterPropagation::OnChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
@@ -71,9 +81,9 @@ void UVoxelWaterPropagation::OnChunkEdited(const FIntVector& ChunkCoord, EEditSo
 					continue;
 				}
 
-				// This voxel must be air, below water level, and NOT already water-flagged
+				// This voxel must be air, below the sea, and NOT already water-flagged
 				const FVoxelData Voxel = ChunkManager->GetVoxelAtWorldPosition(WorldPos);
-				if (!Voxel.IsAir() || Voxel.HasWaterFlag() || WorldPos.Z > WaterLevel)
+				if (!Voxel.IsAir() || Voxel.HasWaterFlag() || !Sea.IsBelow(WorldPos))
 				{
 					continue;
 				}
@@ -233,8 +243,8 @@ bool UVoxelWaterPropagation::CanReceiveWater(const FVector& WorldPos) const
 		return false;
 	}
 
-	// Must be below water level
-	if (WorldPos.Z > WaterLevel)
+	// Must be below the sea
+	if (!Sea.IsBelow(WorldPos))
 	{
 		return false;
 	}

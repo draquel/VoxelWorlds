@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelWaterPropagation.generated.h"
 
 class UVoxelChunkManager;
@@ -28,7 +29,8 @@ public:
 	 *
 	 * @param InChunkManager The chunk manager to query voxel data from
 	 * @param InEditManager The edit manager to apply water flag edits through
-	 * @param InWaterLevel The world-space water level (Z coordinate)
+	 * @param InWaterLevel The world-space water level (Z coordinate). With a chunk manager the sea comes from its
+	 *        configuration instead (FVoxelSeaSurface::FromConfig: on a planet the WaterRadius sphere, SP-B8)
 	 */
 	void Initialize(UVoxelChunkManager* InChunkManager, UVoxelEditManager* InEditManager, float InWaterLevel);
 
@@ -67,8 +69,8 @@ private:
 	UPROPERTY()
 	TWeakObjectPtr<UVoxelEditManager> EditManager;
 
-	/** World-space water level. */
-	float WaterLevel = 0.f;
+	/** The sea water spreads below: the WaterLevel plane, or a planet's WaterRadius sphere (SP-B8). */
+	FVoxelSeaSurface Sea;
 
 	/** BFS queue of world-space voxel positions to process. */
 	TArray<FVector> BFSQueue;
@@ -90,6 +92,6 @@ private:
 	/** Get world-space center of a voxel from its global key. */
 	FVector VoxelKeyToWorld(const FIntVector& Key) const;
 
-	/** Check if a world position is a valid air voxel below water level that can receive water. */
+	/** Check if a world position is a valid air voxel below the sea that can receive water. */
 	bool CanReceiveWater(const FVector& WorldPos) const;
 };

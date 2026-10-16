@@ -11,6 +11,7 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelSeaSurface.h"
 #include "Async/Async.h"
 
 // Permutation table for Perlin noise (Ken Perlin's original)
@@ -1496,6 +1497,67 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	}
 }
 
+// ==================== Scan Lines Along Local Down (planets) ====================
+
+namespace VoxelCPUNoiseGeneratorPrivate
+{
+	/** Line ids ForEachVoxelAlongDown hands out: [0, NumDownLines(ChunkSize)). */
+	int32 NumDownLines(int32 ChunkSize)
+	{
+		return 9 * ChunkSize * ChunkSize;
+	}
+
+	/**
+	 * Visits every voxel of a chunk once, line by line along a down direction, each line from where it enters the chunk
+	 * on its upper side to where it leaves (spherical SP-B7, SP-B8). The lines are digital lines sheared along the axis
+	 * nearest to Down: with K the step index along that axis from the chunk's upper side, voxel (a, b, c) is on line
+	 * (b - round(K * SlopeB), c - round(K * SlopeC)), so every voxel is on exactly one line and each step moves at most
+	 * one voxel sideways. With Down = -Z the lines are the chunk's columns, top to bottom.
+	 *
+	 * @param ChunkSize Voxels per chunk edge
+	 * @param Down Unit down direction (the chunk centre's local down on a planet)
+	 * @param Visit Called as Visit(LineId, VoxelIndex, Local) in line order; LineId in [0, NumDownLines(ChunkSize))
+	 */
+	template <typename FVisit>
+	void ForEachVoxelAlongDown(int32 ChunkSize, const FVector& Down, FVisit&& Visit)
+	{
+		const FVector AbsDown = Down.GetAbs();
+		const int32 AxisA = (AbsDown.X >= AbsDown.Y && AbsDown.X >= AbsDown.Z) ? 0 : (AbsDown.Y >= AbsDown.Z ? 1 : 2);
+		const int32 AxisB = (AxisA + 1) % 3;
+		const int32 AxisC = (AxisA + 2) % 3;
+		const bool bForward = Down[AxisA] > 0.0;
+		const double SlopeB = Down[AxisB] / FMath::Max(AbsDown[AxisA], UE_DOUBLE_SMALL_NUMBER);
+		const double SlopeC = Down[AxisC] / FMath::Max(AbsDown[AxisA], UE_DOUBLE_SMALL_NUMBER);
+		const int32 SliceSize = ChunkSize * ChunkSize;
+		const int32 Span = 3 * ChunkSize; // line ids span [-ChunkSize, 2 * ChunkSize) on each sheared axis
+
+		FIntVector Local;
+		for (int32 K = 0; K < ChunkSize; ++K)
+		{
+			Local[AxisA] = bForward ? K : ChunkSize - 1 - K;
+			const int32 ShiftB = FMath::RoundToInt32(K * SlopeB);
+			const int32 ShiftC = FMath::RoundToInt32(K * SlopeC);
+			for (int32 C = 0; C < ChunkSize; ++C)
+			{
+				Local[AxisC] = C;
+				for (int32 B = 0; B < ChunkSize; ++B)
+				{
+					Local[AxisB] = B;
+					const int32 LineId = (B - ShiftB + ChunkSize) + (C - ShiftC + ChunkSize) * Span;
+					Visit(LineId, Local.X + Local.Y * ChunkSize + Local.Z * SliceSize, Local);
+				}
+			}
+		}
+	}
+
+	/** The local down direction at a planet chunk's centre. */
+	FVector PlanetChunkDown(const FVoxelNoiseGenerationRequest& Request)
+	{
+		const FVector ChunkCenter = Request.GetChunkWorldPosition() + FVector(0.5 * Request.ChunkSize * Request.VoxelSize);
+		return -FSphericalPlanetWorldMode::GetDirectionFromCenter(ChunkCenter, Request.SphericalPlanetParams.PlanetCenter);
+	}
+}
+
 // ==================== Water Fill Pass ====================
 
 void FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(
@@ -1515,9 +1577,12 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	if (!Request.bEnableWaterLevel)
 		return;
 
-	// SphericalPlanet uses radial water — skip flat-plane column scan
+	// A planet's sea is the sphere of WaterRadius (SP-B8): the same three phases with the radius in place of the plane.
 	if (Request.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		ApplyRadialWaterFillPass(Request, OutVoxelData);
 		return;
+	}
 
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
@@ -1646,6 +1711,111 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	}
 }
 
+void FVoxelCPUNoiseGenerator::ApplyRadialWaterFillPass(
+	const FVoxelNoiseGenerationRequest& Request,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	using namespace VoxelCPUNoiseGeneratorPrivate;
+
+	const int32 ChunkSize = Request.ChunkSize;
+	const float VoxelSize = Request.VoxelSize;
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	const int32 SliceSize = ChunkSize * ChunkSize;
+	const int32 VolumeSize = SliceSize * ChunkSize;
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::MakeSphere(Request.SphericalPlanetParams.PlanetCenter, Request.WaterRadius);
+	auto VoxelWorldPos = [&](const FIntVector& Local)
+	{
+		return ChunkWorldPos + FVector(Local) * VoxelSize;
+	};
+
+	// === Phase 1: seed the open sea, in a chunk the sea surface passes through ===
+	// As the plane's column scan: along each line in local down (ForEachVoxelAlongDown, the chunk centre's down), the
+	// part above the sea must be clear of solid and cave voxels from where the line enters the chunk (the column is open
+	// from the chunk top); from the sea surface down, air takes the water flag until the first solid or cave voxel. A
+	// line that enters the chunk already below the sea counts as open, as a column does when the water plane is the
+	// chunk's top layer. Chunks wholly under the sea fill from their neighbours (UVoxelChunkManager::PropagateWaterFromNeighbors).
+	const FBox VoxelBox(ChunkWorldPos, ChunkWorldPos + FVector((ChunkSize - 1) * VoxelSize));
+	if (Sea.Crosses(VoxelBox))
+	{
+		struct FSeaLine
+		{
+			bool bBlocked = false; // solid or cave above the sea, or the flood met its floor
+		};
+		TArray<FSeaLine> Lines;
+		Lines.SetNum(NumDownLines(ChunkSize));
+		ForEachVoxelAlongDown(ChunkSize, PlanetChunkDown(Request), [&](int32 LineId, int32 Index, const FIntVector& Local)
+		{
+			FSeaLine& Line = Lines[LineId];
+			if (Line.bBlocked)
+			{
+				return;
+			}
+			FVoxelData& Voxel = OutVoxelData[Index];
+			if (Voxel.IsSolid() || Voxel.HasCaveFlag())
+			{
+				Line.bBlocked = true;
+				return;
+			}
+			if (Sea.IsBelow(VoxelWorldPos(Local)))
+			{
+				Voxel.SetWaterFlag(true);
+			}
+		});
+	}
+
+	// === Phase 2: BFS flood fill through non-cave air inside the sea radius ===
+	TArray<int32> BFSQueue;
+	BFSQueue.Reserve(SliceSize);
+	for (int32 i = 0; i < VolumeSize; ++i)
+	{
+		if (OutVoxelData[i].HasWaterFlag())
+		{
+			BFSQueue.Add(i);
+		}
+	}
+
+	static constexpr int32 DX[6] = { 1, -1,  0,  0,  0,  0 };
+	static constexpr int32 DY[6] = { 0,  0,  1, -1,  0,  0 };
+	static constexpr int32 DZ[6] = { 0,  0,  0,  0,  1, -1 };
+
+	int32 QueueHead = 0;
+	while (QueueHead < BFSQueue.Num())
+	{
+		const int32 CurrentIdx = BFSQueue[QueueHead++];
+		const int32 CZ = CurrentIdx / SliceSize;
+		const int32 CY = (CurrentIdx - CZ * SliceSize) / ChunkSize;
+		const int32 CX = CurrentIdx - CZ * SliceSize - CY * ChunkSize;
+
+		for (int32 D = 0; D < 6; ++D)
+		{
+			const FIntVector N(CX + DX[D], CY + DY[D], CZ + DZ[D]);
+			if (N.X < 0 || N.X >= ChunkSize || N.Y < 0 || N.Y >= ChunkSize || N.Z < 0 || N.Z >= ChunkSize)
+			{
+				continue;
+			}
+
+			const int32 NeighborIdx = N.X + N.Y * ChunkSize + N.Z * SliceSize;
+			FVoxelData& Neighbor = OutVoxelData[NeighborIdx];
+			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag() || Neighbor.HasCaveFlag() || !Sea.IsBelow(VoxelWorldPos(N)))
+			{
+				continue;
+			}
+
+			Neighbor.SetWaterFlag(true);
+			BFSQueue.Add(NeighborIdx);
+		}
+	}
+
+	// === Phase 3: clear the cave flags (temporary barriers), as the plane's pass does ===
+	for (int32 i = 0; i < VolumeSize; ++i)
+	{
+		if (OutVoxelData[i].HasCaveFlag())
+		{
+			OutVoxelData[i].SetCaveFlag(false);
+		}
+	}
+}
+
 // ==================== Underground Classification Pass ====================
 
 void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
@@ -1708,41 +1878,15 @@ void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
 	{
 		// A planet scans along local down (the chunk centre's), not world -Z (SP-B7): at mid latitudes down is up to 55
 		// degrees off every axis, and a world-Z scan reads a hillside as a cave ceiling, or misses a cave whose column
-		// runs into the ground to the chunk's top. The lines are digital lines sheared along the axis nearest to down:
-		// voxel (a, b, c), with a the step index along that axis from the chunk's upper side, is on line
-		// (b - round(a * SlopeB), c - round(a * SlopeC)), so every voxel is on exactly one line and each step moves at
-		// most one voxel sideways. The same state machine runs on each line from where it enters the chunk.
-		const FVector ChunkCenter = Request.GetChunkWorldPosition() + FVector(0.5 * ChunkSize * Request.VoxelSize);
-		const FVector Down = -FSphericalPlanetWorldMode::GetDirectionFromCenter(ChunkCenter, Request.SphericalPlanetParams.PlanetCenter);
-		const FVector AbsDown = Down.GetAbs();
-		const int32 AxisA = (AbsDown.X >= AbsDown.Y && AbsDown.X >= AbsDown.Z) ? 0 : (AbsDown.Y >= AbsDown.Z ? 1 : 2);
-		const int32 AxisB = (AxisA + 1) % 3;
-		const int32 AxisC = (AxisA + 2) % 3;
-		const bool bForward = Down[AxisA] > 0.0;
-		const double SlopeB = Down[AxisB] / AbsDown[AxisA];
-		const double SlopeC = Down[AxisC] / AbsDown[AxisA];
-
-		// Line ids span [-ChunkSize, 2 * ChunkSize) on each sheared axis.
-		const int32 Span = 3 * ChunkSize;
+		// runs into the ground to the chunk's top. The same state machine runs on each digital line along down
+		// (ForEachVoxelAlongDown) from where it enters the chunk.
+		using namespace VoxelCPUNoiseGeneratorPrivate;
 		TArray<FLineState> Lines;
-		Lines.SetNum(Span * Span);
-		int32 Coord[3];
-		for (int32 K = 0; K < ChunkSize; ++K)
+		Lines.SetNum(NumDownLines(ChunkSize));
+		ForEachVoxelAlongDown(ChunkSize, PlanetChunkDown(Request), [&](int32 LineId, int32 Index, const FIntVector&)
 		{
-			Coord[AxisA] = bForward ? K : ChunkSize - 1 - K;
-			const int32 ShiftB = FMath::RoundToInt32(K * SlopeB);
-			const int32 ShiftC = FMath::RoundToInt32(K * SlopeC);
-			for (int32 C = 0; C < ChunkSize; ++C)
-			{
-				Coord[AxisC] = C;
-				for (int32 B = 0; B < ChunkSize; ++B)
-				{
-					Coord[AxisB] = B;
-					FLineState& Line = Lines[(B - ShiftB + ChunkSize) + (C - ShiftC + ChunkSize) * Span];
-					Step(Line, OutVoxelData[Coord[0] + Coord[1] * ChunkSize + Coord[2] * SliceSize]);
-				}
-			}
-		}
+			Step(Lines[LineId], OutVoxelData[Index]);
+		});
 	}
 	else
 	{

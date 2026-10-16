@@ -9,6 +9,7 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
@@ -30,6 +31,7 @@
 // - Height-material rules read the altitude above the datum, not the radius (SP-B2).
 // - Caves flatten along local up, and the sea above suppresses them to UnderwaterMinDepth (SP-B6).
 // - Underground classification scans along local down (SP-B7).
+// - Water flags by the sea radius: the radial fill pass, and the sea surface every water rule tests (SP-B8).
 // ---------------------------------------------------------------------------
 
 namespace SphericalPlanetTestUtils
@@ -868,6 +870,143 @@ bool FPlanetUndergroundAlongUpTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("Pole: %d underground voxels by world-Z columns, %d differ along local down"), Flagged, Differ));
 	TestTrue(TEXT("The pole case has underground voxels to compare"), Flagged > 100);
 	TestEqual(TEXT("At the pole the planet's scan equals the column scan"), Differ, 0);
+	return true;
+}
+
+/**
+ * SP-B8: the sea surface the water rules test. A plane: at or below WaterLevel. A sphere: within WaterRadius of the
+ * centre, with boxes above it or crossing it judged by their nearest and farthest points. The configuration picks the
+ * sphere on a planet (around WorldOrigin, the planet centre).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetSeaSurfaceTest,
+	"VoxelWorlds.WorldModes.Planet.SeaSurface",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetSeaSurfaceTest::RunTest(const FString& Parameters)
+{
+	const FVoxelSeaSurface Plane = FVoxelSeaSurface::MakePlane(-1500.0);
+	TestTrue(TEXT("Plane: below at the level"), Plane.IsBelow(FVector(1.0e6, 0.0, -1500.0)));
+	TestFalse(TEXT("Plane: above it"), Plane.IsBelow(FVector(0.0, 0.0, -1499.0)));
+	TestTrue(TEXT("Plane: a box over it is above"), Plane.IsAbove(FBox(FVector(0, 0, -1400), FVector(100, 100, 0))));
+	TestTrue(TEXT("Plane: a box across it crosses"), Plane.Crosses(FBox(FVector(0, 0, -2000), FVector(100, 100, 0))));
+	TestFalse(TEXT("Plane: a box under it does not cross"), Plane.Crosses(FBox(FVector(0, 0, -5000), FVector(100, 100, -2000))));
+
+	const FVector Center(100.0, 200.0, 300.0);
+	const FVoxelSeaSurface Sphere = FVoxelSeaSurface::MakeSphere(Center, 1000.0);
+	TestTrue(TEXT("Sphere: below inside the radius, in any direction"), Sphere.IsBelow(Center + FVector(-600, 700, -300)));
+	TestFalse(TEXT("Sphere: above outside it"), Sphere.IsBelow(Center + FVector(0, 0, -1001)));
+	TestTrue(TEXT("Sphere: a box outside is above"), Sphere.IsAbove(FBox(Center + FVector(1100, -50, -50), Center + FVector(1200, 50, 50))));
+	TestTrue(TEXT("Sphere: a box across the surface crosses"), Sphere.Crosses(FBox(Center + FVector(900, -50, -50), Center + FVector(1100, 50, 50))));
+	TestFalse(TEXT("Sphere: a box inside does not cross"), Sphere.Crosses(FBox(Center + FVector(-100, -100, -100), Center + FVector(100, 100, 100))));
+	TestFalse(TEXT("Sphere: ... and is not above"), Sphere.IsAbove(FBox(Center + FVector(-100, -100, -100), Center + FVector(100, 100, 100))));
+
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = Center;
+	Config->WaterRadius = 1234.0f;
+	Config->WaterLevel = 99999.0f;
+	Config->bEnableWaterLevel = true;
+	const FVoxelSeaSurface FromPlanet = FVoxelSeaSurface::FromConfig(*Config);
+	TestTrue(TEXT("A planet's sea is the WaterRadius sphere around WorldOrigin"),
+		FromPlanet.bEnabled && FromPlanet.bRadial && FromPlanet.Center.Equals(Center) && FromPlanet.Radius == 1234.0);
+	Config->WorldMode = EWorldMode::IslandBowl;
+	const FVoxelSeaSurface FromIsland = FVoxelSeaSurface::FromConfig(*Config);
+	TestTrue(TEXT("A heightmap world's sea is the WaterLevel plane"), !FromIsland.bRadial && FromIsland.PlaneZ == 99999.0);
+	return true;
+}
+
+/**
+ * SP-B8: the radial water fill. In a chunk at 45 degrees that the sea sphere crosses, the open sea between the ground
+ * and the sea surface takes the water flag, the air above the sea and a cave in the ground stay dry, and the Z-plane
+ * WaterLevel plays no part. A chunk wholly under the sea is left to its neighbours, as on the plane.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetWaterFillTest,
+	"VoxelWorlds.WorldModes.Planet.WaterFill",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetWaterFillTest::RunTest(const FString& Parameters)
+{
+	using namespace SphericalPlanetTestUtils;
+	const int32 N = PlanetTestChunkSize;
+	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+	const double ChunkWorld = N * PlanetTestVoxelSize;
+	const FIntVector Chunk(FMath::FloorToInt(PlanetTestRadius * C45 / ChunkWorld), 0, FMath::FloorToInt(PlanetTestRadius * C45 / ChunkWorld));
+
+	// The sea surface through the chunk's centre (locally the plane x + z = 32 in voxels); ground below x + z = 20;
+	// a cave (cave-flagged, as carving leaves it) in the ground; a Z-plane water level far above everything.
+	FVoxelNoiseGenerationRequest Request = MakePlanetPassRequest(Chunk, EWorldMode::SphericalPlanet);
+	const FVector ChunkCentre = Request.GetChunkWorldPosition() + FVector(0.5 * (N - 1) * PlanetTestVoxelSize);
+	Request.bEnableWaterLevel = true;
+	Request.WaterRadius = static_cast<float>(ChunkCentre.Size());
+	Request.WaterLevel = 1.0e9f;
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::MakeSphere(FVector::ZeroVector, Request.WaterRadius);
+	const FVector CaveCentre(6.0, 16.0, 6.0);
+	TArray<FVoxelData> Data;
+	Data.SetNum(N * N * N);
+	for (int32 Z = 0; Z < N; ++Z)
+	for (int32 Y = 0; Y < N; ++Y)
+	for (int32 X = 0; X < N; ++X)
+	{
+		const bool bGround = X + Z < 20;
+		FVoxelData Voxel = bGround ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
+		if (bGround && FVector::Dist(FVector(X, Y, Z), CaveCentre) < 3.0)
+		{
+			Voxel = FVoxelData::Air();
+			Voxel.SetCaveFlag(true);
+		}
+		Data[VoxelIndex(X, Y, Z)] = Voxel;
+	}
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, Data);
+
+	int32 SeaAir = 0, SeaWet = 0, SkyAir = 0, SkyWet = 0, CaveAir = 0, CaveWet = 0, CaveFlagsLeft = 0;
+	for (int32 Z = 0; Z < N; ++Z)
+	for (int32 Y = 0; Y < N; ++Y)
+	for (int32 X = 0; X < N; ++X)
+	{
+		const FVoxelData& Voxel = Data[VoxelIndex(X, Y, Z)];
+		CaveFlagsLeft += Voxel.HasCaveFlag() ? 1 : 0;
+		if (Voxel.IsSolid())
+		{
+			continue;
+		}
+		const FVector WorldPos = Request.GetChunkWorldPosition() + FVector(X, Y, Z) * PlanetTestVoxelSize;
+		if (X + Z < 20)
+		{
+			++CaveAir;
+			CaveWet += Voxel.HasWaterFlag() ? 1 : 0;
+		}
+		else if (Sea.IsBelow(WorldPos))
+		{
+			++SeaAir;
+			SeaWet += Voxel.HasWaterFlag() ? 1 : 0;
+		}
+		else
+		{
+			++SkyAir;
+			SkyWet += Voxel.HasWaterFlag() ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("45 degrees: sea %d of %d air voxels wet, sky %d of %d, cave %d of %d"), SeaWet, SeaAir, SkyWet, SkyAir, CaveWet, CaveAir));
+	TestTrue(TEXT("The chunk has sea and sky"), SeaAir > 1000 && SkyAir > 1000);
+	TestEqual(TEXT("All open sea below the sea radius is wet"), SeaWet, SeaAir);
+	TestEqual(TEXT("No air above the sea radius is wet (the Z plane plays no part)"), SkyWet, 0);
+	TestTrue(TEXT("The cave exists"), CaveAir > 50);
+	TestEqual(TEXT("The cave stays dry"), CaveWet, 0);
+	TestEqual(TEXT("Cave flags are cleared after the fill"), CaveFlagsLeft, 0);
+
+	// A chunk wholly under the sea seeds nothing by itself (its neighbours fill it at load, as on the plane).
+	FVoxelNoiseGenerationRequest Deep = MakePlanetPassRequest(Chunk - FIntVector(3, 0, 3), EWorldMode::SphericalPlanet);
+	Deep.bEnableWaterLevel = true;
+	Deep.WaterRadius = Request.WaterRadius;
+	TArray<FVoxelData> DeepData;
+	DeepData.Init(FVoxelData::Air(), N * N * N);
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Deep, DeepData);
+	int32 DeepWet = 0;
+	for (const FVoxelData& Voxel : DeepData)
+	{
+		DeepWet += Voxel.HasWaterFlag() ? 1 : 0;
+	}
+	TestEqual(TEXT("A chunk wholly under the sea seeds nothing by itself"), DeepWet, 0);
 	return true;
 }
 

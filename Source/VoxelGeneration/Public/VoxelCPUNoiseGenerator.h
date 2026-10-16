@@ -264,6 +264,14 @@ private:
 		const FVoxelNoiseGenerationRequest& Request,
 		TArray<FVoxelData>& OutVoxelData);
 
+	/**
+	 * ApplyWaterFillPass on a planet (SP-B8): the sea is the sphere of WaterRadius around the planet centre, and the
+	 * open-sea seeding runs along lines in local down instead of world-Z columns. Same phases and barriers.
+	 */
+	static void ApplyRadialWaterFillPass(
+		const FVoxelNoiseGenerationRequest& Request,
+		TArray<FVoxelData>& OutVoxelData);
+
 	/** Post-generation: mark air voxels below terrain surface as underground (caves, enclosed voids). */
 	static void ApplyUndergroundClassificationPass(
 		const FVoxelNoiseGenerationRequest& Request,
