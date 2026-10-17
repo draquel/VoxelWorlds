@@ -146,6 +146,18 @@ When terrain edits (dig, subtract) expose air adjacent to existing water, this s
 - Bounded by `MaxVoxelsPerFrame` (default 512) for smooth "water filling" effect
 - Total limit of `MaxPropagationVoxels` (default 8192) per flood event
 
+### On a Planet (spherical SP-B8)
+
+The three steps above test "below the sea" with `FVoxelSeaSurface` (VoxelCore): the `WaterLevel` Z plane in
+heightmap worlds, the sphere of `WaterRadius` around the planet centre on a planet (`FVoxelSeaSurface::FromConfig`).
+Generation runs `ApplyRadialWaterFillPass` on planets: chunks the sea sphere crosses seed the open sea along digital
+lines in the chunk's local down direction (the column scan's rule: the part above the sea must be clear from where
+the line enters the chunk, then air takes the flag down to the first solid or cave voxel), a BFS spreads through
+non-cave air inside the radius, and the cave flags clear. Chunks wholly under the sea fill from their neighbours as on
+the plane. The 2D water tiles below are XY grids at `WaterLevel`, so they are off on planets
+(`UVoxelChunkManager::UsesWaterTiles`); the sea surface is the test actor's cube-sphere mesh at `WaterRadius` until
+SP-E2.
+
 ---
 
 ## Water Meshing

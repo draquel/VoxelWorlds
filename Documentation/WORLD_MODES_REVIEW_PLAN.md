@@ -1437,6 +1437,7 @@ Three findings from §13.11 get IDs here:
 | G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
+| G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Open, not investigated past the repro; `Streaming.Planet.ClosedSurface` reports them and fails on any other hole | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -1556,7 +1557,7 @@ this plan:
 |-----------------|--------|------|-------|
 | 0. Guardrails (SP-A5, SP-B3, SP-I1, doc corrections) | M1, WM-H10 | M | Stops a spherical config from producing the GPU's generic noise by default |
 | The API it shares with the island (SP-A1 and SP-A2 heightmap side, SP-A6, SP-G9) | M2, WM-A1/A2/A4 | — | Designed so the planet implementations slot in, as the requirements doc asks (phases 3 and 4 depend on the review). **Done 2026-10-15 (§14.6)**, with a first planet side: shell bounds, radial up and altitude, a gnomonic cube-face coordinate; `GetSurfacePoint` comes with Phase 1 |
-| 1. A correct planet on the CPU | After M4 and M5 | L | SP-C1 (candidates cover the shell) takes WM-S1's shape: a per-column interval around the surface plus the viewer's neighbourhood, which for a planet is a shell. §13.11's fix already keeps a pole viewer's window at its own layer instead of near layer 40. WM-C1 removes the legacy path before planets test seams at mid latitudes (SP-D4) |
+| 1. A correct planet on the CPU | After M4 and M5 (D9: after M6) | L | SP-C1 (candidates cover the shell) takes WM-S1's shape: a per-column interval around the surface plus the viewer's neighbourhood, which for a planet is a shell. §13.11's fix already keeps a pole viewer's window at its own layer instead of near layer 40. WM-C1 removes the legacy path before planets test seams at mid latitudes (SP-D4). **Done 2026-10-16 (§15)**: work items WM-P1 to WM-P8 |
 | 2. GPU | After Phase 1 | L | As in the requirements doc |
 | 3. Walkable | After Phase 1; can run beside Phase 2 (game side) | L | SP-F5 (KillZ) builds on WM-I4's recovery |
 | 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers |
@@ -2408,3 +2409,172 @@ script, the gitlink and the doc map). No game-side change is needed.
 | WM-P6 | The candidates cover every chunk that meets the shell within the view distance at the pole, at 45° and on the equator (against brute force); the horizon cull keeps a peak past the viewer's own horizon; the benches |
 | WM-P7 | Collision faces point away from the planet at 45°; a real chunk manager streaming a small planet at 45°, LOD on, renders a closed surface (no open edge but at the loaded region's edge) |
 | WM-P8 | Survey screenshots before (this base) and after, at the poles, the equator, 45° and across cube-face edges; at 45°, crossfades and first-appearance fades running and a physics body landing on the slope; benches: the planet on its equator and its 45° and 80° circles of latitude at a fixed altitude against the control at a fixed altitude, one build, one batch, a throwaway PIE first (G14), settled at the spawn, against D3; headless and in-editor suites |
+
+### 15.2 Results (2026-10-16)
+
+All eight work items are implemented and verified; PRs open (draquel/VoxelWorlds#96 generation, WM-P1 to WM-P5;
+draquel/VoxelWorlds#97 streaming, WM-P6, WM-P7 and these docs, stacked on it; draquel/UE5_PluginDev#108 content,
+script, gitlink and doc map). Built from VoxelWorlds `feature/sp1-planet-streaming` (on `feature/sp1-planet-generation`,
+base `ad68236`) and UE5_PluginDev `claude/spherical-p1-cpu-planet-952556` (base `4867ac5`), editor 5.8.3 from
+`D:\Program Files\Epic Games\UE_5.8`, in a worktree editor with background throttling off. Live checks ran on
+`PlanetTest` with `/Game/PluginTesting/Review/Review_Planet` through `voxel.ConfigOverride`: `PlanetWorldConfig` (a
+250,000 uu planet from the demo config: its noise, biomes, caves and scatter) with water on at `WaterRadius` 249,500
+(500 under the datum, as the demo's water sits 500 under its sea level) and a ±6,500 shell (the demo's continentalness
+curves take the surface to ±6,000 now that they modulate the planet; `PlanetWorldConfig` is resaved with the same shell).
+Screenshots: `Saved/Screenshots/Claudius/p1b_*` (before, on the unchanged build) and `p1a_*` (after) in the worktree (not
+committed).
+
+**As built.** 15 new automation tests (`VoxelWorlds.WorldModes.Planet.*` 10, `VoxelWorlds.LOD.Planet.*` 3,
+`VoxelWorlds.Streaming.Planet.*` 2); the numbers below are theirs.
+
+| ID | As built | Check |
+|----|----------|-------|
+| WM-P1 | `FSphericalPlanetWorldMode::SampleRadialDisplacement`: `FBM3D` at `GetNoiseSamplePoint(Direction) = Direction × PlanetRadius`, continentalness through the heightmap modes' `ComputeEffectiveTerrainParamsAt` (now taking a 3D sample point; the XY overload is unchanged). Generation, `GetDensityAt` (`ShellSignedDistance`), the new `IVoxelWorldMode::GetSurfacePoint` and the configuration's shell check (`GetDisplacementBounds`, through `FVoxelBiomeSnapshot::GetContinentalnessExtremes`) all call it. `GetSurfacePoint` returns `FVoxelTerrainSurfacePoint` (position, normal, altitude): heightmaps `(X, Y, GetTerrainHeightAt)` with a central-difference normal; the planet the surface on the line from the centre, its normal from central differences along two tangents. Blueprint: `UVoxelChunkManager::GetSurfacePointAt`. The save fingerprint gains `PlanetGeneration=2` (planets only), so a save from the mirrored planet is refused and kept | `SurfaceMatchesGeneration`: generated isosurface against `GetSurfacePoint` along the radius, 16 directions (poles, equator, 45°, face edges and corners, 23 chunks): max gap 0.81 uu. `NoiseSeamless`: 190 of 190 mirrored pairs differ (mean 947 uu); across cube-face edges the worst step between points 200 uu apart is 65.6 uu (59.1 inside faces); sign changes over 400,000 uu: 18 at R 250,000, 17 at R 1,000,000, 13 on the plane (feature size in world units, not tied to the radius). `SurfacePoint`: 200 of 200 normals perpendicular to the sampled surface. `Continentalness`: 592 of 600 directions modulated, displacement −2,835 to +2,000 inside the bounds −6,000 to +4,000. `Configuration.PlanetSettings` extended (the shell check counts continentalness) |
+| WM-P2 | The tangent warp in `WorldToSurface` / `SurfaceToWorld`: `u = (4/π)·atan(g)` per axis, UV in [−1, 1] | `SurfaceCoordWarp`: UV cells (32 × 32 a face) within 1.380× in area (gnomonic: 5.2×), total solid angle 4π; `Api.Frame`'s round trip on all six faces |
+| WM-P3 | Height-material rules get the voxel's altitude above the datum; temperature and moisture are sampled at the datum-sphere point; caves flatten along local up (`FSphericalPlanetWorldMode::ScaleAltitude`, through `SampleCaveLayer`) and get `bIsUnderwater` when the column's terrain radius is under `WaterRadius` | `HeightMaterialsByAltitude` (133 chunks): surface voxels at altitude ≥ 4,000: 72 of 72 snow; below: 0 of 865 (before: snow everywhere). `Caves`: 139,968 carved voxels on dry land; under the sea with `UnderwaterMinDepth` 60: 0 |
+| WM-P4 | The underground pass's state machine on digital lines along the chunk centre's local down (`ForEachVoxelAlongDown`: lines sheared on the axis nearest to down, a bijection of the chunk's voxels); heightmap modes keep the column scan (bit-identical, so the GPU post-pass parity holds) | `UndergroundAlongLocalUp`: at 45°, a cave under the ground: 93 of 93 voxels flagged (world-Z columns: 0), open air 0 of 8,832; at the pole the lines are world Z: 1,702 underground voxels, 0 differ from the column scan |
+| WM-P5 | `FVoxelSeaSurface` (VoxelCore): the `WaterLevel` plane, or the sphere of `WaterRadius` on a planet. Generation's `ApplyRadialWaterFillPass` (seed along local down in chunks the sphere crosses, BFS inside the radius, cave flags cleared); the chunk manager's cross-chunk propagation and `FVoxelWaterPropagation` (edit time) take the same test. The Z-plane water tiles are off on planets (`UVoxelChunkManager::UsesWaterTiles`); the test actor draws the sea as a tangent-warped cube sphere at `WaterRadius` (6 × 96 × 96 quads, a procedural mesh; before, a configured `WaterMeshMaterial` skipped the sphere and nothing was drawn) | `SeaSurface`; `WaterFill` at 45°: sea 9,432 of 9,432 air voxels wet, sky 0 of 16,616, cave 0 of 93; `ClosedSurface`: 77,913 to 96,836 water voxels in 52 to 63 chunks, 0 above the sea radius |
+| WM-P6 | `FDistanceBandLODStrategy::GetPlanetShellWindow` (the column's crossings of the shell ± ½ chunk, one or two intervals, clipped to the view distance) replaces the planet's viewer-relative window; `ShouldCullBeyondHorizon` culls against the window's radii and adds the mountain term (`GetPlanetHorizonDistance`) | `ShellCoverage`, against brute force at the pole, 45°, the equator and a cube corner, view 40,000 and 100,000: 812 to 5,282 chunks meet the shell in range, 0 missing, 0 candidates outside the shell window; the window reaches 2 to 20 layers from the viewer's (the old window was capped at 16). `ColumnWindow`. `HorizonCull`: a viewer 2,000 up sees peaks to 89,064 uu (old buffer 38,186): 100 chunks past the old buffer kept, 213 past the horizon culled; at the datum and 500 under it, 57,378 (the old code: 6,500, and no cull below the datum) |
+| WM-P7 | Streaming tests on a real chunk manager (CPU generation, seam path, LOD on) | `ClosedSurface`: a 20,000 uu planet streamed at the north pole, 45° and the equator, chunk 32, voxel 50, three LOD bands (136 to 158 chunks: 7 to 9 at LOD 0, 51 to 61 at LOD 1, 76 to 90 at LOD 2): no open edge but at the loaded region's edge (298 to 331), in T-junctions (0 to 10) and **G17**'s gaps at mixed-LOD face seams (5 to 6 a run, below); 0 other holes. `CollisionWindingMidLatitude`: chunk (73, 0, 73) at 45°: 1,734 of 1,734 faces wound outward, in the physics order and in the body |
+| WM-P8 | Live checks and benches (below) | — |
+
+Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter` on the PR code: **295 of 295** (280 before plus the 15), 12 GPU tests
+skipping under `-nullrhi`. In-editor (real RHI) the same three suites: **295 of 295**, the GPU tests running (the GPU vs
+CPU generation parity tests, `Meshing.MarchingCubes.CPUvsGPU`, `Generation.GPUNoiseGeneratorAsync` and the rest); only
+the two retired GPU DC interior tests skip, as before.
+
+**The exit check: the survey.** Nine survey cameras over `Review_Planet` (12,000 uu up and 20,000 back, looking 30° down,
+unless noted), before on the base build and after (the after shots in a larger PIE viewport):
+
+| View | Before | After |
+|------|--------|-------|
+| North pole | Sand and gravel (the underwater materials: the cap lies under `WaterRadius`) in concentric arcs around the pole, a stepped silhouette (the old window cut the surface at chunk layers), no sea drawn | An island and its coast in the sea sphere, grass, dirt and sand by biome |
+| South pole, camera mirrored | Too dark to read (below); the silhouette repeats the north pole's | Different terrain (a coast and a peninsula); dark, as the sun is fixed overhead and the south pole is on the planet's night side (no planet-aware sky until SP-G8) |
+| 45° | Snow everywhere, a stepped silhouette, no sea | A peninsula with forest, coasts at sea level, a second coast across the bay |
+| 45°, low (3,000 up) | Snow | Coast, beach and forest close up |
+| Equator | Snow, a stepped silhouette | Hills, two bays, beaches, grass and dirt |
+| −45°, longitude 120 | Snow | Grass and rock on a ridge, the sea on one side |
+| Cube-face edge (equator, longitude 45) | Snow | Grass and dirt, a pond; no step or seam along the face edge |
+| Cube corner (35.26°, 45) | Snow | Two coasts across a strait; no seam at the corner |
+| Equator, 30,000 up looking down | Snow to the loaded region's edge | The loaded region's land and sea; past the view distance the translucent sea shows the sky behind it (no far terrain; see below) |
+
+The terrain is continuous across every face edge and corner surveyed, the hemispheres differ, materials follow altitude
+and biome, and the sea's coasts sit where the terrain crosses `WaterRadius` at every latitude. **Exit check met.**
+
+**SP-D4 at 45°, live** (pawn 600 uu over the surface at latitude 45, longitude 3, after the region streamed: 1,283
+chunks loaded, 527 meshed): crossfades and first-appearance fades both run and none restarts (crossfades: interior 184,
+seam bucket 33,525, 0 mid-fade restarts each; appearance fades: interior 7,886, seam bucket 8,062, 0 active when
+settled). Radial line traces through the surface at the pawn and 1,000 to 8,000 uu around it hit the terrain's collision
+from above with normals 0.83 to 1.00 along the outward radius. Three physics spheres (radius 100) dropped 1,500 uu over
+the surface at longitudes 0, 3 and 6 land and roll down the 53° slope (gravity is world −Z until SP-F1) with their
+centres 100 uu over the surface, the sphere's radius, at every sample. Seam closure at 45° is `ClosedSurface`'s.
+
+**Benches.** The control (`DemoSmoothWorldConfig`) flies 150,000 uu along +X at z 7,200
+(`start=-250000:0:7200 dir=1:0`). The planet flies 7,200 over its datum (radius 257,200) on circles of latitude, using
+the bench's `orbit` route: the equator (a great circle), 45° and 80° (a circle of radius 44,663 uu, a tight turn), 150,000 uu
+each. Both run at 1,500 and 3,000 uu/s. PIE ran in the worktree editor's level viewport (3440×1408) with background
+throttling off, `vox.DeleteSave`, the clock pinned at noon, the player controller's move and look input blocked, and
+`warmup=120`. Everything ran as one batch on one build, with a throwaway PIE first (G14). That build carried a temporary
+`voxel.Temp.PlanetLegacyWindow` cvar, which restored the planet's old viewer-relative window and horizon (removed before
+the PR). The control generates on the GPU and the planet on the CPU (SP-B3). So two more pairs ran after the batch in the
+same editor session, on a CPU-generation copy of the control (`bUseGPUGeneration` off, not committed): the straight
+route, and the 80° circle's radius at z 7,200. JSON reports in [Research/Bench/SP1/](Research/Bench/SP1/) (`p1b_*` the batch,
+`p1bs_*` settled, `p1c_*` and `p1d_*` the CPU control).
+
+| Route | Run | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | Gen queue mean / peak | Loaded mean / peak | Peak voxel MB | Systems MB | LOD re-meshes | Generated / s, queue full | Audit | JSON |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Straight, v1500 | Control (GPU) | 16.7 / 24.1 / 31.3 | 6.7 | 0.17 | 10 / 89 | 1,140 / 1,224 | 823 | 1,014 | 1,860 | 113 | 0 | `20261016_202841_p1b_C_fly_v1500` |
+| Straight, v1500 | Control (CPU) | 16.7 / 21.5 / 26.1 | 4.7 | 1.37 | 32 / 89 | 1,113 / 1,168 | 326 | 525 | 1,861 | 32 | 0 | `20261016_205729_p1c_K_fly_v1500` |
+| Equator, v1500 | **Planet** | 16.7 / 19.2 / 23.3 | 4.3 | 1.77 | 30 / 90 | 1,077 / 1,154 | 308 | 550 | 1,462 | 29 | 0 | `20261016_203111_p1b_P_eq_v1500` |
+| 45°, v1500 | **Planet** | 16.7 / 20.1 / 24.1 | 4.4 | 1.24 | 38 / 99 | 1,153 / 1,234 | 323 | 628 | 1,653 | 30 | 0 | `20261016_203347_p1b_P_45_v1500` |
+| 80°, v1500 | **Planet** | 16.7 / 22.4 / 26.9 | 4.9 | 2.66 | 32 / 95 | 1,095 / 1,164 | 305 | 621 | 1,633 | 29 | 0 | `20261016_203621_p1b_P_80_v1500` |
+| Circle r 44,663, v1500 | Control (CPU) | 16.7 / 24.0 / 30.4 | 5.6 | 4.68 | 75 / 160 | 1,043 / 1,186 | 332 | 601 | 2,040 | 27 | 0 | `20261016_210255_p1d_K_orb44_v1500` |
+| Straight, v3000 | Control (GPU) | 17.6 / 27.7 / 32.6 | 7.7 | 0.42 | 30 / 92 | 1,118 / 1,180 | 799 | 991 | 1,861 | 84 | 0 | `20261016_203741_p1b_C_fly_v3000` |
+| Straight, v3000 | Control (CPU) | 16.7 / 23.9 / 28.7 | 5.5 | 24.57 | 487 / 752 | 668 / 1,140 | 328 | 571 | 1,860 | 30 | 0 | `20261016_205938_p1c_K_fly_v3000` |
+| Equator, v3000 | **Planet** | 16.7 / 22.5 / 26.7 | 4.9 | 20.09 | 388 / 610 | 724 / 1,154 | 319 | 628 | 1,462 | 29 | 0 | `20261016_203939_p1b_P_eq_v3000` |
+| Equator, v3000 | Planet, old window | 16.7 / 23.3 / 28.0 | 6.0 | 28.29 | 578 / 865 | 789 / 1,368 | 360 | 610 | 1,764 | 30 | 0 | `20261016_204612_p1b_L_eq_v3000` |
+| 45°, v3000 | **Planet** | 16.7 / 23.6 / 27.7 | 5.2 | 24.69 | 474 / 736 | 725 / 1,234 | 330 | 672 | 1,653 | 29 | 0 | `20261016_204145_p1b_P_45_v3000` |
+| 45°, v3000 | Planet, old window | 16.9 / 24.6 / 29.2 | 6.1 | 30.57 | 646 / 920 | 721 / 1,374 | 333 | 671 | 1,794 | 28 | 0 | `20261016_204829_p1b_L_45_v3000` |
+| 80°, v3000 | **Planet** | 16.8 / 27.5 / 33.8 | 6.5 | 24.35 | 464 / 723 | 673 / 1,165 | 292 | 654 | 1,633 | 26 | 0 | `20261016_204354_p1b_P_80_v3000` |
+| Circle r 44,663, v3000 | Control (CPU) | 16.8 / 26.7 / 32.4 | 6.3 | 29.05 | 519 / 866 | 613 / 1,181 | 311 | 616 | 1,974 | 26 | 0 | `20261016_210506_p1d_K_orb44_v3000` |
+
+"Generated / s, queue full" is the chunks generated per second while the generation queue held 50 or more (8 jobs in flight
+in every run).
+
+**Settled at the spawn** (the north pole for the planet; `warmup=180`, then 75 s, then a 30 s settled run):
+
+| Run | Loaded | Resident / uniform / compressed | Resident voxel MB | Systems MB (voxel, render GPU, collision, scatter) | Audit |
+|---|---|---|---|---|---|
+| Control (GPU) | 979 | 107 / 47 / 825 | 128 | 356 (139, 23, 103, 90) | 0 |
+| **Planet** | 1,007 | 96 / 200 / 711 | 113 | 383 (133, 19, 91, 93) | 0 |
+| Planet, old window | 1,292 | 112 / 311 / 869 | 131 | 418 (160, 19, 104, 93) | 0 |
+
+Against the GPU control and §1's thresholds:
+
+- **Catch-up: missed on every route.** At v1500 the planet takes 1.24 to 2.66 s against 0.17 s, and at v3000 20.1 to 24.7 s
+  against 0.42 s. It passes the rest: frame P95 (19.2 to 27.5 ms against 24.1 / 27.7; 80° at v3000 is level with the
+  control), manager P95 (4.3 to 6.5 against 6.7 / 7.7), peak loaded chunks (at most +5%) and memory (peak voxel MB 292
+  to 330 against 799 to 823).
+- **The miss is CPU generation, not the planet.** With its queue full the planet generates 26 to 30 chunks a second, the
+  same as the control on the CPU (26 to 32), while the control's GPU generator manages 84 to 113. The control on the CPU
+  misses the same way: 1.37 s and 24.6 s. Phase 2's GPU planet (SP-B4) is the fix; nothing in Phase 1 tunes it.
+- **Against the CPU control, the planet is within §1's thresholds on the equator and at 45°**, with one exception:
+  catch-up on the equator at v1500 is 1.77 s against 1.37 s (+29%, 0.4 s, a miss by 4 points). 45° catches up faster at
+  v1500 (1.24 s) and level at v3000 (24.7 s against 24.6), and the equator faster at v3000 (20.1 s). Frame P95 and
+  manager P95 are below the CPU control's at both speeds. Peak loaded chunks are within +8% and systems MB +5 to +20%,
+  both within +25%.
+- **The 80° circle is the turn, not the latitude.** Against the straight CPU control, 80° at v3000 misses frame P95 by
+  +15% and manager P95 by +18%, and at v1500 catch-up (2.66 s against 1.37). The CPU control on a circle of the same radius does as badly or worse: frame P95 26.7 ms,
+  manager P95 6.3 ms, catch-up 29.1 s, and at v1500 a catch-up of 4.68 s against the planet's 2.66. A tight orbit turns
+  the loaded region round quickly. Against that circle the planet's 80° runs are within +3% on frame and manager P95,
+  and catch up faster.
+- **The shell window against the old one** (the A/B, v3000): the old viewer-relative window queues more (peak 865 to 920
+  against 610 to 736) and catches up 6 to 8 s later. It loads up to 19% more chunks at peak (1,368 to 1,374 against 1,154
+  to 1,234), re-meshes 9 to 21% more for LOD, and holds 1,292 chunks settled at the pole against 1,007 (418 MB against
+  383). The old window took the viewer's layer ± up to 16 in every column, so it loaded air and core the shell does not
+  meet. The shell window loads more layers where the surface needs them: 16 layers across the equator (−8 to 7), against
+  the control's 7.
+- **D3: met.** Systems memory peaks at 550 to 672 MB while streaming (at most 1.5 GB) and is 383 MB settled (at most
+  0.6 GB). The residency audit finds 0 on every run.
+
+**G17 (new, §14.1): small holes in DC face seams between chunks of different LOD.** `ClosedSurface` found pentagonal
+gaps (two open-edge loops of five or six edges, a few voxels across) where a face seam joins chunks at LOD 1 and 2:
+north pole (1,1,12)|(2,1,12), 45° (7,6,7)|(8,6,7), equator (12,−1,−2)|(12,−1,−3), 5 or 6 edges each, and with two
+LOD bands at 0|1 (four edges at latitude 45, longitude 45). Not planet-specific: an InfinitePlane chunk manager with
+chunk 16, voxel 100 and three bands has the same, 5 edges at a 1|2 face seam. The seam is ready and clean and its LOD pair
+current when measured, so it is the face seam's geometry, not scheduling; MS1's mixed-LOD face seam unit tests cover 0|1,
+1|0 and 0|2 on flat and sloped binary solids only, not 1|2 or noise terrain. Not fixed here: the test reports G17 holes
+and fails on any other hole, so a fix makes it strict.
+
+**Things to know.**
+
+- A planet save from before Phase 1 is refused and kept (`PlanetGeneration=2` in the fingerprint); heightmap saves are
+  unaffected.
+- The surface point type is `FVoxelTerrainSurfacePoint` (VoxelCore); `FVoxelSurfacePoint` is the scatter's.
+- Physics bodies on the planet fall along world −Z until SP-F1: away from the poles they roll toward the equator, and
+  fall through once they leave the collision radius around the viewer (20,000 uu here).
+- In a survey the pawn falls out of the world when the camera streams elsewhere (the pole's chunks unload), and the
+  respawn resets the view target: put the pawn in flying mode before each shot.
+- Faint lines along chunk-layer boundaries in the survey are older than Phase 1: the plane shows them on its slopes
+  (M6's island shots).
+
+**Left for later.**
+
+- **GPU** (Phase 2): the GPU generator's planet branch, parity at LOD 0/1/2, and the underground post-pass along local
+  down in `VoxelPostPasses.usf`; planets keep generating on the CPU (SP-B3's warning).
+- **The shell's cost.** The shell window streams every chunk the shell meets within the view distance, ±6,500 here: about
+  1,007 settled at the spawn against the control's 979 (benches). A band around the analytic surface
+  (SP-C5, P2) would hold fewer.
+- **What the planet does not draw yet:** past the view distance the loaded region ends against the translucent sea
+  sphere (the sky shows through it from high up); no far terrain or atmosphere (SP-C5, SP-G8).
+- Walking (Phase 3): gravity toward the centre, movement, spawn (`GetPlanetSpawnPosition` still ignores displacement),
+  KillZ; the pawn lands in the sea at the north pole now that the terrain is right.
+- POIs still sit inside the planet (SP-G5, Phase 5); scatter, map, navigation and NPCs still assume +Z (Phase 4).
+- `GetTerrainHeightAt(X, Y)` on a planet is still the legacy equatorial query (SP-A3, Phase 4).
+- G17 (above): proposed as its own session.
+- **The sea sphere's light and dark halves.** Where a view crosses the sphere's cap twice (in and out, past the loaded
+  terrain: the survey's 45° and south-pole views), part of the sea reads lighter and part darker, split along one grid
+  row (near y = 0 there). The water material (`MI_Ocean`) is two-sided translucent and the sphere is one unsorted mesh, so
+  in part of the view its far side blends over its near side. The sun (straight down) and shadows (the sphere casts none)
+  are not involved, and world-space UVs and tangents on the sphere did not change it. Cosmetic, on the test actor's
+  stand-in sea; SP-E2 (Phase 3) replaces it.

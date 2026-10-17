@@ -365,11 +365,13 @@ Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
 
 ### Overview
 Radial terrain on a spherical surface, on the same Cartesian chunk grid as the other modes, centred on the
-planet. **Status (2026-10-14): a prototype.** It generates on the CPU only, the terrain is mirrored across the
-equator, and the game systems assume +Z is up. What exists, what is wrong and what a playable planet needs are
-in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md); the work is scheduled in
-[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §14.4. A test config and map live in the parent
-project at `/Game/PluginTesting/Planet`.
+planet. **Status (2026-10-16): a correct planet on the CPU** (spherical Phase 1, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md)
+§15): seamless terrain sampled by 3D direction, continentalness, materials by altitude, caves, underground and water
+flags along local up, and a streaming window that covers the shell at every latitude. It still generates on the CPU
+only (GPU is Phase 2), and the game systems assume +Z is up (gravity, movement, scatter, map, navigation: Phases 3
+and 4). What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
+lives in the parent project: `/Game/PluginTesting/Planet` (`PlanetTest`, `PlanetWorldConfig`) and
+`/Game/PluginTesting/Review/Review_Planet` (water on).
 
 ### Configuration (UVoxelWorldConfiguration)
 ```cpp
@@ -378,9 +380,9 @@ EWorldMode WorldMode = EWorldMode::SphericalPlanet;
 float WorldRadius = 100000.0f;           // Planet base radius
 
 // Planet Parameters
-float PlanetMaxTerrainHeight = 5000.0f;  // Shell above the radius: must cover BaseHeight + PlanetHeightScale / 2
-float PlanetMaxTerrainDepth = 2000.0f;   // Shell below the radius: must cover PlanetHeightScale / 2 - BaseHeight
-float PlanetHeightScale = 5000.0f;       // Peak-to-trough terrain amplitude
+float PlanetMaxTerrainHeight = 5000.0f;  // Shell above the radius: must cover the highest surface (below)
+float PlanetMaxTerrainDepth = 2000.0f;   // Shell below the radius: must cover the deepest surface (below)
+float PlanetHeightScale = 5000.0f;       // Peak-to-trough terrain amplitude (before continentalness)
 float BaseHeight = 0.0f;                 // Radial offset of the whole surface (shown for planets since SP-A5)
 
 // Spawn Configuration
@@ -390,27 +392,37 @@ float PlanetSpawnAltitude = 500.0f;      // Height above surface
 
 ### Implementation (FSphericalPlanetWorldMode)
 
-What the code does today (CPU generation, `GenerateChunkSphericalPlanet`):
+One surface function, `FSphericalPlanetWorldMode::SampleRadialDisplacement`, serves generation
+(`GenerateChunkSphericalPlanet`), the analytic surface (`GetSurfacePoint`) and the configuration's shell check:
 
 ```cpp
-// FSphericalPlanetWorldMode::SampleSphericalNoise: the direction's X and Y only, scaled by a fixed 10,000.
-float Noise = FInfinitePlaneWorldMode::SampleTerrainNoise2D(Direction.X * 10000, Direction.Y * 10000, NoiseParams);
+// The 2D fields are sampled at the point on the datum sphere, relative to the centre (GetNoiseSamplePoint):
+// a feature is ~1 / Frequency uu across on any radius, and a 3D field has no seam and no mirror (SP-B1).
+FVector P = Direction * PlanetRadius;
+float Noise = FBM3D(P, NoiseParams);
+// Continentalness, the same field and curves as the heightmap modes (SP-B5).
+Effective = ComputeEffectiveTerrainParamsAt(P, ...);    // BaseHeight + offset, PlanetHeightScale * multiplier
+float Displacement = Effective.BaseHeight + Noise * Effective.HeightScale * 0.5;
 
-// FSphericalPlanetWorldMode::GetDensityAt: radial SDF, positive inside.
+// The signed distance generation writes (ShellSignedDistance): radial, positive inside.
 float Dist = |WorldPos - PlanetCenter|;                 // PlanetCenter = WorldOrigin
 if (Dist > OuterRadius + 1000) return -1000;            // quick reject: air above the shell
 if (Dist < InnerRadius - 1000) return 1000;             // quick reject: core below the shell
-float TerrainRadius = WorldRadius + BaseHeight + Noise * PlanetHeightScale * 0.5;
-return TerrainRadius - Dist;
+return (PlanetRadius + Displacement) - Dist;
 ```
 
-Known defects, all listed with their fixes in the requirements doc (§1): `Direction.Z` is never sampled, so the
-northern and southern hemispheres are mirror images and features stretch north-south near the equator, and the
-fixed 10,000 ties feature size to the radius (SP-B1); height-material rules read the radius as a height, so the
-default rules turn every surface to snow (SP-B2); `GetTerrainHeightAt(X, Y)` returns a radius for the equatorial
-direction (X, Y, 0), not a Z (SP-A1, SP-A3). Terrain outside the shell `[WorldRadius - PlanetMaxTerrainDepth,
-WorldRadius + PlanetMaxTerrainHeight]` is not streamed and is cut off by the quick reject;
-`UVoxelWorldConfiguration::GetSettingsWarnings` reports a shell that does not cover the amplitude (SP-A5).
+Per voxel, generation also: samples temperature and moisture at the same datum-sphere point; applies height-material
+rules to the voxel's altitude above the datum (SP-B2); flattens caves along local up (`ScaleAltitude`: the altitude
+times the layer's `VerticalScale`) and suppresses them under the sea (`WaterRadius`, SP-B6). The post-passes run along
+local down: underground classification on digital lines along the chunk centre's down (SP-B7), and the water fill by
+the sea sphere (`ApplyRadialWaterFillPass`, `FVoxelSeaSurface`, SP-B8); the chunk manager's cross-chunk water and the
+edit-time propagation test the same sphere. `GetTerrainHeightAt(X, Y)` is still a legacy query that returns a radius
+for the equatorial direction (X, Y, 0) (SP-A3, Phase 4). Terrain outside the shell `[WorldRadius - PlanetMaxTerrainDepth,
+WorldRadius + PlanetMaxTerrainHeight]` is cut off; `UVoxelWorldConfiguration::GetSettingsWarnings` reports a shell that
+does not cover `BaseHeight ± PlanetHeightScale / 2` with continentalness's extremes (`GetDisplacementBounds`).
+
+The surface coordinate (`WorldToSurface` / `SurfaceToWorld`) is a cube sphere with the tangent warp,
+`u = (4/π)·atan(g)` per axis on each face: equal UV cells cover areas within 1.38× of each other.
 
 ### Spawn Position
 ```cpp
@@ -428,12 +440,14 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 }
 ```
 
-### LOD Culling
-Three types of culling are applied:
-
-1. **Inner Shell Culling**: Chunks closer to center than `WorldRadius - MaxTerrainDepth` (inside planet core)
-2. **Outer Shell Culling**: Chunks farther than `WorldRadius + MaxTerrainHeight` (empty space)
-3. **Horizon Culling**: Chunks beyond geometric horizon `√(2Rh + h²)` where R = radius, h = viewer altitude
+### Streaming Window and Culling
+- **The shell window** (`FDistanceBandLODStrategy::GetPlanetShellWindow`, SP-C1): each chunk column streams the layers
+  whose chunks meet the shell widened by half a chunk, `[R - MaxTerrainDepth - ½W, R + MaxTerrainHeight + ½W]`,
+  within the view distance: one interval, or two when the column passes inside the inner radius. It covers the
+  shell at every latitude; the window it replaced was the viewer's layer ± up to 16.
+- **Shell culling**: chunks wholly inside the window's inner radius (core) or outside its outer radius (space).
+- **Horizon culling** (SP-C2): chunks farther than `√(2Rh + h²) + √(2RH + H²)` (h the viewer's altitude, H =
+  `MaxTerrainHeight`), so peaks past the viewer's own horizon still load; none for a viewer inside the planet.
 
 ### Use Cases
 - Planetary exploration games
@@ -444,16 +458,17 @@ Three types of culling are applied:
 ### Current Limitations
 - **CPU generation only.** The GPU generator has no planet branch, so `UVoxelWorldConfiguration::ShouldUseGPUGeneration()`
   is false for planets and the chunk manager logs a warning when `bUseGPUGeneration` is on (SP-B3; SP-B4 adds the
-  GPU planet)
-- Mirrored, radius-scaled noise and all-snow materials (above); no tests beyond the config checks
-- Every surface consumer (scatter, PCG, map, navigation, POIs, NPCs, water, movement) assumes +Z is up
+  GPU planet, including the underground post-pass along local down)
+- Every surface consumer (scatter, PCG, map, navigation, POIs, NPCs, movement) assumes +Z is up
   (requirements doc, Appendix A); gravity toward the centre is not implemented
-- Water: generation compares against `WaterRadius`, every other consumer still reads the Z-plane `WaterLevel`
-  (SP-E1); `GetSettingsWarnings` flags water on a planet
+- Water: the voxel water flags follow `WaterRadius` (generation, cross-chunk and edit-time propagation); scatter,
+  navigation, NPC spawning and swimming still read the Z-plane `WaterLevel` (SP-E1), and `GetSettingsWarnings` flags
+  water on a planet. The per-chunk water tiles are Z-plane tiles and are off on planets; the test actor draws the sea
+  as a cube-sphere mesh at `WaterRadius` until SP-E2. That mesh is one unsorted two-sided translucent section, so
+  where a view crosses its cap twice the far side blends over the near side in part of the view (a light/dark split
+  along a grid row; cosmetic)
 - Designed for surface exploration; orbital viewing would need an octree or cube-sphere quadtree LOD (SD5)
-- The world-mode API has a planet side since M2 (2026-10-15): the shell as bounds, radial up, altitude above
-  `PlanetRadius`, and a gnomonic cube-sphere surface coordinate that round-trips. Nothing consumes it on a planet yet;
-  spherical Phase 1 moves the 2D systems onto it and may change the cube warp
+- No 2D system keys on the surface coordinate yet (map tiles, navigation, POI cells, explored tiles: Phase 4)
 
 ---
 
