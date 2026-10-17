@@ -16,6 +16,7 @@
 #include "VoxelTerrainConditioning.h"
 #include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
 #include "VoxelWorldModeFactory.h"
 #include "VoxelEditManager.h"
 #include "EngineUtils.h"
@@ -297,6 +298,7 @@ void UVoxelMapSubsystem::Deinitialize()
 	OverlayAwaitingTiles.Empty();
 	OverlayRebuildTiles.Empty();
 	TileAnalyticRange.Empty();
+	PlanetTileEditedChunks.Empty();
 
 	UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem deinitialized"));
 	Super::Deinitialize();
@@ -407,6 +409,17 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	// checked now.
 	CachedWorldBounds = CachedWorldMode->GetWorldBounds();
 
+	// A planet's tiles are cells of the cube-sphere grid, about a chunk across (spherical Phase 4, WM-SY8).
+	if (CachedWorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
+	{
+		const FSphericalPlanetParams& Planet = static_cast<const FSphericalPlanetWorldMode&>(*CachedWorldMode).GetPlanetParams();
+		CachedPlanetCenter = Planet.PlanetCenter;
+		CachedPlanetRadius = Planet.PlanetRadius;
+		PlanetGrid = FVoxelCubeSphereGrid(FVoxelCubeSphereGrid::CellsPerEdgeFor(CachedPlanetRadius, static_cast<double>(CachedChunkSize) * CachedVoxelSize));
+		CachedSea = FVoxelSeaSurface::FromConfig(*Config);
+		CachedWorldMode->GetAltitudeBounds(CachedAltitudeMin, CachedAltitudeMax);
+	}
+
 	bCacheResolved = true;
 	ApplyTileBudgets();
 	PruneExploredOutsideWorld();
@@ -427,16 +440,25 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 			ChunkEditedHandle = EditManager->OnChunkEdited.AddUObject(this, &UVoxelMapSubsystem::HandleChunkEdited);
 			TArray<FIntVector> EditedChunks;
 			EditManager->GetEditedChunkCoords(EditedChunks);
+			TArray<FIntPoint> ChunkTiles;
 			for (const FIntVector& Coord : EditedChunks)
 			{
 				RecordChunkEdits(Coord);
-				MarkOverlayDirty(PackTileKey(FIntPoint(Coord.X, Coord.Y)));
+				ChunkTiles.Reset();
+				GetChunkTiles(Coord, ChunkTiles);
+				for (const FIntPoint& Tile : ChunkTiles)
+				{
+					MarkOverlayDirty(PackTileKey(Tile));
+				}
 			}
 		}
 	}
 
-	UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem: Resolved chunk manager. ChunkSize=%d, VoxelSize=%.0f"),
-		CachedChunkSize, CachedVoxelSize);
+	UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem: Resolved chunk manager. ChunkSize=%d, VoxelSize=%.0f%s"),
+		CachedChunkSize, CachedVoxelSize, PlanetGrid.IsValid()
+			? *FString::Printf(TEXT(", planet: %d tiles a face edge (%lld tiles, about %.0f uu each)"), PlanetGrid.GetCellsPerEdge(),
+				PlanetGrid.GetNumCells(), GetTileWorldSize())
+			: TEXT(""));
 
 	return true;
 }
@@ -506,6 +528,26 @@ int32 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 	{
 		return 0;
 	}
+	if (PlanetGrid.IsValid())
+	{
+		// A planet: every tile of the atlas.
+		int32 PlanetCount = 0;
+		for (int32 Y = 0; Y < PlanetGrid.GetCellsPerEdge(); ++Y)
+		{
+			for (int32 X = 0; X < 6 * PlanetGrid.GetCellsPerEdge(); ++X)
+			{
+				const uint64 Key = PackTileKey(FIntPoint(X, Y));
+				ExploredTiles.Add(Key);
+				++PlanetCount;
+				if (!TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
+				{
+					TileQueue.Request(Key, /*bInvalidate*/ false);
+				}
+			}
+		}
+		LaunchWaitingTiles();
+		return PlanetCount;
+	}
 	FBox2D Area = CachedWorldBounds.IsBounded() ? CachedWorldBounds.GetBox2D()
 		: FBox2D(FVector2D(Center.X - Radius, Center.Y - Radius), FVector2D(Center.X + Radius, Center.Y + Radius));
 	const FIntPoint Lo = WorldToTileCoord(FVector(Area.Min.X, Area.Min.Y, 0.0));
@@ -540,6 +582,11 @@ bool UVoxelMapSubsystem::IsTileExplored(FIntPoint TileCoord) const
 
 bool UVoxelMapSubsystem::IsTileInsideWorld(FIntPoint TileCoord) const
 {
+	if (PlanetGrid.IsValid())
+	{
+		// A planet: the atlas (spherical Phase 4).
+		return PlanetGrid.IsValidCell(TileCoord);
+	}
 	if (!CachedWorldBounds.IsBounded())
 	{
 		return true;
@@ -686,6 +733,10 @@ int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Coun
 
 FIntPoint UVoxelMapSubsystem::WorldToTileCoord(const FVector& WorldPos) const
 {
+	if (PlanetGrid.IsValid())
+	{
+		return PlanetGrid.CellOfDirection(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, CachedPlanetCenter));
+	}
 	const float ChunkWorldSize = CachedChunkSize * CachedVoxelSize;
 	if (ChunkWorldSize <= 0.f)
 	{
@@ -700,6 +751,13 @@ FIntPoint UVoxelMapSubsystem::WorldToTileCoord(const FVector& WorldPos) const
 
 FVector UVoxelMapSubsystem::TileCoordToWorld(FIntPoint TileCoord) const
 {
+	if (PlanetGrid.IsValid())
+	{
+		// A planet: the tile's (U, V) = (0, 0) corner on the datum sphere.
+		return PlanetGrid.IsValidCell(TileCoord)
+			? CachedPlanetCenter + PlanetGrid.DirectionAt(TileCoord, 0.0, 0.0) * CachedPlanetRadius
+			: CachedPlanetCenter;
+	}
 	const float ChunkWorldSize = CachedChunkSize * CachedVoxelSize;
 	return FVector(
 		TileCoord.X * ChunkWorldSize + CachedWorldOrigin.X,
@@ -710,7 +768,50 @@ FVector UVoxelMapSubsystem::TileCoordToWorld(FIntPoint TileCoord) const
 
 float UVoxelMapSubsystem::GetTileWorldSize() const
 {
+	if (PlanetGrid.IsValid())
+	{
+		// Along a face's centre lines on the datum sphere (the tangent warp keeps the rest within about 1.2x).
+		return static_cast<float>(0.5 * UE_DOUBLE_PI * CachedPlanetRadius / PlanetGrid.GetCellsPerEdge());
+	}
 	return CachedChunkSize * CachedVoxelSize;
+}
+
+bool UVoxelMapSubsystem::PlanetDirectionToTilePixel(const FVector& Direction, FIntPoint& OutTile, int32& OutPX, int32& OutPY) const
+{
+	if (!PlanetGrid.IsValid())
+	{
+		return false;
+	}
+	FVector2D Fraction;
+	OutTile = PlanetGrid.CellOfDirection(Direction, &Fraction);
+	const int32 Res = FMath::Max(1, CachedChunkSize);
+	OutPX = FMath::Clamp(FMath::FloorToInt32(Fraction.X * Res), 0, Res - 1);
+	OutPY = FMath::Clamp(FMath::FloorToInt32(Fraction.Y * Res), 0, Res - 1);
+	return true;
+}
+
+FIntPoint UVoxelMapSubsystem::GetNeighbourTile(FIntPoint TileCoord, int32 DX, int32 DY) const
+{
+	return PlanetGrid.IsValid() ? PlanetGrid.Neighbour(TileCoord, DX, DY) : TileCoord + FIntPoint(DX, DY);
+}
+
+void UVoxelMapSubsystem::GetChunkTiles(const FIntVector& ChunkCoord, TArray<FIntPoint>& OutTiles) const
+{
+	if (!PlanetGrid.IsValid())
+	{
+		OutTiles.Add(FIntPoint(ChunkCoord.X, ChunkCoord.Y));
+		return;
+	}
+	// The cells the chunk's corners and centre span from the planet centre.
+	const double ChunkWorldSize = static_cast<double>(CachedChunkSize) * CachedVoxelSize;
+	TArray<FVector, TInlineAllocator<9>> Directions;
+	for (int32 Corner = 0; Corner < 9; ++Corner)
+	{
+		const FVector Offset = Corner < 8 ? FVector(Corner & 1, (Corner >> 1) & 1, (Corner >> 2) & 1) : FVector(0.5);
+		Directions.Add(FSphericalPlanetWorldMode::GetDirectionFromCenter(
+			CachedWorldOrigin + (FVector(ChunkCoord) + Offset) * ChunkWorldSize, CachedPlanetCenter));
+	}
+	PlanetGrid.GatherSpanned(Directions, OutTiles);
 }
 
 // ---------------------------------------------------------------------------
@@ -727,6 +828,28 @@ void UVoxelMapSubsystem::RequestTilesInRadius(const FVector& WorldPos, float Rad
 	const float ChunkWorldSize = CachedChunkSize * CachedVoxelSize;
 	if (ChunkWorldSize <= 0.f)
 	{
+		return;
+	}
+
+	if (PlanetGrid.IsValid())
+	{
+		// A planet: the tiles whose centres lie within the radius (plus a tile) along the surface, the hemispheres apart.
+		TArray<FIntPoint> Tiles;
+		const double Angle = (Radius + GetTileWorldSize()) / FMath::Max(CachedPlanetRadius, 1.0);
+		PlanetGrid.GatherWithinAngle(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, CachedPlanetCenter), Angle, 16384, Tiles);
+		for (const FIntPoint& Tile : Tiles)
+		{
+			const uint64 Key = PackTileKey(Tile);
+			ExploredTiles.Add(Key);
+			if (!TileStore.HasDetail(Key))
+			{
+				DetailWanted.Add(Key);
+				if (!TileQueue.IsQueued(Key))
+				{
+					QueueTileGeneration(Tile);
+				}
+			}
+		}
 		return;
 	}
 
@@ -785,6 +908,31 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 				QueueTileGeneration(UnpackTileKey(ExploredKey));
 			}
 		}
+	}
+
+	if (PlanetGrid.IsValid())
+	{
+		// A planet: the tiles the chunk spans (spherical Phase 4), each explored with its detail image.
+		TArray<FIntPoint> Tiles;
+		GetChunkTiles(ChunkCoord, Tiles);
+		for (const FIntPoint& Tile : Tiles)
+		{
+			const uint64 TileKey = PackTileKey(Tile);
+			ExploredTiles.Add(TileKey);
+			if (!TileStore.HasDetail(TileKey))
+			{
+				DetailWanted.Add(TileKey);
+				if (!TileQueue.IsQueued(TileKey))
+				{
+					QueueTileGeneration(Tile);
+				}
+			}
+			if (OverlayAwaitingTiles.Contains(TileKey))
+			{
+				MarkOverlayDirty(TileKey);
+			}
+		}
+		return;
 	}
 
 	// Mark as explored (chunks that generate are in the player's vicinity), inside the world only: an island also
@@ -1001,7 +1149,8 @@ int32 UVoxelMapSubsystem::ImportEditOverlays(const FString& Encoded)
 	for (FVoxelMapTileOverlay& Entry : Tiles)
 	{
 		const bool bResolutionMatches = !bCacheResolved || Entry.Overlay.Resolution == CachedChunkSize;
-		if (Entry.Overlay.IsEmpty() || !bResolutionMatches)
+		const bool bKindMatches = !bCacheResolved || Entry.Overlay.bAltitudeHeights == PlanetGrid.IsValid();
+		if (Entry.Overlay.IsEmpty() || !bResolutionMatches || !bKindMatches)
 		{
 			continue;
 		}
@@ -1031,6 +1180,10 @@ void UVoxelMapSubsystem::RedrawAllTiles(bool bRebuildOverlays)
 	if (bRebuildOverlays)
 	{
 		for (const TPair<uint64, TArray<int32>>& Pair : TileEditedChunkZ)
+		{
+			MarkOverlayDirty(Pair.Key);
+		}
+		for (const TPair<uint64, TArray<FIntVector>>& Pair : PlanetTileEditedChunks)
 		{
 			MarkOverlayDirty(Pair.Key);
 		}
@@ -1079,7 +1232,7 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 		TileStore.NumDetail(), TileStore.GetDetailBytes() / MB, TileStore.GetDetailBudget() / MB,
 		TileStore.Num(), TileStore.GetOverviewBytes() / MB, TileStore.GetOverviewBudget() / MB,
 		TileStore.GetDetailEvictions(), TileStore.GetOverviewEvictions(),
-		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunkZ.Num(), OverlayDirtyTiles.Num(),
+		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunkZ.Num() + PlanetTileEditedChunks.Num(), OverlayDirtyTiles.Num(),
 		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num(),
 		CVarMapEditOverlay.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"));
 }
@@ -1091,9 +1244,63 @@ bool UVoxelMapSubsystem::CaptureMapImage(const FVector& Center, int32 RadiusTile
 	{
 		return false;
 	}
+	const int32 Size = (2 * RadiusTiles + 1) * Res;
+
+	if (PlanetGrid.IsValid())
+	{
+		// A planet (spherical Phase 4): the tangent plane at the position, north (toward the +Z pole) up and east right, a
+		// texel per tile pixel; each texel shows the explored tile pixel its ground point's direction falls in.
+		const FVector Up = FSphericalPlanetWorldMode::GetDirectionFromCenter(Center, CachedPlanetCenter);
+		FVector East, North;
+		FVoxelCubeSphere::GetTangentFrame(Up, East, North);
+		const double Texel = GetTileWorldSize() / Res;
+		const FVector Ground = CachedPlanetCenter + Up * CachedPlanetRadius;
+		const int32 Half = Size / 2;
+		TArray64<FColor> PlanetImage;
+		PlanetImage.Init(FColor(10, 10, 10, 255), static_cast<int64>(Size) * Size);
+		FIntPoint LastTile(MIN_int32, MIN_int32);
+		const FVoxelMapTile* LastCached = nullptr;
+		const FVoxelMapEditOverlay* LastOverlay = nullptr;
+		for (int32 Row = 0; Row < Size; ++Row)
+		{
+			for (int32 Column = 0; Column < Size; ++Column)
+			{
+				const FVector Point = Ground + East * ((Column - Half) * Texel) + North * ((Half - Row) * Texel);
+				FIntPoint Tile;
+				int32 PX = 0;
+				int32 PY = 0;
+				PlanetDirectionToTilePixel((Point - CachedPlanetCenter).GetSafeNormal(), Tile, PX, PY);
+				if (Tile != LastTile)
+				{
+					LastTile = Tile;
+					LastCached = IsTileExplored(Tile) ? TileStore.Find(PackTileKey(Tile), /*bTouch*/ false) : nullptr;
+					LastOverlay = bHighlightOverlay ? GetEditOverlay(Tile) : nullptr;
+				}
+				const int32 TileRes = LastCached ? LastCached->Resolution : 0;
+				if (!LastCached || TileRes <= 0 || LastCached->PixelData.Num() != TileRes * TileRes)
+				{
+					continue;
+				}
+				FColor Color = LastCached->PixelData[(PY * TileRes / Res) * TileRes + (PX * TileRes / Res)];
+				if (LastOverlay && LastOverlay->FindColumn(PX, PY) != INDEX_NONE)
+				{
+					Color = FColor((Color.R + 255) / 2, Color.G / 2, (Color.B + 255) / 2, 255);
+				}
+				PlanetImage[static_cast<int64>(Row) * Size + Column] = Color;
+			}
+		}
+		for (int32 D = -3; D <= 3; ++D)
+		{
+			PlanetImage[static_cast<int64>(Half) * Size + Half + D] = FColor::Red;
+			PlanetImage[static_cast<int64>(Half + D) * Size + Half] = FColor::Red;
+		}
+		TArray64<uint8> PlanetPng;
+		FImageUtils::PNGCompressImageArray(Size, Size, PlanetImage, PlanetPng);
+		return PlanetPng.Num() > 0 && FFileHelper::SaveArrayToFile(PlanetPng, *FilePath);
+	}
+
 	const FIntPoint CenterTile = WorldToTileCoord(Center);
 	const FIntPoint MinTile = CenterTile - FIntPoint(RadiusTiles, RadiusTiles);
-	const int32 Size = (2 * RadiusTiles + 1) * Res;
 
 	// Image rows run along world -X (north up), columns along world +Y (east right), like UVCWorldMapWidget.
 	TArray64<FColor> Image;
@@ -1155,12 +1362,41 @@ void UVoxelMapSubsystem::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSo
 	}
 	// Undo, redo, clear and load report a zero centre and radius: key on the chunk only.
 	RecordChunkEdits(ChunkCoord);
-	MarkOverlayDirty(PackTileKey(FIntPoint(ChunkCoord.X, ChunkCoord.Y)));
+	TArray<FIntPoint> Tiles;
+	GetChunkTiles(ChunkCoord, Tiles);
+	for (const FIntPoint& Tile : Tiles)
+	{
+		MarkOverlayDirty(PackTileKey(Tile));
+	}
 }
 
 void UVoxelMapSubsystem::RecordChunkEdits(const FIntVector& ChunkCoord)
 {
 	const UVoxelEditManager* EditManager = CachedEditManagerWeak.Get();
+	if (PlanetGrid.IsValid())
+	{
+		// A planet: the chunk on every tile it spans.
+		const bool bHasEdits = EditManager && EditManager->ChunkHasEdits(ChunkCoord);
+		TArray<FIntPoint> Tiles;
+		GetChunkTiles(ChunkCoord, Tiles);
+		for (const FIntPoint& Tile : Tiles)
+		{
+			const uint64 TileKey = PackTileKey(Tile);
+			if (bHasEdits)
+			{
+				PlanetTileEditedChunks.FindOrAdd(TileKey).AddUnique(ChunkCoord);
+			}
+			else if (TArray<FIntVector>* Chunks = PlanetTileEditedChunks.Find(TileKey))
+			{
+				Chunks->Remove(ChunkCoord);
+				if (Chunks->Num() == 0)
+				{
+					PlanetTileEditedChunks.Remove(TileKey);
+				}
+			}
+		}
+		return;
+	}
 	const uint64 Key = PackTileKey(FIntPoint(ChunkCoord.X, ChunkCoord.Y));
 	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
 	{
@@ -1250,6 +1486,43 @@ void UVoxelMapSubsystem::FlushOverlayRefresh()
 
 bool UVoxelMapSubsystem::CanRebuildOverlay(uint64 TileKey) const
 {
+	if (PlanetGrid.IsValid())
+	{
+		const TArray<FIntVector>* EditedChunks = PlanetTileEditedChunks.Find(TileKey);
+		if (!EditedChunks)
+		{
+			return true;
+		}
+		const UVoxelChunkManager* PlanetChunkMgr = CachedChunkManagerWeak.Get();
+		if (!PlanetChunkMgr)
+		{
+			return false;
+		}
+		// Edited chunks wholly more than a chunk below the tile's lowest analytic altitude cannot reach its surface.
+		const double ChunkWorldSize = static_cast<double>(CachedChunkSize) * CachedVoxelSize;
+		const FVector2f* Range = TileAnalyticRange.Find(TileKey);
+		for (const FIntVector& Coord : *EditedChunks)
+		{
+			if (Range)
+			{
+				double MaxRadius = 0.0;
+				for (int32 Corner = 0; Corner < 8; ++Corner)
+				{
+					const FVector Offset(Corner & 1, (Corner >> 1) & 1, (Corner >> 2) & 1);
+					MaxRadius = FMath::Max(MaxRadius, FVector::Dist(CachedWorldOrigin + (FVector(Coord) + Offset) * ChunkWorldSize, CachedPlanetCenter));
+				}
+				if (MaxRadius - CachedPlanetRadius < Range->X - ChunkWorldSize)
+				{
+					continue;
+				}
+			}
+			if (!PlanetChunkMgr->HasChunkVoxelData(Coord))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 	const TArray<int32>* EditedZs = TileEditedChunkZ.Find(TileKey);
 	if (!EditedZs)
 	{
@@ -1359,6 +1632,89 @@ TSharedPtr<FVoxelMapOverlayBuildInput> UVoxelMapSubsystem::GatherOverlayInput(FI
 	return Input;
 }
 
+TSharedPtr<FVoxelMapPlanetOverlayInput> UVoxelMapSubsystem::GatherPlanetOverlayInput(FIntPoint TileCoord) const
+{
+	UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get();
+	const UVoxelEditManager* EditManager = CachedEditManagerWeak.Get();
+	if (!ChunkMgr || !EditManager)
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<FVoxelMapPlanetOverlayInput> Input = MakeShared<FVoxelMapPlanetOverlayInput>();
+	const int32 CS = CachedChunkSize;
+	Input->ChunkSize = CS;
+	Input->VoxelSize = CachedVoxelSize;
+	Input->Origin = CachedWorldOrigin;
+	Input->Center = CachedPlanetCenter;
+	Input->PlanetRadius = CachedPlanetRadius;
+	Input->bUseWater = CachedSea.bEnabled && CachedSea.bRadial;
+	Input->WaterRadius = CachedSea.Radius;
+
+	const TArray<FIntVector>* EditedChunks = PlanetTileEditedChunks.Find(PackTileKey(TileCoord));
+	if (!EditedChunks)
+	{
+		return Input;
+	}
+	const int32 VolumeSize = CS * CS * CS;
+	auto Snapshot = [ChunkMgr, VolumeSize](const FIntVector& Coord) -> TSharedPtr<const TArray<FVoxelData>>
+	{
+		TSharedPtr<const TArray<FVoxelData>> Voxels = ChunkMgr->GetEditMergedSnapshot(Coord);
+		return (Voxels.IsValid() && Voxels->Num() == VolumeSize) ? Voxels : nullptr;
+	};
+
+	// The edited chunks: their shared edit-merged snapshot (if loaded) and which voxels carry an edit.
+	TSet<FIntVector> Listed;
+	for (const FIntVector& Coord : *EditedChunks)
+	{
+		FVoxelMapPlanetOverlayChunk& Chunk = Input->Chunks.AddDefaulted_GetRef();
+		Chunk.Coord = Coord;
+		Chunk.Voxels = Snapshot(Coord);
+		const FChunkEditLayer* Layer = EditManager->GetEditLayer(Coord);
+		if (Layer && !Layer->IsEmpty() && Layer->ChunkSize == CS)
+		{
+			TSharedPtr<TBitArray<>> Bits = MakeShared<TBitArray<>>(false, VolumeSize);
+			for (const TPair<int32, FVoxelEdit>& Edit : Layer->Edits)
+			{
+				if (Edit.Key >= 0 && Edit.Key < VolumeSize)
+				{
+					(*Bits)[Edit.Key] = true;
+				}
+			}
+			Chunk.EditedVoxels = Bits;
+		}
+		Listed.Add(Coord);
+	}
+
+	// Loaded unedited chunks around them: a pixel's line leaves an edited chunk through its neighbours. Anything else reads
+	// as the analytic terrain.
+	for (const FIntVector& Coord : *EditedChunks)
+	{
+		for (int32 DZ = -1; DZ <= 1; ++DZ)
+		{
+			for (int32 DY = -1; DY <= 1; ++DY)
+			{
+				for (int32 DX = -1; DX <= 1; ++DX)
+				{
+					const FIntVector Neighbour = Coord + FIntVector(DX, DY, DZ);
+					if (Listed.Contains(Neighbour))
+					{
+						continue;
+					}
+					Listed.Add(Neighbour);
+					if (TSharedPtr<const TArray<FVoxelData>> Voxels = Snapshot(Neighbour))
+					{
+						FVoxelMapPlanetOverlayChunk& Chunk = Input->Chunks.AddDefaulted_GetRef();
+						Chunk.Coord = Neighbour;
+						Chunk.Voxels = MoveTemp(Voxels);
+					}
+				}
+			}
+		}
+	}
+	return Input;
+}
+
 // ---------------------------------------------------------------------------
 // Async Tile Generation
 // ---------------------------------------------------------------------------
@@ -1408,6 +1764,11 @@ void UVoxelMapSubsystem::LaunchWaitingTiles()
 
 void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generation)
 {
+	if (PlanetGrid.IsValid())
+	{
+		GeneratePlanetTileAsync(TileCoord, Generation);
+		return;
+	}
 	const uint64 TileKey = PackTileKey(TileCoord);
 
 	// Capture all values needed on the background thread by value. The world mode is OUR standalone
@@ -1732,93 +2093,410 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 			[WeakThis, TileCoord, PixelData = MoveTemp(PixelData), Resolution, Generation, bRebuild, Overlay,
 			 bOverlayPending, AnalyticMin, AnalyticMax]() mutable
 		{
-			UVoxelMapSubsystem* Self = WeakThis.Get();
-			if (!Self)
+			if (UVoxelMapSubsystem* Self = WeakThis.Get())
 			{
-				return;
+				Self->FinishTileDrawing(TileCoord, MoveTemp(PixelData), Resolution, Generation, bRebuild, Overlay, bOverlayPending,
+					AnalyticMin, AnalyticMax);
 			}
+		});
+	});
+}
 
-			if (Self->bShuttingDown)
+void UVoxelMapSubsystem::FinishTileDrawing(FIntPoint TileCoord, TArray<FColor>&& PixelData, int32 Resolution, uint32 Generation,
+	bool bRebuild, const TSharedPtr<const FVoxelMapEditOverlay>& Overlay, bool bOverlayPending, float AnalyticMin, float AnalyticMax)
+{
+	if (bShuttingDown)
+	{
+		// Deinitialize() already ran (PIE stop / world teardown): don't resurrect cache
+		// state, don't broadcast into a dying world, and don't start new tasks.
+		UE_LOG(LogVoxelMap, Verbose, TEXT("Discarded tile (%d,%d) completion after shutdown"),
+			TileCoord.X, TileCoord.Y);
+		return;
+	}
+
+	const uint64 Key = PackTileKey(TileCoord);
+
+	if (!TileQueue.Complete(Key, Generation))
+	{
+		// Invalidated while drawing (an edit refresh or a conditioning change): this result is stale. The tile
+		// is waiting again and its cached image stays until the redraw lands; a discarded overlay rebuild runs
+		// again with it.
+		if (bRebuild)
+		{
+			OverlayRebuildTiles.Add(Key);
+		}
+	}
+	else
+	{
+		if (bRebuild)
+		{
+			const TSharedPtr<const FVoxelMapEditOverlay> Previous = EditOverlays.FindRef(Key);
+			if (Overlay.IsValid())
 			{
-				// Deinitialize() already ran (PIE stop / world teardown): don't resurrect cache
-				// state, don't broadcast into a dying world, and don't start new tasks.
-				UE_LOG(LogVoxelMap, Verbose, TEXT("Discarded tile (%d,%d) completion after shutdown"),
-					TileCoord.X, TileCoord.Y);
-				return;
-			}
-
-			const uint64 Key = PackTileKey(TileCoord);
-
-			if (!Self->TileQueue.Complete(Key, Generation))
-			{
-				// Invalidated while drawing (an edit refresh or a conditioning change): this result is stale. The tile
-				// is waiting again and its cached image stays until the redraw lands; a discarded overlay rebuild runs
-				// again with it.
-				if (bRebuild)
-				{
-					Self->OverlayRebuildTiles.Add(Key);
-				}
+				EditOverlays.Add(Key, Overlay);
 			}
 			else
 			{
-				if (bRebuild)
-				{
-					const TSharedPtr<const FVoxelMapEditOverlay> Previous = Self->EditOverlays.FindRef(Key);
-					if (Overlay.IsValid())
-					{
-						Self->EditOverlays.Add(Key, Overlay);
-					}
-					else
-					{
-						Self->EditOverlays.Remove(Key);
-					}
-					if (bOverlayPending)
-					{
-						Self->OverlayAwaitingTiles.Add(Key);
-					}
+				EditOverlays.Remove(Key);
+			}
+			if (bOverlayPending)
+			{
+				OverlayAwaitingTiles.Add(Key);
+			}
 
-					// Neighbours draw this tile's border columns into their hillshade apron: redraw the cached ones
-					// when those changed, so shading stays continuous across the tile edge.
-					if (!FVoxelMapEditOverlay::BordersEqual(Previous.Get(), Overlay.Get()))
+			// Neighbours draw this tile's border columns into their hillshade apron: redraw the cached ones
+			// when those changed, so shading stays continuous across the tile edge.
+			if (!FVoxelMapEditOverlay::BordersEqual(Previous.Get(), Overlay.Get()))
+			{
+				for (int32 DY = -1; DY <= 1; ++DY)
+				{
+					for (int32 DX = -1; DX <= 1; ++DX)
 					{
-						for (int32 DY = -1; DY <= 1; ++DY)
+						const FIntPoint Neighbour = GetNeighbourTile(TileCoord, DX, DY);
+						if ((DX != 0 || DY != 0) && Neighbour != TileCoord && TileStore.Contains(PackTileKey(Neighbour)))
 						{
-							for (int32 DX = -1; DX <= 1; ++DX)
-							{
-								const FIntPoint Neighbour = TileCoord + FIntPoint(DX, DY);
-								if ((DX != 0 || DY != 0) && Self->TileStore.Contains(PackTileKey(Neighbour)))
-								{
-									Self->TileQueue.Request(PackTileKey(Neighbour), /*bInvalidate*/ true, /*bPriority*/ true);
-								}
-							}
+							TileQueue.Request(PackTileKey(Neighbour), /*bInvalidate*/ true, /*bPriority*/ true);
 						}
 					}
 				}
-
-				// The tile's analytic range decides which edited chunks a rebuild needs; an overlay that waited
-				// without it may be able to rebuild now.
-				const bool bRangeWasKnown = Self->TileAnalyticRange.Contains(Key);
-				Self->TileAnalyticRange.Add(Key, FVector2f(AnalyticMin, AnalyticMax));
-				if (!bRangeWasKnown && Self->OverlayAwaitingTiles.Contains(Key))
-				{
-					Self->MarkOverlayDirty(Key);
-				}
-
-				// Keep the detail image where something asked for it (the minimap's area, a zoomed-in world map) or the
-				// tile already had it; elsewhere only the overview (WM-E2). The store trims to its budgets. An unlimited
-				// detail budget (0) keeps every detail image, as the map did before WM-E2.
-				const bool bKeepDetail = Self->DetailWanted.Remove(Key) > 0 || Self->TileStore.HasDetail(Key)
-					|| Self->TileStore.GetDetailBudget() == 0;
-				{
-					FScopeLock Lock(&Self->TileMutex);
-					Self->TileStore.Store(Key, TileCoord, MoveTemp(PixelData), Resolution, bKeepDetail);
-				}
-
-				Self->OnMapTileReady.Broadcast(TileCoord);
 			}
+		}
 
-			// Every completion drains the queue, so tiles queued while all slots were busy start now.
-			Self->LaunchWaitingTiles();
+		// The tile's analytic range decides which edited chunks a rebuild needs; an overlay that waited
+		// without it may be able to rebuild now.
+		const bool bRangeWasKnown = TileAnalyticRange.Contains(Key);
+		TileAnalyticRange.Add(Key, FVector2f(AnalyticMin, AnalyticMax));
+		if (!bRangeWasKnown && OverlayAwaitingTiles.Contains(Key))
+		{
+			MarkOverlayDirty(Key);
+		}
+
+		// Keep the detail image where something asked for it (the minimap's area, a zoomed-in world map) or the
+		// tile already had it; elsewhere only the overview (WM-E2). The store trims to its budgets. An unlimited
+		// detail budget (0) keeps every detail image, as the map did before WM-E2.
+		const bool bKeepDetail = DetailWanted.Remove(Key) > 0 || TileStore.HasDetail(Key)
+			|| TileStore.GetDetailBudget() == 0;
+		{
+			FScopeLock Lock(&TileMutex);
+			TileStore.Store(Key, TileCoord, MoveTemp(PixelData), Resolution, bKeepDetail);
+		}
+
+		OnMapTileReady.Broadcast(TileCoord);
+	}
+
+	// Every completion drains the queue, so tiles queued while all slots were busy start now.
+	LaunchWaitingTiles();
+}
+
+void UVoxelMapSubsystem::GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Generation)
+{
+	const uint64 TileKey = PackTileKey(TileCoord);
+	TSharedPtr<const IVoxelWorldMode> WorldMode = CachedWorldMode;
+	if (!WorldMode || WorldMode->GetWorldModeType() != EWorldMode::SphericalPlanet || !PlanetGrid.IsValidCell(TileCoord))
+	{
+		TileQueue.Cancel(TileKey);
+		return;
+	}
+
+	// Everything the worker needs, by value (as GenerateTileAsync): the world mode is our own instance, shared into the task.
+	const FVoxelCubeSphereGrid Grid = PlanetGrid;
+	const FVoxelNoiseParams NoiseParams = CachedNoiseParams;
+	const int32 ChunkSize = CachedChunkSize;
+	const float VoxelSize = CachedVoxelSize;
+	const FVector Center = CachedPlanetCenter;
+	const double Radius = CachedPlanetRadius;
+	const FVoxelSeaSurface Sea = CachedSea;
+	const bool bUseBiomes = bBiomesEnabled;
+	TArray<FColor> MaterialPalette = CachedMaterialPalette;
+	const float AltitudeMin = CachedAltitudeMin;
+	const float AltitudeMax = CachedAltitudeMax;
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(CachedBiomeConfig);
+
+	// Fallback climate noise for "biomes on, but no valid config", as the planet generator's.
+	FVoxelNoiseParams FallbackTempNoiseParams;
+	FallbackTempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	FallbackTempNoiseParams.Octaves = 2;
+	FallbackTempNoiseParams.Persistence = 0.5f;
+	FallbackTempNoiseParams.Lacunarity = 2.0f;
+	FallbackTempNoiseParams.Amplitude = 1.0f;
+	FallbackTempNoiseParams.Seed = NoiseParams.Seed + 1234;
+	FallbackTempNoiseParams.Frequency = 0.00005f;
+	FVoxelNoiseParams FallbackMoistureNoiseParams = FallbackTempNoiseParams;
+	FallbackMoistureNoiseParams.Seed = NoiseParams.Seed + 5678;
+	FallbackMoistureNoiseParams.Frequency = 0.00007f;
+
+	// Edit overlays: this tile's, its eight neighbours' (the hillshade apron reads their border pixels; across a face edge
+	// the neighbour is turned, so apron pixels are found by direction), and the rebuild input when one is due.
+	const bool bUseOverlays = CVarMapEditOverlay.GetValueOnGameThread() != 0;
+	TSharedPtr<const FVoxelMapEditOverlay> OwnOverlay;
+	TArray<TPair<FIntPoint, TSharedPtr<const FVoxelMapEditOverlay>>, TInlineAllocator<8>> NeighbourOverlays;
+	TSharedPtr<FVoxelMapPlanetOverlayInput> RebuildInput;
+	if (bUseOverlays)
+	{
+		OwnOverlay = EditOverlays.FindRef(TileKey);
+		for (int32 DY = -1; DY <= 1; ++DY)
+		{
+			for (int32 DX = -1; DX <= 1; ++DX)
+			{
+				const FIntPoint Neighbour = GetNeighbourTile(TileCoord, DX, DY);
+				if ((DX != 0 || DY != 0) && Neighbour != TileCoord)
+				{
+					if (TSharedPtr<const FVoxelMapEditOverlay> Found = EditOverlays.FindRef(PackTileKey(Neighbour)))
+					{
+						NeighbourOverlays.Add({ Neighbour, Found });
+					}
+				}
+			}
+		}
+		if (OverlayRebuildTiles.Remove(TileKey) > 0)
+		{
+			const double GatherStart = FPlatformTime::Seconds();
+			LastOverlayGatherFrame = GFrameCounter;
+			RebuildInput = GatherPlanetOverlayInput(TileCoord);
+			UE_LOG(LogVoxelMap, Verbose, TEXT("Planet overlay gather (%d,%d): %d chunk(s) in %.3f ms on the game thread."),
+				TileCoord.X, TileCoord.Y, RebuildInput.IsValid() ? RebuildInput->Chunks.Num() : 0,
+				(FPlatformTime::Seconds() - GatherStart) * 1000.0);
+		}
+	}
+	const bool bRebuild = RebuildInput.IsValid();
+
+	TWeakObjectPtr<UVoxelMapSubsystem> WeakThis(this);
+	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+		[WeakThis, TileCoord, Generation, WorldMode, Grid, NoiseParams, ChunkSize, VoxelSize, Center, Radius, Sea, bUseBiomes,
+		 MaterialPalette = MoveTemp(MaterialPalette), AltitudeMin, AltitudeMax, BiomeSnapshot,
+		 FallbackTempNoiseParams, FallbackMoistureNoiseParams, OwnOverlay, NeighbourOverlays, RebuildInput, bRebuild]() mutable
+	{
+		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
+		const int32 Resolution = ChunkSize;
+		const int32 GridSize = Resolution + 2;
+		const int32 NumPixels = Resolution * Resolution;
+
+		// --- Pass 1: the direction through each pixel's centre and the terrain's altitude along it, with a one-pixel apron
+		// (the hillshade's neighbours; past a face edge the face's plane extended, which is the neighbouring face's ground).
+		TArray<FVector> Directions;
+		TArray<float> Altitudes;
+		Directions.SetNumUninitialized(GridSize * GridSize);
+		Altitudes.SetNumUninitialized(GridSize * GridSize);
+		for (int32 GY = 0; GY < GridSize; ++GY)
+		{
+			for (int32 GX = 0; GX < GridSize; ++GX)
+			{
+				const FVector Direction = Grid.DirectionAt(TileCoord, (GX - 0.5) / Resolution, (GY - 0.5) / Resolution);
+				Directions[GY * GridSize + GX] = Direction;
+				Altitudes[GY * GridSize + GX] = Planet.GetTerrainAltitude(Direction, NoiseParams);
+			}
+		}
+
+		// Surface material as the planet generator writes it at the surface voxel (QueryPlanetSurfaceConditions).
+		auto AnalyticMaterialAt = [&](const FVector& Direction, float Altitude) -> uint8
+		{
+			const FVector Position = Center + Direction * (Radius + Altitude);
+			uint8 MaterialID = 0;
+			if (bUseBiomes && BiomeSnapshot.bIsValid)
+			{
+				uint8 BiomeID = 0;
+				FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(Planet, Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea, MaterialID, BiomeID);
+			}
+			else if (bUseBiomes)
+			{
+				const FVector BiomeSamplePos = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Direction, static_cast<float>(Radius));
+				const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackTempNoiseParams);
+				const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackMoistureNoiseParams);
+				const FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+				MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
+			}
+			else
+			{
+				MaterialID = Planet.GetMaterialAtDepth(Position, static_cast<float>(Radius + Altitude), 0.0f);
+			}
+			return MaterialID;
+		};
+
+		// The tile's own pixels: the overlay build reads them, and the game thread keeps their altitude range.
+		TArray<FVector> PixelDirections;
+		TArray<float> AnalyticAltitudes;
+		PixelDirections.SetNumUninitialized(NumPixels);
+		AnalyticAltitudes.SetNumUninitialized(NumPixels);
+		float AnalyticMin = TNumericLimits<float>::Max();
+		float AnalyticMax = TNumericLimits<float>::Lowest();
+		for (int32 PY = 0; PY < Resolution; ++PY)
+		{
+			for (int32 PX = 0; PX < Resolution; ++PX)
+			{
+				const int32 G = (PY + 1) * GridSize + PX + 1;
+				PixelDirections[PY * Resolution + PX] = Directions[G];
+				AnalyticAltitudes[PY * Resolution + PX] = Altitudes[G];
+				AnalyticMin = FMath::Min(AnalyticMin, Altitudes[G]);
+				AnalyticMax = FMath::Max(AnalyticMax, Altitudes[G]);
+			}
+		}
+
+		// --- Edit overlay: rebuilt along each pixel's line when due, as on the plane.
+		bool bOverlayPending = false;
+		if (RebuildInput.IsValid())
+		{
+			const FVoxelMapEditOverlay Built = FVoxelMapEditOverlay::BuildPlanet(*RebuildInput, PixelDirections, AnalyticAltitudes,
+				[&](int32 PX, int32 PY)
+				{
+					const int32 Index = PY * Resolution + PX;
+					return AnalyticMaterialAt(PixelDirections[Index], AnalyticAltitudes[Index]);
+				});
+			bOverlayPending = Built.PendingColumns.Num() > 0;
+			const FVoxelMapEditOverlay* Previous = OwnOverlay.Get();
+			FVoxelMapEditOverlay Merged = FVoxelMapEditOverlay::MergePending(Built, Previous);
+			Merged.PendingColumns.Empty();
+			OwnOverlay.Reset();
+			if (!Merged.IsEmpty())
+			{
+				OwnOverlay = MakeShared<const FVoxelMapEditOverlay>(MoveTemp(Merged));
+			}
+			RebuildInput.Reset();
+		}
+		const TSharedPtr<const FVoxelMapEditOverlay> Overlay = OwnOverlay;
+		auto UsableOverlay = [Resolution](const FVoxelMapEditOverlay* Candidate)
+		{
+			return Candidate && Candidate->bAltitudeHeights && Candidate->Resolution == Resolution;
+		};
+
+		// Edited altitudes into the grid: the tile's own pixels from its overlay, the apron's from whichever neighbour holds
+		// the apron pixel's direction.
+		TArray<int32> OverlaySlot;
+		OverlaySlot.Init(INDEX_NONE, NumPixels);
+		for (int32 GY = 0; GY < GridSize; ++GY)
+		{
+			for (int32 GX = 0; GX < GridSize; ++GX)
+			{
+				const int32 G = GY * GridSize + GX;
+				const bool bInterior = GX >= 1 && GY >= 1 && GX <= Resolution && GY <= Resolution;
+				const FVoxelMapEditOverlay* Source = nullptr;
+				int32 PX = GX - 1;
+				int32 PY = GY - 1;
+				if (bInterior)
+				{
+					Source = UsableOverlay(Overlay.Get()) ? Overlay.Get() : nullptr;
+				}
+				else if (NeighbourOverlays.Num() > 0)
+				{
+					FVector2D Fraction;
+					const FIntPoint Cell = Grid.CellOfDirection(Directions[G], &Fraction);
+					for (const TPair<FIntPoint, TSharedPtr<const FVoxelMapEditOverlay>>& Pair : NeighbourOverlays)
+					{
+						if (Pair.Key == Cell && UsableOverlay(Pair.Value.Get()))
+						{
+							Source = Pair.Value.Get();
+							PX = FMath::Clamp(FMath::FloorToInt32(Fraction.X * Resolution), 0, Resolution - 1);
+							PY = FMath::Clamp(FMath::FloorToInt32(Fraction.Y * Resolution), 0, Resolution - 1);
+							break;
+						}
+					}
+				}
+				if (!Source)
+				{
+					continue;
+				}
+				const int32 Slot = Source->FindColumn(PX, PY);
+				if (Slot != INDEX_NONE)
+				{
+					Altitudes[G] = Source->Heights[Slot];
+					if (bInterior)
+					{
+						OverlaySlot[PY * Resolution + PX] = Slot;
+					}
+				}
+			}
+		}
+
+		// Shading ranges from the terrain's altitude bounds: land from the sea (or the lowest terrain) to the highest, water
+		// depth from the sea down to the lowest.
+		const bool bSeaOn = Sea.bEnabled && Sea.bRadial;
+		const float SeaAltitude = bSeaOn ? static_cast<float>(Sea.Radius - Radius) : AltitudeMin;
+		const float LandBase = bSeaOn ? SeaAltitude : AltitudeMin;
+		const float LandSpan = FMath::Max(AltitudeMax - LandBase, 1.0f);
+		const float DepthSpan = FMath::Max(LandBase - AltitudeMin, 1.0f);
+		auto PositionAt = [&](int32 G)
+		{
+			return Center + Directions[G] * (Radius + Altitudes[G]);
+		};
+
+		// --- Pass 2: colour, as the plane's in the local frame.
+		TArray<FColor> PixelData;
+		PixelData.SetNumUninitialized(NumPixels);
+		for (int32 PY = 0; PY < Resolution; ++PY)
+		{
+			for (int32 PX = 0; PX < Resolution; ++PX)
+			{
+				const int32 GX = PX + 1;
+				const int32 GY = PY + 1;
+				const int32 G = GY * GridSize + GX;
+				const float Altitude = Altitudes[G];
+
+				uint8 MaterialID = 0;
+				bool bWater = false;
+				const int32 Slot = OverlaySlot[PY * Resolution + PX];
+				if (Slot != INDEX_NONE)
+				{
+					MaterialID = Overlay->Materials[Slot];
+					bWater = (Overlay->Flags[Slot] & FVoxelMapEditOverlay::FlagWater) != 0;
+				}
+				else
+				{
+					MaterialID = AnalyticMaterialAt(Directions[G], Altitude);
+					bWater = bSeaOn && Radius + Altitude < Sea.Radius;
+				}
+
+				FColor Color;
+				if (bWater)
+				{
+					const float Depth = SeaAltitude - Altitude;
+					const float DepthFactor = FMath::Lerp(1.0f, 0.3f, FMath::Clamp(Depth / DepthSpan, 0.0f, 1.0f));
+					Color.R = FMath::Clamp(static_cast<int32>(20 * DepthFactor), 0, 255);
+					Color.G = FMath::Clamp(static_cast<int32>(80 * DepthFactor), 0, 255);
+					Color.B = FMath::Clamp(static_cast<int32>(180 * DepthFactor), 0, 255);
+					Color.A = 255;
+				}
+				else
+				{
+					Color = MaterialPalette[MaterialID];
+					const float ElevationFactor = FMath::Clamp((Altitude - LandBase) / LandSpan, 0.0f, 1.0f);
+					const float Elevation = FMath::Lerp(0.75f, 1.0f, ElevationFactor);
+
+					// Hillshade: the surface normal from the neighbouring pixels' ground points, lit by the plane's NW key
+					// light in the local frame (north toward the +Z pole).
+					const FVector Up = Directions[G];
+					FVector Normal = FVector::CrossProduct(PositionAt(G + 1) - PositionAt(G - 1), PositionAt(G + GridSize) - PositionAt(G - GridSize)).GetSafeNormal();
+					if (Normal.IsNearlyZero())
+					{
+						Normal = Up;
+					}
+					else if (FVector::DotProduct(Normal, Up) < 0.0)
+					{
+						Normal = -Normal;
+					}
+					FVector East, North;
+					FVoxelCubeSphere::GetTangentFrame(Up, East, North);
+					const FVector LightDir = (North * -0.707 + East * -0.707 + Up).GetSafeNormal();
+					const float NdotL = FMath::Clamp(static_cast<float>(FVector::DotProduct(Normal, LightDir)), 0.0f, 1.0f);
+					const float Shade = FMath::Lerp(0.55f, 1.25f, NdotL);
+
+					const float Brightness = Elevation * Shade;
+					Color.R = FMath::Clamp(static_cast<int32>(Color.R * Brightness), 0, 255);
+					Color.G = FMath::Clamp(static_cast<int32>(Color.G * Brightness), 0, 255);
+					Color.B = FMath::Clamp(static_cast<int32>(Color.B * Brightness), 0, 255);
+					Color.A = 255;
+				}
+				PixelData[PY * Resolution + PX] = Color;
+			}
+		}
+
+		AsyncTask(ENamedThreads::GameThread,
+			[WeakThis, TileCoord, PixelData = MoveTemp(PixelData), Resolution, Generation, bRebuild, Overlay,
+			 bOverlayPending, AnalyticMin, AnalyticMax]() mutable
+		{
+			if (UVoxelMapSubsystem* Self = WeakThis.Get())
+			{
+				Self->FinishTileDrawing(TileCoord, MoveTemp(PixelData), Resolution, Generation, bRebuild, Overlay, bOverlayPending,
+					AnalyticMin, AnalyticMax);
+			}
 		});
 	});
 }

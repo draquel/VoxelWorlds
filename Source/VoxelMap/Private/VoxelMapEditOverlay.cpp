@@ -241,15 +241,284 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::Build(
 	return Out;
 }
 
+FVoxelMapEditOverlay FVoxelMapEditOverlay::BuildPlanet(
+	const FVoxelMapPlanetOverlayInput& Input,
+	TConstArrayView<FVector> PixelDirections,
+	TConstArrayView<float> AnalyticAltitudes,
+	TFunctionRef<uint8(int32 PX, int32 PY)> AnalyticMaterial)
+{
+	FVoxelMapEditOverlay Out;
+	const int32 CS = Input.ChunkSize;
+	const double VS = Input.VoxelSize;
+	Out.Resolution = CS;
+	Out.bAltitudeHeights = true;
+	const int32 NumColumns = CS * CS;
+	if (CS <= 1 || CS > MaxOverlayResolution || VS <= 0.0 || PixelDirections.Num() != NumColumns || AnalyticAltitudes.Num() != NumColumns)
+	{
+		return Out;
+	}
+	const int32 VolumeSize = NumColumns * CS;
+	const double ChunkWorldSize = CS * VS;
+	const FVector& Center = Input.Center;
+	const double Radius = Input.PlanetRadius;
+	const float Iso = static_cast<float>(VOXEL_SURFACE_THRESHOLD);
+
+	// The chunks by coordinate, and the boxes of those with edits (only lines through them can change).
+	TMap<FIntVector, const FVoxelMapPlanetOverlayChunk*> ByCoord;
+	TArray<FBox, TInlineAllocator<16>> EditedBoxes;
+	for (const FVoxelMapPlanetOverlayChunk& Chunk : Input.Chunks)
+	{
+		ByCoord.Add(Chunk.Coord, &Chunk);
+		if (Chunk.EditedVoxels.IsValid() && Chunk.EditedVoxels->Num() == VolumeSize)
+		{
+			const FVector Min = Input.Origin + FVector(Chunk.Coord) * ChunkWorldSize;
+			EditedBoxes.Add(FBox(Min, Min + FVector(ChunkWorldSize)));
+		}
+	}
+	if (EditedBoxes.Num() == 0)
+	{
+		return Out;
+	}
+
+	// Where the line from the centre along D crosses a box: [T0, T1] (slab test).
+	auto RayBox = [&Center](const FVector& D, const FBox& Box, double& OutT0, double& OutT1)
+	{
+		double T0 = 0.0;
+		double T1 = TNumericLimits<double>::Max();
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			if (FMath::Abs(D[Axis]) < 1.0e-12)
+			{
+				if (Center[Axis] < Box.Min[Axis] || Center[Axis] > Box.Max[Axis])
+				{
+					return false;
+				}
+				continue;
+			}
+			double A = (Box.Min[Axis] - Center[Axis]) / D[Axis];
+			double B = (Box.Max[Axis] - Center[Axis]) / D[Axis];
+			if (A > B)
+			{
+				Swap(A, B);
+			}
+			T0 = FMath::Max(T0, A);
+			T1 = FMath::Min(T1, B);
+			if (T0 > T1)
+			{
+				return false;
+			}
+		}
+		OutT0 = T0;
+		OutT1 = T1;
+		return true;
+	};
+
+	enum class ESource : uint8 { Real, StandIn, Unreadable };
+
+	for (int32 Col = 0; Col < NumColumns; ++Col)
+	{
+		const FVector D = PixelDirections[Col];
+		const float AnalyticAltitude = AnalyticAltitudes[Col];
+		const double AnalyticRadius = Radius + AnalyticAltitude;
+
+		double EditMin = TNumericLimits<double>::Max();
+		double EditMax = TNumericLimits<double>::Lowest();
+		for (const FBox& Box : EditedBoxes)
+		{
+			double T0 = 0.0, T1 = 0.0;
+			if (RayBox(D, Box, T0, T1))
+			{
+				EditMin = FMath::Min(EditMin, T0);
+				EditMax = FMath::Max(EditMax, T1);
+			}
+		}
+		if (EditMin > EditMax)
+		{
+			continue;
+		}
+
+		// The voxel with index I (density sample at Origin + I * VS): from its chunk when listed and loaded; the analytic
+		// terrain along this line when the chunk is not listed (solid below the analytic radius, the sea's water flag in
+		// the air under the sea radius); unreadable when listed without data (an edited chunk that is not loaded).
+		auto Read = [&](const FIntVector& I, FVoxelData& OutVoxel, bool& bOutEdited) -> ESource
+		{
+			bOutEdited = false;
+			const FIntVector ChunkCoord(
+				FMath::FloorToInt32(static_cast<double>(I.X) / CS),
+				FMath::FloorToInt32(static_cast<double>(I.Y) / CS),
+				FMath::FloorToInt32(static_cast<double>(I.Z) / CS));
+			if (const FVoxelMapPlanetOverlayChunk* const* Found = ByCoord.Find(ChunkCoord))
+			{
+				const FVoxelMapPlanetOverlayChunk& Chunk = **Found;
+				if (!Chunk.Voxels.IsValid() || Chunk.Voxels->Num() != VolumeSize)
+				{
+					return ESource::Unreadable;
+				}
+				const FIntVector Local = I - ChunkCoord * CS;
+				const int32 Index = Local.X + Local.Y * CS + Local.Z * NumColumns;
+				OutVoxel = (*Chunk.Voxels)[Index];
+				bOutEdited = Chunk.EditedVoxels.IsValid() && Chunk.EditedVoxels->Num() == VolumeSize && (*Chunk.EditedVoxels)[Index];
+				return ESource::Real;
+			}
+			const double R = FVector::Dist(Input.Origin + FVector(I) * VS, Center);
+			OutVoxel = FVoxelData::Air();
+			OutVoxel.Density = static_cast<uint8>(FMath::Clamp(FMath::FloorToInt32(Iso + (AnalyticRadius - R) / VS * 128.0), 0, 255));
+			if (OutVoxel.IsAir() && Input.bUseWater && R < Input.WaterRadius)
+			{
+				OutVoxel.SetWaterFlag(true);
+			}
+			return ESource::StandIn;
+		};
+
+		// Coarse, from the top down: the nearest voxel every half voxel along the line; the first solid voxel under air.
+		const double TopT = FMath::Max(AnalyticRadius, EditMax) + 2.0 * VS;
+		const double BottomT = FMath::Min(AnalyticRadius, EditMin) - ChunkWorldSize;
+		FIntVector Previous(MAX_int32);
+		bool bAirAbove = false;
+		bool bEditSeen = false;
+		bool bWater = false;
+		bool bPending = false;
+		bool bFound = false;
+		bool bSolidAtTop = false;
+		double AirT = TopT;
+		double SolidT = 0.0;
+		FVoxelData Solid;
+		ESource SolidSource = ESource::Real;
+		for (double T = TopT; T >= BottomT; T -= 0.5 * VS)
+		{
+			const FVector F = (Center + D * T - Input.Origin) / VS;
+			const FIntVector I(FMath::RoundToInt32(F.X), FMath::RoundToInt32(F.Y), FMath::RoundToInt32(F.Z));
+			if (I == Previous)
+			{
+				continue;
+			}
+			Previous = I;
+			FVoxelData Voxel;
+			bool bEdited = false;
+			const ESource Source = Read(I, Voxel, bEdited);
+			if (Source == ESource::Unreadable)
+			{
+				bPending = true;
+				break;
+			}
+			bEditSeen |= bEdited;
+			if (Voxel.IsSolid())
+			{
+				if (!bAirAbove)
+				{
+					bSolidAtTop = true;
+					break;
+				}
+				bFound = true;
+				SolidT = T;
+				Solid = Voxel;
+				SolidSource = Source;
+				break;
+			}
+			bWater |= Voxel.HasWaterFlag();
+			bAirAbove = true;
+			AirT = T;
+		}
+		if (bSolidAtTop)
+		{
+			continue;
+		}
+		if (bPending || !bFound)
+		{
+			// An edited chunk without data on the way down, or no ground above the bottom of the walk: dug through.
+			Out.PendingColumns.Add(static_cast<uint16>(Col));
+			continue;
+		}
+		if (!bEditSeen)
+		{
+			// Every edit on this line lies below the surface (or none is on it): the analytic map already draws it.
+			continue;
+		}
+		if (SolidSource == ESource::StandIn)
+		{
+			// The surface is the analytic stand-in's: the real one when it sits at the analytic altitude; when real air ran
+			// below that, an edit opened the line into a chunk that is not loaded.
+			if (AnalyticRadius - SolidT > VS)
+			{
+				Out.PendingColumns.Add(static_cast<uint16>(Col));
+			}
+			continue;
+		}
+
+		// Fine: the trilinear density on the line around the coarse crossing (the nearest voxels stray sideways).
+		auto Density = [&](const FIntVector& I) -> float
+		{
+			FVoxelData Voxel;
+			bool bEdited = false;
+			if (Read(I, Voxel, bEdited) == ESource::Unreadable)
+			{
+				const double R = FVector::Dist(Input.Origin + FVector(I) * VS, Center);
+				return static_cast<float>(FMath::Clamp(Iso + (AnalyticRadius - R) / VS * 128.0, 0.0, 255.0));
+			}
+			return static_cast<float>(Voxel.Density);
+		};
+		auto Trilinear = [&](const FVector& P) -> float
+		{
+			const FVector F = (P - Input.Origin) / VS;
+			const FIntVector I0(FMath::FloorToInt32(F.X), FMath::FloorToInt32(F.Y), FMath::FloorToInt32(F.Z));
+			const FVector W = F - FVector(I0);
+			float Result = 0.0f;
+			for (int32 Corner = 0; Corner < 8; ++Corner)
+			{
+				const FIntVector O(Corner & 1, (Corner >> 1) & 1, (Corner >> 2) & 1);
+				const double Weight = (O.X ? W.X : 1.0 - W.X) * (O.Y ? W.Y : 1.0 - W.Y) * (O.Z ? W.Z : 1.0 - W.Z);
+				Result += static_cast<float>(Weight) * Density(I0 + O);
+			}
+			return Result;
+		};
+		const double Step = 0.25 * VS;
+		double HitT = TNumericLimits<double>::Max();
+		float AboveDensity = Trilinear(Center + D * (AirT + VS));
+		for (double T = AirT + VS - Step; T >= SolidT - 1.5 * VS && AboveDensity < Iso; T -= Step)
+		{
+			const float Value = Trilinear(Center + D * T);
+			if (Value >= Iso)
+			{
+				HitT = T + Step * (Value - Iso) / FMath::Max(Value - AboveDensity, KINDA_SMALL_NUMBER);
+				break;
+			}
+			AboveDensity = Value;
+		}
+		if (HitT == TNumericLimits<double>::Max())
+		{
+			// The fine walk found no crossing (an edge case of the bracket): between the coarse samples.
+			HitT = 0.5 * (AirT + SolidT);
+		}
+
+		const float Altitude = static_cast<float>(HitT - Radius);
+		const bool bAnalyticWater = Input.bUseWater && AnalyticRadius < Input.WaterRadius;
+		const int32 PX = Col % CS;
+		const int32 PY = Col / CS;
+		if (FMath::Abs(Altitude - AnalyticAltitude) <= 0.5 * VS && bWater == bAnalyticWater
+			&& Solid.MaterialID == AnalyticMaterial(PX, PY))
+		{
+			// The edit left the surface as the analytic map already draws it.
+			continue;
+		}
+		Out.Columns.Add(static_cast<uint16>(Col));
+		Out.Heights.Add(Altitude);
+		Out.Materials.Add(Solid.MaterialID);
+		Out.Flags.Add(bWater ? FlagWater : 0);
+	}
+	return Out;
+}
+
 FVoxelMapEditOverlay FVoxelMapEditOverlay::MergePending(const FVoxelMapEditOverlay& Built, const FVoxelMapEditOverlay* Previous)
 {
-	if (!Previous || Previous->IsEmpty() || Built.PendingColumns.Num() == 0 || Previous->Resolution != Built.Resolution)
+	if (!Previous || Previous->IsEmpty() || Built.PendingColumns.Num() == 0 || Previous->Resolution != Built.Resolution
+		|| Previous->bAltitudeHeights != Built.bAltitudeHeights)
 	{
 		return Built;
 	}
 
 	FVoxelMapEditOverlay Out;
 	Out.Resolution = Built.Resolution;
+	Out.bAltitudeHeights = Built.bAltitudeHeights;
 	Out.PendingColumns = Built.PendingColumns;
 	const int32 Capacity = Built.Num() + FMath::Min(Previous->Num(), Built.PendingColumns.Num());
 	Out.Columns.Reserve(Capacity);
@@ -326,7 +595,7 @@ bool FVoxelMapEditOverlay::BordersEqual(const FVoxelMapEditOverlay* A, const FVo
 		{
 			return bLeftDone && bRightDone;
 		}
-		if (L.Resolution != R.Resolution || L.Columns[LI] != R.Columns[RI] || L.Heights[LI] != R.Heights[RI]
+		if (L.Resolution != R.Resolution || L.bAltitudeHeights != R.bAltitudeHeights || L.Columns[LI] != R.Columns[RI] || L.Heights[LI] != R.Heights[RI]
 			|| L.Materials[LI] != R.Materials[RI] || L.Flags[LI] != R.Flags[RI])
 		{
 			return false;
@@ -338,7 +607,7 @@ bool FVoxelMapEditOverlay::BordersEqual(const FVoxelMapEditOverlay* A, const FVo
 
 bool FVoxelMapEditOverlay::Serialize(FArchive& Ar)
 {
-	uint8 Version = FormatVersion;
+	uint8 Version = bAltitudeHeights ? PlanetFormatVersion : FormatVersion;
 	Ar << Version;
 	uint16 SavedResolution = static_cast<uint16>(Resolution);
 	Ar << SavedResolution;
@@ -350,11 +619,13 @@ bool FVoxelMapEditOverlay::Serialize(FArchive& Ar)
 			*this = FVoxelMapEditOverlay();
 			return false;
 		};
-		if (Ar.IsError() || Version != FormatVersion || SavedResolution < 2 || SavedResolution > MaxOverlayResolution)
+		if (Ar.IsError() || (Version != FormatVersion && Version != PlanetFormatVersion) || SavedResolution < 2
+			|| SavedResolution > MaxOverlayResolution)
 		{
 			return Fail();
 		}
 		Resolution = SavedResolution;
+		bAltitudeHeights = Version == PlanetFormatVersion;
 		const int32 NumColumns = Resolution * Resolution;
 		TArray<uint8> Mask;
 		Mask.SetNumZeroed((NumColumns + 7) / 8);
@@ -416,6 +687,7 @@ bool FVoxelMapEditOverlay::Serialize(FArchive& Ar)
 
 bool FVoxelMapEditOverlay::operator==(const FVoxelMapEditOverlay& Other) const
 {
-	return Resolution == Other.Resolution && Columns == Other.Columns && Heights == Other.Heights
+	return Resolution == Other.Resolution && bAltitudeHeights == Other.bAltitudeHeights && Columns == Other.Columns
+		&& Heights == Other.Heights
 		&& Materials == Other.Materials && Flags == Other.Flags;
 }

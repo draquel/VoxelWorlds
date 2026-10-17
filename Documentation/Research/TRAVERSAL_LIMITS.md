@@ -46,3 +46,12 @@ small. This resets the float-bake magnitude (#4), keeps Chaos/CMC in their preci
 makes the world effectively unbounded. It is a cross-system change (renderer proxy offsets, collision
 component placement, chunk-coord ↔ world mapping, gameplay actors) and is **not** implemented here —
 tracked as the major follow-up. Until then the practical clean range is ~100 km from origin.
+
+## Planets: the radius ceiling (SP-H2)
+
+Every surface vertex of a planet lies about R from its centre, so with the centre at the world origin the float-bake
+ceiling (#4) is a radius of about 100 km (a centre placed away from the origin adds its distance); collision (#5)
+stays exact. The planet's GPU density is planet-relative already; its cave and ore noise sample absolute float
+positions, as the CPU's noise does in float (SP-H1). Rebasing would have to separate the two roles `WorldOrigin` plays
+today: the planet's centre (generation, gravity, the surface coordinate) and the chunk grid's origin (chunk keys,
+saves, the edit layer). See `Features/WORLD_MODES.md` "The radius ceiling".

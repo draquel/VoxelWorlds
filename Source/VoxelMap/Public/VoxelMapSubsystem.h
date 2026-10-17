@@ -11,6 +11,8 @@
 #include "VoxelCoreTypes.h"
 #include "VoxelEditTypes.h"
 #include "VoxelWorldModeTypes.h"
+#include "VoxelCubeSphere.h"
+#include "VoxelSeaSurface.h"
 #include "TimerManager.h"
 #include "VoxelMapSubsystem.generated.h"
 
@@ -41,6 +43,13 @@ class UVoxelBiomeConfiguration;
  * drawn tile keeps a small overview image, and the detail image only while recently used (voxel.Map.DetailBudgetMB,
  * voxel.Map.OverviewBudgetMB). Exploration is separate and never evicted: a tile that lost its images is drawn again
  * when the minimap (RequestTilesInRadius) or the world map (RequestTileImage) asks for it.
+ *
+ * Planets (spherical Phase 4, WORLD_MODES_REVIEW_PLAN.md §18, WM-SY8): a tile is a cell of the cube-sphere grid
+ * (FVoxelCubeSphereGrid, N = ceil((pi / 2) * R / chunk size) cells a face edge, so a tile is about a chunk across),
+ * addressed by its atlas coordinate (Face * N + tile U, tile V); every FIntPoint key, the store, the queue, the budgets and
+ * the save blobs work unchanged. A tile's pixels run along the face's U and V; each is the terrain along its direction
+ * from the centre (material by QueryPlanetSurfaceConditions, water by the sea sphere, shading by altitude, hillshade in
+ * the local frame). Edit overlays walk each pixel's line along local up and store altitudes.
  *
  * All tile generation runs on background threads. The subsystem has zero
  * knowledge of players, characters, or UI — purely manages tile data.
@@ -259,6 +268,35 @@ public:
 	/** Get the tile resolution (pixels per edge, matches ChunkSize). */
 	int32 GetTileResolution() const { return CachedChunkSize; }
 
+	// --- Planets (spherical Phase 4, WM-SY8) ---
+
+	/**
+	 * Whether the map is a planet's: tiles are cells of the cube-sphere grid (GetPlanetTileGrid) addressed by atlas
+	 * coordinates, and a tile's pixels run along its face's U and V instead of world X and Y.
+	 * @return True once the map has resolved a planet world
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
+	bool IsPlanetMap() const { return PlanetGrid.IsValid(); }
+
+	/** The planet's tile grid (invalid in heightmap worlds and before the map has resolved its world). */
+	const FVoxelCubeSphereGrid& GetPlanetTileGrid() const { return PlanetGrid; }
+
+	/** The planet's centre (zero in heightmap worlds). */
+	FVector GetPlanetCenter() const { return CachedPlanetCenter; }
+
+	/** The planet's datum radius (zero in heightmap worlds). */
+	double GetPlanetRadius() const { return CachedPlanetRadius; }
+
+	/**
+	 * The tile and pixel a direction from the planet centre falls in.
+	 * @param Direction Unit direction
+	 * @param OutTile   Atlas coordinate of the tile
+	 * @param OutPX     Pixel along the tile's U, in [0, GetTileResolution())
+	 * @param OutPY     Pixel along the tile's V
+	 * @return False in heightmap worlds
+	 */
+	bool PlanetDirectionToTilePixel(const FVector& Direction, FIntPoint& OutTile, int32& OutPX, int32& OutPY) const;
+
 	// --- Events ---
 
 	/** Fired on game thread when a tile finishes generating. */
@@ -335,6 +373,25 @@ private:
 
 	/** Game thread: gather the tile's chunk stack (shared snapshots + edited-column tables) for an overlay build. */
 	TSharedPtr<FVoxelMapOverlayBuildInput> GatherOverlayInput(FIntPoint TileCoord) const;
+
+	/** Game thread: a planet tile's edited chunks and the loaded chunks around them, for FVoxelMapEditOverlay::BuildPlanet. */
+	TSharedPtr<FVoxelMapPlanetOverlayInput> GatherPlanetOverlayInput(FIntPoint TileCoord) const;
+
+	/** GenerateTileAsync on a planet: the same inputs, queue and completion, the pixels along their directions. */
+	void GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Generation);
+
+	/**
+	 * Game thread: store a finished drawing (either world kind), unless it went stale or the subsystem is shutting down;
+	 * then start the waiting tiles.
+	 */
+	void FinishTileDrawing(FIntPoint TileCoord, TArray<FColor>&& PixelData, int32 Resolution, uint32 Generation, bool bRebuild,
+		const TSharedPtr<const FVoxelMapEditOverlay>& Overlay, bool bOverlayPending, float AnalyticMin, float AnalyticMax);
+
+	/** The tile a step away: TileCoord + (DX, DY) on a plane; the grid's neighbour (across a face edge too) on a planet. */
+	FIntPoint GetNeighbourTile(FIntPoint TileCoord, int32 DX, int32 DY) const;
+
+	/** The tiles a chunk belongs to: its (X, Y) on a plane; on a planet the cells its corners span. */
+	void GetChunkTiles(const FIntVector& ChunkCoord, TArray<FIntPoint>& OutTiles) const;
 
 	// Cached references (resolved in Initialize or lazily)
 	TWeakObjectPtr<UVoxelChunkManager> CachedChunkManagerWeak;
@@ -431,6 +488,25 @@ private:
 
 	/** One-shot coalescing timer for FlushOverlayRefresh. */
 	FTimerHandle OverlayRefreshTimer;
+
+	// --- Planets (WM-SY8) ---
+
+	/** The tile grid of a planet world; invalid in heightmap worlds. */
+	FVoxelCubeSphereGrid PlanetGrid;
+
+	/** The planet's centre and datum radius. */
+	FVector CachedPlanetCenter = FVector::ZeroVector;
+	double CachedPlanetRadius = 0.0;
+
+	/** The world's sea (FVoxelSeaSurface::FromConfig): the planet's water sphere. */
+	FVoxelSeaSurface CachedSea;
+
+	/** The terrain's altitude extent (IVoxelWorldMode::GetAltitudeBounds): the planet's elevation and depth shading. */
+	float CachedAltitudeMin = 0.0f;
+	float CachedAltitudeMax = 0.0f;
+
+	/** Edited chunks per planet tile (a chunk belongs to every tile its corners span), in step with OnChunkEdited. */
+	TMap<uint64, TArray<FIntVector>> PlanetTileEditedChunks;
 
 	/** GFrameCounter of the last overlay gather: LaunchWaitingTiles starts at most one rebuild per frame. */
 	uint64 LastOverlayGatherFrame = MAX_uint64;

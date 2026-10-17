@@ -184,6 +184,23 @@ public:
 	const FSphericalPlanetParams& GetPlanetParams() const { return PlanetParams; }
 	void SetPlanetParams(const FSphericalPlanetParams& InParams) { PlanetParams = InParams; }
 
+	/** The biome snapshot SetBiomeContext took (continentalness for the surface); invalid without a biome config. */
+	const FVoxelBiomeSnapshot& GetBiomeSnapshot() const { return BiomeSnapshot; }
+
+	/**
+	 * The terrain's altitude above the datum along a direction: SampleRadialDisplacement with this planet's radius,
+	 * terrain params and biome snapshot, what GetSurfacePoint uses without its normal (spherical Phase 4, the map's
+	 * pixels).
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param NoiseParams Terrain noise
+	 * @return Altitude (uu)
+	 */
+	float GetTerrainAltitude(const FVector& Direction, const FVoxelNoiseParams& NoiseParams) const
+	{
+		return SampleRadialDisplacement(Direction, PlanetParams.PlanetRadius, TerrainParams, NoiseParams, &BiomeSnapshot);
+	}
+
 	// ==================== Static Helpers ====================
 
 	/**

@@ -81,6 +81,7 @@ class IVoxelWorldMode {
     virtual FVoxelWorldBounds GetWorldBounds() const;
     virtual FVector GetUpVector(const FVector& WorldPos) const;
     virtual float GetAltitude(const FVector& WorldPos) const;
+    virtual void GetAltitudeBounds(float& OutMin, float& OutMax) const;      // spherical SP-A4 (a planet: its shell)
     virtual FVoxelSurfaceCoord WorldToSurface(const FVector& WorldPos) const;
     virtual FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const;
 };
@@ -96,6 +97,14 @@ or, on a planet, the sphere of `WaterRadius` (spherical SP-B8, SP-E1). Get it fr
 (`true` for the `WaterLevel + WorldOrigin.Z` plane game code uses) or `FVoxelSeaSurface::FromConfig`; never compare a Z
 with `WaterLevel` in new code. A planet's sea surface is the chunk manager's ocean shell (`FVoxelPlanetOcean`); its
 spawn point over the terrain is `UVoxelChunkManager::GetPlanetSpawnPosition`.
+
+Surface queries go along local up (spherical Phase 4, SP-A3): `UVoxelChunkManager::QueryEditMergedSurfacePoint` (the
+edit-merged surface on the up-line through a position; heightmaps: `QueryEditMergedSurface`), `GetGeneratedSurfacePoint`
+(analytic), and `FVoxelSurfaceQuery::QueryPlanetSurfaceConditions` / `SampleSurfacePoint` for generation's material and
+biome. Never call `GetTerrainHeightAt` in code that can run on a planet: there it logs once and degrades to the upper
+hemisphere's Z. 2D systems key a planet on the cube sphere (`FVoxelCubeSphere`, `FVoxelCubeSphereGrid` in VoxelCore:
+atlas coordinates Face × N + U, V), as the map, navigation regions and the NPC spawner do; heightmap code paths keep
+their XY keys untouched.
 
 ## Core Data Structures
 

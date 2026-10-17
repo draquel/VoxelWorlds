@@ -55,8 +55,8 @@ bool FVoxelConfigTreeTemplateMaterialsTest::RunTest(const FString& Parameters)
 
 /**
  * Spherical Phase 0 guardrails (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5, SP-B3): the terrain shell must cover the
- * terrain's real amplitude, water on a planet is flagged while consumers still read the Z-plane WaterLevel. Since
- * spherical Phase 2 (SP-B4) a planet may generate on the GPU like any other world mode.
+ * terrain's real amplitude. Since spherical Phase 2 (SP-B4) a planet may generate on the GPU like any other world mode;
+ * since Phase 4 (SP-G2, SP-G3) every water consumer reads the sea sphere, so water on a planet is no longer flagged.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelConfigPlanetSettingsTest,
 	"VoxelWorlds.Configuration.PlanetSettings",
@@ -88,7 +88,7 @@ bool FVoxelConfigPlanetSettingsTest::RunTest(const FString& Parameters)
 
 	Config->bEnableWaterLevel = true;
 	Warnings = Config->GetSettingsWarnings();
-	TestTrue(TEXT("Water on a planet is flagged"), AnyWarningContains(Warnings, TEXT("WaterLevel")));
+	TestFalse(TEXT("Water on a planet is not flagged since Phase 4 (the map and PCG read the sea sphere)"), AnyWarningContains(Warnings, TEXT("WaterLevel")));
 
 	// The same settings on a heightmap world raise none of the planet warnings.
 	Config->WorldMode = EWorldMode::InfinitePlane;

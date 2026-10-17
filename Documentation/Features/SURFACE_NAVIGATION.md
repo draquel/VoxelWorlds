@@ -55,11 +55,34 @@ VoxelCharacterPlugin's `UVCVoxelPathProvider` (an `IVCPathProvider`) wraps the s
 one on possess when no provider was set, so surface creatures path over the voxels while dungeon enemies keep their
 grid provider. The surface spawner uses `IsWalkableAt` to reject spawn points.
 
+### On a planet (spherical Phase 4, SP-G4)
+
+A search runs in the tangent-plane frame of the **region** its start lies in (`FVoxelPlanetNavFrame`): regions are cells
+of a cube-sphere grid about 19,200 uu across (21 along a face edge on `Review_Planet`); a frame is gnomonic at the
+region centre on the datum sphere, east and north from the tangent frame (north toward +Z), and frame coordinates (x, y)
+map to the world through the direction of O + x·E + y·N from the centre (`ToFrame` refuses points past 60°). The
+pathfinder is unchanged: its height is the cell's **altitude** (`QueryEditMergedSurfacePoint` along the cell's direction,
+the analytic surface as the fallback), its water the altitude plane `WaterRadius − PlanetRadius` (exactly the sea
+sphere's depth along local up), its output turned back into world points.
+
+- One height cache per region frame, dropped after a minute unused; chunk loads and edits invalidate by each cached
+  tile's 3D bounds.
+- Blocked boxes are 3D on a planet (a cell is blocked when its surface point is inside the box), temporary blocks 3D
+  spheres; `ProjectToSurface` and `IsWalkableAt` work along local up; the debug grid and routes are drawn along it.
+- Heightmap worlds keep the old samplers, cache and blocks (`Navigation.Plane.SubsystemUnchanged`: the subsystem over a
+  plane chunk manager gives the old route, bit for bit).
+
+NPC AI steers in the gravity frame (VoxelCharacterPlugin `FVCGravityFrame`), so routes on a planet are followed on the
+tangent plane.
+
 ### Tests
 
 `VoxelWorlds.Navigation.Flat`, `CliffDetour`, `Water`, `BudgetAndBlocks`, `WorldBounds` (`Tests/VoxelNavigationTests.cpp`):
 pure pathfinder over lambda heightfields; `WorldBounds` blocks the cells outside an island footprint over flat dry ground
-(water off), as the subsystem does.
+(water off), as the subsystem does. On planets (`Tests/VoxelNavigationPlanetTests.cpp`): `Navigation.Planet.RegionFrames`
+(round trips, cells within 2% of their size 33 km out), `.Path` (at 45° and across a cube-face edge: waypoints on the
+surface, the goal reached, the region cache reused, walkability by the sea sphere), `.Blocks`;
+`Navigation.Plane.SubsystemUnchanged`.
 
 ### Related streaming fix
 

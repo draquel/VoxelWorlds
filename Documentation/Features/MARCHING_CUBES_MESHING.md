@@ -560,6 +560,20 @@ This ensures that surface materials (grass on top) are preferred over undergroun
 - At LOD 0, standard majority voting is used (no scanning needed)
 - The fix only affects Marching Cubes meshing; cubic meshing uses face-based material assignment
 
+### On a Planet (spherical Phase 4, SP-D1, SP-D2)
+
+Meshing and seam requests carry `LocalUp`, the chunk centre's local up (+Z on heightmap worlds, which runs the old
+arithmetic). On a planet:
+
+- The LOD material and biome scan walks the **digital line along `LocalUp`** (K = 0 to 8) instead of +Z, and prefers
+  the corner farthest along it (`Meshing.MarchingCubes.PlanetMaterialScan`: LOD 1 at 45° takes the surface material
+  as LOD 0 does).
+- The CPU geomorph morphs along the **axis nearest `LocalUp`**, its steepness gate on the normal along that axis as on
+  the plane (`Meshing.MarchingCubes.PlanetGeomorph`); the gate skips vertices more than 60° off the axis, as it skips
+  steep slopes on the plane. The GPU MC path (idle at runtime) turns the geomorph off on planets.
+
+Planets mesh with Dual Contouring by default, so these run only on an MC planet.
+
 ---
 
 **Status**: Implemented - CPU Marching Cubes with LOD material fix, skirts enabled by default, Transvoxel available but disabled

@@ -5,10 +5,58 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "VoxelSurfacePathfinder.h"
+#include "VoxelCubeSphere.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelSurfaceNavigationSubsystem.generated.h"
 
 class UVoxelChunkManager;
 enum class EEditSource : uint8;
+
+/**
+ * A planet search's frame (spherical Phase 4, WORLD_MODES_REVIEW_PLAN.md §18, WM-SY11; SP-G4): the tangent plane of the
+ * datum sphere at a region's centre, east and north there (FVoxelCubeSphere::GetTangentFrame). Frame point (x, y, h) is
+ * the point at altitude h along the direction from the centre through the plane's point (x, y) (a gnomonic projection:
+ * within 20 km of a region on a 250 km planet cells stay within 2% of their size). The surface pathfinder runs on
+ * (x, y) with the altitude as its height. Pure.
+ */
+struct VOXELNAVIGATION_API FVoxelPlanetNavFrame
+{
+	/** The region (a cell of the subsystem's region grid) this frame belongs to. */
+	FIntPoint Region = FIntPoint::ZeroValue;
+
+	/** Planet centre and datum radius. */
+	FVector Center = FVector::ZeroVector;
+	double Radius = 1.0;
+
+	/** Unit up, east and north at the frame's origin (the region centre on the datum sphere). */
+	FVector Up = FVector::UpVector;
+	FVector East = FVector::RightVector;
+	FVector North = FVector::ForwardVector;
+
+	/**
+	 * The frame at a direction.
+	 * @param InCenter Planet centre
+	 * @param InRadius Datum radius
+	 * @param Direction The frame's centre direction (normalised here)
+	 * @param InRegion The region it belongs to
+	 * @return The frame
+	 */
+	static FVoxelPlanetNavFrame Make(const FVector& InCenter, double InRadius, const FVector& Direction, const FIntPoint& InRegion = FIntPoint::ZeroValue);
+
+	/**
+	 * A world position in the frame.
+	 * @param World World position
+	 * @param OutFramePoint (x, y) on the tangent plane, altitude as Z
+	 * @return False more than 60 degrees from the frame's centre (outside any search from it)
+	 */
+	bool ToFrame(const FVector& World, FVector& OutFramePoint) const;
+
+	/** The unit direction through the tangent plane's point (x, y). */
+	FVector DirectionAt(double X, double Y) const;
+
+	/** The world position of a frame point (x, y, altitude). */
+	FVector ToWorld(const FVector& FramePoint) const;
+};
 
 /**
  * World-level surface navigation over the voxel terrain (feature 10): the pathfinder plus everything it
@@ -21,6 +69,11 @@ enum class EEditSource : uint8;
  * - Blocked boxes (POI structures, campsites …), temporary blocked cells (a stuck walker's repath) and every cell
  *   outside the world mode's bounds (an island's R + falloff; world modes review WM-I2), water on or off.
  * - Tunables through cvars (voxel.Nav.*), stats for logs, debug drawing (voxel.Nav.Debug).
+ * - Planets (spherical Phase 4, WM-SY11): a search runs in the tangent-plane frame (FVoxelPlanetNavFrame) of the region
+ *   its start lies in (regions: cells of a cube-sphere grid about four chunks across), with altitudes for heights and
+ *   the sea as the altitude WaterRadius - PlanetRadius; heights come from QueryEditMergedSurfacePoint along each cell's
+ *   direction (the analytic surface otherwise) and are cached per region frame (dropped after a minute unused);
+ *   blocked boxes and temporary blocks are 3D there. FVoxelSurfacePathfinder itself is the plane's.
  *
  * Game / PIE worlds only. Game thread only. Searches are synchronous and budgeted (MaxNodes), so callers
  * should spread requests over frames (an NPC repaths a few times a second at most).
@@ -126,6 +179,24 @@ private:
 	{
 		int32 Handle = 0;
 		FBox2D Box;
+		FBox Box3D; // the planet's test (the cell's surface point inside the box)
+	};
+
+	/** A planet's temporary block: every cell whose surface point lies within Radius (plus half a cell) of Center. */
+	struct FTempSphere
+	{
+		FVector Center = FVector::ZeroVector;
+		float Radius = 0.f;
+		double ExpireTime = 0.0;
+	};
+
+	/** A planet region's frame and its height cache. */
+	struct FRegionCache
+	{
+		FVoxelPlanetNavFrame Frame;
+		TMap<FIntPoint, TUniquePtr<FNavTile>> Tiles;
+		int32 Cells = 0;
+		double LastUsedSeconds = 0.0;
 	};
 
 	struct FTempBlock
@@ -149,6 +220,23 @@ private:
 	FIntPoint CellOf(const FVector& World) const;
 	FVector2D CellCentre(const FIntPoint& Cell) const;
 	void InvalidateCells(const FIntPoint& MinCell, const FIntPoint& MaxCell, bool bOnlyAnalytic);
+
+	/** Clear cached cells of a tile map in a cell rectangle. @return How many were cleared */
+	static int32 InvalidateTileCells(TMap<FIntPoint, TUniquePtr<FNavTile>>& InTiles, const FIntPoint& MinCell, const FIntPoint& MaxCell, bool bOnlyAnalytic);
+
+	// --- Planets (WM-SY11) ---
+
+	/** The region frame (and its cache) a world position belongs to; made on first use. */
+	FRegionCache& RegionFor(const FVector& World);
+
+	/** A planet cell's surface altitude in a region's frame (cached). */
+	float HeightForPlanetCell(FRegionCache& Region, const FIntPoint& Cell);
+
+	/** Temporary blocks and blocked boxes against a planet cell's surface point. */
+	bool IsPlanetCellBlocked(FRegionCache& Region, const FIntPoint& Cell);
+
+	/** Clear the cached planet cells whose frame points a world box's corners span, in every region. */
+	void InvalidatePlanetBox(const FBox& WorldBox, bool bOnlyAnalytic);
 	void ApplyCVars();
 	void DrawDebug();
 
@@ -170,6 +258,15 @@ private:
 	int32 NextBlockHandle = 1;
 	TArray<FTempBlock> TempBlocks;
 	TSet<FIntPoint> TempBlockedCells;
+
+	// --- Planets (WM-SY11) ---
+	bool bPlanet = false;
+	FVector PlanetCenter = FVector::ZeroVector;
+	double PlanetRadius = 0.0;
+	FVoxelSeaSurface PlanetSea;
+	FVoxelCubeSphereGrid RegionGrid;
+	TMap<FIntPoint, TUniquePtr<FRegionCache>> Regions;
+	TArray<FTempSphere> TempSpheres;
 
 	FVoxelSurfacePathStats LastStats;
 	int32 SearchCount = 0;

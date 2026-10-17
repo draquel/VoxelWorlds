@@ -19,7 +19,8 @@ with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API)
 results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-only) results: §14.9. M6 (the island's
 visible edge and scale) results: §14.10. Spherical Phase 1 (a correct
 planet on the CPU): plan and results in §15. Spherical Phase 2 (the planet on the GPU): plan and results in §16.
-Spherical Phase 3 (walkable): plan and results in §17. Spherical Phase 4 (systems): plan in §18.
+Spherical Phase 3 (walkable): plan and results in §17. Spherical Phase 4 (systems): plan in §18.1, results (met
+2026-10-17) in §18.2.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -1446,6 +1447,8 @@ Three findings from §13.11 get IDs here:
 | G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Fixed (§16.3): one cave carve for every world mode (`GpuCaveCarve`, the planet's generalised), after the biome blend as on the CPU. `GPUvsCPUCavesParity` adds four cases that fail on the old shader (biome scale 1.25 with a minimum-depth override, scale 0, scale 0.5, a chunk under the sea with `UnderwaterMinDepth`); every earlier parity case, planet included, keeps its CRC. `GenerationVersion` 2 (D10) | — |
 | G19 | Heightmap water consumers disagree on the water plane: generation, scatter, the map and PCG compare with `WaterLevel`; navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z` (found in spherical Phase 3, §17). They agree whenever `WorldOrigin.Z` is 0, as in every configuration in the project | Open, documented: both conventions are named in `FVoxelSeaSurface` (`FromConfig`, `FromConfigOriginRelative`) and every consumer goes through one of them; unifying would move water in a world with `WorldOrigin.Z` ≠ 0 | — |
 | G20 | Debug tooling: `vox.TP`'s settle re-requested an already-cooked chunk's collision, which re-cooks it under a pawn standing there (a READY→NOT-READY "re-cook" in the capture), and `vox.Debug.Capture` compared the frame after a teleport with the frame before, logging a "fall-through signature" at every teleport onto ground not streamed yet (found in spherical Phase 3's exit check, §17.2) | Fixed (§17.2, game module): the settle requests only chunks without collision; the capture restarts after a jump of more than a chunk in one frame and while the settle holds | (WM-W4) |
+| G21 | A fresh pawn's view was level in world space, not in its gravity: the engine's possess and restart leave the start spot's world-level rotation (and `AVCGameModeBase` builds respawn rotations from world yaw), so away from the north pole a spawned or respawned player looked into the ground or the sky (45° down after a drowning at 43°; 3° at the polar spawn, unnoticed in Phase 3). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): every possession levels the view on the first planet frame (`AVCPlayerController::bLevelViewInGravity`) | WM-SY21 |
+| G22 | World items lay in the world's frame on a planet: the mesh is `AWorldItem`'s root, so the placeholder's and the WorldDisplay fragment's resting pose (`SetRelativeRotation`) replaced the pool's upright rotation (a raw meat dropped at 8° latitude stood 81.5° off the radial). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): `AWorldItem::ApplyRestingPose` relative to the upright frame | WM-SY16 |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -1568,7 +1571,7 @@ this plan:
 | 1. A correct planet on the CPU | After M4 and M5 (D9: after M6) | L | SP-C1 (candidates cover the shell) takes WM-S1's shape: a per-column interval around the surface plus the viewer's neighbourhood, which for a planet is a shell. §13.11's fix already keeps a pole viewer's window at its own layer instead of near layer 40. WM-C1 removes the legacy path before planets test seams at mid latitudes (SP-D4). **Done 2026-10-16 (§15)**: work items WM-P1 to WM-P8 |
 | 2. GPU | After Phase 1 | L | As in the requirements doc. **Done 2026-10-16 (§16)**: work items WM-G1 to WM-G6 |
 | 3. Walkable | After Phase 1; can run beside Phase 2 (game side) | L | SP-F5 (KillZ) builds on WM-I4's recovery |
-| 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers. **Planned 2026-10-17 (§18)**: work items WM-SY1 to WM-SY22, milestones P4.1 to P4.6 |
+| 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers. **Planned 2026-10-17 (§18)**: work items WM-SY1 to WM-SY22, milestones P4.1 to P4.6. **Done 2026-10-17 (§18.2)**: the exit check met on `Review_Planet`, the `VoxelDemo` A/B identical to the base build |
 | 5. Places | After Phase 4 | M-L | Builds on WM-I1's world-mode-aware placement |
 | 6. Big planets and orbit | Not planned | — | SD1, SD5 |
 
@@ -3345,3 +3348,162 @@ the QA W, F6, F9 and F10 rows played briefly.
 **Left for Phase 5 and later.** POIs, generated campsites, dungeons and claims' conditioning on a planet (SP-B10,
 SP-G5, SP-G6, SP-G10; the WM-SY3 guard holds them off until then); the far-terrain band (SP-C5); the ocean shell showing
 in dry caves below sea level (§17.2); G19.
+
+### 18.2 Results (2026-10-17)
+
+All of WM-SY1 to WM-SY19 is built, each with its tests, and the exit check is met on `Review_Planet` (below). Three
+bugs the live check found are fixed (G21, G22, and `vox.Clock`'s offset). Heightmap worlds are unchanged: the suites
+pass, the "Unchanged" tests are bit for bit, and the `VoxelDemo` A/B against a base build matches (§18.2.4).
+
+Branches `feat/spherical-p4-systems` in VoxelWorlds, VoxelCharacterPlugin, InteractionPlugin and WorldClockPlugin, and
+`claude/spherical-p4-systems-044948` in UE5_PluginDev (PRs in §18.2.6).
+
+#### 18.2.1 What was built
+
+| ID | Built | Tests |
+|----|-------|-------|
+| WM-SY1 | On a planet `GetTerrainHeightAt` logs once (naming SP-A3) and returns the world Z where the vertical line meets the terrain on the upper hemisphere (a march and a bisection); `IVoxelWorldMode::GetAltitudeBounds` (heightmaps: the height bounds through `GetAltitude`; the planet: its shell); the planet's `GetTerrainHeightBounds` is the shell's world-Z extent | `WorldModes.Planet.LegacyHeight`, `WorldModes.Api.AltitudeBounds` |
+| WM-SY2 | `UVoxelChunkManager::QueryEditMergedSurfacePoint` (planet: a digital line of edit-merged voxels along local up, the crossing refined on the up-line in trilinear density; heightmaps: `QueryEditMergedSurface`), `GetGeneratedSurfacePoint`; `FVoxelSurfaceQuery::QueryPlanetSurfaceConditions` and `SampleSurfacePoint`; `FVoxelSurfaceSample` gains position, up and altitude; `FVoxelDigitalLine` (VoxelCore); a shared planet test world (VoxelStreaming `Public/Testing`) | `Streaming.Planet.EditMergedSurface`, `Streaming.Plane.EditMergedSurfaceUnchanged` (bit for bit at 1,000 points), `Generation.Planet.SurfaceConditions` |
+| WM-SY3 | Tree injection never runs on a planet; the field viewer's 2D fields show the upper hemisphere's surface above (X, Y) (altitude, slope against local up, climate at the datum-sphere point); POI placement, its conditioner, claims, streaming and markers held off on a planet until Phase 5, logged once (`UPOIPlacementSubsystem::IsHeldForPlanet`); player-placed campfire kits still work | `Editor.FieldSampler.Planet`, `POI.Planet.NoPlacement` |
+| WM-SY4 | Meshing and seam requests carry `LocalUp` (the chunk centre's; +Z on heightmaps); the MC LOD material and biome scan walks the digital line along it; the CPU MC geomorph runs along the axis nearest it (the idle GPU MC path turns it off on planets); the vertex factory's face type against the radial up (`UVoxelWorldComponent::SetRadialFaceUp`, `FVoxelSceneProxy::ConvertVertex`); `GetVoxelFaceTypeUp` in `VoxelMaterialCommon.ush` | `Meshing.MarchingCubes.PlanetMaterialScan`, `.PlanetGeomorph`, `Rendering.Planet.FaceTypeByLocalUp`; `Meshing.MarchingCubes.CPUvsGPU` unchanged |
+| WM-SY5 | The planet's ore `Rarity` test hashes the planet-relative voxel position with an exact integer hash shared by C++ and HLSL (`OreRarityKey`, `OreRarityHash`, `GpuOreRarityHash`); `PlanetGenerationVersion` 3 (D13); `UVoxelBiomeConfiguration::RebuildCaches` (edits after `InitializeDefaults` kept the default ores); the radius ceiling documented (SP-H2: `Features/WORLD_MODES.md`, `Research/TRAVERSAL_LIMITS.md`) | `WorldModes.Planet.OreRarityHash` (origin-invariant, the CPU and GPU hash equal), `Generation.GPUvsCPUSphericalParity` with a gold ore at `Rarity` 0.5 |
+| WM-SY6 | Scatter on a planet: `ExtractSurfacePointsAlongUp` (the column scan's rules along digital lines in the chunk's local up; crossings at chunk faces kept within 1.5 voxels of the analytic surface), face type, slope and elevation by the point's up and altitude, a spawn weight for density per area, instances on local up (`FScatterSpawnPoint::LocalUp`, `GetRotationQuat`), jitter in the tangent plane, the harvest box along local up, no GPU extraction; `voxel.Scatter.Digest` | `Scatter.Planet.AlongLocalUp` (within 8 uu of the surface, instances upright at both poles, 45°, the equator and a corner), `Scatter.Planet.DensityPerArea` (99-106% of the column scan's) |
+| WM-SY7 | The PCG surface sampler on a planet: the cube faces' UV grid at the spacing (`FPCGVoxelPlanetSurfaceGrid`: a flood fill from the box across face edges), the edit-merged surface near and the analytic surface far, rotated to local up or the normal, seeded by (face, cell), water through `FVoxelSeaSurface` | `PCG.Planet.SurfaceGrid` (worst gap 60 uu at a 100 uu spacing, no point twice, stable cells) |
+| WM-SY8 | Map tiles on the cube sphere (`FVoxelCubeSphere`, `FVoxelCubeSphereGrid`: 82 a face edge on `Review_Planet`, atlas keys), pixels along their directions, exploration by surface key, edit overlays along local up (`FVoxelMapEditOverlay::BuildPlanet`, format 2), `voxel.Map.Capture` as a north-up tangent-plane image; the planet water warning in `GetSettingsWarnings` gone | `Map.Planet.TileKeys`, `.TileMatchesGeneration` (1,000 pixels at five sites), `.Exploration`, `.EditOverlay` |
+| WM-SY9 | The minimap's tangent plane under the player (`FVCPlanetMapFrame`, north toward +Z, latitude and longitude shown), the world map's globe (`FVCGlobeProjection`, D11: dragged, zoomed, 30 redraws a second at most), the texture sampler (`FVCPlanetMapSampler`, a 16-texel control grid); `FVCMapMarker::WorldLocation`, `UVCMapMarkerRegistry::OnGatherMarkersNear` | `VoxelCharacter.Planet.MinimapFrame`, `.WorldMapProjection`, `.MapSampler` (99.4% / 99.8% of texels exact) |
+| WM-SY10 | Planet keys in the same save blobs (atlas tiles, altitude overlays, NPC kill ids by cube-sphere cell); `PlanetGeneration=3` refuses earlier planet saves | `VoxelWorldSave.Document.PlanetKeys` |
+| WM-SY11 | Navigation per region frame (`FVoxelPlanetNavFrame`: gnomonic, regions 19,200 uu, 21 a face edge), the unchanged pathfinder on altitude with the sea as the altitude plane `WaterRadius − PlanetRadius`, a height cache per region frame (dropped after a minute), 3D blocks and invalidation, `ProjectToSurface` / `IsWalkableAt` along local up | `Navigation.Planet.RegionFrames`, `.Path`, `.Blocks`, `Navigation.Plane.SubsystemUnchanged` (bit for bit) |
+| WM-SY12 | `FVCGravityFrame` helpers (each the old expression without custom gravity); the NPC AI's steering, distances, facing, wander and flee goals and auto-jump in the gravity frame; `GetPawnViewLocation` along local up for characters and NPCs | `VoxelCharacter.Planet.NPCSteering` (4,000 default-gravity expressions equal the old ones), `.EyeHeight` |
+| WM-SY13 | The surface NPC spawner on cube-sphere cells (40 a face edge on `Review_Planet`, kill ids unchanged in layout), 3D distances, spawn points through `QueryEditMergedSurfacePoint`, probes along local down, creatures upright, loot bursts along local up; the corpse topple along local up | `POI.SurfaceNPC.PlanetCells` (40 cells, 343 members, the same plan every time, three creatures spawned on a streamed planet) |
+| WM-SY14 | D12: with a planet frame (`UWorldClockSubsystem::SetPlanetFrame`, set by `UPOIPlanetClockBridge`) a world-fixed sun at longitude (12 − hour) × 15°, the local solar hour by longitude (`GetLocalHour` / `Phase` / `Daylight` / `TimeText`, `LocalToGlobal`, `SetLocalTimeOfDay`), the light by the sun's elevation (`DaylightForElevation`); the HUD, the NPC spawner, sleeping, `vox.Time` and `vox.Clock` on local time | `WorldClock.Planet.SolarTime` |
+| WM-SY15 | The SkyAtmosphere centred on the planet (`PlanetCenterAtComponentTransform`, bottom radius the sea radius in km), height fog and actors tagged `WorldClock.ZUpSky` hidden; `setup_planet_test.py` tags `PlanetTest`'s sky sphere | `WorldClock.Planet.Sky` |
+| WM-SY16 | World items stand and snap along the pool's gravity centre (`UWorldItemPoolSubsystem::SetGravityCenter`, set by `AVCGameModeBase`); placing (`TryPlaceItem`: the trace along local down ahead, the slope test on the normal in the gravity frame), the chop aim point, ragdolls pulled toward the centre (`StartRadialRagdoll` / `TickRadialRagdoll`) | `InteractionPlugin.WorldItem.SnapAlongGravity`, `VoxelCharacter.Planet.PlaceItem` |
+| WM-SY17 | `FVoxelBrushParams::Axis` (zero = local up at the brush centre) | `Edit.Brush.CylinderAxis` |
+| WM-SY18 | `voxel.Bench.Run gc=Lat:Lon:Heading[:Alt]` (`EVoxelBenchPath::GreatCircle`), `follow=` along local up, the restore hold along local down, the route in the report | `Bench.Planet.GreatCircleRoute` |
+| WM-SY19 | `vox.FindMaterial`, `vox.Chop`, `vox.SpawnNPC`, `vox.NavPath`, `vox.SpawnDummy`, `vox.Campsite` in the local frame; `vox.Time` / `vox.Clock` on local time; `vox.Edge` says a planet has no edge; `vox.TPPOI`, `vox.TPRoom`, `vox.Trap` say POIs are Phase 5 | live |
+
+Adjustments to the plan (§18.1's "How each is verified"):
+
+- `Generation.Planet.NoTreeInjection` was not written: the gate is one world-mode check before the injector, read in review.
+- `PCG.Plane.GridUnchanged` was replaced by the diff: the heightmap grid's code only moved into the `else` branch.
+- `POI.Campsite.PlanetNextMorning` is covered by `WorldClock.Planet.SolarTime` (`LocalToGlobal`, the function sleeping calls) and the live check.
+- `VoxelCharacter.Planet.RagdollGravity` is part of `VoxelCharacter.Planet.PlaceItem` (the pull only with custom gravity), and the live check saw a corpse lie flat on the local ground at latitude 12.
+- `WorldModes.Planet.OreHashOriginInvariant` is part of `WorldModes.Planet.OreRarityHash`.
+- `Map.Plane.TilePixelsUnchanged` and `POI.SurfaceNPC.PlaneCellsUnchanged` are the A/B's identical map image and NPC spawns (§18.2.4).
+- The face type is measured against the radial up per vertex in the scene proxy (`SetRadialFaceUp`), not a per-chunk `FChunkRenderData::FaceUp`: one flag on the component instead of a field on every render data.
+- The idle GPU MC mesher turns the geomorph off on planets instead of running it along the nearest axis (SP-D2 allows either; the CPU one runs it).
+
+#### 18.2.2 Tests
+
+- Headless (`-nullrhi`), `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin`: 349 / 349 (the first run
+  found `Configuration.PlanetSettings` still expecting the planet water warning WM-SY8 removed; the test was updated).
+- In the editor, the same filter with the GPU tests running: 349 / 349. `Generation.GPUvsCPUSphericalParity` passes at
+  every site and LOD with a gold ore at `Rarity` 0.5; the 48 heightmap parity lines (`GPUvsCPU*Parity`) are
+  CRC-identical to Phase 3's run, and the 27 planet lines equal this phase's earlier GPU gate.
+- After the exit check's fixes (G21, G22): `VoxelCharacter+InteractionPlugin+VoxelWorlds.Scatter` 62 / 62 headless.
+
+#### 18.2.3 Exit check (`PlanetTest` with `Review_Planet`, 2026-10-17)
+
+`vox.Debug.Capture 1` throughout: 10,653 capture lines, no READY→NOT-READY under the feet; the 15 lines without
+collision under the feet are spawn and teleport holds (12) and three re-cooks of a chunk being dug under a standing pawn
+whose old body stayed (`feetBody=1`). No SP-A3 legacy-height warning in the session: no planet path read the old query.
+
+| QA rows | Result on the planet |
+|---------|----------------------|
+| W-01 | Pass. The spawn search lands by direction three rings from the polar sea and holds until collision; the pawn stands 99 uu over the ground. The HUD clock reads local time (`Day 1 09:34`), the minimap draws the planet with `Lat 86.70 Lon 0.01` |
+| W-02 | Pass at 45°: walk 600, jump (rise 320), sprint 960 (1.6×) |
+| W-03 | Pass: under water at a depth of 854 the Air bar drains (13 s left after 8 s); the pawn drowns (damage, then death) and respawns 5 s later on the nearest land along its direction. The respawn's view was pitched 45° into the ground: G21, fixed below |
+| W-04 | Pass: speed 3,000 from 30°N 40°E on heading 195 for 60 s (about 78,500 uu, 40% of it swimming across seas the analytic route survey missed): `feetCol=1` on all 233 lines, no fall, no death. Voxel memory peaked at 1,082 MB at speed and settled at about 600 MB (`Review_Planet` has no D3-style budget) |
+| W-05 | Pass: the globe at zoom 1 (a local map) and 0.25 (the whole disc) shows the explored ground where it is: the polar patch at the top rim, the 45° patch up and to the west, the run's strip under the player; `Player: Lat 12.46 Lon 35.31`. No markers (Phase 5) |
+| W-06 | Pass: EDIT on the HUD, five digs (a clean hole), two builds (251 voxels each), walking into the hole on collision (62 / 62 lines), no carving with edit mode off (the swing chops instead); `voxel.Map.Capture 2 … 1` marks the dig's overlay |
+| W-07 | As planned (Phase 5): no POI, dungeon, claim or campsite actor on the planet; `vox.TPPOI`, `vox.TPRoom`, `vox.Trap` give the Phase 5 notice, `vox.Edge` says a planet has no edge |
+| F6-01 | Pass: one game hour per real minute |
+| F6-02 | Pass: 17:32 local is Day with the sun at 6.8°; 18:15 is Dusk, the sun at −3.7°, the sky darkening |
+| F6-03 | Pass: 23:02 Night, the sun at −71°; dark, lit from below like the plane's night (the "faint moon" is the sun light at 1/120 from below the horizon on both) |
+| F6-04 | Pass: at time scale 600 the local day counter reaches day 2 05:44 (Dawn) after 40 s and day 3 after 150 s |
+| F6-05 | Pass: time scale 0 holds 00:21 over 6 s. `vox.Clock` printed the local offset as −21.66 h once the local hour passed midnight before the global one (the difference of two wrapped hours): fixed to print `LocalHourOffset` |
+| F9-01 | Pass: rest at a kit campsite (respawn point set), `vox.Save`: day 4, one harvest volume, one placed actor, one player, 1,698 explored tiles (atlas keys), 3 map overlays (format 2), 1,330 edits in 3 chunks, one NPC kill id |
+| F9-02 | Pass: Stop, Play: the save loads (3 / 3 items, the edits, the explored tiles and overlays, the felled tree's volume, the campsite respawned), the pawn resumes at the saved spot (8.540°N 34.589°E), the clock goes on from day 4 |
+| F9-05 | Pass: save, dig four times and take a torch, `vox.Load`: the edit layer is back to 3 chunks and 1,330 edits, the inventory to the saved 3 items |
+| F9-06 | Pass: `vox.DeleteSave`, Stop, Play: "No save … fresh world", day 1 08:10, no edits, harvests or placed actors |
+| F9-07 | Pass: a "Game saved" toast came on its own during W-05 |
+| F9-03, F9-04 | Out of scope (dungeons) |
+| F10-01 | Pass at 12°N: deer in groups of two, upright within 0.01° of the radial, 2-5 uu over the ground, walking |
+| F10-02 | Pass: the herd switches to Flee at 706-759 uu and back to Wander about 2,100 uu away |
+| F10-03 | Pass: with the AI frozen, eight 5-point hits kill a deer; it drops hide and raw meat on the ground with the pickup prompt |
+| F10-04 | Pass at local 22:00: three wolves attack the player (5 a bite); the planned packs hunt deer; at the new day a wolf despawns "(new day)" |
+| F10-05 | Pass: `vox.Craft CR_CookedMeat 1` at the kit campsite (315 uu), eaten with F: health 40 → 80 |
+| F10-06 | Pass: a path to a point 16 m ahead is one straight leg (1,559 uu); after digging a trench across it, three waypoints and 1,780 uu round it; the debug grid is on the tangent plane |
+| F10-07 | Pass: leaving 400 m and coming back the same day brings back the same nine ids in the same cells |
+| F10-08 | Pass: a killed deer's id is saved (`surfaceNPCs/killedIds`); after Stop / Play "imported 1 kill record(s) for day 4", its cell's two other members return and it does not |
+| F10-09 | Pass: after a fast run every far creature despawns "(out of range)" and the six new ones stand on the ground (6-17 uu) |
+| F10-10 | Pass: day wolves wander at 8-19 m ignoring the player; one that wandered within 2 m attacked |
+| F10-11 | Pass: with a lit torch (light 1.2) two wolves hold at 801 and 906 uu and never bite; with it away they attack |
+| F10-12 | Pass: a hit deer and its herd flee; a hit idle day wolf attacks |
+| F2-08 | Pass with G22 fixed: Q drops the meat with its prompt and E picks it up, but it stood 81.5° off the radial |
+| F8-01 | Pass: `vox.Chop 3`: +1 Wood per swing, the spruce harvested |
+| F8-07 | Pass: the kit placed 315 uu ahead, upright within 0.07°, lit, with its prompt; the steep-ground refusal is `VoxelCharacter.Planet.PlaceItem`'s |
+
+Found and fixed in the check (each rechecked on the planet after the rebuild):
+
+- **G21: a fresh pawn's view was level in world space, not in its gravity.** The engine's possess and restart
+  (`FinishRestartPlayer`) set the control rotation to the start spot's world-level rotation and `AVCGameModeBase` builds
+  respawn rotations from world yaw, so away from the north pole the view pointed into the ground or the sky; near the
+  pole, where the first spawn is, it was 3° off and went unnoticed. Every possession now marks the view
+  (`AVCPlayerController::bLevelViewInGravity`, set in `OnPossess` and `AcknowledgePossession`), and the first frame in a
+  planet's gravity zeroes its pitch relative to local up, keeping the heading. Rechecked: 0.0° at the first spawn and
+  after a respawn at 43°.
+- **G22: world items lay in the world's frame.** The mesh is `AWorldItem`'s root, so the placeholder's zero and the
+  WorldDisplay fragment's lying pose (`SetRelativeRotation`) replaced the pool's upright rotation. The new
+  `AWorldItem::ApplyRestingPose` applies the pose on top of the upright rotation with a gravity centre and is the world
+  rotation without one (`InteractionPlugin.WorldItem.SnapAlongGravity` gains the pose). Rechecked: a dropped meat 0.00°
+  off the radial, 1 uu over the ground.
+- `vox.Clock`'s offset (above); scatter's GPU-extraction warning on planets is a Log line saying the planet extracts on
+  the CPU; `setup_planet_test.py` tags PlanetTest's sky sphere `WorldClock.ZUpSky` (`SKY_TAG_ONLY` for the existing map).
+
+#### 18.2.4 Heightmap worlds unchanged: the VoxelDemo A/B
+
+One script on both builds (`VoxelDemo`, no override; the feature build against the base: VoxelWorlds `fab8fa3`,
+VoxelCharacterPlugin `e51cc77`, InteractionPlugin `99cc023`, WorldClockPlugin `e0919ab`, UE5_PluginDev `a5948c1` for the
+game module, VoxelWorldPOI and VoxelWorldSave, with `voxel.Scatter.Digest` patched in for the run only). Time frozen at
+10:00 and the AI off, 60 s to settle, streaming frozen, then the map image, the digest twice, the NPCs, the clock,
+`vox.Edge`, three paths to fixed points, and a brief QA pass (dusk by fast-forward, a save, a spawned herd, night).
+
+The demo's configuration scatters on the GPU, whose extractor claims grid cells with atomics, so its digest is not
+reproducible run to run (16,660 and 15,624 points in two feature runs); the A/B ran with GPU extraction off in memory on
+both builds (the CPU path WM-SY6 leaves alone), where two feature runs agree exactly.
+
+| Check | Feature (two runs) | Base | |
+|-------|--------------------|------|---|
+| `voxel.Map.Capture 6` at the spawn | the same PNG | the same PNG | identical |
+| `voxel.Scatter.Digest` | 246 chunks, 18,502 points, 17 types | the same CRCs | identical |
+| NPC spawns (ids, cells, positions) | 6 deer; one spawn's retry offset (250 uu) differs between the two runs | the first run's | identical ids and cells; positions identical to the first run |
+| `vox.NavPath` to three points | no path / 1 waypoint, 3,957 uu / 9 waypoints, 17,061 uu (partial at 4,096 nodes) | the same | identical |
+| `vox.Clock`, phases | Day at 10:00, Dusk at 18:11, Night at 23:00 | the same | identical |
+| `vox.NPCs`, `vox.Edge`, the saves | | | identical |
+
+So heightmap scatter, the map, navigation, the NPC spawner, the clock and saves behave exactly as before. The spawner's
+retry offset depends on when a spot's collision is ready, on both builds (seen within the feature build). `vox.Edge` on an
+unbounded world prints its distance to the edge as `DBL_MAX` (on the base too; a follow-up).
+
+#### 18.2.5 A great-circle bench (WM-SY18 live)
+
+`voxel.Bench.Run p4gc 1500 90000 gc=30:40:195:2000 warmup=30` on `Review_Planet` (GPU generation): warmup 12.3 s, the
+traverse 90,000 uu in 60.0 s at 2,000 uu over the datum, catch-up 0.2 s, peak mesh / generation queues 8 / 94, frame P95
+29.0 ms, manager P95 7.7 ms, 1,208 LOD transitions, unload lag 87 ms mean (2,236 ms max), peak voxel systems 1,321 MB,
+residency audit 0 findings; the pawn restored at its start along local down (ground ready after 0.6 s). The report
+records `"path": "greatCircle"` and the route.
+
+#### 18.2.6 Left for later
+
+- Phase 5: POIs, generated campsites, dungeons and claims' conditioning on planets (SP-B10, SP-G5, SP-G6, SP-G10); the
+  WM-SY3 guard holds them off. Map markers on planets need their providers (the 3D marker plumbing is in).
+- The ocean shell in dry caves below sea level (§17.2), G19.
+- Remote clients: world items replicate only their item instance, not movement, so a planet's upright drop pose is the
+  server's; the view levelling runs on the owning client (`AcknowledgePossession`) but was checked in standalone only.
+- `vox.Edge`'s `DBL_MAX` on unbounded worlds (above); the injected mouse wheel does not reach the world map (the live
+  check set the zoom from Python).
+
+PRs: VoxelWorlds (two, stacked: P4.1 and P4.2; then the rest with these docs), VoxelCharacterPlugin, InteractionPlugin,
+WorldClockPlugin, UE5_PluginDev (VoxelWorldPOI, VoxelWorldSave, the game module, the setup script and PlanetTest, the
+gitlinks, the doc map).

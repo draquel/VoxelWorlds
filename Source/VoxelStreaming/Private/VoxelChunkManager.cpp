@@ -6160,7 +6160,7 @@ static bool ParseBenchVector(const FString& Value, FVector& Out, bool& bOutHasZ)
 static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 	TEXT("voxel.Bench.Run"),
 	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]] [start=X:Y[:Z]] ")
-	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
+	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		// Target the ticking game/PIE world, not the editor world the command may arrive on.
@@ -6199,7 +6199,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 
 		FVoxelBenchConfig Config;
 		TArray<FString> Positional;
-		bool bHasStart = false, bStartHasZ = false, bDistanceGiven = false;
+		bool bHasStart = false, bStartHasZ = false, bDistanceGiven = false, bHasGreatCircle = false;
 		FVector StartArg = FVector::ZeroVector;
 		for (const FString& Arg : Args)
 		{
@@ -6245,6 +6245,23 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 					Config.PathType = EVoxelBenchPath::Orbit;
 				}
 			}
+			else if (Key == TEXT("gc"))
+			{
+				// A planet's great circle (spherical Phase 4, SP-I4): latitude, longitude, heading from north, flight altitude.
+				TArray<FString> Parts;
+				Value.ParseIntoArray(Parts, TEXT(":"), true);
+				const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
+				if (Parts.Num() >= 3 && Cfg && Cfg->WorldMode == EWorldMode::SphericalPlanet)
+				{
+					FVoxelStreamingBenchmark::MakeGreatCircle(Config, Cfg->WorldOrigin, Cfg->WorldRadius, FCString::Atod(*Parts[0]),
+						FCString::Atod(*Parts[1]), FCString::Atod(*Parts[2]), Parts.Num() > 3 ? FCString::Atof(*Parts[3]) : 500.0f);
+					bHasGreatCircle = true;
+				}
+				else
+				{
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: gc=Lat:Lon:Heading[:Alt] needs a planet world and three values"));
+				}
+			}
 			else if (Key == TEXT("follow")) { Config.FollowTerrainAltitude = FCString::Atof(*Value); }
 			else if (Key == TEXT("warmup")) { Config.WarmupTimeoutSec = FCString::Atof(*Value); }
 			else if (Key == TEXT("catchup")) { Config.CatchUpTimeoutSec = FCString::Atof(*Value); }
@@ -6266,12 +6283,25 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 		// Start: an explicit start= (Z defaults to 500 above the analytic surface), else the player view
 		// (on the ground, so the leading edge stays at LOD0), else the chunk-manager owner.
 		FVector Start = FVector::ZeroVector;
-		if (bHasStart)
+		if (bHasGreatCircle)
+		{
+			Start = Config.StartPosition; // the great circle's own start
+		}
+		else if (bHasStart)
 		{
 			Start = StartArg;
 			if (!bStartHasZ)
 			{
-				Start.Z = CM->GetGeneratedSurfaceHeight(Start.X, Start.Y) + 500.0;
+				// 500 above the analytic surface (along local up on a planet).
+				if (CM->GetWorldBounds().Shape == EVoxelWorldBoundsShape::Shell)
+				{
+					const FVector Surface = CM->GetGeneratedSurfacePoint(Start);
+					Start = Surface + CM->GetUpVectorAt(Surface) * 500.0;
+				}
+				else
+				{
+					Start.Z = CM->GetGeneratedSurfaceHeight(Start.X, Start.Y) + 500.0;
+				}
 			}
 		}
 		else if (APlayerController* PC = TargetWorld->GetFirstPlayerController())

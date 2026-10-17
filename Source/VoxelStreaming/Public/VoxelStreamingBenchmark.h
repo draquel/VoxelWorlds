@@ -18,7 +18,12 @@ enum class EVoxelBenchPath : uint8
 	/** StartPosition, then each of RoutePoints in order (a polyline). */
 	Route,
 	/** A circle of OrbitRadius around OrbitCenter, starting at the point nearest StartPosition. */
-	Orbit
+	Orbit,
+	/**
+	 * A planet's great circle (spherical Phase 4, SP-I4): from GreatCircleStart along GreatCircleHeading, at
+	 * GreatCircleAltitude over the datum sphere of GreatCircleRadius around GreatCircleCenter.
+	 */
+	GreatCircle
 };
 
 /** Scenario + equilibrium parameters for a benchmark run. */
@@ -44,12 +49,24 @@ struct FVoxelBenchConfig
 	FVector2D OrbitCenter = FVector2D::ZeroVector;
 	float OrbitRadius = 0.0f;
 
+	/** GreatCircle only: the planet centre and datum radius, the start direction and the heading there (unit, tangent). */
+	FVector GreatCircleCenter = FVector::ZeroVector;
+	double GreatCircleRadius = 0.0;
+	FVector GreatCircleStart = FVector::UpVector;
+	FVector GreatCircleHeading = FVector::ForwardVector;
+
+	/** GreatCircle only: the flight altitude over the datum (FollowTerrainAltitude >= 0 follows the terrain instead). */
+	float GreatCircleAltitude = 500.0f;
+
+	/** GreatCircle only: the route as given (latitude, longitude, heading in degrees) for the report. */
+	FVector GreatCircleLatLonHeading = FVector::ZeroVector;
+
 	/** Traverse length along the path. Must exceed the initial load radius so new terrain streams.
 	 *  <= 0 means the whole route (Route) or one lap (Orbit); a Straight path needs a positive length. */
 	float TraverseDistance = 20000.0f;
 
 	/** >= 0: fly this many uu above the analytic surface (UVoxelChunkManager::GetGeneratedSurfaceHeight)
-	 *  instead of at a fixed Z. Heightmap world modes only (InfinitePlane, IslandBowl). */
+	 *  instead of at a fixed Z; on a planet along local up over UVoxelChunkManager::GetGeneratedSurfacePoint. */
 	float FollowTerrainAltitude = -1.0f;
 
 	/** Max time to wait for the initial load to settle before the traverse begins. Raise it to measure
@@ -148,6 +165,26 @@ private:
 	void SampleMemory();
 	/** Position along the configured path at arc length S (before terrain following). */
 	FVector EvaluatePath(double S) const;
+
+public:
+	/**
+	 * Configure a great-circle route (gc=lat:lon:heading[:alt]): the start direction at a latitude and longitude (+Z
+	 * north, longitude from +X toward +Y), the heading from north toward east there, a flight altitude over the datum.
+	 * @param InOutConfig Config to fill (PathType, the GreatCircle* fields, StartPosition)
+	 * @param Center Planet centre
+	 * @param Radius Datum radius
+	 * @param LatitudeDeg Latitude
+	 * @param LongitudeDeg Longitude
+	 * @param HeadingDeg Heading (0 = north, 90 = east)
+	 * @param Altitude Flight altitude over the datum
+	 */
+	static void MakeGreatCircle(FVoxelBenchConfig& InOutConfig, const FVector& Center, double Radius, double LatitudeDeg,
+		double LongitudeDeg, double HeadingDeg, float Altitude);
+
+	/** A great circle's point at arc length S (at the route's altitude), as EvaluatePath gives it. */
+	static FVector EvaluateGreatCircle(const FVoxelBenchConfig& InConfig, double S);
+
+private:
 	/** Apply FollowTerrainAltitude to a path position. */
 	FVector ApplyAltitude(const FVector& Pos) const;
 	/** Total path length for Route/Orbit (Straight returns TraverseDistance). */

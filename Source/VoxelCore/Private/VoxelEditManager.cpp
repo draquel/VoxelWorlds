@@ -261,8 +261,18 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 	const float VoxelSize = Configuration->VoxelSize;
 	const int32 ChunkSize = Configuration->ChunkSize;
 
-	// Calculate voxel bounds of the brush
-	const int32 VoxelRadius = FMath::CeilToInt(Brush.Radius / VoxelSize);
+	// The cylinder's axis: the brush's own, else local up at the centre (radial on a planet; SP-F8).
+	FVector CylinderAxis = Brush.Axis.GetSafeNormal();
+	if (CylinderAxis.IsZero())
+	{
+		CylinderAxis = (Configuration->WorldMode == EWorldMode::SphericalPlanet && !(WorldPos - Configuration->WorldOrigin).IsNearlyZero())
+			? (WorldPos - Configuration->WorldOrigin).GetSafeNormal()
+			: FVector::UpVector;
+	}
+	const bool bTiltedCylinder = Brush.Shape == EVoxelBrushShape::Cylinder && CylinderAxis != FVector::UpVector;
+
+	// Calculate voxel bounds of the brush (a tilted cylinder reaches sqrt(2) of its radius along the world axes)
+	const int32 VoxelRadius = FMath::CeilToInt((bTiltedCylinder ? Brush.Radius * UE_SQRT_2 : Brush.Radius) / VoxelSize);
 
 	// Auto-start operation if none in progress
 	const bool bAutoOperation = !CurrentOperation.IsValid();
@@ -310,6 +320,17 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 				case EVoxelBrushShape::Cylinder:
 					{
 						const FVector Delta = VoxelWorldPos - WorldPos;
+						if (bTiltedCylinder)
+						{
+							// Along the axis is handled like Z below; the distance is across it.
+							const double Along = FVector::DotProduct(Delta, CylinderAxis);
+							if (FMath::Abs(Along) > Brush.Radius)
+							{
+								continue;
+							}
+							Distance = static_cast<float>((Delta - CylinderAxis * Along).Size());
+							break;
+						}
 						Distance = FMath::Sqrt(Delta.X * Delta.X + Delta.Y * Delta.Y);
 						// Z is handled separately - if outside Z range, skip
 						if (FMath::Abs(Delta.Z) > Brush.Radius)

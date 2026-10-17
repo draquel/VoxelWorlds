@@ -19,6 +19,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "VoxelCubeSphere.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelBench, Log, All);
 
@@ -61,6 +62,17 @@ FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InCo
 			OrbitStartAngle = FMath::Atan2(Config.StartPosition.Y - Config.OrbitCenter.Y, Config.StartPosition.X - Config.OrbitCenter.X);
 		}
 	}
+	// A great circle: a unit start and a unit heading across it.
+	if (Config.PathType == EVoxelBenchPath::GreatCircle)
+	{
+		Config.GreatCircleStart = Config.GreatCircleStart.GetSafeNormal();
+		Config.GreatCircleHeading = (Config.GreatCircleHeading - Config.GreatCircleStart * FVector::DotProduct(Config.GreatCircleHeading, Config.GreatCircleStart)).GetSafeNormal();
+		if (Config.GreatCircleStart.IsNearlyZero() || Config.GreatCircleHeading.IsNearlyZero() || Config.GreatCircleRadius <= 0.0)
+		{
+			UE_LOG(LogVoxelBench, Warning, TEXT("Benchmark '%s': degenerate great circle, falling back to a straight path"), *Config.Tag);
+			Config.PathType = EVoxelBenchPath::Straight;
+		}
+	}
 	// Route and orbit default to the whole path (one lap); a straight path needs an explicit length.
 	if (Config.TraverseDistance <= 0.0f)
 	{
@@ -90,9 +102,40 @@ double FVoxelStreamingBenchmark::GetPathLength() const
 		return RouteCumulative.Num() > 0 ? RouteCumulative.Last() : 0.0;
 	case EVoxelBenchPath::Orbit:
 		return 2.0 * UE_DOUBLE_PI * Config.OrbitRadius;
+	case EVoxelBenchPath::GreatCircle:
+		// Unless a length is given: once round at the flight altitude.
+		return Config.TraverseDistance > 0.0f ? Config.TraverseDistance
+			: 2.0 * UE_DOUBLE_PI * (Config.GreatCircleRadius + FMath::Max(Config.GreatCircleAltitude, 0.0f));
 	default:
 		return Config.TraverseDistance;
 	}
+}
+
+void FVoxelStreamingBenchmark::MakeGreatCircle(FVoxelBenchConfig& InOutConfig, const FVector& Center, double Radius, double LatitudeDeg,
+	double LongitudeDeg, double HeadingDeg, float Altitude)
+{
+	const double La = FMath::DegreesToRadians(LatitudeDeg);
+	const double Lo = FMath::DegreesToRadians(LongitudeDeg);
+	const FVector Start(FMath::Cos(La) * FMath::Cos(Lo), FMath::Cos(La) * FMath::Sin(Lo), FMath::Sin(La));
+	FVector East, North;
+	FVoxelCubeSphere::GetTangentFrame(Start, East, North);
+	const double H = FMath::DegreesToRadians(HeadingDeg);
+	InOutConfig.PathType = EVoxelBenchPath::GreatCircle;
+	InOutConfig.GreatCircleCenter = Center;
+	InOutConfig.GreatCircleRadius = Radius;
+	InOutConfig.GreatCircleStart = Start;
+	InOutConfig.GreatCircleHeading = North * FMath::Cos(H) + East * FMath::Sin(H);
+	InOutConfig.GreatCircleAltitude = Altitude;
+	InOutConfig.GreatCircleLatLonHeading = FVector(LatitudeDeg, LongitudeDeg, HeadingDeg);
+	InOutConfig.StartPosition = Center + Start * (Radius + Altitude);
+}
+
+FVector FVoxelStreamingBenchmark::EvaluateGreatCircle(const FVoxelBenchConfig& InConfig, double S)
+{
+	const double FlightRadius = InConfig.GreatCircleRadius + InConfig.GreatCircleAltitude;
+	const double Angle = S / FMath::Max(FlightRadius, 1.0);
+	const FVector Direction = InConfig.GreatCircleStart * FMath::Cos(Angle) + InConfig.GreatCircleHeading * FMath::Sin(Angle);
+	return InConfig.GreatCircleCenter + Direction * FlightRadius;
 }
 
 FVector FVoxelStreamingBenchmark::EvaluatePath(double S) const
@@ -126,6 +169,8 @@ FVector FVoxelStreamingBenchmark::EvaluatePath(double S) const
 			Config.OrbitCenter.Y + Config.OrbitRadius * FMath::Sin(Angle),
 			Config.StartPosition.Z);
 	}
+	case EVoxelBenchPath::GreatCircle:
+		return EvaluateGreatCircle(Config, S);
 	default:
 		return Config.StartPosition + Config.Direction * S;
 	}
@@ -136,6 +181,12 @@ FVector FVoxelStreamingBenchmark::ApplyAltitude(const FVector& Pos) const
 	if (Config.FollowTerrainAltitude < 0.0f || !ChunkManager)
 	{
 		return Pos;
+	}
+	if (ChunkManager->GetWorldBounds().Shape == EVoxelWorldBoundsShape::Shell)
+	{
+		// A planet: over the surface along local up.
+		const FVector Surface = ChunkManager->GetGeneratedSurfacePoint(Pos);
+		return Surface + ChunkManager->GetUpVectorAt(Surface) * Config.FollowTerrainAltitude;
 	}
 	return FVector(Pos.X, Pos.Y, ChunkManager->GetGeneratedSurfaceHeight(Pos.X, Pos.Y) + Config.FollowTerrainAltitude);
 }
@@ -212,9 +263,11 @@ void FVoxelStreamingBenchmark::TickRestoreHold(float DeltaTime)
 
 	// The chunk under the pawn's feet: ask for its collision every half second (a request made while the
 	// chunk is still meshing is dropped), and release once it is cooked and a trace finds the ground.
+	// Along local down (radial on a planet; world -Z otherwise).
 	const float HalfHeight = Pawn->GetSimpleCollisionHalfHeight();
-	const FVector Feet = Pawn->GetActorLocation() - FVector(0.0, 0.0, HalfHeight);
-	const FIntVector FeetChunk = ChunkManager->WorldToChunkCoord(Feet - FVector(0.0, 0.0, 1.0));
+	const FVector Down = -ChunkManager->GetUpVectorAt(Pawn->GetActorLocation());
+	const FVector Feet = Pawn->GetActorLocation() + Down * HalfHeight;
+	const FIntVector FeetChunk = ChunkManager->WorldToChunkCoord(Feet + Down);
 	UVoxelCollisionManager* Collision = ChunkManager->GetCollisionManager();
 	if (Collision && RestoreElapsed >= RestoreNextNudge)
 	{
@@ -229,7 +282,7 @@ void FVoxelStreamingBenchmark::TickRestoreHold(float DeltaTime)
 		FHitResult Hit;
 		FCollisionQueryParams Params(FName(TEXT("VoxelBenchRestore")), /*bTraceComplex*/ true, Pawn);
 		bGrounded = World && World->LineTraceSingleByChannel(Hit, Pawn->GetActorLocation(),
-			Feet - FVector(0.0, 0.0, 300.0), ECC_WorldStatic, Params);
+			Feet + Down * 300.0, ECC_WorldStatic, Params);
 	}
 
 	if (bGrounded || RestoreElapsed >= Config.RestoreTimeoutSec)
@@ -607,7 +660,7 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 		}
 	}
 
-	static const TCHAR* PathNames[] = { TEXT("straight"), TEXT("route"), TEXT("orbit") };
+	static const TCHAR* PathNames[] = { TEXT("straight"), TEXT("route"), TEXT("orbit"), TEXT("greatCircle") };
 	Str(TEXT("path"), PathNames[static_cast<int32>(Config.PathType)]);
 	Vec(TEXT("start"), Config.StartPosition);
 	if (Config.PathType == EVoxelBenchPath::Straight)
@@ -622,6 +675,11 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 			Points += FString::Printf(TEXT("%s[%.0f, %.0f, %.0f]"), Points.IsEmpty() ? TEXT("") : TEXT(", "), P.X, P.Y, P.Z);
 		}
 		Fields.Add(FString::Printf(TEXT("    \"route\": [%s]"), *Points));
+	}
+	else if (Config.PathType == EVoxelBenchPath::GreatCircle)
+	{
+		Fields.Add(FString::Printf(TEXT("    \"greatCircle\": {\"latitude\": %.4f, \"longitude\": %.4f, \"heading\": %.2f, \"altitude\": %.1f}"),
+			Config.GreatCircleLatLonHeading.X, Config.GreatCircleLatLonHeading.Y, Config.GreatCircleLatLonHeading.Z, Config.GreatCircleAltitude));
 	}
 	else
 	{

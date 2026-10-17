@@ -89,6 +89,13 @@ struct VOXELCORE_API FVoxelBrushParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Brush", meta = (ClampMin = "1", ClampMax = "255"))
 	uint8 DensityDelta = 50;
 
+	/**
+	 * The Cylinder shape's axis (any length). Zero = the world's local up at the brush centre: +Z on a plane, the radial
+	 * direction on a planet (spherical Phase 4, SP-F8). Exactly +Z keeps the old arithmetic.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Brush")
+	FVector Axis = FVector::ZeroVector;
+
 	FVoxelBrushParams() = default;
 
 	/**

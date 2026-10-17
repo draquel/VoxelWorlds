@@ -165,7 +165,7 @@ search, the navigation water check (`FVoxelSurfaceNavParams::IsUnderwater`), the
 class. Heightmap worlds have two plane conventions, kept as they were: generation, scatter, the map and PCG compare with
 `WaterLevel` (`FromConfig`); navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z`
 (`FromConfigOriginRelative`). They agree whenever `WorldOrigin.Z` is 0, as in every configuration here (review plan
-G19). On a planet both are the sphere. The map and the PCG sampler still read `WaterLevel` on a planet (Phase 4).
+G19). On a planet both are the sphere; since spherical Phase 4 the map and the PCG sampler read it too.
 
 **The ocean shell (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
 `WaterRadius` on the surface coordinate's tangent warp, its resolution set so no quad sags more than 8 uu under the

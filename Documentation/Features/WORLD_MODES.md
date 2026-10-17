@@ -372,8 +372,10 @@ covers the shell at every latitude. The GPU generator has a planet branch (Phase
 `Generation.GPUvsCPUSphericalParity`), so planets follow `bUseGPUGeneration` like the other modes. **Walkable since
 2026-10-17** (Phase 3, review plan §17): gravity points at the centre (the character movement component sets the
 engine's custom gravity direction on every move), movement, camera and spawn work in the gravity frame, every water
-consumer asks one sea (`FVoxelSeaSurface`), and the chunk manager draws the ocean shell. The other game systems still
-assume +Z is up (scatter, map, navigation, NPC AI, POIs, sky: Phases 4 and 5). What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
+consumer asks one sea (`FVoxelSeaSurface`), and the chunk manager draws the ocean shell. **Its systems since
+2026-10-17** (Phase 4, review plan §18): scatter, PCG, the map, navigation, NPC AI and the NPC spawner, world items and
+placing, the edit brush, the clock and the sky work in the local frame ("Systems on a planet", below); POIs, dungeons and
+generated campsites are held off on planets until Phase 5. What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
 lives in the parent project: `/Game/PluginTesting/Planet` (`PlanetTest`, `PlanetWorldConfig`) and
 `/Game/PluginTesting/Review/Review_Planet` (water on).
 
@@ -421,13 +423,49 @@ times the layer's `VerticalScale`) and suppresses them under the sea (`WaterRadi
 local down: underground classification on digital lines along the chunk centre's down (SP-B7), and the water fill by
 the sea sphere (`ApplyRadialWaterFillPass`, `FVoxelSeaSurface`, SP-B8); the chunk manager's cross-chunk water and the
 edit-time propagation test the same sphere. The GPU generator does all of this too (GPU Implementation, below).
-`GetTerrainHeightAt(X, Y)` is still a legacy query that returns a radius
-for the equatorial direction (X, Y, 0) (SP-A3, Phase 4). Terrain outside the shell `[WorldRadius - PlanetMaxTerrainDepth,
+`GetTerrainHeightAt(X, Y)` is a legacy heightmap query: on a planet it logs once (naming SP-A3) and returns the world Z
+where the vertical line through (X, Y) meets the terrain on the upper hemisphere, so a stray caller lands on the northern
+surface instead of reading a radius as a Z. The surface queries are along local up (below); `GetAltitudeBounds` is the
+shell, −`PlanetMaxTerrainDepth` to +`PlanetMaxTerrainHeight`, and `GetTerrainHeightBounds` the shell's world-Z extent
+(SP-A4). Terrain outside the shell `[WorldRadius - PlanetMaxTerrainDepth,
 WorldRadius + PlanetMaxTerrainHeight]` is cut off; `UVoxelWorldConfiguration::GetSettingsWarnings` reports a shell that
 does not cover `BaseHeight ± PlanetHeightScale / 2` with continentalness's extremes (`GetDisplacementBounds`).
 
 The surface coordinate (`WorldToSurface` / `SurfaceToWorld`) is a cube sphere with the tangent warp,
 `u = (4/π)·atan(g)` per axis on each face: equal UV cells cover areas within 1.38× of each other.
+
+### Systems on a planet (Phase 4)
+
+Every system that reads the surface asks it along local up (review plan §18; heightmap worlds keep their own code paths,
+checked bit for bit where it matters):
+
+| System | On a planet | Where |
+|--------|-------------|-------|
+| Surface queries | `UVoxelChunkManager::QueryEditMergedSurfacePoint`: a digital line of edit-merged voxels along local up, the crossing refined in the trilinear density, the normal and slope against local up; `GetGeneratedSurfacePoint` (analytic); `FVoxelSurfaceQuery::QueryPlanetSurfaceConditions` / `SampleSurfacePoint` (generation's material and biome at a point). Heightmap modes: `QueryEditMergedSurface(X, Y)` | `VoxelChunkManager`, `VoxelSurfaceQuery` |
+| Surface coordinate | `FVoxelCubeSphere` (face frames, the tangent warp, the tangent frame with north toward +Z) and `FVoxelCubeSphereGrid` (cells on the six faces, atlas keys `(Face * N + U, V)`, neighbours across face edges, a flood fill within an angle): the key of the map, navigation and the NPC spawner | `VoxelCore/VoxelCubeSphere.h` |
+| Meshing | Requests carry the chunk centre's `LocalUp`: the MC LOD material scan walks along it, the CPU MC geomorph runs along the axis nearest it; the vertex factory's face type (top, side, bottom) is measured against the radial up | [MARCHING_CUBES_MESHING.md](MARCHING_CUBES_MESHING.md), [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) |
+| Ores | The `Rarity` test hashes the planet-relative voxel position with an exact integer hash, the same on the CPU and the GPU (`PlanetGenerationVersion` 3) | [ORE_VEINS.md](ORE_VEINS.md) |
+| Scatter | Surface points along digital lines in the chunk's local up; face type, slope and elevation by local up and altitude; instances stand on local up; density per area kept | [SCATTER_SYSTEM.md](SCATTER_SYSTEM.md) |
+| PCG | The surface sampler's points on the cube faces' UV grid, rotated to local up | `VoxelPCG` |
+| Map | Tiles are cube-sphere cells; pixels along their directions; the minimap is the tangent plane under the player, the world map a globe | [MAP_SYSTEM.md](MAP_SYSTEM.md) |
+| Navigation | Each search in the tangent-plane frame of the region it starts in, altitude as height, the sea as an altitude plane | [SURFACE_NAVIGATION.md](SURFACE_NAVIGATION.md) |
+| Edit brush | The cylinder's axis is local up at the brush centre (`FVoxelBrushParams::Axis`, zero = local up) | [EDIT_LAYER.md](EDIT_LAYER.md) |
+| Bench | `voxel.Bench.Run gc=Lat:Lon:Heading[:Alt]`: a great circle at a fixed altitude | `VoxelStreamingBenchmark` |
+| Game side | NPC AI and eye height in the gravity frame, the NPC spawner on cube-sphere cells, world items and placing along gravity, local solar time and a sky centred on the planet (`WorldClockPlugin`), POIs held off until Phase 5 | parent project, `VoxelCharacterPlugin`, `InteractionPlugin`, `WorldClockPlugin` |
+
+Tree injection never runs on a planet (SP-B9: cubic only).
+
+### The radius ceiling (SP-H2)
+
+The scene proxy bakes absolute world positions into float vertices (`FVector3f`), whose spacing (ULP) is about 0.06 uu
+1,000,000 uu (10 km) from the world origin and 1 uu at 10,000,000 uu (100 km), where seams and the crossfade start to
+show it; collision trimeshes are chunk-local, placed by a double transform, and stay exact
+([TRAVERSAL_LIMITS.md](../Research/TRAVERSAL_LIMITS.md) #4, #5). Every surface vertex lies about R from the
+planet's centre, so with the centre at the world origin the ceiling is a radius of about 100 km (a centre placed away
+from the origin adds its distance); the GPU's density is planet-relative already (review plan §16), its cave and ore
+noise at absolute float positions (SP-H1). Past that, origin rebasing
+is needed, and it has to separate two roles `WorldOrigin` plays today: the planet's centre (generation, gravity, the
+surface coordinate) and the chunk grid's origin (chunk keys, saves, the edit layer).
 
 ### Spawn Position
 
@@ -472,15 +510,14 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 - **Small planets** (SD1): past the planet-relative distance and direction the GPU works in single precision (its
   cave and ore noise at absolute positions), as the CPU's noise does; parity is measured on a 250,000 uu planet.
   Large planets need SP-H1
-- Scatter, PCG, the map, navigation, POIs, NPC AI, world-item drops, the edit brush, the sky and the clock still assume
-  +Z is up (requirements doc, Appendix A; Phases 4 and 5): trees stand along world Z, the sky and clouds are a Z-up
-  layer (the equator and the south pole read as night or below the horizon), NPCs fall toward the centre but steer in
-  world yaw
-- Water: one sea for generation and gameplay (`FVoxelSeaSurface`, `WaterRadius`); the map and the PCG sampler still
-  read the Z-plane `WaterLevel` (`GetSettingsWarnings` says so). The ocean shell is a sphere, so it also shows inside dry
-  caves below sea level
+- POIs, dungeons, generated campsites and claims' conditioning are held off on planets until Phase 5 (SP-G5, SP-G6,
+  SP-B10, SP-G10): POI placement samples heightmap heights and would land its sites above the northern hemisphere or
+  inside the planet. Player-placed campfire kits work
+- Water: one sea for every consumer (`FVoxelSeaSurface`, `WaterRadius`). The ocean shell is a sphere, so it also shows
+  inside dry caves below sea level
+- The sun has no axial tilt: the poles sit in a low sun all day (decision D12)
 - Designed for surface exploration; orbital viewing would need an octree or cube-sphere quadtree LOD (SD5)
-- No 2D system keys on the surface coordinate yet (map tiles, navigation, POI cells, explored tiles: Phase 4)
+- Radius: see "The radius ceiling" above
 
 ---
 

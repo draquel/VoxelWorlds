@@ -159,6 +159,10 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	{
 		UE_LOG(LogVoxelScatter, Log, TEXT("Cubic mode: scatter extracts block-face centres on the CPU (bUseGPUScatterExtraction is ignored)"));
 	}
+	else if (Config->bUseGPUScatterExtraction && Config->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		UE_LOG(LogVoxelScatter, Log, TEXT("Spherical planet: scatter extracts along local up on the CPU (bUseGPUScatterExtraction is ignored)"));
+	}
 	else if (Config->bUseGPUScatterExtraction && !bUseGPUExtraction)
 	{
 		UE_LOG(LogVoxelScatter, Warning, TEXT("GPU scatter extraction unavailable (SM5 unsupported or -VoxelForceCPU), falling back to CPU"));
