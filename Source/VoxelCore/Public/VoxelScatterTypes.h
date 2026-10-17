@@ -94,6 +94,20 @@ struct VOXELCORE_API FVoxelSurfacePoint
 	/** Pre-computed slope angle in degrees (0 = flat, 90 = vertical). Computed during surface extraction. */
 	float SlopeAngle = -1.0f;
 
+	/** Local up at the point: +Z in heightmap modes, the radial direction on a planet (spherical SP-G1) */
+	FVector LocalUp = FVector::UpVector;
+
+	/** On a planet: the point's altitude above the datum, which the elevation filter reads instead of world Z */
+	float Altitude = 0.0f;
+	bool bHasAltitude = false;
+
+	/**
+	 * Share of the definition's density this point carries (1 for the column scan). A planet's extraction lines run
+	 * along local up, spaced across the axis nearest it, so they meet level ground more densely by 1 / cos of the angle
+	 * between the two; this weight (that cosine) brings the density per area back to the column scan's.
+	 */
+	float SpawnWeight = 1.0f;
+
 	FVoxelSurfacePoint() = default;
 
 	FVoxelSurfacePoint(const FVector& InPos, const FVector& InNormal, uint8 InMaterial, uint8 InBiome, EVoxelFaceType InFaceType)
@@ -110,6 +124,13 @@ struct VOXELCORE_API FVoxelSurfacePoint
 	void ComputeSlopeAngle()
 	{
 		const float CosAngle = FMath::Clamp(FVector::DotProduct(Normal, FVector::UpVector), -1.0f, 1.0f);
+		SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(CosAngle));
+	}
+
+	/** Compute and cache the slope angle against a local up (a planet's radial direction, spherical SP-G1) */
+	void ComputeSlopeAngle(const FVector& Up)
+	{
+		const float CosAngle = FMath::Clamp(static_cast<float>(FVector::DotProduct(Normal, Up)), -1.0f, 1.0f);
 		SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(CosAngle));
 	}
 
@@ -221,6 +242,10 @@ struct VOXELCORE_API FScatterSpawnPoint
 	UPROPERTY(BlueprintReadOnly)
 	float RotationYaw = 0.0f;
 
+	/** Local up at the surface point: the instance stands along it when not aligned to the normal (spherical SP-G1) */
+	UPROPERTY(BlueprintReadOnly)
+	FVector LocalUp = FVector::UpVector;
+
 	FScatterSpawnPoint() = default;
 
 	FScatterSpawnPoint(const FVector& InPos, const FVector& InNormal, int32 InTypeID, uint32 InSeed)
@@ -242,16 +267,43 @@ struct VOXELCORE_API FScatterSpawnPoint
 			const FQuat YawQuat(Normal, FMath::DegreesToRadians(RotationYaw));
 			return (YawQuat * AlignQuat).Rotator();
 		}
-		else
+		else if (LocalUp == FVector::UpVector)
 		{
 			return FRotator(0.0f, RotationYaw, 0.0f);
 		}
+		else
+		{
+			return GetRotationQuat(bAlignToNormal).Rotator();
+		}
+	}
+
+	/**
+	 * The rotation as a quaternion. On a planet (LocalUp not +Z, spherical SP-G1) the instance's Z axis goes to local up
+	 * (or the normal when aligned) and the yaw turns about it, without the gimbal-prone round trip through FRotator; the
+	 * near-antiparallel case (local up near -Z, the south pole) turns +Z over first so the alignment stays exact.
+	 * Heightmap points: GetRotation's quaternion.
+	 */
+	FQuat GetRotationQuat(bool bAlignToNormal) const
+	{
+		if (LocalUp == FVector::UpVector)
+		{
+			return GetRotation(bAlignToNormal).Quaternion();
+		}
+		const FVector Up = bAlignToNormal ? Normal : LocalUp;
+		const FQuat AlignQuat = FVector::DotProduct(FVector::UpVector, Up) < -0.99
+			? FQuat::FindBetweenNormals(FVector::DownVector, Up) * FQuat(FVector::ForwardVector, UE_DOUBLE_PI)
+			: FQuat::FindBetweenNormals(FVector::UpVector, Up);
+		return FQuat(Up, FMath::DegreesToRadians(RotationYaw)) * AlignQuat;
 	}
 
 	/** Get transform for instance spawning */
 	FTransform GetTransform(bool bAlignToNormal, float SurfaceOffset = 0.0f) const
 	{
 		FVector AdjustedPosition = Position + Normal * SurfaceOffset;
+		if (LocalUp != FVector::UpVector)
+		{
+			return FTransform(GetRotationQuat(bAlignToNormal), AdjustedPosition, FVector(Scale));
+		}
 		FRotator Rotation = GetRotation(bAlignToNormal);
 		return FTransform(Rotation, AdjustedPosition, FVector(Scale));
 	}
@@ -315,11 +367,11 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
 	TArray<uint8> AllowedBiomes;
 
-	/** Minimum world Z height for placement */
+	/** Minimum world Z height for placement (on a planet: the altitude above the datum, spherical SP-G1) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
 	float MinElevation = -1000000.0f;
 
-	/** Maximum world Z height for placement */
+	/** Maximum world Z height for placement (on a planet: the altitude above the datum) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
 	float MaxElevation = 1000000.0f;
 
@@ -520,8 +572,10 @@ struct VOXELCORE_API FScatterDefinition
 			return false;
 		}
 
-		// Check elevation (two float comparisons, no trig)
-		if (Point.Position.Z < MinElevation || Point.Position.Z > MaxElevation)
+		// Check elevation (two float comparisons, no trig): world Z, or on a planet the altitude above the datum
+		if (Point.bHasAltitude
+			? (Point.Altitude < MinElevation || Point.Altitude > MaxElevation)
+			: (Point.Position.Z < MinElevation || Point.Position.Z > MaxElevation))
 		{
 			return false;
 		}
@@ -596,6 +650,21 @@ struct VOXELCORE_API FScatterDefinition
 			(RandomY * 2.0f - 1.0f) * PositionJitter,
 			0.0f
 		);
+	}
+
+	/**
+	 * Compute position jitter offset in the tangent plane of a local up (spherical SP-G1): the XY plane for +Z (the
+	 * offset above, bit for bit), the plane across the radial direction on a planet.
+	 */
+	FVector ComputePositionJitter(float RandomX, float RandomY, const FVector& Up) const
+	{
+		if (Up == FVector::UpVector || PositionJitter <= 0.0f)
+		{
+			return ComputePositionJitter(RandomX, RandomY);
+		}
+		const FVector T1 = FVector::CrossProduct(FMath::Abs(Up.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector, Up).GetSafeNormal();
+		const FVector T2 = FVector::CrossProduct(Up, T1);
+		return T1 * ((RandomX * 2.0f - 1.0f) * PositionJitter) + T2 * ((RandomY * 2.0f - 1.0f) * PositionJitter);
 	}
 };
 

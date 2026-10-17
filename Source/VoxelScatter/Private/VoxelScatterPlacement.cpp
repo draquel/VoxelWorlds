@@ -116,7 +116,7 @@ int32 FVoxelScatterPlacement::GenerateSpawnPointsForType(
 
 		// Probability check
 		const float Roll = RandomFromSeed(PointSeed);
-		if (Roll >= SpawnProbability)
+		if (Roll >= SpawnProbability * SurfacePoint.SpawnWeight)
 		{
 			continue;
 		}
@@ -128,6 +128,7 @@ int32 FVoxelScatterPlacement::GenerateSpawnPointsForType(
 		SpawnPoint.Normal = SurfacePoint.Normal;
 		SpawnPoint.ScatterTypeID = Definition.ScatterID;
 		SpawnPoint.InstanceSeed = PointSeed;
+		SpawnPoint.LocalUp = SurfacePoint.LocalUp;
 
 		// Compute variation using remaining random values
 		SpawnPoint.Scale = Definition.ComputeScale(RandomFromSeed(PointSeed));
@@ -136,10 +137,11 @@ int32 FVoxelScatterPlacement::GenerateSpawnPointsForType(
 		// Apply position jitter
 		if (Definition.PositionJitter > 0.0f)
 		{
-			FVector Jitter = Definition.ComputePositionJitter(
-				RandomFromSeed(PointSeed),
-				RandomFromSeed(PointSeed)
-			);
+			// The heightmap expression is kept as it was (the two draws' order is the compiler's, and must not change); a
+			// planet's point jitters in the plane across its local up (spherical SP-G1).
+			FVector Jitter = (SurfacePoint.LocalUp == FVector::UpVector)
+				? Definition.ComputePositionJitter(RandomFromSeed(PointSeed), RandomFromSeed(PointSeed))
+				: Definition.ComputePositionJitter(RandomFromSeed(PointSeed), RandomFromSeed(PointSeed), SurfacePoint.LocalUp);
 			// Block-face snap (cubic, WM-C3): the instance stays on the block face it was placed on. The
 			// cubic extractor puts one point at each top face's centre and reports the face size as the
 			// point spacing, so a jitter wider than half a face is scaled down to it (scaled, not clamped,

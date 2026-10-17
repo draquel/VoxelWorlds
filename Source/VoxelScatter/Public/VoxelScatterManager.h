@@ -217,6 +217,30 @@ public:
 	const TMap<FIntVector, FChunkScatterData>& GetScatterDataCache() const { return ScatterDataCache; }
 
 	/**
+	 * A digest of every cached spawn point, for comparing two builds' scatter on the same route (spherical Phase 4's
+	 * heightmap A/B, WORLD_MODES_REVIEW_PLAN.md §18): per scatter type the point count and a CRC of the points' type,
+	 * position (to 0.1 uu), yaw, scale and local up, visited in chunk order. The console command voxel.Scatter.Digest
+	 * logs it for every game world.
+	 *
+	 * @return "types=N chunks=M points=P | type <id>: <count> crc <hex> | ..."
+	 */
+	FString ComputeScatterDigest() const;
+
+	/**
+	 * ExtractSurfacePointsAlongUp without cleared volumes (spherical SP-G1): a planet chunk's surface points along local
+	 * up, for tests and tools. Pure and thread-safe.
+	 */
+	static void ExtractPlanetSurfacePoints(
+		const TArray<FVoxelData>& VoxelData,
+		const FIntVector& ChunkCoord,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize,
+		float PointSpacing,
+		const FScatterExtractionContext& Context,
+		FChunkSurfaceData& OutSurfaceData);
+
+	/**
 	 * Get number of chunks pending scatter generation (queued + in-flight async).
 	 * Used to detect if world is still loading.
 	 */
@@ -342,7 +366,8 @@ public:
 	 * @param TrunkRadius   Half-extent in X / Y (keeps neighbouring grass).
 	 * @param Height        Box height above the base.
 	 */
-	static FScatterExclusionVolume MakeHarvestExclusionVolume(const FVector& InstanceBase, float TrunkRadius = 60.0f, float Height = 400.0f);
+	static FScatterExclusionVolume MakeHarvestExclusionVolume(const FVector& InstanceBase, float TrunkRadius = 60.0f, float Height = 400.0f,
+		const FVector& Up = FVector::UpVector);
 
 	/** Pure: was this volume made by MakeHarvestExclusionVolume (a felled instance, worth persisting). */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Scatter|Harvest")
@@ -592,6 +617,27 @@ protected:
 		int32 ChunkSize,
 		float VoxelSize,
 		float SurfacePointSpacing,
+		const TArray<FClearedScatterVolume>& ClearedVolumes,
+		const FScatterExtractionContext& Context,
+		FChunkSurfaceData& OutSurfaceData);
+
+
+	/**
+	 * ExtractSurfacePointsFromVoxelData on a planet (spherical SP-G1): the same scan along digital lines in the chunk's
+	 * local up instead of world-Z columns. The lines step one voxel along the axis nearest local up and are spaced on
+	 * the stride grid across it; along each, every solid voxel with air above it along the line is a point (the first
+	 * one open, the rest underground, as in a column), interpolated toward the voxel above. A crossing whose voxel above
+	 * lies outside the chunk (the chunk's upper face or a side the line enters through) is kept only within 1.5 voxels
+	 * of the analytic surface, the planet's cover check. Face type, slope and the elevation filter go by the point's
+	 * radial up and altitude; SpawnWeight keeps the density per area the column scan's. The async pipeline calls it for planet chunks.
+	 */
+	static void ExtractSurfacePointsAlongUp(
+		const TArray<FVoxelData>& VoxelData,
+		const FIntVector& ChunkCoord,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize,
+		float PointSpacing,
 		const TArray<FClearedScatterVolume>& ClearedVolumes,
 		const FScatterExtractionContext& Context,
 		FChunkSurfaceData& OutSurfaceData);
