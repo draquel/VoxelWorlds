@@ -1437,7 +1437,7 @@ Three findings from §13.11 get IDs here:
 | G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
-| G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Open, not investigated past the repro; `Streaming.Planet.ClosedSurface` reports them and fails on any other hole | — |
+| G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -2544,7 +2544,7 @@ LOD bands at 0|1 (four edges at latitude 45, longitude 45). Not planet-specific:
 chunk 16, voxel 100 and three bands has the same, 5 edges at a 1|2 face seam. The seam is ready and clean and its LOD pair
 current when measured, so it is the face seam's geometry, not scheduling; MS1's mixed-LOD face seam unit tests cover 0|1,
 1|0 and 0|2 on flat and sloped binary solids only, not 1|2 or noise terrain. Not fixed here: the test reports G17 holes
-and fails on any other hole, so a fix makes it strict.
+and fails on any other hole, so a fix makes it strict. *Fixed since (§15.3), and the test is strict.*
 
 **Things to know.**
 
@@ -2571,10 +2571,79 @@ and fails on any other hole, so a fix makes it strict.
   KillZ; the pawn lands in the sea at the north pole now that the terrain is right.
 - POIs still sit inside the planet (SP-G5, Phase 5); scatter, map, navigation and NPCs still assume +Z (Phase 4).
 - `GetTerrainHeightAt(X, Y)` on a planet is still the legacy equatorial query (SP-A3, Phase 4).
-- G17 (above): proposed as its own session.
+- G17 (above): fixed in its own session (§15.3).
 - **The sea sphere's light and dark halves.** Where a view crosses the sphere's cap twice (in and out, past the loaded
   terrain: the survey's 45° and south-pole views), part of the sea reads lighter and part darker, split along one grid
   row (near y = 0 there). The water material (`MI_Ocean`) is two-sided translucent and the sphere is one unsorted mesh, so
   in part of the view its far side blends over its near side. The sun (straight down) and shadows (the sphere casts none)
   are not involved, and world-space UVs and tangents on the sphere did not change it. Cosmetic, on the test actor's
   stand-in sea; SP-E2 (Phase 3) replaces it.
+
+### 15.3 G17: holes in mixed-LOD seams (2026-10-16)
+
+Fixed on VoxelWorlds `fix/g17-mixed-lod-face-seam` (base `b73bd25`, main after spherical Phase 1). Built with editor
+5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree.
+
+**Cause.** The mixed-LOD seam meshers (the face seam of P2c, the edge and corner seams of P2d;
+`Research/SEAM_OWNERSHIP_ARCHITECTURE.md` §2.5) stitch at the finest stride of their participants: every fine
+crossing gets a fan onto the cells of the coarser side. A coarse cell gets a vertex only from crossings on its own
+twelve edges, sampled at its own stride. Where the surface pokes through a coarse cell's face between those samples (a
+small bump or dimple crossing the face plane, a hilltop or a ridge grazing it), all the coarse cell's corners have one
+sign: it has no vertex, the fan onto it was skipped ("a crack, never a protrusion"), and the fine side's quads around
+the crossing had nothing to meet. That is the hole: two to six open edges, the 5 to 6 a run §15.2 measured. Scheduling
+was never involved (§15.2 found the seams ready, clean and current), and nothing is planet-specific: noise terrain with
+features a few voxels across, at any face orientation.
+
+**Fix.** `ComputeBoundaryFallbackVertex` (`VoxelCPUDualContourMesher.cpp`): a coarse cell a fan needs that has no
+crossing at its own stride gets a vertex from the same QEF solve over every voxel-resolution (stride-1) crossing on its
+six faces, normals at stride 1, the position inside the coarse cell's bounds (surface-derived and in its own cell, so
+the #44 laws hold). The three mixed meshers call it, lazily, for exactly the cells they used to skip.
+- It only ever gives a vertex to a cell that was invalid. Interior passes and same-LOD seams only emit valid cells, so no
+  vertex they emit moves and the ring bit-identity contract (SC2, MS2, ES2, CS2, MT2) is untouched; same-LOD seams'
+  triangle counts are unchanged.
+- It depends only on the sampler view, the cell and its stride, not on the calling job's stitch stride, so the face, edge
+  and corner jobs that fan onto the same cell solve the same vertex.
+- Any finer crossing on a cell's boundary implies a stride-1 crossing there, so a fan never finds its cell missing; by
+  the parity argument around each primal face the fans then close.
+- CPU only. The seam meshers have no GPU twin (§7.2 option C of the seam doc: interiors and seams are CPU DC), so GPU
+  parity is unaffected; no shader or shared GPU code changed.
+
+**Tests.**
+- `Meshing.DualContour.SeamClosure.MS4_MixedFaceClosureNoise` (new): interior A + interior B + their face seam on noise
+  terrain (a rolling heightfield with small 3D bumps, density as the generators write it), 24 patches on each axis for
+  LOD 0\|1, 1\|0, 1\|2, 2\|1, 0\|2 and 2\|0, and a 1\|1 control.
+- `Meshing.DualContour.SeamClosure.MT3_MixedTupleClosureNoise` (new): 2 × 2 × 2 lattices on the same terrain (split
+  1\|2 on X, 2\|1 on Z, 0\|1 on Y, and LOD 0, 1 and 2 mixed), every interior, face, edge and corner mesh, closed
+  everywhere inside the lattice.
+- `Streaming.Planet.ClosedSurface` is strict: a G17 gap fails like any other hole. Two fixes to how it counts. It welds
+  vertices within 0.01 uu instead of rounding them to a 0.01 grid: a seam bucket's ring vertex is solved in the
+  neighbour's frame and shifted by a chunk, so it reached the check up to 0.00009 uu from the neighbour's own copy, and a
+  vertex on a rounding boundary split in two (the last two "gaps" left after the fix, and every T-junction the test had
+  counted). And an open edge is at the loaded region's edge when either end, not only its midpoint, lies within 8 voxels
+  of a chunk that is not loaded: a seam missing a participant leaves open the quads that needed its cells, and a long
+  LOD 2 edge's midpoint can lie farther out (850 uu against the 800 reach on the plane).
+- `Streaming.Plane.ClosedSurface` (new): the same check on an InfinitePlane with chunk 16, voxel 100 and the planet's
+  three LOD bands, from three viewers (216, 207 and 216 chunks: 8 to 9 at LOD 0, 60 to 78 at LOD 1, 120 to 148 at LOD 2).
+
+**Results.** "Before" is the same build with the fallback switched off (a temporary edit, reverted).
+
+| Run | Before | After |
+|-----|--------|-------|
+| `MS4`, 432 mixed face seams | 242 open edges in 46 seams: 0\|1 51, 1\|0 40, 1\|2 46, 2\|1 14, 0\|2 67, 2\|0 24 (1\|1 control: 0) | 0 |
+| `MT3`, 24 lattices, fallback off in the edge and corner meshers only | 24 open edges in 3 lattices (1\|2 5, 2\|1 6, mixed 13) | 0 |
+| Planet, north pole | 5 G17 edges at (1,1,12)\|(2,1,12), LOD 1\|2 | 0 |
+| Planet, latitude 45 | 5 at (7,6,7)\|(8,6,7), 1\|2 | 0 |
+| Planet, equator | 5 at (12,−1,−2)\|(12,−1,−3), 1\|2 | 0 |
+| Plane, origin | 5 at (1,−1,−1)\|(2,−1,−1), 1\|2 | 0 |
+| Plane, east | 8 at (14,1,0)\|(14,2,0), 1\|2, and 1 more by a same-LOD face (an edge seam's) | 0 |
+| Plane, south-west | 20 at 1\|2 and 0\|1 faces | 0 |
+
+These are the locations the planet run reported in §15.2. With the fix every run has 0 G17 gaps, 0 T-junctions and 0
+other holes; the only open edges are at the loaded region's edge (planet 298 to 329, plane 166 to 196). With only the
+face mesher's fallback, the plane still has 13 G17-classified edges and 2 others, from the edge and corner meshers.
+
+**Suites.** Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter`: **298 of 298** (295, plus `MS4`, `MT3` and
+`Plane.ClosedSurface`). In-editor (D3D12), the same three suites: **298 of 298**, the GPU tests running (the GPU vs
+CPU generation parity tests, `Meshing.MarchingCubes.CPUvsGPU`, `GPUAsync`, `Generation.GPUNoiseGeneratorAsync`,
+`InfinitePlane.GPUConsistency`); only the two retired GPU DC interior tests skip, as before. No live survey: the
+closed-surface tests check every rendered edge of a streamed world, which a survey cannot.

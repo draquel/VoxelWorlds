@@ -314,6 +314,18 @@ P2 closes the remaining openings: the edge/corner lattice and mixed-LOD faces. I
 4. **P2d — mixed-LOD edges/corners** (compose a+c machinery), then flip evaluation: bench + live
    soak with `voxel.Seam.Meshing 1` to qualify the default flip.
 
+*Update (G17, world modes review §15.3, 2026-10-16):* the mixed meshers (P2c, P2d) stitch at the finest
+participating stride, and a fine crossing could face a coarse cell with no crossing at its own stride (the
+surface poking through the coarse cell's face between its samples). Such a cell had no vertex, the fan onto it
+was skipped ("prefer cracks"), and that left a real hole of two to six open edges on noise terrain, at the pole,
+45° and the equator and on the plane. Such a cell now gets a **boundary fallback vertex**
+(`ComputeBoundaryFallbackVertex`): the same QEF solve over every stride-1 crossing on the cell's six faces,
+inside the coarse cell (surface-derived, own cell: the #44 laws still hold). It only ever gives a vertex to a cell
+that was invalid, so nothing an interior pass or a same-LOD seam emits moves and the ring bit-identity contract is
+untouched; it depends only on the sampler view, the cell and its stride (not on the job's stitch stride), so the
+face, edge and corner jobs that fan onto the same cell solve the same vertex. Guarded by `MS4_MixedFaceClosureNoise`
+and the strict `Streaming.{Planet,Plane}.ClosedSurface`.
+
 **Renderer/bucket encoding:** the seam bucket key generalizes from face axis to a **SeamSlot**
 byte — 0/1/2 = +X/+Y/+Z face, 3/4/5 = edge parallel to X/Y/Z, 6 = corner — so the existing
 (owner, slot) keyspace and unload cleanup (slots 0-6) carry P2 without interface churn.
