@@ -1212,6 +1212,17 @@ void UVoxelChunkManager::Initialize(
 		// Give scatter the analytic world mode so surface extraction can classify points covered by
 		// terrain in a neighboring chunk (cross-chunk cave floors / overhangs) as underground.
 		ScatterManager->SetWorldMode(WorldMode.Get());
+		// Planets: the chunk's conditioning zones, so a line's crossing at a chunk's upper face lands on the flattened
+		// ground (SP-B10). The scatter manager is ours and dies with us; it asks on the game thread.
+		ScatterManager->SetPlanetConditioningGatherer([this](const FBox& ChunkBox, TArray<FVoxelConditioningZone>& OutZones)
+		{
+			FVector CapDirection;
+			double CapAngle = 0.0;
+			if (GetPlanetCapOfBox(ChunkBox, CapDirection, CapAngle))
+			{
+				GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+			}
+		});
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
 			Configuration->ScatterRadius);
@@ -1738,19 +1749,19 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		return false;
 	}
 
-	// The analytic surface along the direction locates the line and makes the near/far decision, as the analytic height
-	// does for the column.
+	// The generated surface along the direction (the analytic one with the conditioning zones there, SP-B10) locates the
+	// line and makes the near/far decision, as the analytic height does for the column.
 	const FVector& Origin = Configuration->WorldOrigin;
-	const FVoxelTerrainSurfacePoint Estimate = WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
-	const FVector Up = WM->GetUpVector(Estimate.Position);
-	if (!IsChunkLoaded(FVoxelCoordinates::WorldToChunk(Estimate.Position - Origin, ChunkSize, VoxelSize)))
+	const FVector EstimatePosition = GetGeneratedSurfacePoint(WorldPos);
+	const FVector Up = WM->GetUpVector(EstimatePosition);
+	if (!IsChunkLoaded(FVoxelCoordinates::WorldToChunk(EstimatePosition - Origin, ChunkSize, VoxelSize)))
 	{
 		return false;
 	}
 
 	// A digital line of edit-merged voxels along local up through the estimate's voxel, one chunk either side (covers
 	// dig-down / build-up). Voxel I's density sample sits at Origin + I * VoxelSize; read it from inside its cell.
-	const FVector RelVoxel = (Estimate.Position - Origin) / VoxelSize;
+	const FVector RelVoxel = (EstimatePosition - Origin) / VoxelSize;
 	const FIntVector Start(FMath::FloorToInt32(RelVoxel.X), FMath::FloorToInt32(RelVoxel.Y), FMath::FloorToInt32(RelVoxel.Z));
 	const FVoxelDigitalLine Line = FVoxelDigitalLine::Make(Up);
 	const int32 Window = ChunkSize;
@@ -1802,14 +1813,14 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		return Result;
 	};
 	const float Iso = static_cast<float>(VOXEL_SURFACE_THRESHOLD);
-	const double TopT = FVector::DotProduct(Origin + FVector(Indices[Found + 1]) * VoxelSize - Estimate.Position, Up) + 1.5 * VoxelSize;
-	const double BottomT = FVector::DotProduct(Origin + FVector(Indices[Found]) * VoxelSize - Estimate.Position, Up) - 1.5 * VoxelSize;
+	const double TopT = FVector::DotProduct(Origin + FVector(Indices[Found + 1]) * VoxelSize - EstimatePosition, Up) + 1.5 * VoxelSize;
+	const double BottomT = FVector::DotProduct(Origin + FVector(Indices[Found]) * VoxelSize - EstimatePosition, Up) - 1.5 * VoxelSize;
 	const double Step = 0.25 * VoxelSize;
 	double HitT = TNumericLimits<double>::Max();
-	float AboveDensity = Trilinear(Estimate.Position + Up * TopT);
+	float AboveDensity = Trilinear(EstimatePosition + Up * TopT);
 	for (double T = TopT - Step; T >= BottomT && AboveDensity < Iso; T -= Step)
 	{
-		const float Density = Trilinear(Estimate.Position + Up * T);
+		const float Density = Trilinear(EstimatePosition + Up * T);
 		if (Density >= Iso)
 		{
 			HitT = T + Step * (Density - Iso) / FMath::Max(Density - AboveDensity, KINDA_SMALL_NUMBER);
@@ -1825,10 +1836,10 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		const float Denom = D1 - D0;
 		const float T = FMath::Abs(Denom) > KINDA_SMALL_NUMBER ? FMath::Clamp((Iso - D0) / Denom, 0.0f, 1.0f) : 0.5f;
 		const FVector Crossing = Origin + FMath::Lerp(FVector(Indices[Found]), FVector(Indices[Found + 1]), static_cast<double>(T)) * VoxelSize;
-		HitT = FVector::DotProduct(Crossing - Estimate.Position, Up);
+		HitT = FVector::DotProduct(Crossing - EstimatePosition, Up);
 	}
 
-	OutSample.Position = Estimate.Position + Up * HitT;
+	OutSample.Position = EstimatePosition + Up * HitT;
 	OutSample.Up = Up;
 	OutSample.MaterialID = Voxels[Found].MaterialID;
 	OutSample.BiomeID = Voxels[Found].BiomeID;
@@ -2772,9 +2783,10 @@ FVector UVoxelChunkManager::GetPlanetSpawnPosition() const
 	{
 		return Configuration->WorldOrigin;
 	}
-	// The configuration's point gives the direction; the terrain along it is the world mode's (SP-B11).
-	const FVoxelTerrainSurfacePoint Surface = GetSurfacePointAt(Configuration->GetPlanetSpawnPosition());
-	return Surface.Position + GetUpVectorAt(Surface.Position) * Configuration->PlanetSpawnAltitude;
+	// The configuration's point gives the direction; the terrain along it is the generated one, a POI's pad included (SP-B11,
+	// SP-B10).
+	const FVector Surface = GetGeneratedSurfacePoint(Configuration->GetPlanetSpawnPosition());
+	return Surface + GetUpVectorAt(Surface) * Configuration->PlanetSpawnAltitude;
 }
 
 FVoxelSeaSurface UVoxelChunkManager::GetSeaSurface(bool bOriginRelativePlane) const

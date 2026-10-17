@@ -14,6 +14,7 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelSurfaceQuery.h"
+#include "VoxelTerrainConditioning.h"
 #include "VoxelWorldModeFactory.h"
 #include "SphericalPlanetWorldMode.h"
 #include "Testing/VoxelTestChunkWorld.h"
@@ -360,6 +361,98 @@ bool FVoxelMapPlanetTileMatchesGenerationTest::RunTest(const FString& Parameters
 		TestTrue(TEXT("Some pixels are under the sea and some on land"), Water > 20 && Water < Checked - 20);
 		TestEqual(TEXT("Every pixel is the surface material along its direction, or the sea"), Matched, Checked);
 		TestTrue(TEXT("The poles are different tiles"), Map->WorldToTileCoord(Center + FVector(0, 0, Radius)) != Map->WorldToTileCoord(Center - FVector(0, 0, Radius)));
+	}
+	W.Stop();
+	Biomes->RemoveFromRoot();
+	return true;
+}
+
+// Spherical Phase 5 (WM-PL4; SP-B10): the planet's tiles draw the conditioned ground. A pad lowered under the sea on dry
+// land shows as sea over its inner radius, and beyond its ring the pixels are the natural surface's, as before.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapPlanetConditionedPixelsTest,
+	"VoxelWorlds.Map.Planet.ConditionedPixels",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelMapPlanetConditionedPixelsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelMapPlanetTest;
+	VoxelTesting::FTestChunkWorld W;
+	W.Create(TEXT("VoxelMapPlanetConditioned"));
+	W.ConfigureSmallPlanet();
+	UVoxelBiomeConfiguration* Biomes = ConfigureBiomesAndSea(W);
+	W.StartManager();
+
+	UVoxelMapSubsystem* Map = W.World->GetSubsystem<UVoxelMapSubsystem>();
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*W.Config);
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
+	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Biomes);
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::FromConfig(*W.Config);
+	const FVector Center = W.Config->WorldOrigin;
+	const double Radius = W.Config->WorldRadius;
+
+	// Dry land near 45 degrees: the pad's site.
+	FVector Site = FVector::ZeroVector;
+	for (int32 i = 0; i < 400 && Site.IsZero(); ++i)
+	{
+		const double Lat = FMath::DegreesToRadians(40.0 + (i % 20) * 0.5);
+		const double Lon = FMath::DegreesToRadians((i / 20) * 9.0);
+		const FVector Candidate(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+		if (Planet.GetTerrainAltitude(Candidate, W.Config->NoiseParams) > 150.0f)
+		{
+			Site = Candidate;
+		}
+	}
+	const float Inner = 700.0f;
+	const float Falloff = 300.0f;
+	const float SeaAltitude = static_cast<float>(Sea.Radius - Radius);
+	if (TestFalse(TEXT("Dry land found near 45 degrees"), Site.IsZero()) && TestNotNull(TEXT("The game world has a map"), Map))
+	{
+		W.Manager->AddConditioningZone(FVoxelConditioningZone::MakeRadial(Site, Inner, Falloff, SeaAltitude - 200.0f));
+		Map->RequestTilesInRadius(Center + Site * Radius, 1400.0f);
+		TestTrue(TEXT("Every tile drew"), DrainMap(Map, nullptr));
+		const FVoxelCubeSphereGrid& Grid = Map->GetPlanetTileGrid();
+		const int32 Res = Map->GetTileResolution();
+		int32 PadPixels = 0, PadSea = 0, FarPixels = 0, FarMatch = 0;
+		TArray<FIntPoint> Tiles;
+		Grid.GatherWithinAngle(Site, 1400.0 / Radius, 64, Tiles);
+		for (const FIntPoint& Tile : Tiles)
+		{
+			const FVoxelMapTile* Image = Map->GetTile(Tile);
+			if (!Image || Image->Resolution != Res)
+			{
+				continue;
+			}
+			for (int32 PY = 0; PY < Res; ++PY)
+			{
+				for (int32 PX = 0; PX < Res; ++PX)
+				{
+					const FVector Direction = Grid.DirectionAt(Tile, (PX + 0.5) / Res, (PY + 0.5) / Res);
+					const double Distance = FVoxelConditioningZone::GreatCircleDistance(Direction, Site, Radius);
+					const FColor Pixel = Image->PixelData[PY * Res + PX];
+					if (Distance <= Inner - 50.0)
+					{
+						++PadPixels;
+						PadSea += IsScaledColor(Pixel, FColor(20, 80, 180), 0.3f, 1.0f) ? 1 : 0;
+					}
+					else if (Distance >= Inner + Falloff + 100.0 && Distance <= 1300.0)
+					{
+						// The natural surface's pixel, as TileMatchesGeneration judges it.
+						const float Altitude = Planet.GetTerrainAltitude(Direction, W.Config->NoiseParams);
+						const bool bUnderSea = Radius + Altitude < Sea.Radius;
+						uint8 Material = 0, Biome = 0;
+						FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(Planet, Center + Direction * (Radius + Altitude), W.Config->VoxelSize,
+							W.Config->NoiseParams, Snapshot, Sea, Material, Biome);
+						++FarPixels;
+						FarMatch += (bUnderSea ? IsScaledColor(Pixel, FColor(20, 80, 180), 0.3f, 1.0f)
+							: IsScaledColor(Pixel, FVoxelMaterialRegistry::GetMaterialColor(Material), 0.75f * 0.55f, 1.25f)) ? 1 : 0;
+					}
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("Pad: %d of %d pixels sea; beyond the ring %d of %d the natural surface's"), PadSea, PadPixels, FarPixels, FarMatch));
+		TestTrue(TEXT("Pixels on the pad (non-vacuous)"), PadPixels > 200 && FarPixels > 200);
+		TestEqual(TEXT("The pad lowered under the sea draws as sea"), PadSea, PadPixels);
+		TestEqual(TEXT("Beyond the ring the natural surface"), FarMatch, FarPixels);
 	}
 	W.Stop();
 	Biomes->RemoveFromRoot();

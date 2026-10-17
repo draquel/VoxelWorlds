@@ -10,6 +10,8 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelSeaSurface.h"
 #include "IVoxelWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
+#include "VoxelTerrainConditioning.h"
 #include "VoxelData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -56,13 +58,21 @@ namespace VoxelScatterPlanetTestUtils
 		return Config;
 	}
 
-	/** The surface points of the 3x3x3 chunks around a site, extracted along local up at one point per voxel. */
-	TArray<FVoxelSurfacePoint> ExtractAround(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const FVector& Site)
+	/**
+	 * The surface points of the 3x3x3 chunks around a site, extracted along local up at one point per voxel. With
+	 * GenerationZones the chunks generate conditioned (spherical Phase 5); ContextZones go to the extraction context.
+	 */
+	TArray<FVoxelSurfacePoint> ExtractAround(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const FVector& Site,
+		const TArray<FVoxelConditioningZone>& GenerationZones = {}, const TArray<FVoxelConditioningZone>& ContextZones = {})
 	{
 		FScatterExtractionContext Context;
 		Context.WorldMode = &Mode;
 		Context.NoiseParams = Config->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
+		if (ContextZones.Num() > 0)
+		{
+			Context.PlanetZones = MakeShared<const TArray<FVoxelConditioningZone>>(ContextZones);
+		}
 		const double ChunkWorld = ChunkSize * VoxelSize;
 		const FVector Local = (Site - Config->WorldOrigin) / ChunkWorld;
 		const FIntVector Center(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
@@ -80,6 +90,7 @@ namespace VoxelScatterPlanetTestUtils
 			Request.VoxelSize = VoxelSize;
 			Request.NoiseParams = Config->NoiseParams;
 			FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
+			Request.ConditioningZones = GenerationZones;
 			TArray<FVoxelData> Voxels;
 			Generator.GenerateChunkCPU(Request, Voxels);
 			FChunkSurfaceData Surface;
@@ -159,6 +170,52 @@ bool FVoxelScatterPlanetAlongLocalUpTest::RunTest(const FString& Parameters)
 		TestEqual(*FString::Printf(TEXT("%s: the face type is by local up"), Site.Key), BadFace, 0);
 		TestEqual(*FString::Printf(TEXT("%s: instances stand on local up (within 0.01 degrees)"), Site.Key), BadInstance, 0);
 	}
+	Config->RemoveFromRoot();
+	return true;
+}
+
+// Spherical Phase 5 (WM-PL4; SP-B10): on a planet chunk generated with a raised pad, the lines that leave a chunk through
+// its upper face put their crossing on the generated (conditioned) surface: with the chunk's zones in the context every open
+// point lies within a voxel of it; without them the analytic test reads the natural ground and loses or misplaces points.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetConditionedLineTopTest,
+	"VoxelWorlds.Scatter.Planet.ConditionedLineTop",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterPlanetConditionedLineTopTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterPlanetTestUtils;
+	UVoxelWorldConfiguration* Config = MakePlanetConfig();
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
+	const FVector Center = Config->WorldOrigin;
+	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+	const FVector Site(C45, 0.0, C45);
+	const float Target = Planet.GetTerrainAltitude(Site, Config->NoiseParams) + 300.0f;
+	const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Site, 1500.0f, 1000.0f, Target) };
+	const FVector PadPoint = Center + Site * (Radius + Target);
+
+	auto Judge = [&](const TArray<FVoxelSurfacePoint>& Points, int32& OutOpen, int32& OutOff)
+	{
+		OutOpen = 0;
+		OutOff = 0;
+		for (const FVoxelSurfacePoint& Point : Points)
+		{
+			if (Point.bIsUnderground)
+			{
+				continue;
+			}
+			++OutOpen;
+			const FVoxelTerrainSurfacePoint Generated = Planet.GetConditionedSurfacePoint(Point.Position, Config->NoiseParams, Zones);
+			OutOff += FMath::Abs(Point.Altitude - Generated.Altitude) > VoxelSize ? 1 : 0;
+		}
+	};
+	int32 Open = 0, Off = 0, OpenWithout = 0, OffWithout = 0;
+	Judge(ExtractAround(Config, *Mode, PadPoint, Zones, Zones), Open, Off);
+	Judge(ExtractAround(Config, *Mode, PadPoint, Zones, {}), OpenWithout, OffWithout);
+	AddInfo(FString::Printf(TEXT("With the zones: %d open points, %d off the generated surface; without: %d open, %d off"), Open, Off, OpenWithout, OffWithout));
+	TestTrue(TEXT("The pad has points (non-vacuous)"), Open >= 2000);
+	TestEqual(TEXT("Every open point within a voxel of the generated surface"), Off, 0);
+	TestTrue(TEXT("Without the zones the line tops read the natural ground (the test is sensitive)"), OpenWithout < Open || OffWithout > 0);
 	Config->RemoveFromRoot();
 	return true;
 }

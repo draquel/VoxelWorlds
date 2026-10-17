@@ -2260,11 +2260,21 @@ void UVoxelMapSubsystem::GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Gen
 	}
 	const bool bRebuild = RebuildInput.IsValid();
 
+	// Planet conditioning over the tile and its apron (POI pads, spherical SP-B10): generation layers the zones onto the
+	// radial height, so the map must too (QA W-05). The tile's cap: its centre's direction and 1.5 tile widths of angle.
+	// Gathered here on the game thread; plain data.
+	TArray<FVoxelConditioningZone> Zones;
+	if (UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get())
+	{
+		ChunkMgr->GatherConditioningZonesOnSphere(Grid.CellCentreDirection(TileCoord), 1.5 * GetTileWorldSize() / FMath::Max(Radius, 1.0), Zones);
+	}
+
 	TWeakObjectPtr<UVoxelMapSubsystem> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
 		[WeakThis, TileCoord, Generation, WorldMode, Grid, NoiseParams, ChunkSize, VoxelSize, Center, Radius, Sea, bUseBiomes,
 		 MaterialPalette = MoveTemp(MaterialPalette), AltitudeMin, AltitudeMax, BiomeSnapshot,
-		 FallbackTempNoiseParams, FallbackMoistureNoiseParams, OwnOverlay, NeighbourOverlays, RebuildInput, bRebuild]() mutable
+		 FallbackTempNoiseParams, FallbackMoistureNoiseParams, OwnOverlay, NeighbourOverlays, RebuildInput, bRebuild,
+		 Zones = MoveTemp(Zones)]() mutable
 	{
 		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
 		const int32 Resolution = ChunkSize;
@@ -2283,7 +2293,7 @@ void UVoxelMapSubsystem::GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Gen
 			{
 				const FVector Direction = Grid.DirectionAt(TileCoord, (GX - 0.5) / Resolution, (GY - 0.5) / Resolution);
 				Directions[GY * GridSize + GX] = Direction;
-				Altitudes[GY * GridSize + GX] = Planet.GetTerrainAltitude(Direction, NoiseParams);
+				Altitudes[GY * GridSize + GX] = Planet.GetConditionedTerrainAltitude(Direction, NoiseParams, Zones);
 			}
 		}
 
@@ -2295,7 +2305,7 @@ void UVoxelMapSubsystem::GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Gen
 			if (bUseBiomes && BiomeSnapshot.bIsValid)
 			{
 				uint8 BiomeID = 0;
-				FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(Planet, Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea, MaterialID, BiomeID);
+				FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(Planet, Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea, MaterialID, BiomeID, &Zones);
 			}
 			else if (bUseBiomes)
 			{

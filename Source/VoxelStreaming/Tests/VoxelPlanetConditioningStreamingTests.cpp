@@ -129,4 +129,92 @@ bool FVoxelPlanetConditioningGatherTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// WM-PL4: every reader of a planet's generated surface sees the zones. On a streamed planet with a raised pad at 45 degrees
+// (a static planet zone): the edit-merged surface on the pad and its ring (the generated voxels) lies within a voxel of
+// GetGeneratedSurfacePoint and of FVoxelSurfaceQuery::SampleSurfacePoint with the zones (the PCG sampler's far points),
+// the pad's material there is generation's, and GetPlanetSpawnPosition stands on the pad.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetConditionedSurfaceTest,
+	"VoxelWorlds.Streaming.Planet.ConditionedSurface",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetConditionedSurfaceTest::RunTest(const FString& Parameters)
+{
+	VoxelTesting::FTestChunkWorld W;
+	W.Create(TEXT("PlanetConditionedSurface"));
+	W.ConfigureSmallPlanet();
+	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+	const FVector Site(C45, 0.0, C45);
+	W.Config->PlanetSpawnLocation = 2; // the north pole
+	W.Config->PlanetSpawnAltitude = 0.0f;
+	W.StartManager();
+	const FVector Center = W.Config->WorldOrigin;
+	const double Radius = W.Config->WorldRadius;
+	const float VoxelSize = W.Config->VoxelSize;
+
+	// A pad 300 uu over the natural ground at the site.
+	const float Natural = W.Manager->GetSurfacePointAt(Center + Site).Altitude;
+	const float Target = Natural + 300.0f;
+	const float Inner = 900.0f;
+	const float Falloff = 700.0f;
+	W.Manager->AddConditioningZone(FVoxelConditioningZone::MakeRadial(Site, Inner, Falloff, Target));
+	TestEqual(TEXT("The generated altitude at the site is the pad's"), W.Manager->GetGeneratedPlanetAltitude(Site), Target, 1e-3f);
+
+	// A second pad at the spawn direction: the spawn position stands on it.
+	const float PoleTarget = W.Manager->GetSurfacePointAt(Center + FVector::UpVector).Altitude + 200.0f;
+	W.Manager->AddConditioningZone(FVoxelConditioningZone::MakeRadial(FVector::UpVector, 500.0f, 300.0f, PoleTarget));
+	TestEqual(TEXT("GetPlanetSpawnPosition stands on the pad under it"),
+		static_cast<double>(W.Manager->GetAltitudeAt(W.Manager->GetPlanetSpawnPosition())), static_cast<double>(PoleTarget), 1.0);
+
+	W.SetViewer(Center + Site * (Radius + Target + 300.0));
+	if (TestTrue(TEXT("Streaming settles"), W.Settle()))
+	{
+		const FVector East = FVector::CrossProduct(FVector::UpVector, Site).GetSafeNormal();
+		const FVector North = FVector::CrossProduct(Site, East);
+		auto At = [&](double Distance, double Bearing)
+		{
+			const FVector Tangent = East * FMath::Cos(Bearing) + North * FMath::Sin(Bearing);
+			return (Site * FMath::Cos(Distance / Radius) + Tangent * FMath::Sin(Distance / Radius)).GetSafeNormal();
+		};
+		const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Site, Inner, Falloff, Target) };
+		const FVoxelSeaSurface Sea = W.Manager->GetSeaSurface();
+		int32 Points = 0, Found = 0, OffGenerated = 0, OffSample = 0, OnPad = 0;
+		double Worst = 0.0;
+		for (const double Distance : { 0.0, 300.0, 600.0, 850.0, 1100.0, 1300.0, 1500.0 })
+		{
+			for (int32 b = 0; b < 6; ++b)
+			{
+				const FVector Direction = At(Distance, b * UE_DOUBLE_PI / 3.0 + 0.2);
+				const FVector Probe = Center + Direction * Radius;
+				++Points;
+				FVoxelSurfaceSample Hit;
+				if (!W.Manager->QueryEditMergedSurfacePoint(Probe, Hit))
+				{
+					continue;
+				}
+				++Found;
+				const FVector Generated = W.Manager->GetGeneratedSurfacePoint(Probe);
+				const FVoxelSurfaceSample Analytic = FVoxelSurfaceQuery::SampleSurfacePoint(*W.Manager->GetWorldMode(), Probe, VoxelSize,
+					W.Config->NoiseParams, FVoxelBiomeSnapshot(), Sea, &Zones);
+				const double ToGenerated = FVector::Dist(Hit.Position, Generated);
+				Worst = FMath::Max(Worst, ToGenerated);
+				OffGenerated += ToGenerated > VoxelSize ? 1 : 0;
+				OffSample += FVector::Dist(Analytic.Position, Generated) > 0.01 ? 1 : 0;
+				if (Distance <= Inner)
+				{
+					OnPad += FMath::Abs(Hit.Altitude - Target) <= VoxelSize ? 1 : 0;
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%d of %d points found loaded; the worst %.1f uu from GetGeneratedSurfacePoint"), Found, Points, Worst));
+		TestTrue(TEXT("The pad and its ring are loaded (non-vacuous)"), Found >= Points * 3 / 4);
+		TestEqual(TEXT("The generated voxels lie on GetGeneratedSurfacePoint (pad and ring)"), OffGenerated, 0);
+		TestEqual(TEXT("SampleSurfacePoint with the zones is GetGeneratedSurfacePoint"), OffSample, 0);
+		TestTrue(TEXT("Inside the inner radius the edit-merged surface is at the pad's altitude"), OnPad >= 6 * 4 * 3 / 4);
+	}
+	W.Stop();
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

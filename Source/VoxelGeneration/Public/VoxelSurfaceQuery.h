@@ -134,6 +134,8 @@ public:
 	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): a sphere on a planet
 	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
 	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
+	 * @param Zones Optional planet conditioning zones there (spherical SP-B10): the terrain's radius is the conditioned one,
+	 *              as generation's, so a pad's surface point reads the surface material at depth 0
 	 */
 	static void QueryPlanetSurfaceConditions(
 		const FSphericalPlanetWorldMode& Planet,
@@ -142,7 +144,8 @@ public:
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		const FVoxelSeaSurface& Sea,
-		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
+		uint8& OutSurfaceMaterial, uint8& OutBiomeID,
+		const TArray<struct FVoxelConditioningZone>* Zones = nullptr);
 
 	/**
 	 * Everything at the analytic surface on the local up-line through a position, in any world mode (spherical SP-A3):
@@ -155,6 +158,8 @@ public:
 	 * @param NoiseParams Terrain noise
 	 * @param BiomeSnapshot Value-captured biome data
 	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): the WaterLevel plane, or a planet's sphere
+	 * @param Zones Optional planet conditioning zones (spherical SP-B10): on a planet the generated surface
+	 *              (GetConditionedSurfacePoint) and its conditions; heightmap modes ignore them (G23)
 	 * @return The surface sample
 	 */
 	static FVoxelSurfaceSample SampleSurfacePoint(
@@ -162,7 +167,8 @@ public:
 		const FVector& WorldPos, float VoxelSize,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const FVoxelSeaSurface& Sea);
+		const FVoxelSeaSurface& Sea,
+		const TArray<struct FVoxelConditioningZone>* Zones = nullptr);
 
 	/**
 	 * Find the topmost terrain surface in a vertical voxel column (index 0 = lowest Z, ascending).
