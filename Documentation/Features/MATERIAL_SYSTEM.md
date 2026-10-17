@@ -274,6 +274,15 @@ float2 GetAtlasUV(uint MaterialID, uint Face, float2 LocalUV)
 }
 ```
 
+### Face Type on a Planet (spherical Phase 4, SP-D3)
+
+The face type (top, side, bottom) that runs is the custom vertex factory's: `FVoxelSceneProxy::ConvertVertex` classifies
+every vertex's normal against 0.7, along world +Z on heightmap worlds. On a planet the custom VF renderer turns on
+`UVoxelWorldComponent::SetRadialFaceUp`, and the normal is measured against the vertex's radial up instead
+(`Rendering.Planet.FaceTypeByLocalUp`). `VoxelMaterialCommon.ush` gets an up-aware `GetVoxelFaceTypeUp` for shaders
+that need one (no shader includes it today). Smooth materials are triplanar on world axes, which works in any
+orientation, and read the face type only in the cubic atlas path, which planets do not use (SD3).
+
 ---
 
 ## Smooth Mode: Triplanar Projection

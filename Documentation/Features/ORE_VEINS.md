@@ -69,6 +69,16 @@ struct VOXELCORE_API FOreVeinConfig
 | `StreakStretch` | float | 4.0 | Elongation factor for streak shapes (1.0-10.0) |
 | `Priority` | int32 | 0 | Evaluation order (higher first) |
 
+### `Rarity` on a Planet (spherical Phase 4, SP-H3)
+
+Below 1, `Rarity` keeps a voxel's ore when a per-voxel hash is under it. Heightmap worlds hash with `frac(sin(…))` of
+the world position, as before. A planet hashes its **planet-relative voxel position** with an exact integer hash
+(`FVoxelCPUNoiseGenerator::OreRarityKey` / `OreRarityHash`, mirrored bit for bit by `GpuOreRarityHash` in
+`BiomeMaterial.ush`: 32-bit wrapping multiplies and shifts only), so the ores move with the planet when `WorldOrigin`
+moves and the CPU and the GPU pick the same voxels at any radius (`sin` of an argument near 10⁷ rounds differently in
+the GPU's float and the CPU's double). `WorldModes.Planet.OreRarityHash`; `Generation.GPUvsCPUSphericalParity` runs with
+a gold ore at `Rarity` 0.5. The change moved planet ores, so `PlanetGenerationVersion` is 3 (D13).
+
 ---
 
 ## Vein Shapes

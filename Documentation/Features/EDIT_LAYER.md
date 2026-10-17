@@ -384,6 +384,12 @@ FVoxelEdit CreateSphereBrush(FVector WorldPos, float Radius, EEditMode Mode, flo
 }
 ```
 
+### Cylinder Brush Axis (spherical Phase 4, SP-F8)
+
+`FVoxelBrushParams::Axis` is the Cylinder shape's axis. Zero (the default) means the world's local up at the brush
+centre: +Z on heightmap worlds (the old arithmetic, the same voxels: `Edit.Brush.CylinderAxis`) and the radial direction
+on a planet, so a dig there is a shaft along local up. A tilted axis widens the voxel box the brush visits by √2.
+
 ### Smooth Tool
 
 ```cpp

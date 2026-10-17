@@ -217,10 +217,43 @@ The subsystem is world-mode-agnostic by design:
 - Uses only `IVoxelWorldMode*` interface — never casts to a specific mode
 - `GetTerrainHeightAt()` is pure virtual, implemented by all modes (InfinitePlane, IslandBowl, SphericalPlanet)
 - Biome sampling uses the same noise functions regardless of world mode
-- **Not** SphericalPlanet: the tiles are a top-down XY projection, so a planet's two hemispheres land on the same
-  tiles, and `GetTerrainHeightAt` returns a radius there, not a height. A planet map needs tiles keyed by a
-  cube-sphere surface parameterisation (SPHERICAL_PLANET_REQUIREMENTS.md SP-A2, SP-G3)
+- SphericalPlanet: tiles on the cube sphere (below); heightmap tiles keep their (chunk X, Y) keys and code paths
 - For IslandBowl, areas beyond the island edge render based on their material (water/void)
+
+## Planets (spherical Phase 4, SP-G3)
+
+A planet's tiles are cells of a cube-sphere grid (`FVoxelCubeSphereGrid`, VoxelCore `VoxelCubeSphere.h`): N cells
+along a face edge, N = ⌈(π/2)·R / chunk size⌉ (82 on `Review_Planet`: 6 × 82² tiles about a chunk across, a pixel about
+75 uu, as on the plane), each addressed by its **atlas coordinate** (Face × N + tile U, tile V). Every `FIntPoint` key,
+the tile store and its budgets, the queue and the save blobs therefore work unchanged; `IsPlanetMap`,
+`GetPlanetTileGrid`, `GetPlanetCenter`, `GetPlanetRadius` and `PlanetDirectionToTilePixel` expose the grid.
+
+- **Pixels** along their directions: pixel (px, py) → UV → direction (`DirectionAt`) → the analytic surface point
+  (`GetTerrainAltitude`); material and biome as generation writes them (`FVoxelSurfaceQuery::QueryPlanetSurfaceConditions`),
+  water where the sea sphere is above the terrain (shaded by depth), elevation shading by altitude over
+  `GetAltitudeBounds`, the hillshade in the local frame (east, north, up) with the plane's light. The one-pixel apron
+  comes from the neighbouring tile, across face edges through the direction.
+- **Exploration** by surface key: `RequestTilesInRadius` gathers tiles by angle from the position's tile through the
+  grid's neighbours (`GatherWithinAngle`); `OnChunkGenerated` marks the tiles the chunk's surface patch spans
+  (`GetChunkTiles`). The two hemispheres no longer share tiles.
+- **Edit overlays** along local up: `FVoxelMapEditOverlay::BuildPlanet` walks each pixel's line along local up through
+  the edited chunks (a ray-box test, a coarse nearest-voxel walk, a trilinear refine), storing altitudes
+  (`PlanetFormatVersion` 2; plane overlays stay version 1, byte for byte). Overlays of the other world kind are dropped
+  on import.
+- **`voxel.Map.Capture`** on a planet writes a north-up image of the tangent plane around the pawn.
+- **The widgets** (VoxelCharacterPlugin): the minimap draws the tangent plane under the player (`FVCPlanetMapFrame`, north
+  toward the +Z pole, heading-up, latitude and longitude shown) and the world map is a **globe** (decision D11,
+  `FVCGlobeProjection`): an orthographic view around a direction, north up, opening on the player, dragged to turn it and
+  zoomed with the wheel (32 tiles from the centre at zoom 1, so zoomed in it is a local map). Both sample the tile images
+  through `FVCPlanetMapSampler` (a 16-texel control-point grid; cells across a face edge or the rim per texel). Markers
+  carry a 3D position (`FVCMapMarker::WorldLocation`, `UVCMapMarkerRegistry::OnGatherMarkersNear`); POIs reach planets in
+  Phase 5, so no provider binds them yet.
+- **Saves**: the same blobs with atlas keys and version-2 overlays; `PlanetGenerationVersion` 3 refuses older planet
+  saves (D13).
+
+Tests: `VoxelWorlds.Map.Planet.TileKeys`, `.TileMatchesGeneration` (1,000 pixels at five sites, each the generated
+surface voxel's material or the sea), `.Exploration`, `.EditOverlay`; `VoxelCharacter.Planet.MinimapFrame`,
+`.WorldMapProjection`, `.MapSampler`.
 
 ## File Listing
 

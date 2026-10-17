@@ -264,6 +264,35 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 
 **Known Limitation**: Uses base procedural VoxelData, not edit-merged data. Player edits are handled via `ClearedVolumesPerChunk` instead.
 
+#### On a Planet: Lines Along Local Up (spherical Phase 4, SP-G1)
+
+World-Z columns cross a planet's surface at a slant away from the poles and run along it at the equator, so on a
+planet `UVoxelScatterManager::ExtractSurfacePointsAlongUp` walks **digital lines along the chunk's local up** (the
+chunk centre's radial direction, within 0.6° of the true up anywhere in a 4,800 uu chunk on a 250 km planet) over the
+same voxel data, started on a stride grid across the axis nearest up (`FVoxelDigitalLine`, VoxelCore). Along each
+line it applies the column scan's rules: every solid voxel with air above it along the line, "not the topmost" marks
+it underground, the next voxel along the line answers "air above is water". The crossing is interpolated along the
+line; crossings at chunk faces are kept within 1.5 voxels of the analytic surface and snapped onto it.
+
+- **Classification** by the point's own radial up and altitude: face type and slope against local up, the elevation
+  filter compares the altitude above the datum (heightmap worlds: world Z, as before), the underwater class by the sea
+  sphere (`FVoxelSeaSurface`).
+- **Density per area**: a line bundle across axis A meets the surface at 1 / (s² cos θ) per area (θ between up and A,
+  up to √3× at a cube corner), so each point's spawn probability is weighted by cos θ; measured at 99-106% of the column
+  scan's density at both poles, 45°, the equator and a corner (`Scatter.Planet.DensityPerArea`).
+- **Instances** stand on local up (`FScatterSpawnPoint::LocalUp`, `GetRotationQuat`: `FindBetweenNormals(+Z, Up)`
+  then the yaw about it; exact near the south pole), or on the surface normal with `bAlignToSurfaceNormal`. The jitter
+  is in the tangent plane, from the same two random draws.
+- **Harvest exclusion**: a felled tree's box turns to local up, its centre along up from the base; the id is the
+  base position's, as before.
+- **No GPU extraction** on planets (`WantsGPUExtraction`): its gates are along +Z. A planet logs that it extracts on
+  the CPU.
+
+Heightmap worlds keep `ExtractSurfacePointsFromVoxelData` and the old expressions (`LocalUp` +Z, weight 1, the jitter
+call unchanged). `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds
+(with CPU extraction: the GPU extractor's per-cell claim is not deterministic). Tests: `Scatter.Planet.AlongLocalUp`
+(points within 8 uu of the surface, instances' up within 0.01° of the radial), `Scatter.Planet.DensityPerArea`.
+
 #### GPU Path: Mesh Vertex Extraction (Optional)
 
 When `bUseGPUScatterExtraction` is enabled, surface points are extracted from mesh vertices via compute shader. See [GPU Surface Extraction](#gpu-surface-extraction-phase-7d-2) for details.
