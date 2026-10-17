@@ -19,6 +19,7 @@ with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API)
 results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-only) results: §14.9. M6 (the island's
 visible edge and scale) results: §14.10. Spherical Phase 1 (a correct
 planet on the CPU): plan and results in §15. Spherical Phase 2 (the planet on the GPU): plan and results in §16.
+Spherical Phase 3 (walkable): plan and results in §17. Spherical Phase 4 (systems): plan in §18.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -253,7 +254,7 @@ code sites).
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
 (SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
-revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended.
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Asked 2026-10-17, open:** D11-D13, for spherical Phase 4 (§18.1).
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
@@ -267,6 +268,9 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D8 | Where heightmap worlds (InfinitePlane, IslandBowl) take their vertical streaming range from *(decided 2026-10-14, from §13.11)*. Today it is the viewer's layer −2 to +8 (island +4), clipped to the world's height range, so a viewer above layer 0 loses the ground below | **From the terrain.** Every column loads its own surface slab (the world mode's analytic surface ± 1.5 chunks, and up to the water plane) at every distance, islands included. Near the viewer (band 0) the viewer's own layer ± 2 is also loaded, for caves, dungeons and digging. The viewer's altitude only adds layers; it never removes the ground. This is WM-S1 and subsumes slab culling for islands (KI5). Keep the window a per-column interval supplied by the world mode, so the planet version (a shell around the surface, SP-C1/SP-C5) has the same shape |
 | D9 | Order of work, island priorities and where spherical starts *(decided 2026-10-14)* | **Island first, then cubic, then spherical** (§14.3): M1 hygiene, M2 the world-mode API, M3 island correctness, M4 the streaming window, M5 cubic terrain-only, M6 the visible island edge and map tile eviction, then spherical Phase 1. Correctness before performance on the island. The island's boundary is **hard at R+F**, with a soft push-back in the sea before it, and falling out of the world respawns the pawn (KI14). Spherical Phase 0 (guardrails) rides in M1, and the heightmap side of its API (SP-A1, SP-A2, SP-A6, SP-G9) in M2; Phase 1 starts after M4 (the window shape SP-C1 needs) and M5 (the legacy path is gone before spherical touches streaming). The order is a priority, not a strict sequence: §14.3 lists what can run in parallel |
 | D10 | Does fixing G18 (the GPU heightmap caves take the cave configuration's biome overrides and `UnderwaterMinDepth`) bump `FVoxelWorldModeFactory::GenerationVersion`? *(decided 2026-10-17)* | **Bump it to 2.** The fix moves GPU InfinitePlane and IslandBowl terrain inside the playable area (caves under the sea and in biomes scaled to 0 fill in), and the factory's rule is to bump when caves change. Every save made before is refused at load, heightmap and planet alike: the world starts fresh and the file stays on disk until the next explicit save overwrites it. The cost is the demo's QA save (`World_VoxelDemo_203652`, GPU InfinitePlane, 21 MB of edits). Not bumping would have kept loading old saves with edits sitting in caves that no longer exist; a heightmap-only version in the fingerprint shape (like `PlanetGeneration`) would have kept planet saves, which hold only test data. CPU worlds generate the same terrain either way |
+| D11 | The world map on a planet (spherical SP-G3) *(asked 2026-10-17)* | Open. Recommended: a globe (an orthographic view turned by dragging, zoomed with the wheel) rather than an unfolded cube; §18.1 |
+| D12 | How the sun and sky work on a planet (SP-G7, SP-G8) *(asked 2026-10-17)* | Open. Recommended: a world-fixed sun turning about the planet's axis (day and night sides, local solar time), no axial tilt, the SkyAtmosphere centred on the planet; §18.1 |
+| D13 | Does spherical Phase 4 bump `PlanetGenerationVersion` (refusing planet saves only)? *(asked 2026-10-17)* | Open. Recommended: bump 2 → 3 (planet ores and map and NPC keys change); heightmap saves unaffected; §18.1 |
 
 ## 9. Order of work
 
@@ -1564,7 +1568,7 @@ this plan:
 | 1. A correct planet on the CPU | After M4 and M5 (D9: after M6) | L | SP-C1 (candidates cover the shell) takes WM-S1's shape: a per-column interval around the surface plus the viewer's neighbourhood, which for a planet is a shell. §13.11's fix already keeps a pole viewer's window at its own layer instead of near layer 40. WM-C1 removes the legacy path before planets test seams at mid latitudes (SP-D4). **Done 2026-10-16 (§15)**: work items WM-P1 to WM-P8 |
 | 2. GPU | After Phase 1 | L | As in the requirements doc. **Done 2026-10-16 (§16)**: work items WM-G1 to WM-G6 |
 | 3. Walkable | After Phase 1; can run beside Phase 2 (game side) | L | SP-F5 (KillZ) builds on WM-I4's recovery |
-| 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers |
+| 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers. **Planned 2026-10-17 (§18)**: work items WM-SY1 to WM-SY22, milestones P4.1 to P4.6 |
 | 5. Places | After Phase 4 | M-L | Builds on WM-I1's world-mode-aware placement |
 | 6. Big planets and orbit | Not planned | — | SD1, SD5 |
 
@@ -3132,3 +3136,212 @@ spawning and the capture are the same.
 **Left for later.** Phase 4 (systems): `GetTerrainHeightAt` (SP-A3), scatter, PCG, map, navigation and NPC AI on the
 surface parameterisation and local up, world-item drops and the placeable slope (SP-F7), the edit brush axis (SP-F8),
 the clock, sun and sky. Phase 5: POIs and campsites.
+
+## 18. Spherical Phase 4: systems (2026-10-17)
+
+The requirements doc's Phase 4 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-A3, SP-A4,
+SP-D1 to SP-D3, SP-F6 to SP-F8, SP-G1 to SP-G4, SP-G7 to SP-G9, SP-H2, SP-H3 and SP-I4, plus SP-A6 and SP-I5, which are
+already done (below). Phase 3 made the planet walkable (§17), but every other system that reads the surface still assumes
++Z is up: trees stand along world Z, the map draws both hemispheres onto one XY grid from the legacy height query (a
+radius read as a Z), navigation and the NPC spawner sample that same query and steer in world yaw, the sun is one
+world-frame direction (the equator and the south pole read as night), and world items snap along world −Z. Exit check:
+the QA plan's world, NPC, map and save rows (`VoxelWorldPOI/Documentation/QA_TEST_PLAN.md`) pass on the planet; the
+table at the end of §18.1 maps them to rows. Heightmap worlds must behave exactly as before.
+
+Bases: VoxelWorlds `fab8fa3`, VoxelCharacterPlugin `e51cc77`, InteractionPlugin `99cc023`, WorldClockPlugin `e0919ab`,
+UE5_PluginDev `a5948c1`. Live checks on `PlanetTest` with `/Game/PluginTesting/Review/Review_Planet` through
+`voxel.ConfigOverride`, as in §15-§17.
+
+**Already done.** SP-A6: every planet params build from a configuration goes through
+`FVoxelWorldModeFactory::MakePlanetParams` (the chunk manager, the generation request, the LOD strategy, and through
+`Create` the map, POI placement and the field viewer); nothing else fills `FSphericalPlanetParams` from a configuration
+(code survey, 2026-10-17). SP-I5: `vox.TPLatLon` and `vox.Planet` exist since Phase 3 (§17).
+
+**What the code survey found (2026-10-17)**, beyond Appendix A of the requirements doc:
+
+- 14 production callers of `GetTerrainHeightAt`, and two chunk-manager wrappers over it (`QueryEditMergedSurface`,
+  `GetGeneratedSurfaceHeight`), feed the map, PCG, navigation, the NPC spawner, POI placement, campsite levelling, tree
+  injection, the bench and three debug commands. Only scatter's cover check and the spawn search have a planet branch.
+- The face type that runs is computed in the vertex conversion (`FVoxelLocalVertex::FromVoxelVertex`: the normal's Z
+  against 0.7) for every mesh on the custom vertex factory, not in `VoxelMaterialCommon.ush`, which no shader includes.
+  Planets mesh with Dual Contouring (the demo's), so the two marching-cubes sites (SP-D1, SP-D2) run only on an MC planet.
+- Scatter's live path scans voxel columns along world Z. The mesh-vertex extractor is dead code; the GPU extractor is off
+  by default, LOD 0 only, and not deterministic (an atomic claim per grid cell).
+- Map tiles, explored tiles, edit overlays, NPC kill ids and dungeon records all key on world-XY cells. The save's
+  fingerprint already carries a planet-only version (`PlanetGeneration` in its shape).
+- The clock is one global hour. `ADayNightController` sets the sun's world rotation and never touches the SkyAtmosphere
+  (at engine defaults in both maps: the planet's top at the world origin, an Earth-sized radius), the clouds or the sky
+  sphere.
+- `APawn::GetPawnViewLocation` adds the eye height along world Z (engine code), so at the equator NPC sight traces and
+  the player's melee trace start beside the head.
+- POI placement samples the legacy height, so on a planet POIs, their claims and dungeon stamps land above the northern
+  hemisphere or inside it.
+
+### 18.1 Plan
+
+Work items (IDs `WM-SY*`, stable; `WM-S*` is M4's, §14.2):
+
+| ID | Work item | Requirements | Repos | Size | Needs |
+|----|-----------|--------------|-------|------|-------|
+| WM-SY1 | **The legacy height query and altitude bounds.** On a planet `GetTerrainHeightAt(X, Y)` logs once and returns the world Z where the vertical line through (X, Y) meets the terrain on the upper hemisphere, so a legacy caller degrades instead of reading a radius as a Z. `IVoxelWorldMode::GetAltitudeBounds`: the terrain's altitude extent (heightmap modes: the height bounds through `GetAltitude`; a planet: its shell). The planet's `GetTerrainHeightBounds` becomes the shell's world-Z extent instead of ±1e9 | SP-A3 (its fallback clause), SP-A4 | VoxelWorlds | S | — |
+| WM-SY2 | **Surface queries along local up**, the functions callers migrate to. `UVoxelChunkManager::QueryEditMergedSurfacePoint`: the edit-merged surface on the up-line through a position (on a planet a digital line along local up, the crossing interpolated, the normal and slope against local up). `GetGeneratedSurfacePoint`: the analytic surface plus conditioning (a planet has no conditioning until SP-B10). `FVoxelSurfaceQuery::SampleSurfacePoint` and `QuerySurfaceConditionsAt`: material and biome as generation writes them (on a planet: climate at the datum-sphere point, height rules by altitude, underwater by the sea sphere). Heightmap modes call the existing functions | SP-A3 | VoxelWorlds | M | WM-SY1 |
+| WM-SY3 | **The remaining callers, and a guard until Phase 5.** Tree injection is gated off on planets (SP-B9: cubic only, which SD3 excludes); the field viewer's height and slope fields read altitude and slope against local up; `voxel.Bench.Run`'s default start height goes through `GetGeneratedSurfacePoint`. POI placement, the POI terrain conditioner and campsite levelling do nothing on a planet and say so once (POIs, generated campsites and dungeons are Phase 5: SP-G5, SP-B10). Player-placed campfire kits still work (WM-SY16) | SP-A3, SP-B9 | VoxelWorlds, parent (VoxelWorldPOI) | S | WM-SY2 |
+| WM-SY4 | **Meshing along local up.** The marching-cubes LOD material and biome scan steps along the chunk's local up (a digital line) and prefers the corner highest along it; the MC geomorph runs along the axis nearest the chunk's local up, gated on the normal as today (CPU and GPU); the face type (top, side, bottom) in `FVoxelLocalVertex::FromVoxelVertex` tests the normal against the chunk's local up, which the render data carries; `VoxelMaterialCommon.ush` gets an up-aware `GetVoxelFaceType` | SP-D1, SP-D2, SP-D3 | VoxelWorlds | M | — |
+| WM-SY5 | **Precision.** The ore `Rarity` test on a planet hashes the voxel's planet-relative integer index, exactly and identically on the CPU and the GPU; the radius ceiling is documented | SP-H3, SP-H2 | VoxelWorlds | S | D13 |
+| WM-SY6 | **Scatter along local up.** On a planet, surface points come from digital lines along the chunk's local up over the (edit-merged) voxel data instead of world-Z columns; face type, slope and the elevation filter by local up and altitude; jitter in the tangent plane; instances stood on local up (or on the surface normal when the definition asks for it); the harvest exclusion box along local up; density per area kept uniform; GPU extraction off on planets. A scatter digest command for the heightmap A/B | SP-G1 | VoxelWorlds | L | WM-SY2 |
+| WM-SY7 | **PCG on the surface coordinate.** On a planet the surface sampler's points lie on a cube-face UV grid at the configured spacing, inside the bounding shape, on the edit-merged or analytic surface along local up, rotated to local up (or the normal), seeded by (face, cell); water through `FVoxelSeaSurface` | SP-G2 | VoxelWorlds | M | WM-SY2 |
+| WM-SY8 | **Map tiles on the cube sphere.** On a planet a tile is a cell of a face's UV grid, about one chunk across, addressed by an atlas coordinate (face × N + tile U, tile V), so every `FIntPoint` key, the store, the queue, the budgets and the save blob work unchanged. Tile pixels from the surface along local up (material, water by the sea sphere, shading by altitude, hillshade in the local frame); exploration and `OnChunkGenerated` by surface key; edit overlays along local up; `voxel.Map.Capture` on a planet | SP-G3, SP-G9 | VoxelWorlds | L | WM-SY2 |
+| WM-SY9 | **The map widgets on a planet.** The minimap draws the tangent plane around the player, sampled through the tile store, heading-up as now, with north toward the +Z pole; the world map per D11; map markers carry a 3D position | SP-G3 | VoxelCharacterPlugin, parent (POI markers) | M-L | WM-SY8, D11 |
+| WM-SY10 | **Save keys.** Explored tiles and overlays saved with planet keys (WM-SY8), NPC kill ids by surface cell (WM-SY13), `PlanetGenerationVersion` 3 (D13); a save round trip on a planet | SP-G9 | parent (VoxelWorldSave), VoxelWorlds | S | WM-SY8, WM-SY13, D13 |
+| WM-SY11 | **Surface navigation on a planet.** Each search runs on the tangent-plane grid of the region it starts in (regions keyed by the surface coordinate, about four chunks across); cell heights are altitudes along local up; the sea is the altitude plane `WaterRadius − PlanetRadius`; one tile cache per region frame; blocked boxes, temporary blocks and invalidation in 3D; `ProjectToSurface` and `IsWalkableAt` along local up. `FVoxelSurfacePathfinder` is not changed | SP-G4 | VoxelWorlds | M-L | WM-SY2 |
+| WM-SY12 | **NPC AI in the gravity frame.** Steering, waypoint acceptance and progress, the stuck probe, auto-jump (feet, knee trace, top probe and rise along local up), facing, wander and flee goals, leash and route distances, all in the local tangent plane; the eye height along local up for every character (`GetPawnViewLocation`), so sight and melee traces start at the head | SP-F6 | VoxelCharacterPlugin | M | WM-SY11 |
+| WM-SY13 | **The surface NPC spawner on a planet.** Population cells by surface coordinate (the kill ids keep their 20+20+12+4+4+4 bits); spawn and despawn distances in 3D; spawn points through `QueryEditMergedSurfacePoint` with the slope against local up; the collision and feet probes along −up; creatures placed upright; group spread and retry offsets in the tangent plane; loot bursts and the corpse topple along local up; the phase per D12 | SP-F6, SP-G4 | parent (VoxelWorldPOI), VoxelCharacterPlugin (topple) | M | WM-SY2, WM-SY12 |
+| WM-SY14 | **The clock on a planet** (per D12): the sun's world direction turns about the planet's axis once a day; local solar time by longitude; `GetLocalHour`, `GetLocalPhase`, `GetLocalDaylight` and `GetLocalTimeText` at a position; the HUD, the NPC spawner, sleeping, `vox.Time` and `vox.Clock` use local time at the player or the place. WorldClockPlugin stays engine-only: a game-side bridge (VoxelWorldPOI) gives it the planet's centre and axis | SP-G7 | WorldClockPlugin, parent (VoxelWorldPOI, game module) | M | D12 |
+| WM-SY15 | **The sky on a planet:** the SkyAtmosphere centred on the planet (`PlanetCenterAtComponentTransform`, bottom radius the sea radius); the Z-up sky sphere hidden, no height fog; the clouds following the atmosphere; the controller's light curves driven by the sun's elevation at the viewer | SP-G8 | WorldClockPlugin, parent (setup script) | S-M | WM-SY14, D12 |
+| WM-SY16 | **World items and placing along gravity.** World items snap and stand along the pool's gravity (a planet centre the game mode sets, like the parking spot); `TryPlaceItem` (forward, the ground trace, the slope test against local up, facing, the offset) and the chop aim point in the gravity frame; loot burst offsets along local up; ragdolls fall toward the centre on a planet | SP-F7 | InteractionPlugin, VoxelCharacterPlugin, parent (VoxelWorldPOI) | M | — |
+| WM-SY17 | **The cylinder brush's axis:** `FVoxelBrushParams::Axis` (zero means the world's local up at the brush centre: +Z on a plane, radial on a planet) | SP-F8 | VoxelWorlds | S | — |
+| WM-SY18 | **A great-circle bench route:** `voxel.Bench.Run … gc=lat:lon:heading[:altitude]` at a fixed altitude over the datum; `follow=` over the terrain along local up on a planet; the restore hold along local down; the route in the report | SP-I4 | VoxelWorlds | S-M | — |
+| WM-SY19 | **Debug commands on a planet:** `vox.SpawnNPC`, `vox.NavPath`, `vox.NavDebug`, `vox.SpawnDummy`, `vox.Chop`, `vox.FindMaterial`, `vox.Campsite`, `vox.Time` and `vox.Clock` (local time) in the local frame; `vox.Edge` says a planet has no edge; `vox.TPPOI`, `vox.TPRoom` and `vox.Trap` say POIs are Phase 5 | (SP-I5's family) | parent (game module) | S-M | the items they call |
+| WM-SY20 | **Tests** with every item (below) | SP-I2's style | all | M | — |
+| WM-SY21 | **Live verification:** the exit check on the planet, and the `VoxelDemo` A/B against a base build | — | docs | L | all |
+| WM-SY22 | **Docs:** these results, the requirement rows and §4's Phase 4 exit check, the feature docs (`WORLD_MODES.md`, `SCATTER_SYSTEM.md`, `MAP_SYSTEM.md`, `SURFACE_NAVIGATION.md`, `MARCHING_CUBES_MESHING.md`, `MATERIAL_SYSTEM.md`, `TRAVERSAL_LIMITS.md`), the plugin instructions, `WORLD_CLOCK_PLAN.md`, the parent's doc map and `vox.*` table | — | all | M | — |
+
+**Milestones.** Phase 4 is split into six; each item lands as its own commit with its tests.
+
+| Milestone | Items | Repos | Done when |
+|-----------|-------|-------|-----------|
+| P4.1 Terrain queries, meshing, precision | WM-SY1 to WM-SY5 | VoxelWorlds, parent | The new queries agree with generation on a planet and equal the old ones bit for bit on a plane; the MC and face-type tests pass; ore parity holds with `Rarity` < 1 |
+| P4.2 Scatter and PCG | WM-SY6, WM-SY7 | VoxelWorlds | Trees stand on local up at every site with a uniform density; the PCG grid tests pass; heightmap scatter and PCG unchanged |
+| P4.3 Map and save keys | WM-SY8 to WM-SY10 | VoxelWorlds, VoxelCharacterPlugin, parent | The minimap and the world map show the planet; exploration and overlays save and load by surface key |
+| P4.4 Navigation and NPCs | WM-SY11 to WM-SY13 | VoxelWorlds, VoxelCharacterPlugin, parent | Paths on the sphere; deer and wolves spawn, wander, flee, chase and jump in the local frame |
+| P4.5 Clock and sky | WM-SY14, WM-SY15 | WorldClockPlugin, parent | A day side and a night side; local time in the HUD, the NPC spawner and sleeping; the sky centred on the planet |
+| P4.6 Items, brush, bench, tooling | WM-SY16 to WM-SY19 | InteractionPlugin, VoxelCharacterPlugin, VoxelWorlds, parent | Drops and placing along gravity; the great-circle bench; the debug commands on a planet |
+| Exit | WM-SY20 to WM-SY22 | all | The exit check met; suites green headless and in the editor; the heightmap A/B unchanged |
+
+Order: P4.1 first (everything after it uses its queries), then P4.2 and P4.6 (independent of the rest), P4.3, P4.4, and
+P4.5 as the decisions below allow. Waiting on a decision: WM-SY9's world map (D11), WM-SY14 and WM-SY15 (D12), and the
+version bump in WM-SY5 and WM-SY10 (D13). PRs: VoxelWorlds in two, stacked (P4.1 and P4.2; then the rest with these docs),
+InteractionPlugin, VoxelCharacterPlugin, WorldClockPlugin, then UE5_PluginDev (VoxelWorldPOI, VoxelWorldSave, the game
+module, the setup script, the gitlinks and the doc map). ItemInventoryPlugin is not touched: the placeable slope test gets
+the normal in the gravity frame (WM-SY16).
+
+**Design (written before building).** P4.1, terrain queries, meshing and precision:
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| The legacy query on a planet | `GetTerrainHeightAt(X, Y)`: the direction from the centre to (X, Y, Centre.Z + √(R² − ρ²)), ρ the distance of (X, Y) from the centre's vertical clamped to R; the terrain along it (`SampleRadialDisplacement`); its world Z. A warning the first time in a process, naming SP-A3. After this phase no planet path calls it; the warning catches strays | The requirement's fallback: a legacy caller then places on the northern hemisphere's surface instead of at a radius in the sky |
+| Altitude bounds | `GetAltitudeBounds(Min, Max)`: by default `GetTerrainHeightBounds` mapped through `GetAltitude` (Z − SeaLevel on the plane and the island); a planet's is its shell, −MaxTerrainDepth to +MaxTerrainHeight. The planet's `GetTerrainHeightBounds` becomes Centre.Z ± OuterRadius, what its `GetWorldBounds` reports. The LOD strategy's vertical cull stays heightmap-only and unchanged; the map shades by the altitude bounds | A conservative superset in the planet's own terms, as `GetTerrainHeightBounds` is for the plane; the ±1e9 default made the map special-case planets |
+| The edit-merged surface on a planet | `QueryEditMergedSurfacePoint(WorldPos, FVoxelSurfaceHit&)` starts from the analytic point along the direction (`GetSurfacePoint`) and walks a digital line along local up one chunk either side: steps along the axis nearest up, sideways shifts rounded as in `FVoxelDownLines`, one edit-merged voxel read per step as in the column scan. It takes the topmost solid voxel with air above it, interpolates the crossing along the true up direction, takes the normal from the edit-merged density gradient flipped toward local up, and the slope as the angle to local up. It returns false when the estimate's chunk is not loaded, as now. Heightmap modes: `QueryEditMergedSurface(X, Y)`, with (X, Y, H) | A planet query then costs what a plane query costs and stays exact on the voxel grid; generation's own underground and water passes walk the same lines (§15.1) |
+| Material and biome at a planet surface point | `QuerySurfaceConditionsAt`: temperature, moisture and continentalness at the datum-sphere point (`GetNoiseSamplePoint`), the biome blend, height rules by altitude, the underwater variant when the terrain radius is under `WaterRadius`: the functions `GenerateChunkSphericalPlanet` calls, in its order | The map's colours and PCG's material attribute then equal what generation writes at that surface voxel (tested at sample points) |
+| The MC material scan on a planet | The meshing request carries `LocalUp`, the chunk centre's (+Z in heightmap modes). The scan walks K = 0 to 8 along the digital line in that direction, and "highest" means farthest along it. Exactly +Z runs the old loop | The scan's purpose, grass over dirt at the surface corner, is along local up; the chunk centre's up is within 0.6° of the true up anywhere in a 4,800 uu chunk on this planet |
+| The MC geomorph on a planet | Morph along the axis A nearest the chunk's local up (±X, ±Y or ±Z): `ComputeCoarseSurfaceZ` generalised to a coarse line along A, the steepness gate on \|N·A\| as today, on the CPU and the GPU (the GPU MC mesher is idle at runtime but kept in step). A = +Z is the old arithmetic | The surface lies mostly across one axis away from the cube's edges, and the gate already skips vertices more than 60° off it, as it skips steep slopes on the plane: the morph acts where it is valid and nowhere else. A radial morph would need a coarse lattice sampled along an arbitrary line, and the requirement allows the simpler course |
+| The face type | `FChunkRenderData` gains `FaceUp` (the chunk centre's local up, +Z by default); `FromVoxelVertex(V, FaceUp)` classifies by N·FaceUp against 0.7, and with +Z it is the old Normal.Z comparison. The tangent's reference axis stays world Z | The custom vertex factory recomputes the face type for every vertex, so this is the site that runs. Smooth materials are triplanar on world axes, which works in any orientation, and read the face type only in the cubic atlas path, which planets do not use (SD3) |
+| The ore hash on a planet | `Hash32(planet-relative voxel index) / 2³²` against `Rarity`: the index is round((ChunkWorldPos − Centre) / VoxelSize), computed in double, plus the local voxel index; one integer hash (PCG style) shared by C++ and HLSL. Heightmap modes keep `frac(sin(…))` | Planet-relative is what SP-H3 asks, but with `WorldOrigin` 0 the old hash already was: its trouble is `sin` of an argument near 10⁷, which the GPU's float and the CPU's double round differently. An integer index hash is exact at any radius and equal on both sides, so the parity test can run with `Rarity` < 1 |
+| The radius ceiling (SP-H2) | Documented in `WORLD_MODES.md` and `TRAVERSAL_LIMITS.md`: absolute float vertex positions in the scene proxy have a ULP of about 0.06 uu at 10 km and 1 uu at 100 km, where seams and collision start to show; past that, origin rebasing would have to separate the planet centre from the chunk grid's origin, both of which `WorldOrigin` is today | — |
+
+P4.2, scatter and PCG:
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Scatter extraction on a planet | Lines along the chunk's local up over the same voxel data (edit-merged where edited), started on a stride grid across the axis nearest up (`FVoxelDownLines`'s geometry, moved to VoxelCore's public headers). Along each line the column's state machine: every solid voxel with air above it along the line, "not the topmost" makes it underground, the next voxel along the line answers "air above is water"; the crossing interpolated along the line; the density-gradient normal. Each point records its local up (radial at the point) and its altitude. Heightmap worlds keep `ExtractSurfacePointsFromVoxelData` as it is | Same data, same flags (generation's underground flag is radial since SP-B7), same determinism; the heightmap function is not touched, so heightmap scatter is unchanged by construction. The mesh-vertex extractor gives positions and normals but none of the voxel flags, and the GPU one is non-deterministic and LOD 0 only |
+| Density on a planet | A line bundle across axis A with spacing s meets the surface at a density of 1 / (s² cos θ), θ the angle between up and A (up to √3× at a cube corner), so each point's spawn probability is scaled by cos θ | Trees per area then match the plane's at every latitude (measured in the test) |
+| Classification on a planet | Face type and slope against the point's local up; the elevation filter compares the altitude (heightmap modes: world Z, as documented today); the underwater test is the sea (already); the cover check stays heightmap-only | The rules read "up" and "height" in the world's own frame |
+| The instance transform | `FVoxelSurfacePoint::LocalUp` (default +Z). Without `bAlignToSurfaceNormal` the instance's Z axis is local up and the random yaw turns about it (`FindBetweenNormals(+Z, Up)` then the yaw); with it, the surface normal as now. Jitter in the tangent plane, from the same two random draws. Up exactly +Z runs the old expressions | Trees stand along gravity; the heightmap branch keeps the old rotator arithmetic bit for bit |
+| The harvest exclusion box | The box's frame turned to local up, its centre along up from the base; the id from the base position as now | A felled tree's volume covers its trunk on a planet, and the save keeps it |
+| GPU extraction | `WantsGPUExtraction` is false on planets | Its gates are along +Z; it is off by default anyway |
+| The PCG grid on a planet | The bounding shape's box gives the faces and UV ranges it touches (its corners and centre through `WorldToSurface`). Per face, cells of du = Spacing / (R·π/4), so a cell is about Spacing across; each cell's centre gives the surface point along it (edit-merged near, analytic far), kept when inside the box; the seed from (face, iu, iv); rotation to local up (or the normal); the attributes as now, the slope against local up. The cell walk is a pure function, tested on its own. Heightmap modes: the XY loop unchanged | Points then cover a volume placed anywhere on the planet without gaps or doubles (each surface point belongs to one face) at the configured spacing, the tangent warp keeping cell areas within 1.38× |
+| PCG water | `FVoxelSeaSurface::FromConfig` | On the plane it is `WaterLevel`, so nothing changes; on a planet the sphere. The configuration's water warning then names no consumer |
+
+P4.3, map and save keys:
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| The tile key on a planet | N tiles along a face edge, N = ⌈(π/2)·R / ChunkWorldSize⌉ (82 on `Review_Planet`: 6 × 82² = 40,344 tiles, a tile about 4,800 uu across and a pixel about 75 uu, as on the plane); the atlas coordinate (Face·N + TU, TV). Every container, the store, the queue, the budgets, the save blob and `PruneExploredOutsideWorld` (on a planet: inside the atlas) keep working on `FIntPoint` keys | No new key type: heightmap keys stay (chunk X, chunk Y) and their code paths are not touched |
+| Tile pixels on a planet | Pixel (px, py) → UV → direction → the analytic surface point (`GetSurfacePoint`); material and biome from `QuerySurfaceConditionsAt`; water where the sea sphere is above the terrain, shaded by sea depth; elevation shading by altitude over `GetAltitudeBounds`; the hillshade's normal in the local frame (east, north, up) with the plane's light vector. The one-pixel apron through the neighbouring UV, across a face edge through the 3D direction | Each pixel is the plane's computation in the local frame; conditioning does not apply on planets yet (SP-B10) |
+| Exploration on a planet | `RequestTilesInRadius`: the tiles whose centres lie within the radius (3D) of the position, gathered outward from the position's tile through UV neighbours (across face edges through the direction). `OnChunkGenerated` marks the tiles the chunk's surface patch touches (its corners and centre through `WorldToSurface`) | The explored set means "seen around the player", as on the plane, and the two hemispheres no longer share tiles |
+| Edit overlays on a planet | The overlay's columns become the tile pixels' up-lines: `GatherOverlayInput` collects the edited chunks the tile's patch passes through, and the worker walks each pixel's line through their snapshots (WM-SY2's line walk), storing altitudes instead of world Z (`FVoxelMapEditOverlay::FormatVersion` 2 for planet overlays; the plane's stay version 1) | Digs show on the planet's map as they do on the plane's (W-05, W-06) |
+| The minimap on a planet | The texture is the tangent plane at the player in a north-up frame: east = +Z × up normalised (at a pole the face's axes), north = up × east. Each texel's ground point → (face, UV) → tile pixel, through a 16 × 16 grid of exact control points with bilinear UV inside cells that stay on one face, exact per texel in cells that cross a face edge; rotated by the camera's heading against north, as now; markers projected into the frame | Heading-up like the plane's minimap. It costs a few ms per refresh instead of a blit, so it redraws only when the player has moved a texel, turned, or a tile arrived |
+| The world map on a planet | D11 (below) | — |
+| Map markers | `FVCMapMarker` gets `WorldLocation` (3D; the 2D field stays for heightmap providers) and the planet views project it. POIs are not placed on planets until Phase 5 (WM-SY3), so the planet's maps show no markers yet | The plumbing is ready for Phase 5 |
+| Save keys | The save keeps the same blobs: planet worlds write atlas keys and version-2 overlays, and old planet saves are refused by D13's bump, so no format sniffing is needed. NPC kill ids pack the planet cell (WM-SY13) | Heightmap documents unchanged, byte for byte |
+
+P4.4, navigation and NPCs:
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Navigation on a planet | Regions are cells of the surface coordinate's grid, about four chunks (19,200 uu) across. A search uses the frame of the region its start lies in: origin O, the region centre on the datum sphere; up there; east and north from the face's axes projected onto the tangent plane. Frame coordinates (x, y) map to the world through the direction of O + x·E + y·N from the centre (a gnomonic projection: on `Review_Planet` the search radius stays within 7° of O, cell sizes within 2% of `CellSize`). The pathfinder is the existing `FVoxelSurfacePathfinder` over (x, y): its "height" is the cell's altitude (`QueryEditMergedSurfacePoint` along the direction, the analytic surface as the fallback), its water a plane at altitude `WaterRadius − PlanetRadius` (exactly the sea sphere's depth), its output (x, y, altitude) turned back into world points. One tile cache per region frame, frames dropped after 60 s unused. Blocked boxes become 3D boxes and temporary blocks 3D spheres (heightmap: the old cell set); invalidation by each cached tile's 3D bounds; `ProjectToSurface` and `IsWalkableAt` along local up | SP-G4 says a per-request tangent grid is enough, and one canonical frame per region keeps the plane's cache across requests. The pathfinder and its tests stay as they are, so the plane's navigation is unchanged by construction |
+| NPC AI | Helpers in the controller over `FVCGravityFrame`: the offset across local up between two points, its length and direction, a yaw-only facing rotation. Every `Dist2D`, `GetSafeNormal2D`, `FVector(…, 0)` and world-yaw `FRotator` in the AI goes through them; auto-jump's feet, knee start, top probe and rise along local up; wander goals at an angle in the tangent plane at the leash origin; flee directions rotated about local up. Without planet gravity each helper returns the old expression | The engine already walks, falls and turns NPCs in gravity space (Phase 3); only the AI's own geometry is Z-up |
+| Eye height | `AVCCharacterBase` and `AVCNPCCharacterBase` override `GetPawnViewLocation`: the location plus local up × `BaseEyeHeight` on a planet, the engine's otherwise | The engine adds it along world Z, so at the equator every eye trace (sight, melee, auto-aim) starts beside the head |
+| The NPC spawner | On a planet, cells are the face UV grid at `CellSize` on the surface, atlas-coded like the map (they fit the id's 20-bit cell fields); plans and groups as now, with offsets in the tangent plane at the cell's surface; distances in 3D (heightmap modes 2D, as now); the collision and feet probes along −up; `SpawnCreature` stands the creature on local up and calls `UpdatePlanetGravity` / `SnapUprightToGravity`; the corpse topple sinks along −up and rolls about the body's own forward axis; loot bursts along local up | Herds keep their cells and ids across visits (F10-07, F10-08) on a planet too |
+
+P4.5, the clock and the sky (if D12 is decided as recommended):
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| The sun's direction | With a planet frame set (centre C, axis the world's +Z through C), the sun's world direction turns about the axis by the hour angle of longitude 0, at declination 0 (a `SunDeclinationDegrees` setting left for a later axial tilt); the directional light points along −sun. The local solar hour at P is the global hour plus longitude(P) / 15. Phases, the HUD text, sleeping and the NPC spawner use the local hour, with the plane's hour rules; the light curves (sun, sky light, exposure) use a daylight value from the sun's elevation at the viewer, a ramp that equals `DaylightForHour` on the equator | A fixed sun over a turning planet is the same thing seen from the ground; the terrain cannot turn, so the sun does. Hour-based phases keep every consumer's rules; elevation-based light is what the sky shows (at a pole the sun stays low all day) |
+| Who tells the clock | `UWorldClockSubsystem::SetPlanetFrame(Centre, Axis)` / `ClearPlanetFrame`; a VoxelWorldPOI world subsystem sets it once the chunk manager reports a shell. WorldClockPlugin keeps its engine-only dependencies | As the world-item pool learns its parking spot (§17) |
+| Sleeping | `NextMorning` in local time at the campsite: the global time moves so that the campsite's local hour is sunrise | "Sleep until dawn" means dawn where you sleep |
+| The sky | The controller, which already finds the lights, also finds the SkyAtmosphere. With a planet frame: `TransformMode = PlanetCenterAtComponentTransform`, the component at the centre, `BottomRadius` the sea radius (the datum without water) in km; the atmosphere's height and scattering stay the engine's, an Earth-like sky from the ground. The Z-up sky sphere actor (tagged by the setup script) and any height fog are hidden; the volumetric clouds follow the atmosphere's planet (their layer altitude lowered for a small planet in content); the sky light keeps its real-time capture | The engine's sky is already a sphere around a planet; it only needs to be told where the planet is |
+
+**Decisions for the user** (asked 2026-10-17; the items that need them wait):
+
+| ID | Question | Options | Recommendation |
+|----|----------|---------|----------------|
+| D11 | The world map on a planet (SP-G3) | (a) **A globe:** an orthographic view of the planet around a view direction, dragged to turn it and zoomed with the wheel (a local map when zoomed in), opening centred on the player with north up. (b) **An unfolded cube:** the six faces laid out as a cross, panned and zoomed as on the plane | **(a), the globe.** It reuses the minimap's sampler and has no cut edges (a route never jumps across the cross). (b) is cheaper to draw (tile images blitted per face) but tears the world along seven of the cube's twelve edges and is up to 1.38× distorted |
+| D12 | How the sun and sky work on a planet (SP-G7, SP-G8) | (a) **A world-fixed sun** turning about the planet's axis once a day: a day side and a night side, local solar time by longitude for the HUD, the NPCs and sleeping, the poles always in a low sun (no axial tilt). (b) **A sun in each player's local frame:** the clock's hour lights every place the same way, there is no night side, and nothing else changes | **(a)**, as SP-G7 describes, with no axial tilt for now, phases by the local solar hour, light by the sun's real elevation, and the SkyAtmosphere at the engine's Earth values. `PlanetTest`'s PlayerStart over the north pole then spawns in a permanent low sun; QA moves to mid latitudes with `vox.TPLatLon`, and the pole stays as it is |
+| D13 | Does Phase 4 bump `PlanetGenerationVersion`, the planet-only version in the fingerprint's shape? | Bump 2 → 3: every planet save is refused (planet saves hold only test data); heightmap saves keep loading (`GenerationVersion` stays 2). Or no bump, with a map key-format field that drops old planet exploration at load | **Bump.** SP-H3 changes which voxels are ore wherever an ore's `Rarity` < 1, and on planets the explored tiles, the overlays and the NPC kill ids change keys: a pre-Phase 4 planet save would put ores and exploration in the wrong places. Not bumping needs the key-format field and still loads stale ores |
+
+**How each is verified.**
+
+| ID | Check |
+|----|-------|
+| WM-SY1 | `WorldModes.Planet.LegacyHeight`: at 24 points on the northern hemisphere the returned Z is within 1 uu of the surface along that line, and the warning is logged once. `WorldModes.Api.AltitudeBounds`: plane and island = the height bounds less SeaLevel; planet = the shell, holding every generated surface voxel |
+| WM-SY2 | `Streaming.Planet.EditMergedSurface`: on a planet chunk manager at the pole, 45°, the equator and a cube corner the point is within one voxel of the analytic surface, the normal within 10° of the analytic one, the slope against local up; after a dig the point is the dig's depth lower along local up. `Streaming.Plane.EditMergedSurfaceUnchanged`: on a plane chunk manager `QueryEditMergedSurfacePoint` equals `QueryEditMergedSurface` bit for bit at 1,000 points. `Generation.Planet.SurfaceConditions`: material and biome equal the generated surface voxel's at 200 points |
+| WM-SY3 | `POI.Planet.NoPlacement` (no POI placed, no conditioning zone); the field viewer's fields on a planet; `Generation.Planet.NoTreeInjection` |
+| WM-SY4 | `Meshing.MarchingCubes.PlanetMaterialScan` (LOD 1 at 45°: top-facing triangles take the surface material, as at LOD 0); `Meshing.MarchingCubes.PlanetGeomorph` (a mixed-LOD seam at the +X face centre: vertices move along X and close the step as on the plane; up +Z: the seam meshes' CRC unchanged); `Rendering.Planet.FaceTypeByLocalUp`; `Meshing.MarchingCubes.CPUvsGPU` unchanged |
+| WM-SY5 | `Generation.GPUvsCPUSphericalParity` with an ore at `Rarity` 0.5: the same ore voxels on both sides at every site; `WorldModes.Planet.OreHashOriginInvariant`: moving `WorldOrigin` moves the ores with the planet |
+| WM-SY6 | `Scatter.Planet.AlongLocalUp`: real planet chunks at both poles, 45°, the equator and a cube corner give points within half a voxel of the isosurface, face type and slope by local up, instances' up within 0.01° of the radial, no surface point under a cave ceiling; `Scatter.Planet.DensityPerArea`: points per area within ±10% across the sites; the heightmap scatter tests unchanged. Live: trees upright at every site |
+| WM-SY7 | `PCG.Planet.SurfaceGrid` (a box at 45° and one across a cube edge: every surface point in the box within half a spacing of one cell's point, no two cells closer than half a spacing, stable seeds); `PCG.Plane.GridUnchanged` |
+| WM-SY8 | `Map.Planet.TileKeys` (atlas ↔ face and UV round trip, every direction in exactly one tile, neighbours across face edges); `Map.Planet.TileMatchesGeneration` (the pixel's material is the generated surface voxel's at 100 pixels, water where the sea is above the terrain); `Map.Planet.Exploration` (the tiles within the radius, the hemispheres apart); `Map.Planet.EditOverlay`; the heightmap map tests unchanged, plus `Map.Plane.TilePixelsUnchanged` (tile CRCs from the base build) |
+| WM-SY9 | `VoxelCharacter.Planet.MinimapFrame` (texel ↔ ground point, north toward +Z, the heading); `VoxelCharacter.Planet.WorldMapProjection` (D11's projection round trip); live screenshots |
+| WM-SY10 | `VoxelWorldSave.Document.PlanetKeys` (a planet document's round trip; a `PlanetGeneration=2` document refused and kept on disk) |
+| WM-SY11 | `Navigation.Planet.RegionFrames` (cells onto the surface, regions shared between requests, frames across a face edge); `Navigation.Planet.Path` (at 45° and across a cube edge: every waypoint on the surface, steps by altitude, around a lake by the sea sphere); `Navigation.Planet.Blocks`; the five `Navigation.*` tests unchanged; `Navigation.Plane.SubsystemUnchanged` (the subsystem over a plane chunk manager gives the old path) |
+| WM-SY12 | `VoxelCharacter.Planet.NPCSteering` (at the equator: movement input across local up, facing upright, wander and flee goals on the tangent plane, the auto-jump probe and rise along up); `VoxelCharacter.Planet.EyeHeight`; `VoxelCharacter.AI.*` unchanged |
+| WM-SY13 | `POI.SurfaceNPC.PlanetCells` (cell ↔ surface, ids round trip, a plan's members on the surface and upright); `POI.SurfaceNPC.PlaneCellsUnchanged`; live: the F10 rows |
+| WM-SY14 | `WorldClock.Planet.SolarTime` (local hour by longitude, the sun's direction, daylight by elevation equal to the hour curve on the equator; without a planet frame the old values); `POI.Campsite.PlanetNextMorning` |
+| WM-SY15 | `WorldClock.Planet.Sky` (with a planet frame the controller centres the atmosphere and hides the Z-up sky; without one it touches nothing); live: dawn, noon, dusk and night at 45° and the equator |
+| WM-SY16 | `InteractionPlugin.WorldItem.SnapAlongGravity` (over a sphere an item snaps along −radial and stands on local up; without a centre, the old trace); `VoxelCharacter.Planet.PlaceItem` (the slope against local up, the facing); `VoxelCharacter.Planet.RagdollGravity`; live: F2-08 and F8-07 |
+| WM-SY17 | `Edit.Brush.CylinderAxis` (a radial axis on a planet; on a plane the same voxels as before) |
+| WM-SY18 | `Bench.Planet.GreatCircleRoute` (points at the altitude, on the great circle, the arc length); live: one run on `Review_Planet` |
+| All | Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin` (the first three are 310 tests today, before the new ones), and the same suites in the editor with the GPU tests running |
+
+**Exit check.** On `Review_Planet` with `vox.Debug.Capture 1` throughout, the QA rows below, each passing as its
+Expected column says, read in the local frame; screenshots and logs per row in §18.2.
+
+| QA rows | On the planet | Where | Items |
+|---------|---------------|-------|-------|
+| W-01 | As written; the HUD clock shows the local solar time; the minimap draws the planet | The PIE spawn (north polar region) | WM-SY8, WM-SY9, WM-SY14 |
+| W-02, W-03 | As written: Phase 3's checks, again with scatter and NPCs on | 45°, the equator | — |
+| W-04 | `vox.SetSpeed 3000`, `vox.AutoRun` along a great circle for a minute: terrain and foliage keep up, trees upright, no fall-through | 45° toward the equator | WM-SY6 |
+| W-05 | Terrain colours match the world, the arrow and heading are right, the world map (D11) shows the explored ground; no markers (POIs are Phase 5) | The pole, 45°, a cube-face edge, the equator, the south pole | WM-SY8, WM-SY9 |
+| W-06 | As written, and the dug hole shows on the map | 45° | WM-SY2, WM-SY8 |
+| W-07 | Out of scope (Phase 5): checked instead that no POI, claim or dungeon stamp is on the planet | — | WM-SY3 |
+| F6-01 to F6-05 | In local solar time: `vox.Time` sets the local hour where the pawn stands; the sunset there; night with the sun below the planet; fast-forward sweeps the light round and the day counter rises; pause holds | 45°, the equator | WM-SY14, WM-SY15 |
+| F9-01, F9-02, F9-05, F9-06, F9-07 | As written, resting at a kit campsite and without the sconce (dungeons are Phase 5); on reload the dig, the felled tree, the explored map and the clock are back | 45° | WM-SY10, WM-SY16, WM-SY6 |
+| F9-03, F9-04 | Out of scope (dungeons, Phase 5 and later) | — | — |
+| F10-01 to F10-12 | As written, by local day and night; F10-05 at a kit campsite | 45°, the equator | WM-SY11 to WM-SY14, WM-SY16 |
+| F2-08, F8-01, F8-07 | Drop and pick up, chop a tree, place a campfire kit (SP-F7's and SP-G1's own checks) | 45° | WM-SY16, WM-SY6 |
+
+Pass: every row as above, no fall-through in the capture, and nothing in the log beyond the known Phase 5 notices.
+
+**Heightmap worlds unchanged.** Planet-only code runs only when the world's bounds are a shell (or the clock has a planet
+frame); where bit-identity matters each new helper branches to the old expression for up +Z rather than rewriting it.
+Checked by the existing suites, the "Unchanged" tests above, and a live A/B on `VoxelDemo`, base build against feature
+build, one script on both: `voxel.Map.Capture` at the spawn (identical PNG), a scatter digest at the spawn (instance
+counts and a CRC of the transforms per type, the new `voxel.Scatter.Digest`), `vox.NavPath` to three fixed points (the
+same nodes and length), `vox.NPCs` after 60 s at a fixed hour (the same creatures in the same places), `vox.Clock`, and
+the QA W, F6, F9 and F10 rows played briefly.
+
+**Left for Phase 5 and later.** POIs, generated campsites, dungeons and claims' conditioning on a planet (SP-B10,
+SP-G5, SP-G6, SP-G10; the WM-SY3 guard holds them off until then); the far-terrain band (SP-C5); the ocean shell showing
+in dry caves below sea level (§17.2); G19.

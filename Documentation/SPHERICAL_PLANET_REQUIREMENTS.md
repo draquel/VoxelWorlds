@@ -204,7 +204,7 @@ seams at mid latitudes). **Phase 1 done 2026-10-16** (review plan §15): the pla
 underground and water flags along local up, and the shell window, all on the CPU; Phases 2 (GPU) and 3 (walkable) can
 start, side by side. **Phase 2 done 2026-10-16** (review plan §16): the same planet generated on the GPU, by default. **Phase 3 done 2026-10-17**
 (review plan §17): gravity toward the centre, movement, camera and spawn in the gravity frame, one sea, the ocean shell;
-Phase 4 (systems) is next.
+Phase 4 (systems) is next: **planned 2026-10-17** (review plan §18: work items WM-SY1 to WM-SY22 in six milestones, decisions D11-D13 asked).
 
 ## Appendix A. Z-up audit
 
