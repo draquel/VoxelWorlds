@@ -594,8 +594,9 @@ balanced-LOD cache covers the keep window, so every chunk the strategy keeps has
 With `bFarBandSurfaceSlabCulling` off every column streams its whole height range (the name predates D8, when the slab
 applied beyond band 0 only). Until M4 the window was the viewer's layer −2 to +8 (island −2 to +4), with the slab on
 InfinitePlane beyond band 0 only: a viewer above layer 0 lost the ground below it (G13), and islands kept every layer
-of every column (KI5). The planet keeps a viewer-relative window (`MinVerticalChunks` .. `MaxVerticalChunks`) until
-spherical Phase 1 gives it a shell around the surface (SP-C1), the same per-column shape.
+of every column (KI5). A planet's column window is the column's crossing of the terrain shell widened by half a
+chunk, within the view distance (`GetPlanetShellWindow`, spherical SP-C1; WORLD_MODES_REVIEW_PLAN.md §15), and its
+horizon cull adds the peaks' tangent distance (`GetPlanetHorizonDistance`, SP-C2).
 
 **Height Range Calculation**: `IVoxelWorldMode::GetTerrainHeightBounds` (the full noise amplitude and continentalness;
 for an island, also the floor beyond its edge), plus one chunk of buffer on each side.

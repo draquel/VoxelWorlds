@@ -173,8 +173,15 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		PlanetMaxTerrainDepth = Planet.MaxTerrainDepth;
 		PlanetCenter = Planet.PlanetCenter;
 
+		// The shell window (SP-C1): every chunk within ShellSlackChunks of the terrain shell, at any latitude.
+		ShellWindowInnerRadius = FMath::Max(0.0, static_cast<double>(PlanetRadius - PlanetMaxTerrainDepth) - ShellSlackChunks * ChunkWorldSize);
+		ShellWindowOuterRadius = static_cast<double>(PlanetRadius + PlanetMaxTerrainHeight) + ShellSlackChunks * ChunkWorldSize;
+
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Shell culling enabled: Radius=%.0f, Height=%.0f, Depth=%.0f"),
 			PlanetRadius, PlanetMaxTerrainHeight, PlanetMaxTerrainDepth);
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Shell window: every column's crossing of radius %.0f to %.0f (the shell + %.1f chunk), horizon + %.0f for the highest peaks"),
+			ShellWindowInnerRadius, ShellWindowOuterRadius, ShellSlackChunks,
+			FMath::Sqrt(2.0 * PlanetRadius * PlanetMaxTerrainHeight + FMath::Square(static_cast<double>(PlanetMaxTerrainHeight))));
 	}
 
 	// The near window (heightmap worlds): band 0's outer edge plus two chunk widths, measured horizontally.
@@ -185,33 +192,6 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 			NearWindowLayers, NearWindowRadius);
 	}
 
-	// The viewer-relative vertical window: SphericalPlanet only (heightmap worlds use GetColumnWindow's terrain window)
-	switch (WorldMode)
-	{
-		case EWorldMode::SphericalPlanet:
-		{
-			// For spherical planets, calculate vertical range based on terrain shell thickness
-			// The terrain shell extends from (Radius - Depth) to (Radius + Height)
-			// We need chunks that can intersect this shell within view distance
-			const float ShellThickness = PlanetMaxTerrainHeight + PlanetMaxTerrainDepth;
-			const float MaxVerticalExtent = FMath::Min(MaxViewDistance, PlanetRadius + PlanetMaxTerrainHeight);
-
-			// Calculate chunk range needed to cover the vertical extent
-			// Use a reasonable range based on view distance, not the full planet
-			const int32 VerticalChunkRange = FMath::CeilToInt(MaxVerticalExtent / ChunkWorldSize) + 1;
-
-			// Clamp to reasonable limits
-			MinVerticalChunks = -FMath::Min(VerticalChunkRange, 16);
-			MaxVerticalChunks = FMath::Min(VerticalChunkRange, 16);
-
-			UE_LOG(LogVoxelLOD, Log, TEXT("  Spherical vertical range: %d to %d chunks (shell thickness=%.0f)"),
-				MinVerticalChunks, MaxVerticalChunks, ShellThickness);
-			break;
-		}
-
-		default:
-			break;
-	}
 	bIsInitialized = true;
 	bBalancedLODCacheDirty = true; // bands, view distance or bounds may have changed
 
@@ -539,6 +519,8 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 		const float OuterRadius = PlanetRadius + PlanetMaxTerrainHeight;
 		Info += FString::Printf(TEXT("  Shell Culling: Radius=%.0f, Shell=[%.0f - %.0f]\n"),
 			PlanetRadius, InnerRadius, OuterRadius);
+		Info += FString::Printf(TEXT("  Vertical Window: each column's crossing of radius [%.0f - %.0f], within the view distance; horizon + %.0f for peaks\n"),
+			ShellWindowInnerRadius, ShellWindowOuterRadius, GetPlanetHorizonDistance(PlanetRadius, 0.0, PlanetMaxTerrainHeight));
 	}
 
 	Info += TEXT("\n  Bands:\n");
@@ -939,11 +921,9 @@ FDistanceBandLODStrategy::FColumnWindow FDistanceBandLODStrategy::GetColumnWindo
 	FColumnWindow Window;
 	const FIntVector ViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 
-	// Planet: the viewer's layer + the mode's offsets, absolute (callers no longer add the viewer's layer, §13.11).
 	if (!IsHeightmapWorld())
 	{
-		Window.SlabMinZ = ViewerChunk.Z + MinVerticalChunks;
-		Window.SlabMaxZ = ViewerChunk.Z + MaxVerticalChunks;
+		GetPlanetShellWindow(ChunkX, ChunkY, Context, Window);
 		return Window;
 	}
 
@@ -995,6 +975,66 @@ FDistanceBandLODStrategy::FColumnWindow FDistanceBandLODStrategy::GetColumnWindo
 		Window.NearMaxZ = FMath::Min(ViewerChunk.Z + NearWindowLayers, BoundsMaxZ);
 	}
 	return Window;
+}
+
+void FDistanceBandLODStrategy::GetPlanetShellWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, FColumnWindow& OutWindow) const
+{
+	// The column's footprint relative to the planet's axis (the vertical line through the centre): its nearest and
+	// farthest points bound the distance Rho from the axis of every point in the column.
+	const double ChunkWorldSize = static_cast<double>(BaseChunkSize) * VoxelSize;
+	const double MinX = Context.WorldOrigin.X + ChunkX * ChunkWorldSize - PlanetCenter.X;
+	const double MinY = Context.WorldOrigin.Y + ChunkY * ChunkWorldSize - PlanetCenter.Y;
+	const double MaxX = MinX + ChunkWorldSize;
+	const double MaxY = MinY + ChunkWorldSize;
+	const double NearX = FMath::Clamp(0.0, MinX, MaxX);
+	const double NearY = FMath::Clamp(0.0, MinY, MaxY);
+	const double FarX = FMath::Max(FMath::Abs(MinX), FMath::Abs(MaxX));
+	const double FarY = FMath::Max(FMath::Abs(MinY), FMath::Abs(MaxY));
+	const double RhoMin2 = NearX * NearX + NearY * NearY;
+	const double RhoMax2 = FarX * FarX + FarY * FarY;
+
+	const double Outer2 = ShellWindowOuterRadius * ShellWindowOuterRadius;
+	if (RhoMin2 > Outer2)
+	{
+		return; // the column passes outside the shell
+	}
+
+	// A point at Rho from the axis is in the shell for |Z| (above the centre) from sqrt(Inner^2 - Rho^2) (0 past the inner
+	// radius) to sqrt(Outer^2 - Rho^2); over the footprint the union is [sqrt(Inner^2 - RhoMax^2), sqrt(Outer^2 - RhoMin^2)].
+	// One crossing above the centre and one below, which meet when the column reaches past the inner radius.
+	const double Inner2 = ShellWindowInnerRadius * ShellWindowInnerRadius;
+	const double ZHigh = FMath::Sqrt(Outer2 - RhoMin2);
+	const double ZLow = RhoMax2 < Inner2 ? FMath::Sqrt(Inner2 - RhoMax2) : 0.0;
+
+	// Clipped to the viewer's reach: nothing past the view distance loads.
+	const double ReachLo = Context.ViewerPosition.Z - MaxViewDistance;
+	const double ReachHi = Context.ViewerPosition.Z + MaxViewDistance;
+	const double CenterZ = PlanetCenter.Z;
+	auto AddCrossing = [&](double Lo, double Hi, int32& OutMinZ, int32& OutMaxZ)
+	{
+		Lo = FMath::Max(Lo, ReachLo);
+		Hi = FMath::Min(Hi, ReachHi);
+		if (Lo <= Hi)
+		{
+			GetLayersOverlapping(Lo, Hi, Context.WorldOrigin.Z, OutMinZ, OutMaxZ);
+		}
+	};
+	if (ZLow <= 0.0)
+	{
+		AddCrossing(CenterZ - ZHigh, CenterZ + ZHigh, OutWindow.SlabMinZ, OutWindow.SlabMaxZ);
+		return;
+	}
+	AddCrossing(CenterZ + ZLow, CenterZ + ZHigh, OutWindow.SlabMinZ, OutWindow.SlabMaxZ);
+	AddCrossing(CenterZ - ZHigh, CenterZ - ZLow, OutWindow.NearMinZ, OutWindow.NearMaxZ);
+	if (OutWindow.SlabMinZ <= OutWindow.NearMaxZ && OutWindow.NearMinZ <= OutWindow.SlabMaxZ && OutWindow.SlabMinZ <= OutWindow.SlabMaxZ
+		&& OutWindow.NearMinZ <= OutWindow.NearMaxZ)
+	{
+		// The two crossings share layers (a small planet): one range, so ForEachLayer visits each layer once.
+		OutWindow.SlabMinZ = FMath::Min(OutWindow.SlabMinZ, OutWindow.NearMinZ);
+		OutWindow.SlabMaxZ = FMath::Max(OutWindow.SlabMaxZ, OutWindow.NearMaxZ);
+		OutWindow.NearMinZ = 0;
+		OutWindow.NearMaxZ = -1;
+	}
 }
 
 void FDistanceBandLODStrategy::GetLayersOverlapping(double Lo, double Hi, double OriginZ, int32& OutMin, int32& OutMax) const
@@ -1085,65 +1125,36 @@ bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
 		return false;
 	}
 
-	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const float ChunkDiagonal = ChunkWorldSize * UE_SQRT_3; // 3D diagonal for spherical
-
-	// Get chunk bounds for shell intersection tests
+	// Distances from a chunk's centre bound every point in it within half its diagonal.
+	const double ChunkHalfDiagonal = 0.5 * BaseChunkSize * VoxelSize * UE_SQRT_3;
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-	const FVector ToChunkFromPlanet = ChunkCenter - PlanetCenter;
-	const float ChunkDistanceFromCenter = ToChunkFromPlanet.Size();
+	const double ChunkDistanceFromCenter = FVector::Dist(ChunkCenter, PlanetCenter);
 
-	// Calculate inner and outer shell radii
-	const float InnerShellRadius = PlanetRadius - PlanetMaxTerrainDepth;
-	const float OuterShellRadius = PlanetRadius + PlanetMaxTerrainHeight;
-
-	// INNER SHELL CULLING: Cull chunks entirely inside the planet core
-	// If the chunk's farthest point from planet center is still inside the inner shell, cull it
-	const float ChunkMaxRadius = ChunkDistanceFromCenter + ChunkDiagonal;
-	if (ChunkMaxRadius < InnerShellRadius)
+	// SHELL: cull a chunk wholly inside the window's inner radius (the core) or wholly outside its outer radius (space).
+	// The window (GetPlanetShellWindow) uses the same radii, exactly per column; this bound keeps a superset of it, so
+	// nothing the window loads is unloaded by the cull.
+	if (ChunkDistanceFromCenter + ChunkHalfDiagonal < ShellWindowInnerRadius
+		|| ChunkDistanceFromCenter - ChunkHalfDiagonal > ShellWindowOuterRadius)
 	{
-		return true; // Chunk is entirely inside planet core
+		return true;
 	}
 
-	// OUTER SHELL CULLING: Cull chunks entirely outside the terrain shell
-	// If the chunk's closest point to planet center is outside the outer shell, cull it
-	const float ChunkMinRadius = FMath::Max(0.0f, ChunkDistanceFromCenter - ChunkDiagonal);
-	if (ChunkMinRadius > OuterShellRadius)
-	{
-		return true; // Chunk is entirely outside terrain shell
-	}
-
-	// HORIZON CULLING: For chunks that intersect the shell, check if they're beyond the horizon
-	// Calculate viewer's altitude above planet surface
-	const FVector ToViewerFromPlanet = Context.ViewerPosition - PlanetCenter;
-	const float ViewerDistanceFromCenter = ToViewerFromPlanet.Size();
-	const float ViewerAltitude = ViewerDistanceFromCenter - PlanetRadius;
-
-	// If viewer is deep underground, skip horizon culling (they're inside the planet)
+	// HORIZON (SP-C2): a point at height H above the datum shows over the horizon of a viewer at height h while their
+	// distance is under sqrt(2Rh + h^2) + sqrt(2RH + H^2), the two tangent distances to the datum sphere. With H the
+	// shell's top, a chunk whose nearest point is farther than that holds nothing the viewer can see. A viewer below the
+	// datum (a valley, the sea floor) sees at least the peaks; a viewer below the shell (inside the planet) is not culled.
+	const double ViewerAltitude = FVector::Dist(Context.ViewerPosition, PlanetCenter) - PlanetRadius;
 	if (ViewerAltitude < -PlanetMaxTerrainDepth)
 	{
 		return false;
 	}
+	const double Horizon = GetPlanetHorizonDistance(PlanetRadius, ViewerAltitude, PlanetMaxTerrainHeight);
+	return FVector::Dist(Context.ViewerPosition, ChunkCenter) - ChunkHalfDiagonal > Horizon;
+}
 
-	// Calculate horizon distance using viewer's effective altitude (clamped to surface)
-	const float EffectiveAltitude = FMath::Max(0.0f, ViewerAltitude);
-	if (EffectiveAltitude > 0.0f)
-	{
-		// Horizon distance formula: sqrt(2*R*h + h^2)
-		const float HorizonDistance = FMath::Sqrt(2.0f * PlanetRadius * EffectiveAltitude + EffectiveAltitude * EffectiveAltitude);
-
-		// Add buffer for terrain variation (but smaller than before - just terrain height, not full diagonal)
-		const float HorizonBuffer = HorizonDistance + PlanetMaxTerrainHeight;
-
-		// Distance from viewer to chunk
-		const float DistanceToChunk = FVector::Distance(Context.ViewerPosition, ChunkCenter);
-
-		// Cull if chunk center is beyond horizon + buffer
-		if (DistanceToChunk > HorizonBuffer + ChunkDiagonal)
-		{
-			return true;
-		}
-	}
-
-	return false;
+double FDistanceBandLODStrategy::GetPlanetHorizonDistance(double PlanetRadius, double ViewerAltitude, double MaxTerrainHeight)
+{
+	const double Viewer = FMath::Max(0.0, ViewerAltitude);
+	const double Peaks = FMath::Max(0.0, MaxTerrainHeight);
+	return FMath::Sqrt(2.0 * PlanetRadius * Viewer + Viewer * Viewer) + FMath::Sqrt(2.0 * PlanetRadius * Peaks + Peaks * Peaks);
 }

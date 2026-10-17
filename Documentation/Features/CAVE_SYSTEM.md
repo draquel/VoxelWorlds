@@ -110,7 +110,7 @@ Each layer generates one type of cave independently. Layers compose via union (m
 | `MinDepth` | 5.0 | Minimum depth below surface (voxels) |
 | `MaxDepth` | 0.0 | Maximum depth (0 = unlimited) |
 | `DepthFadeWidth` | 4.0 | Fade zone width at depth boundaries |
-| `VerticalScale` | 0.5 | Vertical squash (<1 = flatter caves) |
+| `VerticalScale` | 0.5 | Vertical squash (<1 = flatter caves): world Z in heightmap modes, the altitude along local up on a planet (`FSphericalPlanetWorldMode::ScaleAltitude`) |
 | `SecondNoiseSeedOffset` | 7777 | Seed for dual-noise (Spaghetti/Noodle) |
 | `SecondNoiseFrequencyScale` | 1.2 | Frequency ratio for second noise |
 
