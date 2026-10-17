@@ -220,4 +220,79 @@ bool FVoxelConditioningRadialTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// WM-PL2: planet generation on the CPU takes the zones. On a planet like Review_Planet, a raised and a lowered zone at
+// 45 degrees and at a cube corner: inside the inner radius every surface crossing along the radius is within half a voxel
+// of the target altitude, the ring lies between the natural and the target altitude, and beyond the ring the crossings
+// equal the unconditioned planet's exactly.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelConditioningFlattensPlanetTest,
+	"VoxelWorlds.Generation.Conditioning.FlattensPlanet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelConditioningFlattensPlanetTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetConditioningTestUtils;
+
+	UVoxelWorldConfiguration* Config = MakeConditioningPlanet();
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
+	const double Radius = Config->WorldRadius;
+	const float VoxelSize = Config->VoxelSize;
+	const float Inner = 1500.0f;
+	const float Falloff = 1000.0f;
+
+	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+	const TArray<TPair<const TCHAR*, FVector>> Sites = {
+		{ TEXT("45 degrees"), FVector(C45, 0, C45) },
+		{ TEXT("cube corner"), FVector(1, 1, 1).GetSafeNormal() },
+	};
+	FConditionedPlanetVoxels Natural(Config, {});
+	double WorstInside = 0.0;
+	int32 Crossings = 0;
+	for (const TPair<const TCHAR*, FVector>& Site : Sites)
+	{
+		for (const float Shift : { 400.0f, -400.0f })
+		{
+			const float Target = Planet.GetTerrainAltitude(Site.Value, Config->NoiseParams) + Shift;
+			FConditionedPlanetVoxels Conditioned(Config, { FVoxelConditioningZone::MakeRadial(Site.Value, Inner, Falloff, Target) });
+			const FVector Bearings[] = { FVector(0, 1, 0), FVector(-1, 0.4, 0.2), FVector(0.2, -1, 0.5) };
+			for (const FVector& Bearing : Bearings)
+			{
+				// Inside the inner radius: the target.
+				for (const double Distance : { 0.0, 700.0, 1400.0 })
+				{
+					const FVector D = DirectionAtDistance(Site.Value, Bearing, Distance, Radius);
+					const double R = Conditioned.SurfaceRadius(D, Radius + Target, 600.0);
+					const double Error = FMath::Abs(R - (Radius + Target));
+					WorstInside = FMath::Max(WorstInside, Error);
+					++Crossings;
+					TestTrue(*FString::Printf(TEXT("%s, shift %.0f, %.0f uu out: the surface at the target (off by %.1f uu)"), Site.Key, Shift, Distance, Error),
+						R > 0.0 && Error <= 0.5 * VoxelSize);
+				}
+				// The ring's middle: between the natural and the target altitude.
+				{
+					const FVector D = DirectionAtDistance(Site.Value, Bearing, Inner + 0.5 * Falloff, Radius);
+					const double NaturalAltitude = Planet.GetTerrainAltitude(D, Config->NoiseParams);
+					const double Expected = FMath::Lerp(NaturalAltitude, static_cast<double>(Target), 0.5);
+					const double R = Conditioned.SurfaceRadius(D, Radius + Expected, 600.0);
+					TestTrue(*FString::Printf(TEXT("%s, shift %.0f: the ring's middle is half way (%.1f uu off)"), Site.Key, Shift, R - (Radius + Expected)),
+						R > 0.0 && FMath::Abs(R - (Radius + Expected)) <= 0.5 * VoxelSize);
+				}
+				// Beyond the ring: the unconditioned planet, voxel for voxel.
+				{
+					const FVector D = DirectionAtDistance(Site.Value, Bearing, Inner + Falloff + 2.0 * VoxelSize, Radius);
+					const double Around = Radius + Planet.GetTerrainAltitude(D, Config->NoiseParams);
+					const double R = Conditioned.SurfaceRadius(D, Around, 300.0);
+					const double R0 = Natural.SurfaceRadius(D, Around, 300.0);
+					TestTrue(*FString::Printf(TEXT("%s, shift %.0f: beyond the ring the natural surface"), Site.Key, Shift), R > 0.0 && R == R0);
+				}
+			}
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d crossings inside the inner radius: worst %.2f uu from the target"), Crossings, WorstInside));
+	Config->RemoveFromRoot();
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
