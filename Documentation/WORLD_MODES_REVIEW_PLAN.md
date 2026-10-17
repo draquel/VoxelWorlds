@@ -2703,9 +2703,8 @@ by default, the GPU survey showing the CPU's terrain.
 
 ### 16.2 Results (2026-10-16)
 
-All six work items are implemented and verified; PRs open (VoxelWorlds `feature/spherical-p2-gpu`, base `359030e`; the
-parent's gitlink and doc map in UE5_PluginDev `claude/spherical-p2-gpu-678e27`, base `dc7882f`; numbers in the PR
-descriptions). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor with background
+All six work items are implemented and verified; PRs open (draquel/VoxelWorlds#99, `feat/spherical-p2-gpu`, base
+`359030e`; draquel/UE5_PluginDev#110, `claude/spherical-p2-gpu-678e27`, base `dc7882f`: the gitlink and the doc map). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor with background
 throttling off. Live checks ran on `PlanetTest` with `/Game/PluginTesting/Review/Review_Planet` through
 `voxel.ConfigOverride` (R 250,000, water at `WaterRadius` 249,500, the demo's biomes and caves), as in §15.2.
 `Review_Planet` and `PlanetWorldConfig` already set `bUseGPUGeneration`, so they generate on the GPU with no content
