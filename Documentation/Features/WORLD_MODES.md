@@ -365,11 +365,12 @@ Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
 
 ### Overview
 Radial terrain on a spherical surface, on the same Cartesian chunk grid as the other modes, centred on the
-planet. **Status (2026-10-16): a correct planet on the CPU** (spherical Phase 1, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md)
-§15): seamless terrain sampled by 3D direction, continentalness, materials by altitude, caves, underground and water
-flags along local up, and a streaming window that covers the shell at every latitude. It still generates on the CPU
-only (GPU is Phase 2), and the game systems assume +Z is up (gravity, movement, scatter, map, navigation: Phases 3
-and 4). What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
+planet. **Status (2026-10-16): a correct planet, generated on the GPU** (spherical Phases 1 and 2,
+[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §15 and §16): seamless terrain sampled by 3D direction,
+continentalness, materials by altitude, caves, underground and water flags along local up, and a streaming window that
+covers the shell at every latitude. The GPU generator has a planet branch (Phase 2, locked to the CPU by
+`Generation.GPUvsCPUSphericalParity`), so planets follow `bUseGPUGeneration` like the other modes. The game systems
+still assume +Z is up (gravity, movement, scatter, map, navigation: Phases 3 and 4). What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
 lives in the parent project: `/Game/PluginTesting/Planet` (`PlanetTest`, `PlanetWorldConfig`) and
 `/Game/PluginTesting/Review/Review_Planet` (water on).
 
@@ -416,7 +417,8 @@ rules to the voxel's altitude above the datum (SP-B2); flattens caves along loca
 times the layer's `VerticalScale`) and suppresses them under the sea (`WaterRadius`, SP-B6). The post-passes run along
 local down: underground classification on digital lines along the chunk centre's down (SP-B7), and the water fill by
 the sea sphere (`ApplyRadialWaterFillPass`, `FVoxelSeaSurface`, SP-B8); the chunk manager's cross-chunk water and the
-edit-time propagation test the same sphere. `GetTerrainHeightAt(X, Y)` is still a legacy query that returns a radius
+edit-time propagation test the same sphere. The GPU generator does all of this too (GPU Implementation, below).
+`GetTerrainHeightAt(X, Y)` is still a legacy query that returns a radius
 for the equatorial direction (X, Y, 0) (SP-A3, Phase 4). Terrain outside the shell `[WorldRadius - PlanetMaxTerrainDepth,
 WorldRadius + PlanetMaxTerrainHeight]` is cut off; `UVoxelWorldConfiguration::GetSettingsWarnings` reports a shell that
 does not cover `BaseHeight ± PlanetHeightScale / 2` with continentalness's extremes (`GetDisplacementBounds`).
@@ -456,9 +458,9 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 - Any world requiring true spherical geometry
 
 ### Current Limitations
-- **CPU generation only.** The GPU generator has no planet branch, so `UVoxelWorldConfiguration::ShouldUseGPUGeneration()`
-  is false for planets and the chunk manager logs a warning when `bUseGPUGeneration` is on (SP-B3; SP-B4 adds the
-  GPU planet, including the underground post-pass along local down)
+- **Small planets** (SD1): past the planet-relative distance and direction the GPU works in single precision (its
+  cave and ore noise at absolute positions), as the CPU's noise does; parity is measured on a 250,000 uu planet.
+  Large planets need SP-H1
 - Every surface consumer (scatter, PCG, map, navigation, POIs, NPCs, movement) assumes +Z is up
   (requirements doc, Appendix A); gravity toward the centre is not implemented
 - Water: the voxel water flags follow `WaterRadius` (generation, cross-chunk and edit-time propagation); scatter,
@@ -484,9 +486,16 @@ it by the `VoxelWorlds.Generation.GPUvsCPU*` parity tests:
   seabed beyond it (`IslandSeabedHeight`: a smoothstep down by `IslandSeabedDepth` over `IslandSeabedSlopeWidth`). The curves on `t` (0 at `IslandRadius`, 1 at the edge) are
   Linear `1 - t`, Smooth `(1-t)^2 (3 - 2(1-t))`, Squared `(1-t)^2` and Exponential
   `(e^-3t - e^-3) / (1 - e^-3)`; every curve reaches 0 at the edge.
-- **SphericalPlanet:** no branch. A planet request would fall through to the generic 3D-noise path and produce
-  blobs, which is why planets generate on the CPU (`ShouldUseGPUGeneration`, SP-B3). The GPU radial SDF is SP-B4,
-  spherical Phase 2.
+- **SphericalPlanet** (spherical Phase 2, SP-B4; `SphericalPlanet.ush`): `FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet`
+  per voxel, in the same order. The radial height (terrain noise and continentalness at `Direction × PlanetRadius`),
+  the shell signed distance with its quick rejects, biome materials with the underwater variant where the column's
+  terrain is under `WaterRadius`, height rules by altitude, caves with `VerticalScale` along local up (plus the biome
+  overrides and `UnderwaterMinDepth`, which the heightmap branch lacks: G18), the cave-wall override, ores. Distances
+  and directions are planet-relative: the C++ passes the chunk origin minus the planet centre, computed in double. The
+  post-passes run along local down and flood inside the sea sphere (`GPU_PIPELINE.md`, Stage 1b). Params come from the
+  request, which `FVoxelWorldModeFactory::FillGenerationRequest` fills. Parity at LOD 0/1/2 on both poles, the
+  equator, 45°, a cube-face edge and corner, a coast, a cave and caves under the seabed:
+  `Generation.GPUvsCPUSphericalParity` (review plan §16.2 for the numbers).
 
 ---
 
@@ -619,16 +628,15 @@ list (implementation reserved):
    surface (by direction) rather than planar X/Y so bands wrap coherently around the planet.
 
 Recommended sequencing if Spherical is picked up: (1) → (2) → (3) unlock a correct, GPU-generated,
-streamable planet; (4) → (5) make it playable and natural. Until then spherical worlds generate on the CPU
-whatever `bUseGPUGeneration` says (`ShouldUseGPUGeneration`, since 2026-10-14), and the analytic queries are
-approximate. The full requirements list, superseding this summary, is
+streamable planet; (4) → (5) make it playable and natural. *(2026-10-16: (1), (2), (3) and (5) are done, spherical
+Phases 1 and 2; planets generate on the GPU when `bUseGPUGeneration` is on. Gravity and movement, (4), are Phase 3.)* The full requirements list, superseding this summary, is
 [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md).
 
 ---
 
 **Status**: InfinitePlane and IslandBowl are implemented and tested, with mode-specific LOD culling.
-SphericalPlanet is a CPU-only prototype with no tests beyond the configuration checks
-(`VoxelWorlds.Configuration.PlanetSettings`); see the gap analysis and the requirements doc.
+SphericalPlanet generates a correct planet on the GPU or the CPU (spherical Phases 1 and 2), with generation,
+streaming and GPU parity tests; the game systems on a planet are Phases 3 to 5 of the requirements doc.
 GPU generation parity: InfinitePlane + IslandBowl fully verified across the feature matrix — density,
 materials, biomes, metadata, caves, all four noise types, water/underwater, and ore variants at LOD 0/1/2
-(Phase A–D).
+(Phase A–D); SphericalPlanet at LOD 0/1/2 (`GPUvsCPUSphericalParity`, spherical Phase 2).

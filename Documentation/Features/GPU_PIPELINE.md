@@ -46,8 +46,8 @@ void GenerateVoxelData(uint3 DispatchThreadID : SV_DispatchThreadID) {
     // Sample noise for base terrain
     float Density = SampleNoise(WorldPos, NoiseParams);
     
-    // Apply world mode SDF (InfinitePlane / IslandBowl heightmap; there is no SphericalPlanet branch,
-    // planets generate on the CPU: WORLD_MODES.md "GPU Implementation", SP-B3)
+    // Apply world mode SDF: the InfinitePlane / IslandBowl heightmap, or the SphericalPlanet radial height
+    // (SphericalPlanet.ush, spherical Phase 2; WORLD_MODES.md "GPU Implementation")
     Density = ApplyHeightmapWorldMode(WorldPos, Density);
     
     // Determine biome
@@ -73,6 +73,15 @@ void GenerateVoxelData(uint3 DispatchThreadID : SV_DispatchThreadID) {
     OutputBuffer[FlatIndex(DispatchThreadID)] = Output;
 }
 ```
+
+### Stage 1b: Post-passes
+
+The water fill and the underground classification run as compute passes in the same render graph
+(`VoxelPostPasses.usf`, dispatched by `AddVoxelPostPassDispatches`), so the readback returns finished voxel data and
+no thread does per-voxel work after it. Heightmap modes scan world-Z columns; a planet scans digital lines along each
+chunk's local down (`WaterLineSeedCS`, `UndergroundLinesCS`, one thread per line, on the lines `FVoxelDownLines`
+computes for the CPU passes) and floods inside the sea sphere (`WaterFloodSweepRadialCS`). The `GPUvsCPU*Parity`
+tests compare the finished data with the CPU's.
 
 ### Stage 2: Cubic Meshing
 
