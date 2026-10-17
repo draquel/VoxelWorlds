@@ -50,9 +50,9 @@ What is wrong or missing:
 | 5 | **No water flags.** The water-fill pass is skipped for spherical, while the underground classification pass still scans world-Z columns. | `VoxelCPUNoiseGenerator.cpp:1553-1555`, `:1686-1747`. **Fixed 2026-10-16 (SP-B7 on the CPU, SP-B8):** a radial water fill and underground classification along local down |
 | 6 | **The chunk candidate set is an axis-aligned box** (XY radius × a Z range capped at ±16 chunks). At the equator, world Z is horizontal, so reach along it is cut short. | `DistanceBandLODStrategy.cpp:192-211`. **Fixed 2026-10-16 (SP-C1):** each column streams its crossing of the shell |
 | 7 | **The horizon cull under-buffers distant mountains.** It adds `PlanetMaxTerrainHeight` where `√(2R·Hmax + Hmax²)` is needed. | `DistanceBandLODStrategy.cpp:1074-1144`. **Fixed 2026-10-16 (SP-C2)** |
-| 8 | **Config hygiene.** `BaseHeight` is hidden in the UI for spherical but still used. Nothing checks that `PlanetMaxTerrainHeight`/`Depth` cover the real amplitude (`0.5·PlanetHeightScale + BaseHeight`), so terrain past the shell is clipped by the density quick-reject. `GetPlanetSpawnPosition` ignores terrain displacement, and no spawn code calls it. **Partly fixed 2026-10-14 (SP-A5):** `BaseHeight` is shown, and the shell and water checks warn at load; the spawn clauses stay with SP-B11 and SP-F4. Since 2026-10-16 the shell check counts continentalness's extremes (Phase 1) | `VoxelWorldConfiguration.h:99-191`; `VoxelWorldConfiguration.cpp:233-259` |
+| 8 | **Config hygiene.** `BaseHeight` is hidden in the UI for spherical but still used. Nothing checks that `PlanetMaxTerrainHeight`/`Depth` cover the real amplitude (`0.5·PlanetHeightScale + BaseHeight`), so terrain past the shell is clipped by the density quick-reject. `GetPlanetSpawnPosition` ignores terrain displacement, and no spawn code calls it. **Partly fixed 2026-10-14 (SP-A5):** `BaseHeight` is shown, and the shell and water checks warn at load; the spawn clauses stay with SP-B11 and SP-F4. Since 2026-10-16 the shell check counts continentalness's extremes (Phase 1). **Spawn fixed 2026-10-17 (SP-B11, SP-F4, review plan §17):** `UVoxelChunkManager::GetPlanetSpawnPosition` stands on the terrain, and the character's spawn search goes by direction | `VoxelWorldConfiguration.h:99-191`; `VoxelWorldConfiguration.cpp:233-259` |
 | 9 | **No tests, config or map.** No automation test or content asset uses SphericalPlanet. **Partly fixed 2026-10-14:** a planet config and test map exist (SP-I1) and `VoxelWorlds.Configuration.PlanetSettings` tests the config checks; the generation tests are SP-I2. **Generation, streaming and collision tests since 2026-10-16** (SP-I2, 15 tests) | `*/Tests/*`, `Content/` |
-| 10 | **Every system that reads the surface assumes +Z is up**: scatter, PCG, map, navigation, POIs, dungeons, campsites, NPCs, movement, camera, world items, water, sky, clock. See Appendix A. | Appendix A |
+| 10 | **Every system that reads the surface assumes +Z is up**: scatter, PCG, map, navigation, POIs, dungeons, campsites, NPCs, movement, camera, world items, water, sky, clock. See Appendix A. **Movement, camera, spawn and water fixed 2026-10-17 (Phase 3, review plan §17):** gravity toward the centre, movement and camera in the gravity frame, spawn by direction, one sea definition | Appendix A |
 
 Several docs overstate this state; they are listed in §10 of the review plan.
 
@@ -102,7 +102,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 | SP-B8 | Water flags by sea radius (a radial fill pass), plus edit-time water propagation by radius | P1 | **Done 2026-10-16** (WM-P5): `ApplyRadialWaterFillPass` in generation; the chunk manager's cross-chunk propagation and the edit-time propagation test the sea sphere (`FVoxelSeaSurface`); the Z-plane water tiles are off on planets (`WorldModes.Planet.WaterFill`, `SeaSurface`). On the GPU since 2026-10-16 (WM-G2): a line seed, the flood sweep inside the sea sphere, the cave-flag clear |
 | SP-B9 | Voxel-tree injection is gated off on planets (it only applies to cubic, which SD3 excludes) | P1 | Not gated by world mode (`VoxelChunkManager.cpp:2671-2675`) |
 | SP-B10 | Conditioning zones get a radial model (footprint on the surface, target altitude), so claims, POI pads and campsites can flatten ground | P1 (P2 if SD4 defers POIs) | Skipped on planets (`VoxelCPUNoiseGenerator.cpp:1400-1402`; `CLAIMS_ARCHITECTURE.md:218-225`) |
-| SP-B11 | Spawn helper: `GetPlanetSpawnPosition` (or its replacement) includes the terrain displacement at the chosen direction | P1 | Ignores displacement (up to +2,500 uu by default against a 500 uu spawn altitude) |
+| SP-B11 | Spawn helper: `GetPlanetSpawnPosition` (or its replacement) includes the terrain displacement at the chosen direction | P1 | **Done 2026-10-17** (review plan WM-W4, §17): `UVoxelChunkManager::GetPlanetSpawnPosition`, `PlanetSpawnAltitude` over the terrain along the configured direction (`GetSurfacePointAt`); the configuration's own (no world mode) stays the datum's (`Streaming.Planet.SpawnPosition`) |
 
 ### C. Streaming and LOD
 
@@ -111,7 +111,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 | SP-C1 | Candidate enumeration covers every chunk that intersects the shell within the view distance, at any latitude | P0 | **Done 2026-10-16** (review plan WM-P6, §15.2): `FDistanceBandLODStrategy::GetPlanetShellWindow`: each column streams the layers whose chunks meet the shell ± ½ chunk within the view distance (one interval, or two where the column passes inside the inner radius). It replaces the viewer-relative window (an axis-aligned box with a ±16-chunk Z cap until M4, problem #6; M4 made heightmap windows per column, §14.8). 0 chunks missing against brute force at the pole, 45°, the equator and a cube corner (`LOD.Planet.ShellCoverage`) |
 | SP-C2 | Horizon cull adds `√(2R·Hmax + Hmax²)`, so mountains beyond the horizon still load | P1 | **Done 2026-10-16** (WM-P6): `GetPlanetHorizonDistance` = `√(2R·h + h²) + √(2R·Hmax + Hmax²)`, plus half a chunk's diagonal; no cull for a viewer inside the shell's inner radius (`LOD.Planet.HorizonCull`) |
 | SP-C3 | LOD distance stays 3D Euclidean (fine for surface play); `LOD_SYSTEM.md` stops claiming geodesic distance | P1 | Doc mismatch |
-| SP-C4 | The collision cook lead uses local down and the tangential heading | P1 | −Z and a horizontal heading (`VoxelCollisionManager.cpp:403-430`) |
+| SP-C4 | The collision cook lead uses local down and the tangential heading | P1 | **Done 2026-10-17** (review plan WM-W6, §17): `UVoxelCollisionManager::ComputePathCoverageSamples` in the focus's local frame (half a chunk along −up, the look-ahead across up, descending by the velocity along up); with up +Z the heightmap points bit for bit (`Streaming.Planet.CollisionLead`) |
 | SP-C5 | A planet equivalent of the far-band surface slab: far columns load only the altitude band around the analytic surface | P2 | Heightmap modes only; since M4 they keep the slab at every distance (WM-S1) |
 | SP-C6 | Orbital view: a quadtree-on-cube-sphere or octree LOD, plus a distant-planet impostor | P2 | Not started (SD5) |
 
@@ -129,19 +129,19 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 
 | ID | Requirement | Pri | Today |
 |----|-------------|-----|-------|
-| SP-E1 | One sea-radius definition used by every water consumer: scatter underwater class, nav water check, NPC spawner, spawn search, swimming | P1 | Consumers read the Z-plane `WaterLevel` (default 0, so the whole southern hemisphere counts as underwater for scatter) |
-| SP-E2 | Ocean surface: a sphere shell with the water material; per-chunk Z-plane water tiles are off on planets | P1 | Static engine sphere; tiles still run if `WaterMeshMaterial` is set |
-| SP-E3 | Underwater camera and post-process by radial depth | P1 | Z-based |
+| SP-E1 | One sea-radius definition used by every water consumer: scatter underwater class, nav water check, NPC spawner, spawn search, swimming | P1 | **Done 2026-10-17** (review plan WM-W7, §17): `FVoxelSeaSurface::GetDepth` (the signed depth below the plane or the sphere) through `UVoxelChunkManager::GetSeaSurface` / `GetSeaDepthAt`; scatter's underwater class, the navigation water check, the NPC spawner, the spawn search, swimming and breath all ask it. On a planet it is generation's sphere of `WaterRadius`; heightmap consumers keep their plane (generation's `WaterLevel`, or `WaterLevel + WorldOrigin.Z` for navigation, the character and NPCs: G19, equal when `WorldOrigin.Z` is 0). The map and the PCG sampler still read `WaterLevel` (Phase 4, SP-G2, SP-G3) and the configuration warning says so (`WorldModes.Planet.SeaDepth`, `Streaming.Planet.SeaQueries`) |
+| SP-E2 | Ocean surface: a sphere shell with the water material; per-chunk Z-plane water tiles are off on planets | P1 | **Done 2026-10-17** (review plan WM-W8, §17): the chunk manager draws `FVoxelPlanetOcean`, a tangent-warped cube sphere at `WaterRadius` with `WaterMeshMaterial` (160 quads a face edge on `Review_Planet`, quads sagging at most 8 uu), top faces outward, the underside shown only from inside the sea radius (`voxel.World.PlanetOcean`); the tiles stay off (Phase 1); the test actor's two-sided stand-in sphere is gone (`Streaming.Planet.OceanShell`, `OceanComponent`) |
+| SP-E3 | Underwater camera and post-process by radial depth | P1 | **Done 2026-10-17** (review plan WM-W7, §17): the post-process tests the camera's voxel water flag as before (radial since SP-B8) and darkens by the terrain context's depth, now the sea's (along the radius) |
 
 ### F. Character and gameplay (game side)
 
 | ID | Requirement | Pri | Today |
 |----|-------------|-----|-------|
-| SP-F1 | Gravity toward the planet centre: `UVCMovementComponent` sets the CMC gravity direction (UE 5.4+ custom gravity) each tick | P0 | World −Z; no gravity-direction code anywhere |
-| SP-F2 | `UVCMovementComponent` Z uses become gravity-relative: swim and buoyancy, floor trace, ledge check, embed resolve | P0 | `VCMovementComponent.cpp:242-295`, `:440`, `:769-791`, `:930-971` |
-| SP-F3 | Camera and control rotation are relative to gravity | P0 | World yaw and pitch (`VCCharacterBase.cpp:1632-1645`) |
-| SP-F4 | Spawn and the settle hold work by direction. A `vox.TP` equivalent takes latitude and longitude | P0 | Heightmap search; works only at the north pole, by coincidence |
-| SP-F5 | KillZ is off (or radial) on planets. The world-item pool parks items away from the surface | P0 | The default KillZ (~−1,048,575 uu) cuts through planets over ~10 km radius. The pool parks at (0, 0, −100,000), which is the south-pole surface of the default planet (`WorldItemPoolSubsystem.cpp:144`) |
+| SP-F1 | Gravity toward the planet centre: `UVCMovementComponent` sets the CMC gravity direction (UE 5.4+ custom gravity) each tick | P0 | **Done 2026-10-17** (review plan WM-W1, §17): `UVCMovementComponent::PerformMovement` sets it from the position before every move on a planet (server replay, client prediction, NPCs alike; simulated proxies take the engine's replicated direction); heightmap worlds never set it (`VoxelCharacter.Planet.GravityTowardCentre`) |
+| SP-F2 | `UVCMovementComponent` Z uses become gravity-relative: swim and buoyancy, floor trace, ledge check, embed resolve | P0 | **Done 2026-10-17** (WM-W2): swimming, the dive probe, the floor / landing / grace traces, the shore climb, the terrain context, breath, the embed resolve and the sprint's ground speed in the gravity frame; a swimmer stays upright in it (`ShouldRemainVertical`). With the default gravity the old arithmetic bit for bit (`VoxelCharacter.Planet.GravityFrame`) |
+| SP-F3 | Camera and control rotation are relative to gravity | P0 | **Done 2026-10-17** (WM-W3): `FVCGravityFrame`; `AVCPlayerController::UpdateRotation` carries the view across gravity changes and clamps pitch about local up; facing, ground input, the camera modes, the camera collision pivot, the interaction origin and the anim instance work in the gravity frame |
+| SP-F4 | Spawn and the settle hold work by direction. A `vox.TP` equivalent takes latitude and longitude | P0 | **Done 2026-10-17** (WM-W4): `FVCVoxelNavigationHelper::FindPlanetSpawnPoint` (the surface along the direction, rings of directions when it is sea), the terrain wait's grid in the tangent plane, placement along local up and upright; `vox.TP` settles by direction, `vox.TPLatLon`, `vox.Planet` (`VoxelCharacter.Planet.SpawnByDirection`) |
+| SP-F5 | KillZ is off (or radial) on planets. The world-item pool parks items away from the surface | P0 | **Done 2026-10-17** (WM-W5): a planet world moves KillZ below the planet when it would cut through it (`ComputePlanetKillZ`); the character's out-of-world rule is radial (`AVCCharacterBase::IsOutOfWorld`); the pool's `ParkingLocation` is the planet centre (`AVCGameModeBase`, `UWorldItemPoolSubsystem::SetParkingLocation`) (`Streaming.Planet.KillZ`, `VoxelCharacter.Planet.OutOfWorld`) |
 | SP-F6 | NPC AI movement and auto-jump are gravity-relative | P1 | `VCNPCAIController.cpp:697-715`, `:802` |
 | SP-F7 | World-item drop traces follow gravity; the placeable slope test uses local up | P1 | ±Z traces (`WorldItem.cpp:186-195`); `acos(Normal.Z)` (`ItemFragment_Placeable.h:39-42`) |
 | SP-F8 | The cylinder edit brush uses local up as its axis | P1 | Z axis (`VoxelEditManager.cpp:299-320`) |
@@ -177,7 +177,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 | SP-I2 | Automation tests: analytic vs generated surface by direction; seamless noise (the hemispheres differ, no mirror, continuous across cube-face edges); shell and horizon cull; enumeration covers the shell at the equator; params validation | P0 | **Done 2026-10-16** (review plan WM-P1 to WM-P7): 15 tests in `VoxelWorlds.WorldModes.Planet.*`, `VoxelWorlds.LOD.Planet.*` and `VoxelWorlds.Streaming.Planet.*`; params validation is `Configuration.PlanetSettings` (SP-A5) |
 | SP-I3 | `GPUvsCPUSphericalParity` (with SP-B4) | P1 | **Done 2026-10-16** (review plan WM-G3, §16): `VoxelWorlds.Generation.GPUvsCPUSphericalParity` at LOD 0/1/2 on both poles, the equator, 45°, a cube-face edge and corner, a coast, a cave and caves under the seabed, with thresholds from the measured numbers |
 | SP-I4 | A bench great-circle route at fixed altitude (extends review-plan T2) | P1 | Straight +X line only |
-| SP-I5 | Debug commands: `vox.TPLatLon`, `vox.Planet` (radius, shell, horizon, viewer altitude and latitude) | P1 | None |
+| SP-I5 | Debug commands: `vox.TPLatLon`, `vox.Planet` (radius, shell, horizon, viewer altitude and latitude) | P1 | **Done 2026-10-17** (review plan §17, built for Phase 3's checks): both, in the game module's `UVoxelDebugSubsystem`; `vox.AutoRun` follows a great circle on a planet |
 
 ## 4. Suggested phasing (input to the implementation plan)
 
@@ -186,7 +186,7 @@ The reserved gap analysis names this as gap 1. Every other consumer needs it.
 | 0. Guardrails | SP-A5, SP-B3, SP-I1, doc corrections | A spherical config generates on the CPU with a warning and no clipping. **Met 2026-10-14** (review plan §14.5): `PlanetTest` generates on the CPU with the SP-B3 warning, no config warnings, terrain inside its shell |
 | 1. A correct planet (CPU) | SP-A1, SP-A2, SP-B1, SP-B2, SP-B5-B8, SP-C1, SP-C2, SP-D4, SP-I2 | A survey camera shows a seamless, unmirrored planet with sensible materials and water at all latitudes. **Met 2026-10-16** (review plan §15.2): the survey at both poles, ±45°, the equator, a cube-face edge and a corner shows continuous terrain, different hemispheres, materials by altitude and biome, and coasts where the terrain crosses `WaterRadius`. Benches: against the smooth control the planet misses catch-up on every route because it generates on the CPU (the control on the CPU misses the same way); against that CPU control it is within the review plan's thresholds on the equator and at 45° but for one catch-up (+29%); D3 met |
 | 2. GPU | SP-B4, SP-I3 | GPU parity green; GPU default re-enabled for spherical. **Met 2026-10-16** (review plan §16.2): `GPUvsCPUSphericalParity` green in the editor at every site and LOD (the heightmap parity tests bit-identical), planets generate on the GPU by default, and the survey from six cameras shows the CPU's terrain |
-| 3. Walkable | SP-F1-F5, SP-C4, SP-B11, SP-E1-E3 | Walk and swim around the planet with no fall-through (`vox.Debug.Capture`) |
+| 3. Walkable | SP-F1-F5, SP-C4, SP-B11, SP-E1-E3 | Walk and swim around the planet with no fall-through (`vox.Debug.Capture`). **Met 2026-10-17** (review plan §17.2): the pawn spawns upright on land by direction (ring 3 from the polar sea), then at both poles, 45°, the equator and a cube corner stands, jumps, walks along great circles, swims, dives, surfaces and climbs out, gravity and body within 0.01° of the radial; one continuous walk and swim from 89.5° to the equator along longitude 45° (1,239 s, about 396,000 uu); 6,466 capture lines, no READY→NOT-READY under the feet, no re-cook, no out-of-world recovery |
 | 4. Systems | SP-A3, SP-A4, SP-A6, SP-D1-D3, SP-F6-F8, SP-G1-G4, SP-G7-G9, SP-H2, SP-H3, SP-I4, SP-I5 | The QA plan's world, NPC, map and save rows pass on the planet |
 | 5. Places | SP-B10, SP-G5 (then SP-G6, SP-G10) | POIs and campsites sit on the surface; dungeons if SD4 includes them |
 | 6. Big planets and orbit (optional) | SP-H1, SP-C5, SP-C6 | Per SD1 and SD5 |
@@ -202,7 +202,9 @@ surface coordinate), so Phase 1 starts from consumers, not from the interface. P
 per-column streaming window that SP-C1 builds on; **implemented 2026-10-15, in review**, review plan §14.8) and M5 (the legacy whole-chunk path is deleted before SP-D4 tests
 seams at mid latitudes). **Phase 1 done 2026-10-16** (review plan §15): the planet's surface function, materials, caves,
 underground and water flags along local up, and the shell window, all on the CPU; Phases 2 (GPU) and 3 (walkable) can
-start, side by side. **Phase 2 done 2026-10-16** (review plan §16): the same planet generated on the GPU, by default.
+start, side by side. **Phase 2 done 2026-10-16** (review plan §16): the same planet generated on the GPU, by default. **Phase 3 done 2026-10-17**
+(review plan §17): gravity toward the centre, movement, camera and spawn in the gravity frame, one sea, the ocean shell;
+Phase 4 (systems) is next.
 
 ## Appendix A. Z-up audit
 
@@ -224,14 +226,14 @@ Severity:
 | `FVoxelSurfaceQuery` | `VoxelSurfaceQuery.cpp:17-201` | Heightfield gradient; normal `(−dx, −dy, 1)`; biome at (X, Y, 0) | a | A1 |
 | Conditioning zones | `VoxelTerrainConditioning.h:26-116`; skipped in gen `:1400-1402` | XY footprint + target Z | a | B10 |
 | Underground classification | `VoxelCPUNoiseGenerator.cpp:1700-1747`; `VoxelPostPasses.usf:182-197` | Top-down −Z column | a | B7 |
-| Water fill, propagation, tiles, mesher | gen `:1546-1682`; `VoxelChunkManager.cpp:5295-5511`; `VoxelWaterPropagation.cpp:76`, `:237`; `VoxelWaterMesher.cpp:121` | `WaterLevel` is a Z plane; XY tiles | a | B8, E1, E2 |
+| Water fill, propagation, tiles, mesher | gen `:1546-1682`; `VoxelChunkManager.cpp:5295-5511`; `VoxelWaterPropagation.cpp:76`, `:237`; `VoxelWaterMesher.cpp:121` | `WaterLevel` is a Z plane; XY tiles. *Fixed (Phases 1 and 3: the sea sphere, the ocean shell; tiles off)* | a | B8, E1, E2 |
 | Cave shape | gen `:1071`; `GenerateVoxelDensity.usf:233` | `VerticalScale` on world Z | b | B6 |
 | Cave depth fade, ore depth, ore streaks | gen `:1187-1217`, `:1243-1259`, `:1473-1483` | Radial depth on the CPU | c | — |
 | Height-material rules | gen `:1458` | Radius used as height (all snow) | a | B2 |
 | Biome and climate sampling | gen `:1426-1430` (3D direction) vs `VoxelSurfaceQuery.cpp:93`, map `:722` (X, Y, 0) | Analytic paths use XY | c gen / a analytic | A1, B5 |
 | Tree injection | `VoxelTreeInjector.cpp:48`, `:191-229`, `:292`, `:343` | Heightmap Z, vertical trunk | a | B9 |
 | Scatter extraction (smooth, cubic) | `VoxelScatterManager.cpp:2630-2770`, `:2802-2918` | Z-column scan; face type by `Normal.Z`; cubic normal = UpVector | a | G1 |
-| Scatter underground override, underwater | `VoxelScatterManager.cpp:2487-2531`, `:2565`, `:2948-2949` | `Normal.Z > 0.3`; `Z < WaterLevel` | a | G1, E1 |
+| Scatter underground override, underwater | `VoxelScatterManager.cpp:2487-2531`, `:2565`, `:2948-2949` | `Normal.Z > 0.3`; `Z < WaterLevel` (*the underwater test fixed in Phase 3*) | a | G1, E1 |
 | Scatter slope, elevation, rotation | `VoxelScatterTypes.h:110-126`, `:235-249`, `:318-324` | World up; world-Z elevation; yaw about world up | b | G1 |
 | Scatter cover check | `VoxelScatterManager.cpp:2539-2547` | Guarded by `IsHeightmapBased()` | c | — |
 | PCG sampler | `PCGVoxelSurfaceSampler.cpp:208-286`, `:110-111` | XY grid, `MakeFromZ`, `WaterLevel` | a | G2 |
@@ -241,7 +243,7 @@ Severity:
 | MC geomorph | `VoxelCPUMarchingCubesMesher.cpp:1116-1142`; `MarchingCubesMeshGeneration.usf:446-457` | Morph along Z, gated on \|Nz\| | b | D2 |
 | Face type (atlas, cubic) | `VoxelCPUCubicMesher.cpp:119`; `VoxelMaterialCommon.ush:91-104`, `:268` | Top = +Z | b | D3 |
 | Edit brushes | `VoxelEditManager.cpp:299-320` | Cylinder axis = Z (sphere and cube fine) | b | F8 |
-| Collision cook lead | `VoxelCollisionManager.cpp:403-430` | Below feet = −Z; horizontal heading | b | C4 |
+| Collision cook lead | `VoxelCollisionManager.cpp:403-430` | Below feet = −Z; horizontal heading. *Fixed (Phase 3)* | b | C4 |
 | LOD candidates and culling | `DistanceBandLODStrategy.cpp:192-211`, `:1074-1144` | Shell cull fine; Z range capped at ±16 | b | C1, C2 |
 | Collision trimesh, uniform compression, claims volumes | per-chunk mesh; `ChunkDescriptor.h:316-337`; `WorldClaimComponent.cpp:29` | Orientation-agnostic | c | — |
 | Editor field viewer | `VoxelFieldTypes.cpp:67-76`, `:268-289` | XY height and slope fields | a | A6 |
@@ -250,11 +252,11 @@ Severity:
 
 | System | Where | Assumption | Sev | Req |
 |--------|-------|------------|-----|-----|
-| Gravity | `VoxelCharacterPlugin` (no gravity-direction code) | World −Z | a | F1 |
-| Movement | `VCMovementComponent.cpp:242-295`, `:440`, `:769-791`, `:930-971` | Buoyancy, floor trace, ledges, embed resolve on Z | b | F2 |
-| Camera and input | `VCCharacterBase.cpp:1632-1645` | World yaw/pitch | b | F3 |
-| Spawn and settle | `VCVoxelNavigationHelper.cpp:173-240`; `VCCharacterBase.cpp:838-1000` | Heightmap spiral; ±Z sweeps | a | F4 |
-| Water depth | `VCVoxelNavigationHelper.cpp:104-163` | `WaterLevel + Origin.Z − Loc.Z` | a | E1 |
+| Gravity | `VoxelCharacterPlugin` (no gravity-direction code) | World −Z. *Fixed (Phase 3)* | a | F1 |
+| Movement | `VCMovementComponent.cpp:242-295`, `:440`, `:769-791`, `:930-971` | Buoyancy, floor trace, ledges, embed resolve on Z. *Fixed (Phase 3)* | b | F2 |
+| Camera and input | `VCCharacterBase.cpp:1632-1645` | World yaw/pitch. *Fixed (Phase 3)* | b | F3 |
+| Spawn and settle | `VCVoxelNavigationHelper.cpp:173-240`; `VCCharacterBase.cpp:838-1000` | Heightmap spiral; ±Z sweeps. *Fixed (Phase 3)* | a | F4 |
+| Water depth | `VCVoxelNavigationHelper.cpp:104-163` | `WaterLevel + Origin.Z − Loc.Z`. *Fixed (Phase 3)* | a | E1 |
 | NPC AI | `VCNPCAIController.cpp:697-715`, `:802` | Feet Z and rise; rotation about UpVector | b | F6 |
 | POI placement | `POIPlacement.cpp:55-178`; `POIPlacementSubsystem.cpp:151-181`, `:282-293`, `:747-769` | InfinitePlane heights + XY cells | a | G5 |
 | Dungeon stamping | `POIPlacementSubsystem.cpp:989-1008`; `DungeonVoxelStamper.h:59-68` | Translation-only, vertical = Z | b | G6 |
@@ -263,6 +265,6 @@ Severity:
 | Surface NPC spawner | `SurfaceNPCSubsystem.cpp:299-349`, `:443`, `:654-710` | XY surface query; −Z collision probe | a | F6, G4 |
 | World clock and sun | `WorldClockMath.cpp:48-59`; `DayNightController.cpp:142-149` | One world-frame sun direction | a | G7 |
 | Sky and fog | `DayNightController.cpp:80-90`, `:155-160` | Z-height fog | a | G8 |
-| World items | `WorldItem.cpp:186-220`; `WorldItemPoolSubsystem.cpp:144` | ±Z drop trace; pool parked on the south pole | a/b | F5, F7 |
+| World items | `WorldItem.cpp:186-220`; `WorldItemPoolSubsystem.cpp:144` | ±Z drop trace; pool parked on the south pole (*the pool fixed in Phase 3*) | a/b | F5, F7 |
 | Placeable slope | `ItemFragment_Placeable.h:39-42` | `acos(Normal.Z)` | b | F7 |
-| Debug teleport | `Source/VoxelEngine/Private/Debug/VoxelDebugSubsystem.cpp:1765-1786` | Heightmap settle | a | F4, I5 |
+| Debug teleport | `Source/VoxelEngine/Private/Debug/VoxelDebugSubsystem.cpp:1765-1786` | Heightmap settle. *Fixed (Phase 3: by direction, `vox.TPLatLon`, `vox.Planet`)* | a | F4, I5 |

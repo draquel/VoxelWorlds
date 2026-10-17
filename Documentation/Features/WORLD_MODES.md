@@ -369,8 +369,11 @@ planet. **Status (2026-10-16): a correct planet, generated on the GPU** (spheric
 [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §15 and §16): seamless terrain sampled by 3D direction,
 continentalness, materials by altitude, caves, underground and water flags along local up, and a streaming window that
 covers the shell at every latitude. The GPU generator has a planet branch (Phase 2, locked to the CPU by
-`Generation.GPUvsCPUSphericalParity`), so planets follow `bUseGPUGeneration` like the other modes. The game systems
-still assume +Z is up (gravity, movement, scatter, map, navigation: Phases 3 and 4). What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
+`Generation.GPUvsCPUSphericalParity`), so planets follow `bUseGPUGeneration` like the other modes. **Walkable since
+2026-10-17** (Phase 3, review plan §17): gravity points at the centre (the character movement component sets the
+engine's custom gravity direction on every move), movement, camera and spawn work in the gravity frame, every water
+consumer asks one sea (`FVoxelSeaSurface`), and the chunk manager draws the ocean shell. The other game systems still
+assume +Z is up (scatter, map, navigation, NPC AI, POIs, sky: Phases 4 and 5). What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
 lives in the parent project: `/Game/PluginTesting/Planet` (`PlanetTest`, `PlanetWorldConfig`) and
 `/Game/PluginTesting/Review/Review_Planet` (water on).
 
@@ -427,6 +430,14 @@ The surface coordinate (`WorldToSurface` / `SurfaceToWorld`) is a cube sphere wi
 `u = (4/π)·atan(g)` per axis on each face: equal UV cells cover areas within 1.38× of each other.
 
 ### Spawn Position
+
+`UVoxelChunkManager::GetPlanetSpawnPosition()` (SP-B11) puts `PlanetSpawnAltitude` over the terrain along the configured
+direction (`GetSurfacePointAt`). The character spawns by direction (SP-F4): `FVCVoxelNavigationHelper::FindSpawnablePosition`
+takes the terrain along the direction from the centre to the requested position, or, when that is under the sea, the
+nearest land on rings of directions one chunk of arc apart (`PlanetTest`'s PlayerStart is over the north pole, which is
+sea on `Review_Planet`: the pawn lands 3 rings away). The configuration's own helper has no world mode, so it gives the
+datum's point:
+
 ```cpp
 FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 {
@@ -461,14 +472,13 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 - **Small planets** (SD1): past the planet-relative distance and direction the GPU works in single precision (its
   cave and ore noise at absolute positions), as the CPU's noise does; parity is measured on a 250,000 uu planet.
   Large planets need SP-H1
-- Every surface consumer (scatter, PCG, map, navigation, POIs, NPCs, movement) assumes +Z is up
-  (requirements doc, Appendix A); gravity toward the centre is not implemented
-- Water: the voxel water flags follow `WaterRadius` (generation, cross-chunk and edit-time propagation); scatter,
-  navigation, NPC spawning and swimming still read the Z-plane `WaterLevel` (SP-E1), and `GetSettingsWarnings` flags
-  water on a planet. The per-chunk water tiles are Z-plane tiles and are off on planets; the test actor draws the sea
-  as a cube-sphere mesh at `WaterRadius` until SP-E2. That mesh is one unsorted two-sided translucent section, so
-  where a view crosses its cap twice the far side blends over the near side in part of the view (a light/dark split
-  along a grid row; cosmetic)
+- Scatter, PCG, the map, navigation, POIs, NPC AI, world-item drops, the edit brush, the sky and the clock still assume
+  +Z is up (requirements doc, Appendix A; Phases 4 and 5): trees stand along world Z, the sky and clouds are a Z-up
+  layer (the equator and the south pole read as night or below the horizon), NPCs fall toward the centre but steer in
+  world yaw
+- Water: one sea for generation and gameplay (`FVoxelSeaSurface`, `WaterRadius`); the map and the PCG sampler still
+  read the Z-plane `WaterLevel` (`GetSettingsWarnings` says so). The ocean shell is a sphere, so it also shows inside dry
+  caves below sea level
 - Designed for surface exploration; orbital viewing would need an octree or cube-sphere quadtree LOD (SD5)
 - No 2D system keys on the surface coordinate yet (map tiles, navigation, POI cells, explored tiles: Phase 4)
 

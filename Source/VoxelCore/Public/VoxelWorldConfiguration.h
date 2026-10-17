@@ -191,8 +191,9 @@ public:
 	 * Water level height in world units.
 	 * Used for InfinitePlane and IslandBowl world modes.
 	 * Terrain surface below this height will use underwater materials.
-	 * On a planet, generation uses WaterRadius instead, but scatter, navigation, NPC spawning and swimming
-	 * still read this Z plane (SPHERICAL_PLANET_REQUIREMENTS.md SP-E1); GetSettingsWarnings says so.
+	 * On a planet the sea is WaterRadius instead (FVoxelSeaSurface: generation, swimming, scatter, navigation, NPC
+	 * spawning; SPHERICAL_PLANET_REQUIREMENTS.md SP-E1); only the map and the PCG sampler still read this Z plane
+	 * there (Phase 4), and GetSettingsWarnings says so.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel && WorldMode != EWorldMode::SphericalPlanet"))
 	float WaterLevel = 0.0f;
@@ -659,8 +660,9 @@ public:
 	float GetMaterialLODEndDistance() const;
 
 	/**
-	 * Get the spawn position for spherical planet mode.
-	 * Returns WorldOrigin + SpawnDirection * (WorldRadius + PlanetSpawnAltitude)
+	 * Get the spawn position for spherical planet mode over the datum (no terrain: the configuration has no world mode).
+	 * Returns WorldOrigin + SpawnDirection * (WorldRadius + PlanetSpawnAltitude). For the point over the terrain use
+	 * UVoxelChunkManager::GetPlanetSpawnPosition (spherical SP-B11).
 	 *
 	 * PlanetSpawnLocation values:
 	 *   0 = +X (Equator East)

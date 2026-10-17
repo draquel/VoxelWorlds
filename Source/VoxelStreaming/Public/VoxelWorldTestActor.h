@@ -173,9 +173,10 @@ public:
 	void ForceStreamingUpdate();
 
 	/**
-	 * Get the recommended spawn position for spherical planet mode.
-	 * Returns the position on the planet surface based on PlanetSpawnLocation setting.
+	 * Get the recommended spawn position for spherical planet mode: PlanetSpawnAltitude over the terrain along the
+	 * PlanetSpawnLocation direction (UVoxelChunkManager::GetPlanetSpawnPosition), or over the datum before the world starts.
 	 * Only valid when WorldMode == SphericalPlanet.
+	 * @return World position (WorldOrigin in other modes)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel")
 	FVector GetPlanetSpawnPosition() const;
@@ -432,13 +433,6 @@ protected:
 	/** Draw performance HUD on screen */
 	void DrawPerformanceHUD() const;
 
-	/**
-	 * Build the planet's water sphere (WaterSphereMesh) at Radius around the component's origin.
-	 * @param Component Procedural mesh component to fill (section 0)
-	 * @param Radius Sea radius
-	 */
-	static void BuildWaterSphere(UProceduralMeshComponent& Component, float Radius);
-
 protected:
 	/** Chunk manager component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Voxel")
@@ -447,15 +441,6 @@ protected:
 	/** Water plane static mesh component — single plane at water level, follows viewer */
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> WaterPlaneMesh;
-
-	/**
-	 * The sea's surface on a planet: a sphere of WaterRadius around the planet centre, a cube sphere with the tangent
-	 * warp, 96 x 96 quads a face (chords within about 10 uu of the radius on a 250,000 uu planet), drawn with
-	 * WaterMaterial or the configuration's WaterMeshMaterial. It stands in for the ocean surface until SP-E2 (the
-	 * per-chunk water tiles are Z-plane tiles, off on planets).
-	 */
-	UPROPERTY()
-	TObjectPtr<UProceduralMeshComponent> WaterSphereMesh;
 
 	/** LOD strategy (owned by this actor) */
 	IVoxelLODStrategy* LODStrategy = nullptr;

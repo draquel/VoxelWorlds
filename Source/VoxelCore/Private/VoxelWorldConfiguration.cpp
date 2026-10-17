@@ -280,13 +280,13 @@ TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 				Deepest, MaxScaleMult, BaseHeight, MinOffset, PlanetMaxTerrainDepth));
 		}
 
-		// Generation fills a planet's oceans by WaterRadius; everything else that asks "is this under water"
-		// (scatter, navigation, NPC spawning, swimming) still compares against the WaterLevel Z plane, which
-		// on a planet splits it into a wet and a dry hemisphere (SP-E1).
+		// Generation, swimming, scatter, navigation and NPC spawning ask the sea sphere of WaterRadius (FVoxelSeaSurface,
+		// SP-E1). The map and the PCG sampler still compare against the WaterLevel Z plane, which on a planet splits it into
+		// a wet and a dry hemisphere, until spherical Phase 4 (SP-G2, SP-G3).
 		if (bEnableWaterLevel)
 		{
 			Warnings.Add(FString::Printf(
-				TEXT("water is enabled on a planet: generation uses WaterRadius (%.0f), but scatter, navigation, NPC spawning and swimming still read the Z plane WaterLevel (%.0f) until SP-E1"),
+				TEXT("water is enabled on a planet: the sea is WaterRadius (%.0f) everywhere but the map and the PCG sampler, which still read the Z plane WaterLevel (%.0f) until spherical Phase 4 (SP-G2, SP-G3)"),
 				WaterRadius, WaterLevel));
 		}
 	}

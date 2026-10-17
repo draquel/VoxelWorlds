@@ -47,6 +47,31 @@ struct VOXELCORE_API FVoxelSeaSurface
 	static FVoxelSeaSurface FromConfig(const UVoxelWorldConfiguration& Config);
 
 	/**
+	 * The same sea with the heightmap plane at WaterLevel + WorldOrigin.Z, the plane the navigation, the character and
+	 * the NPC spawner have always used (generation, scatter, the map and PCG use WaterLevel itself: FromConfig). The two
+	 * agree whenever WorldOrigin.Z is 0 (review plan G19). On a planet both are the sphere of WaterRadius.
+	 *
+	 * @param Config World configuration
+	 * @return The sea surface
+	 */
+	static FVoxelSeaSurface FromConfigOriginRelative(const UVoxelWorldConfiguration& Config);
+
+	/**
+	 * Signed depth of a world position below the surface: PlaneZ - Z on the plane, Radius - |WorldPos - Center| on a
+	 * sphere (spherical requirement SP-E1). Positive below the sea, negative above, 0 on it; the sign alone answers
+	 * "strictly below" exactly as the old Z < WaterLevel tests did.
+	 *
+	 * @param WorldPos World position
+	 * @return Depth below the surface (world units)
+	 */
+	double GetDepth(const FVector& WorldPos) const
+	{
+		return bRadial
+			? Radius - FVector::Dist(WorldPos, Center)
+			: PlaneZ - WorldPos.Z;
+	}
+
+	/**
 	 * Whether a world position is at or below the surface: Z <= PlaneZ, or within Radius of Center. (The water rules
 	 * give such air the water flag when the open sea reaches it.)
 	 *

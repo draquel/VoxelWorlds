@@ -135,6 +135,13 @@ struct FCollisionCookRequest
 /**
  * Result of an async collision cooking task (mesh gen + trimesh construction on thread pool).
  */
+/** One point ForcePathCoverage asks to have cooked: the chunk holding Position, at the path boost plus Bias. */
+struct FVoxelCollisionCoverSample
+{
+	FVector Position = FVector::ZeroVector;
+	float Bias = 0.0f;
+};
+
 struct FAsyncCollisionResult
 {
 	FIntVector ChunkCoord;
@@ -378,6 +385,22 @@ public:
 	 */
 	static void BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, TArray<Chaos::TVector<int32, 3>>& OutTriangles);
 
+	/**
+	 * Where the collision lead (ForcePathCoverage) looks, in the focus's local frame (spherical SP-C4): the focus itself,
+	 * half a chunk along -Up under it (standing on a seam between chunk layers), then LookAhead chunks along the
+	 * velocity's part across Up and, when the velocity along Up is below -1 (descending), the chunk one below each of
+	 * those along -Up. With Up = (0, 0, 1) these are the heightmap points exactly (world -Z, the horizontal heading).
+	 *
+	 * @param Focus The pawn's position
+	 * @param Velocity The pawn's velocity
+	 * @param Up Local up at the focus (unit)
+	 * @param ChunkWorldSize Chunk width
+	 * @param LookAhead Chunks ahead to cover (0 = the two under the feet only)
+	 * @param OutSamples Receives the samples, in priority order (replaced)
+	 */
+	static void ComputePathCoverageSamples(const FVector& Focus, const FVector& Velocity, const FVector& Up, float ChunkWorldSize,
+		int32 LookAhead, TArray<FVoxelCollisionCoverSample>& OutSamples);
+
 protected:
 	// ==================== Internal Methods ====================
 
@@ -395,7 +418,7 @@ protected:
 
 	/**
 	 * Tier 1 (LeadFix-gated): force-cook, at top priority, the chunk under the focus plus a short fan
-	 * along its horizontal velocity — including the chunk it is descending into — so ground under
+	 * along its velocity across local up — including the chunk it is descending into — so ground under
 	 * imminent (and downhill) footfalls is cooked before the pawn enters it. Overrides the normal
 	 * center-distance priority (which deprioritizes a descending chunk whose center is far below).
 	 */

@@ -91,6 +91,22 @@ static TAutoConsoleVariable<int32> CVarFarOcean(
 	}),
 	ECVF_Default);
 
+// A planet's sea surface (spherical SP-E2): its visibility, for every live chunk manager.
+static TAutoConsoleVariable<int32> CVarPlanetOcean(
+	TEXT("voxel.World.PlanetOcean"),
+	1,
+	TEXT("A planet's sea surface: a cube sphere at WaterRadius with the configuration's water material.\n")
+	TEXT("  1 = drawn (default)\n")
+	TEXT("  0 = hidden (for before/after views)"),
+	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			It->SetPlanetOceanVisible(Var->GetInt() != 0);
+		}
+	}),
+	ECVF_Default);
+
 // How far inside the edge the far ocean's water stands in for columns the streaming has not loaded. Read when the
 // far ocean is built.
 static TAutoConsoleVariable<float> CVarFarOceanInland(
@@ -695,6 +711,8 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		Timing.FarOceanRebuildCount = UpdateFarOceanGrid(false) ? 1 : 0;
 		Timing.FarOceanMs = static_cast<float>((FPlatformTime::Seconds() - FarOceanStart) * 1000.0);
 	}
+	// A planet's sea surface shows its underside only while the viewer is in the sea (SP-E2).
+	UpdatePlanetOceanUnderside(CurrentViewerPosition);
 
 	// === Water propagation (bounded BFS per frame) ===
 	if (WaterPropagation && WaterPropagation->HasPendingWork())
@@ -1206,9 +1224,12 @@ void UVoxelChunkManager::Initialize(
 
 	bIsInitialized = true;
 
-	// The hard boundary at the world's edge (WM-I5, D9), and the sea beyond it (WM-E1).
+	// The hard boundary at the world's edge (WM-I5, D9), and the sea beyond it (WM-E1); a planet's sea surface (SP-E2)
+	// and KillZ under it (SP-F5).
 	RebuildWorldBoundary();
 	RebuildFarOcean();
+	RebuildPlanetOcean();
+	ApplyPlanetKillZ();
 
 	// Dump biome configuration for diagnostics
 	if (Configuration->BiomeConfiguration)
@@ -1334,6 +1355,7 @@ void UVoxelChunkManager::Shutdown()
 	WorldMode.Reset();
 	DestroyWorldBoundary();
 	DestroyFarOcean();
+	DestroyPlanetOcean();
 
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
@@ -2532,6 +2554,65 @@ FVoxelTerrainSurfacePoint UVoxelChunkManager::GetSurfacePointAt(const FVector& W
 	return WorldMode->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
 }
 
+FVector UVoxelChunkManager::GetPlanetSpawnPosition() const
+{
+	if (!Configuration)
+	{
+		return FVector::ZeroVector;
+	}
+	if (!WorldMode || Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return Configuration->WorldOrigin;
+	}
+	// The configuration's point gives the direction; the terrain along it is the world mode's (SP-B11).
+	const FVoxelTerrainSurfacePoint Surface = GetSurfacePointAt(Configuration->GetPlanetSpawnPosition());
+	return Surface.Position + GetUpVectorAt(Surface.Position) * Configuration->PlanetSpawnAltitude;
+}
+
+FVoxelSeaSurface UVoxelChunkManager::GetSeaSurface(bool bOriginRelativePlane) const
+{
+	if (!Configuration)
+	{
+		return FVoxelSeaSurface();
+	}
+	return bOriginRelativePlane ? FVoxelSeaSurface::FromConfigOriginRelative(*Configuration) : FVoxelSeaSurface::FromConfig(*Configuration);
+}
+
+float UVoxelChunkManager::GetSeaDepthAt(const FVector& WorldPos) const
+{
+	const FVoxelSeaSurface Sea = GetSeaSurface(/*bOriginRelativePlane=*/true);
+	return Sea.bEnabled ? static_cast<float>(Sea.GetDepth(WorldPos)) : -1.0e9f;
+}
+
+double UVoxelChunkManager::ComputePlanetKillZ(double CurrentKillZ, const FVoxelWorldBounds& Bounds, double Margin)
+{
+	if (Bounds.Shape != EVoxelWorldBoundsShape::Shell)
+	{
+		return CurrentKillZ;
+	}
+	const double Below = Bounds.Center.Z - Bounds.OuterRadius - FMath::Max(Margin, 0.0);
+	return FMath::Min(CurrentKillZ, Below);
+}
+
+void UVoxelChunkManager::ApplyPlanetKillZ()
+{
+	UWorld* World = GetWorld();
+	AWorldSettings* Settings = World ? World->GetWorldSettings() : nullptr;
+	if (!Settings || !WorldMode || !Configuration || Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return;
+	}
+	// The engine's KillZ is a Z plane: a planet bigger than it reaches would lose its southern hemisphere to it. Below the
+	// planet it never touches the surface, and bodies that leave the planet along world -Z are still removed.
+	const double NewKillZ = ComputePlanetKillZ(Settings->KillZ, WorldMode->GetWorldBounds(), Configuration->GetChunkWorldSize());
+	if (NewKillZ < Settings->KillZ)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet: KillZ moved from %.0f to %.0f, below the planet (centre Z %.0f, outer radius %.0f)."),
+			Settings->KillZ, NewKillZ, WorldMode->GetWorldBounds().Center.Z, WorldMode->GetWorldBounds().OuterRadius);
+		Settings->KillZ = static_cast<float>(NewKillZ);
+	}
+}
+
 FVoxelWorldFingerprint UVoxelChunkManager::GetWorldFingerprint() const
 {
 	return Configuration ? FVoxelWorldModeFactory::MakeFingerprint(*Configuration) : FVoxelWorldFingerprint();
@@ -2980,6 +3061,107 @@ void UVoxelChunkManager::SetFarOceanVisible(bool bVisible)
 	if (FarOceanStatic)
 	{
 		UE_LOG(LogVoxelStreaming, Log, TEXT("Far ocean %s"), bVisible ? TEXT("shown") : TEXT("hidden"));
+	}
+}
+
+// ==================== Planet Ocean (spherical SP-E2) ====================
+
+void UVoxelChunkManager::RebuildPlanetOcean()
+{
+	DestroyPlanetOcean();
+
+	UWorld* World = GetWorld();
+	AActor* Owner = GetOwner();
+	// Visual only: a dedicated server draws nothing.
+	if (!Configuration || !World || !World->IsGameWorld() || !Owner || World->GetNetMode() == NM_DedicatedServer
+		|| Configuration->WorldMode != EWorldMode::SphericalPlanet || !Configuration->bEnableWaterLevel)
+	{
+		return;
+	}
+	if (!Configuration->WaterMeshMaterial)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("Planet ocean: not drawn, the configuration has no WaterMeshMaterial."));
+		return;
+	}
+	const double StartTime = FPlatformTime::Seconds();
+	PlanetOceanSettings = FVoxelPlanetOceanSettings();
+	PlanetOceanSettings.Center = Configuration->WorldOrigin; // the planet centre (FVoxelWorldModeFactory::MakePlanetParams)
+	PlanetOceanSettings.Radius = Configuration->WaterRadius;
+	PlanetOceanSettings.VoxelSize = Configuration->VoxelSize;
+
+	FVoxelPlanetOceanMesh Top;
+	FVoxelPlanetOceanMesh Underside;
+	int32 Segments = 0;
+	const int32 Quads = FVoxelPlanetOcean::Build(PlanetOceanSettings, Top, &Underside, Segments);
+	if (Quads == 0)
+	{
+		return;
+	}
+
+	PlanetOcean = VoxelFarOceanManagerPrivate::MakeComponent(Owner, TEXT("VoxelPlanetOcean"), PlanetOceanSettings.Center);
+	auto MakeTangents = [](const TArray<FVector>& In)
+	{
+		TArray<FProcMeshTangent> Out;
+		Out.Reserve(In.Num());
+		for (const FVector& T : In)
+		{
+			Out.Add(FProcMeshTangent(T, false));
+		}
+		return Out;
+	};
+	const TArray<FVector2D> NoUV;
+	PlanetOcean->CreateMeshSection(0, Top.Positions, Top.Triangles, Top.Normals, Top.UV0, Top.UV1, NoUV, NoUV, Top.Colors,
+		MakeTangents(Top.Tangents), /*bCreateCollision=*/false);
+	PlanetOcean->CreateMeshSection(1, Underside.Positions, Underside.Triangles, Underside.Normals, Underside.UV0, Underside.UV1,
+		NoUV, NoUV, Underside.Colors, MakeTangents(Underside.Tangents), /*bCreateCollision=*/false);
+	PlanetOcean->SetMaterial(0, Configuration->WaterMeshMaterial);
+	PlanetOcean->SetMaterial(1, Configuration->WaterMeshMaterial);
+	PlanetOcean->SetVisibility(CVarPlanetOcean.GetValueOnGameThread() != 0);
+	bPlanetOceanUndersideShown = true; // force the first update to decide
+	UpdatePlanetOceanUnderside(CurrentViewerPosition);
+
+	UE_LOG(LogVoxelStreaming, Log,
+		TEXT("Planet ocean: radius %.0f, %d quads a face edge (%d quads, sag at most %.1f uu), built in %.2f ms%s"),
+		PlanetOceanSettings.Radius, Segments, Quads, FVoxelPlanetOcean::MeasureMaxSag(PlanetOceanSettings.Radius, Segments),
+		(FPlatformTime::Seconds() - StartTime) * 1000.0,
+		CVarPlanetOcean.GetValueOnGameThread() != 0 ? TEXT("") : TEXT(" (hidden: voxel.World.PlanetOcean 0)"));
+}
+
+void UVoxelChunkManager::DestroyPlanetOcean()
+{
+	if (IsValid(PlanetOcean))
+	{
+		PlanetOcean->DestroyComponent();
+	}
+	PlanetOcean = nullptr;
+	bPlanetOceanUndersideShown = false;
+}
+
+void UVoxelChunkManager::UpdatePlanetOceanUnderside(const FVector& ViewerPosition)
+{
+	if (!PlanetOcean)
+	{
+		return;
+	}
+	const bool bInside = FVector::DistSquared(ViewerPosition, PlanetOceanSettings.Center)
+		< PlanetOceanSettings.Radius * PlanetOceanSettings.Radius;
+	if (bInside == bPlanetOceanUndersideShown)
+	{
+		return;
+	}
+	bPlanetOceanUndersideShown = bInside;
+	if (PlanetOcean->GetNumSections() > 1)
+	{
+		PlanetOcean->SetMeshSectionVisible(1, bInside);
+	}
+}
+
+void UVoxelChunkManager::SetPlanetOceanVisible(bool bVisible)
+{
+	if (IsValid(PlanetOcean))
+	{
+		PlanetOcean->SetVisibility(bVisible);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet ocean %s"), bVisible ? TEXT("shown") : TEXT("hidden"));
 	}
 }
 

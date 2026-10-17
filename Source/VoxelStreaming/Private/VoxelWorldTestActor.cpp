@@ -355,7 +355,8 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 	// Log spawn position for spherical planet mode
 	if (Config->WorldMode == EWorldMode::SphericalPlanet)
 	{
-		const FVector SpawnPos = Config->GetPlanetSpawnPosition();
+		// The terrain along the spawn direction (SP-B11), once the chunk manager has its world mode.
+		const FVector SpawnPos = GetPlanetSpawnPosition();
 		static const TCHAR* SpawnLocationNames[] = { TEXT("+X Equator"), TEXT("+Y Equator"), TEXT("+Z North Pole"), TEXT("-Z South Pole") };
 		const int32 SpawnLocIdx = FMath::Clamp(Config->PlanetSpawnLocation, 0, 3);
 
@@ -531,7 +532,8 @@ FVector AVoxelWorldTestActor::GetPlanetSpawnPosition() const
 	UVoxelWorldConfiguration* Config = Configuration ? Configuration.Get() : RuntimeConfiguration.Get();
 	if (Config && Config->WorldMode == EWorldMode::SphericalPlanet)
 	{
-		return Config->GetPlanetSpawnPosition();
+		// The terrain along the spawn direction plus PlanetSpawnAltitude (SP-B11); the datum's point before the world starts.
+		return (ChunkManager && ChunkManager->IsInitialized()) ? ChunkManager->GetPlanetSpawnPosition() : Config->GetPlanetSpawnPosition();
 	}
 
 	// For non-spherical modes, return the world origin (actor location)
@@ -780,181 +782,51 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 		return;
 	}
 
-	// Per-chunk water rendering is active — skip single plane/sphere creation
-	// Each chunk renders its own cave-aware water surface via WaterMeshMaterial (heightmap worlds: the chunk manager has
-	// no water tiles on a planet, so the sphere below is a planet's sea in either case)
-	if (Config->WaterMeshMaterial && Config->WorldMode != EWorldMode::SphericalPlanet)
+	// Per-chunk water rendering is active — skip single plane creation. Each chunk renders its own cave-aware water
+	// surface via WaterMeshMaterial; a planet's sea is the chunk manager's ocean shell (spherical SP-E2:
+	// UVoxelChunkManager::RebuildPlanetOcean), so this actor draws no water there either.
+	if (Config->WaterMeshMaterial || Config->WorldMode == EWorldMode::SphericalPlanet)
 	{
 		DestroyWaterVisualization();
 		return;
 	}
 
-	// Different visualization based on world mode
-	if (Config->WorldMode == EWorldMode::SphericalPlanet)
+	// Flat world modes (InfinitePlane, IslandBowl):
+	// Single water plane at WaterLevel, scaled to cover loaded area
+
+	// Create water plane component if needed
+	if (!WaterPlaneMesh)
 	{
-		// Spherical planet mode: use sphere mesh (per-chunk water not supported for spherical yet)
-
-		// Destroy plane if it exists (switching modes)
-		if (WaterPlaneMesh)
+		WaterPlaneMesh = NewObject<UStaticMeshComponent>(this, TEXT("WaterPlaneMesh"));
+		WaterPlaneMesh->SetupAttachment(GetRootComponent());
+		WaterPlaneMesh->RegisterComponent();
+		UStaticMesh* Plane = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane"));
+		if (Plane)
 		{
-			WaterPlaneMesh->DestroyComponent();
-			WaterPlaneMesh = nullptr;
+			WaterPlaneMesh->SetStaticMesh(Plane);
 		}
-
-		// Create the water sphere mesh component if it doesn't exist
-		if (!WaterSphereMesh)
-		{
-			WaterSphereMesh = NewObject<UProceduralMeshComponent>(this, TEXT("WaterSphereMesh"));
-			if (WaterSphereMesh)
-			{
-				WaterSphereMesh->SetupAttachment(GetRootComponent());
-				WaterSphereMesh->RegisterComponent();
-
-				// Disable collision for visualization
-				WaterSphereMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-
-				// Set cast shadows to false
-				WaterSphereMesh->SetCastShadow(false);
-
-				UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Created water sphere visualization component"));
-			}
-		}
-
-		if (!WaterSphereMesh)
-		{
-			return;
-		}
-
-		// Position at planet center (WorldOrigin), unscaled: the mesh is built at WaterRadius
-		WaterSphereMesh->SetWorldLocation(Config->WorldOrigin);
-		WaterSphereMesh->SetWorldScale3D(FVector::OneVector);
-		BuildWaterSphere(*WaterSphereMesh, Config->WaterRadius);
-
-		// Set material
-		if (WaterMaterial || Config->WaterMeshMaterial)
-		{
-			WaterSphereMesh->SetMaterial(0, WaterMaterial ? WaterMaterial.Get() : Config->WaterMeshMaterial.Get());
-		}
-		else
-		{
-			// Create a simple translucent blue material if none provided
-			UMaterialInstanceDynamic* DefaultWaterMat = UMaterialInstanceDynamic::Create(
-				WaterSphereMesh->GetMaterial(0), this);
-			if (DefaultWaterMat)
-			{
-				DefaultWaterMat->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.1f, 0.3f, 0.6f, 0.5f));
-				WaterSphereMesh->SetMaterial(0, DefaultWaterMat);
-			}
-		}
-
-		WaterSphereMesh->SetVisibility(true);
-
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water sphere at origin (%.0f, %.0f, %.0f), Radius=%.0f"),
-			Config->WorldOrigin.X, Config->WorldOrigin.Y, Config->WorldOrigin.Z, Config->WaterRadius);
+		WaterPlaneMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		WaterPlaneMesh->SetCastShadow(false);
+		WaterPlaneMesh->SetTranslucentSortPriority(100);
 	}
-	else
+
+	// Apply material
+	if (WaterMaterial)
 	{
-		// Flat world modes (InfinitePlane, IslandBowl):
-		// Single water plane at WaterLevel, scaled to cover loaded area
-
-		// Destroy sphere if it exists (switching modes)
-		if (WaterSphereMesh)
-		{
-			WaterSphereMesh->DestroyComponent();
-			WaterSphereMesh = nullptr;
-		}
-
-		// Create water plane component if needed
-		if (!WaterPlaneMesh)
-		{
-			WaterPlaneMesh = NewObject<UStaticMeshComponent>(this, TEXT("WaterPlaneMesh"));
-			WaterPlaneMesh->SetupAttachment(GetRootComponent());
-			WaterPlaneMesh->RegisterComponent();
-			UStaticMesh* Plane = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane"));
-			if (Plane)
-			{
-				WaterPlaneMesh->SetStaticMesh(Plane);
-			}
-			WaterPlaneMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			WaterPlaneMesh->SetCastShadow(false);
-			WaterPlaneMesh->SetTranslucentSortPriority(100);
-		}
-
-		// Apply material
-		if (WaterMaterial)
-		{
-			WaterPlaneMesh->SetMaterial(0, WaterMaterial);
-		}
-
-		// Scale: /Engine/BasicShapes/Plane is 100x100 UU.
-		// Cover ViewDistance * WaterPlaneScale diameter.
-		const float ScaleFactor = (Config->ViewDistance * WaterPlaneScale) / 50.0f;
-		WaterPlaneMesh->SetWorldScale3D(FVector(ScaleFactor, ScaleFactor, 1.0f));
-
-		// Position at water level (XY updated per-tick via UpdateWaterPlanePosition)
-		WaterPlaneMesh->SetWorldLocation(FVector(0.0f, 0.0f, Config->WaterLevel));
-		WaterPlaneMesh->SetVisibility(true);
-
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water plane at Z=%.0f, scale=%.1f"),
-			Config->WaterLevel, ScaleFactor);
+		WaterPlaneMesh->SetMaterial(0, WaterMaterial);
 	}
-}
 
-void AVoxelWorldTestActor::BuildWaterSphere(UProceduralMeshComponent& Component, float Radius)
-{
-	// A cube sphere: six faces of Segments x Segments quads, the grid tangent-warped (g = tan(pi/4 u)) so its cells
-	// are near equal in size, the same mapping as the planet's surface coordinate. Face frames as
-	// FSphericalPlanetWorldMode's: normal N, U axis T, V axis B with T x B = N.
-	constexpr int32 Segments = 96;
-	static const FVector Frames[6][3] = {
-		{ FVector( 1, 0, 0), FVector( 0, 1, 0), FVector(0, 0, 1) },
-		{ FVector(-1, 0, 0), FVector( 0,-1, 0), FVector(0, 0, 1) },
-		{ FVector( 0, 1, 0), FVector(-1, 0, 0), FVector(0, 0, 1) },
-		{ FVector( 0,-1, 0), FVector( 1, 0, 0), FVector(0, 0, 1) },
-		{ FVector( 0, 0, 1), FVector( 1, 0, 0), FVector(0, 1, 0) },
-		{ FVector( 0, 0,-1), FVector( 1, 0, 0), FVector(0,-1, 0) },
-	};
+	// Scale: /Engine/BasicShapes/Plane is 100x100 UU.
+	// Cover ViewDistance * WaterPlaneScale diameter.
+	const float ScaleFactor = (Config->ViewDistance * WaterPlaneScale) / 50.0f;
+	WaterPlaneMesh->SetWorldScale3D(FVector(ScaleFactor, ScaleFactor, 1.0f));
 
-	TArray<FVector> Vertices;
-	TArray<FVector> Normals;
-	TArray<FVector2D> UVs;
-	TArray<int32> Triangles;
-	const int32 Row = Segments + 1;
-	Vertices.Reserve(6 * Row * Row);
-	Normals.Reserve(6 * Row * Row);
-	UVs.Reserve(6 * Row * Row);
-	Triangles.Reserve(6 * Segments * Segments * 6);
-	for (int32 Face = 0; Face < 6; ++Face)
-	{
-		const int32 Base = Vertices.Num();
-		for (int32 j = 0; j < Row; ++j)
-		{
-			for (int32 i = 0; i < Row; ++i)
-			{
-				const double U = -1.0 + 2.0 * i / Segments;
-				const double V = -1.0 + 2.0 * j / Segments;
-				const FVector Dir = (Frames[Face][0] + FMath::Tan(U * UE_DOUBLE_PI / 4.0) * Frames[Face][1]
-					+ FMath::Tan(V * UE_DOUBLE_PI / 4.0) * Frames[Face][2]).GetSafeNormal();
-				Vertices.Add(Dir * Radius);
-				Normals.Add(Dir);
-				UVs.Add(FVector2D(i, j) / Segments);
-			}
-		}
-		// Corners A (i, j), B (i+1, j), D (i+1, j+1), C (i, j+1) run counter-clockwise seen from outside (T x B = N);
-		// UE's front faces take them as (A, D, B), (A, C, D), as the far ocean's and the water mesher's quads do.
-		for (int32 j = 0; j < Segments; ++j)
-		{
-			for (int32 i = 0; i < Segments; ++i)
-			{
-				const int32 A = Base + i + j * Row;
-				const int32 B = A + 1;
-				const int32 C = A + Row;
-				const int32 D = C + 1;
-				Triangles.Append({ A, D, B, A, C, D });
-			}
-		}
-	}
-	Component.CreateMeshSection(0, Vertices, Triangles, Normals, UVs, TArray<FColor>(), TArray<FProcMeshTangent>(), false);
+	// Position at water level (XY updated per-tick via UpdateWaterPlanePosition)
+	WaterPlaneMesh->SetWorldLocation(FVector(0.0f, 0.0f, Config->WaterLevel));
+	WaterPlaneMesh->SetVisibility(true);
+
+	UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water plane at Z=%.0f, scale=%.1f"),
+		Config->WaterLevel, ScaleFactor);
 }
 
 void AVoxelWorldTestActor::DestroyWaterVisualization()
@@ -965,14 +837,6 @@ void AVoxelWorldTestActor::DestroyWaterVisualization()
 		WaterPlaneMesh = nullptr;
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Destroyed water plane visualization"));
-	}
-
-	if (WaterSphereMesh)
-	{
-		WaterSphereMesh->DestroyComponent();
-		WaterSphereMesh = nullptr;
-
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Destroyed water sphere visualization"));
 	}
 }
 

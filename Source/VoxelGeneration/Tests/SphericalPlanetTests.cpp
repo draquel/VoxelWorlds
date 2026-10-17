@@ -916,6 +916,101 @@ bool FPlanetSeaSurfaceTest::RunTest(const FString& Parameters)
 }
 
 /**
+ * SP-E1: the sea's signed depth, the one test every water consumer asks. Plane: PlaneZ - Z, its sign exactly the old
+ * "Z < WaterLevel"; the origin-relative plane adds WorldOrigin.Z (G19), on a planet both are the sphere. Sphere: the
+ * depth along the radius, at or above 0 exactly where IsBelow holds; generation's radial fill wets the open sea where it
+ * is at or above 0 and nowhere else.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetSeaDepthTest,
+	"VoxelWorlds.WorldModes.Planet.SeaDepth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetSeaDepthTest::RunTest(const FString& Parameters)
+{
+	using namespace SphericalPlanetTestUtils;
+	const float WaterLevel = -1500.0f;
+	const FVoxelSeaSurface Plane = FVoxelSeaSurface::MakePlane(WaterLevel);
+	TestEqual(TEXT("Plane: 250 under"), Plane.GetDepth(FVector(9.0e5, -4.0e5, -1750.0)), 250.0);
+	TestEqual(TEXT("Plane: 40 over"), Plane.GetDepth(FVector(0.0, 0.0, -1460.0)), -40.0);
+	// The sign is exactly the old comparison, also one float step either side of the level.
+	int32 SignMismatches = 0;
+	for (const float Z : { WaterLevel, -1500.0001f, -1499.9999f, 0.0f, -1.0e7f }) // the level, the floats either side of it, far off
+	{
+		SignMismatches += ((Plane.GetDepth(FVector(0.0, 0.0, Z)) > 0.0) != (Z < WaterLevel)) ? 1 : 0;
+	}
+	TestEqual(TEXT("Plane: depth > 0 exactly where Z < WaterLevel"), SignMismatches, 0);
+
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->WorldMode = EWorldMode::InfinitePlane;
+	Config->WorldOrigin = FVector(12345.0, 54321.0, 300.0);
+	Config->WaterLevel = WaterLevel;
+	Config->bEnableWaterLevel = true;
+	TestEqual(TEXT("Generation's plane: WaterLevel"), FVoxelSeaSurface::FromConfig(*Config).PlaneZ, -1500.0);
+	TestEqual(TEXT("Game code's plane: WaterLevel + WorldOrigin.Z"), FVoxelSeaSurface::FromConfigOriginRelative(*Config).PlaneZ, -1200.0);
+	Config->WorldOrigin.Z = 0.0;
+	TestEqual(TEXT("They agree when WorldOrigin.Z is 0 (every project config)"), FVoxelSeaSurface::FromConfigOriginRelative(*Config).PlaneZ,
+		FVoxelSeaSurface::FromConfig(*Config).PlaneZ);
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = FVector(100.0, 200.0, 300.0);
+	Config->WaterRadius = 249500.0f;
+	const FVoxelSeaSurface PlanetSea = FVoxelSeaSurface::FromConfigOriginRelative(*Config);
+	TestTrue(TEXT("Planet: the origin-relative sea is the sphere too"), PlanetSea.bRadial && PlanetSea.Radius == 249500.0
+		&& PlanetSea.Center.Equals(Config->WorldOrigin));
+
+	const FVector Dir = FVector(0.3, -0.8, 0.52).GetSafeNormal();
+	TestTrue(TEXT("Sphere: 600 under, along the radius"), FMath::IsNearlyEqual(PlanetSea.GetDepth(PlanetSea.Center + Dir * 248900.0), 600.0, 1.0e-6));
+	TestTrue(TEXT("Sphere: 75 over"), FMath::IsNearlyEqual(PlanetSea.GetDepth(PlanetSea.Center + Dir * 249575.0), -75.0, 1.0e-6));
+	FRandomStream Random(77);
+	int32 BelowMismatches = 0;
+	for (int32 i = 0; i < 2000; ++i)
+	{
+		const FVector P = PlanetSea.Center + Random.GetUnitVector() * (249500.0 + Random.FRandRange(-2.0, 2.0));
+		BelowMismatches += ((PlanetSea.GetDepth(P) >= 0.0) != PlanetSea.IsBelow(P)) ? 1 : 0;
+	}
+	TestEqual(TEXT("Sphere: depth >= 0 exactly where IsBelow holds"), BelowMismatches, 0);
+
+	// Generation agrees: a coastal chunk at 45 degrees, filled by the radial pass, is wet in the open sea where the
+	// depth is at or above 0 and dry where it is below.
+	const int32 N = PlanetTestChunkSize;
+	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+	const double ChunkWorld = N * PlanetTestVoxelSize;
+	const FIntVector Chunk(FMath::FloorToInt(PlanetTestRadius * C45 / ChunkWorld), 0, FMath::FloorToInt(PlanetTestRadius * C45 / ChunkWorld));
+	FVoxelNoiseGenerationRequest Request = MakePlanetPassRequest(Chunk, EWorldMode::SphericalPlanet);
+	const FVector ChunkCentre = Request.GetChunkWorldPosition() + FVector(0.5 * (N - 1) * PlanetTestVoxelSize);
+	Request.bEnableWaterLevel = true;
+	Request.WaterRadius = static_cast<float>(ChunkCentre.Size());
+	Request.WaterLevel = 1.0e9f;
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::MakeSphere(FVector::ZeroVector, Request.WaterRadius);
+	TArray<FVoxelData> Data;
+	Data.SetNum(N * N * N);
+	for (int32 Z = 0; Z < N; ++Z)
+	for (int32 Y = 0; Y < N; ++Y)
+	for (int32 X = 0; X < N; ++X)
+	{
+		Data[VoxelIndex(X, Y, Z)] = (X + Z < 20) ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
+	}
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, Data);
+	int32 Wet = 0, Disagree = 0;
+	for (int32 Z = 0; Z < N; ++Z)
+	for (int32 Y = 0; Y < N; ++Y)
+	for (int32 X = 0; X < N; ++X)
+	{
+		const FVoxelData& Voxel = Data[VoxelIndex(X, Y, Z)];
+		if (Voxel.IsSolid())
+		{
+			continue;
+		}
+		const FVector WorldPos = Request.GetChunkWorldPosition() + FVector(X, Y, Z) * PlanetTestVoxelSize;
+		Wet += Voxel.HasWaterFlag() ? 1 : 0;
+		Disagree += (Voxel.HasWaterFlag() != (Sea.GetDepth(WorldPos) >= 0.0)) ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("45 degrees: %d wet air voxels, %d where the flag and the depth disagree"), Wet, Disagree));
+	TestTrue(TEXT("The chunk has sea"), Wet > 1000);
+	TestEqual(TEXT("Water flags are exactly the open sea at or under the surface"), Disagree, 0);
+	return true;
+}
+
+/**
  * SP-B8: the radial water fill. In a chunk at 45 degrees that the sea sphere crosses, the open sea between the ground
  * and the sea surface takes the water flag, the air above the sea and a cave in the ground stay dry, and the Z-plane
  * WaterLevel plays no part. A chunk wholly under the sea is left to its neighbours, as on the plane.
