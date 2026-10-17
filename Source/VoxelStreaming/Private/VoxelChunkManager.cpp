@@ -1855,6 +1855,16 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 	return true;
 }
 
+FVector UVoxelChunkManager::GetChunkLocalUp(const FIntVector& ChunkCoord) const
+{
+	if (!WorldMode || !Configuration || Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return FVector::UpVector;
+	}
+	const double ChunkWorldSize = static_cast<double>(Configuration->ChunkSize) * Configuration->VoxelSize;
+	return WorldMode->GetUpVector(Configuration->WorldOrigin + (FVector(ChunkCoord) + FVector(0.5)) * ChunkWorldSize);
+}
+
 FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) const
 {
 	const IVoxelWorldMode* WM = GetWorldMode();
@@ -3469,8 +3479,10 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		return;
 	}
 
-	// Tree injection captures (value copies for thread safety)
+	// Tree injection captures (value copies for thread safety). Voxel trees are a heightmap feature (cubic, which planets
+	// do not use: spherical SD3, SP-B9).
 	const bool bInjectTrees = Configuration &&
+		Configuration->WorldMode != EWorldMode::SphericalPlanet &&
 		Configuration->MeshingMode == EMeshingMode::Cubic &&
 		Configuration->TreeMode != EVoxelTreeMode::HISM &&
 		Configuration->TreeTemplates.Num() > 0 &&
@@ -3668,8 +3680,9 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 {
 	// The water/underground post-passes already ran on the GPU (AddVoxelPostPassDispatches), so the
 	// readback data is finished except for cubic-mode voxel-tree injection. Without trees there is
-	// nothing left to compute — enqueue directly and skip the worker hop.
+	// nothing left to compute — enqueue directly and skip the worker hop. Never on a planet (SP-B9).
 	const bool bInjectTrees = Configuration &&
+		Configuration->WorldMode != EWorldMode::SphericalPlanet &&
 		Configuration->MeshingMode == EMeshingMode::Cubic &&
 		Configuration->TreeMode != EVoxelTreeMode::HISM &&
 		Configuration->TreeTemplates.Num() > 0 &&
@@ -3842,6 +3855,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		MeshRequest.ChunkSize = Configuration->ChunkSize;
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
 		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
+		MeshRequest.LocalUp = GetChunkLocalUp(Request.ChunkCoord);
 		MeshRequest.VoxelData = State->Descriptor.GetVoxelDataForRead();
 
 		// Merge edit layer if present
@@ -4880,6 +4894,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		SeamRequest.LocalUp = GetChunkLocalUp(Key.Owner);
 		SeamRequest.VoxelDataA = GetSeamVoxelSnapshot(Job.Participants[0].Coord, *States[0]);
 		SeamRequest.VoxelDataB = GetSeamVoxelSnapshot(Job.Participants[1].Coord, *States[1]);
 
@@ -4921,6 +4936,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		SeamRequest.LocalUp = GetChunkLocalUp(Key.Owner);
 		// Registry participant order [Owner, +PerpA, +PerpB, +PerpA+PerpB] (ascending perps)
 		// matches the request's quadrant order [(0,0),(1,0),(0,1),(1,1)] by construction.
 		for (int32 i = 0; i < 4; ++i)
@@ -4965,6 +4981,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		SeamRequest.LocalUp = GetChunkLocalUp(Key.Owner);
 		// Registry participant order (X innermost: i + j*2 + k*4) matches the request's octant
 		// order dx + dy*2 + dz*4 by construction.
 		for (int32 i = 0; i < 8; ++i)
@@ -6606,6 +6623,7 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	OutMeshRequest.ChunkSize = ChunkSize;
 	OutMeshRequest.VoxelSize = Configuration->VoxelSize;
 	OutMeshRequest.WorldOrigin = Configuration->WorldOrigin;
+	OutMeshRequest.LocalUp = GetChunkLocalUp(ChunkCoord);
 
 	// Hand out the shared edit-merged snapshot (built at most once per chunk content version, usually
 	// already cached by the seam pipeline). The worker copies it into the request off the game thread.

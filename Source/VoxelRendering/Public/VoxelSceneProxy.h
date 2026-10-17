@@ -519,6 +519,21 @@ private:
 	/** Voxel size in world units */
 	float VoxelSize;
 
+	/** Face types against a planet's radial up (UVoxelWorldComponent::SetRadialFaceUp), copied at creation */
+	bool bRadialFaceUp = false;
+	FVector3f FaceUpCenter = FVector3f::ZeroVector;
+
+	/**
+	 * A mesher vertex converted for upload (spherical SP-D3): on a planet the face type is measured against the radial
+	 * up at the vertex's world position (Vertex.Position + Offset); otherwise FVoxelLocalVertex::FromVoxelVertex as is.
+	 */
+	FORCEINLINE FVoxelLocalVertex ConvertVertex(const FVoxelVertex& Vertex, const FVector3f& Offset) const
+	{
+		return bRadialFaceUp
+			? FVoxelLocalVertex::FromVoxelVertex(Vertex, (Vertex.Position + Offset - FaceUpCenter).GetSafeNormal())
+			: FVoxelLocalVertex::FromVoxelVertex(Vertex);
+	}
+
 	/** Critical section for thread-safe chunk access */
 	mutable FCriticalSection ChunkDataLock;
 };

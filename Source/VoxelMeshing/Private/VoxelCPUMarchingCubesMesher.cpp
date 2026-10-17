@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelCPUMarchingCubesMesher.h"
+#include "VoxelDigitalLine.h"
 #include "VoxelMeshing.h"
 #include "MarchingCubesTables.h"
 #include "TransvoxelTables.h"
@@ -1058,6 +1059,74 @@ bool FVoxelCPUMarchingCubesMesher::ComputeCoarseSurfaceZ(
 	return bFound;
 }
 
+bool FVoxelCPUMarchingCubesMesher::ComputeCoarseSurfaceAlongAxis(
+	const FVoxelMeshingRequest& Request,
+	const FVector3f& V, int32 Axis,
+	int32 CoarserStride,
+	float& OutCoord) const
+{
+	// ComputeCoarseSurfaceZ with the axes permuted: Axis takes Z's role, the other two are clamped to the chunk as X and
+	// Y are there (neighbour data is one plane deep).
+	const float IsoLevel = Config.IsoLevel;
+	const int32 E = FMath::Max(1, CoarserStride);
+	const float Ef = static_cast<float>(E);
+	const int32 ChunkSize = Request.ChunkSize;
+	const int32 AxisB = (Axis + 1) % 3;
+	const int32 AxisC = (Axis + 2) % 3;
+
+	auto SampleCoarse = [&](float Aq) -> float
+	{
+		const int32 B0 = FMath::FloorToInt(V[AxisB] / Ef) * E;
+		const int32 C0 = FMath::FloorToInt(V[AxisC] / Ef) * E;
+		const int32 A0 = FMath::FloorToInt(Aq / Ef) * E;
+		const float Fb = (V[AxisB] - static_cast<float>(B0)) / Ef;
+		const float Fc = (V[AxisC] - static_cast<float>(C0)) / Ef;
+		const float Fa = (Aq - static_cast<float>(A0)) / Ef;
+		const int32 Ba = FMath::Clamp(B0, 0, ChunkSize);
+		const int32 Bb = FMath::Clamp(B0 + E, 0, ChunkSize);
+		const int32 Ca = FMath::Clamp(C0, 0, ChunkSize);
+		const int32 Cb = FMath::Clamp(C0 + E, 0, ChunkSize);
+		auto At = [&](int32 A, int32 B, int32 C)
+		{
+			FIntVector I;
+			I[Axis] = A;
+			I[AxisB] = B;
+			I[AxisC] = C;
+			return GetDensityAt(Request, I.X, I.Y, I.Z);
+		};
+		const float D0 = FMath::Lerp(FMath::Lerp(At(A0, Ba, Ca), At(A0, Bb, Ca), Fb), FMath::Lerp(At(A0, Ba, Cb), At(A0, Bb, Cb), Fb), Fc);
+		const float D1 = FMath::Lerp(FMath::Lerp(At(A0 + E, Ba, Ca), At(A0 + E, Bb, Ca), Fb), FMath::Lerp(At(A0 + E, Ba, Cb), At(A0 + E, Bb, Cb), Fb), Fc);
+		return FMath::Lerp(D0, D1, Fa);
+	};
+
+	const int32 SearchCells = 4;
+	const float Near = V[Axis];
+	const int32 ABase = FMath::FloorToInt(Near / Ef) * E;
+	float BestDist = TNumericLimits<float>::Max();
+	bool bFound = false;
+	for (int32 k = -SearchCells; k < SearchCells; k++)
+	{
+		const float Aa = static_cast<float>(ABase + k * E);
+		const float Ab = Aa + Ef;
+		const float Da = SampleCoarse(Aa);
+		const float Db = SampleCoarse(Ab);
+		const float Denom = Db - Da;
+		if ((Da >= IsoLevel) != (Db >= IsoLevel))
+		{
+			const float T = (FMath::Abs(Denom) < KINDA_SMALL_NUMBER) ? 0.5f : FMath::Clamp((IsoLevel - Da) / Denom, 0.0f, 1.0f);
+			const float Ac = Aa + T * Ef;
+			const float Dist = FMath::Abs(Ac - Near);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				OutCoord = Ac;
+				bFound = true;
+			}
+		}
+	}
+	return bFound;
+}
+
 void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 	const FVoxelMeshingRequest& Request,
 	int32 SelfStride,
@@ -1110,6 +1179,31 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 
 	if (BestW <= 0.0f)
 	{
+		return;
+	}
+
+	// On a planet (spherical SP-D2) the morph runs along the axis nearest the chunk's local up instead of Z: the same
+	// gate and the same coarse search on that axis. Exactly +Z keeps the column code below.
+	if (Request.LocalUp != FVector::UpVector)
+	{
+		const FVector3f V(Vx, Vy, Vz);
+		const FVector AbsUp = Request.LocalUp.GetAbs();
+		const int32 Axis = (AbsUp.X >= AbsUp.Y && AbsUp.X >= AbsUp.Z) ? 0 : (AbsUp.Y >= AbsUp.Z ? 1 : 2);
+		const float Gx = GetDensityAtTrilinear(Request, Vx + 1.0f, Vy, Vz) - GetDensityAtTrilinear(Request, Vx - 1.0f, Vy, Vz);
+		const float Gy = GetDensityAtTrilinear(Request, Vx, Vy + 1.0f, Vz) - GetDensityAtTrilinear(Request, Vx, Vy - 1.0f, Vz);
+		const float Gz = GetDensityAtTrilinear(Request, Vx, Vy, Vz + 1.0f) - GetDensityAtTrilinear(Request, Vx, Vy, Vz - 1.0f);
+		const float GMag = FMath::Sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
+		const float GAxis = (Axis == 0) ? Gx : (Axis == 1) ? Gy : Gz;
+		constexpr float SteepThreshold = 0.5f;
+		if (GMag < KINDA_SMALL_NUMBER || FMath::Abs(GAxis) < SteepThreshold * GMag)
+		{
+			return;
+		}
+		float SecCoord;
+		if (ComputeCoarseSurfaceAlongAxis(Request, V, Axis, BestE, SecCoord))
+		{
+			Vertex[Axis] = FMath::Lerp(V[Axis], SecCoord, BestW) * VoxelSize;
+		}
 		return;
 	}
 
@@ -1310,6 +1404,27 @@ uint8 FVoxelCPUMarchingCubesMesher::GetDominantMaterialLOD(
 	uint8 SurfaceMaterial = 0;
 	int32 HighestSurfaceZ = INT32_MIN;
 
+	// On a planet the scan runs along the chunk's local up (spherical SP-D1); exactly +Z keeps the column scan below.
+	if (Request.LocalUp != FVector::UpVector)
+	{
+		double Highest = TNumericLimits<double>::Lowest();
+		for (int32 i = 0; i < 8; i++)
+		{
+			if (CubeIndex & (1 << i))
+			{
+				const FIntVector Corner = FIntVector(X, Y, Z) + MarchingCubesTables::CornerOffsets[i] * Stride;
+				uint8 Value = 0;
+				const double Along = ScanSurfaceAlongLocalUp(Request, Corner, /*bBiome=*/false, Value);
+				if (Along > Highest)
+				{
+					Highest = Along;
+					SurfaceMaterial = Value;
+				}
+			}
+		}
+		return SurfaceMaterial;
+	}
+
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CubeIndex & (1 << i))
@@ -1364,6 +1479,27 @@ uint8 FVoxelCPUMarchingCubesMesher::GetDominantBiomeLOD(
 	uint8 SurfaceBiome = 0;
 	int32 HighestSurfaceZ = INT32_MIN;
 
+	// On a planet the scan runs along the chunk's local up (spherical SP-D1), as GetDominantMaterialLOD's.
+	if (Request.LocalUp != FVector::UpVector)
+	{
+		double Highest = TNumericLimits<double>::Lowest();
+		for (int32 i = 0; i < 8; i++)
+		{
+			if (CubeIndex & (1 << i))
+			{
+				const FIntVector Corner = FIntVector(X, Y, Z) + MarchingCubesTables::CornerOffsets[i] * Stride;
+				uint8 Value = 0;
+				const double Along = ScanSurfaceAlongLocalUp(Request, Corner, /*bBiome=*/true, Value);
+				if (Along > Highest)
+				{
+					Highest = Along;
+					SurfaceBiome = Value;
+				}
+			}
+		}
+		return SurfaceBiome;
+	}
+
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CubeIndex & (1 << i))
@@ -1402,6 +1538,32 @@ uint8 FVoxelCPUMarchingCubesMesher::GetDominantBiomeLOD(
 	}
 
 	return SurfaceBiome;
+}
+
+double FVoxelCPUMarchingCubesMesher::ScanSurfaceAlongLocalUp(
+	const FVoxelMeshingRequest& Request,
+	const FIntVector& Corner,
+	bool bBiome,
+	uint8& OutValue) const
+{
+	// GetDominantMaterialLOD's column walk on the digital line along local up: the last solid voxel before air, at
+	// most MaxScanDistance steps, scored by how far along up it lies.
+	constexpr int32 MaxScanDistance = 8;
+	const FVoxelDigitalLine Line = FVoxelDigitalLine::Make(Request.LocalUp);
+	OutValue = 0;
+	FIntVector Last = Corner;
+	for (int32 K = 0; K <= MaxScanDistance; ++K)
+	{
+		const FIntVector I = Line.Step(Corner, K);
+		const FVoxelData Voxel = GetVoxelAt(Request, I.X, I.Y, I.Z);
+		if (!Voxel.IsSolid())
+		{
+			break;
+		}
+		OutValue = bBiome ? Voxel.BiomeID : Voxel.MaterialID;
+		Last = I;
+	}
+	return FVector::DotProduct(FVector(Last), Request.LocalUp);
 }
 
 // ============================================================================

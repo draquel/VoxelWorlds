@@ -344,6 +344,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel")
 	FVector GetWorldOrigin() const { return WorldOrigin; }
 
+	/**
+	 * Classify each vertex's face type (top, side, bottom) against the radial direction from a planet centre instead of
+	 * world +Z (spherical SP-D3). The renderer sets it for a planet; the scene proxy reads it when it is created (this
+	 * recreates the render state when the value changes).
+	 *
+	 * @param bRadial Planet: the face type against the radial up
+	 * @param Center The planet centre
+	 */
+	void SetRadialFaceUp(bool bRadial, const FVector& Center);
+
+	/** Whether face types are classified against a planet's radial up (SetRadialFaceUp). */
+	bool IsRadialFaceUp() const { return bRadialFaceUp; }
+
+	/** The planet centre the radial face up is measured from. */
+	FVector GetFaceUpCenter() const { return FaceUpCenter; }
+
 	// ==================== Material Atlas ====================
 
 	/**
@@ -511,6 +527,12 @@ private:
 	/** World origin offset - all chunk positions are relative to this */
 	UPROPERTY(VisibleAnywhere, Category = "Voxel")
 	FVector WorldOrigin = FVector::ZeroVector;
+
+	/** Face types against a planet's radial up (SetRadialFaceUp) */
+	bool bRadialFaceUp = false;
+
+	/** The planet centre for the radial face up */
+	FVector FaceUpCenter = FVector::ZeroVector;
 
 	/** Distance where LOD transition starts (MorphFactor = 0) */
 	UPROPERTY(EditAnywhere, Category = "Voxel|LOD", meta = (ClampMin = "0"))

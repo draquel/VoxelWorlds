@@ -297,6 +297,13 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	 */
 	float MorphWidthOverride = -1.0f;
 
+	/**
+	 * Local up at the chunk (spherical Phase 4, SP-D1, SP-D2): +Z in heightmap modes, the chunk centre's radial direction
+	 * on a planet (UVoxelChunkManager fills it). The marching-cubes LOD material scan and the boundary geomorph run
+	 * along it; exactly +Z keeps their original column arithmetic.
+	 */
+	FVector LocalUp = FVector::UpVector;
+
 	// Transition face flag bits
 	static constexpr uint8 TRANSITION_XNEG = 1 << 0;
 	static constexpr uint8 TRANSITION_XPOS = 1 << 1;
@@ -503,6 +510,9 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
 	FVector WorldOrigin = FVector::ZeroVector;
 
+	/** Local up at the owner chunk (matches FVoxelMeshingRequest::LocalUp; +Z in heightmap modes). */
+	FVector LocalUp = FVector::UpVector;
+
 	/**
 	 * Owner-side voxels (ChunkSize^3, edit-merged), as a SHARED IMMUTABLE snapshot: the chunk
 	 * manager builds one snapshot per (chunk, content version) and every seam job touching that
@@ -587,6 +597,9 @@ struct VOXELMESHING_API FVoxelEdgeSeamRequest
 	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
 	FVector WorldOrigin = FVector::ZeroVector;
 
+	/** Local up at the owner chunk (matches FVoxelMeshingRequest::LocalUp; +Z in heightmap modes). */
+	FVector LocalUp = FVector::UpVector;
+
 	/**
 	 * Participant voxel arrays (ChunkSize^3 each, edit-merged), in quadrant order
 	 * [(0,0), (1,0), (0,1), (1,1)] over (PerpA, PerpB) — see the struct comment. Shared
@@ -667,6 +680,9 @@ struct VOXELMESHING_API FVoxelCornerSeamRequest
 
 	/** World origin offset (matches FVoxelMeshingRequest::WorldOrigin). */
 	FVector WorldOrigin = FVector::ZeroVector;
+
+	/** Local up at the owner chunk (matches FVoxelMeshingRequest::LocalUp; +Z in heightmap modes). */
+	FVector LocalUp = FVector::UpVector;
 
 	/**
 	 * Participant voxel arrays (ChunkSize^3 each, edit-merged), octant order dx + dy*2 + dz*4.

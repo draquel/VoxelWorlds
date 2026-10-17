@@ -328,4 +328,113 @@ bool FPlanetSurfaceConditionsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * SP-H3: a planet's ore Rarity test hashes the planet-relative position. OreRarityHash is deterministic, in [0, 1) and
+ * spread evenly (half of 100,000 keys at or under 0.5). On a planet off the world origin, a gold vein at Rarity 0.5 keeps
+ * exactly the voxels of the Rarity 1 vein whose OreRarityHash(OreRarityKey(position - centre)) is at most 0.5.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetOreRarityHashTest,
+	"VoxelWorlds.WorldModes.Planet.OreRarityHash",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetOreRarityHashTest::RunTest(const FString& Parameters)
+{
+	using namespace PlanetSystemsTestUtils;
+
+	// The hash itself.
+	{
+		FRandomStream Random(5);
+		int32 AtOrBelowHalf = 0;
+		double Sum = 0.0;
+		bool bInRange = true;
+		constexpr int32 Keys = 100000;
+		for (int32 i = 0; i < Keys; ++i)
+		{
+			const FIntVector Key(Random.RandRange(-300000, 300000), Random.RandRange(-300000, 300000), Random.RandRange(-300000, 300000));
+			const float Value = FVoxelCPUNoiseGenerator::OreRarityHash(Key, 248675);
+			bInRange &= Value >= 0.0f && Value < 1.0f;
+			AtOrBelowHalf += Value <= 0.5f ? 1 : 0;
+			Sum += Value;
+		}
+		AddInfo(FString::Printf(TEXT("%d keys: mean %.4f, %.2f%% at or under 0.5"), Keys, Sum / Keys, 100.0 * AtOrBelowHalf / Keys));
+		TestTrue(TEXT("The hash is in [0, 1)"), bInRange);
+		TestTrue(TEXT("The hash is spread evenly"), FMath::Abs(Sum / Keys - 0.5) < 0.01 && FMath::Abs(static_cast<double>(AtOrBelowHalf) / Keys - 0.5) < 0.01);
+		TestEqual(TEXT("The hash is deterministic"), FVoxelCPUNoiseGenerator::OreRarityHash(FIntVector(1, 2, 3), 7), FVoxelCPUNoiseGenerator::OreRarityHash(FIntVector(1, 2, 3), 7));
+		TestNotEqual(TEXT("The seed changes it"), FVoxelCPUNoiseGenerator::OreRarityHash(FIntVector(1, 2, 3), 7), FVoxelCPUNoiseGenerator::OreRarityHash(FIntVector(1, 2, 3), 8));
+		TestEqual(TEXT("The key rounds to whole uu"), FVoxelCPUNoiseGenerator::OreRarityKey(FVector(10.49, -10.5, 2.5)), FIntVector(10, -10, 3));
+	}
+
+	// Generation: Rarity 0.5 keeps the Rarity 1 vein's voxels whose hash is at most 0.5.
+	auto MakeBiomes = [](float Rarity)
+	{
+		UVoxelBiomeConfiguration* Biomes = NewObject<UVoxelBiomeConfiguration>();
+		Biomes->AddToRoot();
+		Biomes->InitializeDefaults();
+		Biomes->bEnableOreVeins = true;
+		Biomes->GlobalOreVeins.Empty();
+		FOreVeinConfig Gold;
+		Gold.Name = TEXT("Gold"); Gold.MaterialID = 9; Gold.MinDepth = 12.0f; Gold.MaxDepth = 0.0f;
+		Gold.Shape = EOreVeinShape::Blob; Gold.Frequency = 0.004f; Gold.Threshold = 0.4f;
+		Gold.SeedOffset = 222; Gold.Rarity = Rarity; Gold.Priority = 0;
+		Biomes->GlobalOreVeins.Add(Gold);
+		Biomes->RebuildCaches();
+		return Biomes;
+	};
+	UVoxelBiomeConfiguration* Full = MakeBiomes(1.0f);
+	UVoxelBiomeConfiguration* Half = MakeBiomes(0.5f);
+	UVoxelWorldConfiguration* ConfigFull = MakePlanetConfig(Full, FVector(12345.0, -678.0, 910.0));
+	UVoxelWorldConfiguration* ConfigHalf = MakePlanetConfig(Half, FVector(12345.0, -678.0, 910.0));
+	const FVector Center = ConfigFull->WorldOrigin;
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*ConfigFull);
+	const FVector Pole = Mode->GetSurfacePoint(Center + FVector::UpVector, ConfigFull->NoiseParams).Position;
+	const FIntVector Chunk = FIntVector((Pole - FVector(0.0, 0.0, 2000.0) - Center) / (ChunkSize * VoxelSize)) - FIntVector(0, 0, 1);
+
+	FPlanetVoxels VoxelsFull(ConfigFull);
+	FPlanetVoxels VoxelsHalf(ConfigHalf);
+	int32 FullGold = 0, HalfGold = 0, Expected = 0, Agree = 0, Extra = 0;
+	for (int32 Z = 0; Z < ChunkSize; ++Z)
+	for (int32 Y = 0; Y < ChunkSize; ++Y)
+	for (int32 X = 0; X < ChunkSize; ++X)
+	{
+		const FIntVector Global = Chunk * ChunkSize + FIntVector(X, Y, Z);
+		const bool bFull = VoxelsFull.Voxel(Global).MaterialID == 9;
+		const bool bHalf = VoxelsHalf.Voxel(Global).MaterialID == 9;
+		FullGold += bFull ? 1 : 0;
+		HalfGold += bHalf ? 1 : 0;
+		Extra += (bHalf && !bFull) ? 1 : 0;
+		if (bFull)
+		{
+			const FVector Relative = FVector(Global) * VoxelSize; // voxel positions relative to the centre (= WorldOrigin)
+			const bool bKept = FVoxelCPUNoiseGenerator::OreRarityHash(FVoxelCPUNoiseGenerator::OreRarityKey(Relative), ConfigFull->NoiseParams.Seed) <= 0.5f;
+			Expected += bKept ? 1 : 0;
+			Agree += bKept == bHalf ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("Chunk (%d, %d, %d) under the pole: gold %d at Rarity 1, %d at 0.5 (%d expected by the hash), %d agree"),
+		Chunk.X, Chunk.Y, Chunk.Z, FullGold, HalfGold, Expected, Agree));
+	{
+		TMap<int32, int32> Histogram;
+		for (const FVoxelData& V : VoxelsFull.Chunks.FindChecked(Chunk))
+		{
+			Histogram.FindOrAdd(V.MaterialID * 1000 + (V.IsSolid() ? 1 : 0))++;
+		}
+		FString Text;
+		for (const TPair<int32, int32>& Pair : Histogram)
+		{
+			Text += FString::Printf(TEXT("mat %d %s: %d; "), Pair.Key / 1000, (Pair.Key % 1000) ? TEXT("solid") : TEXT("air"), Pair.Value);
+		}
+		AddInfo(Text);
+	}
+	TestTrue(TEXT("The vein has voxels (non-vacuous)"), FullGold >= 200);
+	TestEqual(TEXT("Rarity 0.5 adds no voxel"), Extra, 0);
+	TestEqual(TEXT("Every Rarity 1 voxel is kept exactly when its planet-relative hash is at most 0.5"), Agree, FullGold);
+	TestTrue(TEXT("About half are kept"), FMath::Abs(static_cast<double>(HalfGold) / FMath::Max(FullGold, 1) - 0.5) < 0.1);
+
+	ConfigFull->RemoveFromRoot();
+	ConfigHalf->RemoveFromRoot();
+	Full->RemoveFromRoot();
+	Half->RemoveFromRoot();
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

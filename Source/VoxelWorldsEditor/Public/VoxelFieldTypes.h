@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"   // FVoxelNoiseParams, EVoxelNoiseType, EWorldMode
 #include "VoxelBiomeSnapshot.h"
+#include "VoxelSeaSurface.h"
+#include "VoxelSurfaceQuery.h" // FVoxelSurfaceSample
 
 class IVoxelWorldMode;
 class UVoxelWorldConfiguration;
@@ -70,6 +72,17 @@ struct FVoxelFieldSampleContext
 	bool bEnableWaterLevel = false;
 	float WaterLevel = 0.0f;
 
+	/** The world's sea (FVoxelSeaSurface::FromConfig): the WaterLevel plane, or a planet's sphere */
+	FVoxelSeaSurface Sea;
+
+	/**
+	 * The world is a planet (spherical Phase 4, SP-A3): the 2D fields then show the surface on the upper hemisphere
+	 * above (X, Y), along the direction from the centre (PlanetSurfaceAbove), with height as the altitude and slope
+	 * against local up, and the climate fields at the direction's point on the datum sphere.
+	 */
+	bool bPlanet = false;
+	float PlanetRadius = 0.0f;
+
 	/** Derived biome-climate noise params (2-octave Simplex + config seed offsets/frequencies). */
 	FVoxelNoiseParams TempNoiseParams;
 	FVoxelNoiseParams MoistureNoiseParams;
@@ -82,6 +95,12 @@ struct FVoxelFieldSampleContext
 
 	/** Base seed for all noise (terrain + biome-climate), mirroring generation (NoiseParams.Seed). */
 	int32 GetSeed() const { return NoiseParams.Seed; }
+
+	/** On a planet: the direction from the centre to the upper hemisphere's datum point above (X, Y). */
+	FVector PlanetDirectionAbove(double X, double Y) const;
+
+	/** On a planet: the analytic surface sample (FVoxelSurfaceQuery::SampleSurfacePoint) above (X, Y). */
+	FVoxelSurfaceSample PlanetSurfaceAbove(double X, double Y) const;
 
 	/** Build a context from a world configuration asset. Game thread (instantiates the world mode). */
 	static FVoxelFieldSampleContext FromConfiguration(const UVoxelWorldConfiguration* Config);

@@ -105,6 +105,27 @@ int GetVoxelFaceType(float3 WorldNormal, float Threshold)
 }
 
 /**
+ * GetVoxelFaceType against a local up instead of world +Z (spherical SP-D3): on a planet pass the radial direction,
+ * normalize(AbsoluteWorldPosition - PlanetCenter). With Up = (0, 0, 1) it is GetVoxelFaceType. The runtime vertex
+ * factory already writes the planet-aware face type into TexCoord[1].y (FVoxelLocalVertex::FromVoxelVertex), so
+ * materials that read it (SampleVoxelAtlasUV1) need nothing else.
+ *
+ * @param WorldNormal - The world-space normal vector
+ * @param Up - Unit local up
+ * @param Threshold - Threshold for detecting top/bottom (default 0.7)
+ * @return Face type: 0=Top, 1=Side, 2=Bottom
+ */
+int GetVoxelFaceTypeUp(float3 WorldNormal, float3 Up, float Threshold)
+{
+    float along = dot(WorldNormal, Up);
+    if (abs(along) > Threshold)
+    {
+        return (along > 0) ? VOXEL_FACE_TOP : VOXEL_FACE_BOTTOM;
+    }
+    return VOXEL_FACE_SIDE;
+}
+
+/**
  * Sample the Material LUT texture to get atlas tile position.
  *
  * LUT Format: 256 x 3 texture (MaterialID x FaceType)

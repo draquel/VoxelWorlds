@@ -8,6 +8,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelSurfaceQuery.h"
 #include "IVoxelWorldMode.h"
+#include "VoxelCPUNoiseGenerator.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -111,6 +112,66 @@ bool FVoxelFieldSamplerParityTest::RunTest(const FString& Parameters)
 		}
 	}
 
+	return true;
+}
+
+/**
+ * Spherical Phase 4 (WORLD_MODES_REVIEW_PLAN.md §18, WM-SY3; SP-A3): on a planet the 2D fields show the surface on the
+ * upper hemisphere above (X, Y): Height is its altitude, Slope is measured against local up, the climate fields are
+ * sampled at the direction's point on the datum sphere, and the legacy height query is not called.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelFieldSamplerPlanetTest, "VoxelWorlds.Editor.FieldSampler.Planet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelFieldSamplerPlanetTest::RunTest(const FString& Parameters)
+{
+	FVoxelFieldRegistry::EnsureBuiltinsRegistered();
+
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = FVector(1000.0, -2000.0, 500.0);
+	Config->WorldRadius = 250000.0f;
+	Config->PlanetHeightScale = 6000.0f;
+	Config->PlanetMaxTerrainHeight = 6500.0f;
+	Config->PlanetMaxTerrainDepth = 6500.0f;
+	Config->bEnableBiomes = true;
+	Config->bEnableCaves = false;
+	Config->NoiseParams.Seed = 24680;
+	Config->NoiseParams.Frequency = 0.000025f;
+
+	const FVoxelFieldSampleContext Ctx = FVoxelFieldSampleContext::FromConfiguration(Config);
+	if (!TestTrue(TEXT("Context is valid"), Ctx.IsValid()) || !TestTrue(TEXT("The context knows it is a planet"), Ctx.bPlanet))
+	{
+		return false;
+	}
+
+	const FVoxelEditorField* Height = FVoxelFieldRegistry::FindField(TEXT("Height"));
+	const FVoxelEditorField* Slope = FVoxelFieldRegistry::FindField(TEXT("Slope"));
+	const FVoxelEditorField* Temperature = FVoxelFieldRegistry::FindField(TEXT("Temperature"));
+	if (!TestNotNull(TEXT("Fields registered"), Height) || !Slope || !Temperature)
+	{
+		return false;
+	}
+	const double Offsets[] = { -150000.0, -50000.0, 0.0, 30000.0, 120000.0 }; // inside the planet's disc
+	for (double DX : Offsets)
+	{
+		for (double DY : Offsets)
+		{
+			const double X = Config->WorldOrigin.X + DX;
+			const double Y = Config->WorldOrigin.Y + DY;
+			const FVector Direction = Ctx.PlanetDirectionAbove(X, Y);
+			const FVoxelTerrainSurfacePoint Surface = Ctx.WorldMode->GetSurfacePoint(Config->WorldOrigin + Direction, Ctx.NoiseParams);
+			TestTrue(TEXT("The direction is on the upper hemisphere"), Direction.Z > 0.0);
+			TestTrue(FString::Printf(TEXT("Height is the altitude above (%.0f, %.0f)"), DX, DY),
+				FMath::IsNearlyEqual(Height->Sample(Ctx, X, Y, 0.0), Surface.Altitude, 0.01f));
+			const float ExpectedSlope = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Surface.Normal, Direction), -1.0, 1.0)));
+			TestTrue(FString::Printf(TEXT("Slope against local up at (%.0f, %.0f)"), DX, DY),
+				FMath::IsNearlyEqual(Slope->Sample(Ctx, X, Y, 0.0), ExpectedSlope, 0.01f));
+			const float ExpectedTemperature = FVoxelCPUNoiseGenerator::FBM3D(Direction * Config->WorldRadius, Ctx.TempNoiseParams);
+			TestTrue(TEXT("Temperature at the datum-sphere point"),
+				FMath::IsNearlyEqual(Temperature->Sample(Ctx, X, Y, 0.0), ExpectedTemperature, 1.0e-5f));
+		}
+	}
 	return true;
 }
 

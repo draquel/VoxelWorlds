@@ -129,6 +129,25 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 	 *   - AO = floor(VertexColor.B * 4)
 	 *   - AOFactor = 1.0 - (AO * 0.25)
 	 */
+	/**
+	 * FromVoxelVertex with the face type (top, side, bottom) measured against a local up instead of world +Z (spherical
+	 * SP-D3): a planet's chunks pass the radial direction at the vertex, so a hilltop at the equator is a top face.
+	 *
+	 * @param VoxelVert The mesher's vertex
+	 * @param FaceUp Unit local up at the vertex
+	 * @return The converted vertex
+	 */
+	static FVoxelLocalVertex FromVoxelVertex(const FVoxelVertex& VoxelVert, const FVector3f& FaceUp)
+	{
+		FVoxelLocalVertex Result = FromVoxelVertex(VoxelVert);
+		FVector3f Normal = VoxelVert.GetNormal();
+		Normal = Normal.IsNearlyZero(KINDA_SMALL_NUMBER) ? FaceUp : Normal.GetSafeNormal();
+		const float Along = FVector3f::DotProduct(Normal, FaceUp);
+		const uint8 FaceType = Along > 0.7f ? 0 : (Along < -0.7f ? 2 : 1);
+		Result.TexCoord1.Y = static_cast<float>(FaceType);
+		return Result;
+	}
+
 	static FVoxelLocalVertex FromVoxelVertex(const FVoxelVertex& VoxelVert)
 	{
 		FVoxelLocalVertex Result;

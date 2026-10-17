@@ -79,6 +79,8 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 	WorldComponent->SetVoxelSize(VoxelSize);
 	WorldComponent->SetChunkWorldSize(ChunkWorldSize);
 	WorldComponent->SetWorldOrigin(WorldConfig->WorldOrigin);
+	// A planet's face types (top, side, bottom) go by the radial up (spherical SP-D3); its centre is WorldOrigin.
+	WorldComponent->SetRadialFaceUp(WorldConfig->WorldMode == EWorldMode::SphericalPlanet, WorldConfig->WorldOrigin);
 
 	// Sync material mode with configuration's meshing mode
 	// Both MarchingCubes and DualContouring use triplanar texturing instead of atlas faces

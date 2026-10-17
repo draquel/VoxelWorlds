@@ -33,6 +33,15 @@ void UVoxelBiomeConfiguration::PostLoad()
 	BuildGpuData();
 }
 
+void UVoxelBiomeConfiguration::RebuildCaches()
+{
+	RebuildBiomeIndexCache();
+	RebuildHeightRulesCache();
+	RebuildOreVeinsCache();
+	RebuildBakedCurves();
+	BuildGpuData();
+}
+
 void UVoxelBiomeConfiguration::InitializeDefaults()
 {
 	Biomes.Empty();

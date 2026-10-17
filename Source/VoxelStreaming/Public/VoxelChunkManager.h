@@ -392,6 +392,15 @@ public:
 	 */
 	FVector GetGeneratedSurfacePoint(const FVector& WorldPos) const;
 
+	/**
+	 * Local up at a chunk's centre: +Z in heightmap modes, the radial direction on a planet. The meshing and seam requests
+	 * carry it (FVoxelMeshingRequest::LocalUp; spherical SP-D1, SP-D2).
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @return Unit up vector
+	 */
+	FVector GetChunkLocalUp(const FIntVector& ChunkCoord) const;
+
 	// ==================== World Bounds and Local Frame (WM-A2) ====================
 	// The configured world mode's bounds and frame (IVoxelWorldMode), for Blueprint and for game plugins, which reach
 	// them through the world actor's chunk manager like the surface queries above. Before Initialize (no world mode)
