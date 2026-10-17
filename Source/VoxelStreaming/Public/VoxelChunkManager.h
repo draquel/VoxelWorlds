@@ -426,6 +426,17 @@ public:
 	FVector SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const;
 
 	/**
+	 * The analytic terrain surface on the local up-line through a position, with its outward normal (spherical SP-A1):
+	 * the point at (X, Y) in heightmap modes, along the direction from the centre on a planet. No caves, conditioning
+	 * zones or edits (GetGeneratedSurfaceHeight and the edit-merged queries add those in heightmap modes).
+	 *
+	 * @param WorldPos Any position on the up-line
+	 * @return The surface point, its normal and its altitude
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVoxelTerrainSurfacePoint GetSurfacePointAt(const FVector& WorldPos) const;
+
+	/**
 	 * What generated this world, for saves (WM-A4): world mode, shape params, voxel grid and generation version.
 	 * A save whose fingerprint differs is not loaded into this world.
 	 *
@@ -997,9 +1008,9 @@ protected:
 	 * Propagate water flags from loaded neighbor chunks into this chunk.
 	 *
 	 * Checks 6 face-neighbor chunks for water-flagged voxels at their shared
-	 * boundary. Any dry air voxels on this chunk's boundary that are below water
-	 * level and adjacent to a neighbor's water voxel become seeds for an
-	 * intra-chunk BFS flood fill.
+	 * boundary. Any dry air voxels on this chunk's boundary that are below the sea
+	 * (FVoxelSeaSurface: the WaterLevel plane, or a planet's WaterRadius sphere, SP-B8)
+	 * and adjacent to a neighbor's water voxel become seeds for an intra-chunk BFS flood fill.
 	 *
 	 * @param ChunkCoord The chunk to propagate water into
 	 * @return True if any new water flags were set (caller should regenerate water mesh)
@@ -1007,6 +1018,14 @@ protected:
 	bool PropagateWaterFromNeighbors(const FIntVector& ChunkCoord);
 
 	// ==================== 2D Water Tile System ====================
+
+	/**
+	 * Whether the per-chunk water tiles run: water on with a WaterMeshMaterial, in a heightmap world. They are XY
+	 * columns meshed at the WaterLevel plane, so a planet (whose sea is a sphere) has none until SP-E2.
+	 *
+	 * @return True when water tiles are built, updated and drawn
+	 */
+	bool UsesWaterTiles() const;
 
 	/**
 	 * Scan a chunk's voxel data and update its water tile contribution.

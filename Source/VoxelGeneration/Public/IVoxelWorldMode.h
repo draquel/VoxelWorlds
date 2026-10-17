@@ -21,9 +21,10 @@ class UVoxelBiomeConfiguration;
  * - Terrain height sampling for heightmap-based modes
  * - Coordinate transformations
  * - Vertical bounds for chunk streaming
- * - Where the world ends (IsInsideWorld, GetWorldBounds) and a local frame (GetUpVector, GetAltitude,
- *   WorldToSurface, SurfaceToWorld), so consumers work in any mode without assuming +Z is up or that the
- *   world has no edge (world modes review WM-A2; spherical requirements SP-A1, SP-A2)
+ * - Where the world ends (IsInsideWorld, GetWorldBounds), a local frame (GetUpVector, GetAltitude,
+ *   WorldToSurface, SurfaceToWorld) and the surface along local up (GetSurfacePoint), so consumers work in any mode
+ *   without assuming +Z is up or that the world has no edge (world modes review WM-A2; spherical requirements SP-A1,
+ *   SP-A2)
  *
  * Build a mode from a world configuration with FVoxelWorldModeFactory::Create. Game code reaches the configured
  * mode's bounds and frame through UVoxelChunkManager (a component of the world actor), which exposes them to
@@ -189,7 +190,8 @@ public:
 	 * The terrain surface's vertical extent over one patch of the world (a chunk column's footprint): the lowest and
 	 * highest surface height there, in world Z. The streaming window (VoxelLOD) keeps every column's chunks around this
 	 * range at every distance, so a column streams its own ground whatever the viewer's altitude (world modes review
-	 * D8, WM-S1). On a planet the same window is an altitude band around the surface (spherical SP-C1, Phase 1).
+	 * D8, WM-S1). A planet's window is the column's crossing of the terrain shell instead (spherical SP-C1; a band
+	 * around the surface is SP-C5), so planets keep the default.
 	 *
 	 * Default: heightmap modes sample GetTerrainHeightAt at the footprint's four corners and its centre (variation
 	 * between the samples is the caller's slack); other modes return GetTerrainHeightBounds, the whole range. Cost: five
@@ -218,6 +220,34 @@ public:
 			Range.Max = FMath::Max(Range.Max, Height);
 		}
 		return Range;
+	}
+
+	/** Step (uu) GetSurfacePoint takes either side of a point for the surface normal's finite differences. */
+	static constexpr float SurfaceNormalStep = 50.0f;
+
+	/**
+	 * The terrain surface on the local up-line through a position, with its outward normal (spherical SP-A1): in
+	 * heightmap modes the point at (X, Y, GetTerrainHeightAt(X, Y)); on a planet the point along the direction from the
+	 * centre, so a direction D maps to GetSurfacePoint(Centre + D). The analytic surface generation produces, without
+	 * caves, conditioning zones or edits. The normal comes from central differences SurfaceNormalStep either side.
+	 *
+	 * Cost: five surface samples. Thread-safe like GetTerrainHeightAt.
+	 *
+	 * @param WorldPos Any position on the up-line (only X, Y in heightmap modes; only the direction on a planet)
+	 * @param NoiseParams Terrain noise parameters, as for GetTerrainHeightAt
+	 * @return The surface point, its normal and its altitude
+	 */
+	virtual FVoxelTerrainSurfacePoint GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const
+	{
+		const float X = static_cast<float>(WorldPos.X);
+		const float Y = static_cast<float>(WorldPos.Y);
+		const float DX = GetTerrainHeightAt(X + SurfaceNormalStep, Y, NoiseParams) - GetTerrainHeightAt(X - SurfaceNormalStep, Y, NoiseParams);
+		const float DY = GetTerrainHeightAt(X, Y + SurfaceNormalStep, NoiseParams) - GetTerrainHeightAt(X, Y - SurfaceNormalStep, NoiseParams);
+		FVoxelTerrainSurfacePoint Point;
+		Point.Position = FVector(WorldPos.X, WorldPos.Y, GetTerrainHeightAt(X, Y, NoiseParams));
+		Point.Normal = FVector(-DX, -DY, 2.0f * SurfaceNormalStep).GetSafeNormal();
+		Point.Altitude = GetAltitude(Point.Position);
+		return Point;
 	}
 
 	// ==================== World Bounds (WM-A2) ====================

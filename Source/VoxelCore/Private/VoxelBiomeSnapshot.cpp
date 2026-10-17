@@ -70,6 +70,21 @@ void FVoxelBiomeSnapshot::EvalBakedCurves(
 	OutHeightScaleMultiplier = FMath::Lerp(ScaleCurve[Idx0], ScaleCurve[Idx0 + 1], Frac);
 }
 
+void FVoxelBiomeSnapshot::GetContinentalnessExtremes(float& OutMinOffset, float& OutMaxOffset, float& OutMaxScaleMult) const
+{
+	OutMinOffset = 0.0f;
+	OutMaxOffset = 0.0f;
+	OutMaxScaleMult = 1.0f; // no continentalness => full HeightScale amplitude
+
+	if (bEnableContinentalness && BakedHeightCurve.Num() > 0 && BakedHeightScaleCurve.Num() > 0)
+	{
+		OutMinOffset = FMath::Min(BakedHeightCurve);
+		OutMaxOffset = FMath::Max(BakedHeightCurve);
+		// Amplitude scales by the LARGEST multiplier any point can take. Guard a degenerate curve.
+		OutMaxScaleMult = FMath::Max(0.0f, FMath::Max(BakedHeightScaleCurve));
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Biome / material selection cores — moved verbatim from UVoxelBiomeConfiguration
 // (which now delegates here). Any algorithm change happens in THIS file only.

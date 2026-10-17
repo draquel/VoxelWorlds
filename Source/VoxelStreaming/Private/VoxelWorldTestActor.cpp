@@ -15,6 +15,7 @@
 #include "VoxelScatterManager.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
+#include "ProceduralMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "DrawDebugHelpers.h"
 #include "Misc/Paths.h"
@@ -780,8 +781,9 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 	}
 
 	// Per-chunk water rendering is active — skip single plane/sphere creation
-	// Each chunk renders its own cave-aware water surface via WaterMeshMaterial
-	if (Config->WaterMeshMaterial)
+	// Each chunk renders its own cave-aware water surface via WaterMeshMaterial (heightmap worlds: the chunk manager has
+	// no water tiles on a planet, so the sphere below is a planet's sea in either case)
+	if (Config->WaterMeshMaterial && Config->WorldMode != EWorldMode::SphericalPlanet)
 	{
 		DestroyWaterVisualization();
 		return;
@@ -802,18 +804,11 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 		// Create the water sphere mesh component if it doesn't exist
 		if (!WaterSphereMesh)
 		{
-			WaterSphereMesh = NewObject<UStaticMeshComponent>(this, TEXT("WaterSphereMesh"));
+			WaterSphereMesh = NewObject<UProceduralMeshComponent>(this, TEXT("WaterSphereMesh"));
 			if (WaterSphereMesh)
 			{
 				WaterSphereMesh->SetupAttachment(GetRootComponent());
 				WaterSphereMesh->RegisterComponent();
-
-				// Use the default sphere mesh from the engine
-				UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-				if (SphereMesh)
-				{
-					WaterSphereMesh->SetStaticMesh(SphereMesh);
-				}
 
 				// Disable collision for visualization
 				WaterSphereMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -830,18 +825,15 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 			return;
 		}
 
-		// Position at planet center (WorldOrigin)
+		// Position at planet center (WorldOrigin), unscaled: the mesh is built at WaterRadius
 		WaterSphereMesh->SetWorldLocation(Config->WorldOrigin);
-
-		// Scale to WaterRadius
-		// The default sphere is 100 units diameter (50 unit radius), so scale = WaterRadius / 50
-		const float Scale = Config->WaterRadius / 50.0f;
-		WaterSphereMesh->SetWorldScale3D(FVector(Scale, Scale, Scale));
+		WaterSphereMesh->SetWorldScale3D(FVector::OneVector);
+		BuildWaterSphere(*WaterSphereMesh, Config->WaterRadius);
 
 		// Set material
-		if (WaterMaterial)
+		if (WaterMaterial || Config->WaterMeshMaterial)
 		{
-			WaterSphereMesh->SetMaterial(0, WaterMaterial);
+			WaterSphereMesh->SetMaterial(0, WaterMaterial ? WaterMaterial.Get() : Config->WaterMeshMaterial.Get());
 		}
 		else
 		{
@@ -906,6 +898,63 @@ void AVoxelWorldTestActor::UpdateWaterVisualization()
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Water plane at Z=%.0f, scale=%.1f"),
 			Config->WaterLevel, ScaleFactor);
 	}
+}
+
+void AVoxelWorldTestActor::BuildWaterSphere(UProceduralMeshComponent& Component, float Radius)
+{
+	// A cube sphere: six faces of Segments x Segments quads, the grid tangent-warped (g = tan(pi/4 u)) so its cells
+	// are near equal in size, the same mapping as the planet's surface coordinate. Face frames as
+	// FSphericalPlanetWorldMode's: normal N, U axis T, V axis B with T x B = N.
+	constexpr int32 Segments = 96;
+	static const FVector Frames[6][3] = {
+		{ FVector( 1, 0, 0), FVector( 0, 1, 0), FVector(0, 0, 1) },
+		{ FVector(-1, 0, 0), FVector( 0,-1, 0), FVector(0, 0, 1) },
+		{ FVector( 0, 1, 0), FVector(-1, 0, 0), FVector(0, 0, 1) },
+		{ FVector( 0,-1, 0), FVector( 1, 0, 0), FVector(0, 0, 1) },
+		{ FVector( 0, 0, 1), FVector( 1, 0, 0), FVector(0, 1, 0) },
+		{ FVector( 0, 0,-1), FVector( 1, 0, 0), FVector(0,-1, 0) },
+	};
+
+	TArray<FVector> Vertices;
+	TArray<FVector> Normals;
+	TArray<FVector2D> UVs;
+	TArray<int32> Triangles;
+	const int32 Row = Segments + 1;
+	Vertices.Reserve(6 * Row * Row);
+	Normals.Reserve(6 * Row * Row);
+	UVs.Reserve(6 * Row * Row);
+	Triangles.Reserve(6 * Segments * Segments * 6);
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		const int32 Base = Vertices.Num();
+		for (int32 j = 0; j < Row; ++j)
+		{
+			for (int32 i = 0; i < Row; ++i)
+			{
+				const double U = -1.0 + 2.0 * i / Segments;
+				const double V = -1.0 + 2.0 * j / Segments;
+				const FVector Dir = (Frames[Face][0] + FMath::Tan(U * UE_DOUBLE_PI / 4.0) * Frames[Face][1]
+					+ FMath::Tan(V * UE_DOUBLE_PI / 4.0) * Frames[Face][2]).GetSafeNormal();
+				Vertices.Add(Dir * Radius);
+				Normals.Add(Dir);
+				UVs.Add(FVector2D(i, j) / Segments);
+			}
+		}
+		// Corners A (i, j), B (i+1, j), D (i+1, j+1), C (i, j+1) run counter-clockwise seen from outside (T x B = N);
+		// UE's front faces take them as (A, D, B), (A, C, D), as the far ocean's and the water mesher's quads do.
+		for (int32 j = 0; j < Segments; ++j)
+		{
+			for (int32 i = 0; i < Segments; ++i)
+			{
+				const int32 A = Base + i + j * Row;
+				const int32 B = A + 1;
+				const int32 C = A + Row;
+				const int32 D = C + 1;
+				Triangles.Append({ A, D, B, A, C, D });
+			}
+		}
+	}
+	Component.CreateMeshSection(0, Vertices, Triangles, Normals, UVs, TArray<FColor>(), TArray<FProcMeshTangent>(), false);
 }
 
 void AVoxelWorldTestActor::DestroyWaterVisualization()

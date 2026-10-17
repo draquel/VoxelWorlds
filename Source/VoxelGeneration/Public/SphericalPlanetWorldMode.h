@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "IVoxelWorldMode.h"
+#include "VoxelBiomeSnapshot.h"
 
 /**
  * Spherical planet configuration parameters. Build them from a world configuration with
@@ -54,11 +55,16 @@ struct VOXELGENERATION_API FSphericalPlanetParams
  * Coordinate System:
  * - Planet center is at PlanetCenter (typically WorldOrigin)
  * - Radial distance determines "height" above/below surface
- * - Noise is sampled using normalized direction (latitude/longitude-like)
+ * - The 2D fields (terrain noise, continentalness, temperature, moisture) are sampled at the point on the datum
+ *   sphere along the direction from the centre (GetNoiseSamplePoint), so features keep their size in world units
+ *   on any radius and the two hemispheres differ (spherical SP-B1)
  *
- * Density Calculation:
- * - Sample terrain noise using direction vector to point
- * - Calculate terrain radius = PlanetRadius + NoiseHeight
+ * Density Calculation (SampleRadialDisplacement is the one surface function: generation, GetSurfacePoint and the
+ * configuration's shell check share it):
+ * - Sample terrain noise and continentalness at the direction's noise sample point
+ * - Displacement = BaseHeight + offset + noise * HeightScale * multiplier / 2, continentalness giving the offset
+ *   and the multiplier as in the heightmap modes (SP-B5)
+ * - Calculate terrain radius = PlanetRadius + displacement
  * - Density = TerrainRadius - DistanceFromCenter (positive = inside solid)
  *
  * @see IVoxelWorldMode
@@ -118,10 +124,22 @@ public:
 		float SurfaceHeight,
 		float DepthBelowSurface) const override;
 
+	/**
+	 * Snapshot the biome configuration for continentalness (SP-B5), by value: GetSurfacePoint then applies the same
+	 * height modulation generation does. No UObject reference is kept.
+	 */
+	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* InBiomeConfig) override
+	{
+		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
+	}
+
+	/** The surface along the direction from the planet centre to WorldPos, with its outward normal (SP-A1). */
+	virtual FVoxelTerrainSurfacePoint GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const override;
+
 	// ==================== World Bounds and Local Frame (IVoxelWorldMode, WM-A2; SP-A1, SP-A2) ====================
-	// The interface fits a planet: up is radial, altitude is above PlanetRadius, the surface coordinate is a cube face.
-	// Nothing consumes these on a planet yet; spherical Phase 1 moves the 2D systems onto them (and may swap the
-	// gnomonic cube mapping for an equal-area one: consumers should rely only on the round trip).
+	// The interface fits a planet: up is radial, altitude is above PlanetRadius, the surface coordinate is a cube face
+	// with the tangent warp (spherical Phase 1, WORLD_MODES_REVIEW_PLAN.md §15). No 2D system consumes the coordinate
+	// yet (Phase 4).
 
 	/** Whether the vertical line at (X, Y) meets the terrain shell (within its outer radius in XY). */
 	virtual bool IsInsideWorld(double X, double Y) const override;
@@ -137,7 +155,9 @@ public:
 
 	/**
 	 * The cube face the radial direction points through (0..5 = +X, -X, +Y, -Y, +Z, -Z) and (U, V) in [-1, 1] on it:
-	 * the gnomonic projection of the direction onto the face.
+	 * the gnomonic projection onto the face, warped per axis by u = (4 / pi) * atan(g) (the tangent warp). Equal UV
+	 * cells cover areas within about 1.41x of each other (the plain gnomonic map: 5.2x); along a face's centre lines
+	 * UV is proportional to the angle, so a UV step du spans about PlanetRadius * pi / 4 * du on the datum sphere.
 	 */
 	virtual FVoxelSurfaceCoord WorldToSurface(const FVector& WorldPos) const override;
 
@@ -177,19 +197,94 @@ public:
 		const FVector& PlanetCenter);
 
 	/**
-	 * Sample spherical noise using direction vector.
-	 * Converts direction to pseudo-UV coordinates for 2D noise sampling.
+	 * Where the planet's 2D fields (terrain noise, continentalness, temperature, moisture) are sampled for a direction:
+	 * the point on the datum sphere, relative to the planet centre (SP-B1). A feature is about 1 / Frequency uu across on
+	 * the surface whatever the radius, as on the plane, and a 3D field has no seam and no mirror between hemispheres.
 	 *
-	 * @param Direction Normalized direction from planet center
-	 * @param NoiseParams Noise sampling parameters
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @return Noise sample position
+	 */
+	static FVector GetNoiseSamplePoint(const FVector& Direction, float PlanetRadius)
+	{
+		return Direction * PlanetRadius;
+	}
+
+	/**
+	 * Terrain noise by direction: FBM3D at GetNoiseSamplePoint (SP-B1).
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @param NoiseParams Terrain noise parameters
 	 * @return Noise value in range [-1, 1]
 	 */
 	static float SampleSphericalNoise(
 		const FVector& Direction,
+		float PlanetRadius,
 		const FVoxelNoiseParams& NoiseParams);
 
 	/**
-	 * Convert noise value to radial terrain displacement.
+	 * The terrain params at a direction with continentalness applied: BaseHeight plus the height offset, HeightScale times
+	 * the multiplier, the continentalness field sampled at GetNoiseSamplePoint (SP-B5). The same noise field and curves
+	 * as FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams. BaseParams unchanged without a snapshot or with
+	 * continentalness off.
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @param BaseParams Un-modulated terrain params (HeightScale = PlanetHeightScale)
+	 * @param NoiseParams Terrain noise params (the seed derives the continentalness seed)
+	 * @param BiomeSnapshot Biome data with the continentalness curves, or null
+	 * @param OutContinentalness Sampled continentalness in [-1, 1] (0 when off): biome selection reuses it
+	 * @return Effective terrain params
+	 */
+	static FWorldModeTerrainParams ComputeEffectiveTerrainParams(
+		const FVector& Direction,
+		float PlanetRadius,
+		const FWorldModeTerrainParams& BaseParams,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot* BiomeSnapshot,
+		float& OutContinentalness);
+
+	/**
+	 * The planet's terrain height: the surface's radial displacement from PlanetRadius along a direction. Generation,
+	 * GetSurfacePoint and the shell check all use it (SP-A1, SP-B1, SP-B5).
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @param TerrainParams Un-modulated terrain params
+	 * @param NoiseParams Terrain noise params
+	 * @param BiomeSnapshot Biome data for continentalness, or null
+	 * @param OutContinentalness Optional: the sampled continentalness
+	 * @return Displacement (uu, positive above the datum)
+	 */
+	static float SampleRadialDisplacement(
+		const FVector& Direction,
+		float PlanetRadius,
+		const FWorldModeTerrainParams& TerrainParams,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot* BiomeSnapshot,
+		float* OutContinentalness = nullptr);
+
+	/**
+	 * Worst-case displacement bounds over every direction: noise in [-1, 1] at continentalness's extremes, decoupled
+	 * (FVoxelBiomeSnapshot::GetContinentalnessExtremes), as FInfinitePlaneWorldMode::GetTerrainHeightBounds does for the
+	 * plane. The terrain shell (MaxTerrainHeight, MaxTerrainDepth) must contain it; UVoxelWorldConfiguration's settings
+	 * check computes the same numbers.
+	 *
+	 * @param TerrainParams Un-modulated terrain params
+	 * @param BiomeSnapshot Biome data for continentalness, or null
+	 * @param OutMin Lowest displacement
+	 * @param OutMax Highest displacement
+	 */
+	static void GetDisplacementBounds(
+		const FWorldModeTerrainParams& TerrainParams,
+		const FVoxelBiomeSnapshot* BiomeSnapshot,
+		float& OutMin,
+		float& OutMax);
+
+	/**
+	 * Convert noise value to radial terrain displacement, without continentalness (GetDensityAt's contract: the caller
+	 * passes the terrain noise, as in the heightmap modes). SampleRadialDisplacement is the full surface.
 	 *
 	 * @param NoiseValue Raw noise value [-1, 1]
 	 * @param TerrainParams Terrain scaling parameters
@@ -198,6 +293,35 @@ public:
 	static float NoiseToRadialDisplacement(
 		float NoiseValue,
 		const FWorldModeTerrainParams& TerrainParams);
+
+	/**
+	 * The signed distance generation writes: TerrainRadius - DistFromCenter, held at -1000 more than 1000 uu above the
+	 * outer shell radius (air) and at +1000 more than 1000 uu below the inner one (core).
+	 *
+	 * @param DistFromCenter Distance from the planet centre
+	 * @param TerrainRadius PlanetRadius + displacement along the point's direction
+	 * @param PlanetParams Planet shell
+	 * @return Signed distance (positive = solid)
+	 */
+	static float ShellSignedDistance(
+		float DistFromCenter,
+		float TerrainRadius,
+		const FSphericalPlanetParams& PlanetParams);
+
+	/**
+	 * A position with its altitude above the datum scaled by VerticalScale and its direction kept: Centre + Direction *
+	 * (PlanetRadius + Altitude * VerticalScale). Cave noise samples here, so VerticalScale flattens caves along local up
+	 * as it flattens them along Z in heightmap modes (SP-B6), and keeps horizontal distances near the datum.
+	 *
+	 * @param WorldPos World position
+	 * @param PlanetParams Planet centre and radius
+	 * @param VerticalScale Scale applied to the altitude
+	 * @return Cave noise sample position
+	 */
+	static FVector ScaleAltitude(
+		const FVector& WorldPos,
+		const FSphericalPlanetParams& PlanetParams,
+		float VerticalScale);
 
 	/**
 	 * Calculate signed distance from a point to the terrain surface.
@@ -227,6 +351,9 @@ private:
 
 	/** Planet-specific parameters */
 	FSphericalPlanetParams PlanetParams;
+
+	/** Continentalness for GetSurfacePoint (SetBiomeContext); plain data, safe on any thread. */
+	FVoxelBiomeSnapshot BiomeSnapshot;
 
 	/** Practical chunk range for spherical planet (relative to viewer) */
 	static constexpr int32 CHUNK_RANGE = 32;

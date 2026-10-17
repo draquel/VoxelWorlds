@@ -13,6 +13,7 @@ class UVoxelMaterialAtlas;
 // Forward declarations
 class UVoxelChunkManager;
 class UVoxelWorldConfiguration;
+class UProceduralMeshComponent;
 class IVoxelLODStrategy;
 class IVoxelMeshRenderer;
 
@@ -431,6 +432,13 @@ protected:
 	/** Draw performance HUD on screen */
 	void DrawPerformanceHUD() const;
 
+	/**
+	 * Build the planet's water sphere (WaterSphereMesh) at Radius around the component's origin.
+	 * @param Component Procedural mesh component to fill (section 0)
+	 * @param Radius Sea radius
+	 */
+	static void BuildWaterSphere(UProceduralMeshComponent& Component, float Radius);
+
 protected:
 	/** Chunk manager component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Voxel")
@@ -440,9 +448,14 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> WaterPlaneMesh;
 
-	/** Water sphere static mesh component (for spherical planet mode) */
+	/**
+	 * The sea's surface on a planet: a sphere of WaterRadius around the planet centre, a cube sphere with the tangent
+	 * warp, 96 x 96 quads a face (chords within about 10 uu of the radius on a 250,000 uu planet), drawn with
+	 * WaterMaterial or the configuration's WaterMeshMaterial. It stands in for the ocean surface until SP-E2 (the
+	 * per-chunk water tiles are Z-plane tiles, off on planets).
+	 */
 	UPROPERTY()
-	TObjectPtr<UStaticMeshComponent> WaterSphereMesh;
+	TObjectPtr<UProceduralMeshComponent> WaterSphereMesh;
 
 	/** LOD strategy (owned by this actor) */
 	IVoxelLODStrategy* LODStrategy = nullptr;

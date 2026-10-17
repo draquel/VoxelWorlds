@@ -169,6 +169,28 @@ struct VOXELCORE_API FVoxelSurfaceCoord
 };
 
 /**
+ * A point on the terrain surface and the surface's orientation there: IVoxelWorldMode::GetSurfacePoint (spherical
+ * requirement SP-A1). The analytic surface generation produces, without caves, conditioning zones or edits.
+ */
+USTRUCT(BlueprintType)
+struct VOXELCORE_API FVoxelTerrainSurfacePoint
+{
+	GENERATED_BODY()
+
+	/** World position of the surface point */
+	UPROPERTY(BlueprintReadOnly, Category = "Voxel|World")
+	FVector Position = FVector::ZeroVector;
+
+	/** Unit surface normal, pointing out of the terrain (local up on flat ground) */
+	UPROPERTY(BlueprintReadOnly, Category = "Voxel|World")
+	FVector Normal = FVector::UpVector;
+
+	/** The point's height above the datum (IVoxelWorldMode::GetAltitude) */
+	UPROPERTY(BlueprintReadOnly, Category = "Voxel|World")
+	float Altitude = 0.0f;
+};
+
+/**
  * What generated a world, recorded with its save so a save is never loaded into a different world (world modes review
  * WM-A4, finding KI7; spherical requirement SP-G9). The save key holds the map and the seed; this holds the rest that
  * decides where terrain, edits and records are: the world mode, the mode's shape params, the voxel grid and the

@@ -36,6 +36,14 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	static constexpr int32 GenerationVersion = 1;
 
 	/**
+	 * Version of the planet's generation, in a planet's fingerprint shape ("PlanetGeneration=N") so a change to planet
+	 * terrain refuses planet saves only; GenerationVersion would refuse every save. 2: spherical Phase 1 (noise by 3D
+	 * direction on the datum sphere, continentalness on the radial height, materials by altitude; SP-B1, SP-B2, SP-B5).
+	 * Fingerprints from before have no entry and are refused.
+	 */
+	static constexpr int32 PlanetGenerationVersion = 2;
+
+	/**
 	 * Terrain params for the heightmap modes (InfinitePlane, IslandBowl).
 	 *
 	 * @param Config World configuration

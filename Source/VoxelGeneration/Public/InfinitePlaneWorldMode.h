@@ -226,6 +226,25 @@ public:
 		float& OutContinentalness);
 
 	/**
+	 * ComputeEffectiveTerrainParams with the continentalness field sampled at a 3D point: (X, Y, 0) in heightmap modes
+	 * (the XY overload calls this), the point on the datum sphere on a planet (FSphericalPlanetWorldMode, spherical
+	 * SP-B5). Same noise field, same curves.
+	 *
+	 * @param SamplePos       Where the continentalness noise is sampled
+	 * @param BaseParams      Un-modulated terrain params
+	 * @param BaseNoiseParams Terrain noise params (only Seed is used, to derive the continentalness seed)
+	 * @param BiomeSnapshot   Value-captured biome data providing continentalness curves, or null
+	 * @param OutContinentalness Sampled continentalness in [-1,1] (0 when disabled)
+	 * @return Effective terrain params with continentalness applied
+	 */
+	static FWorldModeTerrainParams ComputeEffectiveTerrainParamsAt(
+		const FVector& SamplePos,
+		const FWorldModeTerrainParams& BaseParams,
+		const FVoxelNoiseParams& BaseNoiseParams,
+		const FVoxelBiomeSnapshot* BiomeSnapshot,
+		float& OutContinentalness);
+
+	/**
 	 * Worst-case terrain-height bounds [OutMin, OutMax] over ALL (X,Y) for this heightmap mode — the
 	 * authority for vertical chunk-culling bounds (VoxelLOD). Co-located with the height math so it
 	 * stays in sync as height-affecting features are added (add a feature -> update it here, next to

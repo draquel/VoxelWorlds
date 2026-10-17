@@ -3,6 +3,8 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelCore.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelBiomeConfiguration.h"
+#include "VoxelBiomeSnapshot.h"
 #include "VoxelTreeTypes.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/CommandLine.h"
@@ -255,22 +257,27 @@ TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 
 	if (WorldMode == EWorldMode::SphericalPlanet)
 	{
-		// The surface sits at WorldRadius + BaseHeight + noise * PlanetHeightScale / 2, noise in [-1, 1]. The LOD
-		// strategy streams only chunks that meet the shell [WorldRadius - Depth, WorldRadius + Height], and the
-		// density query treats points well outside it as air or core, so terrain past the shell is cut off.
-		const float Highest = BaseHeight + 0.5f * PlanetHeightScale;
-		const float Deepest = 0.5f * PlanetHeightScale - BaseHeight;
+		// The surface sits at WorldRadius + BaseHeight + offset + noise * PlanetHeightScale * multiplier / 2, noise in
+		// [-1, 1], where continentalness gives the offset and the multiplier as in the heightmap modes (SP-B5; none
+		// without a biome configuration or with continentalness off). The LOD strategy streams only chunks that meet the
+		// shell [WorldRadius - Depth, WorldRadius + Height], and the density query treats points well outside it as air
+		// or core, so terrain past the shell is cut off. The bounds are FSphericalPlanetWorldMode::GetDisplacementBounds'.
+		float MinOffset = 0.0f, MaxOffset = 0.0f, MaxScaleMult = 1.0f;
+		FVoxelBiomeSnapshot::FromConfig(BiomeConfiguration).GetContinentalnessExtremes(MinOffset, MaxOffset, MaxScaleMult);
+		const float Amplitude = 0.5f * PlanetHeightScale * MaxScaleMult;
+		const float Highest = BaseHeight + MaxOffset + Amplitude;
+		const float Deepest = Amplitude - BaseHeight - MinOffset;
 		if (Highest > PlanetMaxTerrainHeight)
 		{
 			Warnings.Add(FString::Printf(
-				TEXT("planet terrain reaches %.0f uu above WorldRadius (BaseHeight %.0f + PlanetHeightScale / 2) but PlanetMaxTerrainHeight is %.0f: peaks above the shell are cut off"),
-				Highest, BaseHeight, PlanetMaxTerrainHeight));
+				TEXT("planet terrain reaches %.0f uu above WorldRadius (BaseHeight %.0f + continentalness offset up to %.0f + PlanetHeightScale / 2 x %.2f) but PlanetMaxTerrainHeight is %.0f: peaks above the shell are cut off"),
+				Highest, BaseHeight, MaxOffset, MaxScaleMult, PlanetMaxTerrainHeight));
 		}
 		if (Deepest > PlanetMaxTerrainDepth)
 		{
 			Warnings.Add(FString::Printf(
-				TEXT("planet terrain reaches %.0f uu below WorldRadius (PlanetHeightScale / 2 - BaseHeight %.0f) but PlanetMaxTerrainDepth is %.0f: valleys below the shell are cut off"),
-				Deepest, BaseHeight, PlanetMaxTerrainDepth));
+				TEXT("planet terrain reaches %.0f uu below WorldRadius (PlanetHeightScale / 2 x %.2f - BaseHeight %.0f - continentalness offset down to %.0f) but PlanetMaxTerrainDepth is %.0f: valleys below the shell are cut off"),
+				Deepest, MaxScaleMult, BaseHeight, MinOffset, PlanetMaxTerrainDepth));
 		}
 
 		// Generation fills a planet's oceans by WaterRadius; everything else that asks "is this under water"

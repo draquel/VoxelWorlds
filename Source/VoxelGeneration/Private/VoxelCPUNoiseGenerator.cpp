@@ -11,6 +11,7 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelSeaSurface.h"
 #include "Async/Async.h"
 
 // Permutation table for Perlin noise (Ken Perlin's original)
@@ -1038,10 +1039,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 
 // ==================== Cave Generation Helpers ====================
 
-float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed)
+float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FCaveLayerConfig& LayerConfig, int32 WorldSeed,
+	const FSphericalPlanetParams* Planet)
 {
-	// Apply vertical scale to flatten caves horizontally
-	FVector ScaledPos(WorldPos.X, WorldPos.Y, WorldPos.Z * LayerConfig.VerticalScale);
+	// Apply vertical scale to flatten caves horizontally: along world Z in heightmap modes, along local up on a planet
+	// (the altitude above the datum is scaled, the direction kept; SP-B6)
+	const FVector ScaledPos = Planet
+		? FSphericalPlanetWorldMode::ScaleAltitude(WorldPos, *Planet, LayerConfig.VerticalScale)
+		: FVector(WorldPos.X, WorldPos.Y, WorldPos.Z * LayerConfig.VerticalScale);
 
 	// Build noise params for first noise field
 	FVoxelNoiseParams CaveNoiseParams;
@@ -1114,7 +1119,8 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 	uint8 BiomeID,
 	const UVoxelCaveConfiguration* CaveConfig,
 	int32 WorldSeed,
-	bool bIsUnderwater)
+	bool bIsUnderwater,
+	const FSphericalPlanetParams* Planet)
 {
 	if (!CaveConfig || !CaveConfig->bEnableCaves)
 	{
@@ -1168,7 +1174,7 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 		}
 
 		// Sample this cave layer
-		float LayerCarve = SampleCaveLayer(WorldPos, Layer, WorldSeed);
+		float LayerCarve = SampleCaveLayer(WorldPos, Layer, WorldSeed, Planet);
 
 		if (LayerCarve <= 0.0f)
 		{
@@ -1289,10 +1295,17 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
-	const FVector PlanetCenter = WorldMode.GetPlanetParams().PlanetCenter;
+	const FSphericalPlanetParams& PlanetParams = WorldMode.GetPlanetParams();
+	const FVector PlanetCenter = PlanetParams.PlanetCenter;
+	const float PlanetRadius = PlanetParams.PlanetRadius;
 
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+
+	// Hoisted continentalness snapshot for the per-voxel radial height (plain data), as in the heightmap modes: the
+	// planet's surface function (FSphericalPlanetWorldMode::SampleRadialDisplacement) takes it, and GetSurfacePoint
+	// applies the same.
+	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(BiomeConfig);
 
 	// Set up biome noise parameters
 	FVoxelNoiseParams TempNoiseParams;
@@ -1309,26 +1322,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	MoistureNoiseParams.Lacunarity = 2.0f;
 	MoistureNoiseParams.Amplitude = 1.0f;
 
-	// Set up continentalness noise parameters
-	FVoxelNoiseParams ContinentalnessNoiseParamsSP;
-	ContinentalnessNoiseParamsSP.NoiseType = EVoxelNoiseType::Simplex;
-	ContinentalnessNoiseParamsSP.Octaves = 2;
-	ContinentalnessNoiseParamsSP.Persistence = 0.5f;
-	ContinentalnessNoiseParamsSP.Lacunarity = 2.0f;
-	ContinentalnessNoiseParamsSP.Amplitude = 1.0f;
-
 	if (BiomeConfig)
 	{
 		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
 		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
-
-		if (BiomeConfig->bEnableContinentalness)
-		{
-			ContinentalnessNoiseParamsSP.Seed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
-			ContinentalnessNoiseParamsSP.Frequency = BiomeConfig->ContinentalnessNoiseFrequency;
-		}
 	}
 	else
 	{
@@ -1337,8 +1336,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
-
-	const bool bUseContinentalnessSP = BiomeConfig && BiomeConfig->bEnableContinentalness;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -1356,34 +1353,34 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// Get direction from planet center for noise sampling
 				FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, PlanetCenter);
 
-				// Sample continentalness for biome selection (uses direction like other biome noise)
+				// The surface along this direction: terrain noise and continentalness sampled on the datum sphere, the
+				// displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5). The sampled
+				// continentalness is reused for the biome blend below.
 				float Continentalness = 0.0f;
-				if (bUseContinentalnessSP)
-				{
-					FVector BiomeSamplePosSP = Direction * 10000.0f;
-					Continentalness = FBM3D(BiomeSamplePosSP, ContinentalnessNoiseParamsSP);
-				}
-
-				// Sample spherical noise using direction
-				float NoiseValue = FSphericalPlanetWorldMode::SampleSphericalNoise(Direction, Request.NoiseParams);
-
-				// Get density from spherical planet world mode
-				float SignedDistance = WorldMode.GetDensityAt(WorldPos, Request.LODLevel, NoiseValue);
+				const float TerrainRadius = PlanetRadius + FSphericalPlanetWorldMode::SampleRadialDisplacement(
+					Direction, PlanetRadius, WorldMode.GetTerrainParams(), Request.NoiseParams, &BiomeSnapshot, &Continentalness);
 
 				// NOTE: terrain conditioning (Request.ConditioningZones) is intentionally NOT applied here.
 				// The zone model is heightmap (XY footprint + target Z height); a planet's surface is radial
 				// (a target RADIUS per direction), so flattening needs a separate radial-zone model. Deferred.
 
-				// Convert signed distance to density
+				// Signed distance to the surface (with the shell's quick reject), then density
+				const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);
+				const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(DistFromCenter, TerrainRadius, PlanetParams);
 				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
-
-				// Calculate radial distance for material assignment
-				float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);
-				float TerrainRadius = WorldMode.GetPlanetParams().PlanetRadius +
-					FSphericalPlanetWorldMode::NoiseToRadialDisplacement(NoiseValue, WorldMode.GetTerrainParams());
 
 				// Depth below surface is radial (terrain radius - distance from center)
 				float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
+
+				// Height-material rules read the voxel's altitude above the datum, as they read Z in the heightmap modes
+				// (SP-B2; the radius put every surface past the snow line). Caves under the sea keep their underwater
+				// minimum depth (SP-B6).
+				const float Altitude = DistFromCenter - PlanetRadius;
+				const bool bUnderwater = Request.bEnableWaterLevel && TerrainRadius < Request.WaterRadius;
+
+				// Temperature and moisture are sampled like the terrain, on the datum sphere, so biomes keep their size in
+				// uu whatever the radius (SP-B1).
+				const FVector BiomeSamplePos = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Direction, PlanetRadius);
 
 				// Save pre-cave density to detect cave carving (solid → air transition)
 				const uint8 PreCaveDensity = Density;
@@ -1394,9 +1391,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 				if (Request.bEnableBiomes && BiomeConfig && BiomeConfig->IsValid())
 				{
-					// For spherical planets, use direction for biome sampling
-					// Scale direction to get varied biome coordinates
-					FVector BiomeSamplePos = Direction * 10000.0f;
 					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
@@ -1407,7 +1401,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					float CaveDensity = 0.0f;
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1427,8 +1421,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
 					}
 
-					// Height rules use radial distance as "height" for spherical planets
-					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, DistFromCenter, DepthBelowSurface);
+					// Height rules by altitude above the datum (SP-B2)
+					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, Altitude, DepthBelowSurface);
 
 					// Cave wall material override (solid voxels near cave boundaries)
 					if (Request.bEnableCaves && Request.CaveConfiguration
@@ -1457,7 +1451,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				}
 				else if (Request.bEnableBiomes)
 				{
-					FVector BiomeSamplePos = Direction * 10000.0f;
 					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
 					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
 
@@ -1468,7 +1461,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1483,7 +1476,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -1501,6 +1494,67 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, InitMetadata);
 			}
 		}
+	}
+}
+
+// ==================== Scan Lines Along Local Down (planets) ====================
+
+namespace VoxelCPUNoiseGeneratorPrivate
+{
+	/** Line ids ForEachVoxelAlongDown hands out: [0, NumDownLines(ChunkSize)). */
+	int32 NumDownLines(int32 ChunkSize)
+	{
+		return 9 * ChunkSize * ChunkSize;
+	}
+
+	/**
+	 * Visits every voxel of a chunk once, line by line along a down direction, each line from where it enters the chunk
+	 * on its upper side to where it leaves (spherical SP-B7, SP-B8). The lines are digital lines sheared along the axis
+	 * nearest to Down: with K the step index along that axis from the chunk's upper side, voxel (a, b, c) is on line
+	 * (b - round(K * SlopeB), c - round(K * SlopeC)), so every voxel is on exactly one line and each step moves at most
+	 * one voxel sideways. With Down = -Z the lines are the chunk's columns, top to bottom.
+	 *
+	 * @param ChunkSize Voxels per chunk edge
+	 * @param Down Unit down direction (the chunk centre's local down on a planet)
+	 * @param Visit Called as Visit(LineId, VoxelIndex, Local) in line order; LineId in [0, NumDownLines(ChunkSize))
+	 */
+	template <typename FVisit>
+	void ForEachVoxelAlongDown(int32 ChunkSize, const FVector& Down, FVisit&& Visit)
+	{
+		const FVector AbsDown = Down.GetAbs();
+		const int32 AxisA = (AbsDown.X >= AbsDown.Y && AbsDown.X >= AbsDown.Z) ? 0 : (AbsDown.Y >= AbsDown.Z ? 1 : 2);
+		const int32 AxisB = (AxisA + 1) % 3;
+		const int32 AxisC = (AxisA + 2) % 3;
+		const bool bForward = Down[AxisA] > 0.0;
+		const double SlopeB = Down[AxisB] / FMath::Max(AbsDown[AxisA], UE_DOUBLE_SMALL_NUMBER);
+		const double SlopeC = Down[AxisC] / FMath::Max(AbsDown[AxisA], UE_DOUBLE_SMALL_NUMBER);
+		const int32 SliceSize = ChunkSize * ChunkSize;
+		const int32 Span = 3 * ChunkSize; // line ids span [-ChunkSize, 2 * ChunkSize) on each sheared axis
+
+		FIntVector Local;
+		for (int32 K = 0; K < ChunkSize; ++K)
+		{
+			Local[AxisA] = bForward ? K : ChunkSize - 1 - K;
+			const int32 ShiftB = FMath::RoundToInt32(K * SlopeB);
+			const int32 ShiftC = FMath::RoundToInt32(K * SlopeC);
+			for (int32 C = 0; C < ChunkSize; ++C)
+			{
+				Local[AxisC] = C;
+				for (int32 B = 0; B < ChunkSize; ++B)
+				{
+					Local[AxisB] = B;
+					const int32 LineId = (B - ShiftB + ChunkSize) + (C - ShiftC + ChunkSize) * Span;
+					Visit(LineId, Local.X + Local.Y * ChunkSize + Local.Z * SliceSize, Local);
+				}
+			}
+		}
+	}
+
+	/** The local down direction at a planet chunk's centre. */
+	FVector PlanetChunkDown(const FVoxelNoiseGenerationRequest& Request)
+	{
+		const FVector ChunkCenter = Request.GetChunkWorldPosition() + FVector(0.5 * Request.ChunkSize * Request.VoxelSize);
+		return -FSphericalPlanetWorldMode::GetDirectionFromCenter(ChunkCenter, Request.SphericalPlanetParams.PlanetCenter);
 	}
 }
 
@@ -1523,9 +1577,12 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	if (!Request.bEnableWaterLevel)
 		return;
 
-	// SphericalPlanet uses radial water — skip flat-plane column scan
+	// A planet's sea is the sphere of WaterRadius (SP-B8): the same three phases with the radius in place of the plane.
 	if (Request.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		ApplyRadialWaterFillPass(Request, OutVoxelData);
 		return;
+	}
 
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
@@ -1654,6 +1711,111 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	}
 }
 
+void FVoxelCPUNoiseGenerator::ApplyRadialWaterFillPass(
+	const FVoxelNoiseGenerationRequest& Request,
+	TArray<FVoxelData>& OutVoxelData)
+{
+	using namespace VoxelCPUNoiseGeneratorPrivate;
+
+	const int32 ChunkSize = Request.ChunkSize;
+	const float VoxelSize = Request.VoxelSize;
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	const int32 SliceSize = ChunkSize * ChunkSize;
+	const int32 VolumeSize = SliceSize * ChunkSize;
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::MakeSphere(Request.SphericalPlanetParams.PlanetCenter, Request.WaterRadius);
+	auto VoxelWorldPos = [&](const FIntVector& Local)
+	{
+		return ChunkWorldPos + FVector(Local) * VoxelSize;
+	};
+
+	// === Phase 1: seed the open sea, in a chunk the sea surface passes through ===
+	// As the plane's column scan: along each line in local down (ForEachVoxelAlongDown, the chunk centre's down), the
+	// part above the sea must be clear of solid and cave voxels from where the line enters the chunk (the column is open
+	// from the chunk top); from the sea surface down, air takes the water flag until the first solid or cave voxel. A
+	// line that enters the chunk already below the sea counts as open, as a column does when the water plane is the
+	// chunk's top layer. Chunks wholly under the sea fill from their neighbours (UVoxelChunkManager::PropagateWaterFromNeighbors).
+	const FBox VoxelBox(ChunkWorldPos, ChunkWorldPos + FVector((ChunkSize - 1) * VoxelSize));
+	if (Sea.Crosses(VoxelBox))
+	{
+		struct FSeaLine
+		{
+			bool bBlocked = false; // solid or cave above the sea, or the flood met its floor
+		};
+		TArray<FSeaLine> Lines;
+		Lines.SetNum(NumDownLines(ChunkSize));
+		ForEachVoxelAlongDown(ChunkSize, PlanetChunkDown(Request), [&](int32 LineId, int32 Index, const FIntVector& Local)
+		{
+			FSeaLine& Line = Lines[LineId];
+			if (Line.bBlocked)
+			{
+				return;
+			}
+			FVoxelData& Voxel = OutVoxelData[Index];
+			if (Voxel.IsSolid() || Voxel.HasCaveFlag())
+			{
+				Line.bBlocked = true;
+				return;
+			}
+			if (Sea.IsBelow(VoxelWorldPos(Local)))
+			{
+				Voxel.SetWaterFlag(true);
+			}
+		});
+	}
+
+	// === Phase 2: BFS flood fill through non-cave air inside the sea radius ===
+	TArray<int32> BFSQueue;
+	BFSQueue.Reserve(SliceSize);
+	for (int32 i = 0; i < VolumeSize; ++i)
+	{
+		if (OutVoxelData[i].HasWaterFlag())
+		{
+			BFSQueue.Add(i);
+		}
+	}
+
+	static constexpr int32 DX[6] = { 1, -1,  0,  0,  0,  0 };
+	static constexpr int32 DY[6] = { 0,  0,  1, -1,  0,  0 };
+	static constexpr int32 DZ[6] = { 0,  0,  0,  0,  1, -1 };
+
+	int32 QueueHead = 0;
+	while (QueueHead < BFSQueue.Num())
+	{
+		const int32 CurrentIdx = BFSQueue[QueueHead++];
+		const int32 CZ = CurrentIdx / SliceSize;
+		const int32 CY = (CurrentIdx - CZ * SliceSize) / ChunkSize;
+		const int32 CX = CurrentIdx - CZ * SliceSize - CY * ChunkSize;
+
+		for (int32 D = 0; D < 6; ++D)
+		{
+			const FIntVector N(CX + DX[D], CY + DY[D], CZ + DZ[D]);
+			if (N.X < 0 || N.X >= ChunkSize || N.Y < 0 || N.Y >= ChunkSize || N.Z < 0 || N.Z >= ChunkSize)
+			{
+				continue;
+			}
+
+			const int32 NeighborIdx = N.X + N.Y * ChunkSize + N.Z * SliceSize;
+			FVoxelData& Neighbor = OutVoxelData[NeighborIdx];
+			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag() || Neighbor.HasCaveFlag() || !Sea.IsBelow(VoxelWorldPos(N)))
+			{
+				continue;
+			}
+
+			Neighbor.SetWaterFlag(true);
+			BFSQueue.Add(NeighborIdx);
+		}
+	}
+
+	// === Phase 3: clear the cave flags (temporary barriers), as the plane's pass does ===
+	for (int32 i = 0; i < VolumeSize; ++i)
+	{
+		if (OutVoxelData[i].HasCaveFlag())
+		{
+			OutVoxelData[i].SetCaveFlag(false);
+		}
+	}
+}
+
 // ==================== Underground Classification Pass ====================
 
 void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
@@ -1672,48 +1834,70 @@ void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
 	// This avoids falsely flagging surface air below ridges/overhangs as underground.
 	const int32 MinSolidThickness = 3;
 
-	for (int32 Y = 0; Y < ChunkSize; ++Y)
+	// One scan line's state, top-down.
+	struct FLineState
 	{
-		for (int32 X = 0; X < ChunkSize; ++X)
+		bool bSeenAir = false;
+		bool bUnderground = false;
+		int32 ConsecutiveSolid = 0;
+	};
+	auto Step = [MinSolidThickness](FLineState& Line, FVoxelData& Voxel)
+	{
+		if (Voxel.IsSolid())
 		{
-			bool bSeenAir = false;
-			bool bUnderground = false;
-			int32 ConsecutiveSolid = 0;
-
-			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
+			// Only count solid after we've seen air (sky/surface)
+			if (Line.bSeenAir)
 			{
-				const int32 Index = X + Y * ChunkSize + Z * SliceSize;
-				FVoxelData& Voxel = OutVoxelData[Index];
+				++Line.ConsecutiveSolid;
+			}
+			return;
+		}
 
-				if (Voxel.IsSolid())
+		Line.bSeenAir = true;
+
+		// Air voxel — decide if it's underground
+		if (!Line.bUnderground && Line.ConsecutiveSolid >= MinSolidThickness)
+		{
+			// Passed through thick terrain ceiling — everything below is underground
+			Line.bUnderground = true;
+		}
+
+		if (Line.bUnderground && !Voxel.HasWaterFlag())
+		{
+			Voxel.SetUndergroundFlag(true);
+		}
+
+		// Reset for next solid sequence (only matters while still above ground)
+		if (!Line.bUnderground)
+		{
+			Line.ConsecutiveSolid = 0;
+		}
+	};
+
+	if (Request.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		// A planet scans along local down (the chunk centre's), not world -Z (SP-B7): at mid latitudes down is up to 55
+		// degrees off every axis, and a world-Z scan reads a hillside as a cave ceiling, or misses a cave whose column
+		// runs into the ground to the chunk's top. The same state machine runs on each digital line along down
+		// (ForEachVoxelAlongDown) from where it enters the chunk.
+		using namespace VoxelCPUNoiseGeneratorPrivate;
+		TArray<FLineState> Lines;
+		Lines.SetNum(NumDownLines(ChunkSize));
+		ForEachVoxelAlongDown(ChunkSize, PlanetChunkDown(Request), [&](int32 LineId, int32 Index, const FIntVector&)
+		{
+			Step(Lines[LineId], OutVoxelData[Index]);
+		});
+	}
+	else
+	{
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				FLineState Line;
+				for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 				{
-					// Only count solid after we've seen air (sky/surface)
-					if (bSeenAir)
-					{
-						++ConsecutiveSolid;
-					}
-				}
-				else
-				{
-					bSeenAir = true;
-
-					// Air voxel — decide if it's underground
-					if (!bUnderground && ConsecutiveSolid >= MinSolidThickness)
-					{
-						// Passed through thick terrain ceiling — everything below is underground
-						bUnderground = true;
-					}
-
-					if (bUnderground && !Voxel.HasWaterFlag())
-					{
-						Voxel.SetUndergroundFlag(true);
-					}
-
-					// Reset for next solid sequence (only matters while still above ground)
-					if (!bUnderground)
-					{
-						ConsecutiveSolid = 0;
-					}
+					Step(Line, OutVoxelData[X + Y * ChunkSize + Z * SliceSize]);
 				}
 			}
 		}

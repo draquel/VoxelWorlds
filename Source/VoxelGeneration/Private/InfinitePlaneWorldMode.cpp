@@ -174,6 +174,16 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 	const FVoxelBiomeSnapshot* BiomeSnapshot,
 	float& OutContinentalness)
 {
+	return ComputeEffectiveTerrainParamsAt(FVector(X, Y, 0.0f), BaseParams, BaseNoiseParams, BiomeSnapshot, OutContinentalness);
+}
+
+FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt(
+	const FVector& SamplePos,
+	const FWorldModeTerrainParams& BaseParams,
+	const FVoxelNoiseParams& BaseNoiseParams,
+	const FVoxelBiomeSnapshot* BiomeSnapshot,
+	float& OutContinentalness)
+{
 	OutContinentalness = 0.0f;
 	FWorldModeTerrainParams Effective = BaseParams;
 
@@ -191,7 +201,6 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
 		ContinentalnessNoiseParams.Seed = BaseNoiseParams.Seed + BiomeSnapshot->ContinentalnessSeedOffset;
 		ContinentalnessNoiseParams.Frequency = BiomeSnapshot->ContinentalnessNoiseFrequency;
 
-		const FVector SamplePos(X, Y, 0.0f);
 		OutContinentalness = FVoxelCPUNoiseGenerator::FBM3D(SamplePos, ContinentalnessNoiseParams);
 
 		float HeightOffset = 0.0f;
@@ -234,14 +243,9 @@ void FInfinitePlaneWorldMode::GetTerrainHeightBounds(
 	float MinOffset = 0.0f;
 	float MaxOffset = 0.0f;
 	float MaxScaleMult = 1.0f; // no continentalness => full HeightScale amplitude
-
-	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness
-		&& BiomeSnapshot->BakedHeightCurve.Num() > 0 && BiomeSnapshot->BakedHeightScaleCurve.Num() > 0)
+	if (BiomeSnapshot)
 	{
-		MinOffset = FMath::Min(BiomeSnapshot->BakedHeightCurve);
-		MaxOffset = FMath::Max(BiomeSnapshot->BakedHeightCurve);
-		// Amplitude scales by the LARGEST multiplier any point can take. Guard a degenerate curve.
-		MaxScaleMult = FMath::Max(0.0f, FMath::Max(BiomeSnapshot->BakedHeightScaleCurve));
+		BiomeSnapshot->GetContinentalnessExtremes(MinOffset, MaxOffset, MaxScaleMult);
 	}
 
 	const float Center = BaseParams.SeaLevel + BaseParams.BaseHeight;

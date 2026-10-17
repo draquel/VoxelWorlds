@@ -28,6 +28,7 @@
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelWaterPropagation.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelWaterMesher.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelScatterManager.h"
@@ -675,7 +676,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Process dirty water tiles (2D water grid) ===
 	SubStart = SubEnd;
-	if (Configuration && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
+	if (UsesWaterTiles())
 	{
 		ProcessDirtyWaterTiles(8);
 	}
@@ -853,7 +854,7 @@ void UVoxelChunkManager::Initialize(
 	}
 
 	// Pass water material to renderer for per-chunk water mesh sections
-	if (MeshRenderer && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
+	if (MeshRenderer && UsesWaterTiles())
 	{
 		MeshRenderer->SetWaterMaterial(Configuration->WaterMeshMaterial);
 	}
@@ -1207,9 +1208,6 @@ void UVoxelChunkManager::Initialize(
 	{
 		WaterPropagation = NewObject<UVoxelWaterPropagation>(this);
 		WaterPropagation->Initialize(this, EditManager, Configuration->WaterLevel);
-
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWaterPropagation created (WaterLevel=%.0f)"),
-			Configuration->WaterLevel);
 	}
 
 	bIsInitialized = true;
@@ -2527,6 +2525,17 @@ FVoxelSurfaceCoord UVoxelChunkManager::WorldToSurface(const FVector& WorldPos) c
 FVector UVoxelChunkManager::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
 {
 	return WorldMode ? WorldMode->SurfaceToWorld(Coord, Altitude) : FVector(Coord.UV.X, Coord.UV.Y, Altitude);
+}
+
+FVoxelTerrainSurfacePoint UVoxelChunkManager::GetSurfacePointAt(const FVector& WorldPos) const
+{
+	if (!WorldMode || !Configuration)
+	{
+		FVoxelTerrainSurfacePoint Point;
+		Point.Position = WorldPos;
+		return Point;
+	}
+	return WorldMode->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
 }
 
 FVoxelWorldFingerprint UVoxelChunkManager::GetWorldFingerprint() const
@@ -3990,7 +3999,7 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 		LoadedChunkCoords.Remove(ChunkCoord);
 
 		// Remove water tile contribution before state is cleared
-		if (Configuration && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial)
+		if (UsesWaterTiles())
 		{
 			RemoveWaterTileContribution(ChunkCoord);
 		}
@@ -5205,7 +5214,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			PropagateWaterFromNeighbors(ChunkCoord);
 
 			// Update this chunk's contribution to its 2D water tile
-			if (Configuration->WaterMeshMaterial)
+			if (UsesWaterTiles())
 			{
 				UpdateWaterTileContribution(ChunkCoord);
 			}
@@ -5244,6 +5253,14 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 }
 
+bool UVoxelChunkManager::UsesWaterTiles() const
+{
+	// The tiles are XY columns meshed at the WaterLevel plane; a planet's sea is a sphere (its surface is the world
+	// actor's water sphere until SP-E2), so the tiles would draw in the wrong place there.
+	return Configuration && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
+		&& Configuration->WorldMode != EWorldMode::SphericalPlanet;
+}
+
 bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoord)
 {
 	if (!Configuration || !Configuration->bEnableWaterLevel)
@@ -5261,7 +5278,6 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	const float VS = Configuration->VoxelSize;
 	const int32 VolumeSize = CS * CS * CS;
 	const int32 SliceSize = CS * CS;
-	const float WaterLevel = Configuration->WaterLevel;
 	const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(ChunkCoord, CS, VS);
 
 	if (!State->Descriptor.HasVoxelDataAvailable())
@@ -5269,17 +5285,27 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		return false;
 	}
 
-	// Entirely above the water level — no voxel can qualify as a seed (the per-voxel check
+	// "Below the sea" as generation's fill pass tests it: the WaterLevel plane, or a planet's WaterRadius sphere (SP-B8).
+	// The sphere is tested in world space (the chunk grid is relative to WorldOrigin, the planet centre); the plane keeps
+	// its Z test on the grid position.
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::FromConfig(*Configuration);
+	const FVector VoxelOrigin = Sea.bRadial ? ChunkWorldPos + Configuration->WorldOrigin : ChunkWorldPos;
+	auto IsBelowSea = [&Sea, &VoxelOrigin, VS](int32 X, int32 Y, int32 Z)
+	{
+		return Sea.IsBelow(VoxelOrigin + FVector(X, Y, Z) * VS);
+	};
+
+	// Entirely above the sea — no voxel can qualify as a seed (the per-voxel check
 	// below rejects everything), so skip the 6-face boundary scan outright. This runs per
-	// mesh submit and most submitted chunks are above the water level.
-	if (ChunkWorldPos.Z > WaterLevel)
+	// mesh submit and most submitted chunks are above the sea.
+	if (Sea.IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
 	{
 		return false;
 	}
 
-	// Voxels above the water level never seed — clamp the Z iteration up front instead of
-	// rejecting them one by one. For the X/Y faces, loop axis B is Z.
-	const int32 MaxSeedZ = FMath::Clamp(FMath::FloorToInt32((WaterLevel - ChunkWorldPos.Z) / VS), 0, CS - 1);
+	// Plane: voxels above the water level never seed — clamp the Z iteration up front instead of
+	// rejecting them one by one. For the X/Y faces, loop axis B is Z. A sphere checks every voxel.
+	const int32 MaxSeedZ = Sea.bRadial ? CS - 1 : FMath::Clamp(FMath::FloorToInt32((Sea.PlaneZ - ChunkWorldPos.Z) / VS), 0, CS - 1);
 
 	TArray<FVoxelData>& VoxelData = State->Descriptor.GetVoxelDataMutable();
 
@@ -5307,7 +5333,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		const int32 MaxIdx = CS - 1;
 
 		// +Z face: the whole plane sits at Z=MaxIdx — skip it when that plane is above water
-		if (F == 4 && (ChunkWorldPos.Z + MaxIdx * VS) > WaterLevel)
+		if (!Sea.bRadial && F == 4 && (ChunkWorldPos.Z + MaxIdx * VS) > Sea.PlaneZ)
 		{
 			continue;
 		}
@@ -5359,14 +5385,13 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 				const int32 OurIdx = OurX + OurY * CS + OurZ * SliceSize;
 				FVoxelData& OurVoxel = VoxelData[OurIdx];
 
-				// Our voxel must be dry air below water level
+				// Our voxel must be dry air below the sea
 				if (OurVoxel.IsSolid() || OurVoxel.HasWaterFlag())
 				{
 					continue;
 				}
 
-				const float OurWorldZ = ChunkWorldPos.Z + OurZ * VS;
-				if (OurWorldZ > WaterLevel)
+				if (!IsBelowSea(OurX, OurY, OurZ))
 				{
 					continue;
 				}
@@ -5426,8 +5451,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 				continue;
 			}
 
-			const float NeighborWorldZ = ChunkWorldPos.Z + NZ * VS;
-			if (NeighborWorldZ > WaterLevel)
+			if (!IsBelowSea(NX, NY, NZ))
 			{
 				continue;
 			}
