@@ -10,6 +10,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelCoordinates.h"
 #include "VoxelEditManager.h"
+#include "VoxelSurfaceQuery.h"
 #include "VoxelWorldConfiguration.h"
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,12 @@ static TAutoConsoleVariable<float> CVarNavMaxRadius(TEXT("voxel.Nav.MaxRadius"),
 	TEXT("Cells farther than this from the start are never expanded."));
 static TAutoConsoleVariable<int32> CVarNavDebug(TEXT("voxel.Nav.Debug"), 0,
 	TEXT("1 = draw the walkability grid around the debug focus and recent routes."));
+
+/** A planet's search regions are cells of a cube-sphere grid about this wide (four 4,800 uu chunks). */
+static constexpr double PlanetNavRegionSize = 19200.0;
+
+/** A planet region's height cache is dropped after this many seconds unused. */
+static constexpr double PlanetNavRegionLifetime = 60.0;
 
 // ---------------------------------------------------------------------------
 // Tile
@@ -64,6 +71,7 @@ void UVoxelSurfaceNavigationSubsystem::Deinitialize()
 		}
 	}
 	Tiles.Reset();
+	Regions.Reset();
 	Super::Deinitialize();
 }
 
@@ -94,6 +102,25 @@ void UVoxelSurfaceNavigationSubsystem::Tick(float DeltaTime)
 			for (const FTempBlock& Block : TempBlocks)
 			{
 				TempBlockedCells.Add(Block.Cell);
+			}
+		}
+	}
+
+	// Planets: expire temporary blocks and regions unused for a minute.
+	if (TempSpheres.Num() > 0)
+	{
+		const double Now = GetWorld()->GetTimeSeconds();
+		TempSpheres.RemoveAllSwap([Now](const FTempSphere& Block) { return Block.ExpireTime <= Now; });
+	}
+	if (Regions.Num() > 0)
+	{
+		const double Now = FPlatformTime::Seconds();
+		for (auto It = Regions.CreateIterator(); It; ++It)
+		{
+			if (It.Value() && Now - It.Value()->LastUsedSeconds > PlanetNavRegionLifetime)
+			{
+				CachedCells -= It.Value()->Cells;
+				It.RemoveCurrent();
 			}
 		}
 	}
@@ -192,6 +219,18 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 			Params.WaterLevel = Config->WaterLevel + Config->WorldOrigin.Z;
 			// The test itself goes through the sea (SP-E1): the same plane here, the sea sphere on a planet.
 			Params.Sea = ChunkMgr->GetSeaSurface(/*bOriginRelativePlane=*/true);
+
+			// A planet searches in region frames (WM-SY11).
+			const bool bWasPlanet = bPlanet;
+			bPlanet = Config->WorldMode == EWorldMode::SphericalPlanet;
+			if (bPlanet && !bWasPlanet)
+			{
+				PlanetCenter = Config->WorldOrigin;
+				PlanetRadius = FMath::Max(static_cast<double>(Config->WorldRadius), 1.0);
+				PlanetSea = Params.Sea;
+				RegionGrid = FVoxelCubeSphereGrid(FVoxelCubeSphereGrid::CellsPerEdgeFor(PlanetRadius, PlanetNavRegionSize));
+				Regions.Reset();
+			}
 		}
 	}
 	if (CachedCellSize != Params.CellSize)
@@ -200,6 +239,8 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 		CachedCells = 0;
 		TempBlocks.Reset();
 		TempBlockedCells.Reset();
+		Regions.Reset();
+		TempSpheres.Reset();
 		CachedCellSize = Params.CellSize;
 	}
 }
@@ -324,10 +365,40 @@ bool UVoxelSurfaceNavigationSubsystem::FindPathWithStats(const FVector& From, co
 		return false;
 	}
 	ApplyCVars();
-	FVoxelSurfacePathfinder Pathfinder(Params,
-		[this](double X, double Y) { return HeightForCell(CellOf(FVector(X, Y, 0.0))); },
-		[this](const FIntPoint& Cell) { return IsCellBlocked(Cell); });
-	const bool bOk = Pathfinder.FindPath(From, To, OutPoints, &OutStats);
+	bool bOk = false;
+	if (bPlanet)
+	{
+		// A planet: the search runs in the frame of the region its start lies in, altitudes for heights and the sea as
+		// the altitude plane WaterRadius - PlanetRadius (exactly the sea sphere's depth along local up).
+		FRegionCache& Region = RegionFor(From);
+		FVector FrameFrom, FrameTo;
+		if (Region.Frame.ToFrame(From, FrameFrom) && Region.Frame.ToFrame(To, FrameTo))
+		{
+			FVoxelSurfaceNavParams FrameParams = Params;
+			FrameParams.bHasWater = false;
+			FrameParams.Sea = FVoxelSeaSurface();
+			if (PlanetSea.bEnabled && PlanetSea.bRadial)
+			{
+				FrameParams.Sea = FVoxelSeaSurface::MakePlane(PlanetSea.Radius - PlanetRadius);
+			}
+			FVoxelSurfacePathfinder Pathfinder(FrameParams,
+				[this, &Region](double X, double Y) { return HeightForPlanetCell(Region, CellOf(FVector(X, Y, 0.0))); },
+				[this, &Region](const FIntPoint& Cell) { return IsPlanetCellBlocked(Region, Cell); });
+			TArray<FVector> FramePoints;
+			bOk = Pathfinder.FindPath(FrameFrom, FrameTo, FramePoints, &OutStats);
+			for (const FVector& FramePoint : FramePoints)
+			{
+				OutPoints.Add(Region.Frame.ToWorld(FramePoint));
+			}
+		}
+	}
+	else
+	{
+		FVoxelSurfacePathfinder Pathfinder(Params,
+			[this](double X, double Y) { return HeightForCell(CellOf(FVector(X, Y, 0.0))); },
+			[this](const FIntPoint& Cell) { return IsCellBlocked(Cell); });
+		bOk = Pathfinder.FindPath(From, To, OutPoints, &OutStats);
+	}
 	LastStats = OutStats;
 	++SearchCount;
 	if (CVarNavDebug.GetValueOnGameThread() > 0)
@@ -359,6 +430,14 @@ bool UVoxelSurfaceNavigationSubsystem::ProjectToSurface(const FVector& Location,
 		return false;
 	}
 	ApplyCVars();
+	if (bPlanet)
+	{
+		// Along local up: the edit-merged surface when loaded, the analytic one otherwise.
+		UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
+		FVoxelSurfaceSample Sample;
+		OutOnSurface = ChunkMgr->QueryEditMergedSurfacePoint(Location, Sample) ? Sample.Position : ChunkMgr->GetGeneratedSurfacePoint(Location);
+		return true;
+	}
 	OutOnSurface = FVector(Location.X, Location.Y, SampleHeight(Location.X, Location.Y));
 	return true;
 }
@@ -370,6 +449,22 @@ bool UVoxelSurfaceNavigationSubsystem::IsWalkableAt(const FVector& Location)
 		return false;
 	}
 	ApplyCVars();
+	if (bPlanet)
+	{
+		FRegionCache& Region = RegionFor(Location);
+		FVector FramePoint;
+		if (!Region.Frame.ToFrame(Location, FramePoint))
+		{
+			return false;
+		}
+		const FIntPoint PlanetCell = CellOf(FramePoint);
+		if (IsPlanetCellBlocked(Region, PlanetCell))
+		{
+			return false;
+		}
+		const float Altitude = HeightForPlanetCell(Region, PlanetCell);
+		return !(PlanetSea.bEnabled && PlanetSea.bRadial && PlanetRadius + Altitude < PlanetSea.Radius - Params.MaxWadeDepth);
+	}
 	const FIntPoint Cell = CellOf(Location);
 	if (IsCellBlocked(Cell))
 	{
@@ -385,6 +480,7 @@ int32 UVoxelSurfaceNavigationSubsystem::AddBlockedBox(const FBox& WorldBox)
 	FBlockedBox Entry;
 	Entry.Handle = NextBlockHandle++;
 	Entry.Box = FBox2D(FVector2D(WorldBox.Min.X, WorldBox.Min.Y), FVector2D(WorldBox.Max.X, WorldBox.Max.Y));
+	Entry.Box3D = WorldBox;
 	BlockedBoxes.Add(Entry);
 	return Entry.Handle;
 }
@@ -402,6 +498,11 @@ void UVoxelSurfaceNavigationSubsystem::BlockCellsTemporarily(const FVector& Loca
 	}
 	ApplyCVars();
 	const double Expire = GetWorld()->GetTimeSeconds() + FMath::Max(Seconds, 0.1f);
+	if (bPlanet)
+	{
+		TempSpheres.Add(FTempSphere{ Location, Radius, Expire });
+		return;
+	}
 	const FIntPoint Centre = CellOf(Location);
 	const int32 R = FMath::Max(0, FMath::CeilToInt(Radius / Params.CellSize));
 	for (int32 DX = -R; DX <= R; ++DX)
@@ -421,16 +522,24 @@ void UVoxelSurfaceNavigationSubsystem::BlockCellsTemporarily(const FVector& Loca
 void UVoxelSurfaceNavigationSubsystem::InvalidateAll()
 {
 	Tiles.Reset();
+	Regions.Reset();
 	CachedCells = 0;
 }
 
 void UVoxelSurfaceNavigationSubsystem::InvalidateCells(const FIntPoint& MinCell, const FIntPoint& MaxCell, bool bOnlyAnalytic)
 {
+	CachedCells -= InvalidateTileCells(Tiles, MinCell, MaxCell, bOnlyAnalytic);
+}
+
+int32 UVoxelSurfaceNavigationSubsystem::InvalidateTileCells(TMap<FIntPoint, TUniquePtr<FNavTile>>& InTiles, const FIntPoint& MinCell,
+	const FIntPoint& MaxCell, bool bOnlyAnalytic)
+{
+	int32 Cleared = 0;
 	for (int32 TX = FloorDiv(MinCell.X, TileSize); TX <= FloorDiv(MaxCell.X, TileSize); ++TX)
 	{
 		for (int32 TY = FloorDiv(MinCell.Y, TileSize); TY <= FloorDiv(MaxCell.Y, TileSize); ++TY)
 		{
-			TUniquePtr<FNavTile>* Tile = Tiles.Find(FIntPoint(TX, TY));
+			TUniquePtr<FNavTile>* Tile = InTiles.Find(FIntPoint(TX, TY));
 			if (!Tile || !*Tile)
 			{
 				continue;
@@ -447,18 +556,24 @@ void UVoxelSurfaceNavigationSubsystem::InvalidateCells(const FIntPoint& MinCell,
 					if ((*Tile)->Sampled[Index] && (!bOnlyAnalytic || !(*Tile)->FromLoaded[Index]))
 					{
 						(*Tile)->Sampled[Index] = false;
-						--CachedCells;
+						++Cleared;
 					}
 				}
 			}
 		}
 	}
+	return Cleared;
 }
 
 void UVoxelSurfaceNavigationSubsystem::InvalidateBox(const FBox& WorldBox)
 {
 	if (Params.CellSize <= 0.f)
 	{
+		return;
+	}
+	if (bPlanet)
+	{
+		InvalidatePlanetBox(WorldBox, false);
 		return;
 	}
 	InvalidateCells(CellOf(WorldBox.Min), CellOf(WorldBox.Max), false);
@@ -474,6 +589,11 @@ void UVoxelSurfaceNavigationSubsystem::HandleChunkLoaded(FIntVector ChunkCoord)
 	}
 	// Cells over this chunk that were estimated analytically now have real (edit-merged) data.
 	const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(ChunkCoord, Config->ChunkSize, Config->VoxelSize).ShiftBy(Config->WorldOrigin);
+	if (bPlanet)
+	{
+		InvalidatePlanetBox(Bounds, true);
+		return;
+	}
 	InvalidateCells(CellOf(Bounds.Min), CellOf(Bounds.Max), true);
 }
 
@@ -484,7 +604,158 @@ void UVoxelSurfaceNavigationSubsystem::HandleChunkEdited(const FIntVector& Chunk
 		return;
 	}
 	const float Pad = EditRadius + Params.CellSize;
+	if (bPlanet)
+	{
+		InvalidatePlanetBox(FBox(EditCenter - FVector(Pad), EditCenter + FVector(Pad)), false);
+		return;
+	}
 	InvalidateCells(CellOf(EditCenter - FVector(Pad)), CellOf(EditCenter + FVector(Pad)), false);
+}
+
+// ---------------------------------------------------------------------------
+// Planets (spherical Phase 4, WM-SY11)
+// ---------------------------------------------------------------------------
+
+FVoxelPlanetNavFrame FVoxelPlanetNavFrame::Make(const FVector& InCenter, double InRadius, const FVector& Direction, const FIntPoint& InRegion)
+{
+	FVoxelPlanetNavFrame Frame;
+	Frame.Region = InRegion;
+	Frame.Center = InCenter;
+	Frame.Radius = FMath::Max(InRadius, 1.0);
+	Frame.Up = Direction.IsNearlyZero() ? FVector::UpVector : Direction.GetSafeNormal();
+	FVoxelCubeSphere::GetTangentFrame(Frame.Up, Frame.East, Frame.North);
+	return Frame;
+}
+
+bool FVoxelPlanetNavFrame::ToFrame(const FVector& World, FVector& OutFramePoint) const
+{
+	const FVector ToPoint = World - Center;
+	const double Distance = ToPoint.Size();
+	if (Distance < UE_KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+	const FVector Direction = ToPoint / Distance;
+	const double Along = FVector::DotProduct(Direction, Up);
+	if (Along < 0.5)
+	{
+		return false;
+	}
+	// The direction's line meets the tangent plane at Radius / Along along it.
+	const double Scale = Radius / Along;
+	OutFramePoint = FVector(FVector::DotProduct(Direction, East) * Scale, FVector::DotProduct(Direction, North) * Scale, Distance - Radius);
+	return true;
+}
+
+FVector FVoxelPlanetNavFrame::DirectionAt(double X, double Y) const
+{
+	return (Up * Radius + East * X + North * Y).GetSafeNormal();
+}
+
+FVector FVoxelPlanetNavFrame::ToWorld(const FVector& FramePoint) const
+{
+	return Center + DirectionAt(FramePoint.X, FramePoint.Y) * (Radius + FramePoint.Z);
+}
+
+UVoxelSurfaceNavigationSubsystem::FRegionCache& UVoxelSurfaceNavigationSubsystem::RegionFor(const FVector& World)
+{
+	const FIntPoint Region = RegionGrid.CellOfDirection((World - PlanetCenter).GetSafeNormal());
+	TUniquePtr<FRegionCache>& Cache = Regions.FindOrAdd(Region);
+	if (!Cache)
+	{
+		Cache = MakeUnique<FRegionCache>();
+		Cache->Frame = FVoxelPlanetNavFrame::Make(PlanetCenter, PlanetRadius, RegionGrid.CellCentreDirection(Region), Region);
+	}
+	Cache->LastUsedSeconds = FPlatformTime::Seconds();
+	return *Cache;
+}
+
+float UVoxelSurfaceNavigationSubsystem::HeightForPlanetCell(FRegionCache& Region, const FIntPoint& Cell)
+{
+	const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
+	TUniquePtr<FNavTile>& Tile = Region.Tiles.FindOrAdd(TileKey);
+	if (!Tile)
+	{
+		Tile = MakeUnique<FNavTile>();
+	}
+	const int32 Index = (Cell.Y - TileKey.Y * TileSize) * TileSize + (Cell.X - TileKey.X * TileSize);
+	if (Tile->Sampled[Index])
+	{
+		return Tile->Heights[Index];
+	}
+	// The surface along the cell centre's direction: edit-merged when its chunk is loaded, analytic otherwise.
+	const FVector2D Centre = CellCentre(Cell);
+	const FVector Probe = PlanetCenter + Region.Frame.DirectionAt(Centre.X, Centre.Y) * PlanetRadius;
+	float Altitude = 0.f;
+	bool bLoaded = false;
+	if (UVoxelChunkManager* ChunkMgr = ChunkManager.Get())
+	{
+		FVoxelSurfaceSample Sample;
+		bLoaded = ChunkMgr->QueryEditMergedSurfacePoint(Probe, Sample);
+		Altitude = bLoaded ? Sample.Altitude : ChunkMgr->GetAltitudeAt(ChunkMgr->GetGeneratedSurfacePoint(Probe));
+	}
+	Tile->Heights[Index] = Altitude;
+	Tile->Sampled[Index] = true;
+	Tile->FromLoaded[Index] = bLoaded;
+	++Region.Cells;
+	++CachedCells;
+	return Altitude;
+}
+
+bool UVoxelSurfaceNavigationSubsystem::IsPlanetCellBlocked(FRegionCache& Region, const FIntPoint& Cell)
+{
+	if (TempSpheres.Num() == 0 && BlockedBoxes.Num() == 0)
+	{
+		return false;
+	}
+	const FVector2D Centre = CellCentre(Cell);
+	const FVector Ground = Region.Frame.ToWorld(FVector(Centre.X, Centre.Y, HeightForPlanetCell(Region, Cell)));
+	for (const FTempSphere& Block : TempSpheres)
+	{
+		if (FVector::Dist(Ground, Block.Center) <= Block.Radius + Params.CellSize * 0.5f)
+		{
+			return true;
+		}
+	}
+	for (const FBlockedBox& Box : BlockedBoxes)
+	{
+		if (Box.Box3D.IsInsideOrOn(Ground))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void UVoxelSurfaceNavigationSubsystem::InvalidatePlanetBox(const FBox& WorldBox, bool bOnlyAnalytic)
+{
+	for (TPair<FIntPoint, TUniquePtr<FRegionCache>>& Pair : Regions)
+	{
+		FRegionCache* Region = Pair.Value.Get();
+		if (!Region)
+		{
+			continue;
+		}
+		// The box's corners in the frame give a cell rectangle (its sides along up project inside it).
+		FBox2D Rect(ForceInit);
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const FVector Point((Corner & 1) ? WorldBox.Max.X : WorldBox.Min.X, (Corner & 2) ? WorldBox.Max.Y : WorldBox.Min.Y,
+				(Corner & 4) ? WorldBox.Max.Z : WorldBox.Min.Z);
+			FVector FramePoint;
+			if (Region->Frame.ToFrame(Point, FramePoint))
+			{
+				Rect += FVector2D(FramePoint.X, FramePoint.Y);
+			}
+		}
+		if (!Rect.bIsValid)
+		{
+			continue;
+		}
+		const int32 Cleared = InvalidateTileCells(Region->Tiles, CellOf(FVector(Rect.Min, 0.0)), CellOf(FVector(Rect.Max, 0.0)), bOnlyAnalytic);
+		Region->Cells -= Cleared;
+		CachedCells -= Cleared;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -528,13 +799,18 @@ void UVoxelSurfaceNavigationSubsystem::DrawDebug()
 			continue;
 		}
 		const FColor Color = Path.Color.ToFColor(true);
+		// 40 uu above the ground along local up (radial on a planet).
+		auto Lift = [this](const FVector& Point)
+		{
+			return Point + (bPlanet ? (Point - PlanetCenter).GetSafeNormal() : FVector::UpVector) * 40.0;
+		};
 		for (int32 p = 0; p < Path.Points.Num(); ++p)
 		{
-			const FVector P = Path.Points[p] + FVector(0, 0, 40.f);
+			const FVector P = Lift(Path.Points[p]);
 			DrawDebugSphere(World, P, 20.f, 8, Color, false, 0.f, 0, 2.f);
 			if (p > 0)
 			{
-				DrawDebugLine(World, Path.Points[p - 1] + FVector(0, 0, 40.f), P, Color, false, 0.f, 0, 4.f);
+				DrawDebugLine(World, Lift(Path.Points[p - 1]), P, Color, false, 0.f, 0, 4.f);
 			}
 		}
 	}
@@ -544,6 +820,47 @@ void UVoxelSurfaceNavigationSubsystem::DrawDebug()
 		return;
 	}
 	ApplyCVars();
+	if (bPlanet)
+	{
+		// The region frame's cells around the focus, drawn on the ground in the frame's orientation.
+		FRegionCache& Region = RegionFor(DebugFocus);
+		FVector FocusPoint;
+		if (!Region.Frame.ToFrame(DebugFocus, FocusPoint))
+		{
+			return;
+		}
+		const FIntPoint FocusCell = CellOf(FocusPoint);
+		const int32 PlanetR = FMath::Clamp(FMath::CeilToInt(DebugFocusRadius / Params.CellSize), 1, 24);
+		for (int32 DX = -PlanetR; DX <= PlanetR; ++DX)
+		{
+			for (int32 DY = -PlanetR; DY <= PlanetR; ++DY)
+			{
+				const FIntPoint Cell(FocusCell.X + DX, FocusCell.Y + DY);
+				const float Altitude = HeightForPlanetCell(Region, Cell);
+				const FVector2D C = CellCentre(Cell);
+				const FVector Ground = Region.Frame.ToWorld(FVector(C.X, C.Y, Altitude));
+				const FVector Up = (Ground - PlanetCenter).GetSafeNormal();
+				FColor Color = FColor::Yellow;
+				const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
+				if (const TUniquePtr<FNavTile>* Tile = Region.Tiles.Find(TileKey))
+				{
+					const int32 Index = (Cell.Y - TileKey.Y * TileSize) * TileSize + (Cell.X - TileKey.X * TileSize);
+					Color = (*Tile && (*Tile)->FromLoaded[Index]) ? FColor::Green : FColor::Yellow;
+				}
+				if (IsPlanetCellBlocked(Region, Cell))
+				{
+					Color = FColor::Magenta;
+				}
+				else if (PlanetSea.bEnabled && PlanetSea.bRadial && PlanetRadius + Altitude < PlanetSea.Radius - Params.MaxWadeDepth)
+				{
+					Color = FColor::Red;
+				}
+				const FQuat Rotation = FRotationMatrix::MakeFromXZ(Region.Frame.East, Up).ToQuat();
+				DrawDebugBox(World, Ground + Up * 10.0, FVector(Params.CellSize * 0.45f, Params.CellSize * 0.45f, 2.f), Rotation, Color, false, 0.f, 0, 1.f);
+			}
+		}
+		return;
+	}
 	const FIntPoint Centre = CellOf(DebugFocus);
 	const int32 R = FMath::Clamp(FMath::CeilToInt(DebugFocusRadius / Params.CellSize), 1, 24);
 	for (int32 DX = -R; DX <= R; ++DX)
