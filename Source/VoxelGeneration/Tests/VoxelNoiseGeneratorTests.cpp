@@ -482,11 +482,12 @@ bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Phase D: GPU==CPU parity for cave carving (cheese + tunnel layers + cave-wall material override), at
-// LOD 0/1/2. Verifies the GPU cave block (GenerateVoxelDensity.usf + CaveGeneration.ush) matches the CPU
-// CalculateCaveDensity/SampleCaveLayer path. The config uses NO biome cave overrides and no underwater
-// suppression (GetBiomeCaveScale==1.0, no min-depth override) — that is exactly the core carving path the
-// GPU shader implements; per-biome scale + underwater min-depth are a documented GPU gap, not tested here.
+// Phase D + G18: GPU==CPU parity for cave carving (cheese + tunnel layers + cave-wall material override), at
+// LOD 0/1/2: the core carving (no biome overrides, no water), the cave configuration's biome overrides (a cave
+// scale above 1 with a minimum-depth override, a scale of 0, a scale of 0.5), and a chunk under the sea with the
+// underwater minimum depth. Verifies the GPU cave block (GpuCaveCarve in GenerateVoxelDensity.usf + CaveGeneration.ush)
+// matches the CPU's CalculateCaveDensity/SampleCaveLayer path in the heightmap branch, overrides and underwater
+// suppression included (G18, WORLD_MODES_REVIEW_PLAN.md §14.1).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUCavesParityTest, "VoxelWorlds.Generation.GPUvsCPUCavesParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -499,13 +500,13 @@ bool FVoxelGPUvsCPUCavesParityTest::RunTest(const FString& Parameters)
 	BiomeConfig->InitializeDefaults();
 	BiomeConfig->BuildGpuData();
 
-	// Global cave config: one cheese + one tunnel (spaghetti) layer, cave-wall override on. No biome
-	// overrides / underwater suppression → CPU reduces to the shader's core carving path.
+	// Global cave config: one cheese + one tunnel (spaghetti) layer, cave-wall override on. First no biome
+	// overrides and no underwater minimum depth: the core carving path.
 	UVoxelCaveConfiguration* CaveConfig = NewObject<UVoxelCaveConfiguration>();
 	CaveConfig->AddToRoot();
 	CaveConfig->bEnableCaves = true;
 	CaveConfig->BiomeOverrides.Empty();     // GetBiomeCaveScale() == 1.0, GetBiomeMinDepthOverride() == -1
-	CaveConfig->UnderwaterMinDepth = 0.0f;  // no underwater min-depth (shader doesn't implement it)
+	CaveConfig->UnderwaterMinDepth = 0.0f;
 	CaveConfig->bOverrideCaveWallMaterial = true;
 	CaveConfig->CaveWallMaterialID = 2;
 	CaveConfig->CaveWallMaterialMinDepth = 8.0f;
@@ -558,25 +559,136 @@ bool FVoxelGPUvsCPUCavesParityTest::RunTest(const FString& Parameters)
 	// Guard against a vacuous pass: confirm caves actually carved voxels. The CAVE flag is temporary
 	// (cleared by the water-fill pass), so count the persistent UNDERGROUND flag on air voxels — in a
 	// terrain chunk, underground air comes from cave carving.
+	auto GenerateProbe = [&GPUGenerator](const FVoxelNoiseGenerationRequest& InRequest)
 	{
-		FVoxelNoiseGenerationRequest Probe = Request; Probe.LODLevel = 0;
+		FVoxelNoiseGenerationRequest Probe = InRequest; Probe.LODLevel = 0;
 		TArray<FVoxelData> ProbeData;
 		GPUGenerator.GenerateChunkCPU(Probe, ProbeData);
+		return ProbeData;
+	};
+	auto CountCaveAir = [&GenerateProbe](const FVoxelNoiseGenerationRequest& InRequest)
+	{
 		int32 UndergroundAir = 0;
-		for (const FVoxelData& V : ProbeData)
+		for (const FVoxelData& V : GenerateProbe(InRequest))
 		{
 			if (V.IsAir() && V.HasUndergroundFlag()) { UndergroundAir++; }
 		}
-		AddInfo(FString::Printf(TEXT("Caves probe: %d underground-air (cave) voxels of %d"), UndergroundAir, ProbeData.Num()));
-		TestTrue(TEXT("Cave config should carve some voxels (non-vacuous test)"), UndergroundAir > 0);
-	}
+		return UndergroundAir;
+	};
+	const int32 CoreCaveAir = CountCaveAir(Request);
+	AddInfo(FString::Printf(TEXT("Caves probe: %d underground-air (cave) voxels of %d"), CoreCaveAir, Request.ChunkSize * Request.ChunkSize * Request.ChunkSize));
+	TestTrue(TEXT("Cave config should carve some voxels (non-vacuous test)"), CoreCaveAir > 0);
 
 	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Caves"));
+
+	// The biome overrides. The chunk's biome: with continentalness off every column samples continentalness 0, where
+	// Ocean (range ending at -0.05, inside the blend width, and priority 10) wins the blend, so the chunk is Ocean. Each
+	// override set gives the chunk's biome its values, every other default biome different ones, and then a second entry
+	// for the chunk's biome that the lookup must skip (the first match wins), so a GPU that read the wrong entry would
+	// carve differently.
+	uint8 ChunkBiome = 0;
+	{
+		TMap<uint8, int32> BiomeVotes;
+		for (const FVoxelData& V : GenerateProbe(Request))
+		{
+			++BiomeVotes.FindOrAdd(V.BiomeID);
+		}
+		for (const TPair<uint8, int32>& Vote : BiomeVotes)
+		{
+			if (Vote.Value > BiomeVotes.FindRef(ChunkBiome)) { ChunkBiome = Vote.Key; }
+		}
+	}
+	auto SetOverrides = [CaveConfig, ChunkBiome](float CaveScale, float MinDepthOverride)
+	{
+		auto AddOverride = [CaveConfig](uint8 BiomeID, float Scale, float MinDepth)
+		{
+			FBiomeCaveOverride Override;
+			Override.BiomeID = BiomeID; Override.CaveScale = Scale; Override.MinDepthOverride = MinDepth;
+			CaveConfig->BiomeOverrides.Add(Override);
+		};
+		const float OtherScale = (CaveScale > 0.0f) ? 0.0f : 1.5f;
+		CaveConfig->BiomeOverrides.Empty();
+		for (uint8 BiomeID = 0; BiomeID < 4; ++BiomeID) // Plains, Forest, Mountain, Ocean
+		{
+			AddOverride(BiomeID, (BiomeID == ChunkBiome) ? CaveScale : OtherScale, (BiomeID == ChunkBiome) ? MinDepthOverride : -1.0f);
+		}
+		AddOverride(ChunkBiome, OtherScale, -1.0f); // never read
+	};
+
+	// More caves from a different depth: a scale above 1 and a minimum-depth override.
+	SetOverrides(1.25f, 8.0f);
+	const int32 OverrideCaveAir = CountCaveAir(Request);
+	AddInfo(FString::Printf(TEXT("Biome overrides probe: chunk biome %d, %d underground-air voxels with scale 1.25 and minimum depth 8, %d without"), ChunkBiome, OverrideCaveAir, CoreCaveAir));
+	TestTrue(TEXT("The biome overrides change the carving in the chunk (non-vacuous)"), OverrideCaveAir > 0 && OverrideCaveAir != CoreCaveAir);
+	const bool bOverridesPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Caves biome overrides"));
+
+	// No caves in the biome (the demo's Ocean, CaveScale 0).
+	SetOverrides(0.0f, -1.0f);
+	const int32 NoCaveAir = CountCaveAir(Request);
+	AddInfo(FString::Printf(TEXT("Biome scale 0 probe: %d underground-air voxels"), NoCaveAir));
+	TestTrue(TEXT("A biome cave scale of 0 carves nothing where the core config carves (non-vacuous)"), NoCaveAir == 0 && CoreCaveAir > 0);
+	const bool bZeroScalePass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Caves biome scale 0"));
+
+	// A scale below 1 caps the carve (half of a full carve leaves a fully solid voxel at 127, still solid), so it mostly
+	// softens the density and widens the cave-wall band: the scale and its clamp must match.
+	SetOverrides(0.5f, -1.0f);
+	{
+		FVoxelNoiseGenerationRequest NoCaves = Request;
+		NoCaves.bEnableCaves = false;
+		const TArray<FVoxelData> Uncarved = GenerateProbe(NoCaves);
+		const TArray<FVoxelData> Softened = GenerateProbe(Request);
+		int32 SoftenedCount = 0;
+		for (int32 i = 0; i < Uncarved.Num() && i < Softened.Num(); ++i)
+		{
+			SoftenedCount += (Uncarved[i].Density != Softened[i].Density) ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("Biome scale 0.5 probe: %d voxels softened by the caves, %d underground-air"), SoftenedCount, CountCaveAir(Request)));
+		TestTrue(TEXT("The scale-0.5 caves soften some voxels (non-vacuous)"), SoftenedCount > 0);
+	}
+	const bool bHalfScalePass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Caves biome scale 0.5"));
+
+	// Under the sea: a chunk whose columns' terrain is under the water level, where caves carve without the underwater
+	// minimum depth and most are suppressed with it, so the GPU's suppression is exercised (a GPU without it would carve
+	// here). The overrides that carve are back on: their minimum depth (8) gives way to the larger underwater one.
+	// Searched like the planet's "Under the seabed" site, with the water level of the water test.
+	SetOverrides(1.25f, 8.0f);
+	constexpr float UnderwaterMinDepth = 25.0f;
+	Request.bEnableWaterLevel = true;
+	Request.WaterLevel = 800.0f;
+	bool bFoundUnderSea = false;
+	for (int32 Z = 0; Z >= -2 && !bFoundUnderSea; --Z)
+	{
+		for (int32 Y = 0; Y < 4 && !bFoundUnderSea; ++Y)
+		{
+			for (int32 X = 0; X < 8 && !bFoundUnderSea; ++X)
+			{
+				Request.ChunkCoord = FIntVector(X, Y, Z);
+				CaveConfig->UnderwaterMinDepth = 0.0f;
+				const int32 Unsuppressed = CountCaveAir(Request);
+				CaveConfig->UnderwaterMinDepth = UnderwaterMinDepth;
+				const int32 Suppressed = CountCaveAir(Request);
+				// The caves deeper than the underwater minimum depth stay, so at most half survive rather than none.
+				if (Unsuppressed > 200 && Suppressed * 2 < Unsuppressed)
+				{
+					AddInfo(FString::Printf(TEXT("Under the sea: chunk (%d, %d, %d), water level %.0f, underground air %d without the underwater minimum depth, %d with it"),
+						X, Y, Z, Request.WaterLevel, Unsuppressed, Suppressed));
+					bFoundUnderSea = true;
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("A chunk under the sea where the underwater minimum depth suppresses caves (non-vacuous)"), bFoundUnderSea);
+	const bool bUnderSeaPass = bFoundUnderSea
+		&& VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Caves under the sea"));
 
 	GPUGenerator.Shutdown();
 	CaveConfig->RemoveFromRoot();
 	BiomeConfig->RemoveFromRoot();
 	TestTrue(TEXT("GPU==CPU caves parity (cheese + tunnel + cave-wall) across LOD 0/1/2"), bAllPass);
+	TestTrue(TEXT("GPU==CPU caves parity with the biome overrides across LOD 0/1/2"), bOverridesPass);
+	TestTrue(TEXT("GPU==CPU caves parity with a biome cave scale of 0 across LOD 0/1/2"), bZeroScalePass);
+	TestTrue(TEXT("GPU==CPU caves parity with a biome cave scale of 0.5 across LOD 0/1/2"), bHalfScalePass);
+	TestTrue(TEXT("GPU==CPU caves parity under the sea with the underwater minimum depth across LOD 0/1/2"), bUnderSeaPass);
 	return true;
 }
 

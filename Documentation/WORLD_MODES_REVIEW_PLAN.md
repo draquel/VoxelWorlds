@@ -253,7 +253,7 @@ code sites).
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
 (SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
-revision (§14):** D1, the D3 budget, D8 and D9, each as recommended.
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended.
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
@@ -266,6 +266,7 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended.
 | D7 | Cubic LOD *(decided 2026-10-13, after Review A; implemented the same day, §12.7)* | Cubic forces the LOD system off (`MeshingMode == Cubic` overrides `bEnableLOD`). Greedy meshing is cubic's LOD mechanism until there is a good reason to change it, so block downsampling and other cubic LOD schemes are out of scope. Pair it with far compression keyed on distance (KC11): forcing LOD off alone trades the LOD cost for uncompressed voxel memory (§12.2) |
 | D8 | Where heightmap worlds (InfinitePlane, IslandBowl) take their vertical streaming range from *(decided 2026-10-14, from §13.11)*. Today it is the viewer's layer −2 to +8 (island +4), clipped to the world's height range, so a viewer above layer 0 loses the ground below | **From the terrain.** Every column loads its own surface slab (the world mode's analytic surface ± 1.5 chunks, and up to the water plane) at every distance, islands included. Near the viewer (band 0) the viewer's own layer ± 2 is also loaded, for caves, dungeons and digging. The viewer's altitude only adds layers; it never removes the ground. This is WM-S1 and subsumes slab culling for islands (KI5). Keep the window a per-column interval supplied by the world mode, so the planet version (a shell around the surface, SP-C1/SP-C5) has the same shape |
 | D9 | Order of work, island priorities and where spherical starts *(decided 2026-10-14)* | **Island first, then cubic, then spherical** (§14.3): M1 hygiene, M2 the world-mode API, M3 island correctness, M4 the streaming window, M5 cubic terrain-only, M6 the visible island edge and map tile eviction, then spherical Phase 1. Correctness before performance on the island. The island's boundary is **hard at R+F**, with a soft push-back in the sea before it, and falling out of the world respawns the pawn (KI14). Spherical Phase 0 (guardrails) rides in M1, and the heightmap side of its API (SP-A1, SP-A2, SP-A6, SP-G9) in M2; Phase 1 starts after M4 (the window shape SP-C1 needs) and M5 (the legacy path is gone before spherical touches streaming). The order is a priority, not a strict sequence: §14.3 lists what can run in parallel |
+| D10 | Does fixing G18 (the GPU heightmap caves take the cave configuration's biome overrides and `UnderwaterMinDepth`) bump `FVoxelWorldModeFactory::GenerationVersion`? *(decided 2026-10-17)* | **Bump it to 2.** The fix moves GPU InfinitePlane and IslandBowl terrain inside the playable area (caves under the sea and in biomes scaled to 0 fill in), and the factory's rule is to bump when caves change. Every save made before is refused at load, heightmap and planet alike: the world starts fresh and the file stays on disk until the next explicit save overwrites it. The cost is the demo's QA save (`World_VoxelDemo_203652`, GPU InfinitePlane, 21 MB of edits). Not bumping would have kept loading old saves with edits sitting in caves that no longer exist; a heightmap-only version in the fingerprint shape (like `PlanetGeneration`) would have kept planet saves, which hold only test data. CPU worlds generate the same terrain either way |
 
 ## 9. Order of work
 
@@ -1438,7 +1439,7 @@ Three findings from §13.11 get IDs here:
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
 | G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
-| G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Open. The planet branch applies both since Phase 2; porting them to the heightmap branch moves GPU heightmap terrain under existing saves, so it comes with a decision on `GenerationVersion` | — |
+| G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Fixed (§16.3): one cave carve for every world mode (`GpuCaveCarve`, the planet's generalised), after the biome blend as on the CPU. `GPUvsCPUCavesParity` adds four cases that fail on the old shader (biome scale 1.25 with a minimum-depth override, scale 0, scale 0.5, a chunk under the sea with `UnderwaterMinDepth`); every earlier parity case, planet included, keeps its CRC. `GenerationVersion` 2 (D10) | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -2849,6 +2850,83 @@ Against the GPU control and §1's thresholds:
 - **G18** (§14.1): the heightmap branch still ignores the cave configuration's biome overrides and `UnderwaterMinDepth`,
   which the demo uses, so GPU heightmap worlds carve caves under the sea and in the Ocean biome that CPU worlds do not.
   The planet branch's `GpuPlanetCaveCarve` shows the port; it moves GPU heightmap terrain, so it needs a decision on
-  `GenerationVersion` (it would refuse every heightmap save).
+  `GenerationVersion` (it would refuse every heightmap save). *Fixed in §16.3 (2026-10-17), `GenerationVersion` 2.*
 - The ore `Rarity` hash at absolute positions (SP-H3, Phase 4) and large planets (SP-H1, P2).
 - Walking (Phase 3), systems (Phase 4) and places (Phase 5) as before; nothing here changed them.
+
+### 16.3 G18: the heightmap GPU caves take the biome overrides and the underwater minimum depth (2026-10-17)
+
+PRs open (draquel/VoxelWorlds `fix/g18-heightmap-gpu-caves`, base `c13ae7d`, main after spherical Phase 2; the parent's
+gitlink and doc map in draquel/UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+worktree editor with background throttling off.
+
+**Decision.** D10 (§8): `FVoxelWorldModeFactory::GenerationVersion` goes to 2, so every save made before is refused.
+
+**What changed.**
+
+- `GenerateVoxelDensity.usf`: the planet's `GpuPlanetCaveCarve` became `GpuCaveCarve`, shared by every world mode,
+  with its overrides lookup (`GpuCaveBiomeOverride`) and `ApplyCaveCarve` beside it. Each layer samples its noise at
+  `GpuCaveSamplePos`: `VerticalScale` along Z in the heightmap modes, along local up on a planet (`PlanetScaleAltitude`,
+  moved over unchanged). The heightmap branch now runs in the CPU's order: the biome blend (`SampleGpuBiomeBlend`, the
+  dominant biome and its ore range), then the caves with that biome and `bUnderwater` (water on and the column's terrain
+  height under `WaterLevel`), then the blended material with the underwater variant, height rules, the cave-wall
+  override on the scaled, clamped carve, ores. Before, it carved first with every layer at scale 1 and the layer's own
+  minimum depth.
+- Gone with it: `CalculateDepthFade` (`CaveGeneration.ush`) and `ComputeBiomeMaterial` (`BiomeMaterial.ush`), whose
+  only caller was the old heightmap block.
+- The planet branch calls the same function with the same arguments, so its output did not move (below).
+- `GenerationVersion` 2; comments in `VoxelGPUNoiseGenerator.cpp` no longer call the parameters planet-only.
+
+**Tests.** `VoxelWorlds.Generation.GPUvsCPUCavesParity` keeps its core case (no overrides, water off, chunk (3, 1, 0))
+and adds four, each at LOD 0/1/2 with the default thresholds. Without continentalness every column samples
+continentalness 0, where Ocean wins the blend by priority, so the chunk is Ocean; the test
+reads the chunk's biome and gives it the override under test, every other default biome a different one, and a second
+entry for the chunk's biome after them (the first match must win), so a wrong lookup would carve differently.
+
+| Case | Overrides on the chunk's biome | CPU, non-vacuous probe | Old shader (density within 2 / metadata) | New shader: voxels differing (by > 2), material, metadata |
+|------|------|------|------|------|
+| Caves (core) | none | 439 cave-air voxels | 99.9% / 100% (CRC 295b2d48) | 24 (6), 0, 0; CRC 295b2d48 as before |
+| Caves biome overrides | scale 1.25, minimum depth 8 | 261 cave-air voxels (439 without) | 87.3% / 95.3%: **fails** | 17 (3), 0, 0 |
+| Caves biome scale 0 | scale 0 (the demo's Ocean) | 0 cave-air voxels | 82.7% / 86.6%: **fails** | 5 (2), 0, 0 |
+| Caves biome scale 0.5 | scale 0.5 | 740 voxels softened, none carved to air | 83.3% / 86.6%: **fails** | 21 (2), 0, 0 |
+| Caves under the sea | scale 1.25, minimum depth 8; water level 800, `UnderwaterMinDepth` 25 | chunk (0, 0, −1): 1,054 cave-air voxels without the underwater minimum depth, 450 with it (the rest lie deeper than 25 voxels) | 65.3% / 85.9%: **fails** | 26 (10), 2, 0 |
+
+The differences left are the float-against-double boundaries every heightmap case has (the core case's 24 voxels).
+
+**Every earlier parity case is bit-identical.** The 63 lines of the other `GPUvsCPU*Parity` cases (the heightmap ones
+and the nine planet sites, each LOD) report the same counts and the same CRC32 of the GPU output as before the change,
+in a baseline run of the same build with the old shader and in spherical Phase 2's final log: the planet branch and
+every heightmap case without overrides or `UnderwaterMinDepth` did not move.
+
+**Suites.** Headless (`-nullrhi`) VoxelWorlds + VoxelWorldSave + VoxelCharacter: 299 of 299 (13 GPU tests skip
+there). In the editor (D3D12): 299 of 299, the GPU tests running (only the two retired GPU DC interior tests skip),
+and the 75 parity lines the same as in the run above.
+
+**Live look.** `VoxelDemo` with `DemoSmoothWorldConfig` (GPU generation, water at −1,500, `DemoCaveConfig`), fresh
+worlds. The pawn spawns on a coast: the seabed falls from the waterline at y −1,000 to 2,100 uu deep at y −10,000, south
+of the spawn. Five fixed cameras along x 0: two in the water above the seabed (y −2,000 and −4,500), three just inside
+the ground looking down (at the waterline, and 200 to 400 uu under the seabed at y −4,500 and −7,000). Each was shot
+three times: the GPU with the old shader (swapped back for the run), the GPU with the new one, and the CPU
+(`voxel.GPUGeneration.Enable 0`). Pixel differences (share of pixels off by more than 40 of 255):
+
+| Camera | New GPU against the CPU | Old GPU against the CPU |
+|--------|------|------|
+| In the water, y −2,000 and −4,500 | 0.0%, 0.0% | 0.0%, 0.0% |
+| At the waterline, inside the ground | 0.2% | 0.7% |
+| Under the seabed, y −4,500 and −7,000 | 0.0%, 0.0% | 5.6%, 3.7% |
+
+No cave opens in this seabed with either shader: the demo's cave layers start too deep to reach it. What the old shader
+got wrong was underneath: the differing pixels are the cave walls nearest the seabed, which the old shader carved where
+the CPU keeps the ground solid (within the underwater minimum depth of 25 voxels). The deeper caves under the sea are
+the CPU's own and stay. Screenshots:
+`Saved/Screenshots/Claudius/g18_{old,new,cpu}_{a..e}.png` in the worktree (not committed).
+
+**Things to know.**
+
+- GPU and CPU heightmap worlds now carve the same caves under the sea and in biomes scaled to 0. The demo's GPU world
+  loses the caves it had under the sea within 25 voxels of the seabed and everywhere in the Ocean biome.
+- `GenerationVersion` 2 refuses every earlier save, planet saves included (their terrain did not move; the version is
+  shared). A refused save stays on disk until the next explicit save overwrites it.
+- The CPU's legacy fallback (biomes on without a biome configuration) still picks biomes from `FVoxelBiomeRegistry`, which
+  the GPU has no twin for (the GPU uses biome 0 and the legacy materials there, in every world mode). A separate,
+  older gap, not G18; not changed here.

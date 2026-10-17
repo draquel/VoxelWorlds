@@ -480,7 +480,10 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 it by the `VoxelWorlds.Generation.GPUvsCPU*` parity tests:
 
 - **InfinitePlane:** 2D terrain noise, continentalness, `NoiseToTerrainHeight` (`WorldModeSDF.ush`), then the
-  signed distance to that height.
+  signed distance to that height. Then, in the CPU's order, the biome blend, the caves (`GpuCaveCarve`, shared with
+  the planet: `VerticalScale` along Z, the cave configuration's biome overrides, and `UnderwaterMinDepth` where the
+  column's terrain is under the water level; G18, fixed 2026-10-17), materials, height rules, the cave-wall override
+  and ores.
 - **IslandBowl:** the same height, then `ApplyIslandFalloffToHeight` (`IslandFalloff.ush`, a port of
   `FIslandBowlWorldMode::ComposeTerrainHeight`): the falloff toward `EdgeHeight` inside the island's extent, the
   seabed beyond it (`IslandSeabedHeight`: a smoothstep down by `IslandSeabedDepth` over `IslandSeabedSlopeWidth`). The curves on `t` (0 at `IslandRadius`, 1 at the edge) are
@@ -489,8 +492,8 @@ it by the `VoxelWorlds.Generation.GPUvsCPU*` parity tests:
 - **SphericalPlanet** (spherical Phase 2, SP-B4; `SphericalPlanet.ush`): `FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet`
   per voxel, in the same order. The radial height (terrain noise and continentalness at `Direction × PlanetRadius`),
   the shell signed distance with its quick rejects, biome materials with the underwater variant where the column's
-  terrain is under `WaterRadius`, height rules by altitude, caves with `VerticalScale` along local up (plus the biome
-  overrides and `UnderwaterMinDepth`, which the heightmap branch lacks: G18), the cave-wall override, ores. Distances
+  terrain is under `WaterRadius`, height rules by altitude, caves with `VerticalScale` along local up (through the
+  shared `GpuCaveCarve`, biome overrides and `UnderwaterMinDepth` included), the cave-wall override, ores. Distances
   and directions are planet-relative: the C++ passes the chunk origin minus the planet centre, computed in double. The
   post-passes run along local down and flood inside the sea sphere (`GPU_PIPELINE.md`, Stage 1b). Params come from the
   request, which `FVoxelWorldModeFactory::FillGenerationRequest` fills. Parity at LOD 0/1/2 on both poles, the

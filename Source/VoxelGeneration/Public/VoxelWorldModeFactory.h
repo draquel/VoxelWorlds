@@ -32,8 +32,10 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * configuration starts generating different terrain (noise, height composition, island falloff, caves, ...): saves
 	 * made before the bump are then refused, instead of loading their edits and records onto terrain that moved.
 	 * 1: the first recorded version (WM-A1 moved islands whose WorldOrigin is not zero onto WorldOrigin + offset).
+	 * 2: G18, the GPU heightmap caves apply the cave configuration's biome overrides and underwater minimum depth as the
+	 *    CPU does (GPU InfinitePlane and IslandBowl worlds stop carving caves under the sea and in biomes scaled to 0).
 	 */
-	static constexpr int32 GenerationVersion = 1;
+	static constexpr int32 GenerationVersion = 2;
 
 	/**
 	 * Version of the planet's generation, in a planet's fingerprint shape ("PlanetGeneration=N") so a change to planet

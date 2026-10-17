@@ -124,8 +124,8 @@ float PlanetInnerRadius;      // FSphericalPlanetParams::GetInnerRadius (the she
 float PlanetOuterRadius;      // FSphericalPlanetParams::GetOuterRadius
 float PlanetWaterRadius;      // the sea sphere (WaterRadius)
 
-// Cave parameters the heightmap branch does not read (its documented gap); the planet branch applies them as
-// FVoxelCPUNoiseGenerator::CalculateCaveDensity does. CaveBiomeOverrideData: 1 float4 per override,
+// The cave configuration's underwater minimum depth and biome overrides, which GpuCaveCarve applies in every world mode
+// as FVoxelCPUNoiseGenerator::CalculateCaveDensity does. CaveBiomeOverrideData: 1 float4 per override,
 // [BiomeID, CaveScale, MinDepthOverride, 0] in the cave configuration's order (the first match wins).
 float CaveUnderwaterMinDepth;
 int CaveBiomeOverrideCount;
@@ -219,6 +219,131 @@ float SampleGpuCaveLayer(int ci, float3 CavePos)
         CaveLayerCarveStrength[ci]);
 }
 
+/** FSphericalPlanetWorldMode::ScaleAltitude: the absolute position with its altitude above the datum scaled by
+ *  VerticalScale and its direction kept (caves flatten along local up, SP-B6). Rel is the planet-relative position. */
+float3 PlanetScaleAltitude(float3 Rel, float DistFromCenter, float VerticalScale)
+{
+    if (DistFromCenter < 1.0e-4f)
+    {
+        return PlanetCenter + Rel;
+    }
+    return PlanetCenter + Rel * ((PlanetRadius + (DistFromCenter - PlanetRadius) * VerticalScale) / DistFromCenter);
+}
+
+/**
+ * One cave layer's noise sample position (FVoxelCPUNoiseGenerator::SampleCaveLayer's scaling): the voxel's position with
+ * the layer's VerticalScale applied along Z in the heightmap modes, along local up on a planet.
+ *
+ * @param ci Cave layer index in [0, CaveLayerCount)
+ * @param WorldPos Absolute voxel position (the heightmap modes)
+ * @param PlanetRel Planet-relative voxel position (a planet; unread otherwise)
+ * @param PlanetDist |PlanetRel| (a planet; unread otherwise)
+ * @return Cave noise sample position
+ */
+float3 GpuCaveSamplePos(int ci, float3 WorldPos, float3 PlanetRel, float PlanetDist)
+{
+    if (WorldMode == WORLD_MODE_SPHERICAL_PLANET)
+    {
+        return PlanetScaleAltitude(PlanetRel, PlanetDist, CaveLayerVerticalScale[ci]);
+    }
+    return float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]);
+}
+
+/** UVoxelCaveConfiguration::GetBiomeCaveScale / GetBiomeMinDepthOverride: the first override for the biome, else 1 / -1. */
+void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMinDepthOverride)
+{
+    OutCaveScale = 1.0f;
+    OutMinDepthOverride = -1.0f;
+    for (int o = 0; o < CaveBiomeOverrideCount; ++o)
+    {
+        const float4 Override = CaveBiomeOverrideData[o];
+        if ((uint)(Override.x + 0.5f) == BiomeID)
+        {
+            OutCaveScale = Override.y;
+            OutMinDepthOverride = Override.z;
+            return;
+        }
+    }
+}
+
+/**
+ * FVoxelCPUNoiseGenerator::CalculateCaveDensity, in every world mode: the biome's cave scale and minimum-depth override,
+ * the underwater minimum depth when the column's terrain is under the sea, each layer's depth window and fades, the
+ * union of the layers, the biome scale. Each layer samples its noise at GpuCaveSamplePos.
+ *
+ * @param WorldPos Absolute voxel position
+ * @param PlanetRel Planet-relative voxel position (a planet; unread otherwise)
+ * @param PlanetDist |PlanetRel| (a planet; unread otherwise)
+ * @param DepthBelowSurface Depth below the terrain, in voxels (along Z, or radial on a planet)
+ * @param BiomeID Dominant biome (0 without biomes)
+ * @param bUnderwater The column's terrain is under the sea (and water is on)
+ * @return Carve density [0, 1]
+ */
+float GpuCaveCarve(float3 WorldPos, float3 PlanetRel, float PlanetDist, float DepthBelowSurface, uint BiomeID, bool bUnderwater)
+{
+    float BiomeCaveScale;
+    float MinDepthOverride;
+    GpuCaveBiomeOverride(BiomeID, BiomeCaveScale, MinDepthOverride);
+    if (BiomeCaveScale <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    // The underwater minimum depth catches transition zones where the ocean biome is not assigned but the terrain is
+    // still under the sea.
+    if (bUnderwater && CaveUnderwaterMinDepth > 0.0f)
+    {
+        MinDepthOverride = (MinDepthOverride < 0.0f) ? CaveUnderwaterMinDepth : max(MinDepthOverride, CaveUnderwaterMinDepth);
+    }
+
+    float MaxCarveDensity = 0.0f;
+    for (int ci = 0; ci < CaveLayerCount; ++ci)
+    {
+        const float FadeWidth = CaveLayerDepthFadeWidth[ci];
+        const float MaxDepth = CaveLayerMaxDepth[ci];
+        const float EffectiveMinDepth = (MinDepthOverride >= 0.0f) ? MinDepthOverride : CaveLayerMinDepth[ci];
+
+        if (DepthBelowSurface < EffectiveMinDepth - FadeWidth)
+        {
+            continue;
+        }
+        if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth + FadeWidth)
+        {
+            continue;
+        }
+
+        float LayerCarve = SampleGpuCaveLayer(ci, GpuCaveSamplePos(ci, WorldPos, PlanetRel, PlanetDist));
+        if (LayerCarve <= 0.0f)
+        {
+            continue;
+        }
+
+        if (DepthBelowSurface < EffectiveMinDepth)
+        {
+            LayerCarve *= smoothstep(0.0f, 1.0f, (DepthBelowSurface - (EffectiveMinDepth - FadeWidth)) / FadeWidth);
+        }
+        if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth)
+        {
+            LayerCarve *= smoothstep(0.0f, 1.0f, 1.0f - (DepthBelowSurface - MaxDepth) / FadeWidth);
+        }
+
+        MaxCarveDensity = max(MaxCarveDensity, LayerCarve);
+    }
+
+    return clamp(MaxCarveDensity * BiomeCaveScale, 0.0f, 1.0f);
+}
+
+/** Carve a cave out of a solid voxel's density (the CPU's "density - carve * 255", clamped). */
+uint ApplyCaveCarve(uint Density, float CaveCarve)
+{
+    if (CaveCarve > 0.0f)
+    {
+        const float NewDensity = max(0.0f, float(Density) - CaveCarve * 255.0f);
+        return (uint)clamp(NewDensity, 0.0f, 255.0f);
+    }
+    return Density;
+}
+
 // SphericalPlanet surface function and per-voxel pipeline (references the planet globals and the helpers above).
 #include "/Plugin/VoxelWorlds/Private/SphericalPlanet.ush"
 
@@ -296,53 +421,47 @@ void MainCS(
         // Depth below the terrain surface, in voxels (matches CPU: (TerrainHeight - WorldPos.Z) / VoxelSize).
         float DepthBelowSurface = (TerrainHeight - WorldPos.z) / EffectiveVoxelSize;
 
-        // Cave carving BEFORE material selection (matches CPU order). Keep the max carve amount for the
-        // cave-wall material override and the solid->air transition flag.
-        uint PreCaveDensity = Density;
-        float MaxCarveDensity = 0.0f;
-        if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
-        {
-            for (int ci = 0; ci < CaveLayerCount; ++ci)
-            {
-                // Apply vertical scale to flatten caves horizontally
-                float3 CavePos = float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]);
-
-                float LayerCarve = SampleGpuCaveLayer(ci, CavePos);
-
-                // Apply depth fade
-                LayerCarve *= CalculateDepthFade(
-                    DepthBelowSurface,
-                    CaveLayerMinDepth[ci],
-                    CaveLayerMaxDepth[ci],
-                    CaveLayerDepthFadeWidth[ci]);
-
-                MaxCarveDensity = max(MaxCarveDensity, LayerCarve);
-            }
-
-            if (MaxCarveDensity > 0.0f)
-            {
-                float NewDensity = max(0.0f, float(Density) - MaxCarveDensity * 255.0f);
-                Density = (uint)clamp(NewDensity, 0.0f, 255.0f);
-            }
-        }
-
-        // Assign material: biome pipeline (Phase B) when biomes are configured, else legacy depth-based.
+        // The biome blend comes before the caves, as on the CPU: the caves read the dominant biome's cave scale and
+        // minimum-depth override (the cave configuration's BiomeOverrides).
+        BiomeBlendResult Blend = (BiomeBlendResult)0;
+        uint OreStart = 0u;
+        uint OreCount = 0u;
         if (BiomeCount > 0)
         {
             float3 ClimateSamplePos = float3(WorldPos.x, WorldPos.y, 0.0);
             float Temperature = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0, 2.0, 0.5);
             float Moisture = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0, 2.0, 0.5);
-            uint OutBiome = 0u;
-            uint OreStart = 0u;
-            uint OreCount = 0u;
-            MaterialID = ComputeBiomeMaterial(Temperature, Moisture, ContinentalnessValue, DepthBelowSurface, TerrainHeight, OutBiome, OreStart, OreCount);
-            BiomeID = OutBiome;
+            Blend = SampleGpuBiomeBlend(Temperature, Moisture, ContinentalnessValue);
+            const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
+            BiomeID = Dominant.BiomeID;
+            OreStart = Dominant.OreStart; // ore lookup uses the dominant biome (CPU: GetOreVeinsForBiome(BiomeID))
+            OreCount = Dominant.OreCount;
+        }
+
+        // Cave carving BEFORE material selection (matches CPU order), with the biome's overrides and, where the column's
+        // terrain is under the sea, the underwater minimum depth. Keep the carve for the cave-wall material override and
+        // the solid->air transition flag.
+        const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainHeight < WaterLevelHeight);
+        uint PreCaveDensity = Density;
+        float CaveCarve = 0.0f;
+        if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
+        {
+            CaveCarve = GpuCaveCarve(WorldPos, float3(0.0f, 0.0f, 0.0f), 0.0f, DepthBelowSurface, BiomeID, bUnderwaterColumn);
+            Density = ApplyCaveCarve(Density, CaveCarve);
+        }
+
+        // Assign material: biome pipeline (Phase B) when biomes are configured, else legacy depth-based.
+        if (BiomeCount > 0)
+        {
+            // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater)
+            const bool bUnderwaterMaterial = bUnderwaterColumn && (EnableUnderwaterMaterials != 0);
+            MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial);
 
             // Height-based material overrides (snow at peaks, rock at altitude, etc.)
             MaterialID = ApplyGpuHeightRules(MaterialID, WorldPos.z, DepthBelowSurface);
 
             // Cave-wall material override (still-solid voxels partially carved near a cave boundary)
-            if (CaveWallOverrideEnabled != 0 && MaxCarveDensity > 0.0f && MaxCarveDensity < 1.0f
+            if (CaveWallOverrideEnabled != 0 && CaveCarve > 0.0f && CaveCarve < 1.0f
                 && Density >= 127u && DepthBelowSurface >= CaveWallMaterialMinDepth)
             {
                 MaterialID = CaveWallMaterialID;
