@@ -1440,6 +1440,8 @@ Three findings from §13.11 get IDs here:
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
 | G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
 | G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Fixed (§16.3): one cave carve for every world mode (`GpuCaveCarve`, the planet's generalised), after the biome blend as on the CPU. `GPUvsCPUCavesParity` adds four cases that fail on the old shader (biome scale 1.25 with a minimum-depth override, scale 0, scale 0.5, a chunk under the sea with `UnderwaterMinDepth`); every earlier parity case, planet included, keeps its CRC. `GenerationVersion` 2 (D10) | — |
+| G19 | Heightmap water consumers disagree on the water plane: generation, scatter, the map and PCG compare with `WaterLevel`; navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z` (found in spherical Phase 3, §17). They agree whenever `WorldOrigin.Z` is 0, as in every configuration in the project | Open, documented: both conventions are named in `FVoxelSeaSurface` (`FromConfig`, `FromConfigOriginRelative`) and every consumer goes through one of them; unifying would move water in a world with `WorldOrigin.Z` ≠ 0 | — |
+| G20 | Debug tooling: `vox.TP`'s settle re-requested an already-cooked chunk's collision, which re-cooks it under a pawn standing there (a READY→NOT-READY "re-cook" in the capture), and `vox.Debug.Capture` compared the frame after a teleport with the frame before, logging a "fall-through signature" at every teleport onto ground not streamed yet (found in spherical Phase 3's exit check, §17.2) | Fixed (§17.2, game module): the settle requests only chunks without collision; the capture restarts after a jump of more than a chunk in one frame and while the settle holds | (WM-W4) |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -3016,3 +3018,117 @@ transitions, which are always logged):
 
 Then `VoxelDemo` (InfinitePlane, the demo config): spawn, a two-minute walk with the capture on, swimming at the spawn's
 coast; the same spawn point, swim behaviour and capture as on the base build.
+
+### 17.2 Results (2026-10-17)
+
+All eleven work items are implemented and verified; PRs open (VoxelWorlds#101, VoxelCharacterPlugin#25, InteractionPlugin#5, UE5_PluginDev#112; not merged). Built with editor 5.8.3 from
+`D:\Program Files\Epic Games\UE_5.8` in a worktree editor with background throttling off. Live checks on `PlanetTest`
+with `/Game/PluginTesting/Review/Review_Planet` through `voxel.ConfigOverride`, as in §15 and §16, GPU generation.
+Screenshots: `Saved/Screenshots/Claudius/p3f_*` (the final run) and `p3_*` (a trial run) in the worktree (not committed).
+
+**As built.**
+
+| ID | As built | Check |
+|----|----------|-------|
+| WM-W1 | `UVCMovementComponent::PerformMovement` calls `UpdatePlanetGravity()` first: on a planet (the cached bounds are a shell) `SetGravityDirection` toward `CachedWorldBounds.Center` (`ComputePlanetGravityDirection`). `GetLocalUp`, `HasPlanetGravity`, `SnapUprightToGravity` (keeps the gravity-relative yaw) | `VoxelCharacter.Planet.GravityTowardCentre`: a character in the air over a 20,000 uu planet at both poles, 45°, the equator, a cube corner and −60° falls along the radius (gravity, the fall and the body's up all logged 0.0000° off it; 327 uu/s after 20 frames); on a plane gravity stays the engine's default and the body falls along −Z. Live: gravity 0.000 to 0.010° off the radial at every sample of the exit check |
+| WM-W2 | The swim controls, buoyancy, surface damping and cap and the vertical clamp through `GetGravitySpaceZ` / `SetGravitySpaceZ` and `GetLocalUp`; the dive probe, the floor, landing and grace traces along `GetGravityDirection()`; the shore climb's heights in gravity space and its probe capsule along local up; the terrain context's samples, the breath head point and the embed resolve along local up (its heightmap branch verbatim); the sprint's ground speed across up. **Found live and fixed:** a swimmer tilted away from local up as it swam (0.33° after 2,000 uu, growing): the engine only re-uprights a walker or a faller (`ShouldRemainVertical`) and turns pitch and roll at zero rates otherwise, so `UVCMovementComponent::ShouldRemainVertical` adds swimming on a planet | `VoxelCharacter.Planet.GravityFrame`: with the default gravity 5,000 expressions (gravity-space Z, the floor projection, the traces, the frame helpers) equal the old Z arithmetic bit for bit. Live: swimming upright within 0.01° on every route after the fix |
+| WM-W3 | `FVCGravityFrame` (`ToGravityRelative`, `ToWorld`, `GetYawRotation`, `VectorToWorld`, `GetUp`, `GetHorizontalSpeed`; the input itself without custom gravity). `AVCPlayerController::UpdateRotation` (planets only), `AVCCharacterBase::FaceRotation`, `Input_Move`, the two camera modes, the camera collision pivot, the interaction origin and `UVCAnimInstance` use it | `GravityFrame`: the round trip within 8.5e-7° at six sites, a yaw-only heading 7e-16 off the local horizontal, a level view's relative pitch 4e-14°. Live: the horizon level and the pawn upright in every screenshot (`p3f_*_stand`, `_ashore`) |
+| WM-W4 | `UVoxelChunkManager::GetPlanetSpawnPosition` (SP-B11). `FVCVoxelNavigationHelper::FindSpawnablePosition` goes by direction on a planet (`FindPlanetSpawnPoint`: rings one chunk of arc apart, 8 bearings); `InitiateChunkBasedWait` waits on a tangent-plane grid plus the chunk under the feet; `PlaceOnTerrainAndResume` and the exact-location resume trace along local up and stand the pawn upright; the recovery location is the planet spawn point. Game module: `vox.TP` settles by direction, `vox.TPLatLon`, `vox.Planet`, `vox.AutoRun` along a great circle, `vox.Debug.Capture` along local down (the planet line ends with altitude, latitude, longitude and the movement mode) | `Streaming.Planet.SpawnPosition`: `PlanetSpawnAltitude` over the terrain along each of the four directions (error 0.000 uu; the terrain there is up to 335 uu off the datum, which the old helper ignored). `VoxelCharacter.Planet.SpawnByDirection`: 4 dry and 2 wet starts on a 20,000 uu planet with a sea at the datum, every spawn on the analytic surface (0.0000 uu) and above the sea, the wet ones one ring (4.58°) away; on a synthetic planet with one dry cap the search lands on the first ring that reaches it (ring 6, 17.19° from the start); the plane's (X, Y, height) unchanged. Live: below |
+| WM-W5 | `UVoxelChunkManager::ComputePlanetKillZ` / `ApplyPlanetKillZ` (at initialisation); `AVCCharacterBase::IsOutOfWorld` (radial on a shell); `UWorldItemPoolSubsystem::ParkingLocation` / `SetParkingLocation` (moves the waiting items), `AWorldItem::ResetForPool(ParkingLocation)`; `AVCGameModeBase` parks the pool at the planet centre once the voxel world is up | `Streaming.Planet.KillZ`: a 250,000 uu planet keeps KillZ −1,048,575 (it clears the planet), a 2,000,000 uu one moves it to −2,002,600; planes untouched. `VoxelCharacter.Planet.OutOfWorld`. Live: "world items park at the planet centre" at every PIE start |
+| WM-W6 | `UVoxelCollisionManager::ComputePathCoverageSamples` in the focus's local frame | `Streaming.Planet.CollisionLead`: with up +Z, 206 velocities give the old points bit for bit; at 45° the sample under the feet lies along the radius (the old one went only 0.71 of its distance along local down) and the look-ahead across it |
+| WM-W7 | `FVoxelSeaSurface::GetDepth`, `FromConfigOriginRelative`; `UVoxelChunkManager::GetSeaSurface` / `GetSeaDepthAt`; scatter (`FScatterExtractionContext::Sea`), navigation (`FVoxelSurfaceNavParams::Sea`, `IsUnderwater`), the NPC spawner, the character's terrain context, `IsPositionUnderwater` and the spawn search ask it. The planet water warning names only the map and the PCG sampler now | `WorldModes.Planet.SeaDepth`: the plane's sign equals `Z < WaterLevel` on and either side of the level, the origin-relative plane adds `WorldOrigin.Z`, depth ≥ 0 exactly where `IsBelow` holds (2,000 points), and the radial fill's water flags are exactly the open sea at or under the sphere (9,432 wet air voxels at 45°, 0 disagreeing). `Streaming.Planet.SeaQueries`. Live: swimming starts and ends by radial depth at every site; the dive stops at the seabed |
+| WM-W8 | `FVoxelPlanetOcean` (VoxelStreaming) and the chunk manager's `VoxelPlanetOcean` component; `voxel.World.PlanetOcean`; `AVoxelWorldTestActor`'s sphere and `BuildWaterSphere` removed (the test actor draws no water on a planet) | `Streaming.Planet.OceanShell`: vertices on the sphere (0.0000 uu off), every top triangle facing out and every underside triangle in, all 536 border positions shared by two or three faces (no crack), the sag within 8 uu (R 249,500: 160 quads a face edge, 7.96 uu; R 100,000: 101, 7.98 uu; R 20,000: 45). `OceanComponent`: the underside hidden above the sea, shown under it, hidden again. Live: "Planet ocean: radius 249500, 160 quads a face edge (153600 quads, sag at most 8.0 uu), built in 80 ms"; the sea from above and below at every site, no light and dark halves |
+| WM-W9 | 11 new tests: VoxelWorlds `Streaming.Planet.OceanShell`, `OceanComponent`, `SpawnPosition`, `SeaQueries`, `KillZ`, `CollisionLead`, `WorldModes.Planet.SeaDepth`; VoxelCharacter `Planet.GravityFrame`, `GravityTowardCentre`, `SpawnByDirection`, `OutOfWorld` | Below |
+| WM-W10 | The exit check and the `VoxelDemo` regression pass | Below |
+| WM-W11 | These results, the requirement rows and §4's phase-3 exit check, `WORLD_MODES.md`, `WATER_SYSTEM.md`, the VoxelWorlds, VoxelCharacterPlugin and InteractionPlugin instructions, the parent's `CLAUDE.md` (the `vox.*` table and the doc map) | — |
+
+**The debug tooling, two fixes (G20, §14.1).** The first exit-check run found two artefacts of the tools, not of walking.
+`vox.TP`'s settle re-requested the target chunk's collision every half second, also once it was cooked, and a request
+for a cooked chunk re-cooks it: a READY→NOT-READY "re-cook" under a pawn already standing there. And the capture compared
+the frame after a teleport with the frame before, so every teleport onto ground not streamed yet logged a "fall-through
+signature" for a pawn the settle was holding (mode 0, no velocity): five in the trial run, each one frame after a
+teleport, at its exact target. The settle now requests only chunks without collision, and the capture restarts its state
+after a jump of more than a chunk in one frame and while the settle holds, so it compares only frames where the pawn
+moved under its own power. Both are game-module changes, so heightmap play is untouched; `vox.TP` on a plane benefits
+the same way.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter` on the final build: **310/310 in the
+editor** (274 VoxelWorlds, 2 VoxelWorldSave, 34 VoxelCharacter; the GPU tests ran, among them every
+`Generation.GPUvsCPU*Parity`, `Generation.GPUNoiseGeneratorAsync` and `Meshing.MarchingCubes.CPUvsGPU`; only the retired
+GPU DC interior test skips, as before) and **310/310 headless** (`-nullrhi`: the GPU tests skip themselves, 13 skip
+messages). The 11 new tests pass in both.
+
+**The exit check.** **Met.** One PIE session on the final build, `vox.Debug.Capture 1` at 0.25 s for all of it (6,466 capture
+lines): 0 fall-through signatures (READY→NOT-READY under the feet), 0 re-cooks under the feet, 0 out-of-world
+recoveries, 0 settle timeouts.
+
+| Site | Start (`vox.TPLatLon`) | Landed | Walk | Swim, dive, climb out | Upright |
+|------|------------------------|--------|------|-----------------------|---------|
+| Spawn | PlayerStart over the north pole (sea) | ring 3, lat 86.696°, 99 uu over the ground | — | — | 0.004° |
+| North | 90°, 0° | ring 3 (14,400 uu of arc), lat 86.70° | east 10 km into the sea | swim north, dive to −606, up, ashore in 9 s | ≤ 0.007° |
+| 45° | 45°, 45° | ring 0 | east, north (a ridge, 966 over the datum) | dive to −988 (166 uu/s down), up at 199 uu/s, swim 2.4 km, ashore in 33 s | ≤ 0.007° |
+| Cube corner | 35.26°, 45° | ring 2, lat 36.80° | east into the sea | swim, dive to −1,020, up, ashore in 15 s | ≤ 0.009° |
+| Equator | 0°, 45° | ring 0 | east 9 km, north 10 km | dive to −847, up, ashore in 19 s | ≤ 0.010° |
+| South | −90°, 0° | ring 1, lat −88.90° | east, north 15 km (1,366 over the datum) | dive to −798, up, ashore in 19 s | ≤ 0.009° |
+
+Each site: stand, jump and land (the fall along the radius), walk east and north with `vox.AutoRun` along great circles,
+drop into the sea with `vox.TP … 0`, swim, dive (crouch), surface (jump), swim to land and walk out; screenshots
+`p3f_<site>_stand`, `_swim`, `_under`, `_ashore`. Then **one continuous walk from 89.5° to the equator** along longitude
+45° (`vox.AutoRun` along the meridian, `vox.SetSpeed 1500` on land): 1,239 s, about 210,500 uu walked and 185,600 uu
+swum in seven stretches of sea, each left by climbing out onto the next land; blocked once on land at 45.84° and over
+it with one jump, no sidestep; the gravity at most
+0.014° off the radial, the body at most 0.090° off it (the moment it reached a 1,500 uu/s slope at the equator, 0.013°
+otherwise); 4,901 capture lines, no fall-through, no re-cook. The capture's `feetCol=0` appears twice, both the
+`settle=0` drop into the polar sea (no ground under the feet in the water); its 186 `feetBody=0` lines are swimming over
+chunks with no surface (open water above the seabed).
+
+**Heightmap play: `VoxelDemo` against the base build.** **Unchanged.** The same scenario on the feature build
+and on the base build (the worktree checked out at the bases above and rebuilt), with the capture on and the surface NPCs
+off (`vox.NPCDensity 0`): PIE start with no save, stand, walk +Y for 40 s, jump, walk −Y off the spawn's coast into the
+sea, swim, dive (crouch) and surface (jump), swim back to the coast and walk up it. Three runs on each build; the first
+base run was an earlier version of the script with the NPCs on.
+
+| | Base 2 | Base 3 | Feature 2 | Feature 3 |
+|---|---|---|---|---|
+| Spawn | (−16, 19, −485) | same | same | same |
+| Capture speeds (lines at 600 / 170.7 / 0 uu/s) | — (stalled, below) | 519 / 381 / 15 | — (stalled) | 518 / 380 / 16 |
+| Swimming at the surface | — | Z −1,461 | — | Z −1,460 |
+| Dive, deepest Z | — | −2,630 | — | −2,638 |
+| Climb out | — | Y −655 | — | Y −425 |
+| Capture lines / fall-through / re-cook / out of world | 1,041 / 0 / 0 / 0 | 1,010 / 0 / 0 / 0 | 1,004 / 0 / 0 / 0 | 1,010 / 0 / 0 / 0 |
+
+Every run spawns on the same point by the same path (`FindSpawnablePosition` finds (0, 0) above water at −609, the
+resume trace hits `VoxelCollision_-3_-12_-1` and places the pawn at −502). Base 3 and feature 3 walk, swim, dive and climb
+out within a few tens of uu of each other. **Three runs (base 2, features 1 and 2) stopped dead for a minute on land:**
+the walker hit an obstacle square on and pushed into it. In base 2 a probe at the stall found the capsule against a scatter
+spruce (`HISM_Spruce03_2`, contact at (20, 16169)); feature 1 stopped beside the same tree, at (23, 16167); feature 2 at
+(82, 2287), not identified (the probe was added after it), and a later walk through the same point did not stop.
+Whether a run meets a trunk depends on where the first contact deflects the walker (its X at the first sample is −16 or
+−45 on either build). That is the auto-walker against scatter collision, on both builds; heightmap walking, swimming,
+spawning and the capture are the same.
+
+**Things to know.**
+
+- Gravity is a function of the position; nothing new replicates (the engine's replicated gravity direction serves
+  simulated proxies). NPCs use `UVCMovementComponent`, so they fall toward the centre too, but their AI still steers in
+  world yaw (SP-F6, Phase 4).
+- The gravity frame is the engine's (`FindBetweenNormals` from +Z), which spins near the south pole; only
+  frame-independent operations are done in it, and the south-pole site behaves like the others.
+- Swimming is drag-limited at about 171 uu/s (`SwimmingMaxAcceleration` 256 over `SwimmingDragCoefficient` 1.5), as on
+  the plane; `vox.SetSpeed` raises walking only.
+- Trees and other scatter still stand along world Z on a planet (SP-G1): at mid latitudes they lean, and the auto-walker
+  can walk into a trunk (the trial walk stopped at a spruce at 50.66° until a jump).
+- The sky, clouds and sun are a Z-up layer (SP-G7, SP-G8): the equator and the south pole read as night, the cloud layer
+  crosses the view diagonally at mid latitudes.
+- The ocean shell is a sphere: in a dry cave below sea level it shows inside the cave (a per-chunk radial water surface
+  would be the fix if it matters).
+- G19 (§14.1): heightmap water consumers keep two plane conventions (generation, scatter, the map and PCG at
+  `WaterLevel`; navigation, the character and the NPC spawner at `WaterLevel + WorldOrigin.Z`), now named in
+  `FVoxelSeaSurface`. They agree whenever `WorldOrigin.Z` is 0, as in every configuration here.
+- `vox.DeleteSave` in the editor (no PIE) does nothing; run it in PIE, or delete the worktree's
+  `Saved/SaveGames/Worlds/World_PlanetTest_*` files. An old auto-save put the pawn 57 km over the planet (where a pre-Phase
+  3 `vox.TP` had left it); the terrain wait timed out after 60 s and recovered to the planet spawn point, as designed.
+
+**Left for later.** Phase 4 (systems): `GetTerrainHeightAt` (SP-A3), scatter, PCG, map, navigation and NPC AI on the
+surface parameterisation and local up, world-item drops and the placeable slope (SP-F7), the edit brush axis (SP-F8),
+the clock, sun and sky. Phase 5: POIs and campsites.
