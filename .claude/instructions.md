@@ -106,6 +106,14 @@ hemisphere's Z. 2D systems key a planet on the cube sphere (`FVoxelCubeSphere`, 
 atlas coordinates Face × N + U, V), as the map, navigation regions and the NPC spawner do; heightmap code paths keep
 their XY keys untouched.
 
+Terrain conditioning has two kinds of zone (spherical Phase 5, SP-B10): a heightmap zone (an XY disc, a world-Z target,
+`Direction` zero) and a planet zone (`FVoxelConditioningZone::MakeRadial`: a cap on the datum sphere, great-circle radii,
+an altitude target). Each world mode applies only its own kind (`ApplyToHeight` / `ApplyToAltitude`); a conditioner
+answers `GatherConditioning` for heightmaps and `GatherConditioningOnSphere` for planets. On a planet "the ground the
+generator makes" is `UVoxelChunkManager::GetGeneratedSurfacePoint` / `GetGeneratedPlanetAltitude` (the zones layered on
+the natural surface); `GetSurfacePointAt` is the natural surface. Changing planet generation bumps
+`FVoxelWorldModeFactory::PlanetGenerationVersion` (4 since Phase 5); heightmap changes bump `GenerationVersion`.
+
 ## Core Data Structures
 
 ### FVoxelData (4 bytes per voxel)

@@ -1453,6 +1453,8 @@ Three findings from §13.11 get IDs here:
 | G21 | A fresh pawn's view was level in world space, not in its gravity: the engine's possess and restart leave the start spot's world-level rotation (and `AVCGameModeBase` builds respawn rotations from world yaw), so away from the north pole a spawned or respawned player looked into the ground or the sky (45° down after a drowning at 43°; 3° at the polar spawn, unnoticed in Phase 3). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): every possession levels the view on the first planet frame (`AVCPlayerController::bLevelViewInGravity`) | WM-SY21 |
 | G22 | World items lay in the world's frame on a planet: the mesh is `AWorldItem`'s root, so the placeholder's and the WorldDisplay fragment's resting pose (`SetRelativeRotation`) replaced the pool's upright rotation (a raw meat dropped at 8° latitude stood 81.5° off the radial). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): `AWorldItem::ApplyRestingPose` relative to the upright frame | WM-SY16 |
 | G23 | Two heightmap readers of the analytic surface skip terrain conditioning: scatter's buried-chunk test (`ExtractSurfacePointsFromVoxelData` compares the chunk's top with `GetTerrainHeightAt`, not the conditioned height) and the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can flag a surface chunk as buried (no surface scatter in it) and the second puts far points at the natural height. Found in the spherical Phase 5 survey (§19), in the code, not seen live | Open: a heightmap change, outside Phase 5 (its A/B must stay identical); the planet versions read the conditioned surface (WM-PL4) | — |
+| G24 | A voxel-carved dungeon (`EDungeonPOIRepresentation::VoxelCarved`, the stone-lined `CarveUnderground` stamp) does not hold pawns on a smooth world: the boss falls through its room's floor at spawn, and `vox.TPRoom Boss` drops the player through the floor into the rock below (no surface inside solid rock, so no collision until a cave). Seen on the planet and on `VoxelDemo`'s plane alike, and on the base build of §19.2.4 with the same stamp (118,387 + 4,950 voxels), so it predates Phase 5. The demo's catalog dresses its dungeons with tiles (`TileMeshes`), whose floors are tile collision, so the demo is not affected. Found in the spherical Phase 5 live check (§19.2.3) | Open: a dungeon-plugin fix (the lining's floor surface and its collision on DC worlds), outside Phase 5 | — |
+| G25 | Faint straight shading lines along chunk boundaries across a flattened POI pad on a planet (the City at cell (26, 6), §19.2.3): no hole and no step, only a change in shading. Cosmetic; not yet compared with a flattened pad on the plane | Open: cosmetic, look at seam normals on flat ground | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -3697,3 +3699,114 @@ spawns, three `vox.NavPath` paths, `vox.Clock`, and a dungeon visit (`vox.TPPOI 
 **Left for later.** G23 (heightmap readers that skip conditioning); claim-driven conditioning (a claim volume flattening
 ground by itself; today only POI placement feeds the conditioner, on the plane too); World Partition for planets;
 replicated world items (§18.2.6).
+
+### 19.2 Results (2026-10-17)
+
+All of WM-PL1 to WM-PL15 is built, each with its tests, and the exit check is met on `Review_Planet` (§19.2.3): POIs,
+generated campsites and both dungeon representations' stamps sit on the planet's surface, and the tile-dressed dungeons
+play there as on the plane. Heightmap worlds are unchanged: the suites pass, the identity frames are bit for bit, the GPU
+parity lines are identical by CRC, and the `VoxelDemo` A/B against the base build matches (§19.2.4). The live check found
+two things, both recorded rather than fixed: G24, voxel-carved dungeons do not hold pawns on a smooth world (on the base
+build too), and G25, faint shading lines on a flattened pad.
+
+Branches `feat/spherical-p5-places` in VoxelWorlds, VoxelCharacterPlugin, ProceduralDungeonPlugin and WorldClaims (docs),
+and `claude/spherical-p5-places-39c52a` in UE5_PluginDev.
+
+#### 19.2.1 What was built
+
+| ID | Built | Tests |
+|----|-------|-------|
+| WM-PL1 | `FVoxelConditioningZone::Direction` (zero = a heightmap zone), `MakeRadial`, `IsRadial`, `GreatCircleDistance`, `GetWeightAtDirection`, `GetAngularRadius`, `MeetsCap`; `FVoxelTerrainConditioning::ApplyToAltitude`, `ApplyToHeight` skips planet zones (and the reverse); `IVoxelTerrainConditioner::GatherConditioningOnSphere` (default: none); the chunk manager gathers a planet chunk's zones by the cap its box subtends (`GetPlanetCapOfBox`, `GatherConditioningZonesOnSphere`), `AddConditioningZone` warns on a zone of the other kind; the conditioned planet surface (`FSphericalPlanetWorldMode::GetConditionedSurfacePoint` / `GetConditionedTerrainAltitude`, `UVoxelChunkManager::GetGeneratedPlanetAltitude`) | `Generation.Conditioning.Radial`, `Streaming.Planet.ConditioningGather` (no zone missed against a brute-force test) |
+| WM-PL2 | `GenerateChunkSphericalPlanet` blends the terrain's altitude along each voxel's direction before the SDF (density, depth, underwater, caves and materials follow); `PlanetGenerationVersion` 3 → 4 (D16), `GenerationVersion` stays 2 | `Generation.Conditioning.FlattensPlanet` (raised and lowered pads at 45° and a cube corner: worst 0.64 uu off the target inside the inner radius, the ring half way, the natural surface exactly beyond), `VoxelWorldSave.Document.PlanetKeys` (version 4; 3 and 2 refused) |
+| WM-PL3 | `PlanetApplyConditioning` in `SphericalPlanet.ush` (after the radial height, before the shell SDF); a planet's zones uploaded as `[Direction, InnerRadius][FalloffWidth, Target, Strength, 0]`, each world mode uploading only its own kind (the heightmap packing unchanged) | `Generation.GPUvsCPUSphericalParity` gains four sites (a pad raised at latitude 45, one lowered across a cube-face edge, and each one's ring) at LOD 0/1/2 (§19.2.2) |
+| WM-PL4 | The generated surface on a planet everywhere it is read: `GetGeneratedSurfacePoint`, the line walk's start in `QueryEditMergedSurfacePoint`, `GetPlanetSpawnPosition` and the character's planet spawn search (VoxelCharacterPlugin), `QueryPlanetSurfaceConditions` / `SampleSurfacePoint` with zones, the map's planet tiles (each tile's zones), scatter's planet line top (`FScatterExtractionContext::PlanetZones`, gathered per chunk), the PCG sampler's far planet points (the bounds' zones) | `Streaming.Planet.ConditionedSurface` (the generated point within a voxel of the crossing on the pad and the ring, the edit-merged query and the spawn on the pad), `Map.Planet.ConditionedPixels` (746 of 746 pad pixels at generation's altitude and material), `Scatter.Planet.ConditionedLineTop` (0 points off the surface with the zones, 547 without them) |
+| WM-PL5 | `FPOIPlacement::GeneratePlanetPOIs` on `FVoxelCubeSphereGrid(CellsPerEdgeFor(R, CellSize))` (7 a face edge on `Review_Planet`), the XY draws per atlas cell, `SurveyPlanetSite` on the tangent plane in altitudes, the water line the sea's altitude, results in atlas-cell order whatever cap asks; `FPOIDefinition::Direction` and `Cell`; pad space (`GetPadToWorld`, `GetPadWorldLocation`) | `POI.Planet.Placement` (`Review_Planet` with the project catalog: 46 POIs, the same from any cap, each in its cell, land footprints above the sea, pads at the survey median, pad space on local up) |
+| WM-PL6 | `FPOITerrainConditioner::GatherConditioningOnSphere` returns the flattened planet POIs as radial zones at their pad altitude; its XY query gives nothing on a planet | `POI.Planet.ConditionerZones` |
+| WM-PL7 | The POI bridge registers on planets: the planet terrain context, streaming by 3D distance, every POI composed in its pad space (claims rotated to local up), structures draped onto the pad's cap (`DrapeOnPad`), `FindNearestPOIAt` / `FindNearestPOIsAt` (`FPOISearchResult::WorldLocation`), `poi.Find` with latitude, longitude and a `vox.TPLatLon` line, the registration survey over the whole planet, a viewer override for tests | `POI.Planet.Streaming` (replaces `POI.Planet.NoPlacement`: claims within the radius by 3D distance, at their pads and upright, structures draped and upright, the nearest POI on the sphere, the far side streams them out) |
+| WM-PL8 | `UPOIMapMarkerSubsystem` binds `UVCMapMarkerRegistry::OnGatherMarkersNear` on planets (`GetPlanetMarkersNear`: placement and live claims merged by 3D position, nearest first, each with its `WorldLocation`); `poi.Map.Show`'s radar on the tangent plane | `POI.Planet.MapMarkers` |
+| WM-PL9 | `APOICampsite::GetRespawnTransform` (public) lifts along the campsite's up and faces the fire across it; `UVoxelWorldPOIPlacement::PlaceCampsite` on a planet (the core's mean generated altitude on the tangent plane, the pad and apron along local up over the cap's radial band, the claim in the tangent frame) | `POI.Planet.CampsiteRespawn`, `POI.Planet.PlaceCampsite` (96 of 96 core points on the target) |
+| WM-PL10 | Nothing to change: the oriented consumers already invert the claim's transform | `POI.Planet.Claims` (the edit validator refuses inside a rotated claim and allows outside, scatter's suppression box is the claim's, the registry's point query) |
+| WM-PL11 | `FDungeonVoxelLattice::SetFrame` / `ForEachSampleInBox` (a frame-space box enumerated over the samples of its world bounds, each tested in frame space; the identity frame is `RangeForBox`'s samples in its order); `UDungeonVoxelStamper::StampDungeonInFrame` (cells, lining, outer seal and stair steps in frame space; a rotated tile-dressed stamp carves half a voxel more margin and seals one voxel thicker); `UDungeonEntranceStitcher::StitchEntranceInFrame` (the passage plan over the frame-space height where each frame line meets the generated surface, `DetectFrameSurfaceHeight`) | `Dungeon.Stamp.RotatedFrame` (the identity frame writes `StampDungeon`'s 14,848 and 34,008 edits bit for bit in the two voxel modes; in a tangent frame on a small planet the rooms and halls open, every closed face is lined or sealed, nothing lies outside the shell), `Dungeon.Stitch.PlanetSurface` (the identity frame is `StitchEntrance`; the planet shaft runs along the frame's z from the lid to the generated surface and stops there) |
+| WM-PL12 | `ADungeonActor::bMapInActorFrame` (the tile map at a zero origin; instances, doors, torches and the entrance position relative to the actor); `SetTileInstanceHidden` updates an instance in the space it was added in | `Dungeon.TileMapper.RotatedFrame` (75 of 75 instances where the tile map puts them in each of three cases) |
+| WM-PL13 | `FPOIDungeonEntranceInfo` stays in pad space with a C++-only `PadToWorld` (`PointToWorld`, `PointToPad`, `TransformToWorld`, `GetUp`; not reflected, so saves never carry it); `SetupDungeonPOI` stamps and stitches in the pad frame, the deep claim stands on local up, the tile actor spawns in the frame; doors, torches, crates, traps, chests, the loot burst (`FPOIStructureContext::HasLocalUp`), enemies, the boss, the objective's inside test, `FPOIDungeonGridPath::SetFrame` and the elevator (`APOIElevatorCar::SetShuttleFrame`) convert at the boundary; `GetCellAt`, `GetDungeonInfo` and `GetDungeonActor` by cell (the crate finds its tile actor by cell); the planet dungeon hold (`IsTypeHeldOnPlanet`) removed | `POI.Planet.DungeonFrame` (the record in pad space, its z on the POI's up and its origin on the datum; the mouth on the generated surface; the grid `DungeonDepth` under the pad; the rooms and the shaft carved; the deep claim and the tile actor upright at the grid; 89 doors, torches and crates inside the grid and upright; chests, 15 enemies and the boss inside; the elevator car on the shaft's axis; the grid path and the inside test in the frame) |
+| WM-PL14 | `vox.TPPOI` by the nearest pad on the sphere (settled 600 uu east of its centre in pad space), `vox.TPRoom` by the nearest dungeon (the room's floor mapped out of pad space), `vox.Trap` over the plate along its up; the Phase 5 notice is gone (`vox.Campsite` and `poi.Find` were done in Phase 4 and WM-PL7) | live |
+
+Adjustments to the plan (§19.1's design and "How each is verified"):
+
+- WM-PL11 writes the rotated stamp with the same air and solid `Set` edits as the identity path, not densities graded by
+  the distance to the cell boxes: a carved or lined plane at an angle to the lattice then steps by up to √3/2 voxel (on a
+  tile-dressed dungeon the tiles hide it; a voxel-carved dungeon's walls show it). The extra half voxel of margin and voxel
+  of seal apply to tile-dressed stamps only; the voxel lining keeps its thickness, since its surface is the floor content
+  stands on and a slab a voxel thick has a sample on every lattice line through it. `FDungeonEntrancePassagePlan::Build`
+  did not need a frame: it is pure and offset-linear, so the stitcher builds it in frame space over a frame-space surface
+  function (`DetectFrameSurfaceHeight`, a few Newton steps on the altitude along the frame line, not bisection).
+- WM-PL13's lookups are by cell (`GetCellAt` maps a world point to its cell in any world mode) rather than an
+  `…AtLocation` family; `IsDungeonCleared` already took a cell. The planet markers read the cleared flag by cell.
+- `PCG.Planet.ConditionedFar` is part of `Streaming.Planet.ConditionedSurface` (the far points read the same generated
+  surface through `SampleSurfacePoint`).
+- `POI.Planet.Streaming` and `POI.Planet.MapMarkers` no longer test a held type: dungeon types stream and show markers on
+  planets since WM-PL13.
+
+#### 19.2.2 Tests
+
+Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 505 of 505 (the dungeon
+plugin's suites included, unchanged but for the three new tests). In the editor with the GPU tests running: 505 of 505.
+The GPU parity lines are compared line for line (counts, percentages and GPU CRC) with Phase 4's in-editor run: all 75 of
+Phase 4's lines (the 48 heightmap lines and the 27 planet lines) are identical, and the 12 new lines are the conditioned
+sites (density differs at 2, 10, 22 and 504 of 32,768 voxels, the last across the cube-face edge, where Phase 2's unconditioned
+edge site differs at 578).
+
+#### 19.2.3 Exit check (`PlanetTest` with `Review_Planet`, 2026-10-17)
+
+`vox.Debug.Capture 1` throughout (9,577 capture lines, no READY→NOT-READY, no SP-A3 legacy-height warning in play). The
+planet places 46 POIs (5 types from the project catalog, 3 dungeons) over 58 candidates (40 cells with no fitting type,
+12 in the water). Pads are judged against a 29-point natural survey of the footprint (centre, two rings of 8, 12 on the
+falloff edge) and structures by their tilt against local up and their base's gap to the voxel ground. Screenshots in
+the session's `Saved/Screenshots`.
+
+| QA rows | Where | Result |
+|---------|-------|--------|
+| W-07 | Lookout Tower at latitude 79.4 (polar); generated Campsite at 49.9 (cell (34, 2), on a face edge); City at 39.0 (cell (26, 6), on a face edge); Village at −9.9 (equatorial); two Tiled Dungeons in cube-corner cells ((27, 0) at −30.6, (13, 6) at 31.3) | **Pass.** Every pad lies between its survey's lowest and highest natural altitude (Campsite and dungeon (27, 0) exactly at the median), none in the sea; every structure upright within 0.1° (0.000° but a call post at 0.094°) with its base 0.1 to 0.7 uu off the ground; no trees or grass on the pads; the dungeons' grids lie 3,320 and 3,488 uu under the natural surface at their least-covered point (never exposed). G25 noted on the City's pad |
+| W-05 | The Village; the globe after clearing dungeon (13, 6) | **Pass.** The minimap shows the Village's marker on its pad; the globe shows the catalog's markers by type over the planet, zoomed in the marker on the flattened stone pad with the falloff's material bands matching the ground; a cleared dungeon's marker turns gold "(cleared)" |
+| W-06 (protection) | Dungeon (27, 0) (the only protected types are dungeons) | **Pass.** A dig on its pad is refused ("0 voxels modified, 7 rejected by edit protection"); one outside the claim digs |
+| F8-04, F8-05, F8-06, F8-08 | The generated Campsite | **Pass.** Rest heals (60 → 100) and sets the respawn point; sleeping at local 22:00 wakes at local 06:08 (sun 1.3° up); cooking 2 raw meat at its fire succeeds; dying at latitude 5, longitude 100 respawns 385 uu from it, upright |
+| F9-01, F9-02 | A save inside dungeon (13, 6) after a rest, a dig, a lit sconce and a clear | **Pass.** `vox.Save` writes the document and 651,664 edits; after stopping and playing again the player is back where they stood, the clock, inventory, torch fuel and progression are back, the respawn point is still the campsite (a death respawns there), the edits load |
+| F3-01 to F3-07 | Dungeons (27, 0) and (13, 6), tile-dressed | **Pass.** The elevator takes the player down the shaft to the entrance floor (altitude 1,167 → −3,151, walking, upright); rooms lit, halls dark (29 lit, 37 dark); the entrance chest (4 stacks) and the treasure chest (5, with the boss key) open once; a crate gives 2 stacks once; a boss door refuses without the key, unlocks with it, and the dungeon's second boss door then refuses (the key used up); a door closes and opens; opened chests, a searched crate and the unlocked door are remembered after a stream-out and after a reload |
+| F4-01 to F4-05 | Dungeon (13, 6) | **Pass.** "Objective: defeat the boss" inside; the boss fights back in its room; ten hits kill it: "now CLEARED", 4 reward stacks, the objective line "Dungeon cleared", the gold marker; after a reload still cleared with no boss; progression 1 and 1 |
+| F5-01 to F5-08 | Both tile-dressed dungeons | **Pass**, but F5-07 not run (weapon wear does not touch planet code). Skeletons patrol (13 of 14 walked 200-1,250 uu in 8 s); they chase and hit every 1.2 s (they killed the player once); a killed skeleton stays dead after a reload; the boss hits only inside its room and stays there after the player leaves; a spike plate deals 15 once; a crate breaks on the second sword hit with one loot burst; `vox.AI 0` / `1` freeze and resume |
+| F7-03 to F7-05, F7-08 | Dungeon (13, 6) | **Pass**, but F7-08 not separable live (the skeleton closed in on its patrol before the unlit check could tell the radii apart; the distance rule is `VoxelCharacter.AI.LitTargetSight`, frame-independent). A carried torch lights the dark hall; a dark sconce lights with "Light torch" (30 s of fuel) and says "Needs a lit torch" without one; the lit sconce is remembered after a reload |
+| F9-03, F9-04 | Dungeon (13, 6) | **Pass.** Saved in the entrance room, the player resumes on the dungeon floor ("resumed at the saved spot, floor 12 below", altitude −3,212); the dungeon stays cleared, 6 interactable states restored, the doors as left |
+| Voxel-carved dungeons | Dungeon (13, 6) with the type switched to `VoxelCarved` in memory | Stamps and stitches in the pad frame (112,152 voxels, the shaft along local up; the elevator carries the player down), but the boss falls through its room's floor and so does the player after `vox.TPRoom Boss`: **G24**, the same on the plane and on the base build (§19.2.4) |
+
+Two runs of the same seed stamp the same dungeons (dungeon (27, 0): 338,874 voxels and 4,596 at the entrance both times).
+
+#### 19.2.4 Heightmap worlds unchanged: the VoxelDemo A/B
+
+One script on both builds (`VoxelDemo`, no override; the base: VoxelWorlds `0fed9a0`, VoxelCharacterPlugin `8465d26`,
+ProceduralDungeonPlugin `fb4bd6b`, UE5_PluginDev `e9d8ff0` for the game module, VoxelWorldPOI and VoxelWorldSave), GPU
+scatter extraction off in memory on both as in §18.2.4. Time frozen at 10:00 and the AI off, 60 s to settle, streaming
+frozen, then the map image, the digest twice, the NPCs, the clock, `vox.Edge`, `poi.Find` for each type, three paths to
+fixed points, and a dungeon visit (`vox.TPPOI Tiled`, `vox.TPRoom Boss`, `vox.Enemies`); then the same visit with the
+dungeon type switched to `VoxelCarved` in memory.
+
+| Check | Feature | Base | |
+|-------|---------|------|---|
+| The registration line | 32 placed of 55 candidates (33 no fitting type, 19 water, 4 relief) | the same | identical |
+| `poi.Find` for each type (positions, pad heights) | 2 cities, a village, 3 towers, 2 campsites, 2 dungeons | the same | identical |
+| `voxel.Map.Capture 6` at the spawn | | | the same PNG (byte for byte) |
+| `voxel.Scatter.Digest` | 246 chunks, 18,502 points, 17 types (Phase 4's numbers) | the same CRCs | identical |
+| `vox.NPCs`, `vox.Clock`, `vox.Edge` | 6 alive, 16 planned cells; 10:01 | the same | identical (the sun angle 0.03° apart: when the frozen clock was set) |
+| `vox.NavPath` to three points | no path / 4 waypoints, 5,702 uu / no path | the same | identical (only the cache counts differ, by warmth) |
+| The tile-dressed dungeon | stamp 248,323 + 4,800 voxels, grid top −4,223, 979 tile instances, 16 doors (2 boss-locked), 60 torches, 8 crates, 2 traps, the boss and the enemies | the same | identical (one frozen skeleton 15 uu apart: when the AI froze) |
+| The voxel-carved dungeon | stamp 118,387 + 4,950 voxels; the boss and the player fall through the boss room's floor | the same stamp; the same falls | identical, G24 on both |
+
+So heightmap placement, conditioning, the map, scatter, navigation, the NPCs, the clock and both dungeon representations'
+stamps behave exactly as before.
+
+#### 19.2.5 Left for later
+
+- G24 (voxel-carved dungeons do not hold pawns on smooth worlds, before Phase 5 too) and G25 (shading lines on a flat pad).
+- Voxel-carved dungeons on a planet show the lattice's steps on their walls (graded densities were not built, §19.2.1).
+- As in the plane's code, doors, torches and enemies need a tile-dressed dungeon (the POI path rebuilds the tile map for
+  them); a voxel-carved dungeon gets chests, the boss and the elevator only.
+- From §19.1: G23, claim-driven conditioning, World Partition for planets, replicated world items.

@@ -374,8 +374,10 @@ covers the shell at every latitude. The GPU generator has a planet branch (Phase
 engine's custom gravity direction on every move), movement, camera and spawn work in the gravity frame, every water
 consumer asks one sea (`FVoxelSeaSurface`), and the chunk manager draws the ocean shell. **Its systems since
 2026-10-17** (Phase 4, review plan §18): scatter, PCG, the map, navigation, NPC AI and the NPC spawner, world items and
-placing, the edit brush, the clock and the sky work in the local frame ("Systems on a planet", below); POIs, dungeons and
-generated campsites are held off on planets until Phase 5. What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
+placing, the edit brush, the clock and the sky work in the local frame ("Systems on a planet", below). **Its places
+since 2026-10-17** (Phase 5, review plan §19): conditioning zones are caps on the datum sphere, POIs place on the cube
+sphere and compose in their pad space, campsites level along local up, and dungeons stamp, stitch and play in pad space
+("Places on a planet", below). What remains is in [SPHERICAL_PLANET_REQUIREMENTS.md](../SPHERICAL_PLANET_REQUIREMENTS.md). Test content
 lives in the parent project: `/Game/PluginTesting/Planet` (`PlanetTest`, `PlanetWorldConfig`) and
 `/Game/PluginTesting/Review/Review_Planet` (water on).
 
@@ -451,9 +453,21 @@ checked bit for bit where it matters):
 | Navigation | Each search in the tangent-plane frame of the region it starts in, altitude as height, the sea as an altitude plane | [SURFACE_NAVIGATION.md](SURFACE_NAVIGATION.md) |
 | Edit brush | The cylinder's axis is local up at the brush centre (`FVoxelBrushParams::Axis`, zero = local up) | [EDIT_LAYER.md](EDIT_LAYER.md) |
 | Bench | `voxel.Bench.Run gc=Lat:Lon:Heading[:Alt]`: a great circle at a fixed altitude | `VoxelStreamingBenchmark` |
-| Game side | NPC AI and eye height in the gravity frame, the NPC spawner on cube-sphere cells, world items and placing along gravity, local solar time and a sky centred on the planet (`WorldClockPlugin`), POIs held off until Phase 5 | parent project, `VoxelCharacterPlugin`, `InteractionPlugin`, `WorldClockPlugin` |
+| Game side | NPC AI and eye height in the gravity frame, the NPC spawner on cube-sphere cells, world items and placing along gravity, local solar time and a sky centred on the planet (`WorldClockPlugin`) | parent project, `VoxelCharacterPlugin`, `InteractionPlugin`, `WorldClockPlugin` |
 
 Tree injection never runs on a planet (SP-B9: cubic only).
+
+### Places on a planet (Phase 5)
+
+Review plan §19 (decisions D14-D16):
+
+| System | On a planet | Where |
+|--------|-------------|-------|
+| Conditioning zones | A planet zone is a cap on the datum sphere: `FVoxelConditioningZone::Direction` (zero = a heightmap zone), `InnerRadius` and `FalloffWidth` as great-circle distances, `TargetHeight` an altitude, weighted with the heightmap's smoothstep (`GetWeightAtDirection`) and blended into the terrain's altitude along each direction (`FVoxelTerrainConditioning::ApplyToAltitude`) on the CPU and the GPU (`PlanetApplyConditioning`). The chunk manager gathers a chunk's zones by the cap its box subtends (`GatherConditioningZonesOnSphere`); conditioners answer `IVoxelTerrainConditioner::GatherConditioningOnSphere`. A zone of the other kind does nothing (with a warning). `PlanetGenerationVersion` 4 | `VoxelGeneration/VoxelTerrainConditioning.h`, `SphericalPlanet.ush` |
+| The generated surface | The natural surface plus the zones: `UVoxelChunkManager::GetGeneratedSurfacePoint` / `GetGeneratedPlanetAltitude`, the start of `QueryEditMergedSurfacePoint`'s walk, the spawn, the map's planet tiles, scatter's line top, PCG's far points; `GetSurfacePointAt` stays the natural surface | `VoxelChunkManager` |
+| POIs | Placed on the cube-sphere grid's cells (`FPOIPlacement::GeneratePlanetPOIs`, the site survey on the tangent plane in altitudes, the sea's altitude as the water line); each POI has a pad space, the tangent frame at its centre (x east, y north, z local up), in which its claims, structures and dungeon are composed with the plane's arithmetic; structures are draped onto the pad's cap; streaming, `poi.Find` and the map markers by 3D distance | parent project, `VoxelWorldPOI` (its `POI_POPULATION_PLAN.md`, `POI_DUNGEON_PLAN.md`) |
+| Campsites | Generated campsites stand on the draped pad and respawn the player along their own up; `PlaceCampsite` levels its pad and apron along local up | `VoxelWorldPOI` |
+| Dungeons | Stamped and stitched in a frame (`UDungeonVoxelStamper::StampDungeonInFrame`, `UDungeonEntranceStitcher::StitchEntranceInFrame`), tiles laid out in the tile actor's own frame (`ADungeonActor::bMapInActorFrame`); the POI's dungeon record and gameplay stay in pad space and convert at the boundary | `ProceduralDungeonPlugin`, `VoxelWorldPOI` |
 
 ### The radius ceiling (SP-H2)
 
@@ -510,9 +524,9 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 - **Small planets** (SD1): past the planet-relative distance and direction the GPU works in single precision (its
   cave and ore noise at absolute positions), as the CPU's noise does; parity is measured on a 250,000 uu planet.
   Large planets need SP-H1
-- POIs, dungeons, generated campsites and claims' conditioning are held off on planets until Phase 5 (SP-G5, SP-G6,
-  SP-B10, SP-G10): POI placement samples heightmap heights and would land its sites above the northern hemisphere or
-  inside the planet. Player-placed campfire kits work
+- Voxel-carved dungeons do not hold pawns on smooth worlds, the plane included (G24 in the review plan); tile-dressed
+  dungeons (the demo's) play on a planet as on the plane. A voxel-carved dungeon's walls on a planet step by up to
+  √3/2 voxel (the stamp writes air and solid, not graded densities)
 - Water: one sea for every consumer (`FVoxelSeaSurface`, `WaterRadius`). The ocean shell is a sphere, so it also shows
   inside dry caves below sea level
 - The sun has no axial tilt: the poles sit in a low sun all day (decision D12)
