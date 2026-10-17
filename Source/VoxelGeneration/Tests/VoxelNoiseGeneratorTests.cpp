@@ -8,6 +8,9 @@
 #include "VoxelData.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCaveConfiguration.h"
+#include "VoxelWorldConfiguration.h"
+#include "VoxelWorldModeFactory.h"
+#include "IVoxelWorldMode.h"
 #include "RenderingThread.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
@@ -307,8 +310,12 @@ namespace VoxelParityHarness
 			const float MetaPct = 100.0f * MetaMatch / Total;
 			const float MatWhenDensEqPct = DensityEqualCount > 0 ? 100.0f * MatMatchWhenDensEqual / DensityEqualCount : 100.0f;
 
-			Test.AddInfo(FString::Printf(TEXT("%s LOD%d [%d voxels]: density~%.1f%%, material %.1f%%, biome %.1f%%, meta %.1f%%, material(density==) %.2f%%"),
-				Label, LOD, Total, DensityClosePct, MatPct, BiomePct, MetaPct, MatWhenDensEqPct));
+			// A CRC of the GPU output, so a change to the shader that must not move a heightmap's voxels can be checked
+			// bit for bit against the previous build's log (spherical Phase 2 refactored the heightmap branch's helpers).
+			const uint32 GPUCrc = FCrc::MemCrc32(GPUData.GetData(), GPUData.Num() * sizeof(FVoxelData));
+			Test.AddInfo(FString::Printf(TEXT("%s LOD%d [%d voxels]: density~%.1f%%, material %.1f%%, biome %.1f%%, meta %.1f%%, material(density==) %.2f%% (density %d (%d by more than 2), material %d, biome %d, meta %d differ; GPU crc %08x)"),
+				Label, LOD, Total, DensityClosePct, MatPct, BiomePct, MetaPct, MatWhenDensEqPct,
+				Total - DensityEqualCount, Total - DensityClose, Total - MatMatch, Total - BiomeMatch, Total - MetaMatch, GPUCrc));
 
 			if (DensityClosePct < Thr.DensityClose) { Test.AddError(FString::Printf(TEXT("%s LOD%d density parity %.1f%% < %.1f%%"), Label, LOD, DensityClosePct, Thr.DensityClose)); bAllPass = false; }
 			if (MatPct < Thr.Mat) { Test.AddError(FString::Printf(TEXT("%s LOD%d material parity %.1f%% < %.1f%%"), Label, LOD, MatPct, Thr.Mat)); bAllPass = false; }
@@ -791,6 +798,374 @@ bool FVoxelGPUvsCPUOreVariantParityTest::RunTest(const FString& Parameters)
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
 	TestTrue(TEXT("GPU==CPU ore-variant parity (streak + per-biome) across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// Spherical Phase 2 (SP-B4, SP-I3; WORLD_MODES_REVIEW_PLAN.md §16): GPU==CPU parity for a planet, the full FVoxelData
+// at LOD 0/1/2, on a planet like Review_Planet (R 250,000, the demo's noise, continentalness, biomes with underwater
+// materials, a height rule by altitude, an ore, caves with biome overrides and the underwater minimum depth, water at
+// WaterRadius 500 under the datum), off the world origin like the demo. The params come from FVoxelWorldModeFactory, as
+// the chunk manager's requests do. Sites: both poles, the equator, 45 degrees, a cube-face edge, a cube corner (each the
+// chunk the surface passes through), a coast (the sea surface and the seabed in one chunk), a cave (carved air under the
+// ground) and caves under the seabed that the underwater minimum depth suppresses. The planet's post-passes (the radial
+// water fill, the underground scan along local down) run on the GPU in the same graph, so the metadata channel compares
+// them with the CPU's.
+namespace VoxelSphericalParity
+{
+	constexpr float Radius = 250000.0f;
+	constexpr float WaterRadius = Radius - 500.0f;
+
+	/** Unit directions spread over the sphere (a Fibonacci lattice), for searching sites. */
+	static FVector FibonacciDirection(int32 Index, int32 Count)
+	{
+		const double Golden = UE_DOUBLE_PI * (3.0 - FMath::Sqrt(5.0));
+		const double Z = 1.0 - (2.0 * Index + 1.0) / Count;
+		const double R = FMath::Sqrt(FMath::Max(0.0, 1.0 - Z * Z));
+		return FVector(FMath::Cos(Golden * Index) * R, FMath::Sin(Golden * Index) * R, Z);
+	}
+
+	/**
+	 * Away from the poles and the cube's face centres: no component of the direction above 0.8, so a chunk's lines along
+	 * local down shear by at least half a voxel per step on one axis (FVoxelDownLines), and the GPU line passes are tested
+	 * on sheared lines, not on columns.
+	 */
+	static bool IsSheared(const FVector& Direction)
+	{
+		return Direction.GetAbs().GetMax() <= 0.8;
+	}
+
+	static double LatitudeDeg(const FVector& Direction)
+	{
+		return FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Direction.Z, -1.0, 1.0)));
+	}
+
+	static double LongitudeDeg(const FVector& Direction)
+	{
+		return FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X));
+	}
+
+	static FVector LatLonDirection(double LatDeg, double LonDeg)
+	{
+		const double Lat = FMath::DegreesToRadians(LatDeg);
+		const double Lon = FMath::DegreesToRadians(LonDeg);
+		return FVector(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	}
+
+	struct FCounts
+	{
+		int32 Solid = 0;
+		int32 Air = 0;
+		int32 Water = 0;
+		int32 UnderwaterMaterial = 0;
+		int32 UndergroundAir = 0;
+	};
+
+	static FCounts Count(const TArray<FVoxelData>& Data)
+	{
+		FCounts C;
+		for (const FVoxelData& V : Data)
+		{
+			V.IsSolid() ? ++C.Solid : ++C.Air;
+			C.Water += V.HasWaterFlag() ? 1 : 0;
+			C.UnderwaterMaterial += (V.IsSolid() && (V.MaterialID == 20 || V.MaterialID == 21)) ? 1 : 0;
+			C.UndergroundAir += (V.IsAir() && V.HasUndergroundFlag()) ? 1 : 0;
+		}
+		return C;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUSphericalParityTest, "VoxelWorlds.Generation.GPUvsCPUSphericalParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
+{
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+	using namespace VoxelSphericalParity;
+
+	// Biomes: the defaults with continentalness (the default curves), distinct underwater materials so the underwater
+	// branch is observable, a surface height rule above 2,500 uu of altitude, a global ore (Rarity 1: the rarity hash
+	// is precision-sensitive, SP-H3).
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->bEnableContinentalness = true;
+	BiomeConfig->bEnableUnderwaterMaterials = true;
+	for (FBiomeDefinition& Biome : BiomeConfig->Biomes)
+	{
+		Biome.UnderwaterSurfaceMaterial = 20;
+		Biome.UnderwaterSubsurfaceMaterial = 21;
+	}
+	BiomeConfig->bEnableHeightMaterials = true;
+	BiomeConfig->HeightMaterialRules.Empty();
+	{
+		FHeightMaterialRule Rule;
+		Rule.MinHeight = 2500.0f; Rule.MaxHeight = MAX_FLT; Rule.MaterialID = 6;
+		Rule.bSurfaceOnly = true; Rule.MaxDepthBelowSurface = 2.0f; Rule.Priority = 10;
+		BiomeConfig->HeightMaterialRules.Add(Rule);
+	}
+	BiomeConfig->bEnableOreVeins = true;
+	BiomeConfig->GlobalOreVeins.Empty();
+	{
+		FOreVeinConfig Ore;
+		Ore.Name = TEXT("Iron"); Ore.MaterialID = 8; Ore.MinDepth = 12.0f; Ore.MaxDepth = 0.0f;
+		Ore.Shape = EOreVeinShape::Blob; Ore.Frequency = 0.004f; Ore.Threshold = 0.6f;
+		Ore.SeedOffset = 111; Ore.Rarity = 1.0f; Ore.Priority = 0;
+		BiomeConfig->GlobalOreVeins.Add(Ore);
+	}
+	BiomeConfig->RebuildBakedCurves();
+	BiomeConfig->BuildGpuData();
+
+	// Caves: a cheese and a tunnel layer flattened along local up, the cave-wall override, biome overrides (Plains more
+	// and shallower, Ocean none) and the underwater minimum depth, which the planet branch applies as the CPU does.
+	UVoxelCaveConfiguration* CaveConfig = NewObject<UVoxelCaveConfiguration>();
+	CaveConfig->AddToRoot();
+	CaveConfig->bEnableCaves = true;
+	CaveConfig->UnderwaterMinDepth = 60.0f;
+	CaveConfig->bOverrideCaveWallMaterial = true;
+	CaveConfig->CaveWallMaterialID = 2;
+	CaveConfig->CaveWallMaterialMinDepth = 8.0f;
+	CaveConfig->BiomeOverrides.Empty();
+	{
+		FBiomeCaveOverride Plains;
+		Plains.BiomeID = 0; Plains.CaveScale = 1.5f; Plains.MinDepthOverride = 6.0f;
+		CaveConfig->BiomeOverrides.Add(Plains);
+		FBiomeCaveOverride Ocean;
+		Ocean.BiomeID = 3; Ocean.CaveScale = 0.0f;
+		CaveConfig->BiomeOverrides.Add(Ocean);
+	}
+	CaveConfig->CaveLayers.Empty();
+	{
+		FCaveLayerConfig Cheese;
+		Cheese.bEnabled = true;
+		Cheese.CaveType = ECaveType::Cheese;
+		Cheese.SeedOffset = 1234;
+		Cheese.Frequency = 0.0025f; Cheese.Octaves = 3; Cheese.Persistence = 0.5f; Cheese.Lacunarity = 2.0f;
+		Cheese.Threshold = 0.25f; Cheese.CarveStrength = 1.0f; Cheese.CarveFalloff = 0.25f;
+		Cheese.MinDepth = 4.0f; Cheese.MaxDepth = 0.0f; Cheese.DepthFadeWidth = 4.0f; Cheese.VerticalScale = 0.6f;
+		CaveConfig->CaveLayers.Add(Cheese);
+
+		FCaveLayerConfig Tunnel;
+		Tunnel.bEnabled = true;
+		Tunnel.CaveType = ECaveType::Spaghetti;
+		Tunnel.SeedOffset = 5678;
+		Tunnel.Frequency = 0.003f; Tunnel.Octaves = 2; Tunnel.Persistence = 0.5f; Tunnel.Lacunarity = 2.0f;
+		Tunnel.Threshold = 0.15f; Tunnel.CarveStrength = 1.0f; Tunnel.CarveFalloff = 0.20f;
+		Tunnel.MinDepth = 4.0f; Tunnel.MaxDepth = 0.0f; Tunnel.DepthFadeWidth = 4.0f; Tunnel.VerticalScale = 0.7f;
+		Tunnel.SecondNoiseSeedOffset = 7777; Tunnel.SecondNoiseFrequencyScale = 1.2f;
+		CaveConfig->CaveLayers.Add(Tunnel);
+	}
+
+	// The planet, like Review_Planet, off the world origin like the demo.
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->AddToRoot();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = FVector(12345.0, 54321.0, 0.0);
+	Config->WorldRadius = Radius;
+	Config->PlanetHeightScale = 6000.0f;
+	Config->BaseHeight = 0.0f;
+	Config->PlanetMaxTerrainHeight = 6500.0f;
+	Config->PlanetMaxTerrainDepth = 6500.0f;
+	Config->VoxelSize = 75.0f;
+	Config->ChunkSize = 32;
+	Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Config->NoiseParams.Seed = 248675;
+	Config->NoiseParams.Octaves = 3;
+	Config->NoiseParams.Frequency = 0.000025f;
+	Config->NoiseParams.Lacunarity = 1.681f;
+	Config->NoiseParams.Persistence = 0.5f;
+	Config->BiomeConfiguration = BiomeConfig;
+	Config->bEnableBiomes = true;
+	Config->CaveConfiguration = CaveConfig;
+	Config->bEnableCaves = true;
+	Config->bEnableWaterLevel = true;
+	Config->WaterRadius = WaterRadius;
+
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+	const FVector Origin = Config->WorldOrigin;
+	const double ChunkWorldSize = Config->ChunkSize * Config->VoxelSize;
+
+	// A request as UVoxelChunkManager builds it: the world-mode fields from the factory, the rest from the config.
+	auto MakeRequest = [&](const FIntVector& ChunkCoord)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.ChunkCoord = ChunkCoord;
+		Request.ChunkSize = Config->ChunkSize;
+		Request.VoxelSize = Config->VoxelSize;
+		Request.NoiseParams = Config->NoiseParams;
+		FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
+		Request.bEnableBiomes = Config->bEnableBiomes;
+		Request.BiomeConfiguration = Config->BiomeConfiguration;
+		Request.bEnableCaves = Config->bEnableCaves;
+		Request.CaveConfiguration = Config->CaveConfiguration;
+		Request.bEnableWaterLevel = Config->bEnableWaterLevel;
+		Request.WaterLevel = Config->WaterLevel;
+		Request.WaterRadius = Config->WaterRadius;
+		return Request;
+	};
+	auto ChunkAt = [&](const FVector& WorldPos)
+	{
+		const FVector Local = (WorldPos - Origin) / ChunkWorldSize;
+		return FIntVector(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
+	};
+	auto SurfaceRadius = [&](const FVector& Direction)
+	{
+		return (Mode->GetSurfacePoint(Origin + Direction * Radius, Config->NoiseParams).Position - Origin).Size();
+	};
+	FVoxelCPUNoiseGenerator CPUGenerator;
+	CPUGenerator.Initialize();
+	auto GenerateCPU = [&](const FIntVector& ChunkCoord)
+	{
+		TArray<FVoxelData> Data;
+		CPUGenerator.GenerateChunkCPU(MakeRequest(ChunkCoord), Data);
+		return Data;
+	};
+
+	struct FSite
+	{
+		FString Name;
+		FIntVector Chunk;
+	};
+	TArray<FSite> Sites;
+
+	// The surface sites: the chunk the surface passes through along each direction.
+	const TPair<const TCHAR*, FVector> SurfaceSites[] = {
+		{ TEXT("North pole"), FVector(0, 0, 1) },
+		{ TEXT("South pole"), FVector(0, 0, -1) },
+		{ TEXT("Equator"), FVector(1, 0, 0) },
+		{ TEXT("Latitude 45"), LatLonDirection(45.0, 3.0) },
+		{ TEXT("Cube-face edge"), LatLonDirection(0.0, 45.0) },
+		{ TEXT("Cube corner"), FVector(1, 1, 1).GetSafeNormal() },
+	};
+	for (const TPair<const TCHAR*, FVector>& Site : SurfaceSites)
+	{
+		const FVector Surface = Origin + Site.Value * SurfaceRadius(Site.Value);
+		Sites.Add({ Site.Key, ChunkAt(Surface) });
+		const FCounts C = Count(GenerateCPU(Sites.Last().Chunk));
+		AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), surface radius %.0f, solid %d, air %d, water %d"), Site.Key,
+			Sites.Last().Chunk.X, Sites.Last().Chunk.Y, Sites.Last().Chunk.Z, (Surface - Origin).Size(), C.Solid, C.Air, C.Water));
+		TestTrue(FString::Printf(TEXT("%s: the chunk crosses the surface (non-vacuous)"), Site.Key), C.Solid > 0 && C.Air > 0);
+	}
+
+	// The coast: a seabed just under the sea, so one chunk holds the sea surface, water and underwater materials.
+	constexpr int32 SearchCount = 2000;
+	{
+		bool bFound = false;
+		for (int32 i = 0; i < SearchCount && !bFound; ++i)
+		{
+			const FVector Dir = FibonacciDirection(i, SearchCount);
+			if (!IsSheared(Dir))
+			{
+				continue;
+			}
+			const double SurfaceR = SurfaceRadius(Dir);
+			if (SurfaceR > WaterRadius - 600.0 && SurfaceR < WaterRadius - 150.0)
+			{
+				const FIntVector Chunk = ChunkAt(Origin + Dir * (WaterRadius - 100.0));
+				const FCounts C = Count(GenerateCPU(Chunk));
+				if (C.Water > 0 && C.UnderwaterMaterial > 0 && C.Solid > 0)
+				{
+					Sites.Add({ TEXT("Coast"), Chunk });
+					AddInfo(FString::Printf(TEXT("Coast: chunk (%d, %d, %d) at latitude %.1f, longitude %.1f, seabed radius %.0f, water %d, underwater material %d"),
+						Chunk.X, Chunk.Y, Chunk.Z, LatitudeDeg(Dir), LongitudeDeg(Dir), SurfaceR, C.Water, C.UnderwaterMaterial));
+					bFound = true;
+				}
+			}
+		}
+		TestTrue(TEXT("A coast chunk with water flags and underwater materials (non-vacuous)"), bFound);
+	}
+
+	// A cave: carved underground air 1,200 uu under dry land.
+	{
+		bool bFound = false;
+		for (int32 i = 0; i < SearchCount && !bFound; i += 7)
+		{
+			const FVector Dir = FibonacciDirection(i, SearchCount);
+			if (!IsSheared(Dir))
+			{
+				continue;
+			}
+			const double SurfaceR = SurfaceRadius(Dir);
+			if (SurfaceR < WaterRadius + 300.0)
+			{
+				continue;
+			}
+			const FIntVector Chunk = ChunkAt(Origin + Dir * (SurfaceR - 1200.0));
+			const FCounts C = Count(GenerateCPU(Chunk));
+			if (C.UndergroundAir > 200)
+			{
+				Sites.Add({ TEXT("Cave"), Chunk });
+				AddInfo(FString::Printf(TEXT("Cave: chunk (%d, %d, %d) at latitude %.1f, longitude %.1f, surface radius %.0f, underground air %d"),
+					Chunk.X, Chunk.Y, Chunk.Z, LatitudeDeg(Dir), LongitudeDeg(Dir), SurfaceR, C.UndergroundAir));
+				bFound = true;
+			}
+		}
+		TestTrue(TEXT("A cave chunk with carved underground air (non-vacuous)"), bFound);
+	}
+
+	// Under the seabed: a chunk where caves carve without the underwater minimum depth and are suppressed with it, so
+	// the GPU's suppression is exercised (a GPU without it would carve here).
+	{
+		bool bFound = false;
+		for (int32 i = 0; i < SearchCount && !bFound; i += 3)
+		{
+			const FVector Dir = FibonacciDirection(i, SearchCount);
+			if (!IsSheared(Dir))
+			{
+				continue;
+			}
+			const double SurfaceR = SurfaceRadius(Dir);
+			if (SurfaceR > WaterRadius - 400.0)
+			{
+				continue;
+			}
+			const FIntVector Chunk = ChunkAt(Origin + Dir * (SurfaceR - 900.0));
+			CaveConfig->UnderwaterMinDepth = 0.0f;
+			const FCounts Unsuppressed = Count(GenerateCPU(Chunk));
+			CaveConfig->UnderwaterMinDepth = 60.0f;
+			const FCounts Suppressed = Count(GenerateCPU(Chunk));
+			if (Unsuppressed.UndergroundAir > 200 && Suppressed.UndergroundAir < Unsuppressed.UndergroundAir / 4)
+			{
+				Sites.Add({ TEXT("Under the seabed"), Chunk });
+				AddInfo(FString::Printf(TEXT("Under the seabed: chunk (%d, %d, %d) at latitude %.1f, longitude %.1f, seabed radius %.0f, underground air %d without the underwater minimum depth, %d with it"),
+					Chunk.X, Chunk.Y, Chunk.Z, LatitudeDeg(Dir), LongitudeDeg(Dir), SurfaceR, Unsuppressed.UndergroundAir, Suppressed.UndergroundAir));
+				bFound = true;
+			}
+		}
+		TestTrue(TEXT("A chunk under the seabed where the underwater minimum depth suppresses caves (non-vacuous)"), bFound);
+	}
+	CPUGenerator.Shutdown();
+
+	// Thresholds, tighter than the plane's (its chunks are 16^3, where one voxel is 0.024%). Measured on the first run
+	// (WORLD_MODES_REVIEW_PLAN.md §16.2), every site at every LOD: density within 2 on >= 99.9%, material >= 99.98%, biome
+	// 100%, metadata >= 99.997% (one voxel in 32,768), material where the density matches >= 99.98%. What differs is float
+	// against double at FP boundaries: a density of 126 against 127 at the surface gates the cave carve (the voxels off by
+	// more than 2) and decides solid or air for the water and underground flags beside it; depth-band edges flip a
+	// material. A flood that failed to converge, a line walked in the wrong order or a missing branch moves hundreds of
+	// voxels and fails these.
+	VoxelParityHarness::FParityThresholds PlanetThresholds;
+	PlanetThresholds.DensityClose = 99.5f;
+	PlanetThresholds.Mat = 99.0f;
+	PlanetThresholds.Biome = 99.9f;
+	PlanetThresholds.Meta = 99.9f;
+	PlanetThresholds.MatWhenDensEq = 99.5f;
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+	bool bAllPass = true;
+	for (const FSite& Site : Sites)
+	{
+		const FString Label = FString::Printf(TEXT("Planet %s"), *Site.Name);
+		if (!VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, MakeRequest(Site.Chunk), *Label, PlanetThresholds))
+		{
+			bAllPass = false;
+		}
+	}
+	GPUGenerator.Shutdown();
+
+	Config->RemoveFromRoot();
+	CaveConfig->RemoveFromRoot();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU planet parity (radial height, materials, caves, water, underground) at every site across LOD 0/1/2"), bAllPass);
 	return true;
 }
 
