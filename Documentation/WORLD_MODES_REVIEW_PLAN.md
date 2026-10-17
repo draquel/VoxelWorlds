@@ -1449,6 +1449,7 @@ Three findings from §13.11 get IDs here:
 | G20 | Debug tooling: `vox.TP`'s settle re-requested an already-cooked chunk's collision, which re-cooks it under a pawn standing there (a READY→NOT-READY "re-cook" in the capture), and `vox.Debug.Capture` compared the frame after a teleport with the frame before, logging a "fall-through signature" at every teleport onto ground not streamed yet (found in spherical Phase 3's exit check, §17.2) | Fixed (§17.2, game module): the settle requests only chunks without collision; the capture restarts after a jump of more than a chunk in one frame and while the settle holds | (WM-W4) |
 | G21 | A fresh pawn's view was level in world space, not in its gravity: the engine's possess and restart leave the start spot's world-level rotation (and `AVCGameModeBase` builds respawn rotations from world yaw), so away from the north pole a spawned or respawned player looked into the ground or the sky (45° down after a drowning at 43°; 3° at the polar spawn, unnoticed in Phase 3). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): every possession levels the view on the first planet frame (`AVCPlayerController::bLevelViewInGravity`) | WM-SY21 |
 | G22 | World items lay in the world's frame on a planet: the mesh is `AWorldItem`'s root, so the placeholder's and the WorldDisplay fragment's resting pose (`SetRelativeRotation`) replaced the pool's upright rotation (a raw meat dropped at 8° latitude stood 81.5° off the radial). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): `AWorldItem::ApplyRestingPose` relative to the upright frame | WM-SY16 |
+| G23 | Two heightmap readers of the analytic surface skip terrain conditioning: scatter's buried-chunk test (`ExtractSurfacePointsFromVoxelData` compares the chunk's top with `GetTerrainHeightAt`, not the conditioned height) and the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can flag a surface chunk as buried (no surface scatter in it) and the second puts far points at the natural height. Found in the spherical Phase 5 survey (§19), in the code, not seen live | Open: a heightmap change, outside Phase 5 (its A/B must stay identical); the planet versions read the conditioned surface (WM-PL4) | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -3507,3 +3508,189 @@ records `"path": "greatCircle"` and the route.
 PRs: VoxelWorlds (two, stacked: P4.1 and P4.2; then the rest with these docs), VoxelCharacterPlugin, InteractionPlugin,
 WorldClockPlugin, UE5_PluginDev (VoxelWorldPOI, VoxelWorldSave, the game module, the setup script and PlanetTest, the
 gitlinks, the doc map).
+
+## 19. Spherical Phase 5: places (2026-10-17)
+
+The requirements doc's Phase 5 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-B10 and
+SP-G5, then SP-G6 and SP-G10. Phase 4 made every system that reads the surface work in the local frame (§18) but held
+POIs, generated campsites, dungeons and claims' conditioning off on planets (`UPOIPlacementSubsystem::IsHeldForPlanet`,
+WM-SY3), because placement samples the heightmap height and its cells are world-XY squares. Exit check: POIs and campsites
+sit on the planet's surface, and dungeons too if scope decision SD4 includes them in this phase (D14 below); the table at
+the end of §19.1 maps the QA rows to planet checks. Heightmap worlds must behave exactly as before.
+
+Bases: VoxelWorlds `0fed9a0`, VoxelCharacterPlugin `8465d26`, InteractionPlugin `b941201`, WorldClockPlugin `0ce2ce2`,
+ProceduralDungeonPlugin `fb4bd6b`, WorldClaims `cafde48`, UE5_PluginDev `e9d8ff0`. Live checks on `PlanetTest` with
+`/Game/PluginTesting/Review/Review_Planet` through `voxel.ConfigOverride` (R 250,000, water 249,500, shell ±6,500), as in
+§15-§18.
+
+**What the code survey found (2026-10-17)**, beyond Appendix A of the requirements doc:
+
+- Conditioning is heightmap-only on both paths: an `FVoxelConditioningZone` is an XY disc with a world-Z target, the
+  chunk manager gathers zones by a chunk's XY square (`GatherConditioningZonesForChunk`), the CPU generators blend the
+  column height before the SDF, and the GPU's heightmap branch does the same (`GpuApplyConditioning`). The planet's CPU
+  generator and its GPU branch (`SphericalPlanet.ush`) skip zones with a comment naming SP-B10. Nothing on a planet's
+  analytic side would see a zone either: `GetGeneratedSurfacePoint`, the map's planet tiles, `QueryPlanetSurfaceConditions`,
+  scatter's line top (the crossing at a chunk's upper face is put on the analytic surface, `ExtractSurfacePointsAlongUp`),
+  the PCG sampler's far points and the planet spawn point all read the world mode's own surface.
+- POI placement is a pure function of (seed, cell): one candidate per `CellSize` square (64,000 uu), a position inside it,
+  a weighted type pick among the types whose surface filter accepts the centre, a 29-sample site survey (`SurveySite`:
+  centre, two rings of 8 on the footprint, 12 on the falloff edge) judged against the water line, a relief limit and a cover
+  rule for dungeons, and a pad at the survey's median height. On a planet every one of these steps reads `GetTerrainHeightAt`
+  (the legacy query: the upper hemisphere's Z) and world XY.
+- Everything a POI spawns is composed on its pad transform, `FTransform(ZeroRotator, (Centre, PadHeight))`: claims
+  (`AWorldClaimVolume`), structures (`RelativeTransform * LayoutYaw * Pad`), the campsite spawner's campsite, the dungeon's
+  origin. Only the pad transform and the terrain samples are Z-up; the composition is already transform-relative.
+- Claims are already oriented boxes where it matters: `UWorldClaimComponent::ContainsPoint`, the edit validator
+  (`FClaimEditValidator` bakes the component transform) and scatter's claim suppression (`FScatterExclusionVolume`, frame
+  plus half extent) all invert the actor's transform; the registry's box query is an AABB of the oriented box
+  (conservative). The map markers query claims as a world-Z ±1e9 box and dedupe in 2D (`UPOIMapMarkerSubsystem`), and
+  nothing binds the 3D marker query Phase 4 added (`UVCMapMarkerRegistry::OnGatherMarkersNear`).
+- Dungeons are translation-only end to end: the stamper writes each open cell's world AABB on the voxel lattice
+  (`UDungeonVoxelStamper::StampDungeon`, faces ±X ±Y ±Z, stairs measured along world X/Y/Z), the entrance stitcher finds
+  the surface by a world-Z sweep from +10,000 to −10,000 when the world is not a heightmap (on a planet it finds nothing and
+  returns 0), the passage plan is a list of axis-aligned columns over a `float(X, Y)` surface, the tile mapper outputs
+  `GridToWorld + WorldOffset` with yaw-only rotations, and `ADungeonActor` adds its instances in world space (an actor
+  rotation would be cancelled). The POI side keeps scalar world Zs and world points in `FPOIDungeonEntranceInfo`
+  (`EntranceFloorZ`, `PassageBottomZ`, room floors, `DungeonBoundsWorld` as an FBox), which the enemies, the objective,
+  the chests, the elevator and the grid path build on with world-Z arithmetic.
+- Save: dungeon records (`FPOIDungeonRecord`) are keyed by the placement cell (an `FIntPoint`), and import merges only the
+  player-driven states and the cleared flag, so the saved geometry is never read back; player-placed campsites are saved
+  as placed actors with their full transform (rotation-safe); seed-placed POIs are not saved (they are the seed's).
+- Two heightmap readers of the analytic surface skip conditioning: scatter's buried-chunk test
+  (`ExtractSurfacePointsFromVoxelData`, `ChunkTopWorldZ < GetTerrainHeightAt − 1.5 voxels`) and the PCG sampler's far
+  points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can
+  flag a surface chunk as buried and the second puts far points at the natural height. Recorded as **G23** (§14.1); it is a
+  heightmap behaviour, so Phase 5 does not change it (the A/B must stay identical), and the planet versions are written
+  condition-aware from the start (WM-PL4).
+- `ADungeonActor::SetTileInstanceHidden` writes the instance's world transform with `bWorldSpace=false`, so a hidden
+  instance moves by the actor's location; it is only ever hidden (scaled to zero, F5-06's broken crate), so nothing shows.
+  The local-space instances of WM-PL12 remove it.
+
+### 19.1 Plan
+
+Work items (IDs `WM-PL*`, stable; `WM-P*` is Phase 1's, §15.1):
+
+| ID | Work item | Requirements | Repos | Size | Needs |
+|----|-----------|--------------|-------|------|-------|
+| WM-PL1 | **Radial conditioning zones.** `FVoxelConditioningZone` gains `Direction` (a planet zone: the unit direction from the centre to the zone's centre; zero for a heightmap zone, which keeps `Center`); on a planet `InnerRadius` and `FalloffWidth` are great-circle distances on the datum sphere and `TargetHeight` is an altitude above it. `GetWeightAtDirection`, `FVoxelTerrainConditioning::ApplyToAltitude` (the heightmap blend, on the altitude). `IVoxelTerrainConditioner::GatherConditioningOnSphere(Direction, AngularRadius, Out)` (default: none); the chunk manager gathers a planet chunk's zones by the cap its box subtends (`GatherConditioningZonesOnSphere`, public for the map, scatter and PCG); static zones with a direction take part. The heightmap gather and blend are not touched | SP-B10 | VoxelWorlds | M | — |
+| WM-PL2 | **Planet generation on the CPU takes the zones:** `GenerateChunkSphericalPlanet` blends the terrain's altitude along each voxel's direction before the SDF, so density, depth, the underwater test, caves and materials follow, in the heightmap generators' order. `PlanetGenerationVersion` 3 → 4 (D16) | SP-B10 | VoxelWorlds | S | WM-PL1, D16 |
+| WM-PL3 | **And on the GPU:** the planet branch applies the zones (packed per zone as `[Direction, InnerRadius][FalloffWidth, Target, Strength, 0]`; the heightmap packing is unchanged), `GPUvsCPUSphericalParity` gains conditioned sites | SP-B10 (SP-B4's parity) | VoxelWorlds | M | WM-PL2 |
+| WM-PL4 | **The generated surface on a planet everywhere it is read:** `GetGeneratedSurfacePoint` layers the zones; `QueryEditMergedSurfacePoint` starts its line walk there; `QueryPlanetSurfaceConditions` / `SampleSurfacePoint` take a chunk's or a region's zones (material, biome and the underwater variant at the conditioned radius); the map's planet tiles (altitudes, materials, hillshade) with each tile's zones, redrawn on `OnTerrainConditioningChanged`; scatter's line top with the chunk's zones; the PCG sampler's far points with the bounds' zones; `GetPlanetSpawnPosition` and the character's planet spawn search on the generated surface | SP-B10 | VoxelWorlds, VoxelCharacterPlugin | M-L | WM-PL1 |
+| WM-PL5 | **POI placement on the cube sphere.** `FPOIPlacement::GeneratePlanetPOIs(Seed, Direction, AngularRadius, Config, Out)`: cells of `FVoxelCubeSphereGrid(CellsPerEdgeFor(R, CellSize))` near the cap, the same hash streams on the atlas coordinate, the position as a fraction of the cell, the type pick, `SurveySite`'s 29 samples laid out on the tangent plane at the centre and taken as natural altitudes along their directions, the water line the sea's altitude (`WaterRadius − R`), relief and cover as on the plane, the pad at the median altitude. `FPOIDefinition` gains `Direction` and `Cell` (the placement cell in every mode). `GeneratePOIs` (XY) is not touched | SP-G5 | parent (VoxelWorldPOI) | L | — |
+| WM-PL6 | **The planet conditioner:** `FPOITerrainConditioner::GatherConditioningOnSphere` returns `GeneratePlanetPOIs`' flattened POIs as radial zones at their pad altitude | SP-B10, SP-G5 | parent | S | WM-PL1, WM-PL5 |
+| WM-PL7 | **The POI bridge on a planet (lifts WM-SY3's hold).** Registration builds the planet terrain context; streaming by 3D distance (claim and structure bands, as now); every POI gets a **pad space** (below): its claims, structures and campsite are composed in it as today and placed through it; structures draped onto the pad's cap; `FindNearestPOIs` / `poi.Find` on the sphere (3D distance, expanding caps, the pad's world point in `FPOISearchResult::WorldLocation`); the registration survey over the whole planet. Dungeon types stay held until WM-PL11 to WM-PL13 land (per D14) | SP-G5 | parent | L | WM-PL5, WM-PL6 |
+| WM-PL8 | **POI markers on the planet's maps:** `UPOIMapMarkerSubsystem` binds `OnGatherMarkersNear` with 3D markers (`WorldLocation` the pad point) from `GeneratePlanetPOIs` and the streamed claims, cleared state by cell, the debug radar on the tangent plane | SP-G5 (SP-G3's markers) | parent | S-M | WM-PL7 |
+| WM-PL9 | **Campsites.** Generated: the campsite spawner's campsite stands on the draped pad; `APOICampsite::GetRespawnTransform` lifts along the actor's up and faces the fire across it. Runtime levelling: `UVoxelWorldPOIPlacement::PlaceCampsite` on a planet takes the core's mean natural altitude on the tangent plane and writes the pad and apron along local up (the voxels of the cap's radial band, density from the radial signed distance), its claim in the tangent frame | SP-G5 | parent | M | WM-PL4, WM-PL7 |
+| WM-PL10 | **Claims on a planet:** the oriented consumers (edit validator, scatter suppression, the registry's point query, PCG's `Get Actor Data` bounds, the claim-decoration refresh) checked against rotated claims; markers' claim query by 3D distance (WM-PL8); World Partition stays deferred for planets (documented) | SP-G10 | parent | S | WM-PL7 |
+| WM-PL11 | **Dungeon stamping in pad space.** `UDungeonVoxelStamper::StampDungeon`, `UDungeonEntranceStitcher::StitchEntrance` and `FDungeonEntrancePassagePlan::Build` take a frame (`FTransform`, identity = today's arithmetic, unchanged code): with a rotation the stamper enumerates the lattice samples in the world box of the rotated grid and classifies each in frame space (open, lining, seal, stair), with densities graded by the signed distance to the cell boxes so DC walls are planes at any angle and the carve margin and lining one voxel thicker; the stitcher and the plan run in frame space over a surface function along the frame's up (the generated surface solved along each frame line) | SP-G6 | ProceduralDungeonPlugin, parent | L | WM-PL4, WM-PL7, D14 |
+| WM-PL12 | **The tile actor in pad space:** `ADungeonActor::BuildDungeon` maps in frame space (offset zero) and adds instances relative to the actor, which spawns at the frame; openings, fixtures and props come out in world space through the actor's transform. Identity frame: today's world-space path | SP-G6 | ProceduralDungeonPlugin, parent | S-M | WM-PL11 |
+| WM-PL13 | **Dungeon gameplay in pad space:** `FPOIDungeonEntranceInfo` keeps its fields in pad space (world space on a heightmap, where pad space is the world) and carries the pad-to-world transform; doors, torches, containers, traps, chests, the boss and enemies, the objective's inside test (an oriented box), the grid path, the elevator (along the frame's up) and their loot bursts (along local up) convert at the boundary; the deep protection claim is oriented; dungeon lookups by cell and by 3D position (`GetDungeonInfo`, `GetDungeonActor`, `IsDungeonCleared` take a cell; `…AtLocation` a world point) | SP-G6 | parent | L | WM-PL11, WM-PL12 |
+| WM-PL14 | **Debug commands on a planet:** `vox.TPPOI` (by direction, settled), `vox.TPRoom` (into the room in pad space, upright in its gravity), `vox.Trap`, `vox.Campsite`, `poi.Find` (lat/lon and a `vox.TPLatLon` line); the Phase 5 notices go | (SP-I5's family) | parent (game module, VoxelWorldPOI) | S-M | the items they call |
+| WM-PL15 | **Tests** with every item (below) | SP-I2's style | all | M | — |
+| WM-PL16 | **Live verification:** the exit check on the planet, and the `VoxelDemo` A/B against a base build | — | docs | L | all |
+| WM-PL17 | **Docs:** these results, the requirement rows and §4's Phase 5 exit check, `WORLD_MODES.md`, `CLAIMS_ARCHITECTURE.md`, the POI, dungeon and campsite plans (`POI_POPULATION_PLAN.md`, `POI_DUNGEON_PLAN.md`, `SURFACE_GAMEPLAY_PLAN.md`), the plugin instructions, the parent's doc map and `vox.*` table | — | all | M | — |
+
+**Milestones.** Each item lands as its own commit with its tests.
+
+| Milestone | Items | Repos | Done when |
+|-----------|-------|-------|-----------|
+| P5.1 Conditioning on a planet | WM-PL1 to WM-PL4 | VoxelWorlds, VoxelCharacterPlugin | A zone flattens a planet's terrain on the CPU and the GPU alike (parity in the editor), every analytic reader sees the flattened ground, the heightmap parity CRCs and tests unchanged |
+| P5.2 POIs on a planet | WM-PL5 to WM-PL8 | parent | Surface POIs place, condition, stream and show on the map at every latitude, upright on their pads; heightmap placement unchanged |
+| P5.3 Campsites and claims | WM-PL9, WM-PL10 | parent | Generated and levelled campsites on a planet; rotated claims protect, suppress and decorate |
+| P5.4 Dungeons on a planet | WM-PL11 to WM-PL13 | ProceduralDungeonPlugin, parent | Both dungeon representations stamp, stitch, dress and play in pad space; the identity frame bit for bit as before (per D14) |
+| Exit | WM-PL14 to WM-PL17 | all | The exit check met; suites green headless and in the editor; the heightmap A/B unchanged |
+
+Order: P5.1 first (P5.2's pads rely on it), then P5.2, P5.3, and P5.4 (per D14). PRs: VoxelWorlds (P5.1 and the docs),
+VoxelCharacterPlugin (the spawn search), ProceduralDungeonPlugin (P5.4), then UE5_PluginDev (VoxelWorldPOI, the game
+module, the gitlinks and the doc map). If D14 defers dungeons, P5.4 becomes its own phase with its own PRs and the dungeon
+types stay held on planets.
+
+**Design (written before building).** P5.1, conditioning on a planet:
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| The zone's shape on a planet | A cap on the datum sphere: weight by the great-circle distance from the zone's direction, `s = R · atan2(|D × Dz|, D · Dz)`, `Strength` inside `InnerRadius`, the heightmap's smoothstep across `FalloffWidth`, 0 beyond (D15) | The plane's disc, measured on the surface; atan2 is well conditioned at small angles in float on the GPU (about 0.03 uu at 4,500 uu on this planet) |
+| What it flattens | The terrain's altitude along each direction: `A' = lerp(A, TargetAltitude, w)` per zone in order, so the radius `R + A'` replaces `R + A` before the SDF, as `ApplyToHeight` replaces the column height | A pad is then level in gravity (constant altitude) everywhere on it; the heightmap's "TargetHeight is a world Z" becomes "an altitude", the planet's height everywhere else (SP-A1) |
+| A planet zone's fields | `Direction` (FVector, zero on heightmaps) beside the 2D `Center`; one struct, so the request, the chunk manager's static list and Blueprint keep one type. A zone with a direction is a planet zone; heightmap code never looks at it | The heightmap struct's layout and every heightmap path stay as they are; a planet zone placed in a heightmap world (or the reverse) contributes nothing, with a warning at `AddConditioningZone` |
+| Gathering on a planet | The chunk's cap: its centre's direction and the angle its half-diagonal subtends from the planet centre (everything, for a chunk around the centre). A zone meets it when the angle between them is at most the cap's angle plus the zone's angular radius `(InnerRadius + FalloffWidth) / R`. The conditioner answers the same cap query (`GatherConditioningOnSphere`) | Conservative and cheap (one dot product per zone and chunk); it gives the generator exactly the zones whose influence can reach the chunk, as the XY square does on the plane |
+| The GPU | The same zone buffer and count; the planet branch reads `[Dx, Dy, Dz, Inner][Falloff, Target, Strength, 0]`, uploaded that way when the request's world mode is the planet; the weight and blend in `SphericalPlanet.ush` after the radial height, before `PlanetShellSignedDistance` | No new shader parameter; the heightmap packing, branch and CRCs are untouched |
+| Who reads the generated surface | Every planet consumer that reads the world mode's analytic surface as "the ground": `GetGeneratedSurfacePoint`, the line walk's start in `QueryEditMergedSurfacePoint`, `QueryPlanetSurfaceConditions` / `SampleSurfacePoint` (with zones), the map's planet tiles, scatter's line top, PCG's far points, the planet spawn point and search. `GetSurfacePointAt` stays the world mode's (natural) surface, as `GetTerrainHeightAt` is on the plane; POI placement reads the natural surface on purpose | One rule, "the generated surface is the natural surface plus the zones", applied wherever a planet reader means the ground the generator makes. On the plane G23 is the same rule broken; it stays a heightmap follow-up |
+
+P5.2 and P5.3, POIs, campsites and claims:
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Cells on a planet | The cube-sphere grid with `N = CellsPerEdgeFor(R, CellSize)` (7 a face edge on `Review_Planet` at the default 64,000: 294 cells, each at most 64,000 uu across), keyed by atlas coordinate; `HashCell(Seed, Atlas.X, Atlas.Y)` and the same draws for existence, position, radius and type; the position is the cell fraction 0.15-0.85 along U and V | The heightmap rule on the planet's own 2D coordinate; the atlas key is face-qualified, so streaming, dungeon records and the POI seed (`MakePOISeed`) keep their `FIntPoint` |
+| Which cells a cap query visits | `GatherWithinAngle` from the cap's direction with the cap's angle plus the largest POI influence and a cell's angular half-diagonal; a POI is returned when its influence cap meets the query cap | Every caller (conditioner per chunk, streaming, markers, search) gets the same POI for a cell whatever cap it asks with: a pure function of (seed, cell) |
+| The site survey | `SurveySite`'s pattern in the tangent plane at the centre (east and north from `FVoxelCubeSphere::GetTangentFrame`): a sample at distance r and heading a is the direction `D cos(r/R) + (E cos a + N sin a) sin(r/R)` (r along the surface), its natural altitude (`GetSurfacePoint` of the configured world mode). Water line: the sea's altitude, `WaterRadius − R` (−500 on `Review_Planet`), when water is on, else 0 | The plane's rules read in the planet's own height (altitude) and distance (along the surface) |
+| Pad space | Each POI has a pad space: on a heightmap the world itself (identity); on a planet the tangent frame at the datum point under its centre, x east, y north, z local up (`C + D·R` the origin), so the pad is at (0, 0, PadAltitude). Every piece of POI code that composes things on the pad (claims, structures, layout yaw, the campsite, and in P5.4 the dungeon) works in pad space with its existing arithmetic and converts at the boundary: `PadToWorld` when it spawns an actor or writes a voxel, `WorldToPad` when it reads the world | One idea in place of a frame argument in each consumer: the plane's code is the planet's code in pad space, and the plane runs it with the identity, so its arithmetic does not change |
+| Structures on the cap | A structure's world transform is `Relative * LayoutYaw * Pad` mapped to the world, then draped: moved along its own up line to the pad's altitude plus its height above the pad, and turned from the pad's up to its own local up | The pad is level in gravity, not a plane: a building 3,000 uu from the centre of a pad on `Review_Planet` would otherwise float 18 uu above it and lean 0.7° off its gravity |
+| Claims | The pad claim and the deep dungeon claim spawn at their pad-space transforms mapped to the world (rotated boxes); extents as now (z along local up) | Their consumers already invert the actor's transform; the registry's AABB query stays conservative |
+| Streaming and search on a planet | Distances in 3D between the viewer and the pad's world point (the claim band, the structure band, despawn); `FindNearestPOIs` from a world position by expanding caps (1 km, doubling up to the cap); `poi.Find` prints latitude, longitude, altitude and a `vox.TPLatLon` line | On a 2.5 km planet a 2D distance is meaningless; the bands stay straight-line distances, as on the plane |
+| Generated campsites | The spawner is a draped structure; the campsite spawns at its transform (upright); `GetRespawnTransform` lifts along the actor's up and faces the fire across it (identity on the plane: the old expression) | F8-04 to F8-08 at a generated campsite |
+| Runtime levelling (`PlaceCampsite`) on a planet | The core's mean natural altitude over voxel-spaced points of the tangent plane; then every voxel in the world box of the cap's radial band: its direction, its distance from the centre along the surface, the profile (flat core, the parabolic apron to the natural altitude), density from the radial signed distance `(R + Surface) − |P − C|` with the plane's grading and depth materials; the claim in pad space | The plane's pad and apron in the planet's height; the edits stay on the voxel lattice |
+
+P5.4, dungeons (if D14 includes them):
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| The dungeon's frame | Pad space (no layout yaw, as the plane's grid is never yawed): the grid origin in pad space is computed exactly as today from the pad at (0, 0, PadAltitude), so `WorldOffset` and every recorded point keep their meaning in pad space | The dungeon is rigid (flat floors, straight halls); over its 8,000 uu its floor stays within 2° of the local gravity on `Review_Planet` |
+| Stamping a rotated grid | With a non-identity frame the stamper takes the world box of the rotated grid (plus the lining and margin), enumerates its lattice samples once, classifies each by its frame-space position (open cell, lining face, outer seal, stair step), writes it with a density graded by the signed distance to the nearest open-cell box face (DC then meshes a plane at any angle) and one voxel more carve margin and lining (an oblique plane aliases by up to √3/2 voxel on the lattice). Identity frame: the existing per-cell loops, unchanged | A rotated box on an axis-aligned lattice cannot be written per cell AABB; graded densities are what the generator writes, and keep VoxelCarved walls smooth |
+| The entrance | The passage plan built in frame space (offset zero) over a surface function: the frame-space height where the frame's vertical line through (x, y) meets the generated surface (a few bisection steps on the altitude along it); the stitcher writes its columns, cave opening and collar in frame space through the same per-sample classification | The plan is already pure and offset-linear; only its surface function and its writes were world-Z |
+| The tile actor | Spawned at the frame; `MapToTiles` with a zero offset; instances added relative to the actor; openings, fixtures and props returned through the actor's transform (identity frame: the world-space path) | The mapper is rigid and pure, so composing with the frame is exact, and the interactables keep their ids (cell, face and kind) |
+| Dungeon gameplay | `FPOIDungeonEntranceInfo` stays in pad space (world on a heightmap) plus a C++-only `PadToWorld` transform (not a UPROPERTY, so heightmap save documents stay byte for byte); each consumer computes in pad space as today and converts its final transforms (doors, torches, containers, traps, chests, the boss, enemies, the elevator car's axis, loot bursts along local up); the objective's inside test and the enemies' grid map world positions into pad space first | The consumers' Z-up arithmetic becomes correct by construction in pad space; the import never reads the geometry, so saves need no new field |
+| Dungeon records on a planet | Keyed by the atlas cell (as streaming); `WorldOffset` saved in pad space; nothing else changes | Import merges states and the cleared flag only |
+
+**Decisions for the user** (to ask before building; recorded in §8 when decided):
+
+| ID | Question | Options | Recommendation |
+|----|----------|---------|----------------|
+| D14 | Are dungeons (SP-G6) part of Phase 5? SD4 put them last because they need rotated stamping on an axis-aligned grid | (a) **Yes, as Phase 5's last milestone (P5.4)**, in its own PRs, with dungeon types held on planets until it lands; the exit check covers the dungeon rows (F3, F4, F5, F7's dungeon rows, F9-03, F9-04). (b) **No:** Phase 5 is surface POIs and campsites; dungeon types stay held on planets and P5.4 becomes Phase 6's first item. (c) **Axis-snapped dungeons:** stamp unrotated, only where local up is within a few degrees of a world axis (near the six face centres) | **(a).** The survey shows most of the work is mechanical once pad space exists (the mapper is rigid, claims are oriented, saves need nothing new); the real cost is the rotated stamp and the entrance. (c) is cheap but puts dungeons only near the six face centres (about 1% of the surface within 5° of them), tilted by up to the snap angle |
+| D15 | The conditioning zone model on a planet (SP-B10) | (a) **A radial cap:** the footprint a cap on the datum sphere (great-circle distance), the target an altitude, so a pad is level in gravity; structures draped onto it. (b) **A tangent plane:** the pad is the plane tangent at the centre, so it rises toward its rim by r²/2R (40 uu at 4,500 uu on `Review_Planet`) and leans up to 1° off gravity there, and rigid layouts sit flush without draping | **(a).** It is the plane's rule in the planet's height, one weight function on the CPU and the GPU, and "flat" means what the player and the physics feel; the cost is draping structures, a few lines in the bridge |
+| D16 | Does Phase 5 bump `PlanetGenerationVersion` (refusing planet saves only)? | Bump 3 → 4: every planet save from before Phase 5 is refused and kept on disk; heightmap saves keep loading (`GenerationVersion` stays 2). Or no bump: an old planet save loads onto terrain that is now flattened under POIs, with its edits where they were | **Bump.** Planet generation changes wherever a POI conditions the ground, and planet saves hold only test data. `GenerationVersion` does not move: no heightmap terrain changes |
+
+**How each is verified.**
+
+| ID | Check |
+|----|-------|
+| WM-PL1 | `Generation.Conditioning.Radial` (the weight by great-circle distance: `Strength` inside, the smoothstep on the ring, 0 beyond, at both poles, the equator and a cube corner; `ApplyToAltitude` layering; a planet zone ignored by `ApplyToHeight` and the reverse); `Streaming.Planet.ConditioningGather` (on a planet chunk manager with static zones, each chunk's gathered set equals a brute-force test of every zone against the chunk's voxels); `Generation.Conditioning.Blend` unchanged |
+| WM-PL2 | `Generation.Conditioning.FlattensPlanet` (generated chunks at 45° and at a cube corner: inside the inner radius every surface crossing is within half a voxel of the target altitude, beyond the ring the natural surface's crossings unchanged, raised and lowered zones); the existing conditioning and planet generation tests unchanged; `VoxelWorldSave.Document.PlanetKeys` updated for version 4 |
+| WM-PL3 | `Generation.GPUvsCPUSphericalParity` with conditioned sites (raised at 45°, lowered across a cube edge) at LOD 0/1/2, in the editor; the 48 heightmap parity lines CRC-identical to Phase 4's, the earlier planet sites unchanged |
+| WM-PL4 | `Streaming.Planet.ConditionedSurface` (with a zone: `GetGeneratedSurfacePoint` within a voxel of the generated crossing on the pad and the ring; `QueryEditMergedSurfacePoint` finds the pad; the spawn position stands on it); `Map.Planet.ConditionedPixels` (tile pixels over a pad: altitude and material equal generation's surface voxel); `Scatter.Planet.ConditionedLineTop` (points on a pad's ring at chunk top faces on the surface, none lost to the cover test); `PCG.Planet.ConditionedFar` |
+| WM-PL5 | `POI.Planet.Placement` (on `Review_Planet`'s parameters: the same POIs every call and from any cap containing them; each centre in its cell; land types' footprints above the sea's altitude; the pad the survey's median; type counts by weight over the planet within tolerance; no two POIs' influence caps closer than the cell margin allows); the heightmap POI tests unchanged |
+| WM-PL6 | `POI.Planet.ConditionerZones` (the conditioner's zones for a cap = the placement's flattened POIs, radial, at their pad altitude) |
+| WM-PL7 | `POI.Planet.Streaming` (replaces `POI.Planet.NoPlacement`: on a streamed planet the bridge registers, claims stream in by 3D distance with their up within 0.01° of the radial, structures stand on the pad within a voxel and upright within 0.5° after draping, `FindNearestPOI` returns the nearest pad on the sphere, dungeon types held per D14) |
+| WM-PL8 | `POI.Planet.MapMarkers` (markers near a position carry the pad's world point, by 3D distance, the streamed and far sources merged without doubles) |
+| WM-PL9 | `POI.Planet.CampsiteRespawn` (the respawn point above the pad along local up, facing the fire on the tangent plane; on the plane the old transform); `POI.Planet.PlaceCampsite` (on a streamed planet the core's surface crossings within half a voxel of the target altitude, the apron meeting the natural ground, the claim oriented) |
+| WM-PL10 | `POI.Planet.Claims` (with a rotated claim: the edit validator refuses inside and allows outside, scatter's exclusion volume equals the claim's oriented box, the registry's point query) |
+| WM-PL11 | `Dungeon.Stamp.RotatedFrame` (a rotated stamp opens the voxels inside open cells in frame space within the margin, lines and seals the rest, stairs step along the frame's up; with the identity frame the same edits as before, bit for bit); `Dungeon.Stitch.PlanetSurface` (the shaft and the ramp mouth reach the generated surface along the frame's up); the dungeon plugin's suites unchanged |
+| WM-PL12 | `Dungeon.TileMapper.RotatedFrame` (every tile, opening, fixture and prop is the frame-space one times the frame; identity: the old world transforms) |
+| WM-PL13 | `POI.Planet.DungeonFrame` (the entrance info's pad-space points map onto the stamped rooms' floors; the objective's inside test, the grid path's cells and the elevator's axis in the frame; the deep claim oriented); the POI dungeon tests unchanged |
+| All | Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon` and the same in the editor with the GPU tests running |
+
+**Exit check.** On `Review_Planet` with `vox.Debug.Capture 1` throughout, the QA rows below, each passing as its Expected
+column says, read in the local frame; screenshots and logs per row in §19.2.
+
+| QA rows | On the planet | Where | Items |
+|---------|---------------|-------|-------|
+| W-07 | At one POI of each surface type (City, Village, Lookout Tower, Campsite): the pad cut into the slope at the local ground (its altitude between the ring's lowest and highest natural altitude), never in the sea, structures standing on it upright in their gravity (base within a voxel of the ground, tilt under 0.5°), no grass or trees through them; and (P5.4) a dungeon never exposed in a valley side | 45°, the equator, near a cube edge, the polar region | WM-PL4 to WM-PL7, WM-PL10 |
+| W-05 | POI markers on the minimap and the globe where the POIs are; their flattened pads show on the map | The same POIs | WM-PL4, WM-PL8 |
+| W-06 (protection) | Digging inside a POI's protected claim is refused, outside it works | A POI with `bProtectFromEdits` | WM-PL10 |
+| F8-04, F8-05, F8-06, F8-08 | As written at a generated campsite: Rest, Sleep (local night), campfire crafting, respawn beside it after a death far away | A generated campsite | WM-PL9 |
+| F9-01, F9-02 | Rest at a generated campsite (and, with P5.4, light a sconce); save, reload: the respawn point, the dug hole and the dungeon state back | 45° | WM-PL9, WM-PL13 |
+| F3-01 to F3-07, F4-01 to F4-05, F5-01 to F5-08, F7-03 to F7-05, F7-08, F9-03, F9-04 | (P5.4, per D14) As written, in both dungeon representations: the entrance reachable on foot, chests, containers, the treasure room, locked and ordinary doors, the boss in its room, the clear and its gold marker, patrols, traps, breakable crates, dark halls and sconces, saving inside a dungeon | Two dungeons, one near a cube edge | WM-PL11 to WM-PL13 |
+
+Pass: every row as above, no fall-through in the capture, and no SP-A3 legacy-height warning in the log (POI placement no
+longer reads the old query on a planet).
+
+**Heightmap worlds unchanged.** Planet-only code runs only when the world is a planet (a zone with a direction, a POI
+config with a planet world mode, a non-identity pad space); where bit-identity matters each new helper takes the old
+expression on the plane. Checked by the existing suites, the identity-frame tests above, and a `VoxelDemo` A/B (base build
+against feature build, one script on both, GPU scatter extraction off in memory on both as in §18.2.4): the POI
+registration line (placed of candidates, rejections), `poi.Find` for each type (positions, pad heights), the dungeon stamp
+lines (seed, rooms, voxels, grid top), `voxel.Map.Capture` at the spawn (identical PNG), `voxel.Scatter.Digest`, NPC
+spawns, three `vox.NavPath` paths, `vox.Clock`, and a dungeon visit (`vox.TPPOI Tiled`, `vox.TPRoom Boss`, `vox.Enemies`).
+
+**Left for later.** G23 (heightmap readers that skip conditioning); claim-driven conditioning (a claim volume flattening
+ground by itself; today only POI placement feeds the conditioner, on the plane too); World Partition for planets;
+replicated world items (§18.2.6).
