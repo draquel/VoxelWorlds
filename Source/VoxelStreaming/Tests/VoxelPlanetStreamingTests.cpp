@@ -29,9 +29,10 @@
 // - A real chunk manager streams a small planet (CPU generation, Dual Contouring, three LOD bands, water at the datum)
 //   from viewers at the pole, at 45 degrees and on the equator into a renderer that records the chunk meshes and seam
 //   buckets. Once settled, the rendered surface is closed: every edge is shared by two triangles, except next to chunks
-//   that are not loaded (the loaded region's edge), at T-junctions where resolutions meet, and at G17's small gaps in
-//   mixed-LOD face seams (reported, not failed: heightmap worlds have them too). Water flags lie inside the sea radius
-//   only (the Z-plane WaterLevel is set far above everything), and some chunks have them.
+//   that are not loaded (the loaded region's edge) and at T-junctions where resolutions meet. A gap at a mixed-LOD face
+//   seam (G17) fails like any other hole. Water flags lie inside the sea radius only (the Z-plane WaterLevel is set far
+//   above everything), and some chunks have them.
+// - The same closed-surface check on a plane with the same chunk footprint and LOD bands (G17 was not planet-specific).
 // - Collision winding: a chunk at 45 degrees meshed and built as the collision manager builds its body has its surface
 //   faces pointing away from the planet, in physics order and in the built body.
 // ---------------------------------------------------------------------------
@@ -97,7 +98,10 @@ namespace VoxelPlanetStreamingTestUtils
 	constexpr float PlanetStreamVoxelSize = 50.0f;
 	constexpr float PlanetStreamChunkWorld = PlanetStreamChunkSize * PlanetStreamVoxelSize;
 
-	/** A small planet (radius 20,000) streamed by a real chunk manager into the recording renderer. */
+	/**
+	 * A small planet (radius 20,000) streamed by a real chunk manager into the recording renderer, or (StartPlane) a
+	 * plane with the same chunk footprint and LOD bands.
+	 */
 	struct FPlanetStreamingWorld
 	{
 		UWorld* World = nullptr;
@@ -106,15 +110,12 @@ namespace VoxelPlanetStreamingTestUtils
 		UVoxelChunkManager* Manager = nullptr;
 		FRecordingMeshRenderer Renderer;
 		FVector Viewer = FVector::ZeroVector;
+		float VoxelSize = PlanetStreamVoxelSize;
+		float ChunkWorld = PlanetStreamChunkWorld;
 
 		void Start(const TCHAR* WorldName, const FVector& ViewerDirection, float ViewerAltitude)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
-			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
-			WorldContext.SetCurrentWorld(World);
-
-			Config = NewObject<UVoxelWorldConfiguration>();
-			Config->AddToRoot();
+			CreateWorld(WorldName);
 			Config->WorldMode = EWorldMode::SphericalPlanet;
 			Config->WorldOrigin = FVector::ZeroVector;
 			Config->WorldRadius = PlanetStreamRadius;
@@ -143,17 +144,70 @@ namespace VoxelPlanetStreamingTestUtils
 			Config->NoiseParams.Seed = 9001;
 			Config->NoiseParams.Frequency = 0.0004f;
 			Config->NoiseParams.Octaves = 3;
-			Owner = World->SpawnActor<AActor>();
-			Manager = NewObject<UVoxelChunkManager>(Owner);
-			Manager->RegisterComponent();
-			Renderer.Initialize(World, Config);
-			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+			StartManager();
 
 			// Stream from a viewer above the surface along ViewerDirection.
 			const FVoxelTerrainSurfacePoint Surface = Manager->GetSurfacePointAt(ViewerDirection);
 			Viewer = Surface.Position + ViewerDirection * ViewerAltitude;
 			Manager->ResetBenchCounters();
 			Manager->SetBenchmarkView(true, Viewer);
+		}
+
+		/**
+		 * G17's heightmap repro: an InfinitePlane with chunk 16 and voxel 100 (the planet's 1,600 uu chunk), the same
+		 * three LOD bands and rolling hills, streamed from a viewer ViewerAltitude above the surface at (X, Y).
+		 */
+		void StartPlane(const TCHAR* WorldName, float X, float Y, float ViewerAltitude)
+		{
+			CreateWorld(WorldName);
+			VoxelSize = 100.0f;
+			ChunkWorld = 16 * VoxelSize;
+			Config->WorldMode = EWorldMode::InfinitePlane;
+			Config->WorldOrigin = FVector::ZeroVector;
+			Config->HeightScale = 1600.0f;
+			Config->BaseHeight = 0.0f;
+			Config->MeshingMode = EMeshingMode::DualContouring;
+			Config->bEnableLOD = true;
+			Config->ChunkSize = 16;
+			Config->VoxelSize = VoxelSize;
+			Config->ViewDistance = 6000.0f;
+			Config->LODBands = {
+				FLODBand(0.0f, 2000.0f, 0, 1),
+				FLODBand(2000.0f, 4000.0f, 1, 2),
+				FLODBand(4000.0f, 6000.0f, 2, 4) };
+			Config->bUseGPUGeneration = false;
+			Config->bUseGPUMeshing = false;
+			Config->bGenerateCollision = false;
+			Config->bEnableScatter = false;
+			Config->bEnableCaves = false;
+			Config->bEnableBiomes = false;
+			Config->bEnableWaterLevel = false;
+			Config->NoiseParams.Seed = 9001;
+			Config->NoiseParams.Frequency = 0.0004f;
+			Config->NoiseParams.Octaves = 3;
+			StartManager();
+
+			Viewer = FVector(X, Y, Manager->GetGeneratedSurfaceHeight(X, Y) + ViewerAltitude);
+			Manager->ResetBenchCounters();
+			Manager->SetBenchmarkView(true, Viewer);
+		}
+
+		void CreateWorld(const TCHAR* WorldName)
+		{
+			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
+			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
+			WorldContext.SetCurrentWorld(World);
+			Config = NewObject<UVoxelWorldConfiguration>();
+			Config->AddToRoot();
+		}
+
+		void StartManager()
+		{
+			Owner = World->SpawnActor<AActor>();
+			Manager = NewObject<UVoxelChunkManager>(Owner);
+			Manager->RegisterComponent();
+			Renderer.Initialize(World, Config);
+			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 		}
 
 		/** Tick until the pipeline has been idle for 90 ticks; false if it does not settle within 120 s. */
@@ -189,71 +243,94 @@ namespace VoxelPlanetStreamingTestUtils
 	{
 		return FIntVector(FMath::RoundToInt32(P.X * 100.0), FMath::RoundToInt32(P.Y * 100.0), FMath::RoundToInt32(P.Z * 100.0));
 	}
-}
 
-/**
- * SP-D4, SP-B8, SP-C1: a small planet streamed from viewers at the north pole, at latitude 45 (longitude 45, where
- * chunks straddle the surface diagonally on all three axes) and on the equator renders a closed surface, with chunks at
- * three LOD levels meeting through the seam path, and water flags only inside the sea radius.
- *
- * An open edge next to a chunk that is not loaded is the loaded region's edge, and one along a coarser edge with a vertex
- * of the finer side on it is a T-junction (no gap). Anything else is a hole. Holes at a face seam between chunks of
- * different LOD (G17, WORLD_MODES_REVIEW_PLAN.md §15.3: small gaps in the mixed-LOD face seam, on heightmap worlds too)
- * are counted and reported; any other hole fails the test.
- */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingClosedSurfaceTest,
-	"VoxelWorlds.Streaming.Planet.ClosedSurface",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FVoxelPlanetStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
-{
-	using namespace VoxelPlanetStreamingTestUtils;
-
-	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
-	const TPair<const TCHAR*, FVector> Places[] = {
-		{ TEXT("north pole"), FVector(0.02, 0.03, 1.0).GetSafeNormal() },
-		{ TEXT("latitude 45"), FVector(C45 * C45, C45 * C45, C45).GetSafeNormal() },
-		{ TEXT("equator"), FVector(1.0, 0.03, 0.02).GetSafeNormal() },
-	};
-	for (const TPair<const TCHAR*, FVector>& Place : Places)
+	/**
+	 * Welds world positions within 0.01 uu of each other. One vertex can reach the check as two floats a few ulps
+	 * apart: a seam bucket's ring vertex is solved in the neighbour's frame and shifted by a chunk into the owner's,
+	 * so a plain rounded key splits it whenever it sits on a rounding boundary (G17's last "gaps" were these).
+	 */
+	struct FVertexWelder
 	{
-		FPlanetStreamingWorld Test;
-		Test.Start(TEXT("VoxelPlanetStreamingTestWorld"), Place.Value, 300.0f);
-		TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place.Key), Test.Settle());
+		static constexpr double Tolerance = 0.01;
+		TMap<FIntVector, int32> Ids;
+		TArray<FVector> Positions;
+		double MaxWeldDistance = 0.0; // largest distance between two positions welded into one vertex
 
-		TArray<FIntVector> Loaded;
-		Test.Manager->GetLoadedChunks(Loaded);
-		const TSet<FIntVector> LoadedSet(Loaded);
-		TMap<int32, int32> ByLOD;
-		for (const TPair<FIntVector, int32>& Chunk : Test.Renderer.ChunkLODs)
+		int32 Weld(const FVector& P)
 		{
-			ByLOD.FindOrAdd(Chunk.Value)++;
+			const FIntVector Key = WeldKey(P);
+			for (int32 dz = -1; dz <= 1; ++dz)
+			for (int32 dy = -1; dy <= 1; ++dy)
+			for (int32 dx = -1; dx <= 1; ++dx)
+			{
+				if (const int32* Found = Ids.Find(Key + FIntVector(dx, dy, dz)))
+				{
+					const double Distance = FVector::Dist(Positions[*Found], P);
+					if (Distance <= Tolerance)
+					{
+						MaxWeldDistance = FMath::Max(MaxWeldDistance, Distance);
+						return *Found;
+					}
+				}
+			}
+			const int32 Id = Positions.Add(P);
+			Ids.Add(Key, Id);
+			return Id;
 		}
-		TestTrue(*FString::Printf(TEXT("%s: a neighbourhood streamed in"), Place.Key), Loaded.Num() >= 60);
-		TestTrue(*FString::Printf(TEXT("%s: three LOD levels meet"), Place.Key), ByLOD.FindRef(0) > 0 && ByLOD.FindRef(1) > 0 && ByLOD.FindRef(2) > 0);
+	};
 
-		// Every rendered triangle in world space (the chunk grid is centred on the planet, WorldOrigin 0), welded.
-		TMap<FIntVector, int32> VertexIds;
-		TArray<FVector> VertexPos;
-		TMap<TPair<int32, int32>, int32> EdgeUse;
+	/** The settled world's rendered surface: its size and its open edges by kind. */
+	struct FClosedSurfaceCounts
+	{
+		int32 Chunks = 0;
+		int32 ByLOD[3] = { 0, 0, 0 };
 		int32 Triangles = 0;
+		int32 Edges = 0;
+		double MaxWeldDistance = 0.0;
+		int32 AtEdge = 0;         // next to a chunk that is not loaded: the loaded region's edge
+		int32 TJunctions = 0;     // along a coarser edge with a vertex of the finer side on it (no gap)
+		int32 MixedSeamHoles = 0; // holes at a face seam between chunks of different LOD (G17)
+		int32 OtherHoles = 0;
+
+		FString Describe() const
+		{
+			return FString::Printf(TEXT("%d chunks (LOD 0/1/2: %d/%d/%d), %d triangles, %d edges, welded within %.5f uu; open: %d at the loaded region's edge, %d in T-junctions, %d at mixed-LOD face seams (G17), %d other holes"),
+				Chunks, ByLOD[0], ByLOD[1], ByLOD[2], Triangles, Edges, MaxWeldDistance, AtEdge, TJunctions, MixedSeamHoles, OtherHoles);
+		}
+	};
+
+	/**
+	 * Welds every chunk mesh and seam bucket the recording renderer holds into one world-space surface (the chunk grid
+	 * starts at WorldOrigin 0) and sorts its open edges: next to a chunk that is not loaded, in T-junctions, at a
+	 * mixed-LOD face seam (G17) or elsewhere. The first few holes are logged with their place.
+	 */
+	FClosedSurfaceCounts CountOpenEdges(FAutomationTestBase& Test, const TCHAR* Place, const FPlanetStreamingWorld& World)
+	{
+		FClosedSurfaceCounts Counts;
+		const double ChunkWorld = World.ChunkWorld;
+		TArray<FIntVector> Loaded;
+		World.Manager->GetLoadedChunks(Loaded);
+		const TSet<FIntVector> LoadedSet(Loaded);
+		Counts.Chunks = Loaded.Num();
+		for (const TPair<FIntVector, int32>& Chunk : World.Renderer.ChunkLODs)
+		{
+			if (Chunk.Value >= 0 && Chunk.Value < 3)
+			{
+				++Counts.ByLOD[Chunk.Value];
+			}
+		}
+
+		FVertexWelder Welder;
+		const TArray<FVector>& VertexPos = Welder.Positions;
+		TMap<TPair<int32, int32>, int32> EdgeUse;
 		auto AddMesh = [&](const FChunkMeshData& Mesh, const FIntVector& Coord)
 		{
-			const FVector Offset = FVector(Coord) * PlanetStreamChunkWorld;
+			const FVector Offset = FVector(Coord) * ChunkWorld;
 			TArray<int32> Ids;
 			Ids.Reserve(Mesh.Positions.Num());
 			for (const FVector3f& P : Mesh.Positions)
 			{
-				const FVector World = Offset + FVector(P);
-				const FIntVector Key = WeldKey(World);
-				if (const int32* Found = VertexIds.Find(Key))
-				{
-					Ids.Add(*Found);
-				}
-				else
-				{
-					Ids.Add(VertexIds.Add(Key, VertexPos.Add(World)));
-				}
+				Ids.Add(Welder.Weld(Offset + FVector(P)));
 			}
 			for (int32 i = 0; i + 2 < Mesh.Indices.Num(); i += 3)
 			{
@@ -262,21 +339,23 @@ bool FVoxelPlanetStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
 				{
 					continue;
 				}
-				++Triangles;
+				++Counts.Triangles;
 				for (int32 e = 0; e < 3; ++e)
 				{
 					EdgeUse.FindOrAdd(TPair<int32, int32>(FMath::Min(V[e], V[(e + 1) % 3]), FMath::Max(V[e], V[(e + 1) % 3])))++;
 				}
 			}
 		};
-		for (const TPair<FIntVector, FChunkMeshData>& Chunk : Test.Renderer.ChunkMeshes)
+		for (const TPair<FIntVector, FChunkMeshData>& Chunk : World.Renderer.ChunkMeshes)
 		{
 			AddMesh(Chunk.Value, Chunk.Key);
 		}
-		for (const TPair<FIntVector, FChunkMeshData>& Bucket : Test.Renderer.SeamBuckets)
+		for (const TPair<FIntVector, FChunkMeshData>& Bucket : World.Renderer.SeamBuckets)
 		{
 			AddMesh(Bucket.Value, Bucket.Key);
 		}
+		Counts.Edges = EdgeUse.Num();
+		Counts.MaxWeldDistance = Welder.MaxWeldDistance;
 
 		TArray<TPair<int32, int32>> OpenEdges;
 		for (const TPair<TPair<int32, int32>, int32>& Edge : EdgeUse)
@@ -315,14 +394,15 @@ bool FVoxelPlanetStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
 			return false;
 		};
 
-		// The loaded region's edge: a chunk within 8 voxels (LOD 2's stride-4 cells, twice) is not loaded.
-		const double Reach = 8.0 * PlanetStreamVoxelSize;
-		int32 AtEdge = 0, TJunctions = 0, MixedSeamHoles = 0, OtherHoles = 0;
+		// The loaded region's edge: a chunk within 8 voxels (LOD 2's stride-4 cells, twice) of the edge's midpoint or
+		// either end is not loaded. The ends matter: a seam that cannot be built for want of a participant leaves open
+		// the edges of the quads that needed one of its cells, and a long coarse edge's midpoint can lie farther out.
+		const double Reach = 8.0 * World.VoxelSize;
 		for (const TPair<int32, int32>& Edge : OpenEdges)
 		{
 			const FVector Mid = 0.5 * (VertexPos[Edge.Key] + VertexPos[Edge.Value]);
-			const FIntVector Home(FMath::FloorToInt(Mid.X / PlanetStreamChunkWorld), FMath::FloorToInt(Mid.Y / PlanetStreamChunkWorld),
-				FMath::FloorToInt(Mid.Z / PlanetStreamChunkWorld));
+			const FIntVector Home(FMath::FloorToInt(Mid.X / ChunkWorld), FMath::FloorToInt(Mid.Y / ChunkWorld), FMath::FloorToInt(Mid.Z / ChunkWorld));
+			const FVector Probes[3] = { Mid, VertexPos[Edge.Key], VertexPos[Edge.Value] };
 			bool bAtEdge = !LoadedSet.Contains(Home);
 			for (int32 dz = -1; dz <= 1 && !bAtEdge; ++dz)
 			for (int32 dy = -1; dy <= 1 && !bAtEdge; ++dy)
@@ -331,50 +411,95 @@ bool FVoxelPlanetStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
 				const FIntVector Neighbor = Home + FIntVector(dx, dy, dz);
 				if (!LoadedSet.Contains(Neighbor))
 				{
-					const FBox Box(FVector(Neighbor) * PlanetStreamChunkWorld, FVector(Neighbor + FIntVector(1)) * PlanetStreamChunkWorld);
-					bAtEdge = Box.ComputeSquaredDistanceToPoint(Mid) <= Reach * Reach;
+					const FBox Box(FVector(Neighbor) * ChunkWorld, FVector(Neighbor + FIntVector(1)) * ChunkWorld);
+					for (const FVector& Probe : Probes)
+					{
+						bAtEdge |= Box.ComputeSquaredDistanceToPoint(Probe) <= Reach * Reach;
+					}
 				}
 			}
 			if (bAtEdge)
 			{
-				++AtEdge;
+				++Counts.AtEdge;
 				continue;
 			}
 			if (IsTJunction(Edge))
 			{
-				++TJunctions;
+				++Counts.TJunctions;
 				continue;
 			}
 
 			// The face seam across the nearest chunk face, and whether its two chunks differ in LOD.
-			const FVector Local = Mid - FVector(Home) * PlanetStreamChunkWorld;
+			const FVector Local = Mid - FVector(Home) * ChunkWorld;
 			int32 Axis = 0, Side = -1;
 			double Nearest = TNumericLimits<double>::Max();
 			for (int32 A = 0; A < 3; ++A)
 			{
 				if (Local[A] < Nearest) { Nearest = Local[A]; Axis = A; Side = -1; }
-				if (PlanetStreamChunkWorld - Local[A] < Nearest) { Nearest = PlanetStreamChunkWorld - Local[A]; Axis = A; Side = 1; }
+				if (ChunkWorld - Local[A] < Nearest) { Nearest = ChunkWorld - Local[A]; Axis = A; Side = 1; }
 			}
 			FIntVector Across = Home;
 			Across[Axis] += Side;
-			const int32 HomeLOD = Test.Renderer.ChunkLODs.FindRef(Home);
-			const int32 AcrossLOD = Test.Renderer.ChunkLODs.FindRef(Across);
-			if (HomeLOD != AcrossLOD && Nearest <= 2.0 * PlanetStreamVoxelSize * (1 << FMath::Max(HomeLOD, AcrossLOD)))
+			const int32 HomeLOD = World.Renderer.ChunkLODs.FindRef(Home);
+			const int32 AcrossLOD = World.Renderer.ChunkLODs.FindRef(Across);
+			if (HomeLOD != AcrossLOD && Nearest <= 2.0 * World.VoxelSize * (1 << FMath::Max(HomeLOD, AcrossLOD)))
 			{
-				++MixedSeamHoles;
-				if (MixedSeamHoles <= 2)
+				++Counts.MixedSeamHoles;
+				if (Counts.MixedSeamHoles <= 4)
 				{
-					AddInfo(FString::Printf(TEXT("%s: G17 gap edge at (%.0f, %.0f, %.0f), face seam (%d,%d,%d)|(%d,%d,%d) at LOD %d|%d"),
-						Place.Key, Mid.X, Mid.Y, Mid.Z, Home.X, Home.Y, Home.Z, Across.X, Across.Y, Across.Z, HomeLOD, AcrossLOD));
+					Test.AddInfo(FString::Printf(TEXT("%s: G17 gap edge at (%.0f, %.0f, %.0f), face seam (%d,%d,%d)|(%d,%d,%d) at LOD %d|%d"),
+						Place, Mid.X, Mid.Y, Mid.Z, Home.X, Home.Y, Home.Z, Across.X, Across.Y, Across.Z, HomeLOD, AcrossLOD));
 				}
 			}
 			else
 			{
-				++OtherHoles;
-				AddInfo(FString::Printf(TEXT("%s: hole edge at (%.0f, %.0f, %.0f) in chunk (%d,%d,%d) at LOD %d, %.0f uu from its face toward LOD %d"),
-					Place.Key, Mid.X, Mid.Y, Mid.Z, Home.X, Home.Y, Home.Z, HomeLOD, Nearest, AcrossLOD));
+				++Counts.OtherHoles;
+				if (Counts.OtherHoles <= 4)
+				{
+					Test.AddInfo(FString::Printf(TEXT("%s: hole edge at (%.0f, %.0f, %.0f) in chunk (%d,%d,%d) at LOD %d, %.0f uu from its face toward LOD %d"),
+						Place, Mid.X, Mid.Y, Mid.Z, Home.X, Home.Y, Home.Z, HomeLOD, Nearest, AcrossLOD));
+				}
 			}
 		}
+		return Counts;
+	}
+}
+
+/**
+ * SP-D4, SP-B8, SP-C1: a small planet streamed from viewers at the north pole, at latitude 45 (longitude 45, where
+ * chunks straddle the surface diagonally on all three axes) and on the equator renders a closed surface, with chunks at
+ * three LOD levels meeting through the seam path, and water flags only inside the sea radius.
+ *
+ * An open edge next to a chunk that is not loaded is the loaded region's edge, and one along a coarser edge with a vertex
+ * of the finer side on it is a T-junction (no gap). Anything else is a hole and fails the test, holes at a face seam
+ * between chunks of different LOD (G17, WORLD_MODES_REVIEW_PLAN.md §14.1: small gaps where a fine crossing faced a coarse
+ * cell with no crossing of its own) among them.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingClosedSurfaceTest,
+	"VoxelWorlds.Streaming.Planet.ClosedSurface",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+	const TPair<const TCHAR*, FVector> Places[] = {
+		{ TEXT("north pole"), FVector(0.02, 0.03, 1.0).GetSafeNormal() },
+		{ TEXT("latitude 45"), FVector(C45 * C45, C45 * C45, C45).GetSafeNormal() },
+		{ TEXT("equator"), FVector(1.0, 0.03, 0.02).GetSafeNormal() },
+	};
+	for (const TPair<const TCHAR*, FVector>& Place : Places)
+	{
+		FPlanetStreamingWorld Test;
+		Test.Start(TEXT("VoxelPlanetStreamingTestWorld"), Place.Value, 300.0f);
+		TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place.Key), Test.Settle());
+
+		const FClosedSurfaceCounts Counts = CountOpenEdges(*this, Place.Key, Test);
+		TestTrue(*FString::Printf(TEXT("%s: a neighbourhood streamed in"), Place.Key), Counts.Chunks >= 60);
+		TestTrue(*FString::Printf(TEXT("%s: three LOD levels meet"), Place.Key), Counts.ByLOD[0] > 0 && Counts.ByLOD[1] > 0 && Counts.ByLOD[2] > 0);
+		TArray<FIntVector> Loaded;
+		Test.Manager->GetLoadedChunks(Loaded);
 
 		// Water: flags only inside the sea radius (WaterLevel, the Z plane, is far above everything), and some chunks have them.
 		const FVoxelSeaSurface Sea = FVoxelSeaSurface::FromConfig(*Test.Config);
@@ -401,13 +526,50 @@ bool FVoxelPlanetStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
 			ChunksWithWater += WetHere > 0 ? 1 : 0;
 		}
 
-		AddInfo(FString::Printf(TEXT("%s: %d chunks (LOD 0/1/2: %d/%d/%d), %d seam buckets, %d triangles, %d edges; open: %d at the loaded region's edge, %d in T-junctions, %d at mixed-LOD face seams (G17), %d other holes; water %d voxels in %d chunks, %d above the sea radius"),
-			Place.Key, Loaded.Num(), ByLOD.FindRef(0), ByLOD.FindRef(1), ByLOD.FindRef(2), Test.Renderer.SeamBuckets.Num(), Triangles,
-			EdgeUse.Num(), AtEdge, TJunctions, MixedSeamHoles, OtherHoles, Wet, ChunksWithWater, WetAbove));
-		TestTrue(*FString::Printf(TEXT("%s: the surface has triangles"), Place.Key), Triangles > 20000);
-		TestEqual(*FString::Printf(TEXT("%s: no hole but G17's (closed at same-LOD seams, in interiors and at the loaded region)"), Place.Key), OtherHoles, 0);
+		AddInfo(FString::Printf(TEXT("%s: %s, %d seam buckets; water %d voxels in %d chunks, %d above the sea radius"),
+			Place.Key, *Counts.Describe(), Test.Renderer.SeamBuckets.Num(), Wet, ChunksWithWater, WetAbove));
+		TestTrue(*FString::Printf(TEXT("%s: the surface has triangles"), Place.Key), Counts.Triangles > 20000);
+		TestEqual(*FString::Printf(TEXT("%s: no hole at a mixed-LOD face seam (G17)"), Place.Key), Counts.MixedSeamHoles, 0);
+		TestEqual(*FString::Printf(TEXT("%s: no other hole (closed at same-LOD seams, in interiors and at the loaded region)"), Place.Key), Counts.OtherHoles, 0);
 		TestTrue(*FString::Printf(TEXT("%s: the sea at the datum gives some chunks water"), Place.Key), ChunksWithWater > 0);
 		TestEqual(*FString::Printf(TEXT("%s: no water above the sea radius"), Place.Key), WetAbove, 0);
+
+		Test.Stop();
+	}
+	return true;
+}
+
+/**
+ * G17 on a heightmap world: a plane streamed from three viewers with the planet test's chunk footprint (chunk 16, voxel
+ * 100) and three LOD bands renders a closed surface. Face seams between chunks at LOD 0|1 and 1|2 cross rolling hills
+ * on vertical and horizontal faces; any hole fails, a G17 gap at a mixed-LOD face seam among them.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingClosedSurfaceTest,
+	"VoxelWorlds.Streaming.Plane.ClosedSurface",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	const TPair<const TCHAR*, FVector2D> Places[] = {
+		{ TEXT("plane origin"), FVector2D(0.0, 0.0) },
+		{ TEXT("plane east"), FVector2D(23000.0, 7000.0) },
+		{ TEXT("plane south-west"), FVector2D(-15000.0, -31000.0) },
+	};
+	for (const TPair<const TCHAR*, FVector2D>& Place : Places)
+	{
+		FPlanetStreamingWorld Test;
+		Test.StartPlane(TEXT("VoxelPlaneStreamingTestWorld"), Place.Value.X, Place.Value.Y, 300.0f);
+		TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place.Key), Test.Settle());
+
+		const FClosedSurfaceCounts Counts = CountOpenEdges(*this, Place.Key, Test);
+		AddInfo(FString::Printf(TEXT("%s: %s, %d seam buckets"), Place.Key, *Counts.Describe(), Test.Renderer.SeamBuckets.Num()));
+		TestTrue(*FString::Printf(TEXT("%s: a neighbourhood streamed in"), Place.Key), Counts.Chunks >= 60);
+		TestTrue(*FString::Printf(TEXT("%s: three LOD levels meet"), Place.Key), Counts.ByLOD[0] > 0 && Counts.ByLOD[1] > 0 && Counts.ByLOD[2] > 0);
+		TestTrue(*FString::Printf(TEXT("%s: the surface has triangles"), Place.Key), Counts.Triangles > 10000);
+		TestEqual(*FString::Printf(TEXT("%s: no hole at a mixed-LOD face seam (G17)"), Place.Key), Counts.MixedSeamHoles, 0);
+		TestEqual(*FString::Printf(TEXT("%s: no other hole (closed at same-LOD seams, in interiors and at the loaded region)"), Place.Key), Counts.OtherHoles, 0);
 
 		Test.Stop();
 	}
