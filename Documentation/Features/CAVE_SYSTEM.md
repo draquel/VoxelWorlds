@@ -146,12 +146,17 @@ All three world mode generators call `CalculateCaveDensity()` after base density
 
 ### GPU Path
 
-Cave parameters are passed as flat arrays (up to 4 layers) to the compute shader. `CaveGeneration.ush` provides `SampleCheeseCave()` and `SampleTunnelCave()`. Used by InfinitePlane and IslandBowl, which share the heightmap branch of
-`GenerateVoxelDensity.usf` (locked by `GPUvsCPUCavesParity`), and by spherical planets (`SphericalPlanet.ush`, locked
-by `GPUvsCPUSphericalParity`), which scale the altitude along local up. The planet branch also applies the biome
-overrides (`BiomeOverrides`, uploaded as a small table) and `UnderwaterMinDepth`, as the CPU does. The heightmap branch
-does not: GPU heightmap worlds carve caves under the sea and in biomes whose override is 0 where CPU worlds stay solid
-(G18 in the world modes review plan; the demo's cave configuration uses both).
+Cave parameters are passed as flat arrays (up to 4 layers) to the compute shader. `CaveGeneration.ush` provides
+`SampleCheeseCave()` and `SampleTunnelCave()`. `GpuCaveCarve()` in `GenerateVoxelDensity.usf` is the GPU twin of
+`CalculateCaveDensity()`, shared by every world mode: the biome overrides (`BiomeOverrides`, uploaded as a small table
+of biome id, cave scale and minimum-depth override; the first match wins), `UnderwaterMinDepth` where the column's
+terrain is under the sea, each layer's depth window and fades, the union, the biome scale. Only the noise sample
+position differs: `VerticalScale` along Z for InfinitePlane and IslandBowl, which share the heightmap branch, along
+local up on spherical planets (`SphericalPlanet.ush`). As on the CPU, the biome blend comes before the caves. Locked by
+`GPUvsCPUCavesParity` (the core carving, the biome overrides, a cave scale of 0.5, and a chunk under the sea that carves
+without `UnderwaterMinDepth` and not with it) and `GPUvsCPUSphericalParity`. Until G18 was fixed (2026-10-17, world
+modes review plan §14.1) the heightmap branch ignored the overrides and `UnderwaterMinDepth`, so GPU worlds carved caves
+under the sea and in biomes scaled to 0; the fix bumped `FVoxelWorldModeFactory::GenerationVersion` to 2.
 
 ## Tuning Guide
 

@@ -120,8 +120,8 @@ public:
 		SHADER_PARAMETER(float, PlanetInnerRadius)
 		SHADER_PARAMETER(float, PlanetOuterRadius)
 		SHADER_PARAMETER(float, PlanetWaterRadius)
-		// Cave parameters only the planet branch reads (the heightmap branch's documented gap): the underwater minimum
-		// depth and the biome overrides, 1 float4 each: [BiomeID, CaveScale, MinDepthOverride, 0].
+		// The cave configuration's underwater minimum depth and biome overrides (GpuCaveCarve), 1 float4 each:
+		// [BiomeID, CaveScale, MinDepthOverride, 0].
 		SHADER_PARAMETER(float, CaveUnderwaterMinDepth)
 		SHADER_PARAMETER(int32, CaveBiomeOverrideCount)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, CaveBiomeOverrideData)
@@ -737,8 +737,8 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->PlanetOuterRadius = Planet.GetOuterRadius();
 	Parameters->PlanetWaterRadius = Request.WaterRadius;
 
-	// The cave configuration's underwater minimum depth and biome overrides — the planet branch applies them as the
-	// CPU's CalculateCaveDensity does; the heightmap branch does not read them (its documented gap).
+	// The cave configuration's underwater minimum depth and biome overrides — every world-mode branch applies them as
+	// the CPU's CalculateCaveDensity does (GpuCaveCarve).
 	TArray<FVector4f> CaveOverrideData;
 	Parameters->CaveUnderwaterMinDepth = 0.0f;
 	if (Request.bEnableCaves && Request.CaveConfiguration)

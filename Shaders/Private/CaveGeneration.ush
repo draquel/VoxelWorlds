@@ -18,45 +18,6 @@
 #define CAVE_TYPE_NOODLE 2
 
 /**
- * Calculate depth fade factor for cave depth constraints.
- * Smoothly fades caves at MinDepth and MaxDepth boundaries.
- *
- * @param Depth Current depth below surface in voxels
- * @param MinDepth Minimum depth for this cave layer
- * @param MaxDepth Maximum depth (0 = no limit)
- * @param FadeWidth Width of the fade zone
- * @return Fade factor [0, 1]
- */
-float CalculateDepthFade(float Depth, float MinDepth, float MaxDepth, float FadeWidth)
-{
-    float Fade = 1.0f;
-
-    // Fade at MinDepth boundary
-    if (Depth < MinDepth)
-    {
-        float FadeStart = MinDepth - FadeWidth;
-        if (Depth < FadeStart)
-        {
-            return 0.0f;
-        }
-        Fade *= smoothstep(0.0f, 1.0f, (Depth - FadeStart) / FadeWidth);
-    }
-
-    // Fade at MaxDepth boundary
-    if (MaxDepth > 0.0f && Depth > MaxDepth)
-    {
-        float FadeEnd = MaxDepth + FadeWidth;
-        if (Depth > FadeEnd)
-        {
-            return 0.0f;
-        }
-        Fade *= smoothstep(0.0f, 1.0f, 1.0f - (Depth - MaxDepth) / FadeWidth);
-    }
-
-    return Fade;
-}
-
-/**
  * Sample cheese cave density at a position.
  * Carves where single noise field exceeds threshold.
  *

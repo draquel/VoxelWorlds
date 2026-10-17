@@ -6,7 +6,8 @@
 // match (VoxelWorlds.Generation.GPUvsCPUSphericalParity). Any change here must be mirrored there.
 //
 // Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush and the shared helpers
-// GpuApplyContinentalness / SampleGpuCaveLayer: this file reads the Planet*, Cave*, biome, ore and water globals.
+// GpuApplyContinentalness / GpuCaveCarve (caves along local up through PlanetScaleAltitude): this file reads the Planet*,
+// Cave*, biome, ore and water globals.
 //
 // Precision: distances, directions and the noise sample point are computed planet-relative, from PlanetChunkOffset (the
 // chunk origin relative to the centre, computed in double on the CPU), so the chunk origin is exact and a direction's
@@ -27,100 +28,6 @@ float PlanetShellSignedDistance(float DistFromCenter, float TerrainRadius)
     return TerrainRadius - DistFromCenter;
 }
 
-/** FSphericalPlanetWorldMode::ScaleAltitude: the absolute position with its altitude above the datum scaled by
- *  VerticalScale and its direction kept (caves flatten along local up, SP-B6). Rel is the planet-relative position. */
-float3 PlanetScaleAltitude(float3 Rel, float DistFromCenter, float VerticalScale)
-{
-    if (DistFromCenter < 1.0e-4f)
-    {
-        return PlanetCenter + Rel;
-    }
-    return PlanetCenter + Rel * ((PlanetRadius + (DistFromCenter - PlanetRadius) * VerticalScale) / DistFromCenter);
-}
-
-/** UVoxelCaveConfiguration::GetBiomeCaveScale / GetBiomeMinDepthOverride: the first override for the biome, else 1 / -1. */
-void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMinDepthOverride)
-{
-    OutCaveScale = 1.0f;
-    OutMinDepthOverride = -1.0f;
-    for (int o = 0; o < CaveBiomeOverrideCount; ++o)
-    {
-        const float4 Override = CaveBiomeOverrideData[o];
-        if ((uint)(Override.x + 0.5f) == BiomeID)
-        {
-            OutCaveScale = Override.y;
-            OutMinDepthOverride = Override.z;
-            return;
-        }
-    }
-}
-
-/**
- * FVoxelCPUNoiseGenerator::CalculateCaveDensity with a planet: the biome's cave scale and minimum-depth override, the
- * underwater minimum depth when the column's terrain is under the sea, each layer's depth window and fades, the union
- * of the layers, the biome scale. Cave noise samples the position with its altitude scaled along local up.
- *
- * @param Rel Planet-relative voxel position
- * @param DistFromCenter |Rel|
- * @param DepthBelowSurface Radial depth below the terrain, in voxels
- * @param BiomeID Dominant biome (0 without biomes)
- * @param bUnderwater The column's terrain radius is under WaterRadius (and water is on)
- * @return Carve density [0, 1]
- */
-float GpuPlanetCaveCarve(float3 Rel, float DistFromCenter, float DepthBelowSurface, uint BiomeID, bool bUnderwater)
-{
-    float BiomeCaveScale;
-    float MinDepthOverride;
-    GpuCaveBiomeOverride(BiomeID, BiomeCaveScale, MinDepthOverride);
-    if (BiomeCaveScale <= 0.0f)
-    {
-        return 0.0f;
-    }
-
-    // The underwater minimum depth catches transition zones where the ocean biome is not assigned but the terrain is
-    // still under the sea.
-    if (bUnderwater && CaveUnderwaterMinDepth > 0.0f)
-    {
-        MinDepthOverride = (MinDepthOverride < 0.0f) ? CaveUnderwaterMinDepth : max(MinDepthOverride, CaveUnderwaterMinDepth);
-    }
-
-    float MaxCarveDensity = 0.0f;
-    for (int ci = 0; ci < CaveLayerCount; ++ci)
-    {
-        const float FadeWidth = CaveLayerDepthFadeWidth[ci];
-        const float MaxDepth = CaveLayerMaxDepth[ci];
-        const float EffectiveMinDepth = (MinDepthOverride >= 0.0f) ? MinDepthOverride : CaveLayerMinDepth[ci];
-
-        if (DepthBelowSurface < EffectiveMinDepth - FadeWidth)
-        {
-            continue;
-        }
-        if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth + FadeWidth)
-        {
-            continue;
-        }
-
-        float LayerCarve = SampleGpuCaveLayer(ci, PlanetScaleAltitude(Rel, DistFromCenter, CaveLayerVerticalScale[ci]));
-        if (LayerCarve <= 0.0f)
-        {
-            continue;
-        }
-
-        if (DepthBelowSurface < EffectiveMinDepth)
-        {
-            LayerCarve *= smoothstep(0.0f, 1.0f, (DepthBelowSurface - (EffectiveMinDepth - FadeWidth)) / FadeWidth);
-        }
-        if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth)
-        {
-            LayerCarve *= smoothstep(0.0f, 1.0f, 1.0f - (DepthBelowSurface - MaxDepth) / FadeWidth);
-        }
-
-        MaxCarveDensity = max(MaxCarveDensity, LayerCarve);
-    }
-
-    return clamp(MaxCarveDensity * BiomeCaveScale, 0.0f, 1.0f);
-}
-
 /** FSphericalPlanetWorldMode::GetMaterialAtDepth (no biomes): grass, dirt, stone by radial depth in uu. */
 uint GetMaterialForPlanet(float DepthBelowSurfaceUU)
 {
@@ -137,17 +44,6 @@ uint GetMaterialForPlanet(float DepthBelowSurfaceUU)
         return 1u; // EVoxelMaterial::Dirt
     }
     return 2u; // EVoxelMaterial::Stone
-}
-
-/** Carve a cave out of a solid voxel's density (the CPU's "density - carve * 255", clamped). */
-uint ApplyCaveCarve(uint Density, float CaveCarve)
-{
-    if (CaveCarve > 0.0f)
-    {
-        const float NewDensity = max(0.0f, float(Density) - CaveCarve * 255.0f);
-        return (uint)clamp(NewDensity, 0.0f, 255.0f);
-    }
-    return Density;
 }
 
 /**
@@ -207,7 +103,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuPlanetCaveCarve(Rel, DistFromCenter, DepthBelowSurface, OutBiomeID, bUnderwaterColumn);
+            CaveCarve = GpuCaveCarve(WorldPos, Rel, DistFromCenter, DepthBelowSurface, OutBiomeID, bUnderwaterColumn);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
@@ -238,7 +134,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         MaterialID = GetMaterialForPlanet(DepthBelowSurface * VoxelSize);
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            Density = ApplyCaveCarve(Density, GpuPlanetCaveCarve(Rel, DistFromCenter, DepthBelowSurface, 0u, bUnderwaterColumn));
+            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Rel, DistFromCenter, DepthBelowSurface, 0u, bUnderwaterColumn));
         }
     }
 

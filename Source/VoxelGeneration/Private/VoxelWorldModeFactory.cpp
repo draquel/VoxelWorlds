@@ -118,7 +118,7 @@ FVoxelWorldFingerprint FVoxelWorldModeFactory::MakeFingerprint(const UVoxelWorld
 		Params.Add(TEXT("IslandEdgeHeight=") + Num(Island.EdgeHeight));
 		// The seabed (SeabedDepth, SeabedSlopeWidth; WM-E1) is left out on purpose: it shapes only the terrain past
 		// R + F, where a save holds nothing (POIs, map tiles and edits stay inside the walls), so a seabed change
-		// must not refuse a save. GenerationVersion stays 1 for the same reason (WORLD_MODES_REVIEW_PLAN.md §14.10).
+		// must not refuse a save. GenerationVersion did not move for it either (WORLD_MODES_REVIEW_PLAN.md §14.10).
 	}
 	else if (Config.WorldMode == EWorldMode::SphericalPlanet)
 	{

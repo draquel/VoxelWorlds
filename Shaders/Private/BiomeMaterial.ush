@@ -179,20 +179,6 @@ uint GpuBlendedMaterial(BiomeBlendResult blend, float DepthBelowSurface, bool bU
     return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
 }
 
-// Top-level: blend the biomes, output the dominant BiomeID + its ore range, return the blended material.
-uint ComputeBiomeMaterial(float Temperature, float Moisture, float Continentalness,
-                          float DepthBelowSurface, float TerrainHeight,
-                          out uint OutBiomeID, out uint OutOreStart, out uint OutOreCount)
-{
-    BiomeBlendResult blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
-    GpuBiome dominant = LoadGpuBiome(blend.Indices[0]);
-    OutBiomeID = dominant.BiomeID;
-    OutOreStart = dominant.OreStart;   // ore lookup uses the dominant biome (CPU: GetOreVeinsForBiome(BiomeID))
-    OutOreCount = dominant.OreCount;
-    bool bUnderwater = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainHeight < WaterLevelHeight);
-    return GpuBlendedMaterial(blend, DepthBelowSurface, bUnderwater);
-}
-
 // UVoxelBiomeConfiguration::ApplyHeightMaterialRules — first priority-sorted rule that applies wins.
 // HeightRuleData: 2 float4s per rule: [MinHeight,MaxHeight,MaxDepthBelowSurface,MaterialID][bSurfaceOnly,0,0,0].
 uint ApplyGpuHeightRules(uint CurrentMaterial, float WorldHeight, float DepthBelowSurface)
