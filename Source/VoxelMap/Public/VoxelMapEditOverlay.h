@@ -55,6 +55,49 @@ struct VOXELMAP_API FVoxelMapOverlayBuildInput
 };
 
 /**
+ * One chunk around a planet map tile, as handed to FVoxelMapEditOverlay::BuildPlanet (spherical Phase 4, WM-SY8).
+ * Gathered on the game thread; plain data afterwards.
+ */
+struct VOXELMAP_API FVoxelMapPlanetOverlayChunk
+{
+	/** Chunk coordinate. */
+	FIntVector Coord = FIntVector::ZeroValue;
+
+	/** Edit-merged voxels (ChunkSize^3, chunk-local index X + Y*CS + Z*CS*CS). Null = no voxel data loaded. */
+	TSharedPtr<const TArray<FVoxelData>> Voxels;
+
+	/** Which voxels carry an edit (one bit per voxel index). Null when the chunk has no edits. */
+	TSharedPtr<const TBitArray<>> EditedVoxels;
+};
+
+/** Everything FVoxelMapEditOverlay::BuildPlanet needs for one planet tile, as plain data. */
+struct VOXELMAP_API FVoxelMapPlanetOverlayInput
+{
+	/** Voxels per chunk edge, which is also the tile's pixels per edge. */
+	int32 ChunkSize = 0;
+
+	/** World units per voxel. */
+	float VoxelSize = 0.0f;
+
+	/** World position of voxel 0's density sample of chunk (0, 0, 0) (the world origin). */
+	FVector Origin = FVector::ZeroVector;
+
+	/** Planet centre and datum radius. */
+	FVector Center = FVector::ZeroVector;
+	double PlanetRadius = 0.0;
+
+	/** Water is enabled; terrain inside WaterRadius of the centre reads as under the sea in the analytic map. */
+	bool bUseWater = false;
+	double WaterRadius = 0.0;
+
+	/**
+	 * The chunks that carry edits on the tile (loaded or not) plus loaded unedited chunks around them. Voxels in chunks
+	 * that are not listed read as the analytic terrain along the pixel's line: solid below its analytic altitude.
+	 */
+	TArray<FVoxelMapPlanetOverlayChunk> Chunks;
+};
+
+/**
  * Per-tile map edit overlay (VoxelMap, QA refinement R22).
  *
  * Map tiles are drawn from the analytic terrain (world-mode height, conditioning, biome material), which knows
@@ -74,16 +117,25 @@ struct VOXELMAP_API FVoxelMapEditOverlay
 	/** Serialization format of one overlay (Serialize). Bump when the layout changes. */
 	static constexpr uint8 FormatVersion = 1;
 
+	/** The same layout with altitudes for heights: a planet's overlay (bAltitudeHeights; spherical Phase 4). */
+	static constexpr uint8 PlanetFormatVersion = 2;
+
 	/** Water covers the surface: a water-flagged voxel in the air run above it (flag bit in Flags). */
 	static constexpr uint8 FlagWater = 0x01;
 
 	/** Pixels per tile edge (the chunk size). 0 for a default-constructed overlay. */
 	int32 Resolution = 0;
 
+	/**
+	 * A planet tile's overlay (BuildPlanet): a column is the pixel's line along local up and Heights are altitudes above
+	 * the datum. Saved as PlanetFormatVersion.
+	 */
+	bool bAltitudeHeights = false;
+
 	/** Masked column indices (PY * Resolution + PX), ascending. */
 	TArray<uint16> Columns;
 
-	/** Edited surface height (world Z) per masked column. */
+	/** Edited surface height (world Z) per masked column; on a planet the altitude above the datum (bAltitudeHeights). */
 	TArray<float> Heights;
 
 	/** Surface material ID per masked column. */
@@ -146,6 +198,31 @@ struct VOXELMAP_API FVoxelMapEditOverlay
 		TFunctionRef<uint8(int32 PX, int32 PY)> AnalyticMaterial);
 
 	/**
+	 * Build the overlay for one planet tile (spherical Phase 4, WM-SY8). Pure; runs on any thread.
+	 *
+	 * A column is the pixel's line along local up (its direction from the centre). For every pixel whose line passes
+	 * through an edited chunk, walks the line from two voxels above the highest edited chunk (or the analytic surface)
+	 * down to a chunk below the lowest, reading the nearest voxel every half voxel (listed chunks' voxels; elsewhere the
+	 * analytic terrain), and takes the first solid voxel under air as the surface, refined on the line by the trilinear
+	 * density as UVoxelChunkManager::QueryEditMergedSurfacePoint does. The column is masked when an edited voxel lies on
+	 * the walk at or above that surface and the surface differs from the analytic one (altitude by more than half a
+	 * voxel, material, or water: a water-flagged voxel in the air above). A walk that meets a listed chunk with no data
+	 * before the surface, or a surface in the analytic stand-in under the analytic altitude (dug into an unloaded
+	 * chunk), is pending.
+	 *
+	 * @param Input             The tile's chunks and world constants
+	 * @param PixelDirections   Unit direction of each pixel's line (ChunkSize^2, row-major PY * ChunkSize + PX)
+	 * @param AnalyticAltitudes Analytic surface altitude per pixel (same layout)
+	 * @param AnalyticMaterial  Analytic surface material of a pixel (PX, PY)
+	 * @return The overlay (Resolution = ChunkSize, bAltitudeHeights); empty when no edit changed the surface
+	 */
+	static FVoxelMapEditOverlay BuildPlanet(
+		const FVoxelMapPlanetOverlayInput& Input,
+		TConstArrayView<FVector> PixelDirections,
+		TConstArrayView<float> AnalyticAltitudes,
+		TFunctionRef<uint8(int32 PX, int32 PY)> AnalyticMaterial);
+
+	/**
 	 * Fill a fresh build's pending columns from the previous overlay, so a column waiting on an unloaded chunk keeps
 	 * showing what it showed before.
 	 * @param Built    Build output (its PendingColumns are kept in the result)
@@ -164,8 +241,9 @@ struct VOXELMAP_API FVoxelMapEditOverlay
 	static bool BordersEqual(const FVoxelMapEditOverlay* A, const FVoxelMapEditOverlay* B);
 
 	/**
-	 * Serialize to or from an archive: resolution, a column mask (Resolution^2 bits), then height, material and
-	 * flags for each masked column in column order. PendingColumns are not serialized.
+	 * Serialize to or from an archive: format version (FormatVersion, or PlanetFormatVersion for altitude heights),
+	 * resolution, a column mask (Resolution^2 bits), then height, material and flags for each masked column in column
+	 * order. PendingColumns are not serialized.
 	 * @param Ar The archive
 	 * @return False when loading malformed data (the overlay is then reset to empty)
 	 */
@@ -178,7 +256,7 @@ struct VOXELMAP_API FVoxelMapEditOverlay
 /** A tile coordinate with its edit overlay: the unit UVoxelMapSubsystem saves and restores (R22 phase 3). */
 struct VOXELMAP_API FVoxelMapTileOverlay
 {
-	/** Tile coordinate (chunk X, Y). */
+	/** Tile coordinate (chunk X, Y; a planet's atlas coordinate). */
 	FIntPoint Tile = FIntPoint::ZeroValue;
 
 	/** The tile's overlay. */

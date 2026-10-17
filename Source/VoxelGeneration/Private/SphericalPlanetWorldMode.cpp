@@ -5,6 +5,7 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelGeneration.h"
+#include "VoxelCubeSphere.h"
 
 #include <atomic>
 
@@ -23,38 +24,6 @@ FSphericalPlanetWorldMode::FSphericalPlanetWorldMode(
 }
 
 // ==================== World Bounds and Local Frame ====================
-
-namespace SphericalPlanetSurfacePrivate
-{
-	/** Cube face frames for the surface parameterisation: face normal N, U axis T, V axis B (a point on the face is N + U*T + V*B). */
-	struct FCubeFace
-	{
-		FVector N;
-		FVector T;
-		FVector B;
-	};
-
-	const FCubeFace GCubeFaces[6] = {
-		{ FVector( 1, 0, 0), FVector( 0, 1, 0), FVector(0, 0, 1) },  // 0: +X
-		{ FVector(-1, 0, 0), FVector( 0,-1, 0), FVector(0, 0, 1) },  // 1: -X
-		{ FVector( 0, 1, 0), FVector(-1, 0, 0), FVector(0, 0, 1) },  // 2: +Y
-		{ FVector( 0,-1, 0), FVector( 1, 0, 0), FVector(0, 0, 1) },  // 3: -Y
-		{ FVector( 0, 0, 1), FVector( 1, 0, 0), FVector(0, 1, 0) },  // 4: +Z
-		{ FVector( 0, 0,-1), FVector( 1, 0, 0), FVector(0,-1, 0) },  // 5: -Z
-	};
-
-	// The tangent warp (WORLD_MODES_REVIEW_PLAN.md §15.1): u = (4 / pi) * atan(g) maps the gnomonic coordinate g in
-	// [-1, 1] to u in [-1, 1], uniform in angle along the face's centre lines; its inverse is g = tan(pi / 4 * u).
-	double WarpFromGnomonic(double G)
-	{
-		return FMath::Atan(G) * (4.0 / UE_DOUBLE_PI);
-	}
-
-	double GnomonicFromWarp(double U)
-	{
-		return FMath::Tan(U * (UE_DOUBLE_PI / 4.0));
-	}
-}
 
 bool FSphericalPlanetWorldMode::IsInsideWorld(double X, double Y) const
 {
@@ -89,36 +58,13 @@ float FSphericalPlanetWorldMode::GetAltitude(const FVector& WorldPos) const
 
 FVoxelSurfaceCoord FSphericalPlanetWorldMode::WorldToSurface(const FVector& WorldPos) const
 {
-	const FVector Dir = GetDirectionFromCenter(WorldPos, PlanetParams.PlanetCenter);
-	const FVector Abs = Dir.GetAbs();
-	int32 Face;
-	if (Abs.X >= Abs.Y && Abs.X >= Abs.Z)
-	{
-		Face = Dir.X >= 0.0 ? 0 : 1;
-	}
-	else if (Abs.Y >= Abs.Z)
-	{
-		Face = Dir.Y >= 0.0 ? 2 : 3;
-	}
-	else
-	{
-		Face = Dir.Z >= 0.0 ? 4 : 5;
-	}
-	using namespace SphericalPlanetSurfacePrivate;
-	const FCubeFace& F = GCubeFaces[Face];
-	// Scale the direction onto the face plane (N . P = 1), read its gnomonic coordinates along T and B, then warp them.
-	const double Scale = 1.0 / FVector::DotProduct(Dir, F.N);
-	return FVoxelSurfaceCoord(Face, FVector2D(
-		WarpFromGnomonic(FVector::DotProduct(Dir, F.T) * Scale),
-		WarpFromGnomonic(FVector::DotProduct(Dir, F.B) * Scale)));
+	// The cube faces and the tangent warp (FVoxelCubeSphere, WORLD_MODES_REVIEW_PLAN.md §15.1).
+	return FVoxelCubeSphere::DirectionToSurface(GetDirectionFromCenter(WorldPos, PlanetParams.PlanetCenter));
 }
 
 FVector FSphericalPlanetWorldMode::SurfaceToWorld(const FVoxelSurfaceCoord& Coord, float Altitude) const
 {
-	using namespace SphericalPlanetSurfacePrivate;
-	const FCubeFace& F = GCubeFaces[FMath::Clamp(Coord.Face, 0, 5)];
-	const FVector Dir = (F.N + GnomonicFromWarp(Coord.UV.X) * F.T + GnomonicFromWarp(Coord.UV.Y) * F.B).GetSafeNormal();
-	return PlanetParams.PlanetCenter + Dir * (PlanetParams.PlanetRadius + Altitude);
+	return PlanetParams.PlanetCenter + FVoxelCubeSphere::SurfaceToDirection(Coord.Face, Coord.UV) * (PlanetParams.PlanetRadius + Altitude);
 }
 
 FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const

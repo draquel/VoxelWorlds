@@ -191,9 +191,8 @@ public:
 	 * Water level height in world units.
 	 * Used for InfinitePlane and IslandBowl world modes.
 	 * Terrain surface below this height will use underwater materials.
-	 * On a planet the sea is WaterRadius instead (FVoxelSeaSurface: generation, swimming, scatter, navigation, NPC
-	 * spawning; SPHERICAL_PLANET_REQUIREMENTS.md SP-E1); only the map and the PCG sampler still read this Z plane
-	 * there (Phase 4), and GetSettingsWarnings says so.
+	 * On a planet the sea is WaterRadius instead, for every water consumer (FVoxelSeaSurface: generation, swimming,
+	 * scatter, navigation, NPC spawning, the map and the PCG sampler; SPHERICAL_PLANET_REQUIREMENTS.md SP-E1).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel && WorldMode != EWorldMode::SphericalPlanet"))
 	float WaterLevel = 0.0f;

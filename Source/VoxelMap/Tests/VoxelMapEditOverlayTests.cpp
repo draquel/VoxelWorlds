@@ -413,7 +413,7 @@ bool FVoxelMapEditOverlayRoundTripTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("a rejected overlay is empty"), Broken.IsEmpty() && Broken.Resolution == 0);
 	TArray<uint8> BadVersion = Bytes;
-	BadVersion[0] = FVoxelMapEditOverlay::FormatVersion + 1;
+	BadVersion[0] = FVoxelMapEditOverlay::PlanetFormatVersion + 1; // 1 (plane) and 2 (planet) are known
 	{
 		FMemoryReader Reader(BadVersion);
 		TestFalse(TEXT("an unknown format version is rejected"), Broken.Serialize(Reader));

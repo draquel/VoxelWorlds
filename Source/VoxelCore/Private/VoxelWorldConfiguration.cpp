@@ -279,16 +279,6 @@ TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 				TEXT("planet terrain reaches %.0f uu below WorldRadius (PlanetHeightScale / 2 x %.2f - BaseHeight %.0f - continentalness offset down to %.0f) but PlanetMaxTerrainDepth is %.0f: valleys below the shell are cut off"),
 				Deepest, MaxScaleMult, BaseHeight, MinOffset, PlanetMaxTerrainDepth));
 		}
-
-		// Generation, swimming, scatter, navigation and NPC spawning ask the sea sphere of WaterRadius (FVoxelSeaSurface,
-		// SP-E1). The map and the PCG sampler still compare against the WaterLevel Z plane, which on a planet splits it into
-		// a wet and a dry hemisphere, until spherical Phase 4 (SP-G2, SP-G3).
-		if (bEnableWaterLevel)
-		{
-			Warnings.Add(FString::Printf(
-				TEXT("water is enabled on a planet: the sea is WaterRadius (%.0f) everywhere but the map and the PCG sampler, which still read the Z plane WaterLevel (%.0f) until spherical Phase 4 (SP-G2, SP-G3)"),
-				WaterRadius, WaterLevel));
-		}
 	}
 
 	// The far ocean (WM-E1) is a flat sea at WaterLevel around an island whose edge lies under it. An edge above the
