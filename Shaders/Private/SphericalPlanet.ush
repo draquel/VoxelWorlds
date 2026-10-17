@@ -28,6 +28,53 @@ float PlanetShellSignedDistance(float DistFromCenter, float TerrainRadius)
     return TerrainRadius - DistFromCenter;
 }
 
+/**
+ * FVoxelTerrainConditioning::ApplyToAltitude (spherical SP-B10, D15): blend the terrain's altitude along a direction
+ * toward each planet zone's target altitude by its weight, the great-circle distance from the zone's centre on the datum
+ * sphere through GetWeightAtDistance's profile, layered in order. The CPU uploads a planet's zones as 2 float4s each:
+ * [DirX, DirY, DirZ, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0] (the heightmap packing is
+ * GpuApplyConditioning's).
+ */
+float PlanetApplyConditioning(float3 Direction, float Altitude)
+{
+    float A = Altitude;
+    for (int z = 0; z < ConditioningZoneCount; ++z)
+    {
+        const float4 c0 = ConditioningZoneData[z * 2 + 0];
+        const float4 c1 = ConditioningZoneData[z * 2 + 1];
+        const float3 zoneDirection = c0.xyz;
+        const float innerRadius = c0.w;
+        const float falloffWidth = c1.x;
+        const float targetAltitude = c1.y;
+        const float strength = c1.z;
+
+        const float dist = PlanetRadius * atan2(length(cross(Direction, zoneDirection)), dot(Direction, zoneDirection));
+
+        float w;
+        if (dist <= innerRadius)
+        {
+            w = strength;
+        }
+        else
+        {
+            const float falloff = max(1.0, falloffWidth);
+            if (dist >= innerRadius + falloff)
+            {
+                w = 0.0;
+            }
+            else
+            {
+                const float t = (dist - innerRadius) / falloff;
+                const float s = 1.0 - (t * t * (3.0 - 2.0 * t)); // smoothstep 1 -> 0
+                w = strength * s;
+            }
+        }
+
+        if (w > 0.0) { A = lerp(A, targetAltitude, w); }
+    }
+    return A;
+}
+
 /** FSphericalPlanetWorldMode::GetMaterialAtDepth (no biomes): grass, dirt, stone by radial depth in uu. */
 uint GetMaterialForPlanet(float DepthBelowSurfaceUU)
 {
@@ -76,9 +123,14 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     }
     const float TerrainNoise = FBM3D(
         NoisePoint, NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
-    const float TerrainRadius = PlanetRadius + (EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f);
+    float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
-    // Terrain conditioning is not applied on planets, as on the CPU (heightmap zones; SP-B10).
+    // Terrain conditioning (SP-B10): the planet zones blend the altitude along this direction before the SDF, as on the CPU.
+    if (ConditioningZoneCount > 0)
+    {
+        TerrainAltitude = PlanetApplyConditioning(Direction, TerrainAltitude);
+    }
+    const float TerrainRadius = PlanetRadius + TerrainAltitude;
 
     uint Density = SignedDistanceToDensity(PlanetShellSignedDistance(DistFromCenter, TerrainRadius), VoxelSize);
     const float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
