@@ -119,11 +119,12 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
             MaterialID = CaveWallMaterialID;
         }
 
-        // Ore veins (solid voxels well below the surface; depth > 10 as on the CPU), at the absolute position
+        // Ore veins (solid voxels well below the surface; depth > 10 as on the CPU): the vein noise at the absolute
+        // position, the Rarity hash on the planet-relative one (SP-H3)
         if (Density >= 127u && DepthBelowSurface > 10.0f)
         {
             uint OreMat;
-            if (GpuCheckOreVein(WorldPos, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, OreMat))
+            if (GpuCheckOreVein(WorldPos, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, true, Rel, OreMat))
             {
                 MaterialID = OreMat;
             }

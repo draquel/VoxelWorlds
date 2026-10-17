@@ -235,6 +235,8 @@ namespace VoxelParityHarness
 		float Meta = 98.0f;            // metadata exact (cave/underground/water flags)
 		float MatWhenDensEq = 99.0f;   // material exact among density-identical voxels (isolates logic from FP)
 		bool bCheckMeta = true;        // some scenarios opt out of the metadata gate
+		int32 WatchMaterialID = -1;    // >= 0: also require agreement on the voxels where either side has this material
+		float WatchMaterialMatch = 0.0f; // ... at least this share of them (percent)
 	};
 
 	// Runs GPU-vs-CPU parity for a configured request across the given LODs. Emits per-LOD stats via AddInfo
@@ -282,6 +284,7 @@ namespace VoxelParityHarness
 			const int32 Total = CPUData.Num();
 			int32 DensityClose = 0, MatMatch = 0, BiomeMatch = 0, MetaMatch = 0;
 			int32 DensityEqualCount = 0, MatMatchWhenDensEqual = 0;
+			int32 WatchedEither = 0, WatchedBoth = 0;
 			int32 Reported = 0;
 			for (int32 i = 0; i < Total; ++i)
 			{
@@ -291,6 +294,11 @@ namespace VoxelParityHarness
 				if (C.MaterialID == G.MaterialID) { MatMatch++; }
 				if (C.BiomeID == G.BiomeID) { BiomeMatch++; }
 				if (C.Metadata == G.Metadata) { MetaMatch++; }
+				if (Thr.WatchMaterialID >= 0 && (C.MaterialID == Thr.WatchMaterialID || G.MaterialID == Thr.WatchMaterialID))
+				{
+					WatchedEither++;
+					WatchedBoth += (C.MaterialID == G.MaterialID) ? 1 : 0;
+				}
 				if (C.Density == G.Density)
 				{
 					DensityEqualCount++;
@@ -322,6 +330,12 @@ namespace VoxelParityHarness
 			if (BiomePct < Thr.Biome) { Test.AddError(FString::Printf(TEXT("%s LOD%d biome parity %.1f%% < %.1f%%"), Label, LOD, BiomePct, Thr.Biome)); bAllPass = false; }
 			if (Thr.bCheckMeta && MetaPct < Thr.Meta) { Test.AddError(FString::Printf(TEXT("%s LOD%d metadata parity %.1f%% < %.1f%%"), Label, LOD, MetaPct, Thr.Meta)); bAllPass = false; }
 			if (MatWhenDensEqPct < Thr.MatWhenDensEq) { Test.AddError(FString::Printf(TEXT("%s LOD%d material(density==) %.2f%% < %.2f%%"), Label, LOD, MatWhenDensEqPct, Thr.MatWhenDensEq)); bAllPass = false; }
+			if (Thr.WatchMaterialID >= 0)
+			{
+				const float WatchedPct = WatchedEither > 0 ? 100.0f * WatchedBoth / WatchedEither : 100.0f;
+				Test.AddInfo(FString::Printf(TEXT("%s LOD%d material %d: %d voxels on either side, %.2f%% on both"), Label, LOD, Thr.WatchMaterialID, WatchedEither, WatchedPct));
+				if (WatchedPct < Thr.WatchMaterialMatch) { Test.AddError(FString::Printf(TEXT("%s LOD%d material %d agreement %.2f%% < %.2f%%"), Label, LOD, Thr.WatchMaterialID, WatchedPct, Thr.WatchMaterialMatch)); bAllPass = false; }
+			}
 		}
 		return bAllPass;
 	}
@@ -995,8 +1009,9 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 	using namespace VoxelSphericalParity;
 
 	// Biomes: the defaults with continentalness (the default curves), distinct underwater materials so the underwater
-	// branch is observable, a surface height rule above 2,500 uu of altitude, a global ore (Rarity 1: the rarity hash
-	// is precision-sensitive, SP-H3).
+	// branch is observable, a surface height rule above 2,500 uu of altitude, two global ores: iron (Rarity 1) and gold
+	// at Rarity 0.5, whose Rarity hash is exact on both sides since spherical Phase 4 (SP-H3; the old frac(sin) hash put
+	// about half the gold voxels on one side only).
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
 	BiomeConfig->InitializeDefaults();
@@ -1023,9 +1038,14 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 		Ore.Shape = EOreVeinShape::Blob; Ore.Frequency = 0.004f; Ore.Threshold = 0.6f;
 		Ore.SeedOffset = 111; Ore.Rarity = 1.0f; Ore.Priority = 0;
 		BiomeConfig->GlobalOreVeins.Add(Ore);
+		FOreVeinConfig Gold;
+		Gold.Name = TEXT("Gold"); Gold.MaterialID = 9; Gold.MinDepth = 12.0f; Gold.MaxDepth = 0.0f;
+		Gold.Shape = EOreVeinShape::Blob; Gold.Frequency = 0.004f; Gold.Threshold = 0.55f;
+		Gold.SeedOffset = 222; Gold.Rarity = 0.5f; Gold.Priority = 1;
+		BiomeConfig->GlobalOreVeins.Add(Gold);
 	}
-	BiomeConfig->RebuildBakedCurves();
-	BiomeConfig->BuildGpuData();
+	// The derived caches (sorted ores, height rules): without this the test generated InitializeDefaults' ores.
+	BiomeConfig->RebuildCaches();
 
 	// Caves: a cheese and a tunnel layer flattened along local up, the cave-wall override, biome overrides (Plains more
 	// and shallower, Ocean none) and the underwater minimum depth, which the planet branch applies as the CPU does.
@@ -1260,6 +1280,8 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 	PlanetThresholds.Biome = 99.9f;
 	PlanetThresholds.Meta = 99.9f;
 	PlanetThresholds.MatWhenDensEq = 99.5f;
+	PlanetThresholds.WatchMaterialID = 9; // gold, Rarity 0.5 (SP-H3)
+	PlanetThresholds.WatchMaterialMatch = 99.0f;
 
 	FVoxelGPUNoiseGenerator GPUGenerator;
 	GPUGenerator.Initialize();

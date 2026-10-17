@@ -41,9 +41,11 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * Version of the planet's generation, in a planet's fingerprint shape ("PlanetGeneration=N") so a change to planet
 	 * terrain refuses planet saves only; GenerationVersion would refuse every save. 2: spherical Phase 1 (noise by 3D
 	 * direction on the datum sphere, continentalness on the radial height, materials by altitude; SP-B1, SP-B2, SP-B5).
+	 * 3: spherical Phase 4 (decision D13): the ore Rarity test hashes the planet-relative position (SP-H3), and the
+	 * planet's map tiles, explored tiles, map overlays and surface NPC ids key on the surface coordinate.
 	 * Fingerprints from before have no entry and are refused.
 	 */
-	static constexpr int32 PlanetGenerationVersion = 2;
+	static constexpr int32 PlanetGenerationVersion = 3;
 
 	/**
 	 * Terrain params for the heightmap modes (InfinitePlane, IslandBowl).

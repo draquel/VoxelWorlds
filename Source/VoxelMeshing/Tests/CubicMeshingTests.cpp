@@ -6,6 +6,7 @@
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
+#include "VoxelMaterialRegistry.h"
 
 // ==================== Helper Functions ====================
 

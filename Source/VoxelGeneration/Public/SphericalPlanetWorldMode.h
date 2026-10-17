@@ -97,10 +97,22 @@ public:
 		int32 LODLevel,
 		float NoiseValue) const override;
 
+	/**
+	 * Legacy heightmap query (spherical SP-A3): a planet has no height per (X, Y), so this returns the world Z where the
+	 * vertical line through (X, Y) meets the terrain on the upper hemisphere (the planet centre's Z when the line misses
+	 * the terrain) and logs a warning the first time it is called. Planet code uses GetSurfacePoint instead; the
+	 * fallback only keeps a stray legacy caller on the surface rather than at a radius read as a Z.
+	 */
 	virtual float GetTerrainHeightAt(
 		float X,
 		float Y,
 		const FVoxelNoiseParams& NoiseParams) const override;
+
+	/** The terrain shell's world-Z extent: PlanetCenter.Z -/+ the outer radius (what GetWorldBounds reports). */
+	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override;
+
+	/** The terrain shell as altitudes: -MaxTerrainDepth to +MaxTerrainHeight (spherical SP-A4). */
+	virtual void GetAltitudeBounds(float& OutMin, float& OutMax) const override;
 
 	virtual FIntVector WorldToChunkCoord(
 		const FVector& WorldPos,

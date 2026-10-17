@@ -1245,12 +1245,36 @@ float FVoxelCPUNoiseGenerator::SampleOreVeinNoise(const FVector& WorldPos, const
 	return (NoiseValue + 1.0f) * 0.5f;
 }
 
+FIntVector FVoxelCPUNoiseGenerator::OreRarityKey(const FVector& PlanetRelativePos)
+{
+	return FIntVector(
+		FMath::FloorToInt32(PlanetRelativePos.X + 0.5),
+		FMath::FloorToInt32(PlanetRelativePos.Y + 0.5),
+		FMath::FloorToInt32(PlanetRelativePos.Z + 0.5));
+}
+
+float FVoxelCPUNoiseGenerator::OreRarityHash(const FIntVector& Key, int32 Seed)
+{
+	// Mirrored bit for bit by GpuOreRarityHash (BiomeMaterial.ush): 32-bit wrapping multiplies and shifts only.
+	uint32 H = static_cast<uint32>(Key.X) * 0x8DA6B343u;
+	H ^= static_cast<uint32>(Key.Y) * 0xD8163841u;
+	H ^= static_cast<uint32>(Key.Z) * 0xCB1AB31Fu;
+	H ^= static_cast<uint32>(Seed) * 0x9E3779B9u;
+	H ^= H >> 16;
+	H *= 0x7FEB352Du;
+	H ^= H >> 15;
+	H *= 0x846CA68Bu;
+	H ^= H >> 16;
+	return static_cast<float>(H >> 8) * (1.0f / 16777216.0f);
+}
+
 bool FVoxelCPUNoiseGenerator::CheckOreVeinPlacement(
 	const FVector& WorldPos,
 	float DepthBelowSurface,
 	const TArray<FOreVeinConfig>& OreConfigs,
 	int32 WorldSeed,
-	uint8& OutMaterialID)
+	uint8& OutMaterialID,
+	const FVector* PlanetRelativePos)
 {
 	// Check each ore type in priority order (assumed to be pre-sorted)
 	for (const FOreVeinConfig& OreConfig : OreConfigs)
@@ -1270,10 +1294,11 @@ bool FVoxelCPUNoiseGenerator::CheckOreVeinPlacement(
 			// Apply rarity check (if rarity < 1, randomly skip some valid placements)
 			if (OreConfig.Rarity < 1.0f)
 			{
-				// Use deterministic random based on position
-				float RandomValue = FMath::Frac(
-					FMath::Sin(WorldPos.X * 12.9898f + WorldPos.Y * 78.233f + WorldPos.Z * 45.164f) * 43758.5453f
-				);
+				// Use deterministic random based on position: on a planet an exact integer hash of the planet-relative
+				// position (SP-H3), in heightmap modes the original position hash
+				float RandomValue = PlanetRelativePos
+					? OreRarityHash(OreRarityKey(*PlanetRelativePos), WorldSeed)
+					: FMath::Frac(FMath::Sin(WorldPos.X * 12.9898f + WorldPos.Y * 78.233f + WorldPos.Z * 45.164f) * 43758.5453f);
 				if (RandomValue > OreConfig.Rarity)
 				{
 					continue;
@@ -1299,6 +1324,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const FSphericalPlanetParams& PlanetParams = WorldMode.GetPlanetParams();
 	const FVector PlanetCenter = PlanetParams.PlanetCenter;
 	const float PlanetRadius = PlanetParams.PlanetRadius;
+	// The chunk origin relative to the centre, in double: the ore Rarity hash keys on it (SP-H3), as the GPU's
+	// PlanetChunkOffset does.
+	const FVector ChunkPlanetRelative = ChunkWorldPos - PlanetCenter;
 
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
@@ -1444,7 +1472,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 						BiomeConfig->GetOreVeinsForBiome(BiomeID, ApplicableOres);
 
 						uint8 OreMaterial = 0;
-						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial))
+						const FVector PlanetRelativePos = ChunkPlanetRelative + FVector(X * VoxelSize, Y * VoxelSize, Z * VoxelSize);
+						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial, &PlanetRelativePos))
 						{
 							MaterialID = OreMaterial;
 						}

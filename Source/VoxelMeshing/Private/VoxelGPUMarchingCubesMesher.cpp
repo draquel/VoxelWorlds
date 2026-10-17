@@ -489,6 +489,9 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 	const FVector3f ChunkWorldPos = FVector3f(Request.GetChunkWorldPosition());
 	const FVoxelMeshingConfig CapturedConfig = Config;
 	const FIntVector ChunkCoord = Request.ChunkCoord;
+	// The shader's boundary geomorph runs along Z; on a planet (local up not +Z) it is off on this path (the CPU mesher
+	// morphs along the axis nearest local up, spherical SP-D2). The GPU MC path is not used for runtime chunks.
+	const bool bMorphAlongZ = Request.LocalUp == FVector::UpVector;
 
 	// Calculate LOD stride: 2^LODLevel
 	const int32 LODLevel = FMath::Clamp(Request.LODLevel, 0, 7);
@@ -560,6 +563,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 		 CapturedConfig,
 		 ChunkCoord,
 		 LODStride,
+		 bMorphAlongZ,
 		 RequestId,
 		 Result,
 		 OnComplete](FRHICommandListImmediate& RHICmdList)
@@ -742,7 +746,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				MeshParams->ChunkWorldPosition = ChunkWorldPos;
 				MeshParams->IsoLevel = CapturedConfig.IsoLevel;
 				MeshParams->LODStride = LODStride;
-				MeshParams->MCBoundaryMorph = CVarMCBoundaryMorph.GetValueOnAnyThread() != 0 ? 1u : 0u;
+				MeshParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
 				MeshParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 				MeshParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				MeshParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
@@ -814,7 +818,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				TParams->ChunkWorldPosition = ChunkWorldPos;
 				TParams->IsoLevel = CapturedConfig.IsoLevel;
 				TParams->LODStride = LODStride;
-				TParams->MCBoundaryMorph = CVarMCBoundaryMorph.GetValueOnAnyThread() != 0 ? 1u : 0u;
+				TParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
 				TParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 				TParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				TParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;

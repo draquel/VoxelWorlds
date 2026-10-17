@@ -13,6 +13,7 @@
 #include "Tasks/Task.h"
 #include "Misc/ScopeExit.h"
 #include "VoxelCoordinates.h"
+#include "VoxelDigitalLine.h"
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "IVoxelWorldMode.h"
@@ -1706,6 +1707,178 @@ bool UVoxelChunkManager::QueryEditMergedSurface(
 	return true;
 }
 
+bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FVoxelSurfaceSample& OutSample) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !Configuration || !WM)
+	{
+		return false;
+	}
+
+	if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
+	{
+		// Heightmap modes: the column at (X, Y), unchanged.
+		float Height = 0.0f;
+		if (!QueryEditMergedSurface(WorldPos.X, WorldPos.Y, Height, OutSample.Normal, OutSample.SlopeDegrees, OutSample.MaterialID, OutSample.BiomeID))
+		{
+			return false;
+		}
+		OutSample.Height = Height;
+		OutSample.Position = FVector(WorldPos.X, WorldPos.Y, Height);
+		OutSample.Up = FVector::UpVector;
+		OutSample.Altitude = WM->GetAltitude(OutSample.Position);
+		return true;
+	}
+
+	const float VoxelSize = Configuration->VoxelSize;
+	const int32 ChunkSize = Configuration->ChunkSize;
+	if (VoxelSize <= 0.0f || ChunkSize <= 0)
+	{
+		return false;
+	}
+
+	// The analytic surface along the direction locates the line and makes the near/far decision, as the analytic height
+	// does for the column.
+	const FVector& Origin = Configuration->WorldOrigin;
+	const FVoxelTerrainSurfacePoint Estimate = WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
+	const FVector Up = WM->GetUpVector(Estimate.Position);
+	if (!IsChunkLoaded(FVoxelCoordinates::WorldToChunk(Estimate.Position - Origin, ChunkSize, VoxelSize)))
+	{
+		return false;
+	}
+
+	// A digital line of edit-merged voxels along local up through the estimate's voxel, one chunk either side (covers
+	// dig-down / build-up). Voxel I's density sample sits at Origin + I * VoxelSize; read it from inside its cell.
+	const FVector RelVoxel = (Estimate.Position - Origin) / VoxelSize;
+	const FIntVector Start(FMath::FloorToInt32(RelVoxel.X), FMath::FloorToInt32(RelVoxel.Y), FMath::FloorToInt32(RelVoxel.Z));
+	const FVoxelDigitalLine Line = FVoxelDigitalLine::Make(Up);
+	const int32 Window = ChunkSize;
+	const int32 Count = 2 * Window + 1;
+	TArray<FIntVector, TInlineAllocator<160>> Indices;
+	TArray<FVoxelData, TInlineAllocator<160>> Voxels;
+	Indices.SetNumUninitialized(Count);
+	Voxels.SetNumUninitialized(Count);
+	for (int32 i = 0; i < Count; ++i)
+	{
+		Indices[i] = Line.Step(Start, i - Window);
+		Voxels[i] = GetEditMergedVoxelAtWorldPosition(Origin + (FVector(Indices[i]) + FVector(0.5)) * VoxelSize);
+	}
+
+	// Coarse, from the top down: the highest solid voxel with air above it along the line (ExtractSurfaceFromColumn's
+	// rule), one voxel read per step.
+	int32 Found = INDEX_NONE;
+	for (int32 i = Count - 2; i >= 0; --i)
+	{
+		if (Voxels[i].IsSolid() && Voxels[i + 1].IsAir())
+		{
+			Found = i;
+			break;
+		}
+	}
+	if (Found == INDEX_NONE)
+	{
+		return false;
+	}
+
+	// Fine: the trilinear edit-merged density on the true up-line through the queried direction, around the coarse
+	// crossing. The digital line strays up to a voxel sideways, which on a slope moves the crossing; the up-line does not.
+	auto VoxelDensity = [this, &Origin, VoxelSize](const FIntVector& I) -> float
+	{
+		return static_cast<float>(GetEditMergedVoxelAtWorldPosition(Origin + (FVector(I) + FVector(0.5)) * VoxelSize).Density);
+	};
+	auto Trilinear = [&VoxelDensity, &Origin, VoxelSize](const FVector& P) -> float
+	{
+		const FVector F = (P - Origin) / VoxelSize;
+		const FIntVector I0(FMath::FloorToInt32(F.X), FMath::FloorToInt32(F.Y), FMath::FloorToInt32(F.Z));
+		const FVector T = F - FVector(I0);
+		float Result = 0.0f;
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const FIntVector O(Corner & 1, (Corner >> 1) & 1, (Corner >> 2) & 1);
+			const double W = (O.X ? T.X : 1.0 - T.X) * (O.Y ? T.Y : 1.0 - T.Y) * (O.Z ? T.Z : 1.0 - T.Z);
+			Result += static_cast<float>(W) * VoxelDensity(I0 + O);
+		}
+		return Result;
+	};
+	const float Iso = static_cast<float>(VOXEL_SURFACE_THRESHOLD);
+	const double TopT = FVector::DotProduct(Origin + FVector(Indices[Found + 1]) * VoxelSize - Estimate.Position, Up) + 1.5 * VoxelSize;
+	const double BottomT = FVector::DotProduct(Origin + FVector(Indices[Found]) * VoxelSize - Estimate.Position, Up) - 1.5 * VoxelSize;
+	const double Step = 0.25 * VoxelSize;
+	double HitT = TNumericLimits<double>::Max();
+	float AboveDensity = Trilinear(Estimate.Position + Up * TopT);
+	for (double T = TopT - Step; T >= BottomT && AboveDensity < Iso; T -= Step)
+	{
+		const float Density = Trilinear(Estimate.Position + Up * T);
+		if (Density >= Iso)
+		{
+			HitT = T + Step * (Density - Iso) / FMath::Max(Density - AboveDensity, KINDA_SMALL_NUMBER);
+			break;
+		}
+		AboveDensity = Density;
+	}
+	if (HitT == TNumericLimits<double>::Max())
+	{
+		// The fine walk found no crossing (an edge case of the bracket): keep the coarse crossing, put on the up-line.
+		const float D0 = static_cast<float>(Voxels[Found].Density);
+		const float D1 = static_cast<float>(Voxels[Found + 1].Density);
+		const float Denom = D1 - D0;
+		const float T = FMath::Abs(Denom) > KINDA_SMALL_NUMBER ? FMath::Clamp((Iso - D0) / Denom, 0.0f, 1.0f) : 0.5f;
+		const FVector Crossing = Origin + FMath::Lerp(FVector(Indices[Found]), FVector(Indices[Found + 1]), static_cast<double>(T)) * VoxelSize;
+		HitT = FVector::DotProduct(Crossing - Estimate.Position, Up);
+	}
+
+	OutSample.Position = Estimate.Position + Up * HitT;
+	OutSample.Up = Up;
+	OutSample.MaterialID = Voxels[Found].MaterialID;
+	OutSample.BiomeID = Voxels[Found].BiomeID;
+
+	// The normal from the trilinear edit-merged density gradient at the surface (central differences half a voxel either
+	// side on the world axes), turned toward local up for a top surface.
+	const FVector& P = OutSample.Position;
+	const double H = 0.5 * VoxelSize;
+	const FVector Gradient(
+		Trilinear(P + FVector(H, 0.0, 0.0)) - Trilinear(P - FVector(H, 0.0, 0.0)),
+		Trilinear(P + FVector(0.0, H, 0.0)) - Trilinear(P - FVector(0.0, H, 0.0)),
+		Trilinear(P + FVector(0.0, 0.0, H)) - Trilinear(P - FVector(0.0, 0.0, H)));
+	OutSample.Normal = (-Gradient).GetSafeNormal();
+	if (OutSample.Normal.IsNearlyZero())
+	{
+		OutSample.Normal = Up;
+	}
+	else if (FVector::DotProduct(OutSample.Normal, Up) < 0.0)
+	{
+		OutSample.Normal = -OutSample.Normal;
+	}
+	OutSample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(OutSample.Normal, Up), -1.0, 1.0)));
+	OutSample.Altitude = WM->GetAltitude(OutSample.Position);
+	OutSample.Height = OutSample.Altitude;
+	return true;
+}
+
+FVector UVoxelChunkManager::GetChunkLocalUp(const FIntVector& ChunkCoord) const
+{
+	if (!WorldMode || !Configuration || Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return FVector::UpVector;
+	}
+	const double ChunkWorldSize = static_cast<double>(Configuration->ChunkSize) * Configuration->VoxelSize;
+	return WorldMode->GetUpVector(Configuration->WorldOrigin + (FVector(ChunkCoord) + FVector(0.5)) * ChunkWorldSize);
+}
+
+FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !WM || !Configuration)
+	{
+		return WorldPos;
+	}
+	if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
+	{
+		return FVector(WorldPos.X, WorldPos.Y, GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y));
+	}
+	return WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams).Position;
+}
+
 // ==================== Debug ====================
 
 FString UVoxelChunkManager::GetDebugStats() const
@@ -3306,8 +3479,10 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		return;
 	}
 
-	// Tree injection captures (value copies for thread safety)
+	// Tree injection captures (value copies for thread safety). Voxel trees are a heightmap feature (cubic, which planets
+	// do not use: spherical SD3, SP-B9).
 	const bool bInjectTrees = Configuration &&
+		Configuration->WorldMode != EWorldMode::SphericalPlanet &&
 		Configuration->MeshingMode == EMeshingMode::Cubic &&
 		Configuration->TreeMode != EVoxelTreeMode::HISM &&
 		Configuration->TreeTemplates.Num() > 0 &&
@@ -3505,8 +3680,9 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 {
 	// The water/underground post-passes already ran on the GPU (AddVoxelPostPassDispatches), so the
 	// readback data is finished except for cubic-mode voxel-tree injection. Without trees there is
-	// nothing left to compute — enqueue directly and skip the worker hop.
+	// nothing left to compute — enqueue directly and skip the worker hop. Never on a planet (SP-B9).
 	const bool bInjectTrees = Configuration &&
+		Configuration->WorldMode != EWorldMode::SphericalPlanet &&
 		Configuration->MeshingMode == EMeshingMode::Cubic &&
 		Configuration->TreeMode != EVoxelTreeMode::HISM &&
 		Configuration->TreeTemplates.Num() > 0 &&
@@ -3679,6 +3855,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		MeshRequest.ChunkSize = Configuration->ChunkSize;
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
 		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
+		MeshRequest.LocalUp = GetChunkLocalUp(Request.ChunkCoord);
 		MeshRequest.VoxelData = State->Descriptor.GetVoxelDataForRead();
 
 		// Merge edit layer if present
@@ -4717,6 +4894,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		SeamRequest.LocalUp = GetChunkLocalUp(Key.Owner);
 		SeamRequest.VoxelDataA = GetSeamVoxelSnapshot(Job.Participants[0].Coord, *States[0]);
 		SeamRequest.VoxelDataB = GetSeamVoxelSnapshot(Job.Participants[1].Coord, *States[1]);
 
@@ -4758,6 +4936,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		SeamRequest.LocalUp = GetChunkLocalUp(Key.Owner);
 		// Registry participant order [Owner, +PerpA, +PerpB, +PerpA+PerpB] (ascending perps)
 		// matches the request's quadrant order [(0,0),(1,0),(0,1),(1,1)] by construction.
 		for (int32 i = 0; i < 4; ++i)
@@ -4802,6 +4981,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.ChunkSize = Configuration->ChunkSize;
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
+		SeamRequest.LocalUp = GetChunkLocalUp(Key.Owner);
 		// Registry participant order (X innermost: i + j*2 + k*4) matches the request's octant
 		// order dx + dy*2 + dz*4 by construction.
 		for (int32 i = 0; i < 8; ++i)
@@ -6443,6 +6623,7 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	OutMeshRequest.ChunkSize = ChunkSize;
 	OutMeshRequest.VoxelSize = Configuration->VoxelSize;
 	OutMeshRequest.WorldOrigin = Configuration->WorldOrigin;
+	OutMeshRequest.LocalUp = GetChunkLocalUp(ChunkCoord);
 
 	// Hand out the shared edit-merged snapshot (built at most once per chunk content version, usually
 	// already cached by the seam pipeline). The worker copies it into the request off the game thread.

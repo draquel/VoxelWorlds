@@ -210,13 +210,14 @@ static void SelectCornerArrays(FVoxelMeshingRequest& R, bool bPosX, bool bPosY, 
 
 /** Base synthetic request for one participant frame. */
 static void InitFrameRequest(FVoxelMeshingRequest& R, const FIntVector& Coord, int32 LOD,
-	int32 CS, float VoxelSize, const FVector& WorldOrigin, const TArray<FVoxelData>& Volume)
+	int32 CS, float VoxelSize, const FVector& WorldOrigin, const FVector& LocalUp, const TArray<FVoxelData>& Volume)
 {
 	R.ChunkCoord = Coord;
 	R.LODLevel = LOD;
 	R.ChunkSize = CS;
 	R.VoxelSize = VoxelSize;
 	R.WorldOrigin = WorldOrigin;
+	R.LocalUp = LocalUp;
 	R.VoxelData = Volume; // per-frame copy (worker-side; seam jobs are few and throttled)
 	for (int32 i = 0; i < 6; ++i)
 	{
@@ -299,7 +300,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateFaceSeamMeshCPU(
 		const int32 Depth = FMath::Clamp(FMath::Max(S, 2 * EOther) + 1, 1, CS);
 
 		FVoxelMeshingRequest R;
-		InitFrameRequest(R, P.Coord, P.LOD, CS, VoxelSize, SeamRequest.WorldOrigin, *P.Vol);
+		InitFrameRequest(R, P.Coord, P.LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *P.Vol);
 		R.NeighborPlaneDepth = Depth;
 		TArray<FVoxelData>* Plane; TArray<FVoxelData>* Deep;
 		SelectFaceArrays(R, Axis, P.bFacingPos, Plane, Deep);
@@ -386,7 +387,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateEdgeSeamMeshCPU(
 		const bool bPosP2 = (qb == 0);
 
 		FVoxelMeshingRequest R;
-		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, *SeamRequest.VoxelData[q]);
+		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *SeamRequest.VoxelData[q]);
 		R.NeighborPlaneDepth = Depth;
 
 		TArray<FVoxelData>* Plane; TArray<FVoxelData>* Deep;
@@ -466,7 +467,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateCornerSeamMeshCPU(
 		const int32 Depth = FMath::Clamp(MaxCoarser + 1, 1, CS);
 
 		FVoxelMeshingRequest R;
-		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, *SeamRequest.VoxelData[o]);
+		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *SeamRequest.VoxelData[o]);
 		R.NeighborPlaneDepth = Depth;
 
 		TArray<FVoxelData>* Plane; TArray<FVoxelData>* Deep; uint32 Flag;

@@ -136,6 +136,8 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelWorldComponent* InComponent, UMaterialI
 	if (InComponent)
 	{
 		VoxelSize = InComponent->GetVoxelSize();
+		bRadialFaceUp = InComponent->IsRadialFaceUp();
+		FaceUpCenter = FVector3f(InComponent->GetFaceUpCenter());
 	}
 
 	// Get material (use default if none set)
@@ -1041,7 +1043,7 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 			BiomeIDCounts.FindOrAdd(BiomeID)++;
 		}
 
-		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(SourceVertices[i]);
+		ConvertedVertices[i] = ConvertVertex(SourceVertices[i], ChunkOffset);
 		// Offset vertex position from chunk-local to world space
 		ConvertedVertices[i].Position += ChunkOffset;
 		ColorData[i] = ConvertedVertices[i].Color;
@@ -1255,7 +1257,7 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 
 	for (uint32 i = 0; i < VertexCount; i++)
 	{
-		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Vertices[i]);
+		ConvertedVertices[i] = ConvertVertex(Vertices[i], ChunkOffset);
 		// Offset vertex position from chunk-local to world space
 		ConvertedVertices[i].Position += ChunkOffset;
 		ColorData[i] = ConvertedVertices[i].Color;
@@ -1666,7 +1668,7 @@ void FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread(
 
 	for (uint32 i = 0; i < VertexCount; i++)
 	{
-		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Vertices[i]);
+		ConvertedVertices[i] = ConvertVertex(Vertices[i], TileOffset);
 		ConvertedVertices[i].Position += TileOffset;
 		ColorData[i] = ConvertedVertices[i].Color;
 
@@ -1921,7 +1923,7 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 
 	for (uint32 i = 0; i < VertexCount; i++)
 	{
-		ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Vertices[i]);
+		ConvertedVertices[i] = ConvertVertex(Vertices[i], SeamOffset);
 		ConvertedVertices[i].Position += SeamOffset;
 		ColorData[i] = ConvertedVertices[i].Color;
 
@@ -2331,7 +2333,7 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 			// Debug: Check input normal before conversion
 			FVector3f InputNormal = Add.Vertices[i].GetNormal();
 
-			ConvertedVertices[i] = FVoxelLocalVertex::FromVoxelVertex(Add.Vertices[i]);
+			ConvertedVertices[i] = ConvertVertex(Add.Vertices[i], ChunkOffset);
 			// Offset vertex position from chunk-local to world space
 			ConvertedVertices[i].Position += ChunkOffset;
 			ColorData[i] = ConvertedVertices[i].Color;

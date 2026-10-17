@@ -248,6 +248,8 @@ private:
 	 * @param OreConfigs Array of ore configurations to check
 	 * @param WorldSeed Base world seed
 	 * @param OutMaterialID Output material ID if ore found
+	 * @param PlanetRelativePos On a planet: the voxel's position relative to the planet centre; the Rarity test then
+	 *        uses OreRarityHash (spherical SP-H3). Null: the heightmap modes' position hash, unchanged
 	 * @return True if ore should be placed here
 	 */
 	static bool CheckOreVeinPlacement(
@@ -255,7 +257,32 @@ private:
 		float DepthBelowSurface,
 		const TArray<struct FOreVeinConfig>& OreConfigs,
 		int32 WorldSeed,
-		uint8& OutMaterialID);
+		uint8& OutMaterialID,
+		const FVector* PlanetRelativePos = nullptr);
+
+public:
+	/**
+	 * The integer key a planet's ore Rarity test hashes (spherical SP-H3): the voxel's planet-relative position rounded
+	 * to whole uu (floor(x + 0.5) per axis). Exact on the CPU (double) and the GPU (float holds whole uu below 2^24, a
+	 * 167 km radius), and the same at every LOD for the same world position.
+	 *
+	 * @param PlanetRelativePos Position relative to the planet centre
+	 * @return The key
+	 */
+	static FIntVector OreRarityKey(const FVector& PlanetRelativePos);
+
+	/**
+	 * A planet's ore Rarity value in [0, 1) (spherical SP-H3): an integer hash of the key and the seed, the same bits on
+	 * the CPU and the GPU (GpuOreRarityHash in BiomeMaterial.ush). Replaces frac(sin(p . k)), whose argument near 10^7
+	 * the GPU's float and the CPU's double round differently. An ore is kept where the value is at most its Rarity.
+	 *
+	 * @param Key OreRarityKey of the voxel
+	 * @param Seed World seed
+	 * @return Value in [0, 1), 24 bits
+	 */
+	static float OreRarityHash(const FIntVector& Key, int32 Seed);
+
+private:
 
 	// ==================== Water Fill Pass ====================
 

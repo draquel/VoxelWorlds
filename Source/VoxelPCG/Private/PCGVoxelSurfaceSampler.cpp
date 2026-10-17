@@ -19,6 +19,9 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelNoiseTypes.h"
 #include "IVoxelWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
+#include "VoxelSeaSurface.h"
+#include "PCGVoxelPlanetSurfaceGrid.h"
 
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
@@ -59,6 +62,8 @@ namespace
 		float VoxelSize = 100.0f;
 		bool bWaterEnabled = false;
 		float WaterLevel = 0.0f;
+		// The sea as generation sees it (a planet's sphere of WaterRadius; the WaterLevel plane otherwise).
+		FVoxelSeaSurface Sea;
 		// Live chunk manager for the edit-aware near band (edit-merged voxel surface query).
 		const UVoxelChunkManager* ChunkManager = nullptr;
 		bool bValid = false;
@@ -109,6 +114,7 @@ namespace
 		Out.VoxelSize = Config->VoxelSize;
 		Out.bWaterEnabled = Config->bEnableWaterLevel;
 		Out.WaterLevel = Config->WaterLevel;
+		Out.Sea = FVoxelSeaSurface::FromConfig(*Config);
 		Out.BiomeConfig = Config->bEnableBiomes ? Config->BiomeConfiguration : nullptr;
 		Out.ChunkManager = ChunkMgr;
 		Out.bValid = true;
@@ -205,97 +211,142 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		return true;
 	}
 
-	// Grid stepping over the XY footprint, snapped to a world-anchored grid for determinism.
-	const float Spacing = Settings->PointSpacing;
-	const int32 MinX = FMath::CeilToInt(Bounds.Min.X / Spacing);
-	const int32 MaxX = FMath::FloorToInt(Bounds.Max.X / Spacing);
-	const int32 MinY = FMath::CeilToInt(Bounds.Min.Y / Spacing);
-	const int32 MaxY = FMath::FloorToInt(Bounds.Max.Y / Spacing);
-
-	const int64 NumX = static_cast<int64>(MaxX) - MinX + 1;
-	const int64 NumY = static_cast<int64>(MaxY) - MinY + 1;
-	if (NumX <= 0 || NumY <= 0)
-	{
-		return true;
-	}
-
-	const int64 NumCells = NumX * NumY;
-	constexpr int64 MaxPoints = 4'000'000;
-	if (NumCells > MaxPoints)
-	{
-		PCGE_LOG(Error, GraphAndLog, FText::Format(
-			LOCTEXT("TooMany", "Voxel Surface Sampler: {0} cells exceeds the {1} cap; increase PointSpacing or reduce bounds."),
-			NumCells, MaxPoints));
-		return true;
-	}
-
 	// Sample the surface at each grid cell.
 	TArray<FTransform> Transforms;
 	TArray<FVoxelSurfaceSample> Samples;
-	TArray<FIntPoint> CellIndices;
-	Transforms.Reserve(NumCells);
-	Samples.Reserve(NumCells);
-	CellIndices.Reserve(NumCells);
+	TArray<int32> Seeds;
+	constexpr int64 MaxPoints = 4'000'000;
 
 	// Hoisted biome snapshot for the per-cell surface queries (plain data — the UObject is read
 	// once here on the PCG execution thread, per the sampler's synchronous execution contract).
 	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(VoxelCtx.BiomeConfig);
 
-	for (int32 IX = MinX; IX <= MaxX; ++IX)
+	if (VoxelCtx.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
 	{
-		const double WorldX = static_cast<double>(IX) * Spacing;
-		for (int32 IY = MinY; IY <= MaxY; ++IY)
+		// A planet (spherical SP-G2): the surface coordinate's cube-face grid at the spacing, each cell's surface point
+		// along local up (edit-merged near loaded chunks, the analytic surface beyond), kept when inside the bounds,
+		// rotated to local up, seeded by (face, cell).
+		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*VoxelCtx.WorldMode);
+		TArray<FPCGVoxelPlanetSurfaceCell> Cells;
+		if (!FPCGVoxelPlanetSurfaceGrid::GatherCells(Planet, Bounds, Settings->PointSpacing, MaxPoints, Cells))
 		{
-			const double WorldY = static_cast<double>(IY) * Spacing;
-
-			// No points past the world's edge (an island's R + falloff, where generation writes only a flat floor):
-			// world modes review WM-I2, KI9.
-			if (!VoxelCtx.WorldMode->IsInsideWorld(WorldX, WorldY))
+			PCGE_LOG(Error, GraphAndLog, FText::Format(
+				LOCTEXT("TooManyPlanet", "Voxel Surface Sampler: more than {0} cells; increase PointSpacing or reduce bounds."), MaxPoints));
+			return true;
+		}
+		const FSphericalPlanetParams& PlanetParams = Planet.GetPlanetParams();
+		Transforms.Reserve(Cells.Num());
+		Samples.Reserve(Cells.Num());
+		Seeds.Reserve(Cells.Num());
+		for (const FPCGVoxelPlanetSurfaceCell& Cell : Cells)
+		{
+			const FVector Query = PlanetParams.PlanetCenter + Cell.Direction * PlanetParams.PlanetRadius;
+			FVoxelSurfaceSample Sample;
+			const bool bNear = Settings->bEditAwareNearby && VoxelCtx.ChunkManager
+				&& VoxelCtx.ChunkManager->QueryEditMergedSurfacePoint(Query, Sample);
+			if (!bNear)
+			{
+				Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
+					BiomeSnapshot, VoxelCtx.Sea);
+			}
+			if (!Bounds.IsInsideOrOn(Sample.Position))
 			{
 				continue;
 			}
-
-			// Hybrid surface source: edit-merged voxel data near loaded chunks (edit-aware + exact
-			// surface), the procedural generator beyond them (stream-independent reach).
-			FVoxelSurfaceSample Sample;
-			bool bGotNearBand = false;
-			if (Settings->bEditAwareNearby && VoxelCtx.ChunkManager)
-			{
-				float NearHeight = 0.0f;
-				FVector NearNormal = FVector::UpVector;
-				float NearSlope = 0.0f;
-				uint8 NearMaterial = 0;
-				uint8 NearBiome = 0;
-				if (VoxelCtx.ChunkManager->QueryEditMergedSurface(WorldX, WorldY, NearHeight, NearNormal, NearSlope, NearMaterial, NearBiome))
-				{
-					Sample.Height = NearHeight;
-					Sample.Normal = NearNormal;
-					Sample.SlopeDegrees = NearSlope;
-					Sample.MaterialID = NearMaterial;
-					Sample.BiomeID = NearBiome;
-					bGotNearBand = true;
-				}
-			}
-
-			if (!bGotNearBand)
-			{
-				Sample = FVoxelSurfaceQuery::SampleSurface(
-					*VoxelCtx.WorldMode,
-					static_cast<float>(WorldX), static_cast<float>(WorldY),
-					VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-					BiomeSnapshot, VoxelCtx.WorldSeed,
-					VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel);
-			}
-
-			const FVector Position(WorldX, WorldY, static_cast<double>(Sample.Height));
-			const FQuat Rotation = Settings->bAlignToSurfaceNormal
-				? FRotationMatrix::MakeFromZ(Sample.Normal).ToQuat()
-				: FQuat::Identity;
-
-			Transforms.Emplace(Rotation, Position);
+			const FQuat Rotation = FRotationMatrix::MakeFromZ(Settings->bAlignToSurfaceNormal ? Sample.Normal : Sample.Up).ToQuat();
+			Transforms.Emplace(Rotation, Sample.Position);
 			Samples.Add(Sample);
-			CellIndices.Emplace(IX, IY);
+			Seeds.Add(PCGHelpers::ComputeSeed(Cell.Face, Cell.IU, Cell.IV));
 		}
+	}
+	else
+	{
+		// Grid stepping over the XY footprint, snapped to a world-anchored grid for determinism.
+		const float Spacing = Settings->PointSpacing;
+		const int32 MinX = FMath::CeilToInt(Bounds.Min.X / Spacing);
+		const int32 MaxX = FMath::FloorToInt(Bounds.Max.X / Spacing);
+		const int32 MinY = FMath::CeilToInt(Bounds.Min.Y / Spacing);
+		const int32 MaxY = FMath::FloorToInt(Bounds.Max.Y / Spacing);
+
+		const int64 NumX = static_cast<int64>(MaxX) - MinX + 1;
+		const int64 NumY = static_cast<int64>(MaxY) - MinY + 1;
+		if (NumX <= 0 || NumY <= 0)
+		{
+			return true;
+		}
+
+		const int64 NumCells = NumX * NumY;
+		if (NumCells > MaxPoints)
+		{
+			PCGE_LOG(Error, GraphAndLog, FText::Format(
+				LOCTEXT("TooMany", "Voxel Surface Sampler: {0} cells exceeds the {1} cap; increase PointSpacing or reduce bounds."),
+				NumCells, MaxPoints));
+			return true;
+		}
+
+		Transforms.Reserve(NumCells);
+		Samples.Reserve(NumCells);
+		Seeds.Reserve(NumCells);
+
+		for (int32 IX = MinX; IX <= MaxX; ++IX)
+		{
+			const double WorldX = static_cast<double>(IX) * Spacing;
+			for (int32 IY = MinY; IY <= MaxY; ++IY)
+			{
+				const double WorldY = static_cast<double>(IY) * Spacing;
+
+				// No points past the world's edge (an island's R + falloff, where generation writes only a flat floor):
+				// world modes review WM-I2, KI9.
+				if (!VoxelCtx.WorldMode->IsInsideWorld(WorldX, WorldY))
+				{
+					continue;
+				}
+
+				// Hybrid surface source: edit-merged voxel data near loaded chunks (edit-aware + exact
+				// surface), the procedural generator beyond them (stream-independent reach).
+				FVoxelSurfaceSample Sample;
+				bool bGotNearBand = false;
+				if (Settings->bEditAwareNearby && VoxelCtx.ChunkManager)
+				{
+					float NearHeight = 0.0f;
+					FVector NearNormal = FVector::UpVector;
+					float NearSlope = 0.0f;
+					uint8 NearMaterial = 0;
+					uint8 NearBiome = 0;
+					if (VoxelCtx.ChunkManager->QueryEditMergedSurface(WorldX, WorldY, NearHeight, NearNormal, NearSlope, NearMaterial, NearBiome))
+					{
+						Sample.Height = NearHeight;
+						Sample.Normal = NearNormal;
+						Sample.SlopeDegrees = NearSlope;
+						Sample.MaterialID = NearMaterial;
+						Sample.BiomeID = NearBiome;
+						bGotNearBand = true;
+					}
+				}
+
+				if (!bGotNearBand)
+				{
+					Sample = FVoxelSurfaceQuery::SampleSurface(
+						*VoxelCtx.WorldMode,
+						static_cast<float>(WorldX), static_cast<float>(WorldY),
+						VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
+						BiomeSnapshot, VoxelCtx.WorldSeed,
+						VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel);
+				}
+
+				const FVector Position(WorldX, WorldY, static_cast<double>(Sample.Height));
+				const FQuat Rotation = Settings->bAlignToSurfaceNormal
+					? FRotationMatrix::MakeFromZ(Sample.Normal).ToQuat()
+					: FQuat::Identity;
+
+				Transforms.Emplace(Rotation, Position);
+				Samples.Add(Sample);
+				Seeds.Add(PCGHelpers::ComputeSeed(IX, IY));
+			}
+		}
+		PCGE_LOG(Verbose, LogOnly, FText::Format(
+			LOCTEXT("Generated", "Voxel Surface Sampler: generated {0} points over [{1},{2}]x[{3},{4}]"),
+			Transforms.Num(), MinX, MaxX, MinY, MaxY));
 	}
 
 	const int32 NumPoints = Transforms.Num();
@@ -329,7 +380,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 	{
 		TransformRange[i] = Transforms[i];
 		DensityRange[i] = 1.0f;
-		SeedRange[i] = PCGHelpers::ComputeSeed(CellIndices[i].X, CellIndices[i].Y);
+		SeedRange[i] = Seeds[i];
 
 		const int64 EntryKey = Meta->AddEntry();
 		MetadataEntryRange[i] = EntryKey;
@@ -345,10 +396,6 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 	FPCGTaggedData& Output = Context->OutputData.TaggedData.Emplace_GetRef();
 	Output.Data = PointData;
 	Output.Pin = PCGPinConstants::DefaultOutputLabel;
-
-	PCGE_LOG(Verbose, LogOnly, FText::Format(
-		LOCTEXT("Generated", "Voxel Surface Sampler: generated {0} points over [{1},{2}]x[{3},{4}]"),
-		NumPoints, MinX, MaxX, MinY, MaxY));
 
 	return true;
 }

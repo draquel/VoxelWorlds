@@ -304,6 +304,41 @@ private:
 		float& OutVz) const;
 
 	/**
+	 * ComputeCoarseSurfaceZ along any axis (spherical SP-D2): the coordinate at which the coarse-LOD iso-surface crosses
+	 * the line along Axis through V. The morph target on a planet, where the morph runs along the axis nearest the
+	 * chunk's local up.
+	 *
+	 * @param Request The meshing request
+	 * @param V Vertex position in voxel units (fine resolution)
+	 * @param Axis 0 = X, 1 = Y, 2 = Z
+	 * @param CoarserStride The coarse neighbour's stride (E)
+	 * @param OutCoord Out: the crossing's coordinate along Axis, voxel units
+	 * @return true if a crossing was found within the search band
+	 */
+	bool ComputeCoarseSurfaceAlongAxis(
+		const FVoxelMeshingRequest& Request,
+		const FVector3f& V, int32 Axis,
+		int32 CoarserStride,
+		float& OutCoord) const;
+
+	/**
+	 * The LOD material scan's per-corner walk along a non-vertical local up (spherical SP-D1): from the corner, along the
+	 * digital line in Request.LocalUp's direction, to the last solid voxel before air; its material or biome and how far
+	 * along up it lies.
+	 *
+	 * @param Request The meshing request (LocalUp not +Z)
+	 * @param Corner Corner voxel index
+	 * @param bBiome Read the biome instead of the material
+	 * @param OutValue Out: the last solid voxel's material or biome
+	 * @return The last solid voxel's position along local up (voxel units)
+	 */
+	double ScanSurfaceAlongLocalUp(
+		const FVoxelMeshingRequest& Request,
+		const FIntVector& Corner,
+		bool bBiome,
+		uint8& OutValue) const;
+
+	/**
 	 * Calculate gradient-based normal at a position using LOD-aware sampling.
 	 *
 	 * @param Request The meshing request with voxel data

@@ -1468,6 +1468,17 @@ void UVoxelWorldComponent::SetWorldOrigin(const FVector& InWorldOrigin)
 	WorldOrigin = InWorldOrigin;
 }
 
+void UVoxelWorldComponent::SetRadialFaceUp(bool bRadial, const FVector& Center)
+{
+	if (bRadialFaceUp == bRadial && FaceUpCenter == Center)
+	{
+		return;
+	}
+	bRadialFaceUp = bRadial;
+	FaceUpCenter = Center;
+	MarkRenderStateDirty();
+}
+
 // ==================== Material Atlas ====================
 
 void UVoxelWorldComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)

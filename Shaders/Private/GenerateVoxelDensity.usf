@@ -471,7 +471,7 @@ void MainCS(
             if (Density >= 127u && DepthBelowSurface > 10.0f)
             {
                 uint OreMat;
-                if (GpuCheckOreVein(WorldPos, DepthBelowSurface, OreStart, OreCount, NoiseSeed, OreMat))
+                if (GpuCheckOreVein(WorldPos, DepthBelowSurface, OreStart, OreCount, NoiseSeed, false, float3(0.0f, 0.0f, 0.0f), OreMat))
                 {
                     MaterialID = OreMat;
                 }

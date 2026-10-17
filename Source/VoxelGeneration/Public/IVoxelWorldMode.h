@@ -64,7 +64,9 @@ public:
 	 * Get terrain height at an X,Y position.
 	 *
 	 * For heightmap-based modes (InfinitePlane), this samples 2D noise
-	 * and returns the terrain surface Z coordinate.
+	 * and returns the terrain surface Z coordinate. A planet has no height per (X, Y): it returns the Z where the vertical
+	 * line meets the terrain on the upper hemisphere and logs once (spherical SP-A3); code that must work on a planet uses
+	 * GetSurfacePoint, GetUpVector and GetAltitude instead.
 	 *
 	 * @param X World X coordinate
 	 * @param Y World Y coordinate
@@ -184,6 +186,24 @@ public:
 	{
 		OutMin = -1.0e9f;
 		OutMax = 1.0e9f;
+	}
+
+	/**
+	 * Worst-case terrain bounds as altitudes above the datum (GetAltitude), over the whole world (spherical SP-A4): the
+	 * form of GetTerrainHeightBounds that works in every mode. Heightmap modes: the height bounds through GetAltitude
+	 * (Z - SeaLevel); a planet: its terrain shell, -MaxTerrainDepth to +MaxTerrainHeight. A conservative superset of
+	 * every surface altitude generation can produce, like GetTerrainHeightBounds. Consumers that shade or bound by height
+	 * (the map) use it so they need no planet special case.
+	 *
+	 * @param OutMin Lowest altitude
+	 * @param OutMax Highest altitude
+	 */
+	virtual void GetAltitudeBounds(float& OutMin, float& OutMax) const
+	{
+		float MinZ = 0.0f, MaxZ = 0.0f;
+		GetTerrainHeightBounds(MinZ, MaxZ);
+		OutMin = GetAltitude(FVector(0.0, 0.0, MinZ));
+		OutMax = GetAltitude(FVector(0.0, 0.0, MaxZ));
 	}
 
 	/**

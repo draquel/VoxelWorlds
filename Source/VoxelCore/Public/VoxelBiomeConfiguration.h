@@ -235,6 +235,14 @@ public:
 	void InitializeDefaults();
 
 	/**
+	 * Rebuild every derived cache after the biomes, height rules or ore veins were changed in code: the biome index, the
+	 * sorted height rules and global ores, the baked continentalness curves and the GPU data (what PostLoad does after
+	 * loading). Without it a configuration edited after InitializeDefaults keeps generating the default ores.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Biome")
+	void RebuildCaches();
+
+	/**
 	 * Get the number of configured biomes.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Biome")
