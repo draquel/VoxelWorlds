@@ -5,6 +5,8 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelDownLines.h"
+#include "VoxelSeaSurface.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphResources.h"
 #include "RenderGraphUtils.h"
@@ -110,6 +112,19 @@ public:
 		// The seabed beyond the edge (WM-E1): FIslandBowlParams::SeabedDepth / SeabedSlopeWidth.
 		SHADER_PARAMETER(float, IslandSeabedDepth)
 		SHADER_PARAMETER(float, IslandSeabedSlopeWidth)
+		// SphericalPlanet world-mode params (spherical Phase 2, SP-B4) — applied when WorldMode == SPHERICAL_PLANET (1),
+		// see SphericalPlanet.ush. From the request's SphericalPlanetParams (FVoxelWorldModeFactory) and WaterRadius.
+		SHADER_PARAMETER(FVector3f, PlanetCenter)
+		SHADER_PARAMETER(FVector3f, PlanetChunkOffset)      // chunk origin - planet centre, computed in double
+		SHADER_PARAMETER(float, PlanetRadius)
+		SHADER_PARAMETER(float, PlanetInnerRadius)
+		SHADER_PARAMETER(float, PlanetOuterRadius)
+		SHADER_PARAMETER(float, PlanetWaterRadius)
+		// Cave parameters only the planet branch reads (the heightmap branch's documented gap): the underwater minimum
+		// depth and the biome overrides, 1 float4 each: [BiomeID, CaveScale, MinDepthOverride, 0].
+		SHADER_PARAMETER(float, CaveUnderwaterMinDepth)
+		SHADER_PARAMETER(int32, CaveBiomeOverrideCount)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, CaveBiomeOverrideData)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutputVoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -154,20 +169,81 @@ public:
 	}
 };
 
+// Flood sweep parameters, shared by the plane's sweep (below the WaterLevel plane) and the planet's (inside the sea
+// sphere: PlanetChunkOffset and SeaRadiusSq).
+BEGIN_SHADER_PARAMETER_STRUCT(FVoxelWaterFloodSweepParameters, )
+	SHADER_PARAMETER(uint32, ChunkSize)
+	SHADER_PARAMETER(float, VoxelSize)
+	SHADER_PARAMETER(float, ChunkWorldZ)
+	SHADER_PARAMETER(float, WaterLevel)
+	SHADER_PARAMETER(uint32, SweepAxis)
+	SHADER_PARAMETER(FVector3f, PlanetChunkOffset)
+	SHADER_PARAMETER(float, SeaRadiusSq)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+END_SHADER_PARAMETER_STRUCT()
+
 class FVoxelWaterFloodSweepCS : public FGlobalShader
 {
 public:
 	DECLARE_GLOBAL_SHADER(FVoxelWaterFloodSweepCS);
+	using FParameters = FVoxelWaterFloodSweepParameters;
 	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterFloodSweepCS, FGlobalShader);
 
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER(uint32, ChunkSize)
-		SHADER_PARAMETER(float, VoxelSize)
-		SHADER_PARAMETER(float, ChunkWorldZ)
-		SHADER_PARAMETER(float, WaterLevel)
-		SHADER_PARAMETER(uint32, SweepAxis)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
-	END_SHADER_PARAMETER_STRUCT()
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+/** The planet's flood sweep: eligibility is the sea sphere instead of the WaterLevel plane (spherical SP-B8). */
+class FVoxelWaterFloodSweepRadialCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterFloodSweepRadialCS);
+	using FParameters = FVoxelWaterFloodSweepParameters;
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterFloodSweepRadialCS, FGlobalShader);
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// The planet's line passes (spherical Phase 2, SP-B7 / SP-B8 on the GPU): the digital lines along the chunk's local
+// down (FVoxelDownLines, uploaded as the CPU passes compute them), the sea sphere, and the cave-flag clear.
+BEGIN_SHADER_PARAMETER_STRUCT(FVoxelDownLinesParameters, )
+	SHADER_PARAMETER(uint32, ChunkSize)
+	SHADER_PARAMETER(float, VoxelSize)
+	SHADER_PARAMETER(uint32, ClearCaveFlags)
+	SHADER_PARAMETER(uint32, LineAxisA)
+	SHADER_PARAMETER(uint32, LineForward)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int2>, LineShifts)
+	SHADER_PARAMETER(FVector3f, PlanetChunkOffset)
+	SHADER_PARAMETER(float, SeaRadiusSq)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+END_SHADER_PARAMETER_STRUCT()
+
+/** The planet's water seed: one thread per line, ApplyRadialWaterFillPass phase 1. */
+class FVoxelWaterLineSeedCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterLineSeedCS);
+	using FParameters = FVoxelDownLinesParameters;
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterLineSeedCS, FGlobalShader);
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+/** The planet's underground scan: one thread per line, ApplyUndergroundClassificationPass pass 1 along local down. */
+class FVoxelUndergroundLinesCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelUndergroundLinesCS);
+	using FParameters = FVoxelDownLinesParameters;
+	SHADER_USE_PARAMETER_STRUCT(FVoxelUndergroundLinesCS, FGlobalShader);
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -234,6 +310,98 @@ IMPLEMENT_GLOBAL_SHADER(FVoxelWaterFloodSweepCS, "/Plugin/VoxelWorlds/Private/Vo
 IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundColumnCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundColumnCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundMarkCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundMarkCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundApplyCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundApplyCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterFloodSweepRadialCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterFloodSweepRadialCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterLineSeedCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterLineSeedCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundLinesCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundLinesCS", SF_Compute);
+
+// Flood rounds: repeated bidirectional axis sweeps converge to the same 6-connected fixpoint as the CPU BFS (monotone
+// flag spread). Each round can carry the flood around one more "corner" per axis; ocean-pocket topology converges in
+// 1-2 rounds, 8 is margin.
+static constexpr int32 FloodSweepRounds = 8;
+
+/**
+ * A planet chunk's post-passes (spherical Phase 2, SP-B7 / SP-B8 on the GPU), mirroring the planet branches of
+ * FVoxelCPUNoiseGenerator: ApplyRadialWaterFillPass (seed along the lines in local down, flood inside the sea sphere,
+ * clear the cave flags) and pass 1 of ApplyUndergroundClassificationPass along the same lines. The lines come from
+ * FVoxelDownLines, the geometry the CPU passes use, so both walk the same voxels in the same order.
+ *
+ * Gating as on the CPU: the water passes only with water on; the seed and flood only when the sea surface crosses the
+ * chunk's voxel box (no seeds otherwise); the cave-flag clear whenever the water pass ran, folded into the line scan.
+ */
+static void AddPlanetLinePassDispatches(
+	FRDGBuilder& GraphBuilder,
+	const FVoxelNoiseGenerationRequest& Request,
+	FRDGBufferRef VoxelBuffer)
+{
+	const int32 ChunkSize = Request.ChunkSize;
+	const FVoxelDownLines Lines = FVoxelDownLines::Make(ChunkSize, FVoxelDownLines::PlanetChunkDown(Request));
+	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	const FVector3f ChunkOffset(ChunkWorldPos - Request.SphericalPlanetParams.PlanetCenter);
+	const double SeaRadius = Request.WaterRadius;
+	const float SeaRadiusSq = static_cast<float>(SeaRadius * SeaRadius);
+
+	FRDGBufferRef ShiftBuffer = CreateStructuredBuffer(GraphBuilder, TEXT("VoxelDownLineShifts"), sizeof(FIntPoint), ChunkSize,
+		Lines.Shifts.GetData(), static_cast<uint64>(ChunkSize) * sizeof(FIntPoint));
+	FRDGBufferSRVRef ShiftSRV = GraphBuilder.CreateSRV(ShiftBuffer);
+	const FIntVector LineGroups(FMath::DivideAndRoundUp(Lines.NumLines(), 64), 1, 1);
+	const FIntVector ColumnGroups(FMath::DivideAndRoundUp(ChunkSize, 8), FMath::DivideAndRoundUp(ChunkSize, 8), 1);
+
+	auto FillLineParameters = [&](FVoxelDownLinesParameters* Params, bool bClearCaveFlags)
+	{
+		Params->ChunkSize = ChunkSize;
+		Params->VoxelSize = Request.VoxelSize; // the base voxel size, as the CPU passes
+		Params->ClearCaveFlags = bClearCaveFlags ? 1 : 0;
+		Params->LineAxisA = Lines.AxisA;
+		Params->LineForward = Lines.bForward ? 1 : 0;
+		Params->LineShifts = ShiftSRV;
+		Params->PlanetChunkOffset = ChunkOffset;
+		Params->SeaRadiusSq = SeaRadiusSq;
+		Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+	};
+
+	const auto& ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+	const bool bWaterPass = Request.bEnableWaterLevel;
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::MakeSphere(Request.SphericalPlanetParams.PlanetCenter, Request.WaterRadius);
+	const FBox VoxelBox(ChunkWorldPos, ChunkWorldPos + FVector((ChunkSize - 1) * Request.VoxelSize));
+
+	if (bWaterPass && Sea.Crosses(VoxelBox))
+	{
+		// Phase 1: seed along the lines
+		{
+			FVoxelDownLinesParameters* Params = GraphBuilder.AllocParameters<FVoxelDownLinesParameters>();
+			FillLineParameters(Params, false);
+			TShaderMapRef<FVoxelWaterLineSeedCS> Shader(ShaderMap);
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterLineSeed"), Shader, Params, LineGroups);
+		}
+
+		// Phase 2: flood inside the sea sphere
+		TShaderMapRef<FVoxelWaterFloodSweepRadialCS> SweepShader(ShaderMap);
+		for (int32 Round = 0; Round < FloodSweepRounds; ++Round)
+		{
+			for (const uint32 Axis : { 2u, 0u, 1u })
+			{
+				FVoxelWaterFloodSweepParameters* Params = GraphBuilder.AllocParameters<FVoxelWaterFloodSweepParameters>();
+				Params->ChunkSize = ChunkSize;
+				Params->VoxelSize = Request.VoxelSize;
+				Params->ChunkWorldZ = 0.0f;
+				Params->WaterLevel = 0.0f;
+				Params->SweepAxis = Axis;
+				Params->PlanetChunkOffset = ChunkOffset;
+				Params->SeaRadiusSq = SeaRadiusSq;
+				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterFloodSweepRadial"), SweepShader, Params, ColumnGroups);
+			}
+		}
+	}
+
+	// Underground pass 1 along the lines, with the water pass's cave-flag clear (phase 3) folded in
+	{
+		FVoxelDownLinesParameters* Params = GraphBuilder.AllocParameters<FVoxelDownLinesParameters>();
+		FillLineParameters(Params, bWaterPass);
+		TShaderMapRef<FVoxelUndergroundLinesCS> Shader(ShaderMap);
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelUndergroundLines"), Shader, Params, LineGroups);
+	}
+}
 
 /**
  * Append the post-pass dispatches (water fill + underground classification) to the render graph,
@@ -242,11 +410,11 @@ IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundApplyCS, "/Plugin/VoxelWorlds/Private/V
  * the GPUvsCPU parity tests transitively validate the streaming path.
  *
  * Gating mirrors FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses:
- * - Water pass: only when water is enabled and the world mode is not SphericalPlanet (radial water).
- *   Column seeding + flood only when the chunk straddles the water level (no seeds otherwise);
- *   the cave-flag clear (CPU phase 3) runs whenever the water pass ran, folded into the
- *   underground column kernel via ClearCaveFlags.
- * - Underground classification: always.
+ * - Planets: AddPlanetLinePassDispatches (the radial water fill and the underground scan along local down).
+ * - Heightmap modes, water pass: only when water is enabled. Column seeding + flood only when the
+ *   chunk straddles the water level (no seeds otherwise); the cave-flag clear (CPU phase 3) runs
+ *   whenever the water pass ran, folded into the underground column kernel via ClearCaveFlags.
+ * - Underground classification: always (pass 2, the boundary propagation, is the same in every mode).
  */
 static void AddVoxelPostPassDispatches(
 	FRDGBuilder& GraphBuilder,
@@ -268,11 +436,17 @@ static void AddVoxelPostPassDispatches(
 	const float ChunkWorldZ = static_cast<float>(Request.GetChunkWorldPosition().Z);
 	const float ChunkTopZ = ChunkWorldZ + ChunkSize * Request.VoxelSize;
 
-	const bool bWaterPass = Request.bEnableWaterLevel && Request.WorldMode != EWorldMode::SphericalPlanet;
+	const bool bPlanet = Request.WorldMode == EWorldMode::SphericalPlanet;
+	const bool bWaterPass = Request.bEnableWaterLevel && !bPlanet;
 	const bool bChunkContainsWaterLevel = bWaterPass
 		&& Request.WaterLevel >= ChunkWorldZ && Request.WaterLevel < ChunkTopZ;
 
 	const auto& ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+
+	if (bPlanet)
+	{
+		AddPlanetLinePassDispatches(GraphBuilder, Request, VoxelBuffer);
+	}
 
 	if (bChunkContainsWaterLevel)
 	{
@@ -288,10 +462,7 @@ static void AddVoxelPostPassDispatches(
 			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterColumnSeed"), Shader, Params, ColumnGroups);
 		}
 
-		// Phase 2: flood — repeated bidirectional axis sweeps converge to the same 6-connected
-		// fixpoint as the CPU BFS (monotone flag spread). Each round can carry the flood around
-		// one more "corner" per axis; ocean-pocket topology converges in 1-2 rounds, 8 is margin.
-		constexpr int32 FloodSweepRounds = 8;
+		// Phase 2: flood (FloodSweepRounds of bidirectional axis sweeps)
 		TShaderMapRef<FVoxelWaterFloodSweepCS> SweepShader(ShaderMap);
 		for (int32 Round = 0; Round < FloodSweepRounds; ++Round)
 		{
@@ -303,13 +474,17 @@ static void AddVoxelPostPassDispatches(
 				Params->ChunkWorldZ = ChunkWorldZ;
 				Params->WaterLevel = Request.WaterLevel;
 				Params->SweepAxis = Axis;
+				Params->PlanetChunkOffset = FVector3f::ZeroVector; // read by the planet's sweep only
+				Params->SeaRadiusSq = 0.0f;
 				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterFloodSweep"), SweepShader, Params, ColumnGroups);
 			}
 		}
 	}
 
-	// Underground pass 1 (column scan) + the water pass's cave-flag clear (phase 3) folded in.
+	// Underground pass 1 (column scan) + the water pass's cave-flag clear (phase 3) folded in. Planets scanned their
+	// lines above.
+	if (!bPlanet)
 	{
 		FVoxelUndergroundColumnCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelUndergroundColumnCS::FParameters>();
 		Params->ChunkSize = ChunkSize;
@@ -550,6 +725,32 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->IslandEdgeHeight = Request.IslandParams.EdgeHeight;
 	Parameters->IslandSeabedDepth = Request.IslandParams.SeabedDepth;
 	Parameters->IslandSeabedSlopeWidth = Request.IslandParams.SeabedSlopeWidth;
+
+	// SphericalPlanet world-mode params (spherical Phase 2, SP-B4) — from the request, which
+	// FVoxelWorldModeFactory::FillGenerationRequest fills; ignored by the shader unless WorldMode==SphericalPlanet. The
+	// chunk origin goes relative to the planet centre in double, so the shader's distances and directions start exact.
+	const FSphericalPlanetParams& Planet = Request.SphericalPlanetParams;
+	Parameters->PlanetCenter = FVector3f(Planet.PlanetCenter);
+	Parameters->PlanetChunkOffset = FVector3f(Request.GetChunkWorldPosition() - Planet.PlanetCenter);
+	Parameters->PlanetRadius = Planet.PlanetRadius;
+	Parameters->PlanetInnerRadius = Planet.GetInnerRadius();
+	Parameters->PlanetOuterRadius = Planet.GetOuterRadius();
+	Parameters->PlanetWaterRadius = Request.WaterRadius;
+
+	// The cave configuration's underwater minimum depth and biome overrides — the planet branch applies them as the
+	// CPU's CalculateCaveDensity does; the heightmap branch does not read them (its documented gap).
+	TArray<FVector4f> CaveOverrideData;
+	Parameters->CaveUnderwaterMinDepth = 0.0f;
+	if (Request.bEnableCaves && Request.CaveConfiguration)
+	{
+		Parameters->CaveUnderwaterMinDepth = Request.CaveConfiguration->UnderwaterMinDepth;
+		for (const FBiomeCaveOverride& Override : Request.CaveConfiguration->BiomeOverrides)
+		{
+			CaveOverrideData.Add(FVector4f(static_cast<float>(Override.BiomeID), Override.CaveScale, Override.MinDepthOverride, 0.0f));
+		}
+	}
+	Parameters->CaveBiomeOverrideCount = CaveOverrideData.Num();
+	Parameters->CaveBiomeOverrideData = CreateFloat4StructuredSRV(GraphBuilder, CaveOverrideData, TEXT("VoxelCaveBiomeOverrideData"));
 
 	return Parameters;
 }

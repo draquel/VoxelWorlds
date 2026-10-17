@@ -7,7 +7,10 @@
  * packed voxel buffer, so the readback returns finished voxel data and the game thread /
  * worker threads do no per-voxel work. Semantics mirror FVoxelCPUNoiseGenerator::
  * ApplyWaterFillPass / ApplyUndergroundClassificationPass exactly — any change here must be
- * mirrored there (the GPUvsCPU parity tests compare the two paths bit-for-bit).
+ * mirrored there (the GPUvsCPU parity tests compare the two paths bit-for-bit). On a planet
+ * (spherical Phase 2) the water fill is ApplyRadialWaterFillPass and the underground scan runs
+ * along local down: WaterLineSeedCS, WaterFloodSweepRadialCS and UndergroundLinesCS, on the
+ * CPU passes' own lines (FVoxelDownLines).
  *
  * Packed voxel layout (FVoxelData::Pack): byte0 material, byte1 density, byte2 biome,
  * byte3 metadata (AO low nibble, flags high nibble).
@@ -33,7 +36,15 @@ float VoxelSize;          // Base voxel size — the CPU passes intentionally us
 float ChunkWorldZ;        // Chunk origin Z (world units)
 float WaterLevel;
 uint SweepAxis;           // WaterFloodSweepCS: 0 = X, 1 = Y, 2 = Z
-uint ClearCaveFlags;      // UndergroundColumnCS: 1 = clear cave flags while scanning (water pass phase 3)
+uint ClearCaveFlags;      // UndergroundColumnCS / UndergroundLinesCS: 1 = clear cave flags while scanning (water pass phase 3)
+
+// Planets (spherical Phase 2, SP-B7 / SP-B8 on the GPU): the digital lines along the chunk's local down that the CPU
+// passes walk (FVoxelDownLines), and the sea sphere. The C++ computes the lines in double and uploads them as they are.
+uint LineAxisA;           // the axis nearest to local down: 0 = X, 1 = Y, 2 = Z (the lines step along it)
+uint LineForward;         // 1 when down points along +LineAxisA (lines start at index 0), else along -LineAxisA
+StructuredBuffer<int2> LineShifts;  // per step K in [0, ChunkSize): the line's offset on (AxisA + 1) % 3 and (AxisA + 2) % 3
+float3 PlanetChunkOffset; // chunk origin - planet centre (computed in double on the CPU)
+float SeaRadiusSq;        // WaterRadius^2: a voxel is below the sea when |PlanetChunkOffset + Local * VoxelSize|^2 <= this
 
 RWStructuredBuffer<uint> VoxelData;
 RWStructuredBuffer<uint> ScratchFlags;   // UndergroundMark/Apply: 1 uint per voxel, 1 = flag this voxel
@@ -46,6 +57,51 @@ uint LinearIndex(uint X, uint Y, uint Z)
 bool IsSolid(uint Packed)
 {
     return ((Packed >> 8) & 0xFFu) >= VOXEL_SURFACE_THRESHOLD;
+}
+
+// FVoxelSeaSurface::IsBelow for a planet's sea sphere, planet-relative.
+bool IsBelowSeaSphere(uint3 Local)
+{
+    const float3 Rel = PlanetChunkOffset + float3(Local) * VoxelSize;
+    return dot(Rel, Rel) <= SeaRadiusSq;
+}
+
+// The voxel a digital line (FVoxelDownLines) visits at step K, if it is inside the chunk. LineB / LineC are the line's
+// ids on the two sheared axes, in [-ChunkSize, 2 * ChunkSize).
+bool DownLineVoxel(int LineB, int LineC, uint K, out uint3 Local)
+{
+    Local = uint3(0, 0, 0);
+    const int2 Shift = LineShifts[K];
+    const int B = LineB + Shift.x;
+    const int C = LineC + Shift.y;
+    if (B < 0 || B >= (int)ChunkSize || C < 0 || C >= (int)ChunkSize)
+    {
+        return false;
+    }
+    const uint A = (LineForward != 0) ? K : ChunkSize - 1u - K;
+    // Local[AxisA] = A, Local[(AxisA + 1) % 3] = B, Local[(AxisA + 2) % 3] = C
+    if (LineAxisA == 0u)
+    {
+        Local = uint3(A, (uint)B, (uint)C);
+    }
+    else if (LineAxisA == 1u)
+    {
+        Local = uint3((uint)C, A, (uint)B);
+    }
+    else
+    {
+        Local = uint3((uint)B, (uint)C, A);
+    }
+    return true;
+}
+
+// A line id from the dispatch: FVoxelDownLines's (B - ShiftB + N) + (C - ShiftC + N) * 3N, decoded.
+bool DownLineFromThread(uint LineId, out int LineB, out int LineC)
+{
+    const uint Span = 3u * ChunkSize;
+    LineB = (int)(LineId % Span) - (int)ChunkSize;
+    LineC = (int)(LineId / Span) - (int)ChunkSize;
+    return LineId < Span * Span;
 }
 
 // ==================== Water fill: phase 1 — column seed ====================
@@ -91,14 +147,58 @@ void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
     }
 }
 
+// ==================== Water fill: phase 1 on a planet — line seed ====================
+// One thread per digital line along the chunk's local down (FVoxelDownLines). Mirrors ApplyRadialWaterFillPass phase
+// 1: walking the line from where it enters the chunk, the first solid or cave voxel blocks the rest of the line; until
+// then, air inside the sea sphere takes the water flag. Each voxel is on exactly one line and a line reads and writes
+// only its own voxels, so the threads are independent and the result is the CPU's. Dispatched only when the sea
+// surface crosses the chunk's voxel box (the CPU's gate, evaluated in C++).
+[numthreads(64, 1, 1)]
+void WaterLineSeedCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int LineB, LineC;
+    if (!DownLineFromThread(ThreadId.x, LineB, LineC))
+    {
+        return;
+    }
+
+    for (uint K = 0; K < ChunkSize; ++K)
+    {
+        uint3 Local;
+        if (!DownLineVoxel(LineB, LineC, K, Local))
+        {
+            continue;
+        }
+        const uint Index = LinearIndex(Local.x, Local.y, Local.z);
+        const uint Packed = VoxelData[Index];
+        if (IsSolid(Packed) || (Packed & PACKED_CAVE_BIT) != 0)
+        {
+            return; // the line is blocked from here on
+        }
+        if (IsBelowSeaSphere(Local))
+        {
+            VoxelData[Index] = Packed | PACKED_WATER_BIT;
+        }
+    }
+}
+
 // ==================== Water fill: phase 2 — flood sweep ====================
 // One thread per line along SweepAxis; bidirectional carry scan. Water spreads to a voxel if it
-// is non-solid, non-cave, and its bottom world Z is at or below the water level — the exact
+// is non-solid, non-cave, and below the sea — at or below the water level by its world Z
+// (WaterFloodSweepCS), or inside the sea sphere on a planet (WaterFloodSweepRadialCS) — the exact
 // eligibility of the CPU BFS. Water propagation is a monotone fixpoint (order-independent), so
 // repeated axis sweeps converge to the same result as the CPU's BFS; the C++ side dispatches
 // enough rounds for convergence on real terrain topology.
-[numthreads(8, 8, 1)]
-void WaterFloodSweepCS(uint3 ThreadId : SV_DispatchThreadID)
+bool IsFloodBelowSea(uint X, uint Y, uint Z, bool bRadial)
+{
+    if (bRadial)
+    {
+        return IsBelowSeaSphere(uint3(X, Y, Z));
+    }
+    return (ChunkWorldZ + (float)Z * VoxelSize) <= WaterLevel;
+}
+
+void WaterFloodSweep(uint3 ThreadId, bool bRadial)
 {
     if (ThreadId.x >= ChunkSize || ThreadId.y >= ChunkSize)
     {
@@ -132,7 +232,7 @@ void WaterFloodSweepCS(uint3 ThreadId : SV_DispatchThreadID)
         else if (bCarry
             && !IsSolid(Packed)
             && (Packed & PACKED_CAVE_BIT) == 0
-            && (ChunkWorldZ + (float)Z * VoxelSize) <= WaterLevel)
+            && IsFloodBelowSea(X, Y, Z, bRadial))
         {
             VoxelData[Index] = Packed | PACKED_WATER_BIT;
         }
@@ -161,7 +261,7 @@ void WaterFloodSweepCS(uint3 ThreadId : SV_DispatchThreadID)
         else if (bCarry
             && !IsSolid(Packed)
             && (Packed & PACKED_CAVE_BIT) == 0
-            && (ChunkWorldZ + (float)Z * VoxelSize) <= WaterLevel)
+            && IsFloodBelowSea(X, Y, Z, bRadial))
         {
             VoxelData[Index] = Packed | PACKED_WATER_BIT;
         }
@@ -170,6 +270,18 @@ void WaterFloodSweepCS(uint3 ThreadId : SV_DispatchThreadID)
             bCarry = false;
         }
     }
+}
+
+[numthreads(8, 8, 1)]
+void WaterFloodSweepCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    WaterFloodSweep(ThreadId, false);
+}
+
+[numthreads(8, 8, 1)]
+void WaterFloodSweepRadialCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    WaterFloodSweep(ThreadId, true);
 }
 
 // ==================== Underground classification: pass 1 — column scan ====================
@@ -197,6 +309,79 @@ void UndergroundColumnCS(uint3 ThreadId : SV_DispatchThreadID)
     for (int Z = (int)ChunkSize - 1; Z >= 0; --Z)
     {
         const uint Index = LinearIndex(X, Y, (uint)Z);
+        uint Packed = VoxelData[Index];
+        bool bDirty = false;
+
+        if (ClearCaveFlags != 0 && (Packed & PACKED_CAVE_BIT) != 0)
+        {
+            Packed &= ~PACKED_CAVE_BIT;
+            bDirty = true;
+        }
+
+        if (IsSolid(Packed))
+        {
+            if (bSeenAir)
+            {
+                ++ConsecutiveSolid;
+            }
+        }
+        else
+        {
+            bSeenAir = true;
+
+            if (!bUnderground && ConsecutiveSolid >= MinSolidThickness)
+            {
+                bUnderground = true;
+            }
+
+            if (bUnderground && (Packed & PACKED_WATER_BIT) == 0)
+            {
+                Packed |= PACKED_UNDERGROUND_BIT;
+                bDirty = true;
+            }
+
+            if (!bUnderground)
+            {
+                ConsecutiveSolid = 0;
+            }
+        }
+
+        if (bDirty)
+        {
+            VoxelData[Index] = Packed;
+        }
+    }
+}
+
+// ==================== Underground classification: pass 1 on a planet — line scan ====================
+// One thread per digital line along the chunk's local down (FVoxelDownLines). Mirrors the planet branch of
+// ApplyUndergroundClassificationPass pass 1 (SP-B7): the column scan's state machine on each line, from where it
+// enters the chunk on its upper side. A world-Z scan would read a hillside at mid latitudes as a cave ceiling. As in
+// UndergroundColumnCS, ClearCaveFlags folds in the water pass's phase 3 (every voxel is on exactly one line, so every
+// voxel is cleared once). Heightmap chunks keep UndergroundColumnCS.
+[numthreads(64, 1, 1)]
+void UndergroundLinesCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int LineB, LineC;
+    if (!DownLineFromThread(ThreadId.x, LineB, LineC))
+    {
+        return;
+    }
+
+    const int MinSolidThickness = 3;
+
+    bool bSeenAir = false;
+    bool bUnderground = false;
+    int ConsecutiveSolid = 0;
+
+    for (uint K = 0; K < ChunkSize; ++K)
+    {
+        uint3 Local;
+        if (!DownLineVoxel(LineB, LineC, K, Local))
+        {
+            continue;
+        }
+        const uint Index = LinearIndex(Local.x, Local.y, Local.z);
         uint Packed = VoxelData[Index];
         bool bDirty = false;
 
