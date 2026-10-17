@@ -155,8 +155,26 @@ lines in the chunk's local down direction (the column scan's rule: the part abov
 the line enters the chunk, then air takes the flag down to the first solid or cave voxel), a BFS spreads through
 non-cave air inside the radius, and the cave flags clear. Chunks wholly under the sea fill from their neighbours as on
 the plane. The 2D water tiles below are XY grids at `WaterLevel`, so they are off on planets
-(`UVoxelChunkManager::UsesWaterTiles`); the sea surface is the test actor's cube-sphere mesh at `WaterRadius` until
-SP-E2.
+(`UVoxelChunkManager::UsesWaterTiles`).
+
+**One sea for gameplay (SP-E1, spherical Phase 3).** Everything that asks "how deep under the water is this" goes
+through the same type: `FVoxelSeaSurface::GetDepth(Position)`, the signed depth below the plane (`PlaneZ − Z`) or the
+sphere (`Radius − |P − C|`), positive under the sea. The chunk manager hands it out (`GetSeaSurface`, BlueprintPure
+`GetSeaDepthAt`): swimming and breath (`FVCVoxelNavigationHelper`), the underwater post-process's darkening, the spawn
+search, the navigation water check (`FVoxelSurfaceNavParams::IsUnderwater`), the NPC spawner and scatter's underwater
+class. Heightmap worlds have two plane conventions, kept as they were: generation, scatter, the map and PCG compare with
+`WaterLevel` (`FromConfig`); navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z`
+(`FromConfigOriginRelative`). They agree whenever `WorldOrigin.Z` is 0, as in every configuration here (review plan
+G19). On a planet both are the sphere. The map and the PCG sampler still read `WaterLevel` on a planet (Phase 4).
+
+**The ocean shell (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
+`WaterRadius` on the surface coordinate's tangent warp, its resolution set so no quad sags more than 8 uu under the
+sphere (32 to 160 quads along a face edge; 160 on the 250,000 uu review planet, 153,600 quads), UVs in voxels along
+each face (as the tiles count voxels), the water material id in UV1, drawn with `WaterMeshMaterial`. Two sections: the
+top faces outward and always shows; the underside faces inward and shows only while the viewer is inside the sea radius
+(the far ocean's rule). With a one-sided material no ray meets the shell twice from either side, so it needs no sorting
+and no rebuild. `voxel.World.PlanetOcean 0` hides it. Where the analytic sea passes through dry ground (a cave below
+sea level), the shell shows there too: it is a sphere, not a per-chunk surface.
 
 ---
 
@@ -358,7 +376,7 @@ Creates one `UProceduralMeshComponent` per water tile:
 |----------|------|---------|-------------|
 | `bEnableWaterLevel` | bool | false | Master toggle for the water system |
 | `WaterLevel` | float | 0.0 | Water surface Z height (InfinitePlane/IslandBowl modes) |
-| `WaterRadius` | float | 100000.0 | Water sphere radius (SphericalPlanet mode) |
+| `WaterRadius` | float | 100000.0 | Water sphere radius (SphericalPlanet mode): the sea for generation and gameplay, and the ocean shell's radius |
 | `bShowWaterPlane` | bool | true | Show fallback static water plane when `WaterMeshMaterial` is null |
 | `WaterMeshMaterial` | UMaterialInterface* | nullptr | Material for water tile rendering (should be translucent or Single Layer Water) |
 

@@ -91,6 +91,12 @@ copy config fields into `FIslandBowlParams` / `FSphericalPlanetParams` by hand (
 mean two things, KI3). Positions in the built params are absolute (island centre = `WorldOrigin` + offset). Game code
 reaches the configured mode's bounds and frame through `UVoxelChunkManager` (`Voxel|World` BlueprintPure functions).
 
+"Is this under the water" is always `FVoxelSeaSurface` (VoxelCore): `IsBelow` / `GetDepth` against the `WaterLevel` plane
+or, on a planet, the sphere of `WaterRadius` (spherical SP-B8, SP-E1). Get it from `UVoxelChunkManager::GetSeaSurface`
+(`true` for the `WaterLevel + WorldOrigin.Z` plane game code uses) or `FVoxelSeaSurface::FromConfig`; never compare a Z
+with `WaterLevel` in new code. A planet's sea surface is the chunk manager's ocean shell (`FVoxelPlanetOcean`); its
+spawn point over the terrain is `UVoxelChunkManager::GetPlanetSpawnPosition`.
+
 ## Core Data Structures
 
 ### FVoxelData (4 bytes per voxel)
