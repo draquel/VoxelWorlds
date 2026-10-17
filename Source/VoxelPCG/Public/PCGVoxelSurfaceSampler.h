@@ -32,6 +32,10 @@ namespace PCGVoxelSurfaceSamplerConstants
  * Bounds come from the optional Bounding Shape input pin, or (when none is connected and
  * bUnbounded is false) the executing actor's bounds — which, for a partitioned
  * "Generate at Runtime" PCG component, is the grid cell being generated.
+ *
+ * On a planet (spherical SP-G2) the grid is the surface coordinate's cube faces cut into cells about PointSpacing
+ * across (FPCGVoxelPlanetSurfaceGrid): each cell's surface point along local up, kept when inside the bounds, rotated
+ * to local up (or the normal), seeded by (face, cell); Slope is measured against local up, and water is the sea sphere.
  */
 UCLASS(MinimalAPI, BlueprintType, ClassGroup = (Procedural))
 class UPCGVoxelSurfaceSamplerSettings : public UPCGSettings
