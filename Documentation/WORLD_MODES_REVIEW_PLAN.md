@@ -2856,8 +2856,8 @@ Against the GPU control and §1's thresholds:
 
 ### 16.3 G18: the heightmap GPU caves take the biome overrides and the underwater minimum depth (2026-10-17)
 
-PRs open (draquel/VoxelWorlds `fix/g18-heightmap-gpu-caves`, base `c13ae7d`, main after spherical Phase 2; the parent's
-gitlink and doc map in draquel/UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+PRs open (draquel/VoxelWorlds#100, `fix/g18-heightmap-gpu-caves`, base `c13ae7d`, main after spherical Phase 2; the
+parent's gitlink and doc map in draquel/UE5_PluginDev#111). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
 worktree editor with background throttling off.
 
 **Decision.** D10 (§8): `FVoxelWorldModeFactory::GenerationVersion` goes to 2, so every save made before is refused.
