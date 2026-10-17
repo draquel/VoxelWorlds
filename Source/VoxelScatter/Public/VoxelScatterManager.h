@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Containers/Queue.h"
 #include "VoxelData.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelScatterTypes.h"
 #include "VoxelGPUSurfaceExtractor.h"
 #include "VoxelScatterManager.generated.h"
@@ -27,10 +28,12 @@ struct FScatterExtractionContext
 	const IVoxelWorldMode* WorldMode = nullptr;
 	/** Noise params for IVoxelWorldMode::GetTerrainHeightAt. */
 	FVoxelNoiseParams NoiseParams;
-	/** Whether the world has a water level (enables classifying below-water surfaces as underwater). */
-	bool bEnableWaterLevel = false;
-	/** World Z of the water surface — points below this that are not underground are underwater. */
-	float WaterLevel = 0.0f;
+	/**
+	 * The sea (generation's: FVoxelSeaSurface::FromConfig): points below it that are not underground are underwater.
+	 * The WaterLevel plane in heightmap modes, the sphere of WaterRadius on a planet (spherical SP-E1). Disabled (no
+	 * underwater class from it) when water is off.
+	 */
+	FVoxelSeaSurface Sea;
 };
 
 /**

@@ -30,6 +30,17 @@ FVoxelSeaSurface FVoxelSeaSurface::FromConfig(const UVoxelWorldConfiguration& Co
 	return Sea;
 }
 
+FVoxelSeaSurface FVoxelSeaSurface::FromConfigOriginRelative(const UVoxelWorldConfiguration& Config)
+{
+	FVoxelSeaSurface Sea = FromConfig(Config);
+	if (!Sea.bRadial)
+	{
+		// Rounded to a float, as the navigation and the character have always held it.
+		Sea.PlaneZ = static_cast<float>(Config.WaterLevel + Config.WorldOrigin.Z);
+	}
+	return Sea;
+}
+
 bool FVoxelSeaSurface::IsAbove(const FBox& Box) const
 {
 	if (!bRadial)

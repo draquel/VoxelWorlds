@@ -190,6 +190,8 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 		{
 			Params.bHasWater = Config->bEnableWaterLevel;
 			Params.WaterLevel = Config->WaterLevel + Config->WorldOrigin.Z;
+			// The test itself goes through the sea (SP-E1): the same plane here, the sea sphere on a planet.
+			Params.Sea = ChunkMgr->GetSeaSurface(/*bOriginRelativePlane=*/true);
 		}
 	}
 	if (CachedCellSize != Params.CellSize)
@@ -374,7 +376,8 @@ bool UVoxelSurfaceNavigationSubsystem::IsWalkableAt(const FVector& Location)
 		return false;
 	}
 	const float Height = HeightForCell(Cell);
-	return !(Params.bHasWater && Height < Params.WaterLevel - Params.MaxWadeDepth);
+	const FVector2D Centre = CellCentre(Cell);
+	return !Params.IsUnderwater(Centre.X, Centre.Y, Height);
 }
 
 int32 UVoxelSurfaceNavigationSubsystem::AddBlockedBox(const FBox& WorldBox)
@@ -558,7 +561,7 @@ void UVoxelSurfaceNavigationSubsystem::DrawDebug()
 			{
 				Color = FColor::Magenta;
 			}
-			else if (Params.bHasWater && H < Params.WaterLevel - Params.MaxWadeDepth)
+			else if (Params.IsUnderwater(CellCentre(Cell).X, CellCentre(Cell).Y, H))
 			{
 				Color = FColor::Red;
 			}

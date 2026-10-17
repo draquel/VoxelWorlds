@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelSurfacePathfinder.generated.h"
 
 /** Tunables of the surface pathfinder (feature 10). Distances in world units. */
@@ -53,6 +54,33 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	/** Return the route to the closest expanded cell when the budget / radius ran out before the goal. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Navigation")
 	bool bAllowPartial = true;
+
+	/**
+	 * The world's sea (spherical SP-E1), set by UVoxelSurfaceNavigationSubsystem from the chunk manager
+	 * (UVoxelChunkManager::GetSeaSurface, the origin-relative plane): when enabled it decides IsUnderwater instead of
+	 * bHasWater / WaterLevel, so a planet's cells test the sphere of WaterRadius. Not exposed to Blueprint.
+	 */
+	FVoxelSeaSurface Sea;
+
+	/**
+	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by Sea when it is enabled,
+	 * else by bHasWater and WaterLevel. On a plane both are Height < WaterLevel - MaxWadeDepth.
+	 *
+	 * @param X World X of the cell's centre
+	 * @param Y World Y of the cell's centre
+	 * @param Height The cell's surface Z
+	 * @return True when too deep to walk
+	 */
+	bool IsUnderwater(double X, double Y, float Height) const
+	{
+		if (Sea.bEnabled)
+		{
+			return Sea.bRadial
+				? Sea.GetDepth(FVector(X, Y, Height)) > MaxWadeDepth
+				: Height < static_cast<float>(Sea.PlaneZ) - MaxWadeDepth;
+		}
+		return bHasWater && Height < WaterLevel - MaxWadeDepth;
+	}
 };
 
 /** What a search did (logs, debug, tests). */

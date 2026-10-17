@@ -21,6 +21,8 @@
 #include "VoxelSeamTransitionHolds.h"
 #include "VoxelLODEvalSchedule.h"
 #include "VoxelFarOcean.h"
+#include "VoxelPlanetOcean.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -437,6 +439,48 @@ public:
 	FVoxelTerrainSurfacePoint GetSurfacePointAt(const FVector& WorldPos) const;
 
 	/**
+	 * Where a planet's player spawns (spherical SP-B11): the terrain surface along the configuration's spawn direction
+	 * (PlanetSpawnLocation) plus PlanetSpawnAltitude along its up. UVoxelWorldConfiguration::GetPlanetSpawnPosition,
+	 * which has no world mode, gives the datum's point instead. Other world modes: the configuration's WorldOrigin.
+	 *
+	 * @return World position
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	FVector GetPlanetSpawnPosition() const;
+
+	/**
+	 * The sea as the water rules see it (FVoxelSeaSurface): the sphere of WaterRadius on a planet, a Z plane in heightmap
+	 * modes. bEnabled is false with water off.
+	 *
+	 * @param bOriginRelativePlane Heightmap modes: the plane at WaterLevel + WorldOrigin.Z (navigation, the character
+	 *        and the NPC spawner) instead of generation's WaterLevel (review plan G19); no effect on a planet
+	 * @return The sea surface (disabled before Initialize)
+	 */
+	FVoxelSeaSurface GetSeaSurface(bool bOriginRelativePlane = false) const;
+
+	/**
+	 * Signed depth of a world position below the sea (spherical SP-E1): along the radius on a planet, along Z on the
+	 * plane at WaterLevel + WorldOrigin.Z in heightmap modes (the plane game code has always used).
+	 *
+	 * @param WorldPos World position
+	 * @return Positive below the sea, negative above; a large negative value when water is off
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	float GetSeaDepthAt(const FVector& WorldPos) const;
+
+	/**
+	 * Where KillZ has to be for a planet not to be cut by it (spherical SP-F5): one margin below the planet's lowest point
+	 * when the current KillZ lies above that, else the current value. The chunk manager applies it to the world's
+	 * settings when a planet initialises.
+	 *
+	 * @param CurrentKillZ The world settings' KillZ
+	 * @param Bounds The planet's bounds (a shell); other shapes return CurrentKillZ
+	 * @param Margin Extra depth below the planet's lowest point
+	 * @return The KillZ to use
+	 */
+	static double ComputePlanetKillZ(double CurrentKillZ, const FVoxelWorldBounds& Bounds, double Margin);
+
+	/**
 	 * What generated this world, for saves (WM-A4): world mode, shape params, voxel grid and generation version.
 	 * A save whose fingerprint differs is not loaded into this world.
 	 *
@@ -514,6 +558,29 @@ public:
 
 	/** The columns the far ocean leaves open (see GetFarOceanOpenColumnCount). */
 	const TSet<FIntPoint>& GetFarOceanOpenColumns() const { return FarOceanOpenColumns; }
+
+	// ==================== Planet Ocean (spherical SP-E2) ====================
+
+	/**
+	 * Whether this planet draws its sea surface: a cube sphere at WaterRadius with the configuration's water material
+	 * (FVoxelPlanetOcean). Planets with water on and a WaterMeshMaterial.
+	 *
+	 * @return True when the ocean's mesh exists (it may be hidden by voxel.World.PlanetOcean 0)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	bool HasPlanetOcean() const { return PlanetOcean != nullptr; }
+
+	/** The planet ocean: section 0 the top (faces outward), section 1 the underside (null without an ocean). */
+	UProceduralMeshComponent* GetPlanetOceanComponent() const { return PlanetOcean; }
+
+	/** The settings the planet ocean was built with. */
+	const FVoxelPlanetOceanSettings& GetPlanetOceanSettings() const { return PlanetOceanSettings; }
+
+	/** Whether the planet ocean's underside is shown now (the viewer is inside the sea radius). */
+	bool IsPlanetOceanUndersideShown() const { return bPlanetOceanUndersideShown; }
+
+	/** Show or hide the planet ocean (voxel.World.PlanetOcean). */
+	void SetPlanetOceanVisible(bool bVisible);
 
 	// ==================== Configuration Access ====================
 
@@ -1714,6 +1781,34 @@ private:
 
 	/** The voxel material generation gives the seabed beyond the edge (the most common one around it). */
 	uint8 ResolveFarSeabedMaterial(const FIslandBowlParams& Island) const;
+
+	// ==================== Planet Ocean (spherical SP-E2) ====================
+
+	/**
+	 * A planet's sea surface (FVoxelPlanetOcean): section 0 the top (faces outward), section 1 the underside (inward),
+	 * shown only while the viewer is inside the sea radius. Owned by this component's actor, positioned at the planet
+	 * centre; built once when the world starts.
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UProceduralMeshComponent> PlanetOcean;
+
+	/** What the planet ocean was built with */
+	FVoxelPlanetOceanSettings PlanetOceanSettings;
+
+	/** Whether the planet ocean's underside (section 1) is shown: only while the viewer is inside the sea radius */
+	bool bPlanetOceanUndersideShown = false;
+
+	/** Build the planet ocean (game worlds, planets with water on and a WaterMeshMaterial). */
+	void RebuildPlanetOcean();
+
+	/** Destroy the planet ocean's component. */
+	void DestroyPlanetOcean();
+
+	/** Show the planet ocean's underside while the viewer is inside the sea radius, hide it outside. */
+	void UpdatePlanetOceanUnderside(const FVector& ViewerPosition);
+
+	/** Planets: move the world settings' KillZ below the planet when it would cut through it (spherical SP-F5). */
+	void ApplyPlanetKillZ();
 
 	// ==================== 2D Water Tile State ====================
 

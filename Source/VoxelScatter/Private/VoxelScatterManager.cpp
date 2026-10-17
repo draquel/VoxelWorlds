@@ -2566,7 +2566,7 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 			const int32 UZ = FMath::Clamp(FMath::FloorToInt(AboveLocal.Z), 0, ChunkSize - 1);
 			const int32 UIdx = UX + UY * ChunkSize + UZ * SliceSize;
 			const bool bWaterAbove = VoxelData[UIdx].IsAir() && VoxelData[UIdx].HasWaterFlag();
-			const bool bBelowWater = Context.bEnableWaterLevel && (Point.Position.Z < Context.WaterLevel);
+			const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(Point.Position) > 0.0;
 			if (bWaterAbove || bBelowWater)
 			{
 				Point.bIsUnderwater = true;
@@ -2766,7 +2766,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				// Submerged: open water above it (water flag on the air voxel above) OR the point is below
 				// the world water level. The water-level test catches submerged seabeds even where the
 				// per-voxel water flag did not propagate. Underground takes precedence.
-				const bool bBelowWater = Context.bEnableWaterLevel && (WorldPos.Z < Context.WaterLevel);
+				const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
 				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
@@ -2918,7 +2918,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 
 				// Submerged: open water above (water flag) OR below the world water level (catches
 				// seabeds the water flag missed). Underground takes precedence.
-				const bool bBelowWater = Context.bEnableWaterLevel && (WorldPos.Z < Context.WaterLevel);
+				const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
 				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
@@ -2954,8 +2954,7 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext() const
 	if (Configuration)
 	{
 		Context.NoiseParams = Configuration->NoiseParams;
-		Context.bEnableWaterLevel = Configuration->bEnableWaterLevel;
-		Context.WaterLevel = Configuration->WaterLevel;
+		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
 	}
 	return Context;
 }

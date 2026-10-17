@@ -65,7 +65,7 @@ bool FVoxelSurfacePathfinder::IsCellWalkable(const FIntPoint& Cell) const
 	{
 		return false;
 	}
-	if (Params.bHasWater && HeightAt(Cell) < Params.WaterLevel - Params.MaxWadeDepth)
+	if (Params.IsUnderwater((Cell.X + 0.5) * Params.CellSize, (Cell.Y + 0.5) * Params.CellSize, HeightAt(Cell)))
 	{
 		return false;
 	}

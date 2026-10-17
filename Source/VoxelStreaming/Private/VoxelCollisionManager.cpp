@@ -391,41 +391,53 @@ void UVoxelCollisionManager::ForcePathCoverage(const FVector& FocusPosition, con
 	// so imminent-footfall chunks cook first. RequestCollision re-prioritizes an already-queued chunk.
 	constexpr float PathBoost = 1.0e6f;
 
-	auto CoverAt = [&](const FVector& WorldPos, float Bias)
+	// Local down and the heading across it come from the world mode: world -Z and the horizontal velocity in heightmap
+	// modes, the radius and the tangent on a planet (SP-C4).
+	TArray<FVoxelCollisionCoverSample> Samples;
+	ComputePathCoverageSamples(FocusPosition, FocusVelocity, ChunkManager->GetUpVectorAt(FocusPosition), ChunkWorldSize, LookAhead, Samples);
+	for (const FVoxelCollisionCoverSample& Sample : Samples)
 	{
-		const FIntVector Chunk = ChunkManager->WorldToChunkCoord(WorldPos);
+		const FIntVector Chunk = ChunkManager->WorldToChunkCoord(Sample.Position);
 		if (ChunkManager->IsChunkLoaded(Chunk) && !HasCollision(Chunk))
 		{
-			RequestCollision(Chunk, PathBoost + Bias);
+			RequestCollision(Chunk, PathBoost + Sample.Bias);
 		}
-	};
+	}
+}
 
-	// The pawn's own chunk + a sample below its feet (covers standing atop a vertical chunk seam).
-	CoverAt(FocusPosition, 1000.f);
-	CoverAt(FocusPosition - FVector(0.f, 0.f, ChunkWorldSize * 0.5f), 950.f);
+void UVoxelCollisionManager::ComputePathCoverageSamples(const FVector& Focus, const FVector& Velocity, const FVector& Up,
+	float ChunkWorldSize, int32 LookAhead, TArray<FVoxelCollisionCoverSample>& OutSamples)
+{
+	OutSamples.Reset();
+
+	// The pawn's own chunk + a sample below its feet (covers standing atop a chunk seam).
+	OutSamples.Add({ Focus, 1000.f });
+	OutSamples.Add({ Focus - Up * (ChunkWorldSize * 0.5f), 950.f });
 
 	if (LookAhead <= 0)
 	{
 		return;
 	}
 
-	FVector HeadingH(FocusVelocity.X, FocusVelocity.Y, 0.f);
-	if (HeadingH.IsNearlyZero())
+	// The velocity across local up (with Up = +Z: (X, Y, 0) exactly, the dot product being Z).
+	const double AlongUp = FVector::DotProduct(Velocity, Up);
+	FVector Heading = Velocity - Up * AlongUp;
+	if (Heading.IsNearlyZero())
 	{
 		return; // stationary — nothing ahead to pre-cover
 	}
-	HeadingH = HeadingH.GetSafeNormal();
-	const bool bDescending = FocusVelocity.Z < -1.0f;
+	Heading = Heading.GetSafeNormal();
+	const bool bDescending = AlongUp < -1.0f;
 
 	for (int32 i = 1; i <= LookAhead; ++i)
 	{
-		const FVector Ahead = FocusPosition + HeadingH * (ChunkWorldSize * i);
-		CoverAt(Ahead, 800.f - i);
+		const FVector Ahead = Focus + Heading * (ChunkWorldSize * i);
+		OutSamples.Add({ Ahead, 800.f - i });
 		// Descending: also cover the chunk one below the look-ahead point — terrain (and the pawn's
 		// feet) drop as it advances, so the chunk it will actually land in is lower than straight ahead.
 		if (bDescending)
 		{
-			CoverAt(Ahead - FVector(0.f, 0.f, ChunkWorldSize), 780.f - i);
+			OutSamples.Add({ Ahead - Up * ChunkWorldSize, 780.f - i });
 		}
 	}
 }
