@@ -255,7 +255,7 @@ code sites).
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
 (SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
-revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended.
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended.
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
@@ -272,6 +272,9 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D11 | The world map on a planet (spherical SP-G3) *(decided 2026-10-17)* | **A globe:** an orthographic view of the planet, turned by dragging and zoomed with the wheel, opening centred on the player with north up; not an unfolded cube (§18.1) |
 | D12 | How the sun and sky work on a planet (SP-G7, SP-G8) *(decided 2026-10-17)* | **A world-fixed sun** turning about the planet's axis once a day: a day side and a night side, local solar time by longitude for the HUD, the NPCs and sleeping, no axial tilt (the poles in a low sun), light by the sun's real elevation, the SkyAtmosphere centred on the planet at the engine's Earth values (§18.1) |
 | D13 | Does spherical Phase 4 bump `PlanetGenerationVersion` (refusing planet saves only)? *(decided 2026-10-17)* | **Bump it to 3.** The ore hash (SP-H3) and the planet's map and NPC keys change, so every earlier planet save is refused and kept on disk; heightmap saves keep loading (`GenerationVersion` stays 2) (§18.1) |
+| D14 | Are dungeons (SP-G6) part of spherical Phase 5? *(decided 2026-10-17)* | **Yes, as its last milestone (P5.4)**, in its own PRs; dungeon types stay held on planets until it lands, and the exit check covers the dungeon rows (§19.1) |
+| D15 | The conditioning zone model on a planet (SP-B10) *(decided 2026-10-17)* | **A radial cap:** the footprint a cap on the datum sphere (great-circle distance), the target an altitude, so a pad is level in gravity; structures are draped onto it (§19.1) |
+| D16 | Does spherical Phase 5 bump `PlanetGenerationVersion`? *(decided 2026-10-17)* | **Bump it to 4.** Planet terrain changes wherever a POI conditions it; earlier planet saves are refused and kept on disk, heightmap saves keep loading (`GenerationVersion` stays 2) (§19.1) |
 
 ## 9. Order of work
 
@@ -3641,7 +3644,7 @@ P5.4, dungeons (if D14 includes them):
 | Dungeon gameplay | `FPOIDungeonEntranceInfo` stays in pad space (world on a heightmap) plus a C++-only `PadToWorld` transform (not a UPROPERTY, so heightmap save documents stay byte for byte); each consumer computes in pad space as today and converts its final transforms (doors, torches, containers, traps, chests, the boss, enemies, the elevator car's axis, loot bursts along local up); the objective's inside test and the enemies' grid map world positions into pad space first | The consumers' Z-up arithmetic becomes correct by construction in pad space; the import never reads the geometry, so saves need no new field |
 | Dungeon records on a planet | Keyed by the atlas cell (as streaming); `WorldOffset` saved in pad space; nothing else changes | Import merges states and the cleared flag only |
 
-**Decisions for the user** (to ask before building; recorded in §8 when decided):
+**Decisions for the user** (asked and decided 2026-10-17, each as recommended; recorded in §8):
 
 | ID | Question | Options | Recommendation |
 |----|----------|---------|----------------|
