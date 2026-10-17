@@ -13,6 +13,7 @@
 #include "Tasks/Task.h"
 #include "Misc/ScopeExit.h"
 #include "VoxelCoordinates.h"
+#include "VoxelDigitalLine.h"
 #include "IVoxelLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "IVoxelWorldMode.h"
@@ -1704,6 +1705,168 @@ bool UVoxelChunkManager::QueryEditMergedSurface(
 
 	OutSlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(OutNormal.Z), -1.0f, 1.0f)));
 	return true;
+}
+
+bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FVoxelSurfaceSample& OutSample) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !Configuration || !WM)
+	{
+		return false;
+	}
+
+	if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
+	{
+		// Heightmap modes: the column at (X, Y), unchanged.
+		float Height = 0.0f;
+		if (!QueryEditMergedSurface(WorldPos.X, WorldPos.Y, Height, OutSample.Normal, OutSample.SlopeDegrees, OutSample.MaterialID, OutSample.BiomeID))
+		{
+			return false;
+		}
+		OutSample.Height = Height;
+		OutSample.Position = FVector(WorldPos.X, WorldPos.Y, Height);
+		OutSample.Up = FVector::UpVector;
+		OutSample.Altitude = WM->GetAltitude(OutSample.Position);
+		return true;
+	}
+
+	const float VoxelSize = Configuration->VoxelSize;
+	const int32 ChunkSize = Configuration->ChunkSize;
+	if (VoxelSize <= 0.0f || ChunkSize <= 0)
+	{
+		return false;
+	}
+
+	// The analytic surface along the direction locates the line and makes the near/far decision, as the analytic height
+	// does for the column.
+	const FVector& Origin = Configuration->WorldOrigin;
+	const FVoxelTerrainSurfacePoint Estimate = WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
+	const FVector Up = WM->GetUpVector(Estimate.Position);
+	if (!IsChunkLoaded(FVoxelCoordinates::WorldToChunk(Estimate.Position - Origin, ChunkSize, VoxelSize)))
+	{
+		return false;
+	}
+
+	// A digital line of edit-merged voxels along local up through the estimate's voxel, one chunk either side (covers
+	// dig-down / build-up). Voxel I's density sample sits at Origin + I * VoxelSize; read it from inside its cell.
+	const FVector RelVoxel = (Estimate.Position - Origin) / VoxelSize;
+	const FIntVector Start(FMath::FloorToInt32(RelVoxel.X), FMath::FloorToInt32(RelVoxel.Y), FMath::FloorToInt32(RelVoxel.Z));
+	const FVoxelDigitalLine Line = FVoxelDigitalLine::Make(Up);
+	const int32 Window = ChunkSize;
+	const int32 Count = 2 * Window + 1;
+	TArray<FIntVector, TInlineAllocator<160>> Indices;
+	TArray<FVoxelData, TInlineAllocator<160>> Voxels;
+	Indices.SetNumUninitialized(Count);
+	Voxels.SetNumUninitialized(Count);
+	for (int32 i = 0; i < Count; ++i)
+	{
+		Indices[i] = Line.Step(Start, i - Window);
+		Voxels[i] = GetEditMergedVoxelAtWorldPosition(Origin + (FVector(Indices[i]) + FVector(0.5)) * VoxelSize);
+	}
+
+	// Coarse, from the top down: the highest solid voxel with air above it along the line (ExtractSurfaceFromColumn's
+	// rule), one voxel read per step.
+	int32 Found = INDEX_NONE;
+	for (int32 i = Count - 2; i >= 0; --i)
+	{
+		if (Voxels[i].IsSolid() && Voxels[i + 1].IsAir())
+		{
+			Found = i;
+			break;
+		}
+	}
+	if (Found == INDEX_NONE)
+	{
+		return false;
+	}
+
+	// Fine: the trilinear edit-merged density on the true up-line through the queried direction, around the coarse
+	// crossing. The digital line strays up to a voxel sideways, which on a slope moves the crossing; the up-line does not.
+	auto VoxelDensity = [this, &Origin, VoxelSize](const FIntVector& I) -> float
+	{
+		return static_cast<float>(GetEditMergedVoxelAtWorldPosition(Origin + (FVector(I) + FVector(0.5)) * VoxelSize).Density);
+	};
+	auto Trilinear = [&VoxelDensity, &Origin, VoxelSize](const FVector& P) -> float
+	{
+		const FVector F = (P - Origin) / VoxelSize;
+		const FIntVector I0(FMath::FloorToInt32(F.X), FMath::FloorToInt32(F.Y), FMath::FloorToInt32(F.Z));
+		const FVector T = F - FVector(I0);
+		float Result = 0.0f;
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const FIntVector O(Corner & 1, (Corner >> 1) & 1, (Corner >> 2) & 1);
+			const double W = (O.X ? T.X : 1.0 - T.X) * (O.Y ? T.Y : 1.0 - T.Y) * (O.Z ? T.Z : 1.0 - T.Z);
+			Result += static_cast<float>(W) * VoxelDensity(I0 + O);
+		}
+		return Result;
+	};
+	const float Iso = static_cast<float>(VOXEL_SURFACE_THRESHOLD);
+	const double TopT = FVector::DotProduct(Origin + FVector(Indices[Found + 1]) * VoxelSize - Estimate.Position, Up) + 1.5 * VoxelSize;
+	const double BottomT = FVector::DotProduct(Origin + FVector(Indices[Found]) * VoxelSize - Estimate.Position, Up) - 1.5 * VoxelSize;
+	const double Step = 0.25 * VoxelSize;
+	double HitT = TNumericLimits<double>::Max();
+	float AboveDensity = Trilinear(Estimate.Position + Up * TopT);
+	for (double T = TopT - Step; T >= BottomT && AboveDensity < Iso; T -= Step)
+	{
+		const float Density = Trilinear(Estimate.Position + Up * T);
+		if (Density >= Iso)
+		{
+			HitT = T + Step * (Density - Iso) / FMath::Max(Density - AboveDensity, KINDA_SMALL_NUMBER);
+			break;
+		}
+		AboveDensity = Density;
+	}
+	if (HitT == TNumericLimits<double>::Max())
+	{
+		// The fine walk found no crossing (an edge case of the bracket): keep the coarse crossing, put on the up-line.
+		const float D0 = static_cast<float>(Voxels[Found].Density);
+		const float D1 = static_cast<float>(Voxels[Found + 1].Density);
+		const float Denom = D1 - D0;
+		const float T = FMath::Abs(Denom) > KINDA_SMALL_NUMBER ? FMath::Clamp((Iso - D0) / Denom, 0.0f, 1.0f) : 0.5f;
+		const FVector Crossing = Origin + FMath::Lerp(FVector(Indices[Found]), FVector(Indices[Found + 1]), static_cast<double>(T)) * VoxelSize;
+		HitT = FVector::DotProduct(Crossing - Estimate.Position, Up);
+	}
+
+	OutSample.Position = Estimate.Position + Up * HitT;
+	OutSample.Up = Up;
+	OutSample.MaterialID = Voxels[Found].MaterialID;
+	OutSample.BiomeID = Voxels[Found].BiomeID;
+
+	// The normal from the trilinear edit-merged density gradient at the surface (central differences half a voxel either
+	// side on the world axes), turned toward local up for a top surface.
+	const FVector& P = OutSample.Position;
+	const double H = 0.5 * VoxelSize;
+	const FVector Gradient(
+		Trilinear(P + FVector(H, 0.0, 0.0)) - Trilinear(P - FVector(H, 0.0, 0.0)),
+		Trilinear(P + FVector(0.0, H, 0.0)) - Trilinear(P - FVector(0.0, H, 0.0)),
+		Trilinear(P + FVector(0.0, 0.0, H)) - Trilinear(P - FVector(0.0, 0.0, H)));
+	OutSample.Normal = (-Gradient).GetSafeNormal();
+	if (OutSample.Normal.IsNearlyZero())
+	{
+		OutSample.Normal = Up;
+	}
+	else if (FVector::DotProduct(OutSample.Normal, Up) < 0.0)
+	{
+		OutSample.Normal = -OutSample.Normal;
+	}
+	OutSample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(OutSample.Normal, Up), -1.0, 1.0)));
+	OutSample.Altitude = WM->GetAltitude(OutSample.Position);
+	OutSample.Height = OutSample.Altitude;
+	return true;
+}
+
+FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !WM || !Configuration)
+	{
+		return WorldPos;
+	}
+	if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
+	{
+		return FVector(WorldPos.X, WorldPos.Y, GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y));
+	}
+	return WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams).Position;
 }
 
 // ==================== Debug ====================

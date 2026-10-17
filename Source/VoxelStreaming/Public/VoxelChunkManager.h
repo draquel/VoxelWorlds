@@ -23,6 +23,7 @@
 #include "VoxelFarOcean.h"
 #include "VoxelPlanetOcean.h"
 #include "VoxelSeaSurface.h"
+#include "VoxelSurfaceQuery.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -364,6 +365,32 @@ public:
 	 * QueryEditMergedSurface. A float-param BlueprintCallable wrapper can be added if BP access is needed.
 	 */
 	float GetGeneratedSurfaceHeight(double WorldX, double WorldY) const;
+
+	/**
+	 * EDIT-AWARE surface on the local up-line through a position, in any world mode (spherical SP-A3): the form of
+	 * QueryEditMergedSurface that works on a planet. Heightmap modes run QueryEditMergedSurface at (X, Y) and return
+	 * Position (X, Y, Height). On a planet it starts from the analytic surface along the direction from the centre and
+	 * walks a digital line of edit-merged voxels along local up, one chunk either side (one voxel read per step, as the
+	 * column does) to the topmost solid voxel with air above it, then finds the crossing on the up-line itself in the
+	 * trilinear edit-merged density around it; the normal from that density's gradient (turned toward local up), the
+	 * slope against local up; Height is then the altitude. False when no loaded chunk holds the surface there (the caller falls back to
+	 * GetGeneratedSurfacePoint or FVoxelSurfaceQuery::SampleSurfacePoint). Game thread only.
+	 *
+	 * @param WorldPos Any position on the up-line
+	 * @param OutSample The surface (Position, Normal, Up, SlopeDegrees, Altitude, MaterialID, BiomeID; Height as above)
+	 * @return true if a loaded edit-merged surface was found
+	 */
+	bool QueryEditMergedSurfacePoint(const FVector& WorldPos, FVoxelSurfaceSample& OutSample) const;
+
+	/**
+	 * The generated (analytic) surface point on the local up-line through a position, without loaded chunks (spherical
+	 * SP-A3): (X, Y, GetGeneratedSurfaceHeight) in heightmap modes, conditioning zones included; on a planet the terrain
+	 * along the direction from the centre (GetSurfacePointAt; planets have no conditioning zones yet, SP-B10).
+	 *
+	 * @param WorldPos Any position on the up-line
+	 * @return World position of the surface point (WorldPos before Initialize)
+	 */
+	FVector GetGeneratedSurfacePoint(const FVector& WorldPos) const;
 
 	// ==================== World Bounds and Local Frame (WM-A2) ====================
 	// The configured world mode's bounds and frame (IVoxelWorldMode), for Blueprint and for game plugins, which reach

@@ -5,6 +5,8 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelNoiseTypes.h"
+#include "VoxelSeaSurface.h"
+#include "SphericalPlanetWorldMode.h"
 
 float FVoxelSurfaceQuery::GetSurfaceHeight(
 	const IVoxelWorldMode& WorldMode,
@@ -159,6 +161,89 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurface(
 		BiomeSnapshot, WorldSeed, bEnableWaterLevel, WaterLevel,
 		Sample.MaterialID, Sample.BiomeID);
 
+	Sample.Position = FVector(WorldX, WorldY, Sample.Height);
+	Sample.Altitude = WorldMode.GetAltitude(Sample.Position);
+	return Sample;
+}
+
+void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
+	const FSphericalPlanetWorldMode& Planet,
+	const FVector& Position,
+	float VoxelSize,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
+	const FVoxelSeaSurface& Sea,
+	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
+{
+	OutSurfaceMaterial = 0;
+	OutBiomeID = 0;
+	if (!BiomeSnapshot.bIsValid)
+	{
+		return;
+	}
+
+	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
+	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(Position, Params.PlanetCenter);
+
+	// GenerateChunkSphericalPlanet's order and arithmetic: the radial height (its continentalness reused for the blend),
+	// the depth in voxels and the altitude, climate at the datum-sphere point, the blend, the material (the sea's
+	// variant when water is on), height rules by the altitude. At a surface point the depth is 0.
+	float Continentalness = 0.0f;
+	const float TerrainRadius = Params.PlanetRadius + FSphericalPlanetWorldMode::SampleRadialDisplacement(
+		Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams, &BiomeSnapshot, &Continentalness);
+	const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(Position, Params.PlanetCenter);
+	const float DepthBelowSurface = (TerrainRadius - DistFromCenter) / FMath::Max(VoxelSize, KINDA_SMALL_NUMBER);
+	const float Altitude = DistFromCenter - Params.PlanetRadius;
+
+	FVoxelNoiseParams TempNoiseParams;
+	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	TempNoiseParams.Octaves = 2;
+	TempNoiseParams.Persistence = 0.5f;
+	TempNoiseParams.Lacunarity = 2.0f;
+	TempNoiseParams.Amplitude = 1.0f;
+	TempNoiseParams.Seed = NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset;
+	TempNoiseParams.Frequency = BiomeSnapshot.TemperatureNoiseFrequency;
+
+	FVoxelNoiseParams MoistureNoiseParams = TempNoiseParams;
+	MoistureNoiseParams.Seed = NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset;
+	MoistureNoiseParams.Frequency = BiomeSnapshot.MoistureNoiseFrequency;
+
+	const FVector BiomeSamplePos = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Direction, Params.PlanetRadius);
+	const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, TempNoiseParams);
+	const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, MoistureNoiseParams);
+
+	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
+	OutBiomeID = Blend.GetDominantBiome();
+	OutSurfaceMaterial = (Sea.bEnabled && Sea.bRadial)
+		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainRadius, static_cast<float>(Sea.Radius))
+		: BiomeSnapshot.GetBlendedMaterial(Blend, DepthBelowSurface);
+	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, Altitude, DepthBelowSurface);
+}
+
+FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
+	const IVoxelWorldMode& WorldMode,
+	const FVector& WorldPos, float VoxelSize,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
+	const FVoxelSeaSurface& Sea)
+{
+	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
+	{
+		// Heightmap modes: the (X, Y) sample, unchanged; its sea is the WaterLevel plane.
+		return SampleSurface(WorldMode, static_cast<float>(WorldPos.X), static_cast<float>(WorldPos.Y), VoxelSize, NoiseParams,
+			BiomeSnapshot, NoiseParams.Seed, Sea.bEnabled && !Sea.bRadial, static_cast<float>(Sea.PlaneZ));
+	}
+
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
+	const FVoxelTerrainSurfacePoint Surface = Planet.GetSurfacePoint(WorldPos, NoiseParams);
+	FVoxelSurfaceSample Sample;
+	Sample.Position = Surface.Position;
+	Sample.Normal = Surface.Normal;
+	Sample.Up = Planet.GetUpVector(Surface.Position);
+	Sample.Altitude = Surface.Altitude;
+	Sample.Height = Surface.Altitude;
+	Sample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Sample.Normal, Sample.Up), -1.0, 1.0)));
+	QueryPlanetSurfaceConditions(Planet, Surface.Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea, Sample.MaterialID, Sample.BiomeID);
 	return Sample;
 }
 

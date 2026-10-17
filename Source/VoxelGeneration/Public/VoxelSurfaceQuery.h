@@ -7,22 +7,36 @@
 
 struct FVoxelBiomeSnapshot;
 struct FVoxelNoiseParams;
+struct FVoxelSeaSurface;
 class IVoxelWorldMode;
+class FSphericalPlanetWorldMode;
 
 /**
- * A sampled terrain surface point, derived purely from the procedural generator
- * (no loaded chunk data required).
+ * A sampled terrain surface point: from the procedural generator (FVoxelSurfaceQuery, no loaded chunk data required) or
+ * from loaded, edit-merged voxels (UVoxelChunkManager::QueryEditMergedSurfacePoint).
  */
 struct VOXELGENERATION_API FVoxelSurfaceSample
 {
-	/** World-space Z of the terrain surface at the queried X,Y. */
+	/**
+	 * Heightmap modes: world-space Z of the terrain surface at the queried X,Y. On a planet, which has no Z per (X, Y):
+	 * the surface's altitude above the datum (as Altitude).
+	 */
 	float Height = 0.0f;
 
 	/** Surface normal derived from the height-field gradient (points up-ish). */
 	FVector Normal = FVector::UpVector;
 
-	/** Slope angle in degrees (0 = flat, 90 = vertical). */
+	/** Slope angle in degrees (0 = flat, 90 = vertical), measured against Up. */
 	float SlopeDegrees = 0.0f;
+
+	/** World position of the surface point (heightmap modes: (X, Y, Height)); spherical SP-A3. */
+	FVector Position = FVector::ZeroVector;
+
+	/** Local up at the point: +Z in heightmap modes, the radial direction on a planet. */
+	FVector Up = FVector::UpVector;
+
+	/** The point's altitude above the datum (IVoxelWorldMode::GetAltitude). */
+	float Altitude = 0.0f;
 
 	/** Surface material ID (biome-blended; 0 when no biome config). */
 	uint8 MaterialID = 0;
@@ -105,6 +119,50 @@ public:
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		int32 WorldSeed,
 		bool bEnableWaterLevel, float WaterLevel);
+
+	/**
+	 * Material and biome on a planet as GenerateChunkSphericalPlanet writes them for a voxel at a position, before caves
+	 * and ores (spherical SP-A3): temperature, moisture and continentalness at the direction's point on the datum sphere,
+	 * the biome blend, the blended material at the position's depth below the terrain (with the sea's variant when water
+	 * is on), height rules by its altitude. Pass a surface point for the surface material (depth 0).
+	 *
+	 * @param Planet The planet world mode
+	 * @param Position A surface point, or any position (its depth below the terrain along its direction is used)
+	 * @param VoxelSize Voxel size (generation measures the depth in voxels)
+	 * @param NoiseParams Terrain noise (the radial height; its seed derives the climate seeds)
+	 * @param BiomeSnapshot Value-captured biome data (FVoxelBiomeSnapshot::FromConfig)
+	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): a sphere on a planet
+	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
+	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
+	 */
+	static void QueryPlanetSurfaceConditions(
+		const FSphericalPlanetWorldMode& Planet,
+		const FVector& Position,
+		float VoxelSize,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		const FVoxelSeaSurface& Sea,
+		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
+
+	/**
+	 * Everything at the analytic surface on the local up-line through a position, in any world mode (spherical SP-A3):
+	 * heightmap modes return SampleSurface at (X, Y) with Position (X, Y, Height); a planet the surface along the
+	 * direction from its centre (GetSurfacePoint), the slope against local up, and QueryPlanetSurfaceConditions.
+	 *
+	 * @param WorldMode World mode
+	 * @param WorldPos Any position on the up-line
+	 * @param VoxelSize Voxel size (the heightmap gradient's step)
+	 * @param NoiseParams Terrain noise
+	 * @param BiomeSnapshot Value-captured biome data
+	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): the WaterLevel plane, or a planet's sphere
+	 * @return The surface sample
+	 */
+	static FVoxelSurfaceSample SampleSurfacePoint(
+		const IVoxelWorldMode& WorldMode,
+		const FVector& WorldPos, float VoxelSize,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		const FVoxelSeaSurface& Sea);
 
 	/**
 	 * Find the topmost terrain surface in a vertical voxel column (index 0 = lowest Z, ascending).
