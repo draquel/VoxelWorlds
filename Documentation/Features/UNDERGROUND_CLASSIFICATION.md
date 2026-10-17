@@ -65,13 +65,15 @@ VZ=23: Air  (deeper cave)  -> FLAG SET (bUnderground stays true)
 
 Note: Cave carving in the generation pipeline already sets `VOXEL_FLAG_UNDERGROUND` on carved air voxels (all three world modes). Pass 1 catches additional underground air that wasn't directly carved but is below thick terrain.
 
-**On a planet** (spherical SP-B7, CPU) the same state machine runs on digital lines along the chunk centre's local
+**On a planet** (spherical SP-B7) the same state machine runs on digital lines along the chunk centre's local
 down instead of world-Z columns: lines sheared along the axis nearest to down, voxel (a, b, c) on line
 (b - round(K·SlopeB), c - round(K·SlopeC)) with K the step from the chunk's upper side, so every voxel is on exactly
-one line (`ForEachVoxelAlongDown` in `VoxelCPUNoiseGenerator.cpp`). At mid latitudes local down is up to 55° off
+one line (`FVoxelDownLines`, `VoxelGeneration/Private/VoxelDownLines.h`). At mid latitudes local down is up to 55° off
 every axis, and a world-Z scan reads hillsides as ceilings or misses caves whose column runs into the ground to the
-chunk's top. Heightmap worlds keep the column scan. The GPU post-pass (`VoxelPostPasses.usf`) is heightmap-only until
-spherical Phase 2.
+chunk's top. Heightmap worlds keep the column scan. The GPU walks the same lines since spherical Phase 2
+(`UndergroundLinesCS` in `VoxelPostPasses.usf`, one thread per line): the C++ uploads the lines' axis, direction and
+per-step shifts as `FVoxelDownLines` computes them, so both generators flag the same voxels
+(`Generation.GPUvsCPUSphericalParity`). Heightmap chunks keep `UndergroundColumnCS`.
 
 ### Pass 2: Boundary Propagation (Solid Voxels)
 

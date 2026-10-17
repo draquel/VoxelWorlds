@@ -264,9 +264,9 @@ public:
 	FVoxelNoiseParams NoiseParams;
 
 	/**
-	 * Use GPU compute shaders for terrain generation (true) or CPU fallback (false).
-	 * Ignored for spherical planets, which generate on the CPU until the GPU generator has a planet SDF
-	 * (ShouldUseGPUGeneration; SPHERICAL_PLANET_REQUIREMENTS.md SP-B3, SP-B4).
+	 * Use GPU compute shaders for terrain generation (true) or CPU fallback (false), in every world mode: spherical
+	 * planets generate on the GPU since spherical Phase 2 (ShouldUseGPUGeneration; SPHERICAL_PLANET_REQUIREMENTS.md
+	 * SP-B4).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Generation")
 	bool bUseGPUGeneration = true;
@@ -608,9 +608,10 @@ public:
 	}
 
 	/**
-	 * Whether terrain generation can run on the GPU: bUseGPUGeneration, except that spherical planets always
-	 * generate on the CPU. The GPU generator has no planet branch yet and would fall through to generic 3D noise,
-	 * producing blobs instead of a planet (SPHERICAL_PLANET_REQUIREMENTS.md SP-B3; SP-B4 adds the GPU planet).
+	 * Whether terrain generation can run on the GPU: bUseGPUGeneration, in every world mode. Spherical planets were
+	 * held on the CPU until the GPU generator had a planet branch (SP-B3: it fell through to generic 3D noise, blobs
+	 * instead of a planet); since spherical Phase 2 the GPU generates the CPU's planet (SP-B4), locked by
+	 * VoxelWorlds.Generation.GPUvsCPUSphericalParity (WORLD_MODES_REVIEW_PLAN.md §16).
 	 * The chunk manager also honours -VoxelForceCPU and voxel.GPUGeneration.Enable on top of this.
 	 *
 	 * @return True when the configuration allows GPU generation.
@@ -618,7 +619,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Noise Generation")
 	bool ShouldUseGPUGeneration() const
 	{
-		return bUseGPUGeneration && WorldMode != EWorldMode::SphericalPlanet;
+		return bUseGPUGeneration;
 	}
 
 	/** Get the world size of a single chunk at a specific LOD */

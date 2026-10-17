@@ -1,0 +1,253 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// GPU port of the spherical planet's generation (spherical Phase 2, SP-B4; WORLD_MODES_REVIEW_PLAN.md §16). Mirrors
+// FSphericalPlanetWorldMode's surface function (SampleRadialDisplacement, ShellSignedDistance, ScaleAltitude) and the
+// per-voxel pipeline of FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet, in the same order, so GPU and CPU planets
+// match (VoxelWorlds.Generation.GPUvsCPUSphericalParity). Any change here must be mirrored there.
+//
+// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush and the shared helpers
+// GpuApplyContinentalness / SampleGpuCaveLayer: this file reads the Planet*, Cave*, biome, ore and water globals.
+//
+// Precision: distances, directions and the noise sample point are computed planet-relative, from PlanetChunkOffset (the
+// chunk origin relative to the centre, computed in double on the CPU), so the chunk origin is exact and a direction's
+// error stays in its last bits. The cave and ore noise sample absolute positions, as the CPU does.
+
+/** FSphericalPlanetWorldMode::ShellSignedDistance: TerrainRadius - Dist, held at -1000 (air) more than 1000 uu above the
+ *  outer shell radius and at +1000 (core) more than 1000 uu below the inner one. */
+float PlanetShellSignedDistance(float DistFromCenter, float TerrainRadius)
+{
+    if (DistFromCenter > PlanetOuterRadius + 1000.0f)
+    {
+        return -1000.0f;
+    }
+    if (DistFromCenter < PlanetInnerRadius - 1000.0f)
+    {
+        return 1000.0f;
+    }
+    return TerrainRadius - DistFromCenter;
+}
+
+/** FSphericalPlanetWorldMode::ScaleAltitude: the absolute position with its altitude above the datum scaled by
+ *  VerticalScale and its direction kept (caves flatten along local up, SP-B6). Rel is the planet-relative position. */
+float3 PlanetScaleAltitude(float3 Rel, float DistFromCenter, float VerticalScale)
+{
+    if (DistFromCenter < 1.0e-4f)
+    {
+        return PlanetCenter + Rel;
+    }
+    return PlanetCenter + Rel * ((PlanetRadius + (DistFromCenter - PlanetRadius) * VerticalScale) / DistFromCenter);
+}
+
+/** UVoxelCaveConfiguration::GetBiomeCaveScale / GetBiomeMinDepthOverride: the first override for the biome, else 1 / -1. */
+void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMinDepthOverride)
+{
+    OutCaveScale = 1.0f;
+    OutMinDepthOverride = -1.0f;
+    for (int o = 0; o < CaveBiomeOverrideCount; ++o)
+    {
+        const float4 Override = CaveBiomeOverrideData[o];
+        if ((uint)(Override.x + 0.5f) == BiomeID)
+        {
+            OutCaveScale = Override.y;
+            OutMinDepthOverride = Override.z;
+            return;
+        }
+    }
+}
+
+/**
+ * FVoxelCPUNoiseGenerator::CalculateCaveDensity with a planet: the biome's cave scale and minimum-depth override, the
+ * underwater minimum depth when the column's terrain is under the sea, each layer's depth window and fades, the union
+ * of the layers, the biome scale. Cave noise samples the position with its altitude scaled along local up.
+ *
+ * @param Rel Planet-relative voxel position
+ * @param DistFromCenter |Rel|
+ * @param DepthBelowSurface Radial depth below the terrain, in voxels
+ * @param BiomeID Dominant biome (0 without biomes)
+ * @param bUnderwater The column's terrain radius is under WaterRadius (and water is on)
+ * @return Carve density [0, 1]
+ */
+float GpuPlanetCaveCarve(float3 Rel, float DistFromCenter, float DepthBelowSurface, uint BiomeID, bool bUnderwater)
+{
+    float BiomeCaveScale;
+    float MinDepthOverride;
+    GpuCaveBiomeOverride(BiomeID, BiomeCaveScale, MinDepthOverride);
+    if (BiomeCaveScale <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    // The underwater minimum depth catches transition zones where the ocean biome is not assigned but the terrain is
+    // still under the sea.
+    if (bUnderwater && CaveUnderwaterMinDepth > 0.0f)
+    {
+        MinDepthOverride = (MinDepthOverride < 0.0f) ? CaveUnderwaterMinDepth : max(MinDepthOverride, CaveUnderwaterMinDepth);
+    }
+
+    float MaxCarveDensity = 0.0f;
+    for (int ci = 0; ci < CaveLayerCount; ++ci)
+    {
+        const float FadeWidth = CaveLayerDepthFadeWidth[ci];
+        const float MaxDepth = CaveLayerMaxDepth[ci];
+        const float EffectiveMinDepth = (MinDepthOverride >= 0.0f) ? MinDepthOverride : CaveLayerMinDepth[ci];
+
+        if (DepthBelowSurface < EffectiveMinDepth - FadeWidth)
+        {
+            continue;
+        }
+        if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth + FadeWidth)
+        {
+            continue;
+        }
+
+        float LayerCarve = SampleGpuCaveLayer(ci, PlanetScaleAltitude(Rel, DistFromCenter, CaveLayerVerticalScale[ci]));
+        if (LayerCarve <= 0.0f)
+        {
+            continue;
+        }
+
+        if (DepthBelowSurface < EffectiveMinDepth)
+        {
+            LayerCarve *= smoothstep(0.0f, 1.0f, (DepthBelowSurface - (EffectiveMinDepth - FadeWidth)) / FadeWidth);
+        }
+        if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth)
+        {
+            LayerCarve *= smoothstep(0.0f, 1.0f, 1.0f - (DepthBelowSurface - MaxDepth) / FadeWidth);
+        }
+
+        MaxCarveDensity = max(MaxCarveDensity, LayerCarve);
+    }
+
+    return clamp(MaxCarveDensity * BiomeCaveScale, 0.0f, 1.0f);
+}
+
+/** FSphericalPlanetWorldMode::GetMaterialAtDepth (no biomes): grass, dirt, stone by radial depth in uu. */
+uint GetMaterialForPlanet(float DepthBelowSurfaceUU)
+{
+    if (DepthBelowSurfaceUU < 0.0f)
+    {
+        return 0u;
+    }
+    if (DepthBelowSurfaceUU < 100.0f)
+    {
+        return 0u; // EVoxelMaterial::Grass
+    }
+    if (DepthBelowSurfaceUU < 400.0f)
+    {
+        return 1u; // EVoxelMaterial::Dirt
+    }
+    return 2u; // EVoxelMaterial::Stone
+}
+
+/** Carve a cave out of a solid voxel's density (the CPU's "density - carve * 255", clamped). */
+uint ApplyCaveCarve(uint Density, float CaveCarve)
+{
+    if (CaveCarve > 0.0f)
+    {
+        const float NewDensity = max(0.0f, float(Density) - CaveCarve * 255.0f);
+        return (uint)clamp(NewDensity, 0.0f, 255.0f);
+    }
+    return Density;
+}
+
+/**
+ * One planet voxel: FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet's loop body.
+ *
+ * @param VoxelCoord Voxel index in the chunk
+ * @param WorldPos Absolute voxel position (cave and ore noise)
+ * @param VoxelSize Base voxel size (generation ignores the LOD)
+ */
+void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
+    out uint OutDensity, out uint OutMaterialID, out uint OutBiomeID, out uint OutMetadata)
+{
+    OutBiomeID = 0u;
+    OutMetadata = 0u;
+
+    // Planet-relative position, distance and direction from the centre (GetDirectionFromCenter: +Z at the centre).
+    const float3 Rel = PlanetChunkOffset + float3(VoxelCoord) * VoxelSize;
+    const float DistFromCenter = length(Rel);
+    const float3 Direction = (DistFromCenter > 1.0e-4f) ? Rel / DistFromCenter : float3(0.0f, 0.0f, 1.0f);
+
+    // The surface along this direction (SampleRadialDisplacement): terrain noise and continentalness on the datum
+    // sphere (GetNoiseSamplePoint), the displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5).
+    const float3 NoisePoint = Direction * PlanetRadius;
+    float EffectiveBaseHeight = BaseHeight;
+    float EffectiveHeightScale = HeightScale;
+    float Continentalness = 0.0f;
+    if (ContinentalnessEnabled != 0)
+    {
+        Continentalness = GpuApplyContinentalness(NoisePoint, EffectiveBaseHeight, EffectiveHeightScale);
+    }
+    const float TerrainNoise = FBM3D(
+        NoisePoint, NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
+    const float TerrainRadius = PlanetRadius + (EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f);
+
+    // Terrain conditioning is not applied on planets, as on the CPU (heightmap zones; SP-B10).
+
+    uint Density = SignedDistanceToDensity(PlanetShellSignedDistance(DistFromCenter, TerrainRadius), VoxelSize);
+    const float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
+
+    // Height rules read the altitude above the datum (SP-B2); caves under the sea keep the underwater minimum depth (SP-B6).
+    const float Altitude = DistFromCenter - PlanetRadius;
+    const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainRadius < PlanetWaterRadius);
+
+    const uint PreCaveDensity = Density;
+    uint MaterialID;
+
+    if (BiomeCount > 0)
+    {
+        // Temperature and moisture on the datum sphere, like the terrain (SP-B1)
+        const float Temperature = FBM3D(NoisePoint, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0, 2.0, 0.5);
+        const float Moisture = FBM3D(NoisePoint, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0, 2.0, 0.5);
+        const BiomeBlendResult Blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
+        const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
+        OutBiomeID = Dominant.BiomeID;
+
+        // Caves need the biome (its cave scale and minimum-depth override), so they come after the blend, as on the CPU.
+        float CaveCarve = 0.0f;
+        if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
+        {
+            CaveCarve = GpuPlanetCaveCarve(Rel, DistFromCenter, DepthBelowSurface, OutBiomeID, bUnderwaterColumn);
+            Density = ApplyCaveCarve(Density, CaveCarve);
+        }
+
+        // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater by radius)
+        const bool bUnderwaterMaterial = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainRadius < PlanetWaterRadius);
+        MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial);
+
+        MaterialID = ApplyGpuHeightRules(MaterialID, Altitude, DepthBelowSurface);
+
+        if (CaveWallOverrideEnabled != 0 && CaveCarve > 0.0f && CaveCarve < 1.0f
+            && Density >= 127u && DepthBelowSurface >= CaveWallMaterialMinDepth)
+        {
+            MaterialID = CaveWallMaterialID;
+        }
+
+        // Ore veins (solid voxels well below the surface; depth > 10 as on the CPU), at the absolute position
+        if (Density >= 127u && DepthBelowSurface > 10.0f)
+        {
+            uint OreMat;
+            if (GpuCheckOreVein(WorldPos, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, OreMat))
+            {
+                MaterialID = OreMat;
+            }
+        }
+    }
+    else
+    {
+        MaterialID = GetMaterialForPlanet(DepthBelowSurface * VoxelSize);
+        if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
+        {
+            Density = ApplyCaveCarve(Density, GpuPlanetCaveCarve(Rel, DistFromCenter, DepthBelowSurface, 0u, bUnderwaterColumn));
+        }
+    }
+
+    // Cave and underground flags where carving turned solid into air (the water fill's barriers; cleared by its phase 3)
+    if (PreCaveDensity >= 127u && Density < 127u)
+    {
+        OutMetadata = (VOXEL_FLAG_CAVE | VOXEL_FLAG_UNDERGROUND) << 4;
+    }
+
+    OutDensity = Density;
+    OutMaterialID = MaterialID;
+}

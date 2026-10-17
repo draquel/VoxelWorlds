@@ -55,8 +55,8 @@ bool FVoxelConfigTreeTemplateMaterialsTest::RunTest(const FString& Parameters)
 
 /**
  * Spherical Phase 0 guardrails (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5, SP-B3): the terrain shell must cover the
- * terrain's real amplitude, water on a planet is flagged while consumers still read the Z-plane WaterLevel, and a
- * planet never generates on the GPU.
+ * terrain's real amplitude, water on a planet is flagged while consumers still read the Z-plane WaterLevel. Since
+ * spherical Phase 2 (SP-B4) a planet may generate on the GPU like any other world mode.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelConfigPlanetSettingsTest,
 	"VoxelWorlds.Configuration.PlanetSettings",
@@ -95,13 +95,16 @@ bool FVoxelConfigPlanetSettingsTest::RunTest(const FString& Parameters)
 	Config->PlanetMaxTerrainDepth = 100.0f;
 	TestEqual(TEXT("Planet checks are planet-only"), Config->GetSettingsWarnings().Num(), 0);
 
-	// SP-B3: GPU generation follows bUseGPUGeneration except on a planet.
+	// GPU generation follows bUseGPUGeneration in every mode: planets too since spherical Phase 2 (SP-B4; SP-B3 held
+	// them on the CPU before the GPU generator had a planet branch).
 	Config->bUseGPUGeneration = true;
 	TestTrue(TEXT("InfinitePlane may generate on the GPU"), Config->ShouldUseGPUGeneration());
 	Config->WorldMode = EWorldMode::IslandBowl;
 	TestTrue(TEXT("IslandBowl may generate on the GPU"), Config->ShouldUseGPUGeneration());
 	Config->WorldMode = EWorldMode::SphericalPlanet;
-	TestFalse(TEXT("A planet generates on the CPU whatever bUseGPUGeneration says"), Config->ShouldUseGPUGeneration());
+	TestTrue(TEXT("A planet may generate on the GPU (SP-B4)"), Config->ShouldUseGPUGeneration());
+	Config->bUseGPUGeneration = false;
+	TestFalse(TEXT("bUseGPUGeneration off keeps a planet on the CPU"), Config->ShouldUseGPUGeneration());
 	return true;
 }
 

@@ -147,7 +147,11 @@ All three world mode generators call `CalculateCaveDensity()` after base density
 ### GPU Path
 
 Cave parameters are passed as flat arrays (up to 4 layers) to the compute shader. `CaveGeneration.ush` provides `SampleCheeseCave()` and `SampleTunnelCave()`. Used by InfinitePlane and IslandBowl, which share the heightmap branch of
-`GenerateVoxelDensity.usf` (locked by `GPUvsCPUCavesParity`); spherical planets generate on the CPU.
+`GenerateVoxelDensity.usf` (locked by `GPUvsCPUCavesParity`), and by spherical planets (`SphericalPlanet.ush`, locked
+by `GPUvsCPUSphericalParity`), which scale the altitude along local up. The planet branch also applies the biome
+overrides (`BiomeOverrides`, uploaded as a small table) and `UnderwaterMinDepth`, as the CPU does. The heightmap branch
+does not: GPU heightmap worlds carve caves under the sea and in biomes whose override is 0 where CPU worlds stay solid
+(G18 in the world modes review plan; the demo's cave configuration uses both).
 
 ## Tuning Guide
 

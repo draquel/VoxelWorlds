@@ -18,7 +18,7 @@ revision of this document then turns the confirmed findings into work items. **S
 with the decisions it needed in §8. M1 results: §14.5. M2 (the world-mode API) results: §14.6. M3 (island correctness)
 results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-only) results: §14.9. M6 (the island's
 visible edge and scale) results: §14.10. Spherical Phase 1 (a correct
-planet on the CPU): plan and results in §15.
+planet on the CPU): plan and results in §15. Spherical Phase 2 (the planet on the GPU): plan and results in §16.
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -1438,6 +1438,7 @@ Three findings from §13.11 get IDs here:
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
 | G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
+| G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Open. The planet branch applies both since Phase 2; porting them to the heightmap branch moves GPU heightmap terrain under existing saves, so it comes with a decision on `GenerationVersion` | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -1558,7 +1559,7 @@ this plan:
 | 0. Guardrails (SP-A5, SP-B3, SP-I1, doc corrections) | M1, WM-H10 | M | Stops a spherical config from producing the GPU's generic noise by default |
 | The API it shares with the island (SP-A1 and SP-A2 heightmap side, SP-A6, SP-G9) | M2, WM-A1/A2/A4 | — | Designed so the planet implementations slot in, as the requirements doc asks (phases 3 and 4 depend on the review). **Done 2026-10-15 (§14.6)**, with a first planet side: shell bounds, radial up and altitude, a gnomonic cube-face coordinate; `GetSurfacePoint` comes with Phase 1 |
 | 1. A correct planet on the CPU | After M4 and M5 (D9: after M6) | L | SP-C1 (candidates cover the shell) takes WM-S1's shape: a per-column interval around the surface plus the viewer's neighbourhood, which for a planet is a shell. §13.11's fix already keeps a pole viewer's window at its own layer instead of near layer 40. WM-C1 removes the legacy path before planets test seams at mid latitudes (SP-D4). **Done 2026-10-16 (§15)**: work items WM-P1 to WM-P8 |
-| 2. GPU | After Phase 1 | L | As in the requirements doc |
+| 2. GPU | After Phase 1 | L | As in the requirements doc. **Done 2026-10-16 (§16)**: work items WM-G1 to WM-G6 |
 | 3. Walkable | After Phase 1; can run beside Phase 2 (game side) | L | SP-F5 (KillZ) builds on WM-I4's recovery |
 | 4. Systems | After Phase 3 | L, several PRs | Uses WM-A2's frame and WM-I2's bounds-aware consumers |
 | 5. Places | After Phase 4 | M-L | Builds on WM-I1's world-mode-aware placement |
@@ -2648,3 +2649,206 @@ face mesher's fallback, the plane still has 13 G17-classified edges and 2 others
 CPU generation parity tests, `Meshing.MarchingCubes.CPUvsGPU`, `GPUAsync`, `Generation.GPUNoiseGeneratorAsync`,
 `InfinitePlane.GPUConsistency`); only the two retired GPU DC interior tests skip, as before. No live survey: the
 closed-surface tests check every rendered edge of a streamed world, which a survey cannot.
+
+## 16. Spherical Phase 2: the planet on the GPU (2026-10-16)
+
+The requirements doc's Phase 2 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-B4 and
+SP-I3, plus the GPU half of SP-B7. Phase 1 kept planets on CPU generation (SP-B3's guard), and its benches missed
+catch-up only because the CPU generates about 30 chunks a second against the GPU's 85 to 115 (§15.2). Exit check: GPU
+parity green at LOD 0/1/2, and the GPU default re-enabled for planets. Walking (Phase 3) is game-side and can run beside
+this phase; nothing here touches it.
+
+### 16.1 Plan
+
+Work items (IDs `WM-G*`, stable):
+
+| ID | Work item | Requirements | Repos | Size |
+|----|-----------|--------------|-------|------|
+| WM-G1 | **The planet branch of the density shader.** `GenerateVoxelDensity.usf` gets a `SphericalPlanet` branch that computes what `FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet` computes, in the same order: the radial height (`SampleRadialDisplacement`: terrain noise at `Direction × PlanetRadius`, continentalness at the same point through the baked curves), the shell signed distance and its quick rejects, density, materials by biome (temperature and moisture at the datum-sphere point) with the underwater variant when the column's terrain radius is under `WaterRadius`, height rules by altitude above the datum, caves with `VerticalScale` along local up (`ScaleAltitude`), the biome cave overrides and the underwater minimum depth, the cave-wall override, ores, and the cave flag. The generic 3D-noise branch no longer catches planets. The C++ uploads the planet's params from the request, which `FVoxelWorldModeFactory::FillGenerationRequest` fills | SP-B4 | VoxelWorlds | M |
+| WM-G2 | **The planet's post-passes on the GPU:** the radial water fill (`ApplyRadialWaterFillPass`) and the underground classification along local down (`ForEachVoxelAlongDown`), as compute passes in the generation graph | SP-B7 (GPU), SP-B8 (GPU) | VoxelWorlds | M |
+| WM-G3 | **`VoxelWorlds.Generation.GPUvsCPUSphericalParity`** at LOD 0/1/2: the north and south poles, the equator, 45°, a cube-face edge, a cube corner, a coast and a cave, in the style of the other `GPUvsCPU*Parity` tests | SP-I3 | VoxelWorlds | M |
+| WM-G4 | **The GPU default for planets:** `ShouldUseGPUGeneration()` follows `bUseGPUGeneration` in every mode once WM-G3 is green; the chunk manager's SP-B3 warning goes | SP-B3 (retired), SP-B4 | VoxelWorlds | S |
+| WM-G5 | **Live survey and benches:** the planet surveyed with GPU generation against the CPU from the same cameras, and the §15.2 bench routes against the GPU control | — | VoxelWorlds (docs) | M |
+| WM-G6 | **Docs:** these results, the requirement rows (SP-B3, SP-B4, SP-B7, SP-I3), §4's phase-2 exit check, `GPU_PIPELINE.md`, `WORLD_MODES.md`, the parent's doc map | — | VoxelWorlds, parent | S |
+
+Order: WM-G1 and WM-G2 (the generator, one commit each; they landed as one, since both edit the GPU generator's dispatch), WM-G3 with them, WM-G4 once WM-G3 passes in the editor, then
+WM-G5 and WM-G6. PRs: VoxelWorlds (all of it), then UE5_PluginDev (the gitlink and the doc map). No content change is
+expected: `Review_Planet` and `PlanetWorldConfig` already set `bUseGPUGeneration` like the demo (to confirm in WM-G5).
+
+**Design (written before building).**
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Where the planet's water fill and underground classification run on the GPU path | In the generation graph, as compute passes after the density pass, like the plane's (`AddVoxelPostPassDispatches`). Water: a seed kernel with one thread per digital line along local down (the CPU's phase 1), the existing flood sweep with the sea sphere as its eligibility test (phase 2), and the cave-flag clear folded into the underground kernel (phase 3). Underground: one thread per line, the column scan's state machine. The seed and flood run only in chunks the sea surface crosses, the CPU's gate (`FVoxelSeaSurface::Crosses` on the voxel box), evaluated in C++ | The readback then returns finished voxel data, as for the plane: running the passes on the CPU after readback was the traversal frame-spike source the GPU post-passes removed (`GPU_PIPELINE.md`). Each voxel is on exactly one line and a line's state reads and writes only its own voxels, so one thread per line, walking the line in the CPU's order, reproduces the CPU's result exactly; the flood is the plane's monotone fixpoint with a different test |
+| The lines' geometry | Computed once per chunk in C++ (double) by the function the CPU passes use, and uploaded: the line axis, its direction and the per-step shifts `round(K × slope)`. The heightmap kernels are unchanged | The GPU then walks exactly the CPU's lines: float rounding of `K × slope` could otherwise round the other way at a half and move a voxel to another line. Heightmap chunks keep the column kernel, so their output stays bit-identical (the GPU post-pass parity holds by construction) |
+| Precision | The C++ passes the chunk origin relative to the planet centre, computed in double; distances, directions, the noise sample point (`Direction × PlanetRadius`) and the sea test use it. The cave and ore noise sample the absolute position, as the CPU does | Absolute positions on a 250,000 uu planet off the origin carry float errors of about 0.03 uu; relative to the centre the chunk origin is exact and the error stays in the direction's last bits. The noise fields themselves are float on both sides. This is SP-H1's GPU half for small planets; large planets stay P2 |
+| Caves: biome overrides and the underwater minimum depth | The planet branch applies both, as the CPU planet does (`CalculateCaveDensity`), through a small override table (biome id, cave scale, minimum-depth override). The heightmap branch keeps its documented gap (no override, no underwater minimum depth, the Caves parity test's comment) | Planet parity needs them whenever the config uses them. Changing the heightmap branch would move the GPU terrain of existing heightmap worlds, which needs a `GenerationVersion` bump and refuses every save: a separate decision, recorded as a follow-up |
+| Terrain conditioning | Not applied on planets, as on the CPU | The zones are heightmap zones (SP-B10, Phase 5) |
+| The ore `Rarity` hash | As on the plane: the absolute position, float on the GPU and double on the CPU, so ores with `Rarity` < 1 may differ by a few voxels | SP-H3 (Phase 4) moves the hash to planet-relative coordinates for both; the parity test keeps `Rarity` at 1 like the plane's ore tests |
+| `PlanetGenerationVersion` | Unchanged (2) | The GPU generates the CPU's terrain (WM-G3 measures how closely); saves stay valid |
+| Shared shader code | Two helpers come out of the heightmap branch, continentalness at a sample point and one cave layer's carve, and both branches call them; nothing else in the heightmap branch moves | Less duplication, and the heightmap parity tests' numbers before and after show the refactor changed nothing |
+
+**How each is verified.**
+
+| ID | Check |
+|----|-------|
+| WM-G1, WM-G2 | WM-G3's test; the heightmap `GPUvsCPU*Parity` tests report the same per-channel numbers as before the change |
+| WM-G3 | At every site and LOD: density within ±2 on ≥ 99% of voxels, and the plane's material, biome and metadata thresholds (justified with the measured numbers in §16.2); non-vacuous: the site chunks cross the surface, the coast chunk has water flags and underwater materials, the cave chunk has carved underground air |
+| WM-G4 | `Configuration.PlanetSettings` asserts a planet may generate on the GPU; the log at world start names the GPU generator |
+| WM-G5 | Survey cameras over `Review_Planet` at both poles, 45°, the equator and a cube corner, each shot once on the CPU (`voxel.GPUGeneration.Enable 0`) and once on the GPU from the same camera: the same terrain. Benches: the planet on its equator and its 45° and 80° circles at 7,200 over the datum, at 1,500 and 3,000 uu/s, against the GPU control on its straight route; settled at the spawn; one build, one batch, a throwaway PIE first (G14); against §1's thresholds and D3 |
+| All | Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter` (298 today); the same suites in the editor with the GPU tests running |
+
+**Exit check:** `GPUvsCPUSphericalParity` green in the editor at LOD 0/1/2 at every site, planets generating on the GPU
+by default, the GPU survey showing the CPU's terrain.
+
+### 16.2 Results (2026-10-16)
+
+All six work items are implemented and verified; PRs open (draquel/VoxelWorlds#99, `feat/spherical-p2-gpu`, base
+`359030e`; draquel/UE5_PluginDev#110, `claude/spherical-p2-gpu-678e27`, base `dc7882f`: the gitlink and the doc map). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor with background
+throttling off. Live checks ran on `PlanetTest` with `/Game/PluginTesting/Review/Review_Planet` through
+`voxel.ConfigOverride` (R 250,000, water at `WaterRadius` 249,500, the demo's biomes and caves), as in §15.2.
+`Review_Planet` and `PlanetWorldConfig` already set `bUseGPUGeneration`, so they generate on the GPU with no content
+change. Screenshots: `Saved/Screenshots/Claudius/p2_cpu_*` and `p2_gpu_*` in the worktree (not committed).
+
+**As built.**
+
+| ID | As built | Check |
+|----|----------|-------|
+| WM-G1 | `GenerateVoxelDensity.usf`'s `SphericalPlanet` branch calls `GeneratePlanetVoxel` (`SphericalPlanet.ush`): `GenerateChunkSphericalPlanet`'s loop body in the same order (the radial height through `GpuApplyContinentalness` at `Direction × PlanetRadius`, `PlanetShellSignedDistance`, biome materials with the underwater variant where the column's terrain radius is under `WaterRadius`, height rules by altitude, `GpuPlanetCaveCarve` with `ScaleAltitude` along local up, the biome overrides and the underwater minimum depth, the cave-wall override, ores at the absolute position, the cave flag). Distances, directions and the noise sample point start from `PlanetChunkOffset`, the chunk origin relative to the centre computed in double; the cave and ore noise sample the absolute position, as the CPU does. The C++ uploads the planet's params from the request (`FVoxelWorldModeFactory::FillGenerationRequest`), `WaterRadius`, and the cave configuration's `UnderwaterMinDepth` and `BiomeOverrides` (a float4 table). Two helpers came out of the heightmap branch (`GpuApplyContinentalness`, `SampleGpuCaveLayer`); nothing else in it moved | Every heightmap `GPUvsCPU*Parity` case reports the same counts and the same CRC of the GPU output as before the change (36 of 36 lines identical: the parity harness now logs per-channel counts and a CRC32 of the GPU data), so the heightmap output is bit-identical |
+| WM-G2 | `FVoxelDownLines` (`VoxelGeneration/Private/VoxelDownLines.h`): the lines along a chunk's local down, the shifts rounded in double; the CPU's radial water fill and underground pass now walk it (the arithmetic of Phase 1's `ForEachVoxelAlongDown`, unchanged), and `AddPlanetLinePassDispatches` uploads its axis, direction and shifts. `VoxelPostPasses.usf`: `WaterLineSeedCS` and `UndergroundLinesCS` (one thread per line, the CPU's state machines, the cave-flag clear folded into the underground scan), `WaterFloodSweepRadialCS` (the plane's sweep with the sea sphere as the test). The seed and flood run when the sea crosses the chunk's voxel box (`FVoxelSeaSurface::Crosses`, the CPU's gate). Heightmap chunks keep the column kernels | The planet sites' metadata below (water and underground flags on sheared lines at 52° and −43°); `WorldModes.Planet.UndergroundAlongLocalUp` and `WaterFill` unchanged on the CPU |
+| WM-G3 | `VoxelWorlds.Generation.GPUvsCPUSphericalParity` | Below |
+| WM-G4 | `UVoxelWorldConfiguration::ShouldUseGPUGeneration()` returns `bUseGPUGeneration` in every mode, its comment keeping the reason planets were held on the CPU; the chunk manager's SP-B3 warning is gone | `Configuration.PlanetSettings`: a planet may generate on the GPU, and stays on the CPU with `bUseGPUGeneration` off; the log at PIE start reads "Using GPU noise generator" on `Review_Planet` |
+
+**The parity test.** A planet like `Review_Planet` (R 250,000, voxel 75, chunk 32, `WorldOrigin` (12345, 54321, 0) like
+the demo's, the demo's terrain noise, the default biomes with continentalness, distinct underwater materials, a height
+rule above 2,500 uu of altitude, an ore with `Rarity` 1, a cheese and a tunnel cave layer with a Plains and an Ocean
+override and `UnderwaterMinDepth` 60, water at 249,500), the request built as the chunk manager builds it. The coast,
+cave and seabed sites are searched at mid latitudes (no component of the direction above 0.8), so the lines along local
+down shear. Per site (32,768 voxels; LOD 1 and 2 give the same numbers, generation being LOD-independent):
+
+| Site | Chunk | What it holds (CPU) | Density differs (by > 2) | Material | Biome | Metadata |
+|------|-------|---------------------|--------------------------|----------|-------|----------|
+| North pole | (0, 0, 103) | The seabed 1,700 under the sea: 21,363 water voxels | 19 (0) | 0 | 0 | 0 |
+| South pole | (0, 0, −104) | The seabed 450 under the sea | 9 (0) | 0 | 0 | 0 |
+| Equator | (104, 0, 0) | Land 1,180 above the datum | 470 (12) | 6 | 0 | 0 |
+| Latitude 45 | (72, 3, 73) | The seabed, 13,278 water voxels | 11 (0) | 0 | 0 | 0 |
+| Cube-face edge (equator, longitude 45) | (73, 73, 0) | Land | 578 (18) | 0 | 0 | 1 |
+| Cube corner | (59, 59, 59) | The seabed | 31 (0) | 0 | 0 | 0 |
+| Coast (52.2°, −60.9°) | (30, −56, 82) | The sea surface over a seabed 170 under it: 7,755 water voxels, 4,049 of underwater material | 22 (0) | 0 | 0 | 0 |
+| Cave (52.8°, −165.9°) | (−61, −16, 82) | 5,396 carved underground air voxels, 1,200 under the surface | 791 (14) | 0 | 0 | 0 |
+| Under the seabed (−42.9°, −107.0°) | (−23, −73, −71) | 900 under the seabed: 2,770 carved voxels without the underwater minimum depth, 0 with it | 21 (0) | 2 | 0 | 0 |
+
+The land sites differ most in density because caves carve there and the GPU samples the cave noise at absolute float
+positions about 260,000 uu out (an error of about 0.03 uu, against the CPU's double); every difference but 44 voxels is
+±1 or ±2. The voxels off by more than 2 are a density of 126 against 127 at the surface, which gates the cave carve.
+The material differences are air voxels (material is written for air too) and voxels at a depth band's edge; the one
+metadata difference is an underground flag on a solid voxel next to such a solid/air flip. Thresholds, tighter than the plane's
+(a 16³ chunk's voxel is 0.024%): density within 2 on ≥ 99.5%, material ≥ 99%, biome ≥ 99.9%, metadata ≥ 99.9%,
+material where the density matches ≥ 99.5%. A flood that did not converge, a line walked in the wrong order or a missing
+branch moves hundreds of voxels; the worst site here has 18 voxels off by more than 2 in density and 1 in metadata.
+
+**Suites.** Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter`: **299 of 299** (298, plus `GPUvsCPUSphericalParity`),
+13 GPU tests skipping under `-nullrhi`. In-editor (D3D12), the same three suites: **299 of 299**, the GPU tests running
+(the GPU vs CPU generation parity tests including the planet's, `Meshing.MarchingCubes.CPUvsGPU`,
+`Generation.GPUNoiseGeneratorAsync`, `InfinitePlane.GPUConsistency`); only the two retired GPU DC interior tests skip,
+as before.
+
+**The exit check: the survey.** Six survey cameras over `Review_Planet` (12,000 uu up and 20,000 back along a tangent,
+looking at the datum point below, about 30° down), each shot once with generation on the CPU (`voxel.GPUGeneration.Enable
+0`, one PIE) and once on the GPU (another PIE), with the pawn held in flying mode so a respawn cannot take the view:
+
+| View | Loaded chunks (CPU / GPU) | Triangles (CPU / GPU) | Time per view, s (CPU / GPU) | Images |
+|------|---------------------------|-----------------------|-----------------------------|--------|
+| North pole | 1,034 / 1,034 | 430,338 / 430,336 | 68 / 50 (from the PIE start) | The island and its coast; the same |
+| South pole, camera mirrored | 864 / 864 | 355,348 / 355,356 | 64 / 42 | The same |
+| Latitude 45 | 976 / 976 | 448,436 / 448,426 | 70 / 42 | The peninsula with forest and the coast across the bay; the same |
+| Equator | 864 / 864 | 366,908 / 366,916 | 64 / 43 | The same |
+| Cube-face edge (equator, longitude 45) | 969 / 969 | 448,836 / 448,830 | 70 / 42 | The same |
+| Cube corner (35.26°, 45°) | 1,015 / 1,015 | 446,572 / 446,564 | 70 / 43 | The same |
+
+About 40 s of each view's time is the driver's fixed polling (two settle checks of three idle polls each), so on the
+GPU a view settles within it. The terrain, its materials, coasts, scatter and silhouettes are the same in every pair; the pixel differences (mean 1.4
+to 11 of 255) are the clouds, which move between the shots, the water's animation and highlights, and at the pole a
+one-pixel line along the loaded region's silhouette. The meshes differ by at most 10 triangles in 450,000. **Exit
+check met.** (A first attempt lost the CPU equator shot: in the slower CPU run the pawn fell when its chunks unloaded,
+respawned and took the view; `vox.Freeze` does not hold it, flying mode does.)
+
+**Benches.** As §15.2: the control (`DemoSmoothWorldConfig`, GPU) flies 150,000 uu along +X at z 7,200; the planet flies
+7,200 over its datum on the equator, 45° and 80° (`orbit`), 150,000 uu each, at 1,500 and 3,000 uu/s. One build, one
+editor session, a throwaway PIE first (G14), `vox.DeleteSave`, the clock at noon, move and look input blocked,
+`warmup=120`. In the same batch, the planet on the CPU (`voxel.GPUGeneration.Enable 0`) on the equator, and after it the
+GPU control on a circle of the 80° circle's radius at z 7,200, and repeats of the two v1500 circle runs. PIE ran in the
+worktree editor's level viewport at 1842×920 (§15.2: 3440×1408), so frame times compare within this batch only. JSON
+reports in [Research/Bench/SP2/](Research/Bench/SP2/) (`p2b_*` the batch, `p2bs_*` settled, `p2c_*` the control's
+circle, `p2r_*` the repeats).
+
+| Route | Run | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | Gen queue mean / peak | Loaded mean / peak | Peak voxel MB | Systems MB | LOD re-meshes | Generated / s, queue full | Audit | JSON |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Straight, v1500 | Control (GPU) | 16.7 / 24.8 / 31.7 | 6.7 | 0.17 | 11 / 88 | 1,139 / 1,212 | 808 | 1,000 | 1,859 | 107 | 0 | `20261016_233205_p2b_C_fly_v1500` |
+| Equator, v1500 | **Planet (GPU)** | 16.7 / 19.9 / 25.4 | 5.7 | 0.17 | 5 / 90 | 1,106 / 1,186 | 782 | 992 | 1,462 | 126 | 0 | `20261016_233411_p2b_P_eq_v1500` |
+| Equator, v1500 | Planet (CPU) | 16.7 / 19.2 / 23.3 | 4.1 | 1.72 | 29 / 90 | 1,077 / 1,154 | 309 | 551 | 1,462 | 29 | 0 | `20261016_234101_p2b_K_eq_v1500` |
+| 45°, v1500 | **Planet (GPU)** | 16.7 / 21.5 / 26.5 | 5.8 | 0.17 | 6 / 99 | 1,190 / 1,265 | 834 | 1,084 | 1,653 | 121 | 0 | `20261016_233620_p2b_P_45_v1500` |
+| 80°, v1500 | **Planet (GPU)** | 16.7 / 23.9 / 30.4 | 6.3 | 0.70 | 7 / 94 | 1,124 / 1,181 | 790 | 1,025 | 1,598 | 90 | 0 | `20261016_233829_p2b_P_80_v1500` |
+| 80°, v1500 | Planet (GPU), repeat | 16.7 / 23.7 / 29.5 | 6.0 | 0.69 | 7 / 94 | 1,124 / 1,181 | 754 | 988 | 1,604 | 92 | 0 | `20261016_235734_p2r_P_80_v1500` |
+| Circle r 44,663, v1500 | Control (GPU) | 16.7 / 26.0 / 33.3 | 6.9 | 0.37 | 10 / 101 | 1,112 / 1,197 | 672 | 886 | 2,003 | 82 | 0 | `20261016_235356_p2c_C_orb44_v1500` |
+| Circle r 44,663, v1500 | Control (GPU), repeat | 16.7 / 25.8 / 32.6 | 6.7 | 0.41 | 10 / 101 | 1,112 / 1,196 | 689 | 898 | 2,003 | 81 | 0 | `20261016_235944_p2r_C_orb44_v1500` |
+| Straight, v3000 | Control (GPU) | 19.4 / 30.5 / 37.2 | 8.3 | 0.48 | 36 / 105 | 1,112 / 1,163 | 699 | 891 | 1,861 | 70 | 0 | `20261016_234221_p2b_C_fly_v3000` |
+| Equator, v3000 | **Planet (GPU)** | 16.7 / 23.9 / 29.1 | 6.8 | 0.18 | 12 / 90 | 1,098 / 1,172 | 786 | 1,021 | 1,462 | 119 | 0 | `20261016_234340_p2b_P_eq_v3000` |
+| Equator, v3000 | Planet (CPU) | 16.7 / 23.3 / 28.1 | 5.1 | 20.43 | 408 / 630 | 705 / 1,154 | 324 | 628 | 1,462 | 29 | 0 | `20261016_234816_p2b_K_eq_v3000` |
+| 45°, v3000 | **Planet (GPU)** | 16.7 / 25.7 / 30.3 | 7.1 | 0.41 | 20 / 99 | 1,175 / 1,234 | 848 | 1,097 | 1,653 | 106 | 0 | `20261016_234458_p2b_P_45_v3000` |
+| 80°, v3000 | **Planet (GPU)** | 19.4 / 31.8 / 36.8 | 8.8 | 0.87 | 29 / 98 | 1,101 / 1,165 | 780 | 1,014 | 1,599 | 67 | 0 | `20261016_234616_p2b_P_80_v3000` |
+| Circle r 44,663, v3000 | Control (GPU) | 20.8 / 34.0 / 39.6 | 10.0 | 1.15 | 44 / 113 | 1,076 / 1,181 | 664 | 873 | 2,006 | 59 | 0 | `20261016_235517_p2c_C_orb44_v3000` |
+
+"Generated / s, queue full" is the chunks generated per second while the generation queue held 50 or more, as in §15.2.
+
+**Settled at the spawn** (the north pole for the planet; `warmup=180`, then 75 s, then a 30 s settled run):
+
+| Run | Loaded | Resident / uniform / compressed | Resident voxel MB | Systems MB (voxel, render GPU, collision, scatter) | Audit |
+|---|---|---|---|---|---|
+| Control (GPU) | 979 | 116 / 46 / 817 | 137 | 369 (153, 23, 109, 90) | 0 |
+| **Planet (GPU)** | 1,008 | 96 / 200 / 712 | 113 | 382 (142, 19, 86, 93) | 0 |
+
+Against the GPU control and §1's thresholds:
+
+- **Generation is no longer the limit.** With its queue full the planet generates 67 to 126 chunks a second on the GPU
+  (the 80° runs lowest, as the control on the same circle: 59 to 82), against 29 on the CPU (Phase 1's rate, reproduced in
+  this batch) and the control's 70 to 107 on its straight route. The CPU planet in this
+  batch catches up as in §15.2 (1.72 s and 20.43 s against 1.77 and 20.09), so the batch's machine state matches Phase
+  1's.
+- **Catch-up: met on the equator and at 45° at both speeds** (0.17 s and 0.17 s at v1500 against the control's 0.17; 0.18
+  s and 0.41 s at v3000 against 0.48). Phase 1 missed it on every route.
+- **Catch-up on the 80° circle: 0.70 s at v1500 and 0.87 s at v3000**, against the straight control's 0.17 and 0.48, and
+  the control on the same circle's 0.37 to 0.41 and 1.15. The repeat gives the same 0.69. The cause is where the route
+  ends: the viewer enters a new chunk 11 uu before the stop (y crosses −9,600 between the last two samples, the route
+  ending at y −9,611), which runs the load decisions at the stop and queues the new row of columns in the shell window:
+  78 chunks appear in one frame (tracked 1,087 to 1,165) and take 0.55 s to generate at the GPU's rate. The control's
+  circle is offset by its `WorldOrigin` and ends mid-chunk. Both speeds stop at the same point, so both carry it; on
+  the circle at v3000 the planet still catches up faster than the control. Not a planet cost.
+- **Frame and manager P95: within the thresholds on every route.** Frame P95 is 4 to 22% below the straight control's,
+  but for 80° at v3000 (+4%, against the circle control's 34.0 ms −6%); manager P95 is 6 to 18% below, but for 80° at
+  v3000 (+6%, against the circle control's 10.0 ms −12%).
+- **Peak loaded chunks within +6%** (1,165 to 1,265 against 1,163 and 1,212), **peak voxel MB and systems MB within +25%**
+  (the most, 45° at v3000: 848 and 1,097 MB against 699 and 891, +21% and +23%). The planet's peak voxel memory rose
+  from §15.2's 292 to 330 MB to 754 to 848 MB: the GPU keeps up, so more chunks are resident uncompressed at once, as for
+  the control (699 to 808).
+- **D3: met.** Systems memory peaks at 988 to 1,097 MB while streaming (at most 1.5 GB) and is 382 MB settled (at most
+  0.6 GB; Phase 1: 383). The residency audit finds 0 on every run.
+
+**Things to know.**
+
+- The GPU's parity is not bit-exact on a planet as it nearly is near the origin: positions 250,000 uu out cost the cave
+  noise about 0.03 uu, and density at a cave's edge rounds the other way in a few hundred voxels a land chunk (above).
+  The mesh differs by about 10 triangles in 450,000; terrain, coasts and caves look the same.
+- `FVoxelDownLines` is the one definition of the lines along local down; the CPU and GPU passes cannot drift apart.
+- The parity harness logs counts and a CRC32 of the GPU data per case: a shader change that must not move heightmap
+  voxels can be checked against the previous build's log.
+- Saves are unaffected (`PlanetGenerationVersion` stays 2): the GPU generates the CPU's planet.
+
+**Left for later.**
+
+- **G18** (§14.1): the heightmap branch still ignores the cave configuration's biome overrides and `UnderwaterMinDepth`,
+  which the demo uses, so GPU heightmap worlds carve caves under the sea and in the Ocean biome that CPU worlds do not.
+  The planet branch's `GpuPlanetCaveCarve` shows the port; it moves GPU heightmap terrain, so it needs a decision on
+  `GenerationVersion` (it would refuse every heightmap save).
+- The ore `Rarity` hash at absolute positions (SP-H3, Phase 4) and large planets (SP-H1, P2).
+- Walking (Phase 3), systems (Phase 4) and places (Phase 5) as before; nothing here changed them.

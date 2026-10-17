@@ -115,6 +115,22 @@ float IslandEdgeHeight;
 float IslandSeabedDepth;      // WM-E1: the seabed beyond the edge slopes down by this much
 float IslandSeabedSlopeWidth; // ... over this horizontal distance (0 = a step)
 
+// SphericalPlanet world-mode params (spherical Phase 2, SP-B4) — see SphericalPlanet.ush. From the request's
+// SphericalPlanetParams (FVoxelWorldModeFactory) and WaterRadius.
+float3 PlanetCenter;          // absolute: the cave and ore noise sample absolute positions, as the CPU does
+float3 PlanetChunkOffset;     // ChunkWorldPosition - PlanetCenter, computed in double on the CPU (planet-relative math)
+float PlanetRadius;           // the datum
+float PlanetInnerRadius;      // FSphericalPlanetParams::GetInnerRadius (the shell's quick reject)
+float PlanetOuterRadius;      // FSphericalPlanetParams::GetOuterRadius
+float PlanetWaterRadius;      // the sea sphere (WaterRadius)
+
+// Cave parameters the heightmap branch does not read (its documented gap); the planet branch applies them as
+// FVoxelCPUNoiseGenerator::CalculateCaveDensity does. CaveBiomeOverrideData: 1 float4 per override,
+// [BiomeID, CaveScale, MinDepthOverride, 0] in the cave configuration's order (the first match wins).
+float CaveUnderwaterMinDepth;
+int CaveBiomeOverrideCount;
+StructuredBuffer<float4> CaveBiomeOverrideData;
+
 // Output buffer: packed voxel data (MaterialID | Density<<8 | BiomeID<<16 | Metadata<<24)
 RWStructuredBuffer<uint> OutputVoxelData;
 
@@ -122,6 +138,89 @@ RWStructuredBuffer<uint> OutputVoxelData;
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
 // IslandBowl edge falloff (references the IslandBowl globals declared above).
 #include "/Plugin/VoxelWorlds/Private/IslandFalloff.ush"
+
+// ==================== Helpers shared by the world-mode branches ====================
+
+/**
+ * Continentalness at a sample point, applied to the terrain params: the heightmap modes sample (X, Y, 0), a planet the
+ * point on its datum sphere. Mirrors FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt (2-octave Simplex, the
+ * baked curves' height offset and height-scale multiplier, lerped between samples).
+ *
+ * @param SamplePos Continentalness sample position
+ * @param InOutBaseHeight Base height, the curve's offset added
+ * @param InOutHeightScale Height scale, multiplied by the curve's multiplier
+ * @return The continentalness value (the biome blend reuses it)
+ */
+float GpuApplyContinentalness(float3 SamplePos, inout float InOutBaseHeight, inout float InOutHeightScale)
+{
+    float ContinentalnessNoise = FBM3D(
+        SamplePos,
+        NOISE_TYPE_SIMPLEX,
+        ContinentalnessSeed,
+        2,
+        ContinentalnessFrequency,
+        1.0,
+        2.0,
+        0.5
+    );
+
+    // Curve-based height offset lookup from baked samples (packed as float4[8])
+    float FIdx = (ContinentalnessNoise + 1.0) * 0.5 * float(ContinentalnessCurveSamples - 1);
+    int Idx0 = clamp(int(floor(FIdx)), 0, ContinentalnessCurveSamples - 2);
+    int Idx1 = Idx0 + 1;
+    float Frac = FIdx - float(Idx0);
+    // Unpack scalar from float4: vec[i/4][i%4]
+    float H0 = ContinentalnessHeightCurve[Idx0 / 4][Idx0 % 4];
+    float H1 = ContinentalnessHeightCurve[Idx1 / 4][Idx1 % 4];
+    float S0 = ContinentalnessHeightScaleCurve[Idx0 / 4][Idx0 % 4];
+    float S1 = ContinentalnessHeightScaleCurve[Idx1 / 4][Idx1 % 4];
+    float HeightOffset = lerp(H0, H1, Frac);
+    float ScaleMult = lerp(S0, S1, Frac);
+
+    InOutBaseHeight += HeightOffset;
+    InOutHeightScale *= ScaleMult;
+    return ContinentalnessNoise;
+}
+
+/**
+ * One cave layer's carve at a cave noise position (the voxel's position with VerticalScale applied: along Z in the
+ * heightmap modes, along local up on a planet). Mirrors FVoxelCPUNoiseGenerator::SampleCaveLayer after its scaling.
+ *
+ * @param ci Cave layer index in [0, CaveLayerCount)
+ * @param CavePos Cave noise sample position
+ * @return Carve density [0, CarveStrength], before the depth fade
+ */
+float SampleGpuCaveLayer(int ci, float3 CavePos)
+{
+    if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
+    {
+        return SampleCheeseCave(
+            CavePos,
+            CaveLayerSeed[ci],
+            CaveLayerFrequency[ci],
+            CaveLayerOctaves[ci],
+            CaveLayerPersistence[ci],
+            CaveLayerLacunarity[ci],
+            CaveLayerThreshold[ci],
+            CaveLayerCarveFalloff[ci],
+            CaveLayerCarveStrength[ci]);
+    }
+    return SampleTunnelCave(
+        CavePos,
+        CaveLayerSeed[ci],
+        CaveLayerSeed2[ci],
+        CaveLayerFrequency[ci],
+        CaveLayerFrequency2[ci],
+        CaveLayerOctaves[ci],
+        CaveLayerPersistence[ci],
+        CaveLayerLacunarity[ci],
+        CaveLayerThreshold[ci],
+        CaveLayerCarveFalloff[ci],
+        CaveLayerCarveStrength[ci]);
+}
+
+// SphericalPlanet surface function and per-voxel pipeline (references the planet globals and the helpers above).
+#include "/Plugin/VoxelWorlds/Private/SphericalPlanet.ush"
 
 // ==================== Main Compute Shader ====================
 
@@ -172,34 +271,8 @@ void MainCS(
         if (ContinentalnessEnabled != 0)
         {
             // Sample continentalness noise at X,Y (2D, Z=0)
-            float3 ContSamplePos = float3(WorldPos.x, WorldPos.y, 0.0);
-            float ContinentalnessNoise = FBM3D(
-                ContSamplePos,
-                NOISE_TYPE_SIMPLEX,
-                ContinentalnessSeed,
-                2,
-                ContinentalnessFrequency,
-                1.0,
-                2.0,
-                0.5
-            );
-            ContinentalnessValue = ContinentalnessNoise;
-
-            // Curve-based height offset lookup from baked samples (packed as float4[8])
-            float FIdx = (ContinentalnessNoise + 1.0) * 0.5 * float(ContinentalnessCurveSamples - 1);
-            int Idx0 = clamp(int(floor(FIdx)), 0, ContinentalnessCurveSamples - 2);
-            int Idx1 = Idx0 + 1;
-            float Frac = FIdx - float(Idx0);
-            // Unpack scalar from float4: vec[i/4][i%4]
-            float H0 = ContinentalnessHeightCurve[Idx0 / 4][Idx0 % 4];
-            float H1 = ContinentalnessHeightCurve[Idx1 / 4][Idx1 % 4];
-            float S0 = ContinentalnessHeightScaleCurve[Idx0 / 4][Idx0 % 4];
-            float S1 = ContinentalnessHeightScaleCurve[Idx1 / 4][Idx1 % 4];
-            float HeightOffset = lerp(H0, H1, Frac);
-            float ScaleMult = lerp(S0, S1, Frac);
-
-            EffectiveBaseHeight += HeightOffset;
-            EffectiveHeightScale *= ScaleMult;
+            ContinentalnessValue = GpuApplyContinentalness(
+                float3(WorldPos.x, WorldPos.y, 0.0), EffectiveBaseHeight, EffectiveHeightScale);
         }
 
         // Infinite Plane: 2D heightmap-based terrain. Decomposed (vs the monolithic ApplyInfinitePlaneSDF)
@@ -234,36 +307,7 @@ void MainCS(
                 // Apply vertical scale to flatten caves horizontally
                 float3 CavePos = float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]);
 
-                float LayerCarve = 0.0f;
-
-                if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
-                {
-                    LayerCarve = SampleCheeseCave(
-                        CavePos,
-                        CaveLayerSeed[ci],
-                        CaveLayerFrequency[ci],
-                        CaveLayerOctaves[ci],
-                        CaveLayerPersistence[ci],
-                        CaveLayerLacunarity[ci],
-                        CaveLayerThreshold[ci],
-                        CaveLayerCarveFalloff[ci],
-                        CaveLayerCarveStrength[ci]);
-                }
-                else
-                {
-                    LayerCarve = SampleTunnelCave(
-                        CavePos,
-                        CaveLayerSeed[ci],
-                        CaveLayerSeed2[ci],
-                        CaveLayerFrequency[ci],
-                        CaveLayerFrequency2[ci],
-                        CaveLayerOctaves[ci],
-                        CaveLayerPersistence[ci],
-                        CaveLayerLacunarity[ci],
-                        CaveLayerThreshold[ci],
-                        CaveLayerCarveFalloff[ci],
-                        CaveLayerCarveStrength[ci]);
-                }
+                float LayerCarve = SampleGpuCaveLayer(ci, CavePos);
 
                 // Apply depth fade
                 LayerCarve *= CalculateDepthFade(
@@ -326,9 +370,15 @@ void MainCS(
             Metadata = Metadata | ((VOXEL_FLAG_CAVE | VOXEL_FLAG_UNDERGROUND) << 4);
         }
     }
+    else if (WorldMode == WORLD_MODE_SPHERICAL_PLANET)
+    {
+        // A planet: the radial height along the direction from the centre, materials by altitude, caves along local up
+        // (SphericalPlanet.ush, the GPU twin of FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet; spherical SP-B4).
+        GeneratePlanetVoxel(VoxelCoord, WorldPos, EffectiveVoxelSize, Density, MaterialID, BiomeID, Metadata);
+    }
     else
     {
-        // Default: 3D noise generation (for SphericalPlanet, IslandBowl, etc.)
+        // Default: 3D noise generation for a world mode with no branch of its own (none today)
         float NoiseValue = FBM3D(
             WorldPos,
             NoiseType,
