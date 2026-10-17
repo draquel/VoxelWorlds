@@ -2581,8 +2581,9 @@ and fails on any other hole, so a fix makes it strict. *Fixed since (§15.3), an
 
 ### 15.3 G17: holes in mixed-LOD seams (2026-10-16)
 
-Fixed on VoxelWorlds `fix/g17-mixed-lod-face-seam` (base `b73bd25`, main after spherical Phase 1). Built with editor
-5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree.
+Fixed in draquel/VoxelWorlds#98 (`fix/g17-mixed-lod-face-seam`, base `b73bd25`, main after spherical Phase 1; the
+parent's gitlink in draquel/UE5_PluginDev#109). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+worktree.
 
 **Cause.** The mixed-LOD seam meshers (the face seam of P2c, the edge and corner seams of P2d;
 `Research/SEAM_OWNERSHIP_ARCHITECTURE.md` §2.5) stitch at the finest stride of their participants: every fine
