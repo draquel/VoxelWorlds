@@ -22,33 +22,6 @@ namespace VoxelMixedTupleTestUtils
 	constexpr int32 TestChunkSize = 32;
 	constexpr float TestVoxelSize = 100.0f;
 
-	static TArray<FVoxelData> FillVoxels(const FIntVector& ChunkOffsetVoxels,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn)
-	{
-		TArray<FVoxelData> Data;
-		Data.SetNumUninitialized(TestChunkSize * TestChunkSize * TestChunkSize);
-		for (int32 Z = 0; Z < TestChunkSize; ++Z)
-		{
-			for (int32 Y = 0; Y < TestChunkSize; ++Y)
-			{
-				for (int32 X = 0; X < TestChunkSize; ++X)
-				{
-					const int32 Index = X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize;
-					const bool bSolid = SolidFn(X + ChunkOffsetVoxels.X, Y + ChunkOffsetVoxels.Y, Z + ChunkOffsetVoxels.Z);
-					Data[Index] = bSolid ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
-				}
-			}
-		}
-		return Data;
-	}
-
-	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
-	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn)
-	{
-		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
-	}
-
 	static FVoxelMeshingConfig MakeConfig()
 	{
 		FVoxelMeshingConfig Config;
@@ -86,13 +59,33 @@ namespace VoxelMixedTupleTestUtils
 		FChunkMeshData* EdgeSeam[6] = {}; // [axis*2 + half]
 	};
 
-	/** LODOf(i,j,k) gives each lattice chunk's LOD. */
-	static bool BuildHeteroLattice(TFunctionRef<int32(int32, int32, int32)> LODOf,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn, FHeteroScene& Out, FAutomationTestBase& Test)
+	/** LODOf(i,j,k) gives each lattice chunk's LOD; VoxelFn(x,y,z) the voxel at a lattice voxel coordinate. */
+	static bool BuildHeteroLatticeFrom(TFunctionRef<int32(int32, int32, int32)> LODOf,
+		TFunctionRef<FVoxelData(int32, int32, int32)> VoxelFn, FHeteroScene& Out, FAutomationTestBase& Test)
 	{
 		const float Span = static_cast<float>(TestChunkSize) * TestVoxelSize;
-		auto ChunkVoxelOffset = [](int32 i, int32 j, int32 k) { return FIntVector(i, j, k) * TestChunkSize; };
 		auto ChunkWorld = [Span](int32 i, int32 j, int32 k) { return FVector3f(i * Span, j * Span, k * Span); };
+
+		// The 8 chunks' voxels, filled once and shared by every request.
+		TSharedPtr<const TArray<FVoxelData>> Chunks[8];
+		for (int32 c = 0; c < 8; ++c)
+		{
+			const FIntVector Offset = FIntVector(c & 1, (c >> 1) & 1, (c >> 2) & 1) * TestChunkSize;
+			TSharedPtr<TArray<FVoxelData>> Data = MakeShared<TArray<FVoxelData>>();
+			Data->SetNumUninitialized(TestChunkSize * TestChunkSize * TestChunkSize);
+			for (int32 Z = 0; Z < TestChunkSize; ++Z)
+			{
+				for (int32 Y = 0; Y < TestChunkSize; ++Y)
+				{
+					for (int32 X = 0; X < TestChunkSize; ++X)
+					{
+						(*Data)[X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize] = VoxelFn(X + Offset.X, Y + Offset.Y, Z + Offset.Z);
+					}
+				}
+			}
+			Chunks[c] = Data;
+		}
+		auto ChunkVoxels = [&Chunks](int32 i, int32 j, int32 k) { return Chunks[i + j * 2 + k * 4]; };
 
 		Out.Meshes.SetNum(27);
 		Out.Offsets.SetNum(27);
@@ -110,7 +103,7 @@ namespace VoxelMixedTupleTestUtils
 					Request.ChunkSize = TestChunkSize;
 					Request.VoxelSize = TestVoxelSize;
 					Request.MeshCellDomain = EVoxelMeshCellDomain::Interior;
-					Request.VoxelData = FillVoxels(ChunkVoxelOffset(i, j, k), SolidFn);
+					Request.VoxelData = *ChunkVoxels(i, j, k);
 					FChunkMeshData& Mesh = Out.Meshes[MeshIdx];
 					if (!RunMesher([&](FVoxelCPUDualContourMesher& M) { return M.GenerateMeshCPU(Request, Mesh); }))
 					{
@@ -144,8 +137,8 @@ namespace VoxelMixedTupleTestUtils
 					Seam.LODLevelB = LODOf(NJK[0], NJK[1], NJK[2]);
 					Seam.ChunkSize = TestChunkSize;
 					Seam.VoxelSize = TestVoxelSize;
-					Seam.VoxelDataA = SharedVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
-					Seam.VoxelDataB = SharedVoxels(ChunkVoxelOffset(NJK[0], NJK[1], NJK[2]), SolidFn);
+					Seam.VoxelDataA = ChunkVoxels(IJK[0], IJK[1], IJK[2]);
+					Seam.VoxelDataB = ChunkVoxels(NJK[0], NJK[1], NJK[2]);
 					FChunkMeshData& Mesh = Out.Meshes[MeshIdx];
 					if (!RunMesher([&](FVoxelCPUDualContourMesher& M) { return M.GenerateFaceSeamMeshCPU(Seam, Mesh); }))
 					{
@@ -179,7 +172,7 @@ namespace VoxelMixedTupleTestUtils
 						IJK[PerpB] = dw;
 						const int32 Q = dv + dw * 2;
 						Seam.LODLevels[Q] = LODOf(IJK[0], IJK[1], IJK[2]);
-						Seam.VoxelData[Q] = SharedVoxels(ChunkVoxelOffset(IJK[0], IJK[1], IJK[2]), SolidFn);
+						Seam.VoxelData[Q] = ChunkVoxels(IJK[0], IJK[1], IJK[2]);
 					}
 				}
 				Seam.LODLevel = Seam.LODLevels[0];
@@ -212,7 +205,7 @@ namespace VoxelMixedTupleTestUtils
 					{
 						const int32 O = i + j * 2 + k * 4;
 						Seam.LODLevels[O] = LODOf(i, j, k);
-						Seam.VoxelData[O] = SharedVoxels(ChunkVoxelOffset(i, j, k), SolidFn);
+						Seam.VoxelData[O] = ChunkVoxels(i, j, k);
 					}
 				}
 			}
@@ -230,9 +223,18 @@ namespace VoxelMixedTupleTestUtils
 		return true;
 	}
 
+	/** BuildHeteroLatticeFrom over a binary solid. */
+	static bool BuildHeteroLattice(TFunctionRef<int32(int32, int32, int32)> LODOf,
+		TFunctionRef<bool(int32, int32, int32)> SolidFn, FHeteroScene& Out, FAutomationTestBase& Test)
+	{
+		return BuildHeteroLatticeFrom(LODOf,
+			[&SolidFn](int32 X, int32 Y, int32 Z) { return SolidFn(X, Y, Z) ? FVoxelData::Solid(1, 0) : FVoxelData::Air(); },
+			Out, Test);
+	}
+
 	/** Count open (use-count 1) edges with both endpoints inside a box, over all meshes. */
 	static int32 CountOpenEdgesInBox(const FHeteroScene& Scene, const FVector3f& BoxMin, const FVector3f& BoxMax,
-		FAutomationTestBase& Test, const TCHAR* Label)
+		FAutomationTestBase& Test, const TCHAR* Label, int32 MaxReported = 5)
 	{
 		TMap<FString, int32> EdgeUse;
 		for (int32 m = 0; m < Scene.Meshes.Num(); ++m)
@@ -294,7 +296,7 @@ namespace VoxelMixedTupleTestUtils
 					if (bInBox)
 					{
 						++OpenInBox;
-						if (OpenInBox <= 5)
+						if (OpenInBox <= MaxReported)
 						{
 							Test.AddError(FString::Printf(TEXT("%s: OPEN edge: (%f,%f,%f)-(%f,%f,%f)"),
 								Label, A.X, A.Y, A.Z, B.X, B.Y, B.Z));
@@ -316,6 +318,24 @@ namespace VoxelMixedTupleTestUtils
 	static bool SlantedCorner(int32 X, int32 Y, int32 Z)
 	{
 		return Z <= 16 + (X * 20 + Y * 10) / (2 * TestChunkSize);
+	}
+
+	/**
+	 * Noise terrain as the generators write it (G17; the same field as MS4's): a rolling heightfield with small 3D
+	 * bumps, the signed distance in voxels mapped to density like SignedDistanceToDensity. The surface sits near
+	 * z = 32, the lattice's horizontal faces, edges and corner.
+	 */
+	static FVoxelData NoiseVoxel(const FVector& Seed, int32 X, int32 Y, int32 Z)
+	{
+		const FVector P = FVector(X, Y, Z) + Seed;
+		const float Hills = 6.0f * FMath::PerlinNoise2D(FVector2D(P.X, P.Y) / 23.0f)
+			+ 2.5f * FMath::PerlinNoise2D(FVector2D(P.X, P.Y) / 9.0f + FVector2D(17.0, 3.0));
+		const float Bumps = 1.6f * FMath::PerlinNoise3D(P / 5.0f + FVector(5.0, 11.0, 2.0));
+		const float Clamped = FMath::Clamp(static_cast<float>(TestChunkSize) + Hills + Bumps - static_cast<float>(Z), -1.0f, 1.0f);
+		const uint8 Density = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(127.5f + 127.5f * Clamped), 0, 255));
+		FVoxelData Data = (Density > 0) ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
+		Data.Density = Density;
+		return Data;
 	}
 
 	/** Y-heavy slant: height ~31-32 along the whole X-parallel edge line at y=32 (z=32),
@@ -484,6 +504,61 @@ bool FDCMixedTupleRingMatchTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("mixed corner seam has ring vertices"), Ring > 0);
 	}
 
+	return true;
+}
+
+// ===========================================================================
+// MT3 (G17): heterogeneous lattices on noise terrain close everywhere inside
+//      the lattice: mixed face, edge and corner seams with LOD 0, 1 and 2.
+//      All three mixed meshers used to skip a fine crossing facing a coarse
+//      cell with no crossing of its own; the boundary fallback vertex they
+//      share closes it, and neighbouring jobs solve the same vertex.
+// ===========================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMixedTupleNoiseClosureTest,
+	"VoxelWorlds.Meshing.DualContour.SeamClosure.MT3_MixedTupleClosureNoise",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMixedTupleNoiseClosureTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelMixedTupleTestUtils;
+
+	const float Span = static_cast<float>(TestChunkSize) * TestVoxelSize;
+	const float SMax = 4.0f * TestVoxelSize; // the coarsest stride in the lattices (LOD 2)
+	struct FLattice { const TCHAR* Name; int32 (*LODOf)(int32, int32, int32); };
+	const FLattice Lattices[] = {
+		{ TEXT("X-split 1|2"), [](int32 i, int32 j, int32 k) { return (i == 1) ? 2 : 1; } },
+		{ TEXT("Z-split 2|1"), [](int32 i, int32 j, int32 k) { return (k == 1) ? 1 : 2; } },
+		{ TEXT("Y-split 0|1"), [](int32 i, int32 j, int32 k) { return (j == 1) ? 1 : 0; } },
+		{ TEXT("mixed 0/1/2"), [](int32 i, int32 j, int32 k) { return (i + j + k) % 3; } },
+	};
+	constexpr int32 Patches = 6;
+	for (const FLattice& Lattice : Lattices)
+	{
+		int32 Open = 0, Holed = 0, Triangles = 0;
+		for (int32 Patch = 0; Patch < Patches; ++Patch)
+		{
+			const FVector Seed(41.0 * Patch + 5.0, 29.0 * Patch + 13.0, 17.0 * Patch);
+			FHeteroScene Scene;
+			if (!BuildHeteroLatticeFrom(Lattice.LODOf, [&Seed](int32 X, int32 Y, int32 Z) { return NoiseVoxel(Seed, X, Y, Z); }, Scene, *this))
+			{
+				return true;
+			}
+			for (int32 m = 8; m < Scene.Meshes.Num(); ++m)
+			{
+				Triangles += Scene.Meshes[m].GetTriangleCount();
+			}
+			// Everything inside the lattice, clear of its open outer boundary.
+			const FVector3f BoxMin(2.0f * SMax);
+			const FVector3f BoxMax(2.0f * Span - 2.0f * SMax);
+			const int32 OpenHere = CountOpenEdgesInBox(Scene, BoxMin, BoxMax, *this,
+				*FString::Printf(TEXT("%s, patch %d"), Lattice.Name, Patch), Holed < 2 ? 3 : 0);
+			Open += OpenHere;
+			Holed += OpenHere > 0 ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("%s: %d open edges in %d of %d patches, %d seam triangles"), Lattice.Name, Open, Holed, Patches, Triangles));
+		TestTrue(*FString::Printf(TEXT("%s: the seams have geometry"), Lattice.Name), Triangles > 0);
+		TestEqual(*FString::Printf(TEXT("%s: open edges inside the lattice"), Lattice.Name), Open, 0);
+	}
 	return true;
 }
 

@@ -936,6 +936,8 @@ namespace VoxelDCFaceSeam
 		uint8 EmittedBiomeID = 0;
 		int32 MeshVertexIndex = -1;
 		bool bValid = false;
+		/** The mixed meshers tried ComputeBoundaryFallbackVertex on this invalid cell (G17); never retried. */
+		bool bFallbackTried = false;
 	};
 
 	/**
@@ -1232,6 +1234,105 @@ namespace VoxelDCFaceSeam
 	}
 
 	/**
+	 * The vertex of a coarse cell that has no crossing at its own stride but has a finer one on its boundary
+	 * (G17, WORLD_MODES_REVIEW_PLAN.md §14.1). The mixed meshers stitch at the finest stride of their
+	 * participants, so a fine crossing on the face plane (or a tuple's shared lines) can face a coarse cell
+	 * whose corners all have one sign: the surface pokes through the coarse cell's face between its samples.
+	 * That cell has no vertex at its own stride, and skipping the fine fan left a small hole bounded by the
+	 * fine side's quads (two to six open edges). Here the cell gets one: the same QEF solve over every
+	 * voxel-resolution (stride-1) crossing on the cell's six faces, normals at stride 1, positions in the
+	 * coarse cell's bounds (surface-derived, inside its own cell: the #44 laws).
+	 *
+	 * Only for cells that ComputeCellVertex left invalid, so it never moves a vertex an interior pass or a
+	 * same-LOD seam emits (they only emit valid cells). It is a pure function of the sampler view, the cell
+	 * and its stride, not of the calling job's stitch stride, so every mixed job that fans onto the cell
+	 * (face, edge, corner) solves the same vertex. Any finer crossing on the boundary implies a stride-1
+	 * crossing there, so a cell a fan needs always gets a vertex.
+	 */
+	template <typename TSampler>
+	static bool ComputeBoundaryFallbackVertex(
+		const TSampler& S,
+		int32 CX, int32 CY, int32 CZ,
+		int32 Stride, float VoxelSize, float IsoLevel, float SVDThreshold, float BiasStrength,
+		FSeamCellVertex& Out)
+	{
+		Out.bFallbackTried = true;
+		if (Stride <= 1)
+		{
+			return false; // a stride-1 cell's boundary crossings are its own edges: ComputeCellVertex saw them all
+		}
+
+		const int32 Lo[3] = { CX * Stride, CY * Stride, CZ * Stride };
+		const int32 Hi[3] = { Lo[0] + Stride, Lo[1] + Stride, Lo[2] + Stride };
+		FQEFSolver QEF;
+		FVector3f AvgNormal = FVector3f::ZeroVector;
+
+		for (int32 Z = Lo[2]; Z <= Hi[2]; ++Z)
+		{
+			for (int32 Y = Lo[1]; Y <= Hi[1]; ++Y)
+			{
+				for (int32 X = Lo[0]; X <= Hi[0]; ++X)
+				{
+					const int32 P[3] = { X, Y, Z };
+					const bool bOnMin[3] = { X == Lo[0], Y == Lo[1], Z == Lo[2] };
+					const bool bOnMax[3] = { X == Hi[0], Y == Hi[1], Z == Hi[2] };
+					for (int32 Axis = 0; Axis < 3; ++Axis)
+					{
+						if (P[Axis] == Hi[Axis])
+						{
+							continue; // the edge would leave the cell
+						}
+						// On the boundary: some other axis sits on the cell's min or max plane.
+						const int32 A1 = (Axis + 1) % 3;
+						const int32 A2 = (Axis + 2) % 3;
+						if (!(bOnMin[A1] || bOnMax[A1] || bOnMin[A2] || bOnMax[A2]))
+						{
+							continue;
+						}
+
+						const float D0 = S.GetDensity(X, Y, Z);
+						int32 N[3] = { X, Y, Z };
+						++N[Axis];
+						const float D1 = S.GetDensity(N[0], N[1], N[2]);
+						if ((D0 >= IsoLevel) == (D1 >= IsoLevel))
+						{
+							continue;
+						}
+
+						float t = (IsoLevel - D0) / (D1 - D0);
+						t = FMath::Clamp(t, 0.0f, 1.0f);
+						const FVector3f P0(static_cast<float>(X) * VoxelSize, static_cast<float>(Y) * VoxelSize, static_cast<float>(Z) * VoxelSize);
+						const FVector3f P1(static_cast<float>(N[0]) * VoxelSize, static_cast<float>(N[1]) * VoxelSize, static_cast<float>(N[2]) * VoxelSize);
+						const FVector3f CrossPos = P0 + (P1 - P0) * t;
+						const FVector3f CrossNormal = S.GradientNormal(CrossPos.X / VoxelSize, CrossPos.Y / VoxelSize, CrossPos.Z / VoxelSize, 1);
+						QEF.Add(CrossPos, CrossNormal);
+						AvgNormal += CrossNormal;
+					}
+				}
+			}
+		}
+
+		if (QEF.Count == 0)
+		{
+			return false;
+		}
+
+		const float CellWorldSize = static_cast<float>(Stride) * VoxelSize;
+		const FVector3f Min(static_cast<float>(Lo[0]) * VoxelSize, static_cast<float>(Lo[1]) * VoxelSize, static_cast<float>(Lo[2]) * VoxelSize);
+		const FBox3f CellBounds(Min, Min + FVector3f(CellWorldSize));
+
+		Out.bValid = true;
+		Out.MeshVertexIndex = -1;
+		Out.Position = QEF.Solve(SVDThreshold, CellBounds, BiasStrength);
+		if (!AvgNormal.Normalize())
+		{
+			AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
+		}
+		Out.Normal = AvgNormal;
+		return true;
+	}
+
+	/**
 	 * Mixed-LOD face seam (seam-ownership P2c — the §2.3 cross-resolution mesher).
 	 *
 	 * The slab is ALWAYS the owner's last cell layer at the OWNER's stride (the interior domain
@@ -1241,8 +1342,9 @@ namespace VoxelDCFaceSeam
 	 * every fine crossing gets a fan onto the coarser side's ring vertices, quads collapsing to
 	 * triangles when their two coarse-side slots fall in the same coarse cell (the T-junction).
 	 * All positions are surface-derived QEF output clamped to their own cells (#44 laws hold by
-	 * construction); a fine crossing facing an invalid coarse cell is skipped — degrading to a
-	 * crack, never a protrusion.
+	 * construction). A fine crossing facing a coarse cell with no crossing at its own stride fans
+	 * onto that cell's boundary fallback vertex (G17, ComputeBoundaryFallbackVertex) instead of
+	 * being skipped, which left a hole.
 	 */
 	static bool GenerateMixedFaceSeam(
 		const FVoxelFaceSeamRequest& Req,
@@ -1578,9 +1680,21 @@ namespace VoxelDCFaceSeam
 						return;
 					}
 					FSeamCellVertex& Cell = RingB[BV + BW * SLB];
+					if (!Cell.bValid && !Cell.bFallbackTried)
+					{
+						// G17: a coarser ring cell with no crossing at its stride; B's interior never emits it.
+						int32 C[3];
+						C[U] = 0;
+						C[V] = BV;
+						C[W] = BW;
+						if (ComputeBoundaryFallbackVertex(SamplerB, C[0], C[1], C[2], SB, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, Cell))
+						{
+							Cell.Position[U] += FrameOffsetU;
+						}
+					}
 					if (!Cell.bValid)
 					{
-						return; // fine crossing with no coarse vertex to fan onto -> crack, never a protrusion
+						return; // no surface on the cell's boundary at all: nothing to fan onto
 					}
 					Refs[i] = { &Cell, 2 * KeyStride + BV + BW * SLB };
 				}
@@ -1594,6 +1708,15 @@ namespace VoxelDCFaceSeam
 						return;
 					}
 					FSeamCellVertex& Cell = Slab[AV + AW * SLA];
+					if (!Cell.bValid && !Cell.bFallbackTried)
+					{
+						// G17: a coarser slab cell with no crossing at the owner's stride.
+						int32 C[3];
+						C[U] = SLA;
+						C[V] = AV;
+						C[W] = AW;
+						ComputeBoundaryFallbackVertex(SamplerC, C[0], C[1], C[2], SA, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, Cell);
+					}
 					if (!Cell.bValid)
 					{
 						return;
@@ -1840,6 +1963,8 @@ namespace VoxelDCFaceSeam
 			int32 UValidVox = 0;                      // owned U extent: [0, UValidVox) voxels
 			int32 UCells = 0;
 			uint8 ParticipantMask = 0;                // quadrant bits (dv + dw*2)
+			FIntVector FrameOffset = FIntVector::ZeroValue; // the owning participant's frame (cell solve)
+			int32 CellABase = 0, CellBBase = 0;       // frame-local cell coords of (iv, iw) = (0, 0)
 			TArray<FSeamCellVertex> Cells;            // indexed (iv + iw*VCnt)*UCells + u
 		};
 		FColumn Columns[9];
@@ -1900,6 +2025,9 @@ namespace VoxelDCFaceSeam
 				FrameOffset[PerpB] = OwnerDw * ChunkSize;
 				const int32 CellABase = (Col.VLo - FrameOffset[PerpA]) / Col.StrideC;
 				const int32 CellBBase = (Col.WLo - FrameOffset[PerpB]) / Col.StrideC;
+				Col.FrameOffset = FrameOffset;
+				Col.CellABase = CellABase;
+				Col.CellBBase = CellBBase;
 
 				Col.Cells.SetNum(Col.VCnt * Col.WCnt * Col.UCells);
 				const FQuadSampler Sampler{ Req, U, PerpA, PerpB, Mask, FrameOffset };
@@ -1947,6 +2075,20 @@ namespace VoxelDCFaceSeam
 					const int32 IW = (WVox - Col.WLo) / Col.StrideC;
 					const int32 CellIdx = (IV + IW * Col.VCnt) * Col.UCells + UVox / Col.StrideC;
 					FSeamCellVertex& Cell = Col.Cells[CellIdx];
+					if (!Cell.bValid && !Cell.bFallbackTried)
+					{
+						// G17: a coarser cell with no crossing at its stride, solved as every job solves it.
+						int32 C[3];
+						C[U] = UVox / Col.StrideC;
+						C[PerpA] = Col.CellABase + IV;
+						C[PerpB] = Col.CellBBase + IW;
+						const FQuadSampler Sampler{ Req, U, PerpA, PerpB, Col.ParticipantMask, Col.FrameOffset };
+						if (ComputeBoundaryFallbackVertex(Sampler, C[0], C[1], C[2], Col.StrideC, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, Cell))
+						{
+							Cell.Position[PerpA] += (Col.FrameOffset[PerpA] != 0 ? 1 : 0) * ChunkWorldSpan;
+							Cell.Position[PerpB] += (Col.FrameOffset[PerpB] != 0 ? 1 : 0) * ChunkWorldSpan;
+						}
+					}
 					if (!Cell.bValid)
 					{
 						return false;
@@ -2082,6 +2224,8 @@ namespace VoxelDCFaceSeam
 			int32 Lo[3] = { 0, 0, 0 };
 			int32 Cnt[3] = { 1, 1, 1 };
 			uint8 ParticipantMask = 0; // octant bits
+			FIntVector FrameOffset = FIntVector::ZeroValue; // the owning participant's frame (cell solve)
+			int32 CellBase[3] = { 0, 0, 0 }; // frame-local cell coords of index (0, 0, 0)
 			TArray<FSeamCellVertex> Cells; // indexed (ix + iy*Cnt0)*... x-innermost
 		};
 		FCornerRegion Regions[27];
@@ -2145,7 +2289,9 @@ namespace VoxelDCFaceSeam
 							Reg.Lo[Axis] = ChunkSize;
 						}
 						CellBase[Axis] = (Reg.Lo[Axis] - FrameOffset[Axis]) / Sc;
+						Reg.CellBase[Axis] = CellBase[Axis];
 					}
+					Reg.FrameOffset = FrameOffset;
 
 					Reg.Cells.SetNum(Reg.Cnt[0] * Reg.Cnt[1] * Reg.Cnt[2]);
 					const FOctSampler Sampler{ Req, Mask, FrameOffset };
@@ -2201,6 +2347,18 @@ namespace VoxelDCFaceSeam
 				}
 				const int32 CellIdx = (Idx[2] * Reg.Cnt[1] + Idx[1]) * Reg.Cnt[0] + Idx[0];
 				FSeamCellVertex& Cell = Reg.Cells[CellIdx];
+				if (!Cell.bValid && !Cell.bFallbackTried)
+				{
+					// G17: a coarser cell with no crossing at its stride, solved as every job solves it.
+					const FOctSampler Sampler{ Req, Reg.ParticipantMask, Reg.FrameOffset };
+					if (ComputeBoundaryFallbackVertex(Sampler, Reg.CellBase[0] + Idx[0], Reg.CellBase[1] + Idx[1], Reg.CellBase[2] + Idx[2],
+						Reg.StrideC, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, Cell))
+					{
+						Cell.Position.X += (Reg.FrameOffset.X != 0) ? ChunkWorldSpan : 0.0f;
+						Cell.Position.Y += (Reg.FrameOffset.Y != 0) ? ChunkWorldSpan : 0.0f;
+						Cell.Position.Z += (Reg.FrameOffset.Z != 0) ? ChunkWorldSpan : 0.0f;
+					}
+				}
 				if (!Cell.bValid)
 				{
 					return false;
