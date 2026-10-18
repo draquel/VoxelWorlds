@@ -173,7 +173,8 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	const FVoxelSeaSurface& Sea,
-	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
+	uint8& OutSurfaceMaterial, uint8& OutBiomeID,
+	const TArray<FVoxelConditioningZone>* Zones)
 {
 	OutSurfaceMaterial = 0;
 	OutBiomeID = 0;
@@ -189,8 +190,14 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	// the depth in voxels and the altitude, climate at the datum-sphere point, the blend, the material (the sea's
 	// variant when water is on), height rules by the altitude. At a surface point the depth is 0.
 	float Continentalness = 0.0f;
-	const float TerrainRadius = Params.PlanetRadius + FSphericalPlanetWorldMode::SampleRadialDisplacement(
+	float TerrainAltitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(
 		Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams, &BiomeSnapshot, &Continentalness);
+	if (Zones && Zones->Num() > 0)
+	{
+		// The conditioned terrain (SP-B10), as the generator blends it.
+		TerrainAltitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, Params.PlanetRadius, TerrainAltitude, *Zones);
+	}
+	const float TerrainRadius = Params.PlanetRadius + TerrainAltitude;
 	const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(Position, Params.PlanetCenter);
 	const float DepthBelowSurface = (TerrainRadius - DistFromCenter) / FMath::Max(VoxelSize, KINDA_SMALL_NUMBER);
 	const float Altitude = DistFromCenter - Params.PlanetRadius;
@@ -225,7 +232,8 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 	const FVector& WorldPos, float VoxelSize,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelSeaSurface& Sea)
+	const FVoxelSeaSurface& Sea,
+	const TArray<FVoxelConditioningZone>* Zones)
 {
 	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
@@ -235,7 +243,9 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 	}
 
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
-	const FVoxelTerrainSurfacePoint Surface = Planet.GetSurfacePoint(WorldPos, NoiseParams);
+	const FVoxelTerrainSurfacePoint Surface = (Zones && Zones->Num() > 0)
+		? Planet.GetConditionedSurfacePoint(WorldPos, NoiseParams, *Zones)
+		: Planet.GetSurfacePoint(WorldPos, NoiseParams);
 	FVoxelSurfaceSample Sample;
 	Sample.Position = Surface.Position;
 	Sample.Normal = Surface.Normal;
@@ -243,7 +253,7 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 	Sample.Altitude = Surface.Altitude;
 	Sample.Height = Surface.Altitude;
 	Sample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Sample.Normal, Sample.Up), -1.0, 1.0)));
-	QueryPlanetSurfaceConditions(Planet, Surface.Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea, Sample.MaterialID, Sample.BiomeID);
+	QueryPlanetSurfaceConditions(Planet, Surface.Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea, Sample.MaterialID, Sample.BiomeID, Zones);
 	return Sample;
 }
 

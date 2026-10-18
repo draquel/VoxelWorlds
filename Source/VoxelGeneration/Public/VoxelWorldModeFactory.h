@@ -43,9 +43,11 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * direction on the datum sphere, continentalness on the radial height, materials by altitude; SP-B1, SP-B2, SP-B5).
 	 * 3: spherical Phase 4 (decision D13): the ore Rarity test hashes the planet-relative position (SP-H3), and the
 	 * planet's map tiles, explored tiles, map overlays and surface NPC ids key on the surface coordinate.
+	 * 4: spherical Phase 5 (decision D16): planet generation applies conditioning zones (POI pads, SP-B10), and POIs,
+	 * their claims, campsites and dungeons are placed on planets (dungeon records keyed by cube-sphere cell).
 	 * Fingerprints from before have no entry and are refused.
 	 */
-	static constexpr int32 PlanetGenerationVersion = 3;
+	static constexpr int32 PlanetGenerationVersion = 4;
 
 	/**
 	 * Terrain params for the heightmap modes (InfinitePlane, IslandBowl).

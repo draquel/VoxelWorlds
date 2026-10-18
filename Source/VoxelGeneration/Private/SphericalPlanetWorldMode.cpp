@@ -6,6 +6,7 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelGeneration.h"
 #include "VoxelCubeSphere.h"
+#include "VoxelTerrainConditioning.h"
 
 #include <atomic>
 
@@ -94,6 +95,45 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfacePoint(const FVect
 	}
 	Point.Altitude = GetAltitude(Point.Position);
 	return Point;
+}
+
+FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetConditionedSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams,
+	const TArray<FVoxelConditioningZone>& Zones) const
+{
+	if (Zones.Num() == 0)
+	{
+		return GetSurfacePoint(WorldPos, NoiseParams);
+	}
+	const FVector& Center = PlanetParams.PlanetCenter;
+	const float Radius = PlanetParams.PlanetRadius;
+	auto SurfaceAt = [&](const FVector& Direction)
+	{
+		return Center + Direction * (Radius + GetConditionedTerrainAltitude(Direction, NoiseParams, Zones));
+	};
+
+	// GetSurfacePoint's construction over the conditioned surface.
+	const FVector Dir = GetDirectionFromCenter(WorldPos, Center);
+	FVoxelTerrainSurfacePoint Point;
+	Point.Position = SurfaceAt(Dir);
+	const FVector T1 = FVector::CrossProduct(FMath::Abs(Dir.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector, Dir).GetSafeNormal();
+	const FVector T2 = FVector::CrossProduct(Dir, T1);
+	const double Angle = SurfaceNormalStep / FMath::Max(Radius, 1.0f);
+	const FVector D1 = SurfaceAt((Dir + T1 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T1 * Angle).GetSafeNormal());
+	const FVector D2 = SurfaceAt((Dir + T2 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T2 * Angle).GetSafeNormal());
+	Point.Normal = FVector::CrossProduct(D1, D2).GetSafeNormal();
+	if (FVector::DotProduct(Point.Normal, Dir) < 0.0)
+	{
+		Point.Normal = -Point.Normal;
+	}
+	Point.Altitude = GetAltitude(Point.Position);
+	return Point;
+}
+
+float FSphericalPlanetWorldMode::GetConditionedTerrainAltitude(const FVector& Direction, const FVoxelNoiseParams& NoiseParams,
+	const TArray<FVoxelConditioningZone>& Zones) const
+{
+	const float Natural = GetTerrainAltitude(Direction, NoiseParams);
+	return Zones.Num() > 0 ? FVoxelTerrainConditioning::ApplyToAltitude(Direction, PlanetParams.PlanetRadius, Natural, Zones) : Natural;
 }
 
 float FSphericalPlanetWorldMode::GetDensityAt(

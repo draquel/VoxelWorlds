@@ -148,6 +148,30 @@ public:
 	/** The surface along the direction from the planet centre to WorldPos, with its outward normal (SP-A1). */
 	virtual FVoxelTerrainSurfacePoint GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const override;
 
+	/**
+	 * The generated surface (spherical SP-B10): GetSurfacePoint with planet conditioning zones applied to the altitude
+	 * along every direction it samples (FVoxelTerrainConditioning::ApplyToAltitude, as GenerateChunkSphericalPlanet does),
+	 * so the point and its normal follow a flattened pad and its ring. No zones: GetSurfacePoint exactly.
+	 *
+	 * @param WorldPos Any position on the up-line
+	 * @param NoiseParams Terrain noise
+	 * @param Zones Conditioning zones (planet zones apply; gather them for the place, e.g. UVoxelChunkManager::GatherConditioningZonesOnSphere)
+	 * @return The surface point, normal and altitude
+	 */
+	FVoxelTerrainSurfacePoint GetConditionedSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams,
+		const TArray<struct FVoxelConditioningZone>& Zones) const;
+
+	/**
+	 * GetTerrainAltitude with planet conditioning zones applied (spherical SP-B10).
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param NoiseParams Terrain noise
+	 * @param Zones Conditioning zones (planet zones apply)
+	 * @return Altitude (uu)
+	 */
+	float GetConditionedTerrainAltitude(const FVector& Direction, const FVoxelNoiseParams& NoiseParams,
+		const TArray<struct FVoxelConditioningZone>& Zones) const;
+
 	// ==================== World Bounds and Local Frame (IVoxelWorldMode, WM-A2; SP-A1, SP-A2) ====================
 	// The interface fits a planet: up is radial, altitude is above PlanetRadius, the surface coordinate is a cube face
 	// with the tangent warp (spherical Phase 1, WORLD_MODES_REVIEW_PLAN.md §15). No 2D system consumes the coordinate

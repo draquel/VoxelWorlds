@@ -38,6 +38,7 @@
 #include "VoxelWorldBoundary.h"
 #include "VoxelFarOcean.h"
 #include "IslandBowlWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelBiomeSnapshot.h"
 #include "ProceduralMeshComponent.h"
@@ -1211,6 +1212,17 @@ void UVoxelChunkManager::Initialize(
 		// Give scatter the analytic world mode so surface extraction can classify points covered by
 		// terrain in a neighboring chunk (cross-chunk cave floors / overhangs) as underground.
 		ScatterManager->SetWorldMode(WorldMode.Get());
+		// Planets: the chunk's conditioning zones, so a line's crossing at a chunk's upper face lands on the flattened
+		// ground (SP-B10). The scatter manager is ours and dies with us; it asks on the game thread.
+		ScatterManager->SetPlanetConditioningGatherer([this](const FBox& ChunkBox, TArray<FVoxelConditioningZone>& OutZones)
+		{
+			FVector CapDirection;
+			double CapAngle = 0.0;
+			if (GetPlanetCapOfBox(ChunkBox, CapDirection, CapAngle))
+			{
+				GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+			}
+		});
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
 			Configuration->ScatterRadius);
@@ -1737,19 +1749,19 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		return false;
 	}
 
-	// The analytic surface along the direction locates the line and makes the near/far decision, as the analytic height
-	// does for the column.
+	// The generated surface along the direction (the analytic one with the conditioning zones there, SP-B10) locates the
+	// line and makes the near/far decision, as the analytic height does for the column.
 	const FVector& Origin = Configuration->WorldOrigin;
-	const FVoxelTerrainSurfacePoint Estimate = WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
-	const FVector Up = WM->GetUpVector(Estimate.Position);
-	if (!IsChunkLoaded(FVoxelCoordinates::WorldToChunk(Estimate.Position - Origin, ChunkSize, VoxelSize)))
+	const FVector EstimatePosition = GetGeneratedSurfacePoint(WorldPos);
+	const FVector Up = WM->GetUpVector(EstimatePosition);
+	if (!IsChunkLoaded(FVoxelCoordinates::WorldToChunk(EstimatePosition - Origin, ChunkSize, VoxelSize)))
 	{
 		return false;
 	}
 
 	// A digital line of edit-merged voxels along local up through the estimate's voxel, one chunk either side (covers
 	// dig-down / build-up). Voxel I's density sample sits at Origin + I * VoxelSize; read it from inside its cell.
-	const FVector RelVoxel = (Estimate.Position - Origin) / VoxelSize;
+	const FVector RelVoxel = (EstimatePosition - Origin) / VoxelSize;
 	const FIntVector Start(FMath::FloorToInt32(RelVoxel.X), FMath::FloorToInt32(RelVoxel.Y), FMath::FloorToInt32(RelVoxel.Z));
 	const FVoxelDigitalLine Line = FVoxelDigitalLine::Make(Up);
 	const int32 Window = ChunkSize;
@@ -1801,14 +1813,14 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		return Result;
 	};
 	const float Iso = static_cast<float>(VOXEL_SURFACE_THRESHOLD);
-	const double TopT = FVector::DotProduct(Origin + FVector(Indices[Found + 1]) * VoxelSize - Estimate.Position, Up) + 1.5 * VoxelSize;
-	const double BottomT = FVector::DotProduct(Origin + FVector(Indices[Found]) * VoxelSize - Estimate.Position, Up) - 1.5 * VoxelSize;
+	const double TopT = FVector::DotProduct(Origin + FVector(Indices[Found + 1]) * VoxelSize - EstimatePosition, Up) + 1.5 * VoxelSize;
+	const double BottomT = FVector::DotProduct(Origin + FVector(Indices[Found]) * VoxelSize - EstimatePosition, Up) - 1.5 * VoxelSize;
 	const double Step = 0.25 * VoxelSize;
 	double HitT = TNumericLimits<double>::Max();
-	float AboveDensity = Trilinear(Estimate.Position + Up * TopT);
+	float AboveDensity = Trilinear(EstimatePosition + Up * TopT);
 	for (double T = TopT - Step; T >= BottomT && AboveDensity < Iso; T -= Step)
 	{
-		const float Density = Trilinear(Estimate.Position + Up * T);
+		const float Density = Trilinear(EstimatePosition + Up * T);
 		if (Density >= Iso)
 		{
 			HitT = T + Step * (Density - Iso) / FMath::Max(Density - AboveDensity, KINDA_SMALL_NUMBER);
@@ -1824,10 +1836,10 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		const float Denom = D1 - D0;
 		const float T = FMath::Abs(Denom) > KINDA_SMALL_NUMBER ? FMath::Clamp((Iso - D0) / Denom, 0.0f, 1.0f) : 0.5f;
 		const FVector Crossing = Origin + FMath::Lerp(FVector(Indices[Found]), FVector(Indices[Found + 1]), static_cast<double>(T)) * VoxelSize;
-		HitT = FVector::DotProduct(Crossing - Estimate.Position, Up);
+		HitT = FVector::DotProduct(Crossing - EstimatePosition, Up);
 	}
 
-	OutSample.Position = Estimate.Position + Up * HitT;
+	OutSample.Position = EstimatePosition + Up * HitT;
 	OutSample.Up = Up;
 	OutSample.MaterialID = Voxels[Found].MaterialID;
 	OutSample.BiomeID = Voxels[Found].BiomeID;
@@ -1876,7 +1888,41 @@ FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) co
 	{
 		return FVector(WorldPos.X, WorldPos.Y, GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y));
 	}
+	// A planet: the natural surface along the direction, with the planet conditioning zones there (SP-B10).
+	if (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr)
+	{
+		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
+		const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
+		const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Params.PlanetCenter);
+		TArray<FVoxelConditioningZone> Zones;
+		GatherConditioningZonesOnSphere(Direction, 0.0, Zones);
+		if (Zones.Num() > 0)
+		{
+			return Params.PlanetCenter + Direction * (Params.PlanetRadius + Planet.GetConditionedTerrainAltitude(Direction, Configuration->NoiseParams, Zones));
+		}
+	}
 	return WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams).Position;
+}
+
+float UVoxelChunkManager::GetGeneratedPlanetAltitude(const FVector& Direction) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!WM || !Configuration || WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
+	{
+		return 0.0f;
+	}
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
+	const float Natural = Planet.GetTerrainAltitude(Direction, Configuration->NoiseParams);
+	if (ConditioningZones.Num() == 0 && TerrainConditioner == nullptr)
+	{
+		return Natural;
+	}
+	// The zones at this direction (a point cap), blended as GenerateChunkSphericalPlanet blends them.
+	TArray<FVoxelConditioningZone> Zones;
+	GatherConditioningZonesOnSphere(Direction, 0.0, Zones);
+	return Zones.Num() > 0
+		? FVoxelTerrainConditioning::ApplyToAltitude(Direction, Planet.GetPlanetParams().PlanetRadius, Natural, Zones)
+		: Natural;
 }
 
 // ==================== Debug ====================
@@ -2737,9 +2783,10 @@ FVector UVoxelChunkManager::GetPlanetSpawnPosition() const
 	{
 		return Configuration->WorldOrigin;
 	}
-	// The configuration's point gives the direction; the terrain along it is the world mode's (SP-B11).
-	const FVoxelTerrainSurfacePoint Surface = GetSurfacePointAt(Configuration->GetPlanetSpawnPosition());
-	return Surface.Position + GetUpVectorAt(Surface.Position) * Configuration->PlanetSpawnAltitude;
+	// The configuration's point gives the direction; the terrain along it is the generated one, a POI's pad included (SP-B11,
+	// SP-B10).
+	const FVector Surface = GetGeneratedSurfacePoint(Configuration->GetPlanetSpawnPosition());
+	return Surface + GetUpVectorAt(Surface) * Configuration->PlanetSpawnAltitude;
 }
 
 FVoxelSeaSurface UVoxelChunkManager::GetSeaSurface(bool bOriginRelativePlane) const
@@ -3357,9 +3404,25 @@ FString UVoxelChunkManager::GetFarOceanDebugString() const
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 {
 	ConditioningZones.Add(Zone);
-	UE_LOG(LogVoxelStreaming, Log,
-		TEXT("Added terrain conditioning zone at (%.0f,%.0f) inner=%.0f falloff=%.0f target=%.0f strength=%.2f; %d total."),
-		Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningZones.Num());
+	if (Zone.IsRadial())
+	{
+		UE_LOG(LogVoxelStreaming, Log,
+			TEXT("Added planet conditioning zone toward %s inner=%.0f falloff=%.0f target altitude=%.0f strength=%.2f; %d total."),
+			*Zone.Direction.ToCompactString(), Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningZones.Num());
+	}
+	else
+	{
+		UE_LOG(LogVoxelStreaming, Log,
+			TEXT("Added terrain conditioning zone at (%.0f,%.0f) inner=%.0f falloff=%.0f target=%.0f strength=%.2f; %d total."),
+			Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningZones.Num());
+	}
+	// A zone of the other kind is kept but never applies (each kind's gather and blend skip the other).
+	const bool bPlanet = Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	if (Configuration && Zone.IsRadial() != bPlanet)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningZone: a %s zone in a %s world has no effect (planet zones need a Direction, FVoxelConditioningZone::MakeRadial)."),
+			Zone.IsRadial() ? TEXT("planet") : TEXT("heightmap"), bPlanet ? TEXT("planet") : TEXT("heightmap"));
+	}
 	OnTerrainConditioningChanged.Broadcast();
 }
 
@@ -3379,11 +3442,60 @@ void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& Chunk
 	// Chunk XY footprint in world space (chunks cover the same area at every LOD).
 	const float ChunkWorldSize = Configuration->ChunkSize * Configuration->VoxelSize;
 	const FVector ChunkOrigin = Configuration->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
+
+	// A planet (spherical SP-B10): the cap the chunk's box subtends from the centre.
+	if (Configuration->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		FVector CapDirection;
+		double CapAngle = 0.0;
+		if (GetPlanetCapOfBox(FBox(ChunkOrigin, ChunkOrigin + FVector(ChunkWorldSize)), CapDirection, CapAngle))
+		{
+			GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+		}
+		return;
+	}
+
 	const FBox2D ChunkRegion(
 		FVector2D(ChunkOrigin.X, ChunkOrigin.Y),
 		FVector2D(ChunkOrigin.X + ChunkWorldSize, ChunkOrigin.Y + ChunkWorldSize));
 
 	GatherConditioningZonesForRegion(ChunkRegion, OutZones);
+}
+
+bool UVoxelChunkManager::GetPlanetCapOfBox(const FBox& Box, FVector& OutDirection, double& OutAngle) const
+{
+	if (!Configuration || Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return false;
+	}
+	const FVector Center = FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetCenter;
+	const FVector Offset = Box.GetCenter() - Center;
+	const double Distance = Offset.Size();
+	const double HalfDiagonal = Box.GetExtent().Size();
+	OutDirection = Distance > UE_KINDA_SMALL_NUMBER ? Offset / Distance : FVector::UpVector;
+	OutAngle = Distance <= HalfDiagonal ? UE_DOUBLE_PI : FMath::Asin(HalfDiagonal / Distance);
+	return true;
+}
+
+void UVoxelChunkManager::GatherConditioningZonesOnSphere(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones) const
+{
+	if ((ConditioningZones.Num() == 0 && TerrainConditioner == nullptr) || !Configuration
+		|| Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return;
+	}
+	const double Radius = FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius;
+	for (const FVoxelConditioningZone& Zone : ConditioningZones)
+	{
+		if (Zone.MeetsCap(Direction, AngularRadius, Radius))
+		{
+			OutZones.Add(Zone);
+		}
+	}
+	if (TerrainConditioner)
+	{
+		TerrainConditioner->GatherConditioningOnSphere(Direction, AngularRadius, OutZones);
+	}
 }
 
 void UVoxelChunkManager::GatherConditioningZonesForRegion(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const
@@ -3393,10 +3505,10 @@ void UVoxelChunkManager::GatherConditioningZonesForRegion(const FBox2D& Region, 
 		return;
 	}
 
-	// Static zones whose influence overlaps the region.
+	// Static zones whose influence overlaps the region (heightmap zones: planet zones apply only on a planet).
 	for (const FVoxelConditioningZone& Zone : ConditioningZones)
 	{
-		if (Zone.GetBounds2D().Intersect(Region))
+		if (!Zone.IsRadial() && Zone.GetBounds2D().Intersect(Region))
 		{
 			OutZones.Add(Zone);
 		}

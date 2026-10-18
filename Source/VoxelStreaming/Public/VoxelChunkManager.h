@@ -385,12 +385,23 @@ public:
 	/**
 	 * The generated (analytic) surface point on the local up-line through a position, without loaded chunks (spherical
 	 * SP-A3): (X, Y, GetGeneratedSurfaceHeight) in heightmap modes, conditioning zones included; on a planet the terrain
-	 * along the direction from the centre (GetSurfacePointAt; planets have no conditioning zones yet, SP-B10).
+	 * along the direction from the centre with the planet zones there applied (GetGeneratedPlanetAltitude; SP-B10), as
+	 * the planet generator conditions it. GetSurfacePointAt is the world mode's natural surface, without zones.
 	 *
 	 * @param WorldPos Any position on the up-line
 	 * @return World position of the surface point (WorldPos before Initialize)
 	 */
 	FVector GetGeneratedSurfacePoint(const FVector& WorldPos) const;
+
+	/**
+	 * Planets (spherical SP-B10): the generated terrain's altitude along a direction, the world mode's natural altitude
+	 * with the planet conditioning zones there applied (FVoxelTerrainConditioning::ApplyToAltitude), exactly what
+	 * GenerateChunkSphericalPlanet blends. Game thread.
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @return Altitude above the datum (0 when the world is not a planet)
+	 */
+	float GetGeneratedPlanetAltitude(const FVector& Direction) const;
 
 	/**
 	 * Local up at a chunk's centre: +Z in heightmap modes, the radial direction on a planet. The meshing and seam requests
@@ -702,6 +713,29 @@ public:
 	{
 		GatherConditioningZonesForRegion(Region, OutZones);
 	}
+
+	/**
+	 * Planets (spherical SP-B10): append the planet zones (static, with a Direction, and the dynamic conditioner's
+	 * GatherConditioningOnSphere) whose influence reaches a cap on the sphere: what generation layers onto the radial
+	 * height there (apply with FVoxelTerrainConditioning::ApplyToAltitude). Game thread. The map, scatter and PCG use it
+	 * for their analytic planet surfaces; generation gathers each chunk's by the cap its box subtends. Nothing on a
+	 * heightmap world.
+	 * @param Direction     Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half-angle in radians (0 for a point)
+	 * @param OutZones      Appended with the zones
+	 */
+	void GatherConditioningZonesOnSphere(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones) const;
+
+	/**
+	 * Planets: the cap (direction and half-angle) a world box subtends from the planet centre, the query
+	 * GatherConditioningZonesOnSphere takes for a chunk or a region: the box centre's direction and asin(half diagonal /
+	 * distance), the whole sphere for a box around the centre.
+	 * @param Box           World box
+	 * @param OutDirection  The cap's direction
+	 * @param OutAngle      The cap's half-angle (radians)
+	 * @return False when the world is not a planet
+	 */
+	bool GetPlanetCapOfBox(const FBox& Box, FVector& OutDirection, double& OutAngle) const;
 
 	/**
 	 * Fired when the terrain conditioning changes (a conditioner registered or zones added / cleared). Chunks

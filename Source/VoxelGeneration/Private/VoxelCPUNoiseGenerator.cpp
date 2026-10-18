@@ -1386,12 +1386,17 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5). The sampled
 				// continentalness is reused for the biome blend below.
 				float Continentalness = 0.0f;
-				const float TerrainRadius = PlanetRadius + FSphericalPlanetWorldMode::SampleRadialDisplacement(
+				float TerrainAltitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(
 					Direction, PlanetRadius, WorldMode.GetTerrainParams(), Request.NoiseParams, &BiomeSnapshot, &Continentalness);
 
-				// NOTE: terrain conditioning (Request.ConditioningZones) is intentionally NOT applied here.
-				// The zone model is heightmap (XY footprint + target Z height); a planet's surface is radial
-				// (a target RADIUS per direction), so flattening needs a separate radial-zone model. Deferred.
+				// Terrain conditioning (spherical SP-B10, D15): the planet zones (caps on the datum sphere) blend the altitude
+				// along this direction toward their targets before the SDF, as the heightmap generators blend the column
+				// height, so density, depth, the underwater test, caves and materials all follow the flattened ground.
+				if (Request.ConditioningZones.Num() > 0)
+				{
+					TerrainAltitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, PlanetRadius, TerrainAltitude, Request.ConditioningZones);
+				}
+				const float TerrainRadius = PlanetRadius + TerrainAltitude;
 
 				// Signed distance to the surface (with the shell's quick reject), then density
 				const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);

@@ -704,14 +704,32 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 
 	// Terrain conditioning zones (Phase B) — gathered game-side per chunk and copied onto the request;
 	// flatten the terrain height toward each zone's target before the SDF (matches the CPU order).
+	// A planet's zones (spherical SP-B10) are caps on the datum sphere, packed for the planet branch
+	// (SphericalPlanet.ush PlanetApplyConditioning): [Direction, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0].
+	// Each world mode uploads only its own kind of zone, as the CPU's ApplyToHeight / ApplyToAltitude skip the other.
+	const bool bPlanetZones = Request.WorldMode == EWorldMode::SphericalPlanet;
 	TArray<FVector4f> ConditioningData;
 	ConditioningData.Reserve(Request.ConditioningZones.Num() * 2);
+	int32 UploadedZones = 0;
 	for (const FVoxelConditioningZone& Zone : Request.ConditioningZones)
 	{
-		ConditioningData.Add(FVector4f(static_cast<float>(Zone.Center.X), static_cast<float>(Zone.Center.Y), Zone.InnerRadius, Zone.FalloffWidth));
-		ConditioningData.Add(FVector4f(Zone.TargetHeight, Zone.Strength, 0.0f, 0.0f));
+		if (Zone.IsRadial() != bPlanetZones)
+		{
+			continue;
+		}
+		if (bPlanetZones)
+		{
+			ConditioningData.Add(FVector4f(FVector3f(Zone.Direction), Zone.InnerRadius));
+			ConditioningData.Add(FVector4f(Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, 0.0f));
+		}
+		else
+		{
+			ConditioningData.Add(FVector4f(static_cast<float>(Zone.Center.X), static_cast<float>(Zone.Center.Y), Zone.InnerRadius, Zone.FalloffWidth));
+			ConditioningData.Add(FVector4f(Zone.TargetHeight, Zone.Strength, 0.0f, 0.0f));
+		}
+		++UploadedZones;
 	}
-	Parameters->ConditioningZoneCount = Request.ConditioningZones.Num();
+	Parameters->ConditioningZoneCount = UploadedZones;
 	Parameters->ConditioningZoneData = CreateFloat4StructuredSRV(GraphBuilder, ConditioningData, TEXT("VoxelConditioningData"));
 
 	// IslandBowl world-mode params (Phase C) — from the request; ignored by the shader unless WorldMode==IslandBowl.

@@ -14,6 +14,7 @@ class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
 class IVoxelWorldMode;
 struct FChunkMeshData;
+struct FVoxelConditioningZone;
 
 /**
  * Global signals used to classify extracted surface points as underground / underwater — the things a
@@ -34,6 +35,11 @@ struct FScatterExtractionContext
 	 * underwater class from it) when water is off.
 	 */
 	FVoxelSeaSurface Sea;
+	/**
+	 * Planets (spherical SP-B10): the conditioning zones over the chunk, so a line's crossing put on the analytic surface
+	 * at the chunk's upper face lands on the generated (flattened) ground. Null or empty: the world mode's surface.
+	 */
+	TSharedPtr<const TArray<FVoxelConditioningZone>> PlanetZones;
 };
 
 /**
@@ -412,6 +418,16 @@ public:
 	 */
 	void SetWorldMode(const IVoxelWorldMode* InWorldMode) { WorldMode = InWorldMode; }
 
+	/**
+	 * Planets (spherical SP-B10): how to gather the conditioning zones over a chunk's world box (the chunk manager's
+	 * GetPlanetCapOfBox + GatherConditioningZonesOnSphere), called on the game thread when a planet chunk's extraction is
+	 * set up. Unset: no zones (the world mode's surface).
+	 */
+	void SetPlanetConditioningGatherer(TFunction<void(const FBox& /*ChunkBox*/, TArray<FVoxelConditioningZone>& /*OutZones*/)> InGatherer)
+	{
+		PlanetConditioningGatherer = MoveTemp(InGatherer);
+	}
+
 	// ==================== Debug ====================
 
 	/**
@@ -513,8 +529,11 @@ protected:
 	/** World mode for analytic terrain-height coverage queries during extraction (non-owning; see SetWorldMode). */
 	const IVoxelWorldMode* WorldMode = nullptr;
 
+	/** Planets: the chunk's conditioning zones (see SetPlanetConditioningGatherer). */
+	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> PlanetConditioningGatherer;
+
 	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */
-	FScatterExtractionContext MakeExtractionContext() const;
+	FScatterExtractionContext MakeExtractionContext(const FIntVector& ChunkCoord) const;
 
 	/** Whether the manager is initialized */
 	bool bIsInitialized = false;

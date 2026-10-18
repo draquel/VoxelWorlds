@@ -8,6 +8,8 @@
 #include "VoxelScatterPlacement.h"
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
+#include "VoxelTerrainConditioning.h"
 #include "ChunkRenderData.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeRegistry.h"
@@ -1929,7 +1931,7 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 	}
 
 	FChunkSurfaceData SurfaceData;
-	const FScatterExtractionContext ExtractionContext = MakeExtractionContext();
+	const FScatterExtractionContext ExtractionContext = MakeExtractionContext(ChunkCoord);
 	const bool bUseCubicExtraction = Configuration && Configuration->MeshingMode == EMeshingMode::Cubic;
 	if (bUseCubicExtraction)
 	{
@@ -2098,7 +2100,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 	// Build the classification context on the game thread and capture it by value. It holds a
 	// non-owning world-mode pointer (same lifetime as the owning ChunkManager, per its async-gen
 	// pattern) plus water level and noise params.
-	const FScatterExtractionContext ExtractionContext = MakeExtractionContext();
+	const FScatterExtractionContext ExtractionContext = MakeExtractionContext(ChunkCoord);
 	TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 
 	Async(EAsyncExecution::ThreadPool,
@@ -2428,7 +2430,7 @@ void UVoxelScatterManager::ProcessCompletedGPUExtractions()
 		// Launch placement on thread pool (same as CPU async path from here)
 		const uint32 CapturedWorldSeed = WorldSeed;
 		const int32 GPUSurfacePointCount = SurfaceData.SurfacePoints.Num();
-		const FScatterExtractionContext ExtractionContext = MakeExtractionContext();
+		const FScatterExtractionContext ExtractionContext = MakeExtractionContext(ChunkCoord);
 		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 
 		Async(EAsyncExecution::ThreadPool,
@@ -3003,7 +3005,10 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 
 						if (!bAboveKnown)
 						{
-							const FVoxelTerrainSurfacePoint Analytic = Context.WorldMode->GetSurfacePoint(WorldPos, Context.NoiseParams);
+							// The generated surface: the planet's conditioning zones over the chunk applied (SP-B10).
+							const FVoxelTerrainSurfacePoint Analytic = Context.PlanetZones.IsValid()
+								? static_cast<const FSphericalPlanetWorldMode*>(Context.WorldMode)->GetConditionedSurfacePoint(WorldPos, Context.NoiseParams, *Context.PlanetZones)
+								: Context.WorldMode->GetSurfacePoint(WorldPos, Context.NoiseParams);
 							if (FMath::Abs(Context.WorldMode->GetAltitude(WorldPos) - Analytic.Altitude) > CoverThreshold)
 							{
 								// Terrain continues into the neighbour above: this is not the open surface, and anything
@@ -3258,7 +3263,7 @@ FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) 
 	return Configuration->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 }
 
-FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext() const
+FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FIntVector& ChunkCoord) const
 {
 	FScatterExtractionContext Context;
 	Context.WorldMode = WorldMode;
@@ -3266,6 +3271,17 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext() const
 	{
 		Context.NoiseParams = Configuration->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
+		// A planet: the conditioning zones over the chunk (spherical SP-B10), for the line top's analytic surface.
+		if (Configuration->WorldMode == EWorldMode::SphericalPlanet && PlanetConditioningGatherer)
+		{
+			const FVector Min = GetChunkWorldOrigin(ChunkCoord);
+			TArray<FVoxelConditioningZone> Zones;
+			PlanetConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Zones);
+			if (Zones.Num() > 0)
+			{
+				Context.PlanetZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
+			}
+		}
 	}
 	return Context;
 }

@@ -11,6 +11,8 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
 #include "IVoxelWorldMode.h"
+#include "SphericalPlanetWorldMode.h"
+#include "VoxelTerrainConditioning.h"
 #include "RenderingThread.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
@@ -1156,6 +1158,8 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 	{
 		FString Name;
 		FIntVector Chunk;
+		/** Planet conditioning zones on the request (spherical Phase 5, SP-B10); none for the earlier sites. */
+		TArray<FVoxelConditioningZone> Zones;
 	};
 	TArray<FSite> Sites;
 
@@ -1265,6 +1269,41 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 		}
 		TestTrue(TEXT("A chunk under the seabed where the underwater minimum depth suppresses caves (non-vacuous)"), bFound);
 	}
+
+	// Conditioned pads (spherical Phase 5, WM-PL3): planet zones raise the ground at 45 degrees and lower it across a
+	// cube-face edge; the sites are the chunk the pad's surface passes through and one on the falloff ring's middle.
+	{
+		const float Inner = 1500.0f;
+		const float Falloff = 1000.0f;
+		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
+		auto AlongSurface = [](const FVector& From, const FVector& Toward, double Distance)
+		{
+			const FVector Tangent = (Toward - From * FVector::DotProduct(Toward, From)).GetSafeNormal();
+			return (From * FMath::Cos(Distance / Radius) + Tangent * FMath::Sin(Distance / Radius)).GetSafeNormal();
+		};
+		struct FPad
+		{
+			const TCHAR* Key;
+			FVector Direction;
+			float Shift;
+		};
+		const FPad Pads[] = {
+			{ TEXT("Pad raised at latitude 45"), LatLonDirection(45.0, 3.0), 300.0f },
+			{ TEXT("Pad lowered across a cube-face edge"), LatLonDirection(0.0, 45.0), -300.0f },
+		};
+		for (const FPad& Pad : Pads)
+		{
+			const FVector Dir = Pad.Direction;
+			const float Target = Planet.GetTerrainAltitude(Dir, Config->NoiseParams) + Pad.Shift;
+			const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Dir, Inner, Falloff, Target) };
+			Sites.Add({ Pad.Key, ChunkAt(Origin + Dir * (Radius + Target)), Zones });
+			const FVector RingDir = AlongSurface(Dir, FVector::CrossProduct(FVector(0, 0, 1), Dir).IsNearlyZero() ? FVector(1, 0, 0) : FVector::CrossProduct(FVector(0, 0, 1), Dir), Inner + 0.5 * Falloff);
+			const float RingAltitude = FMath::Lerp(Planet.GetTerrainAltitude(RingDir, Config->NoiseParams), Target, 0.5f);
+			Sites.Add({ FString::Printf(TEXT("%s, ring"), Pad.Key), ChunkAt(Origin + RingDir * (Radius + RingAltitude)), Zones });
+			AddInfo(FString::Printf(TEXT("%s: pad altitude %.0f, chunk (%d, %d, %d)"), Pad.Key, Target,
+				Sites[Sites.Num() - 2].Chunk.X, Sites[Sites.Num() - 2].Chunk.Y, Sites[Sites.Num() - 2].Chunk.Z));
+		}
+	}
 	CPUGenerator.Shutdown();
 
 	// Thresholds, tighter than the plane's (its chunks are 16^3, where one voxel is 0.024%). Measured on the first run
@@ -1289,7 +1328,9 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 	for (const FSite& Site : Sites)
 	{
 		const FString Label = FString::Printf(TEXT("Planet %s"), *Site.Name);
-		if (!VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, MakeRequest(Site.Chunk), *Label, PlanetThresholds))
+		FVoxelNoiseGenerationRequest Request = MakeRequest(Site.Chunk);
+		Request.ConditioningZones = Site.Zones;
+		if (!VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, *Label, PlanetThresholds))
 		{
 			bAllPass = false;
 		}

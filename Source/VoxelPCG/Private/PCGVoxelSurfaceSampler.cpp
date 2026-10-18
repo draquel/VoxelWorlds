@@ -235,6 +235,17 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 			return true;
 		}
 		const FSphericalPlanetParams& PlanetParams = Planet.GetPlanetParams();
+		// The conditioning zones over the bounds (POI pads, SP-B10): the far points stand on the generated ground.
+		TArray<FVoxelConditioningZone> PlanetZones;
+		if (VoxelCtx.ChunkManager)
+		{
+			FVector CapDirection;
+			double CapAngle = 0.0;
+			if (VoxelCtx.ChunkManager->GetPlanetCapOfBox(Bounds, CapDirection, CapAngle))
+			{
+				VoxelCtx.ChunkManager->GatherConditioningZonesOnSphere(CapDirection, CapAngle, PlanetZones);
+			}
+		}
 		Transforms.Reserve(Cells.Num());
 		Samples.Reserve(Cells.Num());
 		Seeds.Reserve(Cells.Num());
@@ -247,7 +258,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 			if (!bNear)
 			{
 				Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-					BiomeSnapshot, VoxelCtx.Sea);
+					BiomeSnapshot, VoxelCtx.Sea, &PlanetZones);
 			}
 			if (!Bounds.IsInsideOrOn(Sample.Position))
 			{
