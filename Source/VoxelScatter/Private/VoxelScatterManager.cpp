@@ -64,6 +64,81 @@ namespace
 				UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest: no scatter manager in a game world"));
 			}
 		}));
+
+	/**
+	 * The digital lines of a planet chunk (UVoxelScatterManager::ExtractSurfacePointsAlongUp): they step one voxel along the
+	 * axis nearest local up at the chunk's centre (AxisA, downward from the side SignA points to) and sideways by the
+	 * rounded multiple of the down direction's slope across it (AxisB, AxisC). A line's voxel above its first one is its
+	 * own continuation over the upper face: the step before K = 0, shifted by ShiftAbove.
+	 */
+	struct FPlanetScatterLines
+	{
+		int32 AxisA = 2;
+		int32 AxisB = 0;
+		int32 AxisC = 1;
+		int32 SignA = 1;
+		/** |Up[AxisA]|: lines Stride apart meet level ground 1 / Major times as densely as columns. */
+		double Major = 1.0;
+		/** Per step K, the sideways shift across AxisB (X) and AxisC (Y). */
+		TArray<FIntPoint> Shifts;
+		/** The shift of the step before K = 0 (the line's voxel over the upper face), against the drift. */
+		FIntPoint ShiftAbove = FIntPoint::ZeroValue;
+
+		FPlanetScatterLines(const FVector& Up, int32 ChunkSize)
+		{
+			const FVector AbsUp = Up.GetAbs();
+			AxisA = (AbsUp.X >= AbsUp.Y && AbsUp.X >= AbsUp.Z) ? 0 : (AbsUp.Y >= AbsUp.Z ? 1 : 2);
+			AxisB = (AxisA + 1) % 3;
+			AxisC = (AxisA + 2) % 3;
+			SignA = Up[AxisA] >= 0.0 ? 1 : -1;
+			Major = FMath::Max(AbsUp[AxisA], UE_DOUBLE_SMALL_NUMBER);
+			Shifts.SetNum(ChunkSize + 1);
+			for (int32 K = 0; K <= ChunkSize; ++K)
+			{
+				Shifts[K] = FIntPoint(FMath::RoundToInt32(-K * Up[AxisB] / Major), FMath::RoundToInt32(-K * Up[AxisC] / Major));
+			}
+			ShiftAbove = FIntPoint(FMath::RoundToInt32(Up[AxisB] / Major), FMath::RoundToInt32(Up[AxisC] / Major));
+		}
+
+		/**
+		 * The neighbours a line's voxel above can lie in (world modes review G29): over the upper face (a line's first step;
+		 * on its edges or corner where the step before it is shifted), on the sides the lines drift in through, and on the
+		 * edge between those sides.
+		 */
+		void GetVoxelAboveNeighbours(TArray<FIntVector>& OutOffsets) const
+		{
+			auto Add = [&](int32 A, int32 B, int32 C)
+			{
+				FIntVector Offset(0);
+				Offset[AxisA] = A;
+				Offset[AxisB] = B;
+				Offset[AxisC] = C;
+				OutOffsets.AddUnique(Offset);
+			};
+			// The step before K = 0, over the upper face.
+			const int32 AboveB = FMath::Sign(ShiftAbove.X);
+			const int32 AboveC = FMath::Sign(ShiftAbove.Y);
+			Add(SignA, 0, 0);
+			Add(SignA, AboveB, 0);
+			Add(SignA, 0, AboveC);
+			Add(SignA, AboveB, AboveC);
+			// Later steps: a line drifting toward +B enters through the -B side.
+			const int32 SideB = -FMath::Sign(Shifts.Last().X);
+			const int32 SideC = -FMath::Sign(Shifts.Last().Y);
+			if (SideB != 0)
+			{
+				Add(0, SideB, 0);
+			}
+			if (SideC != 0)
+			{
+				Add(0, 0, SideC);
+			}
+			if (SideB != 0 && SideC != 0)
+			{
+				Add(0, SideB, SideC);
+			}
+		}
+	};
 }
 
 UVoxelScatterManager::UVoxelScatterManager()
@@ -2414,6 +2489,31 @@ FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 Loc
 	return Generated;
 }
 
+FVoxelData FScatterExtractionContext::GetPlanetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize) const
+{
+	check(WorldMode != nullptr && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet);
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
+	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
+
+	// GenerateChunkSphericalPlanet's density: the generated altitude along the voxel's direction (the planet zones
+	// applied), the shell's signed distance to it.
+	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Params.PlanetCenter);
+	const float Altitude = ConditioningZones.IsValid()
+		? Planet.GetConditionedTerrainAltitude(Direction, NoiseParams, *ConditioningZones)
+		: Planet.GetTerrainAltitude(Direction, NoiseParams);
+	const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(
+		FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, Params.PlanetCenter), Params.PlanetRadius + Altitude, Params);
+	const FVoxelData Generated(0, FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize));
+	if (TouchingEdits.IsValid())
+	{
+		if (const FVoxelEdit* Edit = TouchingEdits->Find(LocalCoord))
+		{
+			return Edit->ApplyToProceduralData(Generated);
+		}
+	}
+	return Generated;
+}
+
 void UVoxelScatterManager::ExtractHeightmapSurfacePoints(
 	const TArray<FVoxelData>& VoxelData,
 	const FIntVector& ChunkCoord,
@@ -2480,18 +2580,13 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 	// the sideways offset is the rounded multiple of the down direction's slope (FVoxelDigitalLine's geometry). Line
 	// (LB, LC) holds voxel (a, LB + ShiftB[K], LC + ShiftC[K]) at step K; ids span [-CS, 2 * CS) so every voxel of the
 	// chunk is on a line at stride 1.
-	const FVector AbsUp = Up.GetAbs();
-	const int32 AxisA = (AbsUp.X >= AbsUp.Y && AbsUp.X >= AbsUp.Z) ? 0 : (AbsUp.Y >= AbsUp.Z ? 1 : 2);
-	const int32 AxisB = (AxisA + 1) % 3;
-	const int32 AxisC = (AxisA + 2) % 3;
-	const int32 SignA = Up[AxisA] >= 0.0 ? 1 : -1;
-	const double Major = FMath::Max(AbsUp[AxisA], UE_DOUBLE_SMALL_NUMBER);
-	TArray<FIntPoint> Shifts;
-	Shifts.SetNum(CS + 1);
-	for (int32 K = 0; K <= CS; ++K)
-	{
-		Shifts[K] = FIntPoint(FMath::RoundToInt32(-K * Up[AxisB] / Major), FMath::RoundToInt32(-K * Up[AxisC] / Major));
-	}
+	const FPlanetScatterLines Lines(Up, CS);
+	const int32 AxisA = Lines.AxisA;
+	const int32 AxisB = Lines.AxisB;
+	const int32 AxisC = Lines.AxisC;
+	const int32 SignA = Lines.SignA;
+	const double Major = Lines.Major;
+	const TArray<FIntPoint>& Shifts = Lines.Shifts;
 	auto VoxelOnLine = [&](int32 LB, int32 LC, int32 K)
 	{
 		FIntVector V;
@@ -2529,8 +2624,11 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 		{
 			bool bFoundLineTop = false;
 			bool bPrevInside = false;
+			// The voxel above the line's first one: the line's own step before it, outside the chunk over the upper face.
 			FIntVector Prev = VoxelOnLine(LB, LC, 0);
-			Prev[AxisA] += SignA; // the voxel above the line's first one, outside the chunk
+			Prev[AxisA] += SignA;
+			Prev[AxisB] += Lines.ShiftAbove.X;
+			Prev[AxisC] += Lines.ShiftAbove.Y;
 			for (int32 K = 0; K < CS; ++K)
 			{
 				const FIntVector V = VoxelOnLine(LB, LC, K);
@@ -2547,8 +2645,8 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 						}
 
 						// A solid voxel: the voxel above along the line is the previous one. Inside the chunk it must be
-						// open for a surface; outside (the upper face, or a side the line came in through) it is unknown
-						// and taken as air near the analytic surface only.
+						// open for a surface; outside (the upper face, or a side the line came in through) it is the
+						// neighbour's, decided below near the analytic surface only.
 						float AirDensity = 0.0f;
 						bool bAirAboveIsUnderground = false;
 						bool bAirAboveIsWater = false;
@@ -2589,9 +2687,34 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 								bFoundLineTop = true;
 								break;
 							}
-							// The crossing lies between this voxel and one outside the chunk: put it on the analytic surface
-							// along its up-line (the interpolation against an assumed-air voxel is off by up to a voxel).
-							WorldPos = Analytic.Position;
+							// Near the generated surface the voxel above is the one the generator made in the neighbour (no
+							// cave comes that close to the surface), with the neighbour's edits applied (world modes review
+							// G29). Solid, the ground continues into the neighbour, which makes the point: keeping this
+							// crossing put a second point on the surface beside it, along the band where the surface crosses
+							// a chunk face. The rest of the line is covered.
+							const FVoxelData AboveVoxel = Context.GetPlanetVoxelOutsideChunk(Prev, AbovePos, VoxelSize);
+							if (AboveVoxel.IsSolid())
+							{
+								bFoundLineTop = true;
+								break;
+							}
+							if (Context.TouchingEdits.IsValid() && Context.TouchingEdits->Contains(Prev))
+							{
+								// An edit there: the generated surface is not the ground, so interpolate against that voxel,
+								// as the mesher does.
+								AirDensity = static_cast<float>(AboveVoxel.Density);
+								const float EditedRange = AirDensity - SolidDensity;
+								Fraction = FMath::Abs(EditedRange) > SMALL_NUMBER
+									? FMath::Clamp((static_cast<float>(VOXEL_SURFACE_THRESHOLD) - SolidDensity) / EditedRange, 0.0f, 1.0f)
+									: 0.5f;
+								WorldPos = SolidPos + (AbovePos - SolidPos) * Fraction;
+							}
+							else
+							{
+								// The crossing lies between this voxel and the generator's air outside the chunk: put it on
+								// the generated surface along its up-line.
+								WorldPos = Analytic.Position;
+							}
 						}
 
 						for (const FClearedScatterVolume& Volume : ClearedVolumes)
@@ -2890,8 +3013,50 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 				}
 			}
 		}
+		// Planets: a line's voxel above lies in the layer of a neighbour touching the chunk, over its upper face or on a side
+		// the line enters through (G29).
+		if (EditLayerSource && WorldMode != nullptr && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
+		{
+			const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(0.5 * Configuration->GetChunkWorldSize());
+			Context.TouchingEdits = GatherPlanetTouchingEdits(WorldMode->GetUpVector(ChunkCenter), ChunkCoord, Configuration->ChunkSize, EditLayerSource);
+		}
 	}
 	return Context;
+}
+
+void UVoxelScatterManager::GetPlanetLineTopNeighbours(const FVector& Up, int32 ChunkSize, TArray<FIntVector>& OutOffsets)
+{
+	FPlanetScatterLines(Up, ChunkSize).GetVoxelAboveNeighbours(OutOffsets);
+}
+
+TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlanetTouchingEdits(const FVector& Up, const FIntVector& ChunkCoord,
+	int32 ChunkSize, TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource)
+{
+	TArray<FIntVector> Neighbours;
+	GetPlanetLineTopNeighbours(Up, ChunkSize, Neighbours);
+	TMap<FIntVector, FVoxelEdit> Touching;
+	for (const FIntVector& Offset : Neighbours)
+	{
+		const FChunkEditLayer* Layer = EditLayerSource(ChunkCoord + Offset);
+		if (!Layer)
+		{
+			continue;
+		}
+		for (const TPair<int32, FVoxelEdit>& Pair : Layer->Edits)
+		{
+			// The neighbour's voxel in this chunk's frame; its layer touching the chunk lies one voxel outside it.
+			const FIntVector Local = Pair.Value.LocalPosition + Offset * ChunkSize;
+			if (Local.GetMin() >= -1 && Local.GetMax() <= ChunkSize)
+			{
+				Touching.Add(Local, Pair.Value);
+			}
+		}
+	}
+	if (Touching.Num() == 0)
+	{
+		return nullptr;
+	}
+	return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(Touching));
 }
 
 void UVoxelScatterManager::CreateDefaultDefinitions()
