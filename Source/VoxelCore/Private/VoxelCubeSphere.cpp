@@ -221,7 +221,6 @@ void FVoxelCubeSphereGrid::GatherSpanned(TConstArrayView<FVector> Directions, TA
 		bFaces[VoxelCubeSpherePrivate::FaceOf(Direction)] = true;
 	}
 	const double CellUV = GetCellUV();
-	const int32 FirstNew = OutCells.Num();
 	for (int32 Face = 0; Face < 6; ++Face)
 	{
 		if (!bFaces[Face])
@@ -245,20 +244,14 @@ void FVoxelCubeSphereGrid::GatherSpanned(TConstArrayView<FVector> Directions, TA
 		const int32 U1 = FMath::Clamp(FMath::FloorToInt32((Rect.Max.X + 1.0) / CellUV), 0, N - 1);
 		const int32 V0 = FMath::Clamp(FMath::FloorToInt32((Rect.Min.Y + 1.0) / CellUV), 0, N - 1);
 		const int32 V1 = FMath::Clamp(FMath::FloorToInt32((Rect.Max.Y + 1.0) / CellUV), 0, N - 1);
+		// A cell lies on one face (its atlas X is Face * N + IU) and a face's rectangle holds it once, so no cell repeats: a
+		// scan for duplicates made this quadratic in the cells (5 ms for a 32^3 planet chunk's 3,000; world modes review G31).
+		OutCells.Reserve(OutCells.Num() + (U1 - U0 + 1) * (V1 - V0 + 1));
 		for (int32 IV = V0; IV <= V1; ++IV)
 		{
 			for (int32 IU = U0; IU <= U1; ++IU)
 			{
-				const FIntPoint Cell = ToAtlas(Face, IU, IV);
-				bool bSeen = false;
-				for (int32 i = FirstNew; i < OutCells.Num() && !bSeen; ++i)
-				{
-					bSeen = OutCells[i] == Cell;
-				}
-				if (!bSeen)
-				{
-					OutCells.Add(Cell);
-				}
+				OutCells.Add(ToAtlas(Face, IU, IV));
 			}
 		}
 	}
