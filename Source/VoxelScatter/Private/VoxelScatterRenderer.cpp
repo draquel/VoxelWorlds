@@ -269,14 +269,9 @@ void UVoxelScatterRenderer::UpdateChunkTypeInstances(const FIntVector& ChunkCoor
 		return;
 	}
 
-	// Zero-scale current instances for this chunk+type and return them to the pool
+	// Zero-scale current instances for this chunk+type and return them to the pool; this also drops the pair's queued
+	// adds, so they don't stack on top of the replacement
 	ReleaseChunkScatterType(ChunkCoord, ScatterTypeID);
-
-	// Drop queued adds for this pair so they don't stack on top of the replacement
-	PendingInstanceAdds.RemoveAll([&ChunkCoord, ScatterTypeID](const FPendingInstanceAdd& Add)
-	{
-		return Add.ChunkCoord == ChunkCoord && Add.ScatterTypeID == ScatterTypeID;
-	});
 
 	if (Transforms.Num() == 0)
 	{
@@ -327,6 +322,13 @@ void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord
 	{
 		return;
 	}
+
+	// Queued adds for the pair go too: flushed after the release they would land in the pool for a type the chunk no
+	// longer tracks, which RemoveChunkInstances never releases (world modes review G30, the distance cleanup's release).
+	PendingInstanceAdds.RemoveAll([&ChunkCoord, ScatterTypeID](const FPendingInstanceAdd& Add)
+	{
+		return Add.ChunkCoord == ChunkCoord && Add.ScatterTypeID == ScatterTypeID;
+	});
 
 	FHISMInstancePool* Pool = InstancePools.Find(ScatterTypeID);
 	if (!Pool)
@@ -543,6 +545,27 @@ int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 }
 
 // ==================== Queries ====================
+
+int32 UVoxelScatterRenderer::GetChunkInstanceCount(const FIntVector& ChunkCoord, int32 ScatterTypeID) const
+{
+	int32 Count = 0;
+	for (const TPair<int32, FHISMInstancePool>& Pair : InstancePools)
+	{
+		const TArray<int32>* Indices = (ScatterTypeID == INDEX_NONE || Pair.Key == ScatterTypeID) ? Pair.Value.ChunkInstanceIndices.Find(ChunkCoord) : nullptr;
+		Count += Indices ? Indices->Num() : 0;
+	}
+	for (const FPendingInstanceAdd& Add : PendingInstanceAdds)
+	{
+		Count += (Add.ChunkCoord == ChunkCoord && (ScatterTypeID == INDEX_NONE || Add.ScatterTypeID == ScatterTypeID)) ? Add.Transforms.Num() : 0;
+	}
+	return Count;
+}
+
+TArray<int32> UVoxelScatterRenderer::GetChunkScatterTypes(const FIntVector& ChunkCoord) const
+{
+	const TSet<int32>* Types = ChunkScatterTypes.Find(ChunkCoord);
+	return Types ? Types->Array() : TArray<int32>();
+}
 
 bool UVoxelScatterRenderer::FindNearestInstance(int32 ScatterTypeID, const FVector& Location, float Radius, int32& OutIndex, FTransform& OutTransform) const
 {

@@ -267,6 +267,12 @@ public:
 	const TMap<FIntVector, FChunkScatterData>& GetScatterDataCache() const { return ScatterDataCache; }
 
 	/**
+	 * The renderer holding the HISM instances per chunk and scatter type, for tests and tools.
+	 * @return The renderer; null before Initialize and after Shutdown.
+	 */
+	const UVoxelScatterRenderer* GetScatterRenderer() const;
+
+	/**
 	 * A digest of every cached spawn point, for comparing two builds' scatter on the same route (spherical Phase 4's
 	 * heightmap A/B, WORLD_MODES_REVIEW_PLAN.md §18): per scatter type the point count and a CRC of the points' type,
 	 * position (to 0.1 uu), yaw, scale and local up, visited in chunk order. The console command voxel.Scatter.Digest
@@ -277,6 +283,21 @@ public:
 	 * @return "types=N chunks=M points=P | type <id>: <count> crc <hex> | ..."
 	 */
 	FString ComputeScatterDigest(TArray<FString>* OutChunkLines = nullptr) const;
+
+	/**
+	 * The two caches against each other and the renderer, to check that every chunk's scatter renders once (world modes
+	 * review G30; voxel.Scatter.Digest logs it under the digest): chunks with spawn points, chunks with surface data,
+	 * chunks with spawn points but no surface data (none since G30: an unloaded chunk drops both), spawn points, rendered
+	 * instances (UVoxelScatterRenderer::GetChunkInstanceCount, queued adds included), chunks whose instance count
+	 * differs from their spawn point count (a type whose mesh cannot load has spawn points and no instances), and spawn
+	 * points that repeat another of their chunk (same type and position to 0.1 uu: a pass appended twice).
+	 *
+	 * @param OutMismatchLines Optional: appended with one "X,Y,Z,spawnPoints,instances,surface|noSurface,types" line per
+	 *                         chunk whose counts differ; types lists "<id>:<spawn points>/<instances>" for each type that
+	 *                         differs, with '!' where the renderer does not track the type for the chunk
+	 * @return "scatterChunks=N surfaceChunks=M scatterOnly=S spawnPoints=P instances=I instanceMismatch=K duplicates=D (C chunks)"
+	 */
+	FString ComputeCacheResidency(TArray<FString>* OutMismatchLines = nullptr) const;
 
 	/**
 	 * The heightmap extractors without cleared volumes, for tests and tools (world modes review G23): the column scan

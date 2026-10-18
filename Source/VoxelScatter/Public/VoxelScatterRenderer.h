@@ -133,7 +133,9 @@ public:
 
 	/**
 	 * Release instances for a specific scatter type from a chunk back to the pool.
-	 * Instances are zero-scaled (hidden) and added to the free list.
+	 * Instances are zero-scaled (hidden) and added to the free list, and adds still queued for the pair are dropped
+	 * (flushed later, they would belong to a type the chunk no longer tracks, which RemoveChunkInstances never releases;
+	 * world modes review G30).
 	 * Does NOT trigger a rebuild — instances remain allocated in HISM.
 	 *
 	 * @param ChunkCoord Chunk coordinate
@@ -188,6 +190,22 @@ public:
 	 * @return True when an instance was found.
 	 */
 	bool FindNearestInstance(int32 ScatterTypeID, const FVector& Location, float Radius, int32& OutIndex, FTransform& OutTransform) const;
+
+	/**
+	 * Instances a chunk holds: those in its HISMs plus those still queued for the per-frame add budget. A chunk's
+	 * scatter renders once when this equals its cached spawn point count (world modes review G30). O(types + queued adds).
+	 * @param ChunkCoord    The chunk.
+	 * @param ScatterTypeID One scatter type, or INDEX_NONE for every type.
+	 * @return Its instance count.
+	 */
+	int32 GetChunkInstanceCount(const FIntVector& ChunkCoord, int32 ScatterTypeID = INDEX_NONE) const;
+
+	/**
+	 * The scatter types the renderer tracks for a chunk (the types RemoveChunkInstances releases on unload).
+	 * @param ChunkCoord The chunk.
+	 * @return Its types; empty when it has none.
+	 */
+	TArray<int32> GetChunkScatterTypes(const FIntVector& ChunkCoord) const;
 
 	// ==================== Visibility ====================
 
