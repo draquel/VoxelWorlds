@@ -115,7 +115,11 @@ makes" is the natural surface with the zones layered on: on a planet `UVoxelChun
 `ApplyToHeight` with the zones from `GatherConditioningZones`). Any reader that means that ground uses it: scatter's
 buried-chunk test (`FScatterExtractionContext::ConditioningZones`, from the chunk manager's conditioning gatherer) and
 the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface` / `SampleSurfacePoint` with the bounds' zones) do
-since world modes review G23. `GetSurfacePointAt` and `GetTerrainHeightAt` are the natural surface (POI placement
+since world modes review G23. A heightmap chunk's data cannot show the voxel over its top layer (the chunk above's):
+near the generated ground scatter takes it as the generator made it, with the chunk above's edits applied
+(`FScatterExtractionContext::GetVoxelAboveChunk`, G26); never assume air there. A planet chunk's scatter lines read the
+voxel above a line top outside the chunk the same way, as the planet generator made it with the neighbour's edits
+(`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits`, G29). `GetSurfacePointAt` and `GetTerrainHeightAt` are the natural surface (POI placement
 surveys it on purpose). Changing planet generation bumps
 `FVoxelWorldModeFactory::PlanetGenerationVersion` (4 since Phase 5); heightmap changes bump `GenerationVersion`.
 

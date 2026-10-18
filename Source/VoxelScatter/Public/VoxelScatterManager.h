@@ -6,14 +6,13 @@
 #include "Containers/Queue.h"
 #include "VoxelData.h"
 #include "VoxelSeaSurface.h"
+#include "VoxelEditTypes.h"
 #include "VoxelScatterTypes.h"
-#include "VoxelGPUSurfaceExtractor.h"
 #include "VoxelScatterManager.generated.h"
 
 class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
 class IVoxelWorldMode;
-struct FChunkMeshData;
 struct FVoxelConditioningZone;
 
 /**
@@ -46,6 +45,21 @@ struct FScatterExtractionContext
 	TSharedPtr<const TArray<FVoxelConditioningZone>> ConditioningZones;
 
 	/**
+	 * Heightmap worlds: the edits of the chunk above on its bottom layer (local Z 0), keyed by local X + Y * ChunkSize
+	 * (world modes review G26). The voxel over a chunk's top layer is that layer's, which the chunk's own data cannot
+	 * show: GetVoxelAboveChunk applies these to the voxel the generator made there. Null: no edits on that layer.
+	 */
+	TSharedPtr<const TMap<int32, FVoxelEdit>> AboveLayerEdits;
+
+	/**
+	 * Planets: the edits in the voxels just outside the chunk that a digital line's voxel above can be (world modes review
+	 * G29): the layer of the neighbour over the lines' upper face and of the neighbours on the sides they enter through
+	 * that touches the chunk. Keyed by the voxel's coordinate in this chunk's frame (each component in [-1, ChunkSize]).
+	 * GetPlanetVoxelOutsideChunk applies these to the voxel the generator made there. Null: no edits there.
+	 */
+	TSharedPtr<const TMap<FIntVector, FVoxelEdit>> TouchingEdits;
+
+	/**
 	 * Heightmap worlds: the generated terrain height at a world X,Y, the world mode's natural height with
 	 * ConditioningZones layered on as the generator does. Requires a heightmap WorldMode.
 	 * @param WorldX World X
@@ -53,6 +67,35 @@ struct FScatterExtractionContext
 	 * @return The generated surface's world Z
 	 */
 	float GetGeneratedTerrainHeight(double WorldX, double WorldY) const;
+
+	/**
+	 * Heightmap worlds (world modes review G26): the voxel over a chunk's top layer at a column, the chunk above's bottom
+	 * voxel. Its density is the generated height's at the chunk's top (the heightmap generator's signed distance, so solid
+	 * where that height reaches the top), with the chunk above's edit there applied (AboveLayerEdits). Valid where no
+	 * cave reaches that voxel, i.e. near the generated surface (cave layers keep several voxels under it). Only Density
+	 * and MaterialID are meaningful.
+	 * @param LocalX Column X in the chunk
+	 * @param LocalY Column Y in the chunk
+	 * @param ChunkSize Voxels per chunk edge
+	 * @param GeneratedHeight The generated height at the column's voxel sample position (GetGeneratedTerrainHeight)
+	 * @param ChunkTopZ World Z of the chunk's top (the voxel above's sample height)
+	 * @param VoxelSize Voxel edge in world units
+	 * @return The voxel above the chunk's top layer
+	 */
+	FVoxelData GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, float GeneratedHeight, double ChunkTopZ, float VoxelSize) const;
+
+	/**
+	 * Planets (world modes review G29): a voxel just outside the chunk, in a neighbour's layer touching it, which the chunk's
+	 * own data cannot show. Its density is the planet generator's there (the signed distance to the generated altitude
+	 * along its direction, ConditioningZones applied), with the neighbour's edit there applied (TouchingEdits). Valid
+	 * where no cave reaches that voxel, i.e. near the generated surface (cave layers keep several voxels under it). Only
+	 * Density and MaterialID are meaningful. Requires a spherical planet WorldMode.
+	 * @param LocalCoord The voxel's coordinate in this chunk's frame (outside [0, ChunkSize) on at least one axis)
+	 * @param WorldPos The voxel's sample position (the chunk's origin + LocalCoord * VoxelSize, as generation samples it)
+	 * @param VoxelSize Voxel edge in world units
+	 * @return The voxel as generated, with any edit applied
+	 */
+	FVoxelData GetPlanetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize) const;
 };
 
 /**
@@ -87,7 +130,6 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnChunkScatterRemoved, const FIntVector& /*
  * on game thread via ProcessCompletedAsyncScatter().
  *
  * @see UVoxelChunkManager
- * @see FVoxelSurfaceExtractor
  * @see FVoxelScatterPlacement
  */
 UCLASS(BlueprintType)
@@ -107,17 +149,6 @@ public:
 	 * @param World World reference for debug drawing
 	 */
 	void Initialize(UVoxelWorldConfiguration* Config, UWorld* World);
-
-	/**
-	 * Pure: whether a configuration asks for GPU surface extraction that it may use. Cubic worlds never
-	 * do: the GPU extractor samples mesh vertices, which on greedy quads are block corners, so cubic
-	 * always extracts block-face centres on the CPU (world modes review WM-C3, KC4). Platform support and
-	 * -VoxelForceCPU are checked separately at Initialize.
-	 *
-	 * @param Config World configuration
-	 * @return bUseGPUScatterExtraction, unless the world is cubic
-	 */
-	static bool WantsGPUExtraction(const UVoxelWorldConfiguration& Config);
 
 	/**
 	 * Shutdown and cleanup all scatter resources.
@@ -264,19 +295,6 @@ public:
 		FChunkSurfaceData& OutSurfaceData);
 
 	/**
-	 * Classify GPU-extracted surface points as underground and/or underwater using voxel data plus the analytic terrain
-	 * height (with the context's conditioning zones) and the sea from the context (cross-chunk coverage + submerged
-	 * seabeds). The GPU extraction path calls it on the thread pool; public for tests. Pure and thread-safe.
-	 */
-	static void ClassifySurfacePointsUnderground(
-		TArray<FVoxelSurfacePoint>& SurfacePoints,
-		const TArray<FVoxelData>& VoxelData,
-		const FVector& ChunkWorldOrigin,
-		int32 ChunkSize,
-		float VoxelSize,
-		const FScatterExtractionContext& Context);
-
-	/**
 	 * ExtractSurfacePointsAlongUp without cleared volumes (spherical SP-G1): a planet chunk's surface points along local
 	 * up, for tests and tools. Pure and thread-safe.
 	 */
@@ -291,6 +309,30 @@ public:
 		FChunkSurfaceData& OutSurfaceData);
 
 	/**
+	 * Planets (world modes review G29): the neighbours a planet chunk's line tops read their voxel above from, as chunk
+	 * coordinate offsets: the one over the lines' upper face (a line's first step), those on the sides the lines drift in
+	 * through, and the one on the edge between those sides. ExtractSurfacePointsAlongUp's lines for local up at the
+	 * chunk's centre. Pure.
+	 * @param Up Local up at the chunk's centre (IVoxelWorldMode::GetUpVector)
+	 * @param ChunkSize Voxels per chunk edge
+	 * @param OutOffsets Receives the offsets (appended)
+	 */
+	static void GetPlanetLineTopNeighbours(const FVector& Up, int32 ChunkSize, TArray<FIntVector>& OutOffsets);
+
+	/**
+	 * Planets (world modes review G29): the edits in the layers of GetPlanetLineTopNeighbours's neighbours touching a chunk,
+	 * keyed by their coordinate in the chunk's frame, for FScatterExtractionContext::TouchingEdits. MakeExtractionContext
+	 * calls it with the chunk manager's edit layers (SetEditLayerSource).
+	 * @param Up Local up at the chunk's centre
+	 * @param ChunkCoord The chunk
+	 * @param ChunkSize Voxels per chunk edge
+	 * @param EditLayerSource A chunk's edit layer, or null when it has none
+	 * @return The edits, or null when there are none
+	 */
+	static TSharedPtr<const TMap<FIntVector, FVoxelEdit>> GatherPlanetTouchingEdits(const FVector& Up, const FIntVector& ChunkCoord, int32 ChunkSize,
+		TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource);
+
+	/**
 	 * Get number of chunks pending scatter generation (queued + in-flight async).
 	 * Used to detect if world is still loading.
 	 */
@@ -300,19 +342,17 @@ public:
 	// ==================== Mesh Data Callback ====================
 
 	/**
-	 * Called when chunk mesh data is ready.
-	 * Triggers surface extraction and scatter generation using voxel data
-	 * (LOD-independent) for consistent scatter regardless of mesh LOD level.
+	 * Called when a chunk's mesh is ready (the chunk manager's hand-off, before the mesh goes to the renderer).
+	 * Queues surface extraction and scatter generation from the chunk's voxels, which are full resolution whatever the
+	 * mesh's LOD, so a chunk's scatter does not depend on the LOD it was meshed at. The mesh itself is not read: it has
+	 * no vertex in the cells along the chunk's max faces, which belong to its seams (world modes review G27).
 	 *
 	 * @param ChunkCoord Chunk coordinate
-	 * @param LODLevel LOD level of the mesh (used for GPU extraction fallback)
-	 * @param MeshData The mesh data (used for GPU extraction path only)
-	 * @param VoxelData Full-resolution voxel data for LOD-independent surface extraction
-	 * @param ChunkSize Number of voxels per edge (typically 32)
-	 * @param VoxelSize World-space size of each voxel (typically 100)
+	 * @param VoxelData Full-resolution (edit-merged) voxel data of the chunk
+	 * @param ChunkSize Number of voxels per edge
+	 * @param VoxelSize World-space size of each voxel
 	 */
-	void OnChunkMeshDataReady(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData,
-		const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
+	void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
 
 	/**
 	 * Called when a chunk is unloaded.
@@ -474,6 +514,18 @@ public:
 		ConditioningGatherer = MoveTemp(InGatherer);
 	}
 
+	/**
+	 * Where a chunk's edit layer lives (the chunk manager's edit manager), so a heightmap chunk's extraction knows the
+	 * voxel over its top layer, the chunk above's bottom voxel (world modes review G26): MakeExtractionContext copies the
+	 * chunk above's edits on that layer into FScatterExtractionContext::AboveLayerEdits. On a planet it copies the edits in
+	 * the neighbours' layers a line's voxel above can lie in into FScatterExtractionContext::TouchingEdits (G29). Called on
+	 * the game thread when a chunk's extraction is set up. Unset: no edits (the generated voxel).
+	 */
+	void SetEditLayerSource(TFunction<const FChunkEditLayer*(const FIntVector& /*ChunkCoord*/)> InSource)
+	{
+		EditLayerSource = MoveTemp(InSource);
+	}
+
 	// ==================== Debug ====================
 
 	/**
@@ -525,11 +577,6 @@ protected:
 	// ==================== Internal Methods ====================
 
 	/**
-	 * Generate scatter for a chunk from mesh data.
-	 */
-	void GenerateChunkScatter(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData);
-
-	/**
 	 * Remove scatter data for a chunk.
 	 */
 	void RemoveChunkScatter(const FIntVector& ChunkCoord);
@@ -577,6 +624,9 @@ protected:
 
 	/** The chunk's conditioning zones (see SetConditioningGatherer). */
 	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> ConditioningGatherer;
+
+	/** A chunk's edit layer (see SetEditLayerSource). */
+	TFunction<const FChunkEditLayer*(const FIntVector&)> EditLayerSource;
 
 	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */
 	FScatterExtractionContext MakeExtractionContext(const FIntVector& ChunkCoord) const;
@@ -674,6 +724,9 @@ protected:
 	 * Scans voxel columns top-down for surface transitions, interpolates exact Z,
 	 * computes normals from density gradient, reads MaterialID/BiomeID from voxel data.
 	 * Produces consistent results regardless of which LOD level the mesh was generated at.
+	 * The voxel over the top layer is the chunk above's: near the generated surface it is the context's
+	 * GetVoxelAboveChunk (solid: the top voxel is no surface and the column below it is covered, world modes
+	 * review G26); deeper, where the buried-chunk test covers the chunk, it is taken for air.
 	 */
 	static void ExtractSurfacePointsFromVoxelData(
 		const TArray<FVoxelData>& VoxelData,
@@ -691,9 +744,13 @@ protected:
 	 * ExtractSurfacePointsFromVoxelData on a planet (spherical SP-G1): the same scan along digital lines in the chunk's
 	 * local up instead of world-Z columns. The lines step one voxel along the axis nearest local up and are spaced on
 	 * the stride grid across it; along each, every solid voxel with air above it along the line is a point (the first
-	 * one open, the rest underground, as in a column), interpolated toward the voxel above. A crossing whose voxel above
-	 * lies outside the chunk (the chunk's upper face or a side the line enters through) is kept only within 1.5 voxels
-	 * of the analytic surface, the planet's cover check. Face type, slope and the elevation filter go by the point's
+	 * one open, the rest underground, as in a column), interpolated toward the voxel above (the line's previous voxel; for
+	 * its first one, the line's own step before it, over the upper face). A crossing whose voxel above lies outside the
+	 * chunk (over the upper face, or on a side the line enters through) is kept only within 1.5 voxels of the analytic
+	 * surface, the planet's cover check, and only where that voxel, the neighbour's, is air: the context's
+	 * GetPlanetVoxelOutsideChunk (solid: the ground continues into the neighbour, which makes the point, and the rest of
+	 * the line is covered; world modes review G29). The kept crossing goes onto the generated surface, or is interpolated
+	 * against that voxel where the neighbour's edit changed it. Face type, slope and the elevation filter go by the point's
 	 * radial up and altitude; SpawnWeight keeps the density per area the column scan's. The async pipeline calls it for planet chunks.
 	 */
 	static void ExtractSurfacePointsAlongUp(
@@ -711,6 +768,7 @@ protected:
 	 * Extract surface points using block-face snapping (cubic terrain).
 	 * Positions snap to block face centers instead of interpolated positions.
 	 * One point per exposed top face, normal is always up, no interpolation.
+	 * The block over the top layer is decided as in ExtractSurfacePointsFromVoxelData (G26).
 	 */
 	static void ExtractSurfacePointsCubic(
 		const TArray<FVoxelData>& VoxelData,
@@ -733,28 +791,20 @@ protected:
 	// ==================== Deferred Generation Queue ====================
 
 	/**
-	 * Pending scatter generation request.
-	 * Stores lightweight copy of mesh data needed for surface extraction.
+	 * Pending scatter generation request: the chunk's voxels and the definitions to place.
 	 */
 	struct FPendingScatterGeneration
 	{
 		FIntVector ChunkCoord;
 		float DistanceToViewer;
-		int32 LODLevel = 0;
 
 		// Definitions to generate (captured at queue time based on distance rules)
 		TArray<FScatterDefinition> CapturedDefinitions;
 
-		// Voxel data for LOD-independent surface extraction (CPU path)
+		// Voxel data for LOD-independent surface extraction
 		TArray<FVoxelData> ChunkVoxelData;
 		int32 ChunkSize = VOXEL_DEFAULT_CHUNK_SIZE;
 		float VoxelSize = 100.0f;
-
-		// Mesh data copy (only populated when GPU extraction is enabled)
-		TArray<FVector3f> Positions;
-		TArray<FVector3f> Normals;
-		TArray<FVector2f> UV1s;
-		TArray<FColor> Colors;
 
 		bool operator<(const FPendingScatterGeneration& Other) const
 		{
@@ -863,32 +913,6 @@ protected:
 
 	/** Process completed async scatter results on game thread */
 	void ProcessCompletedAsyncScatter();
-
-	// ==================== GPU Surface Extraction ====================
-
-	/** Whether GPU surface extraction is enabled and supported */
-	bool bUseGPUExtraction = false;
-
-	/** MPSC queue for completed GPU extraction results (written by render thread) */
-	TQueue<FGPUExtractionResult, EQueueMode::Mpsc> CompletedGPUExtractionQueue;
-
-	/** Chunks waiting for GPU extraction results before scatter placement */
-	TMap<FIntVector, TArray<FScatterDefinition>> GPUExtractionPendingPlacement;
-
-	/** LOD level of mesh data used for GPU extraction (for LOD tracking) */
-	TMap<FIntVector, int32> GPUExtractionPendingLODLevel;
-
-	/** Voxel data stored during GPU extraction dispatch for underground classification */
-	struct FGPUExtractionVoxelInfo
-	{
-		TArray<FVoxelData> VoxelData;
-		int32 ChunkSize = 0;
-		float VoxelSize = 0.0f;
-	};
-	TMap<FIntVector, FGPUExtractionVoxelInfo> GPUExtractionPendingVoxelInfo;
-
-	/** Process completed GPU extractions and launch placement on thread pool */
-	void ProcessCompletedGPUExtractions();
 
 	// ==================== Statistics ====================
 

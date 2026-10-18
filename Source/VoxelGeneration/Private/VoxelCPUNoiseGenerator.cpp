@@ -1879,8 +1879,8 @@ void FVoxelCPUNoiseGenerator::ApplyUndergroundClassificationPass(
 
 	// Pass 2: Propagate underground flag to solid boundary voxels.
 	// Scatter surface points sit at solid-air boundaries. Flagging the solid
-	// side ensures ClassifySurfacePointsUnderground always finds the flag
-	// regardless of which voxel the surface point position maps to.
+	// side ensures the scatter extractors find the flag whichever side of
+	// the crossing they read.
 	// Two iterations extend the flag deeper into solid geometry for corners
 	// and edges where mesh interpolation places surface points further
 	// from the cave air.

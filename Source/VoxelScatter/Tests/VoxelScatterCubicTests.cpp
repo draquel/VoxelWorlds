@@ -9,14 +9,13 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelData.h"
 #include "VoxelMaterialRegistry.h"
-#include "ChunkRenderData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 // ---------------------------------------------------------------------------
 // Cubic scatter (world modes review WM-C3, KC4): cubic worlds extract block-face
-// centres on the CPU whatever bUseGPUScatterExtraction says, and a BlockFaceSnap
-// definition keeps each instance on the block face it was placed on.
+// centres from voxels (every world does since G27 retired the GPU extractor), and a
+// BlockFaceSnap definition keeps each instance on the block face it was placed on.
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterCubicTestUtils
@@ -86,22 +85,12 @@ bool FVoxelScatterCubicCPUExtractionTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterCubicTestUtils;
 
-	// The rule itself: GPU extraction only when asked for and the world is not cubic.
-	UVoxelWorldConfiguration* Smooth = NewObject<UVoxelWorldConfiguration>();
-	Smooth->MeshingMode = EMeshingMode::DualContouring;
-	Smooth->bUseGPUScatterExtraction = true;
-	TestTrue(TEXT("Smooth world with GPU extraction on uses it"), UVoxelScatterManager::WantsGPUExtraction(*Smooth));
-	Smooth->bUseGPUScatterExtraction = false;
-	TestFalse(TEXT("Smooth world with GPU extraction off does not"), UVoxelScatterManager::WantsGPUExtraction(*Smooth));
-
+	// A cubic chunk whose interior mesh would be empty (its only faces lie on its boundary planes, which the
+	// seam jobs mesh) gets scatter: extraction reads voxels, never the mesh. bUseGPUScatterExtraction is set,
+	// and ignored (G27).
 	UVoxelWorldConfiguration* Cubic = NewObject<UVoxelWorldConfiguration>();
 	Cubic->MeshingMode = EMeshingMode::Cubic;
 	Cubic->bUseGPUScatterExtraction = true;
-	TestFalse(TEXT("Cubic world ignores bUseGPUScatterExtraction"), UVoxelScatterManager::WantsGPUExtraction(*Cubic));
-
-	// A cubic chunk whose interior mesh is empty (its only faces lie on its boundary planes, which the
-	// seam jobs mesh) still gets scatter: the CPU extractor reads voxels, not the mesh. The GPU path
-	// would have dropped it ("needs valid mesh data").
 	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelScatterCubicTestWorld"));
 	FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
 	Context.SetCurrentWorld(World);
@@ -115,8 +104,7 @@ bool FVoxelScatterCubicCPUExtractionTest::RunTest(const FString& Parameters)
 	Manager->Initialize(Cubic, World);
 
 	const FIntVector Coord(0, 0, 0);
-	const FChunkMeshData EmptyInteriorMesh;
-	Manager->OnChunkMeshDataReady(Coord, 0, EmptyInteriorMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const double Deadline = FPlatformTime::Seconds() + 15.0;
 	while (FPlatformTime::Seconds() < Deadline && Manager->GetChunkSurfaceData(Coord) == nullptr)
