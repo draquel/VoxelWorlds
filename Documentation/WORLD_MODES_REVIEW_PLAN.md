@@ -4320,7 +4320,7 @@ its faces as G29 does), or share one line family across a region.
 ### 19.8 G24: voxel-carved dungeons hold pawns (2026-10-18)
 
 PRs open: draquel/ProceduralDungeonPlugin#30 (`fix/g24-voxel-carved-floors`: the stamp and its tests), this section in
-draquel/VoxelWorlds (`docs/g24-voxel-carved-floors`, docs only) and draquel/UE5_PluginDev (`claude/g24-voxel-carved-dungeon-floors`: VoxelWorldPOI, the
+draquel/VoxelWorlds#110 (`docs/g24-voxel-carved-floors`, docs only) and draquel/UE5_PluginDev#120 (`claude/g24-voxel-carved-dungeon-floors`: VoxelWorldPOI, the
 game module's `vox.TPRoom`, the gitlinks and the doc map), all on main (VoxelWorlds `cfd94c7`, UE5_PluginDev `89f0455`).
 Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8084), background
 throttling off. Live runs on `VoxelDemo` with its `DA_POIType_DungeonTiled` switched to `VoxelCarved` in memory (never
