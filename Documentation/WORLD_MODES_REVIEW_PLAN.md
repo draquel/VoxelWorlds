@@ -4178,8 +4178,8 @@ Not fixed here: it changes what a reloaded chunk renders and needs its own check
 
 ### 19.6 G29: a planet chunk's line top reads the neighbour's voxel (2026-10-18)
 
-PRs open (draquel/VoxelWorlds#PRVW, `fix/g29-planet-line-top`, on main `7f60551` after G26 and G27 merged; the parent's
-gitlink and doc map in draquel/UE5_PluginDev#PRPARENT). The work and the live runs were on G26's head `bc085d6`; rebased
+PRs open (draquel/VoxelWorlds#109, `fix/g29-planet-line-top`, on main `7f60551` after G26 and G27 merged; the parent's
+gitlink and doc map in draquel/UE5_PluginDev#119). The work and the live runs were on G26's head `bc085d6`; rebased
 onto G27, which leaves planet extraction as it was (planets never extracted on the GPU), the suites ran again (below).
 Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8083), background
 throttling off. Live runs on
