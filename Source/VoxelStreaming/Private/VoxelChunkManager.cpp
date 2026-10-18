@@ -1231,6 +1231,12 @@ void UVoxelChunkManager::Initialize(
 				GatherConditioningZonesForRegion(FBox2D(FVector2D(ChunkBox.Min.X, ChunkBox.Min.Y), FVector2D(ChunkBox.Max.X, ChunkBox.Max.Y)), OutZones);
 			}
 		});
+		// The edit layers, so a heightmap chunk's extraction knows the voxel over its top layer, the chunk above's bottom
+		// voxel with that chunk's edits applied (world modes review G26).
+		ScatterManager->SetEditLayerSource([this](const FIntVector& ChunkCoord) -> const FChunkEditLayer*
+		{
+			return EditManager ? EditManager->GetEditLayer(ChunkCoord) : nullptr;
+		});
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
 			Configuration->ScatterRadius);
@@ -6799,6 +6805,223 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
 			if (FFileHelper::SaveStringArrayToFile(CsvLines, *Path))
 			{
 				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit: %d zone chunk(s) written to %s"), ZoneChunks, *FPaths::ConvertRelativePathToFull(Path));
+			}
+		}
+	}));
+
+// Console: voxel.Scatter.TopFaceAudit [maxLines=20] [drawSeconds=0]
+// Heightmap worlds (world modes review G26): every cached scatter chunk's top-face row, the surface points the column scan
+// (smooth: inside the chunk's top voxel cell) or the cubic scan (on its top face) makes on the chunk's top layer, where the
+// voxel above lies in the chunk above and the scan cannot see it. Where the chunk above has voxel data, its edit-merged
+// voxel over each point's column says what the point is:
+//   rows          points on the chunk's top layer
+//   under         the voxel above is solid: the ground continues into the chunk above, which makes the real surface, so the
+//                 point is a copy under it
+//   underSurface  under points classified surface (G26: surface scatter planted under the ground)
+//   open          the voxel above is air: the real surface (or a cave floor) at the chunk boundary
+//   unknown       the chunk above has no voxel data
+//   The generated height H (the natural height plus the chunk's conditioning zones) at the voxel above's sample position
+//   predicts that voxel: solid when H reaches the chunk's top. Against the voxel itself where it is known:
+//   bandDropReal  H within 1.5 voxels over the top (the band the buried test lets through) but the voxel above is air
+//   deepDropReal  H more than 1.5 voxels over the top but the voxel above is air (a cave floor or a dug floor at the boundary)
+//   deepUnder     H more than 1.5 voxels over the top and the voxel above solid (a copy inside the rock, classified underground)
+//   keepFake      H under the top but the voxel above is solid (built over, or the SDF's rounding)
+//   spawnsUnder   spawn points on the top layer whose column's voxel above is solid, of surface types / underground-only types
+// Logs a summary and the chunks with the most underSurface points, writes every chunk with a row to
+// Saved/VoxelAudit/TopFaceAudit_<world>_<time>.csv, and with drawSeconds > 0 draws, in front of the terrain (they lie under
+// it), the underSurface points (magenta), the other under points within the band (blue) and the spawn points of surface
+// types under the ground (white); the deep rows (a buried chunk's whole top face) are left out.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
+	TEXT("voxel.Scatter.TopFaceAudit"),
+	TEXT("Heightmap worlds: audit every cached scatter chunk's top-face row (surface points on the chunk's top layer) against the ")
+	TEXT("voxel above it in the chunk above (world modes review G26). Optional args: max chunk lines to log, seconds to draw the points."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 20;
+		const float DrawSeconds = Args.Num() > 1 ? FMath::Max(0.0f, FCString::Atof(*Args[1])) : 0.0f;
+
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			const UVoxelScatterManager* ScatterMgr = CM ? CM->GetScatterManager() : nullptr;
+			const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+			const IVoxelWorldMode* WM = CM ? CM->GetWorldMode() : nullptr;
+			if (!ScatterMgr || !Config || !WM)
+			{
+				continue;
+			}
+			if (!WM->IsHeightmapBased())
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit: not a heightmap world (a planet's line top reads the generated surface)"));
+				continue;
+			}
+
+			const bool bCubic = Config->MeshingMode == EMeshingMode::Cubic;
+			const int32 CS = Config->ChunkSize;
+			const float VoxelSize = Config->VoxelSize;
+			const float ChunkWorldSize = Config->GetChunkWorldSize();
+			TArray<FIntVector> Chunks;
+			ScatterMgr->GetScatterDataCache().GetKeys(Chunks);
+			Chunks.Sort([](const FIntVector& A, const FIntVector& B)
+			{
+				return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
+			});
+
+			struct FRowCounts
+			{
+				int32 Rows = 0, Under = 0, UnderSurface = 0, Open = 0, Unknown = 0, BandDropReal = 0, DeepDropReal = 0, DeepUnder = 0, KeepFake = 0;
+				int32 SpawnsUnderSurfaceType = 0, SpawnsUnderUndergroundType = 0;
+				void Add(const FRowCounts& O)
+				{
+					Rows += O.Rows; Under += O.Under; UnderSurface += O.UnderSurface; Open += O.Open; Unknown += O.Unknown; BandDropReal += O.BandDropReal;
+					DeepDropReal += O.DeepDropReal; DeepUnder += O.DeepUnder; KeepFake += O.KeepFake;
+					SpawnsUnderSurfaceType += O.SpawnsUnderSurfaceType; SpawnsUnderUndergroundType += O.SpawnsUnderUndergroundType;
+				}
+			};
+			TArray<TPair<FIntVector, FRowCounts>> PerChunk;
+			FRowCounts Total;
+			int32 SurfaceChunks = 0;
+			for (const FIntVector& Coord : Chunks)
+			{
+				const FChunkSurfaceData* Surface = ScatterMgr->GetChunkSurfaceData(Coord);
+				if (!Surface)
+				{
+					continue;
+				}
+				++SurfaceChunks;
+				const FVector Origin = Config->WorldOrigin + FVector(Coord) * ChunkWorldSize;
+				const double ChunkTop = Origin.Z + ChunkWorldSize;
+				const TSharedPtr<const TArray<FVoxelData>> Above = CM->GetEditMergedSnapshot(Coord + FIntVector(0, 0, 1));
+				const bool bAboveKnown = Above.IsValid() && Above->Num() == CS * CS * CS;
+				TArray<FVoxelConditioningZone> Zones;
+				CM->GatherConditioningZones(FBox2D(FVector2D(Origin.X, Origin.Y), FVector2D(Origin.X + ChunkWorldSize, Origin.Y + ChunkWorldSize)), Zones);
+
+				// The column a point or spawn stands in: smooth points sit on voxel columns (X * VoxelSize), cubic ones at the
+				// block's centre; spawns are jittered off them, so the nearest column (smooth) or the block (cubic).
+				auto ColumnOf = [&](const FVector& P)
+				{
+					const double LX = (P.X - Origin.X) / VoxelSize, LY = (P.Y - Origin.Y) / VoxelSize;
+					return FIntPoint(
+						FMath::Clamp(bCubic ? FMath::FloorToInt32(LX) : FMath::RoundToInt32(LX), 0, CS - 1),
+						FMath::Clamp(bCubic ? FMath::FloorToInt32(LY) : FMath::RoundToInt32(LY), 0, CS - 1));
+				};
+				// -1 unknown, 0 air, 1 solid: the chunk above's bottom voxel over the column.
+				auto AboveState = [&](const FIntPoint& C) -> int32
+				{
+					return bAboveKnown ? ((*Above)[C.X + C.Y * CS].IsSolid() ? 1 : 0) : -1;
+				};
+
+				FRowCounts Counts;
+				for (const FVoxelSurfacePoint& Point : Surface->SurfacePoints)
+				{
+					const bool bTopRow = bCubic ? FMath::Abs(Point.Position.Z - ChunkTop) < 1.0 : Point.Position.Z > ChunkTop - VoxelSize + 0.01;
+					if (!bTopRow)
+					{
+						continue;
+					}
+					++Counts.Rows;
+					const FIntPoint C = ColumnOf(Point.Position);
+					const int32 State = AboveState(C);
+					const double SampleX = Origin.X + C.X * VoxelSize, SampleY = Origin.Y + C.Y * VoxelSize;
+					const float Natural = WM->GetTerrainHeightAt(static_cast<float>(SampleX), static_cast<float>(SampleY), Config->NoiseParams);
+					const float Generated = Zones.Num() > 0 ? FVoxelTerrainConditioning::ApplyToHeight(SampleX, SampleY, Natural, Zones) : Natural;
+					const bool bDeep = Generated > ChunkTop + 1.5 * VoxelSize;
+					const bool bBand = !bDeep && Generated >= ChunkTop;
+					if (State < 0)
+					{
+						++Counts.Unknown;
+						continue;
+					}
+					if (State == 0)
+					{
+						++Counts.Open;
+						Counts.BandDropReal += bBand ? 1 : 0;
+						Counts.DeepDropReal += bDeep ? 1 : 0;
+						continue;
+					}
+					++Counts.Under;
+					Counts.DeepUnder += bDeep ? 1 : 0;
+					Counts.KeepFake += (!bBand && !bDeep) ? 1 : 0;
+					if (!Point.bIsUnderground)
+					{
+						++Counts.UnderSurface;
+					}
+					if (DrawSeconds > 0.0f && !bDeep)
+					{
+						DrawDebugPoint(TargetWorld, Point.Position, 8.0f, Point.bIsUnderground ? FColor::Blue : FColor::Magenta, false, DrawSeconds, SDPG_Foreground);
+					}
+				}
+				if (const FChunkScatterData* Scatter = ScatterMgr->GetChunkScatterData(Coord))
+				{
+					for (const FScatterSpawnPoint& Spawn : Scatter->SpawnPoints)
+					{
+						// The top layer, with room for a definition's surface offset.
+						if (Spawn.Position.Z <= ChunkTop - 1.2 * VoxelSize || Spawn.Position.Z > ChunkTop + 0.2 * VoxelSize || AboveState(ColumnOf(Spawn.Position)) != 1)
+						{
+							continue;
+						}
+						const FScatterDefinition* Def = ScatterMgr->GetScatterDefinition(Spawn.ScatterTypeID);
+						const int32 Mask = Def ? Def->SurfaceLocationMask : static_cast<int32>(EScatterSurfaceLocationFlags::Surface);
+						const bool bUndergroundOnly = (Mask & static_cast<int32>(EScatterSurfaceLocationFlags::Underground)) != 0
+							&& (Mask & static_cast<int32>(EScatterSurfaceLocationFlags::Surface | EScatterSurfaceLocationFlags::Underwater)) == 0;
+						(bUndergroundOnly ? Counts.SpawnsUnderUndergroundType : Counts.SpawnsUnderSurfaceType) += 1;
+						if (DrawSeconds > 0.0f && !bUndergroundOnly)
+						{
+							DrawDebugPoint(TargetWorld, Spawn.Position + FVector(0.0, 0.0, 15.0), 10.0f, FColor::White, false, DrawSeconds, SDPG_Foreground);
+						}
+					}
+				}
+				if (Counts.Rows > 0)
+				{
+					PerChunk.Add(TPair<FIntVector, FRowCounts>(Coord, Counts));
+					Total.Add(Counts);
+				}
+			}
+
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit [%s, %s]: %d surface chunk(s), %d with a top-face row; rows %d: under the ground %d (surface %d, deep %d), open %d, unknown %d; against the generated height: bandDropReal %d, deepDropReal %d, keepFake %d; spawns under the ground %d of surface types, %d of underground types"),
+				*TargetWorld->GetName(), bCubic ? TEXT("cubic") : TEXT("smooth"), SurfaceChunks, PerChunk.Num(), Total.Rows, Total.Under, Total.UnderSurface, Total.DeepUnder, Total.Open,
+				Total.Unknown, Total.BandDropReal, Total.DeepDropReal, Total.KeepFake, Total.SpawnsUnderSurfaceType, Total.SpawnsUnderUndergroundType);
+			TArray<TPair<FIntVector, FRowCounts>> Sorted = PerChunk;
+			Sorted.Sort([](const TPair<FIntVector, FRowCounts>& A, const TPair<FIntVector, FRowCounts>& B) { return A.Value.UnderSurface > B.Value.UnderSurface; });
+			for (int32 i = 0; i < FMath::Min(MaxLines, Sorted.Num()) && Sorted[i].Value.UnderSurface > 0; ++i)
+			{
+				const FIntVector& Coord = Sorted[i].Key;
+				const FRowCounts& C = Sorted[i].Value;
+				const FVector Centre = Config->WorldOrigin + (FVector(Coord) + FVector(0.5, 0.5, 1.0)) * ChunkWorldSize;
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("  chunk (%d,%d,%d) rows=%d under=%d underSurface=%d deepUnder=%d open=%d unknown=%d bandDropReal=%d deepDropReal=%d keepFake=%d spawnsUnder=%d+%d  ->  vox.TP %.0f %.0f %.0f"),
+					Coord.X, Coord.Y, Coord.Z, C.Rows, C.Under, C.UnderSurface, C.DeepUnder, C.Open, C.Unknown, C.BandDropReal, C.DeepDropReal, C.KeepFake,
+					C.SpawnsUnderSurfaceType, C.SpawnsUnderUndergroundType,
+					Centre.X, Centre.Y, Centre.Z);
+			}
+			TArray<FString> CsvLines = { TEXT("X,Y,Z,rows,under,underSurface,deepUnder,open,unknown,bandDropReal,deepDropReal,keepFake,spawnsUnderSurfaceType,spawnsUnderUndergroundType") };
+			for (const TPair<FIntVector, FRowCounts>& Pair : PerChunk)
+			{
+				const FRowCounts& C = Pair.Value;
+				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z, C.Rows, C.Under, C.UnderSurface,
+					C.DeepUnder, C.Open, C.Unknown, C.BandDropReal, C.DeepDropReal, C.KeepFake, C.SpawnsUnderSurfaceType, C.SpawnsUnderUndergroundType));
+			}
+			const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("TopFaceAudit_%s_%s.csv"),
+				*TargetWorld->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+			if (FFileHelper::SaveStringArrayToFile(CsvLines, *Path))
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit: %d chunk(s) written to %s"), PerChunk.Num(), *FPaths::ConvertRelativePathToFull(Path));
 			}
 		}
 	}));

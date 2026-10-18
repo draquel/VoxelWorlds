@@ -9,6 +9,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
+#include "InfinitePlaneWorldMode.h"
 #include "VoxelTerrainConditioning.h"
 #include "ChunkRenderData.h"
 #include "VoxelMaterialRegistry.h"
@@ -2740,6 +2741,14 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				bHaveColumnHeight = true;
 			}
 
+			// The voxel over the top layer is the chunk above's bottom voxel, which this chunk's data cannot show (world
+			// modes review G26). Within CoverThreshold over the generated ground, where the buried test below lets the
+			// chunk through, it is the voxel the generator made there (no cave comes that close to the surface), with the
+			// chunk above's edits applied. Solid, the ground continues into the chunk above, which extracts the real
+			// surface: taking it for air made a copy of that surface on this chunk's top face, up to 1.5 voxels under the
+			// ground. Deeper the buried test covers the chunk, and a cave may open that voxel, so it is taken for air.
+			const bool bKnowVoxelAbove = bHaveColumnHeight && ColumnTerrainHeight <= ChunkTopWorldZ + CoverThreshold;
+
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
 				const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
@@ -2751,7 +2760,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				}
 
 				// Found solid voxel — check if there's air above
-				float AirDensity = 0.0f; // Above chunk boundary = air
+				float AirDensity = 0.0f; // Above chunk boundary = air (unless known, below)
 				bool bAirAboveIsUnderground = false;
 				bool bAirAboveIsWater = false;
 				if (Z + 1 < ChunkSize)
@@ -2765,6 +2774,17 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 					AirDensity = static_cast<float>(AboveVoxel.Density);
 					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
 					bAirAboveIsWater = AboveVoxel.HasWaterFlag();
+				}
+				else if (bKnowVoxelAbove)
+				{
+					const FVoxelData AboveVoxel = Context.GetVoxelAboveChunk(X, Y, ChunkSize, ColumnTerrainHeight, ChunkTopWorldZ, VoxelSize);
+					if (AboveVoxel.IsSolid())
+					{
+						bFoundColumnTop = true; // the ground above covers the rest of the column
+						continue;
+					}
+					// The crossing lies between this voxel and the one above: interpolate against its density, as the mesher does.
+					AirDensity = static_cast<float>(AboveVoxel.Density);
 				}
 
 				// Interpolate exact Z position (same formula as Marching Cubes edge interpolation)
@@ -2892,6 +2912,21 @@ float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double
 	return ConditioningZones.IsValid() && ConditioningZones->Num() > 0
 		? FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Natural, *ConditioningZones)
 		: Natural;
+}
+
+FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, float GeneratedHeight, double ChunkTopZ, float VoxelSize) const
+{
+	// The heightmap generators' density (InfinitePlane and IslandBowl alike): the signed distance to the generated height.
+	const FVoxelData Generated(0, FInfinitePlaneWorldMode::SignedDistanceToDensity(
+		FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(ChunkTopZ), GeneratedHeight), VoxelSize));
+	if (AboveLayerEdits.IsValid())
+	{
+		if (const FVoxelEdit* Edit = AboveLayerEdits->Find(LocalX + LocalY * ChunkSize))
+		{
+			return Edit->ApplyToProceduralData(Generated);
+		}
+	}
+	return Generated;
 }
 
 void UVoxelScatterManager::ExtractHeightmapSurfacePoints(
@@ -3206,6 +3241,20 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 					bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
 					bAirAboveIsWater = AboveVoxel.HasWaterFlag();
 				}
+				else if (bHaveColumnHeight)
+				{
+					// The block over the top layer is the chunk above's, sampled at this column's corner (G26, see
+					// ExtractSurfacePointsFromVoxelData): known near the generated ground, solid where it continues above.
+					// Near is judged at the corner or at the block's centre (the buried test's height), so a column that test
+					// lets through always has its block above decided.
+					const float SampleHeight = Context.GetGeneratedTerrainHeight(ChunkWorldOrigin.X + X * VoxelSize, ChunkWorldOrigin.Y + Y * VoxelSize);
+					if (FMath::Min(SampleHeight, ColumnTerrainHeight) <= ChunkTopWorldZ + CoverThreshold
+						&& Context.GetVoxelAboveChunk(X, Y, ChunkSize, SampleHeight, ChunkTopWorldZ, VoxelSize).IsSolid())
+					{
+						bFoundColumnTop = true; // the ground above covers the rest of the column
+						continue;
+					}
+				}
 
 				// Block face center: center of block XY, top of block Z
 				const FVector WorldPos(
@@ -3341,6 +3390,27 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 			if (Zones.Num() > 0)
 			{
 				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
+			}
+		}
+		// The chunk above's edits on its bottom layer: the voxel over this chunk's top layer is that layer's (heightmap G26).
+		if (EditLayerSource && WorldMode != nullptr && WorldMode->IsHeightmapBased())
+		{
+			if (const FChunkEditLayer* AboveLayer = EditLayerSource(ChunkCoord + FIntVector(0, 0, 1)))
+			{
+				const int32 CS = Configuration->ChunkSize;
+				TMap<int32, FVoxelEdit> BottomEdits;
+				for (const TPair<int32, FVoxelEdit>& Pair : AboveLayer->Edits)
+				{
+					const FIntVector& Local = Pair.Value.LocalPosition;
+					if (Local.Z == 0 && Local.X >= 0 && Local.X < CS && Local.Y >= 0 && Local.Y < CS)
+					{
+						BottomEdits.Add(Local.X + Local.Y * CS, Pair.Value);
+					}
+				}
+				if (BottomEdits.Num() > 0)
+				{
+					Context.AboveLayerEdits = MakeShared<const TMap<int32, FVoxelEdit>>(MoveTemp(BottomEdits));
+				}
 			}
 		}
 	}

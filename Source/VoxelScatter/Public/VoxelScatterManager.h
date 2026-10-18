@@ -6,6 +6,7 @@
 #include "Containers/Queue.h"
 #include "VoxelData.h"
 #include "VoxelSeaSurface.h"
+#include "VoxelEditTypes.h"
 #include "VoxelScatterTypes.h"
 #include "VoxelGPUSurfaceExtractor.h"
 #include "VoxelScatterManager.generated.h"
@@ -46,6 +47,13 @@ struct FScatterExtractionContext
 	TSharedPtr<const TArray<FVoxelConditioningZone>> ConditioningZones;
 
 	/**
+	 * Heightmap worlds: the edits of the chunk above on its bottom layer (local Z 0), keyed by local X + Y * ChunkSize
+	 * (world modes review G26). The voxel over a chunk's top layer is that layer's, which the chunk's own data cannot
+	 * show: GetVoxelAboveChunk applies these to the voxel the generator made there. Null: no edits on that layer.
+	 */
+	TSharedPtr<const TMap<int32, FVoxelEdit>> AboveLayerEdits;
+
+	/**
 	 * Heightmap worlds: the generated terrain height at a world X,Y, the world mode's natural height with
 	 * ConditioningZones layered on as the generator does. Requires a heightmap WorldMode.
 	 * @param WorldX World X
@@ -53,6 +61,22 @@ struct FScatterExtractionContext
 	 * @return The generated surface's world Z
 	 */
 	float GetGeneratedTerrainHeight(double WorldX, double WorldY) const;
+
+	/**
+	 * Heightmap worlds (world modes review G26): the voxel over a chunk's top layer at a column, the chunk above's bottom
+	 * voxel. Its density is the generated height's at the chunk's top (the heightmap generator's signed distance, so solid
+	 * where that height reaches the top), with the chunk above's edit there applied (AboveLayerEdits). Valid where no
+	 * cave reaches that voxel, i.e. near the generated surface (cave layers keep several voxels under it). Only Density
+	 * and MaterialID are meaningful.
+	 * @param LocalX Column X in the chunk
+	 * @param LocalY Column Y in the chunk
+	 * @param ChunkSize Voxels per chunk edge
+	 * @param GeneratedHeight The generated height at the column's voxel sample position (GetGeneratedTerrainHeight)
+	 * @param ChunkTopZ World Z of the chunk's top (the voxel above's sample height)
+	 * @param VoxelSize Voxel edge in world units
+	 * @return The voxel above the chunk's top layer
+	 */
+	FVoxelData GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, float GeneratedHeight, double ChunkTopZ, float VoxelSize) const;
 };
 
 /**
@@ -474,6 +498,17 @@ public:
 		ConditioningGatherer = MoveTemp(InGatherer);
 	}
 
+	/**
+	 * Where a chunk's edit layer lives (the chunk manager's edit manager), so a heightmap chunk's extraction knows the
+	 * voxel over its top layer, the chunk above's bottom voxel (world modes review G26): MakeExtractionContext copies the
+	 * chunk above's edits on that layer into FScatterExtractionContext::AboveLayerEdits. Called on the game thread when a
+	 * chunk's extraction is set up. Unset: no edits (the generated voxel).
+	 */
+	void SetEditLayerSource(TFunction<const FChunkEditLayer*(const FIntVector& /*ChunkCoord*/)> InSource)
+	{
+		EditLayerSource = MoveTemp(InSource);
+	}
+
 	// ==================== Debug ====================
 
 	/**
@@ -578,6 +613,9 @@ protected:
 	/** The chunk's conditioning zones (see SetConditioningGatherer). */
 	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> ConditioningGatherer;
 
+	/** A chunk's edit layer (see SetEditLayerSource). */
+	TFunction<const FChunkEditLayer*(const FIntVector&)> EditLayerSource;
+
 	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */
 	FScatterExtractionContext MakeExtractionContext(const FIntVector& ChunkCoord) const;
 
@@ -674,6 +712,9 @@ protected:
 	 * Scans voxel columns top-down for surface transitions, interpolates exact Z,
 	 * computes normals from density gradient, reads MaterialID/BiomeID from voxel data.
 	 * Produces consistent results regardless of which LOD level the mesh was generated at.
+	 * The voxel over the top layer is the chunk above's: near the generated surface it is the context's
+	 * GetVoxelAboveChunk (solid: the top voxel is no surface and the column below it is covered, world modes
+	 * review G26); deeper, where the buried-chunk test covers the chunk, it is taken for air.
 	 */
 	static void ExtractSurfacePointsFromVoxelData(
 		const TArray<FVoxelData>& VoxelData,
@@ -711,6 +752,7 @@ protected:
 	 * Extract surface points using block-face snapping (cubic terrain).
 	 * Positions snap to block face centers instead of interpolated positions.
 	 * One point per exposed top face, normal is always up, no interpolation.
+	 * The block over the top layer is decided as in ExtractSurfacePointsFromVoxelData (G26).
 	 */
 	static void ExtractSurfacePointsCubic(
 		const TArray<FVoxelData>& VoxelData,
