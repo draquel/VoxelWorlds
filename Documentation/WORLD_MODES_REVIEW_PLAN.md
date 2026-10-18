@@ -1469,7 +1469,7 @@ Three findings from §13.11 get IDs here:
 | G27 | GPU scatter extraction (`bUseGPUScatterExtraction`, the demo asset's setting; chunks meshed at LOD 0 only) had no point in a chunk's max-face cell layers: it read the chunk's interior mesh, which since seam ownership leaves the cells against the +X, +Y and +Z faces to the chunk's seams. Measured on all six faces (§19.5, `voxel.Scatter.BoundaryAudit`): every GPU-extracted chunk (11 to 18 per `VoxelDemo` stop, the chunks around where the player arrives) had point ratio 0.00 on +X, +Y and +Z and about 1 on the min faces: bare bands in the grass along chunk borders and along the contour where the terrain crosses a chunk layer's top. Its 4,096-point output buffer also overflowed on 64³ chunks (60 of 75 extractions), and the same chunks carried 31% fewer spawn points than on the CPU. Found in §19.4 | Fixed (§19.5): GPU scatter extraction retired (decision D25); every chunk extracts from its voxels. Deleted: `FVoxelGPUSurfaceExtractor`, `ScatterSurfaceExtraction.usf`, the GPU branch, `ClassifySurfacePointsUnderground`, `WantsGPUExtraction`, and the uncalled mesh-vertex path (`GenerateChunkScatter`, `FVoxelSurfaceExtractor`); `bUseGPUScatterExtraction` deprecated and ignored; `OnChunkMeshDataReady` takes no mesh. Tests `Scatter.Boundary.{EveryCellLayerCovered,ManagerIgnoresGPUFlag}`; the A/B with the asset's flag set equals the CPU behaviour on all 780 stable chunk-stops, no gap face anywhere | — |
 | G28 | A buried heightmap chunk's top face carries a row of underground points inside the rock: under ground more than 1.5 voxels over a chunk's top the column scan still takes the voxel above for air (a cave can open it there, so the generated height cannot decide; G26's rule stops at the band), and the buried test classifies the copy underground. Around the Tower 374,928 such points in 223 chunks, and underground-only scatter types put 306 spawn points on them inside the rock (invisible unless a cave floor lies just above); 1.5% of those crossings are real (a cave or dug floor at the boundary, 5,736). Found in §19.4 | Open, low (no visible artefact found): decide the voxel above with the cave carve at that point (the generator's cave density, analytic) or the chunk above's own data | — |
 | G29 | The planet's line top (`ExtractSurfacePointsAlongUp`) keeps a crossing whose voxel above lies outside the chunk when it is within 1.5 voxels of the analytic surface, and puts it there; where the ground continues up to about a voxel into the chunk the line came from, that chunk makes the same point, so the band where the surface crosses a chunk face gets two points (on the surface, not sunken like G26's copies: twice the scatter there). A probe over the 27 chunks around the planet scatter tests' sites (§19.4): 605 (45°), 676 (equator) and 325 (cube corner) pairs of open points from different chunks within half a voxel, 3 to 7% of the open points; none at the pole. `Scatter.Planet.DensityPerArea`'s 10% tolerance hides it | Fixed (§19.6): near the generated surface a line top's voxel above outside the chunk is the one the planet generator made there, with the neighbour's edits applied (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits`, `UVoxelScatterManager::GatherPlanetTouchingEdits` over `GetPlanetLineTopNeighbours`): solid drops the line top and covers the line, air keeps it on the generated surface (interpolated against an edited voxel). For a line's first voxel that voxel is the line's own step before it (straight over it, as before, left strips without points where the lines drift half a voxel a step or more). Tests `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}`; audit `voxel.Scatter.LineTopAudit` (pairs, and a local density around the pawn). On `Review_Planet` the pairs at five stops go from 4,147-10,961 to 15-933 (the rest is G31); 85 of 551 stable chunks change, 80 of them with pairs. No `PlanetGenerationVersion` change | — |
-| G30 | `UVoxelScatterManager::RemoveChunkScatter` (a chunk's unload) clears the surface cache and, through a short-circuit `||`, not the scatter cache when the surface cache held the chunk: an unloaded chunk's spawn points stay cached, and when it streams back in its extraction is taken for a supplemental pass (the new spawn points appended to the stale ones, the surface data not cached again, so the distance spawn and the audits skip it). Found in §19.5 by the first version of `Scatter.Boundary.ManagerIgnoresGPUFlag` | Open: clear both caches; check what a reloaded chunk renders and its digest across an unload and reload | — |
+| G30 | `UVoxelScatterManager::RemoveChunkScatter` (a chunk's unload) clears the surface cache and, through a short-circuit `||`, not the scatter cache when the surface cache held the chunk: an unloaded chunk's spawn points stay cached, and when it streams back in its extraction is taken for a supplemental pass (the new spawn points appended to the stale ones, the surface data not cached again, so the distance spawn and the audits skip it). Found in §19.5 by the first version of `Scatter.Boundary.ManagerIgnoresGPUFlag` | Fixed (§19.7): `RemoveChunkScatter` removes both caches and an unloaded chunk keeps no scatter state (a queued exclusion regrow is dropped too). Checking the instances found a second way a chunk rendered twice: the distance cleanup's `UVoxelScatterRenderer::ReleaseChunkScatterType` left the pair's queued adds, which were flushed into a type the chunk no longer tracked and survived its unload under the reload's instances (351 to 902 per chunk on `VoxelDemo`); the release drops them now. `voxel.Scatter.Digest` logs a `caches:` line (`ComputeCacheResidency`: chunks without surface data, spawn points against instances per chunk and type, duplicates); tests `Scatter.Reload.{SameAsFresh,DistanceSpawn,ReleaseBeforeFlush}`. Round trips (three stops, each visited twice): on `VoxelDemo` every stable chunk is the same at both visits (old code: 43-57 per stop doubled, no surface data at the second visits, up to 950 unloaded chunks cached); on `Review_Planet` the same holds for every stable chunk clear of the distance spawn's hysteresis bands (old code: 31-61 doubled, up to 27,230 duplicate spawn points) | — |
 | G31 | A planet chunk's scatter lines follow local up at its own centre, so neighbouring chunks' lines do not continue into each other: where they step along different axes (the cube's diagonals) or round their drift differently (a slope near half a voxel a step, and wherever it changes enough between the two chunks' centres), a line top whose ground continues into the neighbour is dropped while the neighbour's lines pass that spot with their crossing on this side of the face, and a strip along the face gets no point; rarely both make it. G29's doubled line tops had covered most of these strips. 27-chunk sites (§19.6, a Gaussian local density of one voxel): the cube corner 398 of 10,803 samples under 0.8 and `Scatter.Planet.DensityPerArea` 96.5% (99.7% with G29's doubles), 30°N 40°E 230, the poles, 45° and the equator none; a slope of exactly half a voxel a step 150 samples over 1.2 and 36 under. Live on `Review_Planet`: 15-933 pairs left at five stops | Open: give a crossing to the chunk containing it (each chunk keeps the crossings of its own lines that lie inside it, reading the voxels just past its faces as G29 does), or share one line family across a region | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
@@ -4176,7 +4176,7 @@ short-circuit skips the scatter cache, so the chunk's spawn points stay cached a
 its extraction is taken for a supplemental pass: the new spawn points are appended to the stale ones and its surface data
 is not cached again (the distance spawn and the audits then skip it). Found by `Scatter.Boundary.ManagerIgnoresGPUFlag`'s
 first version (resubmitting a chunk after `OnChunkUnloaded` left no surface data); the test now uses a fresh manager.
-Not fixed here: it changes what a reloaded chunk renders and needs its own check.
+Not fixed here: it changes what a reloaded chunk renders and needs its own check. Fixed in §19.7.
 
 **Things to know.**
 
@@ -4317,6 +4317,144 @@ chunk's lines and the other a line top that found air over it). The old rule's d
 that contains it (each chunk keeping the crossings of its own lines that lie inside it, and reading the voxels just past
 its faces as G29 does), or share one line family across a region.
 
+### 19.7 G30: an unloaded chunk's scatter stays cached (2026-10-18)
+
+PRs open (draquel/VoxelWorlds#111, `fix/g30-scatter-cache-reload`, on main `cfd94c7`; the parent's gitlink and doc map
+in draquel/UE5_PluginDev#121). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor
+(Claudius on 8085), background throttling off.
+
+**The bug.** `UVoxelScatterManager::RemoveChunkScatter` (called by `OnChunkUnloaded`) removed the chunk's caches with
+`SurfaceDataCache.Remove(...) > 0 || ScatterDataCache.Remove(...) > 0`. A chunk with surface data (every chunk scatter
+had extracted) kept its spawn points cached after it unloaded. What followed:
+
+- **The reload was an append.** When the chunk streamed back in, `ProcessCompletedAsyncScatter` found its spawn points
+  cached and took the extraction for a supplemental pass: the new spawn points were appended to the stale ones (every
+  point twice) and the surface data was not cached again.
+- **No surface data afterwards.** The distance spawn (which reads the surface cache) never added the distance-limited
+  types there again, the exclusion regrow skipped it, and the audits (`voxel.Scatter.*Audit`, which skip a chunk without
+  surface data) did not see it.
+- **Rendered twice on the next re-render.** The unload had released the chunk's instances and the append rendered only
+  the new points, so the chunk looked right until something re-rendered it from the cache: a cleared radius (a dig), an
+  exclusion volume (a harvest, a claim), each of which replaces a type's instances with the cached survivors, two per
+  point.
+- **Alternating.** At its next unload the chunk had no surface data, so the `||` reached the scatter cache and removed
+  it; the following reload was right again, the one after that doubled.
+- **Leaked.** Every chunk unloaded with surface data stayed in the scatter cache until it was reloaded and unloaded again:
+  `GetScatterChunkCount`, `ComputeScatterDigest`, the audits' chunk lists and the scatter memory the streaming bench
+  reports (`peakScatterMB` / `endScatterMB`, from `GetTotalMemoryUsage`) included them.
+
+**A second way a chunk rendered twice** (found while checking what a reloaded chunk renders).
+`UVoxelScatterRenderer::ReleaseChunkScatterType`, which the distance spawn's out-of-range cleanup calls, released the
+chunk's instances of a type but left its adds still queued for the per-frame budget. Flushed after the release, they
+landed in the pool for a type the chunk no longer tracked, and `RemoveChunkInstances` (the unload) releases only the
+tracked types: those instances stayed in the world across the unload, and when the chunk came back the type was added
+again over them. (`UpdateChunkTypeInstances` and `RemoveChunkInstances` drop the queued adds themselves; the cleanup
+was the one caller that did not.)
+
+Live (`VoxelDemo`, the runs below): at 14 of 36 `vox.TP` stops (six runs), one to three chunks 137 to 234 m from the
+stop had taken distance-limited types (`SpawnDistance` 10,000 and 12,000 uu) in their first pass: they were submitted
+while the viewer (the camera) was still within 100 m of them, not yet at the stop. The next distance check released
+those types while their adds still waited behind the arrival's backlog (about 50,000 adds at 2,000 a frame). Where the
+chunk kept other types (its trees), the adds were then flushed untracked: 351 to 902 instances over the chunk's 12 to 30
+spawn points, in two of the six runs with the cache fix alone. The Tower's (-44, -17, 0) held 371 such bush, grass,
+plant, flower and young spruce instances, and the same 371 were there at the next visit to the Tower, after the chunk had
+unloaded and come back.
+
+**What changed.**
+
+- `RemoveChunkScatter` removes both caches.
+- `OnChunkUnloaded` also drops a queued exclusion regrow (the reload's first pass reads the current volumes), so an
+  unloaded chunk keeps no scatter state at all.
+- `ReleaseChunkScatterType` drops the queued adds for the chunk and type.
+- Tooling (kept): `voxel.Scatter.Digest` logs a second line, `caches:` (`UVoxelScatterManager::ComputeCacheResidency`):
+  chunks with spawn points, chunks with surface data, chunks with spawn points but no surface data (`scatterOnly`, 0 since
+  the fix), spawn points against the renderer's instances (`UVoxelScatterRenderer::GetChunkInstanceCount`, queued adds
+  included) with the chunks where they differ (`instanceMismatch`; up to five logged per type, `<id>:<spawn
+  points>/<instances>`, `!` where the renderer does not track the type; `file` writes all to
+  `Saved/VoxelAudit/ScatterCaches_<world>_<time>.csv`), and spawn points that repeat another of their chunk
+  (`duplicates`). `UVoxelScatterManager::GetScatterRenderer`, `UVoxelScatterRenderer::GetChunkScatterTypes`.
+- Checked, unchanged: supplemental passes (a deferred one is dropped on unload; a reload is now a first pass); the
+  distance spawn (reads the surface cache, which the reload fills again); stale in-flight results (an extraction's is
+  dropped through `AsyncScatterInProgress`, a distance stream's through the surface-cache check, which an unloaded chunk
+  fails until its reload has been extracted, long after a placement-only task finishes); `RegenerateChunkScatter` (an
+  edit) already dropped both caches; the audits, the digest and the stats iterate the scatter cache and now see every
+  loaded chunk and no unloaded one.
+- Generation, extraction and placement do not change; no `GenerationVersion` or `PlanetGenerationVersion` bump.
+
+**Tests** (`Source/VoxelScatter/Tests/VoxelScatterReloadTests.cpp`, through the scatter manager's own pipeline as the
+G27 and G26 harnesses: `OnChunkMeshDataReady`, the async extraction, `Update`; a tilted heightmap plane of grass with
+every third column dirt; the default definitions given the engine cube so the renderer holds real instances, trees at
+density 0.3):
+
+| Test | What it checks | Result |
+|------|------|------|
+| `Scatter.Reload.SameAsFresh` | Four chunks; one unloads and reloads three times. After each unload no cache and no instance holds it and no chunk has spawn points without surface data; after each reload its surface data is cached and equals the first extraction's, its spawn points equal the first load's (no duplicate), it renders each once, and the digest equals the first load's, chunk by chunk. Then a cleared radius on the reloaded chunk against a manager that never unloaded it | 256 surface points, 136 spawn points (57 trees), 136 instances, the digest `types=3 chunks=4 points=547` at every cycle; after the cleared radius 118 spawn points and 118 instances on both |
+| `Scatter.Reload.DistanceSpawn` | The chunk loads with the viewer 40,000 uu off (past the trees' 20,000 and their release at 22,000), the viewer comes near, goes away, the chunk unloads and reloads far away, the viewer comes near again | 83 spawn points far, 126 with 43 trees near, 83 again far; after the reload 83 far and 126 with 43 trees near, the same points; one instance per point at every stop |
+| `Scatter.Reload.ReleaseBeforeFlush` | The viewer moves away before the extraction's result is taken, with every `Update` running the distance check, so the trees are queued and released in the same `Update`; then the chunk unloads and reloads near | No tree instance after the release, none of the chunk after the unload, 126 instances for 126 spawn points after the reload |
+
+With the temporary switch (`voxel.Scatter.G30Legacy`, removed before the commit) at 1, the old code, all three fail:
+after an unload the chunk's 136 spawn points stay cached (`scatterOnly=1`); the reload holds 272 spawn points (136
+unique), no surface data and 136 instances, and the digest says `points=683`; cycle 2 is right again and cycle 3
+doubled (the alternation); after the cleared radius the reloaded chunk renders 236 instances where the other renders
+118; reloaded far away the chunk has 166 spawn points and no surface data, and near it gets no tree. At 2 (only the old
+release) `ReleaseBeforeFlush` alone fails: 43 tree instances with no tree spawn point after the release, still there
+after the unload, and 169 instances for 126 spawn points after the reload. The G27 test
+`Scatter.Boundary.ManagerIgnoresGPUFlag` keeps a fresh manager per run (its point is determinism across managers); its
+comment now points here. Suites: headless VoxelWorlds + VoxelWorldSave + VoxelCharacter + WorldClock
++ InteractionPlugin + Dungeon 520 of 520 (main's 517 and the three above); in the editor (D3D12) 520 of 520 with the GPU
+tests running (only the two retired GPU DC interior tests skip), the 87 GPU parity lines identical to G29's by CRC.
+
+**Live: `VoxelDemo`.** A round trip: the spawn (60 s), then `vox.TP` to the Village (-104312, 331034), the Tower
+(-204430, -46859) and the City (-146871, 175956), then the same three again, 60 s at each stop; at each, streaming frozen
+for `voxel.Scatter.Digest file` (the per-chunk digest and the `caches:` line). The stops are 1.6 to 3.9 km apart and the
+view distance 400 m (chunks 4,800 uu), so every stop's chunks unload before its second visit. A throwaway run first;
+then three runs on the old code (the temporary switch at 1) interleaved with three on the cache fix alone, three more
+on the cache fix alone with a temporary log of releases with queued adds (the second bug's evidence above), and three
+on the fix.
+
+- **Round trip on the fix**: over the chunks stable in every run of one build (the same digest line in all three) at
+  both visits, none differs between the first and the second visit: 245 at the Village, 215 at the Tower, 230 at the
+  City (46,605, 47,357 and 31,333 spawn points both times). Every stop of every run: `scatterOnly=0`, `instanceMismatch=0`,
+  `duplicates=0`; the chunk count stays 223 to 249. (The cache fix alone gives the same round trip on its stable chunks;
+  its `instanceMismatch` was the second bug.)
+- **Round trip on the old code**: of the chunks loaded at both visits and stable, 69, 77 and 75 have spawn points; 43, 57
+  and 57 of them come back with exactly twice their points (8,114 → 16,228 at the Village), 10, 7 and 8 with a few more
+  (up to 2.5%). At the second visits no loaded chunk has surface data (`surfaceChunks` 0 to 7 of 480 to 952).
+- **The leak on the old code**: the chunks of every stop left behind stay cached: 246 after the spawn, about 495 at the
+  Village, 718 at the Tower, 950 at the City, where 64,094 to 82,957 spawn points are cached against about 36,000
+  rendered; `instanceMismatch` 49 to 262 per stop.
+- **First visits** equal on both builds: 247, 215 and 230 stable chunks in both, none differs (the old code's extra
+  chunks are the unloaded ones).
+- Run-to-run variance, both builds: a few chunks near the villages and the City (for instance (-25, 55, 0): 2,980 or
+  2,203 spawn points) differ between runs at both visits alike, so they are not stable and not counted; earlier A/Bs
+  reported the same capture timing (§19.3, §19.5).
+
+**Live: `Review_Planet`** (`PlanetTest` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Planet`; R 250,000,
+chunk 64, voxel 75, the demo's scatter configuration). The same round trip with `vox.TPLatLon`: the spawn (86.7°N), then
+45°N 0°E, 0° 90°E and 60°S 120°W (which settles at 59.9°S 115.6°W), then the same three again, 60 s each; the stops are
+3.9 to 6.2 km apart along the surface. A throwaway run, then three on the fix and three on the old code (the temporary
+switch at 1), interleaved.
+
+- **Round trip on the fix**: 183, 172 and 182 chunks are stable at both visits. Clear of the distance spawn's bands
+  (within 100 uu of a `SpawnDistance`, 10,000 or 12,000 uu from the stop, or between it and 1.1 times it, where the
+  distance spawn neither adds nor releases; or within 500 uu of the 25,000 uu scatter radius) none differs: 148, 148 and
+  157 chunks. In the bands 3 of 35 differ at 45°N and 4 of 25 at the south stop, each the same way in all three runs and
+  on the old code: which types such a chunk holds depends on where the viewer was when it was submitted (for instance
+  (-10, -23, -47), 12,094 uu from the south stop: 4 spawn points at the first visit, 2,492 at the second; the old code
+  has 4 and 2,496, the stale 4 plus the same 2,492). Every stop of every run: `scatterOnly=0`, `instanceMismatch=0`,
+  `duplicates=0`.
+- **Round trip on the old code**: of the chunks loaded at both visits and stable, 45, 37 and 67 have spawn points; 37, 31
+  and 61 of them come back exactly doubled (5,231 → 10,462 at 45°N, 6,446 → 12,892 at the south stop). The second visits
+  hold 426 to 27,230 duplicate spawn points (in 41 to 76 chunks) and 1 to 5 chunks with surface data; the stale chunks
+  grow from 155 after the spawn to 704 at the third stop.
+- **First visits** equal on both builds: 184, 177 and 186 stable chunks in both, none differs.
+
+**Things to know.**
+
+- A chunk submitted in the seconds after a teleport can take its definitions with the viewer (the camera's position, as
+  the chunk manager passes it) not yet at the destination: chunks 137 to 234 m from a `vox.TP` stop took the 100 m and
+  120 m types and released them at the next distance check. The release is right; only that first pass's work is wasted.
+
 ### 19.8 G24: voxel-carved dungeons hold pawns (2026-10-18)
 
 PRs open: draquel/ProceduralDungeonPlugin#30 (`fix/g24-voxel-carved-floors`: the stamp and its tests), this section in
@@ -4443,10 +4581,10 @@ only) are revised by D17 and D18 below. Every decision the plan needs (D17-D24) 
 
 Not executed yet: the loose ends go first, each in its own session (as of 2026-10-18):
 
-- Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6) and G24 (§19.8).
-- Next, each with its section reserved: G30 (§19.7, an unloaded chunk's scatter stays cached) and G31 (§19.9, planet
-  scatter lines do not continue across chunk faces). Phase 6's larger radii shrink all of G31 but its cube-diagonal part,
-  so it can move into P6.5 instead.
+- Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6), G30 (§19.7) and G24
+  (§19.8).
+- Next, with its section reserved: G31 (§19.9, planet scatter lines do not continue across chunk faces). Phase 6's
+  larger radii shrink all of G31 but its cube-diagonal part, so it can move into P6.5 instead.
 - Deferred, not blocking Phase 6: G14 (tooling), G16 and G25 (cosmetic), G19 (documented) and G28 (low).
 
 Bases: VoxelWorlds `2fd32fc`, UE5_PluginDev `f737a3c` (spherical Phase 5 merged). Refreshed on 2026-10-18 onto main after

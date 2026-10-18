@@ -269,9 +269,8 @@ bool FVoxelScatterBoundaryManagerTest::RunTest(const FString& Parameters)
 	const FIntVector Coord(0, 0, 0);
 	const TArray<FVoxelData> Voxels = MakeChunk(Coord, Mode);
 
-	// Each run in a fresh manager. (Resubmitting to the same manager after OnChunkUnloaded does not re-cache the surface:
-	// RemoveChunkScatter leaves the chunk's spawn points cached, so the second extraction is taken for a supplemental
-	// pass. World modes review G30, open.)
+	// Each run in a fresh manager. (A chunk unloaded and resubmitted to the same manager: VoxelScatterReloadTests, world
+	// modes review G30.)
 	auto RunOnce = [&](bool bGPUFlag) -> TArray<FVoxelSurfacePoint>
 	{
 		FHarness Harness(bGPUFlag);

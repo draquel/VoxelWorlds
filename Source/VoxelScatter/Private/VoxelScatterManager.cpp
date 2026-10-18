@@ -28,7 +28,9 @@ namespace
 	/**
 	 * voxel.Scatter.Digest [file]: log every game world's scatter digest (UVoxelScatterManager::ComputeScatterDigest). With
 	 * "file", also write one line per chunk (X,Y,Z,count,crc) to Saved/VoxelAudit/ScatterDigest_<world>_<time>.csv, to
-	 * see which chunks two builds disagree on.
+	 * see which chunks two builds disagree on. A second line checks the caches against each other and the renderer
+	 * (ComputeCacheResidency, world modes review G30), with up to five chunks whose instances differ from their spawn
+	 * points; "file" writes all of them to ScatterCaches_<world>_<time>.csv.
 	 */
 	FAutoConsoleCommand GVoxelScatterDigestCmd(
 		TEXT("voxel.Scatter.Digest"),
@@ -49,6 +51,19 @@ namespace
 				TArray<FString> ChunkLines;
 				UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: %s"), *World->GetName(),
 					*It->ComputeScatterDigest(bFile ? &ChunkLines : nullptr));
+				TArray<FString> MismatchLines;
+				UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s] caches: %s"), *World->GetName(), *It->ComputeCacheResidency(&MismatchLines));
+				for (int32 i = 0; i < FMath::Min(MismatchLines.Num(), 5); ++i)
+				{
+					UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]   mismatch %s"), *World->GetName(), *MismatchLines[i]);
+				}
+				if (bFile && MismatchLines.Num() > 0)
+				{
+					const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("ScatterCaches_%s_%s.csv"),
+						*World->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+					MismatchLines.Insert(TEXT("X,Y,Z,spawnPoints,instances,surface,types"), 0);
+					FFileHelper::SaveStringArrayToFile(MismatchLines, *Path);
+				}
 				if (bFile)
 				{
 					const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("ScatterDigest_%s_%s.csv"),
@@ -491,6 +506,11 @@ const FChunkSurfaceData* UVoxelScatterManager::GetChunkSurfaceData(const FIntVec
 	return SurfaceDataCache.Find(ChunkCoord);
 }
 
+const UVoxelScatterRenderer* UVoxelScatterManager::GetScatterRenderer() const
+{
+	return ScatterRenderer;
+}
+
 bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 {
 	const FChunkScatterData* Data = ScatterDataCache.Find(ChunkCoord);
@@ -668,6 +688,9 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 	// Clear cleared volumes and completed type tracking - allow full regeneration on reload
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
 	CompletedScatterTypes.Remove(ChunkCoord);
+
+	// A queued exclusion regrow is obsolete too: the reload's first pass reads the current volume set
+	PendingExclusionRegrow.Remove(ChunkCoord);
 
 	RemoveChunkScatter(ChunkCoord);
 }
@@ -1430,7 +1453,12 @@ void UVoxelScatterManager::RemoveChunkScatter(const FIntVector& ChunkCoord)
 		ScatterRenderer->RemoveChunkInstances(ChunkCoord);
 	}
 
-	if (SurfaceDataCache.Remove(ChunkCoord) > 0 || ScatterDataCache.Remove(ChunkCoord) > 0)
+	// Both caches, always (world modes review G30): with the two removals joined by a short-circuit ||, a chunk with
+	// surface data kept its spawn points cached after unloading, and its next extraction was taken for a supplemental
+	// pass (spawn points appended to the stale ones, the surface data not cached again).
+	const bool bHadSurface = SurfaceDataCache.Remove(ChunkCoord) > 0;
+	const bool bHadScatter = ScatterDataCache.Remove(ChunkCoord) > 0;
+	if (bHadSurface || bHadScatter)
 	{
 		OnChunkScatterRemoved.Broadcast(ChunkCoord);
 
@@ -2959,6 +2987,64 @@ FString UVoxelScatterManager::ComputeScatterDigest(TArray<FString>* OutChunkLine
 		Out += FString::Printf(TEXT(" | type %d: %d crc %08x"), Type, Entry.Key, Entry.Value);
 	}
 	return Out;
+}
+
+FString UVoxelScatterManager::ComputeCacheResidency(TArray<FString>* OutMismatchLines) const
+{
+	const bool bRenderer = ScatterRenderer && ScatterRenderer->IsInitialized();
+	int32 ScatterOnly = 0, Mismatch = 0, DuplicateChunks = 0;
+	int64 SpawnPoints = 0, Instances = 0, Duplicates = 0;
+	for (const TPair<FIntVector, FChunkScatterData>& Pair : ScatterDataCache)
+	{
+		ScatterOnly += SurfaceDataCache.Contains(Pair.Key) ? 0 : 1;
+		const int32 ChunkInstances = bRenderer ? ScatterRenderer->GetChunkInstanceCount(Pair.Key) : 0;
+		SpawnPoints += Pair.Value.SpawnPoints.Num();
+		Instances += ChunkInstances;
+
+		// Two spawn points of one type at one position (to 0.1 uu, as the digest keys them): a pass appended twice.
+		TSet<TTuple<int32, int64, int64, int64>> Seen;
+		Seen.Reserve(Pair.Value.SpawnPoints.Num());
+		int32 ChunkDuplicates = 0;
+		for (const FScatterSpawnPoint& Point : Pair.Value.SpawnPoints)
+		{
+			bool bAlready = false;
+			Seen.Add(MakeTuple(Point.ScatterTypeID, FMath::RoundToInt64(Point.Position.X * 10.0), FMath::RoundToInt64(Point.Position.Y * 10.0),
+				FMath::RoundToInt64(Point.Position.Z * 10.0)), &bAlready);
+			ChunkDuplicates += bAlready ? 1 : 0;
+		}
+		Duplicates += ChunkDuplicates;
+		DuplicateChunks += ChunkDuplicates > 0 ? 1 : 0;
+		if (ChunkInstances == Pair.Value.SpawnPoints.Num())
+		{
+			continue;
+		}
+		++Mismatch;
+		if (OutMismatchLines && bRenderer)
+		{
+			// Per type: spawn points / instances, and '!' where the renderer does not track the type for the chunk (its
+			// instances would survive the chunk's unload).
+			const TArray<int32> Tracked = ScatterRenderer->GetChunkScatterTypes(Pair.Key);
+			FString Types;
+			for (const FScatterDefinition& Def : ScatterDefinitions)
+			{
+				int32 TypeSpawns = 0;
+				for (const FScatterSpawnPoint& Point : Pair.Value.SpawnPoints)
+				{
+					TypeSpawns += Point.ScatterTypeID == Def.ScatterID ? 1 : 0;
+				}
+				const int32 TypeInstances = ScatterRenderer->GetChunkInstanceCount(Pair.Key, Def.ScatterID);
+				if (TypeSpawns != TypeInstances)
+				{
+					Types += FString::Printf(TEXT(" %d:%d/%d%s"), Def.ScatterID, TypeSpawns, TypeInstances,
+						Tracked.Contains(Def.ScatterID) || TypeInstances == 0 ? TEXT("") : TEXT("!"));
+				}
+			}
+			OutMismatchLines->Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%s,%s"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z, Pair.Value.SpawnPoints.Num(),
+				ChunkInstances, SurfaceDataCache.Contains(Pair.Key) ? TEXT("surface") : TEXT("noSurface"), *Types.TrimStart()));
+		}
+	}
+	return FString::Printf(TEXT("scatterChunks=%d surfaceChunks=%d scatterOnly=%d spawnPoints=%lld instances=%lld instanceMismatch=%d duplicates=%lld (%d chunks)"),
+		ScatterDataCache.Num(), SurfaceDataCache.Num(), ScatterOnly, SpawnPoints, Instances, Mismatch, Duplicates, DuplicateChunks);
 }
 
 FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) const

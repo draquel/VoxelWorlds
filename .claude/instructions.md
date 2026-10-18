@@ -123,6 +123,11 @@ voxel above a line top outside the chunk the same way, as the planet generator m
 surveys it on purpose). Changing planet generation bumps
 `FVoxelWorldModeFactory::PlanetGenerationVersion` (4 since Phase 5); heightmap changes bump `GenerationVersion`.
 
+Any per-chunk state `UVoxelScatterManager` keeps is dropped in `OnChunkUnloaded`, both caches included, so a chunk that
+streams back in is extracted as a first pass (world modes review G30: a short-circuit `||` once kept the spawn points
+cached and turned the reload into an append). `voxel.Scatter.Digest`'s `caches:` line shows a leftover as
+`scatterOnly` > 0 or an `instanceMismatch`.
+
 ## Core Data Structures
 
 ### FVoxelData (4 bytes per voxel)
