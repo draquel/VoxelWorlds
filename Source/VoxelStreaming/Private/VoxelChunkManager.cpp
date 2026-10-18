@@ -7361,6 +7361,249 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterBoundaryAuditCmd(
 		}
 	}));
 
+// Console: voxel.Scatter.LineTopAudit [maxLines=20] [drawSeconds=0] [densityRadius=0]
+// Planets (world modes review G29): over every cached scatter chunk's open surface points, the pairs from two chunks on one
+// up-line (closer than half a voxel across local up, within two voxels along it). A planet chunk's digital line whose voxel
+// above lies outside the chunk kept its crossing near the analytic surface whatever that voxel was; where the ground
+// continues into the neighbour, the neighbour makes the same point, so the band where the surface crosses a chunk face got
+// two points. Since G29 the line top reads that voxel as generated (with the neighbour's edits); a few pairs remain where
+// two chunks' lines do not continue into each other (G31). Logs a summary and the chunks with the most pairs, writes every
+// chunk with open points to Saved/VoxelAudit/LineTopAudit_<world>_<time>.csv, and with drawSeconds > 0 draws the paired
+// points in front of the terrain (magenta).
+// With densityRadius > 0 it also measures the open points' local density on the generated surface within that distance of
+// the player pawn: at samples every half voxel, the points' spawn weights under a Gaussian of one voxel across local up
+// (within 3 voxels across and along), per the column scan's one point per voxel square. A doubled strip shows as samples
+// over 1.2, a strip without points (G31) as samples under 0.8 (drawn magenta and cyan).
+static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterLineTopAuditCmd(
+	TEXT("voxel.Scatter.LineTopAudit"),
+	TEXT("Planets: count pairs of open scatter surface points from two chunks on one up-line (a doubled line top, world modes review G29) ")
+	TEXT("over every cached scatter chunk. Optional args: max chunk lines to log, seconds to draw the pairs, a radius around the pawn to ")
+	TEXT("measure the points' local density in."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.LineTopAudit: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 20;
+		const float DrawSeconds = Args.Num() > 1 ? FMath::Max(0.0f, FCString::Atof(*Args[1])) : 0.0f;
+		const double DensityRadius = Args.Num() > 2 ? FMath::Max(0.0, FCString::Atod(*Args[2])) : 0.0;
+
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			const UVoxelScatterManager* ScatterMgr = CM ? CM->GetScatterManager() : nullptr;
+			const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+			const IVoxelWorldMode* WM = CM ? CM->GetWorldMode() : nullptr;
+			if (!ScatterMgr || !Config || !WM)
+			{
+				continue;
+			}
+			if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.LineTopAudit: not a planet (heightmap top faces: voxel.Scatter.TopFaceAudit)"));
+				continue;
+			}
+
+			const float VoxelSize = Config->VoxelSize;
+			const float ChunkWorldSize = Config->GetChunkWorldSize();
+			TArray<FIntVector> Chunks;
+			ScatterMgr->GetScatterDataCache().GetKeys(Chunks);
+			Chunks.Sort([](const FIntVector& A, const FIntVector& B)
+			{
+				return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
+			});
+
+			// Open points, bucketed by world cells two voxels wide (a pair lies in the same or a neighbouring cell).
+			struct FEntry
+			{
+				FVector Position;
+				FVector Up;
+				int32 Chunk;
+				float Weight;
+			};
+			TArray<FEntry> Entries;
+			TArray<int32> OpenPerChunk;
+			OpenPerChunk.SetNumZeroed(Chunks.Num());
+			for (int32 C = 0; C < Chunks.Num(); ++C)
+			{
+				if (const FChunkSurfaceData* Surface = ScatterMgr->GetChunkSurfaceData(Chunks[C]))
+				{
+					for (const FVoxelSurfacePoint& Point : Surface->SurfacePoints)
+					{
+						if (!Point.bIsUnderground)
+						{
+							Entries.Add({ Point.Position, Point.LocalUp.IsNearlyZero() ? WM->GetUpVector(Point.Position) : Point.LocalUp, C, Point.SpawnWeight });
+							++OpenPerChunk[C];
+						}
+					}
+				}
+			}
+			const double Cell = 2.0 * VoxelSize;
+			auto CellOf = [Cell](const FVector& P)
+			{
+				return FIntVector(FMath::FloorToInt32(P.X / Cell), FMath::FloorToInt32(P.Y / Cell), FMath::FloorToInt32(P.Z / Cell));
+			};
+			TMap<FIntVector, TArray<int32>> Grid;
+			for (int32 I = 0; I < Entries.Num(); ++I)
+			{
+				Grid.FindOrAdd(CellOf(Entries[I].Position)).Add(I);
+			}
+			TArray<int32> PairsPerChunk;
+			PairsPerChunk.SetNumZeroed(Chunks.Num());
+			int32 Pairs = 0;
+			for (int32 I = 0; I < Entries.Num(); ++I)
+			{
+				const FEntry& A = Entries[I];
+				const FIntVector Home = CellOf(A.Position);
+				for (int32 DZ = -1; DZ <= 1; ++DZ)
+				for (int32 DY = -1; DY <= 1; ++DY)
+				for (int32 DX = -1; DX <= 1; ++DX)
+				{
+					const TArray<int32>* Bucket = Grid.Find(Home + FIntVector(DX, DY, DZ));
+					if (!Bucket)
+					{
+						continue;
+					}
+					for (const int32 J : *Bucket)
+					{
+						const FEntry& B = Entries[J];
+						if (J <= I || B.Chunk == A.Chunk)
+						{
+							continue;
+						}
+						const FVector D = B.Position - A.Position;
+						const double Along = FVector::DotProduct(D, A.Up);
+						if ((D - A.Up * Along).Size() < 0.5 * VoxelSize && FMath::Abs(Along) < 2.0 * VoxelSize)
+						{
+							++Pairs;
+							++PairsPerChunk[A.Chunk];
+							++PairsPerChunk[B.Chunk];
+							if (DrawSeconds > 0.0f)
+							{
+								DrawDebugPoint(TargetWorld, A.Position, 8.0f, FColor::Magenta, false, DrawSeconds, SDPG_Foreground);
+								DrawDebugPoint(TargetWorld, B.Position, 8.0f, FColor::Magenta, false, DrawSeconds, SDPG_Foreground);
+							}
+						}
+					}
+				}
+			}
+
+			int32 ChunksWithPairs = 0, SurfaceChunks = 0;
+			TArray<FString> CsvLines = { TEXT("X,Y,Z,open,pairs") };
+			TArray<int32> Order;
+			for (int32 C = 0; C < Chunks.Num(); ++C)
+			{
+				if (OpenPerChunk[C] == 0)
+				{
+					continue;
+				}
+				++SurfaceChunks;
+				ChunksWithPairs += PairsPerChunk[C] > 0 ? 1 : 0;
+				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%d,%d"), Chunks[C].X, Chunks[C].Y, Chunks[C].Z, OpenPerChunk[C], PairsPerChunk[C]));
+				Order.Add(C);
+			}
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.LineTopAudit [%s]: %d chunk(s) with open points, %d open point(s); %d pair(s) from two chunks on one up-line, in %d chunk(s)"),
+				*TargetWorld->GetName(), SurfaceChunks, Entries.Num(), Pairs, ChunksWithPairs);
+			Order.Sort([&PairsPerChunk](int32 A, int32 B) { return PairsPerChunk[A] > PairsPerChunk[B]; });
+			for (int32 I = 0; I < FMath::Min(MaxLines, Order.Num()) && PairsPerChunk[Order[I]] > 0; ++I)
+			{
+				const FIntVector& Coord = Chunks[Order[I]];
+				const FVector Centre = Config->WorldOrigin + (FVector(Coord) + FVector(0.5)) * ChunkWorldSize;
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("  chunk (%d,%d,%d) open=%d pairs=%d  ->  vox.TP %.0f %.0f %.0f"),
+					Coord.X, Coord.Y, Coord.Z, OpenPerChunk[Order[I]], PairsPerChunk[Order[I]], Centre.X, Centre.Y, Centre.Z);
+			}
+			const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("LineTopAudit_%s_%s.csv"),
+				*TargetWorld->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+			if (FFileHelper::SaveStringArrayToFile(CsvLines, *Path))
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.LineTopAudit: %d chunk(s) written to %s"), CsvLines.Num() - 1, *FPaths::ConvertRelativePathToFull(Path));
+			}
+
+			// The local density around the pawn, on the generated surface.
+			const APlayerController* PC = TargetWorld->GetFirstPlayerController();
+			const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+			if (DensityRadius > 0.0 && Pawn)
+			{
+				const double Sigma = VoxelSize, Reach = 3.0 * VoxelSize, Step = 0.5 * VoxelSize, DensityCell = 3.0 * VoxelSize;
+				auto DensityCellOf = [DensityCell](const FVector& P)
+				{
+					return FIntVector(FMath::FloorToInt32(P.X / DensityCell), FMath::FloorToInt32(P.Y / DensityCell), FMath::FloorToInt32(P.Z / DensityCell));
+				};
+				TMap<FIntVector, TArray<int32>> DensityGrid;
+				for (int32 I = 0; I < Entries.Num(); ++I)
+				{
+					DensityGrid.FindOrAdd(DensityCellOf(Entries[I].Position)).Add(I);
+				}
+				const FVector Centre = CM->GetGeneratedSurfacePoint(Pawn->GetActorLocation());
+				const FVector N = WM->GetUpVector(Centre);
+				const FVector T1 = FVector::CrossProduct(FMath::Abs(N.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector, N).GetSafeNormal();
+				const FVector T2 = FVector::CrossProduct(N, T1);
+				const double PerSample = 2.0 * UE_DOUBLE_PI * Sigma * Sigma / (VoxelSize * VoxelSize);
+				int32 Samples = 0, Under = 0, Over = 0;
+				double Sum = 0.0;
+				for (double U = -DensityRadius; U <= DensityRadius; U += Step)
+				{
+					for (double V = -DensityRadius; V <= DensityRadius; V += Step)
+					{
+						if (U * U + V * V > DensityRadius * DensityRadius)
+						{
+							continue;
+						}
+						const FVector Sample = CM->GetGeneratedSurfacePoint(Centre + T1 * U + T2 * V);
+						const FVector Up = WM->GetUpVector(Sample);
+						const FIntVector Home = DensityCellOf(Sample);
+						double Weighted = 0.0;
+						for (int32 DZ = -1; DZ <= 1; ++DZ)
+						for (int32 DY = -1; DY <= 1; ++DY)
+						for (int32 DX = -1; DX <= 1; ++DX)
+						{
+							if (const TArray<int32>* Bucket = DensityGrid.Find(Home + FIntVector(DX, DY, DZ)))
+							{
+								for (const int32 I : *Bucket)
+								{
+									const FVector D = Entries[I].Position - Sample;
+									const double Along = FVector::DotProduct(D, Up);
+									const double Across = (D - Up * Along).Size();
+									if (Across <= Reach && FMath::Abs(Along) < 3.0 * VoxelSize)
+									{
+										Weighted += Entries[I].Weight * FMath::Exp(-0.5 * FMath::Square(Across / Sigma));
+									}
+								}
+							}
+						}
+						const double Ratio = Weighted / PerSample;
+						++Samples;
+						Sum += Ratio;
+						if (Ratio < 0.8 || Ratio > 1.2)
+						{
+							(Ratio < 0.8 ? Under : Over) += 1;
+							if (DrawSeconds > 0.0f)
+							{
+								DrawDebugPoint(TargetWorld, Sample, 6.0f, Ratio < 0.8 ? FColor::Cyan : FColor::Magenta, false, DrawSeconds, SDPG_Foreground);
+							}
+						}
+					}
+				}
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.LineTopAudit [%s]: local density over %d sample(s) within %.0f uu of the pawn: mean %.3f, %d under 0.8, %d over 1.2"),
+					*TargetWorld->GetName(), Samples, DensityRadius, Samples > 0 ? Sum / Samples : 0.0, Under, Over);
+			}
+		}
+	}));
+
 // Console: voxel.FarCompression.Stats
 // Dump the chunk manager's voxel-data residency breakdown (Resident/Uniform/Compressed/Empty
 // chunk counts + resident MB + MB reclaimed by compression). Read with unreal-mcp

@@ -269,14 +269,25 @@ chunk centre's radial direction, within 0.6° of the true up anywhere in a 4,800
 same voxel data, started on a stride grid across the axis nearest up (`FVoxelDigitalLine`, VoxelCore). Along each
 line it applies the column scan's rules: every solid voxel with air above it along the line, "not the topmost" marks
 it underground, the next voxel along the line answers "air above is water". The crossing is interpolated along the
-line; crossings at chunk faces are kept within 1.5 voxels of the analytic surface and snapped onto it.
+line. At a line top whose voxel above lies outside the chunk (over the upper face: the line's own step before its first
+voxel; or on a side the line drifts in through) that voxel is the neighbour's, which the chunk's data cannot show. Within
+1.5 voxels of the generated surface it is taken as the planet generator made it, with the neighbour's edits applied
+(`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits` gathered by
+`UVoxelScatterManager::GatherPlanetTouchingEdits` from the chunk manager's edit layers): solid, the ground continues into
+the neighbour, which makes the point, so the line top is dropped and the rest of the line covered; air, the crossing is
+put on the generated surface (interpolated against the voxel where an edit changed it). Further from the surface the line
+top is dropped and the line covered, as before. Until world modes review G29 the line top was kept near the surface
+whatever that voxel was, which doubled the points along every band where the surface crosses a chunk face
+(`voxel.Scatter.LineTopAudit` counts such pairs).
 
 - **Classification** by the point's own radial up and altitude: face type and slope against local up, the elevation
   filter compares the altitude above the datum (heightmap worlds: world Z, as before), the underwater class by the sea
   sphere (`FVoxelSeaSurface`).
 - **Density per area**: a line bundle across axis A meets the surface at 1 / (s² cos θ) per area (θ between up and A,
-  up to √3× at a cube corner), so each point's spawn probability is weighted by cos θ; measured at 99-106% of the column
-  scan's density at both poles, 45°, the equator and a corner (`Scatter.Planet.DensityPerArea`).
+  up to √3× at a cube corner), so each point's spawn probability is weighted by cos θ; measured at 100% of the column
+  scan's density at both poles and the equator, 99.3% at 45° and 96.5% at a cube corner (`Scatter.Planet.DensityPerArea`;
+  before G29 the doubled line tops put the south pole at 105.5% and hid the corner's shortfall, which comes from strips
+  along chunk faces where neighbouring chunks' lines do not meet, G31).
 - **Instances** stand on local up (`FScatterSpawnPoint::LocalUp`, `GetRotationQuat`: `FindBetweenNormals(+Z, Up)`
   then the yaw about it; exact near the south pole), or on the surface normal with `bAlignToSurfaceNormal`. The jitter
   is in the tangent plane, from the same two random draws.
