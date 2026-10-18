@@ -228,9 +228,11 @@ public:
 	 * position (to 0.1 uu), yaw, scale and local up, visited in chunk order. The console command voxel.Scatter.Digest
 	 * logs it for every game world.
 	 *
+	 * @param OutChunkLines Optional: appended with one "X,Y,Z,count,crc" line per chunk (every type's points, in the same
+	 *                      order), so two builds' digests can be compared chunk by chunk (voxel.Scatter.Digest file)
 	 * @return "types=N chunks=M points=P | type <id>: <count> crc <hex> | ..."
 	 */
-	FString ComputeScatterDigest() const;
+	FString ComputeScatterDigest(TArray<FString>* OutChunkLines = nullptr) const;
 
 	/**
 	 * ExtractSurfacePointsAlongUp without cleared volumes (spherical SP-G1): a planet chunk's surface points along local

@@ -19,6 +19,8 @@
 #include "Async/Async.h"
 #include "Engine/World.h"
 #include "Misc/CommandLine.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Misc/Parse.h"
 #include "VoxelGPUSurfaceExtractor.h"
 #include "Engine/Engine.h"
@@ -27,12 +29,18 @@
 
 namespace
 {
-	/** voxel.Scatter.Digest: log every game world's scatter digest (UVoxelScatterManager::ComputeScatterDigest). */
+	/**
+	 * voxel.Scatter.Digest [file]: log every game world's scatter digest (UVoxelScatterManager::ComputeScatterDigest). With
+	 * "file", also write one line per chunk (X,Y,Z,count,crc) to Saved/VoxelAudit/ScatterDigest_<world>_<time>.csv, to
+	 * see which chunks two builds disagree on.
+	 */
 	FAutoConsoleCommand GVoxelScatterDigestCmd(
 		TEXT("voxel.Scatter.Digest"),
-		TEXT("Log a digest of the cached scatter spawn points (counts and a CRC per type) for every game world, to compare builds."),
-		FConsoleCommandDelegate::CreateLambda([]()
+		TEXT("Log a digest of the cached scatter spawn points (counts and a CRC per type) for every game world, to compare builds. ")
+		TEXT("'voxel.Scatter.Digest file' also writes a per-chunk CSV to Saved/VoxelAudit."),
+		FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 		{
+			const bool bFile = Args.Num() > 0 && Args[0].Equals(TEXT("file"), ESearchCase::IgnoreCase);
 			int32 Managers = 0;
 			for (TObjectIterator<UVoxelScatterManager> It; It; ++It)
 			{
@@ -42,7 +50,18 @@ namespace
 					continue;
 				}
 				++Managers;
-				UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: %s"), *World->GetName(), *It->ComputeScatterDigest());
+				TArray<FString> ChunkLines;
+				UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: %s"), *World->GetName(),
+					*It->ComputeScatterDigest(bFile ? &ChunkLines : nullptr));
+				if (bFile)
+				{
+					const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("ScatterDigest_%s_%s.csv"),
+						*World->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+					ChunkLines.Insert(TEXT("X,Y,Z,count,crc"), 0);
+					const bool bSaved = FFileHelper::SaveStringArrayToFile(ChunkLines, *Path);
+					UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: %d chunk line(s) %s %s"), *World->GetName(),
+						ChunkLines.Num() - 1, bSaved ? TEXT("written to") : TEXT("NOT written to"), *FPaths::ConvertRelativePathToFull(Path));
+				}
 			}
 			if (Managers == 0)
 			{
@@ -3207,7 +3226,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 	OutSurfaceData.bIsValid = true;
 }
 
-FString UVoxelScatterManager::ComputeScatterDigest() const
+FString UVoxelScatterManager::ComputeScatterDigest(TArray<FString>* OutChunkLines) const
 {
 	TArray<FIntVector> Chunks;
 	ScatterDataCache.GetKeys(Chunks);
@@ -3219,7 +3238,9 @@ FString UVoxelScatterManager::ComputeScatterDigest() const
 	int32 Points = 0;
 	for (const FIntVector& Chunk : Chunks)
 	{
-		for (const FScatterSpawnPoint& Point : ScatterDataCache.FindChecked(Chunk).SpawnPoints)
+		const TArray<FScatterSpawnPoint>& SpawnPoints = ScatterDataCache.FindChecked(Chunk).SpawnPoints;
+		uint32 ChunkCrc = 0u;
+		for (const FScatterSpawnPoint& Point : SpawnPoints)
 		{
 			const int32 Key[9] = {
 				Point.ScatterTypeID,
@@ -3229,7 +3250,12 @@ FString UVoxelScatterManager::ComputeScatterDigest() const
 			TPair<int32, uint32>& Entry = PerType.FindOrAdd(Point.ScatterTypeID, TPair<int32, uint32>(0, 0u));
 			++Entry.Key;
 			Entry.Value = FCrc::MemCrc32(Key, sizeof(Key), Entry.Value);
+			ChunkCrc = FCrc::MemCrc32(Key, sizeof(Key), ChunkCrc);
 			++Points;
+		}
+		if (OutChunkLines)
+		{
+			OutChunkLines->Add(FString::Printf(TEXT("%d,%d,%d,%d,%08x"), Chunk.X, Chunk.Y, Chunk.Z, SpawnPoints.Num(), ChunkCrc));
 		}
 	}
 	TArray<int32> Types;

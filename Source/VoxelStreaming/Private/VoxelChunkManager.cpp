@@ -52,6 +52,8 @@
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
@@ -6525,6 +6527,148 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
 		if (Managers == 0)
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats: no UVoxelChunkManager with a scatter manager found"));
+		}
+	}));
+
+// Console: voxel.Scatter.ConditioningAudit [maxLines=40]
+// Heightmap worlds (world modes review G23): for every cached scatter chunk that a terrain conditioning zone reaches (a
+// POI pad and its falloff ring), compare the surface points with the generated ground (the natural height plus the
+// chunk's zones, as the generator layers them) and count:
+//   ground       points within 1.5 voxels of the generated ground (the open surface the generator made)
+//   groundUnder  ground points classified underground (no surface scatter on them)
+//   natBuried    points whose chunk the buried-chunk test calls buried against the natural height
+//   genBuried    the same test against the generated height
+//   farErr       the largest |natural - generated| at a ground point: how far a far point placed at the natural height
+//                (the PCG sampler beyond its edit-aware band) sits off the ground
+// Logs a summary, the zones of the chunks that disagree and one line per such chunk, and writes every zone chunk to
+// Saved/VoxelAudit/ConditioningAudit_<world>_<time>.csv.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
+	TEXT("voxel.Scatter.ConditioningAudit"),
+	TEXT("Heightmap worlds: audit cached scatter chunks reached by terrain conditioning zones (surface points on the generated ground ")
+	TEXT("classified underground, buried-chunk test against the natural vs the generated height). Optional arg: max chunk lines to log."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 40;
+
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			const UVoxelScatterManager* ScatterMgr = CM ? CM->GetScatterManager() : nullptr;
+			const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+			const IVoxelWorldMode* WM = CM ? CM->GetWorldMode() : nullptr;
+			if (!ScatterMgr || !Config || !WM)
+			{
+				continue;
+			}
+			if (!WM->IsHeightmapBased())
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit: not a heightmap world (planets read the conditioned surface, spherical Phase 5)"));
+				continue;
+			}
+
+			const float VoxelSize = Config->VoxelSize;
+			const float ChunkWorldSize = Config->GetChunkWorldSize();
+			const float Margin = VoxelSize * 1.5f;
+			TArray<FIntVector> Chunks;
+			ScatterMgr->GetScatterDataCache().GetKeys(Chunks);
+			Chunks.Sort([](const FIntVector& A, const FIntVector& B)
+			{
+				return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
+			});
+
+			TArray<FString> CsvLines = { TEXT("X,Y,Z,zones,points,ground,groundUnder,natBuried,genBuried,farErr,spawns") };
+			TArray<FString> ChunkLines;
+			TMap<FVector2D, FVoxelConditioningZone> DisagreeZones;
+			int32 ZoneChunks = 0, DisagreeChunks = 0, TotalGround = 0, TotalGroundUnder = 0, TotalNat = 0, TotalGen = 0;
+			float WorstFarErr = 0.0f;
+			for (const FIntVector& Coord : Chunks)
+			{
+				const FChunkSurfaceData* Surface = ScatterMgr->GetChunkSurfaceData(Coord);
+				if (!Surface)
+				{
+					continue;
+				}
+				const FVector Origin = Config->WorldOrigin + FVector(Coord) * ChunkWorldSize;
+				TArray<FVoxelConditioningZone> Zones;
+				CM->GatherConditioningZones(FBox2D(FVector2D(Origin.X, Origin.Y), FVector2D(Origin.X + ChunkWorldSize, Origin.Y + ChunkWorldSize)), Zones);
+				if (Zones.Num() == 0)
+				{
+					continue;
+				}
+				++ZoneChunks;
+				const float ChunkTop = static_cast<float>(Origin.Z) + ChunkWorldSize;
+				int32 Ground = 0, GroundUnder = 0, Nat = 0, Gen = 0;
+				float FarErr = 0.0f;
+				for (const FVoxelSurfacePoint& Point : Surface->SurfacePoints)
+				{
+					const float Natural = WM->GetTerrainHeightAt(static_cast<float>(Point.Position.X), static_cast<float>(Point.Position.Y), Config->NoiseParams);
+					const float Generated = FVoxelTerrainConditioning::ApplyToHeight(Point.Position.X, Point.Position.Y, Natural, Zones);
+					Nat += ChunkTop < Natural - Margin ? 1 : 0;
+					Gen += ChunkTop < Generated - Margin ? 1 : 0;
+					if (FMath::Abs(static_cast<float>(Point.Position.Z) - Generated) <= Margin)
+					{
+						++Ground;
+						GroundUnder += Point.bIsUnderground ? 1 : 0;
+						FarErr = FMath::Max(FarErr, FMath::Abs(Natural - Generated));
+					}
+				}
+				const FChunkScatterData* Scatter = ScatterMgr->GetChunkScatterData(Coord);
+				const int32 Spawns = Scatter ? Scatter->SpawnPoints.Num() : 0;
+				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%.0f,%d"), Coord.X, Coord.Y, Coord.Z, Zones.Num(),
+					Surface->SurfacePoints.Num(), Ground, GroundUnder, Nat, Gen, FarErr, Spawns));
+				TotalGround += Ground;
+				TotalGroundUnder += GroundUnder;
+				TotalNat += Nat;
+				TotalGen += Gen;
+				WorstFarErr = FMath::Max(WorstFarErr, FarErr);
+				if (GroundUnder > 0 || Nat != Gen)
+				{
+					++DisagreeChunks;
+					ChunkLines.Add(FString::Printf(TEXT("  chunk (%d,%d,%d) zones=%d points=%d ground=%d groundUnder=%d natBuried=%d genBuried=%d farErr=%.0f spawns=%d"),
+						Coord.X, Coord.Y, Coord.Z, Zones.Num(), Surface->SurfacePoints.Num(), Ground, GroundUnder, Nat, Gen, FarErr, Spawns));
+					for (const FVoxelConditioningZone& Zone : Zones)
+					{
+						DisagreeZones.Add(Zone.Center, Zone);
+					}
+				}
+			}
+
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit [%s]: %d scatter chunk(s), %d reached by zones, %d disagree; ground points %d, on the ground but underground %d; natBuried %d vs genBuried %d point(s); worst farErr %.0f uu"),
+				*TargetWorld->GetName(), Chunks.Num(), ZoneChunks, DisagreeChunks, TotalGround, TotalGroundUnder, TotalNat, TotalGen, WorstFarErr);
+			for (const TPair<FVector2D, FVoxelConditioningZone>& Pair : DisagreeZones)
+			{
+				const FVoxelConditioningZone& Zone = Pair.Value;
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("  zone centre (%.0f, %.0f) inner %.0f falloff %.0f target %.0f strength %.2f, natural at centre %.0f"),
+					Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength,
+					WM->GetTerrainHeightAt(static_cast<float>(Zone.Center.X), static_cast<float>(Zone.Center.Y), Config->NoiseParams));
+			}
+			for (int32 i = 0; i < FMath::Min(MaxLines, ChunkLines.Num()); ++i)
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("%s"), *ChunkLines[i]);
+			}
+			const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("ConditioningAudit_%s_%s.csv"),
+				*TargetWorld->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+			if (FFileHelper::SaveStringArrayToFile(CsvLines, *Path))
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit: %d zone chunk(s) written to %s"), ZoneChunks, *FPaths::ConvertRelativePathToFull(Path));
+			}
 		}
 	}));
 
