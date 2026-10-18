@@ -453,7 +453,7 @@ The voxel-based path (7D-5) is the default because it produces consistent scatte
 ### Configuration Defaults
 - `MaxAsyncScatterTasks = 2`: Concurrent thread pool tasks
 - `MaxScatterGenerationsPerFrame = 2`: Queue drain rate
-- `bUseGPUScatterExtraction = false`: GPU path off by default (enable for SM5+ hardware)
+- `bUseGPUScatterExtraction`: retired in world modes review G27 and ignored; scatter extracts surface points from voxels on the CPU
 
 ### Scatter Stress Test
 - Fly fast through dense scatter terrain (Grass 50%, Rocks 5%, Trees 2%)

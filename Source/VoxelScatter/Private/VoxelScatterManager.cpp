@@ -4,14 +4,12 @@
 #include "VoxelScatterRenderer.h"
 #include "VoxelScatterConfiguration.h"
 #include "VoxelScatterExclusionSubsystem.h"
-#include "VoxelSurfaceExtractor.h"
 #include "VoxelScatterPlacement.h"
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelTerrainConditioning.h"
-#include "ChunkRenderData.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelScatter.h"
@@ -19,11 +17,8 @@
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
 #include "Engine/World.h"
-#include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Misc/Parse.h"
-#include "VoxelGPUSurfaceExtractor.h"
 #include "Engine/Engine.h"
 #include "HAL/IConsoleManager.h"
 #include "UObject/UObjectIterator.h"
@@ -170,24 +165,13 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	// Async scatter configuration
 	MaxAsyncScatterTasks = FMath::Clamp(Config->MaxAsyncScatterTasks, 1, 4);
 
-	// GPU extraction: enabled only if config says so AND platform supports SM5.
-	// -VoxelForceCPU (headless perf benchmark under -nullrhi, where GPU compute can't dispatch) forces
-	// the CPU path here too — matching the CPU-gen + CPU-mesh forcing in the chunk manager — so the whole
-	// pipeline runs on the CPU and the headless streaming bench works instead of crashing on a missing
-	// GPU shader (FResetSurfaceCounterCS) when the demo config has bUseGPUScatterExtraction=true.
-	const bool bForceCPU = FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU"));
-	bUseGPUExtraction = WantsGPUExtraction(*Config) && !bForceCPU && FVoxelGPUSurfaceExtractor::IsGPUExtractionSupported();
-	if (Config->bUseGPUScatterExtraction && Config->MeshingMode == EMeshingMode::Cubic)
+	// Surface points always come from the chunk's voxels on the thread pool. The GPU extractor that read the chunk's
+	// interior mesh was retired (world modes review G27): since seam ownership that mesh has no vertex in the cells
+	// against the chunk's max faces, its output buffer overflowed on 64^3 chunks, and its per-cell claim was not
+	// deterministic.
+	if (Config->bUseGPUScatterExtraction)
 	{
-		UE_LOG(LogVoxelScatter, Log, TEXT("Cubic mode: scatter extracts block-face centres on the CPU (bUseGPUScatterExtraction is ignored)"));
-	}
-	else if (Config->bUseGPUScatterExtraction && Config->WorldMode == EWorldMode::SphericalPlanet)
-	{
-		UE_LOG(LogVoxelScatter, Log, TEXT("Spherical planet: scatter extracts along local up on the CPU (bUseGPUScatterExtraction is ignored)"));
-	}
-	else if (Config->bUseGPUScatterExtraction && !bUseGPUExtraction)
-	{
-		UE_LOG(LogVoxelScatter, Warning, TEXT("GPU scatter extraction unavailable (SM5 unsupported or -VoxelForceCPU), falling back to CPU"));
+		UE_LOG(LogVoxelScatter, Log, TEXT("bUseGPUScatterExtraction is ignored: scatter extracts surface points from voxel data on the CPU (GPU extraction retired, world modes review G27)"));
 	}
 
 	// Reset statistics
@@ -291,14 +275,6 @@ void UVoxelScatterManager::Shutdown()
 	}
 	DistanceStreamInProgress.Empty();
 
-	// Drain GPU extraction queue
-	{
-		FGPUExtractionResult DiscardedGPUResult;
-		while (CompletedGPUExtractionQueue.Dequeue(DiscardedGPUResult)) {}
-	}
-	GPUExtractionPendingPlacement.Empty();
-	GPUExtractionPendingLODLevel.Empty();
-
 	// Clear pending queue and deferred upgrades
 	PendingGenerationQueue.Empty();
 	PendingQueueSet.Empty();
@@ -331,12 +307,6 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 	}
 
 	LastViewerPosition = ViewerPosition;
-
-	// Process completed GPU extractions (dispatches placement tasks)
-	if (bUseGPUExtraction)
-	{
-		ProcessCompletedGPUExtractions();
-	}
 
 	// Process completed async scatter results (game thread only: cache + HISM update)
 	ProcessCompletedAsyncScatter();
@@ -454,26 +424,19 @@ bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 
 // ==================== Mesh Data Callback ====================
 
-void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData,
-	const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize)
+void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData,
+	int32 ChunkSize, float VoxelSize)
 {
 	if (!bIsInitialized || !Configuration)
 	{
 		return;
 	}
 
-	// Voxel data is required for CPU extraction (always full resolution, LOD-independent)
-	const bool bHasVoxelData = VoxelData.Num() == ChunkSize * ChunkSize * ChunkSize;
-	if (!bHasVoxelData && !bUseGPUExtraction)
+	// Extraction reads the chunk's voxels (always full resolution, LOD-independent)
+	if (VoxelData.Num() != ChunkSize * ChunkSize * ChunkSize)
 	{
 		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): No voxel data for scatter extraction (expected %d, got %d)"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ChunkSize * ChunkSize * ChunkSize, VoxelData.Num());
-		return;
-	}
-
-	// GPU path still needs valid mesh data
-	if (bUseGPUExtraction && !MeshData.IsValid())
-	{
 		return;
 	}
 
@@ -552,25 +515,10 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, in
 		FPendingScatterGeneration Req;
 		Req.ChunkCoord = ChunkCoord;
 		Req.DistanceToViewer = ChunkDistance;
-		Req.LODLevel = LODLevel;
 		Req.CapturedDefinitions = DefsToGenerate;
-
-		// Always store voxel data for CPU extraction path
-		if (bHasVoxelData)
-		{
-			Req.ChunkVoxelData = VoxelData;
-			Req.ChunkSize = ChunkSize;
-			Req.VoxelSize = VoxelSize;
-		}
-
-		// Only store mesh data when GPU extraction is enabled
-		if (bUseGPUExtraction && MeshData.IsValid())
-		{
-			Req.Positions = MeshData.Positions;
-			Req.Normals = MeshData.Normals;
-			Req.UV1s = MeshData.UV1s;
-			Req.Colors = MeshData.Colors;
-		}
+		Req.ChunkVoxelData = VoxelData;
+		Req.ChunkSize = ChunkSize;
+		Req.VoxelSize = VoxelSize;
 		return Req;
 	};
 
@@ -642,11 +590,6 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 	// Remove deferred supplemental passes
 	DeferredSupplementalPasses.Remove(ChunkCoord);
 
-	// Remove from GPU pending placement
-	GPUExtractionPendingPlacement.Remove(ChunkCoord);
-	GPUExtractionPendingLODLevel.Remove(ChunkCoord);
-	GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
-
 	// Clear cleared volumes and completed type tracking - allow full regeneration on reload
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
 	CompletedScatterTypes.Remove(ChunkCoord);
@@ -672,11 +615,6 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 
 	// Remove from async in-progress (stale result will be discarded on arrival)
 	AsyncScatterInProgress.Remove(ChunkCoord);
-
-	// Remove from GPU pending placement
-	GPUExtractionPendingPlacement.Remove(ChunkCoord);
-	GPUExtractionPendingLODLevel.Remove(ChunkCoord);
-	GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
 
 	// Remove deferred supplemental passes
 	DeferredSupplementalPasses.Remove(ChunkCoord);
@@ -1317,11 +1255,7 @@ int64 UVoxelScatterManager::GetTotalMemoryUsage() const
 	Total += PendingGenerationQueue.GetAllocatedSize();
 	for (const auto& Pending : PendingGenerationQueue)
 	{
-		Total += Pending.ChunkVoxelData.GetAllocatedSize()
-			+ Pending.Positions.GetAllocatedSize()
-			+ Pending.Normals.GetAllocatedSize()
-			+ Pending.UV1s.GetAllocatedSize()
-			+ Pending.Colors.GetAllocatedSize();
+		Total += Pending.ChunkVoxelData.GetAllocatedSize();
 	}
 	Total += PendingQueueSet.GetAllocatedSize();
 
@@ -1388,7 +1322,6 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Pending Queue: %d\n")
 		TEXT("Async In-Flight: %d / %d\n")
 		TEXT("Distance Stream In-Flight: %d / %d\n")
-		TEXT("GPU Extraction: %s\n")
 		TEXT("Total Surface Points: %lld\n")
 		TEXT("Total Spawn Points: %lld\n")
 		TEXT("Avg Surface/Chunk: %.1f\n")
@@ -1402,7 +1335,6 @@ FString UVoxelScatterManager::GetDebugStats() const
 		PendingGenerationQueue.Num(),
 		AsyncScatterInProgress.Num(), MaxAsyncScatterTasks,
 		DistanceStreamInProgress.Num(), MaxDistanceStreamTasks,
-		bUseGPUExtraction ? TEXT("Enabled") : TEXT("Disabled"),
 		Stats.TotalSurfacePoints,
 		Stats.TotalSpawnPoints,
 		Stats.GetAverageSurfacePointsPerChunk(),
@@ -1414,109 +1346,6 @@ FString UVoxelScatterManager::GetDebugStats() const
 }
 
 // ==================== Internal Methods ====================
-
-void UVoxelScatterManager::GenerateChunkScatter(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData)
-{
-	if (!MeshData.IsValid())
-	{
-		return;
-	}
-
-	const FVector ChunkWorldOrigin = GetChunkWorldOrigin(ChunkCoord);
-
-	// Calculate chunk distance from viewer
-	float ChunkDistance = 0.0f;
-	if (Configuration)
-	{
-		const FVector ChunkCenter = ChunkWorldOrigin + FVector(Configuration->GetChunkWorldSize() * 0.5f);
-		ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
-	}
-
-	// Filter definitions to only those within their spawn distance
-	TArray<FScatterDefinition> FilteredDefinitions;
-	for (const FScatterDefinition& Def : ScatterDefinitions)
-	{
-		if (!Def.bEnabled)
-		{
-			continue;
-		}
-
-		// Use per-definition SpawnDistance if set, otherwise use global ScatterRadius
-		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
-
-		if (ChunkDistance <= EffectiveSpawnDistance)
-		{
-			FilteredDefinitions.Add(Def);
-		}
-	}
-
-	// Skip surface extraction if no definitions are in range
-	if (FilteredDefinitions.Num() == 0)
-	{
-		return;
-	}
-
-	// Extract surface points
-	FChunkSurfaceData SurfaceData;
-	FVoxelSurfaceExtractor::ExtractSurfacePoints(
-		MeshData,
-		ChunkCoord,
-		ChunkWorldOrigin,
-		SurfacePointSpacing,
-		0, // LOD level
-		SurfaceData
-	);
-
-	if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
-	{
-		return;
-	}
-
-	// Cache surface data
-	SurfaceDataCache.Add(ChunkCoord, MoveTemp(SurfaceData));
-	TotalSurfacePointsExtracted += SurfaceDataCache[ChunkCoord].SurfacePoints.Num();
-
-	// Generate spawn points using only definitions within range
-	const uint32 ChunkSeed = FVoxelScatterPlacement::ComputeChunkSeed(ChunkCoord, WorldSeed);
-
-	FChunkScatterData ScatterData;
-	FVoxelScatterPlacement::GenerateSpawnPoints(
-		SurfaceDataCache[ChunkCoord],
-		FilteredDefinitions,
-		ChunkSeed,
-		ScatterData
-	);
-
-	// Persistent exclusion volumes suppress spawn points on this direct-placement path too
-	// (async completion paths are covered by ApplyClearedVolumesToResult).
-	if (ExclusionVolumes.Num() > 0)
-	{
-		ScatterData.SpawnPoints.RemoveAll([this](const FScatterSpawnPoint& Point)
-		{
-			return IsPointExcluded(Point.Position);
-		});
-	}
-
-	const int32 SpawnCount = ScatterData.SpawnPoints.Num();
-
-	// Cache scatter data
-	ScatterDataCache.Add(ChunkCoord, MoveTemp(ScatterData));
-	TotalSpawnPointsGenerated += SpawnCount;
-	++TotalChunksProcessed;
-
-	// Update HISM instances
-	if (ScatterRenderer && ScatterRenderer->IsInitialized())
-	{
-		ScatterRenderer->UpdateChunkInstances(ChunkCoord, ScatterDataCache[ChunkCoord]);
-	}
-
-	// Broadcast event
-	OnChunkScatterReady.Broadcast(ChunkCoord, SpawnCount);
-
-	UE_LOG(LogVoxelScatter, Log, TEXT("Chunk (%d,%d,%d): Generated scatter (%d surface points, %d spawn points)"),
-		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
-		SurfaceDataCache[ChunkCoord].SurfacePoints.Num(), SpawnCount);
-}
 
 void UVoxelScatterManager::RemoveChunkScatter(const FIntVector& ChunkCoord)
 {
@@ -1537,8 +1366,8 @@ void UVoxelScatterManager::RemoveChunkScatter(const FIntVector& ChunkCoord)
 
 void UVoxelScatterManager::ApplyClearedVolumesToResult(const FIntVector& ChunkCoord, FChunkScatterData* ScatterData, FChunkSurfaceData* SurfaceData) const
 {
-	// Persistent exclusion volumes suppress SPAWN points on every async completion path (CPU,
-	// GPU-placement, distance stream) — this is what makes a chunk that streams in while a volume
+	// Persistent exclusion volumes suppress SPAWN points on every async completion path (extraction,
+	// distance stream) — this is what makes a chunk that streams in while a volume
 	// is active born bare. Surface points are deliberately left whole: the surface cache must
 	// survive so unregistering a volume can regrow foliage from it.
 	if (ScatterData && ExclusionVolumes.Num() > 0)
@@ -2067,47 +1896,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 		return;
 	}
 
-	// === GPU Extraction Path (uses mesh vertex data) ===
-	// Fall back to CPU when LOD > 0: GPU extraction uses mesh vertices which vary
-	// with LOD level, causing inconsistent scatter density. CPU path always uses
-	// full-resolution voxel data (LOD-independent).
-	const bool bUseCPUFallback = bUseGPUExtraction && PendingData.LODLevel > 0;
-	if (bUseGPUExtraction && !bUseCPUFallback)
-	{
-		// Dispatch GPU surface extraction
-		FGPUExtractionRequest GPURequest;
-		GPURequest.ChunkCoord = ChunkCoord;
-		GPURequest.ChunkWorldOrigin = ChunkWorldOrigin;
-		GPURequest.CellSize = CapturedSurfacePointSpacing;
-		GPURequest.Positions = MoveTemp(PendingData.Positions);
-		GPURequest.Normals = MoveTemp(PendingData.Normals);
-		GPURequest.UV1s = MoveTemp(PendingData.UV1s);
-		GPURequest.Colors = MoveTemp(PendingData.Colors);
-
-		// Store filtered definitions, LOD level, and voxel data for placement after GPU extraction completes
-		GPUExtractionPendingPlacement.Add(ChunkCoord, MoveTemp(FilteredDefinitions));
-		GPUExtractionPendingLODLevel.Add(ChunkCoord, PendingData.LODLevel);
-
-		// Store voxel data for underground classification of GPU-extracted surface points
-		if (PendingData.ChunkVoxelData.Num() > 0)
-		{
-			FGPUExtractionVoxelInfo VoxelInfo;
-			VoxelInfo.VoxelData = MoveTemp(PendingData.ChunkVoxelData);
-			VoxelInfo.ChunkSize = PendingData.ChunkSize;
-			VoxelInfo.VoxelSize = PendingData.VoxelSize;
-			GPUExtractionPendingVoxelInfo.Add(ChunkCoord, MoveTemp(VoxelInfo));
-		}
-
-		FVoxelGPUSurfaceExtractor::DispatchExtraction(
-			MoveTemp(GPURequest),
-			&CompletedGPUExtractionQueue);
-
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Dispatched GPU scatter extraction"),
-			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-		return;
-	}
-
-	// === CPU Async Path (voxel-based extraction — LOD-independent) ===
+	// === Async extraction from the chunk's voxels (LOD-independent) ===
 
 	// Snapshot cleared volumes for this chunk (read-only on thread pool)
 	TArray<FClearedScatterVolume> CapturedClearedVolumes;
@@ -2354,310 +2143,6 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 			}
 		}
 	}
-}
-
-void UVoxelScatterManager::ProcessCompletedGPUExtractions()
-{
-	FGPUExtractionResult GPUResult;
-	int32 ProcessedCount = 0;
-	const int32 MaxGPUProcessPerFrame = 4;
-
-	// Count check BEFORE dequeue — see ProcessCompletedAsyncScatter: dequeue-first
-	// drops one result on the exiting iteration and leaks its in-progress entry.
-	while (ProcessedCount < MaxGPUProcessPerFrame && CompletedGPUExtractionQueue.Dequeue(GPUResult))
-	{
-		++ProcessedCount;
-
-		const FIntVector ChunkCoord = GPUResult.ChunkCoord;
-
-		// Look up the pending placement definitions for this chunk
-		TArray<FScatterDefinition> FilteredDefinitions;
-		if (TArray<FScatterDefinition>* PendingDefs = GPUExtractionPendingPlacement.Find(ChunkCoord))
-		{
-			FilteredDefinitions = MoveTemp(*PendingDefs);
-			GPUExtractionPendingPlacement.Remove(ChunkCoord);
-		}
-
-		// Discard if chunk is no longer in async tracking (was unloaded)
-		if (!AsyncScatterInProgress.Contains(ChunkCoord))
-		{
-			UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): GPU extraction result discarded - chunk no longer tracked"),
-				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-			GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
-			continue;
-		}
-
-		if (!GPUResult.bSuccess || FilteredDefinitions.Num() == 0)
-		{
-			// Remove from in-progress tracking for failed/empty results
-			AsyncScatterInProgress.Remove(ChunkCoord);
-			GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
-			continue;
-		}
-
-		// GPU extraction complete - now launch CPU placement on thread pool
-		// Build surface data from GPU extraction result
-		FChunkSurfaceData SurfaceData(ChunkCoord);
-		SurfaceData.LODLevel = GPUExtractionPendingLODLevel.FindRef(ChunkCoord);
-		GPUExtractionPendingLODLevel.Remove(ChunkCoord);
-		SurfaceData.AveragePointSpacing = SurfacePointSpacing;
-		SurfaceData.SurfacePoints = MoveTemp(GPUResult.SurfacePoints);
-		SurfaceData.SurfaceAreaEstimate = SurfaceData.SurfacePoints.Num() * SurfacePointSpacing * SurfacePointSpacing;
-		SurfaceData.bIsValid = true;
-
-		if (SurfaceData.SurfacePoints.Num() == 0)
-		{
-			AsyncScatterInProgress.Remove(ChunkCoord);
-			continue;
-		}
-
-		// Filter out points in cleared volumes (GPU doesn't know about these)
-		if (const TArray<FClearedScatterVolume>* Volumes = ClearedVolumesPerChunk.Find(ChunkCoord))
-		{
-			SurfaceData.SurfacePoints.RemoveAll([&Volumes](const FVoxelSurfacePoint& Point)
-			{
-				for (const FClearedScatterVolume& Volume : *Volumes)
-				{
-					if (Volume.ContainsPoint(Point.Position))
-					{
-						return true;
-					}
-				}
-				return false;
-			});
-
-			if (SurfaceData.SurfacePoints.Num() == 0)
-			{
-				AsyncScatterInProgress.Remove(ChunkCoord);
-				continue;
-			}
-		}
-
-		// Retrieve voxel data for underground classification (if available)
-		TArray<FVoxelData> CapturedVoxelData;
-		int32 CapturedChunkSize = 0;
-		float CapturedVoxelSize = 0.0f;
-		if (FGPUExtractionVoxelInfo* VoxelInfo = GPUExtractionPendingVoxelInfo.Find(ChunkCoord))
-		{
-			CapturedVoxelData = MoveTemp(VoxelInfo->VoxelData);
-			CapturedChunkSize = VoxelInfo->ChunkSize;
-			CapturedVoxelSize = VoxelInfo->VoxelSize;
-			GPUExtractionPendingVoxelInfo.Remove(ChunkCoord);
-		}
-
-		const FVector CapturedChunkWorldOrigin = GetChunkWorldOrigin(ChunkCoord);
-
-		// Launch placement on thread pool (same as CPU async path from here)
-		const uint32 CapturedWorldSeed = WorldSeed;
-		const int32 GPUSurfacePointCount = SurfaceData.SurfacePoints.Num();
-		const FScatterExtractionContext ExtractionContext = MakeExtractionContext(ChunkCoord);
-		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
-
-		Async(EAsyncExecution::ThreadPool,
-			[WeakThis, SurfaceData = MoveTemp(SurfaceData), FilteredDefinitions = MoveTemp(FilteredDefinitions),
-			 CapturedWorldSeed, ChunkCoord,
-			 CapturedVoxelData = MoveTemp(CapturedVoxelData), CapturedChunkSize, CapturedVoxelSize,
-			 CapturedChunkWorldOrigin, ExtractionContext]() mutable
-		{
-			// Classify GPU-extracted surface points as underground / underwater using voxel data plus
-			// the analytic terrain height and water level (the cross-chunk coverage + water-level fixes).
-			if (CapturedVoxelData.Num() == CapturedChunkSize * CapturedChunkSize * CapturedChunkSize && CapturedChunkSize > 0)
-			{
-				ClassifySurfacePointsUnderground(
-					SurfaceData.SurfacePoints,
-					CapturedVoxelData,
-					CapturedChunkWorldOrigin,
-					CapturedChunkSize,
-					CapturedVoxelSize,
-					ExtractionContext);
-			}
-
-			// Count underground points for diagnostic
-			int32 UGCount = 0;
-			for (const FVoxelSurfacePoint& Pt : SurfaceData.SurfacePoints)
-			{
-				if (Pt.bIsUnderground) ++UGCount;
-			}
-
-			FAsyncScatterResult Result;
-			Result.ChunkCoord = ChunkCoord;
-
-			const uint32 ChunkSeed = FVoxelScatterPlacement::ComputeChunkSeed(ChunkCoord, CapturedWorldSeed);
-
-			FChunkScatterData ScatterData;
-			FVoxelScatterPlacement::GenerateSpawnPoints(
-				SurfaceData,
-				FilteredDefinitions,
-				ChunkSeed,
-				ScatterData
-			);
-
-			UE_LOG(LogVoxelScatter, Verbose, TEXT("GPUScatter (%d,%d,%d): surfPts=%d underground=%d spawnPts=%d defs=%d"),
-				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
-				SurfaceData.SurfacePoints.Num(), UGCount, ScatterData.SpawnPoints.Num(), FilteredDefinitions.Num());
-
-			Result.SurfaceData = MoveTemp(SurfaceData);
-			Result.ScatterData = MoveTemp(ScatterData);
-			Result.bSuccess = true;
-
-			for (const FScatterDefinition& Def : FilteredDefinitions)
-			{
-				Result.GeneratedTypeIDs.Add(Def.ScatterID);
-			}
-
-			if (UVoxelScatterManager* This = WeakThis.Get())
-			{
-				This->CompletedScatterQueue.Enqueue(MoveTemp(Result));
-			}
-		});
-
-		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): GPU extraction complete (%d surface points), launching placement"),
-			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, GPUSurfacePointCount);
-	}
-}
-
-void UVoxelScatterManager::ClassifySurfacePointsUnderground(
-	TArray<FVoxelSurfacePoint>& SurfacePoints,
-	const TArray<FVoxelData>& VoxelData,
-	const FVector& ChunkWorldOrigin,
-	int32 ChunkSize,
-	float VoxelSize,
-	const FScatterExtractionContext& Context)
-{
-	const int32 ExpectedVoxels = ChunkSize * ChunkSize * ChunkSize;
-	if (VoxelData.Num() != ExpectedVoxels || ChunkSize <= 0 || VoxelSize <= 0.0f)
-		return;
-
-	const int32 SliceSize = ChunkSize * ChunkSize;
-	int32 UndergroundCount = 0;
-
-	// World Z of this chunk's top, for the edit-independent cross-chunk coverage test below.
-	const float ChunkTopWorldZ = ChunkWorldOrigin.Z + ChunkSize * VoxelSize;
-
-	for (FVoxelSurfacePoint& Point : SurfacePoints)
-	{
-		const FVector LocalPos = (Point.Position - ChunkWorldOrigin) / VoxelSize;
-		const int32 VX = FMath::Clamp(FMath::FloorToInt(LocalPos.X), 0, ChunkSize - 1);
-		const int32 VY = FMath::Clamp(FMath::FloorToInt(LocalPos.Y), 0, ChunkSize - 1);
-		const int32 VZ = FMath::Clamp(FMath::FloorToInt(LocalPos.Z), 0, ChunkSize - 1);
-		const int32 Idx = VX + VY * ChunkSize + VZ * SliceSize;
-
-		bool bFlaggedUnderground = false;
-
-		// Direct flag check — covers both air and solid boundary voxels
-		if (VoxelData[Idx].HasUndergroundFlag())
-		{
-			bFlaggedUnderground = true;
-		}
-		// For mesh-interpolated positions on solid voxels, check air neighbor along normal
-		else if (VoxelData[Idx].IsSolid())
-		{
-			const FVector AirLocal = (Point.Position + FVector(Point.Normal) * VoxelSize * 0.5f - ChunkWorldOrigin) / VoxelSize;
-			const int32 AX = FMath::Clamp(FMath::FloorToInt(AirLocal.X), 0, ChunkSize - 1);
-			const int32 AY = FMath::Clamp(FMath::FloorToInt(AirLocal.Y), 0, ChunkSize - 1);
-			const int32 AZ = FMath::Clamp(FMath::FloorToInt(AirLocal.Z), 0, ChunkSize - 1);
-			const int32 AirIdx = AX + AY * ChunkSize + AZ * SliceSize;
-
-			if (VoxelData[AirIdx].HasUndergroundFlag())
-			{
-				bFlaggedUnderground = true;
-			}
-		}
-
-		// Column scan override for upward-facing surfaces (floors, slopes).
-		// Two checks:
-		// 1. Find first air above — if surface air (not underground), de-classify
-		// 2. If genuinely underground, check cave headroom — de-classify if ceiling
-		//    is too close (mushroom meshes would poke through thin terrain)
-		if (bFlaggedUnderground && Point.Normal.Z > 0.3f)
-		{
-			bool bFoundUndergroundAir = false;
-			int32 Headroom = 0; // air voxels above before hitting solid ceiling
-
-			for (int32 dz = 1; dz < ChunkSize; ++dz)
-			{
-				const int32 CheckZ = VZ + dz;
-				if (CheckZ >= ChunkSize)
-					break;
-
-				const int32 CheckIdx = VX + VY * ChunkSize + CheckZ * SliceSize;
-				const FVoxelData& CheckVoxel = VoxelData[CheckIdx];
-
-				if (!CheckVoxel.IsSolid())
-				{
-					if (!bFoundUndergroundAir)
-					{
-						// First air voxel — determines underground vs surface
-						if (CheckVoxel.HasUndergroundFlag())
-							bFoundUndergroundAir = true;
-						else
-							break; // Surface air → will de-classify below
-					}
-					++Headroom;
-				}
-				else if (bFoundUndergroundAir)
-				{
-					// Hit ceiling after finding underground air
-					break;
-				}
-			}
-
-			// De-classify if surface air above, or chunk boundary (all solid)
-			if (!bFoundUndergroundAir)
-			{
-				bFlaggedUnderground = false;
-			}
-			// De-classify if cave headroom is insufficient (< 3 voxels = 300 units).
-			// Prevents mushroom meshes from poking through thin cave ceilings.
-			else if (Headroom < 3)
-			{
-				bFlaggedUnderground = false;
-			}
-		}
-
-		// Cross-chunk coverage: if the whole chunk sits below the analytic terrain surface it is buried
-		// under terrain that lives in a neighboring chunk — the per-chunk flag / column scan above cannot
-		// see it. Comparing the CHUNK top (not the per-point Z) keeps this edit-independent: carving into a
-		// surface chunk exposes floors to sky that the per-point flag / column scan (run on edit-merged
-		// voxels) classify as surface, instead of this analytic height pinning them underground.
-		// Same fix as the CPU extractor's bCoveredByTerrain.
-		// The analytic height is the generated one (the natural height plus the chunk's conditioning zones, G23): in a POI's
-		// pad and falloff ring the natural height can sit well above or below the ground the generator made.
-		if (!bFlaggedUnderground && Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
-		{
-			const float TerrainHeight = Context.GetGeneratedTerrainHeight(Point.Position.X, Point.Position.Y);
-			if (ChunkTopWorldZ < TerrainHeight - VoxelSize * 1.5f)
-			{
-				bFlaggedUnderground = true;
-			}
-		}
-
-		if (bFlaggedUnderground)
-		{
-			Point.bIsUnderground = true;
-			++UndergroundCount;
-		}
-		else
-		{
-			// Underwater: open water above the point (water flag on the air voxel above) OR the
-			// point is below the world water level. The water-level test catches submerged seabeds
-			// even where the per-voxel water flag never propagated. Underground takes precedence.
-			const FVector AboveLocal = (Point.Position + FVector(0.0f, 0.0f, VoxelSize * 0.5f) - ChunkWorldOrigin) / VoxelSize;
-			const int32 UX = FMath::Clamp(FMath::FloorToInt(AboveLocal.X), 0, ChunkSize - 1);
-			const int32 UY = FMath::Clamp(FMath::FloorToInt(AboveLocal.Y), 0, ChunkSize - 1);
-			const int32 UZ = FMath::Clamp(FMath::FloorToInt(AboveLocal.Z), 0, ChunkSize - 1);
-			const int32 UIdx = UX + UY * ChunkSize + UZ * SliceSize;
-			const bool bWaterAbove = VoxelData[UIdx].IsAir() && VoxelData[UIdx].HasWaterFlag();
-			const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(Point.Position) > 0.0;
-			if (bWaterAbove || bBelowWater)
-			{
-				Point.bIsUnderwater = true;
-			}
-		}
-	}
-
-	UE_LOG(LogVoxelScatter, Log, TEXT("ClassifyUnderground: %d/%d surface points marked underground"),
-		UndergroundCount, SurfacePoints.Num());
 }
 
 void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
@@ -3351,14 +2836,6 @@ FString UVoxelScatterManager::ComputeScatterDigest(TArray<FString>* OutChunkLine
 		Out += FString::Printf(TEXT(" | type %d: %d crc %08x"), Type, Entry.Key, Entry.Value);
 	}
 	return Out;
-}
-
-bool UVoxelScatterManager::WantsGPUExtraction(const UVoxelWorldConfiguration& Config)
-{
-	// Planets extract on the CPU along local up (spherical SP-G1): the GPU extractor's slope, face type and
-	// classification are along world Z.
-	return Config.bUseGPUScatterExtraction && Config.MeshingMode != EMeshingMode::Cubic
-		&& Config.WorldMode != EWorldMode::SphericalPlanet;
 }
 
 FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) const

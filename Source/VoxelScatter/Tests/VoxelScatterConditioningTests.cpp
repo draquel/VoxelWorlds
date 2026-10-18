@@ -12,7 +12,6 @@
 #include "VoxelTerrainConditioning.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelData.h"
-#include "ChunkRenderData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -21,8 +20,8 @@
 // GENERATED height (the natural height plus the chunk's conditioning zones), not the natural one. A hillside rising
 // 0.6 uu per uu along +X with two POI-style zones: a pad cut into the slope (Cut: its uphill pad and ring are lowered by
 // up to 2,400 uu) and a pad raised 3,000-5,400 uu over it (Fill). The chunks are made from the generated height with the
-// generator's SDF (no caves, biomes or water), and every heightmap path classifies them: the column scan, the cubic
-// block-face scan and the GPU path's classifier (over the column scan's points, their classification cleared).
+// generator's SDF (no caves, biomes or water), and both heightmap paths classify them: the column scan and the cubic
+// block-face scan (the GPU path's classifier this also ran went with the GPU extractor, G27).
 //
 // - CutPadAndRing: over every chunk of the cut zone's footprint, no surface point on the generated ground (within 1.5
 //   voxels of it) is underground. Against the natural height (no zones in the context: the old test) the chunk holding
@@ -101,10 +100,10 @@ namespace VoxelScatterConditioningTestUtils
 		return Context;
 	}
 
-	enum class EPath : uint8 { Column, Cubic, GPUClassifier };
+	enum class EPath : uint8 { Column, Cubic };
 	const TCHAR* PathName(EPath Path)
 	{
-		return Path == EPath::Column ? TEXT("column scan") : (Path == EPath::Cubic ? TEXT("cubic scan") : TEXT("GPU classifier"));
+		return Path == EPath::Column ? TEXT("column scan") : TEXT("cubic scan");
 	}
 
 	/** One heightmap path's surface points for a chunk. */
@@ -113,15 +112,6 @@ namespace VoxelScatterConditioningTestUtils
 		FChunkSurfaceData Surface;
 		UVoxelScatterManager::ExtractHeightmapSurfacePoints(Voxels, Coord, ChunkOrigin(Coord), ChunkSize, VoxelSize, VoxelSize,
 			Path == EPath::Cubic, Context, Surface);
-		if (Path == EPath::GPUClassifier)
-		{
-			for (FVoxelSurfacePoint& Point : Surface.SurfacePoints)
-			{
-				Point.bIsUnderground = false;
-				Point.bIsUnderwater = false;
-			}
-			UVoxelScatterManager::ClassifySurfacePointsUnderground(Surface.SurfacePoints, Voxels, ChunkOrigin(Coord), ChunkSize, VoxelSize, Context);
-		}
 		return Surface.SurfacePoints;
 	}
 
@@ -176,7 +166,6 @@ namespace VoxelScatterConditioningTestUtils
 			Config->ChunkSize = ChunkSize;
 			Config->VoxelSize = VoxelSize;
 			Config->ScatterRadius = 100000.0f;
-			Config->bUseGPUScatterExtraction = false;
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
 			Manager->Initialize(Config, World);
@@ -199,8 +188,7 @@ namespace VoxelScatterConditioningTestUtils
 		/** Submit a chunk as if its mesh just arrived and pump until its surface data is cached. */
 		const FChunkSurfaceData* Run(const FIntVector& Coord, const TArray<FVoxelData>& Voxels)
 		{
-			const FChunkMeshData EmptyMesh; // CPU voxel-based extraction ignores mesh data
-			Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, Voxels, ChunkSize, VoxelSize);
+			Manager->OnChunkMeshDataReady(Coord, Voxels, ChunkSize, VoxelSize);
 			const double Deadline = FPlatformTime::Seconds() + 15.0;
 			while (FPlatformTime::Seconds() < Deadline)
 			{
@@ -228,7 +216,7 @@ bool FVoxelScatterConditionedCutTest::RunTest(const FString& Parameters)
 	const FScatterExtractionContext Natural = MakeContext(Mode, nullptr);
 	const TArray<FIntVector> Chunks = FootprintChunks(Zones[0], Zones);
 
-	for (const EPath Path : { EPath::Column, EPath::Cubic, EPath::GPUClassifier })
+	for (const EPath Path : { EPath::Column, EPath::Cubic })
 	{
 		int32 Ground = 0, GroundUnder = 0, NaturalGround = 0, NaturalGroundUnder = 0, CutGround = 0;
 		TSet<FIntVector> NaturalBuriedChunks;
@@ -307,7 +295,7 @@ bool FVoxelScatterConditionedFillTest::RunTest(const FString& Parameters)
 	}
 
 	const float ChunkTop = static_cast<float>(ChunkOrigin(Coord).Z) + ChunkWorldSize;
-	for (const EPath Path : { EPath::Column, EPath::Cubic, EPath::GPUClassifier })
+	for (const EPath Path : { EPath::Column, EPath::Cubic })
 	{
 		for (const bool bGenerated : { true, false })
 		{

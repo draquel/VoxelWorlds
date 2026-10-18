@@ -10,7 +10,6 @@
 #include "IVoxelWorldMode.h"
 #include "VoxelData.h"
 #include "VoxelMaterialRegistry.h"
-#include "ChunkRenderData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -53,7 +52,6 @@ namespace VoxelScatterCleanupTestUtils
 			Config->VoxelSize = TestVoxelSize;
 			Config->ScatterRadius = 100000.0f; // keep every test chunk in range of the origin viewer
 			Config->MaxAsyncScatterTasks = MaxAsyncTasks;
-			Config->bUseGPUScatterExtraction = false;
 
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
@@ -183,8 +181,7 @@ namespace VoxelScatterCleanupTestUtils
 	/** Submit a chunk to the scatter manager as if its mesh just arrived. */
 	static void SubmitChunk(UVoxelScatterManager* Manager, const FIntVector& ChunkCoord)
 	{
-		const FChunkMeshData EmptyMesh; // CPU voxel-based extraction ignores mesh data
-		Manager->OnChunkMeshDataReady(ChunkCoord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+		Manager->OnChunkMeshDataReady(ChunkCoord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 	}
 
 	/** Pump Update until Condition is met or timeout. Returns whether the condition was met. */
@@ -540,9 +537,7 @@ bool FVoxelScatterClassificationTest::RunTest(const FString& Parameters)
 
 	for (const FCase& C : Cases)
 	{
-		const FChunkMeshData EmptyMesh;
-		Harness.Manager->OnChunkMeshDataReady(C.Coord, 0, EmptyMesh,
-			MakeFlaggedGrassChunk(C.bWater, C.bUnderground), TestChunkSize, TestVoxelSize);
+		Harness.Manager->OnChunkMeshDataReady(C.Coord, MakeFlaggedGrassChunk(C.bWater, C.bUnderground), TestChunkSize, TestVoxelSize);
 	}
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
@@ -619,8 +614,7 @@ bool FVoxelScatterCoveredFloorTest::RunTest(const FString& Parameters)
 	FScatterTestHarness Harness(2);
 	const FIntVector Coord(0, 0, 0);
 
-	const FChunkMeshData EmptyMesh;
-	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeCoveredCaveChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->OnChunkMeshDataReady(Coord, MakeCoveredCaveChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -686,8 +680,7 @@ bool FVoxelScatterBelowWaterTest::RunTest(const FString& Parameters)
 	Harness.Config->WaterLevel = 100000.0f;
 
 	const FIntVector Coord(0, 0, 0);
-	const FChunkMeshData EmptyMesh;
-	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -743,8 +736,7 @@ bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
 	Harness.Manager->SetWorldMode(&WorldMode);
 
 	const FIntVector Coord(0, 0, 0);
-	const FChunkMeshData EmptyMesh;
-	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -797,8 +789,7 @@ bool FVoxelScatterSurfaceChunkNotBuriedTest::RunTest(const FString& Parameters)
 	Harness.Manager->SetWorldMode(&WorldMode);
 
 	const FIntVector Coord(0, 0, 0);
-	const FChunkMeshData EmptyMesh;
-	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -867,8 +858,7 @@ bool FVoxelScatterExposedFloorTest::RunTest(const FString& Parameters)
 	}
 
 	const FIntVector Coord(0, 0, 0);
-	const FChunkMeshData EmptyMesh;
-	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, Voxels, TestChunkSize, TestVoxelSize);
+	Harness.Manager->OnChunkMeshDataReady(Coord, Voxels, TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -974,8 +964,7 @@ bool FVoxelScatterExclusionBornBareTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Volume registered"), Harness.Manager->RegisterScatterExclusionVolume(Volume));
 
 	// Submit the chunk AFTER the volume exists — the fresh generation must come out bare
-	const FChunkMeshData EmptyMesh;
-	Harness.Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{

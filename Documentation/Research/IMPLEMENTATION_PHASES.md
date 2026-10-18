@@ -1061,7 +1061,7 @@ Phase 7 performance targets displayed for comparison:
 - [x] Update `GetPendingGenerationCount()` to include async in-flight tasks
 - [x] Handle edge cases: chunk unloaded during async, edit during async, shutdown safety
 
-#### 7D-2: GPU Surface Extraction - COMPLETE
+#### 7D-2: GPU Surface Extraction - COMPLETE (retired in world modes review G27, `WORLD_MODES_REVIEW_PLAN.md` §19.5)
 - [x] Create `ScatterSurfaceExtraction.usf` compute shader (64 threads/group, spatial dedup via occupancy grid)
 - [x] Create `VoxelGPUSurfaceExtractor.h/cpp` - RDG dispatch, staging buffer readback
 - [x] Add RenderCore/RHI/Renderer dependencies to VoxelScatter.Build.cs

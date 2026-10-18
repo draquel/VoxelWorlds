@@ -490,8 +490,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (ClampMin = "1000.0", EditCondition = "bEnableScatter"))
 	float ScatterRadius = 10000.0f;
 
-	/** Use GPU compute shaders for scatter surface extraction (requires SM5) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (EditCondition = "bEnableScatter"))
+	/**
+	 * Retired (world modes review G27): ignored. Scatter extracts surface points from the chunk's voxels on the CPU in
+	 * every world. The GPU extractor read the chunk's interior mesh, which since seam ownership has no vertex in the
+	 * cells along the chunk's max faces, so it left strips without scatter there; it was also not deterministic. Kept so
+	 * existing assets load; the scatter manager logs once when it is set.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", AdvancedDisplay,
+		meta = (EditCondition = "bEnableScatter", DeprecatedProperty, DeprecationMessage = "Ignored: scatter extracts on the CPU (world modes review G27)."))
 	bool bUseGPUScatterExtraction = false;
 
 	/**
