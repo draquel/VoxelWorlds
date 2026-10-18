@@ -3814,8 +3814,8 @@ stamps behave exactly as before.
 
 ### 19.3 G23: heightmap scatter and PCG far points read the generated surface (2026-10-17)
 
-VoxelWorlds branch `fix/g23-heightmap-conditioning` (base `2fd32fc`, main after spherical Phase 5); the parent's gitlink
-and doc map on its own branch. Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor
+PRs open (draquel/VoxelWorlds#105, `fix/g23-heightmap-conditioning`, base `2fd32fc`, main after spherical Phase 5; the
+parent's gitlink and doc map in draquel/UE5_PluginDev#115). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor
 beside the user's (Claudius on 8081), background throttling off. For every `VoxelDemo` run `DemoSmoothWorldConfig`'s
 `bUseGPUScatterExtraction` was set false in memory, never saved (GPU scatter extraction is not deterministic).
 
