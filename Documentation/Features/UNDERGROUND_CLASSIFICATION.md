@@ -97,7 +97,6 @@ The **surface exposure guard** (`!bAdjacentToSurfaceAir`) prevents flagging soli
 
 | Consumer | What It Checks | Effect |
 |----------|---------------|--------|
-| `ClassifySurfacePointsUnderground` | Voxel at surface point position | Sets `bIsUnderground` on scatter surface points |
 | `ExtractSurfacePointsFromVoxelData` | Air voxels in column scan | Sets `bIsUnderground` on CPU-extracted surface points |
 | `ExtractSurfacePointsCubic` | Air voxels in cubic block scan | Sets `bIsUnderground` on cubic surface points |
 | `VoxelTreeInjector` | Air voxel above tree base | Prevents tree placement in caves |
@@ -105,45 +104,26 @@ The **surface exposure guard** (`!bAdjacentToSurfaceAir`) prevents flagging soli
 
 ## Surface Point Classification
 
-`ClassifySurfacePointsUnderground()` is a static function on `UVoxelScatterManager` that classifies an array of `FVoxelSurfacePoint` using the chunk's voxel data. It runs on the thread pool as part of the async scatter generation pipeline.
+The scatter extractors classify each surface point as they make it: the column scan (`ExtractSurfacePointsFromVoxelData`),
+the cubic block-face scan (`ExtractSurfacePointsCubic`) and, on planets, the scan along local up
+(`ExtractSurfacePointsAlongUp`). They run on the thread pool as part of the async scatter generation pipeline. A point
+is underground when:
 
-### Classification Algorithm
+**Step 1 — Flags**: the air voxel above the crossing carries `VOXEL_FLAG_UNDERGROUND`, or the solid voxel under it does.
 
-For each surface point:
+**Step 2 — Not the column's top**: a lower crossing in the same column is always covered (a cave floor, or the ground under
+an overhang), even where Pass 1 left its air unflagged (a ceiling thinner than `MinSolidThickness`, or a cave spanning a
+chunk boundary). On a slope each column's terrain surface is its topmost crossing.
 
-**Step 1 — Direct flag check**: Map the surface point world position to a voxel coordinate. If the voxel has `VOXEL_FLAG_UNDERGROUND`, mark underground.
+**Step 3 — Buried chunk**, below.
 
-**Step 2 — Normal-offset air neighbor check**: If the voxel is solid and unflagged, offset the position by `Normal * VoxelSize * 0.5` (half a voxel toward the air side) and check that voxel. This handles mesh-interpolated positions that land on the solid side of a boundary.
+Until world modes review G27 the GPU extraction path classified its mesh-vertex points afterwards with
+`ClassifySurfacePointsUnderground` (the flag at the point, a normal-offset neighbour, a column scan with a 3-voxel
+headroom check, and the buried-chunk test); it was deleted with that path (`WORLD_MODES_REVIEW_PLAN.md` §19.5).
 
-**Step 3 — Column scan override** (upward-facing surfaces only, `Normal.Z > 0.3`):
-If the point was marked underground by Steps 1-2, verify by scanning upward from the voxel position:
+**Buried chunk** (heightmap worlds): a point not yet underground is underground when its whole chunk lies under the analytic terrain, `ChunkTop < GeneratedHeight - 1.5 * VoxelSize`: the cover over it lives in a neighbouring chunk, which no per-chunk check can see. The extractors (`ExtractSurfacePointsFromVoxelData`, `ExtractSurfacePointsCubic`) apply it per column. `GeneratedHeight` is the ground the generator makes: the world mode's natural height with the chunk's terrain conditioning zones (POI pads and their falloff rings) layered on, `FScatterExtractionContext::GetGeneratedTerrainHeight`, the zones gathered by the chunk manager when the extraction is set up (`FScatterExtractionContext::ConditioningZones`). Before world modes review G23 it was the natural height, so a pad cut below a chunk's top buried the chunk holding the pad's ground (no surface scatter on it), and under a raised pad the chunk below read as open surface.
 
-1. Skip solid voxels upward until the first air voxel is found
-2. If the first air is **non-underground** (surface/sky) -> **de-classify** (this is terrain surface, not a cave floor)
-3. If the first air is **underground** -> measure the **headroom** (contiguous air voxels before the next solid ceiling)
-4. If headroom < 3 voxels -> **de-classify** (cave is too thin; scatter meshes would poke through the ceiling)
-5. If all solid to chunk top -> **de-classify** (terrain interior at chunk boundary)
-
-The `Normal.Z > 0.3` guard ensures cave walls and ceilings retain their underground classification. These surfaces face sideways or downward, and the vertical column scan isn't meaningful for them.
-
-**Step 4 — Buried chunk** (heightmap worlds): a point not yet underground is underground when its whole chunk lies under the analytic terrain, `ChunkTop < GeneratedHeight - 1.5 * VoxelSize`: the cover over it lives in a neighbouring chunk, which no per-chunk check can see. The CPU extractors (`ExtractSurfacePointsFromVoxelData`, `ExtractSurfacePointsCubic`) apply the same test per column. `GeneratedHeight` is the ground the generator makes: the world mode's natural height with the chunk's terrain conditioning zones (POI pads and their falloff rings) layered on, `FScatterExtractionContext::GetGeneratedTerrainHeight`, the zones gathered by the chunk manager when the extraction is set up (`FScatterExtractionContext::ConditioningZones`). Before world modes review G23 it was the natural height, so a pad cut below a chunk's top buried the chunk holding the pad's ground (no surface scatter on it), and under a raised pad the chunk below read as open surface.
-
-The test compares the chunk's top, not the point, so carving into a surface chunk reclassifies the exposed floor as surface. Its 1.5-voxel margin lets through a chunk whose top face lies up to 1.5 voxels under the ground. There the voxel over the chunk's top layer, which belongs to the chunk above and which the chunk's own data cannot show, decides the top voxel (world modes review G26, §19.4): the CPU extractors take it as the generator made it, the generated height's density at the chunk's top (`FScatterExtractionContext::GetVoxelAboveChunk`), with the chunk above's edits on its bottom layer applied (`FScatterExtractionContext::AboveLayerEdits`, copied from the chunk manager's edit layers through `UVoxelScatterManager::SetEditLayerSource`). Solid, the top voxel is no surface: the chunk above extracts the real one, and the rest of the column is covered. Air, the crossing interpolates against that voxel's density, as the mesher does. Until G26 the extractors took that voxel for air, which made a copy of the surface on the chunk's top face, up to 1.5 voxels under the ground and classified open surface, along every contour where the terrain crosses a chunk layer's top and under any pad just above one. Deeper (the buried case above) a cave can open that voxel, so it is still taken for air and the whole column is underground by this test. The GPU path reads the chunk's interior mesh, which has no vertex in the cells along the chunk's boundary, so it never made the copy.
-
-### Why the Column Scan Override Is Necessary
-
-The voxel flag alone isn't sufficient for upward-facing surfaces because:
-- Pass 2 boundary propagation flags solid voxels adjacent to underground air
-- A solid voxel between a cave below and terrain surface above gets flagged (adjacent to underground air below)
-- The surface point on TOP of that voxel (upward-facing, terrain surface) would be incorrectly classified
-
-The column scan distinguishes "terrain surface above a cave" from "cave floor below terrain" by checking what kind of air exists above the surface point.
-
-### Minimum Headroom Check
-
-Even when correctly identified as a cave floor, very thin caves (1-2 voxels tall) cause visual artifacts: scatter meshes (mushrooms, crystals) extend through the thin cave ceiling and become visible from the terrain surface above.
-
-The headroom threshold of 3 voxels (300 units at VoxelSize=100) ensures scatter only spawns in caves tall enough to contain the mesh without clipping. This is a pragmatic visual fix, not a classification accuracy concern.
+The test compares the chunk's top, not the point, so carving into a surface chunk reclassifies the exposed floor as surface. Its 1.5-voxel margin lets through a chunk whose top face lies up to 1.5 voxels under the ground. There the voxel over the chunk's top layer, which belongs to the chunk above and which the chunk's own data cannot show, decides the top voxel (world modes review G26, §19.4): the CPU extractors take it as the generator made it, the generated height's density at the chunk's top (`FScatterExtractionContext::GetVoxelAboveChunk`), with the chunk above's edits on its bottom layer applied (`FScatterExtractionContext::AboveLayerEdits`, copied from the chunk manager's edit layers through `UVoxelScatterManager::SetEditLayerSource`). Solid, the top voxel is no surface: the chunk above extracts the real one, and the rest of the column is covered. Air, the crossing interpolates against that voxel's density, as the mesher does. Until G26 the extractors took that voxel for air, which made a copy of the surface on the chunk's top face, up to 1.5 voxels under the ground and classified open surface, along every contour where the terrain crosses a chunk layer's top and under any pad just above one. Deeper (the buried case above) a cave can open that voxel, so it is still taken for air and the whole column is underground by this test. The GPU path, which read the chunk's interior mesh, never made the copy: that mesh has no vertex in the cells along the chunk's max faces, so it had no point there at all, real crossings included (G27, which retired it).
 
 ## Scatter Filtering
 
@@ -171,8 +151,7 @@ OnChunkMeshDataReady() → PendingGenerationQueue
     │
     ▼
 LaunchAsyncScatterGeneration() [thread pool]
-    ├── GPU or CPU surface extraction → FVoxelSurfacePoint array
-    ├── ClassifySurfacePointsUnderground() → sets bIsUnderground
+    ├── Surface extraction from the chunk's voxels → FVoxelSurfacePoint array, bIsUnderground set per point
     └── GenerateSpawnPoints()
             └── CanSpawnAt() → filters by SurfaceLocation + bIsUnderground
 ```
@@ -184,7 +163,7 @@ LaunchAsyncScatterGeneration() [thread pool]
 | `VoxelCore/Public/VoxelData.h` | `VOXEL_FLAG_UNDERGROUND`, `HasUndergroundFlag()`, `SetUndergroundFlag()` |
 | `VoxelCore/Public/VoxelScatterTypes.h` | `EScatterSurfaceLocation`, `FVoxelSurfacePoint::bIsUnderground`, `CanSpawnAt()` |
 | `VoxelGeneration/Private/VoxelCPUNoiseGenerator.cpp` | `ApplyUndergroundClassificationPass()` — Pass 1 + Pass 2 |
-| `VoxelScatter/Private/VoxelScatterManager.cpp` | `ClassifySurfacePointsUnderground()` — surface point classification; the column and cubic scans' buried-chunk test and the voxel above the top layer (`FScatterExtractionContext::GetVoxelAboveChunk`) |
+| `VoxelScatter/Private/VoxelScatterManager.cpp` | The extractors' classification (flags, column top); the column and cubic scans' buried-chunk test and the voxel above the top layer (`FScatterExtractionContext::GetVoxelAboveChunk`) |
 | `VoxelScatter/Private/VoxelScatterPlacement.cpp` | `GenerateSpawnPointsForType()` — calls `CanSpawnAt()` filter |
 
 ## Tuning

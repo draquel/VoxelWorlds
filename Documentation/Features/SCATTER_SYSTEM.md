@@ -5,23 +5,20 @@
 
 ## Overview
 
-The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. The system extracts surface points from voxel data (or optionally mesh vertices via GPU compute), applies placement rules, and manages HISM instances with optimized rebuild strategies. All scatter generation runs asynchronously on the thread pool.
+The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. The system extracts surface points from voxel data, applies placement rules, and manages HISM instances with optimized rebuild strategies. All scatter generation runs asynchronously on the thread pool.
 
 ## Architecture
 
 ```
 VoxelChunkManager
     │
-    ├── OnChunkMeshDataReady(ChunkCoord, LOD, MeshData, VoxelData, ChunkSize, VoxelSize)
+    ├── OnChunkMeshDataReady(ChunkCoord, VoxelData, ChunkSize, VoxelSize)
     │       │
     │       ▼
     │   VoxelScatterManager
     │       │
-    │       ├── [CPU Path - Default] ExtractSurfacePointsFromVoxelData()
-    │       │       Uses 32³ voxel data directly (LOD-independent)
-    │       │
-    │       ├── [GPU Path - Optional] VoxelGPUSurfaceExtractor
-    │       │       Compute shader extraction from mesh vertices
+    │       ├── ExtractSurfacePointsFromVoxelData() (cubic: ExtractSurfacePointsCubic, planet: ExtractSurfacePointsAlongUp)
+    │       │       Reads the chunk's (edit-merged) voxels directly: LOD-independent, never the mesh
     │       │
     │       ├── VoxelScatterPlacement (apply rules, generate spawn points)
     │       │       Runs on thread pool (async)
@@ -53,8 +50,8 @@ public:
     bool RemoveScatterDefinition(int32 ScatterID);
     const FScatterDefinition* GetScatterDefinition(int32 ScatterID) const;
 
-    // Mesh data callback (called by ChunkManager)
-    void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData);
+    // Chunk hand-off (called by ChunkManager when a chunk's mesh is ready; reads the voxels, not the mesh)
+    void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
     void OnChunkUnloaded(const FIntVector& ChunkCoord);
 
     // Edit integration
@@ -285,55 +282,24 @@ line; crossings at chunk faces are kept within 1.5 voxels of the analytic surfac
   is in the tangent plane, from the same two random draws.
 - **Harvest exclusion**: a felled tree's box turns to local up, its centre along up from the base; the id is the
   base position's, as before.
-- **No GPU extraction** on planets (`WantsGPUExtraction`): its gates are along +Z. A planet logs that it extracts on
-  the CPU.
+- **On the CPU**, as every world since G27 (the retired GPU extractor's gates were along +Z anyway).
 
 Heightmap worlds keep `ExtractSurfacePointsFromVoxelData` and the old expressions (`LocalUp` +Z, weight 1, the jitter
 call unchanged). `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds
-(with CPU extraction: the GPU extractor's per-cell claim is not deterministic). Tests: `Scatter.Planet.AlongLocalUp`
+(extraction is deterministic; the retired GPU extractor's per-cell claim was not). Tests: `Scatter.Planet.AlongLocalUp`
 (points within 8 uu of the surface, instances' up within 0.01° of the radial), `Scatter.Planet.DensityPerArea`.
 
-#### GPU Path: Mesh Vertex Extraction (Optional)
+#### Mesh-vertex extraction (retired, world modes review G27)
 
-When `bUseGPUScatterExtraction` is enabled, surface points are extracted from mesh vertices via compute shader. See [GPU Surface Extraction](#gpu-surface-extraction-phase-7d-2) for details.
-
-#### Legacy CPU Path: Mesh Vertex Extraction
-
-The original `FVoxelSurfaceExtractor` samples mesh vertices with spatial hashing. Still used internally by the GPU fallback path:
-
-```cpp
-void FVoxelSurfaceExtractor::ExtractSurfacePoints(
-    const FChunkMeshData& MeshData,
-    const FIntVector& ChunkCoord,
-    const FVector& ChunkWorldOrigin,
-    float TargetSpacing,
-    int32 LODLevel,
-    FChunkSurfaceData& OutSurfaceData)
-{
-    // Spatial hash grid for even distribution
-    TMap<FIntVector, int32> OccupiedCells;
-
-    for (int32 VertIndex = 0; VertIndex < MeshData.Positions.Num(); ++VertIndex)
-    {
-        FVector WorldPos = ChunkWorldOrigin + FVector(MeshData.Positions[VertIndex]);
-        FIntVector Cell(FMath::FloorToInt(WorldPos.X / TargetSpacing), ...);
-        if (OccupiedCells.Contains(Cell)) continue;
-
-        // Extract surface point data from mesh vertex
-        FVoxelSurfacePoint Point;
-        Point.Position = WorldPos;
-        Point.Normal = FVector(MeshData.Normals[VertIndex]).GetSafeNormal();
-        Point.MaterialID = DecodeFromUV1(MeshData.UV1s[VertIndex]);
-        Point.BiomeID = MeshData.Colors[VertIndex].G;
-        Point.FaceType = DecodeFaceType(MeshData.UV1s[VertIndex]);
-
-        OutSurfaceData.SurfacePoints.Add(Point);
-        OccupiedCells.Add(Cell, OutSurfaceData.SurfacePoints.Num() - 1);
-    }
-}
-```
-
-**Note**: This path is LOD-dependent — mesh vertices change with LOD level, causing different scatter density and positions at different LODs.
+Scatter used to have two paths that took surface points from mesh vertices: the GPU extractor
+(`FVoxelGPUSurfaceExtractor`, `ScatterSurfaceExtraction.usf`, `bUseGPUScatterExtraction`, LOD 0 chunks only) and an
+uncalled CPU one (`FVoxelSurfaceExtractor`). Both were deleted in G27 (`WORLD_MODES_REVIEW_PLAN.md` §19.5). Since seam
+ownership a chunk's mesh is its interior mesh, which has no vertex in the cells along the chunk's +X, +Y and +Z faces
+(they belong to the chunk's seams), so every chunk the GPU path extracted had no point there: bare strips in the grass
+along chunk borders and along the contour where the terrain crosses a chunk layer's top. Its output buffer also held
+4,096 points, sized for 32³ chunks, and dropped whichever points came last on the GPU (not deterministic either way).
+`bUseGPUScatterExtraction` is kept so assets load, and ignored (logged once at initialisation).
+`voxel.Scatter.BoundaryAudit` measures how a chunk's points cover the cell layers along its six faces.
 
 ### 2. Scatter Placement
 
@@ -697,38 +663,11 @@ Game Thread:               Drain Result -> Cache -> HISM Update
 - `VoxelScatterManager.h`: `FAsyncScatterResult`, `CompletedScatterQueue`, `AsyncScatterInProgress`
 - `VoxelScatterManager.cpp`: `LaunchAsyncScatterGeneration()`, `ProcessCompletedAsyncScatter()`
 
-## GPU Surface Extraction (Phase 7D-2)
+## GPU Surface Extraction (Phase 7D-2, retired)
 
-Optional GPU compute shader path for surface point extraction. Enabled via `bUseGPUScatterExtraction` in VoxelWorldConfiguration.
-
-### Architecture
-```
-Game Thread:  Prepare request -> ENQUEUE_RENDER_COMMAND
-Render Thread:                   Upload -> Dispatch CS -> Readback -> Enqueue result
-Game Thread:  Drain GPU result -> Filter cleared volumes -> Launch CPU placement on thread pool
-Thread Pool:                     Scatter placement -> Enqueue final result
-Game Thread:  Drain final result -> Cache -> HISM Update
-```
-
-### Compute Shader
-- File: `Shaders/Private/ScatterSurfaceExtraction.usf`
-- Thread groups: `[numthreads(64, 1, 1)]`, one thread per mesh vertex
-- Deduplication: Occupancy grid with `InterlockedCompareExchange`
-- Output: `FSurfacePointGPU` (48 bytes) with atomic append counter
-
-### Memory Per Dispatch
-- Upload: ~400KB (10K vertices * 4 buffers)
-- Occupancy grid: ~32KB (32x32x32 cells)
-- Output: ~192KB (4096 points * 48 bytes max)
-- Total: ~624KB per chunk, ~1.2MB with 2 concurrent
-
-### Fallback
-If GPU unavailable or `bUseGPUScatterExtraction = false`, seamlessly falls back to CPU async path.
-
-### Key Files
-- `ScatterSurfaceExtraction.usf`: GPU compute shader
-- `VoxelGPUSurfaceExtractor.h/cpp`: RDG dispatch and readback
-- `VoxelScatterManager.cpp`: `ProcessCompletedGPUExtractions()`
+Retired in world modes review G27: see [Mesh-vertex extraction](#mesh-vertex-extraction-retired-world-modes-review-g27).
+Every world extracts surface points from voxels on the thread pool (3.7 ms mean, 5.9 ms P95 per 64³ chunk on
+`VoxelDemo`).
 
 ## Voxel-Based Surface Extraction (Phase 7D-5)
 
@@ -781,10 +720,9 @@ When `MeshingMode == Cubic`, scatter uses `ExtractSurfacePointsCubic()` instead 
   a smaller jitter is unchanged. `bAutoCubicScatterDefaults` sets every definition to `BlockFaceSnap` in cubic worlds.
 
 Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic` in both sync and async scatter paths.
-Cubic worlds always extract on the CPU: `bUseGPUScatterExtraction` is ignored for them
-(`UVoxelScatterManager::WantsGPUExtraction`, logged once at initialisation), because the GPU extractor samples mesh
-vertices, which on greedy quads are block corners (finding KC4, fixed by work item WM-C3). The CPU extractor reads voxels,
-not the mesh, so it is unaffected by cubic chunk meshes being interior-only (the faces on chunk planes are seam meshes).
+Cubic worlds always extracted on the CPU (finding KC4, work item WM-C3: the GPU extractor sampled mesh vertices, which
+on greedy quads are block corners); since G27 every world does. The extractor reads voxels, not the mesh, so it is
+unaffected by cubic chunk meshes being interior-only (the faces on chunk planes are seam meshes).
 Tests: `VoxelWorlds.Scatter.Cubic.CPUExtractionOnly`, `.BlockFaceSnapStaysOnFace`.
 
 ### Scatter Mesh Types
@@ -972,7 +910,7 @@ In `OnChunkMeshDataReady()`, VoxelInjection scatter definitions are filtered bas
 
 ## Future Enhancements
 
-1. ~~**GPU-based scatter generation**~~: COMPLETE (7D-2)
+1. ~~**GPU-based scatter generation**~~: COMPLETE (7D-2), retired in G27 (mesh vertices miss the chunk's boundary cells)
 2. **Foliage LOD**: Leverage HISM's built-in LOD system
 3. **Procedural variation**: Per-instance custom data for shader variation
 4. ~~**Async surface extraction**~~: COMPLETE (7D-1)
