@@ -299,6 +299,14 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		Samples.Reserve(NumCells);
 		Seeds.Reserve(NumCells);
 
+		// The conditioning zones over the bounds (POI pads and their falloff rings): the far points stand on the generated
+		// ground, as the near band's loaded voxels do (world modes review G23).
+		TArray<FVoxelConditioningZone> Zones;
+		if (VoxelCtx.ChunkManager)
+		{
+			VoxelCtx.ChunkManager->GatherConditioningZones(FBox2D(FVector2D(Bounds.Min.X, Bounds.Min.Y), FVector2D(Bounds.Max.X, Bounds.Max.Y)), Zones);
+		}
+
 		for (int32 IX = MinX; IX <= MaxX; ++IX)
 		{
 			const double WorldX = static_cast<double>(IX) * Spacing;
@@ -342,7 +350,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 						static_cast<float>(WorldX), static_cast<float>(WorldY),
 						VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
 						BiomeSnapshot, VoxelCtx.WorldSeed,
-						VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel);
+						VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel, &Zones);
 				}
 
 				const FVector Position(WorldX, WorldY, static_cast<double>(Sample.Height));

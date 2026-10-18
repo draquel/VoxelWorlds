@@ -126,6 +126,10 @@ If the point was marked underground by Steps 1-2, verify by scanning upward from
 
 The `Normal.Z > 0.3` guard ensures cave walls and ceilings retain their underground classification. These surfaces face sideways or downward, and the vertical column scan isn't meaningful for them.
 
+**Step 4 — Buried chunk** (heightmap worlds): a point not yet underground is underground when its whole chunk lies under the analytic terrain, `ChunkTop < GeneratedHeight - 1.5 * VoxelSize`: the cover over it lives in a neighbouring chunk, which no per-chunk check can see. The CPU extractors (`ExtractSurfacePointsFromVoxelData`, `ExtractSurfacePointsCubic`) apply the same test per column. `GeneratedHeight` is the ground the generator makes: the world mode's natural height with the chunk's terrain conditioning zones (POI pads and their falloff rings) layered on, `FScatterExtractionContext::GetGeneratedTerrainHeight`, the zones gathered by the chunk manager when the extraction is set up (`FScatterExtractionContext::ConditioningZones`). Before world modes review G23 it was the natural height, so a pad cut below a chunk's top buried the chunk holding the pad's ground (no surface scatter on it), and under a raised pad the chunk below read as open surface.
+
+The test compares the chunk's top, not the point, so carving into a surface chunk reclassifies the exposed floor as surface. Its 1.5-voxel margin also lets through the row of points the column scan makes on a chunk's top face (it takes the voxel above the chunk for air) wherever the ground lies within 1.5 voxels above that face: a second row of surface points up to 1.5 voxels under the real surface (review plan G26, open).
+
 ### Why the Column Scan Override Is Necessary
 
 The voxel flag alone isn't sufficient for upward-facing surfaces because:

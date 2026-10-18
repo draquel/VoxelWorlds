@@ -1452,9 +1452,10 @@ Three findings from §13.11 get IDs here:
 | G20 | Debug tooling: `vox.TP`'s settle re-requested an already-cooked chunk's collision, which re-cooks it under a pawn standing there (a READY→NOT-READY "re-cook" in the capture), and `vox.Debug.Capture` compared the frame after a teleport with the frame before, logging a "fall-through signature" at every teleport onto ground not streamed yet (found in spherical Phase 3's exit check, §17.2) | Fixed (§17.2, game module): the settle requests only chunks without collision; the capture restarts after a jump of more than a chunk in one frame and while the settle holds | (WM-W4) |
 | G21 | A fresh pawn's view was level in world space, not in its gravity: the engine's possess and restart leave the start spot's world-level rotation (and `AVCGameModeBase` builds respawn rotations from world yaw), so away from the north pole a spawned or respawned player looked into the ground or the sky (45° down after a drowning at 43°; 3° at the polar spawn, unnoticed in Phase 3). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): every possession levels the view on the first planet frame (`AVCPlayerController::bLevelViewInGravity`) | WM-SY21 |
 | G22 | World items lay in the world's frame on a planet: the mesh is `AWorldItem`'s root, so the placeholder's and the WorldDisplay fragment's resting pose (`SetRelativeRotation`) replaced the pool's upright rotation (a raw meat dropped at 8° latitude stood 81.5° off the radial). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): `AWorldItem::ApplyRestingPose` relative to the upright frame | WM-SY16 |
-| G23 | Two heightmap readers of the analytic surface skip terrain conditioning: scatter's buried-chunk test (`ExtractSurfacePointsFromVoxelData` compares the chunk's top with `GetTerrainHeightAt`, not the conditioned height) and the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can flag a surface chunk as buried (no surface scatter in it) and the second puts far points at the natural height. Found in the spherical Phase 5 survey (§19), in the code, not seen live | Open: a heightmap change, outside Phase 5 (its A/B must stay identical); the planet versions read the conditioned surface (WM-PL4) | — |
+| G23 | Two heightmap readers of the analytic surface skip terrain conditioning: scatter's buried-chunk test (`ExtractSurfacePointsFromVoxelData` compares the chunk's top with `GetTerrainHeightAt`, not the conditioned height) and the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can flag a surface chunk as buried (no surface scatter in it) and the second puts far points at the natural height. Found in the spherical Phase 5 survey (§19), in the code; reproduced live on `VoxelDemo` (§19.3: a village's cut pad left 4,969 points of its ground underground, a PCG probe's far points a median 346 uu off the ground) | Fixed (§19.3): the extraction context carries the chunk's zones in every world mode (`FScatterExtractionContext::ConditioningZones`, the chunk manager's conditioning gatherer) and the buried-chunk test reads the generated height in all three heightmap paths; `FVoxelSurfaceQuery::SampleSurface` takes zones and the sampler gathers them over its bounds. Tests `Scatter.Conditioning.{CutPadAndRing,FilledPad,ManagerWiring}`, `PCG.FarPointsOnConditionedSurface`; the `VoxelDemo` A/B differs only in zone chunks. No `GenerationVersion` change | — |
 | G24 | A voxel-carved dungeon (`EDungeonPOIRepresentation::VoxelCarved`, the stone-lined `CarveUnderground` stamp) does not hold pawns on a smooth world: the boss falls through its room's floor at spawn, and `vox.TPRoom Boss` drops the player through the floor into the rock below (no surface inside solid rock, so no collision until a cave). Seen on the planet and on `VoxelDemo`'s plane alike, and on the base build of §19.2.4 with the same stamp (118,387 + 4,950 voxels), so it predates Phase 5. The demo's catalog dresses its dungeons with tiles (`TileMeshes`), whose floors are tile collision, so the demo is not affected. Found in the spherical Phase 5 live check (§19.2.3) | Open: a dungeon-plugin fix (the lining's floor surface and its collision on DC worlds), outside Phase 5 | — |
 | G25 | Faint straight shading lines along chunk boundaries across a flattened POI pad on a planet (the City at cell (26, 6), §19.2.3): no hole and no step, only a change in shading. Cosmetic; not yet compared with a flattened pad on the plane | Open: cosmetic, look at seam normals on flat ground | — |
+| G26 | Heightmap scatter's column scan takes the voxel above a chunk for air, so a chunk whose top face lies within 1.5 voxels under the ground makes a row of points on that face (up to 1.5 voxels under the real surface, which the chunk above extracts too), and the buried-chunk test's 1.5-voxel margin keeps them as surface: a second, sunken copy of the surface scatter along every contour where the terrain crosses a chunk layer's top, and over a whole pad that sits just above one (the Tower at (−204,430, −46,859), pad 23 uu over layer −1's top: 2,185 such points). Before G23's fix the natural height happened to bury some of them under cut pads. Found while reproducing G23 (§19.3) | Open: drop a top-face crossing when the generated surface continues above the chunk (the planet's line top already does, `ExtractSurfacePointsAlongUp`), or narrow the margin now that the analytic height matches the isosurface; changes heightmap scatter along every chunk-layer contour, so it needs its own A/B | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -3809,4 +3810,111 @@ stamps behave exactly as before.
 - Voxel-carved dungeons on a planet show the lattice's steps on their walls (graded densities were not built, §19.2.1).
 - As in the plane's code, doors, torches and enemies need a tile-dressed dungeon (the POI path rebuilds the tile map for
   them); a voxel-carved dungeon gets chests, the boss and the elevator only.
-- From §19.1: G23, claim-driven conditioning, World Partition for planets, replicated world items.
+- From §19.1: G23 (fixed in §19.3), claim-driven conditioning, World Partition for planets, replicated world items.
+
+### 19.3 G23: heightmap scatter and PCG far points read the generated surface (2026-10-17)
+
+PRs open (draquel/VoxelWorlds#105, `fix/g23-heightmap-conditioning`, base `2fd32fc`, main after spherical Phase 5; the
+parent's gitlink and doc map in draquel/UE5_PluginDev#115). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor
+beside the user's (Claudius on 8081), background throttling off. For every `VoxelDemo` run `DemoSmoothWorldConfig`'s
+`bUseGPUScatterExtraction` was set false in memory, never saved (GPU scatter extraction is not deterministic).
+
+**The rule.** "The ground the generator makes" is the natural height with the terrain conditioning zones layered on
+(`FVoxelTerrainConditioning::ApplyToHeight`), as on a planet since Phase 5 (WM-PL4). Two heightmap readers that meant
+that ground read the natural height (`GetTerrainHeightAt`): scatter's buried-chunk test and the PCG sampler's far points.
+POI placement keeps surveying the natural height on purpose.
+
+**Tooling** (kept): `voxel.Scatter.ConditioningAudit [maxLines] [drawSeconds]` audits every cached scatter chunk a zone
+reaches: points on the generated ground classified underground (`groundUnder`), the column scan's top-face row under the
+ground (`edge`, see G26), surface points in chunks the generated test buries (`rockSurface`), the largest
+natural-against-generated gap at a ground point (`farErr`), with a CSV in `Saved/VoxelAudit` and optional debug points.
+`voxel.Scatter.ConditioningAudit scan [radiusKm]` judges every zone within a radius analytically ("lost" columns: the
+generated ground lies in a chunk the natural test buries). `voxel.Scatter.Digest file` writes one line per chunk
+(count, CRC) so two builds compare chunk by chunk.
+
+**Reproduction** (the base build with the audit added, behaviour unchanged).
+
+- The scan over 40 km around the demo spawn: 275 of 1,766 zones have lost columns (86,667 columns on a 150 uu grid),
+  394 have raised ones. Most are pads whose target sits a little under a chunk layer's top (Z 0 in the demo, whose
+  terrain is near sea level) cut into ground rising over it.
+- The Village at (−104,312, 331,034), 3.9 km from the spawn (pad −169, natural −30 at the centre, inner radius 4,609,
+  falloff 2,000): 4,969 scatter points on the generated ground classified underground in six chunks; chunk
+  (−25, 57, −1) holds ground in all 4,096 columns, 1,839 of them underground. Screenshots `g23_base_village_{1,2}.png`
+  (red: those points).
+- A second village at (−138,416, 26,779), pad raised over the natural ground: 5,315 points classified open surface in
+  chunks the generated test buries (the top faces and cave floors of the chunks under the raised pad).
+- Not G23: the Tower at (−204,430, −46,859) showed 850 "ground" points underground, all of them the top-face row of
+  layer −1 under a pad 23 uu above it, which the natural test happened to bury (G26).
+- PCG: a `PCGVolume` over the Village running `PCG_VoxelScatterTest` (300 uu spacing, the sampler's edit-aware band off in
+  memory, so every point is a far point): 900 cubes, a median 346 uu off the ground (p90 774): 362 more than 150 uu above
+  it, 333 more than 150 uu under it. Screenshots `g23_base_village_pcg{,_side}.png`.
+
+**What changed.**
+
+- `FScatterExtractionContext::ConditioningZones` (was `PlanetZones`) carries the chunk's zones in every world mode, from
+  `UVoxelScatterManager::SetConditioningGatherer` (was `SetPlanetConditioningGatherer`): the chunk manager gathers by the
+  chunk's XY footprint on a heightmap (`GatherConditioningZonesForRegion`, what generation gathers) and by the cap its
+  box subtends on a planet, as before. `FScatterExtractionContext::GetGeneratedTerrainHeight` is the natural height plus
+  those zones; the column scan (`ExtractSurfacePointsFromVoxelData`), the cubic scan (`ExtractSurfacePointsCubic`) and the
+  GPU path's classifier (`ClassifySurfacePointsUnderground`) compare the chunk's top with it.
+- `FVoxelSurfaceQuery::SampleSurface` takes optional zones: the height, the four gradient samples and the material's
+  water and height rules on the generated surface; `SampleSurfacePoint` forwards them on heightmaps; the Voxel Surface
+  Sampler gathers the zones over its bounds (`UVoxelChunkManager::GatherConditioningZones`).
+- Generation does not change (no `GenerationVersion` bump). Without zones every path computes exactly what it did.
+- Test seams: `UVoxelScatterManager::ExtractHeightmapSurfacePoints`; `ClassifySurfacePointsUnderground` is public.
+
+**Tests.**
+
+| Test | What it checks | Result |
+|------|------|------|
+| `Scatter.Conditioning.CutPadAndRing` | A hillside (natural height 0.6 X) with a pad cut into it; chunks made with the generator's SDF from the generated height; every heightmap path (column scan, cubic scan, GPU classifier) over the zone's 216 chunks | 0 of 59,226 ground points underground (13,119 of them where the ground is cut below the natural height); against the natural height 6,200 in 20 chunks |
+| `Scatter.Conditioning.FilledPad` | The chunk under a raised pad with a cave pocket at its top, every path | the pocket floor (49 points) and the top face (975) underground; against the natural height all open surface |
+| `Scatter.Conditioning.ManagerWiring` | A cut chunk through the manager's own pipeline (`OnChunkMeshDataReady`, the context built with the gatherer) | 1,018 ground points, 0 underground; without the gatherer all 1,018 |
+| `PCG.FarPointsOnConditionedSurface` | Real terrain from the CPU generator with a cut and a raised pad on a chunk manager; 72 points around each (pad, ring, beyond) with the zones the sampler gathers | within 0.4 uu of the generated isosurface (0.3 on the cut); `SampleSurfacePoint` the same; pads flat; nothing changes beyond the ring; at the natural height up to 2,867 uu off |
+
+Each test fails on the base build's behaviour. Suites: headless VoxelWorlds + VoxelWorldSave + VoxelCharacter + WorldClock
++ InteractionPlugin + Dungeon 509 of 509 (Phase 5's 505 and the four above); in the editor (D3D12) 509 of 509 with the GPU tests running (only the two retired GPU DC interior tests skip), the 87 GPU parity lines identical to Phase 5's by CRC.
+
+**The fixed build on `VoxelDemo`.** At the Village: 0 ground points underground (4,969 before); at the second village 0
+surface points in buried chunks (5,315 before). The PCG probe's 900 far points: on the 859 under which a trace finds the
+terrain, a median 0.4 uu off (p99 1.9); the three outliers stand over an opening in the pad (the trace drops 1,500 to
+2,700 uu), which no analytic surface knows, and the other outliers are traces that hit the two lookout towers.
+Screenshots `g23_fix_village_{1,3}.png`, `g23_fix_village_pcg{,_side}.png` (in the worktree's
+`Saved/Screenshots/Claudius`, not committed). At this village the visible scatter change is small: most of the ground
+that was underground is the pad's gravel and the claimed structures' area, where no grass grows either way.
+
+**A/B against the base build.** Six runs of one script: the spawn (60 s), then `vox.TP` to the Village, the Tower, the
+second village and a City (−146,871, 175,956) with 45 s each, streaming frozen for a per-chunk digest and the audit.
+Base behaviour three times (the base build, and twice the fixed build with a temporary switch that dropped heightmap zones
+from the extraction context, removed before the commit), fixed behaviour three times.
+
+- `voxel.Map.Capture 6` at the spawn: the same PNG, byte for byte, in all six runs. The spawn's digest: identical
+  (246 chunks, 18,502 points).
+- Within 200 m of the five stops, 824 chunks are in every run's digest. 15 differ between runs of the same behaviour
+  (one capture empty, another full: nine chunks 38 to 128 m from the Tower, three near the second village, three near the
+  City; base and fixed alike), so they are noise. Of the 809 stable ones, 11 differ between the behaviours, all reached by
+  a zone:
+
+| Stop | Chunks | Spawn points (base → fixed) | Why |
+|------|------|------|------|
+| Village | (−26, 57, −1), (−26, 58, −1), (−25, 56, −1) | 66 → 147, 494 → 507, 667 → 933 | the cut pad's ground is surface again (1,356, 464 and 564 ground points were underground) |
+| Tower | (−46, −22, −1), (−45, −22, −1), (−45, −21, −1) | 689 → 1,110, 109 → 439, 1,426 → 1,479 | layer −1's top-face row under the pad is surface, as everywhere on natural terrain (G26) |
+| Second village | (−33, −6, −1), (−33, −5, −1), (−32, −7, −1), (−32, −5, −1), (−31, −7, −1) | 96 → 85, 3,350 → 3,343, 1,095 → 513, 677 → 539, 1,231 → 1,167 | surface points inside the ground under the raised pad are underground (844, 208, 2,292, 395 and 812 of them) |
+
+- Over every cached chunk (no distance limit, 3,547 chunk-stops), 17 differ between the behaviours: the 11 above and the
+  Village's two cut chunks again, still cached at the three later stops; nothing outside a zone.
+
+**G26 (new, open).** The column scan takes the voxel above a chunk for air, so a chunk whose top face lies within 1.5
+voxels under the ground makes a row of points on that face, and the buried test's 1.5-voxel margin keeps them as
+surface: a second copy of the surface scatter up to 1.5 voxels under the ground along every contour where the terrain
+crosses a chunk layer's top, and under a whole pad that sits just above one (the Tower's, 2,185 points). The natural
+height used to bury some of them under cut pads; with the generated height a pad behaves like natural terrain there.
+A fix (drop such a crossing when the generated surface continues above the chunk, as the planet's line top does, or
+narrow the margin) moves heightmap scatter along every chunk-layer contour and needs its own A/B (§14.1).
+
+**Things to know.**
+
+- The cubic world's voxel trees (`FVoxelTreeInjector`, generation time) still stand at the natural height in a pad or
+  ring; cubic is terrain-only (D1), and fixing it would change generation (`GenerationVersion`).
+- The planet scatter test and the chunk manager use the renamed API (`ConditioningZones`, `SetConditioningGatherer`);
+  planets behave as before (`Scatter.Planet.*` green).
