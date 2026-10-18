@@ -6868,7 +6868,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 			}
 			if (!WM->IsHeightmapBased())
 			{
-				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit: not a heightmap world (a planet's line top reads the generated surface)"));
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit: not a heightmap world (a planet's rays read the generated surface past a chunk's faces)"));
 				continue;
 			}
 
@@ -7362,12 +7362,11 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterBoundaryAuditCmd(
 	}));
 
 // Console: voxel.Scatter.LineTopAudit [maxLines=20] [drawSeconds=0] [densityRadius=0]
-// Planets (world modes review G29): over every cached scatter chunk's open surface points, the pairs from two chunks on one
-// up-line (closer than half a voxel across local up, within two voxels along it). A planet chunk's digital line whose voxel
-// above lies outside the chunk kept its crossing near the analytic surface whatever that voxel was; where the ground
-// continues into the neighbour, the neighbour makes the same point, so the band where the surface crosses a chunk face got
-// two points. Since G29 the line top reads that voxel as generated (with the neighbour's edits); a few pairs remain where
-// two chunks' lines do not continue into each other (G31). Logs a summary and the chunks with the most pairs, writes every
+// Planets (world modes review G29, G31): over every cached scatter chunk's open surface points, the pairs from two chunks on
+// one up-line (closer than half a voxel across local up, within two voxels along it). Before G31 each planet chunk walked
+// its own digital lines, which did not continue into a neighbour's: a line top that kept its crossing doubled the
+// neighbour's point (G29), and strips along faces got too few (G31). Since G31 every chunk samples one family of radial
+// rays and keeps the crossings in its own box, so neither should show. Logs a summary and the chunks with the most pairs, writes every
 // chunk with open points to Saved/VoxelAudit/LineTopAudit_<world>_<time>.csv, and with drawSeconds > 0 draws the paired
 // points in front of the terrain (magenta).
 // With densityRadius > 0 it also measures the open points' local density on the generated surface within that distance of
@@ -7376,7 +7375,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterBoundaryAuditCmd(
 // over 1.2, a strip without points (G31) as samples under 0.8 (drawn magenta and cyan).
 static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterLineTopAuditCmd(
 	TEXT("voxel.Scatter.LineTopAudit"),
-	TEXT("Planets: count pairs of open scatter surface points from two chunks on one up-line (a doubled line top, world modes review G29) ")
+	TEXT("Planets: count pairs of open scatter surface points from two chunks on one up-line (world modes review G29, G31) ")
 	TEXT("over every cached scatter chunk. Optional args: max chunk lines to log, seconds to draw the pairs, a radius around the pawn to ")
 	TEXT("measure the points' local density in."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)

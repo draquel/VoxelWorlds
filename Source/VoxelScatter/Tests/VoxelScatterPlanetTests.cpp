@@ -215,7 +215,7 @@ bool FVoxelScatterPlanetConditionedLineTopTest::RunTest(const FString& Parameter
 	AddInfo(FString::Printf(TEXT("With the zones: %d open points, %d off the generated surface; without: %d open, %d off"), Open, Off, OpenWithout, OffWithout));
 	TestTrue(TEXT("The pad has points (non-vacuous)"), Open >= 2000);
 	TestEqual(TEXT("Every open point within a voxel of the generated surface"), Off, 0);
-	TestTrue(TEXT("Without the zones the line tops read the natural ground (the test is sensitive)"), OpenWithout < Open || OffWithout > 0);
+	TestTrue(TEXT("Without the zones the voxels past the faces read the natural ground (the test is sensitive)"), OpenWithout < Open || OffWithout > 0);
 	Config->RemoveFromRoot();
 	return true;
 }

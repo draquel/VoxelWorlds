@@ -18,30 +18,30 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelTerrainConditioning.h"
 #include "VoxelData.h"
+#include "VoxelCubeSphere.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 // ---------------------------------------------------------------------------
-// World modes review G29 (WORLD_MODES_REVIEW_PLAN.md §14.1, §19.6): a planet chunk's line top. The lines of
-// UVoxelScatterManager::ExtractSurfacePointsAlongUp step along the axis nearest local up; a line's first solid voxel whose
-// voxel above lies outside the chunk (over the upper face, or on a side the line drifts in through) was kept whenever its
-// crossing lay within 1.5 voxels of the analytic surface, and put on that surface. Where the ground continues into the
-// neighbour that voxel is solid and the neighbour makes the point, so the band where the surface crosses a chunk face got
-// two points on it. That voxel is now the one the planet generator made there (the generated altitude along its
-// direction), with the neighbour's edits applied. Real planet chunks from the CPU generator (a 250,000 uu planet like
-// Review_Planet, voxel 75, chunk 32, as VoxelScatterPlanetTests).
+// World modes review G29 and G31 (WORLD_MODES_REVIEW_PLAN.md §14.1, §19.6, §19.9): where a planet's surface crosses a chunk
+// face. UVoxelScatterManager::ExtractSurfacePointsAlongUp samples the planet's radial lines through the cube-sphere grid's
+// cells (one family for every chunk) and each chunk keeps the crossings in its own box; its last cell on each axis reads
+// the voxels past its +X, +Y and +Z faces as the planet generator makes them, with the neighbours' edits. Before G31 each
+// chunk stepped digital lines along local up at its own centre, which did not continue into a neighbour's: strips along
+// faces got too few points (G31) and, before G29, a line top doubled the neighbour's point. Real planet chunks from the CPU
+// generator (a 250,000 uu planet like Review_Planet, voxel 75, chunk 32, as VoxelScatterPlanetTests).
 //
-// - Duplicates: the 27 chunks around the poles, 45 degrees, the equator and a cube corner: no two chunks put an open point
-//   on the same up-line (but rarely where their lines do not continue into each other), and the local density has no
-//   doubled strip, nor a strip without points but at the cube corner (G31). With the voxel above taken for air (an all-air
-//   touching layer, the old rule's decision) the band's line tops come back as second points.
+// - Duplicates: the 27 chunks around the poles, 45 degrees, the equator, a cube corner and the sites where the old lines'
+//   drift rounded worst (slopes of a quarter and half a voxel a step, 30N 40E and the live corner and south stops): no two
+//   open points on one up-line, and the local density has no doubled strip and no strip without points. With the shell
+//   past the faces taken for air the band where the surface crosses a face gets second points (the test is sensitive).
 // - FlatPad: a flat pad at the north pole at heights around a chunk face (inside the lower chunk's top cell, at the face,
-//   in the band, past it): every column of the pad has exactly one open point, on the pad, and the lower chunk's top layer
-//   has none where the pad lies over the face. With the voxel above taken for air the band's columns have two.
-// - Edits: the neighbours a line top reads (the upper face, the sides the lines drift in through, their edge); the voxel
-//   outside the chunk equals the neighbour's generated and edit-merged voxel on every touching layer; a dig through the
-//   upper chunk's bottom layer exposes the face (open surface) and a build over a face that was the surface covers it;
-//   the scatter manager's own pipeline reads the neighbour's edit layer (SetEditLayerSource).
+//   in the band, past it): every ray through the pad has exactly one open point, on the pad, and the lower chunk's top
+//   layer has none where the pad lies over the face. With the shell taken for air the band's rays have two.
+// - Edits: the neighbours the shell reads (the seven on the +X, +Y and +Z sides); the voxel outside the chunk equals the
+//   neighbour's generated and edit-merged voxel on every touching layer; a dig through the upper chunk's bottom layer
+//   exposes the face (open surface) and a build over a face that was the surface covers it; the scatter manager's own
+//   pipeline reads the neighbour's edit layer (SetEditLayerSource).
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterLineTopTestUtils
@@ -88,11 +88,6 @@ namespace VoxelScatterLineTopTestUtils
 		return FIntVector(FMath::FloorToInt32(Local.X), FMath::FloorToInt32(Local.Y), FMath::FloorToInt32(Local.Z));
 	}
 
-	FVector UpAtChunk(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const FIntVector& Coord)
-	{
-		return Mode.GetUpVector(ChunkOrigin(Config, Coord) + FVector(0.5 * ChunkWorld));
-	}
-
 	TArray<FIntVector> ChunksAround(const FIntVector& Center)
 	{
 		TArray<FIntVector> Coords;
@@ -128,11 +123,11 @@ namespace VoxelScatterLineTopTestUtils
 		return Voxels;
 	}
 
-	/** Every voxel of the layers a chunk's line tops read set to air: the voxel above always open, the old rule's decision. */
-	TSharedPtr<const TMap<FIntVector, FVoxelEdit>> AllAirTouching(const FVector& Up)
+	/** Every voxel of the shell past a chunk's +X, +Y and +Z faces set to air: the ground beyond the faces taken for air. */
+	TSharedPtr<const TMap<FIntVector, FVoxelEdit>> AllAirTouching()
 	{
 		TArray<FIntVector> Offsets;
-		UVoxelScatterManager::GetPlanetLineTopNeighbours(Up, ChunkSize, Offsets);
+		UVoxelScatterManager::GetPlanetShellNeighbours(Offsets);
 		TMap<FIntVector, FVoxelEdit> Map;
 		for (int32 Z = -1; Z <= ChunkSize; ++Z)
 		for (int32 Y = -1; Y <= ChunkSize; ++Y)
@@ -150,7 +145,7 @@ namespace VoxelScatterLineTopTestUtils
 
 	enum class EVoxelAbove : uint8
 	{
-		/** The line top reads the generator's voxel outside the chunk with the neighbours' edits (the scatter manager's context). */
+		/** The shell is the generator's voxel past the faces with the neighbours' edits (the scatter manager's context). */
 		Decided,
 		/** Every voxel there taken for air (AllAirTouching). */
 		AllAir,
@@ -165,7 +160,7 @@ namespace VoxelScatterLineTopTestUtils
 	/**
 	 * Each chunk generated (GenerationZones, its layer in Edits merged in) and extracted along local up with a context like
 	 * the scatter manager's: ContextZones and the neighbours' touching edits (GatherPlanetTouchingEdits over Edits), or an
-	 * all-air touching layer.
+	 * all-air shell.
 	 */
 	TArray<FChunkPoints> ExtractChunks(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const TArray<FIntVector>& Coords,
 		const TArray<FVoxelConditioningZone>& GenerationZones, const TArray<FVoxelConditioningZone>& ContextZones,
@@ -184,10 +179,9 @@ namespace VoxelScatterLineTopTestUtils
 			{
 				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(ContextZones);
 			}
-			const FVector Up = UpAtChunk(Config, Mode, Coord);
 			Context.TouchingEdits = Above == EVoxelAbove::AllAir
-				? AllAirTouching(Up)
-				: UVoxelScatterManager::GatherPlanetTouchingEdits(Up, Coord, ChunkSize, [&Edits](const FIntVector& C) { return Edits.Find(C); });
+				? AllAirTouching()
+				: UVoxelScatterManager::GatherPlanetTouchingEdits(Coord, ChunkSize, [&Edits](const FIntVector& C) { return Edits.Find(C); });
 			const TArray<FVoxelData> Voxels = GenerateChunk(Generator, Config, Coord, GenerationZones, Edits.Find(Coord));
 			FChunkSurfaceData Surface;
 			UVoxelScatterManager::ExtractPlanetSurfacePoints(Voxels, Coord, ChunkOrigin(Config, Coord), ChunkSize, VoxelSize, VoxelSize, Context, Surface);
@@ -199,7 +193,7 @@ namespace VoxelScatterLineTopTestUtils
 
 	/**
 	 * Pairs of open points on one up-line: closer than half a voxel across local up and within two voxels along it (a
-	 * second point on a line top; neighbouring lines lie about a voxel apart across). Also the probe's measure (§19.4):
+	 * second point where one belongs; neighbouring rays lie about a voxel apart across). Also the probe's measure (§19.4):
 	 * open points from different chunks within half a voxel.
 	 */
 	struct FPairCounts
@@ -277,7 +271,7 @@ namespace VoxelScatterLineTopTestUtils
 	 * The open points' weighted density at samples on the surface every half voxel over a disc of 2,200 uu around a site
 	 * (inside the 27 chunks, clear of their outer faces), per the column scan's one point per voxel square: each point's
 	 * spawn weight under a Gaussian of one voxel across local up (within 3 voxels across and along). A kernel as wide as the
-	 * lines' spacing is flat over any regular sampling, so a strip of doubled line tops shows as samples over 1.2 and a strip
+	 * rays' spacing is flat over any regular sampling, so a doubled strip shows as samples over 1.2 and a strip
 	 * without points as samples under 0.8.
 	 */
 	struct FLocalDensity
@@ -355,6 +349,12 @@ namespace VoxelScatterLineTopTestUtils
 		return Result;
 	}
 
+	FVector LatLon(double Lat, double Lon)
+	{
+		const double A = FMath::DegreesToRadians(Lat), B = FMath::DegreesToRadians(Lon);
+		return FVector(FMath::Cos(A) * FMath::Cos(B), FMath::Cos(A) * FMath::Sin(B), FMath::Sin(A));
+	}
+
 	TArray<TPair<const TCHAR*, FVector>> Sites()
 	{
 		const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
@@ -365,6 +365,41 @@ namespace VoxelScatterLineTopTestUtils
 			{ TEXT("equator"), FVector(0, 1, 0) },
 			{ TEXT("cube corner"), FVector(1, 1, 1).GetSafeNormal() },
 		};
+	}
+
+	/**
+	 * Where the per-chunk digital lines (before G31) rounded their drift worst: slopes of a half and a quarter voxel a step
+	 * across the stepping axis, a site between them, and the stops of the §19.6 A/B on Review_Planet near a cube corner
+	 * and in the south.
+	 */
+	TArray<TPair<const TCHAR*, FVector>> SlopeSites()
+	{
+		return {
+			{ TEXT("half slope 26.57N 0E"), LatLon(26.565, 0.0) },
+			{ TEXT("quarter slope 14.04N 0E"), LatLon(14.036, 0.0) },
+			{ TEXT("30N 40E"), LatLon(30.0, 40.0) },
+			{ TEXT("live corner 36.80N 43.06E"), LatLon(36.804, 43.057) },
+			{ TEXT("live south 59.93S 115.61W"), LatLon(-59.927, -115.606) },
+		};
+	}
+
+	/** The rays' grid: the extraction's at one point per voxel. */
+	const FVoxelCubeSphereGrid& RayGrid()
+	{
+		static const FVoxelCubeSphereGrid Grid(FVoxelCubeSphereGrid::CellsPerEdgeFor(Radius, VoxelSize));
+		return Grid;
+	}
+
+	/** The ray (grid cell) a point lies on. */
+	FIntPoint RayOf(const UVoxelWorldConfiguration* Config, const FVector& Position)
+	{
+		return RayGrid().CellOfDirection((Position - Config->WorldOrigin).GetSafeNormal());
+	}
+
+	/** Where a ray reaches an altitude over the datum. */
+	FVector RayAt(const UVoxelWorldConfiguration* Config, const FIntPoint& Ray, double Altitude)
+	{
+		return Config->WorldOrigin + RayGrid().CellCentreDirection(Ray) * (Radius + Altitude);
 	}
 
 	// ---- The flat pad at the north pole ----
@@ -392,11 +427,6 @@ namespace VoxelScatterLineTopTestUtils
 		return FIntPoint(FMath::RoundToInt32((Position.X - Config->WorldOrigin.X) / VoxelSize), FMath::RoundToInt32((Position.Y - Config->WorldOrigin.Y) / VoxelSize));
 	}
 
-	bool IsJudged(const FIntPoint& Column)
-	{
-		return FMath::Square(Column.X * VoxelSize) + FMath::Square(Column.Y * VoxelSize) <= FMath::Square(PadJudged);
-	}
-
 	TArray<FChunkPoints> ExtractPad(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const FVoxelConditioningZone& Pad,
 		const TMap<FIntVector, FChunkEditLayer>& Edits, EVoxelAbove Above, bool bEditsInContext = true)
 	{
@@ -405,7 +435,7 @@ namespace VoxelScatterLineTopTestUtils
 		{
 			return ExtractChunks(Config, Mode, TArray<FIntVector>(PadChunks, UE_ARRAY_COUNT(PadChunks)), Zones, Zones, Edits, Above);
 		}
-		// The voxels carry the edits but the context does not (an edit-blind line top).
+		// The voxels carry the edits but the context does not (edit-blind voxels past the faces).
 		TArray<FChunkPoints> Out;
 		for (const FIntVector& Coord : PadChunks)
 		{
@@ -416,38 +446,57 @@ namespace VoxelScatterLineTopTestUtils
 			}
 			TArray<FChunkPoints> One = ExtractChunks(Config, Mode, { Coord }, Zones, Zones, Own, Above);
 			// The chunk's own layer must not reach its neighbours' contexts: with only itself in Own, GatherPlanetTouchingEdits
-			// finds nothing for a pole chunk (its line tops read the chunk above).
+			// finds nothing for it (it reads only its seven +X, +Y and +Z neighbours).
 			Out.Append(MoveTemp(One));
 		}
 		return Out;
 	}
 
-	/** Over the pad's judged columns: open points per column, the worst distance from the expected surface, the lower top layer. */
+	/** The rays through the pad within PadJudged of the pole (where they reach the face's altitude). */
+	TArray<FIntPoint> PadRays()
+	{
+		TArray<FIntPoint> Rays;
+		RayGrid().GatherWithinAngle(FVector(0, 0, 1), PadJudged / (Radius + FaceAltitude), 100000, Rays);
+		return Rays;
+	}
+
+	/** The column a ray stands in where it reaches the face's altitude. */
+	FIntPoint ColumnOfRay(const UVoxelWorldConfiguration* Config, const FIntPoint& Ray)
+	{
+		return ColumnOf(Config, RayAt(Config, Ray, FaceAltitude));
+	}
+
+	/** Over the pad's judged rays: open points per ray, the worst distance from the expected surface, the lower top layer. */
 	struct FPadResult
 	{
-		int32 Columns = 0;
-		int32 ColumnsWithOne = 0;
-		int32 ColumnsWithTwo = 0;
-		int32 MaxOpenInColumn = 0;
+		int32 Rays = 0;
+		int32 RaysWithOne = 0;
+		int32 RaysWithTwo = 0;
+		int32 RaysWithTwoOrMore = 0;
+		int32 MaxOpenOnRay = 0;
 		double WorstError = 0.0;
-		/** The lower chunks' points (any class) in their top voxel cell in columns where the pad lies over the face within the band. */
+		/** The lower chunks' points (any class) in their top voxel cell on rays where the pad lies over the face within the band. */
 		int32 BandTopLayer = 0;
 	};
 
 	/**
-	 * ExpectedAltitude(Column): the surface each column should have, as an altitude (the pad's, or the edit-merged surface).
-	 * OnlyColumns: judge only these (by default every judged column).
+	 * ExpectedAltitude(Ray): the surface each ray should cross, as an altitude (the pad's, or the edit-merged surface).
+	 * Judged: the rays judged (PadRays, or a part of them).
 	 */
 	FPadResult JudgePad(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const TArray<FChunkPoints>& Chunks,
-		TFunctionRef<double(const FIntPoint&)> ExpectedAltitude, double PadOffsetVoxels, const TSet<FIntPoint>* OnlyColumns = nullptr)
+		TFunctionRef<double(const FIntPoint&)> ExpectedAltitude, double PadOffsetVoxels, const TArray<FIntPoint>& Judged)
 	{
+		const TSet<FIntPoint> JudgedSet(Judged);
 		TMap<FIntPoint, TArray<double>> OpenAltitudes;
 		FPadResult Result;
-		// The pad over the face within the band at a column: the face rises away from the pole, the pad does not.
-		auto PadInBand = [&](const FIntPoint& Column)
+		// The pad over the face within the band on a ray: where the ray meets the face's plane, the face rises away from the
+		// pole, the pad does not.
+		auto PadInBand = [&](const FIntPoint& Ray)
 		{
-			const FVector FacePoint = Config->WorldOrigin + FVector(Column.X * VoxelSize, Column.Y * VoxelSize, (LowerLayer + 1) * ChunkWorld);
-			const double Over = FaceAltitude + PadOffsetVoxels * VoxelSize - Mode.GetAltitude(FacePoint);
+			const FVector Direction = RayGrid().CellCentreDirection(Ray);
+			const double FaceZ = Config->WorldOrigin.Z + (LowerLayer + 1) * ChunkWorld;
+			const double T = (FaceZ - Config->WorldOrigin.Z) / Direction.Z;
+			const double Over = FaceAltitude + PadOffsetVoxels * VoxelSize - (T - Radius);
 			return Over >= 0.0 && Over <= Band;
 		};
 		for (const FChunkPoints& Chunk : Chunks)
@@ -455,43 +504,36 @@ namespace VoxelScatterLineTopTestUtils
 			const double LowerTop = ChunkOrigin(Config, Chunk.Coord).Z + ChunkWorld;
 			for (const FVoxelSurfacePoint& Point : Chunk.Points)
 			{
-				const FIntPoint Column = ColumnOf(Config, Point.Position);
-				if (!IsJudged(Column) || (OnlyColumns && !OnlyColumns->Contains(Column)))
+				const FIntPoint Ray = RayOf(Config, Point.Position);
+				if (!JudgedSet.Contains(Ray))
 				{
 					continue;
 				}
 				if (!Point.bIsUnderground)
 				{
-					OpenAltitudes.FindOrAdd(Column).Add(Mode.GetAltitude(Point.Position));
+					OpenAltitudes.FindOrAdd(Ray).Add(Mode.GetAltitude(Point.Position));
 				}
-				if (Chunk.Coord.Z == LowerLayer && Point.Position.Z > LowerTop - VoxelSize + 0.01 && PadInBand(Column))
+				if (Chunk.Coord.Z == LowerLayer && Point.Position.Z > LowerTop - VoxelSize + 0.01 && PadInBand(Ray))
 				{
 					++Result.BandTopLayer;
 				}
 			}
 		}
-		for (int32 Y = -ChunkSize; Y < ChunkSize; ++Y)
+		for (const FIntPoint& Ray : Judged)
 		{
-			for (int32 X = -ChunkSize; X < ChunkSize; ++X)
+			++Result.Rays;
+			const TArray<double>* Altitudes = OpenAltitudes.Find(Ray);
+			const int32 Count = Altitudes ? Altitudes->Num() : 0;
+			Result.RaysWithOne += Count == 1 ? 1 : 0;
+			Result.RaysWithTwo += Count == 2 ? 1 : 0;
+			Result.RaysWithTwoOrMore += Count >= 2 ? 1 : 0;
+			Result.MaxOpenOnRay = FMath::Max(Result.MaxOpenOnRay, Count);
+			if (Altitudes)
 			{
-				const FIntPoint Column(X, Y);
-				if (!IsJudged(Column) || (OnlyColumns && !OnlyColumns->Contains(Column)))
+				const double Expected = ExpectedAltitude(Ray);
+				for (const double Altitude : *Altitudes)
 				{
-					continue;
-				}
-				++Result.Columns;
-				const TArray<double>* Altitudes = OpenAltitudes.Find(Column);
-				const int32 Count = Altitudes ? Altitudes->Num() : 0;
-				Result.ColumnsWithOne += Count == 1 ? 1 : 0;
-				Result.ColumnsWithTwo += Count == 2 ? 1 : 0;
-				Result.MaxOpenInColumn = FMath::Max(Result.MaxOpenInColumn, Count);
-				if (Altitudes)
-				{
-					const double Expected = ExpectedAltitude(Column);
-					for (const double Altitude : *Altitudes)
-					{
-						Result.WorstError = FMath::Max(Result.WorstError, FMath::Abs(Altitude - Expected));
-					}
+					Result.WorstError = FMath::Max(Result.WorstError, FMath::Abs(Altitude - Expected));
 				}
 			}
 		}
@@ -604,7 +646,9 @@ bool FVoxelScatterPlanetLineTopDuplicatesTest::RunTest(const FString& Parameters
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 	const TMap<FIntVector, FChunkEditLayer> NoEdits;
 	int32 OldPairs = 0, OldOver = 0;
-	for (const TPair<const TCHAR*, FVector>& Site : Sites())
+	TArray<TPair<const TCHAR*, FVector>> AllSites = Sites();
+	AllSites.Append(SlopeSites());
+	for (const TPair<const TCHAR*, FVector>& Site : AllSites)
 	{
 		const FVoxelTerrainSurfacePoint SiteSurface = Mode->GetSurfacePoint(Config->WorldOrigin + Site.Value, Config->NoiseParams);
 		const TArray<FIntVector> Coords = ChunksAround(ChunkOf(Config, SiteSurface.Position));
@@ -616,27 +660,20 @@ bool FVoxelScatterPlanetLineTopDuplicatesTest::RunTest(const FString& Parameters
 		const FLocalDensity OldDensity = MeasureLocalDensity(Config, *Mode, SiteSurface.Position, OldChunks);
 		OldPairs += Old.CrossChunk;
 		OldOver += OldDensity.Over;
-		AddInfo(FString::Printf(TEXT("%s: %d open points; pairs on one up-line from two chunks %d, within one chunk %d; within half a voxel from two chunks %d. With the voxel above taken for air: %d open points, %d pairs from two chunks (%d within one)"),
+		AddInfo(FString::Printf(TEXT("%s: %d open points; pairs on one up-line from two chunks %d, within one chunk %d; within half a voxel from two chunks %d. With the shell taken for air: %d open points, %d pairs from two chunks (%d within one)"),
 			Site.Key, Now.Open, Now.CrossChunk, Now.SameChunk, Now.NearCrossChunk, Old.Open, Old.CrossChunk, Old.SameChunk));
-		AddInfo(FString::Printf(TEXT("%s: local density over %d samples: mean %.3f, %d under 0.8, %d over 1.2; with the voxel above taken for air mean %.3f, %d under, %d over"),
+		AddInfo(FString::Printf(TEXT("%s: local density over %d samples: mean %.3f, %d under 0.8, %d over 1.2; with the shell taken for air mean %.3f, %d under, %d over"),
 			Site.Key, NowDensity.Samples, NowDensity.Mean, NowDensity.Under, NowDensity.Over, OldDensity.Mean, OldDensity.Under, OldDensity.Over));
 		TestEqual(*FString::Printf(TEXT("%s: no strip of doubled points (local density over 1.2)"), Site.Key), NowDensity.Over, 0);
-		if (FCString::Strcmp(Site.Key, TEXT("cube corner")) != 0)
-		{
-			// At the cube corner neighbouring chunks step their lines along different axes, and strips along some faces get no
-			// point from either (G31, WORLD_MODES_REVIEW_PLAN.md section 19.6): reported above, not judged here.
-			TestEqual(*FString::Printf(TEXT("%s: no strip without points (local density under 0.8)"), Site.Key), NowDensity.Under, 0);
-		}
+		TestEqual(*FString::Printf(TEXT("%s: no strip without points (local density under 0.8)"), Site.Key), NowDensity.Under, 0);
 		TestTrue(*FString::Printf(TEXT("%s: the surface has points (non-vacuous)"), Site.Key), Now.Open >= 2000);
-		// Each chunk's lines follow local up at its own centre, so a neighbour's lines do not always continue into its own:
-		// rarely two lines from two chunks cross the surface within a voxel where it lies along their face (an interior
-		// crossing in one, a line top that correctly found air above in the other). That is not a line top's decision.
-		TestTrue(*FString::Printf(TEXT("%s: two chunks put open points on one up-line at most once per 1,000 points (%d)"), Site.Key, Now.CrossChunk),
-			Now.CrossChunk * 1000 <= Now.Open);
+		// One family of rays for every chunk, each crossing kept by the chunk it lies in: no ray has two open points.
+		TestEqual(*FString::Printf(TEXT("%s: no two chunks put open points on one up-line"), Site.Key), Now.CrossChunk, 0);
 		TestEqual(*FString::Printf(TEXT("%s: one chunk never puts two open points on one up-line"), Site.Key), Now.SameChunk, 0);
 	}
-	AddInfo(FString::Printf(TEXT("Over the sites, taking the voxel above for air doubles %d line tops (%d samples over 1.2)"), OldPairs, OldOver));
-	TestTrue(TEXT("Taking the voxel above for air doubles line tops where the surface crosses a chunk face (the test reproduces G29)"), OldPairs >= 500 && OldOver > 0);
+	AddInfo(FString::Printf(TEXT("Over the sites, taking the shell for air doubles %d crossings (%d samples over 1.2)"), OldPairs, OldOver));
+	TestTrue(TEXT("Taking the shell past the faces for air doubles the crossings where the surface crosses a chunk face (the test is sensitive)"),
+		OldPairs >= 500 && OldOver > 0);
 	Config->RemoveFromRoot();
 	return true;
 }
@@ -653,25 +690,26 @@ bool FVoxelScatterPlanetLineTopFlatPadTest::RunTest(const FString& Parameters)
 	const TMap<FIntVector, FChunkEditLayer> NoEdits;
 
 	// The pad's height over the face, in voxels: inside the lower chunk's top cell, at the face, in the band, past it.
+	const TArray<FIntPoint> Rays = PadRays();
 	for (const double Offset : { -0.9, -0.5, -0.1, -0.01, 0.0, 0.01, 0.3, 0.7, 1.0, 1.4, 1.6, 3.0 })
 	{
 		const FVoxelConditioningZone Pad = MakePad(Offset);
 		const double PadAltitude = Pad.TargetHeight;
 		auto OnPad = [PadAltitude](const FIntPoint&) { return PadAltitude; };
-		const FPadResult Now = JudgePad(Config, *Mode, ExtractPad(Config, *Mode, Pad, NoEdits, EVoxelAbove::Decided), OnPad, Offset);
-		const FPadResult Old = JudgePad(Config, *Mode, ExtractPad(Config, *Mode, Pad, NoEdits, EVoxelAbove::AllAir), OnPad, Offset);
-		AddInfo(FString::Printf(TEXT("Pad %+.2f voxels over the face: %d of %d columns with one open point (most %d), worst %.2f uu off the pad, %d points on the lower top layer under the band's pad; the voxel above taken for air: %d columns with two"),
-			Offset, Now.ColumnsWithOne, Now.Columns, Now.MaxOpenInColumn, Now.WorstError, Now.BandTopLayer, Old.ColumnsWithTwo));
-		TestTrue(*FString::Printf(TEXT("Pad %+.2f: columns judged (non-vacuous)"), Offset), Now.Columns >= 2000);
-		TestEqual(*FString::Printf(TEXT("Pad %+.2f: one open point per column"), Offset), Now.ColumnsWithOne, Now.Columns);
+		const FPadResult Now = JudgePad(Config, *Mode, ExtractPad(Config, *Mode, Pad, NoEdits, EVoxelAbove::Decided), OnPad, Offset, Rays);
+		const FPadResult Old = JudgePad(Config, *Mode, ExtractPad(Config, *Mode, Pad, NoEdits, EVoxelAbove::AllAir), OnPad, Offset, Rays);
+		AddInfo(FString::Printf(TEXT("Pad %+.2f voxels over the face: %d of %d rays with one open point (most %d), worst %.2f uu off the pad, %d points on the lower top layer under the band's pad; the shell taken for air: %d rays with two or more"),
+			Offset, Now.RaysWithOne, Now.Rays, Now.MaxOpenOnRay, Now.WorstError, Now.BandTopLayer, Old.RaysWithTwoOrMore));
+		TestTrue(*FString::Printf(TEXT("Pad %+.2f: rays judged (non-vacuous)"), Offset), Now.Rays >= 2000);
+		TestEqual(*FString::Printf(TEXT("Pad %+.2f: one open point per ray"), Offset), Now.RaysWithOne, Now.Rays);
 		TestTrue(*FString::Printf(TEXT("Pad %+.2f: on the pad (worst %.2f uu)"), Offset, Now.WorstError), Now.WorstError <= 2.0);
 		TestEqual(*FString::Printf(TEXT("Pad %+.2f: no point on the lower chunks' top layer under the pad"), Offset), Now.BandTopLayer, 0);
 		if (Offset > 0.05 && Offset <= 1.0)
 		{
-			// The old rule kept a band crossing whose assumed-air interpolation lay within 1.5 voxels of the pad: over the face
-			// by up to a voxel (the crossing sits half a voxel under the face).
-			TestEqual(*FString::Printf(TEXT("Pad %+.2f: taking the voxel above for air gave every column two open points (the test reproduces G29)"), Offset),
-				Old.ColumnsWithTwo, Old.Columns);
+			// The shell taken for air puts a second crossing in the lower chunk's top cell under the face (not quite on every ray:
+			// next to the side faces between the four chunk columns at the pole the air past them bends the lower crossing away).
+			TestTrue(*FString::Printf(TEXT("Pad %+.2f: taking the shell for air gave nine rays in ten two or more open points (the test is sensitive)"), Offset),
+				Old.RaysWithTwoOrMore * 10 >= Old.Rays * 9);
 		}
 	}
 	Config->RemoveFromRoot();
@@ -688,38 +726,19 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 	UVoxelWorldConfiguration* Config = MakePlanetConfig();
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 
-	// The neighbours a line top reads: over the upper face along the axis nearest up, the sides the lines drift in through
-	// (against the down direction's slope), and their edge.
+	// The neighbours the shell reads: the seven on the +X, +Y and +Z sides, wherever local up points.
 	{
-		const double C30 = FMath::Cos(FMath::DegreesToRadians(30.0)), S30 = FMath::Sin(FMath::DegreesToRadians(30.0));
-		struct FCase
+		TArray<FIntVector> Offsets;
+		UVoxelScatterManager::GetPlanetShellNeighbours(Offsets);
+		const bool bSeven = Offsets.Num() == 7 && Algo::AllOf(Offsets, [](const FIntVector& O)
 		{
-			FVector Up;
-			TArray<FIntVector> Expected;
-		};
-		const FCase Cases[] = {
-			{ FVector(0, 0, 1), { FIntVector(0, 0, 1) } },
-			{ FVector(0, 0, -1), { FIntVector(0, 0, -1) } },
-			// Lines step along X and drift toward -Z (0.58 voxels a step): they enter through the +Z side, and the step before a
-			// line's first voxel lies over the upper face's edge with it.
-			{ FVector(C30, 0, S30), { FIntVector(1, 0, 0), FIntVector(1, 0, 1), FIntVector(0, 0, 1) } },
-			// Drifting a voxel a step on both other axes: both sides, their edge, and the upper face's edges and corner.
-			{ FVector(1, 1, 1).GetSafeNormal(), { FIntVector(1, 0, 0), FIntVector(1, 1, 0), FIntVector(1, 0, 1), FIntVector(1, 1, 1),
-				FIntVector(0, 1, 0), FIntVector(0, 0, 1), FIntVector(0, 1, 1) } },
-			{ FVector(-1, 1, -1).GetSafeNormal(), { FIntVector(-1, 0, 0), FIntVector(-1, 1, 0), FIntVector(-1, 0, -1), FIntVector(-1, 1, -1),
-				FIntVector(0, 1, 0), FIntVector(0, 0, -1), FIntVector(0, 1, -1) } },
-		};
-		for (const FCase& Case : Cases)
-		{
-			TArray<FIntVector> Offsets;
-			UVoxelScatterManager::GetPlanetLineTopNeighbours(Case.Up, ChunkSize, Offsets);
-			const bool bSame = Offsets.Num() == Case.Expected.Num() && Algo::AllOf(Case.Expected, [&Offsets](const FIntVector& O) { return Offsets.Contains(O); });
-			TestTrue(*FString::Printf(TEXT("Up %s: the line tops read %d neighbour(s) as expected"), *Case.Up.ToString(), Case.Expected.Num()), bSame);
-		}
+			return O.GetMin() >= 0 && O.GetMax() == 1;
+		});
+		TestTrue(TEXT("The shell reads the seven neighbours on the +X, +Y and +Z sides"), bSeven);
 	}
 
 	// The voxel outside a chunk is the neighbour's voxel: generated (natural terrain), and with edits of every mode on the
-	// touching layers (and edits deeper in the neighbours, and in a neighbour no line top reads, which must not count).
+	// touching layers (and edits deeper in the neighbours, and in a neighbour the shell does not reach, which must not count).
 	{
 		FVoxelCPUNoiseGenerator Generator;
 		Generator.Initialize();
@@ -728,9 +747,8 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		{
 			const FVoxelTerrainSurfacePoint SiteSurface = Mode->GetSurfacePoint(Config->WorldOrigin + Site.Value, Config->NoiseParams);
 			const FIntVector Coord = ChunkOf(Config, SiteSurface.Position);
-			const FVector Up = UpAtChunk(Config, *Mode, Coord);
 			TArray<FIntVector> Offsets;
-			UVoxelScatterManager::GetPlanetLineTopNeighbours(Up, ChunkSize, Offsets);
+			UVoxelScatterManager::GetPlanetShellNeighbours(Offsets);
 			TMap<FIntVector, FChunkEditLayer> Edits;
 			int32 TouchingEditCount = 0;
 			for (const FIntVector& Offset : Offsets)
@@ -760,7 +778,7 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 					TouchingEditCount += bTouching ? 1 : 0;
 				}
 			}
-			// A neighbour no line top reads (opposite the upper face), edited on its layer touching the chunk.
+			// A neighbour the shell does not reach (on the -X side), edited on its layer touching the chunk.
 			const FIntVector Unread = Offsets[0] * -1;
 			FChunkEditLayer& UnreadLayer = Edits.Add(Coord + Unread, FChunkEditLayer(Coord + Unread, ChunkSize));
 			for (int32 I = 0; I < ChunkSize; ++I)
@@ -779,8 +797,8 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 			FScatterExtractionContext Context;
 			Context.WorldMode = &*Mode;
 			Context.NoiseParams = Config->NoiseParams;
-			Context.TouchingEdits = UVoxelScatterManager::GatherPlanetTouchingEdits(Up, Coord, ChunkSize, [&Edits](const FIntVector& C) { return Edits.Find(C); });
-			TestEqual(*FString::Printf(TEXT("%s: the context holds exactly the edits on the touching layers the line tops read"), Site.Key),
+			Context.TouchingEdits = UVoxelScatterManager::GatherPlanetTouchingEdits(Coord, ChunkSize, [&Edits](const FIntVector& C) { return Edits.Find(C); });
+			TestEqual(*FString::Printf(TEXT("%s: the context holds exactly the edits on the touching layers the shell reads"), Site.Key),
 				Context.TouchingEdits.IsValid() ? Context.TouchingEdits->Num() : 0, TouchingEditCount);
 
 			int32 Compared = 0, SolidMismatch = 0, DensityOff = 0, EditedCompared = 0;
@@ -815,14 +833,27 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		Generator.Shutdown();
 	}
 
-	// The pole pad: a patch of columns in chunk (0, 0), the edits on the upper chunk's bottom layer.
-	TSet<FIntPoint> Patch, Outside;
-	for (int32 Y = -ChunkSize; Y < ChunkSize; ++Y)
+	// The pole pad: a patch of columns in chunk (0, 0), the edits on the upper chunk's bottom layer. Rays are judged a voxel
+	// clear of its edge, where the trilinear surface is flat: inside the patch shrunk by one column, outside it grown by one.
+	TSet<FIntPoint> Patch;
+	for (int32 Y = 4; Y <= 11; ++Y)
 	{
-		for (int32 X = -ChunkSize; X < ChunkSize; ++X)
+		for (int32 X = 4; X <= 11; ++X)
 		{
-			const bool bIn = X >= 4 && X <= 11 && Y >= 4 && Y <= 11;
-			(bIn ? Patch : Outside).Add(FIntPoint(X, Y));
+			Patch.Add(FIntPoint(X, Y));
+		}
+	}
+	TArray<FIntPoint> InRays, OutRays;
+	for (const FIntPoint& Ray : PadRays())
+	{
+		const FIntPoint Column = ColumnOfRay(Config, Ray);
+		if (Column.X >= 5 && Column.X <= 10 && Column.Y >= 5 && Column.Y <= 10)
+		{
+			InRays.Add(Ray);
+		}
+		else if (Column.X < 3 || Column.X > 12 || Column.Y < 3 || Column.Y > 12)
+		{
+			OutRays.Add(Ray);
 		}
 	}
 	auto MergedVoxels = [&](const FVoxelConditioningZone& Pad, const TMap<FIntVector, FChunkEditLayer>& Edits)
@@ -844,19 +875,19 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		const FVoxelConditioningZone Pad = MakePad(0.5);
 		const TMap<FIntVector, FChunkEditLayer> Dig = MakePatchEdits(Patch, LowerLayer + 1, 0, FVoxelData::Air());
 		const TMap<FIntVector, TArray<FVoxelData>> Voxels = MergedVoxels(Pad, Dig);
-		auto Merged = [&](const FIntPoint& Column) { return MergedSurfaceAltitude(Config, *Mode, Voxels, Column); };
+		auto Merged = [&](const FIntPoint& Ray) { return MergedSurfaceAltitude(Config, *Mode, Voxels, ColumnOfRay(Config, Ray)); };
 		const TArray<FChunkPoints> With = ExtractPad(Config, *Mode, Pad, Dig, EVoxelAbove::Decided);
 		const TArray<FChunkPoints> Blind = ExtractPad(Config, *Mode, Pad, Dig, EVoxelAbove::Decided, false);
-		const FPadResult In = JudgePad(Config, *Mode, With, Merged, 0.5, &Patch);
-		const FPadResult Out = JudgePad(Config, *Mode, With, Merged, 0.5, &Outside);
-		const FPadResult InBlind = JudgePad(Config, *Mode, Blind, Merged, 0.5, &Patch);
-		AddInfo(FString::Printf(TEXT("Dig: dug columns %d of %d with one open point (worst %.2f uu), the rest %d of %d; without the edits %d of %d"),
-			In.ColumnsWithOne, In.Columns, In.WorstError, Out.ColumnsWithOne, Out.Columns, InBlind.ColumnsWithOne, InBlind.Columns));
-		TestEqual(TEXT("Dig: the patch has columns (non-vacuous)"), In.Columns, Patch.Num());
-		TestEqual(TEXT("Dig: the exposed face is open surface"), In.ColumnsWithOne, In.Columns);
+		const FPadResult In = JudgePad(Config, *Mode, With, Merged, 0.5, InRays);
+		const FPadResult Out = JudgePad(Config, *Mode, With, Merged, 0.5, OutRays);
+		const FPadResult InBlind = JudgePad(Config, *Mode, Blind, Merged, 0.5, InRays);
+		AddInfo(FString::Printf(TEXT("Dig: dug rays %d of %d with one open point (worst %.2f uu), the rest %d of %d; without the edits %d of %d"),
+			In.RaysWithOne, In.Rays, In.WorstError, Out.RaysWithOne, Out.Rays, InBlind.RaysWithOne, InBlind.Rays));
+		TestTrue(TEXT("Dig: the patch has rays (non-vacuous)"), In.Rays >= 25);
+		TestEqual(TEXT("Dig: the exposed face is open surface"), In.RaysWithOne, In.Rays);
 		TestTrue(TEXT("Dig: on the dug surface"), In.WorstError <= 2.0);
-		TestEqual(TEXT("Dig: elsewhere one point per column"), Out.ColumnsWithOne, Out.Columns);
-		TestEqual(TEXT("Dig: without the edits the dug columns have no surface (edit-blind)"), InBlind.ColumnsWithOne, 0);
+		TestEqual(TEXT("Dig: elsewhere one point per ray"), Out.RaysWithOne, Out.Rays);
+		TestEqual(TEXT("Dig: without the edits the dug rays have no surface (edit-blind)"), InBlind.RaysWithOne, 0);
 	}
 
 	// Build: the pad half a voxel under the face (the lower chunk's top cell holds the surface); built over the patch into
@@ -865,18 +896,18 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		const FVoxelConditioningZone Pad = MakePad(-0.5);
 		const TMap<FIntVector, FChunkEditLayer> Build = MakePatchEdits(Patch, LowerLayer + 1, 0, FVoxelData::Solid(EVoxelMaterial::Stone));
 		const TMap<FIntVector, TArray<FVoxelData>> Voxels = MergedVoxels(Pad, Build);
-		auto Merged = [&](const FIntPoint& Column) { return MergedSurfaceAltitude(Config, *Mode, Voxels, Column); };
+		auto Merged = [&](const FIntPoint& Ray) { return MergedSurfaceAltitude(Config, *Mode, Voxels, ColumnOfRay(Config, Ray)); };
 		const TArray<FChunkPoints> With = ExtractPad(Config, *Mode, Pad, Build, EVoxelAbove::Decided);
 		const TArray<FChunkPoints> Blind = ExtractPad(Config, *Mode, Pad, Build, EVoxelAbove::Decided, false);
-		const FPadResult In = JudgePad(Config, *Mode, With, Merged, -0.5, &Patch);
-		const FPadResult Out = JudgePad(Config, *Mode, With, Merged, -0.5, &Outside);
-		const FPadResult InBlind = JudgePad(Config, *Mode, Blind, Merged, -0.5, &Patch);
-		AddInfo(FString::Printf(TEXT("Build: built columns %d of %d with one open point (worst %.2f uu, most %d), the rest %d of %d; without the edits most %d"),
-			In.ColumnsWithOne, In.Columns, In.WorstError, In.MaxOpenInColumn, Out.ColumnsWithOne, Out.Columns, InBlind.MaxOpenInColumn));
-		TestEqual(TEXT("Build: the built-over columns have one open point (the build's top)"), In.ColumnsWithOne, In.Columns);
+		const FPadResult In = JudgePad(Config, *Mode, With, Merged, -0.5, InRays);
+		const FPadResult Out = JudgePad(Config, *Mode, With, Merged, -0.5, OutRays);
+		const FPadResult InBlind = JudgePad(Config, *Mode, Blind, Merged, -0.5, InRays);
+		AddInfo(FString::Printf(TEXT("Build: built rays %d of %d with one open point (worst %.2f uu, most %d), the rest %d of %d; without the edits most %d"),
+			In.RaysWithOne, In.Rays, In.WorstError, In.MaxOpenOnRay, Out.RaysWithOne, Out.Rays, InBlind.MaxOpenOnRay));
+		TestEqual(TEXT("Build: the built-over rays have one open point (the build's top)"), In.RaysWithOne, In.Rays);
 		TestTrue(TEXT("Build: on the build's top"), In.WorstError <= 2.0);
-		TestEqual(TEXT("Build: elsewhere one point per column"), Out.ColumnsWithOne, Out.Columns);
-		TestEqual(TEXT("Build: without the edits the covered face stayed open surface under the build"), InBlind.ColumnsWithTwo, InBlind.Columns);
+		TestEqual(TEXT("Build: elsewhere one point per ray"), Out.RaysWithOne, Out.Rays);
+		TestEqual(TEXT("Build: without the edits the covered face stayed open surface under the build"), InBlind.RaysWithTwo, InBlind.Rays);
 	}
 
 	// Wiring: the scatter manager's own pipeline asks its edit layer source for the neighbours (the dig case).
@@ -898,23 +929,25 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 				Harness.Manager->SetEditLayerSource([&Dig](const FIntVector& ChunkCoord) { return Dig.Find(ChunkCoord); });
 			}
 			const FChunkSurfaceData* Surface = Harness.Run(Lower, LowerVoxels);
+			const TSet<FIntPoint> InSet(InRays), OutSet(OutRays);
 			int32 PatchOpen = 0, OutsideOpen = 0;
 			if (Surface)
 			{
 				for (const FVoxelSurfacePoint& Point : Surface->SurfacePoints)
 				{
-					const FIntPoint Column = ColumnOf(Config, Point.Position);
-					if (!Point.bIsUnderground && IsJudged(Column))
+					const FIntPoint Ray = RayOf(Config, Point.Position);
+					if (!Point.bIsUnderground)
 					{
-						(Patch.Contains(Column) ? PatchOpen : OutsideOpen) += 1;
+						PatchOpen += InSet.Contains(Ray) ? 1 : 0;
+						OutsideOpen += OutSet.Contains(Ray) ? 1 : 0;
 					}
 				}
 			}
-			AddInfo(FString::Printf(TEXT("%s: %d open points over the dig, %d elsewhere in the lower chunk"), bSource ? TEXT("With the edit layer source") : TEXT("Without"),
-				PatchOpen, OutsideOpen));
-			TestEqual(TEXT("The lower chunk has no open point outside the dig (its line tops are covered by the pad)"), OutsideOpen, 0);
+			AddInfo(FString::Printf(TEXT("%s: %d open points on the %d rays over the dig, %d elsewhere in the lower chunk"),
+				bSource ? TEXT("With the edit layer source") : TEXT("Without"), PatchOpen, InRays.Num(), OutsideOpen));
+			TestEqual(TEXT("The lower chunk has no open point outside the dig (its rays enter it under the pad)"), OutsideOpen, 0);
 			TestEqual(bSource ? TEXT("With the edit layer source the dug face is open surface") : TEXT("Without it the dug face has no point"),
-				PatchOpen, bSource ? Patch.Num() : 0);
+				PatchOpen, bSource ? InRays.Num() : 0);
 		}
 	}
 	Config->RemoveFromRoot();

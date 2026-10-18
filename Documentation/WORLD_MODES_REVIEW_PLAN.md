@@ -256,7 +256,7 @@ code sites).
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
 (SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
-revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended. **Decided 2026-10-17, for spherical Phase 6 (§20.0):** D17-D20, the scope (D17 and D18 revise SD1 and SD5), then D21-D24 (§20.1), each as recommended.
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended. **Decided 2026-10-17, for spherical Phase 6 (§20.0):** D17-D20, the scope (D17 and D18 revise SD1 and SD5), then D21-D24 (§20.1), each as recommended. **Decided 2026-10-18:** D25 (§19.5) and D26 (§19.9), each as recommended.
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
@@ -285,6 +285,7 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D23 | Rendering precision far from the origin *(decided 2026-10-17)* | **Region primitives:** one primitive per region of chunks (e.g. 16³, 76,800 uu), vertices relative to the region origin, each region's transform in double; scatter split the same way. No render-origin rebasing, so `WorldOrigin` keeps both roles (§20.1) |
 | D24 | Relief clamps and test-planet sizes *(decided 2026-10-17)* | **10 km** (1,000,000 uu) for `PlanetMaxTerrainHeight`, `PlanetMaxTerrainDepth` and `PlanetHeightScale`; test planets `Review_Planet_M` (R 5 × 10⁶, 50 km) and `Review_Planet_L` (R 10⁸, 1,000 km) (§20.1) |
 | D25 | G27: keep GPU scatter extraction and feed it each chunk's owned seam meshes, or retire it? *(decided 2026-10-18)* | **Retire it**, as GPU DC interior meshing was: every chunk extracts surface points from its voxels on the CPU (3.7 ms mean per 64³ chunk on a worker). Keeping it meant waiting for or appending each chunk's owned seams (which depend on the neighbours and rebuild on LOD changes) and a dynamic output buffer, for a path that stays nondeterministic and makes a different point set from the column scan that extracts about 90% of chunks. `bUseGPUScatterExtraction` stays, ignored, so assets load (§19.5). D17 to D24 are the spherical Phase 6 plan's (draquel/VoxelWorlds#106) |
+| D26 | G31: give each crossing of a planet chunk's own lines to the chunk containing it, or sample one line family for every chunk? *(decided 2026-10-18)* | **One family of radial rays on the cube-sphere grid**: one ray from the planet's centre per cell of `FVoxelCubeSphereGrid` at the point spacing, the same rays for every chunk, each chunk keeping the crossings inside its own box. Ownership alone keeps each chunk's staircase rounding (thin samples inside chunks, 116 of 230 at 30°N 40°E four voxels or more from any face) and still has a line decide whether the neighbour's line makes the point at a face; with one family there is nothing to decide. The spawn weight is the grid cell's area at the point, so the density per area holds on every part of the grid (§19.9) |
 
 ## 9. Order of work
 
@@ -1470,7 +1471,7 @@ Three findings from §13.11 get IDs here:
 | G28 | A buried heightmap chunk's top face carries a row of underground points inside the rock: under ground more than 1.5 voxels over a chunk's top the column scan still takes the voxel above for air (a cave can open it there, so the generated height cannot decide; G26's rule stops at the band), and the buried test classifies the copy underground. Around the Tower 374,928 such points in 223 chunks, and underground-only scatter types put 306 spawn points on them inside the rock (invisible unless a cave floor lies just above); 1.5% of those crossings are real (a cave or dug floor at the boundary, 5,736). Found in §19.4 | Open, low (no visible artefact found): decide the voxel above with the cave carve at that point (the generator's cave density, analytic) or the chunk above's own data | — |
 | G29 | The planet's line top (`ExtractSurfacePointsAlongUp`) keeps a crossing whose voxel above lies outside the chunk when it is within 1.5 voxels of the analytic surface, and puts it there; where the ground continues up to about a voxel into the chunk the line came from, that chunk makes the same point, so the band where the surface crosses a chunk face gets two points (on the surface, not sunken like G26's copies: twice the scatter there). A probe over the 27 chunks around the planet scatter tests' sites (§19.4): 605 (45°), 676 (equator) and 325 (cube corner) pairs of open points from different chunks within half a voxel, 3 to 7% of the open points; none at the pole. `Scatter.Planet.DensityPerArea`'s 10% tolerance hides it | Fixed (§19.6): near the generated surface a line top's voxel above outside the chunk is the one the planet generator made there, with the neighbour's edits applied (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits`, `UVoxelScatterManager::GatherPlanetTouchingEdits` over `GetPlanetLineTopNeighbours`): solid drops the line top and covers the line, air keeps it on the generated surface (interpolated against an edited voxel). For a line's first voxel that voxel is the line's own step before it (straight over it, as before, left strips without points where the lines drift half a voxel a step or more). Tests `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}`; audit `voxel.Scatter.LineTopAudit` (pairs, and a local density around the pawn). On `Review_Planet` the pairs at five stops go from 4,147-10,961 to 15-933 (the rest is G31); 85 of 551 stable chunks change, 80 of them with pairs. No `PlanetGenerationVersion` change | — |
 | G30 | `UVoxelScatterManager::RemoveChunkScatter` (a chunk's unload) clears the surface cache and, through a short-circuit `||`, not the scatter cache when the surface cache held the chunk: an unloaded chunk's spawn points stay cached, and when it streams back in its extraction is taken for a supplemental pass (the new spawn points appended to the stale ones, the surface data not cached again, so the distance spawn and the audits skip it). Found in §19.5 by the first version of `Scatter.Boundary.ManagerIgnoresGPUFlag` | Fixed (§19.7): `RemoveChunkScatter` removes both caches and an unloaded chunk keeps no scatter state (a queued exclusion regrow is dropped too). Checking the instances found a second way a chunk rendered twice: the distance cleanup's `UVoxelScatterRenderer::ReleaseChunkScatterType` left the pair's queued adds, which were flushed into a type the chunk no longer tracked and survived its unload under the reload's instances (351 to 902 per chunk on `VoxelDemo`); the release drops them now. `voxel.Scatter.Digest` logs a `caches:` line (`ComputeCacheResidency`: chunks without surface data, spawn points against instances per chunk and type, duplicates); tests `Scatter.Reload.{SameAsFresh,DistanceSpawn,ReleaseBeforeFlush}`. Round trips (three stops, each visited twice): on `VoxelDemo` every stable chunk is the same at both visits (old code: 43-57 per stop doubled, no surface data at the second visits, up to 950 unloaded chunks cached); on `Review_Planet` the same holds for every stable chunk clear of the distance spawn's hysteresis bands (old code: 31-61 doubled, up to 27,230 duplicate spawn points) | — |
-| G31 | A planet chunk's scatter lines follow local up at its own centre, so neighbouring chunks' lines do not continue into each other: where they step along different axes (the cube's diagonals) or round their drift differently (a slope near half a voxel a step, and wherever it changes enough between the two chunks' centres), a line top whose ground continues into the neighbour is dropped while the neighbour's lines pass that spot with their crossing on this side of the face, and a strip along the face gets no point; rarely both make it. G29's doubled line tops had covered most of these strips. 27-chunk sites (§19.6, a Gaussian local density of one voxel): the cube corner 398 of 10,803 samples under 0.8 and `Scatter.Planet.DensityPerArea` 96.5% (99.7% with G29's doubles), 30°N 40°E 230, the poles, 45° and the equator none; a slope of exactly half a voxel a step 150 samples over 1.2 and 36 under. Live on `Review_Planet`: 15-933 pairs left at five stops | Open: give a crossing to the chunk containing it (each chunk keeps the crossings of its own lines that lie inside it, reading the voxels just past its faces as G29 does), or share one line family across a region | — |
+| G31 | A planet chunk's scatter lines follow local up at its own centre, so neighbouring chunks' lines do not continue into each other: where they step along different axes (the cube's diagonals) or round their drift differently (a slope near half a voxel a step, and wherever it changes enough between the two chunks' centres), a line top whose ground continues into the neighbour is dropped while the neighbour's lines pass that spot with their crossing on this side of the face, and a strip along the face gets no point; rarely both make it. G29's doubled line tops had covered most of these strips. 27-chunk sites (§19.6, a Gaussian local density of one voxel): the cube corner 398 of 10,803 samples under 0.8 and `Scatter.Planet.DensityPerArea` 96.5% (99.7% with G29's doubles), 30°N 40°E 230, the poles, 45° and the equator none; a slope of exactly half a voxel a step 150 samples over 1.2 and 36 under. Live on `Review_Planet`: 15-933 pairs left at five stops | Fixed (§19.9): planet scatter samples one family of radial rays, one per cell of the cube-sphere grid at the point spacing for every chunk, and each chunk keeps the crossings in its own box (decision D26); the voxels past its +X, +Y and +Z faces are G29's generated voxels with the neighbours' edits, from the seven neighbours on those sides. Tests `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}` per ray at ten sites (no pair, no sample under 0.8 or over 1.2). On `Review_Planet` the pairs at five stops go from 15-933 to 0-1, the samples under 0.8 / over 1.2 from up to 4,175 / 1,684 to none, the stable chunks' spawn points rise 2.5% (the corner 6.7%), the map PNG is identical, and extraction takes 16.5 ms per 64³ chunk against 21.3 ms. No `PlanetGenerationVersion` change | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -4306,7 +4307,7 @@ then `vox.TPLatLon` to 45°N 0°E, 0° 90°E, 35.264°N 45°E and 60°S 120°W w
   45° (5,259) and at the corner (6,048): 15,191 bad samples against 11,891 as built and 30,597 under the old rule. The
   372 at the spawn and 288 at the equator under 0.8 are the same in every behaviour, so not the lines'.
 
-**G31 (new, open).** Each planet chunk takes its lines' stepping axis and slope from local up at its own centre, so
+**G31 (new; fixed in §19.9).** Each planet chunk takes its lines' stepping axis and slope from local up at its own centre, so
 neighbouring chunks' lines do not continue into each other: across the cube's diagonals they step along different axes,
 and everywhere their drift rounds differently where the slope differs between the two centres (most where it is near
 half a voxel a step). At such a face a line top whose ground continues into the neighbour is dropped (correctly by its own
@@ -4571,6 +4572,120 @@ numbers exactly; the boss is never held and stands on the tiles at z −5,231; `
   thrashes that chunk: the decision sweep drops its collision while the path coverage re-cooks it (68,305 cooks in a
   minute with `ViewDistance` 3,000). Real worlds are far from it (20,000 on `VoxelDemo`).
 
+### 19.9 G31: planet scatter samples one family of radial rays (2026-10-18)
+
+PRs open (draquel/VoxelWorlds#112, `fix/g31-planet-line-families`, on main `48f9b82` after G30 and G24 merged; the
+parent's gitlink and doc map in draquel/UE5_PluginDev#122). Built with editor 5.8.3 from `D:\Program Files\Epic
+Games\UE_5.8` in a worktree editor (Claudius on 8085), background throttling off. Live runs on `PlanetTest` with
+`/Game/PluginTesting/Review/Review_Planet` through `voxel.ConfigOverride`, as in §19.6; planets extract scatter on the
+CPU.
+
+**The bug** (§19.6). Each planet chunk walked digital lines along local up at its own centre: stepping along the axis
+nearest up, started on a stride grid across it, drifting sideways by the rounded slope. Neighbouring chunks' lines did
+not continue into each other. Across the cube's diagonals they stepped along different axes, and elsewhere their drift
+rounded differently where the slope differs between the two centres. Along such a face a line top whose ground
+continues into the neighbour was dropped while the neighbour's lines passed the spot with their crossing on this side
+of the face, so a strip got no point; rarely both chunks made it. The staircase rounding also thinned the points inside
+a chunk on some slopes: at 30°N 40°E 116 of its 230 thin samples lay 4 voxels or more from any face.
+
+**Decision D26** (§8, the user, 2026-10-18): **one family of radial rays on the cube-sphere grid**, over giving each
+crossing of a chunk's own lines to the chunk containing it. Ownership alone keeps each chunk's staircase (the interior
+gaps above) and still has a line decide whether the neighbour's line makes the point at a face; with one family for
+every chunk there is nothing to decide.
+
+**What changed.**
+
+- `UVoxelScatterManager::ExtractSurfacePointsAlongUp` casts one ray from the planet's centre through the centre of each
+  cell of `FVoxelCubeSphereGrid` whose face-centre cells are the point spacing across (`CellsPerEdgeFor(PlanetRadius,
+  Stride * VoxelSize)`), the same grid for every chunk. The cells the chunk spans come from its corners' directions
+  (`GatherSpanned`); each ray's span in the box [0, ChunkSize]³ is walked down cell by cell (a 3D DDA). In a cell whose
+  corners change sign the trilinear density is sampled five times along the ray (a cell whose corners agree has one sign
+  throughout); a rise through the threshold going down is a floor, the first on the ray open and the rest underground,
+  and every floor of a ray that enters the chunk in the ground is underground. The chunk keeps the floors that lie in its
+  own box, [0, ChunkSize) on each axis, so every crossing has one owner. A cleared volume stops the ray, as it stopped a
+  line.
+- The point: position on the ray, local up = the ray, normal = the trilinear gradient, material, biome, AO and the
+  underground and water flags from the solid and air corners nearest the crossing, altitude by the world mode. Its spawn
+  weight is the cell's solid angle × r² over the column scan's area per point: at most 1 on the datum (a face centre's
+  cell) and (r / R)² over it. The grid's cells shrink to 0.71 of the area at an edge's midpoint, so the rays meet the
+  surface up to 1.42 times as often as the column scan's columns (the old lines up to √3 times, at a cube corner).
+- **Past the faces.** The cells against the +X, +Y and +Z faces reach the voxels past them, which the chunk's data
+  cannot show; they are G29's `GetPlanetVoxelOutsideChunk` (the planet generator's voxel there, the neighbour's edits on
+  top), each computed the first time a ray needs it (`FPlanetRayField`). The neighbours whose edits it reads
+  (`UVoxelScatterManager::GetPlanetShellNeighbours`, replacing `GetPlanetLineTopNeighbours`) are the seven on those sides
+  wherever the chunk is; `GatherPlanetTouchingEdits` no longer takes the up. Fractions within 1e-7 of a cell face snap to
+  it, so both chunks read a point on a face from the same four voxels: a voxel at exactly the threshold there read
+  126.9999 from one side and 127 from the other, and neither chunk kept the crossing.
+- A chunk wholly under or over the shell (`GetAltitudeBounds`, two voxels' margin) is skipped.
+- `FVoxelCubeSphereGrid::GatherSpanned` is linear: it no longer scans its output for duplicates (a cell lies on one
+  face, so none can repeat), which cost 5 ms per chunk at the rays' cell counts.
+- `FPlanetScatterLines` (G29's lines) is deleted; `FVoxelDigitalLine` stays (the MC mesher's material walk and the chunk
+  manager's edit-merged surface query use it). Heightmap paths and generation are unchanged; no `PlanetGenerationVersion` change (scatter only).
+- `voxel.Scatter.LineTopAudit` is unchanged; it now measures that the rays leave no pairs and no thin strips.
+
+**Tests.** The planet line-top tests now judge per ray (`RayGrid`, `PadRays`): each ray of the grid should carry one open
+point. Real chunks from the CPU generator (R 250,000, voxel 75, chunk 32), the 27 around each site.
+
+| Test | What it checks | Result |
+|------|------|------|
+| `Scatter.Planet.LineTop.Duplicates` | Ten sites: both poles, 45°, the equator, a cube corner, slopes of half and a quarter voxel a step (26.57°N and 14.04°N 0°E, where the lines rounded worst), 30°N 40°E and the live corner and south stops. Pairs on one up-line from two chunks (none), none within one chunk, the local density (no sample under 0.8 or over 1.2). The shell taken for air as the sensitive case | Pairs 0 everywhere; every site 0 under 0.8 and 0 over 1.2, mean 0.989-0.990. The shell taken for air doubles 7,694 crossings over the sites (19,123 samples over 1.2) |
+| `Scatter.Planet.LineTop.FlatPad` | A pad at the north pole from 0.9 voxels under a chunk face to 3 voxels over it (12 heights): every ray over the pad has one open point, on the pad, and the lower chunks' top layer none where the pad lies over the face | 2,244 of 2,244 at every height, worst 0.23 uu off the pad, no top-layer point. The shell taken for air: two or more on 45 to 2,243 rays from the face up |
+| `Scatter.Planet.LineTop.Edits` | The seven shell neighbours (components 0 or 1); the voxel past the faces against the neighbour's generated, edit-merged voxel at five sites; a dig through the upper chunk's bottom layer and a build over a face, through the context and the scatter manager's pipeline | 7 neighbours, 0 of 3,169 touching voxels (638 edited) disagree; dig and build: 36 of 36 rays with one open point (0.22 uu), the other 2,144 rays one each; 0 without the edits (the build: two on some); the pipeline 36 open points over the dig with the edit layer source, 0 without |
+
+`Scatter.Planet.DensityPerArea`: 100.5%, 100.8%, 100.2%, 101.0% and 100.5% at the north and south poles, 45°, the equator
+and the cube corner (the old lines 100.0%, 100.0%, 99.3%, 100.0% and 96.5%; a disc of 20 points' radius counts within
+about 1% by where its edge falls). `Scatter.Planet.AlongLocalUp`: worst 0.5 to 0.9 uu off the analytic surface (the old
+lines 0.3 to 7.9 uu, worst at the corner). `Scatter.Planet.ConditionedLineTop`: 17,589 open points on the pad's ground,
+0 off it; without the zones 527 off.
+
+The same tests with the old lines (the temporary switch, `voxel.Scatter.G31Legacy`, removed before the commit): pairs 3
+to 35 at six of the ten sites, samples under 0.8 at the corner (398), 30°N 40°E (230, 116 of them four voxels or more
+from any face), the live corner (88), the half and quarter slopes (36, 34) and the live south stop (2), and over 1.2 on
+the slopes (150, 56) and the south stop (25). The pad and edit tests judge per ray, which lines never matched (2,137 of
+2,244 rays with one point), so they fail there by construction.
+
+Suites: headless VoxelWorlds + VoxelWorldSave + VoxelCharacter + WorldClock + InteractionPlugin + Dungeon 524 of 524 (main's count: the planet line-top tests changed, none added);
+in the editor (D3D12) 524 of 524 with the GPU tests running (only the two retired GPU DC interior tests skip), the 87 GPU parity lines identical to G30's by CRC.
+
+**A/B on `Review_Planet`.** Six runs of one script in one build, three per behaviour, interleaved, after a throwaway
+run: the temporary switch on for the old lines (G29 as merged), off for the rays. Each run: the spawn (60 s), then
+`vox.TPLatLon` to 45°N 0°E, 0° 90°E, 35.264°N 45°E and 60°S 120°W with 45 s each; at each stop streaming frozen for
+`vox.Planet`, the per-chunk digest (`voxel.Scatter.Digest file`), `voxel.Scatter.LineTopAudit 0 0 8000` (pairs, and the
+local density within 8,000 uu of the pawn, 142,948 samples) and the planet extraction's time per chunk (a temporary
+probe).
+
+- `voxel.Map.Capture 6` at the spawn: the same PNG, byte for byte, in all seven runs. The pawn lands at the same place
+  in every run (the equator within 15 uu), and every count below repeats run to run but one old run's 45° capture, which held
+  four more chunks (478,850 open points, 233 pairs).
+- The old lines repeat §19.6's numbers exactly.
+
+| Stop | Pairs, old → rays | Under 0.8 / over 1.2, old → rays | Open points, old → rays | Spawn points in the stable chunks, old → rays |
+|------|------|------|------|------|
+| Spawn (86.7°N 0°E) | 51 → 0 | 372 / 79 → 0 / 0 | 350,070 → 351,790 | 19,549 → 19,988 |
+| 45°N 0°E | 212 → 1 | 4,175 / 128 → 0 / 0 | 464,170 → 466,198 | 30,163 → 30,155 |
+| Equator (0°, 90°E) | 15 → 0 | 288 / 0 → 0 / 0 | 349,660 → 350,270 | 38,016 → 38,569 |
+| Corner (36.8°N 43.1°E) | 518 → 0 | 3,875 / 0 → 0 / 0 | 557,934 → 451,694 | 29,098 → 31,048 |
+| South (59.9°S 115.6°W) | 933 → 0 | 1,290 / 1,684 → 0 / 0 | 410,146 → 405,913 | 36,597 → 37,422 |
+
+- Within 200 m of the five stops 894 chunk-stops are stable (the same digest in every run of each behaviour); 328 of
+  them differ between the behaviours (the points lie on a different lattice wherever there is ground), and their spawn
+  points rise from 153,423 to 157,182 (2.5%; 6.7% at the corner): the strips the old lines left thin. The 372 and 288
+  thin samples at the spawn and the equator, which §19.6 found in every behaviour and set aside, were the lines' too.
+- The corner's open points fall by a fifth: the lines met the surface up to √3 times as often as the column scan there,
+  the rays up to 1.42 times.
+- **The one pair at 45°** (all three runs) lies on open ground in two chunks across an X face (48°N 5.8°E, drawn by the
+  audit: flat grass, no POI or edit near it). With CPU generation (one more run, `-VoxelForceCPU`) it is gone: 0 pairs and
+  0 / 0 at every stop, the open points within one of the GPU runs' at each stop. The voxels past a face come from the CPU
+  formula (`GetPlanetVoxelOutsideChunk`), and the GPU generator's voxels differ from it at a few voxels
+  (`Generation.GPUvsCPUSphericalParity` records 22 to 791 of 32,768 per site with another density, nearly all by 2 or
+  less): one of them on the threshold at the face let the next chunk along the ray enter in air and find the surface
+  again. One point in about two million; left as is.
+
+**Cost.** The planet extraction per 64³ chunk on a worker, over 6,010 and 6,014 chunks: the rays 16.5 ms mean (P95 26.7
+ms, the stops' mean), the old lines 21.3 ms (29.8 ms), 22% less; with CPU generation 17.3 ms. In the tests (32³ chunks,
+the cube corner) 1.86 ms against 3.02 ms: the grid's cells and the slab tests 0.13 ms, the voxels past the faces 0.41 ms
+(3,169 at 0.13 µs). `GatherSpanned`'s duplicate scan had cost 5 ms of it before it was removed.
+
 ## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17)
 
 The requirements doc's optional Phase 6 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-H1
@@ -4579,12 +4694,10 @@ uu, 2.5 km) complete; Phase 6 makes planets **up to about 1,000 km** in radius w
 and from altitude, and lets the player **fly to orbit and back**. Scope decisions SD1 (small planets) and SD5 (surface
 only) are revised by D17 and D18 below. Every decision the plan needs (D17-D24) was taken on 2026-10-17.
 
-Not executed yet: the loose ends go first, each in its own session (as of 2026-10-18):
+Not executed yet. The loose ends went first, each in its own session; as of 2026-10-18 all that block it are fixed:
 
-- Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6), G30 (§19.7) and G24
-  (§19.8).
-- Next, with its section reserved: G31 (§19.9, planet scatter lines do not continue across chunk faces). Phase 6's
-  larger radii shrink all of G31 but its cube-diagonal part, so it can move into P6.5 instead.
+- Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6), G30 (§19.7), G24
+  (§19.8) and G31 (§19.9; planet scatter samples one family of radial rays, D26).
 - Deferred, not blocking Phase 6: G14 (tooling), G16 and G25 (cosmetic), G19 (documented) and G28 (low).
 
 Bases: VoxelWorlds `2fd32fc`, UE5_PluginDev `f737a3c` (spherical Phase 5 merged). Refreshed on 2026-10-18 onto main after

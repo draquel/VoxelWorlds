@@ -38,8 +38,9 @@ struct FScatterExtractionContext
 	 * The terrain conditioning zones over the chunk (POI pads and their falloff rings), so the analytic surface the
 	 * extractors compare with is the generated ground, not the natural one. Heightmap worlds: the buried-chunk test
 	 * compares the chunk's top with the natural height plus these zones (FVoxelTerrainConditioning::ApplyToHeight;
-	 * world modes review G23). Planets (spherical SP-B10): a line's crossing put on the analytic surface at the chunk's
-	 * upper face lands on the flattened ground (ApplyToAltitude). Each kind of zone applies only in its own kind of world.
+	 * world modes review G23). Planets (spherical SP-B10): the voxels past a chunk's +X, +Y and +Z faces
+	 * (GetPlanetVoxelOutsideChunk) are generated on the flattened ground (ApplyToAltitude). Each kind of zone applies only
+	 * in its own kind of world.
 	 * Null or empty: the world mode's natural surface.
 	 */
 	TSharedPtr<const TArray<FVoxelConditioningZone>> ConditioningZones;
@@ -52,10 +53,10 @@ struct FScatterExtractionContext
 	TSharedPtr<const TMap<int32, FVoxelEdit>> AboveLayerEdits;
 
 	/**
-	 * Planets: the edits in the voxels just outside the chunk that a digital line's voxel above can be (world modes review
-	 * G29): the layer of the neighbour over the lines' upper face and of the neighbours on the sides they enter through
-	 * that touches the chunk. Keyed by the voxel's coordinate in this chunk's frame (each component in [-1, ChunkSize]).
-	 * GetPlanetVoxelOutsideChunk applies these to the voxel the generator made there. Null: no edits there.
+	 * Planets: the edits in the voxels just past the chunk's +X, +Y and +Z faces, which its last cell on each axis reaches
+	 * (world modes review G29, G31): the layers of the seven neighbours on those sides (GetPlanetShellNeighbours) that
+	 * touch the chunk. Keyed by the voxel's coordinate in this chunk's frame (each component in [0, ChunkSize], one of
+	 * them ChunkSize). GetPlanetVoxelOutsideChunk applies these to the voxel the generator made there. Null: no edits there.
 	 */
 	TSharedPtr<const TMap<FIntVector, FVoxelEdit>> TouchingEdits;
 
@@ -90,7 +91,7 @@ struct FScatterExtractionContext
 	 * along its direction, ConditioningZones applied), with the neighbour's edit there applied (TouchingEdits). Valid
 	 * where no cave reaches that voxel, i.e. near the generated surface (cave layers keep several voxels under it). Only
 	 * Density and MaterialID are meaningful. Requires a spherical planet WorldMode.
-	 * @param LocalCoord The voxel's coordinate in this chunk's frame (outside [0, ChunkSize) on at least one axis)
+	 * @param LocalCoord The voxel's coordinate in this chunk's frame (ChunkSize on at least one axis)
 	 * @param WorldPos The voxel's sample position (the chunk's origin + LocalCoord * VoxelSize, as generation samples it)
 	 * @param VoxelSize Voxel edge in world units
 	 * @return The voxel as generated, with any edit applied
@@ -330,27 +331,23 @@ public:
 		FChunkSurfaceData& OutSurfaceData);
 
 	/**
-	 * Planets (world modes review G29): the neighbours a planet chunk's line tops read their voxel above from, as chunk
-	 * coordinate offsets: the one over the lines' upper face (a line's first step), those on the sides the lines drift in
-	 * through, and the one on the edge between those sides. ExtractSurfacePointsAlongUp's lines for local up at the
-	 * chunk's centre. Pure.
-	 * @param Up Local up at the chunk's centre (IVoxelWorldMode::GetUpVector)
-	 * @param ChunkSize Voxels per chunk edge
+	 * Planets (world modes review G31): the neighbours whose voxels a planet chunk's rays read past its faces, as chunk
+	 * coordinate offsets: the seven on its +X, +Y and +Z sides (the three faces, their three edges and their corner), into
+	 * which the chunk's last cell on each axis reaches. Pure.
 	 * @param OutOffsets Receives the offsets (appended)
 	 */
-	static void GetPlanetLineTopNeighbours(const FVector& Up, int32 ChunkSize, TArray<FIntVector>& OutOffsets);
+	static void GetPlanetShellNeighbours(TArray<FIntVector>& OutOffsets);
 
 	/**
-	 * Planets (world modes review G29): the edits in the layers of GetPlanetLineTopNeighbours's neighbours touching a chunk,
-	 * keyed by their coordinate in the chunk's frame, for FScatterExtractionContext::TouchingEdits. MakeExtractionContext
-	 * calls it with the chunk manager's edit layers (SetEditLayerSource).
-	 * @param Up Local up at the chunk's centre
+	 * Planets (world modes review G29, G31): the edits in the layers of GetPlanetShellNeighbours's neighbours touching a
+	 * chunk, keyed by their coordinate in the chunk's frame, for FScatterExtractionContext::TouchingEdits.
+	 * MakeExtractionContext calls it with the chunk manager's edit layers (SetEditLayerSource).
 	 * @param ChunkCoord The chunk
 	 * @param ChunkSize Voxels per chunk edge
 	 * @param EditLayerSource A chunk's edit layer, or null when it has none
 	 * @return The edits, or null when there are none
 	 */
-	static TSharedPtr<const TMap<FIntVector, FVoxelEdit>> GatherPlanetTouchingEdits(const FVector& Up, const FIntVector& ChunkCoord, int32 ChunkSize,
+	static TSharedPtr<const TMap<FIntVector, FVoxelEdit>> GatherPlanetTouchingEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
 		TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource);
 
 	/**
@@ -539,7 +536,7 @@ public:
 	 * Where a chunk's edit layer lives (the chunk manager's edit manager), so a heightmap chunk's extraction knows the
 	 * voxel over its top layer, the chunk above's bottom voxel (world modes review G26): MakeExtractionContext copies the
 	 * chunk above's edits on that layer into FScatterExtractionContext::AboveLayerEdits. On a planet it copies the edits in
-	 * the neighbours' layers a line's voxel above can lie in into FScatterExtractionContext::TouchingEdits (G29). Called on
+	 * the layers past the chunk's +X, +Y and +Z faces into FScatterExtractionContext::TouchingEdits (G29, G31). Called on
 	 * the game thread when a chunk's extraction is set up. Unset: no edits (the generated voxel).
 	 */
 	void SetEditLayerSource(TFunction<const FChunkEditLayer*(const FIntVector& /*ChunkCoord*/)> InSource)
@@ -762,17 +759,19 @@ protected:
 
 
 	/**
-	 * ExtractSurfacePointsFromVoxelData on a planet (spherical SP-G1): the same scan along digital lines in the chunk's
-	 * local up instead of world-Z columns. The lines step one voxel along the axis nearest local up and are spaced on
-	 * the stride grid across it; along each, every solid voxel with air above it along the line is a point (the first
-	 * one open, the rest underground, as in a column), interpolated toward the voxel above (the line's previous voxel; for
-	 * its first one, the line's own step before it, over the upper face). A crossing whose voxel above lies outside the
-	 * chunk (over the upper face, or on a side the line enters through) is kept only within 1.5 voxels of the analytic
-	 * surface, the planet's cover check, and only where that voxel, the neighbour's, is air: the context's
-	 * GetPlanetVoxelOutsideChunk (solid: the ground continues into the neighbour, which makes the point, and the rest of
-	 * the line is covered; world modes review G29). The kept crossing goes onto the generated surface, or is interpolated
-	 * against that voxel where the neighbour's edit changed it. Face type, slope and the elevation filter go by the point's
-	 * radial up and altitude; SpawnWeight keeps the density per area the column scan's. The async pipeline calls it for planet chunks.
+	 * ExtractSurfacePointsFromVoxelData on a planet (spherical SP-G1; world modes review G31): the column scan's columns
+	 * are the planet's radial lines, one through the centre of each cell of the cube-sphere grid at the point spacing
+	 * (FVoxelCubeSphereGrid, Stride voxels per cell on the datum sphere), the same lattice for every chunk. Down each ray
+	 * through the chunk the density is the trilinear interpolation of the voxels (sampled in the cells whose corners change
+	 * sign); every rise through the surface threshold going down is a point (the first on the ray open, the rest
+	 * underground, as in a column, and all underground when the ray enters the chunk solid), and the chunk keeps the points
+	 * that lie in its own box [0, ChunkSize) on each axis, so each crossing has one owner. The chunk's last cell on each
+	 * axis reaches the voxels past its +X, +Y and +Z faces: the context's GetPlanetVoxelOutsideChunk, the planet
+	 * generator's voxel there with the neighbour's edit. Material, biome and the underground and water flags come from the
+	 * crossing cell's nearest own solid and air voxels; the normal is the trilinear gradient; local up is the ray. Face
+	 * type, slope and the elevation filter go by the point's radial up and altitude; SpawnWeight is the cell's area at the
+	 * point over the column scan's per point, so the weighted density per area is the column scan's. The async pipeline
+	 * calls it for planet chunks.
 	 */
 	static void ExtractSurfacePointsAlongUp(
 		const TArray<FVoxelData>& VoxelData,

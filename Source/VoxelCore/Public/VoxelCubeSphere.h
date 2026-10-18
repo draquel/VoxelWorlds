@@ -173,7 +173,7 @@ struct VOXELCORE_API FVoxelCubeSphereGrid
 	 * of the UV rectangle of all of them projected onto that face, clamped to the face.
 	 *
 	 * @param Directions Unit directions (a few degrees apart at most)
-	 * @param OutCells The cells (appended, no duplicates among them)
+	 * @param OutCells The cells (appended; none repeats, a cell lying on one face). Linear in the cells.
 	 */
 	void GatherSpanned(TConstArrayView<FVector> Directions, TArray<FIntPoint>& OutCells) const;
 

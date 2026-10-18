@@ -8,6 +8,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
+#include "VoxelCubeSphere.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelTerrainConditioning.h"
 #include "VoxelMaterialRegistry.h"
@@ -81,78 +82,159 @@ namespace
 		}));
 
 	/**
-	 * The digital lines of a planet chunk (UVoxelScatterManager::ExtractSurfacePointsAlongUp): they step one voxel along the
-	 * axis nearest local up at the chunk's centre (AxisA, downward from the side SignA points to) and sideways by the
-	 * rounded multiple of the down direction's slope across it (AxisB, AxisC). A line's voxel above its first one is its
-	 * own continuation over the upper face: the step before K = 0, shifted by ShiftAbove.
+	 * A planet chunk's density for ExtractSurfacePointsAlongUp's radial rays (world modes review G31), on the voxel lattice
+	 * 0..ChunkSize on each axis: its own voxels, and past its +X, +Y and +Z faces (index ChunkSize) the voxel the planet
+	 * generator makes there with the neighbour's edit (FScatterExtractionContext::GetPlanetVoxelOutsideChunk), computed the
+	 * first time a ray needs it. Cell (I, J, K) spans voxels I..I+1 on each axis; the chunk owns cells 0..ChunkSize-1, so
+	 * its last cell on each axis reaches one voxel into the neighbour.
 	 */
-	struct FPlanetScatterLines
+	struct FPlanetRayField
 	{
-		int32 AxisA = 2;
-		int32 AxisB = 0;
-		int32 AxisC = 1;
-		int32 SignA = 1;
-		/** |Up[AxisA]|: lines Stride apart meet level ground 1 / Major times as densely as columns. */
-		double Major = 1.0;
-		/** Per step K, the sideways shift across AxisB (X) and AxisC (Y). */
-		TArray<FIntPoint> Shifts;
-		/** The shift of the step before K = 0 (the line's voxel over the upper face), against the drift. */
-		FIntPoint ShiftAbove = FIntPoint::ZeroValue;
-
-		FPlanetScatterLines(const FVector& Up, int32 ChunkSize)
+		FPlanetRayField(const TArray<FVoxelData>& InVoxels, int32 InChunkSize, const FVector& InOrigin, float InVoxelSize,
+			const FScatterExtractionContext& InContext)
+			: Voxels(InVoxels)
+			, Context(InContext)
+			, Origin(InOrigin)
+			, VoxelSize(InVoxelSize)
+			, CS(InChunkSize)
+			, Side(InChunkSize + 1)
 		{
-			const FVector AbsUp = Up.GetAbs();
-			AxisA = (AbsUp.X >= AbsUp.Y && AbsUp.X >= AbsUp.Z) ? 0 : (AbsUp.Y >= AbsUp.Z ? 1 : 2);
-			AxisB = (AxisA + 1) % 3;
-			AxisC = (AxisA + 2) % 3;
-			SignA = Up[AxisA] >= 0.0 ? 1 : -1;
-			Major = FMath::Max(AbsUp[AxisA], UE_DOUBLE_SMALL_NUMBER);
-			Shifts.SetNum(ChunkSize + 1);
-			for (int32 K = 0; K <= ChunkSize; ++K)
+			Shell.Init(0xFFFF, Side * Side * Side);
+			CellState.Init(0, CS * CS * CS);
+		}
+
+		bool IsOwn(int32 X, int32 Y, int32 Z) const { return X < CS && Y < CS && Z < CS; }
+
+		const FVoxelData& Own(int32 X, int32 Y, int32 Z) const { return Voxels[X + Y * CS + Z * CS * CS]; }
+
+		/** The density at a lattice voxel (each coordinate in 0..ChunkSize). */
+		uint8 Density(int32 X, int32 Y, int32 Z)
+		{
+			if (IsOwn(X, Y, Z))
 			{
-				Shifts[K] = FIntPoint(FMath::RoundToInt32(-K * Up[AxisB] / Major), FMath::RoundToInt32(-K * Up[AxisC] / Major));
+				return Own(X, Y, Z).Density;
 			}
-			ShiftAbove = FIntPoint(FMath::RoundToInt32(Up[AxisB] / Major), FMath::RoundToInt32(Up[AxisC] / Major));
+			uint16& Cached = Shell[X + Y * Side + Z * Side * Side];
+			if (Cached == 0xFFFF)
+			{
+				const FIntVector Local(X, Y, Z);
+				Cached = Context.GetPlanetVoxelOutsideChunk(Local, Origin + FVector(Local) * VoxelSize, VoxelSize).Density;
+			}
+			return static_cast<uint8>(Cached);
+		}
+
+		/** Whether a cell's corners are all air (1), all solid (2) or both (3). */
+		uint8 GetCellState(const FIntVector& C)
+		{
+			uint8& State = CellState[C.X + C.Y * CS + C.Z * CS * CS];
+			if (State == 0)
+			{
+				bool bAir = false;
+				bool bSolid = false;
+				for (int32 I = 0; I < 8; ++I)
+				{
+					const bool bCornerSolid = Density(C.X + (I & 1), C.Y + ((I >> 1) & 1), C.Z + ((I >> 2) & 1)) >= VOXEL_SURFACE_THRESHOLD;
+					bSolid |= bCornerSolid;
+					bAir |= !bCornerSolid;
+				}
+				State = (bAir ? 1 : 0) | (bSolid ? 2 : 0);
+			}
+			return State;
 		}
 
 		/**
-		 * The neighbours a line's voxel above can lie in (world modes review G29): over the upper face (a line's first step;
-		 * on its edges or corner where the step before it is shifted), on the sides the lines drift in through, and on the
-		 * edge between those sides.
+		 * Where in a cell a point lies, 0..1 on each axis, exactly 0 or 1 within 1e-7 of a face: both chunks sharing a face
+		 * then read a point on it from the same four voxels (a voxel at the threshold on a face otherwise read 126.9999 from
+		 * one side and 127 from the other, and neither kept the crossing).
 		 */
-		void GetVoxelAboveNeighbours(TArray<FIntVector>& OutOffsets) const
+		static FVector CellFraction(const FVector& Local, const FIntVector& C)
 		{
-			auto Add = [&](int32 A, int32 B, int32 C)
+			FVector F = Local - FVector(C);
+			for (int32 A = 0; A < 3; ++A)
 			{
-				FIntVector Offset(0);
-				Offset[AxisA] = A;
-				Offset[AxisB] = B;
-				Offset[AxisC] = C;
-				OutOffsets.AddUnique(Offset);
-			};
-			// The step before K = 0, over the upper face.
-			const int32 AboveB = FMath::Sign(ShiftAbove.X);
-			const int32 AboveC = FMath::Sign(ShiftAbove.Y);
-			Add(SignA, 0, 0);
-			Add(SignA, AboveB, 0);
-			Add(SignA, 0, AboveC);
-			Add(SignA, AboveB, AboveC);
-			// Later steps: a line drifting toward +B enters through the -B side.
-			const int32 SideB = -FMath::Sign(Shifts.Last().X);
-			const int32 SideC = -FMath::Sign(Shifts.Last().Y);
-			if (SideB != 0)
-			{
-				Add(0, SideB, 0);
+				F[A] = F[A] < 1e-7 ? 0.0 : (F[A] > 1.0 - 1e-7 ? 1.0 : F[A]);
 			}
-			if (SideC != 0)
+			return F;
+		}
+
+		/** A cell's corner densities, corner I at (I & 1, (I >> 1) & 1, (I >> 2) & 1). */
+		void GetCorners(const FIntVector& C, double V[8])
+		{
+			for (int32 I = 0; I < 8; ++I)
 			{
-				Add(0, 0, SideC);
-			}
-			if (SideB != 0 && SideC != 0)
-			{
-				Add(0, SideB, SideC);
+				V[I] = Density(C.X + (I & 1), C.Y + ((I >> 1) & 1), C.Z + ((I >> 2) & 1));
 			}
 		}
+
+		/**
+		 * The trilinear density at a point of a cell, and optionally its gradient (per voxel).
+		 * @param V The cell's corner densities (GetCorners)
+		 * @param F Where in it, 0..1 on each axis
+		 * @param OutGradient Receives the gradient (density per voxel) when not null
+		 * @return The density there
+		 */
+		static double Sample(const double V[8], const FVector& F, FVector* OutGradient = nullptr)
+		{
+			// Along X on the cell's four X edges, then Y, then Z.
+			const double C00 = V[0] + (V[1] - V[0]) * F.X;
+			const double C10 = V[2] + (V[3] - V[2]) * F.X;
+			const double C01 = V[4] + (V[5] - V[4]) * F.X;
+			const double C11 = V[6] + (V[7] - V[6]) * F.X;
+			const double C0 = C00 + (C10 - C00) * F.Y;
+			const double C1 = C01 + (C11 - C01) * F.Y;
+			if (OutGradient)
+			{
+				const double DX0 = (V[1] - V[0]) + ((V[3] - V[2]) - (V[1] - V[0])) * F.Y;
+				const double DX1 = (V[5] - V[4]) + ((V[7] - V[6]) - (V[5] - V[4])) * F.Y;
+				*OutGradient = FVector(DX0 + (DX1 - DX0) * F.Z, (C10 - C00) + ((C11 - C01) - (C10 - C00)) * F.Z, C1 - C0);
+			}
+			return C0 + (C1 - C0) * F.Z;
+		}
+
+		/**
+		 * The cell's own corner nearest a point of it that is solid (bSolid) or air: where a crossing takes its material,
+		 * biome and flags. A cell always has its own corner (0, 0, 0); when no own corner has the wanted state, the nearest
+		 * own corner.
+		 */
+		const FVoxelData& NearestOwnCorner(const FIntVector& C, const FVector& F, bool bSolid) const
+		{
+			int32 Best = 0;
+			double BestDistance = TNumericLimits<double>::Max();
+			int32 Fallback = 0;
+			double FallbackDistance = TNumericLimits<double>::Max();
+			for (int32 I = 0; I < 8; ++I)
+			{
+				const FIntVector Corner(C.X + (I & 1), C.Y + ((I >> 1) & 1), C.Z + ((I >> 2) & 1));
+				if (!IsOwn(Corner.X, Corner.Y, Corner.Z))
+				{
+					continue;
+				}
+				const double Distance = (FVector(I & 1, (I >> 1) & 1, (I >> 2) & 1) - F).SizeSquared();
+				if (Distance < FallbackDistance)
+				{
+					FallbackDistance = Distance;
+					Fallback = I;
+				}
+				if (Own(Corner.X, Corner.Y, Corner.Z).IsSolid() == bSolid && Distance < BestDistance)
+				{
+					BestDistance = Distance;
+					Best = I;
+				}
+			}
+			const int32 I = BestDistance < TNumericLimits<double>::Max() ? Best : Fallback;
+			return Own(C.X + (I & 1), C.Y + ((I >> 1) & 1), C.Z + ((I >> 2) & 1));
+		}
+
+		const TArray<FVoxelData>& Voxels;
+		const FScatterExtractionContext& Context;
+		FVector Origin;
+		float VoxelSize;
+		int32 CS;
+		int32 Side;
+		/** The shell's densities once computed ((ChunkSize + 1)^3, 0xFFFF = not yet). */
+		TArray<uint16> Shell;
+		/** Per cell: 0 not yet classified, else GetCellState's answer. */
+		TArray<uint8> CellState;
 	};
 }
 
@@ -2594,213 +2676,270 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 	OutSurfaceData.LODLevel = 0;
 
 	const int32 CS = ChunkSize;
-	if (VoxelData.Num() != CS * CS * CS || Context.WorldMode == nullptr)
+	if (VoxelData.Num() != CS * CS * CS || Context.WorldMode == nullptr || Context.WorldMode->GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
 		OutSurfaceData.bIsValid = false;
 		return;
 	}
+	OutSurfaceData.bIsValid = true;
+	const FSphericalPlanetParams& Params = static_cast<const FSphericalPlanetWorldMode*>(Context.WorldMode)->GetPlanetParams();
+	const FVector Centre = Params.PlanetCenter;
+	const double ChunkWorld = static_cast<double>(CS) * VoxelSize;
 
-	const int32 Stride = FMath::Max(1, FMath::RoundToInt(PointSpacing / VoxelSize));
-	const FVector ChunkCenter = ChunkWorldOrigin + FVector(0.5 * CS * VoxelSize);
-	const FVector Up = Context.WorldMode->GetUpVector(ChunkCenter);
-
-	// The lines step one voxel along the axis nearest local up (AxisA), downward from the chunk's upper side; per step K
-	// the sideways offset is the rounded multiple of the down direction's slope (FVoxelDigitalLine's geometry). Line
-	// (LB, LC) holds voxel (a, LB + ShiftB[K], LC + ShiftC[K]) at step K; ids span [-CS, 2 * CS) so every voxel of the
-	// chunk is on a line at stride 1.
-	const FPlanetScatterLines Lines(Up, CS);
-	const int32 AxisA = Lines.AxisA;
-	const int32 AxisB = Lines.AxisB;
-	const int32 AxisC = Lines.AxisC;
-	const int32 SignA = Lines.SignA;
-	const double Major = Lines.Major;
-	const TArray<FIntPoint>& Shifts = Lines.Shifts;
-	auto VoxelOnLine = [&](int32 LB, int32 LC, int32 K)
+	// A chunk wholly under or over the planet's shell has no surface (and the grid's span below needs a chunk a few
+	// degrees wide at most, which every chunk the shell reaches is).
 	{
-		FIntVector V;
-		V[AxisA] = SignA > 0 ? CS - 1 - K : K;
-		V[AxisB] = LB + Shifts[FMath::Max(K, 0)].X;
-		V[AxisC] = LC + Shifts[FMath::Max(K, 0)].Y;
-		return V;
-	};
-	auto Inside = [CS](const FIntVector& V)
-	{
-		return V.X >= 0 && V.X < CS && V.Y >= 0 && V.Y < CS && V.Z >= 0 && V.Z < CS;
-	};
-	auto IndexOf = [CS](const FIntVector& V)
-	{
-		return V.X + V.Y * CS + V.Z * CS * CS;
-	};
-	auto GetDensity = [&](int32 X, int32 Y, int32 Z) -> float
-	{
-		X = FMath::Clamp(X, 0, CS - 1);
-		Y = FMath::Clamp(Y, 0, CS - 1);
-		Z = FMath::Clamp(Z, 0, CS - 1);
-		return static_cast<float>(VoxelData[X + Y * CS + Z * CS * CS].Density);
-	};
-
-	// The density compensation (FVoxelSurfacePoint::SpawnWeight): lines Stride apart across AxisA meet level ground
-	// 1 / Major times as densely as columns meet a plane's level ground.
-	const float SpawnWeight = static_cast<float>(Major);
-	const float CoverThreshold = VoxelSize * 1.5f;
-	const int32 LineCount = (3 * CS + Stride - 1) / Stride;
-	OutSurfaceData.SurfacePoints.Reserve(LineCount * LineCount / 4);
-
-	for (int32 LB = -CS; LB < 2 * CS; LB += Stride)
-	{
-		for (int32 LC = -CS; LC < 2 * CS; LC += Stride)
+		float MinAltitude = 0.0f;
+		float MaxAltitude = 0.0f;
+		Context.WorldMode->GetAltitudeBounds(MinAltitude, MaxAltitude);
+		const FVector Nearest(FMath::Clamp(Centre.X, ChunkWorldOrigin.X, ChunkWorldOrigin.X + ChunkWorld),
+			FMath::Clamp(Centre.Y, ChunkWorldOrigin.Y, ChunkWorldOrigin.Y + ChunkWorld), FMath::Clamp(Centre.Z, ChunkWorldOrigin.Z, ChunkWorldOrigin.Z + ChunkWorld));
+		double Farthest = 0.0;
+		for (int32 I = 0; I < 8; ++I)
 		{
-			bool bFoundLineTop = false;
-			bool bPrevInside = false;
-			// The voxel above the line's first one: the line's own step before it, outside the chunk over the upper face.
-			FIntVector Prev = VoxelOnLine(LB, LC, 0);
-			Prev[AxisA] += SignA;
-			Prev[AxisB] += Lines.ShiftAbove.X;
-			Prev[AxisC] += Lines.ShiftAbove.Y;
-			for (int32 K = 0; K < CS; ++K)
-			{
-				const FIntVector V = VoxelOnLine(LB, LC, K);
-				const bool bInside = Inside(V);
-				bool bStopLine = false;
-				if (bInside)
-				{
-					const FVoxelData& Voxel = VoxelData[IndexOf(V)];
-					do
-					{
-						if (!Voxel.IsSolid())
-						{
-							break;
-						}
-
-						// A solid voxel: the voxel above along the line is the previous one. Inside the chunk it must be
-						// open for a surface; outside (the upper face, or a side the line came in through) it is the
-						// neighbour's, decided below near the analytic surface only.
-						float AirDensity = 0.0f;
-						bool bAirAboveIsUnderground = false;
-						bool bAirAboveIsWater = false;
-						const bool bAboveKnown = bPrevInside;
-						if (bAboveKnown)
-						{
-							const FVoxelData& AboveVoxel = VoxelData[IndexOf(Prev)];
-							if (AboveVoxel.IsSolid())
-							{
-								break; // not a surface transition
-							}
-							AirDensity = static_cast<float>(AboveVoxel.Density);
-							bAirAboveIsUnderground = AboveVoxel.HasUndergroundFlag();
-							bAirAboveIsWater = AboveVoxel.HasWaterFlag();
-						}
-
-						const float SolidDensity = static_cast<float>(Voxel.Density);
-						float Fraction = 0.5f;
-						const float DensityRange = AirDensity - SolidDensity;
-						if (FMath::Abs(DensityRange) > SMALL_NUMBER)
-						{
-							Fraction = FMath::Clamp((static_cast<float>(VOXEL_SURFACE_THRESHOLD) - SolidDensity) / DensityRange, 0.0f, 1.0f);
-						}
-						const FVector SolidPos = ChunkWorldOrigin + FVector(V) * VoxelSize;
-						const FVector AbovePos = ChunkWorldOrigin + FVector(Prev) * VoxelSize;
-						FVector WorldPos = SolidPos + (AbovePos - SolidPos) * Fraction;
-
-						if (!bAboveKnown)
-						{
-							// The generated surface: the planet's conditioning zones over the chunk applied (SP-B10).
-							const FVoxelTerrainSurfacePoint Analytic = Context.ConditioningZones.IsValid()
-								? static_cast<const FSphericalPlanetWorldMode*>(Context.WorldMode)->GetConditionedSurfacePoint(WorldPos, Context.NoiseParams, *Context.ConditioningZones)
-								: Context.WorldMode->GetSurfacePoint(WorldPos, Context.NoiseParams);
-							if (FMath::Abs(Context.WorldMode->GetAltitude(WorldPos) - Analytic.Altitude) > CoverThreshold)
-							{
-								// Terrain continues into the neighbour above: this is not the open surface, and anything
-								// lower on the line is covered.
-								bFoundLineTop = true;
-								break;
-							}
-							// Near the generated surface the voxel above is the one the generator made in the neighbour (no
-							// cave comes that close to the surface), with the neighbour's edits applied (world modes review
-							// G29). Solid, the ground continues into the neighbour, which makes the point: keeping this
-							// crossing put a second point on the surface beside it, along the band where the surface crosses
-							// a chunk face. The rest of the line is covered.
-							const FVoxelData AboveVoxel = Context.GetPlanetVoxelOutsideChunk(Prev, AbovePos, VoxelSize);
-							if (AboveVoxel.IsSolid())
-							{
-								bFoundLineTop = true;
-								break;
-							}
-							if (Context.TouchingEdits.IsValid() && Context.TouchingEdits->Contains(Prev))
-							{
-								// An edit there: the generated surface is not the ground, so interpolate against that voxel,
-								// as the mesher does.
-								AirDensity = static_cast<float>(AboveVoxel.Density);
-								const float EditedRange = AirDensity - SolidDensity;
-								Fraction = FMath::Abs(EditedRange) > SMALL_NUMBER
-									? FMath::Clamp((static_cast<float>(VOXEL_SURFACE_THRESHOLD) - SolidDensity) / EditedRange, 0.0f, 1.0f)
-									: 0.5f;
-								WorldPos = SolidPos + (AbovePos - SolidPos) * Fraction;
-							}
-							else
-							{
-								// The crossing lies between this voxel and the generator's air outside the chunk: put it on
-								// the generated surface along its up-line.
-								WorldPos = Analytic.Position;
-							}
-						}
-
-						for (const FClearedScatterVolume& Volume : ClearedVolumes)
-						{
-							if (Volume.ContainsPoint(WorldPos))
-							{
-								bStopLine = true;
-								break;
-							}
-						}
-						if (bStopLine)
-						{
-							break;
-						}
-
-						const FIntVector& I = V;
-						FVector Normal(
-							-(GetDensity(I.X + 1, I.Y, I.Z) - GetDensity(I.X - 1, I.Y, I.Z)),
-							-(GetDensity(I.X, I.Y + 1, I.Z) - GetDensity(I.X, I.Y - 1, I.Z)),
-							-(GetDensity(I.X, I.Y, I.Z + 1) - GetDensity(I.X, I.Y, I.Z - 1)));
-						const FVector PointUp = Context.WorldMode->GetUpVector(WorldPos);
-						if (!Normal.Normalize())
-						{
-							Normal = PointUp;
-						}
-						const double Along = FVector::DotProduct(Normal, PointUp);
-
-						FVoxelSurfacePoint Point;
-						Point.Position = WorldPos;
-						Point.Normal = Normal;
-						Point.MaterialID = Voxel.MaterialID;
-						Point.BiomeID = Voxel.BiomeID;
-						Point.FaceType = Along > 0.5 ? EVoxelFaceType::Top : (Along < -0.5 ? EVoxelFaceType::Bottom : EVoxelFaceType::Side);
-						Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
-						Point.LocalUp = PointUp;
-						Point.ComputeSlopeAngle(PointUp);
-						Point.Altitude = Context.WorldMode->GetAltitude(WorldPos);
-						Point.bHasAltitude = true;
-						Point.SpawnWeight = SpawnWeight;
-						Point.bIsUnderground = bAirAboveIsUnderground || Voxel.HasUndergroundFlag() || bFoundLineTop;
-						const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
-						Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
-						OutSurfaceData.SurfacePoints.Add(Point);
-						bFoundLineTop = true;
-					} while (false);
-				}
-				Prev = V;
-				bPrevInside = bInside;
-				if (bStopLine)
-				{
-					break;
-				}
-			}
+			const FVector Corner = ChunkWorldOrigin + FVector(I & 1, (I >> 1) & 1, (I >> 2) & 1) * ChunkWorld;
+			Farthest = FMath::Max(Farthest, FVector::Dist(Corner, Centre));
+		}
+		const double Margin = 2.0 * VoxelSize;
+		if (FVector::Dist(Nearest, Centre) > Params.PlanetRadius + MaxAltitude + Margin || Farthest < Params.PlanetRadius + MinAltitude - Margin)
+		{
+			return;
 		}
 	}
 
-	OutSurfaceData.SurfaceAreaEstimate = OutSurfaceData.SurfacePoints.Num() * PointSpacing * PointSpacing;
-	OutSurfaceData.bIsValid = true;
+	// One ray per cell of the cube-sphere grid at the stride (the column scan's columns at a planet's scale), the same
+	// lattice for every chunk: neighbouring chunks' rays are one family, each crossing on a ray lies in exactly one chunk.
+	const int32 Stride = FMath::Max(1, FMath::RoundToInt(PointSpacing / VoxelSize));
+	const double CellSize = Stride * VoxelSize;
+	const FVoxelCubeSphereGrid Grid(FVoxelCubeSphereGrid::CellsPerEdgeFor(Params.PlanetRadius, CellSize));
+	FVector CornerDirections[8];
+	for (int32 I = 0; I < 8; ++I)
+	{
+		CornerDirections[I] = (ChunkWorldOrigin + FVector(I & 1, (I >> 1) & 1, (I >> 2) & 1) * ChunkWorld - Centre).GetSafeNormal();
+	}
+	TArray<FIntPoint> Cells;
+	Grid.GatherSpanned(MakeArrayView(CornerDirections, 8), Cells);
+
+	FPlanetRayField Field(VoxelData, CS, ChunkWorldOrigin, VoxelSize, Context);
+	// The ray through a cell from the planet's centre, in the chunk's voxel units: L(T) = LocalCentre + Direction * T.
+	const FVector LocalCentre = (Centre - ChunkWorldOrigin) / VoxelSize;
+	constexpr double OwnEpsilon = 1e-6;
+	const double Threshold = static_cast<double>(VOXEL_SURFACE_THRESHOLD);
+	OutSurfaceData.SurfacePoints.Reserve(Cells.Num() / 2);
+
+	for (const FIntPoint& Cell : Cells)
+	{
+		const FVector Direction = Grid.CellCentreDirection(Cell);
+
+		// The ray's span in the box [0, ChunkSize]^3.
+		double TNear = 0.0;
+		double TFar = TNumericLimits<double>::Max();
+		bool bHit = true;
+		for (int32 A = 0; A < 3 && bHit; ++A)
+		{
+			if (FMath::Abs(Direction[A]) < 1e-12)
+			{
+				bHit = LocalCentre[A] >= 0.0 && LocalCentre[A] <= CS;
+				continue;
+			}
+			double T1 = -LocalCentre[A] / Direction[A];
+			double T2 = (CS - LocalCentre[A]) / Direction[A];
+			if (T1 > T2)
+			{
+				Swap(T1, T2);
+			}
+			TNear = FMath::Max(TNear, T1);
+			TFar = FMath::Min(TFar, T2);
+			bHit = TFar > TNear;
+		}
+		if (!bHit)
+		{
+			continue;
+		}
+
+		// Down the ray from where it enters the box (its outer end) cell by cell, a 3D DDA. S is the distance down from
+		// there, in voxels.
+		const FVector Down = -Direction;
+		const FVector Start = LocalCentre + Direction * TFar;
+		const double Length = TFar - TNear;
+		FIntVector C(FMath::Clamp(FMath::FloorToInt32(Start.X), 0, CS - 1), FMath::Clamp(FMath::FloorToInt32(Start.Y), 0, CS - 1),
+			FMath::Clamp(FMath::FloorToInt32(Start.Z), 0, CS - 1));
+		int32 StepAxis[3];
+		double SNext[3];
+		double SDelta[3];
+		for (int32 A = 0; A < 3; ++A)
+		{
+			if (Down[A] > 1e-12)
+			{
+				StepAxis[A] = 1;
+				SNext[A] = (C[A] + 1 - Start[A]) / Down[A];
+				SDelta[A] = 1.0 / Down[A];
+			}
+			else if (Down[A] < -1e-12)
+			{
+				StepAxis[A] = -1;
+				SNext[A] = (C[A] - Start[A]) / Down[A];
+				SDelta[A] = -1.0 / Down[A];
+			}
+			else
+			{
+				StepAxis[A] = 0;
+				SNext[A] = TNumericLimits<double>::Max();
+				SDelta[A] = TNumericLimits<double>::Max();
+			}
+		}
+
+		// bSolid: whether the ray is in the ground at S. bCovered: whether a floor lies above S on the ray (or the ray
+		// entered the chunk in the ground), so a lower crossing is underground.
+		bool bFirst = true;
+		bool bSolid = false;
+		bool bCovered = false;
+		bool bStopRay = false;
+		double Omega = -1.0;
+		double S = 0.0;
+		double V[8];
+
+		// A floor at SCross in cell C (corners V): the chunk's point when it lies in its box. Stops the ray at a cleared volume.
+		auto EmitFloor = [&](double SCross)
+		{
+			const FVector LCross = Start + Down * SCross;
+			const bool bOwned = LCross.X >= -OwnEpsilon && LCross.Y >= -OwnEpsilon && LCross.Z >= -OwnEpsilon
+				&& LCross.X < CS - OwnEpsilon && LCross.Y < CS - OwnEpsilon && LCross.Z < CS - OwnEpsilon;
+			const bool bUnder = bCovered;
+			bCovered = true;
+			if (!bOwned)
+			{
+				return;
+			}
+			const FVector WorldPos = ChunkWorldOrigin + LCross * VoxelSize;
+			for (const FClearedScatterVolume& Volume : ClearedVolumes)
+			{
+				if (Volume.ContainsPoint(WorldPos))
+				{
+					bStopRay = true;
+					return;
+				}
+			}
+
+			const FVector CrossFraction = FPlanetRayField::CellFraction(LCross, C);
+			FVector Gradient;
+			FPlanetRayField::Sample(V, CrossFraction, &Gradient);
+			FVector Normal = -Gradient;
+			if (!Normal.Normalize())
+			{
+				Normal = Direction;
+			}
+			const FVoxelData& SolidVoxel = Field.NearestOwnCorner(C, CrossFraction, true);
+			const FVoxelData& AirVoxel = Field.NearestOwnCorner(C, CrossFraction, false);
+			const bool bAirIsAir = !AirVoxel.IsSolid();
+			if (Omega < 0.0)
+			{
+				// The cell's solid angle: the quad of its corner directions (cells are small).
+				const FVector D00 = Grid.DirectionAt(Cell, 0.0, 0.0);
+				const FVector D11 = Grid.DirectionAt(Cell, 1.0, 1.0);
+				const FVector D10 = Grid.DirectionAt(Cell, 1.0, 0.0);
+				const FVector D01 = Grid.DirectionAt(Cell, 0.0, 1.0);
+				Omega = 0.5 * FVector::CrossProduct(D11 - D00, D01 - D10).Size();
+			}
+			const double Radius = FVector::Dist(WorldPos, Centre);
+			const double Along = FVector::DotProduct(Normal, Direction);
+
+			FVoxelSurfacePoint Point;
+			Point.Position = WorldPos;
+			Point.Normal = Normal;
+			Point.MaterialID = SolidVoxel.MaterialID;
+			Point.BiomeID = SolidVoxel.BiomeID;
+			Point.FaceType = Along > 0.5 ? EVoxelFaceType::Top : (Along < -0.5 ? EVoxelFaceType::Bottom : EVoxelFaceType::Side);
+			Point.AmbientOcclusion = SolidVoxel.GetAO() & 0x03;
+			Point.LocalUp = Direction;
+			Point.ComputeSlopeAngle(Direction);
+			Point.Altitude = Context.WorldMode->GetAltitude(WorldPos);
+			Point.bHasAltitude = true;
+			// The cell's area at the point over the column scan's area per point: the weighted density per area is the
+			// column scan's on any part of the grid.
+			Point.SpawnWeight = static_cast<float>(Omega * Radius * Radius / (CellSize * CellSize));
+			Point.bIsUnderground = bUnder || (bAirIsAir && AirVoxel.HasUndergroundFlag()) || SolidVoxel.HasUndergroundFlag();
+			const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
+			Point.bIsUnderwater = ((bAirIsAir && AirVoxel.HasWaterFlag()) || bBelowWater) && !Point.bIsUnderground;
+			OutSurfaceData.SurfacePoints.Add(Point);
+		};
+
+		while (!bStopRay)
+		{
+			const double SEnd = FMath::Min(FMath::Min3(SNext[0], SNext[1], SNext[2]), Length);
+			const uint8 State = Field.GetCellState(C);
+			if (State != 3)
+			{
+				// One sign over the whole cell (a trilinear interpolation stays between its corners). Entering it solid from
+				// air (the previous cell's last sample a hair under the threshold, the surface through a voxel plane) is a
+				// floor at the boundary.
+				const bool bCellSolid = State == 2;
+				if (bFirst)
+				{
+					bCovered = bCellSolid; // entering the chunk in the ground: the ray's surface lies above it
+					bFirst = false;
+				}
+				else if (bCellSolid && !bSolid)
+				{
+					Field.GetCorners(C, V);
+					EmitFloor(S);
+				}
+				bSolid = bCellSolid;
+			}
+			else
+			{
+				// Five samples over the cell's span; a rise through the threshold going down is a floor (the surface, or a
+				// cave's floor under it).
+				Field.GetCorners(C, V);
+				double PrevF = 0.0;
+				double PrevS = S;
+				for (int32 J = 0; J <= 4 && !bStopRay; ++J)
+				{
+					const double SJ = S + (SEnd - S) * J / 4.0;
+					const FVector Fraction = FPlanetRayField::CellFraction(Start + Down * SJ, C);
+					const double F = FPlanetRayField::Sample(V, Fraction);
+					const bool bJSolid = F >= Threshold;
+					if (bFirst)
+					{
+						bCovered = bJSolid; // entering the chunk in the ground: the ray's surface lies above it
+						bFirst = false;
+					}
+					else if (bJSolid && !bSolid)
+					{
+						// The crossing between the last sample and this one (at this sample when the last was in another cell).
+						EmitFloor((J > 0 && FMath::Abs(F - PrevF) > UE_DOUBLE_SMALL_NUMBER)
+							? PrevS + (Threshold - PrevF) / (F - PrevF) * (SJ - PrevS)
+							: SJ);
+					}
+					bSolid = bJSolid;
+					PrevF = F;
+					PrevS = SJ;
+				}
+			}
+
+			if (SEnd >= Length)
+			{
+				break;
+			}
+			// Into the next cell, across the boundary the ray reaches first.
+			const int32 A = SNext[0] <= SNext[1] ? (SNext[0] <= SNext[2] ? 0 : 2) : (SNext[1] <= SNext[2] ? 1 : 2);
+			C[A] += StepAxis[A];
+			if (C[A] < 0 || C[A] >= CS)
+			{
+				break;
+			}
+			S = SNext[A];
+			SNext[A] += SDelta[A];
+		}
+	}
+
+	// The cells' area at the points (the rays are denser than the column scan's spacing away from the face centres).
+	double Area = 0.0;
+	for (const FVoxelSurfacePoint& Point : OutSurfaceData.SurfacePoints)
+	{
+		Area += Point.SpawnWeight;
+	}
+	OutSurfaceData.SurfaceAreaEstimate = static_cast<float>(Area * CellSize * CellSize);
 }
 
 void UVoxelScatterManager::ExtractSurfacePointsCubic(
@@ -3067,7 +3206,7 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 		Context.NoiseParams = Configuration->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
 		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
-		// height on a heightmap (G23), the line top's surface on a planet (spherical SP-B10).
+		// height on a heightmap (G23), the voxels past a planet chunk's faces (spherical SP-B10).
 		if (ConditioningGatherer)
 		{
 			const FVector Min = GetChunkWorldOrigin(ChunkCoord);
@@ -3099,27 +3238,29 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 				}
 			}
 		}
-		// Planets: a line's voxel above lies in the layer of a neighbour touching the chunk, over its upper face or on a side
-		// the line enters through (G29).
+		// Planets: a chunk's last cell on each axis reaches the voxels past its +X, +Y and +Z faces, in the layers of the
+		// neighbours there (G29, G31).
 		if (EditLayerSource && WorldMode != nullptr && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
 		{
-			const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(0.5 * Configuration->GetChunkWorldSize());
-			Context.TouchingEdits = GatherPlanetTouchingEdits(WorldMode->GetUpVector(ChunkCenter), ChunkCoord, Configuration->ChunkSize, EditLayerSource);
+			Context.TouchingEdits = GatherPlanetTouchingEdits(ChunkCoord, Configuration->ChunkSize, EditLayerSource);
 		}
 	}
 	return Context;
 }
 
-void UVoxelScatterManager::GetPlanetLineTopNeighbours(const FVector& Up, int32 ChunkSize, TArray<FIntVector>& OutOffsets)
+void UVoxelScatterManager::GetPlanetShellNeighbours(TArray<FIntVector>& OutOffsets)
 {
-	FPlanetScatterLines(Up, ChunkSize).GetVoxelAboveNeighbours(OutOffsets);
+	for (int32 I = 1; I < 8; ++I)
+	{
+		OutOffsets.AddUnique(FIntVector(I & 1, (I >> 1) & 1, (I >> 2) & 1));
+	}
 }
 
-TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlanetTouchingEdits(const FVector& Up, const FIntVector& ChunkCoord,
-	int32 ChunkSize, TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource)
+TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlanetTouchingEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
+	TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource)
 {
 	TArray<FIntVector> Neighbours;
-	GetPlanetLineTopNeighbours(Up, ChunkSize, Neighbours);
+	GetPlanetShellNeighbours(Neighbours);
 	TMap<FIntVector, FVoxelEdit> Touching;
 	for (const FIntVector& Offset : Neighbours)
 	{
