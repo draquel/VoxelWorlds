@@ -117,7 +117,9 @@ buried-chunk test (`FScatterExtractionContext::ConditioningZones`, from the chun
 the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface` / `SampleSurfacePoint` with the bounds' zones) do
 since world modes review G23. A heightmap chunk's data cannot show the voxel over its top layer (the chunk above's):
 near the generated ground scatter takes it as the generator made it, with the chunk above's edits applied
-(`FScatterExtractionContext::GetVoxelAboveChunk`, G26); never assume air there. `GetSurfacePointAt` and `GetTerrainHeightAt` are the natural surface (POI placement
+(`FScatterExtractionContext::GetVoxelAboveChunk`, G26); never assume air there. A planet chunk's scatter lines read the
+voxel above a line top outside the chunk the same way, as the planet generator made it with the neighbour's edits
+(`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits`, G29). `GetSurfacePointAt` and `GetTerrainHeightAt` are the natural surface (POI placement
 surveys it on purpose). Changing planet generation bumps
 `FVoxelWorldModeFactory::PlanetGenerationVersion` (4 since Phase 5); heightmap changes bump `GenerationVersion`.
 
