@@ -5632,9 +5632,9 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		FPendingMeshData& PendingMesh = PendingMeshQueue[PendingIndex];
 		const int32 PreviousMeshedLOD = State->MeshedLODLevel;
 
-		// Notify scatter manager with voxel data for LOD-independent surface extraction.
-		// Runs BEFORE the renderer submit: scatter reads MeshData, and the submit below
-		// moves it into the renderer.
+		// Notify scatter manager with voxel data for LOD-independent surface extraction. Scatter reads
+		// the chunk's voxels, never the mesh: the interior mesh has no vertex in the cells along the
+		// chunk's max faces, which belong to its seams (world modes review G27).
 		if (ScatterManager && Configuration && Configuration->bEnableScatter)
 		{
 			const double ScatT0 = FPlatformTime::Seconds();
@@ -5647,13 +5647,12 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			{
 				TArray<FVoxelData> EditMergedVoxels = State->Descriptor.GetVoxelDataForRead();
 				EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
-				ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
-					EditMergedVoxels, State->Descriptor.ChunkSize, Configuration->VoxelSize);
+				ScatterManager->OnChunkMeshDataReady(ChunkCoord, EditMergedVoxels, State->Descriptor.ChunkSize, Configuration->VoxelSize);
 			}
 			else
 			{
-				ScatterManager->OnChunkMeshDataReady(ChunkCoord, PendingMesh.LODLevel, PendingMesh.MeshData,
-					State->Descriptor.GetVoxelDataForRead(), State->Descriptor.ChunkSize, Configuration->VoxelSize);
+				ScatterManager->OnChunkMeshDataReady(ChunkCoord, State->Descriptor.GetVoxelDataForRead(), State->Descriptor.ChunkSize,
+					Configuration->VoxelSize);
 			}
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
@@ -7022,6 +7021,342 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 			if (FFileHelper::SaveStringArrayToFile(CsvLines, *Path))
 			{
 				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit: %d chunk(s) written to %s"), PerChunk.Num(), *FPaths::ConvertRelativePathToFull(Path));
+			}
+		}
+	}));
+
+// Console: voxel.Scatter.BoundaryAudit [maxLines=20] [drawSeconds=0]
+// Smooth worlds (world modes review G27): how well every cached scatter chunk's surface points cover the cell layers along
+// its six faces. A cell is the cube between eight voxels (the mesher's cell); it is a floor cell where one of its four
+// vertical edges goes from solid below to air above, the upward-facing crossing scatter extracts (a cell holding only a
+// ceiling or a wall gets no point by design). For each face the audit compares the boundary layer (the cells against that
+// face: local index 0 on a min face, ChunkSize - 1 on a max face, whose far voxels are the face neighbour's first layer)
+// with the layer next to it:
+//   cells     floor cells in the layer (the other two axes 0..ChunkSize-2, so a cell never reaches past one face)
+//   points    the chunk's surface points in the layer's floor cells (a point in a cell with no floor is a copy inside the
+//             rock, G28, or on a ceiling, not coverage)
+//   spawns    the chunk's spawn points of surface types inside the layer (jittered, so near a gap some fall in from the
+//             next layer)
+//   ratio     (boundary points per floor cell) / (inner points per floor cell): about 1 when the boundary layer is
+//             covered like the rest of the chunk, 0 for a strip with no point
+//   gap face  a face whose boundary layer has at least 8 floor cells and no point
+// A max face whose neighbour has no voxel data is left out (both layers). The column scan covers every cell layer. The GPU
+// extraction read the chunk's interior mesh, which since seam ownership has no vertex in the cells against the max faces
+// (they belong to the chunk's seams), so each chunk it extracted was a "strip chunk": every max face with floor a gap.
+// Logs a summary per face, the chunks with the most floor cells on gap faces with a vox.TP to each, writes
+// Saved/VoxelAudit/BoundaryAudit_<world>_<time>.csv, and with drawSeconds > 0 draws the floor cells of the gap faces
+// (red, in front of the terrain).
+static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterBoundaryAuditCmd(
+	TEXT("voxel.Scatter.BoundaryAudit"),
+	TEXT("Smooth worlds: audit how every cached scatter chunk's surface points cover the cell layers along its six faces (world ")
+	TEXT("modes review G27). Optional args: max chunk lines to log, seconds to draw the uncovered boundary cells."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.BoundaryAudit: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 20;
+		const float DrawSeconds = Args.Num() > 1 ? FMath::Max(0.0f, FCString::Atof(*Args[1])) : 0.0f;
+
+		static const TCHAR* FaceNames[6] = { TEXT("-X"), TEXT("+X"), TEXT("-Y"), TEXT("+Y"), TEXT("-Z"), TEXT("+Z") };
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			const UVoxelScatterManager* ScatterMgr = CM ? CM->GetScatterManager() : nullptr;
+			const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+			if (!ScatterMgr || !Config)
+			{
+				continue;
+			}
+			if (Config->MeshingMode == EMeshingMode::Cubic)
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.BoundaryAudit: a cubic world (its scan puts points on block faces, not in cells)"));
+				continue;
+			}
+
+			const int32 CS = Config->ChunkSize;
+			const float VoxelSize = Config->VoxelSize;
+			const float ChunkWorldSize = Config->GetChunkWorldSize();
+			TArray<FIntVector> Chunks;
+			ScatterMgr->GetScatterDataCache().GetKeys(Chunks);
+			Chunks.Sort([](const FIntVector& A, const FIntVector& B)
+			{
+				return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
+			});
+
+			struct FLayer
+			{
+				int64 Cells = 0, Points = 0, Spawns = 0;
+				void Add(const FLayer& O) { Cells += O.Cells; Points += O.Points; Spawns += O.Spawns; }
+			};
+			struct FChunkFaces
+			{
+				FLayer Boundary[6], Inner[6];
+				bool bKnown[6] = { false, false, false, false, false, false };
+				int32 GapFaces = 0; // faces whose boundary layer has 8+ floor cells and no point
+				int32 GapCells = 0; // the floor cells of those layers
+				bool bStrip = false;
+			};
+			FLayer TotalBoundary[6], TotalInner[6];
+			int32 FaceChunks[6] = { 0, 0, 0, 0, 0, 0 };
+			int32 NoNeighbour[6] = { 0, 0, 0, 0, 0, 0 };
+			int32 GapFaceChunks[6] = { 0, 0, 0, 0, 0, 0 };
+			int32 SurfaceChunks = 0, StripChunks = 0, GapChunks = 0;
+			TArray<TPair<FIntVector, FChunkFaces>> PerChunk;
+
+			for (const FIntVector& Coord : Chunks)
+			{
+				const FChunkSurfaceData* Surface = ScatterMgr->GetChunkSurfaceData(Coord);
+				const TSharedPtr<const TArray<FVoxelData>> Own = Surface ? CM->GetEditMergedSnapshot(Coord) : nullptr;
+				if (!Surface || !Own.IsValid() || Own->Num() != CS * CS * CS)
+				{
+					continue;
+				}
+				++SurfaceChunks;
+				TSharedPtr<const TArray<FVoxelData>> Next[3];
+				for (int32 Axis = 0; Axis < 3; ++Axis)
+				{
+					FIntVector Offset(0, 0, 0);
+					Offset[Axis] = 1;
+					Next[Axis] = CM->GetEditMergedSnapshot(Coord + Offset);
+					if (Next[Axis].IsValid() && Next[Axis]->Num() != CS * CS * CS)
+					{
+						Next[Axis].Reset();
+					}
+				}
+				// Solid at a voxel of the chunk's lattice, 0..CS on each axis; CS on one axis reads that face neighbour's first layer.
+				auto IsSolidAt = [&](int32 X, int32 Y, int32 Z) -> bool
+				{
+					if (X == CS) { return (*Next[0])[0 + Y * CS + Z * CS * CS].IsSolid(); }
+					if (Y == CS) { return (*Next[1])[X + 0 * CS + Z * CS * CS].IsSolid(); }
+					if (Z == CS) { return (*Next[2])[X + Y * CS + 0].IsSolid(); }
+					return (*Own)[X + Y * CS + Z * CS * CS].IsSolid();
+				};
+				// A floor cell: one of its four vertical edges goes from solid below to air above (an upward-facing crossing,
+				// what scatter extracts; a cell holding only a ceiling or a wall gets no point by design).
+				auto IsFloorCell = [&](const FIntVector& C) -> bool
+				{
+					for (int32 Edge = 0; Edge < 4; ++Edge)
+					{
+						const int32 X = C.X + (Edge & 1), Y = C.Y + ((Edge >> 1) & 1);
+						if (IsSolidAt(X, Y, C.Z) && !IsSolidAt(X, Y, C.Z + 1))
+						{
+							return true;
+						}
+					}
+					return false;
+				};
+				const FVector Origin = Config->WorldOrigin + FVector(Coord) * ChunkWorldSize;
+				auto CellOf = [&](const FVector& P) -> FIntVector
+				{
+					const FVector L = (P - Origin) / VoxelSize;
+					return FIntVector(FMath::Clamp(FMath::FloorToInt32(L.X), 0, CS - 1), FMath::Clamp(FMath::FloorToInt32(L.Y), 0, CS - 1),
+						FMath::Clamp(FMath::FloorToInt32(L.Z), 0, CS - 1));
+				};
+				// Face F = 2 * axis + (max ? 1 : 0); its boundary layer index and the layer next to it.
+				auto LayerIndex = [&](int32 Face, bool bBoundary) -> int32
+				{
+					const bool bMax = (Face & 1) != 0;
+					return bBoundary ? (bMax ? CS - 1 : 0) : (bMax ? CS - 2 : 1);
+				};
+				auto InLayer = [&](const FIntVector& C, int32 Face, bool bBoundary) -> bool
+				{
+					const int32 Axis = Face >> 1;
+					if (C[Axis] != LayerIndex(Face, bBoundary))
+					{
+						return false;
+					}
+					const int32 A1 = (Axis + 1) % 3, A2 = (Axis + 2) % 3;
+					return C[A1] <= CS - 2 && C[A2] <= CS - 2;
+				};
+
+				// Only points in floor cells count: a point in a cell with no surface is a copy inside the rock (a buried
+				// chunk's top face, G28), not coverage. Spawns of surface types only: those are the visible scatter.
+				FChunkFaces Faces;
+				TArray<FIntVector> PointCells;
+				PointCells.Reserve(Surface->SurfacePoints.Num());
+				// A cell at ChunkSize - 1 on two axes, or on one whose neighbour is missing, lies in no layer audited below.
+				auto CanTestCell = [&](const FIntVector& C) -> bool
+				{
+					int32 MaxAxes = 0;
+					for (int32 Axis = 0; Axis < 3; ++Axis)
+					{
+						if (C[Axis] == CS - 1)
+						{
+							if (!Next[Axis].IsValid())
+							{
+								return false;
+							}
+							++MaxAxes;
+						}
+					}
+					return MaxAxes <= 1;
+				};
+				for (const FVoxelSurfacePoint& Point : Surface->SurfacePoints)
+				{
+					const FIntVector C = CellOf(Point.Position);
+					if (CanTestCell(C) && IsFloorCell(C))
+					{
+						PointCells.Add(C);
+					}
+				}
+				TArray<FIntVector> SpawnCells;
+				if (const FChunkScatterData* Scatter = ScatterMgr->GetChunkScatterData(Coord))
+				{
+					for (const FScatterSpawnPoint& Spawn : Scatter->SpawnPoints)
+					{
+						const FScatterDefinition* Def = ScatterMgr->GetScatterDefinition(Spawn.ScatterTypeID);
+						const int32 Mask = Def ? Def->SurfaceLocationMask : static_cast<int32>(EScatterSurfaceLocationFlags::Surface);
+						if ((Mask & static_cast<int32>(EScatterSurfaceLocationFlags::Surface)) != 0)
+						{
+							SpawnCells.Add(CellOf(Spawn.Position));
+						}
+					}
+				}
+				bool bStrip = true;
+				int32 MaxFacesWithSurface = 0;
+				for (int32 Face = 0; Face < 6; ++Face)
+				{
+					const int32 Axis = Face >> 1;
+					if ((Face & 1) != 0 && !Next[Axis].IsValid())
+					{
+						++NoNeighbour[Face];
+						continue;
+					}
+					Faces.bKnown[Face] = true;
+					++FaceChunks[Face];
+					const int32 A1 = (Axis + 1) % 3, A2 = (Axis + 2) % 3;
+					TArray<FIntVector> BoundaryCells;
+					for (int32 Pass = 0; Pass < 2; ++Pass)
+					{
+						const bool bBoundary = Pass == 0;
+						FLayer& Layer = bBoundary ? Faces.Boundary[Face] : Faces.Inner[Face];
+						for (int32 U = 0; U <= CS - 2; ++U)
+						{
+							for (int32 V = 0; V <= CS - 2; ++V)
+							{
+								FIntVector C;
+								C[Axis] = LayerIndex(Face, bBoundary);
+								C[A1] = U;
+								C[A2] = V;
+								if (IsFloorCell(C))
+								{
+									++Layer.Cells;
+									if (bBoundary)
+									{
+										BoundaryCells.Add(C);
+									}
+								}
+							}
+						}
+						for (const FIntVector& C : PointCells)
+						{
+							Layer.Points += InLayer(C, Face, bBoundary) ? 1 : 0;
+						}
+						for (const FIntVector& C : SpawnCells)
+						{
+							Layer.Spawns += InLayer(C, Face, bBoundary) ? 1 : 0;
+						}
+					}
+					TotalBoundary[Face].Add(Faces.Boundary[Face]);
+					TotalInner[Face].Add(Faces.Inner[Face]);
+					const bool bGapFace = Faces.Boundary[Face].Cells >= 8 && Faces.Boundary[Face].Points == 0;
+					if (bGapFace)
+					{
+						++Faces.GapFaces;
+						++GapFaceChunks[Face];
+						Faces.GapCells += BoundaryCells.Num();
+						if (DrawSeconds > 0.0f)
+						{
+							for (const FIntVector& C : BoundaryCells)
+							{
+								DrawDebugPoint(TargetWorld, Origin + (FVector(C) + FVector(0.5)) * VoxelSize, 6.0f, FColor::Red, false, DrawSeconds, SDPG_Foreground);
+							}
+						}
+					}
+					if ((Face & 1) != 0 && Faces.Boundary[Face].Cells >= 8)
+					{
+						++MaxFacesWithSurface;
+						bStrip &= bGapFace;
+					}
+				}
+				Faces.bStrip = bStrip && MaxFacesWithSurface > 0;
+				StripChunks += Faces.bStrip ? 1 : 0;
+				GapChunks += Faces.GapFaces > 0 ? 1 : 0;
+				PerChunk.Add(TPair<FIntVector, FChunkFaces>(Coord, Faces));
+			}
+
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.BoundaryAudit [%s]: %d surface chunk(s); %d with a gap face (a boundary layer with 8+ floor cells and no point), %d of them strip chunks (every max face with floor a gap)"),
+				*TargetWorld->GetName(), SurfaceChunks, GapChunks, StripChunks);
+			for (int32 Face = 0; Face < 6; ++Face)
+			{
+				const FLayer& B = TotalBoundary[Face];
+				const FLayer& I = TotalInner[Face];
+				const double BRate = B.Cells > 0 ? double(B.Points) / B.Cells : 0.0;
+				const double IRate = I.Cells > 0 ? double(I.Points) / I.Cells : 0.0;
+				const double SBRate = B.Cells > 0 ? double(B.Spawns) / B.Cells : 0.0;
+				const double SIRate = I.Cells > 0 ? double(I.Spawns) / I.Cells : 0.0;
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("  face %s: %d chunk(s) (%d without the neighbour), %d gap; boundary cells %lld points %lld spawns %lld | inner cells %lld points %lld spawns %lld | point ratio %.2f, spawn ratio %.2f"),
+					FaceNames[Face], FaceChunks[Face], NoNeighbour[Face], GapFaceChunks[Face], B.Cells, B.Points, B.Spawns, I.Cells, I.Points, I.Spawns,
+					IRate > 0.0 ? BRate / IRate : 0.0, SIRate > 0.0 ? SBRate / SIRate : 0.0);
+			}
+			TArray<TPair<FIntVector, FChunkFaces>> Sorted = PerChunk;
+			Sorted.Sort([](const TPair<FIntVector, FChunkFaces>& A, const TPair<FIntVector, FChunkFaces>& B) { return A.Value.GapCells > B.Value.GapCells; });
+			for (int32 i = 0; i < FMath::Min(MaxLines, Sorted.Num()) && Sorted[i].Value.GapFaces > 0; ++i)
+			{
+				const FIntVector& Coord = Sorted[i].Key;
+				const FChunkFaces& F = Sorted[i].Value;
+				FString FaceText;
+				for (int32 Face = 0; Face < 6; ++Face)
+				{
+					FaceText += F.bKnown[Face]
+						? FString::Printf(TEXT(" %s %lld/%lld"), FaceNames[Face], F.Boundary[Face].Points, F.Boundary[Face].Cells)
+						: FString::Printf(TEXT(" %s -"), FaceNames[Face]);
+				}
+				const FVector Centre = Config->WorldOrigin + (FVector(Coord) + FVector(0.5, 0.5, 1.0)) * ChunkWorldSize;
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("  chunk (%d,%d,%d) gapFaces=%d gapCells=%d strip=%d boundary points/cells:%s  ->  vox.TP %.0f %.0f %.0f"),
+					Coord.X, Coord.Y, Coord.Z, F.GapFaces, F.GapCells, F.bStrip ? 1 : 0, *FaceText, Centre.X, Centre.Y, Centre.Z);
+			}
+			TArray<FString> CsvLines;
+			FString Header = TEXT("X,Y,Z,strip,gapFaces,gapCells");
+			for (int32 Face = 0; Face < 6; ++Face)
+			{
+				Header += FString::Printf(TEXT(",%s_bCells,%s_bPoints,%s_bSpawns,%s_iCells,%s_iPoints,%s_iSpawns"), FaceNames[Face], FaceNames[Face], FaceNames[Face],
+					FaceNames[Face], FaceNames[Face], FaceNames[Face]);
+			}
+			CsvLines.Add(Header);
+			for (const TPair<FIntVector, FChunkFaces>& Pair : PerChunk)
+			{
+				const FChunkFaces& F = Pair.Value;
+				FString Line = FString::Printf(TEXT("%d,%d,%d,%d,%d,%d"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z, F.bStrip ? 1 : 0, F.GapFaces, F.GapCells);
+				for (int32 Face = 0; Face < 6; ++Face)
+				{
+					Line += F.bKnown[Face]
+						? FString::Printf(TEXT(",%lld,%lld,%lld,%lld,%lld,%lld"), F.Boundary[Face].Cells, F.Boundary[Face].Points, F.Boundary[Face].Spawns,
+							F.Inner[Face].Cells, F.Inner[Face].Points, F.Inner[Face].Spawns)
+						: FString(TEXT(",,,,,,"));
+				}
+				CsvLines.Add(Line);
+			}
+			const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("BoundaryAudit_%s_%s.csv"),
+				*TargetWorld->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+			if (FFileHelper::SaveStringArrayToFile(CsvLines, *Path))
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.BoundaryAudit: %d chunk(s) written to %s"), PerChunk.Num(), *FPaths::ConvertRelativePathToFull(Path));
 			}
 		}
 	}));

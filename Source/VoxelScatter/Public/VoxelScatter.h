@@ -13,7 +13,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogVoxelScatter, Log, All);
  * on voxel terrain surfaces. Supports both smooth and cubic terrain modes.
  *
  * Key components:
- * - FVoxelSurfaceExtractor: Extracts surface points from mesh data
+ * - UVoxelScatterManager::ExtractSurfacePointsFromVoxelData: surface points from a chunk's voxels
  * - FVoxelScatterPlacement: Applies placement rules to generate spawn points
  * - UVoxelScatterManager: Coordinates scatter generation per-chunk
  *

@@ -8,13 +8,11 @@
 #include "VoxelSeaSurface.h"
 #include "VoxelEditTypes.h"
 #include "VoxelScatterTypes.h"
-#include "VoxelGPUSurfaceExtractor.h"
 #include "VoxelScatterManager.generated.h"
 
 class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
 class IVoxelWorldMode;
-struct FChunkMeshData;
 struct FVoxelConditioningZone;
 
 /**
@@ -111,7 +109,6 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnChunkScatterRemoved, const FIntVector& /*
  * on game thread via ProcessCompletedAsyncScatter().
  *
  * @see UVoxelChunkManager
- * @see FVoxelSurfaceExtractor
  * @see FVoxelScatterPlacement
  */
 UCLASS(BlueprintType)
@@ -131,17 +128,6 @@ public:
 	 * @param World World reference for debug drawing
 	 */
 	void Initialize(UVoxelWorldConfiguration* Config, UWorld* World);
-
-	/**
-	 * Pure: whether a configuration asks for GPU surface extraction that it may use. Cubic worlds never
-	 * do: the GPU extractor samples mesh vertices, which on greedy quads are block corners, so cubic
-	 * always extracts block-face centres on the CPU (world modes review WM-C3, KC4). Platform support and
-	 * -VoxelForceCPU are checked separately at Initialize.
-	 *
-	 * @param Config World configuration
-	 * @return bUseGPUScatterExtraction, unless the world is cubic
-	 */
-	static bool WantsGPUExtraction(const UVoxelWorldConfiguration& Config);
 
 	/**
 	 * Shutdown and cleanup all scatter resources.
@@ -288,19 +274,6 @@ public:
 		FChunkSurfaceData& OutSurfaceData);
 
 	/**
-	 * Classify GPU-extracted surface points as underground and/or underwater using voxel data plus the analytic terrain
-	 * height (with the context's conditioning zones) and the sea from the context (cross-chunk coverage + submerged
-	 * seabeds). The GPU extraction path calls it on the thread pool; public for tests. Pure and thread-safe.
-	 */
-	static void ClassifySurfacePointsUnderground(
-		TArray<FVoxelSurfacePoint>& SurfacePoints,
-		const TArray<FVoxelData>& VoxelData,
-		const FVector& ChunkWorldOrigin,
-		int32 ChunkSize,
-		float VoxelSize,
-		const FScatterExtractionContext& Context);
-
-	/**
 	 * ExtractSurfacePointsAlongUp without cleared volumes (spherical SP-G1): a planet chunk's surface points along local
 	 * up, for tests and tools. Pure and thread-safe.
 	 */
@@ -324,19 +297,17 @@ public:
 	// ==================== Mesh Data Callback ====================
 
 	/**
-	 * Called when chunk mesh data is ready.
-	 * Triggers surface extraction and scatter generation using voxel data
-	 * (LOD-independent) for consistent scatter regardless of mesh LOD level.
+	 * Called when a chunk's mesh is ready (the chunk manager's hand-off, before the mesh goes to the renderer).
+	 * Queues surface extraction and scatter generation from the chunk's voxels, which are full resolution whatever the
+	 * mesh's LOD, so a chunk's scatter does not depend on the LOD it was meshed at. The mesh itself is not read: it has
+	 * no vertex in the cells along the chunk's max faces, which belong to its seams (world modes review G27).
 	 *
 	 * @param ChunkCoord Chunk coordinate
-	 * @param LODLevel LOD level of the mesh (used for GPU extraction fallback)
-	 * @param MeshData The mesh data (used for GPU extraction path only)
-	 * @param VoxelData Full-resolution voxel data for LOD-independent surface extraction
-	 * @param ChunkSize Number of voxels per edge (typically 32)
-	 * @param VoxelSize World-space size of each voxel (typically 100)
+	 * @param VoxelData Full-resolution (edit-merged) voxel data of the chunk
+	 * @param ChunkSize Number of voxels per edge
+	 * @param VoxelSize World-space size of each voxel
 	 */
-	void OnChunkMeshDataReady(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData,
-		const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
+	void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
 
 	/**
 	 * Called when a chunk is unloaded.
@@ -560,11 +531,6 @@ protected:
 	// ==================== Internal Methods ====================
 
 	/**
-	 * Generate scatter for a chunk from mesh data.
-	 */
-	void GenerateChunkScatter(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData);
-
-	/**
 	 * Remove scatter data for a chunk.
 	 */
 	void RemoveChunkScatter(const FIntVector& ChunkCoord);
@@ -775,28 +741,20 @@ protected:
 	// ==================== Deferred Generation Queue ====================
 
 	/**
-	 * Pending scatter generation request.
-	 * Stores lightweight copy of mesh data needed for surface extraction.
+	 * Pending scatter generation request: the chunk's voxels and the definitions to place.
 	 */
 	struct FPendingScatterGeneration
 	{
 		FIntVector ChunkCoord;
 		float DistanceToViewer;
-		int32 LODLevel = 0;
 
 		// Definitions to generate (captured at queue time based on distance rules)
 		TArray<FScatterDefinition> CapturedDefinitions;
 
-		// Voxel data for LOD-independent surface extraction (CPU path)
+		// Voxel data for LOD-independent surface extraction
 		TArray<FVoxelData> ChunkVoxelData;
 		int32 ChunkSize = VOXEL_DEFAULT_CHUNK_SIZE;
 		float VoxelSize = 100.0f;
-
-		// Mesh data copy (only populated when GPU extraction is enabled)
-		TArray<FVector3f> Positions;
-		TArray<FVector3f> Normals;
-		TArray<FVector2f> UV1s;
-		TArray<FColor> Colors;
 
 		bool operator<(const FPendingScatterGeneration& Other) const
 		{
@@ -905,32 +863,6 @@ protected:
 
 	/** Process completed async scatter results on game thread */
 	void ProcessCompletedAsyncScatter();
-
-	// ==================== GPU Surface Extraction ====================
-
-	/** Whether GPU surface extraction is enabled and supported */
-	bool bUseGPUExtraction = false;
-
-	/** MPSC queue for completed GPU extraction results (written by render thread) */
-	TQueue<FGPUExtractionResult, EQueueMode::Mpsc> CompletedGPUExtractionQueue;
-
-	/** Chunks waiting for GPU extraction results before scatter placement */
-	TMap<FIntVector, TArray<FScatterDefinition>> GPUExtractionPendingPlacement;
-
-	/** LOD level of mesh data used for GPU extraction (for LOD tracking) */
-	TMap<FIntVector, int32> GPUExtractionPendingLODLevel;
-
-	/** Voxel data stored during GPU extraction dispatch for underground classification */
-	struct FGPUExtractionVoxelInfo
-	{
-		TArray<FVoxelData> VoxelData;
-		int32 ChunkSize = 0;
-		float VoxelSize = 0.0f;
-	};
-	TMap<FIntVector, FGPUExtractionVoxelInfo> GPUExtractionPendingVoxelInfo;
-
-	/** Process completed GPU extractions and launch placement on thread pool */
-	void ProcessCompletedGPUExtractions();
 
 	// ==================== Statistics ====================
 

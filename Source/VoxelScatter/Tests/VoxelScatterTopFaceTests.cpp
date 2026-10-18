@@ -12,7 +12,6 @@
 #include "VoxelEditTypes.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelData.h"
-#include "ChunkRenderData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -26,9 +25,9 @@
 //
 // - Contour: a plane rising through a chunk layer's top, from inside the lower chunk to past the band; over the lower chunk
 //   and the one above, every column has exactly one open-surface point, on the generated surface, and the lower chunk's
-//   top layer has none where the ground continues above it. Every heightmap path (column scan, cubic scan, GPU
-//   classifier). With no analytic height (the voxel above taken for air, as before) that top layer holds a row of
-//   open-surface points under the ground.
+//   top layer has none where the ground continues above it. Both heightmap paths (column scan, cubic scan; the GPU
+//   classifier this also ran went with the GPU extractor, G27). With no analytic height (the voxel above taken for air,
+//   as before) that top layer holds a row of open-surface points under the ground.
 // - FlatGround: flat ground at heights around the layer's top, from inside the top voxel cell to past the band: one
 //   open-surface point per column across the two chunks, within 2 uu of the ground; a crossing in the top voxel cell
 //   interpolates against the generated voxel above, as the mesher does (against an assumed-air voxel it sat up to half a
@@ -140,27 +139,18 @@ namespace VoxelScatterTopFaceTestUtils
 		return Context;
 	}
 
-	enum class EPath : uint8 { Column, Cubic, GPUClassifier };
+	enum class EPath : uint8 { Column, Cubic };
 	const TCHAR* PathName(EPath Path)
 	{
-		return Path == EPath::Column ? TEXT("column scan") : (Path == EPath::Cubic ? TEXT("cubic scan") : TEXT("GPU classifier"));
+		return Path == EPath::Column ? TEXT("column scan") : TEXT("cubic scan");
 	}
 
-	/** One heightmap path's surface points for a chunk (the GPU classifier reclassifies the column scan's points). */
+	/** One heightmap path's surface points for a chunk. */
 	TArray<FVoxelSurfacePoint> Extract(EPath Path, const TArray<FVoxelData>& Voxels, const FIntVector& Coord, const FScatterExtractionContext& Context)
 	{
 		FChunkSurfaceData Surface;
 		UVoxelScatterManager::ExtractHeightmapSurfacePoints(Voxels, Coord, ChunkOrigin(Coord), ChunkSize, VoxelSize, VoxelSize,
 			Path == EPath::Cubic, Context, Surface);
-		if (Path == EPath::GPUClassifier)
-		{
-			for (FVoxelSurfacePoint& Point : Surface.SurfacePoints)
-			{
-				Point.bIsUnderground = false;
-				Point.bIsUnderwater = false;
-			}
-			UVoxelScatterManager::ClassifySurfacePointsUnderground(Surface.SurfacePoints, Voxels, ChunkOrigin(Coord), ChunkSize, VoxelSize, Context);
-		}
 		return Surface.SurfacePoints;
 	}
 
@@ -306,7 +296,6 @@ namespace VoxelScatterTopFaceTestUtils
 			Config->ChunkSize = ChunkSize;
 			Config->VoxelSize = VoxelSize;
 			Config->ScatterRadius = 100000.0f;
-			Config->bUseGPUScatterExtraction = false;
 			Config->MeshingMode = EMeshingMode::MarchingCubes; // smooth: the column scan
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
@@ -330,8 +319,7 @@ namespace VoxelScatterTopFaceTestUtils
 		/** Submit a chunk as if its mesh just arrived and pump until its extraction is done; null when it found no point. */
 		const FChunkSurfaceData* Run(const FIntVector& Coord, const TArray<FVoxelData>& Voxels)
 		{
-			const FChunkMeshData EmptyMesh; // CPU voxel-based extraction ignores mesh data
-			Manager->OnChunkMeshDataReady(Coord, 0, EmptyMesh, Voxels, ChunkSize, VoxelSize);
+			Manager->OnChunkMeshDataReady(Coord, Voxels, ChunkSize, VoxelSize);
 			const double Deadline = FPlatformTime::Seconds() + 15.0;
 			while (FPlatformTime::Seconds() < Deadline)
 			{
@@ -366,7 +354,7 @@ bool FVoxelScatterTopFaceContourTest::RunTest(const FString& Parameters)
 		const FScatterExtractionContext NoHeight = MakeContext(nullptr);
 		const TCHAR* PlaneName = Mode.Slope > 0.0f ? TEXT("rising") : TEXT("falling");
 
-		for (const EPath Path : { EPath::Column, EPath::Cubic, EPath::GPUClassifier })
+		for (const EPath Path : { EPath::Column, EPath::Cubic })
 		{
 			const FTwoChunkResult R = RunTwoChunks(Path, Mode, LowerVoxels, UpperVoxels, Context, Context);
 			const FTwoChunkResult Old = RunTwoChunks(Path, Mode, LowerVoxels, UpperVoxels, NoHeight, NoHeight);
@@ -396,7 +384,7 @@ bool FVoxelScatterTopFaceFlatGroundTest::RunTest(const FString& Parameters)
 		const TArray<FVoxelData> LowerVoxels = MakeChunk(Lower, Mode);
 		const TArray<FVoxelData> UpperVoxels = MakeChunk(Upper, Mode);
 		const FScatterExtractionContext Context = MakeContext(&Mode);
-		for (const EPath Path : { EPath::Column, EPath::Cubic, EPath::GPUClassifier })
+		for (const EPath Path : { EPath::Column, EPath::Cubic })
 		{
 			const FTwoChunkResult R = RunTwoChunks(Path, Mode, LowerVoxels, UpperVoxels, Context, Context);
 			const FString Case = FString::Printf(TEXT("ground %+.2f voxels over the top, %s"), Offset, PathName(Path));
@@ -437,7 +425,7 @@ bool FVoxelScatterTopFaceEditsAboveTest::RunTest(const FString& Parameters)
 		const FChunkEditLayer Dig = MakeBottomPatch(PatchMin, PatchMax, FVoxelData::Air());
 		const TArray<FVoxelData> LowerVoxels = MakeChunk(Lower, Mode);
 		const TArray<FVoxelData> UpperVoxels = ApplyLayer(MakeChunk(Upper, Mode), Dig);
-		for (const EPath Path : { EPath::Column, EPath::Cubic, EPath::GPUClassifier })
+		for (const EPath Path : { EPath::Column, EPath::Cubic })
 		{
 			const FTwoChunkResult In = RunTwoChunks(Path, Mode, LowerVoxels, UpperVoxels, MakeContext(&Mode, &Dig), MakeContext(&Mode), &Inside);
 			const FTwoChunkResult Out = RunTwoChunks(Path, Mode, LowerVoxels, UpperVoxels, MakeContext(&Mode, &Dig), MakeContext(&Mode), &Outside);
@@ -458,7 +446,7 @@ bool FVoxelScatterTopFaceEditsAboveTest::RunTest(const FString& Parameters)
 		const FChunkEditLayer Build = MakeBottomPatch(PatchMin, PatchMax, FVoxelData::Solid(EVoxelMaterial::Stone));
 		const TArray<FVoxelData> LowerVoxels = MakeChunk(Lower, Mode);
 		const TArray<FVoxelData> UpperVoxels = ApplyLayer(MakeChunk(Upper, Mode), Build);
-		for (const EPath Path : { EPath::Column, EPath::Cubic, EPath::GPUClassifier })
+		for (const EPath Path : { EPath::Column, EPath::Cubic })
 		{
 			const FTwoChunkResult In = RunTwoChunks(Path, Mode, LowerVoxels, UpperVoxels, MakeContext(&Mode, &Build), MakeContext(&Mode), &Inside);
 			const FTwoChunkResult Out = RunTwoChunks(Path, Mode, LowerVoxels, UpperVoxels, MakeContext(&Mode, &Build), MakeContext(&Mode), &Outside);
