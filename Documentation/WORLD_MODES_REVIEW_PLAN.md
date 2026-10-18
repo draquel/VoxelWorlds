@@ -20,7 +20,8 @@ results: §14.7. M4 (the streaming window) results: §14.8. M5 (cubic, terrain-o
 visible edge and scale) results: §14.10. Spherical Phase 1 (a correct
 planet on the CPU): plan and results in §15. Spherical Phase 2 (the planet on the GPU): plan and results in §16.
 Spherical Phase 3 (walkable): plan and results in §17. Spherical Phase 4 (systems): plan in §18.1, results (met
-2026-10-17) in §18.2.
+2026-10-17) in §18.2. Spherical Phase 5 (places): plan in §19.1, results (met 2026-10-17) in §19.2. Spherical
+Phase 6 (big planets and orbit): scope, survey and plan in §20 (planned 2026-10-17, not started).
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -255,7 +256,7 @@ code sites).
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
 (SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
-revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended.
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended. **Decided 2026-10-17, for spherical Phase 6 (§20.0):** D17-D20, the scope (D17 and D18 revise SD1 and SD5); D21-D24 are open, in §20.1.
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
@@ -275,6 +276,10 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D14 | Are dungeons (SP-G6) part of spherical Phase 5? *(decided 2026-10-17)* | **Yes, as its last milestone (P5.4)**, in its own PRs; dungeon types stay held on planets until it lands, and the exit check covers the dungeon rows (§19.1) |
 | D15 | The conditioning zone model on a planet (SP-B10) *(decided 2026-10-17)* | **A radial cap:** the footprint a cap on the datum sphere (great-circle distance), the target an altitude, so a pad is level in gravity; structures are draped onto it (§19.1) |
 | D16 | Does spherical Phase 5 bump `PlanetGenerationVersion`? *(decided 2026-10-17)* | **Bump it to 4.** Planet terrain changes wherever a POI conditions it; earlier planet saves are refused and kept on disk, heightmap saves keep loading (`GenerationVersion` stays 2) (§19.1) |
+| D17 | How big do planets get (revises SD1)? *(decided 2026-10-17)* | **Up to about 1,000 km** (R 10⁸ uu). Phase 6 takes the precision track (double and chunk-relative terrain math on the CPU and the GPU, chunk-relative vertices and instances, relative noise, LWC-safe materials) as well as the scale items; Earth scale stays out (§20.0) |
+| D18 | How far off the surface can the player go (revises SD5)? *(decided 2026-10-17)* | **Orbit and back:** up until the whole planet is in view and back down, voxels fading in over the far field. No other bodies (§20.0) |
+| D19 | The far band (SP-C5) *(decided 2026-10-17)* | **An analytic far mesh** beyond the voxel window, with a hole where voxels are loaded; the voxel window keeps its size and takes a per-chunk radial slab of the terrain's real bounds (§20.0) |
+| D20 | How the player gets to altitude *(decided 2026-10-17)* | **QA tooling only:** debug flight and an orbit camera, with streaming, KillZ and the out-of-world checks behaving at altitude; no gameplay flight, constant gravity (§20.0) |
 
 ## 9. Order of work
 
@@ -3810,3 +3815,165 @@ stamps behave exactly as before.
 - As in the plane's code, doors, torches and enemies need a tile-dressed dungeon (the POI path rebuilds the tile map for
   them); a voxel-carved dungeon gets chests, the boss and the elevator only.
 - From §19.1: G23, claim-driven conditioning, World Partition for planets, replicated world items.
+
+## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17)
+
+The requirements doc's optional Phase 6 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-H1
+(precision), SP-C5 (the far band) and SP-C6 (orbit), with SP-C3 (a doc fix). Phases 1-5 made a small planet (R 250,000
+uu, 2.5 km) complete; Phase 6 makes planets **up to about 1,000 km** in radius work, drawn to the horizon from the ground
+and from altitude, and lets the player **fly to orbit and back**. Scope decisions SD1 (small planets) and SD5 (surface
+only) are revised by D17 and D18 below. Not executed yet: G23 and G24 are being handled first, in their own sessions.
+
+Bases: VoxelWorlds `2fd32fc`, UE5_PluginDev `f737a3c` (spherical Phase 5 merged).
+
+### 20.0 What the survey found (2026-10-17)
+
+Three read-only passes over precision, streaming and orbit, with file and line references in the session's notes; the
+figures below come from the code's own formulas (re-run for the streaming numbers, which match the Phase 2 benches).
+
+**Precision.** Float spacing (ULP) is about 1.2 × 10⁻⁷ of a value: 0.5 uu at 5 × 10⁶, 1 uu at 10⁷, 8 uu at 10⁸ (1,000 km),
+64 uu at Earth's 6.4 × 10⁸. The uint8 density step is about 0.6-0.8 uu.
+
+| Area | Today | First visible at |
+|------|-------|------------------|
+| The terrain SDF (CPU and GPU) | `FSphericalPlanetWorldMode::CalculateRadialDistance` returns a float, `GetAltitude` subtracts two floats of size R, `TerrainRadius` is float R + altitude; the GPU does the same (`SphericalPlanet.ush:110-135`). "Planet-relative" removes only the centre's offset: with the centre at the origin the SDF still cancels at magnitude R | One density step at ~8 × 10⁶; terraces 5-10 steps tall and normals off by 2-5° at 10⁸ |
+| Noise inputs | `FBM3D` and the 3D noises cast their position to float (`VoxelCPUNoiseGenerator.cpp:533`, `:578`); the GPU noise is float3. Terrain, continentalness and climate sample at direction × R; caves and ore at absolute positions | Ore jitter 5% of feature size at 10⁷; cave facets at 10⁸ |
+| Noise period | A 256-entry permutation (CPU and GPU): every field repeats every ~222-256 noise units. Continentalness at its default frequency repeats every ~120 km, so about 50 times around a 1,000 km planet's equator | From ~2 × 10⁶ (a scale issue, on the plane too) |
+| Mesh vertices | Chunk-local `FVector3f`, exact; but the scene proxy adds the absolute chunk offset as `FVector3f` (`VoxelSceneProxy.cpp:1028`, `:1236`, `:1902`, `:2304`) with the component at the origin; the GPU MC mesher builds absolute float corners. Collision is chunk-local with a double transform (safe) | 1 uu at 10⁷ (seams, the crossfade): the documented ~100 km ceiling |
+| Scatter | One HISM per type at the origin, instances in world space | ~10⁷ (inferred) |
+| Materials | The triplanar custom node takes Absolute World Position as float3 (per `MATERIAL_SYSTEM.md`; assets not checked) | ~10⁶-10⁷ |
+| GPU specifics | The ore `Rarity` key is exact only while the planet-relative position is under 2²⁴ (1.68 × 10⁷); the GPU's great-circle distance and sea test are float while the CPU's are double (pad edges and shorelines drift between them) | 1-2 × 10⁷ |
+| Safe at any size | The cube sphere (`FVoxelCubeSphere`, `FVoxelCubeSphereGrid`), conditioning on the CPU, `FVoxelSeaSurface`, collision, gravity, movement, camera and AI, world items, pad space, the dungeon lattice, navigation frames, the PCG grid, CPU scatter extraction, chunk, voxel and save integers (int32 to ~2 × 10¹¹ uu), KillZ, the LOD window and horizon | — |
+
+`WorldOrigin` is both the planet centre and the chunk grid's origin; three sites assume they coincide (water propagation,
+`GetChunkLocalUp`, the LOD window), and the save fingerprint records both. Nothing in the project uses UE's world origin
+rebasing.
+
+**Scale (not precision).** The ocean sphere caps at 160 segments a face edge, so its sag passes 8 uu past R 3.3 × 10⁵
+(240 uu at 10⁷, 2,400 uu at 10⁸); the world map's zoom range shows a whole globe only up to R ≈ 5 × 10⁵; POI registration
+surveys every cell of the planet (363,000 at 10⁷, `int32` overflow and gigabytes at Earth) and `voxel.Map.ExploreAll`
+enumerates every tile (an `int32` counter overflows at ~5 × 10⁷); relief is clamped at 500 m (`PlanetMaxTerrainHeight`,
+`PlanetMaxTerrainDepth` and `PlanetHeightScale`, `ClampMax` 50,000 uu). `FChunkDescriptor::GetUniqueID` packs coordinates
+into 16 bits (no callers).
+
+**Streaming.** The planet loads the whole shell (datum ± 6,500 plus half a chunk, 3.7 chunks thick on `Review_Planet`)
+inside a 40,000 uu 3D sphere around the viewer: about 1,000 chunks, over 90% of them LOD 2 and compressed, **whatever the
+radius** (1,004-1,094 at R 2.5 × 10⁵, 5 × 10⁶ and 10⁸). A literal surface ± margin slab saves only 10-20% on today's
+planet (mostly uniform chunks that cost no memory), but with km-scale relief the shell becomes hundreds of chunks thick and
+a per-chunk slab is required. Voxels to the horizon are out of reach (58,000 chunks at R 5 × 10⁶ on the ground, 1.15
+million at 10⁸). Climbing, the window shrinks rather than grows: 884 chunks at 10,000 uu up, 92 at 40,000, none from
+~50,000 (the viewer-Z clip and the 3D distance, the planet's version of G13, which M4's D8 fixed for heightmaps only).
+Nothing is drawn past the view distance except the sea sphere. Frustum culling in the strategy is a no-op
+(`FLODQueryContext::FrustumPlanes` is never filled; the proxy culls at draw time).
+
+**Orbit.** Above about 0.2 R every chunk unloads and only the sea sphere draws (a world without water draws nothing).
+The voxel LOD cannot reach orbit: every chunk has the same world size, generation is always 64³ at full resolution (LOD
+is a meshing stride), and a whole shell is about 126,000 chunks. Other hazards: KillZ is a world-Z plane, so a player high
+over a planet's southern hemisphere is killed (on `Review_Planet`, whose KillZ stays at the engine default, at an altitude of 10 R every latitude south of about −22°); there are no flight controls
+(input is yaw only outside swimming); gravity keeps full strength at any distance; the load budget counts horizontal speed
+only; the SkyAtmosphere keeps its 60 km default height (24 times this planet's radius); a second SkyAtmosphere would not
+render. Reusable: the thread-safe analytic surface (`GetConditionedTerrainAltitude`, `QueryPlanetSurfaceConditions`), the
+cube sphere, `FVoxelPlanetOcean`'s mesh builder, the far ocean's window-and-hole pattern (`FVoxelFarOcean`), the map's
+per-direction tile worker, the planet branch of the GPU generator, the appearance fades, `SetBenchmarkView` and the settle
+hold.
+
+**Decided before planning** (asked 2026-10-17; recorded in §8):
+
+| ID | Question | Decision |
+|----|----------|----------|
+| D17 | How big should Phase 6's planets get? (revises SD1) | **Up to about 1,000 km** (R 10⁸ uu): the precision track is in scope (double and chunk-relative terrain math on the CPU and the GPU, chunk-relative vertices and instances, relative noise, LWC-safe materials) as well as the scale items. Earth scale stays out |
+| D18 | How far off the surface? (revises SD5) | **Orbit and back:** fly up until the whole planet is in view and come back down, voxels fading in over the far field. Other bodies (moons, distant planets) stay out |
+| D19 | The far band (SP-C5) | **An analytic far mesh** beyond the voxel window, with a hole where voxels are loaded; the voxel window keeps its size, its shell tightened to the terrain's bounds. With km-scale relief (D17) the near window also needs the per-chunk radial slab |
+| D20 | How the player gets to altitude | **QA tooling only:** debug flight and an orbit camera, with streaming and the out-of-world checks behaving at altitude. No gameplay flight; gravity stays constant |
+
+### 20.1 Plan
+
+Work items (IDs `WM-BP*`, stable):
+
+| ID | Work item | Requirements | Repos | Size | Needs |
+|----|-----------|--------------|-------|------|-------|
+| WM-BP1 | **Test planets and a baseline.** `Review_Planet_M` (R 5 × 10⁶, 50 km) and `Review_Planet_L` (R 10⁸, 1,000 km) with km-scale relief and scale-appropriate continent and climate frequencies (`Scripts/setup_planet_test.py`); the relief clamps raised (D24); a survey of each as shipped (screenshots at the pole, 45°, the equator and a cube corner, precision probes) to measure what Phase 6 fixes | (SP-I2's style) | parent, VoxelWorlds | S | D24 |
+| WM-BP2 | **Guardrails at altitude:** a space-safe KillZ on planets (one chunk below `centre − OrbitCeiling` instead of the planet's lowest point) and an outer out-of-world bound; `vox.Fly` (`MOVE_Flying` steered in the gravity frame, up and down) and `vox.Orbit` (a camera on a circular orbit at an altitude, or a fixed look-down); `vox.TPLatLon` holding an altitude; the load budget measured in 3D speed; `vox.Planet` reporting the voxel reach and the far field's state; `FChunkDescriptor::GetUniqueID` removed; SP-C3 (`LOD_SYSTEM.md`'s planet horizon) | SP-C3 | VoxelWorlds, VoxelCharacterPlugin, parent | S-M | — |
+| WM-BP3 | **The bench at scale:** altitude and radial-layer residency, loaded chunks per LOD, rendered and skipped mesh batches, generated chunks per second, far-field build and draw time; a climb route (`start=` at the surface, `dir=` local up) and great circles on M and L | — | VoxelWorlds | S | — |
+| WM-BP4 | **Double CPU planet math:** `CalculateRadialDistance`, `GetAltitude`, `ShellSignedDistance`, `CalculateSignedDistance`, `GetDensityAt` and `GenerateChunkSphericalPlanet` in double; surface points built as centre + direction × double radius; normals from the precise per-direction altitude; `FSphericalPlanetParams` radii, `WorldRadius` and `WaterRadius` in double where they meet R-sized values; `FVoxelSurfaceQuery` and the LOD strategy's radii likewise | SP-H1 | VoxelWorlds | M | WM-BP1 |
+| WM-BP5 | **Split-origin, hashed noise for planets (D22):** each noise sample point = a per-chunk origin in noise space (split on the CPU, in double, into an integer lattice cell and a float fraction, per octave) + a small float offset; the lattice hashed from integer cell coordinates (no 256 period), identical on the CPU and the GPU (as the ore `Rarity` hash, SP-H3). Terrain, continentalness and climate sample at direction × R written as the chunk's surface origin + a small tangent offset; caves and ore at the chunk origin + the local offset. Heightmap worlds keep today's noise bit for bit | SP-H1 | VoxelWorlds | L | WM-BP4, D22 |
+| WM-BP6 | **The GPU planet branch chunk-relative:** per chunk the CPU uploads the chunk origin's direction, its altitude (`‖O‖ − R`, double → float) and the split noise origins; the shader computes the voxel's altitude as `(‖O‖ − R) + ‖O‖·(√(1+e) − 1)` with `e = (2O·d + d·d) / ‖O‖²` small (`d` the voxel's offset from the chunk origin, √(1+e) − 1 evaluated as e / (√(1+e) + 1); no R-sized cancellation), conditioning distances from zone positions relative to the chunk (a short chord, not `R·atan2`), the sea test relative to the chunk, the ore key from an integer chunk base + the local offset. `GPUvsCPUSphericalParity` gains L-scale sites | SP-H1, SP-B4 | VoxelWorlds | L | WM-BP5 |
+| WM-BP7 | **Rendering precision (D23):** the scene proxy keeps vertices relative to a region origin (regions of N³ chunks, each its own primitive with a double transform, or one primitive re-based per D23), seam meshes and water likewise; the GPU MC mesher's corners chunk-local; scatter's HISM components per region; the triplanar and world-position material nodes LWC-safe (UVs from a camera- or region-relative position); measured vertex error under 0.1 uu at L | SP-H1, SP-H2 | VoxelWorlds, parent (materials) | L | WM-BP1, D23 |
+| WM-BP8 | **The near window at scale:** a horizon measured from the viewer's ground point (the planet's D8: the viewer-Z clip removed from `GetPlanetShellWindow`, load and unload by distance from the surface point under the viewer, so a climbing viewer keeps its ground disk until the far field takes over); the shell from the terrain's real bounds (`GetDisplacementBounds` + slack); a **per-chunk radial slab**: a chunk loads when its radial extent meets the analytic surface's altitude range over the cap it subtends (cached per cube-sphere cell) ± slack, plus the viewer's altitude ± 2 layers near it, and is kept over the whole shell near it (the heightmap M4 rules on a sphere); edits pinned as today | SP-C5 | VoxelWorlds | M | WM-BP4 |
+| WM-BP9 | **The far field (D19):** a cube-sphere quadtree of analytic-surface patches (`FVoxelPlanetFarField`): six face trees, fixed patches (e.g. 33² vertices) split by screen-space error, heights from `GetConditionedTerrainAltitude`, materials and biomes from `QueryPlanetSurfaceConditions` with the terrain material (as the far seabed), normals from the grid, skirts between levels, patch-relative vertex origins, built asynchronously (and on the GPU from the planet branch if the CPU cost needs it, with a parity test); a hole where voxel chunks are loaded (a patch inside the loaded cap is skipped, a band at its edge drawn sunk under the voxel surface, as the far ocean's seabed), updated as the window moves (the far ocean's window-and-frame split); the sea drawn as far-field patches at sea level (replacing the sag-capped sea sphere at scale) | SP-C5, SP-C6 | VoxelWorlds | XL | WM-BP7, WM-BP8 |
+| WM-BP10 | **Orbit and back (D18):** from orbit the far field draws the whole planet; voxels unload above a cut-over altitude and stream back on descent, fading in over the far field (the appearance fade); the streaming viewer prefetches under a descending camera; the SkyAtmosphere's height and Rayleigh and Mie scale heights scaled to R (`ADayNightController::ApplyPlanetSky`), with a space exposure; landing holds until the ground's collision is cooked (the settle hold) | SP-C6 | VoxelWorlds, WorldClockPlugin, parent | M | WM-BP2, WM-BP9 |
+| WM-BP11 | **Game systems at scale:** the world map's zoom range from R (a globe at any size, drawn from a coarse cube-sphere albedo built with the far field's data at low zoom), `ExploreAll` with an `int64` counter and a cap; the POI registration survey bounded (a sample, not every cell); navigation, scatter's cover test and the surface queries on the precise altitude (WM-BP4); POI and NPC cell counts and densities sane at L; the save fingerprint unchanged in shape (`PlanetGenerationVersion` 5, D21) | SP-G3, SP-G5, SP-G9 | VoxelWorlds, VoxelCharacterPlugin, parent | M | WM-BP4 |
+| WM-BP12 | **Tests** with every item (below) | SP-I2's style | all | M | — |
+| WM-BP13 | **Live verification:** the exit check on M and L, benches against the small planet, the `VoxelDemo` A/B against a base build | — | docs | L | all |
+| WM-BP14 | **Docs:** these results, the requirement rows and §4's Phase 6 exit check, `WORLD_MODES.md` (the radius ceiling rewritten), `LOD_SYSTEM.md`, `RENDERING_SYSTEM.md`, `TRAVERSAL_LIMITS.md`, the plugin instructions, the parent's doc map and `vox.*` table | — | all | M | — |
+
+**Milestones.** Each item lands as its own commit with its tests.
+
+| Milestone | Items | Repos | Done when |
+|-----------|-------|-------|-----------|
+| P6.1 Guardrails and baseline | WM-BP1 to WM-BP3 | VoxelWorlds, VoxelCharacterPlugin, parent | M and L exist and are surveyed as shipped; the player can fly and be put in orbit without being killed; the bench reports altitude, LOD and batch figures |
+| P6.2 Precision | WM-BP4 to WM-BP7 | VoxelWorlds, parent | On L the SDF, normals, noise and vertices are within the thresholds below on the CPU and the GPU (parity at L sites); heightmap generation bit for bit as before |
+| P6.3 Streaming at scale | WM-BP8 | VoxelWorlds | On L with km relief the window loads the surface slab only (chunk counts at or under the small planet's), a climbing viewer keeps its ground disk, no chunk below the slab loads except near the viewer and edits |
+| P6.4 The far field | WM-BP9 | VoxelWorlds | From the ground the planet is drawn to the horizon at every latitude, with no gap or overlap at the voxel edge and no far-field surface visible through holes and caves; within its frame and memory budget |
+| P6.5 Orbit | WM-BP10, WM-BP11 | all | Fly from the surface to orbit and back down to a landing on M and L, the planet drawn at every altitude; the map, POIs, navigation and saves sane at L |
+| Exit | WM-BP12 to WM-BP14 | all | The exit check met; suites green headless and in the editor; the heightmap A/B unchanged; the small planet unchanged except where D21-D22 change it on purpose |
+
+Order: P6.1, then P6.2 (precision underlies everything at L), then P6.3, P6.4 and P6.5. P6.3 can start once WM-BP4 lands;
+the far field's work on patches and holes can start on the small planet before P6.2's rendering item finishes. PRs per
+milestone: VoxelWorlds, VoxelCharacterPlugin, WorldClockPlugin where touched, then UE5_PluginDev (configs, materials, game
+side, gitlinks, doc map).
+
+**Design (written before building).**
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Double math on the CPU | Every quantity of size R kept in double from the centre to the final altitude or signed distance; float only for values of size altitude, chunk or voxel | The cancellation at magnitude R is the root cause; the CPU already holds double positions |
+| The GPU without doubles | A chunk-relative formulation: the CPU sends what is large (the chunk origin's direction and altitude, the split noise origins, zone positions relative to the chunk) and the shader computes only small quantities in float. No `double` in HLSL (not portable, slow) | Keeps the planet on the GPU (Phase 2's default) at any size; the same small-value algebra on the CPU keeps parity |
+| Noise at scale (D22) | Split-origin sampling with a hashed integer lattice for planets: exact positions at any radius and no 256-unit period | A planet of 1,000 km at continental frequencies would otherwise repeat its continents about 50 times around the equator, and its noise inputs would jitter by 8 uu |
+| Rendering at scale (D23) | (a) **Region primitives:** the voxel component split into one primitive per region of N³ chunks (e.g. 16³ chunks, 76,800 uu at 4,800 uu a chunk), vertices relative to the region origin, each region's transform in double (UE5's large-world coordinates); (b) one primitive re-based to a render origin near the camera, every chunk re-baked when the camera moves far | (a) costs a few dozen primitives and no re-bake hitch; (b) keeps one primitive but re-uploads every chunk at each re-base |
+| The near window at scale | The heightmap M4 rules on a sphere: a per-chunk surface slab (the analytic altitude range over the chunk's cap, cached per cube-sphere cell), the viewer's layer ± 2 near it, keep the whole shell near it, edits pinned; distances measured from the viewer's ground point | One rule for both world kinds; km relief makes the shell hundreds of chunks thick, so the slab is what keeps the count bounded |
+| The far field | A separate cube-sphere quadtree of analytic-surface patches, not an `IVoxelLODStrategy`: patches are heightfields with their own primitives, split by screen-space error | The voxel LOD has one chunk size and full-resolution generation, so it cannot reach the horizon or orbit; the analytic surface is thread-safe and cheap per sample |
+| The voxel edge | Patches inside the loaded cap are skipped; a band along its edge is drawn sunk about a voxel under the voxel surface; the hole follows the window (window-and-frame) | Holes and caves dug near the edge never show a far-field floor; the sunk band hides the seam without z-fighting |
+| What the far field does not show | Caves, overhangs and edits beyond the voxel window (the map's edit overlays could adjust heights later) | The far field is seen from far away; G-style follow-up if it matters |
+| Orbit | The far field is the planet from orbit; voxels unload above a cut-over altitude (the window would hold only LOD-2 chunks under a high viewer) and stream back on descent, fading in | A whole shell of voxels (~126,000 chunks) is out of reach; the fade already exists |
+| Getting up (D20) | `vox.Fly` and `vox.Orbit` for QA; KillZ and an outer bound safe in space; constant gravity | No gameplay flight in this phase |
+
+**Decisions for the user** (to ask before executing):
+
+| ID | Question | Options | Recommendation |
+|----|----------|---------|----------------|
+| D21 | Does Phase 6 bump `PlanetGenerationVersion`? | Bump 4 → 5: every planet save is refused and kept on disk (the hashed noise of D22 and the double SDF change every planet's terrain, slightly on today's planet, completely in its noise pattern); heightmap saves keep loading. Or no bump | **Bump.** Planet saves hold only test data; the terrain changes |
+| D22 | The planet noise lattice | (a) **Hashed integer lattice** (no period) with split-origin sampling, planets only: today's small planet changes its look once; (b) keep the 256-entry permutation and split-origin sampling only: exact positions, but continents repeat around big planets | **(a).** Repetition is the most visible scale artefact after precision, and the hash is already the pattern the ore `Rarity` key uses on both CPU and GPU |
+| D23 | Rendering precision | (a) **Region primitives** (above); (b) a re-based single primitive | **(a).** No re-upload hitch, a bounded number of primitives, and the same split works for scatter |
+| D24 | Relief and test-planet sizes | The relief clamps raised to (a) **10 km** (1,000,000 uu) for height and depth; (b) 5 km; (c) unclamped. Test planets M = 50 km, L = 1,000 km | **(a), with M and L as above.** Mountains of a few km on a 1,000 km planet; the slab (WM-BP8) bounds the cost |
+
+**How each is verified.**
+
+| ID | Check |
+|----|-------|
+| WM-BP1 | The baseline survey on M and L recorded (screenshots, precision probes, chunk counts) |
+| WM-BP2 | `Planet.KillZSpace` (KillZ below the orbit ceiling on any planet); `VoxelCharacter.Planet.Fly` (flight along local up and back); live: hold at 2 R over the south pole without dying |
+| WM-BP3 | `Bench.Planet.ClimbRoute`; the new columns present in a run |
+| WM-BP4 | `WorldModes.Planet.PrecisionL` (at R 10⁸ the SDF and altitude against a double reference within 0.05 voxel at the pole, 45°, the equator and a corner; normals within 0.2°); the existing planet tests unchanged |
+| WM-BP5 | `Noise.SplitOrigin` (split-origin samples equal the double reference to 10⁻⁵ at offsets up to 10⁹); `Noise.PlanetHashNoPeriod` (no repeat over 10⁶ noise units); heightmap noise bit for bit (the existing noise tests and the heightmap parity CRCs) |
+| WM-BP6 | `Generation.GPUvsCPUSphericalParity` at L sites (pole, 45°, equator, corner, a conditioned pad, the coast) at LOD 0/1/2; the heightmap parity lines CRC-identical |
+| WM-BP7 | `Rendering.Planet.RegionPrecision` (a vertex's world position within 0.1 uu of the double reference at L); live: no seam cracks or crossfade shimmer on L |
+| WM-BP8 | `LOD.Planet.SurfaceSlab` (no chunk outside the slab but near the viewer and edits; none missing against brute force), `LOD.Planet.GroundHorizon` (a climbing viewer keeps its ground disk); `LOD.Planet.ShellCoverage` unchanged in meaning |
+| WM-BP9 | `FarField.Planet.Quadtree` (no crack between levels, error bound met), `FarField.Planet.Hole` (no patch drawn inside the loaded cap), `FarField.Planet.MatchesSurface` (patch heights equal the analytic surface at their vertices) |
+| WM-BP10 | Live: surface to orbit and back on M and L |
+| WM-BP11 | `Map.Planet.ZoomAtScale`, `POI.Planet.RegistrationBounded`, the planet navigation and scatter tests on the precise altitude |
+| All | Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon` and the same in the editor with the GPU tests running |
+
+**Exit check.** On `PlanetTest` with `Review_Planet_M` and `Review_Planet_L`, `vox.Debug.Capture 1` throughout:
+
+| Check | Where | Pass |
+|-------|-------|------|
+| Walk and edit | Pole, 45°, the equator, a cube corner on L | No fall-through; dig and place; no seam cracks, shimmer or terraces; scatter seated |
+| The horizon from the ground | The same, and on a mountain | The planet drawn to the horizon, no gap or step at the voxel edge, no far-field floor through a dug hole |
+| Climb to orbit and back | The pole and the equator on M and L, `vox.Fly` / `vox.Orbit` | The planet drawn at every altitude up to 2 R; voxels unload and come back on descent with a fade; landing on cooked ground; never killed by KillZ |
+| Systems | L | The QA world, map, POI, save and NPC rows that Phases 4-5 passed, at L |
+| Budgets | Benches on M and L against `Review_Planet` | Frame, manager and memory within the small planet's thresholds (D3: 1.5 GB peak, 0.6 GB settled); the far field's cost reported |
+| Heightmap worlds unchanged | `VoxelDemo` A/B against a base build | Identical: map image, scatter digest, POIs, NPCs, paths, dungeon stamps |
+
+**Left for later.** Earth scale (D17); other bodies and a landable second planet (D18); gameplay flight and gravity
+falloff (D20); edits, caves and overhangs in the far field; frustum culling in the LOD strategy (a no-op today).
