@@ -261,33 +261,41 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 
 **Known Limitation**: Uses base procedural VoxelData, not edit-merged data. Player edits are handled via `ClearedVolumesPerChunk` instead.
 
-#### On a Planet: Lines Along Local Up (spherical Phase 4, SP-G1)
+#### On a Planet: Radial Rays on the Cube-Sphere Grid (spherical Phase 4, SP-G1; world modes review G31)
 
 World-Z columns cross a planet's surface at a slant away from the poles and run along it at the equator, so on a
-planet `UVoxelScatterManager::ExtractSurfacePointsAlongUp` walks **digital lines along the chunk's local up** (the
-chunk centre's radial direction, within 0.6° of the true up anywhere in a 4,800 uu chunk on a 250 km planet) over the
-same voxel data, started on a stride grid across the axis nearest up (`FVoxelDigitalLine`, VoxelCore). Along each
-line it applies the column scan's rules: every solid voxel with air above it along the line, "not the topmost" marks
-it underground, the next voxel along the line answers "air above is water". The crossing is interpolated along the
-line. At a line top whose voxel above lies outside the chunk (over the upper face: the line's own step before its first
-voxel; or on a side the line drifts in through) that voxel is the neighbour's, which the chunk's data cannot show. Within
-1.5 voxels of the generated surface it is taken as the planet generator made it, with the neighbour's edits applied
-(`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits` gathered by
-`UVoxelScatterManager::GatherPlanetTouchingEdits` from the chunk manager's edit layers): solid, the ground continues into
-the neighbour, which makes the point, so the line top is dropped and the rest of the line covered; air, the crossing is
-put on the generated surface (interpolated against the voxel where an edit changed it). Further from the surface the line
-top is dropped and the line covered, as before. Until world modes review G29 the line top was kept near the surface
-whatever that voxel was, which doubled the points along every band where the surface crosses a chunk face
-(`voxel.Scatter.LineTopAudit` counts such pairs).
+planet `UVoxelScatterManager::ExtractSurfacePointsAlongUp` takes the column scan's columns to be the planet's **radial
+lines**: one ray from the centre through the centre of each cell of the cube-sphere grid (`FVoxelCubeSphereGrid`,
+VoxelCore) whose cells at the face centres are the point spacing across (`CellsPerEdgeFor(PlanetRadius, Stride *
+VoxelSize)`). The grid is the same for every chunk, so neighbouring chunks sample one family of rays, and each chunk
+keeps the crossings that lie in its own box, [0, ChunkSize) on each axis: every crossing has one owner, along a face as
+anywhere else.
 
-- **Classification** by the point's own radial up and altitude: face type and slope against local up, the elevation
-  filter compares the altitude above the datum (heightmap worlds: world Z, as before), the underwater class by the sea
-  sphere (`FVoxelSeaSurface`).
-- **Density per area**: a line bundle across axis A meets the surface at 1 / (s² cos θ) per area (θ between up and A,
-  up to √3× at a cube corner), so each point's spawn probability is weighted by cos θ; measured at 100% of the column
-  scan's density at both poles and the equator, 99.3% at 45° and 96.5% at a cube corner (`Scatter.Planet.DensityPerArea`;
-  before G29 the doubled line tops put the south pole at 105.5% and hid the corner's shortfall, which comes from strips
-  along chunk faces where neighbouring chunks' lines do not meet, G31).
+- **Down a ray** through the chunk (a 3D DDA over its voxel cells) the density is the trilinear interpolation of the
+  voxels, sampled five times in each cell whose corners change sign (a cell whose corners agree has one sign
+  throughout). Every rise through the surface threshold going down is a floor: the first on the ray is open, the rest
+  are underground ("not the topmost", as in a column), and a ray that enters the chunk in the ground has its surface
+  above it, so its floors are all underground. The air and solid corners nearest the crossing give the flags
+  (underground, water) and the material, biome and AO; the normal is the trilinear gradient.
+- **Past the faces.** The chunk's last cell on each axis reaches the voxels past its +X, +Y and +Z faces, which its
+  data cannot show: they are taken as the planet generator makes them there, with the neighbour's edits applied
+  (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`; `TouchingEdits` from the seven neighbours on those sides,
+  `UVoxelScatterManager::GetPlanetShellNeighbours` / `GatherPlanetTouchingEdits`), each computed the first time a ray
+  needs it (0.12 µs each, at most 12,481 for a 64³ chunk). Caves are not in them: a cave within a voxel past a chunk's
+  max face reads as rock. They are the CPU formula's, which the GPU generator matches to a density step or two at a few
+  voxels (`Generation.GPUvsCPUSphericalParity`), so on the GPU path a crossing at a face is very rarely doubled (one
+  point in about two million on `Review_Planet`). A point on a face is interpolated from the same four voxels on both
+  sides (fractions within 1e-7 of a cell face snap to it), so a voxel exactly at the threshold there cannot leave the
+  crossing to neither chunk.
+- **Classification** by the point's own radial up (the ray) and altitude: face type and slope against local up, the
+  elevation filter compares the altitude above the datum (heightmap worlds: world Z, as before), the underwater class by
+  the sea sphere (`FVoxelSeaSurface`).
+- **Density per area**: the grid's cells shrink away from the face centres (to 0.71 of the area at an edge's midpoint),
+  so the rays meet the surface up to 1.42 times as often as the column scan's columns. Each point's spawn weight is its
+  cell's area at the point's radius over the column scan's area per point (Stride² voxels): at most 1 on the datum
+  (a face centre's cell) and (r / R)² over it, so the weighted density per area is the column scan's on any part of the grid: 100.2% to 101.0%
+  at the poles, 45°, the equator and a cube corner (`Scatter.Planet.DensityPerArea`), and no strip with too many or too
+  few points at any of ten sites (`Scatter.Planet.LineTop.Duplicates`).
 - **Instances** stand on local up (`FScatterSpawnPoint::LocalUp`, `GetRotationQuat`: `FindBetweenNormals(+Z, Up)`
   then the yaw about it; exact near the south pole), or on the surface normal with `bAlignToSurfaceNormal`. The jitter
   is in the tangent plane, from the same two random draws.
@@ -295,10 +303,20 @@ whatever that voxel was, which doubled the points along every band where the sur
   base position's, as before.
 - **On the CPU**, as every world since G27 (the retired GPU extractor's gates were along +Z anyway).
 
+Until G31 each planet chunk walked digital lines along local up at its own centre, stepping along the axis nearest it and
+drifting sideways by the rounded slope. Neighbouring chunks' lines did not continue into each other (across the cube's
+diagonals they stepped along different axes, and elsewhere their drift rounded differently), so strips along chunk faces
+got too few points; the staircase rounding also thinned the points inside a chunk on some slopes, and a line top that
+left the chunk needed G29's rules to decide whether the neighbour made its point. The rays need none of that.
+`voxel.Scatter.LineTopAudit` still measures it on a live planet: pairs of open points from two chunks on one up-line,
+and the local density around the pawn.
+
 Heightmap worlds keep `ExtractSurfacePointsFromVoxelData` and the old expressions (`LocalUp` +Z, weight 1, the jitter
 call unchanged). `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds
 (extraction is deterministic; the retired GPU extractor's per-cell claim was not). Tests: `Scatter.Planet.AlongLocalUp`
-(points within 8 uu of the surface, instances' up within 0.01° of the radial), `Scatter.Planet.DensityPerArea`.
+(points within 8 uu of the surface, instances' up within 0.01° of the radial), `Scatter.Planet.DensityPerArea`,
+`Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}` (one open point per ray at ten sites, over a flat pad at every height
+across a chunk face, and over edits past the faces).
 
 #### Mesh-vertex extraction (retired, world modes review G27)
 

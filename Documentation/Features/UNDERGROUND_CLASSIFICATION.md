@@ -113,7 +113,9 @@ is underground when:
 
 **Step 2 — Not the column's top**: a lower crossing in the same column is always covered (a cave floor, or the ground under
 an overhang), even where Pass 1 left its air unflagged (a ceiling thinner than `MinSolidThickness`, or a cave spanning a
-chunk boundary). On a slope each column's terrain surface is its topmost crossing.
+chunk boundary). On a slope each column's terrain surface is its topmost crossing. On a planet the columns are the scatter's radial rays (world
+modes review G31, [SCATTER_SYSTEM.md](SCATTER_SYSTEM.md)): a later floor on a ray is covered, and so is every floor of a ray
+that enters the chunk in the ground.
 
 **Step 3 — Buried chunk**, below.
 
