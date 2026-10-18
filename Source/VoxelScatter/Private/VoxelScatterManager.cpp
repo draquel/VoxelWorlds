@@ -19,6 +19,8 @@
 #include "Async/Async.h"
 #include "Engine/World.h"
 #include "Misc/CommandLine.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Misc/Parse.h"
 #include "VoxelGPUSurfaceExtractor.h"
 #include "Engine/Engine.h"
@@ -27,12 +29,18 @@
 
 namespace
 {
-	/** voxel.Scatter.Digest: log every game world's scatter digest (UVoxelScatterManager::ComputeScatterDigest). */
+	/**
+	 * voxel.Scatter.Digest [file]: log every game world's scatter digest (UVoxelScatterManager::ComputeScatterDigest). With
+	 * "file", also write one line per chunk (X,Y,Z,count,crc) to Saved/VoxelAudit/ScatterDigest_<world>_<time>.csv, to
+	 * see which chunks two builds disagree on.
+	 */
 	FAutoConsoleCommand GVoxelScatterDigestCmd(
 		TEXT("voxel.Scatter.Digest"),
-		TEXT("Log a digest of the cached scatter spawn points (counts and a CRC per type) for every game world, to compare builds."),
-		FConsoleCommandDelegate::CreateLambda([]()
+		TEXT("Log a digest of the cached scatter spawn points (counts and a CRC per type) for every game world, to compare builds. ")
+		TEXT("'voxel.Scatter.Digest file' also writes a per-chunk CSV to Saved/VoxelAudit."),
+		FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 		{
+			const bool bFile = Args.Num() > 0 && Args[0].Equals(TEXT("file"), ESearchCase::IgnoreCase);
 			int32 Managers = 0;
 			for (TObjectIterator<UVoxelScatterManager> It; It; ++It)
 			{
@@ -42,7 +50,18 @@ namespace
 					continue;
 				}
 				++Managers;
-				UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: %s"), *World->GetName(), *It->ComputeScatterDigest());
+				TArray<FString> ChunkLines;
+				UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: %s"), *World->GetName(),
+					*It->ComputeScatterDigest(bFile ? &ChunkLines : nullptr));
+				if (bFile)
+				{
+					const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("ScatterDigest_%s_%s.csv"),
+						*World->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+					ChunkLines.Insert(TEXT("X,Y,Z,count,crc"), 0);
+					const bool bSaved = FFileHelper::SaveStringArrayToFile(ChunkLines, *Path);
+					UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: %d chunk line(s) %s %s"), *World->GetName(),
+						ChunkLines.Num() - 1, bSaved ? TEXT("written to") : TEXT("NOT written to"), *FPaths::ConvertRelativePathToFull(Path));
+				}
 			}
 			if (Managers == 0)
 			{
@@ -2601,10 +2620,11 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 		// surface chunk exposes floors to sky that the per-point flag / column scan (run on edit-merged
 		// voxels) classify as surface, instead of this analytic height pinning them underground.
 		// Same fix as the CPU extractor's bCoveredByTerrain.
+		// The analytic height is the generated one (the natural height plus the chunk's conditioning zones, G23): in a POI's
+		// pad and falloff ring the natural height can sit well above or below the ground the generator made.
 		if (!bFlaggedUnderground && Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
 		{
-			const float TerrainHeight = Context.WorldMode->GetTerrainHeightAt(
-				static_cast<float>(Point.Position.X), static_cast<float>(Point.Position.Y), Context.NoiseParams);
+			const float TerrainHeight = Context.GetGeneratedTerrainHeight(Point.Position.X, Point.Position.Y);
 			if (ChunkTopWorldZ < TerrainHeight - VoxelSize * 1.5f)
 			{
 				bFlaggedUnderground = true;
@@ -2707,15 +2727,16 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 
 			// Analytic terrain-surface height at this column (computed once) for the cross-chunk
 			// coverage check below: a point well below this has solid terrain above it even when that
-			// terrain lives in a neighboring chunk. Only heightmap-based world modes provide a height.
+			// terrain lives in a neighboring chunk. Only heightmap-based world modes provide a height. It is
+			// the generated height, conditioning zones included (G23): against the natural height a POI's
+			// lowered pad or ring buried the surface chunk holding its ground.
 			float ColumnTerrainHeight = 0.0f;
 			bool bHaveColumnHeight = false;
 			if (Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
 			{
-				ColumnTerrainHeight = Context.WorldMode->GetTerrainHeightAt(
-					static_cast<float>(ChunkWorldOrigin.X + X * VoxelSize),
-					static_cast<float>(ChunkWorldOrigin.Y + Y * VoxelSize),
-					Context.NoiseParams);
+				ColumnTerrainHeight = Context.GetGeneratedTerrainHeight(
+					ChunkWorldOrigin.X + X * VoxelSize,
+					ChunkWorldOrigin.Y + Y * VoxelSize);
 				bHaveColumnHeight = true;
 			}
 
@@ -2864,6 +2885,38 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	}
 }
 
+float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double WorldY) const
+{
+	check(WorldMode != nullptr);
+	const float Natural = WorldMode->GetTerrainHeightAt(static_cast<float>(WorldX), static_cast<float>(WorldY), NoiseParams);
+	return ConditioningZones.IsValid() && ConditioningZones->Num() > 0
+		? FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Natural, *ConditioningZones)
+		: Natural;
+}
+
+void UVoxelScatterManager::ExtractHeightmapSurfacePoints(
+	const TArray<FVoxelData>& VoxelData,
+	const FIntVector& ChunkCoord,
+	const FVector& ChunkWorldOrigin,
+	int32 ChunkSize,
+	float VoxelSize,
+	float PointSpacing,
+	bool bCubic,
+	const FScatterExtractionContext& Context,
+	FChunkSurfaceData& OutSurfaceData)
+{
+	const TArray<FClearedScatterVolume> NoClearedVolumes;
+	if (bCubic)
+	{
+		ExtractSurfacePointsCubic(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, NoClearedVolumes, Context, OutSurfaceData);
+	}
+	else
+	{
+		ExtractSurfacePointsFromVoxelData(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, NoClearedVolumes,
+			Context, OutSurfaceData);
+	}
+}
+
 void UVoxelScatterManager::ExtractPlanetSurfacePoints(
 	const TArray<FVoxelData>& VoxelData,
 	const FIntVector& ChunkCoord,
@@ -3006,8 +3059,8 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 						if (!bAboveKnown)
 						{
 							// The generated surface: the planet's conditioning zones over the chunk applied (SP-B10).
-							const FVoxelTerrainSurfacePoint Analytic = Context.PlanetZones.IsValid()
-								? static_cast<const FSphericalPlanetWorldMode*>(Context.WorldMode)->GetConditionedSurfacePoint(WorldPos, Context.NoiseParams, *Context.PlanetZones)
+							const FVoxelTerrainSurfacePoint Analytic = Context.ConditioningZones.IsValid()
+								? static_cast<const FSphericalPlanetWorldMode*>(Context.WorldMode)->GetConditionedSurfacePoint(WorldPos, Context.NoiseParams, *Context.ConditioningZones)
 								: Context.WorldMode->GetSurfacePoint(WorldPos, Context.NoiseParams);
 							if (FMath::Abs(Context.WorldMode->GetAltitude(WorldPos) - Analytic.Altitude) > CoverThreshold)
 							{
@@ -3117,15 +3170,15 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 			// the same covered-floor gap as the smooth extractor (see ExtractSurfacePointsFromVoxelData).
 			bool bFoundColumnTop = false;
 
-			// Analytic terrain height at this column for the cross-chunk coverage check (below).
+			// Generated terrain height at this column (conditioning zones included, G23) for the cross-chunk
+			// coverage check (below).
 			float ColumnTerrainHeight = 0.0f;
 			bool bHaveColumnHeight = false;
 			if (Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
 			{
-				ColumnTerrainHeight = Context.WorldMode->GetTerrainHeightAt(
-					static_cast<float>(ChunkWorldOrigin.X + (X + 0.5f) * VoxelSize),
-					static_cast<float>(ChunkWorldOrigin.Y + (Y + 0.5f) * VoxelSize),
-					Context.NoiseParams);
+				ColumnTerrainHeight = Context.GetGeneratedTerrainHeight(
+					ChunkWorldOrigin.X + (X + 0.5f) * VoxelSize,
+					ChunkWorldOrigin.Y + (Y + 0.5f) * VoxelSize);
 				bHaveColumnHeight = true;
 			}
 
@@ -3207,7 +3260,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 	OutSurfaceData.bIsValid = true;
 }
 
-FString UVoxelScatterManager::ComputeScatterDigest() const
+FString UVoxelScatterManager::ComputeScatterDigest(TArray<FString>* OutChunkLines) const
 {
 	TArray<FIntVector> Chunks;
 	ScatterDataCache.GetKeys(Chunks);
@@ -3219,7 +3272,9 @@ FString UVoxelScatterManager::ComputeScatterDigest() const
 	int32 Points = 0;
 	for (const FIntVector& Chunk : Chunks)
 	{
-		for (const FScatterSpawnPoint& Point : ScatterDataCache.FindChecked(Chunk).SpawnPoints)
+		const TArray<FScatterSpawnPoint>& SpawnPoints = ScatterDataCache.FindChecked(Chunk).SpawnPoints;
+		uint32 ChunkCrc = 0u;
+		for (const FScatterSpawnPoint& Point : SpawnPoints)
 		{
 			const int32 Key[9] = {
 				Point.ScatterTypeID,
@@ -3229,7 +3284,12 @@ FString UVoxelScatterManager::ComputeScatterDigest() const
 			TPair<int32, uint32>& Entry = PerType.FindOrAdd(Point.ScatterTypeID, TPair<int32, uint32>(0, 0u));
 			++Entry.Key;
 			Entry.Value = FCrc::MemCrc32(Key, sizeof(Key), Entry.Value);
+			ChunkCrc = FCrc::MemCrc32(Key, sizeof(Key), ChunkCrc);
 			++Points;
+		}
+		if (OutChunkLines)
+		{
+			OutChunkLines->Add(FString::Printf(TEXT("%d,%d,%d,%d,%08x"), Chunk.X, Chunk.Y, Chunk.Z, SpawnPoints.Num(), ChunkCrc));
 		}
 	}
 	TArray<int32> Types;
@@ -3271,15 +3331,16 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	{
 		Context.NoiseParams = Configuration->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
-		// A planet: the conditioning zones over the chunk (spherical SP-B10), for the line top's analytic surface.
-		if (Configuration->WorldMode == EWorldMode::SphericalPlanet && PlanetConditioningGatherer)
+		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
+		// height on a heightmap (G23), the line top's surface on a planet (spherical SP-B10).
+		if (ConditioningGatherer)
 		{
 			const FVector Min = GetChunkWorldOrigin(ChunkCoord);
 			TArray<FVoxelConditioningZone> Zones;
-			PlanetConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Zones);
+			ConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Zones);
 			if (Zones.Num() > 0)
 			{
-				Context.PlanetZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
+				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
 			}
 		}
 	}

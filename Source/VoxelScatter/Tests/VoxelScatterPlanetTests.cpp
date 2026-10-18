@@ -71,7 +71,7 @@ namespace VoxelScatterPlanetTestUtils
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
 		if (ContextZones.Num() > 0)
 		{
-			Context.PlanetZones = MakeShared<const TArray<FVoxelConditioningZone>>(ContextZones);
+			Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(ContextZones);
 		}
 		const double ChunkWorld = ChunkSize * VoxelSize;
 		const FVector Local = (Site - Config->WorldOrigin) / ChunkWorld;
