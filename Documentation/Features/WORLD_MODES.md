@@ -524,9 +524,9 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 - **Small planets** (SD1): past the planet-relative distance and direction the GPU works in single precision (its
   cave and ore noise at absolute positions), as the CPU's noise does; parity is measured on a 250,000 uu planet.
   Large planets need SP-H1
-- Voxel-carved dungeons do not hold pawns on smooth worlds, the plane included (G24 in the review plan); tile-dressed
-  dungeons (the demo's) play on a planet as on the plane. A voxel-carved dungeon's walls on a planet step by up to
-  √3/2 voxel (the stamp writes air and solid, not graded densities)
+- Both dungeon representations play on a planet as on the plane (voxel-carved ones since G24's fix, review plan §19.8).
+  A voxel-carved dungeon's walls on a planet step by up to √3/2 voxel (the stamp writes air and solid, not graded
+  densities)
 - Water: one sea for every consumer (`FVoxelSeaSurface`, `WaterRadius`). The ocean shell is a sphere, so it also shows
   inside dry caves below sea level
 - The sun has no axial tilt: the poles sit in a low sun all day (decision D12)
