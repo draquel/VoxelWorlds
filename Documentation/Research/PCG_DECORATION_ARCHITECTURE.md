@@ -56,7 +56,7 @@ correct only for the far band. The sampler is therefore **distance-banded**:
 | Band | Source | Properties |
 |------|--------|------------|
 | **Near** (loaded chunks) | Edit-**merged** voxel data (base + edit layer) | Edit-aware; **exact surface** (also fixes the analytic-vs-voxelized Z error seen in the first round-trip) |
-| **Far** (beyond loaded chunks) | Re-sample the procedural generator (`FVoxelSurfaceQuery`) | Stream-independent reach; approximate surface; no edits to honor at distance |
+| **Far** (beyond loaded chunks) | Re-sample the procedural generator (`FVoxelSurfaceQuery`) with the terrain conditioning zones over the bounds (POI pads and their falloff rings), so the far band stands on the ground the generator makes (world modes review G23) | Stream-independent reach; approximate surface; no edits to honor at distance |
 
 Free behaviour: because the near band reads the **real edited surface** (actual material + slope), many
 edits "work around" themselves — dig through grass to stone and the `AllowedMaterials = grass` rule simply

@@ -1214,15 +1214,21 @@ void UVoxelChunkManager::Initialize(
 		// Give scatter the analytic world mode so surface extraction can classify points covered by
 		// terrain in a neighboring chunk (cross-chunk cave floors / overhangs) as underground.
 		ScatterManager->SetWorldMode(WorldMode.Get());
-		// Planets: the chunk's conditioning zones, so a line's crossing at a chunk's upper face lands on the flattened
-		// ground (SP-B10). The scatter manager is ours and dies with us; it asks on the game thread.
-		ScatterManager->SetPlanetConditioningGatherer([this](const FBox& ChunkBox, TArray<FVoxelConditioningZone>& OutZones)
+		// The chunk's conditioning zones, the ones generation layered onto it, so scatter's analytic surface is the
+		// generated ground: the buried-chunk test's height on a heightmap (its XY footprint, world modes review G23), a
+		// line's crossing at a planet chunk's upper face (the cap its box subtends, SP-B10). The scatter manager is ours
+		// and dies with us; it asks on the game thread.
+		ScatterManager->SetConditioningGatherer([this](const FBox& ChunkBox, TArray<FVoxelConditioningZone>& OutZones)
 		{
 			FVector CapDirection;
 			double CapAngle = 0.0;
 			if (GetPlanetCapOfBox(ChunkBox, CapDirection, CapAngle))
 			{
 				GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+			}
+			else
+			{
+				GatherConditioningZonesForRegion(FBox2D(FVector2D(ChunkBox.Min.X, ChunkBox.Min.Y), FVector2D(ChunkBox.Max.X, ChunkBox.Max.Y)), OutZones);
 			}
 		});
 
@@ -6530,18 +6536,27 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
 		}
 	}));
 
-// Console: voxel.Scatter.ConditioningAudit [maxLines=40]
+// Console: voxel.Scatter.ConditioningAudit [maxLines=40] [drawSeconds=0]  |  voxel.Scatter.ConditioningAudit scan [radiusKm] [maxLines]
 // Heightmap worlds (world modes review G23): for every cached scatter chunk that a terrain conditioning zone reaches (a
 // POI pad and its falloff ring), compare the surface points with the generated ground (the natural height plus the
 // chunk's zones, as the generator layers them) and count:
-//   ground       points within 1.5 voxels of the generated ground (the open surface the generator made)
+//   ground       points within 1.5 voxels of the generated ground where that ground lies inside the chunk (the open
+//                surface the generator made)
 //   groundUnder  ground points classified underground (no surface scatter on them)
+//   edge         points within 1.5 voxels of the generated ground where that ground lies above the chunk's top: the row
+//                the column scan makes on the chunk's top face (it takes the voxel above the chunk for air), under the
+//                real surface in the chunk above
+//   edgeSurface  edge points classified surface (scatter planted up to 1.5 voxels under the ground)
 //   natBuried    points whose chunk the buried-chunk test calls buried against the natural height
 //   genBuried    the same test against the generated height
+//   rockSurface  points classified surface in a chunk the generated test buries (a cave floor or the chunk's top face
+//                under a raised pad: surface scatter inside the ground)
 //   farErr       the largest |natural - generated| at a ground point: how far a far point placed at the natural height
 //                (the PCG sampler beyond its edit-aware band) sits off the ground
 // Logs a summary, the zones of the chunks that disagree and one line per such chunk, and writes every zone chunk to
-// Saved/VoxelAudit/ConditioningAudit_<world>_<time>.csv.
+// Saved/VoxelAudit/ConditioningAudit_<world>_<time>.csv. With drawSeconds > 0 it also draws, for that long, the
+// groundUnder points (red), the rockSurface points (blue), the edgeSurface points (magenta) and each zone's inner radius and outer edge (yellow) at its
+// target height.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
 	TEXT("voxel.Scatter.ConditioningAudit"),
 	TEXT("Heightmap worlds: audit cached scatter chunks reached by terrain conditioning zones (surface points on the generated ground ")
@@ -6565,7 +6580,92 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit: no PIE/Game world found (start PIE first)"));
 			return;
 		}
+		// "scan [radiusKm=20] [maxLines=20]": every zone within the radius of the viewer, judged analytically (no loaded chunk
+		// needed). Per zone, on a 2-voxel grid over its footprint: "lost" columns, whose generated ground lies in a chunk the
+		// natural-height test buries (no surface scatter on that ground before the fix), and "raised" columns, where the
+		// chunk under the one holding the generated ground is buried only by the generated test (its top-face row or cave
+		// floors read as surface before the fix).
+		if (Args.Num() > 0 && Args[0].Equals(TEXT("scan"), ESearchCase::IgnoreCase))
+		{
+			const double RadiusKm = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 20.0;
+			const int32 MaxZoneLines = Args.Num() > 2 ? FMath::Max(0, FCString::Atoi(*Args[2])) : 20;
+			FVector Viewer = FVector::ZeroVector;
+			if (APlayerController* PC = TargetWorld->GetFirstPlayerController())
+			{
+				FRotator Unused;
+				PC->GetPlayerViewPoint(Viewer, Unused);
+			}
+			for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+			{
+				UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+				const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+				const IVoxelWorldMode* WM = CM ? CM->GetWorldMode() : nullptr;
+				if (!Config || !WM || !WM->IsHeightmapBased())
+				{
+					continue;
+				}
+				const double Reach = RadiusKm * 100000.0;
+				TArray<FVoxelConditioningZone> Zones;
+				CM->GatherConditioningZones(FBox2D(FVector2D(Viewer.X - Reach, Viewer.Y - Reach), FVector2D(Viewer.X + Reach, Viewer.Y + Reach)), Zones);
+				const double ChunkWorldSize = Config->GetChunkWorldSize();
+				const double OriginZ = Config->WorldOrigin.Z;
+				const float Margin = Config->VoxelSize * 1.5f;
+				const double Step = Config->VoxelSize * 2.0;
+				struct FZoneResult { int32 Index; int32 Columns; int32 Lost; int32 Raised; float MaxCut; float MaxRaise; double Distance; };
+				TArray<FZoneResult> Results;
+				for (int32 ZoneIndex = 0; ZoneIndex < Zones.Num(); ++ZoneIndex)
+				{
+					const FVoxelConditioningZone& Zone = Zones[ZoneIndex];
+					const double Outer = Zone.InnerRadius + Zone.FalloffWidth;
+					FZoneResult R{ ZoneIndex, 0, 0, 0, 0.0f, 0.0f, FVector2D::Distance(Zone.Center, FVector2D(Viewer.X, Viewer.Y)) };
+					const TArray<FVoxelConditioningZone> One = { Zone };
+					for (double DX = -Outer; DX <= Outer; DX += Step)
+					{
+						for (double DY = -Outer; DY <= Outer; DY += Step)
+						{
+							if (DX * DX + DY * DY > Outer * Outer)
+							{
+								continue;
+							}
+							const double X = Zone.Center.X + DX, Y = Zone.Center.Y + DY;
+							const float Natural = WM->GetTerrainHeightAt(static_cast<float>(X), static_cast<float>(Y), Config->NoiseParams);
+							const float Generated = FVoxelTerrainConditioning::ApplyToHeight(X, Y, Natural, One);
+							const double Top = OriginZ + (FMath::FloorToDouble((Generated - OriginZ) / ChunkWorldSize) + 1.0) * ChunkWorldSize;
+							++R.Columns;
+							R.Lost += Top < Natural - Margin ? 1 : 0;
+							const double BelowTop = Top - ChunkWorldSize;
+							R.Raised += (BelowTop < Generated - Margin && BelowTop >= Natural - Margin) ? 1 : 0;
+							R.MaxCut = FMath::Max(R.MaxCut, Natural - Generated);
+							R.MaxRaise = FMath::Max(R.MaxRaise, Generated - Natural);
+						}
+					}
+					Results.Add(R);
+				}
+				Results.Sort([](const FZoneResult& A, const FZoneResult& B) { return A.Lost != B.Lost ? A.Lost > B.Lost : A.Distance < B.Distance; });
+				int32 ZonesLost = 0, ZonesRaised = 0, LostColumns = 0, RaisedColumns = 0;
+				for (const FZoneResult& R : Results)
+				{
+					ZonesLost += R.Lost > 0 ? 1 : 0;
+					ZonesRaised += R.Raised > 0 ? 1 : 0;
+					LostColumns += R.Lost;
+					RaisedColumns += R.Raised;
+				}
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit scan [%s]: %d zone(s) within %.0f km; %d with lost columns (%d columns), %d with raised columns (%d columns), %.0f uu grid"),
+					*TargetWorld->GetName(), Zones.Num(), RadiusKm, ZonesLost, LostColumns, ZonesRaised, RaisedColumns, Step);
+				for (int32 i = 0; i < FMath::Min(MaxZoneLines, Results.Num()); ++i)
+				{
+					const FZoneResult& R = Results[i];
+					const FVoxelConditioningZone& Zone = Zones[R.Index];
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("  zone (%.0f, %.0f) inner %.0f falloff %.0f target %.0f: %d columns, lost %d, raised %d, max cut %.0f, max raise %.0f, %.1f km  ->  vox.TP %.0f %.0f %.0f"),
+						Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, R.Columns, R.Lost, R.Raised,
+						R.MaxCut, R.MaxRaise, R.Distance / 100000.0, Zone.Center.X, Zone.Center.Y, Zone.TargetHeight + 200.0f);
+				}
+			}
+			return;
+		}
+
 		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 40;
+		const float DrawSeconds = Args.Num() > 1 ? FMath::Max(0.0f, FCString::Atof(*Args[1])) : 0.0f;
 
 		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
 		{
@@ -6593,10 +6693,10 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
 				return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
 			});
 
-			TArray<FString> CsvLines = { TEXT("X,Y,Z,zones,points,ground,groundUnder,natBuried,genBuried,farErr,spawns") };
+			TArray<FString> CsvLines = { TEXT("X,Y,Z,zones,points,ground,groundUnder,edge,edgeSurface,natBuried,genBuried,rockSurface,farErr,spawns") };
 			TArray<FString> ChunkLines;
 			TMap<FVector2D, FVoxelConditioningZone> DisagreeZones;
-			int32 ZoneChunks = 0, DisagreeChunks = 0, TotalGround = 0, TotalGroundUnder = 0, TotalNat = 0, TotalGen = 0;
+			int32 ZoneChunks = 0, DisagreeChunks = 0, TotalGround = 0, TotalGroundUnder = 0, TotalEdge = 0, TotalEdgeSurface = 0, TotalNat = 0, TotalGen = 0, TotalRock = 0;
 			float WorstFarErr = 0.0f;
 			for (const FIntVector& Coord : Chunks)
 			{
@@ -6614,35 +6714,60 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
 				}
 				++ZoneChunks;
 				const float ChunkTop = static_cast<float>(Origin.Z) + ChunkWorldSize;
-				int32 Ground = 0, GroundUnder = 0, Nat = 0, Gen = 0;
+				int32 Ground = 0, GroundUnder = 0, Edge = 0, EdgeSurface = 0, Nat = 0, Gen = 0, Rock = 0;
 				float FarErr = 0.0f;
 				for (const FVoxelSurfacePoint& Point : Surface->SurfacePoints)
 				{
 					const float Natural = WM->GetTerrainHeightAt(static_cast<float>(Point.Position.X), static_cast<float>(Point.Position.Y), Config->NoiseParams);
 					const float Generated = FVoxelTerrainConditioning::ApplyToHeight(Point.Position.X, Point.Position.Y, Natural, Zones);
+					const bool bGenBuried = ChunkTop < Generated - Margin;
 					Nat += ChunkTop < Natural - Margin ? 1 : 0;
-					Gen += ChunkTop < Generated - Margin ? 1 : 0;
-					if (FMath::Abs(static_cast<float>(Point.Position.Z) - Generated) <= Margin)
+					Gen += bGenBuried ? 1 : 0;
+					if (bGenBuried && !Point.bIsUnderground)
+					{
+						++Rock;
+						if (DrawSeconds > 0.0f)
+						{
+							DrawDebugPoint(TargetWorld, Point.Position, 8.0f, FColor::Blue, false, DrawSeconds);
+						}
+					}
+					if (FMath::Abs(static_cast<float>(Point.Position.Z) - Generated) <= Margin && Generated >= ChunkTop)
+					{
+						++Edge;
+						EdgeSurface += Point.bIsUnderground ? 0 : 1;
+						if (!Point.bIsUnderground && DrawSeconds > 0.0f)
+						{
+							DrawDebugPoint(TargetWorld, Point.Position, 8.0f, FColor::Magenta, false, DrawSeconds);
+						}
+					}
+					else if (FMath::Abs(static_cast<float>(Point.Position.Z) - Generated) <= Margin)
 					{
 						++Ground;
 						GroundUnder += Point.bIsUnderground ? 1 : 0;
 						FarErr = FMath::Max(FarErr, FMath::Abs(Natural - Generated));
+						if (Point.bIsUnderground && DrawSeconds > 0.0f)
+						{
+							DrawDebugPoint(TargetWorld, Point.Position + FVector(0.0, 0.0, 20.0), 8.0f, FColor::Red, false, DrawSeconds);
+						}
 					}
 				}
 				const FChunkScatterData* Scatter = ScatterMgr->GetChunkScatterData(Coord);
 				const int32 Spawns = Scatter ? Scatter->SpawnPoints.Num() : 0;
-				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%.0f,%d"), Coord.X, Coord.Y, Coord.Z, Zones.Num(),
-					Surface->SurfacePoints.Num(), Ground, GroundUnder, Nat, Gen, FarErr, Spawns));
+				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.0f,%d"), Coord.X, Coord.Y, Coord.Z, Zones.Num(),
+					Surface->SurfacePoints.Num(), Ground, GroundUnder, Edge, EdgeSurface, Nat, Gen, Rock, FarErr, Spawns));
 				TotalGround += Ground;
 				TotalGroundUnder += GroundUnder;
 				TotalNat += Nat;
 				TotalGen += Gen;
+				TotalRock += Rock;
+				TotalEdge += Edge;
+				TotalEdgeSurface += EdgeSurface;
 				WorstFarErr = FMath::Max(WorstFarErr, FarErr);
-				if (GroundUnder > 0 || Nat != Gen)
+				if (GroundUnder > 0 || Rock > 0 || Nat != Gen)
 				{
 					++DisagreeChunks;
-					ChunkLines.Add(FString::Printf(TEXT("  chunk (%d,%d,%d) zones=%d points=%d ground=%d groundUnder=%d natBuried=%d genBuried=%d farErr=%.0f spawns=%d"),
-						Coord.X, Coord.Y, Coord.Z, Zones.Num(), Surface->SurfacePoints.Num(), Ground, GroundUnder, Nat, Gen, FarErr, Spawns));
+					ChunkLines.Add(FString::Printf(TEXT("  chunk (%d,%d,%d) zones=%d points=%d ground=%d groundUnder=%d edge=%d edgeSurface=%d natBuried=%d genBuried=%d rockSurface=%d farErr=%.0f spawns=%d"),
+						Coord.X, Coord.Y, Coord.Z, Zones.Num(), Surface->SurfacePoints.Num(), Ground, GroundUnder, Edge, EdgeSurface, Nat, Gen, Rock, FarErr, Spawns));
 					for (const FVoxelConditioningZone& Zone : Zones)
 					{
 						DisagreeZones.Add(Zone.Center, Zone);
@@ -6650,14 +6775,20 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
 				}
 			}
 
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit [%s]: %d scatter chunk(s), %d reached by zones, %d disagree; ground points %d, on the ground but underground %d; natBuried %d vs genBuried %d point(s); worst farErr %.0f uu"),
-				*TargetWorld->GetName(), Chunks.Num(), ZoneChunks, DisagreeChunks, TotalGround, TotalGroundUnder, TotalNat, TotalGen, WorstFarErr);
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.ConditioningAudit [%s]: %d scatter chunk(s), %d reached by zones, %d disagree; ground points %d, on the ground but underground %d; top-face rows under the ground %d, of them surface %d; natBuried %d vs genBuried %d point(s); surface in a buried chunk %d; worst farErr %.0f uu"),
+				*TargetWorld->GetName(), Chunks.Num(), ZoneChunks, DisagreeChunks, TotalGround, TotalGroundUnder, TotalEdge, TotalEdgeSurface, TotalNat, TotalGen, TotalRock, WorstFarErr);
 			for (const TPair<FVector2D, FVoxelConditioningZone>& Pair : DisagreeZones)
 			{
 				const FVoxelConditioningZone& Zone = Pair.Value;
 				UE_LOG(LogVoxelStreaming, Warning, TEXT("  zone centre (%.0f, %.0f) inner %.0f falloff %.0f target %.0f strength %.2f, natural at centre %.0f"),
 					Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength,
 					WM->GetTerrainHeightAt(static_cast<float>(Zone.Center.X), static_cast<float>(Zone.Center.Y), Config->NoiseParams));
+				if (DrawSeconds > 0.0f)
+				{
+					const FVector Centre(Zone.Center.X, Zone.Center.Y, Zone.TargetHeight + 50.0f);
+					DrawDebugCircle(TargetWorld, Centre, Zone.InnerRadius, 64, FColor::Yellow, false, DrawSeconds, 0, 20.0f, FVector(1, 0, 0), FVector(0, 1, 0), false);
+					DrawDebugCircle(TargetWorld, Centre, Zone.InnerRadius + Zone.FalloffWidth, 64, FColor::Yellow, false, DrawSeconds, 0, 20.0f, FVector(1, 0, 0), FVector(0, 1, 0), false);
+				}
 			}
 			for (int32 i = 0; i < FMath::Min(MaxLines, ChunkLines.Num()); ++i)
 			{

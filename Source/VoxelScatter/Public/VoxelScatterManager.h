@@ -36,10 +36,23 @@ struct FScatterExtractionContext
 	 */
 	FVoxelSeaSurface Sea;
 	/**
-	 * Planets (spherical SP-B10): the conditioning zones over the chunk, so a line's crossing put on the analytic surface
-	 * at the chunk's upper face lands on the generated (flattened) ground. Null or empty: the world mode's surface.
+	 * The terrain conditioning zones over the chunk (POI pads and their falloff rings), so the analytic surface the
+	 * extractors compare with is the generated ground, not the natural one. Heightmap worlds: the buried-chunk test
+	 * compares the chunk's top with the natural height plus these zones (FVoxelTerrainConditioning::ApplyToHeight;
+	 * world modes review G23). Planets (spherical SP-B10): a line's crossing put on the analytic surface at the chunk's
+	 * upper face lands on the flattened ground (ApplyToAltitude). Each kind of zone applies only in its own kind of world.
+	 * Null or empty: the world mode's natural surface.
 	 */
-	TSharedPtr<const TArray<FVoxelConditioningZone>> PlanetZones;
+	TSharedPtr<const TArray<FVoxelConditioningZone>> ConditioningZones;
+
+	/**
+	 * Heightmap worlds: the generated terrain height at a world X,Y, the world mode's natural height with
+	 * ConditioningZones layered on as the generator does. Requires a heightmap WorldMode.
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @return The generated surface's world Z
+	 */
+	float GetGeneratedTerrainHeight(double WorldX, double WorldY) const;
 };
 
 /**
@@ -235,6 +248,35 @@ public:
 	FString ComputeScatterDigest(TArray<FString>* OutChunkLines = nullptr) const;
 
 	/**
+	 * The heightmap extractors without cleared volumes, for tests and tools (world modes review G23): the column scan
+	 * (ExtractSurfacePointsFromVoxelData) or, with bCubic, the block-face scan (ExtractSurfacePointsCubic, one point per
+	 * voxel). Pure and thread-safe.
+	 */
+	static void ExtractHeightmapSurfacePoints(
+		const TArray<FVoxelData>& VoxelData,
+		const FIntVector& ChunkCoord,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize,
+		float PointSpacing,
+		bool bCubic,
+		const FScatterExtractionContext& Context,
+		FChunkSurfaceData& OutSurfaceData);
+
+	/**
+	 * Classify GPU-extracted surface points as underground and/or underwater using voxel data plus the analytic terrain
+	 * height (with the context's conditioning zones) and the sea from the context (cross-chunk coverage + submerged
+	 * seabeds). The GPU extraction path calls it on the thread pool; public for tests. Pure and thread-safe.
+	 */
+	static void ClassifySurfacePointsUnderground(
+		TArray<FVoxelSurfacePoint>& SurfacePoints,
+		const TArray<FVoxelData>& VoxelData,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize,
+		const FScatterExtractionContext& Context);
+
+	/**
 	 * ExtractSurfacePointsAlongUp without cleared volumes (spherical SP-G1): a planet chunk's surface points along local
 	 * up, for tests and tools. Pure and thread-safe.
 	 */
@@ -421,13 +463,15 @@ public:
 	void SetWorldMode(const IVoxelWorldMode* InWorldMode) { WorldMode = InWorldMode; }
 
 	/**
-	 * Planets (spherical SP-B10): how to gather the conditioning zones over a chunk's world box (the chunk manager's
-	 * GetPlanetCapOfBox + GatherConditioningZonesOnSphere), called on the game thread when a planet chunk's extraction is
-	 * set up. Unset: no zones (the world mode's surface).
+	 * How to gather the terrain conditioning zones over a chunk's world box, the zones generation layered onto it: the
+	 * chunk manager's region gather on a heightmap (its XY footprint, world modes review G23), the cap the box subtends
+	 * on a planet (GetPlanetCapOfBox + GatherConditioningZonesOnSphere, spherical SP-B10). Called on the game thread
+	 * when a chunk's extraction is set up (FScatterExtractionContext::ConditioningZones). Unset: no zones (the world
+	 * mode's natural surface).
 	 */
-	void SetPlanetConditioningGatherer(TFunction<void(const FBox& /*ChunkBox*/, TArray<FVoxelConditioningZone>& /*OutZones*/)> InGatherer)
+	void SetConditioningGatherer(TFunction<void(const FBox& /*ChunkBox*/, TArray<FVoxelConditioningZone>& /*OutZones*/)> InGatherer)
 	{
-		PlanetConditioningGatherer = MoveTemp(InGatherer);
+		ConditioningGatherer = MoveTemp(InGatherer);
 	}
 
 	// ==================== Debug ====================
@@ -531,8 +575,8 @@ protected:
 	/** World mode for analytic terrain-height coverage queries during extraction (non-owning; see SetWorldMode). */
 	const IVoxelWorldMode* WorldMode = nullptr;
 
-	/** Planets: the chunk's conditioning zones (see SetPlanetConditioningGatherer). */
-	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> PlanetConditioningGatherer;
+	/** The chunk's conditioning zones (see SetConditioningGatherer). */
+	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> ConditioningGatherer;
 
 	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */
 	FScatterExtractionContext MakeExtractionContext(const FIntVector& ChunkCoord) const;
@@ -842,16 +886,6 @@ protected:
 		float VoxelSize = 0.0f;
 	};
 	TMap<FIntVector, FGPUExtractionVoxelInfo> GPUExtractionPendingVoxelInfo;
-
-	/** Classify GPU-extracted surface points as underground and/or underwater using voxel data plus
-	 *  the analytic terrain height + water level from the context (cross-chunk coverage + submerged seabeds). */
-	static void ClassifySurfacePointsUnderground(
-		TArray<FVoxelSurfacePoint>& SurfacePoints,
-		const TArray<FVoxelData>& VoxelData,
-		const FVector& ChunkWorldOrigin,
-		int32 ChunkSize,
-		float VoxelSize,
-		const FScatterExtractionContext& Context);
 
 	/** Process completed GPU extractions and launch placement on thread pool */
 	void ProcessCompletedGPUExtractions();

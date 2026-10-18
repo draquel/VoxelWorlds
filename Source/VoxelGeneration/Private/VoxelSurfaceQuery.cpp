@@ -136,18 +136,27 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurface(
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	int32 WorldSeed,
-	bool bEnableWaterLevel, float WaterLevel)
+	bool bEnableWaterLevel, float WaterLevel,
+	const TArray<FVoxelConditioningZone>* Zones)
 {
 	FVoxelSurfaceSample Sample;
 
+	// The generated height: the natural height with the conditioning zones layered on as the generator does (G23).
+	const bool bConditioned = Zones && Zones->Num() > 0;
+	auto Height = [&](float X, float Y)
+	{
+		const float Natural = WorldMode.GetTerrainHeightAt(X, Y, NoiseParams);
+		return bConditioned ? FVoxelTerrainConditioning::ApplyToHeight(X, Y, Natural, *Zones) : Natural;
+	};
+
 	// Center height + 4-neighbor heights (compute gradient once, derive slope and normal).
 	const float Step = VoxelSize;
-	Sample.Height = WorldMode.GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+	Sample.Height = Height(WorldX, WorldY);
 
-	const float HX0 = WorldMode.GetTerrainHeightAt(WorldX - Step, WorldY, NoiseParams);
-	const float HX1 = WorldMode.GetTerrainHeightAt(WorldX + Step, WorldY, NoiseParams);
-	const float HY0 = WorldMode.GetTerrainHeightAt(WorldX, WorldY - Step, NoiseParams);
-	const float HY1 = WorldMode.GetTerrainHeightAt(WorldX, WorldY + Step, NoiseParams);
+	const float HX0 = Height(WorldX - Step, WorldY);
+	const float HX1 = Height(WorldX + Step, WorldY);
+	const float HY0 = Height(WorldX, WorldY - Step);
+	const float HY1 = Height(WorldX, WorldY + Step);
 
 	const float DX = (HX1 - HX0) / (2.0f * Step);
 	const float DY = (HY1 - HY0) / (2.0f * Step);
@@ -237,9 +246,9 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 {
 	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
-		// Heightmap modes: the (X, Y) sample, unchanged; its sea is the WaterLevel plane.
+		// Heightmap modes: the (X, Y) sample with the zones there; its sea is the WaterLevel plane.
 		return SampleSurface(WorldMode, static_cast<float>(WorldPos.X), static_cast<float>(WorldPos.Y), VoxelSize, NoiseParams,
-			BiomeSnapshot, NoiseParams.Seed, Sea.bEnabled && !Sea.bRadial, static_cast<float>(Sea.PlaneZ));
+			BiomeSnapshot, NoiseParams.Seed, Sea.bEnabled && !Sea.bRadial, static_cast<float>(Sea.PlaneZ), Zones);
 	}
 
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);

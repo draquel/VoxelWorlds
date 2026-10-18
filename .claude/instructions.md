@@ -109,9 +109,14 @@ their XY keys untouched.
 Terrain conditioning has two kinds of zone (spherical Phase 5, SP-B10): a heightmap zone (an XY disc, a world-Z target,
 `Direction` zero) and a planet zone (`FVoxelConditioningZone::MakeRadial`: a cap on the datum sphere, great-circle radii,
 an altitude target). Each world mode applies only its own kind (`ApplyToHeight` / `ApplyToAltitude`); a conditioner
-answers `GatherConditioning` for heightmaps and `GatherConditioningOnSphere` for planets. On a planet "the ground the
-generator makes" is `UVoxelChunkManager::GetGeneratedSurfacePoint` / `GetGeneratedPlanetAltitude` (the zones layered on
-the natural surface); `GetSurfacePointAt` is the natural surface. Changing planet generation bumps
+answers `GatherConditioning` for heightmaps and `GatherConditioningOnSphere` for planets. "The ground the generator
+makes" is the natural surface with the zones layered on: on a planet `UVoxelChunkManager::GetGeneratedSurfacePoint` /
+`GetGeneratedPlanetAltitude`, on a heightmap `GetGeneratedSurfaceHeight` (or `GetTerrainHeightAt` plus
+`ApplyToHeight` with the zones from `GatherConditioningZones`). Any reader that means that ground uses it: scatter's
+buried-chunk test (`FScatterExtractionContext::ConditioningZones`, from the chunk manager's conditioning gatherer) and
+the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface` / `SampleSurfacePoint` with the bounds' zones) do
+since world modes review G23. `GetSurfacePointAt` and `GetTerrainHeightAt` are the natural surface (POI placement
+surveys it on purpose). Changing planet generation bumps
 `FVoxelWorldModeFactory::PlanetGenerationVersion` (4 since Phase 5); heightmap changes bump `GenerationVersion`.
 
 ## Core Data Structures

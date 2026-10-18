@@ -2620,10 +2620,11 @@ void UVoxelScatterManager::ClassifySurfacePointsUnderground(
 		// surface chunk exposes floors to sky that the per-point flag / column scan (run on edit-merged
 		// voxels) classify as surface, instead of this analytic height pinning them underground.
 		// Same fix as the CPU extractor's bCoveredByTerrain.
+		// The analytic height is the generated one (the natural height plus the chunk's conditioning zones, G23): in a POI's
+		// pad and falloff ring the natural height can sit well above or below the ground the generator made.
 		if (!bFlaggedUnderground && Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
 		{
-			const float TerrainHeight = Context.WorldMode->GetTerrainHeightAt(
-				static_cast<float>(Point.Position.X), static_cast<float>(Point.Position.Y), Context.NoiseParams);
+			const float TerrainHeight = Context.GetGeneratedTerrainHeight(Point.Position.X, Point.Position.Y);
 			if (ChunkTopWorldZ < TerrainHeight - VoxelSize * 1.5f)
 			{
 				bFlaggedUnderground = true;
@@ -2726,15 +2727,16 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 
 			// Analytic terrain-surface height at this column (computed once) for the cross-chunk
 			// coverage check below: a point well below this has solid terrain above it even when that
-			// terrain lives in a neighboring chunk. Only heightmap-based world modes provide a height.
+			// terrain lives in a neighboring chunk. Only heightmap-based world modes provide a height. It is
+			// the generated height, conditioning zones included (G23): against the natural height a POI's
+			// lowered pad or ring buried the surface chunk holding its ground.
 			float ColumnTerrainHeight = 0.0f;
 			bool bHaveColumnHeight = false;
 			if (Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
 			{
-				ColumnTerrainHeight = Context.WorldMode->GetTerrainHeightAt(
-					static_cast<float>(ChunkWorldOrigin.X + X * VoxelSize),
-					static_cast<float>(ChunkWorldOrigin.Y + Y * VoxelSize),
-					Context.NoiseParams);
+				ColumnTerrainHeight = Context.GetGeneratedTerrainHeight(
+					ChunkWorldOrigin.X + X * VoxelSize,
+					ChunkWorldOrigin.Y + Y * VoxelSize);
 				bHaveColumnHeight = true;
 			}
 
@@ -2883,6 +2885,38 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 	}
 }
 
+float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double WorldY) const
+{
+	check(WorldMode != nullptr);
+	const float Natural = WorldMode->GetTerrainHeightAt(static_cast<float>(WorldX), static_cast<float>(WorldY), NoiseParams);
+	return ConditioningZones.IsValid() && ConditioningZones->Num() > 0
+		? FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Natural, *ConditioningZones)
+		: Natural;
+}
+
+void UVoxelScatterManager::ExtractHeightmapSurfacePoints(
+	const TArray<FVoxelData>& VoxelData,
+	const FIntVector& ChunkCoord,
+	const FVector& ChunkWorldOrigin,
+	int32 ChunkSize,
+	float VoxelSize,
+	float PointSpacing,
+	bool bCubic,
+	const FScatterExtractionContext& Context,
+	FChunkSurfaceData& OutSurfaceData)
+{
+	const TArray<FClearedScatterVolume> NoClearedVolumes;
+	if (bCubic)
+	{
+		ExtractSurfacePointsCubic(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, NoClearedVolumes, Context, OutSurfaceData);
+	}
+	else
+	{
+		ExtractSurfacePointsFromVoxelData(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, NoClearedVolumes,
+			Context, OutSurfaceData);
+	}
+}
+
 void UVoxelScatterManager::ExtractPlanetSurfacePoints(
 	const TArray<FVoxelData>& VoxelData,
 	const FIntVector& ChunkCoord,
@@ -3025,8 +3059,8 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 						if (!bAboveKnown)
 						{
 							// The generated surface: the planet's conditioning zones over the chunk applied (SP-B10).
-							const FVoxelTerrainSurfacePoint Analytic = Context.PlanetZones.IsValid()
-								? static_cast<const FSphericalPlanetWorldMode*>(Context.WorldMode)->GetConditionedSurfacePoint(WorldPos, Context.NoiseParams, *Context.PlanetZones)
+							const FVoxelTerrainSurfacePoint Analytic = Context.ConditioningZones.IsValid()
+								? static_cast<const FSphericalPlanetWorldMode*>(Context.WorldMode)->GetConditionedSurfacePoint(WorldPos, Context.NoiseParams, *Context.ConditioningZones)
 								: Context.WorldMode->GetSurfacePoint(WorldPos, Context.NoiseParams);
 							if (FMath::Abs(Context.WorldMode->GetAltitude(WorldPos) - Analytic.Altitude) > CoverThreshold)
 							{
@@ -3136,15 +3170,15 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 			// the same covered-floor gap as the smooth extractor (see ExtractSurfacePointsFromVoxelData).
 			bool bFoundColumnTop = false;
 
-			// Analytic terrain height at this column for the cross-chunk coverage check (below).
+			// Generated terrain height at this column (conditioning zones included, G23) for the cross-chunk
+			// coverage check (below).
 			float ColumnTerrainHeight = 0.0f;
 			bool bHaveColumnHeight = false;
 			if (Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased())
 			{
-				ColumnTerrainHeight = Context.WorldMode->GetTerrainHeightAt(
-					static_cast<float>(ChunkWorldOrigin.X + (X + 0.5f) * VoxelSize),
-					static_cast<float>(ChunkWorldOrigin.Y + (Y + 0.5f) * VoxelSize),
-					Context.NoiseParams);
+				ColumnTerrainHeight = Context.GetGeneratedTerrainHeight(
+					ChunkWorldOrigin.X + (X + 0.5f) * VoxelSize,
+					ChunkWorldOrigin.Y + (Y + 0.5f) * VoxelSize);
 				bHaveColumnHeight = true;
 			}
 
@@ -3297,15 +3331,16 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	{
 		Context.NoiseParams = Configuration->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
-		// A planet: the conditioning zones over the chunk (spherical SP-B10), for the line top's analytic surface.
-		if (Configuration->WorldMode == EWorldMode::SphericalPlanet && PlanetConditioningGatherer)
+		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
+		// height on a heightmap (G23), the line top's surface on a planet (spherical SP-B10).
+		if (ConditioningGatherer)
 		{
 			const FVector Min = GetChunkWorldOrigin(ChunkCoord);
 			TArray<FVoxelConditioningZone> Zones;
-			PlanetConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Zones);
+			ConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Zones);
 			if (Zones.Num() > 0)
 			{
-				Context.PlanetZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
+				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
 			}
 		}
 	}

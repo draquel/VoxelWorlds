@@ -111,6 +111,12 @@ public:
 	 * Convenience: sample everything (height, normal, slope, material, biome) at a world X,Y.
 	 * Computes the height gradient once and derives both slope and normal from it.
 	 * BiomeSnapshot as in QuerySurfaceConditions — hoist one per batch via FromConfig.
+	 *
+	 * @param Zones Optional heightmap conditioning zones there (POI pads and their falloff rings; gather them for the place,
+	 *              e.g. UVoxelChunkManager::GatherConditioningZones): the generated surface, as the generator layers them
+	 *              onto the natural height (FVoxelTerrainConditioning::ApplyToHeight), for the height, the gradient and the
+	 *              material's water and height rules (world modes review G23). Planet zones are ignored. Null or empty:
+	 *              the natural surface.
 	 */
 	static FVoxelSurfaceSample SampleSurface(
 		const IVoxelWorldMode& WorldMode,
@@ -118,7 +124,8 @@ public:
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		int32 WorldSeed,
-		bool bEnableWaterLevel, float WaterLevel);
+		bool bEnableWaterLevel, float WaterLevel,
+		const TArray<struct FVoxelConditioningZone>* Zones = nullptr);
 
 	/**
 	 * Material and biome on a planet as GenerateChunkSphericalPlanet writes them for a voxel at a position, before caves
@@ -158,8 +165,8 @@ public:
 	 * @param NoiseParams Terrain noise
 	 * @param BiomeSnapshot Value-captured biome data
 	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): the WaterLevel plane, or a planet's sphere
-	 * @param Zones Optional planet conditioning zones (spherical SP-B10): on a planet the generated surface
-	 *              (GetConditionedSurfacePoint) and its conditions; heightmap modes ignore them (G23)
+	 * @param Zones Optional conditioning zones there: the generated surface and its conditions. On a planet its zones
+	 *              (spherical SP-B10, GetConditionedSurfacePoint); in heightmap modes its zones (SampleSurface's, G23)
 	 * @return The surface sample
 	 */
 	static FVoxelSurfaceSample SampleSurfacePoint(
