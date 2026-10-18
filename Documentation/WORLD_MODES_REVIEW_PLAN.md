@@ -1463,7 +1463,7 @@ Three findings from §13.11 get IDs here:
 | G21 | A fresh pawn's view was level in world space, not in its gravity: the engine's possess and restart leave the start spot's world-level rotation (and `AVCGameModeBase` builds respawn rotations from world yaw), so away from the north pole a spawned or respawned player looked into the ground or the sky (45° down after a drowning at 43°; 3° at the polar spawn, unnoticed in Phase 3). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): every possession levels the view on the first planet frame (`AVCPlayerController::bLevelViewInGravity`) | WM-SY21 |
 | G22 | World items lay in the world's frame on a planet: the mesh is `AWorldItem`'s root, so the placeholder's and the WorldDisplay fragment's resting pose (`SetRelativeRotation`) replaced the pool's upright rotation (a raw meat dropped at 8° latitude stood 81.5° off the radial). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): `AWorldItem::ApplyRestingPose` relative to the upright frame | WM-SY16 |
 | G23 | Two heightmap readers of the analytic surface skip terrain conditioning: scatter's buried-chunk test (`ExtractSurfacePointsFromVoxelData` compares the chunk's top with `GetTerrainHeightAt`, not the conditioned height) and the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can flag a surface chunk as buried (no surface scatter in it) and the second puts far points at the natural height. Found in the spherical Phase 5 survey (§19), in the code; reproduced live on `VoxelDemo` (§19.3: a village's cut pad left 4,969 points of its ground underground, a PCG probe's far points a median 346 uu off the ground) | Fixed (§19.3): the extraction context carries the chunk's zones in every world mode (`FScatterExtractionContext::ConditioningZones`, the chunk manager's conditioning gatherer) and the buried-chunk test reads the generated height in all three heightmap paths; `FVoxelSurfaceQuery::SampleSurface` takes zones and the sampler gathers them over its bounds. Tests `Scatter.Conditioning.{CutPadAndRing,FilledPad,ManagerWiring}`, `PCG.FarPointsOnConditionedSurface`; the `VoxelDemo` A/B differs only in zone chunks. No `GenerationVersion` change | — |
-| G24 | A voxel-carved dungeon (`EDungeonPOIRepresentation::VoxelCarved`, the stone-lined `CarveUnderground` stamp) does not hold pawns on a smooth world: the boss falls through its room's floor at spawn, and `vox.TPRoom Boss` drops the player through the floor into the rock below (no surface inside solid rock, so no collision until a cave). Seen on the planet and on `VoxelDemo`'s plane alike, and on the base build of §19.2.4 with the same stamp (118,387 + 4,950 voxels), so it predates Phase 5. The demo's catalog dresses its dungeons with tiles (`TileMeshes`), whose floors are tile collision, so the demo is not affected. Found in the spherical Phase 5 live check (§19.2.3) | Open: a dungeon-plugin fix (the lining's floor surface and its collision on DC worlds), outside Phase 5 | — |
+| G24 | A voxel-carved dungeon (`EDungeonPOIRepresentation::VoxelCarved`, the stone-lined `CarveUnderground` stamp) does not hold pawns on a smooth world: the boss falls through its room's floor at spawn, and `vox.TPRoom Boss` drops the player through the floor into the rock below (no surface inside solid rock, so no collision until a cave). Seen on the planet and on `VoxelDemo`'s plane alike, and on the base build of §19.2.4 with the same stamp (118,387 + 4,950 voxels), so it predates Phase 5. The demo's catalog dresses its dungeons with tiles (`TileMeshes`), whose floors are tile collision, so the demo is not affected. Found in the spherical Phase 5 live check (§19.2.3) | Fixed (§19.8). Not DC's: the voxel lining stood inside each cell, `WallThickness` deep, and the demo's 3 voxels of 75 on 400 uu cells filled every one-storey room and hallway (pawns stood in rock); and the boss spawned before the voxel floor under it had collision. Now one layer lines each closed face from inside and the rest of the jacket wraps it from outside (`UDungeonVoxelConfig::InnerLiningLayers`; `WallThickness` 1 stamps as before), the POI floor heights take the inner lining, `FPOIVoxelFloorHold` keeps the boss still while no floor lies under it (also when the player walks out of the collision radius), and `vox.TPRoom` waits for the floor. Tests `Dungeon.Stamp.{VoxelLining,CarvedFloorCollision}`, `VoxelWorlds.POI.DungeonFloorHold.{Decide,Character}`; the QA dungeon rows a voxel-carved dungeon has pass on `VoxelDemo` and the planet; tile-dressed dungeons unchanged | — |
 | G25 | Faint straight shading lines along chunk boundaries across a flattened POI pad on a planet (the City at cell (26, 6), §19.2.3): no hole and no step, only a change in shading. Cosmetic; not yet compared with a flattened pad on the plane | Open: cosmetic, look at seam normals on flat ground | — |
 | G26 | Heightmap scatter's column scan takes the voxel above a chunk for air, so a chunk whose top face lies within 1.5 voxels under the ground makes a row of points on that face (up to 1.5 voxels under the real surface, which the chunk above extracts too), and the buried-chunk test's 1.5-voxel margin keeps them as surface: a second, sunken copy of the surface scatter along every contour where the terrain crosses a chunk layer's top, and over a whole pad that sits just above one (the Tower at (−204,430, −46,859), pad 23 uu over layer −1's top: 2,185 such points). Before G23's fix the natural height happened to bury some of them under cut pads. Found while reproducing G23 (§19.3); reproduced over every `VoxelDemo` stop (§19.4: 9,326 copies around the Tower carrying 2,552 surface scatter spawns under the ground, 3,144 at the spawn on natural terrain) | Fixed (§19.4): within 1.5 voxels of the generated ground the voxel over a chunk's top layer is the one the generator made there, with the chunk above's edits applied (`FScatterExtractionContext::GetVoxelAboveChunk`, `AboveLayerEdits`, `UVoxelScatterManager::SetEditLayerSource`): solid drops the top voxel's crossing and covers the column, air interpolates against it. Column and cubic scans; the GPU path never had it (its interior mesh has no boundary-cell vertex, G27). Tests `Scatter.TopFace.{Contour,FlatGround,EditsAbove}`; audit `voxel.Scatter.TopFaceAudit`; the `VoxelDemo` A/B changes only chunks with a top-face row. No `GenerationVersion` change | — |
 | G27 | GPU scatter extraction (`bUseGPUScatterExtraction`, the demo asset's setting; chunks meshed at LOD 0 only) had no point in a chunk's max-face cell layers: it read the chunk's interior mesh, which since seam ownership leaves the cells against the +X, +Y and +Z faces to the chunk's seams. Measured on all six faces (§19.5, `voxel.Scatter.BoundaryAudit`): every GPU-extracted chunk (11 to 18 per `VoxelDemo` stop, the chunks around where the player arrives) had point ratio 0.00 on +X, +Y and +Z and about 1 on the min faces: bare bands in the grass along chunk borders and along the contour where the terrain crosses a chunk layer's top. Its 4,096-point output buffer also overflowed on 64³ chunks (60 of 75 extractions), and the same chunks carried 31% fewer spawn points than on the CPU. Found in §19.4 | Fixed (§19.5): GPU scatter extraction retired (decision D25); every chunk extracts from its voxels. Deleted: `FVoxelGPUSurfaceExtractor`, `ScatterSurfaceExtraction.usf`, the GPU branch, `ClassifySurfacePointsUnderground`, `WantsGPUExtraction`, and the uncalled mesh-vertex path (`GenerateChunkScatter`, `FVoxelSurfaceExtractor`); `bUseGPUScatterExtraction` deprecated and ignored; `OnChunkMeshDataReady` takes no mesh. Tests `Scatter.Boundary.{EveryCellLayerCovered,ManagerIgnoresGPUFlag}`; the A/B with the asset's flag set equals the CPU behaviour on all 780 stable chunk-stops, no gap face anywhere | — |
@@ -4317,6 +4317,122 @@ chunk's lines and the other a line top that found air over it). The old rule's d
 that contains it (each chunk keeping the crossings of its own lines that lie inside it, and reading the voxels just past
 its faces as G29 does), or share one line family across a region.
 
+### 19.8 G24: voxel-carved dungeons hold pawns (2026-10-18)
+
+PRs open: draquel/ProceduralDungeonPlugin#30 (`fix/g24-voxel-carved-floors`: the stamp and its tests), this section in
+draquel/VoxelWorlds#110 (`docs/g24-voxel-carved-floors`, docs only) and draquel/UE5_PluginDev#120 (`claude/g24-voxel-carved-dungeon-floors`: VoxelWorldPOI, the
+game module's `vox.TPRoom`, the gitlinks and the doc map), all on main (VoxelWorlds `cfd94c7`, UE5_PluginDev `89f0455`).
+Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8084), background
+throttling off. Live runs on `VoxelDemo` with its `DA_POIType_DungeonTiled` switched to `VoxelCarved` in memory (never
+saved), and on `PlanetTest` with `/Game/PluginTesting/Review/Review_Planet` through `voxel.ConfigOverride`, the same switch.
+
+**The bug.** Two causes, neither in meshing or collision cooking, and neither particular to smooth worlds:
+
+1. *The lining filled the rooms.* `CarveUnderground` lined every closed face from inside its cell (`PlaceBoundary`),
+   `WallThickness` voxels deep. The demo's voxel config (`DA_DungeonVoxelConfig_POIDemo`, shared by both demo dungeon
+   types) has `WallThickness` 3 at voxel 75, 225 uu, on 400 uu cells: a one-storey cell's floor slab [0, 225) and ceiling
+   slab [175, 400) cover all of it, and a one-wide hallway's walls likewise, so every room and hallway was stamped solid
+   (only a two-storey room keeps a band of air). A pawn put on the "floor" stood in rock: the capture showed the chunk under
+   its feet loaded and cooked (`feetLd=1 feetCol=1 feetBody=1`) and the pawn fell through it all the same, since that
+   chunk's collision has no surface there; from the boss room's centre a camera sees no dungeon at all, and traces down
+   from it find nothing where the floor should be. The tile-dressed type has the same config, but `CarveOnly` writes
+   `WallThickness` as the outer seal, outside the cell, so its rooms were never filled. A cubic world fills them the same way.
+2. *The boss could not wait for its floor.* With a walkable lining (`WallThickness` 1 in memory) the boss still fell in a
+   fresh world: it spawns when its POI's structure band streams in, before the voxel floor under it has collision
+   (collision cooks only near a player), and an NPC has no terrain wait. The floor's collision also goes when the player
+   walks out of the collision radius (20,000 on `VoxelDemo`) while the structure band (the view distance, 40,000) keeps
+   the boss. Tile floors are actor collision and exist from the start. `vox.TPRoom` had the same gap on a fresh arrival
+   (no settle, "tiles carry collision").
+
+**Reproduction** (`VoxelDemo`, the base build, the dungeon at cell (3, −2)): the stamp 118,387 + 4,950 voxels (§19.2.4's
+numbers); the boss spawned at z −5,086 was at −136,476 half a minute later; `vox.TPRoom Boss` with the capture lands the
+pawn at −5,105 over a cooked chunk and it falls straight through. With `WallThickness` 1 in memory the boss stands at
+−5,250 and the player too where the floor was already cooked; in a fresh world the boss falls again (−146,907 after 30 s).
+
+**What changed.**
+
+- ProceduralDungeonPlugin: the voxel-lined modes (`CarveUnderground`, `ReplaceRegion`, `MergeAsStructure`) line each closed
+  face with `UDungeonVoxelConfig::InnerLiningLayers` (one layer) inside the cell, the surface content stands on, and wrap
+  it with the jacket's other `WallThickness` − 1 layers from outside through the outer seal (`PlaceOuterSeal`: never into
+  another open cell). A voxel of lining from each side still walls a room off from a hallway beside it, and stacked
+  hallways keep their floors. `GetInnerLiningLayers`, `GetOuterJacketLayers`, `GetInnerLiningThickness`. `WallThickness` 1
+  stamps exactly as before. `FVoxelDungeonWorldMode`'s SDF lines by the inner lining too (outside its open cells everything
+  is solid already). A warning when a cell is under two linings and a voxel (a one-storey cell keeps an air sample only
+  from three voxels up).
+- VoxelWorldPOI: the floor heights (`EntranceFloorZ`, the room floors the chests and the boss stand on, the side tunnel's
+  lift) take the inner lining (`GetInnerLiningThickness`), not `WallThickness * VoxelSize`.
+- VoxelWorldPOI: `FPOIVoxelFloorHold` holds a character (`MOVE_None`: no gravity, velocity zero) while no floor lies under
+  its feet and releases it onto its default movement mode once one does; a free character is held again when its floor
+  goes with the terrain's collision (a voxel chunk at its feet has none). A floor gone over cooked terrain is a real fall
+  and is left alone. The probe sweeps most of the capsule's radius down through world-static and world-dynamic objects
+  (voxel collision; tiles, the elevator's car, crates), so a tile floor is a floor from the start: a first version that
+  read world-static objects only held the tile-dressed boss until the rock under its tiles cooked. `APOIDungeonObjective`
+  polls it for the boss every 0.25 s.
+- Game module: `vox.TPRoom` holds the player the same way (`UVoxelDebugSubsystem::TeleportPawnToFloor`).
+- The tile-dressed stamp (`CarveOnly`) is unchanged: the same seal, written the same way.
+
+**Tests.**
+
+| Test | What it checks | Result |
+|------|------|------|
+| `Dungeon.Stamp.VoxelLining` | The demo's numbers (cell 400, voxel 75) with `WallThickness` 3 and 1, an 8 × 8 × 2 dungeon under a plane: every sample of every room and hallway cell is air but the inner lining of its closed faces, which is solid; the jacket's other layers are solid outside every face toward rock; nothing past the jacket | 3: 21 cells, 1,185 interior samples air, 1,695 lining samples solid, 3,894 jacket samples solid, none outside. 1: the same interiors and lining, no jacket. With the old lining (3): 1,185 of 1,185 interior samples not air, 3,894 of 3,894 jacket samples not solid |
+| `Dungeon.Stamp.CarvedFloorCollision` | The same dungeon stamped under a streamed plane with collision (LOD 0), in Dual Contouring and cubic meshing: a trace down from each room and hallway cell's middle hits the floor's collision, facing up, an inner lining over the cell's bottom plane (half a voxel either way for DC; a voxel up for cubic, whose block spans its sample's voxel) | DC 21 of 21, worst 12.5 uu off; cubic 21 of 21, worst 50. With the old lining: DC 0 of 21, cubic 6 of 21, all 6 off the floor |
+| `Dungeon.Stamp.RotatedFrame` | Changed: a closed face toward rock is probed at the cell plane, between the inner lining and the jacket outside it (the old probe, the middle of a two-voxel inward lining, would sit on a one-voxel lining's edge in a rotated frame) | Unchanged otherwise; `CarveOnly` writes Phase 5's 34,008 edits, `CarveUnderground` 21,600 (14,848 with the inward lining) |
+| `VoxelWorlds.POI.DungeonFloorHold.Decide` | The hold's decisions: spawned over nothing (held), over a body cooked before the stamp's floor (held), on a tile floor over uncooked terrain (free), a floor gone with the terrain's collision (held), a real fall (free), released onto a floor | 11 rows |
+| `VoxelWorlds.POI.DungeonFloorHold.Character` | A character over uncooked terrain in a streamed world: held (`MOVE_None`), released onto a world-dynamic floor put under it, free on it over uncooked terrain, held again when it goes | Pass |
+
+Both stamp tests fail with the old inward lining. Suites: headless VoxelWorlds + VoxelWorldSave + VoxelCharacter +
+WorldClock + InteractionPlugin + Dungeon 521 of 521 (main's 517 and the four above); in the editor (D3D12) with the GPU
+tests running 520 of 521, the miss `VoxelWorlds.Meshing.MarchingCubes.Performance`'s 5 ms GPU bound (5.83 ms with a
+second editor on the machine; 9.17, 1.87 and 1.99 ms on three reruns, 4.04 in an earlier full run; no meshing code
+changed), and the 87 GPU parity lines identical to G29's by CRC. (That earlier run, in the live checks' editor, missed
+only `VoxelWorlds.POI.Planet.DungeonFrame`, which reads the catalog's dungeon type, still switched to `VoxelCarved` in
+memory there.)
+
+**Live: voxel-carved on `VoxelDemo`** (the asset's `WallThickness` 3), a fresh world: the stamp 112,991 + 4,950 voxels; the
+boss held at spawn ("no floor under it, voxel terrain not cooked") and released onto the floor 16 uu under its feet, then
+standing at z −5,250; `vox.TPRoom Boss` lands at −5,272. The rows a voxel-carved dungeon has (doors, sconces, crates,
+traps and enemies need a tile-dressed one, §19.2.5):
+
+| QA rows | Result |
+|------|------|
+| F3-01 | The elevator takes the player down to the entrance floor (z −4,456 at the capsule's centre); walking off the car, 1,300 uu across the room's voxel floor to its wall. The rooms are dark (no sconces) |
+| F3-02, F3-04 | The side room's chest (4 stacks) and the treasure chest (5, the boss key among them) open, standing on their floors (z −5,348 and −4,548) |
+| F3-07 | After the dungeon streamed out (`vox.TP 0 0 0`) and back in, both chests are open |
+| F4-01 | `vox.Objective` in the boss room: inside |
+| F4-02 | With the AI on, the boss fights from its room (7 hits; it killed the player) |
+| F4-03, F4-05 | 15 hits: "now CLEARED", 4 reward stacks, resting on the floor (z −5,336 to −5,362, unchanged 15 s later); progression 1 and 1 |
+| F4-04 | After a stream-out: cleared, no boss |
+| F5-04, F5-08 | The boss chases 356 uu across its floor, hits 7 times, goes back toward the room's centre when the player leaves; `vox.AI 0` / `1` |
+| F7-02, F7-03 | A torch lights the dark entrance room (light 1.20, 600 s) |
+| Walking away | The player 30,000 uu away: the boss held where it stood (its floor's collision gone, the boss still streamed in), not falling; back in the room the player is held until the re-cooked floor is there, then the boss is released onto it |
+
+**Live: voxel-carved on the planet**, a fresh world. Dungeon (13, 6) stamps in the pad frame (108,135 + 4,755 voxels;
+Phase 5's 112,152); the boss is held and released onto the floor 2 uu over its feet; `vox.TPRoom Boss` stands (walking,
+upright, 4,652 uu under the ground). F4-02 (5 hits), F4-03 and F4-05 (30 hits, cleared, 4 stacks resting on the floor);
+F3-04 and F3-02 (5 and 4 stacks); F3-01: the elevator down to altitude −3,216 and walking off the car both ways on the
+floor; F3-07 and F4-04 after a trip to 20°S 40°E (both chests open, "already cleared — no boss"). Dungeon (27, 0): the
+boss held and released, F4-02 and F5-04 (two hits, it stays when the player leaves); F7-02 and F7-03 with a torch. The
+capture over both worlds' runs: 7,704 and 6,353 lines, no fall-through signature.
+
+**Tile-dressed unchanged.** `VoxelDemo` with the type as the asset has it, a fresh world: the stamp 248,323 + 4,800
+voxels, 979 tile instances, 16 doors (2 boss-locked), 60 torches, 8 containers and 2 traps, 13 enemies: §19.2.4's base
+numbers exactly; the boss is never held and stands on the tiles at z −5,231; `vox.TPRoom Boss` lands on the tiles.
+
+**Observations** (not G24, not fixed):
+
+- *Stale collision along chunk faces.* In a streamed test world (DC, voxel 75, collision LOD 0) 20 of 3,185 down-traces
+  over plain terrain missed, in a voxel-wide strip beside chunk faces (x −16 beside the face at 0, y 2,388 beside 2,400);
+  all 20 hit after re-cooking every chunk once all were loaded. A chunk cooked before its +X / +Y neighbour's voxels
+  exist keeps a boundary built without them, and nothing re-cooks it when the neighbour loads. A capsule stands across
+  such a strip (the floor hold sweeps for that reason); a line trace does not. The tests' grid keeps its cells' middles
+  clear of chunk faces. Worth a finding of its own.
+- A stride-2 collision mesh (`CollisionLODLevel` 1) cracks along chunk faces even after a full re-cook (14 of 3,185, and
+  2 of 21 dungeon floors). Every world in the project cooks collision at LOD 0.
+- A world whose collision radius (`ViewDistance` / 2) is under the distance to the centre of the chunk under its viewer
+  thrashes that chunk: the decision sweep drops its collision while the path coverage re-cooks it (68,305 cooks in a
+  minute with `ViewDistance` 3,000). Real worlds are far from it (20,000 on `VoxelDemo`).
+
 ## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17)
 
 The requirements doc's optional Phase 6 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-H1
@@ -4327,10 +4443,10 @@ only) are revised by D17 and D18 below. Every decision the plan needs (D17-D24) 
 
 Not executed yet: the loose ends go first, each in its own session (as of 2026-10-18):
 
-- Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25) and G29 (§19.6).
-- Next, each with its section reserved: G30 (§19.7, an unloaded chunk's scatter stays cached), G24 (§19.8, voxel-carved
-  dungeons do not hold pawns) and G31 (§19.9, planet scatter lines do not continue across chunk faces). Phase 6's larger
-  radii shrink all of G31 but its cube-diagonal part, so it can move into P6.5 instead.
+- Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6) and G24 (§19.8).
+- Next, each with its section reserved: G30 (§19.7, an unloaded chunk's scatter stays cached) and G31 (§19.9, planet
+  scatter lines do not continue across chunk faces). Phase 6's larger radii shrink all of G31 but its cube-diagonal part,
+  so it can move into P6.5 instead.
 - Deferred, not blocking Phase 6: G14 (tooling), G16 and G25 (cosmetic), G19 (documented) and G28 (low).
 
 Bases: VoxelWorlds `2fd32fc`, UE5_PluginDev `f737a3c` (spherical Phase 5 merged). Refreshed on 2026-10-18 onto main after
