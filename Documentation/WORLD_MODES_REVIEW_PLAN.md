@@ -4063,8 +4063,9 @@ decision would fix it; it changes planet scatter, so it needs its own `Review_Pl
 
 ### 19.5 G27: scatter reads voxels only; GPU scatter extraction retired (2026-10-18)
 
-PRs: draquel/VoxelWorlds `fix/g27-gpu-scatter-boundary` on main `8edb23b` (G26 merged); the parent's gitlink and doc map on UE5_PluginDev main `74adf9f`. Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8081),
-background throttling off. `DemoSmoothWorldConfig.bUseGPUScatterExtraction` is true in the asset; the base-build runs set
+draquel/VoxelWorlds#108 (`fix/g27-gpu-scatter-boundary`, on main `8edb23b` after G26 merged); the parent's gitlink and doc
+map in draquel/UE5_PluginDev#118. Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor
+(Claudius on 8081), background throttling off. `DemoSmoothWorldConfig.bUseGPUScatterExtraction` is true in the asset; the base-build runs set
 it in memory (true for the GPU runs, false for the CPU run), never saved; the fixed build's runs left the asset as it is.
 
 **The bug.** With `bUseGPUScatterExtraction` (the demo asset's setting) a chunk meshed at LOD 0 took its surface points
