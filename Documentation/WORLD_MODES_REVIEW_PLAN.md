@@ -3924,8 +3924,8 @@ narrow the margin) moves heightmap scatter along every chunk-layer contour and n
 
 ### 19.4 G26: the voxel over a heightmap chunk's top layer (2026-10-17)
 
-PRs open (draquel/VoxelWorlds#VWPR, `fix/g26-top-face-rows`, on G23's head `c21700d`, in main since G23 merged; the
-parent's gitlink and doc map in draquel/UE5_PluginDev#PPR). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`
+PRs open (draquel/VoxelWorlds#107, `fix/g26-top-face-rows`, on G23's head `c21700d`, in main since G23 merged; the
+parent's gitlink and doc map in draquel/UE5_PluginDev#117). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`
 in a worktree editor (Claudius on 8081), background throttling off, `DemoSmoothWorldConfig.bUseGPUScatterExtraction` set
 false in memory for every run but the GPU check, never saved.
 
