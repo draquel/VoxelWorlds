@@ -4319,8 +4319,8 @@ its faces as G29 does), or share one line family across a region.
 
 ### 19.7 G30: an unloaded chunk's scatter stays cached (2026-10-18)
 
-PRs open (draquel/VoxelWorlds#VWPR, `fix/g30-scatter-cache-reload`, on main `cfd94c7`; the parent's gitlink and doc map
-in draquel/UE5_PluginDev#PARENTPR). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor
+PRs open (draquel/VoxelWorlds#111, `fix/g30-scatter-cache-reload`, on main `cfd94c7`; the parent's gitlink and doc map
+in draquel/UE5_PluginDev#121). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor
 (Claudius on 8085), background throttling off.
 
 **The bug.** `UVoxelScatterManager::RemoveChunkScatter` (called by `OnChunkUnloaded`) removed the chunk's caches with
