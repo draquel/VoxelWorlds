@@ -490,9 +490,21 @@ void UVoxelScatterRenderer::RemoveChunkInstances(const FIntVector& ChunkCoord)
 
 No rebuild is needed — instances silently return to the free list.
 
+On the manager's side (`UVoxelScatterManager::OnChunkUnloaded`) an unloaded chunk keeps no scatter state: its queued and
+in-flight work (pending queue, in-flight extraction and distance stream, deferred supplemental pass, queued exclusion
+regrow), its cleared volumes and completed types, and both caches (`RemoveChunkScatter`: the surface data and the spawn
+points). When it streams back in, its extraction is a first pass, as on its first load: the surface data is cached
+again (the distance spawn and the audits read it) and its spawn points replace nothing. Until world modes review G30 the
+two cache removals were joined by a short-circuit `||`, so a chunk with surface data kept its spawn points cached after
+unloading and its reload was taken for a supplemental pass (`WORLD_MODES_REVIEW_PLAN.md` §19.7).
+`voxel.Scatter.Digest` logs a second line, `caches:` (`ComputeCacheResidency`), that checks this: chunks with spawn
+points, with surface data, with spawn points but no surface data (0), spawn points against the renderer's instances
+(`UVoxelScatterRenderer::GetChunkInstanceCount`; the chunks that differ are logged per type, `file` writes them to
+`ScatterCaches_<world>_<time>.csv`), and spawn points that repeat another of their chunk.
+
 ### Distance Streaming Cleanup
 
-When scatter types go out of range, the manager calls `ReleaseChunkScatterType()` directly instead of the previous stale-type tracking approach. Instances are zero-scaled immediately (CullDistance already hides them at that range) and recycled when the player returns and new transforms are generated.
+When scatter types go out of range, the manager calls `ReleaseChunkScatterType()` directly instead of the previous stale-type tracking approach. Instances are zero-scaled immediately (CullDistance already hides them at that range) and recycled when the player returns and new transforms are generated. The release also drops the pair's adds still queued for the per-frame budget: a chunk submitted while the viewer was still near it (in the seconds after a teleport) can take a distance-limited type in its first pass and release it at the next check, behind the arrival's backlog. Until world modes review G30 those adds were flushed after the release into the pool for a type the chunk no longer tracked, which `RemoveChunkInstances` never released, so they stayed in the world and the chunk's reload drew the type a second time over them.
 
 ### Debug Stats
 
@@ -666,6 +678,8 @@ Game Thread:               Drain Result -> Cache -> HISM Update
 
 ### Edge Cases
 - **Chunk unloaded during async**: Result arrives, chunk not in tracking -> discarded
+- **Chunk unloaded and reloaded**: both caches were dropped on unload, so the reload's result is a first pass (cached,
+  rendered through `UpdateChunkInstances`), never appended to the chunk's earlier spawn points (G30)
 - **Edit during async**: Cleared volumes updated on game thread; stale result discarded
 - **GetPendingGenerationCount()**: Returns queued + in-flight count for "world stable" check
 - **Shutdown safety**: `TWeakObjectPtr<UVoxelScatterManager>` in lambda prevents use-after-free
