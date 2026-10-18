@@ -1455,7 +1455,10 @@ Three findings from §13.11 get IDs here:
 | G23 | Two heightmap readers of the analytic surface skip terrain conditioning: scatter's buried-chunk test (`ExtractSurfacePointsFromVoxelData` compares the chunk's top with `GetTerrainHeightAt`, not the conditioned height) and the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can flag a surface chunk as buried (no surface scatter in it) and the second puts far points at the natural height. Found in the spherical Phase 5 survey (§19), in the code; reproduced live on `VoxelDemo` (§19.3: a village's cut pad left 4,969 points of its ground underground, a PCG probe's far points a median 346 uu off the ground) | Fixed (§19.3): the extraction context carries the chunk's zones in every world mode (`FScatterExtractionContext::ConditioningZones`, the chunk manager's conditioning gatherer) and the buried-chunk test reads the generated height in all three heightmap paths; `FVoxelSurfaceQuery::SampleSurface` takes zones and the sampler gathers them over its bounds. Tests `Scatter.Conditioning.{CutPadAndRing,FilledPad,ManagerWiring}`, `PCG.FarPointsOnConditionedSurface`; the `VoxelDemo` A/B differs only in zone chunks. No `GenerationVersion` change | — |
 | G24 | A voxel-carved dungeon (`EDungeonPOIRepresentation::VoxelCarved`, the stone-lined `CarveUnderground` stamp) does not hold pawns on a smooth world: the boss falls through its room's floor at spawn, and `vox.TPRoom Boss` drops the player through the floor into the rock below (no surface inside solid rock, so no collision until a cave). Seen on the planet and on `VoxelDemo`'s plane alike, and on the base build of §19.2.4 with the same stamp (118,387 + 4,950 voxels), so it predates Phase 5. The demo's catalog dresses its dungeons with tiles (`TileMeshes`), whose floors are tile collision, so the demo is not affected. Found in the spherical Phase 5 live check (§19.2.3) | Open: a dungeon-plugin fix (the lining's floor surface and its collision on DC worlds), outside Phase 5 | — |
 | G25 | Faint straight shading lines along chunk boundaries across a flattened POI pad on a planet (the City at cell (26, 6), §19.2.3): no hole and no step, only a change in shading. Cosmetic; not yet compared with a flattened pad on the plane | Open: cosmetic, look at seam normals on flat ground | — |
-| G26 | Heightmap scatter's column scan takes the voxel above a chunk for air, so a chunk whose top face lies within 1.5 voxels under the ground makes a row of points on that face (up to 1.5 voxels under the real surface, which the chunk above extracts too), and the buried-chunk test's 1.5-voxel margin keeps them as surface: a second, sunken copy of the surface scatter along every contour where the terrain crosses a chunk layer's top, and over a whole pad that sits just above one (the Tower at (−204,430, −46,859), pad 23 uu over layer −1's top: 2,185 such points). Before G23's fix the natural height happened to bury some of them under cut pads. Found while reproducing G23 (§19.3) | Open: drop a top-face crossing when the generated surface continues above the chunk (the planet's line top already does, `ExtractSurfacePointsAlongUp`), or narrow the margin now that the analytic height matches the isosurface; changes heightmap scatter along every chunk-layer contour, so it needs its own A/B | — |
+| G26 | Heightmap scatter's column scan takes the voxel above a chunk for air, so a chunk whose top face lies within 1.5 voxels under the ground makes a row of points on that face (up to 1.5 voxels under the real surface, which the chunk above extracts too), and the buried-chunk test's 1.5-voxel margin keeps them as surface: a second, sunken copy of the surface scatter along every contour where the terrain crosses a chunk layer's top, and over a whole pad that sits just above one (the Tower at (−204,430, −46,859), pad 23 uu over layer −1's top: 2,185 such points). Before G23's fix the natural height happened to bury some of them under cut pads. Found while reproducing G23 (§19.3); reproduced over every `VoxelDemo` stop (§19.4: 9,326 copies around the Tower carrying 2,552 surface scatter spawns under the ground, 3,144 at the spawn on natural terrain) | Fixed (§19.4): within 1.5 voxels of the generated ground the voxel over a chunk's top layer is the one the generator made there, with the chunk above's edits applied (`FScatterExtractionContext::GetVoxelAboveChunk`, `AboveLayerEdits`, `UVoxelScatterManager::SetEditLayerSource`): solid drops the top voxel's crossing and covers the column, air interpolates against it. Column and cubic scans; the GPU path never had it (its interior mesh has no boundary-cell vertex, G27). Tests `Scatter.TopFace.{Contour,FlatGround,EditsAbove}`; audit `voxel.Scatter.TopFaceAudit`; the `VoxelDemo` A/B changes only chunks with a top-face row. No `GenerationVersion` change | — |
+| G27 | GPU scatter extraction has no point in a chunk's boundary cells: it reads the chunk's interior mesh, which since seam ownership leaves the cells along the chunk's boundary to the seams, so where the surface crosses a chunk's top voxel cell the GPU path makes no point (the Tower's chunk (−46, −22, −1): 81 real crossings on the CPU path, none on the GPU path; §19.4). Presumably the same in the side faces' boundary cells (not measured). With GPU extraction on (the demo asset's setting, LOD 0 only; LOD > 0 falls back to the CPU) that would be a strip without scatter along chunk boundaries. Found in §19.4 | Open: measure the side faces and how visible the gap is; extract the chunk's owned seams too, or use the CPU path everywhere (GPU extraction is also not deterministic, §19.3) | — |
+| G28 | A buried heightmap chunk's top face carries a row of underground points inside the rock: under ground more than 1.5 voxels over a chunk's top the column scan still takes the voxel above for air (a cave can open it there, so the generated height cannot decide; G26's rule stops at the band), and the buried test classifies the copy underground. Around the Tower 374,928 such points in 223 chunks, and underground-only scatter types put 306 spawn points on them inside the rock (invisible unless a cave floor lies just above); 1.5% of those crossings are real (a cave or dug floor at the boundary, 5,736). Found in §19.4 | Open, low (no visible artefact found): decide the voxel above with the cave carve at that point (the generator's cave density, analytic) or the chunk above's own data | — |
+| G29 | The planet's line top (`ExtractSurfacePointsAlongUp`) keeps a crossing whose voxel above lies outside the chunk when it is within 1.5 voxels of the analytic surface, and puts it there; where the ground continues up to about a voxel into the chunk the line came from, that chunk makes the same point, so the band where the surface crosses a chunk face gets two points (on the surface, not sunken like G26's copies: twice the scatter there). A probe over the 27 chunks around the planet scatter tests' sites (§19.4): 605 (45°), 676 (equator) and 325 (cube corner) pairs of open points from different chunks within half a voxel, 3 to 7% of the open points; none at the pole. `Scatter.Planet.DensityPerArea`'s 10% tolerance hides it | Open: decide the line's voxel above as G26 does on heightmaps (the generated surface's altitude at that voxel, the neighbour's edits); needs a planet A/B on `Review_Planet` | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -3918,3 +3921,140 @@ narrow the margin) moves heightmap scatter along every chunk-layer contour and n
   ring; cubic is terrain-only (D1), and fixing it would change generation (`GenerationVersion`).
 - The planet scatter test and the chunk manager use the renamed API (`ConditioningZones`, `SetConditioningGatherer`);
   planets behave as before (`Scatter.Planet.*` green).
+
+### 19.4 G26: the voxel over a heightmap chunk's top layer (2026-10-17)
+
+PRs open (draquel/VoxelWorlds#107, `fix/g26-top-face-rows`, on G23's head `c21700d`, in main since G23 merged; the
+parent's gitlink and doc map in draquel/UE5_PluginDev#117). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`
+in a worktree editor (Claudius on 8081), background throttling off, `DemoSmoothWorldConfig.bUseGPUScatterExtraction` set
+false in memory for every run but the GPU check, never saved.
+
+**The bug.** The voxel over a chunk's top layer is the chunk above's bottom voxel, which the chunk's own data cannot show.
+The column scan (`ExtractSurfacePointsFromVoxelData`) and the cubic scan (`ExtractSurfacePointsCubic`) took it for air.
+Where the ground continues into the chunk above, the chunk's top voxel and the voxel over it are both solid, yet the scan
+made a crossing between them: a copy of the surface on the chunk's top face, up to 1.5 voxels under the real surface,
+which the chunk above extracts. The buried-chunk test (`ChunkTop < GeneratedHeight - 1.5 * VoxelSize`) let the copy
+through as open surface wherever the ground lies within 1.5 voxels over the top: along every contour where the terrain
+crosses a chunk layer's top, and under a whole pad just above one. Where the ground lies inside the top voxel cell (the
+crossing is the real surface), interpolating against density 0 put the point up to half a voxel low.
+
+**The GPU path does not have it.** The GPU extraction (`ScatterSurfaceExtraction.usf` and `ClassifySurfacePointsUnderground`)
+reads the chunk's interior mesh, which since seam ownership has no vertex in the cells along the chunk's boundary (they
+are the seams'). Live at the Tower with GPU extraction on (the asset's setting): the chunks extracted on the GPU (LOD 0)
+have no point at all in their top voxel cell, and the chunks at LOD > 0 (the CPU fallback) match the CPU run chunk for
+chunk. The Tower's chunk (−46, −22, −1): 1,033 copies and 81 real crossings on the CPU path, neither on the GPU path. No
+copy, but no real crossing either (G27).
+
+**Tooling** (kept): `voxel.Scatter.TopFaceAudit [maxLines] [drawSeconds]` audits every cached scatter chunk's top-face row
+(the points on its top layer: inside the top voxel cell, or on the top face in cubic) against the chunk above's
+edit-merged bottom voxel over each point's column (`GetEditMergedSnapshot`):
+
+- `under`: that voxel is solid, so the point is a copy under the ground; `underSurface` counts those classified surface (G26).
+- `open`: that voxel is air (the real surface, or a cave floor).
+- Whether the generated height predicted the voxel: `bandDropReal` (in the 1.5-voxel band but the voxel is air), `deepDropReal` (deeper, but air), `keepFake` (under the top, but solid).
+- Spawn points on the top layer under the ground, by type (surface types / underground-only).
+
+It logs the chunks with the most copies with a `vox.TP` to each, writes `Saved/VoxelAudit/TopFaceAudit_<world>_<time>.csv`,
+and draws, in front of the terrain: the copies (magenta), the band's underground copies (blue) and the surface spawns under
+the ground (white).
+
+**Reproduction.** The fixed build had a temporary switch that restored the old behaviour (`voxel.Scatter.G26Legacy 1`),
+removed before the commit. With the switch on, G23's audit counted exactly G23's 2,185 at the Tower. The A/B below shows
+the switch's runs equal the G23 build's own runs.
+
+- At the Tower (−204,430, −46,859), over the 230 cached surface chunks: 9,326 copies classified surface, carrying 2,552
+  spawn points of surface types under the ground. All are in layer −1 (top Z 0, the demo's lowland), in 37 chunks. The
+  Tower's chunk alone has 1,033 copies and 681 surface spawns under the ground. Screenshots `g26_legacy_{pad,wide,top}.png`
+  (in the worktree's `Saved/Screenshots/Claudius`, not committed) show the pad filled with copies and their spawns, and
+  the copies following the Z 0 contour over the hills.
+- Every A/B stop has copies, natural terrain included: the spawn 3,144 copies (271 surface spawns under the ground), the
+  Village 7,298 (2,035), the Tower 9,250 (2,258), the second village 11,056 (1,515), the City 8,594 (349).
+- `bandDropReal` was 0 at every stop. Inside the band the generated height never calls the voxel above solid where it is
+  air (no cave, edit or dungeon reaches it in the demo), so the rule below loses no real crossing.
+- `deepDropReal` was 2,743 to 8,522: under deeper ground the voxel above is air at real cave floors on a chunk boundary.
+  That is why the rule stops at the band.
+- `keepFake` was 7 to 36: the generated height a fraction of a uu under the top while its voxel is solid. This is the
+  signed distance's rounding (solid from 0.29 uu under the sample). The rule reads the voxel's own density, so it drops
+  these too.
+
+**What changed.**
+
+- `FScatterExtractionContext::GetVoxelAboveChunk` returns the voxel over a chunk's top layer as the heightmap generator
+  makes it (`SignedDistanceToDensity` of the generated height at the chunk's top), with the chunk above's edit there
+  applied. `FScatterExtractionContext::AboveLayerEdits` holds that chunk's edits on its bottom layer, copied by
+  `UVoxelScatterManager::MakeExtractionContext` from the chunk manager's edit layers (`SetEditLayerSource`).
+- The column scan reads that voxel where the generated ground lies at most 1.5 voxels over the chunk's top (the band the
+  buried test lets through):
+  - solid: the top voxel is no surface and is dropped, and the rest of the column is covered (lower crossings underground, as before);
+  - air: the crossing interpolates against its density, as the mesher does, and the point lands on the surface (before, up to half a voxel low);
+  - deeper than the band, the buried test covers the column and a cave can open the voxel above, so it is still taken for air.
+- The cubic scan makes the same decision for the block over the top layer (sampled at the column's corner), with the band
+  judged at the corner or at the block's centre (the buried test's height).
+- The GPU path, planets and generation do not change; no `GenerationVersion` bump.
+
+Edits: the analytic height alone is edit-blind. A live player edit only clears scatter (cleared volumes, nothing regrows
+until the chunk reloads). On reload the extraction reads the chunk's edit-merged voxels and, now, the chunk above's
+bottom-layer edits. A dig through the chunk above's bottom layer exposes the lower chunk's top face, which is open
+surface again; a build over a top face that was the surface covers it. Both are tested. Deeper digs keep the buried
+test's edit-blindness, as before: a floor dug more than 1.5 voxels under the generated ground stays underground.
+
+**Tests.**
+
+| Test | What it checks | Result |
+|------|------|------|
+| `Scatter.TopFace.Contour` | Planes rising and falling through a chunk layer's top (inside the lower chunk, its top cell, the band, past it; on the falling one a column's corner lies 3 uu past the band and its centre 3 uu inside), every heightmap path over the lower chunk and the one above | Every column has exactly one open point, on the surface (0.00 uu off), and the lower chunk's top layer has no point under the band's ground. Taking the voxel above for air makes 384 copies (12 columns × 32) |
+| `Scatter.TopFace.FlatGround` | Flat ground from 0.9 voxels under the top to 3 voxels over it, every path | One open point per column, 0.00 uu off; the top cell's crossing 0.00 uu off, against 42.3 uu low with an assumed-air voxel |
+| `Scatter.TopFace.EditsAbove` | The chunk above's bottom layer dug over a patch (ground in the band) and built over a patch (ground in the top cell), every path; the manager's own pipeline with and without the edit layer source | Dug: the exposed top face is open surface (64 of 64 columns), none without the edits. Built: one open point (the build's top), two without the edits. Pipeline: 64 with the source, 0 without |
+
+Each test fails on the old behaviour. Suites: headless VoxelWorlds + VoxelWorldSave + VoxelCharacter + WorldClock + InteractionPlugin + Dungeon 512 of 512
+(G23's 509 and the three above); in the editor (D3D12) 512 of 512 with the GPU tests running (only the two retired GPU DC
+interior tests skip), the 87 GPU parity lines identical to G23's by CRC.
+
+**The fixed build on `VoxelDemo`.** At the Tower: 0 copies (9,326 before), 0 surface spawns under the ground (2,552), and
+G23's audit `edge` 0 (2,185). Screenshots `g26_fixed_{1,2,3}.png`.
+
+**A/B against the G23 behaviour.** Six runs of one script, three per behaviour, interleaved, all in the fixed build: the
+switch on for the old behaviour, off for the new. Each run: the spawn (60 s), then `vox.TP` to the Village, the Tower, the
+second village and the City with 45 s each, and at each stop streaming frozen for the per-chunk digest and both audits.
+
+- `voxel.Map.Capture 6` at the spawn: the same PNG, byte for byte, in all six runs.
+- The switch is the G23 build: the old-behaviour runs equal the G23 session's three fixed runs (§19.3) on all 809 chunk-stops
+  stable in both.
+- Within 200 m of the five stops, 788 chunk-stops are in every run. 16 differ between runs of one behaviour (capture
+  timing, as in §19.3). Of the 772 stable ones, 61 differ between the behaviours: 60 whose top-face row had copies, and
+  one, (−2, −10, −1) near the spawn, whose row had only real crossings in the top cell (they moved onto the surface; 1,239
+  → 1,236 spawn points). None for any other reason.
+
+| Stop | Stable / changed chunks | Spawn points in the stable chunks (old → new) |
+|------|------|------|
+| Spawn (natural terrain) | 173 / 8 | 15,834 → 15,563 |
+| Village | 143 / 16 | 51,569 → 49,487 |
+| Tower | 148 / 11 | 49,296 → 47,036 (its chunk 1,110 → 429) |
+| Second village | 151 / 19 | 32,946 → 31,445 |
+| City | 157 / 7 | 32,908 → 32,607 |
+
+- The 61 changed chunks lose 6,415 spawn points, and the audit counted 6,360 surface spawns under the ground in them: the
+  change is the scatter that stood on the copies. The rest comes from the audit's spawn test, which takes the nearest
+  column, and from the moved real crossings.
+- Rows that did not change: of the 247 chunks whose top-face row had only real crossings, 243 had only deep ones (cave
+  floors under deeper ground, unchanged by design). 43 chunks with copies kept the same digest because no spawn stood on a
+  copy.
+
+**G27 (new, open).** The GPU path never had the copy, but it has no point at all in a chunk's boundary cells, real
+crossings included. That is a strip without scatter wherever the surface crosses a chunk's top cell (and presumably its
+side cells, not measured) at LOD 0 with GPU extraction on, the demo asset's setting. To measure, then extract the chunk's
+owned seams too, or keep extraction on the CPU (GPU extraction is also nondeterministic).
+
+**G28 (new, open, low).** Under ground more than 1.5 voxels over a chunk's top, the voxel above is still taken for air (a
+cave can open it there, so the generated height cannot decide), so a buried chunk's whole top face carries underground
+copies inside the rock. Around the Tower: 374,928 points in 223 chunks, on which underground-only scatter puts 306 spawn
+points (inside the rock: invisible unless a cave floor lies just above). 1.5% of those crossings are real (5,736). The
+voxel above could be decided with the cave carve there (analytic) or with the chunk above's own data.
+
+**G29 (new, open): planets.** The brief named the planet's line top (`ExtractSurfacePointsAlongUp`) as the model rule. It
+drops a crossing whose voxel above lies outside the chunk only when the crossing is more than 1.5 voxels off the analytic
+surface, and otherwise puts it on that surface. So where the ground continues up to about a voxel into the chunk the line
+came from, both chunks make the point: no sunken copy, but two points on the surface. A temporary probe (not committed)
+over the planet scatter tests' 27-chunk sites counted 605 (45°), 676 (equator) and 325 (cube corner) pairs of open points
+from different chunks within half a voxel, 3 to 7% of the open points, and none at the pole. The same voxel-above
+decision would fix it; it changes planet scatter, so it needs its own `Review_Planet` A/B.
