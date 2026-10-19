@@ -283,6 +283,14 @@ every vertex's normal against 0.7, along world +Z on heightmap worlds. On a plan
 that need one (no shader includes it today). Smooth materials are triplanar on world axes, which works in any
 orientation, and read the face type only in the cubic atlas path, which planets do not use (SD3).
 
+The triplanar position is large-world safe (spherical Phase 6, WM-BP7): the triplanar custom nodes
+(`MF_TriplanarSampleAlbedoRoughness`, `MF_TriplanarSampleNormal`) take a float3, and Absolute World Position demoted to
+float is 8 uu coarse at 10^8 (streaked ground on a 1,000 km planet). `M_VoxelMaster` and `M_VoxelMaster_Fade` feed
+them a tiled position computed with LWC math nodes: Period = max(1, round(65,536 x `TriplanarScale`)) / `TriplanarScale`,
+a whole number of texture tiles, and tiled = frac(absolute world position / Period) x Period. The UV differs from the
+untiled one by whole tiles, and the nodes sample with `SampleLevel`, so the same texels are read with no seam at a
+period boundary. A new smooth master material must do the same before its position reaches a custom node.
+
 ---
 
 ## Smooth Mode: Triplanar Projection

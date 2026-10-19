@@ -248,8 +248,8 @@ the tile store and its budgets, the queue and the save blobs therefore work unch
   through `FVCPlanetMapSampler` (a 16-texel control-point grid; cells across a face edge or the rim per texel). Markers
   carry a 3D position (`FVCMapMarker::WorldLocation`, `UVCMapMarkerRegistry::OnGatherMarkersNear`); POIs reach planets in
   Phase 5, so no provider binds them yet.
-- **Saves**: the same blobs with atlas keys and version-2 overlays; `PlanetGenerationVersion` 3 refuses older planet
-  saves (D13).
+- **Saves**: the same blobs with atlas keys and version-2 overlays; `PlanetGenerationVersion` (3 since D13, 5
+  since spherical Phase 6's P6.2) refuses older planet saves.
 
 Tests: `VoxelWorlds.Map.Planet.TileKeys`, `.TileMatchesGeneration` (1,000 pixels at five sites, each the generated
 surface voxel's material or the sea), `.Exploration`, `.EditOverlay`; `VoxelCharacter.Planet.MinimapFrame`,
