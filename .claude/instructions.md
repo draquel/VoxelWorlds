@@ -131,6 +131,12 @@ never hold a value of size R in float on a planet path: altitudes and signed dis
 float position); primitives on a planet sit at their render region's origin (`FVoxelRenderRegions`) and store float
 offsets from it (scene proxy vertices, seams, water, scatter HISMs per region).
 
+A planet streams by chunk (spherical Phase 6, WM-BP8; `Features/LOD_SYSTEM.md`): `FDistanceBandLODStrategy::IsInPlanetWindow`
+keeps each chunk's surface slab (the analytic altitude range over the cube-sphere cells its corners span, ± 1.5 chunks)
+and, near the viewer, the viewer's altitude ± 2 chunks in the shell; its horizon is the distance along the ground from the
+viewer's ground point (`GetHorizonDistance`). Never clip a planet's window to the viewer's Z or measure its horizon in 3D
+from the viewer: both lost the ground under a climbing viewer (the planet's G13). LOD bands stay 3D from the viewer.
+
 Any per-chunk state `UVoxelScatterManager` keeps is dropped in `OnChunkUnloaded`, both caches included, so a chunk that
 streams back in is extracted as a first pass (world modes review G30: a short-circuit `||` once kept the spawn points
 cached and turned the reload into an append). `voxel.Scatter.Digest`'s `caches:` line shows a leftover as

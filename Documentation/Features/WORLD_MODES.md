@@ -513,13 +513,19 @@ FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const
 ```
 
 ### Streaming Window and Culling
-- **The shell window** (`FDistanceBandLODStrategy::GetPlanetShellWindow`, SP-C1): each chunk column streams the layers
-  whose chunks meet the shell widened by half a chunk, `[R - MaxTerrainDepth - ½W, R + MaxTerrainHeight + ½W]`,
-  within the view distance: one interval, or two when the column passes inside the inner radius. It covers the
-  shell at every latitude; the window it replaced was the viewer's layer ± up to 16.
-- **Shell culling**: chunks wholly inside the window's inner radius (core) or outside its outer radius (space).
-- **Horizon culling** (SP-C2): chunks farther than `√(2Rh + h²) + √(2RH + H²)` (h the viewer's altitude, H =
-  `MaxTerrainHeight`), so peaks past the viewer's own horizon still load; none for a viewer inside the planet.
+A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spherical Phase 6's WM-BP8; details in
+`LOD_SYSTEM.md`, "The Window and Culling (Spherical Planet)"):
+- **The horizon along the ground**: chunks load within the view distance of the viewer's ground point, measured along
+  the ground (the arc between the two directions from the centre at the radius of the terrain under the viewer), so a
+  climbing viewer keeps its ground disk; LOD bands stay 3D from the viewer.
+- **The surface slab**: a chunk loads when its radial extent meets the analytic surface's altitude range over the
+  cube-sphere cells its corners span, ± 1.5 chunks; near the viewer also the viewer's altitude ± 2 chunks.
+- **The shell**: the terrain's real bounds (`GetDisplacementBounds` within `[R - MaxTerrainDepth, R + MaxTerrainHeight]`)
+  widened by half a chunk; nothing outside it loads. With `bFarBandSurfaceSlabCulling` off the window is the whole shell
+  (until WM-BP8 the window was each column's crossing of the shell within the viewer's Z ± the view distance,
+  `GetPlanetShellWindow`).
+- **Horizon culling** (SP-C2): chunks farther than `√(2Rh + h²) + √(2RH + H²)` (h the viewer's altitude, H the
+  terrain's top), so peaks past the viewer's own horizon still load; none for a viewer inside the planet.
 
 ### Use Cases
 - Planetary exploration games
