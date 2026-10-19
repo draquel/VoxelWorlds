@@ -13,6 +13,7 @@
 #include "VoxelPlanetOcean.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelWorldModeFactory.h"
 #include "DistanceBandLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "ChunkRenderData.h"
@@ -454,10 +455,13 @@ bool FPlanetKillZTest::RunTest(const FString& Parameters)
 }
 
 /**
- * Spherical Phase 6 (WM-BP2, D18/D20): KillZ is safe in space. On any planet KillZ lies a chunk below the centre minus
+ * Spherical Phase 6, WM-BP2 (D18/D20): KillZ is safe in space. On any planet KillZ lies a chunk below the centre minus
  * the orbit radius (the datum plus the orbit ceiling, 3 R by default or PlanetOrbitCeiling), so a pawn held anywhere
  * around the planet up to the ceiling, the south pole included, stays above it; the world bounds carry the ceiling as
  * OrbitRadius (the outer out-of-world bound the character checks).
+ *
+ * Pure: the world mode the factory builds and ComputePlanetKillZ, up to the 1,000 km test planet. Streaming.Planet.KillZ
+ * checks that the chunk manager applies it to a real world.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetKillZSpaceTest,
 	"VoxelWorlds.Streaming.Planet.KillZSpace",
@@ -467,25 +471,14 @@ bool FPlanetKillZSpaceTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelPlanetWalkableTestUtils;
 	struct FCase { double Radius; double Ceiling; };
-	// The demo-sized planet, the Phase 6 test planets M and L, and a set ceiling.
-	const FCase Cases[] = { { 250000.0, 0.0 }, { 5.0e6, 0.0 }, { 1.0e8, 0.0 }, { 5.0e6, 2.0e6 } };
-	for (const FCase& Case : Cases)
+	auto CheckCase = [this](const FCase& Case, const FVoxelWorldBounds& Bounds, double KillZ, double ChunkWorldSize)
 	{
-		FWalkableWorld Planet(TEXT("PlanetKillZSpaceWorld"), /*bPlanet=*/true);
-		Planet.Config->WorldRadius = static_cast<float>(Case.Radius);
-		Planet.Config->WaterRadius = static_cast<float>(Case.Radius - 1000.0);
-		Planet.Config->PlanetOrbitCeiling = static_cast<float>(Case.Ceiling);
-		AWorldSettings* Settings = Planet.World->GetWorldSettings();
-		Settings->KillZ = -1048575.0f;
-		Planet.Start();
-
-		const FVoxelWorldBounds Bounds = Planet.Manager->GetWorldBounds();
 		const double Ceiling = Case.Ceiling > 0.0 ? Case.Ceiling : 3.0 * Case.Radius;
-		AddInfo(FString::Printf(TEXT("R %.0f, ceiling %.0f: orbit radius %.0f, KillZ %.0f"), Case.Radius, Ceiling, Bounds.OrbitRadius, Settings->KillZ));
+		AddInfo(FString::Printf(TEXT("R %.0f, ceiling %.0f: orbit radius %.0f, KillZ %.0f"), Case.Radius, Ceiling, Bounds.OrbitRadius, KillZ));
 		TestTrue(TEXT("The bounds carry the orbit radius (datum + ceiling)"), FMath::IsNearlyEqual(Bounds.OrbitRadius, Case.Radius + Ceiling, 1.0));
 		const double Lowest = Bounds.Center.Z - Bounds.OrbitRadius;
-		TestTrue(TEXT("KillZ lies under the planet's whole world"), static_cast<double>(Settings->KillZ) <= Lowest - Planet.Config->GetChunkWorldSize() + 1.0);
-		TestTrue(TEXT("KillZ never rises above the engine default"), Settings->KillZ <= -1048575.0f);
+		TestTrue(TEXT("KillZ lies under the planet's whole world"), KillZ <= Lowest - ChunkWorldSize + 1.0);
+		TestTrue(TEXT("KillZ never rises above the engine default"), KillZ <= -1048575.0);
 
 		// Held over the south pole at 2 R (or the ceiling, if lower) and just under the ceiling: above KillZ, inside the
 		// orbit radius.
@@ -493,10 +486,25 @@ bool FPlanetKillZSpaceTest::RunTest(const FString& Parameters)
 		for (const double Altitude : Altitudes)
 		{
 			const FVector South = Bounds.Center - FVector::UpVector * (Case.Radius + Altitude);
-			TestTrue(*FString::Printf(TEXT("%.0f over the south pole is above KillZ"), Altitude), South.Z > static_cast<double>(Settings->KillZ));
+			TestTrue(*FString::Printf(TEXT("%.0f over the south pole is above KillZ"), Altitude), South.Z > KillZ);
 			TestTrue(*FString::Printf(TEXT("%.0f over the south pole is inside the orbit radius"), Altitude),
 				FVector::Dist(South, Bounds.Center) <= Bounds.OrbitRadius);
 		}
+	};
+
+	// The demo-sized planet, the 2,000 km planet of Streaming.Planet.KillZ, the Phase 6 test planets M and L, and a set
+	// ceiling: the factory's world mode and the pure KillZ.
+	const FCase Pure[] = { { 250000.0, 0.0 }, { 2.0e6, 0.0 }, { 5.0e6, 0.0 }, { 1.0e8, 0.0 }, { 5.0e6, 2.0e6 } };
+	for (const FCase& Case : Pure)
+	{
+		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+		Config->WorldMode = EWorldMode::SphericalPlanet;
+		Config->WorldOrigin = FVector(0.0, 0.0, 700.0);
+		Config->WorldRadius = static_cast<float>(Case.Radius);
+		Config->PlanetOrbitCeiling = static_cast<float>(Case.Ceiling);
+		const FVoxelWorldBounds Bounds = FVoxelWorldModeFactory::Create(*Config)->GetWorldBounds();
+		CheckCase(Case, Bounds, UVoxelChunkManager::ComputePlanetKillZ(-1048575.0, Bounds, Config->GetChunkWorldSize()),
+			Config->GetChunkWorldSize());
 	}
 	return true;
 }
