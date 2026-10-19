@@ -65,6 +65,13 @@ struct VOXELCORE_API FVoxelWorldBounds
 	UPROPERTY(BlueprintReadOnly, Category = "Voxel|World")
 	float MaxZ = 0.0f;
 
+	/**
+	 * Shell: the outer out-of-world bound, a distance from Center (the datum radius plus the planet's orbit ceiling,
+	 * spherical Phase 6): a pawn farther out has left the world, and KillZ sits below it. 0 for the other shapes
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Voxel|World")
+	double OrbitRadius = 0.0;
+
 	/** @return True unless the world is unbounded */
 	bool IsBounded() const { return Shape != EVoxelWorldBoundsShape::Unbounded; }
 

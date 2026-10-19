@@ -571,15 +571,4 @@ struct VOXELCORE_API FChunkDescriptor
 	{
 		return sizeof(FChunkDescriptor) + VoxelData.GetAllocatedSize() + CompressedVoxelData.GetAllocatedSize();
 	}
-
-	/** Unique identifier combining coords and LOD */
-	FORCEINLINE uint64 GetUniqueID() const
-	{
-		// Pack coords (16 bits each, signed) and LOD (8 bits) into 64 bits
-		uint64 X = static_cast<uint16>(ChunkCoord.X);
-		uint64 Y = static_cast<uint16>(ChunkCoord.Y);
-		uint64 Z = static_cast<uint16>(ChunkCoord.Z);
-		uint64 LOD = static_cast<uint8>(LODLevel);
-		return (X) | (Y << 16) | (Z << 32) | (LOD << 48);
-	}
 };

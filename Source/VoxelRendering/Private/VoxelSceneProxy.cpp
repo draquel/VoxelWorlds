@@ -15,6 +15,8 @@
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalRenderResources.h"
 
+#include <atomic>
+
 // ==================== Console Variables ====================
 
 // Global debug mode variable (declared extern in VoxelLocalVertexFactory.h)
@@ -828,6 +830,16 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 		}
 	}
 
+	// The bench's batch columns (spherical Phase 6, WM-BP3).
+	{
+		FVoxelBatchCounters::FCounts Counts;
+		Counts.Drawn = TotalMeshesAdded;
+		Counts.SkippedInvisible = SkippedInvisible;
+		Counts.SkippedFrustum = SkippedFrustum;
+		Counts.SkippedOverLimit = SkippedOverLimit;
+		FVoxelBatchCounters::Add(Counts);
+	}
+
 	// Debug logging (every 60 frames)
 	static int32 LogCounter = 0;
 	LogCounter++;
@@ -837,6 +849,32 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 		UE_LOG(LogVoxelRendering, Log, TEXT("GetDynamicMeshElements: Added %d meshes (limit=%d, water=%d), Skipped: %d invisible, %d frustum, %d over-limit"),
 			TotalMeshesAdded, MaxMeshBatchesPerFrame, WaterTileRenderData.Num(), SkippedInvisible, SkippedFrustum, SkippedOverLimit);
 	}
+}
+
+namespace
+{
+	std::atomic<int32> GVoxelBatchesDrawn{0};
+	std::atomic<int32> GVoxelBatchesSkippedInvisible{0};
+	std::atomic<int32> GVoxelBatchesSkippedFrustum{0};
+	std::atomic<int32> GVoxelBatchesSkippedOverLimit{0};
+}
+
+void FVoxelBatchCounters::Add(const FCounts& Counts)
+{
+	GVoxelBatchesDrawn.fetch_add(Counts.Drawn, std::memory_order_relaxed);
+	GVoxelBatchesSkippedInvisible.fetch_add(Counts.SkippedInvisible, std::memory_order_relaxed);
+	GVoxelBatchesSkippedFrustum.fetch_add(Counts.SkippedFrustum, std::memory_order_relaxed);
+	GVoxelBatchesSkippedOverLimit.fetch_add(Counts.SkippedOverLimit, std::memory_order_relaxed);
+}
+
+FVoxelBatchCounters::FCounts FVoxelBatchCounters::Consume()
+{
+	FCounts Counts;
+	Counts.Drawn = GVoxelBatchesDrawn.exchange(0, std::memory_order_relaxed);
+	Counts.SkippedInvisible = GVoxelBatchesSkippedInvisible.exchange(0, std::memory_order_relaxed);
+	Counts.SkippedFrustum = GVoxelBatchesSkippedFrustum.exchange(0, std::memory_order_relaxed);
+	Counts.SkippedOverLimit = GVoxelBatchesSkippedOverLimit.exchange(0, std::memory_order_relaxed);
+	return Counts;
 }
 
 FPrimitiveViewRelevance FVoxelSceneProxy::GetViewRelevance(const FSceneView* View) const

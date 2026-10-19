@@ -164,7 +164,7 @@ static TAutoConsoleVariable<int32> CVarStreamMaxAsyncGenTasks(
 static TAutoConsoleVariable<int32> CVarStreamSpeedAdaptive(
 	TEXT("voxel.Stream.SpeedAdaptive"),
 	1,
-	TEXT("Auto-raise the per-frame load budget with viewer horizontal speed so the load front leads "
+	TEXT("Auto-raise the per-frame load budget with viewer speed (horizontal; 3D on a planet) so the load front leads "
 	     "during fast traversal (idle stays at the configured budget). 0 = disable. "
 	     "Covers realistic fast movement; extreme speeds (~40 m/s+) still need forward-biased generation."),
 	ECVF_Default);
@@ -414,11 +414,11 @@ int32 UVoxelChunkManager::ResolveMaxLoadPerFrame() const
 	int32 Budget = (CvarOverride > 0) ? CvarOverride : ConfigBase;
 
 	// Speed-adaptive: the faster the viewer moves, the further the load front must lead, so raise the
-	// per-frame budget with horizontal speed (~+1 chunk/frame per 128 uu/s). Idle stays at ConfigBase.
-	// Realistic fast movement is covered; extreme speeds still need forward-biased generation.
+	// per-frame budget with the viewer's speed (~+1 chunk/frame per 128 uu/s; see ViewerLoadSpeed). Idle stays at
+	// ConfigBase. Realistic fast movement is covered; extreme speeds still need forward-biased generation.
 	if (CVarStreamSpeedAdaptive.GetValueOnGameThread() != 0)
 	{
-		const int32 SpeedBudget = ConfigBase + FMath::CeilToInt(ViewerHorizSpeed / 128.0f);
+		const int32 SpeedBudget = ConfigBase + FMath::CeilToInt(ViewerLoadSpeed / 128.0f);
 		Budget = FMath::Max(Budget, SpeedBudget);
 	}
 
@@ -552,13 +552,16 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		MeshRenderer->SetViewerPosition(CurrentViewerPosition);
 	}
 
-	// Track viewer HORIZONTAL speed for the speed-adaptive load budget (ResolveMaxLoadPerFrame).
-	// Smoothed so a teleport spike doesn't blow the budget out for a frame.
+	// Track the viewer's speed for the speed-adaptive load budget (ResolveMaxLoadPerFrame): horizontal in heightmap
+	// worlds (their window is a column per XY), 3D on a planet (its window is a shell around the viewer, so a climb at a
+	// pole or a flight north streams as much as a walk east; spherical Phase 6, WM-BP2). Smoothed so a teleport spike
+	// doesn't blow the budget out for a frame.
 	if (DeltaTime > SMALL_NUMBER && LastViewerPosForSpeed.X != FLT_MAX)
 	{
 		const FVector ViewerDelta = CurrentViewerPosition - LastViewerPosForSpeed;
-		const float InstHorizSpeed = FVector2D(ViewerDelta.X, ViewerDelta.Y).Size() / DeltaTime;
-		ViewerHorizSpeed = FMath::FInterpTo(ViewerHorizSpeed, InstHorizSpeed, DeltaTime, 4.0f);
+		const bool bPlanet = Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet;
+		const float InstSpeed = static_cast<float>((bPlanet ? ViewerDelta.Size() : FVector2D(ViewerDelta.X, ViewerDelta.Y).Size()) / DeltaTime);
+		ViewerLoadSpeed = FMath::FInterpTo(ViewerLoadSpeed, InstSpeed, DeltaTime, 4.0f);
 	}
 	LastViewerPosForSpeed = CurrentViewerPosition;
 
@@ -2824,7 +2827,9 @@ double UVoxelChunkManager::ComputePlanetKillZ(double CurrentKillZ, const FVoxelW
 	{
 		return CurrentKillZ;
 	}
-	const double Below = Bounds.Center.Z - Bounds.OuterRadius - FMath::Max(Margin, 0.0);
+	// The world reaches up to the orbit ceiling (spherical Phase 6): KillZ goes below that, not below the terrain.
+	const double Reach = FMath::Max(Bounds.OrbitRadius, static_cast<double>(Bounds.OuterRadius));
+	const double Below = Bounds.Center.Z - Reach - FMath::Max(Margin, 0.0);
 	return FMath::Min(CurrentKillZ, Below);
 }
 
@@ -2836,13 +2841,15 @@ void UVoxelChunkManager::ApplyPlanetKillZ()
 	{
 		return;
 	}
-	// The engine's KillZ is a Z plane: a planet bigger than it reaches would lose its southern hemisphere to it. Below the
-	// planet it never touches the surface, and bodies that leave the planet along world -Z are still removed.
-	const double NewKillZ = ComputePlanetKillZ(Settings->KillZ, WorldMode->GetWorldBounds(), Configuration->GetChunkWorldSize());
+	// The engine's KillZ is a Z plane: a planet bigger than it reaches would lose its southern hemisphere to it, and a pawn
+	// flying over that hemisphere would die at any altitude. Below the orbit ceiling it never touches the planet or the
+	// space around it, and bodies that leave the world along world -Z are still removed.
+	const FVoxelWorldBounds Bounds = WorldMode->GetWorldBounds();
+	const double NewKillZ = ComputePlanetKillZ(Settings->KillZ, Bounds, Configuration->GetChunkWorldSize());
 	if (NewKillZ < Settings->KillZ)
 	{
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet: KillZ moved from %.0f to %.0f, below the planet (centre Z %.0f, outer radius %.0f)."),
-			Settings->KillZ, NewKillZ, WorldMode->GetWorldBounds().Center.Z, WorldMode->GetWorldBounds().OuterRadius);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet: KillZ moved from %.0f to %.0f, below the planet's world (centre Z %.0f, orbit radius %.0f)."),
+			Settings->KillZ, NewKillZ, Bounds.Center.Z, Bounds.OrbitRadius);
 		Settings->KillZ = static_cast<float>(NewKillZ);
 	}
 }
@@ -4628,6 +4635,51 @@ void UVoxelChunkManager::GetBenchLoadedByLayer(TMap<int32, int32>& OutByLayer) c
 	}
 }
 
+FVoxelResidencySnapshot UVoxelChunkManager::GetResidencySnapshot() const
+{
+	FVoxelResidencySnapshot Out;
+	Out.Viewer = CurrentViewerPosition;
+	if (!Configuration || !WorldMode)
+	{
+		return Out;
+	}
+	const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	Out.bRadialLayers = bPlanet;
+	const double ChunkWorld = Configuration->GetChunkWorldSize();
+	const FVector Centre = Configuration->WorldOrigin;
+	const double Radius = Configuration->WorldRadius;
+	auto AltitudeOf = [&](const FVector& P) { return bPlanet ? FVector::Dist(P, Centre) - Radius : P.Z - Centre.Z; };
+	Out.ViewerAltitude = AltitudeOf(Out.Viewer);
+	// The viewer's ground point: on the datum sphere under it (a planet), its XY (heightmap worlds: 2D distances).
+	const FVector Ground = bPlanet ? Centre + (Out.Viewer - Centre).GetSafeNormal() * Radius : Out.Viewer;
+
+	bool bFirst = true;
+	for (const FIntVector& Coord : LoadedChunkCoords)
+	{
+		++Out.Tracked;
+		if (const FVoxelChunkState* State = ChunkStates.Find(Coord); State && State->State == EChunkState::Loaded)
+		{
+			++Out.Ready;
+			const int32 LOD = FMath::Max(0, State->LODLevel);
+			if (Out.ByLOD.Num() <= LOD)
+			{
+				Out.ByLOD.SetNumZeroed(LOD + 1);
+			}
+			++Out.ByLOD[LOD];
+		}
+		const FVector ChunkCentre = WorldMode->ChunkCoordToWorld(Coord, Configuration->ChunkSize, Configuration->VoxelSize, 0)
+			+ FVector(0.5 * ChunkWorld);
+		const double Altitude = AltitudeOf(ChunkCentre);
+		++Out.ByLayer.FindOrAdd(bPlanet ? FMath::FloorToInt32(Altitude / ChunkWorld) : Coord.Z);
+		Out.MaxDistance = FMath::Max(Out.MaxDistance, FVector::Dist(ChunkCentre, Out.Viewer));
+		Out.MaxGroundDistance = FMath::Max(Out.MaxGroundDistance, bPlanet ? FVector::Dist(ChunkCentre, Ground) : FVector::Dist2D(ChunkCentre, Ground));
+		Out.MinChunkAltitude = bFirst ? Altitude : FMath::Min(Out.MinChunkAltitude, Altitude);
+		Out.MaxChunkAltitude = bFirst ? Altitude : FMath::Max(Out.MaxChunkAltitude, Altitude);
+		bFirst = false;
+	}
+	return Out;
+}
+
 void UVoxelChunkManager::GetBenchLODBacklog(int32& OutStale, int32& OutStaleNear) const
 {
 	OutStale = 0;
@@ -6261,7 +6313,9 @@ void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)
 // Starts a deterministic traverse from the current view position and writes a report under
 // Saved/VoxelBench/. Optional key=value arguments (':' separates components and '/' separates route
 // points, because -ExecCmds splits commands on commas):
-//   dir=X:Y[:Z]            straight-path direction (default +X)
+//   dir=X:Y[:Z]            straight-path direction (default +X); dir=up: local up at the start (a climb)
+//   climb=Lat:Lon[:Alt]    planets: climb along local up from Alt (default 500) over the ground at a latitude and
+//                          longitude (spherical Phase 6; the distance is how high it climbs)
 //   start=X:Y[:Z]          start point instead of the player view; Z defaults to 500 above the surface
 //   route=X:Y[:Z]/X:Y/...  fly a polyline from the start through these points (distance 0 = whole route)
 //   orbit=CX:CY:R          fly a circle around (CX, CY) (distance 0 = one lap)
@@ -6284,8 +6338,8 @@ static bool ParseBenchVector(const FString& Value, FVector& Out, bool& bOutHasZ)
 
 static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 	TEXT("voxel.Bench.Run"),
-	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]] [start=X:Y[:Z]] ")
-	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
+	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]|up] [start=X:Y[:Z]] ")
+	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [climb=Lat:Lon[:Alt]] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		// Target the ticking game/PIE world, not the editor world the command may arrive on.
@@ -6325,6 +6379,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 		FVoxelBenchConfig Config;
 		TArray<FString> Positional;
 		bool bHasStart = false, bStartHasZ = false, bDistanceGiven = false, bHasGreatCircle = false;
+		bool bHasClimb = false, bDirUp = false;
 		FVector StartArg = FVector::ZeroVector;
 		for (const FString& Arg : Args)
 		{
@@ -6337,9 +6392,34 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			Key = Key.ToLower();
 			bool bHasZ = false;
 			FVector Vec;
-			if (Key == TEXT("dir") && ParseBenchVector(Value, Vec, bHasZ))
+			if (Key == TEXT("dir") && Value.Equals(TEXT("up"), ESearchCase::IgnoreCase))
+			{
+				bDirUp = true; // local up at the start, resolved once the start is known
+			}
+			else if (Key == TEXT("dir") && ParseBenchVector(Value, Vec, bHasZ))
 			{
 				Config.Direction = Vec;
+			}
+			else if (Key == TEXT("climb"))
+			{
+				// A climb along local up (spherical Phase 6, WM-BP3): from Alt over the generated ground at Lat, Lon.
+				TArray<FString> Parts;
+				Value.ParseIntoArray(Parts, TEXT(":"), true);
+				const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
+				if (Parts.Num() >= 2 && Cfg && Cfg->WorldMode == EWorldMode::SphericalPlanet)
+				{
+					const double Lat = FCString::Atod(*Parts[0]);
+					const double Lon = FCString::Atod(*Parts[1]);
+					const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(Lat, Lon);
+					const FVector Ground = CM->GetGeneratedSurfacePoint(Cfg->WorldOrigin + Direction * Cfg->WorldRadius);
+					FVoxelStreamingBenchmark::MakeClimb(Config, Cfg->WorldOrigin, Ground, Parts.Num() > 2 ? FCString::Atof(*Parts[2]) : 500.0f,
+						FVector2D(Lat, Lon));
+					bHasClimb = true;
+				}
+				else
+				{
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: climb=Lat:Lon[:Alt] needs a planet world and two values"));
+				}
 			}
 			else if (Key == TEXT("start") && ParseBenchVector(Value, StartArg, bStartHasZ))
 			{
@@ -6408,9 +6488,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 		// Start: an explicit start= (Z defaults to 500 above the analytic surface), else the player view
 		// (on the ground, so the leading edge stays at LOD0), else the chunk-manager owner.
 		FVector Start = FVector::ZeroVector;
-		if (bHasGreatCircle)
+		if (bHasGreatCircle || bHasClimb)
 		{
-			Start = Config.StartPosition; // the great circle's own start
+			Start = Config.StartPosition; // the great circle's or the climb's own start
 		}
 		else if (bHasStart)
 		{
@@ -6441,6 +6521,14 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			Start.Z += 500.0f; // keep slightly above the surface
 		}
 		Config.StartPosition = Start;
+		if (bDirUp && !bHasClimb)
+		{
+			// dir=up: a climb along local up at the start (radial on a planet, +Z on a heightmap world).
+			Config.Direction = CM->GetUpVectorAt(Start);
+			Config.PathType = EVoxelBenchPath::Straight;
+			Config.bClimb = true;
+			Config.ClimbLatLonAltitude = FVector(-999.0, -999.0, 0.0); // no latitude: a start= point
+		}
 		for (FVector& Point : Config.RoutePoints)
 		{
 			if (Point.Z == TNumericLimits<double>::Max()) { Point.Z = Start.Z; }

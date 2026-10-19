@@ -19,6 +19,7 @@
 #include "ChunkRenderData.h"
 #include "VoxelData.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
+#include "VoxelStreamingBenchmark.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -718,6 +719,90 @@ bool FVoxelPlanetCollisionWindingTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Every inner body face normal points away from the planet"), BodyOutward, BodyFaces);
 
 	Config->RemoveFromRoot();
+	return true;
+}
+
+/**
+ * Spherical Phase 6, WM-BP3: the bench at scale. A climb (voxel.Bench.Run climb=lat:lon[:alt]) runs along local up from
+ * its start over the ground, so its altitude grows by the distance flown at every site; and the residency the bench
+ * samples (UVoxelChunkManager::GetResidencySnapshot) on a streamed planet counts chunks per committed LOD and per radial
+ * layer (the chunk centre's altitude in chunk sizes, inside the shell), from a viewer whose altitude it reports, on the
+ * ground and two and a half chunks up. The window's size at altitude is recorded, not asserted (WM-BP8 changes it).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelBenchPlanetClimbRouteTest,
+	"VoxelWorlds.Bench.Planet.ClimbRoute",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelBenchPlanetClimbRouteTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	// The route: radial from the start, the altitude the start's plus the distance.
+	{
+		const FVector Center(1000.0, -2000.0, 500.0);
+		constexpr double Radius = 250000.0;
+		const FVector2D Sites[] = { { 90.0, 0.0 }, { 45.0, 20.0 }, { 0.0, 100.0 }, { 35.264, 45.0 }, { -60.0, 200.0 } };
+		double WorstUp = 0.0, WorstAltitude = 0.0;
+		for (const FVector2D& Site : Sites)
+		{
+			const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(Site.X, Site.Y);
+			const FVector Ground = Center + Direction * (Radius + 600.0);
+			FVoxelBenchConfig Config;
+			FVoxelStreamingBenchmark::MakeClimb(Config, Center, Ground, 500.0f, Site);
+			TestTrue(TEXT("A climb is a straight path"), Config.PathType == EVoxelBenchPath::Straight && Config.bClimb);
+			WorstUp = FMath::Max(WorstUp, 1.0 - FVector::DotProduct(Config.Direction, Direction));
+			for (const double S : { 0.0, 1000.0, 250000.0, 2.0e6 })
+			{
+				const double Altitude = FVector::Dist(Config.StartPosition + Config.Direction * S, Center) - Radius;
+				WorstAltitude = FMath::Max(WorstAltitude, FMath::Abs(Altitude - (600.0 + 500.0 + S)));
+			}
+		}
+		AddInfo(FString::Printf(TEXT("Climbs at 5 sites: direction %.2e off local up, altitude %.2e uu off start + distance"), WorstUp, WorstAltitude));
+		TestTrue(TEXT("The climb follows local up"), WorstUp < 1.0e-12);
+		TestTrue(TEXT("The altitude grows by the distance flown"), WorstAltitude < 1.0e-3);
+	}
+
+	// The residency on a streamed planet, at the pole: on the ground, then 4,000 uu up (2.5 chunks).
+	FPlanetStreamingWorld Test;
+	const FVector Up = FVector(0.02, 0.03, 1.0).GetSafeNormal();
+	Test.Start(TEXT("VoxelBenchClimbTestWorld"), Up, 300.0f);
+	TestTrue(TEXT("The pipeline settled on the ground"), Test.Settle());
+	const double GroundAltitude = Test.Manager->GetSurfacePointAt(Up).Altitude;
+	const FVoxelResidencySnapshot Ground = Test.Manager->GetResidencySnapshot();
+	int32 ByLODSum = 0;
+	for (const int32 Count : Ground.ByLOD)
+	{
+		ByLODSum += Count;
+	}
+	int32 ByLayerSum = 0, LayersOutsideShell = 0;
+	// The shell is the datum +-1,000; chunk centres lie within it plus half a chunk diagonal (1,386 uu): layers -2 to 1.
+	for (const TPair<int32, int32>& Layer : Ground.ByLayer)
+	{
+		ByLayerSum += Layer.Value;
+		LayersOutsideShell += (Layer.Key < -2 || Layer.Key > 1) ? Layer.Value : 0;
+	}
+	AddInfo(FString::Printf(TEXT("On the ground (altitude %.0f): %d tracked, %d ready (LOD 0/1/2: %d/%d/%d), %d radial layers, reach %.0f (ground %.0f), chunk altitudes %.0f to %.0f"),
+		Ground.ViewerAltitude, Ground.Tracked, Ground.Ready, Ground.ByLOD.IsValidIndex(0) ? Ground.ByLOD[0] : 0,
+		Ground.ByLOD.IsValidIndex(1) ? Ground.ByLOD[1] : 0, Ground.ByLOD.IsValidIndex(2) ? Ground.ByLOD[2] : 0, Ground.ByLayer.Num(),
+		Ground.MaxDistance, Ground.MaxGroundDistance, Ground.MinChunkAltitude, Ground.MaxChunkAltitude));
+	TestTrue(TEXT("Radial layers on a planet"), Ground.bRadialLayers);
+	TestTrue(TEXT("A neighbourhood is tracked and ready"), Ground.Tracked >= 60 && Ground.Ready > 0 && Ground.Ready <= Ground.Tracked);
+	TestEqual(TEXT("Every ready chunk counted once per LOD"), ByLODSum, Ground.Ready);
+	TestEqual(TEXT("Every tracked chunk counted once per layer"), ByLayerSum, Ground.Tracked);
+	TestEqual(TEXT("Every layer inside the shell"), LayersOutsideShell, 0);
+	TestTrue(TEXT("The viewer's altitude over the datum"), FMath::IsNearlyEqual(Ground.ViewerAltitude, GroundAltitude + 300.0, 1.0));
+	TestTrue(TEXT("The reach within the unload distance"), Ground.MaxDistance > 0.0 && Ground.MaxDistance <= 1.2 * 6000.0 + 1400.0);
+
+	const FVector High = Test.Manager->GetSurfacePointAt(Up).Position + Up * 4000.0;
+	Test.Viewer = High;
+	Test.Manager->SetBenchmarkView(true, High);
+	TestTrue(TEXT("The pipeline settled up high"), Test.Settle());
+	const FVoxelResidencySnapshot Climbed = Test.Manager->GetResidencySnapshot();
+	AddInfo(FString::Printf(TEXT("4,000 uu up (altitude %.0f): %d tracked, %d ready, %d radial layers, reach %.0f (ground %.0f)"),
+		Climbed.ViewerAltitude, Climbed.Tracked, Climbed.Ready, Climbed.ByLayer.Num(), Climbed.MaxDistance, Climbed.MaxGroundDistance));
+	TestTrue(TEXT("The climbed viewer's altitude"), FMath::IsNearlyEqual(Climbed.ViewerAltitude, GroundAltitude + 4000.0, 1.0));
+	TestTrue(TEXT("Radial layers up high"), Climbed.bRadialLayers);
+	Test.Stop();
 	return true;
 }
 

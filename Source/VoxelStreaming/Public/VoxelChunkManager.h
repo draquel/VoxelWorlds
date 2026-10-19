@@ -132,6 +132,72 @@ enum class EVoxelRemeshReason : uint8
  * @see IVoxelMeshRenderer
  * @see Documentation/ARCHITECTURE.md
  */
+/**
+ * Where the loaded chunks are, seen from the streaming viewer (spherical Phase 6, WM-BP2 / WM-BP3): vox.Planet's voxel
+ * reach and the streaming bench's residency columns. Plain data, built on demand by UVoxelChunkManager::GetResidencySnapshot.
+ */
+struct VOXELSTREAMING_API FVoxelResidencySnapshot
+{
+	/** Chunks the streaming holds (UVoxelChunkManager::GetLoadedChunkCount: loaded or on their way). */
+	int32 Tracked = 0;
+
+	/** Of them, chunks in state Loaded (meshed and drawn). */
+	int32 Ready = 0;
+
+	/** Ready chunks per committed LOD level (index = LOD). */
+	TArray<int32> ByLOD;
+
+	/**
+	 * Tracked chunks per layer. A planet's layers are radial: floor(altitude of the chunk centre over the datum / chunk
+	 * size), so layer 0 is the chunk-thick slab just above WorldRadius and -1 the one below it; a heightmap world's are
+	 * the chunk Z.
+	 */
+	TMap<int32, int32> ByLayer;
+
+	/** True when ByLayer is keyed by radial layer (a planet). */
+	bool bRadialLayers = false;
+
+	/** The viewer the distances are measured from (the streaming viewer of the last tick). */
+	FVector Viewer = FVector::ZeroVector;
+
+	/** The viewer's altitude over the datum (planet), else its Z over WorldOrigin. */
+	double ViewerAltitude = 0.0;
+
+	/** Farthest tracked chunk centre from the viewer (3D), 0 with none. */
+	double MaxDistance = 0.0;
+
+	/**
+	 * Farthest tracked chunk centre from the viewer's ground point: on a planet the point on the datum sphere under the
+	 * viewer (3D distance), on a heightmap world the viewer's XY (2D distance).
+	 */
+	double MaxGroundDistance = 0.0;
+
+	/** Lowest and highest tracked chunk centre altitude (as ViewerAltitude). */
+	double MinChunkAltitude = 0.0;
+	double MaxChunkAltitude = 0.0;
+};
+
+/**
+ * A planet's far field (spherical Phase 6, D19: the analytic surface beyond the voxel window) as the bench and vox.Planet
+ * report it. Inactive (all zero) until a far field exists.
+ */
+struct VOXELSTREAMING_API FVoxelFarFieldStats
+{
+	/** A far field is built and drawn. */
+	bool bActive = false;
+
+	/** Game-thread time of its last update (ms). */
+	float UpdateMs = 0.0f;
+
+	/** Patches in its trees, and the ones drawn (outside the voxel window's hole). */
+	int32 Patches = 0;
+	int32 DrawnPatches = 0;
+
+	/** Patch meshes built or rebuilt since the last read, and the memory its meshes hold (MB). */
+	int32 PatchesBuilt = 0;
+	float MemoryMB = 0.0f;
+};
+
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent))
 class VOXELSTREAMING_API UVoxelChunkManager : public UActorComponent
 {
@@ -516,13 +582,15 @@ public:
 	float GetSeaDepthAt(const FVector& WorldPos) const;
 
 	/**
-	 * Where KillZ has to be for a planet not to be cut by it (spherical SP-F5): one margin below the planet's lowest point
-	 * when the current KillZ lies above that, else the current value. The chunk manager applies it to the world's
-	 * settings when a planet initialises.
+	 * Where KillZ has to be for a planet and the space around it not to be cut by it (spherical SP-F5, Phase 6): one
+	 * margin below the lowest point of the planet's world, Center.Z - OrbitRadius (the orbit ceiling, so a pawn flying or
+	 * held over the southern hemisphere at any altitude up to it lives; OuterRadius when the bounds carry none), when the
+	 * current KillZ lies above that, else the current value. The chunk manager applies it to the world's settings when a
+	 * planet initialises.
 	 *
 	 * @param CurrentKillZ The world settings' KillZ
 	 * @param Bounds The planet's bounds (a shell); other shapes return CurrentKillZ
-	 * @param Margin Extra depth below the planet's lowest point
+	 * @param Margin Extra depth below the lowest point
 	 * @return The KillZ to use
 	 */
 	static double ComputePlanetKillZ(double CurrentKillZ, const FVoxelWorldBounds& Bounds, double Margin);
@@ -951,6 +1019,23 @@ public:
 	 * @param OutByLayer Receives layer -> count (reset first).
 	 */
 	void GetBenchLoadedByLayer(TMap<int32, int32>& OutByLayer) const;
+
+	/**
+	 * Where the loaded chunks are, from the streaming viewer (spherical Phase 6, WM-BP2 / WM-BP3): per committed LOD, per
+	 * layer (radial on a planet) and how far they reach. vox.Planet reports it as the voxel reach; the bench samples it.
+	 * Walks every tracked chunk.
+	 * @return The snapshot
+	 */
+	FVoxelResidencySnapshot GetResidencySnapshot() const;
+
+	/** Chunks generated this session (monotonic; the bench's generated chunks per second). */
+	int64 GetTotalChunksGenerated() const { return TotalChunksGenerated; }
+
+	/**
+	 * The planet far field's figures (spherical Phase 6, D19), for the bench and vox.Planet.
+	 * @return Inactive (all zero) while there is no far field
+	 */
+	FVoxelFarFieldStats GetFarFieldStats() const { return FVoxelFarFieldStats(); }
 
 	/** Start a deterministic streaming benchmark run (drives the streaming origin, samples each
 	 *  frame from TickComponent, and writes a CSV + JSON report on completion). */
@@ -1934,11 +2019,14 @@ private:
 	/** Latest viewer world position, cached each tick for the stale-cull distance test. */
 	FVector CurrentViewerPosition = FVector::ZeroVector;
 
-	/** Previous-tick viewer position for horizontal-speed estimation (FLT_MAX until first tick). */
+	/** Previous-tick viewer position for the speed estimate (FLT_MAX until first tick). */
 	FVector LastViewerPosForSpeed = FVector(FLT_MAX);
 
-	/** Smoothed viewer horizontal speed (uu/s); drives the speed-adaptive load budget. */
-	float ViewerHorizSpeed = 0.0f;
+	/**
+	 * Smoothed viewer speed (uu/s) that drives the speed-adaptive load budget: horizontal in heightmap worlds, 3D on a
+	 * planet, where motion along any axis (a climb at a pole, a flight north) brings in new chunks (spherical Phase 6).
+	 */
+	float ViewerLoadSpeed = 0.0f;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;

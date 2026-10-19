@@ -8,6 +8,7 @@
 #include "LocalVertexFactory.h"
 #include "VoxelLocalVertexFactory.h"
 #include "VoxelChunkGPUData.h"  // FVoxelChunkGPUData (GPU chunk buffer container)
+#include "VoxelBatchCounters.h"
 
 class UVoxelWorldComponent;
 

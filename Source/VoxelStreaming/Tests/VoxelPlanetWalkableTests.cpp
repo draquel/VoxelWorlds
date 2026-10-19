@@ -13,6 +13,7 @@
 #include "VoxelPlanetOcean.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelWorldModeFactory.h"
 #include "DistanceBandLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "ChunkRenderData.h"
@@ -407,8 +408,9 @@ bool FPlanetSeaQueriesTest::RunTest(const FString& Parameters)
 }
 
 /**
- * SP-F5: KillZ under the planet. A planet the default KillZ already clears keeps it; a larger one moves it below its
- * lowest point (the chunk manager applies it to the world); other shapes never change it.
+ * SP-F5: KillZ under the planet. A planet the default KillZ already clears keeps it; a larger one moves it below the
+ * lowest point of its world (the orbit ceiling since spherical Phase 6; the terrain's lowest point for bounds that carry
+ * no ceiling); other shapes never change it.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetKillZTest,
 	"VoxelWorlds.Streaming.Planet.KillZ",
@@ -437,7 +439,8 @@ bool FPlanetKillZTest::RunTest(const FString& Parameters)
 		AWorldSettings* Settings = Big.World->GetWorldSettings();
 		Settings->KillZ = -1048575.0f;
 		Big.Start();
-		const double Expected = -(2000000.0 + Big.Config->PlanetMaxTerrainHeight) - Big.Config->GetChunkWorldSize();
+		// The default orbit ceiling, 3 R above the datum (spherical Phase 6).
+		const double Expected = -(2000000.0 + 3.0 * 2000000.0) - Big.Config->GetChunkWorldSize();
 		AddInfo(FString::Printf(TEXT("Planet R 2,000,000: KillZ %.0f (expected %.0f)"), Settings->KillZ, Expected));
 		TestTrue(TEXT("A big planet's world gets KillZ under it"), FMath::IsNearlyEqual(static_cast<double>(Settings->KillZ), Expected, 1.0));
 	}
@@ -447,6 +450,61 @@ bool FPlanetKillZTest::RunTest(const FString& Parameters)
 		Settings->KillZ = -1048575.0f;
 		Plane.Start();
 		TestEqual(TEXT("A plane's KillZ is not touched"), Settings->KillZ, -1048575.0f);
+	}
+	return true;
+}
+
+/**
+ * Spherical Phase 6, WM-BP2 (D18/D20): KillZ is safe in space. On any planet KillZ lies a chunk below the centre minus
+ * the orbit radius (the datum plus the orbit ceiling, 3 R by default or PlanetOrbitCeiling), so a pawn held anywhere
+ * around the planet up to the ceiling, the south pole included, stays above it; the world bounds carry the ceiling as
+ * OrbitRadius (the outer out-of-world bound the character checks).
+ *
+ * Pure: the world mode the factory builds and ComputePlanetKillZ, up to the 1,000 km test planet. Streaming.Planet.KillZ
+ * checks that the chunk manager applies it to a real world.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetKillZSpaceTest,
+	"VoxelWorlds.Streaming.Planet.KillZSpace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetKillZSpaceTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetWalkableTestUtils;
+	struct FCase { double Radius; double Ceiling; };
+	auto CheckCase = [this](const FCase& Case, const FVoxelWorldBounds& Bounds, double KillZ, double ChunkWorldSize)
+	{
+		const double Ceiling = Case.Ceiling > 0.0 ? Case.Ceiling : 3.0 * Case.Radius;
+		AddInfo(FString::Printf(TEXT("R %.0f, ceiling %.0f: orbit radius %.0f, KillZ %.0f"), Case.Radius, Ceiling, Bounds.OrbitRadius, KillZ));
+		TestTrue(TEXT("The bounds carry the orbit radius (datum + ceiling)"), FMath::IsNearlyEqual(Bounds.OrbitRadius, Case.Radius + Ceiling, 1.0));
+		const double Lowest = Bounds.Center.Z - Bounds.OrbitRadius;
+		TestTrue(TEXT("KillZ lies under the planet's whole world"), KillZ <= Lowest - ChunkWorldSize + 1.0);
+		TestTrue(TEXT("KillZ never rises above the engine default"), KillZ <= -1048575.0);
+
+		// Held over the south pole at 2 R (or the ceiling, if lower) and just under the ceiling: above KillZ, inside the
+		// orbit radius.
+		const double Altitudes[] = { FMath::Min(2.0 * Case.Radius, Ceiling - 1.0), Ceiling - 1.0 };
+		for (const double Altitude : Altitudes)
+		{
+			const FVector South = Bounds.Center - FVector::UpVector * (Case.Radius + Altitude);
+			TestTrue(*FString::Printf(TEXT("%.0f over the south pole is above KillZ"), Altitude), South.Z > KillZ);
+			TestTrue(*FString::Printf(TEXT("%.0f over the south pole is inside the orbit radius"), Altitude),
+				FVector::Dist(South, Bounds.Center) <= Bounds.OrbitRadius);
+		}
+	};
+
+	// The demo-sized planet, the 2,000 km planet of Streaming.Planet.KillZ, the Phase 6 test planets M and L, and a set
+	// ceiling: the factory's world mode and the pure KillZ.
+	const FCase Pure[] = { { 250000.0, 0.0 }, { 2.0e6, 0.0 }, { 5.0e6, 0.0 }, { 1.0e8, 0.0 }, { 5.0e6, 2.0e6 } };
+	for (const FCase& Case : Pure)
+	{
+		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+		Config->WorldMode = EWorldMode::SphericalPlanet;
+		Config->WorldOrigin = FVector(0.0, 0.0, 700.0);
+		Config->WorldRadius = static_cast<float>(Case.Radius);
+		Config->PlanetOrbitCeiling = static_cast<float>(Case.Ceiling);
+		const FVoxelWorldBounds Bounds = FVoxelWorldModeFactory::Create(*Config)->GetWorldBounds();
+		CheckCase(Case, Bounds, UVoxelChunkManager::ComputePlanetKillZ(-1048575.0, Bounds, Config->GetChunkWorldSize()),
+			Config->GetChunkWorldSize());
 	}
 	return true;
 }

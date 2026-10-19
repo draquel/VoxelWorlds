@@ -227,6 +227,15 @@ bool UVoxelWorldConfiguration::ValidateConfiguration() const
 	return bValid;
 }
 
+void UVoxelWorldConfiguration::GetPlanetTerrainExtent(float& OutHighest, float& OutDeepest) const
+{
+	float MinOffset = 0.0f, MaxOffset = 0.0f, MaxScaleMult = 1.0f;
+	FVoxelBiomeSnapshot::FromConfig(BiomeConfiguration).GetContinentalnessExtremes(MinOffset, MaxOffset, MaxScaleMult);
+	const float Amplitude = 0.5f * PlanetHeightScale * MaxScaleMult;
+	OutHighest = BaseHeight + MaxOffset + Amplitude;
+	OutDeepest = Amplitude - BaseHeight - MinOffset;
+}
+
 TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 {
 	TArray<FString> Warnings;
@@ -264,9 +273,8 @@ TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 		// or core, so terrain past the shell is cut off. The bounds are FSphericalPlanetWorldMode::GetDisplacementBounds'.
 		float MinOffset = 0.0f, MaxOffset = 0.0f, MaxScaleMult = 1.0f;
 		FVoxelBiomeSnapshot::FromConfig(BiomeConfiguration).GetContinentalnessExtremes(MinOffset, MaxOffset, MaxScaleMult);
-		const float Amplitude = 0.5f * PlanetHeightScale * MaxScaleMult;
-		const float Highest = BaseHeight + MaxOffset + Amplitude;
-		const float Deepest = Amplitude - BaseHeight - MinOffset;
+		float Highest = 0.0f, Deepest = 0.0f;
+		GetPlanetTerrainExtent(Highest, Deepest);
 		if (Highest > PlanetMaxTerrainHeight)
 		{
 			Warnings.Add(FString::Printf(

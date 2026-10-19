@@ -213,7 +213,7 @@ struct VOXELCORE_API FVoxelNoiseParams
 	int32 Octaves = 6;
 
 	/** Base frequency of noise (lower = larger features) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.00001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.00000001", ClampMax = "1.0"))
 	float Frequency = 0.001f;
 
 	/** Base amplitude of noise */

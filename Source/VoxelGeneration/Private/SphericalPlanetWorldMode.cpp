@@ -44,6 +44,10 @@ FVoxelWorldBounds FSphericalPlanetWorldMode::GetWorldBounds() const
 	Bounds.HalfExtent = FVector2D(Bounds.OuterRadius, Bounds.OuterRadius);
 	Bounds.MinZ = static_cast<float>(PlanetParams.PlanetCenter.Z) - Bounds.OuterRadius;
 	Bounds.MaxZ = static_cast<float>(PlanetParams.PlanetCenter.Z) + Bounds.OuterRadius;
+	// The space above the terrain belongs to the world up to the orbit ceiling (spherical Phase 6, D18): flight and the
+	// orbit camera live there, and KillZ goes below it.
+	const double Ceiling = PlanetParams.OrbitCeiling > 0.0 ? PlanetParams.OrbitCeiling : 3.0 * PlanetParams.PlanetRadius;
+	Bounds.OrbitRadius = FMath::Max(static_cast<double>(PlanetParams.PlanetRadius) + Ceiling, static_cast<double>(Bounds.OuterRadius));
 	return Bounds;
 }
 

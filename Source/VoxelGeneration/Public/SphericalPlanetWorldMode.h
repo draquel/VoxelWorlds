@@ -24,6 +24,12 @@ struct VOXELGENERATION_API FSphericalPlanetParams
 	/** Center of the planet in world space */
 	FVector PlanetCenter = FVector::ZeroVector;
 
+	/**
+	 * How far above PlanetRadius the world reaches (spherical Phase 6): the outer out-of-world bound and KillZ's place
+	 * (FVoxelWorldBounds::OrbitRadius = PlanetRadius + OrbitCeiling). 0 = 3 x PlanetRadius. Not part of the terrain.
+	 */
+	double OrbitCeiling = 0.0;
+
 	FSphericalPlanetParams() = default;
 
 	FSphericalPlanetParams(float InRadius, const FVector& InCenter = FVector::ZeroVector)
