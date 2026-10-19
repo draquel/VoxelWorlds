@@ -1480,9 +1480,12 @@ Three findings from §13.11 get IDs here:
 | G37 | Planet POI queries by distance (claim streaming, `poi.Find`, the planet map markers) opened a cap from the chord of their range plus the origin's height, tens of degrees for an origin in the core or high above a big planet: frames of 30 s to 3 min on `Review_Planet_L`; registration generated every POI of the planet (8.2 million on L, 120 s) for a log line (§20.2) | Fixed in P6.1 (§20.2, WM-BP11's bounds brought forward): `FPOIPlacement::GetPlanetCapAngleWithin`, `GetPlanetSurveyAngle`; `POI.Planet.RegistrationBounded` | (WM-BP11) |
 | G38 | In-editor runs of the six suites lost the GPU device (`DXGI_ERROR_DEVICE_REMOVED`, `DRIVER_INTERNAL_ERROR`, seen at the creation of a 2 GB reserved buffer) at about the 128th render scene of the editor session. Tests that build worlds leave them to the garbage collector, and nothing collected garbage during a run: after a batch of 105 test worlds, 106 `UWorld`s were alive (1 after `obj gc`). The suites as they were build 124 and finished; P6.1's tests took them past the limit (every run that reached 127 scenes lost the device, on the base worktree too, and none that stayed at 126 or under). Headless runs are unaffected | Fixed in P6.1: the game module collects garbage when a test ends with 32 test worlds pending (`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`, `vox.Tests.GCEveryWorlds`); 529/529 in the editor with no device loss (§20.2) | — |
 | G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position, so across a blend zone, where the weights change slowly, it follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets (the grid tilted against local up everywhere, climate zones km across): `Review_Planet_L`'s equator and M's 45° and equator from above (also in P6.1's M shot; found in spherical Phase 6's P6.2 survey, §20.3) | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) | — |
-| G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Open: the far field's sea patches replace it | WM-BP9 |
+| G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Fixed in P6.4 (WM-BP9, §20.5): where the shell would sag past its 8 uu budget (M, L) the far field draws the sea, a section of each patch at sea level with offsets of the patch's size and an 8 x 8 grid (sag under a uu near the viewer); the small planet keeps its shell | WM-BP9 |
 | G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Open (low): snap the camera's pivot on a teleport (VoxelCharacterPlugin) | WM-BP10 |
 | G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Open: profile scatter on km relief | WM-BP13 |
+| G43 | The planet terrain steps across simplex-cell boundaries: `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`, and the heightmap noise's Simplex3D) use the 0.6 kernel radius (Gustavson's), which reaches past the simplex, so a corner's contribution drops out abruptly where a sample crosses into the next simplex. In world space the planes x = ±y, y = ±z and x = ±z through the planet centre lie on a simplex boundary in every octave at once, and they are the cube sphere's face edges: directions 10⁻⁸ rad apart across x = z differ in altitude by up to 11 uu on the small planet and 136 uu on `Review_Planet_L` (measured by `FarField.Planet.MatchesSurface`'s first build, P6.4, §20.5). Elsewhere one octave's boundary at a time gives smaller steps. The voxel terrain has them too (under a voxel on the small planet, up to about two along L's face edges) | Open (low): a 0.5 kernel is continuous but changes every planet's terrain (`PlanetGenerationVersion` bump; the heightmap Simplex3D a `GenerationVersion` bump and its parity CRCs). The far field samples a face edge's vertices exactly on the plane from both faces (`FVoxelFarFieldPatchKey::GetDirection`), so its patches meet there | — |
+| G44 | On a planet the voxel window's LOD 2 chunks light brighter than its LOD 0 and 1 chunks and the far field: from straight above `Review_Planet_L` at 45°N 20°E under a midday sun the window is a ring (the LOD 2 band) brighter than both its centre and the far field around it, and the normal buffer shows the ring's normals off the others' (whiter); the centre and the far field match. Not the far field's: the same material instance (swapping in a region component's makes no difference), the same material ids and vertex conventions (unlit the window's edge vanishes), shadows not involved; the far field's grid normals equal the planet's analytic `GetConditionedSurfacePoint` normals, and only giving it radial normals matches the ring. It shows as a brightness step along the window's edge from altitude, over land and through the sea (§20.5) | Open: the voxel terrain's normals at stride 4 on planets (the DC mesher's normal of an LOD 2 cell, the scene proxy's path); the far field keeps the analytic normals | WM-BP13 |
+| G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Open (cosmetic; the orbit view, WM-BP10, shows it most): blend the materials across a far-field quad (per-vertex material weights, or a per-patch material texture) | WM-BP10 |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -4706,7 +4709,7 @@ and from altitude, and lets the player **fly to orbit and back**. Scope decision
 only) are revised by D17 and D18 below. Every decision the plan needs (D17-D24) was taken on 2026-10-17.
 
 In progress: P6.1 (guardrails and baseline) done 2026-10-18, §20.2; P6.2 (precision) done 2026-10-19, §20.3; P6.3 (streaming
-at scale) done 2026-10-19, §20.4. The loose ends went first, each in its own session; as of
+at scale) done 2026-10-19, §20.4; P6.4 (the far field) done 2026-10-19, §20.5. The loose ends went first, each in its own session; as of
 2026-10-18 all that block it are fixed:
 
 - Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6), G30 (§19.7), G24
@@ -5354,3 +5357,209 @@ parity lines CRC-identical to P6.2's (WM-BP8 changes no generation). The heightm
 distance along the ground from the ground point, and beyond it nothing is drawn yet but the sea sphere (the climb
 shots). P6.5 (WM-BP10, WM-BP11): landing on a big planet's open sea (G36), the camera's teleport sweep (G41), and voxels
 unloading above a cut-over altitude, which also retires the near window's air for a high flyer.
+
+### 20.5 P6.4 results: the far field (2026-10-19)
+
+Bases: VoxelWorlds `ea3d454`, UE5_PluginDev `4e43e99` (P6.3 merged). Branches `feat/spherical-p6-4-far-field` (VoxelWorlds)
+and `claude/spherical-p6-4-far-field` (UE5_PluginDev). P6.4 is WM-BP9 alone: one commit with its tests, and the docs. On
+`Review_Planet_M` and `_L` the planet is now drawn to the horizon from the ground and from altitude, where P6.3's shots
+showed the voxel window's ragged edge against the sea sphere; at scale the sea is the far field's (G40 fixed); the small
+planet keeps its ocean shell and looks as before.
+
+**WM-BP9: the far field** (`FVoxelPlanetFarField`, VoxelStreaming; owned by the chunk manager on planets):
+
+- *Patches.* Six face quadtrees on the cube sphere's surface coordinate (`FVoxelCubeSphere`'s faces and tangent warp):
+  level 0 is a face, each level halves a patch along U and V (`FVoxelFarFieldPatchKey`, packed into a `uint64`). A patch
+  is 16 x 16 quads (`voxel.World.FarFieldQuads`) of the conditioned analytic surface (`GetConditionedTerrainAltitude`,
+  the zones gathered for patches up to 32 chunks in radius) drawn one voxel under it (`Sink`), every patch at every
+  level. Normals come from the grid (a ring of samples past the patch's edges, so neighbours agree), the material and
+  biome from what generation writes at the surface (`FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt`, factored out
+  of `QueryPlanetSurfaceConditions` with the same math), one material per quad (the corners' majority, vertices
+  duplicated where materials meet). Vertices follow the voxel vertex factory's conventions (UV1 = material and face type
+  against local up, colour = material and biome, the tangent cross(Z, N), UV0 the position on the normal's dominant plane
+  in voxels relative to the patch), so the terrain material draws a patch as it draws a chunk.
+- *Skirts.* Each edge hangs a skirt as deep as the worst gap to a neighbour up to three levels finer (the edge against
+  its decimations by 2, 4 and 8) or coarser (the true surface sampled eight times along each edge quad), x 1.25 plus a
+  margin; the skirt's bottom vertices are shared along the edge.
+- *Selection.* A patch splits while its error (the drawn triangles against the surface at its quad centres, and the
+  sea's chord sag) projects to more than `voxel.World.FarFieldError` pixels (2) from the camera, and merges under 0.7 of
+  it; a patch whose cap lies wholly under the camera's horizon over the lowest terrain is neither drawn nor split. A
+  patch keeps drawing until its children are built, so refining never opens a hole. Builds run on the thread pool, six
+  in flight (`voxel.World.FarFieldMaxBuilds`), the roots first and then nearest first; the game thread applies them by a
+  serial, so a stale build is dropped.
+- *The hole.* Within the window's reach of the viewer's ground point (the unload distance plus a chunk's half diagonal,
+  along the ground as WM-BP8 measures its horizons) patches split down to the band level, one to two chunks across
+  (`ComputeBandLevel`: 64 a face edge on the small planet, 1,024 on M, 16,384 on L). A band patch hides its terrain once
+  every voxel chunk its surface passes through is drawn (`SurfaceChunks`: its vertices', its quad centres' and a vertex
+  spacing around each), after the chunks' fade-in (`voxel.MeshFade.Duration` + 0.1 s). A chunk counts as drawn when it
+  is loaded, or re-meshing with its old mesh shown (`IsChunkDrawnForFarField`). A patch partly covered stays drawn a
+  voxel under the voxel surface: no gap and no overlap along the window's ragged edge, and no far-field floor in a hole
+  or a cave wherever the chunks are drawn. Patch geometry never depends on the window: the hole follows it by
+  visibility alone, re-evaluated when a chunk changes state (`ChunkStateVersion`).
+- *Residency.* One procedural mesh component per resident patch at its origin (its centre's point on the datum, in
+  double), vertices float offsets of the patch's size (the render regions' rule, D23): section 0 the terrain, 1 the sea,
+  2 its underside, shown and hidden with `SetMeshSectionVisible`. A patch hidden for 10 s releases its mesh and
+  component (its subtree draws meanwhile), except the roots and the band patches near the window's edge (beyond 0.75 of
+  the load distance), which stay built while covered so they show the moment their chunks unload. A band patch inside
+  that with every chunk drawn and no sea is never built (its 9 x 9 surface samples' chunks stand in for its mesh).
+- *The sea at scale.* Where the ocean shell's 160 segments a face edge would sag past 8 uu (`ShouldDrawSea`: from about
+  R 3.3 x 10^5, so M and L) the far field draws the sea and the chunk manager builds no shell: each patch adds a sea
+  section at sea level over its cells whose terrain lies under the sea or within two voxels of it, on an 8 x 8 grid with
+  its own UVs (wrapped per patch); the sea sections stay drawn inside the voxel window, which has no water tiles on a
+  planet, and the underside is added for patches four levels above the band and finer (seen from under the sea near
+  the viewer). The sea's sag counts in the patch's error, so it refines with the terrain.
+- *Reporting.* `voxel.World.FarField` (1; off: no far field and the ocean shell as before), `voxel.World.FarFieldStats`,
+  `vox.Planet` (patches drawn, terrain, sea, hidden by the window, builds pending and built, ms, MB), and the bench:
+  `FarFieldMs`, `FarFieldPatchN`, `FarFieldMB` and `FarFieldBuiltN` per sample, and in the JSON the far field's peak and
+  end memory, the patches built and their mean build time, and its end state.
+
+**Design choices made while building** (none changes a decision):
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Patch size | 16 x 16 quads (17² vertices), not the plan's 33² | Selection is by screen error, so smaller patches draw about as many triangles where they are needed and fewer elsewhere: on L at 45°N 112 → 41 MB and builds about 1 ms instead of 2.4-3.2 |
+| Which patches sink | Every patch a voxel under the surface, not only a band at the window's edge | The band's geometry never depends on the window, so the hole moves with no rebuild, and neighbours at different levels meet at one sink (smaller skirts) |
+| Where the hole is | Per band patch, hidden when every chunk its surface passes through is drawn | A cap test on the window's disk opens gaps where the disk's edge chunks are still loading or unloading; here a partly covered patch stays drawn under the voxel surface |
+| Covered patches' meshes | Released after 10 s hidden (roots and the edge ring kept); covered band patches inside the edge ring with no sea never built | The first live build kept every patch it had ever built (277 MB at L 45°N) |
+| The sea | The far field's at scale only; the small planet keeps the shell | The shell is within its budget there (8 uu), and its tests and look stay as they were |
+| The sea's grid | 8 x 8 cells a patch, only over the cells near or under the sea | Ocean is flat; the terrain's grid on L's pole took 190 MB, the 8 x 8 grid 88 MB before the patch-size change |
+| Face edges | The gnomonic coordinate exactly ±1 at a face edge, so both faces sample the same directions there | The planet terrain steps across the face-edge planes (G43): two faces' patches sampling 10⁻⁸ rad apart split by up to 136 uu on L |
+| Normals | The analytic surface's (the grid's) | They equal the planet's `GetConditionedSurfacePoint` normals; the voxel window's LOD 2 ring is the one that is off (G44) |
+
+**Tests** (`VoxelWorlds.FarField.Planet.*`, new; the small planet, R 250,000 with its ±6,500 relief, and a 1,000 km planet
+with `Review_Planet_L`'s noise and ±192,000 relief, with synchronous builds and a coarse view, 300 pixels a radian (a 600-pixel view at 90°) and 4 px):
+
+| Test | Check | Result |
+|------|-------|--------|
+| `Quadtree` | From 300 uu over the ground at the pole, 45°, the equator and a cube corner, the selection settles; no drawn patch over the error bound; along every edge between drawn patches (sampled at the finer side's vertices and between them) the gap is covered by the skirts; neighbours differ by at most the skirts' three levels | Settled in 10 updates (small) and 17 (1,000 km), 0.26 and 0.51 ms a build; 381-466 and 241-504 patches drawn (levels 2-6 and 3-14, 320-396 and 128-192 of them in the band); worst 3.73-3.99 px against 4, none over; 59,724-125,874 edge samples, the gaps up to 1,073 uu (small) and 75,947 uu (far, coarse levels on the 1,000 km planet), 0 past the skirt; level differences up to 2 |
+| `Hole` | A window of drawn chunks around the viewer at 45° and a cube corner: along 15,928 directions over the ground, each is drawn by a voxel chunk or by a patch's terrain, never neither; no terrain patch drawn wholly inside the window. The same after the viewer moves three chunks (no patch rebuilt), and with chunks missing near the viewer (patches drawn over them) | 0 gaps at every site and after the move; 1,740-1,786 directions drawn by voxels; 48-139 band patches hidden by the window, none drawn inside it; 490-638 built patches kept across the move, 0 rebuilt; 140-152 of 140-152 directions over the missing chunks drawn by patches |
+| `MatchesSurface` | Patches of 32 x 32 quads (the other tests use the default 16) at four levels from a face's quarter to the band at 45° and a corner: every vertex on the analytic surface less the sink (in double against the patch's origin), normals against the surface's, one material per triangle, the skirts below the true surface along each edge, the sea at its radius and its sag as reported; along the cube edge x = z the two faces' band patches share their edge vertices | 1,089 vertices a patch within 0.0002-0.0055 uu (small) and 0.0009-2.32 uu (1,000 km; the 2.3 at level 1, a patch 785 km across, against a float tolerance of 28), 0 mixed triangles, the skirts within 0.003 uu (small) and 1.7 (1,000 km, level 1) of the surface's lowest point, the sea within 0.003 and 1.8 uu, its sag as computed; the cube edge's 33 vertices within 0.0002 uu (small) and 0.0008 (1,000 km) of the other face's; 0.8-1.7 ms a build |
+| `ChunkManager` | The chunk manager's far field on a test world: an R 10⁶ planet draws the sea through the far field (no ocean shell), a component for every resident patch, each drawn section shown and each hidden one hidden; `voxel.World.FarField 0` and back; the small planet keeps its shell | R 10⁶: 1,191 patches built, 1,191 components (0 missing), 267 drawn with their sea, 924 hidden; the cvar drops and restores it; the small planet: 420 built, 270 drawn, no sea, its shell kept |
+
+The first `MatchesSurface` found the terrain stepping across the cube-sphere's face-edge planes, 10-136 uu between two
+directions 10⁻⁸ rad apart (G43): the far field now samples a face edge on its plane from both faces, and the test checks the
+two faces' vertices along x = z.
+
+**Benches.** `voxel.World.FarField` (read when the world initializes) gives the A/B in one build: on, and off (P6.3: the
+ocean shell alone; the voxel window is the same code either way). PIE on `PlanetTest` with `voxel.ConfigOverride`, a fresh
+world per run, `vox.TPLatLon 45 20` and its settle, local noon, move and look input blocked; a fresh editor and a
+throwaway run first (G14), then for each planet three repetitions of on/off × great circle/climb:
+`voxel.Bench.Run <tag> 1500 40000 gc=45:20:90 follow=300` and `voxel.Bench.Run <tag> 1500 60000 climb=45:20:200`
+(`warmup=30 catchup=90`). Means of three (catch-up per run); JSON and CSV in `Saved/VoxelBench` of the worktree, tags
+`p64_{S,M,L}_{ff,off}_{gc,climb}_r{1,2,3}`. The voxel side is the same with and without the far field (peak loaded, ready
+chunks per LOD, radial layers, LOD re-meshes, batches drawn, catch-up within the runs' spread), so the table gives the
+voxel window once per pair:
+
+| Planet, route | Peak loaded | Far field | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Systems MB peak | Far field ms P95 (max) | Patches (max) | Far field MB peak | Built (ms each) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Small, great circle | 1,305 | **on** | 16.7 / 25.0 | 6.7 | 0.17 / 0.17 / 0.17 | 747 | 0.93 (2.84) | 447 | 67 | 450 (0.66) |
+| | | off | 16.7 / 24.5 | 6.3 | 0.18 / 0.17 / 0.17 | 747 | | | | |
+| Small, climb to 60,200 | 1,260 | **on** | 16.7 / 16.9 | 2.3 | 0.17 | 643 | 0.51 (2.95) | 534 | 71 | 255 (0.65) |
+| | | off | 16.7 / 16.7 | 1.9 | 0.17 | 633 | | | | |
+| M, great circle | 1,220 | **on** | 17.7 / 36.7 | 9.5 | 0.24 / 0.23 / 0.22 | 746 | 0.90 (2.93) | 411 | 48 | 285 (0.87) |
+| | | off | 17.0 / 37.3 | 8.8 | 0.21 / 0.22 / 0.31 | 748 | | | | |
+| M, climb | 1,521 | **on** | 16.7 / 21.5 | 4.4 | 0.18 | 505 | 0.45 (1.43) | 378 | 41 | 27 (0.88) |
+| | | off | 16.7 / 21.3 | 4.1 | 0.18-0.20 | 505 | | | | |
+| L, great circle | 1,264 | **on** | 16.7 / 31.1 | 8.4 | 0.34 / 0.39 / 0.45 | 795 | 0.76 (2.04) | 456 | 49 | 194 (0.99) |
+| | | off | 16.7 / 31.7 | 8.3 | 0.38 / 0.46 / 0.47 | 795 | | | | |
+| L, climb | 1,544 | **on** | 16.7 / 22.1 | 4.8 | 0.17 | 533 | 0.50 (2.28) | 415 | 43 | 22 (1.00) |
+| | | off | 16.7 / 20.4 | 4.1 | 0.17 | 527 | | | | |
+
+- *Frame time:* the frame P95 moves within ±2% on the great circles (small +2%, M −2%, L −2%) and +1%, +1% and +8% on
+  the climbs; the frame P50 is the vsync's 16.7 ms but on M's great circle (17.7 against 17.0).
+- *The manager:* its P95 rises 0.1-0.7 ms with the far field's update inside its tick: +6%, +8% and +1% on the great
+  circles, +21% (1.9 → 2.3 ms), +7% and +17% (4.1 → 4.8) on the climbs. The small planet's and L's climbs pass §1's +15%
+  where the manager's base is smallest. The far field's own update averages 0.2-0.35 ms a frame (selection and
+  visibility over 400-530 patches; about 0.1 ms more on frames where chunks change state and the band's cover tests
+  re-run), its P95 0.45-0.93 ms and its max 1.4-3.0 ms on single frames; its builds run on the thread pool, 0.65 ms each
+  on the small planet and 0.87-1.0 on M and L.
+- *Memory:* the far field's components peak at 41-49 MB on M and L and 67-71 MB on the small planet (whose relief is
+  large against its radius), on top of the systems' figures, which do not count them.
+- *Catch-up* stays at or near the metric's floor on the small planet and M and 0.34-0.45 s on L's great circle, as in
+  P6.3 (L's 0.39 against 0.44 without; §20.4: 0.39-0.45).
+
+**Settled and D3** (a fresh world, the same teleport and settle, 75 s idle so far compression has run, then a zero-length
+bench; `p64_{S,M,L}_{ff,off}_settled`):
+
+| Planet | Far field | Loaded chunks | Voxel data MB (resident / uniform / compressed chunks) | Systems MB settled | Far field MB (patches drawn of built, hidden by the window) | Total MB | Audit |
+|---|---|---|---|---|---|---|---|
+| Small | **on** | 1,250 | 150 (122 / 80 / 1,048) | 511 | 50.5 (386 of 814, 162) | 562 | 0 |
+| | off | 1,249 | 150 (122 / 80 / 1,047) | 512 | | 512 | 0 |
+| M | **on** | 1,078 | 122 (109 / 526 / 443) | 453 | 40.2 (373 of 654, 85) | 493 | 0 |
+| | off | 1,078 | 122 (109 / 526 / 443) | 452 | | 452 | 0 |
+| L | **on** | 1,102 | 123 (111 / 537 / 454) | 473 | 41.8 (412 of 658, 53) | 515 | 0 |
+| | off | 1,102 | 123 (111 / 537 / 454) | 471 | | 471 | 0 |
+
+D3 is met with the far field counted: at most 844 MB while streaming (L's great circle, 795 + 49; at most 1.5 GB) and
+493-562 MB settled (at most 0.6 GB). The small planet's far field is the largest of the three (50 MB settled, 67-71
+streaming) and leaves its settled total 38 MB under the budget.
+
+**Live survey** (`PlanetTest` with `voxel.ConfigOverride`, the sites and cameras of §20.2-§20.4, local noon, `vox.Debug.Capture
+1` throughout; screenshots `Saved/Screenshots/Claudius/p64f_{L,M,S}_*.png` in the worktree, against P6.3's `p63_*`). From
+the ground and from 12,000 uu over it the planet is drawn to the horizon at every site of L and M, where P6.3's
+`p63_{L,M}_*_above` show the window's ragged edge against the sea sphere; on the small planet the far field fills the
+horizon past the window as well (with `voxel.World.FarField 0` the shell's sea shows past the window's edge,
+`p64f_S_pole_above_ffoff` against `_ffon`). The far field's figures at each stop (`vox.Planet`; all builds done, none
+pending):
+
+| Planet, site | Voxel window | Far-field patches drawn (sea sections) | Hidden by the window | Memory MB | Update ms | Build ms (mean) |
+|---|---|---|---|---|---|---|
+| L, 45°N 20°E | 1,103 | 412 of 658 (12) | 53 | 41.7 | 0.12 | 0.96 |
+| L, equator | 969 | 254 of 442 (43) | 42 | 28.6 | 0.10 | 0.98 |
+| L, cube corner (open sea, the pawn swims) | 1,660 | 406 of 598 (359) | 59 | 50.4 | 0.12 | 0.97 |
+| L, pole (open sea) | 1,415 | 278 of 410 (235) | 39 | 34.5 | 0.09-0.58 | 0.98 |
+| M, 45°N 20°E | 1,080 | 373 of 654 (42) | 85 | 40.2 | 0.18 | 0.87 |
+| M, equator | 1,070 | 302 of 530 (62) | 70 | 35.8 | 0.11 | 0.90 |
+| M, cube corner (the coast at 35.3°N 45.1°E) | 1,312 | 463 of 722 (295) | 100 | 55.7 | 0.15 | 0.90 |
+| M, pole (open sea) | 1,354 | 341 of 490 (283) | 73 | 42.9 | 0.11 | 0.91 |
+| Small, 46.1°N 20°E | 1,250 | 386 of 814 (shell) | 162 | 50.5 | 0.18 | 0.69 |
+| Small, equator | 1,088 | 355 of 718 | 115 | 44.2 | 0.16 | 0.70 |
+| Small, cube corner | 1,263 | 378 of 798 | 160 | 49.5 | 0.19 | 0.70 |
+| Small, pole | 1,122 | 323 of 694 | 126 | 41.8 | 0.18 | 0.70 |
+
+- *The window's edge* from the ground and from altitude: no gap and no lip where the voxel terrain meets the far field,
+  over land and through the sea, the far field's sunk band invisible under the voxel surface. What shows is a lighting
+  step: from above, the window's LOD 2 ring is brighter than both its centre and the far field (G44, the voxel terrain's;
+  `p64_dbg_topdown_lit` / `_normals`); and far-field material borders are stepped along its quads, a few km a step at the
+  horizon and most visible from orbit (G45).
+- *A dug hole near the window's edge*: on L at 45°N a shaft of seven 1,500 uu spheres dug 33,000 uu north of the pawn
+  (inside the band, where the far field's covered patches are kept built), seen from 90,000 uu over the ground
+  (`p64f_L_hole_edge`, `_close`): the shaft's walls and floor are voxel terrain, no far-field surface in it.
+- *A mountain*: the highest ground of a 2° scan on L, 27°N 259.75°E (ground 433,147 uu, 4.3 km), four views across its
+  slopes (`p64f_L_mountain_view{0,90,180,270}`): the far field's ranges continue the voxel slopes to the horizon.
+- *Climbs* at 45°N in debug flight (300, 10,000, 40,000 and 100,000 uu over the ground; `p64f_{L,M}_climb_*` and
+  `_horizon`): the drawn count barely moves (L 404, M 370-379: the band's forced splits dominate near the ground, and the
+  error bound holds the rest), memory 41.5-42.4 MB on both, the update 0.13-0.27 ms. Dropped out of flight at 10,000 uu
+  the pawn lands on cooked ground on both.
+- *From orbit* (`vox.Orbit <altitude> 0 45 20`, a fixed look-down; P6.5 owns orbit, this records what P6.4 draws): M at
+  50,000, 500,000 and 5,000,000 uu (1 R) draws 453, 438 and 370 patches (49.5, 48.9, 42.5 MB); the small planet at 50,000
+  and 250,000 (1 R) 714 and 666 (82.9, 79.6 MB: its relief is large against its radius, so more patches pass the error
+  bound). From 1 R the whole hemisphere is drawn, continents and seas (`p64f_M_orbit_5000000`, `p64f_S_orbit_250000`).
+- *Capture*: 17,270 lines over the three surveys; `feetCol=0` only on held (mode 0) and hovering (mode 5) frames, never
+  walking. The two under-feet warnings are not the terrain's: on L the pawn drowned at the pole and respawned into the
+  open sea's water column over an unloaded chunk (it fell 1,500 uu through water and swam, as in P6.3), and on the small
+  planet the pawn stood held at the pole while `vox.Orbit` moved the streaming viewer to 45°N. The small planet's pole
+  settle landed in a cave mouth 1,256 uu under the analytic surface (grounded on cooked collision).
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 539/539 headless (535 + the
+four new tests) and 539/539 in the editor with the GPU tests running (the generation parity tests,
+`Meshing.MarchingCubes.CPUvsGPU`, `GPUNoiseGeneratorAsync`, `InfinitePlane.GPUConsistency`), no device loss; the 108 GPU
+parity lines CRC-identical to P6.3's (WM-BP9 changes no generation). Heightmap worlds are untouched by construction: the
+chunk manager builds a far field only for `EWorldMode::SphericalPlanet` in a game world that draws (not a dedicated
+server), and otherwise only counts chunk-state changes (`ChunkStateVersion`); the heightmap streaming and generation
+tests pass unchanged.
+
+**New findings** (in §14.1):
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G43 | The planet terrain steps across the simplex lattice's boundaries (the 0.6 kernel radius), and the planes x = ±y, y = ±z, x = ±z, the cube sphere's face edges, are a boundary in every octave: up to 11 uu on the small planet and 136 uu on L between directions 10⁻⁸ rad apart, found by `MatchesSurface`'s first build | Open (low): a 0.5 kernel changes every planet's terrain (`PlanetGenerationVersion`); the far field samples a face edge on its plane from both faces |
+| G44 | The voxel window's LOD 2 ring lights brighter than its LOD 0/1 centre and the far field (its normals off in the normal buffer); the far field's normals are the analytic surface's | Open: the voxel terrain's normals at stride 4 on planets (WM-BP13) |
+| G45 | Far-field material borders are stepped along its quads (one material a quad), a few km a step at the horizon and every biome border a staircase from orbit | Open (cosmetic): blend materials across a quad (WM-BP10's orbit view shows it most) |
+
+**Left for the next milestones.** P6.5 (WM-BP10, WM-BP11): voxels unloading above a cut-over altitude and streaming back
+on descent with the fade (the far field already draws the planet from orbit, `p64f_M_orbit_5000000`, while the window
+keeps its ground disk under the viewer), landing on a big planet's open sea (G36), the camera's teleport sweep (G41),
+the SkyAtmosphere at scale, and the game systems at L. The far field shows no edits, caves or overhangs beyond the window
+(§20.1's "left for later"); its materials could blend (G45), and a coarse cube-sphere albedo for the world map (WM-BP11)
+can come from the same surface queries.

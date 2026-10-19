@@ -176,6 +176,17 @@ top faces outward and always shows; the underside faces inward and shows only wh
 and no rebuild. `voxel.World.PlanetOcean 0` hides it. Where the analytic sea passes through dry ground (a cave below
 sea level), the shell shows there too: it is a sphere, not a per-chunk surface.
 
+**The far field's sea (spherical Phase 6, WM-BP9).** Where the shell's 160 quads a face edge would sag more than 8 uu
+(`FVoxelPlanetFarField::ShouldDrawSea`: from about R 3.3 x 10^5, so the 50 km and 1,000 km test planets) the chunk
+manager builds no shell and the far field's patches draw the sea ([LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field"): each
+patch a section at `WaterRadius` over its cells whose terrain reaches under the sea or within two voxels of it, an 8 x 8
+grid a patch, UVs in voxels of arc along the face as the shell's (less a whole number of 1,024 per patch, so the floats
+stay small), the water material id in UV1, `WaterMeshMaterial`; an underside for the patches near the viewer (four
+levels above the band and finer), shown from under the sea. The sections refine with the quadtree (a patch's chord sag
+counts in its error), so near the viewer the sea sags under a uu, and their vertices are offsets from each patch's
+origin where the shell's were floats of size R (G40). They stay drawn over the voxel window, which has no water tiles on
+a planet, and like the shell they show in a dry cave below sea level. `voxel.World.FarField 0` brings the shell back.
+
 ---
 
 ## Water Meshing

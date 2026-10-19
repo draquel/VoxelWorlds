@@ -672,7 +672,49 @@ shells were thicker than the view distance, so their windows were the whole sphe
 viewer keeps its ground disk (`LOD.Planet.GroundHorizon`): until WM-BP8 the window was clipped to the viewer's Z ± the
 view distance and measured in 3D from the viewer, so it held nothing from about the view distance up (the planet's G13).
 A flyer inside the shell adds its near window (160 to 200 chunks of air on the 1,000 km planet); above the shell, nothing.
-Beyond the window nothing is drawn but the sea sphere until the far field (WM-BP9).
+Beyond the window the far field draws the planet (below).
+
+### The Far Field (Spherical Planet)
+
+The voxel window has one chunk size and generates every chunk at full resolution, so it cannot reach the horizon (58,000
+chunks on the ground of a 50 km planet) or orbit. Past it a planet draws its far field (spherical Phase 6, WM-BP9,
+decision D19; WORLD_MODES_REVIEW_PLAN.md §20.5): `FVoxelPlanetFarField` (VoxelStreaming), a cube-sphere quadtree of
+patches of the analytic surface. It is not an `IVoxelLODStrategy`: its patches are heightfields with their own
+primitives, and the voxel window keeps its size.
+
+- **Patches.** Six face quadtrees on the planet's surface coordinate (`FVoxelCubeSphere`'s faces and tangent warp; level 0
+  is a face, each level halves a patch along U and V, `FVoxelFarFieldPatchKey`). A patch is `PatchQuads` x `PatchQuads`
+  quads (`voxel.World.FarFieldQuads`, 16) of the conditioned analytic surface (`GetConditionedTerrainAltitude`, zones
+  gathered for patches up to 32 chunks in radius), drawn `Sink` (a voxel) under it, with normals from the grid (one ring
+  of samples past its edges), the surface material and biome generation writes (`FVoxelSurfaceQuery::
+  QueryPlanetSurfaceConditionsAt`) one per quad, and skirts deep enough to close the gap to a neighbour up to three levels
+  coarser or finer. A shared cube edge is the same direction from both faces (the gnomonic coordinate exactly +-1 there),
+  so the terrain's step across the edge's plane (G43) never splits it.
+- **Selection.** A patch splits while its geometric error (the drawn triangles against the surface at the quad centres,
+  curvature and the sea's sag included) projects to more than `voxel.World.FarFieldError` pixels (2) from the camera,
+  and stays whole under 0.7 of it; a patch wholly under the camera's horizon (the lowest terrain's sphere, plus the
+  angle its top stays in view) is neither drawn nor split. A patch keeps drawing until its subtree covers its area, so
+  the planet never shows a hole while it refines; builds run on the thread pool (`voxel.World.FarFieldMaxBuilds`, 6 in
+  flight), nearest first.
+- **The hole.** Within the window's reach of the viewer's ground point (the unload distance plus a chunk's half
+  diagonal, along the ground as the window measures its horizons) patches split down to the band level, one to two
+  chunks across (`FVoxelFarFieldSettings::ComputeBandLevel`: 64 a face edge on the 2.5 km planet, 1,024 on a 50 km one,
+  16,384 on a 1,000 km one). A band patch hides its terrain once every voxel chunk its surface passes through is drawn
+  (its vertices', its quad centres' and a vertex spacing around each: `SurfaceChunks`), after the chunks' fade-in. A
+  partly covered patch stays drawn a voxel under the voxel surface, which hides it: no gap and no overlap along the
+  window's ragged edge, and no far-field floor in a hole or cave where the chunks are drawn. Patch geometry never depends
+  on the window: the hole moves with the window by visibility alone, recomputed when a chunk changes state.
+- **Residency.** One procedural mesh component per resident patch at the patch's origin (its centre's point on the
+  datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and
+  builds again when needed (its subtree draws meanwhile), except the roots and band patches near the window's edge,
+  which are built while covered so they show the moment their chunks unload.
+- **The sea**, at scale: where the ocean shell would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
+  patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
+  planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
+  its ocean shell.
+
+`voxel.World.FarField 0` drops the far field (the ocean shell draws the sea, as before P6.4); `voxel.World.FarFieldStats`,
+`vox.Planet` and the bench's `FarFieldMs`, `FarFieldPatchN`, `FarFieldMB` and `FarFieldBuiltN` report it.
 
 ### Integration with Streaming
 

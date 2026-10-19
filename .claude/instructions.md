@@ -95,7 +95,8 @@ reaches the configured mode's bounds and frame through `UVoxelChunkManager` (`Vo
 "Is this under the water" is always `FVoxelSeaSurface` (VoxelCore): `IsBelow` / `GetDepth` against the `WaterLevel` plane
 or, on a planet, the sphere of `WaterRadius` (spherical SP-B8, SP-E1). Get it from `UVoxelChunkManager::GetSeaSurface`
 (`true` for the `WaterLevel + WorldOrigin.Z` plane game code uses) or `FVoxelSeaSurface::FromConfig`; never compare a Z
-with `WaterLevel` in new code. A planet's sea surface is the chunk manager's ocean shell (`FVoxelPlanetOcean`); its
+with `WaterLevel` in new code. A planet's sea surface is the chunk manager's ocean shell (`FVoxelPlanetOcean`), or at scale the far field's sea
+sections (`FVoxelPlanetFarField`, spherical Phase 6; `UVoxelChunkManager::DoesFarFieldDrawSea`); its
 spawn point over the terrain is `UVoxelChunkManager::GetPlanetSpawnPosition`.
 
 Surface queries go along local up (spherical Phase 4, SP-A3): `UVoxelChunkManager::QueryEditMergedSurfacePoint` (the

@@ -1084,6 +1084,19 @@ An island's far ocean (WM-E1) is not drawn by the renderer: the chunk manager bu
 components, using `IVoxelMeshRenderer::GetSurfaceMaterial()` (the material terrain is drawn with: the world component's
 atlas instance for the custom VF renderer, the dynamic instance for the PMC renderer) for its seabed.
 
+A planet's far field (spherical Phase 6, WM-BP9; [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") is not drawn by the
+renderer either: the chunk manager keeps one procedural mesh component per resident patch (`FarFieldComponents`), at the
+patch's origin in double with float offsets of the patch's size (the render regions' rule, a patch being its own region):
+section 0 the terrain with `GetSurfaceMaterial()`, 1 the sea and 2 its underside with the water material. A far-field
+terrain vertex is a voxel terrain vertex as the voxel vertex factory presents it (`FVoxelLocalVertex::FromVoxelVertex`
+with the planet's radial face up): UV1 = (material id, face type against local up), colour (material, biome, AO 0), the
+tangent cross(Z, N), UV0 the position on the normal's dominant plane in voxels (relative to the patch), one material per
+triangle (vertices duplicated where materials meet). Sections are shown and hidden with `SetMeshSectionVisible` (a render
+command), so the window's hole moving costs no proxy rebuild; a component is created when its patch is built and goes
+when the patch is released or pruned. They are about 200 bytes a vertex (the component's CPU copy and the GPU one):
+29-56 MB at the surveyed sites of the three test planets, up to 83 MB looking down on the small one from orbit
+(WORLD_MODES_REVIEW_PLAN.md §20.5).
+
 ### Interface
 
 ```cpp
