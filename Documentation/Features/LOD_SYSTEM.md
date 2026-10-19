@@ -350,16 +350,8 @@ LODBands = {
 };
 ```
 
-**Spherical Planet:**
-```cpp
-LODBands = {
-    { 0.0f,    400.0f,  0, 1,  32,  50.0f  },  // Surface detail
-    { 400.0f,  800.0f,  1, 2,  32,  50.0f  },  
-    { 800.0f,  1600.0f, 2, 4,  32,  100.0f },
-    { 1600.0f, 3200.0f, 3, 8,  64,  200.0f },
-    { 3200.0f, 6400.0f, 4, 16, 128, 400.0f },
-};
-```
+**Spherical Planet:** the same bands as any world (the test planets use the demo's), measured in 3D from the viewer
+(see "The Shell Window and Culling" below).
 
 **Island/Bowl:**
 ```cpp
@@ -626,64 +618,33 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 whose centre was within the extent plus a chunk diagonal: a ring of columns wholly past the edge, holding the old floor and
 water there. The far ocean draws the sea past what streams now (WORLD_MODES.md, "Beyond the edge").
 
-### Horizon and Shell Culling (Spherical Planet)
+### The Shell Window and Culling (Spherical Planet)
 
-For spherical planets, three types of culling are applied:
+A planet streams the chunks of its terrain shell near the viewer, with three tests (`FDistanceBandLODStrategy`):
 
-```cpp
-bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
-    const FIntVector& ChunkCoord,
-    const FLODQueryContext& Context) const
-{
-    if (WorldMode != EWorldMode::SphericalPlanet) return false;
+- **The shell window** (`GetPlanetShellWindow`, SP-C1). Per chunk column (world X, Y), the world-Z layers where the column
+  crosses the shell `[ShellWindowInnerRadius, ShellWindowOuterRadius]` around the planet centre: the terrain's radii
+  `WorldRadius - PlanetMaxTerrainDepth` and `WorldRadius + PlanetMaxTerrainHeight`, each widened by `ShellSlackChunks`
+  chunks. A column has one crossing above the centre and one below (they merge when it reaches past the inner radius), and
+  each is clipped to the viewer's world Z +- the view distance.
+- **The load horizon.** A chunk in the window loads when its centre is within the view distance of the viewer in 3D
+  (`GetHorizonDistance`; it unloads past `ViewDistance x UnloadDistanceMultiplier`), and its LOD band is its 3D distance too.
+- **The cull** (`ShouldCullBeyondHorizon`, SP-C2), a superset of the window: a chunk wholly inside the window's inner
+  radius or outside its outer one, or whose nearest point lies beyond the horizon, the sum of the two tangent distances to
+  the datum sphere, `sqrt(2Rh + h^2) + sqrt(2RH + H^2)` (`GetPlanetHorizonDistance`; R the radius, h the viewer's altitude,
+  H the shell's top: a peak shows over the horizon from that far). A viewer inside the planet's lowest terrain is not
+  culled.
 
-    const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-    const FVector ChunkCenter = Context.WorldOrigin +
-        FVector(ChunkCoord) * ChunkWorldSize +
-        FVector(ChunkWorldSize * 0.5f);
+So the window is the shell inside a sphere of the view distance around the viewer: about 1,000 chunks on the demo-sized
+planet, whatever its radius, nearly all at the coarsest band; with km-scale relief, where the shell is thicker than the
+view distance, the whole sphere (2,900 chunks on a 50 km planet with 2 km of relief; WORLD_MODES_REVIEW_PLAN.md §20.2).
+A climbing viewer loses ground: the window is the shell within the view distance of the viewer, so at an altitude near
+the view distance it holds nothing, and above it nothing is drawn but the sea sphere. Spherical Phase 6 changes this: the
+load distance is measured from the viewer's ground point, the shell is a per-chunk slab of the terrain's real bounds
+(WM-BP8), and an analytic far field draws the planet beyond the window (WM-BP9; WORLD_MODES_REVIEW_PLAN.md §20.1).
 
-    // Distance from planet center
-    const float ChunkDistFromCenter = FVector::Distance(ChunkCenter, Context.WorldOrigin);
-
-    // Inner shell culling (planet core - no terrain here)
-    const float InnerShellRadius = PlanetRadius - PlanetMaxTerrainDepth;
-    if (ChunkDistFromCenter < InnerShellRadius - ChunkWorldSize) {
-        return true;  // Deep inside planet
-    }
-
-    // Outer shell culling (empty space above terrain)
-    const float OuterShellRadius = PlanetRadius + PlanetMaxTerrainHeight;
-    if (ChunkDistFromCenter > OuterShellRadius + ChunkWorldSize) {
-        return true;  // Far above surface
-    }
-
-    // Horizon culling
-    const float ViewerDistFromCenter = FVector::Distance(Context.ViewerPosition, Context.WorldOrigin);
-    const float ViewerAltitude = ViewerDistFromCenter - PlanetRadius;
-
-    if (ViewerAltitude > 0) {
-        // Geometric horizon distance: sqrt(2*R*h + h^2)
-        const float HorizonDistance = FMath::Sqrt(
-            2.0f * PlanetRadius * ViewerAltitude +
-            ViewerAltitude * ViewerAltitude
-        );
-
-        // Add buffer for terrain height and chunk size
-        const float CullDistance = HorizonDistance +
-            PlanetMaxTerrainHeight +
-            ChunkWorldSize * UE_SQRT_3;
-
-        const float ChunkDistance = FVector::Distance(ChunkCenter, Context.ViewerPosition);
-        if (ChunkDistance > CullDistance) {
-            return true;  // Beyond horizon
-        }
-    }
-
-    return false;
-}
-```
-
-**Horizon Formula**: `√(2Rh + h²)` where R = planet radius, h = viewer altitude
+Distances are Euclidean (3D), not geodesic (along the surface): SP-C3. At the 40,000 uu view distance the two differ by
+about 0.1% on the 2.5 km planet, less on bigger ones.
 
 ### Integration with Streaming
 

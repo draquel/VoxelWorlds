@@ -40,6 +40,7 @@ FSphericalPlanetParams FVoxelWorldModeFactory::MakePlanetParams(const UVoxelWorl
 	Params.MaxTerrainHeight = Config.PlanetMaxTerrainHeight;
 	Params.MaxTerrainDepth = Config.PlanetMaxTerrainDepth;
 	Params.PlanetCenter = Config.WorldOrigin;
+	Params.OrbitCeiling = Config.PlanetOrbitCeiling;
 	return Params;
 }
 

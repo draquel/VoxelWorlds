@@ -179,6 +179,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", ClampMax = "10000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetSpawnAltitude = 500.0f;
 
+	/**
+	 * How far above the datum a planet's world reaches (spherical Phase 6, D18/D20: orbit and back): the outer
+	 * out-of-world bound sits this altitude above WorldRadius, and KillZ one chunk below the planet centre minus it, so a
+	 * pawn flying anywhere around the planet up to it is never killed by the engine's Z plane. 0 = 3 x WorldRadius (the
+	 * whole planet in view from about 2 R up). See FSphericalPlanetParams::OrbitCeiling.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	float PlanetOrbitCeiling = 0.0f;
+
 	// ==================== Water Settings ====================
 
 	/**
