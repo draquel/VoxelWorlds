@@ -82,12 +82,12 @@ bool FWorldModeFactoryParamsTest::RunTest(const FString& Parameters)
 	UVoxelWorldConfiguration* Planet = MakeConfig(EWorldMode::SphericalPlanet);
 	const FSphericalPlanetParams PlanetParams = FVoxelWorldModeFactory::MakePlanetParams(*Planet);
 	TestTrue(TEXT("Planet centre = WorldOrigin"), PlanetParams.PlanetCenter.Equals(Planet->WorldOrigin));
-	TestEqual(TEXT("Planet radius"), PlanetParams.PlanetRadius, 250000.0f);
+	TestEqual(TEXT("Planet radius"), PlanetParams.PlanetRadius, 250000.0);
 	FVoxelNoiseGenerationRequest PlanetRequest;
 	FVoxelWorldModeFactory::FillGenerationRequest(*Planet, PlanetRequest);
 	TestEqual(TEXT("Planet request height scale is PlanetHeightScale"), PlanetRequest.HeightScale, 4000.0f);
 	TestEqual(TEXT("Planet request sea level is 0 (radial terrain)"), PlanetRequest.SeaLevel, 0.0f);
-	TestEqual(TEXT("Planet request radius"), PlanetRequest.SphericalPlanetParams.PlanetRadius, 250000.0f);
+	TestEqual(TEXT("Planet request radius"), PlanetRequest.SphericalPlanetParams.PlanetRadius, 250000.0);
 	TestEqual(TEXT("Create builds a planet"), static_cast<int32>(FVoxelWorldModeFactory::Create(*Planet)->GetWorldModeType()),
 		static_cast<int32>(EWorldMode::SphericalPlanet));
 

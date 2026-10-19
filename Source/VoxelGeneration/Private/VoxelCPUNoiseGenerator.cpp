@@ -1323,10 +1323,13 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 	const FSphericalPlanetParams& PlanetParams = WorldMode.GetPlanetParams();
 	const FVector PlanetCenter = PlanetParams.PlanetCenter;
-	const float PlanetRadius = PlanetParams.PlanetRadius;
+	const double PlanetRadius = PlanetParams.PlanetRadius;
 	// The chunk origin relative to the centre, in double: the ore Rarity hash keys on it (SP-H3), as the GPU's
 	// PlanetChunkOffset does.
 	const FVector ChunkPlanetRelative = ChunkWorldPos - PlanetCenter;
+	// The sea as an altitude (WM-BP4): every comparison with the terrain is between altitudes, never between two radii of
+	// size R in float.
+	const double WaterAltitude = Request.WaterRadius - PlanetRadius;
 
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
@@ -1379,8 +1382,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					Z * VoxelSize
 				);
 
-				// Get direction from planet center for noise sampling
-				FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, PlanetCenter);
+				// The voxel relative to the centre, its distance and direction, all in double (WM-BP4)
+				const FVector PlanetRelativePos = ChunkPlanetRelative + FVector(X * VoxelSize, Y * VoxelSize, Z * VoxelSize);
+				const double DistFromCenter = PlanetRelativePos.Size();
+				const FVector Direction = DistFromCenter > UE_KINDA_SMALL_NUMBER ? PlanetRelativePos / DistFromCenter : FVector::UpVector;
 
 				// The surface along this direction: terrain noise and continentalness sampled on the datum sphere, the
 				// displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5). The sampled
@@ -1396,21 +1401,23 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				{
 					TerrainAltitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, PlanetRadius, TerrainAltitude, Request.ConditioningZones);
 				}
-				const float TerrainRadius = PlanetRadius + TerrainAltitude;
+				// The voxel's altitude above the datum, |P - C| - R in double (WM-BP4): the signed distance, the depth and
+				// the height rules all read altitudes, quantities of the relief's size, so nothing of size R cancels in
+				// float (at R 1e8 a float radius is 8 uu coarse: 13 density steps of terraces).
+				const double VoxelAltitude = DistFromCenter - PlanetRadius;
 
 				// Signed distance to the surface (with the shell's quick reject), then density
-				const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);
-				const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(DistFromCenter, TerrainRadius, PlanetParams);
+				const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistanceAtAltitude(VoxelAltitude, TerrainAltitude, PlanetParams);
 				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
 
-				// Depth below surface is radial (terrain radius - distance from center)
-				float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
+				// Depth below surface is radial (terrain altitude - voxel altitude)
+				float DepthBelowSurface = static_cast<float>((static_cast<double>(TerrainAltitude) - VoxelAltitude) / VoxelSize);
 
 				// Height-material rules read the voxel's altitude above the datum, as they read Z in the heightmap modes
 				// (SP-B2; the radius put every surface past the snow line). Caves under the sea keep their underwater
 				// minimum depth (SP-B6).
-				const float Altitude = DistFromCenter - PlanetRadius;
-				const bool bUnderwater = Request.bEnableWaterLevel && TerrainRadius < Request.WaterRadius;
+				const float Altitude = static_cast<float>(VoxelAltitude);
+				const bool bUnderwater = Request.bEnableWaterLevel && TerrainAltitude < WaterAltitude;
 
 				// Temperature and moisture are sampled like the terrain, on the datum sphere, so biomes keep their size in
 				// uu whatever the radius (SP-B1).
@@ -1444,11 +1451,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					}
 
 					// Get material considering blend weights and water level
-					// For spherical planets: underwater if terrain radius < water radius
+					// For spherical planets: underwater if the terrain's altitude is under the sea's (WM-BP4: altitudes)
 					if (Request.bEnableWaterLevel)
 					{
 						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainRadius, Request.WaterRadius);
+							Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(WaterAltitude));
 					}
 					else
 					{
@@ -1477,7 +1484,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 						BiomeConfig->GetOreVeinsForBiome(BiomeID, ApplicableOres);
 
 						uint8 OreMaterial = 0;
-						const FVector PlanetRelativePos = ChunkPlanetRelative + FVector(X * VoxelSize, Y * VoxelSize, Z * VoxelSize);
 						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial, &PlanetRelativePos))
 						{
 							MaterialID = OreMaterial;
@@ -1506,7 +1512,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				}
 				else
 				{
-					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainRadius, DepthBelowSurface * VoxelSize);
+					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainAltitude, DepthBelowSurface * VoxelSize);
 
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)

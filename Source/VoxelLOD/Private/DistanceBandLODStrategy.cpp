@@ -174,8 +174,8 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		PlanetCenter = Planet.PlanetCenter;
 
 		// The shell window (SP-C1): every chunk within ShellSlackChunks of the terrain shell, at any latitude.
-		ShellWindowInnerRadius = FMath::Max(0.0, static_cast<double>(PlanetRadius - PlanetMaxTerrainDepth) - ShellSlackChunks * ChunkWorldSize);
-		ShellWindowOuterRadius = static_cast<double>(PlanetRadius + PlanetMaxTerrainHeight) + ShellSlackChunks * ChunkWorldSize;
+		ShellWindowInnerRadius = FMath::Max(0.0, Planet.GetInnerRadius() - ShellSlackChunks * ChunkWorldSize);
+		ShellWindowOuterRadius = Planet.GetOuterRadius() + ShellSlackChunks * ChunkWorldSize;
 
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Shell culling enabled: Radius=%.0f, Height=%.0f, Depth=%.0f"),
 			PlanetRadius, PlanetMaxTerrainHeight, PlanetMaxTerrainDepth);
@@ -513,10 +513,10 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 			IslandTotalExtentX, IslandTotalExtentY,
 			IslandCenter.X, IslandCenter.Y);
 	}
-	if (WorldMode == EWorldMode::SphericalPlanet && PlanetRadius > 0.0f)
+	if (WorldMode == EWorldMode::SphericalPlanet && PlanetRadius > 0.0)
 	{
-		const float InnerRadius = PlanetRadius - PlanetMaxTerrainDepth;
-		const float OuterRadius = PlanetRadius + PlanetMaxTerrainHeight;
+		const double InnerRadius = PlanetRadius - PlanetMaxTerrainDepth;
+		const double OuterRadius = PlanetRadius + PlanetMaxTerrainHeight;
 		Info += FString::Printf(TEXT("  Shell Culling: Radius=%.0f, Shell=[%.0f - %.0f]\n"),
 			PlanetRadius, InnerRadius, OuterRadius);
 		Info += FString::Printf(TEXT("  Vertical Window: each column's crossing of radius [%.0f - %.0f], within the view distance; horizon + %.0f for peaks\n"),
@@ -1120,7 +1120,7 @@ bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
 	const FIntVector& ChunkCoord,
 	const FLODQueryContext& Context) const
 {
-	if (WorldMode != EWorldMode::SphericalPlanet || PlanetRadius <= 0.0f)
+	if (WorldMode != EWorldMode::SphericalPlanet || PlanetRadius <= 0.0)
 	{
 		return false;
 	}

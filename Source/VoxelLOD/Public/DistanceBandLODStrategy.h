@@ -509,8 +509,8 @@ protected:
 	// ==================== Spherical Planet Mode Culling ====================
 	// Cached from FVoxelWorldModeFactory::MakePlanetParams (SP-A6).
 
-	/** Cached planet radius for horizon calculations */
-	float PlanetRadius = 0.0f;
+	/** Cached planet radius for horizon calculations (double: it meets R-sized distances, WM-BP4) */
+	double PlanetRadius = 0.0;
 
 	/** Max terrain height above planet radius (for horizon buffer) */
 	float PlanetMaxTerrainHeight = 0.0f;
