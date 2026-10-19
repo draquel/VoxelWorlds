@@ -6313,7 +6313,9 @@ void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)
 // Starts a deterministic traverse from the current view position and writes a report under
 // Saved/VoxelBench/. Optional key=value arguments (':' separates components and '/' separates route
 // points, because -ExecCmds splits commands on commas):
-//   dir=X:Y[:Z]            straight-path direction (default +X)
+//   dir=X:Y[:Z]            straight-path direction (default +X); dir=up: local up at the start (a climb)
+//   climb=Lat:Lon[:Alt]    planets: climb along local up from Alt (default 500) over the ground at a latitude and
+//                          longitude (spherical Phase 6; the distance is how high it climbs)
 //   start=X:Y[:Z]          start point instead of the player view; Z defaults to 500 above the surface
 //   route=X:Y[:Z]/X:Y/...  fly a polyline from the start through these points (distance 0 = whole route)
 //   orbit=CX:CY:R          fly a circle around (CX, CY) (distance 0 = one lap)
@@ -6336,8 +6338,8 @@ static bool ParseBenchVector(const FString& Value, FVector& Out, bool& bOutHasZ)
 
 static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 	TEXT("voxel.Bench.Run"),
-	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]] [start=X:Y[:Z]] ")
-	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
+	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]|up] [start=X:Y[:Z]] ")
+	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [climb=Lat:Lon[:Alt]] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		// Target the ticking game/PIE world, not the editor world the command may arrive on.
@@ -6377,6 +6379,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 		FVoxelBenchConfig Config;
 		TArray<FString> Positional;
 		bool bHasStart = false, bStartHasZ = false, bDistanceGiven = false, bHasGreatCircle = false;
+		bool bHasClimb = false, bDirUp = false;
 		FVector StartArg = FVector::ZeroVector;
 		for (const FString& Arg : Args)
 		{
@@ -6389,9 +6392,34 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			Key = Key.ToLower();
 			bool bHasZ = false;
 			FVector Vec;
-			if (Key == TEXT("dir") && ParseBenchVector(Value, Vec, bHasZ))
+			if (Key == TEXT("dir") && Value.Equals(TEXT("up"), ESearchCase::IgnoreCase))
+			{
+				bDirUp = true; // local up at the start, resolved once the start is known
+			}
+			else if (Key == TEXT("dir") && ParseBenchVector(Value, Vec, bHasZ))
 			{
 				Config.Direction = Vec;
+			}
+			else if (Key == TEXT("climb"))
+			{
+				// A climb along local up (spherical Phase 6, WM-BP3): from Alt over the generated ground at Lat, Lon.
+				TArray<FString> Parts;
+				Value.ParseIntoArray(Parts, TEXT(":"), true);
+				const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
+				if (Parts.Num() >= 2 && Cfg && Cfg->WorldMode == EWorldMode::SphericalPlanet)
+				{
+					const double Lat = FCString::Atod(*Parts[0]);
+					const double Lon = FCString::Atod(*Parts[1]);
+					const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(Lat, Lon);
+					const FVector Ground = CM->GetGeneratedSurfacePoint(Cfg->WorldOrigin + Direction * Cfg->WorldRadius);
+					FVoxelStreamingBenchmark::MakeClimb(Config, Cfg->WorldOrigin, Ground, Parts.Num() > 2 ? FCString::Atof(*Parts[2]) : 500.0f,
+						FVector2D(Lat, Lon));
+					bHasClimb = true;
+				}
+				else
+				{
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: climb=Lat:Lon[:Alt] needs a planet world and two values"));
+				}
 			}
 			else if (Key == TEXT("start") && ParseBenchVector(Value, StartArg, bStartHasZ))
 			{
@@ -6460,9 +6488,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 		// Start: an explicit start= (Z defaults to 500 above the analytic surface), else the player view
 		// (on the ground, so the leading edge stays at LOD0), else the chunk-manager owner.
 		FVector Start = FVector::ZeroVector;
-		if (bHasGreatCircle)
+		if (bHasGreatCircle || bHasClimb)
 		{
-			Start = Config.StartPosition; // the great circle's own start
+			Start = Config.StartPosition; // the great circle's or the climb's own start
 		}
 		else if (bHasStart)
 		{
@@ -6493,6 +6521,14 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			Start.Z += 500.0f; // keep slightly above the surface
 		}
 		Config.StartPosition = Start;
+		if (bDirUp && !bHasClimb)
+		{
+			// dir=up: a climb along local up at the start (radial on a planet, +Z on a heightmap world).
+			Config.Direction = CM->GetUpVectorAt(Start);
+			Config.PathType = EVoxelBenchPath::Straight;
+			Config.bClimb = true;
+			Config.ClimbLatLonAltitude = FVector(-999.0, -999.0, 0.0); // no latitude: a start= point
+		}
 		for (FVector& Point : Config.RoutePoints)
 		{
 			if (Point.Z == TNumericLimits<double>::Max()) { Point.Z = Start.Z; }

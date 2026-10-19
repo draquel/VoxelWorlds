@@ -61,6 +61,14 @@ struct FVoxelBenchConfig
 	/** GreatCircle only: the route as given (latitude, longitude, heading in degrees) for the report. */
 	FVector GreatCircleLatLonHeading = FVector::ZeroVector;
 
+	/**
+	 * A climb (spherical Phase 6, WM-BP3: climb=lat:lon[:alt], or dir=up): a straight path along local up at the start.
+	 * Set by MakeClimb or the dir=up keyword; the report records the route as given (latitude, longitude, start altitude
+	 * over the ground; latitude and longitude -999 for dir=up from a start= point).
+	 */
+	bool bClimb = false;
+	FVector ClimbLatLonAltitude = FVector::ZeroVector;
+
 	/** Traverse length along the path. Must exceed the initial load radius so new terrain streams.
 	 *  <= 0 means the whole route (Route) or one lap (Orbit); a Straight path needs a positive length. */
 	float TraverseDistance = 20000.0f;
@@ -159,6 +167,17 @@ private:
 		// the LOD backlog when the sample was taken (Loaded chunks whose LOD change is not queued, and the
 		// subset that should be at LOD 0)
 		int32 LODCand, LODQueued, LODStale, LODStaleNear;
+		// At scale (spherical Phase 6, WM-BP3): the viewer's altitude over the datum (Z over the origin on a
+		// heightmap world); ready chunks per committed LOD (0-3, 4 = 4 and up) and the window's reach, refreshed with
+		// the memory sample; mesh batches drawn and skipped since the last sample (every GetDynamicMeshElements call:
+		// main views and shadow gathers); chunks generated this tick; the far field's update time and drawn patches
+		double Altitude;
+		int32 LoadedLOD[5];
+		float ReachUU, GroundReachUU;
+		int32 BatchesDrawn, BatchesSkipped;
+		int32 GenDone;
+		float FarFieldMs;
+		int32 FarFieldPatches;
 	};
 
 	void TakeSample(float DeltaTime);
@@ -183,6 +202,21 @@ public:
 
 	/** A great circle's point at arc length S (at the route's altitude), as EvaluatePath gives it. */
 	static FVector EvaluateGreatCircle(const FVoxelBenchConfig& InConfig, double S);
+
+	/**
+	 * Configure a climb (spherical Phase 6, WM-BP3: climb=lat:lon[:alt]): a straight path from StartAltitude over the
+	 * ground point along its local up (radial from the planet centre), so the altitude grows by the distance flown.
+	 * @param InOutConfig Config to fill (PathType Straight, Direction, StartPosition, bClimb)
+	 * @param Center Planet centre
+	 * @param Ground The ground point the climb starts over (e.g. UVoxelChunkManager::GetGeneratedSurfacePoint)
+	 * @param StartAltitude Height of the start over Ground
+	 * @param LatLonForReport Latitude and longitude as given, for the report
+	 */
+	static void MakeClimb(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
+		const FVector2D& LatLonForReport);
+
+	/** Unit direction for a latitude and longitude (degrees; +Z north, longitude from +X toward +Y), as gc= and climb= read them. */
+	static FVector LatLonToDirection(double LatitudeDeg, double LongitudeDeg);
 
 private:
 	/** Apply FollowTerrainAltitude to a path position. */
@@ -230,10 +264,20 @@ private:
 	TArray<double> RouteCumulative;
 	double OrbitStartAngle = 0.0;
 
-	// Loaded chunks per layer (Z), taken with each traverse memory sample: running sum and max (§13.11).
+	// Tracked chunks per layer (Z; radial on a planet since spherical Phase 6), taken with each traverse memory sample:
+	// running sum and max (§13.11).
 	TMap<int32, int64> LayerLoadedSum;
 	TMap<int32, int32> LayerLoadedMax;
 	int32 LayerSamples = 0;
+	bool bRadialLayers = false;
+
+	// The residency snapshot's per-LOD counts and reach, carried between memory samples (spherical Phase 6, WM-BP3).
+	int32 LastLoadedLOD[5] = {};
+	float LastReachUU = 0.0f;
+	float LastGroundReachUU = 0.0f;
+
+	// Chunks generated when the last sample was taken (the per-tick GenDone column).
+	int64 LastTotalGenerated = 0;
 
 	// Latest memory sample (carried between MemorySampleIntervalSec refreshes) and its timer.
 	FSample LastMemory = {};
