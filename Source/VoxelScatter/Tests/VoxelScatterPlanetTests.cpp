@@ -33,17 +33,21 @@ namespace VoxelScatterPlanetTestUtils
 	constexpr float VoxelSize = 75.0f;
 	constexpr int32 ChunkSize = 32;
 
-	UVoxelWorldConfiguration* MakePlanetConfig()
+	/**
+	 * A planet like Review_Planet; with AtScale one like Review_Planet_L (R 10^8, its terrain noise: the small planet's
+	 * scaled by K 64 with six more octaves, relief to +-192,000; spherical Phase 6, WM-BP11).
+	 */
+	UVoxelWorldConfiguration* MakePlanetConfig(bool bAtScale = false)
 	{
 		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
 		Config->AddToRoot();
 		Config->WorldMode = EWorldMode::SphericalPlanet;
 		Config->WorldOrigin = FVector(1000.0, -2000.0, 500.0);
-		Config->WorldRadius = Radius;
-		Config->PlanetHeightScale = 3000.0f;
+		Config->WorldRadius = bAtScale ? 1.0e8f : Radius;
+		Config->PlanetHeightScale = bAtScale ? 192000.0f : 3000.0f;
 		Config->BaseHeight = 0.0f;
-		Config->PlanetMaxTerrainHeight = 4000.0f;
-		Config->PlanetMaxTerrainDepth = 4000.0f;
+		Config->PlanetMaxTerrainHeight = bAtScale ? 250000.0f : 4000.0f;
+		Config->PlanetMaxTerrainDepth = bAtScale ? 250000.0f : 4000.0f;
 		Config->VoxelSize = VoxelSize;
 		Config->ChunkSize = ChunkSize;
 		Config->bEnableBiomes = false;
@@ -51,8 +55,8 @@ namespace VoxelScatterPlanetTestUtils
 		Config->bEnableWaterLevel = false;
 		Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 		Config->NoiseParams.Seed = 248675;
-		Config->NoiseParams.Octaves = 3;
-		Config->NoiseParams.Frequency = 0.000025f;
+		Config->NoiseParams.Octaves = bAtScale ? 9 : 3;
+		Config->NoiseParams.Frequency = bAtScale ? 0.000025f / 64.0f : 0.000025f;
 		Config->NoiseParams.Lacunarity = 1.681f;
 		Config->NoiseParams.Persistence = 0.5f;
 		return Config;
@@ -102,6 +106,9 @@ namespace VoxelScatterPlanetTestUtils
 		return Out;
 	}
 
+	/** AlongLocalUp's checks, on the small planet or one at scale. */
+	void RunAlongLocalUp(FAutomationTestBase& Test, bool bAtScale);
+
 	TArray<TPair<const TCHAR*, FVector>> Sites()
 	{
 		const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
@@ -121,8 +128,28 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetAlongLocalUpTest,
 
 bool FVoxelScatterPlanetAlongLocalUpTest::RunTest(const FString& Parameters)
 {
-	using namespace VoxelScatterPlanetTestUtils;
-	UVoxelWorldConfiguration* Config = MakePlanetConfig();
+	VoxelScatterPlanetTestUtils::RunAlongLocalUp(*this, /*bAtScale=*/false);
+	return true;
+}
+
+/**
+ * Spherical Phase 6, WM-BP11: AlongLocalUp on a planet like Review_Planet_L (R 10^8, km relief): the open points within a
+ * voxel of the analytic surface along their direction, nothing taken for underground (the cover test along local up),
+ * local up radial, slope and face type against it: scatter on the precise altitude (WM-BP4) at scale.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetAlongLocalUpAtScaleTest,
+	"VoxelWorlds.Scatter.Planet.AlongLocalUpAtScale",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterPlanetAlongLocalUpAtScaleTest::RunTest(const FString& Parameters)
+{
+	VoxelScatterPlanetTestUtils::RunAlongLocalUp(*this, /*bAtScale=*/true);
+	return true;
+}
+
+void VoxelScatterPlanetTestUtils::RunAlongLocalUp(FAutomationTestBase& Test, bool bAtScale)
+{
+	UVoxelWorldConfiguration* Config = MakePlanetConfig(bAtScale);
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 	const FVector Center = Config->WorldOrigin;
 
@@ -160,18 +187,17 @@ bool FVoxelScatterPlanetAlongLocalUpTest::RunTest(const FString& Parameters)
 			const FVector InstanceUp = Spawn.GetTransform(false).GetRotation().GetUpVector();
 			BadInstance += FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(InstanceUp, Direction), -1.0, 1.0))) > 0.01 ? 1 : 0;
 		}
-		AddInfo(FString::Printf(TEXT("%s: %d open points, %d underground; worst %.1f uu off the analytic surface (%d over a voxel)"),
-			Site.Key, Open, Underground, WorstOff, OffSurface));
-		TestTrue(*FString::Printf(TEXT("%s: the surface has points (non-vacuous)"), Site.Key), Open >= 2000);
-		TestEqual(*FString::Printf(TEXT("%s: no cave or overhang, so nothing underground"), Site.Key), Underground, 0);
-		TestEqual(*FString::Printf(TEXT("%s: every open point within a voxel of the analytic surface"), Site.Key), OffSurface, 0);
-		TestEqual(*FString::Printf(TEXT("%s: local up is radial"), Site.Key), BadUp, 0);
-		TestEqual(*FString::Printf(TEXT("%s: the slope is against local up"), Site.Key), BadSlope, 0);
-		TestEqual(*FString::Printf(TEXT("%s: the face type is by local up"), Site.Key), BadFace, 0);
-		TestEqual(*FString::Printf(TEXT("%s: instances stand on local up (within 0.01 degrees)"), Site.Key), BadInstance, 0);
+		Test.AddInfo(FString::Printf(TEXT("%s%s: %d open points, %d underground; worst %.1f uu off the analytic surface (%d over a voxel)"),
+			bAtScale ? TEXT("R 1e8, ") : TEXT(""), Site.Key, Open, Underground, WorstOff, OffSurface));
+		Test.TestTrue(*FString::Printf(TEXT("%s: the surface has points (non-vacuous)"), Site.Key), Open >= 2000);
+		Test.TestEqual(*FString::Printf(TEXT("%s: no cave or overhang, so nothing underground"), Site.Key), Underground, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: every open point within a voxel of the analytic surface"), Site.Key), OffSurface, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: local up is radial"), Site.Key), BadUp, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: the slope is against local up"), Site.Key), BadSlope, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: the face type is by local up"), Site.Key), BadFace, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: instances stand on local up (within 0.01 degrees)"), Site.Key), BadInstance, 0);
 	}
 	Config->RemoveFromRoot();
-	return true;
 }
 
 // Spherical Phase 5 (WM-PL4; SP-B10): on a planet chunk generated with a raised pad, the lines that leave a chunk through

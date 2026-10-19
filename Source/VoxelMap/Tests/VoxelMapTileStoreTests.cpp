@@ -245,7 +245,7 @@ bool FVoxelMapTileBudgetSubsystemTest::RunTest(const FString& Parameters)
 		OverviewVar->Set(TEXT("0.01"), ECVF_SetByConsole); // ~163 overviews
 		Map->ApplyTileBudgets();
 
-		const int32 Explored = Map->ExploreAllTiles(FVector::ZeroVector, 0.0f);
+		const int32 Explored = static_cast<int32>(Map->ExploreAllTiles(FVector::ZeroVector, 0.0f));
 		TestTrue(TEXT("Every tile drew"), DrainMap(Map));
 		const FVoxelMapTileStore& Store = Map->GetTileStore();
 		AddInfo(FString::Printf(TEXT("%d tiles explored; %s"), Explored, *Map->GetDebugStats()));

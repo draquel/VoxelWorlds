@@ -7,6 +7,7 @@
 #include "VoxelWorldModeFactory.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelCubeSphere.h"
+#include "HAL/IConsoleManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -605,6 +606,8 @@ bool FPlanetGroundHorizonTest::RunTest(const FString& Parameters)
 	for (const FPlanetCase& Case : GetPlanetCases())
 	{
 		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
+		// The window under the voxel cut-over (WM-BP10 empties it above; LOD.Planet.Cutover checks that): out of reach here.
+		Config->PlanetVoxelCutoverAltitude = 1.0e9f;
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
@@ -670,6 +673,138 @@ bool FPlanetGroundHorizonTest::RunTest(const FString& Parameters)
 			}
 			AddInfo(FString::Printf(TEXT("%s, %s: ground disk %d chunks%s"), Case.Name, Site.Name, GroundDisk.Num(), *Climb));
 			TestTrue(*FString::Printf(TEXT("%s, %s: the ground disk has chunks"), Case.Name, Site.Name), GroundDisk.Num() > 50);
+		}
+		Config->RemoveFromRoot();
+	}
+	return true;
+}
+
+/**
+ * Spherical Phase 6, WM-BP10 (D18): the voxel cut-over. Above PlanetVoxelCutoverAltitude over the surface under the
+ * viewer (the view distance by default) the window is empty: no candidate, every loaded chunk to unload. Between the
+ * resume altitude (0.85 of it) and the cut-over a suspended window stays suspended and an active one active
+ * (hysteresis); under it the ground disk is back whole. Over open sea the cut-over is measured over the sea, not the
+ * seabed (a flyer skimming the waves keeps its window). voxel.World.VoxelCutover overrides it (0: never). On the small
+ * planet and the 1,000 km one at the four sites.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetCutoverTest,
+	"VoxelWorlds.LOD.Planet.Cutover",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetCutoverTest::RunTest(const FString& Parameters)
+{
+	using namespace PlanetShellWindowTestUtils;
+
+	// The rule.
+	TestFalse(TEXT("Rule: active under the cut-over"), FDistanceBandLODStrategy::ComputeCutoverState(false, 39000.0, 40000.0));
+	TestTrue(TEXT("Rule: suspended over it"), FDistanceBandLODStrategy::ComputeCutoverState(false, 40001.0, 40000.0));
+	TestTrue(TEXT("Rule: a suspended window stays suspended over the resume altitude"), FDistanceBandLODStrategy::ComputeCutoverState(true, 35000.0, 40000.0));
+	TestFalse(TEXT("Rule: ... and resumes under it"), FDistanceBandLODStrategy::ComputeCutoverState(true, 33000.0, 40000.0));
+	TestFalse(TEXT("Rule: an active window stays active between the two"), FDistanceBandLODStrategy::ComputeCutoverState(false, 35000.0, 40000.0));
+	TestFalse(TEXT("Rule: a cut-over of 0 never suspends"), FDistanceBandLODStrategy::ComputeCutoverState(false, 1.0e9, 0.0));
+
+	constexpr float ViewDistance = 40000.0f;
+	const double Resume = FDistanceBandLODStrategy::CutoverResumeFraction;
+	for (const FPlanetCase& Case : GetPlanetCases())
+	{
+		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
+		FProbeStrategy Strategy;
+		Strategy.Initialize(Config);
+		const FTerrain Terrain(*Config);
+		const double Cutover = Strategy.GetPlanetCutoverAltitude();
+		TestTrue(*FString::Printf(TEXT("%s: the cut-over defaults to the view distance"), Case.Name), FMath::IsNearlyEqual(Cutover, static_cast<double>(ViewDistance), 1.0));
+
+		for (const FSite& Site : GetSites())
+		{
+			const FVector Ground = Terrain.SurfacePoint(Site.Up);
+			auto Visit = [&](double Altitude, TSet<FIntVector>& OutVisible)
+			{
+				const FLODQueryContext Context = MakeContext(Ground + Site.Up * Altitude);
+				Strategy.Update(Context, 1.0f / 60.0f);
+				OutVisible = Candidates(Strategy, Context);
+				return Context;
+			};
+			const double BetweenAltitude = 0.5 * (1.0 + Resume) * Cutover;
+			const double BackAltitude = 0.5 * Resume * Cutover;
+			TSet<FIntVector> OnTheGround, High, Between, Back, Rising;
+			Visit(300.0, OnTheGround);
+			const bool bGroundSuspended = Strategy.IsWindowSuspended();
+			const FLODQueryContext HighContext = Visit(Cutover + 5000.0, High);
+			const bool bHighSuspended = Strategy.IsWindowSuspended();
+			TArray<FIntVector> Unload;
+			Strategy.GetChunksToUnload(Unload, OnTheGround, HighContext);
+			Visit(BetweenAltitude, Between);
+			const bool bBetweenSuspended = Strategy.IsWindowSuspended();
+			const FLODQueryContext BackContext = Visit(BackAltitude, Back);
+			const bool bBackSuspended = Strategy.IsWindowSuspended();
+			int32 Missing = 0;
+			const TSet<FIntVector> Disk = SurfaceChunksInDisk(Strategy, Terrain, BackContext, ViewDistance);
+			for (const FIntVector& Coord : Disk)
+			{
+				Missing += Back.Contains(Coord) ? 0 : 1;
+			}
+			// Climbing back up from there: active up to the cut-over.
+			Visit(BetweenAltitude, Rising);
+			const bool bRisingSuspended = Strategy.IsWindowSuspended();
+
+			AddInfo(FString::Printf(TEXT("%s, %s: %d candidates at 300 up; %.0f up: %d (suspended %d), %d of %d to unload; %.0f up: %d (suspended %d); %.0f up: %d (suspended %d, %d of the disk missing); back up to %.0f: %d (suspended %d)"),
+				Case.Name, Site.Name, OnTheGround.Num(), Cutover + 5000.0, High.Num(), bHighSuspended ? 1 : 0, Unload.Num(), OnTheGround.Num(),
+				BetweenAltitude, Between.Num(), bBetweenSuspended ? 1 : 0, BackAltitude, Back.Num(), bBackSuspended ? 1 : 0, Missing,
+				BetweenAltitude, Rising.Num(), bRisingSuspended ? 1 : 0));
+			TestFalse(*FString::Printf(TEXT("%s, %s: active on the ground"), Case.Name, Site.Name), bGroundSuspended);
+			TestTrue(*FString::Printf(TEXT("%s, %s: chunks on the ground"), Case.Name, Site.Name), OnTheGround.Num() > 50);
+			TestTrue(*FString::Printf(TEXT("%s, %s: suspended over the cut-over"), Case.Name, Site.Name), bHighSuspended);
+			TestEqual(*FString::Printf(TEXT("%s, %s: no candidate over the cut-over"), Case.Name, Site.Name), High.Num(), 0);
+			TestEqual(*FString::Printf(TEXT("%s, %s: every loaded chunk unloads over the cut-over"), Case.Name, Site.Name), Unload.Num(), OnTheGround.Num());
+			TestTrue(*FString::Printf(TEXT("%s, %s: still suspended over the resume altitude"), Case.Name, Site.Name), bBetweenSuspended && Between.Num() == 0);
+			TestFalse(*FString::Printf(TEXT("%s, %s: resumed under it"), Case.Name, Site.Name), bBackSuspended);
+			TestEqual(*FString::Printf(TEXT("%s, %s: the ground disk whole again"), Case.Name, Site.Name), Missing, 0);
+			TestTrue(*FString::Printf(TEXT("%s, %s: an active window stays active under the cut-over"), Case.Name, Site.Name), !bRisingSuspended && Rising.Num() > 0);
+		}
+
+		// Over open sea the cut-over is measured over the sea: the lowest seabed of 2,000 directions, 1.5 cut-overs under a sea.
+		{
+			FVector SeaSite = FVector::UpVector;
+			double SeabedAltitude = TNumericLimits<double>::Max();
+			for (int32 I = 0; I < 2000; ++I)
+			{
+				const double Z = 1.0 - 2.0 * (I + 0.5) / 2000.0;
+				const double Phi = I * 2.399963229728653;
+				const FVector Direction(FMath::Sqrt(1.0 - Z * Z) * FMath::Cos(Phi), FMath::Sqrt(1.0 - Z * Z) * FMath::Sin(Phi), Z);
+				const double Altitude = Terrain.Altitude(Direction);
+				if (Altitude < SeabedAltitude)
+				{
+					SeabedAltitude = Altitude;
+					SeaSite = Direction;
+				}
+			}
+			UVoxelWorldConfiguration* SeaConfig = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
+			SeaConfig->bEnableWaterLevel = true;
+			SeaConfig->WaterRadius = static_cast<float>(Case.Radius + SeabedAltitude + 1.5 * Cutover);
+			FProbeStrategy SeaStrategy;
+			SeaStrategy.Initialize(SeaConfig);
+			const FVector Skimming = SeaSite * (static_cast<double>(SeaConfig->WaterRadius) + 300.0);
+			SeaStrategy.Update(MakeContext(Skimming), 1.0f / 60.0f);
+			AddInfo(FString::Printf(TEXT("%s: 300 over a sea %.0f deep: %.0f over the surface, suspended %d"),
+				Case.Name, 1.5 * Cutover, SeaStrategy.GetViewerSurfaceAltitude(), SeaStrategy.IsWindowSuspended() ? 1 : 0));
+			TestFalse(*FString::Printf(TEXT("%s: skimming a deep sea the window is active"), Case.Name), SeaStrategy.IsWindowSuspended());
+			TestTrue(*FString::Printf(TEXT("%s: measured over the sea"), Case.Name), FMath::IsNearlyEqual(SeaStrategy.GetViewerSurfaceAltitude(), 300.0, 16.0));
+			SeaConfig->RemoveFromRoot();
+		}
+
+		// voxel.World.VoxelCutover: an override, and 0 for never.
+		if (IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.VoxelCutover")))
+		{
+			const float Saved = Var->GetFloat();
+			const FVector Up = GetSites()[1].Up;
+			const FVector Ground = Terrain.SurfacePoint(Up);
+			Var->Set(0.0f, ECVF_SetByCode);
+			Strategy.Update(MakeContext(Ground + Up * (10.0 * Cutover)), 1.0f / 60.0f);
+			TestFalse(*FString::Printf(TEXT("%s: voxel.World.VoxelCutover 0 never suspends"), Case.Name), Strategy.IsWindowSuspended());
+			Var->Set(5000.0f, ECVF_SetByCode);
+			Strategy.Update(MakeContext(Ground + Up * 6000.0), 1.0f / 60.0f);
+			TestTrue(*FString::Printf(TEXT("%s: voxel.World.VoxelCutover 5000 suspends at 6,000 up"), Case.Name), Strategy.IsWindowSuspended());
+			Var->Set(Saved, ECVF_SetByCode);
 		}
 		Config->RemoveFromRoot();
 	}

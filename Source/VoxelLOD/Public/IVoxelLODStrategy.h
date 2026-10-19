@@ -288,6 +288,36 @@ public:
 		return static_cast<float>(FVector::Dist(ChunkCenter, ViewerPosition));
 	}
 
+	/**
+	 * Whether the window is empty because the viewer is too high for voxels to matter (spherical Phase 6, WM-BP10, D18: a
+	 * planet's viewer above its voxel cut-over altitude, where the far field alone draws the planet). While it is,
+	 * GetVisibleChunks returns nothing and GetChunksToUnload every loaded chunk, and the chunk manager neither pins edited
+	 * chunks nor keeps queued ones. Set by Update.
+	 *
+	 * Default: false (the window never empties).
+	 *
+	 * @return True while the window is suspended
+	 */
+	virtual bool IsWindowSuspended() const
+	{
+		return false;
+	}
+
+	/**
+	 * The altitude over the surface under the viewer above which the window suspends (IsWindowSuspended), and the
+	 * viewer's altitude over that surface as the last Update saw it (spherical Phase 6, WM-BP10).
+	 *
+	 * Default: 0 (never) and 0.
+	 */
+	virtual double GetCutoverAltitude() const
+	{
+		return 0.0;
+	}
+	virtual double GetViewerSurfaceAltitude() const
+	{
+		return 0.0;
+	}
+
 	// ==================== Debugging ====================
 
 	/**

@@ -1,5 +1,6 @@
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelChunkManager.h"
+#include "IVoxelLODStrategy.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelMesher.h"
@@ -129,7 +130,16 @@ void FVoxelStreamingBenchmark::MakeClimb(FVoxelBenchConfig& InOutConfig, const F
 	InOutConfig.Direction = Up.IsNearlyZero() ? FVector::UpVector : Up;
 	InOutConfig.StartPosition = Ground + InOutConfig.Direction * StartAltitude;
 	InOutConfig.bClimb = true;
+	InOutConfig.bDescend = false;
 	InOutConfig.ClimbLatLonAltitude = FVector(LatLonForReport.X, LatLonForReport.Y, StartAltitude);
+}
+
+void FVoxelStreamingBenchmark::MakeDescent(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
+	const FVector2D& LatLonForReport)
+{
+	MakeClimb(InOutConfig, Center, Ground, StartAltitude, LatLonForReport);
+	InOutConfig.Direction = -InOutConfig.Direction;
+	InOutConfig.bDescend = true;
 }
 
 void FVoxelStreamingBenchmark::MakeGreatCircle(FVoxelBenchConfig& InOutConfig, const FVector& Center, double Radius, double LatitudeDeg,
@@ -439,6 +449,9 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.FarFieldPatches = FarField.DrawnPatches;
 	S.FarFieldMB = FarField.MemoryMB;
 	S.FarFieldBuilt = FarField.PatchesBuilt;
+	S.WindowSuspended = ChunkManager->IsVoxelWindowSuspended() ? 1 : 0;
+	S.StreamingLeadUU = static_cast<float>(ChunkManager->GetStreamingViewerLead());
+	S.SurfaceAltitude = ChunkManager->GetLODStrategy() ? static_cast<float>(ChunkManager->GetLODStrategy()->GetViewerSurfaceAltitude()) : 0.0f;
 
 	MemorySampleTimer += DeltaTime;
 	if (MemorySampleTimer >= Config.MemorySampleIntervalSec)
@@ -711,7 +724,7 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 	}
 
 	static const TCHAR* PathNames[] = { TEXT("straight"), TEXT("route"), TEXT("orbit"), TEXT("greatCircle") };
-	Str(TEXT("path"), Config.bClimb ? TEXT("climb") : PathNames[static_cast<int32>(Config.PathType)]);
+	Str(TEXT("path"), Config.bClimb ? (Config.bDescend ? TEXT("descend") : TEXT("climb")) : PathNames[static_cast<int32>(Config.PathType)]);
 	Vec(TEXT("start"), Config.StartPosition);
 	if (Config.PathType == EVoxelBenchPath::Straight)
 	{
@@ -719,8 +732,8 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 		if (Config.bClimb)
 		{
 			// The climb as given (spherical Phase 6, WM-BP3); latitude -999 means dir=up from a start= point.
-			Fields.Add(FString::Printf(TEXT("    \"climb\": {\"latitude\": %.4f, \"longitude\": %.4f, \"startAltitude\": %.1f}"),
-				Config.ClimbLatLonAltitude.X, Config.ClimbLatLonAltitude.Y, Config.ClimbLatLonAltitude.Z));
+			Fields.Add(FString::Printf(TEXT("    \"%s\": {\"latitude\": %.4f, \"longitude\": %.4f, \"startAltitude\": %.1f}"),
+				Config.bDescend ? TEXT("descend") : TEXT("climb"), Config.ClimbLatLonAltitude.X, Config.ClimbLatLonAltitude.Y, Config.ClimbLatLonAltitude.Z));
 		}
 	}
 	else if (Config.PathType == EVoxelBenchPath::Route)
@@ -760,10 +773,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
@@ -778,7 +791,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.FarCompMs, S.FarCompDispatchN, S.FarCompApplyN,
 			S.LODCand, S.LODQueued, S.LODStale, S.LODStaleNear, S.LODUpdateMs, S.FarOceanMs, S.FarOceanRebuildN,
 			S.Altitude, S.LoadedLOD[0], S.LoadedLOD[1], S.LoadedLOD[2], S.LoadedLOD[3], S.LoadedLOD[4], S.ReachUU, S.GroundReachUU,
-			S.BatchesDrawn, S.BatchesSkipped, S.GenDone, S.FarFieldMs, S.FarFieldPatches, S.FarFieldMB, S.FarFieldBuilt);
+			S.BatchesDrawn, S.BatchesSkipped, S.GenDone, S.FarFieldMs, S.FarFieldPatches, S.FarFieldMB, S.FarFieldBuilt,
+			S.WindowSuspended, S.StreamingLeadUU, S.SurfaceAltitude);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 
@@ -799,6 +813,13 @@ void FVoxelStreamingBenchmark::WriteReport()
 	int64 LODSum[5] = {};
 	int32 LODMax[5] = {};
 	int32 LODSamples = 0;
+	// Orbit and back (WM-BP10), over the traverse: samples with the window suspended, where it suspended and resumed (the
+	// streaming viewer's altitude over the surface at the first sample of each), and the descent prefetch's largest lead.
+	int32 SuspendedSamples = 0;
+	double SuspendSurfaceAltitude = -1.0, ResumeSurfaceAltitude = -1.0;
+	double SuspendCameraAltitude = -1.0, ResumeCameraAltitude = -1.0;
+	float LeadMax = 0.0f;
+	int32 LastSuspended = -1;
 	int32 LODEvalFrames = 0;
 	// Chunk mesh jobs launched over the whole run (every phase).
 	int64 MeshJobsLaunched = 0;
@@ -835,6 +856,19 @@ void FVoxelStreamingBenchmark::WriteReport()
 		FarFieldMBMax = FMath::Max(FarFieldMBMax, S.FarFieldMB);
 		FarFieldBuiltTraverse += S.FarFieldBuilt;
 		TraverseGenerated += S.GenDone;
+		SuspendedSamples += S.WindowSuspended;
+		LeadMax = FMath::Max(LeadMax, S.StreamingLeadUU);
+		if (LastSuspended == 0 && S.WindowSuspended == 1 && SuspendSurfaceAltitude < 0.0)
+		{
+			SuspendSurfaceAltitude = S.SurfaceAltitude;
+			SuspendCameraAltitude = S.Altitude;
+		}
+		if (LastSuspended == 1 && S.WindowSuspended == 0 && ResumeSurfaceAltitude < 0.0)
+		{
+			ResumeSurfaceAltitude = S.SurfaceAltitude;
+			ResumeCameraAltitude = S.Altitude;
+		}
+		LastSuspended = S.WindowSuspended;
 		AltitudeMin = FMath::Min(AltitudeMin, S.Altitude);
 		AltitudeMax = FMath::Max(AltitudeMax, S.Altitude);
 		ReachMax = FMath::Max(ReachMax, S.ReachUU);
@@ -954,6 +988,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 		Json += FString::Printf(TEXT("  \"readyByLODMeanMax\": {%s},\n"), *LODJson);
 		Json += FString::Printf(TEXT("  \"reachMaxUU\": %.0f,\n"), ReachMax);
 		Json += FString::Printf(TEXT("  \"groundReachMaxUU\": %.0f,\n"), GroundReachMax);
+		Json += FString::Printf(TEXT("  \"voxelCutover\": {\"altitude\": %.0f, \"suspendedFraction\": %.3f, \"suspendAt\": {\"overSurface\": %.0f, \"altitude\": %.0f}, \"resumeAt\": {\"overSurface\": %.0f, \"altitude\": %.0f}, \"descentLeadMaxUU\": %.0f},\n"),
+			ChunkManager->GetLODStrategy() ? ChunkManager->GetLODStrategy()->GetCutoverAltitude() : 0.0,
+			LODSamples > 0 ? static_cast<double>(SuspendedSamples) / LODSamples : 0.0, SuspendSurfaceAltitude, SuspendCameraAltitude,
+			ResumeSurfaceAltitude, ResumeCameraAltitude, LeadMax);
 		Json += FString::Printf(TEXT("  \"batchesDrawnP50\": %.0f,\n"), Percentile(BatchesArr, 0.50f));
 		Json += FString::Printf(TEXT("  \"batchesDrawnP95\": %.0f,\n"), Percentile(BatchesArr, 0.95f));
 		Json += FString::Printf(TEXT("  \"batchesDrawnMax\": %.0f,\n"), Percentile(BatchesArr, 1.0f));
