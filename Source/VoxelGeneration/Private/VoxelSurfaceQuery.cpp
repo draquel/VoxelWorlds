@@ -209,6 +209,30 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	}
 	// Altitudes, formed in double (WM-BP4), as the generator compares them.
 	const double VoxelAltitude = FSphericalPlanetWorldMode::CalculateRadialDistance(Position, Params.PlanetCenter) - Params.PlanetRadius;
+	QueryPlanetSurfaceConditionsAt(Planet, Direction, TerrainAltitude, Continentalness, VoxelAltitude, VoxelSize, NoiseParams,
+		BiomeSnapshot, Sea, OutSurfaceMaterial, OutBiomeID);
+}
+
+void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
+	const FSphericalPlanetWorldMode& Planet,
+	const FVector& Direction,
+	float TerrainAltitude,
+	float Continentalness,
+	double VoxelAltitude,
+	float VoxelSize,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
+	const FVoxelSeaSurface& Sea,
+	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
+{
+	OutSurfaceMaterial = 0;
+	OutBiomeID = 0;
+	if (!BiomeSnapshot.bIsValid)
+	{
+		return;
+	}
+
+	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 	const float DepthBelowSurface = static_cast<float>((static_cast<double>(TerrainAltitude) - VoxelAltitude) / FMath::Max(VoxelSize, KINDA_SMALL_NUMBER));
 	const float Altitude = static_cast<float>(VoxelAltitude);
 

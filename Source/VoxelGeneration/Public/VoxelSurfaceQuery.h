@@ -155,6 +155,35 @@ public:
 		const TArray<struct FVoxelConditioningZone>* Zones = nullptr);
 
 	/**
+	 * QueryPlanetSurfaceConditions from a terrain altitude the caller has already sampled (spherical Phase 6, WM-BP9: the
+	 * far field samples the altitude of every patch vertex once and reads the material from it). The same arithmetic:
+	 * QueryPlanetSurfaceConditions calls this after its own SampleRadialDisplacement.
+	 *
+	 * @param Planet The planet world mode
+	 * @param Direction Unit direction from the planet centre
+	 * @param TerrainAltitude The terrain's altitude along Direction (conditioned where zones apply)
+	 * @param Continentalness The continentalness SampleRadialDisplacement returned for Direction (the biome blend reuses it)
+	 * @param VoxelAltitude The queried point's altitude (TerrainAltitude for the surface material: depth 0)
+	 * @param VoxelSize Voxel size (generation measures the depth in voxels)
+	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
+	 * @param BiomeSnapshot Value-captured biome data
+	 * @param Sea The world's sea
+	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
+	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
+	 */
+	static void QueryPlanetSurfaceConditionsAt(
+		const FSphericalPlanetWorldMode& Planet,
+		const FVector& Direction,
+		float TerrainAltitude,
+		float Continentalness,
+		double VoxelAltitude,
+		float VoxelSize,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		const FVoxelSeaSurface& Sea,
+		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
+
+	/**
 	 * Everything at the analytic surface on the local up-line through a position, in any world mode (spherical SP-A3):
 	 * heightmap modes return SampleSurface at (X, Y) with Position (X, Y, Height); a planet the surface along the
 	 * direction from its centre (GetSurfacePoint), the slope against local up, and QueryPlanetSurfaceConditions.

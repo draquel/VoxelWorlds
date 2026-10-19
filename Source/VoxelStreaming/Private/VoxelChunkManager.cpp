@@ -37,6 +37,9 @@
 #include "VoxelTreeTypes.h"
 #include "VoxelWorldBoundary.h"
 #include "VoxelFarOcean.h"
+#include "VoxelPlanetFarField.h"
+#include "VoxelPlanetOcean.h"
+#include "Engine/GameViewportClient.h"
 #include "IslandBowlWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelSurfaceQuery.h"
@@ -121,6 +124,60 @@ static TAutoConsoleVariable<float> CVarFarOceanInland(
 	TEXT("  >= 0 = only columns reaching within this distance of the edge; deeper unloaded land stays empty, as on a plane\n")
 	TEXT("Read when the world initializes."),
 	ECVF_Default);
+
+// A planet's far field (spherical Phase 6, WM-BP9): on or off, for every live chunk manager (A/B against the ocean shell
+// alone, which is what a planet drew beyond its voxel window before P6.4).
+static TAutoConsoleVariable<int32> CVarFarField(
+	TEXT("voxel.World.FarField"),
+	1,
+	TEXT("A planet's far field: the analytic surface drawn beyond the voxel window to the horizon (FVoxelPlanetFarField).\n")
+	TEXT("  1 = drawn (default); at scale its patches also draw the sea in place of the ocean shell\n")
+	TEXT("  0 = off: nothing past the voxel window but the ocean shell (P6.3's planet, for A/B)"),
+	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			if (It->GetWorld() && It->GetWorld()->IsGameWorld())
+			{
+				It->SetFarFieldEnabled(Var->GetInt() != 0);
+			}
+		}
+	}),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarFarFieldError(
+	TEXT("voxel.World.FarFieldError"),
+	2.0f,
+	TEXT("The far field's screen-space error budget (pixels): a patch splits while its geometric error projects to more\n")
+	TEXT("than this from the camera (default 2)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarFieldQuads(
+	TEXT("voxel.World.FarFieldQuads"),
+	16,
+	TEXT("Quads along a far-field patch's edge, a power of two from 4 to 64 (default 16). Read when the far field is built\n")
+	TEXT("(voxel.World.FarField 0 then 1 rebuilds it)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarFieldMaxBuilds(
+	TEXT("voxel.World.FarFieldMaxBuilds"),
+	6,
+	TEXT("Far-field patch builds in flight on the thread pool at once (default 6)."),
+	ECVF_Default);
+
+static FAutoConsoleCommandWithWorld GVoxelFarFieldStatsCmd(
+	TEXT("voxel.World.FarFieldStats"),
+	TEXT("Log the far field's state for every live chunk manager (patches, drawn, hidden by the voxel window, builds, memory)."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld*)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			if (It->GetWorld() && It->GetWorld()->IsGameWorld())
+			{
+				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.FarFieldStats: %s"), *It->GetFarFieldDebugString());
+			}
+		}
+	}));
 
 static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
 	TEXT("voxel.World.FarOceanStats"),
@@ -721,6 +778,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// A planet's sea surface shows its underside only while the viewer is in the sea (SP-E2).
 	UpdatePlanetOceanUnderside(CurrentViewerPosition);
 
+	// === Planet far field (spherical Phase 6, WM-BP9) ===
+	// After this tick's generation results, meshes and unloads: a band patch shows in the tick its chunks leave and
+	// hides once they have been drawn a moment. Timed into FarFieldStats.UpdateMs (the bench's FarFieldMs).
+	if (FarField)
+	{
+		UpdateFarField(CurrentViewerPosition, Context.FieldOfView);
+	}
+
 	// === Water propagation (bounded BFS per frame) ===
 	if (WaterPropagation && WaterPropagation->HasPendingWork())
 	{
@@ -909,6 +974,7 @@ void UVoxelChunkManager::Initialize(
 
 	// Clear any existing state
 	ChunkStates.Empty();
+	++ChunkStateVersion;
 	LoadedChunkCoords.Empty();
 	GenerationQueue.Empty();
 	GenerationQueueSet.Empty();
@@ -1258,6 +1324,7 @@ void UVoxelChunkManager::Initialize(
 	// and KillZ under it (SP-F5).
 	RebuildWorldBoundary();
 	RebuildFarOcean();
+	RebuildFarField(CVarFarField.GetValueOnGameThread() != 0);
 	RebuildPlanetOcean();
 	ApplyPlanetKillZ();
 
@@ -1293,6 +1360,7 @@ void UVoxelChunkManager::Shutdown()
 
 	// Clear state
 	ChunkStates.Empty();
+	++ChunkStateVersion;
 	LoadedChunkCoords.Empty();
 	// Seam-ownership: drop all tracked seams/jobs alongside the chunk state they mirror, and
 	// discard the async seam pipeline's transient state (in-flight results will no-op via the
@@ -1385,6 +1453,7 @@ void UVoxelChunkManager::Shutdown()
 	WorldMode.Reset();
 	DestroyWorldBoundary();
 	DestroyFarOcean();
+	DestroyFarField();
 	DestroyPlanetOcean();
 
 	// Clear pending mesh queue
@@ -3324,6 +3393,16 @@ void UVoxelChunkManager::RebuildPlanetOcean()
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("Planet ocean: not drawn, the configuration has no WaterMeshMaterial."));
 		return;
 	}
+	if (DoesFarFieldDrawSea())
+	{
+		// At scale the shell's quads sag past its budget (G40: up to 3,189 uu on a 1,000 km planet, its vertices floats of
+		// size R): the far field's sea patches draw the sea instead.
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet ocean: drawn by the far field (radius %.0f: the shell would sag %.0f uu at its %d quads a face edge)."),
+			Configuration->WaterRadius, FVoxelPlanetOcean::MeasureMaxSag(Configuration->WaterRadius,
+				FVoxelPlanetOcean::ChooseSegments(Configuration->WaterRadius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
+					PlanetOceanSettings.MaxSegments)), PlanetOceanSettings.MaxSegments);
+		return;
+	}
 	const double StartTime = FPlatformTime::Seconds();
 	PlanetOceanSettings = FVoxelPlanetOceanSettings();
 	PlanetOceanSettings.Center = Configuration->WorldOrigin; // the planet centre (FVoxelWorldModeFactory::MakePlanetParams)
@@ -3406,6 +3485,427 @@ void UVoxelChunkManager::SetPlanetOceanVisible(bool bVisible)
 	}
 }
 
+// ==================== Planet Far Field (spherical Phase 6, WM-BP9) ====================
+
+namespace VoxelFarFieldManagerPrivate
+{
+	/** A procedural mesh component for one far-field patch at its origin (no collision, no shadow, nothing to navigate). */
+	UProceduralMeshComponent* MakePatchComponent(AActor* Owner, const FVector& Location)
+	{
+		UProceduralMeshComponent* Component = NewObject<UProceduralMeshComponent>(Owner, NAME_None, RF_Transient);
+		Component->SetUsingAbsoluteLocation(true);
+		Component->SetUsingAbsoluteRotation(true);
+		Component->SetUsingAbsoluteScale(true);
+		Component->SetupAttachment(Owner->GetRootComponent());
+		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Component->SetCanEverAffectNavigation(false);
+		Component->SetGenerateOverlapEvents(false);
+		Component->SetCastShadow(false);
+		Component->bUseAsyncCooking = false;
+		Component->SetWorldLocationAndRotation(Location, FRotator::ZeroRotator);
+		Component->RegisterComponent();
+		return Component;
+	}
+
+	/** Hand a far-field section to a procedural mesh section, its triangles reversed for an underside; clears it when empty. */
+	void SetPatchSection(UProceduralMeshComponent* Component, int32 Section, const FVoxelFarFieldSection& Mesh, bool bReverse,
+		UMaterialInterface* Material)
+	{
+		if (Mesh.IsEmpty())
+		{
+			Component->ClearMeshSection(Section);
+			return;
+		}
+		const int32 N = Mesh.Positions.Num();
+		TArray<FVector> Vertices;
+		TArray<FVector> Normals;
+		TArray<FVector2D> UV0;
+		TArray<FVector2D> UV1;
+		TArray<FProcMeshTangent> Tangents;
+		Vertices.SetNumUninitialized(N);
+		Normals.SetNumUninitialized(N);
+		UV0.SetNumUninitialized(N);
+		UV1.SetNumUninitialized(N);
+		Tangents.Reserve(N);
+		for (int32 i = 0; i < N; ++i)
+		{
+			Vertices[i] = FVector(Mesh.Positions[i]);
+			Normals[i] = FVector(Mesh.Normals[i]);
+			UV0[i] = FVector2D(Mesh.UV0[i]);
+			UV1[i] = FVector2D(Mesh.UV1[i]);
+			Tangents.Add(FProcMeshTangent(FVector(Mesh.Tangents[i]), false));
+		}
+		TArray<int32> Triangles;
+		if (bReverse)
+		{
+			Triangles.Reserve(Mesh.Triangles.Num());
+			for (int32 i = 0; i + 2 < Mesh.Triangles.Num(); i += 3)
+			{
+				Triangles.Append({ Mesh.Triangles[i], Mesh.Triangles[i + 2], Mesh.Triangles[i + 1] });
+			}
+		}
+		else
+		{
+			Triangles = Mesh.Triangles;
+		}
+		const TArray<FVector2D> NoUV;
+		Component->CreateMeshSection(Section, Vertices, Triangles, Normals, UV0, UV1, NoUV, NoUV, Mesh.Colors, Tangents,
+			/*bCreateCollision=*/false);
+		if (Material)
+		{
+			Component->SetMaterial(Section, Material);
+		}
+	}
+
+	/** What a component's sections hold on the CPU and the GPU (an estimate: the proc-mesh vertex and a GPU vertex). */
+	int64 EstimateBytes(int64 Vertices, int64 Indices)
+	{
+		return Vertices * (static_cast<int64>(sizeof(FProcMeshVertex)) + 64) + Indices * 8;
+	}
+}
+
+void UVoxelChunkManager::RebuildFarField(bool bEnabled)
+{
+	DestroyFarField();
+
+	UWorld* World = GetWorld();
+	AActor* Owner = GetOwner();
+	// Visual only: a dedicated server draws nothing.
+	if (!bEnabled || !Configuration || !WorldMode || !World || !World->IsGameWorld() || !Owner || World->GetNetMode() == NM_DedicatedServer
+		|| Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return;
+	}
+	TSharedPtr<const FVoxelFarFieldSurface> Surface = FVoxelFarFieldSurface::Make(*Configuration, WorldMode);
+	if (!Surface.IsValid())
+	{
+		return;
+	}
+	const FSphericalPlanetWorldMode& Planet = Surface->GetPlanet();
+	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
+
+	FVoxelFarFieldSettings Settings;
+	Settings.Center = Params.PlanetCenter;
+	Settings.Radius = Params.PlanetRadius;
+	Settings.GridOrigin = Configuration->WorldOrigin;
+	Settings.ChunkWorldSize = Configuration->GetChunkWorldSize();
+	Settings.VoxelSize = Configuration->VoxelSize;
+	// Quads along a patch's edge (16: a band patch's error stays a fraction of the sink on the review planets, and the
+	// procedural mesh components hold about 200 bytes a vertex, CPU and GPU copies).
+	Settings.PatchQuads = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(CVarFarFieldQuads.GetValueOnGameThread(), 4, 64))));
+	// A voxel under the analytic surface: the voxel surface (which DC and MC follow within a few uu) hides it wherever a
+	// chunk is drawn over it.
+	Settings.Sink = Configuration->VoxelSize;
+	// The terrain's real bounds within the configured shell (terrain past it is cut off), as the streaming window's (WM-BP8).
+	float MinAltitude = 0.0f;
+	float MaxAltitude = 0.0f;
+	FSphericalPlanetWorldMode::GetDisplacementBounds(Planet.GetTerrainParams(), &Planet.GetBiomeSnapshot(), MinAltitude, MaxAltitude);
+	Settings.MinAltitude = FMath::Max(MinAltitude, -Params.MaxTerrainDepth);
+	Settings.MaxAltitude = FMath::Min(MaxAltitude, Params.MaxTerrainHeight);
+	// The sea is the far field's only at scale, where the ocean shell would sag past its budget (G40); the small planet
+	// keeps its shell.
+	const FVoxelPlanetOceanSettings OceanDefaults;
+	Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
+		&& FVoxelPlanetFarField::ShouldDrawSea(Configuration->WaterRadius, OceanDefaults.MaxSag, OceanDefaults.MinSegments, OceanDefaults.MaxSegments);
+	Settings.SeaRadius = Configuration->WaterRadius;
+	Settings.SeaMargin = 2.0 * Configuration->VoxelSize;
+	Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
+	// Zones (POI pads, a few chunks across) only for patches up to 32 chunks in radius: past that they do not show, and a
+	// wide cap would ask the POI system for every POI in it (G37).
+	Settings.ZoneGatherMaxAngle = 32.0 * Settings.ChunkWorldSize / FMath::Max(Settings.Radius, 1.0);
+
+	FarField = MakeUnique<FVoxelPlanetFarField>();
+	FarField->Initialize(Settings, Surface);
+	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
+	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
+	FarField->SetZoneGatherer([WeakThis](const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones)
+	{
+		if (const UVoxelChunkManager* Manager = WeakThis.Get())
+		{
+			Manager->GatherConditioningZonesOnSphere(Direction, AngularRadius, OutZones);
+		}
+	});
+	FarFieldStats = FVoxelFarFieldStats();
+	FarFieldStats.bActive = true;
+	FarFieldStats.bDrawsSea = Settings.bSea;
+	bFarFieldUndersideShown = false;
+	FarFieldGroundViewer = FVector(TNumericLimits<double>::Max());
+
+	UE_LOG(LogVoxelStreaming, Log,
+		TEXT("Far field: radius %.0f, %d quads a patch, band level %d (patches %.0f uu across near the voxel window), drawn %.0f uu under the surface, altitudes %.0f to %.0f, sea %s"),
+		Settings.Radius, Settings.PatchQuads, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel), Settings.Sink,
+		Settings.MinAltitude, Settings.MaxAltitude,
+		Settings.bSea ? *FString::Printf(TEXT("drawn by the far field (radius %.0f)"), Settings.SeaRadius)
+			: (Configuration->bEnableWaterLevel ? TEXT("drawn by the ocean shell") : TEXT("off")));
+}
+
+void UVoxelChunkManager::DestroyFarField()
+{
+	for (TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : FarFieldComponents)
+	{
+		if (IsValid(Pair.Value))
+		{
+			Pair.Value->DestroyComponent();
+		}
+	}
+	FarFieldComponents.Reset();
+	FarFieldComponentSizes.Reset();
+	FarFieldComponentVertices = 0;
+	FarFieldComponentIndices = 0;
+	FarField.Reset();
+	FarFieldStats = FVoxelFarFieldStats();
+	bFarFieldUndersideShown = false;
+}
+
+bool UVoxelChunkManager::DoesFarFieldDrawSea() const
+{
+	return FarField.IsValid() && FarField->GetSettings().bSea;
+}
+
+UProceduralMeshComponent* UVoxelChunkManager::GetFarFieldComponent(uint64 PackedPatchKey) const
+{
+	const TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(PackedPatchKey);
+	return Found ? Found->Get() : nullptr;
+}
+
+void UVoxelChunkManager::SetFarFieldEnabled(bool bEnabled)
+{
+	// The far field decides whether the ocean shell draws the sea: rebuild both.
+	DestroyPlanetOcean();
+	RebuildFarField(bEnabled);
+	RebuildPlanetOcean();
+	UE_LOG(LogVoxelStreaming, Log, TEXT("Far field %s"), FarField ? TEXT("on") : TEXT("off"));
+}
+
+bool UVoxelChunkManager::IsChunkDrawnForFarField(const FIntVector& ChunkCoord) const
+{
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State)
+	{
+		return false;
+	}
+	switch (State->State)
+	{
+	case EChunkState::Loaded:
+	case EChunkState::PendingUnload:
+		return true;
+	case EChunkState::PendingMeshing:
+	case EChunkState::Meshing:
+		// Re-meshing (an LOD change, an edit): its old mesh is still drawn.
+		return MeshRenderer && MeshRenderer->IsChunkLoaded(ChunkCoord);
+	default:
+		return false;
+	}
+}
+
+void UVoxelChunkManager::UpdateFarFieldForViewer(const FVector& ViewerPosition, float FieldOfView)
+{
+	if (FarField)
+	{
+		UpdateFarField(ViewerPosition, FieldOfView);
+	}
+}
+
+void UVoxelChunkManager::UpdateFarField(const FVector& ViewerPosition, float FieldOfView)
+{
+	using namespace VoxelFarFieldManagerPrivate;
+	if (!FarField || !Configuration)
+	{
+		return;
+	}
+	const double StartTime = FPlatformTime::Seconds();
+	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
+	UWorld* World = GetWorld();
+
+	FVoxelFarFieldView View;
+	View.Camera = ViewerPosition;
+	View.Viewer = ViewerPosition;
+	// Pixels per radian from the game viewport's width and the horizontal field of view.
+	double ViewportWidth = 1920.0;
+	if (const UGameViewportClient* Viewport = World ? World->GetGameViewport() : nullptr)
+	{
+		FVector2D Size;
+		Viewport->GetViewportSize(Size);
+		if (Size.X > 1.0)
+		{
+			ViewportWidth = Size.X;
+		}
+	}
+	const double FieldOfViewRadians = FMath::DegreesToRadians(FMath::Clamp(FieldOfView > 0.0f ? static_cast<double>(FieldOfView) : 90.0, 5.0, 170.0));
+	View.PixelsPerRadian = ViewportWidth / (2.0 * FMath::Tan(FieldOfViewRadians * 0.5));
+	View.MaxScreenError = FMath::Max(0.25f, CVarFarFieldError.GetValueOnGameThread());
+	// The viewer's ground point, as the LOD strategy measures the window's horizons on it (GetPlanetGroundRadius: the
+	// analytic terrain along the viewer's direction, no zones). One sample when the viewer moves.
+	if (FVector::DistSquared(ViewerPosition, FarFieldGroundViewer) > 1.0)
+	{
+		const FVector Direction = (ViewerPosition - Settings.Center).GetSafeNormal();
+		const FSphericalPlanetWorldMode* Planet = WorldMode.IsValid() && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet
+			? static_cast<const FSphericalPlanetWorldMode*>(WorldMode.Get()) : nullptr;
+		FarFieldGroundRadius = Settings.Radius + (Planet && !Direction.IsNearlyZero()
+			? static_cast<double>(Planet->GetTerrainAltitude(Direction, Configuration->NoiseParams)) : 0.0);
+		FarFieldGroundViewer = ViewerPosition;
+	}
+	View.GroundRadius = FarFieldGroundRadius;
+	// Within the unload distance of the ground point (plus a chunk's reach past its centre) the window may hold chunks;
+	// band patches reaching past three quarters of the load distance are built while covered, ready for when their
+	// chunks unload.
+	const double HalfDiagonal = 0.5 * UE_DOUBLE_SQRT_3 * Settings.ChunkWorldSize;
+	const double LoadDistance = LODStrategy ? LODStrategy->GetLoadDistance() : Configuration->ViewDistance;
+	const double UnloadDistance = LODStrategy ? LODStrategy->GetUnloadDistance() : Configuration->ViewDistance * 1.2;
+	View.BandRadius = UnloadDistance + HalfDiagonal;
+	View.PrebuildRadius = 0.75 * LoadDistance;
+	View.Time = FPlatformTime::Seconds();
+	// A new chunk fades in over the patch under it (voxel.MeshFade.Appear): hide the patch once it has.
+	static IConsoleVariable* FadeDuration = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MeshFade.Duration"));
+	View.HideDelay = (FadeDuration ? FMath::Max(0.0f, FadeDuration->GetFloat()) : 0.35f) + 0.1;
+	View.ChunkStateVersion = ChunkStateVersion;
+
+	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
+	FVoxelFarFieldChanges Changes;
+	FarField->Update(View, [this](const FIntVector& Coord) { return IsChunkDrawnForFarField(Coord); }, Changes);
+
+	// Apply: components go with their patches, are (re)filled when a patch is built, and show what the selection drew.
+	AActor* Owner = GetOwner();
+	UMaterialInterface* TerrainMaterial = MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr;
+	UMaterialInterface* WaterMaterial = Configuration->WaterMeshMaterial.Get();
+	const bool bUnderSea = Settings.bSea && FVector::DistSquared(ViewerPosition, Settings.Center) < Settings.SeaRadius * Settings.SeaRadius;
+	for (const uint64 Key : Changes.Removed)
+	{
+		if (TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key))
+		{
+			if (IsValid(*Found))
+			{
+				(*Found)->DestroyComponent();
+			}
+			FarFieldComponents.Remove(Key);
+		}
+		if (const FIntPoint* Size = FarFieldComponentSizes.Find(Key))
+		{
+			FarFieldComponentVertices -= Size->X;
+			FarFieldComponentIndices -= Size->Y;
+			FarFieldComponentSizes.Remove(Key);
+		}
+	}
+	for (const uint64 Key : Changes.Built)
+	{
+		const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindPatch(Key);
+		if (!Patch || !Patch->Mesh.IsValid() || !Owner)
+		{
+			continue;
+		}
+		const FVoxelFarFieldPatchMesh& Mesh = *Patch->Mesh;
+		TObjectPtr<UProceduralMeshComponent>& Component = FarFieldComponents.FindOrAdd(Key);
+		if (!IsValid(Component))
+		{
+			Component = MakePatchComponent(Owner, Mesh.Origin);
+		}
+		else
+		{
+			Component->ClearAllMeshSections();
+			Component->SetWorldLocation(Mesh.Origin);
+		}
+		SetPatchSection(Component, 0, Mesh.Terrain, false, TerrainMaterial);
+		// The sea's underside only near the voxel window: seen from under the water, the surface is only visible close by.
+		const bool bUnderside = Settings.bSea && !Mesh.Sea.IsEmpty() && Patch->Key.Level >= Settings.BandLevel - FarFieldUndersideLevels;
+		if (Settings.bSea && !Mesh.Sea.IsEmpty())
+		{
+			SetPatchSection(Component, 1, Mesh.Sea, false, WaterMaterial);
+			if (bUnderside)
+			{
+				SetPatchSection(Component, 2, Mesh.Sea, true, WaterMaterial);
+			}
+			Component->SetTranslucentSortPriority(0);
+		}
+		const int32 SeaCopies = Settings.bSea ? (bUnderside ? 2 : 1) : 0;
+		const FIntPoint Size(Mesh.Terrain.Positions.Num() + SeaCopies * Mesh.Sea.Positions.Num(),
+			Mesh.Terrain.Triangles.Num() + SeaCopies * Mesh.Sea.Triangles.Num());
+		if (const FIntPoint* Old = FarFieldComponentSizes.Find(Key))
+		{
+			FarFieldComponentVertices -= Old->X;
+			FarFieldComponentIndices -= Old->Y;
+		}
+		FarFieldComponentSizes.Add(Key, Size);
+		FarFieldComponentVertices += Size.X;
+		FarFieldComponentIndices += Size.Y;
+		// The component keeps its own copy.
+		FarField->ReleaseMesh(Key);
+	}
+	auto ApplyVisibility = [this, bUnderSea](uint64 Key)
+	{
+		const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindPatch(Key);
+		const TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key);
+		if (!Patch || !Found || !IsValid(*Found))
+		{
+			return;
+		}
+		UProceduralMeshComponent* Component = *Found;
+		const int32 Sections = Component->GetNumSections();
+		if (Sections > 0)
+		{
+			Component->SetMeshSectionVisible(0, Patch->bDrawTerrain);
+		}
+		if (Sections > 1)
+		{
+			Component->SetMeshSectionVisible(1, Patch->bDrawSea);
+		}
+		if (Sections > 2)
+		{
+			Component->SetMeshSectionVisible(2, Patch->bDrawSea && bUnderSea);
+		}
+	};
+	for (const uint64 Key : Changes.Visibility)
+	{
+		ApplyVisibility(Key);
+	}
+	// The sea's undersides show only while the viewer is inside the sea radius (as the ocean shell's).
+	if (bUnderSea != bFarFieldUndersideShown)
+	{
+		bFarFieldUndersideShown = bUnderSea;
+		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : FarFieldComponents)
+		{
+			ApplyVisibility(Pair.Key);
+		}
+	}
+
+	// Figures for the bench and vox.Planet.
+	FVoxelFarFieldStats& Stats = FarFieldStats;
+	Stats.bActive = true;
+	Stats.bDrawsSea = Settings.bSea;
+	Stats.Patches = FarField->GetPatchCount();
+	Stats.DrawnPatches = FarField->GetDrawnPatchCount();
+	Stats.DrawnTerrain = 0;
+	Stats.DrawnSea = 0;
+	Stats.HiddenBand = 0;
+	FarField->ForEachPatch([&Stats, &Settings](const FVoxelPlanetFarField::FPatchState& Patch)
+	{
+		Stats.DrawnTerrain += Patch.bDrawTerrain ? 1 : 0;
+		Stats.DrawnSea += Patch.bDrawSea ? 1 : 0;
+		Stats.HiddenBand += (Patch.Key.Level >= Settings.BandLevel && !Patch.bDrawTerrain && Patch.bCovered) ? 1 : 0;
+	});
+	Stats.PatchesBuilt = FarField->ConsumeBuiltCount();
+	Stats.BuildsPending = FarField->GetBuildsPending();
+	Stats.TotalBuilt = FarField->GetTotalBuilt();
+	Stats.BuildMsMean = Stats.TotalBuilt > 0 ? static_cast<float>(FarField->GetTotalBuildMs() / Stats.TotalBuilt) : 0.0f;
+	Stats.Components = FarFieldComponents.Num();
+	Stats.MemoryMB = static_cast<float>((FarField->GetMeshMemoryBytes() + EstimateBytes(FarFieldComponentVertices, FarFieldComponentIndices))
+		/ (1024.0 * 1024.0));
+	Stats.UpdateMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+}
+
+FString UVoxelChunkManager::GetFarFieldDebugString() const
+{
+	if (!FarField)
+	{
+		return TEXT("no far field (not a planet, voxel.World.FarField 0, or not a game world)");
+	}
+	const FVoxelFarFieldStats& Stats = FarFieldStats;
+	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
+	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s"),
+		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenBand, Stats.Components, Stats.BuildsPending,
+		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
+		Settings.Sink, Settings.bSea ? TEXT("far field") : TEXT("ocean shell / none"));
+}
+
 FString UVoxelChunkManager::GetFarOceanDebugString() const
 {
 	if (!FarOceanStatic)
@@ -3425,6 +3925,11 @@ FString UVoxelChunkManager::GetFarOceanDebugString() const
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 {
 	ConditioningZones.Add(Zone);
+	if (FarField && Zone.IsRadial() && FarField->GetSettings().Radius > 0.0)
+	{
+		// The far field's patches narrow enough to take zones rebuild with it (their old meshes draw until then).
+		FarField->InvalidateCap(Zone.Direction, (Zone.InnerRadius + Zone.FalloffWidth) / FarField->GetSettings().Radius);
+	}
 	if (Zone.IsRadial())
 	{
 		UE_LOG(LogVoxelStreaming, Log,
@@ -3449,6 +3954,10 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 
 void UVoxelChunkManager::ClearConditioningZones()
 {
+	if (FarField && ConditioningZones.Num() > 0)
+	{
+		FarField->InvalidateCap(FVector::UpVector, UE_DOUBLE_PI);
+	}
 	ConditioningZones.Reset();
 	OnTerrainConditioningChanged.Broadcast();
 }
@@ -4773,12 +5282,14 @@ void UVoxelChunkManager::SetChunkState(const FIntVector& ChunkCoord, EChunkState
 		State->State = NewState;
 		State->Descriptor.State = NewState;
 		State->LastStateChangeFrame = CurrentFrame;
+		++ChunkStateVersion;
 	}
 }
 
 void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 {
 	ChunkStates.Remove(ChunkCoord);
+	++ChunkStateVersion;
 	// Release any in-flight generation / mesh slot: its result belongs to the residency that just
 	// ended and is rejected on arrival (serial mismatch), so a reload dispatches fresh work instead
 	// of waiting on — or being completed by — the old job.
