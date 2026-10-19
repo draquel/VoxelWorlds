@@ -1475,6 +1475,10 @@ Three findings from §13.11 get IDs here:
 | G32 | Stale collision strips along chunk faces: a chunk whose collision is cooked before its +X or +Y neighbour's voxels exist keeps a boundary built without them, and nothing re-cooks it when the neighbour loads. In a streamed test world (DC, voxel 75, collision LOD 0) 20 of 3,185 down-traces over plain terrain missed, in voxel-wide strips beside chunk faces; all hit after every chunk was re-cooked once loaded. A capsule stands across such a strip, a line trace does not (found in G24's live check, §19.8's observations) | Deferred until after Phase 6 | — |
 | G33 | A system or editor edit (a POI's terraform) re-extracts scatter only for the edited chunk; the neighbours whose extraction reads its face voxels (a planet chunk's `TouchingEdits` from the seven +X / +Y / +Z neighbours, a heightmap chunk's `AboveLayerEdits`) keep a stale view of it until they reload (found in G31, §19.9; the same holds for G26's and G29's rules) | Deferred until after Phase 6 | — |
 | G34 | Wide flat cavity ceilings at about Z 0, the chunk layers' shared plane, under hills near every `VoxelDemo` stop: the layer below's top voxels air and the layer above's bottom voxels solid (1,700 such cells in chunk (−45, −24, 0) near the Tower; §19.5's things to know). Not verified whether the cave configuration means them | Deferred until after Phase 6 (unverified) | — |
+| G35 | A pawn teleported to the exact north pole of a planet kept its old tilt (54.7° off upright after a jump from the cube corner): `UVCMovementComponent::SnapUprightToGravity` skipped the engine's default gravity, which is exactly the north pole's (found in spherical Phase 6's baseline survey, §20.2) | Fixed in P6.1 (§20.2): the snap runs on a planet whatever the gravity; `VoxelCharacter.Planet.Fly` snaps a tilted body at every site | — |
+| G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (over the small planet's pole, inside M and L) and a settle from altitude never lands (§20.2) | Open: WM-BP10 (landing) and WM-BP11 (spawn at scale) | WM-BP10, WM-BP11 |
+| G37 | Planet POI queries by distance (claim streaming, `poi.Find`, the planet map markers) opened a cap from the chord of their range plus the origin's height, tens of degrees for an origin in the core or high above a big planet: frames of 30 s to 3 min on `Review_Planet_L`; registration generated every POI of the planet (8.2 million on L, 120 s) for a log line (§20.2) | Fixed in P6.1 (§20.2, WM-BP11's bounds brought forward): `FPOIPlacement::GetPlanetCapAngleWithin`, `GetPlanetSurveyAngle`; `POI.Planet.RegistrationBounded` | (WM-BP11) |
+| G38 | In-editor runs of the six suites lost the GPU device (`DXGI_ERROR_DEVICE_REMOVED`, `DRIVER_INTERNAL_ERROR`, seen at the creation of a 2 GB reserved buffer) at about the 128th render scene of the editor session. Tests that build worlds leave them to the garbage collector, and nothing collected garbage during a run: after a batch of 105 test worlds, 106 `UWorld`s were alive (1 after `obj gc`). The suites as they were build 124 and finished; P6.1's tests took them past the limit (every run that reached 127 scenes lost the device, on the base worktree too, and none that stayed at 126 or under). Headless runs are unaffected | Fixed in P6.1: the game module collects garbage when a test ends with 32 test worlds pending (`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`, `vox.Tests.GCEveryWorlds`); 529/529 in the editor with no device loss (§20.2) | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -4697,7 +4701,8 @@ uu, 2.5 km) complete; Phase 6 makes planets **up to about 1,000 km** in radius w
 and from altitude, and lets the player **fly to orbit and back**. Scope decisions SD1 (small planets) and SD5 (surface
 only) are revised by D17 and D18 below. Every decision the plan needs (D17-D24) was taken on 2026-10-17.
 
-Not executed yet. The loose ends went first, each in its own session; as of 2026-10-18 all that block it are fixed:
+In progress: P6.1 (guardrails and baseline) done 2026-10-18, §20.2. The loose ends went first, each in its own session; as of
+2026-10-18 all that block it are fixed:
 
 - Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6), G30 (§19.7), G24
   (§19.8) and G31 (§19.9; planet scatter samples one family of radial rays, D26).
@@ -4862,3 +4867,171 @@ side, gitlinks, doc map).
 
 **Left for later.** Earth scale (D17); other bodies and a landable second planet (D18); gameplay flight and gravity
 falloff (D20); edits, caves and overhangs in the far field; frustum culling in the LOD strategy (a no-op today).
+
+### 20.2 P6.1 results: guardrails and baseline (2026-10-18)
+
+Bases: VoxelWorlds `82a9f6a`, UE5_PluginDev `2ebdad5` (G31 merged). Branches `feat/spherical-p6-1-guardrails`
+(VoxelWorlds, VoxelCharacterPlugin) and `claude/spherical-p6-1-guardrails` (UE5_PluginDev), one commit per work item.
+WM-BP11's two POI bounds were brought forward into this milestone (below): `Review_Planet_L` was unplayable without them.
+
+**WM-BP1: the test planets.** `Scripts/setup_planet_test.py` (`SCALED_ONLY`) builds `Review_Planet_M` and
+`Review_Planet_L` from `Review_Planet`, each with its own copy of the biome configuration (`Review_Planet_<X>_Biomes`).
+The relief grows without steepening the ground: the terrain noise's base wavelength and `PlanetHeightScale` grow by the
+same factor K and the noise gains log2(K) octaves, so its K-th octave is the demo's first (the same slope per octave, the
+same walking-scale detail) under larger landforms; continentalness carries the km-scale offsets
+(`UVoxelBiomeConfiguration::ScaleContinentalnessHeights`), and continents and climate zones grow with the planet. The
+shells are the terrain's extent (`UVoxelWorldConfiguration::GetPlanetTerrainExtent`, the settings check's numbers) plus
+10%, under D24's clamps (`PlanetMaxTerrainHeight`, `PlanetMaxTerrainDepth` and `PlanetHeightScale` now clamp at
+1,000,000; the noise and climate frequencies clamp lower, UI metadata only).
+
+| | Review_Planet | Review_Planet_M | Review_Planet_L |
+|---|---|---|---|
+| Radius | 250,000 (2.5 km) | 5,000,000 (50 km) | 100,000,000 (1,000 km) |
+| Terrain noise | 2.5e-5 x 3 octaves, height scale 6,000 | K 16: 1.56e-6 x 7, 96,000 | K 64: 3.91e-7 x 9, 384,000 |
+| Continentalness offsets | ±3,000 | ±150,000 (x 50) | ±500,000 (x 166.7) |
+| Continents / climate wavelength | 500 m / 200 m and 140 m (the demo's) | 60 km / 15 km and 11 km | 1,200 km / 250 km and 180 km |
+| Terrain extent / shell | ±6,000 / 6,500 | ±198,000 / 218,000 | ±692,000 / 762,000 |
+| Sea under the datum | 500 | 25,000 | 83,333 |
+| POI cells / NPC cells a face edge | 7 / 40 | 123 / 786 | 2,455 / 15,708 |
+
+**The baseline, as shipped.** Live on `PlanetTest` with `voxel.ConfigOverride` (screenshots
+`Saved/Screenshots/Claudius/p6_base_{M,L}_{45N,equator,corner,pole}_{ground,above}.png` in the worktree), with the precision
+probe below and the benches further down.
+
+- *Getting onto a big planet.* The map's PlayerStart sits over the small planet's pole (z 254,500), inside M's and L's
+  cores, and the spawn search (`FindSpawnablePosition`, by direction) looks for land within 50,000 uu of arc: M's and L's
+  north poles are open sea with no land that close, so the pawn waits in the core for terrain that never streams (G36).
+  Every survey started with `vox.TPLatLon`. L's cube corner and pole are open sea too (the pawn swims there).
+- *L would not run* (before the POI bounds below): PIE start spent 120 s generating the planet's 8.2 million POIs for a log
+  line, and then each frame took 30 s to 3 min, because the planet map markers and the claim streaming generated their POIs
+  over a cap that grew with the query origin's height over the datum (the pawn in the core: 1,000 km; at 2 R: 2,000 km)
+  (G37). With the bounds, L starts in seconds and runs at the frame rates below.
+- *The voxel window.* With km-scale relief the shell is thicker than the view distance, so the window is the whole sphere
+  of 40,000 uu around the viewer: 2,800-3,000 chunks on M and L (radial layers from −25 to 34 depending on the site; LOD 0/1/2 about 18/110/2,600),
+  against about 1,000 on the small planet, whose shell is 3.7 chunks thick. Nothing is drawn past it but the sea sphere:
+  from 115 m over M's ground the window ends in a chunk staircase against that sphere, and on L, where the sea lies 83,333
+  under the datum, the 400 m window floats about 1.5 km over the sea sphere (`p6_base_L_45N_above.png`). The horizon from
+  the ground is 5.8 km on M (14 times the window's reach) and 37 km on L.
+- *Precision on L.* Visible from the ground: straight dark lines along chunk faces (the vertices' absolute float offsets)
+  and striped ground material (the triplanar node's absolute world position). The probe's numbers are below.
+- *Altitude.* Up to 2 R over the south pole of every planet the pawn lives (KillZ and the outer bound, WM-BP2); from the
+  orbit camera at 2 R the planet is the sea sphere alone (`p6_space_p6base_{S,M,L2}_orbit2R.png`): a plain blue ball in the
+  small planet's 60 km atmosphere, with a thin limb on L. The voxel window is empty from about the view distance up.
+- *The exact north pole* (G35, fixed): a pawn teleported there from elsewhere on the planet kept its old tilt (54.7° off
+  upright after a jump from the cube corner), because `SnapUprightToGravity` skipped the default gravity, which is exactly
+  the north pole's.
+
+The precision probe (`VoxelWorlds.WorldModes.Planet.PrecisionProbe`, headless; the surface chunk at each site generated on
+the CPU and compared with a double reference, caves off; a density step is 0.59 uu at voxel 75):
+
+| Planet, site | Voxels within 2 of the surface with another density (max steps) | Float SDF error | Density-gradient normals off (P95 / max) | A surface vertex as an absolute `FVector3f` |
+|---|---|---|---|---|
+| Small, all four | 0.4% (1) | 0.02 uu | 0.00° / 0.6° | 0.01 uu |
+| M, pole / 45° / equator / corner | 14% (1) | 0.50 uu (0.8 steps) | 0.39-0.56° / 0.7-1.15° | 0.00-0.20 uu |
+| L, pole | 47% (14) | 7.9 uu (13 steps) | 4.1° / 5.9° | 0.00 uu |
+| L, 45° | 47% (14) | 7.9 uu | 4.6° / 6.5° | 2.2 uu |
+| L, equator | 48% (14) | 7.9 uu | 5.6° / 8.2° | 1.8 uu |
+| L, cube corner | 48% (13) | 7.8 uu | 2.9° / 4.0° | 3.2 uu |
+
+The terrain noise's own inputs are fine at L (its top octave's float spacing is 2.4 × 10⁻⁴ of a feature, since the
+position is multiplied by the frequency before the float cast), but a 100 uu feature sampled at an absolute position (caves,
+ore) jitters by 8% of itself, and the 256-unit period repeats the terrain's top octave 61 times around L's equator (its base
+octave once, continents and climate under once). The SDF's cancellation at magnitude R is what shows: 13 density steps of
+terraces and normals off by up to 8° on L. WM-BP4 to WM-BP7 take each of these.
+
+**WM-BP2: guardrails at altitude.**
+
+- *KillZ and the outer bound.* `UVoxelWorldConfiguration::PlanetOrbitCeiling` (0 = 3 R) →
+  `FSphericalPlanetParams::OrbitCeiling` → `FVoxelWorldBounds::OrbitRadius` (the datum plus the ceiling).
+  `ComputePlanetKillZ` puts KillZ a chunk below the centre minus the orbit radius (−4 × 10⁸ − 4,800 on L), and
+  `AVCCharacterBase::IsOutOfWorld` counts a pawn past the orbit radius as out of the world (it falls out and respawns).
+- *Flight* (D20, QA only). `UVCMovementComponent::SetDebugFlight` / `SetFlightClimb`: `MOVE_Flying` with the movement
+  input across local up, a climb along it (hands-free, or the jump / crouch keys held) at up to `MaxFlySpeed`, and with no
+  climb the distance from the centre held, so a flight across a planet keeps its altitude (straight lines rise off a
+  sphere; the hold takes that back each frame). A flyer stays upright (`ShouldRemainVertical`) and never turns into a
+  swimmer; stopping drops it into a fall. `vox.Fly [0|1] [climb] [speed]` drives it (the speed raises the acceleration too,
+  restored on landing); `vox.TPLatLon lat lon alt 0 1` holds an altitude.
+- *The orbit camera.* `vox.Orbit <altitude|0> [period] [lat lon]`: a transient camera on the great circle through the point
+  heading east, or a fixed look-down, looking at the centre. It is the view target and so the streaming viewer; the pawn is
+  held, and settles onto the ground when the camera is released.
+- *The load budget* counts the viewer's 3D speed on a planet (`ViewerLoadSpeed`; heightmap worlds keep the horizontal one),
+  so a climb at a pole or a flight north raises it as a walk east does.
+- *`vox.Planet`* adds the orbit radius, the streaming viewer's altitude, the voxel window
+  (`UVoxelChunkManager::GetResidencySnapshot`: tracked and ready chunks, per LOD, per radial layer, the farthest chunk from
+  the viewer and from its ground point) and the far field's state (`GetFarFieldStats`, inactive until WM-BP9), and the
+  pawn's flight.
+- `FChunkDescriptor::GetUniqueID` (16-bit packing, no callers) is gone; `LOD_SYSTEM.md`'s planet section (SP-C3) now
+  describes the shell window, the 3D load horizon and the tangent-sum cull as the code has them.
+
+Live, on the small planet, M and L: hold 2 R over the south pole for 20 s (flying, gravity +Z, alive), descend for about 20 s at
+R/40 a second (125,293 uu on the small planet, 2,506,301 on M, 50,133,440 on L), the orbit camera
+at 2 R over the pawn, release. Never killed. On release the small planet's pawn settled on land at 88.9°S; on M and L the
+south pole is open sea with no land within the search's 50,000 uu of arc, so the settle never found ground and the pawn
+stayed held at its altitude (G36; landing is WM-BP10's).
+
+**WM-BP3: the bench at scale.** New CSV columns: `Altitude`, `LOD0N`-`LOD4N` (ready chunks per committed LOD), `ReachUU`
+and `GroundReachUU`, `BatchesN` and `BatchSkipN` (mesh batches drawn and skipped since the last sample, counted by every
+`FVoxelSceneProxy::GetDynamicMeshElements` call, main views and shadow gathers alike: `FVoxelBatchCounters`), `GenDoneN`
+(chunks generated this tick), `FarFieldMs` and `FarFieldPatchN` (zero until WM-BP9). The layer residency is radial on a
+planet (`layerKind`); the JSON adds the altitude range, `readyByLODMeanMax`, the reach, batch percentiles,
+`generatedChunks` / `generatedPerSec` and the far field's figures. A climb is `climb=Lat:Lon[:Alt]` (along local up from
+Alt over the generated ground; the distance is the climb) or `dir=up` with any start, recorded as path `climb`.
+
+Baseline benches (PIE, GPU generation, one run each): a great circle at 45°N heading east 300 over the ground
+(`gc=45:20:90 follow=300`, 40,000 uu at 1,500 uu/s) and a climb from 200 over the ground at 45°N 20°E
+(`climb=45:20:200`, 60,000 uu at 1,500 uu/s):
+
+| | Peak loaded | Ready by LOD 0/1/2 (mean) | Radial layers | Reach / from the ground point | Frame P50 / P95 | Manager P95 | Generated / s | Batches drawn P50 / P95 | Voxel systems peak |
+|---|---|---|---|---|---|---|---|---|---|
+| Small, great circle | 1,347 | 18 / 103 / 1,182 | −3 to 2 | 48,000 / 48,770 | 16.9 / 30.3 ms | 8.0 ms | 24 | 1,950 / 2,090 | 784 MB |
+| Small, climb to 57,600 | 1,346 | 5 / 31 / 782 | −3 to 2 | 48,000 / 48,272 | 16.7 / 16.7 | 2.0 | 0.2 | 1,895 / 2,490 | 988 |
+| M, great circle | 2,849 | 18 / 106 / 2,512 | −2 to 15 | 48,000 / 77,708 | 18.1 / 35.9 | 11.1 | 59 | 390 / 740 | 1,035 |
+| M, climb to 93,700 | 2,942 | 17 / 112 / 2,613 | −2 to 27 | 48,000 / 130,711 | 16.7 / 28.7 | 8.2 | 72 | 262 / 514 | 1,063 |
+| L, great circle | 2,862 | 18 / 109 / 2,606 | 6 to 24 | 48,000 / 118,125 | 18.6 / 40.7 | 11.5 | 49 | 386 / 775 | 1,060 |
+| L, climb to 130,400 | 3,012 | 18 / 112 / 2,726 | 6 to 34 | 48,000 / 166,244 | 16.7 / 25.8 | 8.1 | 68 | 1 / 288 | 1,078 |
+
+On the small planet the climb empties the window (its mean ready chunks fall to 818 and generation stops, the viewer
+outgrowing the thin shell); on M and L the window rises with the viewer through the thick shell, keeping about 2,900 chunks
+whose ground point recedes (the reach from it grows to 130,000-166,000), and loses the ground under it: the planet's G13
+(WM-BP8). Batches drawn fall as the window leaves the surface. All within D3's 1.5 GB peak.
+
+**WM-BP11, brought forward: POI work bounded on big planets.** `FPOIPlacement::GetPlanetCapAngleWithin`: the cap a query
+by distance generates is the set of directions holding a point of the terrain shell within the range of the origin (the
+law of cosines minimised over the shell's radii). The claim streaming check, `poi.Find` and the planet map markers used
+the chord of the range plus the origin's height, which opened a cap of tens of degrees for an origin inside the planet or
+high above it; on the datum the new cap is the chord's angle, far above with the minimap's range it is empty.
+`GetPlanetSurveyAngle`: registration's statistics survey covers a cap of about 100,000 cells around the north pole (all of
+the small planet and of M, 6° of L: 5,368 POIs in 0.2 s, where all of L was 8.2 million in 120 s). The rest of WM-BP11 (the
+world map's zoom range, `ExploreAll`, NPC densities, the spawn search) stays in P6.5.
+
+**Tests.** New: `VoxelWorlds.Streaming.Planet.KillZSpace`, `VoxelWorlds.Bench.Planet.ClimbRoute`,
+`VoxelWorlds.WorldModes.Planet.PrecisionProbe` (reports), `VoxelWorlds.POI.Planet.RegistrationBounded`,
+`VoxelCharacter.Planet.Fly`; changed: `Streaming.Planet.KillZ` (the ceiling), `VoxelCharacter.Planet.OutOfWorld` (the
+outer bound). `KillZSpace` is pure (the factory's world mode and `ComputePlanetKillZ`, up to L); `Streaming.Planet.KillZ`
+checks the chunk manager's world.
+
+**Test hygiene (G38).** With P6.1's tests in, in-editor runs of the six suites lost the GPU device
+(`DXGI_ERROR_DEVICE_REMOVED`) near their end. Bisected on a base worktree and counted in the logs: every run that reached
+127 render scenes in the editor session (the editor's two and the tests' worlds) lost the device, on the base worktree
+too, and none that stayed at 126 or under; the suites as they were build 124. Tests that build worlds leave them to the
+garbage collector, and nothing collects garbage during an automation run: after a batch of 105 test worlds 106 `UWorld`s
+were alive, 1 after `obj gc`, and with a collection between two such batches 210 ran clean in one session. The game
+module now collects garbage when a test ends with 32 test worlds pending
+(`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`, `vox.Tests.GCEveryWorlds`, 0 = off): three
+collections of 73-127 ms in a run of the six suites.
+
+**Suites.** Headless 529/529. In the editor (D3D12) 529/529 with no device loss (and none in the minute after the
+run), and the 87 GPU parity lines identical to the base's by CRC (no generation change in P6.1).
+
+**New findings.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G35 | A pawn teleported to the exact north pole kept its old tilt: `UVCMovementComponent::SnapUprightToGravity` skipped the engine's default gravity, which is the north pole's | Fixed in P6.1 (VoxelCharacter.Planet.Fly checks every site) |
+| G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (which lies inside M and L) and a settle from altitude never lands | Open, WM-BP10 (landing) and WM-BP11 (spawn at scale) |
+| G37 | Planet POI queries opened a cap from the chord of their range plus the origin's height: frames of 30 s to 3 min on L with the pawn in the core or high above; registration generated every POI of the planet for a log line | Fixed in P6.1 (WM-BP11's bounds, above) |
+| G38 | In-editor runs lost the GPU device at about the 128th test world of the session: nothing collected garbage during a run, so every test world and its render scene stayed alive (the suites as they were build 124; P6.1's tests took them past it) | Fixed in P6.1 (the game module collects garbage between tests, above) |
+
+**Left for the next milestones.** P6.2 (precision): WM-BP4 to WM-BP7 against the probe's table, the GPU checked against
+the CPU at L sites. Seen on L from the ground: the window's sunken edge and seam lines (WM-BP7), the striped ground
+material (WM-BP7's material item).
