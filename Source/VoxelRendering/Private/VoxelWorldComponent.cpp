@@ -541,6 +541,7 @@ void UVoxelWorldComponent::UpdateWaterTileFromCPUData(
 		return;
 	}
 
+	WaterTileKeys.Add(TileCoord);
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -557,6 +558,7 @@ void UVoxelWorldComponent::RemoveWaterTile(const FIntVector2& TileCoord)
 {
 	check(IsInGameThread());
 
+	WaterTileKeys.Remove(TileCoord);
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -573,6 +575,7 @@ void UVoxelWorldComponent::ClearAllWaterTiles()
 {
 	check(IsInGameThread());
 
+	WaterTileKeys.Empty();
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -1642,7 +1645,12 @@ void UVoxelWorldComponent::SetUseSmoothMeshing(bool bUseSmooth)
 	if (bUseSmoothMeshing != bUseSmooth)
 	{
 		bUseSmoothMeshing = bUseSmooth;
-		UpdateMaterialAtlasParameters();
+		// Before the material instance exists there is nothing to update (CreateVoxelMaterialInstance applies the mode);
+		// a planet's renderer configures a component per render region this way (WM-BP7)
+		if (DynamicMaterialInstance)
+		{
+			UpdateMaterialAtlasParameters();
+		}
 	}
 }
 
@@ -1733,6 +1741,20 @@ bool UVoxelWorldComponent::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
 	bRenderDataLost = false;
 	ChunkInfoMap.GetKeys(OutChunks);
 	return true;
+}
+
+bool UVoxelWorldComponent::HasRenderContent() const
+{
+	check(IsInGameThread());
+	{
+		FScopeLock Lock(&ChunkInfoLock);
+		if (ChunkInfoMap.Num() > 0)
+		{
+			return true;
+		}
+	}
+	return SeamBucketSlotMasks.Num() > 0 || WaterTileKeys.Num() > 0 || ActiveFades.Num() > 0 || FadeScheduler.Num() > 0
+		|| HasPendingOperations() || PendingHoldReleases.Num() > 0;
 }
 
 void UVoxelWorldComponent::GetLoadedChunks(TArray<FIntVector>& OutChunks) const

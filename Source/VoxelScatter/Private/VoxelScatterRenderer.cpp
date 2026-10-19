@@ -101,6 +101,7 @@ void UVoxelScatterRenderer::Shutdown()
 		}
 	}
 	HISMComponents.Empty();
+	AllHISMComponents.Empty();
 
 	// Destroy container actor
 	if (ContainerActor)
@@ -330,7 +331,9 @@ void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord
 		return Add.ChunkCoord == ChunkCoord && Add.ScatterTypeID == ScatterTypeID;
 	});
 
-	FHISMInstancePool* Pool = InstancePools.Find(ScatterTypeID);
+	// The chunk's HISM: its type's in the chunk's render region (WM-BP7)
+	const FVoxelScatterHISMKey Key{ ScatterTypeID, Regions.GetRegion(ChunkCoord) };
+	FHISMInstancePool* Pool = InstancePools.Find(Key);
 	if (!Pool)
 	{
 		// No pool means no instances were ever added for this type — just update tracking
@@ -365,18 +368,20 @@ void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord
 
 	// Zero-scale all instances and move to free list
 	UHierarchicalInstancedStaticMeshComponent* HISM = nullptr;
-	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMComponents.Find(ScatterTypeID))
+	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMComponents.Find(Key))
 	{
 		HISM = Found->Get();
 	}
 
 	if (HISM)
 	{
+		// Parked at the HISM's own origin (local space): its region's origin, the world origin on a heightmap world (as
+		// before), so a region's bounds never reach back to the world origin
 		const FTransform ZeroTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
 		for (int32 Index : *Indices)
 		{
 			HISM->UpdateInstanceTransform(Index, ZeroTransform,
-				/*bWorldSpace=*/true, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+				/*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
 		}
 		HISM->MarkRenderStateDirty();
 	}
@@ -424,7 +429,7 @@ void UVoxelScatterRenderer::ClearAllInstances()
 
 // ==================== HISM Management ====================
 
-UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHISM(int32 ScatterTypeID)
+UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHISM(int32 ScatterTypeID, const FIntVector& Region)
 {
 	if (!bIsInitialized || !ScatterManager || !ContainerActor)
 	{
@@ -432,7 +437,8 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 	}
 
 	// Check if already exists
-	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* ExistingHISM = HISMComponents.Find(ScatterTypeID))
+	const FVoxelScatterHISMKey Key{ ScatterTypeID, Region };
+	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* ExistingHISM = HISMComponents.Find(Key))
 	{
 		return ExistingHISM->Get();
 	}
@@ -455,13 +461,26 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 	}
 
 	// Create new HISM
-	UHierarchicalInstancedStaticMeshComponent* HISM = CreateHISMComponent(*Definition);
+	UHierarchicalInstancedStaticMeshComponent* HISM = CreateHISMComponent(*Definition, Region);
 	if (HISM)
 	{
-		HISMComponents.Add(ScatterTypeID, HISM);
+		HISMComponents.Add(Key, HISM);
+		AllHISMComponents.Add(HISM);
 	}
 
 	return HISM;
+}
+
+void UVoxelScatterRenderer::GetTypeHISMs(int32 ScatterTypeID, TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>>& OutHISMs) const
+{
+	OutHISMs.Reset();
+	for (const auto& Pair : HISMComponents)
+	{
+		if (Pair.Key.ScatterTypeID == ScatterTypeID && Pair.Value)
+		{
+			OutHISMs.Emplace(Pair.Key.Region, Pair.Value.Get());
+		}
+	}
 }
 
 void UVoxelScatterRenderer::RefreshAllComponents()
@@ -474,7 +493,7 @@ void UVoxelScatterRenderer::RefreshAllComponents()
 	// Update configuration for all existing HISM components
 	for (auto& Pair : HISMComponents)
 	{
-		const int32 ScatterTypeID = Pair.Key;
+		const int32 ScatterTypeID = Pair.Key.ScatterTypeID;
 		UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value;
 
 		if (!HISM)
@@ -549,9 +568,9 @@ int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 int32 UVoxelScatterRenderer::GetChunkInstanceCount(const FIntVector& ChunkCoord, int32 ScatterTypeID) const
 {
 	int32 Count = 0;
-	for (const TPair<int32, FHISMInstancePool>& Pair : InstancePools)
+	for (const auto& Pair : InstancePools)
 	{
-		const TArray<int32>* Indices = (ScatterTypeID == INDEX_NONE || Pair.Key == ScatterTypeID) ? Pair.Value.ChunkInstanceIndices.Find(ChunkCoord) : nullptr;
+		const TArray<int32>* Indices = (ScatterTypeID == INDEX_NONE || Pair.Key.ScatterTypeID == ScatterTypeID) ? Pair.Value.ChunkInstanceIndices.Find(ChunkCoord) : nullptr;
 		Count += Indices ? Indices->Num() : 0;
 	}
 	for (const FPendingInstanceAdd& Add : PendingInstanceAdds)
@@ -570,29 +589,37 @@ TArray<int32> UVoxelScatterRenderer::GetChunkScatterTypes(const FIntVector& Chun
 bool UVoxelScatterRenderer::FindNearestInstance(int32 ScatterTypeID, const FVector& Location, float Radius, int32& OutIndex, FTransform& OutTransform) const
 {
 	OutIndex = INDEX_NONE;
-	const TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMComponents.Find(ScatterTypeID);
-	UHierarchicalInstancedStaticMeshComponent* HISM = Found ? Found->Get() : nullptr;
-	if (!HISM || Radius <= 0.0f)
+	if (Radius <= 0.0f)
 	{
 		return false;
 	}
-	// The sphere overlap uses instance bounds; a tall tree whose base is a little outside the radius
-	// still reports, so the base distance is re-checked below.
-	const TArray<int32> Candidates = HISM->GetInstancesOverlappingSphere(Location, Radius, /*bSphereInWorldSpace=*/true);
+	// Every region's HISM of the type (one at the world origin unless a planet splits them, WM-BP7); OutIndex is the
+	// instance's index in its region's HISM.
 	float BestDist = Radius;
-	for (int32 Index : Candidates)
+	for (const auto& Pair : HISMComponents)
 	{
-		FTransform Xf;
-		if (!HISM->GetInstanceTransform(Index, Xf, /*bWorldSpace=*/true) || Xf.GetScale3D().IsNearlyZero())
+		UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value.Get();
+		if (Pair.Key.ScatterTypeID != ScatterTypeID || !HISM)
 		{
-			continue; // hidden (free-list) instance
+			continue;
 		}
-		const float Dist = FVector::Dist(Xf.GetLocation(), Location);
-		if (Dist <= BestDist)
+		// The sphere overlap uses instance bounds; a tall tree whose base is a little outside the radius
+		// still reports, so the base distance is re-checked below.
+		const TArray<int32> Candidates = HISM->GetInstancesOverlappingSphere(Location, BestDist, /*bSphereInWorldSpace=*/true);
+		for (int32 Index : Candidates)
 		{
-			BestDist = Dist;
-			OutIndex = Index;
-			OutTransform = Xf;
+			FTransform Xf;
+			if (!HISM->GetInstanceTransform(Index, Xf, /*bWorldSpace=*/true) || Xf.GetScale3D().IsNearlyZero())
+			{
+				continue; // hidden (free-list) instance
+			}
+			const float Dist = FVector::Dist(Xf.GetLocation(), Location);
+			if (Dist <= BestDist)
+			{
+				BestDist = Dist;
+				OutIndex = Index;
+				OutTransform = Xf;
+			}
 		}
 	}
 	return OutIndex != INDEX_NONE;
@@ -607,7 +634,7 @@ void UVoxelScatterRenderer::SetSurfaceScatterVisible(bool bVisible)
 
 	for (auto& Pair : HISMComponents)
 	{
-		const int32 ScatterTypeID = Pair.Key;
+		const int32 ScatterTypeID = Pair.Key.ScatterTypeID;
 		UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value;
 		if (!HISM)
 		{
@@ -661,7 +688,7 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 
 // ==================== Internal Methods ====================
 
-UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComponent(const FScatterDefinition& Definition)
+UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComponent(const FScatterDefinition& Definition, const FIntVector& Region)
 {
 	if (!ContainerActor)
 	{
@@ -714,8 +741,10 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 		}
 	}
 
-	// Create component name
-	FName ComponentName = *FString::Printf(TEXT("HISM_%s_%d"), *Definition.Name, Definition.ScatterID);
+	// Create component name (one HISM per type and render region when a planet splits them, WM-BP7)
+	FName ComponentName = Regions.IsSplit()
+		? FName(*FString::Printf(TEXT("HISM_%s_%d_R%d_%d_%d"), *Definition.Name, Definition.ScatterID, Region.X, Region.Y, Region.Z))
+		: FName(*FString::Printf(TEXT("HISM_%s_%d"), *Definition.Name, Definition.ScatterID));
 
 	// Create HISM component
 	UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(
@@ -730,8 +759,10 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 		return nullptr;
 	}
 
-	// Attach to container actor
+	// Attach to container actor (at the world origin), located at the region's origin (WM-BP7): the world origin when the
+	// world is not split, as before
 	HISM->AttachToComponent(ContainerActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+	HISM->SetRelativeLocation(Regions.GetRegionOrigin(Region));
 
 	// Set mesh
 	HISM->SetStaticMesh(Mesh);
@@ -930,7 +961,9 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 			continue;
 		}
 
-		UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(PendingAdd.ScatterTypeID);
+		// The chunk's region's HISM of the type (WM-BP7)
+		const FIntVector Region = Regions.GetRegion(PendingAdd.ChunkCoord);
+		UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(PendingAdd.ScatterTypeID, Region);
 		if (!HISM)
 		{
 			// Can't create HISM for this type — discard
@@ -938,7 +971,7 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 			continue;
 		}
 
-		FHISMInstancePool& Pool = InstancePools.FindOrAdd(PendingAdd.ScatterTypeID);
+		FHISMInstancePool& Pool = InstancePools.FindOrAdd(FVoxelScatterHISMKey{ PendingAdd.ScatterTypeID, Region });
 		TArray<int32>& ChunkIndices = Pool.ChunkInstanceIndices.FindOrAdd(PendingAdd.ChunkCoord);
 
 		const int32 TotalNeeded = PendingAdd.Transforms.Num();

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "IVoxelMeshRenderer.h"
 #include "VoxelChunkGPUData.h"
+#include "VoxelRenderRegions.h"
 
 class UVoxelWorldComponent;
 class UMaterialInterface;
@@ -24,6 +25,11 @@ class UVoxelWorldConfiguration;
  * - Custom 28-byte vertex format
  * - LOD morphing support
  * - Per-chunk frustum culling
+ * - Render regions on planets (spherical Phase 6, WM-BP7, D23): one UVoxelWorldComponent per region of
+ *   voxel.Render.RegionChunks^3 chunks, located at the region's origin, so vertices are stored in float relative to it
+ *   and keep their precision at any distance from the world origin (FVoxelRenderRegions). Chunks, seams (by their
+ *   owner) and water tiles go to their region's component; settings go to every component and are replayed on a new
+ *   one; a region's component is retired once it holds nothing. Heightmap worlds keep one component at the origin.
  *
  * Thread Safety: All public methods must be called from game thread
  *
@@ -125,10 +131,21 @@ public:
 	// ==================== Custom VF Specific ====================
 
 	/**
-	 * Get the world component used for rendering.
+	 * Get the world component used for rendering: the only one on a heightmap world; on a planet the primary one (region
+	 * (0, 0, 0), kept for the renderer's lifetime; the others come and go with their regions, GetRegionComponents).
 	 * May return nullptr if not initialized.
 	 */
 	UVoxelWorldComponent* GetWorldComponent() const { return WorldComponent; }
+
+	/** The render regions this renderer splits the world into (one at the origin on heightmap worlds). */
+	const FVoxelRenderRegions& GetRenderRegions() const { return Regions; }
+
+	/**
+	 * Every live world component by region (spherical Phase 6, WM-BP7).
+	 *
+	 * @param OutComponents Region coordinate and component pairs
+	 */
+	void GetRegionComponents(TArray<TPair<FIntVector, UVoxelWorldComponent*>>& OutComponents) const;
 
 private:
 	// ==================== Internal Helpers ====================
@@ -156,6 +173,23 @@ private:
 	/** Calculate chunk bounds from mesh data */
 	FBox CalculateChunkBounds(const FIntVector& ChunkCoord) const;
 
+	// ==================== Render Regions (WM-BP7) ====================
+
+	/** The component of a chunk's (or seam owner's) region, or null when that region has none. */
+	UVoxelWorldComponent* FindRegionComponent(const FIntVector& ChunkCoord) const;
+
+	/** The component of a chunk's region, created (configured with every setting so far) when it has none. */
+	UVoxelWorldComponent* GetOrCreateRegionComponent(const FIntVector& ChunkCoord);
+
+	/** A configured, registered component at a region's origin. */
+	UVoxelWorldComponent* CreateRegionComponent(const FIntVector& Region);
+
+	/** Retire the components of regions that hold nothing any more (never the primary one). */
+	void RetireEmptyRegions();
+
+	/** The region a water tile's chunk column belongs to (its z-0 chunk). */
+	FIntVector WaterTileChunk(const FIntVector2& TileCoord) const { return FIntVector(TileCoord.X, TileCoord.Y, 0); }
+
 	// ==================== State ====================
 
 	/** Whether renderer has been initialized */
@@ -167,8 +201,23 @@ private:
 	/** World configuration */
 	TWeakObjectPtr<const UVoxelWorldConfiguration> CachedConfig;
 
-	/** World component for rendering (prevent GC via AddToRoot) */
+	/** The primary world component (owned by the container actor; GetWorldComponent) */
 	TObjectPtr<UVoxelWorldComponent> WorldComponent;
+
+	/** The render regions (FVoxelRenderRegions::FromConfig) */
+	FVoxelRenderRegions Regions;
+
+	/** Every live world component by region coordinate, the primary one included (owned by the container actor) */
+	TMap<FIntVector, TObjectPtr<UVoxelWorldComponent>> RegionComponents;
+
+	/** Settings replayed on a new region component */
+	TWeakObjectPtr<UVoxelMaterialAtlas> CurrentAtlas;
+	TWeakObjectPtr<UMaterialParameterCollection> CurrentLODCollection;
+	bool bHasLODDistances = false;
+	float LODStartDistance = 0.0f;
+	float LODEndDistance = 0.0f;
+	bool bHasViewerPosition = false;
+	FVector CurrentViewerPosition = FVector::ZeroVector;
 
 	/** Container actor for the component */
 	TWeakObjectPtr<AActor> ContainerActor;

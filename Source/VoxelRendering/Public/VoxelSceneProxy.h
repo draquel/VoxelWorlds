@@ -520,13 +520,29 @@ private:
 	/** Voxel size in world units */
 	float VoxelSize;
 
-	/** Face types against a planet's radial up (UVoxelWorldComponent::SetRadialFaceUp), copied at creation */
+	/**
+	 * Where this proxy's primitive sits: its component's location, copied at creation (spherical Phase 6, WM-BP7, D23).
+	 * Vertex positions are stored in float relative to it (ToRenderOffset): a render region's origin on a planet, the
+	 * world origin (0, 0, 0) on heightmap worlds, whose positions are therefore absolute as before. Per-chunk culling
+	 * bounds stay in world space.
+	 */
+	FVector RenderOrigin = FVector::ZeroVector;
+
+	/** A chunk, seam or tile origin as the float offset its vertices are stored at (relative to RenderOrigin). */
+	FORCEINLINE FVector3f ToRenderOffset(const FVector& WorldPosition) const
+	{
+		return FVector3f(WorldPosition - RenderOrigin);
+	}
+
+	/** Face types against a planet's radial up (UVoxelWorldComponent::SetRadialFaceUp), copied at creation; the centre
+	 *  relative to RenderOrigin, as the vertices are */
 	bool bRadialFaceUp = false;
 	FVector3f FaceUpCenter = FVector3f::ZeroVector;
 
 	/**
 	 * A mesher vertex converted for upload (spherical SP-D3): on a planet the face type is measured against the radial
-	 * up at the vertex's world position (Vertex.Position + Offset); otherwise FVoxelLocalVertex::FromVoxelVertex as is.
+	 * up at the vertex's position (Vertex.Position + Offset, relative to RenderOrigin); otherwise
+	 * FVoxelLocalVertex::FromVoxelVertex as is.
 	 */
 	FORCEINLINE FVoxelLocalVertex ConvertVertex(const FVoxelVertex& Vertex, const FVector3f& Offset) const
 	{

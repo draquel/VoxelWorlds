@@ -485,8 +485,10 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 	// Capture data for lambda
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
-	// Use GetChunkWorldPosition() which includes WorldOrigin offset
-	const FVector3f ChunkWorldPos = FVector3f(Request.GetChunkWorldPosition());
+	// The mesher works in the chunk's own frame (spherical Phase 6, WM-BP7): the shader's chunk origin is zero, so its corner
+	// positions are chunk-local and exact (a float world position of size 1e8 is 8 uu coarse), its UVs come from local
+	// positions as the CPU mesher's do, and the readback needs no subtraction. The renderer places the chunk.
+	const FVector3f ChunkWorldPos = FVector3f::ZeroVector;
 	const FVoxelMeshingConfig CapturedConfig = Config;
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 	// The shader's boundary geomorph runs along Z; on a planet (local up not +Z) it is off on this path (the CPU mesher
@@ -1032,9 +1034,8 @@ void FVoxelGPUMarchingCubesMesher::CopyVertexReadbackData_RT(TSharedPtr<FMeshing
 	Result->ReadbackMeshData.UV1s.SetNum(VertexCount);
 	Result->ReadbackMeshData.Colors.SetNum(VertexCount);
 
-	// Shader outputs world-space positions (includes ChunkWorldPosition).
-	// Subtract it to convert back to local chunk space for the rendering pipeline,
-	// which adds ChunkWorldPosition again in the scene proxy.
+	// The shader outputs chunk-local positions (its chunk origin is zero, WM-BP7); the subtraction stays for a caller
+	// that sets one.
 	const FVector3f WorldOffset = Result->ChunkWorldPosition;
 
 	const void* Data = Result->VertexReadback->Lock(VertexCount * sizeof(FVoxelVertex));

@@ -11,6 +11,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
 #include "VoxelData.h"
+#include "VoxelRenderRegions.h"
 
 #include <cmath>
 
@@ -25,15 +26,18 @@
 //
 // - density: the voxels within two voxels of the surface whose density differs from the reference's, and by how much
 //   (a step is 2 * VoxelSize / 255 uu);
-// - the float formula's signed-distance error at the surface (float(R + h) - float(|P - C|) against the double), in uu;
+// - the signed-distance error at the surface against the double, in uu: Phase 5's float formula
+//   (float(R + h) - float(|P - C|)) and the one generation uses since WM-BP4 (ShellSignedDistanceAtAltitude, double);
 // - normals: the angle between the density gradient the mesher sees and the reference density's, at the voxels within a
 //   voxel of the surface;
-// - vertices: how far a surface point moves when stored as an absolute FVector3f (the scene proxy's chunk offset);
+// - vertices: how far a surface point moves when stored as an absolute FVector3f (the scene proxy's offsets up to Phase
+//   5) and as a float relative to its render region's origin (WM-BP7, FVoxelRenderRegions with RegionChunks 16);
 // - noise: the float spacing of the terrain noise's top octave and of a 100 uu feature at absolute positions (caves,
-//   ore), as a fraction of a feature, and how often each field's 256-unit period repeats around the equator.
+//   ore), as a fraction of a feature, and how often each field's 256-unit period repeated around the equator (the
+//   permutation noise up to Phase 5; planets sample a hashed lattice with no period since WM-BP5).
 //
-// It reports and does not assert (the thresholds are WM-BP4's WorldModes.Planet.PrecisionL); the figures go into the
-// plan's §20.2 baseline.
+// It reports and does not assert (the thresholds are WM-BP4's WorldModes.Planet.PrecisionL and WM-BP7's
+// Rendering.Planet.RegionPrecision); the figures go into the plan's §20.2 baseline and §20.3.
 // ---------------------------------------------------------------------------
 
 namespace VoxelPlanetPrecisionProbe
@@ -78,9 +82,11 @@ namespace VoxelPlanetPrecisionProbe
 		int32 DensityMismatches = 0;
 		int32 MaxDensityDelta = 0;
 		double FloatSDFErrorMax = 0.0;
+		double ShippedSDFErrorMax = 0.0;
 		double NormalErrorP95 = 0.0;
 		double NormalErrorMax = 0.0;
 		double VertexError = 0.0;
+		double RegionVertexError = 0.0;
 	};
 
 	FSiteResult ProbeSite(const UVoxelWorldConfiguration& Config, const FVector& Direction)
@@ -109,6 +115,12 @@ namespace VoxelPlanetPrecisionProbe
 		const FVoxelTerrainSurfacePoint Surface = Planet.GetSurfacePoint(Center + Direction * R, Request.NoiseParams);
 		Out.SurfaceAltitude = Surface.Altitude;
 		Out.VertexError = FVector::Dist(FVector(FVector3f(Surface.Position)), Surface.Position);
+		FVoxelRenderRegions Regions;
+		Regions.RegionChunks = 16;
+		Regions.WorldOrigin = Config.WorldOrigin;
+		Regions.ChunkWorldSize = static_cast<double>(Config.ChunkSize) * Config.VoxelSize;
+		const FIntVector Region = Regions.GetRegionAt(Surface.Position);
+		Out.RegionVertexError = FVector::Dist(Regions.GetRegionOrigin(Region) + FVector(Regions.ToRegionLocal(Surface.Position, Region)), Surface.Position);
 		Request.ChunkCoord = Planet.WorldToChunkCoord(Surface.Position, N, VoxelSize);
 		const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 
@@ -150,6 +162,9 @@ namespace VoxelPlanetPrecisionProbe
 				// The float formula generation used up to Phase 5: float(R + h) - float(|P - C|).
 				const float FloatSD = (static_cast<float>(R) + static_cast<float>(H)) - static_cast<float>(Dist);
 				Out.FloatSDFErrorMax = FMath::Max(Out.FloatSDFErrorMax, FMath::Abs(static_cast<double>(FloatSD) - RefSD[i]));
+				// The form generation uses since WM-BP4: the terrain's altitude minus the voxel's, both formed in double.
+				const float ShippedSD = FSphericalPlanetWorldMode::ShellSignedDistanceAtAltitude(Dist - R, H, Planet.GetPlanetParams());
+				Out.ShippedSDFErrorMax = FMath::Max(Out.ShippedSDFErrorMax, FMath::Abs(static_cast<double>(ShippedSD) - RefSD[i]));
 			}
 		}
 
@@ -217,7 +232,7 @@ bool FVoxelPlanetPrecisionProbeTest::RunTest(const FString& Parameters)
 		const double ContinentFrequency = Biomes && Biomes->bEnableContinentalness ? Biomes->ContinentalnessNoiseFrequency : 0.0;
 		const double ClimateFrequency = Biomes ? Biomes->TemperatureNoiseFrequency : 0.0;
 		AddInfo(FString::Printf(TEXT("%s: R %.0f, voxel %.0f (density step %.3f uu), noise %.3g x %d octaves (top %.3g): top octave spacing %.2e of a feature, ")
-			TEXT("a 100 uu feature at |P| = R spaced %.3f of itself; 256-unit period repeats around the equator: terrain %.1f (top octave %.0f), continents %.2f, climate %.2f"),
+			TEXT("a 100 uu feature at |P| = R spaced %.3f of itself; the permutation noise's 256-unit period (planets up to Phase 5, hashed since WM-BP5) repeats around the equator: terrain %.1f (top octave %.0f), continents %.2f, climate %.2f"),
 			*Config->GetName(), R, Config->VoxelSize, Step, Noise.Frequency, Noise.Octaves, TopFrequency, Ulp(R * TopFrequency), Ulp(R) / 100.0,
 			Circumference * Noise.Frequency / 256.0, Circumference * TopFrequency / 256.0, Circumference * ContinentFrequency / 256.0,
 			Circumference * ClimateFrequency / 256.0));
@@ -225,10 +240,11 @@ bool FVoxelPlanetPrecisionProbeTest::RunTest(const FString& Parameters)
 		{
 			const FSiteResult Result = ProbeSite(*Config, LatLon(Site.Lat, Site.Lon));
 			AddInfo(FString::Printf(TEXT("%s %s: surface altitude %.0f; %d voxels within 2 of the surface, %d with another density (max %d steps = %.2f uu); ")
-				TEXT("float SDF error up to %.2f uu (%.1f steps); density-gradient normals off by %.2f deg P95, %.2f max; a vertex stored as FVector3f moves %.2f uu"),
+				TEXT("SDF error up to %.2f uu (%.1f steps) with Phase 5's float formula, %.4f uu as generated; density-gradient normals off by %.2f deg P95, %.2f max; ")
+				TEXT("a vertex moves %.2f uu stored as an absolute FVector3f, %.4f uu relative to its render region"),
 				*Config->GetName(), Site.Name, Result.SurfaceAltitude, Result.NearVoxels, Result.DensityMismatches, Result.MaxDensityDelta,
-				Result.MaxDensityDelta * Step, Result.FloatSDFErrorMax, Result.FloatSDFErrorMax / Step, Result.NormalErrorP95, Result.NormalErrorMax,
-				Result.VertexError));
+				Result.MaxDensityDelta * Step, Result.FloatSDFErrorMax, Result.FloatSDFErrorMax / Step, Result.ShippedSDFErrorMax,
+				Result.NormalErrorP95, Result.NormalErrorMax, Result.VertexError, Result.RegionVertexError));
 			TestTrue(*FString::Printf(TEXT("%s %s: the surface chunk generated"), *Config->GetName(), Site.Name), Result.NearVoxels > 0);
 		}
 	}
