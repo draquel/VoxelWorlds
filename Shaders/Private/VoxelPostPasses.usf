@@ -17,6 +17,7 @@
  */
 
 #include "/Engine/Public/Platform.ush"
+#include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
 
 // Voxel metadata flag bits — match FVoxelData::VOXEL_FLAG_* (stored in the high nibble of Metadata).
 #define VOXEL_FLAG_WATER 0x01u
@@ -43,8 +44,13 @@ uint ClearCaveFlags;      // UndergroundColumnCS / UndergroundLinesCS: 1 = clear
 uint LineAxisA;           // the axis nearest to local down: 0 = X, 1 = Y, 2 = Z (the lines step along it)
 uint LineForward;         // 1 when down points along +LineAxisA (lines start at index 0), else along -LineAxisA
 StructuredBuffer<int2> LineShifts;  // per step K in [0, ChunkSize): the line's offset on (AxisA + 1) % 3 and (AxisA + 2) % 3
-float3 PlanetChunkOffset; // chunk origin - planet centre (computed in double on the CPU)
-float SeaRadiusSq;        // WaterRadius^2: a voxel is below the sea when |PlanetChunkOffset + Local * VoxelSize|^2 <= this
+// The sea test in the chunk's frame (spherical Phase 6, WM-BP6; PlanetFrame.ush): a voxel is below the sea when its
+// altitude (the anchor's + the small difference of its distance) is at or under the sea's, both formed without an R-sized
+// cancellation (a float |P - C|^2 against WaterRadius^2 jitters by 8 uu at R 1e8).
+float3 PlanetAnchorLocal; // the chunk's anchor (its centre) in the chunk
+float3 PlanetAnchorDir;   // the anchor's direction from the planet centre
+float PlanetAnchorDist;   // the anchor's distance from the planet centre
+float PlanetSeaAltitudeOverAnchor; // WaterRadius - |anchor|, formed in double: below the sea when DeltaR <= this
 
 RWStructuredBuffer<uint> VoxelData;
 RWStructuredBuffer<uint> ScratchFlags;   // UndergroundMark/Apply: 1 uint per voxel, 1 = flag this voxel
@@ -59,11 +65,10 @@ bool IsSolid(uint Packed)
     return ((Packed >> 8) & 0xFFu) >= VOXEL_SURFACE_THRESHOLD;
 }
 
-// FVoxelSeaSurface::IsBelow for a planet's sea sphere, planet-relative.
+// FVoxelSeaSurface::IsBelow for a planet's sea sphere, in the chunk's frame.
 bool IsBelowSeaSphere(uint3 Local)
 {
-    const float3 Rel = PlanetChunkOffset + float3(Local) * VoxelSize;
-    return dot(Rel, Rel) <= SeaRadiusSq;
+    return PlanetFrameDeltaR(float3(Local) * VoxelSize - PlanetAnchorLocal, PlanetAnchorDir, PlanetAnchorDist) <= PlanetSeaAltitudeOverAnchor;
 }
 
 // The voxel a digital line (FVoxelDownLines) visits at step K, if it is inside the chunk. LineB / LineC are the line's

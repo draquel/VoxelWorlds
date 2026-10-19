@@ -9,46 +9,54 @@
 // helpers MakePlanetVoxelFrame / GpuContinentalnessCurves / GpuCaveCarve (caves along local up): this file reads the
 // Planet*, Cave*, biome, ore and water globals.
 //
-// Precision: distances and directions are computed planet-relative, from PlanetChunkOffset (the chunk origin relative to
-// the centre, computed in double on the CPU). Every noise field samples the planet noise (WM-BP5, D22) at its per-chunk
-// origin + the voxel's offset from the chunk's anchor (MakePlanetVoxelFrame), exact at any radius.
+// Precision (spherical Phase 6, WM-BP5 / WM-BP6): chunk-relative. Each voxel is its offset from the chunk's anchor in the
+// anchor's frame (MakePlanetVoxelFrame, PlanetFrame.ush): its altitude is the anchor's (formed in double on the CPU) + a
+// small difference, its point on the datum sphere the anchor's + a small tangent offset, so the SDF, the depth, the sea
+// test and the conditioning distances never subtract two R-sized floats. Every noise field samples the planet noise (D22)
+// at its per-chunk origin + the voxel's offset; the ore Rarity key is the chunk's integer base + the voxel's offset.
 
-/** FSphericalPlanetWorldMode::ShellSignedDistance: TerrainRadius - Dist, held at -1000 (air) more than 1000 uu above the
- *  outer shell radius and at +1000 (core) more than 1000 uu below the inner one. */
-float PlanetShellSignedDistance(float DistFromCenter, float TerrainRadius)
+/** FSphericalPlanetWorldMode::ShellSignedDistanceAtAltitude: TerrainAltitude - VoxelAltitude, held at -1000 (air) more
+ *  than 1000 uu above MaxTerrainHeight and at +1000 (core) more than 1000 uu below -MaxTerrainDepth. */
+float PlanetShellSignedDistance(float VoxelAltitude, float TerrainAltitude)
 {
-    if (DistFromCenter > PlanetOuterRadius + 1000.0f)
+    if (VoxelAltitude > PlanetMaxTerrainHeight + 1000.0f)
     {
         return -1000.0f;
     }
-    if (DistFromCenter < PlanetInnerRadius - 1000.0f)
+    if (VoxelAltitude < -PlanetMaxTerrainDepth - 1000.0f)
     {
         return 1000.0f;
     }
-    return TerrainRadius - DistFromCenter;
+    return TerrainAltitude - VoxelAltitude;
 }
 
 /**
  * FVoxelTerrainConditioning::ApplyToAltitude (spherical SP-B10, D15): blend the terrain's altitude along a direction
  * toward each planet zone's target altitude by its weight, the great-circle distance from the zone's centre on the datum
  * sphere through GetWeightAtDistance's profile, layered in order. The CPU uploads a planet's zones as 2 float4s each:
- * [DirX, DirY, DirZ, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0] (the heightmap packing is
- * GpuApplyConditioning's).
+ * [the zone's datum point relative to the chunk anchor's, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0] (the
+ * heightmap packing is GpuApplyConditioning's). The distance comes from the short chord between the voxel's datum point
+ * and the zone's, both relative to the anchor's (WM-BP6): arc = 2 R asin(chord / 2R), with no R-sized cancellation; the
+ * CPU's R atan2(|a x b|, a . b) in double is the same arc.
+ *
+ * @param SurfaceOffset The voxel's datum-sphere point relative to the anchor's (R x DeltaDir)
+ * @param Altitude The natural terrain altitude
  */
-float PlanetApplyConditioning(float3 Direction, float Altitude)
+float PlanetApplyConditioning(float3 SurfaceOffset, float Altitude)
 {
     float A = Altitude;
     for (int z = 0; z < ConditioningZoneCount; ++z)
     {
         const float4 c0 = ConditioningZoneData[z * 2 + 0];
         const float4 c1 = ConditioningZoneData[z * 2 + 1];
-        const float3 zoneDirection = c0.xyz;
+        const float3 zoneOffset = c0.xyz;
         const float innerRadius = c0.w;
         const float falloffWidth = c1.x;
         const float targetAltitude = c1.y;
         const float strength = c1.z;
 
-        const float dist = PlanetRadius * atan2(length(cross(Direction, zoneDirection)), dot(Direction, zoneDirection));
+        const float chord = length(SurfaceOffset - zoneOffset);
+        const float dist = 2.0f * PlanetRadius * asin(min(1.0f, chord / (2.0f * PlanetRadius)));
 
         float w;
         if (dist <= innerRadius)
@@ -119,9 +127,9 @@ float PlanetOreVeinNoise(uint OreIdx, float3 D, int WorldSeed)
  * the Rarity test hashing the planet-relative position (SP-H3). First match wins.
  *
  * @param D The voxel's offset from the chunk's anchor (the noise)
- * @param PlanetRelativePos The voxel relative to the centre (the Rarity key)
+ * @param RarityKey The voxel's OreRarityKey (its planet-relative position rounded to whole uu)
  */
-bool GpuCheckPlanetOreVein(float3 D, float3 PlanetRelativePos, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, out uint OutMat)
+bool GpuCheckPlanetOreVein(float3 D, int3 RarityKey, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, out uint OutMat)
 {
     OutMat = 0u;
     for (uint i = 0; i < OreCount; ++i)
@@ -136,7 +144,7 @@ bool GpuCheckPlanetOreVein(float3 D, float3 PlanetRelativePos, float DepthBelowS
 
         if (PlanetOreVeinNoise(Idx, D, WorldSeed) >= o1.y)
         {
-            if (o1.w < 1.0f && GpuOreRarityHashKey(int3(floor(PlanetRelativePos + 0.5f)), WorldSeed) > o1.w)
+            if (o1.w < 1.0f && GpuOreRarityHashKey(RarityKey, WorldSeed) > o1.w)
             {
                 continue;
             }
@@ -151,7 +159,7 @@ bool GpuCheckPlanetOreVein(float3 D, float3 PlanetRelativePos, float DepthBelowS
  * One planet voxel: FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet's loop body.
  *
  * @param VoxelCoord Voxel index in the chunk
- * @param WorldPos Absolute voxel position (cave and ore noise)
+ * @param WorldPos Absolute voxel position (unread: every planet quantity is chunk-relative)
  * @param VoxelSize Base voxel size (generation ignores the LOD)
  */
 void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
@@ -160,15 +168,12 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     OutBiomeID = 0u;
     OutMetadata = 0u;
 
-    // Planet-relative position, distance and direction from the centre (GetDirectionFromCenter: +Z at the centre).
-    const float3 Rel = PlanetChunkOffset + float3(VoxelCoord) * VoxelSize;
-    const float DistFromCenter = length(Rel);
-    const float3 Direction = (DistFromCenter > 1.0e-4f) ? Rel / DistFromCenter : float3(0.0f, 0.0f, 1.0f);
-
-    // The voxel in its chunk's frame (WM-BP5): the noise fields sample their per-chunk origins + the voxel's small offsets.
+    // The voxel in its chunk's frame (WM-BP5, WM-BP6): its altitude is the anchor's + the small difference of its distance
+    // from the centre, its datum-sphere point the anchor's + SurfaceOffset; the noise fields sample their per-chunk origins
+    // + the voxel's small offsets.
     const PlanetVoxelFrame Frame = MakePlanetVoxelFrame(VoxelCoord, VoxelSize);
-    // The voxel's point on the datum sphere relative to the anchor's (GetNoiseSamplePoint's change across the chunk)
     const float3 SurfaceOffset = PlanetRadius * Frame.DeltaDir;
+    const float Altitude = PlanetAnchorAltitude + Frame.DeltaR;
 
     // The surface along this direction (SampleRadialDisplacement): terrain noise and continentalness on the datum
     // sphere, the displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5).
@@ -188,16 +193,16 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     // Terrain conditioning (SP-B10): the planet zones blend the altitude along this direction before the SDF, as on the CPU.
     if (ConditioningZoneCount > 0)
     {
-        TerrainAltitude = PlanetApplyConditioning(Direction, TerrainAltitude);
+        TerrainAltitude = PlanetApplyConditioning(SurfaceOffset, TerrainAltitude);
     }
-    const float TerrainRadius = PlanetRadius + TerrainAltitude;
 
-    uint Density = SignedDistanceToDensity(PlanetShellSignedDistance(DistFromCenter, TerrainRadius), VoxelSize);
-    const float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
+    // The SDF and the depth from altitudes (ShellSignedDistanceAtAltitude, WM-BP4 / WM-BP6)
+    uint Density = SignedDistanceToDensity(PlanetShellSignedDistance(Altitude, TerrainAltitude), VoxelSize);
+    const float DepthBelowSurface = (TerrainAltitude - Altitude) / VoxelSize;
 
     // Height rules read the altitude above the datum (SP-B2); caves under the sea keep the underwater minimum depth (SP-B6).
-    const float Altitude = DistFromCenter - PlanetRadius;
-    const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainRadius < PlanetWaterRadius);
+    // The sea is an altitude too.
+    const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainAltitude < PlanetWaterAltitude);
 
     const uint PreCaveDensity = Density;
     uint MaterialID;
@@ -219,8 +224,8 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
-        // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater by radius)
-        const bool bUnderwaterMaterial = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainRadius < PlanetWaterRadius);
+        // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater by altitude)
+        const bool bUnderwaterMaterial = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainAltitude < PlanetWaterAltitude);
         MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial);
 
         MaterialID = ApplyGpuHeightRules(MaterialID, Altitude, DepthBelowSurface);
@@ -232,11 +237,13 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         }
 
         // Ore veins (solid voxels well below the surface; depth > 10 as on the CPU): the planet ore noise (WM-BP5), the
-        // Rarity hash on the planet-relative position (SP-H3)
+        // Rarity hash on the planet-relative position rounded to whole uu (SP-H3): the chunk's integer base + the voxel's
+        // offset (WM-BP6; a float position of size R would round to 8 uu)
         if (Density >= 127u && DepthBelowSurface > 10.0f)
         {
             uint OreMat;
-            if (GpuCheckPlanetOreVein(Frame.D, Rel, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, OreMat))
+            const int3 RarityKey = PlanetChunkBase + int3(floor(PlanetChunkBaseFrac + float3(VoxelCoord) * VoxelSize + 0.5f));
+            if (GpuCheckPlanetOreVein(Frame.D, RarityKey, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, OreMat))
             {
                 MaterialID = OreMat;
             }

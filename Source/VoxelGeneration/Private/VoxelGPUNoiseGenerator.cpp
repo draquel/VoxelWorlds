@@ -116,12 +116,14 @@ public:
 		SHADER_PARAMETER(float, IslandSeabedSlopeWidth)
 		// SphericalPlanet world-mode params (spherical Phase 2, SP-B4) — applied when WorldMode == SPHERICAL_PLANET (1),
 		// see SphericalPlanet.ush. From the request's SphericalPlanetParams (FVoxelWorldModeFactory) and WaterRadius.
-		SHADER_PARAMETER(FVector3f, PlanetCenter)
-		SHADER_PARAMETER(FVector3f, PlanetChunkOffset)      // chunk origin - planet centre, computed in double
+		// Chunk-relative (spherical Phase 6, WM-BP6): the sea as an altitude and the ore key's integer chunk base, formed in
+		// double; the shell's quick reject by altitude.
 		SHADER_PARAMETER(float, PlanetRadius)
-		SHADER_PARAMETER(float, PlanetInnerRadius)
-		SHADER_PARAMETER(float, PlanetOuterRadius)
-		SHADER_PARAMETER(float, PlanetWaterRadius)
+		SHADER_PARAMETER(float, PlanetMaxTerrainHeight)
+		SHADER_PARAMETER(float, PlanetMaxTerrainDepth)
+		SHADER_PARAMETER(float, PlanetWaterAltitude)
+		SHADER_PARAMETER(FIntVector, PlanetChunkBase)
+		SHADER_PARAMETER(FVector3f, PlanetChunkBaseFrac)
 		// The planet noise's per-chunk origins (spherical Phase 6, WM-BP5): BuildPlanetNoiseOrigins, 2 float4s a split.
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PlanetNoiseOrigins)
 		SHADER_PARAMETER(int32, PlanetTerrainOrigin)
@@ -191,8 +193,10 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVoxelWaterFloodSweepParameters, )
 	SHADER_PARAMETER(float, ChunkWorldZ)
 	SHADER_PARAMETER(float, WaterLevel)
 	SHADER_PARAMETER(uint32, SweepAxis)
-	SHADER_PARAMETER(FVector3f, PlanetChunkOffset)
-	SHADER_PARAMETER(float, SeaRadiusSq)
+	SHADER_PARAMETER(FVector3f, PlanetAnchorLocal)
+	SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
+	SHADER_PARAMETER(float, PlanetAnchorDist)
+	SHADER_PARAMETER(float, PlanetSeaAltitudeOverAnchor)
 	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
 END_SHADER_PARAMETER_STRUCT()
 
@@ -232,8 +236,10 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVoxelDownLinesParameters, )
 	SHADER_PARAMETER(uint32, LineAxisA)
 	SHADER_PARAMETER(uint32, LineForward)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int2>, LineShifts)
-	SHADER_PARAMETER(FVector3f, PlanetChunkOffset)
-	SHADER_PARAMETER(float, SeaRadiusSq)
+	SHADER_PARAMETER(FVector3f, PlanetAnchorLocal)
+	SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
+	SHADER_PARAMETER(float, PlanetAnchorDist)
+	SHADER_PARAMETER(float, PlanetSeaAltitudeOverAnchor)
 	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
 END_SHADER_PARAMETER_STRUCT()
 
@@ -334,6 +340,22 @@ IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundLinesCS, "/Plugin/VoxelWorlds/Private/V
 static constexpr int32 FloodSweepRounds = 8;
 
 /**
+ * A planet chunk's anchor (spherical Phase 6, WM-BP5 / WM-BP6): its centre, relative to the planet centre in double and in
+ * the chunk. The planet shaders work in its frame (PlanetFrame.ush); a centre, not a corner, so it is never the planet
+ * centre itself (chunk corners lie on the grid through it).
+ *
+ * @param Request The chunk's request
+ * @param OutRelative The anchor relative to the planet centre
+ * @param OutLocal The anchor in the chunk, (ChunkSize / 2) x VoxelSize on each axis
+ */
+static void GetPlanetChunkAnchor(const FVoxelNoiseGenerationRequest& Request, FVector& OutRelative, FVector3f& OutLocal)
+{
+	const float Half = static_cast<float>(Request.ChunkSize / 2) * Request.VoxelSize;
+	OutLocal = FVector3f(Half, Half, Half);
+	OutRelative = (Request.GetChunkWorldPosition() - Request.SphericalPlanetParams.PlanetCenter) + FVector(OutLocal);
+}
+
+/**
  * A planet chunk's post-passes (spherical Phase 2, SP-B7 / SP-B8 on the GPU), mirroring the planet branches of
  * FVoxelCPUNoiseGenerator: ApplyRadialWaterFillPass (seed along the lines in local down, flood inside the sea sphere,
  * clear the cave flags) and pass 1 of ApplyUndergroundClassificationPass along the same lines. The lines come from
@@ -350,9 +372,13 @@ static void AddPlanetLinePassDispatches(
 	const int32 ChunkSize = Request.ChunkSize;
 	const FVoxelDownLines Lines = FVoxelDownLines::Make(ChunkSize, FVoxelDownLines::PlanetChunkDown(Request));
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
-	const FVector3f ChunkOffset(ChunkWorldPos - Request.SphericalPlanetParams.PlanetCenter);
-	const double SeaRadius = Request.WaterRadius;
-	const float SeaRadiusSq = static_cast<float>(SeaRadius * SeaRadius);
+	// The sea test in the chunk's frame (WM-BP6): DeltaR <= WaterRadius - |anchor|, formed in double.
+	FVector AnchorRelative;
+	FVector3f AnchorLocal;
+	GetPlanetChunkAnchor(Request, AnchorRelative, AnchorLocal);
+	const double AnchorDist = AnchorRelative.Size();
+	const FVector3f AnchorDir(AnchorRelative / FMath::Max(AnchorDist, UE_DOUBLE_SMALL_NUMBER));
+	const float SeaAltitudeOverAnchor = static_cast<float>(Request.WaterRadius - AnchorDist);
 
 	FRDGBufferRef ShiftBuffer = CreateStructuredBuffer(GraphBuilder, TEXT("VoxelDownLineShifts"), sizeof(FIntPoint), ChunkSize,
 		Lines.Shifts.GetData(), static_cast<uint64>(ChunkSize) * sizeof(FIntPoint));
@@ -368,8 +394,10 @@ static void AddPlanetLinePassDispatches(
 		Params->LineAxisA = Lines.AxisA;
 		Params->LineForward = Lines.bForward ? 1 : 0;
 		Params->LineShifts = ShiftSRV;
-		Params->PlanetChunkOffset = ChunkOffset;
-		Params->SeaRadiusSq = SeaRadiusSq;
+		Params->PlanetAnchorLocal = AnchorLocal;
+		Params->PlanetAnchorDir = AnchorDir;
+		Params->PlanetAnchorDist = static_cast<float>(AnchorDist);
+		Params->PlanetSeaAltitudeOverAnchor = SeaAltitudeOverAnchor;
 		Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
 	};
 
@@ -400,8 +428,10 @@ static void AddPlanetLinePassDispatches(
 				Params->ChunkWorldZ = 0.0f;
 				Params->WaterLevel = 0.0f;
 				Params->SweepAxis = Axis;
-				Params->PlanetChunkOffset = ChunkOffset;
-				Params->SeaRadiusSq = SeaRadiusSq;
+				Params->PlanetAnchorLocal = AnchorLocal;
+				Params->PlanetAnchorDir = AnchorDir;
+				Params->PlanetAnchorDist = static_cast<float>(AnchorDist);
+				Params->PlanetSeaAltitudeOverAnchor = SeaAltitudeOverAnchor;
 				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterFloodSweepRadial"), SweepShader, Params, ColumnGroups);
 			}
@@ -488,8 +518,11 @@ static void AddVoxelPostPassDispatches(
 				Params->ChunkWorldZ = ChunkWorldZ;
 				Params->WaterLevel = Request.WaterLevel;
 				Params->SweepAxis = Axis;
-				Params->PlanetChunkOffset = FVector3f::ZeroVector; // read by the planet's sweep only
-				Params->SeaRadiusSq = 0.0f;
+				// The anchor and the sea are read by the planet's sweep only
+				Params->PlanetAnchorLocal = FVector3f::ZeroVector;
+				Params->PlanetAnchorDir = FVector3f(0.0f, 0.0f, 1.0f);
+				Params->PlanetAnchorDist = 1.0f;
+				Params->PlanetSeaAltitudeOverAnchor = 0.0f;
 				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterFloodSweep"), SweepShader, Params, ColumnGroups);
 			}
@@ -591,9 +624,7 @@ static FPlanetNoiseOrigins BuildPlanetNoiseOrigins(const FVoxelNoiseGenerationRe
 	FPlanetNoiseOrigins Out;
 	const FSphericalPlanetParams& Planet = Request.SphericalPlanetParams;
 	const double R = Planet.PlanetRadius;
-	const float Half = static_cast<float>(Request.ChunkSize / 2) * Request.VoxelSize;
-	Out.AnchorLocal = FVector3f(Half, Half, Half);
-	Out.AnchorRelative = (Request.GetChunkWorldPosition() - Planet.PlanetCenter) + FVector(Out.AnchorLocal);
+	GetPlanetChunkAnchor(Request, Out.AnchorRelative, Out.AnchorLocal);
 	const FVector Dir = FSphericalPlanetWorldMode::GetDirectionFromCenter(Out.AnchorRelative, FVector::ZeroVector);
 	const FVector SurfaceOrigin = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Dir, R);
 
@@ -829,10 +860,20 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 		Parameters->CaveWallMaterialMinDepth = Request.CaveConfiguration->CaveWallMaterialMinDepth;
 	}
 
+	// The planet noise's per-chunk origins and the anchor they belong to (WM-BP5).
+	FPlanetNoiseOrigins Origins;
+	if (Request.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		Origins = BuildPlanetNoiseOrigins(Request);
+	}
+	const double AnchorDist = Origins.AnchorRelative.Size();
+	const FVector AnchorDir = FSphericalPlanetWorldMode::GetDirectionFromCenter(Origins.AnchorRelative, FVector::ZeroVector);
+
 	// Terrain conditioning zones (Phase B) — gathered game-side per chunk and copied onto the request;
 	// flatten the terrain height toward each zone's target before the SDF (matches the CPU order).
 	// A planet's zones (spherical SP-B10) are caps on the datum sphere, packed for the planet branch
-	// (SphericalPlanet.ush PlanetApplyConditioning): [Direction, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0].
+	// (SphericalPlanet.ush PlanetApplyConditioning) relative to the chunk (WM-BP6): [the zone's datum point minus the
+	// anchor's, in double, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0], so the shader measures a short chord.
 	// Each world mode uploads only its own kind of zone, as the CPU's ApplyToHeight / ApplyToAltitude skip the other.
 	const bool bPlanetZones = Request.WorldMode == EWorldMode::SphericalPlanet;
 	TArray<FVector4f> ConditioningData;
@@ -846,7 +887,8 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 		}
 		if (bPlanetZones)
 		{
-			ConditioningData.Add(FVector4f(FVector3f(Zone.Direction), Zone.InnerRadius));
+			const double R = Request.SphericalPlanetParams.PlanetRadius;
+			ConditioningData.Add(FVector4f(FVector3f(Zone.Direction.GetSafeNormal() * R - AnchorDir * R), Zone.InnerRadius));
 			ConditioningData.Add(FVector4f(Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, 0.0f));
 		}
 		else
@@ -872,23 +914,19 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->IslandSeabedSlopeWidth = Request.IslandParams.SeabedSlopeWidth;
 
 	// SphericalPlanet world-mode params (spherical Phase 2, SP-B4) — from the request, which
-	// FVoxelWorldModeFactory::FillGenerationRequest fills; ignored by the shader unless WorldMode==SphericalPlanet. The
-	// chunk origin goes relative to the planet centre in double, so the shader's distances and directions start exact.
+	// FVoxelWorldModeFactory::FillGenerationRequest fills; ignored by the shader unless WorldMode==SphericalPlanet.
+	// Chunk-relative (spherical Phase 6, WM-BP6): every value of size R is reduced in double here, the sea to an altitude and
+	// the chunk origin to an integer base and a fraction (the ore Rarity key), so the shader sees only small floats.
 	const FSphericalPlanetParams& Planet = Request.SphericalPlanetParams;
-	Parameters->PlanetCenter = FVector3f(Planet.PlanetCenter);
-	Parameters->PlanetChunkOffset = FVector3f(Request.GetChunkWorldPosition() - Planet.PlanetCenter);
-	Parameters->PlanetRadius = Planet.PlanetRadius;
-	Parameters->PlanetInnerRadius = Planet.GetInnerRadius();
-	Parameters->PlanetOuterRadius = Planet.GetOuterRadius();
-	Parameters->PlanetWaterRadius = Request.WaterRadius;
+	const FVector ChunkPlanetRelative = Request.GetChunkWorldPosition() - Planet.PlanetCenter;
+	const FVector ChunkBase(FMath::FloorToDouble(ChunkPlanetRelative.X), FMath::FloorToDouble(ChunkPlanetRelative.Y), FMath::FloorToDouble(ChunkPlanetRelative.Z));
+	Parameters->PlanetRadius = static_cast<float>(Planet.PlanetRadius);
+	Parameters->PlanetMaxTerrainHeight = Planet.MaxTerrainHeight;
+	Parameters->PlanetMaxTerrainDepth = Planet.MaxTerrainDepth;
+	Parameters->PlanetWaterAltitude = static_cast<float>(Request.WaterRadius - Planet.PlanetRadius);
+	Parameters->PlanetChunkBase = FIntVector(static_cast<int32>(ChunkBase.X), static_cast<int32>(ChunkBase.Y), static_cast<int32>(ChunkBase.Z));
+	Parameters->PlanetChunkBaseFrac = FVector3f(ChunkPlanetRelative - ChunkBase);
 
-	// The planet noise's per-chunk origins and the anchor they belong to (WM-BP5).
-	FPlanetNoiseOrigins Origins;
-	if (Request.WorldMode == EWorldMode::SphericalPlanet)
-	{
-		Origins = BuildPlanetNoiseOrigins(Request);
-	}
-	const double AnchorDist = Origins.AnchorRelative.Size();
 	Parameters->PlanetNoiseOrigins = CreateFloat4StructuredSRV(GraphBuilder, Origins.Data, TEXT("VoxelPlanetNoiseOrigins"));
 	Parameters->PlanetTerrainOrigin = Origins.Terrain;
 	Parameters->PlanetContinentOrigin = Origins.Continent;
@@ -897,7 +935,7 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->PlanetCaveOrigin = Origins.Cave;
 	Parameters->PlanetOreOrigin = Origins.Ore;
 	Parameters->PlanetAnchorLocal = Origins.AnchorLocal;
-	Parameters->PlanetAnchorDir = FVector3f(FSphericalPlanetWorldMode::GetDirectionFromCenter(Origins.AnchorRelative, FVector::ZeroVector));
+	Parameters->PlanetAnchorDir = FVector3f(AnchorDir);
 	Parameters->PlanetAnchorDist = static_cast<float>(AnchorDist);
 	Parameters->PlanetAnchorAltitude = static_cast<float>(AnchorDist - Planet.PlanetRadius);
 

@@ -116,13 +116,14 @@ float IslandSeabedDepth;      // WM-E1: the seabed beyond the edge slopes down b
 float IslandSeabedSlopeWidth; // ... over this horizontal distance (0 = a step)
 
 // SphericalPlanet world-mode params (spherical Phase 2, SP-B4) — see SphericalPlanet.ush. From the request's
-// SphericalPlanetParams (FVoxelWorldModeFactory) and WaterRadius.
-float3 PlanetCenter;          // absolute: the cave and ore noise sample absolute positions, as the CPU does
-float3 PlanetChunkOffset;     // ChunkWorldPosition - PlanetCenter, computed in double on the CPU (planet-relative math)
+// SphericalPlanetParams (FVoxelWorldModeFactory) and WaterRadius. Chunk-relative (spherical Phase 6, WM-BP6): nothing here
+// is subtracted from another R-sized value in float; R itself only scales small directions.
 float PlanetRadius;           // the datum
-float PlanetInnerRadius;      // FSphericalPlanetParams::GetInnerRadius (the shell's quick reject)
-float PlanetOuterRadius;      // FSphericalPlanetParams::GetOuterRadius
-float PlanetWaterRadius;      // the sea sphere (WaterRadius)
+float PlanetMaxTerrainHeight; // FSphericalPlanetParams::MaxTerrainHeight (the shell's quick reject, as an altitude)
+float PlanetMaxTerrainDepth;  // FSphericalPlanetParams::MaxTerrainDepth
+float PlanetWaterAltitude;    // the sea as an altitude: WaterRadius - PlanetRadius, formed in double
+int3 PlanetChunkBase;         // floor(chunk origin - planet centre), in double: the ore Rarity key's integer part
+float3 PlanetChunkBaseFrac;   // (chunk origin - planet centre) - PlanetChunkBase
 
 // The planet noise's per-chunk origins (spherical Phase 6, WM-BP5; PlanetNoise.ush): every planet field's origin split per
 // octave on the CPU, in double, 2 float4s a split ([asfloat(cell), 0][frac, 0]). The field bases index splits. The
@@ -154,47 +155,18 @@ RWStructuredBuffer<uint> OutputVoxelData;
 
 // Per-voxel biome selection + material pipeline (references the biome globals declared above).
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
-// The planet noise (references PlanetNoiseOrigins).
+// The planet noise (references PlanetNoiseOrigins) and the chunk frame.
 #include "/Plugin/VoxelWorlds/Private/PlanetNoise.ush"
+#include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
 // IslandBowl edge falloff (references the IslandBowl globals declared above).
 #include "/Plugin/VoxelWorlds/Private/IslandFalloff.ush"
 
 // ==================== Helpers shared by the world-mode branches ====================
 
-/**
- * A planet voxel in its chunk's frame (spherical Phase 6): its offset from the chunk's anchor and the small differences
- * of its direction and distance from the anchor's, exact in float at any radius. With |anchor| = r0 and its direction n0,
- * |anchor + D| - r0 = r0 (sqrt(1 + e) - 1) = r0 e / (sqrt(1 + e) + 1), e = (2 n0.D + D.D / r0) / r0, and the direction's
- * change is (D - n0 dR) / (r0 + dR): no quantity of size R is ever subtracted in float.
- */
-struct PlanetVoxelFrame
-{
-    float3 D;        // offset from the anchor (uu)
-    float3 Dir;      // direction from the centre (n0 + DeltaDir; for local up, not for R-sized distances)
-    float3 DeltaDir; // the direction minus the anchor's
-    float DeltaR;    // the distance from the centre minus the anchor's
-};
-
+/** A planet voxel in its chunk's frame (PlanetFrame.ush): the anchor is the chunk's centre. */
 PlanetVoxelFrame MakePlanetVoxelFrame(uint3 VoxelCoord, float InVoxelSize)
 {
-    PlanetVoxelFrame F;
-    F.D = float3(VoxelCoord) * InVoxelSize - PlanetAnchorLocal;
-    const float R0 = PlanetAnchorDist;
-    const float3 N0 = PlanetAnchorDir;
-    const float E = (2.0f * dot(N0, F.D) + dot(F.D, F.D) / R0) / R0;
-    F.DeltaR = R0 * E / (sqrt(max(1.0f + E, 0.0f)) + 1.0f);
-    const float Dist = R0 + F.DeltaR;
-    if (Dist > 1.0e-3f)
-    {
-        F.DeltaDir = (F.D - N0 * F.DeltaR) / Dist;
-        F.Dir = N0 + F.DeltaDir;
-    }
-    else
-    {
-        F.Dir = float3(0.0f, 0.0f, 1.0f); // GetDirectionFromCenter at the centre
-        F.DeltaDir = F.Dir - N0;
-    }
-    return F;
+    return MakePlanetFrameAt(float3(VoxelCoord) * InVoxelSize - PlanetAnchorLocal, PlanetAnchorDir, PlanetAnchorDist);
 }
 
 /**
