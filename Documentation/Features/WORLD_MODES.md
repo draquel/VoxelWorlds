@@ -483,8 +483,9 @@ Planets are precise up to a radius of about 1,000 km (10^8 uu, `Review_Planet_L`
 | Rendering | Render regions (`FVoxelRenderRegions`, `voxel.Render.RegionChunks`, 16^3 chunks = 76,800 uu by default): one voxel world component per region and one scatter HISM per type and region, each at its region's origin in double (UE's large-world coordinates); vertices and instances are floats relative to it (D23). The voxel materials' triplanar position is tiled by a whole number of texture periods in LWC math. Heightmap worlds keep one component at the origin |
 | Collision | Chunk-local trimeshes placed by a double transform ([TRAVERSAL_LIMITS.md](../Research/TRAVERSAL_LIMITS.md) #5) |
 
-What still holds a size-R float: the planet ocean shell (`FVoxelPlanetOcean`, G40; WM-BP9's far field replaces it). Past
-about 1,000 km the relief clamps (D24) and the streaming window (WM-BP8) set the limits, not precision. `WorldOrigin`
+The far field (WM-BP9, review plan §20.5) keeps the rule: its patches sit at their own origins with float offsets of the
+patch's size, and at scale its sea patches replace the ocean shell, whose vertices were floats of size R (G40, fixed).
+Past about 1,000 km the relief clamps (D24) and the streaming window (WM-BP8) set the limits, not precision. `WorldOrigin`
 still plays two roles, the planet's centre (generation, gravity, the surface coordinate) and the chunk grid's origin
 (chunk keys, saves, the edit layer); a centre far from the world origin is as precise as one at it.
 
@@ -540,10 +541,13 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
 - Both dungeon representations play on a planet as on the plane (voxel-carved ones since G24's fix, review plan §19.8).
   A voxel-carved dungeon's walls on a planet step by up to √3/2 voxel (the stamp writes air and solid, not graded
   densities)
-- Water: one sea for every consumer (`FVoxelSeaSurface`, `WaterRadius`). The ocean shell is a sphere, so it also shows
-  inside dry caves below sea level
+- Water: one sea for every consumer (`FVoxelSeaSurface`, `WaterRadius`). On a small planet the ocean shell is a sphere,
+  so it also shows inside dry caves below sea level; at scale (from about R 3.3 x 10^5, where the shell would sag past
+  8 uu) the far field draws the sea over the cells whose analytic terrain lies near or under it instead
 - The sun has no axial tilt: the poles sit in a low sun all day (decision D12)
-- Designed for surface exploration; orbital viewing would need an octree or cube-sphere quadtree LOD (SD5)
+- The far field (spherical Phase 6, WM-BP9, [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") draws the planet beyond the
+  voxel window, to the horizon and from altitude; voxels unloading above a cut-over altitude and landing from orbit are
+  WM-BP10's (P6.5). The far field shows neither caves, overhangs nor edits beyond the window
 - Radius: see "The radius ceiling" above
 
 ---

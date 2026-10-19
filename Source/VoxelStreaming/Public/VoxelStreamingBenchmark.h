@@ -178,6 +178,9 @@ private:
 		int32 GenDone;
 		float FarFieldMs;
 		int32 FarFieldPatches;
+		// The far field's memory (MB, CPU and GPU copies, estimated) and patches built this tick (WM-BP9)
+		float FarFieldMB;
+		int32 FarFieldBuilt;
 	};
 
 	void TakeSample(float DeltaTime);

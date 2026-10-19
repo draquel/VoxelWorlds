@@ -37,6 +37,7 @@ class UVoxelCollisionManager;
 class UVoxelScatterManager;
 class UVoxelWaterPropagation;
 class FVoxelSeamRegistry;
+class FVoxelPlanetFarField;
 class UBoxComponent;
 class UProceduralMeshComponent;
 struct FIslandBowlParams;
@@ -194,9 +195,27 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 	int32 Patches = 0;
 	int32 DrawnPatches = 0;
 
-	/** Patch meshes built or rebuilt since the last read, and the memory its meshes hold (MB). */
+	/** Patch meshes built or rebuilt in the last update, and the memory its meshes hold (MB, CPU and GPU copies, estimated) */
 	int32 PatchesBuilt = 0;
 	float MemoryMB = 0.0f;
+
+	/** Drawn patches drawing their terrain, and their sea */
+	int32 DrawnTerrain = 0;
+	int32 DrawnSea = 0;
+
+	/** Band patches whose terrain is hidden because every voxel chunk under them is drawn (the hole) */
+	int32 HiddenBand = 0;
+
+	/** Builds waiting or in flight, builds in all, and their mean time on the build threads (ms) */
+	int32 BuildsPending = 0;
+	int64 TotalBuilt = 0;
+	float BuildMsMean = 0.0f;
+
+	/** The far field draws the sea (the ocean shell's sag is past its budget: at scale) */
+	bool bDrawsSea = false;
+
+	/** Patch components alive (built patches, shown or not) */
+	int32 Components = 0;
 };
 
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent))
@@ -698,6 +717,51 @@ public:
 	/** Show or hide the planet ocean (voxel.World.PlanetOcean). */
 	void SetPlanetOceanVisible(bool bVisible);
 
+	// ==================== Planet Far Field (spherical Phase 6, WM-BP9) ====================
+
+	/**
+	 * Whether this planet draws its far field: the analytic surface beyond the voxel window, to the horizon and from orbit
+	 * (FVoxelPlanetFarField, decision D19). Game worlds on a planet with voxel.World.FarField on.
+	 *
+	 * @return True when the far field exists
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	bool HasFarField() const { return FarField.IsValid(); }
+
+	/** The far field (null without one). */
+	const FVoxelPlanetFarField* GetFarField() const { return FarField.Get(); }
+
+	/** The far field, mutable (tests: synchronous builds). */
+	FVoxelPlanetFarField* GetFarFieldMutable() { return FarField.Get(); }
+
+	/** Whether the far field draws the sea, in place of the ocean shell (at scale: FVoxelPlanetFarField::ShouldDrawSea). */
+	bool DoesFarFieldDrawSea() const;
+
+	/** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
+	UProceduralMeshComponent* GetFarFieldComponent(uint64 PackedPatchKey) const;
+
+	/** Patch components alive. */
+	int32 GetFarFieldComponentCount() const { return FarFieldComponents.Num(); }
+
+	/**
+	 * Build or drop the far field and the ocean shell for voxel.World.FarField (game worlds on a planet): with the far
+	 * field off the ocean shell draws the sea as before.
+	 *
+	 * @param bEnabled Far field on
+	 */
+	void SetFarFieldEnabled(bool bEnabled);
+
+	/** One-line summary of the far field for logs (voxel.World.FarFieldStats). */
+	FString GetFarFieldDebugString() const;
+
+	/**
+	 * Run one far-field update now for a viewer (tests; the tick does this every frame after the streaming sections).
+	 *
+	 * @param ViewerPosition The streaming viewer and camera
+	 * @param FieldOfView Horizontal field of view (degrees)
+	 */
+	void UpdateFarFieldForViewer(const FVector& ViewerPosition, float FieldOfView = 90.0f);
+
 	// ==================== Configuration Access ====================
 
 	/**
@@ -1036,7 +1100,7 @@ public:
 	 * The planet far field's figures (spherical Phase 6, D19), for the bench and vox.Planet.
 	 * @return Inactive (all zero) while there is no far field
 	 */
-	FVoxelFarFieldStats GetFarFieldStats() const { return FVoxelFarFieldStats(); }
+	FVoxelFarFieldStats GetFarFieldStats() const { return FarFieldStats; }
 
 	/** Start a deterministic streaming benchmark run (drives the streaming origin, samples each
 	 *  frame from TickComponent, and writes a CSV + JSON report on completion). */
@@ -1954,7 +2018,10 @@ private:
 	/** Whether the planet ocean's underside (section 1) is shown: only while the viewer is inside the sea radius */
 	bool bPlanetOceanUndersideShown = false;
 
-	/** Build the planet ocean (game worlds, planets with water on and a WaterMeshMaterial). */
+	/**
+	 * Build the planet ocean (game worlds, planets with water on and a WaterMeshMaterial), unless the far field draws the
+	 * sea (at scale).
+	 */
 	void RebuildPlanetOcean();
 
 	/** Destroy the planet ocean's component. */
@@ -1965,6 +2032,58 @@ private:
 
 	/** Planets: move the world settings' KillZ below the planet when it would cut through it (spherical SP-F5). */
 	void ApplyPlanetKillZ();
+
+	// ==================== Planet Far Field (spherical Phase 6, WM-BP9) ====================
+
+	/** The far field's patches and their builds (pure; this component owns their mesh components) */
+	TUniquePtr<FVoxelPlanetFarField> FarField;
+
+	/**
+	 * One procedural mesh component per built patch, at the patch's origin (owned by this component's actor): section 0
+	 * the terrain (the terrain material), 1 the sea's top and 2 its underside (the water material). Sections are shown
+	 * and hidden as the far field selects (a render command, no proxy rebuild); a component goes with its patch.
+	 */
+	UPROPERTY(Transient)
+	TMap<uint64, TObjectPtr<UProceduralMeshComponent>> FarFieldComponents;
+
+	/** Patches this many levels coarser than the band level or finer get the sea's underside (seen only close by) */
+	static constexpr int32 FarFieldUndersideLevels = 4;
+
+	/** Vertices and indices each component holds (its memory estimate) */
+	TMap<uint64, FIntPoint> FarFieldComponentSizes;
+	int64 FarFieldComponentVertices = 0;
+	int64 FarFieldComponentIndices = 0;
+
+	/** The last update's figures (GetFarFieldStats) */
+	FVoxelFarFieldStats FarFieldStats;
+
+	/** The viewer's ground radius (one terrain sample when the viewer moves) and the position it was taken at */
+	double FarFieldGroundRadius = 0.0;
+	FVector FarFieldGroundViewer = FVector(TNumericLimits<double>::Max());
+
+	/** Whether the sea's underside sections are shown (the viewer is inside the sea radius) */
+	bool bFarFieldUndersideShown = false;
+
+	/**
+	 * Bumped whenever a chunk changes state or leaves: the far field recomputes which band patches the voxel chunks
+	 * cover only when it moved.
+	 */
+	int64 ChunkStateVersion = 0;
+
+	/**
+	 * Build the far field (game worlds, planets; bEnabled from voxel.World.FarField). Before RebuildPlanetOcean: it decides
+	 * the sea.
+	 */
+	void RebuildFarField(bool bEnabled);
+
+	/** Drop the far field and destroy its components. */
+	void DestroyFarField();
+
+	/** One far-field update for the tick's viewer: select, build, apply to the components; fills FarFieldStats. */
+	void UpdateFarField(const FVector& ViewerPosition, float FieldOfView);
+
+	/** Whether a voxel chunk's mesh is on screen: loaded, or re-meshing with its old mesh still drawn. */
+	bool IsChunkDrawnForFarField(const FIntVector& ChunkCoord) const;
 
 	// ==================== 2D Water Tile State ====================
 
