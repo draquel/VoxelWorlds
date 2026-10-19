@@ -216,6 +216,21 @@ void UVoxelBiomeConfiguration::InitializeDefaults()
 	BuildGpuData();
 }
 
+void UVoxelBiomeConfiguration::ScaleContinentalnessHeights(float Factor)
+{
+	Modify();
+	if (FRichCurve* Curve = ContinentalnessHeightCurve.GetRichCurve())
+	{
+		for (FRichCurveKey& Key : Curve->Keys)
+		{
+			Key.Value *= Factor;
+			Key.ArriveTangent *= Factor;
+			Key.LeaveTangent *= Factor;
+		}
+	}
+	RebuildCaches();
+}
+
 void UVoxelBiomeConfiguration::RebuildBakedCurves()
 {
 	const int32 N = CONTINENTALNESS_CURVE_SAMPLE_COUNT;

@@ -106,14 +106,14 @@ public:
 	 * Frequency for temperature noise (lower = larger biome regions).
 	 * This controls how quickly temperature varies across the world.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.00001", ClampMax = "0.001"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.000000001", ClampMax = "0.001"))
 	float TemperatureNoiseFrequency = 0.00005f;
 
 	/**
 	 * Frequency for moisture noise (lower = larger biome regions).
 	 * This controls how quickly moisture varies across the world.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.00001", ClampMax = "0.001"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.000000001", ClampMax = "0.001"))
 	float MoistureNoiseFrequency = 0.00007f;
 
 	/**
@@ -143,7 +143,7 @@ public:
 	 * Frequency for continentalness noise (lower = larger land masses).
 	 * Default is very low for continental-scale features.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.000001", ClampMax = "0.001", EditCondition = "bEnableContinentalness"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.000000001", ClampMax = "0.001", EditCondition = "bEnableContinentalness"))
 	float ContinentalnessNoiseFrequency = 0.00002f;
 
 	/**
@@ -241,6 +241,15 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Biome")
 	void RebuildCaches();
+
+	/**
+	 * Multiply every continentalness height offset (ContinentalnessHeightCurve's key values and tangents) by Factor and
+	 * rebuild the caches: the same continents with deeper basins and higher plateaus, for a planet of another size
+	 * (spherical Phase 6's test planets, Scripts/setup_planet_test.py). The height-scale multiplier curve is unchanged.
+	 * @param Factor Scale for the offsets
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Biome")
+	void ScaleContinentalnessHeights(float Factor);
 
 	/**
 	 * Get the number of configured biomes.

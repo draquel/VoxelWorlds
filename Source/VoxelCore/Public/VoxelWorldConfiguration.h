@@ -140,27 +140,28 @@ public:
 	 * Maximum terrain height above the planet's base radius.
 	 * Mountains and peaks can rise this high above WorldRadius. Must cover BaseHeight + PlanetHeightScale / 2,
 	 * plus continentalness's highest offset with the scale at its largest multiplier: the highest the terrain
-	 * reaches. Terrain above the shell is not streamed and is cut off (GetSettingsWarnings checks it).
+	 * reaches. Terrain above the shell is not streamed and is cut off (GetSettingsWarnings checks it). Up to 10 km
+	 * (1,000,000 uu, spherical Phase 6 D24: mountains of a few km on planets up to about 1,000 km).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "1000000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetMaxTerrainHeight = 5000.0f;
 
 	/**
 	 * Maximum terrain depth below the planet's base radius.
 	 * Valleys and caves can descend this deep below WorldRadius. Must cover PlanetHeightScale / 2 - BaseHeight,
 	 * plus continentalness's lowest offset with the scale at its largest multiplier: the deepest the terrain
-	 * reaches (GetSettingsWarnings checks it).
+	 * reaches (GetSettingsWarnings checks it). Up to 10 km (spherical Phase 6 D24).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "1000000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetMaxTerrainDepth = 2000.0f;
 
 	/**
 	 * Height scale for planetary terrain features: the surface sits at WorldRadius + BaseHeight + noise *
 	 * PlanetHeightScale / 2, with noise in [-1, 1], and continentalness (the biome configuration's curves) offsets
 	 * BaseHeight and scales PlanetHeightScale as it does BaseHeight and HeightScale in heightmap modes. Planets use
-	 * this instead of HeightScale.
+	 * this instead of HeightScale. Up to 10 km (spherical Phase 6 D24).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "50000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "100", ClampMax = "1000000", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetHeightScale = 5000.0f;
 
 	/**
@@ -639,6 +640,17 @@ public:
 
 	/** Validate configuration and log any issues (including GetSettingsWarnings) */
 	bool ValidateConfiguration() const;
+
+	/**
+	 * A planet's terrain extent over and under WorldRadius: BaseHeight with continentalness's offsets and PlanetHeightScale
+	 * at its largest multiplier, the numbers GetSettingsWarnings checks the shell (PlanetMaxTerrainHeight / Depth)
+	 * against (FSphericalPlanetWorldMode::GetDisplacementBounds). Spherical Phase 6's test planets size their shells
+	 * from it (Scripts/setup_planet_test.py).
+	 * @param OutHighest How far above WorldRadius the terrain can reach
+	 * @param OutDeepest How far below WorldRadius it can reach
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	void GetPlanetTerrainExtent(float& OutHighest, float& OutDeepest) const;
 
 	/**
 	 * Settings that load and run but produce wrong results, one readable line each: a tree template using a
