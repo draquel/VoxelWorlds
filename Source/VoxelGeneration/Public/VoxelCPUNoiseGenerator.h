@@ -272,6 +272,24 @@ public:
 	static FIntVector OreRarityKey(const FVector& PlanetRelativePos);
 
 	/**
+	 * A planet's ore vein noise (spherical Phase 6, WM-BP5): the same 2-octave field at the ore's frequency and seed,
+	 * by the planet noise (FVoxelPlanetNoise) at the planet-relative position, a streak squashed along one direction per
+	 * ore type (GetPlanetOreStreakDirection). Exact at any radius; the planet's ores move with it.
+	 *
+	 * @param PlanetRelativePos Position relative to the planet centre
+	 * @param OreConfig Ore vein configuration
+	 * @param WorldSeed World seed
+	 * @return Noise in [0, 1]
+	 */
+	static float SamplePlanetOreVeinNoise(const FVector& PlanetRelativePos, const struct FOreVeinConfig& OreConfig, int32 WorldSeed);
+
+	/** A planet streak ore's direction: the heightmap formula at the origin (one per ore type, WM-BP5). */
+	static FVector GetPlanetOreStreakDirection(const struct FOreVeinConfig& OreConfig);
+
+	/** Where a planet ore samples its noise: the planet-relative position, squashed along the streak direction for a streak. */
+	static FVector GetPlanetOreSamplePoint(const FVector& PlanetRelativePos, const struct FOreVeinConfig& OreConfig);
+
+	/**
 	 * A planet's ore Rarity value in [0, 1) (spherical SP-H3): an integer hash of the key and the seed, the same bits on
 	 * the CPU and the GPU (GpuOreRarityHash in BiomeMaterial.ush). Replaces frac(sin(p . k)), whose argument near 10^7
 	 * the GPU's float and the CPU's double round differently. An ore is kept where the value is at most its Rarity.

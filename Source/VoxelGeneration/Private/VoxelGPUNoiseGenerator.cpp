@@ -7,6 +7,8 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelDownLines.h"
 #include "VoxelSeaSurface.h"
+#include "VoxelPlanetNoise.h"
+#include "SphericalPlanetWorldMode.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphResources.h"
 #include "RenderGraphUtils.h"
@@ -120,6 +122,18 @@ public:
 		SHADER_PARAMETER(float, PlanetInnerRadius)
 		SHADER_PARAMETER(float, PlanetOuterRadius)
 		SHADER_PARAMETER(float, PlanetWaterRadius)
+		// The planet noise's per-chunk origins (spherical Phase 6, WM-BP5): BuildPlanetNoiseOrigins, 2 float4s a split.
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PlanetNoiseOrigins)
+		SHADER_PARAMETER(int32, PlanetTerrainOrigin)
+		SHADER_PARAMETER(int32, PlanetContinentOrigin)
+		SHADER_PARAMETER(int32, PlanetTemperatureOrigin)
+		SHADER_PARAMETER(int32, PlanetMoistureOrigin)
+		SHADER_PARAMETER(FIntVector4, PlanetCaveOrigin)
+		SHADER_PARAMETER(int32, PlanetOreOrigin)
+		SHADER_PARAMETER(FVector3f, PlanetAnchorLocal)
+		SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
+		SHADER_PARAMETER(float, PlanetAnchorDist)
+		SHADER_PARAMETER(float, PlanetAnchorAltitude)
 		// The cave configuration's underwater minimum depth and biome overrides (GpuCaveCarve), 1 float4 each:
 		// [BiomeID, CaveScale, MinDepthOverride, 0].
 		SHADER_PARAMETER(float, CaveUnderwaterMinDepth)
@@ -534,6 +548,119 @@ static void AddVoxelPostPassDispatches(
  */
 // Create a StructuredBuffer<float4> SRV from a baked float4 array (Phase B biome/material data).
 // Empty input → a 1-element dummy so RDG always has a valid resource (the shader gates on the count param).
+/**
+ * A planet chunk's noise origins (spherical Phase 6, WM-BP5): every planet field's origin at the chunk's anchor (its
+ * centre), split per octave in double (FVoxelPlanetNoise::SplitOctaves), as PlanetNoise.ush reads them: 2 float4s a split,
+ * [asfloat(cell), 0][frac, 0]. The 2D fields (terrain, continentalness, temperature, moisture) at the anchor's point on the
+ * datum sphere; each cave layer (as uploaded: enabled layers, at most 4) at the anchor with its altitude scaled
+ * (ScaleAltitudeRelative), field 1 then field 2; each baked ore record a streak slot ([direction, 1 - 1 / stretch], or a
+ * zero factor for a blob) then its 2 octaves at the anchor through the streak map. The voxels' offsets from the anchor are
+ * the shader's (MakePlanetVoxelFrame).
+ */
+struct FPlanetNoiseOrigins
+{
+	TArray<FVector4f> Data;
+	int32 Terrain = 0;
+	int32 Continent = 0;
+	int32 Temperature = 0;
+	int32 Moisture = 0;
+	FIntVector4 Cave = FIntVector4(0, 0, 0, 0);
+	int32 Ore = 0;
+	FVector AnchorRelative = FVector::ZeroVector;
+	FVector3f AnchorLocal = FVector3f::ZeroVector;
+
+	int32 NumSplits() const { return Data.Num() / 2; }
+
+	int32 Add(const FVector& Origin, const FVoxelNoiseParams& Params)
+	{
+		const int32 Base = NumSplits();
+		FVoxelNoiseSplit Splits[FVoxelPlanetNoise::MaxOctaves];
+		const int32 Count = FVoxelPlanetNoise::SplitOctaves(Origin, Params, Splits);
+		for (int32 i = 0; i < Count; ++i)
+		{
+			Data.Add(FVector4f(FMath::AsFloat(static_cast<uint32>(Splits[i].Cell.X)), FMath::AsFloat(static_cast<uint32>(Splits[i].Cell.Y)),
+				FMath::AsFloat(static_cast<uint32>(Splits[i].Cell.Z)), 0.0f));
+			Data.Add(FVector4f(Splits[i].Frac, 0.0f));
+		}
+		return Base;
+	}
+};
+
+static FPlanetNoiseOrigins BuildPlanetNoiseOrigins(const FVoxelNoiseGenerationRequest& Request)
+{
+	FPlanetNoiseOrigins Out;
+	const FSphericalPlanetParams& Planet = Request.SphericalPlanetParams;
+	const double R = Planet.PlanetRadius;
+	const float Half = static_cast<float>(Request.ChunkSize / 2) * Request.VoxelSize;
+	Out.AnchorLocal = FVector3f(Half, Half, Half);
+	Out.AnchorRelative = (Request.GetChunkWorldPosition() - Planet.PlanetCenter) + FVector(Out.AnchorLocal);
+	const FVector Dir = FSphericalPlanetWorldMode::GetDirectionFromCenter(Out.AnchorRelative, FVector::ZeroVector);
+	const FVector SurfaceOrigin = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Dir, R);
+
+	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
+	const int32 Seed = Request.NoiseParams.Seed;
+	Out.Terrain = Out.Add(SurfaceOrigin, Request.NoiseParams);
+	if (BiomeConfig && BiomeConfig->bEnableContinentalness)
+	{
+		Out.Continent = Out.Add(SurfaceOrigin, FVoxelPlanetNoise::MakeFieldParams(Seed + BiomeConfig->ContinentalnessSeedOffset, BiomeConfig->ContinentalnessNoiseFrequency));
+	}
+	// Climate: the seeds and frequencies the shader's TemperatureSeed / MoistureSeed carry (the biome config's, else the
+	// no-config defaults)
+	const bool bUseBiomes = Request.bEnableBiomes && BiomeConfig && BiomeConfig->BakedGpuBiomeCount > 0;
+	Out.Temperature = Out.Add(SurfaceOrigin, bUseBiomes
+		? FVoxelPlanetNoise::MakeFieldParams(Seed + BiomeConfig->TemperatureSeedOffset, BiomeConfig->TemperatureNoiseFrequency)
+		: FVoxelPlanetNoise::MakeFieldParams(Seed + 1234, 0.00005f));
+	Out.Moisture = Out.Add(SurfaceOrigin, bUseBiomes
+		? FVoxelPlanetNoise::MakeFieldParams(Seed + BiomeConfig->MoistureSeedOffset, BiomeConfig->MoistureNoiseFrequency)
+		: FVoxelPlanetNoise::MakeFieldParams(Seed + 5678, 0.00007f));
+
+	if (Request.bEnableCaves && Request.CaveConfiguration && Request.CaveConfiguration->bEnableCaves)
+	{
+		int32 LayerIdx = 0;
+		for (const FCaveLayerConfig& Layer : Request.CaveConfiguration->CaveLayers)
+		{
+			if (!Layer.bEnabled || LayerIdx >= 4)
+			{
+				continue;
+			}
+			const FVector CaveOrigin = FSphericalPlanetWorldMode::ScaleAltitudeRelative(Out.AnchorRelative, R, Layer.VerticalScale);
+			FVoxelNoiseParams Field;
+			Field.NoiseType = EVoxelNoiseType::Simplex;
+			Field.Octaves = Layer.Octaves;
+			Field.Lacunarity = Layer.Lacunarity;
+			Field.Persistence = Layer.Persistence;
+			Field.Frequency = Layer.Frequency;
+			reinterpret_cast<int32*>(&Out.Cave)[LayerIdx] = Out.Add(CaveOrigin, Field);
+			Field.Frequency = Layer.Frequency * Layer.SecondNoiseFrequencyScale;
+			Out.Add(CaveOrigin, Field);
+			++LayerIdx;
+		}
+	}
+
+	if (bUseBiomes)
+	{
+		Out.Ore = Out.NumSplits();
+		const TArray<FVector4f>& Ores = BiomeConfig->BakedGpuOreVeins;
+		for (int32 Record = 0; Record + 2 < Ores.Num(); Record += 3)
+		{
+			// The baked record (UVoxelBiomeConfiguration::BuildGpuData): [.., Shape][Frequency, .., SeedOffset, ..][StreakStretch, ..]
+			FOreVeinConfig Ore;
+			Ore.Shape = static_cast<EOreVeinShape>(FMath::RoundToInt32(Ores[Record].W));
+			Ore.Frequency = Ores[Record + 1].X;
+			Ore.SeedOffset = FMath::RoundToInt32(Ores[Record + 1].Z);
+			Ore.StreakStretch = Ores[Record + 2].X;
+			const bool bStreak = Ore.Shape == EOreVeinShape::Streak;
+			const FVector StreakDir = FVoxelCPUNoiseGenerator::GetPlanetOreStreakDirection(Ore);
+			const float Factor = bStreak ? static_cast<float>(1.0 - 1.0 / FMath::Max(Ore.StreakStretch, 1.0f)) : 0.0f;
+			Out.Data.Add(FVector4f(FVector3f(StreakDir), Factor));
+			Out.Data.Add(FVector4f(0.0f));
+			Out.Add(FVoxelCPUNoiseGenerator::GetPlanetOreSamplePoint(Out.AnchorRelative, Ore),
+				FVoxelPlanetNoise::MakeFieldParams(Seed + Ore.SeedOffset, Ore.Frequency));
+		}
+	}
+	return Out;
+}
+
 static FRDGBufferSRVRef CreateFloat4StructuredSRV(FRDGBuilder& GraphBuilder, const TArray<FVector4f>& Data, const TCHAR* Name)
 {
 	static const FVector4f Dummy(0.0f, 0.0f, 0.0f, 0.0f);
@@ -754,6 +881,25 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->PlanetInnerRadius = Planet.GetInnerRadius();
 	Parameters->PlanetOuterRadius = Planet.GetOuterRadius();
 	Parameters->PlanetWaterRadius = Request.WaterRadius;
+
+	// The planet noise's per-chunk origins and the anchor they belong to (WM-BP5).
+	FPlanetNoiseOrigins Origins;
+	if (Request.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		Origins = BuildPlanetNoiseOrigins(Request);
+	}
+	const double AnchorDist = Origins.AnchorRelative.Size();
+	Parameters->PlanetNoiseOrigins = CreateFloat4StructuredSRV(GraphBuilder, Origins.Data, TEXT("VoxelPlanetNoiseOrigins"));
+	Parameters->PlanetTerrainOrigin = Origins.Terrain;
+	Parameters->PlanetContinentOrigin = Origins.Continent;
+	Parameters->PlanetTemperatureOrigin = Origins.Temperature;
+	Parameters->PlanetMoistureOrigin = Origins.Moisture;
+	Parameters->PlanetCaveOrigin = Origins.Cave;
+	Parameters->PlanetOreOrigin = Origins.Ore;
+	Parameters->PlanetAnchorLocal = Origins.AnchorLocal;
+	Parameters->PlanetAnchorDir = FVector3f(FSphericalPlanetWorldMode::GetDirectionFromCenter(Origins.AnchorRelative, FVector::ZeroVector));
+	Parameters->PlanetAnchorDist = static_cast<float>(AnchorDist);
+	Parameters->PlanetAnchorAltitude = static_cast<float>(AnchorDist - Planet.PlanetRadius);
 
 	// The cave configuration's underwater minimum depth and biome overrides — every world-mode branch applies them as
 	// the CPU's CalculateCaveDensity does (GpuCaveCarve).

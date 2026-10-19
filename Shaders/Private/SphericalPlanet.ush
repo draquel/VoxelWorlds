@@ -5,13 +5,13 @@
 // per-voxel pipeline of FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet, in the same order, so GPU and CPU planets
 // match (VoxelWorlds.Generation.GPUvsCPUSphericalParity). Any change here must be mirrored there.
 //
-// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush and the shared helpers
-// GpuApplyContinentalness / GpuCaveCarve (caves along local up through PlanetScaleAltitude): this file reads the Planet*,
-// Cave*, biome, ore and water globals.
+// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush, PlanetNoise.ush and the shared
+// helpers MakePlanetVoxelFrame / GpuContinentalnessCurves / GpuCaveCarve (caves along local up): this file reads the
+// Planet*, Cave*, biome, ore and water globals.
 //
-// Precision: distances, directions and the noise sample point are computed planet-relative, from PlanetChunkOffset (the
-// chunk origin relative to the centre, computed in double on the CPU), so the chunk origin is exact and a direction's
-// error stays in its last bits. The cave and ore noise sample absolute positions, as the CPU does.
+// Precision: distances and directions are computed planet-relative, from PlanetChunkOffset (the chunk origin relative to
+// the centre, computed in double on the CPU). Every noise field samples the planet noise (WM-BP5, D22) at its per-chunk
+// origin + the voxel's offset from the chunk's anchor (MakePlanetVoxelFrame), exact at any radius.
 
 /** FSphericalPlanetWorldMode::ShellSignedDistance: TerrainRadius - Dist, held at -1000 (air) more than 1000 uu above the
  *  outer shell radius and at +1000 (core) more than 1000 uu below the inner one. */
@@ -94,6 +94,60 @@ uint GetMaterialForPlanet(float DepthBelowSurfaceUU)
 }
 
 /**
+ * A planet's ore vein noise (FVoxelCPUNoiseGenerator::SamplePlanetOreVeinNoise, WM-BP5): the 2-octave field at the ore's
+ * frequency and seed by the planet noise, at the ore's origin (the anchor through its streak map, split on the CPU) + the
+ * voxel's offset through the same map (D - dir (dir.D) k: the streak squashes one direction per ore type).
+ *
+ * @param OreIdx Ore record index (OreVeinData)
+ * @param D The voxel's offset from the chunk's anchor
+ * @param WorldSeed World seed
+ * @return Noise in [0, 1]
+ */
+float PlanetOreVeinNoise(uint OreIdx, float3 D, int WorldSeed)
+{
+    const float4 o1 = OreVeinData[OreIdx * 3 + 1];
+    const int SeedOffset = (int)o1.z;
+    const int Base = PlanetOreOrigin + (int)OreIdx * 3;
+    const float4 Streak = PlanetNoiseOrigins[Base * 2]; // [direction, 1 - 1 / StreakStretch] (factor 0 for a blob)
+    const float3 Offset = D - Streak.xyz * (dot(D, Streak.xyz) * Streak.w);
+    const float NoiseValue = PlanetFBM3D(Base + 1, Offset, NOISE_TYPE_SIMPLEX, WorldSeed + SeedOffset, 2, o1.x, 1.0f, 2.0f, 0.5f);
+    return (NoiseValue + 1.0f) * 0.5f;
+}
+
+/**
+ * FVoxelCPUNoiseGenerator::CheckOreVeinPlacement on a planet over [OreStart, OreStart + OreCount): the planet ore noise,
+ * the Rarity test hashing the planet-relative position (SP-H3). First match wins.
+ *
+ * @param D The voxel's offset from the chunk's anchor (the noise)
+ * @param PlanetRelativePos The voxel relative to the centre (the Rarity key)
+ */
+bool GpuCheckPlanetOreVein(float3 D, float3 PlanetRelativePos, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, out uint OutMat)
+{
+    OutMat = 0u;
+    for (uint i = 0; i < OreCount; ++i)
+    {
+        const uint Idx = OreStart + i;
+        const float4 o0 = OreVeinData[Idx * 3 + 0];
+        const float4 o1 = OreVeinData[Idx * 3 + 1];
+        const float MinDepth = o0.y;
+        const float MaxDepth = o0.z;
+        if (DepthBelowSurface < MinDepth) { continue; }
+        if (MaxDepth > 0.0f && DepthBelowSurface > MaxDepth) { continue; }
+
+        if (PlanetOreVeinNoise(Idx, D, WorldSeed) >= o1.y)
+        {
+            if (o1.w < 1.0f && GpuOreRarityHashKey(int3(floor(PlanetRelativePos + 0.5f)), WorldSeed) > o1.w)
+            {
+                continue;
+            }
+            OutMat = (uint)(o0.x + 0.5f);
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * One planet voxel: FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet's loop body.
  *
  * @param VoxelCoord Voxel index in the chunk
@@ -111,18 +165,24 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     const float DistFromCenter = length(Rel);
     const float3 Direction = (DistFromCenter > 1.0e-4f) ? Rel / DistFromCenter : float3(0.0f, 0.0f, 1.0f);
 
+    // The voxel in its chunk's frame (WM-BP5): the noise fields sample their per-chunk origins + the voxel's small offsets.
+    const PlanetVoxelFrame Frame = MakePlanetVoxelFrame(VoxelCoord, VoxelSize);
+    // The voxel's point on the datum sphere relative to the anchor's (GetNoiseSamplePoint's change across the chunk)
+    const float3 SurfaceOffset = PlanetRadius * Frame.DeltaDir;
+
     // The surface along this direction (SampleRadialDisplacement): terrain noise and continentalness on the datum
-    // sphere (GetNoiseSamplePoint), the displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5).
-    const float3 NoisePoint = Direction * PlanetRadius;
+    // sphere, the displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5).
     float EffectiveBaseHeight = BaseHeight;
     float EffectiveHeightScale = HeightScale;
     float Continentalness = 0.0f;
     if (ContinentalnessEnabled != 0)
     {
-        Continentalness = GpuApplyContinentalness(NoisePoint, EffectiveBaseHeight, EffectiveHeightScale);
+        Continentalness = GpuContinentalnessCurves(
+            PlanetFBM3D(PlanetContinentOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 1.0f, 2.0f, 0.5f),
+            EffectiveBaseHeight, EffectiveHeightScale);
     }
-    const float TerrainNoise = FBM3D(
-        NoisePoint, NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
+    const float TerrainNoise = PlanetFBM3D(PlanetTerrainOrigin, SurfaceOffset,
+        NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
     // Terrain conditioning (SP-B10): the planet zones blend the altitude along this direction before the SDF, as on the CPU.
@@ -145,8 +205,8 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (BiomeCount > 0)
     {
         // Temperature and moisture on the datum sphere, like the terrain (SP-B1)
-        const float Temperature = FBM3D(NoisePoint, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0, 2.0, 0.5);
-        const float Moisture = FBM3D(NoisePoint, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0, 2.0, 0.5);
+        const float Temperature = PlanetFBM3D(PlanetTemperatureOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
+        const float Moisture = PlanetFBM3D(PlanetMoistureOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
         const BiomeBlendResult Blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
         const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
         OutBiomeID = Dominant.BiomeID;
@@ -155,7 +215,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(WorldPos, Rel, DistFromCenter, DepthBelowSurface, OutBiomeID, bUnderwaterColumn);
+            CaveCarve = GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, OutBiomeID, bUnderwaterColumn);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
@@ -171,12 +231,12 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
             MaterialID = CaveWallMaterialID;
         }
 
-        // Ore veins (solid voxels well below the surface; depth > 10 as on the CPU): the vein noise at the absolute
-        // position, the Rarity hash on the planet-relative one (SP-H3)
+        // Ore veins (solid voxels well below the surface; depth > 10 as on the CPU): the planet ore noise (WM-BP5), the
+        // Rarity hash on the planet-relative position (SP-H3)
         if (Density >= 127u && DepthBelowSurface > 10.0f)
         {
             uint OreMat;
-            if (GpuCheckOreVein(WorldPos, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, true, Rel, OreMat))
+            if (GpuCheckPlanetOreVein(Frame.D, Rel, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, OreMat))
             {
                 MaterialID = OreMat;
             }
@@ -187,7 +247,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         MaterialID = GetMaterialForPlanet(DepthBelowSurface * VoxelSize);
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Rel, DistFromCenter, DepthBelowSurface, 0u, bUnderwaterColumn));
+            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, 0u, bUnderwaterColumn));
         }
     }
 

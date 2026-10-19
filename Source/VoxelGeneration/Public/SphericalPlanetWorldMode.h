@@ -405,6 +405,49 @@ public:
 		float VerticalScale);
 
 	/**
+	 * ScaleAltitude relative to the planet centre: PlanetRelativePos with its altitude scaled by VerticalScale, in double.
+	 * Planet caves sample the planet noise here (WM-BP5), so they move with the planet and stay exact at any radius.
+	 *
+	 * @param PlanetRelativePos Position relative to the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @param VerticalScale Scale applied to the altitude
+	 * @return Cave noise sample position, relative to the centre
+	 */
+	static FVector ScaleAltitudeRelative(
+		const FVector& PlanetRelativePos,
+		double PlanetRadius,
+		float VerticalScale);
+
+	/**
+	 * The planet's continentalness field: the 2-octave Simplex field at the biome configuration's frequency and seed
+	 * offset (the heightmap modes' parameters), sampled by the planet noise (WM-BP5).
+	 *
+	 * @param WorldSeed The terrain noise seed
+	 * @param BiomeSnapshot Biome data with the continentalness settings
+	 * @return Noise parameters
+	 */
+	static FVoxelNoiseParams GetContinentalnessNoiseParams(int32 WorldSeed, const FVoxelBiomeSnapshot& BiomeSnapshot);
+
+	/**
+	 * Temperature and moisture along a direction: each field at the direction's point on the datum sphere (SP-B1) by the
+	 * planet noise (WM-BP5), as generation, the surface queries and the map sample them.
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @param TemperatureParams Temperature field (FVoxelPlanetNoise::MakeFieldParams)
+	 * @param MoistureParams Moisture field
+	 * @param OutTemperature Temperature in about [-1, 1]
+	 * @param OutMoisture Moisture in about [-1, 1]
+	 */
+	static void SampleClimate(
+		const FVector& Direction,
+		double PlanetRadius,
+		const FVoxelNoiseParams& TemperatureParams,
+		const FVoxelNoiseParams& MoistureParams,
+		float& OutTemperature,
+		float& OutMoisture);
+
+	/**
 	 * Calculate signed distance from a point to the terrain surface.
 	 *
 	 * @param DistFromCenter Distance from planet center

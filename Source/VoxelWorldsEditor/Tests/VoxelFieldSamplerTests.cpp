@@ -9,6 +9,7 @@
 #include "VoxelSurfaceQuery.h"
 #include "IVoxelWorldMode.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelPlanetNoise.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -167,7 +168,8 @@ bool FVoxelFieldSamplerPlanetTest::RunTest(const FString& Parameters)
 			const float ExpectedSlope = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Surface.Normal, Direction), -1.0, 1.0)));
 			TestTrue(FString::Printf(TEXT("Slope against local up at (%.0f, %.0f)"), DX, DY),
 				FMath::IsNearlyEqual(Slope->Sample(Ctx, X, Y, 0.0), ExpectedSlope, 0.01f));
-			const float ExpectedTemperature = FVoxelCPUNoiseGenerator::FBM3D(Direction * Config->WorldRadius, Ctx.TempNoiseParams);
+			// A planet's climate is the planet noise (spherical Phase 6, WM-BP5)
+			const float ExpectedTemperature = FVoxelPlanetNoise::FBM3D(Direction * Config->WorldRadius, Ctx.TempNoiseParams);
 			TestTrue(TEXT("Temperature at the datum-sphere point"),
 				FMath::IsNearlyEqual(Temperature->Sample(Ctx, X, Y, 0.0), ExpectedTemperature, 1.0e-5f));
 		}

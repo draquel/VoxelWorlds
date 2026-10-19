@@ -7,6 +7,8 @@
 #include "VoxelGeneration.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelPlanetNoise.h"
+#include "VoxelBiomeSnapshot.h"
 
 #include <atomic>
 
@@ -317,8 +319,9 @@ float FSphericalPlanetWorldMode::SampleSphericalNoise(
 	double PlanetRadius,
 	const FVoxelNoiseParams& NoiseParams)
 {
-	// The full 3D point on the datum sphere: no hemisphere mirror, no seam, feature size in world units (SP-B1).
-	return FVoxelCPUNoiseGenerator::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius), NoiseParams);
+	// The full 3D point on the datum sphere: no hemisphere mirror, no seam, feature size in world units (SP-B1). Planet
+	// noise (WM-BP5, D22): the point split in double per octave, a hashed lattice with no period.
+	return FVoxelPlanetNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius), NoiseParams);
 }
 
 FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams(
@@ -329,8 +332,45 @@ FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams
 	const FVoxelBiomeSnapshot* BiomeSnapshot,
 	float& OutContinentalness)
 {
-	return FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt(
-		GetNoiseSamplePoint(Direction, PlanetRadius), BaseParams, NoiseParams, BiomeSnapshot, OutContinentalness);
+	// FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt's curves, with the continentalness field sampled by the
+	// planet noise at the direction's point on the datum sphere (WM-BP5).
+	OutContinentalness = 0.0f;
+	FWorldModeTerrainParams Effective = BaseParams;
+	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness)
+	{
+		OutContinentalness = FVoxelPlanetNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius),
+			GetContinentalnessNoiseParams(NoiseParams.Seed, *BiomeSnapshot));
+		float HeightOffset = 0.0f;
+		float HeightScaleMult = 1.0f;
+		BiomeSnapshot->GetContinentalnessTerrainParams(OutContinentalness, HeightOffset, HeightScaleMult);
+		Effective.BaseHeight += HeightOffset;
+		Effective.HeightScale *= HeightScaleMult;
+	}
+	return Effective;
+}
+
+FVoxelNoiseParams FSphericalPlanetWorldMode::GetContinentalnessNoiseParams(int32 WorldSeed, const FVoxelBiomeSnapshot& BiomeSnapshot)
+{
+	return FVoxelPlanetNoise::MakeFieldParams(WorldSeed + BiomeSnapshot.ContinentalnessSeedOffset, BiomeSnapshot.ContinentalnessNoiseFrequency);
+}
+
+void FSphericalPlanetWorldMode::SampleClimate(const FVector& Direction, double PlanetRadius, const FVoxelNoiseParams& TemperatureParams,
+	const FVoxelNoiseParams& MoistureParams, float& OutTemperature, float& OutMoisture)
+{
+	const FVector SamplePoint = GetNoiseSamplePoint(Direction, PlanetRadius);
+	OutTemperature = FVoxelPlanetNoise::FBM3D(SamplePoint, TemperatureParams);
+	OutMoisture = FVoxelPlanetNoise::FBM3D(SamplePoint, MoistureParams);
+}
+
+FVector FSphericalPlanetWorldMode::ScaleAltitudeRelative(const FVector& PlanetRelativePos, double PlanetRadius, float VerticalScale)
+{
+	const double Dist = PlanetRelativePos.Size();
+	if (Dist < UE_KINDA_SMALL_NUMBER)
+	{
+		return PlanetRelativePos;
+	}
+	const double Altitude = Dist - PlanetRadius;
+	return PlanetRelativePos * ((PlanetRadius + Altitude * VerticalScale) / Dist);
 }
 
 float FSphericalPlanetWorldMode::SampleRadialDisplacement(

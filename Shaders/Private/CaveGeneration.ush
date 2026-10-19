@@ -32,6 +32,24 @@
  * @param CarveStrength Maximum carve intensity
  * @return Carve density [0, 1]
  */
+/**
+ * A cheese cave's carve from its noise value: carves where the field exceeds the threshold, with a smooth falloff
+ * (SampleCheeseCave's tail; a planet samples its noise with the planet noise, WM-BP5).
+ */
+float CheeseCarveFromNoise(float Noise, float Threshold, float CarveFalloff, float CarveStrength)
+{
+    if (Noise <= Threshold)
+    {
+        return 0.0f;
+    }
+
+    float Excess = Noise - Threshold;
+    float FalloffRange = max(CarveFalloff, 0.01f);
+    float CarveDensity = saturate(Excess / FalloffRange);
+
+    return CarveDensity * CarveStrength;
+}
+
 float SampleCheeseCave(
     float3 ScaledPos,
     int Seed,
@@ -44,15 +62,31 @@ float SampleCheeseCave(
     float CarveStrength)
 {
     float Noise = FBM3D(ScaledPos, NOISE_TYPE_SIMPLEX, Seed, Octaves, Frequency, 1.0f, Lacunarity, Persistence);
+    return CheeseCarveFromNoise(Noise, Threshold, CarveFalloff, CarveStrength);
+}
 
-    if (Noise <= Threshold)
+/**
+ * A tunnel cave's carve from its two noise values: where both fields are near zero at once (SampleTunnelCave's tail).
+ */
+float TunnelCarveFromNoise(float Noise1, float Noise2, float Threshold, float CarveFalloff, float CarveStrength)
+{
+    float AbsNoise1 = abs(Noise1);
+    float AbsNoise2 = abs(Noise2);
+
+    if (AbsNoise1 >= Threshold || AbsNoise2 >= Threshold)
     {
         return 0.0f;
     }
 
-    float Excess = Noise - Threshold;
+    float Carve1 = saturate(1.0f - (AbsNoise1 / Threshold));
+    float Carve2 = saturate(1.0f - (AbsNoise2 / Threshold));
+
+    // Intersection: both must be near zero
+    float CarveDensity = Carve1 * Carve2;
+
+    // Smooth falloff
     float FalloffRange = max(CarveFalloff, 0.01f);
-    float CarveDensity = saturate(Excess / FalloffRange);
+    CarveDensity = smoothstep(0.0f, FalloffRange, CarveDensity);
 
     return CarveDensity * CarveStrength;
 }
@@ -89,24 +123,5 @@ float SampleTunnelCave(
 {
     float Noise1 = FBM3D(ScaledPos, NOISE_TYPE_SIMPLEX, Seed1, Octaves, Frequency1, 1.0f, Lacunarity, Persistence);
     float Noise2 = FBM3D(ScaledPos, NOISE_TYPE_SIMPLEX, Seed2, Octaves, Frequency2, 1.0f, Lacunarity, Persistence);
-
-    float AbsNoise1 = abs(Noise1);
-    float AbsNoise2 = abs(Noise2);
-
-    if (AbsNoise1 >= Threshold || AbsNoise2 >= Threshold)
-    {
-        return 0.0f;
-    }
-
-    float Carve1 = saturate(1.0f - (AbsNoise1 / Threshold));
-    float Carve2 = saturate(1.0f - (AbsNoise2 / Threshold));
-
-    // Intersection: both must be near zero
-    float CarveDensity = Carve1 * Carve2;
-
-    // Smooth falloff
-    float FalloffRange = max(CarveFalloff, 0.01f);
-    CarveDensity = smoothstep(0.0f, FalloffRange, CarveDensity);
-
-    return CarveDensity * CarveStrength;
+    return TunnelCarveFromNoise(Noise1, Noise2, Threshold, CarveFalloff, CarveStrength);
 }

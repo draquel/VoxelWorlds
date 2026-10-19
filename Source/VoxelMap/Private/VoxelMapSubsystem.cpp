@@ -2309,9 +2309,9 @@ void UVoxelMapSubsystem::GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Gen
 			}
 			else if (bUseBiomes)
 			{
-				const FVector BiomeSamplePos = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Direction, static_cast<float>(Radius));
-				const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackTempNoiseParams);
-				const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackMoistureNoiseParams);
+				// The planet generator's climate: the planet noise on the datum sphere (WM-BP5)
+				float Temperature, Moisture;
+				FSphericalPlanetWorldMode::SampleClimate(Direction, Radius, FallbackTempNoiseParams, FallbackMoistureNoiseParams, Temperature, Moisture);
 				const FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 				MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
 			}

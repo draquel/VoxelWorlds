@@ -45,9 +45,11 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * planet's map tiles, explored tiles, map overlays and surface NPC ids key on the surface coordinate.
 	 * 4: spherical Phase 5 (decision D16): planet generation applies conditioning zones (POI pads, SP-B10), and POIs,
 	 * their claims, campsites and dungeons are placed on planets (dungeon records keyed by cube-sphere cell).
+	 * 5: spherical Phase 6 (decisions D21, D22): the planet noise (FVoxelPlanetNoise: a hashed lattice with no period,
+	 * split-origin sampling) for every planet field, caves and ores relative to the planet centre, and the SDF in double.
 	 * Fingerprints from before have no entry and are refused.
 	 */
-	static constexpr int32 PlanetGenerationVersion = 4;
+	static constexpr int32 PlanetGenerationVersion = 5;
 
 	/**
 	 * Terrain params for the heightmap modes (InfinitePlane, IslandBowl).
