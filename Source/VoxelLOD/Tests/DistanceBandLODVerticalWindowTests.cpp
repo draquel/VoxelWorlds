@@ -262,7 +262,8 @@ bool FLODVerticalWindowKeepTest::RunTest(const FString& Parameters)
 }
 
 /**
- * The horizon is horizontal in heightmap worlds and 3D on a planet.
+ * The horizon is horizontal in heightmap worlds and along the ground from the viewer's ground point on a planet
+ * (spherical Phase 6, WM-BP8; 3D until then).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODHorizonDistanceTest,
 	"VoxelWorlds.LOD.VerticalWindow.HorizonDistance",
@@ -285,8 +286,17 @@ bool FLODHorizonDistanceTest::RunTest(const FString& Parameters)
 	Planet->WorldRadius = 250000.0f;
 	FProbeStrategy Strategy;
 	Strategy.Initialize(Planet);
-	TestEqual(TEXT("Planet: horizon distance is 3D"), Strategy.GetHorizonDistance(Chunk, Viewer),
-		static_cast<float>(FVector::Dist(Chunk, Viewer)), 0.5f);
+	// The arc between the two directions from the centre at the radius of the terrain under the viewer, whatever either's
+	// altitude: a viewer 48,000 uu over the north pole, a chunk 30,000 uu along the ground and one straight under it.
+	const FVector High(0.0, 0.0, 250000.0 + 48000.0);
+	const double GroundRadius = Strategy.GetPlanetGroundRadius(High);
+	const double Angle = 30000.0 / 250000.0;
+	const FVector Along = FVector(FMath::Sin(Angle), 0.0, FMath::Cos(Angle)) * (250000.0 + 2400.0);
+	TestTrue(TEXT("Planet: the ground point is on the terrain under the viewer"),
+		GroundRadius >= 250000.0 - Planet->PlanetMaxTerrainDepth && GroundRadius <= 250000.0 + Planet->PlanetMaxTerrainHeight);
+	TestEqual(TEXT("Planet: horizon distance is along the ground from the ground point"), Strategy.GetHorizonDistance(Along, High),
+		static_cast<float>(GroundRadius * Angle), 0.5f);
+	TestEqual(TEXT("Planet: a chunk straight under the viewer is at 0, however deep"), Strategy.GetHorizonDistance(FVector(0.0, 0.0, 240000.0), High), 0.0f, 0.5f);
 	return true;
 }
 

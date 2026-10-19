@@ -6,9 +6,11 @@
 #include "IVoxelLODStrategy.h"
 #include "LODTypes.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelCubeSphere.h"
 #include "VoxelWorldModeTypes.h"
 
 class IVoxelWorldMode;
+class FSphericalPlanetWorldMode;
 
 /**
  * Distance-based LOD strategy using concentric rings.
@@ -127,10 +129,34 @@ public:
 
 	/**
 	 * Horizontal distance in heightmap worlds (InfinitePlane, IslandBowl): the horizons are a cylinder, and each column's
-	 * vertical extent is its window (GetColumnWindow), so the viewer's altitude never removes the ground (D8). 3D on a
-	 * planet. LOD levels use 3D distance in every mode (GetDistanceToViewer).
+	 * vertical extent is its window (GetColumnWindow), so the viewer's altitude never removes the ground (D8). On a
+	 * planet the distance along the ground from the viewer's ground point (GetPlanetGroundDistance, spherical Phase 6,
+	 * WM-BP8): the horizons are a cone around the viewer's up-line, and each chunk's radial extent is its window
+	 * (IsInPlanetWindow), so a climbing viewer keeps its ground disk. LOD levels use 3D distance in every mode
+	 * (GetDistanceToViewer).
 	 */
 	virtual float GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const override;
+
+	/**
+	 * The distance along the ground between a viewer and a point on a planet (spherical Phase 6, WM-BP8): the arc, on the
+	 * sphere through the viewer's ground point, between the viewer's direction from the centre and the point's. A point
+	 * straight above or below the viewer is at 0 whatever its altitude, as a heightmap world's horizontal distance is.
+	 * @param Centre Planet centre
+	 * @param GroundRadius Distance from the centre to the viewer's ground point (the terrain under the viewer)
+	 * @param Viewer Viewer position
+	 * @param Point Point (a chunk centre)
+	 * @return GroundRadius times the angle between the two directions (uu)
+	 */
+	static double GetPlanetGroundDistance(const FVector& Centre, double GroundRadius, const FVector& Viewer, const FVector& Point);
+
+	/**
+	 * A planet viewer's ground point (WM-BP8): the analytic terrain along the viewer's direction from the centre, without
+	 * conditioning zones (GetTerrainAltitude), at the radius GetPlanetGroundDistance measures on. Cached for the position
+	 * the last Update saw; any other position is computed (one terrain sample). Game thread.
+	 * @param ViewerPosition Viewer position
+	 * @return Distance from the planet centre to the ground under the viewer (PlanetRadius on a heightmap world)
+	 */
+	double GetPlanetGroundRadius(const FVector& ViewerPosition) const;
 
 	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
 	static constexpr int32 NearWindowLayers = 2;
@@ -148,7 +174,8 @@ public:
 	 * the column's surface slab (Slab*), plus the viewer's layer ± NearWindowLayers in a column near the viewer (Near*);
 	 * both clipped to the terrain's height bounds. Planet (SP-C1): the column's crossings of the terrain shell
 	 * (GetPlanetShellWindow), the one above the planet centre in Slab* and the one below in Near* (or one range when
-	 * they meet), clipped to the view distance.
+	 * they meet); a planet streams by chunk, not by column (IsInPlanetWindow), and only enumerates candidates by
+	 * crossings like these.
 	 */
 	struct FColumnWindow
 	{
@@ -230,16 +257,99 @@ protected:
 	FColumnWindow GetColumnWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, EWindowUse Use) const;
 
 	/**
-	 * A planet column's window (SP-C1): the layers whose chunks meet the shell from ShellWindowInnerRadius to
-	 * ShellWindowOuterRadius over the column's footprint, within the view distance of the viewer vertically. Exact for
-	 * the footprint: its nearest and farthest points from the planet's axis bound the crossing, so the window covers the
-	 * shell at every latitude (the old viewer-relative box, capped at 16 layers, cut the equator short).
+	 * A planet column's crossing of the shell (SP-C1): the layers whose chunks meet the shell from ShellWindowInnerRadius
+	 * to ShellWindowOuterRadius over the column's footprint. Exact for the footprint: its nearest and farthest points from
+	 * the planet's axis bound the crossing, so it covers the shell at every latitude. Not clipped to the viewer's
+	 * altitude any more (spherical Phase 6, WM-BP8: the viewer-Z clip lost the ground under a climbing viewer).
 	 * @param ChunkX Column X, chunk coordinates
 	 * @param ChunkY Column Y, chunk coordinates
-	 * @param Context Query context (viewer position, world origin)
+	 * @param Context Query context (world origin)
 	 * @param OutWindow Receives the crossings: above the centre in Slab*, below it in Near* (or one range in Slab*)
 	 */
 	void GetPlanetShellWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, FColumnWindow& OutWindow) const;
+
+	/**
+	 * A column of chunks along a grid axis, crossing a spherical shell around the planet centre: the layers along Axis
+	 * whose chunks meet the shell [InnerRadius, OuterRadius] (touching counts). GetPlanetShellWindow is the Z axis with the
+	 * window's radii; the planet's candidate enumeration runs along whichever axis is closest to the viewer's local up.
+	 * @param Axis Column direction: 0 = X, 1 = Y, 2 = Z
+	 * @param ColumnA The column's chunk index along axis (Axis + 1) % 3
+	 * @param ColumnB The column's chunk index along axis (Axis + 2) % 3
+	 * @param InnerRadius Shell inner radius
+	 * @param OuterRadius Shell outer radius
+	 * @param WorldOrigin The chunk grid's origin
+	 * @param OutWindow Receives the crossings: on the centre's positive side in Slab*, the negative in Near* (or one range)
+	 */
+	void GetShellCrossing(int32 Axis, int32 ColumnA, int32 ColumnB, double InnerRadius, double OuterRadius,
+		const FVector& WorldOrigin, FColumnWindow& OutWindow) const;
+
+	/**
+	 * Whether a planet chunk is in the window for this viewer, apart from the horizon distance (spherical Phase 6, WM-BP8;
+	 * the heightmap M4 rules on a sphere):
+	 * - its radial extent meets the terrain shell (ShellWindowInnerRadius to ShellWindowOuterRadius, the terrain's real
+	 *   bounds + ShellSlackChunks);
+	 * - and its radial extent meets its slab (GetPlanetChunkSlab: the analytic surface's altitude range over the cap it
+	 *   subtends ± SlabSlackChunks; with slab culling off, the whole shell);
+	 * - or, within GetNearWindowRadius of the viewer along the ground: Load, the viewer's altitude ± NearWindowLayers chunk
+	 *   widths; Keep, anything in the shell within the unload distance of the viewer (3D). As a heightmap world's near
+	 *   window streams the viewer's layer ± NearWindowLayers within its height bounds: caves and digging below the slab,
+	 *   and the chunks around a viewer above it (a flyer in the shell, a pawn held over the sea), whose terrain waits need
+	 *   them cooked.
+	 * Edits off the window are pinned by the chunk manager.
+	 * @param ChunkCoord Chunk coordinates
+	 * @param Context Query context (viewer position, world origin)
+	 * @param Use Load (stream in) or Keep (retain)
+	 * @return True when the chunk is in the window
+	 */
+	bool IsInPlanetWindow(const FIntVector& ChunkCoord, const FLODQueryContext& Context, EWindowUse Use) const;
+
+	/** A planet chunk's viewer-independent facts (WM-BP8): its radial extent and its slab, as altitudes above the datum. */
+	struct FPlanetChunkSlab
+	{
+		/** Nearest and farthest point of the chunk box from the planet centre, minus PlanetRadius. */
+		float AltitudeMin = 0.0f;
+		float AltitudeMax = 0.0f;
+		/** The surface's altitude range over the cells the chunk's corners span, ± SlabSlackChunks (the whole shell when off). */
+		float SlabMin = 0.0f;
+		float SlabMax = 0.0f;
+	};
+
+	/**
+	 * A planet chunk's radial extent and slab, memoized for the strategy's lifetime (the terrain is immutable per world).
+	 * The slab is the union of the per-cell surface ranges (GetPlanetCellSurfaceRange) of the cube-sphere cells the
+	 * chunk's eight corner directions span (FVoxelCubeSphereGrid::GatherSpanned), widened by SlabSlackChunks. Game thread.
+	 * @param ChunkCoord Chunk coordinates
+	 * @return The chunk's altitude extent and slab
+	 */
+	FPlanetChunkSlab GetPlanetChunkSlab(const FIntVector& ChunkCoord) const;
+
+	/**
+	 * One cube-sphere cell's analytic surface altitude range (WM-BP8): GetTerrainAltitude at its four corners and centre,
+	 * as a heightmap column's GetSurfaceRange samples five heights. Memoized. Game thread.
+	 * @param Cell Atlas coordinate on PlanetSlabGrid
+	 * @return Altitude range (uu above the datum)
+	 */
+	FFloatInterval GetPlanetCellSurfaceRange(const FIntPoint& Cell) const;
+
+	/**
+	 * Calls Visit once for every chunk that may be in the planet's window for this viewer (WM-BP8): the chunks crossing the
+	 * spherical shell of the window's altitude envelope inside the cone of the load horizon around the viewer's up-line,
+	 * plus the near window's cone and envelope. A superset: the caller applies IsInPlanetWindow and the horizon. Columns
+	 * run along the grid axis closest to the viewer's up, so each crosses the envelope steeply.
+	 * @param Context Query context (viewer position, world origin)
+	 * @param Use Load (stream in) or Keep (retain: the near window holds the shell within the unload distance)
+	 * @param Visit Called with each candidate's chunk coordinates (no repeats)
+	 */
+	void ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, TFunctionRef<void(const FIntVector&)> Visit) const;
+
+	/**
+	 * The surface's altitude envelope over the disk of cells within an angle of a direction (WM-BP8): the union of their
+	 * GetPlanetCellSurfaceRange. Memoized for the last direction cell and angle. Game thread.
+	 * @param Direction Unit direction from the planet centre (the viewer's up)
+	 * @param Angle Angular radius of the disk (radians), margins included
+	 * @return Altitude envelope (uu above the datum), without slack
+	 */
+	FFloatInterval GetPlanetSurfaceEnvelope(const FVector& Direction, double Angle) const;
 
 	/**
 	 * The chunk layers whose chunks overlap the world-Z interval [Lo, Hi] (touching counts).
@@ -512,16 +622,22 @@ protected:
 	/** Cached planet radius for horizon calculations (double: it meets R-sized distances, WM-BP4) */
 	double PlanetRadius = 0.0;
 
-	/** Max terrain height above planet radius (for horizon buffer) */
+	/**
+	 * The terrain's highest point above the datum (the horizon's peaks, SP-C2): its real bounds, the displacement bounds
+	 * (FSphericalPlanetWorldMode::GetDisplacementBounds) within the configured shell (WM-BP8).
+	 */
 	float PlanetMaxTerrainHeight = 0.0f;
 
-	/** Max terrain depth below planet radius (for inner shell culling) */
+	/** The terrain's deepest point below the datum (inner shell culling), from the same real bounds. */
 	float PlanetMaxTerrainDepth = 0.0f;
 
 	/** Planet centre in world space (WorldOrigin) */
 	FVector PlanetCenter = FVector::ZeroVector;
 
-	/** The shell window's radii (SP-C1): the terrain shell widened by ShellSlackChunks on both sides. */
+	/**
+	 * The shell window's radii (SP-C1): the terrain's real bounds (WM-BP8: the displacement bounds within the configured
+	 * PlanetMaxTerrainHeight / Depth) widened by ShellSlackChunks on both sides.
+	 */
 	double ShellWindowInnerRadius = 0.0;
 	double ShellWindowOuterRadius = 0.0;
 
@@ -530,6 +646,36 @@ protected:
 	 * or valley at the shell's edge has its neighbour's voxels.
 	 */
 	static constexpr double ShellSlackChunks = 0.5;
+
+	/** The planet's world mode (TerrainWorldMode, when a planet): the analytic surface the slab and the ground point read. */
+	const FSphericalPlanetWorldMode* PlanetWorldMode = nullptr;
+
+	/**
+	 * Per-chunk radial slab on a planet (WM-BP8): bFarBandSurfaceSlabCulling on a planet. Off, every chunk in the shell
+	 * near the viewer streams (the whole shell inside the horizon's cone).
+	 */
+	bool bPlanetSlab = false;
+
+	/** The cells the slab caches surface ranges for: about one chunk width across on the datum sphere. */
+	FVoxelCubeSphereGrid PlanetSlabGrid;
+
+	/** Cell -> surface altitude range (GetPlanetCellSurfaceRange). Game thread; reset past PlanetSlabCacheLimit entries. */
+	mutable TMap<FIntPoint, FFloatInterval> PlanetCellSurfaceCache;
+
+	/** Chunk -> radial extent and slab (GetPlanetChunkSlab). Game thread; reset past PlanetSlabCacheLimit entries. */
+	mutable TMap<FIntVector, FPlanetChunkSlab> PlanetChunkSlabCache;
+
+	/** A long flight keeps adding cells and chunks; past this many entries a cache starts over (about 20-30 MB each). */
+	static constexpr int32 PlanetSlabCacheLimit = 1000000;
+
+	/** GetPlanetSurfaceEnvelope's memo: the direction's cell and the angle it was built for. */
+	mutable FIntPoint EnvelopeMemoCell = FIntPoint(MIN_int32, MIN_int32);
+	mutable double EnvelopeMemoAngle = -1.0;
+	mutable FFloatInterval EnvelopeMemoRange;
+
+	/** The viewer's ground point (GetPlanetGroundRadius), for the position the last Update saw. */
+	FVector GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
+	double GroundRadiusCached = 0.0;
 
 	// ==================== Runtime State ====================
 

@@ -167,8 +167,9 @@ struct VOXELSTREAMING_API FVoxelResidencySnapshot
 	double MaxDistance = 0.0;
 
 	/**
-	 * Farthest tracked chunk centre from the viewer's ground point: on a planet the point on the datum sphere under the
-	 * viewer (3D distance), on a heightmap world the viewer's XY (2D distance).
+	 * Farthest tracked chunk centre from the viewer's ground point, as the LOD strategy measures its horizons
+	 * (IVoxelLODStrategy::GetHorizonDistance): on a planet along the ground from the terrain under the viewer (spherical
+	 * Phase 6, WM-BP8), on a heightmap world from the viewer's XY (2D distance).
 	 */
 	double MaxGroundDistance = 0.0;
 

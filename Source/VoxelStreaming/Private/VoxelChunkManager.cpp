@@ -4650,8 +4650,16 @@ FVoxelResidencySnapshot UVoxelChunkManager::GetResidencySnapshot() const
 	const double Radius = Configuration->WorldRadius;
 	auto AltitudeOf = [&](const FVector& P) { return bPlanet ? FVector::Dist(P, Centre) - Radius : P.Z - Centre.Z; };
 	Out.ViewerAltitude = AltitudeOf(Out.Viewer);
-	// The viewer's ground point: on the datum sphere under it (a planet), its XY (heightmap worlds: 2D distances).
-	const FVector Ground = bPlanet ? Centre + (Out.Viewer - Centre).GetSafeNormal() * Radius : Out.Viewer;
+	// From the viewer's ground point as the strategy's horizons are measured (a planet: along the ground from the terrain
+	// under the viewer, WM-BP8; heightmap worlds: 2D distances from its XY).
+	auto GroundDistanceOf = [&](const FVector& ChunkCentre) -> double
+	{
+		if (LODStrategy)
+		{
+			return LODStrategy->GetHorizonDistance(ChunkCentre, Out.Viewer);
+		}
+		return bPlanet ? FVector::Dist(ChunkCentre, Centre + (Out.Viewer - Centre).GetSafeNormal() * Radius) : FVector::Dist2D(ChunkCentre, Out.Viewer);
+	};
 
 	bool bFirst = true;
 	for (const FIntVector& Coord : LoadedChunkCoords)
@@ -4672,7 +4680,7 @@ FVoxelResidencySnapshot UVoxelChunkManager::GetResidencySnapshot() const
 		const double Altitude = AltitudeOf(ChunkCentre);
 		++Out.ByLayer.FindOrAdd(bPlanet ? FMath::FloorToInt32(Altitude / ChunkWorld) : Coord.Z);
 		Out.MaxDistance = FMath::Max(Out.MaxDistance, FVector::Dist(ChunkCentre, Out.Viewer));
-		Out.MaxGroundDistance = FMath::Max(Out.MaxGroundDistance, bPlanet ? FVector::Dist(ChunkCentre, Ground) : FVector::Dist2D(ChunkCentre, Ground));
+		Out.MaxGroundDistance = FMath::Max(Out.MaxGroundDistance, GroundDistanceOf(ChunkCentre));
 		Out.MinChunkAltitude = bFirst ? Altitude : FMath::Min(Out.MinChunkAltitude, Altitude);
 		Out.MaxChunkAltitude = bFirst ? Altitude : FMath::Max(Out.MaxChunkAltitude, Altitude);
 		bFirst = false;
