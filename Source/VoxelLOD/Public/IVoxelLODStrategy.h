@@ -275,7 +275,9 @@ public:
 	 * chunk manager's queue eviction, edit pins and residency audit) uses it, so they cannot disagree (KI11).
 	 *
 	 * Default: 3D distance. FDistanceBandLODStrategy: horizontal distance in heightmap worlds, whose vertical extent is
-	 * each column's own window (world modes review D8), so the viewer's altitude never removes the ground under it.
+	 * each column's own window (world modes review D8), so the viewer's altitude never removes the ground under it; on a
+	 * planet the distance along the ground from the viewer's ground point, each chunk's radial extent being its slab
+	 * (spherical Phase 6, WM-BP8).
 	 *
 	 * @param ChunkCenter Chunk centre, world space
 	 * @param ViewerPosition Viewer position, world space

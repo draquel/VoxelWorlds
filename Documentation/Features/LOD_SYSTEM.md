@@ -351,7 +351,7 @@ LODBands = {
 ```
 
 **Spherical Planet:** the same bands as any world (the test planets use the demo's), measured in 3D from the viewer
-(see "The Shell Window and Culling" below).
+(see "The Window and Culling (Spherical Planet)" below).
 
 **Island/Bowl:**
 ```cpp
@@ -513,11 +513,15 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(FVector Position, const FLOD
 }
 
 // Whether in range at all: the load and unload horizons. Horizontal in heightmap worlds, where each
-// column's vertical extent is its window; 3D on a planet.
+// column's vertical extent is its window; along the ground on a planet, where each chunk's slab is.
 float FDistanceBandLODStrategy::GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const
 {
-    return IsHeightmapWorld() ? FVector::Dist2D(ChunkCenter, ViewerPosition)
-                              : FVector::Dist(ChunkCenter, ViewerPosition);
+    if (IsHeightmapWorld())
+    {
+        return FVector::Dist2D(ChunkCenter, ViewerPosition);
+    }
+    // The arc between the two directions from the centre, at the radius of the terrain under the viewer.
+    return GetPlanetGroundDistance(PlanetCenter, GetPlanetGroundRadius(ViewerPosition), ViewerPosition, ChunkCenter);
 }
 ```
 
@@ -527,8 +531,10 @@ uncompressed (KI13), and the residency audit, which measured 3D, reported chunks
 and, from 40,000 uu up, all of it. With the horizon horizontal the ground under any viewer stays in range (decision D8);
 the LOD distance keeps the far-away and the far-below coarse.
 
-There is no geodesic (along-the-surface) distance for planets; an earlier version of this document described
-one. Euclidean distance is what the code uses and what the spherical requirements keep (SP-C3).
+A planet's LOD distance stays Euclidean (3D, SP-C3): near the viewer it matches the distance along the surface. Its
+horizon has been the distance along the ground since spherical Phase 6 (WM-BP8, WORLD_MODES_REVIEW_PLAN.md §20.4): with a
+3D horizon a viewer about the view distance above the ground loaded nothing, the planet's version of what D8 fixed for
+heightmaps.
 
 ### LOD Off and Cubic Meshing
 
@@ -586,9 +592,8 @@ balanced-LOD cache covers the keep window, so every chunk the strategy keeps has
 With `bFarBandSurfaceSlabCulling` off every column streams its whole height range (the name predates D8, when the slab
 applied beyond band 0 only). Until M4 the window was the viewer's layer −2 to +8 (island −2 to +4), with the slab on
 InfinitePlane beyond band 0 only: a viewer above layer 0 lost the ground below it (G13), and islands kept every layer
-of every column (KI5). A planet's column window is the column's crossing of the terrain shell widened by half a
-chunk, within the view distance (`GetPlanetShellWindow`, spherical SP-C1; WORLD_MODES_REVIEW_PLAN.md §15), and its
-horizon cull adds the peaks' tangent distance (`GetPlanetHorizonDistance`, SP-C2).
+of every column (KI5). A planet streams by chunk with the same rules on a sphere (each chunk's surface slab, the
+viewer's altitude ± 2 chunks near it, the horizon along the ground; spherical Phase 6, WM-BP8), below.
 
 **Height Range Calculation**: `IVoxelWorldMode::GetTerrainHeightBounds` (the full noise amplitude and continentalness;
 for an island, also the floor beyond its edge), plus one chunk of buffer on each side.
@@ -618,33 +623,56 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 whose centre was within the extent plus a chunk diagonal: a ring of columns wholly past the edge, holding the old floor and
 water there. The far ocean draws the sea past what streams now (WORLD_MODES.md, "Beyond the edge").
 
-### The Shell Window and Culling (Spherical Planet)
+### The Window and Culling (Spherical Planet)
 
-A planet streams the chunks of its terrain shell near the viewer, with three tests (`FDistanceBandLODStrategy`):
+A planet streams by chunk, with the heightmap rules of D8 on a sphere (spherical Phase 6, WM-BP8;
+WORLD_MODES_REVIEW_PLAN.md §20.4). `FDistanceBandLODStrategy::IsInPlanetWindow` decides each chunk:
 
-- **The shell window** (`GetPlanetShellWindow`, SP-C1). Per chunk column (world X, Y), the world-Z layers where the column
-  crosses the shell `[ShellWindowInnerRadius, ShellWindowOuterRadius]` around the planet centre: the terrain's radii
-  `WorldRadius - PlanetMaxTerrainDepth` and `WorldRadius + PlanetMaxTerrainHeight`, each widened by `ShellSlackChunks`
-  chunks. A column has one crossing above the centre and one below (they merge when it reaches past the inner radius), and
-  each is clipped to the viewer's world Z +- the view distance.
-- **The load horizon.** A chunk in the window loads when its centre is within the view distance of the viewer in 3D
-  (`GetHorizonDistance`; it unloads past `ViewDistance x UnloadDistanceMultiplier`), and its LOD band is its 3D distance too.
-- **The cull** (`ShouldCullBeyondHorizon`, SP-C2), a superset of the window: a chunk wholly inside the window's inner
+- **The horizon, along the ground** (`GetHorizonDistance` → `GetPlanetGroundDistance`): the arc between the viewer's
+  direction from the planet centre and the chunk centre's, on the sphere through the viewer's ground point (the analytic
+  terrain under the viewer, `GetPlanetGroundRadius`, one sample when the viewer moves). A cone around the viewer's
+  up-line, as a heightmap world's horizon is a cylinder: a chunk loads within the view distance of it and unloads past it
+  × `UnloadDistanceMultiplier`, whatever the viewer's altitude.
+- **The shell**: the terrain's real bounds (`FSphericalPlanetWorldMode::GetDisplacementBounds`, noise at continentalness's
+  extremes, within the configured `PlanetMaxTerrainHeight` / `PlanetMaxTerrainDepth`) widened by `ShellSlackChunks` (½):
+  `ShellWindowInnerRadius` to `ShellWindowOuterRadius`. Nothing outside it holds terrain.
+- **The surface slab** (`GetPlanetChunkSlab`): a chunk loads when its radial extent (the nearest point and the farthest
+  corner of its box from the centre) meets the surface's altitude range over the cube-sphere cells its eight corner
+  directions span (`FVoxelCubeSphereGrid::GatherSpanned`), ± `SlabSlackChunks` (1.5). The cells are about a chunk across
+  on the datum sphere (`CellsPerEdgeFor(R, chunk size)`: 82 a face edge on a 2.5 km planet, 32,725 on a 1,000 km one), and
+  a cell's range is five terrain samples, its corners and its centre, as a heightmap column's five heights. Cells and
+  chunks are memoized (each cache starts over past a million entries).
+- **Near the viewer** (within `GetNearWindowRadius` along the ground, band 0 + two chunks): off its slab a chunk also
+  loads within the viewer's altitude ± `NearWindowLayers` chunk widths, inside the shell, and stays while it is within the
+  unload distance of the viewer (3D), so a viewer changing altitude unloads nothing near it. As a heightmap world streams
+  the viewer's layer ± 2 within its height bounds: caves, dungeons and digging below the slab, and the chunks around a
+  viewer above it (a flyer inside the shell, a pawn held over the sea), whose terrain waits and settle hold need them
+  cooked. Edits off the window are pinned by the chunk manager.
+- **The cull** (`ShouldCullBeyondHorizon`, SP-C2), a superset of the window: a chunk wholly inside the shell's inner
   radius or outside its outer one, or whose nearest point lies beyond the horizon, the sum of the two tangent distances to
   the datum sphere, `sqrt(2Rh + h^2) + sqrt(2RH + H^2)` (`GetPlanetHorizonDistance`; R the radius, h the viewer's altitude,
-  H the shell's top: a peak shows over the horizon from that far). A viewer inside the planet's lowest terrain is not
+  H the terrain's top: a peak shows over the horizon from that far). A viewer inside the planet's lowest terrain is not
   culled.
 
-So the window is the shell inside a sphere of the view distance around the viewer: about 1,000 chunks on the demo-sized
-planet, whatever its radius, nearly all at the coarsest band; with km-scale relief, where the shell is thicker than the
-view distance, the whole sphere (2,900 chunks on a 50 km planet with 2 km of relief; WORLD_MODES_REVIEW_PLAN.md §20.2).
-A climbing viewer loses ground: the window is the shell within the view distance of the viewer, so at an altitude near
-the view distance it holds nothing, and above it nothing is drawn but the sea sphere. Spherical Phase 6 changes this: the
-load distance is measured from the viewer's ground point, the shell is a per-chunk slab of the terrain's real bounds
-(WM-BP8), and an analytic far field draws the planet beyond the window (WM-BP9; WORLD_MODES_REVIEW_PLAN.md §20.1).
+With `bFarBandSurfaceSlabCulling` off the window is the whole shell inside the cone (fine on a thin shell; with km-scale
+relief that is tens of thousands of chunks). The LOD band is the chunk's 3D distance from the viewer, so a high viewer's
+ground disk sits at the coarsest band. Planets draw their sea with the ocean shell, not voxel water tiles, so a sea
+column's slab is its seabed's (heightmap slabs reach up to the water plane).
 
-Distances are Euclidean (3D), not geodesic (along the surface): SP-C3. At the 40,000 uu view distance the two differ by
-about 0.1% on the 2.5 km planet, less on bigger ones.
+**Candidates** (`ForEachPlanetCandidate`): the chunk columns along the grid axis closest to the viewer's up, inside the
+bounding box of the cone, crossing the spherical shell of the slab's envelope over the disk (`GetPlanetSurfaceEnvelope`:
+the cells within the cone's angle, memoized by the viewer's cell; `GetShellCrossing`), plus the near window's cone and
+altitude band. Load, unload (`GetChunksToUnload`, the keep window) and the balanced LOD cache use the same window.
+
+So the window is the ground disk of the view distance, a few chunks thick around the surface wherever it is: 950 to
+1,160 chunks on the 2.5 km planet and on a 1,000 km one with km-scale relief alike (`LOD.Planet.SurfaceSlab`; the whole
+shell would be 1,000-1,200 and 17,700), and 1,080-1,260 live on the 50 km and 1,000 km test planets
+(WORLD_MODES_REVIEW_PLAN.md §20.4), against 2,800-3,000 for them before WM-BP8, whose
+shells were thicker than the view distance, so their windows were the whole sphere of it around the viewer. A climbing
+viewer keeps its ground disk (`LOD.Planet.GroundHorizon`): until WM-BP8 the window was clipped to the viewer's Z ± the
+view distance and measured in 3D from the viewer, so it held nothing from about the view distance up (the planet's G13).
+A flyer inside the shell adds its near window (160 to 200 chunks of air on the 1,000 km planet); above the shell, nothing.
+Beyond the window nothing is drawn but the sea sphere until the far field (WM-BP9).
 
 ### Integration with Streaming
 
@@ -657,9 +685,13 @@ for each column with GetHorizonDistance(column centre) <= ViewDistance:   // hor
         skip if ShouldCullIslandBoundary(...) || ShouldCullBeyondHorizon(...)
         request (X, Y, Z) at its balanced LOD
 
+// A planet streams by chunk instead (WM-BP8): the candidates of ForEachPlanetCandidate, each kept by
+// GetHorizonDistance (along the ground) <= ViewDistance && IsInPlanetWindow(..., EWindowUse::Load)
+
 // GetChunksToUnload: every loaded chunk that is out of range, farthest first
 if (GetHorizonDistance(ChunkCenter, Viewer) > ViewDistance * UnloadDistanceMultiplier ||
     !GetColumnWindow(X, Y, Context, EWindowUse::Keep).Contains(Z) ||   // heightmap worlds
+    !IsInPlanetWindow(ChunkCoord, Context, EWindowUse::Keep) ||          // a planet
     ShouldCullIslandBoundary(...) || ShouldCullBeyondHorizon(...))
 {
     OutUnload.Add(ChunkCoord);
@@ -672,11 +704,13 @@ There is no chunk-count cap (`MaxLoadedChunks` was never read and was removed in
 bounded by geometry:
 
 - **The horizon:** chunks load within the view distance and unload past it × `UnloadDistanceMultiplier` (1.2), measured
-  horizontally in heightmap worlds (a cylinder) and in 3D on a planet.
+  horizontally in heightmap worlds (a cylinder) and along the ground from the viewer's ground point on a planet (a cone
+  around the viewer's up-line; 3D from the viewer until spherical Phase 6's WM-BP8).
 - **The vertical window:** each column's slab, plus the near window's layers near the viewer (above); in all, the
   world mode's height bounds.
 - **The world's footprint:** an island keeps only columns that touch its R + falloff footprint (since M6; before, out to
-  a chunk diagonal past it); a planet only chunks in its terrain shell and above its horizon.
+  a chunk diagonal past it); a planet only chunks in its terrain shell and above its horizon, each within its surface
+  slab or near the viewer below it (WM-BP8).
 - **Edits:** edited chunks pin-load within the view distance and stay to the unload distance, outside the window too.
 - **The pipeline:** chunks mid-generation or mid-meshing finish before they unload; `MaxChunksToUnloadPerFrame` paces
   unloading, not residency.

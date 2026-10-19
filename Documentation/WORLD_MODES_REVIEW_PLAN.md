@@ -1453,7 +1453,7 @@ Three findings from §13.11 get IDs here:
 | G10 | The bench's re-mesh counter counted reloads | Fixed (§13.10) | — |
 | G11 | The vertical window counted the viewer's layer twice | Fixed (§13.11) | — |
 | G12 | The balanced-LOD cache is rebuilt every tick | Fixed in M1 (WM-H1; draquel/VoxelWorlds#84, merged) | WM-H1 |
-| G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole | WM-S1, WM-S4 |
+| G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole. The planet's version (a viewer-Z clip and a 3D horizon: a climbing viewer lost the ground) fixed in spherical Phase 6's P6.3 (WM-BP8, §20.4) | WM-S1, WM-S4, WM-BP8 |
 | G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
@@ -1481,6 +1481,8 @@ Three findings from §13.11 get IDs here:
 | G38 | In-editor runs of the six suites lost the GPU device (`DXGI_ERROR_DEVICE_REMOVED`, `DRIVER_INTERNAL_ERROR`, seen at the creation of a 2 GB reserved buffer) at about the 128th render scene of the editor session. Tests that build worlds leave them to the garbage collector, and nothing collected garbage during a run: after a batch of 105 test worlds, 106 `UWorld`s were alive (1 after `obj gc`). The suites as they were build 124 and finished; P6.1's tests took them past the limit (every run that reached 127 scenes lost the device, on the base worktree too, and none that stayed at 126 or under). Headless runs are unaffected | Fixed in P6.1: the game module collects garbage when a test ends with 32 test worlds pending (`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`, `vox.Tests.GCEveryWorlds`); 529/529 in the editor with no device loss (§20.2) | — |
 | G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position, so across a blend zone, where the weights change slowly, it follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets (the grid tilted against local up everywhere, climate zones km across): `Review_Planet_L`'s equator and M's 45° and equator from above (also in P6.1's M shot; found in spherical Phase 6's P6.2 survey, §20.3) | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) | — |
 | G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Open: the far field's sea patches replace it | WM-BP9 |
+| G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Open (low): snap the camera's pivot on a teleport (VoxelCharacterPlugin) | WM-BP10 |
+| G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Open: profile scatter on km relief | WM-BP13 |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -4703,7 +4705,8 @@ uu, 2.5 km) complete; Phase 6 makes planets **up to about 1,000 km** in radius w
 and from altitude, and lets the player **fly to orbit and back**. Scope decisions SD1 (small planets) and SD5 (surface
 only) are revised by D17 and D18 below. Every decision the plan needs (D17-D24) was taken on 2026-10-17.
 
-In progress: P6.1 (guardrails and baseline) done 2026-10-18, §20.2. The loose ends went first, each in its own session; as of
+In progress: P6.1 (guardrails and baseline) done 2026-10-18, §20.2; P6.2 (precision) done 2026-10-19, §20.3; P6.3 (streaming
+at scale) done 2026-10-19, §20.4. The loose ends went first, each in its own session; as of
 2026-10-18 all that block it are fixed:
 
 - Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6), G30 (§19.7), G24
@@ -5193,3 +5196,161 @@ WM-BP6's line for line.
 
 **Left for the next milestones.** P6.3 (streaming at scale, WM-BP8). G39 and G40 above; G25's shading lines are more
 visible on M and L's wide flat ground than on the small planet.
+
+### 20.4 P6.3 results: streaming at scale (2026-10-19)
+
+Bases: VoxelWorlds `2f3dadd`, UE5_PluginDev `85a6d41` (P6.2 merged). Branches `feat/spherical-p6-3-streaming` (VoxelWorlds)
+and `claude/spherical-p6-3-streaming-94d677` (UE5_PluginDev). P6.3 is WM-BP8 alone: one commit with its tests, and the
+docs. On `Review_Planet_L` (km relief) the window is the surface slab: 1,100-1,260 chunks against P6.1's 2,860-3,010 and
+the small planet's 1,250-1,310; a climbing viewer keeps its ground disk; nothing loads off the slab but near the viewer
+and edits.
+
+**WM-BP8: the near window at scale.** The heightmap M4 rules (D8, §14.8) on a sphere; a planet streams by chunk
+(`FDistanceBandLODStrategy::IsInPlanetWindow`), not by column:
+
+- *The horizon along the ground* (the planet's D8). On a planet `GetHorizonDistance` is the arc between the viewer's
+  direction from the centre and the chunk centre's, on the sphere through the viewer's ground point
+  (`GetPlanetGroundDistance`; the ground point is the analytic terrain under the viewer, `GetPlanetGroundRadius`, one
+  sample when the viewer moves). The horizons are a cone around the viewer's up-line, as a heightmap world's are a
+  cylinder, and the viewer's altitude never takes the ground out of range. The viewer-Z clip is gone from
+  `GetPlanetShellWindow`. The chunk manager's queue eviction, edit pins, residency audit and the residency snapshot's
+  ground reach (vox.Planet, the bench's `GroundReachUU`) follow through `GetHorizonDistance`. LOD bands stay 3D from the
+  viewer (SP-C3), so a high viewer's ground disk sits at the coarsest band.
+- *The shell from the terrain's real bounds*: `FSphericalPlanetWorldMode::GetDisplacementBounds` within the configured
+  `PlanetMaxTerrainHeight` / `Depth` (past which terrain is cut off), + half a chunk; the horizon cull's peaks likewise.
+  M's and L's configured shells are their extents + 10%, so their shell windows shrink by that.
+- *The per-chunk radial slab.* A chunk loads when its radial extent (its box's nearest point and farthest corner from the
+  centre) meets its slab: the surface's altitude range over the cube-sphere cells its eight corner directions span
+  (`FVoxelCubeSphereGrid::GatherSpanned`), ± 1.5 chunks (`SlabSlackChunks`, the heightmaps' slack). Cells are about a chunk
+  across on the datum sphere (`CellsPerEdgeFor(R, chunk size)`: 82 a face edge on the small planet, 1,637 on M, 32,725 on
+  L), a cell's range five samples of `GetTerrainAltitude` (its corners and centre, as a heightmap column's five heights).
+  Cells and chunks are memoized (`PlanetCellSurfaceCache`, `PlanetChunkSlabCache`, each starting over past a million
+  entries).
+- *Near the viewer* (within `GetNearWindowRadius` along the ground: band 0 + two chunks, 16,600 uu): off its slab a chunk
+  loads within the viewer's altitude ± 2 chunks inside the shell and is kept while within the unload distance (3D), as a
+  heightmap world streams the viewer's layer ± 2 within its height bounds and keeps the whole range near it. Edits off
+  the window stay pinned by the chunk manager.
+- *Candidates* (`ForEachPlanetCandidate`): the chunk columns along the grid axis closest to the viewer's up inside the box
+  of the horizon's cone, crossing the spherical shell of the slab's envelope over the disk (`GetPlanetSurfaceEnvelope`,
+  memoized by the viewer's cell; `GetShellCrossing`, the old column crossing along any axis), plus the near window's
+  cone and band. Load, unload and the balanced LOD cache use the same window.
+- `bFarBandSurfaceSlabCulling` off: the whole shell inside the cone (the heightmaps' whole height range).
+
+**Design choices made while building** (none changes a decision):
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| "Distance from the ground point": 3D, or along the ground? | Along the ground (the arc at the ground point's radius) | A ball around the ground point would drop a mountain beside a flyer, which is high above the ground point; the arc is a heightmap world's horizontal distance on a sphere |
+| A sea column's slab | The seabed's, with no extension to the sea surface | Planets draw the sea with the ocean shell, not voxel water tiles (`UsesWaterTiles`), so no consumer needs the water volume's chunks; heightmap slabs reach the water plane for their tiles |
+| The near window above the slab | Loaded, within the shell (the plan's rule) | A first build left air above the slab out ("no air around a flyer"). In the live survey the settle over L's open sea then held the pawn at the datum for good, waiting on its own chunk's collision, and the spawn's terrain wait counts the chunks around the pawn too. The air costs a flyer inside a thick shell up to about 450 uniform chunks (the climbs below; the first build's climbs held 1,062-1,085) |
+| Keep near the viewer | The shell within the unload distance (3D) | A heightmap world keeps its whole height range near the viewer (8 layers on the demo); a planet's shell needs a bound |
+| Cell size and samples | About a chunk, five samples | As a heightmap column; the 1.5-chunk slack covers the surface between samples and conditioning's deltas (a Tower pad on M loads whole) |
+
+**Tests.**
+
+| Test | Check | Result |
+|------|-------|--------|
+| `LOD.Planet.SurfaceSlab` (new) | The small planet and a 1,000 km one with L's terrain noise (±192,000), a viewer 300 uu over the ground at the pole, 45°, the equator and a cube corner: every chunk holding a surface point within the view distance (brute force over directions a quarter chunk apart) is a candidate; none beyond the near radius lies off the surface (within a chunk and a half of it) by more than the slack; the slab is no larger than the whole shell's window. A viewer three chunks underground streams the chunks around it | 0 missing, 0 off the slab at every site. Candidates: small planet 955-1,161 (the whole shell's window 1,004-1,204), 1,000 km 968-1,161 (17,712-18,063). 2-6 ms cold, 0.3-0.5 ms warm |
+| `LOD.Planet.GroundHorizon` (new) | The same planets and sites, a viewer climbing from 300 to 100,000 uu over the ground | The ground disk (272-334 surface chunks) kept at every altitude, nothing past the view distance along the ground, none of the ground's surface chunks unloaded; off the slab only the near window around the viewer's altitude (160-204 chunks of air for a flyer inside the 1,000 km planet's shell, none above the small planet's) |
+| `LOD.Planet.ShellCoverage` (changed, same meaning) | With slab culling off the window is the shell: no chunk meeting it within the view distance along the ground missing, none outside it | 0 missing, 0 outside at the four sites, views 40,000 and 100,000 |
+| `LOD.Planet.ColumnWindow` (changed) | A column's two crossings; from 200,000 uu up the viewer no longer clips them | Pass |
+| `LOD.VerticalWindow.HorizonDistance` (changed) | A planet's horizon is along the ground from the ground point (a chunk straight under the viewer at 0) | Pass |
+
+**Benches.** One build with a temporary `voxel.Temp.LegacyPlanetWindow` cvar, latched when the world initializes, that
+restored P6.2's window (the 3D horizon from the viewer, the configured shell, the viewer-Z clip, no slab), removed before
+the PR. PIE on `PlanetTest` with `voxel.ConfigOverride`, a fresh world per run, `vox.TPLatLon 45 20` and its settle,
+local noon, move and look input blocked; a throwaway run first (G14), then for each planet three repetitions of
+new/old × great circle/climb: `voxel.Bench.Run <tag> 1500 40000 gc=45:20:90 follow=300` and
+`voxel.Bench.Run <tag> 1500 60000 climb=45:20:200` (`warmup=30 catchup=90`). Means of three (catch-up per run); JSON in
+`Saved/VoxelBench` of the worktree, tags `p63_{S,M,L}_{new,old}_{gc,climb}_r{1,2,3}`:
+
+| Planet, route | Window | Peak loaded | Ready LOD 0/1/2 (mean) | Radial layers | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Generated / s | Systems MB peak |
+|---|---|---|---|---|---|---|---|---|---|
+| Small, great circle | **WM-BP8** | 1,305 | 19 / 103 / 1,126 | −3 to 2 | 16.7 / 24.6 | 6.1 | 0.17 / 0.17 / 0.17 | 22 | 752 |
+| | P6.2 | 1,360 | 19 / 104 / 1,183 | −3 to 2 | 16.7 / 23.8 | 5.9 | 0.17 / 0.17 / 0.17 | 24 | 762 |
+| Small, climb to 60,200 | **WM-BP8** | 1,256 | 4 / 28 / 1,222 | −3 to 2 | 16.7 / 16.8 | 1.9 | 0.17 | 0 | 631 |
+| | P6.2 | 1,288 | 5 / 29 / 740 | −3 to 2 | 16.7 / 16.9 | 1.8 | 0.17 | 0 | 644 |
+| M, great circle | **WM-BP8** | 1,222 | 18 / 105 / 1,044 | 5 to 11 | 16.7 / 34.1 | 8.2 | 0.21 / 0.22 / 0.20 | 24 | 746 |
+| | P6.2 | 2,750 | 18 / 107 / 2,470 | 0 to 16 | 18.2 / 36.9 | 10.5 | 1.79 / 1.66 / 2.62 | 53 | 1,008 |
+| M, climb | **WM-BP8** | 1,521 | 17 / 107 / 1,164 | 5 to 23 | 16.7 / 20.7 | 4.0 | 0.18-0.20 | 12 | 504 |
+| | P6.2 | 2,937 | 17 / 112 / 2,586 | 0 to 28 | 16.7 / 24.7 | 8.5 | 0.73-0.90 | 65 | 985 |
+| L, great circle | **WM-BP8** | 1,264 | 17 / 109 / 1,070 | 40 to 46 | 16.7 / 30.9 | 8.1 | 0.39 / 0.45 / 0.41 | 26 | 797 |
+| | P6.2 | 2,920 | 17 / 110 / 2,503 | 35 to 51 | 17.4 / 33.0 | 10.3 | 1.96 / 2.27 / 2.40 | 57 | 1,072 |
+| L, climb | **WM-BP8** | 1,544 | 17 / 108 / 1,194 | 40 to 58 | 16.7 / 20.0 | 4.0 | 0.17-0.18 | 12 | 528 |
+| | P6.2 | 2,919 | 18 / 111 / 2,645 | 35 to 64 | 16.7 / 22.9 | 8.2 | 0.64-0.93 | 65 | 961 |
+
+- *M and L, the window against P6.2's:* peak loaded −56% on the great circles (1,222 and 1,264 against 2,750 and 2,920),
+  manager P95 −22%, frame P95 −6% to −8%, catch-up 2.0-2.2 s → 0.2-0.4 s, chunks generated per second halved, peak
+  systems memory −26%. Climbing, the old window kept about 2,900 chunks rising through the thick shell while losing the
+  ground; the new one keeps the ground disk (ground reach 40,000 throughout) plus the near window's air (radial layers up
+  to 23 on M and 58 on L), half the chunks and half the memory. Against §20.2 (P6.1, one run each, another build): M's
+  great circle 2,849 → 1,222 chunks, manager P95 11.1 → 8.2 ms, frame P95 35.9 → 34.1; L's 2,862 → 1,264, 11.5 → 8.1,
+  40.7 → 30.9.
+- *The small planet:* the shell was already thin (3.7 chunks), so the slab trims 4% at peak; frame and manager P95 within
+  +3% (§1's thresholds: +10% and +15%), catch-up at the metric's floor in every run. Climbing, the old window emptied
+  (its mean LOD 2 count falls to 740) and the new one keeps the 1,222 ground chunks.
+- *M and L against the small planet* (WM-BP8 on both): peak loaded −6% and −3%, systems memory −1% and +6%, catch-up 0.21
+  and 0.42 s against 0.17 (+24%, and L's +0.25 s), but frame P95 +39% and +26% and manager P95 +34% and +33%. The window
+  is no longer the cause (M and L load fewer chunks than the small planet); scatter is most of the manager's difference
+  (its section's P95 3.8 and 3.4 ms against 0.7 during the traverse), and the rest of the frame's lies outside the
+  manager's sections (G42).
+- *The balanced-LOD cache* costs more to rebuild on a planet: `LODUpdateMs` P95 0.97 → 1.29 ms on the small planet, 1.9 →
+  2.4-2.5 on M and L (the candidate enumeration and the keep window's near cylinder), inside the lower manager totals.
+
+**Settled and D3** (a fresh world, the same teleport and settle, 75 s idle so far compression has run, then a zero-length
+bench; `p63_{S,M,L}_{new,old}_settled`):
+
+| Planet | Window | Loaded chunks | Voxel data MB (resident / uniform / compressed) | Systems MB settled | Audit |
+|---|---|---|---|---|---|
+| Small | **WM-BP8** | 1,250 | 150 (122 / 80 / 1,048) | 511 | 0 |
+| | P6.2 | 1,303 | 151 (123 / 95 / 1,085) | 513 | 0 |
+| M | **WM-BP8** | 1,078 | 122 (109 / 526 / 443) | 453 | 0 |
+| | P6.2 | 2,423 | 123 (110 / 1,876 / 437) | 455 | 0 |
+| L | **WM-BP8** | 1,102 | 123 (111 / 537 / 454) | 473 | 0 |
+| | P6.2 | 2,422 | 124 (112 / 1,866 / 444) | 477 | 0 |
+
+D3 is met: systems memory peaks at 504-797 MB while streaming (at most 1.5 GB) and settles at 453-511 MB (at most 0.6 GB).
+P6.2's extra 1,300 chunks on M and L were uniform (air and rock that compress to nothing), so the settled memory barely
+moves; the cost was the generation, queue and LOD work above. On the small planet the settle teleport's land search
+(45°N 20°E is sea there; it lands at 46.1°N) leaves chunks out to the unload distance in both windows (reach 47,989):
+the camera's sweep (G41). Arriving at the same point without it the window is 997 chunks with a ground reach of 40,112.
+
+**Live survey** (`PlanetTest` with `voxel.ConfigOverride`, the sites and cameras of §20.2 and §20.3, `vox.Debug.Capture 1`
+throughout; screenshots `Saved/Screenshots/Claudius/p63_{L,M}_{45N,equator,corner,pole}_{ground,above}.png`,
+`p63_{L,M}_climb_{300,10000,40000,100000}.png`, `p63_M_poi_ground.png` in the worktree, against P6.2's `p62_*`):
+
+- *The four sites on L and M* look as in P6.2 from the ground and from above (the same terrain, G39's bands at the
+  equator, G25's faint shading lines), with no hole and no missing ground. Windows: L 45°N 1,103 chunks in radial
+  layers 40 to 46 (ground reach 39,991), the equator 962 (−11 to −5); M 45°N 1,080, the equator 995, the corner 1,298.
+  L's corner and pole and M's pole are open sea: the settle holds the pawn at the datum until its chunk cooks, it drops
+  into the sea and swims, as in P6.2 (the windows there, 1,454-1,664 chunks, hold the seabed's slab and the air the pawn
+  fell through within the unload distance).
+- *Climbs* at 45°N in debug flight (`vox.TPLatLon 45 20 <ground + A> 0 1`, A = 300, 10,000, 40,000 and 100,000): the ground
+  reach stays 47,950-47,975 at every altitude on both planets, and from 40,000 and 100,000 uu up the ground disk is drawn
+  under the flyer (`p63_{L,M}_climb_40000`, `_100000`) where P6.1's window held nothing from about 50,000 uu up. The
+  window grows with the near window's air (L 1,281 → 1,706 chunks, M 1,222 → 1,697). Dropped out of flight at 10,000 uu,
+  the pawn lands on cooked ground on both.
+- *Walks*: 45 s along the 45°N great circle at 1,200 uu/s on L and M (about 50,000 uu each): `feetCol=1` on all 175
+  capture lines of each, no NOT-READY warning.
+- *A pad*: `vox.TPPOI` on M lands on the Tower's stairs, the pad's ground whole around it.
+- Over the whole survey (4,943 capture lines) `feetCol=0` appears only on held frames (the settle, mode 0) or hovering
+  ones (debug flight, mode 5) right after a teleport, before the new spot cooks; never walking or falling, and no
+  under-feet NOT-READY warning. The pawn drowned once, left submerged at L's pole (unrelated), and a wolf killed it on M.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 535/535 headless (533 + the
+two new tests) and 535/535 in the editor with the GPU tests running (the generation parity tests,
+`Meshing.MarchingCubes.CPUvsGPU`, `GPUNoiseGeneratorAsync`, `InfinitePlane.GPUConsistency`), no device loss; the 108 GPU
+parity lines CRC-identical to P6.2's (WM-BP8 changes no generation). The heightmap streaming tests
+(`LOD.VerticalWindow.*`, which check each column's candidates exactly) pass unchanged.
+
+**New findings.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the horizon along the ground the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 1,091 from the antipode (whose line arrives along the up-line), 997 arriving in held flight. Teleports only; the extra chunks are within the unload hysteresis and go when the viewer moves | Open (low): snap the camera's pivot on a teleport (VoxelCharacterPlugin); with WM-BP10's descents |
+| G42 | On M and L the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows now load fewer chunks: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. It predates WM-BP8 (P6.1: +18% and +34%) and the window's A/B lowers both on M and L | Open: WM-BP13's budgets (profile scatter on km relief) |
+
+**Left for the next milestones.** P6.4 (the far field, WM-BP9) builds on this window: its hole is the loaded disk, the view
+distance along the ground from the ground point, and beyond it nothing is drawn yet but the sea sphere (the climb
+shots). P6.5 (WM-BP10, WM-BP11): landing on a big planet's open sea (G36), the camera's teleport sweep (G41), and voxels
+unloading above a cut-over altitude, which also retires the near window's air for a high flyer.
