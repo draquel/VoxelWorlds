@@ -231,11 +231,10 @@ float SampleGpuOreVeinNoise(float3 WorldPos, uint OreIdx, int WorldSeed)
     return (noiseValue + 1.0) * 0.5;
 }
 
-// FVoxelCPUNoiseGenerator::OreRarityHash, bit for bit: a planet's ore Rarity value in [0, 1) from the planet-relative
-// position rounded to whole uu (OreRarityKey: floor(x + 0.5)) and the seed (spherical SP-H3).
-float GpuOreRarityHash(float3 PlanetRelativePos, int Seed)
+// FVoxelCPUNoiseGenerator::OreRarityHash, bit for bit: a planet's ore Rarity value in [0, 1) from an OreRarityKey (the
+// planet-relative position rounded to whole uu) and the seed (spherical SP-H3).
+float GpuOreRarityHashKey(int3 Key, int Seed)
 {
-    const int3 Key = int3(floor(PlanetRelativePos + 0.5f));
     uint h = asuint(Key.x) * 0x8DA6B343u;
     h ^= asuint(Key.y) * 0xD8163841u;
     h ^= asuint(Key.z) * 0xCB1AB31Fu;
@@ -248,10 +247,9 @@ float GpuOreRarityHash(float3 PlanetRelativePos, int Seed)
     return (float)(h >> 8) * (1.0f / 16777216.0f);
 }
 
-// FVoxelCPUNoiseGenerator::CheckOreVeinPlacement over [OreStart, OreStart+OreCount). First match wins. bPlanetHash: the
-// Rarity test hashes PlanetRelativePos (a planet, SP-H3); otherwise the heightmap modes' position hash.
-bool GpuCheckOreVein(float3 WorldPos, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, bool bPlanetHash,
-    float3 PlanetRelativePos, out uint OutMat)
+// FVoxelCPUNoiseGenerator::CheckOreVeinPlacement over [OreStart, OreStart+OreCount) in the heightmap modes (a planet's
+// is GpuCheckPlanetOreVein in SphericalPlanet.ush). First match wins.
+bool GpuCheckOreVein(float3 WorldPos, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, out uint OutMat)
 {
     OutMat = 0u;
     for (uint i = 0; i < OreCount; ++i)
@@ -276,9 +274,7 @@ bool GpuCheckOreVein(float3 WorldPos, float DepthBelowSurface, uint OreStart, ui
             {
                 // NOTE: the heightmap position hash is precision-sensitive; the CPU computes it in double, the GPU
                 // in float, so heightmap ores with rarity < 1 may differ by a few voxels GPU vs CPU. A planet's is exact.
-                float randomValue = bPlanetHash
-                    ? GpuOreRarityHash(PlanetRelativePos, WorldSeed)
-                    : frac(sin(WorldPos.x * 12.9898 + WorldPos.y * 78.233 + WorldPos.z * 45.164) * 43758.5453);
+                float randomValue = frac(sin(WorldPos.x * 12.9898 + WorldPos.y * 78.233 + WorldPos.z * 45.164) * 43758.5453);
                 if (randomValue > rarity) { continue; }
             }
             OutMat = matID;

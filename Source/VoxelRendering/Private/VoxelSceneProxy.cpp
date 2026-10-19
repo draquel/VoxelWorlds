@@ -138,8 +138,9 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelWorldComponent* InComponent, UMaterialI
 	if (InComponent)
 	{
 		VoxelSize = InComponent->GetVoxelSize();
+		RenderOrigin = InComponent->GetComponentLocation();
 		bRadialFaceUp = InComponent->IsRadialFaceUp();
-		FaceUpCenter = FVector3f(InComponent->GetFaceUpCenter());
+		FaceUpCenter = ToRenderOffset(InComponent->GetFaceUpCenter());
 	}
 
 	// Get material (use default if none set)
@@ -1062,8 +1063,8 @@ void FVoxelSceneProxy::UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHIC
 	TArray<FVector4f> TexCoordData;
 	TexCoordData.SetNumUninitialized(SourceVertexCount);
 
-	// Get chunk world position offset
-	const FVector3f ChunkOffset = FVector3f(GPUData.ChunkWorldPosition);
+	// The chunk origin relative to the primitive's (RenderOrigin, WM-BP7)
+	const FVector3f ChunkOffset = ToRenderOffset(GPUData.ChunkWorldPosition);
 
 	// Debug: Track MaterialID and BiomeID distribution for first chunk
 	static bool bLoggedMaterialIDs = false;
@@ -1270,8 +1271,9 @@ void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
 	// Retire (crossfade) or release any existing mesh for this chunk
 	RetireOrReleaseChunk_AssumesLocked(ChunkCoord, bCrossfade);
 
-	// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data (NO GPU READBACK!)
-	const FVector3f ChunkOffset = FVector3f(ChunkWorldPosition);
+	// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data (NO GPU READBACK!), the chunk origin
+	// relative to the primitive's (RenderOrigin, WM-BP7)
+	const FVector3f ChunkOffset = ToRenderOffset(ChunkWorldPosition);
 
 	TArray<FVoxelLocalVertex> ConvertedVertices;
 	ConvertedVertices.SetNumUninitialized(VertexCount);
@@ -1683,7 +1685,7 @@ void FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread(
 	}
 
 	// Convert FVoxelVertex to FVoxelLocalVertex format
-	const FVector3f TileOffset = FVector3f(TileWorldPosition);
+	const FVector3f TileOffset = ToRenderOffset(TileWorldPosition);
 
 	TArray<FVoxelLocalVertex> ConvertedVertices;
 	ConvertedVertices.SetNumUninitialized(VertexCount);
@@ -1937,7 +1939,7 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 	RetireOrReleaseSeam_AssumesLocked(Key, bCrossfade);
 
 	// Convert FVoxelVertex to FVoxelLocalVertex format (same pipeline as terrain chunks)
-	const FVector3f SeamOffset = FVector3f(OwnerWorldPosition);
+	const FVector3f SeamOffset = ToRenderOffset(OwnerWorldPosition);
 
 	TArray<FVoxelLocalVertex> ConvertedVertices;
 	ConvertedVertices.SetNumUninitialized(VertexCount);
@@ -2338,8 +2340,9 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 		// Retire (crossfade) or release any existing mesh for this chunk
 		RetireOrReleaseChunk_AssumesLocked(ChunkCoord, Add.bCrossfade);
 
-		// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data
-		const FVector3f ChunkOffset = FVector3f(Add.ChunkWorldPosition);
+		// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data, the chunk origin relative to the
+		// primitive's (RenderOrigin, WM-BP7)
+		const FVector3f ChunkOffset = ToRenderOffset(Add.ChunkWorldPosition);
 
 		TArray<FVoxelLocalVertex> ConvertedVertices;
 		ConvertedVertices.SetNumUninitialized(VertexCount);

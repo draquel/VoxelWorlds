@@ -49,9 +49,9 @@ tracked as the major follow-up. Until then the practical clean range is ~100 km 
 
 ## Planets: the radius ceiling (SP-H2)
 
-Every surface vertex of a planet lies about R from its centre, so with the centre at the world origin the float-bake
-ceiling (#4) is a radius of about 100 km (a centre placed away from the origin adds its distance); collision (#5)
-stays exact. The planet's GPU density is planet-relative already; its cave and ore noise sample absolute float
-positions, as the CPU's noise does in float (SP-H1). Rebasing would have to separate the two roles `WorldOrigin` plays
-today: the planet's centre (generation, gravity, the surface coordinate) and the chunk grid's origin (chunk keys,
-saves, the edit layer). See `Features/WORLD_MODES.md` "The radius ceiling".
+Every surface vertex of a planet lies about R from its centre, so with one primitive at the world origin the
+float-bake ceiling (#4) would be a radius of about 100 km. Since spherical Phase 6 (P6.2, review plan §20.3) planets
+render in regions of 16^3 chunks, each primitive at its region's origin in double, so a vertex's float is at most a
+region across (under 0.01 uu); generation, the noise and the GPU branch keep every size-R value in double or in the
+chunk's frame. Planets are precise to about 1,000 km (`Review_Planet_L`); collision (#5) stays exact. Heightmap
+worlds keep #4's single primitive at the origin. See `Features/WORLD_MODES.md` "The radius ceiling".

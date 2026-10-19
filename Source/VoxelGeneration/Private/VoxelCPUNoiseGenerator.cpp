@@ -13,6 +13,7 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelDownLines.h"
+#include "VoxelPlanetNoise.h"
 #include "Async/Async.h"
 
 // Permutation table for Perlin noise (Ken Perlin's original)
@@ -1044,10 +1045,15 @@ float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FC
 	const FSphericalPlanetParams* Planet)
 {
 	// Apply vertical scale to flatten caves horizontally: along world Z in heightmap modes, along local up on a planet
-	// (the altitude above the datum is scaled, the direction kept; SP-B6)
+	// (the altitude above the datum is scaled, the direction kept; SP-B6). A planet's caves sample the planet noise
+	// relative to its centre (WM-BP5, D22): exact at any radius, no period, and they move with the planet.
 	const FVector ScaledPos = Planet
-		? FSphericalPlanetWorldMode::ScaleAltitude(WorldPos, *Planet, LayerConfig.VerticalScale)
+		? FSphericalPlanetWorldMode::ScaleAltitudeRelative(WorldPos - Planet->PlanetCenter, Planet->PlanetRadius, LayerConfig.VerticalScale)
 		: FVector(WorldPos.X, WorldPos.Y, WorldPos.Z * LayerConfig.VerticalScale);
+	auto SampleField = [Planet, &ScaledPos](const FVoxelNoiseParams& Params)
+	{
+		return Planet ? FVoxelPlanetNoise::FBM3D(ScaledPos, Params) : FBM3D(ScaledPos, Params);
+	};
 
 	// Build noise params for first noise field
 	FVoxelNoiseParams CaveNoiseParams;
@@ -1062,7 +1068,7 @@ float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FC
 	if (LayerConfig.CaveType == ECaveType::Cheese)
 	{
 		// Cheese caves: single noise field, carve where noise > threshold
-		float Noise = FBM3D(ScaledPos, CaveNoiseParams);
+		float Noise = SampleField(CaveNoiseParams);
 
 		// Noise is in [-1, 1], map threshold to that range
 		if (Noise <= LayerConfig.Threshold)
@@ -1081,14 +1087,14 @@ float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FC
 	{
 		// Spaghetti and Noodle: dual-noise intersection
 		// Tunnel forms where BOTH noise fields are near zero simultaneously
-		float Noise1 = FBM3D(ScaledPos, CaveNoiseParams);
+		float Noise1 = SampleField(CaveNoiseParams);
 
 		// Second noise field with offset seed and scaled frequency
 		FVoxelNoiseParams SecondNoiseParams = CaveNoiseParams;
 		SecondNoiseParams.Seed = WorldSeed + LayerConfig.SecondNoiseSeedOffset;
 		SecondNoiseParams.Frequency = LayerConfig.Frequency * LayerConfig.SecondNoiseFrequencyScale;
 
-		float Noise2 = FBM3D(ScaledPos, SecondNoiseParams);
+		float Noise2 = SampleField(SecondNoiseParams);
 
 		// Both noise fields must be within [-Threshold, Threshold] for a tunnel
 		float AbsNoise1 = FMath::Abs(Noise1);
@@ -1245,6 +1251,34 @@ float FVoxelCPUNoiseGenerator::SampleOreVeinNoise(const FVector& WorldPos, const
 	return (NoiseValue + 1.0f) * 0.5f;
 }
 
+FVector FVoxelCPUNoiseGenerator::GetPlanetOreStreakDirection(const FOreVeinConfig& OreConfig)
+{
+	// The heightmap streak's direction formula at the origin: one direction per ore type (WM-BP5). A direction that varies
+	// with the absolute position (the heightmap form) turns into white noise R-sized distances from the origin.
+	const double StreakSeed = static_cast<double>(OreConfig.SeedOffset) * 0.1;
+	return FVector(FMath::Sin(StreakSeed), FMath::Cos(StreakSeed * 1.5), FMath::Sin(StreakSeed * 2.0)).GetSafeNormal();
+}
+
+FVector FVoxelCPUNoiseGenerator::GetPlanetOreSamplePoint(const FVector& PlanetRelativePos, const FOreVeinConfig& OreConfig)
+{
+	if (OreConfig.Shape != EOreVeinShape::Streak)
+	{
+		return PlanetRelativePos;
+	}
+	// Squash the position along the streak direction by StreakStretch (the heightmap streak's projection): a linear map, so
+	// a chunk's origin and its voxels' offsets map separately (the GPU's split origin).
+	const FVector Dir = GetPlanetOreStreakDirection(OreConfig);
+	const double Along = FVector::DotProduct(PlanetRelativePos, Dir);
+	return PlanetRelativePos - Dir * (Along * (1.0 - 1.0 / FMath::Max(OreConfig.StreakStretch, 1.0f)));
+}
+
+float FVoxelCPUNoiseGenerator::SamplePlanetOreVeinNoise(const FVector& PlanetRelativePos, const FOreVeinConfig& OreConfig, int32 WorldSeed)
+{
+	// The heightmap ore field (2-octave Simplex at the ore's frequency and seed) by the planet noise, relative to the centre
+	const FVoxelNoiseParams Params = FVoxelPlanetNoise::MakeFieldParams(WorldSeed + OreConfig.SeedOffset, OreConfig.Frequency);
+	return (FVoxelPlanetNoise::FBM3D(GetPlanetOreSamplePoint(PlanetRelativePos, OreConfig), Params) + 1.0f) * 0.5f;
+}
+
 FIntVector FVoxelCPUNoiseGenerator::OreRarityKey(const FVector& PlanetRelativePos)
 {
 	return FIntVector(
@@ -1285,8 +1319,10 @@ bool FVoxelCPUNoiseGenerator::CheckOreVeinPlacement(
 			continue;
 		}
 
-		// Sample ore noise at this position
-		float OreNoise = SampleOreVeinNoise(WorldPos, OreConfig, WorldSeed);
+		// Sample ore noise at this position: on a planet the planet noise relative to its centre (WM-BP5)
+		float OreNoise = PlanetRelativePos
+			? SamplePlanetOreVeinNoise(*PlanetRelativePos, OreConfig, WorldSeed)
+			: SampleOreVeinNoise(WorldPos, OreConfig, WorldSeed);
 
 		// Check against threshold
 		if (OreNoise >= OreConfig.Threshold)
@@ -1323,10 +1359,13 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
 	const FSphericalPlanetParams& PlanetParams = WorldMode.GetPlanetParams();
 	const FVector PlanetCenter = PlanetParams.PlanetCenter;
-	const float PlanetRadius = PlanetParams.PlanetRadius;
+	const double PlanetRadius = PlanetParams.PlanetRadius;
 	// The chunk origin relative to the centre, in double: the ore Rarity hash keys on it (SP-H3), as the GPU's
 	// PlanetChunkOffset does.
 	const FVector ChunkPlanetRelative = ChunkWorldPos - PlanetCenter;
+	// The sea as an altitude (WM-BP4): every comparison with the terrain is between altitudes, never between two radii of
+	// size R in float.
+	const double WaterAltitude = Request.WaterRadius - PlanetRadius;
 
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
@@ -1336,35 +1375,13 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	// applies the same.
 	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(BiomeConfig);
 
-	// Set up biome noise parameters
-	FVoxelNoiseParams TempNoiseParams;
-	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	TempNoiseParams.Octaves = 2;
-	TempNoiseParams.Persistence = 0.5f;
-	TempNoiseParams.Lacunarity = 2.0f;
-	TempNoiseParams.Amplitude = 1.0f;
-
-	FVoxelNoiseParams MoistureNoiseParams;
-	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	MoistureNoiseParams.Octaves = 2;
-	MoistureNoiseParams.Persistence = 0.5f;
-	MoistureNoiseParams.Lacunarity = 2.0f;
-	MoistureNoiseParams.Amplitude = 1.0f;
-
-	if (BiomeConfig)
-	{
-		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
-		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
-		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
-		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
-	}
-	else
-	{
-		TempNoiseParams.Seed = Request.NoiseParams.Seed + 1234;
-		TempNoiseParams.Frequency = 0.00005f;
-		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
-		MoistureNoiseParams.Frequency = 0.00007f;
-	}
+	// Climate: the heightmap modes' 2-octave fields (seeds and frequencies), sampled by the planet noise (WM-BP5)
+	const FVoxelNoiseParams TempNoiseParams = BiomeConfig
+		? FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset, BiomeConfig->TemperatureNoiseFrequency)
+		: FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + 1234, 0.00005f);
+	const FVoxelNoiseParams MoistureNoiseParams = BiomeConfig
+		? FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset, BiomeConfig->MoistureNoiseFrequency)
+		: FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + 5678, 0.00007f);
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -1379,8 +1396,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					Z * VoxelSize
 				);
 
-				// Get direction from planet center for noise sampling
-				FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, PlanetCenter);
+				// The voxel relative to the centre, its distance and direction, all in double (WM-BP4)
+				const FVector PlanetRelativePos = ChunkPlanetRelative + FVector(X * VoxelSize, Y * VoxelSize, Z * VoxelSize);
+				const double DistFromCenter = PlanetRelativePos.Size();
+				const FVector Direction = DistFromCenter > UE_KINDA_SMALL_NUMBER ? PlanetRelativePos / DistFromCenter : FVector::UpVector;
 
 				// The surface along this direction: terrain noise and continentalness sampled on the datum sphere, the
 				// displacement modulated by continentalness as in the heightmap modes (SP-B1, SP-B5). The sampled
@@ -1396,25 +1415,23 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				{
 					TerrainAltitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, PlanetRadius, TerrainAltitude, Request.ConditioningZones);
 				}
-				const float TerrainRadius = PlanetRadius + TerrainAltitude;
+				// The voxel's altitude above the datum, |P - C| - R in double (WM-BP4): the signed distance, the depth and
+				// the height rules all read altitudes, quantities of the relief's size, so nothing of size R cancels in
+				// float (at R 1e8 a float radius is 8 uu coarse: 13 density steps of terraces).
+				const double VoxelAltitude = DistFromCenter - PlanetRadius;
 
 				// Signed distance to the surface (with the shell's quick reject), then density
-				const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, PlanetCenter);
-				const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(DistFromCenter, TerrainRadius, PlanetParams);
+				const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistanceAtAltitude(VoxelAltitude, TerrainAltitude, PlanetParams);
 				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
 
-				// Depth below surface is radial (terrain radius - distance from center)
-				float DepthBelowSurface = (TerrainRadius - DistFromCenter) / VoxelSize;
+				// Depth below surface is radial (terrain altitude - voxel altitude)
+				float DepthBelowSurface = static_cast<float>((static_cast<double>(TerrainAltitude) - VoxelAltitude) / VoxelSize);
 
 				// Height-material rules read the voxel's altitude above the datum, as they read Z in the heightmap modes
 				// (SP-B2; the radius put every surface past the snow line). Caves under the sea keep their underwater
 				// minimum depth (SP-B6).
-				const float Altitude = DistFromCenter - PlanetRadius;
-				const bool bUnderwater = Request.bEnableWaterLevel && TerrainRadius < Request.WaterRadius;
-
-				// Temperature and moisture are sampled like the terrain, on the datum sphere, so biomes keep their size in
-				// uu whatever the radius (SP-B1).
-				const FVector BiomeSamplePos = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Direction, PlanetRadius);
+				const float Altitude = static_cast<float>(VoxelAltitude);
+				const bool bUnderwater = Request.bEnableWaterLevel && TerrainAltitude < WaterAltitude;
 
 				// Save pre-cave density to detect cave carving (solid → air transition)
 				const uint8 PreCaveDensity = Density;
@@ -1425,8 +1442,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 				if (Request.bEnableBiomes && BiomeConfig && BiomeConfig->IsValid())
 				{
-					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
-					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+					// Temperature and moisture are sampled like the terrain, on the datum sphere, so biomes keep their size
+					// in uu whatever the radius (SP-B1)
+					float Temperature, Moisture;
+					FSphericalPlanetWorldMode::SampleClimate(Direction, PlanetRadius, TempNoiseParams, MoistureNoiseParams, Temperature, Moisture);
 
 					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
 					BiomeID = Blend.GetDominantBiome();
@@ -1444,11 +1463,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					}
 
 					// Get material considering blend weights and water level
-					// For spherical planets: underwater if terrain radius < water radius
+					// For spherical planets: underwater if the terrain's altitude is under the sea's (WM-BP4: altitudes)
 					if (Request.bEnableWaterLevel)
 					{
 						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainRadius, Request.WaterRadius);
+							Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(WaterAltitude));
 					}
 					else
 					{
@@ -1477,7 +1496,6 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 						BiomeConfig->GetOreVeinsForBiome(BiomeID, ApplicableOres);
 
 						uint8 OreMaterial = 0;
-						const FVector PlanetRelativePos = ChunkPlanetRelative + FVector(X * VoxelSize, Y * VoxelSize, Z * VoxelSize);
 						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial, &PlanetRelativePos))
 						{
 							MaterialID = OreMaterial;
@@ -1486,8 +1504,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				}
 				else if (Request.bEnableBiomes)
 				{
-					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
-					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+					float Temperature, Moisture;
+					FSphericalPlanetWorldMode::SampleClimate(Direction, PlanetRadius, TempNoiseParams, MoistureNoiseParams, Temperature, Moisture);
 
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
@@ -1506,7 +1524,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				}
 				else
 				{
-					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainRadius, DepthBelowSurface * VoxelSize);
+					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainAltitude, DepthBelowSurface * VoxelSize);
 
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)

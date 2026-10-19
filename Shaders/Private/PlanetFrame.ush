@@ -1,0 +1,55 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// A planet voxel in its chunk's frame (spherical Phase 6, WM-BP5 / WM-BP6; WORLD_MODES_REVIEW_PLAN.md §20.1): the GPU has no
+// doubles, so the CPU sends what is large (the chunk anchor's direction from the planet centre, its distance and its
+// altitude, formed in double) and the shader computes only small quantities in float. With |anchor| = r0 and its direction
+// n0, a voxel at anchor + D has
+//
+//     |anchor + D| - r0 = r0 (sqrt(1 + e) - 1) = r0 e / (sqrt(1 + e) + 1),   e = (2 n0.D + D.D / r0) / r0,
+//     direction - n0   = (D - n0 dR) / (r0 + dR),
+//
+// so its altitude is the anchor's altitude + dR and no quantity of size R is ever subtracted in float. n0 rounded to float
+// only multiplies small values here. Shared by GenerateVoxelDensity.usf and VoxelPostPasses.usf.
+
+#pragma once
+
+struct PlanetVoxelFrame
+{
+    float3 D;        // offset from the anchor (uu)
+    float3 Dir;      // direction from the centre (n0 + DeltaDir; for local up, not for R-sized distances)
+    float3 DeltaDir; // the direction minus the anchor's
+    float DeltaR;    // the distance from the centre minus the anchor's
+};
+
+/** The distance from the centre of anchor + D minus the anchor's (the small-difference form above). */
+float PlanetFrameDeltaR(float3 D, float3 AnchorDir, float AnchorDist)
+{
+    const float E = (2.0f * dot(AnchorDir, D) + dot(D, D) / AnchorDist) / AnchorDist;
+    return AnchorDist * E / (sqrt(max(1.0f + E, 0.0f)) + 1.0f);
+}
+
+/**
+ * The frame of the voxel at anchor + D.
+ *
+ * @param D The voxel's offset from the chunk's anchor (uu)
+ * @param AnchorDir The anchor's direction from the planet centre
+ * @param AnchorDist The anchor's distance from the planet centre (> 0: the anchor is a chunk's centre)
+ */
+PlanetVoxelFrame MakePlanetFrameAt(float3 D, float3 AnchorDir, float AnchorDist)
+{
+    PlanetVoxelFrame F;
+    F.D = D;
+    F.DeltaR = PlanetFrameDeltaR(D, AnchorDir, AnchorDist);
+    const float Dist = AnchorDist + F.DeltaR;
+    if (Dist > 1.0e-3f)
+    {
+        F.DeltaDir = (D - AnchorDir * F.DeltaR) / Dist;
+        F.Dir = AnchorDir + F.DeltaDir;
+    }
+    else
+    {
+        F.Dir = float3(0.0f, 0.0f, 1.0f); // GetDirectionFromCenter at the centre
+        F.DeltaDir = F.Dir - AnchorDir;
+    }
+    return F;
+}

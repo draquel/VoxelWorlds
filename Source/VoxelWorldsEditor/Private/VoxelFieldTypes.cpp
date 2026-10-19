@@ -15,6 +15,7 @@
 #include "VoxelSurfaceQuery.h"
 #include "VoxelCaveQuery.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelPlanetNoise.h"
 
 #define LOCTEXT_NAMESPACE "VoxelEditorFields"
 
@@ -335,7 +336,8 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		{
 			const FVector SamplePos = C.bPlanet
 				? FSphericalPlanetWorldMode::GetNoiseSamplePoint(C.PlanetDirectionAbove(X, Y), C.PlanetRadius) : FVector(X, Y, 0.0);
-			return FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.TempNoiseParams);
+			// A planet's climate is the planet noise (WM-BP5), as generation samples it
+			return C.bPlanet ? FVoxelPlanetNoise::FBM3D(SamplePos, C.TempNoiseParams) : FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.TempNoiseParams);
 		};
 		RegisterField(F);
 	}
@@ -354,7 +356,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		{
 			const FVector SamplePos = C.bPlanet
 				? FSphericalPlanetWorldMode::GetNoiseSamplePoint(C.PlanetDirectionAbove(X, Y), C.PlanetRadius) : FVector(X, Y, 0.0);
-			return FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.MoistureNoiseParams);
+			return C.bPlanet ? FVoxelPlanetNoise::FBM3D(SamplePos, C.MoistureNoiseParams) : FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.MoistureNoiseParams);
 		};
 		RegisterField(F);
 	}
@@ -374,7 +376,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 			const FVector SamplePos = C.bPlanet
 				? FSphericalPlanetWorldMode::GetNoiseSamplePoint(C.PlanetDirectionAbove(X, Y), C.PlanetRadius) : FVector(X, Y, 0.0);
 			return C.bUseContinentalness
-				? FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.ContinentalnessNoiseParams)
+				? (C.bPlanet ? FVoxelPlanetNoise::FBM3D(SamplePos, C.ContinentalnessNoiseParams) : FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.ContinentalnessNoiseParams))
 				: 0.0f;
 		};
 		RegisterField(F);

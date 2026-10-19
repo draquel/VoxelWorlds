@@ -1479,6 +1479,8 @@ Three findings from §13.11 get IDs here:
 | G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (over the small planet's pole, inside M and L) and a settle from altitude never lands (§20.2) | Open: WM-BP10 (landing) and WM-BP11 (spawn at scale) | WM-BP10, WM-BP11 |
 | G37 | Planet POI queries by distance (claim streaming, `poi.Find`, the planet map markers) opened a cap from the chord of their range plus the origin's height, tens of degrees for an origin in the core or high above a big planet: frames of 30 s to 3 min on `Review_Planet_L`; registration generated every POI of the planet (8.2 million on L, 120 s) for a log line (§20.2) | Fixed in P6.1 (§20.2, WM-BP11's bounds brought forward): `FPOIPlacement::GetPlanetCapAngleWithin`, `GetPlanetSurveyAngle`; `POI.Planet.RegistrationBounded` | (WM-BP11) |
 | G38 | In-editor runs of the six suites lost the GPU device (`DXGI_ERROR_DEVICE_REMOVED`, `DRIVER_INTERNAL_ERROR`, seen at the creation of a 2 GB reserved buffer) at about the 128th render scene of the editor session. Tests that build worlds leave them to the garbage collector, and nothing collected garbage during a run: after a batch of 105 test worlds, 106 `UWorld`s were alive (1 after `obj gc`). The suites as they were build 124 and finished; P6.1's tests took them past the limit (every run that reached 127 scenes lost the device, on the base worktree too, and none that stayed at 126 or under). Headless runs are unaffected | Fixed in P6.1: the game module collects garbage when a test ends with 32 test worlds pending (`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`, `vox.Tests.GCEveryWorlds`); 529/529 in the editor with no device loss (§20.2) | — |
+| G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position, so across a blend zone, where the weights change slowly, it follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets (the grid tilted against local up everywhere, climate zones km across): `Review_Planet_L`'s equator and M's 45° and equator from above (also in P6.1's M shot; found in spherical Phase 6's P6.2 survey, §20.3) | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) | — |
+| G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Open: the far field's sea patches replace it | WM-BP9 |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -5035,3 +5037,159 @@ run), and the 87 GPU parity lines identical to the base's by CRC (no generation 
 **Left for the next milestones.** P6.2 (precision): WM-BP4 to WM-BP7 against the probe's table, the GPU checked against
 the CPU at L sites. Seen on L from the ground: the window's sunken edge and seam lines (WM-BP7), the striped ground
 material (WM-BP7's material item).
+
+### 20.3 P6.2 results: precision (2026-10-19)
+
+Bases: VoxelWorlds `daf78e0`, UE5_PluginDev `e90d8bd` (P6.1 merged). Branches `feat/spherical-p6-2-precision`
+(VoxelWorlds) and `claude/spherical-p6-2-precision-27fdaf` (UE5_PluginDev), one commit per work item. On
+`Review_Planet_L` (R 10⁸) the SDF, normals, noise and vertices are within the thresholds on the CPU and the GPU;
+heightmap generation is bit for bit as before.
+
+**WM-BP4: double CPU planet math.** Every quantity of size R stays in double from the centre to the final altitude or
+signed distance: `FSphericalPlanetParams::PlanetRadius`, the shell radii and `FVoxelNoiseGenerationRequest::WaterRadius`
+are double; `CalculateRadialDistance`, `GetAltitude`, `GetDensityAt`, `ShellSignedDistance` and
+`CalculateSignedDistance` subtract in double; `ShellSignedDistanceAtAltitude` writes the SDF as the terrain's altitude
+minus the voxel's (the form the GPU uses since WM-BP6). `GenerateChunkSphericalPlanet` takes the voxel's planet-relative
+position, distance and direction in double, and its SDF, depth, height rules and sea test read altitudes (the sea as
+`WaterRadius − R`, formed in double). `GetSurfacePoint` and `GetConditionedSurfacePoint` build the point as centre +
+direction × (R + altitude) in double, so the normal's central differences no longer see R + h rounded to 8 uu.
+`QueryPlanetSurfaceConditions` and the LOD strategy's radii likewise.
+
+**WM-BP5: split-origin hashed noise for planets (D22, D21).** `FVoxelPlanetNoise` (`VoxelPlanetNoise.h`) and its GPU
+twin `PlanetNoise.ush`, with the same float algebra on both sides:
+
+- a hashed integer lattice (the ore `Rarity` hash's mixing) instead of the 256-entry permutation table, so no period
+  (the table repeated L's top terrain octave 61 times around its equator);
+- split-origin sampling: an origin split in double, per octave, into an integer lattice cell (wrapping) and a float
+  fraction, plus a small float offset, so every float is of the size of a cell at any radius (simplex splits in the
+  skewed lattice; Perlin, cellular and Voronoi in the cube lattice). The CPU splits each sample at the point itself;
+  the GPU splits a per-chunk origin (`PlanetNoiseOrigins`, uploaded per dispatch) and adds the voxel's offset from it;
+- every planet field samples it: terrain and continentalness (`SampleRadialDisplacement`,
+  `ComputeEffectiveTerrainParams`), temperature and moisture (generation, `SampleClimate`, the surface queries, the map's
+  fallback climate, the editor's field preview; the heightmap's 2-octave fields, same seeds and frequencies),
+  caves at the planet-relative position with the altitude scaled (`ScaleAltitudeRelative`), and ores at the
+  planet-relative position with one streak direction per ore type (a direction that depends on the position turns into
+  white noise far from the origin).
+
+Heightmap noise is untouched. `PlanetGenerationVersion` 4 → 5 (D21): planet saves are refused and kept, heightmap saves
+load (`VoxelWorldSave`'s planet test at `PlanetGeneration=5`).
+
+**WM-BP6: the GPU planet branch chunk-relative.** The GPU has no doubles, so the CPU reduces every R-sized value in
+double and the shader computes only small quantities in float, in the chunk's frame (`PlanetFrame.ush`, shared with the
+post-passes). With the chunk centre as the anchor (distance r0, direction n0), a voxel at anchor + D lies
+dR = r0·e / (√(1+e) + 1) farther out, e = (2 n0·D + D·D / r0) / r0, and its direction moves by (D − n0·dR) / (r0 + dR).
+
+- The voxel's altitude is the anchor's (formed in double) + dR; the SDF, depth and the shell's quick reject read
+  altitudes (`PlanetShellSignedDistance` mirrors `ShellSignedDistanceAtAltitude`).
+- The sea is an altitude for the underwater column and materials; the post-passes test dR ≤ `WaterRadius` − |anchor|
+  (a float |P − C|² against `WaterRadius`² jittered by 8 uu at R 10⁸).
+- Conditioning zones are uploaded as their datum points relative to the anchor's (double); the shader measures the short
+  chord to the voxel's datum point, arc = 2R·asin(chord / 2R) (R·atan2 of float directions was 10 uu off at L).
+- The ore `Rarity` key is the chunk's integer base (the chunk origin relative to the centre, floored in double) +
+  floor(fraction + local + 0.5).
+- `PlanetCenter`, `PlanetChunkOffset` and the radius parameters are gone from the generation shader.
+
+**WM-BP7: rendering precision (D23).** Region primitives (`FVoxelRenderRegions`, VoxelCore): on a planet the terrain is
+split into regions of `voxel.Render.RegionChunks`³ chunks (16 by default: 76,800 uu), each its own
+`UVoxelWorldComponent` at the region's origin in double. Heightmap worlds keep one component at (0, 0, 0), as before.
+
+- `FVoxelCustomVFRenderer` routes every chunk, seam, water tile and fade to its region's component, creating it on demand
+  (material, RVTs, water material, atlas, LOD collection, distances and viewer replayed), and retires a region whose
+  component holds nothing (`UVoxelWorldComponent::HasRenderContent`); the primary component is region (0, 0, 0) and stays.
+- `FVoxelSceneProxy` stores vertices relative to its component's location (`RenderOrigin`, `ToRenderOffset`) on the CPU
+  path, the GPU path, seams, water tiles and batches.
+- The GPU MC mesher writes chunk-local corners (`ChunkWorldPosition` zero).
+- Scatter: one HISM per type and region (`FVoxelScatterHISMKey`), each at its region's origin; released instances park
+  at local zero.
+- The voxel master materials (`M_VoxelMaster`, `M_VoxelMaster_Fade`) feed both triplanar calls an LWC-safe position:
+  Period = max(1, round(65,536 × `TriplanarScale`)) / `TriplanarScale` (a whole number of texture tiles), tiled =
+  frac(absolute world position / Period) × Period. The custom nodes received the absolute position demoted to float
+  (8 uu steps at 10⁸: P6.1's streaked ground); the tiled UV differs from the true one by whole tiles, and the nodes
+  sample with `SampleLevel`, so no seam shows at a period boundary.
+
+Live on M, 1 to 5 region components drew the window as it moved (`Render regions: 16^3 chunks, N primitive(s)` in the
+chunk manager's status).
+
+**The precision probe after P6.2** (`VoxelWorlds.WorldModes.Planet.PrecisionProbe`, headless, against §20.2's table; it
+now reports the SDF error of generation's own form next to Phase 5's float formula, and a vertex relative to its render
+region next to an absolute `FVector3f`). The surface altitudes differ from §20.2's (the new noise pattern), so the
+vertex columns are at different points than P6.1's:
+
+| Planet, site | Voxels within 2 of the surface with another density (P6.1 → P6.2) | SDF error: Phase 5's float formula / as generated | Density-gradient normals off, max (P6.1 → P6.2) | A surface vertex: absolute `FVector3f` / relative to its region |
+|---|---|---|---|---|
+| Small, all four | 0.4% (1 step) → 0 | 0.01-0.02 / 0.0000 uu | 0.6° → 0.00° | 0.00-0.01 / 0.0002-0.006 uu |
+| M, all four | 14% (1) → 0 | 0.49-0.50 / 0.0000 | 0.7-1.15° → 0.00° | 0.07-0.14 / 0.0000-0.0024 |
+| L, pole | 47% (14) → 0 | 7.99 / 0.0000 | 5.9° → 0.00° | 0.54 / 0.0000 |
+| L, 45° | 47% (14) → 0 | 7.84 / 0.0000 | 6.5° → 0.00° | 1.81 / 0.0019 |
+| L, equator | 48% (14) → 0 | 7.94 / 0.0000 | 8.2° → 0.00° | 0.99 / 0.0020 |
+| L, cube corner | 48% (13) → 0 | 7.37 / 0.0000 | 4.0° → 0.00° | 0.36 / 0.0048 |
+
+The probe ran after WM-BP4 (already 0 density steps and 0.00° gradient normals everywhere: the CPU part was done) and after WM-BP7
+(the same, with the region column). It is CPU-only: the GPU's side is the parity test below, and the vertex column's
+rendering side `Rendering.Planet.RegionPrecision`.
+
+**Tests against the thresholds.**
+
+| Test | Threshold | Measured |
+|---|---|---|
+| `WorldModes.Planet.PrecisionL` (new, WM-BP4): L's terrain at R 10⁸, centre at the origin and at (3, −2, 1) × 10⁷, four sites | SDF and altitude within 0.05 voxel (3.75 uu) of a double reference; normals within 0.2° | Density 0 steps off; SDF 0.0000 uu, voxel altitude ≤ 0.004 uu; surface point and altitude 0.0000 uu; surface normals 0.001-0.006° (0.002-0.12° after WM-BP4 alone: the float noise input, fixed by WM-BP5); density-gradient normals 0.000° |
+| `Noise.SplitOrigin` (new, WM-BP5) | Split-origin samples within 10⁻⁵ of the double reference at offsets up to 10⁹ | One octave at origins 0 to 10⁹ noise units: simplex ≤ 3.9 × 10⁻⁶, Perlin ≤ 1.1 × 10⁻⁶, cellular ≤ 1.1 × 10⁻⁶, Voronoi ≤ 1.7 × 10⁻⁶; L's terrain and cave fBm at R 2.5 × 10⁵, 5 × 10⁶ and 10⁸, per point ≤ 4.4 × 10⁻⁷ and as anchor + offset ≤ 4.6 × 10⁻⁶ |
+| `Noise.PlanetHashNoPeriod` (new, WM-BP5) | No repeat over 10⁶ noise units | The most alike shift of k × 256 up to 10⁶ still differs by 0.17-0.25 on average (simplex, Perlin, cellular); control: the heightmap Perlin repeats every 256 (7.8 × 10⁻⁶) |
+| `Generation.GPUvsCPUSphericalParity` (WM-BP6: L sites) | L sites at LOD 0/1/2; heightmap lines CRC-identical | Below |
+| `Rendering.Planet.RegionPrecision` (new, WM-BP7) | A vertex's world position within 0.1 uu of the double reference at L | ≤ 0.006 uu at the pole, 45°, the equator and a cube corner (an absolute float: 4.0-5.3 uu); in a test world each region's component sits at its origin, a seam goes with its owner, an emptied region retires; a heightmap world keeps one component at the origin |
+| `Editor.FieldSampler.Planet` (changed) | The editor's planet climate and continentalness preview equals generation | Expects `FVoxelPlanetNoise` |
+
+**GPU against the CPU** (`GPUvsCPUSphericalParity` in the editor; voxels that differ in the chunk, none by more than 2
+density steps unless said; LOD 0, LOD 1 and 2 the same):
+
+| Site | P6.1 | WM-BP5 | WM-BP6 |
+|---|---|---|---|
+| Small planet: north pole / south pole | 19 / 9 | 25 / 33 | 0 / 1 |
+| Equator / 45° | 470 (12 by more than 2) / 11 | 18 / 9 | 0 / 0 |
+| Cube-face edge / cube corner | 578 (18) / 31 | 30 / 3 | 3 / 0 |
+| Coast / cave / under the seabed | 22 / 791 (14) / 21 | 19 / 6 / 3 | 1 / 5 / 0 |
+| Pad raised at 45°, its ring | 2 / 10 | 5 / 14 | 0 / 0 |
+| Pad lowered across a face edge, its ring | 504 (16) / 22 | 23 (1) / 26 | 1 / 1 |
+| L (new): north pole / 45° / equator / cube corner | — | — | 9 / 19 / 6 / 14 |
+| L: pad raised at 45°, its ring / coast | — | — | 1 / 1 / 53 |
+
+At most one voxel's material differs at any site (L's pole and coast). The 48 heightmap parity lines (InfinitePlane,
+IslandBowl and its seabeds, caves with biome overrides and under the sea, water, the ore variant, the four noise
+types) are CRC-identical to the P6.1 baseline after every item; the 39 small-planet lines
+change because D22 changes the planet's noise pattern (its terrain, climate, caves and ores), as D21 records with the
+version bump.
+
+**Live survey** (`PlanetTest` with `voxel.ConfigOverride`, the sites and cameras of §20.2; screenshots
+`Saved/Screenshots/Claudius/p62_{L,M}_{45N,equator,corner,pole}_{ground,above}.png` and `p62_L_{45N,equator}_close.png`
+in the worktree, against P6.1's `p6_base_*`):
+
+- *L, 45°.* From the ground and close up, the ground material is clean: P6.1's streaked texture (`p6_base_L_45N_ground`)
+  is gone. From above, the dark straight lines along chunk faces are gone; faint shading lines remain along some chunk
+  faces on the flattest ground, as on M in P6.1 and P6.2 (vertex error 0.002 uu on M): G25's seam normals, not
+  precision. No crack, step or crossfade shimmer seen while chunks streamed in after each teleport.
+- *L, equator.* Clean from the ground; from above, bands of two materials along the voxel grid over a wide area (G39,
+  below: a Plains-Forest blend zone, which D22's new climate pattern put at this site). Not precision: the material debug
+  view shows the two biome materials alternating, and P6.1's M 45° shot has the same bands.
+- *L, cube corner and pole.* Open sea, the pawn swimming, as in P6.1.
+- *M.* 45°, the equator and the corner on land and clean at ground level (the corner on the coast); the overhead shots
+  show G39's bands where the site lies in a blend zone; the pole open sea, as in P6.1.
+- The small planet (`p62_S_{45N,equator}`): unchanged in kind, its terrain the new noise pattern.
+- *`VoxelDemo`* (`p62_demo_{pawn,above}`): the heightmap terrain's triplanar textures under the tiled position look as
+  before (no seam at a period boundary, no stripe); no base build was run for a pixel A/B, the texels being the same by
+  construction (the milestone's exit A/B, WM-BP13, compares it against a base build).
+
+**New findings.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position: across a blend zone the weights change slowly, so the pick follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets, where the grid is tilted against local up everywhere and climate zones are km across | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) |
+| G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on L (159 on M, 8 on the small planet) | Open: WM-BP9 replaces it with far-field sea patches at sea level |
+
+**Tests.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 533/533 headless and
+533/533 in the editor with the GPU tests running (the generation parity tests, `Meshing.MarchingCubes.CPUvsGPU`,
+`GPUNoiseGeneratorAsync`), no device loss. Per item, headless: 530/530 after WM-BP4, 531/532 after WM-BP5 (with the
+parent's save test at `PlanetGeneration=5`; `Editor.FieldSampler.Planet` then updated for the planet noise and passing), 533/533 after WM-BP7. The editor's parity lines after WM-BP7 equal
+WM-BP6's line for line.
+
+**Left for the next milestones.** P6.3 (streaming at scale, WM-BP8). G39 and G40 above; G25's shading lines are more
+visible on M and L's wide flat ground than on the small planet.

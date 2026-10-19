@@ -351,8 +351,9 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	TotalSurfacePointsExtracted = 0;
 	TotalSpawnPointsGenerated = 0;
 
-	// Create scatter renderer for HISM instance management
+	// Create scatter renderer for HISM instance management, its HISMs per render region on a planet (WM-BP7)
 	ScatterRenderer = NewObject<UVoxelScatterRenderer>(this);
+	ScatterRenderer->SetRenderRegions(FVoxelRenderRegions::FromConfig(*Config));
 	ScatterRenderer->Initialize(this, World);
 
 	bIsInitialized = true;

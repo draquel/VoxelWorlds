@@ -113,8 +113,11 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	/** Water level height for InfinitePlane/IslandBowl modes (world units) */
 	float WaterLevel = 0.0f;
 
-	/** Water radius for SphericalPlanet mode (world units from planet center) */
-	float WaterRadius = 0.0f;
+	/**
+	 * Water radius for SphericalPlanet mode (world units from planet center). Double (WM-BP4): it meets R-sized values;
+	 * generation compares the sea as the altitude WaterRadius - PlanetRadius, formed in double.
+	 */
+	double WaterRadius = 0.0;
 
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 

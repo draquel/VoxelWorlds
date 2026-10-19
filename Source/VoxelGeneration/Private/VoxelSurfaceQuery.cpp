@@ -7,6 +7,7 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelSeaSurface.h"
 #include "SphericalPlanetWorldMode.h"
+#include "VoxelPlanetNoise.h"
 
 float FVoxelSurfaceQuery::GetSurfaceHeight(
 	const IVoxelWorldMode& WorldMode,
@@ -206,32 +207,22 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 		// The conditioned terrain (SP-B10), as the generator blends it.
 		TerrainAltitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, Params.PlanetRadius, TerrainAltitude, *Zones);
 	}
-	const float TerrainRadius = Params.PlanetRadius + TerrainAltitude;
-	const float DistFromCenter = FSphericalPlanetWorldMode::CalculateRadialDistance(Position, Params.PlanetCenter);
-	const float DepthBelowSurface = (TerrainRadius - DistFromCenter) / FMath::Max(VoxelSize, KINDA_SMALL_NUMBER);
-	const float Altitude = DistFromCenter - Params.PlanetRadius;
+	// Altitudes, formed in double (WM-BP4), as the generator compares them.
+	const double VoxelAltitude = FSphericalPlanetWorldMode::CalculateRadialDistance(Position, Params.PlanetCenter) - Params.PlanetRadius;
+	const float DepthBelowSurface = static_cast<float>((static_cast<double>(TerrainAltitude) - VoxelAltitude) / FMath::Max(VoxelSize, KINDA_SMALL_NUMBER));
+	const float Altitude = static_cast<float>(VoxelAltitude);
 
-	FVoxelNoiseParams TempNoiseParams;
-	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	TempNoiseParams.Octaves = 2;
-	TempNoiseParams.Persistence = 0.5f;
-	TempNoiseParams.Lacunarity = 2.0f;
-	TempNoiseParams.Amplitude = 1.0f;
-	TempNoiseParams.Seed = NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset;
-	TempNoiseParams.Frequency = BiomeSnapshot.TemperatureNoiseFrequency;
-
-	FVoxelNoiseParams MoistureNoiseParams = TempNoiseParams;
-	MoistureNoiseParams.Seed = NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset;
-	MoistureNoiseParams.Frequency = BiomeSnapshot.MoistureNoiseFrequency;
-
-	const FVector BiomeSamplePos = FSphericalPlanetWorldMode::GetNoiseSamplePoint(Direction, Params.PlanetRadius);
-	const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, TempNoiseParams);
-	const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, MoistureNoiseParams);
+	// Climate as generation samples it: the planet noise at the direction's point on the datum sphere (WM-BP5)
+	float Temperature, Moisture;
+	FSphericalPlanetWorldMode::SampleClimate(Direction, Params.PlanetRadius,
+		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
+		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
+		Temperature, Moisture);
 
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	OutBiomeID = Blend.GetDominantBiome();
 	OutSurfaceMaterial = (Sea.bEnabled && Sea.bRadial)
-		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainRadius, static_cast<float>(Sea.Radius))
+		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(Sea.Radius - Params.PlanetRadius))
 		: BiomeSnapshot.GetBlendedMaterial(Blend, DepthBelowSurface);
 	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, Altitude, DepthBelowSurface);
 }

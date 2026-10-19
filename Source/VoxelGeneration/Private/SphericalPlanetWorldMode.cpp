@@ -7,6 +7,8 @@
 #include "VoxelGeneration.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelPlanetNoise.h"
+#include "VoxelBiomeSnapshot.h"
 
 #include <atomic>
 
@@ -42,12 +44,12 @@ FVoxelWorldBounds FSphericalPlanetWorldMode::GetWorldBounds() const
 	Bounds.InnerRadius = PlanetParams.GetInnerRadius();
 	Bounds.OuterRadius = PlanetParams.GetOuterRadius();
 	Bounds.HalfExtent = FVector2D(Bounds.OuterRadius, Bounds.OuterRadius);
-	Bounds.MinZ = static_cast<float>(PlanetParams.PlanetCenter.Z) - Bounds.OuterRadius;
-	Bounds.MaxZ = static_cast<float>(PlanetParams.PlanetCenter.Z) + Bounds.OuterRadius;
+	Bounds.MinZ = static_cast<float>(PlanetParams.PlanetCenter.Z - PlanetParams.GetOuterRadius());
+	Bounds.MaxZ = static_cast<float>(PlanetParams.PlanetCenter.Z + PlanetParams.GetOuterRadius());
 	// The space above the terrain belongs to the world up to the orbit ceiling (spherical Phase 6, D18): flight and the
 	// orbit camera live there, and KillZ goes below it.
 	const double Ceiling = PlanetParams.OrbitCeiling > 0.0 ? PlanetParams.OrbitCeiling : 3.0 * PlanetParams.PlanetRadius;
-	Bounds.OrbitRadius = FMath::Max(static_cast<double>(PlanetParams.PlanetRadius) + Ceiling, static_cast<double>(Bounds.OuterRadius));
+	Bounds.OrbitRadius = FMath::Max(PlanetParams.PlanetRadius + Ceiling, PlanetParams.GetOuterRadius());
 	return Bounds;
 }
 
@@ -58,7 +60,8 @@ FVector FSphericalPlanetWorldMode::GetUpVector(const FVector& WorldPos) const
 
 float FSphericalPlanetWorldMode::GetAltitude(const FVector& WorldPos) const
 {
-	return CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter) - PlanetParams.PlanetRadius;
+	// The subtraction in double; only the altitude (the relief's size) is narrowed (WM-BP4).
+	return static_cast<float>(CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter) - PlanetParams.PlanetRadius);
 }
 
 FVoxelSurfaceCoord FSphericalPlanetWorldMode::WorldToSurface(const FVector& WorldPos) const
@@ -74,11 +77,13 @@ FVector FSphericalPlanetWorldMode::SurfaceToWorld(const FVoxelSurfaceCoord& Coor
 
 FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const
 {
+	// The surface point as centre + direction x (R + altitude), the sum in double (WM-BP4): a float R + altitude is 8 uu
+	// coarse at R 1e8, which tilted the normal below by degrees.
 	const FVector& Center = PlanetParams.PlanetCenter;
-	const float Radius = PlanetParams.PlanetRadius;
+	const double Radius = PlanetParams.PlanetRadius;
 	auto SurfaceAt = [&](const FVector& Direction)
 	{
-		return Center + Direction * (Radius + SampleRadialDisplacement(Direction, Radius, TerrainParams, NoiseParams, &BiomeSnapshot));
+		return Center + Direction * (Radius + static_cast<double>(SampleRadialDisplacement(Direction, Radius, TerrainParams, NoiseParams, &BiomeSnapshot)));
 	};
 
 	const FVector Dir = GetDirectionFromCenter(WorldPos, Center);
@@ -89,7 +94,7 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfacePoint(const FVect
 	// right-handed, so the cross product of the two differences points out of the terrain.
 	const FVector T1 = FVector::CrossProduct(FMath::Abs(Dir.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector, Dir).GetSafeNormal();
 	const FVector T2 = FVector::CrossProduct(Dir, T1);
-	const double Angle = SurfaceNormalStep / FMath::Max(Radius, 1.0f);
+	const double Angle = SurfaceNormalStep / FMath::Max(Radius, 1.0);
 	const FVector D1 = SurfaceAt((Dir + T1 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T1 * Angle).GetSafeNormal());
 	const FVector D2 = SurfaceAt((Dir + T2 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T2 * Angle).GetSafeNormal());
 	Point.Normal = FVector::CrossProduct(D1, D2).GetSafeNormal();
@@ -109,10 +114,10 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetConditionedSurfacePoint(
 		return GetSurfacePoint(WorldPos, NoiseParams);
 	}
 	const FVector& Center = PlanetParams.PlanetCenter;
-	const float Radius = PlanetParams.PlanetRadius;
+	const double Radius = PlanetParams.PlanetRadius;
 	auto SurfaceAt = [&](const FVector& Direction)
 	{
-		return Center + Direction * (Radius + GetConditionedTerrainAltitude(Direction, NoiseParams, Zones));
+		return Center + Direction * (Radius + static_cast<double>(GetConditionedTerrainAltitude(Direction, NoiseParams, Zones)));
 	};
 
 	// GetSurfacePoint's construction over the conditioned surface.
@@ -121,7 +126,7 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetConditionedSurfacePoint(
 	Point.Position = SurfaceAt(Dir);
 	const FVector T1 = FVector::CrossProduct(FMath::Abs(Dir.Z) < 0.9 ? FVector::UpVector : FVector::ForwardVector, Dir).GetSafeNormal();
 	const FVector T2 = FVector::CrossProduct(Dir, T1);
-	const double Angle = SurfaceNormalStep / FMath::Max(Radius, 1.0f);
+	const double Angle = SurfaceNormalStep / FMath::Max(Radius, 1.0);
 	const FVector D1 = SurfaceAt((Dir + T1 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T1 * Angle).GetSafeNormal());
 	const FVector D2 = SurfaceAt((Dir + T2 * Angle).GetSafeNormal()) - SurfaceAt((Dir - T2 * Angle).GetSafeNormal());
 	Point.Normal = FVector::CrossProduct(D1, D2).GetSafeNormal();
@@ -146,9 +151,8 @@ float FSphericalPlanetWorldMode::GetDensityAt(
 	float NoiseValue) const
 {
 	// The terrain noise is the caller's; continentalness is not applied (SampleRadialDisplacement is the full surface).
-	const float DistFromCenter = CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter);
-	const float TerrainRadius = PlanetParams.PlanetRadius + NoiseToRadialDisplacement(NoiseValue, TerrainParams);
-	return ShellSignedDistance(DistFromCenter, TerrainRadius, PlanetParams);
+	const double VoxelAltitude = CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter) - PlanetParams.PlanetRadius;
+	return ShellSignedDistanceAtAltitude(VoxelAltitude, NoiseToRadialDisplacement(NoiseValue, TerrainParams), PlanetParams);
 }
 
 float FSphericalPlanetWorldMode::GetTerrainHeightAt(
@@ -214,8 +218,8 @@ float FSphericalPlanetWorldMode::GetTerrainHeightAt(
 
 void FSphericalPlanetWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) const
 {
-	OutMin = static_cast<float>(PlanetParams.PlanetCenter.Z) - PlanetParams.GetOuterRadius();
-	OutMax = static_cast<float>(PlanetParams.PlanetCenter.Z) + PlanetParams.GetOuterRadius();
+	OutMin = static_cast<float>(PlanetParams.PlanetCenter.Z - PlanetParams.GetOuterRadius());
+	OutMax = static_cast<float>(PlanetParams.PlanetCenter.Z + PlanetParams.GetOuterRadius());
 }
 
 void FSphericalPlanetWorldMode::GetAltitudeBounds(float& OutMin, float& OutMax) const
@@ -291,7 +295,7 @@ uint8 FSphericalPlanetWorldMode::GetMaterialAtDepth(
 
 // ==================== Static Helpers ====================
 
-float FSphericalPlanetWorldMode::CalculateRadialDistance(
+double FSphericalPlanetWorldMode::CalculateRadialDistance(
 	const FVector& WorldPos,
 	const FVector& PlanetCenter)
 {
@@ -312,28 +316,66 @@ FVector FSphericalPlanetWorldMode::GetDirectionFromCenter(
 
 float FSphericalPlanetWorldMode::SampleSphericalNoise(
 	const FVector& Direction,
-	float PlanetRadius,
+	double PlanetRadius,
 	const FVoxelNoiseParams& NoiseParams)
 {
-	// The full 3D point on the datum sphere: no hemisphere mirror, no seam, feature size in world units (SP-B1).
-	return FVoxelCPUNoiseGenerator::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius), NoiseParams);
+	// The full 3D point on the datum sphere: no hemisphere mirror, no seam, feature size in world units (SP-B1). Planet
+	// noise (WM-BP5, D22): the point split in double per octave, a hashed lattice with no period.
+	return FVoxelPlanetNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius), NoiseParams);
 }
 
 FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams(
 	const FVector& Direction,
-	float PlanetRadius,
+	double PlanetRadius,
 	const FWorldModeTerrainParams& BaseParams,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot* BiomeSnapshot,
 	float& OutContinentalness)
 {
-	return FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt(
-		GetNoiseSamplePoint(Direction, PlanetRadius), BaseParams, NoiseParams, BiomeSnapshot, OutContinentalness);
+	// FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt's curves, with the continentalness field sampled by the
+	// planet noise at the direction's point on the datum sphere (WM-BP5).
+	OutContinentalness = 0.0f;
+	FWorldModeTerrainParams Effective = BaseParams;
+	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness)
+	{
+		OutContinentalness = FVoxelPlanetNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius),
+			GetContinentalnessNoiseParams(NoiseParams.Seed, *BiomeSnapshot));
+		float HeightOffset = 0.0f;
+		float HeightScaleMult = 1.0f;
+		BiomeSnapshot->GetContinentalnessTerrainParams(OutContinentalness, HeightOffset, HeightScaleMult);
+		Effective.BaseHeight += HeightOffset;
+		Effective.HeightScale *= HeightScaleMult;
+	}
+	return Effective;
+}
+
+FVoxelNoiseParams FSphericalPlanetWorldMode::GetContinentalnessNoiseParams(int32 WorldSeed, const FVoxelBiomeSnapshot& BiomeSnapshot)
+{
+	return FVoxelPlanetNoise::MakeFieldParams(WorldSeed + BiomeSnapshot.ContinentalnessSeedOffset, BiomeSnapshot.ContinentalnessNoiseFrequency);
+}
+
+void FSphericalPlanetWorldMode::SampleClimate(const FVector& Direction, double PlanetRadius, const FVoxelNoiseParams& TemperatureParams,
+	const FVoxelNoiseParams& MoistureParams, float& OutTemperature, float& OutMoisture)
+{
+	const FVector SamplePoint = GetNoiseSamplePoint(Direction, PlanetRadius);
+	OutTemperature = FVoxelPlanetNoise::FBM3D(SamplePoint, TemperatureParams);
+	OutMoisture = FVoxelPlanetNoise::FBM3D(SamplePoint, MoistureParams);
+}
+
+FVector FSphericalPlanetWorldMode::ScaleAltitudeRelative(const FVector& PlanetRelativePos, double PlanetRadius, float VerticalScale)
+{
+	const double Dist = PlanetRelativePos.Size();
+	if (Dist < UE_KINDA_SMALL_NUMBER)
+	{
+		return PlanetRelativePos;
+	}
+	const double Altitude = Dist - PlanetRadius;
+	return PlanetRelativePos * ((PlanetRadius + Altitude * VerticalScale) / Dist);
 }
 
 float FSphericalPlanetWorldMode::SampleRadialDisplacement(
 	const FVector& Direction,
-	float PlanetRadius,
+	double PlanetRadius,
 	const FWorldModeTerrainParams& TerrainParams,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot* BiomeSnapshot,
@@ -368,20 +410,28 @@ void FSphericalPlanetWorldMode::GetDisplacementBounds(
 }
 
 float FSphericalPlanetWorldMode::ShellSignedDistance(
-	float DistFromCenter,
-	float TerrainRadius,
+	double DistFromCenter,
+	double TerrainRadius,
+	const FSphericalPlanetParams& PlanetParams)
+{
+	return ShellSignedDistanceAtAltitude(DistFromCenter - PlanetParams.PlanetRadius, TerrainRadius - PlanetParams.PlanetRadius, PlanetParams);
+}
+
+float FSphericalPlanetWorldMode::ShellSignedDistanceAtAltitude(
+	double VoxelAltitude,
+	double TerrainAltitude,
 	const FSphericalPlanetParams& PlanetParams)
 {
 	// Quick reject well outside the terrain shell: definitely air above it, definitely core below it.
-	if (DistFromCenter > PlanetParams.GetOuterRadius() + 1000.0f)
+	if (VoxelAltitude > static_cast<double>(PlanetParams.MaxTerrainHeight) + 1000.0)
 	{
 		return -1000.0f;
 	}
-	if (DistFromCenter < PlanetParams.GetInnerRadius() - 1000.0f)
+	if (VoxelAltitude < -static_cast<double>(PlanetParams.MaxTerrainDepth) - 1000.0)
 	{
 		return 1000.0f;
 	}
-	return CalculateSignedDistance(DistFromCenter, TerrainRadius);
+	return static_cast<float>(TerrainAltitude - VoxelAltitude);
 }
 
 FVector FSphericalPlanetWorldMode::ScaleAltitude(
@@ -410,17 +460,18 @@ float FSphericalPlanetWorldMode::NoiseToRadialDisplacement(
 }
 
 float FSphericalPlanetWorldMode::CalculateSignedDistance(
-	float DistFromCenter,
-	float TerrainRadius)
+	double DistFromCenter,
+	double TerrainRadius)
 {
-	// Signed distance: positive when inside solid (below terrain), negative when in air
-	return TerrainRadius - DistFromCenter;
+	// Signed distance: positive when inside solid (below terrain), negative when in air. Formed in double: both radii are
+	// of size R.
+	return static_cast<float>(TerrainRadius - DistFromCenter);
 }
 
 bool FSphericalPlanetWorldMode::IsWithinPlanetBounds(
 	const FVector& WorldPos,
 	const FSphericalPlanetParams& PlanetParams)
 {
-	const float Distance = CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter);
+	const double Distance = CalculateRadialDistance(WorldPos, PlanetParams.PlanetCenter);
 	return Distance >= PlanetParams.GetInnerRadius() && Distance <= PlanetParams.GetOuterRadius();
 }

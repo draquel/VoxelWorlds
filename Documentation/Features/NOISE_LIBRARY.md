@@ -141,6 +141,29 @@ The GPU and CPU implementations use the same algorithms and permutation table. E
 
 To verify consistency, generate the same chunk with `bUseGPUGeneration` toggled and compare voxel data.
 
+## Planet Noise (spherical Phase 6)
+
+Planets do not use the permutation noise above. A 1,000 km planet would repeat its fine octaves every 256 noise units
+(the top terrain octave 61 times around `Review_Planet_L`'s equator), and an absolute float position of size 10^8 is
+8 uu coarse. Every planet field samples `FVoxelPlanetNoise` (`VoxelGeneration/VoxelPlanetNoise.h`; GPU:
+`Shaders/Private/PlanetNoise.ush`, the same float algebra):
+
+- **Hashed lattice:** the gradient or feature point of a lattice cell comes from an integer hash of the cell
+  (`LatticeHash`, the ore `Rarity` hash's mixing), cells wrapping mod 2^32: no period
+  (`VoxelWorlds.Noise.PlanetHashNoPeriod`).
+- **Split-origin sampling:** a sample point is an origin plus a small float offset. Per octave the origin is scaled by
+  the octave's frequency in double and split into an integer cell (`FVoxelNoiseSplit::Cell`) and a float fraction;
+  simplex splits in its skewed lattice, the others in the cube lattice. The CPU splits each sample point itself
+  (`FBM3D(Position, Params)`); the GPU gets one split origin per chunk and field (`PlanetNoiseOrigins`) and adds the
+  voxel's offset from the chunk's anchor (`PlanetFBM3D`). Within 10^-5 of a double reference at origins up to 10^9
+  noise units (`VoxelWorlds.Noise.SplitOrigin`).
+- **Fields:** terrain and continentalness at the direction's point on the datum sphere, temperature and moisture likewise
+  (the heightmap's 2-octave fields: `MakeFieldParams`, `SampleClimate`), caves at the planet-relative position with the
+  altitude scaled (`ScaleAltitudeRelative`), ores at the planet-relative position with one streak direction per ore.
+
+Heightmap worlds keep the permutation noise bit for bit. Changing the planet noise changes every planet, so it bumps
+`FVoxelWorldModeFactory::PlanetGenerationVersion` (5 since D21/D22).
+
 ## Usage Examples
 
 ### Terrain Height (existing)

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelScatterTypes.h"
+#include "VoxelRenderRegions.h"
 #include "VoxelScatterRenderer.generated.h"
 
 class UVoxelScatterManager;
@@ -28,9 +29,30 @@ struct FHISMInstancePool
 };
 
 /**
+ * A HISM's key (spherical Phase 6, WM-BP7, D23): its scatter type and its render region. Each region's HISM sits at the
+ * region's origin, so its instance transforms are stored in float relative to it; heightmap worlds have one region at the
+ * world origin, so one HISM per type as before.
+ */
+struct FVoxelScatterHISMKey
+{
+	int32 ScatterTypeID = 0;
+	FIntVector Region = FIntVector::ZeroValue;
+
+	FORCEINLINE bool operator==(const FVoxelScatterHISMKey& Other) const
+	{
+		return ScatterTypeID == Other.ScatterTypeID && Region == Other.Region;
+	}
+	friend FORCEINLINE uint32 GetTypeHash(const FVoxelScatterHISMKey& Key)
+	{
+		return HashCombine(::GetTypeHash(Key.ScatterTypeID), GetTypeHash(Key.Region));
+	}
+};
+
+/**
  * Manages HISM (Hierarchical Instanced Static Mesh) components for scatter rendering.
  *
- * Creates one HISM per scatter type and manages instances based on chunk lifecycle.
+ * Creates one HISM per scatter type (per type and render region on a planet, FVoxelScatterHISMKey) and manages
+ * instances based on chunk lifecycle.
  * Uses an instance pool per HISM to recycle instances via UpdateInstanceTransform
  * instead of ClearInstances/AddInstances, eliminating visual flicker during
  * distance-based streaming.
@@ -151,12 +173,31 @@ public:
 	// ==================== HISM Management ====================
 
 	/**
-	 * Get or create HISM component for a scatter type.
+	 * Get or create the HISM component of a scatter type in a render region (WM-BP7: located at the region's origin).
 	 *
 	 * @param ScatterTypeID Scatter type ID
+	 * @param Region Render region (FVoxelRenderRegions; (0, 0, 0) when the world is not split)
 	 * @return HISM component or nullptr if scatter type has no mesh
 	 */
-	UHierarchicalInstancedStaticMeshComponent* GetOrCreateHISM(int32 ScatterTypeID);
+	UHierarchicalInstancedStaticMeshComponent* GetOrCreateHISM(int32 ScatterTypeID, const FIntVector& Region = FIntVector::ZeroValue);
+
+	/**
+	 * The render regions instances are kept in (FVoxelRenderRegions::FromConfig; the manager sets them before Initialize).
+	 *
+	 * @param InRegions The regions
+	 */
+	void SetRenderRegions(const FVoxelRenderRegions& InRegions) { Regions = InRegions; }
+
+	/** The render regions instances are kept in. */
+	const FVoxelRenderRegions& GetRenderRegions() const { return Regions; }
+
+	/**
+	 * Every HISM of a scatter type, by region.
+	 *
+	 * @param ScatterTypeID Scatter type ID
+	 * @param OutHISMs Region and component pairs
+	 */
+	void GetTypeHISMs(int32 ScatterTypeID, TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>>& OutHISMs) const;
 
 	/**
 	 * Refresh all HISM components after definition changes.
@@ -228,9 +269,9 @@ protected:
 	// ==================== Internal Methods ====================
 
 	/**
-	 * Create HISM component for a scatter definition.
+	 * Create HISM component for a scatter definition, located at a render region's origin.
 	 */
-	UHierarchicalInstancedStaticMeshComponent* CreateHISMComponent(const FScatterDefinition& Definition);
+	UHierarchicalInstancedStaticMeshComponent* CreateHISMComponent(const FScatterDefinition& Definition, const FIntVector& Region);
 
 	/**
 	 * Configure HISM component from scatter definition.
@@ -258,9 +299,15 @@ protected:
 	UPROPERTY()
 	TObjectPtr<AActor> ContainerActor;
 
-	/** HISM components per scatter type ID */
+	/** HISM components per scatter type and render region (WM-BP7) */
+	TMap<FVoxelScatterHISMKey, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
+
+	/** Every HISM component (keeps HISMComponents' values referenced for the garbage collector) */
 	UPROPERTY()
-	TMap<int32, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
+	TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> AllHISMComponents;
+
+	/** The render regions (SetRenderRegions); one at the world origin unless a planet splits them */
+	FVoxelRenderRegions Regions;
 
 	// ==================== Instance Tracking ====================
 
@@ -272,11 +319,11 @@ protected:
 	TMap<FIntVector, TSet<int32>> ChunkScatterTypes;
 
 	/**
-	 * Per-scatter-type instance pool. Tracks free (zero-scaled) and active
+	 * Per-HISM instance pool. Tracks free (zero-scaled) and active
 	 * instance indices to enable recycling without structural HISM changes.
-	 * Keyed by ScatterTypeID matching HISMComponents.
+	 * Keyed by scatter type and region, matching HISMComponents.
 	 */
-	TMap<int32, FHISMInstancePool> InstancePools;
+	TMap<FVoxelScatterHISMKey, FHISMInstancePool> InstancePools;
 
 	// ==================== Deferred Instance Additions ====================
 

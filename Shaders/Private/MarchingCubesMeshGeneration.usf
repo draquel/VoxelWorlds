@@ -99,7 +99,7 @@ RWStructuredBuffer<uint> MeshCounters;
 // Chunk parameters
 uint ChunkSize;
 float VoxelSize;
-float3 ChunkWorldPosition;
+float3 ChunkWorldPosition;   // the chunk origin in the mesher's frame: zero since WM-BP7 (chunk-local positions)
 float IsoLevel;
 uint LODStride;  // 2^LODLevel (1, 2, 4, 8...)
 

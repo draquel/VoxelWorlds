@@ -121,7 +121,15 @@ near the generated ground scatter takes it as the generator made it, with the ch
 every chunk, G31) read the voxels just past its +X, +Y and +Z faces the same way, as the planet generator made them with
 the neighbours' edits (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits`, G29). `GetSurfacePointAt` and `GetTerrainHeightAt` are the natural surface (POI placement
 surveys it on purpose). Changing planet generation bumps
-`FVoxelWorldModeFactory::PlanetGenerationVersion` (4 since Phase 5); heightmap changes bump `GenerationVersion`.
+`FVoxelWorldModeFactory::PlanetGenerationVersion` (5 since spherical Phase 6's P6.2); heightmap changes bump
+`GenerationVersion`.
+
+Planets are precise to about 1,000 km (spherical Phase 6, P6.2; `Features/WORLD_MODES.md` "The radius ceiling"), so
+never hold a value of size R in float on a planet path: altitudes and signed distances are formed in double on the CPU
+(`ShellSignedDistanceAtAltitude`) and in the chunk's frame on the GPU (`PlanetFrame.ush`); planet noise is
+`FVoxelPlanetNoise` / `PlanetNoise.ush` (hashed lattice, split-origin; never the heightmap's `FBM3D` with an absolute
+float position); primitives on a planet sit at their render region's origin (`FVoxelRenderRegions`) and store float
+offsets from it (scene proxy vertices, seams, water, scatter HISMs per region).
 
 Any per-chunk state `UVoxelScatterManager` keeps is dropped in `OnChunkUnloaded`, both caches included, so a chunk that
 streams back in is extracted as a first pass (world modes review G30: a short-circuit `||` once kept the spawn points

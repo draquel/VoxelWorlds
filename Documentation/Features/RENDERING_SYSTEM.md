@@ -148,6 +148,18 @@ AVoxelWorldTestActor
 - Manages Material Parameter Collection for LOD morphing
 - Exposes statistics and chunk queries
 
+**Render regions** (`FVoxelRenderRegions`, `VoxelCore/Public/VoxelRenderRegions.h`; spherical Phase 6, WM-BP7, D23)
+- A planet's terrain renders in regions of `voxel.Render.RegionChunks`^3 chunks (16 by default, 76,800 uu; 0 turns
+  them off): `FVoxelCustomVFRenderer` keeps one `UVoxelWorldComponent` per region at the region's origin (its min
+  corner, in double) and routes each chunk, seam, water tile and fade to it, creating it on demand with the material,
+  RVTs, atlas, LOD collection, distances and viewer replayed, and retiring it when it holds nothing
+  (`UVoxelWorldComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays.
+- Heightmap worlds keep one region: a single component at the world origin, as before.
+- The scene proxy stores vertices relative to its component's location (`FVoxelSceneProxy::RenderOrigin`,
+  `ToRenderOffset`), so a float offset is at most a region across (under 0.01 uu anywhere;
+  `Rendering.Planet.RegionPrecision`). The GPU MC mesher writes chunk-local corners. Scatter keeps one HISM per type and
+  region (`FVoxelScatterHISMKey`) at the region's origin.
+
 **FVoxelSceneProxy** (`VoxelRendering/Private/VoxelSceneProxy.cpp`)
 - Manages per-chunk `FLocalVertexFactory` instances
 - Performs frustum culling via ViewProjectionMatrix

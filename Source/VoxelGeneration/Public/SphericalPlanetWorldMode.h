@@ -12,8 +12,12 @@
  */
 struct VOXELGENERATION_API FSphericalPlanetParams
 {
-	/** Radius of the planet surface in world units */
-	float PlanetRadius = 100000.0f;
+	/**
+	 * Radius of the planet surface (the datum) in world units. Double (spherical Phase 6, WM-BP4): every quantity of size R
+	 * is kept in double from the centre to the final altitude or signed distance, so a 1,000 km planet (R 1e8, where a
+	 * float's spacing is 8 uu) has no cancellation at magnitude R. Altitudes, chunk and voxel sizes stay float.
+	 */
+	double PlanetRadius = 100000.0;
 
 	/** Maximum terrain height above PlanetRadius */
 	float MaxTerrainHeight = 5000.0f;
@@ -32,20 +36,20 @@ struct VOXELGENERATION_API FSphericalPlanetParams
 
 	FSphericalPlanetParams() = default;
 
-	FSphericalPlanetParams(float InRadius, const FVector& InCenter = FVector::ZeroVector)
+	FSphericalPlanetParams(double InRadius, const FVector& InCenter = FVector::ZeroVector)
 		: PlanetRadius(InRadius)
 		, PlanetCenter(InCenter)
 	{
 	}
 
 	/** Get the inner shell radius (planet surface minus max depth) */
-	float GetInnerRadius() const
+	double GetInnerRadius() const
 	{
 		return PlanetRadius - MaxTerrainDepth;
 	}
 
 	/** Get the outer shell radius (planet surface plus max height) */
-	float GetOuterRadius() const
+	double GetOuterRadius() const
 	{
 		return PlanetRadius + MaxTerrainHeight;
 	}
@@ -234,13 +238,14 @@ public:
 	// ==================== Static Helpers ====================
 
 	/**
-	 * Calculate the distance from a point to the planet center.
+	 * Calculate the distance from a point to the planet center, in double (WM-BP4: a float of size R is 8 uu coarse at
+	 * R 1e8). Subtract PlanetRadius in double before narrowing anything to float.
 	 *
 	 * @param WorldPos World position
 	 * @param PlanetCenter Center of the planet
 	 * @return Distance from planet center
 	 */
-	static float CalculateRadialDistance(
+	static double CalculateRadialDistance(
 		const FVector& WorldPos,
 		const FVector& PlanetCenter);
 
@@ -264,7 +269,7 @@ public:
 	 * @param PlanetRadius Datum radius
 	 * @return Noise sample position
 	 */
-	static FVector GetNoiseSamplePoint(const FVector& Direction, float PlanetRadius)
+	static FVector GetNoiseSamplePoint(const FVector& Direction, double PlanetRadius)
 	{
 		return Direction * PlanetRadius;
 	}
@@ -279,7 +284,7 @@ public:
 	 */
 	static float SampleSphericalNoise(
 		const FVector& Direction,
-		float PlanetRadius,
+		double PlanetRadius,
 		const FVoxelNoiseParams& NoiseParams);
 
 	/**
@@ -298,7 +303,7 @@ public:
 	 */
 	static FWorldModeTerrainParams ComputeEffectiveTerrainParams(
 		const FVector& Direction,
-		float PlanetRadius,
+		double PlanetRadius,
 		const FWorldModeTerrainParams& BaseParams,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot* BiomeSnapshot,
@@ -318,7 +323,7 @@ public:
 	 */
 	static float SampleRadialDisplacement(
 		const FVector& Direction,
-		float PlanetRadius,
+		double PlanetRadius,
 		const FWorldModeTerrainParams& TerrainParams,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot* BiomeSnapshot,
@@ -355,7 +360,8 @@ public:
 
 	/**
 	 * The signed distance generation writes: TerrainRadius - DistFromCenter, held at -1000 more than 1000 uu above the
-	 * outer shell radius (air) and at +1000 more than 1000 uu below the inner one (core).
+	 * outer shell radius (air) and at +1000 more than 1000 uu below the inner one (core). Both radii in double; the
+	 * difference is formed in double (ShellSignedDistanceAtAltitude).
 	 *
 	 * @param DistFromCenter Distance from the planet centre
 	 * @param TerrainRadius PlanetRadius + displacement along the point's direction
@@ -363,8 +369,24 @@ public:
 	 * @return Signed distance (positive = solid)
 	 */
 	static float ShellSignedDistance(
-		float DistFromCenter,
-		float TerrainRadius,
+		double DistFromCenter,
+		double TerrainRadius,
+		const FSphericalPlanetParams& PlanetParams);
+
+	/**
+	 * ShellSignedDistance written with altitudes (spherical Phase 6, WM-BP4): TerrainAltitude - VoxelAltitude, held at
+	 * -1000 more than 1000 uu above MaxTerrainHeight and at +1000 more than 1000 uu below -MaxTerrainDepth. Both are of
+	 * the size of the relief, not of R, so nothing cancels; the generator computes VoxelAltitude = |P - C| - R in double,
+	 * the GPU from the chunk origin's altitude and a small difference (SphericalPlanet.ush).
+	 *
+	 * @param VoxelAltitude The point's distance from the centre minus PlanetRadius
+	 * @param TerrainAltitude The terrain's altitude along the point's direction
+	 * @param PlanetParams Planet shell
+	 * @return Signed distance (positive = solid)
+	 */
+	static float ShellSignedDistanceAtAltitude(
+		double VoxelAltitude,
+		double TerrainAltitude,
 		const FSphericalPlanetParams& PlanetParams);
 
 	/**
@@ -383,6 +405,49 @@ public:
 		float VerticalScale);
 
 	/**
+	 * ScaleAltitude relative to the planet centre: PlanetRelativePos with its altitude scaled by VerticalScale, in double.
+	 * Planet caves sample the planet noise here (WM-BP5), so they move with the planet and stay exact at any radius.
+	 *
+	 * @param PlanetRelativePos Position relative to the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @param VerticalScale Scale applied to the altitude
+	 * @return Cave noise sample position, relative to the centre
+	 */
+	static FVector ScaleAltitudeRelative(
+		const FVector& PlanetRelativePos,
+		double PlanetRadius,
+		float VerticalScale);
+
+	/**
+	 * The planet's continentalness field: the 2-octave Simplex field at the biome configuration's frequency and seed
+	 * offset (the heightmap modes' parameters), sampled by the planet noise (WM-BP5).
+	 *
+	 * @param WorldSeed The terrain noise seed
+	 * @param BiomeSnapshot Biome data with the continentalness settings
+	 * @return Noise parameters
+	 */
+	static FVoxelNoiseParams GetContinentalnessNoiseParams(int32 WorldSeed, const FVoxelBiomeSnapshot& BiomeSnapshot);
+
+	/**
+	 * Temperature and moisture along a direction: each field at the direction's point on the datum sphere (SP-B1) by the
+	 * planet noise (WM-BP5), as generation, the surface queries and the map sample them.
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius Datum radius
+	 * @param TemperatureParams Temperature field (FVoxelPlanetNoise::MakeFieldParams)
+	 * @param MoistureParams Moisture field
+	 * @param OutTemperature Temperature in about [-1, 1]
+	 * @param OutMoisture Moisture in about [-1, 1]
+	 */
+	static void SampleClimate(
+		const FVector& Direction,
+		double PlanetRadius,
+		const FVoxelNoiseParams& TemperatureParams,
+		const FVoxelNoiseParams& MoistureParams,
+		float& OutTemperature,
+		float& OutMoisture);
+
+	/**
 	 * Calculate signed distance from a point to the terrain surface.
 	 *
 	 * @param DistFromCenter Distance from planet center
@@ -390,8 +455,8 @@ public:
 	 * @return Signed distance (positive = inside solid, negative = air)
 	 */
 	static float CalculateSignedDistance(
-		float DistFromCenter,
-		float TerrainRadius);
+		double DistFromCenter,
+		double TerrainRadius);
 
 	/**
 	 * Check if a position is within the planet's terrain shell.

@@ -937,7 +937,9 @@ bool FVoxelGPUvsCPUOreVariantParityTest::RunTest(const FString& Parameters)
 // chunk the surface passes through), a coast (the sea surface and the seabed in one chunk), a cave (carved air under the
 // ground) and caves under the seabed that the underwater minimum depth suppresses. The planet's post-passes (the radial
 // water fill, the underground scan along local down) run on the GPU in the same graph, so the metadata channel compares
-// them with the CPU's.
+// them with the CPU's. Spherical Phase 6 (WM-BP6) adds Review_Planet_L's scale: R 1e8 with L's terrain, sites at both
+// poles' north, 45 degrees, the equator, a cube corner, a conditioned pad and a coast ("Planet L ..."), where a float SDF
+// or a float noise position would differ by 13 density steps.
 namespace VoxelSphericalParity
 {
 	constexpr float Radius = 250000.0f;
@@ -1337,10 +1339,167 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 	}
 	GPUGenerator.Shutdown();
 
+	// Review_Planet_L's scale (spherical Phase 6, WM-BP6): R 1e8 (1,000 km), L's terrain (the demo's base wavelength and
+	// height scale 64 times larger, 6 more octaves), the sea 83,333 under the datum, the same biomes, ore and caves, off the
+	// world origin. The GPU computes its altitudes, conditioning chords, sea test and noise offsets in the chunk's frame
+	// (PlanetFrame.ush, PlanetNoise.ush) and must match the CPU's double math.
+	{
+		constexpr double RL = 1.0e8;
+		UVoxelWorldConfiguration* LConfig = NewObject<UVoxelWorldConfiguration>();
+		LConfig->AddToRoot();
+		LConfig->WorldMode = EWorldMode::SphericalPlanet;
+		LConfig->WorldOrigin = FVector(12345.0, 54321.0, 0.0);
+		LConfig->WorldRadius = static_cast<float>(RL);
+		LConfig->PlanetHeightScale = 384000.0f;
+		LConfig->BaseHeight = 0.0f;
+		LConfig->PlanetMaxTerrainHeight = 762000.0f;
+		LConfig->PlanetMaxTerrainDepth = 762000.0f;
+		LConfig->VoxelSize = 75.0f;
+		LConfig->ChunkSize = 32;
+		LConfig->NoiseParams = Config->NoiseParams;
+		LConfig->NoiseParams.Frequency = 2.5e-5f / 64.0f;
+		LConfig->NoiseParams.Octaves = 9;
+		LConfig->NoiseParams.Lacunarity = 2.0f;
+		LConfig->BiomeConfiguration = BiomeConfig;
+		LConfig->bEnableBiomes = true;
+		LConfig->CaveConfiguration = CaveConfig;
+		LConfig->bEnableCaves = true;
+		LConfig->bEnableWaterLevel = true;
+		LConfig->WaterRadius = static_cast<float>(RL - 83333.0);
+
+		const TSharedRef<IVoxelWorldMode> LMode = FVoxelWorldModeFactory::Create(*LConfig);
+		const FSphericalPlanetWorldMode& LPlanet = static_cast<const FSphericalPlanetWorldMode&>(*LMode);
+		const FVector LOrigin = LConfig->WorldOrigin;
+		const double LChunkWorldSize = LConfig->ChunkSize * LConfig->VoxelSize;
+		const double LWaterRadius = LConfig->WaterRadius;
+		auto MakeLRequest = [&](const FIntVector& ChunkCoord)
+		{
+			FVoxelNoiseGenerationRequest Request;
+			Request.ChunkCoord = ChunkCoord;
+			Request.ChunkSize = LConfig->ChunkSize;
+			Request.VoxelSize = LConfig->VoxelSize;
+			Request.NoiseParams = LConfig->NoiseParams;
+			FVoxelWorldModeFactory::FillGenerationRequest(*LConfig, Request);
+			Request.bEnableBiomes = true;
+			Request.BiomeConfiguration = BiomeConfig;
+			Request.bEnableCaves = true;
+			Request.CaveConfiguration = CaveConfig;
+			Request.bEnableWaterLevel = true;
+			Request.WaterLevel = LConfig->WaterLevel;
+			Request.WaterRadius = LConfig->WaterRadius;
+			return Request;
+		};
+		auto LChunkAt = [&](const FVector& WorldPos)
+		{
+			const FVector Local = (WorldPos - LOrigin) / LChunkWorldSize;
+			return FIntVector(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
+		};
+		auto LSurfaceRadius = [&](const FVector& Direction)
+		{
+			return RL + LPlanet.GetTerrainAltitude(Direction, LConfig->NoiseParams);
+		};
+		FVoxelCPUNoiseGenerator LCPU;
+		LCPU.Initialize();
+		auto LCount = [&](const FIntVector& Chunk, const TArray<FVoxelConditioningZone>& Zones = TArray<FVoxelConditioningZone>())
+		{
+			FVoxelNoiseGenerationRequest Request = MakeLRequest(Chunk);
+			Request.ConditioningZones = Zones;
+			TArray<FVoxelData> Data;
+			LCPU.GenerateChunkCPU(Request, Data);
+			return Count(Data);
+		};
+
+		TArray<FSite> LSites;
+		const TPair<const TCHAR*, FVector> LSurfaceSites[] = {
+			{ TEXT("L North pole"), FVector(0, 0, 1) },
+			{ TEXT("L Latitude 45"), LatLonDirection(45.0, 3.0) },
+			{ TEXT("L Equator"), FVector(1, 0, 0) },
+			{ TEXT("L Cube corner"), FVector(1, 1, 1).GetSafeNormal() },
+		};
+		for (const TPair<const TCHAR*, FVector>& Site : LSurfaceSites)
+		{
+			const FVector Surface = LOrigin + Site.Value * LSurfaceRadius(Site.Value);
+			LSites.Add({ Site.Key, LChunkAt(Surface) });
+			const FCounts C = LCount(LSites.Last().Chunk);
+			AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), surface altitude %.0f, solid %d, air %d, water %d"), Site.Key,
+				LSites.Last().Chunk.X, LSites.Last().Chunk.Y, LSites.Last().Chunk.Z, LSurfaceRadius(Site.Value) - RL, C.Solid, C.Air, C.Water));
+			TestTrue(FString::Printf(TEXT("%s: the chunk crosses the surface (non-vacuous)"), Site.Key), C.Solid > 0 && C.Air > 0);
+		}
+
+		// A conditioned pad at 45 degrees: the ground raised 300 uu over 1,500 uu with a 1,000 uu falloff (POI-sized), the
+		// pad's chunk and one on its ring.
+		{
+			const FVector Dir = LatLonDirection(45.0, 3.0);
+			const float Target = LPlanet.GetTerrainAltitude(Dir, LConfig->NoiseParams) + 300.0f;
+			const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Dir, 1500.0f, 1000.0f, Target) };
+			LSites.Add({ TEXT("L Pad raised at latitude 45"), LChunkAt(LOrigin + Dir * (RL + Target)), Zones });
+			const FVector Tangent = FVector::CrossProduct(FVector(0, 0, 1), Dir).GetSafeNormal();
+			const FVector RingDir = (Dir * FMath::Cos(2000.0 / RL) + Tangent * FMath::Sin(2000.0 / RL)).GetSafeNormal();
+			const float RingAltitude = FMath::Lerp(LPlanet.GetTerrainAltitude(RingDir, LConfig->NoiseParams), Target, 0.5f);
+			LSites.Add({ TEXT("L Pad raised at latitude 45, ring"), LChunkAt(LOrigin + RingDir * (RL + RingAltitude)), Zones });
+			AddInfo(FString::Printf(TEXT("L Pad raised at latitude 45: pad altitude %.0f, chunk (%d, %d, %d)"), Target,
+				LSites[LSites.Num() - 2].Chunk.X, LSites[LSites.Num() - 2].Chunk.Y, LSites[LSites.Num() - 2].Chunk.Z));
+		}
+
+		// A coast: along a great circle from 45 degrees, bisect the first crossing of the sea for a seabed 300 uu under it,
+		// the chunk 100 uu under the sea holding the surface, water and the seabed.
+		{
+			bool bFound = false;
+			const FVector Start = LatLonDirection(45.0, 3.0);
+			const FVector Axis = FVector::CrossProduct(Start, FVector(0, 0, 1)).GetSafeNormal();
+			const double Step = 0.002; // 200 km of arc
+			auto SeabedMinusTarget = [&](double Angle)
+			{
+				return LSurfaceRadius(Start.RotateAngleAxisRad(Angle, Axis)) - (LWaterRadius - 300.0);
+			};
+			for (int32 i = 0; i < 3000 && !bFound; ++i)
+			{
+				const double A0 = i * Step;
+				const double A1 = A0 + Step;
+				if ((SeabedMinusTarget(A0) > 0.0) != (SeabedMinusTarget(A1) > 0.0))
+				{
+					double Lo = A0, Hi = A1;
+					for (int32 b = 0; b < 60; ++b)
+					{
+						const double Mid = 0.5 * (Lo + Hi);
+						((SeabedMinusTarget(Mid) > 0.0) == (SeabedMinusTarget(Lo) > 0.0) ? Lo : Hi) = Mid;
+					}
+					const FVector Dir = Start.RotateAngleAxisRad(0.5 * (Lo + Hi), Axis);
+					const FIntVector Chunk = LChunkAt(LOrigin + Dir * (LWaterRadius - 100.0));
+					const FCounts C = LCount(Chunk);
+					if (C.Water > 0 && C.UnderwaterMaterial > 0 && C.Solid > 0)
+					{
+						LSites.Add({ TEXT("L Coast"), Chunk });
+						AddInfo(FString::Printf(TEXT("L Coast: chunk (%d, %d, %d) at latitude %.2f, longitude %.2f, water %d, underwater material %d"),
+							Chunk.X, Chunk.Y, Chunk.Z, LatitudeDeg(Dir), LongitudeDeg(Dir), C.Water, C.UnderwaterMaterial));
+						bFound = true;
+					}
+				}
+			}
+			TestTrue(TEXT("L: a coast chunk with water flags and underwater materials (non-vacuous)"), bFound);
+		}
+		LCPU.Shutdown();
+
+		FVoxelGPUNoiseGenerator LGPU;
+		LGPU.Initialize();
+		for (const FSite& Site : LSites)
+		{
+			const FString Label = FString::Printf(TEXT("Planet %s"), *Site.Name);
+			FVoxelNoiseGenerationRequest Request = MakeLRequest(Site.Chunk);
+			Request.ConditioningZones = Site.Zones;
+			if (!VoxelParityHarness::RunGpuCpuParity(*this, LGPU, Request, *Label, PlanetThresholds))
+			{
+				bAllPass = false;
+			}
+		}
+		LGPU.Shutdown();
+		LConfig->RemoveFromRoot();
+	}
+
 	Config->RemoveFromRoot();
 	CaveConfig->RemoveFromRoot();
 	BiomeConfig->RemoveFromRoot();
-	TestTrue(TEXT("GPU==CPU planet parity (radial height, materials, caves, water, underground) at every site across LOD 0/1/2"), bAllPass);
+	TestTrue(TEXT("GPU==CPU planet parity (radial height, materials, caves, water, underground) at every site across LOD 0/1/2, R 2.5e5 and 1e8"), bAllPass);
 	return true;
 }
 

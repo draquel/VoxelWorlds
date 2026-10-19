@@ -446,7 +446,8 @@ checked bit for bit where it matters):
 | Surface queries | `UVoxelChunkManager::QueryEditMergedSurfacePoint`: a digital line of edit-merged voxels along local up, the crossing refined in the trilinear density, the normal and slope against local up; `GetGeneratedSurfacePoint` (analytic); `FVoxelSurfaceQuery::QueryPlanetSurfaceConditions` / `SampleSurfacePoint` (generation's material and biome at a point). Heightmap modes: `QueryEditMergedSurface(X, Y)` | `VoxelChunkManager`, `VoxelSurfaceQuery` |
 | Surface coordinate | `FVoxelCubeSphere` (face frames, the tangent warp, the tangent frame with north toward +Z) and `FVoxelCubeSphereGrid` (cells on the six faces, atlas keys `(Face * N + U, V)`, neighbours across face edges, a flood fill within an angle): the key of the map, navigation and the NPC spawner | `VoxelCore/VoxelCubeSphere.h` |
 | Meshing | Requests carry the chunk centre's `LocalUp`: the MC LOD material scan walks along it, the CPU MC geomorph runs along the axis nearest it; the vertex factory's face type (top, side, bottom) is measured against the radial up | [MARCHING_CUBES_MESHING.md](MARCHING_CUBES_MESHING.md), [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) |
-| Ores | The `Rarity` test hashes the planet-relative voxel position with an exact integer hash, the same on the CPU and the GPU (`PlanetGenerationVersion` 3) | [ORE_VEINS.md](ORE_VEINS.md) |
+| Ores | The `Rarity` test hashes the planet-relative voxel position with an exact integer hash, the same on the CPU and the GPU (`PlanetGenerationVersion` 3); since P6.2 the GPU forms the key from an integer chunk base + the local offset, and the vein noise samples the planet noise with one streak direction per ore | [ORE_VEINS.md](ORE_VEINS.md) |
+| Noise (spherical Phase 6) | Every planet field (terrain, continentalness, climate, caves, ores) samples `FVoxelPlanetNoise` / `PlanetNoise.ush`: a hashed integer lattice with no period, at an origin split in double into a lattice cell and a float fraction plus a small offset; the GPU splits one origin per chunk and field (`PlanetNoiseOrigins`). `PlanetGenerationVersion` 5 (D21, D22) | `VoxelGeneration/VoxelPlanetNoise.h`, `Shaders/Private/PlanetNoise.ush`, [NOISE_LIBRARY.md](NOISE_LIBRARY.md) |
 | Scatter | Surface points along radial rays on the cube-sphere grid, one family for every chunk (G31); face type, slope and elevation by local up and altitude; instances stand on local up; density per area kept | [SCATTER_SYSTEM.md](SCATTER_SYSTEM.md) |
 | PCG | The surface sampler's points on the cube faces' UV grid, rotated to local up | `VoxelPCG` |
 | Map | Tiles are cube-sphere cells; pixels along their directions; the minimap is the tangent plane under the player, the world map a globe | [MAP_SYSTEM.md](MAP_SYSTEM.md) |
@@ -469,17 +470,23 @@ Review plan §19 (decisions D14-D16):
 | Campsites | Generated campsites stand on the draped pad and respawn the player along their own up; `PlaceCampsite` levels its pad and apron along local up | `VoxelWorldPOI` |
 | Dungeons | Stamped and stitched in a frame (`UDungeonVoxelStamper::StampDungeonInFrame`, `UDungeonEntranceStitcher::StitchEntranceInFrame`), tiles laid out in the tile actor's own frame (`ADungeonActor::bMapInActorFrame`); the POI's dungeon record and gameplay stay in pad space and convert at the boundary | `ProceduralDungeonPlugin`, `VoxelWorldPOI` |
 
-### The radius ceiling (SP-H2)
+### The radius ceiling (SP-H1, SP-H2)
 
-The scene proxy bakes absolute world positions into float vertices (`FVector3f`), whose spacing (ULP) is about 0.06 uu
-1,000,000 uu (10 km) from the world origin and 1 uu at 10,000,000 uu (100 km), where seams and the crossfade start to
-show it; collision trimeshes are chunk-local, placed by a double transform, and stay exact
-([TRAVERSAL_LIMITS.md](../Research/TRAVERSAL_LIMITS.md) #4, #5). Every surface vertex lies about R from the
-planet's centre, so with the centre at the world origin the ceiling is a radius of about 100 km (a centre placed away
-from the origin adds its distance); the GPU's density is planet-relative already (review plan §16), its cave and ore
-noise at absolute float positions (SP-H1). Past that, origin rebasing
-is needed, and it has to separate two roles `WorldOrigin` plays today: the planet's centre (generation, gravity, the
-surface coordinate) and the chunk grid's origin (chunk keys, saves, the edit layer).
+Planets are precise up to a radius of about 1,000 km (10^8 uu, `Review_Planet_L`; spherical Phase 6, review plan
+§20.3). A float of size R is 8 uu coarse at that radius, so nothing of size R is kept in float:
+
+| Where | How |
+|-------|-----|
+| CPU generation and queries | Double from the centre to the altitude: the SDF is the terrain's altitude minus the voxel's (`ShellSignedDistanceAtAltitude`), surface points are centre + direction x (R + altitude) in double, the sea is an altitude |
+| Noise | Planets sample `FVoxelPlanetNoise` (GPU: `PlanetNoise.ush`): a hashed integer lattice (no 256 period) sampled at an origin split in double into a lattice cell and a float fraction, plus a small float offset (D22). Heightmap worlds keep the permutation noise |
+| GPU generation | In the chunk's frame (`PlanetFrame.ush`): the CPU uploads the chunk centre's direction, distance and altitude and the split noise origins; the shader forms only small values (a voxel's altitude over the anchor's, its change of direction, conditioning chords, the ore key from an integer chunk base) |
+| Rendering | Render regions (`FVoxelRenderRegions`, `voxel.Render.RegionChunks`, 16^3 chunks = 76,800 uu by default): one voxel world component per region and one scatter HISM per type and region, each at its region's origin in double (UE's large-world coordinates); vertices and instances are floats relative to it (D23). The voxel materials' triplanar position is tiled by a whole number of texture periods in LWC math. Heightmap worlds keep one component at the origin |
+| Collision | Chunk-local trimeshes placed by a double transform ([TRAVERSAL_LIMITS.md](../Research/TRAVERSAL_LIMITS.md) #5) |
+
+What still holds a size-R float: the planet ocean shell (`FVoxelPlanetOcean`, G40; WM-BP9's far field replaces it). Past
+about 1,000 km the relief clamps (D24) and the streaming window (WM-BP8) set the limits, not precision. `WorldOrigin`
+still plays two roles, the planet's centre (generation, gravity, the surface coordinate) and the chunk grid's origin
+(chunk keys, saves, the edit layer); a centre far from the world origin is as precise as one at it.
 
 ### Spawn Position
 

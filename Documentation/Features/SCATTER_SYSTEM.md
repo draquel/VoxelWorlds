@@ -93,11 +93,12 @@ public:
     void UpdateChunkTypeInstances(const FIntVector& ChunkCoord, int32 ScatterTypeID, TArray<FTransform> Transforms);
 
 protected:
-    // One HISM per scatter type
-    TMap<int32, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
+    // One HISM per scatter type and render region (a planet's regions of voxel.Render.RegionChunks^3 chunks, each HISM
+    // at its region's origin so instance transforms stay small floats; heightmap worlds have one region at the origin)
+    TMap<FVoxelScatterHISMKey, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
 
-    // Per-scatter-type instance pool for recycling
-    TMap<int32, FHISMInstancePool> InstancePools;
+    // Per-HISM instance pool for recycling
+    TMap<FVoxelScatterHISMKey, FHISMInstancePool> InstancePools;
 
     // Deferred per-frame instance adds (budget-limited, flushed every Tick)
     TArray<FPendingInstanceAdd> PendingInstanceAdds;

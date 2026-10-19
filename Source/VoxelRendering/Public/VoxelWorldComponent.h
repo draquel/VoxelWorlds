@@ -230,6 +230,15 @@ public:
 	 */
 	bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks);
 
+	/**
+	 * Whether this component draws, or is about to draw, anything: chunk meshes, seam buckets, water tiles, active fades
+	 * or queued chunk operations. On a planet the renderer keeps one component per render region (spherical Phase 6,
+	 * WM-BP7) and retires a region's component once this is false.
+	 *
+	 * @return True while the component holds render content
+	 */
+	bool HasRenderContent() const;
+
 	// ==================== Coordinated LOD Transitions (R24) ====================
 
 	/**
@@ -589,6 +598,9 @@ private:
 	 * Lets diagnostics ask which owners have seam geometry without touching render-thread state.
 	 */
 	TMap<FIntVector, uint8> SeamBucketSlotMasks;
+
+	/** Water tiles sent to the proxy (HasRenderContent). */
+	TSet<FIntVector2> WaterTileKeys;
 
 	// ==================== Batched Render Operations ====================
 	// Instead of sending individual render commands, we batch operations
