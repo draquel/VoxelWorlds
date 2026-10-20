@@ -6591,10 +6591,12 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			const double WaterT0 = FPlatformTime::Seconds();
 			PropagateWaterFromNeighbors(ChunkCoord);
 
-			// The chunk's water is in place: an edit that reached it before (a POI's terraform or a dungeon stamp at
-			// stream-in, a save's edits) is scanned for voxels it opened to the sea now (G58).
+			// The chunk's water is in place, the first time since its voxel data arrived: an edit that reached it before (a
+			// POI's terraform or a dungeon stamp at stream-in, a save's edits) is scanned for voxels it opened to the sea now
+			// (G58), and the faces it shares with chunks whose water is in place for edit water to cross (G59).
+			const bool bWaterArrived = !State->bWaterSettled;
 			State->bWaterSettled = true;
-			if (WaterPropagation)
+			if (WaterPropagation && bWaterArrived)
 			{
 				WaterPropagation->OnChunkWaterSettled(ChunkCoord);
 			}
@@ -6865,6 +6867,10 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d): PropagateWaterFromNeighbors — %d seeds, %d total propagated"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NumSeeds, BFSQueue.Num());
 
+	// The flags went into the voxel array without a ContentVersion bump (GetVoxelDataMutable): an edit-merged snapshot
+	// built before them would lack them, and the water tile reads one for a chunk with edits (G59).
+	SeamSnapshotCache.Remove(ChunkCoord);
+
 	return true;
 }
 
@@ -6895,8 +6901,16 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	TArray<bool> PartialMask;
 	PartialMask.SetNumZeroed(CS * CS);
 
+	// The water as it is: an edit-driven flood puts its flags in the edit layer (UVoxelWaterPropagation), so a chunk with
+	// edits builds its columns from the edit-merged voxels, which a dug channel's water and a filled sea's rock are part of
+	// (G59). The snapshot is the one the seam jobs read for this content version; most chunks have no edits.
+	TSharedPtr<const TArray<FVoxelData>> EditMerged;
+	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	{
+		EditMerged = GetEditMergedSnapshot(ChunkCoord);
+	}
 	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
-		State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
+		EditMerged.IsValid() ? *EditMerged : State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
 
 	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
 

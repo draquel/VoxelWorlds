@@ -22,11 +22,17 @@
  */
 namespace VoxelTesting
 {
-	/** A renderer that keeps the latest CPU mesh per chunk and nothing else. */
+	/** A renderer that keeps the latest CPU mesh per chunk and per water tile (a heightmap world's 2D water tiles), and nothing else. */
 	class FRecordingMeshRenderer : public IVoxelMeshRenderer
 	{
 	public:
 		TMap<FIntVector, FChunkMeshData> ChunkMeshes;
+		/** Water tile meshes by tile (chunk X, Y); positions local to the tile's corner at WorldOrigin + tile * chunk extent. */
+		TMap<FIntVector2, FChunkMeshData> WaterTiles;
+
+		virtual void UpdateWaterTileMesh(const FIntVector2& TileCoord, const FChunkMeshData& WaterMeshData) override { WaterTiles.Add(TileCoord, WaterMeshData); }
+		virtual void RemoveWaterTile(const FIntVector2& TileCoord) override { WaterTiles.Remove(TileCoord); }
+		virtual void ClearAllWaterTiles() override { WaterTiles.Reset(); }
 
 		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
 		virtual void Shutdown() override { bInitialized = false; }

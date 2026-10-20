@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Materials/Material.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
 #include "VoxelEditManager.h"
@@ -32,6 +33,20 @@
 //   D. A system dig of a seabed chunk 12,000 uu away, which has no voxel data yet (a POI's terraform at stream-in): its scan
 //      waits for the chunk's water (its first mesh, which pulls the flags of a chunk under a heightmap sea from its
 //      neighbours), and once the viewer streams the chunk in, the dig floods with its density and material.
+//
+// G59 (section 19.15). A flood's water lives in the edit layer, which the water tiles and the chunk manager's pull across
+// chunk faces (PropagateWaterFromNeighbors) did not read: a dug channel's water drew no tile, a flood that stopped at a
+// chunk whose water was not in place did not continue into it when it loaded, and a dry pocket dug beside such a chunk did
+// not flood from the water it loaded with.
+//
+// - Streaming.WaterPropagation.ChunkArrival.Plane / .Planet: two sites on one chunk face, A on this side and N on the
+//   other, in the sea at least 5 voxels deep. (i) With both chunks loaded, a sealed dry pocket is dug in N against the face,
+//   behind a solid door on A's side; the viewer moves so N unloads and A stays; the door is dug open, so A's sea floods it
+//   and the flood stops at the face. (ii) With N unloaded, a dry pocket walled in on A's side is dug against the face. Once
+//   the viewer comes back and N loads, its water settles: the flood continues through the face into N's pocket, and A's
+//   pocket floods from N's sea. No voxel changes but by taking the flag.
+// - Streaming.WaterPropagation.Tiles.Plane: a channel dug from the sea inland, 3 voxels below the sea, floods; its inland
+//   columns, which no water tile covered (the tiles dilate the wet columns by 3), are covered by the tile afterwards.
 // ---------------------------------------------------------------------------
 
 namespace VoxelWaterPropagationTest
@@ -303,10 +318,10 @@ namespace VoxelWaterPropagationTest
 		return Sites;
 	}
 
-	/** Configure and start a small world with a sea; three flat seabed sites 5-10 voxels under it, pairwise at least 900 uu apart. */
-	bool StartWorld(VoxelTesting::FTestChunkWorld& W, bool bPlanet, TArray<FVector>& OutSites)
+	/** Configure and start a small world with a sea (the plane's at Z 0 with WorldOrigin off the voxel grid, the planet's at the datum). */
+	void StartSeaWorld(VoxelTesting::FTestChunkWorld& W, bool bPlanet, const TCHAR* WorldName, bool bWaterTiles = false)
 	{
-		W.Create(bPlanet ? TEXT("WaterPropagationPlanet") : TEXT("WaterPropagationPlane"));
+		W.Create(WorldName);
 		if (bPlanet)
 		{
 			W.ConfigureSmallPlanet();
@@ -328,7 +343,18 @@ namespace VoxelWaterPropagationTest
 		{
 			W.Config->WaterLevel = 0.0f;
 		}
+		if (bWaterTiles)
+		{
+			// The 2D water tiles run with a water material in a heightmap world (UVoxelChunkManager::UsesWaterTiles).
+			W.Config->WaterMeshMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+		}
 		W.StartManager();
+	}
+
+	/** Configure and start a small world with a sea; three flat seabed sites 5-10 voxels under it, pairwise at least 900 uu apart. */
+	bool StartWorld(VoxelTesting::FTestChunkWorld& W, bool bPlanet, TArray<FVector>& OutSites)
+	{
+		StartSeaWorld(W, bPlanet, bPlanet ? TEXT("WaterPropagationPlanet") : TEXT("WaterPropagationPlane"));
 
 		for (const FVector& Site : FindSeabedSites(W, bPlanet, 0.0, false))
 		{
@@ -603,6 +629,553 @@ namespace VoxelWaterPropagationTest
 
 		W.Stop();
 	}
+
+	// ---- G59 ----
+
+	/** Voxel keys from their coordinates along an up axis, an axis across a chunk face, and the third axis. */
+	struct FAxes
+	{
+		int32 Up = 2;
+		int32 Face = 0;
+		int32 Third = 1;
+
+		FIntVector Key(int32 U, int32 F, int32 T) const
+		{
+			FIntVector K = FIntVector::ZeroValue;
+			K[Up] = U;
+			K[Face] = F;
+			K[Third] = T;
+			return K;
+		}
+	};
+
+	int32 FloorDiv(int32 A, int32 B)
+	{
+		return FMath::FloorToInt32(double(A) / B);
+	}
+
+	FIntVector ChunkOfKey(const VoxelTesting::FTestChunkWorld& W, const FIntVector& Key)
+	{
+		const int32 CS = W.Config->ChunkSize;
+		return FIntVector(FloorDiv(Key.X, CS), FloorDiv(Key.Y, CS), FloorDiv(Key.Z, CS));
+	}
+
+	/** The chunks holding some keys. */
+	TSet<FIntVector> ChunksOf(const VoxelTesting::FTestChunkWorld& W, const TArray<FIntVector>& Keys)
+	{
+		TSet<FIntVector> Chunks;
+		for (const FIntVector& Key : Keys)
+		{
+			Chunks.Add(ChunkOfKey(W, Key));
+		}
+		return Chunks;
+	}
+
+	/** Every key of the box [Min, Max] along (up, face, third), less those of another box (an empty one when Max < Min). */
+	TArray<FIntVector> Box(const FAxes& Ax, const FIntVector& Min, const FIntVector& Max, const FIntVector& HoleMin = FIntVector(1), const FIntVector& HoleMax = FIntVector(0))
+	{
+		TArray<FIntVector> Keys;
+		for (int32 U = Min.X; U <= Max.X; ++U)
+		for (int32 F = Min.Y; F <= Max.Y; ++F)
+		for (int32 T = Min.Z; T <= Max.Z; ++T)
+		{
+			const bool bHole = U >= HoleMin.X && U <= HoleMax.X && F >= HoleMin.Y && F <= HoleMax.Y && T >= HoleMin.Z && T <= HoleMax.Z;
+			if (!bHole)
+			{
+				Keys.Add(Ax.Key(U, F, T));
+			}
+		}
+		return Keys;
+	}
+
+	/** Tick until Done holds (and then until the pipeline and the water propagation are idle). */
+	bool TickUntil(VoxelTesting::FTestChunkWorld& W, TFunctionRef<bool()> Done, double TimeoutSeconds = 120.0)
+	{
+		const double Deadline = FPlatformTime::Seconds() + TimeoutSeconds;
+		while (!Done() && FPlatformTime::Seconds() < Deadline)
+		{
+			W.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+			FPlatformProcess::Sleep(0.002f);
+		}
+		return Done() && SettleWater(W, TimeoutSeconds);
+	}
+
+	/** The highest voxel of the column (F, T) along the up axis that is below the sea. */
+	int32 TopBelowSea(const VoxelTesting::FTestChunkWorld& W, bool bPlanet, const FAxes& Ax, int32 F, int32 T)
+	{
+		const double VS = W.Config->VoxelSize;
+		if (!bPlanet)
+		{
+			return FMath::FloorToInt32(W.Config->WaterLevel / VS);
+		}
+		// The planet's sites are at the +X face's equator, up along +X.
+		const double Across = (FMath::Square(double(F)) + FMath::Square(double(T))) * VS * VS;
+		int32 U = FMath::FloorToInt32(FMath::Sqrt(FMath::Max(0.0, FMath::Square(double(W.Config->WaterRadius)) - Across)) / VS);
+		while (BelowSea(W, Ax.Key(U + 1, F, T), true))
+		{
+			++U;
+		}
+		while (!BelowSea(W, Ax.Key(U, F, T), true))
+		{
+			--U;
+		}
+		return U;
+	}
+
+	/**
+	 * The seabed under the column (F, T): walking down along the up axis from the sea's top, the first voxel that is not
+	 * water (generated, its flags pulled). False when it is not solid or a chunk on the way has no data.
+	 */
+	bool FindSeabed(const VoxelTesting::FTestChunkWorld& W, bool bPlanet, const FAxes& Ax, int32 F, int32 T, int32& OutTop, int32& OutBed)
+	{
+		OutTop = TopBelowSea(W, bPlanet, Ax, F, T);
+		for (int32 U = OutTop; U > OutTop - 40; --U)
+		{
+			const FIntVector Key = Ax.Key(U, F, T);
+			if (!HasData(W, Key))
+			{
+				return false;
+			}
+			const FVoxelData V = Generated(W, Key);
+			if (!IsWater(V))
+			{
+				OutBed = U;
+				return V.IsSolid();
+			}
+		}
+		return false;
+	}
+
+	/** Two footprints on one chunk face, at T0 and T1 along the third axis, each over its highest seabed voxel Bed0 / Bed1. */
+	struct FFaceSites
+	{
+		int32 F = 0; // the neighbour's first layer along the face axis; this side's last is F - 1
+		int32 T0 = 0;
+		int32 Bed0 = 0;
+		int32 T1 = 0;
+		int32 Bed1 = 0;
+	};
+
+	/**
+	 * Faces of the anchor's chunk and its neighbours along the face axis, and on them two footprints 8 to 20 voxels apart
+	 * where the columns F-3..F+2 x T-2..T+2 stand in water at least 5 voxels deep over the footprint's highest seabed (the
+	 * walls and pockets sit from 1 to 4 voxels over it, so all of them are in the sea).
+	 */
+	bool FindFaceSites(const VoxelTesting::FTestChunkWorld& W, bool bPlanet, const FAxes& Ax, const FIntVector& Anchor, FFaceSites& Out, FString& OutWhy)
+	{
+		int32 NoBed = 0, Shallow = 0, Fit = 0;
+		const int32 CS = W.Config->ChunkSize;
+		const int32 AnchorChunk = FloorDiv(Anchor[Ax.Face], CS);
+		for (const int32 K : { 1, 0, 2, -1 })
+		{
+			const int32 F = (AnchorChunk + K) * CS;
+			TArray<TPair<int32, int32>> Good; // (T, Bed)
+			for (int32 DT = -30; DT <= 30; ++DT)
+			{
+				const int32 T = Anchor[Ax.Third] + DT;
+				int32 BedMax = MIN_int32, TopMin = MAX_int32;
+				bool bOk = true;
+				for (int32 FF = F - 3; FF <= F + 2 && bOk; ++FF)
+				{
+					for (int32 TT = T - 2; TT <= T + 2 && bOk; ++TT)
+					{
+						int32 Top = 0, Bed = 0;
+						bOk = FindSeabed(W, bPlanet, Ax, FF, TT, Top, Bed);
+						BedMax = FMath::Max(BedMax, Bed);
+						TopMin = FMath::Min(TopMin, Top);
+					}
+				}
+				if (bOk && TopMin - BedMax >= 5)
+				{
+					Good.Add({ T, BedMax });
+				}
+				NoBed += bOk ? 0 : 1;
+				Shallow += (bOk && TopMin - BedMax < 5) ? 1 : 0;
+			}
+			Fit += Good.Num();
+			for (int32 i = 0; i < Good.Num(); ++i)
+			{
+				for (int32 j = i + 1; j < Good.Num(); ++j)
+				{
+					// 8 to 20 apart: the footprints' walls do not touch, and one viewer away from the face keeps both in reach.
+					if (Good[j].Key - Good[i].Key >= 8 && Good[j].Key - Good[i].Key <= 20)
+					{
+						Out.F = F;
+						Out.T0 = Good[i].Key;
+						Out.Bed0 = Good[i].Value;
+						Out.T1 = Good[j].Key;
+						Out.Bed1 = Good[j].Value;
+						return true;
+					}
+				}
+			}
+		}
+		OutWhy = FString::Printf(TEXT("footprints: %d without a solid seabed under water in reach, %d under less than 5 voxels of water, %d fit (none a pair 8 to 20 apart)"),
+			NoBed, Shallow, Fit);
+		return false;
+	}
+
+	void RunChunkArrival(FAutomationTestBase& Test, bool bPlanet)
+	{
+		const TCHAR* Name = bPlanet ? TEXT("Planet") : TEXT("Plane");
+		VoxelTesting::FTestChunkWorld W;
+		StartSeaWorld(W, bPlanet, bPlanet ? TEXT("WaterArrivalPlanet") : TEXT("WaterArrivalPlane"));
+		const float VS = W.Config->VoxelSize;
+		const int32 CS = W.Config->ChunkSize;
+		FAxes Ax;
+		if (bPlanet)
+		{
+			// The +X face's equator: up along X, the face across Y.
+			Ax.Up = 0;
+			Ax.Face = 1;
+			Ax.Third = 2;
+		}
+
+		// Two footprints on one chunk face near a seabed site, the viewer over the first site that has them.
+		FFaceSites Sites;
+		bool bFound = false;
+		const TArray<FVector> Anchors = FindSeabedSites(W, bPlanet, 0.0, false);
+		for (int32 i = 0; i < FMath::Min(4, Anchors.Num()) && !bFound; ++i)
+		{
+			W.SetViewer(Anchors[i] + UpAt(W, Anchors[i], bPlanet) * 300.0);
+			Test.TestTrue(FString::Printf(TEXT("%s: the world settles at seabed site %d"), Name, i), SettleWater(W));
+			FString Why;
+			bFound = FindFaceSites(W, bPlanet, Ax, KeyOf(W, Anchors[i]), Sites, Why);
+			if (!bFound)
+			{
+				Test.AddInfo(FString::Printf(TEXT("%s: seabed site %d has no face pair: %s"), Name, i, *Why));
+			}
+		}
+		if (!bFound)
+		{
+			Test.AddError(FString::Printf(TEXT("%s: no chunk face with two footprints in the sea"), Name));
+			W.Stop();
+			return;
+		}
+		UVoxelWaterPropagation* Water = W.Manager->GetWaterPropagation();
+		if (!Water)
+		{
+			Test.AddError(FString::Printf(TEXT("%s: no water propagation with bEnableWaterLevel"), Name));
+			W.Stop();
+			return;
+		}
+		const int32 F = Sites.F;
+		auto Solid = [&W](const FIntVector& Key) { return FVoxelData(EVoxelMaterial::Sandstone, 220, Generated(W, Key).BiomeID, 0); };
+		auto Air = [](const FIntVector&) { return FVoxelData::Air(); };
+
+		// (i) at T1: a pocket in N against the face (F, F+1), walled in on N's side, a door on A's side (F - 1).
+		const int32 B1 = Sites.Bed1, T1 = Sites.T1;
+		const TArray<FIntVector> PocketN = Box(Ax, FIntVector(B1 + 2, F, T1 - 1), FIntVector(B1 + 3, F + 1, T1 + 1));
+		const TArray<FIntVector> WallN = Box(Ax, FIntVector(B1 + 1, F, T1 - 2), FIntVector(B1 + 4, F + 2, T1 + 2),
+			FIntVector(B1 + 2, F, T1 - 1), FIntVector(B1 + 3, F + 1, T1 + 1));
+		const TArray<FIntVector> Door = Box(Ax, FIntVector(B1 + 2, F - 1, T1 - 1), FIntVector(B1 + 3, F - 1, T1 + 1));
+		// (ii) at T0: a pocket in A against the face (F - 2, F - 1), walled in on A's side; N's sea across the face.
+		const int32 B0 = Sites.Bed0, T0 = Sites.T0;
+		const TArray<FIntVector> PocketA = Box(Ax, FIntVector(B0 + 2, F - 2, T0 - 1), FIntVector(B0 + 3, F - 1, T0 + 1));
+		const TArray<FIntVector> WallA = Box(Ax, FIntVector(B0 + 1, F - 3, T0 - 2), FIntVector(B0 + 4, F - 1, T0 + 2),
+			FIntVector(B0 + 2, F - 2, T0 - 1), FIntVector(B0 + 3, F - 1, T0 + 1));
+		const TArray<FIntVector> SeaAcrossA = Box(Ax, FIntVector(B0 + 2, F, T0 - 1), FIntVector(B0 + 3, F, T0 + 1));
+		// The regions checked for changes: each footprint and a voxel around it, on either side of the face.
+		const TArray<FIntVector> RegionN = Box(Ax, FIntVector(B1, F, T1 - 3), FIntVector(B1 + 5, F + 3, T1 + 3));
+		const TArray<FIntVector> RegionA = Box(Ax, FIntVector(B0, F - 4, T0 - 3), FIntVector(B0 + 5, F - 1, T0 + 3));
+
+		TArray<FIntVector> NKeys = PocketN;
+		NKeys.Append(SeaAcrossA);
+		const TSet<FIntVector> ChunksN = ChunksOf(W, NKeys);
+		TArray<FIntVector> AKeys = PocketA;
+		AKeys.Append(Door);
+		const TSet<FIntVector> ChunksA = ChunksOf(W, AKeys);
+		auto AllHaveNoData = [&W](const TSet<FIntVector>& Chunks)
+		{
+			for (const FIntVector& C : Chunks)
+			{
+				if (W.Manager->HasChunkVoxelData(C))
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		auto AllSettled = [&W](const TSet<FIntVector>& Chunks)
+		{
+			for (const FIntVector& C : Chunks)
+			{
+				if (!W.Manager->IsChunkWaterSettled(C))
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		bool bOverlap = false;
+		for (const FIntVector& C : ChunksN)
+		{
+			bOverlap |= ChunksA.Contains(C);
+		}
+		Test.TestFalse(FString::Printf(TEXT("%s: the two sides of the face are different chunks"), Name), bOverlap);
+
+		const int32 TMid = (T0 + T1) / 2;
+		const FVector Home = CenterOf(W, Ax.Key(FMath::Max(B0, B1) + 1, F, TMid));
+		const FVector HomeViewer = Home + UpAt(W, Home, bPlanet) * 300.0;
+		// 2,400 uu from A's centre away from the face: N's centre 4,000 away, beyond the unload horizon (3,600).
+		const FVector Away = W.Manager->GetGeneratedSurfacePoint(CenterOf(W, Ax.Key(FMath::Max(B0, B1) + 1, F - CS / 2 - FMath::RoundToInt32(2400.0f / VS), TMid)));
+		const FVector AwayViewer = Away + UpAt(W, Away, bPlanet) * 300.0;
+
+		// ---- Phase 1, both sides loaded: (i)'s pocket in N, sealed by the door. ----
+		W.SetViewer(HomeViewer);
+		Test.TestTrue(FString::Printf(TEXT("%s: settles at the face"), Name), SettleWater(W));
+		Test.TestTrue(FString::Printf(TEXT("%s: both sides' chunks are loaded"), Name), AllSettled(ChunksN) && AllSettled(ChunksA));
+		const UVoxelWaterPropagation::FStats Stats0 = Water->GetStats();
+		TArray<FIntVector> WallAndDoor = WallN;
+		WallAndDoor.Append(Door);
+		SystemSet(W, WallAndDoor, Solid);
+		SystemSet(W, PocketN, Air);
+		Test.TestTrue(FString::Printf(TEXT("%s (i): settles after the pocket"), Name), SettleWater(W));
+		int32 PocketNWet = 0;
+		for (const FIntVector& Key : PocketN)
+		{
+			PocketNWet += Merged(W, Key).HasWaterFlag() ? 1 : 0;
+		}
+		Test.TestEqual(FString::Printf(TEXT("%s (i): the sealed pocket in N stays dry"), Name), PocketNWet, 0);
+		Test.TestEqual(FString::Printf(TEXT("%s (i): no seed for it"), Name), Water->GetStats().Seeds, Stats0.Seeds);
+		const TMap<FIntVector, FVoxelData> BeforeN = Capture(W, RegionN);
+
+		// ---- Phase 2, N unloaded: (ii)'s pocket in A against the face; (i)'s door dug open, A's sea floods it. ----
+		W.SetViewer(AwayViewer);
+		Test.TestTrue(FString::Printf(TEXT("%s: N unloads, A stays"), Name), TickUntil(W, [&] { return AllHaveNoData(ChunksN); }));
+		Test.TestTrue(FString::Printf(TEXT("%s: A's water stays in place"), Name), AllSettled(ChunksA));
+		const UVoxelWaterPropagation::FStats Stats1 = Water->GetStats();
+		SystemSet(W, WallA, Solid);
+		SystemSet(W, PocketA, Air);
+		Test.TestTrue(FString::Printf(TEXT("%s (ii): settles after the pocket"), Name), SettleWater(W));
+		int32 PocketAWet = 0;
+		for (const FIntVector& Key : PocketA)
+		{
+			PocketAWet += Merged(W, Key).HasWaterFlag() ? 1 : 0;
+		}
+		Test.TestEqual(FString::Printf(TEXT("%s (ii): the pocket in A is dry while N is not loaded"), Name), PocketAWet, 0);
+		Test.TestEqual(FString::Printf(TEXT("%s (ii): no seed while N is not loaded"), Name), Water->GetStats().Seeds, Stats1.Seeds);
+
+		SystemSet(W, Door, Air);
+		Test.TestTrue(FString::Printf(TEXT("%s (i): settles after the door opened"), Name), SettleWater(W));
+		int32 DoorWet = 0;
+		for (const FIntVector& Key : Door)
+		{
+			DoorWet += IsWater(Merged(W, Key)) ? 1 : 0;
+		}
+		Test.TestEqual(FString::Printf(TEXT("%s (i): the door floods from A's sea"), Name), DoorWet, Door.Num());
+		Test.TestTrue(FString::Printf(TEXT("%s (i): N still not loaded"), Name), AllHaveNoData(ChunksN));
+		const TMap<FIntVector, FVoxelData> BeforeA = Capture(W, RegionA);
+		const UVoxelWaterPropagation::FStats Stats2 = Water->GetStats();
+
+		// ---- Phase 3, back at the face: N loads, its water settles. ----
+		W.SetViewer(HomeViewer);
+		Test.TestTrue(FString::Printf(TEXT("%s: N loads again"), Name), TickUntil(W, [&] { return AllSettled(ChunksN); }));
+		int32 PocketNFlooded = 0, PocketAFlooded = 0, SeaAcross = 0;
+		for (const FIntVector& Key : PocketN)
+		{
+			PocketNFlooded += IsWater(Merged(W, Key)) ? 1 : 0;
+		}
+		for (const FIntVector& Key : PocketA)
+		{
+			PocketAFlooded += IsWater(Merged(W, Key)) ? 1 : 0;
+		}
+		for (const FIntVector& Key : SeaAcrossA)
+		{
+			SeaAcross += IsWater(Merged(W, Key)) ? 1 : 0;
+		}
+		Test.TestEqual(FString::Printf(TEXT("%s (ii): N's sea is across the face from A's pocket"), Name), SeaAcross, SeaAcrossA.Num());
+		Test.TestEqual(FString::Printf(TEXT("%s (i): the flood continues through the face into N's pocket"), Name), PocketNFlooded, PocketN.Num());
+		Test.TestEqual(FString::Printf(TEXT("%s (ii): A's pocket floods from N's sea"), Name), PocketAFlooded, PocketA.Num());
+		CheckOnlyFlagsAdded(Test, *FString::Printf(TEXT("%s (i), N's side"), Name), W, bPlanet, BeforeN, Capture(W, RegionN));
+		CheckOnlyFlagsAdded(Test, *FString::Printf(TEXT("%s (ii), A's side"), Name), W, bPlanet, BeforeA, Capture(W, RegionA));
+		const UVoxelWaterPropagation::FStats& Stats3 = Water->GetStats();
+		Test.TestTrue(FString::Printf(TEXT("%s: seeds on the face"), Name), Stats3.FaceSeeds > Stats2.FaceSeeds);
+		Test.AddInfo(FString::Printf(TEXT("%s: face at %d (axis %d), N's pocket %d voxels (%d flooded), A's pocket %d (%d flooded), door %d (%d flooded before N loaded); after N loaded: %lld faces scanned, %lld face seeds, %lld seeds, %lld voxels flooded"),
+			Name, F, Ax.Face, PocketN.Num(), PocketNFlooded, PocketA.Num(), PocketAFlooded, Door.Num(), DoorWet,
+			Stats3.FaceScansQueued - Stats2.FaceScansQueued, Stats3.FaceSeeds - Stats2.FaceSeeds, Stats3.Seeds - Stats2.Seeds,
+			Stats3.FloodedVoxels - Stats2.FloodedVoxels));
+		W.Stop();
+	}
+
+	/** The ground's height over the column (GX, GY) on the plane, relative to WorldOrigin (the generated surface). */
+	double GroundZ(const VoxelTesting::FTestChunkWorld& W, int32 GX, int32 GY)
+	{
+		const float VS = W.Config->VoxelSize;
+		return W.Manager->GetGeneratedSurfacePoint(OriginOf(W) + FVector((GX + 0.5) * VS, (GY + 0.5) * VS, 0.0)).Z - OriginOf(W).Z;
+	}
+
+	/** Whether the water tile over a column covers its centre (the tile's quads, local to its corner). */
+	bool TileCovers(const VoxelTesting::FTestChunkWorld& W, int32 GX, int32 GY)
+	{
+		const int32 CS = W.Config->ChunkSize;
+		const float VS = W.Config->VoxelSize;
+		const FIntVector2 Tile(FloorDiv(GX, CS), FloorDiv(GY, CS));
+		const FChunkMeshData* Mesh = W.Renderer.WaterTiles.Find(Tile);
+		if (!Mesh)
+		{
+			return false;
+		}
+		const float PX = (GX - Tile.X * CS + 0.5f) * VS;
+		const float PY = (GY - Tile.Y * CS + 0.5f) * VS;
+		for (int32 i = 0; i + 2 < Mesh->Indices.Num(); i += 3)
+		{
+			// The quads are axis-aligned rectangles, each two triangles over the same box.
+			FBox2f Bounds(ForceInit);
+			for (int32 k = 0; k < 3; ++k)
+			{
+				const FVector3f& P = Mesh->Positions[Mesh->Indices[i + k]];
+				Bounds += FVector2f(P.X, P.Y);
+			}
+			if (PX >= Bounds.Min.X && PX <= Bounds.Max.X && PY >= Bounds.Min.Y && PY <= Bounds.Max.Y)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void RunInlandChannelTile(FAutomationTestBase& Test)
+	{
+		VoxelTesting::FTestChunkWorld W;
+		StartSeaWorld(W, false, TEXT("WaterTilesPlane"), true);
+		const float VS = W.Config->VoxelSize;
+
+		// A shore: three columns of sea, then land (the ground over the sea, so no water in the column) up to 12 voxels high
+		// for 11 columns and 4 rows either side, so no wet column lies within the tiles' 3-column dilation of the channel's
+		// inland end (columns 3 to 7).
+		TMap<FIntPoint, double> Heights;
+		auto H = [&](int32 X, int32 Y)
+		{
+			if (const double* Known = Heights.Find(FIntPoint(X, Y)))
+			{
+				return *Known;
+			}
+			return Heights.Add(FIntPoint(X, Y), GroundZ(W, X, Y));
+		};
+		int32 ShoreX = 0, ShoreY = 0, Dir = 0;
+		double BestScore = TNumericLimits<double>::Max(), MaxGround = 0.0;
+		for (int32 GY = -120; GY <= 120; GY += 2)
+		{
+			for (int32 GX = -120; GX <= 120; ++GX)
+			{
+				for (const int32 D : { 1, -1 })
+				{
+					bool bOk = true;
+					for (int32 DY = -1; DY <= 1 && bOk; ++DY)
+					{
+						for (int32 i = 1; i <= 3 && bOk; ++i)
+						{
+							bOk = H(GX - D * i, GY + DY) <= -0.2 * VS;
+						}
+					}
+					double Top = 0.0;
+					for (int32 DY = -4; DY <= 4 && bOk; ++DY)
+					{
+						for (int32 i = 0; i <= 10 && bOk; ++i)
+						{
+							const double Ground = H(GX + D * i, GY + DY);
+							bOk = Ground >= 0.3 * VS && Ground <= 12.0 * VS;
+							Top = FMath::Max(Top, Ground);
+						}
+					}
+					const double Score = FMath::Square(double(GX)) + FMath::Square(double(GY));
+					if (bOk && Score < BestScore)
+					{
+						BestScore = Score;
+						ShoreX = GX;
+						ShoreY = GY;
+						Dir = D;
+						MaxGround = Top;
+					}
+				}
+			}
+		}
+		if (Dir == 0)
+		{
+			Test.AddError(TEXT("Tiles: no shore within 6,000 uu"));
+			W.Stop();
+			return;
+		}
+		UVoxelWaterPropagation* Water = W.Manager->GetWaterPropagation();
+		W.SetViewer(OriginOf(W) + FVector((ShoreX + 0.5) * VS, (ShoreY + 0.5) * VS, 300.0));
+		Test.TestTrue(TEXT("Tiles: the world settles at the shore"), SettleWater(W));
+		if (!Water)
+		{
+			Test.AddError(TEXT("Tiles: no water propagation with bEnableWaterLevel"));
+			W.Stop();
+			return;
+		}
+
+		// The channel's inland columns, 3 to 7 past the shore: land, and no tile over them yet.
+		TArray<FIntPoint> Inland;
+		for (int32 DY = -1; DY <= 1; ++DY)
+		{
+			for (int32 i = 3; i <= 7; ++i)
+			{
+				Inland.Add(FIntPoint(ShoreX + Dir * i, ShoreY + DY));
+			}
+		}
+		int32 CoveredBefore = 0;
+		for (const FIntPoint& C : Inland)
+		{
+			CoveredBefore += TileCovers(W, C.X, C.Y) ? 1 : 0;
+		}
+		Test.TestTrue(TEXT("Tiles: the sea's tile covers the shore"), TileCovers(W, ShoreX - Dir, ShoreY));
+		Test.TestEqual(TEXT("Tiles: no tile over the channel's inland columns before the dig"), CoveredBefore, 0);
+
+		// The channel: from 3 columns out in the sea to 7 inland, 3 wide, down to 3 voxels under the sea. Only rock is dug.
+		const int32 TopZ = FMath::CeilToInt32(MaxGround / VS) + 1;
+		const int32 BottomZ = FMath::FloorToInt32(W.Config->WaterLevel / VS) - 3;
+		TArray<FIntVector> Dig;
+		for (int32 i = -3; i <= 7; ++i)
+		{
+			for (int32 DY = -1; DY <= 1; ++DY)
+			{
+				for (int32 GZ = BottomZ; GZ <= TopZ; ++GZ)
+				{
+					const FIntVector Key(ShoreX + Dir * i, ShoreY + DY, GZ);
+					if (Merged(W, Key).IsSolid())
+					{
+						Dig.Add(Key);
+					}
+				}
+			}
+		}
+		const UVoxelWaterPropagation::FStats Stats0 = Water->GetStats();
+		SystemSet(W, Dig, [](const FIntVector&) { return FVoxelData::Air(); });
+		Test.TestTrue(TEXT("Tiles: settles after the channel"), SettleWater(W));
+
+		int32 DugBelow = 0, Flooded = 0;
+		TSet<FIntPoint> InlandWet;
+		for (const FIntVector& Key : Dig)
+		{
+			if (BelowSea(W, Key, false))
+			{
+				++DugBelow;
+				const bool bWater = IsWater(Merged(W, Key));
+				Flooded += bWater ? 1 : 0;
+				if (bWater && Inland.Contains(FIntPoint(Key.X, Key.Y)))
+				{
+					InlandWet.Add(FIntPoint(Key.X, Key.Y));
+				}
+			}
+		}
+		const int32 InlandFlooded = InlandWet.Num();
+		int32 CoveredAfter = 0;
+		for (const FIntPoint& C : Inland)
+		{
+			CoveredAfter += TileCovers(W, C.X, C.Y) ? 1 : 0;
+		}
+		Test.TestEqual(TEXT("Tiles: the channel's voxels under the sea flooded"), Flooded, DugBelow);
+		Test.TestEqual(TEXT("Tiles: the channel's inland columns holding water"), InlandFlooded, Inland.Num());
+		Test.TestEqual(TEXT("Tiles: the tile covers the channel's inland columns"), CoveredAfter, Inland.Num());
+		const UVoxelWaterPropagation::FStats& Stats1 = Water->GetStats();
+		Test.AddInfo(FString::Printf(TEXT("Tiles: shore at column (%d, %d) heading %+d, ground up to %.0f; channel %d voxels dug (%d under the sea, %d flooded; %d inland columns with water); inland columns covered %d -> %d of %d; %lld seeds, %lld flooded"),
+			ShoreX, ShoreY, Dir, MaxGround, Dig.Num(), DugBelow, Flooded, InlandFlooded, CoveredBefore, CoveredAfter, Inland.Num(),
+			Stats1.Seeds - Stats0.Seeds, Stats1.FloodedVoxels - Stats0.FloodedVoxels));
+		W.Stop();
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPropagationPlaneTest, "VoxelWorlds.Streaming.WaterPropagation.Plane",
@@ -620,6 +1193,33 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPropagationPlanetTest, "VoxelWorlds.
 bool FVoxelWaterPropagationPlanetTest::RunTest(const FString& Parameters)
 {
 	VoxelWaterPropagationTest::RunWorld(*this, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterChunkArrivalPlaneTest, "VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Plane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelWaterChunkArrivalPlaneTest::RunTest(const FString& Parameters)
+{
+	VoxelWaterPropagationTest::RunChunkArrival(*this, false);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterChunkArrivalPlanetTest, "VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Planet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelWaterChunkArrivalPlanetTest::RunTest(const FString& Parameters)
+{
+	VoxelWaterPropagationTest::RunChunkArrival(*this, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterTilesPlaneTest, "VoxelWorlds.Streaming.WaterPropagation.Tiles.Plane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelWaterTilesPlaneTest::RunTest(const FString& Parameters)
+{
+	VoxelWaterPropagationTest::RunInlandChannelTile(*this);
 	return true;
 }
 

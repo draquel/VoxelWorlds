@@ -118,6 +118,83 @@ void UVoxelWaterPropagation::OnChunkWaterSettled(const FIntVector& ChunkCoord)
 	{
 		QueueScan(ChunkCoord, Deferred.Min, Deferred.Max);
 	}
+
+	// A flood stops at a chunk whose water is not in place, and a dig's scan finds no water there (G58); neither looks again
+	// when it arrives. Its faces with chunks whose water is in place are scanned now, for dry air below the sea beside water
+	// across the face (G59). Only edits make that: two chunks without edits hold the generated water, which the chunk
+	// manager's pull across faces already joined (PropagateWaterFromNeighbors). Most chunks have no edits on either side.
+	if (!EditManager.IsValid() || !ChunkManager.IsValid() || ChunkSize <= 0)
+	{
+		return;
+	}
+	const bool bEditsHere = EditManager->ChunkHasEdits(ChunkCoord);
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		const FIntVector Neighbour = ChunkCoord + GWaterNeighbourOffsets[Face];
+		if ((bEditsHere || EditManager->ChunkHasEdits(Neighbour)) && ChunkManager->IsChunkWaterSettled(Neighbour)
+			&& FaceReachesBelowSea(ChunkCoord, Face))
+		{
+			FPendingFaceScan& Scan = PendingFaceScans.AddDefaulted_GetRef();
+			Scan.ChunkCoord = ChunkCoord;
+			Scan.Face = Face;
+			++Stats.FaceScansQueued;
+		}
+	}
+}
+
+namespace
+{
+	/**
+	 * The two layers a face joins: the chunk's voxels along the face (local coordinates) and, across it, its neighbour's;
+	 * and the two axes that span the face.
+	 */
+	struct FWaterFaceLayers
+	{
+		int32 Axis = 0;     // the axis across the face
+		int32 SpanA = 1;    // the two axes along it
+		int32 SpanB = 2;
+		int32 OwnLayer = 0; // local index along Axis of the chunk's layer, and of its neighbour's
+		int32 NeighbourLayer = 0;
+
+		FWaterFaceLayers(int32 Face, int32 ChunkSize)
+		{
+			Axis = Face / 2;
+			SpanA = (Axis + 1) % 3;
+			SpanB = (Axis + 2) % 3;
+			const bool bPositive = (Face % 2) == 0;
+			OwnLayer = bPositive ? ChunkSize - 1 : 0;
+			NeighbourLayer = bPositive ? 0 : ChunkSize - 1;
+		}
+
+		/** The local coordinates of the I-th voxel of the chunk's layer and of the one across from it. */
+		void Pair(int32 I, int32 ChunkSize, FIntVector& OutOwn, FIntVector& OutNeighbour) const
+		{
+			OutOwn[SpanA] = OutNeighbour[SpanA] = I % ChunkSize;
+			OutOwn[SpanB] = OutNeighbour[SpanB] = I / ChunkSize;
+			OutOwn[Axis] = OwnLayer;
+			OutNeighbour[Axis] = NeighbourLayer;
+		}
+	};
+
+	int32 WaterFaceLocalIndex(const FIntVector& Local, int32 ChunkSize)
+	{
+		return Local.X + Local.Y * ChunkSize + Local.Z * ChunkSize * ChunkSize;
+	}
+}
+
+bool UVoxelWaterPropagation::FaceReachesBelowSea(const FIntVector& ChunkCoord, int32 Face) const
+{
+	const FWaterFaceLayers Layers(Face, ChunkSize);
+	const FIntVector Base = ChunkCoord * ChunkSize;
+	const FIntVector NeighbourBase = (ChunkCoord + GWaterNeighbourOffsets[Face]) * ChunkSize;
+	FIntVector Min = Base, Max = Base + FIntVector(ChunkSize - 1);
+	Min[Layers.Axis] = FMath::Min(Base[Layers.Axis] + Layers.OwnLayer, NeighbourBase[Layers.Axis] + Layers.NeighbourLayer);
+	Max[Layers.Axis] = FMath::Max(Base[Layers.Axis] + Layers.OwnLayer, NeighbourBase[Layers.Axis] + Layers.NeighbourLayer);
+	if (!Sea.bRadial)
+	{
+		return IsBelowSea(Min);
+	}
+	return !Sea.IsAbove(FBox(WorldOrigin + FVector(Min) * VoxelSize, WorldOrigin + FVector(Max) * VoxelSize));
 }
 
 namespace
@@ -218,6 +295,7 @@ int32 UVoxelWaterPropagation::ScanPendingEdits(int32 MaxReads)
 			PendingScanOrder.RemoveAt(0);
 		}
 	}
+	SeedsFound += ScanPendingFaces(MaxReads, Reads);
 	Stats.ScanReads += Reads;
 
 	if (SeedsFound > 0)
@@ -225,6 +303,80 @@ int32 UVoxelWaterPropagation::ScanPendingEdits(int32 MaxReads)
 		// A new seed restarts the flood's budget, as an edit did before.
 		TotalPropagated = 0;
 		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation seeded with %d voxels"), SeedsFound);
+	}
+	return SeedsFound;
+}
+
+int32 UVoxelWaterPropagation::ScanPendingFaces(int32 MaxReads, int32& Reads)
+{
+	int32 SeedsFound = 0;
+	const int32 Count = ChunkSize * ChunkSize;
+	while (PendingFaceScans.Num() > 0 && Reads < MaxReads)
+	{
+		FPendingFaceScan& Scan = PendingFaceScans[0];
+		const FIntVector ChunkCoord = Scan.ChunkCoord;
+		const FIntVector NeighbourCoord = ChunkCoord + GWaterNeighbourOffsets[Scan.Face];
+		if (!ChunkManager->IsChunkWaterSettled(ChunkCoord) || !ChunkManager->IsChunkWaterSettled(NeighbourCoord))
+		{
+			// Unloaded (or regenerated) since: whichever of the two settles last scans the face again.
+			PendingFaceScans.RemoveAt(0);
+			continue;
+		}
+
+		// Looked up again each frame: the flood's edits since may have added a layer.
+		const FChunkEditLayer* OwnEdits = EditManager->GetEditLayer(ChunkCoord);
+		const FChunkEditLayer* NeighbourEdits = EditManager->GetEditLayer(NeighbourCoord);
+		const FWaterFaceLayers Layers(Scan.Face, ChunkSize);
+		const FIntVector OwnBase = ChunkCoord * ChunkSize;
+		const FIntVector NeighbourBase = NeighbourCoord * ChunkSize;
+		while (Scan.Next < Count && Reads < MaxReads)
+		{
+			FIntVector OwnLocal = FIntVector::ZeroValue, NeighbourLocal = FIntVector::ZeroValue;
+			Layers.Pair(Scan.Next++, ChunkSize, OwnLocal, NeighbourLocal);
+			const FIntVector OwnKey = OwnBase + OwnLocal;
+			const FIntVector NeighbourKey = NeighbourBase + NeighbourLocal;
+			const bool bOwnBelow = IsBelowSea(OwnKey);
+			const bool bNeighbourBelow = IsBelowSea(NeighbourKey);
+			if (!bOwnBelow && !bNeighbourBelow)
+			{
+				continue;
+			}
+
+			// A pair neither edit touched holds the generated water as the pull across faces left it.
+			++Reads;
+			const bool bEdited = (OwnEdits && OwnEdits->Edits.Contains(WaterFaceLocalIndex(OwnLocal, ChunkSize)))
+				|| (NeighbourEdits && NeighbourEdits->Edits.Contains(WaterFaceLocalIndex(NeighbourLocal, ChunkSize)));
+			if (!bEdited)
+			{
+				continue;
+			}
+
+			FVoxelData Own, Neighbour;
+			Reads += 2;
+			if (!ReadVoxel(OwnKey, Own) || !ReadVoxel(NeighbourKey, Neighbour))
+			{
+				continue;
+			}
+			const bool bOwnWater = Own.IsAir() && Own.HasWaterFlag();
+			const bool bNeighbourWater = Neighbour.IsAir() && Neighbour.HasWaterFlag();
+			if (bOwnBelow && Own.IsAir() && !Own.HasWaterFlag() && bNeighbourWater && !Visited.Contains(OwnKey))
+			{
+				AddSeed(OwnKey);
+				++SeedsFound;
+				++Stats.FaceSeeds;
+			}
+			else if (bNeighbourBelow && Neighbour.IsAir() && !Neighbour.HasWaterFlag() && bOwnWater && !Visited.Contains(NeighbourKey))
+			{
+				AddSeed(NeighbourKey);
+				++SeedsFound;
+				++Stats.FaceSeeds;
+			}
+		}
+
+		if (Scan.Next >= Count)
+		{
+			PendingFaceScans.RemoveAt(0);
+		}
 	}
 	return SeedsFound;
 }

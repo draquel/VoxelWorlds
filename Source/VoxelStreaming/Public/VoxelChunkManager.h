@@ -90,7 +90,8 @@ struct FVoxelChunkState
 	/**
 	 * A mesh was submitted since the chunk's voxel data arrived, and with it the chunk's water flags were pulled across its
 	 * faces from its neighbours (PropagateWaterFromNeighbors): a chunk wholly under a heightmap sea has none before that.
-	 * Edit-driven water propagation reads the chunk only then (world modes review G58).
+	 * Edit-driven water propagation reads the chunk only then (world modes review G58), and is told when it first becomes
+	 * true (UVoxelWaterPropagation::OnChunkWaterSettled, G59).
 	 */
 	bool bWaterSettled = false;
 
@@ -1490,6 +1491,10 @@ protected:
 	 * (FVoxelSeaSurface: the WaterLevel plane, or a planet's WaterRadius sphere, SP-B8)
 	 * and adjacent to a neighbor's water voxel become seeds for an intra-chunk BFS flood fill.
 	 *
+	 * It reads and writes the generated voxels: water an edit-driven flood put in the edit layer crosses chunk faces
+	 * through UVoxelWaterPropagation instead, which scans the faces a chunk shares with its neighbours when its water
+	 * settles (world modes review G59).
+	 *
 	 * @param ChunkCoord The chunk to propagate water into
 	 * @return True if any new water flags were set (caller should regenerate water mesh)
 	 */
@@ -1507,7 +1512,8 @@ protected:
 
 	/**
 	 * Scan a chunk's voxel data and update its water tile contribution.
-	 * Called after meshing completes for a 3D chunk.
+	 * Called after meshing completes for a 3D chunk. A chunk with edits is scanned edit-merged (GetEditMergedSnapshot), so
+	 * the water an edit-driven flood put in the edit layer draws its tile (world modes review G59).
 	 *
 	 * @param ChunkCoord 3D chunk coordinate
 	 */
