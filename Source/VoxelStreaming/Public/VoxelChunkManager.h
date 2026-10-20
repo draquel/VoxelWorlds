@@ -87,6 +87,13 @@ struct FVoxelChunkState
 	 */
 	bool bRemeshAfterMeshing = false;
 
+	/**
+	 * A mesh was submitted since the chunk's voxel data arrived, and with it the chunk's water flags were pulled across its
+	 * faces from its neighbours (PropagateWaterFromNeighbors): a chunk wholly under a heightmap sea has none before that.
+	 * Edit-driven water propagation reads the chunk only then (world modes review G58).
+	 */
+	bool bWaterSettled = false;
+
 	FVoxelChunkState() = default;
 
 	explicit FVoxelChunkState(const FIntVector& InChunkCoord)
@@ -435,6 +442,17 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	bool HasChunkVoxelData(const FIntVector& ChunkCoord) const;
+
+	/**
+	 * Whether a chunk's water flags are in place: it has voxel data and has submitted a mesh since that data arrived, which
+	 * pulls the flags across its faces from its neighbours (PropagateWaterFromNeighbors; a chunk wholly under a heightmap
+	 * sea gets all of its water that way). Edit-driven water propagation reads a chunk only then (world modes review G58).
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @return True if the chunk has voxel data with its water flags pulled
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
+	bool IsChunkWaterSettled(const FIntVector& ChunkCoord) const;
 
 	/**
 	 * EDIT-AWARE surface query at a world X,Y (the near band for PCG decoration).
@@ -845,6 +863,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	UVoxelEditManager* GetEditManager() const { return EditManager; }
+
+	/**
+	 * Get the edit-driven water propagation (floods the voxels an edit opens to the sea), for tests and debugging.
+	 *
+	 * @return The propagation, or null when water is off (bEnableWaterLevel) or before Initialize
+	 */
+	UVoxelWaterPropagation* GetWaterPropagation() const { return WaterPropagation; }
 
 	/**
 	 * Get the collision manager.

@@ -1883,6 +1883,12 @@ bool UVoxelChunkManager::HasChunkVoxelData(const FIntVector& ChunkCoord) const
 	return State && State->Descriptor.HasVoxelDataAvailable();
 }
 
+bool UVoxelChunkManager::IsChunkWaterSettled(const FIntVector& ChunkCoord) const
+{
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	return State && State->bWaterSettled && State->Descriptor.HasVoxelDataAvailable();
+}
+
 bool UVoxelChunkManager::QueryEditMergedSurface(
 	double WorldX, double WorldY,
 	float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
@@ -6378,6 +6384,9 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 		CollisionManager->OnChunkVoxelDataAvailable(ChunkCoord);
 	}
 
+	// New voxel data has no water pulled from the neighbours yet: its first mesh submit does that (G58).
+	State->bWaterSettled = false;
+
 	// Fire event
 	OnChunkGenerated.Broadcast(ChunkCoord);
 
@@ -6581,6 +6590,14 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		{
 			const double WaterT0 = FPlatformTime::Seconds();
 			PropagateWaterFromNeighbors(ChunkCoord);
+
+			// The chunk's water is in place: an edit that reached it before (a POI's terraform or a dungeon stamp at
+			// stream-in, a save's edits) is scanned for voxels it opened to the sea now (G58).
+			State->bWaterSettled = true;
+			if (WaterPropagation)
+			{
+				WaterPropagation->OnChunkWaterSettled(ChunkCoord);
+			}
 
 			// Update this chunk's contribution to its 2D water tile
 			if (UsesWaterTiles())

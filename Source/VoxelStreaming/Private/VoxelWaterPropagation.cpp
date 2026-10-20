@@ -11,6 +11,16 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelWaterPropagation, Log, All);
 
+namespace
+{
+	/** 6-connected neighbour offsets. */
+	const FIntVector GWaterNeighbourOffsets[6] = {
+		FIntVector(1, 0, 0), FIntVector(-1, 0, 0),
+		FIntVector(0, 1, 0), FIntVector(0, -1, 0),
+		FIntVector(0, 0, 1), FIntVector(0, 0, -1)
+	};
+}
+
 void UVoxelWaterPropagation::Initialize(UVoxelChunkManager* InChunkManager, UVoxelEditManager* InEditManager, float InWaterLevel)
 {
 	ChunkManager = InChunkManager;
@@ -43,213 +53,352 @@ void UVoxelWaterPropagation::Initialize(UVoxelChunkManager* InChunkManager, UVox
 
 void UVoxelWaterPropagation::OnChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
 {
-	if (!ChunkManager.IsValid() || EditRadius <= 0.f)
+	// The flood's own batches change only voxels it gave the flag; their neighbours are its frontier already. Scanning them
+	// would also restart its budget (seeds start a new count), so a flood held by MaxPropagationVoxels would never stop.
+	if (bApplyingWater || !ChunkManager.IsValid() || ChunkSize <= 0 || VoxelSize <= 0.0f)
 	{
 		return;
 	}
 
-	// Scan voxels in the edit sphere to find newly exposed air adjacent to water.
-	// We iterate over the bounding box of the edit sphere in voxel steps.
-	const float ScanRadius = EditRadius + VoxelSize; // Pad slightly to catch edge cases
-	const FVector MinCorner = EditCenter - FVector(ScanRadius);
-	const FVector MaxCorner = EditCenter + FVector(ScanRadius);
-
-	const FIntVector MinVoxel = WorldToVoxelKey(MinCorner);
-	const FIntVector MaxVoxel = WorldToVoxelKey(MaxCorner);
-
-	// 6-connected neighbor offsets
-	static const FIntVector Offsets[6] = {
-		FIntVector(1, 0, 0), FIntVector(-1, 0, 0),
-		FIntVector(0, 1, 0), FIntVector(0, -1, 0),
-		FIntVector(0, 0, 1), FIntVector(0, 0, -1)
-	};
-
-	int32 SeedsFound = 0;
-
-	for (int32 Z = MinVoxel.Z; Z <= MaxVoxel.Z; ++Z)
+	// Seeds can only be voxels the edit changed: an unchanged voxel's neighbours are as they were, and edits make no water
+	// (G58). The edit manager reports them while it broadcasts, for every edit: a brush's voxels in this chunk, an operation
+	// of single-voxel edits (a POI's terraform, a dungeon stamp: radius 0 since G53), an undo, a clear or a load. Outside a
+	// broadcast, the brush's box, else the whole chunk.
+	FIntVector Min(0), Max(ChunkSize - 1);
+	if (!(EditManager.IsValid() && EditManager->GetBroadcastEditBounds(Min, Max)) && EditRadius > 0.0f)
 	{
-		for (int32 Y = MinVoxel.Y; Y <= MaxVoxel.Y; ++Y)
+		const FVector Local = (EditCenter - WorldOrigin) / VoxelSize - FVector(ChunkCoord * ChunkSize);
+		const double Reach = EditRadius / VoxelSize + 1.0;
+		Min = FIntVector(FMath::FloorToInt32(Local.X - Reach), FMath::FloorToInt32(Local.Y - Reach), FMath::FloorToInt32(Local.Z - Reach));
+		Max = FIntVector(FMath::FloorToInt32(Local.X + Reach), FMath::FloorToInt32(Local.Y + Reach), FMath::FloorToInt32(Local.Z + Reach));
+	}
+	for (int32 Axis = 0; Axis < 3; ++Axis)
+	{
+		Min[Axis] = FMath::Clamp(Min[Axis], 0, ChunkSize - 1);
+		Max[Axis] = FMath::Clamp(Max[Axis], 0, ChunkSize - 1);
+	}
+
+	// Only voxels below the sea can take water. The plane clips the box's top; a sphere drops a box wholly above it.
+	const FIntVector Base = ChunkCoord * ChunkSize;
+	if (!Sea.bRadial)
+	{
+		const int32 TopBelow = FMath::FloorToInt32(Sea.PlaneZ / VoxelSize) - Base.Z;
+		Max.Z = FMath::Min(Max.Z, TopBelow);
+	}
+	else
+	{
+		const FBox Box(WorldOrigin + FVector(Base + Min) * VoxelSize, WorldOrigin + FVector(Base + Max) * VoxelSize);
+		if (Sea.IsAbove(Box))
 		{
-			for (int32 X = MinVoxel.X; X <= MaxVoxel.X; ++X)
+			return;
+		}
+	}
+	if (Min.X > Max.X || Min.Y > Max.Y || Min.Z > Max.Z)
+	{
+		return;
+	}
+
+	++Stats.ScansQueued;
+	if (!ChunkManager->IsChunkWaterSettled(ChunkCoord))
+	{
+		// Most system edits land before their chunks load (a POI's terraform, a dungeon stamp at stream-in), and a save's
+		// edits before any; and a chunk wholly under a heightmap sea has no water flags until its first mesh pulls them from
+		// its neighbours. Nothing can be read there yet: scanned once its water is in place.
+		++Stats.ScansDeferred;
+		DeferScan(ChunkCoord, Min, Max);
+		return;
+	}
+	QueueScan(ChunkCoord, Min, Max);
+}
+
+void UVoxelWaterPropagation::OnChunkWaterSettled(const FIntVector& ChunkCoord)
+{
+	FPendingScan Deferred;
+	if (DeferredScans.RemoveAndCopyValue(ChunkCoord, Deferred))
+	{
+		QueueScan(ChunkCoord, Deferred.Min, Deferred.Max);
+	}
+}
+
+namespace
+{
+	/** Grow a pending scan's box to hold another; a scan under way starts over (its seeds are visited; the rest reads the same). */
+	void JoinScanBox(FIntVector& Min, FIntVector& Max, int32& Next, const FIntVector& OtherMin, const FIntVector& OtherMax)
+	{
+		Min = FIntVector(FMath::Min(Min.X, OtherMin.X), FMath::Min(Min.Y, OtherMin.Y), FMath::Min(Min.Z, OtherMin.Z));
+		Max = FIntVector(FMath::Max(Max.X, OtherMax.X), FMath::Max(Max.Y, OtherMax.Y), FMath::Max(Max.Z, OtherMax.Z));
+		Next = 0;
+	}
+}
+
+void UVoxelWaterPropagation::QueueScan(const FIntVector& ChunkCoord, const FIntVector& LocalMin, const FIntVector& LocalMax)
+{
+	// One box per chunk: a held brush or a batch broadcasting the chunk again joins it.
+	if (FPendingScan* Existing = PendingScans.Find(ChunkCoord))
+	{
+		JoinScanBox(Existing->Min, Existing->Max, Existing->Next, LocalMin, LocalMax);
+		return;
+	}
+	FPendingScan& Scan = PendingScans.Add(ChunkCoord);
+	Scan.Min = LocalMin;
+	Scan.Max = LocalMax;
+	PendingScanOrder.Add(ChunkCoord);
+}
+
+void UVoxelWaterPropagation::DeferScan(const FIntVector& ChunkCoord, const FIntVector& LocalMin, const FIntVector& LocalMax)
+{
+	if (FPendingScan* Existing = DeferredScans.Find(ChunkCoord))
+	{
+		JoinScanBox(Existing->Min, Existing->Max, Existing->Next, LocalMin, LocalMax);
+		return;
+	}
+	FPendingScan& Scan = DeferredScans.Add(ChunkCoord);
+	Scan.Min = LocalMin;
+	Scan.Max = LocalMax;
+}
+
+int32 UVoxelWaterPropagation::ScanPendingEdits(int32 MaxReads)
+{
+	int32 Reads = 0;
+	int32 SeedsFound = 0;
+	while (PendingScanOrder.Num() > 0 && Reads < MaxReads)
+	{
+		const FIntVector ChunkCoord = PendingScanOrder[0];
+		FPendingScan* Scan = PendingScans.Find(ChunkCoord);
+		if (!Scan)
+		{
+			PendingScanOrder.RemoveAt(0);
+			continue;
+		}
+		if (!ChunkManager->IsChunkWaterSettled(ChunkCoord))
+		{
+			// Unloaded (or regenerated) since the edit: it waits again.
+			DeferScan(ChunkCoord, Scan->Min, Scan->Max);
+			PendingScans.Remove(ChunkCoord);
+			PendingScanOrder.RemoveAt(0);
+			continue;
+		}
+
+		const FIntVector Size = Scan->Max - Scan->Min + FIntVector(1);
+		const int32 Count = Size.X * Size.Y * Size.Z;
+		const FIntVector Base = ChunkCoord * ChunkSize + Scan->Min;
+		while (Scan->Next < Count && Reads < MaxReads)
+		{
+			const int32 i = Scan->Next++;
+			const FIntVector Key = Base + FIntVector(i % Size.X, (i / Size.X) % Size.Y, i / (Size.X * Size.Y));
+			if (!IsBelowSea(Key))
 			{
-				const FIntVector VoxelKey(X, Y, Z);
-				const FVector WorldPos = VoxelKeyToWorld(VoxelKey);
+				continue;
+			}
 
-				// Only consider voxels within the actual edit sphere
-				if (FVector::DistSquared(WorldPos, EditCenter) > ScanRadius * ScanRadius)
+			// The voxel as it is now, edits included: a dug voxel reads as air (G58).
+			++Reads;
+			if (!CanReceiveWater(Key))
+			{
+				continue;
+			}
+			for (const FIntVector& Offset : GWaterNeighbourOffsets)
+			{
+				++Reads;
+				if (IsWaterSource(Key + Offset))
 				{
-					continue;
-				}
-
-				// This voxel must be air, below the sea, and NOT already water-flagged
-				const FVoxelData Voxel = ChunkManager->GetVoxelAtWorldPosition(WorldPos);
-				if (!Voxel.IsAir() || Voxel.HasWaterFlag() || !Sea.IsBelow(WorldPos))
-				{
-					continue;
-				}
-
-				// Check if any face-adjacent neighbor has a water flag
-				bool bAdjacentToWater = false;
-				for (const FIntVector& Offset : Offsets)
-				{
-					const FVector NeighborPos = VoxelKeyToWorld(VoxelKey + Offset);
-					const FVoxelData Neighbor = ChunkManager->GetVoxelAtWorldPosition(NeighborPos);
-					if (Neighbor.HasWaterFlag())
+					if (!Visited.Contains(Key))
 					{
-						bAdjacentToWater = true;
-						break;
-					}
-				}
-
-				if (bAdjacentToWater)
-				{
-					// Seed the BFS from this voxel
-					if (!Visited.Contains(VoxelKey))
-					{
-						BFSQueue.Add(WorldPos);
-						Visited.Add(VoxelKey);
+						AddSeed(Key);
 						++SeedsFound;
 					}
+					break;
 				}
 			}
 		}
+
+		if (Scan->Next >= Count)
+		{
+			PendingScans.Remove(ChunkCoord);
+			PendingScanOrder.RemoveAt(0);
+		}
 	}
+	Stats.ScanReads += Reads;
 
 	if (SeedsFound > 0)
 	{
-		// Reset total propagation counter for a new flood event
+		// A new seed restarts the flood's budget, as an edit did before.
 		TotalPropagated = 0;
-		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation seeded with %d voxels near edit at (%.0f, %.0f, %.0f)"),
-			SeedsFound, EditCenter.X, EditCenter.Y, EditCenter.Z);
+		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation seeded with %d voxels"), SeedsFound);
 	}
+	return SeedsFound;
+}
+
+void UVoxelWaterPropagation::AddSeed(const FIntVector& Key)
+{
+	if (!bEventRunning)
+	{
+		bEventRunning = true;
+		EventSeeds = 0;
+		EventFlooded = 0;
+		++Stats.FloodsStarted;
+	}
+	Visited.Add(Key);
+	BFSQueue.Add(Key);
+	++EventSeeds;
+	++Stats.Seeds;
+}
+
+void UVoxelWaterPropagation::FinishFlood(bool bCapped)
+{
+	if (bEventRunning)
+	{
+		++Stats.FloodsFinished;
+		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation %s: %d voxels flooded from %d seeds"),
+			bCapped ? TEXT("stopped at its limit") : TEXT("done"), EventFlooded, EventSeeds);
+	}
+	bEventRunning = false;
+	BFSQueue.Reset();
+	QueueHead = 0;
+	Visited.Empty();
 }
 
 int32 UVoxelWaterPropagation::ProcessPropagation(int32 MaxVoxelsPerFrame)
 {
-	if (BFSQueue.Num() == 0 || !ChunkManager.IsValid() || !EditManager.IsValid())
+	if (!HasPendingWork() || !ChunkManager.IsValid() || !EditManager.IsValid())
 	{
 		return 0;
 	}
 
-	// 6-connected neighbor offsets
-	static const FIntVector Offsets[6] = {
-		FIntVector(1, 0, 0), FIntVector(-1, 0, 0),
-		FIntVector(0, 1, 0), FIntVector(0, -1, 0),
-		FIntVector(0, 0, 1), FIntVector(0, 0, -1)
-	};
+	// An operation someone holds open would take the flood's edits as its own (and BeginEditOperation would end it).
+	if (EditManager->IsEditOperationInProgress())
+	{
+		return 0;
+	}
+
+	ScanPendingEdits(MaxScanReadsPerFrame);
+	if (QueueHead >= BFSQueue.Num())
+	{
+		if (bEventRunning)
+		{
+			FinishFlood(false);
+		}
+		return 0;
+	}
 
 	int32 ProcessedThisFrame = 0;
-	TSet<FIntVector> DirtyChunks;
 
-	// Begin an edit operation so all water flag changes are grouped
+	// Group this frame's water flags into one operation, as a system edit; the source the caller had is kept.
+	const EEditSource PreviousSource = EditManager->GetEditSource();
 	EditManager->SetEditSource(EEditSource::System);
 	EditManager->BeginEditOperation(TEXT("Water Propagation"));
+	bApplyingWater = true;
 
-	while (BFSQueue.Num() > 0 && ProcessedThisFrame < MaxVoxelsPerFrame && TotalPropagated < MaxPropagationVoxels)
+	while (QueueHead < BFSQueue.Num() && ProcessedThisFrame < MaxVoxelsPerFrame && TotalPropagated < MaxPropagationVoxels)
 	{
-		// Pop from front (FIFO for BFS). Use index 0 for correctness.
-		const FVector CurrentPos = BFSQueue[0];
-		BFSQueue.RemoveAt(0, EAllowShrinking::No);
+		const FIntVector Key = BFSQueue[QueueHead++];
 
-		// Verify this voxel can still receive water (may have changed since queued)
-		if (!CanReceiveWater(CurrentPos))
+		// The voxel may have changed since it was queued (an edit, or its chunk unloaded).
+		FVoxelData WaterVoxel;
+		if (!IsBelowSea(Key) || !ReadVoxel(Key, WaterVoxel) || !WaterVoxel.IsAir() || WaterVoxel.HasWaterFlag())
 		{
 			continue;
 		}
 
-		// Set water flag on this voxel via the edit manager
-		FVoxelData WaterVoxel = ChunkManager->GetVoxelAtWorldPosition(CurrentPos);
+		// The voxel as it is, edits included, with the flag: a dig keeps its density and material, and no voxel goes back
+		// to its generated value (G58). The edit manager writes it to the edit layer, which the chunk's re-mesh and its
+		// save read; its broadcast at the operation's end marks the chunks dirty.
 		WaterVoxel.SetWaterFlag(true);
-
-		EditManager->ApplyEdit(CurrentPos, WaterVoxel, EEditMode::Set);
+		if (!EditManager->ApplyEdit(VoxelKeyToWorld(Key), WaterVoxel, EEditMode::Set))
+		{
+			// Edit protection refused it: water does not pass through it either.
+			++Stats.RejectedEdits;
+			continue;
+		}
 
 		++ProcessedThisFrame;
 		++TotalPropagated;
+		++EventFlooded;
+		++Stats.FloodedVoxels;
 
-		// Track which chunk was modified for remeshing
-		const FIntVector ChunkCoord = FVoxelCoordinates::WorldToChunk(CurrentPos, ChunkSize, VoxelSize);
-		DirtyChunks.Add(ChunkCoord);
-
-		// Enqueue 6-connected neighbors
-		const FIntVector CurrentKey = WorldToVoxelKey(CurrentPos);
-		for (const FIntVector& Offset : Offsets)
+		// Enqueue 6-connected neighbours
+		for (const FIntVector& Offset : GWaterNeighbourOffsets)
 		{
-			const FIntVector NeighborKey = CurrentKey + Offset;
-			if (!Visited.Contains(NeighborKey))
+			const FIntVector NeighborKey = Key + Offset;
+			if (!Visited.Contains(NeighborKey) && CanReceiveWater(NeighborKey))
 			{
-				const FVector NeighborPos = VoxelKeyToWorld(NeighborKey);
-				if (CanReceiveWater(NeighborPos))
-				{
-					Visited.Add(NeighborKey);
-					BFSQueue.Add(NeighborPos);
-				}
+				Visited.Add(NeighborKey);
+				BFSQueue.Add(NeighborKey);
 			}
 		}
 	}
 
 	EditManager->EndEditOperation();
-
-	// Mark all modified chunks dirty for remeshing (the OnChunkEdited handler
-	// already does this for individual edits, but we mark explicitly in case
-	// the edit manager batched them)
-	for (const FIntVector& ChunkCoord : DirtyChunks)
-	{
-		ChunkManager->MarkChunkDirty(ChunkCoord);
-	}
+	bApplyingWater = false;
+	EditManager->SetEditSource(PreviousSource);
 
 	if (ProcessedThisFrame > 0)
 	{
 		UE_LOG(LogVoxelWaterPropagation, Verbose, TEXT("Water propagation: %d voxels this frame, %d total, %d remaining in queue"),
-			ProcessedThisFrame, TotalPropagated, BFSQueue.Num());
+			ProcessedThisFrame, TotalPropagated, BFSQueue.Num() - QueueHead);
 	}
 
-	// If we hit the total limit, clear the queue
-	if (TotalPropagated >= MaxPropagationVoxels && BFSQueue.Num() > 0)
+	if (QueueHead >= BFSQueue.Num())
+	{
+		FinishFlood(false);
+	}
+	else if (TotalPropagated >= MaxPropagationVoxels)
 	{
 		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation reached max limit (%d voxels), clearing %d remaining"),
-			MaxPropagationVoxels, BFSQueue.Num());
-		BFSQueue.Empty();
-		Visited.Empty();
+			MaxPropagationVoxels, BFSQueue.Num() - QueueHead);
+		++Stats.CapHits;
+		FinishFlood(true);
 	}
-
-	// If queue is empty, clean up visited set
-	if (BFSQueue.Num() == 0)
+	else if (QueueHead > 4096)
 	{
-		Visited.Empty();
+		// Drop the processed front so the queue does not grow with every voxel a long flood visits.
+		BFSQueue.RemoveAt(0, QueueHead, EAllowShrinking::No);
+		QueueHead = 0;
 	}
 
 	return ProcessedThisFrame;
 }
 
-FIntVector UVoxelWaterPropagation::WorldToVoxelKey(const FVector& WorldPos) const
-{
-	return FVoxelCoordinates::WorldToVoxel(WorldPos, VoxelSize);
-}
-
 FVector UVoxelWaterPropagation::VoxelKeyToWorld(const FIntVector& Key) const
 {
-	const float HalfVoxel = VoxelSize * 0.5f;
-	return FVector(
-		Key.X * VoxelSize + HalfVoxel,
-		Key.Y * VoxelSize + HalfVoxel,
-		Key.Z * VoxelSize + HalfVoxel
-	);
+	return WorldOrigin + (FVector(Key) + FVector(0.5)) * VoxelSize;
 }
 
-bool UVoxelWaterPropagation::CanReceiveWater(const FVector& WorldPos) const
+FIntVector UVoxelWaterPropagation::VoxelKeyToChunk(const FIntVector& Key) const
 {
-	if (!ChunkManager.IsValid())
+	return FIntVector(
+		FMath::FloorToInt32(double(Key.X) / ChunkSize),
+		FMath::FloorToInt32(double(Key.Y) / ChunkSize),
+		FMath::FloorToInt32(double(Key.Z) / ChunkSize));
+}
+
+bool UVoxelWaterPropagation::IsBelowSea(const FIntVector& Key) const
+{
+	const FVector GridPos = FVector(Key) * VoxelSize;
+	return Sea.IsBelow(Sea.bRadial ? WorldOrigin + GridPos : GridPos);
+}
+
+bool UVoxelWaterPropagation::ReadVoxel(const FIntVector& Key, FVoxelData& OutVoxel) const
+{
+	if (!ChunkManager.IsValid() || !ChunkManager->IsChunkWaterSettled(VoxelKeyToChunk(Key)))
 	{
 		return false;
 	}
+	OutVoxel = ChunkManager->GetEditMergedVoxelAtWorldPosition(VoxelKeyToWorld(Key));
+	return true;
+}
 
-	// Must be below the sea
-	if (!Sea.IsBelow(WorldPos))
-	{
-		return false;
-	}
+bool UVoxelWaterPropagation::CanReceiveWater(const FIntVector& Key) const
+{
+	// Must be below the sea, in a chunk whose water is in place (an unloaded chunk reads as air: water written there would
+	// carve its ground away when it loads; one not meshed yet lacks the sea's flags, which the flood would copy into the
+	// edit layer), and read as air without the flag.
+	FVoxelData Voxel;
+	return IsBelowSea(Key) && ReadVoxel(Key, Voxel) && Voxel.IsAir() && !Voxel.HasWaterFlag();
+}
 
-	// Must be air and not already water-flagged
-	const FVoxelData Voxel = ChunkManager->GetVoxelAtWorldPosition(WorldPos);
-	return Voxel.IsAir() && !Voxel.HasWaterFlag();
+bool UVoxelWaterPropagation::IsWaterSource(const FIntVector& Key) const
+{
+	FVoxelData Voxel;
+	return ReadVoxel(Key, Voxel) && Voxel.IsAir() && Voxel.HasWaterFlag();
 }

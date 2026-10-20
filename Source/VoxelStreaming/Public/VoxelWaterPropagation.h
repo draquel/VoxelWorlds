@@ -17,6 +17,10 @@ enum class EEditSource : uint8;
  * Manages bounded flood fill of water flags when terrain edits expose
  * air voxels adjacent to water. Processes a fixed budget of voxels per
  * frame to avoid hitches, giving a visual "water filling" effect.
+ *
+ * It reads the edit-merged voxels (the generated voxels with the edit layer applied) and sets the flag through the edit
+ * layer on the voxel as it is, so a dug voxel floods and keeps the dig's density and material, and a filled one stays solid
+ * (world modes review G58). Voxels are keyed by their global index in the chunk grid (relative to WorldOrigin).
  */
 UCLASS()
 class VOXELSTREAMING_API UVoxelWaterPropagation : public UObject
@@ -24,6 +28,28 @@ class VOXELSTREAMING_API UVoxelWaterPropagation : public UObject
 	GENERATED_BODY()
 
 public:
+	/** What the propagation has done since Initialize, for tests and the log. */
+	struct FStats
+	{
+		/** OnChunkEdited calls whose changed voxels were queued for a seed scan (some below the sea). */
+		int64 ScansQueued = 0;
+		/** Of those, edits of a chunk whose water is not in place yet (no voxel data, or no mesh since), scanned once it is. */
+		int64 ScansDeferred = 0;
+		/** Voxels read by the seed scans (each scanned voxel below the sea, and its neighbours when it can take water). */
+		int64 ScanReads = 0;
+		/** Seeds found: changed voxels that can take water with a water-flagged air neighbour. */
+		int64 Seeds = 0;
+		/** Floods started (seeds found while no flood was running) and finished (the queue emptied or the cap was hit). */
+		int64 FloodsStarted = 0;
+		int64 FloodsFinished = 0;
+		/** Voxels given the water flag. */
+		int64 FloodedVoxels = 0;
+		/** Water-flag edits the edit manager refused (edit protection). */
+		int64 RejectedEdits = 0;
+		/** Floods stopped by MaxPropagationVoxels. */
+		int64 CapHits = 0;
+	};
+
 	/**
 	 * Initialize the propagation system.
 	 *
@@ -35,32 +61,61 @@ public:
 	void Initialize(UVoxelChunkManager* InChunkManager, UVoxelEditManager* InEditManager, float InWaterLevel);
 
 	/**
-	 * Called when a chunk is edited. Checks for newly exposed air adjacent
-	 * to water and seeds the BFS queue if found.
+	 * Called when a chunk is edited (UVoxelEditManager::OnChunkEdited, through the chunk manager). Queues the voxels the
+	 * edit changed in the chunk (UVoxelEditManager::GetBroadcastEditBounds) for a seed scan in the next
+	 * ProcessPropagation: every edit's, a brush's as well as an operation of single-voxel edits (a POI's terraform, a
+	 * dungeon stamp), an undo, a clear or a load. Outside a broadcast it scans the brush's box, else the whole chunk. The
+	 * propagation's own edits are not scanned.
 	 *
 	 * @param ChunkCoord The edited chunk coordinate
 	 * @param Source Source of the edit (Player, System, etc.)
-	 * @param EditCenter World-space center of the edit
-	 * @param EditRadius World-space radius of the edit
+	 * @param EditCenter World-space center of the edit (a brush's; the zero vector otherwise)
+	 * @param EditRadius World-space radius of the edit (a brush's; 0 otherwise)
 	 */
 	void OnChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius);
 
 	/**
-	 * Process a bounded number of BFS nodes. Call once per frame from Tick.
+	 * Called when a chunk's water is in place (UVoxelChunkManager::IsChunkWaterSettled: its first mesh since its voxel data
+	 * arrived was submitted, which pulls the water flags across its faces). An edit that reached the chunk before (a POI's
+	 * terraform or a dungeon stamp at stream-in, a save's edits) waited for it; its seed scan is queued now.
+	 *
+	 * @param ChunkCoord The chunk whose water settled
+	 */
+	void OnChunkWaterSettled(const FIntVector& ChunkCoord);
+
+	/**
+	 * Scan the queued edits for seeds (dry air below the sea, edit-merged, with a water-flagged air neighbour) within a
+	 * read budget, then process a bounded number of BFS nodes. Call once per frame from Tick. Waits while an edit operation
+	 * is in progress (the flood's edits would join it).
 	 *
 	 * @param MaxVoxelsPerFrame Maximum voxels to process this frame
 	 * @return Number of voxels that received water flags this frame
 	 */
 	int32 ProcessPropagation(int32 MaxVoxelsPerFrame = 512);
 
-	/** Check if there's pending propagation work. */
-	bool HasPendingWork() const { return BFSQueue.Num() > 0; }
+	/** Check if there's pending propagation work: edits to scan for seeds, or a flood to continue. */
+	bool HasPendingWork() const { return QueueHead < BFSQueue.Num() || PendingScanOrder.Num() > 0; }
+
+	/** @return What the propagation has done since Initialize (see FStats) */
+	const FStats& GetStats() const { return Stats; }
 
 	/** Maximum voxels to flood per edit trigger (total, not per frame). */
 	UPROPERTY(EditDefaultsOnly, Category = "Water")
 	int32 MaxPropagationVoxels = 8192;
 
+	/** Maximum voxel reads the seed scans make per frame; a large edit under the sea is scanned over several frames. */
+	UPROPERTY(EditDefaultsOnly, Category = "Water")
+	int32 MaxScanReadsPerFrame = 32768;
+
 private:
+	/** The changed voxels of one chunk still to be scanned for seeds (chunk-local, inclusive), and the scan's position. */
+	struct FPendingScan
+	{
+		FIntVector Min = FIntVector::ZeroValue;
+		FIntVector Max = FIntVector::ZeroValue;
+		int32 Next = 0;
+	};
+
 	/** Chunk manager for voxel queries. */
 	UPROPERTY()
 	TWeakObjectPtr<UVoxelChunkManager> ChunkManager;
@@ -72,26 +127,88 @@ private:
 	/** The sea water spreads below: the WaterLevel plane, or a planet's WaterRadius sphere (SP-B8). */
 	FVoxelSeaSurface Sea;
 
-	/** BFS queue of world-space voxel positions to process. */
-	TArray<FVector> BFSQueue;
+	/** BFS queue of global voxel keys; entries before QueueHead are done. */
+	TArray<FIntVector> BFSQueue;
 
-	/** Set of visited voxel positions (global voxel coords as FIntVector). */
+	/** The next BFS queue entry to process. */
+	int32 QueueHead = 0;
+
+	/** Set of visited voxels (global voxel keys). */
 	TSet<FIntVector> Visited;
+
+	/** Chunks whose edits wait for a seed scan, by chunk, and the order they came in. */
+	TMap<FIntVector, FPendingScan> PendingScans;
+	TArray<FIntVector> PendingScanOrder;
+
+	/** Edits of chunks whose water is not in place yet, waiting for it (OnChunkWaterSettled). */
+	TMap<FIntVector, FPendingScan> DeferredScans;
 
 	/** Total voxels propagated in the current flood event. */
 	int32 TotalPropagated = 0;
+
+	/** Seeds of the current flood event, and whether one is running (for the log and FStats). */
+	int32 EventSeeds = 0;
+	int32 EventFlooded = 0;
+	bool bEventRunning = false;
+
+	/** True while the propagation applies its own edits: their broadcasts are not scanned. */
+	bool bApplyingWater = false;
+
+	FStats Stats;
 
 	/** Configuration cache */
 	int32 ChunkSize = 32;
 	float VoxelSize = 100.f;
 	FVector WorldOrigin = FVector::ZeroVector;
 
-	/** Convert world position to a unique global voxel key for the visited set. */
-	FIntVector WorldToVoxelKey(const FVector& WorldPos) const;
-
-	/** Get world-space center of a voxel from its global key. */
+	/**
+	 * The world-space centre of a voxel's cell, the position its edits are applied at and read from (the edit manager and
+	 * the chunk manager map a position to the voxel by flooring it relative to WorldOrigin).
+	 */
 	FVector VoxelKeyToWorld(const FIntVector& Key) const;
 
-	/** Check if a world position is a valid air voxel below the sea that can receive water. */
-	bool CanReceiveWater(const FVector& WorldPos) const;
+	/** The chunk holding a voxel. */
+	FIntVector VoxelKeyToChunk(const FIntVector& Key) const;
+
+	/**
+	 * Whether a voxel is at or below the sea as generation's fill pass tests it: at its sample point (the cell's min
+	 * corner), on the grid for the plane (WaterLevel against the origin-relative Z) and in world space for a planet's sphere.
+	 */
+	bool IsBelowSea(const FIntVector& Key) const;
+
+	/**
+	 * Read a voxel edit-merged (UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition).
+	 *
+	 * @param Key Global voxel key
+	 * @param OutVoxel Receives the voxel
+	 * @return False when its chunk's water is not in place (UVoxelChunkManager::IsChunkWaterSettled: not loaded, or no mesh
+	 *         since its data arrived, so a chunk under the sea still lacks its flags): nothing is known there, and nothing
+	 *         may be written
+	 */
+	bool ReadVoxel(const FIntVector& Key, FVoxelData& OutVoxel) const;
+
+	/** Whether a voxel can receive water: its chunk's water is in place, it is below the sea, and it reads as air without the flag. */
+	bool CanReceiveWater(const FIntVector& Key) const;
+
+	/** Whether a voxel is water: it reads as water-flagged air (a filled voxel keeps the flag but is solid). */
+	bool IsWaterSource(const FIntVector& Key) const;
+
+	/** Queue a chunk's changed voxels for a seed scan, joining a box already queued for the chunk. */
+	void QueueScan(const FIntVector& ChunkCoord, const FIntVector& LocalMin, const FIntVector& LocalMax);
+
+	/** Keep a chunk's changed voxels until its water is in place, joining a box already kept for it. */
+	void DeferScan(const FIntVector& ChunkCoord, const FIntVector& LocalMin, const FIntVector& LocalMax);
+
+	/**
+	 * Scan queued edits for seeds, at most MaxReads voxel reads.
+	 *
+	 * @return Seeds found
+	 */
+	int32 ScanPendingEdits(int32 MaxReads);
+
+	/** Add a seed to the flood (starting a flood event when none runs). */
+	void AddSeed(const FIntVector& Key);
+
+	/** End the current flood event: log it and clear the visited set. */
+	void FinishFlood(bool bCapped);
 };
