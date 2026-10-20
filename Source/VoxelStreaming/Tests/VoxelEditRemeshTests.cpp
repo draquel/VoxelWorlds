@@ -19,7 +19,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 // ---------------------------------------------------------------------------
-// G56 and G57 (WORLD_MODES_REVIEW_PLAN.md section 14.1, section 19.12). Every edit re-meshed the edited chunk's six face
+// G56 and G57 (WORLD_MODES_REVIEW_PLAN.md section 14.1, section 19.13). Every edit re-meshed the edited chunk's six face
 // neighbours "so they re-extract boundary data". Since seam ownership a chunk mesh is a function of the chunk's own voxels
 // and a seam job of its participants', and the edited chunk's seams restale with its re-mesh (MarkChunkDirty), so the
 // neighbours' re-mesh should change nothing (G56). It did one thing: their incident seams cover all of the edited chunk's,

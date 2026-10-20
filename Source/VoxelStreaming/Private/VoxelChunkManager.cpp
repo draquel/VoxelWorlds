@@ -3014,32 +3014,8 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 		// Mark as generating
 		SetChunkState(Request.ChunkCoord, EChunkState::Generating);
 
-		// Build generation request
 		FVoxelNoiseGenerationRequest GenRequest;
-		GenRequest.ChunkCoord = Request.ChunkCoord;
-		// Force LOD 0 when LOD system is disabled (defense-in-depth)
-		GenRequest.LODLevel = (Configuration->IsLODEnabled()) ? Request.LODLevel : 0;
-		GenRequest.ChunkSize = Configuration->ChunkSize;
-		GenRequest.VoxelSize = Configuration->VoxelSize;
-		GenRequest.NoiseParams = Configuration->NoiseParams;
-		// World mode, origin, terrain params and the island / planet params, from the one builder (WM-A1).
-		FVoxelWorldModeFactory::FillGenerationRequest(*Configuration, GenRequest);
-
-		// Biome configuration (contains biome definitions, blend settings, height rules)
-		GenRequest.bEnableBiomes = Configuration->bEnableBiomes;
-		GenRequest.BiomeConfiguration = Configuration->BiomeConfiguration;
-
-		// Cave parameters
-		GenRequest.bEnableCaves = Configuration->bEnableCaves;
-		GenRequest.CaveConfiguration = Configuration->CaveConfiguration;
-
-		// Water level parameters
-		GenRequest.bEnableWaterLevel = Configuration->bEnableWaterLevel;
-		GenRequest.WaterLevel = Configuration->WaterLevel;
-		GenRequest.WaterRadius = Configuration->WaterRadius;
-
-		// Terrain conditioning zones overlapping this chunk (Phase 6c: flatten under POIs/claims)
-		GatherConditioningZonesForChunk(Request.ChunkCoord, GenRequest.ConditioningZones);
+		BuildChunkGenerationRequest(Request.ChunkCoord, Request.LODLevel, GenRequest);
 
 		// Launch async generation on thread pool
 		LaunchAsyncGeneration(Request, MoveTemp(GenRequest));
@@ -3051,6 +3027,34 @@ void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 	{
 		AddToGenerationQueue(Deferred);
 	}
+}
+
+void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoord, int32 LODLevel, FVoxelNoiseGenerationRequest& OutRequest) const
+{
+	OutRequest.ChunkCoord = ChunkCoord;
+	// Force LOD 0 when LOD system is disabled (defense-in-depth)
+	OutRequest.LODLevel = (Configuration->IsLODEnabled()) ? LODLevel : 0;
+	OutRequest.ChunkSize = Configuration->ChunkSize;
+	OutRequest.VoxelSize = Configuration->VoxelSize;
+	OutRequest.NoiseParams = Configuration->NoiseParams;
+	// World mode, origin, terrain params and the island / planet params, from the one builder (WM-A1).
+	FVoxelWorldModeFactory::FillGenerationRequest(*Configuration, OutRequest);
+
+	// Biome configuration (contains biome definitions, blend settings, height rules)
+	OutRequest.bEnableBiomes = Configuration->bEnableBiomes;
+	OutRequest.BiomeConfiguration = Configuration->BiomeConfiguration;
+
+	// Cave parameters
+	OutRequest.bEnableCaves = Configuration->bEnableCaves;
+	OutRequest.CaveConfiguration = Configuration->CaveConfiguration;
+
+	// Water level parameters
+	OutRequest.bEnableWaterLevel = Configuration->bEnableWaterLevel;
+	OutRequest.WaterLevel = Configuration->WaterLevel;
+	OutRequest.WaterRadius = Configuration->WaterRadius;
+
+	// Terrain conditioning zones overlapping this chunk (Phase 6c: flatten under POIs/claims)
+	GatherConditioningZonesForChunk(ChunkCoord, OutRequest.ConditioningZones);
 }
 
 // ==================== World Bounds and Local Frame (WM-A2) ====================
