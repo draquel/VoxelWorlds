@@ -945,6 +945,8 @@ public:
 	 * @param OutMeshRequest Output meshing request (metadata; voxels come from OutSharedVoxels)
 	 * @param OutSharedVoxels Receives the chunk's shared voxel snapshot
 	 * @param OutNeighborSnapshots Receives the snapshots of the 26 neighbours that have data
+	 * @param OutMissingNeighborMask If set, receives the neighbours without data (bits of
+	 *        UVoxelCollisionManager::GetNeighborBit): the mesher reads them as air, so the cook is re-run when they arrive (G32)
 	 * @return True if request was prepared successfully
 	 */
 	bool PrepareCollisionMeshRequest(
@@ -952,7 +954,8 @@ public:
 		int32 LODLevel,
 		FVoxelMeshingRequest& OutMeshRequest,
 		TSharedPtr<const TArray<FVoxelData>>& OutSharedVoxels,
-		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots);
+		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots,
+		uint32* OutMissingNeighborMask = nullptr);
 
 	/** Whether -VoxelDeepOff / -VoxelDeepFull were set (worker-side slice extraction needs them). */
 	bool IsDeepSliceOff() const { return bDeepDepthOff; }

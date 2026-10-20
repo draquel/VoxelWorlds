@@ -1472,7 +1472,7 @@ Three findings from §13.11 get IDs here:
 | G29 | The planet's line top (`ExtractSurfacePointsAlongUp`) keeps a crossing whose voxel above lies outside the chunk when it is within 1.5 voxels of the analytic surface, and puts it there; where the ground continues up to about a voxel into the chunk the line came from, that chunk makes the same point, so the band where the surface crosses a chunk face gets two points (on the surface, not sunken like G26's copies: twice the scatter there). A probe over the 27 chunks around the planet scatter tests' sites (§19.4): 605 (45°), 676 (equator) and 325 (cube corner) pairs of open points from different chunks within half a voxel, 3 to 7% of the open points; none at the pole. `Scatter.Planet.DensityPerArea`'s 10% tolerance hides it | Fixed (§19.6): near the generated surface a line top's voxel above outside the chunk is the one the planet generator made there, with the neighbour's edits applied (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, `TouchingEdits`, `UVoxelScatterManager::GatherPlanetTouchingEdits` over `GetPlanetLineTopNeighbours`): solid drops the line top and covers the line, air keeps it on the generated surface (interpolated against an edited voxel). For a line's first voxel that voxel is the line's own step before it (straight over it, as before, left strips without points where the lines drift half a voxel a step or more). Tests `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}`; audit `voxel.Scatter.LineTopAudit` (pairs, and a local density around the pawn). On `Review_Planet` the pairs at five stops go from 4,147-10,961 to 15-933 (the rest is G31); 85 of 551 stable chunks change, 80 of them with pairs. No `PlanetGenerationVersion` change | — |
 | G30 | `UVoxelScatterManager::RemoveChunkScatter` (a chunk's unload) clears the surface cache and, through a short-circuit `||`, not the scatter cache when the surface cache held the chunk: an unloaded chunk's spawn points stay cached, and when it streams back in its extraction is taken for a supplemental pass (the new spawn points appended to the stale ones, the surface data not cached again, so the distance spawn and the audits skip it). Found in §19.5 by the first version of `Scatter.Boundary.ManagerIgnoresGPUFlag` | Fixed (§19.7): `RemoveChunkScatter` removes both caches and an unloaded chunk keeps no scatter state (a queued exclusion regrow is dropped too). Checking the instances found a second way a chunk rendered twice: the distance cleanup's `UVoxelScatterRenderer::ReleaseChunkScatterType` left the pair's queued adds, which were flushed into a type the chunk no longer tracked and survived its unload under the reload's instances (351 to 902 per chunk on `VoxelDemo`); the release drops them now. `voxel.Scatter.Digest` logs a `caches:` line (`ComputeCacheResidency`: chunks without surface data, spawn points against instances per chunk and type, duplicates); tests `Scatter.Reload.{SameAsFresh,DistanceSpawn,ReleaseBeforeFlush}`. Round trips (three stops, each visited twice): on `VoxelDemo` every stable chunk is the same at both visits (old code: 43-57 per stop doubled, no surface data at the second visits, up to 950 unloaded chunks cached); on `Review_Planet` the same holds for every stable chunk clear of the distance spawn's hysteresis bands (old code: 31-61 doubled, up to 27,230 duplicate spawn points) | — |
 | G31 | A planet chunk's scatter lines follow local up at its own centre, so neighbouring chunks' lines do not continue into each other: where they step along different axes (the cube's diagonals) or round their drift differently (a slope near half a voxel a step, and wherever it changes enough between the two chunks' centres), a line top whose ground continues into the neighbour is dropped while the neighbour's lines pass that spot with their crossing on this side of the face, and a strip along the face gets no point; rarely both make it. G29's doubled line tops had covered most of these strips. 27-chunk sites (§19.6, a Gaussian local density of one voxel): the cube corner 398 of 10,803 samples under 0.8 and `Scatter.Planet.DensityPerArea` 96.5% (99.7% with G29's doubles), 30°N 40°E 230, the poles, 45° and the equator none; a slope of exactly half a voxel a step 150 samples over 1.2 and 36 under. Live on `Review_Planet`: 15-933 pairs left at five stops | Fixed (§19.9): planet scatter samples one family of radial rays, one per cell of the cube-sphere grid at the point spacing for every chunk, and each chunk keeps the crossings in its own box (decision D26); the voxels past its +X, +Y and +Z faces are G29's generated voxels with the neighbours' edits, from the seven neighbours on those sides. Tests `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}` per ray at ten sites (no pair, no sample under 0.8 or over 1.2). On `Review_Planet` the pairs at five stops go from 15-933 to 0-1, the samples under 0.8 / over 1.2 from up to 4,175 / 1,684 to none, the stable chunks' spawn points rise 2.5% (the corner 6.7%), the map PNG is identical, and extraction takes 16.5 ms per 64³ chunk against 21.3 ms. No `PlanetGenerationVersion` change | — |
-| G32 | Stale collision strips along chunk faces: a chunk whose collision is cooked before its +X or +Y neighbour's voxels exist keeps a boundary built without them, and nothing re-cooks it when the neighbour loads. In a streamed test world (DC, voxel 75, collision LOD 0) 20 of 3,185 down-traces over plain terrain missed, in voxel-wide strips beside chunk faces; all hit after every chunk was re-cooked once loaded. A capsule stands across such a strip, a line trace does not (found in G24's live check, §19.8's observations) | Deferred until after Phase 6 | — |
+| G32 | Stale collision strips along chunk faces: a chunk whose collision is cooked before its +X or +Y neighbour's voxels exist keeps a boundary built without them, and nothing re-cooks it when the neighbour loads. In a streamed test world (DC, voxel 75, collision LOD 0) 20 of 3,185 down-traces over plain terrain missed, in voxel-wide strips beside chunk faces; all hit after every chunk was re-cooked once loaded. A capsule stands across such a strip, a line trace does not (found in G24's live check, §19.8's observations) | Fixed 2026-10-19 (§19.10): a cook records the neighbours it read as air, and a neighbour's arrival re-cooks the chunk unless both sides of the boundary are all air (exact) or all solid (a wall buried in the rock, re-cooked by any edit that reaches it: edits now re-cook the edge and corner neighbours they reach too). How common it was: on `VoxelDemo` 217 of 244 cooked chunks at the spawn read a neighbour as air that had data by then (240 of 240 after a teleport), on `Review_Planet` 203 of 208; the fix leaves 0. `voxel.Collision.NeighborRecook`, `voxel.Collision.AuditNeighbors` | — |
 | G33 | A system or editor edit (a POI's terraform) re-extracts scatter only for the edited chunk; the neighbours whose extraction reads its face voxels (a planet chunk's `TouchingEdits` from the seven +X / +Y / +Z neighbours, a heightmap chunk's `AboveLayerEdits`) keep a stale view of it until they reload (found in G31, §19.9; the same holds for G26's and G29's rules) | Deferred until after Phase 6 | — |
 | G34 | Wide flat cavity ceilings at about Z 0, the chunk layers' shared plane, under hills near every `VoxelDemo` stop: the layer below's top voxels air and the layer above's bottom voxels solid (1,700 such cells in chunk (−45, −24, 0) near the Tower; §19.5's things to know). Not verified whether the cave configuration means them | Deferred until after Phase 6 (unverified) | — |
 | G35 | A pawn teleported to the exact north pole of a planet kept its old tilt (54.7° off upright after a jump from the cube corner): `UVCMovementComponent::SnapUprightToGravity` skipped the engine's default gravity, which is exactly the north pole's (found in spherical Phase 6's baseline survey, §20.2) | Fixed in P6.1 (§20.2): the snap runs on a planet whatever the gravity; `VoxelCharacter.Planet.Fly` snaps a tilted body at every site | — |
@@ -4707,6 +4707,94 @@ ms, the stops' mean), the old lines 21.3 ms (29.8 ms), 22% less; with CPU genera
 the cube corner) 1.86 ms against 3.02 ms: the grid's cells and the slab tests 0.13 ms, the voxels past the faces 0.41 ms
 (3,169 at 0.13 µs). `GatherSpanned`'s duplicate scan had cost 5 ms of it before it was removed.
 
+### 19.10 G32: collision re-cooks when a neighbour arrives (2026-10-19)
+
+Bases: VoxelWorlds `2dc80ac`, UE5_PluginDev `5f6a8f2` (P6.5 merged; built and measured on P6.4's, `6b35d64` and
+`e6691f1`, then rebased: the suites re-run on the rebase). Branches `fix/g32-stale-collision-strips`
+(VoxelWorlds) and `claude/g32-stale-collision-strips` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program
+Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8089), background throttling off.
+
+**The bug** (§19.8's observation). Collision cooks a whole chunk from its own voxels and its 26 neighbours'
+(`PrepareCollisionMeshRequest`, `VoxelNeighborSlices::Extract` on a worker), and the mesher reads a neighbour without
+data as air; its comment still expects the neighbour's arrival to "trigger a remesh". The render path did that once
+(`QueueNeighborsForRemesh`, deleted with the legacy whole-chunk path in M5, §14.9); nothing ever did it for collision.
+The decision sweep cooks a chunk as soon as it is loaded, and a chunk's mesh never waits for its neighbours, so most
+cooks run before some neighbour has data. Where the ground crosses the face toward such a neighbour, the boundary cells
+are built against air: a voxel-wide strip along the face where the surface bends down into a wall and down-traces miss
+the ground. Where both sides are solid, a wall stands along the face inside the rock.
+
+How common: `voxel.Collision.AuditNeighbors` (new) counts the cooks that read as air a neighbour that has data now. With
+the old behaviour, `VoxelDemo` at the spawn: 217 of 244 cooked chunks; after `vox.TP 60000 20000 9000`: 240 of 240;
+after a 40,000 uu bench traverse: 60 to 75 of 240 to 290. `Review_Planet` (the small planet) at the spawn: 203 of 208;
+after `vox.TPLatLon 45 20`: 241 of 244. Most of those neighbours are the layers over and under the terrain, whose
+boundaries carry no ground; the strips are where the ground crosses a face.
+
+**What changed** (VoxelStreaming):
+
+- `PrepareCollisionMeshRequest` reports the neighbours without data (`OutMissingNeighborMask`), and the cook keeps them
+  (`FChunkCollisionData::MissingNeighborMask`).
+- The chunk manager's `OnChunkGenerationComplete`, the one place a chunk's voxel data arrives, calls
+  `UVoxelCollisionManager::OnChunkVoxelDataAvailable`. For each cooked chunk that read the new one as air it classifies
+  both sides of their boundary: the arriving chunk's slab facing it (the planes a cook reads across a boundary: one at
+  stride 1, 2 × stride deeper) and the cooked chunk's own (two strides: the gradient normal of a crossing a stride inside
+  the face reaches across it).
+  - All air on both sides: no sign change across the boundary either way, so the cook is already exact; nothing to do.
+    The air layers over the terrain that load near the viewer arrive this way.
+  - All solid on both sides: the cook put a wall along the boundary (solid against the air it read), now inside the
+    rock where nothing from the open reaches it; nothing to do. The layers under the terrain arrive this way.
+  - Otherwise the arrival is noted (`ArrivedNeighborMask`), and `ProcessNeighborRecooks` marks the chunk for a re-cook
+    once none of its other missing neighbours is still being generated, so the arrivals around a chunk fold into one
+    re-cook. The re-cook queues below every first cook (`bNeighborRecookOnly`, `GetDirtyPriority`): the old body stays
+    live until it is replaced and only its boundary cells toward the arrival are off, while a chunk without collision
+    has nothing.
+- **Edits.** A cook reads its edge and corner neighbours too, but an edit marked only the edited chunk and its six face
+  neighbours. `MarkNeighborsDirtyForEdit` now also marks the edge and corner neighbours whose box the edit's sphere
+  reaches (within stride + 2 voxels; all of them for an undo or redo, radius 0). That is what keeps a buried wall from a
+  solid-on-both-sides arrival from ever being exposed: the dig that opens the rock there re-cooks it. It also fixes edge
+  and corner cells going stale after an edit.
+- `voxel.Collision.NeighborRecook` (1; 0 = the behaviour before, for A/B), `voxel.Collision.AuditNeighbors [n]` (cooked
+  chunks, cooked with a neighbour missing, stale, re-cooks pending, re-cooks so far, arrivals needing none, and up to n
+  stale chunks), and the collision manager's `GetDebugStats`.
+
+**Design choices made while building.**
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| When to re-cook | On the neighbour's arrival, once the others on their way are in, queued after first cooks | Re-cooking at once at the edits' priority re-cooked a chunk once for each neighbour arriving late (88 re-cooks for 44 chunks in the test) and competed with first cooks; folding the arrivals brought the test to 16 |
+| Which arrivals | Only those with a surface able to cross the boundary | With every arrival re-cooked, about one re-cook per cooked chunk at the spawn; skipping air on both sides left about 475 a bench run, still frame P95 +19% and manager P95 +20% against the old behaviour. Of the arrivals left, 71% had solid on both sides (the layers under the terrain): skipping those too, 104-122 a run |
+| A buried wall | Kept until an edit reaches it | Unreachable inside the rock; the edit rule re-cooks it before a dig opens it, and a reload cooks the chunk afresh |
+| Deferring first cooks until the neighbours exist | Not done | A first cook gives collision where there was none (the pawn's path coverage depends on it); waiting would delay it for a correction that most arrivals do not need |
+
+**Tests** (`VoxelWorlds.Collision.*`, new):
+
+| Test | Check | Result |
+|------|-------|--------|
+| `NeighborArrival` | A streamed plane (voxel 50, chunk 32, view 3,000) cooking every loaded chunk. The window's edge chunks are cooked while their +X / +Y neighbours are not loaded; the viewer moves two chunks along +X +Y and those neighbours load. Down-traces inside the last voxel cell along each such face, at every voxel, against the same traces after re-cooking those chunks from scratch; and the audit. Once with `NeighborRecook 0`, once with 1 | 0: 6 of 64 probes miss the ground a fresh cook has, the audit finds 13 of 44 cooked chunks stale (G32 reproduced). 1: 0 of 64 differ, 0 stale, no trace hits a buried wall; 7 re-cooks, with 40 arrivals with air and 46 with solid on both sides needing none |
+| `EditNeighbors` | `MarkNeighborsDirtyForEdit` with a two-voxel edit mid-chunk, by a face, by an edge, by a corner, and with radius 0 | 0, 0, 1 (the edge neighbour), 4 (three edge neighbours and the corner one) and all 20 |
+
+Suites `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: on P6.4's base 541/541
+headless and in the editor; rebased on P6.5, 552/552 headless and 552/552 in the editor with the GPU tests running,
+no device loss, the 108 GPU parity lines CRC-identical to P6.4's (collision only; no generation or meshing change).
+On the rebase the live audit with the re-cook on: 0 stale on `VoxelDemo` at the spawn and after the teleport, and on
+`Review_Planet` at the spawn and at 45°N 20°E.
+
+**A/B on `VoxelDemo`.** The cvar in one build, a fresh PIE per run, input blocked, a throwaway run, then five pairs of
+`voxel.Bench.Run <tag> 1500 40000 warmup=30 catchup=90` from the spawn, interleaved (tags `g32c_demo_*`), and the
+audit after each run:
+
+| | Frame P50 / P95 ms (median) | Manager P95 ms (median) | Collision section mean / P95 ms | Catch-up s | Re-cooks a run | Stale after the run |
+|---|---|---|---|---|---|---|
+| **Re-cook on** | 16.7 / 27.1 | 7.73 | 0.27 / 1.05 | 0.17-0.19 | 104-122 (2,100-2,400 arrivals needing none) | 0 |
+| Off | 16.7 / 27.4 | 7.91 | 0.24 / 0.94 | 0.17 | 0 | 60-75 |
+
+The means over the five: frame P95 30.4 against 27.4 and manager P95 8.51 against 7.71, one pair's on run (a frame P50
+of 27 ms, 42.3 ms at P95) carrying the difference: without that pair, +3% and +3%. Peak loaded chunks, LOD re-meshes and
+catch-up are the same; the collision section's mean rises by 0.03 ms.
+
+**Left as they were** (§19.8's other observations): a stride-2 collision mesh (`CollisionLODLevel` 1) still cracks along
+chunk faces (every world cooks at LOD 0); the bottom layer of the window keeps the wall toward the layer under it, which
+never loads; the thrash of a collision radius smaller than the chunk under the viewer.
+
 ## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17, done 2026-10-19)
 
 The requirements doc's optional Phase 6 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-H1
@@ -4724,7 +4812,7 @@ at scale) done 2026-10-19, §20.4; P6.4 (the far field) done 2026-10-19, §20.5;
   (§19.8) and G31 (§19.9; planet scatter samples one family of radial rays, D26).
 - Deferred until after Phase 6 (none blocks it; none is fixed during Phase 6 unless it turns out to): G14 (tooling), G16
   and G25 (cosmetic), G19 (documented), G28 (low), and three recorded in §14.1 with Phase 6's first commit: G32 (stale
-  collision strips along chunk faces, §19.8's observations), G33 (a system edit re-extracts only the edited chunk's
+  collision strips along chunk faces, §19.8's observations; fixed 2026-10-19 alongside P6.5, §19.10), G33 (a system edit re-extracts only the edited chunk's
   scatter, found in G31) and G34 (flat cavity ceilings at Z 0, §19.5); also §19.8's stride-2 collision cracks and
   small-`ViewDistance` collision thrash, and §19.9's one GPU-against-CPU-shell pair (accepted).
 

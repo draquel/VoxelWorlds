@@ -1248,6 +1248,17 @@ private:
 - **Chaos Physics** (UE 5.8): `TriMeshGeometries` with `TRefCountPtr<FTriangleMeshImplicitObject>`
 - **Container Actor**: `CollisionContainerActor` holds all chunk `UBoxComponent` collision holders
 - **Edit Integration**: `MarkChunkDirty()` called from `EditManager->OnChunkEdited` delegate
+- **Neighbour arrival** (G32, WORLD_MODES_REVIEW_PLAN.md §19.10): a cook meshes the whole chunk with its 26 neighbours'
+  voxels, and the mesher reads a neighbour without data as air, so the boundary cells facing it come out wrong (a
+  voxel-wide strip along the face where traces miss the ground). `PrepareCollisionMeshRequest` reports the missing
+  neighbours, the cook keeps them (`FChunkCollisionData::MissingNeighborMask`), and the chunk manager's
+  `OnChunkGenerationComplete` calls `OnChunkVoxelDataAvailable` for every chunk cooked without the new one. Where the
+  voxels on both sides of that boundary are air (the arriving chunk's facing planes, and two strides of the cooked
+  chunk's, so no crossing's gradient normal reaches across) the cook is already right and nothing happens; otherwise
+  the arrival is noted (`ArrivedNeighborMask`) and `ProcessNeighborRecooks` requests one re-cook once none of the
+  chunk's other missing neighbours is still being generated, queued below every first cook. The old body stays live
+  until the re-cook replaces it. `voxel.Collision.NeighborRecook 0` turns it off (A/B); `voxel.Collision.AuditNeighbors`
+  counts cooks that read as air a neighbour that has data now (0 with the re-cook on), and `GetDebugStats` the re-cooks
 - **Thread Safety**: Data prep reads game-thread state; mesher is stateless; trimesh is pure data construction
 
 ---

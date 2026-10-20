@@ -194,6 +194,38 @@ static FAutoConsoleCommandWithWorld GVoxelFarFieldStatsCmd(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GVoxelCollisionAuditNeighborsCmd(
+	TEXT("voxel.Collision.AuditNeighbors"),
+	TEXT("G32: log the collision cooks that read a neighbour as air (it had no voxel data then): how many cooked chunks, how many "
+	     "were cooked with a neighbour missing, how many of those have the neighbour's data now with no re-cook pending (stale), "
+	     "how many re-cooks are pending, and the neighbour re-cooks so far. Optional arg: max stale chunks to list (default 8)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		const int32 MaxList = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 8;
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			UVoxelCollisionManager* Collision = It->GetCollisionManager();
+			if (!It->GetWorld() || !It->GetWorld()->IsGameWorld() || !Collision || !Collision->IsInitialized())
+			{
+				continue;
+			}
+			int32 Cooked = 0, WithMissing = 0, Stale = 0, Awaiting = 0;
+			TArray<FIntVector> StaleChunks;
+			Collision->AuditNeighborCooks(Cooked, WithMissing, Stale, Awaiting, &StaleChunks);
+			FString List;
+			for (int32 Index = 0; Index < FMath::Min(MaxList, StaleChunks.Num()); ++Index)
+			{
+				List += FString::Printf(TEXT(" (%d,%d,%d)"), StaleChunks[Index].X, StaleChunks[Index].Y, StaleChunks[Index].Z);
+			}
+			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Collision.AuditNeighbors: %d cooked, %d cooked with a neighbour missing, %d stale (the neighbour has data now, no re-cook pending), %d re-cooks pending, %lld neighbour re-cooks so far, arrivals needing none: %lld air and %lld solid on both sides (voxel.Collision.NeighborRecook %d)%s%s"),
+				Cooked, WithMissing, Stale, Awaiting, Collision->GetTotalNeighborRecooks(), Collision->GetTotalNeighborArrivalsSkipped(),
+				Collision->GetTotalNeighborArrivalsSkippedSolid(),
+				IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Collision.NeighborRecook"))
+					? IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Collision.NeighborRecook"))->GetInt() : -1,
+				List.IsEmpty() ? TEXT("") : TEXT("; stale:"), *List);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
 	TEXT("voxel.World.FarOceanStats"),
 	TEXT("Log the far ocean's state for every live chunk manager (open columns, grid quads, rebuilds, extent)."),
@@ -1297,6 +1329,12 @@ void UVoxelChunkManager::Initialize(
 					ScatterManager->RegenerateChunkScatter(NeighborCoord);
 				}
 			}
+		}
+
+		// A collision cook reads the edge and corner neighbours' voxels too: re-cook those the edit reaches (G32).
+		if (CollisionManager)
+		{
+			CollisionManager->MarkNeighborsDirtyForEdit(ChunkCoord, EditCenter, EditRadius);
 		}
 	});
 
@@ -6249,6 +6287,13 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 		SeamRegistry->RegisterChunk(ChunkCoord, State->Descriptor.ContentVersion, State->MeshedLODLevel);
 	}
 
+	// Collision is cooked whole-chunk with its 26 neighbours' voxels, a missing one read as air: re-cook the neighbours
+	// that were cooked before this chunk had data (G32: stale collision strips along chunk faces).
+	if (CollisionManager)
+	{
+		CollisionManager->OnChunkVoxelDataAvailable(ChunkCoord);
+	}
+
 	// Fire event
 	OnChunkGenerated.Broadcast(ChunkCoord);
 
@@ -8600,8 +8645,13 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	int32 LODLevel,
 	FVoxelMeshingRequest& OutMeshRequest,
 	TSharedPtr<const TArray<FVoxelData>>& OutSharedVoxels,
-	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots)
+	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots,
+	uint32* OutMissingNeighborMask)
 {
+	if (OutMissingNeighborMask)
+	{
+		*OutMissingNeighborMask = 0;
+	}
 	if (!bIsInitialized || !Configuration || !Mesher)
 	{
 		return false;
@@ -8650,6 +8700,7 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 			continue;
 		}
 		const FIntVector NCoord = ChunkCoord + FIntVector(DX, DY, DZ);
+		bool bHasData = false;
 		if (FVoxelChunkState* NState = ChunkStates.Find(NCoord))
 		{
 			if (NState->Descriptor.HasVoxelDataAvailable())
@@ -8658,8 +8709,13 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 				if (Snap.IsValid() && Snap->Num() > 0)
 				{
 					OutNeighborSnapshots.Add(NCoord, MoveTemp(Snap));
+					bHasData = true;
 				}
 			}
+		}
+		if (!bHasData && OutMissingNeighborMask)
+		{
+			*OutMissingNeighborMask |= UVoxelCollisionManager::GetNeighborBit(FIntVector(DX, DY, DZ));
 		}
 	}
 

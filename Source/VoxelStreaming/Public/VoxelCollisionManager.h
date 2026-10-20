@@ -82,6 +82,26 @@ struct FChunkCollisionData
 	 */
 	bool bEmpty = false;
 
+	/**
+	 * The neighbours (of the 26 the mesher reads; UVoxelCollisionManager::GetNeighborBit) that had no voxel data
+	 * when the current cook launched. The mesher reads a missing neighbour as air, so the cook's boundary cells
+	 * facing it are wrong until it is re-cooked: OnChunkVoxelDataAvailable marks the chunk dirty when one of
+	 * them arrives (G32).
+	 */
+	uint32 MissingNeighborMask = 0;
+
+	/**
+	 * The neighbours of MissingNeighborMask that have arrived since the cook launched. The re-cook waits while another
+	 * missing neighbour is still being generated, so the arrivals around a chunk fold into one re-cook.
+	 */
+	uint32 ArrivedNeighborMask = 0;
+
+	/**
+	 * bNeedsUpdate was set by a neighbour's arrival alone (no edit since): the re-cook queues below every first cook, so
+	 * new chunks get collision first and the neighbours still arriving meanwhile fold into one re-cook. An edit clears it.
+	 */
+	bool bNeighborRecookOnly = false;
+
 	/** Distance from viewer when last updated (for prioritization) */
 	float LastDistance = 0.0f;
 
@@ -242,6 +262,65 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Collision")
 	void RegenerateChunkCollision(const FIntVector& ChunkCoord);
+
+	/**
+	 * A chunk's voxel data has just become available (its generation completed). Every cooked neighbour whose last
+	 * cook ran without it (its MissingNeighborMask) gets a re-cook, so its boundary cells facing this chunk are built
+	 * from the real voxels instead of the air the mesher read in their place (G32: stale collision strips along chunk
+	 * faces). The re-cook is requested once none of that neighbour's other missing neighbours is still being generated
+	 * (ProcessNeighborRecooks), and below every first cook in the queue; the old body stays live until it is replaced.
+	 * Off with voxel.Collision.NeighborRecook 0. Called by the chunk manager.
+	 *
+	 * @param ChunkCoord The chunk whose voxel data arrived
+	 * @return The number of cooked neighbours that read this chunk as air
+	 */
+	int32 OnChunkVoxelDataAvailable(const FIntVector& ChunkCoord);
+
+	/**
+	 * The bit of a neighbour offset in FChunkCollisionData::MissingNeighborMask.
+	 *
+	 * @param Offset A neighbour's offset from the chunk, each component in -1..1, not all zero
+	 * @return Its bit (one of 26), or 0 for an offset that is not a neighbour
+	 */
+	static uint32 GetNeighborBit(const FIntVector& Offset);
+
+	/** Re-cooks requested because a neighbour missing at cook time arrived (OnChunkVoxelDataAvailable), this session. */
+	int64 GetTotalNeighborRecooks() const { return TotalNeighborRecooks; }
+
+	/** Neighbour arrivals that needed no re-cook (air on both sides of the boundary), this session. */
+	int64 GetTotalNeighborArrivalsSkipped() const { return TotalNeighborArrivalsSkipped; }
+
+	/** Neighbour arrivals that needed no re-cook (solid on both sides: the cook's wall there is buried), this session. */
+	int64 GetTotalNeighborArrivalsSkippedSolid() const { return TotalNeighborArrivalsSkippedSolid; }
+
+	/**
+	 * An edit changed a chunk's voxels: mark dirty the edge and corner neighbours whose cooks read the voxels it changed
+	 * (the chunk manager marks the chunk and its six face neighbours already). A neighbour is marked when the edit's
+	 * sphere comes within reach of its box: a cook reads up to stride + 1 voxels across a boundary (the deep planes), so
+	 * that many voxels plus one. A radius of 0 or less (undo, redo) marks all of them. With solid-on-both-sides arrivals
+	 * skipped (OnChunkVoxelDataAvailable), this is also what re-cooks a buried wall before a dig can expose it.
+	 *
+	 * @param EditedChunk The chunk whose voxels the edit changed
+	 * @param EditCenter The edit's centre (world)
+	 * @param EditRadius The edit's radius (world), or 0 or less when unknown
+	 * @return The number of neighbours marked
+	 */
+	int32 MarkNeighborsDirtyForEdit(const FIntVector& EditedChunk, const FVector& EditCenter, float EditRadius);
+
+	/**
+	 * G32 audit (voxel.Collision.AuditNeighbors): how many cooked chunks read a neighbour as air that has voxel data now.
+	 * With the re-cook on, a chunk is in that state only between the neighbour's arrival and the re-cook (counted as
+	 * awaiting); with it off, until something else re-cooks it.
+	 *
+	 * @param OutCooked Chunks with a cooked body or an empty cook
+	 * @param OutWithMissing Of those, cooked while some neighbour had no data (still missing or since arrived)
+	 * @param OutStale Of those, a neighbour that was missing has data now and no re-cook is pending
+	 * @param OutAwaiting Chunks marked for a re-cook (an arrival or an edit) that has not launched yet, or waiting for
+	 *        another missing neighbour still being generated before their re-cook is requested
+	 * @param OutStaleChunks If set, receives the stale chunks
+	 */
+	void AuditNeighborCooks(int32& OutCooked, int32& OutWithMissing, int32& OutStale, int32& OutAwaiting,
+		TArray<FIntVector>* OutStaleChunks = nullptr) const;
 
 	// ==================== Queries ====================
 
@@ -425,6 +504,22 @@ protected:
 	void ForcePathCoverage(const FVector& FocusPosition, const FVector& FocusVelocity);
 
 	/**
+	 * The cook priority of a dirty chunk at a distance: an edit's above a first cook's at the same distance, a
+	 * neighbour arrival's re-cook below every first cook's (FChunkCollisionData::bNeighborRecookOnly).
+	 *
+	 * @param Data The chunk's collision state (bNeedsUpdate set)
+	 * @param Distance The chunk centre's distance from the focus
+	 * @return The priority to request it at
+	 */
+	float GetDirtyPriority(const FChunkCollisionData& Data, float Distance) const;
+
+	/**
+	 * Request the re-cooks of chunks whose missing neighbours arrived (PendingNeighborRecooks), each once none of its
+	 * other missing neighbours is still being generated.
+	 */
+	void ProcessNeighborRecooks();
+
+	/**
 	 * Process dirty chunks that need collision regeneration (from edits).
 	 */
 	void ProcessDirtyChunks(const FVector& ViewerPosition);
@@ -593,4 +688,16 @@ protected:
 
 	/** Total collision meshes removed */
 	int64 TotalCollisionsRemoved = 0;
+
+	/** Re-cooks requested because a neighbour missing at cook time arrived */
+	int64 TotalNeighborRecooks = 0;
+
+	/** Arrivals that needed no re-cook: the voxels on both sides of the boundary are air (OnChunkVoxelDataAvailable) */
+	int64 TotalNeighborArrivalsSkipped = 0;
+
+	/** Arrivals that needed no re-cook: solid on both sides, the cook's wall along the boundary buried in the rock */
+	int64 TotalNeighborArrivalsSkippedSolid = 0;
+
+	/** Chunks with neighbours arrived since their cook (FChunkCollisionData::ArrivedNeighborMask), awaiting ProcessNeighborRecooks */
+	TSet<FIntVector> PendingNeighborRecooks;
 };
