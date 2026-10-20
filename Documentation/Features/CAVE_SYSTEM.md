@@ -132,7 +132,8 @@ In `UVoxelWorldConfiguration`:
 
 ### Generation Pipeline
 
-`VoxelChunkManager::ProcessGenerationQueue()` copies cave settings into `FVoxelNoiseGenerationRequest`:
+`UVoxelChunkManager::BuildChunkGenerationRequest()` (called by `ProcessGenerationQueue()`) copies cave settings into
+`FVoxelNoiseGenerationRequest`:
 - `GenRequest.bEnableCaves` from `Configuration->bEnableCaves`
 - `GenRequest.CaveConfiguration` from `Configuration->CaveConfiguration`
 
@@ -177,6 +178,21 @@ under the sea and in biomes scaled to 0; the fix bumped `FVoxelWorldModeFactory:
 ### Biome-Specific Caves
 - Use `FBiomeCaveOverride` with `CaveScale = 0` to disable in specific biomes
 - Use `MinDepthOverride` to push caves deeper in flat biomes
+
+### A Layer That Fills Its Depth Window
+A layer whose noise carves most of space fills its depth window as one cavern, with pillars where the noise leaves
+rock. That happens with a Spaghetti or Noodle threshold near 0.5 (the struct's default, which suits Cheese) or a low
+Cheese threshold. Its roof is then the window's fade-in, not the noise:
+- The carve is multiplied by a smoothstep over depths `MinDepth - DepthFadeWidth` to `MinDepth`, and a voxel stays
+  solid while the carve is under about 0.5. So where the noise carves fully, the roof lies `MinDepth - DepthFadeWidth / 2`
+  voxels under the terrain everywhere, parallel to it (flat under flat ground). The floor lies
+  `MaxDepth + DepthFadeWidth / 2` down.
+- Under the sea, `UnderwaterMinDepth` replaces `MinDepth` per column, so the roof steps down along the coast.
+
+`VoxelDemo`'s `DemoCaveConfig` is such a layer: Spaghetti at threshold 0.5, depths 20 to 45, fade 4, with roofs 1,350 uu
+under the ground and 1,725 under the seabed (world modes review G34, §19.12). `voxel.Gen.LayerAudit` counts cave
+ceilings and floors per Z plane over the loaded chunks and compares the chunks with the most on a chunk-layer boundary
+with a CPU regeneration, to tell a configured roof from a generation artefact.
 
 ## Underground Classification
 
