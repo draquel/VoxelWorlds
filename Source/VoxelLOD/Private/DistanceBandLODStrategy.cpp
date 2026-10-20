@@ -180,8 +180,9 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	bPlanetSlab = false;
 	PlanetCellSurfaceCache.Reset();
 	PlanetChunkSlabCache.Reset();
-	EnvelopeMemoCell = FIntPoint(MIN_int32, MIN_int32);
-	EnvelopeMemoAngle = -1.0;
+	LoadEnvelopeMemo = FSurfaceEnvelopeMemo();
+	NearEnvelopeMemo = FSurfaceEnvelopeMemo();
+	PlanetNearBandAngle = 0.0;
 	GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
 	PlanetCutoverConfigured = 0.0;
 	PlanetSeaRadius = 0.0;
@@ -219,7 +220,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Shell window: radius %.0f to %.0f (the terrain + %.1f chunk), horizon + %.0f for the highest peaks"),
 			ShellWindowInnerRadius, ShellWindowOuterRadius, ShellSlackChunks,
 			FMath::Sqrt(2.0 * PlanetRadius * FMath::Max(0.0f, PlanetMaxTerrainHeight) + FMath::Square(static_cast<double>(FMath::Max(0.0f, PlanetMaxTerrainHeight)))));
-		UE_LOG(LogVoxelLOD, Log, TEXT("  Planet window: %s; horizon along the ground from the viewer's ground point; the viewer's altitude ±%d chunks within %.0f uu"),
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Planet window: %s; horizon along the ground from the viewer's ground point; the viewer's altitude ±%d chunks within %.0f uu, up to the top of the surface slab there (or the sea), none above it"),
 			bPlanetSlab ? *FString::Printf(TEXT("per-chunk surface slab ±%.1f chunks (%d cells a face edge)"), SlabSlackChunks, PlanetSlabGrid.GetCellsPerEdge())
 				: TEXT("the whole shell (slab culling off)"),
 			NearWindowLayers, (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f);
@@ -235,6 +236,13 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 
 	// The near window (heightmap worlds): band 0's outer edge plus two chunk widths, measured horizontally.
 	NearWindowRadius = (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f;
+	if (PlanetWorldMode)
+	{
+		// The near disk's cone (GetPlanetNearBandCeiling), at its widest: along the ground at the shell's inner radius.
+		const double InnerRadius = FMath::Max(ShellWindowInnerRadius, static_cast<double>(ChunkWorldSize));
+		const double HalfDiagonal = 0.5 * ChunkWorldSize * UE_DOUBLE_SQRT_3;
+		PlanetNearBandAngle = FMath::Min(UE_DOUBLE_PI, NearWindowRadius / InnerRadius + FMath::Asin(FMath::Min(1.0, HalfDiagonal / InnerRadius)));
+	}
 	if (IsHeightmapWorld())
 	{
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Vertical window from the terrain: the viewer's layer ±%d within %.0f uu, horizon measured horizontally"),
@@ -634,6 +642,9 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 			bPlanetSlab ? TEXT("each chunk's surface slab ±1.5 chunks") : TEXT("the whole shell"),
 			ShellWindowInnerRadius, ShellWindowOuterRadius, NearWindowLayers, NearWindowRadius,
 			GetPlanetHorizonDistance(PlanetRadius, 0.0, PlanetMaxTerrainHeight));
+		Info += FString::Printf(TEXT("  Near band: %s (viewer %.0f over the datum, the band up to %.0f)\n"),
+			IsPlanetNearBandActive(CachedViewerPosition) ? TEXT("on") : TEXT("off, above the surface slab"),
+			FVector::Dist(CachedViewerPosition, PlanetCenter) - PlanetRadius, GetPlanetNearBandCeiling(CachedViewerPosition));
 		Info += FString::Printf(TEXT("  Slab caches: %d cells, %d chunks\n"), PlanetCellSurfaceCache.Num(), PlanetChunkSlabCache.Num());
 		Info += FString::Printf(TEXT("  Voxel cut-over: %.0f over the surface (resumes below %.0f); viewer %.0f over it, window %s\n"),
 			GetPlanetCutoverAltitude(), GetPlanetCutoverAltitude() * CutoverResumeFraction, ViewerSurfaceAltitude,
@@ -1255,7 +1266,7 @@ bool FDistanceBandLODStrategy::IsInPlanetWindow(const FIntVector& ChunkCoord, co
 	}
 
 	// Off its slab, near the viewer along the ground: caves, dungeons and digging under the surface, and the chunks around
-	// the viewer wherever it is in the shell (the spawn's terrain wait and the settle hold wait for them to cook), as a
+	// a viewer near the ground or the sea (the spawn's terrain wait and the settle hold wait for them to cook), as a
 	// heightmap world streams the viewer's layer +- NearWindowLayers within its height bounds.
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 	if (GetPlanetGroundDistance(PlanetCenter, GetPlanetGroundRadius(Context.ViewerPosition), Context.ViewerPosition, ChunkCenter) > NearWindowRadius)
@@ -1267,9 +1278,17 @@ bool FDistanceBandLODStrategy::IsInPlanetWindow(const FIntVector& ChunkCoord, co
 		// The whole shell within the unload distance, so a viewer changing altitude unloads nothing near it.
 		return FVector::Dist(ChunkCenter, Context.ViewerPosition) <= GetUnloadDistance();
 	}
+	// Up to the top of the surface slab over the near disk, the band's ceiling (G52): above it every chunk the band adds off
+	// its slab is air. A descending viewer streamed a new layer of them every second, taking the generation its ground disk
+	// needed; one on the ground kept a layer of them loaded around it, which a descent loaded in its last second.
 	const double ViewerAltitude = FVector::Dist(Context.ViewerPosition, PlanetCenter) - PlanetRadius;
+	const double Ceiling = GetPlanetNearBandCeiling(Context.ViewerPosition);
+	if (ViewerAltitude > Ceiling)
+	{
+		return false;
+	}
 	const double Reach = NearWindowLayers * static_cast<double>(BaseChunkSize) * VoxelSize;
-	return Chunk.AltitudeMax >= ViewerAltitude - Reach && Chunk.AltitudeMin <= ViewerAltitude + Reach;
+	return Chunk.AltitudeMax >= ViewerAltitude - Reach && Chunk.AltitudeMin <= FMath::Min(ViewerAltitude + Reach, Ceiling);
 }
 
 FDistanceBandLODStrategy::FPlanetChunkSlab FDistanceBandLODStrategy::GetPlanetChunkSlab(const FIntVector& ChunkCoord) const
@@ -1363,14 +1382,14 @@ FFloatInterval FDistanceBandLODStrategy::GetPlanetCellSurfaceRange(const FIntPoi
 	return Range;
 }
 
-FFloatInterval FDistanceBandLODStrategy::GetPlanetSurfaceEnvelope(const FVector& Direction, double Angle) const
+FFloatInterval FDistanceBandLODStrategy::GetPlanetSurfaceEnvelope(const FVector& Direction, double Angle, FSurfaceEnvelopeMemo& Memo) const
 {
 	// Memoized by the direction's cell: the disk is gathered around that cell's centre, one cell wider each way, so it
 	// holds the disk around any direction inside the cell.
 	const FIntPoint Cell = PlanetSlabGrid.CellOfDirection(Direction);
-	if (Cell == EnvelopeMemoCell && Angle == EnvelopeMemoAngle)
+	if (Cell == Memo.Cell && Angle == Memo.Angle)
 	{
-		return EnvelopeMemoRange;
+		return Memo.Range;
 	}
 
 	const double CellAngle = 2.0 * (0.5 * UE_DOUBLE_PI) / FMath::Max(1, PlanetSlabGrid.GetCellsPerEdge());
@@ -1389,10 +1408,35 @@ FFloatInterval FDistanceBandLODStrategy::GetPlanetSurfaceEnvelope(const FVector&
 	}
 	// else: a disk of more cells than that (a view distance of a large part of the planet): the terrain's bounds.
 
-	EnvelopeMemoCell = Cell;
-	EnvelopeMemoAngle = Angle;
-	EnvelopeMemoRange = Envelope;
+	Memo.Cell = Cell;
+	Memo.Angle = Angle;
+	Memo.Range = Envelope;
 	return Envelope;
+}
+
+double FDistanceBandLODStrategy::GetPlanetNearBandCeiling(const FVector& ViewerPosition) const
+{
+	const double ShellTop = ShellWindowOuterRadius - PlanetRadius;
+	if (!PlanetWorldMode || !bPlanetSlab || !PlanetSlabGrid.IsValid())
+	{
+		return ShellTop; // without the slab every chunk in the shell is in the window anyway
+	}
+
+	// The highest surface the near disk's chunks read for their slabs, or the sea's surface where that is higher; the
+	// slab's slack over it, as every slab has.
+	const FVector Relative = ViewerPosition - PlanetCenter;
+	const FVector Up = Relative.IsNearlyZero() ? FVector::UpVector : Relative.GetUnsafeNormal();
+	double Top = GetPlanetSurfaceEnvelope(Up, PlanetNearBandAngle, NearEnvelopeMemo).Max;
+	if (PlanetSeaRadius > 0.0)
+	{
+		Top = FMath::Max(Top, PlanetSeaRadius - PlanetRadius);
+	}
+	return Top + SlabSlackChunks * static_cast<double>(BaseChunkSize) * VoxelSize;
+}
+
+bool FDistanceBandLODStrategy::IsPlanetNearBandActive(const FVector& ViewerPosition) const
+{
+	return FVector::Dist(ViewerPosition, PlanetCenter) - PlanetRadius <= GetPlanetNearBandCeiling(ViewerPosition);
 }
 
 void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use,
@@ -1481,21 +1525,22 @@ void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Co
 	double EnvelopeHi = ShellHi;
 	if (bPlanetSlab && PlanetWorldMode)
 	{
-		const FFloatInterval Surface = GetPlanetSurfaceEnvelope(Up, LoadAngle);
+		const FFloatInterval Surface = GetPlanetSurfaceEnvelope(Up, LoadAngle, LoadEnvelopeMemo);
 		const double Slack = SlabSlackChunks * ChunkWorldSize;
 		EnvelopeLo = FMath::Max(ShellLo, Surface.Min - Slack);
 		EnvelopeHi = FMath::Min(ShellHi, Surface.Max + Slack);
 	}
 	Enumerate(LoadAngle, EnvelopeLo, EnvelopeHi);
 
-	// The near window, off the slab near the viewer (IsInPlanetWindow): Load, the viewer's altitude ± NearWindowLayers;
-	// Keep, the shell within the unload distance.
-	if (bPlanetSlab && NearWindowRadius > 0.0f)
+	// The near window, off the slab near the viewer (IsInPlanetWindow): Load, the viewer's altitude ± NearWindowLayers up
+	// to the band's ceiling, none above it (G52); Keep, the shell within the unload distance.
+	const double NearCeiling = (Use == EWindowUse::Load) ? GetPlanetNearBandCeiling(Context.ViewerPosition) : TNumericLimits<double>::Max();
+	if (bPlanetSlab && NearWindowRadius > 0.0f && ViewerRadius - PlanetRadius <= NearCeiling)
 	{
 		const double ViewerAltitude = ViewerRadius - PlanetRadius;
 		const double Reach = (Use == EWindowUse::Load) ? NearWindowLayers * ChunkWorldSize : GetUnloadDistance();
 		const double NearLo = FMath::Max(ShellLo, ViewerAltitude - Reach);
-		const double NearHi = FMath::Min(ShellHi, ViewerAltitude + Reach);
+		const double NearHi = FMath::Min3(ShellHi, ViewerAltitude + Reach, NearCeiling);
 		if (NearLo <= NearHi)
 		{
 			Enumerate(FMath::Min(UE_DOUBLE_PI, NearWindowRadius / GroundRadius + ChunkAngle), NearLo, NearHi);

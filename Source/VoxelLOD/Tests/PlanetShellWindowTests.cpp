@@ -462,11 +462,13 @@ namespace PlanetShellWindowTestUtils
  * - none missing: every chunk holding a surface point within the view distance along the ground is a candidate (brute
  *   force over a grid of directions a quarter chunk apart);
  * - none outside the slab except near the viewer: every candidate farther than the near radius lies within the slab's
- *   slack (1.5 chunks) of the surface within one and a half chunks of it (brute force over 125 directions);
+ *   slack (1.5 chunks) of the surface within one and a half chunks of it (brute force over 125 directions), and the
+ *   viewer, inside the slab, takes the near band;
  * - the slab is no larger than the whole shell's window (slab culling off).
- * And a viewer underground streams the chunks around it (the near window: three chunks under the surface on the 1,000 km
- * planet; on the small planet, whose shell is thinner, the chunks around it inside the shell), with nothing else below
- * the slab.
+ * A flyer above the surface slab around it gets nothing off the slab, near it or not (G52: the near band is air there;
+ * where the shell reaches that high). And a viewer underground streams the chunks around it (the near window: three
+ * chunks under the surface on the 1,000 km planet; on the small planet, whose shell is thinner, the chunks around it
+ * inside the shell), with nothing else below the slab.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetSurfaceSlabTest,
 	"VoxelWorlds.LOD.Planet.SurfaceSlab",
@@ -534,6 +536,26 @@ bool FPlanetSurfaceSlabTest::RunTest(const FString& Parameters)
 			TestEqual(*FString::Printf(TEXT("%s, %s: no candidate off the surface by more than the slack, except near the viewer"), Case.Name, Site.Name), OffSlab, 0);
 			TestTrue(*FString::Printf(TEXT("%s, %s: the slab is no larger than the whole shell's window"), Case.Name, Site.Name), Visible.Num() <= WholeCount);
 			TestEqual(*FString::Printf(TEXT("%s, %s: the warm query returns the same window"), Case.Name, Site.Name), WarmCount, Visible.Num());
+			TestTrue(*FString::Printf(TEXT("%s, %s: 300 over the ground the viewer takes the near band"), Case.Name, Site.Name),
+				Strategy.IsPlanetNearBandActive(Viewer));
+
+			// A flyer two chunks above the near band's ceiling, where that is inside the shell: nothing off the slab (G52).
+			const double FlyerAltitude = Strategy.GetPlanetNearBandCeiling(Viewer) + 2.0 * ChunkWorld;
+			if (FlyerAltitude + FDistanceBandLODStrategy::NearWindowLayers * ChunkWorld < Strategy.ShellWindowOuterRadius - Case.Radius)
+			{
+				const FVector Flyer = Site.Up * (Case.Radius + FlyerAltitude);
+				const FLODQueryContext FlyerContext = MakeContext(Flyer);
+				Strategy.Update(FlyerContext, 1.0f / 60.0f);
+				int32 FlyerOffSlab = 0;
+				for (const FIntVector& Coord : Candidates(Strategy, FlyerContext))
+				{
+					FlyerOffSlab += InItsSlab(Strategy, Coord) ? 0 : 1;
+				}
+				AddInfo(FString::Printf(TEXT("%s, %s: a flyer %.0f over the datum (%.0f over the ground, two chunks over the near band's ceiling): %d candidates off their slab"),
+					Case.Name, Site.Name, FlyerAltitude, FlyerAltitude - Terrain.Altitude(Site.Up), FlyerOffSlab));
+				TestFalse(*FString::Printf(TEXT("%s, %s: a flyer above the slab takes no near band"), Case.Name, Site.Name), Strategy.IsPlanetNearBandActive(Flyer));
+				TestEqual(*FString::Printf(TEXT("%s, %s: a flyer above the slab streams nothing off the slab"), Case.Name, Site.Name), FlyerOffSlab, 0);
+			}
 		}
 
 		// A viewer in a cave three chunks under the surface at 45 degrees: its own chunk and every neighbour in the shell are
@@ -586,13 +608,351 @@ bool FPlanetSurfaceSlabTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace PlanetShellWindowTestUtils
+{
+	/**
+	 * Brute force: the chunks the near band added before G52, whatever the viewer's altitude over the slab: off their
+	 * slab, meeting the shell, within the near radius along the ground and meeting the viewer's altitude ± NearWindowLayers
+	 * chunk widths (over the box around the viewer's chunk that holds the near disk).
+	 */
+	TSet<FIntVector> NearBandBeforeG52(const FProbeStrategy& Strategy, const FVector& Viewer, double Radius)
+	{
+		const double ShellLo = Strategy.ShellWindowInnerRadius - Radius;
+		const double ShellHi = Strategy.ShellWindowOuterRadius - Radius;
+		const double ViewerAltitude = Viewer.Size() - Radius;
+		const double Reach = FDistanceBandLODStrategy::NearWindowLayers * ChunkWorld;
+		const double GroundRadius = Strategy.GetPlanetGroundRadius(Viewer);
+		const int32 K = FMath::CeilToInt32(Strategy.GetNearWindowRadius() / ChunkWorld) + 3;
+		const FIntVector Own = ChunkOf(Viewer);
+		TSet<FIntVector> Out;
+		for (int32 DX = -K; DX <= K; ++DX)
+		for (int32 DY = -K; DY <= K; ++DY)
+		for (int32 DZ = -K; DZ <= K; ++DZ)
+		{
+			const FIntVector Coord = Own + FIntVector(DX, DY, DZ);
+			if (FDistanceBandLODStrategy::GetPlanetGroundDistance(FVector::ZeroVector, GroundRadius, Viewer, CentreOf(Coord)) > Strategy.GetNearWindowRadius())
+			{
+				continue;
+			}
+			const FProbeStrategy::FPlanetChunkSlab Slab = Strategy.GetPlanetChunkSlab(Coord);
+			if (Slab.AltitudeMax >= ShellLo && Slab.AltitudeMin <= ShellHi && !InItsSlab(Strategy, Coord)
+				&& Slab.AltitudeMax >= ViewerAltitude - Reach && Slab.AltitudeMin <= ViewerAltitude + Reach)
+			{
+				Out.Add(Coord);
+			}
+		}
+		return Out;
+	}
+
+	/** Brute force: the highest surface within a ground distance of a direction (a lattice a quarter chunk apart). */
+	double HighestSurfaceWithin(const FTerrain& Terrain, const FVector& Up, double Distance)
+	{
+		FVector East, North;
+		FVoxelCubeSphere::GetTangentFrame(Up, East, North);
+		const double Step = ChunkWorld / 4.0;
+		const int32 K = FMath::CeilToInt32(Distance / Step);
+		double Highest = TNumericLimits<double>::Lowest();
+		for (int32 I = -K; I <= K; ++I)
+		{
+			for (int32 J = -K; J <= K; ++J)
+			{
+				const FVector2D Tangent(I * Step, J * Step);
+				if (Tangent.Size() <= Distance)
+				{
+					Highest = FMath::Max(Highest, Terrain.Altitude((Up * Terrain.Radius + East * Tangent.X + North * Tangent.Y).GetSafeNormal()));
+				}
+			}
+		}
+		return Highest;
+	}
+}
+
+/**
+ * G52 (WORLD_MODES_REVIEW_PLAN.md §20.6): the near band only while the viewer is not above the surface slab around it.
+ * On the small planet and the 1,000 km one at the four sites:
+ * - the ceiling (GetPlanetNearBandCeiling) is the slab's top over the near disk: at least the highest surface within the
+ *   near radius (brute force) plus the slack, and the same along the viewer's up-line;
+ * - the band reaches no higher than the ceiling: at every stop no candidate off its slab lies wholly above it;
+ * - a viewer 300 over the ground and one just under the ceiling take the band: every chunk the band added before G52 under
+ *   the ceiling is a candidate, and so are the chunks the spawn's terrain wait reads (the 3 x 3 grid in the tangent plane
+ *   and the chunk under the feet);
+ * - a viewer just over the ceiling, two chunks over it, 20,000 over it and 100,000 over the ground (the descent bench's
+ *   resume height) takes none: no candidate off its slab near it, where the old band held air (counted on the 1,000 km
+ *   planet, whose shell reaches that high);
+ * - climbing from 300 over the ground to two chunks over the ceiling unloads none of the band's chunks (the keep window
+ *   is unchanged: no churn at the ceiling);
+ * - a viewer in a cave three chunks under the surface keeps the band (chunks below their slab, the chunks around it);
+ * - over a sea deeper than the slab, a swimmer at the surface keeps the band (its own chunk streams: the settle onto the
+ *   sea waits for it to cook), which the same viewer without the sea would not.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetNearBandTest,
+	"VoxelWorlds.LOD.Planet.NearBand",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetNearBandTest::RunTest(const FString& Parameters)
+{
+	using namespace PlanetShellWindowTestUtils;
+
+	constexpr float ViewDistance = 40000.0f;
+	const double Slack = 1.5 * ChunkWorld;
+	for (const FPlanetCase& Case : GetPlanetCases())
+	{
+		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
+		Config->PlanetVoxelCutoverAltitude = 1.0e9f; // the window under the cut-over (LOD.Planet.Cutover checks above it)
+		FProbeStrategy Strategy;
+		Strategy.Initialize(Config);
+		const FTerrain Terrain(*Config);
+		const double NearRadius = Strategy.GetNearWindowRadius();
+		const double ShellTop = Strategy.ShellWindowOuterRadius - Case.Radius;
+		const bool bThickShell = Case.Shell > 10.0 * ChunkWorld;
+		int32 AirBefore = 0;
+		int32 AirAboveCeilingOnTheGround = 0;
+
+		// The off-slab candidates near a viewer, and whether the old band's chunks and the chunks around it are all in.
+		struct FLook
+		{
+			bool bActive = false;
+			int32 OffSlabNear = 0;
+			int32 OldBand = 0;
+			int32 OldBandAboveCeiling = 0;
+			int32 OldBandMissing = 0;
+			int32 OffSlabAboveCeiling = 0;
+			int32 Around = 0;
+			int32 AroundMissing = 0;
+			int32 WaitGrid = 0;
+			int32 WaitGridMissing = 0;
+			int32 BelowSlab = 0;
+			TSet<FIntVector> Visible;
+		};
+		auto Look = [&](FProbeStrategy& At, const FVector& Viewer)
+		{
+			FLook Out;
+			const FLODQueryContext Context = MakeContext(Viewer);
+			At.Update(Context, 1.0f / 60.0f);
+			Out.Visible = Candidates(At, Context);
+			Out.bActive = At.IsPlanetNearBandActive(Viewer);
+			const double Ceiling = At.GetPlanetNearBandCeiling(Viewer);
+			const double GroundRadius = At.GetPlanetGroundRadius(Viewer);
+			for (const FIntVector& Coord : Out.Visible)
+			{
+				if (!InItsSlab(At, Coord) && FDistanceBandLODStrategy::GetPlanetGroundDistance(FVector::ZeroVector, GroundRadius, Viewer, CentreOf(Coord)) <= NearRadius)
+				{
+					++Out.OffSlabNear;
+					const FProbeStrategy::FPlanetChunkSlab Slab = At.GetPlanetChunkSlab(Coord);
+					Out.BelowSlab += Slab.AltitudeMax < Slab.SlabMin ? 1 : 0;
+					Out.OffSlabAboveCeiling += Slab.AltitudeMin > Ceiling ? 1 : 0;
+				}
+			}
+			// The band before G52, less what lies wholly above the ceiling (air: the band reaches no higher now).
+			const TSet<FIntVector> Old = NearBandBeforeG52(At, Viewer, Case.Radius);
+			Out.OldBand = Old.Num();
+			for (const FIntVector& Coord : Old)
+			{
+				if (At.GetPlanetChunkSlab(Coord).AltitudeMin > Ceiling)
+				{
+					++Out.OldBandAboveCeiling;
+					continue;
+				}
+				Out.OldBandMissing += Out.Visible.Contains(Coord) ? 0 : 1;
+			}
+			// The spawn's terrain wait (AVCCharacterBase::InitiateChunkBasedWait on a planet): a 3 x 3 grid in the tangent
+			// plane at the pawn and the chunk half a chunk under it.
+			{
+				const FVector Up = Viewer.GetSafeNormal();
+				FVector East, North;
+				FVoxelCubeSphere::GetTangentFrame(Up, East, North);
+				TSet<FIntVector> Grid;
+				for (int32 DX = -1; DX <= 1; ++DX)
+				for (int32 DY = -1; DY <= 1; ++DY)
+				{
+					Grid.Add(ChunkOf(Viewer + (East * DX + North * DY) * ChunkWorld));
+				}
+				Grid.Add(ChunkOf(Viewer - Up * (0.5 * ChunkWorld)));
+				for (const FIntVector& Coord : Grid)
+				{
+					if (BoxMeetsShell(Coord, At.ShellWindowInnerRadius, At.ShellWindowOuterRadius))
+					{
+						++Out.WaitGrid;
+						Out.WaitGridMissing += Out.Visible.Contains(Coord) ? 0 : 1;
+					}
+				}
+			}
+			const FIntVector Own = ChunkOf(Viewer);
+			for (int32 DZ = -1; DZ <= 1; ++DZ)
+			for (int32 DY = -1; DY <= 1; ++DY)
+			for (int32 DX = -1; DX <= 1; ++DX)
+			{
+				const FIntVector Coord = Own + FIntVector(DX, DY, DZ);
+				if (BoxMeetsShell(Coord, At.ShellWindowInnerRadius, At.ShellWindowOuterRadius))
+				{
+					++Out.Around;
+					Out.AroundMissing += Out.Visible.Contains(Coord) ? 0 : 1;
+				}
+			}
+			return Out;
+		};
+
+		for (const FSite& Site : GetSites())
+		{
+			const double GroundAltitude = Terrain.Altitude(Site.Up);
+			const FVector Low = Site.Up * (Case.Radius + GroundAltitude + 300.0);
+			const double Ceiling = Strategy.GetPlanetNearBandCeiling(Low);
+			const double Highest = HighestSurfaceWithin(Terrain, Site.Up, NearRadius + ChunkWorld);
+			AddInfo(FString::Printf(TEXT("%s, %s: ground %.0f, highest surface within the near radius + a chunk %.0f, the band's ceiling %.0f (%.0f over the ground), the shell's top %.0f"),
+				Case.Name, Site.Name, GroundAltitude, Highest, Ceiling, Ceiling - GroundAltitude, ShellTop));
+			// The cells' five samples miss some of the surface between them, which the slab's slack covers: at least a chunk over
+			// every sampled point.
+			TestTrue(*FString::Printf(TEXT("%s, %s: the ceiling is a chunk or more over the highest surface near the viewer"), Case.Name, Site.Name), Ceiling >= Highest + ChunkWorld);
+			// The envelope reads the cells within the near disk's widest angle around the viewer's cell, plus two cells: no more
+			// than the slack over the highest surface within four chunks past the near radius (half a chunk for the samples).
+			const double HighestReached = HighestSurfaceWithin(Terrain, Site.Up, NearRadius + 4.0 * ChunkWorld);
+			TestTrue(*FString::Printf(TEXT("%s, %s: the ceiling is the slab's slack over the surface the near disk reads"), Case.Name, Site.Name),
+				Ceiling <= HighestReached + Slack + 0.5 * ChunkWorld);
+			TestEqual(*FString::Printf(TEXT("%s, %s: the same ceiling along the up-line"), Case.Name, Site.Name),
+				Strategy.GetPlanetNearBandCeiling(Site.Up * (Case.Radius + GroundAltitude + 50000.0)), Ceiling, 0.01);
+
+			struct FStop
+			{
+				const TCHAR* Name;
+				double Altitude;
+				bool bActive;
+			};
+			const FStop Stops[] = {
+				{ TEXT("300 over the ground"), GroundAltitude + 300.0, true },
+				{ TEXT("just under the ceiling"), Ceiling - 100.0, true },
+				{ TEXT("just over the ceiling"), Ceiling + 100.0, false },
+				{ TEXT("two chunks over the ceiling"), Ceiling + 2.0 * ChunkWorld, false },
+				{ TEXT("20,000 over the ceiling"), Ceiling + 20000.0, false },
+				{ TEXT("100,000 over the ground"), GroundAltitude + 100000.0, false },
+			};
+			FString Line;
+			TSet<FIntVector> LoadedLow;
+			for (const FStop& Stop : Stops)
+			{
+				const FVector Viewer = Site.Up * (Case.Radius + Stop.Altitude);
+				const FLook L = Look(Strategy, Viewer);
+				if (LoadedLow.Num() == 0)
+				{
+					LoadedLow = L.Visible;
+				}
+				Line += FString::Printf(TEXT(" | %s (%.0f): band %s, %d off their slab near it, the old band %d (%d wholly above the ceiling, %d of the rest not in), the spawn wait's %d chunks %d not in"),
+					Stop.Name, Stop.Altitude, L.bActive ? TEXT("on") : TEXT("off"), L.OffSlabNear, L.OldBand, L.OldBandAboveCeiling, L.OldBandMissing,
+					L.WaitGrid, L.WaitGridMissing);
+				TestEqual(*FString::Printf(TEXT("%s, %s, %s: the band's state"), Case.Name, Site.Name, Stop.Name), L.bActive, Stop.bActive);
+				TestEqual(*FString::Printf(TEXT("%s, %s, %s: nothing off its slab wholly above the ceiling"), Case.Name, Site.Name, Stop.Name), L.OffSlabAboveCeiling, 0);
+				if (Stop.bActive)
+				{
+					TestEqual(*FString::Printf(TEXT("%s, %s, %s: every chunk of the band as before under the ceiling is a candidate"), Case.Name, Site.Name, Stop.Name), L.OldBandMissing, 0);
+					TestEqual(*FString::Printf(TEXT("%s, %s, %s: the chunks the spawn's terrain wait reads are candidates"), Case.Name, Site.Name, Stop.Name), L.WaitGridMissing, 0);
+					AirAboveCeilingOnTheGround += (Stop.Altitude == GroundAltitude + 300.0) ? L.OldBandAboveCeiling : 0;
+				}
+				else
+				{
+					TestEqual(*FString::Printf(TEXT("%s, %s, %s: nothing off its slab near the viewer"), Case.Name, Site.Name, Stop.Name), L.OffSlabNear, 0);
+					AirBefore += L.OldBand;
+				}
+			}
+			AddInfo(FString::Printf(TEXT("%s, %s:%s"), Case.Name, Site.Name, *Line));
+
+			// Climbing from 300 over the ground to two chunks over the ceiling unloads none of the band's chunks.
+			{
+				const FVector Flyer = Site.Up * (Case.Radius + Ceiling + 2.0 * ChunkWorld);
+				const FLODQueryContext Context = MakeContext(Flyer);
+				Strategy.Update(Context, 1.0f / 60.0f);
+				TArray<FIntVector> Unload;
+				Strategy.GetChunksToUnload(Unload, LoadedLow, Context);
+				const double GroundRadius = Strategy.GetPlanetGroundRadius(Flyer);
+				const double HalfDiagonal = 0.5 * ChunkWorld * UE_DOUBLE_SQRT_3;
+				int32 BandUnloaded = 0;
+				for (const FIntVector& Coord : Unload)
+				{
+					BandUnloaded += (!InItsSlab(Strategy, Coord)
+						&& FDistanceBandLODStrategy::GetPlanetGroundDistance(FVector::ZeroVector, GroundRadius, Flyer, CentreOf(Coord)) <= NearRadius
+						&& FVector::Dist(CentreOf(Coord), Flyer) <= Strategy.GetUnloadDistance() - HalfDiagonal) ? 1 : 0;
+				}
+				TestEqual(*FString::Printf(TEXT("%s, %s: climbing over the ceiling unloads none of the band's chunks"), Case.Name, Site.Name), BandUnloaded, 0);
+			}
+
+			// A cave three chunks under the surface keeps the band.
+			{
+				const FLook Cave = Look(Strategy, Site.Up * (Case.Radius + GroundAltitude - 3.0 * ChunkWorld));
+				AddInfo(FString::Printf(TEXT("%s, %s, a viewer three chunks underground: band %s, %d off their slab near it (%d below it), the old band %d (%d wholly above the ceiling, %d of the rest not in), %d of the %d chunks around it not in"),
+					Case.Name, Site.Name, Cave.bActive ? TEXT("on") : TEXT("off"), Cave.OffSlabNear, Cave.BelowSlab, Cave.OldBand, Cave.OldBandAboveCeiling, Cave.OldBandMissing, Cave.AroundMissing, Cave.Around));
+				TestTrue(*FString::Printf(TEXT("%s, %s: a viewer in a cave takes the band"), Case.Name, Site.Name), Cave.bActive);
+				TestEqual(*FString::Printf(TEXT("%s, %s: a viewer in a cave streams the band as before"), Case.Name, Site.Name), Cave.OldBandMissing, 0);
+				TestEqual(*FString::Printf(TEXT("%s, %s: a viewer in a cave streams the chunks around it"), Case.Name, Site.Name), Cave.AroundMissing, 0);
+				if (bThickShell)
+				{
+					TestTrue(*FString::Printf(TEXT("%s, %s: the cave's band holds chunks below the slab"), Case.Name, Site.Name), Cave.BelowSlab > 0);
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%s: the band before G52 held %d chunks of air at the stops over the ceiling, and %d wholly above it at 300 over the ground"),
+			Case.Name, AirBefore, AirAboveCeilingOnTheGround));
+		if (bThickShell)
+		{
+			TestTrue(*FString::Printf(TEXT("%s: over the ceiling the band before G52 held air inside the shell"), Case.Name), AirBefore > 0);
+		}
+
+		// A swimmer at the surface of a sea six chunks deep over the lowest seabed of 2,000 directions (where the shell
+		// reaches that high).
+		{
+			FVector SeaSite = FVector::UpVector;
+			double SeabedAltitude = TNumericLimits<double>::Max();
+			for (int32 I = 0; I < 2000; ++I)
+			{
+				const double Z = 1.0 - 2.0 * (I + 0.5) / 2000.0;
+				const double Phi = I * 2.399963229728653;
+				const FVector Direction(FMath::Sqrt(1.0 - Z * Z) * FMath::Cos(Phi), FMath::Sqrt(1.0 - Z * Z) * FMath::Sin(Phi), Z);
+				const double Altitude = Terrain.Altitude(Direction);
+				if (Altitude < SeabedAltitude)
+				{
+					SeabedAltitude = Altitude;
+					SeaSite = Direction;
+				}
+			}
+			const double SeaAltitude = SeabedAltitude + 6.0 * ChunkWorld;
+			if (SeaAltitude + 2.0 * ChunkWorld < ShellTop)
+			{
+				UVoxelWorldConfiguration* SeaConfig = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
+				SeaConfig->PlanetVoxelCutoverAltitude = 1.0e9f;
+				SeaConfig->bEnableWaterLevel = true;
+				SeaConfig->WaterRadius = static_cast<float>(Case.Radius + SeaAltitude);
+				FProbeStrategy SeaStrategy;
+				SeaStrategy.Initialize(SeaConfig);
+				const FVector Swimmer = SeaSite * (static_cast<double>(SeaConfig->WaterRadius) + 90.0);
+				const FLook Sea = Look(SeaStrategy, Swimmer);
+				const FLook Dry = Look(Strategy, Swimmer);
+				AddInfo(FString::Printf(TEXT("%s: a swimmer over a sea %.0f deep: band %s (ceiling %.0f), its chunk %s, %d off their slab near it; without the sea: band %s (ceiling %.0f)"),
+					Case.Name, 6.0 * ChunkWorld, Sea.bActive ? TEXT("on") : TEXT("off"), SeaStrategy.GetPlanetNearBandCeiling(Swimmer),
+					Sea.Visible.Contains(ChunkOf(Swimmer)) ? TEXT("in") : TEXT("out"), Sea.OffSlabNear,
+					Dry.bActive ? TEXT("on") : TEXT("off"), Strategy.GetPlanetNearBandCeiling(Swimmer)));
+				TestTrue(*FString::Printf(TEXT("%s: a swimmer at the sea's surface takes the band"), Case.Name), Sea.bActive);
+				TestTrue(*FString::Printf(TEXT("%s: the swimmer's own chunk streams"), Case.Name), Sea.Visible.Contains(ChunkOf(Swimmer)));
+				TestEqual(*FString::Printf(TEXT("%s: the chunks the spawn's terrain wait reads stream around the swimmer"), Case.Name), Sea.WaitGridMissing, 0);
+				TestEqual(*FString::Printf(TEXT("%s: the swimmer streams the band as before"), Case.Name), Sea.OldBandMissing, 0);
+				TestTrue(*FString::Printf(TEXT("%s: the sea raises the ceiling"), Case.Name),
+					SeaStrategy.GetPlanetNearBandCeiling(Swimmer) > Strategy.GetPlanetNearBandCeiling(Swimmer));
+				SeaConfig->RemoveFromRoot();
+			}
+			else
+			{
+				AddInfo(FString::Printf(TEXT("%s: a sea six chunks deep would reach past the shell (seabed %.0f, shell top %.0f): no sea case"),
+					Case.Name, SeabedAltitude, ShellTop));
+			}
+		}
+		Config->RemoveFromRoot();
+	}
+	return true;
+}
+
 /**
  * WM-BP8 (the planet's D8): a climbing viewer keeps its ground disk. At the four sites on both planets, a viewer climbing
  * from 300 uu to 100,000 uu over the ground keeps every chunk holding the surface within the view distance of its ground
  * point (P6.1: 92 chunks left at 40,000 uu up on the small planet, none from about 50,000); nothing streams farther than
- * the view distance along the ground; off the slab only the near window's chunks, around the viewer's altitude (air
- * around a flyer inside the shell, none above the shell); and the window loaded on the ground unloads none of its
- * surface chunks as the viewer climbs.
+ * the view distance along the ground; off the slab only the near window's chunks, around the viewer's altitude, and none
+ * once the viewer is above the surface slab around it (G52: the band would be air; above the shell none either); and the
+ * window loaded on the ground unloads none of its surface chunks as the viewer climbs.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetGroundHorizonTest,
 	"VoxelWorlds.LOD.Planet.GroundHorizon",
@@ -669,6 +1029,10 @@ bool FPlanetGroundHorizonTest::RunTest(const FString& Parameters)
 				if (ViewerAltitude - NearReach > Strategy.ShellWindowOuterRadius - Case.Radius)
 				{
 					TestEqual(*FString::Printf(TEXT("%s, %s, %.0f up: above the shell nothing streams around the flyer"), Case.Name, Site.Name, Altitude), NotInSlab, 0);
+				}
+				if (!Strategy.IsPlanetNearBandActive(Viewer))
+				{
+					TestEqual(*FString::Printf(TEXT("%s, %s, %.0f up: above the surface slab nothing streams around the flyer"), Case.Name, Site.Name, Altitude), NotInSlab, 0);
 				}
 			}
 			AddInfo(FString::Printf(TEXT("%s, %s: ground disk %d chunks%s"), Case.Name, Site.Name, GroundDisk.Num(), *Climb));
