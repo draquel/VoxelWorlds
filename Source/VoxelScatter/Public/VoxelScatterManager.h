@@ -351,6 +351,74 @@ public:
 		TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource);
 
 	/**
+	 * Which other chunks' extraction reads a chunk's edited voxels, as chunk coordinate offsets from it (world modes review
+	 * G33): the inverse of what MakeExtractionContext reads past a chunk. On a heightmap world (bHeightmapReads) the chunk
+	 * below, whose top layer's voxel above is the bottom layer here (AboveLayerEdits, G26): offset (0, 0, -1) when the edit
+	 * reached local Z 0. On a planet (bPlanetReads) the chunks whose GetPlanetShellNeighbours include this one: offset -D
+	 * for each of their offsets D, when the edit reached local 0 on every axis where D is 1 (a face neighbour reads the
+	 * layer facing it, an edge neighbour the column along the shared edge, the corner neighbour the corner voxel;
+	 * TouchingEdits, G29, G31). Pure.
+	 *
+	 * @param bHeightmapReads Whether extraction reads the voxels over a chunk's top layer (a heightmap world with edits)
+	 * @param bPlanetReads Whether extraction reads the voxels past a chunk's +X, +Y and +Z faces (a planet with edits)
+	 * @param EditMin The lowest chunk-local coordinate the edit reached on each axis (UVoxelEditManager::
+	 *                GetBroadcastEditBounds); null when not known, which gives every chunk that could read it
+	 * @param OutOffsets Receives the offsets (appended)
+	 */
+	static void GetEditReaderOffsets(bool bHeightmapReads, bool bPlanetReads, const FIntVector* EditMin, TArray<FIntVector>& OutOffsets);
+
+	/**
+	 * The chunks whose extraction reads an edited chunk's voxels on this world (GetEditReaderOffsets with this manager's
+	 * world mode and edit layer source, as MakeExtractionContext reads them). The edited chunk itself is not among them.
+	 *
+	 * @param EditedChunk The edited chunk
+	 * @param EditMin The lowest chunk-local coordinate the edit reached on each axis; null when not known
+	 * @param OutChunks Receives the chunk coordinates (appended)
+	 */
+	void GetEditReaders(const FIntVector& EditedChunk, const FIntVector* EditMin, TArray<FIntVector>& OutChunks) const;
+
+	/** One cached chunk's surface points against a fresh extraction now (CompareWithFreshExtraction). */
+	struct FFreshExtractionComparison
+	{
+		FIntVector ChunkCoord = FIntVector::ZeroValue;
+		int32 CachedPoints = 0;
+		int32 FreshPoints = 0;
+		/** Points in one list with no equal point in the other (position to 0.1 uu, normal, material, classification). */
+		int32 ChangedPoints = 0;
+	};
+
+	/** What CompareWithFreshExtraction compared and skipped. */
+	struct FFreshExtractionStats
+	{
+		int32 Compared = 0;
+		int32 Stale = 0;
+		/** Queued or in flight: their cache is about to be replaced. */
+		int32 SkippedPending = 0;
+		/** With a cleared volume (a player edit clears scatter and never re-extracts, by design). */
+		int32 SkippedCleared = 0;
+		int32 SkippedNoVoxels = 0;
+	};
+
+	/**
+	 * Re-run every cached chunk's surface extraction now, from its current voxels and a context made now (the edits of the
+	 * chunks it reads past its faces, the conditioning zones), and compare it with the cached surface points: a chunk whose
+	 * cache differs holds a stale view of something it reads (world modes review G33: a neighbour's edit it was not
+	 * re-extracted for). For audits (voxel.Scatter.EditAudit) and tests; game thread (the extractions run in parallel).
+	 *
+	 * @param VoxelSource A chunk's edit-merged voxels, or null when it has none (the chunk is skipped)
+	 * @param OutStale Receives the chunks whose cache differs, most changed points first
+	 * @return The counts
+	 */
+	FFreshExtractionStats CompareWithFreshExtraction(TFunctionRef<TSharedPtr<const TArray<FVoxelData>>(const FIntVector&)> VoxelSource,
+		TArray<FFreshExtractionComparison>& OutStale) const;
+
+	/** Surface extractions launched since Initialize (each chunk pass on the thread pool), for tests and audits. */
+	int64 GetTotalExtractionsLaunched() const { return TotalExtractionsLaunched; }
+
+	/** RegenerateChunkScatter calls since Initialize, for tests and audits. */
+	int64 GetTotalRegenerations() const { return TotalRegenerations; }
+
+	/**
 	 * Get number of chunks pending scatter generation (queued + in-flight async).
 	 * Used to detect if world is still loading.
 	 */
@@ -800,6 +868,23 @@ protected:
 		const FScatterExtractionContext& Context,
 		FChunkSurfaceData& OutSurfaceData);
 
+	/**
+	 * The extractor a chunk's pass runs: the block-face scan in cubic (bCubic), the radial rays on a planet (the context's
+	 * world mode), the column scan otherwise. The async pass and CompareWithFreshExtraction both call it. Pure and
+	 * thread-safe.
+	 */
+	static void ExtractChunkSurfacePoints(
+		bool bCubic,
+		const TArray<FVoxelData>& VoxelData,
+		const FIntVector& ChunkCoord,
+		const FVector& ChunkWorldOrigin,
+		int32 ChunkSize,
+		float VoxelSize,
+		float PointSpacing,
+		const TArray<FClearedScatterVolume>& ClearedVolumes,
+		const FScatterExtractionContext& Context,
+		FChunkSurfaceData& OutSurfaceData);
+
 	// ==================== Debug ====================
 
 	/** Whether debug visualization is enabled */
@@ -938,6 +1023,12 @@ protected:
 
 	/** Total chunks processed */
 	int64 TotalChunksProcessed = 0;
+
+	/** Surface extractions launched (GetTotalExtractionsLaunched) */
+	int64 TotalExtractionsLaunched = 0;
+
+	/** RegenerateChunkScatter calls (GetTotalRegenerations) */
+	int64 TotalRegenerations = 0;
 
 	/** Total surface points extracted */
 	int64 TotalSurfacePointsExtracted = 0;
