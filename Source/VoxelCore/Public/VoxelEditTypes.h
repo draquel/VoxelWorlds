@@ -466,3 +466,24 @@ struct VOXELCORE_API FVoxelEditOperation
 			+ Description.GetAllocatedSize();
 	}
 };
+
+/**
+ * The chunk-local bounds (inclusive) of the voxels an edit changed in one chunk, which UVoxelEditManager reports while it
+ * broadcasts OnChunkEdited (GetBroadcastEditBounds), so a listener can tell which of the chunk's layers the edit reached:
+ * whether it reached a layer a neighbour's scatter extraction reads (world modes review G33). Empty until a voxel is added.
+ */
+struct FVoxelEditedVoxelBounds
+{
+	FIntVector Min = FIntVector(MAX_int32);
+	FIntVector Max = FIntVector(MIN_int32);
+
+	/** Grow the bounds to include a chunk-local voxel coordinate. */
+	void Add(const FIntVector& Local)
+	{
+		Min = FIntVector(FMath::Min(Min.X, Local.X), FMath::Min(Min.Y, Local.Y), FMath::Min(Min.Z, Local.Z));
+		Max = FIntVector(FMath::Max(Max.X, Local.X), FMath::Max(Max.Y, Local.Y), FMath::Max(Max.Z, Local.Z));
+	}
+
+	/** Whether any voxel was added. */
+	bool IsValid() const { return Min.X <= Max.X; }
+};

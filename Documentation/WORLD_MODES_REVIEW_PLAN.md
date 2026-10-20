@@ -1473,7 +1473,7 @@ Three findings from §13.11 get IDs here:
 | G30 | `UVoxelScatterManager::RemoveChunkScatter` (a chunk's unload) clears the surface cache and, through a short-circuit `||`, not the scatter cache when the surface cache held the chunk: an unloaded chunk's spawn points stay cached, and when it streams back in its extraction is taken for a supplemental pass (the new spawn points appended to the stale ones, the surface data not cached again, so the distance spawn and the audits skip it). Found in §19.5 by the first version of `Scatter.Boundary.ManagerIgnoresGPUFlag` | Fixed (§19.7): `RemoveChunkScatter` removes both caches and an unloaded chunk keeps no scatter state (a queued exclusion regrow is dropped too). Checking the instances found a second way a chunk rendered twice: the distance cleanup's `UVoxelScatterRenderer::ReleaseChunkScatterType` left the pair's queued adds, which were flushed into a type the chunk no longer tracked and survived its unload under the reload's instances (351 to 902 per chunk on `VoxelDemo`); the release drops them now. `voxel.Scatter.Digest` logs a `caches:` line (`ComputeCacheResidency`: chunks without surface data, spawn points against instances per chunk and type, duplicates); tests `Scatter.Reload.{SameAsFresh,DistanceSpawn,ReleaseBeforeFlush}`. Round trips (three stops, each visited twice): on `VoxelDemo` every stable chunk is the same at both visits (old code: 43-57 per stop doubled, no surface data at the second visits, up to 950 unloaded chunks cached); on `Review_Planet` the same holds for every stable chunk clear of the distance spawn's hysteresis bands (old code: 31-61 doubled, up to 27,230 duplicate spawn points) | — |
 | G31 | A planet chunk's scatter lines follow local up at its own centre, so neighbouring chunks' lines do not continue into each other: where they step along different axes (the cube's diagonals) or round their drift differently (a slope near half a voxel a step, and wherever it changes enough between the two chunks' centres), a line top whose ground continues into the neighbour is dropped while the neighbour's lines pass that spot with their crossing on this side of the face, and a strip along the face gets no point; rarely both make it. G29's doubled line tops had covered most of these strips. 27-chunk sites (§19.6, a Gaussian local density of one voxel): the cube corner 398 of 10,803 samples under 0.8 and `Scatter.Planet.DensityPerArea` 96.5% (99.7% with G29's doubles), 30°N 40°E 230, the poles, 45° and the equator none; a slope of exactly half a voxel a step 150 samples over 1.2 and 36 under. Live on `Review_Planet`: 15-933 pairs left at five stops | Fixed (§19.9): planet scatter samples one family of radial rays, one per cell of the cube-sphere grid at the point spacing for every chunk, and each chunk keeps the crossings in its own box (decision D26); the voxels past its +X, +Y and +Z faces are G29's generated voxels with the neighbours' edits, from the seven neighbours on those sides. Tests `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}` per ray at ten sites (no pair, no sample under 0.8 or over 1.2). On `Review_Planet` the pairs at five stops go from 15-933 to 0-1, the samples under 0.8 / over 1.2 from up to 4,175 / 1,684 to none, the stable chunks' spawn points rise 2.5% (the corner 6.7%), the map PNG is identical, and extraction takes 16.5 ms per 64³ chunk against 21.3 ms. No `PlanetGenerationVersion` change | — |
 | G32 | Stale collision strips along chunk faces: a chunk whose collision is cooked before its +X or +Y neighbour's voxels exist keeps a boundary built without them, and nothing re-cooks it when the neighbour loads. In a streamed test world (DC, voxel 75, collision LOD 0) 20 of 3,185 down-traces over plain terrain missed, in voxel-wide strips beside chunk faces; all hit after every chunk was re-cooked once loaded. A capsule stands across such a strip, a line trace does not (found in G24's live check, §19.8's observations) | Fixed 2026-10-19 (§19.10): a cook records the neighbours it read as air, and a neighbour's arrival re-cooks the chunk unless both sides of the boundary are all air (exact) or all solid (a wall buried in the rock, re-cooked by any edit that reaches it: edits now re-cook the edge and corner neighbours they reach too). How common it was: on `VoxelDemo` 217 of 244 cooked chunks at the spawn read a neighbour as air that had data by then (240 of 240 after a teleport), on `Review_Planet` 203 of 208; the fix leaves 0. `voxel.Collision.NeighborRecook`, `voxel.Collision.AuditNeighbors` | — |
-| G33 | A system or editor edit (a POI's terraform) re-extracts scatter only for the edited chunk; the neighbours whose extraction reads its face voxels (a planet chunk's `TouchingEdits` from the seven +X / +Y / +Z neighbours, a heightmap chunk's `AboveLayerEdits`) keep a stale view of it until they reload (found in G31, §19.9; the same holds for G26's and G29's rules) | Deferred until after Phase 6 | — |
+| G33 | A system or editor edit (a POI's terraform) re-extracts scatter only for the edited chunk; the neighbours whose extraction reads its face voxels (a planet chunk's `TouchingEdits` from the seven +X / +Y / +Z neighbours, a heightmap chunk's `AboveLayerEdits`) keep a stale view of it until they reload (found in G31, §19.9; the same holds for G26's and G29's rules). Checked in §19.11: the edit handler re-extracted the edited chunk and its six face neighbours, so a heightmap's one reader (the chunk below) was covered and a planet's three edge readers and corner reader were not, unless edited themselves or a face neighbour of an edited chunk; the other face neighbours re-extracted for nothing | Fixed 2026-10-20 (§19.11): a system or editor edit re-extracts the chunks whose extraction reads the voxels it changed (`UVoxelScatterManager::GetEditReaders`, by the bounds of the changed voxels the edit manager now reports, `GetBroadcastEditBounds`), once each per tick, from their voxels with no re-mesh (`ProcessEditScatterReaders`); player edits unchanged. On `Review_Planet` a second edit beside a first left 3 edge readers stale (67 points) in every run of the rule before and none after; `VoxelDemo` none either way; scatter regenerations per edit 63 → 10 (demo), 63 → 16 (planet), 77 → 12 (a dungeon stamp). `voxel.Scatter.EditReaders`, `voxel.Scatter.EditAudit`, `voxel.Edit.System`, `voxel.Edit.SystemLayers`; tests `Scatter.EditReaders.{Rule,Planet,Plane}` | — |
 | G34 | Wide flat cavity ceilings at about Z 0, the chunk layers' shared plane, under hills near every `VoxelDemo` stop: the layer below's top voxels air and the layer above's bottom voxels solid (1,700 such cells in chunk (−45, −24, 0) near the Tower; §19.5's things to know). Not verified whether the cave configuration means them | Deferred until after Phase 6 (unverified) | — |
 | G35 | A pawn teleported to the exact north pole of a planet kept its old tilt (54.7° off upright after a jump from the cube corner): `UVCMovementComponent::SnapUprightToGravity` skipped the engine's default gravity, which is exactly the north pole's (found in spherical Phase 6's baseline survey, §20.2) | Fixed in P6.1 (§20.2): the snap runs on a planet whatever the gravity; `VoxelCharacter.Planet.Fly` snaps a tilted body at every site | — |
 | G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (over the small planet's pole, inside M and L) and a settle from altitude never lands (§20.2) | Fixed in P6.5 (§20.6): the first spawn searches the whole planet in rings (`FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`, at most 4,096 samples) and spawns at the sea's surface on a planet with no land; the debug settle with no land within reach settles onto the sea; the landing hold (`vox.Fly 0`) holds a falling pawn over uncooked land; `VoxelCharacter.Planet.SpawnAtScale` | WM-BP10, WM-BP11 |
@@ -1493,6 +1493,8 @@ Three findings from §13.11 get IDs here:
 | G50 | The world map zoomed out on a big planet held the game thread for about 1 min 45 s: its marker query (`UPOIMapMarkerSubsystem::GetPlanetMarkersNear`, through `UVCMapMarkerRegistry::GatherMarkersNear`) asked for the whole globe, and P6.1's bound (G37: the cap of the shell within the range) is the whole planet for such a range, so placement generated all of L's 36 million cells; the map refreshes its markers every half second (found in P6.5's L systems check, §20.6) | Fixed in P6.5 (§20.6): the far markers come from at most `PlanetMarkerMaxCells` (20,000) cells around the query's direction (the small planet whole, a fifth of M's 90,774), and the last cap's POIs are reused; `VoxelWorlds.POI.Planet.MapMarkersAtScale` | WM-BP11 |
 | G51 | The world map open on the globe after an `ExploreAll` of a big planet ran at 6.5 FPS (150 ms frames): every tile image that arrived redrew the whole globe (up to 30 times a second), though zoomed out to the albedo the tile images do not show, and the `ExploreAll` had queued 65,536 of them (found in P6.5, M with the cap raised to its 16 million tiles, §20.6) | Fixed in P6.5 (§20.6): at the albedo's zoom only the albedo's arrival redraws at once, tile arrivals at most every 2 s (`UVCWorldMapWidget`); 60 FPS with the map open | WM-BP11 |
 | G52 | A descending viewer spends much of the window's generation on air: the window's near band (the viewer's altitude ± 2 chunks within 16,600 uu, P6.3's rule for flyers near the ground and caves) follows the streaming viewer down, so from 100 km up it loads a new layer of empty chunks around it every second while the ground disk streams back at 60-80 chunks a second; a 5,000 uu/s descent onto M from 200,000 (the cut-over at three view distances, resumed at about 100,000) touched down with 47-130 chunks queued, catch-up 1.1-3.6 s against 0.36 with the window kept (found in P6.5's re-run benches, §20.6) | Open: take the near band only while the viewer is within a few chunks of its surface slab (above it the band is air, and edited chunks are pinned anyway); `LOD.Planet.SurfaceSlab`'s expectation changes with it | WM-BP10 |
+| G53 | `UVoxelEditManager::CurrentEditCenter` / `CurrentEditRadius` were set by `ApplyBrushEdit` and never reset, so every later operation of single-voxel edits (a POI's terraform, a dungeon stamp, water propagation) broadcast `OnChunkEdited` with the last brush's centre and radius: after the player's first dig, the surface navigation invalidated around that dig instead of the terraform, G32's edge and corner collision re-cook judged the wrong sphere, and water propagation rescanned the old dig on each of its own batches (found in G33, §19.11) | Fixed 2026-10-20 (§19.11): the centre and radius are reset when an operation ends, so only a brush's operation reports one; `Scatter.EditReaders.Rule` | — |
+| G54 | A system edit that left a chunk no surface (dug its ground away) kept its scatter instances: `RegenerateChunkScatter` keeps them until the re-extraction replaces them, and a pass that found no surface completed without a result, so they stood on the removed terrain until the chunk unloaded (found by `Scatter.EditReaders.Plane`, §19.11) | Fixed 2026-10-20 (§19.11): a pass with no surface removes the instances of a chunk that has no scatter cache (`ProcessCompletedAsyncScatter`); the test's dug chunk 11 instances → 0 | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -4795,6 +4797,184 @@ catch-up are the same; the collision section's mean rises by 0.03 ms.
 chunk faces (every world cooks at LOD 0); the bottom layer of the window keeps the wall toward the layer under it, which
 never loads; the thrash of a collision radius smaller than the chunk under the viewer.
 
+### 19.11 G33: system edits re-extract the chunks that read them (2026-10-20)
+
+Bases: VoxelWorlds `b63f908`, UE5_PluginDev `099f3c2` (G32 merged). Branches `fix/g33-scatter-edit-readers`
+(VoxelWorlds) and `claude/g33-scatter-edit-readers` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program
+Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8092), background throttling off. Live runs on `VoxelDemo`
+and on `PlanetTest` with `/Game/PluginTesting/Review/Review_Planet` through `voxel.ConfigOverride`; planets extract
+scatter on the CPU.
+
+**What happened before** (checked in the code; the row overstated it). On a system or editor edit the chunk manager's
+edit handler (`EditManager->OnChunkEdited` in `UVoxelChunkManager::Initialize`) called `RegenerateChunkScatter` for the
+edited chunk and its six face neighbours and marked all seven dirty; `RegenerateChunkScatter` only drops the caches, and
+the re-extraction came with each chunk's re-mesh hand-off. The chunks whose extraction reads an edited chunk's voxels
+(`MakeExtractionContext`) are others:
+
+- **Heightmap and cubic:** the chunk below, whose top layer's voxel above is the edited chunk's bottom layer
+  (`AboveLayerEdits`, G26). It is a face neighbour, so it was never missed. The other five face neighbours
+  re-extracted for nothing.
+- **Planets:** the seven chunks at -X / -Y / -Z, whose last cells read one layer past their +X / +Y / +Z faces
+  (`TouchingEdits`, G29, G31): a face neighbour reads the layer facing it, an edge neighbour the column along the shared
+  edge, the corner neighbour the corner voxel. The three face readers were covered. The three edge readers and the corner
+  reader were not, unless they were edited themselves or were a face neighbour of an edited chunk (and then they
+  re-extracted for that broadcast, not for later ones). The +X / +Y / +Z face neighbours re-extracted for nothing.
+
+So a heightmap never kept a stale view, and a planet kept one only where an edit reached a chunk's edge column or corner
+voxel without reaching the chunks that share it. A convex region that reaches an edge column almost always reaches one of
+those chunks too, whose face neighbour the edge reader is. A region whose min corner is chunk-aligned on two axes does not,
+nor does a second edit that lands after the first one re-extracted its readers (the live repro below).
+
+**G53 (found while tracing).** `UVoxelEditManager::CurrentEditCenter` / `CurrentEditRadius` were set by `ApplyBrushEdit`
+and never reset. Every later operation of single-voxel edits (a POI's terraform, a dungeon stamp, water propagation: a
+`BeginEditOperation` / `ApplyEdit` / `EndEditOperation` batch) broadcast `OnChunkEdited` with the last brush's centre and
+radius. In a session where the player had dug once:
+
+- the surface navigation invalidated around that dig instead of the terraform (P6.5 had made centreless edits use the
+  chunk's bounds, but these were not centreless);
+- G32's edge and corner collision re-cook judged the old dig's sphere and re-cooked none of them;
+- water propagation rescanned the old dig for seeds on each of its own batches.
+
+A sphere could not have bounded G33's re-extraction either, for the same reason.
+
+**What changed.**
+
+- **VoxelCore.** `UVoxelEditManager::GetBroadcastEditBounds` gives, during each `OnChunkEdited` broadcast, the chunk-local
+  bounds of the voxels the edit changed in that chunk (`FVoxelEditedVoxelBounds`; every broadcast site goes through
+  `BroadcastChunkEdited`):
+  - operations from the voxels their edits touched (removals included);
+  - undo and redo from the voxels they revert or re-apply;
+  - a clear from the cleared layer, a load from the loaded edits.
+
+  `EndEditOperation` and `CancelEditOperation` reset the centre and radius, so only a brush's operation reports one (G53).
+- **VoxelScatter.**
+  - `UVoxelScatterManager::GetEditReaderOffsets` (pure) and `GetEditReaders`: the inverse of what `MakeExtractionContext`
+    reads, under the same conditions, by the layers the edit reached. A planet's reader at -D needs the edit to reach
+    local 0 on every axis where D is 1; a heightmap's chunk below needs local Z 0.
+  - `CompareWithFreshExtraction`: every cached chunk's surface points against an extraction run now from its edit-merged
+    voxels and a context made now. It skips chunks queued or in flight and chunks with a cleared volume (a player edit
+    only clears, by design).
+  - `ExtractChunkSurfacePoints`: the one extractor dispatch, used by the async pass and the comparison.
+  - Counters `GetTotalExtractionsLaunched` and `GetTotalRegenerations`.
+- **VoxelStreaming.**
+  - The edit handler: for a system or editor edit it regenerates the edited chunk as before (its re-mesh re-extracts it) and
+    collects its readers. `UVoxelChunkManager::ProcessEditScatterReaders`, each tick before the scatter manager's update,
+    re-extracts each reader once from its voxels (`RegenerateChunkScatter`, then `HandOffChunkScatter`, the hand-off a
+    mesh completion makes), with no re-mesh.
+  - Readers edited in the same tick are folded: their own re-mesh re-extracts them, after every edit of the tick.
+  - Readers without voxel data are skipped: their extraction reads the edit when they load.
+  - Player edits are unchanged: they clear in a radius and never re-extract.
+  - `voxel.Scatter.EditReaders` (1; 0 = the rule before, the six face neighbours, for A/B) and
+    `UVoxelChunkManager::GetEditScatterStats`.
+- **G54 (found by the tests).** A re-extraction that finds no surface (a system edit that dug a chunk's ground away)
+  completes without a result, so the instances `RegenerateChunkScatter` keeps for the replacement stayed, standing on the
+  removed terrain until the chunk unloaded. `ProcessCompletedAsyncScatter` now removes a chunk's instances when its pass
+  finds no surface and it has no scatter cache (a supplemental pass keeps what it has).
+- **Tooling** (kept):
+  - `voxel.Scatter.EditAudit [maxLines]` runs `CompareWithFreshExtraction` and logs the stale chunks with a `vox.TP` to
+    each and whether each reads an edited chunk, has edits itself, or neither. It also logs the edit statistics and the
+    rule, and writes `Saved/VoxelAudit/EditAudit_<world>_<time>.csv`. It takes 2 to 4 s for 150 to 250 chunks.
+  - `voxel.Edit.System <x y z | pawn> <radius> [dig|fill] [none|edge|corner]` (a sphere brush with System source,
+    optionally on the nearest chunk edge along local up or the nearest corner).
+  - `voxel.Edit.SystemLayers <x y z | pawn> [dig|fill] [axes] [depth]` (the min-face layers of the chunk holding the
+    point).
+
+  Both log the chunks they edited and, for each, the chunks that read it.
+
+**Design choices made while building.**
+
+| Question | Choice | Why |
+|----------|--------|-----|
+| Which chunks | The inverse of `MakeExtractionContext`'s reads, beside it in the scatter manager | The rule cannot drift from what extraction reads; a face-neighbour list was both too wide and too narrow |
+| How far an edit reaches | The bounds of the voxels it changed, from the edit manager | System edits are batches of single-voxel edits with no centre (and until G53 a stale one); a sphere bounds nothing for them |
+| How a reader re-extracts | From its voxels in the next tick, no re-mesh | Its voxels did not change; the rule before re-meshed the face neighbours for it, and a re-mesh whose state changed in flight hands nothing to scatter |
+| Duplicates | One set drained per tick; readers edited in the same tick folded | One edit spans many chunks, and several share readers |
+| The face neighbours' re-mesh | Kept | Meshing and collision are not G33's (see below) |
+
+**Tests** (`VoxelStreaming/Tests/VoxelScatterEditReadersTests.cpp`, new):
+
+| Test | What it checks | Result |
+|------|------|------|
+| `Scatter.EditReaders.Rule` | `GetEditReaderOffsets` by the layers an edit reached; the bounds and centre `OnChunkEdited` reports for a batch across two chunks, a brush, a batch after a brush, an undo and a clear | Heightmap: none for an edit inside a chunk or on its -X layer only, the chunk below for its bottom layer or unknown bounds. Planet: one reader for a face layer, three for an edge column, seven for the corner or unknown bounds. Exact bounds per chunk; the batch after a brush reports radius 0 and no centre (the brush's 150 before, G53) |
+| `Scatter.EditReaders.Planet` | A streamed small planet (R 20,000, voxel 50, chunk 32, rays a voxel apart) at the equator (local up +X): a system edit digs the three min-face layers of a surface chunk (2,977 voxels), no other chunk edited. Its seven readers' re-extraction after the edit (`OnChunkScatterReady`), every cached chunk against a fresh extraction, and the regenerations for it and for an edit inside the chunk, with the rule before and after | Rule 0: the edge reader beside it is not re-extracted and is stale (G33 reproduced); 7 regenerations (the chunk and its six face neighbours), 7 for an edit inside. Rule 1: every reader with points re-extracted, their points changed, 0 of 13 cached chunks stale; 8 regenerations (the chunk and its seven readers), 1 for an edit inside |
+| `Scatter.EditReaders.Plane` | A streamed plane (voxel 50, chunk 32): a system edit digs a chunk's bottom layer where the ground lies within G26's band over the chunk below's top (1,024 voxels), then an edit inside the chunk, then a dig of the whole chunk | Both rules: the chunk below re-extracted, its points changed, 0 of 27 stale. Regenerations 7 → 2 for the bottom layer and 7 → 1 inside. The whole chunk dug: 11 instances before and 11 after without G54's fix, 0 after with it |
+
+Suites `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 555/555 headless and 555/555 in
+the editor with the GPU tests running, no device loss (G32's 552 and the three above); the 108 GPU parity lines CRC-identical
+to G32's (scatter and the edit notification only; no generation or meshing change). The A/Bs below ran on the build before
+G54's fix, which removes an empty pass's instances and changes no surface point or spawn point the audit and the digests
+compare; the suites ran on the final code.
+
+**A/B on `VoxelDemo`.** The cvar in one build, a fresh PIE per run, input blocked, the clock and NPC AI frozen, a
+throwaway run, then three runs per rule, interleaved. Each run:
+
+1. The spawn (60 s), the map capture and the audit with the per-chunk digest (`voxel.Scatter.Digest file`), streaming
+   frozen for both.
+2. Two system edits beside the pawn: `voxel.Edit.System pawn 700 dig edge` (a sphere on the nearest chunk edge, eight
+   chunks over two layers) and `voxel.Edit.SystemLayers pawn dig xyz` (the pawn's chunk's three min-face layers). Then
+   30 s, the map capture, the audit and the digest.
+3. `vox.TP` to the Village, the Tower and the City, 60 s each, the audit and the digest at each.
+
+| Stop | Stale chunks, rule 0 / 1 | System broadcasts so far | Scatter regenerations so far, rule 0 / 1 |
+|------|------|------|------|
+| Spawn | 0 / 0 (246 compared) | 0 | 0 / 0 |
+| After the two edits | 0 / 0 (246) | 9 | 63 / 10 |
+| Village | 0 / 0 (247) | 29 | 83 / 30 |
+| Tower | 0 / 0 (223-230) | 29 | 83 / 30 |
+| City | 0 / 0 (232) | 29 | 83 / 30 |
+
+- The same in every run of a rule. The chunks every run holds (246, 246, 247, 215, 232) have the same digest under both
+  rules at every stop. The map PNG is the same, byte for byte, in all six runs, at the spawn and after the edits.
+- The two edits made 9 broadcasts. Rule 0 regenerated 54 face neighbours for them; rule 1 one reader (the layers
+  edit's chunk below), with the four lower chunks of the sphere folded (edited themselves).
+- The Village's POI terraform made 20 broadcasts on chunks not loaded yet. Rule 0 had no tracked face neighbour to
+  regenerate, and rule 1's readers were all folded. Their extraction reads the edits when they load.
+
+**A/B on `Review_Planet`.** The same script. The edits beside the pawn are at the spawn, the north pole (the sphere on the
+edge along +Z at (0, 0), the layers edit on chunk (0, 0, 52)). The stops are `vox.TPLatLon` 45°N 0°E, 0° 90°E,
+60°S 120°W, and `vox.TPPOI Dungeon` (a tiled dungeon 3.2 km away, stamped as it streams in).
+
+| Stop | Stale chunks, rule 0 / 1 | System broadcasts so far | Scatter regenerations so far, rule 0 / 1 |
+|------|------|------|------|
+| Spawn | 0 / 0 (157 compared) | 0 | 0 / 0 |
+| After the two edits | **3** (67 points) / 0 (157) | 9 | 63 / 16 |
+| 45°N 0°E | 0 / 0 (182) | 27 | 81 / 34 |
+| Equator 90°E | 0 / 0 (176) | 27 | 81 / 34 |
+| 60°S 120°W | 0 / 0 (180) | 27 | 81 / 34 |
+| Tiled dungeon | 0 / 0 (193) | 38 | 158 / 46 |
+
+- **G33 reproduced, in all three rule-0 runs:** chunks (0, -1, 51), (-1, 0, 51) and (-1, -1, 52) held 57, 8 and 2 changed
+  points against a fresh extraction. They are the layers edit's edge readers, edited themselves by the sphere a second
+  earlier, so the rule before re-extracted them for the sphere and not for the layers edit. The corner reader
+  (-1, -1, 51) held the same points either way.
+- **Rule 1:** 0 stale at every stop. The layers edit re-extracted its seven readers, and the sphere's readers were folded.
+- **Digests and map:** of the chunks every run holds (157, 157, 182, 176, 180, 193) one differs between the rules, the
+  stale edge reader (0, -1, 51) after the edits, whose spawn points rule 0 never updated. The map PNG is the same in all
+  six runs.
+- **The tiled dungeon's stamp:** 11 broadcasts on loaded chunks. Rule 0 regenerated 66 face neighbours; rule 1 one reader,
+  with 8 folded.
+- **The 45°N stop:** 18 broadcasts on chunks not loaded yet, which neither rule re-extracts.
+
+**The scatter work per edit.**
+
+- **On loaded chunks** rule 1 regenerates the edited chunk and the readers the edit reached that were not edited in the
+  same tick. Rule 0 regenerated the edited chunk and its six face neighbours.
+- **Over the runs:** 10 against 63 regenerations for the demo's two edits, 16 against 63 for the planet's, 12 against 77
+  for the dungeon stamp.
+- **In worker time:** a planet extraction costs 16.5 ms per 64³ chunk (§19.9), so the dungeon stamp saves about a second
+  of worker time.
+- **Unchanged:** the face neighbours' re-mesh hand-off still runs. It re-extracts nothing for a chunk whose types are done,
+  and as before relaunches an extraction for a chunk that never had a surface (no types are recorded for an empty pass).
+
+**Left as they were** (noticed, not fixed):
+
+- The edit handler still re-meshes the edited chunk's six face neighbours (render) and re-cooks their collision. Since
+  seam ownership a chunk's mesh reads no neighbour data, so the render re-mesh is probably unneeded.
+- `UVCMovementComponent`'s embed check after an edit (`OnVoxelChunkModified`) goes by the edit's centre and radius, which
+  a system edit does not have (a stamp at the pawn arms no check). The bounds would serve it.
+- `UVoxelScatterManager::GenerateChunkScatterFromPending` is not called and has no planet branch.
+- A chunk whose extraction finds no surface records no completed types, so each re-mesh hand-off relaunches it.
+
 ## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17, done 2026-10-19)
 
 The requirements doc's optional Phase 6 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-H1
@@ -4813,7 +4993,7 @@ at scale) done 2026-10-19, §20.4; P6.4 (the far field) done 2026-10-19, §20.5;
 - Deferred until after Phase 6 (none blocks it; none is fixed during Phase 6 unless it turns out to): G14 (tooling), G16
   and G25 (cosmetic), G19 (documented), G28 (low), and three recorded in §14.1 with Phase 6's first commit: G32 (stale
   collision strips along chunk faces, §19.8's observations; fixed 2026-10-19 alongside P6.5, §19.10), G33 (a system edit re-extracts only the edited chunk's
-  scatter, found in G31) and G34 (flat cavity ceilings at Z 0, §19.5); also §19.8's stride-2 collision cracks and
+  scatter, found in G31; fixed 2026-10-20, §19.11, with G53 and G54 found on the way) and G34 (flat cavity ceilings at Z 0, §19.5); also §19.8's stride-2 collision cracks and
   small-`ViewDistance` collision thrash, and §19.9's one GPU-against-CPU-shell pair (accepted).
 
 Bases: VoxelWorlds `2fd32fc`, UE5_PluginDev `f737a3c` (spherical Phase 5 merged). Refreshed on 2026-10-18 onto main after

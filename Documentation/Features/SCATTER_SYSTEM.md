@@ -26,7 +26,8 @@ VoxelChunkManager
     │       └── VoxelScatterRenderer (HISM instance management)
     │               Game thread only
     │
-    └── OnChunkEdited() ──► ClearScatterInRadius() or RegenerateChunkScatter()
+    └── OnChunkEdited() ──► ClearScatterInRadius() (player) or RegenerateChunkScatter() (system / editor: the edited
+                            chunk and the chunks whose extraction reads its edited voxels, see Edit Integration)
 ```
 
 ## Key Components
@@ -616,6 +617,37 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
     // ...
 }
 ```
+
+### System and Editor Edits: the Chunks That Read Them
+
+A system or editor edit (a POI's terraform, a dungeon stamp, an undo, a clear, a load) re-extracts scatter. Two kinds of
+chunk need it (world modes review G33, `WORLD_MODES_REVIEW_PLAN.md` §19.11):
+
+- **The edited chunk.** The chunk manager's edit handler calls `RegenerateChunkScatter` (the caches are dropped, the
+  instances stay until the re-extraction replaces them per type) and marks the chunk dirty; its re-mesh hands its
+  edit-merged voxels to scatter.
+- **The chunks whose extraction reads its edited voxels**, from past their own faces (`FScatterExtractionContext`):
+  - on a heightmap world, the chunk below: the voxel over its top layer is the edited chunk's bottom layer
+    (`AboveLayerEdits`, G26);
+  - on a planet, the seven chunks at -X, -Y and -Z: a planet chunk's last cell on each axis reads the voxels past its +X,
+    +Y and +Z faces (`TouchingEdits`, G29, G31). A face neighbour reads the layer facing it, an edge neighbour the column
+    along the shared edge, the corner neighbour the corner voxel.
+
+  `UVoxelScatterManager::GetEditReaders` gives them for the layers the edit reached: `UVoxelEditManager::GetBroadcastEditBounds`
+  reports, during each `OnChunkEdited` broadcast, the bounds of the voxels the edit changed in that chunk. The handler
+  collects them, and `UVoxelChunkManager::ProcessEditScatterReaders` re-extracts each once per tick from its voxels
+  (`RegenerateChunkScatter`, then the same hand-off as a mesh completion), with no re-mesh: their own voxels did not
+  change. A reader edited in the same tick is skipped (its own re-mesh re-extracts it, after the edits), and so is one
+  without voxel data (its extraction reads the edit when it loads). `voxel.Scatter.EditReaders 0` restores the rule
+  before G33 (the edited chunk's six face neighbours), for A/B.
+
+Player edits are unchanged: they only clear scatter in a radius (above) and never re-extract.
+
+`voxel.Scatter.EditAudit [maxLines]` checks the result: it re-runs every cached chunk's extraction now
+(`UVoxelScatterManager::CompareWithFreshExtraction`: the chunk's edit-merged voxels and a context made now) and lists
+the chunks whose cache differs, whether each reads an edited chunk, and what system edits did to scatter
+(`UVoxelChunkManager::GetEditScatterStats`). `voxel.Edit.System` and `voxel.Edit.SystemLayers` make system edits for it
+(a sphere, optionally on the nearest chunk edge or corner; a chunk's min-face layers).
 
 ## Configuration
 
