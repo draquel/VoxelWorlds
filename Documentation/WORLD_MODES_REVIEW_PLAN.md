@@ -1492,7 +1492,7 @@ Three findings from §13.11 get IDs here:
 | G49 | A fast descent that stops above the cut-over resumes the window for a moment: the descent prefetch's lead puts the streaming viewer under the resume altitude while the camera is still coming down, and when the camera stops the lead decays and the window suspends again. On L, `vox.FlyTo` from 10⁷ to 60,000 uu (about 20,000 uu/s at its end) resumed for 0.7 s: 56 chunks loaded and about 1,100 queued generations dropped (found in P6.5's L survey, §20.6) | Open (low): the price of the prefetch's speculation, one resume and suspension per stop; a dwell before suspending again, or a lead bounded by how fast the camera can stop, would trade it against suspension latency | WM-BP10 |
 | G50 | The world map zoomed out on a big planet held the game thread for about 1 min 45 s: its marker query (`UPOIMapMarkerSubsystem::GetPlanetMarkersNear`, through `UVCMapMarkerRegistry::GatherMarkersNear`) asked for the whole globe, and P6.1's bound (G37: the cap of the shell within the range) is the whole planet for such a range, so placement generated all of L's 36 million cells; the map refreshes its markers every half second (found in P6.5's L systems check, §20.6) | Fixed in P6.5 (§20.6): the far markers come from at most `PlanetMarkerMaxCells` (20,000) cells around the query's direction (the small planet whole, a fifth of M's 90,774), and the last cap's POIs are reused; `VoxelWorlds.POI.Planet.MapMarkersAtScale` | WM-BP11 |
 | G51 | The world map open on the globe after an `ExploreAll` of a big planet ran at 6.5 FPS (150 ms frames): every tile image that arrived redrew the whole globe (up to 30 times a second), though zoomed out to the albedo the tile images do not show, and the `ExploreAll` had queued 65,536 of them (found in P6.5, M with the cap raised to its 16 million tiles, §20.6) | Fixed in P6.5 (§20.6): at the albedo's zoom only the albedo's arrival redraws at once, tile arrivals at most every 2 s (`UVCWorldMapWidget`); 60 FPS with the map open | WM-BP11 |
-| G52 | A descending viewer spends much of the window's generation on air: the window's near band (the viewer's altitude ± 2 chunks within 16,600 uu, P6.3's rule for flyers near the ground and caves) follows the streaming viewer down, so from 100 km up it loads a new layer of empty chunks around it every second while the ground disk streams back at 60-80 chunks a second; a 5,000 uu/s descent onto M from 200,000 (the cut-over at three view distances, resumed at about 100,000) touched down with 47-130 chunks queued, catch-up 1.1-3.6 s against 0.36 with the window kept (found in P6.5's re-run benches, §20.6) | Open: take the near band only while the viewer is within a few chunks of its surface slab (above it the band is air, and edited chunks are pinned anyway); `LOD.Planet.SurfaceSlab`'s expectation changes with it | WM-BP10 |
+| G52 | A descending viewer spends much of the window's generation on air: the window's near band (the viewer's altitude ± 2 chunks within 16,600 uu, P6.3's rule for flyers near the ground and caves) follows the streaming viewer down, so from 100 km up it loads a new layer of empty chunks around it every second while the ground disk streams back at 60-80 chunks a second; a 5,000 uu/s descent onto M from 200,000 (the cut-over at three view distances, resumed at about 100,000) touched down with 47-130 chunks queued, catch-up 1.1-3.6 s against 0.36 with the window kept (found in P6.5's re-run benches, §20.6) | Fixed (§20.7): the near band reaches no higher than its ceiling, the top of the surface slab over the near disk (or the sea's surface) + 1.5 chunks, and a viewer above it takes none (`FDistanceBandLODStrategy::GetPlanetNearBandCeiling`); the descent's catch-up 0.17-0.22 s on M and L against 1.70-2.83 with the old band and 0.17-0.31 with the window kept; `LOD.Planet.NearBand`, `LOD.Planet.SurfaceSlab` | WM-BP10 |
 | G53 | `UVoxelEditManager::CurrentEditCenter` / `CurrentEditRadius` were set by `ApplyBrushEdit` and never reset, so every later operation of single-voxel edits (a POI's terraform, a dungeon stamp, water propagation) broadcast `OnChunkEdited` with the last brush's centre and radius: after the player's first dig, the surface navigation invalidated around that dig instead of the terraform, G32's edge and corner collision re-cook judged the wrong sphere, and water propagation rescanned the old dig on each of its own batches (found in G33, §19.11) | Fixed 2026-10-20 (§19.11): the centre and radius are reset when an operation ends, so only a brush's operation reports one; `Scatter.EditReaders.Rule` | — |
 | G54 | A system edit that left a chunk no surface (dug its ground away) kept its scatter instances: `RegenerateChunkScatter` keeps them until the re-extraction replaces them, and a pass that found no surface completed without a result, so they stood on the removed terrain until the chunk unloaded (found by `Scatter.EditReaders.Plane`, §19.11) | Fixed 2026-10-20 (§19.11): a pass with no surface removes the instances of a chunk that has no scatter cache (`ProcessCompletedAsyncScatter`); the test's dug chunk 11 instances → 0 | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
@@ -5850,7 +5850,7 @@ equator, with the planet drawn at every altitude. Above a cut-over altitude the 
 alone draws the planet. The window streams back ahead of the descending camera. Landing is on cooked ground or in the
 water. The sky and its clouds are scaled to the planet. The spawn, the map, the NPC cells, navigation and scatter work on
 the 1,000 km planet. Fixed on the way: G36 and G41 (planned), plus G46-G48, G50 and G51, found during the surveys (G47 and G50 had made a
-dungeon stamp and the world map on L hold the game thread for minutes). G49 and G52 are recorded. G45 stays open.
+dungeon stamp and the world map on L hold the game thread for minutes). G49 and G52 are recorded (G52 fixed since, §20.7). G45 stays open.
 
 The cut-over's default changed during the milestone: from the view distance to three view distances, after the descent
 benches. Budgets hold (D3: at most 964 MB peak, 491-543 MB settled with the far field). In orbit the voxel systems hold
@@ -6147,7 +6147,7 @@ them):
   - L: 0.17-3.66 s, against 0.17 kept.
   - From one view distance this was 4.91-6.11 s.
   - What remains is G52: the near band follows the descending viewer through the air and takes much of the generation
-    the ground disk needs.
+    the ground disk needs. Fixed in §20.7: the descent's catch-up is now 0.17-0.22 s on M and L.
   - Peak memory is 868-964 MB, against 525-894 kept, under D3's 1.5 GB.
   - The frame P95 on the way down is lower than with the window kept (27.6-27.8 against 31.3-31.8 ms on M and L).
 - **Budgets (D3):** peak voxel systems at most 964 MB (1.5 GB allowed); settled 491-543 MB with the far field (0.6 GB
@@ -6211,7 +6211,7 @@ main checkout, which holds the user's own edits to the demo's configuration.
 | G49 | A fast descent stopping above the cut-over resumes the window for a moment (the prefetch's lead decays): on L 0.7 s, 56-86 chunks loaded and about 1,100 queued generations dropped | Open (low): the price of the speculation, once per stop |
 | G50 | The world map zoomed out on L held the game thread about 1 min 45 s: its marker query generated every POI cell of the planet | Fixed: at most `PlanetMarkerMaxCells` cells around the view's centre, the last cap reused |
 | G51 | The globe open after an `ExploreAll` of M ran at 6.5 FPS: each of the 65,536 queued tile images redrew it, though at the albedo's zoom they do not show | Fixed: tile arrivals redraw the albedo globe at most every 2 s; 60 FPS |
-| G52 | A descending viewer spends much of the window's generation on air: the near band (the viewer's altitude ± 2 chunks) follows it down, and a 5,000 uu/s descent onto M or L lands with up to 130 chunks queued (catch-up up to 3.7 s, against 0.2-0.4 with the window kept) | Open: take the near band only within a few chunks of the surface slab |
+| G52 | A descending viewer spends much of the window's generation on air: the near band (the viewer's altitude ± 2 chunks) follows it down, and a 5,000 uu/s descent onto M or L lands with up to 130 chunks queued (catch-up up to 3.7 s, against 0.2-0.4 with the window kept) | Fixed in §20.7: the near band reaches no higher than the top of the surface slab around the viewer |
 
 G36 and G41 are fixed (above); G45 stays open: the far field draws one material a quad, and since the cut-over the
 quads show under the viewer too (`p65_L_equator_fly_60000_view`), not only at the horizon and from orbit.
@@ -6231,6 +6231,148 @@ Still open from Phase 6:
 - G44: the LOD 2 ring's lighting.
 - G45: stepped far-field materials.
 - G49: the prefetch's speculation.
-- G52: the near band during descents.
 
-Deferred since before Phase 6: G14, G16, G19, G25, G28 and G32-G34.
+G52 (the near band during descents) is fixed in §20.7.
+
+Deferred since before Phase 6: G14, G16, G19, G25, G28 and G34 (G32 and G33 fixed since, §19.10 and §19.11).
+
+### 20.7 G52: the near band reaches no higher than the slab (2026-10-20)
+
+Bases: VoxelWorlds `2dc80ac`, UE5_PluginDev `5f6a8f2` (P6.5 merged). Branches `fix/g52-near-band-air` (VoxelWorlds) and
+`claude/g52-near-band-air` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+worktree editor (Claudius on 8091), background throttling off.
+
+**The cause.** P6.3's near band (`IsInPlanetWindow`, Load) adds, within `GetNearWindowRadius` (16,600 uu) of the viewer
+along the ground, the chunks off their slab that meet the viewer's altitude ± 2 chunks: caves, dungeons and digging
+under the surface, and the chunks a terrain wait reads around the viewer. It followed the streaming viewer at any
+altitude inside the shell, and the shells of `Review_Planet_M` and `_L` reach about 2 km over the datum. Every chunk it
+added there was air. It cost three things:
+
+- **Descending.** At 5,000 uu/s the viewer crosses a chunk layer a second, and the band loaded a new layer of air around
+  it each second. These chunks were the nearest to the viewer, so they generated first. The queue evicts by the horizon
+  alone (along the ground, where they are at 0), so layers the viewer had passed still generated. The descent from
+  200,000 peaked at 1,331-1,356 loaded chunks against 1,081-1,105, re-meshed 1,220 chunks for LOD changes against about
+  160, and the window touched down 1.7-2.8 s behind the camera (the clean runs below; 0.8-12 s in P6.5's and this
+  session's busier runs).
+- **Climbing.** The same layers went up with a climbing viewer to the cut-over: a climb to 200,200 peaked at 1,534-1,547
+  chunks against 1,090-1,123, with 1,320-1,338 LOD re-meshes against 78-80 and a frame P95 of 23.5-23.8 ms against 16.7.
+- **With the window kept** (`voxel.World.VoxelCutover 0`, P6.4's behaviour and P6.5's control), both, all the way down
+  and up.
+
+**The fix** (`FDistanceBandLODStrategy`):
+
+- **The band's ceiling** (`GetPlanetNearBandCeiling`): the top of the surface slab over the near disk, plus
+  `SlabSlackChunks` (1.5). That is the highest analytic surface the near chunks' slabs read: `GetPlanetSurfaceEnvelope`
+  over the near radius's widest angle (at the shell's inner radius, plus half a chunk diagonal, `PlanetNearBandAngle`),
+  memoized by the viewer's cell. Where the sea's surface is higher, the ceiling is the sea's surface plus the same slack.
+- **The rule.** The band reaches no higher than the ceiling: its Load top is the viewer's altitude + 2 chunks or the
+  ceiling, whichever is lower. A viewer above the ceiling takes no band (`IsPlanetNearBandActive`).
+  `ForEachPlanetCandidate` enumerates the band's Load to the ceiling only.
+- **Why nothing is lost.** Every near chunk's slab reads cells inside the envelope, so its slab top is at most the
+  ceiling. A chunk off its slab that lies wholly above the ceiling therefore lies above its own slab: air, unless edited,
+  and the chunk manager pins edited chunks. With the viewer above the ceiling, no band chunk can lie below its slab
+  either (the band's bottom, 2 chunks under the viewer, is over every slab bottom in the disk), so the whole band is air.
+- **What keeps the band:**
+  - viewers inside or below the slab (caves, dungeons, a flyer near the ground);
+  - the spawn's terrain wait: its 3 × 3 grid in the tangent plane at the pawn and the chunk under its feet lie under
+    the ceiling;
+  - the settle onto the sea, which waits for the chunk at the sea's surface to cook. This is why the sea is in the
+    ceiling.
+- **The keep window is unchanged:** a viewer crossing the ceiling unloads nothing near it, so the band does not churn
+  there.
+- **The first version** dropped the band above the ceiling but did not cap it. The benches showed the band switching back
+  on at the ceiling about 1.5 s before landing and queueing 55-65 chunks of air at its top (the chunks between the slab
+  top and the viewer + 2 chunks), which the old band had loaded on its way down: on the busy first batch L touched down
+  1.0-1.6 s behind, the window kept as well (it ran the same rule), and on the quiet machine 0.28-0.44 s (the "no cap"
+  rows below). Hence the cap.
+- `GetPlanetSurfaceEnvelope` takes the caller's memo (the load disk's and the near disk's are kept apart), and
+  `GetDebugInfo` prints the band's state and ceiling.
+
+Heightmap worlds are unchanged: their near window is already clipped to the terrain's height bounds.
+
+**Tests** (headless and in the editor):
+
+| Test | Check | Result |
+|------|-------|--------|
+| `VoxelWorlds.LOD.Planet.NearBand` (new) | On the small planet and the 1,000 km one at the pole, 45°, the equator and a cube corner: the ceiling is at least a chunk over the highest surface within the near radius (brute force) and at most the slack over the surface the near disk reads, the same along the up-line; at every stop nothing off its slab lies wholly above the ceiling; at 300 over the ground and just under the ceiling the band holds every chunk the old band held under the ceiling, and the chunks the spawn's terrain wait reads; just over the ceiling, two chunks, 20,000 over it and 100,000 over the ground nothing off the slab near the viewer; climbing from 300 over the ground over the ceiling unloads none of the band; a viewer three chunks underground keeps the band; a swimmer over a sea six chunks deep keeps it (its own chunk and the wait's grid stream), which the same viewer without the sea does not | Pass. On the 1,000 km planet the ceiling is 10,666-17,603 over the ground; the old band held 79-122 chunks just under it, of which 64-82 lay wholly above it (the cap removes them), and 79-204 chunks of air at each stop over it (2,518 over the four sites); 300 over the ground the band is the old band (17-32 chunks, none above the ceiling); the cave keeps 90-128 chunks below the slab; the swimmer's ceiling is the sea's (-100,184, against -113,765 over the seabed), 180 chunks off their slab around it. The small planet's ceiling (11,509-12,575 over the datum) is over its shell's top (8,900), so its band is the shell's as before |
+| `VoxelWorlds.LOD.Planet.SurfaceSlab` (expectation changed) | As before, and: 300 over the ground the viewer takes the band; a flyer two chunks over the ceiling, where the shell reaches that high, gets nothing off its slab | Pass. The flyers on the 1,000 km planet, 20,266-27,203 over the ground: 0 candidates off their slab (on the small planet two chunks over the ceiling is outside the shell) |
+| `VoxelWorlds.LOD.Planet.GroundHorizon` (expectation changed) | As before, and a climbing viewer above the ceiling streams nothing off the slab | Pass. On the 1,000 km planet at 40,000 and 100,000 up nothing off the slab (P6.3 measured 160-200 chunks of air there); at 10,000 up, under the ceiling at all four sites, 5-47 |
+
+**Benches.** One build. The window and the band are switched by cvar; the band by a temporary cvar
+(`voxel.Stream.NearBandLegacy`, removed afterwards, as P6.3's A/B did). The variants:
+
+- **new:** G52, with the cut-over and the descent prefetch (P6.5's defaults).
+- **no cap:** the band dropped above its ceiling but not capped at it (G52's first version).
+- **P6.5 band:** the band as merged in P6.5, with the cut-over and the prefetch.
+- **kept:** `voxel.World.VoxelCutover 0` and `voxel.Stream.DescentLead 0`, with G52. This is the control the finding names.
+- **kept, P6.5 band:** the same with the band as merged, which is exactly P6.5's control.
+
+The setup is P6.5's:
+
+- PIE on `PlanetTest` with `voxel.ConfigOverride`, a fresh world per run;
+- `vox.TPLatLon 45 20` and its settle, local noon, input blocked;
+- a fresh editor and a throwaway run first;
+- three repetitions, the variants interleaved within each;
+- routes (all `warmup=30 catchup=90`): the descent `5000 199700 descend=45:20:200000`, the great circle
+  `1500 40000 gc=45:20:90 follow=300` and the climb `3000 200000 climb=45:20:200`.
+
+The small planet ran the descent only: its shell (±6,500 + half a chunk) is under the band's ceiling everywhere, so the
+band was clipped to the shell before G52 and is now. Means of three runs (catch-up per run); tags
+`g52b_{S,M,L}_{new,leg,ctl,ctlleg}_{descend,gc,climb}_r{1,2,3}`, the no-cap rows `g52c_*` (the same editor session
+after a rebuild that fixed the temporary cvar's no-cap mode).
+
+| Planet, route | Variant | Peak loaded | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Systems MB peak (max) | Voxel systems MB at the end (+ far field) | Far field ms P95 (max) | Suspended (of the run) |
+|---|---|---|---|---|---|---|---|---|---|
+| Small, descent | **new** | 1,093 | 16.7 / 19.6 | 4.4 | 0.17 / 0.17 / 0.17 | 870 (870) | 403 (+55) | 0.91 (7.28) | 0.41 |
+|  | P6.5 band | 1,093 | 16.7 / 19.5 | 4.4 | 0.17 / 0.17 / 0.17 | 870 (871) | 402 (+55) | 0.88 (6.97) | 0.41 |
+|  | kept | 1,173 | 16.7 / 23.5 | 4.2 | 0.17 / 0.18 / 0.17 | 525 (526) | 525 (+56) | 0.64 (6.70) | 0.00 |
+| M, descent | **new** | 1,081 | 16.7 / 22.4 | 5.9 | 0.22 / 0.20 / 0.20 | 829 (833) | 376 (+42) | 0.63 (7.97) | 0.43 |
+|  | no cap | 1,148 | 16.7 / 22.5 | 5.8 | 0.28 / 0.30 / 0.31 | 829 (831) | 441 (+42) | 0.65 (7.49) | 0.43 |
+|  | P6.5 band | 1,331 | 16.7 / 27.6 | 8.1 | 1.70 / 2.21 / 2.83 | 888 (904) | 851 (+43) | 0.82 (7.91) | 0.47 |
+|  | kept | 1,085 | 16.7 / 27.7 | 5.8 | 0.25 / 0.28 / 0.31 | 507 (509) | 502 (+42) | 0.46 (2.83) | 0.00 |
+|  | kept, P6.5 band | 1,530 | 19.4 / 32.2 | 9.9 | 0.37 / 0.28 / 0.34 | 742 (753) | 731 (+42) | 0.79 (2.67) | 0.00 |
+| M, great circle | **new** | 1,224 | 16.8 / 34.6 | 8.7 | 0.20 / 0.22 / 0.24 | 755 (769) | 727 (+47) | 0.85 (2.66) | 0.00 |
+|  | P6.5 band | 1,217 | 17.1 / 36.4 | 8.8 | 0.23 / 0.23 / 0.21 | 758 (776) | 728 (+47) | 0.88 (2.67) | 0.00 |
+| M, climb | **new** | 1,090 | 16.7 / 16.7 | 3.1 | 0.17 / 0.17 / 0.17 | 488 (489) | 8 (+16) | 0.25 (3.88) | 0.40 |
+|  | P6.5 band | 1,534 | 16.7 / 23.8 | 5.7 | 0.17 / 0.17 / 0.17 | 543 (549) | 9 (+16) | 0.53 (3.40) | 0.42 |
+| L, descent | **new** | 1,105 | 16.7 / 21.8 | 5.8 | 0.17 / 0.17 / 0.17 | 890 (894) | 433 (+44) | 0.50 (6.81) | 0.43 |
+|  | no cap | 1,145 | 16.7 / 21.0 | 5.7 | 0.40 / 0.40 / 0.44 | 899 (900) | 481 (+44) | 0.46 (5.42) | 0.43 |
+|  | P6.5 band | 1,356 | 16.7 / 26.9 | 8.0 | 2.45 / 2.65 / 2.41 | 934 (935) | 922 (+44) | 0.69 (5.07) | 0.47 |
+|  | kept | 1,111 | 16.7 / 28.2 | 6.5 | 0.17 / 0.19 / 0.17 | 554 (556) | 555 (+43) | 0.43 (2.12) | 0.00 |
+|  | kept, P6.5 band | 1,545 | 22.6 / 32.3 | 10.6 | 0.17 / 0.17 / 0.17 | 901 (916) | 768 (+43) | 0.83 (2.61) | 0.00 |
+| L, great circle | **new** | 1,264 | 16.7 / 31.6 | 8.4 | 0.38 / 0.36 / 0.57 | 831 (832) | 790 (+48) | 0.75 (2.33) | 0.00 |
+|  | P6.5 band | 1,264 | 16.7 / 31.9 | 8.6 | 0.44 / 0.37 / 0.38 | 835 (837) | 795 (+48) | 0.76 (2.07) | 0.00 |
+| L, climb | **new** | 1,123 | 16.7 / 16.7 | 3.2 | 0.17 / 0.17 / 0.17 | 544 (546) | 74 (+24) | 0.24 (3.48) | 0.40 |
+|  | P6.5 band | 1,547 | 16.7 / 23.5 | 5.5 | 0.17 / 0.17 / 0.17 | 598 (604) | 74 (+24) | 0.51 (3.38) | 0.42 |
+
+- **The descent:** the window is ready 0.20-0.22 s after landing on M and 0.17 s on L, against 0.25-0.31 and 0.17-0.19
+  with the window kept, and 1.70-2.83 and 2.41-2.65 with P6.5's band (P6.5's own re-run: 0.81-3.62 and 0.17-3.66).
+  P6.5's control (kept, P6.5 band) took 0.28-0.37 and 0.17. Without the cap 0.28-0.31 and 0.40-0.44: the band switching
+  back on at its ceiling near the ground. The descent now peaks at 1,081-1,105 loaded chunks against 1,331-1,356,
+  re-meshes 156-157 chunks for LOD changes against 1,219-1,225, and its frame and manager P95 fall from 26.9-27.6 /
+  8.0-8.1 ms to 21.8-22.4 / 5.8-5.9. Peak memory is the resumed window's fresh chunks, as in P6.5 (829-890 MB, against
+  888-934 with P6.5's band and 507-554 kept); at the end the voxel systems hold 376-433 MB, where P6.5's band still held
+  its air (851-922). With the window kept the band's air cost as much: P6.5's control peaked at 1,530-1,545 chunks with
+  1,990-2,460 LOD re-meshes and a frame P95 of 32.2-32.3 ms, against 1,085-1,111, 140-144 and 27.7-28.2 with G52. The
+  small planet is the same in every variant (catch-up 0.17).
+- **The climb:** the band no longer follows the viewer up to the cut-over: peak loaded 1,090-1,123 against 1,534-1,547
+  (layers 5-11 against 5-35 on M, 40-46 against 40-71 on L), 78-80 LOD re-meshes against 1,320-1,338, frame P95 16.7 ms
+  against 23.5-23.8 and manager P95 3.1-3.2 against 5.5-5.7, peak memory 488-544 MB against 543-598. At the top, above
+  the cut-over, the same 8-74 MB.
+- **The great circle:** unchanged: the same peak (1,224 and 1,264 against 1,217 and 1,264), frame P95 within 2 ms (34.6
+  against 36.4 on M, 31.6 against 31.9 on L, as P6.5's 34.5-37.7 and 33.2-35.1), catch-up 0.20-0.57 against 0.21-0.44. A
+  pawn walking 300 over the ground is under the ceiling, and on this route the cap clipped nothing (the same peak).
+- **Budgets (D3):** the peak of every run at most 935 MB (1.5 GB allowed). G52 only takes chunks out of the window, so
+  P6.5's settled figures (491-543 MB with the far field) remain an upper bound.
+
+A first batch (tags `g52_*`) ran while another session's suites loaded the machine from its tenth M run on: the same
+ranking, every number noisier (frame P95 up to 81 ms on the great circle, the kept window's catch-up 1.1-2.6 s).
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 551/551 headless and
+551/551 in the editor (P6.5's 550 and `LOD.Planet.NearBand`), the GPU tests running in the editor (the generation parity
+tests, `Meshing.MarchingCubes.CPUvsGPU`, `GPUNoiseGeneratorAsync`, `InfinitePlane.GPUConsistency`) with no device loss.
+The 108 GPU parity lines are CRC-identical to P6.5's: G52 changes no generation. The first headless run failed
+`POI.Planet.DungeonFrame` on the dungeon textures, which this worktree held as Git LFS pointer files (`git lfs checkout`
+from the shared store; that test and the whole re-run then passed).
+
+G52 is fixed. G49 (the prefetch's speculation) stays open; G52's cap does not change it.

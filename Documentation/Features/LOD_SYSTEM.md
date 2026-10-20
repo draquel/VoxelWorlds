@@ -643,11 +643,21 @@ WORLD_MODES_REVIEW_PLAN.md §20.4). `FDistanceBandLODStrategy::IsInPlanetWindow`
   a cell's range is five terrain samples, its corners and its centre, as a heightmap column's five heights. Cells and
   chunks are memoized (each cache starts over past a million entries).
 - **Near the viewer** (within `GetNearWindowRadius` along the ground, band 0 + two chunks): off its slab a chunk also
-  loads within the viewer's altitude ± `NearWindowLayers` chunk widths, inside the shell, and stays while it is within the
-  unload distance of the viewer (3D), so a viewer changing altitude unloads nothing near it. As a heightmap world streams
-  the viewer's layer ± 2 within its height bounds: caves, dungeons and digging below the slab, and the chunks around a
-  viewer above it (a flyer inside the shell, a pawn held over the sea), whose terrain waits and settle hold need them
-  cooked. Edits off the window are pinned by the chunk manager.
+  loads within the viewer's altitude ± `NearWindowLayers` chunk widths, inside the shell, up to the band's ceiling (none
+  for a viewer above it), and stays while it is within the unload distance of the viewer (3D), so a viewer changing
+  altitude unloads nothing near it. As a heightmap world streams the viewer's layer ± 2 within its height bounds: caves,
+  dungeons and digging below the slab, and the chunks around a viewer near the ground or at the sea's surface (a flyer
+  skimming the ground, a swimmer), whose terrain waits and settle hold need them cooked. Edits off the window are pinned
+  by the chunk manager.
+- **The near band's ceiling** (`GetPlanetNearBandCeiling`, G52): the top of the slab over the near disk, the highest
+  surface the near chunks' cells hold (`GetPlanetSurfaceEnvelope` over the near radius's widest angle, at the shell's
+  inner radius, plus half a chunk diagonal; memoized by the viewer's cell) + `SlabSlackChunks`, or the sea's surface +
+  `SlabSlackChunks` where that is higher. A chunk off its slab wholly above it lies above its own slab too: air. So the
+  band reaches no higher, and a viewer above the ceiling takes none. Until G52 the band followed the viewer at any
+  altitude inside the shell: a viewer descending onto the 50 km or 1,000 km test planet from 100 km up streamed a new
+  layer of air every second, taking the generation its ground disk needed, and loaded the last layers over the ground in
+  its last second (WORLD_MODES_REVIEW_PLAN.md §20.7). The keep window is unchanged, so a viewer crossing the ceiling
+  unloads nothing.
 - **The cull** (`ShouldCullBeyondHorizon`, SP-C2), a superset of the window: a chunk wholly inside the shell's inner
   radius or outside its outer one, or whose nearest point lies beyond the horizon, the sum of the two tangent distances to
   the datum sphere, `sqrt(2Rh + h^2) + sqrt(2RH + H^2)` (`GetPlanetHorizonDistance`; R the radius, h the viewer's altitude,
@@ -671,7 +681,8 @@ shell would be 1,000-1,200 and 17,700), and 1,080-1,260 live on the 50 km and 1,
 shells were thicker than the view distance, so their windows were the whole sphere of it around the viewer. A climbing
 viewer keeps its ground disk (`LOD.Planet.GroundHorizon`): until WM-BP8 the window was clipped to the viewer's Z ± the
 view distance and measured in 3D from the viewer, so it held nothing from about the view distance up (the planet's G13).
-A flyer inside the shell adds its near window (160 to 200 chunks of air on the 1,000 km planet); above the shell, nothing.
+A flyer above the surface slab adds nothing off it (G52); until then a flyer inside the shell added its near window (160
+to 200 chunks of air on the 1,000 km planet), and only above the shell nothing.
 Beyond the window the far field draws the planet (below).
 
 ### The Far Field (Spherical Planet)

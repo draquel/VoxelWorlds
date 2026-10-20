@@ -210,6 +210,31 @@ public:
 	float GetNearWindowRadius() const { return NearWindowRadius; }
 
 	/**
+	 * Planets: the near band's ceiling (IsInPlanetWindow's Load: the viewer's altitude ± NearWindowLayers near it; G52,
+	 * WORLD_MODES_REVIEW_PLAN.md §20.7), as an altitude over the datum: the top of the surface slab over the near disk (the
+	 * analytic surface's highest point within GetNearWindowRadius along the ground, margins included, + SlabSlackChunks),
+	 * or the sea's surface + SlabSlackChunks where that is higher. A chunk off its slab wholly above it lies above its own
+	 * slab too, so it holds air (edits are pinned by the chunk manager): the band reaches no higher, and a viewer above it
+	 * takes none. A descending viewer used to stream a new layer of such chunks every second from 100 km up, and one on the
+	 * ground kept a layer of them around it. A viewer inside or below the slab (caves, overhangs, a flyer near the ground)
+	 * or at the sea's surface (a swimmer; the settle onto the sea waits for its chunk to cook) keeps the band below it.
+	 * The shell's top without the slab, and on heightmap worlds, where the band is clipped to the terrain's height
+	 * bounds. Game thread (memoized by the viewer's direction cell).
+	 * @param ViewerPosition Viewer position
+	 * @return Altitude over the datum (uu)
+	 */
+	double GetPlanetNearBandCeiling(const FVector& ViewerPosition) const;
+
+	/**
+	 * Planets: whether a viewer here takes the near band (its altitude over the datum is not above
+	 * GetPlanetNearBandCeiling). The keep window does not change with it: what the band loaded stays within the unload
+	 * distance.
+	 * @param ViewerPosition Viewer position
+	 * @return True when the near band streams around this viewer
+	 */
+	bool IsPlanetNearBandActive(const FVector& ViewerPosition) const;
+
+	/**
 	 * One column's vertical window, as absolute chunk layers (a range is empty when Min > Max). Heightmap worlds (D8):
 	 * the column's surface slab (Slab*), plus the viewer's layer ± NearWindowLayers in a column near the viewer (Near*);
 	 * both clipped to the terrain's height bounds. Planet (SP-C1): the column's crossings of the terrain shell
@@ -331,9 +356,10 @@ protected:
 	 * - and its radial extent meets its slab (GetPlanetChunkSlab: the analytic surface's altitude range over the cap it
 	 *   subtends ± SlabSlackChunks; with slab culling off, the whole shell);
 	 * - or, within GetNearWindowRadius of the viewer along the ground: Load, the viewer's altitude ± NearWindowLayers chunk
-	 *   widths; Keep, anything in the shell within the unload distance of the viewer (3D). As a heightmap world's near
-	 *   window streams the viewer's layer ± NearWindowLayers within its height bounds: caves and digging below the slab,
-	 *   and the chunks around a viewer above it (a flyer in the shell, a pawn held over the sea), whose terrain waits need
+	 *   widths up to GetPlanetNearBandCeiling, and nothing for a viewer above it (G52: above the slab the band is air);
+	 *   Keep, anything in the shell within the unload distance of the viewer (3D). As a heightmap world's near window
+	 *   streams the viewer's layer ± NearWindowLayers within its height bounds: caves and digging below the slab, and the
+	 *   chunks around a viewer near it (a flyer near the ground, a pawn at the sea's surface), whose terrain waits need
 	 *   them cooked.
 	 * Edits off the window are pinned by the chunk manager.
 	 * @param ChunkCoord Chunk coordinates
@@ -374,22 +400,32 @@ protected:
 	/**
 	 * Calls Visit once for every chunk that may be in the planet's window for this viewer (WM-BP8): the chunks crossing the
 	 * spherical shell of the window's altitude envelope inside the cone of the load horizon around the viewer's up-line,
-	 * plus the near window's cone and envelope. A superset: the caller applies IsInPlanetWindow and the horizon. Columns
-	 * run along the grid axis closest to the viewer's up, so each crosses the envelope steeply.
+	 * plus the near window's cone and envelope (for Load up to GetPlanetNearBandCeiling). A superset: the caller applies
+	 * IsInPlanetWindow and the horizon. Columns run along the grid axis closest to the viewer's up, so each crosses the
+	 * envelope steeply.
 	 * @param Context Query context (viewer position, world origin)
 	 * @param Use Load (stream in) or Keep (retain: the near window holds the shell within the unload distance)
 	 * @param Visit Called with each candidate's chunk coordinates (no repeats)
 	 */
 	void ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, TFunctionRef<void(const FIntVector&)> Visit) const;
 
+	/** GetPlanetSurfaceEnvelope's memo: the direction's cell and the angle it was built for, and the envelope. */
+	struct FSurfaceEnvelopeMemo
+	{
+		FIntPoint Cell = FIntPoint(MIN_int32, MIN_int32);
+		double Angle = -1.0;
+		FFloatInterval Range;
+	};
+
 	/**
 	 * The surface's altitude envelope over the disk of cells within an angle of a direction (WM-BP8): the union of their
 	 * GetPlanetCellSurfaceRange. Memoized for the last direction cell and angle. Game thread.
 	 * @param Direction Unit direction from the planet centre (the viewer's up)
 	 * @param Angle Angular radius of the disk (radians), margins included
+	 * @param Memo The caller's memo (the load disk's and the near disk's are kept apart, so neither rebuilds the other's)
 	 * @return Altitude envelope (uu above the datum), without slack
 	 */
-	FFloatInterval GetPlanetSurfaceEnvelope(const FVector& Direction, double Angle) const;
+	FFloatInterval GetPlanetSurfaceEnvelope(const FVector& Direction, double Angle, FSurfaceEnvelopeMemo& Memo) const;
 
 	/**
 	 * The chunk layers whose chunks overlap the world-Z interval [Lo, Hi] (touching counts).
@@ -708,10 +744,16 @@ protected:
 	/** A long flight keeps adding cells and chunks; past this many entries a cache starts over (about 20-30 MB each). */
 	static constexpr int32 PlanetSlabCacheLimit = 1000000;
 
-	/** GetPlanetSurfaceEnvelope's memo: the direction's cell and the angle it was built for. */
-	mutable FIntPoint EnvelopeMemoCell = FIntPoint(MIN_int32, MIN_int32);
-	mutable double EnvelopeMemoAngle = -1.0;
-	mutable FFloatInterval EnvelopeMemoRange;
+	/** GetPlanetSurfaceEnvelope's memos: the load disk's (ForEachPlanetCandidate) and the near disk's (GetPlanetNearBandCeiling). */
+	mutable FSurfaceEnvelopeMemo LoadEnvelopeMemo;
+	mutable FSurfaceEnvelopeMemo NearEnvelopeMemo;
+
+	/**
+	 * The near disk's angular radius for GetPlanetNearBandCeiling: GetNearWindowRadius along the ground at the shell's inner
+	 * radius (the lowest ground point, so the widest angle any viewer's near disk subtends), plus the angle half a chunk's
+	 * diagonal subtends there (a near chunk's slab reads the cells its corners span). Set in Initialize.
+	 */
+	double PlanetNearBandAngle = 0.0;
 
 	/** The viewer's ground point (GetPlanetGroundRadius), for the position the last Update saw. */
 	FVector GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
