@@ -81,6 +81,12 @@ struct FVoxelChunkState
 	/** Priority for processing queues */
 	float Priority = 0.0f;
 
+	/**
+	 * An edit reached the chunk while its mesh was on a worker (world modes review G57): that mesh was built before the
+	 * edit, so the chunk re-meshes once it lands. Cleared when a mesh is dispatched (it reads the edit layer then).
+	 */
+	bool bRemeshAfterMeshing = false;
+
 	FVoxelChunkState() = default;
 
 	explicit FVoxelChunkState(const FIntVector& InChunkCoord)
@@ -883,6 +889,37 @@ public:
 	/** @return What system and editor edits did to scatter since Initialize (see FEditScatterStats) */
 	const FEditScatterStats& GetEditScatterStats() const { return EditScatterStats; }
 
+	/**
+	 * Meshing work since Initialize (world modes review G56, G57), for tests and voxel.Edit.MeshWork: chunk meshes and seam
+	 * jobs with their worker time (streaming's as well as edits'), and what edits asked of the meshing pipeline. An edit
+	 * re-meshes the chunks it changed and restales their seams; voxel.Edit.NeighbourRemesh 1 (the rule before G56) also
+	 * re-meshes each edited chunk's six face neighbours.
+	 */
+	struct FMeshWorkStats
+	{
+		/** Chunk mesh jobs dispatched to a worker. */
+		int64 ChunkMeshJobs = 0;
+		/** Their worker time (CPU meshers; a GPU mesher's jobs count 0). */
+		double ChunkMeshWorkerMs = 0.0;
+		/** Seam jobs dispatched to a worker. */
+		int64 SeamJobs = 0;
+		/** Their worker time, counted when their results land. */
+		double SeamWorkerMs = 0.0;
+		/** OnChunkEdited broadcasts the chunk manager handled (one per chunk an edit changed). */
+		int64 EditBroadcasts = 0;
+		/** Edited chunks that were loaded: queued for a re-mesh, their seams restaled. */
+		int64 EditedRemeshes = 0;
+		/** Edits that reached a chunk on its way to a mesh (queued or on a worker): its seams restaled (G57). */
+		int64 EditedOnTheWay = 0;
+		/** Of those, chunks whose mesh was on a worker: re-meshed once it landed (G57). */
+		int64 RemeshesAfterMeshing = 0;
+		/** Face neighbours of edited chunks queued for a render re-mesh (voxel.Edit.NeighbourRemesh 1, the rule before G56). */
+		int64 NeighbourRemeshes = 0;
+	};
+
+	/** @return The meshing work since Initialize (see FMeshWorkStats) */
+	const FMeshWorkStats& GetMeshWorkStats() const { return MeshWorkStats; }
+
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 
 	/**
@@ -1382,6 +1419,14 @@ protected:
 	void OnChunkMeshingComplete(const FIntVector& ChunkCoord);
 
 	/**
+	 * Re-mesh a chunk that just became Loaded if an edit reached it while that mesh was on a worker (world modes review G57,
+	 * FVoxelChunkState::bRemeshAfterMeshing).
+	 *
+	 * @param ChunkCoord The chunk
+	 */
+	void RemeshIfEditedWhileMeshing(const FIntVector& ChunkCoord);
+
+	/**
 	 * Hand a chunk's voxels (edit-merged when it has edits) to scatter for surface extraction, as a mesh completion does.
 	 * Scatter reads voxels, never the mesh (world modes review G27).
 	 *
@@ -1800,6 +1845,9 @@ private:
 	/** System and editor edits' scatter work (GetEditScatterStats). */
 	FEditScatterStats EditScatterStats;
 
+	/** Meshing work and what edits asked of it (GetMeshWorkStats). */
+	FMeshWorkStats MeshWorkStats;
+
 	/** Chunks a system or editor edit changed since the last ProcessEditScatterReaders (their scatter re-extracts with their re-mesh). */
 	TSet<FIntVector> EditScatterEditedChunks;
 
@@ -2013,6 +2061,8 @@ private:
 		bool bSuccess = false;
 		/** FAsyncJobStamp::Serial of the dispatch that produced this result. */
 		uint32 DispatchSerial = 0;
+		/** The mesher's time on the worker (CPU meshers; 0 for a GPU mesher). */
+		double WorkerMs = 0.0;
 	};
 
 	/** Thread-safe queue for completed async mesh results */
