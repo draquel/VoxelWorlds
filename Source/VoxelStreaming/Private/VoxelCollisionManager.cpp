@@ -87,6 +87,14 @@ static TAutoConsoleVariable<int32> CVarCollisionLookAheadChunks(
 	     "cooked before entry. 0 disables path coverage."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarCollisionNeighborRecook(
+	TEXT("voxel.Collision.NeighborRecook"),
+	1,
+	TEXT("Re-cook a chunk's collision when a neighbour that had no voxel data at its cook arrives (G32). The mesher reads "
+	     "a missing neighbour as air, so without it the boundary cells facing that neighbour stay wrong: voxel-wide strips "
+	     "along chunk faces where line traces miss the ground. 0 = off (the behaviour before the fix, for A/B checks)."),
+	ECVF_Default);
+
 // ==================== UVoxelCollisionComponent ====================
 
 UVoxelCollisionComponent::UVoxelCollisionComponent(const FObjectInitializer& ObjectInitializer)
@@ -207,6 +215,10 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 	// Reset statistics
 	TotalCollisionsGenerated = 0;
 	TotalCollisionsRemoved = 0;
+	TotalNeighborRecooks = 0;
+	TotalNeighborArrivalsSkipped = 0;
+	TotalNeighborArrivalsSkippedSolid = 0;
+	PendingNeighborRecooks.Empty();
 
 	bIsInitialized = true;
 
@@ -225,6 +237,7 @@ void UVoxelCollisionManager::Shutdown()
 	CookingQueue.Empty();
 	CookingQueueSet.Empty();
 	AsyncCollisionInProgress.Empty();
+	PendingNeighborRecooks.Empty();
 
 	// Drain completed queue (results may still be arriving)
 	{
@@ -260,8 +273,8 @@ void UVoxelCollisionManager::Shutdown()
 	ChunkManager = nullptr;
 	bIsInitialized = false;
 
-	UE_LOG(LogVoxelCollision, Log, TEXT("VoxelCollisionManager shutdown. Stats: Generated=%lld, Removed=%lld"),
-		TotalCollisionsGenerated, TotalCollisionsRemoved);
+	UE_LOG(LogVoxelCollision, Log, TEXT("VoxelCollisionManager shutdown. Stats: Generated=%lld, Removed=%lld, NeighborRecooks=%lld"),
+		TotalCollisionsGenerated, TotalCollisionsRemoved, TotalNeighborRecooks);
 }
 
 // ==================== Per-Frame Update ====================
@@ -351,7 +364,8 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		ForcePathCoverage(FocusPosition, FocusVelocity);
 	}
 
-	// 3. Process dirty chunks (from edits) — just queues requests, lightweight
+	// 3. Process dirty chunks (from edits, and neighbours that arrived after a cook: G32) — just queues requests, lightweight
+	ProcessNeighborRecooks();
 	ProcessDirtyChunks(FocusPosition);
 
 	// 4. Launch async tasks from queue (no mesh gen here, just dispatch)
@@ -442,6 +456,19 @@ void UVoxelCollisionManager::ComputePathCoverageSamples(const FVector& Focus, co
 	}
 }
 
+float UVoxelCollisionManager::GetDirtyPriority(const FChunkCollisionData& Data, float Distance) const
+{
+	// A first cook's priority is CollisionRadius - Distance with Distance within the effective radius.
+	const float FirstCook = CollisionRadius - Distance;
+	if (Data.bNeighborRecookOnly)
+	{
+		// Below every first cook: the old body is live and only its boundary cells facing the new neighbour are off, while a
+		// chunk without collision has nothing. Waiting in the queue also folds the neighbours still arriving into one re-cook.
+		return FirstCook - 2.0f * FMath::Max(CurrentEffectiveRadius, CollisionRadius) - 1000.0f;
+	}
+	return FirstCook + 500.0f; // Edits get a priority boost
+}
+
 void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
 {
 	if (!Configuration)
@@ -463,7 +490,7 @@ void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
 				+ FVector(Data.ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
 			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
-			const float Priority = CollisionRadius - Distance + 500.0f; // Dirty chunks get priority boost
+			const float Priority = GetDirtyPriority(Data, Distance);
 
 			// Request regeneration
 			RequestCollision(Data.ChunkCoord, Priority);
@@ -481,6 +508,8 @@ void UVoxelCollisionManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 	if (FChunkCollisionData* Data = CollisionData.Find(ChunkCoord))
 	{
 		Data->bNeedsUpdate = true;
+		// An edit's re-cook keeps the edit priority, even when a neighbour's arrival marked the chunk first.
+		Data->bNeighborRecookOnly = false;
 
 		UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) collision marked dirty"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
@@ -499,6 +528,269 @@ void UVoxelCollisionManager::RegenerateChunkCollision(const FIntVector& ChunkCoo
 
 	// Request new collision with high priority
 	RequestCollision(ChunkCoord, 1000.0f);
+}
+
+uint32 UVoxelCollisionManager::GetNeighborBit(const FIntVector& Offset)
+{
+	if (FMath::Abs(Offset.X) > 1 || FMath::Abs(Offset.Y) > 1 || FMath::Abs(Offset.Z) > 1 || Offset == FIntVector::ZeroValue)
+	{
+		return 0;
+	}
+	// The 3 x 3 x 3 neighbourhood's index; 13 is the chunk itself and never set.
+	const int32 Index = (Offset.X + 1) + (Offset.Y + 1) * 3 + (Offset.Z + 1) * 9;
+	return 1u << Index;
+}
+
+namespace VoxelCollisionNeighbors
+{
+	/** A slab's voxels: all air, all solid, or both. */
+	enum class ESlab : uint8 { Air, Solid, Mixed };
+
+	/**
+	 * Classify a chunk's slab facing Side: per axis, Side +1 is the last Depth layers, -1 the first Depth, 0 the whole
+	 * range (a face slab, an edge column or a corner box). Stops at the first voxel that makes it mixed.
+	 */
+	ESlab ClassifySlab(const TArray<FVoxelData>& Voxels, int32 ChunkSize, const FIntVector& Side, int32 Depth)
+	{
+		if (Voxels.Num() < ChunkSize * ChunkSize * ChunkSize)
+		{
+			return ESlab::Mixed;
+		}
+		int32 Min[3], Max[3];
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			const int32 S = Side[Axis];
+			Min[Axis] = S > 0 ? ChunkSize - Depth : 0;
+			Max[Axis] = S < 0 ? Depth - 1 : ChunkSize - 1;
+		}
+		bool bAir = false;
+		bool bSolid = false;
+		for (int32 Z = Min[2]; Z <= Max[2]; ++Z)
+		for (int32 Y = Min[1]; Y <= Max[1]; ++Y)
+		for (int32 X = Min[0]; X <= Max[0]; ++X)
+		{
+			(Voxels[X + Y * ChunkSize + Z * ChunkSize * ChunkSize].IsAir() ? bAir : bSolid) = true;
+			if (bAir && bSolid)
+			{
+				return ESlab::Mixed;
+			}
+		}
+		return bSolid ? ESlab::Solid : ESlab::Air;
+	}
+}
+
+int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkCoord)
+{
+	if (!bIsInitialized || CVarCollisionNeighborRecook.GetValueOnGameThread() == 0 || !ChunkManager || !Configuration)
+	{
+		return 0;
+	}
+
+	// The arriving chunk's voxels, fetched only if some cooked neighbour read it as air.
+	TSharedPtr<const TArray<FVoxelData>> Arrived;
+	bool bFetchedArrived = false;
+	const int32 ChunkSize = Configuration->ChunkSize;
+	// How deep a cook's results depend on the voxels across a face at its stride. The neighbour's planes go stride + 1
+	// deep (2 * stride with -VoxelDeepFull; the larger is taken). On the chunk's own side the boundary cells span the
+	// stride, and the gradient normals at a crossing up to a stride inside it reach across the face too: with two
+	// strides of air there, no crossing's normal reads the neighbour.
+	const int32 Stride = 1 << FMath::Clamp(CollisionLODLevel, 0, 7);
+	const int32 OwnDepth = FMath::Min(2 * Stride, ChunkSize);
+	const int32 OtherDepth = FMath::Min(Stride <= 1 ? 1 : 2 * Stride, ChunkSize);
+
+	int32 Noted = 0;
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	for (int32 DY = -1; DY <= 1; ++DY)
+	for (int32 DX = -1; DX <= 1; ++DX)
+	{
+		const FIntVector Offset(DX, DY, DZ);
+		if (Offset == FIntVector::ZeroValue)
+		{
+			continue;
+		}
+		// The neighbour at -Offset sees this chunk at +Offset.
+		const FIntVector NeighborCoord = ChunkCoord - Offset;
+		FChunkCollisionData* Data = CollisionData.Find(NeighborCoord);
+		const uint32 Bit = GetNeighborBit(Offset);
+		if (!Data || (Data->MissingNeighborMask & Bit) == 0)
+		{
+			continue;
+		}
+		Data->MissingNeighborMask &= ~Bit;
+
+		// The cook read this chunk as air. Where the voxels on both sides of the boundary are one solidity, nothing that can
+		// be reached changes with the real voxels, so there is nothing to re-cook:
+		// - air on both sides: no sign change across the boundary either way, the cook is already exact. Most arrivals
+		//   after a cook are the air layers over the terrain that load near the viewer;
+		// - solid on both sides: the cook put a wall along the boundary (solid against the air it read), now buried inside
+		//   the rock where no pawn or trace from the open can reach it. The layers under the terrain arrive this way. A dig
+		//   that opens the rock there re-cooks the chunk (MarkNeighborsDirtyForEdit), so a buried wall is never exposed.
+		if (!bFetchedArrived)
+		{
+			Arrived = ChunkManager->GetEditMergedSnapshot(ChunkCoord);
+			bFetchedArrived = true;
+		}
+		if (Arrived.IsValid())
+		{
+			using VoxelCollisionNeighbors::ESlab;
+			const ESlab Other = VoxelCollisionNeighbors::ClassifySlab(*Arrived, ChunkSize, FIntVector::ZeroValue - Offset, OtherDepth);
+			if (Other != ESlab::Mixed)
+			{
+				const TSharedPtr<const TArray<FVoxelData>> OwnVoxels = ChunkManager->GetEditMergedSnapshot(NeighborCoord);
+				const ESlab Own = OwnVoxels.IsValid() ? VoxelCollisionNeighbors::ClassifySlab(*OwnVoxels, ChunkSize, Offset, OwnDepth) : ESlab::Mixed;
+				if (Own == Other)
+				{
+					++(Own == ESlab::Air ? TotalNeighborArrivalsSkipped : TotalNeighborArrivalsSkippedSolid);
+					continue;
+				}
+			}
+		}
+
+		// Moved from missing to arrived; ProcessNeighborRecooks requests the re-cook once no other missing neighbour is
+		// still being generated. A cook in flight read the air too: the request after it applies re-cooks it.
+		Data->ArrivedNeighborMask |= Bit;
+		PendingNeighborRecooks.Add(NeighborCoord);
+		++Noted;
+	}
+	if (Noted > 0)
+	{
+		UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) voxel data arrived: %d neighbour(s) cooked without it await a re-cook"),
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, Noted);
+	}
+	return Noted;
+}
+
+int32 UVoxelCollisionManager::MarkNeighborsDirtyForEdit(const FIntVector& EditedChunk, const FVector& EditCenter, float EditRadius)
+{
+	if (!bIsInitialized || !Configuration)
+	{
+		return 0;
+	}
+	const double ChunkWorld = Configuration->GetChunkWorldSize();
+	const int32 Stride = 1 << FMath::Clamp(CollisionLODLevel, 0, 7);
+	const double Reach = EditRadius + (Stride + 2) * static_cast<double>(Configuration->VoxelSize);
+	int32 Marked = 0;
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	for (int32 DY = -1; DY <= 1; ++DY)
+	for (int32 DX = -1; DX <= 1; ++DX)
+	{
+		// Edge and corner neighbours only: the face neighbours are the chunk manager's.
+		if ((DX != 0) + (DY != 0) + (DZ != 0) < 2)
+		{
+			continue;
+		}
+		const FIntVector NeighborCoord = EditedChunk + FIntVector(DX, DY, DZ);
+		FChunkCollisionData* Data = CollisionData.Find(NeighborCoord);
+		if (!Data)
+		{
+			continue;
+		}
+		if (EditRadius > 0.0f)
+		{
+			const FVector Min = Configuration->WorldOrigin + FVector(NeighborCoord) * ChunkWorld;
+			const FBox Box(Min, Min + FVector(ChunkWorld));
+			if (Box.ComputeSquaredDistanceToPoint(EditCenter) > Reach * Reach)
+			{
+				continue;
+			}
+		}
+		Data->bNeedsUpdate = true;
+		Data->bNeighborRecookOnly = false;
+		++Marked;
+	}
+	return Marked;
+}
+
+void UVoxelCollisionManager::ProcessNeighborRecooks()
+{
+	if (PendingNeighborRecooks.Num() == 0 || !ChunkManager)
+	{
+		return;
+	}
+	for (auto It = PendingNeighborRecooks.CreateIterator(); It; ++It)
+	{
+		FChunkCollisionData* Data = CollisionData.Find(*It);
+		if (!Data || Data->ArrivedNeighborMask == 0)
+		{
+			// Removed, or a cook launched since read every arrival.
+			It.RemoveCurrent();
+			continue;
+		}
+		// Wait while another missing neighbour is on its way, so the arrivals around the chunk fold into one re-cook. A
+		// neighbour that is not tracked (outside the window) does not hold it.
+		bool bWaiting = false;
+		for (int32 Index = 0; Index < 27 && !bWaiting; ++Index)
+		{
+			if ((Data->MissingNeighborMask & (1u << Index)) != 0)
+			{
+				const FIntVector Offset(Index % 3 - 1, (Index / 3) % 3 - 1, Index / 9 - 1);
+				const EChunkState State = ChunkManager->GetChunkState(*It + Offset);
+				bWaiting = State == EChunkState::PendingGeneration || State == EChunkState::Generating;
+			}
+		}
+		if (bWaiting)
+		{
+			continue;
+		}
+		Data->ArrivedNeighborMask = 0;
+		if (!Data->bNeedsUpdate)
+		{
+			Data->bNeedsUpdate = true;
+			Data->bNeighborRecookOnly = true;
+			++TotalNeighborRecooks;
+		}
+		It.RemoveCurrent();
+	}
+}
+
+void UVoxelCollisionManager::AuditNeighborCooks(int32& OutCooked, int32& OutWithMissing, int32& OutStale, int32& OutAwaiting,
+	TArray<FIntVector>* OutStaleChunks) const
+{
+	OutCooked = OutWithMissing = OutStale = OutAwaiting = 0;
+	if (!ChunkManager)
+	{
+		return;
+	}
+	for (const auto& Pair : CollisionData)
+	{
+		const FChunkCollisionData& Data = Pair.Value;
+		if (!Data.HasLiveCollision())
+		{
+			continue;
+		}
+		++OutCooked;
+		const bool bAwaiting = (Data.bNeedsUpdate && !Data.bIsCooking) || Data.ArrivedNeighborMask != 0;
+		if (bAwaiting)
+		{
+			++OutAwaiting;
+		}
+		if (Data.MissingNeighborMask == 0 && Data.ArrivedNeighborMask == 0)
+		{
+			continue;
+		}
+		++OutWithMissing;
+		if (bAwaiting || Data.bIsCooking || Data.MissingNeighborMask == 0)
+		{
+			continue;
+		}
+		bool bStale = false;
+		for (int32 Index = 0; Index < 27 && !bStale; ++Index)
+		{
+			if ((Data.MissingNeighborMask & (1u << Index)) != 0)
+			{
+				const FIntVector Offset(Index % 3 - 1, (Index / 3) % 3 - 1, Index / 9 - 1);
+				bStale = ChunkManager->HasChunkVoxelData(Pair.Key + Offset);
+			}
+		}
+		if (bStale)
+		{
+			++OutStale;
+			if (OutStaleChunks)
+			{
+				OutStaleChunks->Add(Pair.Key);
+			}
+		}
+	}
 }
 
 // ==================== Queries ====================
@@ -567,6 +859,8 @@ FString UVoxelCollisionManager::GetDebugStats() const
 	Stats += FString::Printf(TEXT("Async In-Progress: %d\n"), AsyncCollisionInProgress.Num());
 	Stats += FString::Printf(TEXT("Total Generated: %lld\n"), TotalCollisionsGenerated);
 	Stats += FString::Printf(TEXT("Total Removed: %lld\n"), TotalCollisionsRemoved);
+	Stats += FString::Printf(TEXT("Neighbour Re-cooks: %lld (arrivals with no re-cook: %lld air on both sides, %lld solid on both sides)\n"),
+		TotalNeighborRecooks, TotalNeighborArrivalsSkipped, TotalNeighborArrivalsSkippedSolid);
 
 	return Stats;
 }
@@ -706,7 +1000,7 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 				+ FVector(ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
 			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
-			const float Priority = CollisionRadius - Distance + 500.0f; // Extra priority for updates
+			const float Priority = GetDirtyPriority(*Data, Distance);
 
 			RequestCollision(ChunkCoord, Priority);
 		}
@@ -759,6 +1053,9 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	Data.CollisionLODLevel = Request.LODLevel;
 	Data.bIsCooking = true;
 	Data.bNeedsUpdate = false;
+	Data.bNeighborRecookOnly = false;
+	// This cook reads every neighbour that has arrived; ProcessNeighborRecooks drops the chunk.
+	Data.ArrivedNeighborMask = 0;
 
 	AsyncCollisionInProgress.Add(Request.ChunkCoord);
 
@@ -771,7 +1068,9 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	FVoxelMeshingRequest MeshRequest;
 	TSharedPtr<const TArray<FVoxelData>> SharedVoxels;
 	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> NeighborSnapshots;
-	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest, SharedVoxels, NeighborSnapshots))
+	uint32 MissingNeighborMask = 0;
+	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest, SharedVoxels, NeighborSnapshots,
+		&MissingNeighborMask))
 	{
 		// Chunk may not be loaded yet or has no geometry — remove the CollisionData
 		// entry so UpdateCollisionDecisions() can re-request on a future sweep.
@@ -782,6 +1081,8 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z);
 		return;
 	}
+	// The neighbours this cook reads as air; OnChunkVoxelDataAvailable re-cooks the chunk when one of them arrives (G32).
+	Data.MissingNeighborMask = MissingNeighborMask;
 
 	// Capture mesher pointer (stateless, thread-safe — same pattern as LaunchAsyncMeshGeneration)
 	IVoxelMesher* MesherPtr = ChunkManager->GetMesherPtr();
