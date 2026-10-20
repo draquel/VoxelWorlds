@@ -21,6 +21,12 @@ enum class EEditSource : uint8;
  * It reads the edit-merged voxels (the generated voxels with the edit layer applied) and sets the flag through the edit
  * layer on the voxel as it is, so a dug voxel floods and keeps the dig's density and material, and a filled one stays solid
  * (world modes review G58). Voxels are keyed by their global index in the chunk grid (relative to WorldOrigin).
+ *
+ * A flood reads and writes only chunks whose water is in place (UVoxelChunkManager::IsChunkWaterSettled), so it stops at
+ * one that is not. When a chunk's water settles, the faces it shares with chunks whose water is in place are scanned for
+ * dry air below the sea beside water across the face, an edit on either side: a flood continues into a chunk that loads
+ * after it, and a dug pocket floods when the chunk beside it loads with water (G59). The chunk manager's own pull across
+ * faces (PropagateWaterFromNeighbors) reads the generated voxels only.
  */
 UCLASS()
 class VOXELSTREAMING_API UVoxelWaterPropagation : public UObject
@@ -37,8 +43,12 @@ public:
 		int64 ScansDeferred = 0;
 		/** Voxels read by the seed scans (each scanned voxel below the sea, and its neighbours when it can take water). */
 		int64 ScanReads = 0;
-		/** Seeds found: changed voxels that can take water with a water-flagged air neighbour. */
+		/** Seeds found: changed voxels that can take water with a water-flagged air neighbour, and the face scans' seeds. */
 		int64 Seeds = 0;
+		/** Faces queued for a scan when a chunk's water settled: shared with a chunk whose water is in place, one of the two with edits. */
+		int64 FaceScansQueued = 0;
+		/** Of Seeds, those the face scans found: dry air below the sea beside water across the face, an edit on either voxel. */
+		int64 FaceSeeds = 0;
 		/** Floods started (seeds found while no flood was running) and finished (the queue emptied or the cap was hit). */
 		int64 FloodsStarted = 0;
 		int64 FloodsFinished = 0;
@@ -48,6 +58,9 @@ public:
 		int64 RejectedEdits = 0;
 		/** Floods stopped by MaxPropagationVoxels. */
 		int64 CapHits = 0;
+		/** Game-thread time the seed scans (edit boxes and faces) took, in all and in the slowest frame. */
+		double ScanSeconds = 0.0;
+		double MaxFrameScanSeconds = 0.0;
 	};
 
 	/**
@@ -76,8 +89,10 @@ public:
 
 	/**
 	 * Called when a chunk's water is in place (UVoxelChunkManager::IsChunkWaterSettled: its first mesh since its voxel data
-	 * arrived was submitted, which pulls the water flags across its faces). An edit that reached the chunk before (a POI's
-	 * terraform or a dungeon stamp at stream-in, a save's edits) waited for it; its seed scan is queued now.
+	 * arrived was submitted, which pulls the water flags across its faces), once per arrival. An edit that reached the chunk
+	 * before (a POI's terraform or a dungeon stamp at stream-in, a save's edits) waited for it; its seed scan is queued now.
+	 * So are the faces the chunk shares with chunks whose water is in place, where either chunk has edits (G59): a flood
+	 * that stopped at this chunk continues into it, and a dry pocket dug beside it floods from its water.
 	 *
 	 * @param ChunkCoord The chunk whose water settled
 	 */
@@ -93,8 +108,8 @@ public:
 	 */
 	int32 ProcessPropagation(int32 MaxVoxelsPerFrame = 512);
 
-	/** Check if there's pending propagation work: edits to scan for seeds, or a flood to continue. */
-	bool HasPendingWork() const { return QueueHead < BFSQueue.Num() || PendingScanOrder.Num() > 0; }
+	/** Check if there's pending propagation work: edits or chunk faces to scan for seeds, or a flood to continue. */
+	bool HasPendingWork() const { return QueueHead < BFSQueue.Num() || PendingScanOrder.Num() > 0 || PendingFaceScans.Num() > 0; }
 
 	/** @return What the propagation has done since Initialize (see FStats) */
 	const FStats& GetStats() const { return Stats; }
@@ -113,6 +128,14 @@ private:
 	{
 		FIntVector Min = FIntVector::ZeroValue;
 		FIntVector Max = FIntVector::ZeroValue;
+		int32 Next = 0;
+	};
+
+	/** A face a chunk shares with its neighbour (GWaterNeighbourOffsets[Face]) still to be scanned, and the scan's position. */
+	struct FPendingFaceScan
+	{
+		FIntVector ChunkCoord = FIntVector::ZeroValue;
+		int32 Face = 0;
 		int32 Next = 0;
 	};
 
@@ -142,6 +165,9 @@ private:
 
 	/** Edits of chunks whose water is not in place yet, waiting for it (OnChunkWaterSettled). */
 	TMap<FIntVector, FPendingScan> DeferredScans;
+
+	/** Faces of chunks whose water settled, waiting for a scan (in the order they came in). */
+	TArray<FPendingFaceScan> PendingFaceScans;
 
 	/** Total voxels propagated in the current flood event. */
 	int32 TotalPropagated = 0;
@@ -200,11 +226,30 @@ private:
 	void DeferScan(const FIntVector& ChunkCoord, const FIntVector& LocalMin, const FIntVector& LocalMax);
 
 	/**
-	 * Scan queued edits for seeds, at most MaxReads voxel reads.
+	 * Whether any voxel of the two layers a face joins (the chunk's along it and its neighbour's) is below the sea.
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param Face Index into the 6 face offsets
+	 * @return True if the face can hold a seed
+	 */
+	bool FaceReachesBelowSea(const FIntVector& ChunkCoord, int32 Face) const;
+
+	/**
+	 * Scan queued edits, then queued faces, for seeds, at most MaxReads voxel reads.
 	 *
 	 * @return Seeds found
 	 */
 	int32 ScanPendingEdits(int32 MaxReads);
+
+	/**
+	 * Scan queued faces for seeds: each pair of voxels across a face where either has an edit, one is water-flagged air and
+	 * the other dry air below the sea (the seed). Each pair below the sea counts a read, and each voxel read edit-merged.
+	 *
+	 * @param MaxReads Reads to stop at
+	 * @param Reads The reads made so far this frame; incremented
+	 * @return Seeds found
+	 */
+	int32 ScanPendingFaces(int32 MaxReads, int32& Reads);
 
 	/** Add a seed to the flood (starting a flood event when none runs). */
 	void AddSeed(const FIntVector& Key);

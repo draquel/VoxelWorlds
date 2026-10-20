@@ -6591,10 +6591,12 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			const double WaterT0 = FPlatformTime::Seconds();
 			PropagateWaterFromNeighbors(ChunkCoord);
 
-			// The chunk's water is in place: an edit that reached it before (a POI's terraform or a dungeon stamp at
-			// stream-in, a save's edits) is scanned for voxels it opened to the sea now (G58).
+			// The chunk's water is in place, the first time since its voxel data arrived: an edit that reached it before (a
+			// POI's terraform or a dungeon stamp at stream-in, a save's edits) is scanned for voxels it opened to the sea now
+			// (G58), and the faces it shares with chunks whose water is in place for edit water to cross (G59).
+			const bool bWaterArrived = !State->bWaterSettled;
 			State->bWaterSettled = true;
-			if (WaterPropagation)
+			if (WaterPropagation && bWaterArrived)
 			{
 				WaterPropagation->OnChunkWaterSettled(ChunkCoord);
 			}
@@ -6865,6 +6867,10 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d): PropagateWaterFromNeighbors — %d seeds, %d total propagated"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NumSeeds, BFSQueue.Num());
 
+	// The flags went into the voxel array without a ContentVersion bump (GetVoxelDataMutable): an edit-merged snapshot
+	// built before them would lack them, and the water tile reads one for a chunk with edits (G59).
+	SeamSnapshotCache.Remove(ChunkCoord);
+
 	return true;
 }
 
@@ -6895,8 +6901,16 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	TArray<bool> PartialMask;
 	PartialMask.SetNumZeroed(CS * CS);
 
+	// The water as it is: an edit-driven flood puts its flags in the edit layer (UVoxelWaterPropagation), so a chunk with
+	// edits builds its columns from the edit-merged voxels, which a dug channel's water and a filled sea's rock are part of
+	// (G59). The snapshot is the one the seam jobs read for this content version; most chunks have no edits.
+	TSharedPtr<const TArray<FVoxelData>> EditMerged;
+	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	{
+		EditMerged = GetEditMergedSnapshot(ChunkCoord);
+	}
 	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
-		State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
+		EditMerged.IsValid() ? *EditMerged : State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
 
 	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
 
@@ -6920,6 +6934,33 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 		// spurious water tile rebuild in ProcessDirtyWaterTiles.)
 		RemoveWaterTileContribution(ChunkCoord);
 	}
+}
+
+bool UVoxelChunkManager::GetWaterTileColumn(const FVector& WorldPosition, TArray<int32>& OutWetChunkZ) const
+{
+	OutWetChunkZ.Reset();
+	if (!Configuration)
+	{
+		return false;
+	}
+	const int32 CS = Configuration->ChunkSize;
+	const FIntVector Voxel = FVoxelCoordinates::WorldToVoxel(WorldPosition - Configuration->WorldOrigin, Configuration->VoxelSize);
+	const FIntVector2 TileCoord(FMath::FloorToInt32(double(Voxel.X) / CS), FMath::FloorToInt32(double(Voxel.Y) / CS));
+	const FWaterTileState* Tile = WaterTiles.Find(TileCoord);
+	if (!Tile)
+	{
+		return false;
+	}
+	const int32 Column = (Voxel.X - TileCoord.X * CS) + (Voxel.Y - TileCoord.Y * CS) * CS;
+	for (const TPair<int32, TArray<bool>>& Layer : Tile->PartialMasks)
+	{
+		if (Layer.Value.IsValidIndex(Column) && Layer.Value[Column])
+		{
+			OutWetChunkZ.Add(Layer.Key);
+		}
+	}
+	OutWetChunkZ.Sort();
+	return true;
 }
 
 void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoord)
@@ -8906,6 +8947,76 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelEditMeshWorkCmd(
 				Now.EditedOnTheWay - B.EditedOnTheWay, Now.RemeshesAfterMeshing - B.RemeshesAfterMeshing,
 				Now.NeighbourRemeshes - B.NeighbourRemeshes, Rule ? Rule->GetInt() : -1, CM->GetPendingGenerationCount(),
 				CM->GetPendingMeshingCount(), CM->GetSeamJobsInFlightCount());
+		}
+	}));
+
+// Console: voxel.Water.Stats [x y | pawn]
+// World modes review G58 / G59: what edit-driven water propagation has done (UVoxelWaterPropagation::GetStats: edit scans,
+// the chunk-arrival face scans and their seeds, floods, flooded voxels), and with a position the water tile's column there:
+// the chunk layers whose voxels hold water in it (edit-merged for a chunk with edits since G59), before the tile's dilation.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
+	TEXT("voxel.Water.Stats"),
+	TEXT("Log edit-driven water propagation's counters (world modes review G58 / G59); with 'x y' or 'pawn', also the water ")
+	TEXT("tile's column there (the chunk layers that mark it wet)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		bool bColumn = false;
+		FVector Column = FVector::ZeroVector;
+		if (Args.Num() >= 1 && Args[0].Equals(TEXT("pawn"), ESearchCase::IgnoreCase))
+		{
+			const APlayerController* PC = TargetWorld->GetFirstPlayerController();
+			if (PC && PC->GetPawn())
+			{
+				Column = PC->GetPawn()->GetActorLocation();
+				bColumn = true;
+			}
+		}
+		else if (Args.Num() >= 2)
+		{
+			Column = FVector(FCString::Atod(*Args[0]), FCString::Atod(*Args[1]), 0.0);
+			bColumn = true;
+		}
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			if (!CM)
+			{
+				continue;
+			}
+			if (const UVoxelWaterPropagation* Water = CM->GetWaterPropagation())
+			{
+				const UVoxelWaterPropagation::FStats& S = Water->GetStats();
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: edit scans %lld (%lld deferred), faces scanned on arrival %lld, %lld scan reads (%.1f ms, %.2f ms the slowest frame); seeds %lld (%lld on chunk faces); floods %lld started, %lld finished (%lld at the limit); %lld voxels flooded, %lld refused; pending: %s"),
+					*TargetWorld->GetName(), S.ScansQueued, S.ScansDeferred, S.FaceScansQueued, S.ScanReads, S.ScanSeconds * 1000.0,
+					S.MaxFrameScanSeconds * 1000.0, S.Seeds, S.FaceSeeds,
+					S.FloodsStarted, S.FloodsFinished, S.CapHits, S.FloodedVoxels, S.RejectedEdits,
+					Water->HasPendingWork() ? TEXT("yes") : TEXT("no"));
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: no water propagation (bEnableWaterLevel off)"), *TargetWorld->GetName());
+			}
+			if (bColumn)
+			{
+				TArray<int32> WetLayers;
+				const bool bTile = CM->GetWaterTileColumn(Column, WetLayers);
+				FString Layers;
+				for (const int32 Z : WetLayers)
+				{
+					Layers += FString::Printf(TEXT("%s%d"), Layers.IsEmpty() ? TEXT("") : TEXT(", "), Z);
+				}
+				const FString State = !bTile ? FString(TEXT("no tile"))
+					: WetLayers.Num() == 0 ? FString(TEXT("dry (its tile has no water in this column)"))
+					: FString::Printf(TEXT("wet, from chunk layer(s) Z %s"), *Layers);
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: water tile column at (%.0f, %.0f): %s"),
+					*TargetWorld->GetName(), Column.X, Column.Y, *State);
+			}
 		}
 	}));
 
