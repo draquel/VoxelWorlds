@@ -8992,8 +8992,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 			if (const UVoxelWaterPropagation* Water = CM->GetWaterPropagation())
 			{
 				const UVoxelWaterPropagation::FStats& S = Water->GetStats();
-				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: edit scans %lld (%lld deferred), faces scanned on arrival %lld, %lld scan reads; seeds %lld (%lld on chunk faces); floods %lld started, %lld finished (%lld at the limit); %lld voxels flooded, %lld refused; pending: %s"),
-					*TargetWorld->GetName(), S.ScansQueued, S.ScansDeferred, S.FaceScansQueued, S.ScanReads, S.Seeds, S.FaceSeeds,
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: edit scans %lld (%lld deferred), faces scanned on arrival %lld, %lld scan reads (%.1f ms, %.2f ms the slowest frame); seeds %lld (%lld on chunk faces); floods %lld started, %lld finished (%lld at the limit); %lld voxels flooded, %lld refused; pending: %s"),
+					*TargetWorld->GetName(), S.ScansQueued, S.ScansDeferred, S.FaceScansQueued, S.ScanReads, S.ScanSeconds * 1000.0,
+					S.MaxFrameScanSeconds * 1000.0, S.Seeds, S.FaceSeeds,
 					S.FloodsStarted, S.FloodsFinished, S.CapHits, S.FloodedVoxels, S.RejectedEdits,
 					Water->HasPendingWork() ? TEXT("yes") : TEXT("no"));
 			}

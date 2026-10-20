@@ -425,7 +425,11 @@ int32 UVoxelWaterPropagation::ProcessPropagation(int32 MaxVoxelsPerFrame)
 		return 0;
 	}
 
+	const double ScanT0 = FPlatformTime::Seconds();
 	ScanPendingEdits(MaxScanReadsPerFrame);
+	const double ScanTime = FPlatformTime::Seconds() - ScanT0;
+	Stats.ScanSeconds += ScanTime;
+	Stats.MaxFrameScanSeconds = FMath::Max(Stats.MaxFrameScanSeconds, ScanTime);
 	if (QueueHead >= BFSQueue.Num())
 	{
 		if (bEventRunning)

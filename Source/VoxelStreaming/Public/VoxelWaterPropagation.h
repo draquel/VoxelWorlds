@@ -58,6 +58,9 @@ public:
 		int64 RejectedEdits = 0;
 		/** Floods stopped by MaxPropagationVoxels. */
 		int64 CapHits = 0;
+		/** Game-thread time the seed scans (edit boxes and faces) took, in all and in the slowest frame. */
+		double ScanSeconds = 0.0;
+		double MaxFrameScanSeconds = 0.0;
 	};
 
 	/**
