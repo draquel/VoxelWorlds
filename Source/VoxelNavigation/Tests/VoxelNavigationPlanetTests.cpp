@@ -6,6 +6,7 @@
 #include "VoxelSurfacePathfinder.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelChunkManager.h"
+#include "VoxelEditManager.h"
 #include "Testing/VoxelTestChunkWorld.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -85,113 +86,160 @@ bool FVoxelNavPlanetRegionFramesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace VoxelNavPlanetTest
+{
+	/**
+	 * Path's checks on a streamed planet of a radius: the small one, and a 1,000 km one for spherical Phase 6 (WM-BP11: the
+	 * surface queries, the region frames and the walkability on the precise altitude at scale).
+	 */
+	void RunPlanetPath(FAutomationTestBase& Test, float PlanetRadius, const TCHAR* WorldName)
+	{
+		const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
+		struct FSite { const TCHAR* Name; FVector Direction; FVector Tangent; };
+		const TArray<FSite> Sites = {
+			{ TEXT("45 degrees"), FVector(C45, 0.0, C45), FVector(0, 1, 0) },
+			// Across the +X / +Y face edge: from face +X to face +Y.
+			{ TEXT("cube-face edge"), FVector(1, 1, 0.2).GetSafeNormal(), FVector(-1, 1, 0) },
+		};
+		for (const FSite& Site : Sites)
+		{
+			VoxelTesting::FTestChunkWorld W;
+			W.Create(WorldName);
+			W.ConfigureSmallPlanet(PlanetRadius);
+			W.Config->PlanetHeightScale = 600.0f; // terrain within +-300: walkable slopes, some water
+			W.Config->bEnableWaterLevel = true;
+			W.Config->WaterRadius = W.Config->WorldRadius - 150.0f;
+			W.StartManager();
+			const FVector Center = W.Config->WorldOrigin;
+			const double Radius = W.Config->WorldRadius;
+			const float VoxelSize = W.Config->VoxelSize;
+			W.SetViewer(Center + Site.Direction * (Radius + 300.0));
+			UVoxelSurfaceNavigationSubsystem* Nav = W.World->GetSubsystem<UVoxelSurfaceNavigationSubsystem>();
+			if (!Test.TestNotNull(TEXT("The game world has navigation"), Nav) || !Test.TestTrue(*FString::Printf(TEXT("%s: streaming settles"), Site.Name), W.Settle()))
+			{
+				W.Stop();
+				continue;
+			}
+			Nav->SetChunkManager(W.Manager);
+
+			// A chord through the site whose ground is dry along its length (turned up to 60 degrees from the given tangent, so
+			// the edge site's chord still crosses the edge).
+			FVector Tangent = Site.Tangent;
+			for (const double Turn : { 0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0 })
+			{
+				const FVector Candidate = Site.Tangent.RotateAngleAxis(Turn, Site.Direction);
+				bool bDry = true;
+				for (int32 s = 0; s <= 20 && bDry; ++s)
+				{
+					const FVector Ground = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Candidate, -700.0 + 70.0 * s);
+					bDry = Radius + W.Manager->GetAltitudeAt(Ground) > W.Config->WaterRadius + 60.0;
+				}
+				if (bDry)
+				{
+					Tangent = Candidate;
+					break;
+				}
+			}
+			const FVector From = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Tangent, -700.0);
+			const FVector To = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Tangent, 700.0);
+			TArray<FVector> Points;
+			FVoxelSurfacePathStats Stats;
+			const bool bOk = Nav->FindPathWithStats(From, To, Points, Stats);
+			Test.AddInfo(FString::Printf(TEXT("%s: %s, %d points, %d nodes, %d samples%s; from face %d to face %d"), Site.Name, bOk ? TEXT("ok") : TEXT("FAILED"),
+				Points.Num(), Stats.NodesExpanded, Stats.HeightSamples, Stats.bPartial ? TEXT(" (partial)") : TEXT(""),
+				FVoxelCubeSphere::DirectionToSurface((From - Center).GetSafeNormal()).Face, FVoxelCubeSphere::DirectionToSurface((To - Center).GetSafeNormal()).Face));
+			if (!Test.TestTrue(*FString::Printf(TEXT("%s: a route"), Site.Name), bOk && Points.Num() > 0))
+			{
+				W.Stop();
+				continue;
+			}
+			double WorstOff = 0.0, Length = 0.0;
+			FVector Previous = From;
+			for (const FVector& Point : Points)
+			{
+				const FVector Direction = (Point - Center).GetSafeNormal();
+				WorstOff = FMath::Max(WorstOff, static_cast<double>(FMath::Abs(W.Manager->GetAltitudeAt(Point) - AnalyticAltitude(W.Manager, Center, Direction))));
+				Length += FVector::Dist(Previous, Point);
+				Previous = Point;
+			}
+			const double Straight = FVector::Dist(From, To);
+			Test.AddInfo(FString::Printf(TEXT("%s: worst waypoint %.1f uu off the surface along up; length %.0f against %.0f straight"), Site.Name, WorstOff, Length, Straight));
+			Test.TestTrue(*FString::Printf(TEXT("%s: waypoints on the surface along local up (within a voxel)"), Site.Name), WorstOff <= VoxelSize);
+			Test.TestTrue(*FString::Printf(TEXT("%s: the route ends within a cell of the goal"), Site.Name), FVector::Dist(Points.Last(), To) <= 2.0 * Nav->GetParams().CellSize + VoxelSize);
+			Test.TestTrue(*FString::Printf(TEXT("%s: the route is not a detour (under 1.6x the straight line)"), Site.Name), Length <= 1.6 * Straight);
+			Test.TestFalse(*FString::Printf(TEXT("%s: complete"), Site.Name), Stats.bPartial);
+
+			// The same start reuses its region's cache: a second identical search samples nothing new.
+			const int32 Cells = Nav->GetCachedCellCount();
+			Nav->FindPathWithStats(From, To, Points, Stats);
+			Test.TestEqual(*FString::Printf(TEXT("%s: a second search reuses the region's heights"), Site.Name), Nav->GetCachedCellCount(), Cells);
+
+			// Spherical Phase 6, P6.5: a box at the planet's centre is no surface and clears nothing (projected into every
+			// region's frame it spanned the planet: minutes a stamp on the 1,000 km planet); a system edit, which gives no
+			// centre (zero, radius 0), clears the edited chunk's cells; both at once.
+			{
+				const int32 Before = Nav->GetCachedCellCount();
+				const double T0 = FPlatformTime::Seconds();
+				Nav->InvalidateBox(FBox(Center - FVector(200.0), Center + FVector(200.0)));
+				const int32 AfterCore = Nav->GetCachedCellCount();
+				UVoxelEditManager* Edits = W.Manager->GetEditManager();
+				if (Test.TestNotNull(TEXT("An edit manager"), Edits))
+				{
+					Edits->OnChunkEdited.Broadcast(W.Manager->WorldToChunkCoord(From), EEditSource::System, FVector::ZeroVector, 0.0f);
+				}
+				const double Seconds = FPlatformTime::Seconds() - T0;
+				const int32 AfterEdit = Nav->GetCachedCellCount();
+				Test.AddInfo(FString::Printf(TEXT("%s: %d cached cells; a box at the centre clears %d, a system edit of the start's chunk %d, in %.4f s"),
+					Site.Name, Before, Before - AfterCore, AfterCore - AfterEdit, Seconds));
+				Test.TestEqual(*FString::Printf(TEXT("%s: a box at the planet's centre clears nothing"), Site.Name), AfterCore, Before);
+				Test.TestTrue(*FString::Printf(TEXT("%s: a system edit clears the edited chunk's cells"), Site.Name), AfterEdit < AfterCore);
+				Test.TestTrue(*FString::Printf(TEXT("%s: invalidation in bounded time"), Site.Name), Seconds < 0.5);
+			}
+
+			// Walkability follows the sea sphere.
+			FRandomStream Random(7);
+			int32 Disagree = 0, Under = 0;
+			for (int32 i = 0; i < 200; ++i)
+			{
+				const FVector Around = FVector::CrossProduct(Site.Direction, Random.GetUnitVector()).GetSafeNormal();
+				const FVector Point = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Around, Random.FRandRange(0.0, 2000.0));
+				FVector OnSurface;
+				Nav->ProjectToSurface(Point + (Point - Center).GetSafeNormal() * 500.0, OnSurface);
+				const double Altitude = W.Manager->GetAltitudeAt(OnSurface);
+				const bool bExpectedWet = Radius + Altitude < W.Config->WaterRadius - Nav->GetParams().MaxWadeDepth - 30.0;
+				const bool bExpectedDry = Radius + Altitude > W.Config->WaterRadius - Nav->GetParams().MaxWadeDepth + 30.0;
+				const bool bWalkable = Nav->IsWalkableAt(OnSurface);
+				Under += bExpectedWet ? 1 : 0;
+				Disagree += ((bExpectedWet && bWalkable) || (bExpectedDry && !bWalkable)) ? 1 : 0;
+			}
+			Test.AddInfo(FString::Printf(TEXT("%s: walkability at 200 points (%d under the sea): %d disagree with the sea sphere"), Site.Name, Under, Disagree));
+			Test.TestEqual(*FString::Printf(TEXT("%s: walkable exactly where the sea sphere leaves ground"), Site.Name), Disagree, 0);
+			W.Stop();
+		}
+	}
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavPlanetPathTest,
 	"VoxelWorlds.Navigation.Planet.Path",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelNavPlanetPathTest::RunTest(const FString& Parameters)
 {
-	using namespace VoxelNavPlanetTest;
-	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
-	struct FSite { const TCHAR* Name; FVector Direction; FVector Tangent; };
-	const TArray<FSite> Sites = {
-		{ TEXT("45 degrees"), FVector(C45, 0.0, C45), FVector(0, 1, 0) },
-		// Across the +X / +Y face edge: from face +X to face +Y.
-		{ TEXT("cube-face edge"), FVector(1, 1, 0.2).GetSafeNormal(), FVector(-1, 1, 0) },
-	};
-	for (const FSite& Site : Sites)
-	{
-		VoxelTesting::FTestChunkWorld W;
-		W.Create(TEXT("VoxelNavPlanetPath"));
-		W.ConfigureSmallPlanet();
-		W.Config->PlanetHeightScale = 600.0f; // terrain within +-300: walkable slopes, some water
-		W.Config->bEnableWaterLevel = true;
-		W.Config->WaterRadius = W.Config->WorldRadius - 150.0f;
-		W.StartManager();
-		const FVector Center = W.Config->WorldOrigin;
-		const double Radius = W.Config->WorldRadius;
-		const float VoxelSize = W.Config->VoxelSize;
-		W.SetViewer(Center + Site.Direction * (Radius + 300.0));
-		UVoxelSurfaceNavigationSubsystem* Nav = W.World->GetSubsystem<UVoxelSurfaceNavigationSubsystem>();
-		if (!TestNotNull(TEXT("The game world has navigation"), Nav) || !TestTrue(*FString::Printf(TEXT("%s: streaming settles"), Site.Name), W.Settle()))
-		{
-			W.Stop();
-			continue;
-		}
-		Nav->SetChunkManager(W.Manager);
+	VoxelNavPlanetTest::RunPlanetPath(*this, 20000.0f, TEXT("VoxelNavPlanetPath"));
+	return true;
+}
 
-		// A chord through the site whose ground is dry along its length (turned up to 60 degrees from the given tangent, so
-		// the edge site's chord still crosses the edge).
-		FVector Tangent = Site.Tangent;
-		for (const double Turn : { 0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0 })
-		{
-			const FVector Candidate = Site.Tangent.RotateAngleAxis(Turn, Site.Direction);
-			bool bDry = true;
-			for (int32 s = 0; s <= 20 && bDry; ++s)
-			{
-				const FVector Ground = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Candidate, -700.0 + 70.0 * s);
-				bDry = Radius + W.Manager->GetAltitudeAt(Ground) > W.Config->WaterRadius + 60.0;
-			}
-			if (bDry)
-			{
-				Tangent = Candidate;
-				break;
-			}
-		}
-		const FVector From = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Tangent, -700.0);
-		const FVector To = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Tangent, 700.0);
-		TArray<FVector> Points;
-		FVoxelSurfacePathStats Stats;
-		const bool bOk = Nav->FindPathWithStats(From, To, Points, Stats);
-		AddInfo(FString::Printf(TEXT("%s: %s, %d points, %d nodes, %d samples%s; from face %d to face %d"), Site.Name, bOk ? TEXT("ok") : TEXT("FAILED"),
-			Points.Num(), Stats.NodesExpanded, Stats.HeightSamples, Stats.bPartial ? TEXT(" (partial)") : TEXT(""),
-			FVoxelCubeSphere::DirectionToSurface((From - Center).GetSafeNormal()).Face, FVoxelCubeSphere::DirectionToSurface((To - Center).GetSafeNormal()).Face));
-		if (!TestTrue(*FString::Printf(TEXT("%s: a route"), Site.Name), bOk && Points.Num() > 0))
-		{
-			W.Stop();
-			continue;
-		}
-		double WorstOff = 0.0, Length = 0.0;
-		FVector Previous = From;
-		for (const FVector& Point : Points)
-		{
-			const FVector Direction = (Point - Center).GetSafeNormal();
-			WorstOff = FMath::Max(WorstOff, static_cast<double>(FMath::Abs(W.Manager->GetAltitudeAt(Point) - AnalyticAltitude(W.Manager, Center, Direction))));
-			Length += FVector::Dist(Previous, Point);
-			Previous = Point;
-		}
-		const double Straight = FVector::Dist(From, To);
-		AddInfo(FString::Printf(TEXT("%s: worst waypoint %.1f uu off the surface along up; length %.0f against %.0f straight"), Site.Name, WorstOff, Length, Straight));
-		TestTrue(*FString::Printf(TEXT("%s: waypoints on the surface along local up (within a voxel)"), Site.Name), WorstOff <= VoxelSize);
-		TestTrue(*FString::Printf(TEXT("%s: the route ends within a cell of the goal"), Site.Name), FVector::Dist(Points.Last(), To) <= 2.0 * Nav->GetParams().CellSize + VoxelSize);
-		TestTrue(*FString::Printf(TEXT("%s: the route is not a detour (under 1.6x the straight line)"), Site.Name), Length <= 1.6 * Straight);
-		TestFalse(*FString::Printf(TEXT("%s: complete"), Site.Name), Stats.bPartial);
+/**
+ * Spherical Phase 6, WM-BP11: Path on a 1,000 km planet (R 10^8): routes on the surface along local up within a voxel,
+ * the region caches and the walkability against the sea sphere, with every altitude and frame point formed at that radius.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavPlanetPathAtScaleTest,
+	"VoxelWorlds.Navigation.Planet.PathAtScale",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-		// The same start reuses its region's cache: a second identical search samples nothing new.
-		const int32 Cells = Nav->GetCachedCellCount();
-		Nav->FindPathWithStats(From, To, Points, Stats);
-		TestEqual(*FString::Printf(TEXT("%s: a second search reuses the region's heights"), Site.Name), Nav->GetCachedCellCount(), Cells);
-
-		// Walkability follows the sea sphere.
-		FRandomStream Random(7);
-		int32 Disagree = 0, Under = 0;
-		for (int32 i = 0; i < 200; ++i)
-		{
-			const FVector Around = FVector::CrossProduct(Site.Direction, Random.GetUnitVector()).GetSafeNormal();
-			const FVector Point = SurfaceAway(W.Manager, Center, Radius, Site.Direction, Around, Random.FRandRange(0.0, 2000.0));
-			FVector OnSurface;
-			Nav->ProjectToSurface(Point + (Point - Center).GetSafeNormal() * 500.0, OnSurface);
-			const double Altitude = W.Manager->GetAltitudeAt(OnSurface);
-			const bool bExpectedWet = Radius + Altitude < W.Config->WaterRadius - Nav->GetParams().MaxWadeDepth - 30.0;
-			const bool bExpectedDry = Radius + Altitude > W.Config->WaterRadius - Nav->GetParams().MaxWadeDepth + 30.0;
-			const bool bWalkable = Nav->IsWalkableAt(OnSurface);
-			Under += bExpectedWet ? 1 : 0;
-			Disagree += ((bExpectedWet && bWalkable) || (bExpectedDry && !bWalkable)) ? 1 : 0;
-		}
-		AddInfo(FString::Printf(TEXT("%s: walkability at 200 points (%d under the sea): %d disagree with the sea sphere"), Site.Name, Under, Disagree));
-		TestEqual(*FString::Printf(TEXT("%s: walkable exactly where the sea sphere leaves ground"), Site.Name), Disagree, 0);
-		W.Stop();
-	}
+bool FVoxelNavPlanetPathAtScaleTest::RunTest(const FString& Parameters)
+{
+	VoxelNavPlanetTest::RunPlanetPath(*this, 1.0e8f, TEXT("VoxelNavPlanetPathAtScale"));
 	return true;
 }
 

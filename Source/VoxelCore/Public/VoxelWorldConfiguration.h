@@ -188,6 +188,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
 	float PlanetOrbitCeiling = 0.0f;
 
+	/**
+	 * The voxel cut-over (spherical Phase 6, WM-BP10, D18: orbit and back). Above this altitude over the surface under the
+	 * streaming viewer (the terrain along its direction, or the sea where that is higher) a planet's voxel window unloads
+	 * and the far field alone draws the planet; it streams back, fading in over the far field, once the viewer is below
+	 * 0.85 of it (FDistanceBandLODStrategy::CutoverResumeFraction). 0 = three times the view distance
+	 * (FDistanceBandLODStrategy::DefaultCutoverViewDistances): from there the window's ground disk is a narrow cone under
+	 * the viewer, and a descent at 5,000 uu/s still has about 20 s to stream it back before landing (at the view distance
+	 * a 50 km planet's window was 5 s short). voxel.World.VoxelCutover overrides it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	float PlanetVoxelCutoverAltitude = 0.0f;
+
 	// ==================== Water Settings ====================
 
 	/**

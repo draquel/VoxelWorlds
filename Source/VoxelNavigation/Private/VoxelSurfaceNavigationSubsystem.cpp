@@ -535,29 +535,57 @@ int32 UVoxelSurfaceNavigationSubsystem::InvalidateTileCells(TMap<FIntPoint, TUni
 	const FIntPoint& MaxCell, bool bOnlyAnalytic)
 {
 	int32 Cleared = 0;
-	for (int32 TX = FloorDiv(MinCell.X, TileSize); TX <= FloorDiv(MaxCell.X, TileSize); ++TX)
+	const FIntPoint MinTile(FloorDiv(MinCell.X, TileSize), FloorDiv(MinCell.Y, TileSize));
+	const FIntPoint MaxTile(FloorDiv(MaxCell.X, TileSize), FloorDiv(MaxCell.Y, TileSize));
+	if (MaxTile.X < MinTile.X || MaxTile.Y < MinTile.Y)
 	{
-		for (int32 TY = FloorDiv(MinCell.Y, TileSize); TY <= FloorDiv(MaxCell.Y, TileSize); ++TY)
+		return 0;
+	}
+	// The tiles to visit: the rectangle's, or the cached ones inside it when the rectangle holds more tiles than are cached
+	// (a box projected across a planet's region frame spans millions of tiles; spherical Phase 6, P6.5).
+	TArray<FIntPoint, TInlineAllocator<64>> Keys;
+	const int64 RectTiles = (static_cast<int64>(MaxTile.X) - MinTile.X + 1) * (static_cast<int64>(MaxTile.Y) - MinTile.Y + 1);
+	if (RectTiles > InTiles.Num())
+	{
+		for (const TPair<FIntPoint, TUniquePtr<FNavTile>>& Pair : InTiles)
 		{
-			TUniquePtr<FNavTile>* Tile = InTiles.Find(FIntPoint(TX, TY));
-			if (!Tile || !*Tile)
+			if (Pair.Key.X >= MinTile.X && Pair.Key.X <= MaxTile.X && Pair.Key.Y >= MinTile.Y && Pair.Key.Y <= MaxTile.Y)
 			{
-				continue;
+				Keys.Add(Pair.Key);
 			}
-			const int32 X0 = FMath::Max(MinCell.X - TX * TileSize, 0);
-			const int32 X1 = FMath::Min(MaxCell.X - TX * TileSize, TileSize - 1);
-			const int32 Y0 = FMath::Max(MinCell.Y - TY * TileSize, 0);
-			const int32 Y1 = FMath::Min(MaxCell.Y - TY * TileSize, TileSize - 1);
-			for (int32 Y = Y0; Y <= Y1; ++Y)
+		}
+	}
+	else
+	{
+		for (int32 TX = MinTile.X; TX <= MaxTile.X; ++TX)
+		{
+			for (int32 TY = MinTile.Y; TY <= MaxTile.Y; ++TY)
 			{
-				for (int32 X = X0; X <= X1; ++X)
+				Keys.Add(FIntPoint(TX, TY));
+			}
+		}
+	}
+	for (const FIntPoint& Key : Keys)
+	{
+		const int32 TX = Key.X, TY = Key.Y;
+		TUniquePtr<FNavTile>* Tile = InTiles.Find(Key);
+		if (!Tile || !*Tile)
+		{
+			continue;
+		}
+		const int32 X0 = FMath::Max(MinCell.X - TX * TileSize, 0);
+		const int32 X1 = FMath::Min(MaxCell.X - TX * TileSize, TileSize - 1);
+		const int32 Y0 = FMath::Max(MinCell.Y - TY * TileSize, 0);
+		const int32 Y1 = FMath::Min(MaxCell.Y - TY * TileSize, TileSize - 1);
+		for (int32 Y = Y0; Y <= Y1; ++Y)
+		{
+			for (int32 X = X0; X <= X1; ++X)
+			{
+				const int32 Index = Y * TileSize + X;
+				if ((*Tile)->Sampled[Index] && (!bOnlyAnalytic || !(*Tile)->FromLoaded[Index]))
 				{
-					const int32 Index = Y * TileSize + X;
-					if ((*Tile)->Sampled[Index] && (!bOnlyAnalytic || !(*Tile)->FromLoaded[Index]))
-					{
-						(*Tile)->Sampled[Index] = false;
-						++Cleared;
-					}
+					(*Tile)->Sampled[Index] = false;
+					++Cleared;
 				}
 			}
 		}
@@ -601,6 +629,26 @@ void UVoxelSurfaceNavigationSubsystem::HandleChunkEdited(const FIntVector& Chunk
 {
 	if (Params.CellSize <= 0.f)
 	{
+		return;
+	}
+	// System edits (stamps, region edits, a load) give no centre (zero, radius 0): the edited chunk is the area. On a planet
+	// the zero vector is its centre, and a box there projected into every cached region's frame spanned the planet: a
+	// dungeon stamp on the 1,000 km test planet held the game thread for minutes (spherical Phase 6, P6.5).
+	if (EditRadius <= 0.f && EditCenter.IsZero())
+	{
+		const UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
+		const UVoxelWorldConfiguration* Config = ChunkMgr ? ChunkMgr->GetConfiguration() : nullptr;
+		if (!Config)
+		{
+			return;
+		}
+		const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(ChunkCoord, Config->ChunkSize, Config->VoxelSize).ShiftBy(Config->WorldOrigin).ExpandBy(Params.CellSize);
+		if (bPlanet)
+		{
+			InvalidatePlanetBox(Bounds, false);
+			return;
+		}
+		InvalidateCells(CellOf(Bounds.Min), CellOf(Bounds.Max), false);
 		return;
 	}
 	const float Pad = EditRadius + Params.CellSize;
@@ -736,14 +784,15 @@ void UVoxelSurfaceNavigationSubsystem::InvalidatePlanetBox(const FBox& WorldBox,
 		{
 			continue;
 		}
-		// The box's corners in the frame give a cell rectangle (its sides along up project inside it).
+		// The box's corners in the frame give a cell rectangle (its sides along up project inside it). Corners deep inside
+		// the planet are no surface any frame shows (their directions fan out over the whole sphere).
 		FBox2D Rect(ForceInit);
 		for (int32 Corner = 0; Corner < 8; ++Corner)
 		{
 			const FVector Point((Corner & 1) ? WorldBox.Max.X : WorldBox.Min.X, (Corner & 2) ? WorldBox.Max.Y : WorldBox.Min.Y,
 				(Corner & 4) ? WorldBox.Max.Z : WorldBox.Min.Z);
 			FVector FramePoint;
-			if (Region->Frame.ToFrame(Point, FramePoint))
+			if (FVector::DistSquared(Point, PlanetCenter) >= FMath::Square(0.5 * PlanetRadius) && Region->Frame.ToFrame(Point, FramePoint))
 			{
 				Rect += FVector2D(FramePoint.X, FramePoint.Y);
 			}

@@ -1097,6 +1097,12 @@ when the patch is released or pruned. They are about 200 bytes a vertex (the com
 29-56 MB at the surveyed sites of the three test planets, up to 83 MB looking down on the small one from orbit
 (WORLD_MODES_REVIEW_PLAN.md §20.5).
 
+Above the voxel cut-over (spherical Phase 6, WM-BP10; [LOD_SYSTEM.md](LOD_SYSTEM.md) "Orbit and Back") the window holds
+no chunk and the far field is all that draws the planet: on the 50 km test planet 145 patches (18.5 MB) at 600 m, 59
+(9 MB) from 1 R and 41 (6 MB) from 2 R. The renderer's appearance fade measures from the camera
+(`SetViewerPosition(CurrentCameraPosition)`), not from the streaming viewer, which a descending camera's prefetch puts
+below it: chunks streaming back on a descent fade in at their distance from the eye.
+
 ### Interface
 
 ```cpp

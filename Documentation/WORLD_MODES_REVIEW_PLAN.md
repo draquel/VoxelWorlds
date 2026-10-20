@@ -1476,16 +1476,23 @@ Three findings from §13.11 get IDs here:
 | G33 | A system or editor edit (a POI's terraform) re-extracts scatter only for the edited chunk; the neighbours whose extraction reads its face voxels (a planet chunk's `TouchingEdits` from the seven +X / +Y / +Z neighbours, a heightmap chunk's `AboveLayerEdits`) keep a stale view of it until they reload (found in G31, §19.9; the same holds for G26's and G29's rules) | Deferred until after Phase 6 | — |
 | G34 | Wide flat cavity ceilings at about Z 0, the chunk layers' shared plane, under hills near every `VoxelDemo` stop: the layer below's top voxels air and the layer above's bottom voxels solid (1,700 such cells in chunk (−45, −24, 0) near the Tower; §19.5's things to know). Not verified whether the cave configuration means them | Deferred until after Phase 6 (unverified) | — |
 | G35 | A pawn teleported to the exact north pole of a planet kept its old tilt (54.7° off upright after a jump from the cube corner): `UVCMovementComponent::SnapUprightToGravity` skipped the engine's default gravity, which is exactly the north pole's (found in spherical Phase 6's baseline survey, §20.2) | Fixed in P6.1 (§20.2): the snap runs on a planet whatever the gravity; `VoxelCharacter.Planet.Fly` snaps a tilted body at every site | — |
-| G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (over the small planet's pole, inside M and L) and a settle from altitude never lands (§20.2) | Open: WM-BP10 (landing) and WM-BP11 (spawn at scale) | WM-BP10, WM-BP11 |
+| G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (over the small planet's pole, inside M and L) and a settle from altitude never lands (§20.2) | Fixed in P6.5 (§20.6): the first spawn searches the whole planet in rings (`FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`, at most 4,096 samples) and spawns at the sea's surface on a planet with no land; the debug settle with no land within reach settles onto the sea; the landing hold (`vox.Fly 0`) holds a falling pawn over uncooked land; `VoxelCharacter.Planet.SpawnAtScale` | WM-BP10, WM-BP11 |
 | G37 | Planet POI queries by distance (claim streaming, `poi.Find`, the planet map markers) opened a cap from the chord of their range plus the origin's height, tens of degrees for an origin in the core or high above a big planet: frames of 30 s to 3 min on `Review_Planet_L`; registration generated every POI of the planet (8.2 million on L, 120 s) for a log line (§20.2) | Fixed in P6.1 (§20.2, WM-BP11's bounds brought forward): `FPOIPlacement::GetPlanetCapAngleWithin`, `GetPlanetSurveyAngle`; `POI.Planet.RegistrationBounded` | (WM-BP11) |
 | G38 | In-editor runs of the six suites lost the GPU device (`DXGI_ERROR_DEVICE_REMOVED`, `DRIVER_INTERNAL_ERROR`, seen at the creation of a 2 GB reserved buffer) at about the 128th render scene of the editor session. Tests that build worlds leave them to the garbage collector, and nothing collected garbage during a run: after a batch of 105 test worlds, 106 `UWorld`s were alive (1 after `obj gc`). The suites as they were build 124 and finished; P6.1's tests took them past the limit (every run that reached 127 scenes lost the device, on the base worktree too, and none that stayed at 126 or under). Headless runs are unaffected | Fixed in P6.1: the game module collects garbage when a test ends with 32 test worlds pending (`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`, `vox.Tests.GCEveryWorlds`); 529/529 in the editor with no device loss (§20.2) | — |
 | G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position, so across a blend zone, where the weights change slowly, it follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets (the grid tilted against local up everywhere, climate zones km across): `Review_Planet_L`'s equator and M's 45° and equator from above (also in P6.1's M shot; found in spherical Phase 6's P6.2 survey, §20.3) | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) | — |
 | G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Fixed in P6.4 (WM-BP9, §20.5): where the shell would sag past its 8 uu budget (M, L) the far field draws the sea, a section of each patch at sea level with offsets of the patch's size and an 8 x 8 grid (sag under a uu near the viewer); the small planet keeps its shell | WM-BP9 |
-| G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Open (low): snap the camera's pivot on a teleport (VoxelCharacterPlugin) | WM-BP10 |
+| G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Fixed in P6.5 (§20.6): the lagged pivot snaps when the ideal pivot jumps more than `TeleportSnapDistance` (5,000 uu) in a frame (`UVCThirdPersonCameraMode::ComputeLaggedPivot`, `VoxelCharacter.Camera.TeleportSnap`) | WM-BP10 |
 | G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Open: profile scatter on km relief | WM-BP13 |
 | G43 | The planet terrain steps across simplex-cell boundaries: `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`, and the heightmap noise's Simplex3D) use the 0.6 kernel radius (Gustavson's), which reaches past the simplex, so a corner's contribution drops out abruptly where a sample crosses into the next simplex. In world space the planes x = ±y, y = ±z and x = ±z through the planet centre lie on a simplex boundary in every octave at once, and they are the cube sphere's face edges: directions 10⁻⁸ rad apart across x = z differ in altitude by up to 11 uu on the small planet and 136 uu on `Review_Planet_L` (measured by `FarField.Planet.MatchesSurface`'s first build, P6.4, §20.5). Elsewhere one octave's boundary at a time gives smaller steps. The voxel terrain has them too (under a voxel on the small planet, up to about two along L's face edges) | Open (low): a 0.5 kernel is continuous but changes every planet's terrain (`PlanetGenerationVersion` bump; the heightmap Simplex3D a `GenerationVersion` bump and its parity CRCs). The far field samples a face edge's vertices exactly on the plane from both faces (`FVoxelFarFieldPatchKey::GetDirection`), so its patches meet there | — |
 | G44 | On a planet the voxel window's LOD 2 chunks light brighter than its LOD 0 and 1 chunks and the far field: from straight above `Review_Planet_L` at 45°N 20°E under a midday sun the window is a ring (the LOD 2 band) brighter than both its centre and the far field around it, and the normal buffer shows the ring's normals off the others' (whiter); the centre and the far field match. Not the far field's: the same material instance (swapping in a region component's makes no difference), the same material ids and vertex conventions (unlit the window's edge vanishes), shadows not involved; the far field's grid normals equal the planet's analytic `GetConditionedSurfacePoint` normals, and only giving it radial normals matches the ring. It shows as a brightness step along the window's edge from altitude, over land and through the sea (§20.5) | Open: the voxel terrain's normals at stride 4 on planets (the DC mesher's normal of an LOD 2 cell, the scene proxy's path); the far field keeps the analytic normals | WM-BP13 |
-| G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Open (cosmetic; the orbit view, WM-BP10, shows it most): blend the materials across a far-field quad (per-vertex material weights, or a per-patch material texture) | WM-BP10 |
+| G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Open (cosmetic; the orbit view, WM-BP10, shows it most): blend the materials across a far-field quad (per-vertex material weights, or a per-patch material texture). Not taken in P6.5: it needs the terrain material to blend two materials within a triangle, which the voxel meshes do not do either (`DC_MATERIAL_BLEND_PLAN.md`, deferred). Since P6.5 it also shows under the viewer just above the cut-over, where the window has emptied (§20.6) | WM-BP10 |
+| G46 | The volumetric cloud layer keeps the engine's Earth altitudes (5 km floor, 10 km thick) when the atmosphere is scaled to the planet: from orbit over the 50 km test planet a ring of clouds floats well outside its 9.7 km of air, and on the small planet the layer is 60 times its relief (found in P6.5's orbit survey, §20.6) | Fixed in P6.5 (§20.6): `ADayNightController::ApplyPlanetSky` scales every cloud layer with the atmosphere (`ComputePlanetCloudLayer`: the thickness by K, the floor by K but at least the terrain's top); `WorldClock.Planet.Sky`, `.SkyScale` | WM-BP10 |
+| G47 | System edits (dungeon stamps, region edits, edit loads) broadcast `OnChunkEdited` with no centre (the zero vector, radius 0), and the surface navigation invalidated a box around it: on a planet the zero vector is the centre, and the box's corners projected into every cached region's tangent frame spanned up to 1.7 R a side, so each broadcast walked billions of tile keys on the 1,000 km planet: a dungeon stamp near the pawn held the game thread for minutes (on the small planet every edit cleared the whole region cache; on a heightmap world the cells around the origin, not the edit's) (found in P6.5's L survey, §20.6) | Fixed in P6.5 (§20.6): an edit with no centre invalidates the edited chunk's bounds; a box's corners deep inside the planet project into no frame; `InvalidateTileCells` visits the cached tiles when the rectangle holds more than the cache; checks in `Navigation.Planet.Path` / `.PathAtScale` | WM-BP11 |
+| G48 | A pawn held with movement disabled (`MOVE_None`: the orbit camera's hold, `vox.Freeze`) in water was switched back to swimming by the movement component's water check every tick; under the orbit camera the window unloads, the water check then failed and it fell through the unloaded seabed (60,000 uu under it in 20 s on M's pole) (found in P6.5's M survey, §20.6) | Fixed in P6.5 (§20.6): `UVCMovementComponent` makes no swimming transition from `MOVE_None`; held 30 s under the orbit camera at M's pole, no fall | WM-BP10 |
+| G49 | A fast descent that stops above the cut-over resumes the window for a moment: the descent prefetch's lead puts the streaming viewer under the resume altitude while the camera is still coming down, and when the camera stops the lead decays and the window suspends again. On L, `vox.FlyTo` from 10⁷ to 60,000 uu (about 20,000 uu/s at its end) resumed for 0.7 s: 56 chunks loaded and about 1,100 queued generations dropped (found in P6.5's L survey, §20.6) | Open (low): the price of the prefetch's speculation, one resume and suspension per stop; a dwell before suspending again, or a lead bounded by how fast the camera can stop, would trade it against suspension latency | WM-BP10 |
+| G50 | The world map zoomed out on a big planet held the game thread for about 1 min 45 s: its marker query (`UPOIMapMarkerSubsystem::GetPlanetMarkersNear`, through `UVCMapMarkerRegistry::GatherMarkersNear`) asked for the whole globe, and P6.1's bound (G37: the cap of the shell within the range) is the whole planet for such a range, so placement generated all of L's 36 million cells; the map refreshes its markers every half second (found in P6.5's L systems check, §20.6) | Fixed in P6.5 (§20.6): the far markers come from at most `PlanetMarkerMaxCells` (20,000) cells around the query's direction (the small planet whole, a fifth of M's 90,774), and the last cap's POIs are reused; `VoxelWorlds.POI.Planet.MapMarkersAtScale` | WM-BP11 |
+| G51 | The world map open on the globe after an `ExploreAll` of a big planet ran at 6.5 FPS (150 ms frames): every tile image that arrived redrew the whole globe (up to 30 times a second), though zoomed out to the albedo the tile images do not show, and the `ExploreAll` had queued 65,536 of them (found in P6.5, M with the cap raised to its 16 million tiles, §20.6) | Fixed in P6.5 (§20.6): at the albedo's zoom only the albedo's arrival redraws at once, tile arrivals at most every 2 s (`UVCWorldMapWidget`); 60 FPS with the map open | WM-BP11 |
+| G52 | A descending viewer spends much of the window's generation on air: the window's near band (the viewer's altitude ± 2 chunks within 16,600 uu, P6.3's rule for flyers near the ground and caves) follows the streaming viewer down, so from 100 km up it loads a new layer of empty chunks around it every second while the ground disk streams back at 60-80 chunks a second; a 5,000 uu/s descent onto M from 200,000 (the cut-over at three view distances, resumed at about 100,000) touched down with 47-130 chunks queued, catch-up 1.1-3.6 s against 0.36 with the window kept (found in P6.5's re-run benches, §20.6) | Open: take the near band only while the viewer is within a few chunks of its surface slab (above it the band is air, and edited chunks are pinned anyway); `LOD.Planet.SurfaceSlab`'s expectation changes with it | WM-BP10 |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -4700,7 +4707,7 @@ ms, the stops' mean), the old lines 21.3 ms (29.8 ms), 22% less; with CPU genera
 the cube corner) 1.86 ms against 3.02 ms: the grid's cells and the slab tests 0.13 ms, the voxels past the faces 0.41 ms
 (3,169 at 0.13 µs). `GatherSpanned`'s duplicate scan had cost 5 ms of it before it was removed.
 
-## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17)
+## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17, done 2026-10-19)
 
 The requirements doc's optional Phase 6 ([SPHERICAL_PLANET_REQUIREMENTS.md](SPHERICAL_PLANET_REQUIREMENTS.md) §4): SP-H1
 (precision), SP-C5 (the far band) and SP-C6 (orbit), with SP-C3 (a doc fix). Phases 1-5 made a small planet (R 250,000
@@ -4709,7 +4716,8 @@ and from altitude, and lets the player **fly to orbit and back**. Scope decision
 only) are revised by D17 and D18 below. Every decision the plan needs (D17-D24) was taken on 2026-10-17.
 
 In progress: P6.1 (guardrails and baseline) done 2026-10-18, §20.2; P6.2 (precision) done 2026-10-19, §20.3; P6.3 (streaming
-at scale) done 2026-10-19, §20.4; P6.4 (the far field) done 2026-10-19, §20.5. The loose ends went first, each in its own session; as of
+at scale) done 2026-10-19, §20.4; P6.4 (the far field) done 2026-10-19, §20.5; P6.5 (orbit and back, game systems at scale) done
+2026-10-19, §20.6: every planet row of the exit check below is met. The loose ends went first, each in its own session; as of
 2026-10-18 all that block it are fixed:
 
 - Fixed: G23 (§19.3), G26 (§19.4), G27 (§19.5; GPU scatter extraction retired, D25), G29 (§19.6), G30 (§19.7), G24
@@ -5563,3 +5571,398 @@ keeps its ground disk under the viewer), landing on a big planet's open sea (G36
 the SkyAtmosphere at scale, and the game systems at L. The far field shows no edits, caves or overhangs beyond the window
 (§20.1's "left for later"); its materials could blend (G45), and a coarse cube-sphere albedo for the world map (WM-BP11)
 can come from the same surface queries.
+
+### 20.6 P6.5 results: orbit and back, and game systems at scale (2026-10-19)
+
+Bases: VoxelWorlds `6b35d64`, VoxelCharacterPlugin `c7252f6`, WorldClockPlugin `0ce2ce2`, UE5_PluginDev `e6691f1` (P6.4
+merged). Branches `feat/spherical-p6-5-orbit` (VoxelWorlds, VoxelCharacterPlugin, WorldClockPlugin) and
+`claude/spherical-p6-5-orbit` (UE5_PluginDev, with VoxelWorldPOI and the game module). P6.5 is WM-BP10 and WM-BP11. On
+`Review_Planet_M` and `_L` the player can now fly from the surface to 2 R and back to a landing, at the pole and the
+equator, with the planet drawn at every altitude. Above a cut-over altitude the voxel window unloads and the far field
+alone draws the planet. The window streams back ahead of the descending camera. Landing is on cooked ground or in the
+water. The sky and its clouds are scaled to the planet. The spawn, the map, the NPC cells, navigation and scatter work on
+the 1,000 km planet. Fixed on the way: G36 and G41 (planned), plus G46-G48, G50 and G51, found during the surveys (G47 and G50 had made a
+dungeon stamp and the world map on L hold the game thread for minutes). G49 and G52 are recorded. G45 stays open.
+
+The cut-over's default changed during the milestone: from the view distance to three view distances, after the descent
+benches. Budgets hold (D3: at most 964 MB peak, 491-543 MB settled with the far field). In orbit the voxel systems hold
+14-77 MB, against 253-309 kept. A descent at 5,000 uu/s from 200,000 lands with the window ready within 0.2-3.7 s.
+
+**WM-BP10: orbit and back** (D18):
+
+- *The cut-over* (`FDistanceBandLODStrategy`, `IVoxelLODStrategy::IsWindowSuspended` / `GetCutoverAltitude` /
+  `GetViewerSurfaceAltitude`). From high up the voxel window holds nothing the far field does not draw as well, so a
+  planet's window is suspended while the streaming viewer is more than the cut-over over the surface under it (the
+  analytic terrain along its direction, or the sea where that is higher: a flyer skimming a deep sea keeps its window)
+  and resumes below 0.85 of it (`CutoverResumeFraction`; a flyer hovering at the cut-over does not churn). The cut-over
+  is `UVoxelWorldConfiguration::PlanetVoxelCutoverAltitude` (new; 0 = three view distances,
+  `FDistanceBandLODStrategy::DefaultCutoverViewDistances`, 120,000 uu on the review planets; one view distance at first,
+  raised after the descent benches below), overridden by `voxel.World.VoxelCutover` (-1 the configuration's, 0 never: the window keeps its ground disk at
+  any altitude, as WM-BP8 made it). Suspended, the strategy offers no candidate and unloads every chunk, its balanced
+  LOD cache empty; the chunk manager evicts its queues (`ReprioritizeQueues`), stale-culls what finishes generating, and
+  neither pins nor keeps edited chunks (their edits stay in the edit layers and load with the window). On M the window's
+  1,263 chunks unload in about 2 s.
+- *The far field without a window.* While chunks are held the far field cuts its hole as in P6.4; once the window holds
+  none it refines by its screen error alone (`BandRadius` and `PrebuildRadius` 0: no band patches forced around an empty
+  window). When the window resumes the band returns, its patches build while their parents draw, and the chunks appear
+  over them with the appearance fade.
+- *The camera and the streaming viewer.* The chunk manager now keeps both: the camera (`GetCameraPosition`) and the
+  streaming viewer (`GetStreamingViewerPosition`), equal except under the descent prefetch. The window, the LOD bands and
+  the cut-over are the streaming viewer's; the far field's error and horizon culling, its sea test and the appearance
+  fade (`MeshRenderer->SetViewerPosition`) the camera's; `BuildStreamingContext` gives every other caller (the bench's
+  backlog, the debug draw) the same context.
+- *The descent prefetch* (`UVoxelChunkManager::ApplyDescentPrefetch`, `ComputeDescentLead`). Under a camera descending
+  faster than `voxel.Stream.DescentMinSpeed` (1,500 uu/s) the streaming viewer goes ahead of it along local down by what
+  it covers in `voxel.Stream.DescentLead` seconds (3), at most half its altitude over the surface and never within two
+  chunks of it. The camera's radial speed is smoothed (`FInterpTo`, 4/s) and starts over after a jump of ten chunks in a
+  frame (a teleport or a change of view target). The first version led by speed alone: an exponential descent at
+  hundreds of thousands of uu/s put the viewer at the ground from 3.5 × 10⁶ uu and the window resumed and suspended
+  every few frames; the half-altitude cap keeps the lead proportional.
+- *The sky at scale* (WorldClockPlugin, `ADayNightController::ApplyPlanetSky`). The engine's atmosphere is Earth's: 60 km
+  over a 6,360 km ground, a glowing ball 24 times the small planet's size from orbit. With `bScalePlanetSky` (on) it is
+  scaled by K = clamp(max(R / 6,360 km, 4 × the terrain's top / 60 km), 10⁻⁴, 1) (`ComputePlanetSkyScale`,
+  `PlanetAtmosphereOverTerrain` 4): the height, the Rayleigh and Mie scale heights, the ozone tent and the aerial
+  perspective's distance by K, the scattering and absorption by 1/K, so a column of air holds what the authored one
+  holds and the sky looks as authored from the ground. The terrain's top comes from the planet clock bridge
+  (`UWorldClockSubsystem::SetPlanetFrame(Centre, SeaRadius, TerrainTop)`, VoxelWorldPOI: the world mode's altitude
+  bounds over the sea). The volumetric cloud layers go with it (`ComputePlanetCloudLayer`: the thickness by K, the floor
+  the authored floor by K but at least the terrain's top; G46). Small planet K 0.0047 (0.28 km of air), M 0.162 (9.7 km),
+  L 0.563 (33.8 km). A space exposure (`bPlanetSpaceExposure`, a second unbound post-process,
+  `SpaceExposurePostProcess`): auto-exposure meters the brightest part of the view (histogram 70-98%) with a weight
+  that rises from half the atmosphere's height to one and a half (`ComputeSpaceExposureWeight`), so the sunlit planet
+  keeps its daylight exposure from orbit instead of washing out against black.
+- *Landing* (the game module's debug flight, `UVoxelDebugSubsystem`). `vox.Fly 0` arms a landing hold: while the pawn
+  falls within max(2 chunks, its descent speed × 1 s) of land whose chunk has no cooked collision, it is held
+  (`MOVE_None`) until the chunk cooks, then let go (`Landing hold: ...`, `Landing: on the ground / in the water after N
+  landing hold(s)`); a timeout lets go for good. It never engages while the window is suspended: with the cut-over
+  under its two chunks (a test at 2,000 uu) it held the pawn where nothing could load, until the timeout. The settle
+  (`vox.TP`, `vox.TPLatLon`, the orbit camera's release) already held until collision; a settle with no land within
+  reach goes onto the sea's surface and says so.
+- *G36: land at scale* (VoxelCharacterPlugin). `FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`: rings around the
+  start direction at a quarter of their angle (at most 3.5°), at most 4,096 samples, out to the antipode;
+  `FindSpawnablePosition(..., bAnywhereOnPlanet)` uses it for the character's first spawn. A planet with no land above
+  its sea spawns the pawn at the sea's surface (`bSpawnAtSea`, swimming). The debug settle with no land within reach
+  settles onto the sea's surface along the direction instead of hanging (`TeleportPawn: no land within reach ...`).
+- *G48: a held pawn in water* (VoxelCharacterPlugin). The movement component's water check switched a pawn with movement
+  disabled back to swimming, so the orbit camera's hold did not hold a swimmer: it sank through the seabed the window had
+  unloaded. No swimming transition from `MOVE_None` now.
+- *G41: the camera's teleport sweep* (VoxelCharacterPlugin). `UVCThirdPersonCameraMode::ComputeLaggedPivot`: the lagged
+  pivot snaps to the ideal one when that jumps more than `TeleportSnapDistance` (5,000 uu) in a frame, so a teleport no
+  longer sweeps the camera, and the streaming viewer with it, through the planet.
+- *Tooling.* `vox.FlyTo <altitude> [seconds]` (an exponential climb or descent to an altitude over the surface in debug
+  flight, holding there; progress at each quarter with the window's state and the far field's patches and memory),
+  `vox.Planet`'s window line (active or suspended, the streaming viewer over the surface, the cut-over, the lead), the
+  bench's descent route (`descend=Lat:Lon:Alt`) and its `Suspended`, `LeadUU`, `SurfAlt` columns and `voxelCutover`
+  summary. The capture's fall-through comparison skips flight, the landing hold and the orbit camera's hold.
+
+**WM-BP11: game systems at scale:**
+
+- *The world map's zoom range from R* (VoxelCharacterPlugin, `UVCWorldMapWidget::GetPlanetZoomRange`): the outermost
+  zoom shows the whole globe on any planet (0.9 of the panel), the innermost a tile at its size, so the wheel reaches
+  both on L (where the old fixed minimum, 0.25, showed about 12 km across). `vox.Map [zoom|min|0]` opens it at a zoom.
+- *A coarse globe albedo* (VoxelMap, `UVoxelMapSubsystem::GetGlobeAlbedo`): 256 cells a face edge of the analytic
+  surface's colour (the far field's surface queries, `FVoxelFarFieldSurface`; built once on the thread pool, 0.04 s on L)
+  with the tiles' colouring rules, explored by cell (`IsGlobeCellExplored`). The globe
+  samples it below half a texel per tile (`FVCPlanetMapProjection::bUseGlobeAlbedo`), where per-tile images would be
+  millions of tiles on L.
+- *`ExploreAll` at scale* (`ExploreAllTiles` returns `int64`; `voxel.Map.ExploreAllMaxTiles`, 1,000,000): on a planet
+  it marks the tiles nearest the pawn first (`FVoxelCubeSphereGrid::GatherWithinAngle`) up to the cap and queues images
+  for the nearest 65,536; L's atlas is 32,725 tiles a face edge, 6.4 × 10⁹ tiles (an `int32` count overflowed).
+- *G50: markers on a zoomed-out globe* (VoxelWorldPOI, `UPOIMapMarkerSubsystem::GetPlanetMarkersNear`): the globe asks
+  for the markers of all it shows, and P6.1's cap (G37) is the whole planet for such a range: L's 36 million POI cells,
+  the game thread held about 1 min 45 s. The far markers now come from at most `PlanetMarkerMaxCells` (20,000) cells
+  around the query's direction (the small planet's 294 whole, a fifth of M's 90,774), and the half-second refresh
+  reuses the last cap's POIs; the map draws at most 64 markers.
+- *The globe's redraws* (VoxelCharacterPlugin, `UVCWorldMapWidget`): at the albedo's zoom the tile images do not show,
+  so a tile's arrival no longer redraws the globe at once (at most every 2 s, for the exploration they carry): after an
+  `ExploreAll` on M (16 million tiles, 65,536 images queued) a redraw per arrival held the open map at 6.5 FPS; it holds
+  60. `ExploreAllTiles` sorts the whole atlas by precomputed keys (52 s for M's 16 million with the cap raised, from 79;
+  the default cap takes about 1 s on any planet).
+- *NPC cells* (VoxelWorldPOI): the population cells keep `CellSize` at any radius, their atlas coordinates fit
+  `MakeNPCId`'s 20-bit fields up to L (94,248 a row), and the members planned per cell match the small planet's.
+- *Navigation, scatter and the surface queries on the precise altitude*: P6.2's double CPU math and noise already carry
+  them; the planet path and the scatter along local up now also run on a 1,000 km planet.
+- *G47: edits without a centre* (VoxelNavigation). System edits (dungeon stamps, region edits, edit loads) broadcast the
+  zero vector and radius 0, and the navigation invalidated a box there; on a planet that is the centre, whose box
+  projected into every cached region's frame spanned the planet: on L a dungeon stamp near the pawn held the game thread
+  for minutes. Such an edit now invalidates the edited chunk's bounds (on every world mode), corners deep inside the
+  planet project into no frame, and a rectangle larger than the cache visits only its cached tiles.
+- *Saves*: the fingerprint is unchanged in shape (world mode, radius, shell, centre, grid, `PlanetGenerationVersion` 5);
+  P6.5 changes no generation.
+
+**Tests** (new; headless and in the editor):
+
+| Test | Check | Result |
+|------|-------|--------|
+| `VoxelWorlds.LOD.Planet.Cutover` | The rule (suspend above the cut-over, resume below 0.85 of it), then on the small planet and a 1,000 km planet with `Review_Planet_L`'s noise at the pole, 45°, the equator and a cube corner: candidates on the ground; none and every chunk to unload at 45,000 over the surface; still none at 37,000 (hysteresis); the whole ground disk back at 17,000 and kept at 37,000 on the way up; a flyer 300 over a 60,000-deep sea keeps its window; `voxel.World.VoxelCutover` 0 never suspends, 5,000 sets the altitude | Every site: 955-1,161 candidates on the ground, 0 at 45,000 and 37,000 with all of them to unload, the disk back at 17,000 with none missing, kept at 37,000; the sea case not suspended; the cvar's two cases as set |
+| `VoxelWorlds.Streaming.Planet.CutoverDescent` | `ComputeDescentLead` (no lead climbing, walking or under the minimum speed; at most half the altitude; never within the clearance); a chunk manager on an R 20,000 planet (view 6,000): the window loads, unloads above the cut-over (an edit stays in its layer and reloads with it), holds through the hysteresis, and a descent at 18,000 uu/s resumes it with the camera over the resume altitude; the cvar's 0 never suspends | 146 chunks on the ground, 0 above the cut-over, 146 back with the edit; the descent resumed it with the camera 16,800 over the surface (lead 13,023; the largest 13,300), the streaming viewer never under 300 over it |
+| `VoxelWorlds.Map.Planet.ZoomAtScale` | The globe albedo against the analytic surface (sea and land cells by its altitude); its fog of war follows exploration; `ExploreAll` takes a small planet whole and caps an R 10⁶ one nearest the pawn first; a 1,000 km planet's tile count overflows `int32` | 662 sea and 1,738 land cells, 0 wrong; 36 cells explored after a request, none on the far side; on R 10⁶ 20,000 of 5,785,944 tiles, the farthest 8.9° from the pawn (a cap's 6.7°); 2.57 × 10¹⁰ tiles at the test's tile size |
+| `VoxelCharacter.Planet.MapZoomAtScale` | The world map's zoom range from R (the whole globe in 0.9 of the panel at R 2.5 × 10⁵, 5 × 10⁶ and 10⁸); zoomed out, the sampler draws the albedo and asks for no tile image | The globe's diameter within a pixel at every radius; 2,281 texels drawn from the albedo, 41 tile requests before and after |
+| `VoxelWorlds.Navigation.Planet.PathAtScale` | `Planet.Path` on a 1,000 km planet: routes on the surface along local up within a voxel, the region cache reused, walkability against the sea sphere; and (in `.Path` too, G47) a box at the planet's centre clears no cached cell while a system edit's chunk clears its own, both in under 0.5 s | Waypoints within a voxel, 0 walkability disagreements; the centre's box 0 cells, the edit 36-80, 0.1 ms (before G47's fix the 1,000 km case did not finish) |
+| `VoxelWorlds.Scatter.Planet.AlongLocalUpAtScale` | Scatter along local up on a 1,000 km planet at both poles, 45°, the equator and a cube corner: no open point underground, every point within a voxel of the analytic surface | 9,216-15,996 open points a site, 0 underground, the worst 0.2-3.0 uu off |
+| `VoxelWorlds.POI.SurfaceNPC.PlanetCellsAtScale` | The NPC population cells at R 2.5 × 10⁵, 5 × 10⁶ and 10⁸: every cell an atlas cell whose coordinates fit the id's 20-bit fields, every id carrying its cell, planned spots on the datum sphere, cells of `CellSize`, members a cell as on the small planet | 40, 786 and 15,708 cells a face edge (9,817, 9,992 and 10,000 uu across), 8.94, 9.05 and 8.96 members a cell; 0 bad cells, ids or spots |
+| `VoxelWorlds.POI.Planet.MapMarkersAtScale` | A query whose range covers the whole planet (a zoomed-out globe's): on a 1,000 km planet its far markers come from the bounded cap around its direction and it returns in under a second, and the same query again reuses what placement made; on the small planet (fewer cells than the bound) it holds every POI (G50) | R 10⁸ (36 million cells): 7,120 markers in 0.054 s, again in 0.0009 s, all inside the cap; R 2.5 × 10⁵ (294 cells): 101 markers, every POI |
+| `VoxelCharacter.Planet.SpawnAtScale` | `FindPlanetSpawnPointAtScale` where the 50,000 uu search finds nothing: land 60° away and on the far side of a 1,000 km planet, 30° away on a 50 km one; a planet with no land | The near search found none (89 samples); at scale every cap found, 0.3-1.6° inside its edge, in 559-4,040 samples; no land: 4,090 samples to the antipode and none |
+| `VoxelCharacter.Camera.TeleportSnap` | `ComputeLaggedPivot`: lags as before under the snap distance, snaps when the ideal pivot jumps past it | As specified |
+| `WorldClock.Planet.SkyScale` (and `.Sky` extended) | `ComputePlanetSkyScale` (the terrain decides on M and L, the radius on an Earth-sized planet, at most 1), `ComputePlanetCloudLayer` (G46), `ComputeSpaceExposureWeight`; in `.Sky` the controller's scaled heights, the column of air and the cloud layer on the small planet | K 0.5633 (L), 0.162 (M); clouds 8.45-14.08 km (L), 2.43-4.05 km (M), 65-108 m on the test's small planet (terrain to 6,500 uu; live on `Review_Planet` 70-117 m), inside the air |
+
+`VoxelWorlds.LOD.Planet.GroundHorizon` now sets the cut-over out of reach: its subject is the window under the cut-over
+(a viewer climbing to 100,000 keeps its ground disk).
+
+**Exit check, live** (`PlanetTest` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Planet_{M,L}` and the
+small `Review_Planet`, with the cut-over at P6.5's first default, one view distance: 40,000 uu, resuming below 34,000;
+`vox.Debug.Capture 1` at 0.25 s throughout; `vox.FlyTo` from the surface to 2 R and back in steps
+of 15 s, held 12 s at each with `vox.Planet`, the pawn's view and a look-down; `vox.Fly 0` from 300 uu to land; then the
+orbit camera at 2 R and its release; shots `p65_<planet>_<site>_*`):
+
+- *M, the equator* (0°, 100°E; ground 18,035 under the datum, 6,965 over the sea). Settled on cooked ground: 989
+  chunks, the far field 302 patches (35 MB). Climbing, the window grew to 1,263 chunks (the viewer's altitude band) and
+  was **suspended at 40,079 uu over the surface**; it unloaded in about 2 s, and the far field refined by its error
+  alone: 145 patches (18.5 MB) at 60,000, 123 (17 MB) at 500,000, 59 (9 MB) at 1 R, 41 (6 MB) at 2 R, the whole
+  hemisphere from 1 R up (`p65_M_equator_fly_*`). Coming down at up to 6,400 uu/s the descent prefetch put the streaming
+  viewer 19,247 uu under the camera, so the window **resumed with the camera 53,200 uu over the surface** (the viewer at
+  33,931); at 10,000 it held 1,231 chunks, all ready. Dropped from 300 uu: `Landing: on the ground after 0 landing
+  hold(s)`. The orbit camera at 2 R suspended the window again; its release settled the pawn on cooked ground in 0.2 s.
+- *M, the pole* (open sea: the seabed 37,323 under the datum, 12,300 under the sea). Hovering 10,000 over the sea, up
+  to 2 R and back the same way (suspended at 40,034, resumed at 33,995 with the camera 53,255 over the sea); dropped from
+  300 into the water: `Landing: in the water after 0 landing hold(s)`. Under the orbit camera the swimming pawn was not
+  held (G48 below): it sank through the seabed the window had unloaded, 60,000 uu under it in 20 s; with the fix it held
+  30 s at the surface under the orbit camera, and the release settled it onto the sea (no land within reach) to swim.
+- *Capture*: on M 2,899 lines over the two sites; `feetCol=0` only on hovering (mode 5), held (mode 0) and falling
+  frames over water or from the drop, never walking; the one fall-through signature per site came from the held pawn
+  under the orbit camera (now skipped by the capture, which knows the orbit camera holds the pawn).
+- *L, the equator* (0°, 100°E; ground 36,351 under the datum, over the sea). The first spawn of a fresh world (from the
+  map's PlayerStart over the north pole, open sea) found land 4.7 km of arc away and stood on cooked ground (G36). Settled
+  at the equator: 963 chunks, the far field 255 patches (28.6 MB). Suspended at 40,048 over the surface with 1,218
+  chunks held; the far field 134 patches (15.7 MB) at 60,000, 96 (13.9 MB) at 0.1 R, 24-26 (4.3 MB) at 1 R, 16 (3.0 MB)
+  at 2 R, the whole disc from 1 R. Coming down, `vox.FlyTo` from 0.1 R to 60,000 ends at about 20,000 uu/s: the lead
+  resumed the window under a camera still 67,860 over the surface, and when the camera stopped at 60,000 it suspended
+  again 0.7 s later with 56 chunks loaded (G49); the next descent resumed it with the camera 53,200 over the surface and
+  held 1,197 chunks at 10,000. Dropped from 300: `Landing: on the ground after 0 landing hold(s)`. The orbit camera at 2 R
+  and its release: settled on cooked ground in 0.2 s. Capture: 1,451 lines, `feetCol=0` only while hovering or held, no
+  fall-through signature, no death.
+- *L, the pole* (open sea: the seabed 106,312 under the datum, 23,000 under the sea). Hovering 10,000 over the sea
+  (1,048 chunks, the far field 278 patches, 34.5 MB), up to 2 R: suspended at 40,050 with 1,240 chunks held; the far field
+  134 patches (17.5 MB) at 60,000, 101 (14.3 MB) at 0.1 R, 36 (5.7 MB) at 1 R, 12 (2.5 MB) at 2 R. Down: G49 again at
+  60,000 (resumed for 0.7 s, 86 chunks), then resumed with the camera 53,250 over the sea; 1,240-1,272 chunks at 10,000
+  and 300. Dropped from 300 into the water: `Landing: in the water after 0 landing hold(s)`; under the orbit camera at
+  2 R the swimmer held at the surface (G48's fix), and the release settled it onto the sea (`TeleportPawn: settle
+  released onto the sea's surface`). Capture: 1,467 lines, `feetCol=0` only while hovering or held, no fall-through
+  signature, no death.
+- *The small planet* (`Review_Planet`, R 250,000), the equator and the pole, the same way to 2 R (500,000) and back:
+  suspended at 40,061 and 40,065 with 1,003 and 964 chunks held; the far field 351-383 patches (47-51 MB) at 60,000,
+  153-173 (22-24 MB) at 1 R, 66-71 (10-11 MB) at 2 R; resumed with the camera 52,837-53,068 over the surface; landed on
+  cooked ground at both (0 landing holds); the orbit camera's release settled on cooked ground (at the pole in the cave
+  mouth P6.4 found, 1,293 under the analytic surface). Capture: 2,575 lines; one walking frame without collision under
+  the feet, at the exact pole right after the settle: the pawn, standing still, was on the cooked collision of a
+  neighbouring chunk at the corner of four (the capture takes the feet's chunk by position). The sky: 0.28 km of air
+  (K 0.0047), its clouds 70-117 m over the sea.
+
+**Systems at L** (45°N 20°E, ground 209,816 over the datum; `p65_L_*`), the rows Phases 4-5 passed:
+
+| Check | Result |
+|-------|--------|
+| `voxel.Map.ExploreAll` | 1,000,000 of the planet's 6,425,553,750 tiles explored (the cap), 65,536 images queued, in 0.99 s; the save then carries 1,000,653 explored tiles and loads them |
+| The world map | `vox.Map min`: zoom 0.00138 (the globe whole) to 4; the globe albedo built in 0.04 s (256 cells a face edge). Opening it held the game thread about 1 min 45 s in the POI marker query (G50, fixed after this run; re-checked below) |
+| POIs | `poi.Find`: the nearest three (campsites, a tower) at 0.17-0.61 km at once; `vox.TPPOI` settled on the nearest campsite's pad on cooked ground |
+| NPCs | 18 population cells planned around the player (4 out of their phase, 18 out of the spawn band at noon); `vox.SpawnNPC Deer 2` spawned two 8 m ahead |
+| Navigation | `vox.NavPath`: a 5,987 uu route, 558 nodes, 685 samples, 15.3 ms |
+| Save | `vox.SaveInfo`: the fingerprint `SphericalPlanet [PlanetRadius=100000000; ...; PlanetGeneration=5; ...] gen 2`, unchanged in shape; `vox.Save` and `vox.Load` round trip (54 edited chunks, 1,082,116 edits from the POI stamps) |
+
+**After the fixes** (the same build as the benches):
+
+- *L, the world map* (`vox.Map min`, then 1, then min again): the next console command answered 0.1-0.6 s after each,
+  where G50 held the game thread about 1 min 45 s; the globe albedo built in 0.04 s.
+- *M, the globe* (the whole planet explored with the cap raised, `voxel.Map.ExploreAllMaxTiles 20000000`): drawn from
+  the albedo, its continents, seas and POI markers in place (`p65_M_worldmap_globe`, a UI shot with `shot showui`);
+  60 FPS with the map open, 60 closed (6.5 open before the redraw throttle).
+- *The landing hold, exercised* (M, 30°N 120°E): dropped from 60,000 over the ground (above the cut-over), the window
+  resumed under the falling pawn (lead 12,000) and it landed on cooked ground with no hold needed. With the cut-over
+  forced to 2,000 and the prefetch off, dropped from 10,000: the window resumed at 1,656, the pawn falling at 4,000 uu/s
+  was held 1,142 over the uncooked ground for 0.3 s, then landed (`Landing: on the ground after 1 landing hold(s)`).
+  Before the hold's fix, the same drop held the pawn at 9,598 over the ground, above the cut-over, until the 45 s
+  timeout.
+- *M, the equator, with the default at three view distances* (the build the suites ran): the window held to 120,053 over
+  the surface (1,133 chunks), then suspended. Coming down by `vox.FlyTo`'s steps, it resumed with the camera about
+  182,000 over the surface (the lead at half the altitude), and held 1,092-1,300 chunks at the 60,000 hold, under the
+  resume altitude, so no G49 there. It landed on cooked ground (0 holds), and the orbit camera's release settled.
+  Capture: 1,560 lines, `feetCol=0` only while hovering or held, no fall-through signature, no death.
+
+**Benches.** One build, two behaviours by cvar:
+
+- **new:** the cut-over and the descent prefetch.
+- **control (ctl):** `voxel.World.VoxelCutover 0` and `voxel.Stream.DescentLead 0`, which is P6.4's behaviour: the window
+  keeps its ground disk at any altitude.
+
+The setup is P6.4's: PIE on `PlanetTest` with `voxel.ConfigOverride`, a fresh world per run, `vox.TPLatLon 45 20` and its
+settle, local noon, and input blocked. A fresh editor and a throwaway run come first (G14), then three repetitions of
+new and ctl on every route, interleaved. Means of three runs (catch-up per run). JSON and CSV are in `Saved/VoxelBench`
+of the worktree.
+
+*The first batch* (tags `p65_{S,M,L}_{new,ctl}_{gc,climb,descend}_r{1,2,3}`) ran with the cut-over at one view distance
+(40,000):
+
+- the great circle: `1500 40000 gc=45:20:90 follow=300`;
+- the climb: `1500 60000 climb=45:20:200`, through the cut-over;
+- a descent: `5000 99700 descend=45:20:100000`, from above it;
+- all with `warmup=30 catchup=90`.
+
+| Planet, route | Behaviour | Peak loaded | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Systems MB peak (max) | Voxel systems MB at the end (+ far field) | Far field ms P95 (max) | Suspended (of the run) |
+|---|---|---|---|---|---|---|---|---|---|
+| Small, great circle | **new** | 1,289 | 16.7 / 25.3 | 7.3 | 0.17 / 0.17 / 0.17 | 754 (754) | 708 (+65) | 0.99 (3.91) | 0.00 |
+|  | ctl | 1,284 | 16.7 / 24.6 | 7.1 | 0.17 / 0.17 / 0.17 | 755 (759) | 708 (+65) | 0.97 (2.73) | 0.00 |
+| Small, climb | **new** | 1,173 | 16.7 / 17.4 | 2.4 | 0.17 / 0.17 / 0.17 | 615 (618) | 43 (+43) | 0.61 (4.00) | 0.32 |
+|  | ctl | 1,173 | 16.7 / 17.3 | 2.4 | 0.17 / 0.17 / 0.17 | 613 (615) | 262 (+69) | 0.54 (4.16) | 0.00 |
+| Small, descent | **new** | 1,093 | 16.7 / 26.2 | 7.7 | 0.17 / 0.43 / 0.30 | 934 (938) | 882 (+72) | 1.25 (4.54) | 0.53 |
+|  | ctl | 1,173 | 16.7 / 24.8 | 6.1 | 0.17 / 0.17 / 0.17 | 525 (526) | 525 (+55) | 0.87 (3.38) | 0.00 |
+| M, great circle | **new** | 1,222 | 17.1 / 37.7 | 9.5 | 0.22 / 0.21 / 0.27 | 779 (805) | 732 (+47) | 0.95 (3.12) | 0.00 |
+|  | ctl | 1,224 | 16.7 / 34.5 | 8.3 | 0.19 / 0.21 / 0.20 | 751 (754) | 725 (+47) | 0.81 (2.82) | 0.00 |
+| M, climb | **new** | 1,364 | 16.7 / 20.0 | 4.0 | 0.17 / 0.17 / 0.17 | 507 (510) | 9 (+18) | 0.46 (2.88) | 0.35 |
+|  | ctl | 1,523 | 16.7 / 20.7 | 4.5 | 0.21 / 0.20 / 0.20 | 508 (510) | 441 (+41) | 0.46 (1.67) | 0.00 |
+| M, descent | **new** | 1,329 | 16.7 / 29.6 | 8.9 | 5.00 / 4.91 / 5.74 | 1,128 (1,156) | 1,112 (+44) | 1.14 (6.01) | 0.58 |
+|  | ctl | 1,516 | 25.2 / 37.4 | 13.0 | 0.33 / 0.41 / 0.34 | 860 (873) | 761 (+42) | 1.02 (2.00) | 0.00 |
+| L, great circle | **new** | 1,264 | 17.6 / 35.1 | 9.4 | 0.42 / 0.37 / 0.33 | 849 (881) | 813 (+48) | 0.87 (3.10) | 0.00 |
+|  | ctl | 1,264 | 16.7 / 33.2 | 9.0 | 0.41 / 0.48 / 0.41 | 832 (835) | 810 (+48) | 0.81 (2.56) | 0.00 |
+| L, climb | **new** | 1,409 | 16.7 / 19.6 | 4.0 | 0.17 / 0.17 / 0.17 | 570 (570) | 74 (+27) | 0.46 (2.07) | 0.35 |
+|  | ctl | 1,550 | 16.7 / 20.4 | 4.6 | 0.17 / 0.17 / 0.17 | 570 (570) | 487 (+42) | 0.47 (1.80) | 0.00 |
+| L, descent | **new** | 1,352 | 16.7 / 30.2 | 9.4 | 6.11 / 5.19 / 5.26 | 1,230 (1,252) | 1,214 (+44) | 0.92 (4.21) | 0.58 |
+|  | ctl | 1,533 | 25.8 / 35.6 | 13.0 | 0.27 / 0.25 / 0.25 | 905 (922) | 826 (+43) | 1.00 (2.39) | 0.00 |
+
+- **The great circle** never nears the cut-over, so new and ctl run the same code but the prefetch's per-frame check:
+  - S: identical.
+  - L: the runs overlap (frame P95 31.8-41.1 against 31.5-34.6 ms).
+  - M: two of the new runs were slower in every section alike, scatter, seams, meshing and the LOD update 10-15% each
+    (frame P95 34.7-40.3 against 34.1-34.8). That is the machine, not one terrain query a frame.
+- **The climb through the cut-over:**
+  - The window unloads at 40,000. At the top (60,200) the voxel systems hold 9-74 MB against 262-487 kept.
+  - Frame and manager P95 stay equal or lower.
+  - Peak memory is the same (it peaks on the ground).
+- **The descent from above the cut-over:**
+  - The window, unloaded at 100,000, resumed only with the camera about 48,000 over the ground (the lead is at most half
+    the altitude: 15,000 at 5,000 uu/s), 10 s before arrival.
+  - M's and L's windows (about 1,300 chunks on km relief) stream back at 65-160 chunks a second, so they touched down
+    with half of it loaded. LOD 0 and 1 were complete; the far field drew the outer ring under the appearance fade.
+  - Catch-up was 5.2 s on M and 5.5 s on L, against 0.36 and 0.26 kept. On the small planet it was 0.30 against 0.17.
+  - Peak memory was 1,128-1,230 MB (fresh, uncompressed chunks), against 860-905: still under D3's 1.5 GB.
+  - The control's frame P95 on the way down was the worse one, 35.6-37.4 ms against 29.6-30.2: it re-meshed its 1,500
+    chunks' LOD 1,226-1,250 times under the descending viewer.
+  - This is why the default became three view distances (above): from there a descent at 5,000 uu/s has about 20 s.
+
+*The re-run past three view distances* (tags `p65x_*`; `voxel.World.VoxelCutover 120000`, which on this build equals
+the new default; the great circle and the 60,000 climb never reach it, so the first batch's control rows stand for
+them):
+
+- a climb `3000 200000 climb=45:20:200` to 200,200;
+- a descent `5000 199700 descend=45:20:200000`.
+
+| Planet, route | Behaviour | Peak loaded | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Systems MB peak (max) | Voxel systems MB at the end (+ far field) | Far field ms P95 (max) | Suspended (of the run) |
+|---|---|---|---|---|---|---|---|---|---|
+| Small, climb | **new** | 1,173 | 16.7 / 16.7 | 1.8 | 0.17 / 0.17 / 0.17 | 618 (621) | 43 (+27) | 0.51 (3.76) | 0.40 |
+|  | ctl | 1,173 | 16.7 / 16.7 | 1.8 | 0.17 / 0.17 / 0.17 | 619 (620) | 261 (+62) | 0.50 (3.13) | 0.00 |
+| Small, descent | **new** | 1,093 | 16.7 / 19.3 | 4.5 | 0.17 / 0.17 / 0.17 | 868 (869) | 403 (+55) | 0.91 (10.06) | 0.41 |
+|  | ctl | 1,173 | 16.7 / 22.5 | 4.4 | 0.17 / 0.17 / 0.17 | 525 (526) | 525 (+56) | 0.66 (3.30) | 0.00 |
+| M, climb | **new** | 1,534 | 16.7 / 24.6 | 6.2 | 0.17 / 0.17 / 0.17 | 543 (555) | 8 (+16) | 0.60 (3.90) | 0.43 |
+|  | ctl | 1,535 | 16.7 / 24.9 | 6.4 | 0.17 / 0.17 / 0.17 | 549 (560) | 224 (+41) | 0.61 (2.66) | 0.00 |
+| M, descent | **new** | 1,331 | 16.7 / 27.8 | 8.6 | 1.06 / 0.81 / 3.62 | 897 (930) | 856 (+43) | 0.88 (7.50) | 0.47 |
+|  | ctl | 1,531 | 18.9 / 31.3 | 9.7 | 0.22 / 0.30 / 0.41 | 726 (733) | 717 (+42) | 0.82 (2.25) | 0.00 |
+| L, climb | **new** | 1,547 | 16.7 / 22.5 | 5.7 | 0.17 / 0.17 / 0.17 | 596 (600) | 74 (+24) | 0.51 (3.76) | 0.42 |
+|  | ctl | 1,555 | 16.7 / 25.1 | 7.1 | 0.18 / 0.17 / 0.19 | 597 (601) | 553 (+42) | 0.62 (4.05) | 0.00 |
+| L, descent | **new** | 1,357 | 16.7 / 27.6 | 8.6 | 3.66 / 0.17 / 2.22 | 964 (967) | 942 (+44) | 0.77 (6.20) | 0.47 |
+|  | ctl | 1,549 | 20.9 / 31.8 | 10.9 | 0.17 / 0.17 / 0.17 | 894 (924) | 758 (+43) | 0.87 (3.36) | 0.00 |
+
+- **The climb to 200,200** passes the cut-over at 120,000 and is suspended for 40-43% of the run:
+  - At the top the voxel systems hold 8-74 MB, against 224-553 kept.
+  - Frame and manager P95 are equal or lower (L 22.5 / 5.7 against 25.1 / 7.1 ms).
+- **The descent from 200,000** resumes at about 100,000 under the camera, about 20 s before landing:
+  - The small planet: catch-up 0.17 s, as kept.
+  - M: 0.81-3.62 s, against 0.22-0.41 kept.
+  - L: 0.17-3.66 s, against 0.17 kept.
+  - From one view distance this was 4.91-6.11 s.
+  - What remains is G52: the near band follows the descending viewer through the air and takes much of the generation
+    the ground disk needs.
+  - Peak memory is 868-964 MB, against 525-894 kept, under D3's 1.5 GB.
+  - The frame P95 on the way down is lower than with the window kept (27.6-27.8 against 31.3-31.8 ms on M and L).
+- **Budgets (D3):** peak voxel systems at most 964 MB (1.5 GB allowed); settled 491-543 MB with the far field (0.6 GB
+  allowed); the far field 0.46-1.25 ms P95 over every run (its maximum 1.7-10 ms, the highest on descents, where the window resumes and the band's patches return).
+
+*Settled* (tags `p65_{S,M,L}_{new,ctl}_{settled,orbit}`): a fresh world, then the pawn on the ground at 45°N 20°E or
+held in flight at 2 R over it. After 75 s idle, so far compression has run, a zero-length bench:
+
+| Planet | Place | Behaviour | Loaded | Voxel systems MB | Far field MB (drawn of built) | Total MB |
+|---|---|---|---|---|---|---|
+| Small | on the ground | **new** | 1,079 | 484 | 49.1 (398 of 802) | 533 |
+|  |  | ctl | 1,079 | 483 | 49.1 (398 of 802) | 532 |
+|  | at 2 R | **new** | 0 | 43 | 8.1 (54 of 78) | 51 |
+|  |  | ctl | 1,163 | 261 | 48.1 (373 of 702) | 309 |
+| M | on the ground | **new** | 1,076 | 452 | 40.2 (373 of 654) | 492 |
+|  |  | ctl | 1,076 | 451 | 40.2 (373 of 654) | 491 |
+|  | at 2 R | **new** | 0 | 8 | 5.5 (37 of 54) | 14 |
+|  |  | ctl | 1,045 | 220 | 33.8 (306 of 526) | 253 |
+| L | on the ground | **new** | 1,102 | 501 | 41.8 (412 of 658) | 543 |
+|  |  | ctl | 1,102 | 501 | 41.8 (412 of 658) | 542 |
+|  | at 2 R | **new** | 0 | 74 | 3.0 (16 of 26) | 77 |
+|  |  | ctl | 1,077 | 278 | 28.0 (263 of 426) | 306 |
+
+- **On the ground** new and ctl are the same: the cut-over is far above. D3's settled 0.6 GB holds with the far field
+  counted: 491-543 MB.
+- **At 2 R** the new window holds no chunk:
+  - 14-77 MB in all, against 253-309 MB with the window kept.
+  - What remains is mostly the edit layers: the POI stamps' edits, kept for the window's return (L's are about 1 million
+    voxels in 54 chunks).
+  - The far field's 3-8 MB is in the total.
+- The manager P95 of these 21-sample idle runs comes down to whether one 25-33 ms collision cook lands in it. Both
+  behaviours have that cook, so it is not compared.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`:
+
+- Headless: 550/550 (P6.4's 539 and the eleven new tests).
+- In the editor: 550/550, with the GPU tests running (the generation parity tests, `Meshing.MarchingCubes.CPUvsGPU`,
+  `GPUNoiseGeneratorAsync`, `InfinitePlane.GPUConsistency`) and no device loss.
+- The 108 GPU parity lines are CRC-identical to P6.4's: P6.5 changes no generation.
+
+**Heightmap worlds.** The cut-over, the descent prefetch, the far field, the globe albedo, the map markers' bound, the
+sky and the spawn search are planet-only by construction (each checks for `EWorldMode::SphericalPlanet` or a planet
+frame). Three fixes also act on heightmap worlds:
+
+- G41: a teleport snaps the third-person camera's pivot.
+- G47: a centreless system edit invalidates the edited chunk's navigation cells, where it used to invalidate the cells
+  around the world origin.
+- G48: a pawn whose movement is disabled no longer starts swimming.
+
+`ExploreAll`'s heightmap branch only counts in `int64`. The heightmap navigation, character and map tests pass
+unchanged. Phase 6's exit row "`VoxelDemo` A/B against a base build" was not run in P6.5: a base build here would be the
+main checkout, which holds the user's own edits to the demo's configuration.
+
+**New findings** (in §14.1):
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G46 | The volumetric cloud layer kept the engine's Earth altitudes (5 km floor, 10 km thick) under a scaled atmosphere: from orbit over M a ring of clouds well outside its 9.7 km of air | Fixed: `ComputePlanetCloudLayer` (thickness by K, floor at least the terrain's top) |
+| G47 | Centreless system edits invalidated a navigation box at the zero vector, a planet's centre: projected into every cached region's frame it spanned the planet, and a dungeon stamp on L held the game thread for minutes | Fixed: the edited chunk's bounds; core corners project nowhere; the tile loop bounded by the cache |
+| G48 | A held pawn in water (`MOVE_None`) was switched back to swimming every tick, and under the orbit camera it sank through the unloaded seabed | Fixed: no swimming transition from `MOVE_None` |
+| G49 | A fast descent stopping above the cut-over resumes the window for a moment (the prefetch's lead decays): on L 0.7 s, 56-86 chunks loaded and about 1,100 queued generations dropped | Open (low): the price of the speculation, once per stop |
+| G50 | The world map zoomed out on L held the game thread about 1 min 45 s: its marker query generated every POI cell of the planet | Fixed: at most `PlanetMarkerMaxCells` cells around the view's centre, the last cap reused |
+| G51 | The globe open after an `ExploreAll` of M ran at 6.5 FPS: each of the 65,536 queued tile images redrew it, though at the albedo's zoom they do not show | Fixed: tile arrivals redraw the albedo globe at most every 2 s; 60 FPS |
+| G52 | A descending viewer spends much of the window's generation on air: the near band (the viewer's altitude ± 2 chunks) follows it down, and a 5,000 uu/s descent onto M or L lands with up to 130 chunks queued (catch-up up to 3.7 s, against 0.2-0.4 with the window kept) | Open: take the near band only within a few chunks of the surface slab |
+
+G36 and G41 are fixed (above); G45 stays open: the far field draws one material a quad, and since the cut-over the
+quads show under the viewer too (`p65_L_equator_fly_60000_view`), not only at the horizon and from orbit.
+
+**Left for later.** What §20.1 leaves for later still stands:
+
+- Earth scale (D17).
+- Other bodies and a landable second planet (D18).
+- Gameplay flight and gravity falloff (D20).
+- Edits, caves and overhangs in the far field: they vanish above the cut-over and return with the window.
+
+Still open from Phase 6:
+
+- G39: biome blend bands.
+- G42: M's and L's frame and manager P95.
+- G43: noise steps at the face edges.
+- G44: the LOD 2 ring's lighting.
+- G45: stepped far-field materials.
+- G49: the prefetch's speculation.
+- G52: the near band during descents.
+
+Deferred since before Phase 6: G14, G16, G19, G25, G28 and G32-G34.

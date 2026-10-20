@@ -23,6 +23,8 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Async/Async.h"
+#include "Async/ParallelFor.h"
+#include "VoxelPlanetFarField.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
@@ -78,6 +80,13 @@ static TAutoConsoleVariable<float> CVarMapOverviewBudgetMB(
 	TEXT("least recently used dropped first (the tile stays explored and is drawn again when looked at). 0 = unlimited. ")
 	TEXT("48 MB holds 49,152 tiles of 16 x 16: an island about 12 km across, fully explored."),
 	FConsoleVariableDelegate::CreateStatic(&ApplyMapBudgetsToAll),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarMapExploreAllMaxTiles(
+	TEXT("voxel.Map.ExploreAllMaxTiles"),
+	1000000,
+	TEXT("Planets (spherical Phase 6, WM-BP11): voxel.Map.ExploreAll marks at most this many tiles explored, nearest the pawn ")
+	TEXT("first (a planet's atlas is 6 N^2 tiles: 40,000 on a 2.5 km planet, 16 million at 50 km, 6.4 billion at 1,000 km)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarMapEditRefreshMaxTiles(
@@ -156,8 +165,8 @@ namespace
 				return;
 			}
 			const float Radius = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 200000.0f;
-			const int32 Count = Map->ExploreAllTiles(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector, Radius);
-			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.ExploreAll: %d tile(s) explored; %s"), Count, *Map->GetDebugStats());
+			const int64 Count = Map->ExploreAllTiles(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector, Radius);
+			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.ExploreAll: %lld tile(s) explored; %s"), Count, *Map->GetDebugStats());
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs GVoxelMapCaptureCmd(
@@ -517,7 +526,7 @@ void UVoxelMapSubsystem::ApplyTileBudgets()
 		static_cast<int64>(FMath::Max(0.0f, CVarMapOverviewBudgetMB.GetValueOnGameThread()) * MB));
 }
 
-int32 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
+int64 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 {
 	if (bShuttingDown || !ResolveChunkManager())
 	{
@@ -530,29 +539,67 @@ int32 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 	}
 	if (PlanetGrid.IsValid())
 	{
-		// A planet: every tile of the atlas.
-		int32 PlanetCount = 0;
-		for (int32 Y = 0; Y < PlanetGrid.GetCellsPerEdge(); ++Y)
+		// A planet: every tile of the atlas, up to the cap (spherical Phase 6, WM-BP11): 6 N^2 overflowed an int32 from
+		// about 50 million tiles, and a 1,000 km planet has 6.4 billion. Past the cap the tiles nearest Center, and the
+		// images of the nearest PlanetExploreAllImageTiles queued (the rest are drawn when the map shows them).
+		const int64 N = PlanetGrid.GetCellsPerEdge();
+		const int64 Total = 6 * N * N;
+		const int64 Cap = FMath::Max<int64>(1, CVarMapExploreAllMaxTiles.GetValueOnGameThread());
+		FVector Direction = (Center - CachedPlanetCenter).GetSafeNormal();
+		if (Direction.IsNearlyZero())
 		{
-			for (int32 X = 0; X < 6 * PlanetGrid.GetCellsPerEdge(); ++X)
+			Direction = FVector::UpVector;
+		}
+		TArray<FIntPoint> Tiles;
+		if (Total <= Cap)
+		{
+			// Nearest first, so the images that draw first are the ones around the player. The keys are computed once (a
+			// projection sort recomputed each tile's direction per comparison: 79 s for the 16 million tiles of a 50 km
+			// planet with the cap raised).
+			TArray<TPair<double, FIntPoint>> Keyed;
+			Keyed.Reserve(static_cast<int32>(Total));
+			for (int32 Y = 0; Y < N; ++Y)
 			{
-				const uint64 Key = PackTileKey(FIntPoint(X, Y));
-				ExploredTiles.Add(Key);
-				++PlanetCount;
-				if (!TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
+				for (int32 X = 0; X < 6 * N; ++X)
 				{
-					TileQueue.Request(Key, /*bInvalidate*/ false);
+					const FIntPoint Tile(X, Y);
+					Keyed.Emplace(-FVector::DotProduct(PlanetGrid.CellCentreDirection(Tile), Direction), Tile);
 				}
+			}
+			Keyed.Sort([](const TPair<double, FIntPoint>& A, const TPair<double, FIntPoint>& B) { return A.Key < B.Key; });
+			Tiles.Reserve(Keyed.Num());
+			for (const TPair<double, FIntPoint>& Entry : Keyed)
+			{
+				Tiles.Add(Entry.Value);
+			}
+		}
+		else
+		{
+			PlanetGrid.GatherWithinAngle(Direction, UE_DOUBLE_PI, static_cast<int32>(FMath::Min<int64>(Cap, MAX_int32)), Tiles);
+		}
+		int64 PlanetCount = 0;
+		int32 Queued = 0;
+		for (const FIntPoint& Tile : Tiles)
+		{
+			const uint64 Key = PackTileKey(Tile);
+			ExploredTiles.Add(Key);
+			++PlanetCount;
+			if (Queued < PlanetExploreAllImageTiles && !TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
+			{
+				TileQueue.Request(Key, /*bInvalidate*/ false);
+				++Queued;
 			}
 		}
 		LaunchWaitingTiles();
+		UE_LOG(LogVoxelMap, Log, TEXT("ExploreAllTiles: %lld of the planet's %lld tiles explored (cap %lld), %d images queued."),
+			PlanetCount, Total, Cap, Queued);
 		return PlanetCount;
 	}
 	FBox2D Area = CachedWorldBounds.IsBounded() ? CachedWorldBounds.GetBox2D()
 		: FBox2D(FVector2D(Center.X - Radius, Center.Y - Radius), FVector2D(Center.X + Radius, Center.Y + Radius));
 	const FIntPoint Lo = WorldToTileCoord(FVector(Area.Min.X, Area.Min.Y, 0.0));
 	const FIntPoint Hi = WorldToTileCoord(FVector(Area.Max.X, Area.Max.Y, 0.0));
-	int32 Count = 0;
+	int64 Count = 0;
 	for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
 	{
 		for (int32 X = Lo.X; X <= Hi.X; ++X)
@@ -573,6 +620,175 @@ int32 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 	}
 	LaunchWaitingTiles();
 	return Count;
+}
+
+const FVoxelMapGlobeAlbedo* UVoxelMapSubsystem::GetGlobeAlbedo()
+{
+	if (GlobeAlbedo.IsValid())
+	{
+		return GlobeAlbedo.Get();
+	}
+	if (bGlobeAlbedoBuilding || bShuttingDown || !ResolveChunkManager() || !PlanetGrid.IsValid())
+	{
+		return nullptr;
+	}
+	UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get();
+	const UVoxelWorldConfiguration* Config = ChunkMgr ? ChunkMgr->GetConfiguration() : nullptr;
+	if (!Config)
+	{
+		return nullptr;
+	}
+	// The far field's analytic surface, over a world mode of our own (the task may outlive the chunk manager's).
+	TSharedPtr<const FVoxelFarFieldSurface> Surface = FVoxelFarFieldSurface::Make(*Config, FVoxelWorldModeFactory::Create(*Config));
+	if (!Surface.IsValid())
+	{
+		return nullptr;
+	}
+	bGlobeAlbedoBuilding = true;
+	const int32 Cells = FMath::Min(GlobeAlbedoCellsPerEdge, PlanetGrid.GetCellsPerEdge());
+	TWeakObjectPtr<UVoxelMapSubsystem> WeakThis(this);
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Surface, Cells, Palette = CachedMaterialPalette, Min = CachedAltitudeMin, Max = CachedAltitudeMax]()
+	{
+		TSharedPtr<const FVoxelMapGlobeAlbedo> Built = BuildGlobeAlbedo(*Surface, Cells, Palette, Min, Max);
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Built]()
+		{
+			UVoxelMapSubsystem* Self = WeakThis.Get();
+			if (!Self || Self->bShuttingDown)
+			{
+				return;
+			}
+			Self->GlobeAlbedo = Built;
+			Self->bGlobeAlbedoBuilding = false;
+			Self->GlobeExploredFromCount = -1;
+			UE_LOG(LogVoxelMap, Log, TEXT("Globe albedo: %d cells a face edge built in %.2f s."), Built->Grid.GetCellsPerEdge(), Built->BuildSeconds);
+			Self->OnMapTileReady.Broadcast(FIntPoint(-1, -1));
+		});
+	});
+	return nullptr;
+}
+
+bool UVoxelMapSubsystem::IsGlobeCellExplored(const FIntPoint& AlbedoCell)
+{
+	if (!GlobeAlbedo.IsValid() || !PlanetGrid.IsValid())
+	{
+		return false;
+	}
+	// The albedo cells holding an explored tile, refreshed when the exploration has changed (at most once a second past
+	// 100,000 explored tiles: a planet's exploration can hold a million).
+	const double Now = FPlatformTime::Seconds();
+	if (GlobeExploredFromCount != ExploredTiles.Num()
+		&& (GlobeExploredFromCount < 0 || ExploredTiles.Num() < 100000 || Now - GlobeExploredRefreshedSeconds >= 1.0))
+	{
+		GlobeExploredCells.Reset();
+		const int32 N = PlanetGrid.GetCellsPerEdge();
+		const int32 Nc = GlobeAlbedo->Grid.GetCellsPerEdge();
+		for (const uint64 Key : ExploredTiles)
+		{
+			int32 Face = 0, IU = 0, IV = 0;
+			if (PlanetGrid.FromAtlas(UnpackTileKey(Key), Face, IU, IV))
+			{
+				GlobeExploredCells.Add(PackTileKey(GlobeAlbedo->Grid.ToAtlas(Face, static_cast<int32>(static_cast<int64>(IU) * Nc / N),
+					static_cast<int32>(static_cast<int64>(IV) * Nc / N))));
+			}
+		}
+		GlobeExploredFromCount = ExploredTiles.Num();
+		GlobeExploredRefreshedSeconds = Now;
+	}
+	return GlobeExploredCells.Contains(PackTileKey(AlbedoCell));
+}
+
+TSharedPtr<FVoxelMapGlobeAlbedo> UVoxelMapSubsystem::BuildGlobeAlbedo(const FVoxelFarFieldSurface& Surface, int32 CellsPerEdge,
+	const TArray<FColor>& MaterialPalette, float AltitudeMin, float AltitudeMax)
+{
+	const double StartTime = FPlatformTime::Seconds();
+	TSharedPtr<FVoxelMapGlobeAlbedo> Out = MakeShared<FVoxelMapGlobeAlbedo>();
+	const int32 N = FMath::Max(1, CellsPerEdge);
+	Out->Grid = FVoxelCubeSphereGrid(N);
+	const int32 Width = 6 * N;
+	const FSphericalPlanetWorldMode& Planet = Surface.GetPlanet();
+	const double Radius = Planet.GetPlanetParams().PlanetRadius;
+
+	// Pass 1: each cell's altitude and surface material at its centre (no conditioning zones: a POI pad does not show
+	// at this size).
+	TArray<float> Altitudes;
+	TArray<uint8> Materials;
+	Altitudes.SetNumUninitialized(Width * N);
+	Materials.SetNumUninitialized(Width * N);
+	const TArray<FVoxelConditioningZone> NoZones;
+	ParallelFor(N, [&](int32 Y)
+	{
+		for (int32 X = 0; X < Width; ++X)
+		{
+			const FVector Direction = Out->Grid.CellCentreDirection(FIntPoint(X, Y));
+			float Continentalness = 0.0f;
+			const float Altitude = Surface.SampleAltitude(Direction, NoZones, &Continentalness);
+			uint8 Material = 0, Biome = 0;
+			Surface.SampleConditions(Direction, Altitude, Continentalness, Material, Biome);
+			Altitudes[Y * Width + X] = Altitude;
+			Materials[Y * Width + X] = Material;
+		}
+	});
+
+	// Pass 2: colour as a tile pixel (VoxelMapSubsystem's planet tiles): the sea by depth, land by its material shaded
+	// by elevation and by a hillshade from the neighbouring cells on the face (one-sided at a face's edge).
+	const FVoxelSeaSurface& Sea = Surface.Sea;
+	const bool bSeaOn = Sea.bEnabled && Sea.bRadial;
+	const float SeaAltitude = bSeaOn ? static_cast<float>(Sea.Radius - Radius) : AltitudeMin;
+	const float LandBase = bSeaOn ? SeaAltitude : AltitudeMin;
+	const float LandSpan = FMath::Max(AltitudeMax - LandBase, 1.0f);
+	const float DepthSpan = FMath::Max(LandBase - AltitudeMin, 1.0f);
+	Out->Colors.SetNumUninitialized(Width * N);
+	ParallelFor(N, [&](int32 Y)
+	{
+		for (int32 X = 0; X < Width; ++X)
+		{
+			const int32 Index = Y * Width + X;
+			const float Altitude = Altitudes[Index];
+			FColor Color;
+			if (bSeaOn && Altitude < SeaAltitude)
+			{
+				const float DepthFactor = FMath::Lerp(1.0f, 0.3f, FMath::Clamp((SeaAltitude - Altitude) / DepthSpan, 0.0f, 1.0f));
+				Color = FColor(static_cast<uint8>(20 * DepthFactor), static_cast<uint8>(80 * DepthFactor), static_cast<uint8>(180 * DepthFactor), 255);
+			}
+			else
+			{
+				Color = MaterialPalette.IsValidIndex(Materials[Index]) ? MaterialPalette[Materials[Index]] : FColor(128, 128, 128, 255);
+				const float Elevation = FMath::Lerp(0.75f, 1.0f, FMath::Clamp((Altitude - LandBase) / LandSpan, 0.0f, 1.0f));
+				// The cell's neighbours on its face (X wraps within the face's span of the atlas).
+				const int32 Face = X / N;
+				const int32 IU = X % N;
+				auto PointAt = [&](int32 U, int32 V)
+				{
+					const int32 CU = FMath::Clamp(U, 0, N - 1);
+					const int32 CV = FMath::Clamp(V, 0, N - 1);
+					const FIntPoint Cell(Face * N + CU, CV);
+					return Out->Grid.CellCentreDirection(Cell) * (Radius + Altitudes[CV * Width + Face * N + CU]);
+				};
+				const FVector Up = Out->Grid.CellCentreDirection(FIntPoint(X, Y));
+				FVector Normal = FVector::CrossProduct(PointAt(IU + 1, Y) - PointAt(IU - 1, Y), PointAt(IU, Y + 1) - PointAt(IU, Y - 1)).GetSafeNormal();
+				if (Normal.IsNearlyZero())
+				{
+					Normal = Up;
+				}
+				else if (FVector::DotProduct(Normal, Up) < 0.0)
+				{
+					Normal = -Normal;
+				}
+				FVector East, North;
+				FVoxelCubeSphere::GetTangentFrame(Up, East, North);
+				const FVector LightDir = (North * -0.707 + East * -0.707 + Up).GetSafeNormal();
+				const float Shade = FMath::Lerp(0.55f, 1.25f, FMath::Clamp(static_cast<float>(FVector::DotProduct(Normal, LightDir)), 0.0f, 1.0f));
+				const float Brightness = Elevation * Shade;
+				Color.R = static_cast<uint8>(FMath::Clamp(static_cast<int32>(Color.R * Brightness), 0, 255));
+				Color.G = static_cast<uint8>(FMath::Clamp(static_cast<int32>(Color.G * Brightness), 0, 255));
+				Color.B = static_cast<uint8>(FMath::Clamp(static_cast<int32>(Color.B * Brightness), 0, 255));
+				Color.A = 255;
+			}
+			Out->Colors[Index] = Color;
+		}
+	});
+	Out->BuildSeconds = FPlatformTime::Seconds() - StartTime;
+	return Out;
 }
 
 bool UVoxelMapSubsystem::IsTileExplored(FIntPoint TileCoord) const

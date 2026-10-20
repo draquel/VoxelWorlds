@@ -20,6 +20,29 @@ class IVoxelWorldMode;
 class UVoxelChunkManager;
 class UVoxelEditManager;
 class UVoxelBiomeConfiguration;
+struct FVoxelFarFieldSurface;
+
+/**
+ * A planet's coarse albedo for the world map's globe zoomed out (spherical Phase 6, WM-BP11): a cube-sphere grid of at
+ * most UVoxelMapSubsystem::GlobeAlbedoCellsPerEdge cells a face edge, each the colour of the surface at its centre as a
+ * tile pixel draws it (water by depth under the sea; land the surface material, shaded by elevation and a hillshade),
+ * sampled from the analytic surface the far field draws (FVoxelFarFieldSurface). Where a pixel of the globe spans many
+ * tiles, the world map reads this instead of one tile pixel each.
+ */
+struct VOXELMAP_API FVoxelMapGlobeAlbedo
+{
+	/** The albedo's cells (the same faces and warp as the tile grid, coarser) */
+	FVoxelCubeSphereGrid Grid;
+
+	/** One colour per cell, atlas order: Y * 6N + X */
+	TArray<FColor> Colors;
+
+	/** Time the build took (s, on its thread) */
+	double BuildSeconds = 0.0;
+
+	/** The colour of a cell (atlas coordinate). */
+	const FColor& At(const FIntPoint& Cell) const { return Colors[Cell.Y * 6 * Grid.GetCellsPerEdge() + Cell.X]; }
+};
 
 /**
  * World subsystem that manages 2D map tile data for voxel terrain.
@@ -100,10 +123,47 @@ public:
 
 	/**
 	 * Debug (voxel.Map.ExploreAll): mark every tile that overlaps the world's bounds explored, as a fully explored save
-	 * restores it, and queue their images (overview only). Unbounded worlds: the tiles within Radius of Center.
+	 * restores it, and queue their images (overview only). Unbounded worlds: the tiles within Radius of Center. A planet
+	 * (spherical Phase 6, WM-BP11): its whole atlas up to voxel.Map.ExploreAllMaxTiles tiles (16 million on a 50 km
+	 * planet, 6.4 billion at 1,000 km), else that many nearest Center; the images of the nearest
+	 * PlanetExploreAllImageTiles queued, the rest drawn when the map shows them.
 	 * @return Number of tiles explored
 	 */
-	int32 ExploreAllTiles(const FVector& Center, float Radius);
+	int64 ExploreAllTiles(const FVector& Center, float Radius);
+
+	/** Planets: ExploreAllTiles queues the images of at most this many tiles (nearest first); the rest draw when shown. */
+	static constexpr int32 PlanetExploreAllImageTiles = 65536;
+
+	// --- The globe zoomed out (spherical Phase 6, WM-BP11) ---
+
+	/** Most cells along a globe albedo's face edge (never more than the tile grid has). */
+	static constexpr int32 GlobeAlbedoCellsPerEdge = 256;
+
+	/**
+	 * A planet's coarse albedo for the globe zoomed out (FVoxelMapGlobeAlbedo). The first call starts the build on a
+	 * worker thread (about a second at 256 cells a face edge); OnMapTileReady fires with (-1, -1) when it is ready.
+	 * @return The albedo, or null until it is built (and in heightmap worlds)
+	 */
+	const FVoxelMapGlobeAlbedo* GetGlobeAlbedo();
+
+	/**
+	 * Whether any explored tile lies in a cell of the globe albedo's grid: the globe's fog of war zoomed out.
+	 * @param AlbedoCell Atlas coordinate in the albedo's grid
+	 * @return True when explored (false without an albedo)
+	 */
+	bool IsGlobeCellExplored(const FIntPoint& AlbedoCell);
+
+	/**
+	 * Pure: build a planet's globe albedo (any thread): every cell's colour from the analytic surface at its centre.
+	 * @param Surface The planet's analytic surface
+	 * @param CellsPerEdge Cells along a face edge
+	 * @param MaterialPalette Colour per material id (256)
+	 * @param AltitudeMin Lowest terrain altitude over the datum (the depth shading)
+	 * @param AltitudeMax Highest (the elevation shading)
+	 * @return The albedo
+	 */
+	static TSharedPtr<FVoxelMapGlobeAlbedo> BuildGlobeAlbedo(const FVoxelFarFieldSurface& Surface, int32 CellsPerEdge,
+		const TArray<FColor>& MaterialPalette, float AltitudeMin, float AltitudeMax);
 
 	// --- Exploration ---
 
@@ -504,6 +564,13 @@ private:
 	/** The terrain's altitude extent (IVoxelWorldMode::GetAltitudeBounds): the planet's elevation and depth shading. */
 	float CachedAltitudeMin = 0.0f;
 	float CachedAltitudeMax = 0.0f;
+
+	/** The globe albedo (GetGlobeAlbedo), whether its build is in flight, and the albedo cells holding an explored tile. */
+	TSharedPtr<const FVoxelMapGlobeAlbedo> GlobeAlbedo;
+	bool bGlobeAlbedoBuilding = false;
+	TSet<uint64> GlobeExploredCells;
+	int32 GlobeExploredFromCount = -1;
+	double GlobeExploredRefreshedSeconds = 0.0;
 
 	/** Edited chunks per planet tile (a chunk belongs to every tile its corners span), in step with OnChunkEdited. */
 	TMap<uint64, TArray<FIntVector>> PlanetTileEditedChunks;

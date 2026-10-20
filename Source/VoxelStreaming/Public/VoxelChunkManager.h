@@ -177,6 +177,23 @@ struct VOXELSTREAMING_API FVoxelResidencySnapshot
 	/** Lowest and highest tracked chunk centre altitude (as ViewerAltitude). */
 	double MinChunkAltitude = 0.0;
 	double MaxChunkAltitude = 0.0;
+
+	/** The camera the streaming follows; on a planet the streaming viewer may lie under it (the descent prefetch, WM-BP10). */
+	FVector Camera = FVector::ZeroVector;
+
+	/** How far under the camera the streaming viewer is, along local down (uu; 0 = at the camera). */
+	double StreamingLead = 0.0;
+
+	/** Planets: the voxel window is suspended above the cut-over, the far field alone drawing the planet (WM-BP10). */
+	bool bWindowSuspended = false;
+
+	/**
+	 * Planets: the cut-over altitude in force, the altitude under which a suspended window resumes, and the streaming
+	 * viewer's altitude over the surface under it (uu).
+	 */
+	double CutoverAltitude = 0.0;
+	double CutoverResumeAltitude = 0.0;
+	double ViewerSurfaceAltitude = 0.0;
 };
 
 /**
@@ -762,6 +779,43 @@ public:
 	 */
 	void UpdateFarFieldForViewer(const FVector& ViewerPosition, float FieldOfView = 90.0f);
 
+	// ==================== Orbit and back (spherical Phase 6, WM-BP10, D18) ====================
+
+	/**
+	 * Whether the voxel window is suspended: a planet's streaming viewer above the voxel cut-over
+	 * (UVoxelWorldConfiguration::PlanetVoxelCutoverAltitude, voxel.World.VoxelCutover), where every chunk unloads and the
+	 * far field alone draws the planet (IVoxelLODStrategy::IsWindowSuspended). It streams back below a fraction of it,
+	 * fading in over the far field.
+	 *
+	 * @return True while suspended (always false off a planet)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	bool IsVoxelWindowSuspended() const;
+
+	/** The camera the streaming follows this tick, before the descent prefetch (elsewhere than a planet: the streaming viewer). */
+	FVector GetCameraPosition() const { return CurrentCameraPosition; }
+
+	/** The streaming viewer this tick: the camera, or under it while it descends over a planet (the descent prefetch). */
+	FVector GetStreamingViewerPosition() const { return CurrentViewerPosition; }
+
+	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
+	double GetStreamingViewerLead() const { return StreamingViewerLead; }
+
+	/**
+	 * Pure: the descent prefetch's lead (WM-BP10): under a camera descending over a planet faster than MinDescentSpeed, the
+	 * streaming viewer goes ahead of it along local down by the distance it covers in LeadSeconds, at most half its altitude
+	 * and stopping Clearance over the surface, so the voxel window resumes from the cut-over and refines its LOD before the
+	 * camera gets there (a descent slowing toward the ground resumes it from twice the cut-over at most).
+	 *
+	 * @param RadialSpeed The camera's smoothed speed along local up (uu/s, negative descending)
+	 * @param AltitudeOverSurface The camera's altitude over the surface under it (the terrain, or the sea where higher)
+	 * @param LeadSeconds How far ahead (0 = no prefetch)
+	 * @param MinDescentSpeed Slower descents have no lead (a jump, a walk downhill)
+	 * @param Clearance How close to the surface the streaming viewer may go
+	 * @return The lead (uu along local down, >= 0)
+	 */
+	static double ComputeDescentLead(double RadialSpeed, double AltitudeOverSurface, double LeadSeconds, double MinDescentSpeed, double Clearance);
+
 	// ==================== Configuration Access ====================
 
 	/**
@@ -1176,9 +1230,19 @@ protected:
 	// ==================== Internal Update Methods ====================
 
 	/**
-	 * Build LOD query context from current camera state.
+	 * Build LOD query context from current camera state. The tick moves its viewer by the descent prefetch
+	 * (ApplyDescentPrefetch); BuildStreamingContext gives the context with this tick's lead applied.
 	 */
 	FLODQueryContext BuildQueryContext() const;
+
+	/** BuildQueryContext with the streaming viewer where the tick put it (under the camera by StreamingViewerLead). */
+	FLODQueryContext BuildStreamingContext() const;
+
+	/**
+	 * Planets: move the context's viewer (the camera) down along local up by the descent prefetch's lead
+	 * (ComputeDescentLead, voxel.Stream.DescentLead), from the camera's smoothed radial speed. A teleport resets the speed.
+	 */
+	void ApplyDescentPrefetch(FLODQueryContext& Context, float DeltaTime);
 
 	/**
 	 * Resolve the per-frame chunk load/submit budget: voxel.Stream.MaxLoadPerFrame override when > 0,
@@ -2079,8 +2143,11 @@ private:
 	/** Drop the far field and destroy its components. */
 	void DestroyFarField();
 
-	/** One far-field update for the tick's viewer: select, build, apply to the components; fills FarFieldStats. */
-	void UpdateFarField(const FVector& ViewerPosition, float FieldOfView);
+	/**
+	 * One far-field update: select, build, apply to the components; fills FarFieldStats. The camera measures the screen
+	 * error and the horizon; the streaming viewer (under the camera while it descends, WM-BP10) centres the hole.
+	 */
+	void UpdateFarField(const FVector& CameraPosition, const FVector& ViewerPosition, float FieldOfView);
 
 	/** Whether a voxel chunk's mesh is on screen: loaded, or re-meshing with its old mesh still drawn. */
 	bool IsChunkDrawnForFarField(const FIntVector& ChunkCoord) const;
@@ -2147,6 +2214,19 @@ private:
 	 * planet, where motion along any axis (a climb at a pole, a flight north) brings in new chunks (spherical Phase 6).
 	 */
 	float ViewerLoadSpeed = 0.0f;
+
+	/** The camera this tick, before the descent prefetch moves the streaming viewer under it (spherical Phase 6, WM-BP10). */
+	FVector CurrentCameraPosition = FVector::ZeroVector;
+
+	/** The camera's last position and its smoothed speed along local up (uu/s, negative descending), for the prefetch. */
+	FVector LastPrefetchCamera = FVector(FLT_MAX);
+	double CameraRadialSpeed = 0.0;
+
+	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
+	double StreamingViewerLead = 0.0;
+
+	/** The window's cut-over state on the last tick (IVoxelLODStrategy::IsWindowSuspended), to act when it changes. */
+	bool bWasWindowSuspended = false;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;

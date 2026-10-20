@@ -158,6 +158,46 @@ public:
 	 */
 	double GetPlanetGroundRadius(const FVector& ViewerPosition) const;
 
+	// ==================== The voxel cut-over (spherical Phase 6, WM-BP10, D18) ====================
+
+	/**
+	 * Planets: whether the viewer is above the voxel cut-over (GetPlanetCutoverAltitude over the surface under it), so the
+	 * window holds nothing and the far field alone draws the planet. Decided in Update with hysteresis: suspended above the
+	 * cut-over, resumed below CutoverResumeFraction of it.
+	 */
+	virtual bool IsWindowSuspended() const override { return bPlanetWindowSuspended; }
+
+	/** The window resumes below this fraction of the cut-over altitude (hysteresis: a flyer hovering at it does not churn). */
+	static constexpr double CutoverResumeFraction = 0.85;
+
+	/**
+	 * The default cut-over (PlanetVoxelCutoverAltitude 0) in view distances. At one, a 5,000 uu/s descent onto the 50 km
+	 * test planet resumed the window 10 s before landing and touched down with half of it loaded (the far field drawing
+	 * the rest; P6.5's benches, WORLD_MODES_REVIEW_PLAN.md §20.6); and a viewer 400 m up already saw only the far field.
+	 */
+	static constexpr double DefaultCutoverViewDistances = 3.0;
+
+	/**
+	 * Pure: the window's cut-over state after a viewer altitude.
+	 * @param bWasSuspended The state before
+	 * @param AltitudeOverSurface The viewer's altitude over the surface under it (the terrain, or the sea where higher)
+	 * @param CutoverAltitude The cut-over altitude (<= 0: never suspended)
+	 * @return Whether the window is suspended: above the cut-over, or still above CutoverResumeFraction of it once suspended
+	 */
+	static bool ComputeCutoverState(bool bWasSuspended, double AltitudeOverSurface, double CutoverAltitude);
+
+	/**
+	 * The cut-over altitude in force (uu over the surface; 0 = never): voxel.World.VoxelCutover when set (>= 0), else the
+	 * configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances. 0 on heightmap worlds.
+	 */
+	double GetPlanetCutoverAltitude() const;
+
+	/** The viewer's altitude over the surface under it (the terrain, or the sea where higher), as the last Update saw it. */
+	virtual double GetViewerSurfaceAltitude() const override { return ViewerSurfaceAltitude; }
+
+	/** IVoxelLODStrategy: GetPlanetCutoverAltitude. */
+	virtual double GetCutoverAltitude() const override { return GetPlanetCutoverAltitude(); }
+
 	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
 	static constexpr int32 NearWindowLayers = 2;
 
@@ -676,6 +716,16 @@ protected:
 	/** The viewer's ground point (GetPlanetGroundRadius), for the position the last Update saw. */
 	FVector GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
 	double GroundRadiusCached = 0.0;
+
+	/** The configuration's cut-over altitude (PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances); 0 off a planet. */
+	double PlanetCutoverConfigured = 0.0;
+
+	/** The sea's radius (0 without a sea): the cut-over is measured over the sea where it lies above the terrain. */
+	double PlanetSeaRadius = 0.0;
+
+	/** The cut-over state (IsWindowSuspended) and the altitude it was decided at (GetViewerSurfaceAltitude). */
+	bool bPlanetWindowSuspended = false;
+	double ViewerSurfaceAltitude = 0.0;
 
 	// ==================== Runtime State ====================
 

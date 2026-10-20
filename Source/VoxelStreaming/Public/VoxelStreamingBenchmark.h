@@ -69,6 +69,12 @@ struct FVoxelBenchConfig
 	bool bClimb = false;
 	FVector ClimbLatLonAltitude = FVector::ZeroVector;
 
+	/**
+	 * A descent (spherical Phase 6, WM-BP10: descend=lat:lon:alt): the climb's path the other way, from StartAltitude over
+	 * the ground down along local down (bClimb is set too; the report records the route as path "descend").
+	 */
+	bool bDescend = false;
+
 	/** Traverse length along the path. Must exceed the initial load radius so new terrain streams.
 	 *  <= 0 means the whole route (Route) or one lap (Orbit); a Straight path needs a positive length. */
 	float TraverseDistance = 20000.0f;
@@ -181,6 +187,11 @@ private:
 		// The far field's memory (MB, CPU and GPU copies, estimated) and patches built this tick (WM-BP9)
 		float FarFieldMB;
 		int32 FarFieldBuilt;
+		// Orbit and back (WM-BP10): the voxel window suspended above the cut-over, the descent prefetch's lead (uu under
+		// the camera) and the streaming viewer's altitude over the surface under it
+		int32 WindowSuspended;
+		float StreamingLeadUU;
+		float SurfaceAltitude;
 	};
 
 	void TakeSample(float DeltaTime);
@@ -216,6 +227,18 @@ public:
 	 * @param LatLonForReport Latitude and longitude as given, for the report
 	 */
 	static void MakeClimb(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
+		const FVector2D& LatLonForReport);
+
+	/**
+	 * Configure a descent (spherical Phase 6, WM-BP10: descend=lat:lon:alt): MakeClimb's path flown the other way, from
+	 * StartAltitude over the ground point down along its local down, so the altitude falls by the distance flown.
+	 * @param InOutConfig Config to fill (PathType Straight, Direction, StartPosition, bClimb and bDescend)
+	 * @param Center Planet centre
+	 * @param Ground The ground point the descent ends over
+	 * @param StartAltitude Height of the start over Ground
+	 * @param LatLonForReport Latitude and longitude as given, for the report
+	 */
+	static void MakeDescent(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
 		const FVector2D& LatLonForReport);
 
 	/** Unit direction for a latitude and longitude (degrees; +Z north, longitude from +X toward +Y), as gc= and climb= read them. */

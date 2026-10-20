@@ -186,6 +186,8 @@ levels above the band and finer), shown from under the sea. The sections refine 
 counts in its error), so near the viewer the sea sags under a uu, and their vertices are offsets from each patch's
 origin where the shell's were floats of size R (G40). They stay drawn over the voxel window, which has no water tiles on
 a planet, and like the shell they show in a dry cave below sea level. `voxel.World.FarField 0` brings the shell back.
+Above the voxel cut-over (WM-BP10) they are the only sea drawn, as they are the only terrain; whether the camera is under
+the sea (the underside's test) is the camera's position, not the streaming viewer's.
 
 ---
 

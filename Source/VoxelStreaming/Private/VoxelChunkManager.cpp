@@ -15,6 +15,7 @@
 #include "VoxelCoordinates.h"
 #include "VoxelDigitalLine.h"
 #include "IVoxelLODStrategy.h"
+#include "DistanceBandLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
 #include "IVoxelWorldMode.h"
 #include "VoxelWorldModeFactory.h"
@@ -163,6 +164,20 @@ static TAutoConsoleVariable<int32> CVarFarFieldMaxBuilds(
 	TEXT("voxel.World.FarFieldMaxBuilds"),
 	6,
 	TEXT("Far-field patch builds in flight on the thread pool at once (default 6)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarStreamDescentLead(
+	TEXT("voxel.Stream.DescentLead"),
+	3.0f,
+	TEXT("Planets (spherical Phase 6, WM-BP10): seconds ahead of a descending camera the streaming viewer goes along local down\n")
+	TEXT("(the descent prefetch: the voxel window resumes from the cut-over and refines its LOD before the camera gets there).\n")
+	TEXT("0 = off (the streaming viewer is the camera)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarStreamDescentMinSpeed(
+	TEXT("voxel.Stream.DescentMinSpeed"),
+	1500.0f,
+	TEXT("Planets: the descent prefetch leads only a camera descending faster than this (uu/s), not a jump or a walk downhill."),
 	ECVF_Default);
 
 static FAutoConsoleCommandWithWorld GVoxelFarFieldStatsCmd(
@@ -600,13 +615,18 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Build query context from camera state
 	FLODQueryContext Context = BuildQueryContext();
 
+	// The camera; on a planet the streaming viewer goes ahead of it under a descending camera (spherical Phase 6, WM-BP10:
+	// the descent prefetch), so the window resumes from the cut-over and refines before the camera arrives.
+	CurrentCameraPosition = Context.ViewerPosition;
+	ApplyDescentPrefetch(Context, DeltaTime);
+
 	// Cache the current viewer position for the stale-cull distance test used by the queue
 	// processors (which don't build their own context). Reflects the benchmark view override.
 	CurrentViewerPosition = Context.ViewerPosition;
-	// R24 P3: the renderer fades new geometry in only away from the viewer.
+	// R24 P3: the renderer fades new geometry in only away from the viewer: the camera, what the player sees from.
 	if (MeshRenderer)
 	{
-		MeshRenderer->SetViewerPosition(CurrentViewerPosition);
+		MeshRenderer->SetViewerPosition(CurrentCameraPosition);
 	}
 
 	// Track the viewer's speed for the speed-adaptive load budget (ResolveMaxLoadPerFrame): horizontal in heightmap
@@ -644,6 +664,24 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		const double LODUpdateStart = FPlatformTime::Seconds();
 		LODStrategy->Update(Context, DeltaTime);
 		Timing.LODUpdateMs = static_cast<float>((FPlatformTime::Seconds() - LODUpdateStart) * 1000.0);
+	}
+
+	// The voxel cut-over (spherical Phase 6, WM-BP10): when the window suspends, the queues let go of everything they held
+	// for it (nothing is wanted up there) and every chunk unloads; when it resumes, the next streaming update asks for the
+	// window again.
+	const bool bWindowSuspended = IsVoxelWindowSuspended();
+	if (bWindowSuspended != bWasWindowSuspended)
+	{
+		bWasWindowSuspended = bWindowSuspended;
+		bForceStreamingUpdate = true;
+		if (bWindowSuspended)
+		{
+			ReprioritizeQueues(Context);
+		}
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Voxel window %s: camera %.0f over the datum, streaming viewer %.0f under it, %d chunks held."),
+			bWindowSuspended ? TEXT("suspended above the cut-over (unloading; the far field draws the planet)") : TEXT("resumed (streaming back)"),
+			Configuration ? FVector::Dist(CurrentCameraPosition, Configuration->WorldOrigin) - Configuration->WorldRadius : 0.0,
+			StreamingViewerLead, LoadedChunkCoords.Num());
 	}
 
 	// === Streaming decisions ===
@@ -783,7 +821,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// hides once they have been drawn a moment. Timed into FarFieldStats.UpdateMs (the bench's FarFieldMs).
 	if (FarField)
 	{
-		UpdateFarField(CurrentViewerPosition, Context.FieldOfView);
+		UpdateFarField(CurrentCameraPosition, CurrentViewerPosition, Context.FieldOfView);
 	}
 
 	// === Water propagation (bounded BFS per frame) ===
@@ -906,6 +944,11 @@ void UVoxelChunkManager::Initialize(
 	Configuration = InConfig;
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
+	// The voxel cut-over and the descent prefetch (spherical Phase 6, WM-BP10) start over with the world.
+	bWasWindowSuspended = false;
+	StreamingViewerLead = 0.0;
+	CameraRadialSpeed = 0.0;
+	LastPrefetchCamera = FVector(FLT_MAX);
 
 	// Settings that run but give wrong results (tree template material ids, ...): say so at world start too,
 	// since an editor session loads the asset long before Play.
@@ -2363,7 +2406,7 @@ void UVoxelChunkManager::DrawDebugVisualization() const
 	// Draw LOD strategy visualization
 	if (LODStrategy)
 	{
-		FLODQueryContext Context = const_cast<UVoxelChunkManager*>(this)->BuildQueryContext();
+		FLODQueryContext Context = BuildStreamingContext();
 		LODStrategy->DrawDebugVisualization(GetWorld(), Context);
 	}
 
@@ -2550,6 +2593,87 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 	return Context;
 }
 
+FLODQueryContext UVoxelChunkManager::BuildStreamingContext() const
+{
+	FLODQueryContext Context = BuildQueryContext();
+	if (StreamingViewerLead > 0.0 && Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		Context.ViewerPosition -= (Context.ViewerPosition - Configuration->WorldOrigin).GetSafeNormal() * StreamingViewerLead;
+	}
+	return Context;
+}
+
+double UVoxelChunkManager::ComputeDescentLead(double RadialSpeed, double AltitudeOverSurface, double LeadSeconds, double MinDescentSpeed,
+	double Clearance)
+{
+	const double Descent = -RadialSpeed;
+	if (LeadSeconds <= 0.0 || Descent <= FMath::Max(MinDescentSpeed, 0.0))
+	{
+		return 0.0;
+	}
+	// At most half the altitude: a descent that slows toward the ground (vox.FlyTo's falls by the same factor every
+	// second) would otherwise put the viewer at the ground from any height and resume the window far above the cut-over.
+	const double MaxLead = FMath::Min(0.5 * AltitudeOverSurface, AltitudeOverSurface - Clearance);
+	return FMath::Clamp(Descent * LeadSeconds, 0.0, FMath::Max(MaxLead, 0.0));
+}
+
+void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float DeltaTime)
+{
+	const bool bPlanet = Configuration && WorldMode && Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	const double LeadSeconds = CVarStreamDescentLead.GetValueOnGameThread();
+	if (!bPlanet || LeadSeconds <= 0.0)
+	{
+		StreamingViewerLead = 0.0;
+		CameraRadialSpeed = 0.0;
+		LastPrefetchCamera = FVector(FLT_MAX);
+		return;
+	}
+	const FVector Centre = Configuration->WorldOrigin;
+	const FVector Camera = Context.ViewerPosition;
+	const FVector Up = (Camera - Centre).GetSafeNormal();
+	if (Up.IsNearlyZero())
+	{
+		StreamingViewerLead = 0.0;
+		return;
+	}
+
+	// The camera's speed along local up, smoothed. A jump of more than ten chunks in a frame is a teleport (or a switch of
+	// view target), not motion: the speed starts over.
+	const double ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const double CameraRadius = FVector::Dist(Camera, Centre);
+	if (DeltaTime > SMALL_NUMBER && LastPrefetchCamera.X != FLT_MAX && FVector::DistSquared(Camera, LastPrefetchCamera) < FMath::Square(10.0 * ChunkWorldSize))
+	{
+		const double Instant = (CameraRadius - FVector::Dist(LastPrefetchCamera, Centre)) / DeltaTime;
+		CameraRadialSpeed = FMath::FInterpTo(CameraRadialSpeed, Instant, static_cast<double>(DeltaTime), 4.0);
+	}
+	else
+	{
+		CameraRadialSpeed = 0.0;
+	}
+	LastPrefetchCamera = Camera;
+
+	// Ahead of the camera along local down by what it covers in LeadSeconds, stopping two chunks over the surface under it
+	// (the terrain along its direction, or the sea where that is higher): the near window's layers stay over the ground.
+	const FSphericalPlanetWorldMode* Planet = WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet
+		? static_cast<const FSphericalPlanetWorldMode*>(WorldMode.Get()) : nullptr;
+	double SurfaceRadius = Configuration->WorldRadius + (Planet ? static_cast<double>(Planet->GetTerrainAltitude(Up, Configuration->NoiseParams)) : 0.0);
+	if (Configuration->bEnableWaterLevel)
+	{
+		SurfaceRadius = FMath::Max(SurfaceRadius, static_cast<double>(Configuration->WaterRadius));
+	}
+	StreamingViewerLead = ComputeDescentLead(CameraRadialSpeed, CameraRadius - SurfaceRadius, LeadSeconds,
+		CVarStreamDescentMinSpeed.GetValueOnGameThread(), 2.0 * ChunkWorldSize);
+	if (StreamingViewerLead > 0.0)
+	{
+		Context.ViewerPosition = Camera - Up * StreamingViewerLead;
+	}
+}
+
+bool UVoxelChunkManager::IsVoxelWindowSuspended() const
+{
+	return LODStrategy && LODStrategy->IsWindowSuspended();
+}
+
 void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 {
 	if (!LODStrategy)
@@ -2609,8 +2733,10 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 	// tops get cut off flat at the chunk boundary. Pin-load every edited chunk within the LOAD
 	// radius (the view edge) — pinning out to the unload radius loaded an edited chunk on its own
 	// beyond the rest of the terrain (R23e). UpdateUnloadDecisions keeps a pinned chunk resident out
-	// to the unload radius, so the 1.0-1.2x band is hysteresis, as for every other chunk.
-	if (EditManager)
+	// to the unload radius, so the 1.0-1.2x band is hysteresis, as for every other chunk. None above
+	// a planet's voxel cut-over, where the window holds nothing (WM-BP10): the edits stay in their
+	// layers and load with the window when it resumes.
+	if (EditManager && !LODStrategy->IsWindowSuspended())
 	{
 		TArray<FIntVector> EditedChunks;
 		EditManager->GetEditedChunkCoords(EditedChunks);
@@ -2686,7 +2812,9 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 	// chunk from ever unloading.
 	const float EditPinDistance = LODStrategy->GetUnloadDistance();
 	const float ChunkWorldSize = Configuration ? Configuration->GetChunkWorldSize() : 0.0f;
-	auto CanUnload = [this, &Context, EditPinDistance, ChunkWorldSize](const FIntVector& ChunkCoord) -> bool
+	// Above a planet's voxel cut-over (WM-BP10) edited chunks unload too: their edits stay in the edit layers.
+	const bool bWindowSuspended = LODStrategy->IsWindowSuspended();
+	auto CanUnload = [this, &Context, EditPinDistance, ChunkWorldSize, bWindowSuspended](const FIntVector& ChunkCoord) -> bool
 	{
 		// Only settled chunks unload here: anything mid-pipeline finishes first, and PendingUnload
 		// chunks are already queued.
@@ -2699,7 +2827,7 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 		// chunk that exists only because of its edit layer, immediately undoing the edit-pinned
 		// load in UpdateLoadDecisions — the two would flap load/unload forever. Keep edited chunks
 		// resident until they leave the distance-based unload radius.
-		if (EditManager && ChunkWorldSize > 0.0f && EditManager->ChunkHasEdits(ChunkCoord))
+		if (!bWindowSuspended && EditManager && ChunkWorldSize > 0.0f && EditManager->ChunkHasEdits(ChunkCoord))
 		{
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
@@ -3702,11 +3830,11 @@ void UVoxelChunkManager::UpdateFarFieldForViewer(const FVector& ViewerPosition, 
 {
 	if (FarField)
 	{
-		UpdateFarField(ViewerPosition, FieldOfView);
+		UpdateFarField(ViewerPosition, ViewerPosition, FieldOfView);
 	}
 }
 
-void UVoxelChunkManager::UpdateFarField(const FVector& ViewerPosition, float FieldOfView)
+void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVector& ViewerPosition, float FieldOfView)
 {
 	using namespace VoxelFarFieldManagerPrivate;
 	if (!FarField || !Configuration)
@@ -3717,8 +3845,10 @@ void UVoxelChunkManager::UpdateFarField(const FVector& ViewerPosition, float Fie
 	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
 	UWorld* World = GetWorld();
 
+	// The camera measures the error and the horizon; the streaming viewer (under it while it descends, WM-BP10) is the
+	// voxel window's centre. Both lie on one up-line, so the hole's centre is the same ground point.
 	FVoxelFarFieldView View;
-	View.Camera = ViewerPosition;
+	View.Camera = CameraPosition;
 	View.Viewer = ViewerPosition;
 	// Pixels per radian from the game viewport's width and the horizontal field of view.
 	double ViewportWidth = 1920.0;
@@ -3752,8 +3882,11 @@ void UVoxelChunkManager::UpdateFarField(const FVector& ViewerPosition, float Fie
 	const double HalfDiagonal = 0.5 * UE_DOUBLE_SQRT_3 * Settings.ChunkWorldSize;
 	const double LoadDistance = LODStrategy ? LODStrategy->GetLoadDistance() : Configuration->ViewDistance;
 	const double UnloadDistance = LODStrategy ? LODStrategy->GetUnloadDistance() : Configuration->ViewDistance * 1.2;
-	View.BandRadius = UnloadDistance + HalfDiagonal;
-	View.PrebuildRadius = 0.75 * LoadDistance;
+	// Above the voxel cut-over (WM-BP10) the window empties: once it holds no chunk there is no hole to cut, and the far
+	// field refines by its error alone (the band's forced splits would build band patches for a window that is empty).
+	const bool bNoWindow = IsVoxelWindowSuspended() && LoadedChunkCoords.Num() == 0;
+	View.BandRadius = bNoWindow ? 0.0 : UnloadDistance + HalfDiagonal;
+	View.PrebuildRadius = bNoWindow ? 0.0 : 0.75 * LoadDistance;
 	View.Time = FPlatformTime::Seconds();
 	// A new chunk fades in over the patch under it (voxel.MeshFade.Appear): hide the patch once it has.
 	static IConsoleVariable* FadeDuration = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MeshFade.Duration"));
@@ -3768,7 +3901,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& ViewerPosition, float Fie
 	AActor* Owner = GetOwner();
 	UMaterialInterface* TerrainMaterial = MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr;
 	UMaterialInterface* WaterMaterial = Configuration->WaterMeshMaterial.Get();
-	const bool bUnderSea = Settings.bSea && FVector::DistSquared(ViewerPosition, Settings.Center) < Settings.SeaRadius * Settings.SeaRadius;
+	const bool bUnderSea = Settings.bSea && FVector::DistSquared(CameraPosition, Settings.Center) < Settings.SeaRadius * Settings.SeaRadius;
 	for (const uint64 Key : Changes.Removed)
 	{
 		if (TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key))
@@ -4916,6 +5049,11 @@ bool UVoxelChunkManager::IsChunkBeyondUnloadDistance(const FIntVector& ChunkCoor
 	{
 		return false;
 	}
+	// Above a planet's voxel cut-over (WM-BP10) every chunk is: the window holds nothing.
+	if (LODStrategy->IsWindowSuspended())
+	{
+		return true;
+	}
 	const float UnloadDist = LODStrategy->GetUnloadDistance();
 	if (UnloadDist <= 0.0f)
 	{
@@ -5148,6 +5286,15 @@ FVoxelResidencySnapshot UVoxelChunkManager::GetResidencySnapshot() const
 {
 	FVoxelResidencySnapshot Out;
 	Out.Viewer = CurrentViewerPosition;
+	Out.Camera = CurrentCameraPosition;
+	Out.StreamingLead = StreamingViewerLead;
+	if (LODStrategy)
+	{
+		Out.bWindowSuspended = LODStrategy->IsWindowSuspended();
+		Out.CutoverAltitude = LODStrategy->GetCutoverAltitude();
+		Out.CutoverResumeAltitude = Out.CutoverAltitude * FDistanceBandLODStrategy::CutoverResumeFraction;
+		Out.ViewerSurfaceAltitude = LODStrategy->GetViewerSurfaceAltitude();
+	}
 	if (!Configuration || !WorldMode)
 	{
 		return Out;
@@ -5206,7 +5353,7 @@ void UVoxelChunkManager::GetBenchLODBacklog(int32& OutStale, int32& OutStaleNear
 		return;
 	}
 
-	const FLODQueryContext Context = BuildQueryContext();
+	const FLODQueryContext Context = BuildStreamingContext();
 	for (const FIntVector& ChunkCoord : LoadedChunkCoords)
 	{
 		const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
@@ -6835,6 +6982,8 @@ void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)
 //   dir=X:Y[:Z]            straight-path direction (default +X); dir=up: local up at the start (a climb)
 //   climb=Lat:Lon[:Alt]    planets: climb along local up from Alt (default 500) over the ground at a latitude and
 //                          longitude (spherical Phase 6; the distance is how high it climbs)
+//   descend=Lat:Lon:Alt    planets: descend along local down from Alt over the ground (spherical Phase 6, WM-BP10:
+//                          through the voxel cut-over; the distance is how far down, at most Alt - 300)
 //   start=X:Y[:Z]          start point instead of the player view; Z defaults to 500 above the surface
 //   route=X:Y[:Z]/X:Y/...  fly a polyline from the start through these points (distance 0 = whole route)
 //   orbit=CX:CY:R          fly a circle around (CX, CY) (distance 0 = one lap)
@@ -6858,7 +7007,7 @@ static bool ParseBenchVector(const FString& Value, FVector& Out, bool& bOutHasZ)
 static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 	TEXT("voxel.Bench.Run"),
 	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]|up] [start=X:Y[:Z]] ")
-	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [climb=Lat:Lon[:Alt]] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
+	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [climb=Lat:Lon[:Alt]] [descend=Lat:Lon:Alt] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		// Target the ticking game/PIE world, not the editor world the command may arrive on.
@@ -6940,6 +7089,26 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: climb=Lat:Lon[:Alt] needs a planet world and two values"));
 				}
 			}
+			else if (Key == TEXT("descend"))
+			{
+				// A descent along local down (spherical Phase 6, WM-BP10): from Alt over the generated ground at Lat, Lon.
+				TArray<FString> Parts;
+				Value.ParseIntoArray(Parts, TEXT(":"), true);
+				const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
+				if (Parts.Num() >= 3 && Cfg && Cfg->WorldMode == EWorldMode::SphericalPlanet)
+				{
+					const double Lat = FCString::Atod(*Parts[0]);
+					const double Lon = FCString::Atod(*Parts[1]);
+					const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(Lat, Lon);
+					const FVector Ground = CM->GetGeneratedSurfacePoint(Cfg->WorldOrigin + Direction * Cfg->WorldRadius);
+					FVoxelStreamingBenchmark::MakeDescent(Config, Cfg->WorldOrigin, Ground, FCString::Atof(*Parts[2]), FVector2D(Lat, Lon));
+					bHasClimb = true;
+				}
+				else
+				{
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: descend=Lat:Lon:Alt needs a planet world and three values"));
+				}
+			}
 			else if (Key == TEXT("start") && ParseBenchVector(Value, StartArg, bStartHasZ))
 			{
 				bHasStart = true;
@@ -7002,6 +7171,15 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 		if (Config.PathType != EVoxelBenchPath::Straight && !bDistanceGiven)
 		{
 			Config.TraverseDistance = 0.0f;
+		}
+		// A descent stops 300 uu over the ground it started over.
+		if (Config.bDescend)
+		{
+			const float MaxDescent = FMath::Max(Config.ClimbLatLonAltitude.Z - 300.0, 0.0);
+			if (!bDistanceGiven || Config.TraverseDistance > MaxDescent)
+			{
+				Config.TraverseDistance = MaxDescent;
+			}
 		}
 
 		// Start: an explicit start= (Z defaults to 500 above the analytic surface), else the player view
@@ -8328,6 +8506,8 @@ void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 
 	int32 EvictedCount = 0;
 	int32 LODUpdatedCount = 0;
+	// Above a planet's voxel cut-over (WM-BP10) nothing queued is wanted.
+	const bool bWindowSuspended = LODStrategy && LODStrategy->IsWindowSuspended();
 
 	// Re-prioritize, update LOD levels, and evict stale items from generation queue
 	for (int32 i = GenerationQueue.Num() - 1; i >= 0; --i)
@@ -8339,7 +8519,7 @@ void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 		// would otherwise evict the ground it just requested.
 		const float HorizonDistance = LODStrategy ? LODStrategy->GetHorizonDistance(ChunkCenter, ViewerPosition) : FMath::Sqrt(DistSq);
 
-		if (FMath::Square(HorizonDistance) > EvictDistanceSq)
+		if (bWindowSuspended || FMath::Square(HorizonDistance) > EvictDistanceSq)
 		{
 			// Beyond view distance — evict from queue and reset chunk state
 			GenerationQueueSet.Remove(Request.ChunkCoord);
