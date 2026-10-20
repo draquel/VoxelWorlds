@@ -1496,6 +1496,9 @@ Three findings from §13.11 get IDs here:
 | G53 | `UVoxelEditManager::CurrentEditCenter` / `CurrentEditRadius` were set by `ApplyBrushEdit` and never reset, so every later operation of single-voxel edits (a POI's terraform, a dungeon stamp, water propagation) broadcast `OnChunkEdited` with the last brush's centre and radius: after the player's first dig, the surface navigation invalidated around that dig instead of the terraform, G32's edge and corner collision re-cook judged the wrong sphere, and water propagation rescanned the old dig on each of its own batches (found in G33, §19.11) | Fixed 2026-10-20 (§19.11): the centre and radius are reset when an operation ends, so only a brush's operation reports one; `Scatter.EditReaders.Rule` | — |
 | G54 | A system edit that left a chunk no surface (dug its ground away) kept its scatter instances: `RegenerateChunkScatter` keeps them until the re-extraction replaces them, and a pass that found no surface completed without a result, so they stood on the removed terrain until the chunk unloaded (found by `Scatter.EditReaders.Plane`, §19.11) | Fixed 2026-10-20 (§19.11): a pass with no surface removes the instances of a chunk that has no scatter cache (`ProcessCompletedAsyncScatter`); the test's dug chunk 11 instances → 0 | — |
 | G55 | `UVCMovementComponent`'s embed check (an edit near the pawn arms a check that lifts the pawn out of terrain closed around it once the new collision lands, `OnVoxelChunkModified`) went by the edit's centre and radius, which an edit with no centre does not have: a POI's terraform, a campsite pad or a dungeon stamp at the pawn, an undo, a clear or a load armed no check (its zero centre armed one only for a pawn within about 300 uu of the world's zero point; before G53 a batch after a brush took the brush's sphere). Since G53 that holds for every batch of single-voxel edits (noted in §19.11) | Fixed 2026-10-20: an edit with no radius goes by the world box of the voxels it changed in the chunk (`UVoxelEditManager::GetBroadcastEditBounds` through `WorldOrigin`, `ChunkSize` and `VoxelSize`, `UVCMovementComponent::GetEditedVoxelWorldBox`; the same box on a planet, the whole chunk when no bounds are given) against the capsule's half height plus the brush test's 200 uu margin; brushes keep their sphere. `VoxelCharacter.Edit.SystemEditArmsEmbedCheck` on a plane and a planet: a fill at the pawn arms it, fills far off in the pawn's chunk or another and a brush far off do not | — |
+| G56 | Every edit re-meshed the edited chunk's six face neighbours (render) "so they re-extract boundary data", a rule from before seam ownership: a chunk mesh reads only its own voxels and edits, the edited chunk's seams restale with its own re-mesh, and `MarkChunkDirty` on a neighbour restaled all 26 of its seams, so an edit of one chunk meshed 6 more chunks and ran 25 to 75 more seam jobs for the same geometry (left in G33, §19.11) | Fixed 2026-10-20 (§19.13): the face neighbours' re-mesh removed (`voxel.Edit.NeighbourRemesh` 0, 1 = the rule before; their collision re-cook stays, and `voxel.Scatter.EditReaders 0` keeps it); an edit of one chunk meshes 1 chunk and runs 6 to 26 seam jobs against 7 and 31 to 101; geometry, voxel shape and water flags the same as under the rule before after every edit (`Streaming.EditRemesh.Plane`, `.Planet`: DC, MC and cubic, LOD, water) | — |
+| G57 | An edit that reached a chunk on its way to a mesh (queued, or on a worker) restaled none of its seams, and a mesh already on a worker landed without the edit: `MarkChunkDirty` acted only on a loaded chunk, so the seams, and the interior too in the second case, stayed stale until the chunk re-meshed for another reason. It follows any edit made within a mesh's round trip of another on the same chunk: a held brush, water propagation's batches, a stamp over chunks still loading. The face neighbours' re-mesh restaled the seams only when the neighbours were loaded at the second edit (found in G56, §19.13) | Fixed 2026-10-20 (§19.13): `MarkChunkDirty` restales the seams of a chunk that is queued or on a worker, and one on a worker re-meshes when its mesh lands (`FVoxelChunkState::bRemeshAfterMeshing`, `RemeshIfEditedWhileMeshing`); `Streaming.EditRemesh.*` edits 4 and 5: 1 to 3 stale chunk meshes and seam buckets under both rules before, none after | — |
+| G58 | Edit-driven water propagation (`UVoxelWaterPropagation`) reads the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel dug under the sea still reads solid, so a dig never floods (a probe: 8 dug voxels next to water, none flooded, no seed logged), and its flood sets each voxel to the generated voxel plus the flag, which would undo an edit there (found in G56, §19.13) | Open: read the edit-merged voxels, and keep the edit's density and material when setting the flag | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -4970,7 +4973,8 @@ edge along +Z at (0, 0), the layers edit on chunk (0, 0, 52)). The stops are `vo
 **Left as they were** (noticed, not fixed):
 
 - The edit handler still re-meshes the edited chunk's six face neighbours (render) and re-cooks their collision. Since
-  seam ownership a chunk's mesh reads no neighbour data, so the render re-mesh is probably unneeded.
+  seam ownership a chunk's mesh reads no neighbour data, so the render re-mesh is probably unneeded. Removed since as G56
+  (§19.13; the collision re-cook stays), with G57 found on the way.
 - `UVCMovementComponent`'s embed check after an edit (`OnVoxelChunkModified`) goes by the edit's centre and radius, which
   a system edit does not have (a stamp at the pawn arms no check). The bounds would serve it. Fixed since as G55 (§14.1).
 - `UVoxelScatterManager::GenerateChunkScatterFromPending` is not called and has no planet branch.
@@ -5084,6 +5088,166 @@ CRC-identical to G33's.
   describes. It would change the demo's terrain under the ground and its scatter (cave floors and underground types), so
   it needs its own A/B. Not changed here. `CAVE_SYSTEM.md` now explains a layer that fills its window.
 - **The 375 uu step in the roof along the coast** (above), the same configuration's.
+
+### 19.13 G56 and G57: an edit re-meshes the chunks it changed (2026-10-20)
+
+Bases: VoxelWorlds `1c4531d`, UE5_PluginDev `f3c6cc5` (G52 merged). Branches `fix/edit-neighbour-remesh` (VoxelWorlds)
+and `claude/nice-curie-086c9f` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+worktree editor (Claudius on 8093), background throttling off. It takes up the follow-up §19.11 left: the edit handler
+re-meshed the edited chunk's six face neighbours "so they re-extract boundary data".
+
+**What a face neighbour's re-mesh did** (checked in the code). On every edit the chunk manager's edit handler
+(`EditManager->OnChunkEdited` in `UVoxelChunkManager::Initialize`) called `MarkChunkDirty` on the edited chunk E and on
+each tracked face neighbour N, and re-cooked their collision. For N that meant:
+
+- **Its mesh:** the same mesh again. A chunk mesh is the interior domain, built from the chunk's own voxels and edit
+  layer at its LOD and local up; the request carries no neighbour data (`ProcessMeshingQueue`,
+  `EVoxelMeshCellDomain::Interior`). N's voxels and edits had not changed.
+- **Its seams:** `MarkChunkDirty(N)` calls `FVoxelSeamRegistry::UpdateChunkContent(N)`, which restales all 26 of N's
+  incident seams even when N's content version is unchanged. A seam job reads only its participants' edit-merged
+  snapshots and rendered LODs (`DispatchSeamJob`: two for a face seam, four for an edge, eight for a corner), and every
+  seam that reads E's voxels has E among them, so `MarkChunkDirty(E)` restales it. N's other seams were rebuilt
+  unchanged: 25 to 75 more seam jobs for a one-chunk edit in the tests, 93 to 102 live, 226 to 255 for an eight-chunk
+  brush (below).
+- **Its mesh completion:**
+  - `OnChunkLoaded`: the surface navigation re-reads the cells it had estimated analytically over the chunk, of which
+    none are left after its first load; no Blueprint binds it.
+  - The scatter hand-off: its types are done, so nothing re-extracts (since G33 the chunks that read an edit re-extract
+    directly).
+  - `UpdateWaterTileContribution`: from its own generated voxels, unchanged. The far-compression idle timer resets.
+  - `PropagateWaterFromNeighbors`: it pulls water flags across the chunk's faces from its neighbours' generated voxels.
+    Edits never reach a chunk's generated voxels (they live in the edit layer), so after an edit that pull finds only
+    flags the chunk's first pull missed for load order (a neighbour that arrived after it). None did in the tests below:
+    the two rules' water flags are the same after every edit, and a full re-mesh of every chunk changed no chunk's flags
+    in 80 checks.
+- **Its collision:** a cook reads the 26 neighbours' voxels (G32), so the face neighbours' re-cook stays.
+
+The seam-ownership design says the same (`Research/SEAM_OWNERSHIP_ARCHITECTURE.md` §2.1: interior meshes are never
+invalidated by neighbour edits). So the re-mesh changed nothing but the work, with one exception, G57.
+
+**G57 (found while tracing).** `MarkChunkDirty` acted only on a `Loaded` chunk. An edit that reached a chunk on its way to
+a mesh (`PendingMeshing`: queued; `Meshing`: on a worker or waiting for its upload) did nothing more:
+
+- **Its seams:** none restaled. A seam built since the chunk's last restale kept the content from before this edit, while
+  the chunk's next mesh showed it.
+- **Its interior:** a queued mesh reads the edit layer when it is dispatched, so it had the edit. One already on a worker
+  had been built without it and landed as the chunk's mesh, and nothing re-meshed it (no content check at completion).
+  The edit stayed invisible until the chunk re-meshed for another reason.
+
+That follows any edit made within a mesh's round trip of another on the same chunk: a held brush, water propagation's
+batches, a system batch or stamp over chunks still meshing (the tiled dungeon's stamp on `Review_Planet`, below). The face
+neighbours' incident seams cover all of the edited chunk's (every seam with E among its participants has a face neighbour
+of E too), so the old re-mesh restaled them, but only when the neighbours were `Loaded` at the second edit. Their own
+re-mesh for the first edit was usually still on its way, so in practice neither rule covered it: the tests below found the
+same stale geometry under both.
+
+**What changed** (VoxelStreaming).
+
+- **G56.** The edit handler no longer re-meshes the face neighbours; it still re-cooks their collision.
+  `voxel.Edit.NeighbourRemesh` (0; 1 = the rule before, for A/B). `voxel.Scatter.EditReaders 0` keeps the re-mesh for
+  system and editor edits: that rule's face neighbours re-extract their scatter through it.
+- **G57.** `MarkChunkDirty` on a chunk that is `PendingMeshing` or `Meshing` restales its seams (`UpdateChunkContent`: a
+  seam job reads the edit-merged snapshot when it is dispatched). A `Meshing` one is marked
+  (`FVoxelChunkState::bRemeshAfterMeshing`, cleared when a mesh is dispatched, since that mesh reads the edit layer), and
+  `RemeshIfEditedWhileMeshing` re-queues it when the mesh on the worker lands. This holds for every caller: edits, water
+  propagation, the dungeon stamper and entrance stitcher, a save's edit load, `voxel.RemeshAll`.
+- **Counters** (kept): `UVoxelChunkManager::GetMeshWorkStats` (`FMeshWorkStats`: chunk mesh jobs and seam jobs with their
+  worker time; edit broadcasts, edited chunks re-meshed, edits that reached a chunk on its way to a mesh, re-meshes after
+  a mesh landed, face-neighbour re-meshes) and `voxel.Edit.MeshWork [reset]`, which logs them since the last reset.
+
+**Tests** (`VoxelStreaming/Tests/VoxelEditRemeshTests.cpp`, new): `VoxelWorlds.Streaming.EditRemesh.Plane` and `.Planet`.
+A real chunk manager streams a small world (voxel 50, chunk 32, view distance 3,000; with LOD, two bands to 3,600) into a
+renderer that records the chunk meshes and seam buckets. Cases: DC, MC and cubic on the plane (cubic is terrain-only, and
+planets are smooth), DC and MC on the planet, with and without LOD, and with a sea. The edits are at the chunk edge along
+local up nearest the base point, where the surface crosses it (a few voxels under the sea for a water case):
+
+1. A system dig of chunk E's voxels within 3.5 voxels of the edge, its min edge: the seams there are owned by E's -A,
+   -B and -A-B neighbours, which it does not edit.
+2. A system fill of the chunk across the edge, whose max edge it is: the seams there are its own.
+3. A player brush (radius 2.5 voxels) across the edge.
+4. Two system edits of a chunk by E's -B face with mesh dispatch held: the first edit's seams are built before the
+   second lands, while the chunk waits for its mesh.
+5. Two system edits by E's -A face, the second while the chunk's mesh is on a worker (dispatched in the tick after the
+   first, whose seams are scheduled in that tick too).
+
+After each edit settles, every chunk mesh and seam bucket is compared, as sorted triangles (position, normal, both UV
+sets, colour), with a full rebuild made then: every loaded chunk re-meshed, every seam rebuilt. The rebuild also gives the
+next edit a clean start. Each case runs under both rules, and the two runs are compared after every edit: geometry, the
+edit-merged voxels' shape (material, density, biome) and their water flags.
+
+| Case | Before the fix (the build with the cvar, without G57's change): stale after edits 4 / 5, under both rules | After |
+|------|------|------|
+| Plane DC | 1 seam bucket (104 triangles) / 1 chunk mesh and 2 seam buckets (198) | 0 |
+| Plane DC, LOD | 2 buckets (78) / 1 mesh, 2 buckets (164) | 0 |
+| Plane MC, LOD | 1 bucket (48) / 1 mesh, 2 buckets (154) | 0 |
+| Plane cubic | 1 bucket (48) / 1 mesh, 2 buckets (114) | 0 |
+| Plane DC, sea | 1 bucket (106) / not reached (that run's edit dug only air) | 0 |
+| Planet DC | 1 bucket (130) / 1 mesh, 1 bucket (222) | 0 |
+| Planet DC, LOD, sea | 1 bucket (130) / 1 mesh, 1 bucket (222) | 0 |
+| Planet MC, LOD | 1 bucket (112) / 1 mesh, 1 bucket (132) | 0 |
+
+- **Edits 1 to 3** matched a full rebuild under both rules before the fix as after it: removing the re-mesh changes no
+  chunk mesh and no seam. The first edit changed the seam buckets of 3 owners it did not edit (2 for cubic) in every
+  case.
+- **The two rules** give the same geometry, voxel shape and water flags before the edits and after each of them, in every
+  case (48 comparisons). The sea cases have 12 (plane) and 16 (planet) chunks with water flags, and E has 1 and 4 face
+  neighbours with them.
+- **Edits 4 and 5** reach their target: the chunk is `PendingMeshing` at edit 4's second edit and `Meshing` at edit 5's
+  (on the first attempt, every case). With the fix the chunk re-meshes once after the mesh on the worker lands (the rule
+  before also re-meshes the face neighbours that were on a worker: 6).
+- **The meshing work** of the edits (the final build):
+
+| Case | Edit 1 (one chunk's voxels): chunk meshes / seam jobs, rule 0 against the rule before | Edit 3 (the player brush) | All five edits |
+|------|------|------|------|
+| Plane DC | 1 / 23 against 7 / 83 | 8 / 97 against 32 / 175 | 13 / 258 against 66 / 754 |
+| Plane DC, LOD | 1 / 26 against 7 / 101 | 8 / 117 against 32 / 243 | 13 / 299 against 66 / 893 |
+| Plane MC, LOD | 1 / 26 against 7 / 101 | 8 / 117 against 32 / 243 | 13 / 273 against 66 / 871 |
+| Plane cubic | 1 / 6 against 7 / 31 | 8 / 36 against 32 / 92 | 13 / 78 against 66 / 308 |
+| Plane DC, sea | 1 / 23 against 7 / 83 | 4 / 59 against 20 / 142 | 9 / 214 against 54 / 719 |
+| Planet DC | 1 / 23 against 7 / 75 | 4 / 59 against 20 / 121 | 9 / 220 against 54 / 652 |
+| Planet DC, LOD, sea | 1 / 25 against 7 / 86 | 4 / 67 against 20 / 149 | 9 / 242 against 54 / 709 |
+| Planet MC, LOD | 1 / 25 against 7 / 86 | 4 / 67 against 20 / 149 | 9 / 228 against 54 / 709 |
+
+**Live: the meshing work per edit.** One build, `voxel.Edit.NeighbourRemesh` set per run, a fresh PIE each, input
+blocked, the clock and NPC AI frozen, the pawn held; three runs per rule, interleaved, on `VoxelDemo` as it is and on
+`PlanetTest` with `Review_Planet` (chunks of 64 voxels). After 60 s at the spawn, edits beside the pawn, each measured by
+itself: `voxel.Edit.MeshWork reset`, the edit, 8 s, `voxel.Edit.MeshWork`.
+
+| Edit | Chunks edited, demo / planet | Chunk meshes, rule 0 / before: demo; planet | Seam jobs: demo; planet | Meshing worker ms (chunks + seams): demo; planet |
+|------|------|------|------|------|
+| `voxel.Edit.System pawn 700 dig edge` (a sphere on the chunk edge along local up) | 8 / 8 | 8 / 32; 8 / 32 | 117 / 372; 117 / 343 | 881 / 1,614; 732 / 1,211 |
+| `voxel.Edit.SystemLayers pawn dig xyz` (one chunk's three min-face layers, 12,097 voxels) | 1 / 1 | 1 / 7; 1 / 7 | 26 / 128; 26 / 119 | 117 / 771; 85 / 485 |
+| `voxel.Edit.System pawn 500 fill corner` (a sphere on the chunk corner) | 8 / 8 | 8 / 32; 8 / 32 | 117 / 372; 117 / 343 | 903 / 1,629; 881 / 1,206 |
+| `voxel.Edit.System pawn 150 dig` (27 voxels) | 1 / 4 | 1 / 7; 4 / 20 | 26 / 128; 71 / 250 | 111 / 738; 352 / 999 |
+| A dig and a fill there, back to back | 1 / 4 (twice) | 2 / 14; 8 / 40 | 52 / 256; 142 / 500 | 264 / 1,617; 746 / 1,886 |
+| Nothing, 8 s | — | 0; 0 | 0; 0 | 0; 0 |
+
+- The counts are the same in all three runs of a rule; the worker times are medians.
+- Through the console the back-to-back edits are about half a second apart, after the first edit's re-mesh has landed:
+  no edit reached a chunk on its way to a mesh. Under the rule before, 6 or 7 of an eight-chunk brush's broadcasts found
+  their chunk already queued by an earlier broadcast's neighbour re-mesh.
+- Stream-in, one run per rule, 60 s after a teleport: the tiled dungeon's stamp on `Review_Planet` (`vox.TPPOI Dungeon`,
+  2.3 km) made 18 broadcasts, 5 on loaded chunks and 2 on chunks queued for a mesh (G57's first case) under rule 0; the
+  rule before: 1 loaded, 6 queued (its neighbour re-meshes had queued them), 11 face-neighbour re-meshes. The Village's
+  terraform on `VoxelDemo`: 20 broadcasts, all on chunks not loaded yet. The stream-in's own meshing (1,000 to 1,100
+  chunk meshes and 9,400 to 10,300 seam jobs in the minute) dwarfs the edits'.
+- An edit deep inside one chunk still restales all 26 of its seams (26 seam jobs for 27 voxels). The edit's bounds
+  (`GetBroadcastEditBounds`) could pick the seams it reaches; not taken here.
+
+**Suites** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 558/558 headless and 558/558 in the editor with the GPU tests running, no device loss (G52's 556 and the two above); the 108 GPU parity lines CRC-identical to G52's (no generation change).
+
+**G58 (found while checking water, not fixed).** Edit-driven water propagation (`UVoxelWaterPropagation`) reads voxels with
+`UVoxelChunkManager::GetVoxelAtWorldPosition`, the generated voxels without the edit layer. Its seed scan looks for air
+next to water, and a voxel the player dug still reads solid there, so a dig under the sea never floods. A throwaway probe
+on the plane (a seabed 301 uu under the sea, a player brush): of 11 voxels dug to air, 8 touched water-flagged air, none had
+a water flag once settled, and no seed was logged. Its flood would be wrong too: `ProcessPropagation` sets each voxel to
+the generated voxel plus the flag, which undoes an edit there (a fill in a dry cave under the sea). It does not depend on
+the face neighbours' re-mesh; recorded for a fix of its own (read the edit-merged voxel, and keep the edit's density and
+material when setting the flag).
+
+**Left as they were:** the face neighbours' collision re-cook (G32's reads); `PropagateWaterFromNeighbors` pulling only
+when the chunk itself meshes, so a neighbour that arrives later does not push its flags into a chunk already meshed (not
+seen in the tests).
 
 ## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17, done 2026-10-19)
 

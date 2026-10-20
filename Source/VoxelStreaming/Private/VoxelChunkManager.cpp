@@ -448,6 +448,17 @@ static TAutoConsoleVariable<int32> CVarScatterEditReaders(
 	     "G33). 1 = on (default), 0 = the rule before: the edited chunk's six face neighbours, for A/B."),
 	ECVF_Default);
 
+// World modes review G56: an edit re-meshes the chunks it changed, and their seams restale (MarkChunkDirty). The rule before
+// also re-meshed each edited chunk's six face neighbours ("so they re-extract boundary data"), work for nothing since seam
+// ownership: a chunk mesh reads only its own voxels, and a seam job only its participants', which the edited chunk's seams
+// include. voxel.Scatter.EditReaders 0 keeps the re-mesh: that rule's face neighbours re-extract their scatter through it.
+static TAutoConsoleVariable<int32> CVarEditNeighbourRemesh(
+	TEXT("voxel.Edit.NeighbourRemesh"),
+	0,
+	TEXT("Re-mesh an edited chunk's six face neighbours too (world modes review G56). 0 = off (default): an edit re-meshes the ")
+	TEXT("chunks it changed and restales their seams; 1 = the rule before, for A/B."),
+	ECVF_Default);
+
 // ==================== Far-chunk voxel-data compression ====================
 // Settled far chunks keep a resident ~1MB voxel array purely to serve rare events (neighbor-plane
 // reads, LOD upgrades, edits, queries). A budgeted sweep compacts idle far chunks; any access
@@ -1075,6 +1086,7 @@ void UVoxelChunkManager::Initialize(
 	TotalChunksGenerated = 0;
 	TotalChunksMeshed = 0;
 	TotalChunksUnloaded = 0;
+	MeshWorkStats = FMeshWorkStats();
 	CurrentFrame = 0;
 
 	// Reset streaming decision caching (sentinel values force update on first tick)
@@ -1272,7 +1284,11 @@ void UVoxelChunkManager::Initialize(
 			bForceStreamingUpdate = true;
 		}
 
-		// Mark the edited chunk dirty
+		// Mark the edited chunk dirty: it re-meshes and its seams restale (on its way to a mesh as well, G57).
+		++MeshWorkStats.EditBroadcasts;
+		const EChunkState EditedChunkState = GetChunkState(ChunkCoord);
+		MeshWorkStats.EditedRemeshes += EditedChunkState == EChunkState::Loaded ? 1 : 0;
+		MeshWorkStats.EditedOnTheWay += (EditedChunkState == EChunkState::PendingMeshing || EditedChunkState == EChunkState::Meshing) ? 1 : 0;
 		MarkChunkDirty(ChunkCoord);
 		if (CollisionManager)
 		{
@@ -1331,20 +1347,28 @@ void UVoxelChunkManager::Initialize(
 			WaterPropagation->OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius);
 		}
 
-		// Also mark neighboring chunks dirty so they re-extract boundary data
-		// This ensures seamless edits across chunk borders
+		// The face neighbours re-cook their collision: a cook reads its 26 neighbours' voxels (G32). Their meshes read none of
+		// the edited chunk's voxels (a chunk mesh is a function of its own; the boundary is in the edited chunk's seams,
+		// restaled above), so they re-mesh only under the rule before (voxel.Edit.NeighbourRemesh 1, G56), or for a system edit
+		// under voxel.Scatter.EditReaders 0, whose face neighbours re-extract their scatter through that re-mesh.
 		static const FIntVector NeighborOffsets[6] = {
 			FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
 			FIntVector(0, -1, 0), FIntVector(0, 1, 0),
 			FIntVector(0, 0, -1), FIntVector(0, 0, 1)
 		};
+		const bool bNeighbourRemesh = CVarEditNeighbourRemesh.GetValueOnGameThread() != 0
+			|| (Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0);
 
 		for (const FIntVector& Offset : NeighborOffsets)
 		{
 			const FIntVector NeighborCoord = ChunkCoord + Offset;
 			if (ChunkStates.Contains(NeighborCoord))
 			{
-				MarkChunkDirty(NeighborCoord);
+				if (bNeighbourRemesh)
+				{
+					MeshWorkStats.NeighbourRemeshes += GetChunkState(NeighborCoord) == EChunkState::Loaded ? 1 : 0;
+					MarkChunkDirty(NeighborCoord);
+				}
 				if (CollisionManager)
 				{
 					CollisionManager->MarkChunkDirty(NeighborCoord);
@@ -1475,6 +1499,7 @@ void UVoxelChunkManager::Shutdown()
 	EditScatterReaderChunks.Empty();
 	EditScatterEditedChunks.Empty();
 	EditScatterStats = FEditScatterStats();
+	MeshWorkStats = FMeshWorkStats();
 	// Seam-ownership: drop all tracked seams/jobs alongside the chunk state they mirror, and
 	// discard the async seam pipeline's transient state (in-flight results will no-op via the
 	// weak manager pointer; late results drain harmlessly next session).
@@ -1718,6 +1743,20 @@ void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 			if (AddToMeshingQueue(Request, EVoxelRemeshReason::Dirty))
 			{
 				SetChunkState(ChunkCoord, EChunkState::PendingMeshing);
+			}
+		}
+		else if (State->State == EChunkState::PendingMeshing || State->State == EChunkState::Meshing)
+		{
+			// On its way to a mesh (world modes review G57): its seams restale too, as a seam job reads the chunk's edit-merged
+			// snapshot when it is dispatched. A queued mesh reads the edit layer when it is dispatched; a mesh on a worker was
+			// built before this change, so the chunk re-meshes once it lands (OnChunkMeshingComplete).
+			if (SeamRegistry.IsValid())
+			{
+				SeamRegistry->UpdateChunkContent(ChunkCoord, State->Descriptor.ContentVersion);
+			}
+			if (State->State == EChunkState::Meshing)
+			{
+				State->bRemeshAfterMeshing = true;
 			}
 		}
 	}
@@ -4692,8 +4731,9 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 			continue;
 		}
 
-		// Mark as meshing
+		// Mark as meshing (the request reads the edit layer below, so it has every edit made so far: G57)
 		SetChunkState(Request.ChunkCoord, EChunkState::Meshing);
+		State->bRemeshAfterMeshing = false;
 
 		// Build meshing request
 		double SubT0 = FPlatformTime::Seconds();
@@ -4801,6 +4841,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 {
 	// Mark as in-progress (stamped: the serial travels with the result, see FAsyncJobStamp)
 	const uint32 DispatchSerial = StampAsyncDispatch(AsyncMeshingInProgress, Request.ChunkCoord);
+	++MeshWorkStats.ChunkMeshJobs;
 
 	// Capture mesher pointer (it's a TUniquePtr, so we need raw pointer for lambda)
 	IVoxelMesher* MesherPtr = Mesher.Get();
@@ -4877,7 +4918,9 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		{
 			// Generate mesh on background thread
 			FChunkMeshData MeshData;
+			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
+			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 
 			// Queue result for game thread (thread-safe MPSC queue)
 			if (UVoxelChunkManager* This = WeakThis.Get())
@@ -4887,6 +4930,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 				Result.LODLevel = LODLevel;
 				Result.bSuccess = bSuccess;
 				Result.DispatchSerial = DispatchSerial;
+				Result.WorkerMs = WorkerMs;
 				if (bSuccess)
 				{
 					Result.MeshData = MoveTemp(MeshData);
@@ -4906,6 +4950,8 @@ void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 	// chunk in Meshing for the session (R23b; the demo allows 16 async meshes in flight).
 	VoxelDrainBounded(CompletedMeshQueue, MaxProcessPerFrame, [this](FAsyncMeshResult& Result) -> bool
 	{
+		// The worker time counts a superseded result too: the work was done.
+		MeshWorkStats.ChunkMeshWorkerMs += Result.WorkerMs;
 		// Only the dispatch that owns the chunk's in-flight slot may complete it; this also removes
 		// the slot. A superseded result (unloaded chunk, watchdog re-queue) is discarded.
 		if (!AcceptAsyncResult(AsyncMeshingInProgress, Result.ChunkCoord, Result.DispatchSerial, WorstMeshAsyncSeconds))
@@ -5800,6 +5846,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 	IVoxelMesher* SeamMesherPtr = EnsureSeamMesher();
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	const FVoxelSeamKey Key = Job.Key;
+	++MeshWorkStats.SeamJobs;
 	const double DispatchedAt = SeamRegistry->NowSeconds(); // same clock as the job's schedule stamp
 
 	if (Job.Key.Type == EVoxelSeamType::Face)
@@ -5951,6 +5998,7 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 	{
 		++Processed;
 		SeamJobsInFlight.Remove(Result.Key);
+		MeshWorkStats.SeamWorkerMs += Result.WorkerMs;
 
 		if (!MeshRenderer)
 		{
@@ -6463,6 +6511,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			State->Descriptor.bIsDirty = false;
 			SetChunkState(ChunkCoord, EChunkState::Loaded);
 			OnChunkLoaded.Broadcast(ChunkCoord);
+			RemeshIfEditedWhileMeshing(ChunkCoord);
 		}
 
 		return;
@@ -6571,6 +6620,21 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) loaded"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
+
+	RemeshIfEditedWhileMeshing(ChunkCoord);
+}
+
+void UVoxelChunkManager::RemeshIfEditedWhileMeshing(const FIntVector& ChunkCoord)
+{
+	// Found again: an OnChunkLoaded listener may have changed ChunkStates.
+	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (State && State->bRemeshAfterMeshing && State->State == EChunkState::Loaded)
+	{
+		// The mesh that just landed was built before an edit reached the chunk (G57): mesh it again with the edit.
+		State->bRemeshAfterMeshing = false;
+		++MeshWorkStats.RemeshesAfterMeshing;
+		MarkChunkDirty(ChunkCoord);
+	}
 }
 
 bool UVoxelChunkManager::UsesWaterTiles() const
@@ -8779,6 +8843,54 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelEditSystemLayersCmd(
 	TEXT("Debug: a system edit of the min-face layers of the chunk holding a point. Args: <x y z | pawn> [dig|fill] [axes=xyz] [depth=1]. ")
 	TEXT("Logs the chunks whose scatter reads it (world modes review G33)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World) { RunDebugSystemEdit(Args, World, true); }));
+
+// Console: voxel.Edit.MeshWork [reset]
+// World modes review G56 / G57: the meshing work since the last reset (UVoxelChunkManager::GetMeshWorkStats): chunk mesh jobs
+// and seam jobs with their worker time, streaming's as well as edits', and what edits asked of the meshing pipeline. To
+// measure an edit, hold the viewer still (vox.Freeze 1), reset, edit (voxel.Edit.System), wait for the pipeline to settle and
+// log; voxel.Edit.NeighbourRemesh 1 is the rule before for an A/B.
+static TMap<TWeakObjectPtr<UVoxelChunkManager>, TPair<UVoxelChunkManager::FMeshWorkStats, double>> GVoxelMeshWorkBaselines;
+
+static FAutoConsoleCommandWithWorldAndArgs GVoxelEditMeshWorkCmd(
+	TEXT("voxel.Edit.MeshWork"),
+	TEXT("Log the meshing work since the last 'voxel.Edit.MeshWork reset' (world modes review G56): chunk meshes and seam jobs ")
+	TEXT("with their worker time, and what edits asked of the meshing pipeline. Arg: reset."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Edit.MeshWork: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const bool bReset = Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase);
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			if (!CM)
+			{
+				continue;
+			}
+			const UVoxelChunkManager::FMeshWorkStats& Now = CM->GetMeshWorkStats();
+			if (bReset)
+			{
+				GVoxelMeshWorkBaselines.Add(CM, TPair<UVoxelChunkManager::FMeshWorkStats, double>(Now, FPlatformTime::Seconds()));
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Edit.MeshWork [%s]: reset"), *TargetWorld->GetName());
+				continue;
+			}
+			const TPair<UVoxelChunkManager::FMeshWorkStats, double>* Base = GVoxelMeshWorkBaselines.Find(CM);
+			const UVoxelChunkManager::FMeshWorkStats B = Base ? Base->Key : UVoxelChunkManager::FMeshWorkStats();
+			const double Since = Base ? FPlatformTime::Seconds() - Base->Value : 0.0;
+			const IConsoleVariable* Rule = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Edit.NeighbourRemesh"));
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Edit.MeshWork [%s]: %s %.1f s: chunk meshes %lld (worker %.1f ms), seam jobs %lld (worker %.1f ms); edits: %lld broadcasts, %lld edited chunks re-meshed, %lld on their way to a mesh (%lld re-meshed after it landed), %lld face-neighbour re-meshes (voxel.Edit.NeighbourRemesh %d); now: %d to generate, %d to mesh, %d seam jobs in flight"),
+				*TargetWorld->GetName(), Base ? TEXT("since reset") : TEXT("since Initialize (no reset),"), Since,
+				Now.ChunkMeshJobs - B.ChunkMeshJobs, Now.ChunkMeshWorkerMs - B.ChunkMeshWorkerMs, Now.SeamJobs - B.SeamJobs,
+				Now.SeamWorkerMs - B.SeamWorkerMs, Now.EditBroadcasts - B.EditBroadcasts, Now.EditedRemeshes - B.EditedRemeshes,
+				Now.EditedOnTheWay - B.EditedOnTheWay, Now.RemeshesAfterMeshing - B.RemeshesAfterMeshing,
+				Now.NeighbourRemeshes - B.NeighbourRemeshes, Rule ? Rule->GetInt() : -1, CM->GetPendingGenerationCount(),
+				CM->GetPendingMeshingCount(), CM->GetSeamJobsInFlightCount());
+		}
+	}));
 
 // Console: voxel.FarCompression.Stats
 // Dump the chunk manager's voxel-data residency breakdown (Resident/Uniform/Compressed/Empty
