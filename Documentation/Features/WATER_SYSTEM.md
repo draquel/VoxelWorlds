@@ -197,7 +197,7 @@ read as air, and keys ignored `WorldOrigin` (world modes review G58, WORLD_MODES
 edits from its edit-merged voxels (`UpdateWaterTileContribution`, below), so a channel dug inland from the shore below sea
 level draws its water surface once it floods; and the chunk-arrival face scans above carry a flood into a chunk that
 loads after it. Until 2026-10-20 both read the generated voxels only (world modes review G59, WORLD_MODES_REVIEW_PLAN.md
-§19.15). Tests: `VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Plane`, `.Planet`, `.Tiles.Plane`.
+§19.16). Tests: `VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Plane`, `.Planet`, `.Tiles.Plane`.
 
 ### On a Planet (spherical SP-B8)
 

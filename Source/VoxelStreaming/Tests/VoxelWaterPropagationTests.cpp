@@ -34,7 +34,7 @@
 //      waits for the chunk's water (its first mesh, which pulls the flags of a chunk under a heightmap sea from its
 //      neighbours), and once the viewer streams the chunk in, the dig floods with its density and material.
 //
-// G59 (section 19.15). A flood's water lives in the edit layer, which the water tiles and the chunk manager's pull across
+// G59 (section 19.16). A flood's water lives in the edit layer, which the water tiles and the chunk manager's pull across
 // chunk faces (PropagateWaterFromNeighbors) did not read: a dug channel's water drew no tile, a flood that stopped at a
 // chunk whose water was not in place did not continue into it when it loaded, and a dry pocket dug beside such a chunk did
 // not flood from the water it loaded with.
