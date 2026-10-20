@@ -200,7 +200,7 @@ tunnels and caverns since 2026-10-20 (world modes review §19.15):
 
 | Layer | Enabled | Threshold | Frequency | Depth (voxels) | Fade | Vertical scale |
 |-------|---------|-----------|-----------|----------------|------|----------------|
-| 0 Cheese | yes | 0.33 | 0.00025 | 27 down, no floor | 6 | 0.6 |
+| 0 Cheese | yes | 0.33 | 0.00025 | 27 to 60 | 6 | 0.6 |
 | 1 Spaghetti | yes | 0.15 | 0.0002 | 20 to 45 | 4 | 0.5 |
 | 2 Noodle | no | 0.16 | 0.0003 | 2 to 15 | 3 | 0.45 |
 
@@ -209,16 +209,17 @@ voxels (1,200 uu) of the ground, so there are no openings at the surface; enabli
 Under VoxelDemo's land (CPU generation of 3 × 3 chunk columns at the spawn, the Village, the Tower and the City), the
 share of air by depth under the ground:
 
-| Depth (voxels) | 15-19 | 20-24 | 25-34 | 35-44 | 45-49 | 50-63 | Columns with a cave in 16-49 | Mean cave height |
-|----------------|-------|-------|-------|-------|-------|-------|------------------------------|------------------|
-| Before (Spaghetti 0.5) | 31.7% | 80.8% | 81.2% | 80.9% | 31.2% | 0 | 95.3% | 23.3 voxels |
-| Spaghetti 0.15 + Cheese | 4.6% | 13.0% | 18.6% | 17.3% | 10.1% | 6.2% | 43.9% | 10.2 voxels |
+| Depth (voxels) | 15-19 | 20-24 | 25-34 | 35-44 | 45-49 | 50-59 | 60-65 | 66 and deeper | Columns with a cave in 16-49 | Mean cave height |
+|----------------|-------|-------|-------|-------|-------|-------|-------|---------------|------------------------------|------------------|
+| Before (Spaghetti 0.5) | 31.7% | 80.8% | 81.2% | 80.9% | 31.2% | 0 | 0 | 0 | 95.3% | 23.3 voxels |
+| Spaghetti 0.15 + Cheese to 60 | 4.6% | 13.0% | 18.6% | 17.3% | 10.1% | 6.2% | 2.6% | 0 | 43.9% | 10.2 voxels |
 
-The Cheese layer has no `MaxDepth`, so its caverns (about 6% of the rock) continue below the tunnels as deep as the
-world streams. That has a cost: chunks under the tunnels that were uniform rock now have a surface, so on `VoxelDemo`
-about 180 more chunks draw (+42 to 50%) with 17 to 28% more triangles and renderer memory. A `MaxDepth` on the Cheese
-layer would end them. Spaghetti thresholds of 0.10 and 0.20 (with the Cheese layer) give 9.2% and 21.8% air over depths 16 to
-49 against 14.6% at 0.15.
+The Cheese layer first went in with no `MaxDepth`, so its caverns (about 6% of the rock) went on below the tunnels as
+deep as the world streams. Chunks there that had been uniform rock got a surface: on `VoxelDemo` about 180 more chunks
+drew (+42 to 50%), with 17 to 28% more triangles and renderer memory. With `MaxDepth` 60 the caverns fade out between 60
+and 66 voxels down: 27 to 40 more chunks draw than with the old cavern (+6 to 9%), with 9 to 14% fewer triangles and less
+renderer memory, and CPU generation costs 8% more a chunk (17% without the floor). Spaghetti thresholds of 0.10 and
+0.20 (with the Cheese layer) give 9.2% and 21.8% air over depths 16 to 49 against 14.6% at 0.15.
 
 ## Underground Classification
 

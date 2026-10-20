@@ -1474,7 +1474,7 @@ Three findings from §13.11 get IDs here:
 | G31 | A planet chunk's scatter lines follow local up at its own centre, so neighbouring chunks' lines do not continue into each other: where they step along different axes (the cube's diagonals) or round their drift differently (a slope near half a voxel a step, and wherever it changes enough between the two chunks' centres), a line top whose ground continues into the neighbour is dropped while the neighbour's lines pass that spot with their crossing on this side of the face, and a strip along the face gets no point; rarely both make it. G29's doubled line tops had covered most of these strips. 27-chunk sites (§19.6, a Gaussian local density of one voxel): the cube corner 398 of 10,803 samples under 0.8 and `Scatter.Planet.DensityPerArea` 96.5% (99.7% with G29's doubles), 30°N 40°E 230, the poles, 45° and the equator none; a slope of exactly half a voxel a step 150 samples over 1.2 and 36 under. Live on `Review_Planet`: 15-933 pairs left at five stops | Fixed (§19.9): planet scatter samples one family of radial rays, one per cell of the cube-sphere grid at the point spacing for every chunk, and each chunk keeps the crossings in its own box (decision D26); the voxels past its +X, +Y and +Z faces are G29's generated voxels with the neighbours' edits, from the seven neighbours on those sides. Tests `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}` per ray at ten sites (no pair, no sample under 0.8 or over 1.2). On `Review_Planet` the pairs at five stops go from 15-933 to 0-1, the samples under 0.8 / over 1.2 from up to 4,175 / 1,684 to none, the stable chunks' spawn points rise 2.5% (the corner 6.7%), the map PNG is identical, and extraction takes 16.5 ms per 64³ chunk against 21.3 ms. No `PlanetGenerationVersion` change | — |
 | G32 | Stale collision strips along chunk faces: a chunk whose collision is cooked before its +X or +Y neighbour's voxels exist keeps a boundary built without them, and nothing re-cooks it when the neighbour loads. In a streamed test world (DC, voxel 75, collision LOD 0) 20 of 3,185 down-traces over plain terrain missed, in voxel-wide strips beside chunk faces; all hit after every chunk was re-cooked once loaded. A capsule stands across such a strip, a line trace does not (found in G24's live check, §19.8's observations) | Fixed 2026-10-19 (§19.10): a cook records the neighbours it read as air, and a neighbour's arrival re-cooks the chunk unless both sides of the boundary are all air (exact) or all solid (a wall buried in the rock, re-cooked by any edit that reaches it: edits now re-cook the edge and corner neighbours they reach too). How common it was: on `VoxelDemo` 217 of 244 cooked chunks at the spawn read a neighbour as air that had data by then (240 of 240 after a teleport), on `Review_Planet` 203 of 208; the fix leaves 0. `voxel.Collision.NeighborRecook`, `voxel.Collision.AuditNeighbors` | — |
 | G33 | A system or editor edit (a POI's terraform) re-extracts scatter only for the edited chunk; the neighbours whose extraction reads its face voxels (a planet chunk's `TouchingEdits` from the seven +X / +Y / +Z neighbours, a heightmap chunk's `AboveLayerEdits`) keep a stale view of it until they reload (found in G31, §19.9; the same holds for G26's and G29's rules). Checked in §19.11: the edit handler re-extracted the edited chunk and its six face neighbours, so a heightmap's one reader (the chunk below) was covered and a planet's three edge readers and corner reader were not, unless edited themselves or a face neighbour of an edited chunk; the other face neighbours re-extracted for nothing | Fixed 2026-10-20 (§19.11): a system or editor edit re-extracts the chunks whose extraction reads the voxels it changed (`UVoxelScatterManager::GetEditReaders`, by the bounds of the changed voxels the edit manager now reports, `GetBroadcastEditBounds`), once each per tick, from their voxels with no re-mesh (`ProcessEditScatterReaders`); player edits unchanged. On `Review_Planet` a second edit beside a first left 3 edge readers stale (67 points) in every run of the rule before and none after; `VoxelDemo` none either way; scatter regenerations per edit 63 → 10 (demo), 63 → 16 (planet), 77 → 12 (a dungeon stamp). `voxel.Scatter.EditReaders`, `voxel.Scatter.EditAudit`, `voxel.Edit.System`, `voxel.Edit.SystemLayers`; tests `Scatter.EditReaders.{Rule,Planet,Plane}` | — |
-| G34 | Wide flat cavity ceilings at about Z 0, the chunk layers' shared plane, under hills near every `VoxelDemo` stop: the layer below's top voxels air and the layer above's bottom voxels solid (1,700 such cells in chunk (−45, −24, 0) near the Tower; §19.5's things to know). Not verified whether the cave configuration means them | Dismissed 2026-10-20 (§19.12): not an artefact. They are the roof of `DemoCaveConfig`'s one enabled layer, a Spaghetti layer whose threshold of 0.5 carves most of space, so it fills its depth window (20 to 45 voxels) as one cavern with pillars. The window's fade puts the roof 18 voxels (1,350 uu) under the generated terrain (23 under a seabed), so it is flat under flat ground and on Z 0 wherever the ground is at 1,275 to 1,350. On the A/B route the boundary plane holds as many ceilings as the planes either side of it in the same chunks (the Tower 16,680 against 16,611 and 15,714). The streamed chunks equal a CPU regeneration (GPU: no solid difference in the boundary layers but one voxel; CPU: identical), compressed or not, with no edits. `voxel.Gen.LayerAudit`. Whether the demo wants that cavern is a content decision, left open. Decided 2026-10-20 (§19.15): the user chose tunnels and caverns; `DemoCaveConfig` (16 world configurations with caves) now has Spaghetti at 0.15 and the Cheese layer on: 14.6% of the rock 16 to 49 voxels under the land is cave against 68.8%, the planes' ceilings within a factor of 1.8, only underground scatter changed, map PNGs identical; about 180 more chunks draw (+17 to 28% triangles), from the Cheese layer having no floor | — |
+| G34 | Wide flat cavity ceilings at about Z 0, the chunk layers' shared plane, under hills near every `VoxelDemo` stop: the layer below's top voxels air and the layer above's bottom voxels solid (1,700 such cells in chunk (−45, −24, 0) near the Tower; §19.5's things to know). Not verified whether the cave configuration means them | Dismissed 2026-10-20 (§19.12): not an artefact. They are the roof of `DemoCaveConfig`'s one enabled layer, a Spaghetti layer whose threshold of 0.5 carves most of space, so it fills its depth window (20 to 45 voxels) as one cavern with pillars. The window's fade puts the roof 18 voxels (1,350 uu) under the generated terrain (23 under a seabed), so it is flat under flat ground and on Z 0 wherever the ground is at 1,275 to 1,350. On the A/B route the boundary plane holds as many ceilings as the planes either side of it in the same chunks (the Tower 16,680 against 16,611 and 15,714). The streamed chunks equal a CPU regeneration (GPU: no solid difference in the boundary layers but one voxel; CPU: identical), compressed or not, with no edits. `voxel.Gen.LayerAudit`. Whether the demo wants that cavern is a content decision, left open. Decided 2026-10-20 (§19.15): the user chose tunnels and caverns; `DemoCaveConfig` (16 world configurations with caves) now has Spaghetti at 0.15 and the Cheese layer on from 27 to 60 voxels down: 14.6% of the rock 16 to 49 voxels under the land is cave against 68.8%, half the ceilings per plane and the planes within a factor of 2.3 of each other, only underground scatter changed, map PNGs identical, 9 to 14% fewer triangles drawn (without the Cheese floor, 180 more chunks drew) | — |
 | G35 | A pawn teleported to the exact north pole of a planet kept its old tilt (54.7° off upright after a jump from the cube corner): `UVCMovementComponent::SnapUprightToGravity` skipped the engine's default gravity, which is exactly the north pole's (found in spherical Phase 6's baseline survey, §20.2) | Fixed in P6.1 (§20.2): the snap runs on a planet whatever the gravity; `VoxelCharacter.Planet.Fly` snaps a tilted body at every site | — |
 | G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (over the small planet's pole, inside M and L) and a settle from altitude never lands (§20.2) | Fixed in P6.5 (§20.6): the first spawn searches the whole planet in rings (`FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`, at most 4,096 samples) and spawns at the sea's surface on a planet with no land; the debug settle with no land within reach settles onto the sea; the landing hold (`vox.Fly 0`) holds a falling pawn over uncooked land; `VoxelCharacter.Planet.SpawnAtScale` | WM-BP10, WM-BP11 |
 | G37 | Planet POI queries by distance (claim streaming, `poi.Find`, the planet map markers) opened a cap from the chord of their range plus the origin's height, tens of degrees for an origin in the core or high above a big planet: frames of 30 s to 3 min on `Review_Planet_L`; registration generated every POI of the planet (8.2 million on L, 120 s) for a log line (§20.2) | Fixed in P6.1 (§20.2, WM-BP11's bounds brought forward): `FPOIPlacement::GetPlanetCapAngleWithin`, `GetPlanetSurveyAngle`; `POI.Planet.RegistrationBounded` | (WM-BP11) |
@@ -5367,20 +5367,22 @@ continue into it when it loads. Before G58 no flood reached the edit layer, so n
 
 ### 19.15 The demo caves: tunnels and caverns instead of one cavern (2026-10-20)
 
-Bases: VoxelWorlds `29b9588`, UE5_PluginDev `bf9ec16` (G56 and G57 merged). Branches `docs/demo-cave-tunnels`
-(VoxelWorlds, docs only) and `claude/demo-cave-tunnels` (UE5_PluginDev, the asset). Built with editor 5.8.3 from
-`D:\Program Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8094), background throttling off. It takes up the
-content decision §19.12 left open.
+Bases: VoxelWorlds `29b9588`, UE5_PluginDev `bf9ec16` (G56 and G57 merged); rebased onto main after G58 (§19.14).
+Branches `docs/demo-cave-tunnels` (VoxelWorlds, docs only) and `claude/demo-cave-tunnels` (UE5_PluginDev, the asset).
+Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8094), background
+throttling off. It takes up the content decision §19.12 left open.
 
 **The decision** (the user, 2026-10-20). The options were to keep the cavern; Spaghetti at 0.15 alone; Spaghetti at
 0.15 with the Cheese layer; or both with the Noodle layer too (its depths 2 to 15 open caves at the surface). The user
-chose tunnels and caverns: Spaghetti at 0.15 with the Cheese layer.
+chose tunnels and caverns: Spaghetti at 0.15 with the Cheese layer, enabled as configured. The Cheese layer had no
+`MaxDepth`, and the first round of measurements found what that costs (item 4): its caverns went on under the tunnels
+and gave about 180 more chunks a mesh. The user then asked for a floor: `MaxDepth` 60.
 
 **The change** is content only, in UE5_PluginDev: `DemoCaveConfig`'s layer 1 (Spaghetti) threshold 0.5 → 0.15 (the
-Spaghetti default in `CAVE_SYSTEM.md`), and layer 0 (Cheese) enabled as it was configured: threshold 0.33, frequency
-0.00025, 3 octaves, falloff 0.2, `MinDepth` 27, no `MaxDepth`, fade 6, `VerticalScale` 0.6. The Noodle layer stays off.
-`UnderwaterMinDepth` 25 and the one biome override (biome 3, cave scale 0) are unchanged, so nothing carves within 16
-voxels (1,200 uu) of the ground. No code changes.
+Spaghetti default in `CAVE_SYSTEM.md`), and layer 0 (Cheese) enabled: threshold 0.33, frequency 0.00025, 3 octaves,
+falloff 0.2, `MinDepth` 27, `MaxDepth` 0 → 60, fade 6, `VerticalScale` 0.6. Its caverns therefore fade in from 21 voxels
+and out between 60 and 66. The Noodle layer stays off. `UnderwaterMinDepth` 25 and the one biome override (biome 3,
+cave scale 0) are unchanged, so nothing carves within 16 voxels (1,200 uu) of the ground. No code changes.
 
 **Which worlds.** 24 world configurations reference `DemoCaveConfig`, and 16 of them have caves enabled, so all 16 get
 the tunnels: `VoxelDemo`'s `DemoSmoothWorldConfig`, `DemoCubicWorldConfig`, `DemoWorldConfig_LOD0Ext`,
@@ -5394,114 +5396,124 @@ its edits onto the new rock. Edits are stored per voxel and applied over the gen
 only edits that reach 16 voxels under the ground meet different rock: a pit dug into the old cavern, or a voxel-carved
 dungeon's jacket where it crossed the cavern.
 
-**Measured.**
+**Measured.** "Before" is the old tuning, "no floor" the first round (Cheese without `MaxDepth`), "after" the change as
+it stands.
 
 1. **Air by depth** (a temporary probe test, not committed). CPU generation of 3 × 3 chunk columns at each A/B stop (the
    spawn, the Village, the Tower and the City), with the request `BuildChunkGenerationRequest` builds (no conditioning
-   zones), and each voxel's depth under the analytic surface. 123,454 land and 24,002 sea columns:
+   zones), and each voxel's depth under the analytic surface. 123,454 land and 24,002 sea columns. The window the
+   Spaghetti layer carves, with the variants the decision weighed:
 
-   | Configuration | 15-19 | 20-24 | 25-34 | 35-44 | 45-49 | 50-63 | Air over 16-49 | Columns with a cave in 16-49 | Mean cave height | Sea, air over 16-54 |
-   |---------------|-------|-------|-------|-------|-------|-------|----------------|------------------------------|------------------|---------------------|
-   | Before: Spaghetti 0.5 | 31.7% | 80.8% | 81.2% | 80.9% | 31.2% | 0 | 68.8% | 95.3% | 23.3 voxels | 48.3% |
-   | Spaghetti 0.15 alone | 4.6% | 12.2% | 12.8% | 11.9% | 4.2% | 0 | 10.4% | 34.4% | 9.6 | 7.2% |
-   | Cheese alone | 0 | 0.8% | 6.6% | 5.9% | 6.1% | 6.2% | 4.7% | 14.2% | 10.8 | 5.5% |
-   | **After: Spaghetti 0.15 + Cheese** | 4.6% | 13.0% | 18.6% | 17.3% | 10.1% | 6.2% | **14.6%** | **43.9%** | **10.2** | 12.1% |
-   | Spaghetti 0.10 + Cheese | 2.1% | 6.4% | 12.0% | 11.0% | 7.9% | 6.2% | 9.2% | 33.1% | 8.6 | 8.6% |
-   | Spaghetti 0.20 + Cheese | 7.8% | 21.6% | 27.1% | 25.9% | 13.2% | 6.2% | 21.8% | 54.8% | 12.1 | 16.7% |
+   | Configuration | 15-19 | 20-24 | 25-34 | 35-44 | 45-49 | Air over 16-49 | Columns with a cave in 16-49 | Mean cave height | Sea, air over 16-54 |
+   |---------------|-------|-------|-------|-------|-------|----------------|------------------------------|------------------|---------------------|
+   | Before: Spaghetti 0.5 | 31.7% | 80.8% | 81.2% | 80.9% | 31.2% | 68.8% | 95.3% | 23.3 voxels | 48.3% |
+   | Spaghetti 0.15 alone | 4.6% | 12.2% | 12.8% | 11.9% | 4.2% | 10.4% | 34.4% | 9.6 | 7.2% |
+   | Cheese alone | 0 | 0.8% | 6.6% | 5.9% | 6.1% | 4.7% | 14.2% | 10.8 | 5.5% |
+   | **After: Spaghetti 0.15 + Cheese** | 4.6% | 13.0% | 18.6% | 17.3% | 10.1% | **14.6%** | **43.9%** | **10.2** | 12.1% |
+   | Spaghetti 0.10 + Cheese | 2.1% | 6.4% | 12.0% | 11.0% | 7.9% | 9.2% | 33.1% | 8.6 | 8.6% |
+   | Spaghetti 0.20 + Cheese | 7.8% | 21.6% | 27.1% | 25.9% | 13.2% | 21.8% | 54.8% | 12.1 | 16.7% |
 
    Depths in voxels under the ground; the mean cave height is the mean length of a column's vertical air runs in 16-49.
-   The Cheese layer has no `MaxDepth`, so its caverns continue below the tunnels as deep as the world streams.
+   The Cheese layer's floor at 60 changes nothing above 60 voxels. Under the window, over 120 chunks from the ground to
+   128 voxels down:
 
-   CPU generation of those 84 chunks (64³, from the ground to 64 voxels down): 191 ms a chunk before, 223 ms after
-   (+17%; each measured twice in one run, within 0.4 ms). The Cheese layer samples its noise in every voxel deeper than 21
-   voxels, where the Spaghetti layer stopped at 49, so chunks deeper still cost more than before too. `VoxelDemo`
-   generates on the GPU; the CPU generator serves `-VoxelForceCPU`, the headless benches, tests and point queries.
+   | Configuration | 50-59 | 60-65 | 66-79 | 80-127 | Chunks with cave air | Chunks wholly below 66 voxels with cave air | CPU generation |
+   |---------------|-------|-------|-------|--------|----------------------|----------------------------------------------|----------------|
+   | Before | 0 | 0 | 0 | 0 | 66 | 0 of 33 | 194-197 ms a chunk |
+   | No floor | 6.2% | 6.4% | 5.9% | 6.1% | 107 | 30 of 33 | 228-231 ms (+17%) |
+   | **After (`MaxDepth` 60)** | 6.2% | 2.6% | 0 | 0 | **70** | **0 of 33** | **211-214 ms (+8%)** |
+
+   CPU generation of 64³ chunks, each configuration measured twice in one run. `VoxelDemo` generates on the GPU; the CPU
+   generator serves `-VoxelForceCPU`, the headless benches, tests and point queries.
 
 2. **The A/B** on `VoxelDemo`: three runs per tuning, interleaved, the route of §19.11 (the spawn after 60 s, then
    `vox.TP` to the Village, the Tower and the City, 60 s each). At each stop, streaming frozen: `voxel.Map.Capture 6`,
-   `voxel.Gen.LayerAudit`, `voxel.Scatter.Digest file`. `DemoCaveConfig` was set in memory to the old or the new tuning
-   before each run and never saved that way; GPU generation, as the asset says.
+   `voxel.Gen.LayerAudit 3 2`, `voxel.Scatter.Digest file`, the renderer's totals (`UVoxelChunkManager::GetDebugStats`)
+   and `voxel.FarCompression.Stats`. `DemoCaveConfig` was set in memory to the old tuning or the new one before each run
+   and never saved that way; GPU generation, as the asset says. The first round ran the same way against the no-floor
+   tuning (three runs each, renderer totals from two more each).
 
-   Ceilings over the chunk pairs, and per Z plane over every chunk. The three runs of a tuning gave the same numbers, and
-   the old runs reproduce §19.12's:
+   Ceilings over the chunk pairs, and per Z plane over every chunk. The runs of a tuning gave the same numbers (but one
+   old run's City: boundary 15,985), and the old runs reproduce §19.12's:
 
    | Stop | Boundary plane (under it / over it) | Upper chunks' planes, mean / max | Every plane: mean (min-max) | Planes 22-26 against their neighbours |
    |------|-------------------------------------|----------------------------------|-----------------------------|----------------------------------------|
-   | Spawn | 11,550 (10,827 / 11,274) → 9,985 (9,683 / 10,069) | 14,049 / 22,135 → 7,950 / 11,386 | 14,133 (5,681-22,135) → 11,472 (8,727-14,457) | 0.30 → 0.85 |
-   | Village | 16,021 (15,992 / 15,648) → 9,309 (9,643 / 9,002) | 13,783 / 23,791 → 8,183 / 11,525 | 13,839 (3,369-23,791) → 11,742 (9,643-14,919) | 0.24 → 0.86 |
-   | Tower | 16,680 (16,611 / 15,714) → 9,610 (10,454 / 9,123) | 13,773 / 23,183 → 7,682 / 12,169 | 13,804 (3,069-23,183) → 11,121 (9,122-15,973) | 0.21 → 0.80 |
-   | City | 16,032 (15,314 / 16,490) → 10,508 (10,478 / 10,660) | 14,245 / 19,548 → 8,030 / 10,921 | 14,283 (4,789-19,548) → 11,573 (10,028-14,311) | 0.39 → 0.87 |
+   | Spawn | 11,550 (10,827 / 11,274) → 7,467 (7,104 / 7,622) | 14,049 / 22,135 → 6,845 / 9,475 | 14,133 (5,681-22,135) → 7,195 (5,149-9,475) | 0.30 → 0.79 |
+   | Village | 16,021 (15,992 / 15,648) → 6,725 (6,868 / 6,622) | 13,783 / 23,791 → 6,829 / 9,318 | 13,839 (3,369-23,791) → 7,043 (5,014-9,318) | 0.24 → 0.78 |
+   | Tower | 16,680 (16,611 / 15,714) → 7,327 (8,261 / 6,962) | 13,773 / 23,183 → 6,734 / 10,267 | 13,804 (3,069-23,183) → 6,913 (4,554-10,267) | 0.21 → 0.69 |
+   | City | 16,032 (15,314 / 16,490) → 7,415 (7,448 / 7,757) | 14,245 / 19,548 → 7,048 / 8,100 | 14,283 (4,789-19,548) → 7,200 (5,385-8,266) | 0.39 → 0.81 |
 
-   - The upper chunks' planes hold 41 to 44% fewer ceilings.
-   - Over every chunk, the plane with the most ceilings has 1.4 to 1.8 times the plane with the fewest, against 3.9 to 7.6
-     before, when the planes followed the one roof under the terrain's heights. The total drops less, 15 to 19%: the
-     Cheese layer has no floor, so it also carves the chunk layers under the old window (layer −2 and down), which the
-     Spaghetti layer reached only under the sea and the lowest land.
+   - Half the ceilings: 49 to 51% fewer per plane, over every chunk and over the upper chunks alike. Without the floor
+     the drop over every chunk was 15 to 19%, the Cheese caverns adding ceilings in the layers under the old window.
+   - The plane with the most ceilings has 1.5 to 2.3 times the plane with the fewest (no floor: 1.4 to 1.8), against 3.9
+     to 7.6 before, when the planes followed the one roof under the terrain's heights.
    - Planes 22 to 26, the coast step §19.12 traced to `UnderwaterMinDepth` (no full-carve roof lies there), held a fifth
-     to two fifths of their neighbours' ceilings and now hold 80 to 87%. The step is still in the configuration, but it
+     to two fifths of their neighbours' ceilings and now hold 69 to 81%. The step is still in the configuration, but it
      only showed because the roof was one continuous surface.
 
    Scatter, compared over the chunks whose digest was the same in all three runs of a tuning:
 
    | Stop | Stable chunks (old / new / both) | Differ | By chunk layer (points old → new) |
    |------|----------------------------------|--------|-----------------------------------|
-   | Spawn | 245 / 246 / 245 | 18 | Z −2: 8 of 77 (489 → 425); Z −1: 10 of 84 (4,939 → 4,820) |
-   | Village | 247 / 247 / 247 | 18 | Z −2: 8 of 77 (269 → 255); Z −1: 10 of 83 (16,651 → 16,391) |
-   | Tower | 215 / 223 / 215 | 14 | Z −2: 2 of 70 (119 → 123); Z −1: 12 of 79 (10,264 → 10,096) |
-   | City | 232 / 232 / 232 | 19 | Z −1: 10 of 81 (482 → 481); Z 0: 9 of 80 (11,141 → 11,128) |
+   | Spawn | 246 / 246 / 246 | 17 | Z −2: 7 of 77 (430 → 371); Z −1: 10 of 84 (4,939 → 4,834) |
+   | Village | 247 / 247 / 247 | 14 | Z −2: 4 of 77 (161 → 146); Z −1: 10 of 83 (16,651 → 16,405) |
+   | Tower | 215 / 215 / 215 | 14 | Z −2: 2 of 70 (119 → 127); Z −1: 12 of 79 (10,264 → 10,110) |
+   | City | 231 / 232 / 231 | 18 | Z −1: 10 of 81 (482 → 486); Z 0: 8 of 79 (8,396 → 8,379) |
 
    - Per type, between runs that cached the same chunks: the 14 surface types with points on the route (spruces, bush,
      grasses, plants, flowers, the young spruce; placement mask Surface) are identical in count and CRC at every stop.
-     Only the three underground-only types (`Mushroom01` to `03`) change: 942 → 759 points at the spawn, 795 → 521 at
-     the Village, 761 → 597 at the Tower, 524 → 510 at the City.
+     Only the three underground-only types (`Mushroom01` to `03`) change: 942 → 778 points at the spawn, 795 → 534 at
+     the Village, 761 → 615 at the Tower, 524 → 515 at the City. The first round found the same split.
    - The changed chunks are those holding cave floors: layers −1 and −2, and layer 0 at the City, whose ground at about
      2,900 puts the caves' top there.
-   - Unstable chunks, all on the old side: one at the spawn in the first old run (3,720 points against 2,524 in the five
-     other runs); at the Tower eight chunks where the first two old runs have more points than the third (2,740 against
-     1 in one), the third agreeing with all three new runs, and seven chunks cached in the first two old runs only. The
-     run-to-run noise of §19.11, not the caves.
+   - Unstable chunks: at the Tower one run of each tuning cached 230 chunks against 223 in the other two (eight of the
+     common chunks differ with it, 2,740 points against 1 in one), and one old run's City. The first round showed the
+     same at the Tower and one chunk at the spawn in its first old run. The run-to-run noise of §19.11, not the caves.
 
-   **Map PNGs:** identical in all six runs at all four stops.
+   **Map PNGs:** identical in all twelve runs of both rounds at all four stops.
 
-3. **GPU against CPU** with the new tuning: `voxel.Gen.LayerAudit 4 4` on the Tower hill regenerated its four worst pairs
-   on the CPU. Solid differs in no voxel of either chunk; density differs in 7 to 37 voxels of the upper chunk and 139 to
-   145 of the lower one, one step where profiled. Those pairs now lie under the seabed (ground at −3,162 to −2,655), on
-   the plane Z −4,800: where the noise carves fully at the window's top, the fade still makes a roof 23 voxels under the
-   seabed (carve 0.67 to 0.72 under the plane, 0.30 to 0.36 on it), but in patches of 158 to 216 of a chunk's 4,096
-   columns.
+3. **GPU against CPU.** `voxel.Gen.LayerAudit 3 2` regenerated the two worst pairs of every stop on the CPU: with the new
+   tuning solid differs in 6 voxels over the 8 pairs (0 to 2 a pair, none in a boundary layer), with the old tuning in
+   3, the 0 to 3 a lower chunk §19.12 recorded; density differs in 2 to 431 voxels a chunk, one step where profiled. The
+   same in all three runs of each tuning. In the first round the Tower hill's four worst pairs differed in no solid
+   voxel; they lie under the seabed (ground at −3,162 to −2,655) on the plane Z −4,800, where the noise carves fully at
+   the window's top and the fade still makes a roof 23 voxels under the seabed (carve 0.67 to 0.72 under the plane, 0.30
+   to 0.36 on it), in patches of 158 to 216 of a chunk's 4,096 columns.
 
-4. **What it costs to draw.** Two more runs per tuning on the same route, interleaved, with the renderer's totals
-   (`UVoxelChunkManager::GetDebugStats`) and `voxel.FarCompression.Stats` at each stop. The two runs of a tuning agree
-   (to 1% at the Tower and the City):
+4. **What it costs to draw**, the renderer's totals and the voxel residency at each stop (all runs of a tuning agree to
+   2% but the residency, which varies by up to 16 MB between runs of either tuning):
 
-   | Stop | Chunks drawn | Triangles | Renderer GPU memory | Resident voxel data (uniform chunks) |
-   |------|--------------|-----------|---------------------|--------------------------------------|
-   | Spawn | 428 → 608 | 840,000 → 1,029,000 | 22.5 → 27.5 MB | 127 → 138 MB (47 → 24) |
-   | Village | 421 → 633 | 823,000 → 1,055,000 | 22.0 → 28.1 MB | 132 → 143 MB (122 → 79) |
-   | Tower | 426 → 607 | 835,000-849,000 → 993,000 | 22.3-22.7 → 26.5 MB | 123-138 → 133 MB (101-106 → 73) |
-   | City | 434-436 → 627 | 834,000 → 1,010,000-1,019,000 | 22.4 → 27.1-27.3 MB | 128-144 → 154-155 MB (74-80 → 53) |
+   | Stop | Chunks drawn: before / no floor / after | Triangles | Renderer GPU memory | Resident voxel data |
+   |------|----------------------------------------|-----------|---------------------|---------------------|
+   | Spawn | 428 / 608 / 458 | 840,000 / 1,029,000 / 747,000 | 22.5 / 27.5 / 20.0 MB | 127 / 138 / 127 MB |
+   | Village | 421 / 633 / 453 | 823,000 / 1,055,000 / 750,000 | 22.0 / 28.1 / 19.9 MB | 132 / 143 / 131 MB |
+   | Tower | 426 / 607 / 466 | 835,000-849,000 / 993,000 / 720,000-729,000 | 22.3-22.7 / 26.5 / 19.2-19.5 MB | 123-138 / 133 / 122-137 MB |
+   | City | 434-436 / 627 / 462 | 834,000 / 1,010,000-1,019,000 / 721,000-730,000 | 22.4 / 27.1-27.3 / 19.4-19.6 MB | 128-145 / 153-155 / 141-144 MB |
 
-   About 180 more chunks have a mesh (+42 to 50%), with 17 to 28% more triangles and renderer memory. The extra chunks
-   lie under the old window, where only the Cheese layer carves: the Spaghetti layer keeps the old depths, and the
-   cavern already put a surface in nearly every chunk there. Under the window the rock was uniform, so those chunks had
-   no surface and collapsed to uniform storage; the Cheese caverns now give them both. Frame time was not benched.
+   - Without a floor about 180 more chunks had a mesh (+42 to 50%), with 17 to 28% more triangles and renderer memory:
+     the Cheese caverns put a surface in chunks under the old window that had been uniform rock, and voxel data rose 5 to
+     9%. Frame time was not benched.
+   - With the floor, 27 to 40 more chunks than before have a mesh (+6 to 9%), the caverns between 49 and 66 voxels
+     down, but 9 to 14% fewer triangles and less renderer memory: the tunnels and caverns have less surface than the
+     cavern's roof and floor under all land. Voxel data within the runs' spread.
 
 5. **Live look** (screenshots in the worktree's `Saved/Screenshots/Claudius`, not committed). On the Tower hill of §19.12
    (`vox.TP -202600 -58479`, ground at about 1,350), with each tuning set in memory:
-   - `cave_old_xray.png` / `cave_new_xray.png`: a camera in the rock at Z 300 looking along −X. Back faces do not draw,
-     so it sees the caves' far walls through the rock. Before: one cavern, a flat floor with pillars under a flat roof
-     line. After: separate tunnels and caverns at different depths, rock between them.
-   - `cave_old_pitwall.png` / `cave_new_pitwall.png`: §19.12's trench, 24 system-edit spheres of radius 800 from Z 1,300
+   - `cave_old_xray.png` / `cave_final_xray.png` (`cave_new_xray.png` without the floor, the same): a camera in the rock
+     at Z 300 looking along −X. Back faces do not draw, so it sees the caves' far walls through the rock. Before: one
+     cavern, a flat floor with pillars under a flat roof line. After: separate tunnels and caverns at different depths,
+     rock between them.
+   - `cave_old_pitwall.png` / `cave_final_pitwall.png`: §19.12's trench, 24 system-edit spheres of radius 800 from Z 1,300
      to −2,200, seen from the camera of `g34_pit_wall.png`. Before: the roof's flat edge across the whole wall, the
      cavern under it. After: rock, with one tunnel's mouth at the bottom.
+   - `cave_pr_deep.png` / `cave_final_deep.png`: a camera at Z −5,000, 85 voxels under the ground, looking along −X and
+     15° up. Without the floor a Cheese cavern's wall fills the view at the camera's own depth, with more caverns around
+     it. With the floor nothing lies at the camera's depth or under it, only the caves above.
 
-**Suites** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 559/559 headless and 559/559 in the editor with the GPU tests running, no device loss (main's tests, the same list as G56 and G57's merged state; none added). The tests that load the review worlds now generate the tunnels and pass unchanged. The 108 GPU parity lines are CRC-identical to G33's: no parity case reads `DemoCaveConfig`. Rebased onto main after G58 (§19.14): 561/561 headless.
+**Suites** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 559/559 headless and 559/559 in the editor with the GPU tests running in the first round (on the base); with the floor, rebased onto main after G58 (§19.14), 561/561 headless and 561/561 in the editor, no device loss (main's tests; none added). The tests that load the review worlds generate the new caves and pass unchanged. The 108 GPU parity lines are CRC-identical to G33's: no parity case reads `DemoCaveConfig`.
 
 **Left as they were:**
 
-- The Cheese layer's missing floor: its caverns continue under the tunnels to the bottom of the streaming window, and
-  they are what makes about 180 more chunks draw (item 4). A `MaxDepth` on that layer (60 voxels, say) would end them
-  and most of that cost; not set, the layer was enabled as configured.
 - The Noodle layer, off: nothing opens at the surface. Turning it on adds narrow caves from 2 to 15 voxels down, whose
   fade starts at the ground itself (`MinDepth` 2, fade 3), so they open at the surface.
 - The coast step (`UnderwaterMinDepth` replaces each layer's `MinDepth` under the sea), now a step in the depth where
