@@ -1498,7 +1498,8 @@ Three findings from §13.11 get IDs here:
 | G55 | `UVCMovementComponent`'s embed check (an edit near the pawn arms a check that lifts the pawn out of terrain closed around it once the new collision lands, `OnVoxelChunkModified`) went by the edit's centre and radius, which an edit with no centre does not have: a POI's terraform, a campsite pad or a dungeon stamp at the pawn, an undo, a clear or a load armed no check (its zero centre armed one only for a pawn within about 300 uu of the world's zero point; before G53 a batch after a brush took the brush's sphere). Since G53 that holds for every batch of single-voxel edits (noted in §19.11) | Fixed 2026-10-20: an edit with no radius goes by the world box of the voxels it changed in the chunk (`UVoxelEditManager::GetBroadcastEditBounds` through `WorldOrigin`, `ChunkSize` and `VoxelSize`, `UVCMovementComponent::GetEditedVoxelWorldBox`; the same box on a planet, the whole chunk when no bounds are given) against the capsule's half height plus the brush test's 200 uu margin; brushes keep their sphere. `VoxelCharacter.Edit.SystemEditArmsEmbedCheck` on a plane and a planet: a fill at the pawn arms it, fills far off in the pawn's chunk or another and a brush far off do not | — |
 | G56 | Every edit re-meshed the edited chunk's six face neighbours (render) "so they re-extract boundary data", a rule from before seam ownership: a chunk mesh reads only its own voxels and edits, the edited chunk's seams restale with its own re-mesh, and `MarkChunkDirty` on a neighbour restaled all 26 of its seams, so an edit of one chunk meshed 6 more chunks and ran 25 to 75 more seam jobs for the same geometry (left in G33, §19.11) | Fixed 2026-10-20 (§19.13): the face neighbours' re-mesh removed (`voxel.Edit.NeighbourRemesh` 0, 1 = the rule before; their collision re-cook stays, and `voxel.Scatter.EditReaders 0` keeps it); an edit of one chunk meshes 1 chunk and runs 6 to 26 seam jobs against 7 and 31 to 101; geometry, voxel shape and water flags the same as under the rule before after every edit (`Streaming.EditRemesh.Plane`, `.Planet`: DC, MC and cubic, LOD, water) | — |
 | G57 | An edit that reached a chunk on its way to a mesh (queued, or on a worker) restaled none of its seams, and a mesh already on a worker landed without the edit: `MarkChunkDirty` acted only on a loaded chunk, so the seams, and the interior too in the second case, stayed stale until the chunk re-meshed for another reason. It follows any edit made within a mesh's round trip of another on the same chunk: a held brush, water propagation's batches, a stamp over chunks still loading. The face neighbours' re-mesh restaled the seams only when the neighbours were loaded at the second edit (found in G56, §19.13) | Fixed 2026-10-20 (§19.13): `MarkChunkDirty` restales the seams of a chunk that is queued or on a worker, and one on a worker re-meshes when its mesh lands (`FVoxelChunkState::bRemeshAfterMeshing`, `RemeshIfEditedWhileMeshing`); `Streaming.EditRemesh.*` edits 4 and 5: 1 to 3 stale chunk meshes and seam buckets under both rules before, none after | — |
-| G58 | Edit-driven water propagation (`UVoxelWaterPropagation`) reads the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel dug under the sea still reads solid, so a dig never floods (a probe: 8 dug voxels next to water, none flooded, no seed logged), and its flood sets each voxel to the generated voxel plus the flag, which would undo an edit there (found in G56, §19.13) | Open: read the edit-merged voxels, and keep the edit's density and material when setting the flag | — |
+| G58 | Edit-driven water propagation (`UVoxelWaterPropagation`) reads the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel dug under the sea still reads solid, so a dig never floods (a probe: 8 dug voxels next to water, none flooded, no seed logged), and its flood sets each voxel to the generated voxel plus the flag, which would undo an edit there (found in G56, §19.13) | Fixed 2026-10-20 (§19.14): every read is edit-merged and the flag is set on the voxel as it is (a dig keeps its density and material); seeds come from the voxels each edit changed (`GetBroadcastEditBounds`), so system edits of single voxels seed too, a chunk without data yet scanning when it arrives; water-flagged air is the source (a fill keeps the flag but is solid); nothing is written into a chunk without data; the flood's own batches are not scanned; `Streaming.WaterPropagation.Plane`, `.Planet` | — |
+| G59 | The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a chunk's mesh completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only: water that an edit-driven flood put in the edit layer draws no tile (a channel dug inland from the shore below sea level is flagged but shows no water surface), and a flood does not continue into a chunk that loads after it (traced in G58, §19.14; before G58 no flood reached the edit layer) | Open | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -5236,7 +5237,7 @@ itself: `voxel.Edit.MeshWork reset`, the edit, 8 s, `voxel.Edit.MeshWork`.
 
 **Suites** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 558/558 headless and 558/558 in the editor with the GPU tests running, no device loss (G52's 556 and the two above); the 108 GPU parity lines CRC-identical to G52's (no generation change).
 
-**G58 (found while checking water, not fixed).** Edit-driven water propagation (`UVoxelWaterPropagation`) reads voxels with
+**G58 (found while checking water; fixed in §19.14).** Edit-driven water propagation (`UVoxelWaterPropagation`) reads voxels with
 `UVoxelChunkManager::GetVoxelAtWorldPosition`, the generated voxels without the edit layer. Its seed scan looks for air
 next to water, and a voxel the player dug still reads solid there, so a dig under the sea never floods. A throwaway probe
 on the plane (a seabed 301 uu under the sea, a player brush): of 11 voxels dug to air, 8 touched water-flagged air, none had
@@ -5248,6 +5249,119 @@ material when setting the flag).
 **Left as they were:** the face neighbours' collision re-cook (G32's reads); `PropagateWaterFromNeighbors` pulling only
 when the chunk itself meshes, so a neighbour that arrives later does not push its flags into a chunk already meshed (not
 seen in the tests).
+
+### 19.14 G58: edit-driven water propagation reads the edit-merged voxels (2026-10-20)
+
+Bases: VoxelWorlds `29b9588`, UE5_PluginDev `bf9ec16` (G56 and G57 merged). Branches `fix/g58-water-propagation-edits`
+(VoxelWorlds) and `claude/serene-visvesvaraya-7331a4` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program
+Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8095), background throttling off.
+
+**What it did** (checked in the code). `UVoxelWaterPropagation` floods the voxels an edit opens to the sea: the chunk
+manager's edit handler calls `OnChunkEdited` for every broadcast, which looks for seeds, and `ProcessPropagation` (each
+tick) runs a bounded BFS from them.
+
+- **Its reads** were `UVoxelChunkManager::GetVoxelAtWorldPosition`, the generated voxels without the edit layer, in the
+  seed scan, in `CanReceiveWater` and for the voxel it wrote. A voxel the player dug still read solid, so it was never a
+  seed; nothing after the scan ran (the G56 probe: no seed logged).
+- **Its write** was `ApplyEdit(position, generated voxel + flag, Set)`: a flood reaching an edited voxel would have put
+  the generated voxel back, a dig's rock or a fill's air (the variant run below shows both).
+- **Its seeds** were scanned only for an edit with a radius, over the brush's sphere, once for every chunk the brush
+  reached (an eight-chunk brush eight times). Since G53 an operation of single-voxel edits (a POI's terraform, a dungeon
+  stamp, `voxel.Edit.System`), an undo, a redo, a clear and a load report radius 0, so none of them seeded. Any
+  water-flagged neighbour counted as water, a filled one too: `Add` keeps the voxel's metadata, so a fill in the sea is
+  solid with the sea's flag.
+- **Unloaded chunks** read as air through the same call, so a flood that reached one would have written air with the
+  flag into it, carving its ground away when it loaded.
+- **Its keys** were world positions floored without `WorldOrigin` (the chunk manager and the edit manager subtract it),
+  and the chunks it then marked dirty (`MarkChunkDirty` of `WorldToChunk` without the origin) were shifted by the origin
+  on a world like the demo's; the batch's own broadcast marked the right ones anyway. Its sea test took the cell's
+  centre, where generation's fill pass takes the voxel's sample point (the cell's min corner).
+- **Its batches** set the edit manager's source to System and left it there (an editor's or test actor's brush that
+  sets none was broadcast as System afterwards), and came back to its own `OnChunkEdited` (radius 0 since G53; before
+  it, a brush's radius, so each batch rescanned the old dig).
+
+**What changed** (VoxelStreaming).
+
+- **Reads.** Every read is edit-merged (`GetEditMergedVoxelAtWorldPosition`), and the flag is set on the voxel as it is:
+  `Set` of the merged voxel plus the flag, so a dig keeps its density and material and no voxel goes back to its
+  generated value.
+- **Seeds** come from the voxels each edit changed in the chunk (`UVoxelEditManager::GetBroadcastEditBounds`, G33), so
+  every edit seeds alike: a brush, an operation of single-voxel edits, an undo, a clear, a load. The box is clipped to
+  below the sea (the plane cuts its top, a box wholly outside the sphere is dropped), kept per chunk (a chunk broadcast
+  again joins its box) and scanned at the start of the next `ProcessPropagation`, within `MaxScanReadsPerFrame` reads
+  (32,768). A seed is a changed voxel that can take water with a water-flagged **air** neighbour.
+- **A chunk's water must be in place.** `UVoxelChunkManager::IsChunkWaterSettled` (`FVoxelChunkState::bWaterSettled`):
+  the chunk has voxel data and has submitted a mesh since it arrived, which pulls its water flags across its faces
+  (`PropagateWaterFromNeighbors`); a chunk wholly under a heightmap sea has no flags before that. An edit of a chunk
+  that is not settled (most system edits land before their chunks load, a save's edits before any) keeps its box until
+  it is (`UVoxelWaterPropagation::OnChunkWaterSettled`, called at that mesh submit). The flood reads and writes only
+  settled chunks: it stops at one that is not.
+- **Its own batches** are not scanned (their voxels took the flag, their neighbours are its frontier; a seed restarts the
+  flood's budget, so a capped flood would never stop). It restores the edit source the caller had, waits while another
+  edit operation is open, and keys voxels by their index relative to `WorldOrigin` (the explicit `MarkChunkDirty`
+  removed); below the sea is the generation's test.
+- **Tools.** `UVoxelWaterPropagation::GetStats` (scans queued and deferred, reads, seeds, floods, flooded voxels, refused
+  edits, cap hits), the log line `Water propagation done: N voxels flooded from M seeds` at a flood's end,
+  `UVoxelChunkManager::GetWaterPropagation`.
+
+**Tests** (`VoxelStreaming/Tests/VoxelWaterPropagationTests.cpp`, new): `VoxelWorlds.Streaming.WaterPropagation.Plane`
+and `.Planet`. A real chunk manager streams a small world with a sea (voxel 50, chunk 32, view distance 3,000; the
+plane's sea at Z 0 with `WorldOrigin` (3112.5, -1937.5, 0), a quarter voxel off the voxel grid in X and Y; the planet
+of radius 20,000 with its sea at the datum). Three seabed sites 5 to 10 voxels under the sea where the ground is within
+75 uu of the site's altitude 150 uu either way, and one 12,000 uu off:
+
+- **A.** A player dig on the seabed (sphere brush, radius 2.5 voxels, `Sharp`: its change falls off as (1 - t)², so it
+  digs the rock near its centre to air with densities of its own).
+- **B.** A system edit digs a pocket 8 voxels under the seabed (radius 2.2 voxels: air of density 40, dirt), another
+  fills its bottom (sandstone, 220); the sealed pocket must stay dry. A system shaft (single-voxel edits, radius 0) from
+  the pocket into the sea then opens it.
+- **C.** A player fill (`Smooth`, radius 7: the sea within about 3.5 voxels of its centre turns solid, keeping the flag)
+  plugs the sea over the seabed, and a system edit digs a cavity across the seabed into the plug's core, touching the
+  plug's flagged voxels.
+- **D.** A system dig of a seabed chunk 12,000 uu away that has no voxel data yet (a POI's terraform at stream-in); the
+  viewer then moves there.
+
+Around each site no voxel may change but by taking the flag, and only air below the sea may take it. The rule before and
+a variant were run as throwaway builds of the same tests: "before" emulates the old rule (generated reads and write,
+brush-only seeding, any flagged neighbour as water); the variant has the new reads and seeding with the old write
+(generated voxel + flag) and the old water test (any flagged neighbour).
+
+| Case (plane / planet) | Before | Variant: new reads and seeds, old write and water test | After |
+|------|------|------|------|
+| A: 6 / 7 rock voxels dug to air (5 / 6 with a density above 0) | 0 seeds, 0 flooded | 6 / 7 seeds; every one written back as generated rock with the flag | all flooded, density and material kept (6 / 7 seeds, 143 / 132 reads) |
+| B: pocket 44 voxels (32 air, 12 fill), shaft 36 / 20 | sealed pocket dry; the shaft (radius 0) not scanned: 0 flooded | pocket refilled with rock (0 of 32 as air), 12 / 6 shaft voxels as air; 60 / 48 voxels' density or material changed | sealed pocket dry, no seed; then pocket and shaft all flooded (68 / 52), the fill solid and dry |
+| C: plug 156 / 152 voxels solid with the flag, cavity 8 / 7 voxels | dry (radius 0, not scanned) | the cavity flooded through the plug (1 / 4 seeds), every voxel written back as generated (rock, or the sea the plug filled) | dry, no seed, nothing changed |
+| D: dig 36 / 37 voxels (23 / 28 rock) before the chunk loaded | not scanned (radius 0), 0 flooded | 17 / 13 seeds; all written back as generated | scan deferred, then all flooded with the dig's density and material (17 / 13 seeds) |
+
+D failed on the plane in a first build, which deferred the scan only until the chunk's voxel data arrived: a chunk wholly
+under the plane's sea gets its water flags at its first mesh, after that scan had found no water. Hence
+`IsChunkWaterSettled`.
+
+**Live** (`VoxelDemo`, a fresh PIE: sea at Z -1,500, chunks of 64 voxels of 75 uu). Over the lake by the spawn the
+seabed lies at Z -3,615. `voxel.Edit.System 3600 -4875 -3615 300 dig` (a system brush, `Sharp`) touched 179 voxels; in
+the next tick the propagation seeded 13 of those it dug to air and flooded 14 (`Water propagation done: 14 voxels flooded
+from 13 seeds`).
+
+**Suites** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 561/561 headless and 561/561
+in the editor with the GPU tests running, no device loss (G56's 558, G55's `VoxelCharacter.Edit.SystemEditArmsEmbedCheck`
+merged since, and the two above); the 108 GPU parity lines identical to G56's (no generation change).
+
+**G59 (traced, not fixed).** The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a chunk's mesh
+completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only. A flood's water lives in the
+edit layer, so it draws no tile: a channel dug inland from the shore below sea level is flagged but shows no water
+surface (swimming there goes by the analytic sea, as before). And a flood that stops at a chunk not settled does not
+continue into it when it loads. Before G58 no flood reached the edit layer, so neither showed.
+
+**Left as they were:**
+
+- A flood's batch is an edit like any other: the chunk manager re-meshes the chunks it touched, restales their seams,
+  re-cooks their collision and re-extracts their scatter (the underwater class reads the flag; the meshes and the
+  collision do not). A dig under the open sea floods in one batch.
+- The batches enter the undo history (the demo test actor's Z): undo restores a Set's previous `NewData`, and for a voxel
+  a brush dug (a relative edit, which keeps none) that removes the edit, so the first Z after a dig under the sea undoes
+  the flood and, at the voxels it reached, the dig.
+- The cave flag: generation keeps cave air dry under the sea; a dig that opens a cave to the sea floods it, up to
+  `MaxPropagationVoxels` (8,192).
 
 ## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17, done 2026-10-19)
 
