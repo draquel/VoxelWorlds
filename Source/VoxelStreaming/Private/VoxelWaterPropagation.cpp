@@ -295,14 +295,16 @@ int32 UVoxelWaterPropagation::ScanPendingEdits(int32 MaxReads)
 			PendingScanOrder.RemoveAt(0);
 		}
 	}
-	SeedsFound += ScanPendingFaces(MaxReads, Reads);
+	const int32 FaceSeedsFound = ScanPendingFaces(MaxReads, Reads);
+	SeedsFound += FaceSeedsFound;
 	Stats.ScanReads += Reads;
 
 	if (SeedsFound > 0)
 	{
 		// A new seed restarts the flood's budget, as an edit did before.
 		TotalPropagated = 0;
-		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation seeded with %d voxels"), SeedsFound);
+		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation seeded with %d voxels (%d on the faces of chunks that arrived)"),
+			SeedsFound, FaceSeedsFound);
 	}
 	return SeedsFound;
 }
