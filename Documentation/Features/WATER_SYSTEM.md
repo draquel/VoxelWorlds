@@ -146,6 +146,11 @@ When terrain edits (dig, subtract) expose air adjacent to existing water, this s
 - Bounded by `MaxVoxelsPerFrame` (default 512) for smooth "water filling" effect
 - Total limit of `MaxPropagationVoxels` (default 8192) per flood event
 
+**Known issue (world modes review G58, open).** Both steps read voxels with `UVoxelChunkManager::GetVoxelAtWorldPosition`,
+the generated voxels without the edit layer. A voxel the player dug still reads solid there, so a dig under the sea finds
+no seed and never floods; and a flood would set each voxel to its generated value plus the flag, undoing an edit there.
+Only edits with a radius (brushes) are scanned for seeds; operations of single-voxel edits report none.
+
 ### On a Planet (spherical SP-B8)
 
 The three steps above test "below the sea" with `FVoxelSeaSurface` (VoxelCore): the `WaterLevel` Z plane in

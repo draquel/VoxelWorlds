@@ -48,6 +48,17 @@ Until 2026-10-20 the centre and radius stayed set after a brush, so every later 
 the last brush's (G53): navigation invalidated around the old dig instead of the terraform, and collision's edge and
 corner re-cook (G32) judged the wrong sphere. Tests: `VoxelWorlds.Scatter.EditReaders.Rule`.
 
+### What an edit re-meshes
+
+The chunk manager's handler for `OnChunkEdited` re-meshes the chunk the edit changed and restales its seams
+(`MarkChunkDirty`), and re-cooks the collision of the chunk and its face neighbours (a cook reads its 26 neighbours'
+voxels). A chunk mesh is built from the chunk's own voxels and edit layer, and a seam from its participants', so nothing
+else needs a re-mesh. Until 2026-10-20 the handler also re-meshed the six face neighbours, which rebuilt the same meshes
+and all their seams (world modes review G56; `voxel.Edit.NeighbourRemesh 1` restores it for A/B). An edit that reaches a
+chunk already on its way to a mesh restales its seams too, and if that mesh is on a worker (built before the edit) the
+chunk re-meshes when it lands (G57; before, both stayed stale). `voxel.Edit.MeshWork [reset]` logs the meshing work since
+a reset. Tests: `VoxelWorlds.Streaming.EditRemesh.Plane`, `.Planet`.
+
 ## Original Design Specification
 
 ## Edit Operations
