@@ -708,11 +708,20 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 	for (const FPlanetCase& Case : GetPlanetCases())
 	{
 		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
+		{
+			// The default (PlanetVoxelCutoverAltitude 0): three view distances.
+			FProbeStrategy Default;
+			Default.Initialize(Config);
+			TestTrue(*FString::Printf(TEXT("%s: the cut-over defaults to three view distances"), Case.Name),
+				FMath::IsNearlyEqual(Default.GetPlanetCutoverAltitude(), FDistanceBandLODStrategy::DefaultCutoverViewDistances * ViewDistance, 1.0));
+		}
+		// The checks below at the altitudes of a cut-over at the view distance.
+		Config->PlanetVoxelCutoverAltitude = ViewDistance;
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
 		const double Cutover = Strategy.GetPlanetCutoverAltitude();
-		TestTrue(*FString::Printf(TEXT("%s: the cut-over defaults to the view distance"), Case.Name), FMath::IsNearlyEqual(Cutover, static_cast<double>(ViewDistance), 1.0));
+		TestTrue(*FString::Printf(TEXT("%s: the configured cut-over"), Case.Name), FMath::IsNearlyEqual(Cutover, static_cast<double>(ViewDistance), 1.0));
 
 		for (const FSite& Site : GetSites())
 		{
@@ -780,6 +789,7 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 			}
 			UVoxelWorldConfiguration* SeaConfig = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
 			SeaConfig->bEnableWaterLevel = true;
+			SeaConfig->PlanetVoxelCutoverAltitude = ViewDistance;
 			SeaConfig->WaterRadius = static_cast<float>(Case.Radius + SeabedAltitude + 1.5 * Cutover);
 			FProbeStrategy SeaStrategy;
 			SeaStrategy.Initialize(SeaConfig);

@@ -39,7 +39,7 @@ static TAutoConsoleVariable<float> CVarPlanetVoxelCutover(
 	-1.0f,
 	TEXT("Planets: the voxel cut-over altitude (uu over the terrain or sea under the streaming viewer). Above it the voxel window\n")
 	TEXT("unloads and the far field alone draws the planet; below 0.85 of it the window streams back. -1 = the configuration's\n")
-	TEXT("PlanetVoxelCutoverAltitude (0 there: the view distance), 0 = never (the window keeps its ground disk at any altitude)."),
+	TEXT("PlanetVoxelCutoverAltitude (0 there: three times the view distance), 0 = never (the window keeps its ground disk at any altitude)."),
 	ECVF_Default);
 
 FDistanceBandLODStrategy::FDistanceBandLODStrategy()
@@ -225,7 +225,8 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 			NearWindowLayers, (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f);
 
 		// The voxel cut-over (WM-BP10): over the surface under the viewer, the sea where it lies above the terrain.
-		PlanetCutoverConfigured = WorldConfig->PlanetVoxelCutoverAltitude > 0.0f ? WorldConfig->PlanetVoxelCutoverAltitude : MaxViewDistance;
+		PlanetCutoverConfigured = WorldConfig->PlanetVoxelCutoverAltitude > 0.0f ? WorldConfig->PlanetVoxelCutoverAltitude
+			: DefaultCutoverViewDistances * MaxViewDistance;
 		PlanetSeaRadius = WorldConfig->bEnableWaterLevel ? static_cast<double>(WorldConfig->WaterRadius) : 0.0;
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Voxel cut-over: %.0f uu over the surface under the viewer (resumes below %.0f)%s"),
 			GetPlanetCutoverAltitude(), GetPlanetCutoverAltitude() * CutoverResumeFraction,

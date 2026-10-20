@@ -251,9 +251,40 @@ the tile store and its budgets, the queue and the save blobs therefore work unch
 - **Saves**: the same blobs with atlas keys and version-2 overlays; `PlanetGenerationVersion` (3 since D13, 5
   since spherical Phase 6's P6.2) refuses older planet saves.
 
+**At scale** (spherical Phase 6, WM-BP11; WORLD_MODES_REVIEW_PLAN.md §20.6). A 1,000 km planet's atlas is 32,725 tiles a
+face edge, 6.4 billion tiles, so the map works on what is near the player and draws the rest coarsely:
+
+- **The zoom range from R** (`UVCWorldMapWidget::GetPlanetZoomRange`, `GetZoomRange`, `SetZoom`): zoomed out to the
+  whole globe with a tenth of the view to spare at any radius (`MinZoom` 0.25 showed it only up to R ≈ 5 × 10⁵: 0.0276 on
+  a 50 km planet, 0.00138 on a 1,000 km one), zoomed in to `MaxZoom` as before.
+- **The globe albedo** (`FVoxelMapGlobeAlbedo`, `UVoxelMapSubsystem::GetGlobeAlbedo`): a cube-sphere grid of at most
+  `GlobeAlbedoCellsPerEdge` (256) cells a face edge, never more than the tile grid, each the colour of the surface at
+  its centre as a tile pixel draws it (the sea's blue by depth; land its surface material shaded by elevation and a
+  hillshade from the neighbouring cells), sampled from the far field's analytic surface (`FVoxelFarFieldSurface`) on a
+  worker thread when first asked for (`OnMapTileReady` fires with (-1, -1) when it lands). Zoomed out until a texel spans
+  more than two tiles (`UVCWorldMapWidget::GlobeAlbedoTexelsPerTile`) the world map draws it (`FVCPlanetMapSampler::
+  bUseGlobeAlbedo`) instead of one tile pixel per texel, asking for no tile image; its fog of war is the albedo cells
+  holding an explored tile (`IsGlobeCellExplored`, refreshed when the exploration changes, at most once a second past
+  100,000 explored tiles).
+- **`voxel.Map.ExploreAll`** counts in `int64` (6 N² overflowed `int32` from about 50 million tiles) and explores at most
+  `voxel.Map.ExploreAllMaxTiles` (1,000,000) tiles, nearest the pawn first (`GatherWithinAngle`'s flood fill); it queues
+  the images of the nearest `PlanetExploreAllImageTiles` (65,536), the rest drawn when the map shows them. The small
+  planet (40,000 tiles) is explored whole as before.
+- **Markers on a zoomed-out globe** (VoxelWorldPOI, `UPOIMapMarkerSubsystem::GetPlanetMarkersNear`): the globe asks for
+  the markers of everything it shows, and on a big planet that was every POI cell of the planet (L's 36 million: the map
+  held the game thread for about 1 min 45 s, G50). The far markers now come from at most `PlanetMarkerMaxCells` (20,000)
+  cells around the view's centre, and the last cap's POIs are reused by the half-second refresh; the map draws at most
+  `MaxMarkers` (64) anyway. The small planet's few hundred cells are always whole.
+- **Redraws at the albedo's zoom** (`UVCWorldMapWidget`): the tile images do not show there, so a tile's arrival redraws
+  the globe at most every 2 s (for the exploration it carries), and only the albedo's own arrival at once; a redraw per
+  arrival held the open map at 6.5 FPS after an `ExploreAll` queued 65,536 images (G51).
+- `vox.Map [zoom|min|0]` (the game module, QA) opens the world map at a zoom.
+
 Tests: `VoxelWorlds.Map.Planet.TileKeys`, `.TileMatchesGeneration` (1,000 pixels at five sites, each the generated
-surface voxel's material or the sea), `.Exploration`, `.EditOverlay`; `VoxelCharacter.Planet.MinimapFrame`,
-`.WorldMapProjection`, `.MapSampler`.
+surface voxel's material or the sea), `.Exploration`, `.EditOverlay`, `.ZoomAtScale` (the albedo against the analytic
+surface cell by cell, its fog of war, `ExploreAll` capped on a planet of 5.8 million tiles); `VoxelCharacter.Planet.MinimapFrame`,
+`.WorldMapProjection`, `.MapSampler`, `.MapZoomAtScale` (the zoom range on the 2.5, 50 and 1,000 km planets; the
+globe zoomed out drawn from the albedo).
 
 ## File Listing
 

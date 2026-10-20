@@ -66,7 +66,11 @@ the analytic surface as the fallback), its water the altitude plane `WaterRadius
 sphere's depth along local up), its output turned back into world points.
 
 - One height cache per region frame, dropped after a minute unused; chunk loads and edits invalidate by each cached
-  tile's 3D bounds.
+  tile's 3D bounds. An edit that gives no centre (a system edit: a dungeon stamp, a region edit, an edit load broadcasts
+  the zero vector and radius 0) invalidates the edited chunk's bounds, on every world mode; a box's corners deep inside
+  the planet project into no frame, and a rectangle larger than the cache visits only the cached tiles in it (spherical
+  Phase 6, G47: the planet's centre projected into each region's frame spanned the planet, and a stamp on the 1,000 km
+  test planet held the game thread for minutes).
 - Blocked boxes are 3D on a planet (a cell is blocked when its surface point is inside the box), temporary blocks 3D
   spheres; `ProjectToSurface` and `IsWalkableAt` work along local up; the debug grid and routes are drawn along it.
 - Heightmap worlds keep the old samplers, cache and blocks (`Navigation.Plane.SubsystemUnchanged`: the subsystem over a

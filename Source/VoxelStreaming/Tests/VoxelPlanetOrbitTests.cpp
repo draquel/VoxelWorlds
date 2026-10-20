@@ -119,7 +119,8 @@ namespace VoxelPlanetOrbitTestUtils
 			Config->NoiseParams.Seed = 9001;
 			Config->NoiseParams.Frequency = 0.0004f;
 			Config->NoiseParams.Octaves = 3;
-			// The cut-over at the view distance (PlanetVoxelCutoverAltitude 0).
+			// The cut-over at the view distance (the default is three: PlanetVoxelCutoverAltitude 0).
+			Config->PlanetVoxelCutoverAltitude = ViewDistance;
 			Owner = World->SpawnActor<AActor>();
 			Manager = NewObject<UVoxelChunkManager>(Owner);
 			Manager->RegisterComponent();
@@ -202,7 +203,7 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 	const double SurfaceRadius = FMath::Max(static_cast<double>(Radius) + Ground.Altitude, static_cast<double>(W.Config->WaterRadius));
 	auto At = [&Up, SurfaceRadius](double OverSurface) { return Up * (SurfaceRadius + OverSurface); };
 	const double Cutover = W.Manager->GetLODStrategy()->GetCutoverAltitude();
-	TestTrue(TEXT("The cut-over defaults to the view distance"), FMath::IsNearlyEqual(Cutover, static_cast<double>(ViewDistance), 1.0));
+	TestTrue(TEXT("The configured cut-over (the view distance)"), FMath::IsNearlyEqual(Cutover, static_cast<double>(ViewDistance), 1.0));
 
 	// On the ground: the window loads; an edit near the ground.
 	TestTrue(TEXT("Settled on the ground"), W.SettleAt(At(300.0)));

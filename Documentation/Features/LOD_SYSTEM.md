@@ -716,6 +716,45 @@ primitives, and the voxel window keeps its size.
 `voxel.World.FarField 0` drops the far field (the ocean shell draws the sea, as before P6.4); `voxel.World.FarFieldStats`,
 `vox.Planet` and the bench's `FarFieldMs`, `FarFieldPatchN`, `FarFieldMB` and `FarFieldBuiltN` report it.
 
+### Orbit and Back: the Voxel Cut-Over (Spherical Planet)
+
+From high up the voxel window adds little the far field does not draw: its ground disk is a narrow cone under the
+viewer, all of it in the coarsest band. So a planet's window empties above a cut-over altitude and streams back on the
+way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md §20.6):
+
+- **The cut-over** (`FDistanceBandLODStrategy`, `IVoxelLODStrategy::IsWindowSuspended`): decided in `Update` from the
+  streaming viewer's altitude over the surface under it, the analytic terrain along its direction or the sea where that
+  is higher (`GetViewerSurfaceAltitude`: a flyer skimming a deep sea keeps its window). Above
+  `UVoxelWorldConfiguration::PlanetVoxelCutoverAltitude` (0: three view distances, `DefaultCutoverViewDistances`:
+  120,000 uu on the review planets) the window is suspended; it resumes below `CutoverResumeFraction` (0.85) of it, so a flyer hovering at the cut-over does
+  not churn. `voxel.World.VoxelCutover` overrides it (-1: the configuration's; 0: never, the window keeping its ground
+  disk at any altitude as WM-BP8 made it).
+- **Suspended**, `GetVisibleChunks` returns nothing, `GetChunksToUnload` every loaded chunk and the balanced LOD cache is
+  empty; the chunk manager evicts its generation queue, stale-culls whatever finishes generating, and neither pins nor
+  keeps edited chunks (their edits stay in the edit layers and load with the window when it resumes). The window
+  unloads at the configured unload rate (1,100 chunks in a few seconds).
+- **Why three view distances.** At one, a 5,000 uu/s descent onto the 50 km test planet resumed the window only 10 s
+  before landing (the prefetch's lead is at most half the altitude) and touched down with half of its 1,300 chunks
+  loaded, 5 s of catch-up after landing against 0.36 s with the window kept; and a viewer 400 m up already saw only the
+  far field. Kept up to three view distances, the window costs little (on M about 1,500 chunks and 510 MB climbing to
+  60,000, within D3 and the same frame time) and a descent has about 20 s to stream it back.
+- **The far field** cuts its hole while chunks are held; once the window holds none, it refines by its screen error alone
+  (`BandRadius` 0: no band patches forced for an empty window). When the window resumes the band returns, its patches
+  build while their parents draw, and the chunks fade in over them (`voxel.MeshFade.Appear`, measured from the camera).
+- **The descent prefetch** (`UVoxelChunkManager::ApplyDescentPrefetch`): under a camera descending faster than
+  `voxel.Stream.DescentMinSpeed` (1,500 uu/s) the streaming viewer goes ahead of it along local down by what it covers
+  in `voxel.Stream.DescentLead` seconds (3), at most half its altitude and never within two chunks of the surface
+  (`ComputeDescentLead`; the camera's radial speed smoothed, a jump of ten chunks in a frame treated as a teleport). The
+  window resumes and refines its LOD that much earlier; the cut-over, the LOD bands and the window are the streaming
+  viewer's, the far field's error and horizon and the appearance fade the camera's. A fast descent that stops above the
+  cut-over resumes the window for a moment and suspends it again as the lead decays (G49: on L 0.7 s and 56 chunks).
+- **The camera is the streaming viewer**, so a camera that leaves the pawn (the orbit camera, a debug camera) takes the
+  window with it, as it always has: above the cut-over the ground under a pawn left behind unloads. `vox.Orbit` holds the
+  pawn (a swimmer too since G48) and settles it on release; survey cameras freeze streaming.
+
+`vox.Planet` reports the window's state, the cut-over and the lead; the bench adds `Suspended`, `LeadUU` and `SurfAlt`
+columns and a `voxelCutover` summary, and a descent route (`descend=Lat:Lon:Alt`).
+
 ### Integration with Streaming
 
 Load and unload use the same pieces:

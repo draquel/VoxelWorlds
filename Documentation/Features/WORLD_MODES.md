@@ -535,9 +535,9 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
 - Any world requiring true spherical geometry
 
 ### Current Limitations
-- **Small planets** (SD1): past the planet-relative distance and direction the GPU works in single precision (its
-  cave and ore noise at absolute positions), as the CPU's noise does; parity is measured on a 250,000 uu planet.
-  Large planets need SP-H1
+- **Planets up to about 1,000 km** (D17, revising SD1): since spherical Phase 6's P6.2 the CPU planet math is in double,
+  the planet noise a hashed lattice sampled split-origin and the GPU branch in the chunk's frame (SP-H1, review plan
+  §20.3); see "The radius ceiling" above
 - Both dungeon representations play on a planet as on the plane (voxel-carved ones since G24's fix, review plan §19.8).
   A voxel-carved dungeon's walls on a planet step by up to √3/2 voxel (the stamp writes air and solid, not graded
   densities)
@@ -546,8 +546,15 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
   8 uu) the far field draws the sea over the cells whose analytic terrain lies near or under it instead
 - The sun has no axial tilt: the poles sit in a low sun all day (decision D12)
 - The far field (spherical Phase 6, WM-BP9, [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") draws the planet beyond the
-  voxel window, to the horizon and from altitude; voxels unloading above a cut-over altitude and landing from orbit are
-  WM-BP10's (P6.5). The far field shows neither caves, overhangs nor edits beyond the window
+  voxel window, to the horizon and from altitude; above the voxel cut-over (`PlanetVoxelCutoverAltitude`, three times the view
+  distance by default) the window unloads and the far field alone draws the planet, and on the way down the window
+  streams back ahead of a descending camera and fades in (WM-BP10, "Orbit and Back" in the same doc). The far field
+  shows neither caves, overhangs nor edits beyond the window, so they disappear above the cut-over and come back with
+  the window
+- Spawning and landing at scale (WM-BP10, WM-BP11): the spawn searches the whole planet for land when there is none near
+  its start (`FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`: the 1,000 km test planet's pole is open sea for
+  4.7 km of arc, past the old 50,000 uu search), and spawns at the sea's surface, swimming, on a planet with no land; the
+  debug settle (`vox.TPLatLon`, `vox.Orbit 0`) with no land within its search settles onto the sea's surface
 - Radius: see "The radius ceiling" above
 
 ---

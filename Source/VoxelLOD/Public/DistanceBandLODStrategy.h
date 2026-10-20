@@ -171,6 +171,13 @@ public:
 	static constexpr double CutoverResumeFraction = 0.85;
 
 	/**
+	 * The default cut-over (PlanetVoxelCutoverAltitude 0) in view distances. At one, a 5,000 uu/s descent onto the 50 km
+	 * test planet resumed the window 10 s before landing and touched down with half of it loaded (the far field drawing
+	 * the rest; P6.5's benches, WORLD_MODES_REVIEW_PLAN.md §20.6); and a viewer 400 m up already saw only the far field.
+	 */
+	static constexpr double DefaultCutoverViewDistances = 3.0;
+
+	/**
 	 * Pure: the window's cut-over state after a viewer altitude.
 	 * @param bWasSuspended The state before
 	 * @param AltitudeOverSurface The viewer's altitude over the surface under it (the terrain, or the sea where higher)
@@ -181,7 +188,7 @@ public:
 
 	/**
 	 * The cut-over altitude in force (uu over the surface; 0 = never): voxel.World.VoxelCutover when set (>= 0), else the
-	 * configuration's PlanetVoxelCutoverAltitude, else the view distance. 0 on heightmap worlds.
+	 * configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances. 0 on heightmap worlds.
 	 */
 	double GetPlanetCutoverAltitude() const;
 
@@ -710,7 +717,7 @@ protected:
 	FVector GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
 	double GroundRadiusCached = 0.0;
 
-	/** The configuration's cut-over altitude (PlanetVoxelCutoverAltitude, else the view distance); 0 off a planet. */
+	/** The configuration's cut-over altitude (PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances); 0 off a planet. */
 	double PlanetCutoverConfigured = 0.0;
 
 	/** The sea's radius (0 without a sea): the cut-over is measured over the sea where it lies above the terrain. */
