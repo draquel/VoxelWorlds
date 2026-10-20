@@ -37,6 +37,17 @@ Until 2026-10-14 a relative edit on a Set voxel replaced the Set, so the voxel f
 the delta; one dig under a pad standing over air removed the aimed voxel and its four face neighbours, which had
 only received the brush falloff (WORLD_MODES_REVIEW_PLAN.md G2). Tests: `VoxelWorlds.Edit.Composition.*`.
 
+### What `OnChunkEdited` tells its listeners
+
+`OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius)` fires once per edited chunk when an operation ends (and for
+an undo, redo, clear or load). The centre and radius are the operation's brush (`ApplyBrushEdit`); an operation of
+single-voxel edits (a POI's terraform, a dungeon stamp, water propagation), an undo, a redo, a clear and a load report
+the zero vector and 0. While it is broadcast, `GetBroadcastEditBounds` gives the chunk-local bounds of the voxels the
+edit changed in that chunk, so a listener can tell which layers it reached (scatter's readers, world modes review G33).
+Until 2026-10-20 the centre and radius stayed set after a brush, so every later operation of single-voxel edits reported
+the last brush's (G53): navigation invalidated around the old dig instead of the terraform, and collision's edge and
+corner re-cook (G32) judged the wrong sphere. Tests: `VoxelWorlds.Scatter.EditReaders.Rule`.
+
 ## Original Design Specification
 
 ## Edit Operations
