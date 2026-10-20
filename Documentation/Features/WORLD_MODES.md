@@ -520,7 +520,8 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
   the ground (the arc between the two directions from the centre at the radius of the terrain under the viewer), so a
   climbing viewer keeps its ground disk; LOD bands stay 3D from the viewer.
 - **The surface slab**: a chunk loads when its radial extent meets the analytic surface's altitude range over the
-  cube-sphere cells its corners span, ± 1.5 chunks; near the viewer also the viewer's altitude ± 2 chunks.
+  cube-sphere cells its corners span, ± 1.5 chunks; near the viewer also the viewer's altitude ± 2 chunks, up to the
+  top of the slab there or the sea's surface and none for a viewer above them (G52: above them that band is air).
 - **The shell**: the terrain's real bounds (`GetDisplacementBounds` within `[R - MaxTerrainDepth, R + MaxTerrainHeight]`)
   widened by half a chunk; nothing outside it loads. With `bFarBandSurfaceSlabCulling` off the window is the whole shell
   (until WM-BP8 the window was each column's crossing of the shell within the viewer's Z ± the view distance,
