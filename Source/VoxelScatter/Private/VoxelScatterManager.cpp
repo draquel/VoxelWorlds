@@ -17,6 +17,7 @@
 #include "DrawDebugHelpers.h"
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
+#include "Async/ParallelFor.h"
 #include "Engine/World.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -348,6 +349,8 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 
 	// Reset statistics
 	TotalChunksProcessed = 0;
+	TotalExtractionsLaunched = 0;
+	TotalRegenerations = 0;
 	TotalSurfacePointsExtracted = 0;
 	TotalSpawnPointsGenerated = 0;
 
@@ -784,6 +787,7 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 	{
 		return;
 	}
+	++TotalRegenerations;
 
 	// Remove from pending queue if present
 	if (PendingQueueSet.Remove(ChunkCoord) > 0)
@@ -2067,6 +2071,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 
 	// Mark as in-progress
 	AsyncScatterInProgress.Add(ChunkCoord);
+	++TotalExtractionsLaunched;
 
 	// Capture all values needed by the background thread (no UObject access)
 	const FVector ChunkWorldOrigin = GetChunkWorldOrigin(ChunkCoord);
@@ -2124,48 +2129,8 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 
 		// Extract surface points from voxel data (LOD-independent)
 		FChunkSurfaceData SurfaceData;
-		if (bCubicExtraction)
-		{
-			ExtractSurfacePointsCubic(
-				PendingData.ChunkVoxelData,
-				ChunkCoord,
-				ChunkWorldOrigin,
-				PendingData.ChunkSize,
-				PendingData.VoxelSize,
-				CapturedClearedVolumes,
-				ExtractionContext,
-				SurfaceData
-			);
-		}
-		else if (ExtractionContext.WorldMode && ExtractionContext.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
-		{
-			// A planet scans along local up (spherical SP-G1).
-			ExtractSurfacePointsAlongUp(
-				PendingData.ChunkVoxelData,
-				ChunkCoord,
-				ChunkWorldOrigin,
-				PendingData.ChunkSize,
-				PendingData.VoxelSize,
-				CapturedSurfacePointSpacing,
-				CapturedClearedVolumes,
-				ExtractionContext,
-				SurfaceData
-			);
-		}
-		else
-		{
-			ExtractSurfacePointsFromVoxelData(
-				PendingData.ChunkVoxelData,
-				ChunkCoord,
-				ChunkWorldOrigin,
-				PendingData.ChunkSize,
-				PendingData.VoxelSize,
-				CapturedSurfacePointSpacing,
-				CapturedClearedVolumes,
-				ExtractionContext,
-				SurfaceData
-			);
-		}
+		ExtractChunkSurfacePoints(bCubicExtraction, PendingData.ChunkVoxelData, ChunkCoord, ChunkWorldOrigin, PendingData.ChunkSize,
+			PendingData.VoxelSize, CapturedSurfacePointSpacing, CapturedClearedVolumes, ExtractionContext, SurfaceData);
 
 		if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
 		{
@@ -2236,6 +2201,13 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 
 		if (!Result.bSuccess)
 		{
+			// No surface. A chunk without a scatter cache renders nothing of its own, except after RegenerateChunkScatter,
+			// which keeps its instances until the re-extraction replaces them: an edit that left the chunk no surface
+			// replaces them with none (world modes review G54). A supplemental pass (a cache exists) keeps what it has.
+			if (!ScatterDataCache.Contains(Result.ChunkCoord) && ScatterRenderer && ScatterRenderer->IsInitialized())
+			{
+				ScatterRenderer->RemoveChunkInstances(Result.ChunkCoord);
+			}
 			continue;
 		}
 
@@ -2644,6 +2616,35 @@ void UVoxelScatterManager::ExtractHeightmapSurfacePoints(
 	else
 	{
 		ExtractSurfacePointsFromVoxelData(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, NoClearedVolumes,
+			Context, OutSurfaceData);
+	}
+}
+
+void UVoxelScatterManager::ExtractChunkSurfacePoints(
+	bool bCubic,
+	const TArray<FVoxelData>& VoxelData,
+	const FIntVector& ChunkCoord,
+	const FVector& ChunkWorldOrigin,
+	int32 ChunkSize,
+	float VoxelSize,
+	float PointSpacing,
+	const TArray<FClearedScatterVolume>& ClearedVolumes,
+	const FScatterExtractionContext& Context,
+	FChunkSurfaceData& OutSurfaceData)
+{
+	if (bCubic)
+	{
+		ExtractSurfacePointsCubic(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, ClearedVolumes, Context, OutSurfaceData);
+	}
+	else if (Context.WorldMode && Context.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
+	{
+		// A planet scans along local up (spherical SP-G1).
+		ExtractSurfacePointsAlongUp(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes, Context,
+			OutSurfaceData);
+	}
+	else
+	{
+		ExtractSurfacePointsFromVoxelData(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes,
 			Context, OutSurfaceData);
 	}
 }
@@ -3285,6 +3286,161 @@ TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlane
 		return nullptr;
 	}
 	return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(Touching));
+}
+
+void UVoxelScatterManager::GetEditReaderOffsets(bool bHeightmapReads, bool bPlanetReads, const FIntVector* EditMin,
+	TArray<FIntVector>& OutOffsets)
+{
+	// A heightmap chunk reads the voxels over its top layer: the bottom layer (local Z 0) of the chunk above (G26).
+	if (bHeightmapReads && (!EditMin || EditMin->Z == 0))
+	{
+		OutOffsets.AddUnique(FIntVector(0, 0, -1));
+	}
+	// A planet chunk reads one layer past its +X, +Y and +Z faces, in the neighbours at the offsets D of
+	// GetPlanetShellNeighbours: the neighbour's local 0 on every axis where D is 1 (G29, G31). So the chunk at -D reads this
+	// one's voxels there.
+	if (bPlanetReads)
+	{
+		TArray<FIntVector> Shell;
+		GetPlanetShellNeighbours(Shell);
+		for (const FIntVector& D : Shell)
+		{
+			const bool bReached = !EditMin
+				|| ((D.X == 0 || EditMin->X == 0) && (D.Y == 0 || EditMin->Y == 0) && (D.Z == 0 || EditMin->Z == 0));
+			if (bReached)
+			{
+				OutOffsets.AddUnique(FIntVector::ZeroValue - D);
+			}
+		}
+	}
+}
+
+void UVoxelScatterManager::GetEditReaders(const FIntVector& EditedChunk, const FIntVector* EditMin, TArray<FIntVector>& OutChunks) const
+{
+	// The same conditions under which MakeExtractionContext reads a neighbour's edits.
+	const bool bEdits = static_cast<bool>(EditLayerSource) && WorldMode != nullptr;
+	const bool bHeightmapReads = bEdits && WorldMode->IsHeightmapBased();
+	const bool bPlanetReads = bEdits && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet;
+	TArray<FIntVector> Offsets;
+	GetEditReaderOffsets(bHeightmapReads, bPlanetReads, EditMin, Offsets);
+	for (const FIntVector& Offset : Offsets)
+	{
+		OutChunks.Add(EditedChunk + Offset);
+	}
+}
+
+UVoxelScatterManager::FFreshExtractionStats UVoxelScatterManager::CompareWithFreshExtraction(
+	TFunctionRef<TSharedPtr<const TArray<FVoxelData>>(const FIntVector&)> VoxelSource, TArray<FFreshExtractionComparison>& OutStale) const
+{
+	FFreshExtractionStats Stats;
+	if (!bIsInitialized || !Configuration)
+	{
+		return Stats;
+	}
+	const int32 CS = Configuration->ChunkSize;
+	const float VoxelSize = Configuration->VoxelSize;
+	const bool bCubic = Configuration->MeshingMode == EMeshingMode::Cubic;
+	const FVector WorldOrigin = Configuration->WorldOrigin;
+	const double ChunkWorldSize = Configuration->GetChunkWorldSize();
+
+	TArray<FIntVector> Chunks;
+	SurfaceDataCache.GetKeys(Chunks);
+	Chunks.Sort([](const FIntVector& A, const FIntVector& B)
+	{
+		return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
+	});
+
+	// One point as the comparison keys it: position to 0.1 uu, normal to 1e-4, material and classification.
+	auto PointKey = [](const FVoxelSurfacePoint& P) -> FString
+	{
+		return FString::Printf(TEXT("%lld %lld %lld %d %d %d %d %d %d"),
+			FMath::RoundToInt64(P.Position.X * 10.0), FMath::RoundToInt64(P.Position.Y * 10.0), FMath::RoundToInt64(P.Position.Z * 10.0),
+			FMath::RoundToInt32(P.Normal.X * 10000.0), FMath::RoundToInt32(P.Normal.Y * 10000.0), FMath::RoundToInt32(P.Normal.Z * 10000.0),
+			static_cast<int32>(P.MaterialID), P.bIsUnderground ? 1 : 0, P.bIsUnderwater ? 1 : 0);
+	};
+
+	// In batches, so only a batch's voxel snapshots and contexts are alive at once (a 64^3 chunk's voxels are a megabyte).
+	constexpr int32 BatchSize = 64;
+	struct FJob
+	{
+		FIntVector Coord = FIntVector::ZeroValue;
+		TSharedPtr<const TArray<FVoxelData>> Voxels;
+		FScatterExtractionContext Context;
+		FChunkSurfaceData Fresh;
+	};
+	const TArray<FClearedScatterVolume> NoClearedVolumes;
+	const float Spacing = SurfacePointSpacing;
+	for (int32 Start = 0; Start < Chunks.Num(); Start += BatchSize)
+	{
+		TArray<FJob> Jobs;
+		for (int32 I = Start; I < FMath::Min(Start + BatchSize, Chunks.Num()); ++I)
+		{
+			const FIntVector& Coord = Chunks[I];
+			if (PendingQueueSet.Contains(Coord) || AsyncScatterInProgress.Contains(Coord) || DeferredSupplementalPasses.Contains(Coord))
+			{
+				++Stats.SkippedPending;
+				continue;
+			}
+			if (ClearedVolumesPerChunk.Contains(Coord))
+			{
+				++Stats.SkippedCleared;
+				continue;
+			}
+			TSharedPtr<const TArray<FVoxelData>> Voxels = VoxelSource(Coord);
+			if (!Voxels.IsValid() || Voxels->Num() != CS * CS * CS)
+			{
+				++Stats.SkippedNoVoxels;
+				continue;
+			}
+			FJob& Job = Jobs.AddDefaulted_GetRef();
+			Job.Coord = Coord;
+			Job.Voxels = MoveTemp(Voxels);
+			Job.Context = MakeExtractionContext(Coord);
+		}
+
+		ParallelFor(Jobs.Num(), [&](int32 J)
+		{
+			FJob& Job = Jobs[J];
+			const FVector Origin = WorldOrigin + FVector(Job.Coord) * ChunkWorldSize;
+			ExtractChunkSurfacePoints(bCubic, *Job.Voxels, Job.Coord, Origin, CS, VoxelSize, Spacing, NoClearedVolumes, Job.Context, Job.Fresh);
+		});
+
+		for (const FJob& Job : Jobs)
+		{
+			++Stats.Compared;
+			const FChunkSurfaceData& Cached = SurfaceDataCache.FindChecked(Job.Coord);
+			// The fresh pass as the pipeline would cache it: no points when it found none (the cache then keeps no entry).
+			const bool bFreshValid = Job.Fresh.bIsValid && Job.Fresh.SurfacePoints.Num() > 0;
+			TMap<FString, int32> Count;
+			for (const FVoxelSurfacePoint& P : Cached.SurfacePoints)
+			{
+				++Count.FindOrAdd(PointKey(P));
+			}
+			if (bFreshValid)
+			{
+				for (const FVoxelSurfacePoint& P : Job.Fresh.SurfacePoints)
+				{
+					--Count.FindOrAdd(PointKey(P));
+				}
+			}
+			int32 Changed = 0;
+			for (const TPair<FString, int32>& Pair : Count)
+			{
+				Changed += FMath::Abs(Pair.Value);
+			}
+			if (Changed > 0)
+			{
+				++Stats.Stale;
+				FFreshExtractionComparison& Out = OutStale.AddDefaulted_GetRef();
+				Out.ChunkCoord = Job.Coord;
+				Out.CachedPoints = Cached.SurfacePoints.Num();
+				Out.FreshPoints = bFreshValid ? Job.Fresh.SurfacePoints.Num() : 0;
+				Out.ChangedPoints = Changed;
+			}
+		}
+	}
+	OutStale.Sort([](const FFreshExtractionComparison& A, const FFreshExtractionComparison& B) { return A.ChangedPoints > B.ChangedPoints; });
+	return Stats;
 }
 
 void UVoxelScatterManager::CreateDefaultDefinitions()

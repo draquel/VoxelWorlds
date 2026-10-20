@@ -13,7 +13,9 @@ class UVoxelWorldConfiguration;
  * @param ChunkCoord The chunk that was edited
  * @param Source The source of the edit (Player, System, Editor)
  * @param EditCenter World position of the edit center (for targeted scatter removal)
- * @param EditRadius Radius of the edit brush (for targeted scatter removal)
+ * @param EditRadius Radius of the edit brush (for targeted scatter removal); 0 when the edit is not a brush's (a batch of
+ *                   single-voxel edits, undo, redo, a clear or a load), with EditCenter the zero vector. While it is
+ *                   broadcast, UVoxelEditManager::GetBroadcastEditBounds gives the voxels the edit changed in the chunk.
  */
 DECLARE_MULTICAST_DELEGATE_FourParams(FOnChunkEdited, const FIntVector& /*ChunkCoord*/, EEditSource /*Source*/, const FVector& /*EditCenter*/, float /*EditRadius*/);
 
@@ -304,6 +306,18 @@ public:
 	/** Called when a chunk's edits are modified */
 	FOnChunkEdited OnChunkEdited;
 
+	/**
+	 * The chunk-local bounds (inclusive, 0..ChunkSize-1 on each axis) of the voxels the edit being broadcast changed in its
+	 * chunk, for OnChunkEdited's listeners: which of the chunk's layers the edit reached, e.g. whether it reached a layer a
+	 * neighbour's scatter extraction reads (world modes review G33). A bounding box, so it can include voxels the edit did
+	 * not change. Valid only during an OnChunkEdited broadcast.
+	 *
+	 * @param OutMin Receives the lowest local coordinate on each axis
+	 * @param OutMax Receives the highest local coordinate on each axis
+	 * @return False outside a broadcast (the outputs are left unchanged)
+	 */
+	bool GetBroadcastEditBounds(FIntVector& OutMin, FIntVector& OutMax) const;
+
 	/** Called when undo/redo state changes */
 	FOnUndoRedoStateChanged OnUndoRedoStateChanged;
 
@@ -377,6 +391,19 @@ protected:
 	 */
 	void TrimUndoStack();
 
+	/**
+	 * Broadcast OnChunkEdited for one chunk with the voxels the edit changed there, which GetBroadcastEditBounds reports
+	 * to the listeners for the broadcast's duration.
+	 *
+	 * @param ChunkCoord The edited chunk
+	 * @param Source The edit's source
+	 * @param EditCenter The brush's centre, or the zero vector
+	 * @param EditRadius The brush's radius, or 0
+	 * @param Bounds The voxels changed in the chunk (chunk-local)
+	 */
+	void BroadcastChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius,
+		const FVoxelEditedVoxelBounds& Bounds);
+
 protected:
 	// ==================== Configuration ====================
 
@@ -396,11 +423,21 @@ protected:
 	/** Voxels the validator skipped in the most recent apply call. */
 	int32 LastRejectedEditCount = 0;
 
-	/** Current edit center in world space (for scatter removal) */
+	/**
+	 * The current operation's brush centre in world space (for scatter removal). Set by ApplyBrushEdit, reset when the
+	 * operation ends, so an operation of single-voxel edits (a POI's terraform, a dungeon stamp) reports none instead of
+	 * the last brush's (world modes review G53).
+	 */
 	FVector CurrentEditCenter = FVector::ZeroVector;
 
-	/** Current edit radius (for scatter removal) */
+	/** The current operation's brush radius (for scatter removal); 0 when it has none. Reset with CurrentEditCenter. */
 	float CurrentEditRadius = 0.0f;
+
+	/** The voxels each chunk's edits changed in the current operation (chunk-local), for its OnChunkEdited broadcasts. */
+	TMap<FIntVector, FVoxelEditedVoxelBounds> OperationBounds;
+
+	/** The voxels the chunk being broadcast had changed, while OnChunkEdited is broadcast (GetBroadcastEditBounds). */
+	const FVoxelEditedVoxelBounds* ActiveBroadcastBounds = nullptr;
 
 	// ==================== Edit Storage ====================
 

@@ -860,6 +860,29 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	UVoxelScatterManager* GetScatterManager() const { return ScatterManager; }
 
+	/**
+	 * What system and editor edits did to scatter since Initialize (world modes review G33), for tests and
+	 * voxel.Scatter.EditAudit. An edited chunk's scatter re-extracts with its re-mesh; the chunks whose extraction reads
+	 * its edited voxels (UVoxelScatterManager::GetEditReaders) re-extract once per tick from their voxels, unless they were
+	 * edited themselves.
+	 */
+	struct FEditScatterStats
+	{
+		/** OnChunkEdited broadcasts from system and editor edits. */
+		int64 Broadcasts = 0;
+		/** Readers re-extracted (each once per tick however many edited chunks it reads). */
+		int64 ReadersReextracted = 0;
+		/** Readers edited in the same tick, which re-extract with their own re-mesh. */
+		int64 ReadersFolded = 0;
+		/** Readers without voxel data: not loaded yet (their extraction reads the edit when they load), or unloading. */
+		int64 ReadersWithoutData = 0;
+		/** voxel.Scatter.EditReaders 0 (the rule before G33): face neighbours regenerated. */
+		int64 LegacyFaceNeighbours = 0;
+	};
+
+	/** @return What system and editor edits did to scatter since Initialize (see FEditScatterStats) */
+	const FEditScatterStats& GetEditScatterStats() const { return EditScatterStats; }
+
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 
 	/**
@@ -1359,6 +1382,22 @@ protected:
 	void OnChunkMeshingComplete(const FIntVector& ChunkCoord);
 
 	/**
+	 * Hand a chunk's voxels (edit-merged when it has edits) to scatter for surface extraction, as a mesh completion does.
+	 * Scatter reads voxels, never the mesh (world modes review G27).
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param State Its state; its voxel data must be available
+	 */
+	void HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxelChunkState& State);
+
+	/**
+	 * Re-extract the scatter of the chunks whose extraction reads voxels a system or editor edit changed (world modes review
+	 * G33), noted by the edit handler since the last tick: each once, skipping those edited themselves (they re-extract with
+	 * their re-mesh). Called every tick before the scatter manager's update.
+	 */
+	void ProcessEditScatterReaders();
+
+	/**
 	 * Propagate water flags from loaded neighbor chunks into this chunk.
 	 *
 	 * Checks 6 face-neighbor chunks for water-flagged voxels at their shared
@@ -1757,6 +1796,15 @@ private:
 
 	/** Total chunks unloaded this session */
 	int64 TotalChunksUnloaded = 0;
+
+	/** System and editor edits' scatter work (GetEditScatterStats). */
+	FEditScatterStats EditScatterStats;
+
+	/** Chunks a system or editor edit changed since the last ProcessEditScatterReaders (their scatter re-extracts with their re-mesh). */
+	TSet<FIntVector> EditScatterEditedChunks;
+
+	/** Chunks whose extraction reads voxels a system or editor edit changed since the last ProcessEditScatterReaders. */
+	TSet<FIntVector> EditScatterReaderChunks;
 
 	// ==================== Generation Components ====================
 

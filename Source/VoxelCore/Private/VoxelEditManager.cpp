@@ -93,6 +93,7 @@ void UVoxelEditManager::BeginEditOperation(const FString& Description)
 	}
 
 	CurrentOperation = MakeUnique<FVoxelEditOperation>(NextOperationId++, Description);
+	OperationBounds.Reset();
 
 	UE_LOG(LogVoxelEdit, Verbose, TEXT("Edit operation started: '%s' (ID=%llu)"),
 		*Description, CurrentOperation->OperationId);
@@ -111,6 +112,9 @@ void UVoxelEditManager::EndEditOperation()
 		UE_LOG(LogVoxelEdit, Verbose, TEXT("Edit operation '%s' had no edits - discarding"),
 			*CurrentOperation->Description);
 		CurrentOperation.Reset();
+		OperationBounds.Reset();
+		CurrentEditCenter = FVector::ZeroVector;
+		CurrentEditRadius = 0.0f;
 		return;
 	}
 
@@ -130,11 +134,21 @@ void UVoxelEditManager::EndEditOperation()
 	// Trim if necessary
 	TrimUndoStack();
 
-	// Batched edit notification: one broadcast per affected chunk (operation-level source/center/radius).
+	// Batched edit notification: one broadcast per affected chunk (operation-level source/center/radius), with the voxels
+	// the operation changed in that chunk.
+	const TMap<FIntVector, FVoxelEditedVoxelBounds> Bounds = MoveTemp(OperationBounds);
+	OperationBounds.Reset();
 	for (const FIntVector& ChunkCoord : AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+		const FVoxelEditedVoxelBounds* ChunkBounds = Bounds.Find(ChunkCoord);
+		BroadcastChunkEdited(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius,
+			ChunkBounds ? *ChunkBounds : FVoxelEditedVoxelBounds());
 	}
+
+	// The centre and radius belong to this operation's brush. Left set, the next operation of single-voxel edits (a POI's
+	// terraform, a dungeon stamp, water propagation) broadcast them as its own (world modes review G53).
+	CurrentEditCenter = FVector::ZeroVector;
+	CurrentEditRadius = 0.0f;
 
 	// Notify listeners
 	OnUndoRedoStateChanged.Broadcast();
@@ -177,16 +191,25 @@ void UVoxelEditManager::CancelEditOperation()
 		}
 	}
 
-	// Notify affected chunks (use current source - cancelling reverts player's work)
+	// Notify affected chunks (use current source - cancelling reverts player's work). The revert above wrote every edit's
+	// index into every affected chunk's layer, so each chunk's changed voxels are all the edits' positions.
+	FVoxelEditedVoxelBounds Reverted;
+	for (const FVoxelEdit& Edit : CurrentOperation->Edits)
+	{
+		Reverted.Add(Edit.LocalPosition);
+	}
 	for (const FIntVector& ChunkCoord : CurrentOperation->AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+		BroadcastChunkEdited(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, Reverted);
 	}
 
 	UE_LOG(LogVoxelEdit, Log, TEXT("Edit operation '%s' cancelled (%d edits reverted)"),
 		*CurrentOperation->Description, CurrentOperation->GetEditCount());
 
 	CurrentOperation.Reset();
+	OperationBounds.Reset();
+	CurrentEditCenter = FVector::ZeroVector;
+	CurrentEditRadius = 0.0f;
 }
 
 bool UVoxelEditManager::ApplyEdit(const FVector& WorldPos, const FVoxelData& NewData, EEditMode Mode)
@@ -435,8 +458,8 @@ bool UVoxelEditManager::Undo()
 	FVoxelEditOperation Operation = MoveTemp(UndoStack.Last());
 	UndoStack.RemoveAt(UndoStack.Num() - 1);
 
-	// Track affected chunks
-	TSet<FIntVector> AffectedChunks;
+	// Track affected chunks, and the voxels reverted in each
+	TMap<FIntVector, FVoxelEditedVoxelBounds> AffectedChunks;
 
 	// Revert each edit
 	for (const FVoxelEdit& Edit : Operation.Edits)
@@ -461,7 +484,7 @@ bool UVoxelEditManager::Undo()
 							Layer->Edits.Remove(Index);
 						}
 					}
-					AffectedChunks.Add(ChunkCoord);
+					AffectedChunks.FindOrAdd(ChunkCoord).Add(Edit.LocalPosition);
 					break;
 				}
 			}
@@ -473,9 +496,9 @@ bool UVoxelEditManager::Undo()
 
 	// Notify affected chunks (undo restores previous state, so use System to regenerate scatter)
 	// Use zero radius since we want full regeneration, not targeted removal
-	for (const FIntVector& ChunkCoord : AffectedChunks)
+	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
+		BroadcastChunkEdited(Pair.Key, EEditSource::System, FVector::ZeroVector, 0.0f, Pair.Value);
 	}
 
 	OnUndoRedoStateChanged.Broadcast();
@@ -497,8 +520,8 @@ bool UVoxelEditManager::Redo()
 	FVoxelEditOperation Operation = MoveTemp(RedoStack.Last());
 	RedoStack.RemoveAt(RedoStack.Num() - 1);
 
-	// Track affected chunks
-	TSet<FIntVector> AffectedChunks;
+	// Track affected chunks, and the voxels re-applied in each
+	TMap<FIntVector, FVoxelEditedVoxelBounds> AffectedChunks;
 
 	// Re-apply each edit
 	for (const FVoxelEdit& Edit : Operation.Edits)
@@ -513,7 +536,7 @@ bool UVoxelEditManager::Redo()
 				// Re-apply the edit
 				FVoxelEdit RedoEdit = Edit;
 				Layer->Edits.Add(Index, RedoEdit);
-				AffectedChunks.Add(ChunkCoord);
+				AffectedChunks.FindOrAdd(ChunkCoord).Add(Edit.LocalPosition);
 				break;
 			}
 		}
@@ -524,9 +547,9 @@ bool UVoxelEditManager::Redo()
 
 	// Notify affected chunks (redo reapplies edits, use current source - typically Player)
 	// Use zero radius since this is a full operation redo
-	for (const FIntVector& ChunkCoord : AffectedChunks)
+	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, FVector::ZeroVector, 0.0f);
+		BroadcastChunkEdited(Pair.Key, CurrentEditSource, FVector::ZeroVector, 0.0f, Pair.Value);
 	}
 
 	OnUndoRedoStateChanged.Broadcast();
@@ -621,9 +644,14 @@ bool UVoxelEditManager::ClearChunkEdits(const FIntVector& ChunkCoord)
 	{
 		if (!Layer->IsEmpty())
 		{
+			FVoxelEditedVoxelBounds Cleared;
+			for (const TPair<int32, FVoxelEdit>& Pair : Layer->Edits)
+			{
+				Cleared.Add(Pair.Value.LocalPosition);
+			}
 			Layer->Clear();
 			// Clearing edits is a system action - scatter should regenerate
-			OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
+			BroadcastChunkEdited(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f, Cleared);
 			return true;
 		}
 	}
@@ -632,22 +660,27 @@ bool UVoxelEditManager::ClearChunkEdits(const FIntVector& ChunkCoord)
 
 void UVoxelEditManager::ClearAllEdits()
 {
-	// Collect affected chunks before clearing
-	TArray<FIntVector> AffectedChunks;
+	// Collect affected chunks, and the voxels each loses, before clearing
+	TArray<TPair<FIntVector, FVoxelEditedVoxelBounds>> AffectedChunks;
 	for (const auto& Pair : EditLayers)
 	{
 		if (!Pair.Value.IsEmpty())
 		{
-			AffectedChunks.Add(Pair.Key);
+			FVoxelEditedVoxelBounds Cleared;
+			for (const TPair<int32, FVoxelEdit>& Edit : Pair.Value.Edits)
+			{
+				Cleared.Add(Edit.Value.LocalPosition);
+			}
+			AffectedChunks.Emplace(Pair.Key, Cleared);
 		}
 	}
 
 	EditLayers.Empty();
 
 	// Notify all affected chunks (clearing is system action - regenerate scatter)
-	for (const FIntVector& ChunkCoord : AffectedChunks)
+	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : AffectedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
+		BroadcastChunkEdited(Pair.Key, EEditSource::System, FVector::ZeroVector, 0.0f, Pair.Value);
 	}
 
 	UE_LOG(LogVoxelEdit, Log, TEXT("All edits cleared (%d chunks affected)"), AffectedChunks.Num());
@@ -774,7 +807,7 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 	Reader << ChunkCount;
 
 	// Read each chunk's edits
-	TArray<FIntVector> LoadedChunks;
+	TArray<TPair<FIntVector, FVoxelEditedVoxelBounds>> LoadedChunks;
 	int32 TotalEdits = 0;
 
 	for (int32 ChunkIndex = 0; ChunkIndex < ChunkCount; ++ChunkIndex)
@@ -786,6 +819,7 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 		Reader << EditCount;
 
 		FChunkEditLayer* Layer = GetOrCreateEditLayer(ChunkCoord);
+		FVoxelEditedVoxelBounds Loaded;
 
 		for (int32 EditIndex = 0; EditIndex < EditCount; ++EditIndex)
 		{
@@ -825,16 +859,17 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 			Edit.Timestamp = FPlatformTime::Seconds();
 
 			Layer->ApplyEdit(Edit);
+			Loaded.Add(Edit.LocalPosition);
 			++TotalEdits;
 		}
 
-		LoadedChunks.Add(ChunkCoord);
+		LoadedChunks.Emplace(ChunkCoord, Loaded);
 	}
 
 	// Notify all loaded chunks (loading from file is system action - regenerate scatter)
-	for (const FIntVector& ChunkCoord : LoadedChunks)
+	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : LoadedChunks)
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, EEditSource::System, FVector::ZeroVector, 0.0f);
+		BroadcastChunkEdited(Pair.Key, EEditSource::System, FVector::ZeroVector, 0.0f, Pair.Value);
 	}
 
 	UE_LOG(LogVoxelEdit, Log, TEXT("Loaded %d edits across %d chunks from '%s'"),
@@ -978,6 +1013,7 @@ void UVoxelEditManager::ApplyEditInternal(
 	if (CurrentOperation.IsValid())
 	{
 		CurrentOperation->AddEdit(Edit, ChunkCoord);
+		OperationBounds.FindOrAdd(ChunkCoord).Add(LocalPos);
 	}
 
 	// Notify listeners — but only for standalone edits. During a Begin/End batch operation (brush),
@@ -986,7 +1022,9 @@ void UVoxelEditManager::ApplyEditInternal(
 	// per edited voxel — a large brush (hundreds of thousands of voxels) froze the game thread.
 	if (!CurrentOperation.IsValid())
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+		FVoxelEditedVoxelBounds One;
+		One.Add(LocalPos);
+		BroadcastChunkEdited(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, One);
 	}
 }
 
@@ -1073,12 +1111,15 @@ void UVoxelEditManager::ApplyEditInternal(
 						FVoxelEdit RemovalEdit = *ExistingEdit;
 						RemovalEdit.DensityDelta = 0;
 						CurrentOperation->AddEdit(RemovalEdit, ChunkCoord);
+						OperationBounds.FindOrAdd(ChunkCoord).Add(LocalPos);
 					}
 
 					// Notify listeners that chunk changed (standalone edit only; batch defers to EndEditOperation)
 					if (!CurrentOperation.IsValid())
 					{
-						OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+						FVoxelEditedVoxelBounds One;
+						One.Add(LocalPos);
+						BroadcastChunkEdited(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, One);
 					}
 					return;
 				}
@@ -1118,6 +1159,7 @@ void UVoxelEditManager::ApplyEditInternal(
 	if (CurrentOperation.IsValid())
 	{
 		CurrentOperation->AddEdit(EditCopy, ChunkCoord);
+		OperationBounds.FindOrAdd(ChunkCoord).Add(LocalPos);
 	}
 
 	// Notify listeners — but only for standalone edits. During a Begin/End batch operation (brush),
@@ -1126,8 +1168,31 @@ void UVoxelEditManager::ApplyEditInternal(
 	// per edited voxel — a large brush (hundreds of thousands of voxels) froze the game thread.
 	if (!CurrentOperation.IsValid())
 	{
-		OnChunkEdited.Broadcast(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+		FVoxelEditedVoxelBounds One;
+		One.Add(LocalPos);
+		BroadcastChunkEdited(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, One);
 	}
+}
+
+void UVoxelEditManager::BroadcastChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter,
+	float EditRadius, const FVoxelEditedVoxelBounds& Bounds)
+{
+	// Listeners may edit in turn (water propagation): keep the outer broadcast's bounds for the rest of its listeners.
+	const FVoxelEditedVoxelBounds* Outer = ActiveBroadcastBounds;
+	ActiveBroadcastBounds = &Bounds;
+	OnChunkEdited.Broadcast(ChunkCoord, Source, EditCenter, EditRadius);
+	ActiveBroadcastBounds = Outer;
+}
+
+bool UVoxelEditManager::GetBroadcastEditBounds(FIntVector& OutMin, FIntVector& OutMax) const
+{
+	if (!ActiveBroadcastBounds || !ActiveBroadcastBounds->IsValid())
+	{
+		return false;
+	}
+	OutMin = ActiveBroadcastBounds->Min;
+	OutMax = ActiveBroadcastBounds->Max;
+	return true;
 }
 
 FVoxelData UVoxelEditManager::GetOriginalVoxelData(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const

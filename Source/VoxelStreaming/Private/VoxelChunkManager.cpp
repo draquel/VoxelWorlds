@@ -29,6 +29,7 @@
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
+#include "VoxelMaterialRegistry.h"
 #include "VoxelWaterPropagation.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelWaterMesher.h"
@@ -434,6 +435,17 @@ static TAutoConsoleVariable<int32> CVarAppearHold(
 	1,
 	TEXT("Hold a new chunk that fades in (voxel.MeshFade.Appear) until its ready seams land, then fade them in together "
 	     "(capped by voxel.MeshFade.SeamHoldMs). 1 = on (default), 0 = the interior fades in at once and its seams follow."),
+	ECVF_Default);
+
+// World modes review G33: a system or editor edit re-extracts the scatter of the chunks whose extraction reads the voxels it
+// changed (UVoxelScatterManager::GetEditReaders: the chunk below on a heightmap, the seven chunks at -X / -Y / -Z on a
+// planet, those the edit's bounds reach), once each per tick. The rule before regenerated the edited chunk's six face
+// neighbours, which missed a planet's edge and corner readers and re-extracted the rest for nothing.
+static TAutoConsoleVariable<int32> CVarScatterEditReaders(
+	TEXT("voxel.Scatter.EditReaders"),
+	1,
+	TEXT("System / editor edits re-extract the scatter of the chunks whose extraction reads the edited voxels (world modes review "
+	     "G33). 1 = on (default), 0 = the rule before: the edited chunk's six face neighbours, for A/B."),
 	ECVF_Default);
 
 // ==================== Far-chunk voxel-data compression ====================
@@ -934,6 +946,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	SectionStart = FPlatformTime::Seconds();
 	if (ScatterManager && Configuration && Configuration->bEnableScatter)
 	{
+		ProcessEditScatterReaders();
 		ScatterManager->Update(Context.ViewerPosition, DeltaTime);
 
 		if (Configuration->bScatterDebugVisualization)
@@ -1287,12 +1300,26 @@ void UVoxelChunkManager::Initialize(
 			{
 				// System / Editor edits (e.g. POI terraforming) re-extract the chunk so scatter matches the
 				// new surface. RegenerateChunkScatter keeps the current instances rendered until the
-				// re-extraction smoothly replaces them per type, so it adds no flash.
+				// re-extraction smoothly replaces them per type, so it adds no flash. The chunk's re-mesh
+				// (MarkChunkDirty above) hands its edit-merged voxels to scatter.
 				//
 				// TODO(scatter-claims): a POI often wants foliage SUPPRESSED — either across its whole
 				// claimed zone or just under a static-asset (building) footprint — rather than re-extracted.
 				// Drive that from the claim covering the region once VoxelScatter consumes claims.
 				ScatterManager->RegenerateChunkScatter(ChunkCoord);
+				++EditScatterStats.Broadcasts;
+				if (CVarScatterEditReaders.GetValueOnGameThread() != 0)
+				{
+					// The chunks whose extraction reads the voxels the edit changed here (G33): the chunk below on a
+					// heightmap, the -X / -Y / -Z chunks on a planet, as far as the edit's bounds reach. Re-extracted once
+					// each in the next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
+					FIntVector EditMin, EditMax;
+					const bool bBounds = EditManager->GetBroadcastEditBounds(EditMin, EditMax);
+					TArray<FIntVector> Readers;
+					ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, Readers);
+					EditScatterReaderChunks.Append(Readers);
+					EditScatterEditedChunks.Add(ChunkCoord);
+				}
 			}
 			// Zero-radius player undo/redo needs no scatter handling — the targeted removal already
 			// happened at original-edit time.
@@ -1322,11 +1349,13 @@ void UVoxelChunkManager::Initialize(
 				{
 					CollisionManager->MarkChunkDirty(NeighborCoord);
 				}
-				// Note: Scatter for neighbors is already handled by ClearScatterInRadius
-				// which affects all chunks within the edit radius, not just the primary chunk
-				if (ScatterManager && Source != EEditSource::Player)
+				// Player edits: scatter for neighbours is handled by ClearScatterInRadius, which affects every chunk
+				// within the edit radius. System / Editor edits: the chunks whose extraction reads the edited voxels
+				// re-extract (G33, above); voxel.Scatter.EditReaders 0 restores the rule before, these six.
+				if (ScatterManager && Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0)
 				{
 					ScatterManager->RegenerateChunkScatter(NeighborCoord);
+					++EditScatterStats.LegacyFaceNeighbours;
 				}
 			}
 		}
@@ -1443,6 +1472,9 @@ void UVoxelChunkManager::Shutdown()
 	ChunkStates.Empty();
 	++ChunkStateVersion;
 	LoadedChunkCoords.Empty();
+	EditScatterReaderChunks.Empty();
+	EditScatterEditedChunks.Empty();
+	EditScatterStats = FEditScatterStats();
 	// Seam-ownership: drop all tracked seams/jobs alongside the chunk state they mirror, and
 	// discard the async seam pipeline's transient state (in-flight results will no-op via the
 	// weak manager pointer; late results drain harmlessly next session).
@@ -6301,6 +6333,61 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 }
 
+void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxelChunkState& State)
+{
+	if (!ScatterManager || !Configuration || !Configuration->bEnableScatter)
+	{
+		return;
+	}
+	// Scatter must classify against the terrain the player actually sees. When the chunk has edits (player dig/build, POI,
+	// editor), merge them into a scratch copy so scatter extracts from edit-merged voxels: otherwise grass can cover a dug
+	// cave opening or mushrooms can appear on a carved-flat surface.
+	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	{
+		TArray<FVoxelData> EditMergedVoxels = State.Descriptor.GetVoxelDataForRead();
+		EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
+		ScatterManager->OnChunkMeshDataReady(ChunkCoord, EditMergedVoxels, State.Descriptor.ChunkSize, Configuration->VoxelSize);
+	}
+	else
+	{
+		ScatterManager->OnChunkMeshDataReady(ChunkCoord, State.Descriptor.GetVoxelDataForRead(), State.Descriptor.ChunkSize,
+			Configuration->VoxelSize);
+	}
+}
+
+void UVoxelChunkManager::ProcessEditScatterReaders()
+{
+	if (EditScatterReaderChunks.Num() == 0)
+	{
+		EditScatterEditedChunks.Reset();
+		return;
+	}
+	for (const FIntVector& Reader : EditScatterReaderChunks)
+	{
+		// An edited chunk re-extracts with its re-mesh, and its extraction launches after this edit: it reads it.
+		if (EditScatterEditedChunks.Contains(Reader))
+		{
+			++EditScatterStats.ReadersFolded;
+			continue;
+		}
+		// A chunk without voxel data has not been handed to scatter yet (its extraction reads the edit when it is), or is
+		// on its way out.
+		FVoxelChunkState* State = ChunkStates.Find(Reader);
+		if (!State || !State->Descriptor.HasVoxelDataAvailable() || State->State == EChunkState::PendingUnload)
+		{
+			++EditScatterStats.ReadersWithoutData;
+			continue;
+		}
+		// Its own voxels did not change, so no re-mesh: drop its scatter caches (the instances stay until the re-extraction
+		// replaces them) and hand its voxels to scatter now. A re-mesh hand-off that follows finds its types done.
+		ScatterManager->RegenerateChunkScatter(Reader);
+		HandOffChunkScatter(Reader, *State);
+		++EditScatterStats.ReadersReextracted;
+	}
+	EditScatterReaderChunks.Reset();
+	EditScatterEditedChunks.Reset();
+}
+
 void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 {
 	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
@@ -6401,22 +6488,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		if (ScatterManager && Configuration && Configuration->bEnableScatter)
 		{
 			const double ScatT0 = FPlatformTime::Seconds();
-
-			// Scatter must classify against the terrain the player actually sees. When the
-			// chunk has edits (player dig/build, POI, editor), merge them into a scratch copy
-			// so scatter extracts from edit-merged voxels — otherwise grass can cover a dug
-			// cave opening or mushrooms can appear on a carved-flat surface.
-			if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
-			{
-				TArray<FVoxelData> EditMergedVoxels = State->Descriptor.GetVoxelDataForRead();
-				EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
-				ScatterManager->OnChunkMeshDataReady(ChunkCoord, EditMergedVoxels, State->Descriptor.ChunkSize, Configuration->VoxelSize);
-			}
-			else
-			{
-				ScatterManager->OnChunkMeshDataReady(ChunkCoord, State->Descriptor.GetVoxelDataForRead(), State->Descriptor.ChunkSize,
-					Configuration->VoxelSize);
-			}
+			HandOffChunkScatter(ChunkCoord, *State);
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
 
@@ -8432,6 +8504,277 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterLineTopAuditCmd(
 			}
 		}
 	}));
+
+namespace VoxelEditAuditHelpers
+{
+	/** The PIE or Game world: the console's own when it is one, else the first PIE/Game world context. */
+	UWorld* FindGameWorld(UWorld* World)
+	{
+		if (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game))
+		{
+			return World;
+		}
+		if (GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					return Ctx.World();
+				}
+			}
+		}
+		return nullptr;
+	}
+}
+
+// Console: voxel.Scatter.EditAudit [maxLines=20]
+// World modes review G33: whether every cached scatter chunk's surface points are what a fresh extraction gives now
+// (UVoxelScatterManager::CompareWithFreshExtraction: the chunk's edit-merged voxels and a context made now, so the edits of
+// the chunks it reads past its faces and the conditioning zones as they are now). A chunk that differs holds a stale view of
+// something it reads; the audit says whether it reads an edited chunk (a heightmap chunk the chunk above, a planet chunk the
+// seven at +X / +Y / +Z: a system edit it was not re-extracted for, G33), has edits itself, or neither (a conditioning zone
+// registered after it was extracted, for instance). Chunks queued or in flight are skipped, and so are chunks with a cleared
+// volume (a player edit only clears scatter, by design). Also logs what system and editor edits did to scatter
+// (UVoxelChunkManager::GetEditScatterStats) and voxel.Scatter.EditReaders. Logs the stale chunks with the most changed
+// points with a vox.TP to each and writes Saved/VoxelAudit/EditAudit_<world>_<time>.csv.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterEditAuditCmd(
+	TEXT("voxel.Scatter.EditAudit"),
+	TEXT("Compare every cached scatter chunk's surface points with a fresh extraction now (world modes review G33: stale ")
+	TEXT("scatter next to a system edit). Optional arg: max chunk lines to log."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.EditAudit: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 20;
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			const UVoxelScatterManager* ScatterMgr = CM ? CM->GetScatterManager() : nullptr;
+			const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+			const UVoxelEditManager* EditMgr = CM ? CM->GetEditManager() : nullptr;
+			const IVoxelWorldMode* Mode = CM ? CM->GetWorldMode() : nullptr;
+			if (!ScatterMgr || !Config || !EditMgr || !Mode)
+			{
+				continue;
+			}
+			const double T0 = FPlatformTime::Seconds();
+			TArray<UVoxelScatterManager::FFreshExtractionComparison> Stale;
+			const UVoxelScatterManager::FFreshExtractionStats Stats = ScatterMgr->CompareWithFreshExtraction(
+				[CM](const FIntVector& Coord) { return CM->GetEditMergedSnapshot(Coord); }, Stale);
+			const double Seconds = FPlatformTime::Seconds() - T0;
+
+			// The chunks a chunk reads past its faces: the inverse of the reader offsets.
+			TArray<FIntVector> ReaderOffsets;
+			UVoxelScatterManager::GetEditReaderOffsets(Mode->IsHeightmapBased(), Mode->GetWorldModeType() == EWorldMode::SphericalPlanet,
+				nullptr, ReaderOffsets);
+			int32 ReadsEdited = 0, OwnEdits = 0, Other = 0, ChangedPoints = 0;
+			TArray<FString> Kinds;
+			for (const UVoxelScatterManager::FFreshExtractionComparison& C : Stale)
+			{
+				bool bReadsEdited = false;
+				for (const FIntVector& Offset : ReaderOffsets)
+				{
+					bReadsEdited |= EditMgr->ChunkHasEdits(C.ChunkCoord - Offset);
+				}
+				const bool bOwn = EditMgr->ChunkHasEdits(C.ChunkCoord);
+				ReadsEdited += bReadsEdited ? 1 : 0;
+				OwnEdits += bOwn ? 1 : 0;
+				Other += (!bReadsEdited && !bOwn) ? 1 : 0;
+				ChangedPoints += C.ChangedPoints;
+				Kinds.Add(FString::Printf(TEXT("%s%s"), bReadsEdited ? TEXT("readsEdited") : TEXT(""), bOwn ? (bReadsEdited ? TEXT("+own") : TEXT("own")) : (bReadsEdited ? TEXT("") : TEXT("neither"))));
+			}
+			const UVoxelChunkManager::FEditScatterStats& E = CM->GetEditScatterStats();
+			const IConsoleVariable* Rule = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Scatter.EditReaders"));
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.EditAudit [%s]: compared %d cached chunk(s) in %.2f s: stale %d (%d changed points; reading an edited chunk %d, edited themselves %d, neither %d); skipped %d pending, %d with a cleared volume, %d without voxels; edits (EditReaders %d): %lld system broadcasts, readers re-extracted %lld, folded %lld, without data %lld, legacy face neighbours %lld; scatter regenerations %lld, extractions launched %lld"),
+				*TargetWorld->GetName(), Stats.Compared, Seconds, Stats.Stale, ChangedPoints, ReadsEdited, OwnEdits, Other, Stats.SkippedPending,
+				Stats.SkippedCleared, Stats.SkippedNoVoxels, Rule ? Rule->GetInt() : -1, E.Broadcasts, E.ReadersReextracted, E.ReadersFolded,
+				E.ReadersWithoutData, E.LegacyFaceNeighbours, ScatterMgr->GetTotalRegenerations(), ScatterMgr->GetTotalExtractionsLaunched());
+			const double ChunkWorldSize = Config->GetChunkWorldSize();
+			for (int32 i = 0; i < FMath::Min(MaxLines, Stale.Num()); ++i)
+			{
+				const UVoxelScatterManager::FFreshExtractionComparison& C = Stale[i];
+				const FVector Centre = Config->WorldOrigin + (FVector(C.ChunkCoord) + FVector(0.5)) * ChunkWorldSize;
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("  chunk (%d,%d,%d) %s: cached %d, fresh %d, changed %d  ->  vox.TP %.0f %.0f %.0f"),
+					C.ChunkCoord.X, C.ChunkCoord.Y, C.ChunkCoord.Z, *Kinds[i], C.CachedPoints, C.FreshPoints, C.ChangedPoints, Centre.X, Centre.Y, Centre.Z);
+			}
+			TArray<FString> CsvLines = { TEXT("X,Y,Z,kind,cached,fresh,changed") };
+			for (int32 i = 0; i < Stale.Num(); ++i)
+			{
+				const UVoxelScatterManager::FFreshExtractionComparison& C = Stale[i];
+				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%s,%d,%d,%d"), C.ChunkCoord.X, C.ChunkCoord.Y, C.ChunkCoord.Z, *Kinds[i], C.CachedPoints,
+					C.FreshPoints, C.ChangedPoints));
+			}
+			const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("EditAudit_%s_%s.csv"),
+				*TargetWorld->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+			if (FFileHelper::SaveStringArrayToFile(CsvLines, *Path))
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.EditAudit: %d stale chunk(s) written to %s"), Stale.Num(), *FPaths::ConvertRelativePathToFull(Path));
+			}
+		}
+	}));
+
+// Console: voxel.Edit.System <x y z | pawn> <radius> [dig|fill=dig] [none|edge|corner]
+//          voxel.Edit.SystemLayers <x y z | pawn> [dig|fill=dig] [axes=xyz] [depth=1]
+// Debug system edits (world modes review G33), as a POI's terraform makes them (EEditSource::System, one operation); `pawn`
+// stands for the player pawn's location:
+// - voxel.Edit.System: a sphere brush at (x, y, z) (ApplyBrushEdit, density 255 a voxel at full strength); `edge` moves the
+//   centre onto the nearest chunk edge running closest to local up (the edit spans the four chunks around it), `corner`
+//   onto the nearest chunk corner (eight).
+// - voxel.Edit.SystemLayers: the chunk holding (x, y, z), every voxel of its first `depth` layers on the given min faces
+//   (x: local X < depth, and so on) set to air (dig) or to solid (fill, the voxel's material, stone where it was air). Its
+//   min corner is a chunk corner, so on a planet the chunks at -X / -Y / -Z read it (G29, G31) though none of them is
+//   edited: the edit G33's rule before missed for the edge and corner neighbours.
+// Both log the edited chunks and, for each, the chunks whose extraction reads its edited voxels (GetEditReaders).
+static void RunDebugSystemEdit(const TArray<FString>& InArgs, UWorld* World, bool bLayers)
+{
+	const TCHAR* Name = bLayers ? TEXT("voxel.Edit.SystemLayers") : TEXT("voxel.Edit.System");
+	UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+	// "pawn" in place of x y z: the player pawn's location.
+	TArray<FString> Args = InArgs;
+	if (TargetWorld && Args.Num() > 0 && Args[0].Equals(TEXT("pawn"), ESearchCase::IgnoreCase))
+	{
+		const APlayerController* PC = TargetWorld->GetFirstPlayerController();
+		const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+		if (!Pawn)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("%s: no player pawn"), Name);
+			return;
+		}
+		const FVector L = Pawn->GetActorLocation();
+		Args.RemoveAt(0);
+		Args.Insert(FString::SanitizeFloat(L.Z), 0);
+		Args.Insert(FString::SanitizeFloat(L.Y), 0);
+		Args.Insert(FString::SanitizeFloat(L.X), 0);
+	}
+	if (!TargetWorld || Args.Num() < (bLayers ? 3 : 4))
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("%s: %s"), Name, !TargetWorld ? TEXT("no PIE/Game world found (start PIE first)")
+			: (bLayers ? TEXT("usage: <x y z | pawn> [dig|fill] [axes=xyz] [depth=1]") : TEXT("usage: <x y z | pawn> radius [dig|fill] [none|edge|corner]")));
+		return;
+	}
+	FVector P(FCString::Atod(*Args[0]), FCString::Atod(*Args[1]), FCString::Atod(*Args[2]));
+	const int32 ModeArg = bLayers ? 3 : 4;
+	const bool bFill = Args.Num() > ModeArg && Args[ModeArg].Equals(TEXT("fill"), ESearchCase::IgnoreCase);
+	// voxel.Edit.System's snap: "edge" moves the centre onto the chunk edge nearest it that runs closest to local up (the two
+	// other axes onto chunk boundaries), "corner" onto the nearest chunk corner.
+	const FString Snap = (!bLayers && Args.Num() > 5) ? Args[5].ToLower() : FString(TEXT("none"));
+	for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+	{
+		UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+		UVoxelEditManager* EditMgr = CM ? CM->GetEditManager() : nullptr;
+		const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+		if (!EditMgr || !Config)
+		{
+			continue;
+		}
+		TMap<FIntVector, FVoxelEditedVoxelBounds> Edited;
+		FDelegateHandle Handle = EditMgr->OnChunkEdited.AddLambda([&Edited, EditMgr](const FIntVector& Chunk, EEditSource, const FVector&, float)
+		{
+			FIntVector Min, Max;
+			FVoxelEditedVoxelBounds& B = Edited.FindOrAdd(Chunk);
+			if (EditMgr->GetBroadcastEditBounds(Min, Max))
+			{
+				B.Add(Min);
+				B.Add(Max);
+			}
+		});
+		const EEditSource PrevSource = EditMgr->GetEditSource();
+		EditMgr->SetEditSource(EEditSource::System);
+		int32 Voxels = 0;
+		if (bLayers)
+		{
+			const FString Axes = Args.Num() > 4 ? Args[4].ToLower() : FString(TEXT("xyz"));
+			const int32 Depth = Args.Num() > 5 ? FMath::Max(1, FCString::Atoi(*Args[5])) : 1;
+			const int32 CS = Config->ChunkSize;
+			const float VS = Config->VoxelSize;
+			const FIntVector Chunk = CM->WorldToChunkCoord(P);
+			const FVector ChunkMin = Config->WorldOrigin + FVector(Chunk) * Config->GetChunkWorldSize();
+			EditMgr->BeginEditOperation(TEXT("Debug system layers"));
+			for (int32 Z = 0; Z < CS; ++Z)
+			for (int32 Y = 0; Y < CS; ++Y)
+			for (int32 X = 0; X < CS; ++X)
+			{
+				const bool bOnLayer = (Axes.Contains(TEXT("x")) && X < Depth) || (Axes.Contains(TEXT("y")) && Y < Depth) || (Axes.Contains(TEXT("z")) && Z < Depth);
+				if (!bOnLayer)
+				{
+					continue;
+				}
+				const FVector VoxelPos = ChunkMin + (FVector(X, Y, Z) + FVector(0.5)) * VS;
+				const FVoxelData Current = CM->GetEditMergedVoxelAtWorldPosition(VoxelPos);
+				const FVoxelData NewData = bFill ? FVoxelData::Solid(Current.IsSolid() ? Current.MaterialID : EVoxelMaterial::Stone, Current.BiomeID) : FVoxelData::Air();
+				Voxels += EditMgr->ApplyEdit(VoxelPos, NewData, EEditMode::Set) ? 1 : 0;
+			}
+			EditMgr->EndEditOperation();
+		}
+		else
+		{
+			if (Snap == TEXT("edge") || Snap == TEXT("corner"))
+			{
+				const double CW = Config->GetChunkWorldSize();
+				const FVector Rel = P - Config->WorldOrigin;
+				const FVector Up = Config->WorldMode == EWorldMode::SphericalPlanet ? Rel.GetSafeNormal() : FVector::UpVector;
+				// The axis along the edge: the one closest to local up (kept for an edge, snapped too for a corner).
+				const int32 Along = FMath::Abs(Up.X) >= FMath::Abs(Up.Y) ? (FMath::Abs(Up.X) >= FMath::Abs(Up.Z) ? 0 : 2) : (FMath::Abs(Up.Y) >= FMath::Abs(Up.Z) ? 1 : 2);
+				FVector Snapped = Rel;
+				for (int32 Axis = 0; Axis < 3; ++Axis)
+				{
+					if (Axis != Along || Snap == TEXT("corner"))
+					{
+						Snapped[Axis] = FMath::RoundToDouble(Rel[Axis] / CW) * CW;
+					}
+				}
+				P = Config->WorldOrigin + Snapped;
+			}
+			FVoxelBrushParams Brush;
+			Brush.Shape = EVoxelBrushShape::Sphere;
+			Brush.Radius = FMath::Max(1.0f, FCString::Atof(*Args[3]));
+			Brush.Strength = 1.0f;
+			Brush.FalloffType = EVoxelBrushFalloff::Sharp;
+			Brush.DensityDelta = 255;
+			Brush.MaterialID = EVoxelMaterial::Stone;
+			Voxels = EditMgr->ApplyBrushEdit(P, Brush, bFill ? EEditMode::Add : EEditMode::Subtract);
+		}
+		EditMgr->SetEditSource(PrevSource);
+		EditMgr->OnChunkEdited.Remove(Handle);
+
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("%s (%.0f, %.0f, %.0f) %s: %d voxel(s) in %d chunk(s)"), Name, P.X, P.Y, P.Z,
+			bFill ? TEXT("fill") : TEXT("dig"), Voxels, Edited.Num());
+		const UVoxelScatterManager* ScatterMgr = CM->GetScatterManager();
+		for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : Edited)
+		{
+			FString ReaderText;
+			if (ScatterMgr)
+			{
+				TArray<FIntVector> Readers;
+				ScatterMgr->GetEditReaders(Pair.Key, Pair.Value.IsValid() ? &Pair.Value.Min : nullptr, Readers);
+				for (const FIntVector& R : Readers)
+				{
+					ReaderText += FString::Printf(TEXT(" (%d,%d,%d)%s"), R.X, R.Y, R.Z, Edited.Contains(R) ? TEXT("*") : TEXT(""));
+				}
+			}
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("  chunk (%d,%d,%d) local (%d,%d,%d)-(%d,%d,%d); read by:%s"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z,
+				Pair.Value.Min.X, Pair.Value.Min.Y, Pair.Value.Min.Z, Pair.Value.Max.X, Pair.Value.Max.Y, Pair.Value.Max.Z,
+				ReaderText.IsEmpty() ? TEXT(" none") : *ReaderText);
+		}
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GVoxelEditSystemCmd(
+	TEXT("voxel.Edit.System"),
+	TEXT("Debug: a system edit (as a POI terraform) with a sphere brush. Args: <x y z | pawn> radius [dig|fill] [none|edge|corner]. Logs the edited chunks ")
+	TEXT("and the chunks whose scatter reads them (world modes review G33)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World) { RunDebugSystemEdit(Args, World, false); }));
+
+static FAutoConsoleCommandWithWorldAndArgs GVoxelEditSystemLayersCmd(
+	TEXT("voxel.Edit.SystemLayers"),
+	TEXT("Debug: a system edit of the min-face layers of the chunk holding a point. Args: <x y z | pawn> [dig|fill] [axes=xyz] [depth=1]. ")
+	TEXT("Logs the chunks whose scatter reads it (world modes review G33)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World) { RunDebugSystemEdit(Args, World, true); }));
 
 // Console: voxel.FarCompression.Stats
 // Dump the chunk manager's voxel-data residency breakdown (Resident/Uniform/Compressed/Empty
