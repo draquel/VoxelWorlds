@@ -1228,6 +1228,21 @@ public:
 	int32 AuditResidency(FString& OutReport) const;
 
 	/**
+	 * Layer-boundary audit (voxel.Gen.LayerAudit, world modes review G34): over every loaded chunk with voxel data, counts the
+	 * columns with a ceiling (air under solid) and a floor (solid under air) at each Z plane of the chunk, the plane against
+	 * the chunk below (its top voxel against this chunk's bottom voxel) separately, from the generated voxels and with the
+	 * edit layer applied. A cave's ceilings fall on every plane alike; a spike at the chunk boundary is an artefact. For the
+	 * chunks with the most boundary ceilings it regenerates the chunk and the one below with the CPU generator and compares
+	 * them voxel by voxel with what streamed, and samples the cave carve at the two voxels of each such column.
+	 *
+	 * @param MaxLines Chunks to list (most boundary ceilings first)
+	 * @param RegenCount How many of them to regenerate on the CPU and compare
+	 * @param OutReport Multi-line report
+	 * @return Boundary ceiling columns over all chunk pairs (generated voxels)
+	 */
+	int64 AuditLayerBoundaries(int32 MaxLines, int32 RegenCount, FString& OutReport);
+
+	/**
 	 * Draw debug visualization.
 	 */
 	void DrawDebugVisualization() const;
@@ -1828,6 +1843,15 @@ private:
 
 	/** Collect conditioning zones overlapping a chunk's XY footprint into OutZones (game thread). */
 	void GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const;
+
+	/**
+	 * Build the generation request the streaming sends for a chunk (world mode, biomes, caves, water, conditioning zones).
+	 *
+	 * @param ChunkCoord Chunk to generate
+	 * @param LODLevel LOD of the request (0 when LOD is off)
+	 * @param OutRequest Filled request
+	 */
+	void BuildChunkGenerationRequest(const FIntVector& ChunkCoord, int32 LODLevel, FVoxelNoiseGenerationRequest& OutRequest) const;
 
 	/** Append conditioning zones (static + dynamic) whose influence overlaps a world-space XY region. */
 	void GatherConditioningZonesForRegion(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const;
