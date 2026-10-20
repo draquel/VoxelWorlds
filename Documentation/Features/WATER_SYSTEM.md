@@ -134,22 +134,54 @@ Called after chunk generation completes, before water tile update. Ensures consi
 **File**: `VoxelStreaming/Public/VoxelWaterPropagation.h`
 **Class**: `UVoxelWaterPropagation`
 
-When terrain edits (dig, subtract) expose air adjacent to existing water, this system propagates water flags via bounded BFS:
+When terrain edits (dig, subtract) expose air adjacent to existing water, this system propagates water flags via bounded BFS.
+Every read is of the **edit-merged** voxel (`UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition`: the generated voxel
+with the chunk's edit layer applied), so a dug voxel reads as air and a filled one as solid. Voxels are keyed by their
+global index in the chunk grid (relative to `WorldOrigin`), and "below the sea" is tested at the voxel's sample point as
+generation's fill pass tests it.
 
-**Seeding** (`OnChunkEdited`):
-- Scan voxels in edit sphere's bounding box
-- Find dry air below water level with a 6-connected water neighbor
-- Add to BFS queue
+**Seeding** (`OnChunkEdited`, scanned in the next `ProcessPropagation`):
+- Only voxels the edit changed can be seeds (edits make no water): the chunk-local bounds of the voxels it changed in the
+  chunk (`UVoxelEditManager::GetBroadcastEditBounds`). Every edit reports them, so a brush, an operation of single-voxel
+  edits (a POI's terraform, a dungeon stamp, `voxel.Edit.System`), an undo, a clear and a load all seed alike. Outside a
+  broadcast the brush's box is used, else the whole chunk.
+- The box is clipped to below the sea (the plane cuts its top; a box wholly above the sphere is dropped) and queued per
+  chunk (a chunk broadcast again joins its box). The scans run at the start of `ProcessPropagation` within
+  `MaxScanReadsPerFrame` voxel reads (32,768), so a large edit under the sea is spread over frames.
+- A seed is a changed voxel that can receive water (below the sea, in a chunk whose water is in place, air without the
+  flag) with a 6-connected **water-flagged air** neighbour. A filled voxel keeps the water flag of the sea it filled (`Add` keeps the
+  metadata) but is solid, so it is no source: a cavity dug under a fill plug stays dry.
+- A chunk's water must be in place (`UVoxelChunkManager::IsChunkWaterSettled`): it has voxel data and has submitted a
+  mesh since the data arrived, which runs `PropagateWaterFromNeighbors`. A chunk wholly under a heightmap sea has no water
+  flags before that (generation's column scan seeds only the chunk holding the water level). An edit of a chunk that is
+  not settled (a POI's terraform or a dungeon stamp at stream-in, a save's edits, a chunk generated but not meshed yet)
+  waits: its box is kept until the chunk manager calls `OnChunkWaterSettled` at that mesh submit, then queued.
+- The propagation's own batches are not scanned: their voxels took the flag, and their neighbours are already its
+  frontier (a new seed also restarts the flood's budget, so scanning them would never let a capped flood stop).
 
 **Processing** (`ProcessPropagation`, called per frame):
-- Pop from FIFO queue, set water flag, enqueue valid neighbors
+- Pop from the FIFO queue, set the water flag, enqueue valid neighbours
+- The flag is set on the voxel **as it is**, edits included (`EEditMode::Set` of the edit-merged voxel plus the flag): a
+  dig keeps its density and material, and no voxel goes back to its generated value
+- Nothing is read or written in a chunk whose water is not in place (an unloaded chunk reads as air, and water written
+  there would carve its ground away when it loads; one not meshed yet lacks the sea's flags, which the flood would copy
+  into the edit layer): the flood stops at it
 - Bounded by `MaxVoxelsPerFrame` (default 512) for smooth "water filling" effect
 - Total limit of `MaxPropagationVoxels` (default 8192) per flood event
+- Each frame's flags are one system edit operation (the source the caller had set is restored after it); its broadcast
+  marks the chunks dirty as any edit's does. It waits while another edit operation is in progress
+- `GetStats()` counts scans, reads, seeds, floods and flooded voxels; the log line `Water propagation done: N voxels
+  flooded from M seeds` ends each flood
 
-**Known issue (world modes review G58, open).** Both steps read voxels with `UVoxelChunkManager::GetVoxelAtWorldPosition`,
-the generated voxels without the edit layer. A voxel the player dug still reads solid there, so a dig under the sea finds
-no seed and never floods; and a flood would set each voxel to its generated value plus the flag, undoing an edit there.
-Only edits with a radius (brushes) are scanned for seeds; operations of single-voxel edits report none.
+Until 2026-10-20 both steps read the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel the
+player dug still read solid, so a dig under the sea never flooded, and a flood would have set each voxel to its generated
+value plus the flag, undoing an edit there; only brushes were scanned, a flagged fill counted as water, an unloaded chunk
+read as air, and keys ignored `WorldOrigin` (world modes review G58, WORLD_MODES_REVIEW_PLAN.md §19.14). Tests: `VoxelWorlds.Streaming.WaterPropagation.Plane`, `.Planet`.
+
+**Still on the generated voxels (G59).** The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a
+chunk's mesh completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only. Water that a
+flood put in the edit layer draws no tile (a channel dug inland from the shore below sea level is flagged but shows no
+water surface), and a flood does not continue into a chunk that loads after it.
 
 ### On a Planet (spherical SP-B8)
 
@@ -441,18 +473,19 @@ When `WaterMeshMaterial` is null, the system falls back to a static water plane 
 ### Terrain Edit to Water Fill
 
 ```
-[1] Player digs terrain
+[1] An edit (player dig, system batch, undo, clear, load)
     ↓
 [2] UVoxelWaterPropagation::OnChunkEdited()
-    ↓ Scan edit sphere for dry air adjacent to water
-    ↓ Seed BFS queue
+    ↓ Queue the voxels the edit changed in the chunk (GetBroadcastEditBounds), clipped to below the sea
+    ↓ (a chunk whose water is not in place: kept until OnChunkWaterSettled)
     ↓
-[3] ProcessPropagation() (bounded per frame, 512 voxels)
-    ├─ BFS flood fill from seeds
-    ├─ Set water flags on eligible air voxels
-    └─ Mark affected chunks dirty
+[3] ProcessPropagation() (per frame)
+    ├─ Scan the queued boxes (32,768 reads): edit-merged dry air with a water neighbour → seeds
+    ├─ BFS flood fill from seeds (512 voxels)
+    ├─ Set the flag on each voxel as it is (edit layer, EEditMode::Set)
+    └─ The operation's broadcast marks the chunks dirty
     ↓
-[4] Chunks remesh → water tiles update (steps 3-5 above)
+[4] Chunks remesh (the water tiles read the generated voxels: G59)
 ```
 
 ---
