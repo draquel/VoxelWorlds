@@ -433,7 +433,7 @@ See: [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) for complete details.
 
 See: [WATER_SYSTEM.md](WATER_SYSTEM.md) for complete details.
 
-**Per-voxel water flags** stored in `FVoxelData::Metadata` bit 4, set during generation via column-scan and propagated across chunk boundaries. When terrain edits expose air adjacent to water, `UVoxelWaterPropagation` performs bounded BFS flood fill.
+**Per-voxel water flags** stored in `FVoxelData::Metadata` bit 4, set during generation via column-scan and propagated across chunk boundaries. When terrain edits expose air adjacent to water, `UVoxelWaterPropagation` performs bounded BFS flood fill, writing the flags through the edit layer (G58); the tiles read a chunk with edits edit-merged, and a flood crosses into a chunk that loads after it through face scans when the chunk's water settles (G59).
 
 **2D Water Tiles** (`FIntVector2`-keyed) aggregate water from multiple Z-level chunks per XY column. `FVoxelWaterMesher` builds column masks, dilates by 3 cells for shoreline overlap, and greedy-merges into minimal quads.
 

@@ -122,12 +122,17 @@ During chunk generation, `ApplyWaterFillPass()` performs a CPU column-scan:
 **File**: `VoxelStreaming/Private/VoxelChunkManager.cpp`
 **Method**: `PropagateWaterFromNeighbors()`
 
-Called after chunk generation completes, before water tile update. Ensures consistent water flags across chunk boundaries:
+Called at each mesh submit of a chunk, before its water tile update. Ensures consistent water flags across chunk boundaries:
 
 1. For each of 6 face neighbors (+X, -X, +Y, -Y, +Z, -Z):
 2. Check boundary voxels: if our voxel is dry air below water level AND neighbor has water flag
 3. Seed the voxel and BFS flood fill within the chunk
 4. Returns true if any propagation occurred (triggers remeshing)
+
+It reads and writes the chunk's **generated** voxels (`FChunkDescriptor`), not the edit layer. Water an edit-driven
+flood put in the edit layer crosses chunk faces through `UVoxelWaterPropagation` instead (the chunk-arrival face scans
+below, G59). When it writes flags it drops the chunk's edit-merged snapshot (`GetEditMergedSnapshot`), which it does not
+version, so the water tile reads them.
 
 ### Edit-Triggered Propagation
 
@@ -155,7 +160,15 @@ generation's fill pass tests it.
   mesh since the data arrived, which runs `PropagateWaterFromNeighbors`. A chunk wholly under a heightmap sea has no water
   flags before that (generation's column scan seeds only the chunk holding the water level). An edit of a chunk that is
   not settled (a POI's terraform or a dungeon stamp at stream-in, a save's edits, a chunk generated but not meshed yet)
-  waits: its box is kept until the chunk manager calls `OnChunkWaterSettled` at that mesh submit, then queued.
+  waits: its box is kept until the chunk manager calls `OnChunkWaterSettled` at that mesh submit (once per arrival of
+  the chunk's voxel data), then queued.
+- **Chunk arrival** (G59): a flood stops at a chunk whose water is not in place, and a dig's scan finds no water there;
+  so when a chunk's water settles, `OnChunkWaterSettled` also queues the faces it shares with chunks whose water is in
+  place, where either chunk has edits and the face reaches below the sea. The scan (`ScanPendingFaces`, after the edit
+  boxes within the same read budget) takes each pair of voxels across the face with an edit on either side: one dry air
+  below the sea, the other water-flagged air, makes the dry one a seed. A flood that stopped at the chunk continues into
+  it, and a pocket dug beside it floods from the water it loaded with. A pair neither edit touched holds the generated
+  water, as `PropagateWaterFromNeighbors` left it.
 - The propagation's own batches are not scanned: their voxels took the flag, and their neighbours are already its
   frontier (a new seed also restarts the flood's budget, so scanning them would never let a capped flood stop).
 
@@ -170,18 +183,21 @@ generation's fill pass tests it.
 - Total limit of `MaxPropagationVoxels` (default 8192) per flood event
 - Each frame's flags are one system edit operation (the source the caller had set is restored after it); its broadcast
   marks the chunks dirty as any edit's does. It waits while another edit operation is in progress
-- `GetStats()` counts scans, reads, seeds, floods and flooded voxels; the log line `Water propagation done: N voxels
-  flooded from M seeds` ends each flood
+- `GetStats()` counts scans, reads, seeds (`FaceSeeds` of them from the face scans, `FaceScansQueued` faces), floods and
+  flooded voxels, and times the scans (`ScanSeconds`, `MaxFrameScanSeconds`); `voxel.Water.Stats [x y | pawn]` logs them
+  and the water tile's column there (`UVoxelChunkManager::GetWaterTileColumn`: the chunk layers that mark it wet); the log
+  line `Water propagation done: N voxels flooded from M seeds` ends each flood
 
 Until 2026-10-20 both steps read the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel the
 player dug still read solid, so a dig under the sea never flooded, and a flood would have set each voxel to its generated
 value plus the flag, undoing an edit there; only brushes were scanned, a flagged fill counted as water, an unloaded chunk
 read as air, and keys ignored `WorldOrigin` (world modes review G58, WORLD_MODES_REVIEW_PLAN.md §19.14). Tests: `VoxelWorlds.Streaming.WaterPropagation.Plane`, `.Planet`.
 
-**Still on the generated voxels (G59).** The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a
-chunk's mesh completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only. Water that a
-flood put in the edit layer draws no tile (a channel dug inland from the shore below sea level is flagged but shows no
-water surface), and a flood does not continue into a chunk that loads after it.
+**The flood's water elsewhere (G59).** A flood's water lives in the edit layer. The 2D water tiles build a chunk with
+edits from its edit-merged voxels (`UpdateWaterTileContribution`, below), so a channel dug inland from the shore below sea
+level draws its water surface once it floods; and the chunk-arrival face scans above carry a flood into a chunk that
+loads after it. Until 2026-10-20 both read the generated voxels only (world modes review G59, WORLD_MODES_REVIEW_PLAN.md
+§19.15). Tests: `VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Plane`, `.Planet`, `.Tiles.Plane`.
 
 ### On a Planet (spherical SP-B8)
 
@@ -325,8 +341,9 @@ TSet<FIntVector2> DirtyWaterTileSet;  // O(1) duplicate check
 
 ### Lifecycle
 
-**Chunk loads** → `UpdateWaterTileContribution(ChunkCoord)`:
-1. Build partial mask from chunk voxel data via `BuildColumnMask()`
+**Chunk loads or re-meshes** → `UpdateWaterTileContribution(ChunkCoord)`:
+1. Build partial mask from chunk voxel data via `BuildColumnMask()`: the edit-merged snapshot when the chunk has edits
+   (`GetEditMergedSnapshot`; an edit-driven flood's water is in the edit layer, G59), else the generated voxels
 2. Store mask in `WaterTiles[XY].PartialMasks[Z]`
 3. Mark tile dirty, enqueue for processing
 
@@ -455,7 +472,7 @@ When `WaterMeshMaterial` is null, the system falls back to a static water plane 
     ↓ Cross-chunk boundary BFS flood fill
     ↓
 [4] UpdateWaterTileContribution()
-    ├─ BuildColumnMask() → bool[ChunkSize²]
+    ├─ BuildColumnMask() → bool[ChunkSize²] (edit-merged for a chunk with edits)
     └─ Store in WaterTiles[XY].PartialMasks[Z]
     ↓ Mark dirty → enqueue
     ↓
@@ -485,7 +502,10 @@ When `WaterMeshMaterial` is null, the system falls back to a static water plane 
     ├─ Set the flag on each voxel as it is (edit layer, EEditMode::Set)
     └─ The operation's broadcast marks the chunks dirty
     ↓
-[4] Chunks remesh (the water tiles read the generated voxels: G59)
+[4] Chunks remesh; their water tiles read the edit-merged voxels (G59)
+    ↓
+[5] A chunk whose water settles later (loads, or meshes for the first time)
+    └─ OnChunkWaterSettled(): its faces with settled chunks, an edit on either side → seeds → [3]
 ```
 
 ---
