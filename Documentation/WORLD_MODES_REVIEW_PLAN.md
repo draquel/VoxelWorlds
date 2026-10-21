@@ -7278,8 +7278,9 @@ interleaved; tags `g44b_L_n{0,1}_gc_r{1,2,3}`):
 **Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 567/567 headless (564 +
 the three above) and 567/567 in the editor with the GPU tests running (the generation parity tests,
 `Meshing.MarchingCubes.CPUvsGPU`, `GPUNoiseGeneratorAsync`), no device loss; the 108 GPU parity lines CRC-identical to
-the demo caves' (no generation change). The seam and closure tests (`Meshing.DualContour.*`, 23 including the ring
-bit-match and mixed-seam suites, and `Streaming.{Planet,Plane}.ClosedSurface`) pass unchanged.
+the demo caves' (no generation change). After merging main with G60 (draquel/VoxelWorlds#128): 570/570 headless. The
+seam and closure tests (`Meshing.DualContour.*`, 23 including the ring bit-match and mixed-seam suites, and
+`Streaming.{Planet,Plane}.ClosedSurface`) pass unchanged.
 
 **New finding** (in §14.1):
 
