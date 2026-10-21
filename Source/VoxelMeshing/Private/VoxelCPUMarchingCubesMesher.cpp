@@ -28,6 +28,28 @@ TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
 	TEXT("MC LOD-seam geomorph ramp width, in coarse cells. Larger = gentler ramp, more fine detail traded."),
 	ECVF_Default);
 
+// voxel.Mesh.VoxelShadingNormals (VoxelCPUDualContourMesher.cpp): both smooth meshers' vertex normals at LOD > 0.
+extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
+
+/**
+ * Vertex normals of strided cells (G61, WORLD_MODES_REVIEW_PLAN.md §14.1 and §20.9; Dual Contouring's G44 in §20.8).
+ *
+ * Generated density saturates a voxel either side of the surface (SignedDistanceToDensity), so the stride-scale gradient
+ * (CalculateGradientNormalLOD: taps Stride voxels either side) reads 0 or 255 on every axis the surface crosses within
+ * them: at stride 4 each component becomes a sign and the normal snaps toward the nearest of the 26 cube directions (LOD 2
+ * leaning toward the cube diagonals on a planet, snapped slopes on a heightmap). Every LOD's data is at voxel resolution,
+ * so an edge vertex's normal at stride > 1 is LOD 0's at the voxel crossing on its edge nearest it
+ * (CalculateEdgeShadingNormal). Positions are unchanged, so seams and the boundary geomorph are unaffected.
+ */
+namespace VoxelMCShading
+{
+	/** voxel.Mesh.VoxelShadingNormals for a vertex of this stride (always false at stride 1: LOD 0 is the reference). */
+	static bool UseVoxelShadingNormals(int32 Stride)
+	{
+		return Stride > 1 && CVarVoxelShadingNormals.GetValueOnAnyThread() != 0;
+	}
+}
+
 FVoxelCPUMarchingCubesMesher::FVoxelCPUMarchingCubesMesher()
 {
 }
@@ -611,12 +633,15 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	const int32 VertexCount = CellData.GetVertexCount();
 	const uint16* VertexDataRow = TransvoxelTables::RegularVertexData[CaseIndex];
 	FVector3f CellVertices[12];
+	int32 VertexCorners[12][2];
 
 	for (int32 i = 0; i < VertexCount; i++)
 	{
 		const uint16 VertexCode = VertexDataRow[i];
 		const int32 CornerA = VertexCode & 0x0F;
 		const int32 CornerB = (VertexCode >> 4) & 0x0F;
+		VertexCorners[i][0] = CornerA;
+		VertexCorners[i][1] = CornerB;
 
 		if (CornerA == CornerB)
 		{
@@ -639,6 +664,28 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	if (TransitionMask != 0)
 	{
 		ApplyBoundaryMorph(Request, Stride, TransitionMask, CellVertices, VertexCount);
+	}
+
+	// Vertex normals. G61: at stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge (a function of the
+	// edge alone, so the geomorph does not change it); otherwise the stride-scale gradient at the vertex, as before.
+	const bool bVoxelShading = VoxelMCShading::UseVoxelShadingNormals(Stride);
+	FVector3f CellNormals[12];
+	for (int32 i = 0; i < VertexCount; i++)
+	{
+		// Per component (FVector3f's operator/ multiplies by the reciprocal): the normals before G61 bit for bit.
+		const FVector3f VertexVoxel(CellVertices[i].X / VoxelSize, CellVertices[i].Y / VoxelSize, CellVertices[i].Z / VoxelSize);
+		if (bVoxelShading)
+		{
+			const FIntVector& OffsetA = LengyelCornerOffsets[VertexCorners[i][0]];
+			const FIntVector& OffsetB = LengyelCornerOffsets[VertexCorners[i][1]];
+			CellNormals[i] = CalculateEdgeShadingNormal(Request,
+				FIntVector(X, Y, Z) + OffsetA * Stride, FIntVector(X, Y, Z) + OffsetB * Stride,
+				CornerDensities[VertexCorners[i][0]], CornerDensities[VertexCorners[i][1]], VertexVoxel, Stride);
+		}
+		else
+		{
+			CellNormals[i] = CalculateGradientNormalLOD(Request, VertexVoxel.X, VertexVoxel.Y, VertexVoxel.Z, Stride);
+		}
 	}
 
 	// Emit triangles using CellData triangle indices
@@ -667,13 +714,9 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 		const FVector3f& P1 = CellVertices[Idx1];
 		const FVector3f& P2 = CellVertices[Idx2];
 
-		// Calculate normals using gradient of density field
-		const FVector3f N0 = CalculateGradientNormalLOD(Request,
-			P0.X / VoxelSize, P0.Y / VoxelSize, P0.Z / VoxelSize, Stride);
-		const FVector3f N1 = CalculateGradientNormalLOD(Request,
-			P1.X / VoxelSize, P1.Y / VoxelSize, P1.Z / VoxelSize, Stride);
-		const FVector3f N2 = CalculateGradientNormalLOD(Request,
-			P2.X / VoxelSize, P2.Y / VoxelSize, P2.Z / VoxelSize, Stride);
+		const FVector3f& N0 = CellNormals[Idx0];
+		const FVector3f& N1 = CellNormals[Idx1];
+		const FVector3f& N2 = CellNormals[Idx2];
 
 		// Dominant-axis UV projection based on face normal
 		const FVector3f FaceNormal = FVector3f::CrossProduct(P1 - P0, P2 - P0).GetSafeNormal();
@@ -1384,6 +1427,68 @@ FVector3f FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD(
 	}
 
 	return Normal;
+}
+
+FVector3f FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal(
+	const FVoxelMeshingRequest& Request,
+	const FIntVector& EndA, const FIntVector& EndB,
+	float DensityA, float DensityB,
+	const FVector3f& FallbackPosition,
+	int32 FallbackStride) const
+{
+	const FIntVector Delta = EndB - EndA;
+	const int32 Axis = (Delta.X != 0) ? 0 : (Delta.Y != 0) ? 1 : 2;
+	const int32 Length = FMath::Abs(Delta[Axis]);
+	const int32 OffAxes = (Delta.X != 0 ? 1 : 0) + (Delta.Y != 0 ? 1 : 0) + (Delta.Z != 0 ? 1 : 0);
+	if (Length == 0 || OffAxes != 1)
+	{
+		return CalculateGradientNormalLOD(Request, FallbackPosition.X, FallbackPosition.Y, FallbackPosition.Z, FallbackStride);
+	}
+
+	// Walk from the edge's min end, so every cell sharing the edge reads it in one order.
+	const bool bAFirst = Delta[Axis] > 0;
+	const FIntVector Lo = bAFirst ? EndA : EndB;
+	const float DLo = bAFirst ? DensityA : DensityB;
+	const float DHi = bAFirst ? DensityB : DensityA;
+	const float IsoLevel = Config.IsoLevel;
+
+	// The vertex's place on the edge (voxels from Lo), as InterpolateEdge puts it.
+	const float VertexT = (FMath::Abs(DHi - DLo) < KINDA_SMALL_NUMBER)
+		? 0.5f : FMath::Clamp((IsoLevel - DLo) / (DHi - DLo), 0.0f, 1.0f);
+	const float VertexAlong = VertexT * static_cast<float>(Length);
+
+	// The voxel step whose crossing lies nearest the vertex (the first on a tie): LOD 0's vertex on that step.
+	FIntVector P = Lo;
+	float D0 = DLo;
+	float BestAlong = -1.0f;
+	float BestDist = TNumericLimits<float>::Max();
+	for (int32 Step = 0; Step < Length; ++Step)
+	{
+		FIntVector N = P;
+		++N[Axis];
+		const float D1 = (Step + 1 == Length) ? DHi : GetDensityAt(Request, N.X, N.Y, N.Z);
+		if ((D0 >= IsoLevel) != (D1 >= IsoLevel))
+		{
+			const float T = FMath::Clamp((IsoLevel - D0) / (D1 - D0), 0.0f, 1.0f);
+			const float Along = static_cast<float>(Step) + T;
+			const float Dist = FMath::Abs(Along - VertexAlong);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				BestAlong = Along;
+			}
+		}
+		P = N;
+		D0 = D1;
+	}
+	if (BestAlong < 0.0f)
+	{
+		return CalculateGradientNormalLOD(Request, FallbackPosition.X, FallbackPosition.Y, FallbackPosition.Z, FallbackStride);
+	}
+
+	FVector3f Crossing(static_cast<float>(Lo.X), static_cast<float>(Lo.Y), static_cast<float>(Lo.Z));
+	Crossing[Axis] += BestAlong;
+	return CalculateGradientNormal(Request, Crossing.X, Crossing.Y, Crossing.Z);
 }
 
 uint8 FVoxelCPUMarchingCubesMesher::GetDominantMaterialLOD(
@@ -2479,6 +2584,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	//   C (0xC): Interior corner 3 (sample index 12)
 	TArray<FVector3f> CellVertices;
 	TArray<bool> VertexOnOuterFace;  // true = both endpoints are coarse corners (9-12), i.e. on the outer/coarse face — use CoarserStride for normals
+	int32 VertexSamples[12][2];      // each vertex's edge (sample indices), for its normal at stride > 1 (G61)
 	CellVertices.Reserve(VertexCount);
 	VertexOnOuterFace.Reserve(VertexCount);
 	bool bHasClampedVertices = false;
@@ -2585,6 +2691,8 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			return false;
 		}
 
+		VertexSamples[CellVertices.Num()][0] = SampleA;
+		VertexSamples[CellVertices.Num()][1] = SampleB;
 		CellVertices.Add(VertexPos);
 		// "Outer face" = the coarse boundary face, whose vertices lie between coarse
 		// corners (samples 9-12). Those use the coarser stride for normals so they match
@@ -2638,6 +2746,18 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		? FColor(255, 128, 0, 255)  // Orange for transition cells
 		: FColor(MaterialID, BiomeID, 0, 255);
 
+	// A sample's voxel (GetTransitionCellDensities' sampling: the depth axis pinned to the boundary plane, offsets of
+	// 0, 0.5 and 1 coarse cells on the face axes, integers since CoarserStride is even).
+	auto SampleVoxel = [&](int32 Sample) -> FIntVector
+	{
+		const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][Sample];
+		FIntVector V(X + FMath::RoundToInt32(Offset.X * static_cast<float>(Stride)),
+			Y + FMath::RoundToInt32(Offset.Y * static_cast<float>(Stride)),
+			Z + FMath::RoundToInt32(Offset.Z * static_cast<float>(Stride)));
+		V[DepthAxis] = BoundaryDepthCoord;
+		return V;
+	};
+
 	// Add vertices to mesh
 	const uint32 BaseIndex = OutMeshData.Positions.Num();
 
@@ -2649,9 +2769,16 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		// Calculate normal using gradient — match the stride of the adjacent mesh:
 		// Outer face vertices use CoarserStride (matches coarser neighbor MC normals),
 		// interior/depth vertices use CurrentStride (matches finer chunk MC normals).
+		// G61: at a stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge, as the coincident vertex of the
+		// fine or the coarse MC cell on that edge gets it.
 		const int32 NormalStride = VertexOnOuterFace[i] ? Stride : CurrentStride;
-		const FVector3f Normal = CalculateGradientNormalLOD(Request,
-			Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize, NormalStride);
+		const FVector3f PosVoxel(Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize);
+		const int32 SampleA = VertexSamples[i][0];
+		const int32 SampleB = VertexSamples[i][1];
+		const FVector3f Normal = VoxelMCShading::UseVoxelShadingNormals(NormalStride)
+			? CalculateEdgeShadingNormal(Request, SampleVoxel(SampleA), SampleVoxel(SampleB), Densities[SampleA], Densities[SampleB],
+				PosVoxel, NormalStride)
+			: CalculateGradientNormalLOD(Request, PosVoxel.X, PosVoxel.Y, PosVoxel.Z, NormalStride);
 		OutMeshData.Normals.Add(Normal);
 
 		// UV mapping (triplanar-style based on normal)
@@ -2744,6 +2871,9 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 
 			// Folded triangle detection: RENDERED face normal vs gradient at centroid
 			// Account for winding reversal to avoid false positives
+			// (The stride-scale gradient on purpose, not G61's voxel-crossing normal: a coarse centroid can lie more than a
+			// voxel off the surface, where LOD 0's taps all read saturated density; the sign-snapped direction is enough
+			// for a test against a fold of more than ~95 degrees.)
 			if (bDebugLogAnomalies || bCollectDebugVisualization)
 			{
 				const FVector3f TableNormal = FVector3f::CrossProduct(V1 - V0, V2 - V0);

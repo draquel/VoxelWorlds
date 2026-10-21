@@ -116,6 +116,7 @@ namespace VoxelPlanetStreamingTestUtils
 		float ChunkWorld = PlanetStreamChunkWorld;
 		float Relief = 1600.0f;  // the terrain's height scale (planet and plane), set before Start
 		int32 Octaves = 3;       // the terrain noise's octaves, set before Start
+		EMeshingMode MeshingMode = EMeshingMode::DualContouring; // set before Start
 
 		void Start(const TCHAR* WorldName, const FVector& ViewerDirection, float ViewerAltitude)
 		{
@@ -127,7 +128,7 @@ namespace VoxelPlanetStreamingTestUtils
 			Config->BaseHeight = 0.0f;
 			Config->PlanetMaxTerrainHeight = 1000.0f;
 			Config->PlanetMaxTerrainDepth = 1000.0f;
-			Config->MeshingMode = EMeshingMode::DualContouring;
+			Config->MeshingMode = MeshingMode;
 			Config->bEnableLOD = true;
 			Config->ChunkSize = PlanetStreamChunkSize;
 			Config->VoxelSize = PlanetStreamVoxelSize;
@@ -170,7 +171,7 @@ namespace VoxelPlanetStreamingTestUtils
 			Config->WorldOrigin = FVector::ZeroVector;
 			Config->HeightScale = Relief;
 			Config->BaseHeight = 0.0f;
-			Config->MeshingMode = EMeshingMode::DualContouring;
+			Config->MeshingMode = MeshingMode;
 			Config->bEnableLOD = true;
 			Config->ChunkSize = 16;
 			Config->VoxelSize = VoxelSize;
@@ -1033,14 +1034,16 @@ namespace VoxelPlanetStreamingTestUtils
 	};
 
 	/**
-	 * Streams one place with the normals before G44 (voxel.Mesh.VoxelShadingNormals 0) and as they are (1) and measures
-	 * both. Positions are the same either way (the QEF keeps the stride-scale normals), so the vertex counts must agree.
-	 * With gentle relief (bStrictBound) the current normals meet LODNormalsMatch and the old ones do not; with the default
-	 * relief, whose finest octave LOD 2 cannot resolve, LOD 1 and 2 come closer to the analytic normals than before.
+	 * Streams one place with the normals before G44 (Dual Contouring) or G61 (Marching Cubes) (voxel.Mesh.VoxelShadingNormals
+	 * 0) and as they are (1) and measures both. Positions are the same either way (DC's QEF keeps the stride-scale normals,
+	 * MC's edge interpolation never read them), so the vertex counts must agree. With gentle relief (bStrictBound) the
+	 * current normals meet LODNormalsMatch and the old ones do not; with the default relief, whose finest octave LOD 2
+	 * cannot resolve, LOD 1 and 2 come closer to the analytic normals than before.
 	 */
 	void RunLODNormalsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
-		const FVector& Sun, float Relief, int32 Octaves, bool bStrictBound)
+		const FVector& Sun, float Relief, int32 Octaves, bool bStrictBound, EMeshingMode MeshingMode = EMeshingMode::DualContouring)
 	{
+		const TCHAR* Finding = (MeshingMode == EMeshingMode::MarchingCubes) ? TEXT("G61") : TEXT("G44");
 		FLODNormalStats Before, After;
 		for (int32 Mode = 0; Mode < 2; ++Mode)
 		{
@@ -1048,12 +1051,13 @@ namespace VoxelPlanetStreamingTestUtils
 			FPlanetStreamingWorld World;
 			World.Relief = Relief;
 			World.Octaves = Octaves;
+			World.MeshingMode = MeshingMode;
 			Start(World);
 			Test.TestTrue(*FString::Printf(TEXT("%s (normals %d): the pipeline settled"), Place, Mode), World.Settle());
 			(Mode == 0 ? Before : After) = MeasureLODNormals(World, Sun);
 			World.Stop();
 		}
-		Test.AddInfo(FString::Printf(TEXT("%s, before G44: %s"), Place, *Before.Describe()));
+		Test.AddInfo(FString::Printf(TEXT("%s, before %s: %s"), Place, Finding, *Before.Describe()));
 		Test.AddInfo(FString::Printf(TEXT("%s, after: %s"), Place, *After.Describe()));
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
@@ -1071,15 +1075,15 @@ namespace VoxelPlanetStreamingTestUtils
 			Test.TestTrue(*FString::Printf(TEXT("%s: LOD 1 and 2 normals match LOD 0's against the analytic surface %s"), Place, *Why), bAfterMatches);
 			FString WhyBefore;
 			const bool bBeforeMatches = LODNormalsMatch(Before, WhyBefore);
-			Test.TestFalse(*FString::Printf(TEXT("%s: the stride-scale normals before G44 fail the bound"), Place), bBeforeMatches);
-			Test.AddInfo(FString::Printf(TEXT("%s, before G44 fails on: %s"), Place, *WhyBefore));
+			Test.TestFalse(*FString::Printf(TEXT("%s: the stride-scale normals before %s fail the bound"), Place, Finding), bBeforeMatches);
+			Test.AddInfo(FString::Printf(TEXT("%s, before %s fails on: %s"), Place, Finding, *WhyBefore));
 			return;
 		}
 		// Brightness is reported, not bounded, here: with an octave finer than LOD 2's cells it is the coarse triangles'
 		// interpolation (the far field's quads near the window do the same with the analytic normals), not the estimator.
 		for (int32 LOD = 1; LOD < 3; ++LOD)
 		{
-			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d's mean angle %.2f below the %.2f before G44"), Place, LOD, After.MeanAngle(LOD), Before.MeanAngle(LOD)),
+			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d's mean angle %.2f below the %.2f before %s"), Place, LOD, After.MeanAngle(LOD), Before.MeanAngle(LOD), Finding),
 				After.MeanAngle(LOD) < Before.MeanAngle(LOD));
 		}
 	}
@@ -1138,6 +1142,66 @@ bool FVoxelPlaneStreamingLODNormalsTest::RunTest(const FString& Parameters)
 	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneLODNormalsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
 	RunLODNormalsPlace(*this, TEXT("plane east, gentle"), Start, FVector::UpVector, 400.0f, 1, true);
 	RunLODNormalsPlace(*this, TEXT("plane east"), Start, FVector::UpVector, 1600.0f, 3, false);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G61 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.9): G44 in Marching Cubes. Its LOD 1 and 2 vertex normals were the
+// central-difference gradient with taps a stride apart (CalculateGradientNormalLOD, CPU and GPU) on the same saturated
+// density, so they snapped toward the cube directions too; now each edge vertex takes LOD 0's normal at the voxel
+// crossing on its edge. The same places, reliefs and bounds as the Dual Contouring tests, on MC worlds.
+// ---------------------------------------------------------------------------
+
+/**
+ * G61 on a planet: Marching Cubes chunk meshes and seam buckets from viewers at 45N 20E and on the equator, with gentle
+ * relief LOD 1 and 2 normals as close to the analytic surface's as LOD 0's (no tilt, no brightness step under the local
+ * noon sun), which voxel.Mesh.VoxelShadingNormals 0 (the stride-scale normals before G61) fails; with the streaming tests'
+ * relief they come closer than before.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingLODNormalsMCTest,
+	"VoxelWorlds.Streaming.Planet.LODNormalsMC",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingLODNormalsMCTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Direction = [](double LatDeg, double LonDeg)
+	{
+		const double Lat = FMath::DegreesToRadians(LatDeg);
+		const double Lon = FMath::DegreesToRadians(LonDeg);
+		return FVector(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	};
+	const TPair<const TCHAR*, FVector> Places[] = {
+		{ TEXT("MC 45N 20E"), Direction(45.0, 20.0) },
+		{ TEXT("MC equator"), Direction(1.0, 1.5) },
+	};
+	for (const TPair<const TCHAR*, FVector>& Place : Places)
+	{
+		const FVector Sun = FVector(Place.Value.X, Place.Value.Y, 0.0).GetSafeNormal();
+		auto Start = [&Place](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetLODNormalsMCTestWorld"), Place.Value, 300.0f); };
+		RunLODNormalsPlace(*this, *FString::Printf(TEXT("%s, gentle"), Place.Key), Start, Sun, 400.0f, 2, true, EMeshingMode::MarchingCubes);
+		RunLODNormalsPlace(*this, Place.Key, Start, Sun, 1600.0f, 3, false, EMeshingMode::MarchingCubes);
+	}
+	return true;
+}
+
+/**
+ * G61 on a heightmap world: the Plane.LODNormals places with Marching Cubes. Gentle hills: LOD 1 and 2 normals as close
+ * to the analytic surface's as LOD 0's, which the stride-scale normals before G61 fail; the closed-surface test's hills:
+ * closer to the analytic normals than before.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingLODNormalsMCTest,
+	"VoxelWorlds.Streaming.Plane.LODNormalsMC",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneStreamingLODNormalsMCTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneLODNormalsMCTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunLODNormalsPlace(*this, TEXT("MC plane east, gentle"), Start, FVector::UpVector, 400.0f, 1, true, EMeshingMode::MarchingCubes);
+	RunLODNormalsPlace(*this, TEXT("MC plane east"), Start, FVector::UpVector, 1600.0f, 3, false, EMeshingMode::MarchingCubes);
 	return true;
 }
 

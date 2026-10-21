@@ -5,14 +5,16 @@
 #include "QEFSolver.h"
 #include "HAL/IConsoleManager.h"
 
-static TAutoConsoleVariable<int32> CVarDCVoxelShadingNormals(
+// Shared with the Marching Cubes meshers (VoxelCPUMarchingCubesMesher.cpp, VoxelGPUMarchingCubesMesher.cpp: G61).
+TAutoConsoleVariable<int32> CVarVoxelShadingNormals(
 	TEXT("voxel.Mesh.VoxelShadingNormals"),
 	1,
-	TEXT("Dual Contouring vertex normals at LOD > 0 (G44): 1 = LOD 0's normal of the voxel cell where the surface crosses ")
-	TEXT("the cell's edges nearest the vertex (default); 0 = the average of the gradients at the cell's stride, as before ")
-	TEXT("G44 (their taps read the saturated density, so LOD 2 leans toward the cube diagonals: a brighter ring on ")
-	TEXT("planets). Vertex positions are the same either way. Set it before chunks mesh: interior meshes and seam rings ")
-	TEXT("read it per job."),
+	TEXT("Smooth meshing's vertex normals at LOD > 0: 1 = LOD 0's normals at voxel resolution (default): Dual Contouring ")
+	TEXT("(G44) takes the normal of the voxel cell where the surface crosses the cell's edges nearest the vertex, Marching ")
+	TEXT("Cubes (G61) the gradient at the voxel crossing on the vertex's edge nearest it; 0 = the gradients at the cell's ")
+	TEXT("stride, as before (their taps read the saturated density, so LOD 2 leans toward the cube diagonals: a brighter ")
+	TEXT("ring on planets). Vertex positions are the same either way. Set it before chunks mesh: interior meshes and seam ")
+	TEXT("jobs read it per job."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarDCScaleClampedGradients(
@@ -95,7 +97,7 @@ namespace VoxelDCShading
 	/** voxel.Mesh.VoxelShadingNormals for a cell of this stride (always false at stride 1: LOD 0 is the reference). */
 	static bool UseVoxelShadingNormals(int32 Stride)
 	{
-		return Stride > 1 && CVarDCVoxelShadingNormals.GetValueOnAnyThread() != 0;
+		return Stride > 1 && CVarVoxelShadingNormals.GetValueOnAnyThread() != 0;
 	}
 
 	/** Where a strided edge's surface crosses at voxel resolution, and the voxel cell inside the strided cell there. */

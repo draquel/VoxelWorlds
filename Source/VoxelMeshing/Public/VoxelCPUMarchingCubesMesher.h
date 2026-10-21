@@ -352,6 +352,26 @@ private:
 		int32 Stride) const;
 
 	/**
+	 * The vertex normal of an edge vertex at stride > 1 (G61): LOD 0's normal (CalculateGradientNormal) at the
+	 * voxel-resolution crossing on the edge nearest the vertex, so a strided cell shades like the voxel cells it spans.
+	 * A pure function of the edge (walked from its min end), so every cell and ribbon sharing the edge gives its vertex
+	 * the same normal. Reads only voxels on the edge and one voxel around its crossing.
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param EndA, EndB The edge's endpoints (voxels); they differ along one axis
+	 * @param DensityA, DensityB The densities at EndA and EndB, which the vertex was interpolated from
+	 * @param FallbackPosition The vertex (voxels), for an edge that is not axis-aligned or has no voxel crossing
+	 * @param FallbackStride The stride CalculateGradientNormalLOD takes at FallbackPosition in that case
+	 * @return Unit normal vector pointing away from solid
+	 */
+	FVector3f CalculateEdgeShadingNormal(
+		const FVoxelMeshingRequest& Request,
+		const FIntVector& EndA, const FIntVector& EndB,
+		float DensityA, float DensityB,
+		const FVector3f& FallbackPosition,
+		int32 FallbackStride) const;
+
+	/**
 	 * Get dominant material for an LOD cube from strided corners.
 	 *
 	 * @param Request The meshing request with voxel data

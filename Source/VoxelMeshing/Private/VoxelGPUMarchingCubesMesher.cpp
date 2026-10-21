@@ -21,6 +21,7 @@
 // CPU bake, so both meshers share the same on/off toggle and morph width.
 extern TAutoConsoleVariable<int32> CVarMCBoundaryMorph;
 extern TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth;
+extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
 
 // ==================== Compute Shader Declarations ====================
 
@@ -83,6 +84,7 @@ public:
 		SHADER_PARAMETER(uint32, LODStride)
 		SHADER_PARAMETER(uint32, MCBoundaryMorph)
 		SHADER_PARAMETER(float, MCBoundaryMorphWidth)
+		SHADER_PARAMETER(uint32, VoxelShadingNormals)   // G61: voxel.Mesh.VoxelShadingNormals
 		// Output buffer capacities — overflow protection so cave-dense chunks don't write past the
 		// fixed triangle-soup buffers (which produced invisible-but-collidable chunks). Mirrors the DC mesher.
 		SHADER_PARAMETER(uint32, MaxVertexCount)
@@ -750,6 +752,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				MeshParams->LODStride = LODStride;
 				MeshParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
 				MeshParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
+				MeshParams->VoxelShadingNormals = CVarVoxelShadingNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
 				MeshParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				MeshParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
 
@@ -822,6 +825,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				TParams->LODStride = LODStride;
 				TParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
 				TParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
+				TParams->VoxelShadingNormals = CVarVoxelShadingNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
 				TParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				TParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
 

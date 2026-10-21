@@ -9,6 +9,7 @@
 #include "ChunkRenderData.h"
 #include "RenderingThread.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
+#include "HAL/IConsoleManager.h"
 
 // ==================== Helper Functions ====================
 
@@ -717,5 +718,198 @@ bool FMarchingCubesMeshingPerformanceTest::RunTest(const FString& Parameters)
 	CPUMesher.Shutdown();
 	GPUMesher.Shutdown();
 
+	return true;
+}
+
+
+// ==================== LOD Vertex Normals (G61) ====================
+
+namespace MarchingCubesMeshingTestHelpers
+{
+	/**
+	 * A tilted plane through the chunk's centre (solid below, Normal pointing into the air) whose density saturates a
+	 * voxel either side of the surface, as generated terrain's does (SignedDistanceToDensity), at a given LOD.
+	 */
+	FVoxelMeshingRequest CreateSaturatedPlaneRequest(int32 ChunkSize, int32 LODLevel, const FVector3f& Normal)
+	{
+		FVoxelMeshingRequest Request;
+		Request.ChunkCoord = FIntVector(0, 0, 0);
+		Request.ChunkSize = ChunkSize;
+		Request.VoxelSize = 100.0f;
+		Request.LODLevel = LODLevel;
+		Request.VoxelData.SetNum(ChunkSize * ChunkSize * ChunkSize);
+		const FVector3f Centre(ChunkSize * 0.5f + 0.3f, ChunkSize * 0.5f - 0.2f, ChunkSize * 0.5f + 0.15f);
+		for (int32 Z = 0; Z < ChunkSize; ++Z)
+		{
+			for (int32 Y = 0; Y < ChunkSize; ++Y)
+			{
+				for (int32 X = 0; X < ChunkSize; ++X)
+				{
+					const float Above = FVector3f::DotProduct(FVector3f(static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z)) - Centre, Normal); // voxels into the air
+					const float Density = (FMath::Clamp(-Above, -1.0f, 1.0f) + 1.0f) * 127.5f;
+					Request.VoxelData[X + Y * ChunkSize + Z * ChunkSize * ChunkSize] =
+						FVoxelData(1, static_cast<uint8>(FMath::Clamp(Density, 0.0f, 255.0f)));
+				}
+			}
+		}
+		return Request;
+	}
+
+	/** Sets voxel.Mesh.VoxelShadingNormals at console priority for a scope. */
+	struct FScopedMCVoxelShadingNormals
+	{
+		IConsoleVariable* Var = nullptr;
+		int32 Previous = 1;
+
+		explicit FScopedMCVoxelShadingNormals(int32 Value)
+		{
+			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelShadingNormals"));
+			if (Var)
+			{
+				Previous = Var->GetInt();
+				Var->Set(Value, ECVF_SetByConsole);
+			}
+		}
+
+		~FScopedMCVoxelShadingNormals()
+		{
+			if (Var)
+			{
+				Var->Set(Previous, ECVF_SetByConsole);
+			}
+		}
+	};
+
+	/** Mean angle (degrees) between a mesh's vertex normals and Normal, over vertices more than Margin voxels inside. */
+	double MeanAngleInside(const FChunkMeshData& Mesh, const FVector3f& Normal, float VoxelSize, int32 ChunkSize, float Margin, int32& OutCount)
+	{
+		double Sum = 0.0;
+		OutCount = 0;
+		for (int32 i = 0; i < Mesh.Positions.Num() && i < Mesh.Normals.Num(); ++i)
+		{
+			const FVector3f V = Mesh.Positions[i] / VoxelSize;
+			if (V.GetMin() < Margin || V.GetMax() > ChunkSize - Margin)
+			{
+				continue;
+			}
+			Sum += FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector3f::DotProduct(Mesh.Normals[i].GetSafeNormal(), Normal), -1.0f, 1.0f)));
+			++OutCount;
+		}
+		return OutCount > 0 ? Sum / OutCount : 0.0;
+	}
+}
+
+/**
+ * G61 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.9): on a tilted plane whose density saturates a voxel either side of the
+ * surface, Marching Cubes' LOD 1 and 2 vertex normals are as close to the plane's as LOD 0's (voxel.Mesh.VoxelShadingNormals
+ * 1), where the stride-scale gradient before G61 (0) snaps them toward the cube directions; positions are the same either
+ * way. With a real RHI, the GPU mesher's normals match the CPU's at every LOD in both modes.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingLODNormalsTest, "VoxelWorlds.Meshing.MarchingCubes.LODNormals",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMarchingCubesMeshingLODNormalsTest::RunTest(const FString& Parameters)
+{
+	constexpr int32 ChunkSize = 32;
+	const FVector3f Normal = FVector3f(0.35f, 0.2f, 0.92f).GetSafeNormal();
+
+	FVoxelCPUMarchingCubesMesher CPUMesher;
+	CPUMesher.Initialize();
+	CPUMesher.SetConfig(CreateMCConfig());
+
+	auto MeshGPU = [](FVoxelGPUMarchingCubesMesher& GPUMesher, const FVoxelMeshingRequest& Request, FChunkMeshData& Out)
+	{
+		volatile bool bCompleted = false;
+		FVoxelMeshingHandle Handle = GPUMesher.GenerateMeshAsync(Request,
+			FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool) { bCompleted = true; }));
+		const double StartTime = FPlatformTime::Seconds();
+		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 30.0)
+		{
+			FlushRenderingCommands();
+			GPUMesher.Tick(0.0f);
+			FPlatformProcess::Sleep(0.002f);
+		}
+		const bool bOk = bCompleted && GPUMesher.ReadbackToCPU(Handle, Out);
+		GPUMesher.ReleaseHandle(Handle);
+		return bOk;
+	};
+
+	const bool bGPU = !GUsingNullRHI;
+	FVoxelGPUMarchingCubesMesher GPUMesher;
+	if (bGPU)
+	{
+		GPUMesher.Initialize();
+		GPUMesher.SetConfig(CreateMCConfig());
+	}
+	else
+	{
+		AddInfo(TEXT("GPU half skipped: it needs a real RHI (run without -nullrhi)"));
+	}
+
+	double Angle[2][3] = {};
+	for (int32 Mode = 0; Mode < 2; ++Mode)
+	{
+		FScopedMCVoxelShadingNormals Scoped(Mode);
+		for (int32 LOD = 0; LOD < 3; ++LOD)
+		{
+			const FVoxelMeshingRequest Request = CreateSaturatedPlaneRequest(ChunkSize, LOD, Normal);
+			FChunkMeshData CPUMesh;
+			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: CPU meshing succeeds"), Mode, LOD), CPUMesher.GenerateMeshCPU(Request, CPUMesh));
+			int32 Count = 0;
+			// Away from the chunk's faces, where the taps clamp (no neighbour data here).
+			Angle[Mode][LOD] = MeanAngleInside(CPUMesh, Normal, Request.VoxelSize, ChunkSize, 1.5f * (1 << LOD) + 1.0f, Count);
+			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: vertices measured (%d)"), Mode, LOD, Count), Count > 50);
+
+			if (!bGPU)
+			{
+				continue;
+			}
+			FChunkMeshData GPUMesh;
+			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: GPU meshing and readback succeed"), Mode, LOD), MeshGPU(GPUMesher, Request, GPUMesh));
+			// Each GPU vertex against the CPU vertex at its position (triangle soup: every match carries the cell's normal).
+			TMap<FIntVector, FVector3f> CPUNormals;
+			for (int32 i = 0; i < CPUMesh.Positions.Num(); ++i)
+			{
+				const FVector3f& P = CPUMesh.Positions[i];
+				CPUNormals.Add(FIntVector(FMath::RoundToInt32(P.X), FMath::RoundToInt32(P.Y), FMath::RoundToInt32(P.Z)), CPUMesh.Normals[i]);
+			}
+			int32 Matched = 0;
+			double SumDiff = 0.0, MaxDiff = 0.0;
+			for (int32 i = 0; i < GPUMesh.Positions.Num() && i < GPUMesh.Normals.Num(); ++i)
+			{
+				const FVector3f& P = GPUMesh.Positions[i];
+				const FVector3f* N = CPUNormals.Find(FIntVector(FMath::RoundToInt32(P.X), FMath::RoundToInt32(P.Y), FMath::RoundToInt32(P.Z)));
+				if (!N)
+				{
+					continue;
+				}
+				const double Diff = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector3f::DotProduct(N->GetSafeNormal(), GPUMesh.Normals[i].GetSafeNormal()), -1.0f, 1.0f)));
+				SumDiff += Diff;
+				MaxDiff = FMath::Max(MaxDiff, Diff);
+				++Matched;
+			}
+			AddInfo(FString::Printf(TEXT("Normals %d LOD %d: %d of %d GPU vertices at a CPU vertex, normals %.3f deg apart on average, %.3f at most"),
+				Mode, LOD, Matched, GPUMesh.Positions.Num(), Matched > 0 ? SumDiff / Matched : 0.0, MaxDiff));
+			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: most GPU vertices at a CPU vertex"), Mode, LOD), Matched * 10 >= GPUMesh.Positions.Num() * 9);
+			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: GPU normals match the CPU's (mean %.3f deg)"), Mode, LOD, Matched > 0 ? SumDiff / Matched : 0.0),
+				Matched > 0 && SumDiff / Matched < 0.5);
+		}
+	}
+	AddInfo(FString::Printf(TEXT("Mean angle from the plane's normal, LOD 0/1/2: before G61 %.2f / %.2f / %.2f deg, after %.2f / %.2f / %.2f deg"),
+		Angle[0][0], Angle[0][1], Angle[0][2], Angle[1][0], Angle[1][1], Angle[1][2]));
+	TestTrue(TEXT("LOD 0 is the same in either mode"), FMath::IsNearlyEqual(Angle[0][0], Angle[1][0], 1e-6));
+	for (int32 LOD = 1; LOD < 3; ++LOD)
+	{
+		TestTrue(*FString::Printf(TEXT("LOD %d's normals within a degree of LOD 0's error (%.2f against %.2f)"), LOD, Angle[1][LOD], Angle[1][0]),
+			Angle[1][LOD] <= Angle[1][0] + 1.0);
+	}
+	TestTrue(*FString::Printf(TEXT("The stride-scale normals before G61 snap at LOD 2 (%.2f deg against LOD 0's %.2f)"), Angle[0][2], Angle[0][0]),
+		Angle[0][2] > Angle[0][0] + 3.0);
+
+	if (bGPU)
+	{
+		GPUMesher.Shutdown();
+	}
+	CPUMesher.Shutdown();
 	return true;
 }
