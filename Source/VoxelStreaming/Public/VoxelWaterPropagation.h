@@ -27,6 +27,10 @@ enum class EEditSource : uint8;
  * dry air below the sea beside water across the face, an edit on either side: a flood continues into a chunk that loads
  * after it, and a dug pocket floods when the chunk beside it loads with water (G59). The chunk manager's own pull across
  * faces (PropagateWaterFromNeighbors) reads the generated voxels only.
+ *
+ * The flood's edit operations stay out of the edit manager's undo history (G60): undoing the edit that let the water in
+ * puts that edit's voxels back as they were before it, its flood there included, and a redo of it floods them again. Water
+ * the flood put beyond the edit's own voxels (a cave or a pocket it opened) stays: nothing drains it.
  */
 UCLASS()
 class VOXELSTREAMING_API UVoxelWaterPropagation : public UObject

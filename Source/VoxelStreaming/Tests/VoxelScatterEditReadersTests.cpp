@@ -132,6 +132,31 @@ namespace VoxelScatterEditReadersTest
 	/** An edit inside a chunk (local 10..12 on each axis): no layer another chunk's extraction reads. */
 	bool IsInside(const FIntVector& L) { return L.X >= 10 && L.X < 13 && L.Y >= 10 && L.Y < 13 && L.Z >= 10 && L.Z < 13; }
 
+	/** After a pass's two edits (G60): both undone, then both redone, each settled; the stale cached chunks after each, and the undo steps left after the undos. */
+	struct FUndoRedoAudit
+	{
+		bool bSettled = true;
+		int32 StaleAfterUndo = -1;
+		int32 StaleAfterRedo = -1;
+		int32 UndoStepsAfterUndo = -1;
+	};
+
+	FUndoRedoAudit UndoRedoPass(VoxelTesting::FTestChunkWorld& W)
+	{
+		FUndoRedoAudit A;
+		UVoxelEditManager* Edits = W.Manager->GetEditManager();
+		Edits->Undo();
+		Edits->Undo();
+		A.UndoStepsAfterUndo = Edits->GetUndoCount();
+		A.bSettled = W.Settle() && WaitForScatterIdle(W);
+		A.StaleAfterUndo = Audit(W).Num();
+		Edits->Redo();
+		Edits->Redo();
+		A.bSettled = W.Settle() && WaitForScatterIdle(W) && A.bSettled;
+		A.StaleAfterRedo = Audit(W).Num();
+		return A;
+	}
+
 	/** What one streamed pass measured. */
 	struct FPassResult
 	{
@@ -480,6 +505,12 @@ bool FVoxelScatterEditReadersPlanetTest::RunTest(const FString& Parameters)
 		const FVoxelTerrainSurfacePoint Site = W.Manager->GetSurfacePointAt(W.Config->WorldOrigin + Up);
 		W.SetViewer(Site.Position + Up * 300.0);
 		const FPassResult R = RunPass(*this, W, Rule, FIntVector(0, 0, 0), Find, Edit);
+		// Undo and redo are edits too (G60): the readers re-extract after them, so every cached chunk equals a fresh extraction.
+		FUndoRedoAudit U;
+		if (R.bFound && Rule == 1)
+		{
+			U = UndoRedoPass(W);
+		}
 		W.Stop();
 
 		const TCHAR* Name = Rule ? TEXT("EditReaders 1 (the fix)") : TEXT("EditReaders 0 (the rule before)");
@@ -488,6 +519,15 @@ bool FVoxelScatterEditReadersPlanetTest::RunTest(const FString& Parameters)
 		if (!TestTrue(FString::Printf(TEXT("%s: a surface chunk whose -Y, -Z and -Y -Z neighbours carry points (non-vacuous)"), Name), R.bFound))
 		{
 			continue;
+		}
+		if (Rule == 1)
+		{
+			AddInfo(FString::Printf(TEXT("%s: both edits undone: %d cached chunks stale (%d undo steps left); redone: %d stale"), Name, U.StaleAfterUndo,
+				U.UndoStepsAfterUndo, U.StaleAfterRedo));
+			TestTrue(FString::Printf(TEXT("%s: streaming and scatter settle after the undos and redos"), Name), U.bSettled);
+			TestEqual(FString::Printf(TEXT("%s: the two edits undone"), Name), U.UndoStepsAfterUndo, 0);
+			TestEqual(FString::Printf(TEXT("%s: no cached chunk is stale after the undos"), Name), U.StaleAfterUndo, 0);
+			TestEqual(FString::Printf(TEXT("%s: no cached chunk is stale after the redos"), Name), U.StaleAfterRedo, 0);
 		}
 		TestEqual(FString::Printf(TEXT("%s: every cached chunk equals a fresh extraction before the edit"), Name), R.StaleBefore, 0);
 		TestEqual(FString::Printf(TEXT("%s: the rule gives seven readers for an edit on the min corner"), Name), R.Readers, 7);
@@ -577,6 +617,12 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 		const double ChunkWorld = W.Config->GetChunkWorldSize();
 		W.SetViewer(FVector(ChunkWorld * 0.5, ChunkWorld * 0.5, W.Manager->GetGeneratedSurfaceHeight(ChunkWorld * 0.5, ChunkWorld * 0.5) + 300.0));
 		const FPassResult R = RunPass(*this, W, Rule, FIntVector(0, 0, 0), Find, Edit);
+		// Undo and redo are edits too (G60): the chunk below re-extracts after them, so every cached chunk equals a fresh extraction.
+		FUndoRedoAudit U;
+		if (R.bFound && Rule == 1)
+		{
+			U = UndoRedoPass(W);
+		}
 		// A system edit that leaves the edited chunk no surface: its re-extraction finds no point, and the instances
 		// RegenerateChunkScatter kept for the replacement must go (they stood on terrain the edit removed).
 		int32 InstancesBefore = -1, InstancesAfter = -1;
@@ -602,6 +648,15 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("%s: the chunk below re-extracts after the edit"), Name), R.ReadersReextracted, 1);
 		TestEqual(FString::Printf(TEXT("%s: its points changed (non-vacuous)"), Name), R.ReadersChanged, 1);
 		TestEqual(FString::Printf(TEXT("%s: no cached chunk is stale after the edit"), Name), R.Stale, 0);
+		if (Rule == 1)
+		{
+			AddInfo(FString::Printf(TEXT("%s: both edits undone: %d cached chunks stale (%d undo steps left); redone: %d stale"), Name, U.StaleAfterUndo,
+				U.UndoStepsAfterUndo, U.StaleAfterRedo));
+			TestTrue(FString::Printf(TEXT("%s: streaming and scatter settle after the undos and redos"), Name), U.bSettled);
+			TestEqual(FString::Printf(TEXT("%s: the two edits undone"), Name), U.UndoStepsAfterUndo, 0);
+			TestEqual(FString::Printf(TEXT("%s: no cached chunk is stale after the undos"), Name), U.StaleAfterUndo, 0);
+			TestEqual(FString::Printf(TEXT("%s: no cached chunk is stale after the redos"), Name), U.StaleAfterRedo, 0);
+		}
 		AddInfo(FString::Printf(TEXT("%s: the whole chunk dug: its instances %d before, %d after"), Name, InstancesBefore, InstancesAfter));
 		TestTrue(FString::Printf(TEXT("%s: the dug chunk had instances (non-vacuous)"), Name), InstancesBefore > 0);
 		TestTrue(FString::Printf(TEXT("%s: scatter settles after the dig"), Name), bClearSettled);

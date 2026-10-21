@@ -30,7 +30,8 @@ DECLARE_MULTICAST_DELEGATE(FOnUndoRedoStateChanged);
  * Manages terrain modifications using an overlay architecture:
  * - Edits are stored separately from procedural voxel data
  * - Sparse TMap storage for memory efficiency
- * - Command pattern for undo/redo support
+ * - Command pattern for undo/redo support: each operation records, per voxel, the edit before and after it, so undo
+ *   and redo restore the edit layer exactly (FVoxelEditChange); operations begun outside the history take no undo step
  * - Binary serialization for save/load
  *
  * The edit manager does not directly modify chunk voxel data.
@@ -77,12 +78,16 @@ public:
 	 * will be grouped into a single undo/redo operation.
 	 *
 	 * @param Description Human-readable description of the operation
+	 * @param bAddToUndoHistory False for edits that follow from others rather than being made: the operation is broadcast
+	 *        as any other but takes no undo step and leaves the redo stack as it is. Water propagation's flood (world modes
+	 *        review G60): undoing the dig that let the water in puts the dig's voxels back as they were, flood included,
+	 *        and redoing it floods again
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
-	void BeginEditOperation(const FString& Description = TEXT("Edit"));
+	void BeginEditOperation(const FString& Description = TEXT("Edit"), bool bAddToUndoHistory = true);
 
 	/**
-	 * End the current edit operation and add it to undo stack.
+	 * End the current edit operation and add it to undo stack (unless it began with bAddToUndoHistory false).
 	 *
 	 * If no edits were applied, the operation is discarded.
 	 */
@@ -170,14 +175,16 @@ public:
 	bool CanRedo() const { return RedoStack.Num() > 0; }
 
 	/**
-	 * Undo the last edit operation.
+	 * Undo the last edit operation: every voxel it changed gets back the edit it had before (or none), in each voxel's own
+	 * chunk. Edits made since outside the history (water propagation's) at those voxels go with it.
 	 * @return True if undo was performed
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
 	bool Undo();
 
 	/**
-	 * Redo the last undone operation.
+	 * Redo the last undone operation: every voxel it changed gets the edit it left (or none) again, and its chunks are
+	 * broadcast with the source, brush centre and radius the operation had (an undo broadcasts System, no radius).
 	 * @return True if redo was performed
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
@@ -358,7 +365,7 @@ protected:
 	 * @param ChunkCoord Chunk coordinate
 	 * @param LocalPos Local position within chunk
 	 * @param NewData New voxel data
-	 * @param OriginalData Original voxel data (for undo)
+	 * @param OriginalData The voxel's previous edit's data, or air (FVoxelEdit::OriginalData; undo restores the change's Before)
 	 * @param Mode Edit mode
 	 */
 	void ApplyEditInternal(
@@ -381,8 +388,8 @@ protected:
 		const FVoxelEdit& Edit);
 
 	/**
-	 * Get the original voxel data at a position (from edit layer or procedural).
-	 * For now, returns air if no edit exists (procedural data not accessible here).
+	 * The voxel's previous edit's data, or air if it has none (procedural data is not accessible here), for
+	 * FVoxelEdit::OriginalData. Undo does not depend on it (FVoxelEditChange keeps the whole previous edit).
 	 */
 	FVoxelData GetOriginalVoxelData(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const;
 
@@ -390,6 +397,16 @@ protected:
 	 * Trim undo stack if it exceeds maximum size.
 	 */
 	void TrimUndoStack();
+
+	/**
+	 * Put an operation's voxels back as they were before it (its changes' Before, last change first: undo and cancel) or as
+	 * it left them (their After, first change first: redo), each in its own chunk.
+	 *
+	 * @param Operation The operation
+	 * @param bAsLeft True for the state the operation left (redo), false for the state before it (undo, cancel)
+	 * @param OutChunkBounds Receives each chunk's restored voxels (chunk-local), for its OnChunkEdited broadcast
+	 */
+	void RestoreOperation(const FVoxelEditOperation& Operation, bool bAsLeft, TMap<FIntVector, FVoxelEditedVoxelBounds>& OutChunkBounds);
 
 	/**
 	 * Broadcast OnChunkEdited for one chunk with the voxels the edit changed there, which GetBroadcastEditBounds reports

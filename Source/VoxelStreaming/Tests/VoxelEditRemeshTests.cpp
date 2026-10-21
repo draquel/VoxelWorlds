@@ -37,6 +37,10 @@
 //   are reported, not compared: a chunk's mesh completion pulls them across its faces from its neighbours' generated voxels
 //   (PropagateWaterFromNeighbors), which the face neighbours' re-mesh also ran. The meshing work per edit (chunk meshes, seam
 //   jobs) is logged for both rules.
+//
+// G60 (section 19.17): undo and redo restore each voxel in its own chunk and broadcast every chunk they changed (redo wrote
+// every edit into an operation's first chunk and broadcast only it). Edits 6 and 7: a second player brush across the four
+// chunks, settled and undone; then its redo. Both are checked against a full rebuild like the others.
 // ---------------------------------------------------------------------------
 
 namespace VoxelEditRemeshTest
@@ -381,9 +385,10 @@ namespace VoxelEditRemeshTest
 		}
 	};
 
-	static constexpr int32 NumEdits = 5;
+	static constexpr int32 NumEdits = 7;
 	static const TCHAR* EditNames[NumEdits] = { TEXT("system dig by the min edge"), TEXT("system fill by the max edge"), TEXT("player brush across the edge"),
-		TEXT("system edits while the mesh waits (dispatch held)"), TEXT("system edits while the mesh is on a worker") };
+		TEXT("system edits while the mesh waits (dispatch held)"), TEXT("system edits while the mesh is on a worker"),
+		TEXT("a second player brush across the edge, undone"), TEXT("its redo") };
 
 	/** What one streamed run under one rule gave. */
 	struct FRunResult
@@ -409,6 +414,7 @@ namespace VoxelEditRemeshTest
 		FGeometryDiff Stale[NumEdits];
 		int32 RebuildWaterChanged[NumEdits] = {};
 		int32 EditWaterChanged[NumEdits] = {};
+		TSet<FIntVector> EditedChunks[NumEdits];  // the chunks each edit's broadcasts named
 		// The first edit (one chunk's voxels): what it changed and the seam buckets it changed whose owner it did not edit.
 		TSet<FIntVector> FirstEdited;
 		FGeometryDiff FirstChanged;
@@ -616,6 +622,7 @@ namespace VoxelEditRemeshTest
 			R.Post[Index] = CaptureGeometry(Renderer);
 			R.PostVoxels[Index] = CaptureVoxels(*W.Manager);
 			R.EditWaterChanged[Index] = DiffVoxels(VoxelsBefore, R.PostVoxels[Index], true);
+			R.EditedChunks[Index] = Edited;
 			if (Index == 0)
 			{
 				R.FirstEdited = Edited;
@@ -691,6 +698,15 @@ namespace VoxelEditRemeshTest
 				R.bSettled = Settle(W) && R.bSettled;
 			}
 		});
+		// 6. A second player brush across the edge (the four chunks), settled, then undone (G60).
+		Measure(5, [&]()
+		{
+			PlayerBrush(W, R.Q, 2.5f);
+			R.bSettled = Settle(W) && R.bSettled;
+			Edits->Undo();
+		});
+		// 7. Its redo.
+		Measure(6, [&]() { Edits->Redo(); });
 		Edits->OnChunkEdited.Remove(Handle);
 
 		W.Stop();
@@ -739,6 +755,11 @@ namespace VoxelEditRemeshTest
 					NeighbourRemeshes += R.Work[i].NeighbourRemeshes;
 				}
 				Test.TestTrue(FString::Printf(TEXT("%s: streaming settles"), *Name), R.bSettled);
+				// The redo (edit 7) re-applies a brush at edit 3's place: it names the same chunks (G60: it named only the first).
+				Test.TestTrue(FString::Printf(TEXT("%s: edit 3's brush reaches several chunks (non-vacuous: %d)"), *Name, R.EditedChunks[2].Num()),
+					R.EditedChunks[2].Num() >= 2);
+				Test.TestTrue(FString::Printf(TEXT("%s: edit 7 (the redo) broadcasts every chunk edit 3's brush did (%d against %d)"), *Name,
+					R.EditedChunks[6].Num(), R.EditedChunks[2].Num()), R.EditedChunks[6].Includes(R.EditedChunks[2]));
 				if (Case.bWater)
 				{
 					Test.TestTrue(FString::Printf(TEXT("%s: the first edit's chunk has face neighbours with water flags, whose re-mesh pulls flags across their faces (%d; non-vacuous)"),
