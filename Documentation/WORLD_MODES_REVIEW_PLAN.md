@@ -1501,7 +1501,9 @@ Three findings from §13.11 get IDs here:
 | G58 | Edit-driven water propagation (`UVoxelWaterPropagation`) reads the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel dug under the sea still reads solid, so a dig never floods (a probe: 8 dug voxels next to water, none flooded, no seed logged), and its flood sets each voxel to the generated voxel plus the flag, which would undo an edit there (found in G56, §19.13) | Fixed 2026-10-20 (§19.14): every read is edit-merged and the flag is set on the voxel as it is (a dig keeps its density and material); seeds come from the voxels each edit changed (`GetBroadcastEditBounds`), so system edits of single voxels seed too, a chunk without data yet scanning when it arrives; water-flagged air is the source (a fill keeps the flag but is solid); nothing is written into a chunk without data; the flood's own batches are not scanned; `Streaming.WaterPropagation.Plane`, `.Planet` | — |
 | G59 | The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a chunk's mesh completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only: water that an edit-driven flood put in the edit layer draws no tile (a channel dug inland from the shore below sea level is flagged but shows no water surface), and a flood does not continue into a chunk that loads after it (traced in G58, §19.14; before G58 no flood reached the edit layer) | Fixed 2026-10-20 (§19.16): a chunk with edits builds its tile mask from the edit-merged snapshot (the pull across faces drops the snapshot when it writes flags); when a chunk's water first settles, `UVoxelWaterPropagation::OnChunkWaterSettled` scans the faces it shares with settled chunks (either with edits, below the sea) for a voxel pair with an edit on either side, one dry air below the sea and the other water, and seeds the flood there; the pull itself stays on the generated voxels; `Streaming.WaterPropagation.ChunkArrival.{Plane,Planet}`, `.Tiles.Plane`, `voxel.Water.Stats` | — |
 | G60 | Water propagation's flood batches entered the edit manager's undo history, and an undo record kept only each voxel's previous value (`FVoxelEdit::OriginalData`): a flood replaces a dug voxel's relative edit with a `Set` whose previous value is the dig's unset one (air), so its undo removed the edit and the first undo after a dig under the sea (the demo test actor's Z) took back the flood and the dig at every voxel it had reached. The same record lost a previous relative edit (a dig under a dig), a previous `Set` to air and an edit removed by cancelling deltas; it kept no chunk, so undo could revert another chunk's voxel at the same local position and redo wrote every edit into the operation's first chunk, broadcasting only that chunk; and redo broadcast the current source with no radius, so a system edit's redo re-extracted no scatter (traced in G58, §19.14) | Fixed 2026-10-20 (§19.17): water propagation's operations stay out of the history (`BeginEditOperation(..., bAddToUndoHistory=false)`: no undo step, the redo stack kept); every operation records per voxel its chunk and the whole edit before and after (`FVoxelEditChange`), so undo, redo and cancel restore the edit layer exactly in each voxel's own chunk and broadcast each chunk with its own bounds, and redo broadcasts the operation's own source, centre and radius; undoing a dig under the sea restores its voxels, flood included, and its redo floods again; water beyond the dig's voxels stays (nothing drains it); `Edit.UndoRedo.Records`, `Streaming.WaterPropagation.Undo.{Plane,Planet}`, `EditRemesh` edits 6-7, `Scatter.EditReaders` undo/redo audits | — |
-| G61 | Marching Cubes' LOD normals use the same stride-scale gradient taps G44 fixed in Dual Contouring (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD` and the GPU MC shader's), so an MC world's LOD 1 and 2 would lean the same way (found in G44, §20.8). No shipped configuration meshes with MC: the planets and `VoxelDemo` are DC | Open: the same voxel-resolution vertex normals in MC, CPU and GPU | — |
+| G61 | Marching Cubes' LOD normals use the same stride-scale gradient taps G44 fixed in Dual Contouring (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD` and the GPU MC shader's), so an MC world's LOD 1 and 2 would lean the same way (found in G44, §20.8). No shipped configuration meshes with MC: the planets and `VoxelDemo` are DC | Fixed 2026-10-21 (§20.9): an MC edge vertex at stride > 1 now takes LOD 0's normal at the voxel crossing on its edge nearest it (`CalculateEdgeShadingNormal`, a function of the edge, CPU and GPU, regular cells, seam bands and the transition ribbon); positions unchanged. On gentle relief LOD 2's tilt 6.18° → 0.62° at 45°N, its mean angle 20.3° → 3.3° on the equator, its brightness -12.1% → -0.5% on the plane; from straight above an MC `Review_Planet_L` at 45°N 20°E the LOD 2 ring against the far field 1.18 → 1.01. `Streaming.{Planet,Plane}.LODNormalsMC`, `Meshing.MarchingCubes.LODNormals` (GPU normals within 0.13° of the CPU's); `voxel.Mesh.VoxelShadingNormals` now covers both meshers | — |
+| G62 | The stride-1 gradient both smooth meshers use (`CalculateGradientNormal`: the crossing floored to a voxel, taps one voxel either side on the one-voxel density ramp) tilts a slope's normal by 1.0-1.8 times the slope (5°: 5.0-9.1°) depending on where the surface crosses the voxel layer: bands along iso-height lines, a voxel layer apart at MC's LOD 0. Since G61, MC's LOD 1 and 2 sample it sparsely, which shows from altitude as faint broad rings around hills (ripple 0.75 grey against LOD 0's 0.51 on a 50-grey surface, §20.9). DC's LOD 0 averages the same gradient over a cell's crossings (not measured) | Open: take the stride-1 gradient at the crossing point (trilinear taps), CPU and GPU; MC is unshipped | — |
+| G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` (7.7 ms against 0.33 ms a job; 6,564 jobs took 50-52 s of worker time after `voxel.RemeshAll`), while MC's chunk meshes cost about DC's (§20.9) | Open (not traced): MC is unshipped | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -7286,7 +7288,7 @@ seam and closure tests (`Meshing.DualContour.*`, 23 including the ring bit-match
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G61 | Marching Cubes' LOD normals use the same stride-scale taps (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD`, and the GPU shader's `CalculateGradientNormalLOD`), so an MC world's LOD 1 and 2 would lean the same way. No shipped configuration uses MC (the planets and `VoxelDemo` are DC) | Open: give MC's vertex normals the same voxel-resolution estimate, CPU and GPU |
+| G61 | Marching Cubes' LOD normals use the same stride-scale taps (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD`, and the GPU shader's `CalculateGradientNormalLOD`), so an MC world's LOD 1 and 2 would lean the same way. No shipped configuration uses MC (the planets and `VoxelDemo` are DC) | Fixed in §20.9: an MC edge vertex at stride > 1 takes LOD 0's normal at the voxel crossing on its edge, CPU and GPU |
 
 **Left as they were:**
 
@@ -7299,3 +7301,125 @@ seam and closure tests (`Meshing.DualContour.*`, 23 including the ring bit-match
   the 3% bound; a neighbour's voxels would close it, at the cost of the neighbour independence seam ownership relies on.
 
 G44 and G25 are fixed.
+
+### 20.9 G61: Marching Cubes' vertex normals at a stride (2026-10-21)
+
+Bases: VoxelWorlds `fed44dc`, UE5_PluginDev `93e7812` (G44 and G60 merged). Branches `fix/g61-mc-lod-normals`
+(VoxelWorlds) and `claude/g61-mc-lod-normals` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic
+Games\UE_5.8` in a worktree editor (Claudius on 8097), background throttling off.
+
+**The cause.** G44's in Marching Cubes. An MC vertex at stride > 1 took its normal from a central difference with taps
+`Stride` voxels either side of it (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD`, and the GPU shader's
+`CalculateGradientNormalLOD` in `MarchingCubesMeshGeneration.usf`). The generated density saturates a voxel either side
+of the surface, so at stride 4 each component read 0 or 255 and the normal snapped toward one of the 26 cube directions.
+That covered both the regular cells (`ProcessCubeLOD`, interiors and the seam bands, which drive the same function) and
+the transition ribbon (`ProcessTransitionCell`, its outer face at the coarser neighbour's stride). An MC world showed the
+same ring as DC's on a planet and the same snapped slopes on a heightmap. No shipped configuration meshes with MC.
+
+**What changed** (`VoxelCPUMarchingCubesMesher.cpp`, `MarchingCubesMeshGeneration.usf`; no change to generation,
+positions, seams or the geomorph):
+
+- **An edge vertex's normal at a stride** (`CalculateEdgeShadingNormal`). An MC vertex lies on one cell edge. At stride >
+  1 the edge is walked in voxel steps from its min end, and the step whose crossing lies nearest the vertex gives the
+  normal: LOD 0's own (`CalculateGradientNormal`, taps one voxel apart) at that crossing. That is the normal LOD 0's vertex
+  there has. The normal is a function of the edge alone, so every cell and ribbon that shares the edge gives its vertex the
+  same normal, and the boundary geomorph (which moves vertices, not edges) does not change it. The walk reads voxels on the
+  edge and the gradient reads one voxel around the crossing, which is less than the old taps' `Stride`, so no mesh job
+  reads past the data it held before. `ProcessCubeLOD` now computes one normal per cell vertex instead of three per
+  triangle. In `ProcessTransitionCell` each vertex uses its own normal stride: the coarser neighbour's on the outer face,
+  where the coarse MC cell has the same edge, and this chunk's on the inner face.
+- **The GPU shader** has the same function (`CalculateEdgeShadingNormal`, `UseVoxelShadingNormals`, parameter
+  `VoxelShadingNormals` set by `FVoxelGPUMarchingCubesMesher` from the cvar) in `MainCS` and `TransitionCS`. The GPU MC
+  mesher meshes nothing in the game (`voxel.Seam.CPUInteriorRouting`); it is kept consistent for its tests.
+- **One switch for both smooth meshers.** `voxel.Mesh.VoxelShadingNormals` (1; 0 = the stride-scale normals) was G44's
+  (DC only). It is now shared: `CVarVoxelShadingNormals` lives in the DC mesher and the MC CPU and GPU meshers use it
+  through an `extern`. With 0, and at LOD 0 in either setting, MC's normals are the old ones bit for bit.
+- **Left on the stride-scale gradient:** the transition cell's folded-triangle check (debug only). A coarse triangle's
+  centroid can lie more than a voxel off the surface, where LOD 0's taps all read saturated density; the snapped
+  direction is enough for a test against a fold of more than ~95°.
+
+**Tests.**
+
+- **`Streaming.Planet.LODNormalsMC`, `Streaming.Plane.LODNormalsMC`** (new): G44's `LODNormals` places, reliefs and
+  bounds on MC worlds (`FPlanetStreamingWorld::MeshingMode`; `RunLODNormalsPlace` takes the meshing mode). On gentle relief
+  LOD 1 and 2 must meet G44's bound, and the stride-scale normals must fail it. On the streaming tests' relief the mean
+  angle must fall. Every vertex of the chunk meshes and seam buckets is measured, with the vertex counts equal in both
+  settings.
+- **`Meshing.MarchingCubes.LODNormals`** (new): a plane tilted 23° whose density saturates a voxel either side, at LOD 0, 1
+  and 2 on one chunk. LOD 1 and 2 must stay within a degree of LOD 0's error, LOD 0 must be the same in both settings, and
+  the old LOD 2 must be off by more than 3° over LOD 0's. With a real RHI it also meshes each case on the GPU and matches
+  every GPU vertex to the CPU vertex at its position to compare their normals. Before → after, LOD 0/1/2: 3.34° / 12.50° /
+  23.75° → 3.34° / 3.64° / 3.31°. GPU against CPU: every GPU vertex is at a CPU vertex, with normals 0.03-0.06° apart on
+  average and at most 0.13°, at every LOD in both settings.
+
+| Place, LOD | Mean angle before → after (LOD 0) | Tilt before → after | Brightness before → after (LOD 0) |
+|---|---|---|---|
+| Planet 45°N, gentle, LOD 1 | 7.51° → 2.15° (2.46°) | 3.89° → 0.92° | +5.08% → +1.75% (+1.72%) |
+| Planet 45°N, gentle, LOD 2 | 13.40° → 2.15° | 6.18° → 0.62° | +3.46% → +1.18% |
+| Planet equator, gentle, LOD 1 | 9.27° → 2.93° (2.69°) | 1.24° → 0.39° | -5.11% → -1.47% (-1.16%) |
+| Planet equator, gentle, LOD 2 | 20.29° → 3.29° | 3.10° → 0.57° | -16.65% → -1.78% |
+| Plane, gentle, LOD 1 | 10.53° → 3.79° (4.30°) | 0.83° → 0.33° | -6.29% → -1.74% (-2.56%) |
+| Plane, gentle, LOD 2 | 18.08° → 4.45° | 1.85° → 0.06° | -12.06% → -0.49% |
+| Planet 45°N, ±800, LOD 1 / 2 | 11.69° / 17.44° → 5.01° / 5.94° (5.22°) | 0.56° / 0.73° → 0.20° / 0.01° | +4.48% / +10.30% → +2.16% / +4.74% (+0.81%) |
+| Planet equator, ±800, LOD 1 / 2 | 10.21° / 16.61° → 4.31° / 5.42° (4.41°) | 0.51° / 1.38° → 0.20° / 0.19° | -4.47% / -5.40% → -0.71% / +1.90% (-1.96%) |
+| Plane, ±800, LOD 1 / 2 | 19.34° / 30.16° → 11.38° / 13.18° (11.94°) | 0.49° / 2.18° → 0.21° / 0.67° | +21.9% / +24.1% → +10.4% / +14.7% (+4.7%) |
+
+The stride-scale normals fail the gentle bound on the tilt at 45°N (LOD 1 3.89° against LOD 0's 1.13°), on the mean
+angle on the equator (LOD 1 9.27° against 2.74°) and on the brightness on the plane (LOD 1 -6.29% against -2.56%). LOD 0's
+own figures move a little between the two settings: its chunks' transition ribbons carry outer-face vertices at the
+coarser neighbour's stride, which the old estimator snapped too (on the gentle plane LOD 0's mean angle 4.53° → 4.30°).
+MC's LOD 1 and 2 now match LOD 0 more closely than DC's do in §20.8 (gentle plane LOD 2 4.45° against LOD 0's 4.30°, DC
+7.11° against 2.55°). An MC vertex sits on the edge whose crossing it takes its normal from, while a DC vertex can be a
+cell away from its voxel crossing.
+
+**Live** (MC duplicates of the review configs and of `DemoSmoothWorldConfig`, made in the worktree only and not
+committed: `Saved/ClaudeScripts/g61_make_mc_configs.py` makes them; `PlanetTest` and `VoxelDemo` with
+`voxel.ConfigOverride`, the log confirming `Using CPU MarchingCubes mesher`; in each PIE the old normals first and then
+the new ones, each after `voxel.RemeshAll` from the same cameras; shots `Saved/Screenshots/Claudius/g61_*` in the worktree,
+`_n0` old and `_n1` new):
+
+- **`Review_Planet_L` in MC, 45°N 20°E** (G44's site), from 60,000 uu straight above at local noon. With the old normals
+  MC shows G44's picture: a bright LOD 2 octagon, the LOD 1 square inside it, the darker LOD 0 centre, and in the normal
+  buffer a whitened octagon (`g61_L_45N_top_n0`, `_topnormals_n0`). With the new normals the window cannot be told from
+  the far field, the normal buffer is even, and the oblique look loses the band edges at its LOD boundaries (`_oblique_*`).
+  Measured with eye adaptation and the vignette off (`g61_L_45N_flat_*`), the far field reads the same in both shots
+  (52.9 / 49.3 against 53.0 / 49.4). The LOD 2 ring against the far field went from 1.18 to 1.01, the ring against the
+  centre from 1.25 to 1.05, and LOD 1 from 53.9 to 49.1 grey against the centre's 48.5 / 49.3.
+- **`VoxelDemo` in MC** (heightmap; `G61_DemoSmooth_MC`, 30,000 uu straight down, `g61_demo_*`): the old LOD 1 and 2
+  normals draw bright streaks and terraces across the rocky slopes. With the new ones they are gone
+  (`g61_demo_rocky_side`). The difference image (`g61_demo_top_diff`) is black over the LOD 0 square around the pawn and
+  changes on every LOD 1 and 2 slope.
+- **What is left** (G62, below): with the contrast stretched, the new normals show faint concentric bands around a hill
+  24 km east of the site, a coarser version of the bands LOD 0 itself draws. On a row across the hill, with the same
+  camera and exposure, the ripple's standard deviation is 0.75 grey with the hill at LOD 2 (new normals), 0.51 with the
+  pawn moved onto the hill so that it streams at LOD 0 (`g61_L_45N_hillLOD0_top_n1`), and 0.61 at LOD 2 with the old
+  normals, on a surface of about 50 grey. Without the stretch they are only just visible.
+
+**Meshing cost.** `Review_Planet_L` in MC at 45°N 20°E, pawn held, `voxel.RemeshAll` (1,267 chunk meshes, 6,564 seam
+jobs) with `voxel.Edit.MeshWork`'s worker times, the two settings alternated three times in one PIE. Chunk meshes took
+1,793 / 2,269 / 2,042 ms with the old normals and 1,893 / 2,331 / 2,026 ms with the new (+5.6%, +2.7%, -0.8%: within the
+run-to-run spread). A strided vertex's normal now reads `Stride` + 5 voxels once per cell vertex, where the old one read 6 for
+each triangle using the vertex. Seam jobs took 50.3-51.6 s with either setting; that is MC's own seam cost
+(G63, below), not G61's.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 573/573 headless (570 + the
+three above) and 573/573 in the editor with the GPU tests running (no device loss). The 108 GPU parity lines are
+CRC-identical to G44's (no generation change). The MC seam and closure tests pass unchanged:
+`Meshing.MarchingCubes.*` (30, including `SeamClosure.MCS0-MCS3`, `LODBoundary.T1-T13`, `CPUvsGPU` and
+`PlanetGeomorph`), `Streaming.EditRemesh.{Plane,Planet}` (MC LOD cases) and `Streaming.{Planet,Plane}.ClosedSurface`.
+The DC `LODNormals` figures are §20.8's to the hundredth.
+
+**New findings** (in §14.1):
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G62 | The stride-1 gradient both smooth meshers use (`CalculateGradientNormal`: the crossing floored to a voxel, taps one voxel either side on the one-voxel density ramp) bands along voxel layers. With the surface a fraction f of a voxel above the floored voxel, the vertical difference is 1 - f/2 instead of 1, so a slope's normal tilts by 1.0-1.8 times the slope (5°: 5.0-9.1°; 15°: 15.0-22.9°) depending on where the surface crosses the voxel layer. MC's LOD 0 has the bands a voxel layer apart, too fine to see from altitude. DC's LOD 0 uses the same gradient, averaged over a cell's crossings (not measured here). Since G61, MC's LOD 1 and 2 sample the same estimator sparsely, which shows from altitude as faint broad rings around hills. A gradient taken at the crossing point itself (trilinear taps, as the geomorph's steepness gate does) has no such dependence | Open: take the stride-1 gradient at the crossing point, CPU and GPU, both meshers; MC is unshipped, and DC's share is not measured |
+| G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` at 45°N 20°E: 6,564 MC seam jobs took 50-52 s of worker time (7.7 ms each) against 5,673 DC seam jobs in 1.7-2.0 s (0.33 ms each, §20.8). MC's chunk meshes cost about the same as DC's (1.6 ms each). Not traced; the seam path builds a synthetic request per participant (`InitFrameRequest` copies the volume, `FillFacePlanes` fills the neighbour planes) and meshes its band cells through `ProcessCubeLOD` | Open (not traced): MC is unshipped |
+
+**Left as they were:**
+
+- The GPU MC mesher's neighbour data is one plane deep, so taps past a chunk face read that plane. They did before as
+  well, and the GPU mesher meshes nothing in the game.
+- MC's LOD 0 estimator (G62).
+
+G61 is fixed.
