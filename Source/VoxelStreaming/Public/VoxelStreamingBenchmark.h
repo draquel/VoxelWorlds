@@ -192,6 +192,16 @@ private:
 		int32 WindowSuspended;
 		float StreamingLeadUU;
 		float SurfaceAltitude;
+		// Scatter's sub-steps (world modes review G42): edit readers, applying completed extractions, launches, the
+		// distance spawn, the renderer's instance flush (ms); extractions applied and launched this tick; HISM instances
+		// placed and released since the last sample
+		float ScatEditMs, ScatApplyMs, ScatLaunchMs, ScatDistMs, ScatFlushMs;
+		int32 ScatApplyN, ScatLaunchN, ScatAddN, ScatRelN;
+		// HISM write batches applied and HISMs compacted since the last sample (UVoxelScatterRenderer)
+		int32 ScatBatchN, ScatCompactN;
+		// The engine's last game thread, render thread and GPU frame times (ms; stat unit's), to place frame time outside
+		// the chunk manager
+		float GTMs, RTMs, GPUMs;
 	};
 
 	void TakeSample(float DeltaTime);
@@ -304,6 +314,11 @@ private:
 
 	// Chunks generated when the last sample was taken (the per-tick GenDone column).
 	int64 LastTotalGenerated = 0;
+	/** The scatter renderer's instance totals at the last sample (ScatAddN / ScatRelN are the differences) */
+	int64 LastScatterAdded = -1;
+	int64 LastScatterRemoved = -1;
+	int64 LastScatterBatches = -1;
+	int64 LastScatterCompactions = -1;
 
 	// Latest memory sample (carried between MemorySampleIntervalSec refreshes) and its timer.
 	FSample LastMemory = {};

@@ -10,8 +10,30 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/Actor.h"
+#include "HAL/IConsoleManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelScatterRenderer, Log, All);
+
+static TAutoConsoleVariable<float> CVarVoxelScatterHISMBatchSeconds(
+	TEXT("voxel.Scatter.HISMBatchSeconds"),
+	0.1f,
+	TEXT("Scatter HISM writes (world modes review G42): a HISM takes the instance changes held for it at most this often\n")
+	TEXT("(seconds), and not while its cluster tree builds; releases zero-scale each instance where it stands. 0 = write every\n")
+	TEXT("change to its HISM at once, releases parked at the HISM's origin (the behaviour before G42)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarVoxelScatterHISMMaxHoldSeconds(
+	TEXT("voxel.Scatter.HISMMaxHoldSeconds"),
+	0.5f,
+	TEXT("Scatter HISM writes (world modes review G42): the longest a HISM's held changes wait for its cluster tree build (seconds)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelScatterHISMCompactMinPooled(
+	TEXT("voxel.Scatter.HISMCompactMinPooled"),
+	1024,
+	TEXT("Scatter HISM writes (world modes review G42): a HISM taking a batch whose pooled (released, zero-scaled) instances are at\n")
+	TEXT("least this many and outnumber its live ones is rewritten with its live instances only. 0 = never (pools only grow)."),
+	ECVF_Default);
 
 UVoxelScatterRenderer::UVoxelScatterRenderer()
 {
@@ -80,6 +102,9 @@ void UVoxelScatterRenderer::Tick(const FVector& /*ViewerPosition*/, float /*Delt
 	// viewer movement or a quiet generation pipeline (which is what used to make queued rebuilds
 	// all fire at once when the player stopped — the refresh flash).
 	FlushPendingInstanceAdds();
+
+	// The HISMs whose batch is due take their held writes (world modes review G42)
+	ApplyPendingHISMWrites(/*bAll=*/false);
 }
 
 void UVoxelScatterRenderer::Shutdown()
@@ -124,6 +149,7 @@ void UVoxelScatterRenderer::Shutdown()
 
 void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_UpdateChunkInstances);
 	if (!bIsInitialized || !ScatterManager)
 	{
 		return;
@@ -216,6 +242,7 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 
 void UVoxelScatterRenderer::AddSupplementalInstances(const FIntVector& ChunkCoord, const FChunkScatterData& NewScatterData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_AddSupplemental);
 	if (!bIsInitialized || !ScatterManager)
 	{
 		return;
@@ -319,6 +346,7 @@ void UVoxelScatterRenderer::RemoveChunkInstances(const FIntVector& ChunkCoord)
 
 void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_ReleaseChunkType);
 	if (!bIsInitialized)
 	{
 		return;
@@ -375,15 +403,45 @@ void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord
 
 	if (HISM)
 	{
-		// Parked at the HISM's own origin (local space): its region's origin, the world origin on a heightmap world (as
-		// before), so a region's bounds never reach back to the world origin
-		const FTransform ZeroTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
-		for (int32 Index : *Indices)
+		if (IsBatchingHISMWrites())
 		{
-			HISM->UpdateInstanceTransform(Index, ZeroTransform,
-				/*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+			// Held for the HISM's next batch (world modes review G42), zero scale where each instance stands: an in-place
+			// change, which the HISM takes without rebuilding its cluster tree. A placement still held for an index is
+			// dropped (its location never reached the HISM), so the release stays in place against what the HISM holds.
+			FPendingHISMWrites& Writes = PendingHISMWrites.FindOrAdd(Key);
+			const int32 Applied = HISM->GetInstanceCount();
+			for (int32 Index : *Indices)
+			{
+				if (Index >= Applied)
+				{
+					if (Writes.Grows.IsValidIndex(Index - Applied))
+					{
+						FTransform& Grow = Writes.Grows[Index - Applied];
+						Grow = FTransform(FQuat::Identity, Grow.GetLocation(), FVector::ZeroVector);
+					}
+					continue;
+				}
+				FTransform Stored;
+				if (HISM->GetInstanceTransform(Index, Stored, /*bWorldSpace=*/false))
+				{
+					Writes.Updates.Add(Index, FTransform(FQuat::Identity, Stored.GetLocation(), FVector::ZeroVector));
+				}
+			}
 		}
-		HISM->MarkRenderStateDirty();
+		else
+		{
+			// Writes held while batching was on land first, so the indices below are all in the HISM. Parked at the HISM's
+			// own origin (local space): its region's origin, the world origin on a heightmap world, so a region's bounds
+			// never reach back to the world origin
+			ApplyPendingHISMWrites(/*bAll=*/true);
+			const FTransform ZeroTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
+			for (int32 Index : *Indices)
+			{
+				HISM->UpdateInstanceTransform(Index, ZeroTransform,
+					/*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+			}
+			HISM->MarkRenderStateDirty();
+		}
 	}
 
 	// Move indices to free list
@@ -411,6 +469,10 @@ void UVoxelScatterRenderer::ClearAllInstances()
 	{
 		return;
 	}
+
+	// Held writes go with the instances
+	PendingHISMWrites.Empty();
+	LastHISMWriteSeconds.Empty();
 
 	// Clear all HISM components
 	for (auto& Pair : HISMComponents)
@@ -516,13 +578,212 @@ int32 UVoxelScatterRenderer::GetTotalInstanceCount() const
 	{
 		if (Pair.Value)
 		{
-			Total += Pair.Value->GetInstanceCount();
+			Total += GetEffectiveInstanceCount(Pair.Key, Pair.Value.Get());
 		}
 	}
 	return Total;
 }
 
+// ==================== Batched HISM Writes (world modes review G42) ====================
+
+bool UVoxelScatterRenderer::IsBatchingHISMWrites()
+{
+	return CVarVoxelScatterHISMBatchSeconds.GetValueOnGameThread() > 0.0f;
+}
+
+bool UVoxelScatterRenderer::GetEffectiveInstanceTransform(const FVoxelScatterHISMKey& Key, const UHierarchicalInstancedStaticMeshComponent* HISM,
+	int32 Index, FTransform& OutLocal) const
+{
+	if (!HISM)
+	{
+		return false;
+	}
+	const int32 Applied = HISM->GetInstanceCount();
+	if (const FPendingHISMWrites* Writes = PendingHISMWrites.Find(Key))
+	{
+		if (Index >= Applied)
+		{
+			if (!Writes->Grows.IsValidIndex(Index - Applied))
+			{
+				return false;
+			}
+			OutLocal = Writes->Grows[Index - Applied];
+			return true;
+		}
+		if (const FTransform* Held = Writes->Updates.Find(Index))
+		{
+			OutLocal = *Held;
+			return true;
+		}
+	}
+	return HISM->GetInstanceTransform(Index, OutLocal, /*bWorldSpace=*/false);
+}
+
+int32 UVoxelScatterRenderer::GetEffectiveInstanceCount(const FVoxelScatterHISMKey& Key, const UHierarchicalInstancedStaticMeshComponent* HISM) const
+{
+	const FPendingHISMWrites* Writes = PendingHISMWrites.Find(Key);
+	return (HISM ? HISM->GetInstanceCount() : 0) + (Writes ? Writes->Grows.Num() : 0);
+}
+
+int32 UVoxelScatterRenderer::GetPendingHISMWriteCount() const
+{
+	int32 Count = 0;
+	for (const auto& Pair : PendingHISMWrites)
+	{
+		Count += Pair.Value.Updates.Num() + Pair.Value.Grows.Num();
+	}
+	return Count;
+}
+
+void UVoxelScatterRenderer::CompactHISM(const FVoxelScatterHISMKey& Key, UHierarchicalInstancedStaticMeshComponent* HISM, FHISMInstancePool& Pool)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_CompactHISM);
+	// Each chunk's instances as they will be once the held writes land, renumbered from 0 in that order. Read before the
+	// caller drops the held writes and before the HISM is cleared.
+	TArray<FTransform> Live;
+	Live.Reserve(GetEffectiveInstanceCount(Key, HISM) - Pool.FreeIndices.Num());
+	for (TPair<FIntVector, TArray<int32>>& ChunkPair : Pool.ChunkInstanceIndices)
+	{
+		for (int32& Index : ChunkPair.Value)
+		{
+			// An index the HISM cannot give back (none expected) stays hidden rather than drawn at the origin
+			FTransform Local(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
+			GetEffectiveInstanceTransform(Key, HISM, Index, Local);
+			Index = Live.Add(Local);
+		}
+	}
+	HISM->ClearInstances();
+	if (Live.Num() > 0)
+	{
+		HISM->AddInstances(Live, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
+	}
+	Pool.FreeIndices.Reset();
+	Pool.TotalAllocated = Live.Num();
+	++TotalHISMCompactions;
+}
+
+void UVoxelScatterRenderer::FlushHISMWrites()
+{
+	ApplyPendingHISMWrites(/*bAll=*/true);
+}
+
+void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
+{
+	if (PendingHISMWrites.Num() == 0)
+	{
+		return;
+	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_ApplyHISMWrites);
+	const double Now = FPlatformTime::Seconds();
+	const double Interval = FMath::Max(0.0f, CVarVoxelScatterHISMBatchSeconds.GetValueOnGameThread());
+	const double MaxHold = FMath::Max(Interval, static_cast<double>(CVarVoxelScatterHISMMaxHoldSeconds.GetValueOnGameThread()));
+	for (auto It = PendingHISMWrites.CreateIterator(); It; ++It)
+	{
+		UHierarchicalInstancedStaticMeshComponent* HISM = nullptr;
+		if (const TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMComponents.Find(It.Key()))
+		{
+			HISM = Found->Get();
+		}
+		if (!HISM)
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+		if (!bAll)
+		{
+			// At most once per interval, and not while the last batch's tree builds: a change during the build would throw
+			// it away and start another, unless the writes have waited too long
+			const double* Last = LastHISMWriteSeconds.Find(It.Key());
+			const double Since = Last ? Now - *Last : TNumericLimits<double>::Max();
+			if (Since < Interval || (HISM->IsAsyncBuilding() && Since < MaxHold))
+			{
+				continue;
+			}
+		}
+		// A HISM whose pool outweighs its live instances is rewritten with the live ones, which lands its writes too
+		const int32 MinPooled = CVarVoxelScatterHISMCompactMinPooled.GetValueOnGameThread();
+		if (FHISMInstancePool* Pool = InstancePools.Find(It.Key()); Pool && MinPooled > 0)
+		{
+			const int32 Pooled = Pool->FreeIndices.Num();
+			if (Pooled >= MinPooled && Pooled > GetEffectiveInstanceCount(It.Key(), HISM) - Pooled)
+			{
+				CompactHISM(It.Key(), HISM, *Pool);
+				LastHISMWriteSeconds.Add(It.Key(), Now);
+				++TotalHISMWriteBatches;
+				It.RemoveCurrent();
+				continue;
+			}
+		}
+		FPendingHISMWrites& Writes = It.Value();
+		for (const TPair<int32, FTransform>& Update : Writes.Updates)
+		{
+			HISM->UpdateInstanceTransform(Update.Key, Update.Value, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+		}
+		if (Writes.Grows.Num() > 0)
+		{
+			HISM->AddInstances(Writes.Grows, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
+		}
+		// No MarkRenderStateDirty: the HISM sends the changed instances to its scene proxy itself (in-place zero scales at
+		// once; placements and new instances drawn unbuilt until its tree build lands, which recreates the proxy). Marking it
+		// dirty recreated the proxy, and every instance's distance-field object, a second time per batch.
+		LastHISMWriteSeconds.Add(It.Key(), Now);
+		++TotalHISMWriteBatches;
+		It.RemoveCurrent();
+	}
+}
+
 // ==================== Debug ====================
+
+FString UVoxelScatterRenderer::GetHISMBreakdown(int32 TopN) const
+{
+	struct FRow
+	{
+		FVoxelScatterHISMKey Key;
+		int32 Instances = 0;
+		int32 Pooled = 0;
+	};
+	TArray<FRow> Rows;
+	TMap<int32, FRow> ByType;
+	for (const auto& Pair : HISMComponents)
+	{
+		const UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value.Get();
+		if (!HISM)
+		{
+			continue;
+		}
+		FRow Row;
+		Row.Key = Pair.Key;
+		Row.Instances = GetEffectiveInstanceCount(Pair.Key, HISM);
+		if (const FHISMInstancePool* Pool = InstancePools.Find(Pair.Key))
+		{
+			Row.Pooled = Pool->FreeIndices.Num();
+		}
+		Rows.Add(Row);
+		FRow& Type = ByType.FindOrAdd(Pair.Key.ScatterTypeID);
+		Type.Key.ScatterTypeID = Pair.Key.ScatterTypeID;
+		Type.Key.Region.X += 1; // HISM count
+		Type.Instances += Row.Instances;
+		Type.Pooled += Row.Pooled;
+		Type.Key.Region.Y = FMath::Max(Type.Key.Region.Y, Row.Instances); // largest HISM
+	}
+	FString Out = FString::Printf(TEXT("Scatter HISMs: %d in regions of %d chunks"), Rows.Num(), Regions.RegionChunks);
+	TArray<FRow> Types;
+	ByType.GenerateValueArray(Types);
+	Types.Sort([](const FRow& A, const FRow& B) { return A.Instances > B.Instances; });
+	for (const FRow& Type : Types)
+	{
+		const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(Type.Key.ScatterTypeID) : nullptr;
+		Out += FString::Printf(TEXT("\n  type %d %s: %d HISMs, %d instances (%d pooled), largest %d"), Type.Key.ScatterTypeID,
+			Definition ? *Definition->Name : TEXT("?"), Type.Key.Region.X, Type.Instances, Type.Pooled, Type.Key.Region.Y);
+	}
+	Rows.Sort([](const FRow& A, const FRow& B) { return A.Instances > B.Instances; });
+	for (int32 i = 0; i < FMath::Min(TopN, Rows.Num()); ++i)
+	{
+		Out += FString::Printf(TEXT("\n  HISM type %d region (%d,%d,%d): %d instances (%d pooled)"), Rows[i].Key.ScatterTypeID,
+			Rows[i].Key.Region.X, Rows[i].Key.Region.Y, Rows[i].Key.Region.Z, Rows[i].Instances, Rows[i].Pooled);
+	}
+	return Out;
+}
 
 int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 {
@@ -604,21 +865,40 @@ bool UVoxelScatterRenderer::FindNearestInstance(int32 ScatterTypeID, const FVect
 			continue;
 		}
 		// The sphere overlap uses instance bounds; a tall tree whose base is a little outside the radius
-		// still reports, so the base distance is re-checked below.
-		const TArray<int32> Candidates = HISM->GetInstancesOverlappingSphere(Location, BestDist, /*bSphereInWorldSpace=*/true);
-		for (int32 Index : Candidates)
+		// still reports, so the base distance is re-checked below. Writes held for the HISM's next batch count as made
+		// (world modes review G42): a held release hides its instance, a held placement or new instance is where it goes.
+		const FTransform& ComponentTransform = HISM->GetComponentTransform();
+		auto Consider = [&](int32 Index)
 		{
-			FTransform Xf;
-			if (!HISM->GetInstanceTransform(Index, Xf, /*bWorldSpace=*/true) || Xf.GetScale3D().IsNearlyZero())
+			FTransform Local;
+			if (!GetEffectiveInstanceTransform(Pair.Key, HISM, Index, Local) || Local.GetScale3D().IsNearlyZero())
 			{
-				continue; // hidden (free-list) instance
+				return; // hidden (free-list) instance
 			}
+			const FTransform Xf = Local * ComponentTransform;
 			const float Dist = FVector::Dist(Xf.GetLocation(), Location);
 			if (Dist <= BestDist)
 			{
 				BestDist = Dist;
 				OutIndex = Index;
 				OutTransform = Xf;
+			}
+		};
+		const TArray<int32> Candidates = HISM->GetInstancesOverlappingSphere(Location, BestDist, /*bSphereInWorldSpace=*/true);
+		for (int32 Index : Candidates)
+		{
+			Consider(Index);
+		}
+		if (const FPendingHISMWrites* Writes = PendingHISMWrites.Find(Pair.Key))
+		{
+			for (const TPair<int32, FTransform>& Update : Writes->Updates)
+			{
+				Consider(Update.Key);
+			}
+			const int32 Applied = HISM->GetInstanceCount();
+			for (int32 i = 0; i < Writes->Grows.Num(); ++i)
+			{
+				Consider(Applied + i);
 			}
 		}
 	}
@@ -939,6 +1219,7 @@ void UVoxelScatterRenderer::AddInstancesToHISM(
 
 void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_FlushInstanceAdds);
 	if (PendingInstanceAdds.Num() == 0)
 	{
 		return;
@@ -946,6 +1227,12 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 
 	int32 InstanceBudget = MaxInstanceAddsPerFrame;
 	int32 EntriesProcessed = 0;
+	const bool bBatching = IsBatchingHISMWrites();
+	if (!bBatching)
+	{
+		// Writes held while batching was on land first, so recycled indices are all in their HISMs
+		ApplyPendingHISMWrites(/*bAll=*/true);
+	}
 
 	// Track which HISMs need render state marked dirty after batch updates
 	TSet<UHierarchicalInstancedStaticMeshComponent*> DirtyHISMs;
@@ -981,35 +1268,67 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 		const int32 ToRecycle = FMath::Min(ToProcess, Pool.FreeIndices.Num());
 		const int32 ToGrow = ToProcess - ToRecycle;
 
-		// Recycle from free list: update transforms of zero-scaled instances
-		for (int32 j = 0; j < ToRecycle; ++j)
+		if (bBatching)
 		{
-			const int32 RecycledIndex = Pool.FreeIndices.Pop(EAllowShrinking::No);
-			HISM->UpdateInstanceTransform(RecycledIndex, PendingAdd.Transforms[j],
-				/*bWorldSpace=*/true, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
-			ChunkIndices.Add(RecycledIndex);
-		}
-
-		// Grow pool: add new instances for remainder
-		if (ToGrow > 0)
-		{
-			TArrayView<FTransform> GrowTransforms = MakeArrayView(
-				PendingAdd.Transforms.GetData() + ToRecycle, ToGrow);
-			TArray<FTransform> GrowBatch(GrowTransforms.GetData(), GrowTransforms.Num());
-
-			const int32 FirstNewIndex = HISM->GetInstanceCount();
-			HISM->AddInstances(GrowBatch, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/true);
-
+			// Held for the HISM's next batch (world modes review G42), local to the HISM as AddInstances and
+			// UpdateInstanceTransform make world transforms. The indices are what the HISM gives them when the batch lands.
+			FPendingHISMWrites& Writes = PendingHISMWrites.FindOrAdd(FVoxelScatterHISMKey{ PendingAdd.ScatterTypeID, Region });
+			const FTransform& ComponentTransform = HISM->GetComponentTransform();
+			const int32 Applied = HISM->GetInstanceCount();
+			for (int32 j = 0; j < ToRecycle; ++j)
+			{
+				const int32 RecycledIndex = Pool.FreeIndices.Pop(EAllowShrinking::No);
+				const FTransform Local = PendingAdd.Transforms[j].GetRelativeTransform(ComponentTransform);
+				if (RecycledIndex >= Applied)
+				{
+					Writes.Grows[RecycledIndex - Applied] = Local;
+				}
+				else
+				{
+					Writes.Updates.Add(RecycledIndex, Local);
+				}
+				ChunkIndices.Add(RecycledIndex);
+			}
+			const int32 FirstNewIndex = Applied + Writes.Grows.Num();
 			for (int32 j = 0; j < ToGrow; ++j)
 			{
+				Writes.Grows.Add(PendingAdd.Transforms[ToRecycle + j].GetRelativeTransform(ComponentTransform));
 				ChunkIndices.Add(FirstNewIndex + j);
 			}
 			Pool.TotalAllocated += ToGrow;
 		}
+		else
+		{
+			// Recycle from free list: update transforms of zero-scaled instances
+			for (int32 j = 0; j < ToRecycle; ++j)
+			{
+				const int32 RecycledIndex = Pool.FreeIndices.Pop(EAllowShrinking::No);
+				HISM->UpdateInstanceTransform(RecycledIndex, PendingAdd.Transforms[j],
+					/*bWorldSpace=*/true, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+				ChunkIndices.Add(RecycledIndex);
+			}
+
+			// Grow pool: add new instances for remainder
+			if (ToGrow > 0)
+			{
+				TArrayView<FTransform> GrowTransforms = MakeArrayView(
+					PendingAdd.Transforms.GetData() + ToRecycle, ToGrow);
+				TArray<FTransform> GrowBatch(GrowTransforms.GetData(), GrowTransforms.Num());
+
+				const int32 FirstNewIndex = HISM->GetInstanceCount();
+				HISM->AddInstances(GrowBatch, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/true);
+
+				for (int32 j = 0; j < ToGrow; ++j)
+				{
+					ChunkIndices.Add(FirstNewIndex + j);
+				}
+				Pool.TotalAllocated += ToGrow;
+			}
+			DirtyHISMs.Add(HISM);
+		}
 
 		TotalInstancesAdded += ToProcess;
 		InstanceBudget -= ToProcess;
-		DirtyHISMs.Add(HISM);
 
 		if (ToProcess >= TotalNeeded)
 		{

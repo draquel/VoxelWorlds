@@ -418,6 +418,21 @@ public:
 	/** RegenerateChunkScatter calls since Initialize, for tests and audits. */
 	int64 GetTotalRegenerations() const { return TotalRegenerations; }
 
+	/** Game-thread time of the last Update's steps (ms) and what they did, for the streaming bench (world modes review G42). */
+	struct FUpdateTimings
+	{
+		float ApplyMs = 0.0f;     // ProcessCompletedAsyncScatter: completed extractions into the caches and the renderer
+		float RegrowMs = 0.0f;    // ProcessPendingExclusionRegrow
+		float LaunchMs = 0.0f;    // ProcessPendingGenerationQueue: extraction contexts and launches
+		float DistanceMs = 0.0f;  // ProcessCompletedDistanceStream + PerformDistanceSpawn
+		float FlushMs = 0.0f;     // the renderer's Tick: queued instance adds into the HISMs
+		int32 Applied = 0;        // completed extractions applied
+		int32 Launched = 0;       // extractions launched
+	};
+
+	/** The last Update's step timings. */
+	const FUpdateTimings& GetLastUpdateTimings() const { return LastUpdateTimings; }
+
 	/**
 	 * Get number of chunks pending scatter generation (queued + in-flight async).
 	 * Used to detect if world is still loading.
@@ -1029,6 +1044,9 @@ protected:
 
 	/** RegenerateChunkScatter calls (GetTotalRegenerations) */
 	int64 TotalRegenerations = 0;
+
+	/** The last Update's step timings (GetLastUpdateTimings) */
+	FUpdateTimings LastUpdateTimings;
 
 	/** Total surface points extracted */
 	int64 TotalSurfacePointsExtracted = 0;

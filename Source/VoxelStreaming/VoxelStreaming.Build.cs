@@ -41,6 +41,8 @@ public class VoxelStreaming : ModuleRules
 			new string[]
 			{
 				"ProceduralMeshComponent", // the far ocean's meshes (WM-E1)
+				"RenderCore", // the bench's game and render thread times (stat unit's)
+				"RHI", // the bench's GPU frame time
 			}
 		);
 
