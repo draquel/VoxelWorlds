@@ -1465,7 +1465,7 @@ Three findings from §13.11 get IDs here:
 | G22 | World items lay in the world's frame on a planet: the mesh is `AWorldItem`'s root, so the placeholder's and the WorldDisplay fragment's resting pose (`SetRelativeRotation`) replaced the pool's upright rotation (a raw meat dropped at 8° latitude stood 81.5° off the radial). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): `AWorldItem::ApplyRestingPose` relative to the upright frame | WM-SY16 |
 | G23 | Two heightmap readers of the analytic surface skip terrain conditioning: scatter's buried-chunk test (`ExtractSurfacePointsFromVoxelData` compares the chunk's top with `GetTerrainHeightAt`, not the conditioned height) and the PCG sampler's far points (`FVoxelSurfaceQuery::SampleSurface`). In a POI's falloff ring, where conditioning moves the ground, the first can flag a surface chunk as buried (no surface scatter in it) and the second puts far points at the natural height. Found in the spherical Phase 5 survey (§19), in the code; reproduced live on `VoxelDemo` (§19.3: a village's cut pad left 4,969 points of its ground underground, a PCG probe's far points a median 346 uu off the ground) | Fixed (§19.3): the extraction context carries the chunk's zones in every world mode (`FScatterExtractionContext::ConditioningZones`, the chunk manager's conditioning gatherer) and the buried-chunk test reads the generated height in all three heightmap paths; `FVoxelSurfaceQuery::SampleSurface` takes zones and the sampler gathers them over its bounds. Tests `Scatter.Conditioning.{CutPadAndRing,FilledPad,ManagerWiring}`, `PCG.FarPointsOnConditionedSurface`; the `VoxelDemo` A/B differs only in zone chunks. No `GenerationVersion` change | — |
 | G24 | A voxel-carved dungeon (`EDungeonPOIRepresentation::VoxelCarved`, the stone-lined `CarveUnderground` stamp) does not hold pawns on a smooth world: the boss falls through its room's floor at spawn, and `vox.TPRoom Boss` drops the player through the floor into the rock below (no surface inside solid rock, so no collision until a cave). Seen on the planet and on `VoxelDemo`'s plane alike, and on the base build of §19.2.4 with the same stamp (118,387 + 4,950 voxels), so it predates Phase 5. The demo's catalog dresses its dungeons with tiles (`TileMeshes`), whose floors are tile collision, so the demo is not affected. Found in the spherical Phase 5 live check (§19.2.3) | Fixed (§19.8). Not DC's: the voxel lining stood inside each cell, `WallThickness` deep, and the demo's 3 voxels of 75 on 400 uu cells filled every one-storey room and hallway (pawns stood in rock); and the boss spawned before the voxel floor under it had collision. Now one layer lines each closed face from inside and the rest of the jacket wraps it from outside (`UDungeonVoxelConfig::InnerLiningLayers`; `WallThickness` 1 stamps as before), the POI floor heights take the inner lining, `FPOIVoxelFloorHold` keeps the boss still while no floor lies under it (also when the player walks out of the collision radius), and `vox.TPRoom` waits for the floor. Tests `Dungeon.Stamp.{VoxelLining,CarvedFloorCollision}`, `VoxelWorlds.POI.DungeonFloorHold.{Decide,Character}`; the QA dungeon rows a voxel-carved dungeon has pass on `VoxelDemo` and the planet; tile-dressed dungeons unchanged | — |
-| G25 | Faint straight shading lines along chunk boundaries across a flattened POI pad on a planet (the City at cell (26, 6), §19.2.3): no hole and no step, only a change in shading. Cosmetic; not yet compared with a flattened pad on the plane | Open: cosmetic, look at seam normals on flat ground | — |
+| G25 | Faint straight shading lines along chunk boundaries across a flattened POI pad on a planet (the City at cell (26, 6), §19.2.3): no hole and no step, only a change in shading. Cosmetic; not yet compared with a flattened pad on the plane | Fixed 2026-10-20 (§20.8): not the pad's. At a chunk face the gradient's taps clamp into the mesh job's voxels, which left the clamped axis's one-sided difference at up to half weight, so the normals of the cells along every face leaned away from it wherever the surface crosses the face obliquely: on natural terrain at 45°N lines along the X and Y faces lit darker and along the Z faces brighter, at every LOD. The clamped difference is now scaled to the full span (`VoxelDCGradient::ClampedGradientNormal`, the interior pass and every seam sampler; bit for bit the old one where nothing clamps): LOD 0's triangles along X faces -7.3% → +1.4% and along Z faces +7.7% → -0.2% against the interior's +1.8%; the line across the City's pad at cell (26, 6) gone (`g25_pad_City_s{0,1}`); `Streaming.Planet.ChunkFaceShading`; `voxel.Mesh.ScaleClampedGradients` | — |
 | G26 | Heightmap scatter's column scan takes the voxel above a chunk for air, so a chunk whose top face lies within 1.5 voxels under the ground makes a row of points on that face (up to 1.5 voxels under the real surface, which the chunk above extracts too), and the buried-chunk test's 1.5-voxel margin keeps them as surface: a second, sunken copy of the surface scatter along every contour where the terrain crosses a chunk layer's top, and over a whole pad that sits just above one (the Tower at (−204,430, −46,859), pad 23 uu over layer −1's top: 2,185 such points). Before G23's fix the natural height happened to bury some of them under cut pads. Found while reproducing G23 (§19.3); reproduced over every `VoxelDemo` stop (§19.4: 9,326 copies around the Tower carrying 2,552 surface scatter spawns under the ground, 3,144 at the spawn on natural terrain) | Fixed (§19.4): within 1.5 voxels of the generated ground the voxel over a chunk's top layer is the one the generator made there, with the chunk above's edits applied (`FScatterExtractionContext::GetVoxelAboveChunk`, `AboveLayerEdits`, `UVoxelScatterManager::SetEditLayerSource`): solid drops the top voxel's crossing and covers the column, air interpolates against it. Column and cubic scans; the GPU path never had it (its interior mesh has no boundary-cell vertex, G27). Tests `Scatter.TopFace.{Contour,FlatGround,EditsAbove}`; audit `voxel.Scatter.TopFaceAudit`; the `VoxelDemo` A/B changes only chunks with a top-face row. No `GenerationVersion` change | — |
 | G27 | GPU scatter extraction (`bUseGPUScatterExtraction`, the demo asset's setting; chunks meshed at LOD 0 only) had no point in a chunk's max-face cell layers: it read the chunk's interior mesh, which since seam ownership leaves the cells against the +X, +Y and +Z faces to the chunk's seams. Measured on all six faces (§19.5, `voxel.Scatter.BoundaryAudit`): every GPU-extracted chunk (11 to 18 per `VoxelDemo` stop, the chunks around where the player arrives) had point ratio 0.00 on +X, +Y and +Z and about 1 on the min faces: bare bands in the grass along chunk borders and along the contour where the terrain crosses a chunk layer's top. Its 4,096-point output buffer also overflowed on 64³ chunks (60 of 75 extractions), and the same chunks carried 31% fewer spawn points than on the CPU. Found in §19.4 | Fixed (§19.5): GPU scatter extraction retired (decision D25); every chunk extracts from its voxels. Deleted: `FVoxelGPUSurfaceExtractor`, `ScatterSurfaceExtraction.usf`, the GPU branch, `ClassifySurfacePointsUnderground`, `WantsGPUExtraction`, and the uncalled mesh-vertex path (`GenerateChunkScatter`, `FVoxelSurfaceExtractor`); `bUseGPUScatterExtraction` deprecated and ignored; `OnChunkMeshDataReady` takes no mesh. Tests `Scatter.Boundary.{EveryCellLayerCovered,ManagerIgnoresGPUFlag}`; the A/B with the asset's flag set equals the CPU behaviour on all 780 stable chunk-stops, no gap face anywhere | — |
 | G28 | A buried heightmap chunk's top face carries a row of underground points inside the rock: under ground more than 1.5 voxels over a chunk's top the column scan still takes the voxel above for air (a cave can open it there, so the generated height cannot decide; G26's rule stops at the band), and the buried test classifies the copy underground. Around the Tower 374,928 such points in 223 chunks, and underground-only scatter types put 306 spawn points on them inside the rock (invisible unless a cave floor lies just above); 1.5% of those crossings are real (a cave or dug floor at the boundary, 5,736). Found in §19.4 | Open, low (no visible artefact found): decide the voxel above with the cave carve at that point (the generator's cave density, analytic) or the chunk above's own data | — |
@@ -1484,7 +1484,7 @@ Three findings from §13.11 get IDs here:
 | G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Fixed in P6.5 (§20.6): the lagged pivot snaps when the ideal pivot jumps more than `TeleportSnapDistance` (5,000 uu) in a frame (`UVCThirdPersonCameraMode::ComputeLaggedPivot`, `VoxelCharacter.Camera.TeleportSnap`) | WM-BP10 |
 | G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Open: profile scatter on km relief | WM-BP13 |
 | G43 | The planet terrain steps across simplex-cell boundaries: `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`, and the heightmap noise's Simplex3D) use the 0.6 kernel radius (Gustavson's), which reaches past the simplex, so a corner's contribution drops out abruptly where a sample crosses into the next simplex. In world space the planes x = ±y, y = ±z and x = ±z through the planet centre lie on a simplex boundary in every octave at once, and they are the cube sphere's face edges: directions 10⁻⁸ rad apart across x = z differ in altitude by up to 11 uu on the small planet and 136 uu on `Review_Planet_L` (measured by `FarField.Planet.MatchesSurface`'s first build, P6.4, §20.5). Elsewhere one octave's boundary at a time gives smaller steps. The voxel terrain has them too (under a voxel on the small planet, up to about two along L's face edges) | Open (low): a 0.5 kernel is continuous but changes every planet's terrain (`PlanetGenerationVersion` bump; the heightmap Simplex3D a `GenerationVersion` bump and its parity CRCs). The far field samples a face edge's vertices exactly on the plane from both faces (`FVoxelFarFieldPatchKey::GetDirection`), so its patches meet there | — |
-| G44 | On a planet the voxel window's LOD 2 chunks light brighter than its LOD 0 and 1 chunks and the far field: from straight above `Review_Planet_L` at 45°N 20°E under a midday sun the window is a ring (the LOD 2 band) brighter than both its centre and the far field around it, and the normal buffer shows the ring's normals off the others' (whiter); the centre and the far field match. Not the far field's: the same material instance (swapping in a region component's makes no difference), the same material ids and vertex conventions (unlit the window's edge vanishes), shadows not involved; the far field's grid normals equal the planet's analytic `GetConditionedSurfacePoint` normals, and only giving it radial normals matches the ring. It shows as a brightness step along the window's edge from altitude, over land and through the sea (§20.5) | Open: the voxel terrain's normals at stride 4 on planets (the DC mesher's normal of an LOD 2 cell, the scene proxy's path); the far field keeps the analytic normals | WM-BP13 |
+| G44 | On a planet the voxel window's LOD 2 chunks light brighter than its LOD 0 and 1 chunks and the far field: from straight above `Review_Planet_L` at 45°N 20°E under a midday sun the window is a ring (the LOD 2 band) brighter than both its centre and the far field around it, and the normal buffer shows the ring's normals off the others' (whiter); the centre and the far field match. Not the far field's: the same material instance (swapping in a region component's makes no difference), the same material ids and vertex conventions (unlit the window's edge vanishes), shadows not involved; the far field's grid normals equal the planet's analytic `GetConditionedSurfacePoint` normals, and only giving it radial normals matches the ring. It shows as a brightness step along the window's edge from altitude, over land and through the sea (§20.5) | Fixed 2026-10-20 (§20.8): the DC mesher's crossing normals took their gradient taps `Stride` voxels apart, and generated density saturates a voxel either side of the surface, so at stride 4 each component was a sign and LOD 2's normals snapped toward the cube diagonals (LOD 1's less). A strided cell's vertex normal is now LOD 0's at the voxel crossing nearest the vertex (`VoxelDCShading`); the QEF keeps the stride-scale normals, so no vertex moves. From straight above L at 45°N 20°E the ring against the centre 1.16 → 1.01 and the window no longer told from the far field; LOD 2's tilt on gentle relief 6.4° → 0.7°; `Streaming.{Planet,Plane}.LODNormals`; `voxel.Mesh.VoxelShadingNormals`. Heightmap worlds had it on slopes. G25 was found to be the chunk faces' share of the same lighting and fixed with it | WM-BP13 |
 | G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Open (cosmetic; the orbit view, WM-BP10, shows it most): blend the materials across a far-field quad (per-vertex material weights, or a per-patch material texture). Not taken in P6.5: it needs the terrain material to blend two materials within a triangle, which the voxel meshes do not do either (`DC_MATERIAL_BLEND_PLAN.md`, deferred). Since P6.5 it also shows under the viewer just above the cut-over, where the window has emptied (§20.6) | WM-BP10 |
 | G46 | The volumetric cloud layer keeps the engine's Earth altitudes (5 km floor, 10 km thick) when the atmosphere is scaled to the planet: from orbit over the 50 km test planet a ring of clouds floats well outside its 9.7 km of air, and on the small planet the layer is 60 times its relief (found in P6.5's orbit survey, §20.6) | Fixed in P6.5 (§20.6): `ADayNightController::ApplyPlanetSky` scales every cloud layer with the atmosphere (`ComputePlanetCloudLayer`: the thickness by K, the floor by K but at least the terrain's top); `WorldClock.Planet.Sky`, `.SkyScale` | WM-BP10 |
 | G47 | System edits (dungeon stamps, region edits, edit loads) broadcast `OnChunkEdited` with no centre (the zero vector, radius 0), and the surface navigation invalidated a box around it: on a planet the zero vector is the centre, and the box's corners projected into every cached region's tangent frame spanned up to 1.7 R a side, so each broadcast walked billions of tile keys on the 1,000 km planet: a dungeon stamp near the pawn held the game thread for minutes (on the small planet every edit cleared the whole region cache; on a heightmap world the cells around the origin, not the edit's) (found in P6.5's L survey, §20.6) | Fixed in P6.5 (§20.6): an edit with no centre invalidates the edited chunk's bounds; a box's corners deep inside the planet project into no frame; `InvalidateTileCells` visits the cached tiles when the rectangle holds more than the cache; checks in `Navigation.Planet.Path` / `.PathAtScale` | WM-BP11 |
@@ -1500,6 +1500,7 @@ Three findings from §13.11 get IDs here:
 | G57 | An edit that reached a chunk on its way to a mesh (queued, or on a worker) restaled none of its seams, and a mesh already on a worker landed without the edit: `MarkChunkDirty` acted only on a loaded chunk, so the seams, and the interior too in the second case, stayed stale until the chunk re-meshed for another reason. It follows any edit made within a mesh's round trip of another on the same chunk: a held brush, water propagation's batches, a stamp over chunks still loading. The face neighbours' re-mesh restaled the seams only when the neighbours were loaded at the second edit (found in G56, §19.13) | Fixed 2026-10-20 (§19.13): `MarkChunkDirty` restales the seams of a chunk that is queued or on a worker, and one on a worker re-meshes when its mesh lands (`FVoxelChunkState::bRemeshAfterMeshing`, `RemeshIfEditedWhileMeshing`); `Streaming.EditRemesh.*` edits 4 and 5: 1 to 3 stale chunk meshes and seam buckets under both rules before, none after | — |
 | G58 | Edit-driven water propagation (`UVoxelWaterPropagation`) reads the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel dug under the sea still reads solid, so a dig never floods (a probe: 8 dug voxels next to water, none flooded, no seed logged), and its flood sets each voxel to the generated voxel plus the flag, which would undo an edit there (found in G56, §19.13) | Fixed 2026-10-20 (§19.14): every read is edit-merged and the flag is set on the voxel as it is (a dig keeps its density and material); seeds come from the voxels each edit changed (`GetBroadcastEditBounds`), so system edits of single voxels seed too, a chunk without data yet scanning when it arrives; water-flagged air is the source (a fill keeps the flag but is solid); nothing is written into a chunk without data; the flood's own batches are not scanned; `Streaming.WaterPropagation.Plane`, `.Planet` | — |
 | G59 | The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a chunk's mesh completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only: water that an edit-driven flood put in the edit layer draws no tile (a channel dug inland from the shore below sea level is flagged but shows no water surface), and a flood does not continue into a chunk that loads after it (traced in G58, §19.14; before G58 no flood reached the edit layer) | Fixed 2026-10-20 (§19.16): a chunk with edits builds its tile mask from the edit-merged snapshot (the pull across faces drops the snapshot when it writes flags); when a chunk's water first settles, `UVoxelWaterPropagation::OnChunkWaterSettled` scans the faces it shares with settled chunks (either with edits, below the sea) for a voxel pair with an edit on either side, one dry air below the sea and the other water, and seeds the flood there; the pull itself stays on the generated voxels; `Streaming.WaterPropagation.ChunkArrival.{Plane,Planet}`, `.Tiles.Plane`, `voxel.Water.Stats` | — |
+| G60 | Marching Cubes' LOD normals use the same stride-scale gradient taps G44 fixed in Dual Contouring (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD` and the GPU MC shader's), so an MC world's LOD 1 and 2 would lean the same way (found in G44, §20.8). No shipped configuration meshes with MC: the planets and `VoxelDemo` are DC | Open: the same voxel-resolution vertex normals in MC, CPU and GPU | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -6335,7 +6336,7 @@ planet keeps its ocean shell and looks as before.
 | The sea | The far field's at scale only; the small planet keeps the shell | The shell is within its budget there (8 uu), and its tests and look stay as they were |
 | The sea's grid | 8 x 8 cells a patch, only over the cells near or under the sea | Ocean is flat; the terrain's grid on L's pole took 190 MB, the 8 x 8 grid 88 MB before the patch-size change |
 | Face edges | The gnomonic coordinate exactly ±1 at a face edge, so both faces sample the same directions there | The planet terrain steps across the face-edge planes (G43): two faces' patches sampling 10⁻⁸ rad apart split by up to 136 uu on L |
-| Normals | The analytic surface's (the grid's) | They equal the planet's `GetConditionedSurfacePoint` normals; the voxel window's LOD 2 ring is the one that is off (G44) |
+| Normals | The analytic surface's (the grid's) | They equal the planet's `GetConditionedSurfacePoint` normals; the voxel window's LOD 2 ring is the one that is off (G44, fixed in §20.8) |
 
 **Tests** (`VoxelWorlds.FarField.Planet.*`, new; the small planet, R 250,000 with its ±6,500 relief, and a 1,000 km planet
 with `Review_Planet_L`'s noise and ±192,000 relief, with synchronous builds and a coarse view, 300 pixels a radian (a 600-pixel view at 90°) and 4 px):
@@ -6465,7 +6466,7 @@ tests pass unchanged.
 | ID | Finding | Status |
 |----|---------|--------|
 | G43 | The planet terrain steps across the simplex lattice's boundaries (the 0.6 kernel radius), and the planes x = ±y, y = ±z, x = ±z, the cube sphere's face edges, are a boundary in every octave: up to 11 uu on the small planet and 136 uu on L between directions 10⁻⁸ rad apart, found by `MatchesSurface`'s first build | Open (low): a 0.5 kernel changes every planet's terrain (`PlanetGenerationVersion`); the far field samples a face edge on its plane from both faces |
-| G44 | The voxel window's LOD 2 ring lights brighter than its LOD 0/1 centre and the far field (its normals off in the normal buffer); the far field's normals are the analytic surface's | Open: the voxel terrain's normals at stride 4 on planets (WM-BP13) |
+| G44 | The voxel window's LOD 2 ring lights brighter than its LOD 0/1 centre and the far field (its normals off in the normal buffer); the far field's normals are the analytic surface's | Fixed in §20.8: LOD 1 and 2 vertex normals from voxel-resolution gradients |
 | G45 | Far-field material borders are stepped along its quads (one material a quad), a few km a step at the horizon and every biome border a staircase from orbit | Open (cosmetic): blend materials across a quad (WM-BP10's orbit view shows it most) |
 
 **Left for the next milestones.** P6.5 (WM-BP10, WM-BP11): voxels unloading above a cut-over altitude and streaming back
@@ -6863,11 +6864,10 @@ Still open from Phase 6:
 - G39: biome blend bands.
 - G42: M's and L's frame and manager P95.
 - G43: noise steps at the face edges.
-- G44: the LOD 2 ring's lighting.
 - G45: stepped far-field materials.
 - G49: the prefetch's speculation.
 
-G52 (the near band during descents) is fixed in §20.7.
+G52 (the near band during descents) is fixed in §20.7, G44 (the LOD 2 ring's lighting) in §20.8.
 
 Deferred since before Phase 6: G14, G16, G19, G25 and G28 (G32 and G33 fixed since, §19.10 and §19.11; G34 dismissed, §19.12, and the demo caves retuned, §19.15).
 
@@ -7011,3 +7011,163 @@ The 108 GPU parity lines are CRC-identical to P6.5's: G52 changes no generation.
 from the shared store; that test and the whole re-run then passed).
 
 G52 is fixed. G49 (the prefetch's speculation) stays open; G52's cap does not change it.
+
+### 20.8 G44 and G25: vertex normals at a stride and at chunk faces (2026-10-20)
+
+Bases: VoxelWorlds `5907e2d`, UE5_PluginDev `98b2a85` (the demo caves merged). Branches `fix/g44-lod2-normals`
+(VoxelWorlds) and `claude/g44-lod2-normals` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic
+Games\UE_5.8` in a worktree editor (Claudius on 8094), background throttling off.
+
+**The cause** (G44). Not the far field, the scene proxy or the vertex factory: generation does not depend on the LOD
+(every chunk holds its voxels at voxel resolution), and every chunk and seam mesh in the game comes from the CPU Dual
+Contouring mesher. Its crossing normals are central differences with taps `Stride` voxels either side
+(`CalculateGradientNormalLOD`, and each seam sampler's `GradientNormal`). Generated density saturates a voxel either
+side of the surface: `SignedDistanceToDensity` clamps the signed distance to ±1 voxel. At stride 4 every tap the surface
+does not pass within a voxel of reads 0 or 255, so each component of the gradient is a sign, and the cell's normal (the
+average of its crossings') snaps toward one of the 26 cube directions. On a planet, local up at 45°N 20°E is about
+(0.66, 0.24, 0.71), and LOD 2 leaned toward the diagonal (1, 1, 1) / √3: the near-white ring in P6.4's normal buffer,
+and under the noon sun a ring 16% brighter than the LOD 0 centre (the window's mean grey 118 against 102,
+`g44f_L_45N_top_n0`). LOD 1 (stride 2) leaned less, the dimmer square inside the ring. On a heightmap flat ground shows
+nothing (up is an axis), but slopes snap: bright streaks on `VoxelDemo`'s rocky hills from above (`g44f_demo_top_n0`)
+and a light line across a far hill's slope (`g44f_demo_oblique_n0`). A simulation of the estimator on a plane at 45°N
+20°E put LOD 2's mean normal 16° off, LOD 1's 5° off, and LOD 0's 1° off.
+
+**G25 on the way.** With G44's normals in, the seams along every Z chunk face of the LOD 2 band lit up as bright dashed
+strips one cell wide, there in a fresh PIE too (`g44_L_close_fresh_n1`). They had been there all along, faintly
+(`g44_L_45N_top_n0`: the same rows, 3.5 grey levels over the background against 10.7 with G44's normals alone). Their
+cause is the clamp that makes a mesh job independent of its neighbours: the gradient's taps clamp into the job's voxels
+("the terrain continues"), so at a chunk face the clamped axis's difference is one-sided and has up to half the weight
+of the other two. The normals of the cells along the face lean away from it. At 45°N, under the noon sun, losing X or Y
+darkens and losing Z brightens: P6.4's dark dotted diagonal lines along the X and Y faces and the faint bright ones
+along the Z faces, at every LOD. That is G25 (the lines across the City's flat pad, §19.2.3), which this measures on
+natural terrain.
+
+**What changed** (`VoxelCPUDualContourMesher.cpp`; no change to generation, positions or seam ownership):
+
+- **Vertex normals at a stride** (`VoxelDCShading`). The QEF keeps the stride-scale crossing normals, so no vertex moves
+  and every seam, closure and collision mesh is the same. Only the cell's vertex normal changes. For each strided edge
+  with a crossing, the cell finds where the surface crosses it at voxel resolution (`FindVoxelCrossing`, the first of
+  its `Stride` voxel steps that changes sign). Its vertex normal is the normal LOD 0 gives the voxel cell inside the
+  strided cell next to the crossing nearest the vertex (`VoxelCellNormal`: the stride-1 gradient normals at that voxel
+  cell's crossings, averaged in `CellEdges` order): LOD 0's estimator with LOD 0's footprint. `SolveCellVertices` and
+  the seam template (`ComputeCellVertex`) run the same op sequence through each view's density and gradient, and every
+  voxel read lies inside the strided cell, so ring recomputes stay bit-identical. `voxel.Mesh.VoxelShadingNormals` (1; 0
+  = the stride-scale normals before G44).
+- **Clamped gradients** (`VoxelDCGradient::ClampedGradientNormal`), used by the interior pass and the face, edge and
+  corner seam samplers: a clamped axis's difference is scaled back to the full span (`2 · Stride / span`). Where nothing
+  clamps the result is the old central difference, bit for bit. `voxel.Mesh.ScaleClampedGradients` (1; 0 = before).
+- **The estimator.** Three were measured on the test worlds below (before the clamp fix) on the ±800 relief:
+  - Averaging the voxel-scale gradients of all the strided cell's crossings smooths the normals over the 4-voxel cell
+    and lights brightest. LOD 2 is +7.4% against the analytic surface at 45°N and +21.6% on the plane, where LOD 0 is
+    +1.0% and +8.0%.
+  - One gradient sample at the crossing nearest the vertex lights less bright (+6.8%, +12.8%) but scatters most. LOD 2's
+    mean angle is 15.4° and 32.4°.
+  - LOD 0's cell normal at that crossing (chosen) lights like the single sample (+6.5%, +15.8%) with less scatter
+    (11.7°, 26.0°).
+
+**Tests** (`VoxelStreaming/Tests/VoxelPlanetStreamingTests.cpp`, the closed-surface tests' worlds: the planet of radius
+20,000 with voxel 50 and chunk 32, the plane with voxel 100 and chunk 16, three LOD bands, CPU generation, a fresh world
+per case with the cvar set before it streams). For every vertex and triangle of the chunk meshes and seam buckets, by
+the LOD of the chunk it lies in, against `GetSurfacePointAt`'s normal on its up-line: the mean angle, the tilt (the mean
+of normal minus analytic normal across local east and north) and the brightness (triangle area × the Lambert term with
+the interpolated normal at the centroid against the analytic normal's, under the local noon sun; overhead on the plane).
+
+- **`Streaming.Planet.LODNormals`** (new): 45°N 20°E and the equator. With gentle relief (±200, two octaves of 50 and 25
+  voxels; LOD 2 resolves them) LOD 1 and 2 must tilt at most 1.5° more than LOD 0, light within LOD 0's brightness error
+  + 2%, and stay within 1.5 × LOD 0's mean angle + 5°. The stride-scale normals must fail that bound. With the streaming
+  tests' relief (±800, three octaves; the finest, 12.5 voxels, is finer than LOD 2 resolves) the mean angle must fall.
+- **`Streaming.Plane.LODNormals`** (new): the same on the plane (gentle: one octave of 25 voxels).
+- **`Streaming.Planet.ChunkFaceShading`** (new, G25): 45°N 20°E and the equator, gentle relief. Triangles within 1.5
+  cells of an X, Y or Z chunk face must light within 3% of the interior's at LOD 0, 1 and 2. The unscaled clamp must
+  fail at one of the places.
+
+| Place, LOD | Mean angle before → after (LOD 0) | Tilt before → after | Brightness before → after (LOD 0) |
+|---|---|---|---|
+| Planet 45°N, gentle, LOD 1 | 7.42° → 2.09° (1.90°) | 3.81° → 0.90° | +5.39% → +1.61% (+1.61%) |
+| Planet 45°N, gentle, LOD 2 | 13.67° → 2.94° | 6.40° → 0.65° | +3.18% → +0.90% |
+| Planet equator, gentle, LOD 1 | 9.11° → 2.78° (2.49°) | 1.35° → 0.36° | -5.21% → -1.14% (-1.07%) |
+| Planet equator, gentle, LOD 2 | 19.29° → 3.88° | 1.68° → 0.20° | -14.65% → -1.29% |
+| Plane, gentle, LOD 1 | 8.24° → 3.49° (2.55°) | 0.48° → 0.19° | -4.90% → -0.88% (-1.26%) |
+| Plane, gentle, LOD 2 | 14.29° → 7.11° | 1.61° → 0.58° | -7.54% → +0.17% |
+| Planet 45°N, ±800, LOD 1 / 2 | 10.77° / 17.03° → 5.22° / 11.36° (3.73°) | 0.45° / 1.10° → 0.10° / 0.36° | +5.35% / +11.81% → +2.59% / +6.34% (+1.31%) |
+| Planet equator, ±800, LOD 1 / 2 | 9.18° / 15.26° → 5.21° / 11.59° (3.53°) | 0.56° / 1.01° → 0.25° / 0.28° | -3.85% / -2.85% → -0.26% / +2.33% (-1.65%) |
+| Plane, ±800, LOD 1 / 2 | 19.11° / 29.56° → 12.73° / 24.56° (9.18°) | 0.55° / 1.55° → 0.37° / 0.47° | +25.6% / +26.7% → +13.8% / +16.7% (+8.8%) |
+
+The vertex counts are the same with either normals (no vertex moves). On the default relief what is left of the
+brightness difference is the coarse triangles interpolating normals across 4 voxels, not the estimator; the far field's
+quads near the window do the same with the analytic normals. The plane's LOD 2 keeps a 7° mean angle on gentle hills:
+its vertex normal is a voxel cell's up to a cell away on 27° slopes. Its tilt (0.58°) and brightness (+0.17%) are LOD
+0's.
+
+| Place (ChunkFaceShading), LOD | Interior | X faces | Y faces | Z faces |
+|---|---|---|---|---|
+| 45°N, LOD 0, unscaled → scaled | +1.76% → +1.79% | -7.28% → +1.37% | +0.96% → +1.71% | +7.69% → -0.23% |
+| 45°N, LOD 1 | +1.63% → +1.63% | -2.13% → +2.36% | +1.45% → +1.78% | +5.02% → +0.67% |
+| 45°N, LOD 2 | +1.22% → +1.21% | -3.17% → +0.96% | +0.95% → +1.18% | +3.20% → +0.24% |
+| Equator, LODs 0-2 | -1.0 to -1.5% | within 1.2% of the interior either way | | |
+
+On the equator the surface's normal is along X, so no face clamps a component that matters. The clamp fix also brings
+LOD 0's normals closer to the analytic ones wherever the surface crosses chunk faces obliquely: the mean angle at 45°N
+falls from 3.29° to 1.90° (gentle) and 4.35° to 3.73° (±800), and on the plane's two-octave gentle hills from 7.16° to
+2.46°.
+
+**Live** (`PlanetTest` with `voxel.ConfigOverride`, `vox.TPLatLon` and its settle, local noon, `vox.TimeScale 0`; in
+each PIE the new normals first, then both cvars to 0 and `voxel.RemeshAll` for the old ones from the same cameras; shots
+`Saved/Screenshots/Claudius/g44f_*` in the worktree, `_n1` new and `_n0` old):
+
+- **`Review_Planet_L`, 45°N 20°E.** From 60,000 uu straight above (`g44f_L_45N_top_*`), the old normals give P6.4's
+  picture: the LOD 2 ring 16% brighter than the centre (mean grey 118.2 against 101.7), the LOD 1 square between them,
+  dark dotted lines along X/Y faces and faint bright ones along Z faces. With the new ones the window cannot be told
+  from the far field: ring against centre 111.1 against 110.2, no line over the noise (a row profile's largest excess
+  1.9 grey levels, against 5.3). The normal buffer (`_topnormals_*`) loses its white ring. The oblique look from 12,000
+  uu (`_oblique_*`) had the window's edge as a brightness step at the horizon; it is gone. From 7,000 uu over a Z face
+  in the LOD 2 band (`g44f_L_close_*`) the old dotted lines and the strip are gone.
+- **`Review_Planet_L`, equator** (0°, 100°E; `g44f_L_eq_*`): the old dark chunk-face lines are gone. The orange and
+  brown vertical bands in both are G39's biome blend bands.
+- **`Review_Planet_M`** (`g44f_M_45N_*`, `g44f_M_eq_*`): the same, ring and lines at 45°N gone.
+- **The small planet** (`g44f_S_45N_*`, `g44f_S_eq_*`): the old view is flatter with diagonal chunk-face lines, the new
+  one shows the hills' relief, no lines.
+- **G25's own site**, the City's flattened pad at cell (26, 6) on the small planet (`vox.TPPOI City`), from 5,000 uu
+  straight above with G44's normals on and `voxel.Mesh.ScaleClampedGradients` 0 then 1 (`g25_pad_City_s{0,1}`): the
+  unscaled clamp draws a dark double line diagonally across the pad along a chunk face; scaled, it is gone.
+- **`VoxelDemo`** (its own config, from 30,000 uu over the origin and an oblique look; `g44f_demo_*`): no ring before or
+  after (a heightmap's flat ground is unaffected); the old streaks on the rocky slopes and the light line across the far
+  hill are gone.
+
+**Meshing cost.** On `Review_Planet_L` at 45°N 20°E with the pawn held, `voxel.RemeshAll` re-meshes the window in place
+(1,102 chunk meshes, 5,673 seam jobs); `voxel.Edit.MeshWork` gives their worker time. The two settings were alternated
+in one PIE, seven pairs over three batches. Chunk meshes took 1,483-1,550 ms with the old normals (one outlier, 1,727)
+and 1,676-1,907 ms with the new ones: +14-21%, about 0.2-0.3 ms a chunk, all on LOD 1 and 2. Seam jobs took 1,717-1,808
+ms against 1,904-2,044 ms (+8-13%). Each strided vertex now reads about 40 more voxels. The clamp scale alone costs
+nothing measurable (1,514-1,530 ms). Streaming does not show it: the P6.4 great circle on L (`voxel.Bench.Run <tag> 1500
+40000 gc=45:20:90 follow=300 warmup=30 catchup=90`, a fresh world per run, a throwaway run first, three runs each
+interleaved; tags `g44b_L_n{0,1}_gc_r{1,2,3}`):
+
+| Normals | Catch-up s | Frame P50 / P95 ms | Manager P95 ms | Mesh tick P95 ms | Seam P95 ms | Peak loaded |
+|---|---|---|---|---|---|---|
+| Old (0, 0) | 0.8 / 0.4 / 0.4 | 16.7 / 30.8-35.4 | 8.1-9.9 | 1.17-1.27 | 2.40-2.53 | 1,264 |
+| **New (1, 1)** | 0.5 / 0.4 / 0.4 | 16.7 / 31.6-33.4 | 8.3-9.1 | 1.23-1.29 | 2.40-2.44 | 1,264 |
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 567/567 headless (564 +
+the three above) and 567/567 in the editor with the GPU tests running (the generation parity tests,
+`Meshing.MarchingCubes.CPUvsGPU`, `GPUNoiseGeneratorAsync`), no device loss; the 108 GPU parity lines CRC-identical to
+the demo caves' (no generation change). The seam and closure tests (`Meshing.DualContour.*`, 23 including the ring
+bit-match and mixed-seam suites, and `Streaming.{Planet,Plane}.ClosedSurface`) pass unchanged.
+
+**New finding** (in §14.1):
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G60 | Marching Cubes' LOD normals use the same stride-scale taps (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD`, and the GPU shader's `CalculateGradientNormalLOD`), so an MC world's LOD 1 and 2 would lean the same way. No shipped configuration uses MC (the planets and `VoxelDemo` are DC) | Open: give MC's vertex normals the same voxel-resolution estimate, CPU and GPU |
+
+**Left as they were:**
+
+- Cubic meshing has face normals and no gradients.
+- The retired GPU DC mesher's shader keeps its stride-scale normals; it meshes nothing
+  (`voxel.Seam.CPUInteriorRouting`).
+- What is left at LOD 2 on rough terrain is the coarse mesh's own smoothing: its triangles interpolate normals across 4
+  voxels. The far field does the same across its quads, with the analytic normals.
+- The clamp's one-sided difference leaves LOD 0's Z faces at 45°N 2% darker than the interior (from 6% brighter), under
+  the 3% bound; a neighbour's voxels would close it, at the cost of the neighbour independence seam ownership relies on.
+
+G44 and G25 are fixed.
