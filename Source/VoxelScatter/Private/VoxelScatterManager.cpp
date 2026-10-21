@@ -25,6 +25,18 @@
 #include "HAL/IConsoleManager.h"
 #include "UObject/UObjectIterator.h"
 
+static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
+	TEXT("voxel.Scatter.RegionChunks"),
+	-1,
+	TEXT("Chunks along the edge of a scatter HISM's region (world modes review G42): each scatter type gets one HISM per region.\n")
+	TEXT("-1 = 4 on a planet, one region at the world origin on a heightmap world; 0 = the render regions (voxel.Render.RegionChunks\n")
+	TEXT("on a planet, one region on a heightmap world: the behaviour before G42); N > 0 = regions of N chunks in any world mode.\n")
+	TEXT("Read when the scatter manager initializes."),
+	ECVF_Default);
+
+/** A planet's scatter HISM regions by default (voxel.Scatter.RegionChunks -1): a quarter of the render regions' edge. */
+static constexpr int32 PlanetScatterRegionChunks = 4;
+
 namespace
 {
 	/**
@@ -356,7 +368,20 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 
 	// Create scatter renderer for HISM instance management, its HISMs per render region on a planet (WM-BP7)
 	ScatterRenderer = NewObject<UVoxelScatterRenderer>(this);
-	ScatterRenderer->SetRenderRegions(FVoxelRenderRegions::FromConfig(*Config));
+	// Its HISMs per region (world modes review G42): every change to a HISM costs all its instances (UVoxelScatterRenderer's
+	// batched writes), so a planet keeps scatter in regions a quarter of the render regions' edge; precision only gains.
+	FVoxelRenderRegions ScatterRegions = FVoxelRenderRegions::FromConfig(*Config);
+	const int32 ScatterRegionSetting = CVarVoxelScatterRegionChunks.GetValueOnGameThread();
+	if (ScatterRegionSetting > 0)
+	{
+		ScatterRegions.RegionChunks = ScatterRegionSetting;
+	}
+	else if (ScatterRegionSetting < 0 && Config->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		ScatterRegions.RegionChunks = PlanetScatterRegionChunks;
+	}
+	ScatterRenderer->SetRenderRegions(ScatterRegions);
+	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter HISM regions: %d chunks along an edge (0 = one region)"), ScatterRegions.RegionChunks);
 	ScatterRenderer->Initialize(this, World);
 
 	bIsInitialized = true;
@@ -482,17 +507,31 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 		return;
 	}
 
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_Update);
 	LastViewerPosition = ViewerPosition;
+	FUpdateTimings Timings;
+	const int64 ProcessedBefore = TotalChunksProcessed;
+	const int64 LaunchedBefore = TotalExtractionsLaunched;
+	double StepStart = FPlatformTime::Seconds();
+	auto EndStep = [&StepStart](float& OutMs)
+	{
+		const double Now = FPlatformTime::Seconds();
+		OutMs = static_cast<float>((Now - StepStart) * 1000.0);
+		StepStart = Now;
+	};
 
 	// Process completed async scatter results (game thread only: cache + HISM update)
 	ProcessCompletedAsyncScatter();
+	EndStep(Timings.ApplyMs);
 
 	// Launch regrow placements for chunks uncovered by an unregistered exclusion volume
 	// (throttled; runs right after completions so freed async slots are usable this tick)
 	ProcessPendingExclusionRegrow();
+	EndStep(Timings.RegrowMs);
 
 	// Launch new async scatter tasks from pending queue (throttled)
 	ProcessPendingGenerationQueue();
+	EndStep(Timings.LaunchMs);
 
 	// Distance-based scatter streaming — fully decoupled from chunk generation.
 	// Uses its own async pipeline (DistanceStreamQueue / DistanceStreamInProgress).
@@ -505,6 +544,7 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 		TimeSinceLastDistanceCheck = 0.0f;
 		PerformDistanceSpawn();
 	}
+	EndStep(Timings.DistanceMs);
 
 	// Tick the scatter renderer to flush pending HISM rebuilds
 	// Rebuilds are deferred while viewer is moving to prevent flicker
@@ -512,6 +552,10 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 	{
 		ScatterRenderer->Tick(ViewerPosition, DeltaTime);
 	}
+	EndStep(Timings.FlushMs);
+	Timings.Applied = static_cast<int32>(TotalChunksProcessed - ProcessedBefore);
+	Timings.Launched = static_cast<int32>(TotalExtractionsLaunched - LaunchedBefore);
+	LastUpdateTimings = Timings;
 
 	// Debug visualization is drawn separately via DrawDebugVisualization()
 }
@@ -608,6 +652,7 @@ bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData,
 	int32 ChunkSize, float VoxelSize)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_OnChunkMeshDataReady);
 	if (!bIsInitialized || !Configuration)
 	{
 		return;
@@ -1605,6 +1650,7 @@ void UVoxelScatterManager::ApplyClearedVolumesToResult(const FIntVector& ChunkCo
 
 void UVoxelScatterManager::ProcessPendingGenerationQueue()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_LaunchQueue);
 	if (PendingGenerationQueue.Num() == 0)
 	{
 		return;
@@ -1653,6 +1699,7 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 
 void UVoxelScatterManager::PerformDistanceSpawn()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_DistanceSpawn);
 	if (!Configuration || SurfaceDataCache.Num() == 0)
 	{
 		return;
@@ -1891,6 +1938,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 void UVoxelScatterManager::ProcessCompletedDistanceStream()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_DistanceApply);
 	FDistanceStreamResult Result;
 	int32 ProcessedCount = 0;
 
@@ -2067,6 +2115,7 @@ void UVoxelScatterManager::GenerateChunkScatterFromPending(const FPendingScatter
 
 void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneration PendingData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_Launch);
 	const FIntVector ChunkCoord = PendingData.ChunkCoord;
 
 	// Mark as in-progress
@@ -2172,6 +2221,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 
 void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_Apply);
 	FAsyncScatterResult Result;
 	int32 ProcessedCount = 0;
 	const int32 MaxProcessPerFrame = 2;
@@ -3201,6 +3251,7 @@ FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) 
 
 FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FIntVector& ChunkCoord) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_MakeExtractionContext);
 	FScatterExtractionContext Context;
 	Context.WorldMode = WorldMode;
 	if (Configuration)

@@ -51,11 +51,13 @@ struct FVoxelScatterHISMKey
 /**
  * Manages HISM (Hierarchical Instanced Static Mesh) components for scatter rendering.
  *
- * Creates one HISM per scatter type (per type and render region on a planet, FVoxelScatterHISMKey) and manages
- * instances based on chunk lifecycle.
+ * Creates one HISM per scatter type (per type and region on a planet, FVoxelScatterHISMKey; voxel.Scatter.RegionChunks) and
+ * manages instances based on chunk lifecycle.
  * Uses an instance pool per HISM to recycle instances via UpdateInstanceTransform
  * instead of ClearInstances/AddInstances, eliminating visual flicker during
- * distance-based streaming.
+ * distance-based streaming. Writes to a HISM are held and applied at most once per voxel.Scatter.HISMBatchSeconds, and a
+ * HISM whose pool outgrows its live instances is rewritten without it (world modes review G42: each change costs a UE HISM
+ * all its instances, pooled ones included).
  *
  * Key responsibilities:
  * - Create and configure HISM components per scatter type
@@ -158,7 +160,8 @@ public:
 	 * Instances are zero-scaled (hidden) and added to the free list, and adds still queued for the pair are dropped
 	 * (flushed later, they would belong to a type the chunk no longer tracks, which RemoveChunkInstances never releases;
 	 * world modes review G30).
-	 * Does NOT trigger a rebuild — instances remain allocated in HISM.
+	 * Batched (voxel.Scatter.HISMBatchSeconds > 0), each instance is zero-scaled where it stands, an in-place change that does
+	 * not rebuild the HISM's cluster tree, at the HISM's next batch; the free list and chunk tracking change at once.
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 * @param ScatterTypeID Scatter type ID to release
@@ -169,6 +172,22 @@ public:
 	 * Clear all instances from all HISM components.
 	 */
 	void ClearAllInstances();
+
+	/**
+	 * Apply every HISM write held for a batch now (world modes review G42). Tick applies a HISM's writes at most once per
+	 * voxel.Scatter.HISMBatchSeconds and not while its cluster tree builds; the instance bookkeeping (pools, chunk indices,
+	 * GetChunkInstanceCount) never waits. For callers that read the HISMs' instances directly.
+	 */
+	void FlushHISMWrites();
+
+	/** HISM write batches applied since Initialize (each one HISM's held writes), for tests and the bench. */
+	int64 GetTotalHISMWriteBatches() const { return TotalHISMWriteBatches; }
+
+	/** Writes held for HISMs right now (instances to place, release or add), for tests and the bench. */
+	int32 GetPendingHISMWriteCount() const;
+
+	/** HISMs rewritten without their pooled instances since Initialize (voxel.Scatter.HISMCompactMinPooled), for tests and the bench. */
+	int64 GetTotalHISMCompactions() const { return TotalHISMCompactions; }
 
 	// ==================== HISM Management ====================
 
@@ -213,6 +232,21 @@ public:
 	 * Get total instance count across all HISMs.
 	 */
 	int32 GetTotalInstanceCount() const;
+
+	/** Instances placed into HISMs since Initialize (recycled or new), for the streaming bench. */
+	int64 GetTotalInstancesAdded() const { return TotalInstancesAdded; }
+
+	/** Instances released to the pools since Initialize (zero-scaled), for the streaming bench. */
+	int64 GetTotalInstancesRemoved() const { return TotalInstancesRemoved; }
+
+	/**
+	 * The HISMs by size, for voxel.Scatter.Stats (world modes review G42): per type its HISMs, instances and pooled
+	 * (zero-scaled) instances, and the largest HISMs.
+	 *
+	 * @param TopN How many of the largest HISMs to list
+	 * @return One line per type and per listed HISM
+	 */
+	FString GetHISMBreakdown(int32 TopN = 10) const;
 
 	/**
 	 * Get approximate total memory usage of HISM instances in bytes.
@@ -342,6 +376,78 @@ protected:
 
 	/** Flush pending instance additions within the per-frame budget. Called by Tick(). */
 	void FlushPendingInstanceAdds();
+
+	// ==================== Batched HISM Writes (world modes review G42) ====================
+
+	/**
+	 * One HISM's writes held for a batch. A UE 5.8 HISM keeps its instances in legacy mode: a change that is not in place
+	 * rebuilds its whole cluster tree (an O(instances) copy on the game thread; a change during the build throws it away
+	 * and starts again), and the rebuilt tree recreates its scene proxy, which registers every instance again with the
+	 * distance-field and ray-tracing scenes. Writing each change as it came cost that every frame for every HISM the
+	 * streaming touched; held here, a HISM takes its writes at most once per voxel.Scatter.HISMBatchSeconds.
+	 */
+	struct FPendingHISMWrites
+	{
+		/** Instance index -> its new transform (local to the HISM): a release (zero scale where it stands) or a recycled placement */
+		TMap<int32, FTransform> Updates;
+		/** New instances (local to the HISM), indices from the HISM's instance count when they were queued */
+		TArray<FTransform> Grows;
+	};
+
+	/** Writes held per HISM */
+	TMap<FVoxelScatterHISMKey, FPendingHISMWrites> PendingHISMWrites;
+
+	/** When each HISM last took its writes (FPlatformTime::Seconds) */
+	TMap<FVoxelScatterHISMKey, double> LastHISMWriteSeconds;
+
+	/** Whether writes are held for batches (voxel.Scatter.HISMBatchSeconds > 0); otherwise every write goes to its HISM at once */
+	static bool IsBatchingHISMWrites();
+
+	/**
+	 * An instance's transform (local to its HISM) with the write held for it applied.
+	 *
+	 * @param Key The HISM's key
+	 * @param HISM The HISM
+	 * @param Index Instance index (a held grow's included)
+	 * @param OutLocal Its transform
+	 * @return False if the index is not an instance
+	 */
+	bool GetEffectiveInstanceTransform(const FVoxelScatterHISMKey& Key, const UHierarchicalInstancedStaticMeshComponent* HISM, int32 Index,
+		FTransform& OutLocal) const;
+
+	/**
+	 * A HISM's instance count with its held grows.
+	 *
+	 * @param Key The HISM's key
+	 * @param HISM The HISM
+	 * @return The count
+	 */
+	int32 GetEffectiveInstanceCount(const FVoxelScatterHISMKey& Key, const UHierarchicalInstancedStaticMeshComponent* HISM) const;
+
+	/**
+	 * Apply held writes: each HISM whose batch is due (its last batch voxel.Scatter.HISMBatchSeconds ago and its tree not
+	 * building, or held for voxel.Scatter.HISMMaxHoldSeconds), or all of them.
+	 *
+	 * @param bAll Apply every HISM's writes now
+	 */
+	void ApplyPendingHISMWrites(bool bAll);
+
+	/**
+	 * Rewrite a HISM with its live instances only (each chunk's, the held writes applied), dropping its pooled ones and
+	 * the writes held for it: one cleared and refilled HISM, after which every change to it costs its live instances
+	 * rather than every instance it ever pooled.
+	 *
+	 * @param Key The HISM's key
+	 * @param HISM The HISM
+	 * @param Pool Its pool (its chunks' indices are renumbered, its free list emptied)
+	 */
+	void CompactHISM(const FVoxelScatterHISMKey& Key, UHierarchicalInstancedStaticMeshComponent* HISM, FHISMInstancePool& Pool);
+
+	/** HISM write batches applied (GetTotalHISMWriteBatches) */
+	int64 TotalHISMWriteBatches = 0;
+
+	/** HISMs compacted (GetTotalHISMCompactions) */
+	int64 TotalHISMCompactions = 0;
 
 	// ==================== References ====================
 

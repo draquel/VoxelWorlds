@@ -1099,6 +1099,14 @@ public:
 		float CollisionPrepMs = 0.0f;
 		float CollisionApplyMs = 0.0f;
 		float ScatterMs = 0.0f;
+		// Scatter sub-steps (ScatterMs = edit readers + the scatter manager's Update steps; world modes review G42)
+		float ScatterEditMs = 0.0f;     // ProcessEditScatterReaders
+		float ScatterApplyMs = 0.0f;    // completed extractions into the caches and the renderer
+		float ScatterLaunchMs = 0.0f;   // extraction contexts and launches (with exclusion regrows)
+		float ScatterDistanceMs = 0.0f; // the distance spawn: completed passes and the periodic pass
+		float ScatterFlushMs = 0.0f;    // the renderer's queued instance adds into the HISMs
+		int32 ScatterApplied = 0;       // completed extractions applied this tick
+		int32 ScatterLaunched = 0;      // extractions launched this tick
 		float LODMs = 0.0f;
 		float LODUpdateMs = 0.0f;   // LOD strategy Update (balanced-LOD cache rebuild), before the streaming section
 		float StreamingMs = 0.0f;

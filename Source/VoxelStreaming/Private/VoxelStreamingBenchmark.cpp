@@ -22,6 +22,11 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelBatchCounters.h"
+#include "VoxelScatterManager.h"
+#include "VoxelScatterRenderer.h"
+#include "RenderTimer.h"
+#include "DynamicRHI.h"
+#include "ProfilingDebugging/MiscTrace.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelBench, Log, All);
 
@@ -452,6 +457,44 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.WindowSuspended = ChunkManager->IsVoxelWindowSuspended() ? 1 : 0;
 	S.StreamingLeadUU = static_cast<float>(ChunkManager->GetStreamingViewerLead());
 	S.SurfaceAltitude = ChunkManager->GetLODStrategy() ? static_cast<float>(ChunkManager->GetLODStrategy()->GetViewerSurfaceAltitude()) : 0.0f;
+	S.ScatEditMs = T.ScatterEditMs;
+	S.ScatApplyMs = T.ScatterApplyMs;
+	S.ScatLaunchMs = T.ScatterLaunchMs;
+	S.ScatDistMs = T.ScatterDistanceMs;
+	S.ScatFlushMs = T.ScatterFlushMs;
+	S.ScatApplyN = T.ScatterApplied;
+	S.ScatLaunchN = T.ScatterLaunched;
+	S.ScatAddN = 0;
+	S.ScatRelN = 0;
+	S.ScatBatchN = 0;
+	S.ScatCompactN = 0;
+	if (const UVoxelScatterManager* Scatter = ChunkManager->GetScatterManager())
+	{
+		if (const UVoxelScatterRenderer* ScatterRenderer = Scatter->GetScatterRenderer())
+		{
+			const int64 Added = ScatterRenderer->GetTotalInstancesAdded();
+			const int64 Removed = ScatterRenderer->GetTotalInstancesRemoved();
+			if (LastScatterAdded >= 0)
+			{
+				S.ScatAddN = static_cast<int32>(Added - LastScatterAdded);
+				S.ScatRelN = static_cast<int32>(Removed - LastScatterRemoved);
+			}
+			LastScatterAdded = Added;
+			LastScatterRemoved = Removed;
+			const int64 HISMBatches = ScatterRenderer->GetTotalHISMWriteBatches();
+			const int64 Compactions = ScatterRenderer->GetTotalHISMCompactions();
+			if (LastScatterBatches >= 0)
+			{
+				S.ScatBatchN = static_cast<int32>(HISMBatches - LastScatterBatches);
+				S.ScatCompactN = static_cast<int32>(Compactions - LastScatterCompactions);
+			}
+			LastScatterBatches = HISMBatches;
+			LastScatterCompactions = Compactions;
+		}
+	}
+	S.GTMs = static_cast<float>(FPlatformTime::ToMilliseconds(GGameThreadTime));
+	S.RTMs = static_cast<float>(FPlatformTime::ToMilliseconds(GRenderThreadTime));
+	S.GPUMs = static_cast<float>(FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles()));
 
 	MemorySampleTimer += DeltaTime;
 	if (MemorySampleTimer >= Config.MemorySampleIntervalSec)
@@ -557,6 +600,8 @@ void FVoxelStreamingBenchmark::Tick(float DeltaTime)
 			DistanceTraversed = 0.0f;
 			DrainedStreak = 0;
 			TraverseStartSimTime = SimTime;
+			// A trace region over the traverse, for Unreal Insights' per-region exports (world modes review G42)
+			TRACE_BEGIN_REGION(TEXT("VoxelBench Traverse"));
 			UE_LOG(LogVoxelBench, Log, TEXT("Benchmark '%s': warmup done at t=%.1fs, traversing %.0f uu"),
 				*Config.Tag, SimTime, Config.TraverseDistance);
 		}
@@ -569,6 +614,7 @@ void FVoxelStreamingBenchmark::Tick(float DeltaTime)
 			PhaseElapsed = 0.0f;
 			DrainedStreak = 0;
 			CatchUpStartSimTime = SimTime;
+			TRACE_END_REGION(TEXT("VoxelBench Traverse"));
 			UE_LOG(LogVoxelBench, Log, TEXT("Benchmark '%s': traverse done at t=%.1fs (%.0f uu), measuring catch-up"),
 				*Config.Tag, SimTime, DistanceTraversed);
 		}
@@ -773,10 +819,10 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt,ScatEditMs,ScatApplyMs,ScatLaunchMs,ScatDistMs,ScatFlushMs,ScatApplyN,ScatLaunchN,ScatAddN,ScatRelN,GTMs,RTMs,GPUMs,ScatBatchN,ScatCompactN\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
@@ -792,7 +838,9 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.LODCand, S.LODQueued, S.LODStale, S.LODStaleNear, S.LODUpdateMs, S.FarOceanMs, S.FarOceanRebuildN,
 			S.Altitude, S.LoadedLOD[0], S.LoadedLOD[1], S.LoadedLOD[2], S.LoadedLOD[3], S.LoadedLOD[4], S.ReachUU, S.GroundReachUU,
 			S.BatchesDrawn, S.BatchesSkipped, S.GenDone, S.FarFieldMs, S.FarFieldPatches, S.FarFieldMB, S.FarFieldBuilt,
-			S.WindowSuspended, S.StreamingLeadUU, S.SurfaceAltitude);
+			S.WindowSuspended, S.StreamingLeadUU, S.SurfaceAltitude,
+			S.ScatEditMs, S.ScatApplyMs, S.ScatLaunchMs, S.ScatDistMs, S.ScatFlushMs, S.ScatApplyN, S.ScatLaunchN, S.ScatAddN,
+			S.ScatRelN, S.GTMs, S.RTMs, S.GPUMs, S.ScatBatchN, S.ScatCompactN);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 

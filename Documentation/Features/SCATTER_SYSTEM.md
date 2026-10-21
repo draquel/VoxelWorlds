@@ -72,7 +72,7 @@ protected:
 
 ### VoxelScatterRenderer
 
-Manages HISM components with instance pooling and deferred rebuild strategy. Instances are never removed from the HISM — they are hidden by setting scale to zero and placed on a free list. When new instances are needed, they are recycled from the free list first via `UpdateInstanceTransform`, eliminating the visual flicker caused by `ClearInstances()`/`AddInstances()` cycling.
+Manages HISM components with instance pooling and deferred rebuild strategy. Instances are hidden by setting scale to zero and placed on a free list. When new instances are needed, they are recycled from the free list first via `UpdateInstanceTransform`, eliminating the visual flicker caused by `ClearInstances()`/`AddInstances()` cycling. Since world modes review G42 every write to a HISM is held and applied at most once per `voxel.Scatter.HISMBatchSeconds`, releases zero-scale each instance where it stands, a HISM whose pool outweighs its live instances is rewritten without it, and a planet keeps its scatter HISMs in regions of 4 chunks (`voxel.Scatter.RegionChunks`); see [Batched HISM writes](#batched-hism-writes-world-modes-review-g42).
 
 ```cpp
 UCLASS()
@@ -94,8 +94,8 @@ public:
     void UpdateChunkTypeInstances(const FIntVector& ChunkCoord, int32 ScatterTypeID, TArray<FTransform> Transforms);
 
 protected:
-    // One HISM per scatter type and render region (a planet's regions of voxel.Render.RegionChunks^3 chunks, each HISM
-    // at its region's origin so instance transforms stay small floats; heightmap worlds have one region at the origin)
+    // One HISM per scatter type and region (a planet's regions of voxel.Scatter.RegionChunks^3 chunks, 4 by default, each
+    // HISM at its region's origin so instance transforms stay small floats; heightmap worlds have one region at the origin)
     TMap<FVoxelScatterHISMKey, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
 
     // Per-HISM instance pool for recycling
@@ -104,6 +104,9 @@ protected:
     // Deferred per-frame instance adds (budget-limited, flushed every Tick)
     TArray<FPendingInstanceAdd> PendingInstanceAdds;
     int32 MaxInstanceAddsPerFrame = 2000;
+
+    // Writes held per HISM for its next batch (world modes review G42): released and recycled indices, new instances
+    TMap<FVoxelScatterHISMKey, FPendingHISMWrites> PendingHISMWrites;
 };
 ```
 
@@ -406,9 +409,16 @@ struct FHISMInstancePool
 
 The previous approach (`ClearInstances()` + `AddInstances()`) produced visible flicker because UE5 propagates these as separate render state updates — even when done in the same frame, there is a brief gap where the HISM has zero instances. The pool eliminates this:
 
-- **Release**: `UpdateInstanceTransform(Index, ZeroScaleTransform)` — instance becomes invisible but stays allocated in HISM internal arrays. Zero-scale means zero bounding box, so HISM's spatial tree culls it at zero cost.
-- **Recycle**: `UpdateInstanceTransform(Index, RealTransform)` — instance reappears at new position. No structural HISM change, no render state rebuild.
-- **Grow**: `AddInstances()` only when free list is exhausted. Pool grows to peak usage then stabilizes.
+- **Release**: `UpdateInstanceTransform(Index, ZeroScaleTransform)` — instance becomes invisible but stays allocated in HISM internal arrays. Batched (the default) it keeps its location: an in-place change, which the HISM takes without rebuilding its cluster tree.
+- **Recycle**: `UpdateInstanceTransform(Index, RealTransform)` — instance reappears at new position. No flicker, but not free: a move is not in place, so the HISM rebuilds its cluster tree (below).
+- **Grow**: `AddInstances()` only when free list is exhausted.
+
+The pool does not make changes cheap. In UE 5.8 a HISM keeps its instances in legacy mode: a change that is not in
+place marks its cluster tree out of date, and the rebuild copies every instance on the game thread
+(`BuildTreeAsync`; a change during the build throws it away and starts another), then recreates the HISM's scene proxy,
+which registers every instance again with the distance-field and ray-tracing scenes on the render thread. Zero-scaled
+pooled instances are among them. So a change costs all the HISM's instances, pooled ones included; see
+[Batched HISM writes](#batched-hism-writes-world-modes-review-g42).
 
 #### Release Operations
 
@@ -417,11 +427,11 @@ The previous approach (`ClearInstances()` + `AddInstances()`) produced visible f
 void ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID)
 {
     // 1. Look up pool and chunk indices
-    // 2. Zero-scale each instance via UpdateInstanceTransform
+    // 2. Zero-scale each instance where it stands, held for the HISM's next batch (written at once and parked at
+    //    the HISM's origin, with the render state marked dirty, when voxel.Scatter.HISMBatchSeconds is 0)
     // 3. Move indices to FreeIndices
     // 4. Remove chunk from pool's ChunkInstanceIndices
     // 5. Update ChunkScatterTypes tracking
-    // 6. Mark HISM render state dirty (single batch call)
 }
 
 // Release ALL instances for a scatter type (used by RebuildScatterType)
@@ -439,10 +449,11 @@ The per-frame budget-limited flush recycles from the free list before growing:
 For each PendingInstanceAdd entry:
   1. Get/create HISM and pool for ScatterTypeID
   2. Skip entries for chunks unloaded while pending
-  3. Recycle min(needed, FreeIndices.Num()) via UpdateInstanceTransform
-  4. Grow via AddInstances() for remainder (updates pool.TotalAllocated)
+  3. Recycle min(needed, FreeIndices.Num()): each placement held for the HISM's next batch
+  4. Grow for the remainder: new instances held for the batch, their indices the HISM's count plus those already held
+     (updates pool.TotalAllocated)
   5. Record all indices in pool.ChunkInstanceIndices[ChunkCoord]
-  6. Batch mark HISM render state dirty after all updates
+  (written at once, with the render state marked dirty, when voxel.Scatter.HISMBatchSeconds is 0)
 ```
 
 Both recycled and newly added instances count toward the per-frame budget (`MaxInstanceAddsPerFrame`).
@@ -526,6 +537,41 @@ points, with surface data, with spawn points but no surface data (0), spawn poin
 
 When scatter types go out of range, the manager calls `ReleaseChunkScatterType()` directly instead of the previous stale-type tracking approach. Instances are zero-scaled immediately (CullDistance already hides them at that range) and recycled when the player returns and new transforms are generated. The release also drops the pair's adds still queued for the per-frame budget: a chunk submitted while the viewer was still near it (in the seconds after a teleport) can take a distance-limited type in its first pass and release it at the next check, behind the arrival's backlog. Until world modes review G30 those adds were flushed after the release into the pool for a type the chunk no longer tracked, which `RemoveChunkInstances` never released, so they stayed in the world and the chunk's reload drew the type a second time over them.
 
+### Batched HISM writes (world modes review G42)
+
+Each change to a HISM costs all its instances (the pool section above), and streaming changes the HISMs around the
+viewer every frame: chunks loading at the window's front, unloading behind it, and distance-limited types (grass) spawned
+and released at their `SpawnDistance`. On `Review_Planet_M` and `_L` that was most of the frame time over the small
+planet's (G42, `WORLD_MODES_REVIEW_PLAN.md` §20.9): a HISM tree build and a proxy recreation nearly every frame, the
+grass HISMs of 37,000 instances (half of them pooled), and the render thread re-registering them with the distance-field
+scene (frames up to 51 ms). Writes are now batched per HISM:
+
+- **Held writes.** `ReleaseChunkScatterType` and `FlushPendingInstanceAdds` update the pools and chunk indices at once
+  (so `GetChunkInstanceCount`, the audits and the tests see no delay) and hold the HISM writes in `PendingHISMWrites`:
+  an index's new transform (a release or a recycled placement; the last write wins) and the new instances, whose indices
+  are the HISM's instance count plus those already held. `Tick` applies a HISM's writes at most once per
+  `voxel.Scatter.HISMBatchSeconds` (0.1) and not while its cluster tree builds, unless they have waited
+  `voxel.Scatter.HISMMaxHoldSeconds` (0.5): a change during a build would throw the build away.
+- **In-place releases.** A release zero-scales the instance where it stands. The HISM takes an in-place change without
+  rebuilding its tree, so releases (unloads, distance cleanup, edits) no longer rebuild anything.
+- **No explicit render-state dirtying.** The HISM sends changed instances to its proxy itself: in-place changes at once,
+  placements and new instances drawn as unbuilt until the tree build lands and recreates the proxy. The old
+  `MarkRenderStateDirty` after every release and flush recreated the proxy a second time.
+- **Compaction.** A HISM taking a batch whose pooled instances are at least `voxel.Scatter.HISMCompactMinPooled` (1,024)
+  and outnumber its live ones is rewritten with its live instances only (`CompactHISM`: each chunk's instances, the held
+  writes applied, renumbered; one `ClearInstances` + `AddInstances`).
+- **Smaller regions on a planet.** `voxel.Scatter.RegionChunks` sizes the regions the HISMs are kept per: -1 (default)
+  = 4 chunks on a planet and one region on a heightmap world, 0 = the render regions (`voxel.Render.RegionChunks`, 16),
+  N > 0 = N chunks in any world mode.
+- Queries see held writes: `FindNearestInstance` (harvest) reads each instance through them and also scans held
+  placements and new instances; `GetTotalInstanceCount` counts held new instances. `FlushHISMWrites` applies every held
+  write now.
+
+The instances drawn are the same as with every write made at once (`voxel.Scatter.HISMBatchSeconds 0`, the behaviour
+before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions}`. The bench logs
+`ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps (`ScatApplyMs`, `ScatLaunchMs`,
+`ScatDistMs`, `ScatFlushMs`).
+
 ### Debug Stats
 
 `GetDebugStats()` reports pool health:
@@ -534,8 +580,12 @@ ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%)
 ```
 
 - **Active**: Instances with real transforms (visible within CullDistance)
-- **Pooled**: Zero-scaled instances on free list (invisible, zero render cost)
-- **Util**: Active / TotalAllocated — approaches 100% after initial exploration stabilizes
+- **Pooled**: Zero-scaled instances on free list (not drawn, but part of every tree build, proxy recreation and
+  distance-field update of their HISM until compacted)
+- **Util**: Active / TotalAllocated
+
+`voxel.Scatter.Stats hism` adds the HISMs by size: per type its HISMs, instances, pooled instances and largest HISM, and
+the twelve largest HISMs by region (`UVoxelScatterRenderer::GetHISMBreakdown`).
 
 ## Edit Integration
 
@@ -692,16 +742,16 @@ Created automatically if no configuration is provided:
 
 - Surface data cached per chunk (`SurfaceDataCache`)
 - Scatter spawn points cached per chunk (`ScatterDataCache`)
-- HISM components shared across chunks (one per scatter type)
-- Instance pool per scatter type (`InstancePools`) — tracks free list and per-chunk indices
-- Pool never shrinks: peak allocation is the high water mark. Zero-scaled instances cost only a `FTransform` in HISM internal arrays and have zero rendering cost (zero bounding box = culled by spatial tree)
+- HISM components shared across chunks (one per scatter type and region)
+- Instance pool per HISM (`InstancePools`) — tracks free list and per-chunk indices
+- A pool grows to its peak; a HISM taking a batch whose pool outweighs its live instances is compacted (above). Pooled instances are not drawn, but each change to their HISM still processes them
 
 ### Distance-Based Loading
 
 - Per-definition `SpawnDistance` allows different ranges per scatter type
 - Trees can have larger spawn distance to prevent pop-in
 - Grass can have smaller distance for performance
-- Out-of-range cleanup releases instances to pool via `ReleaseChunkScatterType()` (no rebuild)
+- Out-of-range cleanup releases instances to pool via `ReleaseChunkScatterType()` (in place: no tree rebuild)
 - Returning to an area recycles from pool — faster than initial load since instances already exist in HISM
 
 ## Debug Visualization

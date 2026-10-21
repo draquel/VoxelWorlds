@@ -35,6 +35,7 @@
 #include "VoxelWaterMesher.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelScatterManager.h"
+#include "VoxelScatterRenderer.h"
 #include "VoxelTreeInjector.h"
 #include "VoxelTreeTypes.h"
 #include "VoxelWorldBoundary.h"
@@ -958,7 +959,15 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	if (ScatterManager && Configuration && Configuration->bEnableScatter)
 	{
 		ProcessEditScatterReaders();
+		Timing.ScatterEditMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 		ScatterManager->Update(Context.ViewerPosition, DeltaTime);
+		const UVoxelScatterManager::FUpdateTimings& ScatterSteps = ScatterManager->GetLastUpdateTimings();
+		Timing.ScatterApplyMs = ScatterSteps.ApplyMs;
+		Timing.ScatterLaunchMs = ScatterSteps.RegrowMs + ScatterSteps.LaunchMs;
+		Timing.ScatterDistanceMs = ScatterSteps.DistanceMs;
+		Timing.ScatterFlushMs = ScatterSteps.FlushMs;
+		Timing.ScatterApplied = ScatterSteps.Applied;
+		Timing.ScatterLaunched = ScatterSteps.Launched;
 
 		if (Configuration->bScatterDebugVisualization)
 		{
@@ -7562,6 +7571,11 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
 			if (!ScatterMgr) { continue; }
 			++Managers;
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats:\n%s"), *ScatterMgr->GetDebugStats());
+			// "voxel.Scatter.Stats hism": the HISMs by size (world modes review G42)
+			if (Args.Num() > 0 && Args[0].Equals(TEXT("hism"), ESearchCase::IgnoreCase) && ScatterMgr->GetScatterRenderer())
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats hism:\n%s"), *ScatterMgr->GetScatterRenderer()->GetHISMBreakdown(12));
+			}
 		}
 		if (Managers == 0)
 		{
