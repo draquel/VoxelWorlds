@@ -174,6 +174,18 @@ float gz = GetDensity(x, y, z+1) - GetDensity(x, y, z-1);
 FVector3f Normal = FVector3f(-gx, -gy, -gz).GetSafeNormal();
 ```
 
+That is LOD 0's vertex normal (`CalculateGradientNormal`, the vertex floored to a voxel).
+
+**Normals at a stride (G61).** Generated density saturates a voxel either side of the surface
+(`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them:
+at LOD 2 each gradient component is a sign and the normal snaps toward one of the 26 cube directions (a bright ring on
+planets, streaks on heightmap slopes). So at stride > 1 an edge vertex's normal is LOD 0's at the voxel crossing on its
+edge nearest it (`CalculateEdgeShadingNormal`: the edge walked from its min end in voxel steps). It is a function of the
+edge alone, so every cell, seam band and transition ribbon sharing the edge gives the vertex the same normal, and the
+boundary geomorph (which moves vertices) does not change it. Positions are unchanged. The GPU shader
+(`MarchingCubesMeshGeneration.usf`) does the same. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual Contouring's
+G44) restores the stride-scale normals (`CalculateGradientNormalLOD`) for A/B. See `WORLD_MODES_REVIEW_PLAN.md` §20.9.
+
 ---
 
 ## LOD Support

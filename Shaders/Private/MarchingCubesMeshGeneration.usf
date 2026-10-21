@@ -107,6 +107,10 @@ uint LODStride;  // 2^LODLevel (1, 2, 4, 8...)
 uint MCBoundaryMorph;        // 1 = ramp the fine surface to the coarse height near transition faces
 float MCBoundaryMorphWidth;  // ramp width in coarse cells
 
+// Vertex normals at stride > 1 (G61; voxel.Mesh.VoxelShadingNormals): 1 = LOD 0's normal at the voxel crossing on the
+// vertex's edge (CalculateEdgeShadingNormal), 0 = the stride-scale gradient at the vertex, as before.
+uint VoxelShadingNormals;
+
 // Output buffer capacities (overflow protection — mirrors the DC mesher). Cave-riddled chunks have far
 // more interior surface than the fixed triangle-soup buffers hold; without this guard the atomic counters
 // run past the buffer end, out-of-bounds writes are dropped, and in-bounds index slots end up referencing
@@ -273,6 +277,68 @@ float3 CalculateGradientNormalLOD(int3 Position, int Stride)
         return Normal / Len;
     }
     return float3(0, 0, 1);
+}
+
+/** voxel.Mesh.VoxelShadingNormals for a vertex of this stride (G61; LOD 0, stride 1, is the reference). */
+bool UseVoxelShadingNormals(int Stride)
+{
+    return VoxelShadingNormals != 0u && Stride > 1;
+}
+
+/**
+ * G61: an edge vertex's normal at stride > 1, mirroring FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal. The
+ * generated density saturates a voxel either side of the surface, so the stride-scale gradient's taps read 0 or 255 and
+ * its normal snaps toward the cube directions; this is LOD 0's normal (taps one voxel apart) at the voxel crossing on the
+ * edge nearest the vertex, the edge walked from its min end so every cell sharing it agrees. FallbackPos / FallbackStride:
+ * the stride-scale gradient for an edge that is not axis-aligned or has no voxel crossing (none reaches here).
+ */
+float3 CalculateEdgeShadingNormal(int3 EndA, int3 EndB, float DensityA, float DensityB, int3 FallbackPos, int FallbackStride)
+{
+    int3 Delta = EndB - EndA;
+    int OffAxes = (Delta.x != 0 ? 1 : 0) + (Delta.y != 0 ? 1 : 0) + (Delta.z != 0 ? 1 : 0);
+    int3 Dir = int3(Delta.x != 0 ? 1 : 0, (Delta.x == 0 && Delta.y != 0) ? 1 : 0, (Delta.x == 0 && Delta.y == 0) ? 1 : 0);
+    int Along0 = dot(Delta, Dir);
+    int Length = abs(Along0);
+    if (Length == 0 || OffAxes != 1)
+    {
+        return CalculateGradientNormalLOD(FallbackPos, FallbackStride);
+    }
+
+    bool bAFirst = Along0 > 0;
+    int3 Lo = bAFirst ? EndA : EndB;
+    float DLo = bAFirst ? DensityA : DensityB;
+    float DHi = bAFirst ? DensityB : DensityA;
+
+    // The vertex's place on the edge (voxels from Lo), as InterpolateEdge puts it.
+    float VertexT = (abs(DHi - DLo) < 0.00001f) ? 0.5f : saturate((IsoLevel - DLo) / (DHi - DLo));
+    float VertexAlong = VertexT * (float)Length;
+
+    float D0 = DLo;
+    float BestAlong = -1.0f;
+    float BestDist = 1e30f;
+    [loop]
+    for (int Step = 0; Step < Length; Step++)
+    {
+        float D1 = (Step + 1 == Length) ? DHi : GetDensityAt(Lo + Dir * (Step + 1));
+        if ((D0 >= IsoLevel) != (D1 >= IsoLevel))
+        {
+            float T = saturate((IsoLevel - D0) / (D1 - D0));
+            float Along = (float)Step + T;
+            float Dist = abs(Along - VertexAlong);
+            if (Dist < BestDist)
+            {
+                BestDist = Dist;
+                BestAlong = Along;
+            }
+        }
+        D0 = D1;
+    }
+    if (BestAlong < 0.0f)
+    {
+        return CalculateGradientNormalLOD(FallbackPos, FallbackStride);
+    }
+    float3 Crossing = (float3)Lo + (float3)Dir * BestAlong;
+    return CalculateGradientNormalLOD((int3)floor(Crossing), 1);
 }
 
 /**
@@ -517,6 +583,7 @@ void MainCS(
 
     // Decode edge vertices from RegularVertexData (low nibble = corner A, next = corner B)
     float3 CellVertices[12];
+    uint VertexCorners[12];  // corner A | corner B << 4, for the vertex normals (G61)
     [unroll]
     for (uint i = 0; i < 12; i++)
     {
@@ -527,6 +594,7 @@ void MainCS(
         uint Code = Tv_RegularVertexData(CaseIndex, i);
         uint CornerA = Code & 0x0Fu;
         uint CornerB = (Code >> 4) & 0x0Fu;
+        VertexCorners[i] = CornerA | (CornerB << 4);
         if (CornerA == CornerB)
         {
             CellVertices[i] = CornerPositions[CornerA];
@@ -548,6 +616,25 @@ void MainCS(
         for (uint mi = 0; mi < VertexCount; mi++)
         {
             MorphVertexToCoarse(LODStride, TransitionFaces, CellVertices[mi]);
+        }
+    }
+
+    // Vertex normals. G61: at stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge (a function of the
+    // edge, so the geomorph does not change it); otherwise the stride-scale gradient at the vertex, as before.
+    float3 CellNormals[12];
+    for (uint ni = 0; ni < VertexCount; ni++)
+    {
+        int3 VP = (int3)((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
+        if (UseVoxelShadingNormals(Stride))
+        {
+            uint CA = VertexCorners[ni] & 0x0Fu;
+            uint CB = (VertexCorners[ni] >> 4) & 0x0Fu;
+            CellNormals[ni] = CalculateEdgeShadingNormal(CubePos + LengyelCornerOffsets[CA] * Stride, CubePos + LengyelCornerOffsets[CB] * Stride,
+                CornerDensities[CA], CornerDensities[CB], VP, Stride);
+        }
+        else
+        {
+            CellNormals[ni] = CalculateGradientNormalLOD(VP, Stride);
         }
     }
 
@@ -578,13 +665,9 @@ void MainCS(
         float3 P1 = CellVertices[Idx1];
         float3 P2 = CellVertices[Idx2];
 
-        // Gradient normals (convert world position back to voxel space)
-        int3 VP0 = (int3)((P0 - ChunkWorldPosition) / VoxelSize);
-        int3 VP1 = (int3)((P1 - ChunkWorldPosition) / VoxelSize);
-        int3 VP2 = (int3)((P2 - ChunkWorldPosition) / VoxelSize);
-        float3 N0 = CalculateGradientNormalLOD(VP0, Stride);
-        float3 N1 = CalculateGradientNormalLOD(VP1, Stride);
-        float3 N2 = CalculateGradientNormalLOD(VP2, Stride);
+        float3 N0 = CellNormals[Idx0];
+        float3 N1 = CellNormals[Idx1];
+        float3 N2 = CellNormals[Idx2];
 
         float2 UV0, UV1, UV2;
         ComputeTriangleUVs(P0, P1, P2, UV0, UV1, UV2);
@@ -716,6 +799,7 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     // ---- Generate cell vertices ----
     float3 CellVertices[12];
     bool VertexOnOuterFace[12];
+    uint VertexSamples[12];  // sample A | sample B << 4, for the vertex normals (G61)
     [unroll]
     for (uint i = 0; i < 12u; i++)
     {
@@ -743,6 +827,7 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             VertexPos = InterpolateEdge(Densities[SampleA], Densities[SampleB], PosA, PosB, IsoLevel);
         }
         CellVertices[i] = VertexPos;
+        VertexSamples[i] = SampleA | (SampleB << 4);
         // Outer (coarse) face: both endpoints are coarse corners (samples 9-12)
         VertexOnOuterFace[i] = (SampleA >= 9u && SampleB >= 9u);
     }
@@ -759,6 +844,33 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             {
                 MorphVertexToCoarse(LODStride, (1u << Face), CellVertices[mi]);
             }
+        }
+    }
+
+    // ---- Vertex normals at the stride of the adjacent mesh (outer face: the coarser neighbour's, else this chunk's).
+    // G61: at a stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge, as the coincident fine or coarse
+    // MC vertex on that edge gets it; otherwise the gradient at that stride, as before. ----
+    float3 CellNormals[12];
+    for (uint ni = 0; ni < VertexCount; ni++)
+    {
+        int NS = VertexOnOuterFace[ni] ? CoarserStride : CurrentStride;
+        int3 VP = (int3)((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
+        if (UseVoxelShadingNormals(NS))
+        {
+            uint SA = VertexSamples[ni] & 0x0Fu;
+            uint SB = (VertexSamples[ni] >> 4) & 0x0Fu;
+            float3 OffA = Tv_TransitionSampleOffset(Face, SA);
+            float3 OffB = Tv_TransitionSampleOffset(Face, SB);
+            int3 EA = int3(CellX, CellY, CellZ) + (int3)round(OffA * (float)CoarserStride);
+            int3 EB = int3(CellX, CellY, CellZ) + (int3)round(OffB * (float)CoarserStride);
+            if (DepthAxis == 0) { EA.x = BoundaryDepthCoord; EB.x = BoundaryDepthCoord; }
+            else if (DepthAxis == 1) { EA.y = BoundaryDepthCoord; EB.y = BoundaryDepthCoord; }
+            else { EA.z = BoundaryDepthCoord; EB.z = BoundaryDepthCoord; }
+            CellNormals[ni] = CalculateEdgeShadingNormal(EA, EB, Densities[SA], Densities[SB], VP, NS);
+        }
+        else
+        {
+            CellNormals[ni] = CalculateGradientNormalLOD(VP, NS);
         }
     }
 
@@ -849,16 +961,9 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         float3 P1 = CellVertices[S1];
         float3 P2 = CellVertices[S2];
 
-        int NS0 = VertexOnOuterFace[S0] ? CoarserStride : CurrentStride;
-        int NS1 = VertexOnOuterFace[S1] ? CoarserStride : CurrentStride;
-        int NS2 = VertexOnOuterFace[S2] ? CoarserStride : CurrentStride;
-
-        int3 VP0 = (int3)((P0 - ChunkWorldPosition) / VoxelSize);
-        int3 VP1 = (int3)((P1 - ChunkWorldPosition) / VoxelSize);
-        int3 VP2 = (int3)((P2 - ChunkWorldPosition) / VoxelSize);
-        float3 N0 = CalculateGradientNormalLOD(VP0, NS0);
-        float3 N1 = CalculateGradientNormalLOD(VP1, NS1);
-        float3 N2 = CalculateGradientNormalLOD(VP2, NS2);
+        float3 N0 = CellNormals[S0];
+        float3 N1 = CellNormals[S1];
+        float3 N2 = CellNormals[S2];
 
         float2 UV0, UV1, UV2;
         ComputeTriangleUVs(P0, P1, P2, UV0, UV1, UV2);

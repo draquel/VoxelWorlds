@@ -127,7 +127,8 @@ each of its strided edges at voxel resolution (`VoxelDCShading::FindVoxelCrossin
 normal of the voxel cell inside it next to the crossing nearest the vertex (`VoxelCellNormal`: the stride-1 gradient
 normals at that voxel cell's crossings, averaged). The interior pass and the seam template (`ComputeCellVertex`) run the
 same op sequence, so ring recomputes stay bit-identical. `voxel.Mesh.VoxelShadingNormals 0` restores the stride-scale
-vertex normals for A/B; `voxel.Mesh.ScaleClampedGradients 0` the unscaled clamp.
+vertex normals for A/B (the cvar also covers Marching Cubes' equivalent, G61); `voxel.Mesh.ScaleClampedGradients 0` the
+unscaled clamp.
 
 **Boundary handling**: The mesher samples beyond chunk bounds using neighbor face, edge, and corner data from `FVoxelMeshingRequest` — the same data structures used by the Marching Cubes mesher.
 
