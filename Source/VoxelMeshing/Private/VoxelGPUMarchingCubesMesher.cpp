@@ -22,6 +22,7 @@
 extern TAutoConsoleVariable<int32> CVarMCBoundaryMorph;
 extern TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth;
 extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
+extern TAutoConsoleVariable<int32> CVarVoxelCrossingGradientNormals;
 
 // ==================== Compute Shader Declarations ====================
 
@@ -85,6 +86,7 @@ public:
 		SHADER_PARAMETER(uint32, MCBoundaryMorph)
 		SHADER_PARAMETER(float, MCBoundaryMorphWidth)
 		SHADER_PARAMETER(uint32, VoxelShadingNormals)   // G61: voxel.Mesh.VoxelShadingNormals
+		SHADER_PARAMETER(uint32, CrossingGradientNormals) // G62: voxel.Mesh.CrossingGradientNormals
 		// Output buffer capacities — overflow protection so cave-dense chunks don't write past the
 		// fixed triangle-soup buffers (which produced invisible-but-collidable chunks). Mirrors the DC mesher.
 		SHADER_PARAMETER(uint32, MaxVertexCount)
@@ -753,6 +755,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				MeshParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
 				MeshParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 				MeshParams->VoxelShadingNormals = CVarVoxelShadingNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
+				MeshParams->CrossingGradientNormals = CVarVoxelCrossingGradientNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
 				MeshParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				MeshParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
 
@@ -826,6 +829,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				TParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
 				TParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 				TParams->VoxelShadingNormals = CVarVoxelShadingNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
+				TParams->CrossingGradientNormals = CVarVoxelCrossingGradientNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
 				TParams->MaxVertexCount = CapturedConfig.MaxVerticesPerChunk;
 				TParams->MaxIndexCount = CapturedConfig.MaxIndicesPerChunk;
 

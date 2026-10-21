@@ -3,7 +3,21 @@
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelMeshing.h"
 #include "QEFSolver.h"
+#include "VoxelCrossingGradient.h"
 #include "HAL/IConsoleManager.h"
+
+// Shared with the Marching Cubes meshers (VoxelCPUMarchingCubesMesher.cpp, VoxelGPUMarchingCubesMesher.cpp) through
+// VoxelCrossingGradient.h (G62).
+TAutoConsoleVariable<int32> CVarVoxelCrossingGradientNormals(
+	TEXT("voxel.Mesh.CrossingGradientNormals"),
+	1,
+	TEXT("Smooth meshing's shading normals at voxel resolution (G62): 1 = the density gradient fitted to the voxels on the ")
+	TEXT("density ramp around the point (default); 0 = the central difference about the voxel the point floors to, as before ")
+	TEXT("(the voxel under a surface lies in the saturated rock, so a slope tilted by 1.0-1.8 times by where the surface ")
+	TEXT("crosses the voxel layer: bands a layer apart, and faint rings around hills at LOD 1 and 2). Both meshers' vertex ")
+	TEXT("normals at every LOD; Dual Contouring's QEF keeps the central difference, so no vertex moves. Set it before chunks ")
+	TEXT("mesh: interior meshes and seam jobs read it per job."),
+	ECVF_Default);
 
 // Shared with the Marching Cubes meshers (VoxelCPUMarchingCubesMesher.cpp, VoxelGPUMarchingCubesMesher.cpp: G61).
 TAutoConsoleVariable<int32> CVarVoxelShadingNormals(
@@ -73,6 +87,36 @@ namespace VoxelDCGradient
 		}
 		return Normal;
 	}
+
+	/**
+	 * The shading normal at a point of the surface at voxel resolution (G62): the density gradient fitted to the voxels
+	 * of the box [Lo, Hi] around it (VoxelCrossingGradient::FitNormal; voxels outside the box are skipped, not clamped),
+	 * or, where the fit is ill-conditioned or voxel.Mesh.CrossingGradientNormals is 0, ClampedGradientNormal at stride 1
+	 * about the voxel the point floors to, as before. Every view (the interior pass, each seam sampler) passes its own
+	 * density and box, so a ring recompute runs the interior pass's op sequence.
+	 *
+	 * @param Density (X, Y, Z) -> density at a voxel inside the box
+	 * @param Lo, Hi The box (inclusive voxel coordinates per axis)
+	 * @param X, Y, Z The point (voxels)
+	 * @return The outward unit normal
+	 */
+	template <typename TDensityFn>
+	FVector3f CrossingShadingNormal(const TDensityFn& Density, const int32 Lo[3], const int32 Hi[3], float X, float Y, float Z)
+	{
+		if (VoxelCrossingGradient::UseCrossingGradientNormals())
+		{
+			auto IsHeld = [Lo, Hi](int32 VX, int32 VY, int32 VZ)
+			{
+				return VX >= Lo[0] && VX <= Hi[0] && VY >= Lo[1] && VY <= Hi[1] && VZ >= Lo[2] && VZ <= Hi[2];
+			};
+			FVector3f Normal;
+			if (VoxelCrossingGradient::FitNormal(Density, IsHeld, X, Y, Z, Normal))
+			{
+				return Normal;
+			}
+		}
+		return ClampedGradientNormal(Density, Lo, Hi, FMath::FloorToInt(X), FMath::FloorToInt(Y), FMath::FloorToInt(Z), 1);
+	}
 }
 
 /**
@@ -90,7 +134,9 @@ namespace VoxelDCGradient
  *
  * Density and Gradient are the caller's views (the mesher's request, or a seam sampler, each with its clamp rule), so the
  * interior pass and the seam rings run one op sequence and stay bit-identical. Every voxel read lies inside the strided
- * cell, so no view reads past the data a cell's own vertex reads.
+ * cell, so no view reads past the data a cell's own vertex reads. Gradient is LOD 0's shading normal: the fitted gradient
+ * of G62 (CalculateShadingNormal, the samplers' ShadingNormal), which reads the voxels within a voxel and a half of the
+ * crossing that its view holds.
  */
 namespace VoxelDCShading
 {
@@ -472,6 +518,11 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 						Crossing.Normal = (Stride > 1)
 							? CalculateGradientNormalLOD(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ, Stride)
 							: CalculateGradientNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
+						// G62: LOD 0's vertex normal sums its crossings' shading normals; the QEF keeps Normal.
+						if (Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals())
+						{
+							Crossing.ShadingNormal = CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
+						}
 
 						OutValidEdgeIndices.Add(EIdx);
 					}
@@ -500,9 +551,11 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 	const float BiasStrength = Config.QEFBiasStrength;
 	const float IsoLevel = Config.IsoLevel;
 	// At a stride the vertex normal is LOD 0's at the voxel crossing nearest it (G44); the QEF keeps the stride-scale normals.
+	// LOD 0's shading normals are the fitted gradient at each crossing (G62); the QEF keeps the central difference.
 	const bool bVoxelShading = VoxelDCShading::UseVoxelShadingNormals(Stride);
+	const bool bCrossingShading = Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals();
 	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
-	auto GradientFn = [&](float X, float Y, float Z) { return CalculateGradientNormal(Request, X, Y, Z); };
+	auto GradientFn = [&](float X, float Y, float Z) { return CalculateShadingNormal(Request, X, Y, Z); };
 
 	// 12 edges of a cube cell: 4 along each axis
 	struct FEdgeRef { int32 DX, DY, DZ, Axis; };
@@ -538,6 +591,7 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 			{
 				FQEFSolver QEF;
 				FVector3f AvgNormal = FVector3f::ZeroVector;
+				FVector3f ShadingSum = FVector3f::ZeroVector;
 				VoxelDCShading::FCellVoxelCrossings VoxelCrossings;
 
 				for (const auto& Edge : CellEdges)
@@ -548,6 +602,10 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 					{
 						QEF.Add(Crossing.Position, Crossing.Normal);
 						AvgNormal += Crossing.Normal;
+						if (bCrossingShading)
+						{
+							ShadingSum += Crossing.ShadingNormal;
+						}
 						if (bVoxelShading)
 						{
 							const int32 EdgeOffset[3] = { Edge.DX, Edge.DY, Edge.DZ };
@@ -580,8 +638,15 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 				{
 					AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
 				}
-				Vertex.Normal = bVoxelShading
-					? VoxelCrossings.VertexNormal(Vertex.Position, VoxelSize, DensityFn, GradientFn, IsoLevel, AvgNormal) : AvgNormal;
+				if (bCrossingShading && ShadingSum.Normalize())
+				{
+					Vertex.Normal = ShadingSum;
+				}
+				else
+				{
+					Vertex.Normal = bVoxelShading
+						? VoxelCrossings.VertexNormal(Vertex.Position, VoxelSize, DensityFn, GradientFn, IsoLevel, AvgNormal) : AvgNormal;
+				}
 				// Material/biome are assigned per-quad in GenerateQuads (from the owned
 				// edge's solid endpoint) so triangles stay material-uniform.
 			}
@@ -1080,6 +1145,31 @@ FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormalLOD(
 	return Normal;
 }
 
+FVector3f FVoxelCPUDualContourMesher::CalculateShadingNormal(
+	const FVoxelMeshingRequest& Request,
+	float X, float Y, float Z) const
+{
+	if (VoxelCrossingGradient::UseCrossingGradientNormals())
+	{
+		// The voxels this view holds: the chunk's own in the Interior domain (CalculateGradientNormalLOD's clamp box, and the
+		// seam samplers' per-side box, so ring recomputes match); one voxel past each face in the Full domain (a missing
+		// neighbour reads as Air, which the fit skips).
+		const int32 CS = Request.ChunkSize;
+		const bool bInterior = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+		const int32 Lo = bInterior ? 0 : -1;
+		const int32 Hi = bInterior ? (CS - 1) : CS;
+		FVector3f Normal;
+		if (VoxelCrossingGradient::FitNormal(
+			[&](int32 VX, int32 VY, int32 VZ) { return GetDensityAt(Request, VX, VY, VZ); },
+			[Lo, Hi](int32 VX, int32 VY, int32 VZ) { return VX >= Lo && VX <= Hi && VY >= Lo && VY <= Hi && VZ >= Lo && VZ <= Hi; },
+			X, Y, Z, Normal))
+		{
+			return Normal;
+		}
+	}
+	return CalculateGradientNormal(Request, X, Y, Z);
+}
+
 // ============================================================================
 // Face-Seam Meshing (seam-ownership P1 — SEAM_OWNERSHIP_ARCHITECTURE.md §2.2)
 // ============================================================================
@@ -1141,19 +1231,40 @@ namespace VoxelDCFaceSeam
 		 */
 		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
 		{
-			const int32 CS = Req.ChunkSize;
-			int32 Lo[3] = { 0, 0, 0 };
-			int32 Hi[3] = { CS - 1, CS - 1, CS - 1 };
-			if (Mode == EMode::Combined)
-			{
-				Hi[Req.Axis] = 2 * CS - 1;
-			}
+			int32 Lo[3];
+			int32 Hi[3];
+			GetBox(Lo, Hi);
 
 			const int32 IX = FMath::FloorToInt(X);
 			const int32 IY = FMath::FloorToInt(Y);
 			const int32 IZ = FMath::FloorToInt(Z);
 			return VoxelDCGradient::ClampedGradientNormal(
 				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
+		}
+
+		/** The shading normal at a voxel-resolution crossing over the same box (G62; CalculateShadingNormal's view). */
+		FVector3f ShadingNormal(float X, float Y, float Z) const
+		{
+			int32 Lo[3];
+			int32 Hi[3];
+			GetBox(Lo, Hi);
+			return VoxelDCGradient::CrossingShadingNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, X, Y, Z);
+		}
+
+		/** The sampler's valid data box (frame-local): own chunk only, or both chunks along the face axis for Combined. */
+		void GetBox(int32 Lo[3], int32 Hi[3]) const
+		{
+			const int32 CS = Req.ChunkSize;
+			for (int32 Axis = 0; Axis < 3; ++Axis)
+			{
+				Lo[Axis] = 0;
+				Hi[Axis] = CS - 1;
+			}
+			if (Mode == EMode::Combined)
+			{
+				Hi[Req.Axis] = 2 * CS - 1;
+			}
 		}
 	};
 
@@ -1251,9 +1362,31 @@ namespace VoxelDCFaceSeam
 		 */
 		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
 		{
-			const int32 CS = Req.ChunkSize;
 			int32 Lo[3];
 			int32 Hi[3];
+			GetBox(Lo, Hi);
+
+			const int32 IX = FMath::FloorToInt(X);
+			const int32 IY = FMath::FloorToInt(Y);
+			const int32 IZ = FMath::FloorToInt(Z);
+			return VoxelDCGradient::ClampedGradientNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
+		}
+
+		/** The shading normal at a voxel-resolution crossing over the same box (G62). */
+		FVector3f ShadingNormal(float X, float Y, float Z) const
+		{
+			int32 Lo[3];
+			int32 Hi[3];
+			GetBox(Lo, Hi);
+			return VoxelDCGradient::CrossingShadingNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, X, Y, Z);
+		}
+
+		/** The mask's valid box (frame-local): masks are boxes by construction (per-axis allowed halves). */
+		void GetBox(int32 Lo[3], int32 Hi[3]) const
+		{
+			const int32 CS = Req.ChunkSize;
 			Lo[UAxis] = -FrameOffsetVoxels[UAxis];
 			Hi[UAxis] = CS - 1 - FrameOffsetVoxels[UAxis];
 			const bool bDv0 = (QuadrantMask & 0b0101) != 0;
@@ -1264,12 +1397,6 @@ namespace VoxelDCFaceSeam
 			Hi[PerpA] = (bDv1 ? 2 * CS - 1 : CS - 1) - FrameOffsetVoxels[PerpA];
 			Lo[PerpB] = (bDw0 ? 0 : CS) - FrameOffsetVoxels[PerpB];
 			Hi[PerpB] = (bDw1 ? 2 * CS - 1 : CS - 1) - FrameOffsetVoxels[PerpB];
-
-			const int32 IX = FMath::FloorToInt(X);
-			const int32 IY = FMath::FloorToInt(Y);
-			const int32 IZ = FMath::FloorToInt(Z);
-			return VoxelDCGradient::ClampedGradientNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
 		}
 	};
 
@@ -1323,12 +1450,34 @@ namespace VoxelDCFaceSeam
 		 */
 		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
 		{
+			int32 Lo[3];
+			int32 Hi[3];
+			GetBox(Lo, Hi);
+
+			const int32 IX = FMath::FloorToInt(X);
+			const int32 IY = FMath::FloorToInt(Y);
+			const int32 IZ = FMath::FloorToInt(Z);
+			return VoxelDCGradient::ClampedGradientNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
+		}
+
+		/** The shading normal at a voxel-resolution crossing over the same box (G62). */
+		FVector3f ShadingNormal(float X, float Y, float Z) const
+		{
+			int32 Lo[3];
+			int32 Hi[3];
+			GetBox(Lo, Hi);
+			return VoxelDCGradient::CrossingShadingNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, X, Y, Z);
+		}
+
+		/** The octant mask's valid box (frame-local): octant masks are boxes by construction (per-axis allowed halves). */
+		void GetBox(int32 Lo[3], int32 Hi[3]) const
+		{
 			const int32 CS = Req.ChunkSize;
 			// Per-axis half presence: low/high octant-mask bits per axis (X, Y, Z).
 			static const uint8 LowHalf[3] = { 0x55, 0x33, 0x0F };
 			static const uint8 HighHalf[3] = { 0xAA, 0xCC, 0xF0 };
-			int32 Lo[3];
-			int32 Hi[3];
 			for (int32 Axis = 0; Axis < 3; ++Axis)
 			{
 				const bool bLow = (OctantMask & LowHalf[Axis]) != 0;
@@ -1336,12 +1485,6 @@ namespace VoxelDCFaceSeam
 				Lo[Axis] = (bLow ? 0 : CS) - FrameOffsetVoxels[Axis];
 				Hi[Axis] = (bHigh ? 2 * CS - 1 : CS - 1) - FrameOffsetVoxels[Axis];
 			}
-
-			const int32 IX = FMath::FloorToInt(X);
-			const int32 IY = FMath::FloorToInt(Y);
-			const int32 IZ = FMath::FloorToInt(Z);
-			return VoxelDCGradient::ClampedGradientNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
 		}
 	};
 
@@ -1363,11 +1506,13 @@ namespace VoxelDCFaceSeam
 	{
 		FQEFSolver QEF;
 		FVector3f AvgNormal = FVector3f::ZeroVector;
-		// SolveCellVertices' vertex normal at a stride (G44), op for op.
+		// SolveCellVertices' vertex normal at a stride (G44) and at LOD 0 (G62), op for op.
 		const bool bVoxelShading = VoxelDCShading::UseVoxelShadingNormals(Stride);
+		const bool bCrossingShading = Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals();
+		FVector3f ShadingSum = FVector3f::ZeroVector;
 		VoxelDCShading::FCellVoxelCrossings VoxelCrossings;
 		auto DensityFn = [&S](int32 X, int32 Y, int32 Z) { return S.GetDensity(X, Y, Z); };
-		auto GradientFn = [&S](float X, float Y, float Z) { return S.GradientNormal(X, Y, Z, 1); };
+		auto GradientFn = [&S](float X, float Y, float Z) { return S.ShadingNormal(X, Y, Z); };
 
 		for (const FEdgeRef& Edge : GCellEdges)
 		{
@@ -1407,6 +1552,10 @@ namespace VoxelDCFaceSeam
 
 			QEF.Add(CrossPos, CrossNormal);
 			AvgNormal += CrossNormal;
+			if (bCrossingShading)
+			{
+				ShadingSum += S.ShadingNormal(CrossPos.X / VoxelSize, CrossPos.Y / VoxelSize, CrossPos.Z / VoxelSize);
+			}
 			if (bVoxelShading)
 			{
 				const int32 EdgeOffset[3] = { Edge.DX, Edge.DY, Edge.DZ };
@@ -1437,8 +1586,15 @@ namespace VoxelDCFaceSeam
 		{
 			AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
 		}
-		Out.Normal = bVoxelShading
-			? VoxelCrossings.VertexNormal(Out.Position, VoxelSize, DensityFn, GradientFn, IsoLevel, AvgNormal) : AvgNormal;
+		if (bCrossingShading && ShadingSum.Normalize())
+		{
+			Out.Normal = ShadingSum;
+		}
+		else
+		{
+			Out.Normal = bVoxelShading
+				? VoxelCrossings.VertexNormal(Out.Position, VoxelSize, DensityFn, GradientFn, IsoLevel, AvgNormal) : AvgNormal;
+		}
 		return true;
 	}
 
@@ -1475,6 +1631,9 @@ namespace VoxelDCFaceSeam
 		const int32 Hi[3] = { Lo[0] + Stride, Lo[1] + Stride, Lo[2] + Stride };
 		FQEFSolver QEF;
 		FVector3f AvgNormal = FVector3f::ZeroVector;
+		// The vertex normal from the crossings' shading normals (G62); the QEF keeps the central difference.
+		const bool bCrossingShading = VoxelCrossingGradient::UseCrossingGradientNormals();
+		FVector3f ShadingSum = FVector3f::ZeroVector;
 
 		for (int32 Z = Lo[2]; Z <= Hi[2]; ++Z)
 		{
@@ -1516,6 +1675,10 @@ namespace VoxelDCFaceSeam
 						const FVector3f CrossNormal = S.GradientNormal(CrossPos.X / VoxelSize, CrossPos.Y / VoxelSize, CrossPos.Z / VoxelSize, 1);
 						QEF.Add(CrossPos, CrossNormal);
 						AvgNormal += CrossNormal;
+						if (bCrossingShading)
+						{
+							ShadingSum += S.ShadingNormal(CrossPos.X / VoxelSize, CrossPos.Y / VoxelSize, CrossPos.Z / VoxelSize);
+						}
 					}
 				}
 			}
@@ -1537,7 +1700,7 @@ namespace VoxelDCFaceSeam
 		{
 			AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
 		}
-		Out.Normal = AvgNormal;
+		Out.Normal = (bCrossingShading && ShadingSum.Normalize()) ? ShadingSum : AvgNormal;
 		return true;
 	}
 

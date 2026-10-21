@@ -155,6 +155,7 @@ private:
 	{
 		FVector3f Position;  // World-space crossing point on edge
 		FVector3f Normal;    // Surface gradient normal at crossing (at the cell's stride: the QEF's plane normal)
+		FVector3f ShadingNormal; // At stride 1 with voxel.Mesh.CrossingGradientNormals: the fitted gradient's normal (G62), summed into the vertex normal
 		bool bValid = false; // Whether this edge has a crossing
 	};
 
@@ -204,6 +205,19 @@ private:
 		const FVoxelMeshingRequest& Request,
 		float X, float Y, float Z,
 		int32 Stride) const;
+
+	/**
+	 * The shading normal at a point of the surface at voxel resolution (G62): the density gradient fitted to the voxels
+	 * this request's view holds around it (voxel.Mesh.CrossingGradientNormals 1), else CalculateGradientNormal. LOD 0's
+	 * vertex normals and, at a stride, G44's voxel-cell normals; the QEF keeps CalculateGradientNormal(LOD).
+	 *
+	 * @param Request The meshing request (its MeshCellDomain picks the voxels held)
+	 * @param X, Y, Z The point (voxels, chunk-local)
+	 * @return The outward unit normal
+	 */
+	FVector3f CalculateShadingNormal(
+		const FVoxelMeshingRequest& Request,
+		float X, float Y, float Z) const;
 
 	// ============================================================================
 	// DC Core Algorithm
