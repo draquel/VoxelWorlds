@@ -849,6 +849,54 @@ namespace VoxelPlanetStreamingTestUtils
 		int32 Vertices[3] = { 0, 0, 0 };
 		int32 Skipped = 0;              // farther from the analytic surface along up than two of their cells (steep slopes)
 		double SumAngle[3] = { 0.0, 0.0, 0.0 };
+		double SumAngleSq[3] = { 0.0, 0.0, 0.0 };
+		// G62: the angle per LOD and bin of the vertex's phase in the voxel grid along the analytic normal's dominant axis.
+		double PhaseSum[3][8] = {};
+		int32 PhaseCount[3][8] = {};
+
+		/** The angles' standard deviation (degrees). */
+		double AngleSD(int32 LOD) const
+		{
+			if (Vertices[LOD] <= 0)
+			{
+				return 0.0;
+			}
+			const double Mean = SumAngle[LOD] / Vertices[LOD];
+			return FMath::Sqrt(FMath::Max(0.0, SumAngleSq[LOD] / Vertices[LOD] - Mean * Mean));
+		}
+
+		/**
+		 * The band (G62): largest minus smallest mean angle over eight bins of the vertex's phase in the voxel grid along the
+		 * analytic normal's dominant axis, over bins holding 50 vertices (degrees). The central difference before G62 made a
+		 * vertex's error a function of where the surface crossed the voxel layer; curvature and coarse cells add error at
+		 * every phase alike.
+		 */
+		double Band(int32 LOD) const
+		{
+			double Lo = TNumericLimits<double>::Max();
+			double Hi = -TNumericLimits<double>::Max();
+			for (int32 Bin = 0; Bin < 8; ++Bin)
+			{
+				if (PhaseCount[LOD][Bin] >= 50)
+				{
+					const double M = PhaseSum[LOD][Bin] / PhaseCount[LOD][Bin];
+					Lo = FMath::Min(Lo, M);
+					Hi = FMath::Max(Hi, M);
+				}
+			}
+			return Hi >= Lo ? Hi - Lo : 0.0;
+		}
+
+		FString DescribeBands() const
+		{
+			FString Out;
+			for (int32 LOD = 0; LOD < 3; ++LOD)
+			{
+				Out += FString::Printf(TEXT("%sLOD %d: %d vertices, mean %.2f deg, SD %.2f, band %.2f"), LOD > 0 ? TEXT("; ") : TEXT(""),
+					LOD, Vertices[LOD], MeanAngle(LOD), AngleSD(LOD), Band(LOD));
+			}
+			return Out;
+		}
 		FVector2D SumTangent[3] = { FVector2D::ZeroVector, FVector2D::ZeroVector, FVector2D::ZeroVector };
 		double SumAreaLit[3] = { 0.0, 0.0, 0.0 };         // triangle area x max(0, N.L), N the normalized sum of its vertex normals
 		double SumAreaLitAnalytic[3] = { 0.0, 0.0, 0.0 }; // triangle area x max(0, N.L), N the analytic normal at its centroid
@@ -924,9 +972,24 @@ namespace VoxelPlanetStreamingTestUtils
 				}
 				const FVector North = FVector::CrossProduct(Up, East);
 				const FVector D = N - A;
+				const double Angle = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(N, A), -1.0, 1.0)));
 				++Stats.Vertices[LOD];
-				Stats.SumAngle[LOD] += FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(N, A), -1.0, 1.0)));
+				Stats.SumAngle[LOD] += Angle;
+				Stats.SumAngleSq[LOD] += Angle * Angle;
 				Stats.SumTangent[LOD] += FVector2D(FVector::DotProduct(D, East), FVector::DotProduct(D, North));
+				// The phase along the dominant axis (chunk-local voxels: chunk origins lie on the voxel grid).
+				int32 Dominant = 0;
+				for (int32 Axis = 1; Axis < 3; ++Axis)
+				{
+					if (FMath::Abs(A[Axis]) > FMath::Abs(A[Dominant]))
+					{
+						Dominant = Axis;
+					}
+				}
+				const double Local = static_cast<double>(Mesh.Positions[i][Dominant]) / World.VoxelSize;
+				const int32 Bin = FMath::Clamp(static_cast<int32>((Local - FMath::FloorToDouble(Local)) * 8.0), 0, 7);
+				Stats.PhaseSum[LOD][Bin] += Angle;
+				++Stats.PhaseCount[LOD][Bin];
 			}
 			for (int32 i = 0; i + 2 < Mesh.Indices.Num(); i += 3)
 			{
@@ -1232,6 +1295,31 @@ namespace VoxelPlanetStreamingTestUtils
 		}
 	};
 
+	/** Sets voxel.Mesh.CrossingGradientNormals at console priority for a scope. */
+	struct FScopedCrossingGradientNormals
+	{
+		IConsoleVariable* Var = nullptr;
+		int32 Previous = 1;
+
+		explicit FScopedCrossingGradientNormals(int32 Value)
+		{
+			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.CrossingGradientNormals"));
+			if (Var)
+			{
+				Previous = Var->GetInt();
+				Var->Set(Value, ECVF_SetByConsole);
+			}
+		}
+
+		~FScopedCrossingGradientNormals()
+		{
+			if (Var)
+			{
+				Var->Set(Previous, ECVF_SetByConsole);
+			}
+		}
+	};
+
 	/** Triangles along each chunk face axis light like the interior ones at every LOD (within 3%), where both have 200. */
 	bool ChunkFacesMatch(const FLODNormalStats& Stats, FString& OutWhy)
 	{
@@ -1263,7 +1351,10 @@ namespace VoxelPlanetStreamingTestUtils
  * degrees, where the surface crosses every chunk face obliquely, dark lines along X and Y faces and bright ones along Z
  * faces under the noon sun (stronger at LOD 1 and 2 once their normals came from voxel-scale gradients, G44). With the
  * clamped difference scaled to the full span (voxel.Mesh.ScaleClampedGradients 1) triangles along X, Y and Z faces light
- * like the interior's at LOD 0, 1 and 2 on gentle relief at 45N 20E and on the equator; without it (0) they do not.
+ * like the interior's at LOD 0, 1 and 2 on gentle relief at 45N 20E and on the equator; without it (0) they do not. Since
+ * G62 the shading normals are a fit that skips the voxels a job does not hold instead of clamping taps, so this A/B runs on
+ * the central difference (voxel.Mesh.CrossingGradientNormals 0), and the defaults (the fit) must light chunk faces like the
+ * interior too.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingChunkFaceShadingTest,
 	"VoxelWorlds.Streaming.Planet.ChunkFaceShading",
@@ -1287,20 +1378,23 @@ bool FVoxelPlanetStreamingChunkFaceShadingTest::RunTest(const FString& Parameter
 	for (const TPair<const TCHAR*, FVector>& Place : Places)
 	{
 		const FVector Sun = FVector(Place.Value.X, Place.Value.Y, 0.0).GetSafeNormal();
-		FLODNormalStats Before, After;
-		for (int32 Mode = 0; Mode < 2; ++Mode)
+		// Mode 0: the central difference, clamp unscaled (before G25); 1: scaled (G25); 2: the defaults (G62's fit).
+		FLODNormalStats Before, After, Fit;
+		for (int32 Mode = 0; Mode < 3; ++Mode)
 		{
-			FScopedScaleClampedGradients Scoped(Mode);
+			FScopedScaleClampedGradients Scoped(Mode == 0 ? 0 : 1);
+			FScopedCrossingGradientNormals ScopedFit(Mode == 2 ? 1 : 0);
 			FPlanetStreamingWorld World;
 			World.Relief = 400.0f;
 			World.Octaves = 2;
 			World.Start(TEXT("VoxelPlanetChunkFaceTestWorld"), Place.Value, 300.0f);
-			TestTrue(*FString::Printf(TEXT("%s (scale %d): the pipeline settled"), Place.Key, Mode), World.Settle());
-			(Mode == 0 ? Before : After) = MeasureLODNormals(World, Sun);
+			TestTrue(*FString::Printf(TEXT("%s (mode %d): the pipeline settled"), Place.Key, Mode), World.Settle());
+			(Mode == 0 ? Before : Mode == 1 ? After : Fit) = MeasureLODNormals(World, Sun);
 			World.Stop();
 		}
 		AddInfo(FString::Printf(TEXT("%s, unscaled clamp: %s"), Place.Key, *Before.DescribeFaces()));
 		AddInfo(FString::Printf(TEXT("%s, scaled: %s"), Place.Key, *After.DescribeFaces()));
+		AddInfo(FString::Printf(TEXT("%s, the fit (G62): %s"), Place.Key, *Fit.DescribeFaces()));
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
 			TestTrue(*FString::Printf(TEXT("%s: LOD %d has interior triangles to compare with"), Place.Key, LOD), After.FaceTris[LOD][0] >= 200);
@@ -1308,11 +1402,112 @@ bool FVoxelPlanetStreamingChunkFaceShadingTest::RunTest(const FString& Parameter
 		FString Why;
 		const bool bAfterMatches = ChunkFacesMatch(After, Why);
 		TestTrue(*FString::Printf(TEXT("%s: triangles along chunk faces light like the interior's %s"), Place.Key, *Why), bAfterMatches);
+		FString WhyFit;
+		const bool bFitMatches = ChunkFacesMatch(Fit, WhyFit);
+		TestTrue(*FString::Printf(TEXT("%s: with the fit too %s"), Place.Key, *WhyFit), bFitMatches);
 		FString WhyBefore;
 		bAnyBeforeFails |= !ChunkFacesMatch(Before, WhyBefore);
 		AddInfo(FString::Printf(TEXT("%s, unscaled clamp: %s"), Place.Key, WhyBefore.IsEmpty() ? TEXT("within the bound") : *WhyBefore));
 	}
 	TestTrue(TEXT("The unscaled clamp shows lines along chunk faces"), bAnyBeforeFails);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G62 (WORLD_MODES_REVIEW_PLAN.md §14.1): both smooth meshers took their voxel-resolution normals from a central difference
+// about the voxel the crossing floors to, whose tap under a surface lies in the saturated rock, so a vertex's error
+// depended on where the surface crossed the voxel layer: bands a voxel layer apart at LOD 0, sampled sparsely by LOD 1 and
+// 2 (rings around hills from altitude). The fitted gradient (voxel.Mesh.CrossingGradientNormals 1) has no such dependence.
+// ---------------------------------------------------------------------------
+
+namespace VoxelPlanetStreamingTestUtils
+{
+	/**
+	 * Streams one place with gentle relief with the central difference before G62 (0) and the fitted gradient (1), in one
+	 * meshing mode, and measures both (chunk meshes and seam buckets). Positions are the same either way, so the vertex
+	 * counts must agree. LOD 0 must band less than half a degree over the voxel phase with the fit and more than a degree
+	 * without it; every LOD's mean angle from the analytic normals must fall.
+	 */
+	void RunGradientBandsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
+		float Relief, int32 Octaves, EMeshingMode MeshingMode)
+	{
+		const FVector Sun = FVector::UpVector; // unused by the bands
+		FLODNormalStats Before, After;
+		for (int32 Mode = 0; Mode < 2; ++Mode)
+		{
+			FScopedCrossingGradientNormals Scoped(Mode);
+			FPlanetStreamingWorld World;
+			World.Relief = Relief;
+			World.Octaves = Octaves;
+			World.MeshingMode = MeshingMode;
+			Start(World);
+			Test.TestTrue(*FString::Printf(TEXT("%s (gradient %d): the pipeline settled"), Place, Mode), World.Settle());
+			(Mode == 0 ? Before : After) = MeasureLODNormals(World, Sun);
+			World.Stop();
+		}
+		Test.AddInfo(FString::Printf(TEXT("%s, before G62: %s"), Place, *Before.DescribeBands()));
+		Test.AddInfo(FString::Printf(TEXT("%s, after: %s"), Place, *After.DescribeBands()));
+		for (int32 LOD = 0; LOD < 3; ++LOD)
+		{
+			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d vertices measured"), Place, LOD), After.Vertices[LOD] > 500);
+			Test.TestEqual(*FString::Printf(TEXT("%s: LOD %d vertices the same in either setting (no vertex moves)"), Place, LOD),
+				After.Vertices[LOD], Before.Vertices[LOD]);
+			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d's mean angle %.2f below the %.2f before G62"), Place, LOD, After.MeanAngle(LOD), Before.MeanAngle(LOD)),
+				After.MeanAngle(LOD) < Before.MeanAngle(LOD));
+		}
+		Test.TestTrue(*FString::Printf(TEXT("%s: LOD 0 bands %.2f deg over the voxel phase (at most 0.5)"), Place, After.Band(0)), After.Band(0) <= 0.5);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the central difference before G62 bands LOD 0 by %.2f deg (more than 1)"), Place, Before.Band(0)),
+			Before.Band(0) > 1.0);
+	}
+}
+
+/**
+ * G62 on a planet: Dual Contouring and Marching Cubes chunk meshes and seam buckets from viewers at 45N 20E and on the
+ * equator, gentle relief: with the fitted gradient LOD 0's vertex normals do not band over the surface's phase in the voxel
+ * grid and every LOD comes closer to the analytic normals, where the central difference before G62 bands.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingGradientBandsTest,
+	"VoxelWorlds.Streaming.Planet.GradientBands",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingGradientBandsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Direction = [](double LatDeg, double LonDeg)
+	{
+		const double Lat = FMath::DegreesToRadians(LatDeg);
+		const double Lon = FMath::DegreesToRadians(LonDeg);
+		return FVector(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	};
+	const TPair<const TCHAR*, FVector> Places[] = {
+		{ TEXT("45N 20E"), Direction(45.0, 20.0) },
+		{ TEXT("equator"), Direction(1.0, 1.5) },
+	};
+	for (const TPair<const TCHAR*, FVector>& Place : Places)
+	{
+		auto Start = [&Place](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetGradientBandsTestWorld"), Place.Value, 300.0f); };
+		RunGradientBandsPlace(*this, *FString::Printf(TEXT("DC %s"), Place.Key), Start, 400.0f, 2, EMeshingMode::DualContouring);
+		RunGradientBandsPlace(*this, *FString::Printf(TEXT("MC %s"), Place.Key), Start, 400.0f, 2, EMeshingMode::MarchingCubes);
+	}
+	return true;
+}
+
+/**
+ * G62 on a heightmap world: the Plane.LODNormals place (gentle hills) in Dual Contouring and Marching Cubes, under the same
+ * bounds as the planet's.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingGradientBandsTest,
+	"VoxelWorlds.Streaming.Plane.GradientBands",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneStreamingGradientBandsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneGradientBandsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunGradientBandsPlace(*this, TEXT("DC plane east"), Start, 400.0f, 1, EMeshingMode::DualContouring);
+	RunGradientBandsPlace(*this, TEXT("MC plane east"), Start, 400.0f, 1, EMeshingMode::MarchingCubes);
 	return true;
 }
 
