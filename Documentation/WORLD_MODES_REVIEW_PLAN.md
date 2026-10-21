@@ -1482,7 +1482,7 @@ Three findings from §13.11 get IDs here:
 | G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position, so across a blend zone, where the weights change slowly, it follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets (the grid tilted against local up everywhere, climate zones km across): `Review_Planet_L`'s equator and M's 45° and equator from above (also in P6.1's M shot; found in spherical Phase 6's P6.2 survey, §20.3) | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) | — |
 | G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Fixed in P6.4 (WM-BP9, §20.5): where the shell would sag past its 8 uu budget (M, L) the far field draws the sea, a section of each patch at sea level with offsets of the patch's size and an 8 x 8 grid (sag under a uu near the viewer); the small planet keeps its shell | WM-BP9 |
 | G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Fixed in P6.5 (§20.6): the lagged pivot snaps when the ideal pivot jumps more than `TeleportSnapDistance` (5,000 uu) in a frame (`UVCThirdPersonCameraMode::ComputeLaggedPivot`, `VoxelCharacter.Camera.TeleportSnap`) | WM-BP10 |
-| G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Open: profile scatter on km relief | WM-BP13 |
+| G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Fixed in §20.10: scatter's HISM writes. A UE 5.8 HISM rebuilds its cluster tree and recreates its scene proxy (every instance, pooled ones too, re-registered with the distance-field and ray-tracing scenes) for each change not in place, and the streaming touched the HISMs around the viewer nearly every frame. Writes are now batched per HISM (at most every 0.1 s, not during a tree build, releases in place, no render-state dirtying), pooled HISMs compacted, and a planet keeps 4-chunk scatter regions. The great circles' frame P95 −31% (M) and −23% (L), within 3% of the small planet's land route (its 45°N great circle runs 65% under the sea) | WM-BP13 |
 | G43 | The planet terrain steps across simplex-cell boundaries: `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`, and the heightmap noise's Simplex3D) use the 0.6 kernel radius (Gustavson's), which reaches past the simplex, so a corner's contribution drops out abruptly where a sample crosses into the next simplex. In world space the planes x = ±y, y = ±z and x = ±z through the planet centre lie on a simplex boundary in every octave at once, and they are the cube sphere's face edges: directions 10⁻⁸ rad apart across x = z differ in altitude by up to 11 uu on the small planet and 136 uu on `Review_Planet_L` (measured by `FarField.Planet.MatchesSurface`'s first build, P6.4, §20.5). Elsewhere one octave's boundary at a time gives smaller steps. The voxel terrain has them too (under a voxel on the small planet, up to about two along L's face edges) | Open (low): a 0.5 kernel is continuous but changes every planet's terrain (`PlanetGenerationVersion` bump; the heightmap Simplex3D a `GenerationVersion` bump and its parity CRCs). The far field samples a face edge's vertices exactly on the plane from both faces (`FVoxelFarFieldPatchKey::GetDirection`), so its patches meet there | — |
 | G44 | On a planet the voxel window's LOD 2 chunks light brighter than its LOD 0 and 1 chunks and the far field: from straight above `Review_Planet_L` at 45°N 20°E under a midday sun the window is a ring (the LOD 2 band) brighter than both its centre and the far field around it, and the normal buffer shows the ring's normals off the others' (whiter); the centre and the far field match. Not the far field's: the same material instance (swapping in a region component's makes no difference), the same material ids and vertex conventions (unlit the window's edge vanishes), shadows not involved; the far field's grid normals equal the planet's analytic `GetConditionedSurfacePoint` normals, and only giving it radial normals matches the ring. It shows as a brightness step along the window's edge from altitude, over land and through the sea (§20.5) | Fixed 2026-10-20 (§20.8): the DC mesher's crossing normals took their gradient taps `Stride` voxels apart, and generated density saturates a voxel either side of the surface, so at stride 4 each component was a sign and LOD 2's normals snapped toward the cube diagonals (LOD 1's less). A strided cell's vertex normal is now LOD 0's at the voxel crossing nearest the vertex (`VoxelDCShading`); the QEF keeps the stride-scale normals, so no vertex moves. From straight above L at 45°N 20°E the ring against the centre 1.16 → 1.01 and the window no longer told from the far field; LOD 2's tilt on gentle relief 6.4° → 0.7°; `Streaming.{Planet,Plane}.LODNormals`; `voxel.Mesh.VoxelShadingNormals`. Heightmap worlds had it on slopes. G25 was found to be the chunk faces' share of the same lighting and fixed with it | WM-BP13 |
 | G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Open (cosmetic; the orbit view, WM-BP10, shows it most): blend the materials across a far-field quad (per-vertex material weights, or a per-patch material texture). Not taken in P6.5: it needs the terrain material to blend two materials within a triangle, which the voxel meshes do not do either (`DC_MATERIAL_BLEND_PLAN.md`, deferred). Since P6.5 it also shows under the viewer just above the cut-over, where the window has emptied (§20.6) | WM-BP10 |
@@ -1502,6 +1502,9 @@ Three findings from §13.11 get IDs here:
 | G59 | The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a chunk's mesh completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only: water that an edit-driven flood put in the edit layer draws no tile (a channel dug inland from the shore below sea level is flagged but shows no water surface), and a flood does not continue into a chunk that loads after it (traced in G58, §19.14; before G58 no flood reached the edit layer) | Fixed 2026-10-20 (§19.16): a chunk with edits builds its tile mask from the edit-merged snapshot (the pull across faces drops the snapshot when it writes flags); when a chunk's water first settles, `UVoxelWaterPropagation::OnChunkWaterSettled` scans the faces it shares with settled chunks (either with edits, below the sea) for a voxel pair with an edit on either side, one dry air below the sea and the other water, and seeds the flood there; the pull itself stays on the generated voxels; `Streaming.WaterPropagation.ChunkArrival.{Plane,Planet}`, `.Tiles.Plane`, `voxel.Water.Stats` | — |
 | G60 | Water propagation's flood batches entered the edit manager's undo history, and an undo record kept only each voxel's previous value (`FVoxelEdit::OriginalData`): a flood replaces a dug voxel's relative edit with a `Set` whose previous value is the dig's unset one (air), so its undo removed the edit and the first undo after a dig under the sea (the demo test actor's Z) took back the flood and the dig at every voxel it had reached. The same record lost a previous relative edit (a dig under a dig), a previous `Set` to air and an edit removed by cancelling deltas; it kept no chunk, so undo could revert another chunk's voxel at the same local position and redo wrote every edit into the operation's first chunk, broadcasting only that chunk; and redo broadcast the current source with no radius, so a system edit's redo re-extracted no scatter (traced in G58, §19.14) | Fixed 2026-10-20 (§19.17): water propagation's operations stay out of the history (`BeginEditOperation(..., bAddToUndoHistory=false)`: no undo step, the redo stack kept); every operation records per voxel its chunk and the whole edit before and after (`FVoxelEditChange`), so undo, redo and cancel restore the edit layer exactly in each voxel's own chunk and broadcast each chunk with its own bounds, and redo broadcasts the operation's own source, centre and radius; undoing a dig under the sea restores its voxels, flood included, and its redo floods again; water beyond the dig's voxels stays (nothing drains it); `Edit.UndoRedo.Records`, `Streaming.WaterPropagation.Undo.{Plane,Planet}`, `EditRemesh` edits 6-7, `Scatter.EditReaders` undo/redo audits | — |
 | G61 | Marching Cubes' LOD normals use the same stride-scale gradient taps G44 fixed in Dual Contouring (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD` and the GPU MC shader's), so an MC world's LOD 1 and 2 would lean the same way (found in G44, §20.8). No shipped configuration meshes with MC: the planets and `VoxelDemo` are DC | Open: the same voxel-resolution vertex normals in MC, CPU and GPU | — |
+| G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames (§20.10) | Open (not traced) | — |
+| G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (§20.10) | Open (callers not traced) | — |
+| G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7: M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, the same with and without G42's batching, the voxel data's peak 812-859 MB; settled figures did not move (§20.10). Something merged since G52 holds more voxel data in flight; under D3's 1.5 GB | Open: bisect the merges since G52 | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -6390,7 +6393,7 @@ parity lines CRC-identical to P6.2's (WM-BP8 changes no generation). The heightm
 | ID | Finding | Status |
 |----|---------|--------|
 | G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the horizon along the ground the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 1,091 from the antipode (whose line arrives along the up-line), 997 arriving in held flight. Teleports only; the extra chunks are within the unload hysteresis and go when the viewer moves | Open (low): snap the camera's pivot on a teleport (VoxelCharacterPlugin); with WM-BP10's descents |
-| G42 | On M and L the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows now load fewer chunks: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. It predates WM-BP8 (P6.1: +18% and +34%) and the window's A/B lowers both on M and L | Open: WM-BP13's budgets (profile scatter on km relief) |
+| G42 | On M and L the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows now load fewer chunks: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. It predates WM-BP8 (P6.1: +18% and +34%) and the window's A/B lowers both on M and L | Fixed in §20.10: scatter's HISM writes batched |
 
 **Left for the next milestones.** P6.4 (the far field, WM-BP9) builds on this window: its hole is the loaded disk, the view
 distance along the ground from the ground point, and beyond it nothing is drawn yet but the sea sphere (the climb
@@ -6989,12 +6992,12 @@ quads show under the viewer too (`p65_L_equator_fly_60000_view`), not only at th
 Still open from Phase 6:
 
 - G39: biome blend bands.
-- G42: M's and L's frame and manager P95.
 - G43: noise steps at the face edges.
 - G45: stepped far-field materials.
 - G49: the prefetch's speculation.
 
-G52 (the near band during descents) is fixed in §20.7, G44 (the LOD 2 ring's lighting) in §20.8.
+G52 (the near band during descents) is fixed in §20.7, G44 (the LOD 2 ring's lighting) in §20.8, G42 (M's and L's frame
+and manager P95) in §20.10.
 
 Deferred since before Phase 6: G14, G16, G19, G25 and G28 (G32 and G33 fixed since, §19.10 and §19.11; G34 dismissed, §19.12, and the demo caves retuned, §19.15).
 
@@ -7299,3 +7302,217 @@ seam and closure tests (`Meshing.DualContour.*`, 23 including the ring bit-match
   the 3% bound; a neighbour's voxels would close it, at the cost of the neighbour independence seam ownership relies on.
 
 G44 and G25 are fixed.
+
+### 20.10 G42: scatter's HISM writes, batched (2026-10-21)
+
+Bases: VoxelWorlds `fed44dc`, UE5_PluginDev `93e7812` (G44 merged). Branches `fix/g42-planet-scatter-cost`
+(VoxelWorlds) and `claude/g42-planet-scatter-cost` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic
+Games\UE_5.8` in a worktree editor (Claudius on 8096), background throttling off. This follows G61's §20.9
+(draquel/VoxelWorlds#130, open when this was written).
+
+**Profiling.** Instruments first, kept in the build:
+
+- The bench's CSV gained the scatter section's steps: `ScatEditMs` (edit readers), `ScatApplyMs` (completed
+  extractions), `ScatLaunchMs`, `ScatDistMs` (the distance spawn), `ScatFlushMs` (the renderer's instance flush). It also
+  gained the extractions applied and launched, the HISM instances placed and released (`ScatAddN`, `ScatRelN`), and the
+  engine's game-thread, render-thread and GPU times (`GTMs`, `RTMs`, `GPUMs`, `stat unit`'s).
+- `TRACE_CPUPROFILER` scopes on the scatter manager's and renderer's steps, and a trace region over the bench's traverse
+  (`VoxelBench Traverse`).
+- `voxel.Scatter.Stats hism`: the HISMs by size.
+
+Insights traces of the great circle (`voxel.Bench.Run <tag> 1500 40000 gc=45:20:90 follow=300`, the editor run with
+`-statnamedevents`, `Trace.File`) were exported headless (`UnrealInsights.exe -OpenTraceFile=... -AutoQuit -NoUI
+-ExecOnAnalysisCompleteCmd=...`, `TimingInsights.ExportTimingEvents` / `ExportTimerStatistics`), and every game-thread
+event of the traverse was folded per frame.
+
+- **The small planet is not a like-for-like control.** Its 45°N 20°E is sea (the settle lands at 46.1°N, §20.4), and
+  65% of the great circle's samples lie under the sea surface; M's and L's routes are land throughout. Scatter there is
+  mostly seabed plants, and the HISM instance churn is a quarter of M's (35 instances placed and 26 released a frame
+  against 132 and 121 in the benches below). A land route on the small planet is measured below.
+- **Where M's and L's frames go.** In the slowest 5% of frames, the chunk manager's own time is the same on all three
+  planets (6.7-8.3 ms). On M and L (against the small planet) there are three extra costs:
+  - HISM cluster tree builds on the game thread (`UHierarchicalInstancedStaticMeshComponent::BuildTreeAsync`): 3.5-5.1
+    ms against 0.8;
+  - the game thread waiting for the render thread: 4.1-4.6 ms against 0.1;
+  - HISM scene proxies (`Foliage Create Proxy`): 1.2-1.4 ms against 0.5.
+
+  On the render thread the distance-field scene's object updates (`UpdateDistanceFieldObjectBuffers`) take 3.6-3.7 s of
+  the 26 s traverse against 0.4 s, single frames up to 51 ms, and ray tracing's instance gathering 1.2-1.6 s against 0.2.
+  The scatter section's own P95 (3.4-3.8 ms) is its distance spawn and instance flush, which trigger the same HISM work.
+- **The mechanism** (engine source, 5.8.3). A UE 5.8 HISM keeps its instances in legacy mode
+  (`FPrimitiveInstanceDataManager::EMode::Legacy`). An instance change that is not in place (an add, a move) marks its
+  cluster tree out of date and starts `BuildTreeAsync`, which copies every instance's transform on the game thread. A
+  change while the build runs sets `bConcurrentChanges`, and the finished build is thrown away and started again. An
+  applied build calls `MarkForRebuildFromLegacy` and `MarkRenderStateDirty`: the scene proxy is recreated, and the
+  render thread removes and re-adds every instance's distance-field object (and Lumen and ray-tracing entries). The
+  scatter renderer also marked the HISM's render state dirty after every release and every frame's flush, and parked
+  released instances at the HISM's origin (a move, so not in place). So each frame the streaming touched a HISM, it paid
+  for all its instances. On L after one traverse:
+  - 60 HISMs held 250,440 instances, 53% of them pooled (zero-scaled, waiting for reuse).
+  - The grass HISMs held up to 37,000 instances each.
+  - Pooled instances are in every tree build, proxy and distance-field update of their HISM.
+- **Not it:** extraction (on workers, as §19.9 measured), applying completed extractions (P95 0.01 ms), launches (0.03
+  ms), edit readers (none on these routes), and the GPU (P95 7.6-7.7 ms on all three).
+
+**What changed** (`UVoxelScatterRenderer`, VoxelScatter; the bench and `voxel.Scatter.Stats` in VoxelStreaming; no
+change to extraction, placement, spawn points or generation):
+
+- **Batched HISM writes** (`voxel.Scatter.HISMBatchSeconds`, 0.1 s). The pools and chunk indices change at once, as
+  before (`GetChunkInstanceCount`, the cache audits and the tests see no delay). The HISM writes are held per HISM
+  (`FPendingHISMWrites`: an index's new transform, the last write winning, and the new instances, numbered after the
+  HISM's count and those already held). `Tick` applies a HISM's writes at most once per interval, and not while its
+  tree builds, unless they have waited `voxel.Scatter.HISMMaxHoldSeconds` (0.5 s). No `MarkRenderStateDirty`: the HISM
+  sends in-place changes to its proxy itself, draws placements and new instances unbuilt until its build lands, and
+  then recreates the proxy once. 0 = every write at once, releases parked at the origin, the render state marked dirty:
+  the behaviour before G42, for A/B runs.
+- **In-place releases.** A release zero-scales each instance where it stands. The HISM takes that without rebuilding
+  its tree (`bDoInPlaceUpdate`), so unloads, the distance cleanup and edits no longer rebuild anything.
+- **Compaction** (`voxel.Scatter.HISMCompactMinPooled`, 1,024). A HISM taking a batch whose pooled instances are at
+  least that many and outnumber its live ones is rewritten with its live instances only (`CompactHISM`: each chunk's
+  instances with the held writes applied, renumbered; one `ClearInstances` and `AddInstances`).
+- **Smaller regions on a planet** (`voxel.Scatter.RegionChunks`). The scatter HISMs keep their own regions: 4 chunks
+  on a planet by default (-1), the render regions' 16 with 0 (as before), N chunks in any world mode with N > 0.
+  Heightmap worlds keep one region. Smaller regions only gain precision.
+- Queries see held writes: `FindNearestInstance` (harvest) reads instances through them and scans held placements and
+  new instances; `GetTotalInstanceCount` counts held new instances; `FlushHISMWrites` applies everything now.
+  `voxel.Scatter.Stats hism` lists the HISMs by size; the bench logs `ScatBatchN` and `ScatCompactN`.
+
+**What each part bought** (L's great circle, one profiled run each on a quiet machine, `-statnamedevents`):
+
+| L, great circle | Frame P95 ms | Scatter P95 ms | HISM tree builds / proxies over the traverse | Slowest 5%: tree build / proxy / waiting for the render thread, ms | Distance-field updates, s |
+|---|---|---|---|---|---|
+| Before (write-through, regions of 16) | 30.0 | 3.45 | 1,209 / 1,272 | 2.6 / 0.67 / 6.9 | 3.5 |
+| Batched + compacted, regions of 16 | 24.4 | 2.43 | 678 / 416 | 1.3 / 0.10 / 4.7 | 2.6 |
+| **Batched + compacted, regions of 4** | 23.5 | 1.79 | 422 / 429 | 0.19 / 0.15 / 3.3 | 1.7 |
+
+With compaction L's HISMs end the traverse at 108,000-125,000 instances, 5,000-17,000 pooled, against 253,000 and
+148,000 before.
+
+**Benches.** One build, the A/B by cvars set in the editor before each PIE. The control writes every change at once in
+the render regions (`voxel.Scatter.HISMBatchSeconds 0`, `voxel.Scatter.RegionChunks 0`: the code before G42); the
+batched mode uses the defaults. PIE on `PlanetTest` with `voxel.ConfigOverride`, a fresh world per run, `vox.TPLatLon 45
+20` and its settle, local noon, move and look input blocked. After a throwaway run, three repetitions of each pair,
+interleaved and alternating which goes first: `voxel.Bench.Run <tag> 1500 40000 gc=45:20:90 follow=300` and `1500 60000
+climb=45:20:200` (`warmup=30 catchup=90`). The editor ran without `-statnamedevents` and nothing else ran on the machine.
+Means of three (catch-up per run); tags `g42b_{S,M,L}_{old,new}_{gc,climb}_r{1,2,3}` in the worktree's
+`Saved/VoxelBench`:
+
+| Planet, route | HISM writes | Peak loaded | Frame P50 / P95 ms | Manager P95 ms | Scatter P95 ms | Game thread P95 ms | Catch-up s | Instances placed / released a frame | Systems MB peak (+ far field) |
+|---|---|---|---|---|---|---|---|---|---|
+| Small, great circle | before | 1,290 | 16.7 / 26.3 | 7.1 | 0.74 | 25.5 | 0.17 / 0.17 / 0.17 | 35 / 26 | 1,160 (+67) |
+|  | **batched** | 1,291 | 16.7 / 25.4 | 6.6 | 0.52 | 24.6 | 0.17 / 0.17 / 0.17 | 34 / 25 | 1,152 (+67) |
+| Small, climb to 60,200 | before | 1,173 | 16.7 / 17.1 | 2.3 | 0.07 | 16.3 | 0.17 / 0.17 / 0.17 | 0 / 11 | 1,137 (+70) |
+|  | **batched** | 1,173 | 16.7 / 17.6 | 2.5 | 0.07 | 17.5 | 0.17 / 0.17 / 0.17 | 0 / 11 | 1,159 (+70) |
+| M, great circle | before | 1,220 | 16.7 / 33.6 | 8.2 | 3.75 | 27.0 | 0.22 / 0.20 / 0.19 | 132 / 121 | 1,068 (+49) |
+|  | **batched** | 1,239 | 16.7 / 23.1 | 6.9 | 1.39 | 22.6 | 0.17 / 0.17 / 0.18 | 116 / 106 | 1,072 (+50) |
+| M, climb to 60,200 | before | 1,091 | 16.7 / 17.0 | 3.0 | 0.06 | 16.6 | 0.17 / 0.17 / 0.17 | 2 / 33 | 1,065 (+49) |
+|  | **batched** | 1,091 | 16.7 / 16.7 | 2.9 | 0.07 | 15.4 | 0.17 / 0.17 / 0.17 | 2 / 33 | 1,057 (+49) |
+| L, great circle | before | 1,264 | 16.7 / 30.3 | 8.0 | 3.39 | 25.6 | 0.30 / 0.38 / 0.40 | 131 / 122 | 1,213 (+49) |
+|  | **batched** | 1,270 | 16.7 / 23.2 | 7.1 | 1.89 | 22.5 | 0.17 / 0.17 / 0.17 | 120 / 111 | 1,215 (+50) |
+| L, climb to 60,200 | before | 1,123 | 16.7 / 16.7 | 3.0 | 0.06 | 15.0 | 0.17 / 0.17 / 0.17 | 0 / 33 | 1,237 (+50) |
+|  | **batched** | 1,123 | 16.7 / 16.7 | 2.9 | 0.06 | 14.6 | 0.17 / 0.17 / 0.17 | 0 / 33 | 1,228 (+51) |
+| Small, land route (60°S 50°E north) | before | 1,262 | 16.7 / 24.1 | 6.6 | 1.55 | 23.7 | 0.21 / 0.18 / 0.17 | 50 / 48 | 1,036 (+66) |
+|  | **batched** | 1,263 | 16.7 / 22.6 | 6.0 | 0.67 | 22.0 | 0.21 / 0.19 / 0.19 | 50 / 48 | 1,027 (+66) |
+
+- **The great circles on M and L:**
+  - Frame P95 −31% and −23% (33.6 → 23.1 and 30.3 → 23.2 ms), the same in every run (23.0-23.3).
+  - Manager P95 −16% and −11%, scatter P95 −63% and −44%, game thread P95 −16% and −12%.
+  - L's catch-up 0.30-0.40 s → 0.17 s, the metric's floor.
+- **The small planet's great circle** gains 3% (26.3 → 25.4): its route is mostly sea, with a quarter of the churn.
+- **The climbs** sit at the 16.7 ms vsync either way: the ground disk is already loaded and little scatter changes
+  (none placed). The small planet's batched climb has one run at 19.1 ms.
+- **A land route on the small planet.** 45°N 20°E's great circle runs 65% under the sea. A probe of the analytic
+  ground on a 10° grid and along candidate lines found the 50°E meridian dry from 60°S to 51°S, so the route is
+  `gc=-60:50:0` (north, 40,000 uu), settled at 60°S 50°E, tags `g42b_Sl_*_land_*`. On it the small planet places 50
+  instances a frame, against M's and L's 116-132: the km relief has more surface and more scatter around the viewer.
+- **M and L against the small planet's land route**, batched on both:
+  - Frame P95 +2% and +3% (23.1 and 23.2 ms against 22.6), within §1's +10%. Before: +39% and +26% against the land
+    route (33.6 and 30.3 against 24.1), +28% and +15% against the great circle (26.3).
+  - Manager P95 +15% and +18% (6.9 and 7.1 against 6.0; before +24% and +21%). What is left of it is the balanced-LOD
+    cache's rebuild (`LODUpdMs` P95 2.4-2.5 against 1.3 ms, §20.4) and scatter's instance flush (P95 1.0-1.2 against 0.4
+    ms: more instances placed).
+- **Memory** is the same in both modes (systems peak within 1%; scatter's peak 2-5% lower batched, with fewer pooled
+  instances). D3's 1.5 GB holds: at most 1,287 MB with the far field. The peaks are 300-400 MB over §20.7's (M's great
+  circle 755 MB then, 1,068-1,072 now; L's 831 against 1,213-1,215), in both modes: the voxel data's peak while
+  streaming is 812-859 MB. Settled figures did not move (below). Recorded as G66.
+
+**Tests** (`VoxelScatter/Tests/VoxelScatterHISMBatchTests.cpp`, new; the reload tests' tilted heightmap plane through
+the scatter manager's own pipeline):
+
+- **`Scatter.HISMBatch.SameInstances`** runs one scenario three ways: every write at once, batched, and batched with a
+  compaction whenever any pooled instance outnumbers the live ones. The scenario: four chunks near the viewer, the
+  viewer far (trees released), a chunk unloaded, reloaded near, a cleared radius. At each of the five stops the
+  instances drawn (scale not zero, every HISM) are the same transforms in all three runs, each type's as many as its
+  spawn points. The compacted run rewrote the trees' HISM (547 instances → 344, all live).
+- **`Scatter.HISMBatch.InPlaceRelease`**: the 203 trees one distance pass releases keep their locations with a zero
+  scale, in one batch for the tick.
+- **`Scatter.HISMBatch.Regions`**: regions of one chunk (12 HISMs against 3) draw the same 547 instances, to 0.01 uu.
+
+**Live check** (`Review_Planet_L`, 45°N 20°E, local noon): from 700 and 2,500 uu over the ground, before and after a
+20,000 uu traverse and back, and after a system dig of 900 uu beside the pawn, batched against write-through
+(`g42v_*`, `g42d_*` in the worktree's screenshots). The shots differ by a mean of 0.6-1.6 grey levels of 255, with
+0.06% of pixels or fewer off by more than 40 (TAA and the clouds). The dig's hole is bare in both, and the cache audit
+(`voxel.Scatter.Digest`'s `caches:` line) reads 79,248 instances for 79,248 spawn points either way.
+
+**Settled and D3.** A fresh world, the same teleport and settle, 75 s idle so far compression has run, then a 1 uu
+bench from where the pawn stands; tags `g42s_{S,M,L}_{old,new}_settled`:
+
+| Planet | HISM writes | Loaded chunks | Voxel data MB (resident / uniform / compressed chunks) | Scatter MB | Systems MB settled | Far field MB | Total MB |
+|---|---|---|---|---|---|---|---|
+| Small | before | 1,079 | 126 (103 / 68 / 908) | 162 | 480 | 49.1 | 529 |
+|  | **batched** | 1,079 | 126 (103 / 68 / 908) | 160 | 476 | 49.1 | 525 |
+| M | before | 1,076 | 121 (108 / 494 / 474) | 166 | 400 | 40.2 | 440 |
+|  | **batched** | 1,076 | 121 (108 / 494 / 474) | 165 | 401 | 40.2 | 441 |
+| L | before | 1,102 | 120 (107 / 502 / 493) | 165 | 529 | 41.8 | 571 |
+|  | **batched** | 1,102 | 120 (107 / 502 / 493) | 162 | 527 | 41.8 | 568 |
+
+D3 is met in both modes: at most 1,287 MB while streaming (1.5 GB allowed) and 440-571 MB settled with the far field
+(0.6 GB allowed); P6.5's were 491-543 MB (§20.6). L's edit layer (the POI stamps, 122 MB) is most of its difference
+from M.
+
+**Scatter output.** `voxel.Scatter.Digest file` at the settled site in a fresh world, before and batched: the
+small planet's 201 chunks (30,726 spawn points), L's 192 (79,317) and `VoxelDemo`'s 246 (18,066) give byte-identical
+per-chunk files, and the `caches:` line has as many instances as spawn points, no mismatch, both ways (`g42dg_*`).
+Batching changes when instances reach a HISM, never which: spawn points, transforms and the instances drawn are the
+same (the tests above).
+
+**Heightmap worlds.** The batched writes and compaction act on every world mode; a heightmap world keeps one HISM per
+type (`voxel.Scatter.RegionChunks` -1). `VoxelDemo` with its committed demo configuration
+(`DemoSmoothWorldConfig`), a fresh world per run, 45 s at the spawn, then `voxel.Bench.Run <tag> 1500 40000` (`warmup=30
+catchup=90`), three runs each interleaved (`g42b_demo_*`):
+
+| `VoxelDemo` | Peak loaded | Frame P50 / P95 ms | Manager P95 ms | Scatter P95 ms | Game thread P95 ms | Catch-up s | Systems MB peak |
+|---|---|---|---|---|---|---|---|
+| Before | 1,126 | 16.7 / 22.8 | 6.7 | 1.20 | 22.6 | 0.17 / 0.17 / 0.17 | 679 |
+| **Batched** | 1,127 | 16.7 / 22.3 | 6.8 | 0.94 | 21.7 | 0.17 / 0.17 / 0.17 | 681 |
+
+The demo places 59 instances a frame and releases 39 (half of M's). Frame P95 −2%, scatter P95 −22%, manager P95 and
+memory the same; no regression. One HISM is compacted per run.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 573/573 headless (570 + the
+three above) and 573/573 in the editor with the GPU tests running (the generation parity tests,
+`Meshing.MarchingCubes.CPUvsGPU`, `GPUNoiseGeneratorAsync`, `InfinitePlane.GPUConsistency`), no device loss. The 108
+GPU parity lines are CRC-identical to G44's (no generation change). The scatter reload, boundary, edit-reader, line-top
+and density tests pass unchanged.
+
+**New findings** (in §14.1), from the same traces:
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames. Not relief-dependent | Open (not traced) |
+| G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (6-13 frames) | Open (callers not traced) |
+| G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7 (G52): M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, in both of this A/B's modes, the voxel data's peak 812-859 MB. Settled figures did not move (the small planet 476-480 MB against P6.5's 484). Something merged since G52 (G56-G60, the demo caves' retune in §19.15, G44) holds more voxel data in flight; under D3's 1.5 GB | Open: bisect the merges since G52 |
+
+**Left as they were:**
+
+- What is left of M's and L's manager P95 over the small planet's land route (+15% and +18%). It is the balanced-LOD
+  cache's rebuild (§20.4) and scatter's instance flush, which places 2.3-2.6 times the instances on km relief: the
+  content's density, which batching makes cheap but not fewer.
+- Placements still rebuild a HISM's tree (a recycled instance moves). Only an ISM with GPU-scene instance culling and
+  LOD selection avoids that, at the cost of changing how grass culls and LODs; not tried.
+- Grass registers with the distance-field scene. Each tree build's proxy recreation still re-registers its HISM, now
+  smaller and less often. Turning `bAffectDistanceFieldLighting` off for grass types would remove it at a lighting
+  cost: a content decision, not tried.
+- PIE frame times here include the editor's own Slate, 5-7 ms a frame; a packaged game has no editor UI.
+
+G42 is fixed.
