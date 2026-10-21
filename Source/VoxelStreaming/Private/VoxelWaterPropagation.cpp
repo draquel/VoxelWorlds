@@ -441,10 +441,14 @@ int32 UVoxelWaterPropagation::ProcessPropagation(int32 MaxVoxelsPerFrame)
 
 	int32 ProcessedThisFrame = 0;
 
-	// Group this frame's water flags into one operation, as a system edit; the source the caller had is kept.
+	// Group this frame's water flags into one operation, as a system edit; the source the caller had is kept. It stays out
+	// of the undo history (G60): the flood follows from the edit that let the water in, so undoing that edit puts its voxels
+	// back as they were, flood included, and redoing it floods them again. In the history it was an undo step of its own
+	// (the first undo after a dig took the flood), and since the flood replaces each voxel's edit with a Set, its undo
+	// removed the dig at the voxels it reached.
 	const EEditSource PreviousSource = EditManager->GetEditSource();
 	EditManager->SetEditSource(EEditSource::System);
-	EditManager->BeginEditOperation(TEXT("Water Propagation"));
+	EditManager->BeginEditOperation(TEXT("Water Propagation"), /*bAddToUndoHistory=*/false);
 	bApplyingWater = true;
 
 	while (QueueHead < BFSQueue.Num() && ProcessedThisFrame < MaxVoxelsPerFrame && TotalPropagated < MaxPropagationVoxels)
