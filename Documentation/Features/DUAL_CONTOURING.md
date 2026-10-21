@@ -141,7 +141,7 @@ box, each seam sampler's `GetBox`: skipped, not clamped). LOD 0's vertex normal 
 (`CalculateShadingNormal`, the samplers' `ShadingNormal`). The QEF keeps the central difference, so no vertex moves. Where
 the voxels on the ramp do not span three directions (the surface through a voxel layer) the central difference is used,
 which is exact there. `voxel.Mesh.CrossingGradientNormals 0` restores the central difference (shared with Marching Cubes).
-See `WORLD_MODES_REVIEW_PLAN.md` §20.11.
+See `WORLD_MODES_REVIEW_PLAN.md` §20.12.
 
 **Boundary handling**: The mesher samples beyond chunk bounds using neighbor face, edge, and corner data from `FVoxelMeshingRequest` — the same data structures used by the Marching Cubes mesher.
 

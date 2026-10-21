@@ -182,7 +182,7 @@ is now `CalculateShadingNormal`: the density gradient fitted to the voxels on th
 difference read the saturated rock under the surface and tilted a slope's normal by 1.0-1.8 times with the surface's phase
 in the voxel layer (bands; G62). Where the voxels on the ramp do not span three directions it is used, exact there.
 `voxel.Mesh.CrossingGradientNormals 0` restores it (shared with Dual Contouring; the GPU shader the same). See
-`WORLD_MODES_REVIEW_PLAN.md` §20.11.
+`WORLD_MODES_REVIEW_PLAN.md` §20.12.
 
 **Normals at a stride (G61).** Generated density saturates a voxel either side of the surface
 (`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them:
