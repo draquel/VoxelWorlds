@@ -130,6 +130,19 @@ same op sequence, so ring recomputes stay bit-identical. `voxel.Mesh.VoxelShadin
 vertex normals for A/B (the cvar also covers Marching Cubes' equivalent, G61); `voxel.Mesh.ScaleClampedGradients 0` the
 unscaled clamp.
 
+**Shading normals at voxel resolution (G62).** The central difference about the voxel a crossing floors to reads the
+saturated rock under a surface a fraction of a voxel above that voxel, so its normals tilted by 1.0-1.8 times the slope
+with the surface's phase in the voxel layer: bands a voxel layer apart, and on a planet errors of a degree or more on flat
+ground. The shading normals are instead the density gradient fitted to the voxels around the crossing that are on the
+ramp (`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block around the crossing's nearest voxel,
+0 < density < 255, tent weights, a free offset; exact for any plane), over the voxels the view holds (the interior pass's
+box, each seam sampler's `GetBox`: skipped, not clamped). LOD 0's vertex normal sums them at the cell's crossings
+(`FDCEdgeCrossing::ShadingNormal`), and G44's voxel-cell normal and G17's fallback vertex use them too
+(`CalculateShadingNormal`, the samplers' `ShadingNormal`). The QEF keeps the central difference, so no vertex moves. Where
+the voxels on the ramp do not span three directions (the surface through a voxel layer) the central difference is used,
+which is exact there. `voxel.Mesh.CrossingGradientNormals 0` restores the central difference (shared with Marching Cubes).
+See `WORLD_MODES_REVIEW_PLAN.md` §20.11.
+
 **Boundary handling**: The mesher samples beyond chunk bounds using neighbor face, edge, and corner data from `FVoxelMeshingRequest` — the same data structures used by the Marching Cubes mesher.
 
 ### Pass 2: QEF Vertex Solve

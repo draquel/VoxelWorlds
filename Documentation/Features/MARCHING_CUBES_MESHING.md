@@ -174,13 +174,21 @@ float gz = GetDensity(x, y, z+1) - GetDensity(x, y, z-1);
 FVector3f Normal = FVector3f(-gx, -gy, -gz).GetSafeNormal();
 ```
 
-That is LOD 0's vertex normal (`CalculateGradientNormal`, the vertex floored to a voxel).
+That is the central difference before G62 (`CalculateGradientNormal`, the vertex floored to a voxel). LOD 0's vertex normal
+is now `CalculateShadingNormal`: the density gradient fitted to the voxels on the ramp around the vertex
+(`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block around its nearest voxel, 0 < density <
+255, tent weights, a free offset, so a geomorphed vertex off the surface is fitted too), over the voxels the request holds
+(`IsVoxelHeld`: the chunk, or one voxel past it where that face's plane, edge's strip or corner is present). The central
+difference read the saturated rock under the surface and tilted a slope's normal by 1.0-1.8 times with the surface's phase
+in the voxel layer (bands; G62). Where the voxels on the ramp do not span three directions it is used, exact there.
+`voxel.Mesh.CrossingGradientNormals 0` restores it (shared with Dual Contouring; the GPU shader the same). See
+`WORLD_MODES_REVIEW_PLAN.md` §20.11.
 
 **Normals at a stride (G61).** Generated density saturates a voxel either side of the surface
 (`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them:
 at LOD 2 each gradient component is a sign and the normal snaps toward one of the 26 cube directions (a bright ring on
-planets, streaks on heightmap slopes). So at stride > 1 an edge vertex's normal is LOD 0's at the voxel crossing on its
-edge nearest it (`CalculateEdgeShadingNormal`: the edge walked from its min end in voxel steps). It is a function of the
+planets, streaks on heightmap slopes). So at stride > 1 an edge vertex's normal is LOD 0's (`CalculateShadingNormal`) at
+the voxel crossing on its edge nearest it (`CalculateEdgeShadingNormal`: the edge walked from its min end in voxel steps). It is a function of the
 edge alone, so every cell, seam band and transition ribbon sharing the edge gives the vertex the same normal, and the
 boundary geomorph (which moves vertices) does not change it. Positions are unchanged. The GPU shader
 (`MarchingCubesMeshGeneration.usf`) does the same. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual Contouring's
