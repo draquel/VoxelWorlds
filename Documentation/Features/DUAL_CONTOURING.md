@@ -111,9 +111,23 @@ Each cell owns three edges emanating from its minimum corner in the +X, +Y, and 
    float t = (IsoLevel - D0) / (D1 - D0);
    FVector3f CrossPos = P0 + (P1 - P0) * t;
    ```
-3. Compute the surface gradient normal at the crossing point via central differences
+3. Compute the surface gradient normal at the crossing point via central differences, the taps `Stride` voxels either
+   side (the QEF's plane normal). In the Interior domain and in every seam sampler the taps clamp into the voxels the job
+   holds ("the terrain continues": no neighbour dependence), and a clamped axis's one-sided difference is scaled back to
+   the full span (`VoxelDCGradient::ClampedGradientNormal`; unscaled it lost up to half its weight and drew lines of shading
+   along chunk faces, G25)
 4. Store hermite data: `{Position, Normal, bValid}` in the edge crossings array
 5. Append the edge index to a compact valid-edge list (used by Pass 3)
+
+**Normals at a stride (G44).** Generated density saturates a voxel either side of the surface
+(`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them: at
+LOD 2 each gradient component is a sign and the normal snaps toward one of the 26 cube directions. The QEF keeps these
+normals (no vertex moves), but the **vertex normal** of a strided cell is LOD 0's: the cell finds where the surface crosses
+each of its strided edges at voxel resolution (`VoxelDCShading::FindVoxelCrossing`), and its normal is LOD 0's vertex
+normal of the voxel cell inside it next to the crossing nearest the vertex (`VoxelCellNormal`: the stride-1 gradient
+normals at that voxel cell's crossings, averaged). The interior pass and the seam template (`ComputeCellVertex`) run the
+same op sequence, so ring recomputes stay bit-identical. `voxel.Mesh.VoxelShadingNormals 0` restores the stride-scale
+vertex normals for A/B; `voxel.Mesh.ScaleClampedGradients 0` the unscaled clamp.
 
 **Boundary handling**: The mesher samples beyond chunk bounds using neighbor face, edge, and corner data from `FVoxelMeshingRequest` — the same data structures used by the Marching Cubes mesher.
 
@@ -134,7 +148,8 @@ For each cell in the grid:
    };
    ```
 2. Add each valid crossing's plane (`Normal . (v - Point) = 0`) to the QEF accumulator
-3. Solve the QEF (see [QEF Solver](#qef-solver) section)
+3. Solve the QEF (see [QEF Solver](#qef-solver) section); the vertex normal is the crossings' normals averaged at stride
+   1, and at a stride LOD 0's normal at the voxel crossing nearest the vertex (Pass 1's note)
 4. Assign material and biome via nearest-solid-voxel voting across the cell's 8 corners
 5. Store the result in the cell vertices array
 

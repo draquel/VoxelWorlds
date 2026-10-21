@@ -20,6 +20,7 @@
 #include "VoxelData.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelStreamingBenchmark.h"
+#include "HAL/IConsoleManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -113,6 +114,8 @@ namespace VoxelPlanetStreamingTestUtils
 		FVector Viewer = FVector::ZeroVector;
 		float VoxelSize = PlanetStreamVoxelSize;
 		float ChunkWorld = PlanetStreamChunkWorld;
+		float Relief = 1600.0f;  // the terrain's height scale (planet and plane), set before Start
+		int32 Octaves = 3;       // the terrain noise's octaves, set before Start
 
 		void Start(const TCHAR* WorldName, const FVector& ViewerDirection, float ViewerAltitude)
 		{
@@ -120,7 +123,7 @@ namespace VoxelPlanetStreamingTestUtils
 			Config->WorldMode = EWorldMode::SphericalPlanet;
 			Config->WorldOrigin = FVector::ZeroVector;
 			Config->WorldRadius = PlanetStreamRadius;
-			Config->PlanetHeightScale = 1600.0f; // terrain +-800
+			Config->PlanetHeightScale = Relief; // terrain +-800 by default
 			Config->BaseHeight = 0.0f;
 			Config->PlanetMaxTerrainHeight = 1000.0f;
 			Config->PlanetMaxTerrainDepth = 1000.0f;
@@ -144,7 +147,7 @@ namespace VoxelPlanetStreamingTestUtils
 			Config->WaterLevel = 1.0e9f;        // the Z plane far above everything: it must play no part
 			Config->NoiseParams.Seed = 9001;
 			Config->NoiseParams.Frequency = 0.0004f;
-			Config->NoiseParams.Octaves = 3;
+			Config->NoiseParams.Octaves = Octaves;
 			StartManager();
 
 			// Stream from a viewer above the surface along ViewerDirection.
@@ -165,7 +168,7 @@ namespace VoxelPlanetStreamingTestUtils
 			ChunkWorld = 16 * VoxelSize;
 			Config->WorldMode = EWorldMode::InfinitePlane;
 			Config->WorldOrigin = FVector::ZeroVector;
-			Config->HeightScale = 1600.0f;
+			Config->HeightScale = Relief;
 			Config->BaseHeight = 0.0f;
 			Config->MeshingMode = EMeshingMode::DualContouring;
 			Config->bEnableLOD = true;
@@ -185,7 +188,7 @@ namespace VoxelPlanetStreamingTestUtils
 			Config->bEnableWaterLevel = false;
 			Config->NoiseParams.Seed = 9001;
 			Config->NoiseParams.Frequency = 0.0004f;
-			Config->NoiseParams.Octaves = 3;
+			Config->NoiseParams.Octaves = Octaves;
 			StartManager();
 
 			Viewer = FVector(X, Y, Manager->GetGeneratedSurfaceHeight(X, Y) + ViewerAltitude);
@@ -803,6 +806,449 @@ bool FVoxelBenchPlanetClimbRouteTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The climbed viewer's altitude"), FMath::IsNearlyEqual(Climbed.ViewerAltitude, GroundAltitude + 4000.0, 1.0));
 	TestTrue(TEXT("Radial layers up high"), Climbed.bRadialLayers);
 	Test.Stop();
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G44 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.8): Dual Contouring's vertex normals at LOD 1 and 2 against the analytic
+// surface's, as LOD 0's are. The generated density saturates a voxel either side of the surface, so a gradient with taps
+// a stride apart reads 0 or 255 and snapped LOD 2's normals toward the cube directions: on a planet a ring lit brighter
+// than the LOD 0/1 centre and the far field (whose normals are the analytic surface's), on a heightmap snapped slopes.
+// ---------------------------------------------------------------------------
+
+namespace VoxelPlanetStreamingTestUtils
+{
+	/** Per LOD: how the rendered vertex normals and triangles compare with the analytic surface's normals (G44). */
+	struct FLODNormalStats
+	{
+		double FaceLit[3][4] = {};      // per LOD and class (0 interior, 1-3 within 1.5 cells of an X, Y or Z chunk face)
+		double FaceLitAnalytic[3][4] = {};
+		int32 FaceTris[3][4] = {};
+
+		/** Brightness (as Brightness) of the LOD's triangles in a class: 0 interior, 1-3 along X, Y or Z chunk faces. */
+		double FaceBrightness(int32 LOD, int32 Class) const
+		{
+			return FaceLitAnalytic[LOD][Class] > 0.0 ? FaceLit[LOD][Class] / FaceLitAnalytic[LOD][Class] - 1.0 : 0.0;
+		}
+
+		FString DescribeFaces() const
+		{
+			FString Out;
+			for (int32 LOD = 0; LOD < 3; ++LOD)
+			{
+				Out += FString::Printf(TEXT("%sLOD %d:"), LOD > 0 ? TEXT("; ") : TEXT(""), LOD);
+				for (int32 Class = 0; Class < 4; ++Class)
+				{
+					static const TCHAR* Names[4] = { TEXT("interior"), TEXT("X faces"), TEXT("Y faces"), TEXT("Z faces") };
+					Out += FString::Printf(TEXT(" %s %d tris %+.2f%%"), Names[Class], FaceTris[LOD][Class], 100.0 * FaceBrightness(LOD, Class));
+				}
+			}
+			return Out;
+		}
+		int32 Vertices[3] = { 0, 0, 0 };
+		int32 Skipped = 0;              // farther from the analytic surface along up than two of their cells (steep slopes)
+		double SumAngle[3] = { 0.0, 0.0, 0.0 };
+		FVector2D SumTangent[3] = { FVector2D::ZeroVector, FVector2D::ZeroVector, FVector2D::ZeroVector };
+		double SumAreaLit[3] = { 0.0, 0.0, 0.0 };         // triangle area x max(0, N.L), N the normalized sum of its vertex normals
+		double SumAreaLitAnalytic[3] = { 0.0, 0.0, 0.0 }; // triangle area x max(0, N.L), N the analytic normal at its centroid
+
+		int32 TotalVertices() const { return Vertices[0] + Vertices[1] + Vertices[2]; }
+
+		/** Mean angle between a vertex normal and the analytic normal (degrees). */
+		double MeanAngle(int32 LOD) const { return Vertices[LOD] > 0 ? SumAngle[LOD] / Vertices[LOD] : 0.0; }
+
+		/** The systematic tilt: the mean of (normal - analytic normal) across local up, east and north (degrees). */
+		double TiltBias(int32 LOD) const
+		{
+			return Vertices[LOD] > 0 ? FMath::RadiansToDegrees(FMath::Asin(FMath::Min(1.0, (SumTangent[LOD] / Vertices[LOD]).Size()))) : 0.0;
+		}
+
+		/**
+		 * How bright the LOD's triangles light against the analytic surface under them, per unit area (the Lambert term
+		 * with the interpolated normal at each triangle's centroid, under the test's sun): 0 = the same, +0.05 = 5% brighter.
+		 */
+		double Brightness(int32 LOD) const { return SumAreaLitAnalytic[LOD] > 0.0 ? SumAreaLit[LOD] / SumAreaLitAnalytic[LOD] - 1.0 : 0.0; }
+
+		FString Describe() const
+		{
+			FString Out;
+			for (int32 LOD = 0; LOD < 3; ++LOD)
+			{
+				Out += FString::Printf(TEXT("%sLOD %d: %d vertices, mean %.2f deg, tilt %.2f deg, brightness %+.2f%%"),
+					LOD > 0 ? TEXT("; ") : TEXT(""), LOD, Vertices[LOD], MeanAngle(LOD), TiltBias(LOD), 100.0 * Brightness(LOD));
+			}
+			return Out + FString::Printf(TEXT("; %d skipped"), Skipped);
+		}
+	};
+
+	/**
+	 * Every vertex and triangle of the recording renderer's chunk meshes and seam buckets (seam rings and slabs carry LOD 1
+	 * and 2 geometry too), sorted by the LOD of the chunk it lies in, against GetSurfacePointAt's normal along its up-line.
+	 */
+	FLODNormalStats MeasureLODNormals(const FPlanetStreamingWorld& World, const FVector& Sun)
+	{
+		FLODNormalStats Stats;
+		const double ChunkWorld = World.ChunkWorld;
+		auto LODAt = [&](const FVector& P) -> int32
+		{
+			const FIntVector Home(FMath::FloorToInt(P.X / ChunkWorld), FMath::FloorToInt(P.Y / ChunkWorld), FMath::FloorToInt(P.Z / ChunkWorld));
+			const int32* LOD = World.Renderer.ChunkLODs.Find(Home);
+			return (LOD && *LOD >= 0 && *LOD <= 2) ? *LOD : -1;
+		};
+		auto AddMesh = [&](const FChunkMeshData& Mesh, const FIntVector& Coord)
+		{
+			const FVector Offset = FVector(Coord) * ChunkWorld;
+			const int32 Num = FMath::Min(Mesh.Positions.Num(), Mesh.Normals.Num());
+			for (int32 i = 0; i < Num; ++i)
+			{
+				const FVector P = Offset + FVector(Mesh.Positions[i]);
+				const int32 LOD = LODAt(P);
+				if (LOD < 0)
+				{
+					continue;
+				}
+				const FVoxelTerrainSurfacePoint Surface = World.Manager->GetSurfacePointAt(P);
+				const FVector Up = World.Manager->GetUpVectorAt(P);
+				if (FMath::Abs(FVector::DotProduct(P - Surface.Position, Up)) > 2.0 * World.VoxelSize * (1 << LOD))
+				{
+					++Stats.Skipped;
+					continue;
+				}
+				const FVector N = FVector(Mesh.Normals[i]).GetSafeNormal();
+				const FVector A = Surface.Normal.GetSafeNormal();
+				FVector East = FVector::CrossProduct(FVector::UpVector, Up).GetSafeNormal();
+				if (East.IsNearlyZero())
+				{
+					East = FVector::ForwardVector;
+				}
+				const FVector North = FVector::CrossProduct(Up, East);
+				const FVector D = N - A;
+				++Stats.Vertices[LOD];
+				Stats.SumAngle[LOD] += FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(N, A), -1.0, 1.0)));
+				Stats.SumTangent[LOD] += FVector2D(FVector::DotProduct(D, East), FVector::DotProduct(D, North));
+			}
+			for (int32 i = 0; i + 2 < Mesh.Indices.Num(); i += 3)
+			{
+				const int32 I[3] = { static_cast<int32>(Mesh.Indices[i]), static_cast<int32>(Mesh.Indices[i + 1]), static_cast<int32>(Mesh.Indices[i + 2]) };
+				if (I[0] >= Num || I[1] >= Num || I[2] >= Num)
+				{
+					continue;
+				}
+				const FVector P0 = Offset + FVector(Mesh.Positions[I[0]]);
+				const FVector P1 = Offset + FVector(Mesh.Positions[I[1]]);
+				const FVector P2 = Offset + FVector(Mesh.Positions[I[2]]);
+				const FVector Centroid = (P0 + P1 + P2) / 3.0;
+				const int32 LOD = LODAt(Centroid);
+				const double Area = 0.5 * FVector::CrossProduct(P1 - P0, P2 - P0).Size();
+				if (LOD < 0 || Area <= 0.0)
+				{
+					continue;
+				}
+				const FVector N = (FVector(Mesh.Normals[I[0]]) + FVector(Mesh.Normals[I[1]]) + FVector(Mesh.Normals[I[2]])).GetSafeNormal();
+				const FVector A = World.Manager->GetSurfacePointAt(Centroid).Normal.GetSafeNormal();
+				Stats.SumAreaLit[LOD] += Area * FMath::Max(0.0, FVector::DotProduct(N, Sun));
+				Stats.SumAreaLitAnalytic[LOD] += Area * FMath::Max(0.0, FVector::DotProduct(A, Sun));
+				// The chunk face nearest the centroid, if within 1.5 of the LOD's cells (seam slabs and the rings either side).
+				int32 Class = 0;
+				double Nearest = World.VoxelSize * (1 << LOD) * 1.5;
+				for (int32 Axis = 0; Axis < 3; ++Axis)
+				{
+					const double Local = Centroid[Axis] - FMath::FloorToDouble(Centroid[Axis] / ChunkWorld) * ChunkWorld;
+					const double Dist = FMath::Min(Local, ChunkWorld - Local);
+					if (Dist < Nearest)
+					{
+						Nearest = Dist;
+						Class = Axis + 1;
+					}
+				}
+				++Stats.FaceTris[LOD][Class];
+				Stats.FaceLit[LOD][Class] += Area * FMath::Max(0.0, FVector::DotProduct(N, Sun));
+				Stats.FaceLitAnalytic[LOD][Class] += Area * FMath::Max(0.0, FVector::DotProduct(A, Sun));
+			}
+		};
+		for (const TPair<FIntVector, FChunkMeshData>& Chunk : World.Renderer.ChunkMeshes)
+		{
+			AddMesh(Chunk.Value, Chunk.Key);
+		}
+		for (const TPair<FIntVector, FChunkMeshData>& Bucket : World.Renderer.SeamBuckets)
+		{
+			AddMesh(Bucket.Value, Bucket.Key);
+		}
+		return Stats;
+	}
+
+	/**
+	 * G44's bound where the LOD 2 mesh resolves the terrain (gentle relief), so what differs from LOD 0 is the normal
+	 * estimator: LOD 1 and 2 vertex normals tilted at most 1.5 degrees more than LOD 0's and their triangles' brightness
+	 * within LOD 0's error plus 2% (the lighting step G44 is about), and their mean angle from the analytic normals within
+	 * half again LOD 0's plus 5 degrees (a coarse vertex's normal is a voxel cell's up to a cell away from it, so its scatter
+	 * grows with the slopes' curvature: 7 degrees at LOD 2 on the plane's 27-degree hills against 2.6 at LOD 0).
+	 */
+	bool LODNormalsMatch(const FLODNormalStats& Stats, FString& OutWhy)
+	{
+		for (int32 LOD = 1; LOD < 3; ++LOD)
+		{
+			if (Stats.MeanAngle(LOD) > Stats.MeanAngle(0) * 1.5 + 5.0)
+			{
+				OutWhy = FString::Printf(TEXT("LOD %d's mean angle %.2f against LOD 0's %.2f"), LOD, Stats.MeanAngle(LOD), Stats.MeanAngle(0));
+				return false;
+			}
+			if (Stats.TiltBias(LOD) > Stats.TiltBias(0) + 1.5)
+			{
+				OutWhy = FString::Printf(TEXT("LOD %d tilts %.2f deg (LOD 0 %.2f)"), LOD, Stats.TiltBias(LOD), Stats.TiltBias(0));
+				return false;
+			}
+			if (FMath::Abs(Stats.Brightness(LOD)) > FMath::Abs(Stats.Brightness(0)) + 0.02)
+			{
+				OutWhy = FString::Printf(TEXT("LOD %d lights %+.2f%% against LOD 0's %+.2f%%"), LOD, 100.0 * Stats.Brightness(LOD), 100.0 * Stats.Brightness(0));
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** Sets voxel.Mesh.VoxelShadingNormals at console priority for a scope (tests set cvars at console priority). */
+	struct FScopedVoxelShadingNormals
+	{
+		IConsoleVariable* Var = nullptr;
+		int32 Previous = 1;
+
+		explicit FScopedVoxelShadingNormals(int32 Value)
+		{
+			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelShadingNormals"));
+			if (Var)
+			{
+				Previous = Var->GetInt();
+				Var->Set(Value, ECVF_SetByConsole);
+			}
+		}
+
+		~FScopedVoxelShadingNormals()
+		{
+			if (Var)
+			{
+				Var->Set(Previous, ECVF_SetByConsole);
+			}
+		}
+	};
+
+	/**
+	 * Streams one place with the normals before G44 (voxel.Mesh.VoxelShadingNormals 0) and as they are (1) and measures
+	 * both. Positions are the same either way (the QEF keeps the stride-scale normals), so the vertex counts must agree.
+	 * With gentle relief (bStrictBound) the current normals meet LODNormalsMatch and the old ones do not; with the default
+	 * relief, whose finest octave LOD 2 cannot resolve, LOD 1 and 2 come closer to the analytic normals than before.
+	 */
+	void RunLODNormalsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
+		const FVector& Sun, float Relief, int32 Octaves, bool bStrictBound)
+	{
+		FLODNormalStats Before, After;
+		for (int32 Mode = 0; Mode < 2; ++Mode)
+		{
+			FScopedVoxelShadingNormals Scoped(Mode);
+			FPlanetStreamingWorld World;
+			World.Relief = Relief;
+			World.Octaves = Octaves;
+			Start(World);
+			Test.TestTrue(*FString::Printf(TEXT("%s (normals %d): the pipeline settled"), Place, Mode), World.Settle());
+			(Mode == 0 ? Before : After) = MeasureLODNormals(World, Sun);
+			World.Stop();
+		}
+		Test.AddInfo(FString::Printf(TEXT("%s, before G44: %s"), Place, *Before.Describe()));
+		Test.AddInfo(FString::Printf(TEXT("%s, after: %s"), Place, *After.Describe()));
+		for (int32 LOD = 0; LOD < 3; ++LOD)
+		{
+			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d vertices measured"), Place, LOD), After.Vertices[LOD] > 500);
+			Test.TestEqual(*FString::Printf(TEXT("%s: LOD %d vertices the same with either normals (no vertex moves)"), Place, LOD),
+				After.Vertices[LOD], Before.Vertices[LOD]);
+		}
+		Test.TestTrue(*FString::Printf(TEXT("%s: at most 0.1%% of vertices off the analytic surface's up-line by two cells (%d)"), Place, After.Skipped),
+			After.Skipped * 1000 <= After.TotalVertices());
+
+		if (bStrictBound)
+		{
+			FString Why;
+			const bool bAfterMatches = LODNormalsMatch(After, Why);
+			Test.TestTrue(*FString::Printf(TEXT("%s: LOD 1 and 2 normals match LOD 0's against the analytic surface %s"), Place, *Why), bAfterMatches);
+			FString WhyBefore;
+			const bool bBeforeMatches = LODNormalsMatch(Before, WhyBefore);
+			Test.TestFalse(*FString::Printf(TEXT("%s: the stride-scale normals before G44 fail the bound"), Place), bBeforeMatches);
+			Test.AddInfo(FString::Printf(TEXT("%s, before G44 fails on: %s"), Place, *WhyBefore));
+			return;
+		}
+		// Brightness is reported, not bounded, here: with an octave finer than LOD 2's cells it is the coarse triangles'
+		// interpolation (the far field's quads near the window do the same with the analytic normals), not the estimator.
+		for (int32 LOD = 1; LOD < 3; ++LOD)
+		{
+			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d's mean angle %.2f below the %.2f before G44"), Place, LOD, After.MeanAngle(LOD), Before.MeanAngle(LOD)),
+				After.MeanAngle(LOD) < Before.MeanAngle(LOD));
+		}
+	}
+}
+
+/**
+ * G44 on a planet: from viewers at 45N 20E (G44's site; up far from every cube axis and diagonal) and on the equator, with
+ * gentle relief (+-200, two octaves: LOD 2 resolves it) LOD 1 and 2 vertex normals (chunk meshes and seam buckets) are as
+ * close to the analytic surface's as LOD 0's, with no tilt and no brightness step under the local noon sun, which
+ * voxel.Mesh.VoxelShadingNormals 0 (the stride-scale normals before G44) fails; with the streaming tests' relief (+-800,
+ * three octaves) they come closer to LOD 0's than before.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingLODNormalsTest,
+	"VoxelWorlds.Streaming.Planet.LODNormals",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingLODNormalsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Direction = [](double LatDeg, double LonDeg)
+	{
+		const double Lat = FMath::DegreesToRadians(LatDeg);
+		const double Lon = FMath::DegreesToRadians(LonDeg);
+		return FVector(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	};
+	const TPair<const TCHAR*, FVector> Places[] = {
+		{ TEXT("45N 20E"), Direction(45.0, 20.0) },
+		{ TEXT("equator"), Direction(1.0, 1.5) },
+	};
+	for (const TPair<const TCHAR*, FVector>& Place : Places)
+	{
+		// The sun at local noon with no axial tilt: over the equator at the place's longitude.
+		const FVector Sun = FVector(Place.Value.X, Place.Value.Y, 0.0).GetSafeNormal();
+		auto Start = [&Place](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetLODNormalsTestWorld"), Place.Value, 300.0f); };
+		RunLODNormalsPlace(*this, *FString::Printf(TEXT("%s, gentle"), Place.Key), Start, Sun, 400.0f, 2, true);
+		RunLODNormalsPlace(*this, Place.Key, Start, Sun, 1600.0f, 3, false);
+	}
+	return true;
+}
+
+/**
+ * G44 on a heightmap world: the plane of the closed-surface test (chunk 16, voxel 100, three LOD bands) under an overhead
+ * sun, with gentle hills (+-200, one octave of 25 voxels, which LOD 2 resolves: LOD 1 and 2 normals as close to the
+ * analytic surface's as LOD 0's, which the stride-scale normals before G44 fail) and with the closed-surface test's
+ * (closer to the analytic normals than before).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingLODNormalsTest,
+	"VoxelWorlds.Streaming.Plane.LODNormals",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneStreamingLODNormalsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneLODNormalsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunLODNormalsPlace(*this, TEXT("plane east, gentle"), Start, FVector::UpVector, 400.0f, 1, true);
+	RunLODNormalsPlace(*this, TEXT("plane east"), Start, FVector::UpVector, 1600.0f, 3, false);
+	return true;
+}
+
+namespace VoxelPlanetStreamingTestUtils
+{
+	/** Sets voxel.Mesh.ScaleClampedGradients at console priority for a scope. */
+	struct FScopedScaleClampedGradients
+	{
+		IConsoleVariable* Var = nullptr;
+		int32 Previous = 1;
+
+		explicit FScopedScaleClampedGradients(int32 Value)
+		{
+			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.ScaleClampedGradients"));
+			if (Var)
+			{
+				Previous = Var->GetInt();
+				Var->Set(Value, ECVF_SetByConsole);
+			}
+		}
+
+		~FScopedScaleClampedGradients()
+		{
+			if (Var)
+			{
+				Var->Set(Previous, ECVF_SetByConsole);
+			}
+		}
+	};
+
+	/** Triangles along each chunk face axis light like the interior ones at every LOD (within 3%), where both have 200. */
+	bool ChunkFacesMatch(const FLODNormalStats& Stats, FString& OutWhy)
+	{
+		for (int32 LOD = 0; LOD < 3; ++LOD)
+		{
+			if (Stats.FaceTris[LOD][0] < 200)
+			{
+				continue;
+			}
+			for (int32 Class = 1; Class < 4; ++Class)
+			{
+				if (Stats.FaceTris[LOD][Class] >= 200
+					&& FMath::Abs(Stats.FaceBrightness(LOD, Class) - Stats.FaceBrightness(LOD, 0)) > 0.03)
+				{
+					OutWhy = FString::Printf(TEXT("LOD %d's triangles along %c faces light %+.2f%% against the interior's %+.2f%%"),
+						LOD, TEXT("XYZ")[Class - 1], 100.0 * Stats.FaceBrightness(LOD, Class), 100.0 * Stats.FaceBrightness(LOD, 0));
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+}
+
+/**
+ * G25 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.8): no line of shading along chunk faces. A mesh job's gradient taps clamp at
+ * the edge of its voxels ("the terrain continues": no neighbour dependence), which made the clamped axis's difference
+ * one-sided and up to half weight, so the normals of the cells along a chunk face leaned away from it: on a planet at 45
+ * degrees, where the surface crosses every chunk face obliquely, dark lines along X and Y faces and bright ones along Z
+ * faces under the noon sun (stronger at LOD 1 and 2 once their normals came from voxel-scale gradients, G44). With the
+ * clamped difference scaled to the full span (voxel.Mesh.ScaleClampedGradients 1) triangles along X, Y and Z faces light
+ * like the interior's at LOD 0, 1 and 2 on gentle relief at 45N 20E and on the equator; without it (0) they do not.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingChunkFaceShadingTest,
+	"VoxelWorlds.Streaming.Planet.ChunkFaceShading",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingChunkFaceShadingTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Direction = [](double LatDeg, double LonDeg)
+	{
+		const double Lat = FMath::DegreesToRadians(LatDeg);
+		const double Lon = FMath::DegreesToRadians(LonDeg);
+		return FVector(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	};
+	const TPair<const TCHAR*, FVector> Places[] = {
+		{ TEXT("45N 20E"), Direction(45.0, 20.0) },
+		{ TEXT("equator"), Direction(1.0, 1.5) },
+	};
+	bool bAnyBeforeFails = false;
+	for (const TPair<const TCHAR*, FVector>& Place : Places)
+	{
+		const FVector Sun = FVector(Place.Value.X, Place.Value.Y, 0.0).GetSafeNormal();
+		FLODNormalStats Before, After;
+		for (int32 Mode = 0; Mode < 2; ++Mode)
+		{
+			FScopedScaleClampedGradients Scoped(Mode);
+			FPlanetStreamingWorld World;
+			World.Relief = 400.0f;
+			World.Octaves = 2;
+			World.Start(TEXT("VoxelPlanetChunkFaceTestWorld"), Place.Value, 300.0f);
+			TestTrue(*FString::Printf(TEXT("%s (scale %d): the pipeline settled"), Place.Key, Mode), World.Settle());
+			(Mode == 0 ? Before : After) = MeasureLODNormals(World, Sun);
+			World.Stop();
+		}
+		AddInfo(FString::Printf(TEXT("%s, unscaled clamp: %s"), Place.Key, *Before.DescribeFaces()));
+		AddInfo(FString::Printf(TEXT("%s, scaled: %s"), Place.Key, *After.DescribeFaces()));
+		for (int32 LOD = 0; LOD < 3; ++LOD)
+		{
+			TestTrue(*FString::Printf(TEXT("%s: LOD %d has interior triangles to compare with"), Place.Key, LOD), After.FaceTris[LOD][0] >= 200);
+		}
+		FString Why;
+		const bool bAfterMatches = ChunkFacesMatch(After, Why);
+		TestTrue(*FString::Printf(TEXT("%s: triangles along chunk faces light like the interior's %s"), Place.Key, *Why), bAfterMatches);
+		FString WhyBefore;
+		bAnyBeforeFails |= !ChunkFacesMatch(Before, WhyBefore);
+		AddInfo(FString::Printf(TEXT("%s, unscaled clamp: %s"), Place.Key, WhyBefore.IsEmpty() ? TEXT("within the bound") : *WhyBefore));
+	}
+	TestTrue(TEXT("The unscaled clamp shows lines along chunk faces"), bAnyBeforeFails);
 	return true;
 }
 

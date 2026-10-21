@@ -154,7 +154,7 @@ private:
 	struct FDCEdgeCrossing
 	{
 		FVector3f Position;  // World-space crossing point on edge
-		FVector3f Normal;    // Surface gradient normal at crossing
+		FVector3f Normal;    // Surface gradient normal at crossing (at the cell's stride: the QEF's plane normal)
 		bool bValid = false; // Whether this edge has a crossing
 	};
 
@@ -162,7 +162,7 @@ private:
 	struct FDCCellVertex
 	{
 		FVector3f Position;     // QEF-solved vertex position
-		FVector3f Normal;       // Averaged normal from edge crossings
+		FVector3f Normal;       // Averaged normal from edge crossings (at a stride: LOD 0's at the voxel crossing nearest the vertex, G44)
 		uint8 EmittedMaterialID = 0; // Material of the primary emission (valid when MeshVertexIndex >= 0)
 		uint8 EmittedBiomeID = 0;    // Biome of the primary emission (valid when MeshVertexIndex >= 0)
 		int32 MeshVertexIndex = -1;  // Primary emission index in output FChunkMeshData (-1 = not emitted yet)

@@ -5,6 +5,248 @@
 #include "QEFSolver.h"
 #include "HAL/IConsoleManager.h"
 
+static TAutoConsoleVariable<int32> CVarDCVoxelShadingNormals(
+	TEXT("voxel.Mesh.VoxelShadingNormals"),
+	1,
+	TEXT("Dual Contouring vertex normals at LOD > 0 (G44): 1 = LOD 0's normal of the voxel cell where the surface crosses ")
+	TEXT("the cell's edges nearest the vertex (default); 0 = the average of the gradients at the cell's stride, as before ")
+	TEXT("G44 (their taps read the saturated density, so LOD 2 leans toward the cube diagonals: a brighter ring on ")
+	TEXT("planets). Vertex positions are the same either way. Set it before chunks mesh: interior meshes and seam rings ")
+	TEXT("read it per job."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarDCScaleClampedGradients(
+	TEXT("voxel.Mesh.ScaleClampedGradients"),
+	1,
+	TEXT("Dual Contouring gradient normals where a tap is clamped at the edge of a mesh job's voxels (chunk faces, G25): ")
+	TEXT("1 = scale the clamped axis's one-sided difference to the full span (default); 0 = leave it at up to half weight, ")
+	TEXT("as before (lines of shading along chunk faces). Set it before chunks mesh."),
+	ECVF_Default);
+
+namespace VoxelDCGradient
+{
+	/**
+	 * The central-difference gradient normal (taps Stride voxels either side) with every tap clamped into the box [Lo, Hi]:
+	 * "the terrain continues" past the data a view holds, so no mesh depends on a neighbour's voxels (seam ownership).
+	 *
+	 * A clamped tap shortens its axis's difference (one-sided at a chunk face), so that component is scaled back to the full
+	 * span. Unscaled, the axis a chunk face cut lost up to half its weight and the normals of the cells along the face leaned
+	 * away from it: lines of shading along chunk faces wherever the surface crosses them obliquely, darker or brighter by the
+	 * face's axis against the sun (G25; on a planet at stride 4, after G44, the Z faces' strips). Where no tap clamps the
+	 * result is the plain central difference, bit for bit.
+	 *
+	 * @param Density (X, Y, Z) -> density at a voxel inside the box
+	 * @param Lo, Hi The box (inclusive voxel coordinates per axis)
+	 * @param IX, IY, IZ The voxel the gradient is taken at
+	 * @param Stride The taps' distance (voxels)
+	 * @return The outward normal (minus the gradient), +Z where it vanishes
+	 */
+	template <typename TDensityFn>
+	FVector3f ClampedGradientNormal(const TDensityFn& Density, const int32 Lo[3], const int32 Hi[3],
+		int32 IX, int32 IY, int32 IZ, int32 Stride)
+	{
+		const int32 I[3] = { IX, IY, IZ };
+		float G[3];
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			int32 Plus[3];
+			int32 Minus[3];
+			for (int32 A = 0; A < 3; ++A)
+			{
+				const int32 Offset = (A == Axis) ? Stride : 0;
+				Plus[A] = FMath::Clamp(I[A] + Offset, Lo[A], Hi[A]);
+				Minus[A] = FMath::Clamp(I[A] - Offset, Lo[A], Hi[A]);
+			}
+			G[Axis] = Density(Plus[0], Plus[1], Plus[2]) - Density(Minus[0], Minus[1], Minus[2]);
+			const int32 Span = Plus[Axis] - Minus[Axis];
+			if (Span > 0 && Span < 2 * Stride && CVarDCScaleClampedGradients.GetValueOnAnyThread() != 0)
+			{
+				G[Axis] *= static_cast<float>(2 * Stride) / static_cast<float>(Span);
+			}
+		}
+		FVector3f Normal(-G[0], -G[1], -G[2]);
+		if (!Normal.Normalize())
+		{
+			return FVector3f(0.0f, 0.0f, 1.0f);
+		}
+		return Normal;
+	}
+}
+
+/**
+ * Vertex normals of strided cells (G44, WORLD_MODES_REVIEW_PLAN.md §14.1 and §20.8).
+ *
+ * Generated density saturates a voxel either side of the surface (SignedDistanceToDensity), so a gradient whose taps lie
+ * Stride voxels apart reads 0 or 255 on every axis the surface crosses within them: at stride 4 each component becomes a
+ * sign and the normal snaps toward the nearest of the 26 cube directions. On a planet, where local up is diagonal, LOD 2
+ * leaned toward the cube diagonals (the ring brighter than the LOD 0/1 centre and the far field); on a heightmap its
+ * slopes snapped. Every LOD's data is at voxel resolution, so a strided cell's vertex normal is the normal LOD 0 gives the
+ * voxel cell where the surface crosses the strided cell's edges nearest the vertex: LOD 0's estimator with LOD 0's
+ * footprint. Averaging voxel-scale normals over the whole strided cell instead smooths them (brighter on rough terrain),
+ * and a single gradient sample is noisier than LOD 0's cell average (darker). The QEF keeps the stride-scale normals, so
+ * no vertex moves.
+ *
+ * Density and Gradient are the caller's views (the mesher's request, or a seam sampler, each with its clamp rule), so the
+ * interior pass and the seam rings run one op sequence and stay bit-identical. Every voxel read lies inside the strided
+ * cell, so no view reads past the data a cell's own vertex reads.
+ */
+namespace VoxelDCShading
+{
+	/** voxel.Mesh.VoxelShadingNormals for a cell of this stride (always false at stride 1: LOD 0 is the reference). */
+	static bool UseVoxelShadingNormals(int32 Stride)
+	{
+		return Stride > 1 && CVarDCVoxelShadingNormals.GetValueOnAnyThread() != 0;
+	}
+
+	/** Where a strided edge's surface crosses at voxel resolution, and the voxel cell inside the strided cell there. */
+	struct FVoxelCrossing
+	{
+		FVector3f VoxelPosition; // voxels, the strided cell's frame
+		FIntVector VoxelCell;    // min corner of the voxel cell inside the strided cell next to the crossing
+	};
+
+	/**
+	 * The voxel-resolution crossing on a strided cell edge: the first of its Stride voxel steps whose ends differ in sign.
+	 *
+	 * @param Density (X, Y, Z) -> density, the view the edge's endpoints were read through
+	 * @param VX, VY, VZ The edge's first endpoint (voxels)
+	 * @param Axis The edge's axis
+	 * @param Stride The edge's length (voxels)
+	 * @param IsoLevel The surface threshold
+	 * @param EdgeOffset The edge's corner offset in the cell (FEdgeRef's DX, DY, DZ): 1 = the edge runs along the cell's
+	 *                   max face on that axis
+	 * @return The crossing (the edge's first step if none changes sign, which a crossing on the edge excludes)
+	 */
+	template <typename TDensityFn>
+	FVoxelCrossing FindVoxelCrossing(const TDensityFn& Density, int32 VX, int32 VY, int32 VZ, int32 Axis, int32 Stride,
+		float IsoLevel, const int32 EdgeOffset[3])
+	{
+		int32 P[3] = { VX, VY, VZ };
+		float T = 0.0f;
+		float D0 = Density(P[0], P[1], P[2]);
+		for (int32 Step = 0; Step < Stride; ++Step)
+		{
+			int32 N[3] = { P[0], P[1], P[2] };
+			++N[Axis];
+			const float D1 = Density(N[0], N[1], N[2]);
+			if ((D0 >= IsoLevel) != (D1 >= IsoLevel))
+			{
+				T = FMath::Clamp((IsoLevel - D0) / (D1 - D0), 0.0f, 1.0f);
+				break;
+			}
+			if (Step + 1 < Stride)
+			{
+				P[Axis] = N[Axis];
+				D0 = D1;
+			}
+		}
+		FVoxelCrossing Out;
+		float C[3] = { static_cast<float>(P[0]), static_cast<float>(P[1]), static_cast<float>(P[2]) };
+		C[Axis] += T;
+		Out.VoxelPosition = FVector3f(C[0], C[1], C[2]);
+		// Across the edge, the voxel cell inside the strided cell starts a voxel below the edge on each axis where the
+		// edge runs along the cell's max face.
+		int32 Cell[3] = { P[0], P[1], P[2] };
+		for (int32 A = 0; A < 3; ++A)
+		{
+			if (A != Axis)
+			{
+				Cell[A] -= EdgeOffset[A];
+			}
+		}
+		Out.VoxelCell = FIntVector(Cell[0], Cell[1], Cell[2]);
+		return Out;
+	}
+
+	/**
+	 * LOD 0's vertex normal of the voxel cell with min corner Cell: LOD 0's gradient normals at its crossings, summed in
+	 * the cell's edge order (SolveCellVertices' CellEdges) and normalized, with SolveCellVertices' +Z fallback.
+	 */
+	template <typename TDensityFn, typename TGradientFn>
+	FVector3f VoxelCellNormal(const TDensityFn& Density, const TGradientFn& Gradient, const FIntVector& Cell, float IsoLevel)
+	{
+		static const int32 Edges[12][4] = {
+			{0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 0, 2},
+			{1, 0, 0, 1}, {1, 0, 0, 2},
+			{0, 1, 0, 0}, {0, 1, 0, 2},
+			{0, 0, 1, 0}, {0, 0, 1, 1},
+			{1, 1, 0, 2}, {1, 0, 1, 1}, {0, 1, 1, 0},
+		};
+		float Corner[8];
+		for (int32 i = 0; i < 8; ++i)
+		{
+			Corner[i] = Density(Cell.X + (i & 1), Cell.Y + ((i >> 1) & 1), Cell.Z + ((i >> 2) & 1));
+		}
+		FVector3f Sum = FVector3f::ZeroVector;
+		for (const int32* E : Edges)
+		{
+			const int32 A[3] = { E[0], E[1], E[2] };
+			int32 B[3] = { E[0], E[1], E[2] };
+			++B[E[3]];
+			const float D0 = Corner[A[0] + A[1] * 2 + A[2] * 4];
+			const float D1 = Corner[B[0] + B[1] * 2 + B[2] * 4];
+			if ((D0 >= IsoLevel) == (D1 >= IsoLevel))
+			{
+				continue;
+			}
+			const float T = FMath::Clamp((IsoLevel - D0) / (D1 - D0), 0.0f, 1.0f);
+			float C[3] = { static_cast<float>(Cell.X + A[0]), static_cast<float>(Cell.Y + A[1]), static_cast<float>(Cell.Z + A[2]) };
+			C[E[3]] += T;
+			Sum += Gradient(C[0], C[1], C[2]);
+		}
+		if (!Sum.Normalize())
+		{
+			Sum = FVector3f(0.0f, 0.0f, 1.0f);
+		}
+		return Sum;
+	}
+
+	/** A strided cell's voxel crossings in the cell's edge order, and the vertex normal they give. */
+	struct FCellVoxelCrossings
+	{
+		FVoxelCrossing Crossings[12];
+		int32 Num = 0;
+
+		void Add(const FVoxelCrossing& Crossing)
+		{
+			if (Num < 12)
+			{
+				Crossings[Num++] = Crossing;
+			}
+		}
+
+		/**
+		 * LOD 0's normal of the voxel cell at the crossing nearest the vertex (the first in edge order on a tie).
+		 *
+		 * @param VertexPosition The solved vertex (cell frame, uu)
+		 * @param VoxelSize Voxel size (uu)
+		 * @param Density, Gradient, IsoLevel As for VoxelCellNormal
+		 * @param Fallback The normal when the cell has no crossing (none reaches here: the QEF needs one)
+		 */
+		template <typename TDensityFn, typename TGradientFn>
+		FVector3f VertexNormal(const FVector3f& VertexPosition, float VoxelSize, const TDensityFn& Density,
+			const TGradientFn& Gradient, float IsoLevel, const FVector3f& Fallback) const
+		{
+			if (Num == 0)
+			{
+				return Fallback;
+			}
+			int32 Best = 0;
+			float BestDistSq = TNumericLimits<float>::Max();
+			for (int32 i = 0; i < Num; ++i)
+			{
+				const float DistSq = FVector3f::DistSquared(Crossings[i].VoxelPosition * VoxelSize, VertexPosition);
+				if (DistSq < BestDistSq)
+				{
+					BestDistSq = DistSq;
+					Best = i;
+				}
+			}
+			return VoxelCellNormal(Density, Gradient, Crossings[Best].VoxelCell, IsoLevel);
+		}
+	};
+}
+
 FVoxelCPUDualContourMesher::FVoxelCPUDualContourMesher()
 {
 }
@@ -254,6 +496,11 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 	const float CellWorldSize = static_cast<float>(Stride) * VoxelSize;
 	const float SVDThreshold = Config.QEFSVDThreshold;
 	const float BiasStrength = Config.QEFBiasStrength;
+	const float IsoLevel = Config.IsoLevel;
+	// At a stride the vertex normal is LOD 0's at the voxel crossing nearest it (G44); the QEF keeps the stride-scale normals.
+	const bool bVoxelShading = VoxelDCShading::UseVoxelShadingNormals(Stride);
+	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
+	auto GradientFn = [&](float X, float Y, float Z) { return CalculateGradientNormal(Request, X, Y, Z); };
 
 	// 12 edges of a cube cell: 4 along each axis
 	struct FEdgeRef { int32 DX, DY, DZ, Axis; };
@@ -289,6 +536,7 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 			{
 				FQEFSolver QEF;
 				FVector3f AvgNormal = FVector3f::ZeroVector;
+				VoxelDCShading::FCellVoxelCrossings VoxelCrossings;
 
 				for (const auto& Edge : CellEdges)
 				{
@@ -298,6 +546,12 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 					{
 						QEF.Add(Crossing.Position, Crossing.Normal);
 						AvgNormal += Crossing.Normal;
+						if (bVoxelShading)
+						{
+							const int32 EdgeOffset[3] = { Edge.DX, Edge.DY, Edge.DZ };
+							VoxelCrossings.Add(VoxelDCShading::FindVoxelCrossing(DensityFn,
+								(CX + Edge.DX) * Stride, (CY + Edge.DY) * Stride, (CZ + Edge.DZ) * Stride, Edge.Axis, Stride, IsoLevel, EdgeOffset));
+						}
 					}
 				}
 
@@ -324,7 +578,8 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 				{
 					AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
 				}
-				Vertex.Normal = AvgNormal;
+				Vertex.Normal = bVoxelShading
+					? VoxelCrossings.VertexNormal(Vertex.Position, VoxelSize, DensityFn, GradientFn, IsoLevel, AvgNormal) : AvgNormal;
 				// Material/biome are assigned per-quad in GenerateQuads (from the owned
 				// edge's solid endpoint) so triangles stay material-uniform.
 			}
@@ -803,21 +1058,10 @@ FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormalLOD(
 	if (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior)
 	{
 		const int32 Max = Request.ChunkSize - 1;
-		auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
-		{
-			return GetDensityAt(Request,
-				FMath::Clamp(TX, 0, Max), FMath::Clamp(TY, 0, Max), FMath::Clamp(TZ, 0, Max));
-		};
-		float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
-		float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
-		float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
-
-		FVector3f Normal(-gx, -gy, -gz);
-		if (!Normal.Normalize())
-		{
-			return FVector3f(0.0f, 0.0f, 1.0f);
-		}
-		return Normal;
+		const int32 Lo[3] = { 0, 0, 0 };
+		const int32 Hi[3] = { Max, Max, Max };
+		return VoxelDCGradient::ClampedGradientNormal(
+			[&](int32 TX, int32 TY, int32 TZ) { return GetDensityAt(Request, TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
 	}
 
 	float gx = GetDensityAt(Request, IX + Stride, IY, IZ) - GetDensityAt(Request, IX - Stride, IY, IZ);
@@ -906,24 +1150,8 @@ namespace VoxelDCFaceSeam
 			const int32 IX = FMath::FloorToInt(X);
 			const int32 IY = FMath::FloorToInt(Y);
 			const int32 IZ = FMath::FloorToInt(Z);
-			auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
-			{
-				return GetDensity(
-					FMath::Clamp(TX, Lo[0], Hi[0]),
-					FMath::Clamp(TY, Lo[1], Hi[1]),
-					FMath::Clamp(TZ, Lo[2], Hi[2]));
-			};
-
-			float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
-			float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
-			float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
-
-			FVector3f Normal(-gx, -gy, -gz);
-			if (!Normal.Normalize())
-			{
-				return FVector3f(0.0f, 0.0f, 1.0f);
-			}
-			return Normal;
+			return VoxelDCGradient::ClampedGradientNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
 		}
 	};
 
@@ -1038,24 +1266,8 @@ namespace VoxelDCFaceSeam
 			const int32 IX = FMath::FloorToInt(X);
 			const int32 IY = FMath::FloorToInt(Y);
 			const int32 IZ = FMath::FloorToInt(Z);
-			auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
-			{
-				return GetDensity(
-					FMath::Clamp(TX, Lo[0], Hi[0]),
-					FMath::Clamp(TY, Lo[1], Hi[1]),
-					FMath::Clamp(TZ, Lo[2], Hi[2]));
-			};
-
-			float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
-			float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
-			float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
-
-			FVector3f Normal(-gx, -gy, -gz);
-			if (!Normal.Normalize())
-			{
-				return FVector3f(0.0f, 0.0f, 1.0f);
-			}
-			return Normal;
+			return VoxelDCGradient::ClampedGradientNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
 		}
 	};
 
@@ -1126,24 +1338,8 @@ namespace VoxelDCFaceSeam
 			const int32 IX = FMath::FloorToInt(X);
 			const int32 IY = FMath::FloorToInt(Y);
 			const int32 IZ = FMath::FloorToInt(Z);
-			auto D = [&](int32 TX, int32 TY, int32 TZ) -> float
-			{
-				return GetDensity(
-					FMath::Clamp(TX, Lo[0], Hi[0]),
-					FMath::Clamp(TY, Lo[1], Hi[1]),
-					FMath::Clamp(TZ, Lo[2], Hi[2]));
-			};
-
-			float gx = D(IX + Stride, IY, IZ) - D(IX - Stride, IY, IZ);
-			float gy = D(IX, IY + Stride, IZ) - D(IX, IY - Stride, IZ);
-			float gz = D(IX, IY, IZ + Stride) - D(IX, IY, IZ - Stride);
-
-			FVector3f Normal(-gx, -gy, -gz);
-			if (!Normal.Normalize())
-			{
-				return FVector3f(0.0f, 0.0f, 1.0f);
-			}
-			return Normal;
+			return VoxelDCGradient::ClampedGradientNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
 		}
 	};
 
@@ -1165,6 +1361,11 @@ namespace VoxelDCFaceSeam
 	{
 		FQEFSolver QEF;
 		FVector3f AvgNormal = FVector3f::ZeroVector;
+		// SolveCellVertices' vertex normal at a stride (G44), op for op.
+		const bool bVoxelShading = VoxelDCShading::UseVoxelShadingNormals(Stride);
+		VoxelDCShading::FCellVoxelCrossings VoxelCrossings;
+		auto DensityFn = [&S](int32 X, int32 Y, int32 Z) { return S.GetDensity(X, Y, Z); };
+		auto GradientFn = [&S](float X, float Y, float Z) { return S.GradientNormal(X, Y, Z, 1); };
 
 		for (const FEdgeRef& Edge : GCellEdges)
 		{
@@ -1204,6 +1405,11 @@ namespace VoxelDCFaceSeam
 
 			QEF.Add(CrossPos, CrossNormal);
 			AvgNormal += CrossNormal;
+			if (bVoxelShading)
+			{
+				const int32 EdgeOffset[3] = { Edge.DX, Edge.DY, Edge.DZ };
+				VoxelCrossings.Add(VoxelDCShading::FindVoxelCrossing(DensityFn, VX, VY, VZ, Edge.Axis, Stride, IsoLevel, EdgeOffset));
+			}
 		}
 
 		if (QEF.Count == 0)
@@ -1229,7 +1435,8 @@ namespace VoxelDCFaceSeam
 		{
 			AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
 		}
-		Out.Normal = AvgNormal;
+		Out.Normal = bVoxelShading
+			? VoxelCrossings.VertexNormal(Out.Position, VoxelSize, DensityFn, GradientFn, IsoLevel, AvgNormal) : AvgNormal;
 		return true;
 	}
 
