@@ -183,6 +183,11 @@ generation's fill pass tests it.
 - Total limit of `MaxPropagationVoxels` (default 8192) per flood event
 - Each frame's flags are one system edit operation (the source the caller had set is restored after it); its broadcast
   marks the chunks dirty as any edit's does. It waits while another edit operation is in progress
+- That operation stays **out of the undo history** (`BeginEditOperation(..., bAddToUndoHistory=false)`: no undo step, the
+  redo stack kept). The flood follows from the edit that let the water in: undoing that edit puts its voxels back as they
+  were before it, the flood there with them (an undo restores each voxel's previous edit, `FVoxelEditChange`), and its
+  redo floods them again. Water the flood put beyond the edit's own voxels (a cave or a sealed pocket it opened) stays:
+  nothing drains it
 - `GetStats()` counts scans, reads, seeds (`FaceSeeds` of them from the face scans, `FaceScansQueued` faces), floods and
   flooded voxels, and times the scans (`ScanSeconds`, `MaxFrameScanSeconds`); `voxel.Water.Stats [x y | pawn]` logs them
   and the water tile's column there (`UVoxelChunkManager::GetWaterTileColumn`: the chunk layers that mark it wet); the log
@@ -198,6 +203,14 @@ edits from its edit-merged voxels (`UpdateWaterTileContribution`, below), so a c
 level draws its water surface once it floods; and the chunk-arrival face scans above carry a flood into a chunk that
 loads after it. Until 2026-10-20 both read the generated voxels only (world modes review G59, WORLD_MODES_REVIEW_PLAN.md
 §19.16). Tests: `VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Plane`, `.Planet`, `.Tiles.Plane`.
+
+**The flood and undo (G60).** Until 2026-10-20 each frame's flood batch was an undo step of its own, and the edit
+manager's undo record kept only each voxel's previous value: the flood replaces a dug voxel's relative edit with a Set
+whose previous value was the dig's unset one, so the first undo after a dig under the sea (the demo test actor's Z) took
+the flood back and removed the dig at every voxel it had reached, leaving the dig's partly dug voxels; the second undo
+took the rest (world modes review G60, WORLD_MODES_REVIEW_PLAN.md §19.17). A save keeps the flood as edits in its
+`.edits.bin`; loading it floods nothing again (the flooded voxels are water already). Tests:
+`VoxelWorlds.Streaming.WaterPropagation.Undo.Plane`, `.Planet`, `VoxelWorlds.Edit.UndoRedo.Records`.
 
 ### On a Planet (spherical SP-B8)
 
@@ -490,7 +503,7 @@ When `WaterMeshMaterial` is null, the system falls back to a static water plane 
 ### Terrain Edit to Water Fill
 
 ```
-[1] An edit (player dig, system batch, undo, clear, load)
+[1] An edit (player dig, system batch, undo, redo, clear, load)
     ↓
 [2] UVoxelWaterPropagation::OnChunkEdited()
     ↓ Queue the voxels the edit changed in the chunk (GetBroadcastEditBounds), clipped to below the sea
@@ -499,7 +512,7 @@ When `WaterMeshMaterial` is null, the system falls back to a static water plane 
 [3] ProcessPropagation() (per frame)
     ├─ Scan the queued boxes (32,768 reads): edit-merged dry air with a water neighbour → seeds
     ├─ BFS flood fill from seeds (512 voxels)
-    ├─ Set the flag on each voxel as it is (edit layer, EEditMode::Set)
+    ├─ Set the flag on each voxel as it is (edit layer, EEditMode::Set), in an operation outside the undo history (G60)
     └─ The operation's broadcast marks the chunks dirty
     ↓
 [4] Chunks remesh; their water tiles read the edit-merged voxels (G59)
