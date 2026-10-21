@@ -29,7 +29,7 @@ The actual implementation uses an **overlay architecture**:
 | Existing edit | New edit | Result |
 |---------------|----------|--------|
 | Add / Subtract | Add / Subtract | One relative edit with the summed delta; a sum of 0 removes the edit (or becomes a Paint when the new Add carries a material) |
-| Set / Smooth (absolute) | Add / Subtract / Paint | A Set whose voxel is the new edit applied to the existing voxel: a dig under a POI pad takes density from the pad, not from the procedural terrain under it. `OriginalData` keeps the previous voxel, so undo restores it |
+| Set / Smooth (absolute) | Add / Subtract / Paint | A Set whose voxel is the new edit applied to the existing voxel: a dig under a POI pad takes density from the pad, not from the procedural terrain under it. Undo restores the pad's Set (below) |
 | anything | Set / Smooth | The new absolute edit replaces it |
 | Add / Subtract | Paint | The Paint replaces it (the delta is lost) |
 
@@ -40,10 +40,10 @@ only received the brush falloff (WORLD_MODES_REVIEW_PLAN.md G2). Tests: `VoxelWo
 ### What `OnChunkEdited` tells its listeners
 
 `OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius)` fires once per edited chunk when an operation ends (and for
-an undo, redo, clear or load). The centre and radius are the operation's brush (`ApplyBrushEdit`); an operation of
-single-voxel edits (a POI's terraform, a dungeon stamp, water propagation), an undo, a redo, a clear and a load report
-the zero vector and 0. While it is broadcast, `GetBroadcastEditBounds` gives the chunk-local bounds of the voxels the
-edit changed in that chunk, so a listener can tell which layers it reached (scatter's readers, world modes review G33),
+an undo, redo, clear or load). The centre and radius are the operation's brush (`ApplyBrushEdit`), and a redo reports
+the operation's again; an operation of single-voxel edits (a POI's terraform, a dungeon stamp, water propagation), an
+undo, a clear and a load report the zero vector and 0. While it is broadcast, `GetBroadcastEditBounds` gives the
+chunk-local bounds of the voxels the edit changed in that chunk, so a listener can tell which layers it reached (scatter's readers, world modes review G33),
 or which voxels to look at (water propagation scans them for voxels the edit opened to the sea, G58; the movement
 component's embed check, G55).
 Until 2026-10-20 the centre and radius stayed set after a brush, so every later operation of single-voxel edits reported
@@ -60,6 +60,38 @@ and all their seams (world modes review G56; `voxel.Edit.NeighbourRemesh 1` rest
 chunk already on its way to a mesh restales its seams too, and if that mesh is on a worker (built before the edit) the
 chunk re-meshes when it lands (G57; before, both stayed stale). `voxel.Edit.MeshWork [reset]` logs the meshing work since
 a reset. Tests: `VoxelWorlds.Streaming.EditRemesh.Plane`, `.Planet`.
+
+### Undo and redo
+
+Every operation between `BeginEditOperation` and `EndEditOperation` (or the one `ApplyEdit` and `ApplyBrushEdit` start
+themselves) is one undo step of at most `MaxUndoHistory` (100). It records, for each voxel it changed, the voxel's chunk
+and the whole edit the voxel held before and after (`FVoxelEditChange`, none for the generated voxel), and when it ends
+the source, brush centre and radius it broadcast.
+
+- **Undo** puts each voxel's previous edit back, or removes the edit when there was none, last change first, in the
+  voxel's own chunk; it broadcasts each chunk it changed as a System edit with no radius (the restored voxels re-mesh,
+  re-cook and re-extract their scatter, the chunks that read them too, and water propagation scans them).
+- **Redo** puts each voxel's edit back as the operation left it, first change first, and broadcasts each chunk with the
+  operation's own source, centre and radius, so a player brush clears scatter in its sphere again and a system edit
+  re-extracts the chunks that read it.
+- **Cancel** (`CancelEditOperation`) restores the open operation's voxels as an undo does.
+- An operation begun with `bAddToUndoHistory` false takes no undo step and leaves the redo stack as it is; it is
+  broadcast like any other. Water propagation's flood is one (it follows from the edit that let the water in): undoing
+  that edit puts its voxels back as they were before it, the flood there with them, and its redo floods again. Water the
+  flood put beyond the edit's voxels stays.
+- A clear (`ClearChunkEdits`, `ClearAllEdits`) is outside the history; a load (`LoadEditsFromFile`) clears it.
+- `FVoxelEdit::OriginalData` (the previous edit's voxel, or air) is still written to the edits file but undo does not
+  read it.
+
+Until 2026-10-20 the record was the operation's list of edits with their `OriginalData`: undo took the first of the
+operation's chunks holding an edit at the voxel's local index and set `OriginalData` on it (removing it when that was
+air), redo wrote every edit into the operation's first chunk and broadcast only that chunk with the current source and no
+radius. So a brush across a chunk face came back in one chunk, a voxel's previous relative edit (a dig under a dig), a
+previous Set to air and an edit removed by cancelling deltas did not come back, and a system edit redone as a player's
+re-extracted no scatter. Water propagation's flood was an undo step of its own, and its undo removed the dig at the voxels
+it had reached (world modes review G60, WORLD_MODES_REVIEW_PLAN.md §19.17). Tests: `VoxelWorlds.Edit.UndoRedo.Records`,
+`VoxelWorlds.Streaming.WaterPropagation.Undo.Plane`, `.Planet`; `Streaming.EditRemesh.*` edits 6 and 7 and
+`Scatter.EditReaders.{Plane,Planet}` undo and redo too.
 
 ## Original Design Specification
 

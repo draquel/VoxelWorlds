@@ -2,6 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 #include "Materials/Material.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
@@ -47,6 +49,18 @@
 //   pocket floods from N's sea. No voxel changes but by taking the flag.
 // - Streaming.WaterPropagation.Tiles.Plane: a channel dug from the sea inland, 3 voxels below the sea, floods; its inland
 //   columns, which no water tile covered (the tiles dilate the wet columns by 3), are covered by the tile afterwards.
+//
+// G60 (section 19.17). The flood's batches entered the edit manager's undo history, and an undo record kept only the
+// voxel's previous value: undoing a flood over a dug voxel (a relative edit, whose value is unset) removed the dig there.
+// So the first undo after a dig under the sea undid the flood and part of the dig, the second the rest.
+//
+// - Streaming.WaterPropagation.Undo.Plane / .Planet: each edit takes one undo step and its flood none; one undo puts the
+//   region's voxels and the world's edits back as they were before the edit, its water gone with it; a redo brings the
+//   edit back and it floods again as before; both twice. A. A player dig on the seabed inside a chunk, then the flooded
+//   dig through the edits file: the same edits and voxels, nothing flooded again. B. A player dig on a chunk face (two
+//   chunks). C. A player dig on land: nothing floods. D. A system stamp (the dungeon stamper's operation of single-voxel
+//   Sets to air) opens a shaft into the seabed. E. A sealed pocket stays dry; a shaft opens it and both flood; undoing the
+//   shaft puts its voxels back and leaves the pocket's water (nothing drains it); undoing the pocket puts the region back.
 // ---------------------------------------------------------------------------
 
 namespace VoxelWaterPropagationTest
@@ -268,11 +282,13 @@ namespace VoxelWaterPropagationTest
 
 	/**
 	 * Seabed sites on a 200 uu grid, 31 x 31, around a base point (the plane's origin; the planet's +X face at the equator)
-	 * moved Shift uu along the first axis across local up, nearest first: the seabed 5-10 voxels under the sea, the ground
-	 * within 75 uu of the site's altitude 150 uu either way across local up (a slope under 0.5, so the cavities dug below
-	 * stay closed by rock at their sides); with bInterior, the site's voxel at least 5 voxels inside its chunk on every axis.
+	 * moved Shift uu along the first axis across local up, nearest first: the seabed 5-10 voxels under the sea (or
+	 * MinDepthVoxels to MaxDepthVoxels; negative is above it), the ground within 75 uu of the site's altitude 150 uu either
+	 * way across local up (a slope under 0.5, so the cavities dug below stay closed by rock at their sides); with bInterior,
+	 * the site's voxel at least 5 voxels inside its chunk on every axis.
 	 */
-	TArray<FVector> FindSeabedSites(const VoxelTesting::FTestChunkWorld& W, bool bPlanet, double Shift, bool bInterior)
+	TArray<FVector> FindSeabedSites(const VoxelTesting::FTestChunkWorld& W, bool bPlanet, double Shift, bool bInterior,
+		double MinDepthVoxels = 5.0, double MaxDepthVoxels = 10.0)
 	{
 		const float VS = W.Config->VoxelSize;
 		const int32 CS = W.Config->ChunkSize;
@@ -285,7 +301,7 @@ namespace VoxelWaterPropagationTest
 				: OriginOf(W) + FVector(Shift + i * 200.0, j * 200.0, 0.0);
 			const FVector Site = W.Manager->GetGeneratedSurfacePoint(Base);
 			const double Depth = DepthUnderSea(W, bPlanet, Site);
-			if (Depth < 5.0 * VS || Depth > 10.0 * VS)
+			if (Depth < MinDepthVoxels * VS || Depth > MaxDepthVoxels * VS)
 			{
 				continue;
 			}
@@ -1176,6 +1192,434 @@ namespace VoxelWaterPropagationTest
 			Stats1.Seeds - Stats0.Seeds, Stats1.FloodedVoxels - Stats0.FloodedVoxels));
 		W.Stop();
 	}
+
+	// ---- G60 ----
+
+	/** What an edit does to its voxel at merge time (not when or from what it was made). */
+	struct FEditSignature
+	{
+		uint8 Mode = 0;
+		int32 Delta = 0;
+		uint8 Material = 0;
+		uint32 NewData = 0;
+
+		bool operator==(const FEditSignature& Other) const
+		{
+			return Mode == Other.Mode && Delta == Other.Delta && Material == Other.Material && NewData == Other.NewData;
+		}
+	};
+
+	/** Every edit in the world, keyed by chunk and voxel index. */
+	using FEditSnapshot = TMap<TPair<FIntVector, int32>, FEditSignature>;
+
+	FEditSnapshot SnapshotEdits(const VoxelTesting::FTestChunkWorld& W)
+	{
+		const UVoxelEditManager* Edits = W.Manager->GetEditManager();
+		FEditSnapshot Out;
+		TArray<FIntVector> Chunks;
+		Edits->GetEditedChunkCoords(Chunks);
+		for (const FIntVector& Chunk : Chunks)
+		{
+			for (const TPair<int32, FVoxelEdit>& Pair : Edits->GetEditLayer(Chunk)->Edits)
+			{
+				FEditSignature Sig;
+				Sig.Mode = static_cast<uint8>(Pair.Value.EditMode);
+				Sig.Delta = Pair.Value.DensityDelta;
+				Sig.Material = Pair.Value.BrushMaterialID;
+				Sig.NewData = Pair.Value.NewData.Pack();
+				Out.Add(TPair<FIntVector, int32>(Chunk, Pair.Key), Sig);
+			}
+		}
+		return Out;
+	}
+
+	/** Edits that differ between two snapshots: missing from one, extra in it, or different. */
+	int32 EditDifferences(const FEditSnapshot& Expected, const FEditSnapshot& Actual)
+	{
+		int32 Count = 0;
+		for (const TPair<TPair<FIntVector, int32>, FEditSignature>& Pair : Expected)
+		{
+			const FEditSignature* Found = Actual.Find(Pair.Key);
+			Count += (!Found || !(*Found == Pair.Value)) ? 1 : 0;
+		}
+		for (const TPair<TPair<FIntVector, int32>, FEditSignature>& Pair : Actual)
+		{
+			Count += Expected.Contains(Pair.Key) ? 0 : 1;
+		}
+		return Count;
+	}
+
+	/** Voxels whose edit-merged value differs between two captures of the same keys (the water flag included). */
+	int32 VoxelDifferences(const TMap<FIntVector, FVoxelData>& Expected, const TMap<FIntVector, FVoxelData>& Actual)
+	{
+		int32 Count = 0;
+		for (const TPair<FIntVector, FVoxelData>& Pair : Expected)
+		{
+			const FVoxelData* Found = Actual.Find(Pair.Key);
+			Count += (!Found || !(*Found == Pair.Value)) ? 1 : 0;
+		}
+		return Count;
+	}
+
+	/** Voxels that are water in a capture and not in another. */
+	int32 WaterGained(const TMap<FIntVector, FVoxelData>& From, const TMap<FIntVector, FVoxelData>& To)
+	{
+		int32 Count = 0;
+		for (const TPair<FIntVector, FVoxelData>& Pair : To)
+		{
+			const FVoxelData* Was = From.Find(Pair.Key);
+			Count += (IsWater(Pair.Value) && !(Was && IsWater(*Was))) ? 1 : 0;
+		}
+		return Count;
+	}
+
+	/**
+	 * One edit's round through the history: the edit and its flood, one undo, a redo, and both again, each settled. Checks
+	 * that the edit adds one undo step (its flood none), that an undo puts the region's voxels and the world's edits back as
+	 * they were before the edit, and that a redo brings back the edit and its flood as they were.
+	 *
+	 * @return Text for the info line
+	 */
+	FString RunUndoRound(FAutomationTestBase& Test, VoxelTesting::FTestChunkWorld& W, const FString& What,
+		const TArray<FIntVector>& Region, TFunctionRef<void()> Apply, bool bExpectFlood)
+	{
+		UVoxelEditManager* Edits = W.Manager->GetEditManager();
+		const UVoxelWaterPropagation* Water = W.Manager->GetWaterPropagation();
+		bool bLoaded = true;
+		for (const FIntVector& Key : Region)
+		{
+			bLoaded &= HasData(W, Key);
+		}
+		Test.TestTrue(What + TEXT(": the region's chunks are loaded"), bLoaded);
+
+		const FEditSnapshot Edits0 = SnapshotEdits(W);
+		const TMap<FIntVector, FVoxelData> V0 = Capture(W, Region);
+		const int32 Undo0 = Edits->GetUndoCount();
+		const UVoxelWaterPropagation::FStats Stats0 = Water->GetStats();
+
+		Apply();
+		const TMap<FIntVector, FVoxelData> V1 = Capture(W, Region);
+		Test.TestTrue(What + TEXT(": settles after the edit"), SettleWater(W));
+		const TMap<FIntVector, FVoxelData> V2 = Capture(W, Region);
+		const FEditSnapshot Edits2 = SnapshotEdits(W);
+		const int32 Changed = VoxelDifferences(V0, V1);
+		const int32 Flooded = WaterGained(V1, V2);
+		const int32 Steps = Edits->GetUndoCount() - Undo0;
+		const int64 FloodedVoxels = Water->GetStats().FloodedVoxels - Stats0.FloodedVoxels;
+		Test.TestTrue(What + TEXT(": the edit changed voxels"), Changed > 0);
+		if (bExpectFlood)
+		{
+			Test.TestTrue(What + TEXT(": the edit flooded"), Flooded > 0);
+		}
+		else
+		{
+			Test.TestEqual(What + TEXT(": voxels flooded"), Flooded, 0);
+		}
+		Test.TestEqual(What + TEXT(": undo steps the edit and its flood added"), Steps, 1);
+
+		// One undo: the region and the world's edits as they were before the edit, its water gone with it.
+		Edits->Undo();
+		Test.TestTrue(What + TEXT(": settles after the undo"), SettleWater(W));
+		const TMap<FIntVector, FVoxelData> V3 = Capture(W, Region);
+		const int32 UndoVoxels = VoxelDifferences(V0, V3);
+		const int32 UndoEdits = EditDifferences(Edits0, SnapshotEdits(W));
+		const int32 UndoWater = WaterGained(V0, V3);
+		// Voxels whose density or material the edit changed and the undo left so.
+		const int32 UndoStillDug = [&]
+		{
+			auto Shape = [](const FVoxelData& V) { return TPair<uint8, uint8>(V.Density, V.MaterialID); };
+			int32 Count = 0;
+			for (const TPair<FIntVector, FVoxelData>& Pair : V1)
+			{
+				Count += (Shape(Pair.Value) != Shape(V0[Pair.Key]) && Shape(V3[Pair.Key]) == Shape(Pair.Value)) ? 1 : 0;
+			}
+			return Count;
+		}();
+		Test.TestEqual(What + TEXT(": voxels that differ from before the edit after one undo"), UndoVoxels, 0);
+		Test.TestEqual(What + TEXT(": edits that differ from before the edit after one undo"), UndoEdits, 0);
+		Test.TestEqual(What + TEXT(": undo steps left after one undo"), Edits->GetUndoCount(), Undo0);
+
+		// A redo: the edit again, and its flood as before.
+		Edits->Redo();
+		Test.TestTrue(What + TEXT(": settles after the redo"), SettleWater(W));
+		const int32 RedoVoxels = VoxelDifferences(V2, Capture(W, Region));
+		const int32 RedoEdits = EditDifferences(Edits2, SnapshotEdits(W));
+		Test.TestEqual(What + TEXT(": voxels that differ from the flooded edit after its redo"), RedoVoxels, 0);
+		Test.TestEqual(What + TEXT(": edits that differ from the flooded edit after its redo"), RedoEdits, 0);
+		Test.TestEqual(What + TEXT(": undo steps after the redo"), Edits->GetUndoCount() - Undo0, 1);
+
+		// And both again.
+		Edits->Undo();
+		Test.TestTrue(What + TEXT(": settles after the second undo"), SettleWater(W));
+		const int32 Undo2Voxels = VoxelDifferences(V0, Capture(W, Region));
+		Test.TestEqual(What + TEXT(": voxels that differ from before the edit after the second undo"), Undo2Voxels, 0);
+		Edits->Redo();
+		Test.TestTrue(What + TEXT(": settles after the second redo"), SettleWater(W));
+		const int32 Redo2Voxels = VoxelDifferences(V2, Capture(W, Region));
+		Test.TestEqual(What + TEXT(": voxels that differ from the flooded edit after the second redo"), Redo2Voxels, 0);
+
+		return FString::Printf(TEXT("%s: %d voxels changed, %d flooded (%lld by the propagation), %d undo steps; after one undo %d voxels and %d edits differ from before (%d still as the edit left them, %d water left); after the redo %d voxels and %d edits differ from the flooded edit; second undo %d, second redo %d"),
+			*What, Changed, Flooded, FloodedVoxels, Steps, UndoVoxels, UndoEdits, UndoStillDug, UndoWater, RedoVoxels, RedoEdits,
+			Undo2Voxels, Redo2Voxels);
+	}
+
+	/**
+	 * A seabed point on a chunk face across local up, within 3 voxels of one of the sites and 5-10 voxels under the sea:
+	 * a 2.5-voxel brush centred there edits two chunks.
+	 */
+	bool FindFaceSite(const VoxelTesting::FTestChunkWorld& W, bool bPlanet, const TArray<FVector>& Sites, const TArray<FVector>& Avoid, FVector& Out)
+	{
+		const float VS = W.Config->VoxelSize;
+		const int32 CS = W.Config->ChunkSize;
+		const int32 Axes[2] = { bPlanet ? 1 : 0, bPlanet ? 2 : 1 };
+		for (const FVector& S : Sites)
+		{
+			bool bApart = true;
+			for (const FVector& A : Avoid)
+			{
+				bApart &= FVector::Dist(A, S) >= 900.0;
+			}
+			if (!bApart)
+			{
+				continue;
+			}
+			const FIntVector Key = KeyOf(W, S);
+			for (const int32 Axis : Axes)
+			{
+				const int32 Local = Key[Axis] - FloorDiv(Key[Axis], CS) * CS;
+				const int32 Shift = Local <= CS / 2 ? -Local : CS - Local;
+				if (FMath::Abs(Shift) > 3)
+				{
+					continue;
+				}
+				FVector P = S;
+				P[Axis] += Shift * VS;
+				const FVector Surface = W.Manager->GetGeneratedSurfacePoint(P);
+				const double Depth = DepthUnderSea(W, bPlanet, Surface);
+				if (Depth < 5.0 * VS || Depth > 10.0 * VS)
+				{
+					continue;
+				}
+				TSet<FIntVector> Chunks;
+				for (const FIntVector& BrushKey : BrushKeys(W, Surface, 2.5f))
+				{
+					Chunks.Add(ChunkOfKey(W, BrushKey));
+				}
+				if (Chunks.Num() >= 2)
+				{
+					Out = Surface;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/** The first site at least 900 uu from every one in Avoid. */
+	bool PickApart(const TArray<FVector>& Sites, const TArray<FVector>& Avoid, FVector& Out)
+	{
+		for (const FVector& S : Sites)
+		{
+			bool bApart = true;
+			for (const FVector& A : Avoid)
+			{
+				bApart &= FVector::Dist(A, S) >= 900.0;
+			}
+			if (bApart)
+			{
+				Out = S;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void RunUndo(FAutomationTestBase& Test, bool bPlanet)
+	{
+		const TCHAR* Name = bPlanet ? TEXT("Planet") : TEXT("Plane");
+		VoxelTesting::FTestChunkWorld W;
+		StartSeaWorld(W, bPlanet, bPlanet ? TEXT("WaterUndoPlanet") : TEXT("WaterUndoPlane"));
+		UVoxelWaterPropagation* Water = W.Manager->GetWaterPropagation();
+		UVoxelEditManager* Edits = W.Manager->GetEditManager();
+		if (!Water || !Edits)
+		{
+			Test.AddError(FString::Printf(TEXT("%s: no water propagation with bEnableWaterLevel"), Name));
+			W.Stop();
+			return;
+		}
+		const float VS = W.Config->VoxelSize;
+
+		// Sites: seabed inside a chunk (the dig, the stamp, the pocket), seabed on a chunk face, land inside a chunk.
+		const TArray<FVector> Interior = FindSeabedSites(W, bPlanet, 0.0, true);
+		TArray<FVector> Used;
+		FVector DigSite, FaceSite, StampSite, PocketSite, LandSite;
+		const bool bDig = PickApart(Interior, Used, DigSite);
+		Used.Add(DigSite);
+		const bool bFace = FindFaceSite(W, bPlanet, FindSeabedSites(W, bPlanet, 0.0, false), Used, FaceSite);
+		Used.Add(FaceSite);
+		const bool bStamp = PickApart(Interior, Used, StampSite);
+		Used.Add(StampSite);
+		const bool bPocket = PickApart(Interior, Used, PocketSite);
+		bool bLand = false;
+		for (const double Shift : { 0.0, 6000.0, -6000.0, 12000.0, -12000.0 })
+		{
+			const TArray<FVector> Land = FindSeabedSites(W, bPlanet, Shift, true, -12.0, -4.0);
+			if (Land.Num() > 0)
+			{
+				LandSite = Land[0];
+				bLand = true;
+				break;
+			}
+		}
+		if (!(bDig && bFace && bStamp && bPocket && bLand))
+		{
+			Test.AddError(FString::Printf(TEXT("%s: sites not found (dig %d, face %d, stamp %d, pocket %d, land %d)"), Name, bDig, bFace, bStamp, bPocket, bLand));
+			W.Stop();
+			return;
+		}
+		auto GoTo = [&](const FVector& Site, const TCHAR* What)
+		{
+			W.SetViewer(Site + UpAt(W, Site, bPlanet) * 300.0);
+			Test.TestTrue(FString::Printf(TEXT("%s %s: the world settles at the site"), Name, What), SettleWater(W));
+		};
+
+		// ---- A: a player dig on the seabed inside a chunk; then a save and load of the flooded dig. ----
+		{
+			GoTo(DigSite, TEXT("A"));
+			const TArray<FIntVector> Region = Ball(W, DigSite, 6.5f);
+			Test.AddInfo(RunUndoRound(Test, W, FString::Printf(TEXT("%s A (seabed dig)"), Name), Region,
+				[&] { PlayerBrush(W, DigSite, 2.5f, EEditMode::Subtract, EVoxelBrushFalloff::Sharp); }, true));
+
+			// The flooded dig through the edits file (UVoxelEditManager::SaveEditsToFile / LoadEditsFromFile, the save's
+			// .edits.bin): the same edits and voxels come back, and the load floods nothing again.
+			const FString Path = FPaths::Combine(FPaths::AutomationTransientDir(), FString::Printf(TEXT("WaterUndo%s.edits.bin"), Name));
+			const FEditSnapshot Saved = SnapshotEdits(W);
+			const TMap<FIntVector, FVoxelData> VSaved = Capture(W, Region);
+			const UVoxelWaterPropagation::FStats Stats0 = Water->GetStats();
+			Test.TestTrue(FString::Printf(TEXT("%s A: the edits save"), Name), Edits->SaveEditsToFile(Path));
+			Test.TestTrue(FString::Printf(TEXT("%s A: the edits load"), Name), Edits->LoadEditsFromFile(Path));
+			Test.TestTrue(FString::Printf(TEXT("%s A: settles after the load"), Name), SettleWater(W));
+			IFileManager::Get().Delete(*Path);
+			const int32 LoadEdits = EditDifferences(Saved, SnapshotEdits(W));
+			const TMap<FIntVector, FVoxelData> VLoaded = Capture(W, Region);
+			const int32 LoadVoxels = VoxelDifferences(VSaved, VLoaded);
+			const UVoxelWaterPropagation::FStats& Stats1 = Water->GetStats();
+			Test.TestEqual(FString::Printf(TEXT("%s A: edits that differ after the load"), Name), LoadEdits, 0);
+			Test.TestEqual(FString::Printf(TEXT("%s A: voxels that differ after the load"), Name), LoadVoxels, 0);
+			Test.TestEqual(FString::Printf(TEXT("%s A: voxels flooded again after the load"), Name), Stats1.FloodedVoxels - Stats0.FloodedVoxels, int64(0));
+			Test.TestEqual(FString::Printf(TEXT("%s A: undo steps after the load (the load clears the history)"), Name), Edits->GetUndoCount(), 0);
+			int32 WaterSaved = 0, WaterLoaded = 0;
+			for (const TPair<FIntVector, FVoxelData>& Pair : VSaved)
+			{
+				WaterSaved += IsWater(Pair.Value) ? 1 : 0;
+				WaterLoaded += IsWater(VLoaded[Pair.Key]) ? 1 : 0;
+			}
+			Test.AddInfo(FString::Printf(TEXT("%s A save/load: %d edits in the world, %d water voxels in the region before and %d after; %d edits and %d voxels differ, %lld seeds and %lld voxels flooded after the load"),
+				Name, Saved.Num(), WaterSaved, WaterLoaded, LoadEdits, LoadVoxels, Stats1.Seeds - Stats0.Seeds, Stats1.FloodedVoxels - Stats0.FloodedVoxels));
+		}
+
+		// ---- B: a player dig on the seabed on a chunk face (two chunks). ----
+		{
+			GoTo(FaceSite, TEXT("B"));
+			Test.AddInfo(RunUndoRound(Test, W, FString::Printf(TEXT("%s B (seabed dig on a chunk face)"), Name), Ball(W, FaceSite, 6.5f),
+				[&] { PlayerBrush(W, FaceSite, 2.5f, EEditMode::Subtract, EVoxelBrushFalloff::Sharp); }, true));
+		}
+
+		// ---- C: a player dig on land: nothing floods, undo and redo as before. ----
+		{
+			GoTo(LandSite, TEXT("C"));
+			Test.AddInfo(RunUndoRound(Test, W, FString::Printf(TEXT("%s C (land dig, %.0f over the sea)"), Name, -DepthUnderSea(W, bPlanet, LandSite)),
+				Ball(W, LandSite, 6.5f), [&] { PlayerBrush(W, LandSite, 2.5f, EEditMode::Subtract, EVoxelBrushFalloff::Sharp); }, false));
+		}
+
+		// ---- D: a system stamp (the dungeon stamper's: one operation of single-voxel Sets to air) opens a shaft into the seabed. ----
+		{
+			GoTo(StampSite, TEXT("D"));
+			const FVector Up = UpAt(W, StampSite, bPlanet);
+			const TArray<FIntVector> Shaft = Tube(W, StampSite - Up * 4.0 * VS, StampSite + Up * 1.5 * VS, 1.2f);
+			Test.AddInfo(RunUndoRound(Test, W, FString::Printf(TEXT("%s D (system stamp, %d voxels)"), Name, Shaft.Num()),
+				Tube(W, StampSite - Up * 7.0 * VS, StampSite + Up * 4.0 * VS, 4.5f),
+				[&] { SystemSet(W, Shaft, [](const FIntVector&) { return FVoxelData::Air(); }); }, true));
+		}
+
+		// ---- E: water does not drain: a sealed pocket opened by a shaft floods; undoing the shaft leaves the pocket's water. ----
+		{
+			GoTo(PocketSite, TEXT("E"));
+			const FString What = FString::Printf(TEXT("%s E (pocket and shaft)"), Name);
+			const FVector Up = UpAt(W, PocketSite, bPlanet);
+			const FVector C = PocketSite - Up * 7.0 * VS;
+			const TArray<FIntVector> Pocket = Ball(W, C, 2.2f);
+			TArray<FIntVector> Shaft;
+			for (const FIntVector& Key : Tube(W, C, PocketSite + Up * 1.5 * VS, 1.0f))
+			{
+				if (!Pocket.Contains(Key))
+				{
+					Shaft.Add(Key);
+				}
+			}
+			const TArray<FIntVector> Region = Tube(W, C - Up * 3.0 * VS, PocketSite + Up * 3.0 * VS, 4.5f);
+			const int32 Undo0 = Edits->GetUndoCount();
+			const FEditSnapshot E0 = SnapshotEdits(W);
+			const TMap<FIntVector, FVoxelData> V0 = Capture(W, Region);
+
+			SystemSet(W, Pocket, [&](const FIntVector& Key) { return FVoxelData(EVoxelMaterial::Dirt, 40, Generated(W, Key).BiomeID, 0); });
+			Test.TestTrue(What + TEXT(": settles after the pocket"), SettleWater(W));
+			const TMap<FIntVector, FVoxelData> VPocket = Capture(W, Region);
+			const int32 PocketWet0 = WaterGained(V0, VPocket);
+			Test.TestEqual(What + TEXT(": the sealed pocket stays dry"), PocketWet0, 0);
+
+			SystemSet(W, Shaft, [](const FIntVector&) { return FVoxelData::Air(); });
+			Test.TestTrue(What + TEXT(": settles after the shaft"), SettleWater(W));
+			const TMap<FIntVector, FVoxelData> VFlooded = Capture(W, Region);
+			int32 PocketWater = 0;
+			for (const FIntVector& Key : Pocket)
+			{
+				PocketWater += IsWater(VFlooded[Key]) ? 1 : 0;
+			}
+			Test.TestEqual(What + TEXT(": pocket voxels flooded through the shaft"), PocketWater, Pocket.Num());
+			const int32 Steps = Edits->GetUndoCount() - Undo0;
+			Test.TestEqual(What + TEXT(": undo steps (the pocket and the shaft, no flood)"), Steps, 2);
+
+			// Undo the shaft: its voxels as before it; the pocket keeps its water (nothing drains it).
+			Edits->Undo();
+			Test.TestTrue(What + TEXT(": settles after undoing the shaft"), SettleWater(W));
+			const TMap<FIntVector, FVoxelData> VUndoShaft = Capture(W, Region);
+			int32 ShaftDiffer = 0, PocketKept = 0;
+			for (const FIntVector& Key : Shaft)
+			{
+				ShaftDiffer += (VUndoShaft[Key] == VPocket[Key]) ? 0 : 1;
+			}
+			for (const FIntVector& Key : Pocket)
+			{
+				PocketKept += IsWater(VUndoShaft[Key]) ? 1 : 0;
+			}
+			Test.TestEqual(What + TEXT(": shaft voxels that differ from before the shaft after its undo"), ShaftDiffer, 0);
+			Test.TestEqual(What + TEXT(": pocket voxels still water after undoing the shaft"), PocketKept, Pocket.Num());
+
+			// Undo the pocket: the region as it was.
+			Edits->Undo();
+			Test.TestTrue(What + TEXT(": settles after undoing the pocket"), SettleWater(W));
+			const int32 UndoPocketVoxels = VoxelDifferences(V0, Capture(W, Region));
+			const int32 UndoPocketEdits = EditDifferences(E0, SnapshotEdits(W));
+			Test.TestEqual(What + TEXT(": voxels that differ from before the pocket after both undos"), UndoPocketVoxels, 0);
+			Test.TestEqual(What + TEXT(": edits that differ from before the pocket after both undos"), UndoPocketEdits, 0);
+
+			// Redo both: the pocket sealed and dry, then the shaft and the flood.
+			Edits->Redo();
+			Test.TestTrue(What + TEXT(": settles after redoing the pocket"), SettleWater(W));
+			const int32 RedoPocketVoxels = VoxelDifferences(VPocket, Capture(W, Region));
+			Test.TestEqual(What + TEXT(": voxels that differ from the dry pocket after its redo"), RedoPocketVoxels, 0);
+			Edits->Redo();
+			Test.TestTrue(What + TEXT(": settles after redoing the shaft"), SettleWater(W));
+			const int32 RedoShaftVoxels = VoxelDifferences(VFlooded, Capture(W, Region));
+			Test.TestEqual(What + TEXT(": voxels that differ from the flooded pocket after redoing the shaft"), RedoShaftVoxels, 0);
+			Test.AddInfo(FString::Printf(TEXT("%s: pocket %d voxels, shaft %d; %d pocket voxels flooded, %d undo steps; undoing the shaft: %d shaft voxels differ from before it, %d pocket voxels still water; undoing the pocket: %d voxels and %d edits differ from before; redo pocket %d, redo shaft %d"),
+				*What, Pocket.Num(), Shaft.Num(), PocketWater, Steps, ShaftDiffer, PocketKept, UndoPocketVoxels, UndoPocketEdits,
+				RedoPocketVoxels, RedoShaftVoxels));
+		}
+
+		W.Stop();
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPropagationPlaneTest, "VoxelWorlds.Streaming.WaterPropagation.Plane",
@@ -1220,6 +1664,24 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterTilesPlaneTest, "VoxelWorlds.Streami
 bool FVoxelWaterTilesPlaneTest::RunTest(const FString& Parameters)
 {
 	VoxelWaterPropagationTest::RunInlandChannelTile(*this);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterUndoPlaneTest, "VoxelWorlds.Streaming.WaterPropagation.Undo.Plane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelWaterUndoPlaneTest::RunTest(const FString& Parameters)
+{
+	VoxelWaterPropagationTest::RunUndo(*this, false);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterUndoPlanetTest, "VoxelWorlds.Streaming.WaterPropagation.Undo.Planet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelWaterUndoPlanetTest::RunTest(const FString& Parameters)
+{
+	VoxelWaterPropagationTest::RunUndo(*this, true);
 	return true;
 }
 

@@ -1500,6 +1500,7 @@ Three findings from §13.11 get IDs here:
 | G57 | An edit that reached a chunk on its way to a mesh (queued, or on a worker) restaled none of its seams, and a mesh already on a worker landed without the edit: `MarkChunkDirty` acted only on a loaded chunk, so the seams, and the interior too in the second case, stayed stale until the chunk re-meshed for another reason. It follows any edit made within a mesh's round trip of another on the same chunk: a held brush, water propagation's batches, a stamp over chunks still loading. The face neighbours' re-mesh restaled the seams only when the neighbours were loaded at the second edit (found in G56, §19.13) | Fixed 2026-10-20 (§19.13): `MarkChunkDirty` restales the seams of a chunk that is queued or on a worker, and one on a worker re-meshes when its mesh lands (`FVoxelChunkState::bRemeshAfterMeshing`, `RemeshIfEditedWhileMeshing`); `Streaming.EditRemesh.*` edits 4 and 5: 1 to 3 stale chunk meshes and seam buckets under both rules before, none after | — |
 | G58 | Edit-driven water propagation (`UVoxelWaterPropagation`) reads the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel dug under the sea still reads solid, so a dig never floods (a probe: 8 dug voxels next to water, none flooded, no seed logged), and its flood sets each voxel to the generated voxel plus the flag, which would undo an edit there (found in G56, §19.13) | Fixed 2026-10-20 (§19.14): every read is edit-merged and the flag is set on the voxel as it is (a dig keeps its density and material); seeds come from the voxels each edit changed (`GetBroadcastEditBounds`), so system edits of single voxels seed too, a chunk without data yet scanning when it arrives; water-flagged air is the source (a fill keeps the flag but is solid); nothing is written into a chunk without data; the flood's own batches are not scanned; `Streaming.WaterPropagation.Plane`, `.Planet` | — |
 | G59 | The 2D water tiles (`UpdateWaterTileContribution`) and the cross-chunk pull at a chunk's mesh completion (`PropagateWaterFromNeighbors`) read and write the chunk's generated voxels only: water that an edit-driven flood put in the edit layer draws no tile (a channel dug inland from the shore below sea level is flagged but shows no water surface), and a flood does not continue into a chunk that loads after it (traced in G58, §19.14; before G58 no flood reached the edit layer) | Fixed 2026-10-20 (§19.16): a chunk with edits builds its tile mask from the edit-merged snapshot (the pull across faces drops the snapshot when it writes flags); when a chunk's water first settles, `UVoxelWaterPropagation::OnChunkWaterSettled` scans the faces it shares with settled chunks (either with edits, below the sea) for a voxel pair with an edit on either side, one dry air below the sea and the other water, and seeds the flood there; the pull itself stays on the generated voxels; `Streaming.WaterPropagation.ChunkArrival.{Plane,Planet}`, `.Tiles.Plane`, `voxel.Water.Stats` | — |
+| G60 | Water propagation's flood batches entered the edit manager's undo history, and an undo record kept only each voxel's previous value (`FVoxelEdit::OriginalData`): a flood replaces a dug voxel's relative edit with a `Set` whose previous value is the dig's unset one (air), so its undo removed the edit and the first undo after a dig under the sea (the demo test actor's Z) took back the flood and the dig at every voxel it had reached. The same record lost a previous relative edit (a dig under a dig), a previous `Set` to air and an edit removed by cancelling deltas; it kept no chunk, so undo could revert another chunk's voxel at the same local position and redo wrote every edit into the operation's first chunk, broadcasting only that chunk; and redo broadcast the current source with no radius, so a system edit's redo re-extracted no scatter (traced in G58, §19.14) | Fixed 2026-10-20 (§19.17): water propagation's operations stay out of the history (`BeginEditOperation(..., bAddToUndoHistory=false)`: no undo step, the redo stack kept); every operation records per voxel its chunk and the whole edit before and after (`FVoxelEditChange`), so undo, redo and cancel restore the edit layer exactly in each voxel's own chunk and broadcast each chunk with its own bounds, and redo broadcasts the operation's own source, centre and radius; undoing a dig under the sea restores its voxels, flood included, and its redo floods again; water beyond the dig's voxels stays (nothing drains it); `Edit.UndoRedo.Records`, `Streaming.WaterPropagation.Undo.{Plane,Planet}`, `EditRemesh` edits 6-7, `Scatter.EditReaders` undo/redo audits | — |
 | G61 | Marching Cubes' LOD normals use the same stride-scale gradient taps G44 fixed in Dual Contouring (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD` and the GPU MC shader's), so an MC world's LOD 1 and 2 would lean the same way (found in G44, §20.8). No shipped configuration meshes with MC: the planets and `VoxelDemo` are DC | Open: the same voxel-resolution vertex normals in MC, CPU and GPU | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
@@ -5362,7 +5363,8 @@ continue into it when it loads. Before G58 no flood reached the edit layer, so n
   collision do not). A dig under the open sea floods in one batch.
 - The batches enter the undo history (the demo test actor's Z): undo restores a Set's previous `NewData`, and for a voxel
   a brush dug (a relative edit, which keeps none) that removes the edit, so the first Z after a dig under the sea undoes
-  the flood and, at the voxels it reached, the dig.
+  the flood and, at the voxels it reached, the dig. Fixed in §19.17 (G60): the flood stays out of the history, and undo
+  and redo restore the edit layer exactly.
 - The cave flag: generation keeps cave air dry under the sea; a dig that opens a cave to the sea floods it, up to
   `MaxPropagationVoxels` (8,192).
 
@@ -5610,6 +5612,131 @@ identical to G58's (no generation change).
   that arrives later does not push its flags into a chunk already meshed (G56's note; not seen in the tests).
 - A flood still stops at a chunk whose water is not in place and continues when it arrives, a frame or more later; the
   water tile of a flooded column appears with the re-mesh of the flood's batch, as any edit's.
+
+### 19.17 G60: undo and redo restore the edit layer; the flood stays out of the history (2026-10-20)
+
+Bases: VoxelWorlds `5907e2d`, UE5_PluginDev `98b2a85` (G59 and the demo caves merged). Branches `fix/g60-water-undo`
+(VoxelWorlds) and `claude/nifty-nash-4063d7` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic
+Games\UE_5.8` in a worktree editor (Claudius on 8095), background throttling off. It takes up the second item §19.14
+left: the flood's batches entered the undo history.
+
+**What it did** (checked in the code).
+
+- **The flood in the history.** Each frame's flood is one edit operation (`ProcessPropagation`, G58), and
+  `EndEditOperation` put every operation on the undo stack and emptied the redo stack. A dig under the sea took two undo
+  steps, the dig and its flood (one more for each frame a flood takes).
+- **The undo record.** An operation kept its edits as applied, each with `FVoxelEdit::OriginalData`: the `NewData` of the
+  edit the voxel held before, or air when it held none. Undo wrote that value into the `NewData` of the edit the layer
+  held at the voxel and removed the edit when the value was air; the edit's mode stayed. A relative edit (a dig, a fill,
+  a paint) keeps no `NewData` (it is air), so:
+  - The flood, a `Set` of the dug voxel plus the flag over the dig's `Subtract`, recorded air, and its undo removed the
+    edit: the voxel went back to the generated rock. So the first undo after a dig under the sea (the demo test actor's Z)
+    took the flood back and the dig at every voxel the flood had reached. The voxels the dig had only softened (still
+    solid) kept it; the second undo took those.
+  - Any edit over a relative edit went the same way: a dig over a dig (the two deltas sum into one `Subtract`, recorded
+    as air: its undo removed both), and a fill cancelling a dig (the edit is removed, and its undo found no edit to set).
+  - A `Set` over a `Set` to air (a wall over a dungeon stamp's air) recorded air: its undo removed both.
+- **The chunk.** The record kept each edit's position in its chunk but not the chunk. Undo took the first of the
+  operation's chunks whose layer held an edit at that position, for an operation over several chunks possibly another
+  chunk's voxel. Redo wrote every edit into the operation's first chunk and broadcast only that chunk: a brush across a
+  chunk face came back with all its voxels in one chunk, at the others' positions, and the others were not re-meshed.
+  Cancel wrote every edit into every chunk of the operation.
+- **Redo's broadcast** carried the edit manager's current source with no centre or radius: Player after any system edit
+  restores it. The chunk manager does nothing to scatter for a Player broadcast with no radius, so a system edit's redo
+  re-extracted no scatter (neither the chunk nor its readers, G33), and a player dig's redo left the scatter its undo had
+  regenerated (a System broadcast) standing over the hole.
+- The path that removes an edit (cancelling deltas) read the edit after removing it from the layer's map.
+
+**Decision: the flood stays out of the history.** The alternative, the flood joining its dig's undo step, needs to know
+which operation each of its batches follows from. A flood runs over frames, waits for chunks whose water is not in place
+(G58) and continues when a chunk arrives (G59), by which time other operations can be on the stack, and adding to an
+operation under the top breaks the stack's order (its undo would restore voxels a later operation changed). Out of the
+history, undoing the dig restores its voxels as they were before it, the flood there with them, once the record
+restores whole previous edits; a redo of the dig floods again through the propagation, which re-meshes, re-cooks and
+re-extracts as any edit's broadcast. What it does not do: water the flood put beyond the dig's own voxels (a cave or a
+sealed pocket the dig opened) stays after the dig is undone, since nothing drains water, as when a fill seals a flooded
+hole.
+
+**What changed** (VoxelCore, VoxelStreaming).
+
+- **Outside the history.** `UVoxelEditManager::BeginEditOperation(Description, bAddToUndoHistory = true)`: an operation
+  begun with false takes no undo step and leaves the redo stack as it is; it is broadcast like any other. Water
+  propagation's operations begin with false.
+- **The undo record** (`FVoxelEditOperation::Changes` of `FVoxelEditChange`, replacing its edit list): for each voxel
+  change, the chunk, the position, and the whole edit the voxel held before and after it (or none). Undo restores
+  Before last change first (an operation can change a voxel twice), cancel the same, redo After first change first
+  (`RestoreOperation`), each voxel in its own chunk, and each chunk changed is broadcast with the bounds of its own
+  restored voxels. `OriginalData` is still written to the edits file; undo no longer reads it.
+- **Redo broadcasts** the source, brush centre and radius the operation broadcast when it ended
+  (`FVoxelEditOperation::Source`, `EditCenter`, `EditRadius`): a player brush clears scatter in its sphere again, a system
+  edit re-extracts its readers. Undo still broadcasts System with no radius (the restored voxels regenerate).
+- The removal path records the edit before removing it.
+- The history holds about 130 bytes per voxel change against about 40 before (at most 100 operations).
+
+**Tests** (new `VoxelCore/Tests/VoxelEditUndoRedoTests.cpp`; G58's `VoxelWaterPropagationTests.cpp`, G56's
+`VoxelEditRemeshTests.cpp` and G33's `VoxelScatterEditReadersTests.cpp` extended).
+
+- **`VoxelWorlds.Edit.UndoRedo.Records`** (the edit layer alone): every edit of every chunk (mode, delta, material, new
+  voxel) against the state an undo or redo should give. A brush across a chunk face (57 voxels in two chunks); a dig
+  over a dig; a `Set` to stone over a `Set` to air; a fill cancelling a dig; an operation outside the history (no undo
+  step, the redo stack kept; undoing the dig before it removes its edit on the dig's centre and keeps its other voxel);
+  a cancel.
+- **`VoxelWorlds.Streaming.WaterPropagation.Undo.Plane` / `.Planet`**: G58's worlds (voxel 50, chunk 32, view distance
+  3,000, a sea; the plane's `WorldOrigin` off the voxel grid). For each edit: the region's edit-merged voxels and every
+  edit in the world before it; the edit, settled (and flooded); one undo, settled; a redo, settled; and both again. The
+  edit must take one undo step and its flood none, one undo must give back the region's voxels and the world's edits as
+  they were before the edit, and a redo the flooded state. A: a player dig on the seabed (sphere brush of radius 2.5
+  voxels, `Sharp`) inside a chunk, then that flooded dig through `SaveEditsToFile` and `LoadEditsFromFile` (a save's
+  `.edits.bin`). B: the same dig centred on a chunk face (two chunks). C: a player dig on land, 4 to 12 voxels over the
+  sea. D: a system stamp (one operation of single-voxel `Set`s to air, as the dungeon stamper's) opening a shaft from 4
+  voxels under the seabed into the sea. E: a sealed pocket (dirt of density 40) 7 voxels under the seabed, then a system
+  shaft opening it: undoing the shaft must put the shaft's voxels back and leave the pocket's water, undoing the pocket
+  the region as before, and redoing both the dry pocket, then the flood.
+- **`Streaming.EditRemesh.Plane` / `.Planet`** gain edits 6 and 7: a second player brush across edit 3's four chunks,
+  settled and undone, then its redo; both against a full rebuild like the other edits, and the redo must broadcast every
+  chunk the brush did.
+- **`Scatter.EditReaders.Plane` / `.Planet`** (rule 1): the pass's two system edits undone, then redone, each followed by
+  the audit (every cached chunk against a fresh extraction).
+
+"Before" is the base build's edit manager, edit types, water propagation and chunk manager with the new tests (the
+operation outside the history needs the new parameter, so that case ran after only).
+
+| Case (plane / planet) | Before | After |
+|------|------|------|
+| A: seabed dig inside a chunk, 54 / 51 voxels changed, 5 / 4 flooded | 2 undo steps. One undo: 49 / 47 voxels and 52 / 53 edits differ from before the dig (the softened voxels still dug, the flooded ones back to rock), 1 step left; the redo then redoes the flood | 1 step. One undo: 0 voxels and 0 edits differ; the redo floods again (0 differ from the flooded dig); both again: 0 |
+| A, saved and loaded: 57 edits, 317 / 466 water voxels in the region | 0 edits and 0 voxels differ, nothing flooded again | the same |
+| B: seabed dig on a chunk face, 51 / 52 voxels changed, 7 / 5 flooded | 2 steps. One undo: 44 / 47 voxels and 50 / 52 edits differ; after the redo 5 / 4 voxels and 10 / 8 edits differ from the flooded dig (the flood redone into one chunk) | 1 step; 0 after each undo and redo |
+| C: land dig, 52 / 48 voxels changed, 482 / 323 uu over the sea | 1 step; 0 after each undo and redo | the same |
+| D: system stamp, 32 / 34 voxels, all flooded | 2 steps. The flood's undo removed every stamp voxel (its `OriginalData` was air), so one undo looked right (0 differ) but left the stamp's step on the stack, with nothing for it to undo | 1 step; 0 after each undo and redo, 0 steps left after the undo |
+| E: pocket of 44 voxels, shaft of 28 / 24, the pocket flooded through it | 3 steps. The first undo (the flood's) left the pocket dry and put the shaft back to rock; the second (the shaft's) found nothing to undo, so 44 voxels and 44 edits differ from before the pocket (its step still on the stack); the first redo (the shaft's): 71 / 64 voxels differ from the dry pocket | 2 steps. Undoing the shaft: its voxels as before it (0 differ), the pocket still water (44 of 44); undoing the pocket: 0 voxels and 0 edits differ; redo pocket 0, redo shaft 0 |
+| Edit layer (`Edit.UndoRedo.Records`) | brush across a face redone into 1 chunk (36 edits differ); dig over a dig: its undo leaves 7 of 7 edits wrong; `Set` over a `Set` to air: 2 of 2; a cancelling fill's undo: the dig not back, its redo leaves an edit; a cancel: 58 edits differ | 0 in every case (2 chunks after the redo) |
+| `EditRemesh` edit 7 (the redo of a brush across a chunk edge) | broadcast 1 of the brush's 8 chunks (4 with water, 4 on the planet); against a full rebuild 0 differ (the rebuild reads the same wrong layer) | broadcasts all of them; 0 differ |
+| `Scatter.EditReaders`, the two edits redone | 2 / 4 cached chunks stale (the readers not re-extracted); after the undos 0 | 0 |
+
+**Live** (`VoxelDemo`, a fresh PIE: sea at Z -1,500, chunks of 64 voxels of 75 uu; input blocked, the pawn held over
+the lake by the spawn, no edits before). The demo test actor's own dig (`TestDigAt`: a `Smooth` sphere of 300 uu taking
+100) on the lake bed at (3600, -4875, -3615) changed 251 voxels in one chunk and flooded 6 (`Water propagation done: 6
+voxels flooded from 6 seeds`); the history held one step. `TestUndo` (what the Z key calls) undid `Dig` (251 edits): no
+edit left, and the undo's scan found no seed. `TestRedo`: the 251 edits again, and the same 6 voxels flooded; a second
+undo and redo did the same. Then `vox.Save` with the flooded dig (251 edits in the `.edits.bin`, 6,554 bytes) and a new
+PIE, which loads the save: 251 edits loaded, no undo step. Once the pawn was back, the deferred scan of the loaded edits
+and 5 chunk faces on arrival (15,959 reads in 0.6 ms) found no seed and flooded nothing: the flooded voxels kept their
+flag (without it, those 6 dug voxels beside the sea would have seeded again). `vox.DeleteSave` after.
+
+**Suites** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 567/567 headless and
+567/567 in the editor with the GPU tests running, no device loss (G59's 564 and the three above); the 108 GPU parity
+lines identical to G59's (no generation change).
+
+**Left as they were:**
+
+- Water does not drain: water the flood put beyond the voxels of the edit that let it in (a cave, a pocket) stays when
+  that edit is undone (case E). Draining would need the flood to know what is still connected to the sea.
+- System edits are undo steps like a player's: a POI's campsite, a dungeon stamp and its entrance (`Dungeon Stamp`),
+  `voxel.Edit.System`, a test's batch. The demo test actor's Z after a dungeon streamed in undoes its stamp (as before;
+  now exactly). `bAddToUndoHistory` false would keep them out; not changed here.
+- A clear (`ClearChunkEdits`, `ClearAllEdits`) is outside the history and leaves it as it is: an undo after a clear puts
+  the operation's previous edits back on its voxels (before, it found no edit there and did nothing). A load clears the
+  history, and nothing else calls them.
 
 ## 20. Spherical Phase 6: big planets and orbit (planned 2026-10-17, done 2026-10-19)
 

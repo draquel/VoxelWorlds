@@ -1337,8 +1337,8 @@ void UVoxelChunkManager::Initialize(
 					EditScatterEditedChunks.Add(ChunkCoord);
 				}
 			}
-			// Zero-radius player undo/redo needs no scatter handling — the targeted removal already
-			// happened at original-edit time.
+			// A zero-radius player edit has no sphere to clear. Undo broadcasts System (the restored voxels regenerate),
+			// and redo the operation's own source, centre and radius (G60).
 		}
 
 		// Notify water propagation system of the edit

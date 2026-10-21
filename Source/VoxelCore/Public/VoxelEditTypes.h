@@ -160,7 +160,11 @@ struct VOXELCORE_API FVoxelEdit
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
 	FVoxelData NewData;
 
-	/** Original voxel data before edit (for undo) */
+	/**
+	 * The voxel before the edit as the edit layer knew it: the previous edit's NewData, or air when there was none (the
+	 * generated voxel is not known here). Kept in the edits file; undo does not read it but restores the operation's
+	 * FVoxelEditChange::Before, the whole previous edit (world modes review G60).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
 	FVoxelData OriginalData;
 
@@ -388,12 +392,48 @@ struct VOXELCORE_API FChunkEditLayer
 };
 
 /**
+ * One voxel's change in an edit operation, for undo and redo: the voxel's chunk and position, and the edit the voxel held
+ * in the edit layer before and after the change (none: the generated voxel). Undo puts Before back and redo After, so both
+ * restore the edit layer exactly, whatever the change replaced: a relative edit (a dig, which has no previous voxel value
+ * of its own), a Set to air, or an edit that cancelling deltas removed (world modes review G60).
+ */
+USTRUCT()
+struct VOXELCORE_API FVoxelEditChange
+{
+	GENERATED_BODY()
+
+	/** Chunk the voxel is in */
+	UPROPERTY()
+	FIntVector ChunkCoord = FIntVector::ZeroValue;
+
+	/** Position within the chunk */
+	UPROPERTY()
+	FIntVector LocalPosition = FIntVector::ZeroValue;
+
+	/** The voxel's edit before the change; meaningful only when bHadBefore */
+	UPROPERTY()
+	FVoxelEdit Before;
+
+	/** The voxel's edit after the change; meaningful only when bHasAfter (false: the change removed the edit) */
+	UPROPERTY()
+	FVoxelEdit After;
+
+	/** Whether the voxel had an edit before the change */
+	UPROPERTY()
+	bool bHadBefore = false;
+
+	/** Whether the voxel has an edit after the change */
+	UPROPERTY()
+	bool bHasAfter = false;
+};
+
+/**
  * Undo/redo operation containing a batch of edits.
  *
  * Represents a single user action that may affect multiple voxels
  * across multiple chunks. All edits in an operation are undone/redone together.
  *
- * Memory: ~64 bytes base + ~32 bytes per edit
+ * Memory: ~64 bytes base + ~130 bytes per voxel change
  */
 USTRUCT()
 struct VOXELCORE_API FVoxelEditOperation
@@ -404,9 +444,9 @@ struct VOXELCORE_API FVoxelEditOperation
 	UPROPERTY()
 	uint64 OperationId = 0;
 
-	/** All voxel edits in this operation */
+	/** Every voxel change in this operation, in the order made: undo restores them last to first, redo first to last */
 	UPROPERTY()
-	TArray<FVoxelEdit> Edits;
+	TArray<FVoxelEditChange> Changes;
 
 	/** Chunk coordinates affected by this operation */
 	UPROPERTY()
@@ -420,6 +460,27 @@ struct VOXELCORE_API FVoxelEditOperation
 	UPROPERTY()
 	double Timestamp = 0.0;
 
+	/**
+	 * Whether ending the operation adds it to the undo history. False for edits that follow from others rather than being
+	 * made (water propagation's flood: undoing the dig puts its voxels back, and a redo of the dig floods again; G60).
+	 */
+	UPROPERTY()
+	bool bAddToUndoHistory = true;
+
+	/**
+	 * The source, brush centre and radius the operation's edits were broadcast with when it ended. A redo broadcasts them
+	 * again, so its listeners do what they did for the edit (a player brush clears scatter in its sphere, a system edit
+	 * re-extracts the chunks that read it; G60). An undo broadcasts System with no radius: the restored voxels regenerate.
+	 */
+	UPROPERTY()
+	EEditSource Source = EEditSource::Player;
+
+	UPROPERTY()
+	FVector EditCenter = FVector::ZeroVector;
+
+	UPROPERTY()
+	float EditRadius = 0.0f;
+
 	FVoxelEditOperation() = default;
 
 	explicit FVoxelEditOperation(uint64 InId, const FString& InDescription = TEXT(""))
@@ -430,12 +491,28 @@ struct VOXELCORE_API FVoxelEditOperation
 	}
 
 	/**
-	 * Add an edit to this operation.
-	 * Also tracks the affected chunk if not already tracked.
+	 * Record one voxel's change, and track its chunk if not already tracked.
+	 *
+	 * @param ChunkCoord The voxel's chunk
+	 * @param LocalPos The voxel's position within the chunk
+	 * @param Before The voxel's edit before the change, or nullptr if it had none
+	 * @param After The voxel's edit after the change, or nullptr if the change removed it
 	 */
-	void AddEdit(const FVoxelEdit& Edit, const FIntVector& ChunkCoord)
+	void RecordChange(const FIntVector& ChunkCoord, const FIntVector& LocalPos, const FVoxelEdit* Before, const FVoxelEdit* After)
 	{
-		Edits.Add(Edit);
+		FVoxelEditChange& Change = Changes.AddDefaulted_GetRef();
+		Change.ChunkCoord = ChunkCoord;
+		Change.LocalPosition = LocalPos;
+		if (Before)
+		{
+			Change.Before = *Before;
+			Change.bHadBefore = true;
+		}
+		if (After)
+		{
+			Change.After = *After;
+			Change.bHasAfter = true;
+		}
 		AffectedChunks.AddUnique(ChunkCoord);
 	}
 
@@ -444,15 +521,15 @@ struct VOXELCORE_API FVoxelEditOperation
 	 */
 	FORCEINLINE bool IsEmpty() const
 	{
-		return Edits.Num() == 0;
+		return Changes.Num() == 0;
 	}
 
 	/**
-	 * Get number of edits in this operation.
+	 * Get number of voxel changes in this operation.
 	 */
 	FORCEINLINE int32 GetEditCount() const
 	{
-		return Edits.Num();
+		return Changes.Num();
 	}
 
 	/**
@@ -461,7 +538,7 @@ struct VOXELCORE_API FVoxelEditOperation
 	SIZE_T GetMemoryUsage() const
 	{
 		return sizeof(FVoxelEditOperation)
-			+ Edits.GetAllocatedSize()
+			+ Changes.GetAllocatedSize()
 			+ AffectedChunks.GetAllocatedSize()
 			+ Description.GetAllocatedSize();
 	}

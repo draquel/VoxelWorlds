@@ -8,6 +8,7 @@
 #include "Serialization/MemoryReader.h"
 #include "Misc/FileHelper.h"
 #include "HAL/PlatformFileManager.h"
+#include "Misc/Optional.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelEdit, Log, All);
 
@@ -78,7 +79,7 @@ void UVoxelEditManager::Shutdown()
 
 // ==================== Edit Operations ====================
 
-void UVoxelEditManager::BeginEditOperation(const FString& Description)
+void UVoxelEditManager::BeginEditOperation(const FString& Description, bool bAddToUndoHistory)
 {
 	if (!bIsInitialized)
 	{
@@ -93,6 +94,7 @@ void UVoxelEditManager::BeginEditOperation(const FString& Description)
 	}
 
 	CurrentOperation = MakeUnique<FVoxelEditOperation>(NextOperationId++, Description);
+	CurrentOperation->bAddToUndoHistory = bAddToUndoHistory;
 	OperationBounds.Reset();
 
 	UE_LOG(LogVoxelEdit, Verbose, TEXT("Edit operation started: '%s' (ID=%llu)"),
@@ -118,21 +120,32 @@ void UVoxelEditManager::EndEditOperation()
 		return;
 	}
 
-	// Clear redo stack when new edits are made
-	RedoStack.Empty();
-
 	// Capture the affected chunks before moving the operation. ApplyEditInternal defers its
 	// per-voxel notification during a batch op; we fire ONE OnChunkEdited per affected chunk here
 	// (deduped set), so the chunk-manager handler's scatter-clear + dirty cascade runs a handful of
 	// times instead of once per edited voxel (the max-brush freeze).
 	const TArray<FIntVector> AffectedChunks = CurrentOperation->AffectedChunks;
+	const bool bAddToUndoHistory = CurrentOperation->bAddToUndoHistory;
 
-	// Add to undo stack
-	UndoStack.Add(MoveTemp(*CurrentOperation));
+	// What the broadcasts below carry, for a redo to broadcast again (G60).
+	CurrentOperation->Source = CurrentEditSource;
+	CurrentOperation->EditCenter = CurrentEditCenter;
+	CurrentOperation->EditRadius = CurrentEditRadius;
+
+	if (bAddToUndoHistory)
+	{
+		// Clear redo stack when new edits are made
+		RedoStack.Empty();
+
+		// Add to undo stack
+		UndoStack.Add(MoveTemp(*CurrentOperation));
+
+		// Trim if necessary
+		TrimUndoStack();
+	}
+	// Else edits that follow from others (water propagation's flood): no undo step, and the redo stack stays. Undoing the
+	// operation that caused them restores its voxels as they were before it, these edits there included (G60).
 	CurrentOperation.Reset();
-
-	// Trim if necessary
-	TrimUndoStack();
 
 	// Batched edit notification: one broadcast per affected chunk (operation-level source/center/radius), with the voxels
 	// the operation changed in that chunk.
@@ -151,9 +164,13 @@ void UVoxelEditManager::EndEditOperation()
 	CurrentEditRadius = 0.0f;
 
 	// Notify listeners
-	OnUndoRedoStateChanged.Broadcast();
+	if (bAddToUndoHistory)
+	{
+		OnUndoRedoStateChanged.Broadcast();
+	}
 
-	UE_LOG(LogVoxelEdit, Verbose, TEXT("Edit operation completed (UndoStack=%d)"), UndoStack.Num());
+	UE_LOG(LogVoxelEdit, Verbose, TEXT("Edit operation completed (UndoStack=%d%s)"), UndoStack.Num(),
+		bAddToUndoHistory ? TEXT("") : TEXT(", outside the history"));
 }
 
 void UVoxelEditManager::CancelEditOperation()
@@ -164,43 +181,14 @@ void UVoxelEditManager::CancelEditOperation()
 		return;
 	}
 
-	// Revert all edits in the current operation
-	for (const FVoxelEdit& Edit : CurrentOperation->Edits)
-	{
-		// Find which chunk this edit belongs to
-		for (const FIntVector& ChunkCoord : CurrentOperation->AffectedChunks)
-		{
-			if (FChunkEditLayer* Layer = EditLayers.Find(ChunkCoord))
-			{
-				const int32 Index = Edit.GetVoxelIndex(Layer->ChunkSize);
+	// Revert all edits in the current operation: every voxel as it was before it, in its own chunk
+	TMap<FIntVector, FVoxelEditedVoxelBounds> Reverted;
+	RestoreOperation(*CurrentOperation, /*bAsLeft=*/false, Reverted);
 
-				// Remove the edit or restore original
-				if (Edit.OriginalData == FVoxelData::Air())
-				{
-					// Was a new edit - just remove it
-					Layer->Edits.Remove(Index);
-				}
-				else
-				{
-					// Restore original edit
-					FVoxelEdit RevertEdit = Edit;
-					RevertEdit.NewData = Edit.OriginalData;
-					Layer->Edits.Add(Index, RevertEdit);
-				}
-			}
-		}
-	}
-
-	// Notify affected chunks (use current source - cancelling reverts player's work). The revert above wrote every edit's
-	// index into every affected chunk's layer, so each chunk's changed voxels are all the edits' positions.
-	FVoxelEditedVoxelBounds Reverted;
-	for (const FVoxelEdit& Edit : CurrentOperation->Edits)
+	// Notify affected chunks (use current source - cancelling reverts player's work)
+	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : Reverted)
 	{
-		Reverted.Add(Edit.LocalPosition);
-	}
-	for (const FIntVector& ChunkCoord : CurrentOperation->AffectedChunks)
-	{
-		BroadcastChunkEdited(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, Reverted);
+		BroadcastChunkEdited(Pair.Key, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, Pair.Value);
 	}
 
 	UE_LOG(LogVoxelEdit, Log, TEXT("Edit operation '%s' cancelled (%d edits reverted)"),
@@ -458,38 +446,10 @@ bool UVoxelEditManager::Undo()
 	FVoxelEditOperation Operation = MoveTemp(UndoStack.Last());
 	UndoStack.RemoveAt(UndoStack.Num() - 1);
 
-	// Track affected chunks, and the voxels reverted in each
+	// Every voxel the operation changed gets back the edit it had before (or none), and the voxels reverted in each chunk
+	// are tracked. Edits made outside the history since (water propagation's flood) at those voxels go with it (G60).
 	TMap<FIntVector, FVoxelEditedVoxelBounds> AffectedChunks;
-
-	// Revert each edit
-	for (const FVoxelEdit& Edit : Operation.Edits)
-	{
-		// Find the chunk this edit belongs to
-		for (const FIntVector& ChunkCoord : Operation.AffectedChunks)
-		{
-			if (FChunkEditLayer* Layer = EditLayers.Find(ChunkCoord))
-			{
-				const int32 Index = Edit.GetVoxelIndex(Layer->ChunkSize);
-				if (Layer->Edits.Contains(Index))
-				{
-					// Swap to original data
-					FVoxelEdit* ExistingEdit = Layer->Edits.Find(Index);
-					if (ExistingEdit)
-					{
-						ExistingEdit->NewData = Edit.OriginalData;
-
-						// If reverting to air, remove the edit entirely
-						if (Edit.OriginalData == FVoxelData::Air())
-						{
-							Layer->Edits.Remove(Index);
-						}
-					}
-					AffectedChunks.FindOrAdd(ChunkCoord).Add(Edit.LocalPosition);
-					break;
-				}
-			}
-		}
-	}
+	RestoreOperation(Operation, /*bAsLeft=*/false, AffectedChunks);
 
 	// Add to redo stack
 	RedoStack.Add(MoveTemp(Operation));
@@ -520,36 +480,24 @@ bool UVoxelEditManager::Redo()
 	FVoxelEditOperation Operation = MoveTemp(RedoStack.Last());
 	RedoStack.RemoveAt(RedoStack.Num() - 1);
 
-	// Track affected chunks, and the voxels re-applied in each
+	// Every voxel the operation changed gets the edit it left (or none) again, in its own chunk; the voxels re-applied in
+	// each chunk are tracked. Edits that followed from it before its undo (a flood) come again from its broadcast (G60).
 	TMap<FIntVector, FVoxelEditedVoxelBounds> AffectedChunks;
-
-	// Re-apply each edit
-	for (const FVoxelEdit& Edit : Operation.Edits)
-	{
-		for (const FIntVector& ChunkCoord : Operation.AffectedChunks)
-		{
-			FChunkEditLayer* Layer = GetOrCreateEditLayer(ChunkCoord);
-			if (Layer)
-			{
-				const int32 Index = Edit.GetVoxelIndex(Layer->ChunkSize);
-
-				// Re-apply the edit
-				FVoxelEdit RedoEdit = Edit;
-				Layer->Edits.Add(Index, RedoEdit);
-				AffectedChunks.FindOrAdd(ChunkCoord).Add(Edit.LocalPosition);
-				break;
-			}
-		}
-	}
+	RestoreOperation(Operation, /*bAsLeft=*/true, AffectedChunks);
+	const EEditSource Source = Operation.Source;
+	const FVector EditCenter = Operation.EditCenter;
+	const float EditRadius = Operation.EditRadius;
 
 	// Add back to undo stack
 	UndoStack.Add(MoveTemp(Operation));
 
-	// Notify affected chunks (redo reapplies edits, use current source - typically Player)
-	// Use zero radius since this is a full operation redo
+	// Notify affected chunks with what the operation broadcast when it was made (its source, brush centre and radius), so
+	// they respond as they did then: a player brush clears scatter in its sphere again (its undo regenerated it), a system
+	// edit re-extracts the chunks that read it. It used the current source with no radius, so a system edit redone as a
+	// player's re-extracted nothing (G60).
 	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : AffectedChunks)
 	{
-		BroadcastChunkEdited(Pair.Key, CurrentEditSource, FVector::ZeroVector, 0.0f, Pair.Value);
+		BroadcastChunkEdited(Pair.Key, Source, EditCenter, EditRadius, Pair.Value);
 	}
 
 	OnUndoRedoStateChanged.Broadcast();
@@ -1003,6 +951,13 @@ void UVoxelEditManager::ApplyEditInternal(
 		return;
 	}
 
+	// The edit the voxel held before, for undo
+	TOptional<FVoxelEdit> Before;
+	if (const FVoxelEdit* Existing = Layer->GetEdit(LocalPos))
+	{
+		Before = *Existing;
+	}
+
 	// Create edit record
 	FVoxelEdit Edit(LocalPos, NewData, OriginalData, Mode);
 
@@ -1012,7 +967,7 @@ void UVoxelEditManager::ApplyEditInternal(
 	// Track in current operation if active
 	if (CurrentOperation.IsValid())
 	{
-		CurrentOperation->AddEdit(Edit, ChunkCoord);
+		CurrentOperation->RecordChange(ChunkCoord, LocalPos, Before.GetPtrOrNull(), &Edit);
 		OperationBounds.FindOrAdd(ChunkCoord).Add(LocalPos);
 	}
 
@@ -1044,8 +999,15 @@ void UVoxelEditManager::ApplyEditInternal(
 	FVoxelEdit EditCopy = Edit;
 	EditCopy.LocalPosition = LocalPos;
 
+	// The edit the voxel held before, for undo (G60: a relative edit has no previous voxel value of its own to restore)
+	TOptional<FVoxelEdit> Before;
+	if (const FVoxelEdit* Existing = Layer->GetEdit(LocalPos))
+	{
+		Before = *Existing;
+	}
+
 	// Check for existing edit at this location and accumulate if compatible
-	if (const FVoxelEdit* ExistingEdit = Layer->GetEdit(LocalPos))
+	if (const FVoxelEdit* ExistingEdit = Before.GetPtrOrNull())
 	{
 		const bool bExistingAbsolute = ExistingEdit->EditMode == EEditMode::Set || ExistingEdit->EditMode == EEditMode::Smooth;
 		const bool bNewRelative = EditCopy.EditMode == EEditMode::Add || EditCopy.EditMode == EEditMode::Subtract
@@ -1104,13 +1066,10 @@ void UVoxelEditManager::ApplyEditInternal(
 					// This reverts the voxel to pure procedural state
 					Layer->RemoveEdit(LocalPos);
 
-					// Track removal in current operation if active
+					// Track removal in current operation if active: undo puts the removed edit back, redo removes it again
 					if (CurrentOperation.IsValid())
 					{
-						// Store a "removal" edit for undo purposes
-						FVoxelEdit RemovalEdit = *ExistingEdit;
-						RemovalEdit.DensityDelta = 0;
-						CurrentOperation->AddEdit(RemovalEdit, ChunkCoord);
+						CurrentOperation->RecordChange(ChunkCoord, LocalPos, ExistingEdit, nullptr);
 						OperationBounds.FindOrAdd(ChunkCoord).Add(LocalPos);
 					}
 
@@ -1158,7 +1117,7 @@ void UVoxelEditManager::ApplyEditInternal(
 	// Track in current operation if active
 	if (CurrentOperation.IsValid())
 	{
-		CurrentOperation->AddEdit(EditCopy, ChunkCoord);
+		CurrentOperation->RecordChange(ChunkCoord, LocalPos, Before.GetPtrOrNull(), &EditCopy);
 		OperationBounds.FindOrAdd(ChunkCoord).Add(LocalPos);
 	}
 
@@ -1207,9 +1166,8 @@ FVoxelData UVoxelEditManager::GetOriginalVoxelData(const FIntVector& ChunkCoord,
 		}
 	}
 
-	// No existing edit - return air as placeholder
-	// NOTE: In a full implementation, we'd query the chunk manager for procedural data
-	// For now, this means undo will restore to air for first-time edits
+	// No existing edit - return air as placeholder (procedural data is not known here). Undo does not read it: it restores
+	// the change's previous edit, or none (G60).
 	return FVoxelData::Air();
 }
 
@@ -1218,5 +1176,29 @@ void UVoxelEditManager::TrimUndoStack()
 	while (UndoStack.Num() > MaxUndoHistory)
 	{
 		UndoStack.RemoveAt(0);
+	}
+}
+
+void UVoxelEditManager::RestoreOperation(const FVoxelEditOperation& Operation, bool bAsLeft,
+	TMap<FIntVector, FVoxelEditedVoxelBounds>& OutChunkBounds)
+{
+	// An operation can change a voxel more than once (a batch writing it twice): the state before it is its first change's
+	// Before, the state it left its last change's After, hence the two directions.
+	const int32 Count = Operation.Changes.Num();
+	for (int32 Step = 0; Step < Count; ++Step)
+	{
+		const FVoxelEditChange& Change = Operation.Changes[bAsLeft ? Step : Count - 1 - Step];
+		const bool bHasEdit = bAsLeft ? Change.bHasAfter : Change.bHadBefore;
+		if (bHasEdit)
+		{
+			FVoxelEdit Edit = bAsLeft ? Change.After : Change.Before;
+			Edit.LocalPosition = Change.LocalPosition;
+			GetOrCreateEditLayer(Change.ChunkCoord)->ApplyEdit(Edit);
+		}
+		else if (FChunkEditLayer* Layer = EditLayers.Find(Change.ChunkCoord))
+		{
+			Layer->RemoveEdit(Change.LocalPosition);
+		}
+		OutChunkBounds.FindOrAdd(Change.ChunkCoord).Add(Change.LocalPosition);
 	}
 }
