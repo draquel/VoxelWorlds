@@ -1506,7 +1506,9 @@ Three findings from §13.11 get IDs here:
 | G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` (7.7 ms against 0.33 ms a job; 6,564 jobs took 50-52 s of worker time after `voxel.RemeshAll`), while MC's chunk meshes cost about DC's (§20.9) | Open (not traced): MC is unshipped | — |
 | G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames (§20.10) | Open (not traced) | — |
 | G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (§20.10) | Open (callers not traced) | — |
-| G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7: M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, the same with and without G42's batching, the voxel data's peak 812-859 MB; settled figures did not move (§20.10). Something merged since G52 holds more voxel data in flight; under D3's 1.5 GB | Open: bisect the merges since G52 | — |
+| G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7: M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, the same with and without G42's batching, the voxel data's peak 812-859 MB; settled figures did not move (§20.10). Something merged since G52 holds more voxel data in flight; under D3's 1.5 GB | Dismissed 2026-10-21 (§20.11): not a regression. §20.10's benches started 10.7 s after the settle, §20.7's 21.5 s after. After a teleport the window streams in at once and holds 787-837 MB of voxel data 10-11 s after the settle on M and L, until far compression's idle wait (`IdleFrames` 300) and encode budget catch up by +15-16 s; the bench's peaks count every sample from the first. On one build a bench started 10 s after the settle peaks at 1,048-1,061 MB on M and 1,194-1,241 on L, one started 21 s after at 675-683 and 832-833. G52's build gives 1,049-1,067 and 1,168-1,189 against 742-779 and 830-836 (§20.7: 747-769, 830-837). The traverse's voxel data is unchanged (M 375-380 MB, L 404-405). D3 holds with the transient: at most 1,241 MB + 51 MB of far field. G67, G68 recorded | — |
+| G67 | After a teleport or a spawn the window streams in at once, and stays resident until far compression catches up (`IdleFrames` 300, then at most 4 encodes a tick): on M and L, 779-830 of about 1,100 chunks are resident 10-11 s after the settle (787-837 MB of voxel data, systems 1.05-1.24 GB) for about 5 s, in G52's build too. About 340 of them are uniform (all air or all solid), which the sweep collapses for free but only after the same wait. Collapsing a uniform chunk when it is generated would take about 340 MB off that peak, given reads that do not re-expand it (meshing and seams read through `EnsureResident`). Under D3 either way | Open (an improvement, not a defect): found with G66 (§20.11) | — |
+| G68 | System edits (POI and dungeon stamps, campsites) enter the undo history, and since G60 each voxel change there is an `FVoxelEditChange` (its chunk, its position and the whole edit before and after: 112 bytes, against `FVoxelEdit`'s 40). On L, 4 POI operations around the site hold 94.0 MB of the edit manager's 122.0 (the edit layer: 420,713 edits, 28.0 MB). The same history took 33.6 MB before G60, so L's systems memory, settled and peak, rose 60 MB with it. An undo would take back the last of them | Open: found with G66 (§20.11). Keep system edits out of the history (as G60 did for water propagation), slim the record (it repeats the position and keeps two timestamps), or cap the history by memory; a design decision (undoing a stamp) | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -7416,7 +7418,7 @@ The DC `LODNormals` figures are §20.8's to the hundredth.
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G62 | The stride-1 gradient both smooth meshers use (`CalculateGradientNormal`: the crossing floored to a voxel, taps one voxel either side on the one-voxel density ramp) bands along voxel layers. With the surface a fraction f of a voxel above the floored voxel, the vertical difference is 1 - f/2 instead of 1, so a slope's normal tilts by 1.0-1.8 times the slope (5°: 5.0-9.1°; 15°: 15.0-22.9°) depending on where the surface crosses the voxel layer. MC's LOD 0 has the bands a voxel layer apart, too fine to see from altitude. DC's LOD 0 uses the same gradient, averaged over a cell's crossings (not measured here). Since G61, MC's LOD 1 and 2 sample the same estimator sparsely, which shows from altitude as faint broad rings around hills. A gradient taken at the crossing point itself (trilinear taps, as the geomorph's steepness gate does) has no such dependence | Open: take the stride-1 gradient at the crossing point, CPU and GPU, both meshers; MC is unshipped, and DC's share is not measured |
+| G62 | The stride-1 gradient both smooth meshers use (`CalculateGradientNormal`: the crossing floored to a voxel, taps one voxel either side on the one-voxel density ramp) bands along voxel layers. With the surface a fraction f of a voxel above the floored voxel, the vertical difference is 1 - f/2 instead of 1, so a slope's normal tilts by 1.0-1.8 times the slope (5°: 5.0-9.1°; 15°: 15.0-22.9°) depending on where the surface crosses the voxel layer. MC's LOD 0 has the bands a voxel layer apart, too fine to see from altitude. DC's LOD 0 uses the same gradient, averaged over a cell's crossings (not measured here). Since G61, MC's LOD 1 and 2 sample the same estimator sparsely, which shows from altitude as faint broad rings around hills. A gradient taken at the crossing point itself (trilinear taps, as the geomorph's steepness gate does) has no such dependence | Fixed in §20.12: both meshers' shading normals at voxel resolution are the density gradient fitted to the voxels on the ramp around the point |
 | G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` at 45°N 20°E: 6,564 MC seam jobs took 50-52 s of worker time (7.7 ms each) against 5,673 DC seam jobs in 1.7-2.0 s (0.33 ms each, §20.8). MC's chunk meshes cost about the same as DC's (1.6 ms each). Not traced; the seam path builds a synthetic request per participant (`InitFrameRequest` copies the volume, `FillFacePlanes` fills the neighbour planes) and meshes its band cells through `ProcessCubeLOD` | Open (not traced): MC is unshipped |
 
 **Left as they were:**
@@ -7625,7 +7627,7 @@ and density tests pass unchanged.
 |----|---------|--------|
 | G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames. Not relief-dependent | Open (not traced) |
 | G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (6-13 frames) | Open (callers not traced) |
-| G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7 (G52): M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, in both of this A/B's modes, the voxel data's peak 812-859 MB. Settled figures did not move (the small planet 476-480 MB against P6.5's 484). Something merged since G52 (G56-G60, the demo caves' retune in §19.15, G44) holds more voxel data in flight; under D3's 1.5 GB | Open: bisect the merges since G52 |
+| G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7 (G52): M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, in both of this A/B's modes, the voxel data's peak 812-859 MB. Settled figures did not move (the small planet 476-480 MB against P6.5's 484). Something merged since G52 (G56-G60, the demo caves' retune in §19.15, G44) holds more voxel data in flight; under D3's 1.5 GB | Dismissed in §20.11: not a regression; §20.10's benches started before far compression caught up after the settle |
 
 **Left as they were:**
 
@@ -7640,6 +7642,151 @@ and density tests pass unchanged.
 - PIE frame times here include the editor's own Slate, 5-7 ms a frame; a packaged game has no editor UI.
 
 G42 is fixed.
+
+### 20.11 G66: the great circle's peak was the window before far compression (2026-10-21)
+
+Bases: VoxelWorlds `4a4df99`, UE5_PluginDev `ebf888d` (G42 merged). Branches `docs/g66-peak-memory` (VoxelWorlds) and
+`claude/g66-peak-memory` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+worktree editor (Claudius on 8098), background throttling off. G52's build is the G52 session's own worktree (VoxelWorlds
+`1c4531d`, UE5_PluginDev `469cb83`, built there), run with the same scripts. No code changes.
+
+**The finding.** §20.10's great circles peaked 300-400 MB over §20.7's: M 755 → 1,068-1,072 MB of systems memory, L
+831 → 1,213-1,215, the voxel data's peak 812-859 MB, in both of its A/B's modes. Peak loaded chunks and the settled
+figures had not moved, so it read as more voxel data per chunk, or more held in flight, from something merged since G52.
+
+**Not a regression: §20.10's benches started earlier.** The bench reports settle it without a build:
+
+- **Where the peak was.** Every one of §20.10's 18 great-circle runs peaks in its first 1.5 s. At the first sample M's
+  window has 690-822 of its 1,076 chunks resident (697-829 MB of voxel data), with 109-160 uniform and 93-145
+  compressed. Far compression brings it down within about 5 s, and the traverse runs as in §20.7.
+- **The traverse is unchanged.** Over the traverse after its first 7 s the voxel data peaks at 375-391 MB on M and
+  404-411 on L, against §20.7's 381-400 and 407 (`g52b_{M,L}_new_gc_*`).
+- **§20.7's runs started from a compressed window.** M's first sample: 120.5 MB, with 108 resident, 526 uniform and 442
+  compressed chunks, a settled world's split. Their peak was the traverse's.
+- **The scripts' timing differs.** From the editor logs, §20.10's script started each bench 10.7 s after the settle
+  (15.5 s after PIE started), and §20.7's 21.5 s after it (32 s after PIE started: it waited 15 + 2 s and read the whole
+  log every 1.5 s).
+- **Why it matters.**
+  - Far compression (§12.7, §12.8) compacts a chunk only after it has sat `voxel.FarCompression.IdleFrames` (300)
+    frames unchanged at LOD 2 or coarser. It starts at most 4 encodes a tick, with 8 in flight.
+  - Uniform chunks collapse in the same sweep, so they also stay resident (1 MB for a 64³ chunk) until then.
+  - A teleport streams the whole window at once.
+  - The bench's memory peaks count every sample from the first, warmup included (`VoxelStreamingBenchmark.cpp`).
+- **§20.10's other planet rows are the same.** The climbs to 60,200 (1,057-1,237 MB, against 488-544 for §20.7's
+  climbs to 200,200) and the small planet's land route began with 718-843 of their chunks resident (728-850 MB of voxel
+  data). `VoxelDemo`'s runs began 45 s after the spawn, settled (127 MB).
+- **One build, both states.** G44's L runs (§20.8) came after the demo caves and G56-G60, and also started 10 s after the
+  settle. They began with 124-529 MB of voxel data and peaked at 781-855 MB, 784 when the window had compressed.
+
+**The window after a teleport.** `voxel.FarCompression.Stats` once a second after `vox.TPLatLon 45 20` and its settle,
+with the benches' PIE setup on a warm editor (`course_*` in the session's scratchpad):
+
+| Build, planet | Chunks with data at the settle | Window loaded | First compaction | Peak voxel data (resident / uniform / compressed chunks) | Settled at | Settled split (resident / uniform / compressed) |
+|---|---|---|---|---|---|---|
+| Current, small | 48 of 1,079 | +16.3 s | +6.3 s | 565 MB at +14.5 s (550 / 21 / 408) | +21.5 s | 103 / 68 / 908 |
+| Current, M | 63 of 1,076 | +11.4 s | +6.3 s | 787 MB at +10.4 s (779 / 149 / 136) | +16.3 s | 108 / 494 / 474 |
+| Current, L | 40 of 1,102 | +11.3 s | +6.2 s | 813 MB at +11.3 s (805 / 159 / 138) | +16.3 s | 107 / 502 / 493 |
+| G52's, M | 52 of 1,076 | +10.2 s | +6.2 s | 837 MB at +10.2 s (830 / 138 / 108) | +15.4 s | 108 / 526 / 442 |
+
+- **The settle comes early.** It releases as soon as the chunk under the pawn has collision, with 4-6% of the window
+  holding data. The window fills over the next 10-16 s, and far compression's first compactions come 6 s after the
+  settle.
+- **Which state a bench starts in.** A bench started 10 s after the settle starts at the window's peak; one started 21
+  s after starts settled.
+- **The small planet settles last.** Its window is sea and seabed, with 908 chunks to encode against M's 474.
+- **G52's build behaves the same.** Its peak is 837 MB, and it settles 0.9 s sooner. The transient predates every merge
+  since G52.
+
+**The A/B.** One build at a time, the bench started 10 s or 21 s after the settle (`bench_run.ps1 -IdleSec`). The rest
+is §20.10's protocol:
+
+- PIE on `PlanetTest` with `voxel.ConfigOverride`, a fresh world per run;
+- `vox.TPLatLon 45 20` and its settle, local noon, move and look input blocked;
+- a fresh editor and a throwaway run, then three repetitions alternating which goes first;
+- `voxel.Bench.Run <tag> 1500 40000 gc=45:20:90 follow=300 warmup=30 catchup=90`.
+
+Tags `g66a_{S,M,L}_i{10,21}_gc_r{1,2,3}` (the current build, in this session's worktree's `Saved/VoxelBench`) and
+`g66b_{M,L}_i{10,21}_gc_r{1,2,3}` (G52's build, in the G52 session's worktree's). Ranges over three runs:
+
+| Build, planet | Bench after the settle | Voxel data MB at the first sample (resident chunks) | Systems MB peak | Voxel data MB peak | Voxel data MB peak, the traverse after its first 7 s | Scatter / collision MB peak | Far field MB | Peak loaded |
+|---|---|---|---|---|---|---|---|---|
+| Current, small | 10 s | 647-786 (637-775) | 1,028-1,159 | 678-816 | 375-385 | 186-187 / 98-101 | 67 | 1,289-1,291 |
+|  | 21 s | 126-130 (103) | 736-738 | 375 | 375 | 186-187 / 100-102 | 67 | 1,282-1,289 |
+| Current, M | 10 s | 748-775 (741-768) | 1,048-1,061 | 768-783 | 375-378 | 198-199 / 100-101 | 48 | 1,239-1,244 |
+|  | 21 s | 121 (108) | 675-683 | 376-380 | 376-380 | 198-204 / 99-101 | 48 | 1,229-1,244 |
+| Current, L | 10 s | 746-847 (741-840) | 1,194-1,241 | 805-852 | 404-406 | 194 / 95-97 | 49-51 | 1,266-1,269 |
+|  | 21 s | 120 (107) | 832-833 | 404-405 | 404-405 | 193-194 / 94-96 | 49 | 1,265-1,269 |
+| G52's, M | 10 s | 525-715 (521-708) | 1,049-1,067 | 732-750 | 382-491 | 232-234 / 114-116 | 48 | 1,207-1,220 |
+|  | 21 s | 124 (108) | 742-779 | 383-413 | 382-413 | 233 / 115 | 48 | 1,217-1,222 |
+| G52's, L | 10 s | 728-788 (723-781) | 1,168-1,189 | 800-816 | 410-418 | 227-228 / 110-114 | 49 | 1,264 |
+|  | 21 s | 123 (107) | 830-836 | 407-413 | 407-412 | 227-228 / 112-113 | 49 | 1,264 |
+
+- **When the bench starts decides the peak.**
+  - Started 10 s after the settle, systems memory peaks at 1,028-1,241 MB on every planet, in both builds.
+  - Started 21 s after, it peaks at 675-836 MB.
+  - G52's build started at 21 s reproduces §20.7's figures: M 742-779 MB against 747-769, L 830-836 against 830-837.
+- **Nothing after the start differs.** The traverse's voxel data after its first 7 s, scatter, collision, the far field
+  and peak loaded chunks are the same both ways.
+  - One exception: G52's first M run at 10 s. Another session's headless tests started during it, so its traverse ran
+    at a lower frame rate. 300 frames then took longer, and the traverse held up to 491 MB.
+  - The current build's batch ran on a quiet machine.
+- **Between the builds, started settled:** M 675-683 MB against 742-779, L 832-833 against 830-836.
+  - Scatter and collision peak lower on the current build: M 198-204 and 99-101 MB against 232-234 and 114-116; L
+    193-194 and 94-96 against 227-228 and 112-113.
+  - L's edit memory is higher: 122.0 MB against 61.6 (G68, below).
+
+**Content.** The settled split moved between the two builds:
+
+- M: 526 uniform and 442 compressed → 494 and 474. L: 538 and 457 → 502 and 493.
+- So 32-36 chunks that were all solid now hold cave. The most likely cause is the demo caves' Cheese layer (§19.15),
+  which carves down to 66 voxels where the old cavern stopped at 45. Not isolated.
+- A compressed chunk holds about 0.03 MB here, so settled voxel data moved by 0.3-0.8 MB (M 120.5 → 120.8 MB, L 119.0
+  → 119.8).
+
+**L's edit memory (G68).** The bench counts the edit manager with the voxel systems. On L it holds 122.0 MB on the
+current build against 61.6 on G52's. M and the small planet have no edits around the site.
+
+- **Measured live** on L, 25 s after the settle (a Python probe through Claudius: the edit manager's `GetDebugStats`
+  before and after `ClearHistory`):
+  - 4 operations in the undo history, all from POI placement around 45°N 20°E (a fresh world, no player edits);
+  - 420,713 edits in 18 chunks;
+  - 122.0 MB, and 28.0 MB with the history cleared. The history holds 94.0 MB.
+- **What changed.** System edits enter the undo history: the POI subsystem's stamps (dungeons, their entrances,
+  campsites, brush edits) begin their operations with the default `bAddToUndoHistory`. Since G60 (§19.17) each voxel change there is an `FVoxelEditChange`: its chunk, its position,
+  and the whole edit before and after, 112 bytes. Before G60 it was an `FVoxelEdit` of 40 bytes.
+- **The old size.** At 40 bytes the same history is 33.6 MB, and the edit memory 28.0 + 33.6 = 61.6 MB: G52's exactly.
+- **What it costs.** L's systems memory, settled and peak, is 60 MB higher since G60. It did not cause G66.
+- **What else follows.** These are the history's only entries, so an undo (the demo test actor's Z) would take back
+  the last of them.
+
+**D3.**
+
+- **The peak after a teleport is real, and counts against D3's 1.5 GB.** In these runs it is at most 1,241 MB of
+  systems memory plus 51 MB of far field (L), and 1,159 + 67 on the small planet. D3 holds.
+- **Earlier streaming peaks were under-reported.** The transient is the same on G52's build, so §20.7's benches, and
+  any earlier bench that started settled, under-reported the streaming peak by 300-400 MB. Their traverse figures
+  stand.
+- **The settled budget (0.6 GB) is unaffected.** The settled figures are §20.10's: 440-571 MB with the far field. L's
+  571 includes G68's 94 MB of undo history.
+- **§20.10's frame and manager times stand.** They are traverse statistics, and both of its modes started the same way.
+  Here, frame P95 (22.5-26.4 ms) and manager P95 (6.4-7.9 ms) do not depend on when the bench starts. Only the far
+  compression step's own P95 rises during the catch-up (0.54-0.80 ms against 0.46-0.49).
+
+**Benches from now on.**
+
+- **To start settled,** a planet bench waits 25 s after the settle (the small planet's window settles at +21.5 s). Or it
+  checks that the CSV's first row has the settled split (`ResidentN` about 100-110 on the review planets).
+- **To include the teleport's peak,** a bench starts at once.
+- **Either way, the report should say which.** `peakVoxelSystemsMB` counts every sample from the first.
+
+**New findings** (in §14.1):
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G67 | After a teleport or a spawn the window streams in at once, and stays resident until far compression catches up (`IdleFrames` 300, then at most 4 encodes a tick): on M and L, 779-830 of about 1,100 chunks are resident 10-11 s after the settle (787-837 MB of voxel data, systems 1.05-1.24 GB) for about 5 s, in G52's build too. About 340 of them are uniform (all air or all solid), which the sweep collapses for free but only after the same wait. Collapsing a uniform chunk when it is generated would take about 340 MB off that peak, given reads that do not re-expand it (meshing and seams read through `EnsureResident`). Under D3 either way | Open (an improvement, not a defect) |
+| G68 | System edits (POI and dungeon stamps, campsites) enter the undo history, and since G60 each voxel change there is an `FVoxelEditChange` (its chunk, its position and the whole edit before and after: 112 bytes, against `FVoxelEdit`'s 40). On L, 4 POI operations around the site hold 94.0 MB of the edit manager's 122.0 (the edit layer: 420,713 edits, 28.0 MB). The same history took 33.6 MB before G60, so L's systems memory, settled and peak, rose 60 MB with it. An undo would take back the last of them | Open: keep system edits out of the history (as G60 did for water propagation), slim the record (it repeats the position and keeps two timestamps), or cap the history by memory; a design decision (undoing a stamp) |
+
+G66 is dismissed: not a regression. No code changes; no suites were run.
 
 ### 20.12 G62: the voxel-resolution gradient, fitted (2026-10-21)
 
