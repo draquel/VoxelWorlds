@@ -8213,7 +8213,7 @@ the table.
 
 **Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 585/585 headless (582 + the
 three above) and 585/585 in the editor with the GPU tests running (no device loss, no ensure). The 108 GPU parity lines
-are CRC-identical to G44's (no generation change).
+are CRC-identical to G44's (no generation change). After merging main (G68, §20.14): 587/587 headless.
 
 **New findings** (in §14.1):
 
