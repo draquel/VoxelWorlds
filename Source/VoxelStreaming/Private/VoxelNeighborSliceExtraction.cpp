@@ -6,6 +6,20 @@
 namespace VoxelNeighborSlices
 {
 
+int32 GetNeighborDepth(int32 LODLevel, bool bDeepOff, bool bDeepFull, int32 ChunkSize)
+{
+	const int32 MeshStride = 1 << FMath::Clamp(LODLevel, 0, 7);
+	// Total deep planes incl. plane 0. Default stride+1 = geometry-only: the outward DC boundary
+	// cell reaches `stride` voxels deep (watertight), plus one plane for one-sided boundary normals.
+	// -VoxelDeepFull restores 2*stride (adds central-difference normal reach at higher per-job cost,
+	// ~14% slower catch-up at v6000); -VoxelDeepOff drops to 1 plane (no deep data, loses the seam fix).
+	int32 DeepDepth;
+	if (MeshStride <= 1 || bDeepOff) { DeepDepth = 1; }
+	else if (bDeepFull)             { DeepDepth = 2 * MeshStride; }
+	else                                 { DeepDepth = MeshStride + 1; }
+	return FMath::Clamp(DeepDepth - 1, 0, FMath::Max(0, ChunkSize - 1)) + 1;
+}
+
 void Extract(
 	int32 ChunkSize,
 	const FIntVector& ChunkCoord,
@@ -27,16 +41,7 @@ void Extract(
 	// Dual Contouring's outward boundary cell computes identically to the inward
 	// neighbor (watertight), and Marching Cubes gets correct boundary normals. LOD 0
 	// keeps a single plane (no extra cost). Capped so the source index stays in range.
-	const int32 MeshStride = 1 << FMath::Clamp(OutRequest.LODLevel, 0, 7);
-	// Total deep planes incl. plane 0. Default stride+1 = geometry-only: the outward DC boundary
-	// cell reaches `stride` voxels deep (watertight), plus one plane for one-sided boundary normals.
-	// -VoxelDeepFull restores 2*stride (adds central-difference normal reach at higher per-job cost,
-	// ~14% slower catch-up at v6000); -VoxelDeepOff drops to 1 plane (no deep data, loses the seam fix).
-	int32 DeepDepth;
-	if (MeshStride <= 1 || bDeepOff) { DeepDepth = 1; }
-	else if (bDeepFull)             { DeepDepth = 2 * MeshStride; }
-	else                                 { DeepDepth = MeshStride + 1; }
-	const int32 ExtraPlanes = FMath::Clamp(DeepDepth - 1, 0, ChunkSize - 1);
+	const int32 ExtraPlanes = GetNeighborDepth(OutRequest.LODLevel, bDeepOff, bDeepFull, ChunkSize) - 1;
 	OutRequest.NeighborPlaneDepth = ExtraPlanes + 1;
 
 	// Fill a Deep array with planes one voxel deeper than the face slice (plane 0).

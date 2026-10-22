@@ -22,6 +22,9 @@
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelStreamingBenchmark.h"
 #include "HAL/IConsoleManager.h"
+#include "VoxelChunkShell.h"
+#include "VoxelNeighborSliceExtraction.h"
+#include "VoxelEditManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -1725,5 +1728,218 @@ bool FVoxelPlaneStreamingFarReadsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+
+namespace VoxelPlanetStreamingTestUtils
+{
+	/**
+	 * One chunk's collision request prepared as a cook prepares it, with its neighbours' snapshots (voxel.Collision.
+	 * NeighborShells 0) or boundary shells (1), the slices extracted as the cook's worker does, and meshed: the CRC of the
+	 * mesh and of the neighbours the cook reads as air.
+	 */
+	uint32 CollisionCookCrc(UVoxelChunkManager* Manager, const FIntVector& Coord, int32 LODLevel, bool bShells, int32& OutNeighbors,
+		int32& OutShells)
+	{
+		FScopedIntCVar Shells(TEXT("voxel.Collision.NeighborShells"), bShells ? 1 : 0);
+		FVoxelMeshingRequest Request;
+		TSharedPtr<const TArray<FVoxelData>> Own;
+		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> Snapshots;
+		TMap<FIntVector, TSharedPtr<const FVoxelChunkShell>> ShellMap;
+		uint32 Missing = 0;
+		TArray<UE::Tasks::FTask> Ready;
+		OutNeighbors = 0;
+		OutShells = 0;
+		if (!Manager->PrepareCollisionMeshRequest(Coord, LODLevel, Request, Own, Snapshots, &Missing, &Ready, &ShellMap) || !Own.IsValid())
+		{
+			return 0;
+		}
+		for (UE::Tasks::FTask& Task : Ready)
+		{
+			Task.Wait();
+		}
+		Request.VoxelData = *Own;
+		const int32 CS = Request.ChunkSize;
+		OutNeighbors = ShellMap.Num() + Snapshots.Num();
+		OutShells = ShellMap.Num();
+		auto Has = [&ShellMap, &Snapshots](const FIntVector& N) { return ShellMap.Contains(N) || Snapshots.Contains(N); };
+		auto Get = [&ShellMap, &Snapshots, CS](const FIntVector& N, int32 X, int32 Y, int32 Z) -> FVoxelData
+		{
+			if (const TSharedPtr<const FVoxelChunkShell>* Shell = ShellMap.Find(N))
+			{
+				return (*Shell)->Get(X, Y, Z);
+			}
+			if (const TSharedPtr<const TArray<FVoxelData>>* Array = Snapshots.Find(N))
+			{
+				const int32 Index = X + Y * CS + Z * CS * CS;
+				return (*Array)->IsValidIndex(Index) ? (**Array)[Index] : FVoxelData::Air();
+			}
+			return FVoxelData::Air();
+		};
+		VoxelNeighborSlices::Extract(CS, Coord, Manager->IsDeepSliceOff(), Manager->IsDeepSliceFull(), Has, Get, Request);
+		FChunkMeshData Mesh;
+		Manager->GetMesherPtr()->GenerateMeshCPU(Request, Mesh);
+		uint32 Crc = FCrc::MemCrc32(&Missing, sizeof(Missing));
+		Crc = FCrc::MemCrc32(Mesh.Positions.GetData(), Mesh.Positions.Num() * Mesh.Positions.GetTypeSize(), Crc);
+		Crc = FCrc::MemCrc32(Mesh.Normals.GetData(), Mesh.Normals.Num() * Mesh.Normals.GetTypeSize(), Crc);
+		Crc = FCrc::MemCrc32(Mesh.Indices.GetData(), Mesh.Indices.Num() * Mesh.Indices.GetTypeSize(), Crc);
+		return Crc;
+	}
+
+	/** Empty the snapshot and shell caches: the age sweep (every 64 ticks) with a maximum age of one tick. */
+	void EvictSnapshotCaches(FPlanetStreamingWorld& World)
+	{
+		FScopedIntCVar Age(TEXT("voxel.Snapshot.MaxAgeTicks"), 1);
+		for (int32 Tick = 0; Tick < 140; ++Tick)
+		{
+			World.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+		}
+	}
+
+	/**
+	 * G69: streams a place, lets far compression compact the far band and digs one hole (a chunk with edits), then cooks
+	 * every loaded chunk's collision request at LOD 0 and 1 with the neighbours' snapshots and with their shells: every
+	 * mesh is the same, and with shells the cache holds a fraction of the bytes.
+	 */
+	void RunCollisionShellsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start)
+	{
+		FScopedIntCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), 1);
+		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
+		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
+		FPlanetStreamingWorld World;
+		Start(World);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place), World.Settle());
+
+		// A dig near the viewer: a chunk with edits (its shell is cut from its edit-merged snapshot).
+		FVoxelSurfaceSample Ground;
+		if (World.Manager->QueryEditMergedSurfacePoint(World.Viewer, Ground))
+		{
+			FVoxelBrushParams Brush;
+			Brush.Shape = EVoxelBrushShape::Sphere;
+			Brush.Radius = 300.0f;
+			Brush.Strength = 1.0f;
+			Brush.FalloffType = EVoxelBrushFalloff::Linear;
+			Brush.DensityDelta = 255;
+			World.Manager->GetEditManager()->ApplyBrushEdit(Ground.Position, Brush, EEditMode::Subtract);
+		}
+		Test.TestTrue(*FString::Printf(TEXT("%s: settled after the dig"), Place), World.Settle());
+
+		// The far band compacts: tick until the compact count has held for 60 ticks.
+		int32 LastCompact = -1;
+		int32 Still = 0;
+		for (int32 Tick = 0; Tick < 3000 && Still < 60; ++Tick)
+		{
+			World.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+			FPlatformProcess::Sleep(0.002f);
+			const UVoxelChunkManager::FVoxelMemoryStats Memory = World.Manager->GetVoxelMemoryStats();
+			const int32 Compact = Memory.UniformChunks + Memory.CompressedChunks;
+			Still = (Compact == LastCompact) ? Still + 1 : 0;
+			LastCompact = Compact;
+		}
+		const UVoxelChunkManager::FVoxelMemoryStats Residency = World.Manager->GetVoxelMemoryStats();
+		Test.TestTrue(*FString::Printf(TEXT("%s: resident, compressed and uniform chunks (%d / %d / %d)"), Place, Residency.ResidentChunks,
+			Residency.CompressedChunks, Residency.UniformChunks),
+			Residency.ResidentChunks > 0 && Residency.CompressedChunks > 0 && Residency.UniformChunks > 0);
+		TArray<FIntVector> Edited;
+		World.Manager->GetEditManager()->GetEditedChunkCoords(Edited);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the dig made chunks with edits (%d)"), Place, Edited.Num()), Edited.Num() > 0);
+
+		TArray<FIntVector> Loaded;
+		World.Manager->GetLoadedChunks(Loaded);
+		Loaded.RemoveAll([&World](const FIntVector& C) { return !World.Manager->HasChunkVoxelData(C); });
+		Loaded.Sort([](const FIntVector& A, const FIntVector& B) { return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z); });
+
+		for (const int32 LOD : { 0, 1 })
+		{
+			const int32 Depth = VoxelNeighborSlices::GetNeighborDepth(LOD, World.Manager->IsDeepSliceOff(), World.Manager->IsDeepSliceFull(),
+				World.Config->ChunkSize);
+			TArray<uint32> Before, After;
+			int32 Neighbors = 0, ShellReads = 0, Different = 0, Meshed = 0, NeighborsBefore = 0;
+			EvictSnapshotCaches(World);
+			for (const FIntVector& Coord : Loaded)
+			{
+				int32 N = 0, S = 0;
+				Before.Add(CollisionCookCrc(World.Manager, Coord, LOD, false, N, S));
+				NeighborsBefore += N;
+			}
+			const UVoxelChunkManager::FVoxelMemoryStats WithSnapshots = World.Manager->GetVoxelMemoryStats();
+			const FString DescribeSnapshots = World.Manager->DescribeSnapshotCache();
+			EvictSnapshotCaches(World);
+			for (const FIntVector& Coord : Loaded)
+			{
+				int32 N = 0, S = 0;
+				After.Add(CollisionCookCrc(World.Manager, Coord, LOD, true, N, S));
+				Neighbors += N;
+				ShellReads += S;
+			}
+			const UVoxelChunkManager::FVoxelMemoryStats WithShells = World.Manager->GetVoxelMemoryStats();
+			const FString DescribeShells = World.Manager->DescribeSnapshotCache();
+			Test.AddInfo(FString::Printf(TEXT("%s LOD %d with snapshots: %s"), Place, LOD, *DescribeSnapshots.Replace(TEXT("\n"), TEXT(" | "))));
+			Test.AddInfo(FString::Printf(TEXT("%s LOD %d with shells: %s"), Place, LOD, *DescribeShells.Replace(TEXT("\n"), TEXT(" | "))));
+			for (int32 I = 0; I < Before.Num(); ++I)
+			{
+				Meshed += Before[I] != 0 ? 1 : 0;
+				Different += Before[I] != After[I] ? 1 : 0;
+			}
+			const double ToKB = 1.0 / 1024.0;
+			Test.AddInfo(FString::Printf(TEXT("%s LOD %d (shell depth %d): %d chunks cooked, %d neighbour reads (%d from shells); cache %.0f KB ")
+				TEXT("with snapshots, %.0f KB with shells (shells %.0f KB, full snapshots %.0f KB)"), Place, LOD, Depth, Loaded.Num(), Neighbors,
+				ShellReads, WithSnapshots.SnapshotBytes * ToKB, WithShells.SnapshotBytes * ToKB, WithShells.ShellBytes * ToKB,
+				(WithShells.SnapshotBytes - WithShells.ShellBytes) * ToKB));
+			Test.TestTrue(*FString::Printf(TEXT("%s LOD %d: chunks cooked (%d)"), Place, LOD, Meshed), Meshed >= 20);
+			Test.TestEqual(*FString::Printf(TEXT("%s LOD %d: the same neighbours read"), Place, LOD), Neighbors, NeighborsBefore);
+			Test.TestEqual(*FString::Printf(TEXT("%s LOD %d: every collision mesh the same with shells"), Place, LOD), Different, 0);
+			// Shells are taken while one is at most three quarters of a chunk (8 * Depth <= ChunkSize).
+			const int32 CS = World.Config->ChunkSize;
+			const bool bShellsUsed = 8 * Depth <= CS;
+			Test.TestEqual(*FString::Printf(TEXT("%s LOD %d: %s"), Place, LOD,
+				bShellsUsed ? TEXT("every neighbour from a shell") : TEXT("no shell deeper than three quarters of a chunk")),
+				ShellReads, bShellsUsed ? Neighbors : 0);
+			if (bShellsUsed)
+			{
+				// A shell holds 6 * Depth / ChunkSize of its chunk (the faces, overlapping at the edges); the full snapshots
+				// left are the edited chunks', and no cook's own (nothing else read them).
+				const double Share = 6.0 * Depth / CS;
+				Test.TestTrue(*FString::Printf(TEXT("%s LOD %d: the cache with shells about the shells' share of the snapshots' (%.0f KB against %.0f KB x %.2f)"),
+					Place, LOD, WithShells.SnapshotBytes * ToKB, WithSnapshots.SnapshotBytes * ToKB, Share),
+					WithShells.SnapshotBytes <= 1.25 * Share * WithSnapshots.SnapshotBytes);
+			}
+		}
+		World.Stop();
+	}
+}
+
+/**
+ * G69 on a planet (45N 20E): collision cooks read their neighbours from boundary shells (voxel.Collision.NeighborShells), the
+ * same collision meshes as from the neighbours' whole snapshots at LOD 0 and 1, and the snapshot cache holds a fraction of
+ * the bytes: resident, compressed, uniform and edited neighbours.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetCollisionShellsTest,
+	"VoxelWorlds.Streaming.Planet.CollisionNeighborShells",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetCollisionShellsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	const double Lat = FMath::DegreesToRadians(45.0);
+	const double Lon = FMath::DegreesToRadians(20.0);
+	const FVector Direction(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	auto Start = [&Direction](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetCollisionShellsTestWorld"), Direction, 300.0f); };
+	RunCollisionShellsPlace(*this, TEXT("45N 20E"), Start);
+	return true;
+}
+
+/** G69 on a heightmap world: the same over the plane of the far-reads test. */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneCollisionShellsTest,
+	"VoxelWorlds.Streaming.Plane.CollisionNeighborShells",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneCollisionShellsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneCollisionShellsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunCollisionShellsPlace(*this, TEXT("plane"), Start);
+	return true;
+}
 
 #endif // WITH_DEV_AUTOMATION_TESTS

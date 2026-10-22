@@ -1509,8 +1509,9 @@ Three findings from §13.11 get IDs here:
 | G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7: M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, the same with and without G42's batching, the voxel data's peak 812-859 MB; settled figures did not move (§20.10). Something merged since G52 holds more voxel data in flight; under D3's 1.5 GB | Dismissed 2026-10-21 (§20.11): not a regression. §20.10's benches started 10.7 s after the settle, §20.7's 21.5 s after. After a teleport the window streams in at once and holds 787-837 MB of voxel data 10-11 s after the settle on M and L, until far compression's idle wait (`IdleFrames` 300) and encode budget catch up by +15-16 s; the bench's peaks count every sample from the first. On one build a bench started 10 s after the settle peaks at 1,048-1,061 MB on M and 1,194-1,241 on L, one started 21 s after at 675-683 and 832-833. G52's build gives 1,049-1,067 and 1,168-1,189 against 742-779 and 830-836 (§20.7: 747-769, 830-837). The traverse's voxel data is unchanged (M 375-380 MB, L 404-405). D3 holds with the transient: at most 1,241 MB + 51 MB of far field. G67, G68 recorded | — |
 | G67 | After a teleport or a spawn the window streams in at once, and stays resident until far compression catches up (`IdleFrames` 300, then at most 4 encodes a tick): on M and L, 779-830 of about 1,100 chunks are resident 10-11 s after the settle (787-837 MB of voxel data, systems 1.05-1.24 GB) for about 5 s, in G52's build too. About 340 of them are uniform (all air or all solid), which the sweep collapses for free but only after the same wait. Collapsing a uniform chunk when it is generated would take about 340 MB off that peak, given reads that do not re-expand it (meshing and seams read through `EnsureResident`). Under D3 either way | Open (an improvement, not a defect): found with G66 (§20.11) | — |
 | G68 | System edits (POI and dungeon stamps, campsites) enter the undo history, and since G60 each voxel change there is an `FVoxelEditChange` (its chunk, its position and the whole edit before and after: 112 bytes, against `FVoxelEdit`'s 40). On L, 4 POI operations around the site hold 94.0 MB of the edit manager's 122.0 (the edit layer: 420,713 edits, 28.0 MB). The same history took 33.6 MB before G60, so L's systems memory, settled and peak, rose 60 MB with it. An undo would take back the last of them | Open: found with G66 (§20.11). Keep system edits out of the history (as G60 did for water propagation), slim the record (it repeats the position and keeps two timestamps), or cap the history by memory; a design decision (undoing a stamp) | — |
-| G69 | The seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one full array per chunk, 1 MB at 64³, kept for 128 seam ticks after its last use) holds 1,061-1,095 MB at the small planet's great-circle peak and 688-753 MB on M and L, 590-750 MB at the end, with and without G65's snapshot reads. Nothing counted it before G65 (`GetVoxelMemoryStats`; the eviction's comment says tens of MB). Counted with the systems and the far field, the traverse peaks at 1.75-1.83 GB on S, 1.34-1.42 on M and 1.48-1.61 on L, over D3's 1.5 GB on S (§20.13) | Open: found with G65. Evict an entry once its chunk's seam jobs and cooks have read it, keep snapshots of unchanged chunks compact, or share the chunk's own array while it is resident | — |
+| G69 | The seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one full array per chunk, 1 MB at 64³, kept for 128 seam ticks after its last use) holds 1,061-1,095 MB at the small planet's great-circle peak and 688-753 MB on M and L, 590-750 MB at the end, with and without G65's snapshot reads. Nothing counted it before G65 (`GetVoxelMemoryStats`; the eviction's comment says tens of MB). Counted with the systems and the far field, the traverse peaks at 1.75-1.83 GB on S, 1.34-1.42 on M and 1.48-1.61 on L, over D3's 1.5 GB on S (§20.13) | Fixed 2026-10-22 (§20.15): traced with `voxel.Snapshot.Stats`, the cache is the working set, not stale entries (10+ reads each, a shorter lifetime only re-makes them); its peak was collision cooks, which pin each of their 26 neighbours' whole snapshot to read one plane of it (the collision radius is half the view distance, 20,000 uu here), and uniform chunks each expanded into their own array. Now cooks read their neighbours from boundary shells (`FVoxelChunkShell`, the voxels within `VoxelNeighborSlices::GetNeighborDepth` of each face: 96 KB at 64³ against 1 MB; `voxel.Collision.NeighborShells`), a cook drops its own chunk's snapshot once it has taken it unless another reader did, and uniform chunks share one array per value (`voxel.Snapshot.ShareUniform`). Benches (three runs per planet, by cvar): the snapshot cache's peak 0.71-1.09 → 0.46-0.71 GB, the traverse's peak with it and the far field S 1.76-1.78 → 1.30-1.36 GB, M 1.34-1.41 → 1.10-1.14, L 1.49 → 1.23 (D3 met), frame, manager, catch-up and game-thread decode unchanged; collision meshes identical (`Streaming.{Planet,Plane}.CollisionNeighborShells`). G71 recorded | — |
 | G70 | The water pull's result at a chunk corner depends on the order in which the neighbouring chunks finish meshing: in `Streaming.Planet.FarReadsOffGameThread` 9 air voxels below the sea at chunk (6, 0, 9)'s +Y+Z corner are flooded in some runs and not in others, with either setting of `voxel.FarCompression.SnapshotReads` (§20.13) | Open (not traced): found with G65; the test compares the water flags apart | — |
+| G71 | Seam jobs and chunk meshes still read their participants' whole snapshots: with G69's shells, 540-607 of the small planet's mid-traverse entries (518-579 MB) are read by a seam job or a chunk mesh. A seam job reads its participants only near the seam, but each side's boundary ring is recomputed with that side's own samplers, which reach a stride-scale depth (several voxels at LOD 2), so a shell at coarse LODs would hold most of a chunk, and the rings must stay bit-identical (§20.15) | Open (an improvement): D3 is met without it | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -8051,10 +8052,120 @@ three above) and 582/582 in the editor with the GPU tests running (no device los
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G69 | The seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one full array per chunk, 1 MB at 64³, kept for 128 seam ticks after its last use) holds 1,061-1,095 MB at the small planet's great-circle peak and 688-753 MB on M and L, in both settings, 590-750 MB at the end. Nothing counted it before G65 (its comment says tens of MB). Counted with the systems and the far field, the traverse peaks at 1.75-1.83 GB on S, 1.34-1.42 on M and 1.48-1.61 on L (the lower ends with G65), over D3's 1.5 GB on S | Open |
+| G69 | The seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one full array per chunk, 1 MB at 64³, kept for 128 seam ticks after its last use) holds 1,061-1,095 MB at the small planet's great-circle peak and 688-753 MB on M and L, in both settings, 590-750 MB at the end. Nothing counted it before G65 (its comment says tens of MB). Counted with the systems and the far field, the traverse peaks at 1.75-1.83 GB on S, 1.34-1.42 on M and 1.48-1.61 on L (the lower ends with G65), over D3's 1.5 GB on S | Fixed in §20.15: collision cooks read their neighbours' boundary shells, uniform chunks share one array |
 | G70 | The water pull's result at a chunk corner depends on the order in which the neighbouring chunks finish meshing: in `Streaming.Planet.FarReadsOffGameThread` 9 air voxels below the sea at chunk (6, 0, 9)'s +Y+Z corner are flooded in some runs and not in others, with either setting | Open (not traced) |
 
 **Left as they were:** the surface and point queries' expansions (small, on the game thread), chunks with edits (read
 through `EnsureResident`), and the far-compression sweep and its codec.
 
 G65 is fixed.
+
+### 20.15 G69: the seam snapshot cache, bounded (2026-10-22)
+
+Bases: VoxelWorlds `63c171a`, UE5_PluginDev `8b3e119` (G65 merged). Branches `fix/g69-snapshot-cache` (VoxelWorlds) and
+`claude/g69-snapshot-cache` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree
+editor (Claudius on 8097), background throttling off.
+
+**The finding** (§20.13): the seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one ChunkSize³ array per chunk,
+1 MB at 64³, dropped 128 seam ticks after its last read) peaked at 1.06-1.10 GB on the small planet's great circle and
+0.69-0.75 GB on M and L, uncounted until G65. Counted, the small planet's peak was over D3's 1.5 GB.
+
+**Instruments first**, kept in the build: every entry records how it was made (copied from a resident chunk, with edits,
+decoded from a compressed or a uniform chunk), when, its reads, the readers that made it and last read it, and a bitmask of
+every reader that took it (a seam job, a chunk mesh, a collision cook's own chunk or a neighbour, the water, scatter);
+session counters (made, read, replaced, evicted by age and how many never read again, removed, made again within 600 ticks
+of an eviction). `voxel.Snapshot.Stats [reset]` (`DescribeSnapshotCache`) lists them with the entries' age, reads and
+distance from the viewer's chunk. The age is a cvar, `voxel.Snapshot.MaxAgeTicks` (128).
+
+**What the cache holds.** Probes on the bench's great circle (the protocol below; the stats logged 4, 8, 12, 20 and 28 s in):
+
+- **The working set, not stale entries.** On the small planet 700-1,070 entries, 75-96% read ten times or more (145,000
+  reads in a traverse, 39 per entry), most last read under 64 ticks ago, 4-7 chunks from the viewer. A shorter lifetime
+  does not lower the peak: at 128, 64 and 32 ticks the 8 s sample holds 1,035, 1,072 and 1,001 entries; it only makes them
+  again (1,484, 2,854 and 4,067 made again within 600 ticks of an eviction) and slows the frame (P95 28.9, 29.6, 35.5 ms).
+- **Collision cooks.** The cache jumps from 0 to 914 MB in the bench's first two seconds, with no re-mesh: collision's
+  decisions re-run when the viewer starts moving, and its radius is half the view distance (20,000 uu here) plus a speed
+  lead, so hundreds of chunks are cooked. A cook reads its chunk and its 26 neighbours' snapshots
+  (`PrepareCollisionMeshRequest`), but of a neighbour the slice extraction (`VoxelNeighborSlices::Extract`) reads only the
+  planes next to the shared face, edge or corner: one at collision LOD 0 (`CollisionLODLevel`), stride + 1 above it. With
+  the reader bits: 191-218 entries (182-206 MB) taken only by cooks as a neighbour, 42-182 (40-178 MB) by a cook as its own
+  chunk and as a neighbour.
+- **Uniform chunks.** On M and L a third of the entries are uniform chunks (all air or all rock, 204-212 of 568-699), each
+  expanded on a worker into its own 1 MB array.
+- **Copies of resident chunks** are a quarter to a third of the entries (144-289), the rest decoded from compressed chunks.
+
+**The fix.**
+
+- **Neighbours as boundary shells** (`voxel.Collision.NeighborShells`, 1). `FVoxelChunkShell` (VoxelCore, new) holds a
+  chunk's voxels within a depth of each of its six faces: six slabs, `Get(X, Y, Z)` for any voxel within the depth of a face
+  (at an edge or a corner any slab holding it answers). `VoxelNeighborSlices::GetNeighborDepth` (new, the rule `Extract`
+  used) gives the cook's depth. `UVoxelChunkManager::GetChunkShell` keeps one per chunk (`ShellCache`, per ContentVersion and
+  depth, the same age sweep, dropped with the snapshot on unload and on the water pull's flags): cut on a worker from the
+  chunk's cached snapshot if there is one; for a far-compressed chunk without edits decoded on a worker with only the shell
+  kept (the chunk stays compressed, as in G65); for a uniform one the shared shell of its value and depth; for a resident one
+  cut on the game thread (its faces only); with edits cut from its edit-merged snapshot. `PrepareCollisionMeshRequest`
+  hands the cook the neighbours' shells (`OutNeighborShells`); the cook's worker reads them in the slice extraction
+  (`ensure`: no read outside the depth). At 64³ a depth-1 shell is 96 KB.
+- **A cook's own chunk is read once.** The cook cuts its chunk's shell from the snapshot (for its neighbours' cooks) and then
+  drops the snapshot, unless another reader took it (the reader bits). Collision's prefetch (`PrefetchCollisionInputs`, from
+  `RequestCollision`) starts the far-compressed neighbours' shells and not the chunk's own snapshot: after the bench's
+  teleport back, a queue of 408 cooks held 377 MB of their own prefetched snapshots.
+- **Shells while they are small:** taken while 8 × depth ≤ ChunkSize (`ShouldUseCollisionShells`: a shell is 6 × depth /
+  ChunkSize of a chunk, overlapping at the edges; at 64³ one plane is 9%, collision LOD 2's five planes 47%). A deeper one
+  holds about as much as the chunk, and the cook reads whole snapshots as before.
+- **Uniform chunks share one array per value** (`voxel.Snapshot.ShareUniform`, 1): `GetUniformSnapshotArray`, counted once.
+- **Memory stats:** `FVoxelMemoryStats::ShellBytes` (in `SnapshotBytes`); the bench's CSV gained `ShellMB`.
+
+**Tests.**
+
+- **`Compression.ChunkShell.Extract`** (new): random chunks of 8³, 16³ and 64³ at depths 1, 2, 3, 5, half and the whole
+  chunk: `Contains` is the within-depth rule and every voxel held reads as the chunk's; a chunk of the wrong size makes no
+  shell; a uniform shell (96 KB at 64³ and depth 1).
+- **`Streaming.Planet.CollisionNeighborShells`, `Streaming.Plane.CollisionNeighborShells`** (new): a place streams, far
+  compression compacts the far band and a dig makes chunks with edits (resident, compressed, uniform and edited chunks); every
+  loaded chunk's collision request is prepared and meshed with its neighbours' snapshots and then with their shells, at LOD
+  0 and 1, the caches emptied between. Every collision mesh (and the neighbours read as air) is the same. On the planet (32³
+  chunks) 158 chunks, 2,684 neighbour reads, all from shells: the cache 14,208 → 2,920 KB at LOD 0 and 14,256 → 8,296 KB at
+  LOD 1 (depth 3). On the plane (16³) 207 chunks: 2,128 → 830 KB at LOD 0; at LOD 1 a depth-3 shell would be bigger than the
+  chunk and none is taken. The memory must be within 1.25 times the shells' share of the snapshots'.
+- The G65 tests (`Streaming.{Planet,Plane}.FarReadsOffGameThread`) still find no game-thread decode in the move.
+
+**Benches.** One build, the settings by cvar: before = `voxel.Snapshot.ShareUniform 0`, `voxel.Collision.NeighborShells 0`
+(the cache as on main after G65), after = both 1. The protocol of §20.13 (a fresh PIE on `PlanetTest` with
+`voxel.ConfigOverride`, `vox.TPLatLon 45 20`, the bench 25 s after the settle, `voxel.Bench.Run <tag> 1500 40000 gc=45:20:90
+follow=300 warmup=30 catchup=90`, three runs per planet and setting, interleaved), after a throwaway warm-up run. The peak
+with the cache is one sample's systems (the bench's: voxel data, edits, renderer, collision, scatter) plus snapshot cache plus
+far field. Before → after (ranges over the three runs):
+
+| | Small planet (S) | M (50 km) | L (1,000 km) |
+|---|---|---|---|
+| Snapshot cache, peak (shells included) | 1,087-1,093 → 669-706 MB (72-73) | 709-760 → 464-508 MB (20) | 743-754 → 484-504 MB (21) |
+| Peak with the cache and the far field | 1,760-1,776 → 1,299-1,361 MB | 1,340-1,406 → 1,100-1,142 MB | 1,485-1,489 → 1,231-1,235 MB |
+| Snapshot cache at the end | 637-702 → 503-534 MB | 622-673 → 289-439 MB | 726-754 → 458-472 MB |
+| Peak voxel data / systems | 288-300 / 644-648 → 288-291 / 644-648 MB | 307-308 / 597-599 → 309-313 / 599-603 MB | 292 / 703-704 → 290-291 / 702-704 MB |
+| Frame P95 / P99 | 27.4-33.0 / 38.2-43.5 → 26.7-32.9 / 32.7-43.2 ms | 24.0-30.1 / 31.1-38.0 → 23.7-30.6 / 29.0-41.0 ms | 23.5-30.2 / 29.4-38.3 → 23.4-26.5 / 28.0-35.0 ms |
+| Manager P95 | 5.4-6.5 → 5.2-6.3 ms | 5.7-6.9 → 5.6-7.1 ms | 5.9-7.6 → 6.1-6.6 ms |
+| Catch-up | 0.17-0.21 → 0.17-0.22 s | 0.17 → 0.17 s | 0.17-0.54 → 0.17 s |
+| Game-thread decode, traverse | 14-24 → 16-20 ms | 20-26 → 20-30 ms | 12-16 → 12-13 ms |
+
+D3 is met on every planet with the cache counted. Worker decodes: on the small planet 2,387 → 3,607 a traverse (a chunk read
+by a seam job and by cooks is decoded once for its snapshot and once for its shell when no snapshot is cached), 2.60 → 2.43 s
+of worker time; on L 1,917 → 1,498, 1.97 → 0.81 s (no uniform chunk decodes). The frame times of this session ran 25-35%
+over §20.13's in both settings and in every manager section alike, those G69 does not touch included (the far field +37%,
+LOD +40%, the GPU +6%), and the first repetition was the slowest in both: the machine's, not the change's; compare within
+the table.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 585/585 headless (582 + the
+three above) and 585/585 in the editor with the GPU tests running (no device loss, no ensure). The 108 GPU parity lines
+are CRC-identical to G44's (no generation change).
+
+**New findings** (in §14.1):
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G71 | Seam jobs and chunk meshes still read their participants' whole snapshots: with shells, 540-607 of the small planet's mid-traverse entries (518-579 MB). A seam reads its participants only near the seam, but each side's ring is recomputed with its own samplers, which reach a stride-scale depth, and the rings must stay bit-identical | Open (an improvement): D3 is met without it |
+
+**Left as they were:** seam jobs and chunk meshes on whole snapshots (G71), the cache's lifetime (128 ticks: shorter only
+re-makes), the collision radius, and copies of resident chunks for seam jobs.
+
+G69 is fixed.

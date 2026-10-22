@@ -208,6 +208,8 @@ private:
 		float DecodeMs;
 		// The shared voxel snapshots cached for seam jobs and cooks (MB; not in the voxel systems total; G65)
 		float SnapMB;
+		// Of which the neighbours' boundary shells for collision cooks (MB; G69)
+		float ShellMB;
 	};
 
 	void TakeSample(float DeltaTime);
