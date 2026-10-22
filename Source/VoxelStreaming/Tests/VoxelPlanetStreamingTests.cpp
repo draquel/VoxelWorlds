@@ -17,6 +17,7 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelMeshingTypes.h"
 #include "ChunkRenderData.h"
+#include "VoxelResidencyStats.h"
 #include "VoxelData.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelStreamingBenchmark.h"
@@ -1510,5 +1511,219 @@ bool FVoxelPlaneStreamingGradientBandsTest::RunTest(const FString& Parameters)
 	RunGradientBandsPlace(*this, TEXT("MC plane east"), Start, 400.0f, 1, EMeshingMode::MarchingCubes);
 	return true;
 }
+
+// ---------------------------------------------------------------------------
+// G65 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.13): far-compressed chunk data read off the game thread. A far chunk that
+// compression had compacted was expanded in place on the game thread by every reader that reached it as the viewer came
+// near (mesh jobs, seam jobs, collision cooks, the water pull), each about 0.3 ms at 64^3. Since G65 those readers read a
+// snapshot that a worker task decodes, started when a chunk in its neighbourhood is queued, and the chunk stays compressed.
+// ---------------------------------------------------------------------------
+
+namespace VoxelPlanetStreamingTestUtils
+{
+	/** Sets an int console variable at console priority for a scope. */
+	struct FScopedIntCVar
+	{
+		IConsoleVariable* Var = nullptr;
+		int32 Previous = 0;
+
+		FScopedIntCVar(const TCHAR* Name, int32 Value)
+		{
+			Var = IConsoleManager::Get().FindConsoleVariable(Name);
+			if (Var)
+			{
+				Previous = Var->GetInt();
+				Var->Set(Value, ECVF_SetByConsole);
+			}
+		}
+
+		~FScopedIntCVar()
+		{
+			if (Var)
+			{
+				Var->Set(Previous, ECVF_SetByConsole);
+			}
+		}
+	};
+
+	/** What a move over far-compressed chunks cost the game thread, and what it left. */
+	struct FFarReadsResult
+	{
+		int32 CompactBefore = 0;      // chunks held compact (uniform or compressed) when the move began
+		int32 GameThreadDecodes = 0;  // expansions on the game thread and its waits for worker decodes, during the move
+		float GameThreadMs = 0.0f;
+		int64 SnapshotDecodes = 0;    // snapshots decoded by worker tasks (the session)
+		TMap<FIntVector, uint32> VoxelCrcs; // every loaded chunk's voxels after the move, water flags masked
+		TMap<FIntVector, int32> WaterCounts; // and its water-flagged voxels
+		uint32 MeshCrc = 0;           // every chunk mesh and seam bucket after the move
+	};
+
+	/** CRC of the renderer's chunk meshes and seam buckets, in coordinate order. */
+	uint32 MeshesCrc(const FPlanetStreamingWorld& World)
+	{
+		uint32 Crc = 0;
+		auto AddMap = [&Crc](const TMap<FIntVector, FChunkMeshData>& Meshes)
+		{
+			TArray<FIntVector> Keys;
+			Meshes.GetKeys(Keys);
+			Keys.Sort([](const FIntVector& A, const FIntVector& B)
+			{
+				return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
+			});
+			for (const FIntVector& Key : Keys)
+			{
+				const FChunkMeshData& Mesh = Meshes[Key];
+				Crc = FCrc::MemCrc32(&Key, sizeof(Key), Crc);
+				Crc = FCrc::MemCrc32(Mesh.Positions.GetData(), Mesh.Positions.Num() * Mesh.Positions.GetTypeSize(), Crc);
+				Crc = FCrc::MemCrc32(Mesh.Normals.GetData(), Mesh.Normals.Num() * Mesh.Normals.GetTypeSize(), Crc);
+				Crc = FCrc::MemCrc32(Mesh.Indices.GetData(), Mesh.Indices.Num() * Mesh.Indices.GetTypeSize(), Crc);
+			}
+		};
+		AddMap(World.Renderer.ChunkMeshes);
+		AddMap(World.Renderer.SeamBuckets);
+		return Crc;
+	}
+
+	/**
+	 * Streams a place, lets far compression compact the far band (idle frames 5), then moves the viewer by Move so its LOD
+	 * bands sweep over compressed chunks, and records the move's game-thread decodes and what it left.
+	 */
+	FFarReadsResult RunFarReads(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
+		const FVector& Move, int32 SnapshotReads)
+	{
+		FScopedIntCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), SnapshotReads);
+		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
+		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
+		FFarReadsResult Result;
+		FPlanetStreamingWorld World;
+		Start(World);
+		Test.TestTrue(*FString::Printf(TEXT("%s (snapshot reads %d): the pipeline settled"), Place, SnapshotReads), World.Settle());
+
+		// The far band compacts: tick until the compact count has held for 60 ticks.
+		int32 LastCompact = -1;
+		int32 Still = 0;
+		for (int32 Tick = 0; Tick < 3000 && Still < 60; ++Tick)
+		{
+			World.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+			FPlatformProcess::Sleep(0.002f);
+			const UVoxelChunkManager::FVoxelMemoryStats Memory = World.Manager->GetVoxelMemoryStats();
+			const int32 Compact = Memory.UniformChunks + Memory.CompressedChunks;
+			Still = (Compact == LastCompact) ? Still + 1 : 0;
+			LastCompact = Compact;
+		}
+		Result.CompactBefore = LastCompact;
+
+		int32 Ignored = 0;
+		float IgnoredMs = 0.0f;
+		VoxelResidencyStats::ConsumeGameThread(Ignored, IgnoredMs);
+		World.Viewer += Move;
+		World.Manager->SetBenchmarkView(true, World.Viewer);
+		Test.TestTrue(*FString::Printf(TEXT("%s (snapshot reads %d): settled after the move"), Place, SnapshotReads), World.Settle());
+		VoxelResidencyStats::ConsumeGameThread(Result.GameThreadDecodes, Result.GameThreadMs);
+		Result.SnapshotDecodes = World.Manager->GetSnapshotDecodeCount();
+
+		TArray<FIntVector> Loaded;
+		World.Manager->GetLoadedChunks(Loaded);
+		for (const FIntVector& Coord : Loaded)
+		{
+			const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetEditMergedSnapshot(Coord);
+			if (Voxels.IsValid())
+			{
+				// The water flag is masked: the water pull's result at a chunk corner depends on the order neighbouring
+				// chunks finish meshing, either way (G70); it is compared apart.
+				TArray<FVoxelData> Masked = *Voxels;
+				int32 Water = 0;
+				for (FVoxelData& Voxel : Masked)
+				{
+					Water += Voxel.HasWaterFlag() ? 1 : 0;
+					Voxel.SetWaterFlag(false);
+				}
+				Result.VoxelCrcs.Add(Coord, FCrc::MemCrc32(Masked.GetData(), Masked.Num() * sizeof(FVoxelData)));
+				Result.WaterCounts.Add(Coord, Water);
+			}
+		}
+		Result.MeshCrc = MeshesCrc(World);
+		World.Stop();
+		return Result;
+	}
+
+	/** Runs a place with the reads as before G65 and as they are, and checks the second moves them off the game thread. */
+	void RunFarReadsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start, const FVector& Move)
+	{
+		const FFarReadsResult Before = RunFarReads(Test, Place, Start, Move, 0);
+		const FFarReadsResult After = RunFarReads(Test, Place, Start, Move, 1);
+		Test.AddInfo(FString::Printf(TEXT("%s: compact chunks before the move %d / %d; game-thread decodes in the move: before G65 %d (%.1f ms), after %d (%.1f ms); snapshots decoded on workers %lld"),
+			Place, Before.CompactBefore, After.CompactBefore, Before.GameThreadDecodes, Before.GameThreadMs, After.GameThreadDecodes,
+			After.GameThreadMs, After.SnapshotDecodes));
+		Test.TestTrue(*FString::Printf(TEXT("%s: the far band compacted (%d chunks)"), Place, After.CompactBefore), After.CompactBefore >= 20);
+		Test.TestTrue(*FString::Printf(TEXT("%s: before G65 the move decoded far chunks on the game thread (%d)"), Place, Before.GameThreadDecodes),
+			Before.GameThreadDecodes >= 20);
+		Test.TestTrue(*FString::Printf(TEXT("%s: after, at most a tenth of them (%d against %d)"), Place, After.GameThreadDecodes, Before.GameThreadDecodes),
+			After.GameThreadDecodes * 10 <= Before.GameThreadDecodes);
+		Test.TestTrue(*FString::Printf(TEXT("%s: after, the snapshots decode on workers (%lld)"), Place, After.SnapshotDecodes), After.SnapshotDecodes > 0);
+
+		// The same world either way: every chunk's voxels and every mesh and seam. Water flags are reported: where they
+		// differ, it is the water pull's order dependence (G70), which runs of either setting show alike.
+		Test.TestEqual(*FString::Printf(TEXT("%s: the same chunks loaded"), Place), After.VoxelCrcs.Num(), Before.VoxelCrcs.Num());
+		int32 Different = 0;
+		for (const TPair<FIntVector, uint32>& Pair : After.VoxelCrcs)
+		{
+			const uint32* Other = Before.VoxelCrcs.Find(Pair.Key);
+			Different += (!Other || *Other != Pair.Value) ? 1 : 0;
+		}
+		Test.TestEqual(*FString::Printf(TEXT("%s: every chunk's voxels the same (water flags apart)"), Place), Different, 0);
+		int32 WaterDifferent = 0;
+		for (const TPair<FIntVector, int32>& Pair : After.WaterCounts)
+		{
+			const int32* Other = Before.WaterCounts.Find(Pair.Key);
+			if (Other && *Other != Pair.Value)
+			{
+				++WaterDifferent;
+				Test.AddInfo(FString::Printf(TEXT("%s: chunk %s holds %d water voxels against %d (the water pull's order, G70)"),
+					Place, *Pair.Key.ToString(), Pair.Value, *Other));
+			}
+		}
+		Test.AddInfo(FString::Printf(TEXT("%s: %d of %d chunks with a different water count"), Place, WaterDifferent, After.WaterCounts.Num()));
+		Test.TestEqual(*FString::Printf(TEXT("%s: every mesh and seam the same"), Place), After.MeshCrc, Before.MeshCrc);
+	}
+}
+
+/**
+ * G65 on a planet (45N 20E, a sea at the datum, so the water pull reads too): moving the viewer 3,000 uu over a far band
+ * that compression has compacted, the reads of the compressed chunks no longer expand them on the game thread (at most a
+ * tenth of the decodes voxel.FarCompression.SnapshotReads 0 does there), and the world is the same either way: every chunk's
+ * voxels and every mesh and seam.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingFarReadsTest,
+	"VoxelWorlds.Streaming.Planet.FarReadsOffGameThread",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingFarReadsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	const double Lat = FMath::DegreesToRadians(45.0);
+	const double Lon = FMath::DegreesToRadians(20.0);
+	const FVector Direction(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	const FVector East = FVector::CrossProduct(FVector::UpVector, Direction).GetSafeNormal();
+	auto Start = [&Direction](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetFarReadsTestWorld"), Direction, 300.0f); };
+	RunFarReadsPlace(*this, TEXT("45N 20E"), Start, East * 3000.0);
+	return true;
+}
+
+/** G65 on a heightmap world: the same over the plane of the closed-surface test, moving 3,000 uu east. */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingFarReadsTest,
+	"VoxelWorlds.Streaming.Plane.FarReadsOffGameThread",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneStreamingFarReadsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneFarReadsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunFarReadsPlace(*this, TEXT("plane east"), Start, FVector(3000.0, 0.0, 0.0));
+	return true;
+}
+
 
 #endif // WITH_DEV_AUTOMATION_TESTS

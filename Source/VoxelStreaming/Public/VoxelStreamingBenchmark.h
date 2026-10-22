@@ -202,6 +202,12 @@ private:
 		// The engine's last game thread, render thread and GPU frame times (ms; stat unit's), to place frame time outside
 		// the chunk manager
 		float GTMs, RTMs, GPUMs;
+		// Far-compressed chunks expanded on the game thread since the last sample, and their time (ms; world modes
+		// review G65, VoxelResidencyStats)
+		int32 DecodeN;
+		float DecodeMs;
+		// The shared voxel snapshots cached for seam jobs and cooks (MB; not in the voxel systems total; G65)
+		float SnapMB;
 	};
 
 	void TakeSample(float DeltaTime);

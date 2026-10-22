@@ -25,6 +25,7 @@
 
 // Chaos physics includes (UE5 always uses Chaos)
 #include "Chaos/TriangleMeshImplicitObject.h"
+#include "VoxelResidencyStats.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelCollision, Log, All);
 
@@ -581,6 +582,7 @@ namespace VoxelCollisionNeighbors
 
 int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkCoord)
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("collision neighbour arrival"));
 	if (!bIsInitialized || CVarCollisionNeighborRecook.GetValueOnGameThread() == 0 || !ChunkManager || !Configuration)
 	{
 		return 0;
@@ -1069,8 +1071,10 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	TSharedPtr<const TArray<FVoxelData>> SharedVoxels;
 	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> NeighborSnapshots;
 	uint32 MissingNeighborMask = 0;
+	// Far-compressed chunks' snapshots may still be decoding on workers (G65): the cook's worker waits for them.
+	TArray<UE::Tasks::FTask> SnapshotDecodes;
 	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest, SharedVoxels, NeighborSnapshots,
-		&MissingNeighborMask))
+		&MissingNeighborMask, &SnapshotDecodes))
 	{
 		// Chunk may not be loaded yet or has no geometry — remove the CollisionData
 		// entry so UpdateCollisionDecisions() can re-request on a future sweep.
@@ -1104,8 +1108,12 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	LastPrepMs += static_cast<float>((FPlatformTime::Seconds() - PrepT0) * 1000.0);
 
 	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
-	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), ChunkCoord, LODLevel, bDeepOff, bDeepFull, ChunkSizeCapture]() mutable
+	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), ChunkCoord, LODLevel, bDeepOff, bDeepFull, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
 	{
+		for (UE::Tasks::FTask& Decode : SnapshotDecodes)
+		{
+			Decode.Wait();
+		}
 		FAsyncCollisionResult Result;
 		Result.ChunkCoord = ChunkCoord;
 		Result.LODLevel = LODLevel;
@@ -1419,6 +1427,13 @@ void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, floa
 
 	// Add to tracking set
 	CookingQueueSet.Add(ChunkCoord);
+
+	// The cook reads the chunk and its 26 neighbours: start the far-compressed ones' snapshots decoding on workers while
+	// it waits in the queue (G65).
+	if (ChunkManager)
+	{
+		ChunkManager->PrefetchVoxelSnapshotsAround(ChunkCoord);
+	}
 
 	// Sorted insertion (lowest priority first, highest at back for O(1) Pop)
 	int32 InsertIndex = Algo::LowerBound(CookingQueue, Request);

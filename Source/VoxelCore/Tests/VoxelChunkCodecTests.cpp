@@ -354,4 +354,79 @@ bool FVoxelChunkAsyncCompactCacheOnlyTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkCompactSourceTest,
+	"VoxelWorlds.Compression.Codec.CompactSource",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/**
+ * World modes review G65: a compact form copied off a descriptor (FVoxelCompactSource) expands to the chunk's exact array
+ * on any thread while the descriptor stays compact; a resident chunk has no compact source; and the descriptor's own
+ * in-place expansion is what the residency statistics count.
+ */
+bool FVoxelChunkCompactSourceTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelChunkCodecTestUtils;
+	const int32 CS = 32;
+
+	// Compressed (Oodle, the default codec): the copy expands to the original, the descriptor stays compressed.
+	FChunkDescriptor D(FIntVector(3, -2, 5), CS);
+	D.AllocateVoxelData();
+	const TArray<FVoxelData> Original = MakeTerrainChunk(CS);
+	D.VoxelData = Original;
+	D.Residency = EVoxelDataResidency::Resident;
+
+	FVoxelCompactSource Resident;
+	TestFalse(TEXT("a resident chunk has no compact source"), D.CopyCompactSource(Resident));
+	TestFalse(TEXT("the empty source is not valid"), Resident.IsValid());
+
+	TestTrue(TEXT("compress the terrain chunk"), D.TryCompress(EVoxelChunkCodec::Oodle));
+	TestTrue(TEXT("compact once compressed"), D.IsCompact());
+	FVoxelCompactSource Source;
+	TestTrue(TEXT("copy the compressed form"), D.CopyCompactSource(Source));
+	TestEqual(TEXT("the descriptor stays compressed"), (int32)D.Residency, (int32)EVoxelDataResidency::Compressed);
+	TestEqual(TEXT("no raw array after the copy"), D.VoxelData.Num(), 0);
+
+	int32 Count = 0;
+	float Ms = 0.0f;
+	VoxelResidencyStats::ConsumeGameThread(Count, Ms);
+	TArray<FVoxelData> Expanded;
+	TestTrue(TEXT("the copy expands"), Source.Expand(Expanded));
+	TestTrue(TEXT("to the exact array"), Expanded == Original);
+	VoxelResidencyStats::ConsumeGameThread(Count, Ms);
+	TestEqual(TEXT("expanding a copy is not an in-place expansion"), Count, 0);
+
+	// Expanding it on a worker gives the same array.
+	TArray<FVoxelData> WorkerExpanded;
+	UE::Tasks::Launch(UE_SOURCE_LOCATION, [&Source, &WorkerExpanded]() { Source.Expand(WorkerExpanded); }).Wait();
+	TestTrue(TEXT("a worker expands the same array"), WorkerExpanded == Original);
+
+	// The descriptor's own expansion is counted (game thread here).
+	D.EnsureResident();
+	VoxelResidencyStats::ConsumeGameThread(Count, Ms);
+	TestEqual(TEXT("an in-place expansion on the game thread is counted"), Count, 1);
+	TestTrue(TEXT("and the chunk is resident again"), D.IsVoxelDataResident());
+
+	// Uniform: the value is copied, the expansion fills the chunk.
+	FChunkDescriptor U(FIntVector::ZeroValue, CS);
+	U.AllocateVoxelData();
+	const FVoxelData Rock = FVoxelData::Solid(4, 1);
+	for (FVoxelData& V : U.VoxelData)
+	{
+		V = Rock;
+	}
+	TestTrue(TEXT("collapse the uniform chunk"), U.TryCollapseUniform());
+	FVoxelCompactSource UniformSource;
+	TestTrue(TEXT("copy the uniform form"), U.CopyCompactSource(UniformSource));
+	TestEqual(TEXT("the descriptor stays uniform"), (int32)U.Residency, (int32)EVoxelDataResidency::Uniform);
+	TArray<FVoxelData> Filled;
+	TestTrue(TEXT("the uniform copy expands"), UniformSource.Expand(Filled));
+	bool bAllRock = Filled.Num() == CS * CS * CS;
+	for (const FVoxelData& V : Filled)
+	{
+		bAllRock &= (V == Rock);
+	}
+	TestTrue(TEXT("to the chunk's value everywhere"), bAllRock);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
