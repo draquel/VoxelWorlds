@@ -78,10 +78,12 @@ public:
 	 * will be grouped into a single undo/redo operation.
 	 *
 	 * @param Description Human-readable description of the operation
-	 * @param bAddToUndoHistory False for edits that follow from others rather than being made: the operation is broadcast
-	 *        as any other but takes no undo step and leaves the redo stack as it is. Water propagation's flood (world modes
-	 *        review G60): undoing the dig that let the water in puts the dig's voxels back as they were, flood included,
-	 *        and redoing it floods again
+	 * @param bAddToUndoHistory False for edits that follow from others rather than being made, and for the world's own
+	 *        generation: the operation is broadcast as any other but takes no undo step and leaves the redo stack as it is.
+	 *        Water propagation's flood (world modes review G60): undoing the dig that let the water in puts the dig's voxels
+	 *        back as they were, flood included, and redoing it floods again. Dungeon stamps, their entrances and campsites
+	 *        (G68): a player's undo takes back the player's own last edit, never a POI, and the history does not hold their
+	 *        hundreds of thousands of voxel changes (112 bytes each)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
 	void BeginEditOperation(const FString& Description = TEXT("Edit"), bool bAddToUndoHistory = true);
@@ -341,6 +343,14 @@ public:
 	 */
 	SIZE_T GetMemoryUsage() const;
 
+	/**
+	 * Approximate memory of the undo and redo history in bytes: what voxel.Edit.UndoHistoryMB bounds (world modes review
+	 * G68). Each operation records 112 bytes per voxel it changed (FVoxelEditChange).
+	 * @return The history's bytes
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
+	int64 GetHistoryMemoryUsage() const;
+
 protected:
 	// ==================== Internal Methods ====================
 
@@ -394,7 +404,8 @@ protected:
 	FVoxelData GetOriginalVoxelData(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const;
 
 	/**
-	 * Trim undo stack if it exceeds maximum size.
+	 * Trim the undo stack, oldest operations first, while it holds more than MaxUndoHistory operations or the history is
+	 * over voxel.Edit.UndoHistoryMB (G68). The newest operation is always kept, however large.
 	 */
 	void TrimUndoStack();
 
@@ -475,7 +486,7 @@ protected:
 	UPROPERTY()
 	TArray<FVoxelEditOperation> RedoStack;
 
-	/** Maximum number of operations in undo stack */
+	/** Maximum number of operations in undo stack (the memory budget, voxel.Edit.UndoHistoryMB, may hold fewer: G68) */
 	static constexpr int32 MaxUndoHistory = 100;
 
 	/** Counter for generating unique operation IDs */

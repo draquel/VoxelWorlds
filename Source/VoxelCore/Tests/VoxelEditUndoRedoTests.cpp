@@ -4,6 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "VoxelEditManager.h"
 #include "VoxelWorldConfiguration.h"
+#include "HAL/IConsoleManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -267,6 +268,111 @@ bool FVoxelEditUndoRedoRecordsTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Cancel: edits that differ from before the operation"), Differences(Before, Snapshot(*Manager)), 0);
 	}
 
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G68 (WORLD_MODES_REVIEW_PLAN.md section 14.1): the history's memory budget (voxel.Edit.UndoHistoryMB). Each operation
+// records 112 bytes per voxel it changed, so the history was bounded only by its 100-operation count. Over the budget the
+// oldest operations are dropped and the newest is always kept; what is kept undoes and redoes exactly; 0 = no budget.
+// ---------------------------------------------------------------------------
+
+namespace VoxelEditUndoRedoTestUtils
+{
+	/** Sets voxel.Edit.UndoHistoryMB at console priority for a scope. */
+	struct FScopedUndoHistoryMB
+	{
+		IConsoleVariable* Var = nullptr;
+		float Previous = 32.0f;
+
+		explicit FScopedUndoHistoryMB(float Value)
+		{
+			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Edit.UndoHistoryMB"));
+			if (Var)
+			{
+				Previous = Var->GetFloat();
+				Var->Set(Value, ECVF_SetByConsole);
+			}
+		}
+
+		~FScopedUndoHistoryMB()
+		{
+			if (Var)
+			{
+				Var->Set(Previous, ECVF_SetByConsole);
+			}
+		}
+	};
+
+	/** Twelve digs of radius 3 voxels a few voxels apart (about 110 voxels and 13 KB of history each). */
+	void DigTwelve(UVoxelEditManager& Manager, TArray<FLayerSnapshot>* OutAfterEach = nullptr)
+	{
+		for (int32 i = 0; i < 12; ++i)
+		{
+			Manager.ApplyBrushEdit(VoxelCentre(4 + 7 * (i % 4), 4 + 7 * ((i / 4) % 3), 8), Brush(3.0f, 80, 0), EEditMode::Subtract);
+			if (OutAfterEach)
+			{
+				OutAfterEach->Add(Snapshot(Manager));
+			}
+		}
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelEditUndoHistoryBudgetTest,
+	"VoxelWorlds.Edit.UndoRedo.MemoryBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelEditUndoHistoryBudgetTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelEditUndoRedoTestUtils;
+
+	// ---- No budget: the twelve digs are all kept. ----
+	int64 TwelveBytes = 0;
+	{
+		FScopedUndoHistoryMB Scoped(0.0f);
+		UVoxelEditManager* Manager = MakeManager();
+		DigTwelve(*Manager);
+		TwelveBytes = Manager->GetHistoryMemoryUsage();
+		TestEqual(TEXT("No budget: twelve undo steps"), Manager->GetUndoCount(), 12);
+		AddInfo(FString::Printf(TEXT("Twelve digs: %d edits, %lld bytes of history"), Manager->GetTotalEditCount(), TwelveBytes));
+	}
+
+	// ---- A budget of about a third of that: the oldest are dropped, the history within it, the rest undoes exactly. ----
+	{
+		const float BudgetMB = static_cast<float>(TwelveBytes / 3) / (1024.0f * 1024.0f);
+		FScopedUndoHistoryMB Scoped(BudgetMB);
+		UVoxelEditManager* Manager = MakeManager();
+		TArray<FLayerSnapshot> AfterEach;
+		DigTwelve(*Manager, &AfterEach);
+		const int32 Kept = Manager->GetUndoCount();
+		const int64 Bytes = Manager->GetHistoryMemoryUsage();
+		AddInfo(FString::Printf(TEXT("Budget %.4f MB: %d of 12 operations kept in %lld bytes"), BudgetMB, Kept, Bytes));
+		TestTrue(TEXT("Budget: the oldest operations dropped, some kept"), Kept >= 2 && Kept < 12);
+		TestTrue(TEXT("Budget: the history within it"), Bytes <= static_cast<int64>(BudgetMB * 1024.0 * 1024.0));
+		// Undo every kept operation: the layer comes back to what it was after each earlier dig, in turn.
+		int32 Mismatched = 0;
+		for (int32 Step = 0; Step < Kept; ++Step)
+		{
+			TestTrue(TEXT("Budget: undo a kept operation"), Manager->Undo());
+			Mismatched += Differences(AfterEach[12 - 2 - Step], Snapshot(*Manager)) > 0 ? 1 : 0;
+		}
+		TestFalse(TEXT("Budget: nothing older to undo"), Manager->CanUndo());
+		TestEqual(TEXT("Budget: every undo restores the layer after the dig before it"), Mismatched, 0);
+		// And redo them all: the layer as after the twelfth dig.
+		while (Manager->Redo())
+		{
+		}
+		TestEqual(TEXT("Budget: redo restores the twelfth dig's layer"), Differences(AfterEach.Last(), Snapshot(*Manager)), 0);
+	}
+
+	// ---- A budget smaller than one operation: the newest is still kept, alone. ----
+	{
+		FScopedUndoHistoryMB Scoped(0.001f);
+		UVoxelEditManager* Manager = MakeManager();
+		DigTwelve(*Manager);
+		TestEqual(TEXT("Tiny budget: the newest operation kept"), Manager->GetUndoCount(), 1);
+		TestTrue(TEXT("Tiny budget: it undoes"), Manager->Undo());
+	}
 	return true;
 }
 
