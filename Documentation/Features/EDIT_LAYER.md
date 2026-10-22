@@ -65,8 +65,10 @@ a reset. Tests: `VoxelWorlds.Streaming.EditRemesh.Plane`, `.Planet`.
 
 Every operation between `BeginEditOperation` and `EndEditOperation` (or the one `ApplyEdit` and `ApplyBrushEdit` start
 themselves) is one undo step of at most `MaxUndoHistory` (100). It records, for each voxel it changed, the voxel's chunk
-and the whole edit the voxel held before and after (`FVoxelEditChange`, none for the generated voxel), and when it ends
-the source, brush centre and radius it broadcast.
+and the whole edit the voxel held before and after (`FVoxelEditChange`, 112 bytes, none for the generated voxel), and when
+it ends the source, brush centre and radius it broadcast. The history (undo and redo) also keeps within
+`voxel.Edit.UndoHistoryMB` (32 MB; 0 = no budget): past it the oldest operations are dropped, the newest always kept
+(`GetHistoryMemoryUsage`; world modes review G68).
 
 - **Undo** puts each voxel's previous edit back, or removes the edit when there was none, last change first, in the
   voxel's own chunk; it broadcasts each chunk it changed as a System edit with no radius (the restored voxels re-mesh,
@@ -79,6 +81,11 @@ the source, brush centre and radius it broadcast.
   broadcast like any other. Water propagation's flood is one (it follows from the edit that let the water in): undoing
   that edit puts its voxels back as they were before it, the flood there with them, and its redo floods again. Water the
   flood put beyond the edit's voxels stays.
+  The world's own generation is outside it too (G68): dungeon stamps (`UDungeonVoxelStamper`), their entrances
+  (`UDungeonEntranceStitcher`) and campsites (`UVoxelWorldPOIPlacement::PlaceCampsite`), so an undo takes back the
+  player's own last edit, never a POI. Until 2026-10-22 they were undo steps: on `Review_Planet_L` four POI operations
+  around a site held 94 MB of history, and an undo took back the last of them. As with the flood, undoing a player's
+  edit made before a stamp puts back that edit's voxels as they were before it, the stamp's there with them.
 - A clear (`ClearChunkEdits`, `ClearAllEdits`) is outside the history; a load (`LoadEditsFromFile`) clears it.
 - `FVoxelEdit::OriginalData` (the previous edit's voxel, or air) is still written to the edits file but undo does not
   read it.

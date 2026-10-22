@@ -1508,7 +1508,7 @@ Three findings from §13.11 get IDs here:
 | G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (§20.10) | Fixed 2026-10-21 (§20.13): a chunk compacted while far was expanded in place on the game thread by every reader as the viewer came near (collision cooks, the water pull, seam jobs, chunk meshes; about 0.3 ms each, 2,959 expansions of 1,279 chunks per small-planet great circle, 57% repeats, since the sweep compacts again at once). Now the snapshot of a far-compressed chunk without edits is decoded by a worker task from a copy of its compact form (`FVoxelCompactSource`) and the chunk stays compressed: seam jobs, cooks and mesh jobs wait for it on their workers, the water pull's seed search, the water tile and the scatter hand-off read it, and a chunk queued for a mesh or a cook starts its neighbourhood's (`PrefetchVoxelSnapshotsAround`); `voxel.FarCompression.SnapshotReads`. Benches (three runs per planet): the traverse's game-thread decode 364-548 → 11-27 ms, frames with over 2 ms of it 53-75 → 0-5, frame P99 1.8-2.6 ms and manager P95 1.2-1.8 ms lower (medians), peak voxel data −63 to −113 MB, catch-up unchanged. Tests `Compression.Codec.CompactSource`, `Streaming.{Planet,Plane}.FarReadsOffGameThread`. G69, G70 recorded | — |
 | G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7: M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, the same with and without G42's batching, the voxel data's peak 812-859 MB; settled figures did not move (§20.10). Something merged since G52 holds more voxel data in flight; under D3's 1.5 GB | Dismissed 2026-10-21 (§20.11): not a regression. §20.10's benches started 10.7 s after the settle, §20.7's 21.5 s after. After a teleport the window streams in at once and holds 787-837 MB of voxel data 10-11 s after the settle on M and L, until far compression's idle wait (`IdleFrames` 300) and encode budget catch up by +15-16 s; the bench's peaks count every sample from the first. On one build a bench started 10 s after the settle peaks at 1,048-1,061 MB on M and 1,194-1,241 on L, one started 21 s after at 675-683 and 832-833. G52's build gives 1,049-1,067 and 1,168-1,189 against 742-779 and 830-836 (§20.7: 747-769, 830-837). The traverse's voxel data is unchanged (M 375-380 MB, L 404-405). D3 holds with the transient: at most 1,241 MB + 51 MB of far field. G67, G68 recorded | — |
 | G67 | After a teleport or a spawn the window streams in at once, and stays resident until far compression catches up (`IdleFrames` 300, then at most 4 encodes a tick): on M and L, 779-830 of about 1,100 chunks are resident 10-11 s after the settle (787-837 MB of voxel data, systems 1.05-1.24 GB) for about 5 s, in G52's build too. About 340 of them are uniform (all air or all solid), which the sweep collapses for free but only after the same wait. Collapsing a uniform chunk when it is generated would take about 340 MB off that peak, given reads that do not re-expand it (meshing and seams read through `EnsureResident`). Under D3 either way | Open (an improvement, not a defect): found with G66 (§20.11) | — |
-| G68 | System edits (POI and dungeon stamps, campsites) enter the undo history, and since G60 each voxel change there is an `FVoxelEditChange` (its chunk, its position and the whole edit before and after: 112 bytes, against `FVoxelEdit`'s 40). On L, 4 POI operations around the site hold 94.0 MB of the edit manager's 122.0 (the edit layer: 420,713 edits, 28.0 MB). The same history took 33.6 MB before G60, so L's systems memory, settled and peak, rose 60 MB with it. An undo would take back the last of them | Open: found with G66 (§20.11). Keep system edits out of the history (as G60 did for water propagation), slim the record (it repeats the position and keeps two timestamps), or cap the history by memory; a design decision (undoing a stamp) | — |
+| G68 | System edits (POI and dungeon stamps, campsites) enter the undo history, and since G60 each voxel change there is an `FVoxelEditChange` (its chunk, its position and the whole edit before and after: 112 bytes, against `FVoxelEdit`'s 40). On L, 4 POI operations around the site hold 94.0 MB of the edit manager's 122.0 (the edit layer: 420,713 edits, 28.0 MB). The same history took 33.6 MB before G60, so L's systems memory, settled and peak, rose 60 MB with it. An undo would take back the last of them | Fixed in §20.14 (the user's decision): dungeon stamps, their entrances and campsites begin their operations outside the history, as water propagation's flood does, so an undo takes back the player's own last edit; and the history keeps within `voxel.Edit.UndoHistoryMB` (32 MB, oldest dropped first, the newest always kept). Live on L: 420,713 edits, no undo step, the edit manager 28.0 MB against 122.0 | — |
 | G69 | The seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one full array per chunk, 1 MB at 64³, kept for 128 seam ticks after its last use) holds 1,061-1,095 MB at the small planet's great-circle peak and 688-753 MB on M and L, 590-750 MB at the end, with and without G65's snapshot reads. Nothing counted it before G65 (`GetVoxelMemoryStats`; the eviction's comment says tens of MB). Counted with the systems and the far field, the traverse peaks at 1.75-1.83 GB on S, 1.34-1.42 on M and 1.48-1.61 on L, over D3's 1.5 GB on S (§20.13) | Fixed 2026-10-22 (§20.15): traced with `voxel.Snapshot.Stats`, the cache is the working set, not stale entries (10+ reads each, a shorter lifetime only re-makes them); its peak was collision cooks, which pin each of their 26 neighbours' whole snapshot to read one plane of it (the collision radius is half the view distance, 20,000 uu here), and uniform chunks each expanded into their own array. Now cooks read their neighbours from boundary shells (`FVoxelChunkShell`, the voxels within `VoxelNeighborSlices::GetNeighborDepth` of each face: 96 KB at 64³ against 1 MB; `voxel.Collision.NeighborShells`), a cook drops its own chunk's snapshot once it has taken it unless another reader did, and uniform chunks share one array per value (`voxel.Snapshot.ShareUniform`). Benches (three runs per planet, by cvar): the snapshot cache's peak 0.71-1.09 → 0.46-0.71 GB, the traverse's peak with it and the far field S 1.76-1.78 → 1.30-1.36 GB, M 1.34-1.41 → 1.10-1.14, L 1.49 → 1.23 (D3 met), frame, manager, catch-up and game-thread decode unchanged; collision meshes identical (`Streaming.{Planet,Plane}.CollisionNeighborShells`). G71 recorded | — |
 | G70 | The water pull's result at a chunk corner depends on the order in which the neighbouring chunks finish meshing: in `Streaming.Planet.FarReadsOffGameThread` 9 air voxels below the sea at chunk (6, 0, 9)'s +Y+Z corner are flooded in some runs and not in others, with either setting of `voxel.FarCompression.SnapshotReads` (§20.13) | Open (not traced): found with G65; the test compares the water flags apart | — |
 | G71 | Seam jobs and chunk meshes still read their participants' whole snapshots: with G69's shells, 540-607 of the small planet's mid-traverse entries (518-579 MB) are read by a seam job or a chunk mesh. A seam job reads its participants only near the seam, but each side's boundary ring is recomputed with that side's own samplers, which reach a stride-scale depth (several voxels at LOD 2), so a shell at coarse LODs would hold most of a chunk, and the rings must stay bit-identical (§20.15) | Open (an improvement): D3 is met without it | — |
@@ -8059,6 +8059,62 @@ three above) and 582/582 in the editor with the GPU tests running (no device los
 through `EnsureResident`), and the far-compression sweep and its codec.
 
 G65 is fixed.
+
+### 20.14 G68: system edits outside the undo history, and a memory budget for it (2026-10-22)
+
+Bases: VoxelWorlds `63c171a`, ProceduralDungeonPlugin `fe9232e`, UE5_PluginDev `8b3e119` (G62, G66 and G65 merged).
+Branches `fix/g68-system-edit-history` (VoxelWorlds, ProceduralDungeonPlugin) and `claude/g68-system-edit-history`
+(UE5_PluginDev, which holds VoxelWorldPOI). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+worktree editor (Claudius on 8098), background throttling off.
+
+**The finding** (§20.11): system edits entered the edit manager's undo history. The dungeon stamp, its entrance and the
+campsites began their operations with the default `bAddToUndoHistory`, and since G60 each voxel change there is an
+`FVoxelEditChange` of 112 bytes. On `Review_Planet_L` four POI operations around 45°N 20°E held 94.0 MB of the edit
+manager's 122.0, and an undo (the demo test actor's Z) would have taken back the last of them.
+
+**The decision** (the user's, 2026-10-22): the world's own generation stays out of the history, as G60 did for water
+propagation's flood, and the history gets a memory budget as a safety net. Keeping stamps undoable with a slimmer record, or
+a budget alone (which on L would drop the stamps again), were not taken. Undo exists in the game only through the demo test
+actor; the player controller has none.
+
+**What changed:**
+
+- **Out of the history** (`BeginEditOperation(…, /*bAddToUndoHistory=*/false)`): `UDungeonVoxelStamper::StampDungeonInFrame`
+  (ProceduralDungeonPlugin), `UDungeonEntranceStitcher::StitchEntranceInFrame` (ProceduralDungeonPlugin), and both paths of
+  `UVoxelWorldPOIPlacement::PlaceCampsite` (VoxelWorldPOI; heightmap and planet). They are broadcast as before (System
+  source: re-mesh, re-cook, scatter re-extraction, water), take no undo step and leave the redo stack. Whether an operation
+  enters the history stays the caller's choice: other System operations (the debug `voxel.Edit.System` and
+  `voxel.Edit.SystemLayers`, and the ones the undo tests build on the edit manager) are still undo steps.
+- **The history's memory budget** (`UVoxelEditManager`): `voxel.Edit.UndoHistoryMB` (32 MB; 0 = no budget, the
+  100-operation limit only). When an operation enters the history, the oldest operations are dropped while the undo and redo
+  history is over the budget, down to the newest, which is always kept. A player brush of radius 8 voxels takes about 0.25
+  MB. `GetHistoryMemoryUsage()` (BlueprintCallable) reports it; `GetDebugStats` prints it.
+- **What follows:** as with the flood, undoing a player's edit made before a stamp puts that edit's voxels back as they were
+  before it, the stamp's there with them. Only the demo test actor can undo, so this is a debug-tool corner.
+
+**Tests.**
+
+- **`VoxelWorlds.POI.SystemEditsOutsideHistory`** (new, VoxelWorldPOI): on a small plane a player dig (81 voxels, one undo
+  step, 9,798 bytes of history), then a dungeon stamp (28,832 voxels), its entrance (5,321) and a campsite: still one undo
+  step and 9,798 bytes, and an undo takes back the dig and leaves the POIs' 28,276 edits. Before, the three would each have
+  been an undo step, about 3.8 MB of history, and the undo would have taken back the campsite.
+- **`VoxelWorlds.Edit.UndoRedo.MemoryBudget`** (new): twelve digs (972 edits, 114,872 bytes of history) are all kept with
+  no budget; with a budget of a third of that, 3 of 12 are kept in 30,434 bytes, each undo restores the layer after the dig
+  before it, nothing older can be undone and redo restores the twelfth dig's layer; under a budget smaller than one
+  operation the newest is still kept and undoes.
+- **Unchanged and green:** `Edit.UndoRedo.Records`, `Streaming.WaterPropagation.Undo.{Plane,Planet}` (their system stamp is
+  an operation the test builds on the edit manager, still an undo step), `Scatter.EditReaders.*`, `Streaming.EditRemesh.*`, `Dungeon.Stamp.*`,
+  `Dungeon.Stitch.*`, `POI.Planet.PlaceCampsite`.
+
+**Live** (`Review_Planet_L` on `PlanetTest`, a fresh world, the pawn settled at 45°N 20°E and probed 25 s later through
+the edit manager's `GetDebugStats` and `GetHistoryMemoryUsage`, as in §20.11): the same 420,713 edits in 18 chunks (a
+dungeon of 289,574 voxels and 4,563 for its entrance, and a campsite), no undo step and 0.00 MB of history; the edit manager
+holds 28.0 MB against 122.0 before. L's systems memory, settled and peak, is back by the 94 MB G60 added.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 584/584 headless and 584/584
+in the editor with the GPU tests running (no device loss). The 108 GPU parity lines are CRC-identical to G44's.
+
+G68 is fixed.
 
 ### 20.15 G69: the seam snapshot cache, bounded (2026-10-22)
 

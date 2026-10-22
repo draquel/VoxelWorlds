@@ -8,9 +8,18 @@
 #include "Serialization/MemoryReader.h"
 #include "Misc/FileHelper.h"
 #include "HAL/PlatformFileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/Optional.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelEdit, Log, All);
+
+static TAutoConsoleVariable<float> CVarVoxelEditUndoHistoryMB(
+	TEXT("voxel.Edit.UndoHistoryMB"),
+	32.0f,
+	TEXT("Memory budget of the edit manager's undo and redo history, in MB (world modes review G68): past it the oldest ")
+	TEXT("operations are dropped, down to the newest, which is always kept. 0 = no budget (the 100-operation limit only). ")
+	TEXT("An operation records 112 bytes per voxel it changed (G60): a player brush of radius 8 voxels about 0.25 MB."),
+	ECVF_Default);
 
 // File format version for binary serialization
 // Version 1: Original format with NewData/OriginalData only
@@ -836,6 +845,8 @@ FString UVoxelEditManager::GetDebugStats() const
 	Stats += FString::Printf(TEXT("Total Edits: %d\n"), GetTotalEditCount());
 	Stats += FString::Printf(TEXT("Undo Stack: %d\n"), UndoStack.Num());
 	Stats += FString::Printf(TEXT("Redo Stack: %d\n"), RedoStack.Num());
+	Stats += FString::Printf(TEXT("Undo History Memory: %.2f MB (budget %.1f MB, voxel.Edit.UndoHistoryMB)\n"),
+		GetHistoryMemoryUsage() / (1024.0 * 1024.0), CVarVoxelEditUndoHistoryMB.GetValueOnAnyThread());
 	Stats += FString::Printf(TEXT("Operation In Progress: %s\n"),
 		CurrentOperation.IsValid() ? TEXT("Yes") : TEXT("No"));
 	Stats += FString::Printf(TEXT("Memory Usage: %.2f KB\n"), GetMemoryUsage() / 1024.0f);
@@ -1177,6 +1188,41 @@ void UVoxelEditManager::TrimUndoStack()
 	{
 		UndoStack.RemoveAt(0);
 	}
+
+	// The memory budget (G68): oldest first, the newest operation kept whatever its size.
+	const double BudgetMB = CVarVoxelEditUndoHistoryMB.GetValueOnAnyThread();
+	if (BudgetMB <= 0.0)
+	{
+		return;
+	}
+	const int64 Budget = static_cast<int64>(BudgetMB * 1024.0 * 1024.0);
+	int64 Bytes = GetHistoryMemoryUsage();
+	int32 Dropped = 0;
+	while (Bytes > Budget && UndoStack.Num() > 1)
+	{
+		Bytes -= static_cast<int64>(UndoStack[0].GetMemoryUsage());
+		UndoStack.RemoveAt(0);
+		++Dropped;
+	}
+	if (Dropped > 0)
+	{
+		UE_LOG(LogVoxelEdit, Log, TEXT("Undo history over its %.2f MB budget (voxel.Edit.UndoHistoryMB): dropped the %d oldest operation(s), %d kept in %.2f MB"),
+			BudgetMB, Dropped, UndoStack.Num(), GetHistoryMemoryUsage() / (1024.0 * 1024.0));
+	}
+}
+
+int64 UVoxelEditManager::GetHistoryMemoryUsage() const
+{
+	int64 Total = static_cast<int64>(UndoStack.GetAllocatedSize() + RedoStack.GetAllocatedSize());
+	for (const FVoxelEditOperation& Op : UndoStack)
+	{
+		Total += static_cast<int64>(Op.GetMemoryUsage());
+	}
+	for (const FVoxelEditOperation& Op : RedoStack)
+	{
+		Total += static_cast<int64>(Op.GetMemoryUsage());
+	}
+	return Total;
 }
 
 void UVoxelEditManager::RestoreOperation(const FVoxelEditOperation& Operation, bool bAsLeft,
