@@ -111,6 +111,10 @@ float MCBoundaryMorphWidth;  // ramp width in coarse cells
 // vertex's edge (CalculateEdgeShadingNormal), 0 = the stride-scale gradient at the vertex, as before.
 uint VoxelShadingNormals;
 
+// Shading normals at voxel resolution (G62; voxel.Mesh.CrossingGradientNormals): 1 = the density gradient fitted to the
+// voxels on the ramp around the point (CalculateShadingNormal), 0 = the central difference about the voxel it floors to.
+uint CrossingGradientNormals;
+
 // Output buffer capacities (overflow protection — mirrors the DC mesher). Cave-riddled chunks have far
 // more interior surface than the fixed triangle-soup buffers hold; without this guard the atomic counters
 // run past the buffer end, out-of-bounds writes are dropped, and in-bounds index slots end up referencing
@@ -279,6 +283,154 @@ float3 CalculateGradientNormalLOD(int3 Position, int Stride)
     return float3(0, 0, 1);
 }
 
+/**
+ * G62: whether GetVoxelAt returns the real voxel rather than a clamped stand-in, mirroring
+ * FVoxelCPUMarchingCubesMesher::IsVoxelHeld: inside the chunk, or one voxel past it where that face's plane, edge's strip
+ * or corner is bound.
+ */
+bool IsVoxelHeld(int3 P)
+{
+    int CS = (int)ChunkSize;
+    if (any(P < int3(-1, -1, -1)) || any(P > int3(CS, CS, CS)))
+    {
+        return false;
+    }
+    bool bXPos = (P.x == CS);
+    bool bXNeg = (P.x < 0);
+    bool bYPos = (P.y == CS);
+    bool bYNeg = (P.y < 0);
+    bool bZPos = (P.z == CS);
+    bool bZNeg = (P.z < 0);
+    bool bOutX = bXPos || bXNeg;
+    bool bOutY = bYPos || bYNeg;
+    bool bOutZ = bZPos || bZNeg;
+    uint OutCount = (bOutX ? 1u : 0u) + (bOutY ? 1u : 0u) + (bOutZ ? 1u : 0u);
+    if (OutCount == 0u)
+    {
+        return true;
+    }
+    if (OutCount == 1u)
+    {
+        uint Face = bXPos ? FACE_X_POS : (bXNeg ? FACE_X_NEG : (bYPos ? FACE_Y_POS : (bYNeg ? FACE_Y_NEG : (bZPos ? FACE_Z_POS : FACE_Z_NEG))));
+        return HasNeighborData(Face);
+    }
+    if (OutCount == 2u)
+    {
+        uint Edge;
+        if (!bOutZ)
+        {
+            Edge = bXPos ? (bYPos ? EDGE_XPOS_YPOS : EDGE_XPOS_YNEG) : (bYPos ? EDGE_XNEG_YPOS : EDGE_XNEG_YNEG);
+        }
+        else if (!bOutY)
+        {
+            Edge = bXPos ? (bZPos ? EDGE_XPOS_ZPOS : EDGE_XPOS_ZNEG) : (bZPos ? EDGE_XNEG_ZPOS : EDGE_XNEG_ZNEG);
+        }
+        else
+        {
+            Edge = bYPos ? (bZPos ? EDGE_YPOS_ZPOS : EDGE_YPOS_ZNEG) : (bZPos ? EDGE_YNEG_ZPOS : EDGE_YNEG_ZNEG);
+        }
+        return HasEdgeData(Edge);
+    }
+    uint Corner = bXPos
+        ? (bYPos ? (bZPos ? CORNER_XPOS_YPOS_ZPOS : CORNER_XPOS_YPOS_ZNEG) : (bZPos ? CORNER_XPOS_YNEG_ZPOS : CORNER_XPOS_YNEG_ZNEG))
+        : (bYPos ? (bZPos ? CORNER_XNEG_YPOS_ZPOS : CORNER_XNEG_YPOS_ZNEG) : (bZPos ? CORNER_XNEG_YNEG_ZPOS : CORNER_XNEG_YNEG_ZNEG));
+    return HasCornerData(Corner);
+}
+
+/**
+ * G62: the shading normal at a point at voxel resolution, mirroring FVoxelCPUMarchingCubesMesher::CalculateShadingNormal
+ * (VoxelCrossingGradient::FitNormal): the weighted least-squares fit of a linear density to the voxels of the 3x3x3 block
+ * around the point's nearest voxel that lie on the ramp (0 < density < 1) and are held, tent weights centred on the point,
+ * a free offset; where the voxels on the ramp do not span three directions (or CrossingGradientNormals is 0), the central
+ * difference about the voxel the point floors to, as before.
+ */
+float3 CalculateShadingNormal(float3 P)
+{
+    if (CrossingGradientNormals != 0u)
+    {
+        int3 Base = (int3)floor(P + 0.5f) - int3(1, 1, 1);
+        float SW = 0.0f;
+        float SD = 0.0f;
+        float3 SO = float3(0.0f, 0.0f, 0.0f);
+        float XX = 0.0f, XY = 0.0f, XZ = 0.0f, YY = 0.0f, YZ = 0.0f, ZZ = 0.0f;
+        float3 DO = float3(0.0f, 0.0f, 0.0f);
+        [loop]
+        for (int K = 0; K < 3; K++)
+        {
+            int VZ = Base.z + K;
+            float OZ = (float)VZ - P.z;
+            float WZ = 1.5f - abs(OZ);
+            if (WZ <= 0.0f)
+            {
+                continue;
+            }
+            [loop]
+            for (int J = 0; J < 3; J++)
+            {
+                int VY = Base.y + J;
+                float OY = (float)VY - P.y;
+                float WY = 1.5f - abs(OY);
+                if (WY <= 0.0f)
+                {
+                    continue;
+                }
+                [loop]
+                for (int I = 0; I < 3; I++)
+                {
+                    int VX = Base.x + I;
+                    float OX = (float)VX - P.x;
+                    float WX = 1.5f - abs(OX);
+                    if (WX <= 0.0f || !IsVoxelHeld(int3(VX, VY, VZ)))
+                    {
+                        continue;
+                    }
+                    float D = GetDensityAt(int3(VX, VY, VZ));
+                    if (D <= 0.0f || D >= 1.0f)
+                    {
+                        continue;
+                    }
+                    float W = WX * WY * WZ;
+                    SW += W;
+                    SD += W * D;
+                    SO += W * float3(OX, OY, OZ);
+                    XX += W * OX * OX;
+                    XY += W * OX * OY;
+                    XZ += W * OX * OZ;
+                    YY += W * OY * OY;
+                    YZ += W * OY * OZ;
+                    ZZ += W * OZ * OZ;
+                    DO += W * D * float3(OX, OY, OZ);
+                }
+            }
+        }
+        if (SW > 0.0f)
+        {
+            float InvW = 1.0f / SW;
+            float M00 = XX - SO.x * SO.x * InvW, M01 = XY - SO.x * SO.y * InvW, M02 = XZ - SO.x * SO.z * InvW;
+            float M11 = YY - SO.y * SO.y * InvW, M12 = YZ - SO.y * SO.z * InvW, M22 = ZZ - SO.z * SO.z * InvW;
+            float3 R = DO - SD * SO * InvW;
+            float C00 = M11 * M22 - M12 * M12;
+            float C01 = M02 * M12 - M01 * M22;
+            float C02 = M01 * M12 - M02 * M11;
+            float C11 = M00 * M22 - M02 * M02;
+            float C12 = M01 * M02 - M00 * M12;
+            float C22 = M00 * M11 - M01 * M01;
+            float Det = M00 * C00 + M01 * C01 + M02 * C02;
+            float Third = (M00 + M11 + M22) / 3.0f;
+            if (Third > 0.0f && Det > 0.02f * Third * Third * Third)
+            {
+                float3 N = -float3(C00 * R.x + C01 * R.y + C02 * R.z, C01 * R.x + C11 * R.y + C12 * R.z, C02 * R.x + C12 * R.y + C22 * R.z);
+                float LenSq = dot(N, N);
+                if (LenSq > 1e-8f)
+                {
+                    return N * rsqrt(LenSq);
+                }
+            }
+        }
+    }
+    return CalculateGradientNormalLOD((int3)floor(P), 1);
+}
+
 /** voxel.Mesh.VoxelShadingNormals for a vertex of this stride (G61; LOD 0, stride 1, is the reference). */
 bool UseVoxelShadingNormals(int Stride)
 {
@@ -338,7 +490,7 @@ float3 CalculateEdgeShadingNormal(int3 EndA, int3 EndB, float DensityA, float De
         return CalculateGradientNormalLOD(FallbackPos, FallbackStride);
     }
     float3 Crossing = (float3)Lo + (float3)Dir * BestAlong;
-    return CalculateGradientNormalLOD((int3)floor(Crossing), 1);
+    return CalculateShadingNormal(Crossing);
 }
 
 /**
@@ -632,6 +784,11 @@ void MainCS(
             CellNormals[ni] = CalculateEdgeShadingNormal(CubePos + LengyelCornerOffsets[CA] * Stride, CubePos + LengyelCornerOffsets[CB] * Stride,
                 CornerDensities[CA], CornerDensities[CB], VP, Stride);
         }
+        else if (Stride == 1)
+        {
+            // G62: the fitted gradient at the vertex.
+            CellNormals[ni] = CalculateShadingNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
+        }
         else
         {
             CellNormals[ni] = CalculateGradientNormalLOD(VP, Stride);
@@ -867,6 +1024,11 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             else if (DepthAxis == 1) { EA.y = BoundaryDepthCoord; EB.y = BoundaryDepthCoord; }
             else { EA.z = BoundaryDepthCoord; EB.z = BoundaryDepthCoord; }
             CellNormals[ni] = CalculateEdgeShadingNormal(EA, EB, Densities[SA], Densities[SB], VP, NS);
+        }
+        else if (NS == 1)
+        {
+            // G62: the fitted gradient at the vertex, as the regular pass's.
+            CellNormals[ni] = CalculateShadingNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
         }
         else
         {

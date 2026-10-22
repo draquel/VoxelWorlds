@@ -195,6 +195,32 @@ private:
 		float X, float Y, float Z) const;
 
 	/**
+	 * The shading normal at a point at voxel resolution (G62): the density gradient fitted to the voxels the request holds
+	 * around it (VoxelCrossingGradient::FitNormal, voxel.Mesh.CrossingGradientNormals 1), else CalculateGradientNormal.
+	 * LOD 0's vertex normals, and G61's normal at a strided edge's voxel crossing.
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z The point (voxels, chunk-local)
+	 * @return Unit normal vector pointing away from solid
+	 */
+	FVector3f CalculateShadingNormal(
+		const FVoxelMeshingRequest& Request,
+		float X, float Y, float Z) const;
+
+	/**
+	 * Whether GetVoxelAt returns the real voxel at a position rather than a clamped stand-in: inside the chunk, or one voxel
+	 * past it where the request carries that face's plane, that edge's strip or that corner (a fit must not read a
+	 * duplicate at the wrong place; G62).
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param X, Y, Z Voxel position (chunk-local)
+	 * @return True when the voxel is held
+	 */
+	bool IsVoxelHeld(
+		const FVoxelMeshingRequest& Request,
+		int32 X, int32 Y, int32 Z) const;
+
+	/**
 	 * Get the dominant material ID for a cube.
 	 * Uses the material from the majority of solid corners.
 	 *
@@ -352,10 +378,10 @@ private:
 		int32 Stride) const;
 
 	/**
-	 * The vertex normal of an edge vertex at stride > 1 (G61): LOD 0's normal (CalculateGradientNormal) at the
+	 * The vertex normal of an edge vertex at stride > 1 (G61): LOD 0's normal (CalculateShadingNormal) at the
 	 * voxel-resolution crossing on the edge nearest the vertex, so a strided cell shades like the voxel cells it spans.
 	 * A pure function of the edge (walked from its min end), so every cell and ribbon sharing the edge gives its vertex
-	 * the same normal. Reads only voxels on the edge and one voxel around its crossing.
+	 * the same normal. Reads only voxels on the edge and the 3x3x3 block around its crossing's nearest voxel.
 	 *
 	 * @param Request The meshing request with voxel data
 	 * @param EndA, EndB The edge's endpoints (voxels); they differ along one axis

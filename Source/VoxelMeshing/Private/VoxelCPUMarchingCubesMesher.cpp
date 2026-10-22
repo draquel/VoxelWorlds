@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelCPUMarchingCubesMesher.h"
+#include "VoxelCrossingGradient.h"
 #include "VoxelDigitalLine.h"
 #include "VoxelMeshing.h"
 #include "MarchingCubesTables.h"
@@ -667,7 +668,8 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	}
 
 	// Vertex normals. G61: at stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge (a function of the
-	// edge alone, so the geomorph does not change it); otherwise the stride-scale gradient at the vertex, as before.
+	// edge alone, so the geomorph does not change it); otherwise the stride-scale gradient at the vertex, as before. At
+	// stride 1 the fitted gradient at the vertex (G62).
 	const bool bVoxelShading = VoxelMCShading::UseVoxelShadingNormals(Stride);
 	FVector3f CellNormals[12];
 	for (int32 i = 0; i < VertexCount; i++)
@@ -684,7 +686,9 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 		}
 		else
 		{
-			CellNormals[i] = CalculateGradientNormalLOD(Request, VertexVoxel.X, VertexVoxel.Y, VertexVoxel.Z, Stride);
+			CellNormals[i] = (Stride == 1)
+				? CalculateShadingNormal(Request, VertexVoxel.X, VertexVoxel.Y, VertexVoxel.Z)
+				: CalculateGradientNormalLOD(Request, VertexVoxel.X, VertexVoxel.Y, VertexVoxel.Z, Stride);
 		}
 	}
 
@@ -1488,7 +1492,69 @@ FVector3f FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal(
 
 	FVector3f Crossing(static_cast<float>(Lo.X), static_cast<float>(Lo.Y), static_cast<float>(Lo.Z));
 	Crossing[Axis] += BestAlong;
-	return CalculateGradientNormal(Request, Crossing.X, Crossing.Y, Crossing.Z);
+	return CalculateShadingNormal(Request, Crossing.X, Crossing.Y, Crossing.Z);
+}
+
+FVector3f FVoxelCPUMarchingCubesMesher::CalculateShadingNormal(
+	const FVoxelMeshingRequest& Request,
+	float X, float Y, float Z) const
+{
+	if (VoxelCrossingGradient::UseCrossingGradientNormals())
+	{
+		FVector3f Normal;
+		if (VoxelCrossingGradient::FitNormal(
+			[&](int32 VX, int32 VY, int32 VZ) { return GetDensityAt(Request, VX, VY, VZ); },
+			[&](int32 VX, int32 VY, int32 VZ) { return IsVoxelHeld(Request, VX, VY, VZ); },
+			X, Y, Z, Normal))
+		{
+			return Normal;
+		}
+	}
+	return CalculateGradientNormal(Request, X, Y, Z);
+}
+
+bool FVoxelCPUMarchingCubesMesher::IsVoxelHeld(
+	const FVoxelMeshingRequest& Request,
+	int32 X, int32 Y, int32 Z) const
+{
+	const int32 CS = Request.ChunkSize;
+	if (X < -1 || X > CS || Y < -1 || Y > CS || Z < -1 || Z > CS)
+	{
+		return false;
+	}
+	const bool bXPos = X == CS, bXNeg = X < 0;
+	const bool bYPos = Y == CS, bYNeg = Y < 0;
+	const bool bZPos = Z == CS, bZNeg = Z < 0;
+	const bool bOutX = bXPos || bXNeg;
+	const bool bOutY = bYPos || bYNeg;
+	const bool bOutZ = bZPos || bZNeg;
+	const int32 OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
+	if (OutCount == 0)
+	{
+		return true;
+	}
+
+	// GetVoxelAt's sources one voxel past the chunk (each plane, strip and corner holds that depth); it clamps elsewhere.
+	using R = FVoxelMeshingRequest;
+	if (OutCount == 1)
+	{
+		const int32 SliceSize = CS * CS;
+		const TArray<FVoxelData>& Plane = bOutX ? (bXPos ? Request.NeighborXPos : Request.NeighborXNeg)
+			: bOutY ? (bYPos ? Request.NeighborYPos : Request.NeighborYNeg)
+			: (bZPos ? Request.NeighborZPos : Request.NeighborZNeg);
+		return Plane.Num() == SliceSize;
+	}
+	if (OutCount == 2)
+	{
+		const uint32 Edge = !bOutZ ? (bXPos ? (bYPos ? R::EDGE_XPOS_YPOS : R::EDGE_XPOS_YNEG) : (bYPos ? R::EDGE_XNEG_YPOS : R::EDGE_XNEG_YNEG))
+			: !bOutY ? (bXPos ? (bZPos ? R::EDGE_XPOS_ZPOS : R::EDGE_XPOS_ZNEG) : (bZPos ? R::EDGE_XNEG_ZPOS : R::EDGE_XNEG_ZNEG))
+			: (bYPos ? (bZPos ? R::EDGE_YPOS_ZPOS : R::EDGE_YPOS_ZNEG) : (bZPos ? R::EDGE_YNEG_ZPOS : R::EDGE_YNEG_ZNEG));
+		return Request.HasEdge(Edge);
+	}
+	const uint32 Corner = bXPos
+		? (bYPos ? (bZPos ? R::CORNER_XPOS_YPOS_ZPOS : R::CORNER_XPOS_YPOS_ZNEG) : (bZPos ? R::CORNER_XPOS_YNEG_ZPOS : R::CORNER_XPOS_YNEG_ZNEG))
+		: (bYPos ? (bZPos ? R::CORNER_XNEG_YPOS_ZPOS : R::CORNER_XNEG_YPOS_ZNEG) : (bZPos ? R::CORNER_XNEG_YNEG_ZPOS : R::CORNER_XNEG_YNEG_ZNEG));
+	return Request.HasCorner(Corner);
 }
 
 uint8 FVoxelCPUMarchingCubesMesher::GetDominantMaterialLOD(
@@ -2775,10 +2841,13 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		const FVector3f PosVoxel(Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize);
 		const int32 SampleA = VertexSamples[i][0];
 		const int32 SampleB = VertexSamples[i][1];
+		// G62: at stride 1 the fitted gradient at the vertex, as ProcessCubeLOD's.
 		const FVector3f Normal = VoxelMCShading::UseVoxelShadingNormals(NormalStride)
 			? CalculateEdgeShadingNormal(Request, SampleVoxel(SampleA), SampleVoxel(SampleB), Densities[SampleA], Densities[SampleB],
 				PosVoxel, NormalStride)
-			: CalculateGradientNormalLOD(Request, PosVoxel.X, PosVoxel.Y, PosVoxel.Z, NormalStride);
+			: (NormalStride == 1)
+				? CalculateShadingNormal(Request, PosVoxel.X, PosVoxel.Y, PosVoxel.Z)
+				: CalculateGradientNormalLOD(Request, PosVoxel.X, PosVoxel.Y, PosVoxel.Z, NormalStride);
 		OutMeshData.Normals.Add(Normal);
 
 		// UV mapping (triplanar-style based on normal)
