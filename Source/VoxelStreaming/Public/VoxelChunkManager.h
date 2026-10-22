@@ -429,7 +429,7 @@ public:
 	 * ahead of their readers (world modes review G65). A chunk queued for a mesh or a collision cook is about to be read
 	 * with its neighbours (its seam jobs, the water pull at its mesh's completion, the cook): each reads the snapshot,
 	 * decoded by then, instead of expanding the chunk on the game thread. Chunks that are resident, empty or edited are
-	 * left alone. No-op with voxel.FarCompression.ExpandAhead 0.
+	 * left alone. No-op with voxel.FarCompression.SnapshotReads 0.
 	 *
 	 * @param ChunkCoord Centre of the neighbourhood
 	 */

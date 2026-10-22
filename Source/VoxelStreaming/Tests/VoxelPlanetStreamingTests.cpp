@@ -1589,15 +1589,15 @@ namespace VoxelPlanetStreamingTestUtils
 	 * bands sweep over compressed chunks, and records the move's game-thread decodes and what it left.
 	 */
 	FFarReadsResult RunFarReads(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
-		const FVector& Move, int32 ExpandAhead)
+		const FVector& Move, int32 SnapshotReads)
 	{
-		FScopedIntCVar Expand(TEXT("voxel.FarCompression.ExpandAhead"), ExpandAhead);
+		FScopedIntCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), SnapshotReads);
 		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
 		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
 		FFarReadsResult Result;
 		FPlanetStreamingWorld World;
 		Start(World);
-		Test.TestTrue(*FString::Printf(TEXT("%s (expand ahead %d): the pipeline settled"), Place, ExpandAhead), World.Settle());
+		Test.TestTrue(*FString::Printf(TEXT("%s (snapshot reads %d): the pipeline settled"), Place, SnapshotReads), World.Settle());
 
 		// The far band compacts: tick until the compact count has held for 60 ticks.
 		int32 LastCompact = -1;
@@ -1618,7 +1618,7 @@ namespace VoxelPlanetStreamingTestUtils
 		VoxelResidencyStats::ConsumeGameThread(Ignored, IgnoredMs);
 		World.Viewer += Move;
 		World.Manager->SetBenchmarkView(true, World.Viewer);
-		Test.TestTrue(*FString::Printf(TEXT("%s (expand ahead %d): settled after the move"), Place, ExpandAhead), World.Settle());
+		Test.TestTrue(*FString::Printf(TEXT("%s (snapshot reads %d): settled after the move"), Place, SnapshotReads), World.Settle());
 		VoxelResidencyStats::ConsumeGameThread(Result.GameThreadDecodes, Result.GameThreadMs);
 		Result.SnapshotDecodes = World.Manager->GetSnapshotDecodeCount();
 
@@ -1691,7 +1691,7 @@ namespace VoxelPlanetStreamingTestUtils
 /**
  * G65 on a planet (45N 20E, a sea at the datum, so the water pull reads too): moving the viewer 3,000 uu over a far band
  * that compression has compacted, the reads of the compressed chunks no longer expand them on the game thread (at most a
- * tenth of the decodes voxel.FarCompression.ExpandAhead 0 does there), and the world is the same either way: every chunk's
+ * tenth of the decodes voxel.FarCompression.SnapshotReads 0 does there), and the world is the same either way: every chunk's
  * voxels and every mesh and seam.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingFarReadsTest,

@@ -225,6 +225,21 @@ mesh job, so on that path the sweep holds a chunk expanded by such a read reside
 before compacting it again; otherwise a neighbour re-mesh cascade decodes the same chunks job after
 job. The seam pipeline reads through its snapshot cache and compacts again at once.
 
+**Reads of a compressed chunk stay off the game thread** (world modes review G65,
+[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.13; `voxel.FarCompression.SnapshotReads`,
+default 1). A chunk compacted while far is read again as the viewer comes near: by its own re-mesh,
+its neighbours' seam jobs, collision cooks and the water pull. Each of those reads used to expand it
+in place on the game thread (about 0.3 ms at 64³), and the sweep compacted it again at once, so the
+next reader expanded it again. Now the snapshot of a far-compressed chunk without edits
+(`GetSeamVoxelSnapshot`) is decoded by a worker task from a copy of its compact form
+(`FVoxelCompactSource`), and the chunk stays compressed. Mesh jobs, seam jobs and cooks wait for the
+task on their own workers; the water pull, the water tile and the scatter hand-off read the snapshot
+on the game thread, which waits for it if it is still decoding. A chunk queued for a mesh or a cook
+starts its 27-chunk neighbourhood's snapshots (`PrefetchVoxelSnapshotsAround`), so they are usually
+ready when read. `voxel.FarCompression.Decodes` lists the expansions per reader and thread; the bench
+records the game thread's share (`DecodeN`, `DecodeMs`, `decodeGT*`) and the snapshot cache's memory
+(`SnapMB`, `peakSnapshotMB`), which the voxel-data figures do not include.
+
 **The encode runs on a worker thread** (`voxel.FarCompression.Async`, default 1). An Oodle encode of
 a 1 MB chunk costs about 3.5 ms in PIE and cannot be split, so the sweep does not run it on the game
 thread. For each chunk that needs a fresh encode (at most `voxel.FarCompression.MaxScansPerTick`, 4,

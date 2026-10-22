@@ -512,8 +512,8 @@ static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
 	     "so this also caps the copies' memory."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarFarCompressionExpandAhead(
-	TEXT("voxel.FarCompression.ExpandAhead"),
+static TAutoConsoleVariable<int32> CVarFarCompressionSnapshotReads(
+	TEXT("voxel.FarCompression.SnapshotReads"),
 	1,
 	TEXT("Far-compressed chunk data off the game thread's reads (world modes review G65). 1 = the snapshot of a "
 	     "far-compressed chunk without edits is decoded by a worker task, started when a chunk in its neighbourhood is "
@@ -4822,7 +4822,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		// (rarely compressed) reads its array as before.
 		TSharedPtr<const TArray<FVoxelData>> DeferredVoxels;
 		UE::Tasks::FTask DeferredDecode;
-		if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact()
+		if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact()
 			&& !(EditManager && EditManager->ChunkHasEdits(Request.ChunkCoord)))
 		{
 			const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("chunk mesh"));
@@ -6297,7 +6297,7 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(co
 	// A far-compressed chunk without edits (G65): its snapshot is decoded by a worker task, and the chunk stays compressed.
 	// Its readers wait for the task on their own workers (seam jobs, cooks), or here (game-thread readers).
 	FVoxelCompactSource Source;
-	if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0
+	if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0
 		&& !(EditManager && EditManager->ChunkHasEdits(Coord))
 		&& State.Descriptor.CopyCompactSource(Source))
 	{
@@ -6347,7 +6347,7 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(co
 
 void UVoxelChunkManager::PrefetchVoxelSnapshotsAround(const FIntVector& ChunkCoord)
 {
-	if (CVarFarCompressionExpandAhead.GetValueOnGameThread() == 0)
+	if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() == 0)
 	{
 		return;
 	}
@@ -6594,7 +6594,7 @@ void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxe
 		EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
 		ScatterManager->OnChunkMeshDataReady(ChunkCoord, EditMergedVoxels, State.Descriptor.ChunkSize, Configuration->VoxelSize);
 	}
-	else if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0 && State.Descriptor.IsCompact())
+	else if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State.Descriptor.IsCompact())
 	{
 		// A far-compressed chunk hands scatter its snapshot (decoded on a worker, prefetched when the chunk was queued for
 		// its mesh) and stays compressed (G65).
@@ -6906,7 +6906,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	// The seed search reads only (G65): a far-compressed chunk without edits through its snapshot (decoded on a worker,
 	// usually prefetched when the chunk was queued), so a chunk no water flows into is neither expanded nor marked
 	// mutated. The chunk's own array is taken for writing once a seed is found.
-	const bool bSnapshotReads = CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0;
+	const bool bSnapshotReads = CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0;
 	auto ReadVoxels = [this, bSnapshotReads](const FIntVector& Coord, FVoxelChunkState& ReadState,
 		TSharedPtr<const TArray<FVoxelData>>& OutHold) -> const TArray<FVoxelData>&
 	{
@@ -7132,7 +7132,7 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	{
 		EditMerged = GetEditMergedSnapshot(ChunkCoord);
 	}
-	else if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact())
+	else if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact())
 	{
 		// A far-compressed chunk reads its snapshot (the generated voxels, no edits), decoded on a worker (G65).
 		EditMerged = GetSeamVoxelSnapshot(ChunkCoord, *State);
