@@ -35,6 +35,7 @@
 #include "Misc/Paths.h"
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
+#include "VoxelResidencyStats.h"
 
 static TAutoConsoleVariable<int32> CVarMapEditOverlay(
 	TEXT("voxel.Map.EditOverlay"),
@@ -1772,6 +1773,7 @@ bool UVoxelMapSubsystem::CanRebuildOverlay(uint64 TileKey) const
 
 TSharedPtr<FVoxelMapOverlayBuildInput> UVoxelMapSubsystem::GatherOverlayInput(FIntPoint TileCoord) const
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("map overlay"));
 	UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get();
 	const UVoxelEditManager* EditManager = CachedEditManagerWeak.Get();
 	if (!ChunkMgr || !EditManager)
@@ -1850,6 +1852,7 @@ TSharedPtr<FVoxelMapOverlayBuildInput> UVoxelMapSubsystem::GatherOverlayInput(FI
 
 TSharedPtr<FVoxelMapPlanetOverlayInput> UVoxelMapSubsystem::GatherPlanetOverlayInput(FIntPoint TileCoord) const
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("map overlay"));
 	UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get();
 	const UVoxelEditManager* EditManager = CachedEditManagerWeak.Get();
 	if (!ChunkMgr || !EditManager)

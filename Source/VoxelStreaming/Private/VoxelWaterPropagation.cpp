@@ -8,6 +8,7 @@
 #include "VoxelCoordinates.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelResidencyStats.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelWaterPropagation, Log, All);
 
@@ -542,6 +543,7 @@ bool UVoxelWaterPropagation::IsBelowSea(const FIntVector& Key) const
 
 bool UVoxelWaterPropagation::ReadVoxel(const FIntVector& Key, FVoxelData& OutVoxel) const
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("water propagation"));
 	if (!ChunkManager.IsValid() || !ChunkManager->IsChunkWaterSettled(VoxelKeyToChunk(Key)))
 	{
 		return false;

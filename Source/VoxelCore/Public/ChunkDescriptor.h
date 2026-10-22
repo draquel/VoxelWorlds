@@ -6,7 +6,56 @@
 #include "VoxelCoreTypes.h"
 #include "VoxelData.h"
 #include "VoxelChunkCodec.h"
+#include "VoxelResidencyStats.h"
+#include "HAL/PlatformTime.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ChunkDescriptor.generated.h"
+
+/**
+ * A chunk's compact form copied off its descriptor, so a worker can expand it without touching the descriptor (world
+ * modes review G65): the snapshot of a far-compressed chunk is expanded by a task that the mesh jobs, seam jobs and
+ * collision cooks reading it wait for on their workers.
+ */
+struct FVoxelCompactSource
+{
+	/** Uniform or Compressed; anything else is not a source. */
+	EVoxelDataResidency Residency = EVoxelDataResidency::Empty;
+
+	/** The value of a Uniform chunk. */
+	FVoxelData UniformValue;
+
+	/** The FVoxelChunkCodec buffer of a Compressed chunk. */
+	TArray<uint8> Buffer;
+
+	/** ChunkSize^3. */
+	int32 TotalVoxels = 0;
+
+	bool IsValid() const
+	{
+		return Residency == EVoxelDataResidency::Uniform || Residency == EVoxelDataResidency::Compressed;
+	}
+
+	/**
+	 * Expand into Out (any thread).
+	 *
+	 * @param Out Receives the ChunkSize^3 array
+	 * @return False if this is not a source or the buffer did not decode to the chunk's size
+	 */
+	bool Expand(TArray<FVoxelData>& Out) const
+	{
+		if (Residency == EVoxelDataResidency::Uniform)
+		{
+			Out.Init(UniformValue, TotalVoxels);
+			return true;
+		}
+		if (Residency == EVoxelDataResidency::Compressed)
+		{
+			FVoxelChunkCodec::Decompress(Buffer, Out);
+			return Out.Num() == TotalVoxels;
+		}
+		return false;
+	}
+};
 
 /**
  * The compact form a chunk's voxel array reduces to (far-chunk compression). Computed from the
@@ -330,20 +379,59 @@ struct VOXELCORE_API FChunkDescriptor
 		{
 			// Expand the single value back into a full array. UniformValue stays valid — the array is
 			// exactly UniformValue everywhere until mutated — so re-collapsing is free (see TryCollapseUniform).
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelChunk_ExpandUniform);
+			const uint64 StartCycles = FPlatformTime::Cycles64();
 			VoxelData.Init(UniformValue, GetTotalVoxels());
 			Residency = EVoxelDataResidency::Resident;
 			bDataMutated = false;
 			bUniformValueValid = true;
+			VoxelResidencyStats::RecordExpand(false, FPlatformTime::Cycles64() - StartCycles, ChunkCoord);
 		}
 		else if (Residency == EVoxelDataResidency::Compressed)
 		{
 			// Decompress in place. CompressedVoxelData is retained (still valid until mutated) so a
 			// re-qualifying chunk re-compresses for free by just dropping the raw array again.
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelChunk_Decompress);
+			const uint64 StartCycles = FPlatformTime::Cycles64();
 			FVoxelChunkCodec::Decompress(CompressedVoxelData, VoxelData);
 			Residency = EVoxelDataResidency::Resident;
 			bDataMutated = false;
+			VoxelResidencyStats::RecordExpand(true, FPlatformTime::Cycles64() - StartCycles, ChunkCoord);
 		}
 		return VoxelData;
+	}
+
+	/**
+	 * Whether the voxels are held in a compact form (Uniform or Compressed) that a read would expand.
+	 */
+	FORCEINLINE bool IsCompact() const
+	{
+		return Residency == EVoxelDataResidency::Uniform || Residency == EVoxelDataResidency::Compressed;
+	}
+
+	/**
+	 * Copy the compact form out for a worker to expand (G65); the descriptor stays compact. Game-thread only.
+	 *
+	 * @param Out Receives the form (its Residency stays Empty when there is none)
+	 * @return True if the chunk is held Uniform or Compressed
+	 */
+	bool CopyCompactSource(FVoxelCompactSource& Out) const
+	{
+		Out = FVoxelCompactSource();
+		Out.TotalVoxels = GetTotalVoxels();
+		if (Residency == EVoxelDataResidency::Uniform)
+		{
+			Out.Residency = Residency;
+			Out.UniformValue = UniformValue;
+			return true;
+		}
+		if (Residency == EVoxelDataResidency::Compressed)
+		{
+			Out.Residency = Residency;
+			Out.Buffer = CompressedVoxelData;
+			return true;
+		}
+		return false;
 	}
 
 	/**

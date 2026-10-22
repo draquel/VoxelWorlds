@@ -26,6 +26,7 @@
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelGPUDualContourMesher.h"
 #include "VoxelGPUMarchingCubesMesher.h"
+#include "VoxelResidencyStats.h"
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -511,6 +512,16 @@ static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
 	     "so this also caps the copies' memory."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarFarCompressionExpandAhead(
+	TEXT("voxel.FarCompression.ExpandAhead"),
+	1,
+	TEXT("Far-compressed chunk data off the game thread's reads (world modes review G65). 1 = the snapshot of a "
+	     "far-compressed chunk without edits is decoded by a worker task, started when a chunk in its neighbourhood is "
+	     "queued for a mesh or a collision cook; mesh jobs, seam jobs and cooks wait for it on their own workers, and the "
+	     "water pull, water tile and scatter hand-off read it. The chunks stay compressed. 0 = every read expands the chunk "
+	     "in place on the game thread, as before (for A/B)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarFarCompressionCodec(
 	TEXT("voxel.FarCompression.Codec"),
 	3, // Oodle — bake-off winner (best ratio + fastest encode/decode; de-interleave hurts on
@@ -519,6 +530,32 @@ static TAutoConsoleVariable<int32> CVarFarCompressionCodec(
 	     "codec), 2=LZ4, 3=Oodle, 4=LZ4Planar, 5=OodlePlanar. Uniform collapse always applies. "
 	     "Buffers written by any codec still decode (codec id is stored in the buffer header)."),
 	ECVF_Default);
+
+/** A mesh job's own far-compressed chunk: its snapshot, decoded on a worker, copied into the request on the job's worker (G65). */
+static void TakeDeferredMeshVoxels(TSharedPtr<const TArray<FVoxelData>>& DeferredVoxels, UE::Tasks::FTask& DeferredDecode,
+	TArray<FVoxelData>& OutVoxels)
+{
+	if (!DeferredVoxels.IsValid())
+	{
+		return;
+	}
+	if (DeferredDecode.IsValid())
+	{
+		DeferredDecode.Wait();
+	}
+	OutVoxels = *DeferredVoxels;
+	DeferredVoxels.Reset();
+}
+
+/** A seam job or cook waits on its worker for the snapshot decodes it reads (G65). */
+static void WaitForSnapshotDecodes(TArray<UE::Tasks::FTask>& Decodes)
+{
+	for (UE::Tasks::FTask& Decode : Decodes)
+	{
+		Decode.Wait();
+	}
+	Decodes.Reset();
+}
 
 UVoxelChunkManager::UVoxelChunkManager()
 {
@@ -1816,6 +1853,7 @@ FIntVector UVoxelChunkManager::WorldToChunkCoord(const FVector& WorldPosition) c
 
 FVoxelData UVoxelChunkManager::GetVoxelAtWorldPosition(const FVector& WorldPosition) const
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("point query"));
 	if (!bIsInitialized || !Configuration)
 	{
 		return FVoxelData::Air();
@@ -1839,6 +1877,7 @@ FVoxelData UVoxelChunkManager::GetVoxelAtWorldPosition(const FVector& WorldPosit
 
 FVoxelData UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition(const FVector& WorldPosition) const
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("point query"));
 	if (!bIsInitialized || !Configuration)
 	{
 		return FVoxelData::Air();
@@ -1878,6 +1917,7 @@ FVoxelData UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition(const FVector& 
 
 TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetEditMergedSnapshot(const FIntVector& ChunkCoord)
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("snapshot"));
 	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
 	if (!bIsInitialized || !State || !State->Descriptor.HasVoxelDataAvailable())
 	{
@@ -1903,6 +1943,7 @@ bool UVoxelChunkManager::QueryEditMergedSurface(
 	float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
 	uint8& OutMaterialID, uint8& OutBiomeID) const
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("surface query"));
 	const IVoxelWorldMode* WM = GetWorldMode();
 	if (!bIsInitialized || !Configuration || !WM)
 	{
@@ -1974,6 +2015,7 @@ bool UVoxelChunkManager::QueryEditMergedSurface(
 
 bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FVoxelSurfaceSample& OutSample) const
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("surface query"));
 	const IVoxelWorldMode* WM = GetWorldMode();
 	if (!bIsInitialized || !Configuration || !WM)
 	{
@@ -2479,6 +2521,21 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 			++Stats.EmptyChunks;
 			break;
 		}
+	}
+
+	// Shared snapshots cached for seam jobs and cooks (G65: a far-compressed chunk's is decoded on a worker; counted at its
+	// full size while it decodes).
+	for (const auto& Pair : SeamSnapshotCache)
+	{
+		const FSeamVoxelSnapshot& Snapshot = Pair.Value;
+		if (!Snapshot.Data.IsValid())
+		{
+			continue;
+		}
+		Stats.SnapshotBytes += (Snapshot.Ready.IsValid() && !Snapshot.Ready.IsCompleted())
+			? static_cast<int64>(Configuration ? Configuration->ChunkSize : 0) * (Configuration ? Configuration->ChunkSize : 0)
+				* (Configuration ? Configuration->ChunkSize : 0) * static_cast<int64>(sizeof(FVoxelData))
+			: static_cast<int64>(Snapshot.Data->GetAllocatedSize());
 	}
 
 	// Copies held by async far-compression encodes, in flight or pooled for the next dispatch.
@@ -4760,7 +4817,22 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		MeshRequest.VoxelSize = Configuration->VoxelSize;
 		MeshRequest.WorldOrigin = Configuration->WorldOrigin;
 		MeshRequest.LocalUp = GetChunkLocalUp(Request.ChunkCoord);
-		MeshRequest.VoxelData = State->Descriptor.GetVoxelDataForRead();
+		// A far-compressed chunk without edits meshes from its snapshot (decoded on a worker, usually prefetched when the
+		// chunk was queued), copied into the request on the mesh worker (G65); edits merge here, so a chunk with edits
+		// (rarely compressed) reads its array as before.
+		TSharedPtr<const TArray<FVoxelData>> DeferredVoxels;
+		UE::Tasks::FTask DeferredDecode;
+		if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact()
+			&& !(EditManager && EditManager->ChunkHasEdits(Request.ChunkCoord)))
+		{
+			const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("chunk mesh"));
+			DeferredVoxels = GetSeamVoxelSnapshot(Request.ChunkCoord, *State, &DeferredDecode);
+		}
+		else
+		{
+			const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("chunk mesh"));
+			MeshRequest.VoxelData = State->Descriptor.GetVoxelDataForRead();
+		}
 
 		// Merge edit layer if present
 		if (EditManager && EditManager->ChunkHasEdits(Request.ChunkCoord))
@@ -4810,7 +4882,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		// full chunk volume + neighbor slices (~1.3MB at 64^3); copying it into the by-value
 		// parameter was a per-launch game-thread cost.
 		const double DispatchT0 = FPlatformTime::Seconds();
-		LaunchAsyncMeshGeneration(Request, MoveTemp(MeshRequest));
+		LaunchAsyncMeshGeneration(Request, MoveTemp(MeshRequest), MoveTemp(DeferredVoxels), MoveTemp(DeferredDecode));
 		DispatchSeconds += FPlatformTime::Seconds() - DispatchT0;
 
 		++ProcessedCount;
@@ -4852,7 +4924,8 @@ IVoxelMesher* UVoxelChunkManager::EnsureSeamMesher()
 	return SeamMesher.Get();
 }
 
-void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest)
+void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest,
+	TSharedPtr<const TArray<FVoxelData>> DeferredVoxels, UE::Tasks::FTask DeferredDecode)
 {
 	// Mark as in-progress (stamped: the serial travels with the result, see FAsyncJobStamp)
 	const uint32 DispatchSerial = StampAsyncDispatch(AsyncMeshingInProgress, Request.ChunkCoord);
@@ -4921,19 +4994,23 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		// volume into upload buffers, copies + allocations per chunk) was a per-launch game-thread
 		// cost. The DC/MC meshers are worker-safe here (atomic request ids, lock-guarded result
 		// maps, and their render command is self-contained).
-		Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete]() mutable
+		Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete,
+			DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
 		{
+			TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
 			MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
 		});
 	}
 	else
 	{
 		// CPU path: existing thread pool dispatch (unchanged)
-		Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
+			DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
 		{
 			// Generate mesh on background thread
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
+			TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
 			const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
 			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 
@@ -5793,6 +5870,7 @@ void UVoxelChunkManager::FinishSeamJob(const FVoxelSeamKey& Key, bool bAbandoned
 
 void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("seam job"));
 	// P2 scope: same-LOD FACE (2), EDGE (4), and CORNER (8 participants) seams. Mixed-LOD is
 	// P2c/d — dropped jobs stay clean until a participant changes, which re-schedules them
 	// (and the filter drops them again until the missing mesher lands).
@@ -5851,6 +5929,19 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		}
 		MinParticipantLOD = FMath::Min(MinParticipantLOD, States[i]->MeshedLODLevel);
 	}
+	// Participant snapshots: a far-compressed participant's is decoded by a worker task, which the job waits for on its
+	// own worker (G65).
+	TArray<UE::Tasks::FTask> SnapshotDecodes;
+	auto TakeSnapshot = [this, &Job, &States, &SnapshotDecodes](int32 Participant)
+	{
+		UE::Tasks::FTask Decode;
+		TSharedPtr<const TArray<FVoxelData>> Snapshot = GetSeamVoxelSnapshot(Job.Participants[Participant].Coord, *States[Participant], &Decode);
+		if (Decode.IsValid())
+		{
+			SnapshotDecodes.Add(MoveTemp(Decode));
+		}
+		return Snapshot;
+	};
 	const int32 SharedLOD = States[0]->MeshedLODLevel;
 
 	// Worker dispatch mirrors the chunk-mesh CPU path: raw mesher pointer + weak manager for the
@@ -5875,14 +5966,15 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamRequest.VoxelSize = Configuration->VoxelSize;
 		SeamRequest.WorldOrigin = Configuration->WorldOrigin;
 		SeamRequest.LocalUp = GetChunkLocalUp(Key.Owner);
-		SeamRequest.VoxelDataA = GetSeamVoxelSnapshot(Job.Participants[0].Coord, *States[0]);
-		SeamRequest.VoxelDataB = GetSeamVoxelSnapshot(Job.Participants[1].Coord, *States[1]);
+		SeamRequest.VoxelDataA = TakeSnapshot(0);
+		SeamRequest.VoxelDataB = TakeSnapshot(1);
 
 		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
+			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
@@ -5922,13 +6014,14 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		for (int32 i = 0; i < 4; ++i)
 		{
 			SeamRequest.LODLevels[i] = States[i]->MeshedLODLevel; // may differ (P2d mixed path)
-			SeamRequest.VoxelData[i] = GetSeamVoxelSnapshot(Job.Participants[i].Coord, *States[i]);
+			SeamRequest.VoxelData[i] = TakeSnapshot(i);
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
+			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
@@ -5967,13 +6060,14 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		for (int32 i = 0; i < 8; ++i)
 		{
 			SeamRequest.LODLevels[i] = States[i]->MeshedLODLevel; // may differ (P2d mixed path)
-			SeamRequest.VoxelData[i] = GetSeamVoxelSnapshot(Job.Participants[i].Coord, *States[i]);
+			SeamRequest.VoxelData[i] = TakeSnapshot(i);
 		}
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch]() mutable
+		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
+			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateCornerSeamMeshCPU(SeamRequest, MeshData);
@@ -6169,7 +6263,25 @@ void UVoxelChunkManager::FlushDueSeamBuckets()
 	}
 }
 
-TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State)
+/** Hand a snapshot's decode to a caller that waits for it on its worker, or wait for it here on the game thread (G65). */
+static void HandOutSnapshotDecode(const UE::Tasks::FTask& Decode, UE::Tasks::FTask* OutReady, const FIntVector& Coord)
+{
+	if (OutReady)
+	{
+		*OutReady = Decode.IsValid() && !Decode.IsCompleted() ? Decode : UE::Tasks::FTask();
+		return;
+	}
+	if (Decode.IsValid() && !Decode.IsCompleted())
+	{
+		const VoxelResidencyStats::FGameThreadWaitScope WaitScope;
+		const uint64 StartCycles = FPlatformTime::Cycles64();
+		Decode.Wait();
+		VoxelResidencyStats::RecordWait(FPlatformTime::Cycles64() - StartCycles, Coord);
+	}
+}
+
+TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State,
+	UE::Tasks::FTask* OutReady)
 {
 	const uint32 Version = State.Descriptor.ContentVersion;
 	if (FSeamVoxelSnapshot* Cached = SeamSnapshotCache.Find(Coord))
@@ -6177,8 +6289,39 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(co
 		if (Cached->ContentVersion == Version && Cached->Data.IsValid())
 		{
 			Cached->LastUsedTick = SeamTickCounter;
+			HandOutSnapshotDecode(Cached->Ready, OutReady, Coord);
 			return Cached->Data;
 		}
+	}
+
+	// A far-compressed chunk without edits (G65): its snapshot is decoded by a worker task, and the chunk stays compressed.
+	// Its readers wait for the task on their own workers (seam jobs, cooks), or here (game-thread readers).
+	FVoxelCompactSource Source;
+	if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0
+		&& !(EditManager && EditManager->ChunkHasEdits(Coord))
+		&& State.Descriptor.CopyCompactSource(Source))
+	{
+		TSharedPtr<TArray<FVoxelData>> Decoded = MakeShared<TArray<FVoxelData>>();
+		const TCHAR* Reason = VoxelResidencyStats::GetReadReason();
+		UE::Tasks::FTask Decode = UE::Tasks::Launch(UE_SOURCE_LOCATION,
+			[Decoded, Source = MoveTemp(Source), Coord, Reason]()
+			{
+				const VoxelResidencyStats::FReadScope ResidencyReadScope(Reason ? Reason : TEXT("snapshot"));
+				TRACE_CPUPROFILER_EVENT_SCOPE(VoxelChunk_SnapshotDecode);
+				const uint64 StartCycles = FPlatformTime::Cycles64();
+				Source.Expand(*Decoded);
+				VoxelResidencyStats::RecordExpand(Source.Residency == EVoxelDataResidency::Compressed,
+					FPlatformTime::Cycles64() - StartCycles, Coord);
+			},
+			UE::Tasks::ETaskPriority::BackgroundHigh);
+		++SnapshotDecodeTasks;
+		FSeamVoxelSnapshot& Entry = SeamSnapshotCache.FindOrAdd(Coord);
+		Entry.ContentVersion = Version;
+		Entry.LastUsedTick = SeamTickCounter;
+		Entry.Data = Decoded;
+		Entry.Ready = Decode;
+		HandOutSnapshotDecode(Decode, OutReady, Coord);
+		return Decoded;
 	}
 
 	// Build once per (chunk, content version) — the only remaining game-thread voxel copy in the
@@ -6194,7 +6337,39 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(co
 	Entry.ContentVersion = Version;
 	Entry.LastUsedTick = SeamTickCounter;
 	Entry.Data = Built;
+	Entry.Ready = UE::Tasks::FTask();
+	if (OutReady)
+	{
+		*OutReady = UE::Tasks::FTask();
+	}
 	return Entry.Data;
+}
+
+void UVoxelChunkManager::PrefetchVoxelSnapshotsAround(const FIntVector& ChunkCoord)
+{
+	if (CVarFarCompressionExpandAhead.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("prefetch"));
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	{
+		for (int32 DY = -1; DY <= 1; ++DY)
+		{
+			for (int32 DX = -1; DX <= 1; ++DX)
+			{
+				const FIntVector Coord = ChunkCoord + FIntVector(DX, DY, DZ);
+				FVoxelChunkState* State = ChunkStates.Find(Coord);
+				// Only far-compressed chunks without edits: others would be read (expanded) here.
+				if (!State || !State->Descriptor.IsCompact() || (EditManager && EditManager->ChunkHasEdits(Coord)))
+				{
+					continue;
+				}
+				UE::Tasks::FTask Decode;
+				GetSeamVoxelSnapshot(Coord, *State, &Decode);
+			}
+		}
+	}
 }
 
 void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Context, FVoxelTimingStats& Timing)
@@ -6405,6 +6580,7 @@ void UVoxelChunkManager::OnChunkGenerationComplete(const FIntVector& ChunkCoord)
 
 void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxelChunkState& State)
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("scatter"));
 	if (!ScatterManager || !Configuration || !Configuration->bEnableScatter)
 	{
 		return;
@@ -6417,6 +6593,13 @@ void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxe
 		TArray<FVoxelData> EditMergedVoxels = State.Descriptor.GetVoxelDataForRead();
 		EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
 		ScatterManager->OnChunkMeshDataReady(ChunkCoord, EditMergedVoxels, State.Descriptor.ChunkSize, Configuration->VoxelSize);
+	}
+	else if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0 && State.Descriptor.IsCompact())
+	{
+		// A far-compressed chunk hands scatter its snapshot (decoded on a worker, prefetched when the chunk was queued for
+		// its mesh) and stays compressed (G65).
+		const TSharedPtr<const TArray<FVoxelData>> Snapshot = GetSeamVoxelSnapshot(ChunkCoord, State);
+		ScatterManager->OnChunkMeshDataReady(ChunkCoord, *Snapshot, State.Descriptor.ChunkSize, Configuration->VoxelSize);
 	}
 	else
 	{
@@ -6675,6 +6858,7 @@ bool UVoxelChunkManager::UsesWaterTiles() const
 
 bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoord)
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("water pull"));
 	if (!Configuration || !Configuration->bEnableWaterLevel)
 	{
 		return false;
@@ -6719,10 +6903,26 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	// rejecting them one by one. For the X/Y faces, loop axis B is Z. A sphere checks every voxel.
 	const int32 MaxSeedZ = Sea.bRadial ? CS - 1 : FMath::Clamp(FMath::FloorToInt32((Sea.PlaneZ - ChunkWorldPos.Z) / VS), 0, CS - 1);
 
-	TArray<FVoxelData>& VoxelData = State->Descriptor.GetVoxelDataMutable();
+	// The seed search reads only (G65): a far-compressed chunk without edits through its snapshot (decoded on a worker,
+	// usually prefetched when the chunk was queued), so a chunk no water flows into is neither expanded nor marked
+	// mutated. The chunk's own array is taken for writing once a seed is found.
+	const bool bSnapshotReads = CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0;
+	auto ReadVoxels = [this, bSnapshotReads](const FIntVector& Coord, FVoxelChunkState& ReadState,
+		TSharedPtr<const TArray<FVoxelData>>& OutHold) -> const TArray<FVoxelData>&
+	{
+		if (bSnapshotReads && ReadState.Descriptor.IsCompact() && !(EditManager && EditManager->ChunkHasEdits(Coord)))
+		{
+			OutHold = GetSeamVoxelSnapshot(Coord, ReadState);
+			return *OutHold;
+		}
+		return ReadState.Descriptor.GetVoxelDataForRead();
+	};
+	TSharedPtr<const TArray<FVoxelData>> OwnHold;
+	const TArray<FVoxelData>& OwnVoxels = ReadVoxels(ChunkCoord, *State, OwnHold);
 
 	// Collect seed voxels from 6 face neighbors
 	TArray<int32> Seeds;
+	TSet<int32> SeedSet;
 
 	static const FIntVector FaceOffsets[6] = {
 		{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
@@ -6731,13 +6931,14 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	for (int32 F = 0; F < 6; ++F)
 	{
 		const FIntVector NeighborCoord = ChunkCoord + FaceOffsets[F];
-		const FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
+		FVoxelChunkState* NeighborState = ChunkStates.Find(NeighborCoord);
 		if (!NeighborState || !NeighborState->Descriptor.HasVoxelDataAvailable())
 		{
 			continue;
 		}
 
-		const TArray<FVoxelData>& NeighborData = NeighborState->Descriptor.GetVoxelDataForRead();
+		TSharedPtr<const TArray<FVoxelData>> NeighborHold;
+		const TArray<FVoxelData>& NeighborData = ReadVoxels(NeighborCoord, *NeighborState, NeighborHold);
 
 		// Determine which boundary face to check on each chunk
 		// For face direction F, check our boundary face and the neighbor's opposite face
@@ -6795,7 +6996,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 				const FVoxelData& NbrVoxel = NeighborData[NbrIdx];
 
 				const int32 OurIdx = OurX + OurY * CS + OurZ * SliceSize;
-				FVoxelData& OurVoxel = VoxelData[OurIdx];
+				const FVoxelData& OurVoxel = OwnVoxels[OurIdx];
 
 				// Our voxel must be dry air below the sea
 				if (OurVoxel.IsSolid() || OurVoxel.HasWaterFlag())
@@ -6816,9 +7017,13 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 					continue;
 				}
 
-				// Seed this voxel
-				OurVoxel.SetWaterFlag(true);
-				Seeds.Add(OurIdx);
+				// Seed this voxel (once: a voxel on a chunk edge faces two neighbours)
+				bool bAlreadySeeded = false;
+				SeedSet.Add(OurIdx, &bAlreadySeeded);
+				if (!bAlreadySeeded)
+				{
+					Seeds.Add(OurIdx);
+				}
 			}
 		}
 	}
@@ -6826,6 +7031,14 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	if (Seeds.Num() == 0)
 	{
 		return false;
+	}
+
+	// Water flows in: write the seeds' flags into the chunk's own array, and flood from them.
+	OwnHold.Reset();
+	TArray<FVoxelData>& VoxelData = State->Descriptor.GetVoxelDataMutable();
+	for (const int32 SeedIdx : Seeds)
+	{
+		VoxelData[SeedIdx].SetWaterFlag(true);
 	}
 
 	// BFS flood fill from seeds (same algorithm as ApplyWaterFillPass Phase 2)
@@ -6887,6 +7100,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 
 void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoord)
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("water tile"));
 	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
 	if (!State || !State->Descriptor.HasVoxelDataAvailable())
 	{
@@ -6917,6 +7131,11 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
 	{
 		EditMerged = GetEditMergedSnapshot(ChunkCoord);
+	}
+	else if (CVarFarCompressionExpandAhead.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact())
+	{
+		// A far-compressed chunk reads its snapshot (the generated voxels, no edits), decoded on a worker (G65).
+		EditMerged = GetSeamVoxelSnapshot(ChunkCoord, *State);
 	}
 	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
 		EditMerged.IsValid() ? *EditMerged : State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
@@ -7154,6 +7373,10 @@ bool UVoxelChunkManager::AddToMeshingQueue(const FChunkLODRequest& Request, EVox
 	// Binary search for sorted insertion (ascending — highest priority at back for O(1) pop)
 	int32 InsertIndex = Algo::LowerBound(MeshingQueue, Request);
 	MeshingQueue.Insert(Request, InsertIndex);
+
+	// Its seam jobs and the water pull at its mesh's completion read it and its neighbours: start the far-compressed ones'
+	// snapshots decoding while it waits (G65).
+	PrefetchVoxelSnapshotsAround(Request.ChunkCoord);
 
 	return true;
 }
@@ -9083,6 +9306,49 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelFarCompressionStatsCmd(
 		}
 	}));
 
+// Console: voxel.FarCompression.Decodes [reset]
+// Where far-compressed chunks were expanded since the last reset (G65): per reader (the FReadScope tags) and per thread
+// kind, the count (uniform / compressed) and the time, game-thread waits for worker decodes, and each running chunk
+// manager's snapshot decodes this session.
+static FAutoConsoleCommand GVoxelFarCompressionDecodesCmd(
+	TEXT("voxel.FarCompression.Decodes"),
+	TEXT("Log where far-compressed chunk data was expanded (per reader, game thread or worker, and game-thread waits) since "
+	     "the last reset. 'reset' clears the statistics."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))
+		{
+			VoxelResidencyStats::Reset();
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.FarCompression.Decodes: reset"));
+			return;
+		}
+		if (GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				UWorld* World = Ctx.World();
+				if (!World || (Ctx.WorldType != EWorldType::PIE && Ctx.WorldType != EWorldType::Game))
+				{
+					continue;
+				}
+				for (TActorIterator<AActor> It(World); It; ++It)
+				{
+					if (const UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>())
+					{
+						UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.FarCompression.Decodes: snapshot decodes on workers (session): %lld"),
+							CM->GetSnapshotDecodeCount());
+					}
+				}
+			}
+		}
+		TArray<FString> Lines;
+		VoxelResidencyStats::Describe().ParseIntoArrayLines(Lines);
+		for (const FString& Line : Lines)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.FarCompression.Decodes: %s"), *Line);
+		}
+	}));
+
 // Console: voxel.Stream.AuditResidency
 // One-line QA check for "a distant chunk that should have unloaded is still visible" (R23): chunks
 // tracked beyond the unload radius (by state), renderer chunks and seam buckets with no tracked
@@ -9247,8 +9513,10 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	FVoxelMeshingRequest& OutMeshRequest,
 	TSharedPtr<const TArray<FVoxelData>>& OutSharedVoxels,
 	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots,
-	uint32* OutMissingNeighborMask)
+	uint32* OutMissingNeighborMask,
+	TArray<UE::Tasks::FTask>* OutSnapshotsReady)
 {
+	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("collision"));
 	if (OutMissingNeighborMask)
 	{
 		*OutMissingNeighborMask = 0;
@@ -9282,10 +9550,17 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 
 	// Hand out the shared edit-merged snapshot (built at most once per chunk content version, usually
 	// already cached by the seam pipeline). The worker copies it into the request off the game thread.
-	OutSharedVoxels = GetSeamVoxelSnapshot(ChunkCoord, *State);
-	if (!OutSharedVoxels.IsValid() || OutSharedVoxels->Num() == 0)
+	// A far-compressed chunk's snapshot may still be decoding on a worker (G65): with OutSnapshotsReady the cook's worker
+	// waits for it; its size is the chunk's once decoded.
+	UE::Tasks::FTask OwnDecode;
+	OutSharedVoxels = GetSeamVoxelSnapshot(ChunkCoord, *State, OutSnapshotsReady ? &OwnDecode : nullptr);
+	if (!OutSharedVoxels.IsValid() || (!OwnDecode.IsValid() && OutSharedVoxels->Num() == 0))
 	{
 		return false;
+	}
+	if (OwnDecode.IsValid())
+	{
+		OutSnapshotsReady->Add(MoveTemp(OwnDecode));
 	}
 
 	// Shared snapshots for the 26 neighbours that have data (map lookups; builds only on cache miss,
@@ -9306,11 +9581,16 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 		{
 			if (NState->Descriptor.HasVoxelDataAvailable())
 			{
-				TSharedPtr<const TArray<FVoxelData>> Snap = GetSeamVoxelSnapshot(NCoord, *NState);
-				if (Snap.IsValid() && Snap->Num() > 0)
+				UE::Tasks::FTask Decode;
+				TSharedPtr<const TArray<FVoxelData>> Snap = GetSeamVoxelSnapshot(NCoord, *NState, OutSnapshotsReady ? &Decode : nullptr);
+				if (Snap.IsValid() && (Decode.IsValid() || Snap->Num() > 0))
 				{
 					OutNeighborSnapshots.Add(NCoord, MoveTemp(Snap));
 					bHasData = true;
+					if (Decode.IsValid())
+					{
+						OutSnapshotsReady->Add(MoveTemp(Decode));
+					}
 				}
 			}
 		}

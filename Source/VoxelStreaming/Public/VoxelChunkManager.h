@@ -7,6 +7,7 @@
 #include "Containers/Queue.h"
 #include "VoxelCoreTypes.h"
 #include "ChunkDescriptor.h"
+#include "Tasks/Task.h"
 #include "ChunkRenderData.h"
 #include "LODTypes.h"
 #include "IVoxelNoiseGenerator.h"
@@ -422,6 +423,25 @@ public:
 	 * runtime player edits (dig/build). Returns Air for unloaded/ungenerated chunks. Game thread only.
 	 */
 	FVoxelData GetEditMergedVoxelAtWorldPosition(const FVector& WorldPosition) const;
+
+	/**
+	 * Start the snapshots of a neighbourhood's far-compressed chunks (the chunk and its 26 neighbours) decoding on workers
+	 * ahead of their readers (world modes review G65). A chunk queued for a mesh or a collision cook is about to be read
+	 * with its neighbours (its seam jobs, the water pull at its mesh's completion, the cook): each reads the snapshot,
+	 * decoded by then, instead of expanding the chunk on the game thread. Chunks that are resident, empty or edited are
+	 * left alone. No-op with voxel.FarCompression.ExpandAhead 0.
+	 *
+	 * @param ChunkCoord Centre of the neighbourhood
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming")
+	void PrefetchVoxelSnapshotsAround(const FIntVector& ChunkCoord);
+
+	/**
+	 * Snapshots of far-compressed chunks decoded on workers this session (G65; voxel.FarCompression.Decodes reports it).
+	 *
+	 * @return Decode tasks launched
+	 */
+	int64 GetSnapshotDecodeCount() const { return SnapshotDecodeTasks; }
 
 	/**
 	 * A chunk's edit-merged voxels as a shared, immutable snapshot (ChunkSize^3, chunk-local index
@@ -1051,7 +1071,8 @@ public:
 		FVoxelMeshingRequest& OutMeshRequest,
 		TSharedPtr<const TArray<FVoxelData>>& OutSharedVoxels,
 		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots,
-		uint32* OutMissingNeighborMask = nullptr);
+		uint32* OutMissingNeighborMask = nullptr,
+		TArray<UE::Tasks::FTask>* OutSnapshotsReady = nullptr);
 
 	/** Whether -VoxelDeepOff / -VoxelDeepFull were set (worker-side slice extraction needs them). */
 	bool IsDeepSliceOff() const { return bDeepDepthOff; }
@@ -1078,6 +1099,7 @@ public:
 		int64 CollisionBytes = 0;      // Collision manager memory
 		int64 ScatterBytes = 0;        // Scatter manager + renderer memory
 		int64 TotalBytes = 0;          // Sum of above
+		int64 SnapshotBytes = 0;       // Shared voxel snapshots cached for seam jobs and cooks (not in TotalBytes; G65)
 
 		// Far-chunk compression residency breakdown (chunk counts + bytes reclaimed).
 		int32 ResidentChunks = 0;      // raw array in memory
@@ -1720,8 +1742,16 @@ protected:
 		uint32 ContentVersion = 0;
 		uint64 LastUsedTick = 0;
 		TSharedPtr<const TArray<FVoxelData>> Data;
+		/**
+		 * The decode of a far-compressed chunk's snapshot on a worker (G65): Data is filled once it completes. Invalid
+		 * (nothing to wait for) for a snapshot copied from a resident array.
+		 */
+		UE::Tasks::FTask Ready;
 	};
 	TMap<FIntVector, FSeamVoxelSnapshot> SeamSnapshotCache;
+
+	/** Snapshots of far-compressed chunks decoded on workers this session (G65). */
+	int64 SnapshotDecodeTasks = 0;
 
 	/** Monotonic TickSeamScheduler counter (drives the snapshot age sweep). */
 	uint64 SeamTickCounter = 0;
@@ -1758,8 +1788,18 @@ private:
 	};
 	TMap<FIntVector, FSeamOwnerSlots> SeamOwnerSlots;
 
-	/** Get (building at most once per content version) the shared edit-merged snapshot of a chunk. */
-	TSharedPtr<const TArray<FVoxelData>> GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State);
+	/**
+	 * Get (building at most once per content version) the shared edit-merged snapshot of a chunk. The snapshot of a
+	 * far-compressed chunk without edits is decoded by a worker task (G65): with OutReady the caller receives that task and
+	 * waits for it on its own worker before reading the data; without, the game thread waits here.
+	 *
+	 * @param Coord    Chunk coordinate
+	 * @param State    Its state
+	 * @param OutReady Receives the decode to wait for (invalid when the data is ready); nullptr to wait here
+	 * @return The snapshot (filled once OutReady completes)
+	 */
+	TSharedPtr<const TArray<FVoxelData>> GetSeamVoxelSnapshot(const FIntVector& Coord, FVoxelChunkState& State,
+		UE::Tasks::FTask* OutReady = nullptr);
 
 	/**
 	 * Validate + dispatch one drained seam job (face, edge or corner, same or mixed LOD). Builds the
@@ -2150,7 +2190,8 @@ private:
 	void ProcessCompletedAsyncMeshes();
 
 	/** Launch async mesh generation for a chunk */
-	void LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest);
+	void LaunchAsyncMeshGeneration(const FChunkLODRequest& Request, FVoxelMeshingRequest MeshRequest,
+		TSharedPtr<const TArray<FVoxelData>> DeferredVoxels = nullptr, UE::Tasks::FTask DeferredDecode = UE::Tasks::FTask());
 
 	// ==================== Edit & Collision Systems ====================
 
