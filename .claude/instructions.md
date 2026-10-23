@@ -161,7 +161,7 @@ struct FChunkDescriptor {
     FIntVector ChunkCoord;
     int32 LODLevel;
     int32 ChunkSize;
-    TArray<FVoxelData> VoxelData;
+    TSharedPtr<TArray<FVoxelData>> VoxelArray; // shared copy-on-write: read via GetVoxelDataForRead, write via GetVoxelDataMutable
     FBox Bounds;
     float MorphFactor;
     // ... see DATA_STRUCTURES.md

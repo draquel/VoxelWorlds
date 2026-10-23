@@ -131,8 +131,9 @@ Called at each mesh submit of a chunk, before its water tile update. Ensures con
 
 It reads and writes the chunk's **generated** voxels (`FChunkDescriptor`), not the edit layer. Water an edit-driven
 flood put in the edit layer crosses chunk faces through `UVoxelWaterPropagation` instead (the chunk-arrival face scans
-below, G59). When it writes flags it drops the chunk's edit-merged snapshot (`GetEditMergedSnapshot`), which it does not
-version, so the water tile reads them.
+below, G59). Before it writes flags it drops the chunk's edit-merged snapshot (`GetEditMergedSnapshot`), which it does not
+version, so the water tile reads them. A resident chunk's snapshot shares its array (G71); dropped first, the write clones
+the array only while a seam job or a cook still holds it, and that reader keeps the voxels it took.
 
 **The second pulls (world modes review G70).** A chunk pulls once when its mesh lands, and a chunk wholly under the sea
 gets all of its water that way, so water that reached it only through a neighbour that flooded after it pulled never came:
