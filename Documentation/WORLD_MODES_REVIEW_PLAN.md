@@ -1504,7 +1504,7 @@ Three findings from §13.11 get IDs here:
 | G61 | Marching Cubes' LOD normals use the same stride-scale gradient taps G44 fixed in Dual Contouring (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD` and the GPU MC shader's), so an MC world's LOD 1 and 2 would lean the same way (found in G44, §20.8). No shipped configuration meshes with MC: the planets and `VoxelDemo` are DC | Fixed 2026-10-21 (§20.9): an MC edge vertex at stride > 1 now takes LOD 0's normal at the voxel crossing on its edge nearest it (`CalculateEdgeShadingNormal`, a function of the edge, CPU and GPU, regular cells, seam bands and the transition ribbon); positions unchanged. On gentle relief LOD 2's tilt 6.18° → 0.62° at 45°N, its mean angle 20.3° → 3.3° on the equator, its brightness -12.1% → -0.5% on the plane; from straight above an MC `Review_Planet_L` at 45°N 20°E the LOD 2 ring against the far field 1.18 → 1.01. `Streaming.{Planet,Plane}.LODNormalsMC`, `Meshing.MarchingCubes.LODNormals` (GPU normals within 0.13° of the CPU's); `voxel.Mesh.VoxelShadingNormals` now covers both meshers | — |
 | G62 | The stride-1 gradient both smooth meshers use (`CalculateGradientNormal`: the crossing floored to a voxel, taps one voxel either side on the one-voxel density ramp) tilts a slope's normal by 1.0-1.8 times the slope (5°: 5.0-9.1°) depending on where the surface crosses the voxel layer: bands along iso-height lines, a voxel layer apart at MC's LOD 0. Since G61, MC's LOD 1 and 2 sample it sparsely, which shows from altitude as faint broad rings around hills (ripple 0.75 grey against LOD 0's 0.51 on a 50-grey surface, §20.9). DC's LOD 0 averages the same gradient over a cell's crossings and bands about as much (2.3-3.8° over the voxel phase on the streaming tests' gentle relief, MC 4.2-4.5°; §20.12) | Fixed in §20.12: both meshers' shading normals at voxel resolution are the density gradient fitted to the voxels on the ramp around the point (`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block, tent weights, a free offset; exact for any plane; trilinear taps at ±1 only cut the error by a third), CPU and GPU, `voxel.Mesh.CrossingGradientNormals`; DC's QEF keeps the central difference (no vertex moves). LOD 0 band 0.04-0.28°, the hill's rings and LOD 0's bands gone on MC `Review_Planet_L`, DC chunk-mesh worker time +13-34% | — |
 | G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` (7.7 ms against 0.33 ms a job; 6,564 jobs took 50-52 s of worker time after `voxel.RemeshAll`), while MC's chunk meshes cost about DC's (§20.9) | Open (not traced): MC is unshipped | — |
-| G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames (§20.10) | Open (not traced) | — |
+| G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames (§20.10) | Fixed 2026-10-23 (§20.16): every refresh (ten a second) filled the minimap's texture on the CPU, 2-3 ms (a planet's tangent-plane sampler; on a plane a blit of every pixel of every tile in view, about 300,000 to draw 80,000 texels); the tile requests, upload and markers cost under 0.1 ms. Now the texture is filled only when the player moved two texels, a tile it shows changed or 2 s passed, the image shifted by the movement in between (on a planet with the heading and markers on the plane it was drawn in), and a plane is filled texel by texel (`FVCPlaneMapSampler`); `vc.Minimap.SkipUnchanged`, `vc.Minimap.TexelFill`, `vc.Minimap.Stats`. Moving 7,200 uu in about 19 s: fills 173-185 → 20, refreshes over 2 ms 66-177 → 0-19, the minimap's game-thread time per refresh 2.1-2.7 → 0.2-0.4 ms; tests `VoxelCharacter.Map.PlaneMapSampler`, `VoxelCharacter.Planet.MinimapShift` | — |
 | G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (§20.10) | Fixed 2026-10-21 (§20.13): a chunk compacted while far was expanded in place on the game thread by every reader as the viewer came near (collision cooks, the water pull, seam jobs, chunk meshes; about 0.3 ms each, 2,959 expansions of 1,279 chunks per small-planet great circle, 57% repeats, since the sweep compacts again at once). Now the snapshot of a far-compressed chunk without edits is decoded by a worker task from a copy of its compact form (`FVoxelCompactSource`) and the chunk stays compressed: seam jobs, cooks and mesh jobs wait for it on their workers, the water pull's seed search, the water tile and the scatter hand-off read it, and a chunk queued for a mesh or a cook starts its neighbourhood's (`PrefetchVoxelSnapshotsAround`); `voxel.FarCompression.SnapshotReads`. Benches (three runs per planet): the traverse's game-thread decode 364-548 → 11-27 ms, frames with over 2 ms of it 53-75 → 0-5, frame P99 1.8-2.6 ms and manager P95 1.2-1.8 ms lower (medians), peak voxel data −63 to −113 MB, catch-up unchanged. Tests `Compression.Codec.CompactSource`, `Streaming.{Planet,Plane}.FarReadsOffGameThread`. G69, G70 recorded | — |
 | G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7: M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, the same with and without G42's batching, the voxel data's peak 812-859 MB; settled figures did not move (§20.10). Something merged since G52 holds more voxel data in flight; under D3's 1.5 GB | Dismissed 2026-10-21 (§20.11): not a regression. §20.10's benches started 10.7 s after the settle, §20.7's 21.5 s after. After a teleport the window streams in at once and holds 787-837 MB of voxel data 10-11 s after the settle on M and L, until far compression's idle wait (`IdleFrames` 300) and encode budget catch up by +15-16 s; the bench's peaks count every sample from the first. On one build a bench started 10 s after the settle peaks at 1,048-1,061 MB on M and 1,194-1,241 on L, one started 21 s after at 675-683 and 832-833. G52's build gives 1,049-1,067 and 1,168-1,189 against 742-779 and 830-836 (§20.7: 747-769, 830-837). The traverse's voxel data is unchanged (M 375-380 MB, L 404-405). D3 holds with the transient: at most 1,241 MB + 51 MB of far field. G67, G68 recorded | — |
 | G67 | After a teleport or a spawn the window streams in at once, and stays resident until far compression catches up (`IdleFrames` 300, then at most 4 encodes a tick): on M and L, 779-830 of about 1,100 chunks are resident 10-11 s after the settle (787-837 MB of voxel data, systems 1.05-1.24 GB) for about 5 s, in G52's build too. About 340 of them are uniform (all air or all solid), which the sweep collapses for free but only after the same wait. Collapsing a uniform chunk when it is generated would take about 340 MB off that peak, given reads that do not re-expand it (meshing and seams read through `EnsureResident`). Under D3 either way | Open (an improvement, not a defect): found with G66 (§20.11) | — |
@@ -7628,7 +7628,7 @@ and density tests pass unchanged.
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames. Not relief-dependent | Open (not traced) |
+| G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames. Not relief-dependent | Fixed in §20.16: the texture is filled again only when what it shows changed |
 | G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (6-13 frames) | Fixed in §20.13: the reads of a far-compressed chunk use a snapshot decoded on a worker |
 | G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7 (G52): M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, in both of this A/B's modes, the voxel data's peak 812-859 MB. Settled figures did not move (the small planet 476-480 MB against P6.5's 484). Something merged since G52 (G56-G60, the demo caves' retune in §19.15, G44) holds more voxel data in flight; under D3's 1.5 GB | Dismissed in §20.11: not a regression; §20.10's benches started before far compression caught up after the settle |
 
@@ -8225,3 +8225,77 @@ are CRC-identical to G44's (no generation change). After merging main (G68, §20
 re-makes), the collision radius, and copies of resident chunks for seam jobs.
 
 G69 is fixed.
+
+### 20.16 G64: the minimap fills its texture only when it changed (2026-10-23)
+
+Bases: VoxelWorlds `45fbf28`, VoxelCharacterPlugin `c34a8d9`, UE5_PluginDev `a6ccc2b` (G69 merged). Branches
+`docs/g64-minimap` (VoxelWorlds), `fix/g64-minimap-tick` (VoxelCharacterPlugin) and `claude/g64-minimap-tick` (UE5_PluginDev).
+Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree editor (Claudius on 8097), background
+throttling off. The code is VoxelCharacterPlugin's (`UVCMinimapWidget`, `VCPlanetMapProjection`); this plugin has the
+write-up.
+
+**The finding** (§20.10): the minimap widget's tick took over 2 ms in about 18% of PIE frames on every planet alike.
+
+**Instruments first**, kept in the build: the refresh's phases are timed (tile requests, texture fill, texture upload,
+markers, the refresh; trace scopes `VCMinimap_*`), and `vc.Minimap.Stats [reset]` logs refreshes, fills, refreshes skipped
+and over 2 ms, and each phase's mean and maximum.
+
+**The cause.** The refresh runs every 0.1 s (`UpdateInterval`), one frame in six, and each refresh filled the 284 × 284
+texture on the CPU. Standing for 14 s at 45°N 20E: on the small planet and on L every one of 138-140 refreshes took over
+2 ms; the texture fill took 2.6-2.8 ms (the tangent-plane sampler, `FVCPlanetMapSampler`), the tile requests 0.05 ms, the
+upload 0.08 ms (`UpdateResource`) and the markers 0.02 ms. On `VoxelDemo` (a plane) the fill took 2.5 ms: it blitted every
+pixel of every tile in view at its near corner, about 300,000 pixels to draw 80,000 texels.
+
+**The fix** (VoxelCharacterPlugin):
+
+- **Fill only when something changed** (`vc.Minimap.SkipUnchanged`, 1). A refresh still requests the tiles, rotates the
+  image and places the markers. `NeedsRefill` fills only when:
+  - there is no texture yet, or its size changed;
+  - the player moved `RefillShiftTexels` (2) from the last fill's centre;
+  - an image of a tile the last fill read changed (`ComputeTileSignature`: each tile's entry, its pixel buffer and its
+    resolution; the samplers report the tiles they read, `VisitedTiles`);
+  - `MaxRefillSeconds` (2) passed.
+- **The shift.** Between fills the image is shifted back by the player's movement since the last fill
+  (`GetFillOffsetTexels`, rotated with the map), so the terrain stays under the player. The texture gets a margin for it
+  (289 × 289 at the defaults; 160 uu a texel, shown 1:1).
+- **The display frame.** On a planet the heading and the markers are taken on the tangent plane the texture was drawn in
+  (`GetDisplayFrame`), because neighbouring planes turn against each other near a pole.
+- **A plane is filled texel by texel** (`FVCPlaneMapSampler`, `vc.Minimap.TexelFill`, 1). Each texel shows the tile pixel
+  just inside its far corner, which is the pixel the blit wrote last. The columns' and rows' tiles and positions are worked
+  out once. Where tile pixels are coarser than texels every texel is drawn; the blit left gaps there.
+- **The planet sampler** steps its interpolation along a row and truncates instead of flooring.
+
+**Tests.**
+
+- **`VoxelCharacter.Map.PlaneMapSampler`** (new): on a small plane's tiles, off the tile grid, with 1.6 tile pixels a texel
+  the texel fill draws the blit's image (100% of 16,384 texels here). With 0.4 the blit leaves 36% of the texels as
+  background and the texel fill draws them all.
+- **`VoxelCharacter.Planet.MinimapShift`** (new): a texture filled two texels away, shifted, with the heading on its own
+  plane, shows terrain across the visible square within 0.017 texels of a fresh fill, at 0-89.9° on planets of 250,000 and
+  5,000,000 uu. With the heading on the player's own plane it would be off by 1.03 texels at 80°, 2.07 at 85° and 113 at
+  89.9° on the small planet.
+- The planet sampler tests (`VoxelCharacter.Planet.MapSampler`, `MapZoomAtScale`) pass unchanged (99.36-99.77% exact
+  texels).
+
+**Benches.** These are in-session A/Bs by cvar, because this machine's speed swung three- to fourfold between sessions.
+Old = `vc.Minimap.SkipUnchanged 0` and `vc.Minimap.TexelFill 0` (as before); new = both 1. The pawn was stepped 60 uu
+every 0.1 s by teleports, 7,200 uu in 18-21 s (about 380 uu/s), at 45°N 20E on the planets and along X on `VoxelDemo`:
+
+| | Fills | Refreshes over 2 ms | Fill, mean | Refresh, mean |
+|---|---|---|---|---|
+| Small planet, old → new | 173-183 → 20 | 158-176 → 18-19 | 2.13-2.46 → 2.03-2.34 ms | 2.35-2.73 → 0.36-0.42 ms |
+| L, old → new | 174-185 → 20 | 66-120 → 3-12 | 1.91-2.27 → 1.72-2.29 ms | 2.14-2.55 → 0.34-0.41 ms |
+| `VoxelDemo`, old → texel fill → new | 177 → 190 → 20 | 177 → 20 → 0 | 2.54 → 1.09 → 0.90 ms | 2.74 → 1.34 → 0.21 ms |
+
+`VoxelDemo`'s second repetition is left out: its runs' settings did not take (its new run filled at every refresh). Standing
+still the texture is filled 7-14 times in 138-140 refreshes (every 2 s, more where tiles were still drawing), with 0-11
+refreshes over 2 ms against all of them.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 589/589 headless (587 + the
+two above) and 589/589 in the editor with the GPU tests running (no device loss). The 108 GPU parity lines are
+CRC-identical to G44's (no generation change).
+
+**Left as they were:** a planet's fill (about 2 ms; while moving, once a second at this speed and more often faster), the
+texture upload (`UpdateResource`, under 0.15 ms), and the world map widget, which draws only while it is open.
+
+G64 is fixed.
