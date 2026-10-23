@@ -102,12 +102,13 @@ bool FChunkCompressionRoundTripTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("round-trip preserves every voxel"), bAllMatch);
 
-	// A point read on a compressed chunk decompresses transparently.
+	// A point read on a uniform chunk answers from the value and leaves it collapsed (G67).
 	D.TryCollapseUniform(); // re-collapse (free)
 	TestEqual(TEXT("re-collapsed to Uniform"), (int32)D.Residency, (int32)EVoxelDataResidency::Uniform);
 	const FVoxelData Q = D.GetVoxelResident(FIntVector(1, 2, 3));
 	TestTrue(TEXT("point query on Uniform returns the value"), Q == Fill);
-	TestEqual(TEXT("point query materialized the array"), (int32)D.Residency, (int32)EVoxelDataResidency::Resident);
+	TestEqual(TEXT("point query left the chunk collapsed"), (int32)D.Residency, (int32)EVoxelDataResidency::Uniform);
+	TestEqual(TEXT("point query did not materialize the array"), D.VoxelData.Num(), 0);
 
 	return true;
 }
@@ -172,6 +173,40 @@ bool FChunkCompressionMemoryTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("collapsed footprint is much smaller"), After < Before);
 	TestEqual(TEXT("no raw array bytes when Uniform"), (int32)D.VoxelData.GetAllocatedSize(), 0);
 
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G67 (WORLD_MODES_REVIEW_PLAN.md §14.1): a chunk generation found uniform collapses without a scan, keeps its content
+// version, and a point read answers its value without expanding it.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FChunkCompressionCollapseToUniformTest,
+	"VoxelWorlds.Compression.CollapseToUniform",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FChunkCompressionCollapseToUniformTest::RunTest(const FString& Parameters)
+{
+	using namespace ChunkCompressionTestUtils;
+	const FVoxelData Rock = FVoxelData::Solid(3);
+	FChunkDescriptor D = MakeUniform(16, Rock);
+	const uint32 Version = D.ContentVersion;
+	TestTrue(TEXT("A resident chunk collapses"), D.CollapseToUniform(Rock));
+	TestEqual(TEXT("Uniform now"), static_cast<int32>(D.Residency), static_cast<int32>(EVoxelDataResidency::Uniform));
+	TestEqual(TEXT("No raw array"), D.VoxelData.Num(), 0);
+	TestEqual(TEXT("Content version unchanged"), D.ContentVersion, Version);
+	TestFalse(TEXT("A uniform chunk does not collapse again"), D.CollapseToUniform(Rock));
+
+	// Point reads answer the value and leave the chunk uniform; outside the chunk, air.
+	const FVoxelData Inside = D.GetVoxelResident(FIntVector(5, 9, 15));
+	TestTrue(TEXT("A point read inside is the value"), Inside.MaterialID == 3 && Inside.Density == Rock.Density);
+	TestTrue(TEXT("A point read outside is air"), D.GetVoxelResident(FIntVector(16, 0, 0)).Density == FVoxelData::Air().Density);
+	TestEqual(TEXT("Point reads do not expand it"), static_cast<int32>(D.Residency), static_cast<int32>(EVoxelDataResidency::Uniform));
+
+	// Expanding gives the value everywhere, and the sweep re-collapses it for free.
+	const TArray<FVoxelData>& Expanded = D.EnsureResident();
+	TestEqual(TEXT("Expanded to the chunk"), Expanded.Num(), 16 * 16 * 16);
+	TestTrue(TEXT("Every voxel the value"), Expanded.Num() > 0 && Expanded[0] == Rock && Expanded.Last() == Rock);
+	TestTrue(TEXT("Re-collapses"), D.TryCollapseUniform());
 	return true;
 }
 
