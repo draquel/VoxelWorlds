@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelBiomeDefinition.h"
+#include "VoxelBiomeBlendDither.h"
 
 class UVoxelBiomeConfiguration;
 
@@ -133,18 +134,18 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 		return ComputeBiomeBlend(Biomes, BiomeBlendWidth, Temperature, Moisture, Continentalness);
 	}
 
-	/** Material from a biome blend (dithered weighted selection). See UVoxelBiomeConfiguration::GetBlendedMaterial. */
-	uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface) const
+	/** Material from a biome blend (dithered weighted selection at Dither's voxel). See UVoxelBiomeConfiguration::GetBlendedMaterial. */
+	uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey()) const
 	{
-		return SelectBlendedMaterial(Biomes, Blend, DepthBelowSurface);
+		return SelectBlendedMaterial(Biomes, Blend, DepthBelowSurface, Dither);
 	}
 
 	/** Material from a biome blend with underwater handling. See UVoxelBiomeConfiguration::GetBlendedMaterialWithWater. */
 	uint8 GetBlendedMaterialWithWater(const FBiomeBlend& Blend, float DepthBelowSurface,
-		float TerrainSurfaceHeight, float WaterLevel) const
+		float TerrainSurfaceHeight, float WaterLevel, const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey()) const
 	{
 		return SelectBlendedMaterialWithWater(Biomes, Blend, DepthBelowSurface,
-			TerrainSurfaceHeight, WaterLevel, bEnableUnderwaterMaterials, DefaultUnderwaterMaterial);
+			TerrainSurfaceHeight, WaterLevel, bEnableUnderwaterMaterials, DefaultUnderwaterMaterial, Dither);
 	}
 
 	/** Height-rule material override (first applicable wins, priority order). See UVoxelBiomeConfiguration::ApplyHeightMaterialRules. */
@@ -165,15 +166,29 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 		const TArray<FBiomeDefinition>& InBiomes, float InBiomeBlendWidth,
 		float Temperature, float Moisture, float Continentalness);
 
-	/** Dithered weighted material selection from a blend. */
-	static uint8 SelectBlendedMaterial(
-		const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface);
+	/**
+	 * Which of a blend's biomes a voxel takes: the dominant one when it holds over 0.9 of the weight, else a weighted pick by
+	 * FVoxelBiomeBlendDither at the voxel, walking the biomes in BiomeID order (G39; voxel.Biome.BlendDither 0: the old
+	 * frac value of the weights and depth, in weight order). Mirrored by GpuBlendedMaterial (BiomeMaterial.ush).
+	 *
+	 * @param Blend The blend
+	 * @param DepthBelowSurface Depth under the surface, in voxels (the old value's input)
+	 * @param Dither The voxel's key and the world seed
+	 * @return An index into Blend.BiomeIDs
+	 */
+	static int32 PickBlendIndex(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither);
 
-	/** Dithered weighted material selection with underwater material handling. */
+	/** Dithered weighted material selection from a blend (PickBlendIndex). */
+	static uint8 SelectBlendedMaterial(
+		const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface,
+		const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey());
+
+	/** Dithered weighted material selection with underwater material handling (PickBlendIndex). */
 	static uint8 SelectBlendedMaterialWithWater(
 		const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface,
 		float TerrainSurfaceHeight, float WaterLevel,
-		bool bInEnableUnderwaterMaterials, uint8 InDefaultUnderwaterMaterial);
+		bool bInEnableUnderwaterMaterials, uint8 InDefaultUnderwaterMaterial,
+		const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey());
 
 	/** Height-rule override. Rules MUST be pre-sorted by priority descending (first applicable wins). */
 	static uint8 ApplyHeightRules(

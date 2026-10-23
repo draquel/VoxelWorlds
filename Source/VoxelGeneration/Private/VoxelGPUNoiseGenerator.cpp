@@ -5,6 +5,7 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelBiomeBlendDither.h"
 #include "VoxelDownLines.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelPlanetNoise.h"
@@ -84,6 +85,9 @@ public:
 		SHADER_PARAMETER(int32, EnableUnderwaterMaterials)
 		SHADER_PARAMETER(uint32, DefaultUnderwaterMaterial)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, BiomeData)
+		// The blend zones' dither (G39): the chunk's first voxel on the world's grid, and voxel.Biome.BlendDither.
+		SHADER_PARAMETER(FIntVector, BlendDitherBase)
+		SHADER_PARAMETER(int32, BlendDitherMode)
 		// Height material rules (Phase B) — GPU_HEIGHTRULE_FLOAT4_STRIDE(2) float4s each, priority-sorted;
 		// HeightRuleCount 0 = disabled.
 		SHADER_PARAMETER(int32, HeightRuleCount)
@@ -822,6 +826,8 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->MoistureSeed = Request.NoiseParams.Seed + 5678;
 	Parameters->MoistureFrequency = 0.00007f;
 	Parameters->EnableUnderwaterMaterials = 0;
+	Parameters->BlendDitherBase = FVoxelBiomeBlendDither::GridBase(Request.ChunkCoord, Request.ChunkSize, Request.WorldOrigin, Request.VoxelSize);
+	Parameters->BlendDitherMode = FVoxelBiomeBlendDither::IsEnabled() ? 1 : 0;
 	Parameters->DefaultUnderwaterMaterial = 3;
 
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;

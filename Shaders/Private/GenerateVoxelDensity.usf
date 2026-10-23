@@ -91,6 +91,10 @@ float MoistureFrequency;
 int EnableUnderwaterMaterials;
 uint DefaultUnderwaterMaterial;
 StructuredBuffer<float4> BiomeData;
+// The blend zones' dither (G39): the chunk's first voxel on the world's grid (FVoxelBiomeBlendDither::GridBase), and
+// voxel.Biome.BlendDither (0: the old pick).
+int3 BlendDitherBase;
+int BlendDitherMode;
 
 // Height rules / ore veins / cave-wall / conditioning (Phase B) — layouts in BiomeMaterial.ush.
 int HeightRuleCount;
@@ -495,7 +499,7 @@ void MainCS(
         {
             // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater)
             const bool bUnderwaterMaterial = bUnderwaterColumn && (EnableUnderwaterMaterials != 0);
-            MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial);
+            MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial, BlendDitherBase + int3(VoxelCoord));
 
             // Height-based material overrides (snow at peaks, rock at altitude, etc.)
             MaterialID = ApplyGpuHeightRules(MaterialID, WorldPos.z, DepthBelowSurface);

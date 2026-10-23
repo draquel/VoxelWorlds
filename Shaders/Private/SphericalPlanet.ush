@@ -226,7 +226,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
 
         // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater by altitude)
         const bool bUnderwaterMaterial = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainAltitude < PlanetWaterAltitude);
-        MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial);
+        MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial, BlendDitherBase + int3(VoxelCoord));
 
         MaterialID = ApplyGpuHeightRules(MaterialID, Altitude, DepthBelowSurface);
 

@@ -207,85 +207,74 @@ FBiomeBlend FVoxelBiomeSnapshot::ComputeBiomeBlend(
 	return Result;
 }
 
-uint8 FVoxelBiomeSnapshot::SelectBlendedMaterial(
-	const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface)
+int32 FVoxelBiomeSnapshot::PickBlendIndex(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither)
 {
-	// For single biome or dominant biome, use simple lookup
-	if (Blend.BiomeCount == 1 || Blend.Weights[0] > 0.9f)
+	// A single biome, or one holding over 0.9 of the weight, takes the voxel outright.
+	if (Blend.BiomeCount <= 1 || Blend.Weights[0] > 0.9f)
 	{
-		const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[0]);
-		return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
+		return 0;
+	}
+	const int32 Count = FMath::Min(Blend.BiomeCount, MAX_BIOME_BLEND);
+
+	if (!FVoxelBiomeBlendDither::IsEnabled())
+	{
+		// Before G39: a value of the weights and the depth, in weight order. Across a zone the weights change slowly, so it
+		// followed the depth, which cycles with the voxel grid on a slope: bands of two materials along the grid.
+		const float RandomValue = FMath::Frac(Blend.Weights[0] * 17.3f + Blend.Weights[1] * 31.7f + DepthBelowSurface * 0.1f);
+		float CumulativeWeight = 0.0f;
+		for (int32 i = 0; i < Count; ++i)
+		{
+			CumulativeWeight += Blend.Weights[i];
+			if (RandomValue < CumulativeWeight)
+			{
+				return i;
+			}
+		}
+		return 0;
 	}
 
-	// For blended biomes, use weighted random selection
-	// This creates a dithered blend effect that looks more natural than hard edges
-	float RandomValue = FMath::Frac(
-		Blend.Weights[0] * 17.3f +
-		Blend.Weights[1] * 31.7f +
-		DepthBelowSurface * 0.1f
-	);
-
-	// Walk through weights to select biome
-	float CumulativeWeight = 0.0f;
-	for (int32 i = 0; i < Blend.BiomeCount; ++i)
+	// The lattice dither at the voxel (uniform on [0, 1), constant in patches a few voxels across), walking the biomes in
+	// BiomeID order: by weight the order changes where the dominant biome does, inside a zone, and a patch there would
+	// change biome along that line.
+	int32 Order[MAX_BIOME_BLEND] = { 0, 1, 2, 3 };
+	for (int32 i = 1; i < Count; ++i)
 	{
-		CumulativeWeight += Blend.Weights[i];
-		if (RandomValue < CumulativeWeight)
+		for (int32 j = i; j > 0 && Blend.BiomeIDs[Order[j]] < Blend.BiomeIDs[Order[j - 1]]; --j)
 		{
-			const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[i]);
-			return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
+			Swap(Order[j], Order[j - 1]);
 		}
 	}
+	const float RandomValue = FVoxelBiomeBlendDither::Sample(Dither);
+	float CumulativeWeight = 0.0f;
+	for (int32 k = 0; k < Count; ++k)
+	{
+		CumulativeWeight += Blend.Weights[Order[k]];
+		if (RandomValue < CumulativeWeight)
+		{
+			return Order[k];
+		}
+	}
+	return 0; // the weights summed short of the value by rounding: the dominant biome
+}
 
-	// Fallback to dominant biome
-	const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[0]);
+uint8 FVoxelBiomeSnapshot::SelectBlendedMaterial(
+	const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither)
+{
+	// The dominant biome, or a dithered weighted pick in blend zones (PickBlendIndex)
+	const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[PickBlendIndex(Blend, DepthBelowSurface, Dither)]);
 	return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
 }
 
 uint8 FVoxelBiomeSnapshot::SelectBlendedMaterialWithWater(
 	const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface,
 	float TerrainSurfaceHeight, float WaterLevel,
-	bool bInEnableUnderwaterMaterials, uint8 InDefaultUnderwaterMaterial)
+	bool bInEnableUnderwaterMaterials, uint8 InDefaultUnderwaterMaterial, const FVoxelBlendDitherKey& Dither)
 {
 	// Determine if terrain surface is underwater
 	const bool bIsUnderwater = bInEnableUnderwaterMaterials && (TerrainSurfaceHeight < WaterLevel);
 
-	// For single biome or dominant biome, use simple lookup
-	if (Blend.BiomeCount == 1 || Blend.Weights[0] > 0.9f)
-	{
-		const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[0]);
-		if (Biome)
-		{
-			return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
-		}
-		return bIsUnderwater ? InDefaultUnderwaterMaterial : 0;
-	}
-
-	// For blended biomes, use weighted random selection
-	float RandomValue = FMath::Frac(
-		Blend.Weights[0] * 17.3f +
-		Blend.Weights[1] * 31.7f +
-		DepthBelowSurface * 0.1f
-	);
-
-	// Walk through weights to select biome
-	float CumulativeWeight = 0.0f;
-	for (int32 i = 0; i < Blend.BiomeCount; ++i)
-	{
-		CumulativeWeight += Blend.Weights[i];
-		if (RandomValue < CumulativeWeight)
-		{
-			const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[i]);
-			if (Biome)
-			{
-				return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
-			}
-			return bIsUnderwater ? InDefaultUnderwaterMaterial : 0;
-		}
-	}
-
-	// Fallback to dominant biome
-	const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[0]);
+	// The dominant biome, or a dithered weighted pick in blend zones (PickBlendIndex)
+	const FBiomeDefinition* Biome = FindBiome(InBiomes, Blend.BiomeIDs[PickBlendIndex(Blend, DepthBelowSurface, Dither)]);
 	if (Biome)
 	{
 		return Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater);
