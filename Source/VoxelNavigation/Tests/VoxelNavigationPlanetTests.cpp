@@ -365,4 +365,46 @@ bool FVoxelNavPlaneSubsystemUnchangedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * G19 (WORLD_MODES_REVIEW_PLAN.md §14.1): on a heightmap world navigation's sea is the plane generation floods,
+ * WaterLevel itself, wherever WorldOrigin puts the chunk grid: a cell's ground deeper under it than a walker wades is
+ * water, ground just short of that depth is not.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavPlaneSeaWithOriginTest,
+	"VoxelWorlds.Navigation.Plane.SeaWithOrigin",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelNavPlaneSeaWithOriginTest::RunTest(const FString& Parameters)
+{
+	for (const double OriginZ : { -3000.0, 2600.0 })
+	{
+		VoxelTesting::FTestChunkWorld W;
+		W.Create(TEXT("VoxelNavPlaneSeaWithOrigin"));
+		W.ConfigureSmallPlane();
+		W.Config->WorldOrigin = FVector(12345.0, 54321.0, OriginZ);
+		W.Config->bEnableWaterLevel = true;
+		W.Config->WaterLevel = 0.0f;
+		W.StartManager();
+		W.SetViewer(FVector(W.Config->WorldOrigin.X, W.Config->WorldOrigin.Y, 200.0));
+		UVoxelSurfaceNavigationSubsystem* Nav = W.World->GetSubsystem<UVoxelSurfaceNavigationSubsystem>();
+		const FString Name = FString::Printf(TEXT("WorldOrigin.Z %.0f"), OriginZ);
+		if (TestNotNull(TEXT("The game world has navigation"), Nav) && TestTrue(*FString::Printf(TEXT("%s: streaming settles"), *Name), W.Settle()))
+		{
+			Nav->SetChunkManager(W.Manager);
+			Nav->IsWalkableAt(FVector(W.Config->WorldOrigin.X, W.Config->WorldOrigin.Y, 0.0)); // refreshes the parameters
+			const FVoxelSurfaceNavParams Params = Nav->GetParams();
+			const double X = W.Config->WorldOrigin.X, Y = W.Config->WorldOrigin.Y;
+			const float Deep = W.Config->WaterLevel - Params.MaxWadeDepth - 10.0f;
+			const float Shallow = W.Config->WaterLevel - Params.MaxWadeDepth + 10.0f;
+			AddInfo(FString::Printf(TEXT("%s: navigation's sea %.0f (WaterLevel %.0f), wade depth %.0f"), *Name, Params.Sea.PlaneZ,
+				W.Config->WaterLevel, Params.MaxWadeDepth));
+			TestEqual(*FString::Printf(TEXT("%s: navigation's sea is the WaterLevel plane"), *Name), Params.Sea.PlaneZ, static_cast<double>(W.Config->WaterLevel));
+			TestTrue(*FString::Printf(TEXT("%s: ground deeper than a wade is water"), *Name), Params.IsUnderwater(X, Y, Deep));
+			TestFalse(*FString::Printf(TEXT("%s: ground short of it is not"), *Name), Params.IsUnderwater(X, Y, Shallow));
+		}
+		W.Stop();
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

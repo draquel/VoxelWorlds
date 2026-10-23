@@ -216,9 +216,10 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 		if (const UVoxelWorldConfiguration* Config = ChunkMgr->GetConfiguration())
 		{
 			Params.bHasWater = Config->bEnableWaterLevel;
-			Params.WaterLevel = Config->WaterLevel + Config->WorldOrigin.Z;
-			// The test itself goes through the sea (SP-E1): the same plane here, the sea sphere on a planet.
-			Params.Sea = ChunkMgr->GetSeaSurface(/*bOriginRelativePlane=*/true);
+			// The test itself goes through the sea (SP-E1): the WaterLevel plane generation floods (G19), the sea sphere
+			// on a planet.
+			Params.Sea = ChunkMgr->GetSeaSurface();
+			Params.WaterLevel = Params.Sea.bRadial ? Config->WaterLevel : static_cast<float>(Params.Sea.PlaneZ);
 
 			// A planet searches in region frames (WM-SY11).
 			const bool bWasPlanet = bPlanet;

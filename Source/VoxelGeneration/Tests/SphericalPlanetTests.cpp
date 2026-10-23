@@ -917,7 +917,7 @@ bool FPlanetSeaSurfaceTest::RunTest(const FString& Parameters)
 
 /**
  * SP-E1: the sea's signed depth, the one test every water consumer asks. Plane: PlaneZ - Z, its sign exactly the old
- * "Z < WaterLevel"; the origin-relative plane adds WorldOrigin.Z (G19), on a planet both are the sphere. Sphere: the
+ * "Z < WaterLevel", at WaterLevel whatever WorldOrigin.Z (G19: one plane for every consumer). Sphere: the
  * depth along the radius, at or above 0 exactly where IsBelow holds; generation's radial fill wets the open sea where it
  * is at or above 0 and nowhere else.
  */
@@ -945,16 +945,14 @@ bool FPlanetSeaDepthTest::RunTest(const FString& Parameters)
 	Config->WorldOrigin = FVector(12345.0, 54321.0, 300.0);
 	Config->WaterLevel = WaterLevel;
 	Config->bEnableWaterLevel = true;
-	TestEqual(TEXT("Generation's plane: WaterLevel"), FVoxelSeaSurface::FromConfig(*Config).PlaneZ, -1500.0);
-	TestEqual(TEXT("Game code's plane: WaterLevel + WorldOrigin.Z"), FVoxelSeaSurface::FromConfigOriginRelative(*Config).PlaneZ, -1200.0);
-	Config->WorldOrigin.Z = 0.0;
-	TestEqual(TEXT("They agree when WorldOrigin.Z is 0 (every project config)"), FVoxelSeaSurface::FromConfigOriginRelative(*Config).PlaneZ,
-		FVoxelSeaSurface::FromConfig(*Config).PlaneZ);
+	TestEqual(TEXT("The plane: WaterLevel, with WorldOrigin.Z 300"), FVoxelSeaSurface::FromConfig(*Config).PlaneZ, -1500.0);
+	Config->WorldOrigin.Z = -7000.0;
+	TestEqual(TEXT("The plane: WaterLevel, with WorldOrigin.Z -7000"), FVoxelSeaSurface::FromConfig(*Config).PlaneZ, -1500.0);
 	Config->WorldMode = EWorldMode::SphericalPlanet;
 	Config->WorldOrigin = FVector(100.0, 200.0, 300.0);
 	Config->WaterRadius = 249500.0f;
-	const FVoxelSeaSurface PlanetSea = FVoxelSeaSurface::FromConfigOriginRelative(*Config);
-	TestTrue(TEXT("Planet: the origin-relative sea is the sphere too"), PlanetSea.bRadial && PlanetSea.Radius == 249500.0
+	const FVoxelSeaSurface PlanetSea = FVoxelSeaSurface::FromConfig(*Config);
+	TestTrue(TEXT("Planet: the sphere of WaterRadius around WorldOrigin"), PlanetSea.bRadial && PlanetSea.Radius == 249500.0
 		&& PlanetSea.Center.Equals(Config->WorldOrigin));
 
 	const FVector Dir = FVector(0.3, -0.8, 0.52).GetSafeNormal();

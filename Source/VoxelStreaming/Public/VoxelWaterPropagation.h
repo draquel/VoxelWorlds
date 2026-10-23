@@ -202,7 +202,7 @@ private:
 
 	/**
 	 * Whether a voxel is at or below the sea as generation's fill pass tests it: at its sample point (the cell's min
-	 * corner), on the grid for the plane (WaterLevel against the origin-relative Z) and in world space for a planet's sphere.
+	 * corner) in world space, against the WaterLevel plane or a planet's sphere (G19).
 	 */
 	bool IsBelowSea(const FIntVector& Key) const;
 

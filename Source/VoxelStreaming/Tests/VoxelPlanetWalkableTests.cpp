@@ -370,7 +370,7 @@ bool FPlanetSpawnPositionTest::RunTest(const FString& Parameters)
 
 /**
  * SP-E1: the chunk manager's sea. On a planet the sphere of WaterRadius (the depth along the radius); on a plane the
- * WaterLevel plane, shifted by WorldOrigin.Z for the origin-relative consumers; water off disables it.
+ * WaterLevel plane wherever WorldOrigin is (G19); water off disables it.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetSeaQueriesTest,
 	"VoxelWorlds.Streaming.Planet.SeaQueries",
@@ -385,23 +385,22 @@ bool FPlanetSeaQueriesTest::RunTest(const FString& Parameters)
 		const FVector Dir = LatLon(-30.0, 135.0);
 		TestTrue(TEXT("Planet: 300 under the sea sphere"), FMath::IsNearlyEqual(Planet.Manager->GetSeaDepthAt(Dir * (Planet.Config->WaterRadius - 300.0)), 300.0f, 0.01f));
 		TestTrue(TEXT("Planet: 120 over it"), FMath::IsNearlyEqual(Planet.Manager->GetSeaDepthAt(Dir * (Planet.Config->WaterRadius + 120.0)), -120.0f, 0.01f));
-		const FVoxelSeaSurface A = Planet.Manager->GetSeaSurface(false);
-		const FVoxelSeaSurface B = Planet.Manager->GetSeaSurface(true);
-		TestTrue(TEXT("Planet: both conventions are the sphere"), A.bRadial && B.bRadial && A.Radius == B.Radius && A.Center.Equals(B.Center));
+		const FVoxelSeaSurface Sea = Planet.Manager->GetSeaSurface();
+		TestTrue(TEXT("Planet: the sea is the sphere of WaterRadius"), Sea.bRadial && Sea.Radius == Planet.Config->WaterRadius
+			&& Sea.Center.Equals(Planet.Config->WorldOrigin));
 	}
 	{
 		FWalkableWorld Plane(TEXT("PlaneSeaQueriesWorld"), /*bPlanet=*/false);
 		Plane.Config->WorldOrigin = FVector(100.0, 200.0, 300.0);
 		Plane.Start();
-		TestEqual(TEXT("Plane: generation's plane is WaterLevel"), Plane.Manager->GetSeaSurface(false).PlaneZ, -1500.0);
-		TestEqual(TEXT("Plane: game code's plane adds WorldOrigin.Z"), Plane.Manager->GetSeaSurface(true).PlaneZ, -1200.0);
-		TestTrue(TEXT("Plane: GetSeaDepthAt reads the game plane"), FMath::IsNearlyEqual(Plane.Manager->GetSeaDepthAt(FVector(5.0e5, -3.0e5, -1250.0)), 50.0f, 0.001f));
+		TestEqual(TEXT("Plane: the sea is the WaterLevel plane, whatever WorldOrigin.Z"), Plane.Manager->GetSeaSurface().PlaneZ, -1500.0);
+		TestTrue(TEXT("Plane: GetSeaDepthAt reads it"), FMath::IsNearlyEqual(Plane.Manager->GetSeaDepthAt(FVector(5.0e5, -3.0e5, -1550.0)), 50.0f, 0.001f));
 	}
 	{
 		FWalkableWorld Dry(TEXT("PlaneSeaQueriesDryWorld"), /*bPlanet=*/false);
 		Dry.Config->bEnableWaterLevel = false;
 		Dry.Start();
-		TestFalse(TEXT("Water off: the sea is disabled"), Dry.Manager->GetSeaSurface(true).bEnabled);
+		TestFalse(TEXT("Water off: the sea is disabled"), Dry.Manager->GetSeaSurface().bEnabled);
 		TestTrue(TEXT("Water off: never under it"), Dry.Manager->GetSeaDepthAt(FVector(0.0, 0.0, -1.0e6)) < -1.0e8f);
 	}
 	return true;

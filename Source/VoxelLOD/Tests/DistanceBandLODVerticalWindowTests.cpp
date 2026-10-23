@@ -361,4 +361,72 @@ bool FLODIslandDistance3DTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * G19 (WORLD_MODES_REVIEW_PLAN.md §14.1): a column under the sea streams up to the water plane generation floods, which
+ * is WaterLevel itself wherever WorldOrigin puts the chunk grid (the terrain's heights are absolute too). Every far
+ * column's slab must be its surface ± the slack, raised to the water plane, in the grid's layers. With the origin 20,000
+ * uu down and the sea at 6,000 a deep column has to keep the layer the water's surface is in; with it 9,000 up and the sea
+ * at 1,000, a column under it no layer above the one its slack reaches.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLODVerticalWindowWaterPlaneWithOriginTest,
+	"VoxelWorlds.LOD.VerticalWindow.WaterPlaneWithOrigin",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLODVerticalWindowWaterPlaneWithOriginTest::RunTest(const FString& Parameters)
+{
+	using namespace VerticalWindowTestHelpers;
+
+	const double Slack = 1.5 * ChunkWorldSize;
+	struct FCase { double OriginZ; float WaterLevel; };
+	for (const FCase& Case : { FCase{ -20000.0, 6000.0f }, FCase{ 9000.0, 1000.0f } })
+	{
+		UVoxelWorldConfiguration* Config = MakeConfig(EWorldMode::InfinitePlane);
+		Config->WorldOrigin = FVector(0.0, 0.0, Case.OriginZ);
+		Config->WaterLevel = Case.WaterLevel;
+		FProbeStrategy Strategy;
+		Strategy.Initialize(Config);
+		const TSharedRef<IVoxelWorldMode> World = FVoxelWorldModeFactory::Create(*Config);
+
+		FLODQueryContext Context = MakeContext(EWorldMode::InfinitePlane, 0);
+		Context.WorldOrigin = Config->WorldOrigin;
+		Context.ViewerPosition.Z += Case.OriginZ;
+		// Layers of the grid: layer L spans [OriginZ + L * ChunkWorldSize, OriginZ + (L + 1) * ChunkWorldSize).
+		auto GridLayers = [&Case](double Lo, double Hi, int32& OutMin, int32& OutMax)
+		{
+			Layers(Lo - Case.OriginZ, Hi - Case.OriginZ, OutMin, OutMax);
+		};
+		int32 BoundsMin = 0, BoundsMax = -1;
+		GridLayers(Strategy.TerrainMinHeight, Strategy.TerrainMaxHeight, BoundsMin, BoundsMax);
+
+		int32 Columns = 0, UnderSea = 0, Raised = 0, Wrong = 0;
+		for (int32 X = -8; X <= 8; ++X)
+		{
+			for (int32 Y = -8; Y <= 8; ++Y)
+			{
+				if (ColumnDistance(X, Y, Context.ViewerPosition) <= Strategy.GetNearWindowRadius())
+				{
+					continue; // far columns only: the slab alone decides there
+				}
+				const FFloatInterval Surface = World->GetSurfaceRange(FVector2D(X * ChunkWorldSize, Y * ChunkWorldSize),
+					FVector2D((X + 1) * ChunkWorldSize, (Y + 1) * ChunkWorldSize), Config->NoiseParams);
+				int32 GroundMin = 0, GroundMax = -1, SlabMin = 0, SlabMax = -1;
+				GridLayers(Surface.Min - Slack, Surface.Max + Slack, GroundMin, GroundMax);
+				GridLayers(Surface.Min - Slack, FMath::Max(Surface.Max, Config->WaterLevel) + Slack, SlabMin, SlabMax);
+				SlabMin = FMath::Max(SlabMin, BoundsMin);
+				SlabMax = FMath::Min(SlabMax, BoundsMax);
+				++Columns;
+				UnderSea += (Surface.Max < Config->WaterLevel) ? 1 : 0;
+				Raised += (FMath::Min(SlabMax, BoundsMax) > FMath::Min(GroundMax, BoundsMax)) ? 1 : 0;
+				const FProbeStrategy::FColumnWindow Window = Strategy.GetColumnWindow(X, Y, Context, FProbeStrategy::EWindowUse::Load);
+				Wrong += (Window.SlabMinZ != SlabMin || Window.SlabMaxZ != SlabMax) ? 1 : 0;
+			}
+		}
+		AddInfo(FString::Printf(TEXT("WorldOrigin.Z %.0f, WaterLevel %.0f: %d far columns, %d under the sea, %d raised to its plane by a layer or more"),
+			Case.OriginZ, Case.WaterLevel, Columns, UnderSea, Raised));
+		TestTrue(*FString::Printf(TEXT("WorldOrigin.Z %.0f: columns under the sea (non-vacuous)"), Case.OriginZ), UnderSea >= 5);
+		TestEqual(*FString::Printf(TEXT("WorldOrigin.Z %.0f: every far column's slab reaches the water plane, and no further"), Case.OriginZ), Wrong, 0);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

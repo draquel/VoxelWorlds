@@ -688,18 +688,17 @@ public:
 	FVector GetPlanetSpawnPosition() const;
 
 	/**
-	 * The sea as the water rules see it (FVoxelSeaSurface): the sphere of WaterRadius on a planet, a Z plane in heightmap
-	 * modes. bEnabled is false with water off.
+	 * The sea as the water rules see it (FVoxelSeaSurface::FromConfig): the sphere of WaterRadius on a planet, the plane
+	 * at WaterLevel in heightmap modes, where generation floods and the water tiles draw wherever WorldOrigin is (review
+	 * plan G19). Every consumer reads it: navigation, the character, the NPC spawner. bEnabled is false with water off.
 	 *
-	 * @param bOriginRelativePlane Heightmap modes: the plane at WaterLevel + WorldOrigin.Z (navigation, the character
-	 *        and the NPC spawner) instead of generation's WaterLevel (review plan G19); no effect on a planet
 	 * @return The sea surface (disabled before Initialize)
 	 */
-	FVoxelSeaSurface GetSeaSurface(bool bOriginRelativePlane = false) const;
+	FVoxelSeaSurface GetSeaSurface() const;
 
 	/**
-	 * Signed depth of a world position below the sea (spherical SP-E1): along the radius on a planet, along Z on the
-	 * plane at WaterLevel + WorldOrigin.Z in heightmap modes (the plane game code has always used).
+	 * Signed depth of a world position below the sea (spherical SP-E1): along the radius on a planet, along Z under the
+	 * WaterLevel plane in heightmap modes (GetSeaSurface).
 	 *
 	 * @param WorldPos World position
 	 * @return Positive below the sea, negative above; a large negative value when water is off

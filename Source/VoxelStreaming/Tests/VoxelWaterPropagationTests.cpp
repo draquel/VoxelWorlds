@@ -24,7 +24,7 @@
 // for seeds; an operation of single-voxel edits (a POI's terraform, a dungeon stamp) reports radius 0 and seeded nothing.
 //
 // - Streaming.WaterPropagation.Plane / .Planet: a real chunk manager streams a small world with a sea (the plane's
-//   WorldOrigin off the voxel grid by a fraction of a voxel). At three seabed sites a few voxels under the sea:
+//   WorldOrigin off the voxel grid by a fraction of a voxel, Z included). At three seabed sites a few voxels under the sea:
 //   A. A player dig on the seabed (a sphere brush): every voxel it dug floods, and keeps the dig's density and material.
 //   B. A system edit digs a pocket under the seabed (air with a density and material of its own), another fills its
 //      bottom: the sealed pocket stays dry. A system shaft (single-voxel edits, radius 0) opens it to the sea: the pocket
@@ -99,11 +99,14 @@ namespace VoxelWaterPropagationTest
 		return W.Manager->HasChunkVoxelData(W.Manager->WorldToChunkCoord(CenterOf(W, Key)));
 	}
 
-	/** Below the sea as generation tests it: the voxel's sample point (its cell's min corner), on the grid for the plane. */
+	/** The plane's sea relative to WorldOrigin, the height voxel keys are on (G19: WaterLevel is world Z). */
+	double SeaGridZ(const VoxelTesting::FTestChunkWorld& W) { return W.Config->WaterLevel - OriginOf(W).Z; }
+
+	/** Below the sea as generation tests it: the voxel's sample point (its cell's min corner), in world space. */
 	bool BelowSea(const VoxelTesting::FTestChunkWorld& W, const FIntVector& Key, bool bPlanet)
 	{
 		const FVector GridPos = FVector(Key) * W.Config->VoxelSize;
-		return bPlanet ? GridPos.Size() <= W.Config->WaterRadius : GridPos.Z <= W.Config->WaterLevel;
+		return bPlanet ? GridPos.Size() <= W.Config->WaterRadius : GridPos.Z <= SeaGridZ(W);
 	}
 
 	/** Water: water-flagged air. */
@@ -345,9 +348,9 @@ namespace VoxelWaterPropagationTest
 		else
 		{
 			W.ConfigureSmallPlane();
-			// Off the voxel grid by a fraction of a voxel in X and Y (Z stays 0: the two sea-plane conventions agree, G19), so
-			// voxel keys relative to the origin and world positions differ.
-			W.Config->WorldOrigin = FVector(3112.5, -1937.5, 0.0);
+			// Off the voxel grid by a fraction of a voxel on every axis, so voxel keys relative to the origin and world positions
+			// differ; Z too since G19 (one sea plane, WaterLevel in world Z, wherever the origin puts the grid).
+			W.Config->WorldOrigin = FVector(3112.5, -1937.5, -2187.5);
 		}
 		W.Config->bEnableWaterLevel = true;
 		if (bPlanet)
@@ -722,7 +725,7 @@ namespace VoxelWaterPropagationTest
 		const double VS = W.Config->VoxelSize;
 		if (!bPlanet)
 		{
-			return FMath::FloorToInt32(W.Config->WaterLevel / VS);
+			return FMath::FloorToInt32(SeaGridZ(W) / VS);
 		}
 		// The planet's sites are at the +X face's equator, up along +X.
 		const double Across = (FMath::Square(double(F)) + FMath::Square(double(T))) * VS * VS;
@@ -1071,6 +1074,7 @@ namespace VoxelWaterPropagationTest
 		};
 		int32 ShoreX = 0, ShoreY = 0, Dir = 0;
 		double BestScore = TNumericLimits<double>::Max(), MaxGround = 0.0;
+		const double Sea = SeaGridZ(W); // the heights below are relative to WorldOrigin, as the voxel keys are
 		for (int32 GY = -120; GY <= 120; GY += 2)
 		{
 			for (int32 GX = -120; GX <= 120; ++GX)
@@ -1082,7 +1086,7 @@ namespace VoxelWaterPropagationTest
 					{
 						for (int32 i = 1; i <= 3 && bOk; ++i)
 						{
-							bOk = H(GX - D * i, GY + DY) <= -0.2 * VS;
+							bOk = H(GX - D * i, GY + DY) - Sea <= -0.2 * VS;
 						}
 					}
 					double Top = 0.0;
@@ -1090,7 +1094,7 @@ namespace VoxelWaterPropagationTest
 					{
 						for (int32 i = 0; i <= 10 && bOk; ++i)
 						{
-							const double Ground = H(GX + D * i, GY + DY);
+							const double Ground = H(GX + D * i, GY + DY) - Sea;
 							bOk = Ground >= 0.3 * VS && Ground <= 12.0 * VS;
 							Top = FMath::Max(Top, Ground);
 						}
@@ -1141,8 +1145,8 @@ namespace VoxelWaterPropagationTest
 		Test.TestEqual(TEXT("Tiles: no tile over the channel's inland columns before the dig"), CoveredBefore, 0);
 
 		// The channel: from 3 columns out in the sea to 7 inland, 3 wide, down to 3 voxels under the sea. Only rock is dug.
-		const int32 TopZ = FMath::CeilToInt32(MaxGround / VS) + 1;
-		const int32 BottomZ = FMath::FloorToInt32(W.Config->WaterLevel / VS) - 3;
+		const int32 TopZ = FMath::CeilToInt32((MaxGround + Sea) / VS) + 1;
+		const int32 BottomZ = FMath::FloorToInt32(Sea / VS) - 3;
 		TArray<FIntVector> Dig;
 		for (int32 i = -3; i <= 7; ++i)
 		{
