@@ -2138,7 +2138,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 				const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackTempNoiseParams);
 				const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackMoistureNoiseParams);
 				FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
-				MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
+				MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f,
+					FVoxelBlendDitherKey(FVoxelBiomeBlendDither::KeyAt(FVector(WorldX, WorldY, Height), VoxelSize), NoiseParams.Seed));
 			}
 			else
 			{
@@ -2532,7 +2533,8 @@ void UVoxelMapSubsystem::GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Gen
 				float Temperature, Moisture;
 				FSphericalPlanetWorldMode::SampleClimate(Direction, Radius, FallbackTempNoiseParams, FallbackMoistureNoiseParams, Temperature, Moisture);
 				const FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
-				MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f);
+				MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f,
+					FVoxelBlendDitherKey(FVoxelBiomeBlendDither::KeyAt(Position, VoxelSize), NoiseParams.Seed));
 			}
 			else
 			{

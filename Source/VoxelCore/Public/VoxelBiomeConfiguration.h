@@ -6,6 +6,7 @@
 #include "Engine/DataAsset.h"
 #include "Curves/CurveFloat.h"
 #include "VoxelBiomeDefinition.h"
+#include "VoxelBiomeBlendDither.h"
 #include "VoxelBiomeConfiguration.generated.h"
 
 /**
@@ -299,9 +300,10 @@ public:
 	 * Performs weighted selection based on blend weights.
 	 * @param Blend The biome blend result
 	 * @param DepthBelowSurface Depth below terrain surface
+	 * @param Dither The voxel's key and the world seed: the blend zone's dither (G39, FVoxelBiomeBlendDither)
 	 * @return Material ID selected based on blend weights
 	 */
-	uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface) const;
+	uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey()) const;
 
 	/**
 	 * Get material ID considering biome blending and water level.
@@ -310,10 +312,11 @@ public:
 	 * @param DepthBelowSurface Depth below terrain surface
 	 * @param TerrainSurfaceHeight The height of the terrain surface at this X,Y
 	 * @param WaterLevel The water level height (or radius for spherical)
+	 * @param Dither The voxel's key and the world seed: the blend zone's dither (G39, FVoxelBiomeBlendDither)
 	 * @return Material ID selected based on blend weights and water state
 	 */
 	uint8 GetBlendedMaterialWithWater(const FBiomeBlend& Blend, float DepthBelowSurface,
-		float TerrainSurfaceHeight, float WaterLevel) const;
+		float TerrainSurfaceHeight, float WaterLevel, const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey()) const;
 
 	/**
 	 * Apply height material rules to override a material based on elevation.

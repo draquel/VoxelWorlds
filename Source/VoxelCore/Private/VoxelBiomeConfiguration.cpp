@@ -437,18 +437,18 @@ FBiomeBlend UVoxelBiomeConfiguration::GetBiomeBlend(float Temperature, float Moi
 	return FVoxelBiomeSnapshot::ComputeBiomeBlend(Biomes, BiomeBlendWidth, Temperature, Moisture, Continentalness);
 }
 
-uint8 UVoxelBiomeConfiguration::GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface) const
+uint8 UVoxelBiomeConfiguration::GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither) const
 {
 	// Shared algorithm core — see FVoxelBiomeSnapshot.
-	return FVoxelBiomeSnapshot::SelectBlendedMaterial(Biomes, Blend, DepthBelowSurface);
+	return FVoxelBiomeSnapshot::SelectBlendedMaterial(Biomes, Blend, DepthBelowSurface, Dither);
 }
 
 uint8 UVoxelBiomeConfiguration::GetBlendedMaterialWithWater(const FBiomeBlend& Blend, float DepthBelowSurface,
-	float TerrainSurfaceHeight, float WaterLevel) const
+	float TerrainSurfaceHeight, float WaterLevel, const FVoxelBlendDitherKey& Dither) const
 {
 	// Shared algorithm core — see FVoxelBiomeSnapshot.
 	return FVoxelBiomeSnapshot::SelectBlendedMaterialWithWater(Biomes, Blend, DepthBelowSurface,
-		TerrainSurfaceHeight, WaterLevel, bEnableUnderwaterMaterials, DefaultUnderwaterMaterial);
+		TerrainSurfaceHeight, WaterLevel, bEnableUnderwaterMaterials, DefaultUnderwaterMaterial, Dither);
 }
 
 uint8 UVoxelBiomeConfiguration::ApplyHeightMaterialRules(uint8 CurrentMaterial, float WorldHeight, float DepthBelowSurface) const

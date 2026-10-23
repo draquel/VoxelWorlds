@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelBiomeDefinition.h"
+#include "VoxelBiomeBlendDither.h"
 
 /**
  * Biome ID constants for type-safe biome references.
@@ -76,9 +77,10 @@ public:
 	 * Performs weighted selection based on blend weights.
 	 * @param Blend The biome blend result
 	 * @param DepthBelowSurface Depth below terrain surface
+	 * @param Dither The voxel's key and the world seed: the blend zone's dither (G39, FVoxelBiomeBlendDither)
 	 * @return Material ID selected based on blend weights
 	 */
-	static uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface);
+	static uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey());
 
 private:
 	/** Array of all biome definitions */

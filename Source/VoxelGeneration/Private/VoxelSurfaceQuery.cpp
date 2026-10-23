@@ -116,15 +116,16 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	OutBiomeID = Blend.GetDominantBiome();
 
-	// Get surface material (depth = 0 for surface)
+	// Get surface material (depth = 0 for surface), blend zones dithered at the surface's voxel (G39)
+	const FVoxelBlendDitherKey Dither(FVoxelBiomeBlendDither::KeyAt(FVector(WorldX, WorldY, TerrainHeight), VoxelSize), WorldSeed);
 	const bool bIsUnderwater = bEnableWaterLevel && TerrainHeight < WaterLevel;
 	if (bIsUnderwater)
 	{
-		OutSurfaceMaterial = BiomeSnapshot.GetBlendedMaterialWithWater(Blend, 0.0f, TerrainHeight, WaterLevel);
+		OutSurfaceMaterial = BiomeSnapshot.GetBlendedMaterialWithWater(Blend, 0.0f, TerrainHeight, WaterLevel, Dither);
 	}
 	else
 	{
-		OutSurfaceMaterial = BiomeSnapshot.GetBlendedMaterial(Blend, 0.0f);
+		OutSurfaceMaterial = BiomeSnapshot.GetBlendedMaterial(Blend, 0.0f, Dither);
 	}
 
 	// Apply height material rules (snow on peaks, etc.)
@@ -245,9 +246,12 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	OutBiomeID = Blend.GetDominantBiome();
+	// Blend zones dithered at the voxel's key (G39): its position along the direction, in double
+	const FVoxelBlendDitherKey Dither(FVoxelBiomeBlendDither::KeyAt(
+		Params.PlanetCenter + Direction * (Params.PlanetRadius + VoxelAltitude), VoxelSize), NoiseParams.Seed);
 	OutSurfaceMaterial = (Sea.bEnabled && Sea.bRadial)
-		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(Sea.Radius - Params.PlanetRadius))
-		: BiomeSnapshot.GetBlendedMaterial(Blend, DepthBelowSurface);
+		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(Sea.Radius - Params.PlanetRadius), Dither)
+		: BiomeSnapshot.GetBlendedMaterial(Blend, DepthBelowSurface, Dither);
 	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, Altitude, DepthBelowSurface);
 }
 

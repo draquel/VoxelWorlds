@@ -2,6 +2,7 @@
 
 #include "VoxelBiomeRegistry.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelBiomeSnapshot.h"
 
 TArray<FBiomeDefinition> FVoxelBiomeRegistry::Biomes;
 bool FVoxelBiomeRegistry::bInitialized = false;
@@ -218,39 +219,11 @@ FBiomeBlend FVoxelBiomeRegistry::GetBiomeBlend(float Temperature, float Moisture
 	return Result;
 }
 
-uint8 FVoxelBiomeRegistry::GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface)
+uint8 FVoxelBiomeRegistry::GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither)
 {
 	EnsureInitialized();
 
-	// For single biome or dominant biome, use simple lookup
-	if (Blend.BiomeCount == 1 || Blend.Weights[0] > 0.9f)
-	{
-		const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
-		return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
-	}
-
-	// For blended biomes, use weighted random selection
-	// This creates a dithered blend effect that looks more natural than hard edges
-	// Use a deterministic "random" based on the blend state for consistency
-	float RandomValue = FMath::Frac(
-		Blend.Weights[0] * 17.3f +
-		Blend.Weights[1] * 31.7f +
-		DepthBelowSurface * 0.1f
-	);
-
-	// Walk through weights to select biome
-	float CumulativeWeight = 0.0f;
-	for (int32 i = 0; i < Blend.BiomeCount; ++i)
-	{
-		CumulativeWeight += Blend.Weights[i];
-		if (RandomValue < CumulativeWeight)
-		{
-			const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[i]);
-			return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
-		}
-	}
-
-	// Fallback to dominant biome
-	const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[0]);
+	// The dominant biome, or a dithered weighted pick in blend zones (FVoxelBiomeSnapshot::PickBlendIndex, G39)
+	const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[FVoxelBiomeSnapshot::PickBlendIndex(Blend, DepthBelowSurface, Dither)]);
 	return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
 }
