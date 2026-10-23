@@ -68,7 +68,7 @@ namespace VoxelWaterPullOrderTestUtils
 	/**
 	 * Every loaded chunk's voxels (edit-merged snapshots; no edits here), and the flood's closure of their flags: from each
 	 * flagged voxel, its six neighbours (across chunk faces into loaded chunks) that are air below the sea and dry are
-	 * missed, and so on from those. The sea test is the pull's own (FVoxelSeaSurface on the voxel's grid position).
+	 * missed, and so on from those. The sea test is the pull's own (FVoxelSeaSurface on the voxel's world position).
 	 */
 	FPullResult Measure(VoxelTesting::FTestChunkWorld& W)
 	{
@@ -97,8 +97,7 @@ namespace VoxelWaterPullOrderTestUtils
 		};
 		auto IsBelowSea = [&](const FIntVector& Global)
 		{
-			const FVector GridPos = FVector(Global) * VS;
-			return Sea.IsBelow(Sea.bRadial ? GridPos + W.Config->WorldOrigin : GridPos);
+			return Sea.IsBelow(W.Config->WorldOrigin + FVector(Global) * VS);
 		};
 		TSet<FIntVector> Missed;
 		TArray<FIntVector> Queue;

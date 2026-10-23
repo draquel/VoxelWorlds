@@ -57,8 +57,9 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 
 	/**
 	 * The world's sea (spherical SP-E1), set by UVoxelSurfaceNavigationSubsystem from the chunk manager
-	 * (UVoxelChunkManager::GetSeaSurface, the origin-relative plane): when enabled it decides IsUnderwater instead of
-	 * bHasWater / WaterLevel, so a planet's cells test the sphere of WaterRadius. Not exposed to Blueprint.
+	 * (UVoxelChunkManager::GetSeaSurface, the WaterLevel plane generation floods, G19): when enabled it decides
+	 * IsUnderwater instead of bHasWater / WaterLevel, so a planet's cells test the sphere of WaterRadius. Not exposed to
+	 * Blueprint.
 	 */
 	FVoxelSeaSurface Sea;
 

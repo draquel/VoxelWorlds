@@ -39,22 +39,14 @@ struct VOXELCORE_API FVoxelSeaSurface
 
 	/**
 	 * The sea of a world configuration: WaterLevel's plane, or on a planet the sphere of WaterRadius around WorldOrigin
-	 * (the planet centre, FVoxelWorldModeFactory::MakePlanetParams). bEnabled follows bEnableWaterLevel.
+	 * (the planet centre, FVoxelWorldModeFactory::MakePlanetParams). bEnabled follows bEnableWaterLevel. The one sea
+	 * every consumer reads: the plane is world Z, as the terrain's heights are (WorldOrigin moves the chunk grid, not the
+	 * ground), so it is where generation floods and the water tiles draw, wherever WorldOrigin is (review plan G19).
 	 *
 	 * @param Config World configuration
 	 * @return The sea surface
 	 */
 	static FVoxelSeaSurface FromConfig(const UVoxelWorldConfiguration& Config);
-
-	/**
-	 * The same sea with the heightmap plane at WaterLevel + WorldOrigin.Z, the plane the navigation, the character and
-	 * the NPC spawner have always used (generation, scatter, the map and PCG use WaterLevel itself: FromConfig). The two
-	 * agree whenever WorldOrigin.Z is 0 (review plan G19). On a planet both are the sphere of WaterRadius.
-	 *
-	 * @param Config World configuration
-	 * @return The sea surface
-	 */
-	static FVoxelSeaSurface FromConfigOriginRelative(const UVoxelWorldConfiguration& Config);
 
 	/**
 	 * Signed depth of a world position below the surface: PlaneZ - Z on the plane, Radius - |WorldPos - Center| on a
