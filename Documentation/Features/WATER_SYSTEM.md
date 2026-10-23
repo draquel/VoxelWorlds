@@ -241,10 +241,11 @@ through the same type: `FVoxelSeaSurface::GetDepth(Position)`, the signed depth 
 sphere (`Radius − |P − C|`), positive under the sea. The chunk manager hands it out (`GetSeaSurface`, BlueprintPure
 `GetSeaDepthAt`): swimming and breath (`FVCVoxelNavigationHelper`), the underwater post-process's darkening, the spawn
 search, the navigation water check (`FVoxelSurfaceNavParams::IsUnderwater`), the NPC spawner and scatter's underwater
-class. Heightmap worlds have two plane conventions, kept as they were: generation, scatter, the map and PCG compare with
-`WaterLevel` (`FromConfig`); navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z`
-(`FromConfigOriginRelative`). They agree whenever `WorldOrigin.Z` is 0, as in every configuration here (review plan
-G19). On a planet both are the sphere; since spherical Phase 4 the map and the PCG sampler read it too.
+class. In heightmap worlds the sea is the `WaterLevel` plane in world Z (`FromConfig`), wherever `WorldOrigin` puts the
+chunk grid: the terrain's heights are world Z, generation floods air at or below `WaterLevel`, and the tiles draw there.
+Every plane test works in world space, the water pull and the edit-driven flood included (review plan G19, §20.20: some
+consumers used `WaterLevel + WorldOrigin.Z` until 2026-10-23). On a planet it is the sphere; since spherical Phase 4 the
+map and the PCG sampler read it too.
 
 **The ocean shell (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
 `WaterRadius` on the surface coordinate's tangent warp, its resolution set so no quad sags more than 8 uu under the
