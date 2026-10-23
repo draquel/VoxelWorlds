@@ -87,7 +87,7 @@ struct FVoxelChunkCompactForm
  * Chunk metadata and voxel storage.
  *
  * Contains all data needed to describe a chunk's state and contents.
- * VoxelData array is sized to ChunkSize^3 elements.
+ * VoxelArray is sized to ChunkSize^3 elements (shared copy-on-write with its readers, G71).
  *
  * Memory: ~128 KB for 32^3 chunk (voxel data only)
  * Thread Safety: Not thread-safe, use external synchronization
@@ -111,9 +111,14 @@ struct VOXELCORE_API FChunkDescriptor
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk")
 	int32 ChunkSize = VOXEL_DEFAULT_CHUNK_SIZE;
 
-	/** Voxel data array (ChunkSize^3 elements) */
-	UPROPERTY()
-	TArray<FVoxelData> VoxelData;
+	/**
+	 * The resident voxel array (ChunkSize^3 elements), or null. Shared copy-on-write (world modes review G71): a snapshot
+	 * of a resident chunk without edits (seam jobs, collision cooks, the water pull) and the far-compression encode hold
+	 * this array instead of a copy, and a write (GetVoxelDataMutable, SetVoxel, SetVoxelByIndex) first clones it while
+	 * anything else holds it, so a reader's array never changes under it. A copy of the descriptor shares it the same way.
+	 * Read it through GetResidentArray / GetVoxelDataForRead and never write through it directly. Not reflected.
+	 */
+	TSharedPtr<TArray<FVoxelData>> VoxelArray;
 
 	/** World-space bounding box */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk")
@@ -142,7 +147,7 @@ struct VOXELCORE_API FChunkDescriptor
 	// --- Far-chunk compression runtime state (non-UPROPERTY: transient, not serialized) ---
 
 	/**
-	 * Where the voxel payload currently lives. The raw VoxelData array remains the fine-grained
+	 * Where the voxel payload currently lives. The raw VoxelArray remains the fine-grained
 	 * source of truth (IsVoxelDataResident()); Residency additionally tracks the compact forms so
 	 * EnsureResident() can materialize them. PR A: only Empty|Resident occur.
 	 */
@@ -216,7 +221,8 @@ struct VOXELCORE_API FChunkDescriptor
 	void AllocateVoxelData()
 	{
 		const int32 TotalVoxels = ChunkSize * ChunkSize * ChunkSize;
-		VoxelData.SetNumZeroed(TotalVoxels);
+		VoxelArray = MakeShared<TArray<FVoxelData>>();
+		VoxelArray->SetNumZeroed(TotalVoxels);
 		Residency = EVoxelDataResidency::Resident;
 		bDataMutated = false;
 		bUniformValueValid = false;
@@ -229,7 +235,8 @@ struct VOXELCORE_API FChunkDescriptor
 	/** Install a freshly generated resident voxel array (the sole population point). */
 	void SetResidentVoxelData(TArray<FVoxelData>&& InData)
 	{
-		VoxelData = MoveTemp(InData);
+		// A new array: a reader of the old one keeps it.
+		VoxelArray = MakeShared<TArray<FVoxelData>>(MoveTemp(InData));
 		Residency = EVoxelDataResidency::Resident;
 		bDataMutated = false;
 		bUniformValueValid = false;
@@ -242,7 +249,7 @@ struct VOXELCORE_API FChunkDescriptor
 	/** Clear voxel data to free memory */
 	void ClearVoxelData()
 	{
-		VoxelData.Empty();
+		VoxelArray.Reset();
 		Residency = EVoxelDataResidency::Empty;
 		bDataMutated = false;
 		bUniformValueValid = false;
@@ -280,20 +287,28 @@ struct VOXELCORE_API FChunkDescriptor
 		);
 	}
 
+	/** The resident array as it is (an empty array when none is resident); no residency change. Read-only. */
+	FORCEINLINE const TArray<FVoxelData>& GetResidentArray() const
+	{
+		static const TArray<FVoxelData> Empty;
+		return VoxelArray.IsValid() ? *VoxelArray : Empty;
+	}
+
 	/** Get voxel at local position */
 	FORCEINLINE FVoxelData GetVoxel(const FIntVector& LocalPos) const
 	{
 		const int32 Index = GetVoxelIndex(LocalPos);
-		return VoxelData.IsValidIndex(Index) ? VoxelData[Index] : FVoxelData::Air();
+		const TArray<FVoxelData>& Data = GetResidentArray();
+		return Data.IsValidIndex(Index) ? Data[Index] : FVoxelData::Air();
 	}
 
 	/** Set voxel at local position */
 	FORCEINLINE void SetVoxel(const FIntVector& LocalPos, const FVoxelData& Data)
 	{
 		const int32 Index = GetVoxelIndex(LocalPos);
-		if (VoxelData.IsValidIndex(Index))
+		if (GetResidentArray().IsValidIndex(Index))
 		{
-			VoxelData[Index] = Data;
+			DetachVoxelArray()[Index] = Data;
 			bIsDirty = true;
 			bDataMutated = true;
 			bUniformValueValid = false;
@@ -308,7 +323,7 @@ struct VOXELCORE_API FChunkDescriptor
 	 * Advance ContentVersion for a LOGICAL content change that lives OUTSIDE this descriptor's own
 	 * array — i.e. the edit-manager's edit layer. Consumers key edit-MERGED content off ContentVersion
 	 * (seam registry staleness, the shared seam/collision voxel-snapshot cache, completion-time
-	 * boundary revalidation), so an edit-layer change must bump it even though VoxelData is untouched.
+	 * boundary revalidation), so an edit-layer change must bump it even though VoxelArray is untouched.
 	 * Deliberately does NOT set bDataMutated / clear the uniform+compression caches: the procedural
 	 * array really is unchanged, and edits are merged over it at snapshot-build time.
 	 */
@@ -320,15 +335,16 @@ struct VOXELCORE_API FChunkDescriptor
 	/** Get voxel by linear index */
 	FORCEINLINE FVoxelData GetVoxelByIndex(int32 Index) const
 	{
-		return VoxelData.IsValidIndex(Index) ? VoxelData[Index] : FVoxelData::Air();
+		const TArray<FVoxelData>& Data = GetResidentArray();
+		return Data.IsValidIndex(Index) ? Data[Index] : FVoxelData::Air();
 	}
 
 	/** Set voxel by linear index */
 	FORCEINLINE void SetVoxelByIndex(int32 Index, const FVoxelData& Data)
 	{
-		if (VoxelData.IsValidIndex(Index))
+		if (GetResidentArray().IsValidIndex(Index))
 		{
-			VoxelData[Index] = Data;
+			DetachVoxelArray()[Index] = Data;
 			bIsDirty = true;
 			bDataMutated = true;
 			bUniformValueValid = false;
@@ -353,7 +369,7 @@ struct VOXELCORE_API FChunkDescriptor
 	 */
 	FORCEINLINE bool IsVoxelDataResident() const
 	{
-		return VoxelData.Num() == GetTotalVoxels();
+		return GetResidentArray().Num() == GetTotalVoxels();
 	}
 
 	/**
@@ -371,17 +387,19 @@ struct VOXELCORE_API FChunkDescriptor
 	/**
 	 * Materialize the raw voxel array in place if it is held in a compact form, and return it.
 	 * All resident-array access funnels through here so later tiers decompress transparently.
-	 * Game-thread only. PR A: only Empty|Resident occur, so this is a pass-through.
+	 * Read-only: writes go through GetVoxelDataMutable, which clones a shared array first (G71). Game-thread only.
 	 */
-	TArray<FVoxelData>& EnsureResident()
+	const TArray<FVoxelData>& EnsureResident()
 	{
 		if (Residency == EVoxelDataResidency::Uniform)
 		{
 			// Expand the single value back into a full array. UniformValue stays valid — the array is
 			// exactly UniformValue everywhere until mutated — so re-collapsing is free (see TryCollapseUniform).
+			// A new array: the compact form dropped the old one.
 			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelChunk_ExpandUniform);
 			const uint64 StartCycles = FPlatformTime::Cycles64();
-			VoxelData.Init(UniformValue, GetTotalVoxels());
+			VoxelArray = MakeShared<TArray<FVoxelData>>();
+			VoxelArray->Init(UniformValue, GetTotalVoxels());
 			Residency = EVoxelDataResidency::Resident;
 			bDataMutated = false;
 			bUniformValueValid = true;
@@ -393,12 +411,58 @@ struct VOXELCORE_API FChunkDescriptor
 			// re-qualifying chunk re-compresses for free by just dropping the raw array again.
 			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelChunk_Decompress);
 			const uint64 StartCycles = FPlatformTime::Cycles64();
-			FVoxelChunkCodec::Decompress(CompressedVoxelData, VoxelData);
+			VoxelArray = MakeShared<TArray<FVoxelData>>();
+			FVoxelChunkCodec::Decompress(CompressedVoxelData, *VoxelArray);
 			Residency = EVoxelDataResidency::Resident;
 			bDataMutated = false;
 			VoxelResidencyStats::RecordExpand(true, FPlatformTime::Cycles64() - StartCycles, ChunkCoord);
 		}
-		return VoxelData;
+		return GetResidentArray();
+	}
+
+	/**
+	 * The resident array to share with a reader instead of a copy (G71): it never changes while the reader holds it (a
+	 * write clones it first). Expands a compact chunk in place, as EnsureResident does. Game-thread only.
+	 *
+	 * @return The chunk's array, or null when it has no voxel data
+	 */
+	TSharedPtr<const TArray<FVoxelData>> ShareVoxelData()
+	{
+		EnsureResident();
+		return VoxelArray;
+	}
+
+	/**
+	 * Whether Array is the chunk's resident array (a reader sharing it holds no voxels of its own).
+	 *
+	 * @param Array A reader's array
+	 * @return True if it is this chunk's current resident array
+	 */
+	FORCEINLINE bool SharesVoxelArray(const TArray<FVoxelData>* Array) const
+	{
+		return Array && VoxelArray.IsValid() && VoxelArray.Get() == Array;
+	}
+
+	/**
+	 * The resident array for writing: cloned first while a reader shares it (G71), so the reader's stays as it was.
+	 * Creates an empty array when there is none. Callers flag the write (bDataMutated and the caches) themselves.
+	 */
+	TArray<FVoxelData>& DetachVoxelArray()
+	{
+		if (!VoxelArray.IsValid())
+		{
+			VoxelArray = MakeShared<TArray<FVoxelData>>();
+		}
+		else if (!VoxelArray.IsUnique())
+		{
+			// IsUnique on the game thread is exact enough: a reader that let go meanwhile only costs a needless copy, and
+			// no reader can take the array again except from the game thread.
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelChunk_CopyOnWrite);
+			const uint64 StartCycles = FPlatformTime::Cycles64();
+			VoxelArray = MakeShared<TArray<FVoxelData>>(*VoxelArray);
+			VoxelResidencyStats::RecordSharedArrayClone(FPlatformTime::Cycles64() - StartCycles);
+		}
+		return *VoxelArray;
 	}
 
 	/**
@@ -457,7 +521,7 @@ struct VOXELCORE_API FChunkDescriptor
 		UniformValue = Value;
 		bUniformValueValid = true;
 		bCompressionEvaluated = true;
-		VoxelData.Empty();
+		VoxelArray.Reset(); // a reader sharing the array keeps it (G71)
 		Residency = EVoxelDataResidency::Uniform;
 		AsyncCompactTicket = 0;
 		return true;
@@ -471,18 +535,18 @@ struct VOXELCORE_API FChunkDescriptor
 		}
 		if (bUniformValueValid)
 		{
-			VoxelData.Empty();
+			VoxelArray.Reset();
 			Residency = EVoxelDataResidency::Uniform;
 			AsyncCompactTicket = 0;
 			return true;
 		}
 		bCompressionEvaluated = true;
 		FVoxelData Value;
-		if (ComputeUniformValue(VoxelData, Value))
+		if (ComputeUniformValue(GetResidentArray(), Value))
 		{
 			UniformValue = Value;
 			bUniformValueValid = true;
-			VoxelData.Empty();
+			VoxelArray.Reset();
 			Residency = EVoxelDataResidency::Uniform;
 			AsyncCompactTicket = 0;
 			return true;
@@ -513,7 +577,7 @@ struct VOXELCORE_API FChunkDescriptor
 			return DropResidentForCachedForm();
 		}
 		// Fresh chunk: the uniform scan, then the general codec.
-		return InstallCompactForm(ComputeCompactForm(VoxelData, Codec, ChunkSize));
+		return InstallCompactForm(ComputeCompactForm(GetResidentArray(), Codec, ChunkSize));
 	}
 
 	/**
@@ -595,14 +659,15 @@ struct VOXELCORE_API FChunkDescriptor
 		{
 			return false;
 		}
+		// A reader sharing the array keeps it.
 		if (bUniformValueValid)
 		{
-			VoxelData.Empty();
+			VoxelArray.Reset();
 			Residency = EVoxelDataResidency::Uniform;
 		}
 		else if (CompressedVoxelData.Num() > 0)
 		{
-			VoxelData.Empty();
+			VoxelArray.Reset();
 			Residency = EVoxelDataResidency::Compressed;
 		}
 		else
@@ -668,11 +733,13 @@ struct VOXELCORE_API FChunkDescriptor
 
 	/**
 	 * Write access: guarantees residency and flags the payload mutated so re-compression re-encodes
-	 * rather than reusing a stale buffer. Use for in-place mutation (e.g. water-flag propagation).
+	 * rather than reusing a stale buffer. Use for in-place mutation (e.g. water-flag propagation). A shared array is
+	 * cloned first (G71): drop the readers that need not keep the old voxels (a cached snapshot) before calling this.
 	 */
 	FORCEINLINE TArray<FVoxelData>& GetVoxelDataMutable()
 	{
-		TArray<FVoxelData>& Data = EnsureResident();
+		EnsureResident();
+		TArray<FVoxelData>& Data = DetachVoxelArray();
 		bDataMutated = true;
 		bUniformValueValid = false;
 		bCompressionEvaluated = false;
@@ -704,6 +771,6 @@ struct VOXELCORE_API FChunkDescriptor
 	/** Get memory usage in bytes */
 	SIZE_T GetMemoryUsage() const
 	{
-		return sizeof(FChunkDescriptor) + VoxelData.GetAllocatedSize() + CompressedVoxelData.GetAllocatedSize();
+		return sizeof(FChunkDescriptor) + GetResidentArray().GetAllocatedSize() + CompressedVoxelData.GetAllocatedSize();
 	}
 };

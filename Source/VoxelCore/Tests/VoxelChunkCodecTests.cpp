@@ -156,13 +156,13 @@ bool FVoxelChunkCodecDescriptorTest::RunTest(const FString& Parameters)
 	FChunkDescriptor D(FIntVector::ZeroValue, CS);
 	D.AllocateVoxelData();
 	const TArray<FVoxelData> Original = MakeTerrainChunk(CS);
-	D.VoxelData = Original;
+	D.DetachVoxelArray() = Original;
 	D.Residency = EVoxelDataResidency::Resident;
 
 	// Non-uniform terrain chunk compresses to the Compressed tier (OodlePlanar).
 	TestTrue(TEXT("compress non-uniform chunk"), D.TryCompress(EVoxelChunkCodec::OodlePlanar));
 	TestEqual(TEXT("residency is Compressed"), (int32)D.Residency, (int32)EVoxelDataResidency::Compressed);
-	TestEqual(TEXT("raw array dropped"), D.VoxelData.Num(), 0);
+	TestEqual(TEXT("raw array dropped"), D.GetResidentArray().Num(), 0);
 	TestTrue(TEXT("compressed buffer present"), D.CompressedVoxelData.Num() > 0);
 	TestTrue(TEXT("compressed smaller than raw"), D.CompressedVoxelData.Num() < Original.Num() * (int32)sizeof(FVoxelData));
 
@@ -231,7 +231,7 @@ bool FVoxelChunkAsyncCompactMatchesSyncTest::RunTest(const FString& Parameters)
 		// Async: encode a copy on a worker, install on this thread.
 		FChunkDescriptor Async(FIntVector::ZeroValue, CS);
 		MakeResident(Async, C.Data);
-		const TArray<FVoxelData> Copy = Async.VoxelData;
+		const TArray<FVoxelData> Copy = Async.GetResidentArray();
 		FVoxelChunkCompactForm Form;
 		UE::Tasks::Launch(UE_SOURCE_LOCATION, [&Form, &Copy, CS]()
 		{
@@ -270,7 +270,7 @@ bool FVoxelChunkAsyncCompactTicketTest::RunTest(const FString& Parameters)
 		{ TEXT("AllocateVoxelData"),   [](FChunkDescriptor& D) { D.AllocateVoxelData(); }, true },
 		{ TEXT("ClearVoxelData"),      [](FChunkDescriptor& D) { D.ClearVoxelData(); }, true },
 		{ TEXT("TryCompress"),         [](FChunkDescriptor& D) { D.TryCompress(EVoxelChunkCodec::Oodle); }, true },
-		{ TEXT("TryCollapseUniform"),  [](FChunkDescriptor& D) { D.VoxelData.Init(FVoxelData::Air(), D.GetTotalVoxels()); D.TryCollapseUniform(); }, true },
+		{ TEXT("TryCollapseUniform"),  [](FChunkDescriptor& D) { D.DetachVoxelArray().Init(FVoxelData::Air(), D.GetTotalVoxels()); D.TryCollapseUniform(); }, true },
 		// ...reads and edit-layer version bumps do not (the procedural array is unchanged).
 		{ TEXT("GetVoxelDataForRead"), [](FChunkDescriptor& D) { D.GetVoxelDataForRead(); }, false },
 		{ TEXT("GetVoxelResident"),    [](FChunkDescriptor& D) { D.GetVoxelResident(FIntVector(1, 2, 3)); }, false },
@@ -297,7 +297,7 @@ bool FVoxelChunkAsyncCompactTicketTest::RunTest(const FString& Parameters)
 	FChunkDescriptor D(FIntVector::ZeroValue, CS);
 	MakeResident(D, Terrain);
 	D.AsyncCompactTicket = Ticket;
-	const TArray<FVoxelData> Copy = D.VoxelData;
+	const TArray<FVoxelData> Copy = D.GetResidentArray();
 	UE::Tasks::FTask Encode = UE::Tasks::Launch(UE_SOURCE_LOCATION, [&Copy, CS]()
 	{
 		(void)FChunkDescriptor::ComputeCompactForm(Copy, EVoxelChunkCodec::Oodle, CS);
@@ -325,7 +325,7 @@ bool FVoxelChunkAsyncCompactCacheOnlyTest::RunTest(const FString& Parameters)
 	const bool bDropped = D.InstallCompactForm(FChunkDescriptor::ComputeCompactForm(Terrain, EVoxelChunkCodec::Oodle, CS), /*bDropResident*/ false);
 	TestFalse(TEXT("cache-only install keeps the raw array"), bDropped);
 	TestEqual(TEXT("still Resident"), (int32)D.Residency, (int32)EVoxelDataResidency::Resident);
-	TestTrue(TEXT("raw array intact"), D.VoxelData == Terrain);
+	TestTrue(TEXT("raw array intact"), D.GetResidentArray() == Terrain);
 	TestTrue(TEXT("buffer cached"), D.CompressedVoxelData.Num() > 0);
 	TestTrue(TEXT("ticket consumed"), D.AsyncCompactTicket == 0);
 
@@ -372,7 +372,7 @@ bool FVoxelChunkCompactSourceTest::RunTest(const FString& Parameters)
 	FChunkDescriptor D(FIntVector(3, -2, 5), CS);
 	D.AllocateVoxelData();
 	const TArray<FVoxelData> Original = MakeTerrainChunk(CS);
-	D.VoxelData = Original;
+	D.DetachVoxelArray() = Original;
 	D.Residency = EVoxelDataResidency::Resident;
 
 	FVoxelCompactSource Resident;
@@ -384,7 +384,7 @@ bool FVoxelChunkCompactSourceTest::RunTest(const FString& Parameters)
 	FVoxelCompactSource Source;
 	TestTrue(TEXT("copy the compressed form"), D.CopyCompactSource(Source));
 	TestEqual(TEXT("the descriptor stays compressed"), (int32)D.Residency, (int32)EVoxelDataResidency::Compressed);
-	TestEqual(TEXT("no raw array after the copy"), D.VoxelData.Num(), 0);
+	TestEqual(TEXT("no raw array after the copy"), D.GetResidentArray().Num(), 0);
 
 	int32 Count = 0;
 	float Ms = 0.0f;
@@ -410,7 +410,7 @@ bool FVoxelChunkCompactSourceTest::RunTest(const FString& Parameters)
 	FChunkDescriptor U(FIntVector::ZeroValue, CS);
 	U.AllocateVoxelData();
 	const FVoxelData Rock = FVoxelData::Solid(4, 1);
-	for (FVoxelData& V : U.VoxelData)
+	for (FVoxelData& V : U.DetachVoxelArray())
 	{
 		V = Rock;
 	}

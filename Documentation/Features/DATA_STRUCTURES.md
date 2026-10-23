@@ -39,7 +39,7 @@ struct FChunkDescriptor {
     FIntVector ChunkCoord;      // Chunk position in chunk space
     int32 LODLevel;             // 0 = finest
     int32 ChunkSize;            // Voxels per edge (32, 64, etc.)
-    TArray<FVoxelData> VoxelData;
+    TSharedPtr<TArray<FVoxelData>> VoxelArray; // resident voxels (or null), shared copy-on-write (G71)
     FBox Bounds;
     bool bIsDirty;
     bool bHasEdits;
@@ -48,6 +48,12 @@ struct FChunkDescriptor {
     EChunkState State;          // Streaming lifecycle state
 };
 ```
+
+The resident array is read through `GetVoxelDataForRead()` (or `GetResidentArray()`, which does not expand a compact
+chunk) and written through `GetVoxelDataMutable()`, `SetVoxel()` or `SetVoxelByIndex()`. It is shared copy-on-write (world
+modes review G71): a snapshot of a resident chunk without edits and the far-compression encode take `ShareVoxelData()`
+instead of a copy, and a write while one of them still holds the array clones it first, so a reader's voxels never change
+under it. Copying a descriptor shares the array the same way.
 
 ## Rendering Data
 

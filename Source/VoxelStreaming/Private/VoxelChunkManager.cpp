@@ -556,6 +556,14 @@ static TAutoConsoleVariable<int32> CVarSnapshotShareUniform(
 	     "shares one array per value; 0 = each is expanded into its own array on a worker, as before."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarSnapshotShareResident(
+	TEXT("voxel.Snapshot.ShareResident"),
+	1,
+	TEXT("Resident chunks (world modes review G71): 1 = the snapshot of a resident chunk without edits (seam jobs, collision "
+	     "cooks, the water pull) and the far-compression encode's input share the chunk's own voxel array, copy-on-write "
+	     "(a write to the chunk while one holds it clones the array first); 0 = each takes a copy, as before."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarSnapshotMaxAgeTicks(
 	TEXT("voxel.Snapshot.MaxAgeTicks"),
 	128,
@@ -2577,18 +2585,10 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 	}
 
 	// Shared snapshots cached for seam jobs and cooks (G65: a far-compressed chunk's is decoded on a worker; counted at its
-	// full size while it decodes).
+	// full size while it decodes; G71: a resident chunk's own array it shares is in the voxel data above).
 	for (const auto& Pair : SeamSnapshotCache)
 	{
-		const FSeamVoxelSnapshot& Snapshot = Pair.Value;
-		if (!Snapshot.Data.IsValid() || Snapshot.Kind == static_cast<uint8>(ESnapshotKind::SharedUniform))
-		{
-			continue;
-		}
-		Stats.SnapshotBytes += (Snapshot.Ready.IsValid() && !Snapshot.Ready.IsCompleted())
-			? static_cast<int64>(Configuration ? Configuration->ChunkSize : 0) * (Configuration ? Configuration->ChunkSize : 0)
-				* (Configuration ? Configuration->ChunkSize : 0) * static_cast<int64>(sizeof(FVoxelData))
-			: static_cast<int64>(Snapshot.Data->GetAllocatedSize());
+		Stats.SnapshotBytes += GetSnapshotOwnBytes(Pair.Key, Pair.Value);
 	}
 
 	// The neighbours' boundary shells for collision cooks (G69), the uniform values' shared shells once each.
@@ -6489,6 +6489,30 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetUniformSnapshotArray
 	return Shared;
 }
 
+int64 UVoxelChunkManager::GetSnapshotOwnBytes(const FIntVector& Coord, const FSeamVoxelSnapshot& Snap) const
+{
+	if (!Snap.Data.IsValid() || Snap.Kind == static_cast<uint8>(ESnapshotKind::SharedUniform))
+	{
+		return 0;
+	}
+	if (Snap.Kind == static_cast<uint8>(ESnapshotKind::SharedResident))
+	{
+		// The chunk's own array while the chunk still holds it (G71); once the chunk compacts, unloads or clones it, the
+		// entry holds it alone.
+		const FVoxelChunkState* State = ChunkStates.Find(Coord);
+		if (State && State->Descriptor.SharesVoxelArray(Snap.Data.Get()))
+		{
+			return 0;
+		}
+	}
+	if (Snap.Ready.IsValid() && !Snap.Ready.IsCompleted())
+	{
+		const int64 CS = Configuration ? Configuration->ChunkSize : 0;
+		return CS * CS * CS * static_cast<int64>(sizeof(FVoxelData));
+	}
+	return static_cast<int64>(Snap.Data->GetAllocatedSize());
+}
+
 void UVoxelChunkManager::NoteSnapshotMade(const FIntVector& Coord, FSeamVoxelSnapshot& Entry, ESnapshotKind Kind)
 {
 	if (RecentlyEvictedSnapshots.Remove(Coord) > 0)
@@ -6572,23 +6596,37 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetSeamVoxelSnapshot(co
 		return Decoded;
 	}
 
-	// Build once per (chunk, content version) — the only remaining game-thread voxel copy in the
-	// seam pipeline. ContentVersion covers edits (bumped on explicit voxel edits), so the merged
-	// snapshot stays valid exactly as long as the seams that would read it.
-	TSharedPtr<TArray<FVoxelData>> Built = MakeShared<TArray<FVoxelData>>(State.Descriptor.GetVoxelDataForRead());
+	// Build once per (chunk, content version). ContentVersion covers edits (bumped on explicit voxel edits), so the
+	// merged snapshot stays valid exactly as long as the seams that would read it. A resident chunk without edits shares
+	// its own array, copy-on-write (G71): no copy, and its readers' voxels never change under them (the water pull's
+	// flags, the one write that keeps the ContentVersion, drop this entry and then clone the array if a reader still
+	// holds it). With edits the edit-merged copy is built on the game thread.
 	const bool bWithEdits = EditManager && EditManager->ChunkHasEdits(Coord);
-	if (bWithEdits)
+	TSharedPtr<const TArray<FVoxelData>> Data;
+	ESnapshotKind Kind = ESnapshotKind::Copied;
+	if (!bWithEdits && CVarSnapshotShareResident.GetValueOnGameThread() != 0)
 	{
-		EditManager->ApplyEditsToVoxelData(Coord, *Built);
+		Data = State.Descriptor.ShareVoxelData();
+		Kind = ESnapshotKind::SharedResident;
+	}
+	if (!Data.IsValid())
+	{
+		TSharedPtr<TArray<FVoxelData>> Built = MakeShared<TArray<FVoxelData>>(State.Descriptor.GetVoxelDataForRead());
+		if (bWithEdits)
+		{
+			EditManager->ApplyEditsToVoxelData(Coord, *Built);
+		}
+		Data = Built;
+		Kind = bWithEdits ? ESnapshotKind::CopiedWithEdits : ESnapshotKind::Copied;
 	}
 
 	FSeamVoxelSnapshot& Entry = SeamSnapshotCache.FindOrAdd(Coord);
 	Entry = FSeamVoxelSnapshot();
 	Entry.ContentVersion = Version;
 	Entry.LastUsedTick = SeamTickCounter;
-	Entry.Data = Built;
+	Entry.Data = Data;
 	Entry.Ready = UE::Tasks::FTask();
-	NoteSnapshotMade(Coord, Entry, bWithEdits ? ESnapshotKind::CopiedWithEdits : ESnapshotKind::Copied);
+	NoteSnapshotMade(Coord, Entry, Kind);
 	if (OutReady)
 	{
 		*OutReady = UE::Tasks::FTask();
@@ -6814,11 +6852,9 @@ void UVoxelChunkManager::PrefetchVoxelSnapshotsAround(const FIntVector& ChunkCoo
 FString UVoxelChunkManager::DescribeSnapshotCache() const
 {
 	static const TCHAR* KindNames[] = { TEXT("copied"), TEXT("copied with edits"), TEXT("decoded compressed"),
-		TEXT("decoded uniform"), TEXT("shared uniform") };
+		TEXT("decoded uniform"), TEXT("shared uniform"), TEXT("shared with the resident chunk") };
 	constexpr int32 NumKinds = static_cast<int32>(ESnapshotKind::Num);
 	const double ToMB = 1.0 / (1024.0 * 1024.0);
-	const int64 ChunkVoxels = Configuration
-		? static_cast<int64>(Configuration->ChunkSize) * Configuration->ChunkSize * Configuration->ChunkSize : 0;
 
 	int32 KindN[NumKinds] = {};
 	double KindMB[NumKinds] = {};
@@ -6841,6 +6877,9 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 	// neighbour; only its own cook; both; anything else.
 	int32 ReadN[5] = {};
 	double ReadMB[5] = {};
+	// Entries sharing a resident chunk's array (G71), and the MB of those the chunk still holds (not in the cache's total).
+	int32 SharedN = 0;
+	double SharedResidentMB = 0.0;
 	const FIntVector ViewerChunk = WorldToChunkCoord(CurrentViewerPosition);
 
 	for (const auto& Pair : SeamSnapshotCache)
@@ -6851,15 +6890,22 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 			continue;
 		}
 		const bool bPending = Snap.Ready.IsValid() && !Snap.Ready.IsCompleted();
-		const double MB = (Snap.Kind == static_cast<uint8>(ESnapshotKind::SharedUniform)) ? 0.0
-			: (bPending ? ChunkVoxels * static_cast<int64>(sizeof(FVoxelData))
-				: static_cast<int64>(Snap.Data->GetAllocatedSize())) * ToMB;
+		// What the cache holds of its own (G71: none of a resident chunk's array it shares).
+		const double MB = GetSnapshotOwnBytes(Pair.Key, Snap) * ToMB;
 		TotalMB += MB;
 		const int32 Kind = FMath::Clamp<int32>(Snap.Kind, 0, NumKinds - 1);
 		++KindN[Kind];
 		KindMB[Kind] += MB;
 		Pending += bPending ? 1 : 0;
-		if (Snap.Kind != static_cast<uint8>(ESnapshotKind::SharedUniform) && Snap.Data.GetSharedReferenceCount() > 1)
+		const FVoxelChunkState* OwnerState = ChunkStates.Find(Pair.Key);
+		const bool bChunkShares = OwnerState && OwnerState->Descriptor.SharesVoxelArray(Snap.Data.Get());
+		if (Kind == static_cast<int32>(ESnapshotKind::SharedResident))
+		{
+			++SharedN;
+			SharedResidentMB += bChunkShares ? static_cast<double>(Snap.Data->GetAllocatedSize()) * ToMB : 0.0;
+		}
+		if (Snap.Kind != static_cast<uint8>(ESnapshotKind::SharedUniform)
+			&& Snap.Data.GetSharedReferenceCount() > (bChunkShares ? 2 : 1))
 		{
 			++Held;
 			HeldMB += MB;
@@ -6874,7 +6920,7 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 		const FIntVector D = Pair.Key - ViewerChunk;
 		const int32 Cheb = FMath::Max3(FMath::Abs(D.X), FMath::Abs(D.Y), FMath::Abs(D.Z));
 		++DistN[Cheb <= 1 ? 0 : (Cheb <= 3 ? 1 : (Cheb <= 7 ? 2 : 3))];
-		if (const FVoxelChunkState* State = ChunkStates.Find(Pair.Key))
+		if (const FVoxelChunkState* State = OwnerState)
 		{
 			if (State->Descriptor.IsCompact())
 			{
@@ -6937,6 +6983,14 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 	}
 	Out += FString::Printf(TEXT("uniform snapshots: %d distinct values among the decoded; shared arrays %d (%.1f MB, in the total ")
 		TEXT("memory stats, not above)\n"), UniformValues.Num(), UniformSnapshotArrays.Num(), SharedMB);
+	{
+		int64 Clones = 0;
+		double CloneMs = 0.0;
+		VoxelResidencyStats::GetSharedArrayClones(Clones, CloneMs);
+		Out += FString::Printf(TEXT("resident arrays shared (voxel.Snapshot.ShareResident %d): %d entries, %.1f MB the chunks hold (in ")
+			TEXT("the voxel data, not above); copy-on-write clones %lld (%.1f ms)\n"), CVarSnapshotShareResident.GetValueOnGameThread(),
+			SharedN, SharedResidentMB, Clones, CloneMs);
+	}
 	Out += FString::Printf(TEXT("since last read (ticks): <16 %d (%.0f MB), 16-63 %d (%.0f MB), 64-127 %d (%.0f MB), >=128 %d (%.0f MB)\n"),
 		AgeN[0], AgeMB[0], AgeN[1], AgeMB[1], AgeN[2], AgeMB[2], AgeN[3], AgeMB[3]);
 	Out += FString::Printf(TEXT("reads after the first: 0 %d (%.0f MB), 1-2 %d (%.0f MB), 3-9 %d (%.0f MB), 10+ %d (%.0f MB)\n"),
@@ -6947,6 +7001,47 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 	Out += FString::Printf(TEXT("taken by: a seam job or chunk mesh %d (%.0f MB), only collision cooks as a neighbour %d (%.0f MB), ")
 		TEXT("only its own cook %d (%.0f MB), both %d (%.0f MB), other %d (%.0f MB)\n"),
 		ReadN[0], ReadMB[0], ReadN[1], ReadMB[1], ReadN[2], ReadMB[2], ReadN[3], ReadMB[3], ReadN[4], ReadMB[4]);
+	{
+		// G71: the entries a seam job or a chunk mesh took, by the chunk's rendered LOD (0, 1, 2, 3+, none) and by who took
+		// them (seam jobs only, its chunk mesh only, both), and what a boundary shell deep enough for that LOD's seam rings
+		// would hold: 2 * stride + 2 voxels on the -X/-Y/-Z faces (the neighbour side's first cell layer and its gradient
+		// taps), 3 * stride + 2 on the +X/+Y/+Z faces (the owner side's ring a layer further in).
+		const int64 CS = Configuration ? Configuration->ChunkSize : 0;
+		int32 N[5][3] = {};
+		double MB[5][3] = {};
+		double ShellEstimateMB[5] = {};
+		for (const auto& Pair : SeamSnapshotCache)
+		{
+			const FSeamVoxelSnapshot& Snap = Pair.Value;
+			const uint8 M = Snap.ReaderMask;
+			if (!Snap.Data.IsValid() || !(M & (SnapReaderSeamJob | SnapReaderChunkMesh))
+				|| Snap.Kind == static_cast<uint8>(ESnapshotKind::SharedUniform))
+			{
+				continue;
+			}
+			const FVoxelChunkState* State = ChunkStates.Find(Pair.Key);
+			const int32 LOD = (State && State->MeshedLODLevel >= 0) ? FMath::Min(State->MeshedLODLevel, 3) : 4;
+			const int32 Who = (M & SnapReaderChunkMesh) ? ((M & SnapReaderSeamJob) ? 2 : 1) : 0;
+			const double EntryMB = GetSnapshotOwnBytes(Pair.Key, Snap) * ToMB;
+			++N[LOD][Who];
+			MB[LOD][Who] += EntryMB;
+			if (LOD < 4 && CS > 0)
+			{
+				const int64 Stride = int64(1) << (State ? State->MeshedLODLevel : 0);
+				const int64 Inner = FMath::Max<int64>(0, CS - (2 * Stride + 2) - (3 * Stride + 2));
+				const double ShellShare = 1.0 - static_cast<double>(Inner * Inner * Inner) / static_cast<double>(CS * CS * CS);
+				ShellEstimateMB[LOD] += EntryMB * ShellShare;
+			}
+		}
+		static const TCHAR* LODNames[5] = { TEXT("LOD 0"), TEXT("LOD 1"), TEXT("LOD 2"), TEXT("LOD 3+"), TEXT("no mesh") };
+		Out += TEXT("G71, seam/mesh entries by LOD (seam jobs only / its mesh only / both; a seam shell would hold):");
+		for (int32 L = 0; L < 5; ++L)
+		{
+			Out += FString::Printf(TEXT(" %s %d/%d/%d (%.0f/%.0f/%.0f MB; shell %.0f MB)"), LODNames[L], N[L][0], N[L][1], N[L][2],
+				MB[L][0], MB[L][1], MB[L][2], ShellEstimateMB[L]);
+		}
+		Out += TEXT("\n");
+	}
 	{
 		static const TCHAR* ShellKindNames[] = { TEXT("from resident"), TEXT("from snapshot"), TEXT("decoded"), TEXT("shared uniform") };
 		int32 ShellN[static_cast<int32>(EShellKind::Num)] = {};
@@ -6981,10 +7076,10 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 	}
 	const FSnapshotCacheCounters& C = SnapshotCounters;
 	Out += FString::Printf(TEXT("session: made copied %lld, with edits %lld, decoded compressed %lld, decoded uniform %lld, shared ")
-		TEXT("uniform %lld; reads after ")
+		TEXT("uniform %lld, shared resident %lld; reads after ")
 		TEXT("the first %lld; replaced %lld; evicted by age %lld (%lld never read again, mean life %.0f ticks); removed on unload %lld, on ")
 		TEXT("water %lld"),
-		C.Made[0], C.Made[1], C.Made[2], C.Made[3], C.Made[4], C.Hits, C.Replaced, C.EvictedByAge, C.EvictedByAgeUnread,
+		C.Made[0], C.Made[1], C.Made[2], C.Made[3], C.Made[4], C.Made[5], C.Hits, C.Replaced, C.EvictedByAge, C.EvictedByAgeUnread,
 		C.EvictedByAge > 0 ? static_cast<double>(C.EvictedAgeTicksSum) / C.EvictedByAge : 0.0, C.RemovedOnUnload, C.RemovedOnWater);
 	Out += FString::Printf(TEXT("\nsession: made again within 600 ticks of an eviction %lld (max age %d ticks); a cook's own dropped ")
 		TEXT("after the cook %lld"), C.RemadeAfterEviction, CVarSnapshotMaxAgeTicks.GetValueOnGameThread(), C.ReleasedAfterCook);
@@ -7027,7 +7122,7 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 	{
 		--FarCompressJobsInFlight;
 		FarCompressBytesInFlight -= Result.Scratch.GetAllocatedSize();
-		if (FarCompressScratchPool.Num() + FarCompressJobsInFlight < MaxInFlight)
+		if (Result.Scratch.Max() > 0 && FarCompressScratchPool.Num() + FarCompressJobsInFlight < MaxInFlight)
 		{
 			FarCompressScratchPool.Add(MoveTemp(Result.Scratch));
 		}
@@ -7124,25 +7219,37 @@ void UVoxelChunkManager::DispatchFarCompression(const FIntVector& ChunkCoord, FC
 	const uint32 Ticket = NextFarCompressTicket;
 	Descriptor.AsyncCompactTicket = Ticket;
 
-	// Encode from a copy: the resident array stays readable (neighbour reads, seam snapshots, point
-	// queries) and writable while the worker runs, and a write clears the ticket, which voids the result.
-	// The game-thread cost is one memcpy into a pooled array, against ~3.5 ms for the encode.
-	TArray<FVoxelData> Copy = FarCompressScratchPool.Num() > 0 ? FarCompressScratchPool.Pop(EAllowShrinking::No) : TArray<FVoxelData>();
-	const int32 Num = Descriptor.VoxelData.Num();
-	Copy.SetNumUninitialized(Num, EAllowShrinking::No);
-	FMemory::Memcpy(Copy.GetData(), Descriptor.VoxelData.GetData(), static_cast<SIZE_T>(Num) * sizeof(FVoxelData));
+	// The resident array stays readable (neighbour reads, seam snapshots, point queries) and writable while the worker
+	// runs, and a write clears the ticket, which voids the result. The worker encodes the chunk's own array, shared
+	// copy-on-write (G71: a write meanwhile clones it), or with voxel.Snapshot.ShareResident 0 a copy, a memcpy into a
+	// pooled array, as before; against ~3.5 ms for the encode.
+	TSharedPtr<const TArray<FVoxelData>> Shared;
+	TArray<FVoxelData> Copy;
+	if (CVarSnapshotShareResident.GetValueOnGameThread() != 0)
+	{
+		Shared = Descriptor.ShareVoxelData();
+	}
+	else
+	{
+		Copy = FarCompressScratchPool.Num() > 0 ? FarCompressScratchPool.Pop(EAllowShrinking::No) : TArray<FVoxelData>();
+		const TArray<FVoxelData>& Resident = Descriptor.GetResidentArray();
+		Copy.SetNumUninitialized(Resident.Num(), EAllowShrinking::No);
+		FMemory::Memcpy(Copy.GetData(), Resident.GetData(), static_cast<SIZE_T>(Resident.Num()) * sizeof(FVoxelData));
+		FarCompressBytesInFlight += Copy.GetAllocatedSize();
+	}
 	++FarCompressJobsInFlight;
-	FarCompressBytesInFlight += Copy.GetAllocatedSize();
 
 	// Background priority, outside the thread pool that runs generation, meshing and seam jobs:
 	// compression only saves memory, so it never delays the streaming front.
 	UE::Tasks::Launch(UE_SOURCE_LOCATION,
-		[Results = FarCompressResults, ChunkCoord, Ticket, Codec, ChunkSize = Descriptor.ChunkSize, Copy = MoveTemp(Copy)]() mutable
+		[Results = FarCompressResults, ChunkCoord, Ticket, Codec, ChunkSize = Descriptor.ChunkSize, Shared = MoveTemp(Shared),
+			Copy = MoveTemp(Copy)]() mutable
 		{
 			FFarCompressResult Done;
 			Done.ChunkCoord = ChunkCoord;
 			Done.Ticket = Ticket;
-			Done.Form = FChunkDescriptor::ComputeCompactForm(Copy, Codec, ChunkSize);
+			Done.Form = FChunkDescriptor::ComputeCompactForm(Shared.IsValid() ? *Shared : Copy, Codec, ChunkSize);
+			Shared.Reset(); // let go before the result lands, so the chunk's array is unique again when it is installed
 			Done.Scratch = MoveTemp(Copy);
 			Results->Enqueue(MoveTemp(Done));
 		},
@@ -7665,8 +7772,14 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		return false;
 	}
 
-	// Water flows in: write the seeds' flags into the chunk's own array, and flood from them.
+	// The flags go into the voxel array without a ContentVersion bump (GetVoxelDataMutable): an edit-merged snapshot
+	// built before them would lack them, and the water tile reads one for a chunk with edits (G59). Dropped before the
+	// write, so a snapshot sharing the resident array (G71) does not make the write clone it unless a job still holds it.
 	OwnHold.Reset();
+	SnapshotCounters.RemovedOnWater += SeamSnapshotCache.Remove(ChunkCoord);
+	ShellCache.Remove(ChunkCoord);
+
+	// Water flows in: write the seeds' flags into the chunk's own array, and flood from them.
 	TArray<FVoxelData>& VoxelData = State->Descriptor.GetVoxelDataMutable();
 	for (const int32 SeedIdx : Seeds)
 	{
@@ -7743,11 +7856,6 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	{
 		*OutFloodedVoxels = BFSQueue.Num();
 	}
-
-	// The flags went into the voxel array without a ContentVersion bump (GetVoxelDataMutable): an edit-merged snapshot
-	// built before them would lack them, and the water tile reads one for a chunk with edits (G59).
-	SnapshotCounters.RemovedOnWater += SeamSnapshotCache.Remove(ChunkCoord);
-	ShellCache.Remove(ChunkCoord);
 
 	return true;
 }

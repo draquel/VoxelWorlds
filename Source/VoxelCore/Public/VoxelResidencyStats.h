@@ -82,4 +82,23 @@ namespace VoxelResidencyStats
 
 	/** Clears the per-reason statistics (not the bench's running counters). */
 	VOXELCORE_API void Reset();
+
+	/**
+	 * Records one copy-on-write clone of a resident chunk's voxel array (world modes review G71): a write to the array while
+	 * a reader still held it (a seam snapshot, a cook's, the far-compression encode). FChunkDescriptor calls it.
+	 *
+	 * @param Cycles How long the copy took (FPlatformTime::Cycles64 units)
+	 */
+	VOXELCORE_API void RecordSharedArrayClone(uint64 Cycles);
+
+	/**
+	 * The copy-on-write clones since the last ResetSharedArrayClones.
+	 *
+	 * @param OutCount Clones
+	 * @param OutMs    Their total time (ms)
+	 */
+	VOXELCORE_API void GetSharedArrayClones(int64& OutCount, double& OutMs);
+
+	/** Clears the copy-on-write clone count. */
+	VOXELCORE_API void ResetSharedArrayClones();
 }

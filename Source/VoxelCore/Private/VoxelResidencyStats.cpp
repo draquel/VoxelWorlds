@@ -143,4 +143,31 @@ namespace VoxelResidencyStats
 		GAllChunks.Reset();
 		GAllCount = 0;
 	}
+
+	namespace
+	{
+		int64 GCloneCount = 0;
+		double GCloneMs = 0.0;
+	}
+
+	void RecordSharedArrayClone(uint64 Cycles)
+	{
+		FScopeLock Lock(&GLock);
+		++GCloneCount;
+		GCloneMs += FPlatformTime::ToMilliseconds64(Cycles);
+	}
+
+	void GetSharedArrayClones(int64& OutCount, double& OutMs)
+	{
+		FScopeLock Lock(&GLock);
+		OutCount = GCloneCount;
+		OutMs = GCloneMs;
+	}
+
+	void ResetSharedArrayClones()
+	{
+		FScopeLock Lock(&GLock);
+		GCloneCount = 0;
+		GCloneMs = 0.0;
+	}
 }

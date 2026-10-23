@@ -135,7 +135,7 @@ struct FChunkDescriptor {
     int32 LODLevel;            // 0 = finest detail
     int32 ChunkSize;           // Voxels per edge (32, 64, 128, etc.)
     
-    TArray<FVoxelData> VoxelData;  // Voxel contents
+    TSharedPtr<TArray<FVoxelData>> VoxelArray;  // Voxel contents, shared copy-on-write (G71)
     
     FBox Bounds;               // World-space bounds
     bool bIsDirty;             // Needs remeshing

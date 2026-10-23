@@ -250,9 +250,18 @@ not what bounds it. What bounds it is what each reader pins:
 - After the cook takes its own chunk's snapshot, the snapshot is dropped unless another reader took it too.
 - Uniform chunks share one array per value (`voxel.Snapshot.ShareUniform`).
 
-On the great circles this took the cache's peak from 0.71-1.09 GB to 0.46-0.71 GB. What remains is mostly what seam jobs
-and chunk meshes read (G71). `voxel.Snapshot.Stats` lists the cache by kind, reader, age and distance; the bench records
-`SnapMB` (shells included) and `ShellMB`.
+On the great circles this took the cache's peak from 0.71-1.09 GB to 0.46-0.71 GB. `voxel.Snapshot.Stats` lists the cache by
+kind, reader, age and distance; the bench records `SnapMB` (shells included) and `ShellMB`.
+
+**Resident chunks are shared, not copied** (G71, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.19). A
+chunk's resident array is held copy-on-write (`FChunkDescriptor::VoxelArray`): the snapshot of a resident chunk without
+edits, which seam jobs, cooks and the water pull read, is the chunk's own array (`ShareVoxelData`), and so is the
+far-compression encode's input. A write to the chunk (the water pull's flags, which drops the chunk's snapshot first)
+clones the array only while a reader still holds it, and the reader keeps the voxels it took. A shared entry holds nothing
+of its own while the chunk holds the array; `voxel.Snapshot.Stats` lists the shared entries and the clones
+(`voxel.Snapshot.ShareResident`, 1). On the great circles a third to a half of the cache had been such copies: its peak fell
+to 0.31-0.50 GB, the peak with it and the far field to 0.88-1.08 GB. What remains is mostly far-compressed chunks decoded
+for seam jobs (a seam shell deep enough for their rings would keep three quarters of a chunk at LOD 2).
 
 **Uniform chunks collapse as they are generated** (G67, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.18;
 `voxel.FarCompression.UniformAtGeneration`, default 1). A chunk whose every voxel is the same (sky, rock, open sea) used to
@@ -266,14 +275,15 @@ readers take the shared uniform snapshot (G69), and a point query answers its va
 **The encode runs on a worker thread** (`voxel.FarCompression.Async`, default 1). An Oodle encode of
 a 1 MB chunk costs about 3.5 ms in PIE and cannot be split, so the sweep does not run it on the game
 thread. For each chunk that needs a fresh encode (at most `voxel.FarCompression.MaxScansPerTick`, 4,
-per tick) it copies the array into a pooled scratch array and starts a background `UE::Tasks` task
-that runs `FChunkDescriptor::ComputeCompactForm` on the copy. At most
+per tick) it starts a background `UE::Tasks` task that runs `FChunkDescriptor::ComputeCompactForm` on
+the chunk's own array, shared copy-on-write (G71: a write meanwhile clones it; with
+`voxel.Snapshot.ShareResident 0` the sweep copies the array into a pooled scratch array, as before). At most
 `voxel.FarCompression.MaxInFlight` (8) encodes are in flight. The next sweep installs each result
-with `InstallCompactForm`, but only if the chunk's array is still the one that was copied: dispatch
+with `InstallCompactForm`, but only if the chunk's array is still the one that was encoded: dispatch
 stamps the descriptor with a ticket (`AsyncCompactTicket`), and every write path and residency change
 clears it. If the chunk stopped qualifying meanwhile (a re-mesh started, or it came closer), it keeps
 its raw array and the result is cached as its compact form, which the sweep applies for free later.
-The copies, in flight or pooled, count as voxel data in the memory stats. `Async 0` runs the encode
+Copies, in flight or pooled, count as voxel data in the memory stats. `Async 0` runs the encode
 on the game thread, as before, for A/B.
 
 Measured on VoxelDemo's 400 m config ([WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md)

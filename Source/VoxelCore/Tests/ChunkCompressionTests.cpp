@@ -20,7 +20,7 @@ namespace ChunkCompressionTestUtils
 	{
 		FChunkDescriptor D(FIntVector::ZeroValue, ChunkSize);
 		D.AllocateVoxelData(); // zeroed = air, Resident
-		for (FVoxelData& V : D.VoxelData)
+		for (FVoxelData& V : D.DetachVoxelArray())
 		{
 			V = Fill;
 		}
@@ -41,7 +41,7 @@ bool FChunkCompressionUniformDetectionTest::RunTest(const FString& Parameters)
 		FChunkDescriptor D(FIntVector::ZeroValue, 4);
 		D.AllocateVoxelData();
 		FVoxelData Out(255, 255, 255, 255);
-		TestTrue(TEXT("all-air is uniform"), FChunkDescriptor::ComputeUniformValue(D.VoxelData, Out));
+		TestTrue(TEXT("all-air is uniform"), FChunkDescriptor::ComputeUniformValue(D.GetResidentArray(), Out));
 		TestTrue(TEXT("uniform value is air"), Out == FVoxelData::Air());
 	}
 
@@ -49,16 +49,16 @@ bool FChunkCompressionUniformDetectionTest::RunTest(const FString& Parameters)
 	{
 		FChunkDescriptor D = MakeUniform(4, FVoxelData::Solid(3, 1));
 		FVoxelData Out;
-		TestTrue(TEXT("all-solid is uniform"), FChunkDescriptor::ComputeUniformValue(D.VoxelData, Out));
+		TestTrue(TEXT("all-solid is uniform"), FChunkDescriptor::ComputeUniformValue(D.GetResidentArray(), Out));
 		TestTrue(TEXT("uniform value is the solid voxel"), Out == FVoxelData::Solid(3, 1));
 	}
 
 	// A single differing voxel breaks uniformity.
 	{
 		FChunkDescriptor D = MakeUniform(4, FVoxelData::Air());
-		D.VoxelData[17] = FVoxelData::Solid(1);
+		D.DetachVoxelArray()[17] = FVoxelData::Solid(1);
 		FVoxelData Out;
-		TestFalse(TEXT("mixed is not uniform"), FChunkDescriptor::ComputeUniformValue(D.VoxelData, Out));
+		TestFalse(TEXT("mixed is not uniform"), FChunkDescriptor::ComputeUniformValue(D.GetResidentArray(), Out));
 	}
 
 	// Empty array is never uniform.
@@ -87,7 +87,7 @@ bool FChunkCompressionRoundTripTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("resident before collapse"), D.IsVoxelDataResident());
 	TestTrue(TEXT("collapse succeeds"), D.TryCollapseUniform());
 	TestEqual(TEXT("residency is Uniform"), (int32)D.Residency, (int32)EVoxelDataResidency::Uniform);
-	TestEqual(TEXT("raw array emptied"), D.VoxelData.Num(), 0);
+	TestEqual(TEXT("raw array emptied"), D.GetResidentArray().Num(), 0);
 	TestFalse(TEXT("not resident when Uniform"), D.IsVoxelDataResident());
 	TestTrue(TEXT("still available when Uniform"), D.HasVoxelDataAvailable());
 
@@ -108,7 +108,7 @@ bool FChunkCompressionRoundTripTest::RunTest(const FString& Parameters)
 	const FVoxelData Q = D.GetVoxelResident(FIntVector(1, 2, 3));
 	TestTrue(TEXT("point query on Uniform returns the value"), Q == Fill);
 	TestEqual(TEXT("point query left the chunk collapsed"), (int32)D.Residency, (int32)EVoxelDataResidency::Uniform);
-	TestEqual(TEXT("point query did not materialize the array"), D.VoxelData.Num(), 0);
+	TestEqual(TEXT("point query did not materialize the array"), D.GetResidentArray().Num(), 0);
 
 	return true;
 }
@@ -122,7 +122,7 @@ bool FChunkCompressionNonUniformTest::RunTest(const FString& Parameters)
 	using namespace ChunkCompressionTestUtils;
 
 	FChunkDescriptor D = MakeUniform(4, FVoxelData::Air());
-	D.VoxelData[10] = FVoxelData::Solid(1); // break uniformity
+	D.DetachVoxelArray()[10] = FVoxelData::Solid(1); // break uniformity
 
 	TestFalse(TEXT("non-uniform collapse fails"), D.TryCollapseUniform());
 	TestTrue(TEXT("stays resident"), D.IsVoxelDataResident());
@@ -171,7 +171,7 @@ bool FChunkCompressionMemoryTest::RunTest(const FString& Parameters)
 	const SIZE_T After = D.GetMemoryUsage();
 
 	TestTrue(TEXT("collapsed footprint is much smaller"), After < Before);
-	TestEqual(TEXT("no raw array bytes when Uniform"), (int32)D.VoxelData.GetAllocatedSize(), 0);
+	TestEqual(TEXT("no raw array bytes when Uniform"), (int32)D.GetResidentArray().GetAllocatedSize(), 0);
 
 	return true;
 }
@@ -192,7 +192,7 @@ bool FChunkCompressionCollapseToUniformTest::RunTest(const FString& Parameters)
 	const uint32 Version = D.ContentVersion;
 	TestTrue(TEXT("A resident chunk collapses"), D.CollapseToUniform(Rock));
 	TestEqual(TEXT("Uniform now"), static_cast<int32>(D.Residency), static_cast<int32>(EVoxelDataResidency::Uniform));
-	TestEqual(TEXT("No raw array"), D.VoxelData.Num(), 0);
+	TestEqual(TEXT("No raw array"), D.GetResidentArray().Num(), 0);
 	TestEqual(TEXT("Content version unchanged"), D.ContentVersion, Version);
 	TestFalse(TEXT("A uniform chunk does not collapse again"), D.CollapseToUniform(Rock));
 
