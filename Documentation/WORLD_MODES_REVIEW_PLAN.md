@@ -8632,8 +8632,8 @@ G19 is fixed.
 
 ### 20.21 G28: the voxel over a buried chunk's top layer, caves included (2026-10-23)
 
-Bases: VoxelWorlds `6cf8973`, UE5_PluginDev `b992fe5` (G71 merged). Branches `fix/g28-buried-top-face` (VoxelWorlds) and
-`claude/g28-buried-top-face` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+Bases: VoxelWorlds `6cf8973`, UE5_PluginDev `b992fe5` (G71 merged), with main's G19 (§20.20) merged in after the runs below.
+Branches `fix/g28-buried-top-face` (VoxelWorlds) and `claude/g28-buried-top-face` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
 worktree editor (Claudius on 8097), background throttling off.
 
 **The finding** (§19.4): a heightmap chunk's column and cubic scans cannot see the voxel over the chunk's top layer, which
@@ -8713,7 +8713,7 @@ scatter statistics. GPU generation, CPU extraction (the demo's settings).
   0.085-0.091 ms, on half the points. 221-247 chunks cached surface data before and 173-190 after.
 - **The leftover:** under GPU generation 1-3 columns a stop disagree, the same in all three runs (three at the Village, one at the Tower, each a single column at a cave boundary): the GPU generator's density there differs from the CPU formula the rule uses. A fourth run of the fix with CPU generation (`voxel.GPUGeneration.Enable 0`) had 0 copies and 0 missed at every stop.
 
-**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 599/599 headless (598 + the one above) and 599/599 in the editor with the GPU tests running (no device loss). The 108 GPU parity lines are CRC-identical to G44's (no generation change).
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 599/599 headless (598 + the one above) and 599/599 in the editor with the GPU tests running (no device loss). The 108 GPU parity lines are CRC-identical to G44's (no generation change). With G19 merged, 603/603 headless.
 
 **Left as they were:** planets. A planet chunk's rays read the voxels past its +X, +Y and +Z faces as the generator makes
 them without the cave carve (`GetPlanetVoxelOutsideChunk`, G29, G31). Deep under the ground that voxel is rock, so no copy
