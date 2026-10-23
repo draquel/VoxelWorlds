@@ -8552,7 +8552,8 @@ the largest peak with the cache and the far field is 1.08 GB.
 
 **Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 595/595 headless (591 on
 main + the four above) and 595/595 in the editor with the GPU tests running (no device loss). The 108 GPU parity lines
-are CRC-identical to G44's (no generation or meshing change).
+are CRC-identical to G44's (no generation or meshing change). After merging main (G67, §20.18; its `CollapseToUniform`
+drops only the chunk's reference): 598/598 headless and 598/598 in the editor, the parity lines the same.
 
 **Left as they were:** seam jobs and chunk meshes on whole snapshots of far-compressed chunks (shells would save about 30%
 of those), a chunk mesh's own copy of a resident chunk (`MeshRequest.VoxelData`, held while its job runs) and scatter's
