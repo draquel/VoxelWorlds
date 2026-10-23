@@ -458,6 +458,14 @@ public:
 	}
 
 	/**
+	 * Chunks collapsed to uniform as they were generated this session (world modes review G67;
+	 * voxel.FarCompression.UniformAtGeneration).
+	 *
+	 * @return The count
+	 */
+	int64 GetUniformAtGenerationCount() const { return UniformAtGenerationCount; }
+
+	/**
 	 * The seam snapshot cache's contents and session counters (world modes review G69): entries and MB by how they were
 	 * made (copied from a resident chunk, with edits, decoded from a compressed or a uniform chunk), by the reader that
 	 * made them and the last that read them, by age since their last read and by reads; how many workers still hold;
@@ -2005,6 +2013,9 @@ protected:
 	/** Snapshots of far-compressed chunks decoded on workers this session (G65). */
 	int64 SnapshotDecodeTasks = 0;
 
+	/** Chunks collapsed to uniform as they were generated (G67). */
+	int64 UniformAtGenerationCount = 0;
+
 	/** Monotonic TickSeamScheduler counter (drives the snapshot age sweep). */
 	uint64 SeamTickCounter = 0;
 
@@ -2331,6 +2342,9 @@ private:
 		FIntVector ChunkCoord;
 		TArray<FVoxelData> VoxelData;
 		bool bSuccess = false;
+		/** Every voxel is UniformValue: found on the worker, so the chunk collapses as it is stored (G67). */
+		bool bUniform = false;
+		FVoxelData UniformValue;
 		/** FAsyncJobStamp::Serial of the dispatch that produced this result. */
 		uint32 DispatchSerial = 0;
 	};
@@ -2376,7 +2390,11 @@ private:
 	 * thread (per-chunk volume work there caused multi-chunk frame spikes; readbacks arrive in
 	 * batches). Without tree injection the result is enqueued directly.
 	 */
-	void LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData, uint32 DispatchSerial);
+	void LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData, uint32 DispatchSerial,
+		bool bUniform = false, const FVoxelData& UniformValue = FVoxelData());
+
+	/** Whether GPU-generated chunks get voxel trees injected after the readback (cubic heightmap worlds with tree templates). */
+	bool WillInjectTreesAfterReadback() const;
 
 	// ==================== Async far-chunk compression ====================
 

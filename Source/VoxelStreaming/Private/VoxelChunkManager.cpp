@@ -27,6 +27,7 @@
 #include "VoxelGPUDualContourMesher.h"
 #include "VoxelGPUMarchingCubesMesher.h"
 #include "VoxelResidencyStats.h"
+#include "Async/ParallelFor.h"
 #include "VoxelNeighborSliceExtraction.h"
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
@@ -511,6 +512,14 @@ static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
 	8,
 	TEXT("Async encodes in flight at most. Each holds a copy of its chunk's array (1MB for a 64^3 chunk), "
 	     "so this also caps the copies' memory."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarCompressionUniformAtGeneration(
+	TEXT("voxel.FarCompression.UniformAtGeneration"),
+	1,
+	TEXT("World modes review G67: 1 = a chunk whose every voxel is the same (all air, all rock, open sea) is collapsed to that "
+	     "value as it is generated (found by the generation worker, or as a GPU readback lands); 0 = it stays resident until the "
+	     "far-compression sweep collapses it (IdleFrames after it went idle), as before."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarFarCompressionSnapshotReads(
@@ -4587,6 +4596,8 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 			Result.DispatchSerial = DispatchSerial;
 			if (bSuccess)
 			{
+				// Uniform (G67): the scan stops at the first voxel that differs, so it costs a surface chunk nothing.
+				Result.bUniform = FChunkDescriptor::ComputeUniformValue(VoxelData, Result.UniformValue);
 				Result.VoxelData = MoveTemp(VoxelData);
 			}
 			This->CompletedGenerationQueue.Enqueue(MoveTemp(Result));
@@ -4631,6 +4642,13 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Tim
 			{
 				double T0 = FPlatformTime::Seconds();
 				State->Descriptor.SetResidentVoxelData(MoveTemp(Result.VoxelData));
+				// A uniform chunk is collapsed now rather than after far compression's idle wait (G67): its readers take
+				// the shared uniform snapshot (G69) and point queries its value, so nothing expands it again.
+				if (Result.bUniform && CVarFarCompressionUniformAtGeneration.GetValueOnGameThread() != 0
+					&& State->Descriptor.CollapseToUniform(Result.UniformValue))
+				{
+					++UniformAtGenerationCount;
+				}
 				double T1 = FPlatformTime::Seconds();
 				OnChunkGenerationComplete(Result.ChunkCoord);
 				NotifySeconds += FPlatformTime::Seconds() - T1;
@@ -4674,6 +4692,17 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 	// on a thread-pool worker — never here: dispatches complete in batches, and per-chunk volume
 	// work on the game thread stacked into 20-35ms generation spikes during traversal.
 	TArray<FIntVector> Finished;
+	// The readbacks that landed this tick, handed on after the loop (G67: their uniformity scans run together).
+	struct FReadyReadback
+	{
+		FIntVector Coord;
+		FVoxelNoiseGenerationRequest GenRequest;
+		TArray<FVoxelData> VoxelData;
+		uint32 DispatchSerial = 0;
+		bool bUniform = false;
+		FVoxelData UniformValue;
+	};
+	TArray<FReadyReadback> Ready;
 	for (TPair<FIntVector, FPendingGPUGeneration>& Pair : PendingGPUReadbacks)
 	{
 		const FIntVector ChunkCoord = Pair.Key;
@@ -4690,7 +4719,11 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 
 		if (Status == EVoxelGPUReadbackStatus::Ready && VoxelData.Num() == ExpectedVoxels)
 		{
-			LaunchPostReadbackProcessing(ChunkCoord, MoveTemp(Pending.GenRequest), MoveTemp(VoxelData), Pending.DispatchSerial);
+			FReadyReadback& Landed = Ready.AddDefaulted_GetRef();
+			Landed.Coord = ChunkCoord;
+			Landed.GenRequest = MoveTemp(Pending.GenRequest);
+			Landed.VoxelData = MoveTemp(VoxelData);
+			Landed.DispatchSerial = Pending.DispatchSerial;
 		}
 		else
 		{
@@ -4711,25 +4744,51 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 	{
 		PendingGPUReadbacks.Remove(ChunkCoord);
 	}
+
+	// Uniform (G67): scanned here, as the readbacks land, so each result is stored this tick and frees its generation slot (a
+	// worker hop held the slot for another tick and slowed generation). The chunks that landed together are scanned across
+	// workers, so the game thread waits for about the slowest one, not their sum: a fully uniform chunk reads its whole
+	// megabyte, a chunk with any surface stops at its first block that differs. The tree injector scans after injecting.
+	if (Ready.Num() > 0 && CVarFarCompressionUniformAtGeneration.GetValueOnGameThread() != 0 && !WillInjectTreesAfterReadback())
+	{
+		ParallelFor(Ready.Num(), [&Ready](int32 Index)
+		{
+			FReadyReadback& Landed = Ready[Index];
+			Landed.bUniform = FChunkDescriptor::ComputeUniformValue(Landed.VoxelData, Landed.UniformValue);
+		});
+	}
+	for (FReadyReadback& Landed : Ready)
+	{
+		LaunchPostReadbackProcessing(Landed.Coord, MoveTemp(Landed.GenRequest), MoveTemp(Landed.VoxelData), Landed.DispatchSerial,
+			Landed.bUniform, Landed.UniformValue);
+	}
 }
 
-void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData, uint32 DispatchSerial)
+bool UVoxelChunkManager::WillInjectTreesAfterReadback() const
 {
-	// The water/underground post-passes already ran on the GPU (AddVoxelPostPassDispatches), so the
-	// readback data is finished except for cubic-mode voxel-tree injection. Without trees there is
-	// nothing left to compute — enqueue directly and skip the worker hop. Never on a planet (SP-B9).
-	const bool bInjectTrees = Configuration &&
+	// Voxel trees are a heightmap feature (cubic, which planets do not use: spherical SD3, SP-B9).
+	return Configuration && WorldMode.IsValid() &&
 		Configuration->WorldMode != EWorldMode::SphericalPlanet &&
 		Configuration->MeshingMode == EMeshingMode::Cubic &&
 		Configuration->TreeMode != EVoxelTreeMode::HISM &&
 		Configuration->TreeTemplates.Num() > 0 &&
 		Configuration->TreeDensity > 0.0f;
+}
 
-	if (!bInjectTrees || !WorldMode)
+void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoord, FVoxelNoiseGenerationRequest GenRequest, TArray<FVoxelData> VoxelData, uint32 DispatchSerial,
+	bool bUniform, const FVoxelData& UniformValue)
+{
+	// The water/underground post-passes already ran on the GPU (AddVoxelPostPassDispatches), so the
+	// readback data is finished except for cubic-mode voxel-tree injection. Without trees there is
+	// nothing left to compute — enqueue directly and skip the worker hop. Never on a planet (SP-B9).
+	if (!WillInjectTreesAfterReadback())
 	{
 		FAsyncGenerationResult Result;
 		Result.ChunkCoord = ChunkCoord;
 		Result.bSuccess = true;
+		// Uniform (G67): scanned as the readbacks landed (ProcessPendingGPUReadbacks).
+		Result.bUniform = bUniform;
+		Result.UniformValue = UniformValue;
 		Result.VoxelData = MoveTemp(VoxelData);
 		Result.DispatchSerial = DispatchSerial;
 		CompletedGenerationQueue.Enqueue(MoveTemp(Result));
@@ -4776,6 +4835,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 			FAsyncGenerationResult Result;
 			Result.ChunkCoord = ChunkCoord;
 			Result.bSuccess = true;
+			Result.bUniform = FChunkDescriptor::ComputeUniformValue(VoxelData, Result.UniformValue);
 			Result.VoxelData = MoveTemp(VoxelData);
 			Result.DispatchSerial = DispatchSerial;
 			This->CompletedGenerationQueue.Enqueue(MoveTemp(Result));

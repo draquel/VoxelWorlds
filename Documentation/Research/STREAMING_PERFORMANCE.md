@@ -253,7 +253,7 @@ not what bounds it. What bounds it is what each reader pins:
 On the great circles this took the cache's peak from 0.71-1.09 GB to 0.46-0.71 GB. `voxel.Snapshot.Stats` lists the cache by
 kind, reader, age and distance; the bench records `SnapMB` (shells included) and `ShellMB`.
 
-**Resident chunks are shared, not copied** (G71, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.18). A
+**Resident chunks are shared, not copied** (G71, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.19). A
 chunk's resident array is held copy-on-write (`FChunkDescriptor::VoxelArray`): the snapshot of a resident chunk without
 edits, which seam jobs, cooks and the water pull read, is the chunk's own array (`ShareVoxelData`), and so is the
 far-compression encode's input. A write to the chunk (the water pull's flags, which drops the chunk's snapshot first)
@@ -262,6 +262,15 @@ of its own while the chunk holds the array; `voxel.Snapshot.Stats` lists the sha
 (`voxel.Snapshot.ShareResident`, 1). On the great circles a third to a half of the cache had been such copies: its peak fell
 to 0.31-0.50 GB, the peak with it and the far field to 0.88-1.08 GB. What remains is mostly far-compressed chunks decoded
 for seam jobs (a seam shell deep enough for their rings would keep three quarters of a chunk at LOD 2).
+
+**Uniform chunks collapse as they are generated** (G67, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.18;
+`voxel.FarCompression.UniformAtGeneration`, default 1). A chunk whose every voxel is the same (sky, rock, open sea) used to
+stay resident (1 MB at 64³) until the sweep found it idle (`IdleFrames`). After a teleport that put a third of the window's
+voxel data in chunks with nothing in them for several seconds. Generation now finds them on its worker
+(`FChunkDescriptor::ComputeUniformValue`, word blocks that stop at the first that differs; GPU readbacks are scanned as
+they land, those of a tick in parallel, so the result still frees its generation slot that tick), and the chunk is
+stored collapsed (`CollapseToUniform`, no `ContentVersion` change). Nothing expands it again: its
+readers take the shared uniform snapshot (G69), and a point query answers its value (`GetVoxelResident`).
 
 **The encode runs on a worker thread** (`voxel.FarCompression.Async`, default 1). An Oodle encode of
 a 1 MB chunk costs about 3.5 ms in PIE and cannot be split, so the sweep does not run it on the game
