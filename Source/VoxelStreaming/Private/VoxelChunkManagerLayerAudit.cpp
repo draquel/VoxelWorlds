@@ -25,7 +25,7 @@ namespace VoxelLayerAuditPrivate
 	{
 		if (Descriptor.IsVoxelDataResident())
 		{
-			return &Descriptor.VoxelData;
+			return &Descriptor.GetResidentArray();
 		}
 		if (Descriptor.Residency == EVoxelDataResidency::Uniform)
 		{

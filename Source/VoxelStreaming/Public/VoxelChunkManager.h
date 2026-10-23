@@ -445,6 +445,19 @@ public:
 	int64 GetSnapshotDecodeCount() const { return SnapshotDecodeTasks; }
 
 	/**
+	 * Snapshots of resident chunks that shared the chunk's own array this session instead of copying it (world modes review
+	 * G71; voxel.Snapshot.ShareResident), and those copied (without edits).
+	 *
+	 * @param OutCopied Receives the copies made from resident chunks without edits
+	 * @return The shared ones
+	 */
+	int64 GetResidentSnapshotsShared(int64& OutCopied) const
+	{
+		OutCopied = SnapshotCounters.Made[static_cast<int32>(ESnapshotKind::Copied)];
+		return SnapshotCounters.Made[static_cast<int32>(ESnapshotKind::SharedResident)];
+	}
+
+	/**
 	 * The seam snapshot cache's contents and session counters (world modes review G69): entries and MB by how they were
 	 * made (copied from a resident chunk, with edits, decoded from a compressed or a uniform chunk), by the reader that
 	 * made them and the last that read them, by age since their last read and by reads; how many workers still hold;
@@ -463,6 +476,7 @@ public:
 		RecentlyEvictedSnapshots.Reset();
 		FMemory::Memzero(ShellsMade, sizeof(ShellsMade));
 		ShellHits = 0;
+		VoxelResidencyStats::ResetSharedArrayClones();
 	}
 
 	/**
@@ -1889,7 +1903,8 @@ protected:
 		DecodedCompressed = 2,  // decoded on a worker from a far-compressed chunk (G65)
 		DecodedUniform = 3,     // expanded on a worker from a uniform chunk (G65; voxel.Snapshot.ShareUniform 0)
 		SharedUniform = 4,      // a uniform chunk's, the shared array for its value (G69)
-		Num = 5
+		SharedResident = 5,     // a resident chunk's own array, shared copy-on-write (G71; voxel.Snapshot.ShareResident)
+		Num = 6
 	};
 
 	/** The snapshot cache's session counters (G69; voxel.Snapshot.Stats). */
@@ -1915,6 +1930,17 @@ protected:
 
 	/** The shared array for a uniform chunk's snapshot (G69), made on first use. */
 	TSharedPtr<const TArray<FVoxelData>> GetUniformSnapshotArray(const FVoxelData& Value, int32 TotalVoxels);
+
+	/**
+	 * The memory a cache entry holds of its own: none for a uniform value's shared array (counted once) or for a resident
+	 * chunk's array it shares while the chunk still holds it (counted in the voxel data, G71), the chunk's full size while
+	 * it decodes, else its array.
+	 *
+	 * @param Coord The entry's chunk
+	 * @param Snap  The entry
+	 * @return Bytes
+	 */
+	int64 GetSnapshotOwnBytes(const FIntVector& Coord, const FSeamVoxelSnapshot& Snap) const;
 
 	/** How a cached boundary shell was made (G69). */
 	enum class EShellKind : uint8

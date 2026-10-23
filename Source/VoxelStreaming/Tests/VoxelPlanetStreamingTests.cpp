@@ -1805,6 +1805,10 @@ namespace VoxelPlanetStreamingTestUtils
 		FScopedIntCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), 1);
 		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
 		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
+		// The memory check compares the shells with whole snapshots as the cache held them for cooks, a copy of every
+		// resident neighbour; since G71 a resident chunk's snapshot shares its array and holds nothing of its own
+		// (Streaming.*.SharedResidentSnapshots tests that).
+		FScopedIntCVar ShareResident(TEXT("voxel.Snapshot.ShareResident"), 0);
 		FPlanetStreamingWorld World;
 		Start(World);
 		Test.TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place), World.Settle());
@@ -1940,6 +1944,164 @@ bool FVoxelPlaneCollisionShellsTest::RunTest(const FString& Parameters)
 
 	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneCollisionShellsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
 	RunCollisionShellsPlace(*this, TEXT("plane"), Start);
+	return true;
+}
+
+namespace VoxelPlanetStreamingTestUtils
+{
+	/** What a streamed place left and held with resident chunks' snapshots copied (voxel.Snapshot.ShareResident 0) or shared (1). */
+	struct FSharedResidentResult
+	{
+		TMap<FIntVector, uint32> VoxelCrcs; // every loaded chunk's edit-merged voxels, water flags included
+		uint32 MeshCrc = 0;                 // every chunk mesh and seam bucket
+		int64 PeakCacheBytes = 0;           // the snapshot cache's own bytes (shells apart), the largest sample
+		int64 PeakWithVoxelBytes = 0;       // the voxel data and the snapshot cache, the largest sample
+		int64 Shared = 0;                   // resident chunks' snapshots that shared the chunk's array
+		int64 Copied = 0;                   // and those copied (without edits)
+		int64 Clones = 0;                   // copy-on-write clones (a write while a reader held the array)
+		double CloneMs = 0.0;
+		int32 CompactChunks = 0;            // far-compressed or uniform chunks before the move
+	};
+
+	/**
+	 * G71: streams a place, lets far compression compact the far band (the encode reads the resident arrays too), moves the
+	 * viewer by Move, and records what it left and the snapshot cache's peak, sampled every tick.
+	 */
+	FSharedResidentResult RunSharedResident(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
+		const FVector& Move, int32 ShareResident)
+	{
+		FScopedIntCVar Share(TEXT("voxel.Snapshot.ShareResident"), ShareResident);
+		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
+		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
+		VoxelResidencyStats::ResetSharedArrayClones();
+		FSharedResidentResult Result;
+		FPlanetStreamingWorld World;
+		Start(World);
+
+		auto Sample = [&World, &Result]()
+		{
+			const UVoxelChunkManager::FVoxelMemoryStats Memory = World.Manager->GetVoxelMemoryStats();
+			const int64 Cache = Memory.SnapshotBytes - Memory.ShellBytes;
+			Result.PeakCacheBytes = FMath::Max(Result.PeakCacheBytes, Cache);
+			Result.PeakWithVoxelBytes = FMath::Max(Result.PeakWithVoxelBytes, Cache + Memory.VoxelDataBytes);
+			return Memory;
+		};
+		// World.Settle with a sample every tick.
+		auto SettleSampled = [&World, &Sample]()
+		{
+			int32 IdleTicks = 0;
+			const double Deadline = FPlatformTime::Seconds() + 120.0;
+			while (IdleTicks < 90 && FPlatformTime::Seconds() < Deadline)
+			{
+				World.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+				Sample();
+				UVoxelChunkManager* M = World.Manager;
+				const bool bIdle = M->GetPendingGenerationCount() == 0 && M->GetPendingMeshingCount() == 0
+					&& M->GetAsyncGenerationInProgressCount() == 0 && M->GetAsyncMeshingInProgressCount() == 0
+					&& M->GetPendingMeshUploadCount() == 0 && M->GetSeamJobsInFlightCount() == 0;
+				IdleTicks = bIdle ? IdleTicks + 1 : 0;
+				FPlatformProcess::Sleep(0.002f);
+			}
+			return IdleTicks >= 90;
+		};
+
+		Test.TestTrue(*FString::Printf(TEXT("%s (share resident %d): the pipeline settled"), Place, ShareResident), SettleSampled());
+		int32 LastCompact = -1;
+		int32 Still = 0;
+		for (int32 Tick = 0; Tick < 3000 && Still < 60; ++Tick)
+		{
+			World.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+			FPlatformProcess::Sleep(0.002f);
+			const UVoxelChunkManager::FVoxelMemoryStats Memory = Sample();
+			const int32 Compact = Memory.UniformChunks + Memory.CompressedChunks;
+			Still = (Compact == LastCompact) ? Still + 1 : 0;
+			LastCompact = Compact;
+		}
+		Result.CompactChunks = LastCompact;
+		World.Viewer += Move;
+		World.Manager->SetBenchmarkView(true, World.Viewer);
+		Test.TestTrue(*FString::Printf(TEXT("%s (share resident %d): settled after the move"), Place, ShareResident), SettleSampled());
+
+		TArray<FIntVector> Loaded;
+		World.Manager->GetLoadedChunks(Loaded);
+		for (const FIntVector& Coord : Loaded)
+		{
+			if (const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetEditMergedSnapshot(Coord))
+			{
+				Result.VoxelCrcs.Add(Coord, FCrc::MemCrc32(Voxels->GetData(), Voxels->Num() * sizeof(FVoxelData)));
+			}
+		}
+		Result.MeshCrc = MeshesCrc(World);
+		Result.Shared = World.Manager->GetResidentSnapshotsShared(Result.Copied);
+		VoxelResidencyStats::GetSharedArrayClones(Result.Clones, Result.CloneMs);
+		World.Stop();
+		return Result;
+	}
+
+	/** Runs a place with resident chunks' snapshots copied and shared: the same world, a smaller cache. */
+	void RunSharedResidentPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start, const FVector& Move)
+	{
+		const FSharedResidentResult Before = RunSharedResident(Test, Place, Start, Move, 0);
+		const FSharedResidentResult After = RunSharedResident(Test, Place, Start, Move, 1);
+		const double ToKB = 1.0 / 1024.0;
+		Test.AddInfo(FString::Printf(TEXT("%s: %d chunks, %d compact before the move; resident snapshots copied / shared: before %lld / %lld, after %lld / %lld; copy-on-write clones %lld (%.2f ms); snapshot cache peak %.0f -> %.0f KB, with the voxel data %.0f -> %.0f KB"),
+			Place, After.VoxelCrcs.Num(), After.CompactChunks, Before.Copied, Before.Shared, After.Copied, After.Shared, After.Clones, After.CloneMs,
+			Before.PeakCacheBytes * ToKB, After.PeakCacheBytes * ToKB, Before.PeakWithVoxelBytes * ToKB, After.PeakWithVoxelBytes * ToKB));
+
+		Test.TestTrue(*FString::Printf(TEXT("%s: the far band compacted (%d chunks)"), Place, After.CompactChunks), After.CompactChunks >= 20);
+		Test.TestTrue(*FString::Printf(TEXT("%s: copied, resident chunks' snapshots are copies"), Place), Before.Copied > 0 && Before.Shared == 0);
+		Test.TestTrue(*FString::Printf(TEXT("%s: shared, every one shares the chunk's array"), Place), After.Shared > 0 && After.Copied == 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: copied, nothing clones"), Place), Before.Clones, static_cast<int64>(0));
+		Test.TestTrue(*FString::Printf(TEXT("%s: the cache's peak is lower shared (%lld against %lld bytes)"), Place, After.PeakCacheBytes, Before.PeakCacheBytes),
+			After.PeakCacheBytes < Before.PeakCacheBytes);
+		Test.TestTrue(*FString::Printf(TEXT("%s: and so is the voxel data with it"), Place), After.PeakWithVoxelBytes < Before.PeakWithVoxelBytes);
+
+		// The same world either way: every chunk's voxels (water flags included) and every mesh and seam.
+		Test.TestEqual(*FString::Printf(TEXT("%s: the same chunks loaded"), Place), After.VoxelCrcs.Num(), Before.VoxelCrcs.Num());
+		int32 Different = 0;
+		for (const TPair<FIntVector, uint32>& Pair : After.VoxelCrcs)
+		{
+			const uint32* Other = Before.VoxelCrcs.Find(Pair.Key);
+			Different += (!Other || *Other != Pair.Value) ? 1 : 0;
+		}
+		Test.TestEqual(*FString::Printf(TEXT("%s: every chunk's voxels the same, water included"), Place), Different, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: every mesh and seam the same"), Place), After.MeshCrc, Before.MeshCrc);
+	}
+}
+
+/**
+ * G71 on a planet (45N 20E, a sea at the datum, so the water pull writes resident chunks that seam jobs and cooks share):
+ * the far-reads test's move with resident chunks' snapshots copied and shared copy-on-write. The world is the same (every
+ * chunk's voxels with their water, every mesh and seam) and the snapshot cache's peak lower.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetSharedResidentTest,
+	"VoxelWorlds.Streaming.Planet.SharedResidentSnapshots",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetSharedResidentTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	const double Lat = FMath::DegreesToRadians(45.0);
+	const double Lon = FMath::DegreesToRadians(20.0);
+	const FVector Direction(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	const FVector East = FVector::CrossProduct(FVector::UpVector, Direction).GetSafeNormal();
+	auto Start = [&Direction](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetSharedResidentTestWorld"), Direction, 300.0f); };
+	RunSharedResidentPlace(*this, TEXT("45N 20E"), Start, East * 3000.0);
+	return true;
+}
+
+/** G71 on a heightmap world: the same over the plane of the far-reads test, moving 3,000 uu east. */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneSharedResidentTest,
+	"VoxelWorlds.Streaming.Plane.SharedResidentSnapshots",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneSharedResidentTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneSharedResidentTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunSharedResidentPlace(*this, TEXT("plane east"), Start, FVector(3000.0, 0.0, 0.0));
 	return true;
 }
 
