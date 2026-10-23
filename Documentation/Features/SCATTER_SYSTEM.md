@@ -286,8 +286,14 @@ anywhere else.
   data cannot show: they are taken as the planet generator makes them there, with the neighbour's edits applied
   (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`; `TouchingEdits` from the seven neighbours on those sides,
   `UVoxelScatterManager::GetPlanetShellNeighbours` / `GatherPlanetTouchingEdits`), each computed the first time a ray
-  needs it (0.12 µs each, at most 12,481 for a 64³ chunk). Caves are not in them: a cave within a voxel past a chunk's
-  max face reads as rock. They are the CPU formula's, which the GPU generator matches to a density step or two at a few
+  needs it (at most 12,481 for a 64³ chunk). Since world modes review G72 (§20.23) they are carved by the caves as
+  generation carves them: `CalculateCaveDensity` at the voxel's depth along local up, for the biome generation gives
+  its direction (found only when the cave configuration has biome overrides and some layer reaches that depth), with
+  the sea's minimum depth (`FScatterExtractionContext::CaveConfiguration`). Before, a cave within a voxel past a
+  chunk's max face read as rock: the cave floor in that cell got no point, and where the cave met the face the rock
+  made a floor in the air (on `Review_Planet` 1.3-1.6% of the points missed and up to 7% added).
+  `voxel.Scatter.PlanetFaceCaves 0` restores that for A/B; `voxel.Scatter.PlanetFaceAudit` compares every cached chunk
+  with an extraction that takes those voxels from its neighbours (`OutsideVoxelSource`). They are the CPU formula's, which the GPU generator matches to a density step or two at a few
   voxels (`Generation.GPUvsCPUSphericalParity`), so on the GPU path a crossing at a face is very rarely doubled (one
   point in about two million on `Review_Planet`). A point on a face is interpolated from the same four voxels on both
   sides (fractions within 1e-7 of a cell face snap to it), so a voxel exactly at the threshold there cannot leave the

@@ -9176,6 +9176,65 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 		}
 	}));
 
+// Console: voxel.Scatter.PlanetFaceAudit [maxLines=20]
+// Planets (world modes review G72): every cached scatter chunk whose seven neighbours on its +X, +Y and +Z sides have voxel
+// data, extracted now twice (UVoxelScatterManager::ComparePlanetFaceVoxels): with the voxels past its faces made by the
+// extraction (GetPlanetVoxelOutsideChunk, the context built now: voxel.Scatter.PlanetFaceCaves applies) and taken from the
+// neighbours' edit-merged voxels. Logs the points the made voxels miss and add (and how many of each are underground) and
+// the chunks that differ, worst first, with a vox.TP to each.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterPlanetFaceAuditCmd(
+	TEXT("voxel.Scatter.PlanetFaceAudit"),
+	TEXT("Planets: compare every cached scatter chunk's extraction with the voxels past its +X/+Y/+Z faces made against the ")
+	TEXT("neighbours' own voxels (world modes review G72). Optional arg: max chunk lines to log."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.PlanetFaceAudit: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 20;
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
+			const UVoxelScatterManager* ScatterMgr = CM ? CM->GetScatterManager() : nullptr;
+			const IVoxelWorldMode* WM = CM ? CM->GetWorldMode() : nullptr;
+			if (!ScatterMgr || !WM)
+			{
+				continue;
+			}
+			if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.PlanetFaceAudit: not a planet (heightmap top faces: voxel.Scatter.TopFaceAudit)"));
+				continue;
+			}
+			const double T0 = FPlatformTime::Seconds();
+			TArray<FString> Lines;
+			const UVoxelScatterManager::FPlanetFaceStats Stats = ScatterMgr->ComparePlanetFaceVoxels(
+				[CM](const FIntVector& Coord) { return CM->GetEditMergedSnapshot(Coord); }, Lines);
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.PlanetFaceAudit [%s]: %d chunk(s) compared (skipped: %d pending, %d cleared, %d without voxels, %d without a neighbour); reference points %lld: missed %lld (underground %lld), spurious %lld (underground %lld), reclassified %lld, in %d chunk(s); %.0f ms"),
+				*TargetWorld->GetName(), Stats.Chunks, Stats.SkippedPending, Stats.SkippedCleared, Stats.SkippedNoVoxels, Stats.SkippedNeighbours,
+				Stats.ReferencePoints, Stats.Missed, Stats.MissedUnderground, Stats.Spurious, Stats.SpuriousUnderground, Stats.Reclassified,
+				Stats.ChunksDiffering, 1000.0 * (FPlatformTime::Seconds() - T0));
+			for (int32 I = 0; I < FMath::Min(MaxLines, Lines.Num()); ++I)
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("  %s"), *Lines[I]);
+			}
+		}
+	}));
+
 // Console: voxel.Scatter.BoundaryAudit [maxLines=20] [drawSeconds=0]
 // Smooth worlds (world modes review G27): how well every cached scatter chunk's surface points cover the cell layers along
 // its six faces. A cell is the cube between eight voxels (the mesher's cell); it is a floor cell where one of its four

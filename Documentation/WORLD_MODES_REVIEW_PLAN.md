@@ -1512,7 +1512,7 @@ Three findings from §13.11 get IDs here:
 | G69 | The seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one full array per chunk, 1 MB at 64³, kept for 128 seam ticks after its last use) holds 1,061-1,095 MB at the small planet's great-circle peak and 688-753 MB on M and L, 590-750 MB at the end, with and without G65's snapshot reads. Nothing counted it before G65 (`GetVoxelMemoryStats`; the eviction's comment says tens of MB). Counted with the systems and the far field, the traverse peaks at 1.75-1.83 GB on S, 1.34-1.42 on M and 1.48-1.61 on L, over D3's 1.5 GB on S (§20.13) | Fixed 2026-10-22 (§20.15): traced with `voxel.Snapshot.Stats`, the cache is the working set, not stale entries (10+ reads each, a shorter lifetime only re-makes them); its peak was collision cooks, which pin each of their 26 neighbours' whole snapshot to read one plane of it (the collision radius is half the view distance, 20,000 uu here), and uniform chunks each expanded into their own array. Now cooks read their neighbours from boundary shells (`FVoxelChunkShell`, the voxels within `VoxelNeighborSlices::GetNeighborDepth` of each face: 96 KB at 64³ against 1 MB; `voxel.Collision.NeighborShells`), a cook drops its own chunk's snapshot once it has taken it unless another reader did, and uniform chunks share one array per value (`voxel.Snapshot.ShareUniform`). Benches (three runs per planet, by cvar): the snapshot cache's peak 0.71-1.09 → 0.46-0.71 GB, the traverse's peak with it and the far field S 1.76-1.78 → 1.30-1.36 GB, M 1.34-1.41 → 1.10-1.14, L 1.49 → 1.23 (D3 met), frame, manager, catch-up and game-thread decode unchanged; collision meshes identical (`Streaming.{Planet,Plane}.CollisionNeighborShells`). G71 recorded | — |
 | G70 | The water pull's result at a chunk corner depends on the order in which the neighbouring chunks finish meshing: in `Streaming.Planet.FarReadsOffGameThread` 9 air voxels below the sea at chunk (6, 0, 9)'s +Y+Z corner are flooded in some runs and not in others, with either setting of `voxel.FarCompression.SnapshotReads` (§20.13) | Fixed in §20.16: a chunk pulled the flags across its faces once, when its mesh landed, and a neighbour whose water rose later never passed it on (a chunk wholly under the sea gets all its water that way). Now a chunk's water rising has its settled face neighbours pull again (`QueueWaterRepulls`, about a millisecond a tick, Loaded chunks only; `voxel.Water.PullAgain`), so the flood is the same whatever the meshing order: `Streaming.Water.PullOrder.{Plane,Planet}` 202,034 / 103,345 dry voxels the flood reaches → 0; G65's test compares every chunk's water now | — |
 | G71 | Seam jobs and chunk meshes still read their participants' whole snapshots: with G69's shells, 540-607 of the small planet's mid-traverse entries (518-579 MB) are read by a seam job or a chunk mesh. A seam job reads its participants only near the seam, but each side's boundary ring is recomputed with that side's own samplers, which reach a stride-scale depth (several voxels at LOD 2), so a shell at coarse LODs would hold most of a chunk, and the rings must stay bit-identical (§20.15) | Fixed in §20.19 (2026-10-23; the user's choice): measured first, most seam/mesh entries are far LOD 2 chunks read only by seam jobs, and a shell deep enough for their rings keeps 76% of a chunk (seam shells would save about 30%); 35-47% of the cache were copies of chunks still resident. Now a chunk's resident array is shared copy-on-write (`FChunkDescriptor::VoxelArray`, `ShareVoxelData`; a write clones it while a reader holds it) and a resident chunk's snapshot without edits shares it (`SharedResident`), as does the far-compression encode; `voxel.Snapshot.ShareResident`. Benches: the cache's peak S 658-692 → 491-496 MB, M 478-494 → 314-331, L 503-511 → 317-335; the peak with it and the far field S 1.28-1.30 → 1.07-1.08 GB, M 1.10-1.12 → 0.88, L 1.16-1.17 → 0.90-0.92; manager P95 −0.3-0.9 ms; no copy-on-write clone. Left: seam jobs on whole snapshots of far-compressed chunks | — |
-| G72 | Planets: the voxels past a planet chunk's +X, +Y and +Z faces are made from the generated altitude alone (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, G29, G31), without the cave carve, so where a cave opens such a voxel under the ground the ray crossing that face reads rock and the cave floor in that cell gets no point (underground scatter misses it). No copy is made (the heightmap's G28). Found in §20.21; not measured | Open, low: the same carve (`CalculateCaveDensity` along the planet's local up) would decide it; it changes planet scatter, so it needs its own `Review_Planet` A/B | — |
+| G72 | Planets: the voxels past a planet chunk's +X, +Y and +Z faces are made from the generated altitude alone (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`, G29, G31), without the cave carve, so where a cave opens such a voxel under the ground the ray crossing that face reads rock and the cave floor in that cell gets no point (underground scatter misses it). No copy is made (the heightmap's G28). Found in §20.21; not measured | Fixed 2026-10-23 (§20.23): measured first with `voxel.Scatter.PlanetFaceAudit` (every cached chunk extracted with the voxels past its faces made and with its neighbours' own voxels there, `FScatterExtractionContext::OutsideVoxelSource`): on `Review_Planet` 8,793-11,243 points missed a stop (1.3-1.6%, 92-97% underground) and 284-46,141 added, floors where a cave meets a face read as rock. `GetPlanetVoxelOutsideChunk` now carves the voxel as generation does (`CalculateCaveDensity` along local up, the direction's biome when the cave configuration has overrides, behind a depth pre-check, the sea's minimum depth); `voxel.Scatter.PlanetFaceCaves`. A/B (three runs per rule): 15-49 matched pairs left a stop (the GPU generator's density; 0 with CPU generation), scatter changed in 4-15 chunks a stop (underground types), extraction +1.5-2.2 ms a chunk (8-11%). Test `Scatter.Planet.FaceCaves` | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
 | I10 | World Partition on an island | Not run; deferred with World Partition (`Research/ENGINE_INTEGRATION.md`) | — |
@@ -8724,7 +8724,7 @@ the buried-chunk test's edit-blindness, as G26 left them.
 chunk's +X, +Y and +Z faces from the generated altitude alone. Where a cave opens such a voxel under the ground, a ray
 crossing the face there reads rock and misses the cave floor's point, so underground scatter has no point in those cells.
 Not measured. The same carve (`CalculateCaveDensity` with the planet's local up) would fix it; it changes planet scatter,
-so it needs its own `Review_Planet` A/B.
+so it needs its own `Review_Planet` A/B. Fixed in §20.23.
 
 G28 is fixed.
 
@@ -8812,3 +8812,94 @@ worktree, four pairs side by side in `g39_before_after.png`):
   crosses 0.9, looks as before.
 
 G39 is fixed.
+
+### 20.23 G72: the voxels past a planet chunk's faces, caves included (2026-10-23)
+
+Bases: VoxelWorlds `0da2b83`, UE5_PluginDev `5fb2245` (G28 merged). Branches `fix/g72-planet-face-caves` (VoxelWorlds) and
+`claude/g72-planet-face-caves` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a
+worktree editor (Claudius on 8097), background throttling off.
+
+**The finding** (§20.21): a planet chunk's rays (G31) read the voxels past its +X, +Y and +Z faces in their last cells.
+`FScatterExtractionContext::GetPlanetVoxelOutsideChunk` made those voxels from the generated altitude alone. Where a cave
+opens such a voxel under the ground, the extraction read rock there:
+
+- the cave floor in that cell got no point;
+- where the cave meets the face, the rock against the cave's air made a floor in the air (a point the neighbours' own
+  voxels do not give).
+
+It is the opposite of the heightmap's G28: no copies under the rock, but missed and misplaced cave floors.
+
+**Measured first** with a new audit, `voxel.Scatter.PlanetFaceAudit`
+(`UVoxelScatterManager::ComparePlanetFaceVoxels`). It extracts every cached chunk whose seven neighbours on those sides
+have voxels twice: once with the voxels past its faces made, and once taken from the neighbours' edit-merged voxels
+(`FScatterExtractionContext::OutsideVoxelSource`, the reference). It counts the reference points the made voxels miss and
+the points they add, and which of each are underground.
+
+On `Review_Planet` (`DemoCaveConfig`: Cheese 27-60 and Spaghetti 20-45 voxels down, no caves in biome 3, a 25-voxel
+minimum under the sea), at four stops (45°N 20E, 0°N 100E, 30°S 60W, the cube corner), 173-201 chunks were compared at each:
+
+- 8,793-11,243 reference points missed per stop (1.3-1.6% of 541,449-699,534), 92-97% of them underground;
+- 284-46,141 points added, nearly all underground. The 46,141 are at 30°S 60W, where caverns meet many chunk faces;
+- in 133-154 of the chunks.
+
+**The fix** (VoxelWorlds; `voxel.Scatter.PlanetFaceCaves`, 1; 0 = before). `GetPlanetVoxelOutsideChunk` makes the voxel as
+`GenerateChunkSphericalPlanet` does: the generated altitude's signed distance, less the cave carve where the voxel is solid
+under the ground, with the neighbour's edit applied as before.
+
+- The carve is `FVoxelCPUNoiseGenerator::CalculateCaveDensity` at the voxel's depth along local up, with the planet's
+  vertical scale along local up (SP-B6) and the sea's minimum depth when the ground is under the sea.
+- **The biome.** The cave configuration's biome overrides read it, and on a planet it is the direction's: the climate
+  fields on the datum sphere and the continentalness the altitude samples, through the world mode's biome snapshot (the
+  registry's blend without a biome configuration, 0 without biomes). It is found only when the configuration has
+  overrides.
+- **A depth pre-check.** The biome is found only when some layer can carve at the voxel's depth for some biome. That
+  window is each layer's, using the shallowest of its own minimum depth, an override's and the underwater one
+  (`CaveLayerReachesDepth`). Outside it the carve is 0 for every biome. Without the pre-check every solid voxel under the
+  ground past a face paid two climate fields: 3.4 ms a chunk on the mean against 1.5-2.2 ms with it.
+- The context carries `bEnableBiomes` and `bCarvePlanetFaceVoxels`; the cave configuration was already there (G28).
+- Heightmap worlds, generation and the planet's surface (the shell's signed distance) are unchanged. No
+  `PlanetGenerationVersion` bump: generation does not change.
+
+**Tests.**
+
+- **`VoxelWorlds.Scatter.Planet.FaceCaves`** (new): the planet of the line-top tests with biomes, a sea at the datum and
+  the default cave layers. Chunks 15 and 35 voxels under the ground at four sites, each generated on the CPU with its seven
+  neighbours on the +X, +Y and +Z sides.
+  - Every chunk extracted with the voxels past its faces made matches, point for point (position to 0.1 uu and the
+    underground class), the same extraction with the neighbours' own voxels there: 9,893 reference points (9,450
+    underground), none missed, none added.
+  - Without the carve: 878 missed and 451 added.
+  - With biome overrides (caves only in the commonest biome, from 6 voxels down): 9,714 points, none missed, none added.
+- The line-top tests (G29, G31) and G28's top-face tests pass unchanged.
+
+**A/B on `Review_Planet`** (in-session, by the cvar). Six runs, three per rule, interleaved. Each was a fresh PIE on
+`PlanetTest` with the config override and the world's save deleted, then `vox.TPLatLon` to the four stops with 45 s at
+each. At each stop streaming was frozen for the audit, a per-chunk digest and the scatter statistics. GPU generation,
+CPU extraction (the review planet's settings). The audit gave the same counts in every run of a rule:
+
+| Stop | Reference points | Missed (underground) | Added (underground) |
+|---|---|---|---|
+| 45°N 20E | 699,534 | 10,862 (10,179) → 36 (9) | 565 (537) → 37 (9) |
+| 0°N 100E | 541,449 | 8,793 (8,097) → 15 (8) | 7,318 (7,311) → 15 (8) |
+| 30°S 60W | 642,334 | 10,169 (9,897) → 42 (6) | 46,141 (46,105) → 42 (6) |
+| Cube corner | 690,664 | 11,243 (10,512) → 49 (8) | 284 (243) → 49 (8) |
+
+- **The leftover is the GPU generator.** With the fix, 15-49 points a stop are missed and as many added, the same
+  positions in pairs: a point that moved by at least 0.1 uu because the GPU-generated neighbour's voxel there differs from
+  the CPU formula by a density step. A fourth run of the fix with CPU generation (`voxel.GPUGeneration.Enable 0`) had 0
+  missed and 0 added at every stop.
+- **Scatter.** 178-213 chunks a stop were in every run and gave the same digest in all three runs of each rule. Of them,
+  4-15 changed between the rules, in the underground types (15-17) and one point each in three
+  surface types at the corner. Their spawn points went 212 → 217 (45°N), 2,323 → 2,331, 19,539 → 19,496 (30°S, where the
+  added floors stood) and 1,817 → 1,825. Underground spawns gain where floors were missed and lose where floors in the
+  air were added: at 30°S types 15-17 went 60, 57 and 46 → 50, 39 and 31.
+- **Cost.** Over each run 1,588-1,592 chunks were extracted on workers. Extraction took 18.70-19.26 ms a chunk on the
+  mean before and 20.73-20.88 after (+1.5-2.2 ms, 8-11%); placement was unchanged. The surface cache was within 1 MB at
+  three stops and 4.7 MB smaller at 30°S (the added floors).
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 610/610 headless (609 + the one above) and 610/610 in the editor with the GPU tests running (no device loss). Of the GPU parity lines, the 78 that G39's dither changed differ from G44's baseline as G39 recorded, the other 30 are CRC-identical, and every case still matches the CPU (no generation change here).
+
+**Left as they were:** the extraction cost above. M and L were not benched; their extraction is the same code, and their
+chunks are the same size.
+
+G72 is fixed.
