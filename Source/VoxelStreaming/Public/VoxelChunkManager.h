@@ -998,6 +998,36 @@ public:
 	/** @return The meshing work since Initialize (see FMeshWorkStats) */
 	const FMeshWorkStats& GetMeshWorkStats() const { return MeshWorkStats; }
 
+	/**
+	 * The water pull's second passes since Initialize (world modes review G70), for tests and voxel.Water.Stats. A chunk pulls
+	 * the water flags across its faces from its neighbours when its mesh lands (PropagateWaterFromNeighbors); a neighbour
+	 * whose water rose after that (its own pull, or its generated water arriving) has it pulled again, so the flood reaches
+	 * the same voxels whatever order the chunks finish meshing in.
+	 */
+	struct FWaterRepullStats
+	{
+		/** Chunks queued to pull again (a face neighbour's water rose after their pull). */
+		int64 Queued = 0;
+		/** Pulls run from the queue (Loaded chunks; the others pull again when their next mesh lands). */
+		int64 Run = 0;
+		/** Of those, pulls that flooded voxels. */
+		int64 Flooded = 0;
+		/** Voxels those pulls flooded. */
+		int64 FloodedVoxels = 0;
+		/** Queued chunks skipped: no voxel data any more, or not Loaded (a mesh on its way pulls when it lands). */
+		int64 Skipped = 0;
+		/** Chunks still queued. */
+		int32 Pending = 0;
+	};
+
+	/** @return The water pull's second passes since Initialize (see FWaterRepullStats) */
+	FWaterRepullStats GetWaterRepullStats() const
+	{
+		FWaterRepullStats Out = WaterRepullStats;
+		Out.Pending = WaterRepullQueue.Num();
+		return Out;
+	}
+
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 
 	/**
@@ -1594,10 +1624,31 @@ protected:
 	 * through UVoxelWaterPropagation instead, which scans the faces a chunk shares with its neighbours when its water
 	 * settles (world modes review G59).
 	 *
+	 * The pull runs when the chunk's mesh lands. Its neighbours pull again when its water rises after theirs (G70:
+	 * QueueWaterRepulls, ProcessWaterRepulls), so a flood that reaches a chunk only through a neighbour that floods later
+	 * arrives whatever order the chunks mesh in.
+	 *
 	 * @param ChunkCoord The chunk to propagate water into
+	 * @param OutFloodedFaces If set, the faces (bit = FaceOffsets index: +X, -X, +Y, -Y, +Z, -Z) on which it flooded voxels
+	 * @param OutFloodedVoxels If set, the number of voxels it flooded
 	 * @return True if any new water flags were set (caller should regenerate water mesh)
 	 */
-	bool PropagateWaterFromNeighbors(const FIntVector& ChunkCoord);
+	bool PropagateWaterFromNeighbors(const FIntVector& ChunkCoord, uint8* OutFloodedFaces = nullptr, int32* OutFloodedVoxels = nullptr);
+
+	/**
+	 * Queue the face neighbours across the faces in FaceMask to pull water again (world modes review G70): those that have
+	 * pulled once (their water settled) and reach below the sea. voxel.Water.PullAgain 0 queues nothing (the rule before).
+	 *
+	 * @param ChunkCoord The chunk whose water rose
+	 * @param FaceMask The faces to queue across (bit = FaceOffsets index: +X, -X, +Y, -Y, +Z, -Z)
+	 */
+	void QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 FaceMask);
+
+	/**
+	 * Run queued second pulls (G70) within about a millisecond a tick, at least one: each Loaded chunk pulls from its
+	 * neighbours again, refreshes its water tile if it flooded, and queues the neighbours across the faces it flooded.
+	 */
+	void ProcessWaterRepulls();
 
 	// ==================== 2D Water Tile System ====================
 
@@ -2126,6 +2177,13 @@ private:
 
 	/** Meshing work and what edits asked of it (GetMeshWorkStats). */
 	FMeshWorkStats MeshWorkStats;
+
+	/** Chunks to pull water again, in the order queued, and the set of them (G70; ProcessWaterRepulls). */
+	TArray<FIntVector> WaterRepullQueue;
+	TSet<FIntVector> WaterRepullSet;
+
+	/** The water pull's second passes (GetWaterRepullStats). */
+	FWaterRepullStats WaterRepullStats;
 
 	/** Chunks a system or editor edit changed since the last ProcessEditScatterReaders (their scatter re-extracts with their re-mesh). */
 	TSet<FIntVector> EditScatterEditedChunks;

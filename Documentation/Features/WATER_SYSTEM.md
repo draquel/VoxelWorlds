@@ -127,12 +127,24 @@ Called at each mesh submit of a chunk, before its water tile update. Ensures con
 1. For each of 6 face neighbors (+X, -X, +Y, -Y, +Z, -Z):
 2. Check boundary voxels: if our voxel is dry air below water level AND neighbor has water flag
 3. Seed the voxel and BFS flood fill within the chunk
-4. Returns true if any propagation occurred (triggers remeshing)
+4. Returns true if any propagation occurred (the faces it flooded and the voxels, on request)
 
 It reads and writes the chunk's **generated** voxels (`FChunkDescriptor`), not the edit layer. Water an edit-driven
 flood put in the edit layer crosses chunk faces through `UVoxelWaterPropagation` instead (the chunk-arrival face scans
 below, G59). When it writes flags it drops the chunk's edit-merged snapshot (`GetEditMergedSnapshot`), which it does not
 version, so the water tile reads them.
+
+**The second pulls (world modes review G70).** A chunk pulls once when its mesh lands, and a chunk wholly under the sea
+gets all of its water that way, so water that reached it only through a neighbour that flooded after it pulled never came:
+which voxels flooded depended on the order the chunks finished meshing in. Now a chunk's water rising queues its face
+neighbours that have already pulled (`bWaterSettled`) and reach below the sea to pull again (`QueueWaterRepulls`): across
+every face when its water first settles (its generated water arrived with it), else across the faces its pull flooded.
+`ProcessWaterRepulls` runs the queue each tick within about a millisecond, first in first out, on Loaded chunks only (a
+chunk queued for a mesh or meshing pulls when that mesh lands, and its voxels are not written while a job may read them);
+a pull that floods refreshes its water tile and queues on. The flood so reaches every dry air voxel below the sea connected
+to the sea through loaded chunks, whatever the order. `voxel.Water.PullAgain` (1; 0 = one pull each, the rule before);
+`voxel.Water.Stats` reports the second pulls (`GetWaterRepullStats`). Tests: `Streaming.Water.PullOrder.Plane`, `.Planet`;
+`Streaming.{Planet,Plane}.FarReadsOffGameThread` compare every chunk's water between their two runs.
 
 ### Edit-Triggered Propagation
 

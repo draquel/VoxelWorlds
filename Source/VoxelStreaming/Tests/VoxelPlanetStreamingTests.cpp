@@ -1632,8 +1632,8 @@ namespace VoxelPlanetStreamingTestUtils
 			const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetEditMergedSnapshot(Coord);
 			if (Voxels.IsValid())
 			{
-				// The water flag is masked: the water pull's result at a chunk corner depends on the order neighbouring
-				// chunks finish meshing, either way (G70); it is compared apart.
+				// The water flag is compared apart (its count): the water pull's result at a chunk corner depended on the
+				// order neighbouring chunks finished meshing until G70, which makes it the same in both runs.
 				TArray<FVoxelData> Masked = *Voxels;
 				int32 Water = 0;
 				for (FVoxelData& Voxel : Masked)
@@ -1665,8 +1665,8 @@ namespace VoxelPlanetStreamingTestUtils
 			After.GameThreadDecodes * 10 <= Before.GameThreadDecodes);
 		Test.TestTrue(*FString::Printf(TEXT("%s: after, the snapshots decode on workers (%lld)"), Place, After.SnapshotDecodes), After.SnapshotDecodes > 0);
 
-		// The same world either way: every chunk's voxels and every mesh and seam. Water flags are reported: where they
-		// differ, it is the water pull's order dependence (G70), which runs of either setting show alike.
+		// The same world either way: every chunk's voxels and every mesh and seam, and since G70 every chunk's water (the
+		// water pull's result no longer depends on the order chunks finish meshing in).
 		Test.TestEqual(*FString::Printf(TEXT("%s: the same chunks loaded"), Place), After.VoxelCrcs.Num(), Before.VoxelCrcs.Num());
 		int32 Different = 0;
 		for (const TPair<FIntVector, uint32>& Pair : After.VoxelCrcs)
@@ -1682,11 +1682,12 @@ namespace VoxelPlanetStreamingTestUtils
 			if (Other && *Other != Pair.Value)
 			{
 				++WaterDifferent;
-				Test.AddInfo(FString::Printf(TEXT("%s: chunk %s holds %d water voxels against %d (the water pull's order, G70)"),
+				Test.AddInfo(FString::Printf(TEXT("%s: chunk %s holds %d water voxels against %d"),
 					Place, *Pair.Key.ToString(), Pair.Value, *Other));
 			}
 		}
 		Test.AddInfo(FString::Printf(TEXT("%s: %d of %d chunks with a different water count"), Place, WaterDifferent, After.WaterCounts.Num()));
+		Test.TestEqual(*FString::Printf(TEXT("%s: every chunk's water the same (G70)"), Place), WaterDifferent, 0);
 		Test.TestEqual(*FString::Printf(TEXT("%s: every mesh and seam the same"), Place), After.MeshCrc, Before.MeshCrc);
 	}
 }
