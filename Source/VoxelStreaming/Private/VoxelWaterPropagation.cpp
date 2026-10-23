@@ -79,11 +79,12 @@ void UVoxelWaterPropagation::OnChunkEdited(const FIntVector& ChunkCoord, EEditSo
 		Max[Axis] = FMath::Clamp(Max[Axis], 0, ChunkSize - 1);
 	}
 
-	// Only voxels below the sea can take water. The plane clips the box's top; a sphere drops a box wholly above it.
+	// Only voxels below the sea can take water. The plane clips the box's top; a sphere drops a box wholly above it. Both
+	// in world space, as generation floods (a voxel's world Z is WorldOrigin.Z plus its grid Z, G19).
 	const FIntVector Base = ChunkCoord * ChunkSize;
 	if (!Sea.bRadial)
 	{
-		const int32 TopBelow = FMath::FloorToInt32(Sea.PlaneZ / VoxelSize) - Base.Z;
+		const int32 TopBelow = FMath::FloorToInt32((Sea.PlaneZ - WorldOrigin.Z) / VoxelSize) - Base.Z;
 		Max.Z = FMath::Min(Max.Z, TopBelow);
 	}
 	else
@@ -537,8 +538,8 @@ FIntVector UVoxelWaterPropagation::VoxelKeyToChunk(const FIntVector& Key) const
 
 bool UVoxelWaterPropagation::IsBelowSea(const FIntVector& Key) const
 {
-	const FVector GridPos = FVector(Key) * VoxelSize;
-	return Sea.IsBelow(Sea.bRadial ? WorldOrigin + GridPos : GridPos);
+	// The voxel's sample point in world space, the plane's too (G19: generation's fill pass tests world Z).
+	return Sea.IsBelow(WorldOrigin + FVector(Key) * VoxelSize);
 }
 
 bool UVoxelWaterPropagation::ReadVoxel(const FIntVector& Key, FVoxelData& OutVoxel) const

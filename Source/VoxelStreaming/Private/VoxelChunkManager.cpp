@@ -3274,18 +3274,18 @@ FVector UVoxelChunkManager::GetPlanetSpawnPosition() const
 	return Surface + GetUpVectorAt(Surface) * Configuration->PlanetSpawnAltitude;
 }
 
-FVoxelSeaSurface UVoxelChunkManager::GetSeaSurface(bool bOriginRelativePlane) const
+FVoxelSeaSurface UVoxelChunkManager::GetSeaSurface() const
 {
 	if (!Configuration)
 	{
 		return FVoxelSeaSurface();
 	}
-	return bOriginRelativePlane ? FVoxelSeaSurface::FromConfigOriginRelative(*Configuration) : FVoxelSeaSurface::FromConfig(*Configuration);
+	return FVoxelSeaSurface::FromConfig(*Configuration);
 }
 
 float UVoxelChunkManager::GetSeaDepthAt(const FVector& WorldPos) const
 {
-	const FVoxelSeaSurface Sea = GetSeaSurface(/*bOriginRelativePlane=*/true);
+	const FVoxelSeaSurface Sea = GetSeaSurface();
 	return Sea.bEnabled ? static_cast<float>(Sea.GetDepth(WorldPos)) : -1.0e9f;
 }
 
@@ -7620,11 +7620,10 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		return false;
 	}
 
-	// "Below the sea" as generation's fill pass tests it: the WaterLevel plane, or a planet's WaterRadius sphere (SP-B8).
-	// The sphere is tested in world space (the chunk grid is relative to WorldOrigin, the planet centre); the plane keeps
-	// its Z test on the grid position.
+	// "Below the sea" as generation's fill pass tests it: the WaterLevel plane, or a planet's WaterRadius sphere (SP-B8),
+	// in world space (the chunk grid is relative to WorldOrigin; the plane is world Z, as the terrain's heights are, G19).
 	const FVoxelSeaSurface Sea = FVoxelSeaSurface::FromConfig(*Configuration);
-	const FVector VoxelOrigin = Sea.bRadial ? ChunkWorldPos + Configuration->WorldOrigin : ChunkWorldPos;
+	const FVector VoxelOrigin = ChunkWorldPos + Configuration->WorldOrigin;
 	auto IsBelowSea = [&Sea, &VoxelOrigin, VS](int32 X, int32 Y, int32 Z)
 	{
 		return Sea.IsBelow(VoxelOrigin + FVector(X, Y, Z) * VS);
@@ -7640,7 +7639,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 
 	// Plane: voxels above the water level never seed — clamp the Z iteration up front instead of
 	// rejecting them one by one. For the X/Y faces, loop axis B is Z. A sphere checks every voxel.
-	const int32 MaxSeedZ = Sea.bRadial ? CS - 1 : FMath::Clamp(FMath::FloorToInt32((Sea.PlaneZ - ChunkWorldPos.Z) / VS), 0, CS - 1);
+	const int32 MaxSeedZ = Sea.bRadial ? CS - 1 : FMath::Clamp(FMath::FloorToInt32((Sea.PlaneZ - VoxelOrigin.Z) / VS), 0, CS - 1);
 
 	// The seed search reads only (G65): a far-compressed chunk without edits through its snapshot (decoded on a worker,
 	// usually prefetched when the chunk was queued), so a chunk no water flows into is neither expanded nor marked
@@ -7685,7 +7684,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		const int32 MaxIdx = CS - 1;
 
 		// +Z face: the whole plane sits at Z=MaxIdx — skip it when that plane is above water
-		if (!Sea.bRadial && F == 4 && (ChunkWorldPos.Z + MaxIdx * VS) > Sea.PlaneZ)
+		if (!Sea.bRadial && F == 4 && (VoxelOrigin.Z + MaxIdx * VS) > Sea.PlaneZ)
 		{
 			continue;
 		}
@@ -7886,8 +7885,7 @@ void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 F
 			continue;
 		}
 		// Wholly above the sea: nothing to flood (PropagateWaterFromNeighbors' own test).
-		const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(Neighbour, CS, VS);
-		const FVector VoxelOrigin = Sea.bRadial ? ChunkWorldPos + Configuration->WorldOrigin : ChunkWorldPos;
+		const FVector VoxelOrigin = FVoxelCoordinates::ChunkToWorld(Neighbour, CS, VS) + Configuration->WorldOrigin;
 		if (Sea.IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
 		{
 			continue;
@@ -7953,10 +7951,10 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	const int32 CS = State->Descriptor.ChunkSize;
 
 	// Chunks entirely above the water level cannot hold water flags — skip the full-volume
-	// column scan (this runs per mesh submit) and just clear any stale contribution.
+	// column scan (this runs per mesh submit) and just clear any stale contribution. World Z, as generation floods (G19).
 	if (Configuration)
 	{
-		const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(ChunkCoord, CS, Configuration->VoxelSize);
+		const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(ChunkCoord, CS, Configuration->VoxelSize) + Configuration->WorldOrigin;
 		if (ChunkWorldPos.Z > Configuration->WaterLevel)
 		{
 			RemoveWaterTileContribution(ChunkCoord);

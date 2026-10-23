@@ -153,7 +153,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	{
 		SlabNoiseParams = WorldConfig->NoiseParams;
 		bSlabHasWater = WorldConfig->bEnableWaterLevel;
-		SlabWaterLevel = WorldConfig->WaterLevel + WorldConfig->WorldOrigin.Z; // the water plane is relative to the origin
+		SlabWaterLevel = WorldConfig->WaterLevel; // world Z, as the terrain's heights and generation's water are (G19)
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Surface slab ENABLED: every column keeps its surface ±%.1f chunks%s at every distance"),
 			SlabSlackChunks, bSlabHasWater ? TEXT(" (up to the water plane)") : TEXT(""));
 	}

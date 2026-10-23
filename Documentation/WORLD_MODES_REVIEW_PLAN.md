@@ -1459,7 +1459,7 @@ Three findings from §13.11 get IDs here:
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
 | G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
 | G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Fixed (§16.3): one cave carve for every world mode (`GpuCaveCarve`, the planet's generalised), after the biome blend as on the CPU. `GPUvsCPUCavesParity` adds four cases that fail on the old shader (biome scale 1.25 with a minimum-depth override, scale 0, scale 0.5, a chunk under the sea with `UnderwaterMinDepth`); every earlier parity case, planet included, keeps its CRC. `GenerationVersion` 2 (D10) | — |
-| G19 | Heightmap water consumers disagree on the water plane: generation, scatter, the map and PCG compare with `WaterLevel`; navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z` (found in spherical Phase 3, §17). They agree whenever `WorldOrigin.Z` is 0, as in every configuration in the project | Open, documented: both conventions are named in `FVoxelSeaSurface` (`FromConfig`, `FromConfigOriginRelative`) and every consumer goes through one of them; unifying would move water in a world with `WorldOrigin.Z` ≠ 0 | — |
+| G19 | Heightmap water consumers disagree on the water plane: generation, scatter, the map and PCG compare with `WaterLevel`; navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z` (found in spherical Phase 3, §17). They agree whenever `WorldOrigin.Z` is 0, as in every configuration in the project | Fixed in §20.20 (2026-10-23): the sea is `WaterLevel` in world Z, where generation floods and the tiles draw (the terrain's heights are absolute; `WorldOrigin` moves only the grid). `FromConfigOriginRelative` and `GetSeaSurface`'s parameter are gone; navigation, the character, the NPC spawner, the debug commands, `GetSeaDepthAt` and the LOD slab read the one plane, and the water pull, the edit-driven flood and the tiles' chunk filter (which passed grid positions: the origin-relative plane again) test world positions. No project world changes (every configuration has `WorldOrigin.Z` 0); tests with `WorldOrigin.Z` -20,000 to 9,000 | — |
 | G20 | Debug tooling: `vox.TP`'s settle re-requested an already-cooked chunk's collision, which re-cooks it under a pawn standing there (a READY→NOT-READY "re-cook" in the capture), and `vox.Debug.Capture` compared the frame after a teleport with the frame before, logging a "fall-through signature" at every teleport onto ground not streamed yet (found in spherical Phase 3's exit check, §17.2) | Fixed (§17.2, game module): the settle requests only chunks without collision; the capture restarts after a jump of more than a chunk in one frame and while the settle holds | (WM-W4) |
 | G21 | A fresh pawn's view was level in world space, not in its gravity: the engine's possess and restart leave the start spot's world-level rotation (and `AVCGameModeBase` builds respawn rotations from world yaw), so away from the north pole a spawned or respawned player looked into the ground or the sky (45° down after a drowning at 43°; 3° at the polar spawn, unnoticed in Phase 3). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): every possession levels the view on the first planet frame (`AVCPlayerController::bLevelViewInGravity`) | WM-SY21 |
 | G22 | World items lay in the world's frame on a planet: the mesh is `AWorldItem`'s root, so the placeholder's and the WorldDisplay fragment's resting pose (`SetRelativeRotation`) replaced the pool's upright rotation (a raw meat dropped at 8° latitude stood 81.5° off the radial). Found in spherical Phase 4's exit check (§18.2.3) | Fixed (§18.2.3): `AWorldItem::ApplyRestingPose` relative to the upright frame | WM-SY16 |
@@ -8561,6 +8561,74 @@ of those), a chunk mesh's own copy of a resident chunk (`MeshRequest.VoxelData`,
 (`FPendingScatterGeneration::ChunkVoxelData`, held while it waits), and the edit-merged copies of chunks with edits.
 
 G71 is fixed.
+
+### 20.20 G19: one sea plane in heightmap worlds (2026-10-23)
+
+Bases: VoxelWorlds `6cf8973`, VoxelCharacterPlugin `1d84e16`, UE5_PluginDev `b992fe5` (G71 merged). Branches
+`fix/g19-sea-plane` (VoxelWorlds, VoxelCharacterPlugin) and `claude/g19-sea-plane` (UE5_PluginDev). Built with editor
+5.8.3 from `D:\Program Files\Epic Games\UE_5.8`; tests headless and in a worktree editor (Claudius on 8098).
+
+**The finding** (§17): heightmap water consumers disagreed on the water plane. Generation, scatter, the map and PCG used
+`WaterLevel`; navigation, the character and the NPC spawner used `WaterLevel + WorldOrigin.Z`. They agree whenever
+`WorldOrigin.Z` is 0. Since Phase 3 both conventions had been named in `FVoxelSeaSurface` (`FromConfig`,
+`FromConfigOriginRelative`).
+
+**Which plane is the sea.** `WorldOrigin` moves the chunk grid, not the ground: the terrain's heights are world Z
+(`SeaLevel` + `BaseHeight` + the noise, `FVoxelWorldModeFactory::MakeTerrainParams`), and generation's water fill (CPU and
+GPU) floods air at world Z ≤ `WaterLevel` (`GetChunkWorldPosition` is `WorldOrigin` plus the grid position). The water tiles
+are drawn there too (built relative to `WorldOrigin.Z` and placed at it by both renderers), and so is the island's far
+ocean. So the sea is `WaterLevel`, wherever `WorldOrigin` is.
+
+**The audit.** Every plane test in the code, by the plane it used:
+
+| Plane | Consumers |
+|---|---|
+| `WaterLevel`, world Z | generation's water fill and underwater materials (CPU, GPU), the water tiles' height, the far ocean, scatter's underwater class, the map and its edit overlay, PCG, POI placement |
+| `WaterLevel + WorldOrigin.Z` | navigation (`FVoxelSurfaceNavParams::WaterLevel` and `Sea`), the character (swim and breath depth, the spawn search, the sea spawn on a planet), the NPC spawner, the debug commands, `GetSeaDepthAt` (Blueprint), the LOD slab's water term (`SlabWaterLevel`) |
+| grid Z against `WaterLevel` (the same as the row above) | the chunk manager's water pull and its second pulls (`PropagateWaterFromNeighbors`, `QueueWaterRepulls`), the edit-driven flood (`UVoxelWaterPropagation::IsBelowSea` and its plane clip), the water tiles' chunk filter (`UpdateWaterTileContribution`) |
+
+The last row was not in G19: those tests passed the voxel's grid position to the sea, not its world position, which on a
+plane is the origin-relative plane again. With `WorldOrigin.Z` ≠ 0 each origin-relative consumer was off by it: a pawn
+reads its swim depth from the wrong surface (clamped to 0 under a negative origin) and spawns on the seabed or finds no
+land; navigation walks under the sea or treats land as water; the LOD slab drops the layer the water's surface is in, or
+streams layers of air above it; a chunk holding the sea's surface gets no water tile under a negative origin; a dig under
+the sea floods up to the wrong height, or not at all.
+
+**What changed** (one plane, generation's):
+
+- `FVoxelSeaSurface::FromConfigOriginRelative` is gone and `UVoxelChunkManager::GetSeaSurface` takes no parameter: every
+  consumer reads `FromConfig`, the `WaterLevel` plane in world Z (the sphere on a planet, unchanged). Navigation, the
+  character, the NPC spawner, the debug commands and `GetSeaDepthAt` with it.
+- Navigation's `WaterLevel` is the sea's plane; the LOD slab's water term is `WaterLevel`.
+- The water pull, its second pulls, the edit-driven flood and the water tiles' chunk filter test the voxel's world position
+  (`WorldOrigin` + grid) on the plane, as they already did on a planet.
+
+**No world in the project changes.** All 25 `UVoxelWorldConfiguration` assets have `WorldOrigin.Z` 0 (listed headless: the
+demo and review worlds at (12,345, 54,321, 0), the rest at the origin), and at Z 0 every changed line computes what it did.
+
+**Tests.** Each new test fails before the change and passes after:
+
+- **`Streaming.Plane.OneSeaPlane`** (new, `VoxelSeaPlaneTests.cpp`): the small plane with its sea at 0, `WorldOrigin.Z`
+  -3,000 and 2,600, streamed. Generation's highest water-flagged voxel is at Z 0. Every one of the 22,309 flagged voxels
+  must be under the chunk manager's sea (before: 0 of them at -3,000), a voxel above the highest above it (before: under
+  it at 2,600), and every chunk column holding water must have a water tile (before: 0 of 12 at -3,000).
+- **`LOD.VerticalWindow.WaterPlaneWithOrigin`** (new): every far column's slab must be its surface ± the slack, raised to
+  the water plane, in the grid's layers. Before: 93 of 252 columns wrong with the origin 20,000 down and the sea at 6,000
+  (the water's surface layer dropped), 107 with it 9,000 up and the sea at 1,000 (a layer of air added).
+- **`Navigation.Plane.SeaWithOrigin`** (new): navigation's sea is the `WaterLevel` plane and ground a wade deeper under it is
+  water. Before: its plane at -3,000 and 2,600.
+- **`VoxelCharacter.Plane.SpawnAboveSeaWithOrigin`** (new, VoxelCharacterPlugin): from a seabed start the spawn search finds
+  dry land, from a land start it stays. Before: the seabed accepted at -3,000; no spawn from either start at 2,600.
+- **The edit-driven flood's suite** (`Streaming.WaterPropagation.*`: digs, pockets, chunk arrival, tiles, undo) now runs on a
+  plane whose origin is off the voxel grid on every axis, Z included ((3,112.5, -1,937.5, -2,187.5)); its helpers test the
+  plane in world space (`SeaGridZ`), as does `Streaming.Water.PullOrder`'s measure.
+- `Streaming.Planet.SeaQueries` and `WorldModes.Planet.SeaDepth` check the one plane instead of the two.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 602/602 headless (598 on main
++ the four above) and 602/602 in the editor with the GPU tests running (no device loss). The 108 GPU parity lines are
+CRC-identical to G44's (no generation change).
+
+G19 is fixed.
 
 ### 20.21 G28: the voxel over a buried chunk's top layer, caves included (2026-10-23)
 
