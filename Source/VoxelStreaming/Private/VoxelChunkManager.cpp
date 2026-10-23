@@ -523,6 +523,15 @@ static TAutoConsoleVariable<int32> CVarFarCompressionSnapshotReads(
 	     "in place on the game thread, as before (for A/B)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarWaterPullAgain(
+	TEXT("voxel.Water.PullAgain"),
+	1,
+	TEXT("The water pull across chunk faces (world modes review G70): 1 = when a chunk's water rises after a neighbour pulled "
+	     "(its own pull floods voxels on the face they share, or its generated water arrives), that neighbour pulls again, "
+	     "so the flood reaches the same voxels whatever order the chunks finish meshing in; 0 = each chunk pulls once when "
+	     "its mesh lands, as before (a flood that reached it only through a neighbour that flooded later never came)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarCollisionNeighborShells(
 	TEXT("voxel.Collision.NeighborShells"),
 	1,
@@ -944,6 +953,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	if (WaterPropagation && WaterPropagation->HasPendingWork())
 	{
 		WaterPropagation->ProcessPropagation(512);
+	}
+
+	// === The water pull's second passes (G70), within about a millisecond ===
+	if (WaterRepullQueue.Num() > 0)
+	{
+		ProcessWaterRepulls();
 	}
 
 	// === LOD level changes and morph factor updates ===
@@ -1686,6 +1701,8 @@ void UVoxelChunkManager::Shutdown()
 
 	// Shutdown water propagation (before edit manager since it depends on it)
 	WaterPropagation = nullptr;
+	WaterRepullQueue.Reset();
+	WaterRepullSet.Reset();
 
 	// Shutdown edit manager
 	if (EditManager)
@@ -7323,7 +7340,8 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		if (Configuration && Configuration->bEnableWaterLevel)
 		{
 			const double WaterT0 = FPlatformTime::Seconds();
-			PropagateWaterFromNeighbors(ChunkCoord);
+			uint8 FloodedFaces = 0;
+			PropagateWaterFromNeighbors(ChunkCoord, &FloodedFaces);
 
 			// The chunk's water is in place, the first time since its voxel data arrived: an edit that reached it before (a
 			// POI's terraform or a dungeon stamp at stream-in, a save's edits) is scanned for voxels it opened to the sea now
@@ -7334,6 +7352,10 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			{
 				WaterPropagation->OnChunkWaterSettled(ChunkCoord);
 			}
+
+			// Its neighbours that pulled before its water was there pull again (G70): across every face the first time (its
+			// generated water arrived with it), else across the faces this pull flooded.
+			QueueWaterRepulls(ChunkCoord, bWaterArrived ? 0x3F : FloodedFaces);
 
 			// Update this chunk's contribution to its 2D water tile
 			if (UsesWaterTiles())
@@ -7398,9 +7420,17 @@ bool UVoxelChunkManager::UsesWaterTiles() const
 		&& Configuration->WorldMode != EWorldMode::SphericalPlanet;
 }
 
-bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoord)
+bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoord, uint8* OutFloodedFaces, int32* OutFloodedVoxels)
 {
 	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("water pull"));
+	if (OutFloodedFaces)
+	{
+		*OutFloodedFaces = 0;
+	}
+	if (OutFloodedVoxels)
+	{
+		*OutFloodedVoxels = 0;
+	}
 	if (!Configuration || !Configuration->bEnableWaterLevel)
 	{
 		return false;
@@ -7631,6 +7661,29 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d,%d,%d): PropagateWaterFromNeighbors — %d seeds, %d total propagated"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NumSeeds, BFSQueue.Num());
 
+	// The faces the flood reached (the neighbours there may pull it on: G70). The queue holds every voxel it flagged.
+	if (OutFloodedFaces)
+	{
+		uint8 Faces = 0;
+		for (const int32 Idx : BFSQueue)
+		{
+			const int32 Z = Idx / SliceSize;
+			const int32 Y = (Idx - Z * SliceSize) / CS;
+			const int32 X = Idx - Z * SliceSize - Y * CS;
+			Faces |= (X == CS - 1 ? 1 : 0) | (X == 0 ? 2 : 0) | (Y == CS - 1 ? 4 : 0) | (Y == 0 ? 8 : 0)
+				| (Z == CS - 1 ? 16 : 0) | (Z == 0 ? 32 : 0);
+			if (Faces == 0x3F)
+			{
+				break;
+			}
+		}
+		*OutFloodedFaces = Faces;
+	}
+	if (OutFloodedVoxels)
+	{
+		*OutFloodedVoxels = BFSQueue.Num();
+	}
+
 	// The flags went into the voxel array without a ContentVersion bump (GetVoxelDataMutable): an edit-merged snapshot
 	// built before them would lack them, and the water tile reads one for a chunk with edits (G59).
 	SnapshotCounters.RemovedOnWater += SeamSnapshotCache.Remove(ChunkCoord);
@@ -7640,6 +7693,85 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 }
 
 // ==================== 2D Water Tile System ====================
+
+void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 FaceMask)
+{
+	if (FaceMask == 0 || !Configuration || !Configuration->bEnableWaterLevel || CVarWaterPullAgain.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+	static const FIntVector FaceOffsets[6] = { {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1} };
+	const int32 CS = Configuration->ChunkSize;
+	const float VS = Configuration->VoxelSize;
+	const FVoxelSeaSurface Sea = FVoxelSeaSurface::FromConfig(*Configuration);
+	for (int32 F = 0; F < 6; ++F)
+	{
+		if (!(FaceMask & (1 << F)))
+		{
+			continue;
+		}
+		const FIntVector Neighbour = ChunkCoord + FaceOffsets[F];
+		const FVoxelChunkState* NeighbourState = ChunkStates.Find(Neighbour);
+		// A neighbour that has not pulled yet does when its mesh lands, and reads this chunk's water then.
+		if (!NeighbourState || !NeighbourState->bWaterSettled || !NeighbourState->Descriptor.HasVoxelDataAvailable())
+		{
+			continue;
+		}
+		// Wholly above the sea: nothing to flood (PropagateWaterFromNeighbors' own test).
+		const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(Neighbour, CS, VS);
+		const FVector VoxelOrigin = Sea.bRadial ? ChunkWorldPos + Configuration->WorldOrigin : ChunkWorldPos;
+		if (Sea.IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
+		{
+			continue;
+		}
+		bool bAlreadyQueued = false;
+		WaterRepullSet.Add(Neighbour, &bAlreadyQueued);
+		if (!bAlreadyQueued)
+		{
+			WaterRepullQueue.Add(Neighbour);
+			++WaterRepullStats.Queued;
+		}
+	}
+}
+
+void UVoxelChunkManager::ProcessWaterRepulls()
+{
+	// About a millisecond a tick, at least one pull: a pull without seeds reads only its six faces, one that floods a chunk
+	// runs a BFS over it. First in, first out, so a flood spreads ring by ring.
+	const double Deadline = FPlatformTime::Seconds() + 0.001;
+	int32 Index = 0;
+	for (; Index < WaterRepullQueue.Num(); ++Index)
+	{
+		if (Index > 0 && FPlatformTime::Seconds() > Deadline)
+		{
+			break;
+		}
+		const FIntVector ChunkCoord = WaterRepullQueue[Index];
+		WaterRepullSet.Remove(ChunkCoord);
+		FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+		// Only a Loaded chunk: one queued for a mesh or meshing pulls when that mesh lands, and its voxels are not written
+		// while a job may read them.
+		if (!State || !State->Descriptor.HasVoxelDataAvailable() || !State->bWaterSettled || State->State != EChunkState::Loaded)
+		{
+			++WaterRepullStats.Skipped;
+			continue;
+		}
+		++WaterRepullStats.Run;
+		uint8 FloodedFaces = 0;
+		int32 FloodedVoxels = 0;
+		if (PropagateWaterFromNeighbors(ChunkCoord, &FloodedFaces, &FloodedVoxels))
+		{
+			++WaterRepullStats.Flooded;
+			WaterRepullStats.FloodedVoxels += FloodedVoxels;
+			if (UsesWaterTiles())
+			{
+				UpdateWaterTileContribution(ChunkCoord);
+			}
+			QueueWaterRepulls(ChunkCoord, FloodedFaces);
+		}
+	}
+	WaterRepullQueue.RemoveAt(0, Index, EAllowShrinking::No);
+}
 
 void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoord)
 {
@@ -9782,6 +9914,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 			{
 				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: no water propagation (bEnableWaterLevel off)"), *TargetWorld->GetName());
 			}
+			const UVoxelChunkManager::FWaterRepullStats R = CM->GetWaterRepullStats();
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: the pull's second passes (G70, voxel.Water.PullAgain): %lld queued, %lld run, %lld flooded (%lld voxels), %lld skipped, %d pending"),
+				*TargetWorld->GetName(), R.Queued, R.Run, R.Flooded, R.FloodedVoxels, R.Skipped, R.Pending);
 			if (bColumn)
 			{
 				TArray<int32> WetLayers;
