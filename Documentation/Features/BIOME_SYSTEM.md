@@ -175,6 +175,32 @@ FBiomeBlend CalculateBiomeBlend(FVector WorldPos)
 }
 ```
 
+### The material in a blend zone
+
+Where a voxel's blend has more than one biome and no weight over 0.9, the voxel takes one biome's material, chosen per voxel
+with a probability equal to that biome's weight (`FVoxelBiomeSnapshot::PickBlendIndex`, the registry's `GetBlendedMaterial`,
+the GPU's `GpuBlendedMaterial` in `BiomeMaterial.ush`). The value that decides is the blend dither, `FVoxelBiomeBlendDither`
+(`VoxelBiomeBlendDither.h`; world modes review G39):
+
+- **Key.** The voxel's integer position in voxels from the world's origin of space, round(WorldPos / VoxelSize), and the
+  world seed. Generation counts it from the chunk's first voxel (`GridBase` plus the local index); the analytic readers (the
+  surface query, the map) take `KeyAt` at the point they read, so they find the same voxel.
+- **Value.** 3D value noise on a lattice 4 voxels apart: each lattice point's 16-bit integer hash (the ore `Rarity` hash's
+  mix, on the lattice coordinates and the seed + 0x5D1A3), trilinear with smoothstep weights 0, 5, 16 and 27 of 32, all in
+  integers, then equalised through a fixed 257-entry table of the noise's distribution (`Cdf`), so it is uniform on [0, 1)
+  and a biome covers its weight's share of the voxels. The CPU and the GPU compute the same multiple of 2^-24.
+- **Order.** The walk over the blend's biomes goes in BiomeID order, not by weight, so a patch keeps its biome where the
+  leading biome changes inside a zone.
+
+Two biomes interleave in patches a few voxels across, their shares following the weights across the zone, with no relation
+to the voxel grid. Before G39 the value was frac(W0 x 17.3 + W1 x 31.7 + depth x 0.1): across a zone the weights change
+slowly, so it followed the voxel's depth under the surface, which cycles with the grid on a slope, and drew bands of the two
+materials along the grid (widest on planets, where the grid is tilted against local up everywhere). `voxel.Biome.BlendDither 0`
+restores that value and the weight order (read when a chunk generates; for A/B). A weight over 0.9 still takes its biome's
+material outright, so a zone's visible edge is where the leading weight crosses 0.9, as before. Only the materials inside
+blend zones change; neither `GenerationVersion` nor `PlanetGenerationVersion` moved, so earlier saves load (their edits on
+top of the new materials).
+
 ## Integration with Generation
 
 ```cpp

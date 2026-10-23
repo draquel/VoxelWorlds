@@ -1479,7 +1479,7 @@ Three findings from §13.11 get IDs here:
 | G36 | On a big planet the land search (`FindSpawnablePosition`, 50,000 uu of arc) finds nothing from an open-sea pole: the first spawn waits in the core at the map's PlayerStart (over the small planet's pole, inside M and L) and a settle from altitude never lands (§20.2) | Fixed in P6.5 (§20.6): the first spawn searches the whole planet in rings (`FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`, at most 4,096 samples) and spawns at the sea's surface on a planet with no land; the debug settle with no land within reach settles onto the sea; the landing hold (`vox.Fly 0`) holds a falling pawn over uncooked land; `VoxelCharacter.Planet.SpawnAtScale` | WM-BP10, WM-BP11 |
 | G37 | Planet POI queries by distance (claim streaming, `poi.Find`, the planet map markers) opened a cap from the chord of their range plus the origin's height, tens of degrees for an origin in the core or high above a big planet: frames of 30 s to 3 min on `Review_Planet_L`; registration generated every POI of the planet (8.2 million on L, 120 s) for a log line (§20.2) | Fixed in P6.1 (§20.2, WM-BP11's bounds brought forward): `FPOIPlacement::GetPlanetCapAngleWithin`, `GetPlanetSurveyAngle`; `POI.Planet.RegistrationBounded` | (WM-BP11) |
 | G38 | In-editor runs of the six suites lost the GPU device (`DXGI_ERROR_DEVICE_REMOVED`, `DRIVER_INTERNAL_ERROR`, seen at the creation of a 2 GB reserved buffer) at about the 128th render scene of the editor session. Tests that build worlds leave them to the garbage collector, and nothing collected garbage during a run: after a batch of 105 test worlds, 106 `UWorld`s were alive (1 after `obj gc`). The suites as they were build 124 and finished; P6.1's tests took them past the limit (every run that reached 127 scenes lost the device, on the base worktree too, and none that stayed at 126 or under). Headless runs are unaffected | Fixed in P6.1: the game module collects garbage when a test ends with 32 test worlds pending (`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`, `vox.Tests.GCEveryWorlds`); 529/529 in the editor with no device loss (§20.2) | — |
-| G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position, so across a blend zone, where the weights change slowly, it follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets (the grid tilted against local up everywhere, climate zones km across): `Review_Planet_L`'s equator and M's 45° and equator from above (also in P6.1's M shot; found in spherical Phase 6's P6.2 survey, §20.3) | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) | — |
+| G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position, so across a blend zone, where the weights change slowly, it follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets (the grid tilted against local up everywhere, climate zones km across): `Review_Planet_L`'s equator and M's 45° and equator from above (also in P6.1's M shot; found in spherical Phase 6's P6.2 survey, §20.3) | Fixed in §20.22 (2026-10-23): the value is 3D value noise over a lattice 4 voxels apart on the voxel's integer key (round(WorldPos / VoxelSize) and the world seed; the ore `Rarity` hash's mix on the lattice points, smoothstep weights, all in integers), equalised through a fixed table of its distribution so a biome covers its weight's share, the same on the CPU and the GPU (`FVoxelBiomeBlendDither`, `GpuBiomeBlendDither`): the two biomes interleave in patches a few voxels across; the walk goes in BiomeID order (no seam where the leading biome changes inside a zone); `voxel.Biome.BlendDither` (0 = before); no version bump (the user's choice); with the cvar at 0 the 108 GPU parity lines are G44's, with the dither 78 change (the cases whose chunk holds a blend zone) | — |
 | G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Fixed in P6.4 (WM-BP9, §20.5): where the shell would sag past its 8 uu budget (M, L) the far field draws the sea, a section of each patch at sea level with offsets of the patch's size and an 8 x 8 grid (sag under a uu near the viewer); the small planet keeps its shell | WM-BP9 |
 | G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Fixed in P6.5 (§20.6): the lagged pivot snaps when the ideal pivot jumps more than `TeleportSnapDistance` (5,000 uu) in a frame (`UVCThirdPersonCameraMode::ComputeLaggedPivot`, `VoxelCharacter.Camera.TeleportSnap`) | WM-BP10 |
 | G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Fixed in §20.10: scatter's HISM writes. A UE 5.8 HISM rebuilds its cluster tree and recreates its scene proxy (every instance, pooled ones too, re-registered with the distance-field and ray-tracing scenes) for each change not in place, and the streaming touched the HISMs around the viewer nearly every frame. Writes are now batched per HISM (at most every 0.1 s, not during a tree build, releases in place, no render-state dirtying), pooled HISMs compacted, and a planet keeps 4-chunk scatter regions. The great circles' frame P95 −31% (M) and −23% (L), within 3% of the small planet's land route (its 45°N great circle runs 65% under the sea) | WM-BP13 |
@@ -6237,7 +6237,7 @@ in the worktree, against P6.1's `p6_base_*`):
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position: across a blend zone the weights change slowly, so the pick follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets, where the grid is tilted against local up everywhere and climate zones are km across | Open: dither by an integer hash of the voxel's key (a planet's: the ore `Rarity` key) on the CPU and the GPU; on heightmap worlds it changes generated materials and the parity CRCs, so it waits for its own change (with or without a `GenerationVersion` bump) |
+| G39 | Biome blend zones draw bands of two materials along the voxel grid on gentle slopes: the blended material's "random" pick (`FVoxelBiomeSnapshot::SelectBlendedMaterial[WithWater]`, `FVoxelBiomeRegistry::GetBlendedMaterial`, the GPU's `GpuBlendedMaterial`) is frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), no hash of position: across a blend zone the weights change slowly, so the pick follows the voxel's depth under the surface, which cycles with the grid on a slope. Every world mode; widest on planets, where the grid is tilted against local up everywhere and climate zones are km across | Fixed in §20.22: a lattice value-noise dither on the voxel's key, equalised, walked in BiomeID order (CPU and GPU) |
 | G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on L (159 on M, 8 on the small planet) | Open: WM-BP9 replaces it with far-field sea patches at sea level |
 
 **Tests.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 533/533 headless and
@@ -8628,3 +8628,88 @@ demo and review worlds at (12,345, 54,321, 0), the rest at the origin), and at Z
 CRC-identical to G44's (no generation change).
 
 G19 is fixed.
+
+### 20.22 G39: biome blend zones dithered in patches, not along the voxel grid (2026-10-23)
+
+Bases: VoxelWorlds `50f96cd`, UE5_PluginDev `0a6dd79` (G19 merged). Branches `fix/g39-blend-dither` (VoxelWorlds) and
+`claude/g39-blend-dither` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`; tests headless
+and in a worktree editor (Claudius on 8098). The user chose patches over a per-voxel hash, and no version bump.
+
+**The finding** (§20.3): a voxel in a biome blend zone (no weight over 0.9) takes one biome's material, the first biome
+whose cumulative weight passes a "random" value. That value was frac(W0 × 17.3 + W1 × 31.7 + depth × 0.1), with no hash of
+the voxel's position. Across a zone the weights change slowly, so the value followed the voxel's depth under the surface,
+which on a slope cycles with the voxel grid: the two materials alternated in bands along the grid. Every world mode had it;
+planets showed it widest, the grid being tilted against local up everywhere and climate zones km across (`Review_Planet_L`'s
+equator, M's 45° and equator from above). The same formula ran in four places: `FVoxelBiomeSnapshot::SelectBlendedMaterial`
+and `SelectBlendedMaterialWithWater` (generation on the CPU), `FVoxelBiomeRegistry::GetBlendedMaterial` (the map's
+fallback) and the GPU's `GpuBlendedMaterial`.
+
+**The dither** (`FVoxelBiomeBlendDither`, `VoxelBiomeBlendDither.h`; mirrored bit for bit by `GpuBiomeBlendDither` in
+`BiomeMaterial.ush`):
+
+- *Key.* The voxel's integer position in voxels counted from the world's origin of space, round(WorldPos / VoxelSize), and
+  the world seed. Generation adds the local index to the chunk's first voxel (`GridBase(ChunkCoord, ChunkSize,
+  WorldOrigin, VoxelSize)`; the GPU gets it as `BlendDitherBase`); the analytic readers (`FVoxelSurfaceQuery`'s surface and
+  planet conditions, the map's registry fallback) take `KeyAt` at the point they read. A planet uses the same key: its
+  voxel's world position, as the ore `Rarity` hash does.
+- *Value.* 3D value noise over a lattice 4 voxels apart. Each lattice point gets a 16-bit hash (the ore `Rarity` hash's mix
+  on the lattice coordinates and the seed + 0x5D1A3). The eight corners are blended trilinearly with smoothstep weights
+  (0, 5, 16 and 27 of 32 at the voxel's offset in its cell), all in integers (the sum stays under 2^31). The result goes
+  through a fixed 257-entry table of the noise's distribution (`Cdf`, a 256-million-sample Monte Carlo over the 64 offsets),
+  interpolated in integers. The value is a multiple of 2^-24, uniform on [0, 1), and the same on the CPU and the GPU.
+  Without the equalisation, smoothed noise piles up around 0.5: a biome at weight 0.10 would cover 0.9% of the voxels and
+  one at 0.25 9.8%.
+- *Order.* The walk goes over the blend's biomes in BiomeID order (the GPU sorts its four entries with a five-comparator
+  network). The blend sorts its biomes by weight, so a walk in that order changes biome in every voxel where the leading
+  biome changes inside a zone: a seam down the middle of each zone. In BiomeID order the cumulative bounds do not move
+  there.
+
+The 0.9 shortcut stays: a weight over 0.9 takes its biome's material outright, so a zone's visible edge is where the leading
+weight crosses 0.9, as before. `voxel.Biome.BlendDither` (default 1; 0 = the old value and weight order, for A/B) is read
+wherever a pick is made, on any thread; the GPU gets it as `BlendDitherMode`.
+
+**No version bump** (the user's decision): neither `GenerationVersion` nor `PlanetGenerationVersion` moved. Only generated
+materials inside blend zones change, so a save from before loads; its edits apply over the new materials.
+
+**Tests** (new, `BiomeBlendDitherTests.cpp` in VoxelCore, and one GPU test):
+
+- `Biome.BlendDither.Uniform`: over 2 million voxels the value's 16 bins are within 0.61% of an even share, and a biome at
+  weight 0.10 / 0.25 / 0.50 / 0.75 / 0.90 covers 0.1005 / 0.2507 / 0.5007 / 0.7505 / 0.9004 of the voxels.
+- `Biome.BlendDither.Patches`: in a 50/50 blend, neighbours along each axis take the same biome 0.874-0.875 of the time
+  (0.5 for independent picks); the value does not depend on depth.
+- `Biome.BlendDither.Keys`: `GridBase` plus the local index equals `KeyAt` at the voxel's sample point for 60,000 voxels on
+  three grids (two with origins off the voxel grid).
+- `Biome.BlendDither.NoGridBands`: on a slope at weight 0.7, the leading biome's share by the surface's phase in the voxel
+  layer (8 bins). Before: 0.000 to 1.000 (all of one biome in some phases, none in others: the bands). Now: 0.696 to 0.704.
+- `Biome.BlendDither.DominanceFlip`: across a point where the leading biome changes (weights 0.501/0.499 to 0.499/0.501), the BiomeID
+  walk changes 375 of 200,000 voxels; a walk in weight order would change all 200,000.
+- `Generation.GPUvsCPUBlendDitherParity` (GPU): the default biomes with a wide blend (`BiomeBlendWidth` 0.5) on an off-grid
+  origin. On the CPU the two settings pick differently in 4,179 of 32,768 voxels. GPU against CPU: 100.0% of the materials
+  match with the dither and with the old pick, at LOD 0/1/2.
+- `Biome.SnapshotParity`'s reference passes the same key as the surface query.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 608/608 headless (602 on main
++ the six above) and 608/608 in the editor with the GPU tests running (no device loss). GPU parity, 36 cases at LOD 0/1/2:
+
+- With `voxel.Biome.BlendDither 0`, all 108 lines are CRC-identical to G44's.
+- With the dither (the default), 78 lines (26 cases) change CRC, the cases whose chunk holds a blend zone; 30 lines
+  (10 cases) are identical: the ore variant and nine planet cases with no blend zone in their chunk.
+- In every case the GPU's density differences from the CPU are the same counts as G44's, and its material differences the
+  same or fewer (Simplex 2 → 0, L's coast 1 → 0).
+
+**Live** (`PlanetTest` with `voxel.ConfigOverride` and `VoxelDemo` with its own configuration; one PIE per world and
+setting, the cvar set before the world generates; local noon; screenshots `Saved/Screenshots/Claudius/g39_*` in the
+worktree, four pairs side by side in `g39_before_after.png`):
+
+- *L and M at P6.2's equator site (0°, 100°E)*, from 12,000 uu up looking north (P6.2's framing). The old pick draws bands
+  of the two materials along the voxel grid on the slopes, and wide strips of one material where the ground is flat (there
+  the depth term is constant and the weights change slowly, so the value stays on one side of the leading weight). The
+  dither draws the two materials in patches over the whole zone. Top-down at 2,500 uu on M: one material with the old
+  pick, patches of the second biome over a share of the ground with the dither.
+- *L at (0°, 0°)*: a blend zone the old pick draws in one material only; the dither draws patches. M at 45°N 20°E and at
+  (0°, 0°) stand in one biome (the same either way; at (0°, 0°) a zone begins on the far ridge).
+- *`VoxelDemo`*, from 6,000 uu over the world origin in four directions: with the old pick, strips of the second biome
+  follow the terrain's contours through the forest's brown; with the dither they are patches. A zone's edge, where a weight
+  crosses 0.9, looks as before.
+
+G39 is fixed.
