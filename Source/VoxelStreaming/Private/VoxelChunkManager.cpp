@@ -8600,9 +8600,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.RemeshAll: re-meshing %d chunk(s) across %d manager(s)"), TotalDirtied, Managers);
 	}));
 
-// Console: voxel.Scatter.Stats
+// Console: voxel.Scatter.Stats [hism|reset]
 // Dump scatter manager + renderer statistics (HISM counts, pool active/pooled/util, pending
-// adds, chunk/surface/spawn totals, memory) for perf and config profiling. Read the output
+// adds, chunk/surface/spawn totals, memory, worker extraction timing) for perf and config profiling. Read the output
 // with unreal-mcp LogsToolset.GetLogEntries (category LogVoxelStreaming) since Claudius
 // get_output_log fails while PIE holds the log file open.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
@@ -8637,6 +8637,11 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
 			if (!ScatterMgr) { continue; }
 			++Managers;
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.Stats:\n%s"), *ScatterMgr->GetDebugStats());
+			// "voxel.Scatter.Stats reset": restart the worker extraction timing (world modes review G28)
+			if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))
+			{
+				ScatterMgr->ResetExtractionTiming();
+			}
 			// "voxel.Scatter.Stats hism": the HISMs by size (world modes review G42)
 			if (Args.Num() > 0 && Args[0].Equals(TEXT("hism"), ESearchCase::IgnoreCase) && ScatterMgr->GetScatterRenderer())
 			{
@@ -8934,6 +8939,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterConditioningAuditCmd(
 //   deepUnder     H more than 1.5 voxels over the top and the voxel above solid (a copy inside the rock, classified underground)
 //   keepFake      H under the top but the voxel above is solid (built over, or the SDF's rounding)
 //   spawnsUnder   spawn points on the top layer whose column's voxel above is solid, of surface types / underground-only types
+//   realCross     columns the scan reads (its point spacing) whose top voxel is solid and the voxel above air: a real crossing
+//                 at the boundary (the surface, a cave floor, a dug floor), from both chunks' edit-merged voxels
+//   missedReal    of them, columns with no point on the top layer (G28: a rule deciding the voxel above that loses real floors)
 // Logs a summary and the chunks with the most underSurface points, writes every chunk with a row to
 // Saved/VoxelAudit/TopFaceAudit_<world>_<time>.csv, and with drawSeconds > 0 draws, in front of the terrain (they lie under
 // it), the underSurface points (magenta), the other under points within the band (blue) and the spawn points of surface
@@ -8995,11 +9003,13 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 			{
 				int32 Rows = 0, Under = 0, UnderSurface = 0, Open = 0, Unknown = 0, BandDropReal = 0, DeepDropReal = 0, DeepUnder = 0, KeepFake = 0;
 				int32 SpawnsUnderSurfaceType = 0, SpawnsUnderUndergroundType = 0;
+				int32 RealCross = 0, MissedReal = 0, MissedRealDeep = 0;
 				void Add(const FRowCounts& O)
 				{
 					Rows += O.Rows; Under += O.Under; UnderSurface += O.UnderSurface; Open += O.Open; Unknown += O.Unknown; BandDropReal += O.BandDropReal;
 					DeepDropReal += O.DeepDropReal; DeepUnder += O.DeepUnder; KeepFake += O.KeepFake;
 					SpawnsUnderSurfaceType += O.SpawnsUnderSurfaceType; SpawnsUnderUndergroundType += O.SpawnsUnderUndergroundType;
+					RealCross += O.RealCross; MissedReal += O.MissedReal; MissedRealDeep += O.MissedRealDeep;
 				}
 			};
 			TArray<TPair<FIntVector, FRowCounts>> PerChunk;
@@ -9036,8 +9046,15 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 				};
 
 				FRowCounts Counts;
+				TSet<int32> RowColumns; // the columns with a point from their top voxel (smooth: from the voxel itself up, where a
+				                        // top voxel at the surface density puts its crossing)
 				for (const FVoxelSurfacePoint& Point : Surface->SurfacePoints)
 				{
+					if (bCubic ? FMath::Abs(Point.Position.Z - ChunkTop) < 1.0 : Point.Position.Z >= ChunkTop - VoxelSize - 0.01)
+					{
+						const FIntPoint C = ColumnOf(Point.Position);
+						RowColumns.Add(C.X + C.Y * CS);
+					}
 					const bool bTopRow = bCubic ? FMath::Abs(Point.Position.Z - ChunkTop) < 1.0 : Point.Position.Z > ChunkTop - VoxelSize + 0.01;
 					if (!bTopRow)
 					{
@@ -9075,6 +9092,32 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 						DrawDebugPoint(TargetWorld, Point.Position, 8.0f, Point.bIsUnderground ? FColor::Blue : FColor::Magenta, false, DrawSeconds, SDPG_Foreground);
 					}
 				}
+				// The real crossings at the boundary, from both chunks' voxels, over the columns the scan reads (smooth: at the
+				// point spacing's stride; cubic: every column), and those the row has no point in (G28).
+				const TSharedPtr<const TArray<FVoxelData>> Own = bAboveKnown ? CM->GetEditMergedSnapshot(Coord) : nullptr;
+				if (Own.IsValid() && Own->Num() == CS * CS * CS)
+				{
+					const int32 Stride = bCubic ? 1 : FMath::Max(1, FMath::RoundToInt(Surface->AveragePointSpacing / VoxelSize));
+					for (int32 Y = 0; Y < CS; Y += Stride)
+					{
+						for (int32 X = 0; X < CS; X += Stride)
+						{
+							if (!(*Own)[X + Y * CS + (CS - 1) * CS * CS].IsSolid() || (*Above)[X + Y * CS].IsSolid())
+							{
+								continue;
+							}
+							++Counts.RealCross;
+							if (!RowColumns.Contains(X + Y * CS))
+							{
+								++Counts.MissedReal;
+								const double SampleX = Origin.X + X * VoxelSize, SampleY = Origin.Y + Y * VoxelSize;
+								const float Natural = WM->GetTerrainHeightAt(static_cast<float>(SampleX), static_cast<float>(SampleY), Config->NoiseParams);
+								const float Generated = Zones.Num() > 0 ? FVoxelTerrainConditioning::ApplyToHeight(SampleX, SampleY, Natural, Zones) : Natural;
+								Counts.MissedRealDeep += Generated > ChunkTop + 1.5 * VoxelSize ? 1 : 0;
+							}
+						}
+					}
+				}
 				if (const FChunkScatterData* Scatter = ScatterMgr->GetChunkScatterData(Coord))
 				{
 					for (const FScatterSpawnPoint& Spawn : Scatter->SpawnPoints)
@@ -9095,16 +9138,17 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 						}
 					}
 				}
-				if (Counts.Rows > 0)
+				if (Counts.Rows > 0 || Counts.RealCross > 0)
 				{
 					PerChunk.Add(TPair<FIntVector, FRowCounts>(Coord, Counts));
 					Total.Add(Counts);
 				}
 			}
 
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit [%s, %s]: %d surface chunk(s), %d with a top-face row; rows %d: under the ground %d (surface %d, deep %d), open %d, unknown %d; against the generated height: bandDropReal %d, deepDropReal %d, keepFake %d; spawns under the ground %d of surface types, %d of underground types"),
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.TopFaceAudit [%s, %s]: %d surface chunk(s), %d with a top-face row; rows %d: under the ground %d (surface %d, deep %d), open %d, unknown %d; against the generated height: bandDropReal %d, deepDropReal %d, keepFake %d; spawns under the ground %d of surface types, %d of underground types; real crossings %d, missed %d (deep %d)"),
 				*TargetWorld->GetName(), bCubic ? TEXT("cubic") : TEXT("smooth"), SurfaceChunks, PerChunk.Num(), Total.Rows, Total.Under, Total.UnderSurface, Total.DeepUnder, Total.Open,
-				Total.Unknown, Total.BandDropReal, Total.DeepDropReal, Total.KeepFake, Total.SpawnsUnderSurfaceType, Total.SpawnsUnderUndergroundType);
+				Total.Unknown, Total.BandDropReal, Total.DeepDropReal, Total.KeepFake, Total.SpawnsUnderSurfaceType, Total.SpawnsUnderUndergroundType,
+				Total.RealCross, Total.MissedReal, Total.MissedRealDeep);
 			TArray<TPair<FIntVector, FRowCounts>> Sorted = PerChunk;
 			Sorted.Sort([](const TPair<FIntVector, FRowCounts>& A, const TPair<FIntVector, FRowCounts>& B) { return A.Value.UnderSurface > B.Value.UnderSurface; });
 			for (int32 i = 0; i < FMath::Min(MaxLines, Sorted.Num()) && Sorted[i].Value.UnderSurface > 0; ++i)
@@ -9117,12 +9161,13 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterTopFaceAuditCmd(
 					C.SpawnsUnderSurfaceType, C.SpawnsUnderUndergroundType,
 					Centre.X, Centre.Y, Centre.Z);
 			}
-			TArray<FString> CsvLines = { TEXT("X,Y,Z,rows,under,underSurface,deepUnder,open,unknown,bandDropReal,deepDropReal,keepFake,spawnsUnderSurfaceType,spawnsUnderUndergroundType") };
+			TArray<FString> CsvLines = { TEXT("X,Y,Z,rows,under,underSurface,deepUnder,open,unknown,bandDropReal,deepDropReal,keepFake,spawnsUnderSurfaceType,spawnsUnderUndergroundType,realCross,missedReal,missedRealDeep") };
 			for (const TPair<FIntVector, FRowCounts>& Pair : PerChunk)
 			{
 				const FRowCounts& C = Pair.Value;
-				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z, C.Rows, C.Under, C.UnderSurface,
-					C.DeepUnder, C.Open, C.Unknown, C.BandDropReal, C.DeepDropReal, C.KeepFake, C.SpawnsUnderSurfaceType, C.SpawnsUnderUndergroundType));
+				CsvLines.Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z, C.Rows, C.Under, C.UnderSurface,
+					C.DeepUnder, C.Open, C.Unknown, C.BandDropReal, C.DeepDropReal, C.KeepFake, C.SpawnsUnderSurfaceType, C.SpawnsUnderUndergroundType,
+					C.RealCross, C.MissedReal, C.MissedRealDeep));
 			}
 			const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("TopFaceAudit_%s_%s.csv"),
 				*TargetWorld->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));

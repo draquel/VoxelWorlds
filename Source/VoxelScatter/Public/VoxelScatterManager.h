@@ -13,6 +13,7 @@
 class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
 class IVoxelWorldMode;
+class UVoxelCaveConfiguration;
 struct FVoxelConditioningZone;
 
 /**
@@ -53,6 +54,20 @@ struct FScatterExtractionContext
 	TSharedPtr<const TMap<int32, FVoxelEdit>> AboveLayerEdits;
 
 	/**
+	 * Heightmap worlds (world modes review G28): the world's cave configuration when its caves are on, so the voxel over a
+	 * chunk's top layer under deeper ground is carved as generation carves it (GetVoxelAboveChunk). Null: no caves (the
+	 * voxel is the terrain's alone). Non-owning: the world configuration's asset.
+	 */
+	const UVoxelCaveConfiguration* CaveConfiguration = nullptr;
+
+	/**
+	 * Heightmap worlds (G28, voxel.Scatter.BuriedTopFace): the scans decide the voxel over a chunk's top layer at any depth
+	 * (GetVoxelAboveChunk, caves included), so a buried chunk's top face carries no copy of the rock above it. False: only
+	 * within the band the buried-chunk test lets through (G26), the voxel taken for air under deeper ground, as before.
+	 */
+	bool bDecideVoxelAboveAtAnyDepth = true;
+
+	/**
 	 * Planets: the edits in the voxels just past the chunk's +X, +Y and +Z faces, which its last cell on each axis reaches
 	 * (world modes review G29, G31): the layers of the seven neighbours on those sides (GetPlanetShellNeighbours) that
 	 * touch the chunk. Keyed by the voxel's coordinate in this chunk's frame (each component in [0, ChunkSize], one of
@@ -70,20 +85,24 @@ struct FScatterExtractionContext
 	float GetGeneratedTerrainHeight(double WorldX, double WorldY) const;
 
 	/**
-	 * Heightmap worlds (world modes review G26): the voxel over a chunk's top layer at a column, the chunk above's bottom
-	 * voxel. Its density is the generated height's at the chunk's top (the heightmap generator's signed distance, so solid
-	 * where that height reaches the top), with the chunk above's edit there applied (AboveLayerEdits). Valid where no
-	 * cave reaches that voxel, i.e. near the generated surface (cave layers keep several voxels under it). Only Density
-	 * and MaterialID are meaningful.
+	 * Heightmap worlds (world modes review G26, G28): the voxel over a chunk's top layer at a column, the chunk above's
+	 * bottom voxel, as the heightmap generators make it: the generated height's signed distance at the chunk's top (solid
+	 * where that height reaches the top), less the cave carve there (CaveConfiguration: FVoxelCPUNoiseGenerator's
+	 * CalculateCaveDensity at the voxel's depth under the generated ground, for the column's biome, under the sea or not),
+	 * with the chunk above's edit there applied (AboveLayerEdits). Only Density and MaterialID are meaningful.
 	 * @param LocalX Column X in the chunk
 	 * @param LocalY Column Y in the chunk
 	 * @param ChunkSize Voxels per chunk edge
-	 * @param GeneratedHeight The generated height at the column's voxel sample position (GetGeneratedTerrainHeight)
-	 * @param ChunkTopZ World Z of the chunk's top (the voxel above's sample height)
+	 * @param SamplePos The voxel's sample position: the column's X, Y (the chunk's origin + LocalX, LocalY * VoxelSize) at
+	 *        the chunk's top Z, as generation samples the chunk above's bottom layer
+	 * @param GeneratedHeight The generated height at the column's sample position (GetGeneratedTerrainHeight)
 	 * @param VoxelSize Voxel edge in world units
+	 * @param BiomeID The column's biome (a column has one: any of its generated voxels' BiomeID), for the cave
+	 *        configuration's biome overrides
 	 * @return The voxel above the chunk's top layer
 	 */
-	FVoxelData GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, float GeneratedHeight, double ChunkTopZ, float VoxelSize) const;
+	FVoxelData GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, const FVector& SamplePos, float GeneratedHeight, float VoxelSize,
+		uint8 BiomeID) const;
 
 	/**
 	 * Planets (world modes review G29): a voxel just outside the chunk, in a neighbour's layer touching it, which the chunk's
@@ -666,6 +685,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Debug")
 	FString GetDebugStats() const;
 
+	/**
+	 * Restart the worker extraction timing GetDebugStats reports (world modes review G28: chunks extracted on the thread
+	 * pool, their extraction and placement time, the surface points they found). voxel.Scatter.Stats reset.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Debug")
+	void ResetExtractionTiming();
+
 	// ==================== Events ====================
 
 	/** Fired when scatter data is ready for a chunk */
@@ -825,9 +851,8 @@ protected:
 	 * Scans voxel columns top-down for surface transitions, interpolates exact Z,
 	 * computes normals from density gradient, reads MaterialID/BiomeID from voxel data.
 	 * Produces consistent results regardless of which LOD level the mesh was generated at.
-	 * The voxel over the top layer is the chunk above's: near the generated surface it is the context's
-	 * GetVoxelAboveChunk (solid: the top voxel is no surface and the column below it is covered, world modes
-	 * review G26); deeper, where the buried-chunk test covers the chunk, it is taken for air.
+	 * The voxel over the top layer is the chunk above's: the context's GetVoxelAboveChunk (solid: the top voxel is
+	 * no surface and the column below it is covered, world modes review G26; at any depth, caves included, G28).
 	 */
 	static void ExtractSurfacePointsFromVoxelData(
 		const TArray<FVoxelData>& VoxelData,
@@ -957,7 +982,24 @@ protected:
 		FChunkScatterData ScatterData;
 		TSet<int32> GeneratedTypeIDs;
 		bool bSuccess = false;
+		/** Worker time on the chunk (G28 timing): surface extraction, then spawn placement. */
+		double ExtractSeconds = 0.0;
+		double PlaceSeconds = 0.0;
+		/** Surface points the extraction found (0 when it found none: no surface data cached). */
+		int32 ExtractedPoints = 0;
 	};
+
+	/** The async results' worker timing since the last reset (G28), summed on the game thread as they are consumed. */
+	struct FExtractionTiming
+	{
+		int64 Chunks = 0;
+		int64 Points = 0;
+		double ExtractSeconds = 0.0;
+		double ExtractMaxSeconds = 0.0;
+		double PlaceSeconds = 0.0;
+		double PlaceMaxSeconds = 0.0;
+	};
+	FExtractionTiming ExtractionTiming;
 
 	/** MPSC queue for completed async scatter results (written by thread pool, read by game thread) */
 	TQueue<FAsyncScatterResult, EQueueMode::Mpsc> CompletedScatterQueue;
