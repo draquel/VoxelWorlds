@@ -1510,7 +1510,7 @@ Three findings from §13.11 get IDs here:
 | G67 | After a teleport or a spawn the window streams in at once, and stays resident until far compression catches up (`IdleFrames` 300, then at most 4 encodes a tick): on M and L, 779-830 of about 1,100 chunks are resident 10-11 s after the settle (787-837 MB of voxel data, systems 1.05-1.24 GB) for about 5 s, in G52's build too. About 340 of them are uniform (all air or all solid), which the sweep collapses for free but only after the same wait. Collapsing a uniform chunk when it is generated would take about 340 MB off that peak, given reads that do not re-expand it (meshing and seams read through `EnsureResident`). Under D3 either way | Open (an improvement, not a defect): found with G66 (§20.11) | — |
 | G68 | System edits (POI and dungeon stamps, campsites) enter the undo history, and since G60 each voxel change there is an `FVoxelEditChange` (its chunk, its position and the whole edit before and after: 112 bytes, against `FVoxelEdit`'s 40). On L, 4 POI operations around the site hold 94.0 MB of the edit manager's 122.0 (the edit layer: 420,713 edits, 28.0 MB). The same history took 33.6 MB before G60, so L's systems memory, settled and peak, rose 60 MB with it. An undo would take back the last of them | Fixed in §20.14 (the user's decision): dungeon stamps, their entrances and campsites begin their operations outside the history, as water propagation's flood does, so an undo takes back the player's own last edit; and the history keeps within `voxel.Edit.UndoHistoryMB` (32 MB, oldest dropped first, the newest always kept). Live on L: 420,713 edits, no undo step, the edit manager 28.0 MB against 122.0 | — |
 | G69 | The seam snapshot cache (`UVoxelChunkManager::SeamSnapshotCache`: one full array per chunk, 1 MB at 64³, kept for 128 seam ticks after its last use) holds 1,061-1,095 MB at the small planet's great-circle peak and 688-753 MB on M and L, 590-750 MB at the end, with and without G65's snapshot reads. Nothing counted it before G65 (`GetVoxelMemoryStats`; the eviction's comment says tens of MB). Counted with the systems and the far field, the traverse peaks at 1.75-1.83 GB on S, 1.34-1.42 on M and 1.48-1.61 on L, over D3's 1.5 GB on S (§20.13) | Fixed 2026-10-22 (§20.15): traced with `voxel.Snapshot.Stats`, the cache is the working set, not stale entries (10+ reads each, a shorter lifetime only re-makes them); its peak was collision cooks, which pin each of their 26 neighbours' whole snapshot to read one plane of it (the collision radius is half the view distance, 20,000 uu here), and uniform chunks each expanded into their own array. Now cooks read their neighbours from boundary shells (`FVoxelChunkShell`, the voxels within `VoxelNeighborSlices::GetNeighborDepth` of each face: 96 KB at 64³ against 1 MB; `voxel.Collision.NeighborShells`), a cook drops its own chunk's snapshot once it has taken it unless another reader did, and uniform chunks share one array per value (`voxel.Snapshot.ShareUniform`). Benches (three runs per planet, by cvar): the snapshot cache's peak 0.71-1.09 → 0.46-0.71 GB, the traverse's peak with it and the far field S 1.76-1.78 → 1.30-1.36 GB, M 1.34-1.41 → 1.10-1.14, L 1.49 → 1.23 (D3 met), frame, manager, catch-up and game-thread decode unchanged; collision meshes identical (`Streaming.{Planet,Plane}.CollisionNeighborShells`). G71 recorded | — |
-| G70 | The water pull's result at a chunk corner depends on the order in which the neighbouring chunks finish meshing: in `Streaming.Planet.FarReadsOffGameThread` 9 air voxels below the sea at chunk (6, 0, 9)'s +Y+Z corner are flooded in some runs and not in others, with either setting of `voxel.FarCompression.SnapshotReads` (§20.13) | Open (not traced): found with G65; the test compares the water flags apart | — |
+| G70 | The water pull's result at a chunk corner depends on the order in which the neighbouring chunks finish meshing: in `Streaming.Planet.FarReadsOffGameThread` 9 air voxels below the sea at chunk (6, 0, 9)'s +Y+Z corner are flooded in some runs and not in others, with either setting of `voxel.FarCompression.SnapshotReads` (§20.13) | Fixed in §20.16: a chunk pulled the flags across its faces once, when its mesh landed, and a neighbour whose water rose later never passed it on (a chunk wholly under the sea gets all its water that way). Now a chunk's water rising has its settled face neighbours pull again (`QueueWaterRepulls`, about a millisecond a tick, Loaded chunks only; `voxel.Water.PullAgain`), so the flood is the same whatever the meshing order: `Streaming.Water.PullOrder.{Plane,Planet}` 202,034 / 103,345 dry voxels the flood reaches → 0; G65's test compares every chunk's water now | — |
 | G71 | Seam jobs and chunk meshes still read their participants' whole snapshots: with G69's shells, 540-607 of the small planet's mid-traverse entries (518-579 MB) are read by a seam job or a chunk mesh. A seam job reads its participants only near the seam, but each side's boundary ring is recomputed with that side's own samplers, which reach a stride-scale depth (several voxels at LOD 2), so a shell at coarse LODs would hold most of a chunk, and the rings must stay bit-identical (§20.15) | Open (an improvement): D3 is met without it | — |
 | T6 | `STATGROUP_Voxel` cycle counters | Not planned: `LODUpdateMs` (§13.11) accounted for the unattributed manager time | — |
 | §11 | Documentation that disagrees with the code | Fixed in M1 (WM-H9, draquel/VoxelWorlds#88; WM-H10's spherical items, draquel/VoxelWorlds#87; merged). Earlier: the `LOD_SYSTEM.md` cubic note, the project `CLAUDE.md` GPU-skip note | WM-H9, WM-H10 |
@@ -8225,3 +8225,72 @@ are CRC-identical to G44's (no generation change). After merging main (G68, §20
 re-makes), the collision radius, and copies of resident chunks for seam jobs.
 
 G69 is fixed.
+
+### 20.16 G70: the water pull, again when a neighbour's water rises (2026-10-22)
+
+Bases: VoxelWorlds `45fbf28`, UE5_PluginDev `a6ccc2b` (G68 and G69 merged). Branches `fix/g70-water-pull-order`
+(VoxelWorlds) and `claude/g70-water-pull-order` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic
+Games\UE_5.8`; tests headless and in a worktree editor (Claudius on 8098), background throttling off.
+
+**The finding** (§20.13): in `Streaming.Planet.FarReadsOffGameThread` 9 air voxels below the sea at chunk (6, 0, 9)'s
++Y+Z corner flooded in some runs and not in others, with either setting of `voxel.FarCompression.SnapshotReads`, so the
+test compared the water flags apart.
+
+**The cause.** A chunk pulls the water flags across its six faces from its neighbours once, when its mesh lands
+(`UVoxelChunkManager::PropagateWaterFromNeighbors`, at the mesh submit), and floods its own dry air below the sea from
+those seeds. A chunk wholly under the sea has no water of its own (generation's fill pass seeds the chunk the sea's surface
+crosses), so it gets all of it that way. Nothing pushed: a neighbour whose water rose after the chunk pulled (its own pull,
+or its generated water arriving with its data) never passed it on. Water that reached a chunk only through a neighbour that
+flooded later never came, and which voxels flooded depended on the order the chunks finished meshing in. A seabed chunk
+meshed before the chunk above it stayed dry.
+
+**What changed** (`VoxelChunkManager.cpp/.h`; no change to generation, meshes, the edit-driven flood or the water tiles'
+rule):
+
+- **The pull again** (`QueueWaterRepulls`, `ProcessWaterRepulls`). When a chunk's water rises, its face neighbours that
+  have already pulled (`bWaterSettled`) and reach below the sea are queued to pull again: across every face when its water
+  first settles (its generated water arrived with it), else across the faces its pull flooded
+  (`PropagateWaterFromNeighbors` now reports them). The queue runs each tick within about a millisecond (at least one
+  pull), first in first out, on Loaded chunks only: a chunk queued for a mesh or meshing pulls when that mesh lands, and its
+  voxels are not written while a job may read them. A pull that floods refreshes the chunk's water tile (heightmap worlds)
+  and queues on. The flood so reaches every dry air voxel below the sea connected to the sea through loaded chunks,
+  whatever the order they mesh in.
+- **One switch:** `voxel.Water.PullAgain` (1; 0 = one pull each, the rule before). `voxel.Water.Stats` reports the second
+  pulls (`GetWaterRepullStats`: queued, run, flooded, voxels, skipped, pending).
+- **Left as they were:** scatter is handed a chunk's voxels before its pull (its cave points are classified by the
+  underground flag, so the pull's flags rarely reach it), and an unloaded chunk's water is pulled again from its neighbours
+  when it reloads.
+
+**Tests.**
+
+- **`Streaming.Water.PullOrder.Plane`, `.Planet`** (new, `VoxelWaterPullOrderTests.cpp`): a sea two chunk layers deeper than
+  the seabed's top (the small plane under a sea at 2,900; the small planet under one 2,300 over the datum), streamed from a
+  viewer 1,200 under the datum, so the chunks under the sea mesh from the bottom up. Afterwards the flags must be closed
+  under the flood: from every flagged voxel, no dry air below the sea in a loaded chunk is reachable through such air, in
+  its own chunk or across a face. With the fix there is none; with one pull each, many:
+
+  | | Before (one pull each) | After |
+  |---|---|---|
+  | Plane, 48 chunks | 202,034 dry voxels the flood reaches, in 18 chunks (512,075 flagged) | 0 (714,109 flagged; 119 second pulls, 17 flooded 139,514 voxels) |
+  | Planet, 40 chunks | 103,345, in 10 chunks (500,869 flagged) | 0 (604,214 flagged; 79 second pulls, 4 flooded 39,055 voxels) |
+
+- **`Streaming.{Planet,Plane}.FarReadsOffGameThread`** (G65's) compare every chunk's water count between their two runs
+  now: 0 of 195 planet and 0 of 231 plane chunks differ in three runs of each (six worlds each). With one pull each
+  the three runs of the planet's showed no difference either: the miss was intermittent there (0-1 of 195 chunks in
+  §20.13's runs), and the `PullOrder` tests are the deterministic check.
+- **What stays history-dependent:** a chunk's flags persist until it unloads, so water a neighbour passed on before it
+  unloaded stays, and a neighbour that unloads before its mesh lands passes its water only to chunks that pulled while it
+  had data. The flood is the same whatever order the chunks mesh in, given the chunks that were loaded together.
+- **Unchanged and green:** `Streaming.WaterPropagation.*` (the edit-driven flood, its chunk-arrival scans, tiles and undo),
+  `Streaming.EditRemesh.*`.
+
+**Live** (a worktree editor, `voxel.Water.Stats` after streaming): `VoxelDemo` from the spawn, a minute: 1,350 second
+pulls queued and run, 2 flooded 124 voxels one pull each would have left dry. `Review_Planet` settled at 45°N 20°E: 2,178
+run, none flooded. A second pull without seeds reads only its chunk's six faces; the queue's millisecond a tick was not
+reached.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 589/589 headless and 589/589 in the editor with the GPU tests running (no device
+loss). The 108 GPU
+parity lines are CRC-identical to G44's.
+
+G70 is fixed.
