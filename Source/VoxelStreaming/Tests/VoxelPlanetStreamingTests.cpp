@@ -1943,4 +1943,122 @@ bool FVoxelPlaneCollisionShellsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace VoxelPlanetStreamingTestUtils
+{
+	/** A streamed place with uniform chunks collapsed as generated or not, far compression's sweep held off. */
+	struct FUniformAtGenerationResult
+	{
+		int32 Loaded = 0;
+		int32 UniformChunks = 0;       // collapsed to uniform when the stream settled
+		int32 ResidentChunks = 0;
+		int64 VoxelDataBytes = 0;
+		int64 CollapsedAtGeneration = 0;
+		int32 GameThreadExpansions = 0; // expansions of compact chunks on the game thread while streaming
+		TMap<FIntVector, uint32> VoxelCrcs;
+		uint32 MeshCrc = 0;
+	};
+
+	FUniformAtGenerationResult RunUniformAtGeneration(FAutomationTestBase& Test, const TCHAR* Place,
+		TFunctionRef<void(FPlanetStreamingWorld&)> Start, int32 Setting)
+	{
+		FScopedIntCVar AtGeneration(TEXT("voxel.FarCompression.UniformAtGeneration"), Setting);
+		// The sweep would collapse them too, after its idle wait: hold it off so only generation does.
+		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 1000000);
+		FUniformAtGenerationResult Result;
+		FPlanetStreamingWorld World;
+		int32 Ignored = 0;
+		float IgnoredMs = 0.0f;
+		VoxelResidencyStats::ConsumeGameThread(Ignored, IgnoredMs);
+		Start(World);
+		Test.TestTrue(*FString::Printf(TEXT("%s (at generation %d): the pipeline settled"), Place, Setting), World.Settle());
+		float Ms = 0.0f;
+		VoxelResidencyStats::ConsumeGameThread(Result.GameThreadExpansions, Ms);
+
+		const UVoxelChunkManager::FVoxelMemoryStats Memory = World.Manager->GetVoxelMemoryStats();
+		Result.UniformChunks = Memory.UniformChunks;
+		Result.ResidentChunks = Memory.ResidentChunks;
+		Result.VoxelDataBytes = Memory.VoxelDataBytes;
+		Result.CollapsedAtGeneration = World.Manager->GetUniformAtGenerationCount();
+
+		TArray<FIntVector> Loaded;
+		World.Manager->GetLoadedChunks(Loaded);
+		Result.Loaded = Loaded.Num();
+		for (const FIntVector& Coord : Loaded)
+		{
+			const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetEditMergedSnapshot(Coord);
+			if (Voxels.IsValid())
+			{
+				Result.VoxelCrcs.Add(Coord, FCrc::MemCrc32(Voxels->GetData(), Voxels->Num() * sizeof(FVoxelData)));
+			}
+		}
+		Result.MeshCrc = MeshesCrc(World);
+		World.Stop();
+		return Result;
+	}
+
+	/**
+	 * G67: the same place streamed with uniform chunks left resident until the sweep (0) and collapsed as generated (1):
+	 * the same voxels and meshes; with 1 the uniform chunks are collapsed when the stream settles and stay so (their readers
+	 * use the shared uniform snapshot, point queries the value), the voxel data falling by their arrays.
+	 */
+	void RunUniformAtGenerationPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start)
+	{
+		const FUniformAtGenerationResult Before = RunUniformAtGeneration(Test, Place, Start, 0);
+		const FUniformAtGenerationResult After = RunUniformAtGeneration(Test, Place, Start, 1);
+		const double ToMB = 1.0 / (1024.0 * 1024.0);
+		Test.AddInfo(FString::Printf(TEXT("%s: %d / %d chunks loaded; uniform %d -> %d (collapsed at generation %lld), resident %d -> %d, voxel data %.1f -> %.1f MB; game-thread expansions while streaming %d -> %d"),
+			Place, Before.Loaded, After.Loaded, Before.UniformChunks, After.UniformChunks, After.CollapsedAtGeneration, Before.ResidentChunks,
+			After.ResidentChunks, Before.VoxelDataBytes * ToMB, After.VoxelDataBytes * ToMB, Before.GameThreadExpansions, After.GameThreadExpansions));
+		Test.TestEqual(*FString::Printf(TEXT("%s: before, no chunk is collapsed with the sweep held off"), Place), Before.UniformChunks, 0);
+		Test.TestTrue(*FString::Printf(TEXT("%s: after, uniform chunks are collapsed as generated (%d)"), Place, After.UniformChunks),
+			After.UniformChunks >= 10);
+		Test.TestTrue(*FString::Printf(TEXT("%s: and they stay so: nothing expanded them again (%d of %lld)"), Place, After.UniformChunks,
+			After.CollapsedAtGeneration), After.UniformChunks * 10 >= After.CollapsedAtGeneration * 9);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the voxel data falls by their arrays"), Place), After.VoxelDataBytes < Before.VoxelDataBytes);
+		Test.TestEqual(*FString::Printf(TEXT("%s: the same chunks"), Place), After.VoxelCrcs.Num(), Before.VoxelCrcs.Num());
+		int32 Different = 0;
+		for (const TPair<FIntVector, uint32>& Pair : After.VoxelCrcs)
+		{
+			const uint32* Other = Before.VoxelCrcs.Find(Pair.Key);
+			Different += (!Other || *Other != Pair.Value) ? 1 : 0;
+		}
+		Test.TestEqual(*FString::Printf(TEXT("%s: every chunk's voxels the same"), Place), Different, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: every mesh and seam the same"), Place), After.MeshCrc, Before.MeshCrc);
+	}
+}
+
+/**
+ * G67 on a planet (45N 20E): uniform chunks (sky, rock, open sea) are collapsed as generated, so the window's voxel data
+ * after a teleport no longer waits for far compression's idle sweep; the world is the same either way.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingUniformAtGenerationTest,
+	"VoxelWorlds.Streaming.Planet.UniformAtGeneration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingUniformAtGenerationTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	const double Lat = FMath::DegreesToRadians(45.0);
+	const double Lon = FMath::DegreesToRadians(20.0);
+	const FVector Direction(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	auto Start = [&Direction](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetUniformAtGenerationTestWorld"), Direction, 300.0f); };
+	RunUniformAtGenerationPlace(*this, TEXT("45N 20E"), Start);
+	return true;
+}
+
+/** G67 on a heightmap world: the same over the plane of the far-reads test. */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingUniformAtGenerationTest,
+	"VoxelWorlds.Streaming.Plane.UniformAtGeneration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneStreamingUniformAtGenerationTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneUniformAtGenerationTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunUniformAtGenerationPlace(*this, TEXT("plane"), Start);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

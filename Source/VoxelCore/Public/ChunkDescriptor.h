@@ -441,6 +441,28 @@ struct VOXELCORE_API FChunkDescriptor
 	 * non-uniform chunk is marked evaluated so the sweep won't re-scan it until its content changes.
 	 * Game-thread only.
 	 */
+	/**
+	 * Collapse a resident chunk known to be uniform (every voxel Value) without scanning it: generation found it so on its
+	 * worker (world modes review G67). Content does not change, so no ContentVersion bump. Game-thread only.
+	 *
+	 * @param Value The chunk's every voxel
+	 * @return True if it was resident and is now uniform
+	 */
+	bool CollapseToUniform(const FVoxelData& Value)
+	{
+		if (Residency != EVoxelDataResidency::Resident)
+		{
+			return false;
+		}
+		UniformValue = Value;
+		bUniformValueValid = true;
+		bCompressionEvaluated = true;
+		VoxelData.Empty();
+		Residency = EVoxelDataResidency::Uniform;
+		AsyncCompactTicket = 0;
+		return true;
+	}
+
 	bool TryCollapseUniform()
 	{
 		if (Residency != EVoxelDataResidency::Resident)
@@ -598,15 +620,33 @@ struct VOXELCORE_API FChunkDescriptor
 		{
 			return false;
 		}
-		const FVoxelData First = Data[0];
-		for (int32 i = 1; i < Data.Num(); ++i)
+		// Whole voxels as words, in blocks OR-reduced against the first (G67: GPU readbacks are scanned as they land, while
+		// the game thread waits): the inner loop vectorizes, and a chunk with any surface stops at its first block that differs.
+		static_assert(sizeof(FVoxelData) == sizeof(uint32), "FVoxelData compares as one word");
+		const uint32* Words = reinterpret_cast<const uint32*>(Data.GetData());
+		const uint32 First = Words[0];
+		const int32 Num = Data.Num();
+		int32 I = 0;
+		for (; I + 64 <= Num; I += 64)
 		{
-			if (Data[i] != First)
+			uint32 Differs = 0;
+			for (int32 K = 0; K < 64; ++K)
+			{
+				Differs |= Words[I + K] ^ First;
+			}
+			if (Differs != 0)
 			{
 				return false;
 			}
 		}
-		Out = First;
+		for (; I < Num; ++I)
+		{
+			if (Words[I] != First)
+			{
+				return false;
+			}
+		}
+		Out = Data[0];
 		return true;
 	}
 
@@ -650,6 +690,13 @@ struct VOXELCORE_API FChunkDescriptor
 	/** Point-query accessor: guarantees residency (lazy-decompresses), then returns one voxel. */
 	FORCEINLINE FVoxelData GetVoxelResident(const FIntVector& LocalPos) const
 	{
+		// A uniform chunk answers without expanding (G67: uniform chunks collapse when generated, near the viewer too).
+		if (Residency == EVoxelDataResidency::Uniform && bUniformValueValid)
+		{
+			const bool bInside = LocalPos.X >= 0 && LocalPos.Y >= 0 && LocalPos.Z >= 0
+				&& LocalPos.X < ChunkSize && LocalPos.Y < ChunkSize && LocalPos.Z < ChunkSize;
+			return bInside ? UniformValue : FVoxelData::Air();
+		}
 		const_cast<FChunkDescriptor*>(this)->EnsureResident();
 		return GetVoxel(LocalPos);
 	}

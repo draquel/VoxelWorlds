@@ -254,6 +254,15 @@ On the great circles this took the cache's peak from 0.71-1.09 GB to 0.46-0.71 G
 and chunk meshes read (G71). `voxel.Snapshot.Stats` lists the cache by kind, reader, age and distance; the bench records
 `SnapMB` (shells included) and `ShellMB`.
 
+**Uniform chunks collapse as they are generated** (G67, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.18;
+`voxel.FarCompression.UniformAtGeneration`, default 1). A chunk whose every voxel is the same (sky, rock, open sea) used to
+stay resident (1 MB at 64³) until the sweep found it idle (`IdleFrames`). After a teleport that put a third of the window's
+voxel data in chunks with nothing in them for several seconds. Generation now finds them on its worker
+(`FChunkDescriptor::ComputeUniformValue`, word blocks that stop at the first that differs; GPU readbacks are scanned as
+they land, those of a tick in parallel, so the result still frees its generation slot that tick), and the chunk is
+stored collapsed (`CollapseToUniform`, no `ContentVersion` change). Nothing expands it again: its
+readers take the shared uniform snapshot (G69), and a point query answers its value (`GetVoxelResident`).
+
 **The encode runs on a worker thread** (`voxel.FarCompression.Async`, default 1). An Oodle encode of
 a 1 MB chunk costs about 3.5 ms in PIE and cannot be split, so the sweep does not run it on the game
 thread. For each chunk that needs a fresh encode (at most `voxel.FarCompression.MaxScansPerTick`, 4,
