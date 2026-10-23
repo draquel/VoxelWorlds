@@ -155,24 +155,145 @@ uint GpuMaterialAtDepth(GpuBiome bio, float DepthBelowSurface, bool bUnderwater)
     else { return bio.DeepMat; }
 }
 
-// UVoxelBiomeConfiguration::GetBlendedMaterial[WithWater]: dominant, or frac-dithered weighted pick.
-uint GpuBlendedMaterial(BiomeBlendResult blend, float DepthBelowSurface, bool bUnderwater)
+// FVoxelBiomeBlendDither (VoxelCore), bit for bit (world modes review G39): the blend zones' dither, 3D value noise over a
+// lattice of 4 voxels on the voxel's key (its position on the world's grid in voxels), equalised through the same table.
+#define BLEND_DITHER_SEED_OFFSET 0x5D1A3
+
+static const uint BlendDitherCdf[257] = {
+    0u, 1144u, 2511u, 4118u, 5976u, 8053u, 10436u, 13114u,
+    16089u, 19368u, 23007u, 27023u, 31443u, 36279u, 41571u, 47347u,
+    53617u, 60473u, 67882u, 75875u, 84542u, 93894u, 103961u, 114815u,
+    126514u, 139018u, 152469u, 166812u, 182232u, 198664u, 216171u, 234854u,
+    254725u, 275898u, 298251u, 321907u, 347027u, 373598u, 401710u, 431300u,
+    462397u, 494995u, 528885u, 564200u, 601035u, 639251u, 678931u, 719987u,
+    762433u, 806435u, 851908u, 899044u, 947496u, 997525u, 1048975u, 1101898u,
+    1156321u, 1212255u, 1269510u, 1328282u, 1388433u, 1449970u, 1512889u, 1577391u,
+    1643288u, 1710351u, 1778680u, 1848404u, 1919407u, 1991743u, 2065398u, 2140147u,
+    2216198u, 2293512u, 2372187u, 2451933u, 2533020u, 2615237u, 2699020u, 2783856u,
+    2869817u, 2957084u, 3045531u, 3135443u, 3226522u, 3318677u, 3412338u, 3507187u,
+    3603298u, 3700634u, 3799246u, 3899080u, 4000105u, 4102324u, 4205902u, 4310827u,
+    4416751u, 4524055u, 4632642u, 4742375u, 4853333u, 4965650u, 5079087u, 5193667u,
+    5309672u, 5426895u, 5545127u, 5664518u, 5785210u, 5906971u, 6029910u, 6153920u,
+    6278942u, 6404988u, 6532078u, 6660031u, 6789019u, 6918920u, 7049699u, 7181200u,
+    7313457u, 7446168u, 7579745u, 7713495u, 7847783u, 7982542u, 8117597u, 8252766u,
+    8388154u, 8523442u, 8658687u, 8793842u, 8928518u, 9063067u, 9197124u, 9330524u,
+    9463379u, 9595595u, 9726967u, 9857635u, 9987304u, 10116177u, 10244301u, 10371413u,
+    10497342u, 10622222u, 10746299u, 10869423u, 10991204u, 11111875u, 11231370u, 11349666u,
+    11466919u, 11582890u, 11697578u, 11811165u, 11923381u, 12034415u, 12144260u, 12252875u,
+    12360317u, 12466417u, 12571227u, 12674831u, 12777111u, 12878154u, 12978042u, 13076693u,
+    13173906u, 13270037u, 13364775u, 13458282u, 13550504u, 13641626u, 13731327u, 13819851u,
+    13906958u, 13992981u, 14077857u, 14161624u, 14243957u, 14325015u, 14404879u, 14483442u,
+    14560870u, 14637087u, 14711894u, 14785339u, 14857519u, 14928559u, 14998115u, 15066600u,
+    15133753u, 15199584u, 15263949u, 15326781u, 15388303u, 15448603u, 15507343u, 15564727u,
+    15620640u, 15675033u, 15727992u, 15779398u, 15829344u, 15877882u, 15924992u, 15970609u,
+    16014700u, 16057378u, 16098386u, 16138063u, 16176315u, 16213056u, 16248476u, 16282441u,
+    16314991u, 16346060u, 16375586u, 16403659u, 16430215u, 16455368u, 16479041u, 16501427u,
+    16522498u, 16542289u, 16560888u, 16578399u, 16594759u, 16610173u, 16624525u, 16638031u,
+    16650565u, 16662259u, 16673120u, 16683217u, 16692565u, 16701191u, 16709228u, 16716617u,
+    16723472u, 16729787u, 16735542u, 16740848u, 16745725u, 16750158u, 16754184u, 16757847u,
+    16761146u, 16764116u, 16766784u, 16769139u, 16771250u, 16773084u, 16774691u, 16776066u,
+    16777216u
+};
+
+// The ore Rarity hash's mix on a lattice point: its top 16 bits (FVoxelBiomeBlendDither's LatticeHash16).
+uint GpuBlendDitherHash16(int3 L, int Seed)
+{
+    uint h = asuint(L.x) * 0x8DA6B343u;
+    h ^= asuint(L.y) * 0xD8163841u;
+    h ^= asuint(L.z) * 0xCB1AB31Fu;
+    h ^= asuint(Seed) * 0x9E3779B9u;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16;
+    return h >> 16;
+}
+
+// FVoxelBiomeBlendDither::Sample: uniform on [0, 1) in multiples of 2^-24.
+float GpuBiomeBlendDither(int3 Key, int WorldSeed)
+{
+    const int Seed = WorldSeed + BLEND_DITHER_SEED_OFFSET;
+    const int3 L = Key >> 2; // floor division by the lattice (arithmetic shift)
+    const uint3 R = asuint(Key) & 3u;
+    const uint FarWeight[4] = { 0u, 5u, 16u, 27u };
+    const uint3 W1 = uint3(FarWeight[R.x], FarWeight[R.y], FarWeight[R.z]);
+    const uint3 W0 = 32u - W1;
+    uint Sum = 0u;
+    [unroll] for (int dz = 0; dz < 2; ++dz)
+    {
+        [unroll] for (int dy = 0; dy < 2; ++dy)
+        {
+            [unroll] for (int dx = 0; dx < 2; ++dx)
+            {
+                const uint W = (dx ? W1.x : W0.x) * (dy ? W1.y : W0.y) * (dz ? W1.z : W0.z);
+                Sum += GpuBlendDitherHash16(L + int3(dx, dy, dz), Seed) * W;
+            }
+        }
+    }
+    const uint Bucket = min(Sum >> 23, 255u);
+    const uint Frac14 = (Sum >> 9) & 0x3FFFu;
+    const uint Lo = BlendDitherCdf[Bucket];
+    const uint Hi = BlendDitherCdf[Bucket + 1];
+    return (float)(Lo + (((Hi - Lo) * Frac14) >> 14)) * (1.0f / 16777216.0f);
+}
+
+// UVoxelBiomeConfiguration::GetBlendedMaterial[WithWater] (FVoxelBiomeSnapshot::PickBlendIndex): the dominant biome, or a
+// weighted pick by the dither at DitherKey walking the biomes in BiomeID order (BlendDitherMode 0: the old frac value of the
+// weights and depth, in weight order).
+uint GpuBlendedMaterial(BiomeBlendResult blend, float DepthBelowSurface, bool bUnderwater, int3 DitherKey)
 {
     if (blend.Count == 1 || blend.Weights[0] > 0.9)
     {
         return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
     }
 
-    float randomValue = frac(blend.Weights[0] * 17.3 + blend.Weights[1] * 31.7 + DepthBelowSurface * 0.1);
-    float cumulative = 0.0;
+    if (BlendDitherMode == 0)
+    {
+        float randomValue = frac(blend.Weights[0] * 17.3 + blend.Weights[1] * 31.7 + DepthBelowSurface * 0.1);
+        float cumulative = 0.0;
+        [unroll] for (int i = 0; i < 4; ++i)
+        {
+            if (i < blend.Count)
+            {
+                cumulative += blend.Weights[i];
+                if (randomValue < cumulative)
+                {
+                    return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[i]), DepthBelowSurface, bUnderwater);
+                }
+            }
+        }
+        return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[0]), DepthBelowSurface, bUnderwater);
+    }
+
+    // The blend's entries in ascending BiomeID (a sorting network over 4; absent entries sort last)
+    uint Order[4] = { 0u, 1u, 2u, 3u };
+    uint Ids[4];
     [unroll] for (int i = 0; i < 4; ++i)
     {
-        if (i < blend.Count)
+        Ids[i] = (i < blend.Count) ? LoadGpuBiome(blend.Indices[i]).BiomeID : 0xFFFFu + (uint)i;
+    }
+    const uint2 Pairs[5] = { uint2(0u, 1u), uint2(2u, 3u), uint2(0u, 2u), uint2(1u, 3u), uint2(1u, 2u) };
+    [unroll] for (int p = 0; p < 5; ++p)
+    {
+        const uint A = Pairs[p].x, B = Pairs[p].y;
+        if (Ids[Order[B]] < Ids[Order[A]])
         {
-            cumulative += blend.Weights[i];
-            if (randomValue < cumulative)
+            const uint T = Order[A];
+            Order[A] = Order[B];
+            Order[B] = T;
+        }
+    }
+    const float r = GpuBiomeBlendDither(DitherKey, NoiseSeed);
+    float cumulative = 0.0;
+    [unroll] for (int k = 0; k < 4; ++k)
+    {
+        if (k < blend.Count)
+        {
+            cumulative += blend.Weights[Order[k]];
+            if (r < cumulative)
             {
-                return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[i]), DepthBelowSurface, bUnderwater);
+                return GpuMaterialAtDepth(LoadGpuBiome(blend.Indices[Order[k]]), DepthBelowSurface, bUnderwater);
             }
         }
     }

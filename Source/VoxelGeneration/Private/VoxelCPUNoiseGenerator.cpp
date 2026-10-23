@@ -178,6 +178,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 	// LOD stride is applied during meshing, not generation
 	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	// The blend zones' dither keys (G39): the chunk's first voxel on the world's grid, plus each voxel's local index.
+	const FIntVector DitherBase = FVoxelBiomeBlendDither::GridBase(Request.ChunkCoord, ChunkSize, Request.WorldOrigin, VoxelSize);
+	const int32 DitherSeed = Request.NoiseParams.Seed;
 
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
@@ -307,11 +310,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 					if (Request.bEnableWaterLevel)
 					{
 						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel);
+							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 					else
 					{
-						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 
 					// Apply height-based material overrides (snow at peaks, rock at altitude, etc.)
@@ -352,7 +355,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
-					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
@@ -833,6 +836,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 	// LOD stride is applied during meshing, not generation
 	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	// The blend zones' dither keys (G39): the chunk's first voxel on the world's grid, plus each voxel's local index.
+	const FIntVector DitherBase = FVoxelBiomeBlendDither::GridBase(Request.ChunkCoord, ChunkSize, Request.WorldOrigin, VoxelSize);
+	const int32 DitherSeed = Request.NoiseParams.Seed;
 
 	// Get biome configuration (may be null if biomes disabled)
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
@@ -950,11 +956,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 					if (Request.bEnableWaterLevel)
 					{
 						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel);
+							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 					else
 					{
-						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 
 					// Apply height-based material overrides
@@ -995,7 +1001,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
 
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
-					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
@@ -1357,6 +1363,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
+	// The blend zones' dither keys (G39): the chunk's first voxel on the world's grid, plus each voxel's local index.
+	const FIntVector DitherBase = FVoxelBiomeBlendDither::GridBase(Request.ChunkCoord, ChunkSize, Request.WorldOrigin, VoxelSize);
+	const int32 DitherSeed = Request.NoiseParams.Seed;
 	const FSphericalPlanetParams& PlanetParams = WorldMode.GetPlanetParams();
 	const FVector PlanetCenter = PlanetParams.PlanetCenter;
 	const double PlanetRadius = PlanetParams.PlanetRadius;
@@ -1467,11 +1476,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					if (Request.bEnableWaterLevel)
 					{
 						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(WaterAltitude));
+							Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(WaterAltitude),
+							FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 					else
 					{
-						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface);
+						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 
 					// Height rules by altitude above the datum (SP-B2)
@@ -1509,7 +1519,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
-					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface);
+					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)

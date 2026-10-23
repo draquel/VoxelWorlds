@@ -115,9 +115,11 @@ bool FBiomeSnapshotParityTest::RunTest(const FString& Parameters)
 		const float M = FVoxelCPUNoiseGenerator::FBM3D(Pos, MoistNP);
 		const float C = FVoxelCPUNoiseGenerator::FBM3D(Pos, ContNP);
 		const FBiomeBlend Blend = Config->GetBiomeBlend(T, M, C);
+		// The blend zones' dither at the surface's voxel, as the query keys it (G39)
+		const FVoxelBlendDitherKey Dither(FVoxelBiomeBlendDither::KeyAt(FVector(X, Y, Height), 100.0f), WorldSeed);
 		uint8 RefMat = (bWater && Height < WaterLevel)
-			? Config->GetBlendedMaterialWithWater(Blend, 0.0f, Height, WaterLevel)
-			: Config->GetBlendedMaterial(Blend, 0.0f);
+			? Config->GetBlendedMaterialWithWater(Blend, 0.0f, Height, WaterLevel, Dither)
+			: Config->GetBlendedMaterial(Blend, 0.0f, Dither);
 		RefMat = Config->ApplyHeightMaterialRules(RefMat, Height, 0.0f);
 		const uint8 RefBiome = Blend.GetDominantBiome();
 
