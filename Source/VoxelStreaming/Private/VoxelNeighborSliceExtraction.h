@@ -21,6 +21,19 @@ struct FVoxelData;
 namespace VoxelNeighborSlices
 {
 	/**
+	 * How many planes Extract reads from each neighbour next to the shared face (plane 0 included): 1 at stride 1 or with
+	 * bDeepOff, stride + 1 by default, 2 * stride with bDeepFull; at most ChunkSize. A neighbour's boundary shell of this
+	 * depth (FVoxelChunkShell) holds everything Extract reads from it (G69).
+	 *
+	 * @param LODLevel  The request's LOD level (stride 2^LOD)
+	 * @param bDeepOff  -VoxelDeepOff
+	 * @param bDeepFull -VoxelDeepFull
+	 * @param ChunkSize Voxels per chunk axis
+	 * @return Planes per face
+	 */
+	int32 GetNeighborDepth(int32 LODLevel, bool bDeepOff, bool bDeepFull, int32 ChunkSize);
+
+	/**
 	 * Fill OutRequest's neighbor slice/edge/corner arrays + flags from an arbitrary voxel source.
 	 *
 	 * @param ChunkSize        Voxels per chunk axis.

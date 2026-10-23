@@ -7,6 +7,7 @@
 #include "Containers/Queue.h"
 #include "VoxelCoreTypes.h"
 #include "ChunkDescriptor.h"
+#include "VoxelChunkShell.h"
 #include "Tasks/Task.h"
 #include "ChunkRenderData.h"
 #include "LODTypes.h"
@@ -442,6 +443,27 @@ public:
 	 * @return Decode tasks launched
 	 */
 	int64 GetSnapshotDecodeCount() const { return SnapshotDecodeTasks; }
+
+	/**
+	 * The seam snapshot cache's contents and session counters (world modes review G69): entries and MB by how they were
+	 * made (copied from a resident chunk, with edits, decoded from a compressed or a uniform chunk), by the reader that
+	 * made them and the last that read them, by age since their last read and by reads; how many workers still hold;
+	 * what was made, read, replaced, evicted and removed this session.
+	 *
+	 * @return Multi-line description (voxel.Snapshot.Stats logs it)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming|Debug")
+	FString DescribeSnapshotCache() const;
+
+	/** Clear the snapshot cache's session counters (voxel.Snapshot.Stats reset). */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming|Debug")
+	void ResetSnapshotCacheCounters()
+	{
+		SnapshotCounters = FSnapshotCacheCounters();
+		RecentlyEvictedSnapshots.Reset();
+		FMemory::Memzero(ShellsMade, sizeof(ShellsMade));
+		ShellHits = 0;
+	}
 
 	/**
 	 * A chunk's edit-merged voxels as a shared, immutable snapshot (ChunkSize^3, chunk-local index
@@ -1063,6 +1085,11 @@ public:
 	 * @param OutNeighborSnapshots Receives the snapshots of the 26 neighbours that have data
 	 * @param OutMissingNeighborMask If set, receives the neighbours without data (bits of
 	 *        UVoxelCollisionManager::GetNeighborBit): the mesher reads them as air, so the cook is re-run when they arrive (G32)
+	 * @param OutSnapshotsReady If set, receives the worker tasks still decoding snapshots or shells, for the cook's worker
+	 *        to wait for (G65); else the game thread waits for them here
+	 * @param OutNeighborShells If set and voxel.Collision.NeighborShells is on, receives the neighbours' boundary shells
+	 *        instead of their snapshots (G69: a cook reads only VoxelNeighborSlices::GetNeighborDepth planes of each);
+	 *        OutNeighborSnapshots is then left empty
 	 * @return True if request was prepared successfully
 	 */
 	bool PrepareCollisionMeshRequest(
@@ -1072,7 +1099,38 @@ public:
 		TSharedPtr<const TArray<FVoxelData>>& OutSharedVoxels,
 		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& OutNeighborSnapshots,
 		uint32* OutMissingNeighborMask = nullptr,
-		TArray<UE::Tasks::FTask>* OutSnapshotsReady = nullptr);
+		TArray<UE::Tasks::FTask>* OutSnapshotsReady = nullptr,
+		TMap<FIntVector, TSharedPtr<const FVoxelChunkShell>>* OutNeighborShells = nullptr);
+
+	/**
+	 * Start the inputs of a queued collision cook decoding on workers (G65, G69): with shells (ShouldUseCollisionShells),
+	 * the 26 neighbours' boundary shells (the far-compressed ones without edits; the chunk's own snapshot is decoded when the
+	 * cook starts, so a long queue holds no whole snapshots); without, the 27 snapshots as PrefetchVoxelSnapshotsAround.
+	 * No-op with voxel.FarCompression.SnapshotReads 0.
+	 *
+	 * @param ChunkCoord The chunk to be cooked
+	 * @param LODLevel   The cook's LOD level (sets the shells' depth)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming")
+	void PrefetchCollisionInputs(const FIntVector& ChunkCoord, int32 LODLevel);
+
+	/**
+	 * Whether collision cooks read their neighbours' boundary shells (voxel.Collision.NeighborShells, G69).
+	 *
+	 * @return True if they do
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming")
+	bool UsesCollisionNeighborShells() const;
+
+	/**
+	 * Whether a cook at this neighbour depth takes shells (G69): voxel.Collision.NeighborShells is on and a shell of that
+	 * depth is at most three quarters of a chunk (8 * Depth <= ChunkSize: one plane at 64^3 is 9%, the stride + 1 planes of
+	 * collision LOD 2 47%); a deeper shell would hold about as much as the chunk, so the cook reads whole snapshots.
+	 *
+	 * @param Depth Planes per face (VoxelNeighborSlices::GetNeighborDepth)
+	 * @return True if shells are used
+	 */
+	bool ShouldUseCollisionShells(int32 Depth) const;
 
 	/** Whether -VoxelDeepOff / -VoxelDeepFull were set (worker-side slice extraction needs them). */
 	bool IsDeepSliceOff() const { return bDeepDepthOff; }
@@ -1099,7 +1157,8 @@ public:
 		int64 CollisionBytes = 0;      // Collision manager memory
 		int64 ScatterBytes = 0;        // Scatter manager + renderer memory
 		int64 TotalBytes = 0;          // Sum of above
-		int64 SnapshotBytes = 0;       // Shared voxel snapshots cached for seam jobs and cooks (not in TotalBytes; G65)
+		int64 SnapshotBytes = 0;       // Shared voxel snapshots cached for seam jobs and cooks, shells included (not in TotalBytes; G65)
+		int64 ShellBytes = 0;          // Of which the neighbours' boundary shells for collision cooks (G69)
 
 		// Far-chunk compression residency breakdown (chunk counts + bytes reclaimed).
 		int32 ResidentChunks = 0;      // raw array in memory
@@ -1747,8 +1806,124 @@ protected:
 		 * (nothing to wait for) for a snapshot copied from a resident array.
 		 */
 		UE::Tasks::FTask Ready;
+
+		// Instrumentation (G69): how the snapshot was made, when, how often it was read again and by which readers.
+		uint8 Kind = 0;                       // ESnapshotKind
+		uint64 CreatedTick = 0;
+		int32 Hits = 0;                       // reads after the one that made it
+		const TCHAR* FirstReason = nullptr;   // VoxelResidencyStats read reason that made it
+		const TCHAR* LastReason = nullptr;    // and the last one that read it
+		uint8 ReaderMask = 0;                 // ESnapshotReader bits of every reader that took it
 	};
 	TMap<FIntVector, FSeamVoxelSnapshot> SeamSnapshotCache;
+
+	/** Who read a cached snapshot (G69 instrumentation; FSeamVoxelSnapshot::ReaderMask). */
+	enum ESnapshotReader : uint8
+	{
+		SnapReaderCollisionOwn = 1 << 0,
+		SnapReaderCollisionNeighbor = 1 << 1,
+		SnapReaderSeamJob = 1 << 2,
+		SnapReaderChunkMesh = 1 << 3,
+		SnapReaderPrefetch = 1 << 4,
+		SnapReaderWater = 1 << 5,
+		SnapReaderScatter = 1 << 6,
+		SnapReaderOther = 1 << 7,
+	};
+
+	/** How a cached snapshot was made (G69). */
+	enum class ESnapshotKind : uint8
+	{
+		Copied = 0,             // copied from a resident chunk's array
+		CopiedWithEdits = 1,    // copied, the chunk's edits applied
+		DecodedCompressed = 2,  // decoded on a worker from a far-compressed chunk (G65)
+		DecodedUniform = 3,     // expanded on a worker from a uniform chunk (G65; voxel.Snapshot.ShareUniform 0)
+		SharedUniform = 4,      // a uniform chunk's, the shared array for its value (G69)
+		Num = 5
+	};
+
+	/** The snapshot cache's session counters (G69; voxel.Snapshot.Stats). */
+	struct FSnapshotCacheCounters
+	{
+		int64 Made[static_cast<int32>(ESnapshotKind::Num)] = {};
+		int64 Hits = 0;
+		int64 Replaced = 0;          // made again for a newer ContentVersion
+		int64 EvictedByAge = 0;
+		int64 EvictedByAgeUnread = 0; // evicted without a single read after the one that made it
+		int64 EvictedAgeTicksSum = 0; // their lifetimes, for the mean
+		int64 RemovedOnUnload = 0;
+		int64 RemovedOnWater = 0;
+		int64 RemadeAfterEviction = 0; // made again within 600 ticks of its eviction by age
+		int64 ReleasedAfterCook = 0;   // a cook's own snapshot dropped once the cook took it, no other reader having (G69)
+	};
+
+	/**
+	 * One immutable array per uniform value (G69): the snapshot of every uniform chunk with that value shares it, so an
+	 * all-air or all-rock chunk costs its cache entry nothing. Keyed by the packed voxel; counted once in the memory stats.
+	 */
+	TMap<uint32, TSharedPtr<const TArray<FVoxelData>>> UniformSnapshotArrays;
+
+	/** The shared array for a uniform chunk's snapshot (G69), made on first use. */
+	TSharedPtr<const TArray<FVoxelData>> GetUniformSnapshotArray(const FVoxelData& Value, int32 TotalVoxels);
+
+	/** How a cached boundary shell was made (G69). */
+	enum class EShellKind : uint8
+	{
+		FromResident = 0,       // cut from a resident chunk's array on the game thread (the faces only)
+		FromSnapshot = 1,       // cut from the chunk's cached full snapshot (edit-merged), on a worker
+		DecodedCompressed = 2,  // a far-compressed chunk decoded on a worker, only the shell kept
+		SharedUniform = 3,      // a uniform chunk's: the shared shell for its value and depth
+		Num = 4
+	};
+
+	/**
+	 * A neighbour's boundary shell for collision cooks (G69): the voxels a cook reads from it, within the cook's
+	 * neighbour depth of each face, instead of its whole array. Keyed per chunk; valid for one ContentVersion and any
+	 * depth up to Depth; dropped with the chunk's snapshot (unload, the water pull's flags) and by the same age sweep.
+	 */
+	struct FChunkShellEntry
+	{
+		uint32 ContentVersion = 0;
+		int32 Depth = 0;
+		uint64 LastUsedTick = 0;
+		TSharedPtr<const FVoxelChunkShell> Shell;
+		/** The worker task that fills Shell (cut from a decoding snapshot or a compressed chunk); invalid when built. */
+		UE::Tasks::FTask Ready;
+		uint8 Kind = 0;   // EShellKind
+		int32 Hits = 0;
+	};
+	TMap<FIntVector, FChunkShellEntry> ShellCache;
+
+	/** One shell per uniform value and depth (G69), shared like UniformSnapshotArrays. Key: packed voxel | depth << 32. */
+	TMap<uint64, TSharedPtr<const FVoxelChunkShell>> UniformShells;
+
+	/** Shells made per kind and cache hits this session (G69; voxel.Snapshot.Stats). */
+	int64 ShellsMade[static_cast<int32>(EShellKind::Num)] = {};
+	int64 ShellHits = 0;
+
+	/**
+	 * A chunk's boundary shell of at least Depth planes for a collision cook (G69; game thread). A far-compressed chunk
+	 * without edits is decoded on a worker and only its shell kept (OutReady receives that task); a resident one is cut
+	 * here from its array (the faces only); a chunk with edits is cut from its edit-merged snapshot.
+	 *
+	 * @param Coord    The chunk
+	 * @param State    Its state
+	 * @param Depth    Planes needed next to each face
+	 * @param OutReady If set, receives the task still filling the shell (invalid when it is built); else this waits
+	 * @return The shell (being filled while OutReady is pending), or null if the chunk has no data
+	 */
+	TSharedPtr<const FVoxelChunkShell> GetChunkShell(const FIntVector& Coord, FVoxelChunkState& State, int32 Depth,
+		UE::Tasks::FTask* OutReady);
+
+	/** Store a shell just made in ShellCache and count it (G69). */
+	TSharedPtr<const FVoxelChunkShell> StoreChunkShell(const FIntVector& Coord, uint32 Version, int32 Depth,
+		TSharedPtr<const FVoxelChunkShell> Shell, UE::Tasks::FTask Ready, EShellKind Kind);
+
+	/** Chunks whose snapshot the age sweep evicted, and when (pruned after 600 ticks; G69 instrumentation). */
+	TMap<FIntVector, uint64> RecentlyEvictedSnapshots;
+	FSnapshotCacheCounters SnapshotCounters;
+
+	/** Stamp a snapshot just made with its kind, tick and reader, and count it (G69). */
+	void NoteSnapshotMade(const FIntVector& Coord, FSeamVoxelSnapshot& Entry, ESnapshotKind Kind);
 
 	/** Snapshots of far-compressed chunks decoded on workers this session (G65). */
 	int64 SnapshotDecodeTasks = 0;

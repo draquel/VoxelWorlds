@@ -240,6 +240,20 @@ ready when read. `voxel.FarCompression.Decodes` lists the expansions per reader 
 records the game thread's share (`DecodeN`, `DecodeMs`, `decodeGT*`) and the snapshot cache's memory
 (`SnapMB`, `peakSnapshotMB`), which the voxel-data figures do not include.
 
+**The snapshot cache's size** (G69, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §20.15). The cache holds the
+working set of its readers (each entry is read ten times or more), so its lifetime (`voxel.Snapshot.MaxAgeTicks`, 128) is
+not what bounds it. What bounds it is what each reader pins:
+
+- A collision cook reads each of its 26 neighbours from a boundary shell (`FVoxelChunkShell`: the voxels within
+  `VoxelNeighborSlices::GetNeighborDepth` of each face, one plane at collision LOD 0, 96 KB at 64³; `voxel.Collision.NeighborShells`),
+  not from the neighbour's whole snapshot.
+- After the cook takes its own chunk's snapshot, the snapshot is dropped unless another reader took it too.
+- Uniform chunks share one array per value (`voxel.Snapshot.ShareUniform`).
+
+On the great circles this took the cache's peak from 0.71-1.09 GB to 0.46-0.71 GB. What remains is mostly what seam jobs
+and chunk meshes read (G71). `voxel.Snapshot.Stats` lists the cache by kind, reader, age and distance; the bench records
+`SnapMB` (shells included) and `ShellMB`.
+
 **The encode runs on a worker thread** (`voxel.FarCompression.Async`, default 1). An Oodle encode of
 a 1 MB chunk costs about 3.5 ms in PIE and cannot be split, so the sweep does not run it on the game
 thread. For each chunk that needs a fresh encode (at most `voxel.FarCompression.MaxScansPerTick`, 4,

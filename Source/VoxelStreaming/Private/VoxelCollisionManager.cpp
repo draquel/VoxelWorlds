@@ -1070,11 +1070,13 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	FVoxelMeshingRequest MeshRequest;
 	TSharedPtr<const TArray<FVoxelData>> SharedVoxels;
 	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> NeighborSnapshots;
+	// The neighbours' boundary shells when voxel.Collision.NeighborShells is on (G69); NeighborSnapshots is then empty.
+	TMap<FIntVector, TSharedPtr<const FVoxelChunkShell>> NeighborShells;
 	uint32 MissingNeighborMask = 0;
 	// Far-compressed chunks' snapshots may still be decoding on workers (G65): the cook's worker waits for them.
 	TArray<UE::Tasks::FTask> SnapshotDecodes;
 	if (!ChunkManager->PrepareCollisionMeshRequest(Request.ChunkCoord, CollisionLODLevel, MeshRequest, SharedVoxels, NeighborSnapshots,
-		&MissingNeighborMask, &SnapshotDecodes))
+		&MissingNeighborMask, &SnapshotDecodes, &NeighborShells))
 	{
 		// Chunk may not be loaded yet or has no geometry — remove the CollisionData
 		// entry so UpdateCollisionDecisions() can re-request on a future sweep.
@@ -1108,7 +1110,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	LastPrepMs += static_cast<float>((FPlatformTime::Seconds() - PrepT0) * 1000.0);
 
 	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
-	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), ChunkCoord, LODLevel, bDeepOff, bDeepFull, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
+	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, bDeepOff, bDeepFull, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
 	{
 		for (UE::Tasks::FTask& Decode : SnapshotDecodes)
 		{
@@ -1131,21 +1133,32 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 		// data at launch time (same semantics as the game-thread extraction path).
 		{
 			const int32 CS = ChunkSizeCapture;
-			auto HasNeighborData = [&NeighborSnapshots](const FIntVector& NCoord) -> bool
+			auto HasNeighborData = [&NeighborSnapshots, &NeighborShells](const FIntVector& NCoord) -> bool
 			{
-				return NeighborSnapshots.Contains(NCoord);
+				return NeighborShells.Contains(NCoord) || NeighborSnapshots.Contains(NCoord);
 			};
 			// Memoize the last-resolved snapshot: each extraction loop reads one neighbor at
 			// a time, so this avoids a TMap find per voxel (mirrors the game-thread path).
 			FIntVector MemoCoord(INT32_MAX, INT32_MAX, INT32_MAX);
 			const TArray<FVoxelData>* MemoArr = nullptr;
-			auto GetNeighborVoxel = [CS, &NeighborSnapshots, &MemoCoord, &MemoArr](const FIntVector& NCoord, int32 X, int32 Y, int32 Z) -> FVoxelData
+			const FVoxelChunkShell* MemoShell = nullptr;
+			auto GetNeighborVoxel = [CS, &NeighborSnapshots, &NeighborShells, &MemoCoord, &MemoArr, &MemoShell](const FIntVector& NCoord,
+				int32 X, int32 Y, int32 Z) -> FVoxelData
 			{
 				if (NCoord != MemoCoord)
 				{
-					const TSharedPtr<const TArray<FVoxelData>>* Found = NeighborSnapshots.Find(NCoord);
+					const TSharedPtr<const FVoxelChunkShell>* FoundShell = NeighborShells.Find(NCoord);
+					MemoShell = FoundShell ? FoundShell->Get() : nullptr;
+					const TSharedPtr<const TArray<FVoxelData>>* Found = MemoShell ? nullptr : NeighborSnapshots.Find(NCoord);
 					MemoArr = Found ? Found->Get() : nullptr;
 					MemoCoord = NCoord;
+				}
+				if (MemoShell)
+				{
+					// The extraction reads only within GetNeighborDepth of the shared faces, which the shell holds (G69).
+					ensureMsgf(MemoShell->Contains(X, Y, Z), TEXT("Collision neighbour read (%d,%d,%d) outside its depth-%d shell"),
+						X, Y, Z, MemoShell->Depth);
+					return MemoShell->Get(X, Y, Z);
 				}
 				if (!MemoArr)
 				{
@@ -1157,6 +1170,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 			VoxelNeighborSlices::Extract(CS, ChunkCoord, bDeepOff, bDeepFull,
 				HasNeighborData, GetNeighborVoxel, MeshRequest);
 			NeighborSnapshots.Empty();
+			NeighborShells.Empty();
 		}
 
 		// Step 1: Generate mesh on background thread (the expensive part, ~2-4ms)
@@ -1428,11 +1442,11 @@ void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, floa
 	// Add to tracking set
 	CookingQueueSet.Add(ChunkCoord);
 
-	// The cook reads the chunk and its 26 neighbours: start the far-compressed ones' snapshots decoding on workers while
-	// it waits in the queue (G65).
+	// The cook reads the chunk and its 26 neighbours: start the far-compressed neighbours' boundary shells decoding on
+	// workers while it waits in the queue (G65, G69); the chunk's own snapshot is decoded when the cook starts.
 	if (ChunkManager)
 	{
-		ChunkManager->PrefetchVoxelSnapshotsAround(ChunkCoord);
+		ChunkManager->PrefetchCollisionInputs(ChunkCoord, CollisionLODLevel);
 	}
 
 	// Sorted insertion (lowest priority first, highest at back for O(1) Pop)
