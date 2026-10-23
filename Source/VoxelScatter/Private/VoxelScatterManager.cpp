@@ -11,6 +11,8 @@
 #include "VoxelCubeSphere.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelCaveConfiguration.h"
+#include "VoxelCPUNoiseGenerator.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelScatter.h"
@@ -32,6 +34,15 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
 	TEXT("-1 = 4 on a planet, one region at the world origin on a heightmap world; 0 = the render regions (voxel.Render.RegionChunks\n")
 	TEXT("on a planet, one region on a heightmap world: the behaviour before G42); N > 0 = regions of N chunks in any world mode.\n")
 	TEXT("Read when the scatter manager initializes."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelScatterBuriedTopFace(
+	TEXT("voxel.Scatter.BuriedTopFace"),
+	1,
+	TEXT("Heightmap worlds (world modes review G28): 1 = the column and cubic scans decide the voxel over a chunk's top layer at any\n")
+	TEXT("depth, as generation makes it (the generated height, the cave carve, the chunk above's edits), so a buried chunk's top face\n")
+	TEXT("carries no copy of the rock over it; 0 = only within 1.5 voxels of the generated ground (G26), taken for air deeper (before).\n")
+	TEXT("Read when a chunk's extraction context is built."),
 	ECVF_Default);
 
 /** A planet's scatter HISM regions by default (voxel.Scatter.RegionChunks -1): a quarter of the render regions' edge. */
@@ -1558,6 +1569,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Avg Spawn/Chunk: %.1f\n")
 		TEXT("Surface Data Memory: %.2f KB\n")
 		TEXT("Scatter Data Memory: %.2f KB\n")
+		TEXT("Worker extraction since reset: %lld chunks, %lld surface points; extract mean %.3f ms (max %.2f), placement mean %.3f ms (max %.2f)\n")
 		TEXT("%s\n"),
 		bIsInitialized ? TEXT("Yes") : TEXT("No"),
 		ScatterDefinitions.Num(),
@@ -1571,8 +1583,16 @@ FString UVoxelScatterManager::GetDebugStats() const
 		Stats.GetAverageSpawnPointsPerChunk(),
 		Stats.SurfaceDataMemory / 1024.0f,
 		Stats.ScatterDataMemory / 1024.0f,
+		ExtractionTiming.Chunks, ExtractionTiming.Points,
+		ExtractionTiming.Chunks > 0 ? 1000.0 * ExtractionTiming.ExtractSeconds / ExtractionTiming.Chunks : 0.0, 1000.0 * ExtractionTiming.ExtractMaxSeconds,
+		ExtractionTiming.Chunks > 0 ? 1000.0 * ExtractionTiming.PlaceSeconds / ExtractionTiming.Chunks : 0.0, 1000.0 * ExtractionTiming.PlaceMaxSeconds,
 		*RendererStats
 	);
+}
+
+void UVoxelScatterManager::ResetExtractionTiming()
+{
+	ExtractionTiming = FExtractionTiming();
 }
 
 // ==================== Internal Methods ====================
@@ -2178,8 +2198,12 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 
 		// Extract surface points from voxel data (LOD-independent)
 		FChunkSurfaceData SurfaceData;
+		const double ExtractStart = FPlatformTime::Seconds();
 		ExtractChunkSurfacePoints(bCubicExtraction, PendingData.ChunkVoxelData, ChunkCoord, ChunkWorldOrigin, PendingData.ChunkSize,
 			PendingData.VoxelSize, CapturedSurfacePointSpacing, CapturedClearedVolumes, ExtractionContext, SurfaceData);
+		const double PlaceStart = FPlatformTime::Seconds();
+		Result.ExtractSeconds = PlaceStart - ExtractStart;
+		Result.ExtractedPoints = SurfaceData.SurfacePoints.Num();
 
 		if (!SurfaceData.bIsValid || SurfaceData.SurfacePoints.Num() == 0)
 		{
@@ -2200,6 +2224,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 			ChunkSeed,
 			ScatterData
 		);
+		Result.PlaceSeconds = FPlatformTime::Seconds() - PlaceStart;
 
 		Result.SurfaceData = MoveTemp(SurfaceData);
 		Result.ScatterData = MoveTemp(ScatterData);
@@ -2232,6 +2257,12 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 	while (ProcessedCount < MaxProcessPerFrame && CompletedScatterQueue.Dequeue(Result))
 	{
 		++ProcessedCount;
+		++ExtractionTiming.Chunks;
+		ExtractionTiming.Points += Result.ExtractedPoints;
+		ExtractionTiming.ExtractSeconds += Result.ExtractSeconds;
+		ExtractionTiming.ExtractMaxSeconds = FMath::Max(ExtractionTiming.ExtractMaxSeconds, Result.ExtractSeconds);
+		ExtractionTiming.PlaceSeconds += Result.PlaceSeconds;
+		ExtractionTiming.PlaceMaxSeconds = FMath::Max(ExtractionTiming.PlaceMaxSeconds, Result.PlaceSeconds);
 
 		// Remove from in-progress tracking. If the chunk is no longer tracked,
 		// it was unloaded or regeneration was requested while the task was in
@@ -2435,12 +2466,14 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 			}
 
 			// The voxel over the top layer is the chunk above's bottom voxel, which this chunk's data cannot show (world
-			// modes review G26). Within CoverThreshold over the generated ground, where the buried test below lets the
-			// chunk through, it is the voxel the generator made there (no cave comes that close to the surface), with the
-			// chunk above's edits applied. Solid, the ground continues into the chunk above, which extracts the real
-			// surface: taking it for air made a copy of that surface on this chunk's top face, up to 1.5 voxels under the
-			// ground. Deeper the buried test covers the chunk, and a cave may open that voxel, so it is taken for air.
-			const bool bKnowVoxelAbove = bHaveColumnHeight && ColumnTerrainHeight <= ChunkTopWorldZ + CoverThreshold;
+			// modes review G26, G28): the voxel the generator made there, the cave carve included, with the chunk above's
+			// edits applied. Solid, the ground continues into the chunk above, which extracts the real surface: taking it for
+			// air made a copy of that surface on this chunk's top face, up to 1.5 voxels under the ground (G26), and under
+			// deeper ground a copy of the rock over the whole top face of a buried chunk, which underground scatter took for
+			// cave floors (G28). Air, it is the surface or a cave floor at the boundary. With voxel.Scatter.BuriedTopFace 0
+			// only within CoverThreshold over the generated ground, taken for air deeper, as before G28.
+			const bool bKnowVoxelAbove = bHaveColumnHeight
+				&& (Context.bDecideVoxelAboveAtAnyDepth || ColumnTerrainHeight <= ChunkTopWorldZ + CoverThreshold);
 
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
@@ -2470,7 +2503,8 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				}
 				else if (bKnowVoxelAbove)
 				{
-					const FVoxelData AboveVoxel = Context.GetVoxelAboveChunk(X, Y, ChunkSize, ColumnTerrainHeight, ChunkTopWorldZ, VoxelSize);
+					const FVoxelData AboveVoxel = Context.GetVoxelAboveChunk(X, Y, ChunkSize,
+						ChunkWorldOrigin + FVector(X * VoxelSize, Y * VoxelSize, ChunkSize * VoxelSize), ColumnTerrainHeight, VoxelSize, Voxel.BiomeID);
 					if (AboveVoxel.IsSolid())
 					{
 						bFoundColumnTop = true; // the ground above covers the rest of the column
@@ -2607,11 +2641,25 @@ float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double
 		: Natural;
 }
 
-FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, float GeneratedHeight, double ChunkTopZ, float VoxelSize) const
+FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, const FVector& SamplePos, float GeneratedHeight,
+	float VoxelSize, uint8 BiomeID) const
 {
-	// The heightmap generators' density (InfinitePlane and IslandBowl alike): the signed distance to the generated height.
-	const FVoxelData Generated(0, FInfinitePlaneWorldMode::SignedDistanceToDensity(
-		FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(ChunkTopZ), GeneratedHeight), VoxelSize));
+	// The heightmap generators' density (InfinitePlane and IslandBowl alike): the signed distance to the generated height,
+	// less the cave carve where the voxel is solid and under the ground, as GenerateChunkInfinitePlane / IslandBowl apply it
+	// (G28). A column's biome is the same at every depth, so the chunk's own voxel there carries the one generation used.
+	uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
+		FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(SamplePos.Z), GeneratedHeight), VoxelSize);
+	const float DepthBelowSurface = (GeneratedHeight - static_cast<float>(SamplePos.Z)) / VoxelSize;
+	if (CaveConfiguration && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+	{
+		const bool bUnderwater = Sea.bEnabled && GeneratedHeight < Sea.PlaneZ;
+		const float Carve = FVoxelCPUNoiseGenerator::CalculateCaveDensity(SamplePos, DepthBelowSurface, BiomeID, CaveConfiguration, NoiseParams.Seed, bUnderwater);
+		if (Carve > 0.0f)
+		{
+			Density = static_cast<uint8>(FMath::Clamp(FMath::Max(0.0f, static_cast<float>(Density) - Carve * 255.0f), 0.0f, 255.0f));
+		}
+	}
+	const FVoxelData Generated(0, Density);
 	if (AboveLayerEdits.IsValid())
 	{
 		if (const FVoxelEdit* Edit = AboveLayerEdits->Find(LocalX + LocalY * ChunkSize))
@@ -3070,13 +3118,14 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				}
 				else if (bHaveColumnHeight)
 				{
-					// The block over the top layer is the chunk above's, sampled at this column's corner (G26, see
-					// ExtractSurfacePointsFromVoxelData): known near the generated ground, solid where it continues above.
-					// Near is judged at the corner or at the block's centre (the buried test's height), so a column that test
-					// lets through always has its block above decided.
+					// The block over the top layer is the chunk above's, sampled at this column's corner (G26, G28, see
+					// ExtractSurfacePointsFromVoxelData): solid where the ground continues above, caves included. With
+					// voxel.Scatter.BuriedTopFace 0 only near the generated ground, judged at the corner or at the block's
+					// centre (the buried test's height), so a column that test lets through always has its block above decided.
 					const float SampleHeight = Context.GetGeneratedTerrainHeight(ChunkWorldOrigin.X + X * VoxelSize, ChunkWorldOrigin.Y + Y * VoxelSize);
-					if (FMath::Min(SampleHeight, ColumnTerrainHeight) <= ChunkTopWorldZ + CoverThreshold
-						&& Context.GetVoxelAboveChunk(X, Y, ChunkSize, SampleHeight, ChunkTopWorldZ, VoxelSize).IsSolid())
+					if ((Context.bDecideVoxelAboveAtAnyDepth || FMath::Min(SampleHeight, ColumnTerrainHeight) <= ChunkTopWorldZ + CoverThreshold)
+						&& Context.GetVoxelAboveChunk(X, Y, ChunkSize, ChunkWorldOrigin + FVector(X * VoxelSize, Y * VoxelSize, ChunkSize * VoxelSize),
+							SampleHeight, VoxelSize, Voxel.BiomeID).IsSolid())
 					{
 						bFoundColumnTop = true; // the ground above covers the rest of the column
 						continue;
@@ -3258,6 +3307,9 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	{
 		Context.NoiseParams = Configuration->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
+		// The voxel over a heightmap chunk's top layer is carved as generation carves it (G28).
+		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;
+		Context.bDecideVoxelAboveAtAnyDepth = CVarVoxelScatterBuriedTopFace.GetValueOnAnyThread() != 0;
 		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
 		// height on a heightmap (G23), the voxels past a planet chunk's faces (spherical SP-B10).
 		if (ConditioningGatherer)
