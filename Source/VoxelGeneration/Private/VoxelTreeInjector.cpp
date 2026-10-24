@@ -244,9 +244,9 @@ void FVoxelTreeInjector::StampTree(
 {
 	const FIntVector ChunkMin = ChunkCoord * ChunkSize;
 
-	// Helper: write a voxel if it's within this chunk's bounds
-	// bOnlyReplaceAir: true = skip if existing voxel is solid terrain (but allow overwriting other tree materials)
-	auto SetVoxel = [&](int32 GX, int32 GY, int32 GZ, uint8 MaterialID, bool bOnlyReplaceAir)
+	// Write a voxel if it's within this chunk's bounds. Leaves (bTrunk false) only replace air, or another tree's blocks
+	// (leaves from neighbouring trees), never natural terrain; the trunk is written over anything.
+	ForEachTreeVoxel(BaseGlobalVoxel, Template, TreeSeed, [&](int32 GX, int32 GY, int32 GZ, uint8 MaterialID, bool bTrunk)
 	{
 		const int32 LX = GX - ChunkMin.X;
 		const int32 LY = GY - ChunkMin.Y;
@@ -260,7 +260,7 @@ void FVoxelTreeInjector::StampTree(
 		const int32 Index = LX + LY * ChunkSize + LZ * ChunkSize * ChunkSize;
 		FVoxelData& Voxel = InOutVoxelData[Index];
 
-		if (bOnlyReplaceAir && Voxel.IsSolid())
+		if (!bTrunk && Voxel.IsSolid())
 		{
 			// Allow overwriting other tree materials (leaves from neighboring trees)
 			// but don't overwrite natural terrain
@@ -273,8 +273,12 @@ void FVoxelTreeInjector::StampTree(
 
 		Voxel.Density = 255; // Fully solid
 		Voxel.MaterialID = MaterialID;
-	};
+	});
+}
 
+void FVoxelTreeInjector::ForEachTreeVoxel(const FIntVector& BaseGlobalVoxel, const FVoxelTreeTemplate& Template, uint32 TreeSeed,
+	TFunctionRef<void(int32 GX, int32 GY, int32 GZ, uint8 MaterialID, bool bTrunk)> Visit)
+{
 	// Compute actual tree dimensions from template + variance
 	uint32 VarianceSeed = TreeSeed;
 	const int32 ActualTrunkHeight = Template.TrunkHeight +
@@ -337,13 +341,7 @@ void FVoxelTreeInjector::StampTree(
 
 				if (bInside)
 				{
-					SetVoxel(
-						CanopyCenter.X + DX,
-						CanopyCenter.Y + DY,
-						CanopyCenter.Z + DZ,
-						Template.LeafMaterialID,
-						true // Only replace air
-					);
+					Visit(CanopyCenter.X + DX, CanopyCenter.Y + DY, CanopyCenter.Z + DZ, Template.LeafMaterialID, /*bTrunk=*/false);
 				}
 			}
 		}
@@ -359,7 +357,7 @@ void FVoxelTreeInjector::StampTree(
 		if (Template.TrunkRadius == 0)
 		{
 			// 1x1 trunk
-			SetVoxel(BaseGlobalVoxel.X, BaseGlobalVoxel.Y, GZ, Template.TrunkMaterialID, false);
+			Visit(BaseGlobalVoxel.X, BaseGlobalVoxel.Y, GZ, Template.TrunkMaterialID, /*bTrunk=*/true);
 		}
 		else
 		{
@@ -373,7 +371,88 @@ void FVoxelTreeInjector::StampTree(
 					{
 						continue;
 					}
-					SetVoxel(BaseGlobalVoxel.X + DX, BaseGlobalVoxel.Y + DY, GZ, Template.TrunkMaterialID, false);
+					Visit(BaseGlobalVoxel.X + DX, BaseGlobalVoxel.Y + DY, GZ, Template.TrunkMaterialID, /*bTrunk=*/true);
+				}
+			}
+		}
+	}
+}
+
+void FVoxelTreeInjector::CollectTreeVoxels(const FIntVector& BaseGlobalVoxel, const FVoxelTreeTemplate& Template, uint32 TreeSeed,
+	TArray<FVoxelTreeVoxel>& OutVoxels)
+{
+	ForEachTreeVoxel(BaseGlobalVoxel, Template, TreeSeed, [&OutVoxels](int32 GX, int32 GY, int32 GZ, uint8 MaterialID, bool bTrunk)
+	{
+		FVoxelTreeVoxel& Voxel = OutVoxels.AddDefaulted_GetRef();
+		Voxel.GlobalVoxel = FIntVector(GX, GY, GZ);
+		Voxel.MaterialID = MaterialID;
+		Voxel.bTrunk = bTrunk;
+	});
+}
+
+void FVoxelTreeInjector::FindTreesWithTrunkAt(
+	const FIntVector& GlobalVoxel,
+	int32 ChunkSize, float VoxelSize,
+	const FVector& WorldOrigin, int32 WorldSeed,
+	const TArray<FVoxelTreeTemplate>& Templates,
+	const FVoxelNoiseParams& NoiseParams,
+	const IVoxelWorldMode& WorldMode,
+	float TreeDensity,
+	const UVoxelBiomeConfiguration* BiomeConfig,
+	bool bEnableWaterLevel, float WaterLevel,
+	TArray<FVoxelTreeInstance>& OutTrees)
+{
+	if (Templates.Num() == 0 || TreeDensity <= 0.0f || ChunkSize <= 0)
+	{
+		return;
+	}
+
+	// A trunk stands within its template's trunk radius of its base, so its tree's base lies in this voxel's chunk or the
+	// chunks beside it (a cross trunk reaches TrunkRadius <= 2 voxels).
+	int32 MaxTrunkRadius = 0;
+	for (const FVoxelTreeTemplate& Tmpl : Templates)
+	{
+		MaxTrunkRadius = FMath::Max(MaxTrunkRadius, Tmpl.TrunkRadius);
+	}
+	const int32 SearchRadiusChunks = FMath::Max(1, FMath::CeilToInt(static_cast<float>(MaxTrunkRadius) / ChunkSize));
+	const FIntVector Chunk(
+		FMath::FloorToInt(static_cast<float>(GlobalVoxel.X) / ChunkSize),
+		FMath::FloorToInt(static_cast<float>(GlobalVoxel.Y) / ChunkSize),
+		FMath::FloorToInt(static_cast<float>(GlobalVoxel.Z) / ChunkSize));
+
+	TArray<FVoxelTreeVoxel> Voxels;
+	for (int32 DX = -SearchRadiusChunks; DX <= SearchRadiusChunks; ++DX)
+	{
+		for (int32 DY = -SearchRadiusChunks; DY <= SearchRadiusChunks; ++DY)
+		{
+			TArray<FIntVector> TreePositions;
+			TArray<int32> TemplateIDs;
+			TArray<uint32> TreeSeeds;
+			ComputeTreePositionsForChunk(FIntVector(Chunk.X + DX, Chunk.Y + DY, Chunk.Z), ChunkSize, VoxelSize, WorldOrigin, WorldSeed,
+				NoiseParams, WorldMode, TreeDensity, Templates, BiomeConfig, bEnableWaterLevel, WaterLevel,
+				TreePositions, TemplateIDs, TreeSeeds);
+
+			for (int32 i = 0; i < TreePositions.Num(); ++i)
+			{
+				if (!Templates.IsValidIndex(TemplateIDs[i]))
+				{
+					continue;
+				}
+				const FVoxelTreeTemplate& Tmpl = Templates[TemplateIDs[i]];
+				const FIntVector& Base = TreePositions[i];
+				if (FMath::Abs(GlobalVoxel.X - Base.X) + FMath::Abs(GlobalVoxel.Y - Base.Y) > Tmpl.TrunkRadius
+					|| GlobalVoxel.Z < Base.Z || GlobalVoxel.Z > Base.Z + Tmpl.GetMaxHeight())
+				{
+					continue;
+				}
+				Voxels.Reset();
+				CollectTreeVoxels(Base, Tmpl, TreeSeeds[i], Voxels);
+				if (Voxels.ContainsByPredicate([&GlobalVoxel](const FVoxelTreeVoxel& V) { return V.bTrunk && V.GlobalVoxel == GlobalVoxel; }))
+				{
+					FVoxelTreeInstance& Tree = OutTrees.AddDefaulted_GetRef();
+					Tree.BaseVoxel = Base;
+					Tree.TemplateIndex = TemplateIDs[i];
+					Tree.Seed = TreeSeeds[i];
 				}
 			}
 		}

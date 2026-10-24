@@ -11,6 +11,37 @@ class IVoxelWorldMode;
 class UVoxelBiomeConfiguration;
 
 /**
+ * One voxel tree as the injector places it (world modes review WM-C8, KC9): recomputed from the same seeded positions the
+ * stamp uses, so gameplay can find and fell the tree whose voxels a chunk holds.
+ */
+struct FVoxelTreeInstance
+{
+	/** Global voxel coordinate of the trunk's lowest block (the ground's top voxel, which the trunk replaces). */
+	FIntVector BaseVoxel = FIntVector::ZeroValue;
+
+	/** Index into the templates the trees were placed with. */
+	int32 TemplateIndex = INDEX_NONE;
+
+	/** The tree's own seed (height and canopy variation). */
+	uint32 Seed = 0;
+
+	bool IsValid() const { return TemplateIndex != INDEX_NONE; }
+};
+
+/** One voxel a tree's stamp writes (FVoxelTreeInjector::CollectTreeVoxels). */
+struct FVoxelTreeVoxel
+{
+	/** Global voxel coordinate (above WorldOrigin, in voxels). */
+	FIntVector GlobalVoxel = FIntVector::ZeroValue;
+
+	/** The material the stamp writes there (the template's trunk or leaf material). */
+	uint8 MaterialID = 0;
+
+	/** A trunk block (written over anything) rather than a leaf (written only over air or other trees' blocks). */
+	bool bTrunk = false;
+};
+
+/**
  * Stamps voxel tree blocks into chunk VoxelData during generation.
  *
  * Deterministic: same seed + templates = same trees every time.
@@ -91,7 +122,47 @@ public:
 		TArray<int32>& OutTemplateIDs,
 		TArray<uint32>& OutSeeds);
 
+	/**
+	 * Every voxel one tree's stamp writes, in the order the stamp writes them (canopy, then trunk), the trunk's base block
+	 * included. The same shape enumeration as InjectTrees, so the result equals what the stamp wrote wherever nothing
+	 * stamped later (a neighbouring tree, or terrain under a leaf) overrode it.
+	 *
+	 * @param BaseGlobalVoxel The tree's base (FVoxelTreeInstance::BaseVoxel)
+	 * @param Template The tree's template
+	 * @param TreeSeed The tree's seed
+	 * @param OutVoxels Receives the voxels (appended)
+	 */
+	static void CollectTreeVoxels(const FIntVector& BaseGlobalVoxel, const FVoxelTreeTemplate& Template, uint32 TreeSeed,
+		TArray<FVoxelTreeVoxel>& OutVoxels);
+
+	/**
+	 * The trees whose trunk passes through a voxel (world modes review WM-C8): recomputed from the seeded positions of the
+	 * chunks around it, as InjectTrees places them. A tree the stamp skipped (its base under an overhang) is still listed;
+	 * callers check the voxels are there. Arguments as InjectTrees.
+	 *
+	 * @param GlobalVoxel The voxel (global voxel coordinate)
+	 * @param OutTrees Receives the trees (appended); usually one, two only where trunks touch
+	 */
+	static void FindTreesWithTrunkAt(
+		const FIntVector& GlobalVoxel,
+		int32 ChunkSize, float VoxelSize,
+		const FVector& WorldOrigin, int32 WorldSeed,
+		const TArray<FVoxelTreeTemplate>& Templates,
+		const FVoxelNoiseParams& NoiseParams,
+		const IVoxelWorldMode& WorldMode,
+		float TreeDensity,
+		const UVoxelBiomeConfiguration* BiomeConfig,
+		bool bEnableWaterLevel, float WaterLevel,
+		TArray<FVoxelTreeInstance>& OutTrees);
+
 private:
+	/**
+	 * Visit every voxel a tree's stamp writes, canopy first then trunk (the trunk punches through the canopy): the shape
+	 * StampTree writes and CollectTreeVoxels lists.
+	 */
+	static void ForEachTreeVoxel(const FIntVector& BaseGlobalVoxel, const FVoxelTreeTemplate& Template, uint32 TreeSeed,
+		TFunctionRef<void(int32 GX, int32 GY, int32 GZ, uint8 MaterialID, bool bTrunk)> Visit);
+
 	/**
 	 * Stamp a single tree, writing only voxels that fall within the target chunk bounds.
 	 */

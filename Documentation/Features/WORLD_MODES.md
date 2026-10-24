@@ -561,6 +561,27 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
 
 ---
 
+## Block worlds: cubic meshing on a heightmap (world modes review §21)
+
+A cubic world draws and collides with whole blocks: the block at voxel (i, j, k) is the cell [k V, (k + 1) V) above
+`WorldOrigin`, solid when the generator gives it a density of at least 127 from the column height H sampled at the
+cell's lower corner. The top face of a column's topmost solid block therefore lies between H and H + V, up to a block above
+the density isosurface that smooth meshing draws. Since §21 (WM-C5 to WM-C9, decisions D29 and D30) the game systems
+use the block tops in a cubic heightmap world (`FVoxelBlockSurface::UsesBlockSurface`, `UVoxelChunkManager::IsBlockSurface`;
+`voxel.Cubic.BlockSurface 0` = the isosurface, as before):
+
+| System | In a block world | Where |
+|--------|------------------|-------|
+| Surface queries | `GetGeneratedSurfaceHeight` samples the column at its corner and returns the top of the topmost block the generator makes (`FVoxelBlockSurface::BlockTopForHeight`, exact by the generator's own density rule); `QueryEditMergedSurface` returns the top face of the topmost ground voxel with no ground above it in the edit-merged column (the configured voxel trees' leaves are not ground: a canopy is walked under); the point forms follow; normal and slope stay the density gradient's (the terrain's slope). Spawn, surface NPC spawns, navigation, the dungeon entrance stitcher, PCG near points, `vox.TPPOI` and the bench's follow take block tops with no change of their own | `VoxelChunkManager`, `VoxelBlockSurface` |
+| Pads | Generation unchanged (a pad zone's target is still the pad height); the pad's walking surface is `SnapToBlockTop(PadHeight)` (`FPOIPlacement::GetPadSurfaceHeight`): the claim, the structures and a dungeon's mouth stand there. The runtime campsite levelling (`PlaceCampsite`) sets whole blocks: the pad at a block top and a staircase apron, one block per block of distance | VoxelWorldPOI |
+| Steps | Players and NPCs step one block (`UVCMovementComponent::MaxStepHeight` = V + 5, `vc.Move.StepUpBlocks`); two blocks are a wall; the camera eases a block step | VoxelCharacterPlugin |
+| Navigation | One cell per block column on the voxel grid, a step of at most one block (no √2 on diagonals, no corner cut past a pillar), the node budget scaled by the cell area (`voxel.Nav.BlockSteps`) | `VoxelSurfaceNavigationSubsystem`, see `SURFACE_NAVIGATION.md` |
+| Voxel trees | Recomputed from the injector's seeded positions (`FVoxelTreeInjector::FindTreesWithTrunkAt`, `CollectTreeVoxels`; `UVoxelChunkManager::FindVoxelTreeAt`, `GetVoxelTreeBlocks`, `FellVoxelTree`); chopped like a scatter tree, felled to a stump at the harvest entry's third hit | VoxelWorlds, VoxelCharacterPlugin |
+
+Cubic planets are out of scope: a planet has no block surface.
+
+---
+
 ## GPU Implementation
 
 `Shaders/Private/GenerateVoxelDensity.usf` mirrors the CPU generator for the two heightmap modes and is locked to

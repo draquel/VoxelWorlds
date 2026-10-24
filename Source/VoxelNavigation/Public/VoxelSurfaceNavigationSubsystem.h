@@ -251,6 +251,8 @@ private:
 
 	FVoxelSurfaceNavParams Params;
 	float CachedCellSize = 0.f;
+	/** The grid origin the height cache was sampled on (block worlds align it with the voxel grid, WM-C7). */
+	FVector2D CachedGridOrigin = FVector2D::ZeroVector;
 	TMap<FIntPoint, TUniquePtr<FNavTile>> Tiles;
 	int32 CachedCells = 0;
 

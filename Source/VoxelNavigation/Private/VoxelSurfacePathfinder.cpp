@@ -37,14 +37,13 @@ FVoxelSurfacePathfinder::FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& I
 
 FIntPoint FVoxelSurfacePathfinder::WorldToCell(const FVector& World) const
 {
-	return FIntPoint(FMath::FloorToInt(World.X / Params.CellSize), FMath::FloorToInt(World.Y / Params.CellSize));
+	return Params.CellOf(World.X, World.Y);
 }
 
 FVector FVoxelSurfacePathfinder::CellToWorld(const FIntPoint& Cell) const
 {
-	const double X = (Cell.X + 0.5) * Params.CellSize;
-	const double Y = (Cell.Y + 0.5) * Params.CellSize;
-	return FVector(X, Y, HeightAt(Cell));
+	const FVector2D Centre = Params.CellCentre(Cell);
+	return FVector(Centre.X, Centre.Y, HeightAt(Cell));
 }
 
 float FVoxelSurfacePathfinder::HeightAt(const FIntPoint& Cell) const
@@ -53,7 +52,8 @@ float FVoxelSurfacePathfinder::HeightAt(const FIntPoint& Cell) const
 	{
 		return *Cached;
 	}
-	const float H = Sampler ? Sampler((Cell.X + 0.5) * Params.CellSize, (Cell.Y + 0.5) * Params.CellSize) : 0.f;
+	const FVector2D Centre = Params.CellCentre(Cell);
+	const float H = Sampler ? Sampler(Centre.X, Centre.Y) : 0.f;
 	HeightCache.Add(Cell, H);
 	++SampleCount;
 	return H;
@@ -65,7 +65,8 @@ bool FVoxelSurfacePathfinder::IsCellWalkable(const FIntPoint& Cell) const
 	{
 		return false;
 	}
-	if (Params.IsUnderwater((Cell.X + 0.5) * Params.CellSize, (Cell.Y + 0.5) * Params.CellSize, HeightAt(Cell)))
+	const FVector2D Centre = Params.CellCentre(Cell);
+	if (Params.IsUnderwater(Centre.X, Centre.Y, HeightAt(Cell)))
 	{
 		return false;
 	}
@@ -79,6 +80,30 @@ bool FVoxelSurfacePathfinder::CanStep(const FIntPoint& From, const FIntPoint& To
 		return false;
 	}
 	const bool bDiagonal = From.X != To.X && From.Y != To.Y;
+	if (Params.bBlockSteps)
+	{
+		// Whole blocks (WM-C7): a walker steps one block whichever way it goes, and a diagonal passes the corner the two
+		// cells beside it share, so each of them must be walkable and within a step of both ends.
+		auto WithinStep = [this](const FIntPoint& A, const FIntPoint& B)
+		{
+			return FMath::Abs(HeightAt(A) - HeightAt(B)) <= Params.MaxStepRise;
+		};
+		if (!WithinStep(From, To))
+		{
+			return false;
+		}
+		if (bDiagonal)
+		{
+			for (const FIntPoint& Side : { FIntPoint(To.X, From.Y), FIntPoint(From.X, To.Y) })
+			{
+				if (!IsCellWalkable(Side) || !WithinStep(From, Side) || !WithinStep(Side, To))
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
 	const float Limit = Params.MaxStepRise * (bDiagonal ? UE_SQRT_2 : 1.f);
 	return FMath::Abs(HeightAt(From) - HeightAt(To)) <= Limit;
 }

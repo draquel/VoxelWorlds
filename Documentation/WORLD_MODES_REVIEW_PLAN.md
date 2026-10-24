@@ -22,6 +22,7 @@ planet on the CPU): plan and results in §15. Spherical Phase 2 (the planet on t
 Spherical Phase 3 (walkable): plan and results in §17. Spherical Phase 4 (systems): plan in §18.1, results (met
 2026-10-17) in §18.2. Spherical Phase 5 (places): plan in §19.1, results (met 2026-10-17) in §19.2. Spherical
 Phase 6 (big planets and orbit): scope, survey and plan in §20 (planned 2026-10-17, its decisions D17-D24 taken the same day; not started).
+Cubic as a game world (KC6, KC7, KC9, KC12, in scope since D1 was amended 2026-10-24): plan and results in §21 (met 2026-10-24: §21.2).
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -193,7 +194,7 @@ estimate of the largest island the current streaming-only model can hold. **Done
 "Critical" means needed to call the mode on par with InfinitePlane for this project's game. "Nice to have" means
 it would make the mode better without blocking parity. The review confirms the critical list; the follow-up
 plan sizes and orders it. *(Second revision, 2026-10-14: §14 sizes and orders it. With D1 decided as terrain-only,
-the cubic rows that serve the game systems are first-class only and deferred; the work item for each row is in its
+the cubic rows that serve the game systems are first-class only and deferred, and since the D1 amendment of 2026-10-24 done in §21; the work item for each row is in its
 class column.)*
 
 ### Cubic
@@ -202,13 +203,13 @@ class column.)*
 |---------|-------|-------|
 | Cubic without the LOD system (D7) | Critical, **done 2026-10-13 (§12.7)** | KC1, KC11. Decided 2026-10-13: cubic forces LOD off, and greedy meshing is its LOD mechanism until there is a good reason to change it. Key far compression on distance so the LOD-off path keeps it. Measured in §12.2: LOD off already beats smooth per frame (before compression; §12.7 has the numbers with it). A far representation (coarse mesh or impostor) or a shorter cubic view distance is the only route to renderer-memory parity, and is not planned |
 | Block-accurate player editing | Critical, **WM-C2** | KC5. Dig at `ImpactPoint − ½·VoxelSize·normal`, place at `+ ½·VoxelSize·normal`, set whole voxels (0/255) so one click equals one block. Port the test actor's discrete editing into the player path when the mode is cubic |
-| Block-top surface query | First-class only, **deferred (D1)** | KC6. A cubic surface height that snaps to the top of the solid voxel, used by spawn, NPCs, POIs, campsites and world items |
-| Step policy | First-class only, **deferred (D1)** | KC7, KC12. Keep "every block is a jump" and make nav and NPC auto-jump agree with block heights, or auto-step one block (decision D5) |
-| Cubic-aware pads and aprons | First-class only, **deferred (D1)** | KC6. Flat whole-voxel pads and stepped aprons for POIs and campsites |
+| Block-top surface query | First-class only, **done 2026-10-24 (WM-C5, §21)** | KC6. A cubic surface height that snaps to the top of the solid voxel, used by spawn, NPCs, POIs, campsites and world items |
+| Step policy | First-class only, **done 2026-10-24 (WM-C7, WM-C9, §21)** | KC7, KC12. Keep "every block is a jump" and make nav and NPC auto-jump agree with block heights, or auto-step one block (decision D5). *Decided by D29: auto-step one block* |
+| Cubic-aware pads and aprons | First-class only, **done 2026-10-24 (WM-C6, §21)** | KC6. Flat whole-voxel pads and stepped aprons for POIs and campsites |
 | Correct scatter on block faces | Critical, **WM-C3** | KC4. Route cubic to the CPU extractor (or teach GPU extraction about block faces) and make `BlockFaceSnap` real |
 | Seam support for cubic, or keep the legacy path | Critical, **decided with D1: seam support (WM-C1)** | KC2. Cubic seam jobs are "trivially compatible" per the seam doc (face culling across the pair). Doing it lets the legacy neighbour-slice and revalidation machinery be deleted. The alternative is keeping that machinery for cubic alone. See D1. Measured in §12: with LOD off, the legacy cascade is the main remaining catch-up cost (2.0 meshes per chunk, catch-up 1.6-3.2× smooth) |
 | GPU cubic meshing in streaming, or delete it | Nice, **decided with D1: delete (WM-C4)** | KC3. Today it is dead weight that only tests use |
-| Choppable voxel trees | Nice, first-class only, **deferred (D1)** | KC9. Felling removes connected log and leaf voxels and yields wood like HISM trees do |
+| Choppable voxel trees | Nice, first-class only, **done 2026-10-24 (WM-C8, D30, §21)** | KC9. Felling removes connected log and leaf voxels and yields wood like HISM trees do |
 | Block highlight and placement preview | Nice | Outline of the targeted block and a ghost of the block to place |
 | Per-material hardness and break time | Nice | Mining feel; drops per material |
 
@@ -256,15 +257,15 @@ code sites).
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
 (SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
-revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended. **Decided 2026-10-17, for spherical Phase 6 (§20.0):** D17-D20, the scope (D17 and D18 revise SD1 and SD5), then D21-D24 (§20.1), each as recommended. **Decided 2026-10-18:** D25 (§19.5) and D26 (§19.9), each as recommended.
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended. **Decided 2026-10-17, for spherical Phase 6 (§20.0):** D17-D20, the scope (D17 and D18 revise SD1 and SD5), then D21-D24 (§20.1), each as recommended. **Decided 2026-10-18:** D25 (§19.5) and D26 (§19.9), each as recommended. **Decided 2026-10-24:** the D1 amendment, D29 and D30 (§21.1), each as recommended.
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
-| D1 | How far is cubic supported: first-class (every game system), terrain-only (meshing, streaming, editing), or dropped? | Decide **after** Review A, using its numbers. The review is scoped to gather the evidence. Review A recommended terrain-only (§12.5). **Decided 2026-10-14: terrain-only.** Cubic gets meshing, streaming, editing and CPU scatter (milestone M5): it moves onto the seam path, so the legacy neighbour path can be deleted (WM-C1), block-accurate editing (WM-C2), cubic scatter on the CPU extractor (WM-C3), and the GPU cubic mesher is deleted (WM-C4). The game-system items (block-top surface query and cubic pads, KC6; two-block rises, KC7; melee height, KC12; choppable voxel trees, KC9) wait until a game needs cubic |
+| D1 | How far is cubic supported: first-class (every game system), terrain-only (meshing, streaming, editing), or dropped? | Decide **after** Review A, using its numbers. The review is scoped to gather the evidence. Review A recommended terrain-only (§12.5). **Decided 2026-10-14: terrain-only.** Cubic gets meshing, streaming, editing and CPU scatter (milestone M5): it moves onto the seam path, so the legacy neighbour path can be deleted (WM-C1), block-accurate editing (WM-C2), cubic scatter on the CPU extractor (WM-C3), and the GPU cubic mesher is deleted (WM-C4). The game-system items (block-top surface query and cubic pads, KC6; two-block rises, KC7; melee height, KC12; choppable voxel trees, KC9) wait until a game needs cubic. **Amended 2026-10-24:** the user lifted that deferral; KC6, KC7, KC9 and KC12 are in scope (§21: WM-C5 to WM-C11, decisions D29 and D30), so cubic is first-class for spawning, POIs and campsites, movement, navigation and NPCs, trees and melee. Still out: a far representation for cubic (§12.5) and the nice-to-haves of §6 |
 | D2 | Island sizes for Review B | S / M / L as in §5 |
 | D3 | Performance acceptance and memory budget | Relative to the InfinitePlane control (§1). Set the absolute memory budget after I3 measures full residency on S. Proposed in §13.4. **Accepted 2026-10-14:** 0.6 GB of voxel systems memory settled for a fully resident S-class island; at most 1.5 GB peak while streaming at any speed and tier. Benches report against it from now on |
 | D4 | Build T1-T5 before the review? | Yes, as one small PR. T6 optional |
-| D5 | Cubic step policy | Keep "every block is a jump" (current design) and make nav and NPC auto-jump agree with block heights |
+| D5 | Cubic step policy | Keep "every block is a jump" (current design) and make nav and NPC auto-jump agree with block heights. *Revised 2026-10-24 by D29: auto-step one block* |
 | D6 | Spherical scope (planet size, cubic on planets, game systems, orbit) | See the requirements doc, §2 |
 | D7 | Cubic LOD *(decided 2026-10-13, after Review A; implemented the same day, §12.7)* | Cubic forces the LOD system off (`MeshingMode == Cubic` overrides `bEnableLOD`). Greedy meshing is cubic's LOD mechanism until there is a good reason to change it, so block downsampling and other cubic LOD schemes are out of scope. Pair it with far compression keyed on distance (KC11): forcing LOD off alone trades the LOD cost for uncompressed voxel memory (§12.2) |
 | D8 | Where heightmap worlds (InfinitePlane, IslandBowl) take their vertical streaming range from *(decided 2026-10-14, from §13.11)*. Today it is the viewer's layer −2 to +8 (island +4), clipped to the world's height range, so a viewer above layer 0 loses the ground below | **From the terrain.** Every column loads its own surface slab (the world mode's analytic surface ± 1.5 chunks, and up to the water plane) at every distance, islands included. Near the viewer (band 0) the viewer's own layer ± 2 is also loaded, for caves, dungeons and digging. The viewer's altitude only adds layers; it never removes the ground. This is WM-S1 and subsumes slab culling for islands (KI5). Keep the window a per-column interval supplied by the world mode, so the planet version (a shell around the surface, SP-C1/SP-C5) has the same shape |
@@ -288,6 +289,8 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D26 | G31: give each crossing of a planet chunk's own lines to the chunk containing it, or sample one line family for every chunk? *(decided 2026-10-18)* | **One family of radial rays on the cube-sphere grid**: one ray from the planet's centre per cell of `FVoxelCubeSphereGrid` at the point spacing, the same rays for every chunk, each chunk keeping the crossings inside its own box. Ownership alone keeps each chunk's staircase rounding (thin samples inside chunks, 116 of 230 at 30°N 40°E four voxels or more from any face) and still has a line decide whether the neighbour's line makes the point at a face; with one family there is nothing to decide. The spawn weight is the grid cell's area at the point, so the density per area holds on every part of the grid (§19.9) |
 | D27 | G43: which continuous corner kernel for the planet Simplex noise, and for which worlds? *(decided 2026-10-23)* | **The tangent-corrected kernel, planets only:** the classic (0.6 − d²)⁴ less its value and slope at d² = 0.5, v²(v² + 0.4v + 0.06) with v = 0.5 − d², its sum scaled by 33.25 for the classic spread: no step and smooth normals, within 1.2% rms of the classic noise (correlation 0.9996), so every planet keeps its landscape. Rejected: the value-corrected (0.6 − d²)⁴ − 0.1⁴ (closer, 0.2% rms, but a crease in the slope along every boundary) and the textbook (0.5 − d²)⁴ (7% rms, worst 35%: visibly different shapes). `PlanetGenerationVersion` 6 refuses earlier planet saves; heightmap worlds keep the classic kernel, whose steps there are about a quarter voxel, and `GenerationVersion` 2 (§20.24) |
 | D28 | G45: blend a far-field quad's two materials by a dithered pick or by sampling both? *(decided 2026-10-24)* | **A dithered pick**: each quad carries its corners' two leading materials (flat per triangle) and the second's weight at each corner, and the terrain material takes one of the two per pixel against a temporal screen dither (interleaved gradient noise moved every frame) weighted by the interpolated weight, which TSR resolves into a gradient: no texture sample added, one Custom node after `MF_GetMaterialID` (`FarFieldMaterialPick`), voxel chunks unchanged (their vertices' alpha 255 is weight 0). Rejected: sampling both materials and lerping by the weight (smooth with no noise, but about twice the terrain's texture cost on the far field's blend pixels and the triplanar sampling duplicated in HLSL). The weight is the share of generation's dithered per-voxel picks (G39, §20.22), so the far field averages to what the voxel terrain draws (§20.27) |
+| D29 | Cubic step policy, revisiting D5 *(decided 2026-10-24)* | **Auto-step one block:** in a cubic world players and NPCs step up one block without a jump and two blocks are a wall; navigation uses the same rule (one cell per block column, at most one block of rise) and the camera eases the step (§21.1). Rejected: jump per block (D5) with an NPC hop at each one-block rise, a player auto-jump assist and a repeating held jump |
+| D30 | How a cubic voxel tree is felled *(decided 2026-10-24)* | **Like an HISM tree:** hits on a trunk block pay the gather table's `Tree` harvest entry per hit (1 wood, 2 with a tool) and the third hit removes the tree's trunk above the ground and its leaves, leaving a stump; not undoable, saved with the edits (§21.1). Rejected: wood per log block removed at felling, with no pay per hit |
 
 ## 9. Order of work
 
@@ -485,10 +488,10 @@ A near cubic chunk costs about the same as a near smooth chunk, but every cubic 
 | KC3 | **Confirmed** (dead path); the test hazard is **fixed** by T5 | The cubic branch always builds `FVoxelCPUCubicMesher` and never reads `bUseGPUMeshing` (`VoxelChunkManager.cpp:1110-1126`); every PIE logged "Using Cubic mesher". The GPU cubic tests pass in-editor, skip headless, and `Performance` returns *(Fixed in M5, §14.9: the GPU cubic mesher and its tests are deleted)* |
 | KC4 | **Confirmed** | Same site, LOD0, instances within 6,000 uu. `Review_Cubic` (CPU extraction): every instance on a block top, rocks 100% on face centres, grass and mushrooms jittered inside the face (median 7-31 uu from the centre, maximum 36 < 37.5). `Review_Cubic_GPUScatter`: every instance still on a block top, but 24-25% of rocks sit on block corners (greedy-quad vertices); grass and mushrooms are pushed to face edges (median 25-33 uu); and density falls to about a third for grass (217-247 instances vs 655-725) and half for rocks (151-177 vs 288-317). All 8 definitions are forced to `BlockFaceSnap` (logged), but the GPU branch runs before the cubic check *(Fixed in M5, §14.9: cubic always extracts scatter on the CPU, and `BlockFaceSnap` is read)* |
 | KC5 | **Confirmed**, worse than described | *Targeting:* `floor(ImpactPoint)` picked the air voxel for +X and +Z faces every time, and also for a −Y face: the impact lies exactly on the voxel boundary, so floating-point noise picks the side ("Voxel destroyed at [-6435,-4664,-16]" for a block at y −4663). *Brush:* digging is a density delta, not a block. A near-threshold surface block went in 1 click. On the next block down, the aimed block survived until click 4 while its +X neighbour went at click 1, and 4 blocks (a plus shape) were gone after 5 clicks. On a +X face the aimed block went at click 2 and a neighbour at click 3. Aiming at the block centre took 2 clicks with no collateral. Placement targets the right voxel (offset along the normal) but adds +80 density: 1 click beside terrain, 2 in open air (the first click is invisible). *Demo:* in edit mode LMB also fires `AVoxelWorldTestActor`'s mouse brush (radius 300, smooth, `bUseDiscreteEditing` off). One press removed 6 scattered blocks around the aim point and left the aimed block (`rc_c4_lmbkey1`) *(Fixed in M5, §14.9: one target rule, `GetEditVoxelCoord`; whole-block edits)* |
-| KC6 | **Confirmed** | Anything placed from the smooth or analytic surface sits up to one block low. Tiled dungeon: pad height −223, block top −150; the brazier, stone pillar and elevator call post stand at −223, 73-74 uu inside the block (`rc_c6_brazier_sunk`, `rc_c6_pillar_sunk`). Generated campsite: actor at −1,244 on a −1,200 block top; the campfire mesh is entirely inside the block (its top is −1,213) and the bench shows 2 uu (`rc_c6_campsite_close`). The control places the same dungeon and campsite at the same heights, and there they sit on the ground: props 0.4-0.6 uu from a −223.5 pad, campsite 0.3 uu above −1,244.0. Not affected: anything placed by trace or physics (spawn, NPCs, world items, a player-placed campfire kit, the physics cube) |
-| KC7 | **Partly confirmed** | Player: every block is a jump (D5), so auto-run and a held jump stall at the first rise (C5). NPCs: one-block steps work (deer and wolves log "jumping a 73 uu obstacle"; wolves reached and killed the player across terraces). Two-block rises strand them: with the player on a 3×3 pillar two blocks high, two wolves stood at its base looping "stuck … blocking ahead and repathing" and never reached it. That is consistent with the nav/auto-jump mismatch (`voxel.Nav.MaxStepRise` 100 checked against interpolated heights), but the session did not isolate a path that nav accepted and movement refused. (At the one site checked, nav's surface sample under the player was identical in both modes, −1,215.85, so nav reads the same interpolated surface in cubic and smooth, not the block tops) |
+| KC6 | **Confirmed** | Anything placed from the smooth or analytic surface sits up to one block low. Tiled dungeon: pad height −223, block top −150; the brazier, stone pillar and elevator call post stand at −223, 73-74 uu inside the block (`rc_c6_brazier_sunk`, `rc_c6_pillar_sunk`). Generated campsite: actor at −1,244 on a −1,200 block top; the campfire mesh is entirely inside the block (its top is −1,213) and the bench shows 2 uu (`rc_c6_campsite_close`). The control places the same dungeon and campsite at the same heights, and there they sit on the ground: props 0.4-0.6 uu from a −223.5 pad, campsite 0.3 uu above −1,244.0. Not affected: anything placed by trace or physics (spawn, NPCs, world items, a player-placed campfire kit, the physics cube) *(Fixed in §21: see §21.2)* |
+| KC7 | **Partly confirmed** | Player: every block is a jump (D5), so auto-run and a held jump stall at the first rise (C5). NPCs: one-block steps work (deer and wolves log "jumping a 73 uu obstacle"; wolves reached and killed the player across terraces). Two-block rises strand them: with the player on a 3×3 pillar two blocks high, two wolves stood at its base looping "stuck … blocking ahead and repathing" and never reached it. That is consistent with the nav/auto-jump mismatch (`voxel.Nav.MaxStepRise` 100 checked against interpolated heights), but the session did not isolate a path that nav accepted and movement refused. (At the one site checked, nav's surface sample under the player was identical in both modes, −1,215.85, so nav reads the same interpolated surface in cubic and smooth, not the block tops) *(Fixed in §21: see §21.2)* |
 | KC8 | **Confirmed** | No map references `DemoCubicWorldConfig` or `Config/CubicScatterConfig` (each is referenced only by itself; `DemoCubicScatterConfig` is used by the review configs). Before this review no PIE bench had recorded a cubic run. `Review_Cubic`, `_GPUScatter` and `_SingleLOD` are now the cubic test content |
-| KC9 | **Confirmed**, worse than described | Cubic worlds get voxel trees (`TreeMode` VoxelData, 3 templates, density 5.1) and the cubic scatter config has no tree definition, so there is no HISM tree to chop. Swinging at a voxel tree does nothing: no harvestable scatter, and no dig without edit mode or a digging tool. Digging a trunk voxel yields Wood (material 20), 1 per dig, forever on the same voxel (G3). Nothing fells; the canopy stays. In `Review_Cubic` the canopies also render wrong (KC10, a config issue) |
+| KC9 | **Confirmed**, worse than described | Cubic worlds get voxel trees (`TreeMode` VoxelData, 3 templates, density 5.1) and the cubic scatter config has no tree definition, so there is no HISM tree to chop. Swinging at a voxel tree does nothing: no harvestable scatter, and no dig without edit mode or a digging tool. Digging a trunk voxel yields Wood (material 20), 1 per dig, forever on the same voxel (G3). Nothing fells; the canopy stays. In `Review_Cubic` the canopies also render wrong (KC10, a config issue) *(Fixed in §21: see §21.2)* |
 
 ### 12.4 New findings
 
@@ -498,7 +501,7 @@ Cubic:
 |----|---------|----------|--------|
 | KC10 | **`DemoSmoothWorldConfig`'s voxel tree templates use material IDs that do not exist.** Leaves are 22 and 23, but the registry has 22 materials (0-21: Wood 20, Leaves 21), and template 2's trunk is 21 (Leaves). The templates are inert in smooth (voxel trees are cubic-only), so this only shows when the config is meshed cubic, as `Review_Cubic` is: canopies render as opaque clay and brick blocks. `DemoCubicWorldConfig` uses 20 and 21 correctly. Nothing validates template material IDs against the registry | `Review_Cubic` / `DemoSmoothWorldConfig` / `DemoCubicWorldConfig` tree templates; `VoxelCore/Public/VoxelMaterialRegistry.h:30-34`; `rc_c6_tree_found` | Latent content bug; the review's tree screenshots show it. The canopies are not treated as leaves (not masked, not non-occluding) |
 | KC11 | **Far compression is keyed on the LOD level, so the intended cubic path has none.** Compression skips chunks below `voxel.FarCompression.MinStride`, and with `bEnableLOD` off every chunk is LOD 0. The far-band slab is keyed on band 0's distance instead, so it survives `bEnableLOD` off (but not a one-band config) | `VoxelChunkManager.cpp:4677`; `DistanceBandLODStrategy.cpp:956-962`. LOD off: 0 compressed, 1,123-1,245 MB resident voxel data against 215 MB (spawn) and 600-760 MB (bench peak) for the control, loaded chunks unchanged. One band: no slab either, +47% chunks, 1,803 MB | The intended cubic path's main memory cost. **Fixed (§12.7)**: compression keys on the distance band |
-| KC12 | **Melee misses across a one-block height difference.** From a one-block pit, 10 swings at a dummy on the rim did no damage; on the same level it died in 4 | C5 | Common in cubic terrain |
+| KC12 | **Melee misses across a one-block height difference.** From a one-block pit, 10 swings at a dummy on the rim did no damage; on the same level it died in 4 | C5 | Common in cubic terrain *(Fixed in §21: a line trace through a capsule's axis missed it, see §21.2)* |
 | KC13 | **The edge of the loaded region shows vertical walls.** A missing neighbour counts as air, so boundary faces are emitted. Visible only from beyond the view distance | `VoxelCPUCubicMesher.cpp:930-1001`; `rc_r23_siteB_east` | Cosmetic *(Fixed by WM-C1, §14.9: the edge is open, as on the control)* |
 | KC14 | **The legacy path re-queues waiting chunks every frame, and the bench counts each one as a re-mesh.** When a chunk's face neighbour has no voxel data yet, the legacy path (cubic only; the seam path never waits) defers it and re-queues it at the end of every frame with the default reason "other". The bench's thrash counter counts queue insertions of already-meshed chunks, so each frame's wait counts once. Traced after the bench runs | `ShouldDeferMeshForNeighbors` under `!bSeamMeshingActive`, `VoxelChunkManager.cpp:3051-3066`; re-queue at `:3383-3386`; counter at `:5798-5803`. "Other" is 0 for smooth in every run; for cubic 0-1,074 in PIE and up to 91,074 headless, where CPU generation keeps neighbours waiting longer. The verbose run that counted 53,799 cubic re-meshes executed 5,729 meshes | Mostly a measurement artefact: queue churn and delayed re-meshes rather than wasted meshing. The wait itself is part of KC2's catch-up cost *(Gone with the legacy path in M5, §14.9)* |
 
@@ -1410,13 +1413,13 @@ Three findings from §13.11 get IDs here:
 | KC3 | GPU cubic meshing is test-only | Fixed in M5 (WM-C4, §14.9): deleted with its tests | WM-C4 |
 | KC4 | Cubic scatter is wrong with GPU extraction | Fixed in M5 (WM-C3, §14.9) | WM-C3 |
 | KC5 | Player dig and place are tuned for smooth terrain | Fixed in M5 (WM-C2, §14.9): one click is one block | WM-C2 |
-| KC6 | Surface queries return the smooth surface, so props sink into blocks | Deferred (D1: first-class only) | — |
-| KC7 | Two-block rises strand NPCs | Partly confirmed; deferred (D1) | — |
+| KC6 | Surface queries return the smooth surface, so props sink into blocks | Fixed in §21 (D1 amended 2026-10-24): the surface queries return block tops in a cubic world, pads stand on the block their height makes, the runtime campsite levels in whole blocks; props 73-74 uu inside the blocks → 0.0 | WM-C5, WM-C6 |
+| KC7 | Two-block rises strand NPCs | Fixed in §21 (D29): players and NPCs step one block, navigation takes one block per block column; at a two-block pillar no auto-jump or stuck loop, a one-block staircase climbed | WM-C7 |
 | KC8 | No content exercises cubic | Fixed in M1 (WM-H5; UE5_PluginDev#102, merged): `DemoCubicWorldConfig` is on the intended path and `Config/CubicScatterConfig` is deleted. The review configs exist | WM-H5 |
-| KC9 | Voxel trees are not gameplay | Deferred (D1). The unlimited yield from one voxel is G3 | — |
+| KC9 | Voxel trees are not gameplay | Fixed in §21 (D30): chopped like a scatter tree, felled to a stump at the third hit, saved with the edits. The unlimited yield from one voxel was G3 | WM-C8 |
 | KC10 | The smooth config's tree templates use material IDs that do not exist | Fixed in M1 (WM-H4; draquel/VoxelWorlds#85, UE5_PluginDev#102, merged) | WM-H4 |
 | KC11 | Far compression was keyed on the LOD level | Fixed (§12.7) | — |
-| KC12 | Melee misses across a one-block height difference | Deferred (D1) | — |
+| KC12 | Melee misses across a one-block height difference | Fixed in §21: the client's target check was a line trace, which misses a capsule whose axis it crosses exactly (an aim at a body's centre); now a 5 uu sphere | WM-C9 |
 | KC13 | Vertical walls at the edge of the loaded region | Fixed by WM-C1 (§14.9): no boundary face is built without both chunks, so the edge is open as on the control | (WM-C1) |
 | KC14 | The legacy path re-queues a waiting chunk every frame | Gone with the legacy path (WM-C1, §14.9) | (WM-C1) |
 
@@ -9545,3 +9548,173 @@ triangles; in the streaming tests MC's seam jobs cost 0.151 → 0.049 ms (plane)
 (P3's v1 limitation). `FillFacePlanes`, `FillEdgeStrip` and `FillCorner` stay for the copied rule.
 
 G63 is fixed.
+
+## 21. Cubic as a game world: KC6, KC7, KC9 and KC12 (planned and met 2026-10-24)
+
+D1 made cubic terrain-only (meshing, streaming, editing, scatter: M5, §14.9) and parked the four findings that need the
+game systems to know about blocks. On 2026-10-24 the user lifted that deferral (D1 amended in §8): KC6 (props sink into
+blocks), KC7 (two-block rises strand NPCs), KC9 (voxel trees are not gameplay) and KC12 (melee misses across one block)
+are in scope. Bases: VoxelWorlds `952d4ae`, UE5_PluginDev `c91ff9d`.
+
+### 21.1 Plan
+
+**Where the four come from** (the code survey, 2026-10-24). A cubic block at voxel (i, j, k) is the cell
+[k·V, (k+1)·V) above `WorldOrigin`, and the generator gives it the density of the column's height H sampled at the cell's
+lower corner (i, j). The block is solid when that density is at least 127, which is when its corner lies no more than
+0.004 voxel above H, so the top face of the topmost solid block lies between H and H + V. Every surface query in
+`UVoxelChunkManager` returns H (the density isosurface), and so does every pad: POI pads and generated campsites are
+flattened to their pad height, and their claim and structures stand at it, up to one block inside the blocks (§12.3:
+73-74 uu). Traces and physics already land on the block tops (spawn settle, world items, a placed campfire kit). Movement
+steps 50 uu against 75 uu blocks; navigation allows a rise of 100 uu between cells 150 uu apart, measured on H, so it
+both accepts a two-block rise somewhere (two cells of one block each look like a 0.7-block slope) and refuses a
+one-block staircase elsewhere (150 uu between cell centres two blocks apart). Voxel trees are injected into the voxel data
+(cubic only, deterministic per seed, `FVoxelTreeInjector`), but nothing in the chop path (`TryChopScatter`, HISM trees
+only) knows them. Melee targets a hostile with a line trace and the server sweeps a 30 uu sphere along the view on
+`ECC_Pawn`, which the terrain blocks.
+
+| ID | Work item | Finding | Repos | Size |
+|----|-----------|---------|-------|------|
+| WM-C5 | **The block-top surface query.** `FVoxelBlockSurface` (VoxelGeneration): whether a world has a block surface (cubic meshing in a heightmap mode), the column a position lies in, and the top face the generator makes from a column height, exactly by the generator's density rule. In a cubic world `UVoxelChunkManager::GetGeneratedSurfaceHeight` samples the height at the block column's corner and returns that top face; `QueryEditMergedSurface` returns the top face of the topmost solid voxel with air above it in the edit-merged column (normal and slope stay the density gradient's: the terrain's slope, so slope filters behave as in smooth); `GetGeneratedSurfacePoint` and `QueryEditMergedSurfacePoint` follow; Blueprint `IsBlockSurface` / `SnapToBlockTop`. Spawn search, NPC spawns, navigation, the dungeon entrance stitcher, PCG near points, `vox.TPPOI` and the bench's follow take block tops with no change. `voxel.Cubic.BlockSurface` (0 = the isosurface, as before). Smooth worlds take the old code path | KC6 | VoxelWorlds | S |
+| WM-C6 | **Cubic pads and aprons.** Generation is unchanged (a pad zone's target stays the pad height, so cubic terrain and saves do not move); its walking surface is the block top the generator makes from it (`FPOIPlacement::GetPadSurfaceHeight`, the pad height in smooth), used for the claim, the structures' base (props, the campsite spawner, dungeon surface pieces), the pad's world location (markers, `poi.Find`, `vox.TPPOI`) and `FindNearestPOIs`. The core is whole-voxel already: the zone holds every column there at one height. The generated apron is the voxelized smoothstep blend, one block per column wherever its slope (1.5·ΔH / falloff) stays under 1; checked on every demo POI type (§21.2), widened in cubic only if a site needs it. The runtime `PlaceCampsite` in cubic: the pad at a block top, whole-voxel Set edits (0 / 255 instead of graded density) and a stepped apron (a linear profile in whole blocks, one block per column while the natural ground is within the apron's width in blocks), the claim at the block top | KC6 | parent (VoxelWorldPOI), ProceduralDungeonPlugin if the stitcher needs it | M |
+| WM-C7 | **The step policy (D29).** Movement, navigation and NPCs agree on one rule for block rises; the design below is option (a), auto-step one block, as decided. In a cubic world `UVCMovementComponent` steps one block (`MaxStepHeight` = voxel size + 5; 50 elsewhere), for players and NPCs alike, and two blocks stay a wall (the jump's apex is about 113 uu); the camera eases out a step (first and third person) so a block does not jolt the view. Navigation in a cubic world: one cell per block column, heights the block tops (WM-C5), a step up or down of at most one block (no √2 on diagonals; a diagonal also needs one of its two side cells steppable, so a route never cuts a corner past a pillar), the node budget scaled by the cell area so a search covers the same ground; `voxel.Nav.BlockSteps` (0 = the smooth rules). NPCs keep their auto-jump for what is not terrain. The other option (jump per block, D5 as decided) keeps the 50 uu step, has NPCs hop as their path reaches a cell one block up instead of after a stall, and gives the player an auto-jump assist and a held jump that repeats; navigation as above | KC7 | VoxelCharacterPlugin, VoxelWorlds | M |
+| WM-C8 | **Choppable voxel trees (D30).** `FVoxelTreeInjector`'s tree shape becomes one enumeration shared by stamping and a new collector, so a tree's voxels can be recomputed exactly; `FindTreeAt` recomputes, from the same seeded positions, the tree whose trunk passes through a voxel; `UVoxelChunkManager::FindVoxelTreeAt` / `GetVoxelTreeVoxels` with the configuration's templates. Chopping (option (a), as decided): the primary action's step 1b also takes a voxel tree's trunk under the crosshair within reach (`TryChopVoxelTree`, after `TryChopScatter`; no edit mode or tool); the server (`AVCPlayerController::ChopVoxelTreeAt`) re-checks range and tree, counts hits per tree, pays the gather table's `Tree` harvest entry per hit (as an HISM tree: 1 wood, 2 with a tool) and at `HitsToRemove` (3) fells it: one edit operation (player source, outside the undo history) that empties the tree's trunk above the ground and its leaves where they are still as generated, leaving the ground-level trunk block as a stump. Scatter, navigation and collision follow as for any edit, and the edit layer saves it. `vox.Chop [n]`, `vox.Trees` | KC9 | VoxelWorlds, VoxelCharacterPlugin, parent | M |
+| WM-C9 | **Melee across a block.** Reproduced first: a miss logs what the sweep hit. If, as expected, the 30 uu sphere grazes the block edge between attacker and target (the player in a pit aiming up at the rim; an NPC's level view below a rim), the swing takes the first hostile the sphere meets among pawns only, and lands if a thin line from the eyes to that target (its hit point, capsule centre or top) is clear of world geometry; an NPC's swing aims at its target in 3D. Walls still stop a swing. The fix is in the shared path (a ledge in smooth terrain clips the same way) and changes nothing where the sweep did not touch terrain first | KC12 | VoxelCharacterPlugin | S |
+| WM-C10 | **Tests** with each item (below) | — | all | M |
+| WM-C11 | **Live verification and docs:** `VoxelDemo` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Cubic`, the smooth control, these results, §6, §14.1, `WORLD_MODES.md`, `SURFACE_NAVIGATION.md`, the plugin instructions, the parent's doc map and `vox.*` table | — | all | M |
+
+**Decisions** (asked 2026-10-24; **each decided as recommended** the same day, recorded in §8):
+
+| ID | Question | Options | Recommendation (accepted) |
+|----|----------|---------|---------------------------|
+| D29 | Cubic step policy (revisits D5) | (a) **Auto-step one block** for players and NPCs; two blocks are a wall; navigation the same rule; the camera eases the step. (b) **Jump per block** (D5): keep the 50 uu step; NPCs hop as their path reaches a one-block rise; a player auto-jump assist and a repeating held jump; navigation the same rule | **(a).** One rule shared by movement, navigation, NPCs and the QA tooling (`vox.AutoRun` walks cubic terrain), the least special-case code, and no stall-then-hop; Review A measured that jump-per-block hurts (C5: auto-run stops at the first rise, every block needs a tap). Cost: one-block terrain needs no jump, a design flavour |
+| D30 | How a voxel tree is felled | (a) **Like an HISM tree:** hits on a trunk block pay the `Tree` harvest entry per hit and the third hit removes the tree's trunk above the ground and its leaves, leaving a stump; (b) **wood per log block:** no pay per hit, felling pays one wood (two with a tool) per trunk block removed, so a tall tree pays more; leaves and stump as (a) | **(a).** Parity with the smooth world's trees (the same table entry, hit count and yield), so recipes and balance hold in both modes; digging a trunk block still pays per voxel (G3) |
+
+**How each is verified.**
+
+| ID | Check |
+|----|-------|
+| WM-C5 | `Cubic.BlockSurface.Generated` (on CPU-generated cubic chunks, at random columns and over a pad, the generated block top equals the top face of the topmost solid voxel the chunks hold), `.EditMerged` (after digs and places, the edit-merged query equals a voxel scan), `.SmoothUnchanged` (the four queries in a smooth world equal the isosurface values as before); live: `vox.TPPOI` and NPC spawns stand on block tops |
+| WM-C6 | `POI.Cubic.PadSurface` (a cubic POI's base and claim at the block top the pad's columns have; smooth at the pad height as before), `POI.Cubic.PlaceCampsite` (a whole-voxel pad, every apron column within one block of its neighbours, the claim on the block top); live: props and campfires at 0 uu over the blocks on the demo POI types, apron rises surveyed |
+| WM-C7 | `VoxelCharacter.Cubic.StepPolicy` (the step height in cubic and smooth worlds; a capsule walks up a 75 uu box step and stops at 150), `Navigation.Cubic.BlockSteps` (one-block staircases pass, two-block walls refuse, no corner cut past a pillar, budget covers the smooth search's ground); live: `vox.AutoRun` over terraces, `vox.SpawnNPC Wolf 3` against a two-block pillar (no stuck loop) and up a one-block staircase, `vox.NavPath` |
+| WM-C8 | `Cubic.VoxelTrees.CollectMatchesStamp` (the collected voxels of every tree in a block of chunks equal what injection wrote), `.FindTreeAt` (every trunk voxel finds its tree, a leaf or ground voxel none), `VoxelCharacter.Cubic.FellVoxelTree` (the server path: yield per hit, the third hit empties trunk and leaves, keeps the stump and other trees' voxels); live: chop a tree, save and reload, the tree stays felled |
+| WM-C9 | `VoxelCharacter.Combat.MeleeAcrossBlock` (from a one-block pit at a target on the rim and back, the swing lands; through a wall it does not); live: `vox.SpawnDummy` + `vox.Attack` from a pit, a wolf in a pit attacking the player on its rim |
+| Smooth unchanged | Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon` and the same in the editor with the GPU tests (parity lines identical to main's); the smooth control live: POI props, NPC spawns and a nav path as before |
+
+**Order.** WM-C5 first (WM-C6 and WM-C7's navigation read it), then WM-C6, WM-C7, WM-C8 and WM-C9 (independent of each
+other), then the live pass. PRs: VoxelWorlds, VoxelCharacterPlugin (and ProceduralDungeonPlugin if touched), then
+UE5_PluginDev (VoxelWorldPOI, the game module's `vox.*` commands, the gitlinks and the doc map).
+
+**Left for later.** A far representation for cubic (§12.5), per-material hardness and drops, a block highlight and
+placement preview, cubic on planets.
+
+### 21.2 Results (2026-10-24)
+
+All four findings are fixed and verified; PRs open (below). Built from VoxelWorlds `feature/wm-c5-cubic-game-world` (base
+`952d4ae`), VoxelCharacterPlugin `feature/wm-c5-cubic-game-world` (base `45be0dd`) and UE5_PluginDev
+`claude/wizardly-booth-09b687` (base `c91ff9d`), editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`, in a worktree
+editor with background throttling off, `VoxelDemo` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Cubic`
+from a fresh world (`vox.DeleteSave`) unless noted; the A/B runs flip the three cvars (`voxel.Cubic.BlockSurface`,
+`voxel.Nav.BlockSteps`, `vc.Move.StepUpBlocks`) on one build. ProceduralDungeonPlugin and InteractionPlugin needed no
+change: the entrance stitcher reads `GetGeneratedSurfaceHeight`, which now returns block tops in a cubic world, and world
+items rest by trace on the collision, which is the blocks.
+
+**What changed, against the plan (§21.1).** Two items came out differently once built:
+
+- *The runtime campsite's apron* (WM-C6) is a staircase, not a linear profile in whole blocks. The linear profile left a
+  two-block step at the apron's outer edge where its rounding met the natural ground's own step
+  (`POI.Cubic.PlaceCampsite`: 1 of 1,226 neighbouring pairs); the staircase holds each column within one block of the pad
+  per block of distance from the pad's edge and takes the natural top as soon as that is within reach, so neighbouring
+  columns differ by at most a block wherever the natural ground does. The same test found the levelling's edits, written at
+  exact voxel corners, flooring into the neighbouring column when `WorldOrigin` is off an integer grid (11 of 112 core
+  columns untouched); the block levelling writes at cell centres. The smooth levelling keeps its corners (its graded
+  density hides a column's offset, and no project world has a fractional origin).
+- *KC12's cause* was not the sphere grazing a block edge (the plan's guess). The melee ability's 30 uu sweep never missed;
+  the client's check before it did. `TryStartMeleeAttack` asked a **line trace** whether a hostile is under the crosshair,
+  and a ray that passes exactly through a capsule's axis misses the capsule: reproduced live with the player on a rim and
+  a dummy one block down (eyes to centre (−87, −78, −139)), every swing reported "no hostile under the crosshair"; at the
+  same moment a ray 0.01 uu to the side of that line hit the capsule at 129 uu, rays moved up or down (still in the plane of
+  the axis) missed, and a 10 uu sphere hit at 113.5. Aiming straight at a body's centre is what `vox.Attack`'s auto-aim does
+  (Review A's 10 misses from a pit); whether a ray lands exactly on the axis depends on float rounding, so the misses came
+  and went with the geometry. The fix is a 5 uu sphere for the client's check (`FindMeleeTargetUnderCrosshair`,
+  `AttackTargetProbeRadius`); the ability is unchanged. NPCs never had it (they attack through the ability's sweep).
+
+Also found and fixed with WM-C5: the edit-merged column scan took a voxel tree's canopy for the ground (the topmost solid
+voxel with air above it), so in a cubic world a surface query under a tree returned the canopy's top. Leaves of the
+configured templates are not ground now; a trunk is (navigation sees it as an obstacle).
+
+**KC6: things stand on the blocks.** The pad and every structure on it, measured from each mesh's bounds to the voxel
+collision straight below it (each run streams the POI fresh):
+
+| Site | Old rules (`voxel.Cubic.BlockSurface 0`) | New rules | Smooth control (`DemoSmoothWorldConfig`) |
+|------|-------------------------------------------|-----------|------------------------------------------|
+| Tiled dungeon at (224810, −78550): pad height −223.1, block top −150 | brazier, elevator call post −73.1 uu, stone pillar −74.1 (inside the block) | 0.0, 0.0, −1.0 (the pillar's own offset); claim at −150.0 | 0.4, 0.4, −0.6 over the −223.5 isosurface (Review A's control) |
+| Generated campsite at (109006, −204628): pad −772.2, block top −750 | campfire, bench, claim −22.2 | 0.0, 0.0, 0.0 | 0.3 over −772.6 |
+
+The dungeon under the tiled POI moved up with its pad's surface (it hangs `DungeonDepth` under it): `vox.TPRoom Entrance`
+and `Boss` land on their floors (feet −4,467.8 and −5,267.8). Surface NPC spawns: all 119 in the new-rules runs stand on
+block tops (`SurfaceNPC: … spawned at`, every Z a multiple of 75 with `WorldOrigin.Z` 0), where the old rules spawned them
+at isosurface heights (2,675.91, 866.84, …: inside the top block, then pushed out); the smooth control's 8 spawns stay at
+isosurface heights. The player's spawn search and settle land on block tops (feet 2.3 uu over −525 at the spawn).
+
+**KC7: one rule for steps.** Automation `VoxelCharacter.Cubic.StepUpOneBlock` (static boxes, a walker fed +X input for 4 s):
+in a cubic world it walks up a 75 uu block without a jump and stops at the two-block rise after it (feet Z 77.2, X 666 =
+the wall at 700 less the capsule radius); in a smooth world it stops at the 75 uu block (X 266). Live:
+
+- *Hands-free walking* (`vox.AutoRun 1 0.3 0` from (30000, −20000), 30 s, `vox.Debug.Capture` every 0.25 s): 17,362 uu
+  across cubic terraces at the full 600 uu/s, 12 rises and 14 drops between samples, every one of 119 samples grounded
+  (vZ 0), no READY→NOT-READY. Review A: auto-run stopped at the first block (C5).
+- *A two-block pillar*: a 3×3 pillar two blocks above a moat dug around it on a flat campsite pad (ground 1,650, moat floor
+  1,500), two wolves in the moat at night. New rules, 30 s: no auto-jump, no stuck/repath (one Chase→Return and back).
+  Old rules (`voxel.Nav.BlockSteps 0`, `vc.Move.StepUpBlocks 0`, fresh wolves), 30 s: 11 auto-jumps at the wall and a
+  stuck/repath. Review A: wolves looping "stuck … repathing" at a pillar's base.
+- *A one-block staircase* cut into the same pillar: a wolf in the moat, provoked from the pillar top, climbed moat → stair
+  → pillar (feet 1,502 → 1,652) within 2 s and attacked (12 hits).
+- *Navigation*: `vox.NavPath` reports cell 75, step 76 in the cubic world (150 / 100 in the control). Three routes from one
+  spot, block rule against the smooth rule on the same terrain: 889 / 6,067 / 2,850 uu long, 79 / 804 / 499 nodes,
+  0.97 / 8.52 / 5.02 ms, against 838 / 6,061 / 2,955 uu, 20 / 200 / 134 nodes, 0.58 / 3.78 / 1.42 ms (G73).
+
+**KC9: trees are gameplay.** Live `vox.Trees 60` listed 14 standing voxel trees; `vox.Chop` stood by the nearest (template 0,
+8 trunk and 30 leaf blocks) and chopped it through the server path: "Chop 1/3 … +1 ID_Material_Wood", 2/3, 3/3, then "Felled
+… 37 blocks removed, stump kept"; the trunk and the canopy's shadow are gone and the stump lies flush with the ground
+(`c21_tree_before`, `c21_tree_after`). `vox.Save`, Stop, Play: the player is back beside it and the tree is not among the
+12 standing within 60 m. Automation: `Cubic.VoxelTrees.FindAndFell` (12 of 16 placed trees present in the streamed chunks,
+the rest skipped by the stamp under an overhang; 162 of 166 trunk blocks find their own tree, the other 4 a touching
+neighbour's; felling removes every block but the stump, leaves every other tree's trunk, removes nothing a second time and
+takes no undo step), `VoxelCharacter.Cubic.FellVoxelTree` (the controller path: standing after two hits, 117 blocks → the
+stump at the third, a stump not chopped again).
+
+**KC12: melee across a block.** Live after the fix, a dummy one block below the player on a staircase and one block above,
+`vox.Attack 1` ×5 each: 5 of 5 hits both ways (before the fix the "one block below" case missed every swing at the geometry
+above). Automation `VoxelCharacter.Combat.MeleeTargetThroughAxis`: seven aims straight at a body's centre (from 60° below to
+20° above, the live failing one among them) all find the target; through a wall and past `AttackTargetRange`, nothing.
+
+**Smooth worlds unchanged.** Every change keys on a block surface (`UsesBlockSurface`: cubic meshing in a heightmap mode),
+and the smooth code paths are the ones they were: `Cubic.BlockSurface.SmoothUnchanged` (the four surface queries in a DC
+world equal the isosurface values computed as before, bit for bit, over 300 columns), `POI.Cubic.PadSurface` (smooth: the
+pad's surface is its height), the step test (smooth: 50 uu), the smooth control live (props, campsite, nav cells, NPC spawn
+heights as Review A measured them), `vox.Trees` "no voxel trees". The tree stamp now goes through the shape enumeration it
+shares with the collector (`ForEachTreeVoxel`); its loops and write rule are the old ones line for line. The pathfinder's
+cell maths moved behind `FVoxelSurfaceNavParams::CellCentre` / `CellOf` with `GridOrigin` zero by default, the same
+arithmetic (`Navigation.*` pass unchanged). The melee probe (5 uu sphere) applies in every world: it finds what the line
+found, and a body whose axis the crosshair crosses exactly.
+
+**Suites.** 631 tests headless (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`, `-nullrhi`) and 631 in the editor with the GPU tests, all passing: main's 620 and the 11 above. The GPU parity lines are identical to main's (the same 236 event lines and CRCs). The editor run predates a last tightening of one assertion in `Cubic.BlockSurface.Generated` (the isosurface gap's lower bound); the headless run has it.
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| WM-C5 | Done, in review | VoxelWorlds VW_PR | `Cubic.BlockSurface.Generated` (597 columns of a cubic world with an off-grid `WorldOrigin` and a pad: `GetGeneratedSurfaceHeight` and `QueryEditMergedSurface` equal the streamed top face at all 597; each block top lies above its column's isosurface by 0.8 to 74.8 uu, 402 columns by more than 1 uu; the pad's core at `SnapToBlockTop` of its height), `.EditMerged` (a placed block, floating leaves, a trunk block, a dig), `.SmoothUnchanged`; live: props, campsites and NPC spawns on block tops |
+| WM-C6 | Done, in review | UE5_PluginDev PARENT_PR | `POI.Cubic.PadSurface` (137 of 137 core columns of a streamed pad top out at its surface; a POI on natural ground stands on its centre's block; smooth unchanged), `POI.Cubic.PlaceCampsite` (core flat at the claim's block top, 0 of 1,226 neighbouring pairs over a block, only whole voxels where it edited); live: the table above |
+| WM-C7 | Done, in review | VoxelCharacterPlugin VCP_PR, VoxelWorlds VW_PR | `VoxelCharacter.Cubic.StepUpOneBlock`, `VoxelCharacter.Camera.BlockStepEase`, `Navigation.Cubic.BlockSteps`; live: the walk, the pillar, the staircase |
+| WM-C8 | Done, in review | VoxelWorlds VW_PR, VoxelCharacterPlugin VCP_PR, UE5_PluginDev PARENT_PR | `Cubic.VoxelTrees.FindAndFell`, `VoxelCharacter.Cubic.FellVoxelTree`; live: chop, fell, save and reload |
+| WM-C9 | Done, in review | VoxelCharacterPlugin VCP_PR | `VoxelCharacter.Combat.MeleeTargetThroughAxis`; live: across a block both ways |
+
+**New findings.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G73 | Block-rule navigation searches cost about 1.7-3.5× the smooth rule's on the same routes (8.5 against 3.8 ms for a 60 m route): four times the cells, each a column scan on first touch. Paths stay within the node budget | Recorded; a coarser search with block-aware edges (sampling the columns between 150 uu cells) would bring it back if NPC counts grow |
+
+**Left as it was.** A far representation for cubic (§12.5), per-material hardness, a block highlight, cubic on planets.
+`vox.Attack`'s auto-aim picks the nearest hostile within 4 m, not the one under the crosshair (QA tooling).
+
+KC6, KC7, KC9 and KC12 are fixed.
