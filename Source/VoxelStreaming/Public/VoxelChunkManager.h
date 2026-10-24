@@ -26,6 +26,7 @@
 #include "VoxelPlanetOcean.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelSurfaceQuery.h"
+#include "VoxelTreeInjector.h"
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -704,6 +705,88 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	FVoxelTerrainSurfacePoint GetSurfacePointAt(const FVector& WorldPos) const;
+
+	/**
+	 * Whether this world's walking surface is block tops (cubic meshing in a heightmap world mode; world modes review
+	 * WM-C5, KC6). There GetGeneratedSurfaceHeight, QueryEditMergedSurface and their point forms return the top face of
+	 * the block column's topmost block, not the density isosurface up to a block under it, and anything placed on a pad or
+	 * the generated ground should stand on SnapToBlockTop of its height.
+	 *
+	 * @return True in a cubic heightmap world (with voxel.Cubic.BlockSurface on)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	bool IsBlockSurface() const;
+
+	/**
+	 * The walking surface for a generated column height: in a block world the top face of the topmost block the generator
+	 * makes from it (FVoxelBlockSurface::BlockTopForHeight, between Height and Height + VoxelSize); Height itself elsewhere.
+	 *
+	 * @param Height A generated column height (a pad height, GetTerrainHeightAt plus zones)
+	 * @return World Z to stand things on
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	float SnapToBlockTop(float Height) const;
+
+	// ==================== Voxel trees (world modes review WM-C8, KC9) ====================
+	// Cubic worlds inject trees into the voxel data (FVoxelTreeInjector). They are recomputed from the same seeded
+	// positions here, so gameplay can find the tree a trunk block belongs to and fell it. Game thread only.
+
+	/**
+	 * Whether this world injects voxel trees (cubic meshing in a heightmap mode, TreeMode not HISM, templates and a density).
+	 *
+	 * @return True when FindVoxelTreeAt can find anything
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Trees")
+	bool HasVoxelTrees() const;
+
+	/**
+	 * The voxel tree whose trunk passes through a world position: of the trees the injector places with a trunk block in
+	 * that voxel, the one whose trunk is there (the voxel is solid and carries the trunk material). Not a UFUNCTION
+	 * (FVoxelTreeInstance is plain C++).
+	 *
+	 * @param WorldPos A position inside the trunk block
+	 * @param OutTree The tree
+	 * @return False in a world without voxel trees, or when that voxel is no placed tree's trunk block
+	 */
+	bool FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInstance& OutTree) const;
+
+	/**
+	 * The voxel trees placed within a horizontal radius of a position (their bases), nearest first, that still have a trunk
+	 * block above the ground in loaded voxels (QA: vox.Chop, vox.Trees).
+	 *
+	 * @param WorldPos Search centre
+	 * @param Radius Horizontal search radius (uu)
+	 * @param OutTrees Receives the trees (reset first)
+	 */
+	void FindVoxelTreesNear(const FVector& WorldPos, float Radius, TArray<FVoxelTreeInstance>& OutTrees) const;
+
+	/**
+	 * A voxel tree's blocks that are still as its stamp wrote them: the edit-merged voxel is solid and carries the stamp's
+	 * material (a dug block, or one replaced by a neighbouring tree's stamp or by an edit, is left out).
+	 *
+	 * @param Tree The tree (FindVoxelTreeAt)
+	 * @param OutBlocks Receives the blocks (reset first)
+	 */
+	void GetVoxelTreeBlocks(const FVoxelTreeInstance& Tree, TArray<FVoxelTreeVoxel>& OutBlocks) const;
+
+	/**
+	 * Fell a voxel tree: one edit operation (outside the undo history, the edit source as set by the caller) that empties
+	 * every block of it GetVoxelTreeBlocks returns, except, with bKeepStump, its trunk's ground-level layer, which stays as
+	 * a stump flush with the ground. Scatter, collision and navigation follow as for any edit; the edit layer saves it.
+	 *
+	 * @param Tree The tree
+	 * @param bKeepStump Keep the trunk's lowest layer (the ground's top voxel the trunk replaced)
+	 * @return Blocks removed (trunk and leaves)
+	 */
+	int32 FellVoxelTree(const FVoxelTreeInstance& Tree, bool bKeepStump = true);
+
+	/**
+	 * World position of a global voxel's cell centre (global voxel coordinates count from WorldOrigin in voxels).
+	 *
+	 * @param GlobalVoxel Global voxel coordinate
+	 * @return The cell's centre
+	 */
+	FVector GlobalVoxelToWorldCentre(const FIntVector& GlobalVoxel) const;
 
 	/**
 	 * Where a planet's player spawns (spherical SP-B11): the terrain surface along the configuration's spawn direction
@@ -2292,6 +2375,21 @@ private:
 
 	/** Append conditioning zones (static + dynamic) whose influence covers a single world-space XY point. */
 	void GatherConditioningZonesForPoint(double WorldX, double WorldY, TArray<FVoxelConditioningZone>& OutZones) const;
+
+	/**
+	 * The generated column height (GetTerrainHeightAt plus the conditioning zones there) at a sample point, as the heightmap
+	 * generators compute it for a voxel column. GetGeneratedSurfaceHeight returns it in smooth worlds.
+	 */
+	float GetGeneratedColumnHeight(double WorldX, double WorldY) const;
+
+	/**
+	 * QueryEditMergedSurface in a block world (FVoxelBlockSurface::UsesBlockSurface; WM-C5, KC6): the top face of the
+	 * topmost ground voxel with no ground above it in the edit-merged column of the block containing (X, Y). Leaves of the
+	 * configured voxel trees are not ground (a canopy is walked under, not on), a trunk is. The normal and slope are the
+	 * edit-merged density gradient's, the terrain's slope, as in smooth worlds.
+	 */
+	bool QueryEditMergedBlockSurface(double WorldX, double WorldY, float EstimateZ,
+		float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees, uint8& OutMaterialID, uint8& OutBiomeID) const;
 
 	/** CPU mesher for generating mesh geometry (polymorphic - can be cubic or smooth) */
 	TUniquePtr<IVoxelMesher> Mesher;

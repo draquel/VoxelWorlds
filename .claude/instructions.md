@@ -103,7 +103,14 @@ Surface queries go along local up (spherical Phase 4, SP-A3): `UVoxelChunkManage
 edit-merged surface on the up-line through a position; heightmaps: `QueryEditMergedSurface`), `GetGeneratedSurfacePoint`
 (analytic), and `FVoxelSurfaceQuery::QueryPlanetSurfaceConditions` / `SampleSurfacePoint` for generation's material and
 biome. Never call `GetTerrainHeightAt` in code that can run on a planet: there it logs once and degrades to the upper
-hemisphere's Z. 2D systems key a planet on the cube sphere (`FVoxelCubeSphere`, `FVoxelCubeSphereGrid` in VoxelCore:
+hemisphere's Z. In a cubic heightmap world the walking surface is block tops, up to a block above the density isosurface
+(world modes review §21, WM-C5): `GetGeneratedSurfaceHeight`, `QueryEditMergedSurface` and their point forms return the
+top face of the block column's topmost block there (`FVoxelBlockSurface`, `UVoxelChunkManager::IsBlockSurface`,
+`SnapToBlockTop`; voxel-tree leaves are not ground), so anything placed from a surface query or a pad height stands on a
+block; compute block tops with `FVoxelBlockSurface::BlockTopForHeight`, never by rounding a height yourself (the generator's
+density rule decides which voxel is solid). A cubic world's voxel trees are recomputed, not stored: `FindVoxelTreeAt`,
+`GetVoxelTreeBlocks` and `FellVoxelTree` share `FVoxelTreeInjector`'s shape enumeration (`ForEachTreeVoxel`) with the stamp,
+so change the shape there only. 2D systems key a planet on the cube sphere (`FVoxelCubeSphere`, `FVoxelCubeSphereGrid` in VoxelCore:
 atlas coordinates Face × N + U, V), as the map, navigation regions and the NPC spawner do; heightmap code paths keep
 their XY keys untouched.
 

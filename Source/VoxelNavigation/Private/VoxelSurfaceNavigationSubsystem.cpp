@@ -27,6 +27,9 @@ static TAutoConsoleVariable<float> CVarNavMaxWadeDepth(TEXT("voxel.Nav.MaxWadeDe
 	TEXT("Cells this far below the water surface are still walkable."));
 static TAutoConsoleVariable<float> CVarNavMaxRadius(TEXT("voxel.Nav.MaxRadius"), 20000.f,
 	TEXT("Cells farther than this from the start are never expanded."));
+static TAutoConsoleVariable<int32> CVarNavBlockSteps(TEXT("voxel.Nav.BlockSteps"), 1,
+	TEXT("Cubic (block) worlds: one cell per block column and a step of one block (1, world modes review WM-C7), or the smooth ")
+	TEXT("rules at voxel.Nav.CellSize and voxel.Nav.MaxStepRise (0, as before)."));
 static TAutoConsoleVariable<int32> CVarNavDebug(TEXT("voxel.Nav.Debug"), 0,
 	TEXT("1 = draw the walkability grid around the debug focus and recent routes."));
 
@@ -211,10 +214,26 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 	Params.MaxStepRise = FMath::Max(CVarNavMaxStepRise.GetValueOnGameThread(), 0.f);
 	Params.MaxWadeDepth = FMath::Max(CVarNavMaxWadeDepth.GetValueOnGameThread(), 0.f);
 	Params.MaxSearchRadius = FMath::Max(CVarNavMaxRadius.GetValueOnGameThread(), 0.f);
+	Params.GridOrigin = FVector2D::ZeroVector;
+	Params.bBlockSteps = false;
 	if (const UVoxelChunkManager* ChunkMgr = ChunkManager.Get())
 	{
 		if (const UVoxelWorldConfiguration* Config = ChunkMgr->GetConfiguration())
 		{
+			// A block world (cubic, WM-C7, D29): one cell per block column on the voxel grid, heights the block tops the
+			// surface queries return there (WM-C5), and a step of one block up or down; the node budget grows with the
+			// cells per area, so a search still covers the ground it covers at the configured cell size.
+			if (ChunkMgr->IsBlockSurface() && CVarNavBlockSteps.GetValueOnGameThread() != 0)
+			{
+				const float ConfiguredCellSize = Params.CellSize;
+				Params.bBlockSteps = true;
+				Params.CellSize = Config->VoxelSize;
+				Params.GridOrigin = FVector2D(Config->WorldOrigin.X, Config->WorldOrigin.Y);
+				Params.MaxStepRise = Config->VoxelSize + 1.f;
+				const float CellsPerConfiguredCell = FMath::Square(ConfiguredCellSize / Params.CellSize);
+				Params.MaxNodes = FMath::Max(Params.MaxNodes, FMath::RoundToInt(Params.MaxNodes * CellsPerConfiguredCell));
+			}
+
 			Params.bHasWater = Config->bEnableWaterLevel;
 			// The test itself goes through the sea (SP-E1): the WaterLevel plane generation floods (G19), the sea sphere
 			// on a planet.
@@ -234,7 +253,7 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 			}
 		}
 	}
-	if (CachedCellSize != Params.CellSize)
+	if (CachedCellSize != Params.CellSize || CachedGridOrigin != Params.GridOrigin)
 	{
 		Tiles.Reset();
 		CachedCells = 0;
@@ -243,6 +262,7 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 		Regions.Reset();
 		TempSpheres.Reset();
 		CachedCellSize = Params.CellSize;
+		CachedGridOrigin = Params.GridOrigin;
 	}
 }
 
@@ -253,13 +273,12 @@ FVoxelSurfaceNavParams UVoxelSurfaceNavigationSubsystem::GetParams() const
 
 FIntPoint UVoxelSurfaceNavigationSubsystem::CellOf(const FVector& World) const
 {
-	const float Size = FMath::Max(Params.CellSize, 1.f);
-	return FIntPoint(FMath::FloorToInt(World.X / Size), FMath::FloorToInt(World.Y / Size));
+	return Params.CellOf(World.X, World.Y);
 }
 
 FVector2D UVoxelSurfaceNavigationSubsystem::CellCentre(const FIntPoint& Cell) const
 {
-	return FVector2D((Cell.X + 0.5) * Params.CellSize, (Cell.Y + 0.5) * Params.CellSize);
+	return Params.CellCentre(Cell);
 }
 
 static FORCEINLINE int32 FloorDiv(int32 A, int32 B)

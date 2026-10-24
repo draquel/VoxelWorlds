@@ -20,6 +20,7 @@
 #include "IVoxelWorldMode.h"
 #include "VoxelWorldModeFactory.h"
 #include "VoxelSurfaceQuery.h"
+#include "VoxelBlockSurface.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelCPUMarchingCubesMesher.h"
@@ -2077,6 +2078,12 @@ bool UVoxelChunkManager::QueryEditMergedSurface(
 		return false; // far band — caller falls back to the generator
 	}
 
+	// A block world's surface is the block tops it draws, not the density isosurface under them (WM-C5).
+	if (FVoxelBlockSurface::UsesBlockSurface(*Configuration))
+	{
+		return QueryEditMergedBlockSurface(WorldX, WorldY, EstZ, OutHeight, OutNormal, OutSlopeDegrees, OutMaterialID, OutBiomeID);
+	}
+
 	// Assemble a vertical merged-voxel column over a +/- one-chunk window around the estimate
 	// (covers dig-down / build-up that shifts the surface off the analytic height).
 	const int32 Window = ChunkSize;
@@ -2118,6 +2125,80 @@ bool UVoxelChunkManager::QueryEditMergedSurface(
 		OutNormal = -OutNormal; // keep it up-facing for a top surface
 	}
 
+	OutSlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(OutNormal.Z), -1.0f, 1.0f)));
+	return true;
+}
+
+bool UVoxelChunkManager::QueryEditMergedBlockSurface(double WorldX, double WorldY, float EstimateZ,
+	float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees, uint8& OutMaterialID, uint8& OutBiomeID) const
+{
+	const float VoxelSize = Configuration->VoxelSize;
+	const int32 Window = Configuration->ChunkSize;
+	const FVector& Origin = Configuration->WorldOrigin;
+
+	// The voxel trees' leaves are not ground: a canopy is walked under, so the surface under it is the ground's top.
+	uint64 LeafMask[4] = { 0, 0, 0, 0 };
+	if (Configuration->TreeMode != EVoxelTreeMode::HISM && Configuration->TreeDensity > 0.0f)
+	{
+		for (const FVoxelTreeTemplate& Template : Configuration->TreeTemplates)
+		{
+			LeafMask[Template.LeafMaterialID >> 6] |= uint64(1) << (Template.LeafMaterialID & 63);
+		}
+	}
+	auto IsGround = [&LeafMask](const FVoxelData& Voxel)
+	{
+		return Voxel.IsSolid() && (LeafMask[Voxel.MaterialID >> 6] & (uint64(1) << (Voxel.MaterialID & 63))) == 0;
+	};
+
+	// The block column containing (X, Y), read at its cells' centres so the position-to-voxel floor is unambiguous.
+	const double CX = FVoxelBlockSurface::ColumnCorner(WorldX, Origin.X, VoxelSize) + 0.5 * VoxelSize;
+	const double CY = FVoxelBlockSurface::ColumnCorner(WorldY, Origin.Y, VoxelSize) + 0.5 * VoxelSize;
+	const int64 EstLayer = static_cast<int64>(FMath::FloorToDouble((static_cast<double>(EstimateZ) - Origin.Z) / VoxelSize));
+	auto LayerCentre = [&Origin, VoxelSize](int64 Layer) { return Origin.Z + (static_cast<double>(Layer) + 0.5) * VoxelSize; };
+
+	// Scan down from the top of a +/- one-chunk window around the estimate for the topmost ground voxel with no ground above.
+	bool bAboveGround = IsGround(GetEditMergedVoxelAtWorldPosition(FVector(CX, CY, LayerCentre(EstLayer + Window + 1))));
+	int64 TopLayer = TNumericLimits<int64>::Lowest();
+	FVoxelData TopVoxel;
+	for (int64 Layer = EstLayer + Window; Layer >= EstLayer - Window; --Layer)
+	{
+		const FVoxelData Voxel = GetEditMergedVoxelAtWorldPosition(FVector(CX, CY, LayerCentre(Layer)));
+		const bool bGround = IsGround(Voxel);
+		if (bGround && !bAboveGround)
+		{
+			TopLayer = Layer;
+			TopVoxel = Voxel;
+			break;
+		}
+		bAboveGround = bGround;
+	}
+	if (TopLayer == TNumericLimits<int64>::Lowest())
+	{
+		return false;
+	}
+
+	OutHeight = static_cast<float>(FVoxelBlockSurface::LayerTop(TopLayer, Origin.Z, VoxelSize));
+	OutMaterialID = TopVoxel.MaterialID;
+	OutBiomeID = TopVoxel.BiomeID;
+
+	// The terrain's slope from the edit-merged density gradient, sampled inside the top block (a block's own face is flat).
+	auto Density = [this](double X, double Y, double Z) -> float
+	{
+		return static_cast<float>(GetEditMergedVoxelAtWorldPosition(FVector(X, Y, Z)).Density);
+	};
+	const double Hz = LayerCentre(TopLayer);
+	const float dX = Density(CX + VoxelSize, CY, Hz) - Density(CX - VoxelSize, CY, Hz);
+	const float dY = Density(CX, CY + VoxelSize, Hz) - Density(CX, CY - VoxelSize, Hz);
+	const float dZ = Density(CX, CY, Hz + VoxelSize) - Density(CX, CY, Hz - VoxelSize);
+	OutNormal = FVector(-dX, -dY, -dZ).GetSafeNormal();
+	if (OutNormal.IsNearlyZero())
+	{
+		OutNormal = FVector::UpVector;
+	}
+	else if (OutNormal.Z < 0.0f)
+	{
+		OutNormal = -OutNormal;
+	}
 	OutSlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(OutNormal.Z), -1.0f, 1.0f)));
 	return true;
 }
@@ -3307,6 +3388,180 @@ FVoxelTerrainSurfacePoint UVoxelChunkManager::GetSurfacePointAt(const FVector& W
 		return Point;
 	}
 	return WorldMode->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
+}
+
+bool UVoxelChunkManager::IsBlockSurface() const
+{
+	return Configuration && FVoxelBlockSurface::UsesBlockSurface(*Configuration);
+}
+
+float UVoxelChunkManager::SnapToBlockTop(float Height) const
+{
+	if (!IsBlockSurface())
+	{
+		return Height;
+	}
+	return static_cast<float>(FVoxelBlockSurface::BlockTopForHeight(Height, Configuration->WorldOrigin.Z, Configuration->VoxelSize));
+}
+
+bool UVoxelChunkManager::HasVoxelTrees() const
+{
+	// The same gate as the generation request's tree injection.
+	return bIsInitialized && Configuration && WorldMode
+		&& Configuration->WorldMode != EWorldMode::SphericalPlanet
+		&& Configuration->MeshingMode == EMeshingMode::Cubic
+		&& Configuration->TreeMode != EVoxelTreeMode::HISM
+		&& Configuration->TreeTemplates.Num() > 0
+		&& Configuration->TreeDensity > 0.0f;
+}
+
+FVector UVoxelChunkManager::GlobalVoxelToWorldCentre(const FIntVector& GlobalVoxel) const
+{
+	const float VoxelSize = Configuration ? Configuration->VoxelSize : 100.0f;
+	const FVector Origin = Configuration ? Configuration->WorldOrigin : FVector::ZeroVector;
+	return Origin + (FVector(GlobalVoxel) + FVector(0.5)) * VoxelSize;
+}
+
+bool UVoxelChunkManager::FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInstance& OutTree) const
+{
+	if (!HasVoxelTrees())
+	{
+		return false;
+	}
+	const float VoxelSize = Configuration->VoxelSize;
+	const FVector Relative = (WorldPos - Configuration->WorldOrigin) / VoxelSize;
+	const FIntVector GlobalVoxel(FMath::FloorToInt32(Relative.X), FMath::FloorToInt32(Relative.Y), FMath::FloorToInt32(Relative.Z));
+
+	TArray<FVoxelTreeInstance> Candidates;
+	FVoxelTreeInjector::FindTreesWithTrunkAt(GlobalVoxel, Configuration->ChunkSize, VoxelSize, Configuration->WorldOrigin,
+		Configuration->WorldSeed, Configuration->TreeTemplates, Configuration->NoiseParams, *WorldMode, Configuration->TreeDensity,
+		Configuration->BiomeConfiguration, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Candidates);
+
+	// The voxel must still be that tree's trunk block; where two trunks touch, the tree with more of its trunk left wins.
+	const FVoxelData Voxel = GetEditMergedVoxelAtWorldPosition(GlobalVoxelToWorldCentre(GlobalVoxel));
+	int32 BestTrunk = 0;
+	TArray<FVoxelTreeVoxel> Blocks;
+	for (const FVoxelTreeInstance& Candidate : Candidates)
+	{
+		const FVoxelTreeTemplate& Template = Configuration->TreeTemplates[Candidate.TemplateIndex];
+		if (!Voxel.IsSolid() || Voxel.MaterialID != Template.TrunkMaterialID)
+		{
+			continue;
+		}
+		GetVoxelTreeBlocks(Candidate, Blocks);
+		const int32 Trunk = Blocks.FilterByPredicate([](const FVoxelTreeVoxel& B) { return B.bTrunk; }).Num();
+		if (Trunk > BestTrunk)
+		{
+			BestTrunk = Trunk;
+			OutTree = Candidate;
+		}
+	}
+	return BestTrunk > 0;
+}
+
+void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radius, TArray<FVoxelTreeInstance>& OutTrees) const
+{
+	OutTrees.Reset();
+	if (!HasVoxelTrees())
+	{
+		return;
+	}
+	const float VoxelSize = Configuration->VoxelSize;
+	const int32 ChunkSize = Configuration->ChunkSize;
+	const double ChunkWorldSize = static_cast<double>(ChunkSize) * VoxelSize;
+	const FVector Relative = WorldPos - Configuration->WorldOrigin;
+	const int32 CX0 = FMath::FloorToInt32((Relative.X - Radius) / ChunkWorldSize);
+	const int32 CX1 = FMath::FloorToInt32((Relative.X + Radius) / ChunkWorldSize);
+	const int32 CY0 = FMath::FloorToInt32((Relative.Y - Radius) / ChunkWorldSize);
+	const int32 CY1 = FMath::FloorToInt32((Relative.Y + Radius) / ChunkWorldSize);
+	TArray<TPair<double, FVoxelTreeInstance>> Found;
+	TArray<FVoxelTreeVoxel> Blocks;
+	for (int32 CX = CX0; CX <= CX1; ++CX)
+	{
+		for (int32 CY = CY0; CY <= CY1; ++CY)
+		{
+			TArray<FIntVector> Positions;
+			TArray<int32> Templates;
+			TArray<uint32> Seeds;
+			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), ChunkSize, VoxelSize, Configuration->WorldOrigin,
+				Configuration->WorldSeed, Configuration->NoiseParams, *WorldMode, Configuration->TreeDensity, Configuration->TreeTemplates,
+				Configuration->BiomeConfiguration, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Positions, Templates, Seeds);
+			for (int32 i = 0; i < Positions.Num(); ++i)
+			{
+				FVoxelTreeInstance Tree;
+				Tree.BaseVoxel = Positions[i];
+				Tree.TemplateIndex = Templates[i];
+				Tree.Seed = Seeds[i];
+				const double Distance = FVector::Dist2D(GlobalVoxelToWorldCentre(Tree.BaseVoxel), WorldPos);
+				if (Distance > Radius)
+				{
+					continue;
+				}
+				GetVoxelTreeBlocks(Tree, Blocks);
+				if (Blocks.ContainsByPredicate([&Tree](const FVoxelTreeVoxel& B) { return B.bTrunk && B.GlobalVoxel.Z > Tree.BaseVoxel.Z; }))
+				{
+					Found.Emplace(Distance, Tree);
+				}
+			}
+		}
+	}
+	Found.Sort([](const TPair<double, FVoxelTreeInstance>& A, const TPair<double, FVoxelTreeInstance>& B) { return A.Key < B.Key; });
+	for (const TPair<double, FVoxelTreeInstance>& Entry : Found)
+	{
+		OutTrees.Add(Entry.Value);
+	}
+}
+
+void UVoxelChunkManager::GetVoxelTreeBlocks(const FVoxelTreeInstance& Tree, TArray<FVoxelTreeVoxel>& OutBlocks) const
+{
+	OutBlocks.Reset();
+	if (!Configuration || !Configuration->TreeTemplates.IsValidIndex(Tree.TemplateIndex))
+	{
+		return;
+	}
+	TArray<FVoxelTreeVoxel> Stamp;
+	FVoxelTreeInjector::CollectTreeVoxels(Tree.BaseVoxel, Configuration->TreeTemplates[Tree.TemplateIndex], Tree.Seed, Stamp);
+	TSet<FIntVector> Seen;
+	// Later entries win (the trunk is stamped after the canopy and punches through it), so walk the stamp backwards.
+	for (int32 i = Stamp.Num() - 1; i >= 0; --i)
+	{
+		const FVoxelTreeVoxel& Block = Stamp[i];
+		bool bAlreadySeen = false;
+		Seen.Add(Block.GlobalVoxel, &bAlreadySeen);
+		if (bAlreadySeen)
+		{
+			continue;
+		}
+		const FVoxelData Voxel = GetEditMergedVoxelAtWorldPosition(GlobalVoxelToWorldCentre(Block.GlobalVoxel));
+		if (Voxel.IsSolid() && Voxel.MaterialID == Block.MaterialID)
+		{
+			OutBlocks.Add(Block);
+		}
+	}
+}
+
+int32 UVoxelChunkManager::FellVoxelTree(const FVoxelTreeInstance& Tree, bool bKeepStump)
+{
+	if (!EditManager || !Tree.IsValid())
+	{
+		return 0;
+	}
+	TArray<FVoxelTreeVoxel> Blocks;
+	GetVoxelTreeBlocks(Tree, Blocks);
+	// Felling is gameplay, as chopping a scatter tree is: it stays out of the undo history (as POI stamps and the flood do).
+	EditManager->BeginEditOperation(TEXT("Fell voxel tree"), /*bAddToUndoHistory=*/false);
+	int32 Removed = 0;
+	for (const FVoxelTreeVoxel& Block : Blocks)
+	{
+		if (bKeepStump && Block.bTrunk && Block.GlobalVoxel.Z == Tree.BaseVoxel.Z)
+		{
+			continue;
+		}
+		EditManager->ApplyEdit(GlobalVoxelToWorldCentre(Block.GlobalVoxel), FVoxelData::Air(), EEditMode::Set);
+		++Removed;
+	}
+	EditManager->EndEditOperation();
+	return Removed;
 }
 
 FVector UVoxelChunkManager::GetPlanetSpawnPosition() const
@@ -4515,6 +4770,27 @@ void UVoxelChunkManager::GatherConditioningZonesForPoint(double WorldX, double W
 }
 
 float UVoxelChunkManager::GetGeneratedSurfaceHeight(double WorldX, double WorldY) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !WM || !Configuration)
+	{
+		return 0.0f;
+	}
+
+	// A block world (WM-C5, KC6): the top of the topmost block the generator makes in the block column containing (X, Y),
+	// from the height sampled where the generator samples it, the column's lower corner.
+	if (FVoxelBlockSurface::UsesBlockSurface(*Configuration))
+	{
+		const FVector& Origin = Configuration->WorldOrigin;
+		const float VoxelSize = Configuration->VoxelSize;
+		const float ColumnHeight = GetGeneratedColumnHeight(
+			FVoxelBlockSurface::ColumnCorner(WorldX, Origin.X, VoxelSize), FVoxelBlockSurface::ColumnCorner(WorldY, Origin.Y, VoxelSize));
+		return static_cast<float>(FVoxelBlockSurface::BlockTopForHeight(ColumnHeight, Origin.Z, VoxelSize));
+	}
+	return GetGeneratedColumnHeight(WorldX, WorldY);
+}
+
+float UVoxelChunkManager::GetGeneratedColumnHeight(double WorldX, double WorldY) const
 {
 	const IVoxelWorldMode* WM = GetWorldMode();
 	if (!bIsInitialized || !WM || !Configuration)

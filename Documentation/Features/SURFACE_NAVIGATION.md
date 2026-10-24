@@ -28,6 +28,18 @@ generation writes only the seabed, which with water off would otherwise read as 
 steppable. Cost = run × (1 + SlopeCostScale × rise / run). Surface only: caves, overhangs and bridges do not exist
 for the pathfinder (one height per column).
 
+**Block worlds** (cubic meshing on a heightmap; world modes review WM-C7, decision D29): walkers step one block
+(`UVCMovementComponent`), so the grid follows the blocks. `FVoxelSurfaceNavParams::bBlockSteps` makes one cell per block
+column (`CellSize` = the voxel size, `GridOrigin` = `WorldOrigin`, so cell centres are block-column centres), the heights
+the block tops the chunk manager's surface queries return there, `MaxStepRise` one block (+ 1) with no √2 on diagonals,
+and a diagonal needs both cells beside it walkable and within a step of either end (no corner cut past a pillar). The
+node budget grows with the cells per area (`MaxNodes` × (150 / V)²), so a search covers the ground it covers at 150 uu
+cells. With the smooth rule at 150 uu cells, cell centres two blocks apart turned a one-block staircase into a 150 uu
+rise (refused), while the isosurface it sampled made a two-block step a slope it could take, so nav and movement
+disagreed (KC7).
+`voxel.Nav.BlockSteps 0` keeps the smooth rule in a cubic world. Searches cost about 1.7-3.5× the smooth rule's on the
+same routes (four times the cells; G73).
+
 ### Subsystem API
 
 - `FindPath(From, To, OutPoints)` / `FindPathWithStats(...)`: synchronous, budgeted (`voxel.Nav.MaxNodes`, 4096).
@@ -40,7 +52,7 @@ for the pathfinder (one height per column).
 ### CVars
 
 `voxel.Nav.CellSize` (150), `voxel.Nav.MaxNodes` (4096), `voxel.Nav.MaxStepRise` (100), `voxel.Nav.MaxWadeDepth`
-(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.Debug` (0).
+(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.BlockSteps` (1: block worlds use the block rule above), `voxel.Nav.Debug` (0).
 
 ### Costs
 

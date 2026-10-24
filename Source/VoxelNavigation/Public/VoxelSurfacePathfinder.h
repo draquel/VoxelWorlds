@@ -24,6 +24,21 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Navigation", meta = (ClampMin = "0"))
 	float MaxStepRise = 100.f;
 
+	/**
+	 * World (X, Y) where the cell grid starts: cell (0, 0) covers [GridOrigin, GridOrigin + CellSize). Zero by default; a
+	 * block world aligns it with the voxel grid (WorldOrigin) so each cell is one block column (world modes review WM-C7).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Navigation")
+	FVector2D GridOrigin = FVector2D::ZeroVector;
+
+	/**
+	 * A block world's step rule (cubic, world modes review WM-C7, decision D29): every rise is whole blocks and a walker
+	 * steps one block, so MaxStepRise (one block) is not scaled on diagonals, and a diagonal step also needs both cells
+	 * beside it walkable and within a step of either end, so a route never cuts a corner past a pillar.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Navigation")
+	bool bBlockSteps = false;
+
 	/** World Z of the water surface, used when bHasWater. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Navigation")
 	float WaterLevel = 0.f;
@@ -62,6 +77,30 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	 * Blueprint.
 	 */
 	FVoxelSeaSurface Sea;
+
+	/**
+	 * The world (X, Y) of a cell's centre.
+	 *
+	 * @param Cell Grid cell
+	 * @return GridOrigin + (Cell + 0.5) * CellSize
+	 */
+	FVector2D CellCentre(const FIntPoint& Cell) const
+	{
+		return GridOrigin + FVector2D((Cell.X + 0.5) * CellSize, (Cell.Y + 0.5) * CellSize);
+	}
+
+	/**
+	 * The cell containing a world (X, Y).
+	 *
+	 * @param X World X
+	 * @param Y World Y
+	 * @return Grid cell
+	 */
+	FIntPoint CellOf(double X, double Y) const
+	{
+		const double Size = FMath::Max(CellSize, 1.f);
+		return FIntPoint(FMath::FloorToInt((X - GridOrigin.X) / Size), FMath::FloorToInt((Y - GridOrigin.Y) / Size));
+	}
 
 	/**
 	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by Sea when it is enabled,
