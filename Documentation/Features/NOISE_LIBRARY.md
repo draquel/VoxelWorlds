@@ -157,12 +157,21 @@ Planets do not use the permutation noise above. A 1,000 km planet would repeat i
   (`FBM3D(Position, Params)`); the GPU gets one split origin per chunk and field (`PlanetNoiseOrigins`) and adds the
   voxel's offset from the chunk's anchor (`PlanetFBM3D`). Within 10^-5 of a double reference at origins up to 10^9
   noise units (`VoxelWorlds.Noise.SplitOrigin`).
+- **Continuous Simplex (G43):** the classic corner weight (0.6 − d²)⁴ reaches past the simplex (a point's nearest corner
+  outside its simplex is √0.5 away), so a corner's contribution dropped out where a sample crossed into the next simplex:
+  steps of up to 0.0064 of the noise's range, every octave's at once on the planes x = y, y = z and x = z through the
+  planet centre, the cube sphere's face edges (up to 465 uu across them on `Review_Planet_L`'s terrain). Planets use that
+  weight less its value and slope at d² = 0.5, v²(v² + 0.4v + 0.06) with v = 0.5 − d², and scale the sum by 33.25 instead
+  of 32 for the same spread: no step, a continuous slope, within 1.2% rms of the classic noise (correlation 0.9996)
+  (`VoxelWorlds.Noise.PlanetSimplexContinuous`, `VoxelWorlds.WorldModes.Planet.FaceEdgeContinuity`).
+  `voxel.Planet.ContinuousSimplex 0` restores the classic weight, for A/B only.
 - **Fields:** terrain and continentalness at the direction's point on the datum sphere, temperature and moisture likewise
   (the heightmap's 2-octave fields: `MakeFieldParams`, `SampleClimate`), caves at the planet-relative position with the
   altitude scaled (`ScaleAltitudeRelative`), ores at the planet-relative position with one streak direction per ore.
 
-Heightmap worlds keep the permutation noise bit for bit. Changing the planet noise changes every planet, so it bumps
-`FVoxelWorldModeFactory::PlanetGenerationVersion` (5 since D21/D22).
+Heightmap worlds keep the permutation noise bit for bit, the classic Simplex weight included (their steps are about a
+quarter voxel; decision D27). Changing the planet noise changes every planet, so it bumps
+`FVoxelWorldModeFactory::PlanetGenerationVersion` (5 since D21/D22, 6 since G43/D27).
 
 ## Usage Examples
 
