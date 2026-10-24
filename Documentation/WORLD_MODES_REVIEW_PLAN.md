@@ -1505,7 +1505,7 @@ Three findings from §13.11 get IDs here:
 | G60 | Water propagation's flood batches entered the edit manager's undo history, and an undo record kept only each voxel's previous value (`FVoxelEdit::OriginalData`): a flood replaces a dug voxel's relative edit with a `Set` whose previous value is the dig's unset one (air), so its undo removed the edit and the first undo after a dig under the sea (the demo test actor's Z) took back the flood and the dig at every voxel it had reached. The same record lost a previous relative edit (a dig under a dig), a previous `Set` to air and an edit removed by cancelling deltas; it kept no chunk, so undo could revert another chunk's voxel at the same local position and redo wrote every edit into the operation's first chunk, broadcasting only that chunk; and redo broadcast the current source with no radius, so a system edit's redo re-extracted no scatter (traced in G58, §19.14) | Fixed 2026-10-20 (§19.17): water propagation's operations stay out of the history (`BeginEditOperation(..., bAddToUndoHistory=false)`: no undo step, the redo stack kept); every operation records per voxel its chunk and the whole edit before and after (`FVoxelEditChange`), so undo, redo and cancel restore the edit layer exactly in each voxel's own chunk and broadcast each chunk with its own bounds, and redo broadcasts the operation's own source, centre and radius; undoing a dig under the sea restores its voxels, flood included, and its redo floods again; water beyond the dig's voxels stays (nothing drains it); `Edit.UndoRedo.Records`, `Streaming.WaterPropagation.Undo.{Plane,Planet}`, `EditRemesh` edits 6-7, `Scatter.EditReaders` undo/redo audits | — |
 | G61 | Marching Cubes' LOD normals use the same stride-scale gradient taps G44 fixed in Dual Contouring (`FVoxelCPUMarchingCubesMesher::CalculateGradientNormalLOD` and the GPU MC shader's), so an MC world's LOD 1 and 2 would lean the same way (found in G44, §20.8). No shipped configuration meshes with MC: the planets and `VoxelDemo` are DC | Fixed 2026-10-21 (§20.9): an MC edge vertex at stride > 1 now takes LOD 0's normal at the voxel crossing on its edge nearest it (`CalculateEdgeShadingNormal`, a function of the edge, CPU and GPU, regular cells, seam bands and the transition ribbon); positions unchanged. On gentle relief LOD 2's tilt 6.18° → 0.62° at 45°N, its mean angle 20.3° → 3.3° on the equator, its brightness -12.1% → -0.5% on the plane; from straight above an MC `Review_Planet_L` at 45°N 20°E the LOD 2 ring against the far field 1.18 → 1.01. `Streaming.{Planet,Plane}.LODNormalsMC`, `Meshing.MarchingCubes.LODNormals` (GPU normals within 0.13° of the CPU's); `voxel.Mesh.VoxelShadingNormals` now covers both meshers | — |
 | G62 | The stride-1 gradient both smooth meshers use (`CalculateGradientNormal`: the crossing floored to a voxel, taps one voxel either side on the one-voxel density ramp) tilts a slope's normal by 1.0-1.8 times the slope (5°: 5.0-9.1°) depending on where the surface crosses the voxel layer: bands along iso-height lines, a voxel layer apart at MC's LOD 0. Since G61, MC's LOD 1 and 2 sample it sparsely, which shows from altitude as faint broad rings around hills (ripple 0.75 grey against LOD 0's 0.51 on a 50-grey surface, §20.9). DC's LOD 0 averages the same gradient over a cell's crossings and bands about as much (2.3-3.8° over the voxel phase on the streaming tests' gentle relief, MC 4.2-4.5°; §20.12) | Fixed in §20.12: both meshers' shading normals at voxel resolution are the density gradient fitted to the voxels on the ramp around the point (`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block, tent weights, a free offset; exact for any plane; trilinear taps at ±1 only cut the error by a third), CPU and GPU, `voxel.Mesh.CrossingGradientNormals`; DC's QEF keeps the central difference (no vertex moves). LOD 0 band 0.04-0.28°, the hill's rings and LOD 0's bands gone on MC `Review_Planet_L`, DC chunk-mesh worker time +13-34% | — |
-| G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` (7.7 ms against 0.33 ms a job; 6,564 jobs took 50-52 s of worker time after `voxel.RemeshAll`), while MC's chunk meshes cost about DC's (§20.9) | Open (not traced): MC is unshipped | — |
+| G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` (7.7 ms against 0.33 ms a job; 6,564 jobs took 50-52 s of worker time after `voxel.RemeshAll`), while MC's chunk meshes cost about DC's (§20.9) | Fixed 2026-10-24 (§20.29): meshing was 5% of a job; the rest built each participant frame's synthetic request: its whole volume copied (1 MB at 64³; 26-28%) and its neighbours' planes, edge grids and corner boxes gathered (strided; the deep grids are DC's, MC never reads them; 63-69%), two frames a face job, four an edge job, eight a corner job. Frames now read the participants' snapshots in place (`FVoxelMeshingRequest::VolumeViews`, each read the voxel the copy held; `voxel.Seam.MCReadInPlace`, `voxel.Seam.MCStats`), every seam mesh bit-identical (`MCS4_ReadInPlace`, `Streaming.{Planet,Plane}.MCSeamReadInPlace`). `voxel.RemeshAll` (three runs per rule): seam worker time 34.1-37.5 → 1.0-1.2 s on MC `Review_Planet_L` (5.98-6.57 → 0.18-0.21 ms a job), 44.1-46.0 → 0.94-0.96 s on MC `VoxelDemo`; benches: frame P95 73-98 → 34-36 ms and 71-75 → 33-38, manager P95 19-25 → 10-11 and 17-19 → 9-10, catch-up 2.7-4.1 → 1.1-1.3 s and 0.8-1.4 → 0.2 | — |
 | G64 | The minimap widget's tick (`VCMinimapWidget`, VoxelCharacterPlugin) takes over 2 ms in about 18% of PIE frames on every planet alike (235-241 of 1,200-1,470 traverse frames on S, M and L; mean 0.5-0.7 ms, single frames up to 6.5 ms), 1-2 ms of the slowest 5% of frames (§20.10) | Fixed 2026-10-23 (§20.17): every refresh (ten a second) filled the minimap's texture on the CPU, 2-3 ms (a planet's tangent-plane sampler; on a plane a blit of every pixel of every tile in view, about 300,000 to draw 80,000 texels); the tile requests, upload and markers cost under 0.1 ms. Now the texture is filled only when the player moved two texels, a tile it shows changed or 2 s passed, the image shifted by the movement in between (on a planet with the heading and markers on the plane it was drawn in), and a plane is filled texel by texel (`FVCPlaneMapSampler`); `vc.Minimap.SkipUnchanged`, `vc.Minimap.TexelFill`, `vc.Minimap.Stats`. Moving 7,200 uu in about 19 s: fills 173-185 → 20, refreshes over 2 ms 66-177 → 0-19, the minimap's game-thread time per refresh 2.1-2.7 → 0.2-0.4 ms; tests `VoxelCharacter.Map.PlaneMapSampler`, `VoxelCharacter.Planet.MinimapShift` | — |
 | G65 | Far-compressed chunks are decoded on the game thread when something reads their voxels (`FChunkDescriptor::EnsureResident`, Oodle): single frames up to 28.9 ms on the small planet's great circle (50 frames over 2 ms in its traverse) and 8.8-11.7 ms on M and L (§20.10) | Fixed 2026-10-21 (§20.13): a chunk compacted while far was expanded in place on the game thread by every reader as the viewer came near (collision cooks, the water pull, seam jobs, chunk meshes; about 0.3 ms each, 2,959 expansions of 1,279 chunks per small-planet great circle, 57% repeats, since the sweep compacts again at once). Now the snapshot of a far-compressed chunk without edits is decoded by a worker task from a copy of its compact form (`FVoxelCompactSource`) and the chunk stays compressed: seam jobs, cooks and mesh jobs wait for it on their workers, the water pull's seed search, the water tile and the scatter hand-off read it, and a chunk queued for a mesh or a cook starts its neighbourhood's (`PrefetchVoxelSnapshotsAround`); `voxel.FarCompression.SnapshotReads`. Benches (three runs per planet): the traverse's game-thread decode 364-548 → 11-27 ms, frames with over 2 ms of it 53-75 → 0-5, frame P99 1.8-2.6 ms and manager P95 1.2-1.8 ms lower (medians), peak voxel data −63 to −113 MB, catch-up unchanged. Tests `Compression.Codec.CompactSource`, `Streaming.{Planet,Plane}.FarReadsOffGameThread`. G69, G70 recorded | — |
 | G66 | Peak systems memory while streaming the great circle rose 300-400 MB since §20.7: M 755 → 1,068-1,072 MB, L 831 → 1,213-1,215, the same with and without G42's batching, the voxel data's peak 812-859 MB; settled figures did not move (§20.10). Something merged since G52 holds more voxel data in flight; under D3's 1.5 GB | Dismissed 2026-10-21 (§20.11): not a regression. §20.10's benches started 10.7 s after the settle, §20.7's 21.5 s after. After a teleport the window streams in at once and holds 787-837 MB of voxel data 10-11 s after the settle on M and L, until far compression's idle wait (`IdleFrames` 300) and encode budget catch up by +15-16 s; the bench's peaks count every sample from the first. On one build a bench started 10 s after the settle peaks at 1,048-1,061 MB on M and 1,194-1,241 on L, one started 21 s after at 675-683 and 832-833. G52's build gives 1,049-1,067 and 1,168-1,189 against 742-779 and 830-836 (§20.7: 747-769, 830-837). The traverse's voxel data is unchanged (M 375-380 MB, L 404-405). D3 holds with the transient: at most 1,241 MB + 51 MB of far field. G67, G68 recorded | — |
@@ -7427,7 +7427,7 @@ The DC `LODNormals` figures are §20.8's to the hundredth.
 | ID | Finding | Status |
 |----|---------|--------|
 | G62 | The stride-1 gradient both smooth meshers use (`CalculateGradientNormal`: the crossing floored to a voxel, taps one voxel either side on the one-voxel density ramp) bands along voxel layers. With the surface a fraction f of a voxel above the floored voxel, the vertical difference is 1 - f/2 instead of 1, so a slope's normal tilts by 1.0-1.8 times the slope (5°: 5.0-9.1°; 15°: 15.0-22.9°) depending on where the surface crosses the voxel layer. MC's LOD 0 has the bands a voxel layer apart, too fine to see from altitude. DC's LOD 0 uses the same gradient, averaged over a cell's crossings (not measured here). Since G61, MC's LOD 1 and 2 sample the same estimator sparsely, which shows from altitude as faint broad rings around hills. A gradient taken at the crossing point itself (trilinear taps, as the geomorph's steepness gate does) has no such dependence | Fixed in §20.12: both meshers' shading normals at voxel resolution are the density gradient fitted to the voxels on the ramp around the point |
-| G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` at 45°N 20°E: 6,564 MC seam jobs took 50-52 s of worker time (7.7 ms each) against 5,673 DC seam jobs in 1.7-2.0 s (0.33 ms each, §20.8). MC's chunk meshes cost about the same as DC's (1.6 ms each). Not traced; the seam path builds a synthetic request per participant (`InitFrameRequest` copies the volume, `FillFacePlanes` fills the neighbour planes) and meshes its band cells through `ProcessCubeLOD` | Open (not traced): MC is unshipped |
+| G63 | Marching Cubes seam jobs cost about 23 times Dual Contouring's on `Review_Planet_L` at 45°N 20°E: 6,564 MC seam jobs took 50-52 s of worker time (7.7 ms each) against 5,673 DC seam jobs in 1.7-2.0 s (0.33 ms each, §20.8). MC's chunk meshes cost about the same as DC's (1.6 ms each). Not traced; the seam path builds a synthetic request per participant (`InitFrameRequest` copies the volume, `FillFacePlanes` fills the neighbour planes) and meshes its band cells through `ProcessCubeLOD` | Fixed in §20.29: the synthetic requests were 95% of a job (the volume copies and the neighbour gathers); frames read the participants' snapshots in place, 0.18-0.21 ms a job, every seam mesh bit-identical |
 
 **Left as they were:**
 
@@ -9246,3 +9246,119 @@ snaps to the nearest of the two (the 74 jumps above). A faint dither shimmer is 
 while the camera moves; none was seen in the stills.
 
 G45 is fixed.
+
+### 20.29 G63: Marching Cubes seam jobs read their participants in place (2026-10-24)
+
+Bases: VoxelWorlds `303a547`, UE5_PluginDev `02a0034` (G14 and G45 merged). Branches `fix/g63-mc-seam-cost` (VoxelWorlds)
+and `claude/g63-mc-seam-cost-84c6b2` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`;
+tests headless and in a worktree editor (Claudius on 8100), background throttling off. §20.28 is left for G49. Another
+session's editor (G49's, about four cores busy) ran on the machine through every measurement below, so absolute times
+carry its load; each comparison is interleaved in one session.
+
+**The finding** (§20.9): on `Review_Planet_L` in MC at 45°N 20°E, `voxel.RemeshAll`'s 6,564 seam jobs took 50-52 s of
+worker time (7.7 ms each) against DC's 0.33 ms a job, while MC's chunk meshes cost about DC's.
+
+**Traced** with timers in the MC seam mesher, per participant frame: its request (setup), its neighbours' planes, strips
+and corners (fill), the band cells, the transition ribbon, the move into the owner's frame and the request's release
+(`voxel.Seam.MCStats`). MC duplicates of `Review_Planet_L` and `DemoSmoothWorldConfig` (64³ chunks of 75 uu;
+worktree-only, G61's script), the pawn held, `voxel.RemeshAll` with the copies (`Review_Planet_L` at 45°N 20°E: 1,107
+chunk meshes, 5,702 seam jobs; `VoxelDemo` at the spawn: 979 and 5,290; three runs each):
+
+| Stage | `Review_Planet_L` MC | `VoxelDemo` MC |
+|---|---|---|
+| Setup: the frame's volume copied | 25.5-28.0% | 27.9-28.1% |
+| Fill: the neighbours' planes, strips and corners gathered | 66.7-69.1% | 67.7-67.9% |
+| Band cells (`ProcessCubeLOD`) | 4.5-4.8% | 3.5-3.7% |
+| Ribbon, translate, release | 0.7-0.8% | 0.6% |
+
+Meshing was 5% of a job. The rest built the synthetic request each participant frame gets (seam ownership P3,
+`VoxelCPUMarchingCubesSeams.cpp`):
+
+- **Setup.** `InitFrameRequest` copied the frame's whole volume into the request (`R.VoxelData = Volume`), 1 MB at 64³.
+  A face job has two frames, an edge job four and a corner job eight, to mesh one cell layer of each (a corner frame
+  meshes one cell).
+- **Fill.** `FillFacePlanes` gathered `NeighborPlaneDepth` planes from each facing sibling (up to 9 beside a coarse
+  neighbour, 37,000 voxels a face); `FillEdgeStrip` and `FillCorner` gathered a Depth × Depth × ChunkSize grid and a
+  Depth³ box. An X face's plane is a strided gather, a cache line per voxel across the 1 MB source, so the fill cost more
+  than the larger volume copy. The edge and corner grids were never read: MC's `GetVoxelAt` reads an edge's base strip
+  and the corner voxel only (the deep grids are Dual Contouring's).
+- **By job type**, copied: face 2.6-3.9 ms, edge 6.7-9.8 ms, corner 18.4-24.4 ms.
+- **Streaming** (the benches below) spent the same way: setup 27-28%, fill 63-64%, band cells 7%.
+
+**The fix** (VoxelWorlds; `voxel.Seam.MCReadInPlace` 1, 0 = the copies as before):
+
+- **`FVoxelMeshingRequest::VolumeViews`** (27 pointers by neighbour direction, [13] the chunk itself): a seam frame points
+  at its participants' snapshots instead of copying them. Only the CPU MC mesher reads it. A request that sets the own
+  view leaves `VoxelData` empty, so `IsValid` refuses it for a whole-chunk mesh.
+- **The same voxel at every read.** `GetVoxelAt` (`VoxelMCVolume::OwnVoxel`, `NeighbourViewVoxel`) reads a neighbour as
+  the copy held it: across a face at min(depth, `NeighborPlaneDepth` − 1) into it (`NeighborPlaneVoxel`'s clamp; the
+  geomorph's coarse search reads past the planes), across an edge the strip one voxel deep, across a corner the corner
+  voxel. A neighbour not held reads the clamped own voxel. `IsVoxelHeld` (G62's fit) and `HasRequiredNeighborData` (the
+  ribbon's self-skip) test the views where they tested the arrays. Positions, normals, materials and the geomorph are the
+  same bit for bit.
+- **Chunk meshes** read their own `VoxelData` through the same accessor, one pointer test per voxel read. A
+  single-threaded benchmark of a 64³ chunk (hills and caves, the fastest of 25 meshes, 8 runs with the test against 6
+  without it, headless): LOD 0 46.6-50.7 against 45.5-51.1 ms, LOD 1 10.3-11.2 against 10.0-11.0, LOD 2 1.94-2.09
+  against 1.90-2.01. Within the spread.
+- `voxel.Seam.MCStats [reset]` (by job type and stage) and `FVoxelCPUMarchingCubesMesher::GetSeamJobStats` stay.
+- **Not shared:** the GPU MC mesher has no seam path (seam jobs always run on the CPU seam mesher, `EnsureSeamMesher`),
+  and nothing in Dual Contouring or cubic meshing changed.
+
+**Tests.**
+
+- **`Meshing.MarchingCubes.SeamClosure.MCS4_ReadInPlace`** (new). A 2x2x2 block on a plane (local up +Z) and on a gyroid
+  meshed with a planet's local up at 45°N 20°E (the material scan and the geomorph along it). Every face, edge and corner
+  job at LOD 0, 1 and 2 and in three mixed-LOD sets (ribbons, the band-confined geomorph), copied and in place: 42 jobs a
+  world, every one identical in every vertex attribute and index.
+- **`Streaming.{Planet,Plane}.MCSeamReadInPlace`** (new). G65's far-reads places on MC worlds (45°N 20°E on the planet of
+  radius 20,000 with a sea at the datum; the plane), LOD 0, 1 and 2 streamed, settled, moved 3,000 uu and settled, once
+  copied and once in place. Every chunk mesh and seam bucket must be the same bit for bit (a CRC of every attribute),
+  every MC seam job of the second run must read in place and none of the first.
+
+**`voxel.RemeshAll`** (one session, the cvar alternated, three re-meshes each; worker times from `voxel.Edit.MeshWork`, a
+job's from `voxel.Seam.MCStats`):
+
+| World | Rule | Seam jobs' worker time | A job (face / edge / corner) | Chunk meshes' worker time |
+|---|---|---|---|---|
+| `Review_Planet_L` MC | copied | 35.4 / 34.1 / 37.5 s | 5.98-6.57 ms (2.6-2.8 / 6.7-7.1 / 18.4-21.1) | 2.6 / 3.0 / 3.4 s |
+| | **in place** | 1.15 / 1.04 / 1.22 s | 0.18-0.21 ms (0.32-0.37 / 0.06-0.08 / 0.014-0.019) | 2.2 / 2.1 / 2.4 s |
+| `VoxelDemo` MC | copied | 44.1 / 46.0 / 44.7 s | 8.34-8.69 ms (3.9 / 9.4-9.8 / 23.2-24.4) | 2.7 / 3.2 / 3.0 s |
+| | **in place** | 0.94 / 0.96 / 0.96 s | 0.18 ms (0.31-0.32 / 0.06 / 0.017-0.020) | 2.2 / 2.0 / 2.1 s |
+
+The same triangles in every run (225,781 and 215,830). In place the band cells take 93% of a job and the ribbon 5%. The
+chunk meshes ran beside the copies and took 14-37% less worker time without them (26-29% on average).
+
+**Streaming benches** (a fresh PIE per run, 45 s at the start, a throwaway run first, three runs per rule interleaved).
+`Review_Planet_L` MC on G44's great circle (`voxel.Bench.Run <tag> 1500 40000 gc=45:20:90 follow=300 warmup=30
+catchup=90`); `VoxelDemo` MC from the spawn (`voxel.Bench.Run <tag> 1500 40000 warmup=30 catchup=90`, G42's):
+
+| World, rule | Frame P50 / P95 ms | Manager P95 ms | Seam P95 ms | Catch-up s | Seam jobs' worker time (a job) | Peak systems MB |
+|---|---|---|---|---|---|---|
+| `Review_Planet_L` MC, copied | 44.9-51.6 / 73.2-98.4 | 19.1-25.3 | 7.3-9.2 | 3.05 / 2.72 / 4.12 | 248-256 s (7.9-8.3 ms) | 723-745 |
+| **in place** | 24.5-24.7 / 34.2-35.9 | 10.0-10.7 | 4.6-4.8 | 1.08 / 1.21 / 1.33 | 17.7-17.9 s (0.57 ms) | 681 |
+| `VoxelDemo` MC, copied | 45.4-46.4 / 71.4-75.4 | 17.0-19.1 | 6.8-7.3 | 1.36 / 0.93 / 0.83 | 194-212 s (10.5-11.0 ms) | 785-809 |
+| **in place** | 22.9-24.4 / 32.8-37.6 | 9.4-10.1 | 3.7-4.2 | 0.20 / 0.22 / 0.22 | 7.7-9.2 s (0.41-0.46 ms) | 634-656 |
+
+Copying, MC's seam jobs kept 4.5 workers busy on average through each `Review_Planet_L` run (warm-up, traverse and
+catch-up, about 55 s) and 6.5-7 through each `VoxelDemo` run (30 s), and the frame, the manager and the catch-up waited
+on them. The voxel data's peak was higher too (`VoxelDemo` 429-444 against 278-306 MB): far compression encodes on
+the same workers and installed 1,042-1,062 encodes in a run against 1,259-1,276 (`Review_Planet_L` 1,079-1,115 against
+1,209-1,210).
+
+**Dual Contouring unchanged.** None of its code changed, and the cvar does nothing to it. `VoxelDemo` in DC (its own
+config) by the same cvar, three bench runs each: frame P95 67.2 / 39.7 / 67.3 against 58.2 / 58.9 / 56.1 ms, manager P95
+15.2 / 10.0 / 14.5 against 13.9 / 14.8 / 13.7 ms, catch-up 1.12 / 0.22 / 1.03 against 0.38 / 0.95 / 0.46 s: within each
+other's spread on the loaded machine. DC's seam jobs cost 1.6-1.9 ms each in those runs, MC's now 0.41-0.46 ms.
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 618/618 headless (main's 615
+and the three above) and 618/618 in the editor with the GPU tests running (no device loss, no GPU test skipped); the 114
+GPU parity lines identical to main's (G14's and G45's runs). `Meshing.MarchingCubes.*` (31 with `MCS4`: `SeamClosure.MCS0`-
+`MCS3`, `LODBoundary.T1-T13`, `CPUvsGPU`, `PlanetGeomorph`), `Streaming.EditRemesh.{Plane,Planet}` (their MC cases) and
+`Streaming.{Planet,Plane}.ClosedSurface` pass unchanged. In `MCS4` 36 of the plane's 42 jobs and 40 of the gyroid's carry
+triangles; in the streaming tests MC's seam jobs cost 0.151 → 0.049 ms (plane) and 0.573 → 0.145 ms (planet) a job.
+
+**Left as it was.** In streaming MC's seam time is now the band cells (85%) and the ribbon (13%), most of it in face jobs
+(1.3 ms each: two layers of (ChunkSize / stride − 2)² cells, 62² at LOD 0). The ribbon still self-skips its perimeter rows
+(P3's v1 limitation). `FillFacePlanes`, `FillEdgeStrip` and `FillCorner` stay for the copied rule.
+
+G63 is fixed.

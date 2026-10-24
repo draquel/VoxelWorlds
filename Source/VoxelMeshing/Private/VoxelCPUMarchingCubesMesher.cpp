@@ -51,6 +51,53 @@ namespace VoxelMCShading
 	}
 }
 
+/**
+ * The request's voxels when a seam job reads its participants in place (G63, FVoxelMeshingRequest::VolumeViews): the same
+ * voxel the copied volume, plane, strip or corner would hold at every position GetVoxelAt reads.
+ */
+namespace VoxelMCVolume
+{
+	/** The chunk's own voxel at an in-chunk position: the borrowed volume, else VoxelData. */
+	static FORCEINLINE const FVoxelData& OwnVoxel(const FVoxelMeshingRequest& Request, int32 X, int32 Y, int32 Z)
+	{
+		const int32 Index = X + Y * Request.ChunkSize + Z * Request.ChunkSize * Request.ChunkSize;
+		const FVoxelData* Own = Request.VolumeViews[13];
+		return Own ? Own[Index] : Request.VoxelData[Index];
+	}
+
+	/**
+	 * A voxel outside the chunk read from the neighbour's volume as the copied arrays held it: across one face at
+	 * min(depth, NeighborPlaneDepth - 1) into the neighbour (NeighborPlaneVoxel's clamp), across an edge the strip one voxel
+	 * deep on both pinned axes, across a corner the corner voxel. A neighbour not held reads the clamped own voxel.
+	 */
+	static FVoxelData NeighbourViewVoxel(const FVoxelMeshingRequest& Request, int32 X, int32 Y, int32 Z,
+		int32 ClampedX, int32 ClampedY, int32 ClampedZ)
+	{
+		const int32 CS = Request.ChunkSize;
+		const int32 D[3] = { X < 0 ? -1 : (X >= CS ? 1 : 0), Y < 0 ? -1 : (Y >= CS ? 1 : 0), Z < 0 ? -1 : (Z >= CS ? 1 : 0) };
+		const FVoxelData* View = Request.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(D[0], D[1], D[2])];
+		if (View == nullptr)
+		{
+			return OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
+		}
+		const int32 OutCount = (D[0] != 0 ? 1 : 0) + (D[1] != 0 ? 1 : 0) + (D[2] != 0 ? 1 : 0);
+		const int32 P[3] = { X, Y, Z };
+		int32 N[3];
+		for (int32 A = 0; A < 3; ++A)
+		{
+			if (D[A] == 0)
+			{
+				N[A] = P[A];
+				continue;
+			}
+			// Depth into the neighbour past this face (0 = the plane touching it); only a face plane reaches deeper.
+			const int32 Depth = (OutCount == 1) ? FMath::Min(D[A] > 0 ? P[A] - CS : -P[A] - 1, FMath::Max(Request.NeighborPlaneDepth, 1) - 1) : 0;
+			N[A] = D[A] > 0 ? Depth : (CS - 1 - Depth);
+		}
+		return View[N[0] + N[1] * CS + N[2] * CS * CS];
+	}
+}
+
 FVoxelCPUMarchingCubesMesher::FVoxelCPUMarchingCubesMesher()
 {
 }
@@ -843,16 +890,22 @@ FVoxelData FVoxelCPUMarchingCubesMesher::GetVoxelAt(
 	// Check if within chunk bounds
 	if (X >= 0 && X < ChunkSize && Y >= 0 && Y < ChunkSize && Z >= 0 && Z < ChunkSize)
 	{
-		return Request.GetVoxel(X, Y, Z);
+		return VoxelMCVolume::OwnVoxel(Request, X, Y, Z);
 	}
-
-	// Handle neighbor chunk lookups
-	const int32 SliceSize = ChunkSize * ChunkSize;
 
 	// Clamp coordinates for fallback
 	const int32 ClampedX = FMath::Clamp(X, 0, ChunkSize - 1);
 	const int32 ClampedY = FMath::Clamp(Y, 0, ChunkSize - 1);
 	const int32 ClampedZ = FMath::Clamp(Z, 0, ChunkSize - 1);
+
+	// A seam job reading its participants in place (G63): the voxel its copied plane, strip or corner held.
+	if (Request.VolumeViews[13] != nullptr)
+	{
+		return VoxelMCVolume::NeighbourViewVoxel(Request, X, Y, Z, ClampedX, ClampedY, ClampedZ);
+	}
+
+	// Handle neighbor chunk lookups
+	const int32 SliceSize = ChunkSize * ChunkSize;
 
 	// Determine which axes are out of bounds and in which direction
 	const bool bXPos = (X >= ChunkSize);
@@ -899,7 +952,7 @@ FVoxelData FVoxelCPUMarchingCubesMesher::GetVoxelAt(
 			return Request.NeighborPlaneVoxel(Request.NeighborZNeg, Request.NeighborZNegDeep, X + Y * ChunkSize, -Z - 1);
 		}
 		// Fallback to edge voxel
-		return Request.GetVoxel(ClampedX, ClampedY, ClampedZ);
+		return VoxelMCVolume::OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
 	}
 
 	// Edge case (2 axes out of bounds): use edge neighbor data
@@ -960,7 +1013,7 @@ FVoxelData FVoxelCPUMarchingCubesMesher::GetVoxelAt(
 		}
 
 		// Fallback to edge voxel
-		return Request.GetVoxel(ClampedX, ClampedY, ClampedZ);
+		return VoxelMCVolume::OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
 	}
 
 	// Corner case (3 axes out of bounds): use corner neighbor data
@@ -1000,7 +1053,7 @@ FVoxelData FVoxelCPUMarchingCubesMesher::GetVoxelAt(
 		}
 
 		// Fallback to corner voxel
-		return Request.GetVoxel(ClampedX, ClampedY, ClampedZ);
+		return VoxelMCVolume::OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
 	}
 
 	// Out of bounds - treat as air
@@ -1535,6 +1588,11 @@ bool FVoxelCPUMarchingCubesMesher::IsVoxelHeld(
 	}
 
 	// GetVoxelAt's sources one voxel past the chunk (each plane, strip and corner holds that depth); it clamps elsewhere.
+	if (Request.VolumeViews[13] != nullptr)
+	{
+		return Request.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(bXPos ? 1 : (bXNeg ? -1 : 0),
+			bYPos ? 1 : (bYNeg ? -1 : 0), bZPos ? 1 : (bZNeg ? -1 : 0))] != nullptr;
+	}
 	using R = FVoxelMeshingRequest;
 	if (OutCount == 1)
 	{
@@ -2334,6 +2392,17 @@ bool FVoxelCPUMarchingCubesMesher::HasRequiredNeighborData(
 					const int32 OutCount = (bXPos || bXNeg ? 1 : 0) +
 					                       (bYPos || bYNeg ? 1 : 0) +
 					                       (bZPos || bZNeg ? 1 : 0);
+
+					// A seam job reading its participants in place (G63): the neighbour in that direction is held or not.
+					if (Request.VolumeViews[13] != nullptr)
+					{
+						if (Request.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(bXPos ? 1 : (bXNeg ? -1 : 0),
+							bYPos ? 1 : (bYNeg ? -1 : 0), bZPos ? 1 : (bZNeg ? -1 : 0))] == nullptr)
+						{
+							return false;
+						}
+						continue;
+					}
 
 					// Check face neighbors
 					if (OutCount == 1)

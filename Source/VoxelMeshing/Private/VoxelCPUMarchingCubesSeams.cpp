@@ -10,6 +10,12 @@
 // ProcessTransitionCell / geomorph code as legacy whole-chunk meshing. Junctions with the
 // interior-domain chunk meshes are bit-identical by construction (same functions, same values).
 //
+// Reading the participants (world modes review G63): each frame's request reads its own volume and its neighbours' in
+// place from the job's snapshots (FVoxelMeshingRequest::VolumeViews), as the planes, strips and corner the frame used to
+// copy would hold them. Copying them cost a face job two whole volumes, an edge job four and a corner job eight (with
+// the planes), to mesh one cell layer; voxel.Seam.MCReadInPlace 0 copies them as before, voxel.Seam.MCStats times the
+// stages.
+//
 // Coverage partition per chunk (cells, per axis, N = ChunkSize/Stride):
 //   interior mesh: [1, N-2]   face seam: exactly one axis at {0, N-1}, others [1, N-2]
 //   edge seam: exactly two axes at {0, N-1}   corner seam: all three
@@ -25,6 +31,159 @@
 
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshing.h"
+#include "HAL/IConsoleManager.h"
+#include <atomic>
+
+static TAutoConsoleVariable<int32> CVarMCSeamReadInPlace(
+	TEXT("voxel.Seam.MCReadInPlace"),
+	1,
+	TEXT("Marching Cubes seam jobs (world modes review G63): 1 = each participant's frame reads the participants' voxels in ")
+	TEXT("place from the job's snapshots (default); 0 = copy the participant's whole volume and its neighbours' planes, ")
+	TEXT("strips and corners into a request first, as before (a face job copied two volumes, an edge job four, a corner ")
+	TEXT("job eight, to mesh one cell layer). The seam meshes are the same either way. Read per job."),
+	ECVF_Default);
+
+/**
+ * Where a Marching Cubes seam job's worker time goes (G63; voxel.Seam.MCStats). Every job, per participant frame: the
+ * frame's request (setup), its neighbours' planes, strips and corners (fill), the band cells, the transition ribbon, the
+ * move into the owner's frame (translate) and the request's release (teardown).
+ */
+namespace VoxelMCSeamStats
+{
+	enum EStage : int32 { Setup, Fill, Band, Ribbon, Translate, Teardown, NumStages };
+	static const TCHAR* StageNames[NumStages] = { TEXT("setup"), TEXT("fill"), TEXT("band"), TEXT("ribbon"), TEXT("translate"), TEXT("teardown") };
+	static const TCHAR* JobNames[3] = { TEXT("face"), TEXT("edge"), TEXT("corner") };
+
+	struct FCounters
+	{
+		std::atomic<int64> Jobs[3] = {};
+		std::atomic<int64> Frames[3] = {};
+		std::atomic<int64> InPlaceJobs = 0;
+		std::atomic<uint64> JobCycles[3] = {};
+		std::atomic<uint64> StageCycles[NumStages] = {};
+		std::atomic<int64> BandCells = 0;
+		std::atomic<int64> RibbonCells = 0;
+		std::atomic<int64> Triangles = 0;
+	};
+	static FCounters GCounters;
+
+	static void AddStage(EStage Stage, uint64 Cycles)
+	{
+		GCounters.StageCycles[Stage].fetch_add(Cycles, std::memory_order_relaxed);
+	}
+
+	/** Lap timer: each Take adds the cycles since the last to a stage and restarts. */
+	struct FLap
+	{
+		uint64 Mark = FPlatformTime::Cycles64();
+		void Take(EStage Stage)
+		{
+			const uint64 Now = FPlatformTime::Cycles64();
+			AddStage(Stage, Now - Mark);
+			Mark = Now;
+		}
+	};
+
+	/** One job: counts it, and its total cycles and triangles when it ends. */
+	struct FJobScope
+	{
+		int32 Type;
+		const FChunkMeshData& Mesh;
+		uint64 Start = FPlatformTime::Cycles64();
+		FJobScope(int32 InType, bool bInPlace, const FChunkMeshData& InMesh) : Type(InType), Mesh(InMesh)
+		{
+			GCounters.Jobs[Type].fetch_add(1, std::memory_order_relaxed);
+			GCounters.InPlaceJobs.fetch_add(bInPlace ? 1 : 0, std::memory_order_relaxed);
+		}
+		~FJobScope()
+		{
+			GCounters.JobCycles[Type].fetch_add(FPlatformTime::Cycles64() - Start, std::memory_order_relaxed);
+			GCounters.Triangles.fetch_add(Mesh.Indices.Num() / 3, std::memory_order_relaxed);
+		}
+	};
+
+	/** Counts one participant frame and its band and ribbon cells. */
+	static void AddFrame(int32 Type, const FIntVector& BandMin, const FIntVector& BandMaxEx, int32 Stride, int64 RibbonCells)
+	{
+		GCounters.Frames[Type].fetch_add(1, std::memory_order_relaxed);
+		int64 Cells = 1;
+		for (int32 A = 0; A < 3; ++A)
+		{
+			Cells *= FMath::Max(0, (BandMaxEx[A] - BandMin[A] + Stride - 1) / Stride);
+		}
+		GCounters.BandCells.fetch_add(Cells, std::memory_order_relaxed);
+		GCounters.RibbonCells.fetch_add(RibbonCells, std::memory_order_relaxed);
+	}
+
+	static double Ms(uint64 Cycles)
+	{
+		return static_cast<double>(Cycles) * FPlatformTime::GetSecondsPerCycle64() * 1000.0;
+	}
+
+	static void Reset()
+	{
+		for (int32 i = 0; i < 3; ++i)
+		{
+			GCounters.Jobs[i] = 0;
+			GCounters.Frames[i] = 0;
+			GCounters.JobCycles[i] = 0;
+		}
+		for (int32 i = 0; i < NumStages; ++i)
+		{
+			GCounters.StageCycles[i] = 0;
+		}
+		GCounters.InPlaceJobs = 0;
+		GCounters.BandCells = 0;
+		GCounters.RibbonCells = 0;
+		GCounters.Triangles = 0;
+	}
+
+	static FString Describe()
+	{
+		int64 Jobs = 0;
+		uint64 Cycles = 0;
+		FString PerType;
+		for (int32 i = 0; i < 3; ++i)
+		{
+			const int64 N = GCounters.Jobs[i].load();
+			const uint64 C = GCounters.JobCycles[i].load();
+			Jobs += N;
+			Cycles += C;
+			PerType += FString::Printf(TEXT("%s%s %lld (%lld frames, %.1f ms, %.3f ms a job)"), i ? TEXT(", ") : TEXT(""),
+				JobNames[i], N, GCounters.Frames[i].load(), Ms(C), N > 0 ? Ms(C) / static_cast<double>(N) : 0.0);
+		}
+		FString Stages;
+		uint64 StageSum = 0;
+		for (int32 i = 0; i < NumStages; ++i)
+		{
+			const uint64 C = GCounters.StageCycles[i].load();
+			StageSum += C;
+			Stages += FString::Printf(TEXT("%s%s %.1f ms (%.1f%%)"), i ? TEXT(", ") : TEXT(""), StageNames[i], Ms(C),
+				Cycles > 0 ? 100.0 * static_cast<double>(C) / static_cast<double>(Cycles) : 0.0);
+		}
+		return FString::Printf(TEXT("%lld jobs (%lld read in place), worker %.1f ms (%.3f ms a job): %s; stages: %s, other %.1f ms; ")
+			TEXT("band cells %lld, ribbon cells %lld, triangles %lld; voxel.Seam.MCReadInPlace %d"),
+			Jobs, GCounters.InPlaceJobs.load(), Ms(Cycles), Jobs > 0 ? Ms(Cycles) / static_cast<double>(Jobs) : 0.0, *PerType,
+			*Stages, Ms(Cycles > StageSum ? Cycles - StageSum : 0), GCounters.BandCells.load(), GCounters.RibbonCells.load(),
+			GCounters.Triangles.load(), CVarMCSeamReadInPlace.GetValueOnAnyThread());
+	}
+}
+
+// Console: voxel.Seam.MCStats [reset]
+static FAutoConsoleCommand GVoxelMCSeamStatsCmd(
+	TEXT("voxel.Seam.MCStats"),
+	TEXT("Log the Marching Cubes seam jobs' worker time since the last reset, by job type and by stage (world modes review ")
+	TEXT("G63: setup, fill, band, ribbon, translate, teardown). 'reset' clears the counters."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))
+		{
+			VoxelMCSeamStats::Reset();
+			UE_LOG(LogVoxelMeshing, Warning, TEXT("voxel.Seam.MCStats: reset"));
+			return;
+		}
+		UE_LOG(LogVoxelMeshing, Warning, TEXT("voxel.Seam.MCStats: %s"), *VoxelMCSeamStats::Describe());
+	}));
 
 namespace VoxelMCSeamDetail
 {
@@ -208,9 +367,10 @@ static void SelectCornerArrays(FVoxelMeshingRequest& R, bool bPosX, bool bPosY, 
 	}
 }
 
-/** Base synthetic request for one participant frame. */
+/** Base synthetic request for one participant frame. bInPlace: read the volume from its snapshot (G63), else copy it. */
 static void InitFrameRequest(FVoxelMeshingRequest& R, const FIntVector& Coord, int32 LOD,
-	int32 CS, float VoxelSize, const FVector& WorldOrigin, const FVector& LocalUp, const TArray<FVoxelData>& Volume)
+	int32 CS, float VoxelSize, const FVector& WorldOrigin, const FVector& LocalUp, const TArray<FVoxelData>& Volume,
+	bool bInPlace)
 {
 	R.ChunkCoord = Coord;
 	R.LODLevel = LOD;
@@ -218,7 +378,14 @@ static void InitFrameRequest(FVoxelMeshingRequest& R, const FIntVector& Coord, i
 	R.VoxelSize = VoxelSize;
 	R.WorldOrigin = WorldOrigin;
 	R.LocalUp = LocalUp;
-	R.VoxelData = Volume; // per-frame copy (worker-side; seam jobs are few and throttled)
+	if (bInPlace)
+	{
+		R.VolumeViews[13] = Volume.GetData();
+	}
+	else
+	{
+		R.VoxelData = Volume; // per-frame copy (before G63)
+	}
 	for (int32 i = 0; i < 6; ++i)
 	{
 		R.NeighborLODLevels[i] = LOD;
@@ -226,6 +393,12 @@ static void InitFrameRequest(FVoxelMeshingRequest& R, const FIntVector& Coord, i
 	R.TransitionFaces = 0;
 	R.EdgeCornerFlags = 0;
 	R.MeshCellDomain = EVoxelMeshCellDomain::Full;
+}
+
+/** Read the neighbour at (DX, DY, DZ) in place from its snapshot (G63): the voxels FillFacePlanes, FillEdgeStrip and FillCorner copy. */
+static void SetNeighbourView(FVoxelMeshingRequest& R, int32 DX, int32 DY, int32 DZ, const TArray<FVoxelData>& Src)
+{
+	R.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(DX, DY, DZ)] = Src.GetData();
 }
 
 /** Translate a vertex range into the owner's local frame. */
@@ -244,6 +417,25 @@ static void TranslateRange(FChunkMeshData& Mesh, int32 FirstVertex, const FVecto
 } // namespace VoxelMCSeamDetail
 
 using namespace VoxelMCSeamDetail;
+
+void FVoxelCPUMarchingCubesMesher::GetSeamJobStats(int64& OutJobs, int64& OutInPlaceJobs, double& OutWorkerMs)
+{
+	using namespace VoxelMCSeamStats;
+	OutJobs = 0;
+	uint64 Cycles = 0;
+	for (int32 i = 0; i < 3; ++i)
+	{
+		OutJobs += GCounters.Jobs[i].load();
+		Cycles += GCounters.JobCycles[i].load();
+	}
+	OutInPlaceJobs = GCounters.InPlaceJobs.load();
+	OutWorkerMs = Ms(Cycles);
+}
+
+void FVoxelCPUMarchingCubesMesher::ResetSeamJobStats()
+{
+	VoxelMCSeamStats::Reset();
+}
 
 void FVoxelCPUMarchingCubesMesher::MeshSeamBandCells(
 	const FVoxelMeshingRequest& SyntheticRequest,
@@ -291,6 +483,8 @@ bool FVoxelCPUMarchingCubesMesher::GenerateFaceSeamMeshCPU(
 		{ BCoord,                      LODB, SeamRequest.VoxelDataB.Get(), false },
 	};
 
+	const bool bInPlace = CVarMCSeamReadInPlace.GetValueOnAnyThread() != 0;
+	VoxelMCSeamStats::FJobScope JobScope(0, bInPlace, OutMeshData);
 	for (int32 SideIdx = 0; SideIdx < 2; ++SideIdx)
 	{
 		const FSide& P = Sides[SideIdx];
@@ -299,12 +493,24 @@ bool FVoxelCPUMarchingCubesMesher::GenerateFaceSeamMeshCPU(
 		const int32 EOther = 1 << Other.LOD;
 		const int32 Depth = FMath::Clamp(FMath::Max(S, 2 * EOther) + 1, 1, CS);
 
+		VoxelMCSeamStats::FLap Lap;
 		FVoxelMeshingRequest R;
-		InitFrameRequest(R, P.Coord, P.LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *P.Vol);
+		InitFrameRequest(R, P.Coord, P.LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *P.Vol, bInPlace);
 		R.NeighborPlaneDepth = Depth;
-		TArray<FVoxelData>* Plane; TArray<FVoxelData>* Deep;
-		SelectFaceArrays(R, Axis, P.bFacingPos, Plane, Deep);
-		FillFacePlanes(*Other.Vol, CS, Axis, P.bFacingPos, Depth, *Plane, *Deep);
+		Lap.Take(VoxelMCSeamStats::Setup);
+		if (bInPlace)
+		{
+			FIntVector Dir = FIntVector::ZeroValue;
+			Dir[Axis] = P.bFacingPos ? 1 : -1;
+			SetNeighbourView(R, Dir.X, Dir.Y, Dir.Z, *Other.Vol);
+		}
+		else
+		{
+			TArray<FVoxelData>* Plane; TArray<FVoxelData>* Deep;
+			SelectFaceArrays(R, Axis, P.bFacingPos, Plane, Deep);
+			FillFacePlanes(*Other.Vol, CS, Axis, P.bFacingPos, Depth, *Plane, *Deep);
+		}
+		Lap.Take(VoxelMCSeamStats::Fill);
 		const int32 FacingFaceIdx = Axis * 2 + (P.bFacingPos ? 1 : 0);
 		R.NeighborLODLevels[FacingFaceIdx] = Other.LOD;
 		uint8 Mask = 0;
@@ -323,6 +529,9 @@ bool FVoxelCPUMarchingCubesMesher::GenerateFaceSeamMeshCPU(
 
 		const int32 FirstVertex = OutMeshData.Positions.Num();
 		MeshSeamBandCells(R, BandMin, BandMaxEx, Mask, OutMeshData, TriangleCount);
+		Lap.Take(VoxelMCSeamStats::Band);
+		VoxelMCSeamStats::AddFrame(0, BandMin, BandMaxEx, S,
+			(Other.LOD > P.LOD) ? static_cast<int64>(CS / EOther) * static_cast<int64>(CS / EOther) : 0);
 
 		// Mixed LOD: the finer side emits the transvoxel ribbon (full face; cells needing data
 		// beyond the two participants self-skip via HasRequiredNeighborData).
@@ -346,10 +555,14 @@ bool FVoxelCPUMarchingCubesMesher::GenerateFaceSeamMeshCPU(
 				}
 			}
 		}
+		Lap.Take(VoxelMCSeamStats::Ribbon);
 
 		const FIntVector DeltaP = P.Coord - SeamRequest.OwnerChunkCoord;
 		TranslateRange(OutMeshData, FirstVertex,
 			FVector3f(DeltaP.X, DeltaP.Y, DeltaP.Z) * static_cast<float>(CS) * VoxelSize);
+		Lap.Take(VoxelMCSeamStats::Translate);
+		R = FVoxelMeshingRequest(); // release the frame's arrays here, so their release is timed
+		Lap.Take(VoxelMCSeamStats::Teardown);
 	}
 	return true;
 }
@@ -370,6 +583,8 @@ bool FVoxelCPUMarchingCubesMesher::GenerateEdgeSeamMeshCPU(
 	const int32 P1 = (EdgeAxis == 0) ? 1 : 0;
 	const int32 P2 = (EdgeAxis == 2) ? 1 : 2;
 
+	const bool bInPlace = CVarMCSeamReadInPlace.GetValueOnAnyThread() != 0;
+	VoxelMCSeamStats::FJobScope JobScope(1, bInPlace, OutMeshData);
 	for (int32 q = 0; q < 4; ++q)
 	{
 		const int32 qa = q & 1;
@@ -386,24 +601,40 @@ bool FVoxelCPUMarchingCubesMesher::GenerateEdgeSeamMeshCPU(
 		const bool bPosP1 = (qa == 0);
 		const bool bPosP2 = (qb == 0);
 
+		VoxelMCSeamStats::FLap Lap;
 		FVoxelMeshingRequest R;
-		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *SeamRequest.VoxelData[q]);
+		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *SeamRequest.VoxelData[q], bInPlace);
 		R.NeighborPlaneDepth = Depth;
+		Lap.Take(VoxelMCSeamStats::Setup);
 
 		TArray<FVoxelData>* Plane; TArray<FVoxelData>* Deep;
-		SelectFaceArrays(R, P1, bPosP1, Plane, Deep);
-		FillFacePlanes(*SeamRequest.VoxelData[q ^ 1], CS, P1, bPosP1, Depth, *Plane, *Deep);
-		SelectFaceArrays(R, P2, bPosP2, Plane, Deep);
-		FillFacePlanes(*SeamRequest.VoxelData[q ^ 2], CS, P2, bPosP2, Depth, *Plane, *Deep);
-
 		TArray<FVoxelData>* Strip; uint32 Flag;
 		const int32 AxisA = FMath::Min(P1, P2);
 		const int32 AxisB = FMath::Max(P1, P2);
 		const bool bPosA = (AxisA == P1) ? bPosP1 : bPosP2;
 		const bool bPosB = (AxisB == P2) ? bPosP2 : bPosP1;
-		SelectEdgeArrays(R, AxisA, bPosA, AxisB, bPosB, Strip, Deep, Flag);
-		FillEdgeStrip(*SeamRequest.VoxelData[q ^ 3], CS, AxisA, bPosA, AxisB, bPosB, EdgeAxis, Depth, *Strip, *Deep);
+		if (bInPlace)
+		{
+			FIntVector Dir1 = FIntVector::ZeroValue, Dir2 = FIntVector::ZeroValue;
+			Dir1[P1] = bPosP1 ? 1 : -1;
+			Dir2[P2] = bPosP2 ? 1 : -1;
+			const FIntVector Diagonal = Dir1 + Dir2;
+			SetNeighbourView(R, Dir1.X, Dir1.Y, Dir1.Z, *SeamRequest.VoxelData[q ^ 1]);
+			SetNeighbourView(R, Dir2.X, Dir2.Y, Dir2.Z, *SeamRequest.VoxelData[q ^ 2]);
+			SetNeighbourView(R, Diagonal.X, Diagonal.Y, Diagonal.Z, *SeamRequest.VoxelData[q ^ 3]);
+			SelectEdgeArrays(R, AxisA, bPosA, AxisB, bPosB, Strip, Deep, Flag);
+		}
+		else
+		{
+			SelectFaceArrays(R, P1, bPosP1, Plane, Deep);
+			FillFacePlanes(*SeamRequest.VoxelData[q ^ 1], CS, P1, bPosP1, Depth, *Plane, *Deep);
+			SelectFaceArrays(R, P2, bPosP2, Plane, Deep);
+			FillFacePlanes(*SeamRequest.VoxelData[q ^ 2], CS, P2, bPosP2, Depth, *Plane, *Deep);
+			SelectEdgeArrays(R, AxisA, bPosA, AxisB, bPosB, Strip, Deep, Flag);
+			FillEdgeStrip(*SeamRequest.VoxelData[q ^ 3], CS, AxisA, bPosA, AxisB, bPosB, EdgeAxis, Depth, *Strip, *Deep);
+		}
 		R.EdgeCornerFlags |= Flag;
+		Lap.Take(VoxelMCSeamStats::Fill);
 
 		const int32 FaceP1 = P1 * 2 + (bPosP1 ? 1 : 0);
 		const int32 FaceP2 = P2 * 2 + (bPosP2 ? 1 : 0);
@@ -427,9 +658,14 @@ bool FVoxelCPUMarchingCubesMesher::GenerateEdgeSeamMeshCPU(
 
 		const int32 FirstVertex = OutMeshData.Positions.Num();
 		MeshSeamBandCells(R, BandMin, BandMaxEx, Mask, OutMeshData, TriangleCount);
+		Lap.Take(VoxelMCSeamStats::Band);
+		VoxelMCSeamStats::AddFrame(1, BandMin, BandMaxEx, S, 0);
 		const FIntVector Delta = Coord - SeamRequest.OwnerChunkCoord;
 		TranslateRange(OutMeshData, FirstVertex,
 			FVector3f(Delta.X, Delta.Y, Delta.Z) * static_cast<float>(CS) * VoxelSize);
+		Lap.Take(VoxelMCSeamStats::Translate);
+		R = FVoxelMeshingRequest(); // release the frame's arrays here, so their release is timed
+		Lap.Take(VoxelMCSeamStats::Teardown);
 	}
 	return true;
 }
@@ -447,6 +683,8 @@ bool FVoxelCPUMarchingCubesMesher::GenerateCornerSeamMeshCPU(
 	const int32 CS = SeamRequest.ChunkSize;
 	const float VoxelSize = SeamRequest.VoxelSize;
 
+	const bool bInPlace = CVarMCSeamReadInPlace.GetValueOnAnyThread() != 0;
+	VoxelMCSeamStats::FJobScope JobScope(2, bInPlace, OutMeshData);
 	for (int32 o = 0; o < 8; ++o)
 	{
 		const int32 dx = o & 1;
@@ -466,17 +704,28 @@ bool FVoxelCPUMarchingCubesMesher::GenerateCornerSeamMeshCPU(
 		}
 		const int32 Depth = FMath::Clamp(MaxCoarser + 1, 1, CS);
 
+		VoxelMCSeamStats::FLap Lap;
 		FVoxelMeshingRequest R;
-		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *SeamRequest.VoxelData[o]);
+		InitFrameRequest(R, Coord, LOD, CS, VoxelSize, SeamRequest.WorldOrigin, SeamRequest.LocalUp, *SeamRequest.VoxelData[o], bInPlace);
 		R.NeighborPlaneDepth = Depth;
+		Lap.Take(VoxelMCSeamStats::Setup);
 
+		// Toward each sibling: +1 where this participant sits at 0 on that axis.
+		const int32 Dir[3] = { bPos[0] ? 1 : -1, bPos[1] ? 1 : -1, bPos[2] ? 1 : -1 };
 		TArray<FVoxelData>* Plane; TArray<FVoxelData>* Deep; uint32 Flag;
 		uint8 Mask = 0;
 		int32 MaxCoarserStride = 0;
 		for (int32 A = 0; A < 3; ++A)
 		{
-			SelectFaceArrays(R, A, bPos[A], Plane, Deep);
-			FillFacePlanes(*SeamRequest.VoxelData[o ^ (1 << A)], CS, A, bPos[A], Depth, *Plane, *Deep);
+			if (bInPlace)
+			{
+				SetNeighbourView(R, A == 0 ? Dir[0] : 0, A == 1 ? Dir[1] : 0, A == 2 ? Dir[2] : 0, *SeamRequest.VoxelData[o ^ (1 << A)]);
+			}
+			else
+			{
+				SelectFaceArrays(R, A, bPos[A], Plane, Deep);
+				FillFacePlanes(*SeamRequest.VoxelData[o ^ (1 << A)], CS, A, bPos[A], Depth, *Plane, *Deep);
+			}
 			const int32 FaceIdx = A * 2 + (bPos[A] ? 1 : 0);
 			R.NeighborLODLevels[FaceIdx] = FaceLods[A];
 			if (FaceLods[A] > LOD)
@@ -495,17 +744,33 @@ bool FVoxelCPUMarchingCubesMesher::GenerateCornerSeamMeshCPU(
 			const int32 Sibling = o ^ (1 << AxisA) ^ (1 << AxisB);
 			TArray<FVoxelData>* Strip;
 			SelectEdgeArrays(R, AxisA, bPos[AxisA], AxisB, bPos[AxisB], Strip, Deep, Flag);
-			FillEdgeStrip(*SeamRequest.VoxelData[Sibling], CS, AxisA, bPos[AxisA], AxisB, bPos[AxisB],
-				FreeAxis, Depth, *Strip, *Deep);
+			if (bInPlace)
+			{
+				SetNeighbourView(R, FreeAxis == 0 ? 0 : Dir[0], FreeAxis == 1 ? 0 : Dir[1], FreeAxis == 2 ? 0 : Dir[2],
+					*SeamRequest.VoxelData[Sibling]);
+			}
+			else
+			{
+				FillEdgeStrip(*SeamRequest.VoxelData[Sibling], CS, AxisA, bPos[AxisA], AxisB, bPos[AxisB],
+					FreeAxis, Depth, *Strip, *Deep);
+			}
 			R.EdgeCornerFlags |= Flag;
 		}
 		// The diagonal corner voxel.
 		{
 			FVoxelData* Scalar;
 			SelectCornerArrays(R, bPos[0], bPos[1], bPos[2], Scalar, Deep, Flag);
-			FillCorner(*SeamRequest.VoxelData[o ^ 7], CS, bPos[0], bPos[1], bPos[2], Depth, *Scalar, *Deep);
+			if (bInPlace)
+			{
+				SetNeighbourView(R, Dir[0], Dir[1], Dir[2], *SeamRequest.VoxelData[o ^ 7]);
+			}
+			else
+			{
+				FillCorner(*SeamRequest.VoxelData[o ^ 7], CS, bPos[0], bPos[1], bPos[2], Depth, *Scalar, *Deep);
+			}
 			R.EdgeCornerFlags |= Flag;
 		}
+		Lap.Take(VoxelMCSeamStats::Fill);
 		if (Mask)
 		{
 			R.TransitionFaces = Mask;
@@ -521,9 +786,14 @@ bool FVoxelCPUMarchingCubesMesher::GenerateCornerSeamMeshCPU(
 
 		const int32 FirstVertex = OutMeshData.Positions.Num();
 		MeshSeamBandCells(R, BandMin, BandMaxEx, Mask, OutMeshData, TriangleCount);
+		Lap.Take(VoxelMCSeamStats::Band);
+		VoxelMCSeamStats::AddFrame(2, BandMin, BandMaxEx, S, 0);
 		const FIntVector Delta = Coord - SeamRequest.OwnerChunkCoord;
 		TranslateRange(OutMeshData, FirstVertex,
 			FVector3f(Delta.X, Delta.Y, Delta.Z) * static_cast<float>(CS) * VoxelSize);
+		Lap.Take(VoxelMCSeamStats::Translate);
+		R = FVoxelMeshingRequest(); // release the frame's arrays here, so their release is timed
+		Lap.Take(VoxelMCSeamStats::Teardown);
 	}
 	return true;
 }
