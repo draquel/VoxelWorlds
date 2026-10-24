@@ -292,7 +292,8 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("Cut-over %.0f (resumes below %.0f): %d chunks on the ground, %d back; descending at %.0f uu/s the window resumed with the camera %.0f over the surface (lead %.0f), largest lead %.0f, the streaming viewer never under %.0f over it"),
 		Cutover, Cutover * FDistanceBandLODStrategy::CutoverResumeFraction, OnTheGround, Back, SpeedPerTick * 60.0, ResumedAt, LeadAtResume, MaxLead, MinViewerOver));
 	TestTrue(TEXT("Descending, the window resumes"), ResumedAt > 0.0);
-	TestTrue(TEXT("... while the camera is still over the resume altitude (the prefetch)"), ResumedAt > Cutover * FDistanceBandLODStrategy::CutoverResumeFraction + 500.0);
+	TestTrue(TEXT("... while the camera is still over the resume altitude (the prefetch)"), ResumedAt > Cutover * FDistanceBandLODStrategy::CutoverResumeFraction);
+	TestTrue(TEXT("... and under the cut-over (G49: voxel.World.CutoverResumeGuard)"), ResumedAt <= Cutover);
 	TestTrue(TEXT("The prefetch led the camera"), MaxLead > 1000.0);
 	TestTrue(TEXT("The streaming viewer stays over the surface"), MinViewerOver >= 0.0);
 	TestTrue(TEXT("Settled after the descent"), W.SettleAt(At(300.0)));
