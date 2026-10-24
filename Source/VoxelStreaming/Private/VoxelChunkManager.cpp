@@ -522,6 +522,15 @@ static TAutoConsoleVariable<int32> CVarFarCompressionUniformAtGeneration(
 	     "far-compression sweep collapses it (IdleFrames after it went idle), as before."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarBenchCountPreBenchMeshes(
+	TEXT("voxel.Bench.CountPreBenchMeshes"),
+	1,
+	TEXT("The streaming bench's re-mesh count (world modes review G14). 1 = a re-mesh counts for every chunk that had a mesh "
+	     "when its job launched, also one meshed before the bench started. 0 = only chunks meshed since the bench started "
+	     "count (the rule before): a bench started after a cold first PIE, which had meshed fewer chunks by then, counted "
+	     "about twice the LOD re-meshes of a later one."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarFarCompressionSnapshotReads(
 	TEXT("voxel.FarCompression.SnapshotReads"),
 	1,
@@ -1175,6 +1184,7 @@ void UVoxelChunkManager::Initialize(
 	// Clear any existing state
 	ChunkStates.Empty();
 	++ChunkStateVersion;
+	BenchEverMeshed.Empty();
 	LoadedChunkCoords.Empty();
 	GenerationQueue.Empty();
 	GenerationQueueSet.Empty();
@@ -1596,6 +1606,7 @@ void UVoxelChunkManager::Shutdown()
 	// Clear state
 	ChunkStates.Empty();
 	++ChunkStateVersion;
+	BenchEverMeshed.Empty();
 	LoadedChunkCoords.Empty();
 	EditScatterReaderChunks.Empty();
 	EditScatterEditedChunks.Empty();
@@ -5457,7 +5468,7 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 			}
 			// A chunk loaded again later meshes for the first time again: not a re-mesh. Without this a
 			// route that revisits terrain counted every reload as thrash (the I9 soak's lap 2, §13.10).
-			BenchEverMeshed.Remove(ChunkCoord);
+			// (BenchEverMeshed drops it in RemoveChunkState.)
 			BenchQueuedRemeshReason.Remove(ChunkCoord);
 		}
 
@@ -5787,6 +5798,8 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 {
 	ChunkStates.Remove(ChunkCoord);
 	++ChunkStateVersion;
+	// Its next mesh, after a reload, is a first mesh again (G14).
+	BenchEverMeshed.Remove(ChunkCoord);
 	// Release any in-flight generation / mesh slot: its result belongs to the residency that just
 	// ended and is rejected on arrival (serial mismatch), so a reload dispatches fresh work instead
 	// of waiting on — or being completed by — the old job.
@@ -7410,7 +7423,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 					{
 						BeginSeamHold(ChunkCoord);
 					}
-					if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
+					BenchEverMeshed.Add(ChunkCoord);
 					SubmittedLOD = PendingMeshQueue[i].LODLevel;
 					bMeshSubmitted = true;
 				}
@@ -7500,7 +7513,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		{
 			BeginSeamHold(ChunkCoord);
 		}
-		if (bBenchmarkViewActive) { BenchEverMeshed.Add(ChunkCoord); }
+		BenchEverMeshed.Add(ChunkCoord);
 
 		// Propagate water flags from loaded neighbors into this chunk's voxel data
 		// so caves connected across chunk boundaries receive consistent water flags.
@@ -8285,6 +8298,24 @@ void UVoxelChunkManager::RemoveFromUnloadQueue(const FIntVector& ChunkCoord)
 }
 
 // ==================== Streaming Benchmark ====================
+
+void UVoxelChunkManager::ResetBenchCounters()
+{
+	BenchRemeshCount = 0;
+	for (int64& C : BenchRemeshByReason) { C = 0; }
+	BenchSeamJobsCompleted = 0;
+	BenchUnloadLagSumMs = 0.0;
+	BenchUnloadLagMaxMs = 0.0;
+	BenchUnloadLagCount = 0;
+	BenchUnloadDistSumUU = 0.0;
+	BenchUnloadDistMaxUU = 0.0;
+	UnloadEnqueueTimeSeconds.Reset();
+	if (CVarBenchCountPreBenchMeshes.GetValueOnGameThread() == 0)
+	{
+		BenchEverMeshed.Reset();
+	}
+	BenchQueuedRemeshReason.Reset();
+}
 
 void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)
 {
