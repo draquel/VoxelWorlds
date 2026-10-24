@@ -257,7 +257,7 @@ code sites).
 
 **Decided 2026-10-12: every recommendation below is accepted**, including the spherical scope recommendations
 (SD1-SD5 in the requirements doc). T1-T5 are built first, as their own PR. **Decided 2026-10-14, for the second
-revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended. **Decided 2026-10-17, for spherical Phase 6 (§20.0):** D17-D20, the scope (D17 and D18 revise SD1 and SD5), then D21-D24 (§20.1), each as recommended. **Decided 2026-10-18:** D25 (§19.5) and D26 (§19.9), each as recommended. **Decided 2026-10-24:** the D1 amendment, D29 and D30 (§21.1), each as recommended.
+revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 2026-10-17:** D10, as recommended. **Decided 2026-10-17, for spherical Phase 4 (§18.1):** D11-D13, each as recommended. **Decided 2026-10-17, for spherical Phase 5 (§19.1):** D14-D16, each as recommended. **Decided 2026-10-17, for spherical Phase 6 (§20.0):** D17-D20, the scope (D17 and D18 revise SD1 and SD5), then D21-D24 (§20.1), each as recommended. **Decided 2026-10-18:** D25 (§19.5) and D26 (§19.9), each as recommended. **Decided 2026-10-24:** the D1 amendment, D29 and D30 (§21.1), each as recommended. **Decided 2026-10-24, for the cubic block feedback (§22.1):** D31-D34, each as recommended.
 
 | ID | Question | Recommendation (accepted) |
 |----|----------|---------------------------|
@@ -291,6 +291,10 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D28 | G45: blend a far-field quad's two materials by a dithered pick or by sampling both? *(decided 2026-10-24)* | **A dithered pick**: each quad carries its corners' two leading materials (flat per triangle) and the second's weight at each corner, and the terrain material takes one of the two per pixel against a temporal screen dither (interleaved gradient noise moved every frame) weighted by the interpolated weight, which TSR resolves into a gradient: no texture sample added, one Custom node after `MF_GetMaterialID` (`FarFieldMaterialPick`), voxel chunks unchanged (their vertices' alpha 255 is weight 0). Rejected: sampling both materials and lerping by the weight (smooth with no noise, but about twice the terrain's texture cost on the far field's blend pixels and the triplanar sampling duplicated in HLSL). The weight is the share of generation's dithered per-voxel picks (G39, §20.22), so the far field averages to what the voxel terrain draws (§20.27) |
 | D29 | Cubic step policy, revisiting D5 *(decided 2026-10-24)* | **Auto-step one block:** in a cubic world players and NPCs step up one block without a jump and two blocks are a wall; navigation uses the same rule (one cell per block column, at most one block of rise) and the camera eases the step (§21.1). Rejected: jump per block (D5) with an NPC hop at each one-block rise, a player auto-jump assist and a repeating held jump |
 | D30 | How a cubic voxel tree is felled *(decided 2026-10-24)* | **Like an HISM tree:** hits on a trunk block pay the gather table's `Tree` harvest entry per hit (1 wood, 2 with a tool) and the third hit removes the tree's trunk above the ground and its leaves, leaving a stump; not undoable, saved with the edits (§21.1). Rejected: wood per log block removed at felling, with no pay per hit |
+| D31 | Where cubic block hardness lives *(decided 2026-10-24)* | **Per material in the voxel material registry** (`FVoxelMaterialDefinition::Hardness`, seconds bare-handed, defaults for every material): the same values on every machine with no asset, readable by any system (§22.1). Rejected: the gather table (an entry for every material that should differ, also those that yield nothing) and per biome material entries |
+| D32 | Do smooth worlds get break times? *(decided 2026-10-24)* | **Cubic only:** a smooth dig stays one density dent per click (§22.1) |
+| D33 | How break progress shows *(decided 2026-10-24)* | **Cracks on the block's exposed faces**, drawn with the outline; no HUD bar (§22.1) |
+| D34 | What tools do to breaking *(decided 2026-10-24)* | **Speed only:** break time = hardness ÷ MiningSpeed (bare hands 1, stone pickaxe 1.5, iron 2); no minimum tool per material, so every block breaks bare-handed (§22.1) |
 
 ## 9. Order of work
 
@@ -9720,3 +9724,63 @@ found, and a body whose axis the crosshair crosses exactly.
 `vox.Attack`'s auto-aim picks the nearest hostile within 4 m, not the one under the crosshair (QA tooling).
 
 KC6, KC7, KC9 and KC12 are fixed.
+
+## 22. Cubic block feedback: a block highlight, a placement preview and break times (planned 2026-10-24)
+
+The last two cubic rows of §6, left for later by §21: an outline of the block the player targets and a ghost of the block a
+place would add, and blocks that take a material's time to break. Bases: VoxelWorlds `9affbc4`, VoxelCharacterPlugin
+`09302ed`, UE5_PluginDev `1b997e7` (§21 merged).
+
+### 22.1 Plan
+
+**What is there** (the code survey, 2026-10-24). The primary action (LMB) runs a chain: melee, a scatter chop, a voxel tree
+chop (outside edit mode), then a dig, gated on edit mode (B) or a digging tool (`HasDiggingTool`: `MiningSpeed` above 1);
+the secondary action (RMB) places stone, in edit mode only. Both trace 500 uu from the camera on Visibility
+(`TraceForVoxel`), take the voxel with `GetEditVoxelCoord` (WM-C2; four copies of the same branch) and send
+`Server_RequestVoxelModification`, which refuses a voxel more than 800 uu from the pawn (measured to the voxel's corner) and
+in a cubic world edits one whole block per click; a dig pays the gather table once per voxel it empties (G3). The input
+binds only `Started`, so nothing knows the button is held. Nothing in the game draws the target: the only indicator is the
+demo test actor's `DrawDebugBox` pair (a cyan target, a green place cell), from its own trace and its own coordinate maths,
+drawn in edit mode through `voxel.Edit.PlayerInputs`, and in a cubic world the same actor removes the block under its
+crosshair on the press itself (`TestRemoveBlock`), beside the player's dig. Materials have no hardness:
+`FVoxelMaterialDefinition` holds a colour, atlas cells and masking. `MiningSpeed` (1 bare-handed, +0.5 / +1.0 with the stone /
+iron pickaxe) only picks the gather table's tool yield. Voxel edits do not replicate to clients (`EDIT_LAYER.md`, a known
+gap), so a remote client sees no dig, timed or not; the server is still the one that decides.
+
+| ID | Work item | Finding | Repos | Size |
+|----|-----------|---------|-------|------|
+| WM-C12 | **One edit target.** `AVCCharacterBase::FindEditTarget` (the trace and `GetEditVoxelCoord` for the dig voxel and the place voxel) replaces the four copies in the primary and secondary actions and is what `vox.Dig` aims with; `AVCPlayerController::IsVoxelInEditReach` (800 uu from the pawn to the voxel's corner, the rule `Server_RequestVoxelModification` applies) is the reach of the server and of the preview alike | — | VoxelCharacterPlugin, parent | S |
+| WM-C13 | **Block highlight and placement preview.** `UVCBlockInteractionComponent` on the player character: on the locally controlled player in a cubic world it outlines the block the primary action would dig (when it would dig: edit mode, or a digging tool) and shows a translucent ghost of the block the secondary action would place (edit mode), both from `FindEditTarget`; each is hidden when its voxel is out of reach, the dig voxel is air or the place voxel solid, when edit mode is off (and no tool digs), while a UI has the input, and in smooth worlds. The ghost turns red where the server would refuse the block (a pawn in its cell: the server's own box test). Drawn by the character's own `ULineBatchComponent` (depth-tested lines and a solid box, no assets). `vc.Dig.Highlight` (0 = none) | — | VoxelCharacterPlugin | M |
+| WM-C14 | **Hardness (D31).** `FVoxelMaterialDefinition::Hardness`: seconds to break a block of the material bare-handed, with a default for every material in `FVoxelMaterialRegistry` (leaves 0.2, snow 0.3, dirt and sand 0.5, grass 0.6, frozen dirt 0.8, sandstone 1.0, wood 1.2, stone 1.5, coal 2.0, copper 2.2, iron and gold 2.5, diamond 4.0, the reserved slots 1.0); `FVoxelMaterialRegistry::GetHardness`. Not taken from the atlas (rendering data, which a dedicated server need not load) | — | VoxelWorlds | S |
+| WM-C15 | **Timed breaking (D32-D34), decided on the server.** In a cubic world the primary action's dig is a hold: the input binds `Completed` too; while it is held the owning client sends `Server_BeginBlockBreak(voxel)` for the dig target (again on every retarget) and `Server_StopBlockBreak` on release, and draws its own prediction of the progress. The server keeps one break per player: it checks the request as a dig (pawn, reach, a solid voxel, the edit validator: `UVoxelEditManager::CanEditAt`), advances it by Δt ÷ (hardness ÷ MiningSpeed) each tick (a tool equipped mid-break counts from then on), and at 1 checks again and digs through the code an instant dig runs (`AVCPlayerController::DigVoxelAt`: the one block, the gather table once per voxel), then tells the client (`Client_BlockBreakFinished`). Releasing, retargeting, walking out of reach or the block changing resets it; holding on goes on to the next block under the crosshair. Progress shows as cracks (D33): dark lines spreading over the block's exposed faces from a pattern seeded by the voxel, more and longer as the break advances. `Server_RequestVoxelModification(Destroy)` refuses in a world with timed breaks (a client cannot skip the time); `vox.Dig` digs through `DigVoxelAt` (QA, at once) and `vox.Mine [seconds]` holds the primary action on the crosshair through the client path. Smooth worlds keep one dent per click (D32). `vc.Dig.BreakTimes` (0 = blocks break at once, as before) | G3 (the yields stay per voxel) | VoxelCharacterPlugin, VoxelWorlds, parent | M |
+| WM-C16 | **The demo test actor steps aside.** `voxel.Edit.PlayerInputs 2`: the test actor keeps its keys (Z, Y, F9, F10) but makes no mouse edits and draws no target boxes, since the player character edits the blocks and draws the target itself; the character's edit-mode mirror sets 2 in a cubic world and 1 in a smooth one (as before) | — | VoxelWorlds, VoxelCharacterPlugin | S |
+| WM-C17 | **Tests** with each item (below) | — | all | M |
+| WM-C18 | **Live verification and docs:** `VoxelDemo` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Cubic` (screenshots of the highlight, the ghost and a break in progress), the smooth control, these results, §6, `MATERIAL_SYSTEM.md`, the VoxelCharacterPlugin instructions, the parent's doc map and `vox.*` table | — | all | M |
+
+**Decisions** (asked 2026-10-24; **each decided as recommended** the same day, recorded in §8):
+
+| ID | Question | Options | Recommendation (accepted) |
+|----|----------|---------|---------------------------|
+| D31 | Where block hardness lives | (a) **Per material in the voxel material registry** (VoxelCore): the same values on every machine, a dedicated server included, with no asset, readable by any system; tuning is the registry's defaults. (b) **Per material in the gather table**, beside the yields: tunable without code, but every material that should differ needs an entry, also those that yield nothing. (c) **Per biome material entry**: the same stone harder in one biome than another | **(a).** Hardness belongs to the material, whatever it yields; nothing to keep consistent between assets |
+| D32 | Do smooth worlds get break times? | (a) **Cubic only:** a smooth dig stays one density dent per click. (b) **Smooth too:** holding the primary action digs dents at a rate set by the hardness | **(a).** Only in cubic does a break remove one block; smooth worlds stay as they are |
+| D33 | How progress shows | (a) **Cracks on the block's faces**, drawn with the outline. (b) **A HUD progress bar** under the screen centre. (c) Both | **(a).** On the block itself, with no texture assets |
+| D34 | What tools do | (a) **Speed only:** break time = hardness ÷ MiningSpeed (bare hands 1, stone pickaxe 1.5, iron pickaxe 2). (b) **Speed and a minimum MiningSpeed per material** (ores need a pickaxe) | **(a).** The existing stat and no new data; every block breaks bare-handed (the stone pickaxe's recipe needs stone) |
+
+Not asked, chosen with the design: the ghost shows whenever edit mode is on (a place is one press, so the preview has to
+show before it, not during a hold), and the outline whenever the primary action would dig, so also with a pickaxe outside
+edit mode (the dig gate).
+
+**How each is verified.**
+
+| ID | Check |
+|----|-------|
+| WM-C12 | `VoxelCharacter.Cubic.EditTarget`: camera rays over streamed cubic terrain: `FindEditTarget`'s dig and place voxels equal `GetEditVoxelCoord` on the trace's hit, and `IsVoxelInEditReach` agrees with what `Server_RequestVoxelModification` accepts |
+| WM-C13 | `VoxelCharacter.Cubic.BlockHighlight`: the outline and the ghost are the dig and place voxels' cells; nothing out of reach, with edit mode off and no tool, on air, in a smooth world, with `vc.Dig.Highlight 0`; the ghost red with a pawn in the place cell; live screenshots |
+| WM-C14 | `VoxelCharacter.Cubic.BreakTime` (pure): every registered material has a hardness of 0 or more, dirt < stone < iron < diamond, seconds = hardness ÷ MiningSpeed at 1, 1.5 and 2 |
+| WM-C15 | `VoxelCharacter.Cubic.BlockBreak` (the server path on CPU-generated cubic chunks): a block stands until its time and breaks after it, paying the gather table; a release before the end resets (a new begin needs the whole time); a retarget resets and leaves the first block standing; out of reach, air and protected voxels are refused; `Server_RequestVoxelModification(Destroy)` breaks nothing in a timed world; `vc.Dig.BreakTimes 0` and a smooth world dig at once as before. `VoxelCharacter.Cubic.CrackPattern` (pure): nothing at 0, more line length as progress grows, every line on an exposed face. Live: a break in progress (screenshot), a release and a retarget, a pickaxe breaking sooner, the gather toast |
+| WM-C16 | Live: in edit mode in the cubic demo the test actor's boxes are gone and a click removes no block at once; Z still undoes; in the smooth control the brush sphere is back |
+| Smooth unchanged | Headless `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon` and the same in the editor with the GPU tests (parity lines identical to main's); the smooth control live: a dig and a place as before, no highlight |
+
+**Order.** WM-C14 and WM-C12 first, then WM-C13, WM-C15 and WM-C16, the tests with each, then the live pass. PRs:
+VoxelWorlds (hardness, `CanEditAt`, `voxel.Edit.PlayerInputs 2`, the docs), VoxelCharacterPlugin, then UE5_PluginDev
+(`vox.Dig`, `vox.Mine`, the gitlinks and the doc map).

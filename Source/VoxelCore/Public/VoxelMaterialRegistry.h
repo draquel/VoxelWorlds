@@ -114,6 +114,16 @@ public:
 	static bool IsNonOccluding(uint8 MaterialID);
 
 	/**
+	 * How hard a block of a material is to break (world modes review WM-C14, D31): seconds bare-handed.
+	 * @param MaterialID The material ID to look up
+	 * @return The material's hardness (DefaultHardness for an unknown ID)
+	 */
+	static float GetHardness(uint8 MaterialID);
+
+	/** The hardness of a material the registry does not know (and of the reserved slots). */
+	static constexpr float DefaultHardness = 1.0f;
+
+	/**
 	 * Get the set of all MaterialIDs that use masked blending.
 	 */
 	static TSet<uint8> GetMaskedMaterialIDs();
