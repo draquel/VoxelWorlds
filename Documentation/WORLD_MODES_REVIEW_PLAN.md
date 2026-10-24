@@ -1457,7 +1457,7 @@ Three findings from §13.11 get IDs here:
 | G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole. The planet's version (a viewer-Z clip and a 3D horizon: a climbing viewer lost the ground) fixed in spherical Phase 6's P6.3 (WM-BP8, §20.4) | WM-S1, WM-S4, WM-BP8 |
 | G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
-| G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Open, cosmetic; the material's, not the far ocean's | — |
+| G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Fixed 2026-10-24 (§20.25): not the material's but the engine's. Without front-layer reflections Lumen reflects translucent surfaces from its radiance cache and marks the probes they need at 1/4 of the screen (`r.Lumen.TranslucencyReflections.MarkDownsampleFactor` 4); at grazing angles kilometres of sea fall in a few pixel rows, probe cells along the view are skipped and the water's reflection is dark there. Traced by switching one thing at a time (fog, clouds, atmosphere, the sky light's cubemap, the material's normal, roughness and emissive changed nothing; specular 0, front-layer reflections, the radiance cache's reflections off and factor 2 or 1 removed them). Fixed with `r.Lumen.TranslucencyReflections.MarkDownsampleFactor=1` in the project's `Config/DefaultEngine.ini`: on island M 2-10 dark rows a view at 100 and 300 uu over the sea -> 0, the mark pass 0.013 -> 0.033 ms at 1280 x 722 | — |
 | G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
 | G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Fixed (§16.3): one cave carve for every world mode (`GpuCaveCarve`, the planet's generalised), after the biome blend as on the CPU. `GPUvsCPUCavesParity` adds four cases that fail on the old shader (biome scale 1.25 with a minimum-depth override, scale 0, scale 0.5, a chunk under the sea with `UnderwaterMinDepth`); every earlier parity case, planet included, keeps its CRC. `GenerationVersion` 2 (D10) | — |
 | G19 | Heightmap water consumers disagree on the water plane: generation, scatter, the map and PCG compare with `WaterLevel`; navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z` (found in spherical Phase 3, §17). They agree whenever `WorldOrigin.Z` is 0, as in every configuration in the project | Fixed in §20.20 (2026-10-23): the sea is `WaterLevel` in world Z, where generation floods and the tiles draw (the terrain's heights are absolute; `WorldOrigin` moves only the grid). `FromConfigOriginRelative` and `GetSeaSurface`'s parameter are gone; navigation, the character, the NPC spawner, the debug commands, `GetSeaDepthAt` and the LOD slab read the one plane, and the water pull, the edit-driven flood and the tiles' chunk filter (which passed grid positions: the origin-relative plane again) test world positions. No project world changes (every configuration has `WorldOrigin.Z` 0); tests with `WorldOrigin.Z` -20,000 to 9,000 | — |
@@ -2362,7 +2362,7 @@ Three artefacts found on the way and what came of them:
 - **Dark bands just under the horizon** at sea level, at fixed screen rows from any position: not the far ocean. With the
   far ocean hidden, the loaded water tiles over island M's coastal sea show the same bands (`mtiles_off`); fog, volumetric
   fog, anti-aliasing and the sky sphere are not involved. The water material draws them at grazing angles; until M6 no
-  water reached that distance. Recorded as G16 (§14.1), cosmetic, not changed here.
+  water reached that distance. Recorded as G16 (§14.1), cosmetic, not changed here. Fixed in §20.25 (a Lumen setting).
 
 **The edge, `vox.Edge` checks on S** (fresh world, water on):
 
@@ -9014,3 +9014,76 @@ land, local noon; screenshots `Saved/Screenshots/Claudius/g43_*` in the worktree
   elsewhere where the ground moved.
 
 G43 is fixed.
+
+### 20.25 G16: the water's dark lines under the horizon (2026-10-24)
+
+Bases: VoxelWorlds `b46375b`, UE5_PluginDev `187d9c5` (G72 merged), with main's G43 (§20.24) merged in. Branches `fix/g16-water-horizon-bands` (VoxelWorlds) and
+`claude/g16-water-horizon-bands` (UE5_PluginDev). Editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree
+editor (Claudius on 8097), background throttling off. No code change: the fix is a project setting.
+
+**The finding** (§14.10): the water draws thin dark bands just under its horizon at grazing angles, at fixed screen rows
+from any position. M6 ruled out the far ocean, fog, volumetric fog, anti-aliasing and the sky sphere.
+
+**Reproduced** on island M (`Review_Island_M`, `WaterMeshMaterial` = `/DatasmithContent/Materials/Water/M_Water`, Epic's
+translucent default-lit water: refraction of the scene colour, caustics and depth fog in a material function), with a
+camera on the open sea past the coast looking out:
+
+- **What they are.** Lines one or two pixels tall across the whole width, 1.0-1.5° under the horizon: 11,500-16,500 uu
+  out at 300 uu over the sea, closer and more of them at 100 uu, none seen from 1,000 uu (the same angles lie past
+  50,000 uu, where the height fog covers the water).
+- **They follow the camera.** The same rows from 10,000 uu further out.
+- **They are the water's, not the world's.** Weaker 90° along the coast, nearly gone looking back at the island (a shallow
+  seabed brightens the water under them), and no line on the seabed with translucency hidden.
+
+**Traced** by switching one thing at a time, at the same view:
+
+| Switched | The lines |
+|---|---|
+| Fog, volumetric fog, sky atmosphere, volumetric clouds, anti-aliasing, mip bias, anisotropy | stay |
+| Lumen reflections off (`r.ReflectionMethod 0`), Lumen translucency volume off, the translucency lighting volume off | stay |
+| The sky light: lower hemisphere not black, cubemap 512 instead of 128, a static capture | stay |
+| A copy of the material: flat normal (constant up), no emissive, roughness 0.3 | stay (fainter at 0.3) |
+| The copy: specular 0; or `show Specular` off | **gone** |
+| Lumen front-layer translucency reflections on (`r.Lumen.TranslucencyReflections.FrontLayer.Enable 1`) | **gone** |
+| Lumen translucency reflections from the radiance cache off (`r.Lumen.TranslucencyReflections.RadianceCache 0`) | **gone** |
+| `r.Lumen.TranslucencyReflections.MarkDownsampleFactor` 4 (the engine default) → 2 / 1 | **gone** (2: a faint line left at a swimmer's height) |
+
+**The cause** is the engine's, not the material's. Without front-layer reflections, Lumen gives translucent surfaces their
+reflections from its radiance cache, and marks the probes they need in a pass over the translucent surfaces at
+1/`MarkDownsampleFactor` of the screen (`TranslucentSurfacesMarkPass`). At grazing angles kilometres of sea squeeze into a few
+pixel rows, so at a quarter resolution the pass skips probe cells along the view. The water there reads no probe and its
+reflection comes out dark. The rows are where those cells fall, so they follow the camera, and the water's own colour
+hides them where a shallow seabed brightens it. The material's reflection is a mirror of the sky light even with its waves
+flattened, which is why the normals, roughness and the cubemap did not matter.
+
+**The fix** (UE5_PluginDev): `r.Lumen.TranslucencyReflections.MarkDownsampleFactor=1` in `Config/DefaultEngine.ini`
+(`[SystemSettings]`). No scalability group sets it, so it holds at every quality level.
+
+- Front-layer reflections also remove the lines, but they replace the water's look (mirror reflections of the scene) at a
+  much larger cost, and the engine enables them only at Cine quality.
+- Factor 2 still left a faint line at 50-100 uu over the sea.
+
+**A/B on island M** (one PIE, by the cvar). Camera 100 and 300 uu over the sea (and 50 uu), pitch −1°, −3° and −8°,
+heading out to sea and 90° along the coast. Counted: rows more than 3 pixels under the geometric horizon whose brightness
+dips 15 or more under their neighbours (`g16_under.py`).
+
+| | Factor 4 (before) | Factor 1 (after) |
+|---|---|---|
+| 300 uu | 2-6 dark rows a view, dips 17-71 | 0 |
+| 100 uu | 5-10 dark rows a view, dips 18-84 | 0 |
+| 50 uu | 0 in this run (an earlier sweep the same session: 7-10) | 0 |
+
+After restarting the editor with the setting in `DefaultEngine.ini` (the cvar 1 at startup, nothing set by hand), the same
+views have no dark row.
+
+**Cost.** `ProfileGPU`, three frames each at 1280 × 722, looking out at 100 uu over the sea:
+
+- `TranslucentSurfacesMarkPass`: 0.012-0.014 ms at factor 4, 0.016-0.018 ms at 2 and 0.033-0.034 ms at 1, a pass that
+  scales with the pixels (about 0.3 ms at 4K by that ratio).
+- `UpdateWorldRadianceCaches`, `RenderTranslucency` and `LumenReflections` were within their frame-to-frame spread.
+
+**Tests.** No code change; the suites are untouched. The setting changes nothing that headless or in-editor tests read.
+
+**Left as it was:** `M_Water` itself, an engine-plugin asset, is not edited.
+
+G16 is fixed.
