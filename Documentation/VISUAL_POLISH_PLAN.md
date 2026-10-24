@@ -138,12 +138,72 @@ roughness against both fixes: the far hill's speckle and the wet-looking sheen o
 
 Tests: `WorldClock.*` and `VoxelWorlds.Rendering.*` in the editor, 16/16.
 
+### The first-PIE crash and the material atlas arrays (2026-10-24, after the merge)
+
+**The crash.** A PIE run on `PlanetTest` on main crashed (`Saved/Crashes/UECC-*`, read in Rider with the 5.8 editor
+symbols). On an RHI translate worker, a Lumen card-capture draw set a pipeline whose vertex shader had already been
+freed and its memory reused: `UE::RHICore::ApplyStaticUniformBuffers` (`RHICoreShader.h:74`, called from
+`FD3D12CommandContext::RHISetGraphicsPipelineState`) caught the mismatch, and formatting the check's message read the
+freed shader's name and faulted. No project code was on any thread's stack, the minidump holds too little heap to name
+the material, and nothing in the log shows shaders compiling or garbage collection in that run. It has not reproduced in
+about 22 PIE starts (with and without RHI validation). It was the first PIE of the editor session, 18 s after the atlas
+finished building its texture arrays; a forum report describes the same kind of crash on 5.8.3 and not on 5.8.1.
+
+**F2.10 (new): the atlas arrays were 4096 RGBA32F.** `UVoxelMaterialAtlas::BuildSingleTextureArray` handed its slices to
+`UTexture2DArray::UpdateSourceFromSourceTextures()`, which sizes the array to its largest slice and, when the slices'
+gamma spaces or formats differ, converts all of them to RGBA32F. `TextureArraySize` (512 on `DemoMaterialAtlas`) was
+never applied, so "512 px slices" in "The setup as found" was wrong: the albedo and normal arrays were 4096 x 4096 x 22
+float (5.9 GB of source each, held for the editor session) and the roughness array 2048. Every editor session's first
+PIE spent 20-24 s building them on the game thread; on the GPU they took 800 MB (BC, 246 + 492 + 62 MB).
+
+**Fix.** The atlas builds the array's source itself: every slice at `TextureArraySize` (rounded up to a power of two) in
+BGRA8, converted from its texture's own gamma into the array's (sRGB albedo, linear normals and roughness, so the
+shader samples the same values) with the engine's gamma-correct resize, wrapping at the edges; each distinct texture is
+decoded once (the demo atlas repeats one texture in 14 of 22 slots); slots without a texture take the first built
+slice, as before. The settings are pinned per array instead of copied from whichever texture lands in slice 0: albedo
+`TC_Default` (BC1/BC3), normals `TC_Normalmap` (BC5) in the normal-map texture group, roughness `TC_Masks` (BC1/BC3,
+linear). One `UpdateResource` instead of two, and each build gets a new object name (`NewObject` with the old name
+would reconstruct the array the materials still draw with in place). Tests `VoxelWorlds.MaterialAtlas.TextureArrays.Build`
+and `.Rebuild`.
+
+Measured in a fresh editor on `PlanetTest` per run (`Scripts/launch_editor.ps1`, settled, then the session's first PIE;
+`Saved/ClaudeScripts/atlas_pie_measure.sh`, results in `atlas_measure_*.txt`); memory is the editor's working set /
+committed bytes:
+
+| | Before, run 1 | Before, run 2 | After, run 1 (not cached) | After, run 2 (cached) |
+|---|---|---|---|---|
+| PIE start, as the engine reports it | 25.8 s | 21.2 s | 3.6 s | 3.4 s |
+| Building the three arrays | 24.3 s | 20.0 s | 2.3 s | 2.2 s |
+| Editor before PIE | 4.5 / 5.6 GB | 4.6 / 5.6 GB | 4.5 / 5.6 GB | 4.5 / 5.6 GB |
+| Right after PIE start | 18.5 / 21.9 GB | 18.2 / 21.7 GB | 4.7 / 7.5 GB | 4.6 / 7.4 GB |
+| 45 s later (streaming) | 17.7 / 21.6 GB | 17.5 / 21.4 GB | 6.0 / 9.3 GB | 5.9 / 9.2 GB |
+| Peak committed | 23.1 GB | 23.1 GB | 9.4 GB | 9.4 GB |
+| Arrays on the GPU | 800 MB | 800 MB | 16 MB | 16 MB |
+
+The arrays' platform data was ready when PIE finished starting in every run (the 4096 arrays came from the DDC; the 512
+ones build in under a second). `BakeMapColors` still takes about 1 s of the 3.4 s: it decodes every full-size albedo.
+
+**The look.** At the player's view heights the 512 slices look the same as 4096: the ground's fine detail (mean
+absolute luma step between neighbouring pixels) at the 160 uu view is 18.85 against 18.96 for 4096 slices built by the
+new code in the same session, 18.40 against 18.79 from 350 uu straight down (`atlas_before_*`, `atlas_after_*`,
+`atlas_ref4096_*`). The new code at 4096 reproduces the old images (18.96 against 18.95). From 60 uu over the ground the
+512 slices are softer (19.2 against 23.2, `atlas_after512_near.png` against `atlas_ref4096_near.png`). If close-ups
+matter for media, `TextureArraySize` 1024 costs 64 MB on the GPU and about four times the build.
+
+**Full crash dumps.** The editor is launched with `-fullcrashdump` (`Scripts/launch_editor.ps1`, and the Rider run
+configuration's program arguments, which are local settings), so the next crash writes a full-memory dump that can
+name the freed shader's material. A full dump is about the editor's working set.
+
 ### Next
 
 - **VP1-O6 (new):** decide the atmosphere's shadows on small planets: keep them (stable now apart from the cascades'
   re-fit), soften them, or turn `bCastShadowsOnAtmosphere` off when the scaled atmosphere is thin.
 - **F2.9 (new, seen with the sky light on):** faint striped shading on far gentle slopes at a low sun
   (`vp1o5_45n_eye_ab.png`, the far valley): to trace (shadow-map self-shadowing at grazing light, or G62's shading).
+- **F2.11 (new, from the code; not tried in a package):** a packaged game has no terrain textures on smooth worlds. The
+  arrays live in the transient package, so the atlas never saves them, and outside the editor
+  `BuildSingleTextureArray` has no source data to read and binds empty arrays. Fix: build the arrays into saved
+  `Texture2DArray` assets (a button and a cook-time check), which would also drop the build from the first PIE.
 - Then milestone 2 (VP2-O2 to O4) and milestone 3 (VP3-O2, O3) as planned.
 
 ## The setup as found
@@ -172,7 +232,8 @@ Tests: `WorldClock.*` and `VoxelWorlds.Rendering.*` in the editor, 16/16.
   (`Plugins/VoxelWorlds/Source/VoxelRendering/Private/VoxelSceneProxy.cpp:161-162`) and provides no ray tracing geometry.
 - **Terrain material**: `M_VoxelMaster` (and `M_VoxelMaster_Fade`) sample through `MF_TriplanarSampleAlbedoRoughness` and
   `MF_TriplanarSampleNormal`. `MI_VoxelDefault`: `TriplanarScale` 0.01 (one tile per metre), `TriplanarSharpness` 8,
-  `Specular` 0.05. `DemoMaterialAtlas`: 512 px slices; Grass, Dirt (mud), Stone (slope), Snow and Riverbed from the
+  `Specular` 0.05. `DemoMaterialAtlas`: `TextureArraySize` 512, but the arrays were built at 4096 (F2.10, fixed);
+  Grass, Dirt (mud), Stone (slope), Snow and Riverbed from the
   Stylized Spruce Forest pack, the ores from Megascans; Sand and Frozen Dirt have no textures. No terrain material has a
   roughness map.
 - **Biomes** (`DemoBiomeConfig`): Plains (grass over dirt over stone), Forest (dirt), Mountain (stone); temperature

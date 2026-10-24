@@ -113,7 +113,7 @@ public:
     UTexture2DArray* AlbedoArray;    // VisibleAnywhere - runtime generated
     UTexture2DArray* NormalArray;
     UTexture2DArray* RoughnessArray;
-    int32 TextureArraySize = 512;    // Target size for array slices
+    int32 TextureArraySize = 512;    // Size of every array slice (rounded up to a power of two)
 
     // ===== Per-Material Configuration =====
 
@@ -133,6 +133,30 @@ public:
     bool AreTextureArraysDirty() const;
 };
 ```
+
+### Building the Texture Arrays
+
+`BuildTextureArrays()` runs in the editor when a world component first binds the atlas (once an editor session: the
+arrays live in the transient package and are not saved). For each array (albedo, normal, roughness),
+`BuildSingleTextureArray` writes the array's source itself rather than through
+`UTexture2DArray::UpdateSourceFromSourceTextures()`, which would size every slice to the largest source texture and
+convert them all to RGBA32F when their gamma spaces or formats differ (on the demo atlas that was 4096 x 4096 x 22 float
+slices, 20-24 s of the first PIE and 800 MB on the GPU; see `VISUAL_POLISH_PLAN.md`, F2.10):
+
+- Slices are `TextureArraySize` square (rounded up to a power of two), 8-bit BGRA. One slice per MaterialID up to the
+  highest configured.
+- Each slice is converted from its texture's own gamma into the array's: sRGB for albedo, linear for normals and
+  roughness, so the shader samples the same values whatever the source textures' formats. The resize is ImageCore's
+  default filter in linear light, wrapping at the edges (terrain textures tile).
+- Each distinct texture is decoded and resized once; slots without a texture (or with no readable source) take the
+  first built slice; with no readable texture at all, every slice is the placeholder colour.
+- The settings are fixed per array: albedo `TC_Default` (BC1, or BC3 with alpha for masked materials), sRGB; normals
+  `TC_Normalmap` (BC5) in `TEXTUREGROUP_WorldNormalMap`; roughness `TC_Masks` (BC1/BC3, linear). Mips from the texture
+  group, `TF_Default` filtering, never streamed.
+- The platform data builds asynchronously and is cached in the DDC by the source's hash.
+
+On `DemoMaterialAtlas` (22 slices at 512) the build takes about 2.3 s and the arrays 16 MB on the GPU. A packaged game
+has no source data to build from (see `VISUAL_POLISH_PLAN.md`, F2.11).
 
 ---
 

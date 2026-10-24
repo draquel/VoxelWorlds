@@ -287,46 +287,6 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 		LUTWidth, LUTHeight, MaterialConfigs.Num());
 }
 
-UTexture2D* UVoxelMaterialAtlas::CreatePlaceholderTexture(FColor Color, int32 Size) const
-{
-	UTexture2D* Texture = UTexture2D::CreateTransient(Size, Size, PF_B8G8R8A8);
-	if (!Texture)
-	{
-		return nullptr;
-	}
-
-	// Configure texture
-	Texture->SRGB = true;
-	Texture->Filter = TF_Default;
-	Texture->CompressionSettings = TC_Default;
-#if WITH_EDITORONLY_DATA
-	// Generate a mip chain: a placeholder slice with no mips would drag the whole array
-	// down to a single mip (UpdateSourceFromSourceTextures takes the min mip count).
-	Texture->MipGenSettings = TMGS_FromTextureGroup;
-#endif
-
-	// Fill with solid color
-	FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
-	void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-	if (TextureData)
-	{
-		uint8* PixelData = static_cast<uint8*>(TextureData);
-		const int32 NumPixels = Size * Size;
-		for (int32 i = 0; i < NumPixels; ++i)
-		{
-			// BGRA format
-			PixelData[i * 4 + 0] = Color.B;
-			PixelData[i * 4 + 1] = Color.G;
-			PixelData[i * 4 + 2] = Color.R;
-			PixelData[i * 4 + 3] = Color.A;
-		}
-		Mip.BulkData.Unlock();
-		Texture->UpdateResource();
-	}
-
-	return Texture;
-}
-
 bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	TObjectPtr<UTexture2DArray>& OutArray,
 	TFunctionRef<TSoftObjectPtr<UTexture2D>(const FVoxelMaterialTextureConfig&)> TextureGetter,
@@ -347,17 +307,10 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	}
 	const int32 NumSlices = MaxMaterialID + 1;
 
-	// Collect source textures (load soft pointers)
+	// Collect source textures (load soft pointers); a slot without one stays null
 	TArray<UTexture2D*> SourceTextures;
-	SourceTextures.SetNum(NumSlices);
+	SourceTextures.SetNumZeroed(NumSlices);
 
-	// Initialize all to nullptr
-	for (int32 i = 0; i < NumSlices; ++i)
-	{
-		SourceTextures[i] = nullptr;
-	}
-
-	// Load textures from configs
 	int32 LoadedCount = 0;
 	for (const FVoxelMaterialTextureConfig& Config : MaterialConfigs)
 	{
@@ -385,79 +338,10 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 		return false;
 	}
 
-	// Determine texture size and format from first valid loaded texture
-	int32 ActualTextureSize = TextureArraySize;
-	EPixelFormat SourceFormat = PF_B8G8R8A8;
-	UTexture2D* FirstValidTexture = nullptr;
-	for (int32 i = 0; i < NumSlices; ++i)
-	{
-		if (SourceTextures[i] && SourceTextures[i]->GetSizeX() > 0)
-		{
-			FirstValidTexture = SourceTextures[i];
-			ActualTextureSize = SourceTextures[i]->GetSizeX();
-			if (SourceTextures[i]->GetPlatformData() && SourceTextures[i]->GetPlatformData()->Mips.Num() > 0)
-			{
-				SourceFormat = SourceTextures[i]->GetPlatformData()->PixelFormat;
-			}
-			UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Source textures are %dx%d, format %d (from slot %d)"),
-				*ArrayName, ActualTextureSize, ActualTextureSize, (int32)SourceFormat, i);
-			break;
-		}
-	}
-
-	// For placeholder, we'll use the first valid texture itself as a template
-	// This avoids format mismatch issues with compressed textures
-	UTexture2D* Placeholder = FirstValidTexture ? FirstValidTexture : CreatePlaceholderTexture(PlaceholderColor, ActualTextureSize);
-	if (!Placeholder)
-	{
-		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): Failed to create placeholder texture"), *ArrayName);
-		return false;
-	}
-
-	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Using %s as placeholder: %dx%d"),
-		*ArrayName, FirstValidTexture ? TEXT("first valid texture") : TEXT("generated placeholder"),
-		Placeholder->GetSizeX(), Placeholder->GetSizeY());
-
-	// Fill missing slots with placeholder
-	for (int32 i = 0; i < NumSlices; ++i)
-	{
-		if (!SourceTextures[i])
-		{
-			SourceTextures[i] = Placeholder;
-		}
-	}
-
-	// Verify all textures have valid dimensions
-	int32 FirstValidWidth = 0, FirstValidHeight = 0;
-	for (int32 i = 0; i < NumSlices; ++i)
-	{
-		if (SourceTextures[i])
-		{
-			int32 W = SourceTextures[i]->GetSizeX();
-			int32 H = SourceTextures[i]->GetSizeY();
-			if (W > 0 && H > 0)
-			{
-				if (FirstValidWidth == 0)
-				{
-					FirstValidWidth = W;
-					FirstValidHeight = H;
-				}
-				else if (W != FirstValidWidth || H != FirstValidHeight)
-				{
-					UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): Texture[%d] size mismatch: %dx%d vs expected %dx%d"),
-						*ArrayName, i, W, H, FirstValidWidth, FirstValidHeight);
-				}
-			}
-			else
-			{
-				UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): Texture[%d] has invalid size: %dx%d"),
-					*ArrayName, i, W, H);
-			}
-		}
-	}
-
-	// Create the Texture2DArray
-	OutArray = NewObject<UTexture2DArray>(GetTransientPackage(), *FString::Printf(TEXT("VoxelMaterial%sArray"), *ArrayName));
+	// A unique name: a rebuild in the same session must not construct the new array in place of the one the
+	// terrain's materials still draw with (NewObject with an existing name reuses that object).
+	OutArray = NewObject<UTexture2DArray>(GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(),
+		UTexture2DArray::StaticClass(), FName(*FString::Printf(TEXT("VoxelMaterial%sArray"), *ArrayName))));
 	if (!OutArray)
 	{
 		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): Failed to create UTexture2DArray"), *ArrayName);
@@ -470,110 +354,121 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	// anisotropy and uses point mip selection, which produces crawling minification
 	// shimmer on triplanar terrain viewed at grazing angles.
 	OutArray->Filter = TF_Default;
-	OutArray->SRGB = (ArrayName != TEXT("Normal")); // Normal maps should not be sRGB
 	OutArray->LODGroup = TEXTUREGROUP_World;
-	// NOTE: MipGenSettings is (re)set AFTER UpdateSourceFromSourceTextures() below - that call
-	// force-resets it to TMGS_NoMipmaps, so setting it here would be silently overwritten.
 
 #if WITH_EDITOR
-	// In editor, we can use the source textures directly
-	OutArray->SourceTextures.Empty();
+	// The array's source is built here rather than by UTexture2DArray::UpdateSourceFromSourceTextures(), which sizes
+	// the array to its largest slice (4096 on the demo atlas, whatever TextureArraySize says) and converts every slice
+	// to RGBA32F when their gamma spaces or formats differ: on the demo atlas 5.9 GB of source each for the albedo and
+	// normal arrays, held for the editor session, 24 s of its first PIE and a texture build estimated at tens of GB,
+	// then 800 MB of GPU memory. Every slice is stored at
+	// TextureArraySize in BGRA8, converted from its own texture's gamma into the array's (sRGB for albedo, linear for
+	// normals and roughness), so the shader samples the same values; each distinct texture is decoded and resized once
+	// (the demo atlas repeats one texture in 14 of its 22 slots).
+	const double StartSeconds = FPlatformTime::Seconds();
+	const int32 SliceSize = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(TextureArraySize, 64, 4096))));
+	const bool bNormalArray = (ArrayName == TEXT("Normal"));
+	const bool bSRGB = (ArrayName == TEXT("Albedo"));
+	const EGammaSpace ArrayGamma = bSRGB ? EGammaSpace::sRGB : EGammaSpace::Linear;
+	const int64 SliceBytes = int64(SliceSize) * SliceSize * sizeof(FColor);
 
-	// Check format compatibility of all textures
-	EPixelFormat ExpectedFormat = PF_Unknown;
-	bool bFormatMismatch = false;
+	TArray64<uint8> ArrayData;
+	ArrayData.SetNumUninitialized(SliceBytes * NumSlices);
+	TArray<bool> SliceFilled;
+	SliceFilled.SetNumZeroed(NumSlices);
 
-	for (int32 i = 0; i < SourceTextures.Num(); ++i)
+	// Terrain textures tile: the resize filters across the wrapped edges
+	const FImageCore::EResizeImageFilter ResizeFilter = FImageCore::EResizeImageFilter::Default
+		| FImageCore::EResizeImageFilter::Flag_WrapX | FImageCore::EResizeImageFilter::Flag_WrapY;
+
+	TMap<UTexture2D*, int32> BuiltSlice; // texture -> the slice it was built into (INDEX_NONE: unreadable)
+	int32 FirstFilledSlice = INDEX_NONE;
+	for (int32 SliceIndex = 0; SliceIndex < NumSlices; ++SliceIndex)
 	{
-		UTexture2D* Texture = SourceTextures[i];
-		if (Texture)
+		UTexture2D* Texture = SourceTextures[SliceIndex];
+		if (!Texture)
 		{
-			OutArray->SourceTextures.Add(Texture);
-
-			// Get texture format for logging
-			EPixelFormat TexFormat = PF_Unknown;
-			if (Texture->GetPlatformData() && Texture->GetPlatformData()->Mips.Num() > 0)
-			{
-				TexFormat = Texture->GetPlatformData()->PixelFormat;
-			}
-
-			if (ExpectedFormat == PF_Unknown)
-			{
-				ExpectedFormat = TexFormat;
-			}
-			else if (TexFormat != ExpectedFormat)
-			{
-				bFormatMismatch = true;
-				UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("  Slice[%d]: %s (%dx%d) compressed format %d differs from slice 0 (%d)"),
-					i, *Texture->GetName(), Texture->GetSizeX(), Texture->GetSizeY(), (int32)TexFormat, (int32)ExpectedFormat);
-			}
-
-			UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("  Slice[%d]: %s (%dx%d, format=%d, sRGB=%s)"),
-				i, *Texture->GetName(), Texture->GetSizeX(), Texture->GetSizeY(),
-				(int32)TexFormat, Texture->SRGB ? TEXT("Yes") : TEXT("No"));
+			continue;
 		}
-		else
+		uint8* SliceData = ArrayData.GetData() + SliceBytes * SliceIndex;
+
+		if (const int32* Built = BuiltSlice.Find(Texture))
 		{
-			UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("  Slice[%d]: NULL texture!"), i);
-			OutArray->SourceTextures.Add(Placeholder); // Ensure we add something
+			if (*Built != INDEX_NONE)
+			{
+				FMemory::Memcpy(SliceData, ArrayData.GetData() + SliceBytes * *Built, SliceBytes);
+				SliceFilled[SliceIndex] = true;
+			}
+			continue;
+		}
+
+		FImage SourceImage;
+		if (!Texture->Source.IsValid() || !Texture->Source.GetMipImage(SourceImage, 0))
+		{
+			UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): %s has no readable source data; its slices take the placeholder"),
+				*ArrayName, *Texture->GetName());
+			BuiltSlice.Add(Texture, INDEX_NONE);
+			continue;
+		}
+
+		FImageCore::ResizeImage(SourceImage, FImageView(SliceData, SliceSize, SliceSize, 1, ERawImageFormat::BGRA8, ArrayGamma), ResizeFilter);
+		BuiltSlice.Add(Texture, SliceIndex);
+		SliceFilled[SliceIndex] = true;
+		if (FirstFilledSlice == INDEX_NONE)
+		{
+			FirstFilledSlice = SliceIndex;
+		}
+
+		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("  Slice[%d]: %s source %dx%d %s %s -> %dx%d"),
+			SliceIndex, *Texture->GetName(), SourceImage.SizeX, SourceImage.SizeY,
+			ERawImageFormat::GetName(SourceImage.Format), SourceImage.GammaSpace == EGammaSpace::Linear ? TEXT("linear") : TEXT("sRGB"),
+			SliceSize, SliceSize);
+	}
+
+	// Slots without a texture take the first built slice, as before; with no readable texture at all, PlaceholderColor
+	if (FirstFilledSlice == INDEX_NONE)
+	{
+		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): no texture had readable source data; every slice is the placeholder colour"), *ArrayName);
+		FColor* Pixels = reinterpret_cast<FColor*>(ArrayData.GetData());
+		for (int64 PixelIndex = 0; PixelIndex < int64(SliceSize) * SliceSize; ++PixelIndex)
+		{
+			Pixels[PixelIndex] = PlaceholderColor;
+		}
+		SliceFilled[0] = true;
+		FirstFilledSlice = 0;
+	}
+	int32 PlaceholderCount = 0;
+	for (int32 SliceIndex = 0; SliceIndex < NumSlices; ++SliceIndex)
+	{
+		if (!SliceFilled[SliceIndex])
+		{
+			FMemory::Memcpy(ArrayData.GetData() + SliceBytes * SliceIndex, ArrayData.GetData() + SliceBytes * FirstFilledSlice, SliceBytes);
+			++PlaceholderCount;
 		}
 	}
 
-	if (bFormatMismatch)
-	{
-		// Informational only: UpdateSourceFromSourceTextures() builds the array from the slices' SOURCE
-		// pixels (converted to a common source format) and the array is compressed with its own settings
-		// below, so differing per-texture platform formats do not affect the result.
-		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): slices use different compressed formats; the array re-encodes them from source."), *ArrayName);
-	}
-
-	// Update the array resource from source textures
-	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Calling UpdateSourceFromSourceTextures with %d textures..."), *ArrayName, OutArray->SourceTextures.Num());
-	OutArray->UpdateSourceFromSourceTextures();
-
-	// CRITICAL: UpdateSourceFromSourceTextures() forces MipGenSettings to TMGS_NoMipmaps.
-	// Re-enable mip generation AFTER it (setting it earlier is silently overwritten) so the
-	// built array gets a full mip chain. Without this the 2048px slices are single-mip and
-	// minify into severe crawling shimmer on distant terrain, regardless of the filter.
-#if WITH_EDITORONLY_DATA
+	// Settings pinned per array, not taken from whichever texture lands in slice 0: BC1/BC3 colour, BC5 normals
+	// (in the normal-map texture group), BC1/BC3 linear roughness
+	OutArray->Source.Init(SliceSize, SliceSize, NumSlices, 1, TSF_BGRA8, ArrayData.GetData());
+	OutArray->SRGB = bSRGB;
+	OutArray->CompressionSettings = bNormalArray ? TC_Normalmap : (bSRGB ? TC_Default : TC_Masks);
+	OutArray->LODGroup = bNormalArray ? TEXTUREGROUP_WorldNormalMap : TEXTUREGROUP_World;
+	// A full mip chain (TMGS_FromTextureGroup = the World group's): single-mip slices minify into crawling shimmer
 	OutArray->MipGenSettings = TMGS_FromTextureGroup;
+	OutArray->PowerOfTwoMode = ETexturePowerOfTwoSetting::None;
+	OutArray->NeverStream = true;
+	OutArray->ValidateSettingsAfterImportOrEdit();
+	OutArray->SetLightingGuid();
+
+	// One build of the platform data (compressed, mipped), asynchronous in the editor and cached in the DDC by the
+	// source's hash: the same atlas builds once and is fetched in later sessions.
+	OutArray->UpdateResource();
+
+	UE_LOG(LogVoxelMaterialAtlas, Log,
+		TEXT("BuildSingleTextureArray(%s): Built %d slices at %dx%d BGRA8 %s (%d distinct textures, %d from configs, %d placeholders) in %.2f s, compression %d, MipGen %d"),
+		*ArrayName, NumSlices, SliceSize, SliceSize, bSRGB ? TEXT("sRGB") : TEXT("linear"), BuiltSlice.Num(), LoadedCount, PlaceholderCount,
+		FPlatformTime::Seconds() - StartSeconds, static_cast<int32>(OutArray->CompressionSettings.GetValue()), static_cast<int32>(OutArray->MipGenSettings.GetValue()));
 #endif
-	// UpdateSourceFromSourceTextures() also copies slice 0's CompressionSettings onto the array. Pin the
-	// normal array to Normalmap (BC5) so it never inherits a colour setting from whichever texture happens
-	// to be first (the demo atlas's first normal slice is a TC_Default Fab texture -> DXT1 normals).
-	if (ArrayName == TEXT("Normal"))
-	{
-		OutArray->CompressionSettings = TC_Normalmap;
-		OutArray->SRGB = false;
-	}
-
-	// Report the array's SOURCE dimensions. GetSizeX() reads platform data that is rebuilt
-	// asynchronously by UpdateResource(), so right after the call it under-reports (e.g. 32).
-	int32 ResultSizeX = static_cast<int32>(OutArray->Source.GetSizeX());
-	int32 ResultSizeY = static_cast<int32>(OutArray->Source.GetSizeY());
-
-	if (ResultSizeX == 0 || ResultSizeY == 0)
-	{
-		UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("BuildSingleTextureArray(%s): UpdateSourceFromSourceTextures FAILED - result is %dx%d! Check texture formats and compression settings."),
-			*ArrayName, ResultSizeX, ResultSizeY);
-	}
-	else
-	{
-		// Build the platform data - this generates the full mip chain per MipGenSettings above.
-		OutArray->UpdateResource();
-
-		// Report reliable, editor-side facts. The platform mip count is built asynchronously
-		// and is not readable synchronously here; verify the final chain via the built asset if
-		// needed. MipGen must read 0 (TMGS_FromTextureGroup); 13 (TMGS_NoMipmaps) => shimmer.
-		UE_LOG(LogVoxelMaterialAtlas, Log,
-			TEXT("BuildSingleTextureArray(%s): SUCCESS - source %dx%dx%d, MipGen=%d (0=FromGroup good, 13=NoMipmaps bad), Filter=%d (3=Default/Aniso)"),
-			*ArrayName, ResultSizeX, ResultSizeY, OutArray->SourceTextures.Num(),
-			static_cast<int32>(OutArray->MipGenSettings), static_cast<int32>(OutArray->Filter));
-	}
-#endif
-
-	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("BuildSingleTextureArray(%s): Created array with %d slices (%d from configs, %d placeholders)"),
-		*ArrayName, NumSlices, LoadedCount, NumSlices - LoadedCount);
 
 	return true;
 }
