@@ -1491,7 +1491,7 @@ Three findings from §13.11 get IDs here:
 | G46 | The volumetric cloud layer keeps the engine's Earth altitudes (5 km floor, 10 km thick) when the atmosphere is scaled to the planet: from orbit over the 50 km test planet a ring of clouds floats well outside its 9.7 km of air, and on the small planet the layer is 60 times its relief (found in P6.5's orbit survey, §20.6) | Fixed in P6.5 (§20.6): `ADayNightController::ApplyPlanetSky` scales every cloud layer with the atmosphere (`ComputePlanetCloudLayer`: the thickness by K, the floor by K but at least the terrain's top); `WorldClock.Planet.Sky`, `.SkyScale` | WM-BP10 |
 | G47 | System edits (dungeon stamps, region edits, edit loads) broadcast `OnChunkEdited` with no centre (the zero vector, radius 0), and the surface navigation invalidated a box around it: on a planet the zero vector is the centre, and the box's corners projected into every cached region's tangent frame spanned up to 1.7 R a side, so each broadcast walked billions of tile keys on the 1,000 km planet: a dungeon stamp near the pawn held the game thread for minutes (on the small planet every edit cleared the whole region cache; on a heightmap world the cells around the origin, not the edit's) (found in P6.5's L survey, §20.6) | Fixed in P6.5 (§20.6): an edit with no centre invalidates the edited chunk's bounds; a box's corners deep inside the planet project into no frame; `InvalidateTileCells` visits the cached tiles when the rectangle holds more than the cache; checks in `Navigation.Planet.Path` / `.PathAtScale` | WM-BP11 |
 | G48 | A pawn held with movement disabled (`MOVE_None`: the orbit camera's hold, `vox.Freeze`) in water was switched back to swimming by the movement component's water check every tick; under the orbit camera the window unloads, the water check then failed and it fell through the unloaded seabed (60,000 uu under it in 20 s on M's pole) (found in P6.5's M survey, §20.6) | Fixed in P6.5 (§20.6): `UVCMovementComponent` makes no swimming transition from `MOVE_None`; held 30 s under the orbit camera at M's pole, no fall | WM-BP10 |
-| G49 | A fast descent that stops above the cut-over resumes the window for a moment: the descent prefetch's lead puts the streaming viewer under the resume altitude while the camera is still coming down, and when the camera stops the lead decays and the window suspends again. On L, `vox.FlyTo` from 10⁷ to 60,000 uu (about 20,000 uu/s at its end) resumed for 0.7 s: 56 chunks loaded and about 1,100 queued generations dropped (found in P6.5's L survey, §20.6) | Open (low): the price of the prefetch's speculation, one resume and suspension per stop; a dwell before suspending again, or a lead bounded by how fast the camera can stop, would trade it against suspension latency | WM-BP10 |
+| G49 | A fast descent that stops above the cut-over resumes the window for a moment: the descent prefetch's lead puts the streaming viewer under the resume altitude while the camera is still coming down, and when the camera stops the lead decays and the window suspends again. On L, `vox.FlyTo` from 10⁷ to 60,000 uu (about 20,000 uu/s at its end) resumed for 0.7 s: 56 chunks loaded and about 1,100 queued generations dropped (found in P6.5's L survey, §20.6) | Fixed in §20.28: a suspended window resumes only with the camera under the cut-over (`voxel.World.CutoverResumeGuard`; the lead brings a resume forward to the cut-over at most), so a stop above it never resumes the window and one under it keeps it; descents faster than about 0.05 C a second at the cut-over resume there, at most about 2.5 s later than before | WM-BP10 |
 | G50 | The world map zoomed out on a big planet held the game thread for about 1 min 45 s: its marker query (`UPOIMapMarkerSubsystem::GetPlanetMarkersNear`, through `UVCMapMarkerRegistry::GatherMarkersNear`) asked for the whole globe, and P6.1's bound (G37: the cap of the shell within the range) is the whole planet for such a range, so placement generated all of L's 36 million cells; the map refreshes its markers every half second (found in P6.5's L systems check, §20.6) | Fixed in P6.5 (§20.6): the far markers come from at most `PlanetMarkerMaxCells` (20,000) cells around the query's direction (the small planet whole, a fifth of M's 90,774), and the last cap's POIs are reused; `VoxelWorlds.POI.Planet.MapMarkersAtScale` | WM-BP11 |
 | G51 | The world map open on the globe after an `ExploreAll` of a big planet ran at 6.5 FPS (150 ms frames): every tile image that arrived redrew the whole globe (up to 30 times a second), though zoomed out to the albedo the tile images do not show, and the `ExploreAll` had queued 65,536 of them (found in P6.5, M with the cap raised to its 16 million tiles, §20.6) | Fixed in P6.5 (§20.6): at the albedo's zoom only the albedo's arrival redraws at once, tile arrivals at most every 2 s (`UVCWorldMapWidget`); 60 FPS with the map open | WM-BP11 |
 | G52 | A descending viewer spends much of the window's generation on air: the window's near band (the viewer's altitude ± 2 chunks within 16,600 uu, P6.3's rule for flyers near the ground and caves) follows the streaming viewer down, so from 100 km up it loads a new layer of empty chunks around it every second while the ground disk streams back at 60-80 chunks a second; a 5,000 uu/s descent onto M from 200,000 (the cut-over at three view distances, resumed at about 100,000) touched down with 47-130 chunks queued, catch-up 1.1-3.6 s against 0.36 with the window kept (found in P6.5's re-run benches, §20.6) | Fixed (§20.7): the near band reaches no higher than its ceiling, the top of the surface slab over the near disk (or the sea's surface) + 1.5 chunks, and a viewer above it takes none (`FDistanceBandLODStrategy::GetPlanetNearBandCeiling`); the descent's catch-up 0.17-0.22 s on M and L against 1.70-2.83 with the old band and 0.17-0.31 with the window kept; `LOD.Planet.NearBand`, `LOD.Planet.SurfaceSlab` | WM-BP10 |
@@ -6986,7 +6986,7 @@ main checkout, which holds the user's own edits to the demo's configuration.
 | G46 | The volumetric cloud layer kept the engine's Earth altitudes (5 km floor, 10 km thick) under a scaled atmosphere: from orbit over M a ring of clouds well outside its 9.7 km of air | Fixed: `ComputePlanetCloudLayer` (thickness by K, floor at least the terrain's top) |
 | G47 | Centreless system edits invalidated a navigation box at the zero vector, a planet's centre: projected into every cached region's frame it spanned the planet, and a dungeon stamp on L held the game thread for minutes | Fixed: the edited chunk's bounds; core corners project nowhere; the tile loop bounded by the cache |
 | G48 | A held pawn in water (`MOVE_None`) was switched back to swimming every tick, and under the orbit camera it sank through the unloaded seabed | Fixed: no swimming transition from `MOVE_None` |
-| G49 | A fast descent stopping above the cut-over resumes the window for a moment (the prefetch's lead decays): on L 0.7 s, 56-86 chunks loaded and about 1,100 queued generations dropped | Open (low): the price of the speculation, once per stop |
+| G49 | A fast descent stopping above the cut-over resumes the window for a moment (the prefetch's lead decays): on L 0.7 s, 56-86 chunks loaded and about 1,100 queued generations dropped | Fixed in §20.28: the resume needs the camera under the cut-over |
 | G50 | The world map zoomed out on L held the game thread about 1 min 45 s: its marker query generated every POI cell of the planet | Fixed: at most `PlanetMarkerMaxCells` cells around the view's centre, the last cap reused |
 | G51 | The globe open after an `ExploreAll` of M ran at 6.5 FPS: each of the 65,536 queued tile images redrew it, though at the albedo's zoom they do not show | Fixed: tile arrivals redraw the albedo globe at most every 2 s; 60 FPS |
 | G52 | A descending viewer spends much of the window's generation on air: the near band (the viewer's altitude ± 2 chunks) follows it down, and a 5,000 uu/s descent onto M or L lands with up to 130 chunks queued (catch-up up to 3.7 s, against 0.2-0.4 with the window kept) | Fixed in §20.7: the near band reaches no higher than the top of the surface slab around the viewer |
@@ -7006,10 +7006,9 @@ Still open from Phase 6:
 - G39: biome blend bands.
 - G43: noise steps at the face edges.
 - G45: stepped far-field materials.
-- G49: the prefetch's speculation.
 
 G52 (the near band during descents) is fixed in §20.7, G44 (the LOD 2 ring's lighting) in §20.8, G42 (M's and L's frame
-and manager P95) in §20.10.
+and manager P95) in §20.10, G49 (the prefetch's speculation) in §20.28.
 
 Deferred since before Phase 6: G14, G16, G19, G25 and G28 (G32 and G33 fixed since, §19.10 and §19.11; G34 dismissed, §19.12, and the demo caves retuned, §19.15).
 
@@ -9246,6 +9245,190 @@ snaps to the nearest of the two (the 74 jumps above). A faint dither shimmer is 
 while the camera moves; none was seen in the stills.
 
 G45 is fixed.
+
+### 20.28 G49: a suspended window resumes only with the camera under the cut-over (2026-10-24)
+
+Bases: VoxelWorlds `303a547`, UE5_PluginDev `02a0034` (G14 and G45 merged), with main's G63 (§20.29) merged in before the
+in-editor suites. Branches `fix/g49-descent-resume` (VoxelWorlds) and `claude/g49-descent-resume-7a4125` (UE5_PluginDev).
+Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`; tests headless and in a worktree editor (Claudius on
+8099), background throttling off. G63's session ran its tests and benches on the machine during part of the benches
+below; each comparison is interleaved in one session.
+
+**The finding** (§20.6): a fast descent that stops above the voxel cut-over resumes the window for a moment. In P6.5's L
+survey (cut-over 40,000): 0.7 s, 56-86 chunks loaded and about 1,100 queued generations dropped.
+
+**Traced.**
+- *The rule.* The cut-over is the streaming viewer's: the window suspends with the viewer over the cut-over C and resumes
+  with it under 0.85 C (`FDistanceBandLODStrategy::ComputeCutoverState`).
+- *The lead.* Under a descending camera the viewer leads it by 3 s of the smoothed descent, at most half the camera's
+  altitude (`UVoxelChunkManager::ComputeDescentLead`). A fast descent reaches the half-altitude cap, so the window resumes
+  with the camera at up to 1.7 C: 204,000 over the surface at the default cut-over (120,000).
+- *The stop.* `vox.FlyTo` falls by the same factor every second and stops dead at its target: the flight hold moves to
+  the level at once. The smoothed speed then decays (`FInterpTo`, 4 a second). The lead falls under the camera's height
+  over C, or to 0 under `voxel.Stream.DescentMinSpeed`, and the viewer rises over C: the window suspends again.
+- *Which stops.* Any stop between C and about 1.7 C after a descent whose lead passed the hysteresis band (C − 0.85 C).
+  P6.5's survey stopped at 60,000 with the cut-over at one view distance (its default then). Its re-run with three view
+  distances stopped at 60,000, under the cut-over, so it did not show there. At the default it shows for a stop between
+  120,000 and 204,000.
+- *The cost of a stop.* The resumed window queues its whole ground disk (about 1,000 generations) and generates and
+  meshes the nearest chunks. The far field's band patches come back. Then the suspension unloads the chunks and evicts
+  the queue.
+
+**Instrument** (kept). The chunk manager records each cut-over transition (`FVoxelCutoverTransition`,
+`UVoxelChunkManager::GetCutoverTransitions`):
+- the camera, the streaming viewer and the lead;
+- for a suspension: the seconds since the last resume, the chunks it held, the queued generations it evicted
+  (`ReprioritizeQueues` now returns them), and the chunks generated and meshed since the resume.
+
+Each transition is logged (`Voxel window resumed / suspended ...`), and the bench reports the run's (`cutoverTransitions`).
+
+**Reproduced** with `vox.FlyTo` at 45°N 20°E, one PIE per planet: `vox.FlyTo 10000000 20`, then `vox.FlyTo <stop> 20`,
+held 8 s. Three descents per rule and setting, the rules alternating (`voxel.World.CutoverResumeGuard`: 0 = the rule
+before, 1 = the fix below):
+
+| Planet | Cut-over, stop | Rule | Resumed, camera over the surface | Suspended again after | Chunks held | Generated / meshed | Queued generations dropped |
+|---|---|---|---|---|---|---|---|
+| L | 120,000 (default), 150,000 | before | 203,434-203,549 | 1.75-1.79 s | 80-100 | 80-100 / 84-106 | 971-991 |
+|  |  | guard | never (held with the camera at 203,229-203,760) | - | 0 | 0 | 0 |
+| L | 40,000 (P6.5's survey), 60,000 | before | 67,562-67,943 | 0.67-0.72 s | 20-44 | 24-44 / 23-48 | 1,027-1,051 |
+|  |  | guard | never (held at 67,821-67,874) | - | 0 | 0 | 0 |
+| M | 120,000, 150,000 | before | 202,908-203,580 | 1.74-1.78 s | 88-92 | 88-92 / 92-94 | 958-962 |
+|  |  | guard | never (held at 203,418-203,888) | - | 0 | 0 | 0 |
+| M | 40,000, 60,000 | before | 67,578-67,896 | 0.69-0.71 s | 28-32 | 28-36 / 31-35 | 1,018-1,022 |
+|  |  | guard | never (held at 67,680-67,916) | - | 0 | 0 | 0 |
+
+At the default cut-over the resume comes from twice the resume altitude, so the window streams for 1.7 s before the
+stop suspends it again.
+
+**Options weighed:**
+
+- *A dwell before suspending again* (after a resume, the window stays at least D seconds). At a stop above the cut-over it
+  keeps streaming for D seconds and then unloads: more work for nothing, not less. It saves only a stop shorter than D
+  followed by another descent, and it makes every suspension after a resume D seconds late.
+- *A lead bounded by how fast the camera can stop.* `vox.FlyTo` stops dead and debug flight brakes within a fraction of a
+  second, so the distance such a camera must still cover is about nothing. That bound is no lead.
+- *Chosen: the resume needs the camera under the cut-over.* The lead may take the viewer under the resume altitude early,
+  but the window resumes only once the camera itself is under the cut-over.
+  - Why that holds: a window suspends only with the viewer over the cut-over, and the viewer is never above the camera.
+    So a window resumed this way stays until the camera climbs back over the cut-over, and a camera that stops above it
+    never resumed it.
+  - After the resume the lead runs the window's LOD ahead of the camera as before.
+  - The cost: the resume is unchanged where the lead at the cut-over is inside the band (0.15 C: 18,000 at the default,
+    a descent slower than 6,000 uu/s there: P6.5's 5,000 uu/s bench, a fall at the terminal 4,000 uu/s). Past the band it comes
+    when the camera reaches the cut-over, not up to 1.7 C. At a constant speed v the resume is min(3v − 0.15 C, 0.7 C) / v
+    later: at most about 2.5 s (at 0.28 C a second). For example:
+    - a constant 20,000 uu/s landing gets 6.0 s instead of 8.1 s before touchdown (measured below);
+    - a `vox.FlyTo` landing from 10⁷ (x0.59 a second) gets 11.5 s instead of 12.5 s.
+
+**The change** (VoxelWorlds):
+
+- `FLODQueryContext::ViewerLead` (VoxelCore): how far the streaming viewer lies under the camera. The chunk manager sets
+  it with the lead (`ApplyDescentPrefetch`, `BuildStreamingContext`); 0 elsewhere.
+- `FDistanceBandLODStrategy::ComputeCutoverState(..., CameraAltitudeOverSurface)`:
+  - a suspended window stays suspended while the viewer is over the resume altitude or the camera over the cut-over;
+  - an active one suspends with the viewer over the cut-over, as before;
+  - with the camera at the viewer it is the rule before.
+- `Update` takes the camera's altitude as the viewer's plus `ViewerLead` (the same direction, so the same surface). It
+  logs a held resume once (`Planet voxel window resume held (G49): ...`, `IsCutoverResumeHeld`), and the camera joins the
+  transition log and `GetDebugInfo`.
+- `voxel.World.CutoverResumeGuard` (1; 0 = the streaming viewer alone decides, the rule before).
+- Heightmap worlds have no cut-over and are unchanged.
+
+**Tests** (headless and in the editor):
+
+| Test | Checks | Result |
+|---|---|---|
+| `VoxelWorlds.LOD.Planet.CutoverResumeGuard` (new) | The rule: an active window suspends with the viewer over C whatever the camera; a suspended one resumes with the viewer under 0.85 C and the camera under C, and stays suspended with the camera over C; with the camera at the viewer the rule equals the one without a camera at every altitude from 0 to 100,000 in both states. A strategy on the small planet and the 1,000 km one at the four sites (C the view distance): suspended at 1.5 C; the camera at 1.4 C with the viewer led to 0.7 C stays suspended with no candidate, and with the guard off the same context resumes it; the camera just under C with the viewer at 0.5 C, and the viewer at 0.8 C with no lead, resume it | Pass: the held contexts 0 candidates (the strategy reads the camera at 1.4 C, 56,000 over the ground), the guard off 940-1,156 a site |
+| `VoxelWorlds.Streaming.Planet.CutoverDescentStop` (new) | A chunk manager on an R 20,000 planet (C 6,000), from 3 C at 18,000 uu/s: a stop at 1.4 C held 3 s; a stop at 0.92 C held 3 s, then a settle; with C 40,000 (`voxel.World.VoxelCutover`) a descent at 1,800 uu/s (lead 5,400, inside the band) and one at 6,000 uu/s (lead 18,000) to their resumes; each under both rules | Stop at 1.4 C: before, resumed with the camera at 9,900 and suspended again (26 chunks held and generated, 118 queued generations dropped); guard, no transition and no chunk. Stop at 0.92 C: both resumed (before at 9,900, guard at 5,700, the first tick under C) and stayed, then settled with the ground disk (97-104 chunks). C 40,000: 1,800 uu/s resumed at 39,370 under both; 6,000 uu/s at 51,900 before, 40,000 with the guard |
+| `VoxelWorlds.Streaming.Planet.CutoverDescent` (expectation tightened) | As before, and under the guard the descent's resume comes with the camera under the cut-over | Pass: resumed with the camera at 5,700 (lead 2,500; the rule before resumes this descent at 9,900, as `CutoverDescentStop` measures) |
+
+**A/B benches.** One build, the two rules by the cvar, P6.5's setup:
+- PIE on `PlanetTest` with `voxel.ConfigOverride`, a fresh world per run with no save;
+- `vox.TPLatLon 45 20`, its settle and 25 s more, local noon pinned, input blocked;
+- a throwaway run first, then three repetitions of every route under both rules, interleaved, the order alternating
+  between repetitions;
+- tags `g49_{M,L}_{new,old}_{stop,land,fast,gc,climb}_r{1,2,3}`; reports in the worktree's `Saved/VoxelBench`.
+
+The routes:
+- *stop*: G49's case, `20000 50000 descend=45:20:200000 warmup=30 catchup=30`, 20,000 uu/s from 200,000 to a stop at
+  150,000;
+- *land*: P6.5's landing, `5000 199700 descend=45:20:200000`;
+- *fast*: a landing at 20,000 uu/s, `20000 199700 descend=45:20:200000`, where the lead (60,000) passes the band;
+- *gc*: the great circle, `1500 40000 gc=45:20:90 follow=300`;
+- *climb* (L only): `3000 200000 climb=45:20:200`, through the cut-over.
+
+All with `warmup=30 catchup=90` unless given.
+
+*The stop above the cut-over* (per run: the resume, then the suspension that followed it):
+
+| Planet | Rule | Resumes | Camera at the resume | Suspended again after | Chunks held / generated / meshed | Queued generations dropped | Far-field patches built | Manager P95 ms |
+|---|---|---|---|---|---|---|---|---|
+| M | before | 3 of 3 runs | 161,397-161,962 | 0.74-0.77 s | 13-44 / 16-48 / 12-45 | 1,007-1,038 | 24-210 | 9.6 |
+|  | guard | 0 | - | - | 0 | 0 | 24-52 | 7.0 |
+| L | before | 3 of 3 | 161,695-161,860 | 0.75-0.77 s | 36-56 / 40-56 / 38-58 | 1,016-1,036 | 148-232 | 7.1 |
+|  | guard | 0 | - | - | 0 | 0 | 34 | 4.2 |
+
+The far-field builds count the whole run, the jump to 200,000 included. Frame P95 (46-63 ms under both rules) is the
+window unloading its ground disk at the run's start, not compared.
+
+*Landing, the great circle and the climb* (means of three runs, catch-up per run):
+
+| Planet, route | Rule | Camera at the resume | Peak loaded | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Peak voxel systems MB |
+|---|---|---|---|---|---|---|---|
+| M, land (5,000 uu/s) | guard | 116,927-116,999 | 1,101 | 18.9 / 37.3 | 6.4 | 1.78 / 0.71 / 0.72 | 457 |
+|  | before | 116,926-116,948 | 1,102 | 19.5 / 36.0 | 7.0 | 4.20 / 0.58 / 0.66 | 375 |
+| M, fast (20,000 uu/s) | guard | 119,612-119,848 | 1,103 | 24.9 / 51.3 | 11.2 | 23.52 / 11.42 / 10.61 | 522 |
+|  | before | 161,157-161,580 | 1,102 | 25.9 / 54.5 | 13.5 | 16.61 / 12.45 / 12.40 | 508 |
+| M, great circle | guard | - | 1,230 | 21.3 / 35.9 | 7.6 | 0.21 / 0.17 / 0.18 | 488 |
+|  | before | - | 1,229 | 22.1 / 37.1 | 7.7 | 0.19 / 0.19 / 0.18 | 497 |
+| L, land (5,000 uu/s) | guard | 116,935-116,944 | 1,108 | 19.3 / 30.5 | 6.5 | 3.14 / 0.23 / 0.21 | 499 |
+|  | before | 116,958-116,976 | 1,108 | 16.7 / 26.3 | 5.1 | 0.29 / 0.26 / 0.23 | 553 |
+| L, fast (20,000 uu/s) | guard | 119,697-119,870 | 1,108 | 18.9 / 42.7 | 9.7 | 8.24 / 9.90 / 8.51 | 566 |
+|  | before | 161,720-161,962 | 1,108 | 18.8 / 42.6 | 9.8 | 4.51 / 11.14 / 5.51 | 545 |
+| L, great circle | guard | - | 1,280 | 17.9 / 28.0 | 6.0 | 0.67 / 0.69 / 0.80 | 482 |
+|  | before | - | 1,280 | 18.0 / 28.6 | 6.3 | 0.70 / 0.81 / 0.65 | 481 |
+| L, climb (3,000 uu/s) | guard | suspended at 120,021-120,033 | 1,127 | 16.7 / 17.6 | 3.3 | 0.17 / 0.17 / 0.17 | 379 |
+|  | before | suspended at 120,011-120,040 | 1,126 | 16.7 / 17.8 | 3.4 | 0.17 / 0.17 / 0.17 | 379 |
+
+- **The stop:** under the old rule every run resumed the window 0.6 s before the stop and suspended it 0.74-0.77 s after
+  it resumed, with 13-56 chunks generated and about 1,000 queued generations dropped (the bench's stop is constant speed,
+  so its lead is the 3 s cap, 60,000: a resume from about 161,500, later than `vox.FlyTo`'s half-altitude resume above).
+  The far field built up to 158 band patches more on M and 114-198 more on L. With the guard no run resumed, and the
+  manager P95 fell from 9.6 / 7.1 to 7.0 / 4.2 ms.
+- **The 5,000 uu/s landing** runs the same code under both rules: the lead (15,000) is inside the band, and the resume
+  came with the camera at the same altitude (116,926-116,999, a frame's descent apart). The catch-up differs between
+  runs, not rules: one slow first repetition in each (4.20 s before on M, 3.14 s with the guard on L, both with fewer
+  chunks generated on the way down), the others 0.21-0.72 s. That is slower than G52's 0.17-0.22 s (§20.7), on a busier
+  machine (frame P95 26-37 ms here against 22).
+- **The 20,000 uu/s landing** is where the guard costs. The window resumes with the camera at the cut-over (about 119,800)
+  instead of 161,500, 6.0 s before touchdown instead of 8.1 s. Neither rule has the window ready on landing: catch-up
+  10.6-23.5 s (M) and 8.2-9.9 s (L) with the guard, against 12.4-16.6 s and 4.5-11.1 s before. On L the median is
+  8.5 s against 5.5 s; on M 11.4 s against 12.5 s. At that speed the window (about 1,100 chunks at 65-160 a second, §20.6)
+  needs more than either lead gives; P6.5's three view distances were sized for 5,000 uu/s. No gameplay descent is that
+  fast (D20: flight is QA tooling; a fall reaches at most the engine's terminal speed, 4,000 uu/s, which the project does
+  not change).
+- **The great circle** never nears the cut-over: the same peak, re-meshes (541-542) and chunks generated, frame and
+  manager P95 within 1.2 ms, catch-up 0.17-0.81 s under both.
+- **The climb** (suspension latency): a climb has no lead, so the guard never acts. The window suspended at
+  120,011-120,040 over the surface under both rules with all 1,082 chunks, the same peak (1,126-1,127), 208 LOD re-meshes
+  in every run, and frame and manager P95 within 0.4 ms.
+- **Budgets (D3):** the peak of every run at most 613 MB (1.5 GB allowed).
+
+**Suites and GPU parity.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 620/620
+headless and 620/620 in the editor (main's 618 with G63, and the two new tests), the GPU tests running in the editor (the
+generation parity tests, `Meshing.MarchingCubes.CPUvsGPU`, `GPUNoiseGeneratorAsync`, `InfinitePlane.GPUConsistency`) with
+no device loss. The 114 GPU parity lines are CRC-identical to main's (G45's run, which G63's matched): G49 changes no
+generation. Before G63 was merged in, the branch ran 617/617 headless (main's 615 and the two new tests).
+
+**Left as it was.**
+- The lead itself (3 s, half the altitude, two chunks over the surface), the resume altitude and the suspension rule.
+- A camera that climbs back over the cut-over soon after a resume still unloads the window: that is a climb.
+- The landing hold, the orbit camera and the teleports run as before: a teleport or a change of view target restarts the
+  smoothed speed, so it takes no lead.
+- Descents faster than about 0.05 C a second at the cut-over now resume the window there. A larger cut-over (or a lead
+  that grows with the speed past the band) would give them more time; neither is needed for a gameplay descent.
+
+G49 is fixed.
 
 ### 20.29 G63: Marching Cubes seam jobs read their participants in place (2026-10-24)
 

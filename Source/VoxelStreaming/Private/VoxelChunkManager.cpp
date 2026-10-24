@@ -770,6 +770,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// the descent prefetch), so the window resumes from the cut-over and refines before the camera arrives.
 	CurrentCameraPosition = Context.ViewerPosition;
 	ApplyDescentPrefetch(Context, DeltaTime);
+	CutoverClock += DeltaTime;
 
 	// Cache the current viewer position for the stale-cull distance test used by the queue
 	// processors (which don't build their own context). Reflects the benchmark view override.
@@ -825,14 +826,44 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		bWasWindowSuspended = bWindowSuspended;
 		bForceStreamingUpdate = true;
+		FVoxelCutoverTransition Transition;
+		Transition.Time = CutoverClock;
+		Transition.bSuspended = bWindowSuspended;
+		Transition.ViewerOverSurface = LODStrategy ? LODStrategy->GetViewerSurfaceAltitude() : 0.0;
+		Transition.Lead = StreamingViewerLead;
+		Transition.CameraOverSurface = Transition.ViewerOverSurface + StreamingViewerLead;
 		if (bWindowSuspended)
 		{
-			ReprioritizeQueues(Context);
+			Transition.ChunksHeld = LoadedChunkCoords.Num();
+			Transition.GenerationsDropped = ReprioritizeQueues(Context);
+			Transition.ActiveSeconds = LastWindowResumeTime >= 0.0 ? Transition.Time - LastWindowResumeTime : -1.0;
+			Transition.GeneratedSinceResume = TotalChunksGenerated - GeneratedAtWindowResume;
+			Transition.MeshedSinceResume = TotalChunksMeshed - MeshedAtWindowResume;
 		}
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Voxel window %s: camera %.0f over the datum, streaming viewer %.0f under it, %d chunks held."),
-			bWindowSuspended ? TEXT("suspended above the cut-over (unloading; the far field draws the planet)") : TEXT("resumed (streaming back)"),
-			Configuration ? FVector::Dist(CurrentCameraPosition, Configuration->WorldOrigin) - Configuration->WorldRadius : 0.0,
-			StreamingViewerLead, LoadedChunkCoords.Num());
+		else
+		{
+			LastWindowResumeTime = Transition.Time;
+			GeneratedAtWindowResume = TotalChunksGenerated;
+			MeshedAtWindowResume = TotalChunksMeshed;
+		}
+		if (CutoverTransitions.Num() >= MaxCutoverTransitions)
+		{
+			CutoverTransitions.RemoveAt(0);
+		}
+		CutoverTransitions.Add(Transition);
+		++CutoverTransitionCount;
+		if (bWindowSuspended)
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Voxel window suspended above the cut-over (unloading; the far field draws the planet): camera %.0f over the surface, streaming viewer %.0f (lead %.0f); %d chunks held, %d queued generations dropped; %s, %lld chunks generated and %lld meshed in it."),
+				Transition.CameraOverSurface, Transition.ViewerOverSurface, Transition.Lead, Transition.ChunksHeld, Transition.GenerationsDropped,
+				Transition.ActiveSeconds >= 0.0 ? *FString::Printf(TEXT("active %.2f s since it resumed"), Transition.ActiveSeconds) : TEXT("active since the world started"),
+				Transition.GeneratedSinceResume, Transition.MeshedSinceResume);
+		}
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Voxel window resumed (streaming back): camera %.0f over the surface, streaming viewer %.0f (lead %.0f), %d chunks held."),
+				Transition.CameraOverSurface, Transition.ViewerOverSurface, Transition.Lead, LoadedChunkCoords.Num());
+		}
 	}
 
 	// === Streaming decisions ===
@@ -1115,6 +1146,12 @@ void UVoxelChunkManager::Initialize(
 	StreamingViewerLead = 0.0;
 	CameraRadialSpeed = 0.0;
 	LastPrefetchCamera = FVector(FLT_MAX);
+	CutoverTransitions.Reset();
+	CutoverTransitionCount = 0;
+	CutoverClock = 0.0;
+	LastWindowResumeTime = -1.0;
+	GeneratedAtWindowResume = 0;
+	MeshedAtWindowResume = 0;
 
 	// Settings that run but give wrong results (tree template material ids, ...): say so at world start too,
 	// since an editor session loads the asset long before Play.
@@ -2877,6 +2914,7 @@ FLODQueryContext UVoxelChunkManager::BuildStreamingContext() const
 	if (StreamingViewerLead > 0.0 && Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet)
 	{
 		Context.ViewerPosition -= (Context.ViewerPosition - Configuration->WorldOrigin).GetSafeNormal() * StreamingViewerLead;
+		Context.ViewerLead = StreamingViewerLead;
 	}
 	return Context;
 }
@@ -2944,6 +2982,8 @@ void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float D
 	if (StreamingViewerLead > 0.0)
 	{
 		Context.ViewerPosition = Camera - Up * StreamingViewerLead;
+		// The cut-over reads the camera's altitude from it (G49: a suspended window resumes only with the camera under it).
+		Context.ViewerLead = StreamingViewerLead;
 	}
 }
 
@@ -10422,11 +10462,11 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelAuditResidencyCmd(
 
 // ==================== Queue Re-Prioritization ====================
 
-void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
+int32 UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 {
 	if (!Configuration)
 	{
-		return;
+		return 0;
 	}
 
 	const FVector& ViewerPosition = Context.ViewerPosition;
@@ -10523,6 +10563,7 @@ void UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 		UE_LOG(LogVoxelStreaming, Log, TEXT("ReprioritizeQueues: Evicted %d gen items, updated %d LOD levels, Gen=%d Mesh=%d remaining"),
 			EvictedCount, LODUpdatedCount, GenerationQueue.Num(), MeshingQueue.Num());
 	}
+	return EvictedCount;
 }
 
 // ==================== Collision Mesh Generation ====================

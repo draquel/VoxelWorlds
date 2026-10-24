@@ -748,7 +748,10 @@ way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md Â
   `UVoxelWorldConfiguration::PlanetVoxelCutoverAltitude` (0: three view distances, `DefaultCutoverViewDistances`:
   120,000 uu on the review planets) the window is suspended; it resumes below `CutoverResumeFraction` (0.85) of it, so a flyer hovering at the cut-over does
   not churn. `voxel.World.VoxelCutover` overrides it (-1: the configuration's; 0: never, the window keeping its ground
-  disk at any altitude as WM-BP8 made it).
+  disk at any altitude as WM-BP8 made it). A suspended window resumes only with the camera under the cut-over as well
+  (`FLODQueryContext::ViewerLead` gives the strategy the camera's altitude; G49, `voxel.World.CutoverResumeGuard`, 0 =
+  the streaming viewer alone decides, the rule before): the descent prefetch below can bring a resume forward to the
+  cut-over but no higher.
 - **Suspended**, `GetVisibleChunks` returns nothing, `GetChunksToUnload` every loaded chunk and the balanced LOD cache is
   empty; the chunk manager evicts its generation queue, stale-culls whatever finishes generating, and neither pins nor
   keeps edited chunks (their edits stay in the edit layers and load with the window when it resumes). The window
@@ -766,14 +769,20 @@ way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md Â
   in `voxel.Stream.DescentLead` seconds (3), at most half its altitude and never within two chunks of the surface
   (`ComputeDescentLead`; the camera's radial speed smoothed, a jump of ten chunks in a frame treated as a teleport). The
   window resumes and refines its LOD that much earlier; the cut-over, the LOD bands and the window are the streaming
-  viewer's, the far field's error and horizon and the appearance fade the camera's. A fast descent that stops above the
-  cut-over resumes the window for a moment and suspends it again as the lead decays (G49: on L 0.7 s and 56 chunks).
+  viewer's, the far field's error and horizon and the appearance fade the camera's. Before G49's guard (above) a fast
+  descent that stopped above the cut-over resumed the window for a moment and suspended it again as the lead decayed
+  (on L 0.7-1.8 s, 20-100 chunks generated and about 1,000 queued generations dropped a stop); now a window the lead
+  resumes has the camera under the cut-over, and a window suspends only with the streaming viewer, which is never above
+  the camera, over the cut-over, so only a climb back over the cut-over suspends it again.
 - **The camera is the streaming viewer**, so a camera that leaves the pawn (the orbit camera, a debug camera) takes the
   window with it, as it always has: above the cut-over the ground under a pawn left behind unloads. `vox.Orbit` holds the
   pawn (a swimmer too since G48) and settles it on release; survey cameras freeze streaming.
 
 `vox.Planet` reports the window's state, the cut-over and the lead; the bench adds `Suspended`, `LeadUU` and `SurfAlt`
-columns and a `voxelCutover` summary, and a descent route (`descend=Lat:Lon:Alt`).
+columns, a `voxelCutover` summary and the run's `cutoverTransitions` (each resume and suspension with the camera, the
+streaming viewer and the lead, and for a suspension the seconds active, the chunks held and generated and the queued
+generations dropped; `UVoxelChunkManager::GetCutoverTransitions`, also logged), and a descent route
+(`descend=Lat:Lon:Alt`).
 
 ### Integration with Streaming
 
