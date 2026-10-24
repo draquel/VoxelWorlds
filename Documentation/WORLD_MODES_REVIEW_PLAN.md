@@ -1455,7 +1455,7 @@ Three findings from §13.11 get IDs here:
 | G11 | The vertical window counted the viewer's layer twice | Fixed (§13.11) | — |
 | G12 | The balanced-LOD cache is rebuilt every tick | Fixed in M1 (WM-H1; draquel/VoxelWorlds#84, merged) | WM-H1 |
 | G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole. The planet's version (a viewer-Z clip and a 3D horizon: a climbing viewer lost the ground) fixed in spherical Phase 6's P6.3 (WM-BP8, §20.4) | WM-S1, WM-S4, WM-BP8 |
-| G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
+| G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Fixed 2026-10-24 (§20.26): the bench's count, not the streaming. The LOD evaluation queued 499-503 re-meshes in every PIE on the chord; the bench counted a re-mesh only for a chunk meshed since it started (`ResetBenchCounters` emptied `BenchEverMeshed`), and a later PIE had meshed 340-500 chunks before its bench against 4-9 in a cold first PIE. The manager now keeps the set at all times (`voxel.Bench.CountPreBenchMeshes`, 0 = before): on `VoxelDemo` 500-503 in every PIE, the first included (the rule before: 499 cold, 264-266 later); test `Streaming.Bench.PreBenchMeshes` | — |
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
 | G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Fixed 2026-10-24 (§20.25): not the material's but the engine's. Without front-layer reflections Lumen reflects translucent surfaces from its radiance cache and marks the probes they need at 1/4 of the screen (`r.Lumen.TranslucencyReflections.MarkDownsampleFactor` 4); at grazing angles kilometres of sea fall in a few pixel rows, probe cells along the view are skipped and the water's reflection is dark there. Traced by switching one thing at a time (fog, clouds, atmosphere, the sky light's cubemap, the material's normal, roughness and emissive changed nothing; specular 0, front-layer reflections, the radiance cache's reflections off and factor 2 or 1 removed them). Fixed with `r.Lumen.TranslucencyReflections.MarkDownsampleFactor=1` in the project's `Config/DefaultEngine.ini`: on island M 2-10 dark rows a view at 100 and 300 uu over the sea -> 0, the mark pass 0.013 -> 0.033 ms at 1280 x 722 | — |
 | G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
@@ -1788,6 +1788,8 @@ sessions against 287-304 in every later run, old window or new (frame and manage
 blamed it on a keep margin the first build had (the near window's extra layers kept one chunk past the near radius); the
 final build, without that margin, gave 533 again in its first PIE and 287 in the next two. Not investigated further. Every
 batch in this section ran after several PIE sessions in the same editor; start any bench batch with a throwaway PIE.
+*(Explained and fixed in §20.26: the bench left out the re-meshes of chunks meshed before it started, and a cold first
+PIE had meshed almost none by then, so it was the one complete count.)*
 
 **WM-S3.** `MaxLoadedChunks` is removed from `UVoxelWorldConfiguration` (it was read nowhere; the test actor set it).
 What bounds residency is now written down in `Features/LOD_SYSTEM.md` ("What Bounds Residency") and on the config: the
@@ -9087,3 +9089,78 @@ views have no dark row.
 **Left as it was:** `M_Water` itself, an engine-plugin asset, is not edited.
 
 G16 is fixed.
+
+### 20.26 G14: the first PIE's LOD re-meshes were the bench's count (2026-10-24)
+
+Bases: VoxelWorlds `7462223`, UE5_PluginDev `d4f786d` (G16 and G43 merged). Branches `fix/g14-first-pie-remesh`
+(VoxelWorlds) and `claude/g14-first-pie-remesh` (UE5_PluginDev). Editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`
+in a worktree editor (Claudius on 8097), background throttling off.
+
+**The finding** (§14.8): the first PIE of an editor session counted far more LOD re-meshes than later runs on the same
+route (533 against 287-304 on the control's 40,000 uu chord at v3000). Every bench batch since has started with a
+throwaway PIE.
+
+**Reproduced** on `VoxelDemo` (the control), with the save deleted, the clock at noon and input blocked:
+`voxel.Bench.Run <tag> 3000 40000 start=0:0 dir=1:0 warmup=120` in three PIEs of a fresh editor gave 499, 259 and 257
+LOD re-meshes. Frame and manager P95 were 37.3 / 10.7 and 37.8 / 11.2 ms in the first two; the third (53.7 / 14.9 ms)
+ran while the machine was busy.
+
+**Traced.** The streaming did the same work in every run; only the count differed.
+- **The LOD evaluation queued the same.** Per sample, `LODQueued` summed over a run is 499-503 in every PIE, the first
+  included.
+- **The count started late in later PIEs.** In the first PIE, LOD re-meshes counted at about 40 a second from the
+  traverse's first second. In the second, 0-4 a second for the first 3 s (to x ≈ 10,800) and 12-26 a second to
+  x ≈ 28,800. Only then did it reach about 40 a second, once the viewer had left the ground loaded before the bench.
+- **Why.** The bench counts a re-mesh when a mesh job launches for a chunk in `BenchEverMeshed`, the chunks with a mesh.
+  That set was filled only while a bench ran, and `ResetBenchCounters` emptied it when one started. A chunk meshed before
+  `voxel.Bench.Run` was not in it, so its LOD re-meshes went uncounted.
+- **Why the first PIE differs.** The scripts start the bench about 8 s after PIE starts. In a later PIE most of the window
+  is meshed by then; in a cold first PIE (shaders and assets loading) almost nothing is. The bench then saw 4-9 chunks
+  loaded against 340-500 in later PIEs, so the first PIE counted every LOD re-mesh and a later one about half.
+
+**The fix** (VoxelWorlds): the manager keeps `BenchEverMeshed` at all times. Every mesh submission adds the chunk,
+`RemoveChunkState` (an unload, an eviction from the generation queue) drops it, and a world reset empties it. A bench
+start no longer empties it. One set insert per mesh and one removal per unload; nothing else changes.
+`voxel.Bench.CountPreBenchMeshes` (1) is the switch; 0 empties the set at a bench's start, the rule before. G10's rule
+holds: a chunk that unloads and loads again meshes for the first time again.
+
+**A/B on `VoxelDemo`** (the route above, two fresh editors, one build, by the cvar):
+
+| Editor session | PIE | Rule | Chunks loaded at the bench's start | LOD queued | LOD re-meshes counted |
+|---|---|---|---|---|---|
+| 1 | 1 (cold) | 1 (fix) | 9 | 500 | 500 |
+| 1 | 2 | 1 | 340 | 503 | 503 |
+| 1 | 3 | 1 | 352 | 503 | 503 |
+| 1 | 4 | 0 (before) | 454 | 503 | 266 |
+| 1 | 5 | 0 | 460 | 503 | 265 |
+| 2 | 1 (cold) | 0 | 6 | 499 | 499 |
+| 2 | 2 | 0 | 464 | 503 | 264 |
+| 2 | 3 | 1 | 448 | 503 | 503 |
+
+With the fix the count equals what the LOD evaluation queued in every run, the cold first PIE included.
+- **The old rule's count** depended on how much was meshed before the bench started: 499 cold, 264-266 later.
+- **Frame P95** was 41-44 ms in most runs (manager P95 12.0-13.0 ms). Session 1's first two PIEs gave 62 ms (manager
+  18.9 ms) and a 4.4 s catch-up, with 12.9-20.8 s warmups: the machine was busy, and the counts were not affected.
+- **What the old counts meant.** Every LOD re-mesh count in this plan's PIE benches that followed a throwaway PIE left out
+  the chunks meshed before its bench started (about half on this route). Comparisons inside one batch still hold, since
+  their runs started from the same state. A bench started before the world had meshed (a cold first PIE) counted them
+  all.
+- **Throwaway PIEs.** A bench's re-mesh counts no longer depend on one. Where the machine was not busy, the first PIE's
+  frame and manager P95 matched the next one's (37.3 / 10.7 against 37.8 / 11.2 ms, 42.7 / 12.3 against 44.2 / 12.3 ms),
+  so nothing here says one is needed for the timings either.
+
+**Tests.** `VoxelWorlds.Streaming.Bench.PreBenchMeshes` (new): a small plane with three LOD bands settles around a
+viewer, the counters are reset as a bench start resets them, and the viewer moves 3,000 uu and settles again. The
+recording renderer counts the re-meshes it receives (`FRecordingMeshRenderer::ChunkResubmits`).
+- **With 1:** 48 re-meshes received, all 48 counted as LOD transitions.
+- **With 0:** 0 counted.
+
+Six suites (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`): 613/613 headless (G43's
+612 and the new test) and 613/613 in the editor. The GPU parity lines are as on main: the 54 heightmap lines identical to
+G72's run (§20.23), the 60 planet lines changed as G43 changed them (§20.24; its own run reported the same).
+
+**Left as it was:** the bench still counts at a job's launch, and the reason it records (`BenchQueuedRemeshReason`) is
+still taken from the queue only while a bench runs. A chunk queued for its LOD before the bench started and launched
+after counts as "other"; every run above counted 0 "other".
+
+G14 is fixed.

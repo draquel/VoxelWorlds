@@ -1399,21 +1399,11 @@ public:
 	 *  frame from TickComponent, and writes a CSV + JSON report on completion). */
 	void StartBenchmark(const FVoxelBenchConfig& InConfig);
 
-	/** Reset benchmark counters (call at the start of a benchmark run). */
-	void ResetBenchCounters()
-	{
-		BenchRemeshCount = 0;
-		for (int64& C : BenchRemeshByReason) { C = 0; }
-		BenchSeamJobsCompleted = 0;
-		BenchUnloadLagSumMs = 0.0;
-		BenchUnloadLagMaxMs = 0.0;
-		BenchUnloadLagCount = 0;
-		BenchUnloadDistSumUU = 0.0;
-		BenchUnloadDistMaxUU = 0.0;
-		UnloadEnqueueTimeSeconds.Reset();
-		BenchEverMeshed.Reset();
-		BenchQueuedRemeshReason.Reset();
-	}
+	/**
+	 * Reset benchmark counters (call at the start of a benchmark run). The chunks that already have a mesh stay known, so
+	 * their re-meshes count like those of chunks meshed during the run (world modes review G14; `voxel.Bench.CountPreBenchMeshes`).
+	 */
+	void ResetBenchCounters();
 
 	// ==================== Debug ====================
 
@@ -2758,7 +2748,12 @@ private:
 	/** Seam meshes applied during the active benchmark (see GetBenchSeamJobsCompleted). */
 	int64 BenchSeamJobsCompleted = 0;
 
-	/** Chunks meshed at least once during the active benchmark (to detect re-mesh churn). */
+	/**
+	 * Chunks with a mesh submitted since they were loaded (to detect re-mesh churn): filled at every mesh submission,
+	 * emptied of a chunk when its state is removed. Kept outside a benchmark too, so a run counts the re-meshes of
+	 * chunks meshed before it started (G14: a bench started after a slower, cold PIE start had meshed fewer of them and
+	 * counted about twice as many LOD re-meshes). `voxel.Bench.CountPreBenchMeshes` 0 empties it at the run's start.
+	 */
 	TSet<FIntVector> BenchEverMeshed;
 
 	/**
