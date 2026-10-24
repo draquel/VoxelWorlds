@@ -195,7 +195,7 @@ estimate of the largest island the current streaming-only model can hold. **Done
 it would make the mode better without blocking parity. The review confirms the critical list; the follow-up
 plan sizes and orders it. *(Second revision, 2026-10-14: §14 sizes and orders it. With D1 decided as terrain-only,
 the cubic rows that serve the game systems are first-class only and deferred, and since the D1 amendment of 2026-10-24 done in §21; the work item for each row is in its
-class column.)*
+class column. The last two cubic nice-to-haves are done in §22.)*
 
 ### Cubic
 
@@ -210,8 +210,8 @@ class column.)*
 | Seam support for cubic, or keep the legacy path | Critical, **decided with D1: seam support (WM-C1)** | KC2. Cubic seam jobs are "trivially compatible" per the seam doc (face culling across the pair). Doing it lets the legacy neighbour-slice and revalidation machinery be deleted. The alternative is keeping that machinery for cubic alone. See D1. Measured in §12: with LOD off, the legacy cascade is the main remaining catch-up cost (2.0 meshes per chunk, catch-up 1.6-3.2× smooth) |
 | GPU cubic meshing in streaming, or delete it | Nice, **decided with D1: delete (WM-C4)** | KC3. Today it is dead weight that only tests use |
 | Choppable voxel trees | Nice, first-class only, **done 2026-10-24 (WM-C8, D30, §21)** | KC9. Felling removes connected log and leaf voxels and yields wood like HISM trees do |
-| Block highlight and placement preview | Nice | Outline of the targeted block and a ghost of the block to place |
-| Per-material hardness and break time | Nice | Mining feel; drops per material |
+| Block highlight and placement preview | Nice, **done 2026-10-24 (WM-C12, WM-C13, §22)** | Outline of the targeted block and a ghost of the block to place. *Both from the edit path's own target (`FindEditTarget`) and reach; the ghost red where the server would refuse the block* |
+| Per-material hardness and break time | Nice, **done 2026-10-24 (WM-C14, WM-C15, §22; D31-D34)** | Mining feel; drops per material. *Hardness per material in the registry, break time = hardness ÷ MiningSpeed while the primary action is held, decided on the server, cracks as the progress; the gather table's yields unchanged; smooth worlds dig at once* |
 
 ### Island
 
@@ -9725,7 +9725,7 @@ found, and a body whose axis the crosshair crosses exactly.
 
 KC6, KC7, KC9 and KC12 are fixed.
 
-## 22. Cubic block feedback: a block highlight, a placement preview and break times (planned 2026-10-24)
+## 22. Cubic block feedback: a block highlight, a placement preview and break times (planned and met 2026-10-24)
 
 The last two cubic rows of §6, left for later by §21: an outline of the block the player targets and a ghost of the block a
 place would add, and blocks that take a material's time to break. Bases: VoxelWorlds `9affbc4`, VoxelCharacterPlugin
@@ -9784,3 +9784,102 @@ edit mode (the dig gate).
 **Order.** WM-C14 and WM-C12 first, then WM-C13, WM-C15 and WM-C16, the tests with each, then the live pass. PRs:
 VoxelWorlds (hardness, `CanEditAt`, `voxel.Edit.PlayerInputs 2`, the docs), VoxelCharacterPlugin, then UE5_PluginDev
 (`vox.Dig`, `vox.Mine`, the gitlinks and the doc map).
+
+### 22.2 Results (2026-10-24)
+
+Both features are built and verified; PRs open (draquel/VoxelWorlds#154, draquel/VoxelCharacterPlugin#34, draquel/UE5_PluginDev#163; not merged). Built from VoxelWorlds
+`feature/wm-c12-block-feedback` (base `9affbc4`), VoxelCharacterPlugin `feature/wm-c12-block-feedback` (base `09302ed`)
+and UE5_PluginDev `claude/nervous-kilby-f5240e` (base `1b997e7`), editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`,
+in a worktree editor with background throttling off, `VoxelDemo` with `voxel.ConfigOverride
+/Game/PluginTesting/Review/Review_Cubic` from a fresh world (`vox.DeleteSave`), the player's move and look input blocked
+and the view set by script, first person.
+
+**What changed, against the plan (§22.1).**
+
+- *The ghost steps aside while a break runs.* The first live pass showed it covering the cracks on the block's top face
+  (the place cell is above it); the outline stays.
+- *A press starts a new attempt.* A block whose break was refused, or has just ended, is not begun again while the
+  crosshair stays on it (no request per frame); `VoxelCharacter.Cubic.BlockBreak` found that a new press on the same block
+  was also held off, so `StartHold` clears it.
+- *QA and test hooks:* `vc.Dig.BreakTimeScale` (slows every break, the server and the client alike, to look at the
+  cracks), `AVCPlayerController::OnVoxelGathered` (a dug voxel paid the gather table), `UVCCameraManager::SetCurrentView`
+  (tests aim the crosshair). The test world needs its actors initialised: `AActor::ProcessEvent` drops every call, the RPCs
+  among them, in a world whose actors are not, and `VoxelTesting::FTestChunkWorld` does not; the block tests call
+  `InitializeActorsForPlay`.
+
+**WM-C12 and WM-C13: what is outlined is what is edited.** Automation `VoxelCharacter.Cubic.BlockHighlight` (a block in the
+air, all six faces exposed, a collider over its cell): 18 aims at the six faces (the centre and two points off it on each)
+give dig and place voxels equal to `GetEditVoxelCoord` on the trace's hit, and the outline and the ghost are exactly those
+voxels' cells, 18 of 18 each; nothing is shown 900 uu away (and `IsVoxelInEditReach` refuses it too), with edit mode off and
+no tool, on air, in a smooth world or with `vc.Dig.Highlight 0` (the targets are still found then); a pawn in the place cell
+turns the ghost red, as the server's own test says. Live (`Review_Cubic`):
+
+| Shot | Shows |
+|------|-------|
+| `c22_highlight_ghost` | Edit mode on, flat ground: the ghost of the stone block in the cell above the outlined grass block |
+| `c22_outline_pickaxe` | Edit mode off with the iron pickaxe in hand: the outline only (the primary action digs with a tool, the secondary does not place) |
+| `c22_side_ghost` | The crosshair on a raised block's side face: the outline on it, the ghost beside the face |
+| `c22_break_a`, `c22_break_b` | A break at about a third and two thirds (grass with the iron pickaxe, `vc.Dig.BreakTimeScale 10`: 3.0 s) |
+| `c22_final_break2` | A close one at 48%: cracks on the top and side faces, the ghost out of the way |
+
+In edit mode `voxel.Edit.PlayerInputs` is 2 in the cubic world (the test actor's cyan and green boxes and its
+press-to-remove are gone; its keys stay) and 1 in the smooth control. A place through the real input
+(`Input.+key RightMouseButton`) filled exactly the ghost's voxel (−142, −681, −15) with stone.
+
+**WM-C14 and WM-C15: blocks break in their material's time, decided on the server.** Automation
+`VoxelCharacter.Cubic.BlockBreak` (CPU-generated cubic chunks, the server path and the client's hold frame by frame): a stone
+block stands two frames before its 1.50 s and is gone two frames after, paying the gather table once (1 stone); stopped at
+90% and begun again it still stands half the time later; a retarget to a dirt block breaks the dirt in dirt's time and leaves
+the half-broken stone; air, a block 900 uu away and a protected block (a validator on its cell) are refused at the start;
+walking out of reach mid-break cancels it; `Server_RequestVoxelModification(Destroy)` breaks nothing while breaks are timed
+and digs at once with `vc.Dig.BreakTimes 0`; through `StartHold` the server's break begins on the press, the client's
+prediction is within two frames of it (0.500 against 0.500 halfway, 49 crack lines drawn), the block breaks, a release mid-break
+stops both sides, and a retarget while held moves the server's break to the new block from nothing. `.BreakTime` (every
+material's hardness ≥ 0, dirt 0.5 < stone 1.5 < iron 2.5 < diamond 4.0, seconds = hardness ÷ MiningSpeed at 1, 1.5 and 2) and
+`.CrackPattern` (nothing at 0, line length only grows with progress, every point on an exposed face inside it, the same block
+cracks the same way). Live (`vox.Mine` holds through the client path; times from the log, the server's break begin to its dig):
+
+| Block | Tool (MiningSpeed) | Break time | Expected | Gathered |
+|-------|--------------------|------------|----------|----------|
+| Grass, `vc.Dig.BreakTimeScale 10` | Iron pickaxe (2) | 3.00 s | 0.6 × 10 ÷ 2 | — (no gather entry) |
+| Dirt, scale 10 | Iron pickaxe (2) | 2.50 s | 0.5 × 10 ÷ 2 | — |
+| Stone (placed) | Iron pickaxe (2) | 0.75 s | 1.5 ÷ 2 | +2 stone (the tool yield) |
+| Stone (placed) | Bare hands (1) | 1.50 s | 1.5 | +1 stone |
+
+- *Release:* holds released at 33% and at 50% left the grass block; the next full hold needed the whole 3.0 s.
+- *Retarget:* moving the crosshair 1.2 s into a 2.5 s dirt break began the next block from nothing; released at 42%, neither
+  block broke.
+- *The real input:* `Input.+key LeftMouseButton` held 3.6 s through Enhanced Input broke a dirt block at 2.5 s, began the next
+  one under the crosshair, and the release (`Completed`) stopped it.
+- *Holding on* digs down a column: a 2.0 s hold broke three dirt blocks (0.5 s each, about 0.06 s between them while the next
+  block's collision is cooked) and left the fourth at 57%.
+- *Protected:* a stone block of the tiled dungeon at (224810, −78400) was refused at the start ("refused: protected"), and not
+  asked again while held.
+
+**Smooth worlds unchanged.** Every change keys on cubic meshing (`ShowsBlockFeedback`, `UsesTimedBreaks`): in the smooth
+worlds of the tests there is no feedback, no timed break and the dig request dents at once (density 255 → 175); live on the
+smooth control (`DemoSmoothWorldConfig`) edit mode sets `voxel.Edit.PlayerInputs` 1, nothing is outlined, and a press digs at
+once, the character's dent and the test actor's brush as before. The dig, place and paint paths are the old code, moved:
+`DigVoxelAt` is the old `Destroy` branch line for line, and the four target copies in the actions are one call to
+`FindEditTarget` with the same arithmetic (`VoxelCharacter.Edit.BlockTargeting` unchanged).
+
+**Suites.** 635 tests headless (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`, `-nullrhi`) and 635 in the editor with the GPU tests (D3D12), all passing on the final build: main's 631 and the 4 above. The GPU parity lines are identical to main's (114 of 114 by CRC against the baseline of §20.29).
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| WM-C12 | Done, in review | VoxelCharacterPlugin#34, UE5_PluginDev#163 | `VoxelCharacter.Cubic.BlockHighlight` (18 of 18 aims), the actions and `vox.Dig` through `FindEditTarget`, `IsVoxelInEditReach` shared with the server |
+| WM-C13 | Done, in review | VoxelCharacterPlugin#34 | `VoxelCharacter.Cubic.BlockHighlight`; live: the shots above |
+| WM-C14 | Done, in review | VoxelWorlds#154 | `VoxelCharacter.Cubic.BreakTime`; `MATERIAL_SYSTEM.md` "Hardness" |
+| WM-C15 | Done, in review | VoxelCharacterPlugin#34, VoxelWorlds#154, UE5_PluginDev#163 | `VoxelCharacter.Cubic.BlockBreak`, `.CrackPattern`; live: the table above, release, retarget, the real input, protection |
+| WM-C16 | Done, in review | VoxelWorlds#154, VoxelCharacterPlugin#34 | Live: `voxel.Edit.PlayerInputs` 2 in cubic (no test-actor boxes or press-to-remove), 1 in smooth |
+
+**New findings.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G74 | With `voxel.MeshFade` on (the default), an edit's re-mesh does not reach the screen: the edited chunk keeps drawing the mesh it had before. In the cubic world five dug blocks stayed drawn for a minute and more (`c22_pit_after`, `c22_g74_before` / `c22_g74_after6s`) while the voxels and the collision had the holes (a trace down the column landed on the block below) and `voxel.Edit.MeshWork` counted 5 edited chunks re-meshed; in the smooth control the test actor's brush crater did not show either. An edit made with `voxel.MeshFade 0` shows at once, with the ones before it (`c22_pit_nofade`). Not this work's: the smooth world draws no block feedback and the renderer is untouched. §21's felled tree disappeared at once at `952d4ae`, before visual polish milestone 1, so it is probably newer than that; not bisected | Recorded; the live pass above ran with `voxel.MeshFade 0` |
+
+**Left as it was.** Voxel edits still do not replicate to clients (`EDIT_LAYER.md`): a remote client sees its predicted
+cracks and the server's verdict, not the dug block. A far representation for cubic (§12.5), cubic on planets.
+
+The block highlight, the placement preview and per-material break times are in.
