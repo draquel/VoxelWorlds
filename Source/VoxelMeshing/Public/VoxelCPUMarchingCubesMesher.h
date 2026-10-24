@@ -99,6 +99,19 @@ public:
 	virtual bool GenerateEdgeSeamMeshCPU(const FVoxelEdgeSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
 	virtual bool GenerateCornerSeamMeshCPU(const FVoxelCornerSeamRequest& SeamRequest, FChunkMeshData& OutMeshData) override;
 
+	/**
+	 * The Marching Cubes seam jobs meshed since the last reset, in every mesher instance (world modes review G63;
+	 * voxel.Seam.MCStats logs them by job type and stage).
+	 *
+	 * @param OutJobs Face, edge and corner seam jobs meshed
+	 * @param OutInPlaceJobs Those whose frames read the participants in place (voxel.Seam.MCReadInPlace 1)
+	 * @param OutWorkerMs Their time in the mesher, milliseconds
+	 */
+	static void GetSeamJobStats(int64& OutJobs, int64& OutInPlaceJobs, double& OutWorkerMs);
+
+	/** Clears the counters GetSeamJobStats and voxel.Seam.MCStats read. */
+	static void ResetSeamJobStats();
+
 private:
 	/**
 	 * Seam helper: mesh one participant's boundary-band cells from a synthetic request.

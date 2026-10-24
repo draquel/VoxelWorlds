@@ -304,6 +304,23 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	 */
 	FVector LocalUp = FVector::UpVector;
 
+	/**
+	 * Marching Cubes seam jobs only (world modes review G63, voxel.Seam.MCReadInPlace): the volumes of this chunk and of
+	 * its neighbours, read in place from the seam job's snapshots (each ChunkSize^3 elements) instead of copied into
+	 * VoxelData and the neighbour planes, strips and corners. Index (dx + 1) + (dy + 1) * 3 + (dz + 1) * 9 for the
+	 * neighbour at (dx, dy, dz); [13] is this chunk's own volume, and a request that sets it leaves VoxelData empty (so
+	 * IsValid fails and no whole-chunk mesh takes it). A neighbour reads as its face plane, edge strip or corner voxel
+	 * would: face planes NeighborPlaneDepth deep (clamped past it), edges and corners one voxel. Null = not held. Read only
+	 * by the CPU Marching Cubes mesher; not a UPROPERTY: a view valid for the call that sets it.
+	 */
+	const FVoxelData* VolumeViews[27] = {};
+
+	/** VolumeViews index of the neighbour at (DX, DY, DZ), each in {-1, 0, 1}; 13 = the chunk itself. */
+	static FORCEINLINE int32 VolumeViewIndex(int32 DX, int32 DY, int32 DZ)
+	{
+		return (DX + 1) + (DY + 1) * 3 + (DZ + 1) * 9;
+	}
+
 	// Transition face flag bits
 	static constexpr uint8 TRANSITION_XNEG = 1 << 0;
 	static constexpr uint8 TRANSITION_XPOS = 1 << 1;

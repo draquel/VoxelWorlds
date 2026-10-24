@@ -14,6 +14,7 @@
 #include "IVoxelWorldMode.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelMeshingTypes.h"
 #include "ChunkRenderData.h"
@@ -2220,6 +2221,138 @@ bool FVoxelPlaneStreamingUniformAtGenerationTest::RunTest(const FString& Paramet
 
 	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneUniformAtGenerationTestWorld"), 23000.0f, 7000.0f, 300.0f); };
 	RunUniformAtGenerationPlace(*this, TEXT("plane"), Start);
+	return true;
+}
+
+namespace VoxelPlanetStreamingTestUtils
+{
+	/** What a Marching Cubes world left with its seam frames' reads copied (voxel.Seam.MCReadInPlace 0) or in place (1). */
+	struct FMCSeamReadsResult
+	{
+		uint32 MeshCrc = 0;                    // every chunk mesh and seam bucket
+		TMap<FIntVector, uint32> ChunkCrcs;    // per chunk mesh
+		TMap<FIntVector, uint32> SeamCrcs;     // per seam bucket (by owner)
+		int32 ChunksPerLOD[3] = {};
+		int64 SeamJobs = 0;                    // MC seam jobs meshed (the mesher's counters)
+		int64 InPlaceJobs = 0;
+		double SeamMs = 0.0;
+	};
+
+	uint32 SingleMeshCrc(const FChunkMeshData& Mesh)
+	{
+		uint32 Crc = FCrc::MemCrc32(Mesh.Positions.GetData(), Mesh.Positions.Num() * Mesh.Positions.GetTypeSize());
+		Crc = FCrc::MemCrc32(Mesh.Normals.GetData(), Mesh.Normals.Num() * Mesh.Normals.GetTypeSize(), Crc);
+		Crc = FCrc::MemCrc32(Mesh.UVs.GetData(), Mesh.UVs.Num() * Mesh.UVs.GetTypeSize(), Crc);
+		Crc = FCrc::MemCrc32(Mesh.UV1s.GetData(), Mesh.UV1s.Num() * Mesh.UV1s.GetTypeSize(), Crc);
+		Crc = FCrc::MemCrc32(Mesh.Colors.GetData(), Mesh.Colors.Num() * Mesh.Colors.GetTypeSize(), Crc);
+		return FCrc::MemCrc32(Mesh.Indices.GetData(), Mesh.Indices.Num() * Mesh.Indices.GetTypeSize(), Crc);
+	}
+
+	/** G63: streams a Marching Cubes place (three LOD bands: LOD 0, 1 and 2 and mixed-LOD seams), moves by Move and settles. */
+	FMCSeamReadsResult RunMCSeamReads(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
+		const FVector& Move, int32 ReadInPlace)
+	{
+		FScopedIntCVar Reads(TEXT("voxel.Seam.MCReadInPlace"), ReadInPlace);
+		FVoxelCPUMarchingCubesMesher::ResetSeamJobStats();
+		FMCSeamReadsResult Result;
+		FPlanetStreamingWorld World;
+		World.MeshingMode = EMeshingMode::MarchingCubes;
+		Start(World);
+		Test.TestTrue(*FString::Printf(TEXT("%s (read in place %d): the pipeline settled"), Place, ReadInPlace), World.Settle());
+		World.Viewer += Move;
+		World.Manager->SetBenchmarkView(true, World.Viewer);
+		Test.TestTrue(*FString::Printf(TEXT("%s (read in place %d): settled after the move"), Place, ReadInPlace), World.Settle());
+
+		Result.MeshCrc = MeshesCrc(World);
+		for (const TPair<FIntVector, FChunkMeshData>& Pair : World.Renderer.ChunkMeshes)
+		{
+			Result.ChunkCrcs.Add(Pair.Key, SingleMeshCrc(Pair.Value));
+			const int32* LOD = World.Renderer.ChunkLODs.Find(Pair.Key);
+			if (LOD && *LOD >= 0 && *LOD < 3)
+			{
+				++Result.ChunksPerLOD[*LOD];
+			}
+		}
+		for (const TPair<FIntVector, FChunkMeshData>& Pair : World.Renderer.SeamBuckets)
+		{
+			Result.SeamCrcs.Add(Pair.Key, SingleMeshCrc(Pair.Value));
+		}
+		FVoxelCPUMarchingCubesMesher::GetSeamJobStats(Result.SeamJobs, Result.InPlaceJobs, Result.SeamMs);
+		World.Stop();
+		return Result;
+	}
+
+	/** Keys of A whose CRC differs in B or is missing there, and the other way round. */
+	int32 CountDifferentCrcs(const TMap<FIntVector, uint32>& A, const TMap<FIntVector, uint32>& B)
+	{
+		int32 Different = 0;
+		for (const TPair<FIntVector, uint32>& Pair : A)
+		{
+			const uint32* Other = B.Find(Pair.Key);
+			Different += (!Other || *Other != Pair.Value) ? 1 : 0;
+		}
+		for (const TPair<FIntVector, uint32>& Pair : B)
+		{
+			Different += A.Contains(Pair.Key) ? 0 : 1;
+		}
+		return Different;
+	}
+
+	/** Runs a place with the seam frames' reads copied and in place: the same meshes and seams bit for bit. */
+	void RunMCSeamReadsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start, const FVector& Move)
+	{
+		const FMCSeamReadsResult Copied = RunMCSeamReads(Test, Place, Start, Move, 0);
+		const FMCSeamReadsResult InPlace = RunMCSeamReads(Test, Place, Start, Move, 1);
+		Test.AddInfo(FString::Printf(TEXT("%s: chunks at LOD 0/1/2 %d/%d/%d, %d seam buckets; MC seam jobs copied %lld (%.1f ms, %.3f ms a job), in place %lld (%.1f ms, %.3f ms a job)"),
+			Place, InPlace.ChunksPerLOD[0], InPlace.ChunksPerLOD[1], InPlace.ChunksPerLOD[2], InPlace.SeamCrcs.Num(),
+			Copied.SeamJobs, Copied.SeamMs, Copied.SeamJobs > 0 ? Copied.SeamMs / Copied.SeamJobs : 0.0,
+			InPlace.SeamJobs, InPlace.SeamMs, InPlace.SeamJobs > 0 ? InPlace.SeamMs / InPlace.SeamJobs : 0.0));
+
+		Test.TestTrue(*FString::Printf(TEXT("%s: every LOD streamed"), Place),
+			InPlace.ChunksPerLOD[0] > 0 && InPlace.ChunksPerLOD[1] > 0 && InPlace.ChunksPerLOD[2] > 0);
+		Test.TestTrue(*FString::Printf(TEXT("%s: copied, MC seam jobs ran and none read in place"), Place), Copied.SeamJobs > 100 && Copied.InPlaceJobs == 0);
+		Test.TestTrue(*FString::Printf(TEXT("%s: in place, every MC seam job read in place"), Place), InPlace.SeamJobs > 100 && InPlace.InPlaceJobs == InPlace.SeamJobs);
+		const int32 ChunksDifferent = CountDifferentCrcs(Copied.ChunkCrcs, InPlace.ChunkCrcs);
+		const int32 SeamsDifferent = CountDifferentCrcs(Copied.SeamCrcs, InPlace.SeamCrcs);
+		Test.TestEqual(*FString::Printf(TEXT("%s: every chunk mesh the same (%d chunks)"), Place, InPlace.ChunkCrcs.Num()), ChunksDifferent, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: every seam bucket the same bit for bit (%d buckets)"), Place, InPlace.SeamCrcs.Num()), SeamsDifferent, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: every mesh and seam the same"), Place), InPlace.MeshCrc, Copied.MeshCrc);
+	}
+}
+
+/**
+ * G63 on a planet (45N 20E, Marching Cubes): the far-reads test's place and move, its seam frames reading their
+ * participants copied into a request (voxel.Seam.MCReadInPlace 0) and in place (1). Every chunk mesh and seam bucket, LOD 0,
+ * 1 and 2 and the mixed-LOD seams between them, must be the same bit for bit.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingMCSeamReadsTest,
+	"VoxelWorlds.Streaming.Planet.MCSeamReadInPlace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetStreamingMCSeamReadsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	const double Lat = FMath::DegreesToRadians(45.0);
+	const double Lon = FMath::DegreesToRadians(20.0);
+	const FVector Direction(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	const FVector East = FVector::CrossProduct(FVector::UpVector, Direction).GetSafeNormal();
+	auto Start = [&Direction](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetMCSeamReadsTestWorld"), Direction, 300.0f); };
+	RunMCSeamReadsPlace(*this, TEXT("45N 20E"), Start, East * 3000.0);
+	return true;
+}
+
+/** G63 on a heightmap world (Marching Cubes): the same over the plane of the far-reads test, moving 3,000 uu east. */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingMCSeamReadsTest,
+	"VoxelWorlds.Streaming.Plane.MCSeamReadInPlace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlaneStreamingMCSeamReadsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetStreamingTestUtils;
+
+	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneMCSeamReadsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
+	RunMCSeamReadsPlace(*this, TEXT("plane east"), Start, FVector(3000.0, 0.0, 0.0));
 	return true;
 }
 
