@@ -42,6 +42,17 @@ static TAutoConsoleVariable<float> CVarPlanetVoxelCutover(
 	TEXT("PlanetVoxelCutoverAltitude (0 there: three times the view distance), 0 = never (the window keeps its ground disk at any altitude)."),
 	ECVF_Default);
 
+// G49 (WORLD_MODES_REVIEW_PLAN.md §20.28): a suspended planet window resumes by the descent prefetch's lead only once the
+// camera itself is under the cut-over, so a fast descent that stops above the cut-over does not resume it for a moment.
+static TAutoConsoleVariable<int32> CVarPlanetCutoverResumeGuard(
+	TEXT("voxel.World.CutoverResumeGuard"),
+	1,
+	TEXT("Planets: 1 (default) = a suspended voxel window resumes only with the streaming viewer under the resume altitude\n")
+	TEXT("(0.85 of the cut-over) AND the camera under the cut-over (G49: the descent prefetch's lead resumes it from the\n")
+	TEXT("cut-over at most). 0 = wherever the lead takes the streaming viewer (the rule before: a descent stopping above the\n")
+	TEXT("cut-over resumed the window for a moment)."),
+	ECVF_Default);
+
 FDistanceBandLODStrategy::FDistanceBandLODStrategy()
 {
 	// Default LOD bands will be set during Initialize()
@@ -188,6 +199,8 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	PlanetSeaRadius = 0.0;
 	bPlanetWindowSuspended = false;
 	ViewerSurfaceAltitude = 0.0;
+	CameraSurfaceAltitude = 0.0;
+	bCutoverResumeHeld = false;
 	if (WorldMode == EWorldMode::SphericalPlanet)
 	{
 		const FSphericalPlanetParams Planet = FVoxelWorldModeFactory::MakePlanetParams(*WorldConfig);
@@ -299,14 +312,27 @@ void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float Del
 	{
 		const double SurfaceRadius = FMath::Max(GroundRadiusCached, PlanetSeaRadius);
 		ViewerSurfaceAltitude = FVector::Dist(Context.ViewerPosition, PlanetCenter) - SurfaceRadius;
+		// The camera is the viewer moved back up by the prefetch's lead, along the same direction (the same surface).
+		CameraSurfaceAltitude = ViewerSurfaceAltitude + FMath::Max(Context.ViewerLead, 0.0);
 		const bool bWasSuspended = bPlanetWindowSuspended;
-		bPlanetWindowSuspended = ComputeCutoverState(bWasSuspended, ViewerSurfaceAltitude, GetPlanetCutoverAltitude());
+		const double Cutover = GetPlanetCutoverAltitude();
+		const bool bByViewer = ComputeCutoverState(bWasSuspended, ViewerSurfaceAltitude, Cutover);
+		bPlanetWindowSuspended = CVarPlanetCutoverResumeGuard.GetValueOnAnyThread() != 0
+			? ComputeCutoverState(bWasSuspended, ViewerSurfaceAltitude, Cutover, CameraSurfaceAltitude)
+			: bByViewer;
+		const bool bWasResumeHeld = bCutoverResumeHeld;
+		bCutoverResumeHeld = bPlanetWindowSuspended && !bByViewer;
+		if (bCutoverResumeHeld && !bWasResumeHeld)
+		{
+			UE_LOG(LogVoxelLOD, Log, TEXT("Planet voxel window resume held (G49): the streaming viewer %.0f uu over the surface (under the resume altitude %.0f), the camera %.0f over it (over the cut-over %.0f)."),
+				ViewerSurfaceAltitude, Cutover * CutoverResumeFraction, CameraSurfaceAltitude, Cutover);
+		}
 		if (bPlanetWindowSuspended != bWasSuspended)
 		{
 			bBalancedLODCacheDirty = true;
-			UE_LOG(LogVoxelLOD, Log, TEXT("Planet voxel window %s at %.0f uu over the surface (cut-over %.0f, resumes below %.0f)."),
+			UE_LOG(LogVoxelLOD, Log, TEXT("Planet voxel window %s at %.0f uu over the surface, the camera at %.0f (cut-over %.0f, resumes below %.0f)."),
 				bPlanetWindowSuspended ? TEXT("SUSPENDED: the far field draws the planet") : TEXT("RESUMED"),
-				ViewerSurfaceAltitude, GetPlanetCutoverAltitude(), GetPlanetCutoverAltitude() * CutoverResumeFraction);
+				ViewerSurfaceAltitude, CameraSurfaceAltitude, Cutover, Cutover * CutoverResumeFraction);
 		}
 	}
 
@@ -646,9 +672,10 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 			IsPlanetNearBandActive(CachedViewerPosition) ? TEXT("on") : TEXT("off, above the surface slab"),
 			FVector::Dist(CachedViewerPosition, PlanetCenter) - PlanetRadius, GetPlanetNearBandCeiling(CachedViewerPosition));
 		Info += FString::Printf(TEXT("  Slab caches: %d cells, %d chunks\n"), PlanetCellSurfaceCache.Num(), PlanetChunkSlabCache.Num());
-		Info += FString::Printf(TEXT("  Voxel cut-over: %.0f over the surface (resumes below %.0f); viewer %.0f over it, window %s\n"),
-			GetPlanetCutoverAltitude(), GetPlanetCutoverAltitude() * CutoverResumeFraction, ViewerSurfaceAltitude,
-			bPlanetWindowSuspended ? TEXT("SUSPENDED") : TEXT("active"));
+		Info += FString::Printf(TEXT("  Voxel cut-over: %.0f over the surface (resumes below %.0f, the camera under the cut-over: %s); viewer %.0f over it, camera %.0f, window %s\n"),
+			GetPlanetCutoverAltitude(), GetPlanetCutoverAltitude() * CutoverResumeFraction,
+			CVarPlanetCutoverResumeGuard.GetValueOnAnyThread() != 0 ? TEXT("on") : TEXT("off"), ViewerSurfaceAltitude, CameraSurfaceAltitude,
+			bPlanetWindowSuspended ? (bCutoverResumeHeld ? TEXT("SUSPENDED (resume held: the camera over the cut-over)") : TEXT("SUSPENDED")) : TEXT("active"));
 	}
 
 	Info += TEXT("\n  Bands:\n");
@@ -803,6 +830,20 @@ bool FDistanceBandLODStrategy::ComputeCutoverState(bool bWasSuspended, double Al
 		return false;
 	}
 	return AltitudeOverSurface > (bWasSuspended ? CutoverAltitude * CutoverResumeFraction : CutoverAltitude);
+}
+
+bool FDistanceBandLODStrategy::ComputeCutoverState(bool bWasSuspended, double AltitudeOverSurface, double CutoverAltitude,
+	double CameraAltitudeOverSurface)
+{
+	if (CutoverAltitude <= 0.0)
+	{
+		return false;
+	}
+	if (bWasSuspended)
+	{
+		return AltitudeOverSurface > CutoverAltitude * CutoverResumeFraction || CameraAltitudeOverSurface > CutoverAltitude;
+	}
+	return AltitudeOverSurface > CutoverAltitude;
 }
 
 double FDistanceBandLODStrategy::GetPlanetCutoverAltitude() const

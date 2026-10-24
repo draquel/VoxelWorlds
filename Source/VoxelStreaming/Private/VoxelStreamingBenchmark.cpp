@@ -94,6 +94,7 @@ FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InCo
 		ChunkManager->ResetBenchCounters();
 		ChunkManager->SetBenchmarkView(true, CurrentPos);
 		LastTotalGenerated = ChunkManager->GetTotalChunksGenerated();
+		CutoverTransitionsAtStart = ChunkManager->GetCutoverTransitionCount();
 	}
 	FVoxelBatchCounters::Consume(); // the first sample counts the run's own frames only
 	Samples.Reserve(4096);
@@ -1059,6 +1060,31 @@ void FVoxelStreamingBenchmark::WriteReport()
 			ChunkManager->GetLODStrategy() ? ChunkManager->GetLODStrategy()->GetCutoverAltitude() : 0.0,
 			LODSamples > 0 ? static_cast<double>(SuspendedSamples) / LODSamples : 0.0, SuspendSurfaceAltitude, SuspendCameraAltitude,
 			ResumeSurfaceAltitude, ResumeCameraAltitude, LeadMax);
+		// The run's cut-over transitions (G49): each resume and suspension with the camera and the streaming viewer over
+		// the surface, and for a suspension how long the window had been active, the chunks it held and generated and the
+		// queued generations it dropped.
+		{
+			const TArray<FVoxelCutoverTransition>& Transitions = ChunkManager->GetCutoverTransitions();
+			const int64 FirstIndex = ChunkManager->GetCutoverTransitionCount() - Transitions.Num();
+			FString TransitionsJson;
+			int32 Resumes = 0;
+			int32 Suspensions = 0;
+			for (int32 i = 0; i < Transitions.Num(); ++i)
+			{
+				if (FirstIndex + i < CutoverTransitionsAtStart)
+				{
+					continue;
+				}
+				const FVoxelCutoverTransition& T = Transitions[i];
+				(T.bSuspended ? Suspensions : Resumes) += 1;
+				TransitionsJson += FString::Printf(TEXT("%s{\"t\": %.2f, \"state\": \"%s\", \"cameraOverSurface\": %.0f, \"viewerOverSurface\": %.0f, \"lead\": %.0f, \"activeSeconds\": %.2f, \"chunksHeld\": %d, \"generationsDropped\": %d, \"generatedSinceResume\": %lld, \"meshedSinceResume\": %lld}"),
+					TransitionsJson.IsEmpty() ? TEXT("") : TEXT(", "), T.Time, T.bSuspended ? TEXT("suspended") : TEXT("resumed"),
+					T.CameraOverSurface, T.ViewerOverSurface, T.Lead, T.ActiveSeconds, T.ChunksHeld, T.GenerationsDropped,
+					T.GeneratedSinceResume, T.MeshedSinceResume);
+			}
+			Json += FString::Printf(TEXT("  \"cutoverTransitions\": {\"resumes\": %d, \"suspensions\": %d, \"list\": [%s]},\n"),
+				Resumes, Suspensions, *TransitionsJson);
+		}
 		Json += FString::Printf(TEXT("  \"batchesDrawnP50\": %.0f,\n"), Percentile(BatchesArr, 0.50f));
 		Json += FString::Printf(TEXT("  \"batchesDrawnP95\": %.0f,\n"), Percentile(BatchesArr, 0.95f));
 		Json += FString::Printf(TEXT("  \"batchesDrawnMax\": %.0f,\n"), Percentile(BatchesArr, 1.0f));

@@ -322,6 +322,8 @@ private:
 
 	// Chunks generated when the last sample was taken (the per-tick GenDone column).
 	int64 LastTotalGenerated = 0;
+	// The chunk manager's cut-over transition count when the run started (the report lists the run's own; G49).
+	int64 CutoverTransitionsAtStart = 0;
 	/** The scatter renderer's instance totals at the last sample (ScatAddN / ScatRelN are the differences) */
 	int64 LastScatterAdded = -1;
 	int64 LastScatterRemoved = -1;

@@ -213,6 +213,34 @@ struct VOXELSTREAMING_API FVoxelResidencySnapshot
 };
 
 /**
+ * A change of a planet window's cut-over state (spherical Phase 6, WM-BP10), as the chunk manager records it for the
+ * bench, the log and tests (G49, WORLD_MODES_REVIEW_PLAN.md §20.28): when the window resumed or suspended, where the
+ * camera and the streaming viewer were, and for a suspension what the window had done since it last resumed.
+ */
+struct FVoxelCutoverTransition
+{
+	/** Seconds of streaming ticks since the world started, and the state entered: true = suspended, false = resumed. */
+	double Time = 0.0;
+	bool bSuspended = false;
+
+	/** The camera's and the streaming viewer's altitude over the surface under them (uu), and the prefetch's lead. */
+	double CameraOverSurface = 0.0;
+	double ViewerOverSurface = 0.0;
+	double Lead = 0.0;
+
+	/** Suspensions: seconds since the window last resumed (-1: active since the world started, never resumed). */
+	double ActiveSeconds = -1.0;
+
+	/** Suspensions: chunks loaded when it suspended (all of them unload), and queued generations evicted then. */
+	int32 ChunksHeld = 0;
+	int32 GenerationsDropped = 0;
+
+	/** Suspensions: chunks generated and meshed since the window last resumed (since the world started if it never did). */
+	int64 GeneratedSinceResume = 0;
+	int64 MeshedSinceResume = 0;
+};
+
+/**
  * A planet's far field (spherical Phase 6, D19: the analytic surface beyond the voxel window) as the bench and vox.Planet
  * report it. Inactive (all zero) until a far field exists.
  */
@@ -888,6 +916,15 @@ public:
 
 	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
 	double GetStreamingViewerLead() const { return StreamingViewerLead; }
+
+	/**
+	 * The window's cut-over transitions since the world started, oldest first (at most MaxCutoverTransitions kept; the
+	 * count of all of them is GetCutoverTransitionCount). G49's instrument: a suspension soon after a resume, with the
+	 * chunks it held and the generations it dropped, is the window resumed for nothing.
+	 */
+	const TArray<FVoxelCutoverTransition>& GetCutoverTransitions() const { return CutoverTransitions; }
+	int64 GetCutoverTransitionCount() const { return CutoverTransitionCount; }
+	static constexpr int32 MaxCutoverTransitions = 256;
 
 	/**
 	 * Pure: the descent prefetch's lead (WM-BP10): under a camera descending over a planet faster than MinDescentSpeed, the
@@ -1764,8 +1801,9 @@ protected:
 	 * without needing a post-load LOD transition. Evicts generation work beyond ViewDistance.
 	 *
 	 * @param Context Current LOD query context (viewer position, forward, etc.)
+	 * @return The generation requests evicted
 	 */
-	void ReprioritizeQueues(const FLODQueryContext& Context);
+	int32 ReprioritizeQueues(const FLODQueryContext& Context);
 
 protected:
 	// ==================== Configuration ====================
@@ -2708,6 +2746,14 @@ private:
 
 	/** The window's cut-over state on the last tick (IVoxelLODStrategy::IsWindowSuspended), to act when it changes. */
 	bool bWasWindowSuspended = false;
+
+	/** The cut-over transitions (GetCutoverTransitions), their count, and the last resume's time and counters (-1: none). */
+	TArray<FVoxelCutoverTransition> CutoverTransitions;
+	int64 CutoverTransitionCount = 0;
+	double CutoverClock = 0.0; // seconds of streaming ticks since the world started (the transitions' Time)
+	double LastWindowResumeTime = -1.0;
+	int64 GeneratedAtWindowResume = 0;
+	int64 MeshedAtWindowResume = 0;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;

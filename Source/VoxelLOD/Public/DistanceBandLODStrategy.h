@@ -187,6 +187,27 @@ public:
 	static bool ComputeCutoverState(bool bWasSuspended, double AltitudeOverSurface, double CutoverAltitude);
 
 	/**
+	 * Pure: the cut-over state with the camera apart from the streaming viewer (the descent prefetch; G49,
+	 * WORLD_MODES_REVIEW_PLAN.md §20.28). A suspended window resumes only with the viewer under CutoverResumeFraction of
+	 * the cut-over and the camera under the cut-over itself: the prefetch's lead brings the resume forward to the cut-over
+	 * at most, so a camera that stops above it never resumed the window, and one that stops under it keeps it (an active
+	 * window suspends with the viewer above the cut-over, as before, and the viewer is never above the camera).
+	 *
+	 * @param bWasSuspended The state before
+	 * @param AltitudeOverSurface The streaming viewer's altitude over the surface under it
+	 * @param CutoverAltitude The cut-over altitude (<= 0: never suspended)
+	 * @param CameraAltitudeOverSurface The camera's altitude over the same surface (the viewer's plus the lead)
+	 * @return Whether the window is suspended
+	 */
+	static bool ComputeCutoverState(bool bWasSuspended, double AltitudeOverSurface, double CutoverAltitude, double CameraAltitudeOverSurface);
+
+	/**
+	 * Whether the last Update held a suspended window that the streaming viewer alone would have resumed: the viewer under
+	 * the resume altitude by the prefetch's lead, the camera still over the cut-over (G49).
+	 */
+	bool IsCutoverResumeHeld() const { return bCutoverResumeHeld; }
+
+	/**
 	 * The cut-over altitude in force (uu over the surface; 0 = never): voxel.World.VoxelCutover when set (>= 0), else the
 	 * configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances. 0 on heightmap worlds.
 	 */
@@ -768,6 +789,10 @@ protected:
 	/** The cut-over state (IsWindowSuspended) and the altitude it was decided at (GetViewerSurfaceAltitude). */
 	bool bPlanetWindowSuspended = false;
 	double ViewerSurfaceAltitude = 0.0;
+
+	/** The camera's altitude over the same surface (the viewer's plus the context's ViewerLead), and whether it held a resume (G49). */
+	double CameraSurfaceAltitude = 0.0;
+	bool bCutoverResumeHeld = false;
 
 	// ==================== Runtime State ====================
 

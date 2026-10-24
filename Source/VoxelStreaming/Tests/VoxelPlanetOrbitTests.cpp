@@ -31,6 +31,8 @@
 //   hold nothing, the far field cuts no hole; between the resume altitude and the cut-over it stays empty; under the
 //   resume altitude it streams back, the edited chunk with it. A camera descending fast from above the cut-over resumes
 //   the window while it is still above the resume altitude, with the streaming viewer under it and over the ground.
+// - G49 (§20.28): a descent that stops above the cut-over no longer resumes the window for a moment (the lead resumes it
+//   with the camera under the cut-over at the earliest); one that stops under it keeps it.
 // ---------------------------------------------------------------------------
 
 namespace VoxelPlanetOrbitTestUtils
@@ -308,6 +310,177 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 		CutoverVar->Set(Saved, ECVF_SetByCode);
 	}
 
+	W.Stop();
+	return true;
+}
+
+/**
+ * G49 (WORLD_MODES_REVIEW_PLAN.md §20.28): a fast descent that stops above the cut-over, in the chunk manager above (the
+ * cut-over C 6,000 over the terrain or sea, resuming below 5,100), descending from 3 C at 18,000 uu/s:
+ * - stopping at 1.4 C and held 3 s: with voxel.World.CutoverResumeGuard 0 (the rule before) the prefetch's lead resumes
+ *   the window and, once the camera has stopped, it suspends again with what it loaded and queued for nothing; with 1 it
+ *   never resumes and holds no chunk;
+ * - stopping at 0.92 C (under the cut-over, over the resume altitude) and held 3 s: under both rules it resumes during the
+ *   descent and stays resumed (the camera under the cut-over keeps it), then settles with its ground disk;
+ * - with the cut-over at 40,000 (voxel.World.VoxelCutover; the band between the resume altitude and the cut-over 6,000):
+ *   a descent at 1,800 uu/s, whose lead (5,400) stays inside the band, resumes at the same camera altitude under both
+ *   rules; one at 6,000 uu/s (lead 18,000) resumes with the camera over the cut-over under the old rule and at the
+ *   cut-over under the guard.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetCutoverDescentStopTest,
+	"VoxelWorlds.Streaming.Planet.CutoverDescentStop",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetCutoverDescentStopTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetOrbitTestUtils;
+
+	IConsoleVariable* GuardVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.CutoverResumeGuard"));
+	IConsoleVariable* CutoverVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.VoxelCutover"));
+	IConsoleVariable* LeadVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.DescentLead"));
+	TestNotNull(TEXT("voxel.World.CutoverResumeGuard exists"), GuardVar);
+	if (!GuardVar || !CutoverVar || !LeadVar)
+	{
+		return false;
+	}
+	const int32 SavedGuard = GuardVar->GetInt();
+	const float SavedCutover = CutoverVar->GetFloat();
+	const float SavedLead = LeadVar->GetFloat();
+	LeadVar->Set(3.0f, ECVF_SetByConsole);
+
+	FOrbitWorld W;
+	W.Start(TEXT("VoxelPlanetCutoverStopTestWorld"));
+	const FVector Up = FVector(0.3, -0.2, 1.0).GetSafeNormal();
+	const FVoxelTerrainSurfacePoint Ground = W.Manager->GetSurfacePointAt(Up);
+	const double SurfaceRadius = FMath::Max(static_cast<double>(Radius) + Ground.Altitude, static_cast<double>(W.Config->WaterRadius));
+	auto At = [&Up, SurfaceRadius](double OverSurface) { return Up * (SurfaceRadius + OverSurface); };
+	const double Cutover = W.Manager->GetLODStrategy()->GetCutoverAltitude();
+	const double Resume = Cutover * FDistanceBandLODStrategy::CutoverResumeFraction;
+
+	struct FDescent
+	{
+		double ResumedAt = -1.0;       // the camera over the surface at the first resume (-1: none)
+		int32 Resumes = 0;
+		int32 Suspensions = 0;
+		int32 MaxLoaded = 0;           // chunks loaded at any tick
+		int32 HeldAtSuspensions = 0;   // chunks the suspensions unloaded
+		int32 Dropped = 0;             // queued generations the suspensions evicted
+		int64 Generated = 0;           // chunks generated in the windows the suspensions ended
+		bool bSuspendedAtEnd = false;
+	};
+	// From From down to To at Speed (uu a tick at 60 Hz), held HoldTicks there, stopping at the first resume if asked.
+	auto Descend = [&](double From, double To, double SpeedPerTick, int32 HoldTicks, bool bStopAtResume)
+	{
+		FDescent Out;
+		const int64 Start = W.Manager->GetCutoverTransitionCount();
+		double CameraOver = From;
+		int32 Hold = 0;
+		while (Hold < HoldTicks)
+		{
+			if (CameraOver > To)
+			{
+				CameraOver = FMath::Max(CameraOver - SpeedPerTick, To);
+			}
+			else
+			{
+				++Hold;
+			}
+			W.Manager->SetBenchmarkView(true, At(CameraOver));
+			W.Tick();
+			Out.MaxLoaded = FMath::Max(Out.MaxLoaded, W.Manager->GetLoadedChunkCount());
+			if (Out.ResumedAt < 0.0 && !W.Manager->IsVoxelWindowSuspended())
+			{
+				Out.ResumedAt = CameraOver;
+				if (bStopAtResume)
+				{
+					break;
+				}
+			}
+		}
+		const TArray<FVoxelCutoverTransition>& Transitions = W.Manager->GetCutoverTransitions();
+		const int64 First = W.Manager->GetCutoverTransitionCount() - Transitions.Num();
+		for (int32 I = 0; I < Transitions.Num(); ++I)
+		{
+			if (First + I < Start)
+			{
+				continue;
+			}
+			const FVoxelCutoverTransition& T = Transitions[I];
+			if (T.bSuspended)
+			{
+				++Out.Suspensions;
+				Out.HeldAtSuspensions += T.ChunksHeld;
+				Out.Dropped += T.GenerationsDropped;
+				Out.Generated += T.GeneratedSinceResume;
+			}
+			else
+			{
+				++Out.Resumes;
+			}
+		}
+		Out.bSuspendedAtEnd = W.Manager->IsVoxelWindowSuspended();
+		return Out;
+	};
+	auto Describe = [](const FDescent& D)
+	{
+		return FString::Printf(TEXT("resumed with the camera %.0f over the surface, %d resume(s), %d suspension(s), at most %d chunks loaded, %d held and %d queued generations dropped at the suspensions, %lld generated in between, suspended at the end %d"),
+			D.ResumedAt, D.Resumes, D.Suspensions, D.MaxLoaded, D.HeldAtSuspensions, D.Dropped, D.Generated, D.bSuspendedAtEnd ? 1 : 0);
+	};
+	constexpr double Fast = 300.0; // 18,000 uu/s at 60 Hz
+
+	// A stop at 1.4 C, held 3 s.
+	FDescent StopHigh[2];
+	for (int32 Guard = 0; Guard < 2; ++Guard)
+	{
+		GuardVar->Set(Guard, ECVF_SetByConsole);
+		TestTrue(TEXT("Settled over the cut-over"), W.SettleAt(At(3.0 * Cutover)));
+		StopHigh[Guard] = Descend(3.0 * Cutover, 1.4 * Cutover, Fast, 180, false);
+		AddInfo(FString::Printf(TEXT("Guard %d, stop at 1.4 C (%.0f): %s"), Guard, 1.4 * Cutover, *Describe(StopHigh[Guard])));
+	}
+	TestTrue(TEXT("Rule before: the lead resumed the window over the cut-over"), StopHigh[0].Resumes >= 1 && StopHigh[0].ResumedAt > Cutover);
+	TestTrue(TEXT("Rule before: ... and it suspended again once the camera stopped"), StopHigh[0].Suspensions >= 1 && StopHigh[0].bSuspendedAtEnd);
+	TestTrue(TEXT("Rule before: ... with work done or queued for nothing"), StopHigh[0].HeldAtSuspensions + StopHigh[0].Dropped > 0);
+	TestEqual(TEXT("Guard: no resume"), StopHigh[1].Resumes, 0);
+	TestEqual(TEXT("Guard: no suspension"), StopHigh[1].Suspensions, 0);
+	TestEqual(TEXT("Guard: no chunk loaded"), StopHigh[1].MaxLoaded, 0);
+	TestTrue(TEXT("Guard: suspended throughout"), StopHigh[1].bSuspendedAtEnd);
+
+	// A stop at 0.92 C (under the cut-over, over the resume altitude), held 3 s.
+	FDescent StopLow[2];
+	for (int32 Guard = 0; Guard < 2; ++Guard)
+	{
+		GuardVar->Set(Guard, ECVF_SetByConsole);
+		TestTrue(TEXT("Settled over the cut-over"), W.SettleAt(At(3.0 * Cutover)));
+		StopLow[Guard] = Descend(3.0 * Cutover, 0.92 * Cutover, Fast, 180, false);
+		AddInfo(FString::Printf(TEXT("Guard %d, stop at 0.92 C (%.0f): %s"), Guard, 0.92 * Cutover, *Describe(StopLow[Guard])));
+		TestTrue(*FString::Printf(TEXT("Guard %d: resumed during the descent"), Guard), StopLow[Guard].Resumes == 1 && StopLow[Guard].ResumedAt > Resume);
+		TestTrue(*FString::Printf(TEXT("Guard %d: stays resumed under the cut-over"), Guard), StopLow[Guard].Suspensions == 0 && !StopLow[Guard].bSuspendedAtEnd);
+		TestTrue(*FString::Printf(TEXT("Guard %d: settles with its ground disk"), Guard), W.SettleAt(At(0.92 * Cutover)) && !W.Manager->IsVoxelWindowSuspended() && W.Manager->GetLoadedChunkCount() > 30);
+	}
+	TestTrue(TEXT("Rule before: the resume came with the camera over the cut-over"), StopLow[0].ResumedAt > Cutover);
+	TestTrue(TEXT("Guard: the resume came with the camera at the cut-over (within a tick)"), StopLow[1].ResumedAt <= Cutover && StopLow[1].ResumedAt >= Cutover - Fast);
+
+	// The cut-over at 40,000: a lead inside the band changes nothing; a lead past it moves the resume to the cut-over.
+	CutoverVar->Set(40000.0f, ECVF_SetByConsole);
+	const double Wide = 40000.0;
+	FDescent Slow[2], Quick[2];
+	for (int32 Guard = 0; Guard < 2; ++Guard)
+	{
+		GuardVar->Set(Guard, ECVF_SetByConsole);
+		TestTrue(TEXT("Settled over the wide cut-over"), W.SettleAt(At(Wide + 6000.0)));
+		Slow[Guard] = Descend(Wide + 6000.0, 300.0, 30.0, 1, true);
+		TestTrue(TEXT("Settled over the wide cut-over"), W.SettleAt(At(1.5 * Wide)));
+		Quick[Guard] = Descend(1.5 * Wide, 300.0, 100.0, 1, true);
+		AddInfo(FString::Printf(TEXT("Guard %d, C 40,000: 1,800 uu/s %s; 6,000 uu/s %s"), Guard, *Describe(Slow[Guard]), *Describe(Quick[Guard])));
+	}
+	TestTrue(TEXT("A lead inside the band: the same resume under both rules"), Slow[0].ResumedAt > 0.0 && FMath::IsNearlyEqual(Slow[0].ResumedAt, Slow[1].ResumedAt, 0.5));
+	TestTrue(TEXT("... with the camera under the cut-over"), Slow[1].ResumedAt <= Wide);
+	TestTrue(TEXT("A lead past the band, rule before: resumed with the camera over the cut-over"), Quick[0].ResumedAt > Wide + 1000.0);
+	TestTrue(TEXT("... guard: at the cut-over"), Quick[1].ResumedAt <= Wide && Quick[1].ResumedAt > Wide - 100.0);
+
+	CutoverVar->Set(SavedCutover, ECVF_SetByConsole);
+	GuardVar->Set(SavedGuard, ECVF_SetByConsole);
+	LeadVar->Set(SavedLead, ECVF_SetByConsole);
 	W.Stop();
 	return true;
 }

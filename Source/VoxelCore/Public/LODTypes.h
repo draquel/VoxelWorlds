@@ -43,6 +43,14 @@ struct VOXELCORE_API FLODQueryContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	float ViewDistance = 10000.0f;
 
+	/**
+	 * Planets: how far ViewerPosition (the streaming viewer) lies under the camera along local down, by the descent prefetch
+	 * (spherical Phase 6, WM-BP10); 0 = the viewer is the camera. The voxel cut-over reads the camera's altitude from it
+	 * (G49: a suspended window resumes only with the camera under the cut-over).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	double ViewerLead = 0.0;
+
 	/** Field of view in degrees (for frustum calculations) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	float FieldOfView = 90.0f;
