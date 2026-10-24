@@ -286,6 +286,7 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D24 | Relief clamps and test-planet sizes *(decided 2026-10-17)* | **10 km** (1,000,000 uu) for `PlanetMaxTerrainHeight`, `PlanetMaxTerrainDepth` and `PlanetHeightScale`; test planets `Review_Planet_M` (R 5 × 10⁶, 50 km) and `Review_Planet_L` (R 10⁸, 1,000 km) (§20.1) |
 | D25 | G27: keep GPU scatter extraction and feed it each chunk's owned seam meshes, or retire it? *(decided 2026-10-18)* | **Retire it**, as GPU DC interior meshing was: every chunk extracts surface points from its voxels on the CPU (3.7 ms mean per 64³ chunk on a worker). Keeping it meant waiting for or appending each chunk's owned seams (which depend on the neighbours and rebuild on LOD changes) and a dynamic output buffer, for a path that stays nondeterministic and makes a different point set from the column scan that extracts about 90% of chunks. `bUseGPUScatterExtraction` stays, ignored, so assets load (§19.5). D17 to D24 are the spherical Phase 6 plan's (draquel/VoxelWorlds#106) |
 | D26 | G31: give each crossing of a planet chunk's own lines to the chunk containing it, or sample one line family for every chunk? *(decided 2026-10-18)* | **One family of radial rays on the cube-sphere grid**: one ray from the planet's centre per cell of `FVoxelCubeSphereGrid` at the point spacing, the same rays for every chunk, each chunk keeping the crossings inside its own box. Ownership alone keeps each chunk's staircase rounding (thin samples inside chunks, 116 of 230 at 30°N 40°E four voxels or more from any face) and still has a line decide whether the neighbour's line makes the point at a face; with one family there is nothing to decide. The spawn weight is the grid cell's area at the point, so the density per area holds on every part of the grid (§19.9) |
+| D27 | G43: which continuous corner kernel for the planet Simplex noise, and for which worlds? *(decided 2026-10-23)* | **The tangent-corrected kernel, planets only:** the classic (0.6 − d²)⁴ less its value and slope at d² = 0.5, v²(v² + 0.4v + 0.06) with v = 0.5 − d², its sum scaled by 33.25 for the classic spread: no step and smooth normals, within 1.2% rms of the classic noise (correlation 0.9996), so every planet keeps its landscape. Rejected: the value-corrected (0.6 − d²)⁴ − 0.1⁴ (closer, 0.2% rms, but a crease in the slope along every boundary) and the textbook (0.5 − d²)⁴ (7% rms, worst 35%: visibly different shapes). `PlanetGenerationVersion` 6 refuses earlier planet saves; heightmap worlds keep the classic kernel, whose steps there are about a quarter voxel, and `GenerationVersion` 2 (§20.24) |
 
 ## 9. Order of work
 
@@ -1456,7 +1457,7 @@ Three findings from §13.11 get IDs here:
 | G13 | The vertical range follows the viewer's altitude | Fixed in M4 (WM-S1, §14.8): at z 7,200 layers −3 and −2 load under the flight on both sides, and from 48,000 uu up island S streams whole. The planet's version (a viewer-Z clip and a 3D horizon: a climbing viewer lost the ground) fixed in spherical Phase 6's P6.3 (WM-BP8, §20.4) | WM-S1, WM-S4, WM-BP8 |
 | G14 | The first PIE of an editor session re-meshes far more for LOD than later runs on the same route (533 against 287-304 on the control's 40,000 uu chord, in two sessions; §14.8) | Open (tooling), not investigated: start a bench batch with a throwaway PIE | — |
 | G15 | A recreated scene proxy dropped every chunk mesh, seam bucket and water tile it held (found in M5's C4, §14.9) | Fixed in M5: the chunk manager re-sends them (`RecoverLostRenderData`), every meshing mode | (WM-C1) |
-| G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Fixed 2026-10-24 (§20.24): not the material's but the engine's. Without front-layer reflections Lumen reflects translucent surfaces from its radiance cache and marks the probes they need at 1/4 of the screen (`r.Lumen.TranslucencyReflections.MarkDownsampleFactor` 4); at grazing angles kilometres of sea fall in a few pixel rows, probe cells along the view are skipped and the water's reflection is dark there. Traced by switching one thing at a time (fog, clouds, atmosphere, the sky light's cubemap, the material's normal, roughness and emissive changed nothing; specular 0, front-layer reflections, the radiance cache's reflections off and factor 2 or 1 removed them). Fixed with `r.Lumen.TranslucencyReflections.MarkDownsampleFactor=1` in the project's `Config/DefaultEngine.ini`: on island M 2-10 dark rows a view at 100 and 300 uu over the sea -> 0, the mark pass 0.013 -> 0.033 ms at 1280 x 722 | — |
+| G16 | The water material (`M_Water`) draws thin dark bands just under its horizon at grazing angles, at fixed screen rows (found in M6, §14.10). The water tiles alone show them on island M with the far ocean hidden; until M6 the water ended before the distance where they appear | Fixed 2026-10-24 (§20.25): not the material's but the engine's. Without front-layer reflections Lumen reflects translucent surfaces from its radiance cache and marks the probes they need at 1/4 of the screen (`r.Lumen.TranslucencyReflections.MarkDownsampleFactor` 4); at grazing angles kilometres of sea fall in a few pixel rows, probe cells along the view are skipped and the water's reflection is dark there. Traced by switching one thing at a time (fog, clouds, atmosphere, the sky light's cubemap, the material's normal, roughness and emissive changed nothing; specular 0, front-layer reflections, the radiance cache's reflections off and factor 2 or 1 removed them). Fixed with `r.Lumen.TranslucencyReflections.MarkDownsampleFactor=1` in the project's `Config/DefaultEngine.ini`: on island M 2-10 dark rows a view at 100 and 300 uu over the sea -> 0, the mark pass 0.013 -> 0.033 ms at 1280 x 722 | — |
 | G17 | Small holes in DC face seams between chunks of different LOD: two open-edge loops of 5 or 6 edges where a face seam joins chunks at LOD 1 and 2 (also 0 and 1), found by spherical Phase 1's closed-surface test at the pole, 45° and the equator, and reproduced on an InfinitePlane chunk manager (§15.2). The seam is ready and clean when measured; MS1's unit tests do not cover 1\|2 or noise terrain | Fixed (§15.3): a fine crossing faced a coarse cell with no crossing at its own stride and the fan onto it was skipped; such a cell now gets a boundary fallback vertex in the mixed face, edge and corner meshers. `MS4_MixedFaceClosureNoise` covers 0\|1 to 2\|0 on noise terrain, and `Streaming.{Planet,Plane}.ClosedSurface` fail on any G17 gap | — |
 | G18 | The GPU generator's heightmap branch ignores the cave configuration's biome overrides (`BiomeOverrides`) and `UnderwaterMinDepth`, which the CPU applies (`CalculateCaveDensity`); the `GPUvsCPUCavesParity` test leaves them out on purpose ("a documented GPU gap"). The demo's cave configuration uses both (Ocean scale 0, underwater minimum depth 25), so GPU heightmap worlds carve caves under the sea and in the Ocean biome where CPU worlds stay solid (found in spherical Phase 2, §16) | Fixed (§16.3): one cave carve for every world mode (`GpuCaveCarve`, the planet's generalised), after the biome blend as on the CPU. `GPUvsCPUCavesParity` adds four cases that fail on the old shader (biome scale 1.25 with a minimum-depth override, scale 0, scale 0.5, a chunk under the sea with `UnderwaterMinDepth`); every earlier parity case, planet included, keeps its CRC. `GenerationVersion` 2 (D10) | — |
 | G19 | Heightmap water consumers disagree on the water plane: generation, scatter, the map and PCG compare with `WaterLevel`; navigation, the character and the NPC spawner with `WaterLevel + WorldOrigin.Z` (found in spherical Phase 3, §17). They agree whenever `WorldOrigin.Z` is 0, as in every configuration in the project | Fixed in §20.20 (2026-10-23): the sea is `WaterLevel` in world Z, where generation floods and the tiles draw (the terrain's heights are absolute; `WorldOrigin` moves only the grid). `FromConfigOriginRelative` and `GetSeaSurface`'s parameter are gone; navigation, the character, the NPC spawner, the debug commands, `GetSeaDepthAt` and the LOD slab read the one plane, and the water pull, the edit-driven flood and the tiles' chunk filter (which passed grid positions: the origin-relative plane again) test world positions. No project world changes (every configuration has `WorldOrigin.Z` 0); tests with `WorldOrigin.Z` -20,000 to 9,000 | — |
@@ -1483,7 +1484,7 @@ Three findings from §13.11 get IDs here:
 | G40 | The planet ocean shell (`FVoxelPlanetOcean`) stores absolute float vertices of size R around the centre (8 uu steps on L) and its 160 quads a face edge sag up to 3,189 uu on `Review_Planet_L` (159 on M, 8 on the small planet) (§20.3) | Fixed in P6.4 (WM-BP9, §20.5): where the shell would sag past its 8 uu budget (M, L) the far field draws the sea, a section of each patch at sea level with offsets of the patch's size and an 8 x 8 grid (sag under a uu near the viewer); the small planet keeps its shell | WM-BP9 |
 | G41 | A teleport sweeps the streaming viewer through the planet: the third-person camera's pivot lags toward the pawn (`UVCThirdPersonCameraMode`, `VInterpTo` at `LagSpeed`), and the camera is the streaming viewer, so for a few frames after `vox.TP` / `vox.TPLatLon` it travels the straight line from the old spot. With the planet's horizon along the ground (WM-BP8) the window loads the ground under each direction it passes, and what lies within the unload distance of the arrival stays: on the small planet at 46.1°N 1,244 chunks after a settle from the pole, 997 arriving in held flight (§20.4) | Fixed in P6.5 (§20.6): the lagged pivot snaps when the ideal pivot jumps more than `TeleportSnapDistance` (5,000 uu) in a frame (`UVCThirdPersonCameraMode::ComputeLaggedPivot`, `VoxelCharacter.Camera.TeleportSnap`) | WM-BP10 |
 | G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Fixed in §20.10: scatter's HISM writes. A UE 5.8 HISM rebuilds its cluster tree and recreates its scene proxy (every instance, pooled ones too, re-registered with the distance-field and ray-tracing scenes) for each change not in place, and the streaming touched the HISMs around the viewer nearly every frame. Writes are now batched per HISM (at most every 0.1 s, not during a tree build, releases in place, no render-state dirtying), pooled HISMs compacted, and a planet keeps 4-chunk scatter regions. The great circles' frame P95 −31% (M) and −23% (L), within 3% of the small planet's land route (its 45°N great circle runs 65% under the sea) | WM-BP13 |
-| G43 | The planet terrain steps across simplex-cell boundaries: `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`, and the heightmap noise's Simplex3D) use the 0.6 kernel radius (Gustavson's), which reaches past the simplex, so a corner's contribution drops out abruptly where a sample crosses into the next simplex. In world space the planes x = ±y, y = ±z and x = ±z through the planet centre lie on a simplex boundary in every octave at once, and they are the cube sphere's face edges: directions 10⁻⁸ rad apart across x = z differ in altitude by up to 11 uu on the small planet and 136 uu on `Review_Planet_L` (measured by `FarField.Planet.MatchesSurface`'s first build, P6.4, §20.5). Elsewhere one octave's boundary at a time gives smaller steps. The voxel terrain has them too (under a voxel on the small planet, up to about two along L's face edges) | Open (low): a 0.5 kernel is continuous but changes every planet's terrain (`PlanetGenerationVersion` bump; the heightmap Simplex3D a `GenerationVersion` bump and its parity CRCs). The far field samples a face edge's vertices exactly on the plane from both faces (`FVoxelFarFieldPatchKey::GetDirection`), so its patches meet there | — |
+| G43 | The planet terrain steps across simplex-cell boundaries: `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`, and the heightmap noise's Simplex3D) use the 0.6 kernel radius (Gustavson's), which reaches past the simplex, so a corner's contribution drops out abruptly where a sample crosses into the next simplex. In world space the planes x = ±y, y = ±z and x = ±z through the planet centre lie on a simplex boundary in every octave at once, and they are the cube sphere's face edges: directions 10⁻⁸ rad apart across x = z differ in altitude by up to 11 uu on the small planet and 136 uu on `Review_Planet_L` (measured by `FarField.Planet.MatchesSurface`'s first build, P6.4, §20.5). Elsewhere one octave's boundary at a time gives smaller steps. The voxel terrain has them too (under a voxel on the small planet, up to about two along L's face edges) | Fixed in §20.24 (2026-10-23; decision D27, planets only): the planet Simplex's corner kernel is the classic one less its value and slope at d² = 0.5 (`FVoxelPlanetNoise`, `PlanetNoise.ush`; `voxel.Planet.ContinuousSimplex` 0 = before), scaled for the same spread, so the noise has no step and no slope change across any simplex boundary and stays within 1.2% rms of the classic; across the 12 face edges the altitude stepped by up to 6.6 uu on the small planet and 465 uu on L (terrain noise alone), now 0.001 and 0.18 uu (the terrain's own change over 2 × 10⁻⁹ rad); `PlanetGenerationVersion` 6; heightmap worlds keep the classic kernel (their steps are about a quarter voxel) | — |
 | G44 | On a planet the voxel window's LOD 2 chunks light brighter than its LOD 0 and 1 chunks and the far field: from straight above `Review_Planet_L` at 45°N 20°E under a midday sun the window is a ring (the LOD 2 band) brighter than both its centre and the far field around it, and the normal buffer shows the ring's normals off the others' (whiter); the centre and the far field match. Not the far field's: the same material instance (swapping in a region component's makes no difference), the same material ids and vertex conventions (unlit the window's edge vanishes), shadows not involved; the far field's grid normals equal the planet's analytic `GetConditionedSurfacePoint` normals, and only giving it radial normals matches the ring. It shows as a brightness step along the window's edge from altitude, over land and through the sea (§20.5) | Fixed 2026-10-20 (§20.8): the DC mesher's crossing normals took their gradient taps `Stride` voxels apart, and generated density saturates a voxel either side of the surface, so at stride 4 each component was a sign and LOD 2's normals snapped toward the cube diagonals (LOD 1's less). A strided cell's vertex normal is now LOD 0's at the voxel crossing nearest the vertex (`VoxelDCShading`); the QEF keeps the stride-scale normals, so no vertex moves. From straight above L at 45°N 20°E the ring against the centre 1.16 → 1.01 and the window no longer told from the far field; LOD 2's tilt on gentle relief 6.4° → 0.7°; `Streaming.{Planet,Plane}.LODNormals`; `voxel.Mesh.VoxelShadingNormals`. Heightmap worlds had it on slopes. G25 was found to be the chunk faces' share of the same lighting and fixed with it | WM-BP13 |
 | G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Open (cosmetic; the orbit view, WM-BP10, shows it most): blend the materials across a far-field quad (per-vertex material weights, or a per-patch material texture). Not taken in P6.5: it needs the terrain material to blend two materials within a triangle, which the voxel meshes do not do either (`DC_MATERIAL_BLEND_PLAN.md`, deferred). Since P6.5 it also shows under the viewer just above the cut-over, where the window has emptied (§20.6) | WM-BP10 |
 | G46 | The volumetric cloud layer keeps the engine's Earth altitudes (5 km floor, 10 km thick) when the atmosphere is scaled to the planet: from orbit over the 50 km test planet a ring of clouds floats well outside its 9.7 km of air, and on the small planet the layer is 60 times its relief (found in P6.5's orbit survey, §20.6) | Fixed in P6.5 (§20.6): `ADayNightController::ApplyPlanetSky` scales every cloud layer with the atmosphere (`ComputePlanetCloudLayer`: the thickness by K, the floor by K but at least the terrain's top); `WorldClock.Planet.Sky`, `.SkyScale` | WM-BP10 |
@@ -2361,7 +2362,7 @@ Three artefacts found on the way and what came of them:
 - **Dark bands just under the horizon** at sea level, at fixed screen rows from any position: not the far ocean. With the
   far ocean hidden, the loaded water tiles over island M's coastal sea show the same bands (`mtiles_off`); fog, volumetric
   fog, anti-aliasing and the sky sphere are not involved. The water material draws them at grazing angles; until M6 no
-  water reached that distance. Recorded as G16 (§14.1), cosmetic, not changed here. Fixed in §20.24 (a Lumen setting).
+  water reached that distance. Recorded as G16 (§14.1), cosmetic, not changed here. Fixed in §20.25 (a Lumen setting).
 
 **The edge, `vox.Edge` checks on S** (fresh world, water on):
 
@@ -6603,7 +6604,7 @@ tests pass unchanged.
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G43 | The planet terrain steps across the simplex lattice's boundaries (the 0.6 kernel radius), and the planes x = ±y, y = ±z, x = ±z, the cube sphere's face edges, are a boundary in every octave: up to 11 uu on the small planet and 136 uu on L between directions 10⁻⁸ rad apart, found by `MatchesSurface`'s first build | Open (low): a 0.5 kernel changes every planet's terrain (`PlanetGenerationVersion`); the far field samples a face edge on its plane from both faces |
+| G43 | The planet terrain steps across the simplex lattice's boundaries (the 0.6 kernel radius), and the planes x = ±y, y = ±z, x = ±z, the cube sphere's face edges, are a boundary in every octave: up to 11 uu on the small planet and 136 uu on L between directions 10⁻⁸ rad apart, found by `MatchesSurface`'s first build | Fixed in §20.24: a continuous kernel, the classic one less its value and slope at d² = 0.5, planets only (`PlanetGenerationVersion` 6, D27) |
 | G44 | The voxel window's LOD 2 ring lights brighter than its LOD 0/1 centre and the far field (its normals off in the normal buffer); the far field's normals are the analytic surface's | Fixed in §20.8: LOD 1 and 2 vertex normals from voxel-resolution gradients |
 | G45 | Far-field material borders are stepped along its quads (one material a quad), a few km a step at the horizon and every biome border a staircase from orbit | Open (cosmetic): blend materials across a quad (WM-BP10's orbit view shows it most) |
 
@@ -8904,9 +8905,119 @@ chunks are the same size.
 
 G72 is fixed.
 
-### 20.24 G16: the water's dark lines under the horizon (2026-10-24)
+### 20.24 G43: the planet Simplex noise continuous across the simplices (2026-10-23)
 
-Bases: VoxelWorlds `b46375b`, UE5_PluginDev `187d9c5` (G72 merged). Branches `fix/g16-water-horizon-bands` (VoxelWorlds) and
+Bases: VoxelWorlds `b46375b`, UE5_PluginDev `187d9c5` (G72 merged). Branches `fix/g43-simplex-kernel` (VoxelWorlds) and
+`claude/g43-simplex-kernel` (UE5_PluginDev). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`; tests headless
+and in a worktree editor (Claudius on 8098). The user chose the tangent-corrected kernel and planets only (decision D27).
+
+**The finding** (§20.5): `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`) weighted each simplex corner by Gustavson's
+(0.6 − d²)⁴. A point's nearest corner outside its own simplex is √0.5 away, so that weight reaches past the simplex, and a
+corner's contribution dropped out where a sample crossed into the next simplex: a step in the noise. The corner order's
+planes x = y, y = z and x = z through the origin are a boundary in every octave at once, and on a planet they are the cube
+sphere's face edges.
+
+**Measured first** (a numpy model of the engine's simplex, then the tests below):
+
+- The classic kernel steps by up to 0.0043 of the noise's ±1 range at an arbitrary boundary and 0.0064 on the planes
+  through the origin, per octave; the slope jumps by up to 0.35 there.
+- Across the 12 face edges (directions 2 × 10⁻⁹ rad apart), the altitude stepped by up to 6.6 uu on the small planet's
+  terrain noise, 465 uu on `Review_Planet_L`'s (more than P6.4's first sample, 136), and as configured 13 uu on
+  `Review_Planet`, 91 uu on `_M` and 300 uu on `_L` (about four voxels). Only the six edges on x = y, y = z and x = z
+  step; the six on x = −y, y = −z and x = −z are not lattice boundaries.
+- Heightmap worlds have the same kernel (`FVoxelCPUNoiseGenerator::Simplex3D`, `SimplexNoise.ush`). Estimated from the
+  model with the demo's noise (three octaves, ±3,000 uu): at most about 20 uu, a quarter voxel, where every octave steps
+  together (in the z = 0 slice the lines x = y, x = 0 and y = 0 of the noise's coordinates), less elsewhere.
+
+**The kernels considered** (the classic sum scaled 32; each candidate scaled by least squares to the classic spread):
+
+| Kernel w(d²), v = 0.5 − d² | Step | Slope | Correlation with the classic | Difference (rms / worst, of ±1) |
+|---|---|---|---|---|
+| Classic (0.6 − d²)⁴ | 0.0064 | jumps | 1 | — |
+| Value-corrected (0.6 − d²)⁴ − 0.1⁴ | 0 | a crease (a few percent) | 0.99999 | 0.002 / 0.010 |
+| **Tangent-corrected** v²(v² + 0.4v + 0.06) | 0 | continuous | 0.9996 | 0.012 / 0.059 |
+| v³(v + 0.4) (C2) | 0 | continuous | 0.996 | 0.036 / 0.18 |
+| Textbook (0.5 − d²)⁴ | 0 | continuous | 0.985 | 0.074 / 0.35 |
+
+They are one family: the classic weight less its Taylor expansion at d² = 0.5 to order 0, 1, 2 and 3 (the textbook kernel).
+The user chose the tangent-corrected one (D27): no step, a continuous slope, and the same landscape.
+
+**What changed** (planets only):
+
+- `FVoxelPlanetNoise::Simplex` and its double reference: each corner weighs v²(v² + 0.4v + 0.06), v = 0.5 − d², and the
+  sum is scaled by 33.25 instead of 32 (the classic spread). `PlanetNoise.ush` the same, from `PlanetSimplexContinuous`.
+  Every planet field moves slightly with it: terrain, continentalness, temperature, moisture, caves and ores.
+- `voxel.Planet.ContinuousSimplex` (default 1; 0 = the classic kernel, for A/B only: version 6 saves do not match it).
+- `FVoxelWorldModeFactory::PlanetGenerationVersion` 5 → 6: earlier planet saves are refused and kept. Heightmap worlds keep
+  the classic kernel and `GenerationVersion` 2.
+
+**Tests:**
+
+- **`Noise.PlanetSimplexContinuous`** (new): 3,000 random points on each kind of boundary (the corner order's planes
+  x − y = k, y − z = k, x − z = k, the planes through the origin separately, and the skewed cells' faces x + s = n),
+  with both kernels. Classic: steps up to 6.35 × 10⁻³, slope changes up to 0.35. Continuous: steps up to 1.2 × 10⁻⁶ in
+  the double reference (the noise's own change over 2 × 10⁻⁷) and 1.2 × 10⁻⁴ in the float split-origin form (over
+  2 × 10⁻⁵), slope changes up to 5.8 × 10⁻⁵. Over 40,000 points the spread is the classic's (std 0.4275 both, the largest
+  value 0.969), correlation 0.99963, difference 0.0116 rms, worst 0.051.
+- **`WorldModes.Planet.FaceEdgeContinuity`** (new): 300 directions on each of the 12 face edges, the altitude 10⁻⁹ rad
+  either side, with both kernels, on the small planet's and L's terrain noise and on `Review_Planet`, `_M` and `_L` as
+  configured (their assets loaded, skipped if absent). A control probes 3,600 random directions off the edges the same
+  way. The face edges must step far beyond the control with the classic kernel, and with the continuous one stay under a
+  tolerance or within 1.5 times the control.
+
+  | Planet | Classic, at the edges | Continuous, at the edges | Control (continuous) |
+  |---|---|---|---|
+  | Small planet's terrain noise | 6.6 uu | 0.001 | 0.001 |
+  | L's terrain noise | 465 uu | 0.18 (grows with the distance: the slope) | 0.14 |
+  | `Review_Planet` | 13 uu | 0.003 | 0.003 |
+  | `Review_Planet_M` | 91 uu | 0.10 | 0.17 |
+  | `Review_Planet_L` | 300 uu | 0.45 | 0.32 |
+
+  On the configured big planets a few tenths of a uu remain everywhere, not only at the edges, and do not grow with the
+  distance at first: the float resolution of the continentalness field (its float fraction resolves about 7 uu of ground
+  on L, and its height curve turns one step of it into 0.3-0.5 uu, under L's density step of 0.59 uu).
+- `VoxelWorldSave.Document.PlanetKeys`: a planet fingerprint carries `PlanetGeneration=6`, and saves of versions 2 to 5
+  are refused.
+- `LOD.Planet.SurfaceSlab` and `LOD.Planet.NearBand` failed on the new terrain, by margins of their brute-force references,
+  not of the window (no chunk missing in either):
+  - `SurfaceSlab` sampled the true surface a chunk apart, and on L's km relief peaks between those samples are missed by
+    about 100 uu: three cube-corner chunks came out 7,299 uu off the surface against 7,200. It now samples half a chunk
+    apart.
+  - `NearBand` bounded the near-band ceiling by the surface within four chunks past the near radius. The envelope
+    (`GetPlanetSurfaceEnvelope`) reads the cells whose centres lie within the near angle plus two cell angles of π/N each
+    (four cells) of the viewer's cell, and their samples reach a further cell, so up to about six chunks on L, where a
+    cell is a chunk across. The bound is now that radius, from the strategy's own angle and grid.
+
+  Both pass with either kernel (`LOD.Planet`, 7 of 7, with `voxel.Planet.ContinuousSimplex 0` too).
+
+**Suites.** `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 612/612 headless (610 on main
++ the two above) and 612/612 in the editor with the GPU tests running (no device loss). GPU parity, 38 cases at LOD 0/1/2,
+against G39's lines (the latest; G28 and G72 changed no generation):
+
+- With the continuous kernel, the 60 planet lines (20 cases) change CRC and the 54 heightmap lines are identical. The GPU
+  still matches the CPU as closely as before: 0-22 voxels a case differ in density, none by more than 2 steps (0-53
+  before), no material (one before) and one biome voxel at the small planet's equator.
+- With `voxel.Planet.ContinuousSimplex 0`, 102 lines are identical. The 12 others (4 planet cases) differ from the CPU in
+  one or two more voxels by a density step (3 → 4, 14 → 15, 53 → 55, 19 → 19): the shader compiler schedules the
+  restructured corner function differently. The CPU's classic path computes what it did, operation for operation.
+
+**Live** (`PlanetTest` with `voxel.ConfigOverride`, one PIE per planet and kernel, the cvar set before the world
+generates; `vox.TPLatLon` and its settle at the face-edge site where the test logs the classic kernel's largest step on
+land, local noon; screenshots `Saved/Screenshots/Claudius/g43_*` in the worktree, four pairs in `g43_before_after.png`):
+
+- *`Review_Planet_L`, 41.667°N 27.135°W*, on the x = z face edge (the classic step there 300 uu). From 4,000 and 1,500 uu
+  straight down, the classic kernel draws a straight light line across the terrain along the edge, the step's riser; the
+  continuous kernel draws none.
+- *`Review_Planet_M`, 41.994°N 25.813°W* (91 uu): the same line, fainter, with the classic kernel; none with the continuous
+  one.
+- The landscape is the same in both (the same patches, slopes and biomes); trees and other scatter stand slightly
+  elsewhere where the ground moved.
+
+G43 is fixed.
+
+### 20.25 G16: the water's dark lines under the horizon (2026-10-24)
+
+Bases: VoxelWorlds `b46375b`, UE5_PluginDev `187d9c5` (G72 merged), with main's G43 (§20.24) merged in. Branches `fix/g16-water-horizon-bands` (VoxelWorlds) and
 `claude/g16-water-horizon-bands` (UE5_PluginDev). Editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree
 editor (Claudius on 8097), background throttling off. No code change: the fix is a project setting.
 

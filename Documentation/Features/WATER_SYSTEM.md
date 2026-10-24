@@ -489,7 +489,7 @@ With Lumen and a translucent water material (the default `M_Water` is translucen
 from Lumen's radiance cache unless front-layer translucency reflections are on. Lumen marks the probes translucent surfaces
 need in a pass at 1/`r.Lumen.TranslucencyReflections.MarkDownsampleFactor` of the screen; at the engine default (4) a sea
 seen at grazing angles skips probe cells along the view and shows thin dark lines under its horizon, at fixed screen rows,
-most visible over deep water from a swimmer's or a boat's height (world modes review G16, §20.24). Set
+most visible over deep water from a swimmer's or a boat's height (world modes review G16, §20.25). Set
 `r.Lumen.TranslucencyReflections.MarkDownsampleFactor=1` in the project's `DefaultEngine.ini` (`[SystemSettings]`), as this
 project does: the mark pass costs about 0.02 ms more at 1280 x 720.
 

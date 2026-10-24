@@ -146,6 +146,7 @@ float3 PlanetAnchorLocal;     // the anchor in the chunk: (ChunkSize / 2) x Voxe
 float3 PlanetAnchorDir;       // the anchor's direction from the centre
 float PlanetAnchorDist;       // the anchor's distance from the centre
 float PlanetAnchorAltitude;   // that distance minus PlanetRadius, formed in double
+int PlanetSimplexContinuous;  // G43: voxel.Planet.ContinuousSimplex (1: the continuous Simplex kernel; 0: the classic one)
 
 // The cave configuration's underwater minimum depth and biome overrides, which GpuCaveCarve applies in every world mode
 // as FVoxelCPUNoiseGenerator::CalculateCaveDensity does. CaveBiomeOverrideData: 1 float4 per override,

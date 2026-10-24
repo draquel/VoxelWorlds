@@ -47,9 +47,12 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * their claims, campsites and dungeons are placed on planets (dungeon records keyed by cube-sphere cell).
 	 * 5: spherical Phase 6 (decisions D21, D22): the planet noise (FVoxelPlanetNoise: a hashed lattice with no period,
 	 * split-origin sampling) for every planet field, caves and ores relative to the planet centre, and the SDF in double.
+	 * 6: G43 (decision D27): the planet Simplex noise's corner kernel is continuous at the simplex boundaries, so every
+	 * planet field (terrain, continentalness, climate, caves, ores) moves slightly and the steps along the cube sphere's
+	 * face edges are gone.
 	 * Fingerprints from before have no entry and are refused.
 	 */
-	static constexpr int32 PlanetGenerationVersion = 5;
+	static constexpr int32 PlanetGenerationVersion = 6;
 
 	/**
 	 * Terrain params for the heightmap modes (InfinitePlane, IslandBowl).
