@@ -1196,14 +1196,8 @@ void FVoxelPMCRenderer::UpdateMaterialAtlasParameters()
 
 	// ===== Texture Array Parameters (Smooth Terrain) =====
 
-	// Build texture arrays if needed (similar to LUT)
-	if (Atlas->AreTextureArraysDirty() || !Atlas->AlbedoArray)
-	{
-		UE_LOG(LogVoxelRendering, Log, TEXT("Building Texture Arrays (Dirty=%s, AlbedoArray=%s)"),
-			Atlas->AreTextureArraysDirty() ? TEXT("Yes") : TEXT("No"),
-			Atlas->AlbedoArray ? TEXT("Exists") : TEXT("NULL"));
-		Atlas->BuildTextureArrays();
-	}
+	// The saved arrays (the editor rebuilds missing or stale ones first)
+	Atlas->EnsureTextureArrays();
 
 	if (Atlas->AlbedoArray)
 	{

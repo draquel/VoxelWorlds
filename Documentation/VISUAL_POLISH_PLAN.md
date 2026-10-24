@@ -194,16 +194,79 @@ matter for media, `TextureArraySize` 1024 costs 64 MB on the GPU and about four 
 configuration's program arguments, which are local settings), so the next crash writes a full-memory dump that can
 name the freed shader's material. A full dump is about the editor's working set.
 
+### F2.11: the atlas arrays saved with the atlas (2026-10-24)
+
+**Confirmed in a package.** A Development Win64 package of `PlanetTest` (`BuildCookRun -map=/Game/PluginTesting/Planet/PlanetTest`,
+cooked for SM6 only, see "Found on the way") logged "Texture arrays built successfully" 7 ms after "Building texture
+arrays": outside the editor `BuildSingleTextureArray` made array objects with no source and no platform data and bound
+them. The terrain drew black: under the grass at the spawn and on every far hill (mean luma of the slope right of the
+spawn 57; the terrain's strips black with instanced meshes hidden).
+
+**Fix (the user's choices, 2026-10-24: the editor rebuilds stale arrays; the arrays in Git LFS).** The arrays are assets
+next to the atlas, `<Atlas>_AlbedoArray`, `_NormalArray` and `_RoughnessArray`, referenced by it and cooked with it:
+
+- `BuildTextureArrays()` creates them or updates them in place (`PreEditChange` / `PostEditChange`, as a reimport does)
+  with F2.10's source build unchanged (formats, gamma, dedup, placeholders), and leaves the atlas and its arrays unsaved.
+  A transient atlas (the tests) still gets transient arrays. Outside the editor it does nothing, so a packaged game keeps
+  the saved arrays.
+- The atlas saves a hash of the build's inputs (`TextureArrayBuildKey`, editor-only): `TextureArraySize`, a build
+  version, each config's MaterialID and texture paths, and each texture's saved package hash from the asset registry
+  (a loaded texture with unsaved changes, or a transient one, by its source id). Checking it loads no texture.
+- A world binding the atlas calls `EnsureTextureArrays()` (`UVoxelWorldComponent` and `FVoxelPMCRenderer`'s
+  `UpdateMaterialAtlasParameters`): in the editor missing or stale arrays are rebuilt there, with a warning naming the
+  atlas and that they need saving; up-to-date ones are only bound. Outside the editor an atlas with source textures
+  and no arrays logs one error.
+- Cooking an atlas (`PreSave` with a target platform) logs an error when an array is missing, which fails the cook (a
+  cook fails on any logged error), and a warning when they are stale. `IsDataValid` reports both as errors.
+- `Scripts/rebuild_atlas_arrays.py` rebuilds and saves every atlas under `/Game`, headless or in a running editor
+  (`--only-stale`). It built `DemoMaterialAtlas` (22 slices) and `Config/VoxelMaterialAtlas` (24; the third path,
+  `Content/PluginTesting/VoxelMaterialAtlas`, is a redirector to it).
+
+Tests: `VoxelWorlds.MaterialAtlas.TextureArrays.{Build,Rebuild}` unchanged (a transient atlas) and the new `.SavedAssets`
+(an atlas asset in `/Temp`: the arrays are assets next to it, rebuilt in place, stale after a new `TextureArraySize` or
+a source texture's new content, `EnsureTextureArrays()` rebuilding only then, an array with no texture left dropped, an
+atlas with no source texture never stale). The six suites: 634 tests headless and in the editor.
+
+**Results.**
+
+- The package after the fix draws the terrain textured: the same view's slope 57 → 107 mean luma, the far hills lit
+  (`f211_package_before_after.png`); the cook found the saved arrays up to date (no warning).
+- The editor's first PIE on `PlanetTest` (`atlas_pie_measure.sh` in a fresh editor, settled): **0.28 s** against F2.10's
+  3.4-3.6 s and 21-26 s before it; nothing built, nothing left dirty; the editor at 4.4 GB working set / 5.8 GB
+  committed right after the PIE start (F2.10: 4.6-4.7 / 7.4-7.5). The atlas read as up to date in a new session from the
+  asset registry, with no source texture loaded.
+- Stale arrays, live (`TextureArraySize` changed in memory, then back): the PIE start rebuilt them in place with the
+  warning, 4.2 s at 256 and 3.4 s at 512, about F2.10's every first PIE; the terrain drew normally after each rebuild.
+- On disk each array is 11-14 MB (`DemoMaterialAtlas`'s three 38.8 MB, `VoxelMaterialAtlas`'s 39.2 MB): the source is
+  saved delta-coded and Kraken-compressed, about half of 512 x 512 x 4 bytes a slice, and the repeated slices (14 of 22
+  albedo and normal slices, 19 of 22 roughness slices copy another) do not compress away. Every save of a rebuild writes
+  new bytes even for the same content. In LFS (`.gitattributes`); the repo held 18 MB of LFS objects before.
+
+**Found on the way.**
+
+- WorldClockPlugin did not compile for a game target: `ADayNightController` called `ADirectionalLight::GetComponent()`,
+  which is editor-only. It now takes `ALight::GetLightComponent()`. No package of this project could be built before.
+- A cook for the project's `D3D11TargetedShaderFormats=PCD3D_SM5` compiles the voxel compute shaders with FXC for a very
+  long time on a cold cache: `FDCEdgeCrossingCS` 911 s, `FGenerateVoxelDensityCS` 980 s, and the Marching Cubes mesh
+  shaders (`FGenerateMarchingCubesMeshCS`, `FGenerateTransitionCellsCS`) still compiling after 31 minutes, when the
+  cook was stopped. The verification cooks here dropped SM5 in the worktree's config only (SM6: a 5 minute cook).
+- A cook fails on any logged error: with another process on 127.0.0.1:8080, Claudius's listener in the cook commandlet
+  logs "unable to bind" and the cook exits `Error_UnknownCookFailure`. Pass
+  `-AdditionalCookerOptions=-ini:Editor:[/Script/Claudius.ClaudiusSettings]:bEnableHttpServer=False` then.
+- The atlas's source textures (`MaterialConfigs`' soft references, 4096 and 2K) are still cooked into the package,
+  though the game reads only the arrays and the baked map colours.
+- The repeated slices could be dropped altogether: a slice per distinct texture and the material's slice in the LUT
+  would make the arrays on disk and on the GPU about a third of today's on the demo atlas (needs the masters' triplanar
+  functions to read the slice from the LUT).
+
 ### Next
 
 - **VP1-O6 (new):** decide the atmosphere's shadows on small planets: keep them (stable now apart from the cascades'
   re-fit), soften them, or turn `bCastShadowsOnAtmosphere` off when the scaled atmosphere is thin.
 - **F2.9 (new, seen with the sky light on):** faint striped shading on far gentle slopes at a low sun
   (`vp1o5_45n_eye_ab.png`, the far valley): to trace (shadow-map self-shadowing at grazing light, or G62's shading).
-- **F2.11 (new, from the code; not tried in a package):** a packaged game has no terrain textures on smooth worlds. The
-  arrays live in the transient package, so the atlas never saves them, and outside the editor
-  `BuildSingleTextureArray` has no source data to read and binds empty arrays. Fix: build the arrays into saved
-  `Texture2DArray` assets (a button and a cook-time check), which would also drop the build from the first PIE.
+- **F2.11 done (2026-10-24):** a packaged game had no terrain textures on smooth worlds (shown in a package); the
+  arrays are saved assets next to the atlas now, see "F2.11: the atlas arrays saved with the atlas".
 - Then milestone 2 (VP2-O2 to O4) and milestone 3 (VP3-O2, O3) as planned.
 
 ## The setup as found

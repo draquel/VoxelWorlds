@@ -203,21 +203,34 @@ public:
 
 	// ===== Texture Arrays (Smooth Terrain) - Auto-generated from MaterialConfigs =====
 
-	/** Albedo Texture2DArray for triplanar sampling (auto-built from MaterialConfigs) */
+	/**
+	 * Albedo Texture2DArray for triplanar sampling, built from MaterialConfigs by BuildTextureArrays(). For an atlas
+	 * asset it is a saved asset next to it (<Atlas>_AlbedoArray), cooked with it: a packaged game has no source
+	 * textures to build from.
+	 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
 	TObjectPtr<UTexture2DArray> AlbedoArray;
 
-	/** Normal map Texture2DArray for triplanar sampling (auto-built from MaterialConfigs) */
+	/** Normal map Texture2DArray for triplanar sampling (<Atlas>_NormalArray, built like AlbedoArray) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
 	TObjectPtr<UTexture2DArray> NormalArray;
 
-	/** Roughness Texture2DArray for triplanar sampling (auto-built from MaterialConfigs) */
+	/** Roughness Texture2DArray for triplanar sampling (<Atlas>_RoughnessArray, built like AlbedoArray) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
 	TObjectPtr<UTexture2DArray> RoughnessArray;
 
 	/** Target texture size for generated arrays (textures will be resized to match) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Texture Arrays", meta = (ClampMin = "64", ClampMax = "4096"))
 	int32 TextureArraySize = 512;
+
+#if WITH_EDITORONLY_DATA
+	/**
+	 * A hash of the inputs the arrays were last built from (TextureArraySize, each config's MaterialID and source
+	 * textures, the textures' saved packages). The editor rebuilds the arrays when the inputs no longer match.
+	 */
+	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Texture Arrays")
+	FString TextureArrayBuildKey;
+#endif
 
 	// ===== Per-Material Configuration =====
 
@@ -358,16 +371,42 @@ public:
 	 * All source textures will be resized to TextureArraySize x TextureArraySize, 8 bits a channel.
 	 * Materials without textures take the array's first built slice.
 	 *
+	 * For an atlas asset the arrays are assets in its folder (<Atlas>_AlbedoArray, _NormalArray, _RoughnessArray),
+	 * created or updated in place and left unsaved with the atlas: save them to keep them. An atlas outside a package
+	 * (a transient one) gets transient arrays. Editor-only: outside the editor there is no source data, and the
+	 * saved arrays are kept as they are.
+	 *
 	 * Call this after modifying MaterialConfigs or source textures.
 	 */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Voxel|Material Atlas")
 	void BuildTextureArrays();
 
 	/**
-	 * Check if texture arrays need rebuilding.
+	 * Check if texture arrays need rebuilding: in the editor, whether they are missing or were built from other inputs
+	 * than the current configs and textures. Always false outside the editor (nothing to compare against).
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
-	bool AreTextureArraysDirty() const { return bTextureArraysDirty; }
+	bool AreTextureArraysDirty() const;
+
+	/**
+	 * Make the texture arrays ready for a world to bind. In the editor, missing or stale arrays are rebuilt
+	 * (BuildTextureArrays(), with a warning, left unsaved), up-to-date ones only bound; a cook never rebuilds. Outside
+	 * the editor the saved arrays are used as they are, and an atlas with source textures but no saved arrays logs
+	 * an error once (smooth terrain then draws untextured).
+	 * @return true if an albedo array is available to bind
+	 */
+	bool EnsureTextureArrays();
+
+#if WITH_EDITOR
+	/**
+	 * Whether the texture arrays are missing or stale (built from inputs other than the current ones).
+	 * @param OutReason Optional: why, for logs
+	 * @param bOutMissing Optional: whether an array the configs give textures for is missing (rather than stale)
+	 * @param bAllowLoad Whether a source texture may be loaded to identify it (false while saving)
+	 * @return true if BuildTextureArrays() would change them
+	 */
+	bool NeedsTextureArrayRebuild(FString* OutReason = nullptr, bool* bOutMissing = nullptr, bool bAllowLoad = true) const;
+#endif
 
 	// ===== 2D Map Colors =====
 
@@ -419,6 +458,11 @@ public:
 	 * Called when a property changes in the editor.
 	 */
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
+	/**
+	 * When cooking, reports texture arrays the packaged game would lack (an error) or that are stale (a warning).
+	 */
+	virtual void PreSave(FObjectPreSaveContext SaveContext) override;
 #endif
 
 private:
@@ -439,8 +483,33 @@ private:
 	/** Whether the LUT needs rebuilding */
 	mutable bool bLUTDirty = true;
 
-	/** Whether texture arrays need rebuilding */
-	mutable bool bTextureArraysDirty = true;
+	/** Outside the editor: the missing-arrays error was logged (once per atlas) */
+	bool bReportedMissingTextureArrays = false;
+
+#if WITH_EDITOR
+	/** The texture arrays' inputs: their hash, and which arrays the configs give textures for. */
+	struct FTextureArrayInputs
+	{
+		FString Key;
+		bool bAlbedo = false;
+		bool bNormal = false;
+		bool bRoughness = false;
+	};
+
+	/**
+	 * Hash the current inputs of BuildTextureArrays(), without loading textures whose packages are saved.
+	 * @param bAllowLoad Whether a texture with no saved hash may be loaded to read its source id (not while saving)
+	 */
+	FTextureArrayInputs ComputeTextureArrayInputs(bool bAllowLoad = true) const;
+
+	/** Whether the arrays are assets of their own (this atlas is an asset), not transient objects. */
+	bool BuildsTextureArrayAssets() const;
+
+	/**
+	 * The object an array is built into: for an atlas asset the asset <Atlas>_<ArrayName>Array in its folder (the
+	 * current one, loaded or created), otherwise a new transient object.
+	 */
+	UTexture2DArray* AcquireTextureArrayObject(const FString& ArrayName, UTexture2DArray* Current);
 
 	/**
 	 * Helper to build a single texture array from source textures.
@@ -450,7 +519,7 @@ private:
 	 * @param TextureGetter Function to get the source texture from a config
 	 * @param PlaceholderColor Color of every slice when no texture has readable source data
 	 *        (slots without a texture take the first built slice)
-	 * @param ArrayName Name for the created array (for debugging)
+	 * @param ArrayName Name of the array ("Albedo", "Normal", "Roughness"); names the array object
 	 * @return true if successful
 	 */
 	bool BuildSingleTextureArray(
@@ -458,4 +527,5 @@ private:
 		TFunctionRef<TSoftObjectPtr<UTexture2D>(const FVoxelMaterialTextureConfig&)> TextureGetter,
 		FColor PlaceholderColor,
 		const FString& ArrayName);
+#endif
 };
