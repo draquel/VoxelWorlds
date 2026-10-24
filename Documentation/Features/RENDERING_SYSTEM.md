@@ -1089,9 +1089,13 @@ renderer either: the chunk manager keeps one procedural mesh component per resid
 patch's origin in double with float offsets of the patch's size (the render regions' rule, a patch being its own region):
 section 0 the terrain with `GetSurfaceMaterial()`, 1 the sea and 2 its underside with the water material. A far-field
 terrain vertex is a voxel terrain vertex as the voxel vertex factory presents it (`FVoxelLocalVertex::FromVoxelVertex`
-with the planet's radial face up): UV1 = (material id, face type against local up), colour (material, biome, AO 0), the
-tangent cross(Z, N), UV0 the position on the normal's dominant plane in voxels (relative to the patch), one material per
-triangle (vertices duplicated where materials meet). Sections are shown and hidden with `SetMeshSectionVisible` (a render
+with the planet's radial face up): UV1 = (material id, face type against local up), colour (the quad's second material,
+biome, AO 0, alpha 255 less the second material's weight at the vertex; G45), the tangent cross(Z, N), UV0 the position
+on the normal's dominant plane in voxels (relative to the patch). Both materials are flat per triangle (vertices
+duplicated where quads' pairs differ) and the terrain material picks between them per pixel by the interpolated weight
+([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material Blend"); every voxel chunk vertex has alpha 255, weight 0.
+With `voxel.World.FarFieldMaterialBlend 0` colour R is the material itself and alpha 255: one material per triangle, as
+before G45. Sections are shown and hidden with `SetMeshSectionVisible` (a render
 command), so the window's hole moving costs no proxy rebuild; a component is created when its patch is built and goes
 when the patch is released or pruned. They are about 200 bytes a vertex (the component's CPU copy and the GPU one):
 29-56 MB at the surveyed sites of the three test planets, up to 83 MB looking down on the small one from orbit

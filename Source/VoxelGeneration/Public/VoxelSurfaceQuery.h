@@ -46,6 +46,22 @@ struct VOXELGENERATION_API FVoxelSurfaceSample
 };
 
 /**
+ * A surface point's material mix (G45, FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt): its two leading surface
+ * materials and the second's share of them, what the per-voxel material picks there cover on average.
+ */
+struct FVoxelSurfaceMaterialMix
+{
+	/** The leading material, then the second (the leading one again when there is no second) */
+	uint8 Materials[2] = { 0, 0 };
+
+	/** The second material's share of the two, in [0, 0.5] */
+	float Weight = 0.0f;
+
+	/** The dominant biome */
+	uint8 BiomeID = 0;
+};
+
+/**
  * Stateless, thread-safe surface queries against the procedural generator.
  *
  * Answers "what is the terrain surface at world X,Y" (height, normal, slope, biome,
@@ -182,6 +198,30 @@ public:
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		const FVoxelSeaSurface& Sea,
 		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
+
+	/**
+	 * The surface material mix at a planet's surface point (G45): what QueryPlanetSurfaceConditionsAt's per-voxel picks cover
+	 * there on average, for the far field, whose vertices lie km apart while a blend zone's picks change every few voxels.
+	 * The blend's materials and shares at depth 0 (FVoxelBiomeSnapshot::GetBlendedMaterialShares, the sea's variant below it),
+	 * height rules applied to each, summed per material; the two largest, with the second's share of the two.
+	 *
+	 * @param Planet The planet world mode
+	 * @param Direction Unit direction from the planet centre
+	 * @param TerrainAltitude The terrain's altitude along Direction (conditioned where zones apply)
+	 * @param Continentalness The continentalness SampleRadialDisplacement returned for Direction
+	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
+	 * @param BiomeSnapshot Value-captured biome data
+	 * @param Sea The world's sea
+	 * @return The mix (material 0 and weight 0 when the snapshot is invalid)
+	 */
+	static FVoxelSurfaceMaterialMix QueryPlanetSurfaceMaterialMixAt(
+		const FSphericalPlanetWorldMode& Planet,
+		const FVector& Direction,
+		float TerrainAltitude,
+		float Continentalness,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		const FVoxelSeaSurface& Sea);
 
 	/**
 	 * Everything at the analytic surface on the local up-line through a position, in any world mode (spherical SP-A3):

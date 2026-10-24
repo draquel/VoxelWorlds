@@ -282,6 +282,62 @@ uint8 FVoxelBiomeSnapshot::SelectBlendedMaterialWithWater(
 	return bIsUnderwater ? InDefaultUnderwaterMaterial : 0;
 }
 
+int32 FVoxelBiomeSnapshot::SelectBlendedMaterialShares(
+	const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface,
+	float TerrainSurfaceHeight, float WaterLevel,
+	bool bInEnableUnderwaterMaterials, uint8 InDefaultUnderwaterMaterial,
+	uint8* OutMaterials, float* OutShares)
+{
+	const bool bIsUnderwater = bInEnableUnderwaterMaterials && (TerrainSurfaceHeight < WaterLevel);
+	auto MaterialOf = [&](uint8 BiomeID)
+	{
+		const FBiomeDefinition* Biome = FindBiome(InBiomes, BiomeID);
+		return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface, bIsUnderwater) : (bIsUnderwater ? InDefaultUnderwaterMaterial : static_cast<uint8>(0));
+	};
+	// A single biome, or one holding over 0.9 of the weight, takes every voxel (PickBlendIndex).
+	const int32 Count = FMath::Min(Blend.BiomeCount, MAX_BIOME_BLEND);
+	if (Count <= 1 || Blend.Weights[0] > 0.9f)
+	{
+		OutMaterials[0] = MaterialOf(Blend.BiomeIDs[0]);
+		OutShares[0] = 1.0f;
+		return 1;
+	}
+	int32 Num = 0;
+	float Total = 0.0f;
+	for (int32 i = 0; i < Count; ++i)
+	{
+		const uint8 Material = MaterialOf(Blend.BiomeIDs[i]);
+		const float Weight = FMath::Max(0.0f, Blend.Weights[i]);
+		Total += Weight;
+		int32 Slot = 0;
+		while (Slot < Num && OutMaterials[Slot] != Material)
+		{
+			++Slot;
+		}
+		if (Slot == Num)
+		{
+			OutMaterials[Num] = Material;
+			OutShares[Num] = 0.0f;
+			++Num;
+		}
+		OutShares[Slot] += Weight;
+	}
+	// Normalised, largest share first.
+	for (int32 i = 0; i < Num; ++i)
+	{
+		OutShares[i] = Total > 0.0f ? OutShares[i] / Total : (i == 0 ? 1.0f : 0.0f);
+	}
+	for (int32 i = 1; i < Num; ++i)
+	{
+		for (int32 j = i; j > 0 && OutShares[j] > OutShares[j - 1]; --j)
+		{
+			Swap(OutShares[j], OutShares[j - 1]);
+			Swap(OutMaterials[j], OutMaterials[j - 1]);
+		}
+	}
+	return Num;
+}
+
 uint8 FVoxelBiomeSnapshot::ApplyHeightRules(
 	const TArray<FHeightMaterialRule>& InSortedRules, uint8 CurrentMaterial,
 	float WorldHeight, float DepthBelowSurface)

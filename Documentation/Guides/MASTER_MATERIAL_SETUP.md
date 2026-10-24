@@ -460,6 +460,11 @@ Create in: `Content/VoxelWorlds/Materials/M_VoxelMaster`
 #### 2. Get MaterialID
 - Add **MF_GetMaterialID** function call
 - Connect TexCoord[1] → MaterialUV input
+- In the shipped masters (`M_VoxelMaster`, `M_VoxelMaster_Fade`) a Custom node, **FarFieldMaterialPick**, sits between
+  `MF_GetMaterialID` and the `MaterialID` named reroute: it keeps `MaterialID` on every voxel chunk pixel (vertex colour
+  alpha 1) and picks a planet far field's second material where alpha is under 1 (G45; [MATERIAL_SYSTEM.md](../Features/MATERIAL_SYSTEM.md)
+  "Far-Field Material Blend"). `Scripts/setup_farfield_material_blend.py` (UE5_PluginDev) adds it to both; its inputs are
+  `MaterialID`, `SecondaryR` (a VertexColor node's R output) and `VertexAlpha` (its A output)
 
 #### 3. Smooth Terrain Path
 - Add **MF_TriplanarSampleAlbedoRoughness**:
@@ -586,6 +591,10 @@ See `VoxelWorldComponent.cpp` - CreateVoxelMaterialInstance() should:
 ### "Undeclared identifier" errors in Custom nodes
 - Verify input names match EXACTLY (case-sensitive)
 - Ensure all inputs are connected before compiling
+
+### "vector swizzle 'a' is out of bounds" (every voxel mesh draws the default material)
+- A Custom node reads `.a` of an input wired to a VertexColor node's default output, which is RGB only
+- Wire the VertexColor node's A output to an input of its own (as FarFieldMaterialPick's `VertexAlpha`)
 
 ### "Cannot cast from TextureExternal to Texture2DArray"
 - Use "Texture Sample Parameter 2D Array" nodes for array textures

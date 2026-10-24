@@ -697,10 +697,19 @@ primitives, and the voxel window keeps its size.
   is a face, each level halves a patch along U and V, `FVoxelFarFieldPatchKey`). A patch is `PatchQuads` x `PatchQuads`
   quads (`voxel.World.FarFieldQuads`, 16) of the conditioned analytic surface (`GetConditionedTerrainAltitude`, zones
   gathered for patches up to 32 chunks in radius), drawn `Sink` (a voxel) under it, with normals from the grid (one ring
-  of samples past its edges), the surface material and biome generation writes (`FVoxelSurfaceQuery::
-  QueryPlanetSurfaceConditionsAt`) one per quad, and skirts deep enough to close the gap to a neighbour up to three levels
-  coarser or finer. A shared cube edge is the same direction from both faces (the gnomonic coordinate exactly +-1 there),
+  of samples past its edges), the surface's materials (below), and skirts deep enough to close the gap to a neighbour up
+  to three levels coarser or finer. A shared cube edge is the same direction from both faces (the gnomonic coordinate exactly +-1 there),
   so the terrain's step across the edge's plane (G43) never splits it.
+- **Materials** (G45, decision D28; WORLD_MODES_REVIEW_PLAN.md §20.27). Each grid vertex samples the surface's material
+  mix (`FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt`: in a biome blend zone the two leading biomes' surface
+  materials, height rules applied, and the second's share, which is what generation's dithered per-voxel picks cover
+  there; one material outside the zones). A quad carries its corners' two largest materials and, at each corner, the
+  second's weight of the two; both materials are flat per triangle (a grid vertex is duplicated where neighbouring quads
+  hold different pairs) and only the weight interpolates. The terrain material picks one of the two per pixel against a
+  temporal screen dither (`FarFieldMaterialPick`, [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material Blend"),
+  which TSR resolves into a gradient across the quad. `voxel.World.FarFieldMaterialBlend 0` gives each quad one
+  material, the most common of its corners' picks (`QueryPlanetSurfaceConditionsAt`), so a border is a staircase of
+  quads, as before G45; it is read when patches build (`voxel.World.FarField 0` then `1` rebuilds them).
 - **Selection.** A patch splits while its geometric error (the drawn triangles against the surface at the quad centres,
   curvature and the sea's sag included) projects to more than `voxel.World.FarFieldError` pixels (2) from the camera,
   and stays whole under 0.7 of it; a patch wholly under the camera's horizon (the lowest terrain's sphere, plus the

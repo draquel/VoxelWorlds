@@ -8,6 +8,21 @@
 #include "SphericalPlanetWorldMode.h"
 #include "IVoxelWorldMode.h"
 #include "Async/Async.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarFarFieldMaterialBlend(
+	TEXT("voxel.World.FarFieldMaterialBlend"),
+	1,
+	TEXT("Planet far field materials (world modes review G45): 1 = each quad carries its corners' two leading materials and a ")
+	TEXT("weight per corner, from each vertex's material mix, and the terrain material dithers between them (a gradient across ")
+	TEXT("the quad); 0 = one material a quad, the most common of its corners' picks, as before (borders a staircase of quads). ")
+	TEXT("Read when patches build; voxel.World.FarField 0 then 1 rebuilds them."),
+	ECVF_Default);
+
+bool FVoxelFarFieldSurface::IsMaterialBlendEnabled()
+{
+	return CVarFarFieldMaterialBlend.GetValueOnAnyThread() != 0;
+}
 
 namespace VoxelPlanetFarFieldPrivate
 {
@@ -139,6 +154,21 @@ void FVoxelFarFieldSurface::SampleConditions(const FVector& Direction, float Alt
 	OutBiome = 0;
 }
 
+FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness) const
+{
+	const FSphericalPlanetWorldMode& Planet = GetPlanet();
+	if (Biomes.bIsValid)
+	{
+		return FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Altitude, Continentalness, NoiseParams, Biomes, Sea);
+	}
+	FVoxelSurfaceMaterialMix Mix;
+	uint8 Biome = 0;
+	SampleConditions(Direction, Altitude, Continentalness, Mix.Materials[0], Biome);
+	Mix.Materials[1] = Mix.Materials[0];
+	Mix.BiomeID = Biome;
+	return Mix;
+}
+
 // ==================== FVoxelPlanetFarField: statics ====================
 
 void FVoxelPlanetFarField::GetPatchCap(const FVoxelFarFieldPatchKey& Key, FVector& OutDirection, double& OutAngle)
@@ -229,9 +259,15 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	TArray<FVector3f> Normals;
 	TArray<uint8> Materials;
 	TArray<uint8> Biomes;
+	TArray<FVoxelSurfaceMaterialMix> Mixes; // G45: each vertex's material mix, when the quads blend
+	const bool bBlendMaterials = FVoxelFarFieldSurface::IsMaterialBlendEnabled();
 	Normals.SetNumUninitialized(Row * Row);
 	Materials.SetNumUninitialized(Row * Row);
 	Biomes.SetNumUninitialized(Row * Row);
+	if (bBlendMaterials)
+	{
+		Mixes.SetNum(Row * Row);
+	}
 	Out.MinAltitude = TNumericLimits<float>::Max();
 	Out.MaxAltitude = TNumericLimits<float>::Lowest();
 	for (int32 J = 0; J <= Q; ++J)
@@ -247,8 +283,18 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 				Normal = Directions[Index];
 			}
 			Normals[I + J * Row] = FVector3f(Normal);
-			Surface.SampleConditions(Directions[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index],
-				Materials[I + J * Row], Biomes[I + J * Row]);
+			if (bBlendMaterials)
+			{
+				FVoxelSurfaceMaterialMix& Mix = Mixes[I + J * Row];
+				Mix = Surface.SampleMaterialMix(Directions[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index]);
+				Materials[I + J * Row] = Mix.Materials[0];
+				Biomes[I + J * Row] = Mix.BiomeID;
+			}
+			else
+			{
+				Surface.SampleConditions(Directions[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index],
+					Materials[I + J * Row], Biomes[I + J * Row]);
+			}
 			Out.MinAltitude = FMath::Min(Out.MinAltitude, static_cast<float>(Altitudes[Index]));
 			Out.MaxAltitude = FMath::Max(Out.MaxAltitude, static_cast<float>(Altitudes[Index]));
 		}
@@ -387,8 +433,10 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	Terrain.Triangles.Reserve(Q * Q * 6 + 4 * Q * 12);
 
 	FBox Bounds(ForceInit);
+	// Colour: R the quad's second material (the material itself without one), G the biome, A 255 less the second's weight
+	// at the vertex (G45; 255 = none, as every voxel chunk vertex).
 	auto AddVertex = [&](FVoxelFarFieldSection& Section, const FVector& WorldPoint, const FVector3f& Normal, const FVector& Direction,
-		const FVector2f& UV0, uint8 Material, uint8 Biome)
+		const FVector2f& UV0, uint8 Material, uint8 Biome, uint8 Secondary, float SecondaryWeight)
 	{
 		const int32 Index = Section.Positions.Num();
 		Section.Positions.Add(FVector3f(WorldPoint - Origin));
@@ -396,7 +444,8 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 		Section.Tangents.Add(FVector3f((FaceT - FVector::DotProduct(FaceT, Direction) * Direction).GetSafeNormal()));
 		Section.UV0.Add(UV0);
 		Section.UV1.Add(FVector2f(static_cast<float>(Material), 0.0f));
-		Section.Colors.Add(FColor(Material, Biome, 0, 255));
+		const uint8 Alpha = static_cast<uint8>(255 - FMath::Clamp(FMath::RoundToInt32(SecondaryWeight * 255.0f), 0, 255));
+		Section.Colors.Add(FColor(Secondary, Biome, 0, Alpha));
 		Bounds += WorldPoint;
 		return Index;
 	};
@@ -405,9 +454,9 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	// local up (0 top, 1 side, 2 bottom). The terrain material's shading reads both, and the far field must shade as the
 	// voxel surface it continues (a different tangent frame drew it visibly darker at the window's edge).
 	auto AddTerrainVertex = [&](const FVector& WorldPoint, const FVector3f& Normal, const FVector& Direction, const FVector2f& UV0,
-		uint8 Material, uint8 Biome)
+		uint8 Material, uint8 Biome, uint8 Secondary, float SecondaryWeight)
 	{
-		const int32 Index = AddVertex(Terrain, WorldPoint, Normal, Direction, UV0, Material, Biome);
+		const int32 Index = AddVertex(Terrain, WorldPoint, Normal, Direction, UV0, Material, Biome, Secondary, SecondaryWeight);
 		const FVector3f Reference = FMath::Abs(Normal.Z) < 0.999f ? FVector3f(0.0f, 0.0f, 1.0f) : FVector3f(1.0f, 0.0f, 0.0f);
 		Terrain.Tangents[Index] = FVector3f::CrossProduct(Reference, Normal).GetSafeNormal();
 		const float Along = FVector3f::DotProduct(Normal, FVector3f(Direction));
@@ -433,31 +482,115 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 		return FVector2f(static_cast<float>(Local.X), static_cast<float>(Local.Z));
 	};
 
-	// Quad materials: the most common of the corners'.
-	TArray<uint16> QuadKeys;
+	// Quad keys: the material (bits 0-7), the second material (8-15) and the biome (16-23). Without the blend the most common
+	// (material, biome) of the corners, its second material itself. With it (G45) the two largest shares of the corners'
+	// mixes, and the most common biome.
+	auto PackKey = [](uint8 Material, uint8 Secondary, uint8 Biome)
+	{
+		return static_cast<uint32>(Material) | (static_cast<uint32>(Secondary) << 8) | (static_cast<uint32>(Biome) << 16);
+	};
+	auto KeyMaterial = [](uint32 Key) { return static_cast<uint8>(Key & 0xFF); };
+	auto KeySecondary = [](uint32 Key) { return static_cast<uint8>((Key >> 8) & 0xFF); };
+	auto KeyBiome = [](uint32 Key) { return static_cast<uint8>((Key >> 16) & 0xFF); };
+	// A vertex mix's share of a material.
+	auto ShareOf = [](const FVoxelSurfaceMaterialMix& Mix, uint8 Material)
+	{
+		const float Second = Mix.Materials[1] != Mix.Materials[0] ? Mix.Weight : 0.0f;
+		return (Mix.Materials[0] == Material ? 1.0f - Second : 0.0f) + (Mix.Materials[1] == Material && Mix.Materials[1] != Mix.Materials[0] ? Second : 0.0f);
+	};
+	TArray<uint32> QuadKeys;
 	QuadKeys.SetNumUninitialized(Q * Q);
 	for (int32 J = 0; J < Q; ++J)
 	{
 		for (int32 I = 0; I < Q; ++I)
 		{
 			const int32 Corners[4] = { I + J * Row, (I + 1) + J * Row, I + (J + 1) * Row, (I + 1) + (J + 1) * Row };
-			uint16 Keys[4];
+			if (!bBlendMaterials)
+			{
+				uint16 Keys[4];
+				for (int32 c = 0; c < 4; ++c)
+				{
+					Keys[c] = static_cast<uint16>(Materials[Corners[c]]) | (static_cast<uint16>(Biomes[Corners[c]]) << 8);
+				}
+				const uint16 Majority = Keys[MajorityOfFour(Keys)];
+				QuadKeys[I + J * Q] = PackKey(static_cast<uint8>(Majority & 0xFF), static_cast<uint8>(Majority & 0xFF), static_cast<uint8>(Majority >> 8));
+				continue;
+			}
+			// The corners' shares per material; the largest two.
+			uint8 Candidates[8];
+			float Totals[8];
+			int32 Num = 0;
+			auto Add = [&](uint8 Material, float Share)
+			{
+				if (Share <= 0.0f)
+				{
+					return;
+				}
+				int32 Slot = 0;
+				while (Slot < Num && Candidates[Slot] != Material)
+				{
+					++Slot;
+				}
+				if (Slot == Num)
+				{
+					Candidates[Num] = Material;
+					Totals[Num] = 0.0f;
+					++Num;
+				}
+				Totals[Slot] += Share;
+			};
+			uint16 BiomeKeys[4];
 			for (int32 c = 0; c < 4; ++c)
 			{
-				Keys[c] = static_cast<uint16>(Materials[Corners[c]]) | (static_cast<uint16>(Biomes[Corners[c]]) << 8);
+				const FVoxelSurfaceMaterialMix& Mix = Mixes[Corners[c]];
+				Add(Mix.Materials[0], ShareOf(Mix, Mix.Materials[0]));
+				if (Mix.Materials[1] != Mix.Materials[0])
+				{
+					Add(Mix.Materials[1], ShareOf(Mix, Mix.Materials[1]));
+				}
+				BiomeKeys[c] = Mix.BiomeID;
 			}
-			QuadKeys[I + J * Q] = Keys[MajorityOfFour(Keys)];
+			int32 First = 0;
+			for (int32 k = 1; k < Num; ++k)
+			{
+				First = Totals[k] > Totals[First] ? k : First;
+			}
+			int32 Second = -1;
+			for (int32 k = 0; k < Num; ++k)
+			{
+				if (k != First && (Second < 0 || Totals[k] > Totals[Second]))
+				{
+					Second = k;
+				}
+			}
+			const uint8 Primary = Num > 0 ? Candidates[First] : Materials[Corners[0]];
+			const uint8 Secondary = Second >= 0 ? Candidates[Second] : Primary;
+			QuadKeys[I + J * Q] = PackKey(Primary, Secondary, static_cast<uint8>(BiomeKeys[MajorityOfFour(BiomeKeys)]));
 		}
 	}
-	// Grid vertex variants: (material, biome) -> vertex index.
+	// The second material's weight at a grid vertex for a quad's pair: its share of the pair in the vertex's mix.
+	auto CornerWeight = [&](int32 I, int32 J, uint32 QuadKey)
+	{
+		const uint8 Primary = KeyMaterial(QuadKey);
+		const uint8 Secondary = KeySecondary(QuadKey);
+		if (!bBlendMaterials || Primary == Secondary)
+		{
+			return 0.0f;
+		}
+		const FVoxelSurfaceMaterialMix& Mix = Mixes[I + J * Row];
+		const float P = ShareOf(Mix, Primary);
+		const float S = ShareOf(Mix, Secondary);
+		return (P + S) > 0.0f ? S / (P + S) : 0.0f;
+	};
+	// Grid vertex variants: quad key -> vertex index.
 	struct FVariant
 	{
-		uint16 Key;
+		uint32 Key;
 		int32 Index;
 	};
 	TArray<TArray<FVariant, TInlineAllocator<2>>> Variants;
 	Variants.SetNum(Row * Row);
-	auto GetVertex = [&](int32 I, int32 J, uint16 QuadKey)
+	auto GetVertex = [&](int32 I, int32 J, uint32 QuadKey)
 	{
 		TArray<FVariant, TInlineAllocator<2>>& List = Variants[I + J * Row];
 		for (const FVariant& Variant : List)
@@ -470,7 +603,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 		const int32 GridIdx = GridIndex(I, J);
 		const FVector Point = DrawnPoint(I, J);
 		const int32 Index = AddTerrainVertex(Point, Normals[I + J * Row], Directions[GridIdx], TerrainUV0(Point, Normals[I + J * Row]),
-			static_cast<uint8>(QuadKey & 0xFF), static_cast<uint8>(QuadKey >> 8));
+			KeyMaterial(QuadKey), KeyBiome(QuadKey), KeySecondary(QuadKey), CornerWeight(I, J, QuadKey));
 		List.Add({ QuadKey, Index });
 		return Index;
 	};
@@ -478,7 +611,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	{
 		for (int32 I = 0; I < Q; ++I)
 		{
-			const uint16 QuadKey = QuadKeys[I + J * Q];
+			const uint32 QuadKey = QuadKeys[I + J * Q];
 			// Corners A (i, j), B (i+1, j), D (i+1, j+1), C (i, j+1) run counter-clockwise seen from outside (T x B = N); UE's
 			// front faces take them as (A, D, B), (A, C, D), as the ocean shell's quads do.
 			const int32 A = GetVertex(I, J, QuadKey);
@@ -492,10 +625,10 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 
 	// Skirts: each edge dropped along local down by SkirtDepth, both windings, in the material of the quad each segment hangs
 	// from. The top is the surface's own vertices; a bottom vertex is shared by the segments of one material either side.
-	TMap<uint32, int32> SkirtBottoms;
-	auto GetBottom = [&](int32 I, int32 J, uint16 QuadKey)
+	TMap<uint64, int32> SkirtBottoms;
+	auto GetBottom = [&](int32 I, int32 J, uint32 QuadKey)
 	{
-		const uint32 BottomKey = (static_cast<uint32>(I + J * Row) << 16) | QuadKey;
+		const uint64 BottomKey = (static_cast<uint64>(I + J * Row) << 32) | QuadKey;
 		if (const int32* Found = SkirtBottoms.Find(BottomKey))
 		{
 			return *Found;
@@ -503,7 +636,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 		const int32 GridIdx = GridIndex(I, J);
 		const FVector Point = DrawnPoint(I, J) - Directions[GridIdx] * Out.SkirtDepth;
 		const int32 Index = AddTerrainVertex(Point, Normals[I + J * Row], Directions[GridIdx], TerrainUV0(Point, Normals[I + J * Row]),
-			static_cast<uint8>(QuadKey & 0xFF), static_cast<uint8>(QuadKey >> 8));
+			KeyMaterial(QuadKey), KeyBiome(QuadKey), KeySecondary(QuadKey), CornerWeight(I, J, QuadKey));
 		SkirtBottoms.Add(BottomKey, Index);
 		return Index;
 	};
@@ -519,7 +652,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 			case 2: I0 = K; J0 = Q; I1 = K + 1; J1 = Q; QI = K; QJ = Q - 1; break;
 			default: I0 = 0; J0 = K; I1 = 0; J1 = K + 1; QI = 0; QJ = K; break;
 			}
-			const uint16 QuadKey = QuadKeys[QI + QJ * Q];
+			const uint32 QuadKey = QuadKeys[QI + QJ * Q];
 			const int32 T0 = GetVertex(I0, J0, QuadKey);
 			const int32 T1 = GetVertex(I1, J1, QuadKey);
 			const int32 B0 = GetBottom(I0, J0, QuadKey);
@@ -555,7 +688,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 				const FVector2f UV0(
 					static_cast<float>((UVMin.X + UVSize * I / Q) * SeaUVScale - SeaUVOffset.X),
 					static_cast<float>((UVMin.Y + UVSize * J / Q) * SeaUVScale - SeaUVOffset.Y));
-				Index = AddVertex(Sea, C + Direction * Settings.SeaRadius, FVector3f(Direction), Direction, UV0, SeaMaterial, 0);
+				Index = AddVertex(Sea, C + Direction * Settings.SeaRadius, FVector3f(Direction), Direction, UV0, SeaMaterial, 0, SeaMaterial, 0.0f);
 			}
 			return Index;
 		};

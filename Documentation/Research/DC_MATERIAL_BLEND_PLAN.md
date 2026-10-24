@@ -5,6 +5,13 @@ material-border striping fix (per-quad materials + border vertex duplication,
 `fix/dc-material-border-stripes`, VoxelWorlds PR #13). **Status: DEFERRED — scoped,
 not started.**
 
+> **The planet far field blends this way since G45** (2026-10-24, WORLD_MODES_REVIEW_PLAN.md §20.27, decision D28):
+> primary in UV1.x and secondary in colour R, both flat per triangle, the secondary's weight in colour A
+> (255 − weight), and instead of two samples and a `lerp` the master material's `FarFieldMaterialPick` node
+> picks one of the two per pixel against a temporal dither (MATERIAL_SYSTEM.md "Far-Field Material Blend").
+> Checked then: vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so RGB carries an ID
+> exactly too; the transport table's note about RGB below is overcautious. The voxel meshes are unchanged.
+
 ## Goal
 
 Post-fix, a grass→gravel border is a crisp polygonal edge following triangle
