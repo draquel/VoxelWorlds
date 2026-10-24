@@ -12,6 +12,8 @@
 #include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialParameterCollectionInstance.h"
 #include "Engine/World.h"
+#include "Engine/Engine.h"
+#include "Async/Async.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture2DArray.h"
@@ -74,6 +76,89 @@ static constexpr double VoxelFadeHoldFailsafeSeconds = 3.0;
 static const FName VoxelFadeAlphaParamName(TEXT("FadeAlpha"));
 static const FName VoxelFadeInvertParamName(TEXT("FadeInvert"));
 
+static TAutoConsoleVariable<int32> CVarVoxelMaterialGradientSampling(
+	TEXT("voxel.Material.GradientSampling"),
+	1,
+	TEXT("How the smooth terrain material samples its texture arrays (visual polish VP2-O1; MPC_VoxelMaterial's\n")
+	TEXT("GradientSampling, read by MF_TriplanarSampleAlbedoRoughness and MF_TriplanarSampleNormal):\n")
+	TEXT("  1 = at the pixel's footprint: mip and anisotropy from the UV derivatives (default)\n")
+	TEXT("  0 = mip 0 at every distance, as before (the texture aliases into noise beyond a few metres)"),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelMaterialConstantRoughness(
+	TEXT("voxel.Material.ConstantRoughness"),
+	1,
+	TEXT("The terrain's roughness (visual polish VP2-O6; MPC_VoxelMaterial's ConstantRoughness, read by M_VoxelMaster and\n")
+	TEXT("M_VoxelMaster_Fade):\n")
+	TEXT("  1 = the material's TerrainRoughness scalar (0.9 by default): matte ground (default)\n")
+	TEXT("  0 = the sampled roughness times RoughnessMultiplier, as before (0 in MI_VoxelDefault: a mirror that reflects the\n")
+	TEXT("      sky at grazing angles; no terrain material has a roughness map, the slots hold a placeholder)"),
+	ECVF_Default);
+
+namespace
+{
+	/** The collection the voxel master materials read their switches from (VP2-O1, VP2-O6) */
+	const TCHAR* VoxelMaterialCollectionPath = TEXT("/VoxelWorlds/Materials/MPC_VoxelMaterial.MPC_VoxelMaterial");
+
+	/** Each switch: the collection's scalar and the console variable that sets it (0 or 1). */
+	struct FVoxelMaterialSwitch
+	{
+		FName ParamName;
+		TAutoConsoleVariable<int32>* CVar;
+	};
+
+	/** Push the voxel.Material.* switches into the world's MPC_VoxelMaterial instance where they differ. */
+	void ApplyVoxelMaterialSwitches(UWorld* World)
+	{
+		static const FVoxelMaterialSwitch Switches[] = {
+			{ FName(TEXT("GradientSampling")), &CVarVoxelMaterialGradientSampling },
+			{ FName(TEXT("ConstantRoughness")), &CVarVoxelMaterialConstantRoughness },
+		};
+		static TWeakObjectPtr<UMaterialParameterCollection> Collection;
+		static bool bLoadAttempted = false;
+		if (!Collection.IsValid() && !bLoadAttempted)
+		{
+			bLoadAttempted = true;
+			Collection = LoadObject<UMaterialParameterCollection>(nullptr, VoxelMaterialCollectionPath);
+			UE_CLOG(!Collection.IsValid(), LogVoxelRendering, Warning, TEXT("ApplyVoxelMaterialSwitches: %s not found, the voxel.Material.* switches have no effect"),
+				VoxelMaterialCollectionPath);
+		}
+		UMaterialParameterCollectionInstance* Instance = (World && Collection.IsValid()) ? World->GetParameterCollectionInstance(Collection.Get()) : nullptr;
+		if (!Instance)
+		{
+			return;
+		}
+		for (const FVoxelMaterialSwitch& Switch : Switches)
+		{
+			const float Wanted = Switch.CVar->GetValueOnGameThread() != 0 ? 1.0f : 0.0f;
+			float Current = -1.0f;
+			if (!Instance->GetScalarParameterValue(Switch.ParamName, Current) || Current != Wanted)
+			{
+				Instance->SetScalarParameterValue(Switch.ParamName, Wanted);
+			}
+		}
+	}
+
+	/** A console variable changed: apply the switches to every game and PIE world (each world has its own MPC instance). */
+	void OnVoxelMaterialCVarsChanged()
+	{
+		if (!GEngine)
+		{
+			return;
+		}
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			UWorld* World = Context.World();
+			if (World && (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE))
+			{
+				ApplyVoxelMaterialSwitches(World);
+			}
+		}
+	}
+
+	FAutoConsoleVariableSink VoxelMaterialCVarSink(FConsoleCommandDelegate::CreateStatic(&OnVoxelMaterialCVarsChanged));
+}
+
 // ==================== UVoxelWorldComponent ====================
 
 UVoxelWorldComponent::UVoxelWorldComponent(const FObjectInitializer& ObjectInitializer)
@@ -116,6 +201,13 @@ FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
 
 	// Resolve the crossfade fade material (covers materials assigned without SetMaterial)
 	RefreshDerivedFadeMaterial();
+
+	// A new world's MPC instance starts at the collection's defaults: give it the material switches (VP2-O1, O6). Render
+	// state can be created off the game thread, and the MPC instance belongs to it.
+	AsyncTask(ENamedThreads::GameThread, [WeakWorld = TWeakObjectPtr<UWorld>(GetWorld())]()
+	{
+		ApplyVoxelMaterialSwitches(WeakWorld.Get());
+	});
 
 	// Ensure we have a material
 	UMaterialInterface* MaterialToUse = VoxelMaterial;

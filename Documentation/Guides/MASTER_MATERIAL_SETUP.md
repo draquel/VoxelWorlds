@@ -117,19 +117,26 @@ float2 UV_X = WorldPosition.zy * Scale;
 float2 UV_Y = WorldPosition.xz * Scale;
 float2 UV_Z = WorldPosition.xy * Scale;
 
-// Get sampler
-SamplerState Samp = View.MaterialTextureBilinearWrapedSampler;
+// UV derivatives from the continuous translated position (the WorldPosition input is tiled for large-world
+// precision and jumps at its period), scaled by GradientSampling: 0 = mip 0 (MATERIAL_SYSTEM.md "Footprint Sampling")
+float3 DPdx = 0;
+float3 DPdy = 0;
+#if PIXELSHADER
+const float3 TranslatedPosition = GetTranslatedWorldPosition(Parameters);
+DPdx = ddx(TranslatedPosition) * (Scale * GradientSampling);
+DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
+#endif
 
-// Sample albedo from each projection
-float4 Albedo_X = AlbedoArray.SampleLevel(Samp, float3(UV_X, MatID), 0);
-float4 Albedo_Y = AlbedoArray.SampleLevel(Samp, float3(UV_Y, MatID), 0);
-float4 Albedo_Z = AlbedoArray.SampleLevel(Samp, float3(UV_Z, MatID), 0);
+// Sample albedo from each projection at the pixel's footprint, with the array's own sampler
+float4 Albedo_X = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_X, MatID), DPdx.zy, DPdy.zy);
+float4 Albedo_Y = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Y, MatID), DPdx.xz, DPdy.xz);
+float4 Albedo_Z = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Z, MatID), DPdx.xy, DPdy.xy);
 float3 Albedo = Albedo_X.rgb * Weights.x + Albedo_Y.rgb * Weights.y + Albedo_Z.rgb * Weights.z;
 
 // Sample roughness from each projection
-float Rough_X = RoughnessArray.SampleLevel(Samp, float3(UV_X, MatID), 0).r;
-float Rough_Y = RoughnessArray.SampleLevel(Samp, float3(UV_Y, MatID), 0).r;
-float Rough_Z = RoughnessArray.SampleLevel(Samp, float3(UV_Z, MatID), 0).r;
+float Rough_X = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_X, MatID), DPdx.zy, DPdy.zy).r;
+float Rough_Y = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Y, MatID), DPdx.xz, DPdy.xz).r;
+float Rough_Z = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Z, MatID), DPdx.xy, DPdy.xy).r;
 float Roughness = Rough_X * Weights.x + Rough_Y * Weights.y + Rough_Z * Weights.z;
 
 return float4(Albedo, Roughness);
@@ -144,6 +151,7 @@ return float4(Albedo, Roughness);
      - `Sharpness` (Scalar)
      - `AlbedoArray` (Texture2DArray)
      - `RoughnessArray` (Texture2DArray)
+     - `GradientSampling` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `GradientSampling`, inside the function
    - Output Type: CMOT Float 4
 
 5. Add **Component Mask** nodes to split the output:
@@ -202,13 +210,19 @@ float2 UV_X = WorldPosition.zy * Scale;
 float2 UV_Y = WorldPosition.xz * Scale;
 float2 UV_Z = WorldPosition.xy * Scale;
 
-// Get sampler
-SamplerState Samp = View.MaterialTextureBilinearWrapedSampler;
+// UV derivatives as in MF_TriplanarSampleAlbedoRoughness
+float3 DPdx = 0;
+float3 DPdy = 0;
+#if PIXELSHADER
+const float3 TranslatedPosition = GetTranslatedWorldPosition(Parameters);
+DPdx = ddx(TranslatedPosition) * (Scale * GradientSampling);
+DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
+#endif
 
 // Sample and decode tangent-space normals
-float3 TN_X = NormalArray.SampleLevel(Samp, float3(UV_X, MatID), 0).rgb * 2.0 - 1.0;
-float3 TN_Y = NormalArray.SampleLevel(Samp, float3(UV_Y, MatID), 0).rgb * 2.0 - 1.0;
-float3 TN_Z = NormalArray.SampleLevel(Samp, float3(UV_Z, MatID), 0).rgb * 2.0 - 1.0;
+float3 TN_X = NormalArray.SampleGrad(NormalArraySampler, float3(UV_X, MatID), DPdx.zy, DPdy.zy).rgb * 2.0 - 1.0;
+float3 TN_Y = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Y, MatID), DPdx.xz, DPdy.xz).rgb * 2.0 - 1.0;
+float3 TN_Z = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Z, MatID), DPdx.xy, DPdy.xy).rgb * 2.0 - 1.0;
 
 // UDN blend: Project tangent-space normals to world-space derivatives
 float3 N_X = float3(0, TN_X.y, -TN_X.x);
@@ -229,6 +243,7 @@ return BlendedNormal;
      - `Scale` (Scalar)
      - `Sharpness` (Scalar)
      - `NormalArray` (Texture2DArray)
+     - `GradientSampling` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `GradientSampling`, inside the function
    - Output Type: CMOT Float 3
 
 5. Add **Function Output**:

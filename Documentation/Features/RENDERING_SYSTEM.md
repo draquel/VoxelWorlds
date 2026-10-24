@@ -162,7 +162,14 @@ AVoxelWorldTestActor
 
 **FVoxelSceneProxy** (`VoxelRendering/Private/VoxelSceneProxy.cpp`)
 - Manages per-chunk `FLocalVertexFactory` instances
-- Performs frustum culling via ViewProjectionMatrix
+- Culls chunk and seam batches per view in `GetDynamicMeshElements()` (`FVoxelViewCull`): against the view's frustum,
+  and in a shadow depth pass against the shadow's caster volume (`FSceneView::GetDynamicMeshElementsShadowCullFrustum`,
+  boxes moved by `GetPreShadowTranslation`). A shadow pass calls with a snapshot of the camera's view whose
+  `ViewFrustum` is still the camera's; culling with it left every chunk out of view out of the shadow map, so hills
+  behind or beside the camera cast no shadow until turned into view (visual polish VP3-O1). A shadow pass also skips
+  the RVT clones and water, which cast no shadow. `voxel.Render.ShadowCullFrustum` (1 by default, 0 = the camera's
+  frustum as before); `FVoxelBatchCounters::FCounts::ShadowDrawn` and the bench's `ShadowBatchN` column count the
+  batches drawn into shadow maps
 - Issues draw calls in `GetDynamicMeshElements()`
 - Handles game→render thread chunk buffer updates
 - Holds the only copy of the GPU geometry: the engine recreates the proxy on material and render-state changes

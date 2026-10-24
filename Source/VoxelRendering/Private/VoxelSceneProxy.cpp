@@ -39,6 +39,51 @@ static void SyncVertexColorDebugMode()
 	GVoxelVertexColorDebugMode = CVarVoxelVertexColorDebugMode.GetValueOnAnyThread();
 }
 
+static TAutoConsoleVariable<int32> CVarVoxelShadowCullFrustum(
+	TEXT("voxel.Render.ShadowCullFrustum"),
+	1,
+	TEXT("How the voxel scene proxy culls chunks and seams in a shadow depth pass (visual polish VP3-O1):\n")
+	TEXT("  1 = against the shadow's caster volume (GetDynamicMeshElementsShadowCullFrustum): terrain out of view still casts\n")
+	TEXT("  0 = against the camera's frustum, as before: a hill out of view casts no shadow until it is turned into view"),
+	ECVF_RenderThreadSafe
+);
+
+namespace
+{
+	/**
+	 * How GetDynamicMeshElements culls one view's batches (visual polish VP3-O1). A shadow depth pass calls with a snapshot
+	 * of the camera's view, whose ViewFrustum is still the camera's, and passes the shadow's caster volume as
+	 * GetDynamicMeshElementsShadowCullFrustum, in the space translated by GetPreShadowTranslation (zero for the sun's
+	 * whole-scene cascades). Culling with the camera's frustum there dropped every chunk out of view from the shadow
+	 * map, so a hill behind or beside the camera cast no shadow until it was turned into view.
+	 */
+	struct FVoxelViewCull
+	{
+		const FConvexVolume* Frustum = nullptr;
+		FVector Translation = FVector::ZeroVector;
+		/** A shadow gather culled by its caster volume: batches that cast no shadow (RVT clones, water) are left out. */
+		bool bShadowCasters = false;
+
+		FVoxelViewCull(const FSceneView& View, bool bUseShadowVolume)
+			: Frustum(&View.ViewFrustum)
+		{
+			const FConvexVolume* ShadowFrustum = View.GetDynamicMeshElementsShadowCullFrustum();
+			if (bUseShadowVolume && ShadowFrustum)
+			{
+				Frustum = ShadowFrustum;
+				Translation = View.GetPreShadowTranslation();
+				bShadowCasters = true;
+			}
+		}
+
+		/** @return Whether the world-space box can be seen by the view (or cast into the shadow) */
+		bool Intersects(const FBox& WorldBox) const
+		{
+			return Frustum->IntersectBox(WorldBox.GetCenter() + Translation, WorldBox.GetExtent());
+		}
+	};
+}
+
 // ==================== Helper Function Implementation ====================
 
 void InitVoxelLocalVertexFactory(
@@ -351,6 +396,10 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	// retained Previous mesh, or an appearance, which has none)
 	const bool bAnyFades = ChunkFadeStates.Num() > 0;
 
+	// A shadow gather passes one view carrying the shadow's caster volume (FVoxelViewCull)
+	const bool bUseShadowVolume = CVarVoxelShadowCullFrustum.GetValueOnAnyThread() != 0;
+	const bool bShadowGather = Views.Num() > 0 && Views[0]->GetDynamicMeshElementsShadowCullFrustum() != nullptr;
+
 	// Process each view
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 	{
@@ -359,7 +408,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			continue;
 		}
 
-		const FSceneView* View = Views[ViewIndex];
+		const FVoxelViewCull Cull(*Views[ViewIndex], bUseShadowVolume);
 
 		// Iterate over all chunks
 		for (const auto& Pair : ChunkRenderData)
@@ -407,17 +456,10 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					// Expand bounds for safety margin (accounts for vertex displacement, LOD morphing)
 					WorldBounds = WorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
 
-					// Use UE's built-in frustum intersection test which handles all edge cases:
-					// - Corners outside but surface visible
-					// - Camera inside bounds
-					// - Bounds spanning frustum planes
-					const FConvexVolume& ViewFrustum = View->ViewFrustum;
-
-					// IntersectBox returns true if the box intersects or is inside the frustum
-					// This is the proper conservative test for frustum culling
-					bool bIntersects = ViewFrustum.IntersectBox(WorldBounds.GetCenter(), WorldBounds.GetExtent());
-
-					if (!bIntersects)
+					// UE's box-frustum test (conservative: corners outside but surface visible, camera inside
+					// the bounds, bounds spanning planes), against the camera's frustum or, in a shadow pass,
+					// the shadow's caster volume
+					if (!Cull.Intersects(WorldBounds))
 					{
 						SkippedFrustum++;
 						continue;
@@ -520,21 +562,25 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			// is populated by the base FPrimitiveSceneProxy from the component's assigned RVTs,
 			// so this loop is a no-op when no RVT is assigned (zero overhead in that case).
 			// Pattern mirrors FBaseDynamicMeshSceneProxy. Only terrain writes to RVT; water does not.
-			for (ERuntimeVirtualTextureMaterialType RVTMaterialType : RuntimeVirtualTextureMaterialTypes)
+			// A shadow pass draws none of them.
+			if (!Cull.bShadowCasters)
 			{
-				FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
-				VirtualMeshBatch = MeshBatch;
-				// RVT always samples the shared (opaque) material — a dithered fade mask would
-				// punch transient holes into the cached virtual texture pages.
-				VirtualMeshBatch.MaterialRenderProxy = MaterialProxy;
-				VirtualMeshBatch.CastShadow = false;
-				VirtualMeshBatch.bUseAsOccluder = false;
-				VirtualMeshBatch.bUseForDepthPass = false;
-				VirtualMeshBatch.bUseForMaterial = false;
-				VirtualMeshBatch.bDitheredLODTransition = false;
-				VirtualMeshBatch.bRenderToVirtualTexture = true;
-				VirtualMeshBatch.RuntimeVirtualTextureMaterialType = (uint32)RVTMaterialType;
-				Collector.AddMesh(ViewIndex, VirtualMeshBatch);
+				for (ERuntimeVirtualTextureMaterialType RVTMaterialType : RuntimeVirtualTextureMaterialTypes)
+				{
+					FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
+					VirtualMeshBatch = MeshBatch;
+					// RVT always samples the shared (opaque) material — a dithered fade mask would
+					// punch transient holes into the cached virtual texture pages.
+					VirtualMeshBatch.MaterialRenderProxy = MaterialProxy;
+					VirtualMeshBatch.CastShadow = false;
+					VirtualMeshBatch.bUseAsOccluder = false;
+					VirtualMeshBatch.bUseForDepthPass = false;
+					VirtualMeshBatch.bUseForMaterial = false;
+					VirtualMeshBatch.bDitheredLODTransition = false;
+					VirtualMeshBatch.bRenderToVirtualTexture = true;
+					VirtualMeshBatch.RuntimeVirtualTextureMaterialType = (uint32)RVTMaterialType;
+					Collector.AddMesh(ViewIndex, VirtualMeshBatch);
+				}
 			}
 
 			// Add mesh to collector
@@ -556,14 +602,13 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	const bool bAnySeamFades = !bWireframe && SeamFadeStates.Num() > 0;
 	if (SeamRenderData.Num() > 0 || (bAnySeamFades && SeamPreviousMeshes.Num() > 0))
 	{
-		auto IsFrustumCulled = [this](const FSceneView* View, const FBox& SeamWorldBounds)
+		auto IsFrustumCulled = [this](const FVoxelViewCull& Cull, const FBox& SeamWorldBounds)
 		{
 			if (!SeamWorldBounds.IsValid)
 			{
 				return false;
 			}
-			const FBox Expanded = SeamWorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
-			return !View->ViewFrustum.IntersectBox(Expanded.GetCenter(), Expanded.GetExtent());
+			return !Cull.Intersects(SeamWorldBounds.ExpandBy(FVector(VoxelSize * 2.0f)));
 		};
 
 		auto EmitSeamBatch = [&](int32 ViewIndex, const FLocalVertexFactory* VertexFactory, const FIndexBuffer* IndexBuffer,
@@ -631,7 +676,8 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				continue;
 			}
 
-			const FSceneView* View = Views[ViewIndex];
+			const FVoxelViewCull Cull(*Views[ViewIndex], bUseShadowVolume);
+			const bool bWithRVT = !Cull.bShadowCasters;
 
 			for (const auto& Pair : SeamRenderData)
 			{
@@ -665,7 +711,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				}
 
 				// Frustum culling (same conservative box test as chunks)
-				if (IsFrustumCulled(View, RenderData.WorldBounds))
+				if (IsFrustumCulled(Cull, RenderData.WorldBounds))
 				{
 					SkippedFrustum++;
 					continue;
@@ -685,7 +731,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				}
 
 				EmitSeamBatch(ViewIndex, VertexFactoryPtr->Get(), IndexBufferPtr->Get(), RenderData,
-					bFading ? FadeState->FadeInProxy : MaterialProxy, /*bWithRVT*/ true);
+					bFading ? FadeState->FadeInProxy : MaterialProxy, bWithRVT);
 			}
 
 			// Buckets fading out to nothing (removed during a fade): only their Previous set remains.
@@ -707,7 +753,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 						SkippedOverLimit++;
 						continue;
 					}
-					if (IsFrustumCulled(View, Pair.Value.RenderData.WorldBounds))
+					if (IsFrustumCulled(Cull, Pair.Value.RenderData.WorldBounds))
 					{
 						SkippedFrustum++;
 						continue;
@@ -749,7 +795,11 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					continue;
 				}
 
-				const FSceneView* View = Views[ViewIndex];
+				const FVoxelViewCull Cull(*Views[ViewIndex], bUseShadowVolume);
+				if (Cull.bShadowCasters)
+				{
+					continue; // water casts no shadow
+				}
 
 				for (const auto& Pair : WaterTileRenderData)
 				{
@@ -788,8 +838,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 						if (WorldBounds.IsValid)
 						{
 							WorldBounds = WorldBounds.ExpandBy(FVector(VoxelSize * 2.0f));
-							const FConvexVolume& ViewFrustum = View->ViewFrustum;
-							if (!ViewFrustum.IntersectBox(WorldBounds.GetCenter(), WorldBounds.GetExtent()))
+							if (!Cull.Intersects(WorldBounds))
 							{
 								SkippedFrustum++;
 								continue;
@@ -838,6 +887,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 		Counts.SkippedInvisible = SkippedInvisible;
 		Counts.SkippedFrustum = SkippedFrustum;
 		Counts.SkippedOverLimit = SkippedOverLimit;
+		Counts.ShadowDrawn = bShadowGather ? TotalMeshesAdded : 0;
 		FVoxelBatchCounters::Add(Counts);
 	}
 
@@ -858,6 +908,7 @@ namespace
 	std::atomic<int32> GVoxelBatchesSkippedInvisible{0};
 	std::atomic<int32> GVoxelBatchesSkippedFrustum{0};
 	std::atomic<int32> GVoxelBatchesSkippedOverLimit{0};
+	std::atomic<int32> GVoxelBatchesShadowDrawn{0};
 }
 
 void FVoxelBatchCounters::Add(const FCounts& Counts)
@@ -866,6 +917,7 @@ void FVoxelBatchCounters::Add(const FCounts& Counts)
 	GVoxelBatchesSkippedInvisible.fetch_add(Counts.SkippedInvisible, std::memory_order_relaxed);
 	GVoxelBatchesSkippedFrustum.fetch_add(Counts.SkippedFrustum, std::memory_order_relaxed);
 	GVoxelBatchesSkippedOverLimit.fetch_add(Counts.SkippedOverLimit, std::memory_order_relaxed);
+	GVoxelBatchesShadowDrawn.fetch_add(Counts.ShadowDrawn, std::memory_order_relaxed);
 }
 
 FVoxelBatchCounters::FCounts FVoxelBatchCounters::Consume()
@@ -875,6 +927,7 @@ FVoxelBatchCounters::FCounts FVoxelBatchCounters::Consume()
 	Counts.SkippedInvisible = GVoxelBatchesSkippedInvisible.exchange(0, std::memory_order_relaxed);
 	Counts.SkippedFrustum = GVoxelBatchesSkippedFrustum.exchange(0, std::memory_order_relaxed);
 	Counts.SkippedOverLimit = GVoxelBatchesSkippedOverLimit.exchange(0, std::memory_order_relaxed);
+	Counts.ShadowDrawn = GVoxelBatchesShadowDrawn.exchange(0, std::memory_order_relaxed);
 	return Counts;
 }
 
