@@ -18,6 +18,8 @@ struct VOXELRENDERING_API FVoxelBatchCounters
 		int32 SkippedInvisible = 0;
 		int32 SkippedFrustum = 0;
 		int32 SkippedOverLimit = 0;
+		/** Of Drawn, the batches drawn in shadow gathers (calls whose view carries a shadow cull volume; visual polish VP3) */
+		int32 ShadowDrawn = 0;
 
 		int32 Skipped() const { return SkippedInvisible + SkippedFrustum + SkippedOverLimit; }
 	};

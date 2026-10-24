@@ -288,8 +288,10 @@ The triplanar position is large-world safe (spherical Phase 6, WM-BP7): the trip
 float is 8 uu coarse at 10^8 (streaked ground on a 1,000 km planet). `M_VoxelMaster` and `M_VoxelMaster_Fade` feed
 them a tiled position computed with LWC math nodes: Period = max(1, round(65,536 x `TriplanarScale`)) / `TriplanarScale`,
 a whole number of texture tiles, and tiled = frac(absolute world position / Period) x Period. The UV differs from the
-untiled one by whole tiles, and the nodes sample with `SampleLevel`, so the same texels are read with no seam at a
-period boundary. A new smooth master material must do the same before its position reaches a custom node.
+untiled one by whole tiles, so the same texels are read with no seam at a period boundary. The nodes take their UV
+derivatives from the translated (camera-relative) world position, not from the tiled one, which jumps by a period at
+its boundaries (see "Footprint Sampling" below). A new smooth master material must tile its position the same way
+before it reaches a custom node.
 
 ---
 
@@ -325,6 +327,7 @@ This custom HLSL node samples both albedo and roughness arrays:
 - `Sharpness` (float) - Blend sharpness (e.g., 4.0)
 - `AlbedoArray` (Texture2DArray) - Material atlas parameter
 - `RoughnessArray` (Texture2DArray) - Material atlas parameter
+- `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter (Footprint Sampling below)
 
 **Output:** `float4` (RGB = Albedo, A = Roughness)
 
@@ -340,19 +343,25 @@ float2 UV_X = WorldPos.zy * Scale;  // YZ plane
 float2 UV_Y = WorldPos.xz * Scale;  // XZ plane (top/bottom)
 float2 UV_Z = WorldPos.xy * Scale;  // XY plane
 
-// Use SampleLevel for ray tracing compatibility
-SamplerState Samp = View.MaterialTextureBilinearWrapedSampler;
+// UV derivatives from the continuous translated position, scaled by GradientSampling (MPC_VoxelMaterial)
+float3 DPdx = 0;
+float3 DPdy = 0;
+#if PIXELSHADER
+const float3 TranslatedPosition = GetTranslatedWorldPosition(Parameters);
+DPdx = ddx(TranslatedPosition) * (Scale * GradientSampling);
+DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
+#endif
 
-// Sample albedo from each projection
-float4 Albedo_X = AlbedoArray.SampleLevel(Samp, float3(UV_X, MaterialID), 0);
-float4 Albedo_Y = AlbedoArray.SampleLevel(Samp, float3(UV_Y, MaterialID), 0);
-float4 Albedo_Z = AlbedoArray.SampleLevel(Samp, float3(UV_Z, MaterialID), 0);
+// Sample albedo from each projection at the pixel's footprint, with the array's own (anisotropic) sampler
+float4 Albedo_X = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_X, MaterialID), DPdx.zy, DPdy.zy);
+float4 Albedo_Y = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Y, MaterialID), DPdx.xz, DPdy.xz);
+float4 Albedo_Z = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Z, MaterialID), DPdx.xy, DPdy.xy);
 float3 Albedo = Albedo_X.rgb * Weights.x + Albedo_Y.rgb * Weights.y + Albedo_Z.rgb * Weights.z;
 
 // Sample roughness
-float Rough_X = RoughnessArray.SampleLevel(Samp, float3(UV_X, MaterialID), 0).r;
-float Rough_Y = RoughnessArray.SampleLevel(Samp, float3(UV_Y, MaterialID), 0).r;
-float Rough_Z = RoughnessArray.SampleLevel(Samp, float3(UV_Z, MaterialID), 0).r;
+float Rough_X = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_X, MaterialID), DPdx.zy, DPdy.zy).r;
+float Rough_Y = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Y, MaterialID), DPdx.xz, DPdy.xz).r;
+float Rough_Z = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Z, MaterialID), DPdx.xy, DPdy.xy).r;
 float Roughness = Rough_X * Weights.x + Rough_Y * Weights.y + Rough_Z * Weights.z;
 
 return float4(Albedo, Roughness);
@@ -369,6 +378,7 @@ Normal maps require special blending to avoid "plaid" artifacts. This uses UDN (
 - `Scale` (float) - Triplanar tiling scale
 - `Sharpness` (float) - Blend sharpness
 - `NormalArray` (Texture2DArray) - Material atlas parameter
+- `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter
 
 **Output:** `float3` (World-space normal)
 
@@ -382,12 +392,19 @@ float2 UV_X = WorldPos.zy * Scale;
 float2 UV_Y = WorldPos.xz * Scale;
 float2 UV_Z = WorldPos.xy * Scale;
 
-SamplerState Samp = View.MaterialTextureBilinearWrapedSampler;
+// DPdx / DPdy as in the albedo node
+float3 DPdx = 0;
+float3 DPdy = 0;
+#if PIXELSHADER
+const float3 TranslatedPosition = GetTranslatedWorldPosition(Parameters);
+DPdx = ddx(TranslatedPosition) * (Scale * GradientSampling);
+DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
+#endif
 
 // Decode tangent-space normals
-float3 TN_X = NormalArray.SampleLevel(Samp, float3(UV_X, MaterialID), 0).rgb * 2.0 - 1.0;
-float3 TN_Y = NormalArray.SampleLevel(Samp, float3(UV_Y, MaterialID), 0).rgb * 2.0 - 1.0;
-float3 TN_Z = NormalArray.SampleLevel(Samp, float3(UV_Z, MaterialID), 0).rgb * 2.0 - 1.0;
+float3 TN_X = NormalArray.SampleGrad(NormalArraySampler, float3(UV_X, MaterialID), DPdx.zy, DPdy.zy).rgb * 2.0 - 1.0;
+float3 TN_Y = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Y, MaterialID), DPdx.xz, DPdy.xz).rgb * 2.0 - 1.0;
+float3 TN_Z = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Z, MaterialID), DPdx.xy, DPdy.xy).rgb * 2.0 - 1.0;
 
 // UDN blend: Project tangent-space normals to world-space derivatives
 float3 N_X = float3(0, TN_X.y, -TN_X.x);        // X-axis projection
@@ -403,7 +420,26 @@ return BlendedNormal;
 **Important Notes:**
 - Use `VertexNormalWS` as input, NOT `PixelNormalWS` (creates circular dependency)
 - Disable "Tangent Space Normal" in material settings
-- Use `SampleLevel()` instead of `Sample()` for ray tracing compatibility
+- Sample with `SampleGrad()` and explicit derivatives, not `Sample()`: the derivatives must come from the continuous
+  translated position (the tiled position jumps at its period), and outside the pixel shader (ray tracing hit shaders)
+  there are none, so the gradients stay zero there (mip 0)
+
+### Footprint Sampling (visual polish VP2-O1)
+
+Until 2026-10-24 both nodes sampled with `SampleLevel(..., 0)`: mip 0 at every distance. At one 512 px tile per metre a
+pixel of ground 10 m away covers about 5 texels and 50 m away about 26, so every pixel beyond a few metres picked one
+texel out of its footprint, a different one with every sub-pixel camera move and TSR jitter: aliasing TSR cannot
+resolve, the terrain's "extremely noisy" look (`Documentation/VISUAL_POLISH_PLAN.md`). The mip chain restored in
+VoxelWorlds#25 was never read.
+
+Now each projection samples with `SampleGrad` and the UV derivatives of the translated world position, with the
+array's own sampler (`AlbedoArraySampler` etc., anisotropic: the arrays are `TEXTUREGROUP_World` with `TF_Default`).
+The switch is the scalar `GradientSampling` of `MPC_VoxelMaterial` (`/VoxelWorlds/Materials/`), read inside both
+functions; `voxel.Material.GradientSampling` (1 by default, 0 = mip 0 as before) sets it in every game and PIE world
+(a console variable sink, and each `UVoxelWorldComponent` applies it when its scene proxy is created). On `PlanetTest`
+at four fixed views, a quarter-pixel camera turn changes the ground's pixels by 43.8-45.0 luma (of 255) at mip 0 and
+0.6-1.6 with gradients; the ground's high-frequency energy under TSR falls from 55-59 to 3.5-7.3; GPU time per frame
+is not higher (P50 5.11-5.22 ms against 4.94-5.07, three bench runs each).
 
 ---
 

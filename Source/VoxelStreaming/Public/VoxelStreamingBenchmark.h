@@ -210,6 +210,8 @@ private:
 		float SnapMB;
 		// Of which the neighbours' boundary shells for collision cooks (MB; G69)
 		float ShellMB;
+		// Of BatchesDrawn, the voxel batches drawn into shadow maps (visual polish VP3: voxel.Render.ShadowCullFrustum)
+		int32 ShadowBatchesDrawn;
 	};
 
 	void TakeSample(float DeltaTime);
