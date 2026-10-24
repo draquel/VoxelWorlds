@@ -13,6 +13,7 @@
 #include "VoxelTerrainConditioning.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelPlanetNoise.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelScatter.h"
@@ -43,6 +44,14 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterBuriedTopFace(
 	TEXT("depth, as generation makes it (the generated height, the cave carve, the chunk above's edits), so a buried chunk's top face\n")
 	TEXT("carries no copy of the rock over it; 0 = only within 1.5 voxels of the generated ground (G26), taken for air deeper (before).\n")
 	TEXT("Read when a chunk's extraction context is built."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelScatterPlanetFaceCaves(
+	TEXT("voxel.Scatter.PlanetFaceCaves"),
+	1,
+	TEXT("Planets (world modes review G72): 1 = the voxels past a chunk's +X, +Y and +Z faces, which its rays read in its last\n")
+	TEXT("cells, are carved by the caves as generation carves them; 0 = the generated altitude alone (before): a cave opening\n")
+	TEXT("such a voxel was read as rock. Read when a chunk's extraction context is built."),
 	ECVF_Default);
 
 /** A planet's scatter HISM regions by default (voxel.Scatter.RegionChunks -1): a quarter of the render regions' edge. */
@@ -142,7 +151,10 @@ namespace
 			if (Cached == 0xFFFF)
 			{
 				const FIntVector Local(X, Y, Z);
-				Cached = Context.GetPlanetVoxelOutsideChunk(Local, Origin + FVector(Local) * VoxelSize, VoxelSize).Density;
+				FVoxelData Given;
+				Cached = (Context.OutsideVoxelSource && Context.OutsideVoxelSource(Local, Given))
+					? Given.Density
+					: Context.GetPlanetVoxelOutsideChunk(Local, Origin + FVector(Local) * VoxelSize, VoxelSize).Density;
 			}
 			return static_cast<uint8>(Cached);
 		}
@@ -2670,6 +2682,42 @@ FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 Loc
 	return Generated;
 }
 
+/**
+ * Whether any of a cave configuration's layers can carve at a depth under the ground (voxels) for some biome, under the sea
+ * or not: its depth window (MinDepth less the fade, MaxDepth plus it), the minimum depth the shallowest of the layer's own,
+ * a biome override's and the underwater one (CalculateCaveDensity replaces the layer's with those). Outside every layer's
+ * window the carve is 0 for any biome, so the biome need not be found (G72: a planet voxel's biome costs two climate fields).
+ */
+static bool CaveLayerReachesDepth(const UVoxelCaveConfiguration& Caves, float DepthBelowSurface)
+{
+	float ShallowestOverride = Caves.UnderwaterMinDepth > 0.0f ? Caves.UnderwaterMinDepth : TNumericLimits<float>::Max();
+	for (const FBiomeCaveOverride& Override : Caves.BiomeOverrides)
+	{
+		if (Override.MinDepthOverride >= 0.0f)
+		{
+			ShallowestOverride = FMath::Min(ShallowestOverride, Override.MinDepthOverride);
+		}
+	}
+	for (const FCaveLayerConfig& Layer : Caves.CaveLayers)
+	{
+		if (!Layer.bEnabled)
+		{
+			continue;
+		}
+		const float MinDepth = FMath::Min(Layer.MinDepth, ShallowestOverride);
+		if (DepthBelowSurface < MinDepth - Layer.DepthFadeWidth)
+		{
+			continue;
+		}
+		if (Layer.MaxDepth > 0.0f && DepthBelowSurface > Layer.MaxDepth + Layer.DepthFadeWidth)
+		{
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
 FVoxelData FScatterExtractionContext::GetPlanetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize) const
 {
 	check(WorldMode != nullptr && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet);
@@ -2677,14 +2725,50 @@ FVoxelData FScatterExtractionContext::GetPlanetVoxelOutsideChunk(const FIntVecto
 	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 
 	// GenerateChunkSphericalPlanet's density: the generated altitude along the voxel's direction (the planet zones
-	// applied), the shell's signed distance to it.
+	// applied), the shell's signed distance to it. The continentalness the altitude samples picks the biome below.
 	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Params.PlanetCenter);
-	const float Altitude = ConditioningZones.IsValid()
-		? Planet.GetConditionedTerrainAltitude(Direction, NoiseParams, *ConditioningZones)
-		: Planet.GetTerrainAltitude(Direction, NoiseParams);
-	const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(
-		FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, Params.PlanetCenter), Params.PlanetRadius + Altitude, Params);
-	const FVoxelData Generated(0, FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize));
+	float Continentalness = 0.0f;
+	float Altitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams,
+		&Planet.GetBiomeSnapshot(), &Continentalness);
+	if (ConditioningZones.IsValid() && ConditioningZones->Num() > 0)
+	{
+		Altitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, Params.PlanetRadius, Altitude, *ConditioningZones);
+	}
+	const double Distance = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, Params.PlanetCenter);
+	const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(Distance, Params.PlanetRadius + Altitude, Params);
+	uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
+
+	// The cave carve where the voxel is solid and under the ground, as GenerateChunkSphericalPlanet applies it (G72): its
+	// depth along local up, the biome generation gives its direction (only the cave configuration's biome overrides read
+	// it), the sea's minimum depth when the ground is under the sea.
+	const float DepthBelowSurface = static_cast<float>((static_cast<double>(Altitude) - (Distance - Params.PlanetRadius)) / VoxelSize);
+	if (bCarvePlanetFaceVoxels && CaveConfiguration && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f
+		&& CaveLayerReachesDepth(*CaveConfiguration, DepthBelowSurface))
+	{
+		uint8 BiomeID = 0;
+		if (CaveConfiguration->BiomeOverrides.Num() > 0 && bEnableBiomes)
+		{
+			const FVoxelBiomeSnapshot& Snapshot = Planet.GetBiomeSnapshot();
+			const FVoxelNoiseParams TemperatureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.TemperatureSeedOffset,
+				Snapshot.TemperatureNoiseFrequency);
+			const FVoxelNoiseParams MoistureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.MoistureSeedOffset,
+				Snapshot.MoistureNoiseFrequency);
+			float Temperature = 0.0f;
+			float Moisture = 0.0f;
+			FSphericalPlanetWorldMode::SampleClimate(Direction, Params.PlanetRadius, TemperatureParams, MoistureParams, Temperature, Moisture);
+			BiomeID = Snapshot.bIsValid
+				? Snapshot.GetBiomeBlend(Temperature, Moisture, Continentalness).GetDominantBiome()
+				: FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f).GetDominantBiome();
+		}
+		const bool bUnderwater = Sea.bEnabled && static_cast<double>(Altitude) < Sea.Radius - Params.PlanetRadius;
+		const float Carve = FVoxelCPUNoiseGenerator::CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, CaveConfiguration, NoiseParams.Seed,
+			bUnderwater, &Params);
+		if (Carve > 0.0f)
+		{
+			Density = static_cast<uint8>(FMath::Clamp(FMath::Max(0.0f, static_cast<float>(Density) - Carve * 255.0f), 0.0f, 255.0f));
+		}
+	}
+	const FVoxelData Generated(0, Density);
 	if (TouchingEdits.IsValid())
 	{
 		if (const FVoxelEdit* Edit = TouchingEdits->Find(LocalCoord))
@@ -3310,6 +3394,9 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 		// The voxel over a heightmap chunk's top layer is carved as generation carves it (G28).
 		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;
 		Context.bDecideVoxelAboveAtAnyDepth = CVarVoxelScatterBuriedTopFace.GetValueOnAnyThread() != 0;
+		// A planet's voxels past a chunk's +X, +Y and +Z faces are carved likewise (G72).
+		Context.bEnableBiomes = Configuration->bEnableBiomes;
+		Context.bCarvePlanetFaceVoxels = CVarVoxelScatterPlanetFaceCaves.GetValueOnAnyThread() != 0;
 		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
 		// height on a heightmap (G23), the voxels past a planet chunk's faces (spherical SP-B10).
 		if (ConditioningGatherer)
@@ -3430,6 +3517,176 @@ void UVoxelScatterManager::GetEditReaders(const FIntVector& EditedChunk, const F
 	{
 		OutChunks.Add(EditedChunk + Offset);
 	}
+}
+
+UVoxelScatterManager::FPlanetFaceStats UVoxelScatterManager::ComparePlanetFaceVoxels(
+	TFunctionRef<TSharedPtr<const TArray<FVoxelData>>(const FIntVector&)> VoxelSource, TArray<FString>& OutChunkLines) const
+{
+	FPlanetFaceStats Stats;
+	if (!bIsInitialized || !Configuration || !WorldMode || WorldMode->GetWorldModeType() != EWorldMode::SphericalPlanet)
+	{
+		return Stats;
+	}
+	const int32 CS = Configuration->ChunkSize;
+	const float VoxelSize = Configuration->VoxelSize;
+	TArray<FIntVector> Shell;
+	GetPlanetShellNeighbours(Shell);
+
+	TArray<FIntVector> Chunks;
+	SurfaceDataCache.GetKeys(Chunks);
+	Chunks.Sort([](const FIntVector& A, const FIntVector& B)
+	{
+		return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
+	});
+
+	// A point's position to 0.1 uu, and its classification.
+	auto PositionKey = [](const FVoxelSurfacePoint& P)
+	{
+		// Planets up to D17's 1,000 km keep the tenths within an int32.
+		return FIntVector(static_cast<int32>(FMath::RoundToInt64(P.Position.X * 10.0)), static_cast<int32>(FMath::RoundToInt64(P.Position.Y * 10.0)),
+			static_cast<int32>(FMath::RoundToInt64(P.Position.Z * 10.0)));
+	};
+	auto ClassOf = [](const FVoxelSurfacePoint& P) { return (P.bIsUnderground ? 1 : 0) | (P.bIsUnderwater ? 2 : 0); };
+
+	constexpr int32 BatchSize = 32;
+	struct FJob
+	{
+		FIntVector Coord = FIntVector::ZeroValue;
+		TSharedPtr<const TArray<FVoxelData>> Voxels;
+		TArray<TSharedPtr<const TArray<FVoxelData>>> Neighbours;
+		FScatterExtractionContext Context;
+		FChunkSurfaceData Made;
+		FChunkSurfaceData Reference;
+	};
+	struct FLine
+	{
+		int64 Score = 0;
+		FString Text;
+	};
+	TArray<FLine> Lines;
+	const TArray<FClearedScatterVolume> NoClearedVolumes;
+	const float Spacing = SurfacePointSpacing;
+	for (int32 Start = 0; Start < Chunks.Num(); Start += BatchSize)
+	{
+		TArray<FJob> Jobs;
+		for (int32 I = Start; I < FMath::Min(Start + BatchSize, Chunks.Num()); ++I)
+		{
+			const FIntVector& Coord = Chunks[I];
+			if (PendingQueueSet.Contains(Coord) || AsyncScatterInProgress.Contains(Coord) || DeferredSupplementalPasses.Contains(Coord))
+			{
+				++Stats.SkippedPending;
+				continue;
+			}
+			if (ClearedVolumesPerChunk.Contains(Coord))
+			{
+				++Stats.SkippedCleared;
+				continue;
+			}
+			TSharedPtr<const TArray<FVoxelData>> Voxels = VoxelSource(Coord);
+			if (!Voxels.IsValid() || Voxels->Num() != CS * CS * CS)
+			{
+				++Stats.SkippedNoVoxels;
+				continue;
+			}
+			TArray<TSharedPtr<const TArray<FVoxelData>>> Neighbours;
+			bool bAll = true;
+			for (const FIntVector& Offset : Shell)
+			{
+				TSharedPtr<const TArray<FVoxelData>> N = VoxelSource(Coord + Offset);
+				bAll &= N.IsValid() && N->Num() == CS * CS * CS;
+				Neighbours.Add(MoveTemp(N));
+			}
+			if (!bAll)
+			{
+				++Stats.SkippedNeighbours;
+				continue;
+			}
+			FJob& Job = Jobs.AddDefaulted_GetRef();
+			Job.Coord = Coord;
+			Job.Voxels = MoveTemp(Voxels);
+			Job.Neighbours = MoveTemp(Neighbours);
+			Job.Context = MakeExtractionContext(Coord);
+		}
+
+		ParallelFor(Jobs.Num(), [&](int32 J)
+		{
+			FJob& Job = Jobs[J];
+			const FVector Origin = GetChunkWorldOrigin(Job.Coord);
+			ExtractChunkSurfacePoints(false, *Job.Voxels, Job.Coord, Origin, CS, VoxelSize, Spacing, NoClearedVolumes, Job.Context, Job.Made);
+			// The reference: the voxels past the faces are the neighbours' own (their edits included).
+			FScatterExtractionContext Reference = Job.Context;
+			Reference.OutsideVoxelSource = [&Job, &Shell, CS](const FIntVector& Local, FVoxelData& Out)
+			{
+				const FIntVector Offset(Local.X >= CS ? 1 : 0, Local.Y >= CS ? 1 : 0, Local.Z >= CS ? 1 : 0);
+				const int32 Index = Shell.IndexOfByKey(Offset);
+				if (Index == INDEX_NONE)
+				{
+					return false;
+				}
+				const FIntVector N = Local - Offset * CS;
+				Out = (*Job.Neighbours[Index])[N.X + N.Y * CS + N.Z * CS * CS];
+				return true;
+			};
+			ExtractChunkSurfacePoints(false, *Job.Voxels, Job.Coord, Origin, CS, VoxelSize, Spacing, NoClearedVolumes, Reference, Job.Reference);
+		});
+
+		for (const FJob& Job : Jobs)
+		{
+			++Stats.Chunks;
+			TMap<FIntVector, int32> Made;
+			for (const FVoxelSurfacePoint& P : Job.Made.SurfacePoints)
+			{
+				Made.Add(PositionKey(P), ClassOf(P));
+			}
+			TMap<FIntVector, int32> Reference;
+			for (const FVoxelSurfacePoint& P : Job.Reference.SurfacePoints)
+			{
+				Reference.Add(PositionKey(P), ClassOf(P));
+			}
+			int64 Missed = 0, MissedUG = 0, Spurious = 0, SpuriousUG = 0, Reclassified = 0;
+			for (const TPair<FIntVector, int32>& Pair : Reference)
+			{
+				const int32* Class = Made.Find(Pair.Key);
+				if (!Class)
+				{
+					++Missed;
+					MissedUG += (Pair.Value & 1) ? 1 : 0;
+				}
+				else if (*Class != Pair.Value)
+				{
+					++Reclassified;
+				}
+			}
+			for (const TPair<FIntVector, int32>& Pair : Made)
+			{
+				if (!Reference.Contains(Pair.Key))
+				{
+					++Spurious;
+					SpuriousUG += (Pair.Value & 1) ? 1 : 0;
+				}
+			}
+			Stats.ReferencePoints += Reference.Num();
+			Stats.Missed += Missed;
+			Stats.MissedUnderground += MissedUG;
+			Stats.Spurious += Spurious;
+			Stats.SpuriousUnderground += SpuriousUG;
+			Stats.Reclassified += Reclassified;
+			if (Missed + Spurious + Reclassified > 0)
+			{
+				++Stats.ChunksDiffering;
+				const FVector Centre = GetChunkWorldOrigin(Job.Coord) + FVector(0.5 * Configuration->GetChunkWorldSize());
+				Lines.Add({ Missed + Spurious + Reclassified, FString::Printf(
+					TEXT("chunk (%d,%d,%d): %d reference points; missed %lld (underground %lld), spurious %lld (underground %lld), reclassified %lld  ->  vox.TP %.0f %.0f %.0f"),
+					Job.Coord.X, Job.Coord.Y, Job.Coord.Z, Reference.Num(), Missed, MissedUG, Spurious, SpuriousUG, Reclassified, Centre.X, Centre.Y, Centre.Z) });
+			}
+		}
+	}
+	Lines.Sort([](const FLine& A, const FLine& B) { return A.Score > B.Score; });
+	for (const FLine& Line : Lines)
+	{
+		OutChunkLines.Add(Line.Text);
+	}
+	return Stats;
 }
 
 UVoxelScatterManager::FFreshExtractionStats UVoxelScatterManager::CompareWithFreshExtraction(

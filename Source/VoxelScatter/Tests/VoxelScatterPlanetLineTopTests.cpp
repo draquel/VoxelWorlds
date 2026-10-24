@@ -19,6 +19,9 @@
 #include "VoxelTerrainConditioning.h"
 #include "VoxelData.h"
 #include "VoxelCubeSphere.h"
+#include "VoxelCaveConfiguration.h"
+#include "VoxelCaveTypes.h"
+#include "VoxelBiomeConfiguration.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -951,6 +954,263 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		}
 	}
 	Config->RemoveFromRoot();
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// World modes review G72 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.23): a planet chunk's rays read the voxels past its +X, +Y and
+// +Z faces in its last cells, made by FScatterExtractionContext::GetPlanetVoxelOutsideChunk. Those were the generated
+// altitude's alone, so where a cave opens such a voxel under the ground it was read as rock: the cave floor in that cell
+// got no point, and where the cave meets the face the rock made a floor in the air. They are now carved as generation
+// carves them (the cave configuration's layers, its biome overrides by the biome generation gives the direction, the sea's
+// minimum depth).
+//
+// - FaceCaves: the planet of the tests above with biomes, a sea at the datum and the default cave layers; chunks 15 and 35
+//   voxels under the ground at four sites, each with its seven neighbours on the +X, +Y and +Z sides generated on the CPU.
+//   Every chunk extracted with the face voxels made matches, point for point (position and classification), the same
+//   extraction with the neighbours' own voxels there (OutsideVoxelSource). With the cave carve off (as before G72) points
+//   are missed and added. Again with biome overrides (caves only in the commonest biome, from a shallower depth).
+// ---------------------------------------------------------------------------
+
+namespace VoxelScatterPlanetFaceCavesTestUtils
+{
+	using namespace VoxelScatterLineTopTestUtils;
+
+	struct FCaveSetup
+	{
+		UVoxelWorldConfiguration* Config = nullptr;
+		UVoxelBiomeConfiguration* Biomes = nullptr;
+		UVoxelCaveConfiguration* Caves = nullptr;
+		TSharedPtr<IVoxelWorldMode> Mode;
+
+		FCaveSetup()
+		{
+			Config = MakePlanetConfig();
+			Config->bEnableBiomes = true;
+			Biomes = NewObject<UVoxelBiomeConfiguration>();
+			Biomes->AddToRoot();
+			Biomes->InitializeDefaults();
+			Config->BiomeConfiguration = Biomes;
+			Config->bEnableCaves = true;
+			Caves = NewObject<UVoxelCaveConfiguration>(); // the default Cheese, Spaghetti and Noodle layers
+			Caves->AddToRoot();
+			Caves->bEnableCaves = true;
+			Config->CaveConfiguration = Caves;
+			Config->bEnableWaterLevel = true;
+			Config->WaterRadius = Radius;
+			Mode = FVoxelWorldModeFactory::Create(*Config);
+		}
+
+		~FCaveSetup()
+		{
+			Caves->RemoveFromRoot();
+			Biomes->RemoveFromRoot();
+			Config->RemoveFromRoot();
+		}
+
+		TArray<FVoxelData> Generate(FVoxelCPUNoiseGenerator& Generator, const FIntVector& Coord) const
+		{
+			FVoxelNoiseGenerationRequest Request;
+			Request.ChunkCoord = Coord;
+			Request.ChunkSize = ChunkSize;
+			Request.VoxelSize = VoxelSize;
+			Request.NoiseParams = Config->NoiseParams;
+			FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
+			Request.bEnableBiomes = Config->bEnableBiomes;
+			Request.BiomeConfiguration = Config->BiomeConfiguration;
+			Request.bEnableCaves = Config->bEnableCaves;
+			Request.CaveConfiguration = Config->CaveConfiguration;
+			Request.bEnableWaterLevel = Config->bEnableWaterLevel;
+			Request.WaterLevel = Config->WaterLevel;
+			Request.WaterRadius = Config->WaterRadius;
+			TArray<FVoxelData> Voxels;
+			Generator.GenerateChunkCPU(Request, Voxels);
+			return Voxels;
+		}
+
+		FScatterExtractionContext MakeContext(bool bCarve) const
+		{
+			FScatterExtractionContext Context;
+			Context.WorldMode = Mode.Get();
+			Context.NoiseParams = Config->NoiseParams;
+			Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
+			Context.CaveConfiguration = Caves;
+			Context.bEnableBiomes = Config->bEnableBiomes;
+			Context.bCarvePlanetFaceVoxels = bCarve;
+			return Context;
+		}
+	};
+
+	struct FFaceResult
+	{
+		int32 Chunks = 0;
+		int64 Reference = 0;
+		int64 ReferenceUnderground = 0;
+		int64 Missed = 0;
+		int64 Spurious = 0;
+		int64 Reclassified = 0;
+		void Add(const FFaceResult& O)
+		{
+			Chunks += O.Chunks; Reference += O.Reference; ReferenceUnderground += O.ReferenceUnderground; Missed += O.Missed; Spurious += O.Spurious;
+			Reclassified += O.Reclassified;
+		}
+	};
+
+	/** A chunk and its seven +X/+Y/+Z neighbours, generated. */
+	struct FBlock
+	{
+		FIntVector Coord;
+		TArray<FVoxelData> Voxels;
+		TArray<TArray<FVoxelData>> Neighbours;
+	};
+
+	TArray<FBlock> MakeBlocks(const FCaveSetup& Setup)
+	{
+		TArray<FIntVector> Shell;
+		UVoxelScatterManager::GetPlanetShellNeighbours(Shell);
+		FVoxelCPUNoiseGenerator Generator;
+		Generator.Initialize();
+		TArray<FBlock> Blocks;
+		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Setup.Mode);
+		for (const FVector& Direction : { LatLon(45.0, 20.0), LatLon(0.0, 100.0), LatLon(-30.0, -60.0), FVector(1, 1, 1).GetSafeNormal() })
+		{
+			const float Ground = Planet.GetTerrainAltitude(Direction, Setup.Config->NoiseParams);
+			for (const double Depth : { 15.0, 35.0 })
+			{
+				FBlock& Block = Blocks.AddDefaulted_GetRef();
+				Block.Coord = ChunkOf(Setup.Config, Setup.Config->WorldOrigin + Direction * (Radius + Ground - Depth * VoxelSize));
+				Block.Voxels = Setup.Generate(Generator, Block.Coord);
+				for (const FIntVector& Offset : Shell)
+				{
+					Block.Neighbours.Add(Setup.Generate(Generator, Block.Coord + Offset));
+				}
+			}
+		}
+		Generator.Shutdown();
+		return Blocks;
+	}
+
+	FFaceResult Compare(const FCaveSetup& Setup, const FBlock& Block, bool bCarve)
+	{
+		TArray<FIntVector> Shell;
+		UVoxelScatterManager::GetPlanetShellNeighbours(Shell);
+		const FVector Origin = ChunkOrigin(Setup.Config, Block.Coord);
+		FChunkSurfaceData Made, Reference;
+		UVoxelScatterManager::ExtractPlanetSurfacePoints(Block.Voxels, Block.Coord, Origin, ChunkSize, VoxelSize, VoxelSize, Setup.MakeContext(bCarve), Made);
+		FScatterExtractionContext RefContext = Setup.MakeContext(true);
+		RefContext.OutsideVoxelSource = [&Block, &Shell](const FIntVector& Local, FVoxelData& Out)
+		{
+			const FIntVector Offset(Local.X >= ChunkSize ? 1 : 0, Local.Y >= ChunkSize ? 1 : 0, Local.Z >= ChunkSize ? 1 : 0);
+			const int32 Index = Shell.IndexOfByKey(Offset);
+			if (Index == INDEX_NONE)
+			{
+				return false;
+			}
+			const FIntVector N = Local - Offset * ChunkSize;
+			Out = Block.Neighbours[Index][N.X + N.Y * ChunkSize + N.Z * ChunkSize * ChunkSize];
+			return true;
+		};
+		UVoxelScatterManager::ExtractPlanetSurfacePoints(Block.Voxels, Block.Coord, Origin, ChunkSize, VoxelSize, VoxelSize, RefContext, Reference);
+
+		auto Key = [](const FVoxelSurfacePoint& P)
+		{
+			return FIntVector(static_cast<int32>(FMath::RoundToInt64(P.Position.X * 10.0)), static_cast<int32>(FMath::RoundToInt64(P.Position.Y * 10.0)),
+				static_cast<int32>(FMath::RoundToInt64(P.Position.Z * 10.0)));
+		};
+		TMap<FIntVector, bool> MadeKeys;
+		for (const FVoxelSurfacePoint& P : Made.SurfacePoints)
+		{
+			MadeKeys.Add(Key(P), P.bIsUnderground);
+		}
+		FFaceResult Result;
+		Result.Chunks = 1;
+		TSet<FIntVector> RefKeys;
+		for (const FVoxelSurfacePoint& P : Reference.SurfacePoints)
+		{
+			const FIntVector K = Key(P);
+			RefKeys.Add(K);
+			++Result.Reference;
+			Result.ReferenceUnderground += P.bIsUnderground ? 1 : 0;
+			const bool* Class = MadeKeys.Find(K);
+			Result.Missed += Class ? 0 : 1;
+			Result.Reclassified += (Class && *Class != P.bIsUnderground) ? 1 : 0;
+		}
+		for (const TPair<FIntVector, bool>& Pair : MadeKeys)
+		{
+			Result.Spurious += RefKeys.Contains(Pair.Key) ? 0 : 1;
+		}
+		return Result;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetFaceCavesTest,
+	"VoxelWorlds.Scatter.Planet.FaceCaves",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterPlanetFaceCavesTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterPlanetFaceCavesTestUtils;
+	FCaveSetup Setup;
+
+	auto RunAll = [this, &Setup](const TArray<FBlock>& Blocks, const TCHAR* Label, bool bCarve)
+	{
+		FFaceResult Total;
+		for (const FBlock& Block : Blocks)
+		{
+			Total.Add(Compare(Setup, Block, bCarve));
+		}
+		AddInfo(FString::Printf(TEXT("%s%s: %d chunks, %lld reference points (%lld underground); missed %lld, spurious %lld, reclassified %lld"),
+			Label, bCarve ? TEXT("") : TEXT(" (no cave carve, as before)"), Total.Chunks, Total.Reference, Total.ReferenceUnderground, Total.Missed,
+			Total.Spurious, Total.Reclassified));
+		return Total;
+	};
+
+	const TArray<FBlock> Blocks = MakeBlocks(Setup);
+	const FFaceResult New = RunAll(Blocks, TEXT("Default caves"), true);
+	TestEqual(TEXT("Default caves: no reference point missed"), New.Missed, static_cast<int64>(0));
+	TestEqual(TEXT("Default caves: no point the reference lacks"), New.Spurious, static_cast<int64>(0));
+	TestEqual(TEXT("Default caves: no point classified differently"), New.Reclassified, static_cast<int64>(0));
+	TestTrue(TEXT("Default caves: cave floors in the chunks (not vacuous)"), New.ReferenceUnderground > 100);
+	const FFaceResult Old = RunAll(Blocks, TEXT("Default caves"), false);
+	TestTrue(*FString::Printf(TEXT("Default caves: without the carve the face cells differ (%lld missed, %lld spurious)"), Old.Missed, Old.Spurious),
+		Old.Missed + Old.Spurious > 0);
+
+	// Biome overrides: caves only in the commonest biome of the chunks, from a shallower depth.
+	{
+		TMap<uint8, int32> BiomeCounts;
+		for (const FBlock& Block : Blocks)
+		{
+			for (const FVoxelData& V : Block.Voxels)
+			{
+				BiomeCounts.FindOrAdd(V.BiomeID) += 1;
+			}
+		}
+		uint8 Common = 0;
+		int32 CommonCount = -1;
+		for (const TPair<uint8, int32>& Entry : BiomeCounts)
+		{
+			if (Entry.Value > CommonCount)
+			{
+				Common = Entry.Key;
+				CommonCount = Entry.Value;
+			}
+		}
+		Setup.Caves->BiomeOverrides.Empty();
+		for (const TPair<uint8, int32>& Entry : BiomeCounts)
+		{
+			FBiomeCaveOverride Override;
+			Override.BiomeID = Entry.Key;
+			Override.CaveScale = Entry.Key == Common ? 1.5f : 0.0f;
+			Override.MinDepthOverride = Entry.Key == Common ? 6.0f : -1.0f;
+			Setup.Caves->BiomeOverrides.Add(Override);
+		}
+		const TArray<FBlock> OverrideBlocks = MakeBlocks(Setup);
+		const FFaceResult Overrides = RunAll(OverrideBlocks, *FString::Printf(TEXT("Biome overrides (%d biomes, caves in %d)"), BiomeCounts.Num(), Common), true);
+		TestEqual(TEXT("Biome overrides: no point missed"), Overrides.Missed, static_cast<int64>(0));
+		TestEqual(TEXT("Biome overrides: no point added"), Overrides.Spurious, static_cast<int64>(0));
+		TestEqual(TEXT("Biome overrides: no point classified differently"), Overrides.Reclassified, static_cast<int64>(0));
+		Setup.Caves->BiomeOverrides.Empty();
+	}
 	return true;
 }
 

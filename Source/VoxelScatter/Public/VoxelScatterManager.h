@@ -54,11 +54,30 @@ struct FScatterExtractionContext
 	TSharedPtr<const TMap<int32, FVoxelEdit>> AboveLayerEdits;
 
 	/**
-	 * Heightmap worlds (world modes review G28): the world's cave configuration when its caves are on, so the voxel over a
-	 * chunk's top layer under deeper ground is carved as generation carves it (GetVoxelAboveChunk). Null: no caves (the
-	 * voxel is the terrain's alone). Non-owning: the world configuration's asset.
+	 * The world's cave configuration when its caves are on, so the voxels a chunk's extraction reads past its own data are
+	 * carved as generation carves them: on a heightmap the voxel over the chunk's top layer under deeper ground
+	 * (GetVoxelAboveChunk, world modes review G28), on a planet the voxels past its +X, +Y and +Z faces
+	 * (GetPlanetVoxelOutsideChunk, G72). Null: no caves (the terrain's voxel alone). Non-owning: the world configuration's
+	 * asset.
 	 */
 	const UVoxelCaveConfiguration* CaveConfiguration = nullptr;
+
+	/** Whether the world's biomes are on (bEnableBiomes): which biome generation gives a planet voxel, for the cave
+	 *  configuration's biome overrides (GetPlanetVoxelOutsideChunk). */
+	bool bEnableBiomes = false;
+
+	/**
+	 * Planets (G72, voxel.Scatter.PlanetFaceCaves): the voxels past a chunk's +X, +Y and +Z faces are carved by the caves,
+	 * as generation carves them. False: the generated altitude alone, as before (a cave opening such a voxel read as rock).
+	 */
+	bool bCarvePlanetFaceVoxels = true;
+
+	/**
+	 * Planets, for audits and tests (G72): when set, the voxels past the chunk's +X, +Y and +Z faces come from here (the
+	 * neighbours' own voxels, LocalCoord in this chunk's frame as GetPlanetVoxelOutsideChunk takes it) instead of being
+	 * made; returning false falls back to GetPlanetVoxelOutsideChunk. Unset in the streaming.
+	 */
+	TFunction<bool(const FIntVector& LocalCoord, FVoxelData& OutVoxel)> OutsideVoxelSource;
 
 	/**
 	 * Heightmap worlds (G28, voxel.Scatter.BuriedTopFace): the scans decide the voxel over a chunk's top layer at any depth
@@ -105,11 +124,12 @@ struct FScatterExtractionContext
 		uint8 BiomeID) const;
 
 	/**
-	 * Planets (world modes review G29): a voxel just outside the chunk, in a neighbour's layer touching it, which the chunk's
-	 * own data cannot show. Its density is the planet generator's there (the signed distance to the generated altitude
-	 * along its direction, ConditioningZones applied), with the neighbour's edit there applied (TouchingEdits). Valid
-	 * where no cave reaches that voxel, i.e. near the generated surface (cave layers keep several voxels under it). Only
-	 * Density and MaterialID are meaningful. Requires a spherical planet WorldMode.
+	 * Planets (world modes review G29, G72): a voxel just outside the chunk, in a neighbour's layer touching it, which the
+	 * chunk's own data cannot show, as the planet generator makes it: the signed distance to the generated altitude along
+	 * its direction (ConditioningZones applied), less the cave carve where it is solid under the ground (CaveConfiguration:
+	 * CalculateCaveDensity at its depth along local up, for the biome generation gives its direction, under the sea or not;
+	 * bCarvePlanetFaceVoxels), with the neighbour's edit there applied (TouchingEdits). Only Density and MaterialID are
+	 * meaningful. Requires a spherical planet WorldMode.
 	 * @param LocalCoord The voxel's coordinate in this chunk's frame (ChunkSize on at least one axis)
 	 * @param WorldPos The voxel's sample position (the chunk's origin + LocalCoord * VoxelSize, as generation samples it)
 	 * @param VoxelSize Voxel edge in world units
@@ -405,6 +425,41 @@ public:
 		/** Points in one list with no equal point in the other (position to 0.1 uu, normal, material, classification). */
 		int32 ChangedPoints = 0;
 	};
+
+	/** What ComparePlanetFaceVoxels found (world modes review G72): made face voxels against the neighbours' own. */
+	struct FPlanetFaceStats
+	{
+		int32 Chunks = 0;
+		int32 SkippedPending = 0;
+		int32 SkippedCleared = 0;
+		int32 SkippedNoVoxels = 0;
+		/** A neighbour on the +X, +Y or +Z side had no voxels: the reference cannot be made. */
+		int32 SkippedNeighbours = 0;
+		/** Surface points with the neighbours' voxels past the faces (the reference). */
+		int64 ReferencePoints = 0;
+		/** Reference points with no point at their position when the voxels are made, and of them underground. */
+		int64 Missed = 0;
+		int64 MissedUnderground = 0;
+		/** Made-voxel points with no reference point at their position, and of them underground. */
+		int64 Spurious = 0;
+		int64 SpuriousUnderground = 0;
+		/** Points at the same position classified differently (underground, underwater). */
+		int64 Reclassified = 0;
+		int32 ChunksDiffering = 0;
+	};
+
+	/**
+	 * Planets (world modes review G72): every cached chunk extracted twice now, with the voxels past its +X, +Y and +Z faces
+	 * made (GetPlanetVoxelOutsideChunk, the context MakeExtractionContext builds now) and taken from its seven neighbours'
+	 * voxels (VoxelSource: their edit-merged snapshots), compared point by point. A difference is a rule that reads those
+	 * voxels wrongly: a cave floor in a face cell missed, or a floor where a cave meets a face read as rock.
+	 *
+	 * @param VoxelSource A chunk's edit-merged voxels, or null when it has none
+	 * @param OutChunkLines One line per differing chunk (coordinates and counts), worst first
+	 * @return The counts
+	 */
+	FPlanetFaceStats ComparePlanetFaceVoxels(TFunctionRef<TSharedPtr<const TArray<FVoxelData>>(const FIntVector&)> VoxelSource,
+		TArray<FString>& OutChunkLines) const;
 
 	/** What CompareWithFreshExtraction compared and skipped. */
 	struct FFreshExtractionStats
