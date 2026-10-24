@@ -9609,9 +9609,11 @@ placement preview, cubic on planets.
 
 ### 21.2 Results (2026-10-24)
 
-All four findings are fixed and verified; PRs open (below). Built from VoxelWorlds `feature/wm-c5-cubic-game-world` (base
-`952d4ae`), VoxelCharacterPlugin `feature/wm-c5-cubic-game-world` (base `45be0dd`) and UE5_PluginDev
-`claude/wizardly-booth-09b687` (base `c91ff9d`), editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`, in a worktree
+All four findings are fixed and verified; PRs open (draquel/VoxelWorlds#152, draquel/VoxelCharacterPlugin#33,
+draquel/UE5_PluginDev#161; not merged). Built from VoxelWorlds `feature/wm-c5-cubic-game-world` (base
+`952d4ae`; rebased onto `c914196`, visual polish milestone 1, for the PR), VoxelCharacterPlugin
+`feature/wm-c5-cubic-game-world` (base `45be0dd`) and UE5_PluginDev
+`claude/wizardly-booth-09b687` (base `c91ff9d`; rebased onto `57fbd7e`), editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`, in a worktree
 editor with background throttling off, `VoxelDemo` with `voxel.ConfigOverride /Game/PluginTesting/Review/Review_Cubic`
 from a fresh world (`vox.DeleteSave`) unless noted; the A/B runs flip the three cvars (`voxel.Cubic.BlockSurface`,
 `voxel.Nav.BlockSteps`, `vc.Move.StepUpBlocks`) on one build. ProceduralDungeonPlugin and InteractionPlugin needed no
@@ -9698,15 +9700,15 @@ cell maths moved behind `FVoxelSurfaceNavParams::CellCentre` / `CellOf` with `Gr
 arithmetic (`Navigation.*` pass unchanged). The melee probe (5 uu sphere) applies in every world: it finds what the line
 found, and a body whose axis the crosshair crosses exactly.
 
-**Suites.** 631 tests headless (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`, `-nullrhi`) and 631 in the editor with the GPU tests, all passing: main's 620 and the 11 above. The GPU parity lines are identical to main's (the same 236 event lines and CRCs). The editor run predates a last tightening of one assertion in `Cubic.BlockSurface.Generated` (the isosurface gap's lower bound); the headless run has it.
+**Suites.** 631 tests headless (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`, `-nullrhi`) and 631 in the editor with the GPU tests, all passing: main's 620 and the 11 above. The GPU parity lines are identical to main's (the same 236 event lines and CRCs). The editor run predates a last tightening of one assertion in `Cubic.BlockSurface.Generated` (the isosurface gap's lower bound); the headless run has it. After the rebase onto `c914196` the six suites ran headless again: 631 of 631.
 
 | ID | Status | PR | Check |
 |----|--------|----|-------|
-| WM-C5 | Done, in review | VoxelWorlds VW_PR | `Cubic.BlockSurface.Generated` (597 columns of a cubic world with an off-grid `WorldOrigin` and a pad: `GetGeneratedSurfaceHeight` and `QueryEditMergedSurface` equal the streamed top face at all 597; each block top lies above its column's isosurface by 0.8 to 74.8 uu, 402 columns by more than 1 uu; the pad's core at `SnapToBlockTop` of its height), `.EditMerged` (a placed block, floating leaves, a trunk block, a dig), `.SmoothUnchanged`; live: props, campsites and NPC spawns on block tops |
-| WM-C6 | Done, in review | UE5_PluginDev PARENT_PR | `POI.Cubic.PadSurface` (137 of 137 core columns of a streamed pad top out at its surface; a POI on natural ground stands on its centre's block; smooth unchanged), `POI.Cubic.PlaceCampsite` (core flat at the claim's block top, 0 of 1,226 neighbouring pairs over a block, only whole voxels where it edited); live: the table above |
-| WM-C7 | Done, in review | VoxelCharacterPlugin VCP_PR, VoxelWorlds VW_PR | `VoxelCharacter.Cubic.StepUpOneBlock`, `VoxelCharacter.Camera.BlockStepEase`, `Navigation.Cubic.BlockSteps`; live: the walk, the pillar, the staircase |
-| WM-C8 | Done, in review | VoxelWorlds VW_PR, VoxelCharacterPlugin VCP_PR, UE5_PluginDev PARENT_PR | `Cubic.VoxelTrees.FindAndFell`, `VoxelCharacter.Cubic.FellVoxelTree`; live: chop, fell, save and reload |
-| WM-C9 | Done, in review | VoxelCharacterPlugin VCP_PR | `VoxelCharacter.Combat.MeleeTargetThroughAxis`; live: across a block both ways |
+| WM-C5 | Done, in review | VoxelWorlds#152 | `Cubic.BlockSurface.Generated` (597 columns of a cubic world with an off-grid `WorldOrigin` and a pad: `GetGeneratedSurfaceHeight` and `QueryEditMergedSurface` equal the streamed top face at all 597; each block top lies above its column's isosurface by 0.8 to 74.8 uu, 402 columns by more than 1 uu; the pad's core at `SnapToBlockTop` of its height), `.EditMerged` (a placed block, floating leaves, a trunk block, a dig), `.SmoothUnchanged`; live: props, campsites and NPC spawns on block tops |
+| WM-C6 | Done, in review | UE5_PluginDev#161 | `POI.Cubic.PadSurface` (137 of 137 core columns of a streamed pad top out at its surface; a POI on natural ground stands on its centre's block; smooth unchanged), `POI.Cubic.PlaceCampsite` (core flat at the claim's block top, 0 of 1,226 neighbouring pairs over a block, only whole voxels where it edited); live: the table above |
+| WM-C7 | Done, in review | VoxelCharacterPlugin#33, VoxelWorlds#152 | `VoxelCharacter.Cubic.StepUpOneBlock`, `VoxelCharacter.Camera.BlockStepEase`, `Navigation.Cubic.BlockSteps`; live: the walk, the pillar, the staircase |
+| WM-C8 | Done, in review | VoxelWorlds#152, VoxelCharacterPlugin#33, UE5_PluginDev#161 | `Cubic.VoxelTrees.FindAndFell`, `VoxelCharacter.Cubic.FellVoxelTree`; live: chop, fell, save and reload |
+| WM-C9 | Done, in review | VoxelCharacterPlugin#33 | `VoxelCharacter.Combat.MeleeTargetThroughAxis`; live: across a block both ways |
 
 **New findings.**
 
