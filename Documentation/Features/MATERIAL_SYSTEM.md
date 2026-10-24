@@ -669,6 +669,35 @@ The master material uses 4 reusable material functions:
 3. **MF_TriplanarSampleNormal** - Smooth terrain normals with UDN blend
 4. **MF_CubicAtlasSample** - Cubic terrain sampling via UV0 + MaterialLUT
 
+### Far-Field Material Blend (FarFieldMaterialPick)
+
+A planet's far field ([LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") draws with the same material, and since G45
+(WORLD_MODES_REVIEW_PLAN.md §20.27, decision D28) its quads blend two materials: UV1.x the quad's first material as on
+every voxel vertex, vertex colour R its second, and vertex colour A 255 less the second's weight at the vertex. In
+`M_VoxelMaster` and `M_VoxelMaster_Fade` a Custom node, **FarFieldMaterialPick**, sits between `MF_GetMaterialID` and the
+`MaterialID` named reroute, so everything that reads the reroute sees the picked material:
+
+```hlsl
+// Inputs: MaterialID (MF_GetMaterialID), SecondaryR (VertexColor R), VertexAlpha (VertexColor A)
+#if PIXELSHADER
+float W = saturate(1.0 - VertexAlpha);
+if (W > 0.002)
+{
+    float2 P = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
+    float Noise = frac(52.9829189 * frac(dot(P, float2(0.06711056, 0.00583715))));
+    if (Noise < W) { return floor(SecondaryR * 255.0 + 0.5); }
+}
+#endif
+return MaterialID;
+```
+
+Each pixel takes one of the two materials against interleaved gradient noise moved every frame, which TSR averages into a
+gradient across the quad: no texture sample is added. Every voxel chunk vertex has alpha 255 (weight 0) and keeps
+`MaterialID`. Vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so R carries an ID exactly; IDs stay
+out of interpolation because both are flat per triangle. The node is added by `Scripts/setup_farfield_material_blend.py`
+(UE5_PluginDev; idempotent, run headless). The VertexColor node's default output is RGB only, so R and A go in as their own
+inputs: a `.a` on that output fails the material's compile and every mesh using it draws the default material.
+
 ### Material Assets
 
 | Asset | Location | Purpose |

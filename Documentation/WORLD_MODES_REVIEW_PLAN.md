@@ -287,6 +287,7 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D25 | G27: keep GPU scatter extraction and feed it each chunk's owned seam meshes, or retire it? *(decided 2026-10-18)* | **Retire it**, as GPU DC interior meshing was: every chunk extracts surface points from its voxels on the CPU (3.7 ms mean per 64³ chunk on a worker). Keeping it meant waiting for or appending each chunk's owned seams (which depend on the neighbours and rebuild on LOD changes) and a dynamic output buffer, for a path that stays nondeterministic and makes a different point set from the column scan that extracts about 90% of chunks. `bUseGPUScatterExtraction` stays, ignored, so assets load (§19.5). D17 to D24 are the spherical Phase 6 plan's (draquel/VoxelWorlds#106) |
 | D26 | G31: give each crossing of a planet chunk's own lines to the chunk containing it, or sample one line family for every chunk? *(decided 2026-10-18)* | **One family of radial rays on the cube-sphere grid**: one ray from the planet's centre per cell of `FVoxelCubeSphereGrid` at the point spacing, the same rays for every chunk, each chunk keeping the crossings inside its own box. Ownership alone keeps each chunk's staircase rounding (thin samples inside chunks, 116 of 230 at 30°N 40°E four voxels or more from any face) and still has a line decide whether the neighbour's line makes the point at a face; with one family there is nothing to decide. The spawn weight is the grid cell's area at the point, so the density per area holds on every part of the grid (§19.9) |
 | D27 | G43: which continuous corner kernel for the planet Simplex noise, and for which worlds? *(decided 2026-10-23)* | **The tangent-corrected kernel, planets only:** the classic (0.6 − d²)⁴ less its value and slope at d² = 0.5, v²(v² + 0.4v + 0.06) with v = 0.5 − d², its sum scaled by 33.25 for the classic spread: no step and smooth normals, within 1.2% rms of the classic noise (correlation 0.9996), so every planet keeps its landscape. Rejected: the value-corrected (0.6 − d²)⁴ − 0.1⁴ (closer, 0.2% rms, but a crease in the slope along every boundary) and the textbook (0.5 − d²)⁴ (7% rms, worst 35%: visibly different shapes). `PlanetGenerationVersion` 6 refuses earlier planet saves; heightmap worlds keep the classic kernel, whose steps there are about a quarter voxel, and `GenerationVersion` 2 (§20.24) |
+| D28 | G45: blend a far-field quad's two materials by a dithered pick or by sampling both? *(decided 2026-10-24)* | **A dithered pick**: each quad carries its corners' two leading materials (flat per triangle) and the second's weight at each corner, and the terrain material takes one of the two per pixel against a temporal screen dither (interleaved gradient noise moved every frame) weighted by the interpolated weight, which TSR resolves into a gradient: no texture sample added, one Custom node after `MF_GetMaterialID` (`FarFieldMaterialPick`), voxel chunks unchanged (their vertices' alpha 255 is weight 0). Rejected: sampling both materials and lerping by the weight (smooth with no noise, but about twice the terrain's texture cost on the far field's blend pixels and the triplanar sampling duplicated in HLSL). The weight is the share of generation's dithered per-voxel picks (G39, §20.22), so the far field averages to what the voxel terrain draws (§20.27) |
 
 ## 9. Order of work
 
@@ -1486,7 +1487,7 @@ Three findings from §13.11 get IDs here:
 | G42 | On `Review_Planet_M` and `_L` the frame P95 while streaming stays 26-39% over the small planet's and the manager P95 33-34% over, though their windows load fewer chunks since WM-BP8: scatter (its section's P95 3.4-3.8 ms against 0.7 on the km-relief worlds) and frame time outside the manager's sections. Predates WM-BP8 (P6.1: frame +18% and +34%), and WM-BP8 lowers both on M and L (§20.4) | Fixed in §20.10: scatter's HISM writes. A UE 5.8 HISM rebuilds its cluster tree and recreates its scene proxy (every instance, pooled ones too, re-registered with the distance-field and ray-tracing scenes) for each change not in place, and the streaming touched the HISMs around the viewer nearly every frame. Writes are now batched per HISM (at most every 0.1 s, not during a tree build, releases in place, no render-state dirtying), pooled HISMs compacted, and a planet keeps 4-chunk scatter regions. The great circles' frame P95 −31% (M) and −23% (L), within 3% of the small planet's land route (its 45°N great circle runs 65% under the sea) | WM-BP13 |
 | G43 | The planet terrain steps across simplex-cell boundaries: `FVoxelPlanetNoise::Simplex` (and `PlanetNoise.ush`, and the heightmap noise's Simplex3D) use the 0.6 kernel radius (Gustavson's), which reaches past the simplex, so a corner's contribution drops out abruptly where a sample crosses into the next simplex. In world space the planes x = ±y, y = ±z and x = ±z through the planet centre lie on a simplex boundary in every octave at once, and they are the cube sphere's face edges: directions 10⁻⁸ rad apart across x = z differ in altitude by up to 11 uu on the small planet and 136 uu on `Review_Planet_L` (measured by `FarField.Planet.MatchesSurface`'s first build, P6.4, §20.5). Elsewhere one octave's boundary at a time gives smaller steps. The voxel terrain has them too (under a voxel on the small planet, up to about two along L's face edges) | Fixed in §20.24 (2026-10-23; decision D27, planets only): the planet Simplex's corner kernel is the classic one less its value and slope at d² = 0.5 (`FVoxelPlanetNoise`, `PlanetNoise.ush`; `voxel.Planet.ContinuousSimplex` 0 = before), scaled for the same spread, so the noise has no step and no slope change across any simplex boundary and stays within 1.2% rms of the classic; across the 12 face edges the altitude stepped by up to 6.6 uu on the small planet and 465 uu on L (terrain noise alone), now 0.001 and 0.18 uu (the terrain's own change over 2 × 10⁻⁹ rad); `PlanetGenerationVersion` 6; heightmap worlds keep the classic kernel (their steps are about a quarter voxel) | — |
 | G44 | On a planet the voxel window's LOD 2 chunks light brighter than its LOD 0 and 1 chunks and the far field: from straight above `Review_Planet_L` at 45°N 20°E under a midday sun the window is a ring (the LOD 2 band) brighter than both its centre and the far field around it, and the normal buffer shows the ring's normals off the others' (whiter); the centre and the far field match. Not the far field's: the same material instance (swapping in a region component's makes no difference), the same material ids and vertex conventions (unlit the window's edge vanishes), shadows not involved; the far field's grid normals equal the planet's analytic `GetConditionedSurfacePoint` normals, and only giving it radial normals matches the ring. It shows as a brightness step along the window's edge from altitude, over land and through the sea (§20.5) | Fixed 2026-10-20 (§20.8): the DC mesher's crossing normals took their gradient taps `Stride` voxels apart, and generated density saturates a voxel either side of the surface, so at stride 4 each component was a sign and LOD 2's normals snapped toward the cube diagonals (LOD 1's less). A strided cell's vertex normal is now LOD 0's at the voxel crossing nearest the vertex (`VoxelDCShading`); the QEF keeps the stride-scale normals, so no vertex moves. From straight above L at 45°N 20°E the ring against the centre 1.16 → 1.01 and the window no longer told from the far field; LOD 2's tilt on gentle relief 6.4° → 0.7°; `Streaming.{Planet,Plane}.LODNormals`; `voxel.Mesh.VoxelShadingNormals`. Heightmap worlds had it on slopes. G25 was found to be the chunk faces' share of the same lighting and fixed with it | WM-BP13 |
-| G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Open (cosmetic; the orbit view, WM-BP10, shows it most): blend the materials across a far-field quad (per-vertex material weights, or a per-patch material texture). Not taken in P6.5: it needs the terrain material to blend two materials within a triangle, which the voxel meshes do not do either (`DC_MATERIAL_BLEND_PLAN.md`, deferred). Since P6.5 it also shows under the viewer just above the cut-over, where the window has emptied (§20.6) | WM-BP10 |
+| G45 | The far field's material borders are stepped along its quads: each quad carries one material (the corners' majority, as the voxel meshes' per-quad materials), so a border between biomes or materials is a staircase of the patch's quads, steps of a few km at the horizon (`Review_Planet_M` at 45°N from 100,000 uu up, `p64f_M_climb_100000_horizon`), and most from orbit, where every biome border is a staircase (1 R over M, `p64f_M_orbit_5000000`); the voxel terrain's own steps are a voxel to four (§20.5) | Fixed in §20.27 (2026-10-24; decision D28, a dithered pick): each far-field vertex samples the surface's material mix (`FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt`: a blend zone's two leading biome materials and the second's share, what generation's dithered per-voxel picks cover there), a quad carries its corners' two largest materials (UV1.x and vertex colour R, flat per triangle) and the second's weight at each corner (255 less it in vertex colour A), and the voxel master materials pick one of the two per pixel against a temporal dither (`FarFieldMaterialPick`, `Scripts/setup_farfield_material_blend.py`), which TSR resolves into a gradient; voxel chunks unchanged (alpha 255); `voxel.World.FarFieldMaterialBlend` (0 = before) | WM-BP10 |
 | G46 | The volumetric cloud layer keeps the engine's Earth altitudes (5 km floor, 10 km thick) when the atmosphere is scaled to the planet: from orbit over the 50 km test planet a ring of clouds floats well outside its 9.7 km of air, and on the small planet the layer is 60 times its relief (found in P6.5's orbit survey, §20.6) | Fixed in P6.5 (§20.6): `ADayNightController::ApplyPlanetSky` scales every cloud layer with the atmosphere (`ComputePlanetCloudLayer`: the thickness by K, the floor by K but at least the terrain's top); `WorldClock.Planet.Sky`, `.SkyScale` | WM-BP10 |
 | G47 | System edits (dungeon stamps, region edits, edit loads) broadcast `OnChunkEdited` with no centre (the zero vector, radius 0), and the surface navigation invalidated a box around it: on a planet the zero vector is the centre, and the box's corners projected into every cached region's tangent frame spanned up to 1.7 R a side, so each broadcast walked billions of tile keys on the 1,000 km planet: a dungeon stamp near the pawn held the game thread for minutes (on the small planet every edit cleared the whole region cache; on a heightmap world the cells around the origin, not the edit's) (found in P6.5's L survey, §20.6) | Fixed in P6.5 (§20.6): an edit with no centre invalidates the edited chunk's bounds; a box's corners deep inside the planet project into no frame; `InvalidateTileCells` visits the cached tiles when the rectangle holds more than the cache; checks in `Navigation.Planet.Path` / `.PathAtScale` | WM-BP11 |
 | G48 | A pawn held with movement disabled (`MOVE_None`: the orbit camera's hold, `vox.Freeze`) in water was switched back to swimming by the movement component's water check every tick; under the orbit camera the window unloads, the water check then failed and it fell through the unloaded seabed (60,000 uu under it in 20 s on M's pole) (found in P6.5's M survey, §20.6) | Fixed in P6.5 (§20.6): `UVCMovementComponent` makes no swimming transition from `MOVE_None`; held 30 s under the orbit camera at M's pole, no fall | WM-BP10 |
@@ -6608,7 +6609,7 @@ tests pass unchanged.
 |----|---------|--------|
 | G43 | The planet terrain steps across the simplex lattice's boundaries (the 0.6 kernel radius), and the planes x = ±y, y = ±z, x = ±z, the cube sphere's face edges, are a boundary in every octave: up to 11 uu on the small planet and 136 uu on L between directions 10⁻⁸ rad apart, found by `MatchesSurface`'s first build | Fixed in §20.24: a continuous kernel, the classic one less its value and slope at d² = 0.5, planets only (`PlanetGenerationVersion` 6, D27) |
 | G44 | The voxel window's LOD 2 ring lights brighter than its LOD 0/1 centre and the far field (its normals off in the normal buffer); the far field's normals are the analytic surface's | Fixed in §20.8: LOD 1 and 2 vertex normals from voxel-resolution gradients |
-| G45 | Far-field material borders are stepped along its quads (one material a quad), a few km a step at the horizon and every biome border a staircase from orbit | Open (cosmetic): blend materials across a quad (WM-BP10's orbit view shows it most) |
+| G45 | Far-field material borders are stepped along its quads (one material a quad), a few km a step at the horizon and every biome border a staircase from orbit | Fixed in §20.27: two materials a quad and a weight per corner from each vertex's material mix, picked per pixel against a temporal dither in the terrain material (D28) |
 
 **Left for the next milestones.** P6.5 (WM-BP10, WM-BP11): voxels unloading above a cut-over altitude and streaming back
 on descent with the fade (the far field already draws the planet from orbit, `p64f_M_orbit_5000000`, while the window
@@ -9164,3 +9165,84 @@ still taken from the queue only while a bench runs. A chunk queued for its LOD b
 after counts as "other"; every run above counted 0 "other".
 
 G14 is fixed.
+
+### 20.27 G45: far-field materials blended across its quads (2026-10-24)
+
+Bases: VoxelWorlds `7462223`, UE5_PluginDev `d4f786d` (G43 and G16 merged), with main's G14 (§20.26) merged in. Branches `fix/g45-farfield-materials`
+(VoxelWorlds) and `claude/g45-farfield-materials` (UE5_PluginDev). Built with editor 5.8.3 from
+`D:\Program Files\Epic Games\UE_5.8`; tests headless and in a worktree editor (Claudius on 8098). The user chose the
+dithered pick (decision D28).
+
+**The finding** (§20.5, §20.6): each far-field quad carried one material, the most common of its corners' picks, so a border
+between materials was a staircase of quads: a few km a step at the horizon, every biome border from orbit, and since the
+cut-over under the viewer too.
+
+**What the voxel terrain draws there.** Generation picks one biome per voxel in a blend zone, dithered in patches (G39,
+§20.22), so a blend zone is a mix of two materials whose share changes across the zone. A far-field quad is a few metres
+across at the band level and about 5 km on M's root patches (100 km on L's); one material per quad cannot show that, and its
+corners' picks are a sample of the dither.
+
+**The change** (VoxelWorlds):
+
+- **The mix at a vertex.** `FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt`: the climate and blend as
+  `QueryPlanetSurfaceConditionsAt`, then each blending biome's surface material (its underwater variant under the sea,
+  `FVoxelBiomeSnapshot::SelectBlendedMaterialShares`) weighted by its blend weight, undithered, the height rules applied
+  per material, the same materials merged; the two largest and the second's share of the two
+  (`FVoxelSurfaceMaterialMix`). Outside the blend zones one material, as before.
+- **Two materials a quad.** Each quad takes its corners' two largest summed shares (`P`, `S`) and the corners' most common
+  biome; each corner the weight `S / (P + S)` of its own mix. UV1.x carries `P` as on every voxel vertex, vertex colour R
+  `S` and A `255 − 255 w`; both IDs are flat per triangle (a grid vertex is duplicated per quad key, the skirts too), so
+  only the weight interpolates.
+- **The pick** (`M_VoxelMaster`, `M_VoxelMaster_Fade`): a Custom node, `FarFieldMaterialPick`, between `MF_GetMaterialID`
+  and the `MaterialID` named reroute: where the interpolated weight is above 0 a pixel takes `S` when interleaved gradient
+  noise on the pixel (moved every frame by `View.StateFrameIndexMod8`) falls under it, so TSR resolves a gradient across the
+  quad. No texture sample added. Every other vertex that can draw with these materials (every mesher's chunk vertices,
+  the water tiles, the far ocean, the ocean shell) has alpha 255 and keeps `MaterialID`. The node is added by
+  `Scripts/setup_farfield_material_blend.py` (UE5_PluginDev), idempotent, run headless (`-run=pythonscript -nullrhi`): in
+  a running editor `recompile_material` held the editor on the shader compile and texture streaming for over 40 minutes,
+  until it was stopped. Its first version read `.a` of the VertexColor node's default output, which is RGB only: both
+  masters failed to compile and every voxel mesh drew the default material (grey from orbit). R and A now go in as their
+  own inputs.
+- **Vertex colour carries an ID exactly.** The colour stream is `VET_Color` with a UNORM SRV (`R8G8B8A8`), no sRGB decode,
+  so `floor(R × 255 + 0.5)` is the ID (MATERIAL_SYSTEM.md's reason for UV1, gamma, does not apply; interpolation does, and
+  both IDs are flat).
+- `voxel.World.FarFieldMaterialBlend` (1; 0 = one material a quad as before, colour R the material and alpha 255). Read
+  when patches build; `voxel.World.FarField 0` then `1` rebuilds them.
+
+**Tests** (VoxelStreaming, `Review_Planet`'s size and terrain, the default biomes blending widely, its sea):
+
+| Test | Checks | Result |
+|---|---|---|
+| `FarField.Planet.MaterialMix` | 24 blend-zone sites (mix weight 0.15-0.5): over 48 × 48 voxels around each, the share of generation's per-voxel picks taking the second material, of the two, against the mix's weight | off by 0.042 on average, 0.117 at worst (limits 0.05, 0.15); picks of neither material up to 0.073 of a site (limit 0.10) |
+| `FarField.Planet.MaterialBlend` | Patches built both ways: both IDs flat per triangle, the encoding, every vertex whose quad's pair holds its mix carrying the mix's weight, and how many grid points shared by quads have a material's share jump by over 0.25 across them | no blend: 2,975 vertices in the old encoding, 650 of 650 shared points jump (every border a step); blend: 5,949 of 6,144 triangles blending, 2,169 vertices carrying their mix's weight (0 another), 74 of 602 shared points jump (three materials meeting: a quad's pair cannot hold the third) |
+
+**Live** (`Review_Planet_M`, PlanetTest, noon; each setting with the far field rebuilt by `voxel.World.FarField 0` then `1`):
+
+| View | Blend off (before) | Blend on |
+|---|---|---|
+| Over the equator, 30 km over the datum (`vox.Orbit 3000000`; `g45_M_eqfix_orbit3000k_b0` / `_b1`) | blocks of dirt and grass along the quads | the same areas, borders a gradient |
+| 1 R (50 km) over 45°N 20°E (`g45_M_45Nfix_orbit5000k_b0` / `_b1`) | every biome border a staircase | gradients, no step |
+| The horizon from 100,000 uu over the ground at 45°N 20°E (`g45_M_45Nfix_horizon_b0` / `_b1`) | the dirt band along the horizon stepped | a continuous band |
+| 4 km over the datum at 45°N 20°E (`g45_M_45Nfix_orbit400k_*`, grass only in view) | the same | the same |
+
+**Cost** (`voxel.World.FarFieldStats` once the rebuilt far field settles, three rebuilds per setting, the orbit camera at
+45°N 20°E):
+
+| Camera | Patches | Build per patch, off / on | Far-field memory, off / on |
+|---|---|---|---|
+| 200,000 uu over the datum (about 160,000 over the ground, above the cut-over) | 346 (322 built) | 0.79-0.92 / 0.77-0.80 ms | 23.6 / 24.1 MB |
+| 1 R | 122 (106 built) | 0.85-0.93 / 0.93-0.95 ms | 9.9 / 11.5 MB |
+
+The mix replaces the per-vertex pick, so a build costs about what it did; the memory is the grid vertices duplicated where
+neighbouring quads hold different pairs, most from orbit, where a quad spans the most borders. On the GPU the pick adds
+a branch on the interpolated alpha and a few ALU operations per pixel, no texture sample (not profiled).
+
+**Suites and GPU parity.** 614 tests headless and in the editor (the six suites; the two above new), no device loss; the
+114 GPU parity lines identical to G43's (§20.24): nothing here changes generation.
+
+**Left as it was.** The voxel meshes keep one material per triangle (`DC_MATERIAL_BLEND_PLAN.md`, deferred; the far field's
+encoding is the one it planned, with a dithered pick for the two samples). Where three materials meet in a quad the third
+snaps to the nearest of the two (the 74 jumps above). A faint dither shimmer is possible on near far-field blend pixels
+while the camera moves; none was seen in the stills.
+
+G45 is fixed.

@@ -148,6 +148,26 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 			TerrainSurfaceHeight, WaterLevel, bEnableUnderwaterMaterials, DefaultUnderwaterMaterial, Dither);
 	}
 
+	/**
+	 * A blend's materials and their shares of the voxels (SelectBlendedMaterialShares), with the underwater variant when
+	 * bWater and the surface lies under WaterLevel.
+	 *
+	 * @param Blend The blend
+	 * @param DepthBelowSurface Depth under the surface, in voxels
+	 * @param bWater Whether the world has a sea (the underwater variant applies below WaterLevel)
+	 * @param TerrainSurfaceHeight The terrain's surface height (an altitude on a planet)
+	 * @param WaterLevel The sea's level in the same terms
+	 * @param OutMaterials MAX_BIOME_BLEND material IDs, largest share first
+	 * @param OutShares Their shares (summing to 1)
+	 * @return The number of distinct materials written (1 or more)
+	 */
+	int32 GetBlendedMaterialShares(const FBiomeBlend& Blend, float DepthBelowSurface, bool bWater, float TerrainSurfaceHeight, float WaterLevel,
+		uint8* OutMaterials, float* OutShares) const
+	{
+		return SelectBlendedMaterialShares(Biomes, Blend, DepthBelowSurface, TerrainSurfaceHeight, bWater ? WaterLevel : -TNumericLimits<float>::Max(),
+			bEnableUnderwaterMaterials, DefaultUnderwaterMaterial, OutMaterials, OutShares);
+	}
+
 	/** Height-rule material override (first applicable wins, priority order). See UVoxelBiomeConfiguration::ApplyHeightMaterialRules. */
 	uint8 ApplyHeightMaterialRules(uint8 CurrentMaterial, float WorldHeight, float DepthBelowSurface) const
 	{
@@ -189,6 +209,29 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 		float TerrainSurfaceHeight, float WaterLevel,
 		bool bInEnableUnderwaterMaterials, uint8 InDefaultUnderwaterMaterial,
 		const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey());
+
+	/**
+	 * A blend's materials with their shares of the voxels, what SelectBlendedMaterialWithWater's picks cover on average
+	 * (G45: the planet far field draws a blend zone's mix, not one voxel's pick): each biome's material at the depth (its
+	 * underwater variant below the water) with the biome's weight, summed per material; a biome holding over 0.9 of the
+	 * weight takes it alone, as PickBlendIndex does.
+	 *
+	 * @param InBiomes The biome definitions
+	 * @param Blend The blend
+	 * @param DepthBelowSurface Depth under the surface, in voxels
+	 * @param TerrainSurfaceHeight The terrain's surface height (an altitude on a planet)
+	 * @param WaterLevel The sea's level in the same terms (the lowest float: no sea)
+	 * @param bInEnableUnderwaterMaterials Whether the underwater variants apply
+	 * @param InDefaultUnderwaterMaterial The material under water where a biome is missing
+	 * @param OutMaterials MAX_BIOME_BLEND material IDs, largest share first
+	 * @param OutShares Their shares (summing to 1)
+	 * @return The number of distinct materials written (1 or more)
+	 */
+	static int32 SelectBlendedMaterialShares(
+		const TArray<FBiomeDefinition>& InBiomes, const FBiomeBlend& Blend, float DepthBelowSurface,
+		float TerrainSurfaceHeight, float WaterLevel,
+		bool bInEnableUnderwaterMaterials, uint8 InDefaultUnderwaterMaterial,
+		uint8* OutMaterials, float* OutShares);
 
 	/** Height-rule override. Rules MUST be pre-sorted by priority descending (first applicable wins). */
 	static uint8 ApplyHeightRules(

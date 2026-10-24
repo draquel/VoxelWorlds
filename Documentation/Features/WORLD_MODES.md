@@ -551,7 +551,8 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
   distance by default) the window unloads and the far field alone draws the planet, and on the way down the window
   streams back ahead of a descending camera and fades in (WM-BP10, "Orbit and Back" in the same doc). The far field
   shows neither caves, overhangs nor edits beyond the window, so they disappear above the cut-over and come back with
-  the window
+  the window. Its materials blend across its quads as the voxels' dithered biome picks do (G45: a gradient where the
+  voxel terrain's blend zones are, no staircase of quads at the horizon or from orbit)
 - Spawning and landing at scale (WM-BP10, WM-BP11): the spawn searches the whole planet for land when there is none near
   its start (`FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`: the 1,000 km test planet's pole is open sea for
   4.7 km of arc, past the old 50,000 uu search), and spawns at the sea's surface, swimming, on a planet with no land; the

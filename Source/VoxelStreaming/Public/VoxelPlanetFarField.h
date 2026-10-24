@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelSurfaceQuery.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelSeaSurface.h"
@@ -220,6 +221,21 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	 * @param OutBiome Dominant biome ID
 	 */
 	void SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const;
+
+	/**
+	 * The surface material mix where the terrain is at Altitude along Direction (G45): its two leading materials and the
+	 * second's share (FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt), what the voxels' per-voxel picks cover there on
+	 * average. Without biomes: generation's material by depth, alone.
+	 *
+	 * @param Direction Unit direction from the centre
+	 * @param Altitude The terrain's altitude there (SampleAltitude)
+	 * @param Continentalness SampleAltitude's continentalness
+	 * @return The mix
+	 */
+	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness) const;
+
+	/** voxel.World.FarFieldMaterialBlend: whether patches blend each quad's two leading materials (G45) or draw one. */
+	static bool IsMaterialBlendEnabled();
 };
 
 /** One mesh section of a patch, ready for a procedural mesh section (positions relative to the patch's origin). */
@@ -258,9 +274,15 @@ struct VOXELSTREAMING_API FVoxelFarFieldSection
  * A built patch: its meshes, relative to its origin, and what the selection needs to know about it.
  *
  * Vertex attributes match the voxel terrain's (FChunkMeshData from the CPU meshers): UV1 = (material id, 0 = top face),
- * colour R the material id, G the biome id; each quad has one material and biome (the most common of its corners), and
- * a grid vertex is duplicated where quads of different materials meet, since the terrain material reads the id from the
- * interpolated UV1. The sea's attributes match the ocean shell's (FVoxelPlanetOcean).
+ * colour G the biome id. Each quad has one material and biome, the same at its four corners, and a grid vertex is
+ * duplicated where quads of different materials meet, since the terrain material reads the id from the interpolated UV1.
+ * G45 (voxel.World.FarFieldMaterialBlend): a quad also carries a second material, colour R, the same at its corners, and
+ * each corner the second's weight there as 1 - colour A; the terrain material takes the second where a temporal dither
+ * falls under the interpolated weight (M_VoxelMaster's FarFieldMaterialPick node), so a border or a blend zone draws as a
+ * gradient across the quad. The quad's materials are the two largest shares of its corners' mixes
+ * (FVoxelFarFieldSurface::SampleMaterialMix); voxel chunks carry alpha 1 and keep their one material. Without the blend
+ * each quad takes the most common material and biome of its corners, colour R that material and alpha 1. The sea's
+ * attributes match the ocean shell's (FVoxelPlanetOcean).
  */
 struct VOXELSTREAMING_API FVoxelFarFieldPatchMesh
 {

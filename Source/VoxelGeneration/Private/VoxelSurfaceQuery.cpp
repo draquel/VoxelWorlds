@@ -255,6 +255,77 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, Altitude, DepthBelowSurface);
 }
 
+FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
+	const FSphericalPlanetWorldMode& Planet,
+	const FVector& Direction,
+	float TerrainAltitude,
+	float Continentalness,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
+	const FVoxelSeaSurface& Sea)
+{
+	FVoxelSurfaceMaterialMix Mix;
+	if (!BiomeSnapshot.bIsValid)
+	{
+		return Mix;
+	}
+	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
+
+	// Climate and the blend as QueryPlanetSurfaceConditionsAt has them
+	float Temperature, Moisture;
+	FSphericalPlanetWorldMode::SampleClimate(Direction, Params.PlanetRadius,
+		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
+		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
+		Temperature, Moisture);
+	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
+	Mix.BiomeID = Blend.GetDominantBiome();
+
+	// The blend's surface materials and shares, height rules applied to each, merged per material.
+	uint8 Materials[MAX_BIOME_BLEND];
+	float Shares[MAX_BIOME_BLEND];
+	const bool bWater = Sea.bEnabled && Sea.bRadial;
+	const int32 Num = BiomeSnapshot.GetBlendedMaterialShares(Blend, 0.0f, bWater, TerrainAltitude,
+		static_cast<float>(Sea.Radius - Params.PlanetRadius), Materials, Shares);
+	uint8 Merged[MAX_BIOME_BLEND];
+	float MergedShares[MAX_BIOME_BLEND];
+	int32 MergedNum = 0;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		const uint8 Material = BiomeSnapshot.ApplyHeightMaterialRules(Materials[i], TerrainAltitude, 0.0f);
+		int32 Slot = 0;
+		while (Slot < MergedNum && Merged[Slot] != Material)
+		{
+			++Slot;
+		}
+		if (Slot == MergedNum)
+		{
+			Merged[MergedNum] = Material;
+			MergedShares[MergedNum] = 0.0f;
+			++MergedNum;
+		}
+		MergedShares[Slot] += Shares[i];
+	}
+	// The two largest.
+	int32 First = 0;
+	for (int32 i = 1; i < MergedNum; ++i)
+	{
+		First = MergedShares[i] > MergedShares[First] ? i : First;
+	}
+	int32 Second = -1;
+	for (int32 i = 0; i < MergedNum; ++i)
+	{
+		if (i != First && (Second < 0 || MergedShares[i] > MergedShares[Second]))
+		{
+			Second = i;
+		}
+	}
+	Mix.Materials[0] = Merged[First];
+	Mix.Materials[1] = Second >= 0 ? Merged[Second] : Merged[First];
+	const float Pair = MergedShares[First] + (Second >= 0 ? MergedShares[Second] : 0.0f);
+	Mix.Weight = (Second >= 0 && Pair > 0.0f) ? MergedShares[Second] / Pair : 0.0f;
+	return Mix;
+}
+
 FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 	const IVoxelWorldMode& WorldMode,
 	const FVector& WorldPos, float VoxelSize,
