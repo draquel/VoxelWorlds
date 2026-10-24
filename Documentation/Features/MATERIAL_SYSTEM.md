@@ -441,6 +441,19 @@ at four fixed views, a quarter-pixel camera turn changes the ground's pixels by 
 0.6-1.6 with gradients; the ground's high-frequency energy under TSR falls from 55-59 to 3.5-7.3; GPU time per frame
 is not higher (P50 5.11-5.22 ms against 4.94-5.07, three bench runs each).
 
+### Terrain Roughness (visual polish VP2-O6)
+
+`M_VoxelMaster` and `M_VoxelMaster_Fade` used to output the sampled roughness times `RoughnessMultiplier`, which is 0 in
+the master and in `MI_VoxelDefault`: roughness 0, a mirror. No terrain material has a roughness map (empty slots of the
+roughness array hold a placeholder: the first valid texture, the coal ore's packed ORD map), so the multiplier could not
+fix it either. The terrain reflected the sky at grazing angles: a pale sheen and hard-edged patches on far, flat ground,
+and before VP2-O1 sparkle. Both masters now output `lerp(sampled x RoughnessMultiplier, TerrainRoughness,
+ConstantRoughness)`: `TerrainRoughness` is a scalar parameter (0.9 by default), `ConstantRoughness` is
+`MPC_VoxelMaterial`'s, set by `voxel.Material.ConstantRoughness` (1 by default; 0 = as before). On `PlanetTest` the
+roughness buffer reads 0 → 0.9 on the ground, and the far ground at a grazing view loses its sky sheen (blue channel
+112 → 86, saturation 41.6 → 66.0). When real roughness maps exist, `ConstantRoughness` 0 and a `RoughnessMultiplier` of 1
+use them.
+
 ---
 
 ## Material Assignment

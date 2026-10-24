@@ -85,22 +85,42 @@ static TAutoConsoleVariable<int32> CVarVoxelMaterialGradientSampling(
 	TEXT("  0 = mip 0 at every distance, as before (the texture aliases into noise beyond a few metres)"),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelMaterialConstantRoughness(
+	TEXT("voxel.Material.ConstantRoughness"),
+	1,
+	TEXT("The terrain's roughness (visual polish VP2-O6; MPC_VoxelMaterial's ConstantRoughness, read by M_VoxelMaster and\n")
+	TEXT("M_VoxelMaster_Fade):\n")
+	TEXT("  1 = the material's TerrainRoughness scalar (0.9 by default): matte ground (default)\n")
+	TEXT("  0 = the sampled roughness times RoughnessMultiplier, as before (0 in MI_VoxelDefault: a mirror that reflects the\n")
+	TEXT("      sky at grazing angles; no terrain material has a roughness map, the slots hold a placeholder)"),
+	ECVF_Default);
+
 namespace
 {
-	/** The collection the voxel master materials' triplanar functions read their switches from (VP2-O1) */
+	/** The collection the voxel master materials read their switches from (VP2-O1, VP2-O6) */
 	const TCHAR* VoxelMaterialCollectionPath = TEXT("/VoxelWorlds/Materials/MPC_VoxelMaterial.MPC_VoxelMaterial");
-	const FName VoxelGradientSamplingParamName(TEXT("GradientSampling"));
 
-	/** Push voxel.Material.GradientSampling into the world's MPC_VoxelMaterial instance when it differs. */
+	/** Each switch: the collection's scalar and the console variable that sets it (0 or 1). */
+	struct FVoxelMaterialSwitch
+	{
+		FName ParamName;
+		TAutoConsoleVariable<int32>* CVar;
+	};
+
+	/** Push the voxel.Material.* switches into the world's MPC_VoxelMaterial instance where they differ. */
 	void ApplyVoxelMaterialSwitches(UWorld* World)
 	{
+		static const FVoxelMaterialSwitch Switches[] = {
+			{ FName(TEXT("GradientSampling")), &CVarVoxelMaterialGradientSampling },
+			{ FName(TEXT("ConstantRoughness")), &CVarVoxelMaterialConstantRoughness },
+		};
 		static TWeakObjectPtr<UMaterialParameterCollection> Collection;
 		static bool bLoadAttempted = false;
 		if (!Collection.IsValid() && !bLoadAttempted)
 		{
 			bLoadAttempted = true;
 			Collection = LoadObject<UMaterialParameterCollection>(nullptr, VoxelMaterialCollectionPath);
-			UE_CLOG(!Collection.IsValid(), LogVoxelRendering, Warning, TEXT("ApplyVoxelMaterialSwitches: %s not found, voxel.Material.GradientSampling has no effect"),
+			UE_CLOG(!Collection.IsValid(), LogVoxelRendering, Warning, TEXT("ApplyVoxelMaterialSwitches: %s not found, the voxel.Material.* switches have no effect"),
 				VoxelMaterialCollectionPath);
 		}
 		UMaterialParameterCollectionInstance* Instance = (World && Collection.IsValid()) ? World->GetParameterCollectionInstance(Collection.Get()) : nullptr;
@@ -108,11 +128,14 @@ namespace
 		{
 			return;
 		}
-		const float Wanted = CVarVoxelMaterialGradientSampling.GetValueOnGameThread() != 0 ? 1.0f : 0.0f;
-		float Current = -1.0f;
-		if (!Instance->GetScalarParameterValue(VoxelGradientSamplingParamName, Current) || Current != Wanted)
+		for (const FVoxelMaterialSwitch& Switch : Switches)
 		{
-			Instance->SetScalarParameterValue(VoxelGradientSamplingParamName, Wanted);
+			const float Wanted = Switch.CVar->GetValueOnGameThread() != 0 ? 1.0f : 0.0f;
+			float Current = -1.0f;
+			if (!Instance->GetScalarParameterValue(Switch.ParamName, Current) || Current != Wanted)
+			{
+				Instance->SetScalarParameterValue(Switch.ParamName, Wanted);
+			}
 		}
 	}
 
@@ -179,7 +202,7 @@ FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
 	// Resolve the crossfade fade material (covers materials assigned without SetMaterial)
 	RefreshDerivedFadeMaterial();
 
-	// A new world's MPC instance starts at the collection's defaults: give it the material switches (VP2-O1). Render
+	// A new world's MPC instance starts at the collection's defaults: give it the material switches (VP2-O1, O6). Render
 	// state can be created off the game thread, and the MPC instance belongs to it.
 	AsyncTask(ENamedThreads::GameThread, [WeakWorld = TWeakObjectPtr<UWorld>(GetWorld())]()
 	{

@@ -17,8 +17,8 @@ root; line numbers in the findings are as of VoxelWorlds `952d4ae`, WorldClockPl
 
 | ID | Report | Cause | Status | Modes | Repos | Size |
 |----|--------|-------|--------|-------|-------|------|
-| VP1 | Sky flickers and moves | The terrain's (and trees') shadows cast onto the atmosphere through the sun's cascades (F1.7), redrawn as the cascades re-fit and, before VP3-O1, as casters were culled with the view; the sky light captured at the planet's centre leaves every shadow black (F1.4). The volumetric clouds, the first suspect, are not visible on `PlanetTest` | Both shown live 2026-10-24; VP3-O1 removes about 80% of the sky's change from the shadows; F1.4 not fixed yet (VP1-O5) | Planets (small ones most) | WorldClockPlugin, parent (maps) | S |
-| VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 shown live, not fixed yet | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (material functions) | S, then M for the look |
+| VP1 | Sky flickers and moves | The terrain's (and trees') shadows cast onto the atmosphere through the sun's cascades (F1.7), redrawn as the cascades re-fit and, before VP3-O1, as casters were culled with the view; the sky light captured at the planet's centre leaves every shadow black (F1.4). The volumetric clouds, the first suspect, are not visible on `PlanetTest` | Both shown live 2026-10-24; VP3-O1 removes about 80% of the sky's change from the shadows; F1.4 **fixed** (VP1-O5, `wc.Planet.SkyLightAtViewer`); VP1-O6 open | Planets (small ones most) | WorldClockPlugin, parent (maps) | S |
+| VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 **fixed** (VP2-O6, `voxel.Material.ConstantRoughness`) | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (materials) | S, then M for the look |
 | VP3 | Hill shadows come and go | The voxel scene proxy culled shadow casters with the camera's frustum (F3.1) | **Fixed** (VP3-O1, `voxel.Render.ShadowCullFrustum`); F3.2 and F3.3 open | Every mode | VoxelWorlds (VoxelRendering) | S; the shadow range and Lumen items M-L |
 
 ## Milestone 1 results (2026-10-24)
@@ -108,12 +108,42 @@ noise. GPU frame P50 5.11-5.22 → 4.94-5.07 ms over the bench route (three runs
   not re-send the chunks (`RecoverLostRenderData`, G15) until streaming resumed. Debug-only; worth a line in the
   freeze command's help, or recovery that runs while paused.
 
+### VP1-O5 and VP2-O6 (2026-10-24, same branch)
+
+**VP1-O5, the sky light at the viewer** (WorldClockPlugin): with a planet frame `ADayNightController` moves the sky
+light to the camera every tick (`bPlanetSkyLightAtViewer`, `ApplyPlanetSkyLight`) and turns its lower hemisphere solid
+colour off: "lower" is world −Z, which on a planet can be half the sky, and the atmosphere draws the planet's ground under
+the local horizon. `wc.Planet.SkyLightAtViewer` (1; 0 = the sky light where the map put it, as before). Test:
+`WorldClock.Planet.Sky` extended.
+
+| Where (16:50 local) | Darkest fifth of the ground, before → after | Brightest fifth |
+|---------------------|-------------------------------------------|-----------------|
+| 45°N 20°E, from 4,000 uu straight down (a hill's shadow) | 0.0 → 69.1 | 124.1 → 197.5 |
+| 45°N 20°E, eye level (foreground in the hill's shadow) | 0.0 → 12.2 | 19.1 → 163.6 |
+| 0°N 20°E, eye level in a forest (light moved by hand in PIE) | 27.7 → 35.1 at the viewer, 39.5 with the whole sphere | 173.1 → 174.6 |
+
+At eye level the shadowed foreground goes from black to sky-lit grass (`vp1o5_45n_eye_ab.png`). Walking 150 uu steps
+the frame changes as much either way (ground 30.2 a step with the sky light following, 30.5 without; sky band 3.5 and
+3.1), so the capture moving with the camera adds no visible instability.
+
+**VP2-O6, constant terrain roughness** (both masters): roughness = `lerp(sampled x RoughnessMultiplier,
+TerrainRoughness, ConstantRoughness)`, `TerrainRoughness` a scalar parameter (0.9), `ConstantRoughness` in
+`MPC_VoxelMaterial`, set by `voxel.Material.ConstantRoughness` (1; 0 = as before). At the grazing view on `PlanetTest`
+(scatter hidden) the roughness buffer reads 0 → 0.9; the far ground, which with the sky light now reflected the sky as a
+pale blue sheen with yellow streaks, is matte (blue channel 112 → 86, saturation 41.6 → 66.0; `vp2o6_graze_ab.png`).
+
+**`VoxelDemo`** (a heightmap world; the sky light change does not apply there) with the mip-0 sampling and mirror
+roughness against both fixes: the far hill's speckle and the wet-looking sheen on the dirt slope by the lake are gone
+(`vp_demo_ab.png`).
+
+Tests: `WorldClock.*` and `VoxelWorlds.Rendering.*` in the editor, 16/16.
+
 ### Next
 
-- **VP1-O5** (move the sky light's capture to the viewer on a planet) and **VP2-O6** (constant terrain roughness):
-  both small, both shown here to matter.
 - **VP1-O6 (new):** decide the atmosphere's shadows on small planets: keep them (stable now apart from the cascades'
   re-fit), soften them, or turn `bCastShadowsOnAtmosphere` off when the scaled atmosphere is thin.
+- **F2.9 (new, seen with the sky light on):** faint striped shading on far gentle slopes at a low sun
+  (`vp1o5_45n_eye_ab.png`, the far valley): to trace (shadow-map self-shadowing at grazing light, or G62's shading).
 - Then milestone 2 (VP2-O2 to O4) and milestone 3 (VP3-O2, O3) as planned.
 
 ## The setup as found
@@ -334,8 +364,8 @@ temporal noise into a still pattern) and a burst along a slow pan with TSR for T
 
 1. **Milestone 1, causes and the two small fixes** (done 2026-10-24: "Milestone 1 results"). VP3-O1 (shadow cull
    volume) and VP2-O1 (gradient sampling), each behind a cvar with its A/B. The VP1 A/B session (steps 1-6) to find
-   the flicker; it pointed at F1.7 and F1.4, not the clouds, so VP1-O5 and the new VP1-O6 and VP2-O6 come next. Then
-   the user looks at the result in PIE.
+   the flicker; it pointed at F1.7 and F1.4, not the clouds. VP1-O5 and VP2-O6 followed the same day; VP1-O6 is open.
+   Then the user looks at the result in PIE.
 2. **Milestone 2, the terrain's look.** VP2-O2 to O4 in the order the user's review sets, and VP2-O5 if the textures
    still disappoint.
 3. **Milestone 3, shadow range and Lumen.** VP3-O2's budget decision, and VP3-O3's spike.
