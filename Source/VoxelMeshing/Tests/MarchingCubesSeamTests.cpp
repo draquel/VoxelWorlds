@@ -9,11 +9,14 @@
 //          open-edge count is no worse than the legacy whole-chunk transvoxel meshes
 //          (legacy carries inherent T-junctions at the ribbon's fine edge, so exact
 //          watertightness is not the bar — parity with legacy is).
+//   MCS4 — G63: every face, edge and corner job the same bit for bit with the participants
+//          read in place (voxel.Seam.MCReadInPlace 1) and copied (0), plane and tilted up.
 // MC triangle soup has no shared vertices, so closure is measured by quantized-position
 // vertex welding + boundary-edge counting scoped to a spatial window.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "HAL/IConsoleManager.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 
@@ -437,6 +440,213 @@ bool FMCSeamMCS3Test::RunTest(const FString& Parameters)
 	// Parity bar: no worse than legacy (which carries inherent ribbon T-junctions), with a
 	// small absolute allowance for windowing differences.
 	TestTrue(TEXT("mixed-LOD junction no worse than legacy"), OpenSeam <= OpenLegacy + 8);
+	return true;
+}
+
+// ============================ MCS4: in-place reads (G63) ============================
+//
+// World modes review G63 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.29): every seam frame copied its participant's whole volume
+// and its neighbours' planes, strips and corners into a request; voxel.Seam.MCReadInPlace 1 reads them in place from the
+// job's snapshots. Every face, edge and corner job of a 2x2x2 block, at LOD 0, 1 and 2 and with mixed LODs (ribbons and the
+// band-confined geomorph), on a plane (local up +Z) and on a gyroid with a planet's local up at 45N 20E (the planet's material
+// scan and geomorph axis), must give the same mesh bit for bit either way.
+
+namespace MCSeamTest
+{
+
+/** voxel.Seam.MCReadInPlace for a scope. */
+struct FScopedReadInPlace
+{
+	IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Seam.MCReadInPlace"));
+	int32 Previous = Var ? Var->GetInt() : 1;
+	explicit FScopedReadInPlace(int32 Value) { if (Var) { Var->Set(Value, ECVF_SetByConsole); } }
+	~FScopedReadInPlace() { if (Var) { Var->Set(Previous, ECVF_SetByConsole); } }
+};
+
+/** A planet's local up at 45N 20E. */
+static FVector PlanetUp()
+{
+	const double Lat = FMath::DegreesToRadians(45.0);
+	const double Lon = FMath::DegreesToRadians(20.0);
+	return FVector(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+}
+
+/**
+ * A 2x2x2 block's voxels: the plane's slanted height field with bumps, or a gyroid (period 24 voxels) whose surface
+ * crosses every seam of the block, meshed with the planet's tilted local up. Density ramps about a voxel either side of
+ * the surface (as the generators' does), materials by depth (two layers) and biomes in stripes, so the LOD material scans
+ * read.
+ */
+static TSharedPtr<const TArray<FVoxelData>> MakeBlockVoxels(const FIntVector& ChunkCoord, bool bGyroid)
+{
+	const double K = 2.0 * PI / 24.0;
+	TSharedPtr<TArray<FVoxelData>> Voxels = MakeShared<TArray<FVoxelData>>();
+	Voxels->SetNumZeroed(CS * CS * CS);
+	for (int32 Z = 0; Z < CS; ++Z)
+	{
+		for (int32 Y = 0; Y < CS; ++Y)
+		{
+			for (int32 X = 0; X < CS; ++X)
+			{
+				const FVector P(ChunkCoord.X * CS + X, ChunkCoord.Y * CS + Y, ChunkCoord.Z * CS + Z);
+				const double Bumps = 3.0 * FMath::Sin(P.X * 0.23) + 2.0 * FMath::Sin(P.Y * 0.17 + P.Z * 0.11);
+				const double Gyroid = FMath::Sin(P.X * K) * FMath::Cos(P.Y * K) + FMath::Sin(P.Y * K) * FMath::Cos(P.Z * K)
+					+ FMath::Sin(P.Z * K) * FMath::Cos(P.X * K);
+				const double Depth = bGyroid
+					? Gyroid * 3.0
+					: (HeightAt(P.X, P.Y) + 8.0 + Bumps) - P.Z;
+				FVoxelData& V = (*Voxels)[X + Y * CS + Z * CS * CS];
+				V.Density = static_cast<uint8>(FMath::RoundToInt(FMath::Clamp(0.5 + Depth * 0.5, 0.0, 1.0) * 255.0));
+				V.MaterialID = Depth > 2.0 ? 2 : 1;
+				V.BiomeID = static_cast<uint8>((FMath::FloorToInt(P.X / 6.0) + FMath::FloorToInt(P.Y / 9.0)) & 1);
+			}
+		}
+	}
+	return Voxels;
+}
+
+/** Bit for bit: every vertex attribute and index in order. */
+static bool MeshesIdentical(const FChunkMeshData& A, const FChunkMeshData& B)
+{
+	auto Same = [](const auto& L, const auto& R)
+	{
+		return L.Num() == R.Num() && FMemory::Memcmp(L.GetData(), R.GetData(), L.Num() * L.GetTypeSize()) == 0;
+	};
+	return Same(A.Positions, B.Positions) && Same(A.Normals, B.Normals) && Same(A.UVs, B.UVs) && Same(A.UV1s, B.UV1s)
+		&& Same(A.Colors, B.Colors) && Same(A.Indices, B.Indices);
+}
+
+} // namespace MCSeamTest
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCSeamMCS4Test, "VoxelWorlds.Meshing.MarchingCubes.SeamClosure.MCS4_ReadInPlace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMCSeamMCS4Test::RunTest(const FString& Parameters)
+{
+	using namespace MCSeamTest;
+	if (!IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Seam.MCReadInPlace")))
+	{
+		AddError(TEXT("voxel.Seam.MCReadInPlace is not registered"));
+		return false;
+	}
+
+	// LOD sets: uniform 0, 1, 2 and mixed (per participant in the request's order).
+	const TArray<TArray<int32>> LODSets = {
+		{ 0, 0, 0, 0, 0, 0, 0, 0 }, { 1, 1, 1, 1, 1, 1, 1, 1 }, { 2, 2, 2, 2, 2, 2, 2, 2 },
+		{ 0, 1, 0, 1, 1, 2, 1, 2 }, { 1, 0, 2, 1, 0, 1, 1, 2 }, { 2, 1, 1, 0, 2, 2, 0, 1 } };
+
+	for (int32 World = 0; World < 2; ++World)
+	{
+		const bool bTilted = World == 1;
+		const TCHAR* WorldName = bTilted ? TEXT("gyroid, up at 45N 20E") : TEXT("plane");
+		const FVector LocalUp = bTilted ? PlanetUp() : FVector::UpVector;
+		TSharedPtr<const TArray<FVoxelData>> Vox[8];
+		for (int32 o = 0; o < 8; ++o)
+		{
+			Vox[o] = MakeBlockVoxels(FIntVector(o & 1, (o >> 1) & 1, (o >> 2) & 1), bTilted);
+		}
+		auto VoxAt = [&Vox](const FIntVector& C) { return Vox[C.X + C.Y * 2 + C.Z * 4]; };
+
+		FVoxelCPUMarchingCubesMesher::ResetSeamJobStats();
+		int32 Jobs = 0, Identical = 0, NonEmpty = 0, Triangles = 0;
+		auto Check =[&](const FString& What, TFunctionRef<bool(FChunkMeshData&)> Mesh)
+		{
+			FChunkMeshData Copied, InPlace;
+			bool bOkCopied, bOkInPlace;
+			{
+				FScopedReadInPlace Setting(0);
+				bOkCopied = Mesh(Copied);
+			}
+			{
+				FScopedReadInPlace Setting(1);
+				bOkInPlace = Mesh(InPlace);
+			}
+			++Jobs;
+			TestTrue(*FString::Printf(TEXT("%s %s: meshes either way"), WorldName, *What), bOkCopied && bOkInPlace);
+			const bool bSame = MeshesIdentical(Copied, InPlace);
+			Identical += bSame ? 1 : 0;
+			NonEmpty += Copied.Indices.Num() > 0 ? 1 : 0;
+			Triangles += Copied.Indices.Num() / 3;
+			if (!bSame)
+			{
+				AddError(FString::Printf(TEXT("%s %s: copied %d vertices / %d indices, in place %d / %d, not bit-identical"),
+					WorldName, *What, Copied.Positions.Num(), Copied.Indices.Num(), InPlace.Positions.Num(), InPlace.Indices.Num()));
+			}
+		};
+
+		for (const TArray<int32>& LODs : LODSets)
+		{
+			const FString Set = FString::Printf(TEXT("LODs %d%d%d%d%d%d%d%d"), LODs[0], LODs[1], LODs[2], LODs[3], LODs[4], LODs[5], LODs[6], LODs[7]);
+			// Faces: owner (0,0,0) and its +Axis neighbour.
+			for (int32 Axis = 0; Axis < 3; ++Axis)
+			{
+				Check(FString::Printf(TEXT("face %d, %s"), Axis, *Set), [&](FChunkMeshData& Out)
+				{
+					FVoxelFaceSeamRequest R;
+					FIntVector B = FIntVector::ZeroValue;
+					B[Axis] = 1;
+					R.OwnerChunkCoord = FIntVector::ZeroValue;
+					R.Axis = static_cast<uint8>(Axis);
+					R.LODLevel = LODs[0];
+					R.LODLevelB = LODs[1 + Axis];
+					R.ChunkSize = CS;
+					R.VoxelSize = VoxSize;
+					R.LocalUp = LocalUp;
+					R.VoxelDataA = VoxAt(FIntVector::ZeroValue);
+					R.VoxelDataB = VoxAt(B);
+					return Mesher().GenerateFaceSeamMeshCPU(R, Out);
+				});
+			}
+			// Edges: owner (0,0,0), the four chunks around the edge along EdgeAxis.
+			for (int32 EdgeAxis = 0; EdgeAxis < 3; ++EdgeAxis)
+			{
+				Check(FString::Printf(TEXT("edge %d, %s"), EdgeAxis, *Set), [&](FChunkMeshData& Out)
+				{
+					const int32 P1 = (EdgeAxis == 0) ? 1 : 0;
+					const int32 P2 = (EdgeAxis == 2) ? 1 : 2;
+					FVoxelEdgeSeamRequest R;
+					R.OwnerChunkCoord = FIntVector::ZeroValue;
+					R.EdgeAxis = static_cast<uint8>(EdgeAxis);
+					R.LODLevel = LODs[0];
+					R.ChunkSize = CS;
+					R.VoxelSize = VoxSize;
+					R.LocalUp = LocalUp;
+					for (int32 q = 0; q < 4; ++q)
+					{
+						FIntVector C = FIntVector::ZeroValue;
+						C[P1] += (q & 1);
+						C[P2] += (q >> 1);
+						R.LODLevels[q] = LODs[2 * q + EdgeAxis % 2];
+						R.VoxelData[q] = VoxAt(C);
+					}
+					return Mesher().GenerateEdgeSeamMeshCPU(R, Out);
+				});
+			}
+			// The corner: all eight.
+			Check(FString::Printf(TEXT("corner, %s"), *Set), [&](FChunkMeshData& Out)
+			{
+				FVoxelCornerSeamRequest R;
+				R.OwnerChunkCoord = FIntVector::ZeroValue;
+				R.LODLevel = LODs[0];
+				R.ChunkSize = CS;
+				R.VoxelSize = VoxSize;
+				R.LocalUp = LocalUp;
+				for (int32 o = 0; o < 8; ++o)
+				{
+					R.LODLevels[o] = LODs[o];
+					R.VoxelData[o] = Vox[o];
+				}
+				return Mesher().GenerateCornerSeamMeshCPU(R, Out);
+			});
+		}
+		int64 Meshed = 0, InPlace = 0;
+		double WorkerMs = 0.0;
+		FVoxelCPUMarchingCubesMesher::GetSeamJobStats(Meshed, InPlace, WorkerMs);
+		AddInfo(FString::Printf(TEXT("%s: %d seam jobs, %d bit-identical copied and in place, %d with triangles (%d triangles); %lld meshed, %lld in place, %.1f ms"),
+			WorldName, Jobs, Identical, NonEmpty, Triangles, Meshed, InPlace, WorkerMs));
+		TestEqual(*FString::Printf(TEXT("%s: each job meshed once copied and once in place"), WorldName), InPlace * 2, Meshed);
+		TestEqual(*FString::Printf(TEXT("%s: every seam job the same either way"), WorldName), Identical, Jobs);
+		TestTrue(*FString::Printf(TEXT("%s: most seam jobs carry the surface (%d of %d)"), WorldName, NonEmpty, Jobs), NonEmpty * 4 >= Jobs * 3);
+	}
 	return true;
 }
 
