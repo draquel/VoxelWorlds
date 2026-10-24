@@ -1,6 +1,21 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelPlanetNoise.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarPlanetContinuousSimplex(
+	TEXT("voxel.Planet.ContinuousSimplex"),
+	1,
+	TEXT("Planet Simplex noise's corner kernel (world modes review G43): 1 = continuous at the simplex boundaries ((0.6 - d^2)^4 ")
+	TEXT("less its value and slope at d^2 = 0.5, PlanetGenerationVersion 6); 0 = the 0.6 kernel as before, which steps where a ")
+	TEXT("sample crosses into the next simplex (up to 136 uu along Review_Planet_L's cube face edges). For A/B only: 0 generates ")
+	TEXT("terrain that version 6 saves do not match. Read when chunks generate; CPU and GPU alike."),
+	ECVF_Default);
+
+bool FVoxelPlanetNoise::IsContinuousSimplex()
+{
+	return CVarPlanetContinuousSimplex.GetValueOnAnyThread() != 0;
+}
 
 // Spherical Phase 6, WM-BP5 (D22). Every function here has a twin in Shaders/Private/PlanetNoise.ush with the same float
 // operations in the same order; change both together (VoxelWorlds.Generation.GPUvsCPUSphericalParity).
@@ -74,17 +89,41 @@ namespace VoxelPlanetNoiseDetail
 		}
 	}
 
+	/**
+	 * A simplex corner's contribution. G43: the classic kernel (0.6 - d^2)^4 reaches past the simplex (a point's nearest
+	 * corner outside its simplex is sqrt(0.5) away), so a corner's contribution dropped out abruptly where a sample crossed
+	 * into the next simplex: steps in the terrain, every octave's at once on the planes x = y, y = z and x = z (the cube
+	 * sphere's face edges). The continuous kernel is that one less its value and slope at d^2 = 0.5, so it reaches zero
+	 * there with a zero slope: v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2. It stays within 1.2% rms of the old noise
+	 * (SimplexScale keeps its spread), so the landscape is the same.
+	 */
 	template <typename T>
-	FORCEINLINE T SimplexCorner(uint32 Hash, T X, T Y, T Z)
+	FORCEINLINE T SimplexCorner(uint32 Hash, T X, T Y, T Z, bool bContinuous)
 	{
+		const int32* G = Grad3[Hash % 12u];
+		if (bContinuous)
+		{
+			const T V = T(0.5) - X * X - Y * Y - Z * Z;
+			if (V <= T(0))
+			{
+				return T(0);
+			}
+			const T W = V * V * ((V + T(0.4)) * V + T(0.06));
+			return W * (T(G[0]) * X + T(G[1]) * Y + T(G[2]) * Z);
+		}
 		T R = T(0.6) - X * X - Y * Y - Z * Z;
 		if (R < T(0))
 		{
 			return T(0);
 		}
 		R *= R;
-		const int32* G = Grad3[Hash % 12u];
 		return R * R * (T(G[0]) * X + T(G[1]) * Y + T(G[2]) * Z);
+	}
+
+	/** The corner sum's scale: 32 for the classic kernel; 33.25 gives the continuous one the same spread. */
+	FORCEINLINE float SimplexScale(bool bContinuous)
+	{
+		return bContinuous ? 33.25f : 32.0f;
 	}
 }
 
@@ -148,11 +187,12 @@ float FVoxelPlanetNoise::Simplex(const FVoxelNoiseSplit& Origin, const FVector3f
 	const uint32 BY = static_cast<uint32>(Origin.Cell.Y) + static_cast<uint32>(CY);
 	const uint32 BZ = static_cast<uint32>(Origin.Cell.Z) + static_cast<uint32>(CZ);
 
-	const float N0 = SimplexCorner(LatticeHash(BX, BY, BZ, Seed), X0, Y0, Z0);
-	const float N1 = SimplexCorner(LatticeHash(BX + I1, BY + J1, BZ + K1, Seed), X1, Y1, Z1);
-	const float N2 = SimplexCorner(LatticeHash(BX + I2, BY + J2, BZ + K2, Seed), X2, Y2, Z2);
-	const float N3 = SimplexCorner(LatticeHash(BX + 1u, BY + 1u, BZ + 1u, Seed), X3, Y3, Z3);
-	return 32.0f * (N0 + N1 + N2 + N3);
+	const bool bContinuous = IsContinuousSimplex();
+	const float N0 = SimplexCorner(LatticeHash(BX, BY, BZ, Seed), X0, Y0, Z0, bContinuous);
+	const float N1 = SimplexCorner(LatticeHash(BX + I1, BY + J1, BZ + K1, Seed), X1, Y1, Z1, bContinuous);
+	const float N2 = SimplexCorner(LatticeHash(BX + I2, BY + J2, BZ + K2, Seed), X2, Y2, Z2, bContinuous);
+	const float N3 = SimplexCorner(LatticeHash(BX + 1u, BY + 1u, BZ + 1u, Seed), X3, Y3, Z3, bContinuous);
+	return SimplexScale(bContinuous) * (N0 + N1 + N2 + N3);
 }
 
 float FVoxelPlanetNoise::Perlin(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed)
@@ -356,11 +396,12 @@ double FVoxelPlanetNoise::ReferenceSample(const FVector& P, EVoxelNoiseType Type
 		SimplexCorners(X0, Y0, Z0, I1, J1, K1, I2, J2, K2);
 		const double G = 1.0 / 6.0;
 		const uint32 BX = Wrap(CX), BY = Wrap(CY), BZ = Wrap(CZ);
-		const double N0 = SimplexCorner(LatticeHash(BX, BY, BZ, Seed), X0, Y0, Z0);
-		const double N1 = SimplexCorner(LatticeHash(BX + I1, BY + J1, BZ + K1, Seed), X0 - I1 + G, Y0 - J1 + G, Z0 - K1 + G);
-		const double N2 = SimplexCorner(LatticeHash(BX + I2, BY + J2, BZ + K2, Seed), X0 - I2 + 2.0 * G, Y0 - J2 + 2.0 * G, Z0 - K2 + 2.0 * G);
-		const double N3 = SimplexCorner(LatticeHash(BX + 1u, BY + 1u, BZ + 1u, Seed), X0 - 1.0 + 3.0 * G, Y0 - 1.0 + 3.0 * G, Z0 - 1.0 + 3.0 * G);
-		return 32.0 * (N0 + N1 + N2 + N3);
+		const bool bContinuous = IsContinuousSimplex();
+		const double N0 = SimplexCorner(LatticeHash(BX, BY, BZ, Seed), X0, Y0, Z0, bContinuous);
+		const double N1 = SimplexCorner(LatticeHash(BX + I1, BY + J1, BZ + K1, Seed), X0 - I1 + G, Y0 - J1 + G, Z0 - K1 + G, bContinuous);
+		const double N2 = SimplexCorner(LatticeHash(BX + I2, BY + J2, BZ + K2, Seed), X0 - I2 + 2.0 * G, Y0 - J2 + 2.0 * G, Z0 - K2 + 2.0 * G, bContinuous);
+		const double N3 = SimplexCorner(LatticeHash(BX + 1u, BY + 1u, BZ + 1u, Seed), X0 - 1.0 + 3.0 * G, Y0 - 1.0 + 3.0 * G, Z0 - 1.0 + 3.0 * G, bContinuous);
+		return static_cast<double>(SimplexScale(bContinuous)) * (N0 + N1 + N2 + N3);
 	}
 
 	const double CX = FMath::FloorToDouble(P.X), CY = FMath::FloorToDouble(P.Y), CZ = FMath::FloorToDouble(P.Z);

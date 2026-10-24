@@ -7,7 +7,7 @@
 // adds the voxel's small offset in noise units, so every float here is of the size of a lattice cell, at any radius.
 // Heightmap worlds keep FBMNoise.ush bit for bit.
 //
-// Include AFTER the generation globals (GenerateVoxelDensity.usf): reads PlanetNoiseOrigins.
+// Include AFTER the generation globals (GenerateVoxelDensity.usf): reads PlanetNoiseOrigins and PlanetSimplexContinuous.
 
 #pragma once
 
@@ -38,15 +38,28 @@ static const int3 PlanetGrad3[12] = {
     int3(0,1,1), int3(0,-1,1), int3(0,1,-1), int3(0,-1,-1)
 };
 
+// A simplex corner's contribution (FVoxelPlanetNoise's SimplexCorner). G43: the continuous kernel, (0.6 - d^2)^4 less its
+// value and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, reaches zero where the next simplex begins;
+// PlanetSimplexContinuous 0 (voxel.Planet.ContinuousSimplex) keeps the classic one, which steps there.
 float PlanetSimplexCorner(uint Hash, float3 X)
 {
+    const int3 G = PlanetGrad3[Hash % 12u];
+    if (PlanetSimplexContinuous != 0)
+    {
+        const float V = 0.5f - X.x * X.x - X.y * X.y - X.z * X.z;
+        if (V <= 0.0f)
+        {
+            return 0.0f;
+        }
+        const float W = V * V * ((V + 0.4f) * V + 0.06f);
+        return W * ((float)G.x * X.x + (float)G.y * X.y + (float)G.z * X.z);
+    }
     float R = 0.6f - X.x * X.x - X.y * X.y - X.z * X.z;
     if (R < 0.0f)
     {
         return 0.0f;
     }
     R *= R;
-    const int3 G = PlanetGrad3[Hash % 12u];
     return R * R * ((float)G.x * X.x + (float)G.y * X.y + (float)G.z * X.z);
 }
 
@@ -87,7 +100,8 @@ float PlanetSimplex(uint3 Cell, float3 Frac, float3 Offset, int Seed)
     const float N1 = PlanetSimplexCorner(PlanetLatticeHash(B + asuint(I1), Seed), X1);
     const float N2 = PlanetSimplexCorner(PlanetLatticeHash(B + asuint(I2), Seed), X2);
     const float N3 = PlanetSimplexCorner(PlanetLatticeHash(B + uint3(1u, 1u, 1u), Seed), X3);
-    return 32.0f * (N0 + N1 + N2 + N3);
+    // The sum's scale: 33.25 gives the continuous kernel the classic one's spread (32).
+    return (PlanetSimplexContinuous != 0 ? 33.25f : 32.0f) * (N0 + N1 + N2 + N3);
 }
 
 float PlanetGrad(uint Hash, float X, float Y, float Z)

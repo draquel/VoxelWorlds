@@ -39,6 +39,8 @@ namespace PlanetShellWindowTestUtils
 		using FDistanceBandLODStrategy::ShellWindowOuterRadius;
 		using FDistanceBandLODStrategy::GetPlanetChunkSlab;
 		using FDistanceBandLODStrategy::FPlanetChunkSlab;
+		using FDistanceBandLODStrategy::PlanetSlabGrid;
+		using FDistanceBandLODStrategy::PlanetNearBandAngle;
 	};
 
 	constexpr double ChunkWorld = 4800.0;
@@ -174,21 +176,24 @@ namespace PlanetShellWindowTestUtils
 	}
 
 	/**
-	 * Brute force: how far a chunk lies off the surface over its neighbourhood. The surface's altitude range at a 5 x 5 x 5
-	 * lattice of directions over the chunk box widened by one and a half chunks on every side (the cells the strategy
-	 * reads for a chunk are about a chunk across and reach up to a cell past its corners), against the chunk's altitude
-	 * extent. 0 when the extent meets the range.
+	 * Brute force: how far a chunk lies off the surface over its neighbourhood. The surface's altitude range at a 9 x 9 x 9
+	 * lattice of directions (half a chunk apart) over the chunk box widened by one and a half chunks on every side (the
+	 * cells the strategy reads for a chunk are about a chunk across and reach up to a cell past its corners), against the
+	 * chunk's altitude extent. 0 when the extent meets the range. The lattice is half a chunk apart because the km relief
+	 * of the 1,000 km planet rises up to about 100 uu between points a chunk apart (G43: a 5 x 5 x 5 lattice put three
+	 * cube-corner chunks 99 uu past the slack after the noise's kernel changed).
 	 */
 	double DistanceOffSurface(const FTerrain& Terrain, const FIntVector& Coord)
 	{
 		const FVector Min = FVector(Coord) * ChunkWorld - FVector(1.5 * ChunkWorld);
 		const double Size = 4.0 * ChunkWorld;
+		constexpr int32 Points = 9;
 		double SurfaceMin = TNumericLimits<double>::Max(), SurfaceMax = TNumericLimits<double>::Lowest();
-		for (int32 X = 0; X < 5; ++X)
-		for (int32 Y = 0; Y < 5; ++Y)
-		for (int32 Z = 0; Z < 5; ++Z)
+		for (int32 X = 0; X < Points; ++X)
+		for (int32 Y = 0; Y < Points; ++Y)
+		for (int32 Z = 0; Z < Points; ++Z)
 		{
-			const double Altitude = Terrain.Altitude((Min + FVector(X, Y, Z) * (Size / 4.0)).GetSafeNormal());
+			const double Altitude = Terrain.Altitude((Min + FVector(X, Y, Z) * (Size / (Points - 1))).GetSafeNormal());
 			SurfaceMin = FMath::Min(SurfaceMin, Altitude);
 			SurfaceMax = FMath::Max(SurfaceMax, Altitude);
 		}
@@ -803,9 +808,14 @@ bool FPlanetNearBandTest::RunTest(const FString& Parameters)
 			// The cells' five samples miss some of the surface between them, which the slab's slack covers: at least a chunk over
 			// every sampled point.
 			TestTrue(*FString::Printf(TEXT("%s, %s: the ceiling is a chunk or more over the highest surface near the viewer"), Case.Name, Site.Name), Ceiling >= Highest + ChunkWorld);
-			// The envelope reads the cells within the near disk's widest angle around the viewer's cell, plus two cells: no more
-			// than the slack over the highest surface within four chunks past the near radius (half a chunk for the samples).
-			const double HighestReached = HighestSurfaceWithin(Terrain, Site.Up, NearRadius + 4.0 * ChunkWorld);
+			// The envelope reads the cells whose centres lie within the near disk's widest angle plus two cell angles (2 pi / N,
+			// GetPlanetSurfaceEnvelope) of the viewer's cell's centre; its samples reach a cell's half diagonal past those
+			// centres, and the viewer lies up to another from its cell's centre: no more than the slack over the highest
+			// surface within that radius (half a chunk for the samples). G43: the bound used to be four chunks past the near
+			// radius, two short of the cells read on the 1,000 km planet, whose cells are a chunk across.
+			const double CellAngle = 0.5 * UE_DOUBLE_PI / Strategy.PlanetSlabGrid.GetCellsPerEdge();
+			const double ReadAngle = Strategy.PlanetNearBandAngle + 4.0 * CellAngle + UE_DOUBLE_SQRT_2 * CellAngle;
+			const double HighestReached = HighestSurfaceWithin(Terrain, Site.Up, ReadAngle * Case.Radius);
 			TestTrue(*FString::Printf(TEXT("%s, %s: the ceiling is the slab's slack over the surface the near disk reads"), Case.Name, Site.Name),
 				Ceiling <= HighestReached + Slack + 0.5 * ChunkWorld);
 			TestEqual(*FString::Printf(TEXT("%s, %s: the same ceiling along the up-line"), Case.Name, Site.Name),
