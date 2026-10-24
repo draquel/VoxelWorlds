@@ -35,6 +35,11 @@ struct VOXELGENERATION_API FVoxelNoiseSplit
  *   itself (FBM3D(Position)); the GPU splits a per-chunk origin on the CPU and adds each voxel's offset (FBM3D(Origin,
  *   Offset) is that form on the CPU, for parity and tests).
  *
+ * - A continuous Simplex kernel (G43, PlanetGenerationVersion 6): the classic (0.6 - d^2)^4 corner weight stepped where
+ *   a sample crossed into the next simplex (up to 136 uu along Review_Planet_L's cube face edges, where every octave's
+ *   boundary lies); it is now that weight less its value and slope at d^2 = 0.5. voxel.Planet.ContinuousSimplex 0
+ *   restores the classic one (A/B).
+ *
  * The octave loop (frequencies multiplied in float, amplitudes, normalisation) is FVoxelCPUNoiseGenerator::FBM3D's.
  *
  * Thread safety: stateless, any thread.
@@ -91,8 +96,15 @@ public:
 	 */
 	static float Sample(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, EVoxelNoiseType Type, int32 Seed);
 
-	/** Simplex noise at Origin + Offset (Origin split in the skewed lattice): [-1, 1]. */
+	/** Simplex noise at Origin + Offset (Origin split in the skewed lattice): about [-1, 1], continuous across simplices. */
 	static float Simplex(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed);
+
+	/**
+	 * voxel.Planet.ContinuousSimplex: whether Simplex uses the continuous corner kernel (G43, the default) or the classic one.
+	 *
+	 * @return True for the continuous kernel
+	 */
+	static bool IsContinuousSimplex();
 
 	/** Perlin (improved gradient) noise at Origin + Offset: about [-1, 1]. */
 	static float Perlin(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed);

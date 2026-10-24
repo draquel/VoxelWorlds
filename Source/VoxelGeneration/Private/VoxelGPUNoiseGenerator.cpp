@@ -140,6 +140,8 @@ public:
 		SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
 		SHADER_PARAMETER(float, PlanetAnchorDist)
 		SHADER_PARAMETER(float, PlanetAnchorAltitude)
+		// G43: the planet Simplex noise's corner kernel (voxel.Planet.ContinuousSimplex).
+		SHADER_PARAMETER(int32, PlanetSimplexContinuous)
 		// The cave configuration's underwater minimum depth and biome overrides (GpuCaveCarve), 1 float4 each:
 		// [BiomeID, CaveScale, MinDepthOverride, 0].
 		SHADER_PARAMETER(float, CaveUnderwaterMinDepth)
@@ -944,6 +946,7 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->PlanetAnchorDir = FVector3f(AnchorDir);
 	Parameters->PlanetAnchorDist = static_cast<float>(AnchorDist);
 	Parameters->PlanetAnchorAltitude = static_cast<float>(AnchorDist - Planet.PlanetRadius);
+	Parameters->PlanetSimplexContinuous = FVoxelPlanetNoise::IsContinuousSimplex() ? 1 : 0;
 
 	// The cave configuration's underwater minimum depth and biome overrides — every world-mode branch applies them as
 	// the CPU's CalculateCaveDensity does (GpuCaveCarve).
