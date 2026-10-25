@@ -437,6 +437,11 @@ makes the boundary fade with it:
   geometry still appears at once. A new interior that fades in is held, invisible, until its ready
   seams land and then fades in with them (`voxel.MeshFade.AppearHold`, same holds and cap as an LOD
   change). A resubmit during an appearance replaces the mesh in place on the same alpha.
+- Diagnostics (world modes review G74, `WORLD_MODES_REVIEW_PLAN.md` §22.3): `voxel.MeshFade.Stats [fades] [x y z]`
+  logs every component's fades, holds and proxy fade states and, for a point, what its chunk's proxy holds and what the
+  last frame drew of it; `VoxelWorlds.Rendering.Crossfade.SwapReachesProxy` and `VoxelWorlds.Streaming.EditReachesProxy.*`
+  check that a swap (an edit's re-mesh, an LOD change, a held transition) ends with the new mesh drawn alone. They need a
+  render scene: they run in the editor and skip under `-nullrhi`.
 
 Details, measurements and limits: `VOXEL_QA_FOLLOWUPS_PLAN.md`, "R24 as built" (VoxelWorlds#71).
 
