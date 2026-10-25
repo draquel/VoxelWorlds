@@ -17,7 +17,7 @@ root; line numbers in the findings are as of VoxelWorlds `952d4ae`, WorldClockPl
 
 | ID | Report | Cause | Status | Modes | Repos | Size |
 |----|--------|-------|--------|-------|-------|------|
-| VP1 | Sky flickers and moves | The terrain's (and trees') shadows cast onto the atmosphere through the sun's cascades (F1.7), redrawn as the cascades re-fit and, before VP3-O1, as casters were culled with the view; the sky light captured at the planet's centre leaves every shadow black (F1.4). The volumetric clouds, the first suspect, are not visible on `PlanetTest` | Both shown live 2026-10-24; VP3-O1 removes about 80% of the sky's change from the shadows; F1.4 **fixed** (VP1-O5, `wc.Planet.SkyLightAtViewer`); VP1-O6 open | Planets (small ones most) | WorldClockPlugin, parent (maps) | S |
+| VP1 | Sky flickers and moves | The terrain's (and trees') shadows cast onto the atmosphere through the sun's cascades (F1.7), redrawn as the cascades re-fit and, before VP3-O1, as casters were culled with the view; the sky light captured at the planet's centre leaves every shadow black (F1.4). The volumetric clouds, the first suspect, are not visible on `PlanetTest` | Both shown live 2026-10-24; VP3-O1 removes about 80% of the sky's change from the shadows; F1.4 **fixed** (VP1-O5, `wc.Planet.SkyLightAtViewer`); the "pixelated clouds" were F1.7 through the sky view LUT, **fixed** (VP1-O6, `wc.Planet.AtmosphereShadows`) | Planets (small ones most) | WorldClockPlugin, parent (maps) | S |
 | VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 **fixed** (VP2-O6, `voxel.Material.ConstantRoughness`); F2.8 **fixed** (VP2-O2, `voxel.Material.TileVariation`, `MacroVariation`) | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (materials) | S, then M for the look |
 | VP3 | Hill shadows come and go | The voxel scene proxy culled shadow casters with the camera's frustum (F3.1) | **Fixed** (VP3-O1, `voxel.Render.ShadowCullFrustum`); F3.2 and F3.3 open | Every mode | VoxelWorlds (VoxelRendering) | S; the shadow range and Lumen items M-L |
 | VP4 | Fast terrain flicker as you move | A far-field patch waiting for a build where nothing of it would show was stood in for by its nearest built ancestor, often a cube face's root, drawn over the voxel terrain and the horizon for a frame (F4.1) | **Fixed** (VP4-O1, `voxel.World.FarFieldAvoidStandIns`); see "VP4 terrain flicker" | Planets | VoxelWorlds (VoxelStreaming) | S |
@@ -491,8 +491,8 @@ script, their links unchanged. Checked on `PlanetTest` with VP2-O2's survey (`vp
 
 ### Next
 
-- **VP1-O6 (new):** decide the atmosphere's shadows on small planets: keep them (stable now apart from the cascades'
-  re-fit), soften them, or turn `bCastShadowsOnAtmosphere` off when the scaled atmosphere is thin.
+- **VP1-O6 done (2026-10-25):** the sun's shadows on the atmosphere are off on planets whose scaled air is over twice the
+  authored density; they were the "pixelated clouds which move with the camera". See "VP1 follow-up: the pixelated clouds".
 - **F2.9 (new, seen with the sky light on):** faint striped shading on far gentle slopes at a low sun
   (`vp1o5_45n_eye_ab.png`, the far valley): to trace (shadow-map self-shadowing at grazing light, or G62's shading).
 - **F2.11 done (2026-10-24):** a packaged game had no terrain textures on smooth worlds (shown in a package); the
@@ -726,6 +726,84 @@ along the move and measure the frame-to-frame difference over the sky pixels (to
   point over the ground under it) every tick. The real-time capture re-renders anyway; check its time slicing while
   moving fast (`r.SkyLight.RealTimeReflectionCapture.TimeSlice`). Small.
 
+### VP1 follow-up: the pixelated clouds (VP1-O6, 2026-10-25)
+
+After VP1-O5 the user reported "flickering of a white overlay" in the sky, taken for clouds, then "pixelated clouds which
+move with the camera". Branch `fix/vp1-o6-planet-atmosphere-shadows` in WorldClockPlugin, the docs in VoxelWorlds and the
+parent. All on `PlanetTest` in PIE (DX12, 1280 x 722, TSR), the clock stopped.
+
+**Repro.** At the pole spawn (the sun on the horizon) blurry, blocky dark smudges hang over the horizon among the trees
+and change shape as the camera turns. At 30°N 20°E at 11:30 local, looking straight up from 180 uu over the pawn, large
+jagged dark shapes radiate from the zenith: the shadows of the trees beside the pawn, and the pawn's own
+(`vp1o6_before_after.png`, left).
+
+**Cause: the sun's shadows on the atmosphere (F1.7), not the clouds.** With `bCastShadowsOnAtmosphere` the engine samples
+the sun's cascades along each ray of the sky view LUT (`SAMPLE_OPAQUE_SHADOW`, `SkyAtmosphereRendering.cpp:1805`) and of
+the aerial perspective volume (`:1851`). The sky view LUT is 192 x 104 texels over the whole sky, in a frame turned with
+the camera's heading (`SkyViewLutReferential`). Each ray's sample count goes from `r.SkyAtmosphere.FastSkyLUT.SampleCountMin`
+(4) toward 32 as its length approaches `r.SkyAtmosphere.FastSkyLUT.DistanceToSampleCountMax` (150 km), so a ray through a
+0.26 km atmosphere takes about 4, squared toward the camera. The scaled air near the ground is 231 times as dense as the
+authored (1 / K), so the first ~200 m, the cascades' reach, holds a large share of the sky's light. A tree's shadow there
+darkens the sky strongly, one shadow sample stands for tens of metres of the densest air, and the result is drawn at the
+LUT's resolution. Turning the camera turns the LUT's texels over the shadows, so the patches move and change with it.
+Where the sun is low the Mie glow toward it is bright, and patches flipping in it read as a white overlay flickering.
+
+**One switch at a time** (the first frames at the pole):
+
+| Switch | The patches |
+|--------|-------------|
+| `r.SkyAtmosphere.SampleLightShadowmap 0` | Gone: a smooth sky |
+| `showflag.Cloud 0` | Stay; the clouds change the frame by under 0.4 luma here and overhead at 30°N, so they are still not visible on `PlanetTest` |
+| `r.SkyAtmosphere.AerialPerspectiveLUT.FastApplyOnOpaque 0` | Stay |
+| `wc.Planet.SkyLightAtViewer 0` | Stay |
+| `showflag.Atmosphere 0` | No sky at all |
+| The sampling distances scaled by K (`r.SkyAtmosphere.FastSkyLUT.DistanceToSampleCountMax` and `r.SkyAtmosphere.DistanceToSampleCountMax` 0.65 km) | 32 samples a ray: thinner, streaky shafts, still there |
+| That and a 4x LUT (`FastSkyLUT.Width` 768, `Height` 416) | Finer streaks, the cascades' steps still visible |
+| `r.SkyAtmosphere.FastSkyLUT 0` (the sky ray marched per pixel) | The sky renders black at the planet's ground (not traced further) |
+
+Short of drawing no shadows in the air, nothing removes the patches: an exact integral would still show the trees' shadow
+volumes as dark shapes in the sky, because the near air is so dense. The engine has no strength setting for opaque
+shadows on the atmosphere, only for cloud shadows.
+
+**Fix (the user's choice, 2026-10-25: off by default).** On a planet `ADayNightController::ApplyPlanetAtmosphereShadows`
+runs every tick after the sky is scaled. It keeps the sun's own `bCastShadowsOnAtmosphere` (read the first time) while the
+scaled air is at most `PlanetAtmosphereShadowMaxDensity` (2) times as dense as the authored, and turns it off while the air
+is denser (`bLimitPlanetAtmosphereShadows`, `ShouldShadowPlanetAtmosphere`). That means off on `PlanetTest` (231 times)
+and `Review_Planet_M` (6.2), kept on `Review_Planet_L` (1.8) and Earth-sized planets. The light has no setter, so the flag
+is set directly and the light's render state dirtied. `wc.Planet.AtmosphereShadows` (1; 0 = the light's own setting, as
+before). A side effect in the engine: the last cascade's bounds stretch to the camera only while a light casts shadows on
+the atmosphere or clouds (`DirectionalLightComponent.cpp:1003`), so the last cascade is fitted as without them; no change
+on the ground was measured.
+
+**Measured.** Sky A/Bs with the sky masked from a pass with `showflag.Atmosphere 0` (the sky renders black, eroded 8 px).
+"Blotch" is the mean absolute residual of the sky after a smooth fit (a degree-4 polynomial in x, y), where a clear sky
+scores near 0. "Change" is the mean frame-to-frame difference over the sky along the sweep. Both in luma of 255.
+
+| View (sweep) | Blotch, before → after | Change, before → after |
+|--------------|------------------------|------------------------|
+| 30°N 20°E 11:30, straight up (6 x 2° turns) | 4.42 → 0.76 | 1.14 → 0.43 |
+| Pole, eye level down-sun, 8° up (6-8 x 1° turns; two spawns) | 1.03 → 0.68; 0.44 → 0.32 | 0.58 → 0.42; 0.35 → 0.34 |
+| Pole, walking toward the sun (7 x 150 uu) | 0.77 → 0.46 | 0.54 → 0.53 |
+| 30°N 20°E 11:30, eye level toward the sun, 20° up | 0.48 → 0.48 | 0.41 → 0.41 |
+
+A repeat of the "before" pass differs from the first by 0.25-0.46 luma against 9.1 between before and after (straight up
+at 30°N). With the high sun the horizon has no shadowed air in view, so nothing changes there. The ground band of the
+same frames differs by 0.6 luma (p99 4) at eye level, with the trees swaying between passes; in the walk the larger
+differences below the horizon were patches of sky between the trunks, the ground itself the same. The options above at 30°N straight up:
+the K-scaled distances 2.29, with the 4x LUT 2.45. GPU (`ProfileGPU`, two frames each, straight up): `SkyViewLut`
+0.013 → 0.005-0.007 ms, `CameraVolumeLut` 0.036-0.039 → 0.021-0.027 ms.
+
+Tests: `WorldClock.Planet.Sky` (the light off on the small planet's sky, back with the cvar at 0, off again at 1, kept
+under a limit above the air's density, untouched on a plane) and `WorldClock.Planet.SkyScale` (the threshold: off for
+`PlanetTest` and M, kept for L, an Earth-like planet and the authored sky); `WorldClock.*` 7/7 in the editor.
+
+Tooling (in the worktree's `Saved/ClaudeScripts/`): `vp_sky_metrics.py` (`msky` masked blockiness, blotch and change;
+`mdiff` a switch's A/B over the masked sky), `sky_ab.sh` (a turn or walk sweep in the pawn's frame: a mask pass, then a
+pass per setting), `vp_sun_camera.py` (the survey pose, as in milestone 1).
+
+Not done: M and L not looked at on screen (the threshold puts M with the small planet); the clouds are still invisible on
+`PlanetTest` (D-VP1 open).
+
 ## VP2 Terrain materials are noisy
 
 ### Findings
@@ -849,7 +927,7 @@ temporal noise into a still pattern) and a burst along a slow pan with TSR for T
 
 1. **Milestone 1, causes and the two small fixes** (done 2026-10-24: "Milestone 1 results"). VP3-O1 (shadow cull
    volume) and VP2-O1 (gradient sampling), each behind a cvar with its A/B. The VP1 A/B session (steps 1-6) to find
-   the flicker; it pointed at F1.7 and F1.4, not the clouds. VP1-O5 and VP2-O6 followed the same day; VP1-O6 is open.
+   the flicker; it pointed at F1.7 and F1.4, not the clouds. VP1-O5 and VP2-O6 followed the same day; VP1-O6 on 2026-10-25.
    Then the user looks at the result in PIE.
 2. **Milestone 2, the terrain's look.** VP2-O2 to O4 in the order the user's review sets, and VP2-O5 if the textures
    still disappoint.
