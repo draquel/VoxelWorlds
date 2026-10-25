@@ -92,18 +92,18 @@ FVector2D UVoxelMaterialAtlas::GetAtlasTileUVScale() const
 
 int32 UVoxelMaterialAtlas::GetArrayIndex(uint8 MaterialID) const
 {
-	// For texture arrays, the index typically matches the MaterialID
-	// unless we have a sparse configuration
-	const FVoxelMaterialTextureConfig* Config = GetMaterialConfig(MaterialID);
-
-	if (Config)
+	if (GetMaterialConfig(MaterialID))
 	{
-		// Config exists - MaterialID is the array index
-		return MaterialID;
+		return GetArraySlice(AlbedoArraySlices, MaterialID);
 	}
 
 	// No config found
 	return -1;
+}
+
+uint8 UVoxelMaterialAtlas::GetArraySlice(const TArray<uint8>& Slices, uint8 MaterialID)
+{
+	return Slices.IsValidIndex(MaterialID) ? Slices[MaterialID] : MaterialID;
 }
 
 float UVoxelMaterialAtlas::GetTriplanarScale(uint8 MaterialID) const
@@ -206,9 +206,10 @@ FVoxelAtlasTile UVoxelMaterialAtlas::GetTileForFace(uint8 MaterialID, EVoxelFace
 
 void UVoxelMaterialAtlas::BuildMaterialLUT()
 {
-	// LUT dimensions: 256 materials x 3 face types
+	// LUT dimensions: 256 materials x (3 face types + the texture array slices)
 	const int32 LUTWidth = 256;
-	const int32 LUTHeight = 3;
+	const int32 LUTHeight = 4;
+	const int32 SliceRow = 3;
 
 	// Create or recreate the LUT texture
 	if (!MaterialLUT || MaterialLUT->GetSizeX() != LUTWidth || MaterialLUT->GetSizeY() != LUTHeight)
@@ -282,6 +283,16 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 		}
 	}
 
+	// The slice row: each material's slice in the texture arrays (smooth terrain's triplanar functions), BGRA
+	for (int32 MaterialID = 0; MaterialID < 256; ++MaterialID)
+	{
+		const int32 PixelIndex = (SliceRow * LUTWidth + MaterialID) * 4;
+		PixelData[PixelIndex + 0] = GetArraySlice(RoughnessArraySlices, static_cast<uint8>(MaterialID)); // B
+		PixelData[PixelIndex + 1] = GetArraySlice(NormalArraySlices, static_cast<uint8>(MaterialID));    // G
+		PixelData[PixelIndex + 2] = GetArraySlice(AlbedoArraySlices, static_cast<uint8>(MaterialID));    // R
+		PixelData[PixelIndex + 3] = 0;
+	}
+
 	// Unlock and update
 	Mip.BulkData.Unlock();
 	MaterialLUT->UpdateResource();
@@ -295,27 +306,29 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 #if WITH_EDITOR
 bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	TObjectPtr<UTexture2DArray>& OutArray,
+	TArray<uint8>& OutSlices,
 	TFunctionRef<TSoftObjectPtr<UTexture2D>(const FVoxelMaterialTextureConfig&)> TextureGetter,
 	FColor PlaceholderColor,
 	const FString& ArrayName)
 {
+	OutSlices.Reset();
 	if (MaterialConfigs.Num() == 0)
 	{
 		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): No material configs defined"), *ArrayName);
 		return false;
 	}
 
-	// Find maximum MaterialID to determine array size
+	// One slot per MaterialID up to the highest configured, each with its config's texture or none
 	uint8 MaxMaterialID = 0;
 	for (const FVoxelMaterialTextureConfig& Config : MaterialConfigs)
 	{
 		MaxMaterialID = FMath::Max(MaxMaterialID, Config.MaterialID);
 	}
-	const int32 NumSlices = MaxMaterialID + 1;
+	const int32 NumSlots = MaxMaterialID + 1;
 
 	// Collect source textures (load soft pointers); a slot without one stays null
 	TArray<UTexture2D*> SourceTextures;
-	SourceTextures.SetNumZeroed(NumSlices);
+	SourceTextures.SetNumZeroed(NumSlots);
 
 	int32 LoadedCount = 0;
 	for (const FVoxelMaterialTextureConfig& Config : MaterialConfigs)
@@ -377,8 +390,11 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	// normal arrays, held for the editor session, 24 s of its first PIE and a texture build estimated at tens of GB,
 	// then 800 MB of GPU memory. Every slice is stored at
 	// TextureArraySize in BGRA8, converted from its own texture's gamma into the array's (sRGB for albedo, linear for
-	// normals and roughness), so the shader samples the same values; each distinct texture is decoded and resized once
-	// (the demo atlas repeats one texture in 14 of its 22 slots).
+	// normals and roughness), so the shader samples the same values.
+	//
+	// One slice per distinct texture, in MaterialID order, and each material's slice in OutSlices (the material LUT's
+	// slice row): with a slice per MaterialID, the 14 of the demo atlas's 22 materials without an albedo held copies of
+	// the first slice (19 of 22 without a roughness map), stored on disk (they do not compress away) and on the GPU.
 	const double StartSeconds = FPlatformTime::Seconds();
 	const int32 SliceSize = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(TextureArraySize, 64, 4096))));
 	const bool bNormalArray = (ArrayName == TEXT("Normal"));
@@ -387,78 +403,77 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	const int64 SliceBytes = int64(SliceSize) * SliceSize * sizeof(FColor);
 
 	TArray64<uint8> ArrayData;
-	ArrayData.SetNumUninitialized(SliceBytes * NumSlices);
-	TArray<bool> SliceFilled;
-	SliceFilled.SetNumZeroed(NumSlices);
+	int32 NumSlices = 0;
 
 	// Terrain textures tile: the resize filters across the wrapped edges
 	const FImageCore::EResizeImageFilter ResizeFilter = FImageCore::EResizeImageFilter::Default
 		| FImageCore::EResizeImageFilter::Flag_WrapX | FImageCore::EResizeImageFilter::Flag_WrapY;
 
-	TMap<UTexture2D*, int32> BuiltSlice; // texture -> the slice it was built into (INDEX_NONE: unreadable)
-	int32 FirstFilledSlice = INDEX_NONE;
-	for (int32 SliceIndex = 0; SliceIndex < NumSlices; ++SliceIndex)
+	TMap<UTexture2D*, int32> BuiltSlice; // texture -> its slice (INDEX_NONE: unreadable)
+	TArray<int32> SlotSlices;            // each slot's slice (INDEX_NONE: no readable texture)
+	SlotSlices.Init(INDEX_NONE, NumSlots);
+	for (int32 Slot = 0; Slot < NumSlots; ++Slot)
 	{
-		UTexture2D* Texture = SourceTextures[SliceIndex];
+		UTexture2D* Texture = SourceTextures[Slot];
 		if (!Texture)
 		{
 			continue;
 		}
-		uint8* SliceData = ArrayData.GetData() + SliceBytes * SliceIndex;
-
 		if (const int32* Built = BuiltSlice.Find(Texture))
 		{
-			if (*Built != INDEX_NONE)
-			{
-				FMemory::Memcpy(SliceData, ArrayData.GetData() + SliceBytes * *Built, SliceBytes);
-				SliceFilled[SliceIndex] = true;
-			}
+			SlotSlices[Slot] = *Built;
 			continue;
 		}
 
 		FImage SourceImage;
 		if (!Texture->Source.IsValid() || !Texture->Source.GetMipImage(SourceImage, 0))
 		{
-			UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): %s has no readable source data; its slices take the placeholder"),
+			UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): %s has no readable source data; its materials take the first slice"),
 				*ArrayName, *Texture->GetName());
 			BuiltSlice.Add(Texture, INDEX_NONE);
 			continue;
 		}
 
-		FImageCore::ResizeImage(SourceImage, FImageView(SliceData, SliceSize, SliceSize, 1, ERawImageFormat::BGRA8, ArrayGamma), ResizeFilter);
+		const int32 SliceIndex = NumSlices++;
+		ArrayData.AddUninitialized(SliceBytes);
+		FImageCore::ResizeImage(SourceImage, FImageView(ArrayData.GetData() + SliceBytes * SliceIndex, SliceSize, SliceSize, 1, ERawImageFormat::BGRA8, ArrayGamma), ResizeFilter);
 		BuiltSlice.Add(Texture, SliceIndex);
-		SliceFilled[SliceIndex] = true;
-		if (FirstFilledSlice == INDEX_NONE)
-		{
-			FirstFilledSlice = SliceIndex;
-		}
+		SlotSlices[Slot] = SliceIndex;
 
-		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("  Slice[%d]: %s source %dx%d %s %s -> %dx%d"),
-			SliceIndex, *Texture->GetName(), SourceImage.SizeX, SourceImage.SizeY,
+		UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("  Slice[%d] (from MaterialID %d): %s source %dx%d %s %s -> %dx%d"),
+			SliceIndex, Slot, *Texture->GetName(), SourceImage.SizeX, SourceImage.SizeY,
 			ERawImageFormat::GetName(SourceImage.Format), SourceImage.GammaSpace == EGammaSpace::Linear ? TEXT("linear") : TEXT("sRGB"),
 			SliceSize, SliceSize);
 	}
 
-	// Slots without a texture take the first built slice, as before; with no readable texture at all, PlaceholderColor
-	if (FirstFilledSlice == INDEX_NONE)
+	// With no readable texture at all, the array's one slice is PlaceholderColor
+	if (NumSlices == 0)
 	{
-		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): no texture had readable source data; every slice is the placeholder colour"), *ArrayName);
+		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("BuildSingleTextureArray(%s): no texture had readable source data; its one slice is the placeholder colour"), *ArrayName);
+		ArrayData.AddUninitialized(SliceBytes);
 		FColor* Pixels = reinterpret_cast<FColor*>(ArrayData.GetData());
 		for (int64 PixelIndex = 0; PixelIndex < int64(SliceSize) * SliceSize; ++PixelIndex)
 		{
 			Pixels[PixelIndex] = PlaceholderColor;
 		}
-		SliceFilled[0] = true;
-		FirstFilledSlice = 0;
+		NumSlices = 1;
 	}
-	int32 PlaceholderCount = 0;
-	for (int32 SliceIndex = 0; SliceIndex < NumSlices; ++SliceIndex)
+
+	// Each MaterialID's slice. Slots without a readable texture take the first slice, which a slice per slot copied into
+	// them; a MaterialID above the highest configured the highest's, where the sampler clamped it then
+	int32 SlotsOnFirstSlice = 0;
+	for (int32& Slice : SlotSlices)
 	{
-		if (!SliceFilled[SliceIndex])
+		if (Slice == INDEX_NONE)
 		{
-			FMemory::Memcpy(ArrayData.GetData() + SliceBytes * SliceIndex, ArrayData.GetData() + SliceBytes * FirstFilledSlice, SliceBytes);
-			++PlaceholderCount;
+			Slice = 0;
+			++SlotsOnFirstSlice;
 		}
+	}
+	OutSlices.SetNumUninitialized(256);
+	for (int32 MaterialID = 0; MaterialID < 256; ++MaterialID)
+	{
+		OutSlices[MaterialID] = static_cast<uint8>(SlotSlices[FMath::Min(MaterialID, NumSlots - 1)]);
 	}
 
 	// Settings pinned per array, not taken from whichever texture lands in slice 0: BC1/BC3 colour, BC5 normals
@@ -491,8 +506,8 @@ bool UVoxelMaterialAtlas::BuildSingleTextureArray(
 	OutArray = Array;
 
 	UE_LOG(LogVoxelMaterialAtlas, Log,
-		TEXT("BuildSingleTextureArray(%s): Built %d slices at %dx%d BGRA8 %s (%d distinct textures, %d from configs, %d placeholders) in %.2f s, compression %d, MipGen %d -> %s"),
-		*ArrayName, NumSlices, SliceSize, SliceSize, bSRGB ? TEXT("sRGB") : TEXT("linear"), BuiltSlice.Num(), LoadedCount, PlaceholderCount,
+		TEXT("BuildSingleTextureArray(%s): Built %d slices at %dx%d BGRA8 %s for %d MaterialIDs (%d distinct textures, %d from configs, %d without a readable texture on the first slice) in %.2f s, compression %d, MipGen %d -> %s"),
+		*ArrayName, NumSlices, SliceSize, SliceSize, bSRGB ? TEXT("sRGB") : TEXT("linear"), NumSlots, BuiltSlice.Num(), LoadedCount, SlotsOnFirstSlice,
 		FPlatformTime::Seconds() - StartSeconds, static_cast<int32>(Array->CompressionSettings.GetValue()), static_cast<int32>(Array->MipGenSettings.GetValue()),
 		*Array->GetPathName());
 
@@ -545,8 +560,9 @@ UTexture2DArray* UVoxelMaterialAtlas::AcquireTextureArrayObject(const FString& A
 
 UVoxelMaterialAtlas::FTextureArrayInputs UVoxelMaterialAtlas::ComputeTextureArrayInputs(bool bAllowLoad) const
 {
-	// Bump when BuildSingleTextureArray's output changes for the same inputs (its formats, filters, placeholders)
-	static constexpr int32 TextureArrayBuildVersion = 1;
+	// Bump when BuildSingleTextureArray's output changes for the same inputs (its formats, filters, placeholders).
+	// 2: one slice per distinct texture, each material's slice in the slice tables (F2.12)
+	static constexpr int32 TextureArrayBuildVersion = 2;
 
 	IAssetRegistry* AssetRegistry = IAssetRegistry::Get();
 	FTextureArrayInputs Inputs;
@@ -713,6 +729,7 @@ void UVoxelMaterialAtlas::BuildTextureArrays()
 	// Build Albedo array
 	bool bAlbedoSuccess = BuildSingleTextureArray(
 		AlbedoArray,
+		AlbedoArraySlices,
 		[](const FVoxelMaterialTextureConfig& Config) { return Config.AlbedoTexture; },
 		FColor(128, 128, 128, 255), // Gray placeholder
 		TEXT("Albedo")
@@ -721,6 +738,7 @@ void UVoxelMaterialAtlas::BuildTextureArrays()
 	// Build Normal array
 	bool bNormalSuccess = BuildSingleTextureArray(
 		NormalArray,
+		NormalArraySlices,
 		[](const FVoxelMaterialTextureConfig& Config) { return Config.NormalTexture; },
 		FColor(128, 128, 255, 255), // Flat normal (pointing up in tangent space)
 		TEXT("Normal")
@@ -729,6 +747,7 @@ void UVoxelMaterialAtlas::BuildTextureArrays()
 	// Build Roughness array
 	bool bRoughnessSuccess = BuildSingleTextureArray(
 		RoughnessArray,
+		RoughnessArraySlices,
 		[](const FVoxelMaterialTextureConfig& Config) { return Config.RoughnessTexture; },
 		FColor(128, 128, 128, 255), // 0.5 roughness
 		TEXT("Roughness")
@@ -748,6 +767,14 @@ void UVoxelMaterialAtlas::BuildTextureArrays()
 	else
 	{
 		UE_LOG(LogVoxelMaterialAtlas, Warning, TEXT("No texture arrays were built - check that MaterialConfigs have source textures assigned"));
+	}
+
+	// The slice tables changed with the arrays: the material LUT carries them to the shader. A LUT that exists is bound
+	// to materials already, and is rebuilt in place so they read the new slices with the new arrays.
+	bLUTDirty = true;
+	if (MaterialLUT)
+	{
+		BuildMaterialLUT();
 	}
 
 	// Refresh the 2D map colors from the same source textures we just packed.
