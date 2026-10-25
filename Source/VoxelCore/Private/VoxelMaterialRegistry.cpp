@@ -152,6 +152,19 @@ void FVoxelMaterialRegistry::EnsureInitialized()
 		Materials.Add(LeavesDef);
 	}
 
+	// Hardness (world modes review WM-C14, D31): seconds to break a block bare-handed. Loose ground goes in about half a
+	// second, stone in one and a half, ores take longer the rarer they are; the reserved slots keep DefaultHardness.
+	const TPair<uint8, float> Hardness[] = {
+		{ EVoxelMaterial::Grass, 0.6f }, { EVoxelMaterial::Dirt, 0.5f }, { EVoxelMaterial::Stone, 1.5f },
+		{ EVoxelMaterial::Sand, 0.5f }, { EVoxelMaterial::Snow, 0.3f }, { EVoxelMaterial::Sandstone, 1.0f },
+		{ EVoxelMaterial::FrozenDirt, 0.8f }, { EVoxelMaterial::Coal, 2.0f }, { EVoxelMaterial::Iron, 2.5f },
+		{ EVoxelMaterial::Gold, 2.5f }, { EVoxelMaterial::Copper, 2.2f }, { EVoxelMaterial::Diamond, 4.0f },
+		{ EVoxelMaterial::Wood, 1.2f }, { EVoxelMaterial::Leaves, 0.2f } };
+	for (const TPair<uint8, float>& Entry : Hardness)
+	{
+		Materials[Entry.Key].Hardness = Entry.Value;
+	}
+
 	bInitialized = true;
 }
 
@@ -282,6 +295,18 @@ bool FVoxelMaterialRegistry::IsNonOccluding(uint8 MaterialID)
 	}
 
 	return false;
+}
+
+float FVoxelMaterialRegistry::GetHardness(uint8 MaterialID)
+{
+	EnsureInitialized();
+
+	if (MaterialID < Materials.Num())
+	{
+		return Materials[MaterialID].Hardness;
+	}
+
+	return DefaultHardness;
 }
 
 TSet<uint8> FVoxelMaterialRegistry::GetMaskedMaterialIDs()

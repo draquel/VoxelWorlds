@@ -61,6 +61,15 @@ struct VOXELCORE_API FVoxelMaterialDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material")
 	bool bNonOccluding = false;
 
+	/**
+	 * How hard a block of this material is to break: seconds to break it bare-handed (world modes review WM-C14, D31).
+	 * Gameplay divides it by the breaker's mining speed (a cubic world's timed breaking, VoxelCharacterPlugin). A property
+	 * of the material, set by the registry's defaults; the material atlas does not override it (rendering data, which a
+	 * dedicated server need not load).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material", meta = (ClampMin = "0.0", Units = "s"))
+	float Hardness = 1.0f;
+
 	FVoxelMaterialDefinition() = default;
 
 	FVoxelMaterialDefinition(uint8 InID, const FString& InName, const FColor& InColor)

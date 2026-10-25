@@ -523,7 +523,33 @@ uint8 GetMaterialByHeight(float Elevation)
 
 ---
 
+## Hardness (world modes review §22, decision D31)
+
+`FVoxelMaterialDefinition::Hardness` is how hard a block of the material is to break: the seconds it takes bare-handed.
+It is a property of the material, set by the registry's defaults (`FVoxelMaterialRegistry::EnsureInitialized`), read with
+`FVoxelMaterialRegistry::GetHardness` (`DefaultHardness`, 1 s, for an ID the registry does not know). The material atlas
+does not override it: the atlas is rendering data, which a dedicated server need not load, and the server decides a break.
+
+| Material | Hardness (s) | Material | Hardness (s) |
+|----------|--------------|----------|--------------|
+| Leaves | 0.2 | Wood | 1.2 |
+| Snow | 0.3 | Stone | 1.5 |
+| Dirt, Sand | 0.5 | Coal | 2.0 |
+| Grass | 0.6 | Copper | 2.2 |
+| Frozen Dirt | 0.8 | Iron, Gold | 2.5 |
+| Sandstone | 1.0 | Diamond | 4.0 |
+
+The reserved slots, and materials an atlas adds past the registry's list, keep the default. Gameplay decides what the
+number means: in VoxelCharacterPlugin a cubic world's block breaks after `Hardness / MiningSpeed` while the primary action
+is held (`UVCBlockInteractionComponent::GetBreakSeconds`; bare hands 1, the stone pickaxe 1.5, the iron pickaxe 2;
+`vc.Dig.BreakTimes`), decided on the server; smooth worlds dig at once (D32).
+
+---
+
 ## Example Material Definitions
+
+*(A design sketch from before the registry; its fields do not all exist. The real definition is `VoxelMaterialDefinition.h`,
+and its `Hardness` is the section above.)*
 
 ### Grass Material
 

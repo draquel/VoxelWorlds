@@ -132,6 +132,17 @@ public:
 	void SetEditValidator(const class IVoxelEditValidator* Validator) { EditValidator = Validator; }
 
 	/**
+	 * Would the installed edit validator let an edit from Source change the voxel at WorldPos? Asked before an edit that
+	 * takes time to happen (a cubic block's timed break, world modes review WM-C15), so a protected voxel is refused at the
+	 * start rather than once the time has passed.
+	 *
+	 * @param WorldPos World-space position of the voxel
+	 * @param Source   Who would edit it
+	 * @return True when no validator is installed or it allows the edit
+	 */
+	bool CanEditAt(const FVector& WorldPos, EEditSource Source) const;
+
+	/**
 	 * Voxels skipped by the validator during the most recent ApplyEdit/ApplyBrushEdit call.
 	 * Zero when no validator is installed. Lets callers/UI message "protected area" later.
 	 */

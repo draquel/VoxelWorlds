@@ -150,6 +150,11 @@ streams back in is extracted as a first pass (world modes review G30: a short-ci
 cached and turned the reload into an append). `voxel.Scatter.Digest`'s `caches:` line shows a leftover as
 `scatterOnly` > 0 or an `instanceMismatch`.
 
+A material's hardness (`FVoxelMaterialDefinition::Hardness`, seconds to break a block bare-handed; world modes review
+§22, D31) is the registry's (`FVoxelMaterialRegistry::GetHardness`), never the atlas's: the server decides a cubic world's
+timed break (VoxelCharacterPlugin) and need not load rendering data. An edit that takes time asks
+`UVoxelEditManager::CanEditAt` when it starts, so a protected voxel is refused before the wait.
+
 ## Core Data Structures
 
 ### FVoxelData (4 bytes per voxel)

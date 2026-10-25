@@ -209,6 +209,11 @@ void UVoxelEditManager::CancelEditOperation()
 	CurrentEditRadius = 0.0f;
 }
 
+bool UVoxelEditManager::CanEditAt(const FVector& WorldPos, EEditSource Source) const
+{
+	return !EditValidator || EditValidator->CanApplyEdit(WorldPos, Source);
+}
+
 bool UVoxelEditManager::ApplyEdit(const FVector& WorldPos, const FVoxelData& NewData, EEditMode Mode)
 {
 	if (!bIsInitialized || !Configuration)

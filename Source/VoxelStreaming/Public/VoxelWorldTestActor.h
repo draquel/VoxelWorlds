@@ -196,7 +196,8 @@ public:
 	 * Left click = Dig, Right click = Build, Mouse wheel = Adjust radius.
 	 * Requires being in PIE with a player controller.
 	 * Runtime switch: console variable voxel.Edit.PlayerInputs (0 suppresses the edits, brush sphere and
-	 * crosshair without touching this flag); the character's edit-mode toggle drives it.
+	 * crosshair without touching this flag; 2 keeps only the keys, for a cubic world where the player character
+	 * edits the blocks itself); the character's edit-mode toggle drives it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Edit")
 	bool bEnableEditInputs = false;
@@ -370,7 +371,7 @@ protected:
 	void UpdateWaterPlanePosition();
 
 	/** Process edit inputs (called from Tick when bEnableEditInputs is true) */
-	void ProcessEditInputs();
+	void ProcessEditInputs(bool bMouseEdits = true);
 
 	/**
 	 * Perform a line trace from the camera to find terrain hit location.

@@ -28,12 +28,15 @@
  * Runtime switch for the mouse-driven test editing (LMB dig / RMB build, brush sphere, crosshair).
  * bEnableEditInputs says the actor *offers* editing; this says whether it is *active right now*.
  * Gameplay code drives it (AVCCharacterBase mirrors its edit-mode toggle here) so attack / interact
- * clicks never reach the test brush while edit mode is off.
+ * clicks never reach the test brush while edit mode is off. 2 keeps the keys but leaves the mouse to the
+ * player character: in a cubic world it targets, previews and breaks blocks itself, with a break time, so
+ * this actor's own press-to-remove and target boxes would duplicate it (world modes review WM-C16).
  */
 static TAutoConsoleVariable<int32> CVarVoxelEditPlayerInputs(
 	TEXT("voxel.Edit.PlayerInputs"),
 	1,
-	TEXT("1 = AVoxelWorldTestActor processes mouse edits and draws its brush/crosshair (when bEnableEditInputs is set); 0 = suppressed at runtime."),
+	TEXT("1 = AVoxelWorldTestActor processes mouse edits and draws its brush/crosshair (when bEnableEditInputs is set); 0 = suppressed at runtime; ")
+	TEXT("2 = keys only (undo, redo, save, load): the player character edits the blocks and draws the target itself (a cubic world, world modes review WM-C16)."),
 	ECVF_Default);
 
 AVoxelWorldTestActor::AVoxelWorldTestActor()
@@ -122,17 +125,19 @@ void AVoxelWorldTestActor::Tick(float DeltaSeconds)
 	}
 
 	// Process edit inputs if enabled and not suppressed at runtime (voxel.Edit.PlayerInputs)
-	const bool bPlayerEditInputsActive = CVarVoxelEditPlayerInputs.GetValueOnGameThread() != 0;
+	const int32 PlayerEditInputs = CVarVoxelEditPlayerInputs.GetValueOnGameThread();
+	const bool bPlayerEditInputsActive = PlayerEditInputs != 0;
+	const bool bMouseEditsActive = PlayerEditInputs == 1;
 	const double EditT0 = FPlatformTime::Seconds();
 	if (bEnableEditInputs && bPlayerEditInputsActive)
 	{
-		ProcessEditInputs();
+		ProcessEditInputs(bMouseEditsActive);
 	}
 	const double EditSec = FPlatformTime::Seconds() - EditT0;
 
 	// Draw edit crosshair + brush sphere (can be enabled independently of edit inputs, but obeys the same runtime switch)
 	const double CrossT0 = FPlatformTime::Seconds();
-	if (bShowEditCrosshair && bPlayerEditInputsActive)
+	if (bShowEditCrosshair && bMouseEditsActive)
 	{
 		DrawEditCrosshair();
 	}
@@ -1311,7 +1316,7 @@ void AVoxelWorldTestActor::PrintCollisionStats()
 
 // ==================== Edit Input Processing ====================
 
-void AVoxelWorldTestActor::ProcessEditInputs()
+void AVoxelWorldTestActor::ProcessEditInputs(bool bMouseEdits)
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -1331,8 +1336,8 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 	const bool bMiddleMouseDown = PC->IsInputKeyDown(EKeys::MiddleMouseButton);
 
 	// Handle mouse wheel for brush radius adjustment using scroll up/down keys
-	const bool bScrollUp = PC->WasInputKeyJustPressed(EKeys::MouseScrollUp);
-	const bool bScrollDown = PC->WasInputKeyJustPressed(EKeys::MouseScrollDown);
+	const bool bScrollUp = bMouseEdits && PC->WasInputKeyJustPressed(EKeys::MouseScrollUp);
+	const bool bScrollDown = bMouseEdits && PC->WasInputKeyJustPressed(EKeys::MouseScrollDown);
 
 	if (bScrollUp || bScrollDown)
 	{
@@ -1390,10 +1395,11 @@ void AVoxelWorldTestActor::ProcessEditInputs()
 		}
 	}
 
-	// Detect button press (transition from not-pressed to pressed)
-	const bool bLeftMousePressed = bLeftMouseDown && !bWasLeftMouseDown;
-	const bool bRightMousePressed = bRightMouseDown && !bWasRightMouseDown;
-	const bool bMiddleMousePressed = bMiddleMouseDown && !bWasMiddleMouseDown;
+	// Detect button press (transition from not-pressed to pressed); none while the mouse is left to the player
+	// character (voxel.Edit.PlayerInputs 2), whose button states are still tracked so handing it back is no press.
+	const bool bLeftMousePressed = bMouseEdits && bLeftMouseDown && !bWasLeftMouseDown;
+	const bool bRightMousePressed = bMouseEdits && bRightMouseDown && !bWasRightMouseDown;
+	const bool bMiddleMousePressed = bMouseEdits && bMiddleMouseDown && !bWasMiddleMouseDown;
 
 	// Update previous state
 	bWasLeftMouseDown = bLeftMouseDown;
