@@ -82,10 +82,7 @@ namespace
 			return Frustum->IntersectBox(WorldBox.GetCenter() + Translation, WorldBox.GetExtent());
 		}
 	};
-}
 
-namespace
-{
 	/**
 	 * A chunk with this fade state and retained Previous mesh crossfades: both meshes draw, under complementary dither
 	 * masks. Any other combination draws the current mesh alone (an appearance fades it in from nothing).
