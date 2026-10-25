@@ -94,6 +94,39 @@ struct FVoxelChunkFadeState
 };
 
 /**
+ * What FVoxelSceneProxy holds and draws for one chunk interior (diagnostics and tests, world modes review G74; see
+ * FVoxelSceneProxy::GetChunkDrawInfo_RenderThread).
+ */
+struct FVoxelChunkDrawInfo
+{
+	/** Triangles of the current mesh (0 = none), its LOD and visibility */
+	uint32 CurrentTriangles = 0;
+	int32 LODLevel = -1;
+	bool bVisible = false;
+
+	/** The current mesh's vertex factory: tells one upload from the next */
+	const void* VertexFactory = nullptr;
+
+	/** Triangles of the retained Previous mesh (0 = none) */
+	uint32 PreviousTriangles = 0;
+
+	/** A crossfade or appearance state is attached: its alpha, hold and appearance flags */
+	bool bHasFadeState = false;
+	float FadeAlpha = 0.0f;
+	bool bHeld = false;
+	bool bAppear = false;
+
+	/** A frame draws the Previous mesh dithering out under the current one dithering in */
+	bool bCrossfading = false;
+
+	/** A frame draws the current mesh alone, dithering in from nothing */
+	bool bAppearing = false;
+
+	/** A frame draws the current mesh alone with the terrain material (no fade) */
+	bool DrawsCurrentOnly() const { return CurrentTriangles > 0 && bVisible && !bCrossfading && !bAppearing; }
+};
+
+/**
  * Scene proxy for voxel world rendering.
  *
  * Uses FLocalVertexFactory (Epic's proven implementation) for reliable rendering.
@@ -389,6 +422,28 @@ public:
 
 	/** Get total GPU memory usage */
 	SIZE_T GetGPUMemoryUsage() const;
+
+	/**
+	 * How the proxy draws one chunk interior now (diagnostics and tests, world modes review G74): its current mesh,
+	 * the retained Previous mesh and fade state, and whether a frame crossfades them, fades the current one in or draws
+	 * the current one alone with the terrain material (the test GetDynamicMeshElements makes). Render thread.
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param OutInfo    Receives what the proxy holds for it
+	 * @return True if the proxy holds a current mesh for the chunk
+	 */
+	bool GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const;
+
+	/**
+	 * The crossfade state the proxy holds, for diagnostics (voxel.MeshFade.Stats): fade states and retained Previous
+	 * meshes of chunk interiors and seam buckets, up to MaxEntries of the chunk ones, and for a focus chunk what the
+	 * proxy holds (GetChunkDrawInfo_RenderThread) and what the last frame drew of it. Render thread.
+	 *
+	 * @param MaxEntries Chunk fade states to list
+	 * @param FocusChunk A chunk to report and to watch in GetDynamicMeshElements from now on, or null to stop watching
+	 * @return One line per item
+	 */
+	FString GetFadeDebugString_RenderThread(int32 MaxEntries, const FIntVector* FocusChunk) const;
 
 private:
 	// ==================== Terrain Chunk Data ====================

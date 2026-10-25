@@ -10,6 +10,7 @@
 #include "VoxelWorldComponent.generated.h"
 
 class FVoxelSceneProxy;
+struct FVoxelChunkDrawInfo;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UMaterialParameterCollection;
@@ -316,6 +317,27 @@ public:
 		OutStarts = FadeStartCounts[bSeams ? 1 : 0];
 		OutMidFadeRestarts = FadeMidRestartCounts[bSeams ? 1 : 0];
 	}
+
+	/**
+	 * The crossfades this component drives, for diagnostics (voxel.MeshFade.Stats): its tick, the scheduler's fades
+	 * (alpha, held, appearing), the hold requests, and the proxy's fade state (waits for the render thread).
+	 *
+	 * @param MaxEntries Fades to list one by one
+	 * @param FocusPoint A world point whose chunk's meshes (here and in the proxy) to report and whose drawing the proxy
+	 *                   watches from now on, or null to stop watching
+	 * @return One line per item
+	 */
+	FString GetFadeDebugString(int32 MaxEntries, const FVector* FocusPoint = nullptr) const;
+
+	/**
+	 * How the scene proxy draws one chunk interior now (diagnostics and tests, world modes review G74). Waits for the
+	 * render thread (FlushRenderingCommands): not for per-frame use.
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param OutInfo    Receives what the proxy holds for it (empty when there is no proxy)
+	 * @return True if the proxy holds a current mesh for the chunk
+	 */
+	bool GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const;
 
 	// ==================== Configuration ====================
 
