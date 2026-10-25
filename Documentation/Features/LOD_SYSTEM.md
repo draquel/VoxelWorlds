@@ -715,7 +715,12 @@ primitives, and the voxel window keeps its size.
   and stays whole under 0.7 of it; a patch wholly under the camera's horizon (the lowest terrain's sphere, plus the
   angle its top stays in view) is neither drawn nor split. A patch keeps drawing until its subtree covers its area, so
   the planet never shows a hole while it refines; builds run on the thread pool (`voxel.World.FarFieldMaxBuilds`, 6 in
-  flight), nearest first.
+  flight), nearest first. A patch whose subtree waits for a build stands in for it, hiding everything under it, so a
+  wait where nothing would show must not reach one (visual polish VP4, `voxel.World.FarFieldAvoidStandIns`, 1): a band
+  patch the voxel chunks cover covers its area without a mesh, a patch culled in its last visit (coming up over the
+  horizon) waits for its build drawing nothing, and a chunk re-meshing counts as drawn. Before, the nearest built
+  ancestor stood in, often a face's root (the others released), and its coarse surface flashed over the voxel terrain
+  and the horizon for a frame or more ([VISUAL_POLISH_PLAN.md](../VISUAL_POLISH_PLAN.md) "VP4 terrain flicker").
 - **The hole.** Within the window's reach of the viewer's ground point (the unload distance plus a chunk's half
   diagonal, along the ground as the window measures its horizons) patches split down to the band level, one to two
   chunks across (`FVoxelFarFieldSettings::ComputeBandLevel`: 64 a face edge on the 2.5 km planet, 1,024 on a 50 km one,
@@ -727,14 +732,17 @@ primitives, and the voxel window keeps its size.
 - **Residency.** One procedural mesh component per resident patch at the patch's origin (its centre's point on the
   datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and
   builds again when needed (its subtree draws meanwhile), except the roots and band patches near the window's edge,
-  which are built while covered so they show the moment their chunks unload.
+  which are built while covered so they show the moment their chunks unload (a covered one the viewer leaves there
+  builds while it draws nothing, VP4).
 - **The sea**, at scale: where the ocean shell would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
   its ocean shell.
 
 `voxel.World.FarField 0` drops the far field (the ocean shell draws the sea, as before P6.4); `voxel.World.FarFieldStats`,
-`vox.Planet` and the bench's `FarFieldMs`, `FarFieldPatchN`, `FarFieldMB` and `FarFieldBuiltN` report it.
+`vox.Planet` and the bench's `FarFieldMs`, `FarFieldPatchN`, `FarFieldMB`, `FarFieldBuiltN` and `FarFieldStandInN`
+(stand-ins over band patches the chunks cover, VP4) report it; `voxel.World.FarFieldTrace 1` logs every update with
+such a stand-in and why.
 
 ### Orbit and Back: the Voxel Cut-Over (Spherical Planet)
 

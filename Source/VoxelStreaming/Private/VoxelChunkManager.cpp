@@ -172,6 +172,30 @@ static TAutoConsoleVariable<int32> CVarFarFieldMaxBuilds(
 	TEXT("Far-field patch builds in flight on the thread pool at once (default 6)."),
 	ECVF_Default);
 
+// Visual polish VP4: the terrain flicker on planets. A far-field patch that needed a build while nothing showed of it (a
+// band patch the voxel chunks covered, past the prebuild radius or with a chunk under it re-meshing an empty mesh; a patch
+// coming up over the horizon) was stood in for by its nearest built ancestor, often a cube face's root, whose coarse
+// surface replaced the horizon and rose through the voxel terrain for the frame or more the build took.
+static TAutoConsoleVariable<int32> CVarFarFieldAvoidStandIns(
+	TEXT("voxel.World.FarFieldAvoidStandIns"),
+	1,
+	TEXT("Planets (visual polish VP4): no far-field stand-in where nothing would show.\n")
+	TEXT("  1 = a band patch whose chunks are all drawn draws nothing, built or not (one kept built for the window's edge builds\n")
+	TEXT("      meanwhile); a chunk re-meshing counts as drawn as it was; a patch coming up over the horizon waits for its build\n")
+	TEXT("      drawing nothing. No coarse ancestor is drawn over the voxel terrain or the horizon for them (default)\n")
+	TEXT("  0 = as before: each needed a build, and its nearest built ancestor (often a cube face's root) flashed in its place,\n")
+	TEXT("      over everything under it, until the build landed"),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarFieldTrace(
+	TEXT("voxel.World.FarFieldTrace"),
+	0,
+	TEXT("Planets (visual polish VP4): log every far-field update with a stand-in over the voxel window (a coarser patch drawn\n")
+	TEXT("because a patch under it was not ready, over band patches the chunks cover): the frame, the stand-ins and the coarsest's\n")
+	TEXT("level, the band patches not ready (covered by drawn chunks or not) and a chunk not drawn under one, with its state.\n")
+	TEXT("0 = off (default)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarStreamDescentLead(
 	TEXT("voxel.Stream.DescentLead"),
 	3.0f,
@@ -4396,8 +4420,11 @@ bool UVoxelChunkManager::IsChunkDrawnForFarField(const FIntVector& ChunkCoord) c
 		return true;
 	case EChunkState::PendingMeshing:
 	case EChunkState::Meshing:
-		// Re-meshing (an LOD change, an edit): its old mesh is still drawn.
-		return MeshRenderer && MeshRenderer->IsChunkLoaded(ChunkCoord);
+		// Re-meshing (an LOD change, an edit): its old mesh is still drawn. A chunk loaded before is drawn as it was, also
+		// with an empty mesh the renderer holds nothing for (VP4: such a chunk under a band patch uncovered the patch for its
+		// re-mesh, and the patch's ancestor flashed over the terrain).
+		return (CVarFarFieldAvoidStandIns.GetValueOnGameThread() != 0 && LoadedChunkCoords.Contains(ChunkCoord))
+			|| (MeshRenderer && MeshRenderer->IsChunkLoaded(ChunkCoord));
 	default:
 		return false;
 	}
@@ -4469,6 +4496,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	static IConsoleVariable* FadeDuration = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MeshFade.Duration"));
 	View.HideDelay = (FadeDuration ? FMath::Max(0.0f, FadeDuration->GetFloat()) : 0.35f) + 0.1;
 	View.ChunkStateVersion = ChunkStateVersion;
+	View.bAvoidStandIns = CVarFarFieldAvoidStandIns.GetValueOnGameThread() != 0;
 
 	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
 	FVoxelFarFieldChanges Changes;
@@ -4599,7 +4627,28 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	Stats.Components = FarFieldComponents.Num();
 	Stats.MemoryMB = static_cast<float>((FarField->GetMeshMemoryBytes() + EstimateBytes(FarFieldComponentVertices, FarFieldComponentIndices))
 		/ (1024.0 * 1024.0));
+	Stats.StandIns = FarField->GetStandInCount();
+	Stats.StandInMinLevel = FarField->GetStandInMinLevel();
+	Stats.TotalStandIns = FarField->GetTotalStandIns();
+	Stats.StandInUpdates = FarField->GetStandInUpdates();
 	Stats.UpdateMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+
+	// VP4: what stood in over the voxel window this update, and why.
+	if (CVarFarFieldTrace.GetValueOnGameThread() != 0 && Stats.StandIns > 0)
+	{
+		FIntVector Undrawn;
+		FString UndrawnText = TEXT("none");
+		if (FarField->GetUndrawnChunk(Undrawn))
+		{
+			const FVoxelChunkState* State = ChunkStates.Find(Undrawn);
+			UndrawnText = FString::Printf(TEXT("%s state %d, renderer %d, loaded before %d"), *Undrawn.ToString(),
+				State ? static_cast<int32>(State->State) : -1, MeshRenderer && MeshRenderer->IsChunkLoaded(Undrawn) ? 1 : 0,
+				LoadedChunkCoords.Contains(Undrawn) ? 1 : 0);
+		}
+		UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.FarFieldTrace: frame %llu (dumping %d): %d stand-in(s) over the window, coarsest level %d (band %d); band patches not ready: %d covered, %d uncovered; a chunk not drawn under one: %s"),
+			static_cast<uint64>(GFrameCounter), GIsDumpingMovie, Stats.StandIns, Stats.StandInMinLevel, Settings.BandLevel,
+			FarField->GetUnreadyBandCount(true), FarField->GetUnreadyBandCount(false), *UndrawnText);
+	}
 }
 
 FString UVoxelChunkManager::GetFarFieldDebugString() const
@@ -4610,10 +4659,11 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 	}
 	const FVoxelFarFieldStats& Stats = FarFieldStats;
 	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
-	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s"),
+	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d)"),
 		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenBand, Stats.Components, Stats.BuildsPending,
 		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
-		Settings.Sink, Settings.bSea ? TEXT("far field") : TEXT("ocean shell / none"));
+		Settings.Sink, Settings.bSea ? TEXT("far field") : TEXT("ocean shell / none"), Stats.TotalStandIns, Stats.StandInUpdates,
+		CVarFarFieldAvoidStandIns.GetValueOnGameThread());
 }
 
 FString UVoxelChunkManager::GetFarOceanDebugString() const

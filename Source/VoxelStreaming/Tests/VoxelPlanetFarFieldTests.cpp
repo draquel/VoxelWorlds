@@ -564,6 +564,171 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 }
 
 /**
+ * Visual polish VP4: no coarse stand-in over the voxel window while the viewer walks. With the window loaded around a
+ * viewer at 45 degrees on the small planet, settled past the release delay (ancestors hidden under their children are
+ * released), the viewer walks 7,500 uu east at 1,500 uu/s, the window following, one update a frame at 30 fps: with
+ * View.bAvoidStandIns no update draws a stand-in over the window (under the rule before, covered band patches the viewer
+ * leaves past the prebuild radius, and a patch coming back over the horizon, need a build, and their nearest built
+ * ancestor, up to a face's root, stands in for a frame); every direction out to three view distances stays drawn by a
+ * chunk or a patch; and
+ * the window shrunk to 0.85 of the view distance (its edge chunks unloading) leaves no gap in the very next update (the
+ * band patches near the edge were built meanwhile).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetNoStandInTest,
+	"VoxelWorlds.FarField.Planet.NoStandInOverWindow",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetFarFieldTestUtils;
+
+	const FPlanetCase Case = GetPlanetCases()[0];
+	const FSite Site = GetSites()[1];
+	for (const bool bAvoidStandIns : { false, true })
+	{
+		const TCHAR* Rule = bAvoidStandIns ? TEXT("avoiding stand-ins") : TEXT("the rule before");
+		FRig Rig(Case, 16, /*bSea=*/false);
+		auto MakeView = [&Rig, bAvoidStandIns](const FVector& Viewer, double Time)
+		{
+			FVoxelFarFieldView View = Rig.MakeView(Viewer);
+			View.Time = Time;
+			View.HideDelay = 0.45;
+			View.bAvoidStandIns = bAvoidStandIns;
+			return View;
+		};
+		auto Viewer = [&Rig](const FVector& Up) { return Rig.SurfacePoint(Up) + Up * 170.0; };
+
+		// Directions out to three view distances not drawn by a chunk or a patch.
+		auto CountGaps = [&Rig](const FVoxelFarFieldView& View, TFunctionRef<bool(const FIntVector&)> IsDrawn)
+		{
+			const FVector GroundDirection = (View.Viewer - Rig.Settings.Center).GetSafeNormal();
+			FVector East, North;
+			FVoxelCubeSphere::GetTangentFrame(GroundDirection, East, North);
+			int32 Gaps = 0;
+			for (double Distance = 0.0; Distance <= 3.0 * ViewDistance; Distance += ChunkWorld / 2.0)
+			{
+				const int32 Around = FMath::Max(8, FMath::CeilToInt32(UE_DOUBLE_TWO_PI * Distance / ChunkWorld));
+				for (int32 Step = 0; Step < Around; ++Step)
+				{
+					const double Theta = UE_DOUBLE_TWO_PI * Step / Around;
+					const double Angle = Distance / View.GroundRadius;
+					const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
+					const FVector Direction = (GroundDirection * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
+					if (!IsDrawn(Rig.ChunkOf(Rig.SurfacePoint(Direction))) && !Rig.FarField.FindDrawnPatch(Direction))
+					{
+						++Gaps;
+					}
+				}
+			}
+			return Gaps;
+		};
+
+		// Settled with the window loaded, then again past the release delay (hidden ancestors released).
+		double Time = 0.0;
+		FVoxelFarFieldView View = MakeView(Viewer(Site.Up), Time);
+		auto Loaded = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, ViewDistance); };
+		TestTrue(*FString::Printf(TEXT("%s: settles"), Rule), Rig.Converge(View, Loaded) > 0);
+		Time = 20.0;
+		View = MakeView(Viewer(Site.Up), Time);
+		TestTrue(*FString::Printf(TEXT("%s: settles past the release delay"), Rule), Rig.Converge(View, Loaded) > 0);
+		const int64 ReleasedBefore = Rig.FarField.GetTotalReleased();
+
+		// The walk: 1,500 uu/s east, an update a frame at 30 fps, the window following.
+		FVector East, North;
+		FVoxelCubeSphere::GetTangentFrame(Site.Up, East, North);
+		const int32 Frames = 150;
+		const double StepAngle = 50.0 / Rig.Settings.Radius;
+		int32 FramesWithStandIns = 0, StandIns = 0, CoarsestLevel = 64, UnreadyCovered = 0, WalkGaps = 0;
+		FVoxelFarFieldChanges Changes;
+		for (int32 Frame = 1; Frame <= Frames; ++Frame)
+		{
+			const double Angle = Frame * StepAngle;
+			const FVector Up = (Site.Up * FMath::Cos(Angle) + East * FMath::Sin(Angle)).GetSafeNormal();
+			Time += 1.0 / 30.0;
+			View = MakeView(Viewer(Up), Time);
+			Rig.FarField.Update(View, Loaded, Changes);
+			const int32 Count = Rig.FarField.GetStandInCount();
+			StandIns += Count;
+			FramesWithStandIns += Count > 0 ? 1 : 0;
+			if (Count > 0)
+			{
+				CoarsestLevel = FMath::Min(CoarsestLevel, Rig.FarField.GetStandInMinLevel());
+				// The band patches this update asked to build (their builds land next update), and where they lie.
+				const FVector GroundDirection = Up;
+				FString Waiting;
+				Rig.FarField.ForEachPatch([&](const FVoxelPlanetFarField::FPatchState& Patch)
+				{
+					if (!Patch.bBuilding)
+					{
+						return;
+					}
+					const double Angle = FMath::Atan2(FVector::CrossProduct(GroundDirection, Patch.CapDirection).Size(),
+						FVector::DotProduct(GroundDirection, Patch.CapDirection));
+					Waiting += FString::Printf(TEXT(" [level %d, children %d, ground %.0f-%.0f, built before %d, covered %d since %.2f]"),
+						Patch.Key.Level, Patch.bHasChildren ? 1 : 0,
+						View.GroundRadius * FMath::Max(Angle - Patch.CapAngle, 0.0), View.GroundRadius * (Angle + Patch.CapAngle),
+						Patch.bBuilt ? 1 : 0, Patch.bCovered ? 1 : 0, Patch.CoveredSince >= 0.0 ? Time - Patch.CoveredSince : -1.0);
+				});
+				FIntVector Undrawn;
+				const bool bUndrawn = Rig.FarField.GetUndrawnChunk(Undrawn);
+				AddInfo(FString::Printf(TEXT("%s: frame %d: %d stand-in(s), level %d; unready band patches %d covered, %d uncovered%s; building:%s"),
+					Rule, Frame, Count, Rig.FarField.GetStandInMinLevel(), Rig.FarField.GetUnreadyBandCount(true), Rig.FarField.GetUnreadyBandCount(false),
+					bUndrawn ? *FString::Printf(TEXT(" (a chunk not drawn %.0f from the ground point)"), Rig.GroundDistance(View, Rig.ChunkCentre(Undrawn))) : TEXT(""),
+					*Waiting));
+			}
+			UnreadyCovered += Rig.FarField.GetUnreadyBandCount(true);
+			if (Frame % 30 == 0)
+			{
+				WalkGaps += CountGaps(View, Loaded);
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%s: walking 7,500 uu, %d of %d frames drew a stand-in over the window (%d in all, coarsest level %d, band %d); covered band patches not ready %d; %lld patches released while settling; %d gaps at five checks"),
+			Rule, FramesWithStandIns, Frames, StandIns, FramesWithStandIns > 0 ? CoarsestLevel : -1, Rig.Settings.BandLevel, UnreadyCovered,
+			ReleasedBefore, WalkGaps));
+		TestTrue(*FString::Printf(TEXT("%s: hidden patches were released while settling"), Rule), ReleasedBefore > 0);
+		TestEqual(*FString::Printf(TEXT("%s: no gap while walking"), Rule), WalkGaps, 0);
+		if (bAvoidStandIns)
+		{
+			TestEqual(*FString::Printf(TEXT("%s: no stand-in over the window while walking"), Rule), FramesWithStandIns, 0);
+			TestEqual(*FString::Printf(TEXT("%s: no covered band patch waits for a build"), Rule), UnreadyCovered, 0);
+
+			// The window's edge unloads: the band patches there were built meanwhile and draw in the very next update.
+			TestTrue(*FString::Printf(TEXT("%s: settles after the walk"), Rule), Rig.Converge(View, Loaded) > 0);
+			auto Shrunk = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, 0.85 * ViewDistance); };
+			Rig.FarField.Update(View, Shrunk, Changes);
+			const int32 EdgeGaps = CountGaps(View, Shrunk);
+			AddInfo(FString::Printf(TEXT("%s: the window shrunk to 0.85 of the view distance: %d gaps in the next update, %d stand-ins"),
+				Rule, EdgeGaps, Rig.FarField.GetStandInCount()));
+			TestEqual(*FString::Printf(TEXT("%s: the edge's patches draw at once when its chunks unload"), Rule), EdgeGaps, 0);
+
+		}
+		else
+		{
+			// Documents the flicker this replaces (VP4): if this fails the rule before no longer shows it, and the test needs
+			// a new walk.
+			TestTrue(*FString::Printf(TEXT("%s: stand-ins over the window while walking"), Rule), FramesWithStandIns > 0);
+		}
+
+		// A teleport 40 degrees toward the pole, settled past the release delay first: the destination was under the
+		// horizon (culled, released) on a face whose root is built, and nothing is loaded there yet. The first update
+		// after the cut has no gap: an ancestor stands in as before (the horizon rule holds for motion only). (A face
+		// never seen has no built root: the first update after a teleport onto it draws nothing there either way.)
+		Time += 20.0;
+		TestTrue(*FString::Printf(TEXT("%s: settles before the teleport"), Rule), Rig.Converge(MakeView(View.Viewer, Time), Loaded) > 0);
+		const double Jump = FMath::DegreesToRadians(40.0);
+		const FVector Far = (Site.Up * FMath::Cos(Jump) + North * FMath::Sin(Jump)).GetSafeNormal();
+		Time += 1.0 / 30.0;
+		View = MakeView(Viewer(Far), Time);
+		auto Nothing = [](const FIntVector&) { return false; };
+		Rig.FarField.Update(View, Nothing, Changes);
+		const int32 TeleportGaps = CountGaps(View, Nothing);
+		AddInfo(FString::Printf(TEXT("%s: a teleport 40 degrees toward the pole: %d gaps in the first update, %d stand-ins over the window, coarsest level %d"), Rule, TeleportGaps, Rig.FarField.GetStandInCount(), Rig.FarField.GetStandInMinLevel()));
+		TestEqual(*FString::Printf(TEXT("%s: no gap after a teleport"), Rule), TeleportGaps, 0);
+	}
+	return true;
+}
+
+/**
  * WM-BP9: patches match the analytic surface. Patches holding the 45-degree site and the cube corner at levels from a
  * face's quarter to the band, on both planets, with the sea: every surface vertex at its direction's altitude minus the
  * sink; every terrain triangle one material; normals unit and outward; offsets no larger than the patch; skirt vertices

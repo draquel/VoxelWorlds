@@ -20,6 +20,7 @@ root; line numbers in the findings are as of VoxelWorlds `952d4ae`, WorldClockPl
 | VP1 | Sky flickers and moves | The terrain's (and trees') shadows cast onto the atmosphere through the sun's cascades (F1.7), redrawn as the cascades re-fit and, before VP3-O1, as casters were culled with the view; the sky light captured at the planet's centre leaves every shadow black (F1.4). The volumetric clouds, the first suspect, are not visible on `PlanetTest` | Both shown live 2026-10-24; VP3-O1 removes about 80% of the sky's change from the shadows; F1.4 **fixed** (VP1-O5, `wc.Planet.SkyLightAtViewer`); VP1-O6 open | Planets (small ones most) | WorldClockPlugin, parent (maps) | S |
 | VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 **fixed** (VP2-O6, `voxel.Material.ConstantRoughness`); F2.8 **fixed** (VP2-O2, `voxel.Material.TileVariation`, `MacroVariation`) | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (materials) | S, then M for the look |
 | VP3 | Hill shadows come and go | The voxel scene proxy culled shadow casters with the camera's frustum (F3.1) | **Fixed** (VP3-O1, `voxel.Render.ShadowCullFrustum`); F3.2 and F3.3 open | Every mode | VoxelWorlds (VoxelRendering) | S; the shadow range and Lumen items M-L |
+| VP4 | Fast terrain flicker as you move | A far-field patch waiting for a build where nothing of it would show was stood in for by its nearest built ancestor, often a cube face's root, drawn over the voxel terrain and the horizon for a frame (F4.1) | **Fixed** (VP4-O1, `voxel.World.FarFieldAvoidStandIns`); see "VP4 terrain flicker" | Planets | VoxelWorlds (VoxelStreaming) | S |
 
 ## Milestone 1 results (2026-10-24)
 
@@ -505,6 +506,129 @@ script, their links unchanged. Checked on `PlanetTest` with VP2-O2's survey (`vp
   the shaders restructured (no change in what they compute) the global shader step takes 42 s against 1 h 51 min, and
   DX11 planets' pads match the CPU; see "F2.13: the voxel compute shaders on FXC".
 - Then the rest of milestone 2 (VP2-O3, O4; VP2-O2 done above) and milestone 3 (VP3-O2, O3) as planned.
+
+## VP4 terrain flicker (2026-10-25)
+
+The user's report on `PlanetTest`: "flickering of the terrain. it is very fast and i am unsure what the cause could be. it
+seems to happen both near and far at different times but consistently will occur in different areas as you move." (Their
+`PlanetWorldConfig` had scatter turned off, uncommitted; the runs below have it off unless noted.)
+
+### Repro and tooling
+
+- **Capture:** `r.DumpingMovie N` writes N consecutive rendered frames (`Saved/Screenshots/WindowsEditor/MovieFrame*.png`),
+  at about 3 a second in real time; `UEngine::bUseFixedFrameRate` 30 (set from Python by its raw property name,
+  `Saved/ClaudeScripts/fixed_fps.py`; the console's `set Engine ...` does not reach the editor engine) makes every dumped
+  frame 1/30 s of game time, so a burst plays as 30 fps play would. The pawn is hidden.
+- **Metric** (`Saved/ClaudeScripts/vp4_flicker.py`): a flicker is a pixel that jumps and jumps back. For each frame t,
+  spike = min(|L(t) - L(t-1)|, |L(t+1) - L(t)|) where the two differences have opposite signs, else 0; motion moves edges
+  across pixels (a step that stays) and TSR's jitter stays under the threshold (24 luma). Reported: the share of pixels
+  spiking per frame, and **events**: frames over 0.1% with a connected region of at least 1,500 px, with the region's
+  mean change against its neighbours.
+- **Scenario** (`scenario.sh`, `ab.sh`): `vox.TPLatLon 30 20` at 11:30 (the clock stopped), `vox.AutoRun 1 0 0` at
+  1,500 uu/s, 300 frames (10 s, 15,000 uu); the bursts in `Saved/Bursts/`.
+
+Standing still (at the pole and at 30°N) and in a 3 s walk nothing spiked. Running, a few frames a burst had an event: a
+region of terrain 1,500-16,000 px, brighter by 10-31 luma, for exactly one frame. In those frames the region is drawn by
+the far field's analytic surface: flatter shading, other material patches (its vertex picks), the 1 m tiling visible, a
+deer on a hill hidden behind it, the horizon's silhouette changed (`Saved/Screenshots/Claudius/vp4_before_238.png`,
+`vp4_before_48.png`, `vp4_before_287.png`). `voxel.World.FarField 0`: no event and no hole in 300 frames, so the voxel
+terrain was drawn every frame and the far field was drawn over it. The other switches the investigation listed (crossfade,
+sky light, shadow culling, texture variation, shadows, Lumen, anti-aliasing) were not needed: the cause was traced in the
+far field's selection and confirmed frame by frame by instrumenting it (below).
+
+### F4.1 The far field's stand-ins
+
+`FVoxelPlanetFarField::Visit` draws a patch whose subtree is not ready (a patch under it waits for its build) in its
+subtree's place, hiding everything under it (`ClearDrawnSubtree`) until the build lands, the next update at the earliest.
+For refinement that is right: the patch was drawn last frame, and keeps being drawn until its four children are ready.
+Patches hidden under their children are released after `ReleaseDelay` (10 s), so inside and around the voxel window the
+nearest built ancestor of a band patch is usually a **cube face's root**: 16 x 16 quads over a 90° face (24,500 uu a quad
+on `PlanetTest`), whose chords lie hundreds to thousands of uu over the voxel terrain in valleys (patches sink 75 uu) and
+which replaces every finer patch out to the horizon. Three things made a patch wait for a build where nothing of it
+would have shown:
+
+1. **The prebuild ring.** A band patch whose chunks are all drawn stood in for its area without a mesh (lazy) only within
+   `PrebuildRadius` (0.75 of the load distance, 30,000 uu); past it, band patches are kept built for when their chunks
+   unload. As the viewer moves, covered, unbuilt band patches cross that ring outward and wait for a build: the most
+   frequent trigger (straddling 22,000-30,000 uu in every case the test logged).
+2. **The horizon.** A patch culled under the horizon (drawing nothing) for 10 s is released; when the viewer's move brings
+   it back over the horizon it waits for a build. From eye height on `PlanetTest` the culling boundary is about 0.53 rad
+   (132,000 uu) away, so far patches cross it continually.
+3. **An empty chunk re-meshing.** `UVoxelChunkManager::IsChunkDrawnForFarField` counted a chunk re-meshing (an LOD change)
+   as drawn only if the renderer held its mesh, which it does not for an empty mesh, so the band patch over it was
+   uncovered for the re-mesh and waited for a build.
+
+The trace (`voxel.World.FarFieldTrace 1`, below) over the session's bursts with the rule before (the A/B's three, the
+pole's and two with scatter): of the 117 stand-in updates while they dumped, 74 came from (1), 39 from (2) and 4 from
+chunks loading; over the whole session (teleports and settling included), (3) 41 times. Each flicker event of the A/B
+fell on a frame with a stand-in (run 1: level 1 stand-ins at frames 257 and 287, the two events; run 2: frame 230;
+run 3: 234 and 262); root stand-ins without an event drew little over the terrain from where the camera was.
+
+### VP4-O1 No stand-in where nothing would show
+
+`voxel.World.FarFieldAvoidStandIns` (1; 0 = before), `FVoxelFarFieldView::bAvoidStandIns`:
+
+- A band patch whose chunks are all drawn covers its area drawing nothing, built or not, wherever it lies; past
+  `PrebuildRadius` once its chunks have been drawn `HideDelay` (a chunk that has just appeared fades in over where the
+  patch's mesh would be). One that must stay built for the window's edge (`IsKeptBuilt`) builds meanwhile and draws
+  nothing until its chunks unload (`IsLazy`, `Visit`).
+- A patch culled in its last visit (`FPatchState::bCulled`) waits for its build drawing nothing: it drew nothing a
+  moment ago and lies at the horizon's edge. Not after a cut (the camera more than a chunk from the last update's, a
+  teleport), where it may lie in full view and its ancestor stands in as before: without that, a teleport left 2,282
+  directions of the test's grid with no surface for an update.
+- A chunk loaded before counts as drawn while it re-meshes, also with an empty mesh (`LoadedChunkCoords`).
+
+Stand-ins for chunks that are not loaded yet (after a teleport, the window catching up) are unchanged: there the far
+field must fill the hole.
+
+Instrumentation: `FVoxelPlanetFarField::GetStandInCount` / `GetStandInMinLevel` / `GetTotalStandIns` /
+`GetStandInUpdates` (a stand-in counts when its subtree has a band patch the chunks cover), `GetUnreadyBandCount`,
+`GetUndrawnChunk`; `FVoxelFarFieldStats::StandIns` (and the level and totals), in `voxel.World.FarFieldStats`; the
+bench's `FarFieldStandInN` column and `farFieldStandInsTraverse` / `farFieldStandInSamples`; `voxel.World.FarFieldTrace 1`
+logs every update with a stand-in (the frame, `GIsDumpingMovie`'s count, the coarsest level, the band patches waiting
+covered and uncovered, and a chunk not drawn under one with its state).
+
+### Results
+
+Test `VoxelWorlds.FarField.Planet.NoStandInOverWindow` (pure logic, headless): the window loaded at 45° on the small
+planet, settled past the release delay (162 patches released), the viewer walking 7,500 uu at 1,500 uu/s with an update
+a frame at 30 fps. The rule before: 9 of 150 frames drew a stand-in over the window (16 in all, the coarsest a face's
+root), from 14 covered band patches waiting and two patches back over the horizon. With VP4-O1: none, no covered band
+patch waits, no gap out to three view distances, and the window shrunk to 0.85 of the view distance leaves no gap in the
+very next update (the edge's band patches were built meanwhile). A teleport 40° toward the pole, into area culled until
+then, leaves no gap in its first update under either rule.
+
+Live on `PlanetTest`, the scenario above, alternating (one build, by the cvar):
+
+| Run | Stand-in updates while dumping (a face's root) | Flicker events | Most pixels spiking in a frame |
+|-----|-----------------------------------------------|----------------|--------------------------------|
+| Before, runs 1-3 | 13 (6), 27 (8), 27 (8) | 2, 1, 2 | 1.06%, 0.27%, 0.29% |
+| VP4-O1, runs 1-3 | 0, 0, 0 | 0, 0, 0 | 0.045%, 0.059%, 0.044% |
+
+Again on the final build (with the cut rule), two runs each: stand-in updates 20 (8 roots) and 27 (7) → 0 and 0; the
+one event left with VP4-O1 is deer walking across a few frames.
+
+From the north pole at walking speed (600 uu/s, along +Y): 18 stand-in updates (8 roots) → 0. With scatter on: 23 → 0;
+the grass and flowers streaming past spike in both (0.7% of the frame each frame), as do the foreground at the pole
+under the grazing sun (detail passing a texel a frame) and the hill line as the camera bobs over bumps: motion, the same
+either way. With VP4-O1 the stand-ins left are the ones after each teleport, for chunks not loaded yet.
+
+Cost (bench `300 3000 gc=45:20:90:2000`, three runs each, alternating, scatter off): stand-ins over the traverse 2 → 0;
+far-field patches built 20 → 8-9 (covered patches past the ring are no longer built to stand in), update P50 0.33-0.37
+ms either way, memory peak 84.9 → 84.3-85.1 MB; GPU frame P50 3.73-4.65 → 4.05-4.29 ms, P95 6.99-7.95 → 6.75-7.28 ms;
+frame P95 23.7-24.3 → 22.6-23.6 ms (vsync-bound P50 16.67); manager P95 4.10-4.14 → 3.92-4.23 ms. No cost.
+
+Tests: the six suites (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`) 644/644 headless and
+in the editor.
+
+**F4.2 (found on the way, not fixed): a teleport onto a face never seen.** A cube face's root is built only once some of
+it comes into view (a culled patch requests no build). After a teleport onto a face the camera has not looked at, nothing
+of the far field is resident there, so the first update after it draws nothing there under either rule (the test's
+teleport 90° away from 45°: no patch drawn, 4,042 empty directions); builds fill it over the next updates while the voxel
+window loads. Building the six roots up front (a patch each, about 0.1-0.2 MB on `PlanetTest`) would close it.
+
+Not traced here: the sky and lighting were not touched (the sky's own flicker is VP1, the pixelated clouds a separate
+session).
 
 ## The setup as found
 

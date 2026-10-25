@@ -769,6 +769,7 @@ void FVoxelPlanetFarField::Reset()
 	DrawnPatchCount = 0;
 	BuiltSinceRead = 0;
 	MeshMemoryBytes = 0;
+	bHasLastCamera = false;
 	Surface.Reset();
 }
 
@@ -979,7 +980,19 @@ bool FVoxelPlanetFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
 		return false;
 	}
 	const bool bMayHaveSea = Settings.bSea && (Patch.bBuilt ? Patch.bHasSea : (Parent.bBuilt ? Parent.bHasSea : true));
-	return !bMayHaveSea && GetGroundDistanceMax(Patch) < View.PrebuildRadius && UpdateCovered(Patch);
+	if (bMayHaveSea)
+	{
+		return false;
+	}
+	if (View.bAvoidStandIns)
+	{
+		// VP4: covered is enough wherever the patch lies; near the window's edge its build is requested meanwhile (Visit),
+		// and nothing stands in for it in the meantime. Past the prebuild radius only once its chunks have been drawn
+		// HideDelay: a chunk that has just appeared fades in over where the patch's mesh would be.
+		return UpdateCovered(Patch)
+			&& (GetGroundDistanceMax(Patch) < View.PrebuildRadius || View.Time - Patch.CoveredSince >= View.HideDelay);
+	}
+	return GetGroundDistanceMax(Patch) < View.PrebuildRadius && UpdateCovered(Patch);
 }
 
 bool FVoxelPlanetFarField::IsKeptBuilt(const FPatchState& Patch) const
@@ -1083,21 +1096,34 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	}
 	Patch->bDrawTerrain = false;
 	Patch->bDrawSea = false;
-	if (IsCulled(*Patch))
+	const bool bCulledBefore = Patch->bCulled;
+	Patch->bCulled = IsCulled(*Patch);
+	if (Patch->bCulled)
 	{
 		PruneChildren(*Patch, OutChanges);
 		return true;
 	}
+	// Coming up over the horizon as the camera moves (VP4): nothing was drawn for it, so it waits for its build drawing
+	// nothing (a stand-in would replace everything drawn under that ancestor, the horizon and the voxel window included).
+	// After a cut (a teleport) it may lie in full view: the ancestor stands in as before, or there would be a hole.
+	const bool bWaitsUndrawn = View.bAvoidStandIns && bCulledBefore && !bCameraCut;
 	// A band patch standing in without a mesh (its parent found it lazy this update: never built, or released while
 	// covered) covers its area by drawing nothing; anything else unbuilt is built first.
 	if (Patch->bLazy)
 	{
+		++CoveredBandVisits;
+		// Near the window's edge it is wanted built for when its chunks unload (VP4): built meanwhile, still drawing nothing.
+		if (View.bAvoidStandIns && IsKeptBuilt(*Patch))
+		{
+			RequestBuild(*Patch);
+		}
 		return true;
 	}
 	if (!Patch->bBuilt)
 	{
+		NoteUnready(*Patch);
 		RequestBuild(*Patch);
-		return false;
+		return bWaitsUndrawn;
 	}
 	if (Patch->bDirty && Patch->bResident)
 	{
@@ -1105,6 +1131,7 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	}
 
 	bool bSplit = WantsSplit(*Patch);
+	bool bStandInOverWindow = false;
 	if (!bSplit && Patch->bHasChildren && !Patch->bResident)
 	{
 		// Merging needs this patch's mesh back: its children keep drawing until it is built again.
@@ -1122,6 +1149,7 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 			Patch->bHasChildren = true;
 		}
 		bool bCovered = true;
+		const int64 CoveredBandVisitsBefore = CoveredBandVisits;
 		for (int32 Index = 0; Index < 4; ++Index)
 		{
 			FPatchState* Child = FindPatchMutable(Patch->Key.GetChild(Index).Pack());
@@ -1139,6 +1167,9 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 		}
 		// The subtree does not cover the area yet (builds in flight): this patch draws it, nothing under it does.
 		ClearDrawnSubtree(*Patch);
+		// Over band patches the voxel chunks cover, the stand-in shows through the voxel terrain wherever its chords rise
+		// over it (VP4).
+		bStandInOverWindow = CoveredBandVisits > CoveredBandVisitsBefore;
 	}
 	else
 	{
@@ -1147,10 +1178,48 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	if (Patch->bResident)
 	{
 		SetDrawn(*Patch);
+		if (Patch->Key.Level >= Settings.BandLevel && Patch->bCovered)
+		{
+			++CoveredBandVisits;
+		}
+		if (bStandInOverWindow && Patch->bDrawTerrain)
+		{
+			++StandInCount;
+			StandInMinLevel = StandInMinLevel < 0 ? Patch->Key.Level : FMath::Min(StandInMinLevel, Patch->Key.Level);
+		}
 		return true;
 	}
+	NoteUnready(*Patch);
 	RequestBuild(*Patch);
-	return false;
+	return bWaitsUndrawn;
+}
+
+void FVoxelPlanetFarField::NoteUnready(FPatchState& Patch)
+{
+	if (Patch.Key.Level < Settings.BandLevel)
+	{
+		return;
+	}
+	if (UpdateCovered(Patch))
+	{
+		++UnreadyCoveredBand;
+		++CoveredBandVisits;
+		return;
+	}
+	++UnreadyUncoveredBand;
+	if (bHasUndrawnChunk || !ChunkDrawn)
+	{
+		return;
+	}
+	for (const FIntVector& Chunk : Patch.bBuilt ? Patch.SurfaceChunks : Patch.SampleChunks)
+	{
+		if (!(*ChunkDrawn)(Chunk))
+		{
+			UndrawnChunk = Chunk;
+			bHasUndrawnChunk = true;
+			return;
+		}
+	}
 }
 
 void FVoxelPlanetFarField::ApplyBuild(FPatchState& Patch, const TSharedPtr<FVoxelFarFieldPatchMesh>& Mesh, FVoxelFarFieldChanges& OutChanges)
@@ -1276,6 +1345,15 @@ void FVoxelPlanetFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef
 	}
 	ChunkDrawn = &IsChunkDrawn;
 	BuiltThisUpdate.Reset();
+	// More than a chunk since the last update is a cut, not motion (VP4's horizon rule holds for motion only).
+	bCameraCut = !bHasLastCamera || FVector::DistSquared(View.Camera, LastCamera) > FMath::Square(Settings.ChunkWorldSize);
+	LastCamera = View.Camera;
+	bHasLastCamera = true;
+	StandInCount = 0;
+	StandInMinLevel = -1;
+	UnreadyCoveredBand = 0;
+	UnreadyUncoveredBand = 0;
+	bHasUndrawnChunk = false;
 
 	DrainBuilds(OutChanges);
 
@@ -1319,6 +1397,9 @@ void FVoxelPlanetFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef
 			Patch.bAppliedSea = Patch.bDrawSea;
 		}
 	}
+
+	TotalStandIns += StandInCount;
+	StandInUpdates += StandInCount > 0 ? 1 : 0;
 
 	LaunchBuilds();
 	ChunkDrawn = nullptr;
