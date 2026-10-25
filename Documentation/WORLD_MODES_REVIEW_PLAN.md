@@ -9952,7 +9952,7 @@ Check a dig from above, or with the highlight off
 
 | ID | Status | PR | Check |
 |----|--------|----|-------|
-| G74 | Explained: not a defect | VoxelWorlds @@VWPR@@, UE5_PluginDev @@PPR@@ | `VoxelWorlds.Rendering.Crossfade.SwapReachesProxy`, `VoxelWorlds.Streaming.EditReachesProxy.{Smooth,Cubic}`; live: §22.2's session replayed on its build and content |
+| G74 | Explained: not a defect | VoxelWorlds#157, UE5_PluginDev#166 | `VoxelWorlds.Rendering.Crossfade.SwapReachesProxy`, `VoxelWorlds.Streaming.EditReachesProxy.{Smooth,Cubic}`; live: §22.2's session replayed on its build and content |
 
 **New finding.**
 
