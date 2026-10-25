@@ -394,8 +394,14 @@ This custom HLSL node samples both albedo and roughness arrays:
 - `RoughnessArray` (Texture2DArray) - Material atlas parameter
 - `MaterialLUT` (Texture2D) - The atlas's material LUT (its slice row gives the material's slice in each array)
 - `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter (Footprint Sampling below)
+- `TileVariation`, `MacroVariation` (float) - `MPC_VoxelMaterial` collection parameters (Texture Variation below; the node
+  includes `/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush`)
 
 **Output:** `float4` (RGB = Albedo, A = Roughness)
+
+The code below is the node with both variation switches at 0; the full code, with the variation path, is in
+`Scripts/setup_texture_variation.py` (parent repo), which writes it into the asset; `Scripts/setup_texture_array_slices.py`
+(F2.12) then reads each array at the material's slice from the LUT. Run both, in that order.
 
 ```hlsl
 int MaterialID = (int)floor(MaterialUV.x + 0.5);
@@ -451,6 +457,7 @@ Normal maps require special blending to avoid "plaid" artifacts. This uses UDN (
 - `NormalArray` (Texture2DArray) - Material atlas parameter
 - `MaterialLUT` (Texture2D) - The atlas's material LUT
 - `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter
+- `TileVariation` (float) - `MPC_VoxelMaterial` collection parameter (Texture Variation below)
 
 **Output:** `float3` (World-space normal)
 
@@ -543,6 +550,30 @@ ConstantRoughness)`: `TerrainRoughness` is a scalar parameter (0.9 by default), 
 roughness buffer reads 0 → 0.9 on the ground, and the far ground at a grazing view loses its sky sheen (blue channel
 112 → 86, saturation 41.6 → 66.0). When real roughness maps exist, `ConstantRoughness` 0 and a `RoughnessMultiplier` of 1
 use them.
+
+### Texture Variation (visual polish VP2-O2)
+
+With mips in use (VP2-O1) the one-metre tiles repeat visibly: rows of the same marks close up, a plaid grid on flat
+ground at mid distance (F2.8). Both triplanar functions include `Shaders/Private/VoxelTextureVariation.ush`:
+
+- **Tile variation** (`TileVariation`, `voxel.Material.TileVariation`, 1 by default): the ground becomes a mosaic of
+  patches under a tile across, each reading the texture at its own offset (Inigo Quilez, "Texture repetition",
+  technique 3). A smooth value noise about a tile across, times eight, picks one of eight offsets; each patch's tail
+  blends into the next patch's offset, which the next patch starts with, so there is no seam. Offsets keep the
+  texture's orientation, so the normal map needs no rotation, and both functions compute the same offsets. Where a patch
+  is not blending, one read suffices; the second read happens only in the blend bands. Triplanar projections under 2%
+  are dropped (the rest renormalised), so at the terrain's sharpness most pixels read one projection.
+- **Macro variation** (`MacroVariation`, `voxel.Material.MacroVariation`, 0.3 by default, albedo only): the albedo's
+  brightness is scaled by up to 1 ± that by two octaves of value noise about 13 and 41 tiles across.
+
+The triplanar position is tiled for large-world precision (spherical Phase 6, P6.2): it wraps every
+max(1, round(65,536 x `TriplanarScale`)) tiles. Every noise is built on a lattice that fits that period a whole number
+of times, with its hash wrapped to it, so nothing jumps where the position wraps. Both switches at 0 give the material
+as before. The tunables (cell size, number of offsets, where the blend starts) are `#define`s at the top of the include;
+the include's hash is part of the material's shader key, so editing it recompiles the masters (in a running editor:
+`recompileshaders changed`, then recompile the materials). `Scripts/setup_texture_variation.py` writes the nodes and the
+collection scalars; `VoxelWorlds.Rendering.TextureVariation.Assets` checks the wiring. Results: `VISUAL_POLISH_PLAN.md`,
+"VP2-O2 texture variation".
 
 ---
 

@@ -1,0 +1,128 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+// VoxelTextureVariation.ush - breaks up the tiling of the smooth terrain's triplanar textures (visual polish VP2-O2).
+//
+// Included by the Custom nodes of MF_TriplanarSampleAlbedoRoughness and MF_TriplanarSampleNormal. Two parts:
+// - Tile variation: the ground is a mosaic of patches smaller than a tile, each reading the texture at its own offset,
+//   blended across the patches' edges, so the tile grid no longer repeats (Inigo Quilez, "Texture repetition",
+//   technique 3). An offset keeps the texture's orientation, so tangent-space normals need no rotation.
+// - Macro variation: a brightness change over tens of tiles, so distant ground is not one flat tone.
+//
+// The triplanar position the nodes take is tiled for large-world precision: M_VoxelMaster wraps it every
+// max(1, round(65,536 x Scale)) tiles (spherical Phase 6 P6.2). Every noise here is periodic on that period, so nothing
+// jumps where the position wraps.
+
+#pragma once
+
+/** Cell size of the noise that picks the offsets, in tiles: patches have to be under a tile for no tile to repeat whole */
+#ifndef VOXEL_VARIATION_CELL_TILES
+#define VOXEL_VARIATION_CELL_TILES 1.0
+#endif
+
+/** Offsets to pick from (the noise's level sets, times this) */
+#ifndef VOXEL_VARIATION_LEVELS
+#define VOXEL_VARIATION_LEVELS 8.0
+#endif
+
+/** Where in each band the blend into the next band's offset starts (1 = hard edges) */
+#ifndef VOXEL_VARIATION_BLEND_START
+#define VOXEL_VARIATION_BLEND_START 0.5
+#endif
+
+/** Tiles in one period of the tiled triplanar position (M_VoxelMaster: Period = max(1, round(65,536 x Scale)) / Scale) */
+float VoxelVariationTilesPerPeriod(float Scale)
+{
+	return max(1.0, round(65536.0 * Scale));
+}
+
+/** A hash in [0, 1) of a lattice point wrapped to Cells x Cells, and a seed */
+float VoxelVariationHash(float2 Lattice, float Cells, uint Seed)
+{
+	Lattice -= Cells * floor(Lattice / Cells);
+	uint H = uint(Lattice.x) * 0x8da6b343u ^ uint(Lattice.y) * 0xd8163841u ^ (Seed + 1u) * 0xcb1ab31fu;
+	H ^= H >> 16;
+	H *= 0x7feb352du;
+	H ^= H >> 15;
+	H *= 0x846ca68bu;
+	H ^= H >> 16;
+	return float(H >> 8) * (1.0 / 16777216.0);
+}
+
+/** Smooth value noise in [0, 1] at P (in cells), periodic in Cells */
+float VoxelVariationValueNoise(float2 P, float Cells, uint Seed)
+{
+	const float2 I = floor(P);
+	const float2 F = P - I;
+	const float2 U = F * F * (3.0 - 2.0 * F);
+	const float A = VoxelVariationHash(I, Cells, Seed);
+	const float B = VoxelVariationHash(I + float2(1, 0), Cells, Seed);
+	const float C = VoxelVariationHash(I + float2(0, 1), Cells, Seed);
+	const float D = VoxelVariationHash(I + float2(1, 1), Cells, Seed);
+	return lerp(lerp(A, B, U.x), lerp(C, D, U.x), U.y);
+}
+
+/** Noise of a projection's UV (in tiles) on a lattice about CellTiles tiles across that fits the period a whole number of times */
+float VoxelVariationNoiseAt(float2 UV, float TilesPerPeriod, float CellTiles, uint Seed)
+{
+	const float Cells = max(1.0, round(TilesPerPeriod / CellTiles));
+	return VoxelVariationValueNoise(UV * (Cells / TilesPerPeriod), Cells, Seed);
+}
+
+/** A projection's two texture offsets (in tiles) and the second's weight */
+struct FVoxelVariationOffsets
+{
+	float2 OffsetA;
+	float2 OffsetB;
+	float BlendB;
+};
+
+/**
+ * The offsets for a projection's UV. A smooth noise about a tile across, times VOXEL_VARIATION_LEVELS, picks one offset per
+ * patch: the patches are the bands between the noise's level sets, smaller than a tile with irregular edges, so each tile
+ * is a mosaic of differently offset copies. Each band's tail (from VOXEL_VARIATION_BLEND_START) blends into the next band's
+ * offset (the next band starts with it, so the blend is continuous); elsewhere BlendB is 0 or 1 and one read suffices.
+ */
+FVoxelVariationOffsets VoxelVariationOffsetsAt(float2 UV, float TilesPerPeriod)
+{
+	const float Level = VoxelVariationNoiseAt(UV, TilesPerPeriod, VOXEL_VARIATION_CELL_TILES, 0u) * VOXEL_VARIATION_LEVELS;
+	const float IndexA = floor(Level);
+	FVoxelVariationOffsets Result;
+	Result.OffsetA = float2(VoxelVariationHash(float2(IndexA, 0), 64.0, 1u), VoxelVariationHash(float2(IndexA, 0), 64.0, 2u));
+	Result.OffsetB = float2(VoxelVariationHash(float2(IndexA + 1.0, 0), 64.0, 1u), VoxelVariationHash(float2(IndexA + 1.0, 0), 64.0, 2u));
+	Result.BlendB = smoothstep(VOXEL_VARIATION_BLEND_START, 1.0, Level - IndexA);
+	return Result;
+}
+
+/** Sample a texture array at a projection's UV with its variation offsets: one read where BlendB is 0 or 1, two in between */
+float4 VoxelVariationSample(Texture2DArray Tex, SamplerState Samp, float2 UV, float Slice, float2 DUVDX, float2 DUVDY,
+	FVoxelVariationOffsets Offsets)
+{
+	if (Offsets.BlendB <= 0.0)
+	{
+		return Tex.SampleGrad(Samp, float3(UV + Offsets.OffsetA, Slice), DUVDX, DUVDY);
+	}
+	if (Offsets.BlendB >= 1.0)
+	{
+		return Tex.SampleGrad(Samp, float3(UV + Offsets.OffsetB, Slice), DUVDX, DUVDY);
+	}
+	const float4 A = Tex.SampleGrad(Samp, float3(UV + Offsets.OffsetA, Slice), DUVDX, DUVDY);
+	const float4 B = Tex.SampleGrad(Samp, float3(UV + Offsets.OffsetB, Slice), DUVDX, DUVDY);
+	return lerp(A, B, Offsets.BlendB);
+}
+
+/** Brightness factor 1 +- Strength from two octaves of noise about 13 and 41 tiles across */
+float VoxelVariationMacro(float2 UV, float TilesPerPeriod, float Strength)
+{
+	const float Noise = 0.65 * VoxelVariationNoiseAt(UV, TilesPerPeriod, 13.0, 3u)
+		+ 0.35 * VoxelVariationNoiseAt(UV, TilesPerPeriod, 41.0, 4u);
+	return 1.0 + Strength * (Noise - 0.5) * 2.0;
+}
+
+/**
+ * Triplanar weights with the projections under 2% dropped and the rest renormalised: at the terrain's sharpness most
+ * pixels then read one projection.
+ */
+float3 VoxelVariationPruneWeights(float3 Weights)
+{
+	Weights *= step(0.02, Weights);
+	return Weights / max(Weights.x + Weights.y + Weights.z, 0.0001);
+}

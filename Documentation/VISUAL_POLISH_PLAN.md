@@ -18,7 +18,7 @@ root; line numbers in the findings are as of VoxelWorlds `952d4ae`, WorldClockPl
 | ID | Report | Cause | Status | Modes | Repos | Size |
 |----|--------|-------|--------|-------|-------|------|
 | VP1 | Sky flickers and moves | The terrain's (and trees') shadows cast onto the atmosphere through the sun's cascades (F1.7), redrawn as the cascades re-fit and, before VP3-O1, as casters were culled with the view; the sky light captured at the planet's centre leaves every shadow black (F1.4). The volumetric clouds, the first suspect, are not visible on `PlanetTest` | Both shown live 2026-10-24; VP3-O1 removes about 80% of the sky's change from the shadows; F1.4 **fixed** (VP1-O5, `wc.Planet.SkyLightAtViewer`); VP1-O6 open | Planets (small ones most) | WorldClockPlugin, parent (maps) | S |
-| VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 **fixed** (VP2-O6, `voxel.Material.ConstantRoughness`) | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (materials) | S, then M for the look |
+| VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 **fixed** (VP2-O6, `voxel.Material.ConstantRoughness`); F2.8 **fixed** (VP2-O2, `voxel.Material.TileVariation`, `MacroVariation`) | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (materials) | S, then M for the look |
 | VP3 | Hill shadows come and go | The voxel scene proxy culled shadow casters with the camera's frustum (F3.1) | **Fixed** (VP3-O1, `voxel.Render.ShadowCullFrustum`); F3.2 and F3.3 open | Every mode | VoxelWorlds (VoxelRendering) | S; the shadow range and Lumen items M-L |
 
 ## Milestone 1 results (2026-10-24)
@@ -439,6 +439,55 @@ HLSL and gives it to FXC again: 1.28 MB of HLSL with every call inlined and ever
   GPU DC interior meshing is retired) and only the MC GPU tests run them, but every target compiles them
   (`ShouldCompilePermutation`: the SM5 feature level). GPU generation is the one used at run time (planets by default).
 
+### VP2-O2 texture variation (2026-10-24)
+
+The user's report after milestone 1: the texture tiling shows, "we need to do something to break up the pattern" (F2.8).
+Branch `feat/vp2-texture-variation` (VoxelWorlds and the parent; rebased onto F2.13's `main` on 2026-10-25, below).
+
+**What it does.** Both triplanar functions include a new `Shaders/Private/VoxelTextureVariation.ush`
+(`MATERIAL_SYSTEM.md`, "Texture Variation"). Tile variation (`voxel.Material.TileVariation`, 1): the ground is a mosaic of
+patches under a tile, each reading the texture at one of eight offsets picked by a smooth noise about a tile across,
+blended across the patches' edges (after Inigo Quilez's "texture repetition", technique 3; offsets keep the normal map
+valid). Triplanar projections under 2% are dropped, so most pixels read one projection, and a second read happens only in
+the blend bands. Macro variation (`voxel.Material.MacroVariation`, 0.3): the albedo's brightness varies by up to ±30%
+over 13 and 41 tiles. Every noise is periodic on the tiled position's period (655 tiles at `TriplanarScale` 0.01), so
+nothing jumps where it wraps. `MPC_VoxelMaterial` gains `TileVariation` and `MacroVariation`;
+`Scripts/setup_texture_variation.py` (parent) writes the nodes; test `VoxelWorlds.Rendering.TextureVariation.Assets`
+(the collection scalars, the includes, the inputs, and every collection parameter node carrying its scalar's id).
+
+**First try, too coarse.** With the noise 8 tiles across, the patches were several tiles wide and the tiles still repeated
+inside each one: a cross-correlation of the off and on images found each region shifted as a block (by -46 to +39 px),
+the lattice intact. The lattice measure below went 0.243 → 0.220. Patches under a tile fixed it.
+
+**Results** on `PlanetTest` at 30°N 20°E, 11:30 local, the clock stopped, scatter hidden (`ShowFlag.InstancedStaticMeshes
+0`), five survey poses, each with the variation off, tile only, tile and macro (`Saved/ClaudeScripts/vp2o2_ab.sh`, images
+`vp2o2_pt30nB_*`):
+
+- **Repetition** from 1,500 uu straight down (`vp_lattice.py`: the off image's three strongest autocorrelation peaks of
+  the high-passed ground at 0.6-3 tiles, the tile lattice, and every image's autocorrelation at those lags; 1 = an exact
+  repeat): off 0.281, tile 0.049, tile and macro 0.048.
+- **Close** (120 uu up): the rows of brown marks become random ground, with no visible patch seams; contrast drops a
+  little where two copies blend.
+- **Grazing** (170 uu up, 9,000 ahead) and **from 3,500 uu**: the plaid grid on the far grass and mud is gone; the macro
+  term breaks the far ground into broad lighter and darker areas.
+- **Cost** (bench `300 3000 gc=45:20:90:2000`, three runs each, alternating, scatter on): GPU frame P50 5.60-6.48 ms off
+  against 5.93-6.20 on, P95 8.10-9.44 against 7.67-8.12; frame P50 18.7-21.6 against 18.8-22.5 ms. No cost measurable:
+  dropping the minor projections pays for the extra reads.
+
+Gotchas: editing the include in a running editor does not recompile the masters by itself (its hash is part of the
+shader key, but the materials must be recompiled after `recompileshaders changed`); the first bench batch ran with the
+editor throttled to 3 FPS in the background and was discarded.
+
+**Rebased onto F2.12 (2026-10-25).** VP2-O2 was finished before F2.11-F2.13 landed and stayed uncommitted until then.
+F2.12 rewrote the same two binary material functions (a `MaterialLUT` input, each array read at its own slice), so the
+rebase took `main`'s functions and ran `Scripts/setup_texture_variation.py` and then
+`Scripts/setup_texture_array_slices.py` on them (headless): VP2-O2's code with each array read, `VoxelVariationSample`
+included, at the material's slice from the LUT. `MF_CubicAtlasSample` and both masters were saved again by the second
+script, their links unchanged. Checked on `PlanetTest` with VP2-O2's survey (`vp2o2_ab.sh`, the same five poses, images
+`vp2o2_rebase_*`): the terrain textured, no material compile error, and the tile lattice's repetition from above off
+0.314, tile 0.048, tile and macro 0.047 (VP2-O2's own shots measured the same way: 0.268, 0.046, 0.046). The six suites:
+643/643 headless and in the editor.
+
 ### Next
 
 - **VP1-O6 (new):** decide the atmosphere's shadows on small planets: keep them (stable now apart from the cascades'
@@ -450,11 +499,12 @@ HLSL and gives it to FXC again: 1.28 MB of HLSL with every call inlined and ever
 - **F2.12 done (2026-10-24):** the arrays hold one slice per distinct texture and the triplanar functions read each
   material's slice from the LUT's slice row: the demo atlas's arrays 38.8 → 7.9 MB on disk and 15.8 → 4.8 MB on the GPU,
   the terrain unchanged; see "F2.12: one slice per distinct texture". VP2-O2's texture variation (uncommitted when this
-  landed) edits the same two functions: rerun `Scripts/setup_texture_array_slices.py` after its own setup script.
+  landed) edits the same two functions: rerun `Scripts/setup_texture_array_slices.py` after its own setup script (done
+  when VP2-O2 was rebased).
 - **F2.13 done (2026-10-24):** the SM5 (DX11) cook spent hours in FXC on the voxel compute shaders and then failed; with
   the shaders restructured (no change in what they compute) the global shader step takes 42 s against 1 h 51 min, and
   DX11 planets' pads match the CPU; see "F2.13: the voxel compute shaders on FXC".
-- Then milestone 2 (VP2-O2 to O4) and milestone 3 (VP3-O2, O3) as planned.
+- Then the rest of milestone 2 (VP2-O3, O4; VP2-O2 done above) and milestone 3 (VP3-O2, O3) as planned.
 
 ## The setup as found
 
