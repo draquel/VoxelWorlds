@@ -618,8 +618,8 @@ far-field patches built 20 → 8-9 (covered patches past the ring are no longer 
 ms either way, memory peak 84.9 → 84.3-85.1 MB; GPU frame P50 3.73-4.65 → 4.05-4.29 ms, P95 6.99-7.95 → 6.75-7.28 ms;
 frame P95 23.7-24.3 → 22.6-23.6 ms (vsync-bound P50 16.67); manager P95 4.10-4.14 → 3.92-4.23 ms. No cost.
 
-Tests: the six suites (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`) 644/644 headless;
-in the editor `VoxelWorlds.FarField` and `VoxelWorlds.Rendering` 18/18.
+Tests: the six suites (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`) 644/644 headless and
+in the editor.
 
 **F4.2 (found on the way, not fixed): a teleport onto a face never seen.** A cube face's root is built only once some of
 it comes into view (a culled patch requests no build). After a teleport onto a face the camera has not looked at, nothing
