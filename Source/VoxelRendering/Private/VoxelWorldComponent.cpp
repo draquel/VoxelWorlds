@@ -97,24 +97,50 @@ static TAutoConsoleVariable<int32> CVarVoxelMaterialConstantRoughness(
 	TEXT("      sky at grazing angles; no terrain material has a roughness map, the slots hold a placeholder)"),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelMaterialTileVariation(
+	TEXT("voxel.Material.TileVariation"),
+	1,
+	TEXT("Breaks up the tiling of the smooth terrain's textures (visual polish VP2-O2; MPC_VoxelMaterial's TileVariation, read\n")
+	TEXT("by MF_TriplanarSampleAlbedoRoughness and MF_TriplanarSampleNormal through VoxelTextureVariation.ush):\n")
+	TEXT("  1 = the ground is a mosaic of patches under a tile, each reading the texture at its own offset, and triplanar\n")
+	TEXT("      projections under 2% are skipped (default)\n")
+	TEXT("  0 = every tile the same, as before"),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarVoxelMaterialMacroVariation(
+	TEXT("voxel.Material.MacroVariation"),
+	0.3f,
+	TEXT("Large-scale brightness variation of the smooth terrain (visual polish VP2-O2; MPC_VoxelMaterial's MacroVariation,\n")
+	TEXT("read by MF_TriplanarSampleAlbedoRoughness): the albedo is scaled by 1 +- this at most, by noise about 13 and 41\n")
+	TEXT("tiles across. Default 0.3; 0 = none, as before."),
+	ECVF_Default);
+
 namespace
 {
-	/** The collection the voxel master materials read their switches from (VP2-O1, VP2-O6) */
+	/** The collection the voxel master materials read their switches from (VP2-O1, VP2-O2, VP2-O6) */
 	const TCHAR* VoxelMaterialCollectionPath = TEXT("/VoxelWorlds/Materials/MPC_VoxelMaterial.MPC_VoxelMaterial");
 
-	/** Each switch: the collection's scalar and the console variable that sets it (0 or 1). */
+	/** Each switch: the collection's scalar and the console variable that sets it, an on/off switch (0 or 1) or a value. */
 	struct FVoxelMaterialSwitch
 	{
 		FName ParamName;
-		TAutoConsoleVariable<int32>* CVar;
+		TAutoConsoleVariable<int32>* OnOffCVar = nullptr;
+		TAutoConsoleVariable<float>* ValueCVar = nullptr;
+
+		float GetWanted() const
+		{
+			return OnOffCVar ? (OnOffCVar->GetValueOnGameThread() != 0 ? 1.0f : 0.0f) : ValueCVar->GetValueOnGameThread();
+		}
 	};
 
 	/** Push the voxel.Material.* switches into the world's MPC_VoxelMaterial instance where they differ. */
 	void ApplyVoxelMaterialSwitches(UWorld* World)
 	{
 		static const FVoxelMaterialSwitch Switches[] = {
-			{ FName(TEXT("GradientSampling")), &CVarVoxelMaterialGradientSampling },
-			{ FName(TEXT("ConstantRoughness")), &CVarVoxelMaterialConstantRoughness },
+			{ FName(TEXT("GradientSampling")), &CVarVoxelMaterialGradientSampling, nullptr },
+			{ FName(TEXT("ConstantRoughness")), &CVarVoxelMaterialConstantRoughness, nullptr },
+			{ FName(TEXT("TileVariation")), &CVarVoxelMaterialTileVariation, nullptr },
+			{ FName(TEXT("MacroVariation")), nullptr, &CVarVoxelMaterialMacroVariation },
 		};
 		static TWeakObjectPtr<UMaterialParameterCollection> Collection;
 		static bool bLoadAttempted = false;
@@ -132,7 +158,7 @@ namespace
 		}
 		for (const FVoxelMaterialSwitch& Switch : Switches)
 		{
-			const float Wanted = Switch.CVar->GetValueOnGameThread() != 0 ? 1.0f : 0.0f;
+			const float Wanted = Switch.GetWanted();
 			float Current = -1.0f;
 			if (!Instance->GetScalarParameterValue(Switch.ParamName, Current) || Current != Wanted)
 			{

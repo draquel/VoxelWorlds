@@ -159,7 +159,12 @@ return float4(Albedo, Roughness);
      - `AlbedoArray` (Texture2DArray)
      - `RoughnessArray` (Texture2DArray)
      - `GradientSampling` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `GradientSampling`, inside the function
+     - `TileVariation`, `MacroVariation` (Scalar): Collection Parameter nodes on `MPC_VoxelMaterial`, likewise (texture
+       variation, VP2-O2)
+   - Include File Paths: `/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush`
    - Output Type: CMOT Float 4
+   - `Scripts/setup_texture_variation.py` (parent repo) writes the code, inputs and include into both functions; run
+     `Scripts/setup_texture_array_slices.py` (F2.12) after it to restore the `MaterialLUT` input and the slice reads
 
 5. Add **Component Mask** nodes to split the output:
    - RGB mask → Albedo output
@@ -257,6 +262,8 @@ return BlendedNormal;
      - `Sharpness` (Scalar)
      - `NormalArray` (Texture2DArray)
      - `GradientSampling` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `GradientSampling`, inside the function
+     - `TileVariation` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `TileVariation` (VP2-O2)
+   - Include File Paths: `/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush`
    - Output Type: CMOT Float 3
 
 5. Add **Function Output**:
