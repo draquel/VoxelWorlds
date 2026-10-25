@@ -278,6 +278,16 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 
 	/** Patch components alive (built patches, shown or not) */
 	int32 Components = 0;
+
+	/**
+	 * Stand-ins over the voxel window (visual polish VP4): patches drawn in the last update because a patch under them was
+	 * not ready, reaching into the window, where their coarse surface shows through the voxel terrain; the coarsest one's
+	 * level (-1 none); in all, and the updates that had any
+	 */
+	int32 StandIns = 0;
+	int32 StandInMinLevel = -1;
+	int64 TotalStandIns = 0;
+	int64 StandInUpdates = 0;
 };
 
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent))

@@ -94,6 +94,7 @@ FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InCo
 		ChunkManager->ResetBenchCounters();
 		ChunkManager->SetBenchmarkView(true, CurrentPos);
 		LastTotalGenerated = ChunkManager->GetTotalChunksGenerated();
+		LastFarFieldStandIns = ChunkManager->GetFarFieldStats().TotalStandIns;
 		CutoverTransitionsAtStart = ChunkManager->GetCutoverTransitionCount();
 	}
 	FVoxelBatchCounters::Consume(); // the first sample counts the run's own frames only
@@ -457,6 +458,8 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.FarFieldPatches = FarField.DrawnPatches;
 	S.FarFieldMB = FarField.MemoryMB;
 	S.FarFieldBuilt = FarField.PatchesBuilt;
+	S.FarFieldStandIns = static_cast<int32>(FarField.TotalStandIns - LastFarFieldStandIns);
+	LastFarFieldStandIns = FarField.TotalStandIns;
 	S.WindowSuspended = ChunkManager->IsVoxelWindowSuspended() ? 1 : 0;
 	S.StreamingLeadUU = static_cast<float>(ChunkManager->GetStreamingViewerLead());
 	S.SurfaceAltitude = ChunkManager->GetLODStrategy() ? static_cast<float>(ChunkManager->GetLODStrategy()->GetViewerSurfaceAltitude()) : 0.0f;
@@ -830,7 +833,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt,ScatEditMs,ScatApplyMs,ScatLaunchMs,ScatDistMs,ScatFlushMs,ScatApplyN,ScatLaunchN,ScatAddN,ScatRelN,GTMs,RTMs,GPUMs,ScatBatchN,ScatCompactN,DecodeN,DecodeMs,SnapMB,ShellMB,ShadowBatchN\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%.1f,%.1f,%d\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%.1f,%.1f,%d,%d\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
@@ -848,7 +851,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.BatchesDrawn, S.BatchesSkipped, S.GenDone, S.FarFieldMs, S.FarFieldPatches, S.FarFieldMB, S.FarFieldBuilt,
 			S.WindowSuspended, S.StreamingLeadUU, S.SurfaceAltitude,
 			S.ScatEditMs, S.ScatApplyMs, S.ScatLaunchMs, S.ScatDistMs, S.ScatFlushMs, S.ScatApplyN, S.ScatLaunchN, S.ScatAddN,
-			S.ScatRelN, S.GTMs, S.RTMs, S.GPUMs, S.ScatBatchN, S.ScatCompactN, S.DecodeN, S.DecodeMs, S.SnapMB, S.ShellMB, S.ShadowBatchesDrawn);
+			S.ScatRelN, S.GTMs, S.RTMs, S.GPUMs, S.ScatBatchN, S.ScatCompactN, S.DecodeN, S.DecodeMs, S.SnapMB, S.ShellMB, S.ShadowBatchesDrawn, S.FarFieldStandIns);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 
@@ -865,6 +868,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 	int32 FarFieldPatchesMax = 0;
 	float FarFieldMBMax = 0.0f;
 	int64 FarFieldBuiltTraverse = 0;
+	int64 FarFieldStandInsTraverse = 0;
+	int32 FarFieldStandInSamples = 0;
 	double AltitudeMin = TNumericLimits<double>::Max(), AltitudeMax = -TNumericLimits<double>::Max();
 	float ReachMax = 0.0f, GroundReachMax = 0.0f;
 	int64 LODSum[5] = {};
@@ -921,6 +926,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 		FarFieldPatchesMax = FMath::Max(FarFieldPatchesMax, S.FarFieldPatches);
 		FarFieldMBMax = FMath::Max(FarFieldMBMax, S.FarFieldMB);
 		FarFieldBuiltTraverse += S.FarFieldBuilt;
+		FarFieldStandInsTraverse += S.FarFieldStandIns;
+		FarFieldStandInSamples += S.FarFieldStandIns > 0 ? 1 : 0;
 		TraverseGenerated += S.GenDone;
 		SuspendedSamples += S.WindowSuspended;
 		LeadMax = FMath::Max(LeadMax, S.StreamingLeadUU);
@@ -1107,6 +1114,8 @@ void FVoxelStreamingBenchmark::WriteReport()
 			Json += FString::Printf(TEXT("  \"farFieldMemoryPeakMB\": %.1f, \"farFieldMemoryEndMB\": %.1f,\n"), FarFieldMBMax, FarFieldEnd.MemoryMB);
 			Json += FString::Printf(TEXT("  \"farFieldBuiltTraverse\": %lld, \"farFieldBuiltTotal\": %lld, \"farFieldBuildMsMean\": %.2f,\n"),
 				FarFieldBuiltTraverse, FarFieldEnd.TotalBuilt, FarFieldEnd.BuildMsMean);
+			Json += FString::Printf(TEXT("  \"farFieldStandInsTraverse\": %lld, \"farFieldStandInSamples\": %d,\n"),
+				FarFieldStandInsTraverse, FarFieldStandInSamples);
 			Json += FString::Printf(TEXT("  \"farFieldEnd\": {\"patches\": %d, \"drawn\": %d, \"drawnTerrain\": %d, \"drawnSea\": %d, \"hiddenBand\": %d, \"components\": %d, \"buildsPending\": %d, \"drawsSea\": %s},\n"),
 				FarFieldEnd.Patches, FarFieldEnd.DrawnPatches, FarFieldEnd.DrawnTerrain, FarFieldEnd.DrawnSea, FarFieldEnd.HiddenBand, FarFieldEnd.Components,
 				FarFieldEnd.BuildsPending, FarFieldEnd.bDrawsSea ? TEXT("true") : TEXT("false"));

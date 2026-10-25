@@ -387,6 +387,20 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 	 * band patches near the window's edge stay. Negative: never
 	 */
 	double ReleaseDelay = 10.0;
+
+	/**
+	 * No stand-in where nothing would show (visual polish VP4). A patch that is not ready to draw is stood in for by its
+	 * nearest built ancestor, which draws its whole area instead of everything under it; past the voxel window's band the
+	 * ancestors are released after ReleaseDelay, so that is often a cube face's root, whose coarse surface replaced the
+	 * horizon and rose through the voxel terrain for the frame or more the build took. With this:
+	 * - a band patch whose chunks are all drawn covers its area with nothing to draw, built or not (past PrebuildRadius
+	 *   once they have been drawn HideDelay; one that must stay built for when its chunks unload builds meanwhile);
+	 * - a patch culled (wholly under the horizon) in its last visit, so drawing nothing, waits for its build drawing nothing
+	 *   while the camera moves (not after a cut: the camera more than a chunk from the last update's, where it may lie in
+	 *   full view).
+	 * False = before: both stood in for, as a covered band patch the viewer moved past PrebuildRadius did
+	 */
+	bool bAvoidStandIns = true;
 };
 
 /** What an update changed, for the owner to apply to its components. */
@@ -500,6 +514,9 @@ public:
 		/** A band patch standing in for its part of its parent without a mesh this update (nothing to draw) */
 		bool bLazy = false;
 
+		/** Culled (wholly under the horizon) in its last visit: nothing was drawn for it */
+		bool bCulled = false;
+
 		/** Builds launched for it (a result for an older one is dropped) */
 		uint32 BuildSerial = 0;
 
@@ -610,6 +627,33 @@ public:
 	/** Patches released in all (rebuilt when needed again). */
 	int64 GetTotalReleased() const { return TotalReleased; }
 
+	/**
+	 * Stand-ins over the voxel window in the last update (visual polish VP4): patches drawn because a patch under them was
+	 * not ready to draw, over band patches the voxel chunks cover. Coarser than the voxel terrain, they show through it
+	 * wherever their chords rise over it (a flash of the analytic surface for as long as the stand-in lasts).
+	 */
+	int32 GetStandInCount() const { return StandInCount; }
+
+	/** The coarsest of the last update's stand-ins over the window (its level), -1 with none. */
+	int32 GetStandInMinLevel() const { return StandInMinLevel; }
+
+	/** Stand-ins over the window in all, and the updates that had any. */
+	int64 GetTotalStandIns() const { return TotalStandIns; }
+	int64 GetStandInUpdates() const { return StandInUpdates; }
+
+	/**
+	 * Band patches that were not ready to draw in the last update (unbuilt or released, and not standing in without a
+	 * mesh): covered (every chunk under them drawn) or not.
+	 */
+	int32 GetUnreadyBandCount(bool bCovered) const { return bCovered ? UnreadyCoveredBand : UnreadyUncoveredBand; }
+
+	/** A chunk under one of the last update's unready, uncovered band patches that was not drawn. False with none. */
+	bool GetUndrawnChunk(FIntVector& OutChunk) const
+	{
+		OutChunk = UndrawnChunk;
+		return bHasUndrawnChunk;
+	}
+
 	/** Patches built in all, and their total build time (ms, on the build threads). */
 	int64 GetTotalBuilt() const { return TotalBuilt; }
 	double GetTotalBuildMs() const { return TotalBuildMs; }
@@ -687,7 +731,11 @@ private:
 	 */
 	bool Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges);
 
-	/** Whether an unbuilt band patch can stand in without a mesh: every chunk under it drawn, no sea, inside the prebuild radius. */
+	/**
+	 * Whether a band patch without a mesh (unbuilt or released) can stand in for its area drawing nothing: every chunk under
+	 * it drawn and no sea; inside the prebuild radius, or past it once the chunks have been drawn HideDelay (with
+	 * View.bAvoidStandIns, VP4).
+	 */
 	bool IsLazy(FPatchState& Patch, const FPatchState& Parent);
 
 	/** Whether a patch stays built while hidden: a root, or a band patch near the window's edge. */
@@ -717,6 +765,9 @@ private:
 
 	/** Whether every chunk under a band patch is drawn (cached per chunk-state version). */
 	bool UpdateCovered(FPatchState& Patch);
+
+	/** Count a patch that is not ready to draw, if it is a band patch (the stand-in figures, VP4). */
+	void NoteUnready(FPatchState& Patch);
 
 	/** The chunk holding a world point. */
 	FIntVector GetChunkOf(const FVector& WorldPoint) const;
@@ -755,4 +806,20 @@ private:
 	int64 TotalReleased = 0;
 	double TotalBuildMs = 0.0;
 	int64 MeshMemoryBytes = 0;
+
+	/** The stand-in figures (VP4): this update's, and in all */
+	int32 StandInCount = 0;
+	int32 StandInMinLevel = -1;
+	int64 TotalStandIns = 0;
+	int64 StandInUpdates = 0;
+	int32 UnreadyCoveredBand = 0;
+	int32 UnreadyUncoveredBand = 0;
+	/** Band patches visited covered by drawn chunks (a stand-in counts when its subtree had one) */
+	int64 CoveredBandVisits = 0;
+	/** The last update's camera, and whether this update's moved more than a chunk from it (a cut: VP4) */
+	FVector LastCamera = FVector::ZeroVector;
+	bool bHasLastCamera = false;
+	bool bCameraCut = true;
+	FIntVector UndrawnChunk = FIntVector::ZeroValue;
+	bool bHasUndrawnChunk = false;
 };

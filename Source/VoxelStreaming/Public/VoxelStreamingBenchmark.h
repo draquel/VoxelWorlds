@@ -212,6 +212,8 @@ private:
 		float ShellMB;
 		// Of BatchesDrawn, the voxel batches drawn into shadow maps (visual polish VP3: voxel.Render.ShadowCullFrustum)
 		int32 ShadowBatchesDrawn;
+		// Far-field stand-ins over the voxel window since the last sample (visual polish VP4: voxel.World.FarFieldAvoidStandIns)
+		int32 FarFieldStandIns;
 	};
 
 	void TakeSample(float DeltaTime);
@@ -324,6 +326,8 @@ private:
 
 	// Chunks generated when the last sample was taken (the per-tick GenDone column).
 	int64 LastTotalGenerated = 0;
+	// The far field's stand-ins over the window in all when the last sample was taken (the FarFieldStandInN column, VP4).
+	int64 LastFarFieldStandIns = 0;
 	// The chunk manager's cut-over transition count when the run started (the report lists the run's own; G49).
 	int64 CutoverTransitionsAtStart = 0;
 	/** The scatter renderer's instance totals at the last sample (ScatAddN / ScatRelN are the differences) */
