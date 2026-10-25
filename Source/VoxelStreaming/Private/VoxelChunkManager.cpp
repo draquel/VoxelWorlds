@@ -187,6 +187,18 @@ static TAutoConsoleVariable<int32> CVarFarFieldAvoidStandIns(
 	TEXT("      over everything under it, until the build landed"),
 	ECVF_Default);
 
+// Visual polish F4.2: a cube face's far-field root was built only once some of the face came into view, so after a teleport
+// onto a face the camera had never seen nothing of the far field was there to stand in, and the first update drew none.
+static TAutoConsoleVariable<int32> CVarFarFieldBuildAllRoots(
+	TEXT("voxel.World.FarFieldBuildAllRoots"),
+	1,
+	TEXT("Planets (visual polish F4.2): build all six cube faces' far-field roots, also faces under the horizon.\n")
+	TEXT("  1 = every root is built in the first updates and kept (a patch each), so after a teleport onto a face the camera\n")
+	TEXT("      never saw its root stands in from the first update (default)\n")
+	TEXT("  0 = as before: a root is built once some of its face comes into view; a teleport onto a face never seen drew no\n")
+	TEXT("      far field there until builds landed"),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 	TEXT("voxel.World.FarFieldTrace"),
 	0,
@@ -4497,6 +4509,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	View.HideDelay = (FadeDuration ? FMath::Max(0.0f, FadeDuration->GetFloat()) : 0.35f) + 0.1;
 	View.ChunkStateVersion = ChunkStateVersion;
 	View.bAvoidStandIns = CVarFarFieldAvoidStandIns.GetValueOnGameThread() != 0;
+	View.bBuildAllRoots = CVarFarFieldBuildAllRoots.GetValueOnGameThread() != 0;
 
 	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
 	FVoxelFarFieldChanges Changes;
@@ -4659,11 +4672,17 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 	}
 	const FVoxelFarFieldStats& Stats = FarFieldStats;
 	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
-	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d)"),
+	int32 RootsBuilt = 0;
+	for (int32 Face = 0; Face < 6; ++Face)
+	{
+		const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
+		RootsBuilt += Root && Root->bResident ? 1 : 0;
+	}
+	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of 6 (voxel.World.FarFieldBuildAllRoots %d)"),
 		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenBand, Stats.Components, Stats.BuildsPending,
 		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
 		Settings.Sink, Settings.bSea ? TEXT("far field") : TEXT("ocean shell / none"), Stats.TotalStandIns, Stats.StandInUpdates,
-		CVarFarFieldAvoidStandIns.GetValueOnGameThread());
+		CVarFarFieldAvoidStandIns.GetValueOnGameThread(), RootsBuilt, CVarFarFieldBuildAllRoots.GetValueOnGameThread());
 }
 
 FString UVoxelChunkManager::GetFarOceanDebugString() const

@@ -733,7 +733,10 @@ primitives, and the voxel window keeps its size.
   datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and
   builds again when needed (its subtree draws meanwhile), except the roots and band patches near the window's edge,
   which are built while covered so they show the moment their chunks unload (a covered one the viewer leaves there
-  builds while it draws nothing, VP4).
+  builds while it draws nothing, VP4). Every root is built from the first updates, also a face under the horizon, so
+  after a teleport onto a face the camera never saw its root stands in at once (F4.2,
+  `voxel.World.FarFieldBuildAllRoots`, 1; before, a root was built once some of its face came into view and the first
+  update there drew no far field).
 - **The sea**, at scale: where the ocean shell would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps

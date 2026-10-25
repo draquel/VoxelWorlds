@@ -187,6 +187,31 @@ namespace VoxelPlanetFarFieldTestUtils
 			return -1;
 		}
 
+		/** Directions out to three view distances around a view's ground point not drawn by a chunk or a patch. */
+		int32 CountGaps(const FVoxelFarFieldView& View, TFunctionRef<bool(const FIntVector&)> IsDrawn) const
+		{
+			const FVector GroundDirection = (View.Viewer - Settings.Center).GetSafeNormal();
+			FVector East, North;
+			FVoxelCubeSphere::GetTangentFrame(GroundDirection, East, North);
+			int32 Gaps = 0;
+			for (double Distance = 0.0; Distance <= 3.0 * ViewDistance; Distance += ChunkWorld / 2.0)
+			{
+				const int32 Around = FMath::Max(8, FMath::CeilToInt32(UE_DOUBLE_TWO_PI * Distance / ChunkWorld));
+				for (int32 Step = 0; Step < Around; ++Step)
+				{
+					const double Theta = UE_DOUBLE_TWO_PI * Step / Around;
+					const double Angle = Distance / View.GroundRadius;
+					const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
+					const FVector Direction = (GroundDirection * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
+					if (!IsDrawn(ChunkOf(SurfacePoint(Direction))) && !FarField.FindDrawnPatch(Direction))
+					{
+						++Gaps;
+					}
+				}
+			}
+			return Gaps;
+		}
+
 		/** Ground distance from a viewer's ground point (the window's horizons, WM-BP8). */
 		double GroundDistance(const FVoxelFarFieldView& View, const FVector& Point) const
 		{
@@ -598,31 +623,6 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 		};
 		auto Viewer = [&Rig](const FVector& Up) { return Rig.SurfacePoint(Up) + Up * 170.0; };
 
-		// Directions out to three view distances not drawn by a chunk or a patch.
-		auto CountGaps = [&Rig](const FVoxelFarFieldView& View, TFunctionRef<bool(const FIntVector&)> IsDrawn)
-		{
-			const FVector GroundDirection = (View.Viewer - Rig.Settings.Center).GetSafeNormal();
-			FVector East, North;
-			FVoxelCubeSphere::GetTangentFrame(GroundDirection, East, North);
-			int32 Gaps = 0;
-			for (double Distance = 0.0; Distance <= 3.0 * ViewDistance; Distance += ChunkWorld / 2.0)
-			{
-				const int32 Around = FMath::Max(8, FMath::CeilToInt32(UE_DOUBLE_TWO_PI * Distance / ChunkWorld));
-				for (int32 Step = 0; Step < Around; ++Step)
-				{
-					const double Theta = UE_DOUBLE_TWO_PI * Step / Around;
-					const double Angle = Distance / View.GroundRadius;
-					const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
-					const FVector Direction = (GroundDirection * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
-					if (!IsDrawn(Rig.ChunkOf(Rig.SurfacePoint(Direction))) && !Rig.FarField.FindDrawnPatch(Direction))
-					{
-						++Gaps;
-					}
-				}
-			}
-			return Gaps;
-		};
-
 		// Settled with the window loaded, then again past the release delay (hidden ancestors released).
 		double Time = 0.0;
 		FVoxelFarFieldView View = MakeView(Viewer(Site.Up), Time);
@@ -679,7 +679,7 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 			UnreadyCovered += Rig.FarField.GetUnreadyBandCount(true);
 			if (Frame % 30 == 0)
 			{
-				WalkGaps += CountGaps(View, Loaded);
+				WalkGaps += Rig.CountGaps(View, Loaded);
 			}
 		}
 		AddInfo(FString::Printf(TEXT("%s: walking 7,500 uu, %d of %d frames drew a stand-in over the window (%d in all, coarsest level %d, band %d); covered band patches not ready %d; %lld patches released while settling; %d gaps at five checks"),
@@ -696,7 +696,7 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 			TestTrue(*FString::Printf(TEXT("%s: settles after the walk"), Rule), Rig.Converge(View, Loaded) > 0);
 			auto Shrunk = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, 0.85 * ViewDistance); };
 			Rig.FarField.Update(View, Shrunk, Changes);
-			const int32 EdgeGaps = CountGaps(View, Shrunk);
+			const int32 EdgeGaps = Rig.CountGaps(View, Shrunk);
 			AddInfo(FString::Printf(TEXT("%s: the window shrunk to 0.85 of the view distance: %d gaps in the next update, %d stand-ins"),
 				Rule, EdgeGaps, Rig.FarField.GetStandInCount()));
 			TestEqual(*FString::Printf(TEXT("%s: the edge's patches draw at once when its chunks unload"), Rule), EdgeGaps, 0);
@@ -712,7 +712,7 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 		// A teleport 40 degrees toward the pole, settled past the release delay first: the destination was under the
 		// horizon (culled, released) on a face whose root is built, and nothing is loaded there yet. The first update
 		// after the cut has no gap: an ancestor stands in as before (the horizon rule holds for motion only). (A face
-		// never seen has no built root: the first update after a teleport onto it draws nothing there either way.)
+		// never seen: TeleportOntoUnseenFace, F4.2.)
 		Time += 20.0;
 		TestTrue(*FString::Printf(TEXT("%s: settles before the teleport"), Rule), Rig.Converge(MakeView(View.Viewer, Time), Loaded) > 0);
 		const double Jump = FMath::DegreesToRadians(40.0);
@@ -721,9 +721,132 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 		View = MakeView(Viewer(Far), Time);
 		auto Nothing = [](const FIntVector&) { return false; };
 		Rig.FarField.Update(View, Nothing, Changes);
-		const int32 TeleportGaps = CountGaps(View, Nothing);
+		const int32 TeleportGaps = Rig.CountGaps(View, Nothing);
 		AddInfo(FString::Printf(TEXT("%s: a teleport 40 degrees toward the pole: %d gaps in the first update, %d stand-ins over the window, coarsest level %d"), Rule, TeleportGaps, Rig.FarField.GetStandInCount(), Rig.FarField.GetStandInMinLevel()));
 		TestEqual(*FString::Printf(TEXT("%s: no gap after a teleport"), Rule), TeleportGaps, 0);
+	}
+	return true;
+}
+
+/**
+ * Visual polish F4.2: a teleport onto a cube face the camera never saw. The window loaded around a viewer at 45 degrees on
+ * the small planet (between the +X and +Z faces), settled past the release delay; then a teleport 90 degrees east, onto
+ * the middle of a face that lay under the horizon all along, where nothing of the window is loaded. With
+ * View.bBuildAllRoots every root is built while settling (culled ones drawing nothing: the site draws the same patches as
+ * under the rule before) and the destination face's root stands in from the first update after the teleport: no gap out
+ * to three view distances, then or in the updates after it while the face refines. Under the rule before that root was
+ * never built: nothing of the far field was drawn there in the first update.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetUnseenFaceTest,
+	"VoxelWorlds.FarField.Planet.TeleportOntoUnseenFace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetFarFieldTestUtils;
+
+	const FPlanetCase Case = GetPlanetCases()[0];
+	const FSite Site = GetSites()[1];
+	FVector East, North;
+	FVoxelCubeSphere::GetTangentFrame(Site.Up, East, North);
+	const FVector Far = East.GetSafeNormal();
+	const int32 FarFace = FVoxelCubeSphere::DirectionToSurface(Far).Face;
+	const uint64 FarRoot = FVoxelFarFieldPatchKey(FarFace, 0, 0, 0).Pack();
+	TSet<uint64> DrawnAtSiteBefore;
+	for (const bool bBuildAllRoots : { false, true })
+	{
+		const TCHAR* Rule = bBuildAllRoots ? TEXT("building every root") : TEXT("the rule before");
+		FRig Rig(Case, 16, /*bSea=*/false);
+		auto MakeView = [&Rig, bBuildAllRoots](const FVector& Viewer, double Time)
+		{
+			FVoxelFarFieldView View = Rig.MakeView(Viewer);
+			View.Time = Time;
+			View.HideDelay = 0.45;
+			View.bBuildAllRoots = bBuildAllRoots;
+			return View;
+		};
+		auto Viewer = [&Rig](const FVector& Up) { return Rig.SurfacePoint(Up) + Up * 170.0; };
+
+		// Settled with the window loaded, then again past the release delay.
+		double Time = 0.0;
+		FVoxelFarFieldView View = MakeView(Viewer(Site.Up), Time);
+		auto Loaded = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, ViewDistance); };
+		TestTrue(*FString::Printf(TEXT("%s: settles"), Rule), Rig.Converge(View, Loaded) > 0);
+		Time = 20.0;
+		View = MakeView(Viewer(Site.Up), Time);
+		TestTrue(*FString::Printf(TEXT("%s: settles past the release delay"), Rule), Rig.Converge(View, Loaded) > 0);
+
+		// The roots built, what each holds, and what the site draws.
+		int32 RootsBuilt = 0;
+		SIZE_T RootBytes = 0;
+		for (int32 Face = 0; Face < 6; ++Face)
+		{
+			const FVoxelPlanetFarField::FPatchState* Root = Rig.FarField.FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
+			if (Root && Root->bResident)
+			{
+				++RootsBuilt;
+				RootBytes = FMath::Max(RootBytes, Root->Mesh.IsValid() ? Root->Mesh->GetAllocatedSize() : SIZE_T(0));
+			}
+		}
+		TSet<uint64> DrawnAtSite;
+		Rig.FarField.ForEachPatch([&DrawnAtSite](const FVoxelPlanetFarField::FPatchState& Patch)
+		{
+			if (Patch.bDrawTerrain || Patch.bDrawSea)
+			{
+				DrawnAtSite.Add(Patch.Key.Pack());
+			}
+		});
+		const FVoxelPlanetFarField::FPatchState* Destination = Rig.FarField.FindPatch(FarRoot);
+		TestTrue(*FString::Printf(TEXT("%s: the destination's face lay under the horizon from the site"), Rule), Destination && Destination->bCulled);
+		AddInfo(FString::Printf(TEXT("%s: settled at 45 degrees: %d of 6 roots built (the largest %.1f KB), %d patches drawn; the destination's face %d"),
+			Rule, RootsBuilt, RootBytes / 1024.0, DrawnAtSite.Num(), FarFace));
+		if (bBuildAllRoots)
+		{
+			TestEqual(*FString::Printf(TEXT("%s: every root is built"), Rule), RootsBuilt, 6);
+			TestTrue(*FString::Printf(TEXT("%s: the site draws what it drew under the rule before"), Rule),
+				DrawnAtSite.Num() == DrawnAtSiteBefore.Num() && DrawnAtSite.Includes(DrawnAtSiteBefore));
+		}
+		else
+		{
+			// Documents the gap this closes (F4.2): if this fails the destination's root is built under the rule before,
+			// and the test needs a face the site does not see.
+			TestTrue(*FString::Printf(TEXT("%s: the destination's root was never built"), Rule), Destination && !Destination->bBuilt);
+			DrawnAtSiteBefore = DrawnAtSite;
+		}
+
+		// The teleport: nothing of the window loaded there; the first update after it, and a second of updates after that.
+		auto Nothing = [](const FIntVector&) { return false; };
+		FVoxelFarFieldChanges Changes;
+		int32 FirstGaps = 0, LaterGaps = 0, LaterUpdatesWithGaps = 0;
+		for (int32 Frame = 1; Frame <= 30; ++Frame)
+		{
+			Time += 1.0 / 30.0;
+			View = MakeView(Viewer(Far), Time);
+			Rig.FarField.Update(View, Nothing, Changes);
+			const int32 Gaps = Rig.CountGaps(View, Nothing);
+			if (Frame == 1)
+			{
+				FirstGaps = Gaps;
+				const FVoxelPlanetFarField::FPatchState* Drawn = Rig.FarField.FindDrawnPatch(Far);
+				AddInfo(FString::Printf(TEXT("%s: a teleport 90 degrees east onto face %d: %d gaps in the first update, %d patches drawn, under the viewer %s"),
+					Rule, FarFace, Gaps, Rig.FarField.GetDrawnPatchCount(), Drawn ? *Drawn->Key.ToString() : TEXT("nothing")));
+			}
+			else
+			{
+				LaterGaps += Gaps;
+				LaterUpdatesWithGaps += Gaps > 0 ? 1 : 0;
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%s: the 29 updates after the first: %d with gaps (%d gaps in all)"), Rule, LaterUpdatesWithGaps, LaterGaps));
+		if (bBuildAllRoots)
+		{
+			TestEqual(*FString::Printf(TEXT("%s: no gap in the first update after the teleport"), Rule), FirstGaps, 0);
+			TestEqual(*FString::Printf(TEXT("%s: no gap in the updates after it"), Rule), LaterGaps, 0);
+		}
+		else
+		{
+			TestTrue(*FString::Printf(TEXT("%s: the first update after the teleport has gaps"), Rule), FirstGaps > 0);
+		}
 	}
 	return true;
 }

@@ -1101,6 +1101,11 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	if (Patch->bCulled)
 	{
 		PruneChildren(*Patch, OutChanges);
+		// A root is built while culled too (F4.2), so after a teleport onto a face the camera never saw it stands in at once.
+		if (View.bBuildAllRoots && Patch->Key.Level == 0)
+		{
+			RequestBuild(*Patch);
+		}
 		return true;
 	}
 	// Coming up over the horizon as the camera moves (VP4): nothing was drawn for it, so it waits for its build drawing

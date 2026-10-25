@@ -20,7 +20,7 @@ root; line numbers in the findings are as of VoxelWorlds `952d4ae`, WorldClockPl
 | VP1 | Sky flickers and moves | The terrain's (and trees') shadows cast onto the atmosphere through the sun's cascades (F1.7), redrawn as the cascades re-fit and, before VP3-O1, as casters were culled with the view; the sky light captured at the planet's centre leaves every shadow black (F1.4). The volumetric clouds, the first suspect, are not visible on `PlanetTest` | Both shown live 2026-10-24; VP3-O1 removes about 80% of the sky's change from the shadows; F1.4 **fixed** (VP1-O5, `wc.Planet.SkyLightAtViewer`); VP1-O6 open | Planets (small ones most) | WorldClockPlugin, parent (maps) | S |
 | VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 **fixed** (VP2-O6, `voxel.Material.ConstantRoughness`); F2.8 **fixed** (VP2-O2, `voxel.Material.TileVariation`, `MacroVariation`) | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (materials) | S, then M for the look |
 | VP3 | Hill shadows come and go | The voxel scene proxy culled shadow casters with the camera's frustum (F3.1) | **Fixed** (VP3-O1, `voxel.Render.ShadowCullFrustum`); F3.2 and F3.3 open | Every mode | VoxelWorlds (VoxelRendering) | S; the shadow range and Lumen items M-L |
-| VP4 | Fast terrain flicker as you move | A far-field patch waiting for a build where nothing of it would show was stood in for by its nearest built ancestor, often a cube face's root, drawn over the voxel terrain and the horizon for a frame (F4.1) | **Fixed** (VP4-O1, `voxel.World.FarFieldAvoidStandIns`); see "VP4 terrain flicker" | Planets | VoxelWorlds (VoxelStreaming) | S |
+| VP4 | Fast terrain flicker as you move | A far-field patch waiting for a build where nothing of it would show was stood in for by its nearest built ancestor, often a cube face's root, drawn over the voxel terrain and the horizon for a frame (F4.1) | **Fixed** (VP4-O1, `voxel.World.FarFieldAvoidStandIns`); F4.2 (no far field for an update after a teleport onto a face never seen) **fixed** (`voxel.World.FarFieldBuildAllRoots`); F4.3 open; see "VP4 terrain flicker" | Planets | VoxelWorlds (VoxelStreaming) | S |
 
 ## Milestone 1 results (2026-10-24)
 
@@ -621,14 +621,46 @@ frame P95 23.7-24.3 → 22.6-23.6 ms (vsync-bound P50 16.67); manager P95 4.10-4
 Tests: the six suites (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`) 644/644 headless and
 in the editor.
 
-**F4.2 (found on the way, not fixed): a teleport onto a face never seen.** A cube face's root is built only once some of
-it comes into view (a culled patch requests no build). After a teleport onto a face the camera has not looked at, nothing
-of the far field is resident there, so the first update after it draws nothing there under either rule (the test's
-teleport 90° away from 45°: no patch drawn, 4,042 empty directions); builds fill it over the next updates while the voxel
-window loads. Building the six roots up front (a patch each, about 0.1-0.2 MB on `PlanetTest`) would close it.
-
 Not traced here: the sky and lighting were not touched (the sky's own flicker is VP1, the pixelated clouds a separate
 session).
+
+### F4.2 A teleport onto a face never seen (2026-10-25, fixed)
+
+Found while testing VP4-O1. A cube face's root was built only once some of the face came into view: `Visit` returns for a
+culled patch before it requests a build. After a teleport onto a face the camera had not looked at, nothing of the far
+field was resident there, so the first update after it drew nothing there under either rule: the sky through the planet,
+with the voxel window not loaded there yet either. The root's build landed in the update after that.
+
+**Fix:** `voxel.World.FarFieldBuildAllRoots` (1; 0 = before), `FVoxelFarFieldView::bBuildAllRoots`. A culled root
+requests its build too, so all six roots are built in the first updates (nearest first: roots go before every other
+patch, and the culled ones are the farthest) and kept (`IsKeptBuilt`). A culled root draws nothing, so nothing on screen
+changes until a teleport needs one. Cost: three to five more patches built once, each a patch of 16 x 16 quads (38.8 KB
+of CPU mesh on the test's small planet, released once the component has it).
+
+**Results.** Test `VoxelWorlds.FarField.Planet.TeleportOntoUnseenFace` (pure logic, headless): the window loaded at 45°
+on the small planet and settled past the release delay, then a teleport 90° east onto the middle of face 2 (+Y), which was
+under the horizon all along, with nothing of the window loaded there:
+
+| Rule | Roots built at the site | Patches drawn at the site | Gaps out to three view distances, first update after the teleport | Gaps in the 29 updates after it |
+|------|------------------------|---------------------------|-------------------------------------------------------------------|---------------------------------|
+| Before | 2 of 6 | 330 | 4,042 (all of them: no patch drawn) | 0 |
+| `FarFieldBuildAllRoots` | 6 of 6 | 330 (the same patches) | 0 (the face's root draws) | 0 |
+
+Live on `PlanetTest` (one build, by the cvar, two runs each): from 45°N 20°E, with the far field rebuilt there
+(`voxel.World.FarField 0` then `1`), a teleport to 0°N 90°W (the -Y face) inside a frame burst (`r.DumpingMovie` at a
+fixed 30 fps; unlit, atmosphere, fog and clouds off, TSR off, so the sky is black and anything drawn shows). Roots built at
+the site 3 of 6 → 6 of 6; frames after the teleport with nothing drawn (100% of the frame black) 2 → 1 in both runs; the
+next frame draws the face's root (the lower half 84% drawn, the horizon a little under the frame's middle) and the
+following ones its children. `voxel.World.FarFieldStats` reports "roots built N of 6".
+
+**F4.3 (found, not fixed): the first frame after a teleport.** The black frame left is a frame of lag in the chunk manager's
+view, not the roots: `UVoxelChunkManager` ticks in `TG_PrePhysics` and takes its camera from
+`PlayerCameraManager->GetCameraLocation()`, the camera of the frame before, so the first frame rendered after a teleport
+is drawn with the far-field selection for the old position. The fix would be a far-field update that sees this frame's
+camera (a tick after the camera's update, or one more update on a cut); the headless test's update sees the new camera
+and has no such frame.
+
+Tests: `VoxelWorlds.FarField` 8/8 headless and in the editor.
 
 ## The setup as found
 
