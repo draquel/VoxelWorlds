@@ -1691,20 +1691,11 @@ void UVoxelWorldComponent::UpdateMaterialAtlasParameters()
 
 	// ===== Texture Array Parameters (Smooth Terrain) =====
 
-	// Build texture arrays if needed (similar to LUT)
-	if (MaterialAtlas->AreTextureArraysDirty() || !MaterialAtlas->AlbedoArray)
+	// The saved arrays (the editor rebuilds missing or stale ones first)
+	if (!MaterialAtlas->EnsureTextureArrays())
 	{
-		UE_LOG(LogVoxelRendering, Log, TEXT("Building Texture Arrays (Dirty=%s, AlbedoArray=%s, NumConfigs=%d)"),
-			MaterialAtlas->AreTextureArraysDirty() ? TEXT("Yes") : TEXT("No"),
-			MaterialAtlas->AlbedoArray ? TEXT("Exists") : TEXT("NULL"),
-			MaterialAtlas->GetMaterialCount());
-		MaterialAtlas->BuildTextureArrays();
-	}
-
-	// Warn if arrays are still null after build attempt
-	if (!MaterialAtlas->AlbedoArray)
-	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("AlbedoArray is NULL after BuildTextureArrays! Check that MaterialConfigs have AlbedoTexture assigned."));
+		UE_LOG(LogVoxelRendering, Warning, TEXT("%s has no AlbedoArray to bind. Check that MaterialConfigs have AlbedoTexture assigned and the arrays are built."),
+			*MaterialAtlas->GetName());
 	}
 
 	if (MaterialAtlas->AlbedoArray)

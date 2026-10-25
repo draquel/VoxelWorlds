@@ -38,6 +38,13 @@ public class VoxelCore : ModuleRules
 			}
 		);
 
+		if (Target.bBuildEditor)
+		{
+			// UVoxelMaterialAtlas: the texture arrays' build key reads source textures' saved package hashes, and new
+			// array assets are registered
+			PrivateDependencyModuleNames.Add("AssetRegistry");
+		}
+
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{

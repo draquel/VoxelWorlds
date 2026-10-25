@@ -107,13 +107,14 @@ public:
     int32 AtlasColumns = 4;
     int32 AtlasRows = 4;
 
-    // ===== Texture Arrays (Smooth Terrain) - Auto-generated =====
+    // ===== Texture Arrays (Smooth Terrain) - Built from MaterialConfigs =====
 
-    /** Auto-built from MaterialConfigs source textures */
-    UTexture2DArray* AlbedoArray;    // VisibleAnywhere - runtime generated
+    /** Saved assets next to the atlas (<Atlas>_AlbedoArray, ...), built by BuildTextureArrays() */
+    UTexture2DArray* AlbedoArray;    // VisibleAnywhere
     UTexture2DArray* NormalArray;
     UTexture2DArray* RoughnessArray;
     int32 TextureArraySize = 512;    // Size of every array slice (rounded up to a power of two)
+    FString TextureArrayBuildKey;    // Editor-only: hash of the inputs the arrays were built from
 
     // ===== Per-Material Configuration =====
 
@@ -129,16 +130,47 @@ public:
     UFUNCTION(BlueprintCallable, CallInEditor)
     void BuildMaterialLUT();
 
-    /** Check if arrays need rebuilding */
+    /** Check if arrays need rebuilding (editor: missing, or built from other inputs) */
     bool AreTextureArraysDirty() const;
+
+    /** What a world calls before binding: the editor rebuilds missing or stale arrays first */
+    bool EnsureTextureArrays();
 };
 ```
 
 ### Building the Texture Arrays
 
-`BuildTextureArrays()` runs in the editor when a world component first binds the atlas (once an editor session: the
-arrays live in the transient package and are not saved). For each array (albedo, normal, roughness),
-`BuildSingleTextureArray` writes the array's source itself rather than through
+The arrays are **saved assets** next to the atlas: `<Atlas>_AlbedoArray`, `<Atlas>_NormalArray` and
+`<Atlas>_RoughnessArray` in the atlas's folder (`DemoMaterialAtlas_AlbedoArray`, ...), referenced by the atlas and cooked
+with it. A packaged game has no source textures to build from, so it binds what was saved (`VISUAL_POLISH_PLAN.md`,
+F2.11). They are Git LFS files in the parent repo (`.gitattributes`): 11-14 MB each on disk at 512 (the source,
+delta-coded and Kraken-compressed; repeated slices are stored in full), about 39 MB an atlas.
+
+- **Building.** `BuildTextureArrays()` (the atlas's *Build Texture Arrays* button) creates the three assets or updates
+  them in place (`PreEditChange` / `PostEditChange`, as a reimport does, so materials drawing with them pick up the new
+  data), stores the inputs' hash in `TextureArrayBuildKey`, bakes the map colours, and leaves the atlas and its arrays
+  unsaved. `Scripts/rebuild_atlas_arrays.py` rebuilds and saves every atlas under `/Game` (headless:
+  `UnrealEditor-Cmd.exe VoxelEngine.uproject -run=pythonscript -script="Scripts/rebuild_atlas_arrays.py" -nullrhi
+  -unattended`; `--only-stale` skips up-to-date ones). An atlas outside a package (a transient one, as in the tests)
+  gets transient arrays. Outside the editor `BuildTextureArrays()` does nothing (no source data); the saved arrays stay.
+- **Staleness.** The key hashes `TextureArraySize`, a build version, and for each config its MaterialID and each
+  texture's path with what identifies its content: the saved package's hash from the asset registry when the texture's
+  package is saved and unmodified (so checking loads nothing), otherwise the loaded texture's source id. The arrays
+  are stale when the key differs or an array the configs give textures for is missing (`AreTextureArraysDirty()`,
+  `NeedsTextureArrayRebuild()`). Editing the atlas's configs or `TextureArraySize`, or reimporting a source texture,
+  makes them stale; renaming a material does not. An atlas with no source texture and no array (a packed atlas for
+  cubic terrain only) is never stale.
+- **Binding.** `UVoxelWorldComponent::UpdateMaterialAtlasParameters` and `FVoxelPMCRenderer::UpdateMaterialAtlasParameters`
+  call `EnsureTextureArrays()` and bind the arrays. In the editor, missing or stale arrays are rebuilt there first, with
+  a warning naming the atlas (save the atlas and its arrays to keep them; a packaged game uses the saved ones); up to
+  date ones are only bound, so an editor session's first PIE builds nothing (0.28 s on `PlanetTest`; a rebuild of the
+  demo atlas's arrays there takes about 3 s). A cook never rebuilds. Outside the editor an atlas with source textures
+  and no saved arrays logs an error once (smooth terrain then draws untextured: black in a package).
+- **Cook check.** Cooking an atlas (`PreSave` with a target platform) logs an error when an array is missing, which
+  fails the cook, and a warning when they are stale (the package ships the saved ones). Data validation (`IsDataValid`)
+  reports both as errors, so a cook with `-RunAssetValidation -ValidationErrorsAreFatal` fails on stale arrays too.
+
+For each array (albedo, normal, roughness), `BuildSingleTextureArray` writes the array's source itself rather than through
 `UTexture2DArray::UpdateSourceFromSourceTextures()`, which would size every slice to the largest source texture and
 convert them all to RGBA32F when their gamma spaces or formats differ (on the demo atlas that was 4096 x 4096 x 22 float
 slices, 20-24 s of the first PIE and 800 MB on the GPU; see `VISUAL_POLISH_PLAN.md`, F2.10):
@@ -155,8 +187,7 @@ slices, 20-24 s of the first PIE and 800 MB on the GPU; see `VISUAL_POLISH_PLAN.
   group, `TF_Default` filtering, never streamed.
 - The platform data builds asynchronously and is cached in the DDC by the source's hash.
 
-On `DemoMaterialAtlas` (22 slices at 512) the build takes about 2.3 s and the arrays 16 MB on the GPU. A packaged game
-has no source data to build from (see `VISUAL_POLISH_PLAN.md`, F2.11).
+On `DemoMaterialAtlas` (22 slices at 512) the build takes about 2.3 s and the arrays 16 MB on the GPU.
 
 ---
 
@@ -673,11 +704,8 @@ void UVoxelWorldComponent::UpdateMaterialAtlasParameters(UMaterialInstanceDynami
         MaterialAtlas->BuildMaterialLUT();
     }
 
-    // Build texture arrays if needed
-    if (MaterialAtlas->AreTextureArraysDirty() || !MaterialAtlas->AlbedoArray)
-    {
-        MaterialAtlas->BuildTextureArrays();
-    }
+    // The saved arrays; in the editor missing or stale ones are rebuilt first (left unsaved, with a warning)
+    MaterialAtlas->EnsureTextureArrays();
 
     // Set texture array parameters
     if (MaterialAtlas->AlbedoArray)
