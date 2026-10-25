@@ -5,6 +5,10 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/PlayerController.h"
+#include "Camera/CameraActor.h"
+#include "Camera/PlayerCameraManager.h"
+#include "HAL/IConsoleManager.h"
 #include "Materials/Material.h"
 #include "ProceduralMeshComponent.h"
 #include "VoxelChunkManager.h"
@@ -287,6 +291,29 @@ namespace VoxelPlanetFarFieldTestUtils
 		default: OutFU = 0.0; OutFV = Along; OutOutsideFU = -Outside; OutOutsideFV = Along; break;
 		}
 	}
+
+	/** A console variable set for a scope (restored after). */
+	struct FScopedCVar
+	{
+		IConsoleVariable* Var = nullptr;
+		FString Previous;
+		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
+		{
+			Var = IConsoleManager::Get().FindConsoleVariable(Name);
+			if (Var)
+			{
+				Previous = Var->GetString();
+				Var->Set(Value, ECVF_SetByConsole);
+			}
+		}
+		~FScopedCVar()
+		{
+			if (Var)
+			{
+				Var->Set(*Previous, ECVF_SetByConsole);
+			}
+		}
+	};
 
 	/** A renderer that draws nothing (the chunk manager needs one to initialise). */
 	class FNullMeshRenderer : public IVoxelMeshRenderer
@@ -1125,6 +1152,205 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 
 	RunWorld(TEXT("FarFieldBigPlanetWorld"), 1.0e6, /*bExpectFarFieldSea=*/true);
 	RunWorld(TEXT("FarFieldSmallPlanetWorld"), 20000.0, /*bExpectFarFieldSea=*/false);
+	return true;
+}
+
+/**
+ * Visual polish F4.3: the far field for the camera a frame renders with. A chunk manager on a small planet (R 20,000,
+ * terrain +-1,000) in a game world with a player controller whose view target is a camera actor, frames stepped in
+ * UWorld::Tick's order: the chunk manager's tick (TG_PrePhysics, reading the camera manager's camera), the camera managers,
+ * then the far field's camera tick (TG_PostUpdateWork). The window settles around the camera 1,200 over the datum at 45
+ * degrees between +X and +Z; the camera then jumps 135 degrees, over the middle of the -X face, which lay under the
+ * horizon all along. With voxel.World.FarFieldCameraUpdate that very frame draws the far field there: every direction out
+ * to 9,000 uu around the camera falls on a drawn patch whose component shows it. Under the rule before that frame drew
+ * the selection for the old camera, nothing there, and the next frame drew it. Moving under a chunk a frame runs no
+ * second update; the camera tick is registered in TG_PostUpdateWork after the primary tick.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetCameraAfterCutTest,
+	"VoxelWorlds.FarField.Planet.CameraAfterCut",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetFarFieldTestUtils;
+
+	constexpr double Radius = 20000.0;
+	constexpr double Altitude = 1200.0;
+	constexpr float FrameSeconds = 1.0f / 60.0f;
+	const FVector SiteUp = FVector(1, 0, 1).GetSafeNormal();
+	const FVector FarUp = FVector(-1, 0, 0);
+	for (const bool bCameraUpdate : { false, true })
+	{
+		const TCHAR* Rule = bCameraUpdate ? TEXT("updating for the frame's camera") : TEXT("the rule before");
+		const FScopedCVar CameraUpdate(TEXT("voxel.World.FarFieldCameraUpdate"), bCameraUpdate ? TEXT("1") : TEXT("0"));
+
+		UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("FarFieldCameraAfterCutWorld"));
+		FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
+		WorldContext.SetCurrentWorld(World);
+		// Actors initialised, so a player controller spawns its camera manager and joins the world's controllers.
+		World->InitializeActorsForPlay(FURL());
+		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+		Config->AddToRoot();
+		Config->WorldMode = EWorldMode::SphericalPlanet;
+		Config->WorldOrigin = FVector::ZeroVector;
+		Config->WorldRadius = Radius;
+		Config->PlanetHeightScale = 1600.0f;
+		Config->BaseHeight = 0.0f;
+		Config->PlanetMaxTerrainHeight = 1000.0f;
+		Config->PlanetMaxTerrainDepth = 1000.0f;
+		Config->MeshingMode = EMeshingMode::DualContouring;
+		Config->ChunkSize = 32;
+		Config->VoxelSize = 50.0f;
+		Config->ViewDistance = 3000.0f;
+		Config->bUseGPUGeneration = false;
+		Config->bUseGPUMeshing = false;
+		Config->bGenerateCollision = false;
+		Config->bEnableScatter = false;
+		Config->bEnableCaves = false;
+		Config->bEnableBiomes = false;
+		Config->bEnableWaterLevel = true;
+		Config->WaterRadius = Radius - 200.0;
+		Config->WaterMeshMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+		Config->NoiseParams.Seed = 9001;
+		Config->NoiseParams.Frequency = 0.0004f;
+		Config->NoiseParams.Octaves = 3;
+
+		AActor* Owner = World->SpawnActor<AActor>();
+		UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
+		Manager->RegisterComponent();
+		FNullMeshRenderer Renderer;
+		Renderer.Initialize(World, Config);
+		Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+
+		// The camera: a camera actor, the controller's view target (as vox.Orbit's camera is).
+		APlayerController* PC = World->SpawnActor<APlayerController>();
+		ACameraActor* Camera = World->SpawnActor<ACameraActor>(SiteUp * (Radius + Altitude), FRotator::ZeroRotator);
+		FVoxelPlanetFarField* FarField = Manager->GetFarFieldMutable();
+		const bool bReady = FarField && PC && PC->PlayerCameraManager && Camera && World->GetFirstPlayerController() == PC;
+		TestTrue(*FString::Printf(TEXT("%s: a far field, and a controller with a camera manager, the world's first"), Rule), bReady);
+		if (bReady)
+		{
+			FarField->SetSynchronousBuilds(true);
+			FarField->SetMaxBuildsInFlight(256);
+			// A test controller has no local player: its camera manager updates only without client-side updates.
+			PC->PlayerCameraManager->bUseClientSideCameraUpdates = false;
+			PC->SetViewTarget(Camera);
+
+			// The camera tick: after the primary tick, after the camera managers.
+			Manager->RegisterAllComponentTickFunctions(true);
+			FVoxelFarFieldCameraTickFunction& CameraTick = Manager->GetFarFieldCameraTickFunction();
+			bool bAfterPrimary = false;
+			for (const FTickPrerequisite& Prerequisite : CameraTick.GetPrerequisites())
+			{
+				bAfterPrimary |= Prerequisite.PrerequisiteTickFunction == &Manager->PrimaryComponentTick;
+			}
+			TestTrue(*FString::Printf(TEXT("%s: the camera tick is registered"), Rule), CameraTick.IsTickFunctionRegistered());
+			TestTrue(*FString::Printf(TEXT("%s: the camera tick runs in TG_PostUpdateWork, the primary in TG_PrePhysics"), Rule),
+				CameraTick.TickGroup == TG_PostUpdateWork && Manager->PrimaryComponentTick.TickGroup == TG_PrePhysics);
+			TestTrue(*FString::Printf(TEXT("%s: the camera tick follows the primary tick"), Rule), bAfterPrimary);
+
+			// A frame as UWorld::Tick runs it.
+			auto Frame = [Manager, PC, &CameraTick, FrameSeconds]()
+			{
+				Manager->TickComponent(FrameSeconds, LEVELTICK_All, nullptr);
+				PC->UpdateCameraManager(FrameSeconds);
+				CameraTick.ExecuteTick(FrameSeconds, LEVELTICK_All, ENamedThreads::GameThread, FGraphEventRef());
+			};
+			// Directions out to 9,000 uu around a point on the ground with no drawn patch, or one whose component hides it.
+			auto CountGaps = [Manager, FarField, Radius](const FVector& Up, int32& OutSamples)
+			{
+				FVector East, North;
+				FVoxelCubeSphere::GetTangentFrame(Up, East, North);
+				int32 Gaps = 0;
+				OutSamples = 0;
+				for (double Distance = 0.0; Distance <= 9000.0; Distance += 800.0)
+				{
+					const int32 Around = FMath::Max(8, FMath::CeilToInt32(UE_DOUBLE_TWO_PI * Distance / 800.0));
+					for (int32 Step = 0; Step < Around; ++Step)
+					{
+						const double Theta = UE_DOUBLE_TWO_PI * Step / Around;
+						const double Angle = Distance / Radius;
+						const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
+						const FVector Direction = (Up * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
+						const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindDrawnPatch(Direction);
+						const UProceduralMeshComponent* Component = Patch ? Manager->GetFarFieldComponent(Patch->Key.Pack()) : nullptr;
+						++OutSamples;
+						Gaps += (!Component || Component->GetNumSections() == 0 || !Component->IsMeshSectionVisible(0)) ? 1 : 0;
+					}
+				}
+				return Gaps;
+			};
+
+			// Settle: the window loaded and the far field built around the camera.
+			int32 IdleFrames = 0;
+			const double Deadline = FPlatformTime::Seconds() + 120.0;
+			while (IdleFrames < 30 && FPlatformTime::Seconds() < Deadline)
+			{
+				Frame();
+				FPlatformProcess::Sleep(0.002f);
+				const bool bIdle = Manager->GetPendingGenerationCount() == 0 && Manager->GetPendingMeshingCount() == 0
+					&& Manager->GetAsyncGenerationInProgressCount() == 0 && Manager->GetAsyncMeshingInProgressCount() == 0
+					&& Manager->GetPendingMeshUploadCount() == 0 && Manager->GetSeamJobsInFlightCount() == 0 && FarField->GetBuildsPending() == 0;
+				IdleFrames = bIdle ? IdleFrames + 1 : 0;
+			}
+			TestTrue(*FString::Printf(TEXT("%s: settles"), Rule), IdleFrames >= 30);
+			TestTrue(*FString::Printf(TEXT("%s: the camera manager's camera is the camera actor"), Rule),
+				PC->PlayerCameraManager->GetCameraLocation().Equals(Camera->GetActorLocation(), 1.0));
+			const FVoxelPlanetFarField::FPatchState* FarRoot = FarField->FindPatch(FVoxelFarFieldPatchKey(FVoxelCubeSphere::DirectionToSurface(FarUp).Face, 0, 0, 0).Pack());
+			TestTrue(*FString::Printf(TEXT("%s: the destination's face lies under the horizon"), Rule), FarRoot && FarRoot->bCulled);
+
+			// Moving under a chunk a frame: the tick's selection holds, no second update.
+			FVector East, North;
+			FVoxelCubeSphere::GetTangentFrame(SiteUp, East, North);
+			const int64 UpdatesBefore = Manager->GetFarFieldStats().CameraUpdates;
+			for (int32 Step = 1; Step <= 5; ++Step)
+			{
+				Camera->SetActorLocation(SiteUp * (Radius + Altitude) + East * (400.0 * Step));
+				Frame();
+			}
+			TestEqual(*FString::Printf(TEXT("%s: no second update while moving 400 uu a frame"), Rule),
+				Manager->GetFarFieldStats().CameraUpdates, UpdatesBefore);
+
+			// The cut: the camera over the -X face's middle.
+			Camera->SetActorLocation(FarUp * (Radius + Altitude));
+			Frame();
+			int32 Samples = 0;
+			const int32 FirstGaps = CountGaps(FarUp, Samples);
+			const int64 CutUpdates = Manager->GetFarFieldStats().CameraUpdates - UpdatesBefore;
+			const FVoxelPlanetFarField::FPatchState* Drawn = FarField->FindDrawnPatch(FarUp);
+			Frame();
+			int32 SecondSamples = 0;
+			const int32 SecondGaps = CountGaps(FarUp, SecondSamples);
+			AddInfo(FString::Printf(TEXT("%s: the frame of the cut: %d of %d directions without the far field (under the camera %s), %lld update(s) for the frame's camera; the next frame: %d"),
+				Rule, FirstGaps, Samples, Drawn ? *Drawn->Key.ToString() : TEXT("nothing"), CutUpdates, SecondGaps));
+			TestEqual(*FString::Printf(TEXT("%s: the frame after the cut draws the far field there"), Rule), SecondGaps, 0);
+			if (bCameraUpdate)
+			{
+				TestEqual(*FString::Printf(TEXT("%s: the frame of the cut draws the far field there"), Rule), FirstGaps, 0);
+				TestEqual(*FString::Printf(TEXT("%s: one update for the frame's camera"), Rule), CutUpdates, int64(1));
+			}
+			else
+			{
+				// Documents the frame this closes (F4.3): if this fails the rule before no longer lags the camera here.
+				TestEqual(*FString::Printf(TEXT("%s: the frame of the cut draws the old camera's selection, nothing there"), Rule), FirstGaps, Samples);
+				TestEqual(*FString::Printf(TEXT("%s: no update for the frame's camera"), Rule), CutUpdates, int64(0));
+			}
+		}
+
+		Manager->Shutdown();
+		if (PC)
+		{
+			PC->Destroy();
+		}
+		if (Camera)
+		{
+			Camera->Destroy();
+		}
+		Owner->Destroy();
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		Config->RemoveFromRoot();
+	}
 	return true;
 }
 

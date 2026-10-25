@@ -721,6 +721,11 @@ primitives, and the voxel window keeps its size.
   horizon) waits for its build drawing nothing, and a chunk re-meshing counts as drawn. Before, the nearest built
   ancestor stood in, often a face's root (the others released), and its coarse surface flashed over the voxel terrain
   and the horizon for a frame or more ([VISUAL_POLISH_PLAN.md](../VISUAL_POLISH_PLAN.md) "VP4 terrain flicker").
+  The chunk manager updates the far field in its tick (`TG_PrePhysics`) with the player camera manager's camera, the
+  frame before's (the camera managers update after `TG_PostPhysics`); after a cut, a camera more than a chunk from that
+  one, it updates it again in `TG_PostUpdateWork` for this frame's (`FVoxelFarFieldCameraTickFunction`,
+  `UpdateFarFieldForCamera`; F4.3, `voxel.World.FarFieldCameraUpdate`), so the frame of a teleport draws the far field
+  where the camera arrived rather than the old position's selection.
 - **The hole.** Within the window's reach of the viewer's ground point (the unload distance plus a chunk's half
   diagonal, along the ground as the window measures its horizons) patches split down to the band level, one to two
   chunks across (`FVoxelFarFieldSettings::ComputeBandLevel`: 64 a face edge on the 2.5 km planet, 1,024 on a 50 km one,

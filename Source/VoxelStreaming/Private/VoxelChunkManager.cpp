@@ -199,6 +199,20 @@ static TAutoConsoleVariable<int32> CVarFarFieldBuildAllRoots(
 	TEXT("      far field there until builds landed"),
 	ECVF_Default);
 
+// Visual polish F4.3: the tick (TG_PrePhysics) reads the player camera manager's camera before the camera managers
+// update (after TG_PostPhysics), so the far field lagged the rendered camera a frame: the first frame after a teleport
+// was drawn with the selection for the old position.
+static TAutoConsoleVariable<int32> CVarFarFieldCameraUpdate(
+	TEXT("voxel.World.FarFieldCameraUpdate"),
+	1,
+	TEXT("Planets (visual polish F4.3): after a cut, update the far field again for the camera the frame renders with.\n")
+	TEXT("  1 = in TG_PostUpdateWork, after the camera managers, when the camera lies more than a chunk from the camera of\n")
+	TEXT("      the tick's update (a teleport), the far field updates for it: the first frame after a teleport draws the\n")
+	TEXT("      far field there (default)\n")
+	TEXT("  0 = as before: the tick's update only, for the frame before's camera; the first frame after a teleport drew the\n")
+	TEXT("      far field for the old position (nothing where the camera arrived)"),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 	TEXT("voxel.World.FarFieldTrace"),
 	0,
@@ -657,6 +671,12 @@ UVoxelChunkManager::UVoxelChunkManager()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 
+	// The far field again for the frame's camera after a cut (F4.3): after the camera managers update.
+	FarFieldCameraTick.bCanEverTick = true;
+	FarFieldCameraTick.bStartWithTickEnabled = true;
+	FarFieldCameraTick.TickGroup = TG_PostUpdateWork;
+	FarFieldCameraTick.Target = this;
+
 	// Seam-ownership registry: a plain C++ helper, always on (every mesher meshes through seam jobs).
 	SeamRegistry = MakeUnique<FVoxelSeamRegistry>();
 	SeamRegistry->SetEnabled(true);
@@ -688,6 +708,45 @@ int32 UVoxelChunkManager::ResolveMaxLoadPerFrame() const
 void UVoxelChunkManager::BeginPlay()
 {
 	Super::BeginPlay();
+}
+
+void UVoxelChunkManager::RegisterComponentTickFunctions(bool bRegister)
+{
+	Super::RegisterComponentTickFunctions(bRegister);
+	if (bRegister)
+	{
+		if (SetupActorComponentTickFunction(&FarFieldCameraTick))
+		{
+			FarFieldCameraTick.Target = this;
+			FarFieldCameraTick.AddPrerequisite(this, PrimaryComponentTick);
+		}
+	}
+	else if (FarFieldCameraTick.IsTickFunctionRegistered())
+	{
+		FarFieldCameraTick.UnRegisterTickFunction();
+	}
+}
+
+void FVoxelFarFieldCameraTickFunction::ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent)
+{
+	FActorComponentTickFunction::ExecuteTickHelper(Target, /*bTickInEditor=*/ false, DeltaTime, TickType, [this](float DilatedTime)
+	{
+		Target->TickFarFieldCamera();
+	});
+}
+
+FString FVoxelFarFieldCameraTickFunction::DiagnosticMessage()
+{
+	return GetFullNameSafe(Target) + TEXT("[UVoxelChunkManager::TickFarFieldCamera]");
+}
+
+FName FVoxelFarFieldCameraTickFunction::DiagnosticContext(bool bDetailed)
+{
+	if (bDetailed)
+	{
+		return FName(*FString::Printf(TEXT("VoxelFarFieldCameraTick/%s"), *GetFullNameSafe(Target)));
+	}
+	return FName(TEXT("VoxelFarFieldCameraTick"));
 }
 
 void UVoxelChunkManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -4450,6 +4509,45 @@ void UVoxelChunkManager::UpdateFarFieldForViewer(const FVector& ViewerPosition, 
 	}
 }
 
+bool UVoxelChunkManager::UpdateFarFieldForCamera(const FVector& CameraPosition, float FieldOfView)
+{
+	if (!FarField || !Configuration || !bFarFieldHasLastCamera)
+	{
+		return false;
+	}
+	// Up to a chunk a frame the tick's selection holds (its hysteresis covers the motion); more is a cut, as the far field
+	// itself tells one from motion (VP4's horizon rule).
+	if (FVector::DistSquared(CameraPosition, FarFieldLastCamera) <= FMath::Square(FarField->GetSettings().ChunkWorldSize))
+	{
+		return false;
+	}
+	// The window has not moved yet (the next tick moves it): the hole stays where its chunks are. The frame's figures
+	// cover both updates.
+	const float TickUpdateMs = FarFieldStats.UpdateMs;
+	const int32 TickPatchesBuilt = FarFieldStats.PatchesBuilt;
+	UpdateFarField(CameraPosition, FarFieldLastViewer, FieldOfView);
+	FarFieldStats.UpdateMs += TickUpdateMs;
+	FarFieldStats.PatchesBuilt += TickPatchesBuilt;
+	FarFieldStats.CameraUpdates = ++FarFieldCameraUpdates;
+	return true;
+}
+
+void UVoxelChunkManager::TickFarFieldCamera()
+{
+	if (!FarField || bBenchmarkViewActive || CVarFarFieldCameraUpdate.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+	// The camera the tick read (BuildQueryContext), now updated for this frame.
+	const UWorld* World = GetWorld();
+	const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	if (!PC || !PC->PlayerCameraManager)
+	{
+		return;
+	}
+	UpdateFarFieldForCamera(PC->PlayerCameraManager->GetCameraLocation(), PC->PlayerCameraManager->GetFOVAngle());
+}
+
 void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVector& ViewerPosition, float FieldOfView)
 {
 	using namespace VoxelFarFieldManagerPrivate;
@@ -4460,6 +4558,9 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	const double StartTime = FPlatformTime::Seconds();
 	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
 	UWorld* World = GetWorld();
+	FarFieldLastCamera = CameraPosition;
+	FarFieldLastViewer = ViewerPosition;
+	bFarFieldHasLastCamera = true;
 
 	// The camera measures the error and the horizon; the streaming viewer (under it while it descends, WM-BP10) is the
 	// voxel window's centre. Both lie on one up-line, so the hole's centre is the same ground point.
@@ -4644,6 +4745,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	Stats.StandInMinLevel = FarField->GetStandInMinLevel();
 	Stats.TotalStandIns = FarField->GetTotalStandIns();
 	Stats.StandInUpdates = FarField->GetStandInUpdates();
+	Stats.CameraUpdates = FarFieldCameraUpdates;
 	Stats.UpdateMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
 
 	// VP4: what stood in over the voxel window this update, and why.
@@ -4678,11 +4780,12 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 		const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
 		RootsBuilt += Root && Root->bResident ? 1 : 0;
 	}
-	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of 6 (voxel.World.FarFieldBuildAllRoots %d)"),
+	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of 6 (voxel.World.FarFieldBuildAllRoots %d); updates for the frame's camera after a cut %lld (voxel.World.FarFieldCameraUpdate %d)"),
 		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenBand, Stats.Components, Stats.BuildsPending,
 		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
 		Settings.Sink, Settings.bSea ? TEXT("far field") : TEXT("ocean shell / none"), Stats.TotalStandIns, Stats.StandInUpdates,
-		CVarFarFieldAvoidStandIns.GetValueOnGameThread(), RootsBuilt, CVarFarFieldBuildAllRoots.GetValueOnGameThread());
+		CVarFarFieldAvoidStandIns.GetValueOnGameThread(), RootsBuilt, CVarFarFieldBuildAllRoots.GetValueOnGameThread(),
+		FarFieldCameraUpdates, CVarFarFieldCameraUpdate.GetValueOnGameThread());
 }
 
 FString UVoxelChunkManager::GetFarOceanDebugString() const
