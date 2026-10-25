@@ -230,6 +230,8 @@ void WaterFloodSweep(uint3 ThreadId, bool bRadial)
         const uint Index = LinearIndex(X, Y, Z);
         const uint Packed = VoxelData[Index];
 
+        // [branch]: FXC cannot flatten the UAV write in the else-if (an internal error, then a DXC cross-compile).
+        [branch]
         if ((Packed & PACKED_WATER_BIT) != 0)
         {
             bCarry = true;
@@ -259,6 +261,8 @@ void WaterFloodSweep(uint3 ThreadId, bool bRadial)
         const uint Index = LinearIndex(X, Y, Z);
         const uint Packed = VoxelData[Index];
 
+        // [branch]: FXC cannot flatten the UAV write in the else-if (an internal error, then a DXC cross-compile).
+        [branch]
         if ((Packed & PACKED_WATER_BIT) != 0)
         {
             bCarry = true;

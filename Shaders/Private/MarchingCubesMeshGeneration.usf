@@ -108,11 +108,11 @@ uint MCBoundaryMorph;        // 1 = ramp the fine surface to the coarse height n
 float MCBoundaryMorphWidth;  // ramp width in coarse cells
 
 // Vertex normals at stride > 1 (G61; voxel.Mesh.VoxelShadingNormals): 1 = LOD 0's normal at the voxel crossing on the
-// vertex's edge (CalculateEdgeShadingNormal), 0 = the stride-scale gradient at the vertex, as before.
+// vertex's edge (FindEdgeShadingPoint), 0 = the stride-scale gradient at the vertex, as before.
 uint VoxelShadingNormals;
 
 // Shading normals at voxel resolution (G62; voxel.Mesh.CrossingGradientNormals): 1 = the density gradient fitted to the
-// voxels on the ramp around the point (CalculateShadingNormal), 0 = the central difference about the voxel it floors to.
+// voxels on the ramp around the point (TryFitShadingNormal), 0 = the central difference about the voxel it floors to.
 uint CrossingGradientNormals;
 
 // Output buffer capacities (overflow protection — mirrors the DC mesher). Cave-riddled chunks have far
@@ -145,7 +145,11 @@ bool HasCornerData(uint CornerFlag)
 /**
  * Get packed voxel data at position, handling chunk boundaries.
  * Handles face neighbors (1 axis out), edge neighbors (2 axes out),
- * and corner neighbors (3 axes out).
+ * and corner neighbors (3 axes out); an absent neighbor reads the nearest voxel of this chunk.
+ *
+ * The neighbor is found by index (face 0-5, edge 0-11, corner 0-7 in the FACE_ / EDGE_ / CORNER_ order: each axis + before
+ * -) and read with one [branch] switch. This function is inlined at every call, and FXC (the D3D11 SM5 compiler) took
+ * minutes per inlined copy of the if-ladder over the 26 neighbor buffers it replaces (VISUAL_POLISH_PLAN.md, F2.13).
  */
 uint GetVoxelAt(int3 Position)
 {
@@ -156,10 +160,7 @@ uint GetVoxelAt(int3 Position)
         return InputVoxelData[Index];
     }
 
-    // Clamp coordinates for fallback
-    int3 ClampedPos = clamp(Position, int3(0, 0, 0), int3((int)ChunkSize - 1, (int)ChunkSize - 1, (int)ChunkSize - 1));
-
-    // Determine which axes are out of bounds and in which direction
+    // Determine which axes are out of bounds and in which direction (Side: 0 = +, 1 = -)
     bool bXPos = (Position.x >= (int)ChunkSize);
     bool bXNeg = (Position.x < 0);
     bool bYPos = (Position.y >= (int)ChunkSize);
@@ -170,93 +171,88 @@ uint GetVoxelAt(int3 Position)
     bool bOutX = bXPos || bXNeg;
     bool bOutY = bYPos || bYNeg;
     bool bOutZ = bZPos || bZNeg;
-    uint OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
+    uint OutCount = (bOutX ? 1u : 0u) + (bOutY ? 1u : 0u) + (bOutZ ? 1u : 0u);
+    uint SideX = bXNeg ? 1u : 0u;
+    uint SideY = bYNeg ? 1u : 0u;
+    uint SideZ = bZNeg ? 1u : 0u;
 
     // Single-axis out of bounds: use face neighbor data
-    if (OutCount == 1)
+    if (OutCount == 1u)
     {
-        if (bXPos && HasNeighborData(FACE_X_POS))
-            return NeighborXPos[(uint)Position.y + (uint)Position.z * ChunkSize];
-        if (bXNeg && HasNeighborData(FACE_X_NEG))
-            return NeighborXNeg[(uint)Position.y + (uint)Position.z * ChunkSize];
-        if (bYPos && HasNeighborData(FACE_Y_POS))
-            return NeighborYPos[(uint)Position.x + (uint)Position.z * ChunkSize];
-        if (bYNeg && HasNeighborData(FACE_Y_NEG))
-            return NeighborYNeg[(uint)Position.x + (uint)Position.z * ChunkSize];
-        if (bZPos && HasNeighborData(FACE_Z_POS))
-            return NeighborZPos[(uint)Position.x + (uint)Position.y * ChunkSize];
-        if (bZNeg && HasNeighborData(FACE_Z_NEG))
-            return NeighborZNeg[(uint)Position.x + (uint)Position.y * ChunkSize];
-        // Fallback to edge voxel
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+        uint Face = bOutX ? (FACE_X_POS + SideX) : (bOutY ? (FACE_Y_POS + SideY) : (FACE_Z_POS + SideZ));
+        uint InIdx = bOutX ? ((uint)Position.y + (uint)Position.z * ChunkSize)
+            : (bOutY ? ((uint)Position.x + (uint)Position.z * ChunkSize) : ((uint)Position.x + (uint)Position.y * ChunkSize));
+        if (HasNeighborData(Face))
+        {
+            [branch]
+            switch (Face)
+            {
+                case FACE_X_POS: return NeighborXPos[InIdx];
+                case FACE_X_NEG: return NeighborXNeg[InIdx];
+                case FACE_Y_POS: return NeighborYPos[InIdx];
+                case FACE_Y_NEG: return NeighborYNeg[InIdx];
+                case FACE_Z_POS: return NeighborZPos[InIdx];
+                default:         return NeighborZNeg[InIdx];
+            }
+        }
+    }
+    // Edge case (2 axes out of bounds): use edge neighbor data. X+Y edges (Z varies) 0-3, X+Z (Y varies) 4-7,
+    // Y+Z (X varies) 8-11.
+    else if (OutCount == 2u)
+    {
+        uint Edge;
+        uint Free;
+        if (!bOutZ)
+        {
+            Edge = SideX * 2u + SideY;
+            Free = (uint)Position.z;
+        }
+        else if (!bOutY)
+        {
+            Edge = 4u + SideX * 2u + SideZ;
+            Free = (uint)Position.y;
+        }
+        else
+        {
+            Edge = 8u + SideY * 2u + SideZ;
+            Free = (uint)Position.x;
+        }
+        if (HasEdgeData(1u << Edge))
+        {
+            [branch]
+            switch (Edge)
+            {
+                case 0u:  return EdgeXPosYPos[Free];
+                case 1u:  return EdgeXPosYNeg[Free];
+                case 2u:  return EdgeXNegYPos[Free];
+                case 3u:  return EdgeXNegYNeg[Free];
+                case 4u:  return EdgeXPosZPos[Free];
+                case 5u:  return EdgeXPosZNeg[Free];
+                case 6u:  return EdgeXNegZPos[Free];
+                case 7u:  return EdgeXNegZNeg[Free];
+                case 8u:  return EdgeYPosZPos[Free];
+                case 9u:  return EdgeYPosZNeg[Free];
+                case 10u: return EdgeYNegZPos[Free];
+                default:  return EdgeYNegZNeg[Free];
+            }
+        }
+    }
+    // Corner case (3 axes out of bounds): use corner neighbor data.
+    // Corner indices in CornerData buffer:
+    // 0: X+Y+Z+, 1: X+Y+Z-, 2: X+Y-Z+, 3: X+Y-Z-
+    // 4: X-Y+Z+, 5: X-Y+Z-, 6: X-Y-Z+, 7: X-Y-Z-
+    else
+    {
+        uint Corner = SideX * 4u + SideY * 2u + SideZ;
+        if (HasCornerData(CORNER_XPOS_YPOS_ZPOS << Corner))
+        {
+            return CornerData[Corner];
+        }
     }
 
-    // Edge case (2 axes out of bounds): use edge neighbor data
-    if (OutCount == 2)
-    {
-        // X+Y edges (Z varies)
-        if (bXPos && bYPos && HasEdgeData(EDGE_XPOS_YPOS))
-            return EdgeXPosYPos[(uint)Position.z];
-        if (bXPos && bYNeg && HasEdgeData(EDGE_XPOS_YNEG))
-            return EdgeXPosYNeg[(uint)Position.z];
-        if (bXNeg && bYPos && HasEdgeData(EDGE_XNEG_YPOS))
-            return EdgeXNegYPos[(uint)Position.z];
-        if (bXNeg && bYNeg && HasEdgeData(EDGE_XNEG_YNEG))
-            return EdgeXNegYNeg[(uint)Position.z];
-
-        // X+Z edges (Y varies)
-        if (bXPos && bZPos && HasEdgeData(EDGE_XPOS_ZPOS))
-            return EdgeXPosZPos[(uint)Position.y];
-        if (bXPos && bZNeg && HasEdgeData(EDGE_XPOS_ZNEG))
-            return EdgeXPosZNeg[(uint)Position.y];
-        if (bXNeg && bZPos && HasEdgeData(EDGE_XNEG_ZPOS))
-            return EdgeXNegZPos[(uint)Position.y];
-        if (bXNeg && bZNeg && HasEdgeData(EDGE_XNEG_ZNEG))
-            return EdgeXNegZNeg[(uint)Position.y];
-
-        // Y+Z edges (X varies)
-        if (bYPos && bZPos && HasEdgeData(EDGE_YPOS_ZPOS))
-            return EdgeYPosZPos[(uint)Position.x];
-        if (bYPos && bZNeg && HasEdgeData(EDGE_YPOS_ZNEG))
-            return EdgeYPosZNeg[(uint)Position.x];
-        if (bYNeg && bZPos && HasEdgeData(EDGE_YNEG_ZPOS))
-            return EdgeYNegZPos[(uint)Position.x];
-        if (bYNeg && bZNeg && HasEdgeData(EDGE_YNEG_ZNEG))
-            return EdgeYNegZNeg[(uint)Position.x];
-
-        // Fallback to edge voxel
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
-    }
-
-    // Corner case (3 axes out of bounds): use corner neighbor data
-    if (OutCount == 3)
-    {
-        // Corner indices in CornerData buffer:
-        // 0: X+Y+Z+, 1: X+Y+Z-, 2: X+Y-Z+, 3: X+Y-Z-
-        // 4: X-Y+Z+, 5: X-Y+Z-, 6: X-Y-Z+, 7: X-Y-Z-
-        if (bXPos && bYPos && bZPos && HasCornerData(CORNER_XPOS_YPOS_ZPOS))
-            return CornerData[0];
-        if (bXPos && bYPos && bZNeg && HasCornerData(CORNER_XPOS_YPOS_ZNEG))
-            return CornerData[1];
-        if (bXPos && bYNeg && bZPos && HasCornerData(CORNER_XPOS_YNEG_ZPOS))
-            return CornerData[2];
-        if (bXPos && bYNeg && bZNeg && HasCornerData(CORNER_XPOS_YNEG_ZNEG))
-            return CornerData[3];
-        if (bXNeg && bYPos && bZPos && HasCornerData(CORNER_XNEG_YPOS_ZPOS))
-            return CornerData[4];
-        if (bXNeg && bYPos && bZNeg && HasCornerData(CORNER_XNEG_YPOS_ZNEG))
-            return CornerData[5];
-        if (bXNeg && bYNeg && bZPos && HasCornerData(CORNER_XNEG_YNEG_ZPOS))
-            return CornerData[6];
-        if (bXNeg && bYNeg && bZNeg && HasCornerData(CORNER_XNEG_YNEG_ZNEG))
-            return CornerData[7];
-
-        // Fallback to corner voxel
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
-    }
-
-    // Out of bounds - treat as air (density = 0)
-    return 0;
+    // Fallback to the nearest voxel of this chunk
+    int3 ClampedPos = clamp(Position, int3(0, 0, 0), int3((int)ChunkSize - 1, (int)ChunkSize - 1, (int)ChunkSize - 1));
+    return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
 }
 
 /** Get density at position (normalized 0-1). */
@@ -266,14 +262,24 @@ float GetDensityAt(int3 Position)
     return GetDensity(PackedVoxel);
 }
 
-/** Calculate gradient-based normal with LOD-aware sampling. */
+/**
+ * Calculate gradient-based normal with LOD-aware sampling. The six taps run in a [loop] so GetVoxelAt
+ * is inlined once here: FXC (the D3D11 SM5 compiler) spends minutes to hours on every extra inlined
+ * copy of it (VISUAL_POLISH_PLAN.md, F2.13), so the voxel reads in this file sit in loops.
+ */
 float3 CalculateGradientNormalLOD(int3 Position, int Stride)
 {
-    float gx = GetDensityAt(Position + int3(Stride, 0, 0)) - GetDensityAt(Position + int3(-Stride, 0, 0));
-    float gy = GetDensityAt(Position + int3(0, Stride, 0)) - GetDensityAt(Position + int3(0, -Stride, 0));
-    float gz = GetDensityAt(Position + int3(0, 0, Stride)) - GetDensityAt(Position + int3(0, 0, -Stride));
+    float3 G = float3(0, 0, 0);
+    [loop]
+    for (int Tap = 0; Tap < 6; Tap++)
+    {
+        int3 Dir = int3(Tap < 2 ? 1 : 0, (Tap >> 1) == 1 ? 1 : 0, Tap >= 4 ? 1 : 0);
+        bool bNegative = (Tap & 1) != 0;
+        float D = GetDensityAt(Position + Dir * (bNegative ? -Stride : Stride));
+        G += float3(Dir) * (bNegative ? -D : D);
+    }
 
-    float3 Normal = float3(-gx, -gy, -gz);
+    float3 Normal = -G;
 
     float Len = length(Normal);
     if (Len > 0.0001f)
@@ -342,10 +348,12 @@ bool IsVoxelHeld(int3 P)
  * (VoxelCrossingGradient::FitNormal): the weighted least-squares fit of a linear density to the voxels of the 3x3x3 block
  * around the point's nearest voxel that lie on the ramp (0 < density < 1) and are held, tent weights centred on the point,
  * a free offset; where the voxels on the ramp do not span three directions (or CrossingGradientNormals is 0), the central
- * difference about the voxel the point floors to, as before.
+ * difference about the voxel the point floors to, as before. This is the fit: it returns false for that fallback, which
+ * the caller takes (CalculateVertexNormal), so the gradient's voxel reads are inlined once (F2.13).
  */
-float3 CalculateShadingNormal(float3 P)
+bool TryFitShadingNormal(float3 P, out float3 OutNormal)
 {
+    OutNormal = float3(0.0f, 0.0f, 1.0f);
     if (CrossingGradientNormals != 0u)
     {
         int3 Base = (int3)floor(P + 0.5f) - int3(1, 1, 1);
@@ -423,12 +431,13 @@ float3 CalculateShadingNormal(float3 P)
                 float LenSq = dot(N, N);
                 if (LenSq > 1e-8f)
                 {
-                    return N * rsqrt(LenSq);
+                    OutNormal = N * rsqrt(LenSq);
+                    return true;
                 }
             }
         }
     }
-    return CalculateGradientNormalLOD((int3)floor(P), 1);
+    return false;
 }
 
 /** voxel.Mesh.VoxelShadingNormals for a vertex of this stride (G61; LOD 0, stride 1, is the reference). */
@@ -438,91 +447,102 @@ bool UseVoxelShadingNormals(int Stride)
 }
 
 /**
- * G61: an edge vertex's normal at stride > 1, mirroring FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal. The
- * generated density saturates a voxel either side of the surface, so the stride-scale gradient's taps read 0 or 255 and
- * its normal snaps toward the cube directions; this is LOD 0's normal (taps one voxel apart) at the voxel crossing on the
- * edge nearest the vertex, the edge walked from its min end so every cell sharing it agrees. FallbackPos / FallbackStride:
- * the stride-scale gradient for an edge that is not axis-aligned or has no voxel crossing (none reaches here).
+ * G61: where an edge vertex at stride > 1 takes its normal, mirroring FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal.
+ * The generated density saturates a voxel either side of the surface, so the stride-scale gradient's taps read 0 or 255 and
+ * its normal snaps toward the cube directions; the normal is LOD 0's (taps one voxel apart) at the voxel crossing on the
+ * edge nearest the vertex, the edge walked from its min end so every cell sharing it agrees. Returns false for an edge
+ * that is not axis-aligned or has no voxel crossing (none reaches here): the caller takes the stride-scale gradient.
  */
-float3 CalculateEdgeShadingNormal(int3 EndA, int3 EndB, float DensityA, float DensityB, int3 FallbackPos, int FallbackStride)
+bool FindEdgeShadingPoint(int3 EndA, int3 EndB, float DensityA, float DensityB, out float3 OutCrossing)
 {
     int3 Delta = EndB - EndA;
     int OffAxes = (Delta.x != 0 ? 1 : 0) + (Delta.y != 0 ? 1 : 0) + (Delta.z != 0 ? 1 : 0);
     int3 Dir = int3(Delta.x != 0 ? 1 : 0, (Delta.x == 0 && Delta.y != 0) ? 1 : 0, (Delta.x == 0 && Delta.y == 0) ? 1 : 0);
     int Along0 = dot(Delta, Dir);
     int Length = abs(Along0);
-    if (Length == 0 || OffAxes != 1)
-    {
-        return CalculateGradientNormalLOD(FallbackPos, FallbackStride);
-    }
 
+    float BestAlong = -1.0f;
     bool bAFirst = Along0 > 0;
     int3 Lo = bAFirst ? EndA : EndB;
-    float DLo = bAFirst ? DensityA : DensityB;
-    float DHi = bAFirst ? DensityB : DensityA;
-
-    // The vertex's place on the edge (voxels from Lo), as InterpolateEdge puts it.
-    float VertexT = (abs(DHi - DLo) < 0.00001f) ? 0.5f : saturate((IsoLevel - DLo) / (DHi - DLo));
-    float VertexAlong = VertexT * (float)Length;
-
-    float D0 = DLo;
-    float BestAlong = -1.0f;
-    float BestDist = 1e30f;
-    [loop]
-    for (int Step = 0; Step < Length; Step++)
+    if (Length != 0 && OffAxes == 1)
     {
-        float D1 = (Step + 1 == Length) ? DHi : GetDensityAt(Lo + Dir * (Step + 1));
-        if ((D0 >= IsoLevel) != (D1 >= IsoLevel))
+        float DLo = bAFirst ? DensityA : DensityB;
+        float DHi = bAFirst ? DensityB : DensityA;
+
+        // The vertex's place on the edge (voxels from Lo), as InterpolateEdge puts it.
+        float VertexT = (abs(DHi - DLo) < 0.00001f) ? 0.5f : saturate((IsoLevel - DLo) / (DHi - DLo));
+        float VertexAlong = VertexT * (float)Length;
+
+        float D0 = DLo;
+        float BestDist = 1e30f;
+        [loop]
+        for (int Step = 0; Step < Length; Step++)
         {
-            float T = saturate((IsoLevel - D0) / (D1 - D0));
-            float Along = (float)Step + T;
-            float Dist = abs(Along - VertexAlong);
-            if (Dist < BestDist)
+            float D1 = (Step + 1 == Length) ? DHi : GetDensityAt(Lo + Dir * (Step + 1));
+            if ((D0 >= IsoLevel) != (D1 >= IsoLevel))
             {
-                BestDist = Dist;
-                BestAlong = Along;
+                float T = saturate((IsoLevel - D0) / (D1 - D0));
+                float Along = (float)Step + T;
+                float Dist = abs(Along - VertexAlong);
+                if (Dist < BestDist)
+                {
+                    BestDist = Dist;
+                    BestAlong = Along;
+                }
             }
+            D0 = D1;
         }
-        D0 = D1;
     }
-    if (BestAlong < 0.0f)
-    {
-        return CalculateGradientNormalLOD(FallbackPos, FallbackStride);
-    }
-    float3 Crossing = (float3)Lo + (float3)Dir * BestAlong;
-    return CalculateShadingNormal(Crossing);
+    OutCrossing = (float3)Lo + (float3)Dir * max(BestAlong, 0.0f);
+    return BestAlong >= 0.0f;
 }
 
 /**
- * Dominant material/biome from the first solid corner, using Lengyel corner order.
- * SolidMask has bit i set when corner i (LengyelCornerOffsets[i]) is solid.
+ * A vertex's normal (G61, G62). At a stride > 1 with voxel.Mesh.VoxelShadingNormals: the fitted normal at the voxel crossing
+ * on the vertex's edge EndA-EndB (FindEdgeShadingPoint), the stride-scale gradient at the vertex where the edge has none;
+ * at stride 1: the fitted normal at the vertex; otherwise the stride-scale gradient at the vertex. A fit that falls back
+ * takes the central difference about the voxel its point floors to. One inlined copy each of the edge walk, the fit and the
+ * gradient, for both passes (F2.13).
+ *
+ * @param VertexVoxelPos The vertex in voxel units of the chunk (its world position less ChunkWorldPosition, / VoxelSize)
+ * @param Stride The stride of the mesh the vertex belongs to
  */
-uint GetDominantMaterialLengyel(int3 CubePos, uint SolidMask, int Stride)
+float3 CalculateVertexNormal(float3 VertexVoxelPos, int Stride, int3 EndA, int3 EndB, float DensityA, float DensityB)
 {
-    [unroll]
-    for (uint i = 0; i < 8; i++)
+    int3 GradientPos = (int3)VertexVoxelPos;
+    int GradientStride = Stride;
+    float3 FitPoint = VertexVoxelPos;
+    bool bFit = (Stride == 1);
+    if (UseVoxelShadingNormals(Stride))
     {
-        if (SolidMask & (1u << i))
-        {
-            int3 CornerPos = CubePos + LengyelCornerOffsets[i] * Stride;
-            return GetMaterialID(GetVoxelAt(CornerPos));
-        }
+        bFit = FindEdgeShadingPoint(EndA, EndB, DensityA, DensityB, FitPoint);
     }
-    return 0;
+    if (bFit)
+    {
+        float3 Fitted;
+        if (TryFitShadingNormal(FitPoint, Fitted))
+        {
+            return Fitted;
+        }
+        GradientPos = (int3)floor(FitPoint);
+        GradientStride = 1;
+    }
+    return CalculateGradientNormalLOD(GradientPos, GradientStride);
 }
 
-uint GetDominantBiomeLengyel(int3 CubePos, uint SolidMask, int Stride)
+/**
+ * The first solid corner's voxel, in Lengyel corner order, whose material and biome the cell takes;
+ * 0 (material 0, biome 0) when no corner is solid. SolidMask has bit i set when corner i
+ * (LengyelCornerOffsets[i]) is solid. One read (F2.13).
+ */
+uint GetDominantVoxelLengyel(int3 CubePos, uint SolidMask, int Stride)
 {
-    [unroll]
-    for (uint i = 0; i < 8; i++)
+    if (SolidMask == 0u)
     {
-        if (SolidMask & (1u << i))
-        {
-            int3 CornerPos = CubePos + LengyelCornerOffsets[i] * Stride;
-            return GetBiomeID(GetVoxelAt(CornerPos));
-        }
+        return 0;
     }
-    return 0;
+    int3 CornerPos = CubePos + LengyelCornerOffsets[firstbitlow(SolidMask)] * Stride;
+    return GetVoxelAt(CornerPos);
 }
 
 /**
@@ -564,18 +584,17 @@ float GetDensityAtFloat(float3 P)
 {
     int3 P0 = (int3)floor(P);
     float3 F = P - (float3)P0;
-    float d000 = GetDensityAt(P0 + int3(0, 0, 0));
-    float d100 = GetDensityAt(P0 + int3(1, 0, 0));
-    float d010 = GetDensityAt(P0 + int3(0, 1, 0));
-    float d110 = GetDensityAt(P0 + int3(1, 1, 0));
-    float d001 = GetDensityAt(P0 + int3(0, 0, 1));
-    float d101 = GetDensityAt(P0 + int3(1, 0, 1));
-    float d011 = GetDensityAt(P0 + int3(0, 1, 1));
-    float d111 = GetDensityAt(P0 + int3(1, 1, 1));
-    float d00 = lerp(d000, d100, F.x);
-    float d10 = lerp(d010, d110, F.x);
-    float d01 = lerp(d001, d101, F.x);
-    float d11 = lerp(d011, d111, F.x);
+    // D[x + 2y + 4z]: the 8 corners read in one [loop] (F2.13).
+    float D[8];
+    [loop]
+    for (int Corner = 0; Corner < 8; Corner++)
+    {
+        D[Corner] = GetDensityAt(P0 + int3(Corner & 1, (Corner >> 1) & 1, Corner >> 2));
+    }
+    float d00 = lerp(D[0], D[1], F.x);
+    float d10 = lerp(D[2], D[3], F.x);
+    float d01 = lerp(D[4], D[5], F.x);
+    float d11 = lerp(D[6], D[7], F.x);
     return lerp(lerp(d00, d10, F.y), lerp(d01, d11, F.y), F.z);
 }
 
@@ -609,10 +628,15 @@ bool ComputeCoarseSurfaceZ(float Vx, float Vy, float NearVz, uint Eu, out float 
     {
         int Zai = ZBase + k * E;
         int Zbi = Zai + E;
-        float Da = lerp(lerp(GetDensityAt(int3(Xa, Ya, Zai)), GetDensityAt(int3(Xb, Ya, Zai)), Fx),
-                        lerp(GetDensityAt(int3(Xa, Yb, Zai)), GetDensityAt(int3(Xb, Yb, Zai)), Fx), Fy);
-        float Db = lerp(lerp(GetDensityAt(int3(Xa, Ya, Zbi)), GetDensityAt(int3(Xb, Ya, Zbi)), Fx),
-                        lerp(GetDensityAt(int3(Xa, Yb, Zbi)), GetDensityAt(int3(Xb, Yb, Zbi)), Fx), Fy);
+        // S[x + 2y + 4z] over (Xa|Xb, Ya|Yb, Zai|Zbi), read in one [loop] (F2.13).
+        float S[8];
+        [loop]
+        for (int Sample = 0; Sample < 8; Sample++)
+        {
+            S[Sample] = GetDensityAt(int3((Sample & 1) != 0 ? Xb : Xa, (Sample & 2) != 0 ? Yb : Ya, (Sample & 4) != 0 ? Zbi : Zai));
+        }
+        float Da = lerp(lerp(S[0], S[1], Fx), lerp(S[2], S[3], Fx), Fy);
+        float Db = lerp(lerp(S[4], S[5], Fx), lerp(S[6], S[7], Fx), Fy);
         if ((Da >= IsoLevel) != (Db >= IsoLevel))
         {
             float Denom = Db - Da;
@@ -661,10 +685,20 @@ void MorphVertexToCoarse(uint SelfStride, uint Mask, inout float3 Vertex)
     }
     if (BestW <= 0.0f) { return; }
 
-    // Steepness gate: only morph where the surface normal (-grad density) is mostly vertical.
-    float Gx = GetDensityAtFloat(float3(Vx + 1.0f, Vy, Vz)) - GetDensityAtFloat(float3(Vx - 1.0f, Vy, Vz));
-    float Gy = GetDensityAtFloat(float3(Vx, Vy + 1.0f, Vz)) - GetDensityAtFloat(float3(Vx, Vy - 1.0f, Vz));
-    float Gz = GetDensityAtFloat(float3(Vx, Vy, Vz + 1.0f)) - GetDensityAtFloat(float3(Vx, Vy, Vz - 1.0f));
+    // Steepness gate: only morph where the surface normal (-grad density) is mostly vertical. The six
+    // taps run in one [loop] (F2.13).
+    float3 G = float3(0.0f, 0.0f, 0.0f);
+    [loop]
+    for (int Tap = 0; Tap < 6; Tap++)
+    {
+        float3 Dir = float3(Tap < 2 ? 1.0f : 0.0f, (Tap >> 1) == 1 ? 1.0f : 0.0f, Tap >= 4 ? 1.0f : 0.0f);
+        bool bNegative = (Tap & 1) != 0;
+        float D = GetDensityAtFloat(float3(Vx, Vy, Vz) + Dir * (bNegative ? -1.0f : 1.0f));
+        G += Dir * (bNegative ? -D : D);
+    }
+    float Gx = G.x;
+    float Gy = G.y;
+    float Gz = G.z;
     float GMag = sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
     if (GMag < 1e-5f || abs(Gz) < 0.5f * GMag) { return; }
 
@@ -695,10 +729,11 @@ void MainCS(
         return;
     }
 
-    // Sample density + world position at the 8 cube corners (Lengyel ordering)
+    // Sample density + world position at the 8 cube corners (Lengyel ordering). [loop]: one inlined
+    // GetVoxelAt (F2.13).
     float CornerDensities[8];
     float3 CornerPositions[8];
-    [unroll]
+    [loop]
     for (uint i = 0; i < 8; i++)
     {
         int3 CornerPos = CubePos + LengyelCornerOffsets[i] * Stride;
@@ -730,8 +765,9 @@ void MainCS(
         return;
     }
 
-    uint MaterialID = GetDominantMaterialLengyel(CubePos, SolidMask, Stride);
-    uint BiomeID = GetDominantBiomeLengyel(CubePos, SolidMask, Stride);
+    uint DominantVoxel = GetDominantVoxelLengyel(CubePos, SolidMask, Stride);
+    uint MaterialID = GetMaterialID(DominantVoxel);
+    uint BiomeID = GetBiomeID(DominantVoxel);
 
     // Decode edge vertices from RegularVertexData (low nibble = corner A, next = corner B)
     float3 CellVertices[12];
@@ -765,6 +801,7 @@ void MainCS(
     // ApplyBoundaryMorph; the ribbon (TransitionCS) morphs its fine side the same way.
     if (MCBoundaryMorph != 0u && TransitionFaces != 0u)
     {
+        [loop]
         for (uint mi = 0; mi < VertexCount; mi++)
         {
             MorphVertexToCoarse(LODStride, TransitionFaces, CellVertices[mi]);
@@ -772,27 +809,17 @@ void MainCS(
     }
 
     // Vertex normals. G61: at stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge (a function of the
-    // edge, so the geomorph does not change it); otherwise the stride-scale gradient at the vertex, as before.
+    // edge, so the geomorph does not change it); G62: at stride 1 the fitted gradient at the vertex; otherwise the
+    // stride-scale gradient at the vertex, as before.
     float3 CellNormals[12];
+    [loop]
     for (uint ni = 0; ni < VertexCount; ni++)
     {
-        int3 VP = (int3)((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
-        if (UseVoxelShadingNormals(Stride))
-        {
-            uint CA = VertexCorners[ni] & 0x0Fu;
-            uint CB = (VertexCorners[ni] >> 4) & 0x0Fu;
-            CellNormals[ni] = CalculateEdgeShadingNormal(CubePos + LengyelCornerOffsets[CA] * Stride, CubePos + LengyelCornerOffsets[CB] * Stride,
-                CornerDensities[CA], CornerDensities[CB], VP, Stride);
-        }
-        else if (Stride == 1)
-        {
-            // G62: the fitted gradient at the vertex.
-            CellNormals[ni] = CalculateShadingNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
-        }
-        else
-        {
-            CellNormals[ni] = CalculateGradientNormalLOD(VP, Stride);
-        }
+        uint CA = VertexCorners[ni] & 0x0Fu;
+        uint CB = (VertexCorners[ni] >> 4) & 0x0Fu;
+        CellNormals[ni] = CalculateVertexNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize, Stride,
+            CubePos + LengyelCornerOffsets[CA] * Stride, CubePos + LengyelCornerOffsets[CB] * Stride,
+            CornerDensities[CA], CornerDensities[CB]);
     }
 
     // Atomically allocate vertices and indices
@@ -812,6 +839,7 @@ void MainCS(
     uint CurrentVertex = VertexStart;
     uint CurrentIndex = IndexStart;
 
+    [loop]
     for (uint t = 0; t < TriCount; t++)
     {
         uint Idx0 = Tv_RegularVertexIndex(CellClass, t * 3 + 0);
@@ -900,9 +928,10 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     int BoundaryDepthCoord = bPositiveFace ? (BaseDepthCoord + CurrentStride) : BaseDepthCoord;
 
     // ---- Sample 13 densities (zero-thickness: depth pinned, face-parallel * CoarserStride) ----
-    // All offsets are {0, 0.5, 1.0} * even CoarserStride -> integer voxel coords.
+    // All offsets are {0, 0.5, 1.0} * even CoarserStride -> integer voxel coords. [loop]: one inlined
+    // GetVoxelAt (F2.13).
     float Densities[13];
-    [unroll]
+    [loop]
     for (uint i = 0; i < 13u; i++)
     {
         float3 Off = Tv_TransitionSampleOffset(Face, i);
@@ -995,6 +1024,7 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     // neighbour match is preserved. Done before triangle counting so count and emit agree.
     if (MCBoundaryMorph != 0u)
     {
+        [loop]
         for (uint mi = 0; mi < VertexCount; mi++)
         {
             if (!VertexOnOuterFace[mi])
@@ -1006,53 +1036,47 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     // ---- Vertex normals at the stride of the adjacent mesh (outer face: the coarser neighbour's, else this chunk's).
     // G61: at a stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge, as the coincident fine or coarse
-    // MC vertex on that edge gets it; otherwise the gradient at that stride, as before. ----
+    // MC vertex on that edge gets it; G62: at stride 1 the fitted gradient at the vertex, as the regular pass's; otherwise
+    // the gradient at that stride, as before. ----
     float3 CellNormals[12];
+    [loop]
     for (uint ni = 0; ni < VertexCount; ni++)
     {
         int NS = VertexOnOuterFace[ni] ? CoarserStride : CurrentStride;
-        int3 VP = (int3)((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
-        if (UseVoxelShadingNormals(NS))
-        {
-            uint SA = VertexSamples[ni] & 0x0Fu;
-            uint SB = (VertexSamples[ni] >> 4) & 0x0Fu;
-            float3 OffA = Tv_TransitionSampleOffset(Face, SA);
-            float3 OffB = Tv_TransitionSampleOffset(Face, SB);
-            int3 EA = int3(CellX, CellY, CellZ) + (int3)round(OffA * (float)CoarserStride);
-            int3 EB = int3(CellX, CellY, CellZ) + (int3)round(OffB * (float)CoarserStride);
-            if (DepthAxis == 0) { EA.x = BoundaryDepthCoord; EB.x = BoundaryDepthCoord; }
-            else if (DepthAxis == 1) { EA.y = BoundaryDepthCoord; EB.y = BoundaryDepthCoord; }
-            else { EA.z = BoundaryDepthCoord; EB.z = BoundaryDepthCoord; }
-            CellNormals[ni] = CalculateEdgeShadingNormal(EA, EB, Densities[SA], Densities[SB], VP, NS);
-        }
-        else if (NS == 1)
-        {
-            // G62: the fitted gradient at the vertex, as the regular pass's.
-            CellNormals[ni] = CalculateShadingNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize);
-        }
-        else
-        {
-            CellNormals[ni] = CalculateGradientNormalLOD(VP, NS);
-        }
+        uint SA = VertexSamples[ni] & 0x0Fu;
+        uint SB = (VertexSamples[ni] >> 4) & 0x0Fu;
+        float3 OffA = Tv_TransitionSampleOffset(Face, SA);
+        float3 OffB = Tv_TransitionSampleOffset(Face, SB);
+        int3 EA = int3(CellX, CellY, CellZ) + (int3)round(OffA * (float)CoarserStride);
+        int3 EB = int3(CellX, CellY, CellZ) + (int3)round(OffB * (float)CoarserStride);
+        if (DepthAxis == 0) { EA.x = BoundaryDepthCoord; EB.x = BoundaryDepthCoord; }
+        else if (DepthAxis == 1) { EA.y = BoundaryDepthCoord; EB.y = BoundaryDepthCoord; }
+        else { EA.z = BoundaryDepthCoord; EB.z = BoundaryDepthCoord; }
+        CellNormals[ni] = CalculateVertexNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize, NS, EA, EB,
+            Densities[SA], Densities[SB]);
     }
 
-    // ---- Material / biome from the first solid face sample ----
+    // ---- Material / biome from the first solid face sample (found first, then read once: F2.13) ----
     uint MaterialID = 0;
     uint BiomeID = 0;
+    uint FirstSolid = 9u;
     [unroll]
     for (uint s = 0; s < 9u; s++)
     {
-        if (Densities[s] >= IsoLevel)
+        if (FirstSolid == 9u && Densities[s] >= IsoLevel)
         {
-            float3 Off = Tv_TransitionSampleOffset(Face, s);
-            int SX = (DepthAxis == 0) ? BoundaryDepthCoord : (CellX + (int)round(Off.x * (float)CoarserStride));
-            int SY = (DepthAxis == 1) ? BoundaryDepthCoord : (CellY + (int)round(Off.y * (float)CoarserStride));
-            int SZ = (DepthAxis == 2) ? BoundaryDepthCoord : (CellZ + (int)round(Off.z * (float)CoarserStride));
-            uint Packed = GetVoxelAt(int3(SX, SY, SZ));
-            MaterialID = GetMaterialID(Packed);
-            BiomeID = GetBiomeID(Packed);
-            break;
+            FirstSolid = s;
         }
+    }
+    if (FirstSolid < 9u)
+    {
+        float3 Off = Tv_TransitionSampleOffset(Face, FirstSolid);
+        int SX = (DepthAxis == 0) ? BoundaryDepthCoord : (CellX + (int)round(Off.x * (float)CoarserStride));
+        int SY = (DepthAxis == 1) ? BoundaryDepthCoord : (CellY + (int)round(Off.y * (float)CoarserStride));
+        int SZ = (DepthAxis == 2) ? BoundaryDepthCoord : (CellZ + (int)round(Off.z * (float)CoarserStride));
+        uint Packed = GetVoxelAt(int3(SX, SY, SZ));
+        MaterialID = GetMaterialID(Packed);
+        BiomeID = GetBiomeID(Packed);
     }
 
     // ---- Winding: reflection along depth flips handedness for +/-Y faces ----
@@ -1065,6 +1089,7 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     // Count valid triangles so soup allocation is exact (no buffer gaps).
     uint ValidTriCount = 0;
+    [loop]
     for (uint t = 0; t < TriangleCount; t++)
     {
         uint i0 = Tv_TransitionTriangle(CellClass, t * 3 + 0);
@@ -1099,6 +1124,7 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     uint CurrentVertex = VertexStart;
     uint CurrentIndex = IndexStart;
 
+    [loop]
     for (uint t = 0; t < TriangleCount; t++)
     {
         uint i0 = Tv_TransitionTriangle(CellClass, t * 3 + 0);

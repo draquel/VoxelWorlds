@@ -43,14 +43,15 @@ float2 Cellular3D(float3 Position, int Seed)
     float F1 = 100.0f;
     float F2 = 100.0f;
 
-    // Search 3x3x3 neighborhood
-    [unroll]
+    // Search 3x3x3 neighborhood. [loop]s, not [unroll]: every FBM call site inlines this, and FXC (the D3D11 SM5
+    // compiler) took 20 minutes and then aborted on the unrolled copies (VISUAL_POLISH_PLAN.md, F2.13).
+    [loop]
     for (int dz = -1; dz <= 1; ++dz)
     {
-        [unroll]
+        [loop]
         for (int dy = -1; dy <= 1; ++dy)
         {
-            [unroll]
+            [loop]
             for (int dx = -1; dx <= 1; ++dx)
             {
                 int3 NeighborCell = Cell + int3(dx, dy, dz);
@@ -95,14 +96,15 @@ float3 Voronoi3D(float3 Position, int Seed)
     float F2 = 100.0f;
     int3 NearestCell = Cell;
 
-    // Search 3x3x3 neighborhood
-    [unroll]
+    // Search 3x3x3 neighborhood. [loop]s, not [unroll]: every FBM call site inlines this, and FXC (the D3D11 SM5
+    // compiler) took 20 minutes and then aborted on the unrolled copies (VISUAL_POLISH_PLAN.md, F2.13).
+    [loop]
     for (int dz = -1; dz <= 1; ++dz)
     {
-        [unroll]
+        [loop]
         for (int dy = -1; dy <= 1; ++dy)
         {
-            [unroll]
+            [loop]
             for (int dx = -1; dx <= 1; ++dx)
             {
                 int3 NeighborCell = Cell + int3(dx, dy, dz);

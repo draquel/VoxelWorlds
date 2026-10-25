@@ -54,17 +54,13 @@ float FBM3D(
         {
             NoiseValue = Perlin3D(ScaledPos, Seed);
         }
-        else if (NoiseType == NOISE_TYPE_CELLULAR)
+        else if (NoiseType == NOISE_TYPE_CELLULAR || NoiseType == NOISE_TYPE_VORONOI)
         {
+            // One search for both (Voronoi3D's F1 / F2 are Cellular3D's), so it is inlined once (F2.13).
             // Cellular: use F1 distance, map from [0, ~1.5] to [-1, 1]
-            float2 Cell = Cellular3D(ScaledPos, Seed);
-            NoiseValue = Cell.x * 2.0f - 1.0f;
-        }
-        else if (NoiseType == NOISE_TYPE_VORONOI)
-        {
             // Voronoi: use F2-F1 edge distance, map from [0, ~1] to [-1, 1]
-            float3 Vor = Voronoi3D(ScaledPos, Seed);
-            NoiseValue = (Vor.y - Vor.x) * 2.0f - 1.0f;
+            float2 Cell = Cellular3D(ScaledPos, Seed);
+            NoiseValue = (NoiseType == NOISE_TYPE_CELLULAR) ? (Cell.x * 2.0f - 1.0f) : ((Cell.y - Cell.x) * 2.0f - 1.0f);
         }
         else
         {
@@ -125,15 +121,11 @@ float RidgedFBM3D(
         {
             NoiseValue = Perlin3D(ScaledPos, Seed);
         }
-        else if (NoiseType == NOISE_TYPE_CELLULAR)
+        else if (NoiseType == NOISE_TYPE_CELLULAR || NoiseType == NOISE_TYPE_VORONOI)
         {
+            // One search for both, as FBM3D (F2.13).
             float2 Cell = Cellular3D(ScaledPos, Seed);
-            NoiseValue = Cell.x * 2.0f - 1.0f;
-        }
-        else if (NoiseType == NOISE_TYPE_VORONOI)
-        {
-            float3 Vor = Voronoi3D(ScaledPos, Seed);
-            NoiseValue = (Vor.y - Vor.x) * 2.0f - 1.0f;
+            NoiseValue = (NoiseType == NOISE_TYPE_CELLULAR) ? (Cell.x * 2.0f - 1.0f) : ((Cell.y - Cell.x) * 2.0f - 1.0f);
         }
         else
         {

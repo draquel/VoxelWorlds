@@ -320,9 +320,11 @@ void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMin
  * @param DepthBelowSurface Depth below the terrain, in voxels (along Z, or radial on a planet)
  * @param BiomeID Dominant biome (0 without biomes)
  * @param bUnderwater The column's terrain is under the sea (and water is on)
+ * @param bPlanetFrame A literal at each call: true in the planet branch, false in the heightmap one. A runtime
+ *        WorldMode test inlined (and, on FXC, ran) both layer samplers at every call (F2.13)
  * @return Carve density [0, 1]
  */
-float GpuCaveCarve(float3 WorldPos, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater)
+float GpuCaveCarve(float3 WorldPos, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater, bool bPlanetFrame)
 {
     float BiomeCaveScale;
     float MinDepthOverride;
@@ -355,9 +357,15 @@ float GpuCaveCarve(float3 WorldPos, PlanetVoxelFrame Planet, float DepthBelowSur
             continue;
         }
 
-        float LayerCarve = (WorldMode == WORLD_MODE_SPHERICAL_PLANET)
-            ? PlanetCaveLayerCarve(ci, Planet)
-            : SampleGpuCaveLayer(ci, float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]));
+        float LayerCarve;
+        if (bPlanetFrame)
+        {
+            LayerCarve = PlanetCaveLayerCarve(ci, Planet);
+        }
+        else
+        {
+            LayerCarve = SampleGpuCaveLayer(ci, float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]));
+        }
         if (LayerCarve <= 0.0f)
         {
             continue;
@@ -491,7 +499,7 @@ void MainCS(
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(WorldPos, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn);
+            CaveCarve = GpuCaveCarve(WorldPos, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 

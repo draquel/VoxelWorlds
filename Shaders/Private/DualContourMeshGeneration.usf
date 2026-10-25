@@ -218,7 +218,12 @@ uint CornerDeepVoxelGPU(uint CornerIdx, int DepthX, int DepthY, int DepthZ, uint
 
 /**
  * Get packed voxel data at position, handling chunk boundaries.
- * Duplicated from MarchingCubesMeshGeneration.usf for self-contained shader.
+ * Duplicated from MarchingCubesMeshGeneration.usf for self-contained shader, plus the deep neighbor planes.
+ *
+ * The neighbor is found by index (face 0-5, edge 0-11, corner 0-7 in the FACE_ / EDGE_ / CORNER_ order: each axis + before
+ * -) and its base value read with one [branch] switch, then the deep data once. This function is inlined at every call,
+ * and FXC (the D3D11 SM5 compiler) took minutes per inlined copy of the if-ladder over the 26 neighbor buffers it replaces
+ * (VISUAL_POLISH_PLAN.md, F2.13).
  */
 uint GetVoxelAt(int3 Position)
 {
@@ -227,8 +232,6 @@ uint GetVoxelAt(int3 Position)
         uint Index = GetVoxelIndex(Position, ChunkSize);
         return InputVoxelData[Index];
     }
-
-    int3 ClampedPos = clamp(Position, int3(0, 0, 0), int3((int)ChunkSize - 1, (int)ChunkSize - 1, (int)ChunkSize - 1));
 
     bool bXPos = (Position.x >= (int)ChunkSize);
     bool bXNeg = (Position.x < 0);
@@ -240,7 +243,10 @@ uint GetVoxelAt(int3 Position)
     bool bOutX = bXPos || bXNeg;
     bool bOutY = bYPos || bYNeg;
     bool bOutZ = bZPos || bZNeg;
-    uint OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
+    uint OutCount = (bOutX ? 1u : 0u) + (bOutY ? 1u : 0u) + (bOutZ ? 1u : 0u);
+    uint SideX = bXNeg ? 1u : 0u;
+    uint SideY = bYNeg ? 1u : 0u;
+    uint SideZ = bZNeg ? 1u : 0u;
 
     // 0-based depth into a neighbor along each out-of-bounds axis (0 = first plane past the
     // face). Used to read deep edge/corner data for strided cells. Mirrors the CPU GetVoxelAt.
@@ -248,98 +254,96 @@ uint GetVoxelAt(int3 Position)
     int DepthY = bYPos ? (Position.y - (int)ChunkSize) : (bYNeg ? (-Position.y - 1) : 0);
     int DepthZ = bZPos ? (Position.z - (int)ChunkSize) : (bZNeg ? (-Position.z - 1) : 0);
 
-    if (OutCount == 1)
+    if (OutCount == 1u)
     {
         // Read the correct DEPTH plane into the neighbor (plane 0 = the face slice, deeper
         // planes from FaceDeep). At stride 1 / LOD0 PlaneIdx is 0 and this is the single slice.
-        if (bXPos && HasNeighborData(FACE_X_POS))
+        uint Face = bOutX ? (FACE_X_POS + SideX) : (bOutY ? (FACE_Y_POS + SideY) : (FACE_Z_POS + SideZ));
+        uint InIdx = bOutX ? ((uint)Position.y + (uint)Position.z * ChunkSize)
+            : (bOutY ? ((uint)Position.x + (uint)Position.z * ChunkSize) : ((uint)Position.x + (uint)Position.y * ChunkSize));
+        int PlaneIdx = bOutX ? DepthX : (bOutY ? DepthY : DepthZ);
+        if (HasNeighborData(Face))
         {
-            uint InIdx = (uint)Position.y + (uint)Position.z * ChunkSize;
-            return FaceDeepVoxel(0, InIdx, Position.x - (int)ChunkSize, NeighborXPos[InIdx]);
+            uint Base;
+            [branch]
+            switch (Face)
+            {
+                case FACE_X_POS: Base = NeighborXPos[InIdx]; break;
+                case FACE_X_NEG: Base = NeighborXNeg[InIdx]; break;
+                case FACE_Y_POS: Base = NeighborYPos[InIdx]; break;
+                case FACE_Y_NEG: Base = NeighborYNeg[InIdx]; break;
+                case FACE_Z_POS: Base = NeighborZPos[InIdx]; break;
+                default:         Base = NeighborZNeg[InIdx]; break;
+            }
+            return FaceDeepVoxel(Face, InIdx, PlaneIdx, Base);
         }
-        if (bXNeg && HasNeighborData(FACE_X_NEG))
-        {
-            uint InIdx = (uint)Position.y + (uint)Position.z * ChunkSize;
-            return FaceDeepVoxel(1, InIdx, -Position.x - 1, NeighborXNeg[InIdx]);
-        }
-        if (bYPos && HasNeighborData(FACE_Y_POS))
-        {
-            uint InIdx = (uint)Position.x + (uint)Position.z * ChunkSize;
-            return FaceDeepVoxel(2, InIdx, Position.y - (int)ChunkSize, NeighborYPos[InIdx]);
-        }
-        if (bYNeg && HasNeighborData(FACE_Y_NEG))
-        {
-            uint InIdx = (uint)Position.x + (uint)Position.z * ChunkSize;
-            return FaceDeepVoxel(3, InIdx, -Position.y - 1, NeighborYNeg[InIdx]);
-        }
-        if (bZPos && HasNeighborData(FACE_Z_POS))
-        {
-            uint InIdx = (uint)Position.x + (uint)Position.y * ChunkSize;
-            return FaceDeepVoxel(4, InIdx, Position.z - (int)ChunkSize, NeighborZPos[InIdx]);
-        }
-        if (bZNeg && HasNeighborData(FACE_Z_NEG))
-        {
-            uint InIdx = (uint)Position.x + (uint)Position.y * ChunkSize;
-            return FaceDeepVoxel(5, InIdx, -Position.z - 1, NeighborZNeg[InIdx]);
-        }
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
     }
-
-    if (OutCount == 2)
+    else if (OutCount == 2u)
     {
         // Read the depth grid into the edge neighbor (deep arrays for strided cells; the base
-        // strip at depth (0,0)). EdgeIdx matches the EDGE_* order. Free axis indexes the strip.
-        if (bXPos && bYPos && HasEdgeData(EDGE_XPOS_YPOS))
-            return EdgeDeepVoxelGPU(0, (uint)Position.z, DepthX, DepthY, EdgeXPosYPos[(uint)Position.z]);
-        if (bXPos && bYNeg && HasEdgeData(EDGE_XPOS_YNEG))
-            return EdgeDeepVoxelGPU(1, (uint)Position.z, DepthX, DepthY, EdgeXPosYNeg[(uint)Position.z]);
-        if (bXNeg && bYPos && HasEdgeData(EDGE_XNEG_YPOS))
-            return EdgeDeepVoxelGPU(2, (uint)Position.z, DepthX, DepthY, EdgeXNegYPos[(uint)Position.z]);
-        if (bXNeg && bYNeg && HasEdgeData(EDGE_XNEG_YNEG))
-            return EdgeDeepVoxelGPU(3, (uint)Position.z, DepthX, DepthY, EdgeXNegYNeg[(uint)Position.z]);
-        if (bXPos && bZPos && HasEdgeData(EDGE_XPOS_ZPOS))
-            return EdgeDeepVoxelGPU(4, (uint)Position.y, DepthX, DepthZ, EdgeXPosZPos[(uint)Position.y]);
-        if (bXPos && bZNeg && HasEdgeData(EDGE_XPOS_ZNEG))
-            return EdgeDeepVoxelGPU(5, (uint)Position.y, DepthX, DepthZ, EdgeXPosZNeg[(uint)Position.y]);
-        if (bXNeg && bZPos && HasEdgeData(EDGE_XNEG_ZPOS))
-            return EdgeDeepVoxelGPU(6, (uint)Position.y, DepthX, DepthZ, EdgeXNegZPos[(uint)Position.y]);
-        if (bXNeg && bZNeg && HasEdgeData(EDGE_XNEG_ZNEG))
-            return EdgeDeepVoxelGPU(7, (uint)Position.y, DepthX, DepthZ, EdgeXNegZNeg[(uint)Position.y]);
-        if (bYPos && bZPos && HasEdgeData(EDGE_YPOS_ZPOS))
-            return EdgeDeepVoxelGPU(8, (uint)Position.x, DepthY, DepthZ, EdgeYPosZPos[(uint)Position.x]);
-        if (bYPos && bZNeg && HasEdgeData(EDGE_YPOS_ZNEG))
-            return EdgeDeepVoxelGPU(9, (uint)Position.x, DepthY, DepthZ, EdgeYPosZNeg[(uint)Position.x]);
-        if (bYNeg && bZPos && HasEdgeData(EDGE_YNEG_ZPOS))
-            return EdgeDeepVoxelGPU(10, (uint)Position.x, DepthY, DepthZ, EdgeYNegZPos[(uint)Position.x]);
-        if (bYNeg && bZNeg && HasEdgeData(EDGE_YNEG_ZNEG))
-            return EdgeDeepVoxelGPU(11, (uint)Position.x, DepthY, DepthZ, EdgeYNegZNeg[(uint)Position.x]);
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+        // strip at depth (0,0)). EdgeIdx matches the EDGE_* order: X+Y edges (Z varies) 0-3,
+        // X+Z (Y varies) 4-7, Y+Z (X varies) 8-11. Free axis indexes the strip.
+        uint Edge;
+        uint Free;
+        int DepthA;
+        int DepthB;
+        if (!bOutZ)
+        {
+            Edge = SideX * 2u + SideY;
+            Free = (uint)Position.z;
+            DepthA = DepthX;
+            DepthB = DepthY;
+        }
+        else if (!bOutY)
+        {
+            Edge = 4u + SideX * 2u + SideZ;
+            Free = (uint)Position.y;
+            DepthA = DepthX;
+            DepthB = DepthZ;
+        }
+        else
+        {
+            Edge = 8u + SideY * 2u + SideZ;
+            Free = (uint)Position.x;
+            DepthA = DepthY;
+            DepthB = DepthZ;
+        }
+        if (HasEdgeData(1u << Edge))
+        {
+            uint Base;
+            [branch]
+            switch (Edge)
+            {
+                case 0u:  Base = EdgeXPosYPos[Free]; break;
+                case 1u:  Base = EdgeXPosYNeg[Free]; break;
+                case 2u:  Base = EdgeXNegYPos[Free]; break;
+                case 3u:  Base = EdgeXNegYNeg[Free]; break;
+                case 4u:  Base = EdgeXPosZPos[Free]; break;
+                case 5u:  Base = EdgeXPosZNeg[Free]; break;
+                case 6u:  Base = EdgeXNegZPos[Free]; break;
+                case 7u:  Base = EdgeXNegZNeg[Free]; break;
+                case 8u:  Base = EdgeYPosZPos[Free]; break;
+                case 9u:  Base = EdgeYPosZNeg[Free]; break;
+                case 10u: Base = EdgeYNegZPos[Free]; break;
+                default:  Base = EdgeYNegZNeg[Free]; break;
+            }
+            return EdgeDeepVoxelGPU(Edge, Free, DepthA, DepthB, Base);
+        }
     }
-
-    if (OutCount == 3)
+    else
     {
         // Read the depth box into the corner neighbor (deep arrays for strided cells; the
-        // scalar Corner* at depth (0,0,0)). CornerIdx matches the CORNER_* order.
-        if (bXPos && bYPos && bZPos && HasCornerData(CORNER_XPOS_YPOS_ZPOS))
-            return CornerDeepVoxelGPU(0, DepthX, DepthY, DepthZ, CornerData[0]);
-        if (bXPos && bYPos && bZNeg && HasCornerData(CORNER_XPOS_YPOS_ZNEG))
-            return CornerDeepVoxelGPU(1, DepthX, DepthY, DepthZ, CornerData[1]);
-        if (bXPos && bYNeg && bZPos && HasCornerData(CORNER_XPOS_YNEG_ZPOS))
-            return CornerDeepVoxelGPU(2, DepthX, DepthY, DepthZ, CornerData[2]);
-        if (bXPos && bYNeg && bZNeg && HasCornerData(CORNER_XPOS_YNEG_ZNEG))
-            return CornerDeepVoxelGPU(3, DepthX, DepthY, DepthZ, CornerData[3]);
-        if (bXNeg && bYPos && bZPos && HasCornerData(CORNER_XNEG_YPOS_ZPOS))
-            return CornerDeepVoxelGPU(4, DepthX, DepthY, DepthZ, CornerData[4]);
-        if (bXNeg && bYPos && bZNeg && HasCornerData(CORNER_XNEG_YPOS_ZNEG))
-            return CornerDeepVoxelGPU(5, DepthX, DepthY, DepthZ, CornerData[5]);
-        if (bXNeg && bYNeg && bZPos && HasCornerData(CORNER_XNEG_YNEG_ZPOS))
-            return CornerDeepVoxelGPU(6, DepthX, DepthY, DepthZ, CornerData[6]);
-        if (bXNeg && bYNeg && bZNeg && HasCornerData(CORNER_XNEG_YNEG_ZNEG))
-            return CornerDeepVoxelGPU(7, DepthX, DepthY, DepthZ, CornerData[7]);
-        return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
+        // scalar Corner* at depth (0,0,0)). CornerIdx matches the CORNER_* order:
+        // 0: X+Y+Z+, 1: X+Y+Z-, 2: X+Y-Z+, 3: X+Y-Z-, 4: X-Y+Z+, 5: X-Y+Z-, 6: X-Y-Z+, 7: X-Y-Z-
+        uint Corner = SideX * 4u + SideY * 2u + SideZ;
+        if (HasCornerData(CORNER_XPOS_YPOS_ZPOS << Corner))
+        {
+            return CornerDeepVoxelGPU(Corner, DepthX, DepthY, DepthZ, CornerData[Corner]);
+        }
     }
 
-    return 0;
+    int3 ClampedPos = clamp(Position, int3(0, 0, 0), int3((int)ChunkSize - 1, (int)ChunkSize - 1, (int)ChunkSize - 1));
+    return InputVoxelData[GetVoxelIndex(ClampedPos, ChunkSize)];
 }
 
 float GetDensityAt(int3 Position)
@@ -355,30 +359,26 @@ float3 CalculateGradientNormalLOD(int3 Position, int Stride)
     // ("the terrain cliffs"). The Air tilt shaded every chunk's rim ring differently — a
     // per-chunk checkerboard at world scale. Mirrors the CPU Interior-domain clamp so the
     // CPU seam jobs' ring shading agrees with the GPU interior meshes.
-    if (MeshCellDomain != 0)
+    //
+    // The six taps run in a [loop] so GetVoxelAt is inlined once here, not twelve times: FXC (the
+    // D3D11 SM5 compiler) took 15-25 minutes on the unrolled copies (VISUAL_POLISH_PLAN.md, F2.13).
+    int MaxC = (int)ChunkSize - 1;
+    float3 G = float3(0, 0, 0);
+    [loop]
+    for (int Tap = 0; Tap < 6; Tap++)
     {
-        int MaxC = (int)ChunkSize - 1;
-        float gxc = GetDensityAt(clamp(Position + int3(Stride, 0, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
-                  - GetDensityAt(clamp(Position + int3(-Stride, 0, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
-        float gyc = GetDensityAt(clamp(Position + int3(0, Stride, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
-                  - GetDensityAt(clamp(Position + int3(0, -Stride, 0), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
-        float gzc = GetDensityAt(clamp(Position + int3(0, 0, Stride), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)))
-                  - GetDensityAt(clamp(Position + int3(0, 0, -Stride), int3(0, 0, 0), int3(MaxC, MaxC, MaxC)));
-
-        float3 NormalC = float3(-gxc, -gyc, -gzc);
-        float LenC = length(NormalC);
-        if (LenC > 0.0001f)
+        int3 Dir = int3(Tap < 2 ? 1 : 0, (Tap >> 1) == 1 ? 1 : 0, Tap >= 4 ? 1 : 0);
+        bool bNegative = (Tap & 1) != 0;
+        int3 P = Position + Dir * (bNegative ? -Stride : Stride);
+        if (MeshCellDomain != 0)
         {
-            return NormalC / LenC;
+            P = clamp(P, int3(0, 0, 0), int3(MaxC, MaxC, MaxC));
         }
-        return float3(0, 0, 1);
+        float D = GetDensityAt(P);
+        G += float3(Dir) * (bNegative ? -D : D);
     }
 
-    float gx = GetDensityAt(Position + int3(Stride, 0, 0)) - GetDensityAt(Position + int3(-Stride, 0, 0));
-    float gy = GetDensityAt(Position + int3(0, Stride, 0)) - GetDensityAt(Position + int3(0, -Stride, 0));
-    float gz = GetDensityAt(Position + int3(0, 0, Stride)) - GetDensityAt(Position + int3(0, 0, -Stride));
-
-    float3 Normal = float3(-gx, -gy, -gz);
+    float3 Normal = -G;
     float Len = length(Normal);
     if (Len > 0.0001f)
     {
@@ -401,68 +401,32 @@ uint DCEdgeIndex(int CX, int CY, int CZ, int Axis)
     return DCCellIndex(CX, CY, CZ) * 3 + (uint)Axis;
 }
 
-/** Get cell material by finding solid voxel closest to isosurface */
-uint GetCellMaterial(int3 CellVoxelPos, int Stride)
+/**
+ * The cell's solid corner voxel closest to the isosurface (the first such corner in z, y, x order),
+ * whose material and biome the cell takes; 0 (material 0, biome 0) when no corner is solid. One
+ * [loop] over the 8 corners so GetVoxelAt is inlined once (FXC, F2.13).
+ */
+uint GetCellSurfaceVoxel(int3 CellVoxelPos, int Stride)
 {
-    uint BestMat = 0;
+    uint BestPacked = 0;
     int ClosestDist = 0x7FFFFFFF;
-    [unroll]
-    for (int dz = 0; dz <= 1; dz++)
+    [loop]
+    for (int Corner = 0; Corner < 8; Corner++)
     {
-        [unroll]
-        for (int dy = 0; dy <= 1; dy++)
+        int3 VP = CellVoxelPos + int3(Corner & 1, (Corner >> 1) & 1, Corner >> 2) * Stride;
+        uint Packed = GetVoxelAt(VP);
+        uint Density = (Packed >> 8) & 0xFF;
+        if (Density >= 127) // IsSolid
         {
-            [unroll]
-            for (int dx = 0; dx <= 1; dx++)
+            int Dist = abs((int)Density - 128);
+            if (Dist < ClosestDist)
             {
-                int3 VP = CellVoxelPos + int3(dx, dy, dz) * Stride;
-                uint Packed = GetVoxelAt(VP);
-                uint Density = (Packed >> 8) & 0xFF;
-                if (Density >= 127) // IsSolid
-                {
-                    int Dist = abs((int)Density - 128);
-                    if (Dist < ClosestDist)
-                    {
-                        ClosestDist = Dist;
-                        BestMat = GetMaterialID(Packed);
-                    }
-                }
+                ClosestDist = Dist;
+                BestPacked = Packed;
             }
         }
     }
-    return BestMat;
-}
-
-/** Get cell biome by finding solid voxel closest to isosurface */
-uint GetCellBiome(int3 CellVoxelPos, int Stride)
-{
-    uint BestBiome = 0;
-    int ClosestDist = 0x7FFFFFFF;
-    [unroll]
-    for (int dz = 0; dz <= 1; dz++)
-    {
-        [unroll]
-        for (int dy = 0; dy <= 1; dy++)
-        {
-            [unroll]
-            for (int dx = 0; dx <= 1; dx++)
-            {
-                int3 VP = CellVoxelPos + int3(dx, dy, dz) * Stride;
-                uint Packed = GetVoxelAt(VP);
-                uint Density = (Packed >> 8) & 0xFF;
-                if (Density >= 127)
-                {
-                    int Dist = abs((int)Density - 128);
-                    if (Dist < ClosestDist)
-                    {
-                        ClosestDist = Dist;
-                        BestBiome = GetBiomeID(Packed);
-                    }
-                }
-            }
-        }
-    }
-    return BestBiome;
+    return BestPacked;
 }
 
 // ==================== Pass 0: Reset Counters ====================
@@ -506,8 +470,10 @@ void DCEdgeCrossingCS(
 
     float D0 = GetDensityAt(int3(VX, VY, VZ));
 
-    // Check 3 edges (+X, +Y, +Z) from this cell
-    [unroll]
+    // Check 3 edges (+X, +Y, +Z) from this cell. [loop], not [unroll]: FXC cannot unroll a body this
+    // large (X3511), and UE's fallback for that, a DXC cross-compile to flattened HLSL, took FXC
+    // 15-25 minutes (F2.13).
+    [loop]
     for (int Axis = 0; Axis < 3; Axis++)
     {
         int3 Neighbor = int3(VX, VY, VZ);
@@ -546,7 +512,7 @@ void DCEdgeCrossingCS(
             float3 Normal = CalculateGradientNormalLOD(CrossVoxel, Stride);
 
             // Get material/biome from the solid side
-            uint SolidPacked = bSolid0 ? GetVoxelAt(int3(VX, VY, VZ)) : GetVoxelAt(Neighbor);
+            uint SolidPacked = GetVoxelAt(bSolid0 ? int3(VX, VY, VZ) : Neighbor);
             uint MatID = GetMaterialID(SolidPacked);
             uint BiomeID = GetBiomeID(SolidPacked);
 
@@ -940,8 +906,9 @@ void DCQEFSolveCS(
 
     // Get material and biome
     int3 CellVoxelPos = int3(CX * Stride, CY * Stride, CZ * Stride);
-    uint MatID = GetCellMaterial(CellVoxelPos, Stride);
-    uint BiomeId = GetCellBiome(CellVoxelPos, Stride);
+    uint SurfaceVoxel = GetCellSurfaceVoxel(CellVoxelPos, Stride);
+    uint MatID = GetMaterialID(SurfaceVoxel);
+    uint BiomeId = GetBiomeID(SurfaceVoxel);
 
     // Common cell-vertex record. Written for every valid cell so the weld (Pass 2.6) and any owned
     // quad (Pass 3) can read its solved position; VertexIndex is assigned below ONLY if this cell
