@@ -9877,9 +9877,85 @@ once, the character's dent and the test actor's brush as before. The dig, place 
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G74 | With `voxel.MeshFade` on (the default), an edit's re-mesh does not reach the screen: the edited chunk keeps drawing the mesh it had before. In the cubic world five dug blocks stayed drawn for a minute and more (`c22_pit_after`, `c22_g74_before` / `c22_g74_after6s`) while the voxels and the collision had the holes (a trace down the column landed on the block below) and `voxel.Edit.MeshWork` counted 5 edited chunks re-meshed; in the smooth control the test actor's brush crater did not show either. An edit made with `voxel.MeshFade 0` shows at once, with the ones before it (`c22_pit_nofade`). Not this work's: the smooth world draws no block feedback and the renderer is untouched. §21's felled tree disappeared at once at `952d4ae`, before visual polish milestone 1, so it is probably newer than that; not bisected | Recorded; the live pass above ran with `voxel.MeshFade 0` |
+| G74 | With `voxel.MeshFade` on (the default), an edit's re-mesh does not reach the screen: the edited chunk keeps drawing the mesh it had before. In the cubic world five dug blocks stayed drawn for a minute and more (`c22_pit_after`, `c22_g74_before` / `c22_g74_after6s`) while the voxels and the collision had the holes (a trace down the column landed on the block below) and `voxel.Edit.MeshWork` counted 5 edited chunks re-meshed; in the smooth control the test actor's brush crater did not show either. An edit made with `voxel.MeshFade 0` shows at once, with the ones before it (`c22_pit_nofade`). Not this work's: the smooth world draws no block feedback and the renderer is untouched. §21's felled tree disappeared at once at `952d4ae`, before visual polish milestone 1, so it is probably newer than that; not bisected | Explained in §22.3: not a renderer defect; the dug cells lay under the held tool's head and the placement ghost in a first-person view (G75) |
 
 **Left as it was.** Voxel edits still do not replicate to clients (`EDIT_LAYER.md`): a remote client sees its predicted
 cracks and the server's verdict, not the dug block. A far representation for cubic (§12.5), cubic on planets.
 
 The block highlight, the placement preview and per-material break times are in.
+
+### 22.3 G74: an edit's re-mesh reaches the screen (2026-10-24)
+
+Traced on VoxelWorlds `fix/g74-edit-reaches-screen` (base `42c8d5f`) and UE5_PluginDev `claude/quizzical-pasteur-b2dccd`
+(base `e919dd1`), editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8`, in a worktree editor with background
+throttling off, `VoxelDemo` (smooth, and `Review_Cubic` by `voxel.ConfigOverride`) from a fresh world. To replay §22.2's
+session exactly, the same editor also ran §22.2's build (VoxelWorlds `5c31b62`) with §22.2's content (UE5_PluginDev
+`7760c3c`'s atlases, which have no saved arrays: the first PIE built them, 4096 RGBA32F, in 38.6 s, and the second PIE
+recreated the scene proxy a second in, as §22.2's log shows).
+
+**Not a renderer defect.** An edit's re-mesh reaches the scene proxy within a frame, crossfades from the mesh it
+replaces for `voxel.MeshFade.Duration` (0.35 s) and is then drawn alone with the terrain material, in both meshing
+modes, on both builds. What §22.2 saw was the view.
+
+- *What the proxy draws.* `voxel.MeshFade.Stats` with the dig's point (below): on main the cubic chunk (−3, −12, −1)
+  went 15,870 → 15,860 → 15,854 triangles over a system dig and a `vox.Dig`, each a new vertex factory, with no fade
+  state or Previous mesh left after the fade. On §22.2's build, after the same `vox.Mine` break as §22.2's first (voxel
+  [−162, −724, −10]), the main view drew the post-break mesh (15,876 triangles) with the terrain material, and still did
+  after `voxel.RemeshAll` and after the proxy was recreated (the component hidden and shown).
+- *What the screen shows.* Straight down from above, the broken block's hole is drawn at once with the fade on
+  (`g74_top`), and the collision agrees (the column's top at −750 against −675 and −600 around it). From the pose §22.2
+  used (first person at the pawn, pitch −40 to −55, the iron pickaxe in hand, edit mode on) the same ground looks
+  untouched (`g74_fp_after_mine`): §22.2's five pit voxels dug again at their centres give `c22_pit_after`'s picture,
+  and its sixth (voxel [−161, −724, −11], dug in §22.2 with `voxel.MeshFade 0`) dug here with the fade **on** gives
+  `c22_pit_nofade`'s (`g74_c22_replay`). The cvar changed nothing; the sixth dig opened the column two deep.
+- *Why the pit hides.* The block a dig takes is the one under the crosshair, at the screen's centre, which the held
+  tool's head covers in first person; in edit mode the placement ghost then moves into the cell just dug (a place on
+  the hole's floor would fill it), a pale block where the dug one was (`g74_c22_pose_triple`); and at those pitches a
+  one-block hole a few blocks ahead shows mostly its floor, the grass top of the block below. §22.2's smooth control was
+  the same view: one dig at the crosshair, first person at pitch −45 with the pickaxe in hand.
+- *The leads.* "Crossfades: interior 1 after five edits" is §22.2's periodic stats line of 22:59:36, a second before its
+  first `vox.Dig` (the 1 is the `vox.Mine` break of 22:56:49); the counter then rose 2, 3, 4, 5 with each dig, every
+  fade complete (active fades 0) at the next line. The 822 dirty seams with none queued were 822 at 22:55:35, before any
+  edit, and stayed: seams with a participant that never became resident (3,348 registered, 2,533 scheduled and
+  processed). Visual polish milestone 1 (`FVoxelViewCull`, shadow-caster culling) and the F2.10/F2.11 arrays play no
+  part: §22.2's build with its content and main with the saved arrays draw edits alike.
+- *A/B.* Fifteen fill and dig cycles at one spot of the smooth demo (a 200 uu stone mound and back to the ground;
+  `voxel.Edit.System` brushes are relative, so the dig cancels the fill), photographed 2 s after each edit from a fixed
+  camera with the fade on: 30 of 30 shots match the expected state (mean difference 0.5-2.2 against it, 8.9-9.7 against
+  the other; `g74_ab_refs`).
+
+Check a dig from above, or with the highlight off
+(`vc.Dig.Highlight 0`) and the tool unequipped; the first-person view at the crosshair hides it.
+
+**What stays: the tooling that showed it.**
+
+- `voxel.MeshFade.Stats [fades=8] [x y z]`: for every voxel world component of the world its tick, the fades it drives
+  (alpha, held, appearing, time left), the hold requests and its proxy's fade states; with a world point, that chunk's
+  mesh in the component and in the proxy, how a frame draws it now (the current mesh alone, a crossfade or an
+  appearance) and what the last frame drew of it (watched from then until a call without a point).
+- `FVoxelSceneProxy::GetChunkDrawInfo_RenderThread` and `UVoxelWorldComponent::GetChunkDrawInfo` (`FVoxelChunkDrawInfo`):
+  what the proxy holds for a chunk and how a frame draws it, by the crossfade test `GetDynamicMeshElements` makes
+  (`IsChunkCrossfadeDrawable`, shared).
+- `VoxelWorlds.Rendering.Crossfade.SwapReachesProxy`: a real component and scene proxy with `M_VoxelMaster` and its
+  _Fade, the world's clock advanced by hand. An edit swap crossfades from the 8-triangle mesh to the 12-triangle one
+  (halfway at 0.2 s) and is drawn alone after 0.5 s; an LOD swap the same; a swap held for its seams shows the old mesh
+  at alpha 0 for 1 s and fades once released; an unreleased hold lands at the renderer's 3 s failsafe; with
+  `voxel.MeshFade 0` a swap is drawn at once.
+- `VoxelWorlds.Streaming.EditReachesProxy.{Smooth,Cubic}`: the chunk manager streams a small plane into the real
+  renderer and a player's 3-voxel dig at the surface (81 voxels) re-meshes the chunk under it: one interior crossfade
+  from the old mesh, then the new upload drawn alone; with the fade off the same mesh (by its content's hash) drawn at
+  once. The DC dent kept the triangle count (2,632), the cubic chunk went 3,534 → 3,530.
+- The three tests need a render scene: they run in the editor; under `-nullrhi` no component creates a scene proxy and
+  they skip, as the GPU tests do.
+
+**Suites.** 641 tests headless (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`, `-nullrhi`; the three above skip there) and 641 in the editor with the GPU tests (D3D12), all passing: main's 638 and the three above. The GPU parity lines are identical to main's (114 of 114 by CRC against the baseline of §20.29).
+
+| ID | Status | PR | Check |
+|----|--------|----|-------|
+| G74 | Explained: not a defect | VoxelWorlds @@VWPR@@, UE5_PluginDev @@PPR@@ | `VoxelWorlds.Rendering.Crossfade.SwapReachesProxy`, `VoxelWorlds.Streaming.EditReachesProxy.{Smooth,Cubic}`; live: §22.2's session replayed on its build and content |
+
+**New finding.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G75 | In first person a dig at the crosshair lies under the held tool's head, and in edit mode the placement ghost moves into the cell just dug, a pale block where the dug one was: a one-block dig reads as not having happened (G74 was this). A presentation question for the block feedback of §22 (for example, no ghost in the cell just dug until the crosshair moves), not a defect | Recorded |
