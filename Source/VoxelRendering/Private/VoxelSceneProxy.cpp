@@ -84,6 +84,32 @@ namespace
 	};
 }
 
+namespace
+{
+	/**
+	 * A chunk with this fade state and retained Previous mesh crossfades: both meshes draw, under complementary dither
+	 * masks. Any other combination draws the current mesh alone (an appearance fades it in from nothing).
+	 */
+	bool IsChunkCrossfadeDrawable(const FVoxelChunkFadeState* FadeState, const FVoxelChunkPreviousMesh* PreviousMesh)
+	{
+		return FadeState && PreviousMesh
+			&& FadeState->FadeInProxy && FadeState->FadeOutProxy
+			&& PreviousMesh->RenderData.HasValidBuffers()
+			&& PreviousMesh->RenderData.IndexCount >= 3
+			&& PreviousMesh->VertexFactory.IsValid()
+			&& PreviousMesh->IndexBuffer.IsValid();
+	}
+}
+
+namespace VoxelFadeDebug
+{
+	/** voxel.MeshFade.Stats' focus chunk: GetDynamicMeshElements records what the main view drew of it. */
+	std::atomic<bool> bFocusActive{ false };
+	FCriticalSection FocusLock;
+	FIntVector FocusChunk = FIntVector::ZeroValue;
+	FString FocusDrawn;
+}
+
 // ==================== Helper Function Implementation ====================
 
 void InitVoxelLocalVertexFactory(
@@ -487,13 +513,22 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					PreviousMesh = ChunkPreviousMeshes.Find(ChunkCoord);
 				}
 			}
-			const bool bFading = FadeState && PreviousMesh
-				&& FadeState->FadeInProxy && FadeState->FadeOutProxy
-				&& PreviousMesh->RenderData.HasValidBuffers()
-				&& PreviousMesh->RenderData.IndexCount >= 3
-				&& PreviousMesh->VertexFactory.IsValid()
-				&& PreviousMesh->IndexBuffer.IsValid();
+			const bool bFading = IsChunkCrossfadeDrawable(FadeState, PreviousMesh);
 			const bool bAppearing = !bFading && FadeState && FadeState->bAppear && FadeState->FadeInProxy;
+
+			// voxel.MeshFade.Stats with a focus chunk: what the main view draws of it (G74)
+			if (VoxelFadeDebug::bFocusActive.load(std::memory_order_relaxed) && !Cull.bShadowCasters)
+			{
+				FScopeLock FocusScope(&VoxelFadeDebug::FocusLock);
+				if (ChunkCoord == VoxelFadeDebug::FocusChunk)
+				{
+					VoxelFadeDebug::FocusDrawn = FString::Printf(TEXT("frame %u view %d: current factory %p, %u tris, %s%s"),
+						ViewFamily.FrameNumber, ViewIndex, VertexFactoryPtr->Get(), RenderData.IndexCount / 3,
+						(bFading || bAppearing) ? TEXT("fade-in material") : TEXT("terrain material"),
+						bFading ? *FString::Printf(TEXT("; previous factory %p, %u tris, fade-out material"), PreviousMesh->VertexFactory.Get(),
+							PreviousMesh->RenderData.IndexCount / 3) : TEXT(""));
+				}
+			}
 
 			if (bFading)
 			{
@@ -2619,4 +2654,88 @@ SIZE_T FVoxelSceneProxy::GetGPUMemoryUsage() const
 		Total += Pair.Value.RenderData.GetGPUMemoryUsage();
 	}
 	return Total;
+}
+
+bool FVoxelSceneProxy::GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	OutInfo = FVoxelChunkDrawInfo();
+	const FVoxelChunkRenderData* Current = ChunkRenderData.Find(ChunkCoord);
+	const TSharedPtr<FLocalVertexFactory>* VertexFactoryPtr = ChunkVertexFactories.Find(ChunkCoord);
+	const FVoxelChunkPreviousMesh* PreviousMesh = ChunkPreviousMeshes.Find(ChunkCoord);
+	const FVoxelChunkFadeState* FadeState = ChunkFadeStates.Find(ChunkCoord);
+	if (Current && Current->HasValidBuffers() && Current->IndexCount >= 3 && VertexFactoryPtr && VertexFactoryPtr->IsValid())
+	{
+		OutInfo.CurrentTriangles = Current->IndexCount / 3;
+		OutInfo.LODLevel = Current->LODLevel;
+		OutInfo.bVisible = Current->bIsVisible;
+		OutInfo.VertexFactory = VertexFactoryPtr->Get();
+	}
+	OutInfo.PreviousTriangles = PreviousMesh ? PreviousMesh->RenderData.IndexCount / 3 : 0;
+	if (FadeState)
+	{
+		OutInfo.bHasFadeState = true;
+		OutInfo.FadeAlpha = FadeState->FadeAlpha;
+		OutInfo.bHeld = FadeState->bHeld;
+		OutInfo.bAppear = FadeState->bAppear;
+	}
+	// As GetDynamicMeshElements decides it (outside wireframe)
+	OutInfo.bCrossfading = IsChunkCrossfadeDrawable(FadeState, PreviousMesh);
+	OutInfo.bAppearing = !OutInfo.bCrossfading && FadeState && FadeState->bAppear && FadeState->FadeInProxy;
+	return OutInfo.CurrentTriangles > 0;
+}
+
+FString FVoxelSceneProxy::GetFadeDebugString_RenderThread(int32 MaxEntries, const FIntVector* FocusChunk) const
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	FString Out = FString::Printf(TEXT("proxy: chunks %d, chunk fade states %d, chunk previous meshes %d, seam fade states %d, seam previous meshes %d"),
+		ChunkRenderData.Num(), ChunkFadeStates.Num(), ChunkPreviousMeshes.Num(), SeamFadeStates.Num(), SeamPreviousMeshes.Num());
+	int32 Listed = 0;
+	for (const TPair<FIntVector, FVoxelChunkFadeState>& Pair : ChunkFadeStates)
+	{
+		if (Listed++ >= MaxEntries)
+		{
+			break;
+		}
+		const FVoxelChunkPreviousMesh* Previous = ChunkPreviousMeshes.Find(Pair.Key);
+		const FVoxelChunkRenderData* Current = ChunkRenderData.Find(Pair.Key);
+		Out += FString::Printf(TEXT("\n  chunk %s: alpha %.2f held %d appear %d in %d out %d, previous %s, current %s"),
+			*Pair.Key.ToString(), Pair.Value.FadeAlpha, Pair.Value.bHeld ? 1 : 0, Pair.Value.bAppear ? 1 : 0,
+			Pair.Value.FadeInProxy ? 1 : 0, Pair.Value.FadeOutProxy ? 1 : 0,
+			Previous ? *FString::Printf(TEXT("%u tris"), Previous->RenderData.IndexCount / 3) : TEXT("none"),
+			Current ? *FString::Printf(TEXT("%u tris"), Current->IndexCount / 3) : TEXT("none"));
+	}
+	{
+		FScopeLock FocusScope(&VoxelFadeDebug::FocusLock);
+		if (VoxelFadeDebug::bFocusActive.load() && (!FocusChunk || *FocusChunk == VoxelFadeDebug::FocusChunk))
+		{
+			Out += FString::Printf(TEXT("\n  last drawn for %s: %s"), *VoxelFadeDebug::FocusChunk.ToString(),
+				VoxelFadeDebug::FocusDrawn.IsEmpty() ? TEXT("nothing since the focus was set") : *VoxelFadeDebug::FocusDrawn);
+		}
+		if (FocusChunk && (!VoxelFadeDebug::bFocusActive.load() || *FocusChunk != VoxelFadeDebug::FocusChunk))
+		{
+			VoxelFadeDebug::FocusChunk = *FocusChunk;
+			VoxelFadeDebug::FocusDrawn.Reset();
+		}
+		VoxelFadeDebug::bFocusActive.store(FocusChunk != nullptr);
+	}
+	if (FocusChunk)
+	{
+		FVoxelChunkDrawInfo Info;
+		GetChunkDrawInfo_RenderThread(*FocusChunk, Info);
+		Out += FString::Printf(TEXT("\n  focus chunk %s: current %s (LOD %d, visible %d, factory %p), previous %s, fade state %s -> a frame draws %s"),
+			*FocusChunk->ToString(),
+			Info.CurrentTriangles > 0 ? *FString::Printf(TEXT("%u tris"), Info.CurrentTriangles) : TEXT("none"),
+			Info.LODLevel, Info.bVisible ? 1 : 0, Info.VertexFactory,
+			Info.PreviousTriangles > 0 ? *FString::Printf(TEXT("%u tris"), Info.PreviousTriangles) : TEXT("none"),
+			Info.bHasFadeState ? *FString::Printf(TEXT("alpha %.2f held %d appear %d"), Info.FadeAlpha, Info.bHeld ? 1 : 0, Info.bAppear ? 1 : 0) : TEXT("none"),
+			Info.bCrossfading ? TEXT("a crossfade") : Info.bAppearing ? TEXT("an appearance") : Info.DrawsCurrentOnly() ? TEXT("the current mesh") : TEXT("nothing"));
+	}
+	return Out;
 }

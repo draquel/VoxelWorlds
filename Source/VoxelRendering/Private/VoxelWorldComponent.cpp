@@ -14,6 +14,8 @@
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "Async/Async.h"
+#include "RenderingThread.h"
+#include "UObject/UObjectIterator.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture2DArray.h"
@@ -1062,6 +1064,121 @@ float UVoxelWorldComponent::GetSeamFadeRemainingSeconds(const FIntVector& OwnerC
 	}
 	return Remaining;
 }
+
+FString UVoxelWorldComponent::GetFadeDebugString(int32 MaxEntries, const FVector* FocusPoint) const
+{
+	check(IsInGameThread());
+
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetRealTimeSeconds() : 0.0;
+	const float Duration = CVarVoxelMeshFadeDuration.GetValueOnGameThread();
+	FString Out = FString::Printf(TEXT("%s: can crossfade %d (fade material %s), tick registered %d enabled %d, active fades %d, scheduled %d, chunk holds %d, seam holds %d, pending releases %d, interior fades started %lld (appearances %lld)"),
+		*GetName(), CanCrossfade() ? 1 : 0, FadeMaterial ? *FadeMaterial->GetName() : TEXT("none"),
+		PrimaryComponentTick.IsTickFunctionRegistered() ? 1 : 0, IsComponentTickEnabled() ? 1 : 0,
+		ActiveFades.Num(), FadeScheduler.Num(), ChunkFadeHolds.Num(), SeamFadeHolds.Num(), PendingHoldReleases.Num(),
+		FadeStartCounts[0], FadeAppearCounts[0]);
+
+	TOptional<FIntVector> FocusChunk;
+	if (FocusPoint && ChunkWorldSize > 0.0f)
+	{
+		const FVector Local = (*FocusPoint - WorldOrigin) / ChunkWorldSize;
+		FocusChunk = FIntVector(FMath::FloorToInt32(Local.X), FMath::FloorToInt32(Local.Y), FMath::FloorToInt32(Local.Z));
+		int32 Pending = 0;
+		for (const FPendingChunkAdd& Add : PendingAdds)
+		{
+			Pending += (Add.ChunkCoord == FocusChunk.GetValue()) ? 1 : 0;
+		}
+		FScopeLock Lock(&ChunkInfoLock);
+		const FChunkInfo* Info = ChunkInfoMap.Find(FocusChunk.GetValue());
+		const FIntVector4 Key = FVoxelCrossfadeScheduler::ChunkKey(FocusChunk.GetValue());
+		Out += FString::Printf(TEXT("\n  focus chunk %s: game side %s, pending adds %d, fade scheduled %d held %d appearing %d"),
+			*FocusChunk->ToString(), Info ? *FString::Printf(TEXT("%lld tris, LOD %d"), Info->TriangleCount, Info->LODLevel) : TEXT("none"),
+			Pending, FadeScheduler.Contains(Key) ? 1 : 0, FadeScheduler.IsHeld(Key) ? 1 : 0, FadeScheduler.IsAppearing(Key) ? 1 : 0);
+	}
+	int32 Listed = 0;
+	for (const TPair<FIntVector4, FActiveChunkFade>& Pair : ActiveFades)
+	{
+		if (Listed++ >= MaxEntries)
+		{
+			break;
+		}
+		const FIntVector4& Key = Pair.Key;
+		Out += FString::Printf(TEXT("\n  %s %s: scheduled %d held %d appearing %d, %.2f s left"),
+			FVoxelCrossfadeScheduler::IsSeamKey(Key) ? *FString::Printf(TEXT("seam slot %d of"), Key.W) : TEXT("chunk"),
+			*FVoxelCrossfadeScheduler::KeyCoord(Key).ToString(), FadeScheduler.Contains(Key) ? 1 : 0, FadeScheduler.IsHeld(Key) ? 1 : 0,
+			FadeScheduler.IsAppearing(Key) ? 1 : 0, FadeScheduler.GetRemainingSeconds(Key, Now, Duration));
+	}
+
+	if (FVoxelSceneProxy* Proxy = GetVoxelSceneProxy())
+	{
+		FString ProxyString;
+		ENQUEUE_RENDER_COMMAND(VoxelFadeDebugString)(
+			[Proxy, MaxEntries, FocusChunk, &ProxyString](FRHICommandListImmediate& RHICmdList)
+			{
+				ProxyString = Proxy->GetFadeDebugString_RenderThread(MaxEntries, FocusChunk.GetPtrOrNull());
+			}
+		);
+		FlushRenderingCommands();
+		Out += TEXT("\n  ") + ProxyString;
+	}
+	else
+	{
+		Out += TEXT("\n  no scene proxy");
+	}
+	return Out;
+}
+
+bool UVoxelWorldComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const
+{
+	check(IsInGameThread());
+
+	OutInfo = FVoxelChunkDrawInfo();
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (!Proxy)
+	{
+		return false;
+	}
+	FVoxelChunkDrawInfo Info;
+	ENQUEUE_RENDER_COMMAND(VoxelChunkDrawInfo)(
+		[Proxy, ChunkCoord, &Info](FRHICommandListImmediate& RHICmdList)
+		{
+			Proxy->GetChunkDrawInfo_RenderThread(ChunkCoord, Info);
+		}
+	);
+	FlushRenderingCommands();
+	OutInfo = Info;
+	return OutInfo.CurrentTriangles > 0;
+}
+
+// Console: voxel.MeshFade.Stats [fades=8] [x y z]
+// World modes review G74: what the mesh-swap crossfades are doing, and for a world point what its chunk's proxy holds and
+// what the last frame drew of it (the current mesh with the terrain material, a crossfade or an appearance).
+static FAutoConsoleCommandWithWorldAndArgs GVoxelMeshFadeStatsCmd(
+	TEXT("voxel.MeshFade.Stats"),
+	TEXT("Log the mesh-swap crossfades of every voxel world component in the world: its tick, the fades it drives (alpha, held, ")
+	TEXT("appearing, time left), the hold requests and its scene proxy's fade states. Optional args: fades to list per component (default 8), ")
+	TEXT("and a world point x y z: its chunk's mesh here and in the proxy, and what the last frame drew of it (watched from then on; ")
+	TEXT("a call without a point stops watching)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		const int32 MaxEntries = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 8;
+		TOptional<FVector> FocusPoint;
+		if (Args.Num() >= 4)
+		{
+			FocusPoint = FVector(FCString::Atod(*Args[1]), FCString::Atod(*Args[2]), FCString::Atod(*Args[3]));
+		}
+		int32 Components = 0;
+		for (TObjectIterator<UVoxelWorldComponent> It; It; ++It)
+		{
+			if (It->IsRegistered() && (!World || It->GetWorld() == World))
+			{
+				UE_LOG(LogVoxelRendering, Log, TEXT("voxel.MeshFade.Stats: %s"), *It->GetFadeDebugString(MaxEntries, FocusPoint.GetPtrOrNull()));
+				++Components;
+			}
+		}
+		UE_LOG(LogVoxelRendering, Log, TEXT("voxel.MeshFade.Stats: %d voxel world component(s) in %s"), Components,
+			World ? *World->GetName() : TEXT("any world"));
+	}));
 
 bool UVoxelWorldComponent::StartFade(const FIntVector4& Key)
 {
