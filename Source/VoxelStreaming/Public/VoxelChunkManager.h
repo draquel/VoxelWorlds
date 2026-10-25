@@ -288,6 +288,39 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 	int32 StandInMinLevel = -1;
 	int64 TotalStandIns = 0;
 	int64 StandInUpdates = 0;
+
+	/**
+	 * Updates run again in a frame for the camera it renders with, after a cut (visual polish F4.3:
+	 * UVoxelChunkManager::UpdateFarFieldForCamera), in all
+	 */
+	int64 CameraUpdates = 0;
+};
+
+/**
+ * The chunk manager's far-field update for the camera a frame renders with (visual polish F4.3). The chunk manager ticks
+ * in TG_PrePhysics, before the player camera managers update (UWorld::Tick: after TG_PostPhysics), so its camera is the
+ * frame before's; this runs in TG_PostUpdateWork, after them (UVoxelChunkManager::TickFarFieldCamera).
+ */
+USTRUCT()
+struct FVoxelFarFieldCameraTickFunction : public FTickFunction
+{
+	GENERATED_BODY()
+
+	/** The chunk manager this ticks */
+	class UVoxelChunkManager* Target = nullptr;
+
+	virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent) override;
+	virtual FString DiagnosticMessage() override;
+	virtual FName DiagnosticContext(bool bDetailed) override;
+};
+
+template<>
+struct TStructOpsTypeTraits<FVoxelFarFieldCameraTickFunction> : public TStructOpsTypeTraitsBase2<FVoxelFarFieldCameraTickFunction>
+{
+	enum
+	{
+		WithCopy = false
+	};
 };
 
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent))
@@ -988,6 +1021,29 @@ public:
 	 */
 	void UpdateFarFieldForViewer(const FVector& ViewerPosition, float FieldOfView = 90.0f);
 
+	/**
+	 * The far field for the camera a frame renders with (visual polish F4.3). The tick updates the far field in
+	 * TG_PrePhysics with the player camera manager's camera, which is the frame before's (the camera managers update after
+	 * TG_PostPhysics), so after a cut (a teleport) the first frame was drawn with the selection for the old position: on a
+	 * face the camera never saw, nothing. When this frame's camera lies more than a chunk from the camera of the last
+	 * update, the far field updates again for it, the streaming viewer (the window's centre) as the last update had it.
+	 * Called from TG_PostUpdateWork (FVoxelFarFieldCameraTickFunction) with voxel.World.FarFieldCameraUpdate on.
+	 *
+	 * @param CameraPosition This frame's camera
+	 * @param FieldOfView Its horizontal field of view (degrees)
+	 * @return Whether the far field updated
+	 */
+	bool UpdateFarFieldForCamera(const FVector& CameraPosition, float FieldOfView);
+
+	/**
+	 * The camera tick's body: UpdateFarFieldForCamera with the first player camera manager's camera, unless
+	 * voxel.World.FarFieldCameraUpdate is 0, the bench drives the view (SetBenchmarkView) or there is no camera manager.
+	 */
+	void TickFarFieldCamera();
+
+	/** The tick function that runs TickFarFieldCamera after the camera managers (tests run it as a world tick would). */
+	FVoxelFarFieldCameraTickFunction& GetFarFieldCameraTickFunction() { return FarFieldCameraTick; }
+
 	// ==================== Orbit and back (spherical Phase 6, WM-BP10, D18) ====================
 
 	/**
@@ -1601,6 +1657,9 @@ public:
 	FOnChunkUnloaded OnChunkUnloaded;
 
 protected:
+	/** Registers the far field's camera tick (FarFieldCameraTick) with the primary tick, which it follows. */
+	virtual void RegisterComponentTickFunctions(bool bRegister) override;
+
 	// ==================== Internal Update Methods ====================
 
 	/**
@@ -2751,6 +2810,18 @@ private:
 	/** The viewer's ground radius (one terrain sample when the viewer moves) and the position it was taken at */
 	double FarFieldGroundRadius = 0.0;
 	FVector FarFieldGroundViewer = FVector(TNumericLimits<double>::Max());
+
+	/** The camera and streaming viewer of the last far-field update (UpdateFarFieldForCamera compares this frame's camera) */
+	FVector FarFieldLastCamera = FVector::ZeroVector;
+	FVector FarFieldLastViewer = FVector::ZeroVector;
+	bool bFarFieldHasLastCamera = false;
+
+	/** Far-field updates run again for a frame's camera after a cut (F4.3), in all */
+	int64 FarFieldCameraUpdates = 0;
+
+	/** Runs TickFarFieldCamera in TG_PostUpdateWork, after the player camera managers (F4.3) */
+	UPROPERTY()
+	FVoxelFarFieldCameraTickFunction FarFieldCameraTick;
 
 	/** Whether the sea's underside sections are shown (the viewer is inside the sea radius) */
 	bool bFarFieldUndersideShown = false;

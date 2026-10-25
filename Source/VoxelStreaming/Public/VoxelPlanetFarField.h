@@ -401,6 +401,15 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 	 * False = before: both stood in for, as a covered band patch the viewer moved past PrebuildRadius did
 	 */
 	bool bAvoidStandIns = true;
+
+	/**
+	 * Build every cube face's root, also one wholly under the horizon (visual polish F4.2). A root is the stand-in of last
+	 * resort, kept built once built (IsKeptBuilt), but a culled patch requests no build, so a face the camera had never
+	 * looked at had no root: after a teleport onto it the first update drew nothing there (the sky through the planet;
+	 * the voxel window is not loaded there yet either) until builds landed. Six patches in all, built in the first
+	 * updates, nearest first. False = before: a root was built once some of its face came into view
+	 */
+	bool bBuildAllRoots = true;
 };
 
 /** What an update changed, for the owner to apply to its components. */

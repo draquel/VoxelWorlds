@@ -721,6 +721,11 @@ primitives, and the voxel window keeps its size.
   horizon) waits for its build drawing nothing, and a chunk re-meshing counts as drawn. Before, the nearest built
   ancestor stood in, often a face's root (the others released), and its coarse surface flashed over the voxel terrain
   and the horizon for a frame or more ([VISUAL_POLISH_PLAN.md](../VISUAL_POLISH_PLAN.md) "VP4 terrain flicker").
+  The chunk manager updates the far field in its tick (`TG_PrePhysics`) with the player camera manager's camera, the
+  frame before's (the camera managers update after `TG_PostPhysics`); after a cut, a camera more than a chunk from that
+  one, it updates it again in `TG_PostUpdateWork` for this frame's (`FVoxelFarFieldCameraTickFunction`,
+  `UpdateFarFieldForCamera`; F4.3, `voxel.World.FarFieldCameraUpdate`), so the frame of a teleport draws the far field
+  where the camera arrived rather than the old position's selection.
 - **The hole.** Within the window's reach of the viewer's ground point (the unload distance plus a chunk's half
   diagonal, along the ground as the window measures its horizons) patches split down to the band level, one to two
   chunks across (`FVoxelFarFieldSettings::ComputeBandLevel`: 64 a face edge on the 2.5 km planet, 1,024 on a 50 km one,
@@ -733,7 +738,10 @@ primitives, and the voxel window keeps its size.
   datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and
   builds again when needed (its subtree draws meanwhile), except the roots and band patches near the window's edge,
   which are built while covered so they show the moment their chunks unload (a covered one the viewer leaves there
-  builds while it draws nothing, VP4).
+  builds while it draws nothing, VP4). Every root is built from the first updates, also a face under the horizon, so
+  after a teleport onto a face the camera never saw its root stands in at once (F4.2,
+  `voxel.World.FarFieldBuildAllRoots`, 1; before, a root was built once some of its face came into view and the first
+  update there drew no far field).
 - **The sea**, at scale: where the ocean shell would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
