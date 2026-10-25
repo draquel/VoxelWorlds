@@ -223,6 +223,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Texture Arrays", meta = (ClampMin = "64", ClampMax = "4096"))
 	int32 TextureArraySize = 512;
 
+	/**
+	 * Each MaterialID's slice in AlbedoArray (index = MaterialID, 256 entries). The arrays hold one slice per distinct
+	 * texture, so materials sharing a texture share its slice; BuildTextureArrays() writes these with the arrays and the
+	 * material LUT's slice row carries them to the triplanar functions. Empty when there is no such array, or arrays built
+	 * before slices were shared (one slice per MaterialID): the LUT then gives each MaterialID the slice of its own index.
+	 */
+	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Texture Arrays")
+	TArray<uint8> AlbedoArraySlices;
+
+	/** Each MaterialID's slice in NormalArray (as AlbedoArraySlices: a material may have an albedo but no normal map) */
+	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Texture Arrays")
+	TArray<uint8> NormalArraySlices;
+
+	/** Each MaterialID's slice in RoughnessArray (as AlbedoArraySlices) */
+	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Texture Arrays")
+	TArray<uint8> RoughnessArraySlices;
+
 #if WITH_EDITORONLY_DATA
 	/**
 	 * A hash of the inputs the arrays were last built from (TextureArraySize, each config's MaterialID and source
@@ -286,12 +303,21 @@ public:
 	FVector2D GetAtlasTileUVScale() const;
 
 	/**
-	 * Get the texture array index for a material.
+	 * Get a material's slice in the albedo texture array (the normal and roughness arrays: NormalArraySlices,
+	 * RoughnessArraySlices).
 	 * @param MaterialID The material ID to look up
-	 * @return Index into the texture arrays (-1 if not found)
+	 * @return Slice in AlbedoArray (-1 if the material has no config)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
 	int32 GetArrayIndex(uint8 MaterialID) const;
+
+	/**
+	 * A MaterialID's slice in a texture array from the array's slice table (AlbedoArraySlices, ...).
+	 * @param Slices The array's slice table
+	 * @param MaterialID The material ID to look up
+	 * @return The slice; the MaterialID itself when the table is empty (no array, or one slice per MaterialID)
+	 */
+	static uint8 GetArraySlice(const TArray<uint8>& Slices, uint8 MaterialID);
 
 	/**
 	 * Get the triplanar scale for a material.
@@ -330,14 +356,18 @@ public:
 	 * This texture encodes per-material, per-face atlas positions.
 	 * Call this after modifying MaterialConfigs.
 	 *
-	 * LUT Format: 256 x 3 texture (MaterialID x FaceType)
+	 * LUT Format: 256 x 4 texture (one column per MaterialID), read by texel (Load), not by UV
 	 * - Row 0: Top face tiles
 	 * - Row 1: Side face tiles
 	 * - Row 2: Bottom face tiles
-	 * - R channel: Atlas column (0-255)
-	 * - G channel: Atlas row (0-255)
-	 * - B channel: Reserved (UV scale * 25.5, clamped to 0-255)
-	 * - A channel: Flags (bit 0 = bIsMasked)
+	 *   - R channel: Atlas column (0-255)
+	 *   - G channel: Atlas row (0-255)
+	 *   - B channel: Reserved (UV scale * 25.5, clamped to 0-255)
+	 *   - A channel: Flags (bit 0 = bIsMasked)
+	 * - Row 3: the material's texture array slices (smooth terrain): R = AlbedoArray slice, G = NormalArray slice,
+	 *   B = RoughnessArray slice, A = 0 (AlbedoArraySlices, NormalArraySlices, RoughnessArraySlices)
+	 *
+	 * BuildTextureArrays() rebuilds an existing LUT in place, so materials bound to it read the new slices.
 	 */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Voxel|Material Atlas")
 	void BuildMaterialLUT();
@@ -368,8 +398,9 @@ public:
 	 * Creates AlbedoArray, NormalArray, and RoughnessArray from the per-material
 	 * source textures defined in MaterialConfigs.
 	 *
-	 * All source textures will be resized to TextureArraySize x TextureArraySize, 8 bits a channel.
-	 * Materials without textures take the array's first built slice.
+	 * All source textures will be resized to TextureArraySize x TextureArraySize, 8 bits a channel. Each array holds one
+	 * slice per distinct texture; each MaterialID's slice is written to AlbedoArraySlices / NormalArraySlices /
+	 * RoughnessArraySlices (and the material LUT). Materials without textures take the array's first slice.
 	 *
 	 * For an atlas asset the arrays are assets in its folder (<Atlas>_AlbedoArray, _NormalArray, _RoughnessArray),
 	 * created or updated in place and left unsaved with the atlas: save them to keep them. An atlas outside a package
@@ -512,18 +543,21 @@ private:
 	UTexture2DArray* AcquireTextureArrayObject(const FString& ArrayName, UTexture2DArray* Current);
 
 	/**
-	 * Helper to build a single texture array from source textures.
-	 * Every slice is stored at TextureArraySize in BGRA8 (sRGB for albedo, linear otherwise); the array then
-	 * compresses with its own settings (BC formats for the colour and normal arrays).
+	 * Helper to build a single texture array from source textures: one slice per distinct texture with readable source
+	 * data, in MaterialID order. Every slice is stored at TextureArraySize in BGRA8 (sRGB for albedo, linear
+	 * otherwise); the array then compresses with its own settings (BC formats for the colour and normal arrays).
 	 * @param OutArray The array to populate
+	 * @param OutSlices Each MaterialID's slice (256 entries; empty when no array is built). A material without a
+	 *        texture, or with no config below the highest configured MaterialID, takes the first slice; one above it the
+	 *        highest's (as a sampler clamped the MaterialID when the arrays had a slice per MaterialID).
 	 * @param TextureGetter Function to get the source texture from a config
-	 * @param PlaceholderColor Color of every slice when no texture has readable source data
-	 *        (slots without a texture take the first built slice)
+	 * @param PlaceholderColor Color of the array's one slice when no texture has readable source data
 	 * @param ArrayName Name of the array ("Albedo", "Normal", "Roughness"); names the array object
 	 * @return true if successful
 	 */
 	bool BuildSingleTextureArray(
 		TObjectPtr<UTexture2DArray>& OutArray,
+		TArray<uint8>& OutSlices,
 		TFunctionRef<TSoftObjectPtr<UTexture2D>(const FVoxelMaterialTextureConfig&)> TextureGetter,
 		FColor PlaceholderColor,
 		const FString& ArrayName);

@@ -115,6 +115,9 @@ public:
     UTexture2DArray* RoughnessArray;
     int32 TextureArraySize = 512;    // Size of every array slice (rounded up to a power of two)
     FString TextureArrayBuildKey;    // Editor-only: hash of the inputs the arrays were built from
+    TArray<uint8> AlbedoArraySlices; // Each MaterialID's slice (256 entries), written with the arrays; saved
+    TArray<uint8> NormalArraySlices;
+    TArray<uint8> RoughnessArraySlices;
 
     // ===== Per-Material Configuration =====
 
@@ -126,7 +129,7 @@ public:
     UFUNCTION(BlueprintCallable, CallInEditor)
     void BuildTextureArrays();
 
-    /** Build Material Lookup Table for face-variant atlas positions */
+    /** Build Material Lookup Table: face-variant atlas positions (rows 0-2) and texture array slices (row 3) */
     UFUNCTION(BlueprintCallable, CallInEditor)
     void BuildMaterialLUT();
 
@@ -143,8 +146,9 @@ public:
 The arrays are **saved assets** next to the atlas: `<Atlas>_AlbedoArray`, `<Atlas>_NormalArray` and
 `<Atlas>_RoughnessArray` in the atlas's folder (`DemoMaterialAtlas_AlbedoArray`, ...), referenced by the atlas and cooked
 with it. A packaged game has no source textures to build from, so it binds what was saved (`VISUAL_POLISH_PLAN.md`,
-F2.11). They are Git LFS files in the parent repo (`.gitattributes`): 11-14 MB each on disk at 512 (the source,
-delta-coded and Kraken-compressed; repeated slices are stored in full), about 39 MB an atlas.
+F2.11). They are Git LFS files in the parent repo (`.gitattributes`), one slice per distinct texture (F2.12), about
+half of 512 x 512 x 4 bytes a slice on disk (the source, delta-coded and Kraken-compressed): `DemoMaterialAtlas`'s three
+7.9 MB (8, 8 and 3 slices), `VoxelMaterialAtlas`'s 14.3 MB (10 each); 38.8 and 39.2 MB with a slice per MaterialID.
 
 - **Building.** `BuildTextureArrays()` (the atlas's *Build Texture Arrays* button) creates the three assets or updates
   them in place (`PreEditChange` / `PostEditChange`, as a reimport does, so materials drawing with them pick up the new
@@ -175,19 +179,25 @@ For each array (albedo, normal, roughness), `BuildSingleTextureArray` writes the
 convert them all to RGBA32F when their gamma spaces or formats differ (on the demo atlas that was 4096 x 4096 x 22 float
 slices, 20-24 s of the first PIE and 800 MB on the GPU; see `VISUAL_POLISH_PLAN.md`, F2.10):
 
-- Slices are `TextureArraySize` square (rounded up to a power of two), 8-bit BGRA. One slice per MaterialID up to the
-  highest configured.
+- Slices are `TextureArraySize` square (rounded up to a power of two), 8-bit BGRA. One slice per distinct texture with
+  readable source data, in MaterialID order (F2.12): materials sharing a texture share its slice.
 - Each slice is converted from its texture's own gamma into the array's: sRGB for albedo, linear for normals and
   roughness, so the shader samples the same values whatever the source textures' formats. The resize is ImageCore's
   default filter in linear light, wrapping at the edges (terrain textures tile).
-- Each distinct texture is decoded and resized once; slots without a texture (or with no readable source) take the
-  first built slice; with no readable texture at all, every slice is the placeholder colour.
+- Each material's slice per array goes in the atlas's slice tables (`AlbedoArraySlices`, `NormalArraySlices`,
+  `RoughnessArraySlices`: 256 entries, index = MaterialID, saved with the atlas) and from there into the material LUT's
+  slice row, which the triplanar functions read (see "The Slice Row" below). The kinds are independent: a material may
+  have an albedo but no normal map. A material without a texture (or with no readable source), and a MaterialID with no
+  config below the highest configured, reads the first slice; a MaterialID above the highest configured reads the
+  highest's: what a slice per MaterialID gave them (a copy of the first slice, and the sampler clamping the index), so
+  the terrain draws the same. With no readable texture at all, the array is one slice of the placeholder colour.
 - The settings are fixed per array: albedo `TC_Default` (BC1, or BC3 with alpha for masked materials), sRGB; normals
   `TC_Normalmap` (BC5) in `TEXTUREGROUP_WorldNormalMap`; roughness `TC_Masks` (BC1/BC3, linear). Mips from the texture
   group, `TF_Default` filtering, never streamed.
 - The platform data builds asynchronously and is cached in the DDC by the source's hash.
 
-On `DemoMaterialAtlas` (22 slices at 512) the build takes about 2.3 s and the arrays 16 MB on the GPU.
+On `DemoMaterialAtlas` (8, 8 and 3 slices at 512 for its 22 materials) the build takes about 3.3 s and the arrays
+4.8 MB on the GPU (15.8 MB with a slice per MaterialID).
 
 ---
 
@@ -382,12 +392,18 @@ This custom HLSL node samples both albedo and roughness arrays:
 - `Sharpness` (float) - Blend sharpness (e.g., 4.0)
 - `AlbedoArray` (Texture2DArray) - Material atlas parameter
 - `RoughnessArray` (Texture2DArray) - Material atlas parameter
+- `MaterialLUT` (Texture2D) - The atlas's material LUT (its slice row gives the material's slice in each array)
 - `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter (Footprint Sampling below)
 
 **Output:** `float4` (RGB = Albedo, A = Roughness)
 
 ```hlsl
 int MaterialID = (int)floor(MaterialUV.x + 0.5);
+
+// The material's slice in each array, from the material LUT's slice row (row 3: R albedo, G normal, B roughness)
+const float4 ArraySlices = MaterialLUT.Load(int3(clamp(MaterialID, 0, 255), 3, 0));
+const float AlbedoSlice = floor(ArraySlices.r * 255.0 + 0.5);
+const float RoughnessSlice = floor(ArraySlices.b * 255.0 + 0.5);
 
 // Calculate triplanar blend weights
 float3 Weights = pow(abs(WorldNormal), Sharpness);
@@ -408,15 +424,15 @@ DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
 #endif
 
 // Sample albedo from each projection at the pixel's footprint, with the array's own (anisotropic) sampler
-float4 Albedo_X = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_X, MaterialID), DPdx.zy, DPdy.zy);
-float4 Albedo_Y = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Y, MaterialID), DPdx.xz, DPdy.xz);
-float4 Albedo_Z = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Z, MaterialID), DPdx.xy, DPdy.xy);
+float4 Albedo_X = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_X, AlbedoSlice), DPdx.zy, DPdy.zy);
+float4 Albedo_Y = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Y, AlbedoSlice), DPdx.xz, DPdy.xz);
+float4 Albedo_Z = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Z, AlbedoSlice), DPdx.xy, DPdy.xy);
 float3 Albedo = Albedo_X.rgb * Weights.x + Albedo_Y.rgb * Weights.y + Albedo_Z.rgb * Weights.z;
 
 // Sample roughness
-float Rough_X = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_X, MaterialID), DPdx.zy, DPdy.zy).r;
-float Rough_Y = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Y, MaterialID), DPdx.xz, DPdy.xz).r;
-float Rough_Z = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Z, MaterialID), DPdx.xy, DPdy.xy).r;
+float Rough_X = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_X, RoughnessSlice), DPdx.zy, DPdy.zy).r;
+float Rough_Y = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Y, RoughnessSlice), DPdx.xz, DPdy.xz).r;
+float Rough_Z = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Z, RoughnessSlice), DPdx.xy, DPdy.xy).r;
 float Roughness = Rough_X * Weights.x + Rough_Y * Weights.y + Rough_Z * Weights.z;
 
 return float4(Albedo, Roughness);
@@ -433,12 +449,17 @@ Normal maps require special blending to avoid "plaid" artifacts. This uses UDN (
 - `Scale` (float) - Triplanar tiling scale
 - `Sharpness` (float) - Blend sharpness
 - `NormalArray` (Texture2DArray) - Material atlas parameter
+- `MaterialLUT` (Texture2D) - The atlas's material LUT
 - `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter
 
 **Output:** `float3` (World-space normal)
 
 ```hlsl
 int MaterialID = (int)floor(MaterialUV.x + 0.5);
+
+// The material's slice in each array, from the material LUT's slice row (row 3: R albedo, G normal, B roughness)
+const float4 ArraySlices = MaterialLUT.Load(int3(clamp(MaterialID, 0, 255), 3, 0));
+const float NormalSlice = floor(ArraySlices.g * 255.0 + 0.5);
 
 float3 Weights = pow(abs(WorldNormal), Sharpness);
 Weights /= max(Weights.x + Weights.y + Weights.z, 0.0001);
@@ -457,9 +478,9 @@ DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
 #endif
 
 // Decode tangent-space normals
-float3 TN_X = NormalArray.SampleGrad(NormalArraySampler, float3(UV_X, MaterialID), DPdx.zy, DPdy.zy).rgb * 2.0 - 1.0;
-float3 TN_Y = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Y, MaterialID), DPdx.xz, DPdy.xz).rgb * 2.0 - 1.0;
-float3 TN_Z = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Z, MaterialID), DPdx.xy, DPdy.xy).rgb * 2.0 - 1.0;
+float3 TN_X = NormalArray.SampleGrad(NormalArraySampler, float3(UV_X, NormalSlice), DPdx.zy, DPdy.zy).rgb * 2.0 - 1.0;
+float3 TN_Y = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Y, NormalSlice), DPdx.xz, DPdy.xz).rgb * 2.0 - 1.0;
+float3 TN_Z = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Z, NormalSlice), DPdx.xy, DPdy.xy).rgb * 2.0 - 1.0;
 
 // UDN blend: Project tangent-space normals to world-space derivatives
 float3 N_X = float3(0, TN_X.y, -TN_X.x);        // X-axis projection
@@ -478,6 +499,20 @@ return BlendedNormal;
 - Sample with `SampleGrad()` and explicit derivatives, not `Sample()`: the derivatives must come from the continuous
   translated position (the tiled position jumps at its period), and outside the pixel shader (ray tracing hit shaders)
   there are none, so the gradients stay zero there (mip 0)
+
+### The Slice Row (F2.12)
+
+The texture arrays hold one slice per distinct texture, not one per MaterialID (`VISUAL_POLISH_PLAN.md`, F2.12), so the
+triplanar functions cannot sample at the MaterialID. `UVoxelMaterialAtlas::BuildMaterialLUT` writes a fourth row below
+the three face rows: texel (MaterialID, 3) holds the material's slice in the albedo array (R), the normal array (G) and
+the roughness array (B), from the atlas's slice tables; A is 0. Both triplanar functions take the `MaterialLUT` texture
+as an input (wired in `M_VoxelMaster` and `M_VoxelMaster_Fade` from the same `MaterialLUT` parameter the cubic path
+reads) and `Load` that texel. The face rows are read by texel too (`MF_CubicAtlasSample`), so the extra row does not
+move them. An atlas whose arrays were built with a slice per MaterialID has empty slice tables, and its LUT gives every
+MaterialID the slice of its own index. `BuildTextureArrays()` rewrites an existing LUT in place, so materials already
+bound to it read the new slices with the new arrays (the editor rebuilds stale arrays when a world binds the atlas, after
+the LUT was built). The planet far field's `FarFieldMaterialPick` produces a MaterialID like every voxel vertex and needs
+nothing of its own. `Scripts/setup_texture_array_slices.py` (UE5_PluginDev) made the material edits, headless.
 
 ### Footprint Sampling (visual polish VP2-O1)
 
@@ -852,7 +887,8 @@ Materials can be flagged as **masked** (alpha cutout) and/or **non-occluding** (
 
 ### LUT A-Channel Encoding
 
-The Material LUT texture (256x3) uses the **A channel** to encode per-material flags:
+The Material LUT texture (256 x 4: three face rows and the slice row, see "The Slice Row") uses the **A channel** of its
+face rows to encode per-material flags:
 - **Bit 0**: `bIsMasked` (1 = masked blend, 0 = opaque)
 - **Bits 1-7**: Reserved for future flags
 

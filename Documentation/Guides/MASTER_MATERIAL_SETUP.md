@@ -84,6 +84,7 @@ return floor(MaterialUV.x + 0.5);
 | Sharpness | Scalar | Blend sharpness (default: 4.0) |
 | AlbedoArray | Texture2DArray | Albedo texture array |
 | RoughnessArray | Texture2DArray | Roughness texture array |
+| MaterialLUT | Texture2D | The atlas's material LUT: row 3 holds each material's slice in each array |
 
 **Outputs**:
 | Name | Type | Description |
@@ -102,11 +103,17 @@ return floor(MaterialUV.x + 0.5);
    - `Sharpness` (Scalar, Preview: 4.0)
    - `AlbedoArray` (Texture2DArray)
    - `RoughnessArray` (Texture2DArray)
+   - `MaterialLUT` (Texture2D)
 
 4. Add **Custom** node with this code:
 
 ```hlsl
+// The arrays hold one slice per distinct texture; the material LUT's slice row (row 3) gives this material's
+// slice in each array: R albedo, G normal, B roughness (UVoxelMaterialAtlas::BuildMaterialLUT, F2.12)
 int MatID = (int)MaterialID;
+const float4 ArraySlices = MaterialLUT.Load(int3(clamp(MatID, 0, 255), 3, 0));
+const float AlbedoSlice = floor(ArraySlices.r * 255.0 + 0.5);
+const float RoughnessSlice = floor(ArraySlices.b * 255.0 + 0.5);
 
 // Calculate triplanar blend weights
 float3 Weights = pow(abs(WorldNormal), Sharpness);
@@ -128,15 +135,15 @@ DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
 #endif
 
 // Sample albedo from each projection at the pixel's footprint, with the array's own sampler
-float4 Albedo_X = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_X, MatID), DPdx.zy, DPdy.zy);
-float4 Albedo_Y = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Y, MatID), DPdx.xz, DPdy.xz);
-float4 Albedo_Z = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Z, MatID), DPdx.xy, DPdy.xy);
+float4 Albedo_X = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_X, AlbedoSlice), DPdx.zy, DPdy.zy);
+float4 Albedo_Y = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Y, AlbedoSlice), DPdx.xz, DPdy.xz);
+float4 Albedo_Z = AlbedoArray.SampleGrad(AlbedoArraySampler, float3(UV_Z, AlbedoSlice), DPdx.xy, DPdy.xy);
 float3 Albedo = Albedo_X.rgb * Weights.x + Albedo_Y.rgb * Weights.y + Albedo_Z.rgb * Weights.z;
 
 // Sample roughness from each projection
-float Rough_X = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_X, MatID), DPdx.zy, DPdy.zy).r;
-float Rough_Y = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Y, MatID), DPdx.xz, DPdy.xz).r;
-float Rough_Z = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Z, MatID), DPdx.xy, DPdy.xy).r;
+float Rough_X = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_X, RoughnessSlice), DPdx.zy, DPdy.zy).r;
+float Rough_Y = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Y, RoughnessSlice), DPdx.xz, DPdy.xz).r;
+float Rough_Z = RoughnessArray.SampleGrad(RoughnessArraySampler, float3(UV_Z, RoughnessSlice), DPdx.xy, DPdy.xy).r;
 float Roughness = Rough_X * Weights.x + Rough_Y * Weights.y + Rough_Z * Weights.z;
 
 return float4(Albedo, Roughness);
@@ -179,6 +186,7 @@ return float4(Albedo, Roughness);
 | Scale | Scalar | Triplanar tiling (default: 0.01) |
 | Sharpness | Scalar | Blend sharpness (default: 4.0) |
 | NormalArray | Texture2DArray | Normal map texture array |
+| MaterialLUT | Texture2D | The atlas's material LUT: row 3 holds each material's slice in each array |
 
 **Outputs**:
 | Name | Type | Description |
@@ -195,11 +203,16 @@ return float4(Albedo, Roughness);
    - `Scale` (Scalar, Preview: 0.01)
    - `Sharpness` (Scalar, Preview: 4.0)
    - `NormalArray` (Texture2DArray)
+   - `MaterialLUT` (Texture2D)
 
 4. Add **Custom** node with this code:
 
 ```hlsl
+// The arrays hold one slice per distinct texture; the material LUT's slice row (row 3) gives this material's
+// slice in each array: R albedo, G normal, B roughness (UVoxelMaterialAtlas::BuildMaterialLUT, F2.12)
 int MatID = (int)MaterialID;
+const float4 ArraySlices = MaterialLUT.Load(int3(clamp(MatID, 0, 255), 3, 0));
+const float NormalSlice = floor(ArraySlices.g * 255.0 + 0.5);
 
 // Calculate triplanar blend weights
 float3 Weights = pow(abs(WorldNormal), Sharpness);
@@ -220,9 +233,9 @@ DPdy = ddy(TranslatedPosition) * (Scale * GradientSampling);
 #endif
 
 // Sample and decode tangent-space normals
-float3 TN_X = NormalArray.SampleGrad(NormalArraySampler, float3(UV_X, MatID), DPdx.zy, DPdy.zy).rgb * 2.0 - 1.0;
-float3 TN_Y = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Y, MatID), DPdx.xz, DPdy.xz).rgb * 2.0 - 1.0;
-float3 TN_Z = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Z, MatID), DPdx.xy, DPdy.xy).rgb * 2.0 - 1.0;
+float3 TN_X = NormalArray.SampleGrad(NormalArraySampler, float3(UV_X, NormalSlice), DPdx.zy, DPdy.zy).rgb * 2.0 - 1.0;
+float3 TN_Y = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Y, NormalSlice), DPdx.xz, DPdy.xz).rgb * 2.0 - 1.0;
+float3 TN_Z = NormalArray.SampleGrad(NormalArraySampler, float3(UV_Z, NormalSlice), DPdx.xy, DPdy.xy).rgb * 2.0 - 1.0;
 
 // UDN blend: Project tangent-space normals to world-space derivatives
 float3 N_X = float3(0, TN_X.y, -TN_X.x);
@@ -265,7 +278,7 @@ return BlendedNormal;
 | FaceType | Scalar | From UV1.y (0=Top, 1=Side, 2=Bottom) |
 | AtlasColumns | Scalar | Number of columns in atlas |
 | AtlasRows | Scalar | Number of rows in atlas |
-| MaterialLUT | Texture2D | Material lookup table (256x3) |
+| MaterialLUT | Texture2D | Material lookup table (256 x 4: three face rows and the slice row) |
 | AlbedoAtlas | Texture2D | Packed albedo atlas |
 | NormalAtlas | Texture2D | Packed normal atlas |
 | RoughnessAtlas | Texture2D | Packed roughness atlas |
@@ -286,8 +299,8 @@ return BlendedNormal;
 
 ```hlsl
 // Sample MaterialLUT to get atlas tile position
-float2 LutUV = float2((MaterialID + 0.5) / 256.0, (FaceType + 0.5) / 3.0);
-float4 LutSample = MaterialLUT.SampleLevel(View.MaterialTextureBilinearClampedSampler, LutUV, 0);
+// By texel: the LUT has a slice row below the three face rows (F2.12)
+float4 LutSample = MaterialLUT.Load(int3(clamp((int)floor(MaterialID + 0.5), 0, 255), clamp((int)floor(FaceType + 0.5), 0, 2), 0));
 
 float Column = LutSample.r * 255.0;
 float Row = LutSample.g * 255.0;
@@ -313,8 +326,8 @@ return float4(Albedo, Roughness);
 5. Add second **Custom** node for Normal:
 
 ```hlsl
-float2 LutUV = float2((MaterialID + 0.5) / 256.0, (FaceType + 0.5) / 3.0);
-float4 LutSample = MaterialLUT.SampleLevel(View.MaterialTextureBilinearClampedSampler, LutUV, 0);
+// By texel: the LUT has a slice row below the three face rows (F2.12)
+float4 LutSample = MaterialLUT.Load(int3(clamp((int)floor(MaterialID + 0.5), 0, 255), clamp((int)floor(FaceType + 0.5), 0, 2), 0));
 
 float Column = LutSample.r * 255.0;
 float Row = LutSample.g * 255.0;
@@ -390,7 +403,7 @@ Create in: `Content/VoxelWorlds/Materials/M_VoxelMaster`
 **Texture2D Parameters** (for Cubic terrain):
 | Name | Group | Description |
 |------|-------|-------------|
-| MaterialLUT | CubicAtlas | Material lookup table (auto-built) |
+| MaterialLUT | CubicAtlas | Material lookup table (auto-built; read by both paths: face tiles for cubic, array slices for smooth) |
 | PackedAlbedoAtlas | CubicAtlas | Packed albedo atlas texture |
 | PackedNormalAtlas | CubicAtlas | Packed normal atlas texture |
 | PackedRoughnessAtlas | CubicAtlas | Packed roughness atlas texture |
@@ -490,10 +503,12 @@ Create in: `Content/VoxelWorlds/Materials/M_VoxelMaster`
   - Sharpness ← TriplanarSharpness parameter
   - AlbedoArray ← AlbedoArray parameter
   - RoughnessArray ← RoughnessArray parameter
+  - MaterialLUT ← MaterialLUT parameter (the one the cubic path reads)
 
 - Add **MF_TriplanarSampleNormal**:
   - Same inputs as above (except texture arrays)
   - NormalArray ← NormalArray parameter
+  - MaterialLUT ← MaterialLUT parameter
 
 - Multiply Roughness output by RoughnessMultiplier parameter
 

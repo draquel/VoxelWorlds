@@ -257,7 +257,85 @@ atlas with no source texture never stale). The six suites: 634 tests headless an
   though the game reads only the arrays and the baked map colours.
 - The repeated slices could be dropped altogether: a slice per distinct texture and the material's slice in the LUT
   would make the arrays on disk and on the GPU about a third of today's on the demo atlas (needs the masters' triplanar
-  functions to read the slice from the LUT).
+  functions to read the slice from the LUT). Done the same day: "F2.12: one slice per distinct texture".
+
+### F2.12: one slice per distinct texture (2026-10-24)
+
+**What the arrays held.** `BuildSingleTextureArray` wrote a slice per MaterialID up to the highest configured, and a
+material without a texture (or with no readable source) got a full copy of the first built slice. On `DemoMaterialAtlas`
+that is 14 of 22 albedo and normal slices and 19 of 22 roughness slices (14 of its 22 materials have no albedo, only
+three have a roughness map); on `VoxelMaterialAtlas` 14 of 24 of each. The copies do not compress away on disk and are
+uploaded like any slice.
+
+**Fix.** Each array holds one slice per distinct texture with readable source data, in MaterialID order, and the atlas
+saves each MaterialID's slice per array (`AlbedoArraySlices`, `NormalArraySlices`, `RoughnessArraySlices`: 256 entries,
+written by `BuildTextureArrays()` with the arrays, not editor-only, so a package builds its LUT from them). The kinds
+are independent (a material may have an albedo and no normal map). A material without a texture, and a MaterialID with
+no config below the highest configured, reads the first slice; one above the highest configured the highest's slice:
+exactly what the copies and the sampler's clamp of the array index gave them, so the terrain draws the same.
+
+- `BuildMaterialLUT` grows the LUT from 256 x 3 to 256 x 4: row 3 is the slice row, R the albedo slice, G the normal
+  slice, B the roughness slice. Empty tables (arrays built before this) give every MaterialID the slice of its own index.
+  `BuildTextureArrays()` rewrites an existing LUT in place, so the materials bound to it read the new slices with the new
+  arrays (the bind order builds the LUT before `EnsureTextureArrays()` rebuilds stale arrays). The transient LUT keeps
+  its CPU copy after upload (its bulk data is not single-use), so the rewrite can lock it.
+- `MF_TriplanarSampleAlbedoRoughness` and `MF_TriplanarSampleNormal` take a `MaterialLUT` texture input, wired in
+  `M_VoxelMaster` and `M_VoxelMaster_Fade` from the `MaterialLUT` parameter the cubic path already reads, and their Custom
+  nodes `Load` the material's slices from row 3 and sample each array at its own slice. `MF_CubicAtlasSample` read the
+  LUT at V = (FaceType + 0.5) / 3, which a fourth row would have shifted; it reads the same texels by `Load` now. The
+  far field's `FarFieldMaterialPick` hands the triplanar functions a MaterialID like any voxel vertex: no change.
+  `Scripts/setup_texture_array_slices.py` (headless, idempotent) made the edits; it rewrites only the array reads of
+  the Custom nodes' code, so it applies over VP2-O2's texture variation as well (checked on that code offline).
+- `TextureArrayBuildVersion` 2: every saved array is stale, and `Scripts/rebuild_atlas_arrays.py` rebuilt and saved both
+  atlases. `GetArrayIndex` returns the albedo slice.
+
+Tests: `VoxelWorlds.MaterialAtlas.TextureArrays.Build` (one slice per distinct texture: two albedo slices for four
+materials, a texture used twice read by both, a material without one on the first slice) and `.SavedAssets` (the slice
+tables built with the arrays and saved) changed; new `.SliceTables` (gaps, a texture with no source data, the highest
+configured MaterialID and above, independent kinds, one placeholder slice when nothing is readable, the LUT's slice row
+equal to the tables for every MaterialID with the face rows' column, row, UV scale and flags unchanged, the identity
+before a build, and a rebuild after a new texture rewriting the same LUT object).
+
+**Results.**
+
+| | Before (a slice per MaterialID) | After (a slice per texture) |
+|---|---|---|
+| `DemoMaterialAtlas` slices (albedo, normal, roughness) | 22, 22, 22 | 8, 8, 3 |
+| `DemoMaterialAtlas` arrays on disk | 13.3 + 14.1 + 11.4 = 38.8 MB | 3.3 + 3.8 + 0.7 = 7.9 MB |
+| `DemoMaterialAtlas` arrays on the GPU | 4.0 + 7.8 + 4.0 = 15.8 MB | 1.4 + 2.8 + 0.6 = 4.8 MB |
+| `VoxelMaterialAtlas` slices | 24, 24, 24 | 10, 10, 10 |
+| `VoxelMaterialAtlas` arrays on disk | 12.2 + 14.4 + 12.6 = 39.2 MB | 4.6 + 5.3 + 4.4 = 14.3 MB |
+| `VoxelMaterialAtlas` arrays on the GPU | 4.3 + 8.5 + 4.3 = 17.1 MB | 1.8 + 3.5 + 1.8 = 7.2 MB |
+
+GPU sizes are `UTexture::GetMemorySize` of the arrays in PIE (BC1 albedo and roughness, BC5 normals, full mips): 31% and
+42% of before. On disk the demo atlas's arrays are a fifth of before (its roughness array keeps only the three ore maps),
+`VoxelMaterialAtlas`'s 36%; in Git LFS the next rebuild of an atlas adds about that much again, not 39 MB.
+
+The terrain, before and after, in PIE (the same editor build for each side, fixed survey camera poses, the clock stopped,
+AA off, the PIE paused for each shot; five poses each on `VoxelDemo` (`DemoMaterialAtlas`), `PlanetTest` (the same
+atlas, the far field's blend off so it does not dither by frame) and `VoxelWorldsTest` (`VoxelMaterialAtlas`, the same
+terrain), each shot lit, unlit (albedo), and as the world-normal and roughness buffers with the sampled roughness drawn
+(`voxel.Material.ConstantRoughness 0`, `RoughnessMultiplier` 1)): the normal and roughness buffers are identical on every
+pixel but the player pawn's (its idle pose and spawn differ by run) and two 2-4 pixel specks of distant geometry; the
+unlit images are identical on every terrain pixel outside the lake (translucent water animates on its own clock) and
+the pawn, 0 to 8 pixels a view differing by 1 of 255 (the lake's edge); `PlanetTest`'s near view, with no water, is
+identical on every pixel. The cubic path (`Review_Cubic` on `VoxelDemo`) draws its tiles by face as before (grass tops,
+the grass-over-dirt side tile on the step faces); it was not compared pixel for pixel. Shots in the worktree's
+`Saved/Screenshots/Claudius/f212_*`.
+
+Six suites (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`): 639/639 headless. In the
+editor 638/639, no device loss: `VoxelWorlds.Configuration.TreeTemplateMaterials` failed because a PIE on
+`VoxelWorldsTest` earlier in the same editor session had bound `VoxelMaterialAtlas`, and binding an atlas registers its
+MaterialIDs (`FVoxelMaterialRegistry::SetAtlasPositions`: 22 and 23, which the test expects unregistered); in a fresh
+editor session it passes, as do the four `MaterialAtlas.TextureArrays` tests. The test's dependence on the registry's
+global state predates this change.
+
+**Found on the way.** A fresh worktree has none of the gitignored content packs (`Content/Fab`, `Content/Megascans`,
+`Content/ContentPacks`): both atlases' source textures live there, so an editor opened there finds every atlas stale,
+rebuilds with nothing loaded and drops the arrays in memory (nothing saved, but the terrain draws untextured). The
+directory junctions to the main checkout's packs (made from a `.cmd` file, before anything loads) are needed for any
+editor run there. Two worktree editors picking the same Claudius port: the second one's listener fails to bind and the
+first one answers, so check the port's owning process before sending anything.
 
 ### Next
 
@@ -267,6 +345,10 @@ atlas with no source texture never stale). The six suites: 634 tests headless an
   (`vp1o5_45n_eye_ab.png`, the far valley): to trace (shadow-map self-shadowing at grazing light, or G62's shading).
 - **F2.11 done (2026-10-24):** a packaged game had no terrain textures on smooth worlds (shown in a package); the
   arrays are saved assets next to the atlas now, see "F2.11: the atlas arrays saved with the atlas".
+- **F2.12 done (2026-10-24):** the arrays hold one slice per distinct texture and the triplanar functions read each
+  material's slice from the LUT's slice row: the demo atlas's arrays 38.8 → 7.9 MB on disk and 15.8 → 4.8 MB on the GPU,
+  the terrain unchanged; see "F2.12: one slice per distinct texture". VP2-O2's texture variation (uncommitted when this
+  landed) edits the same two functions: rerun `Scripts/setup_texture_array_slices.py` after its own setup script.
 - Then milestone 2 (VP2-O2 to O4) and milestone 3 (VP3-O2, O3) as planned.
 
 ## The setup as found
