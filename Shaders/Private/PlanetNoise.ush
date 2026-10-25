@@ -152,10 +152,14 @@ float2 PlanetCellular(uint3 Cell, float3 Frac, float3 Offset, int Seed)
     const uint3 B = Cell + asuint(C);
     float F1 = 100.0f;
     float F2 = 100.0f;
+    // [loop]s: FXC unrolls these otherwise, once per noise call site (F2.13, as Cellular3D).
+    [loop]
     for (int DZ = -1; DZ <= 1; ++DZ)
     {
+        [loop]
         for (int DY = -1; DY <= 1; ++DY)
         {
+            [loop]
             for (int DX = -1; DX <= 1; ++DX)
             {
                 const uint3 N = B + asuint(int3(DX, DY, DZ));
@@ -185,14 +189,11 @@ float PlanetNoiseSample(uint3 Cell, float3 Frac, float3 Offset, int NoiseType, i
     {
         return PlanetPerlin(Cell, Frac, Offset, Seed);
     }
-    if (NoiseType == NOISE_TYPE_CELLULAR)
+    if (NoiseType == NOISE_TYPE_CELLULAR || NoiseType == NOISE_TYPE_VORONOI)
     {
-        return PlanetCellular(Cell, Frac, Offset, Seed).x * 2.0f - 1.0f;
-    }
-    if (NoiseType == NOISE_TYPE_VORONOI)
-    {
+        // One search for both, so it is inlined once (F2.13).
         const float2 Cel = PlanetCellular(Cell, Frac, Offset, Seed);
-        return (Cel.y - Cel.x) * 2.0f - 1.0f;
+        return (NoiseType == NOISE_TYPE_CELLULAR) ? (Cel.x * 2.0f - 1.0f) : ((Cel.y - Cel.x) * 2.0f - 1.0f);
     }
     return PlanetSimplex(Cell, Frac, Offset, Seed);
 }

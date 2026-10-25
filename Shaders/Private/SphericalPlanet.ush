@@ -56,7 +56,13 @@ float PlanetApplyConditioning(float3 SurfaceOffset, float Altitude)
         const float strength = c1.z;
 
         const float chord = length(SurfaceOffset - zoneOffset);
-        const float dist = 2.0f * PlanetRadius * asin(min(1.0f, chord / (2.0f * PlanetRadius)));
+        // asin by its series below 0.1 (the next term is under 1e-10 of it): D3D11 bytecode has no asin, and FXC expands
+        // it to a polynomial with up to 5e-5 rad of error, which 2R turns into uu-scale errors at the pad's edge
+        // (GPUvsCPUSphericalParity's pads at 71.6-99.1% on D3D11; F2.13). The D3D12 output is the same either way.
+        const float x = min(1.0f, chord / (2.0f * PlanetRadius));
+        const float x2 = x * x;
+        const float asinX = (x < 0.1f) ? x * (1.0f + x2 * (1.0f / 6.0f + x2 * (3.0f / 40.0f + x2 * (5.0f / 112.0f)))) : asin(x);
+        const float dist = 2.0f * PlanetRadius * asinX;
 
         float w;
         if (dist <= innerRadius)
@@ -220,7 +226,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, OutBiomeID, bUnderwaterColumn);
+            CaveCarve = GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, OutBiomeID, bUnderwaterColumn, true);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
@@ -254,7 +260,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         MaterialID = GetMaterialForPlanet(DepthBelowSurface * VoxelSize);
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, 0u, bUnderwaterColumn));
+            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, 0u, bUnderwaterColumn, true));
         }
     }
 

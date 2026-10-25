@@ -250,6 +250,8 @@ atlas with no source texture never stale). The six suites: 634 tests headless an
   long time on a cold cache: `FDCEdgeCrossingCS` 911 s, `FGenerateVoxelDensityCS` 980 s, and the Marching Cubes mesh
   shaders (`FGenerateMarchingCubesMeshCS`, `FGenerateTransitionCellsCS`) still compiling after 31 minutes, when the
   cook was stopped. The verification cooks here dropped SM5 in the worktree's config only (SM6: a 5 minute cook).
+  Measured and fixed the next day (the user's choice: keep DX11, change the shaders): the SM5 global shader step took
+  1 h 51 min and then failed on an FXC internal error, against 42 s after; see "F2.13: the voxel compute shaders on FXC".
 - A cook fails on any logged error: with another process on 127.0.0.1:8080, Claudius's listener in the cook commandlet
   logs "unable to bind" and the cook exits `Error_UnknownCookFailure`. Pass
   `-AdditionalCookerOptions=-ini:Editor:[/Script/Claudius.ClaudiusSettings]:bEnableHttpServer=False` then.
@@ -337,6 +339,106 @@ directory junctions to the main checkout's packs (made from a `.cmd` file, befor
 editor run there. Two worktree editors picking the same Claudius port: the second one's listener fails to bind and the
 first one answers, so check the port's owning process before sending anything.
 
+### F2.13: the voxel compute shaders on FXC (2026-10-24)
+
+**What a Windows cook spent.** The Windows targets build `PCD3D_SM6` for DX12 and `PCD3D_SM5` for DX11
+(`Config/DefaultEngine.ini`, as UE's project template has it); SM5 compiles with FXC (the engine's `d3dcompiler_47.dll`,
+10.0.19041, `/O3 /Gec /Zpr`). The cook's global shader step alone (`-run=CookGlobalShaders -platform=Windows`, the voxel
+shaders out of the DDC by a comment appended to each `.usf`, `r.DumpShaderDebugInfo=1`, 18 shader workers) ran 6,657 s
+and then **failed**: "1 errors encountered compiling global shaders for platform PCD3D_SM5", so no SM5 cook could have
+finished. Per job (UE's "compile time exceeded threshold" lines):
+
+| Shader | SM5 before | What FXC did |
+|---|---|---|
+| `FGenerateTransitionCellsCS` | 5,423 s | its first attempt |
+| `FGenerateMarchingCubesMeshCS` | 5,372 s | its first attempt |
+| `FDCEdgeCrossingCS` | 1,416 s | X3511 after 3 s (it cannot unroll the axis loop); then UE's fallback, below |
+| `FGenerateVoxelDensityCS` | 963 s | "compilation aborted unexpectedly" (`ERROR_ARITHMETIC_OVERFLOW`) after about 12 min (1,225 s alone); then the fallback |
+| `FVoxelWaterFloodSweepRadialCS` | error | "internal error: flattened side effect", the fallback too: the step's fatal error |
+| `FVoxelWaterFloodSweepCS` | < 1 s | the same internal error; the fallback compiled |
+| `FDCQEFSolveCS` | 73 s | its first attempt |
+
+When FXC fails or aborts, `D3DShaderCompiler.cpp` compiles the shader with DXC to SPIR-V, cross-compiles that back to
+HLSL and gives it to FXC again: 1.28 MB of HLSL with every call inlined and every loop unrolled for the DC edge pass,
+600 KB for the density pass.
+
+**Cause.** Timed with FXC outside UE on each shader's dumped input and on variants of it (the engine's DLL, UE's flags;
+`fxc_time.py` in the session's notes):
+
+- Both meshers' `GetVoxelAt` resolves a voxel outside the chunk with an if-ladder over the 26 neighbour buffers (DC:
+  and the deep planes), and FXC inlines it at every call, its optimiser's time growing much faster than the copies.
+  `MainCS` had about a hundred reads: the 8 corners and 16 more for the material and biome (unrolled), the geomorph's 6
+  trilinear samples of 8 taps and its coarse-surface search, the gradient's 6 taps on each of the normal paths. With
+  the same loop structure and a one-line `GetVoxelAt`, `MainCS` compiled in 1.8 s against 115 s.
+- `DCEdgeCrossingCS`: `[unroll]` over 3 axes of 14 inlined reads each: X3511. `[loop]` alone compiled in 615 s (5,491
+  instructions); flags do not rescue it (`/O1` 382 s, `/Gfp` 1,226 s, `/Od` 20 s but 20,758 instructions).
+- `FGenerateVoxelDensityCS`: the 27-cell cellular search `[unroll]`ed at every fBm call site with a runtime noise type
+  (the heightmap terrain, the planet's terrain, the default branch), Voronoi a second copy of it, and `GpuCaveCarve`'s
+  `WorldMode == planet ? planet : heightmap` inlining both cave samplers at its three calls (and running both on FXC,
+  whose `?:` does not short-circuit). Any one world-mode branch removed, it compiled (468-704 s); all three, it aborted.
+- The water sweeps: FXC cannot flatten the else-if that holds the UAV write.
+
+**Fix (the user's choice, 2026-10-24: keep DX11, change the shaders).** Nothing the shaders compute changes:
+
+- `GetVoxelAt` (MC and DC) finds the neighbour by index (face 0-5, edge 0-11, corner 0-7, the `FACE_` / `EDGE_` /
+  `CORNER_` order) and reads it with one `[branch] switch`; DC then reads the deep data once. The same fallback to the
+  nearest voxel of the chunk.
+- The voxel reads sit in `[loop]`s: the gradient's 6 taps (both meshers), MC's 8 corners, the trilinear sample's 8 taps,
+  the coarse-surface search's 8 and the geomorph's 6 steepness taps, the transition cell's 13 samples, DC's axis loop
+  and a cell's 8 corners (`GetCellSurfaceVoxel`: one read for the material and the biome, the voxel both chose before),
+  and the vertex loops. MC reads the first solid corner once (`GetDominantVoxelLengyel`, `firstbitlow`), as does the
+  transition cell its first solid sample. MC's vertex normals go through one `CalculateVertexNormal` (the edge walk
+  `FindEdgeShadingPoint`, the fit `TryFitShadingNormal`, then the gradient) instead of three paths with a copy each.
+- The cellular searches in `[loop]`s (`Cellular3D`, `Voronoi3D`, `PlanetCellular`), one search for Cellular and Voronoi
+  (they compute the same F1 and F2), and `GpuCaveCarve(..., bPlanetFrame)` with a literal at each call.
+- `[branch]` on the water sweeps' if-chain.
+
+**Results.**
+
+| Shader | SM5 before (the cook) | FXC after (alone) | Instructions after |
+|---|---|---|---|
+| `FGenerateTransitionCellsCS` | 5,423 s | 2.7 s | 2,666 |
+| `FGenerateMarchingCubesMeshCS` | 5,372 s | 2.3 s | 2,236 |
+| `FDCEdgeCrossingCS` | 1,416 s | 0.24 s | 867 |
+| `FGenerateVoxelDensityCS` | 963 s | 18.0 s | 6,308 |
+| `FDCQEFSolveCS` | 73 s | 0.67 s | 1,088 |
+| `FVoxelWaterFloodSweepRadialCS` | error | 0.02 s | 94 |
+| the 11 others | < 1 s | 0.3 s together | |
+
+- `CookGlobalShaders` as above (SM5 and SM6, the voxel shaders not in the DDC): 6,657 s and a fatal error before,
+  **42 s** after (66 jobs, the longest 23 s; no fallback, no error).
+- DX12 is unchanged: the 46 GPU tests (`Generation.GPU*`, `WorldModes.InfinitePlane.GPUConsistency`,
+  `Meshing.MarchingCubes`, `Meshing.CrossingGradient`, `Meshing.DualContour.MaterialBorder`) in the editor on D3D12 SM6
+  give every one of their 304 messages identical before and after (parity percentages, mismatch counts, GPU CRCs,
+  normal angles). DC's two GPU tests skip, as before (GPU DC interior meshing is retired).
+- DX11, for the first time (`-d3d11`; before, the editor would have compiled the voxel shaders for 1.5 h at start, then
+  failed): the 46 pass with the planet fix below; seven of the generation tests read a little differently from D3D12
+  (FXC's floats against DXC's; the lowest density parity 99.4% in `GPUvsCPUCavesParity`, 99.8% on D3D12), inside their
+  thresholds.
+- The six suites (`VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`): 639/639 in the
+  editor (D3D12) and 639/639 headless.
+- The package on a cold cache: `BuildCookRun` Win64 Development of `PlanetTest`, SM6 and SM5, with a new, empty DDC
+  (`-AdditionalCookerOptions=-LocalDataCachePath=<path>`; the engine's shipped `Compressed.ddp` is the only cache left):
+  built, cooked, staged and packaged in 17 min 17 s, the cook **997 s** (about 413 s of start-up, 584 s cooking 995
+  packages), 9,092 shader jobs compiled, no shader warning. The voxel shaders' SM5 jobs there, at full load: density
+  46.7 s (the cook's slowest job, the engine's volumetric cloud shaders 40-47 s), MC 9.1 and 12.0 s. With the shared,
+  warm DDC the same cook took 154 s. Before, no SM5 cook could finish (above). The packaged game on D3D11 (`-d3d11`)
+  draws `PlanetTest` with GPU generation (968 chunks loaded, 53 fps; `f213_package_d3d11.png` in the session's notes).
+- A cold-DDC cook's path must stay under 119 characters (a fatal error otherwise) and take forward slashes: UAT strips
+  backslashes, and the cook then disables the file-system cache and falls back to the shared, warm Zen store unannounced.
+
+**Found on the way.**
+
+- On D3D11 `GPUvsCPUSphericalParity` failed at its conditioning pads: density parity 71.6% at `Planet L`'s pad, 95.0-99.1%
+  at the small planet's pads and rings, every other site 100%. A pad's distance is 2R asin(chord / 2R); D3D11 bytecode
+  has no asin, and FXC expands it to a polynomial with up to 5e-5 rad of error, which 2R turns into uu at the pad's edge.
+  Older than this change: the old SM5 density pass (the DXC fallback's output) holds the same polynomial
+  (`-0.018729`, `0.074261` in its `Output.d3dasm`). `PlanetApplyConditioning` now takes asin's series below 0.1: every
+  pad 100% on D3D11, the D3D12 messages identical.
+- The GPU mesher shaders do no work in a game: chunk meshes go to the CPU seam mesher (`voxel.Seam.CPUInteriorRouting`;
+  GPU DC interior meshing is retired) and only the MC GPU tests run them, but every target compiles them
+  (`ShouldCompilePermutation`: the SM5 feature level). GPU generation is the one used at run time (planets by default).
+
 ### Next
 
 - **VP1-O6 (new):** decide the atmosphere's shadows on small planets: keep them (stable now apart from the cascades'
@@ -349,6 +451,9 @@ first one answers, so check the port's owning process before sending anything.
   material's slice from the LUT's slice row: the demo atlas's arrays 38.8 → 7.9 MB on disk and 15.8 → 4.8 MB on the GPU,
   the terrain unchanged; see "F2.12: one slice per distinct texture". VP2-O2's texture variation (uncommitted when this
   landed) edits the same two functions: rerun `Scripts/setup_texture_array_slices.py` after its own setup script.
+- **F2.13 done (2026-10-24):** the SM5 (DX11) cook spent hours in FXC on the voxel compute shaders and then failed; with
+  the shaders restructured (no change in what they compute) the global shader step takes 42 s against 1 h 51 min, and
+  DX11 planets' pads match the CPU; see "F2.13: the voxel compute shaders on FXC".
 - Then milestone 2 (VP2-O2 to O4) and milestone 3 (VP3-O2, O3) as planned.
 
 ## The setup as found
