@@ -355,8 +355,8 @@ public:
 	 * Creates AlbedoArray, NormalArray, and RoughnessArray from the per-material
 	 * source textures defined in MaterialConfigs.
 	 *
-	 * All source textures will be resized to TextureArraySize x TextureArraySize.
-	 * Materials without textures will use a placeholder (solid color).
+	 * All source textures will be resized to TextureArraySize x TextureArraySize, 8 bits a channel.
+	 * Materials without textures take the array's first built slice.
 	 *
 	 * Call this after modifying MaterialConfigs or source textures.
 	 */
@@ -443,16 +443,13 @@ private:
 	mutable bool bTextureArraysDirty = true;
 
 	/**
-	 * Helper to create a solid color placeholder texture.
-	 * Used when a material config doesn't have a source texture assigned.
-	 */
-	UTexture2D* CreatePlaceholderTexture(FColor Color, int32 Size) const;
-
-	/**
 	 * Helper to build a single texture array from source textures.
+	 * Every slice is stored at TextureArraySize in BGRA8 (sRGB for albedo, linear otherwise); the array then
+	 * compresses with its own settings (BC formats for the colour and normal arrays).
 	 * @param OutArray The array to populate
 	 * @param TextureGetter Function to get the source texture from a config
-	 * @param PlaceholderColor Color for missing textures
+	 * @param PlaceholderColor Color of every slice when no texture has readable source data
+	 *        (slots without a texture take the first built slice)
 	 * @param ArrayName Name for the created array (for debugging)
 	 * @return true if successful
 	 */
