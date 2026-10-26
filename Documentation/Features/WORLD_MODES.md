@@ -101,7 +101,7 @@ float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos,
 - **The voxel cut-over** (WM-MP2, D38): above three view distances over the ground or the sea under the streaming viewer
   the window unloads and the far field alone draws; it streams back under 0.85 of it, ahead of a descending camera (the
   descent prefetch, WM-MP3). Only while a far field is on (`voxel.World.FarField 0`: the window keeps its ground disk at
-  any altitude, as before); `Features/LOD_SYSTEM.md`, "Orbit and Back"
+  any altitude, as before), on a planet too since G78; `Features/LOD_SYSTEM.md`, "Orbit and Back"
 
 ### Use Cases
 - Traditional Minecraft-style worlds
@@ -604,7 +604,7 @@ the heightmap modes every planet feature that is not tied to the sphere. One cod
 | Feature | Heightmap worlds | Planets | Since |
 |---------|------------------|---------|-------|
 | Terrain past the view distance | The far field to the horizon: a quadtree per root tile on the XY grid (`FVoxelFarFieldTileKey`), the island's over its bounds with the far ocean beyond (D37), the sea at `WaterLevel`, a cubic world's patches at the block tops; `voxel.World.FarField`, `voxel.World.FarFieldDistance` (2,000,000 uu), `voxel.World.FarFieldHeightmapError` (4 px) | Six cube-face quadtrees (`voxel.World.FarFieldError` 2 px) | MP3 (WM-MP1, D36) |
-| The voxel window at altitude | Suspended above three view distances over the ground or the sea under the streaming viewer, only while a far field is on (D38, kept by D41); resumed under 0.85 of it with the camera under it (G49) | The same (`PlanetVoxelCutoverAltitude`, `voxel.World.VoxelCutover`) | MP3 (WM-MP2) |
+| The voxel window at altitude | Suspended above three view distances over the ground or the sea under the streaming viewer, only while a far field is on (D38, kept by D41); resumed under 0.85 of it with the camera under it (G49) | The same (`PlanetVoxelCutoverAltitude`, `voxel.World.VoxelCutover`), the far-field gate included since G78 | MP3 (WM-MP2); G78 (§23.13) |
 | Streaming ahead of a fall | The descent prefetch leads the streaming viewer under a descending camera (`voxel.Stream.DescentLead`) | The same | MP1 (WM-MP3) |
 | The frame of a teleport | A second streaming pass for the frame's camera after a cut of more than a chunk (`voxel.Stream.CameraCutUpdate`) | The same, and the far field's second update (F4.3) | MP1 (WM-MP4) |
 | Precision far from the origin | Render regions and scatter regions (`voxel.Render.RegionChunks` 16, `voxel.Scatter.RegionChunks`): no float of the world's size | The same | MP2 (WM-MP5, D40) |

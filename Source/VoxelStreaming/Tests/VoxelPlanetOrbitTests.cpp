@@ -486,4 +486,60 @@ bool FVoxelPlanetCutoverDescentStopTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * G78 (world modes review §23.13): a planet's chunk manager without a far field (voxel.World.FarField 0) reports no
+ * cut-over, keeps its window active three view distances over the surface (the ground disk a climbing viewer keeps,
+ * P6.3) and records no transition, as a plane's does under D38 (LOD.Plane.Cutover's second rule).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetCutoverFarFieldGateTest,
+	"VoxelWorlds.Streaming.Planet.CutoverFarFieldGate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetOrbitTestUtils;
+
+	// At the priority the variable already holds (a console set earlier in a suite run outranks a code set).
+	IConsoleVariable* FarFieldVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.FarField"));
+	TestNotNull(TEXT("voxel.World.FarField exists"), FarFieldVar);
+	if (!FarFieldVar)
+	{
+		return false;
+	}
+	const FString SavedFarField = FarFieldVar->GetString();
+	const EConsoleVariableFlags Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(FarFieldVar->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
+	FarFieldVar->Set(TEXT("0"), Priority);
+
+	FOrbitWorld W;
+	W.Start(TEXT("VoxelPlanetCutoverGateTestWorld"));
+	TestFalse(TEXT("No far field (voxel.World.FarField 0)"), W.Manager->HasFarField());
+	const FVector Up = FVector(0.3, -0.2, 1.0).GetSafeNormal();
+	const FVoxelTerrainSurfacePoint Ground = W.Manager->GetSurfacePointAt(Up);
+	const double SurfaceRadius = FMath::Max(static_cast<double>(Radius) + Ground.Altitude, static_cast<double>(W.Config->WaterRadius));
+	auto At = [&Up, SurfaceRadius](double OverSurface) { return Up * (SurfaceRadius + OverSurface); };
+
+	TestTrue(TEXT("Settled on the ground"), W.SettleAt(At(300.0)));
+	const int32 OnTheGround = W.Manager->GetLoadedChunkCount();
+	TestTrue(TEXT("On the ground the window holds chunks"), OnTheGround > 30);
+	TestFalse(TEXT("On the ground the window is active"), W.Manager->IsVoxelWindowSuspended());
+	TestEqual(TEXT("No cut-over in force without a far field"), W.Manager->GetLODStrategy()->GetCutoverAltitude(), 0.0);
+	TestTrue(TEXT("The configured cut-over is kept (the view distance)"),
+		FMath::IsNearlyEqual(static_cast<const FDistanceBandLODStrategy*>(W.Manager->GetLODStrategy())->GetPlanetCutoverAltitude(), static_cast<double>(ViewDistance), 1.0));
+
+	// Three view distances up (three cut-overs): never suspended, the ground disk kept, no transition.
+	TestTrue(TEXT("Settled three view distances up"), W.SettleAt(At(3.0 * ViewDistance)));
+	const int32 High = W.Manager->GetLoadedChunkCount();
+	const FVoxelResidencySnapshot Snapshot = W.Manager->GetResidencySnapshot();
+	AddInfo(FString::Printf(TEXT("On the ground %d chunks; at %.0f over the surface: window %s, %d chunks, cut-over in force %.0f, %d transitions"),
+		OnTheGround, 3.0 * ViewDistance, W.Manager->IsVoxelWindowSuspended() ? TEXT("suspended") : TEXT("active"), High, Snapshot.CutoverAltitude,
+		W.Manager->GetCutoverTransitions().Num()));
+	TestFalse(TEXT("Never suspended without a far field"), W.Manager->IsVoxelWindowSuspended());
+	TestTrue(TEXT("The ground stays loaded under a high viewer"), High > 0);
+	TestEqual(TEXT("The snapshot reports no cut-over"), Snapshot.CutoverAltitude, 0.0);
+	TestEqual(TEXT("No transition"), W.Manager->GetCutoverTransitions().Num(), 0);
+	W.Stop();
+	FarFieldVar->Set(*SavedFarField, Priority);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

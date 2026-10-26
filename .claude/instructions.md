@@ -98,7 +98,8 @@ or, on a planet, the sphere of `WaterRadius` (spherical SP-B8, SP-E1). Get it fr
 with `WaterLevel` in new code. A planet's sea surface is the chunk manager's ocean shell (`FVoxelPlanetOcean`), or at scale the far field's sea
 sections (`FVoxelPlanetFarField`, spherical Phase 6; `UVoxelChunkManager::DoesFarFieldDrawSea`). Since the world modes
 review's MP3 the far field draws heightmap worlds too (root-tile quadtrees on the XY grid, the sea at `WaterLevel` beyond the
-water tiles, the voxel window suspended above `PlanetVoxelCutoverAltitude` only while a far field is on); a planet's
+water tiles, the voxel window suspended above `PlanetVoxelCutoverAltitude` only while a far field is on, in every mode
+since G78: `FDistanceBandLODStrategy::GetCutoverAltitude` is 0 without one); a planet's
 spawn point over the terrain is `UVoxelChunkManager::GetPlanetSpawnPosition`.
 
 Surface queries go along local up (spherical Phase 4, SP-A3): `UVoxelChunkManager::QueryEditMergedSurfacePoint` (the

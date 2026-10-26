@@ -163,8 +163,9 @@ public:
 	/**
 	 * Whether the viewer is above the voxel cut-over (GetPlanetCutoverAltitude over the surface under it), so the window
 	 * holds nothing and the far field alone draws the world. Decided in Update with hysteresis: suspended above the
-	 * cut-over, resumed below CutoverResumeFraction of it. Planets always; a heightmap world only while the context reports
-	 * a far field (FLODQueryContext::bFarFieldActive; world modes review WM-MP2, D38).
+	 * cut-over, resumed below CutoverResumeFraction of it. In every world mode only while the context reports a far field
+	 * (FLODQueryContext::bFarFieldActive; world modes review WM-MP2, D38; planets too since G78: a suspended window with
+	 * nothing to draw the world is a hole, whatever the mode).
 	 */
 	virtual bool IsWindowSuspended() const override { return bPlanetWindowSuspended; }
 
@@ -218,8 +219,14 @@ public:
 	/** The viewer's altitude over the surface under it (the terrain, or the sea where higher), as the last Update saw it. */
 	virtual double GetViewerSurfaceAltitude() const override { return ViewerSurfaceAltitude; }
 
-	/** IVoxelLODStrategy: GetPlanetCutoverAltitude. */
-	virtual double GetCutoverAltitude() const override { return GetPlanetCutoverAltitude(); }
+	/**
+	 * IVoxelLODStrategy: the cut-over in force, 0 while the last Update's context reported no far field (D38, every mode
+	 * since G78); GetPlanetCutoverAltitude is the configured altitude whatever the far field.
+	 */
+	virtual double GetCutoverAltitude() const override { return bCutoverAllowed ? GetPlanetCutoverAltitude() : 0.0; }
+
+	/** IVoxelLODStrategy: the far-field gate between Updates (the chunk manager, when the far field is built or released). */
+	virtual void SetFarFieldActive(bool bActive) override { bCutoverAllowed = bActive; }
 
 	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
 	static constexpr int32 NearWindowLayers = 2;
@@ -797,10 +804,10 @@ protected:
 	bool bCutoverResumeHeld = false;
 
 	/**
-	 * Heightmap worlds (WM-MP2): the cut-over applies while the chunk manager has a far field (the last Update's context);
-	 * the sea's world Z (lowest double without a sea); the generated ground Z under the viewer the last Update sampled
+	 * The cut-over applies while the chunk manager has a far field (the last Update's context; WM-MP2, D38, every mode
+	 * since G78). Heightmap worlds: the sea's world Z (lowest double without a sea); the generated ground Z under the viewer the last Update sampled
 	 */
-	bool bHeightmapCutoverAllowed = false;
+	bool bCutoverAllowed = false;
 	double HeightmapSeaZ = TNumericLimits<double>::Lowest();
 	FVector HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
 	double HeightmapGroundZ = 0.0;

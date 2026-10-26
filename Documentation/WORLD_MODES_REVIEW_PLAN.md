@@ -10544,11 +10544,50 @@ the far field's absence changes nothing on the voxel side, and the window still 
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G78 | D38's gate (the cut-over only while a far field is on, `FLODQueryContext::bFarFieldActive`) is applied on heightmap worlds only; a planet with `voxel.World.FarField 0` still suspends its window above the cut-over, so from orbit nothing draws the planet but the ocean shell at small radii (P6.4 builds none at scale). The cvar is a debug switch, so the hole is QA-only; the gate could cover planets in one line (`bHeightmapCutoverAllowed` → every mode) if a planet without a far field is ever wanted | Recorded |
+| G78 | D38's gate (the cut-over only while a far field is on, `FLODQueryContext::bFarFieldActive`) is applied on heightmap worlds only; a planet with `voxel.World.FarField 0` still suspends its window above the cut-over, so from orbit nothing draws the planet but the ocean shell at small radii (P6.4 builds none at scale). The cvar is a debug switch, so the hole is QA-only; the gate could cover planets in one line (`bHeightmapCutoverAllowed` → every mode) if a planet without a far field is ever wanted | **Fixed 2026-10-26 (§23.13)** |
 
 **Docs (WM-MP14).** `Features/WORLD_MODES.md` gains a "Mode parity" section (what every mode shares after §23, one
 code path per row, and what stays planet-only); `LOD_SYSTEM.md` (the far field and the cut-over per mode),
 `RENDERING_SYSTEM.md` (regions in every mode), `NOISE_LIBRARY.md` (one noise), `Research/TRAVERSAL_LIMITS.md` (no known
 ceiling on heightmap worlds after WM-MP5 and MP4) and the plugin instructions were brought up to date by MP2-MP4 and
 checked here; the parent's doc map and `vox.*` table carry the exit's summary; §23.11's parity table corrected (above).
-§23 is closed: every item done, every §23.6 row met, G77 and G78 open and recorded. Next free finding G79, decision D42.
+§23 is closed: every item done, every §23.6 row met, G77 open and recorded, G78 fixed the same day (§23.13). Next free
+finding G79, decision D42.
+
+### 23.13 G78 fixed: the far-field gate on the cut-over in every mode (2026-10-26)
+
+**Cause.** D38's gate lived in the heightmap branch alone: `FDistanceBandLODStrategy::GetPlanetCutoverAltitude` returned 0
+for a heightmap world whose last context reported no far field (`bHeightmapCutoverAllowed`), and the configured
+altitude for a planet whatever the context, so a planet with `voxel.World.FarField 0` suspended its window above the
+cut-over with nothing left to draw it (§23.12's accidental planet pass: the window cut over at 200,000 with no far
+field).
+
+**Fix** (VoxelWorlds, `fix/g78-planet-cutover-gate`). One gate for every mode, `bCutoverAllowed`, read from
+`FLODQueryContext::bFarFieldActive` at each `Update` as before: `GetCutoverAltitude` (the `IVoxelLODStrategy` accessor
+the chunk manager's residency, the bench and the debug commands read) is 0 without a far field, `GetPlanetCutoverAltitude`
+stays the configured altitude in any mode with a surface (the planet tests read it before an update), and the decision in
+`Update` takes the gated value, so a suspended window resumes at once when the far field goes. The chunk manager also
+tells the strategy when the far field is built or released (`IVoxelLODStrategy::SetFarFieldActive`, from `RebuildFarField`
+and `DestroyFarField`): the first pass of the fix gated the altitude only from `Update`, and `Streaming.Planet.CutoverDescent`
+and `CutoverDescentStop`, which read the cut-over right after the manager starts, saw 0 and failed; the planet LOD tests'
+`MakeContext` now carries a far field as the chunk manager's context does. The strategy's debug stats print "off (no far
+field; N configured)" in both branches; `vox.Planet` (the parent, `claude/g78-planet-cutover-gate`) prints "cut-over off:
+no far field (G78)" as `vox.World` does.
+
+**Tests.**
+
+| Test | What it does | Result |
+|------|--------------|--------|
+| `VoxelWorlds.LOD.Planet.CutoverFarFieldGate` (new) | The strategy on both planet cases at the four sites, the cut-over the view distance, a viewer at 1.5 cut-overs: a context without a far field, one with, one without again | Without: active, `GetCutoverAltitude` 0, `GetPlanetCutoverAltitude` the view distance, 954-1,156 candidates on the small planet; with: suspended, 40,000 in force, 0 candidates; without again: active, the candidates back |
+| `VoxelWorlds.Streaming.Planet.CutoverFarFieldGate` (new) | A planet chunk manager with `voxel.World.FarField 0` (R 20,000, the cut-over the 6,000 view distance): settled on the ground, then three view distances up | No far field; on the ground 146 chunks, no cut-over in force, the configured 6,000 kept; at 18,000 over the surface active with the same 146 chunks (the ground disk a climbing viewer keeps), the residency snapshot's cut-over 0, 0 transitions |
+| `LOD.Planet.Cutover`, `CutoverResumeGuard`, `Streaming.Planet.CutoverDescent`, `CutoverDescentStop`, `LOD.Plane.Cutover`, `Streaming.Plane.CutoverDescentStop`, `DescentPrefetch`, every `FarField.*` | As before | 33 of 33 targeted; the six suites **670 of 670** headless |
+
+**Live** (`PlanetTest`, the small planet, the worktree editor; `Saved/ClaudeScripts/g78_live.py`): with
+`voxel.World.FarField 0` read at PIE start, `vox.Planet` at 45°N 20°E reports "cut-over off: no far field (G78)",
+`vox.FlyTo 150000 20` keeps the window active all the way (1,087 chunks, all LOD 2, at 150,047 over the surface; no
+suspension line), `vox.FlyTo 300 20` and `vox.Fly 0` land walking with 1,096 chunks back, no fall-through; with the far
+field on the same flight suspends once at 120,542 over the surface and resumes once at 59,764 with the camera at
+119,528 (the lead 59,764), as P6.5 and §23.12 had it. The look-down shots (`g78_ff{0,1}_top.png`, the survey camera
+at the pawn, so its mesh fills the frame's edges) show the sea sphere's limb from 150,000 either way; the window's
+state is the log's. Without a far field the cvar now means on a planet what it means on a plane: nothing past the
+window but the sea, the window kept at any altitude.
