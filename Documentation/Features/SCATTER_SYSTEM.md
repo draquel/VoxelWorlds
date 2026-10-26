@@ -72,7 +72,7 @@ protected:
 
 ### VoxelScatterRenderer
 
-Manages HISM components with instance pooling and deferred rebuild strategy. Instances are hidden by setting scale to zero and placed on a free list. When new instances are needed, they are recycled from the free list first via `UpdateInstanceTransform`, eliminating the visual flicker caused by `ClearInstances()`/`AddInstances()` cycling. Since world modes review G42 every write to a HISM is held and applied at most once per `voxel.Scatter.HISMBatchSeconds`, releases zero-scale each instance where it stands, a HISM whose pool outweighs its live instances is rewritten without it, and a planet keeps its scatter HISMs in regions of 4 chunks (`voxel.Scatter.RegionChunks`); see [Batched HISM writes](#batched-hism-writes-world-modes-review-g42).
+Manages HISM components with instance pooling and deferred rebuild strategy. Instances are hidden by setting scale to zero and placed on a free list. When new instances are needed, they are recycled from the free list first via `UpdateInstanceTransform`, eliminating the visual flicker caused by `ClearInstances()`/`AddInstances()` cycling. Since world modes review G42 every write to a HISM is held and applied at most once per `voxel.Scatter.HISMBatchSeconds`, releases zero-scale each instance where it stands, a HISM whose pool outweighs its live instances is rewritten without it, and the scatter HISMs are kept in regions of 4 chunks in every world mode (`voxel.Scatter.RegionChunks`; planets since G42, heightmap worlds since world modes review WM-MP5); see [Batched HISM writes](#batched-hism-writes-world-modes-review-g42).
 
 ```cpp
 UCLASS()
@@ -94,8 +94,8 @@ public:
     void UpdateChunkTypeInstances(const FIntVector& ChunkCoord, int32 ScatterTypeID, TArray<FTransform> Transforms);
 
 protected:
-    // One HISM per scatter type and region (a planet's regions of voxel.Scatter.RegionChunks^3 chunks, 4 by default, each
-    // HISM at its region's origin so instance transforms stay small floats; heightmap worlds have one region at the origin)
+    // One HISM per scatter type and region (regions of voxel.Scatter.RegionChunks^3 chunks, 4 by default in every world
+    // mode, each HISM at its region's origin so instance transforms stay small floats)
     TMap<FVoxelScatterHISMKey, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComponents;
 
     // Per-HISM instance pool for recycling
@@ -566,9 +566,9 @@ scene (frames up to 51 ms). Writes are now batched per HISM:
 - **Compaction.** A HISM taking a batch whose pooled instances are at least `voxel.Scatter.HISMCompactMinPooled` (1,024)
   and outnumber its live ones is rewritten with its live instances only (`CompactHISM`: each chunk's instances, the held
   writes applied, renumbered; one `ClearInstances` + `AddInstances`).
-- **Smaller regions on a planet.** `voxel.Scatter.RegionChunks` sizes the regions the HISMs are kept per: -1 (default)
-  = 4 chunks on a planet and one region on a heightmap world, 0 = the render regions (`voxel.Render.RegionChunks`, 16),
-  N > 0 = N chunks in any world mode.
+- **Smaller regions than the renderer's.** `voxel.Scatter.RegionChunks` sizes the regions the HISMs are kept per: -1
+  (default) = 4 chunks in every world mode (planets since G42, heightmap worlds since world modes review WM-MP5), 0 = the
+  render regions (`voxel.Render.RegionChunks`, 16), N > 0 = N chunks.
 - Queries see held writes: `FindNearestInstance` (harvest) reads each instance through them and also scans held
   placements and new instances; `GetTotalInstanceCount` counts held new instances. `FlushHISMWrites` applies every held
   write now.

@@ -9,13 +9,14 @@ class UVoxelWorldConfiguration;
 /**
  * Render regions (spherical Phase 6, WM-BP7, decision D23): rendering precision at scale. Vertex positions, seam meshes,
  * water tiles and scatter instances are stored in float relative to their primitive's location, and a float of size 1e8
- * (a 1,000 km planet's surface) is 8 uu coarse. So on a planet the terrain is split into regions of RegionChunks^3
- * chunks, each region its own primitive (a UVoxelWorldComponent, a scatter HISM per type) located at the region's origin
- * in double (UE's large-world coordinates). A vertex's float offset from its region origin is at most a region across
- * (76,800 uu at 16 chunks of 4,800), so its spacing is under 0.01 uu wherever the region is.
+ * (a 1,000 km planet's surface, a plane 1,000 km from its origin) is 8 uu coarse. So the terrain is split into regions of
+ * RegionChunks^3 chunks, each region its own primitive (a UVoxelWorldComponent, a scatter HISM per type) located at the
+ * region's origin in double (UE's large-world coordinates). A vertex's float offset from its region origin is at most a
+ * region across (76,800 uu at 16 chunks of 4,800), so its spacing is under 0.01 uu wherever the region is.
  *
- * RegionChunks 0 means one region at the world origin (0, 0, 0): heightmap worlds render as before, one primitive with
- * absolute positions. A planet takes RegionChunks from voxel.Render.RegionChunks (16 by default, 0 to turn regions off).
+ * Every world mode takes RegionChunks from voxel.Render.RegionChunks (16 by default; planets since WM-BP7, heightmap worlds
+ * since world modes review WM-MP5, D40). 0 means one region at the world origin (0, 0, 0): one primitive with absolute
+ * positions, the rule heightmap worlds had before, clean to about 100 km from the origin.
  *
  * Pure value type; any thread.
  */
@@ -31,7 +32,7 @@ struct VOXELCORE_API FVoxelRenderRegions
 	double ChunkWorldSize = 0.0;
 
 	/**
-	 * The regions a world configuration renders with: a planet takes voxel.Render.RegionChunks, a heightmap world one region.
+	 * The regions a world configuration renders with: voxel.Render.RegionChunks in every world mode (0 = one region).
 	 *
 	 * @param Config World configuration
 	 * @return The regions

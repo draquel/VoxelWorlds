@@ -166,22 +166,57 @@ bool FVoxelRenderRegionPrecisionTest::RunTest(const FString& Parameters)
 		Renderer.Shutdown();
 	}
 
-	// Heightmap worlds: one component at the world origin (0, 0, 0), absolute positions as before
+	// Heightmap worlds split too (world modes review WM-MP5, D40): a plane 100 km out loses float precision as a big planet
+	// does. The vertex math at 1e7, 1e8 and 5e7 along the plane; one component per region with content, at its origin.
 	{
 		UVoxelWorldConfiguration* Plane = MakeConfig(EWorldMode::InfinitePlane, 0.0);
 		const FVoxelRenderRegions PlaneRegions = FVoxelRenderRegions::FromConfig(*Plane);
-		TestFalse(TEXT("A heightmap world is not split"), PlaneRegions.IsSplit());
-		TestEqual(TEXT("... its one region's origin is the world origin (0, 0, 0)"), PlaneRegions.GetRegionOrigin(FIntVector(5, -3, 2)), FVector::ZeroVector);
+		TestTrue(TEXT("A heightmap world splits into render regions"), PlaneRegions.IsSplit());
+		TestEqual(TEXT("... the same regions as a planet's"), PlaneRegions.RegionChunks, Regions.RegionChunks);
+		const TPair<const TCHAR*, FVector> PlaneSites[] = {
+			{ TEXT("100 km east"), FVector(1.0e7, 0.0, 0.0) },
+			{ TEXT("1,000 km east"), FVector(1.0e8, 0.0, 0.0) },
+			{ TEXT("500 km south-east"), FVector(5.0e7, -5.0e7, 0.0) },
+		};
+		for (const TPair<const TCHAR*, FVector>& Site : PlaneSites)
+		{
+			const FIntVector Chunk = ChunkAt(*Plane, Plane->WorldOrigin + Site.Value);
+			const FVector ChunkWorldPos = Plane->WorldOrigin + FVector(Chunk) * ChunkWorldSize;
+			const FIntVector Region = PlaneRegions.GetRegion(Chunk);
+			const FVector RegionOrigin = PlaneRegions.GetRegionOrigin(Region);
+			double MaxRegionError = 0.0, MaxAbsoluteError = 0.0;
+			for (int32 i = 0; i < 2000; ++i)
+			{
+				const FVector3f Local(Random.FRandRange(0.0, 2.0 * ChunkWorldSize), Random.FRandRange(0.0, 2.0 * ChunkWorldSize), Random.FRandRange(0.0, 2.0 * ChunkWorldSize));
+				const FVector Reference = ChunkWorldPos + FVector(Local);
+				const FVector3f Stored = PlaneRegions.ToRegionLocal(ChunkWorldPos, Region) + Local;
+				MaxRegionError = FMath::Max(MaxRegionError, FVector::Dist(RegionOrigin + FVector(Stored), Reference));
+				const FVector3f Absolute = FVector3f(ChunkWorldPos) + Local;
+				MaxAbsoluteError = FMath::Max(MaxAbsoluteError, FVector::Dist(FVector(Absolute), Reference));
+			}
+			AddInfo(FString::Printf(TEXT("plane, %s: chunk %s in region %s; a vertex's world position off by up to %.4f uu (absolute float, the rule before: %.2f uu)"),
+				Site.Key, *Chunk.ToString(), *Region.ToString(), MaxRegionError, MaxAbsoluteError));
+			TestTrue(*FString::Printf(TEXT("plane, %s: within 0.1 uu of the double reference (%.4f)"), Site.Key, MaxRegionError), MaxRegionError <= 0.1);
+		}
+
 		FVoxelCustomVFRenderer Renderer;
 		Renderer.SetMaterial(UMaterial::GetDefaultMaterial(MD_Surface));
 		Renderer.Initialize(World, Plane);
-		Renderer.UpdateChunkMeshFromCPU(FIntVector(40, -20, 1), 0, MakeMesh());
-		Renderer.UpdateChunkMeshFromCPU(FIntVector(-300, 7, 0), 0, MakeMesh());
+		const FIntVector Near(40, -20, 1);
+		const FIntVector Far(-300, 7, 0);
+		Renderer.UpdateChunkMeshFromCPU(Near, 0, MakeMesh());
+		Renderer.UpdateChunkMeshFromCPU(Far, 0, MakeMesh());
 		Renderer.FlushPendingOperations();
 		TArray<TPair<FIntVector, UVoxelWorldComponent*>> Components;
 		Renderer.GetRegionComponents(Components);
-		TestTrue(TEXT("Heightmap: one component, at the origin"), Components.Num() == 1 && Components[0].Value
-			&& Components[0].Value->GetComponentLocation().IsZero());
+		TSet<FIntVector> PlaneExpected = { FIntVector::ZeroValue, PlaneRegions.GetRegion(Near), PlaneRegions.GetRegion(Far) };
+		TestEqual(TEXT("Heightmap: a component per region with content, plus the primary one"), Components.Num(), PlaneExpected.Num());
+		int32 Misplaced = 0;
+		for (const TPair<FIntVector, UVoxelWorldComponent*>& Pair : Components)
+		{
+			Misplaced += (Pair.Value && Pair.Value->GetComponentLocation().Equals(PlaneRegions.GetRegionOrigin(Pair.Key), 1.0e-6)) ? 0 : 1;
+		}
+		TestEqual(TEXT("Heightmap: every component sits at its region's origin"), Misplaced, 0);
 		Renderer.Shutdown();
 		Plane->RemoveFromRoot();
 	}

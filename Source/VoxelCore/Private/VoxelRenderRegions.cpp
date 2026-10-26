@@ -7,10 +7,11 @@
 static TAutoConsoleVariable<int32> CVarVoxelRenderRegionChunks(
 	TEXT("voxel.Render.RegionChunks"),
 	16,
-	TEXT("Planets: chunks along a render region's edge (spherical Phase 6, WM-BP7). Each region is its own terrain primitive and\n")
-	TEXT("scatter HISM per type, located at the region's origin in double, with vertex and instance positions in float relative to\n")
-	TEXT("it, so they keep sub-0.01 uu precision at any distance from the world origin. 0 = one primitive at the world origin\n")
-	TEXT("(absolute float positions, 8 uu coarse at 1e8). Heightmap worlds always use one primitive. Read when the renderers start."),
+	TEXT("Chunks along a render region's edge (spherical Phase 6, WM-BP7; every world mode since world modes review WM-MP5, D40).\n")
+	TEXT("Each region is its own terrain primitive and scatter HISM per type, located at the region's origin in double, with vertex\n")
+	TEXT("and instance positions in float relative to it, so they keep sub-0.01 uu precision at any distance from the world origin\n")
+	TEXT("(a plane 100 km out as much as a 1,000 km planet). 0 = one primitive at the world origin (absolute float positions, 8 uu\n")
+	TEXT("coarse at 1e8: the rule before on heightmap worlds). Read when the renderers start."),
 	ECVF_Default);
 
 namespace VoxelRenderRegionsDetail
@@ -26,9 +27,8 @@ FVoxelRenderRegions FVoxelRenderRegions::FromConfig(const UVoxelWorldConfigurati
 	FVoxelRenderRegions Regions;
 	Regions.WorldOrigin = Config.WorldOrigin;
 	Regions.ChunkWorldSize = Config.GetChunkWorldSize();
-	Regions.RegionChunks = Config.WorldMode == EWorldMode::SphericalPlanet
-		? FMath::Max(0, CVarVoxelRenderRegionChunks.GetValueOnAnyThread())
-		: 0;
+	// Every world mode (WM-MP5): a plane far from its origin loses float precision as a big planet does.
+	Regions.RegionChunks = FMath::Max(0, CVarVoxelRenderRegionChunks.GetValueOnAnyThread());
 	return Regions;
 }
 

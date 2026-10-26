@@ -37,15 +37,19 @@ So the GPU renderer's float bake is clean to roughly **~100 km**, degrading past
   precision sub-cm well past 10 km.
 - **Extreme speed (~40 m/s / 144 km/h):** still outruns generation — needs forward-biased generation
   (constraint #2 TODO).
-- **Visual precision ceiling:** ~100 km clean, artifacts beyond ~500–1000 km (constraint #4).
+- **Visual precision ceiling:** was ~100 km clean, artifacts beyond ~500–1000 km (constraint #4). Since world modes
+  review WM-MP5 (2026-10-25, D40) heightmap worlds render in regions as planets do (below), so #4 no longer bounds the
+  renderer: a vertex's float is at most a region across at any distance. What still degrades far out on a heightmap world
+  is generation's float noise inputs and the 256-unit noise period (features repeat about every 120 km at the
+  continental frequency), planned as WM-MP6 and WM-MP7 (review plan §23, milestone MP4).
 
-## Recommended long-term fix: world-origin rebasing
+## World-origin rebasing: not needed for the renderer
 
-Periodically shift the world origin toward the viewer so absolute coordinates near the player stay
-small. This resets the float-bake magnitude (#4), keeps Chaos/CMC in their precise range (#5), and
-makes the world effectively unbounded. It is a cross-system change (renderer proxy offsets, collision
-component placement, chunk-coord ↔ world mapping, gameplay actors) and is **not** implemented here —
-tracked as the major follow-up. Until then the practical clean range is ~100 km from origin.
+Periodically shifting the world origin toward the viewer was the recommended fix for #4 and #5. The renderer took the
+other route (D23, WM-BP7, WM-MP5): regions of 16^3 chunks, each primitive at its region's origin in double, in every
+world mode, which resets the float-bake magnitude without a cross-system rebase. Chaos/CMC (#5) stay in their precise
+range well past 10 km (collision is chunk-local with a double transform); a rebase would only matter for gameplay
+actors at thousands of km, which no world mode here reaches.
 
 ## Planets: the radius ceiling (SP-H2)
 
@@ -54,4 +58,4 @@ float-bake ceiling (#4) would be a radius of about 100 km. Since spherical Phase
 render in regions of 16^3 chunks, each primitive at its region's origin in double, so a vertex's float is at most a
 region across (under 0.01 uu); generation, the noise and the GPU branch keep every size-R value in double or in the
 chunk's frame. Planets are precise to about 1,000 km (`Review_Planet_L`); collision (#5) stays exact. Heightmap
-worlds keep #4's single primitive at the origin. See `Features/WORLD_MODES.md` "The radius ceiling".
+worlds split the same way since world modes review WM-MP5 (2026-10-25). See `Features/WORLD_MODES.md` "The radius ceiling".
