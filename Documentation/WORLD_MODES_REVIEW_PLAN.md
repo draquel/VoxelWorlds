@@ -10423,5 +10423,5 @@ collision 98, renderer GPU 25 MB), the far field 1.3 ms P95 and 784 patches. Aga
 different), so the noise's own cost is not separable here: the GPU generator's work is the chunk count's, and the CPU
 noise (surface queries, scatter, the map) was not timed apart. D3 met.
 
-PRs: draquel/VoxelWorlds#TBD (`feat/mp4-noise`), draquel/UE5_PluginDev#TBD (`claude/mp4-noise`: the save test, the gitlink, the doc map);
+PRs: draquel/VoxelWorlds#168 (`feat/mp4-noise`), draquel/UE5_PluginDev#176 (`claude/mp4-noise`: the save test, the gitlink, the doc map);
 merge VoxelWorlds first, then re-point the parent's gitlink at its merge commit.
