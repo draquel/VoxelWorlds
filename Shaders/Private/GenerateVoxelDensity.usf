@@ -126,27 +126,31 @@ float PlanetRadius;           // the datum
 float PlanetMaxTerrainHeight; // FSphericalPlanetParams::MaxTerrainHeight (the shell's quick reject, as an altitude)
 float PlanetMaxTerrainDepth;  // FSphericalPlanetParams::MaxTerrainDepth
 float PlanetWaterAltitude;    // the sea as an altitude: WaterRadius - PlanetRadius, formed in double
-int3 PlanetChunkBase;         // floor(chunk origin - planet centre), in double: the ore Rarity key's integer part
-float3 PlanetChunkBaseFrac;   // (chunk origin - planet centre) - PlanetChunkBase
+int3 ChunkBaseInt;            // floor of the chunk origin, in double: the ore Rarity key's integer part (relative to the
+                              // planet centre on a planet, absolute on a heightmap world since MP4)
+float3 ChunkBaseFrac;         // the chunk origin less ChunkBaseInt
 
-// The planet noise's per-chunk origins (spherical Phase 6, WM-BP5; PlanetNoise.ush): every planet field's origin split per
-// octave on the CPU, in double, 2 float4s a split ([asfloat(cell), 0][frac, 0]). The field bases index splits. The
-// origins belong to the chunk's anchor (its centre): the 2D fields at the anchor's point on the datum sphere, each cave
-// layer at the anchor with its altitude scaled, each ore at the anchor through its streak map (a first slot holds the
-// streak's [direction, factor]). The anchor's direction, distance from the centre and altitude (computed in double) give
-// each voxel's small differences (MakePlanetVoxelFrame).
-StructuredBuffer<float4> PlanetNoiseOrigins;
-int PlanetTerrainOrigin;
-int PlanetContinentOrigin;
-int PlanetTemperatureOrigin;
-int PlanetMoistureOrigin;
-int4 PlanetCaveOrigin;        // per cave layer: field 1's splits, then field 2's (CaveLayerOctaves each)
-int PlanetOreOrigin;          // per ore record (OreVeinData order): 3 splits, the streak slot then 2 octaves
+// The noise's per-chunk origins (spherical Phase 6, WM-BP5; every world mode since the world modes review's MP4, D39;
+// PlanetNoise.ush): every field's origin split per octave on the CPU, in double, 2 float4s a split ([asfloat(cell), 0]
+// [frac, 0]). The field bases index splits. On a planet the origins belong to the chunk's anchor (its centre): the 2D
+// fields at the anchor's point on the datum sphere, each cave layer at the anchor with its altitude scaled, each ore at
+// the anchor through its streak map (a first slot holds the streak's [direction, factor]); the anchor's direction, distance
+// from the centre and altitude (computed in double) give each voxel's small differences (MakePlanetVoxelFrame). On a
+// heightmap world the anchor is the chunk's origin corner: the 2D fields at (X, Y, 0), each cave layer at
+// (X, Y, Z x VerticalScale), each ore at the corner through its streak map; a voxel's offset is its index times the voxel
+// size (BuildNoiseOrigins in VoxelGPUNoiseGenerator.cpp).
+StructuredBuffer<float4> NoiseOrigins;
+int TerrainNoiseOrigin;
+int ContinentNoiseOrigin;
+int TemperatureNoiseOrigin;
+int MoistureNoiseOrigin;
+int4 CaveNoiseOrigin;        // per cave layer: field 1's splits, then field 2's (CaveLayerOctaves each)
+int OreNoiseOrigin;          // per ore record (OreVeinData order): 3 splits, the streak slot then 2 octaves
 float3 PlanetAnchorLocal;     // the anchor in the chunk: (ChunkSize / 2) x VoxelSize on each axis
 float3 PlanetAnchorDir;       // the anchor's direction from the centre
 float PlanetAnchorDist;       // the anchor's distance from the centre
 float PlanetAnchorAltitude;   // that distance minus PlanetRadius, formed in double
-int PlanetSimplexContinuous;  // G43: voxel.Planet.ContinuousSimplex (1: the continuous Simplex kernel; 0: the classic one)
+int SimplexContinuous;  // G43: voxel.Planet.ContinuousSimplex (1: the continuous Simplex kernel; 0: the classic one)
 
 // The cave configuration's underwater minimum depth and biome overrides, which GpuCaveCarve applies in every world mode
 // as FVoxelCPUNoiseGenerator::CalculateCaveDensity does. CaveBiomeOverrideData: 1 float4 per override,
@@ -160,7 +164,7 @@ RWStructuredBuffer<uint> OutputVoxelData;
 
 // Per-voxel biome selection + material pipeline (references the biome globals declared above).
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
-// The planet noise (references PlanetNoiseOrigins) and the chunk frame.
+// The planet noise (references NoiseOrigins) and the chunk frame.
 #include "/Plugin/VoxelWorlds/Private/PlanetNoise.ush"
 #include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
 // IslandBowl edge falloff (references the IslandBowl globals declared above).
@@ -204,65 +208,46 @@ float GpuContinentalnessCurves(float ContinentalnessNoise, inout float InOutBase
 }
 
 /**
- * Continentalness at a sample point, applied to the terrain params: the heightmap modes sample (X, Y, 0). Mirrors
- * FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt (2-octave Simplex, then the curves). A planet samples the field
- * with the planet noise (SphericalPlanet.ush) and applies GpuContinentalnessCurves.
+ * Continentalness on a heightmap world, applied to the terrain params: the field at (X, Y, 0), sampled as the chunk's
+ * continentalness origin (the corner's (X, Y, 0), split on the CPU) + the voxel's offset in the plane (MP4: the same noise
+ * as the CPU's FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt, 2-octave Simplex, then the curves). A planet
+ * samples the field on the datum sphere (SphericalPlanet.ush) and applies GpuContinentalnessCurves.
  *
- * @param SamplePos Continentalness sample position
+ * @param Offset2D The voxel's offset from the chunk's origin corner, (dx, dy, 0)
  * @param InOutBaseHeight Base height, the curve's offset added
  * @param InOutHeightScale Height scale, multiplied by the curve's multiplier
  * @return The continentalness value (the biome blend reuses it)
  */
-float GpuApplyContinentalness(float3 SamplePos, inout float InOutBaseHeight, inout float InOutHeightScale)
+float GpuApplyContinentalness(float3 Offset2D, inout float InOutBaseHeight, inout float InOutHeightScale)
 {
-    float ContinentalnessNoise = FBM3D(
-        SamplePos,
-        NOISE_TYPE_SIMPLEX,
-        ContinentalnessSeed,
-        2,
-        ContinentalnessFrequency,
-        1.0,
-        2.0,
-        0.5
-    );
+    const float ContinentalnessNoise = PlanetFBM3D(ContinentNoiseOrigin, Offset2D, NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2,
+        ContinentalnessFrequency, 1.0f, 2.0f, 0.5f);
     return GpuContinentalnessCurves(ContinentalnessNoise, InOutBaseHeight, InOutHeightScale);
 }
 
 /**
- * One cave layer's carve at a cave noise position (the voxel's position with VerticalScale applied: along Z in the
- * heightmap modes, along local up on a planet). Mirrors FVoxelCPUNoiseGenerator::SampleCaveLayer after its scaling.
+ * One cave layer's carve on a heightmap world (FVoxelCPUNoiseGenerator::SampleCaveLayer: the noise at the voxel's position
+ * with VerticalScale applied along Z), as the layer's origin (the chunk corner's (X, Y, Z x VerticalScale), split on the
+ * CPU) + the voxel's offset with its Z scaled the same (MP4). A planet's is PlanetCaveLayerCarve.
  *
  * @param ci Cave layer index in [0, CaveLayerCount)
- * @param CavePos Cave noise sample position
+ * @param VoxelOffset The voxel's offset from the chunk's origin corner (its index times the voxel size)
  * @return Carve density [0, CarveStrength], before the depth fade
  */
-float SampleGpuCaveLayer(int ci, float3 CavePos)
+float HeightmapCaveLayerCarve(int ci, float3 VoxelOffset)
 {
+    const float3 Offset = float3(VoxelOffset.x, VoxelOffset.y, VoxelOffset.z * CaveLayerVerticalScale[ci]);
+    const int Base = CaveNoiseOrigin[ci];
+    const int Octaves = CaveLayerOctaves[ci];
+    const float Noise1 = PlanetFBM3D(Base, Offset, NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
+        CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
     if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
     {
-        return SampleCheeseCave(
-            CavePos,
-            CaveLayerSeed[ci],
-            CaveLayerFrequency[ci],
-            CaveLayerOctaves[ci],
-            CaveLayerPersistence[ci],
-            CaveLayerLacunarity[ci],
-            CaveLayerThreshold[ci],
-            CaveLayerCarveFalloff[ci],
-            CaveLayerCarveStrength[ci]);
+        return CheeseCarveFromNoise(Noise1, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
     }
-    return SampleTunnelCave(
-        CavePos,
-        CaveLayerSeed[ci],
-        CaveLayerSeed2[ci],
-        CaveLayerFrequency[ci],
-        CaveLayerFrequency2[ci],
-        CaveLayerOctaves[ci],
-        CaveLayerPersistence[ci],
-        CaveLayerLacunarity[ci],
-        CaveLayerThreshold[ci],
-        CaveLayerCarveFalloff[ci],
-        CaveLayerCarveStrength[ci]);
+    const float Noise2 = PlanetFBM3D(Base + clamp(Octaves, 1, 16), Offset, NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
+        CaveLayerFrequency2[ci], 1.0f, CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
+    return TunnelCarveFromNoise(Noise1, Noise2, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
 }
 
 /**
@@ -279,7 +264,7 @@ float PlanetCaveLayerCarve(int ci, PlanetVoxelFrame F)
 {
     const float VS = CaveLayerVerticalScale[ci];
     const float3 Offset = F.DeltaDir * (PlanetRadius + PlanetAnchorAltitude * VS) + F.Dir * (F.DeltaR * VS);
-    const int Base = PlanetCaveOrigin[ci];
+    const int Base = CaveNoiseOrigin[ci];
     const int Octaves = CaveLayerOctaves[ci];
     const float Noise1 = PlanetFBM3D(Base, Offset, NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
         CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
@@ -312,10 +297,10 @@ void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMin
 /**
  * FVoxelCPUNoiseGenerator::CalculateCaveDensity, in every world mode: the biome's cave scale and minimum-depth override,
  * the underwater minimum depth when the column's terrain is under the sea, each layer's depth window and fades, the
- * union of the layers, the biome scale. A heightmap layer samples its noise at the voxel's position with VerticalScale
- * applied along Z; a planet's, PlanetCaveLayerCarve.
+ * union of the layers, the biome scale. A heightmap layer samples its noise at the chunk's cave origin + the voxel's
+ * offset with VerticalScale applied along Z (HeightmapCaveLayerCarve); a planet's, PlanetCaveLayerCarve.
  *
- * @param WorldPos Absolute voxel position (the heightmap modes)
+ * @param VoxelOffset The voxel's offset from the chunk's origin corner (the heightmap modes; unread on a planet)
  * @param Planet The voxel in its chunk's frame (a planet; unread otherwise)
  * @param DepthBelowSurface Depth below the terrain, in voxels (along Z, or radial on a planet)
  * @param BiomeID Dominant biome (0 without biomes)
@@ -324,7 +309,7 @@ void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMin
  *        WorldMode test inlined (and, on FXC, ran) both layer samplers at every call (F2.13)
  * @return Carve density [0, 1]
  */
-float GpuCaveCarve(float3 WorldPos, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater, bool bPlanetFrame)
+float GpuCaveCarve(float3 VoxelOffset, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater, bool bPlanetFrame)
 {
     float BiomeCaveScale;
     float MinDepthOverride;
@@ -364,7 +349,7 @@ float GpuCaveCarve(float3 WorldPos, PlanetVoxelFrame Planet, float DepthBelowSur
         }
         else
         {
-            LayerCarve = SampleGpuCaveLayer(ci, float3(WorldPos.x, WorldPos.y, WorldPos.z * CaveLayerVerticalScale[ci]));
+            LayerCarve = HeightmapCaveLayerCarve(ci, VoxelOffset);
         }
         if (LayerCarve <= 0.0f)
         {
@@ -431,6 +416,9 @@ void MainCS(
 
     // Calculate world position for this voxel
     float3 WorldPos = ChunkWorldPosition + float3(VoxelCoord) * EffectiveVoxelSize;
+    // The voxel's offset from the chunk's origin corner: what the heightmap noise fields add to their per-chunk origins
+    // (MP4), so no float here is of the size of the absolute position.
+    const float3 VoxelOffset = float3(VoxelCoord) * EffectiveVoxelSize;
 
     uint Density;
     uint MaterialID;
@@ -441,6 +429,9 @@ void MainCS(
     // continentalness -> height); IslandBowl additionally applies its edge falloff below.
     if (WorldMode == WORLD_MODE_INFINITE_PLANE || WorldMode == WORLD_MODE_ISLAND_BOWL)
     {
+        // The 2D fields (terrain, continentalness, climate) sample (X, Y, 0): their origins are the corner's (X, Y, 0).
+        const float3 Offset2D = float3(VoxelOffset.x, VoxelOffset.y, 0.0f);
+
         // Apply continentalness height modulation
         float EffectiveBaseHeight = BaseHeight;
         float EffectiveHeightScale = HeightScale;
@@ -448,16 +439,15 @@ void MainCS(
 
         if (ContinentalnessEnabled != 0)
         {
-            // Sample continentalness noise at X,Y (2D, Z=0)
-            ContinentalnessValue = GpuApplyContinentalness(
-                float3(WorldPos.x, WorldPos.y, 0.0), EffectiveBaseHeight, EffectiveHeightScale);
+            ContinentalnessValue = GpuApplyContinentalness(Offset2D, EffectiveBaseHeight, EffectiveHeightScale);
         }
 
         // Infinite Plane: 2D heightmap-based terrain. Decomposed (vs the monolithic ApplyInfinitePlaneSDF)
         // so terrain conditioning can flatten the height BEFORE the density is derived — matches the CPU
         // order: SampleTerrainNoise2D -> NoiseToTerrainHeight -> ApplyToHeight -> CalculateSignedDistance -> density.
-        float TerrainNoise = SampleTerrainHeight2D(
-            WorldPos.x, WorldPos.y,
+        // The terrain noise at the chunk's terrain origin + the voxel's offset in the plane (MP4: FVoxelPlanetNoise's
+        // hashed lattice, split origin and continuous Simplex kernel, as FVoxelCPUNoiseGenerator::FBM3D).
+        float TerrainNoise = PlanetFBM3D(TerrainNoiseOrigin, Offset2D,
             NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
         float TerrainHeight = NoiseToTerrainHeight(TerrainNoise, SeaLevel, EffectiveHeightScale, EffectiveBaseHeight);
         // IslandBowl: fade the (continentalness-modulated) height toward EdgeHeight at the world edge.
@@ -481,9 +471,9 @@ void MainCS(
         uint OreCount = 0u;
         if (BiomeCount > 0)
         {
-            float3 ClimateSamplePos = float3(WorldPos.x, WorldPos.y, 0.0);
-            float Temperature = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0, 2.0, 0.5);
-            float Moisture = FBM3D(ClimateSamplePos, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0, 2.0, 0.5);
+            // Temperature and moisture at (X, Y, 0): the chunk's climate origins + the voxel's offset in the plane
+            const float Temperature = PlanetFBM3D(TemperatureNoiseOrigin, Offset2D, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
+            const float Moisture = PlanetFBM3D(MoistureNoiseOrigin, Offset2D, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
             Blend = SampleGpuBiomeBlend(Temperature, Moisture, ContinentalnessValue);
             const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
             BiomeID = Dominant.BiomeID;
@@ -499,7 +489,7 @@ void MainCS(
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(WorldPos, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false);
+            CaveCarve = GpuCaveCarve(VoxelOffset, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
@@ -520,11 +510,15 @@ void MainCS(
                 MaterialID = CaveWallMaterialID;
             }
 
-            // Ore vein overrides (solid voxels well below surface; depth > 10 matches the CPU guard).
+            // Ore vein overrides (solid voxels well below surface; depth > 10 matches the CPU guard): since MP4 the
+            // planet's ore path on a heightmap world too (GpuCheckPlanetOreVein): the ore noise at the chunk's ore origin +
+            // the voxel's offset through the streak's linear map, the Rarity hash on the absolute position rounded to
+            // whole uu (the chunk's integer base + the voxel's offset; the CPU's OreRarityKey)
             if (Density >= 127u && DepthBelowSurface > 10.0f)
             {
                 uint OreMat;
-                if (GpuCheckOreVein(WorldPos, DepthBelowSurface, OreStart, OreCount, NoiseSeed, OreMat))
+                const int3 RarityKey = ChunkBaseInt + int3(floor(ChunkBaseFrac + VoxelOffset + 0.5f));
+                if (GpuCheckPlanetOreVein(VoxelOffset, RarityKey, DepthBelowSurface, OreStart, OreCount, NoiseSeed, OreMat))
                 {
                     MaterialID = OreMat;
                 }
@@ -550,9 +544,10 @@ void MainCS(
     }
     else
     {
-        // Default: 3D noise generation for a world mode with no branch of its own (none today)
-        float NoiseValue = FBM3D(
-            WorldPos,
+        // Default: 3D noise generation for a world mode with no branch of its own (none today): the terrain noise at the
+        // chunk's terrain origin (the corner's (X, Y, 0)) + the voxel's offset with its absolute Z
+        float NoiseValue = PlanetFBM3D(TerrainNoiseOrigin,
+            float3(VoxelOffset.x, VoxelOffset.y, ChunkWorldPosition.z + VoxelOffset.z),
             NoiseType,
             NoiseSeed,
             NoiseOctaves,

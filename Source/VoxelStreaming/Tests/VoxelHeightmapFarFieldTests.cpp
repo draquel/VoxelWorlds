@@ -1056,8 +1056,26 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 					const FIntPoint Column(FMath::FloorToInt32(Centre.X / W.Config->GetChunkWorldSize()), FMath::FloorToInt32(Centre.Y / W.Config->GetChunkWorldSize()));
 					const bool bTile = W.Manager->HasWaterTile(Column);
 					SeaOverTile += (Patch.bDrawSea && bTile) ? 1 : 0;
-					// A selected band patch (its terrain drawn, or hidden by the window) draws its sea where no tile is.
-					SeaWithoutTile += (!Patch.bDrawSea && !bTile && (Patch.bDrawTerrain || Patch.bCovered)) ? 1 : 0;
+					// Where no tile is drawn and the surface is under the sea by more than a voxel (a patch's bHasSea also
+					// counts a sliver the water fill leaves dry), some drawn patch draws the sea at the column's centre:
+					// the band patch itself, or the covered parent that stands for it (a band patch under a covered parent
+					// keeps stale flags from the last update it was selected in, which is no defect).
+					const double Height = W.Manager->GetGeneratedSurfaceHeight(Centre.X, Centre.Y);
+					const bool bRealSea = static_cast<double>(W.Config->WaterLevel) - Height > static_cast<double>(W.Config->VoxelSize);
+					const FVoxelPlanetFarField::FPatchState* DrawnThere = (!bTile && bRealSea)
+						? FarField->FindDrawnPatchAt(FVector(Centre.X, Centre.Y, 0.0), /*bTerrainOnly*/ false) : nullptr;
+					const bool bSeaWithoutTile = !bTile && bRealSea && !(DrawnThere && DrawnThere->bDrawSea);
+					SeaWithoutTile += bSeaWithoutTile ? 1 : 0;
+					if (bSeaWithoutTile || (Patch.bDrawSea && bTile))
+					{
+						TArray<int32> WetLayers;
+						const bool bColumnTile = W.Manager->GetWaterTileColumn(FVector(Centre.X, Centre.Y, 0.0), WetLayers);
+						AddInfo(FString::Printf(TEXT("Plane: band patch %s box (%.0f,%.0f)-(%.0f,%.0f) column (%d,%d): sea drawn %d, has sea %d, terrain drawn %d, covered %d, lazy %d, resident %d, built %d; tile %d (column %d, %d wet layers); %d surface chunks, loaded %s"),
+							*Patch.Key.ToString(), Patch.Box.Min.X, Patch.Box.Min.Y, Patch.Box.Max.X, Patch.Box.Max.Y, Column.X, Column.Y,
+							Patch.bDrawSea ? 1 : 0, Patch.bHasSea ? 1 : 0, Patch.bDrawTerrain ? 1 : 0, Patch.bCovered ? 1 : 0, Patch.bLazy ? 1 : 0,
+							Patch.bResident ? 1 : 0, Patch.bBuilt ? 1 : 0, bTile ? 1 : 0, bColumnTile ? 1 : 0, WetLayers.Num(), Patch.SurfaceChunks.Num(),
+							*FString::JoinBy(Patch.SurfaceChunks, TEXT(" "), [&](const FIntVector& C) { return FString::Printf(TEXT("%s:%d"), *C.ToString(), W.Manager->IsChunkLoaded(C) ? 1 : 0); })));
+					}
 				}
 				if (!Patch.bResident)
 				{
@@ -1158,7 +1176,7 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 			TestEqual(TEXT("Plane: drawn patches shown"), Shown, Drawn);
 			TestTrue(TEXT("Plane: the window hides band patches"), HiddenBand > 0);
 			TestEqual(TEXT("Plane: no band patch draws its sea over a water tile"), SeaOverTile, 0);
-			TestEqual(TEXT("Plane: no band patch hides its sea where no water tile is drawn"), SeaWithoutTile, 0);
+			TestEqual(TEXT("Plane: wherever no water tile is drawn over a real sea, a drawn patch draws the sea"), SeaWithoutTile, 0);
 			TestTrue(TEXT("Plane: sea sections shown"), SeaShown > 0);
 			TestTrue(TEXT("Plane: the stats report it"), Stats.bActive && Stats.DrawnPatches > 0 && Stats.MemoryMB > 0.0f && Stats.bDrawsSea);
 		}

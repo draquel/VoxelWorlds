@@ -433,7 +433,7 @@ bool FVoxelNoisePlanetHashNoPeriodTest::RunTest(const FString& Parameters)
 // x = z, the cube sphere's face edges (P6.4 measured up to 136 uu on Review_Planet_L across them). The continuous kernel
 // is that one less its value and slope at d^2 = 0.5 (voxel.Planet.ContinuousSimplex 1, PlanetGenerationVersion 6).
 //
-// - Noise.PlanetSimplexContinuous: on random points of every kind of boundary (the corner order's planes x - y = k,
+// - Noise.SimplexContinuous: on random points of every kind of boundary (the corner order's planes x - y = k,
 //   y - z = k, x - z = k, k = 0 among them, and the skewed cells' faces), the noise's step across the plane and the
 //   change of its slope there, in the double reference and in the float split-origin form generation uses; and the new
 //   noise's spread and shape against the classic one.
@@ -447,14 +447,14 @@ bool FVoxelNoisePlanetHashNoPeriodTest::RunTest(const FString& Parameters)
 
 namespace VoxelPlanetSimplexContinuity
 {
-	/** Sets voxel.Planet.ContinuousSimplex for a scope. */
+	/** Sets voxel.Noise.ContinuousSimplex (voxel.Planet.ContinuousSimplex before MP4) for a scope. */
 	struct FScopedKernel
 	{
 		IConsoleVariable* Var = nullptr;
 		int32 Previous = 1;
 
 		explicit FScopedKernel(int32 Value)
-			: Var(IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Planet.ContinuousSimplex")))
+			: Var(IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Noise.ContinuousSimplex")))
 		{
 			if (Var)
 			{
@@ -549,11 +549,11 @@ namespace VoxelPlanetSimplexContinuity
 	}
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNoisePlanetSimplexContinuousTest,
-	"VoxelWorlds.Noise.PlanetSimplexContinuous",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNoiseSimplexContinuousTest,
+	"VoxelWorlds.Noise.SimplexContinuous",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FVoxelNoisePlanetSimplexContinuousTest::RunTest(const FString& Parameters)
+bool FVoxelNoiseSimplexContinuousTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelPlanetSimplexContinuity;
 

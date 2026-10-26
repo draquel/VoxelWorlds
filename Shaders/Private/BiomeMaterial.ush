@@ -321,36 +321,9 @@ uint ApplyGpuHeightRules(uint CurrentMaterial, float WorldHeight, float DepthBel
     return CurrentMaterial;
 }
 
-// FVoxelCPUNoiseGenerator::SampleOreVeinNoise — Simplex FBM (2 octaves) with optional streak stretch.
-// Ore record (3 float4s): [MaterialID,MinDepth,MaxDepth,Shape][Frequency,Threshold,SeedOffset,Rarity][StreakStretch,0,0,0].
-float SampleGpuOreVeinNoise(float3 WorldPos, uint OreIdx, int WorldSeed)
-{
-    float4 o0 = OreVeinData[OreIdx * 3 + 0];
-    float4 o1 = OreVeinData[OreIdx * 3 + 1];
-    float4 o2 = OreVeinData[OreIdx * 3 + 2];
-
-    uint shape = (uint)(o0.w + 0.5);
-    float frequency = o1.x;
-    int seedOffset = (int)o1.z;
-    float streakStretch = o2.x;
-
-    float3 samplePos = WorldPos;
-    if (shape == 1u) // Streak — stretch along a position-derived pseudo-random direction
-    {
-        float streakSeed = (float)seedOffset * 0.1;
-        float3 streakDir;
-        streakDir.x = sin(WorldPos.y * 0.0001 + streakSeed);
-        streakDir.y = cos(WorldPos.x * 0.0001 + streakSeed * 1.5);
-        streakDir.z = sin(WorldPos.z * 0.0002 + streakSeed * 2.0);
-        streakDir = normalize(streakDir);
-        float proj = dot(WorldPos, streakDir);
-        float3 projected = WorldPos - streakDir * proj;
-        samplePos = projected + streakDir * (proj / streakStretch);
-    }
-
-    float noiseValue = FBM3D(samplePos, NOISE_TYPE_SIMPLEX, WorldSeed + seedOffset, 2, frequency, 1.0, 2.0, 0.5);
-    return (noiseValue + 1.0) * 0.5;
-}
+// The ore noise is sampled by GpuCheckPlanetOreVein (SphericalPlanet.ush) in every world mode since MP4: the ore's
+// per-chunk origin + the voxel's offset through the streak's linear map, the Rarity hash on the position rounded to
+// whole uu (GpuOreRarityHashKey below).
 
 // FVoxelCPUNoiseGenerator::OreRarityHash, bit for bit: a planet's ore Rarity value in [0, 1) from an OreRarityKey (the
 // planet-relative position rounded to whole uu) and the seed (spherical SP-H3).
@@ -366,43 +339,6 @@ float GpuOreRarityHashKey(int3 Key, int Seed)
     h *= 0x846CA68Bu;
     h ^= h >> 16;
     return (float)(h >> 8) * (1.0f / 16777216.0f);
-}
-
-// FVoxelCPUNoiseGenerator::CheckOreVeinPlacement over [OreStart, OreStart+OreCount) in the heightmap modes (a planet's
-// is GpuCheckPlanetOreVein in SphericalPlanet.ush). First match wins.
-bool GpuCheckOreVein(float3 WorldPos, float DepthBelowSurface, uint OreStart, uint OreCount, int WorldSeed, out uint OutMat)
-{
-    OutMat = 0u;
-    for (uint i = 0; i < OreCount; ++i)
-    {
-        uint idx = OreStart + i;
-        float4 o0 = OreVeinData[idx * 3 + 0];
-        float4 o1 = OreVeinData[idx * 3 + 1];
-        uint matID = (uint)(o0.x + 0.5);
-        float minDepth = o0.y;
-        float maxDepth = o0.z;
-        float threshold = o1.y;
-        float rarity = o1.w;
-
-        // IsValidDepth
-        if (DepthBelowSurface < minDepth) { continue; }
-        if (maxDepth > 0.0 && DepthBelowSurface > maxDepth) { continue; }
-
-        float oreNoise = SampleGpuOreVeinNoise(WorldPos, idx, WorldSeed);
-        if (oreNoise >= threshold)
-        {
-            if (rarity < 1.0)
-            {
-                // NOTE: the heightmap position hash is precision-sensitive; the CPU computes it in double, the GPU
-                // in float, so heightmap ores with rarity < 1 may differ by a few voxels GPU vs CPU. A planet's is exact.
-                float randomValue = frac(sin(WorldPos.x * 12.9898 + WorldPos.y * 78.233 + WorldPos.z * 45.164) * 43758.5453);
-                if (randomValue > rarity) { continue; }
-            }
-            OutMat = matID;
-            return true;
-        }
-    }
-    return false;
 }
 
 // FVoxelTerrainConditioning::ApplyToHeight — blend the height toward each zone's target by its weight.

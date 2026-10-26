@@ -8740,7 +8740,14 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 
 	if (bAnyWater)
 	{
+		// A new tile: the far field's band patches over this column hide their sea under it (WM-MP1), so they re-select
+		// (the far field re-reads the window on a chunk-state version change).
+		const bool bNewTile = !WaterTiles.Contains(TileCoord);
 		FWaterTileState& Tile = WaterTiles.FindOrAdd(TileCoord);
+		if (bNewTile)
+		{
+			++ChunkStateVersion;
+		}
 		Tile.PartialMasks.Add(ChunkCoord.Z, MoveTemp(PartialMask));
 
 		// Mark dirty and queue
@@ -8809,13 +8816,15 @@ void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoor
 
 	if (Tile->PartialMasks.IsEmpty())
 	{
-		// No more contributors — remove the tile entirely
+		// No more contributors — remove the tile entirely. The far field's band patches over this column drew no sea
+		// under it (WM-MP1): a chunk-state version change has them re-select.
 		if (MeshRenderer)
 		{
 			MeshRenderer->RemoveWaterTile(TileCoord);
 		}
 		WaterTiles.Remove(TileCoord);
 		DirtyWaterTileSet.Remove(TileCoord);
+		++ChunkStateVersion;
 	}
 	else
 	{

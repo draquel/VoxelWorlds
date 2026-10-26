@@ -34,8 +34,13 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * 1: the first recorded version (WM-A1 moved islands whose WorldOrigin is not zero onto WorldOrigin + offset).
 	 * 2: G18, the GPU heightmap caves apply the cave configuration's biome overrides and underwater minimum depth as the
 	 *    CPU does (GPU InfinitePlane and IslandBowl worlds stop carving caves under the sea and in biomes scaled to 0).
+	 * 3: world modes review MP4 (WM-MP6, WM-MP7, decision D39): heightmap worlds sample the planet's noise
+	 *    (FVoxelPlanetNoise: a hashed lattice with no 256-unit period, split-origin sampling, the continuous Simplex
+	 *    kernel) in every field, and their ores take the planet's streak map and Rarity hash; every heightmap world's
+	 *    terrain changes once. A planet's terrain does not change, but this version is in every fingerprint, so planet
+	 *    saves from before are refused too.
 	 */
-	static constexpr int32 GenerationVersion = 2;
+	static constexpr int32 GenerationVersion = 3;
 
 	/**
 	 * Version of the planet's generation, in a planet's fingerprint shape ("PlanetGeneration=N") so a change to planet

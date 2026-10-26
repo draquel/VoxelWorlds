@@ -39,9 +39,11 @@ So the GPU renderer's float bake is clean to roughly **~100 km**, degrading past
   (constraint #2 TODO).
 - **Visual precision ceiling:** was ~100 km clean, artifacts beyond ~500–1000 km (constraint #4). Since world modes
   review WM-MP5 (2026-10-25, D40) heightmap worlds render in regions as planets do (below), so #4 no longer bounds the
-  renderer: a vertex's float is at most a region across at any distance. What still degrades far out on a heightmap world
-  is generation's float noise inputs and the 256-unit noise period (features repeat about every 120 km at the
-  continental frequency), planned as WM-MP6 and WM-MP7 (review plan §23, milestone MP4).
+  renderer: a vertex's float is at most a region across at any distance. Generation's float noise inputs and the
+  256-unit noise period (features repeated about every 120 km at the continental frequency) went with the world modes
+  review's MP4 (2026-10-26, D39, `GenerationVersion` 3): heightmap worlds sample the planet's hashed, split-origin noise
+  (`NOISE_LIBRARY.md`), exact to float precision at any distance and without a period. No known ceiling remains on a
+  heightmap world short of the double precision of the position itself.
 
 ## World-origin rebasing: not needed for the renderer
 

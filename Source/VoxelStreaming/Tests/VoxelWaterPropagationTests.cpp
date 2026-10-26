@@ -375,21 +375,31 @@ namespace VoxelWaterPropagationTest
 	{
 		StartSeaWorld(W, bPlanet, bPlanet ? TEXT("WaterPropagationPlanet") : TEXT("WaterPropagationPlane"));
 
-		for (const FVector& Site : FindSeabedSites(W, bPlanet, 0.0, false))
+		// The 6,000 uu square about the base point first, then squares shifted along the first axis (the terrain decides
+		// where a shallow flat seabed lies; MP4's noise moved it off the plane's origin).
+		for (const double Shift : { 0.0, 8000.0, -8000.0, 16000.0, -16000.0, 24000.0, -24000.0, 32000.0, -32000.0 })
 		{
-			// Pairwise 900 uu apart, and within 2,000 of the first, so one viewer streams all three.
-			bool bFar = OutSites.Num() == 0 || FVector::Dist(OutSites[0], Site) <= 2000.0;
-			for (const FVector& S : OutSites)
+			OutSites.Reset();
+			for (const FVector& Site : FindSeabedSites(W, bPlanet, Shift, false))
 			{
-				bFar &= FVector::Dist(S, Site) >= 900.0;
-			}
-			if (bFar)
-			{
-				OutSites.Add(Site);
-				if (OutSites.Num() == 3)
+				// Pairwise 900 uu apart, and within 2,000 of the first, so one viewer streams all three.
+				bool bFar = OutSites.Num() == 0 || FVector::Dist(OutSites[0], Site) <= 2000.0;
+				for (const FVector& S : OutSites)
 				{
-					break;
+					bFar &= FVector::Dist(S, Site) >= 900.0;
 				}
+				if (bFar)
+				{
+					OutSites.Add(Site);
+					if (OutSites.Num() == 3)
+					{
+						break;
+					}
+				}
+			}
+			if (OutSites.Num() == 3)
+			{
+				break;
 			}
 		}
 		if (OutSites.Num() < 3)

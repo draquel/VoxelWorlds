@@ -9991,8 +9991,8 @@ their rows except where its column says otherwise.
 | Streaming ahead of a fall | The settle hold and the landing hold after the fact | Same | Same | The descent prefetch leads the streaming viewer under a descending camera (`ApplyDescentPrefetch`) | WM-MP3 **(done 2026-10-25, §23.8)** |
 | The frame of a teleport | The streaming viewer reads the previous frame's camera | Same | Same | The same for the window; the far field is updated again for this frame's camera (F4.3) | WM-MP4 **(done 2026-10-25, §23.8)** |
 | Precision far from the origin | One primitive, absolute float vertices and instances: clean to about 100 km (`Research/TRAVERSAL_LIMITS.md`) | Not reached (bounded) | As the plane; block faces show drift sooner | Region primitives and scatter regions (D23, G42) | WM-MP5 **(done 2026-10-26, §23.9)** |
-| Noise at scale | A 256-entry permutation: features repeat every 222-256 noise units; float noise inputs | Not reached | As the plane | Split-origin hashed lattice (D22) | WM-MP6 |
-| Simplex continuity | Gustavson's 0.6 kernel: steps across simplex cells (G43's measurement, §20.24) | Same | Same, as block steps | The tangent-corrected kernel (D27) | WM-MP7 |
+| Noise at scale | A 256-entry permutation: features repeat every 222-256 noise units; float noise inputs | Not reached | As the plane | Split-origin hashed lattice (D22) | WM-MP6 **(done 2026-10-26, §23.11)** |
+| Simplex continuity | Gustavson's 0.6 kernel: steps across simplex cells (G43's measurement, §20.24) | Same | Same, as block steps | The tangent-corrected kernel (D27) | WM-MP7 **(done 2026-10-26, §23.11)** |
 | The near band | The viewer's layer ± `NearWindowLayers` within `NearWindowRadius`, clipped to the terrain's height bounds only | Same | Same | Capped at the surface slab's top near the viewer (G52) | WM-MP8 **(measured 2026-10-25, not needed: the heightmap band is clipped to the terrain's bounds, §23.8)** |
 | The world map at scale | Every marker in the view's range (`GetMarkersInArea`), a redraw per tile image, `ExploreAll` unbounded | The same, with a bounded tile count | Same | A marker cap around the view's centre (G50), tile redraws every 2 s at most (G51), `voxel.Map.ExploreAllMaxTiles` | WM-MP9 **(done 2026-10-25, §23.8)** |
 | The first spawn over the sea | A ring search within `MaxSearchRadius`; past it the pawn waits in the water | The same, inside the bounds | Same | The ring search, then the whole planet (`FindPlanetSpawnPointAtScale`, G36) | WM-MP10 **(done 2026-10-25, §23.8)** |
@@ -10011,8 +10011,8 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 | WM-MP3 *(done 2026-10-25, §23.8)* | **The descent prefetch on heightmaps.** `ApplyDescentPrefetch` loses its planet gate: local up is +Z, the surface under the camera the generated surface height (or the sea), `ComputeDescentLead` unchanged; the resume altitude's guard (G49) follows from WM-MP2. Check first whether the landing hold (P6.5: a pawn falling within two chunks, or a second, of land whose collision is not cooked is held) runs on heightmap worlds; if it is planet-gated, open it too | VoxelWorlds, VCP | S-M | — |
 | WM-MP4 *(done 2026-10-25, §23.8)* | **The streaming viewer after a camera cut.** F4.3's second tick (`FVoxelFarFieldCameraTickFunction`, `TG_PostUpdateWork`) updates the far field only; the window's selection waits a frame. Extend it: after a cut of more than a chunk, the chunk manager builds a second query context from this frame's camera and runs the LOD evaluation once more for it (the code the pre-physics tick runs, its hysteresis unchanged), so the chunks under the new position are requested in the frame of the teleport, respawn or fast travel; no second evaluation while the camera moves less than a chunk (every normal frame). Measured by the frames between a `vox.TP` and its first generation request, and the settle hold's length | VoxelWorlds | S-M | — |
 | WM-MP5 *(done 2026-10-26, §23.9)* | **Render regions and scatter regions on heightmaps.** `FVoxelRenderRegions::FromConfig` takes `voxel.Render.RegionChunks` in every world mode (the SphericalPlanet condition removed; 0 keeps one primitive), `voxel.Scatter.RegionChunks -1` gives every mode the planet's 4-chunk regions (D40); nothing else changes: the triplanar material is LWC-safe since P6.2 and the GPU MC mesher's corners are chunk-local. Measured on `VoxelDemo` at the origin (no cost expected: the window spans 4-9 regions) and 100 km and 500 km out (`vox.TP` there: seam cracks, crossfade shimmer and scatter jitter gone) | VoxelWorlds | S | — |
-| WM-MP6 | **Split-origin hashed noise on heightmaps (D39).** `FVoxelCPUNoiseGenerator`'s FBM, Perlin and Simplex (and `FBMNoise.ush`, `PerlinNoise.ush`, `SimplexNoise.ush`) sample as `FVoxelPlanetNoise` / `PlanetNoise.ush` do: a per-chunk origin split in double into an integer lattice cell and a float fraction, per octave, plus a small float offset, the lattice hashed from integer cell coordinates (no 256 period), the same hash on the CPU and the GPU; the 2D terrain, continentalness and climate fields and the 3D cave and ore fields alike. Every heightmap world's terrain changes (the lattice's values), so `FVoxelWorldModeFactory::GenerationVersion` 2 → 3 and every heightmap save is refused and kept on disk (as D21 did for planets); `VoxelDemo`'s POIs, dungeons and NPC cells reseat themselves on the new terrain (their placement reads the surface). The alternative is in D39 | VoxelWorlds, parent (the content re-surveyed) | L | D39 |
-| WM-MP7 | **The continuous Simplex kernel on heightmaps.** `FVoxelCPUNoiseGenerator::Simplex3D` and `SimplexNoise.ush` take G43's tangent-corrected kernel (v² (v² + 0.4 v + 0.06), scaled 33.25), within 1.2% rms of the classic noise; the same `GenerationVersion` bump as WM-MP6, so the two land together | VoxelWorlds | S | D39 |
+| WM-MP6 *(done 2026-10-26, §23.11)* | **Split-origin hashed noise on heightmaps (D39).** `FVoxelCPUNoiseGenerator`'s FBM, Perlin and Simplex (and `FBMNoise.ush`, `PerlinNoise.ush`, `SimplexNoise.ush`) sample as `FVoxelPlanetNoise` / `PlanetNoise.ush` do: a per-chunk origin split in double into an integer lattice cell and a float fraction, per octave, plus a small float offset, the lattice hashed from integer cell coordinates (no 256 period), the same hash on the CPU and the GPU; the 2D terrain, continentalness and climate fields and the 3D cave and ore fields alike. Every heightmap world's terrain changes (the lattice's values), so `FVoxelWorldModeFactory::GenerationVersion` 2 → 3 and every heightmap save is refused and kept on disk (as D21 did for planets); `VoxelDemo`'s POIs, dungeons and NPC cells reseat themselves on the new terrain (their placement reads the surface). The alternative is in D39 | VoxelWorlds, parent (the content re-surveyed) | L | D39 |
+| WM-MP7 *(done 2026-10-26, §23.11)* | **The continuous Simplex kernel on heightmaps.** `FVoxelCPUNoiseGenerator::Simplex3D` and `SimplexNoise.ush` take G43's tangent-corrected kernel (v² (v² + 0.4 v + 0.06), scaled 33.25), within 1.2% rms of the classic noise; the same `GenerationVersion` bump as WM-MP6, so the two land together | VoxelWorlds | S | D39 |
 | WM-MP8 *(measured, not needed 2026-10-25, §23.8)* | **The near band's ceiling on heightmaps.** Measure first (`voxel.Stream.AuditResidency`, the bench's loaded chunks per layer): how many of the near band's chunks above the surface slab a climbing viewer loads on `VoxelDemo` (a `vox.Fly` climb to 20,000 and 50,000 uu) and what they cost. If it matters, `GetColumnWindow`'s `NearMaxZ` is capped at the slab's top over the near disk (the column surface range's maximum over the columns within `NearWindowRadius`, plus `NearWindowLayers`), the band below unchanged (caves and digging) | VoxelWorlds | S | — |
 | WM-MP9 *(done 2026-10-25, §23.8)* | **The world map at scale on heightmaps.** `UPOIMapMarkerSubsystem::GetMarkersNear`'s heightmap path capped at `MarkerMaxCells` placement cells around the query's centre (the planet's `PlanetMarkerMaxCells`, one constant for both); `UVCWorldMapWidget` redraws for tile arrivals at most every 2 s in every mode once the view shows more than a threshold of tiles (today the throttle is planet-only, `bRenderedFromAlbedo`); `voxel.Map.ExploreAllMaxTiles` applies to every mode (an island's tile count is bounded, the plane's is not) | POI, VCP, VoxelWorlds | S-M | — |
 | WM-MP10 *(done 2026-10-25, §23.8)* | **The land search past the ring on heightmaps.** `FVCVoxelNavigationHelper::FindSpawnablePosition`: when the ring search within `MaxSearchRadius` finds no land, a coarse spiral over the generated surface (a sample per chunk, out to a bound of a few hundred chunks on the plane, the bounds on an island) as `FindPlanetSpawnPointAtScale` does by direction; the result logged as the planet's is. Covers a seed whose spawn is open sea and an island whose radius shrank | VCP | S | — |
@@ -10028,7 +10028,7 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 | MP1 Small fixes | WM-MP3, WM-MP4, WM-MP8, WM-MP9, WM-MP10 | ~4 days | Each item's check; `VoxelDemo` and island M benches unchanged within batch noise; the planet GPU parity lines identical. **Met 2026-10-25 (§23.8)** |
 | MP2 Regions | WM-MP5 | ~1 day | `VoxelDemo` at the origin within the control on frame and manager P95; at 500 km no seam crack, shimmer or scatter jitter in the survey; the planet unchanged. **Met 2026-10-26 (§23.9)** |
 | MP3 Altitude | WM-MP1, WM-MP2, WM-MP11 | ~2.5 weeks | From the ground on `VoxelDemo`, island M and `Review_Cubic` the terrain reaches the horizon with no gap, step or far-field floor through a dug hole; a `vox.FlyTo` to three view distances and back lands on cooked ground with the window suspended and resumed once; the far field's cost reported and within the D3 budget. **Met 2026-10-26 (§23.10)** |
-| MP4 Noise | WM-MP6, WM-MP7 | ~1 week | No repeat over 10⁶ noise units on the plane; no step across simplex cells; the GPU equal to the CPU (parity CRCs re-baselined once); heightmap saves refused at `GenerationVersion` 3; `VoxelDemo`'s content re-surveyed and the QA rows that depend on places re-run |
+| MP4 Noise | WM-MP6, WM-MP7 | ~1 week | No repeat over 10⁶ noise units on the plane; no step across simplex cells; the GPU equal to the CPU (parity CRCs re-baselined once); heightmap saves refused at `GenerationVersion` 3; `VoxelDemo`'s content re-surveyed and the QA rows that depend on places re-run. **Met 2026-10-26 (§23.11)** |
 | Exit | WM-MP12 to WM-MP14 | ~1 week | §23.6 met; suites green headless and in the editor; every planet row of §20's exit check unchanged |
 
 **Order.** MP1 first: five independent, small items with their own measurements and no decision pending but D35. MP2
@@ -10064,8 +10064,8 @@ the window proves small.
 | WM-MP3 | `Streaming.Plane.DescentPrefetch` (the lead under a descending camera, none while climbing or slow, stopping two chunks over the surface and the sea); live on `VoxelDemo`: a `vox.Fly` drop from 50,000 uu at 5,000 uu/s lands within 0.3 s of ready against the settle hold's wait today (three runs each) |
 | WM-MP4 | `Streaming.Plane.CameraAfterCut` (frames stepped in `UWorld::Tick`'s order with a player controller, as F4.3's planet test: chunks under the new position requested in the frame of a 10-chunk teleport, none twice; no second evaluation in a frame the camera moves under a chunk); live: `vox.TP` 100 times, generation requests in the teleport's frame |
 | WM-MP5 | `Rendering.Plane.RegionPrecision` (a vertex's world position within 0.1 uu of the double reference at 10⁸ uu from the origin), `Scatter.HISMBatch.Regions` on a plane; live: `VoxelDemo` at 0, 100 km and 500 km (shots at the seams and a crossfade; scatter at rest) |
-| WM-MP6 | `Noise.SplitOrigin` and `Noise.HashNoPeriod` for the heightmap noise (10⁻⁵ of a double reference at offsets up to 10⁹; no repeat over 10⁶ units); the `GPUvsCPU*Parity` suite (CPU and GPU equal; the CRCs re-baselined once and recorded); `VoxelWorldSave.Document.HeightmapKeys` (version 3; 2 refused) |
-| WM-MP7 | `Noise.SimplexContinuous` on the heightmap kernel (no step across a simplex cell, within 1.2% rms of the classic); `Streaming.Plane.NoiseCreases` (a gentle slope's normals at simplex boundaries no rougher than between them) |
+| WM-MP6 | `Noise.SplitOrigin` and `Noise.HashNoPeriod` for the heightmap noise (10⁻⁵ of a double reference at offsets up to 10⁹; no repeat over 10⁶ units); the `GPUvsCPU*Parity` suite (CPU and GPU equal; the CRCs re-baselined once and recorded); `VoxelWorldSave.Document.HeightmapKeys` (version 3; 2 refused). *As built (§23.11): the heightmap checks are one test, `Noise.HeightmapNoise` (bit for bit the planet noise; 10⁻⁵ of the double reference at 2D points up to 10⁹; the classic Perlin and Simplex controls repeat every 256 and 768 units; no repeat over 10⁶; the spread kept)* |
+| WM-MP7 | `Noise.SimplexContinuous` on the heightmap kernel (no step across a simplex cell, within 1.2% rms of the classic); `Streaming.Plane.NoiseCreases` (a gentle slope's normals at simplex boundaries no rougher than between them). *As built: the kernel is the planet's (`Noise.PlanetSimplexContinuous` covers it); `WorldModes.Plane.NoiseCreases` measures the generated height across X = Y* |
 | WM-MP8 | The measurement recorded (chunks above the slab per climb); if capped, `LOD.Plane.NearBandCeiling` (none above the near disk's slab top, every cave layer below kept) |
 | WM-MP9 | `POI.Map.MarkerCap` (a query over a wide area returns the nearest cells' markers in bounded time), `VoxelCharacter.Map.TileRedrawThrottle` (a burst of tile arrivals redraws once per 2 s), `Map.ExploreAllCap.Plane` |
 | WM-MP10 | `VoxelCharacter.Plane.SpawnPastRing` (a seed with sea within the ring spawns on the nearest land beyond it; an island whose spawn is outside its bounds lands inside) |
@@ -10351,4 +10351,77 @@ The chord was also run on `Review_Cubic` by mistake (the override not cleared) b
 | G77 | On `VoxelDemo` (and `Review_Cubic`, the same terrain) the water tiles are dry in a block of columns west of the spawn's lake where the lake continues (around X 8,000-16,000, Y -20,000 to -40,000 from the spawn, 2-4 columns wide and 4 long): `voxel.Water.Stats` reads `dry (its tile has no water in this column)` there while the lake bed is drawn (a column-aligned grey strip from above). Present with the far field off from the PIE's start, so not MP3's (nothing in MP3 writes water flags or tiles); not traced | Recorded |
 
 PRs: draquel/VoxelWorlds#166 (`feat/mp3-altitude`), draquel/UE5_PluginDev#174 (`claude/mp3-altitude`: `UVoxelDebugSubsystem`, the gitlink, the doc map);
+merge VoxelWorlds first, then re-point the parent's gitlink at its merge commit.
+
+### 23.11 MP4 results: the heightmap noise (2026-10-26)
+
+Bases: VoxelWorlds `4f2780d`, UE5_PluginDev `48d47c3` (MP3 and D41 merged); branches `feat/mp4-noise` (VoxelWorlds),
+`claude/mp4-noise` (parent). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree
+(`-NoHotReloadFromIDE`); tests headless and in a worktree editor; the survey and bench in that editor on `VoxelDemo`.
+
+| ID | Built | Tests |
+|----|-------|-------|
+| WM-MP6 | **One noise for every world mode** (D39, `GenerationVersion` 2 → 3). `FVoxelCPUNoiseGenerator::FBM3D`, the heightmap entry point every field comes through (the terrain, continentalness, the climate, caves, ores, the surface queries, the map's fallback, the editor's field views), is `FVoxelPlanetNoise::FBM3D`: the hashed integer lattice with no period and split-origin sampling exact to float precision at any distance (D22's noise). The classic table noise stays as the tests' control (`ClassicFBM3D`, `Perlin3D`, `Simplex3D`, `Cellular3D`, `Voronoi3D`; no generation path reads it). On the GPU the heightmap branch of `GenerateVoxelDensity.usf` samples through `PlanetFBM3D` at per-chunk origins the CPU splits in double (`BuildNoiseOrigins`, every world mode: a heightmap chunk's anchor is its origin corner, the 2D fields at (X, Y, 0), each cave layer at (X, Y, Z × VerticalScale), each ore at the corner through its streak map; a voxel's offset is its index times the voxel size), the shared parameters renamed out of their planet names (`NoiseOrigins`, `TerrainNoiseOrigin`, `ContinentNoiseOrigin`, `TemperatureNoiseOrigin`, `MoistureNoiseOrigin`, `CaveNoiseOrigin`, `OreNoiseOrigin`, `SimplexContinuous`, `ChunkBaseInt` / `ChunkBaseFrac`); the classic shader samplers (`SampleTerrainHeight2D`, `ApplyInfinitePlaneSDF`, `SampleCheeseCave`, `SampleTunnelCave`, `SampleGpuOreVeinNoise`, `GpuCheckOreVein`) deleted, `FBMNoise.ush` kept for its `NOISE_TYPE_*` defines. Heightmap ores take the planet's path too: a streak squashes the position along one direction per ore type (`GetPlanetOreSamplePoint`, a linear map; the formula that varied the direction with the absolute position turned into white noise far out and could not split) and the `Rarity` test hashes the position rounded to whole uu (`OreRarityHash`; its `frac(sin(p · k))` the GPU's float and the CPU's double rounded differently). `voxel.Planet.ContinuousSimplex` is `voxel.Noise.ContinuousSimplex`. The water tiles bump the chunk-state version when a tile appears or goes (the far field's covered-patch cache, WM-MP1). Docs: `NOISE_LIBRARY.md` (the terrain noise section for every mode), `WORLD_MODES.md`, `TRAVERSAL_LIMITS.md` (the noise ceiling retired), the plugin instructions | `Noise.HeightmapNoise`, `VoxelWorldSave.Document.HeightmapKeys` (version 3; 2 and 1 refused, the reason naming the version), the `GPUvsCPU*Parity` suite (below); `Noise.SplitOrigin` and `Noise.PlanetHashNoPeriod` as before |
+| WM-MP7 | **The continuous Simplex kernel on heightmaps**: the same kernel (G43, D27) through the same code; `WorldModes.Plane.NoiseCreases` measures what it removes on a heightmap world | `WorldModes.Plane.NoiseCreases`, `Noise.PlanetSimplexContinuous` |
+
+**What changed for a heightmap world.** Every heightmap world's terrain changes once (the lattice's values are new), so
+`VoxelDemo`'s POIs, dungeons, campsites and NPC cells reseat themselves on the new terrain (their placement reads the
+surface), and every save made before is refused and kept on disk (the subsystem turns auto-save off). `GenerationVersion`
+is in every fingerprint, so planet saves from before are refused too, though no planet's terrain changes (a planet
+already sampled this noise; its parity lines are the same). The spread is the classic noise's (the continuous kernel is
+scaled for it), so height scales and biome thresholds mean what they did.
+
+**Tests.** `Noise.HeightmapNoise`: `FBM3D` is the planet noise bit for bit at 2D and 3D points (0 of 2,000 differ per
+type); at 2D points 10³ to 10⁹ uu from the origin the heightmap noise is within 10⁻⁵ of the double reference, per point and
+as a chunk origin + a 4,800 uu offset, for Simplex, Perlin, Cellular and Voronoi; the classic controls repeat every 256
+(Perlin) and 768 (Simplex) lattice units along X and the heightmap noise differs by 0.05 or more there and at every
+multiple of 256 / f up to 10⁶ noise units; the spread within 5% of the classic. `WorldModes.Plane.NoiseCreases`: across the
+line X = Y (every octave's simplex boundary) on a VoxelDemo-like slope (800 uu over 2,500 uu wavelengths) the classic kernel
+steps by more than ten times the control off the line, the continuous kernel by no more than twice the control, its slope
+as continuous as off the line. Suite changes the new terrain forced: `Streaming.WaterPropagation.Plane` searches its
+three shallow seabed sites over nine squares along X (the plane's origin no longer has them); `LOD.VerticalWindow.FromTerrain`'s
+non-vacuity guard 1,000 → 500 chunks (the exact-agreement checks unchanged: MP4's per-column surface ranges are tighter
+than the table noise's were, 993-1,024 chunks against the guard's 1,000); `FarField.Plane.ChunkManager`'s sea rule is now
+the invariant it meant (wherever no water tile is drawn over a surface more than a voxel under the sea, a drawn patch draws
+the sea there; a band patch under a covered parent keeps stale flags from its last selection, which is no defect).
+Headless, the six suites: **668 of 668**. In the worktree editor: the eight GPU parity tests, `Meshing.MarchingCubes.CPUvsGPU`,
+`Rendering.Crossfade.SwapReachesProxy` and `Streaming.EditReachesProxy.{Smooth,Cubic}`: 12 of 12 (the density shader
+recompiled with the renamed parameters).
+
+**The parity lines, re-baselined.** The heightmap lines were bit-identical before MP4 (the CPU and the GPU sampled the
+same table noise at the same float positions); now the CPU splits each sample point and the GPU a chunk origin plus the
+voxel's offset, so they differ by float rounding, as the planet's have since spherical Phase 6. Recorded for the next
+comparison (`Saved/ClaudeScripts/mp4_parity_crcs.txt` holds every line):
+
+| Case | Density steps (over 2) | Material / biome / meta | GPU CRC |
+|------|------------------------|-------------------------|---------|
+| InfinitePlane | 11 of 4,096 (5) | 8 / 0 / 0 | `7320267b` |
+| IslandBowl | 13 (3) | 0 / 0 / 0 | `6ef5202a` |
+| IslandBowl seabed rectangle | 0 (0) | 0 / 0 / 0 | `a79df198` |
+| Caves | 24 (6) | 0 / 0 / 0 | `a2320721` |
+| Caves under the sea | 26 (10) | 2 / 0 / 0 | `4d1c60d5` |
+| Noise-Perlin / Simplex / Cellular / Voronoi | 0 / 4 (2) / 0 / 0 | 0 | `6e229991` / `c18f3d16` / `04b008a9` / `ec428337` |
+| OreVariant | 0 (0) | 0 / 0 / 0 | `e8542a26` |
+| BlendDither (on / off) | 4 (0) of 32,768 | 0 / 0 / 0 | `d8a1c537` / `16017c9f` |
+| Planet (North pole, Equator, Cave, Coast) | 0 / 3 / 6 / 0 (0) | 0 / 1 / 0 / 0 biome | `ef35f91c` / `792c7782` / `6188791f` / `45ed6ca7` |
+
+**Live on `VoxelDemo`** (the worktree editor, a fresh PIE at noon; `Saved/ClaudeScripts/mp4_live.py`): the save subsystem
+refuses the save on disk as a different world (`generation version 2 vs 3` among its reasons) and keeps it; the pawn
+spawns standing on the new terrain (ground at −582, a lakeside slope under pines), 981 chunks in the window, the far field
+734 of 1,168 patches drawn (135.8 MB), 0 stand-ins while still; from 50,000 uu the new lakes and biome patches read as
+before, with G77's dry water-tile block in a new place (a two-column L west of a lake: the finding stands on the new
+terrain); `vox.TPPOI` lands at the demo's campsite claim, reseated on the new terrain at (−16,886, 15,918) on a lakeside
+flat, `vox.Campsite` beside it, `vox.Objective` reports no dungeon streamed at the spawn; no fall-through. The QA rows that
+depend on places (W-05 to W-07, the campsite and dungeon rows) are to be re-run by hand on the merged build, as §23.3's
+MP4 line asks; the campsite row passed here.
+
+**Bench** (the 40,000 uu chord at 1,500 uu/s from the spawn, three fresh PIEs per rule, medians; the far field on against
+off): frame P95 23.1 / 22.1 ms, manager P95 6.1 / 5.7 ms, catch-up 0.17 s either way, peak loaded 1,157 / 1,160 chunks,
+618 chunks generated, LOD re-meshes 505, peak voxel systems 493 / 489 MB (voxel data 254, snapshots 423, scatter 139,
+collision 98, renderer GPU 25 MB), the far field 1.3 ms P95 and 784 patches. Against MP3's chord on the old terrain
+(22.3 / 21.3 ms, 5.9 / 5.1 ms, 1,129 chunks, 579 generated) the route now crosses more chunks (the terrain under it is
+different), so the noise's own cost is not separable here: the GPU generator's work is the chunk count's, and the CPU
+noise (surface queries, scatter, the map) was not timed apart. D3 met.
+
+PRs: draquel/VoxelWorlds#168 (`feat/mp4-noise`), draquel/UE5_PluginDev#176 (`claude/mp4-noise`: the save test, the gitlink, the doc map);
 merge VoxelWorlds first, then re-point the parent's gitlink at its merge commit.

@@ -121,8 +121,8 @@ float PlanetOreVeinNoise(uint OreIdx, float3 D, int WorldSeed)
 {
     const float4 o1 = OreVeinData[OreIdx * 3 + 1];
     const int SeedOffset = (int)o1.z;
-    const int Base = PlanetOreOrigin + (int)OreIdx * 3;
-    const float4 Streak = PlanetNoiseOrigins[Base * 2]; // [direction, 1 - 1 / StreakStretch] (factor 0 for a blob)
+    const int Base = OreNoiseOrigin + (int)OreIdx * 3;
+    const float4 Streak = NoiseOrigins[Base * 2]; // [direction, 1 - 1 / StreakStretch] (factor 0 for a blob)
     const float3 Offset = D - Streak.xyz * (dot(D, Streak.xyz) * Streak.w);
     const float NoiseValue = PlanetFBM3D(Base + 1, Offset, NOISE_TYPE_SIMPLEX, WorldSeed + SeedOffset, 2, o1.x, 1.0f, 2.0f, 0.5f);
     return (NoiseValue + 1.0f) * 0.5f;
@@ -189,10 +189,10 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (ContinentalnessEnabled != 0)
     {
         Continentalness = GpuContinentalnessCurves(
-            PlanetFBM3D(PlanetContinentOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 1.0f, 2.0f, 0.5f),
+            PlanetFBM3D(ContinentNoiseOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 1.0f, 2.0f, 0.5f),
             EffectiveBaseHeight, EffectiveHeightScale);
     }
-    const float TerrainNoise = PlanetFBM3D(PlanetTerrainOrigin, SurfaceOffset,
+    const float TerrainNoise = PlanetFBM3D(TerrainNoiseOrigin, SurfaceOffset,
         NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
@@ -216,8 +216,8 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (BiomeCount > 0)
     {
         // Temperature and moisture on the datum sphere, like the terrain (SP-B1)
-        const float Temperature = PlanetFBM3D(PlanetTemperatureOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
-        const float Moisture = PlanetFBM3D(PlanetMoistureOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
+        const float Temperature = PlanetFBM3D(TemperatureNoiseOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
+        const float Moisture = PlanetFBM3D(MoistureNoiseOrigin, SurfaceOffset, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
         const BiomeBlendResult Blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
         const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
         OutBiomeID = Dominant.BiomeID;
@@ -248,7 +248,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         if (Density >= 127u && DepthBelowSurface > 10.0f)
         {
             uint OreMat;
-            const int3 RarityKey = PlanetChunkBase + int3(floor(PlanetChunkBaseFrac + float3(VoxelCoord) * VoxelSize + 0.5f));
+            const int3 RarityKey = ChunkBaseInt + int3(floor(ChunkBaseFrac + float3(VoxelCoord) * VoxelSize + 0.5f));
             if (GpuCheckPlanetOreVein(Frame.D, RarityKey, DepthBelowSurface, Dominant.OreStart, Dominant.OreCount, NoiseSeed, OreMat))
             {
                 MaterialID = OreMat;

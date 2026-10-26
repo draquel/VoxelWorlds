@@ -782,6 +782,17 @@ void FVoxelCPUNoiseGenerator::Voronoi3D(const FVector& Position, int32 Seed, flo
 
 float FVoxelCPUNoiseGenerator::FBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
 {
+	// One noise for every world mode (world modes review MP4, WM-MP6 / WM-MP7, decision D39; GenerationVersion 3): the
+	// hashed lattice with split-origin sampling and the continuous Simplex kernel the planet has had since spherical Phase
+	// 6 and G43. The heightmap fields (terrain, continentalness, climate, caves, ores, the surface queries, the map) all
+	// come through here, so they have no 256-unit period, are exact to float precision at any distance from the origin
+	// and do not step across the simplex lattice's boundaries. The classic table noise (Perlin3D, Simplex3D, Cellular3D,
+	// Voronoi3D) is kept for the tests that measure what it did.
+	return FVoxelPlanetNoise::FBM3D(Position, Params);
+}
+
+float FVoxelCPUNoiseGenerator::ClassicFBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
+{
 	float Total = 0.0f;
 	float Frequency = Params.Frequency;
 	float Amplitude = Params.Amplitude;
@@ -1232,23 +1243,10 @@ float FVoxelCPUNoiseGenerator::SampleOreVeinNoise(const FVector& WorldPos, const
 
 	FVector SamplePos = WorldPos;
 
-	if (OreConfig.Shape == EOreVeinShape::Streak)
-	{
-		// For streak shapes, stretch the noise along a pseudo-random direction
-		// derived from position to create elongated vein shapes
-		const float StreakSeed = static_cast<float>(OreConfig.SeedOffset) * 0.1f;
-
-		// Create direction vector based on position (varies smoothly across world)
-		FVector StreakDir;
-		StreakDir.X = FMath::Sin(WorldPos.Y * 0.0001f + StreakSeed);
-		StreakDir.Y = FMath::Cos(WorldPos.X * 0.0001f + StreakSeed * 1.5f);
-		StreakDir.Z = FMath::Sin(WorldPos.Z * 0.0002f + StreakSeed * 2.0f);
-		StreakDir.Normalize();
-
-		// Project position onto perpendicular plane to stretch
-		FVector Projected = WorldPos - StreakDir * FVector::DotProduct(WorldPos, StreakDir);
-		SamplePos = Projected + StreakDir * (FVector::DotProduct(WorldPos, StreakDir) / OreConfig.StreakStretch);
-	}
+	// A streak squashes the position along one direction per ore type (GetPlanetOreSamplePoint, the planet's linear map;
+	// MP4 gives heightmap worlds the same: the direction formula that varied with the absolute position turned into
+	// white noise far from the origin, and a linear map lets the GPU sample the ore at a chunk origin + the voxel's offset).
+	SamplePos = GetPlanetOreSamplePoint(WorldPos, OreConfig);
 
 	// Sample noise
 	float NoiseValue = FBM3D(SamplePos, OreNoiseParams);
@@ -1336,11 +1334,10 @@ bool FVoxelCPUNoiseGenerator::CheckOreVeinPlacement(
 			// Apply rarity check (if rarity < 1, randomly skip some valid placements)
 			if (OreConfig.Rarity < 1.0f)
 			{
-				// Use deterministic random based on position: on a planet an exact integer hash of the planet-relative
-				// position (SP-H3), in heightmap modes the original position hash
-				float RandomValue = PlanetRelativePos
-					? OreRarityHash(OreRarityKey(*PlanetRelativePos), WorldSeed)
-					: FMath::Frac(FMath::Sin(WorldPos.X * 12.9898f + WorldPos.Y * 78.233f + WorldPos.Z * 45.164f) * 43758.5453f);
+				// A deterministic value per voxel: an exact integer hash of the position rounded to whole uu, relative to
+				// the planet centre on a planet (SP-H3) and absolute on a heightmap world (MP4; before it, frac(sin(p . k)),
+				// which the GPU's float and the CPU's double rounded differently)
+				const float RandomValue = OreRarityHash(OreRarityKey(PlanetRelativePos ? *PlanetRelativePos : WorldPos), WorldSeed);
 				if (RandomValue > OreConfig.Rarity)
 				{
 					continue;
