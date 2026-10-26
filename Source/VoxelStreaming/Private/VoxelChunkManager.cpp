@@ -3153,7 +3153,7 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 		Context.MaxChunksToUnloadPerFrame = Configuration->MaxChunksToUnloadPerFrame;
 		Context.TimeSliceMS = Configuration->StreamingTimeSliceMS;
 	}
-	// A heightmap world's cut-over applies only with a far field (WM-MP2).
+	// The cut-over applies only with a far field (WM-MP2, D38; every mode since G78).
 	Context.bFarFieldActive = FarField.IsValid();
 
 	Context.FrameNumber = CurrentFrame;
@@ -4561,6 +4561,11 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	FarField = MakeUnique<FVoxelPlanetFarField>();
 	FarField->Initialize(Settings, Surface);
 	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
+	// The cut-over is in force only with a far field (D38, every mode since G78): told now, not at the next Update.
+	if (LODStrategy)
+	{
+		LODStrategy->SetFarFieldActive(true);
+	}
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 	FarField->SetZoneGatherer([WeakThis](const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones)
 	{
@@ -4624,6 +4629,10 @@ void UVoxelChunkManager::DestroyFarField()
 	FarField.Reset();
 	FarFieldStats = FVoxelFarFieldStats();
 	bFarFieldUndersideShown = false;
+	if (LODStrategy)
+	{
+		LODStrategy->SetFarFieldActive(false);
+	}
 }
 
 bool UVoxelChunkManager::DoesFarFieldDrawSea() const

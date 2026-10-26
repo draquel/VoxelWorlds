@@ -83,6 +83,9 @@ namespace PlanetShellWindowTestUtils
 		FLODQueryContext Context;
 		Context.ViewerPosition = Viewer;
 		Context.WorldMode = EWorldMode::SphericalPlanet;
+		// The chunk manager's planet context has a far field (voxel.World.FarField 1); without one there is no cut-over
+		// in any mode (D38, G78; LOD.Planet.CutoverFarFieldGate).
+		Context.bFarFieldActive = true;
 		return Context;
 	}
 
@@ -1296,6 +1299,62 @@ bool FPlanetCutoverResumeGuardTest::RunTest(const FString& Parameters)
 		Config->RemoveFromRoot();
 	}
 	GuardVar->Set(SavedGuard, ECVF_SetByConsole);
+	return true;
+}
+
+/**
+ * G78 (world modes review §23.13): D38's gate on a planet. Without a far field in the context there is no cut-over in
+ * force (GetCutoverAltitude 0, the configured altitude kept): a viewer at 1.5 cut-overs keeps the window active; with a
+ * far field the same viewer suspends it; a far field going away while suspended resumes it at once.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetCutoverFarFieldGateTest,
+	"VoxelWorlds.LOD.Planet.CutoverFarFieldGate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
+{
+	using namespace PlanetShellWindowTestUtils;
+
+	constexpr float ViewDistance = 40000.0f;
+	for (const FPlanetCase& Case : GetPlanetCases())
+	{
+		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
+		Config->PlanetVoxelCutoverAltitude = ViewDistance;
+		FProbeStrategy Strategy;
+		Strategy.Initialize(Config);
+		const FTerrain Terrain(*Config);
+		const double Configured = Strategy.GetPlanetCutoverAltitude();
+		TestTrue(*FString::Printf(TEXT("%s: the configured cut-over"), Case.Name), FMath::IsNearlyEqual(Configured, static_cast<double>(ViewDistance), 1.0));
+
+		for (const FSite& Site : GetSites())
+		{
+			const FVector Ground = Terrain.SurfacePoint(Site.Up);
+			auto Visit = [&](bool bFarField, int32& OutCandidates)
+			{
+				FLODQueryContext Context = MakeContext(Ground + Site.Up * (1.5 * Configured));
+				Context.bFarFieldActive = bFarField;
+				Strategy.Update(Context, 1.0f / 60.0f);
+				OutCandidates = Candidates(Strategy, Context).Num();
+				return Strategy.IsWindowSuspended();
+			};
+			int32 NoFarField = 0, WithFarField = 0, GoneAgain = 0;
+			const bool bNoFarField = Visit(false, NoFarField);
+			const double InForceWithout = Strategy.GetCutoverAltitude();
+			const bool bWithFarField = Visit(true, WithFarField);
+			const double InForceWith = Strategy.GetCutoverAltitude();
+			const bool bGoneAgain = Visit(false, GoneAgain);
+			AddInfo(FString::Printf(TEXT("%s, %s at %.0f over the surface: no far field: window %s, cut-over in force %.0f, %d candidates; with a far field: %s, %.0f, %d; the far field gone again: %s, %d"),
+				Case.Name, Site.Name, 1.5 * Configured, bNoFarField ? TEXT("suspended") : TEXT("active"), InForceWithout, NoFarField,
+				bWithFarField ? TEXT("suspended") : TEXT("active"), InForceWith, WithFarField, bGoneAgain ? TEXT("suspended") : TEXT("active"), GoneAgain));
+			TestFalse(*FString::Printf(TEXT("%s, %s: no far field, no cut-over: active at 1.5 cut-overs"), Case.Name, Site.Name), bNoFarField);
+			TestEqual(*FString::Printf(TEXT("%s, %s: no cut-over in force without a far field"), Case.Name, Site.Name), InForceWithout, 0.0);
+			TestTrue(*FString::Printf(TEXT("%s, %s: the configured altitude is kept"), Case.Name, Site.Name), FMath::IsNearlyEqual(Strategy.GetPlanetCutoverAltitude(), Configured, 1.0));
+			TestTrue(*FString::Printf(TEXT("%s, %s: with a far field the same viewer suspends the window"), Case.Name, Site.Name), bWithFarField);
+			TestTrue(*FString::Printf(TEXT("%s, %s: the cut-over in force with a far field"), Case.Name, Site.Name), FMath::IsNearlyEqual(InForceWith, Configured, 1.0));
+			TestEqual(*FString::Printf(TEXT("%s, %s: a suspended window holds no candidate"), Case.Name, Site.Name), WithFarField, 0);
+			TestFalse(*FString::Printf(TEXT("%s, %s: the far field gone, the window resumes"), Case.Name, Site.Name), bGoneAgain);
+		}
+	}
 	return true;
 }
 

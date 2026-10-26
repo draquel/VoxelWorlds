@@ -313,6 +313,16 @@ public:
 	{
 		return 0.0;
 	}
+
+	/**
+	 * Whether the chunk manager has a far field to draw the world beyond the window: the cut-over is in force only
+	 * while it has (D38; every mode since G78). The chunk manager sets it when the far field is built or released and
+	 * every Update's context carries it (FLODQueryContext::bFarFieldActive), so GetCutoverAltitude is right before the
+	 * first Update too. Default: nothing to set.
+	 */
+	virtual void SetFarFieldActive(bool bActive)
+	{
+	}
 	virtual double GetViewerSurfaceAltitude() const
 	{
 		return 0.0;

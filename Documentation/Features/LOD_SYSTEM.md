@@ -792,8 +792,11 @@ does the same since the world modes review's MP3 (WM-MP2, decision D38): the alt
 ground under the streaming viewer or the sea where higher, `PlanetVoxelCutoverAltitude` and the three-view-distance
 default, `voxel.World.VoxelCutover` and G49's guard apply as on a planet, a suspended heightmap window returns no column
 (`GetVisibleChunks`, the balanced LOD cache) and unloads every chunk, and the cut-over is in force only while the chunk
-manager has a far field (`FLODQueryContext::bFarFieldActive`): without one `GetCutoverAltitude` is 0 and the window keeps
-its ground disk at any altitude (D8), since a suspended window with nothing drawn under it is a hole in the world.
+manager has a far field (`FLODQueryContext::bFarFieldActive`): without one `GetCutoverAltitude` is 0 (the configured
+altitude stays readable as `GetPlanetCutoverAltitude`) and the window keeps its ground disk at any altitude (D8), since
+a suspended window with nothing drawn under it is a hole in the world. The same gate holds on a planet since G78
+(world modes review §23.13): `voxel.World.FarField 0` there once left the cut-over in force, so from orbit nothing drew
+the planet; now it keeps the window, and `vox.Planet` reports "cut-over off: no far field".
 
 - **The cut-over** (`FDistanceBandLODStrategy`, `IVoxelLODStrategy::IsWindowSuspended`): decided in `Update` from the
   streaming viewer's altitude over the surface under it, the analytic terrain along its direction or the sea where that
