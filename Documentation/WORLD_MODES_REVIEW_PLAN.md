@@ -10349,5 +10349,5 @@ The chord was also run on `Review_Cubic` by mistake (the override not cleared) b
 |----|---------|--------|
 | G77 | On `VoxelDemo` (and `Review_Cubic`, the same terrain) the water tiles are dry in a block of columns west of the spawn's lake where the lake continues (around X 8,000-16,000, Y -20,000 to -40,000 from the spawn, 2-4 columns wide and 4 long): `voxel.Water.Stats` reads `dry (its tile has no water in this column)` there while the lake bed is drawn (a column-aligned grey strip from above). Present with the far field off from the PIE's start, so not MP3's (nothing in MP3 writes water flags or tiles); not traced | Recorded |
 
-PRs: draquel/VoxelWorlds#TBD (`feat/mp3-altitude`), draquel/UE5_PluginDev#TBD (`claude/mp3-altitude`: `UVoxelDebugSubsystem`, the gitlink, the doc map);
+PRs: draquel/VoxelWorlds#166 (`feat/mp3-altitude`), draquel/UE5_PluginDev#174 (`claude/mp3-altitude`: `UVoxelDebugSubsystem`, the gitlink, the doc map);
 merge VoxelWorlds first, then re-point the parent's gitlink at its merge commit.
