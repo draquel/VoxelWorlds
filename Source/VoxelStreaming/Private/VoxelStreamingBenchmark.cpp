@@ -133,19 +133,34 @@ FVector FVoxelStreamingBenchmark::LatLonToDirection(double LatitudeDeg, double L
 void FVoxelStreamingBenchmark::MakeClimb(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
 	const FVector2D& LatLonForReport)
 {
-	const FVector Up = (Ground - Center).GetSafeNormal();
+	MakeClimbAlong(InOutConfig, (Ground - Center).GetSafeNormal(), Ground, StartAltitude, LatLonForReport);
+	InOutConfig.bClimbSiteXY = false;
+}
+
+void FVoxelStreamingBenchmark::MakeClimbAlong(FVoxelBenchConfig& InOutConfig, const FVector& Up, const FVector& Ground, float StartAltitude,
+	const FVector2D& SiteForReport)
+{
 	InOutConfig.PathType = EVoxelBenchPath::Straight;
-	InOutConfig.Direction = Up.IsNearlyZero() ? FVector::UpVector : Up;
+	InOutConfig.Direction = Up.IsNearlyZero() ? FVector::UpVector : Up.GetSafeNormal();
 	InOutConfig.StartPosition = Ground + InOutConfig.Direction * StartAltitude;
 	InOutConfig.bClimb = true;
 	InOutConfig.bDescend = false;
-	InOutConfig.ClimbLatLonAltitude = FVector(LatLonForReport.X, LatLonForReport.Y, StartAltitude);
+	InOutConfig.ClimbLatLonAltitude = FVector(SiteForReport.X, SiteForReport.Y, StartAltitude);
+	InOutConfig.bClimbSiteXY = true;
 }
 
 void FVoxelStreamingBenchmark::MakeDescent(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
 	const FVector2D& LatLonForReport)
 {
 	MakeClimb(InOutConfig, Center, Ground, StartAltitude, LatLonForReport);
+	InOutConfig.Direction = -InOutConfig.Direction;
+	InOutConfig.bDescend = true;
+}
+
+void FVoxelStreamingBenchmark::MakeDescentAlong(FVoxelBenchConfig& InOutConfig, const FVector& Up, const FVector& Ground, float StartAltitude,
+	const FVector2D& SiteForReport)
+{
+	MakeClimbAlong(InOutConfig, Up, Ground, StartAltitude, SiteForReport);
 	InOutConfig.Direction = -InOutConfig.Direction;
 	InOutConfig.bDescend = true;
 }
@@ -788,9 +803,18 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 		Vec(TEXT("direction"), Config.Direction);
 		if (Config.bClimb)
 		{
-			// The climb as given (spherical Phase 6, WM-BP3); latitude -999 means dir=up from a start= point.
-			Fields.Add(FString::Printf(TEXT("    \"%s\": {\"latitude\": %.4f, \"longitude\": %.4f, \"startAltitude\": %.1f}"),
-				Config.bDescend ? TEXT("descend") : TEXT("climb"), Config.ClimbLatLonAltitude.X, Config.ClimbLatLonAltitude.Y, Config.ClimbLatLonAltitude.Z));
+			// The climb as given (spherical Phase 6, WM-BP3); latitude -999 means dir=up from a start= point. On a heightmap world
+			// (WM-MP11) the site is the ground point's X and Y.
+			if (Config.bClimbSiteXY)
+			{
+				Fields.Add(FString::Printf(TEXT("    \"%s\": {\"x\": %.1f, \"y\": %.1f, \"startAltitude\": %.1f}"),
+					Config.bDescend ? TEXT("descend") : TEXT("climb"), Config.ClimbLatLonAltitude.X, Config.ClimbLatLonAltitude.Y, Config.ClimbLatLonAltitude.Z));
+			}
+			else
+			{
+				Fields.Add(FString::Printf(TEXT("    \"%s\": {\"latitude\": %.4f, \"longitude\": %.4f, \"startAltitude\": %.1f}"),
+					Config.bDescend ? TEXT("descend") : TEXT("climb"), Config.ClimbLatLonAltitude.X, Config.ClimbLatLonAltitude.Y, Config.ClimbLatLonAltitude.Z));
+			}
 		}
 	}
 	else if (Config.PathType == EVoxelBenchPath::Route)

@@ -5,6 +5,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "HAL/IConsoleManager.h"
 #include "Materials/Material.h"
 #include "ProceduralMeshComponent.h"
 #include "VoxelFarOcean.h"
@@ -473,6 +474,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelFarOceanStreamingTest,
 bool FVoxelFarOceanStreamingTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelFarOceanTest;
+
+	// The far ocean's grid water as it is without the far field (with it, WM-MP1 / D37, the grid water and floor are not
+	// built: the far field draws the terrain and the sea inside the bounds; VoxelWorlds.FarField.Island.* cover that).
+	IConsoleVariable* FarFieldVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.FarField"));
+	const FString FarFieldBefore = FarFieldVar ? FarFieldVar->GetString() : FString();
+	if (FarFieldVar)
+	{
+		FarFieldVar->Set(TEXT("0"), ECVF_SetByCode);
+	}
+	ON_SCOPE_EXIT
+	{
+		if (FarFieldVar)
+		{
+			FarFieldVar->Set(*FarFieldBefore, ECVF_SetByCode);
+		}
+	};
 
 	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelFarOceanTestWorld"));
 	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);

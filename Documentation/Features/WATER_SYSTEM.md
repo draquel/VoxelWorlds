@@ -567,6 +567,12 @@ with `bIslandFarOcean` draws the sea past that: procedural mesh components on th
   are drawn two-sided always).
 - **Proxy recreation (G15):** the far ocean's meshes live on their own components, so a recreated terrain scene proxy
   does not lose them; nothing needs re-sending.
+- **With the far field (mode parity WM-MP1, decision D37, 2026-10-26):** a heightmap world's far field draws the land and
+  the sea at `WaterLevel` inside the island's bounds box (a band patch's sea hidden with its terrain where the window's
+  chunks and tiles are, so a tile and the far field never overlap), so the far ocean builds no grid water or floor and
+  keeps its open sea from the box outward and its seabed; the far field's sea uses the tiles' UVs too (world X and Y over
+  the voxel size), one pattern across the three. `voxel.World.FarField 0` builds the grid again
+  ([LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field").
 
 Details, cvars (`voxel.World.FarOcean`, `voxel.World.FarOceanInland`, `voxel.World.FarOceanStats`) and the trade-offs:
 WORLD_MODES.md, "Beyond the edge".

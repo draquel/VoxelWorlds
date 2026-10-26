@@ -161,9 +161,10 @@ public:
 	// ==================== The voxel cut-over (spherical Phase 6, WM-BP10, D18) ====================
 
 	/**
-	 * Planets: whether the viewer is above the voxel cut-over (GetPlanetCutoverAltitude over the surface under it), so the
-	 * window holds nothing and the far field alone draws the planet. Decided in Update with hysteresis: suspended above the
-	 * cut-over, resumed below CutoverResumeFraction of it.
+	 * Whether the viewer is above the voxel cut-over (GetPlanetCutoverAltitude over the surface under it), so the window
+	 * holds nothing and the far field alone draws the world. Decided in Update with hysteresis: suspended above the
+	 * cut-over, resumed below CutoverResumeFraction of it. Planets always; a heightmap world only while the context reports
+	 * a far field (FLODQueryContext::bFarFieldActive; world modes review WM-MP2, D38).
 	 */
 	virtual bool IsWindowSuspended() const override { return bPlanetWindowSuspended; }
 
@@ -209,7 +210,8 @@ public:
 
 	/**
 	 * The cut-over altitude in force (uu over the surface; 0 = never): voxel.World.VoxelCutover when set (>= 0), else the
-	 * configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances. 0 on heightmap worlds.
+	 * configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances. 0 on a heightmap world
+	 * whose last Update saw no far field (WM-MP2).
 	 */
 	double GetPlanetCutoverAltitude() const;
 
@@ -793,6 +795,15 @@ protected:
 	/** The camera's altitude over the same surface (the viewer's plus the context's ViewerLead), and whether it held a resume (G49). */
 	double CameraSurfaceAltitude = 0.0;
 	bool bCutoverResumeHeld = false;
+
+	/**
+	 * Heightmap worlds (WM-MP2): the cut-over applies while the chunk manager has a far field (the last Update's context);
+	 * the sea's world Z (lowest double without a sea); the generated ground Z under the viewer the last Update sampled
+	 */
+	bool bHeightmapCutoverAllowed = false;
+	double HeightmapSeaZ = TNumericLimits<double>::Lowest();
+	FVector HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
+	double HeightmapGroundZ = 0.0;
 
 	// ==================== Runtime State ====================
 

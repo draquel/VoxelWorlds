@@ -64,10 +64,12 @@ struct FVoxelBenchConfig
 	/**
 	 * A climb (spherical Phase 6, WM-BP3: climb=lat:lon[:alt], or dir=up): a straight path along local up at the start.
 	 * Set by MakeClimb or the dir=up keyword; the report records the route as given (latitude, longitude, start altitude
-	 * over the ground; latitude and longitude -999 for dir=up from a start= point).
+	 * over the ground; latitude and longitude -999 for dir=up from a start= point). On a heightmap world (WM-MP11) the
+	 * site is the ground point's X and Y (bClimbSiteXY), as climb=X:Y[:Alt] gives it.
 	 */
 	bool bClimb = false;
 	FVector ClimbLatLonAltitude = FVector::ZeroVector;
+	bool bClimbSiteXY = false;
 
 	/**
 	 * A descent (spherical Phase 6, WM-BP10: descend=lat:lon:alt): the climb's path the other way, from StartAltitude over
@@ -252,6 +254,18 @@ public:
 		const FVector2D& LatLonForReport);
 
 	/**
+	 * Configure a climb along a given local up (world modes review WM-MP11: climb=X:Y[:Alt] on a heightmap world, where up
+	 * is +Z and the report records the ground point's X and Y in place of a latitude and longitude).
+	 * @param InOutConfig Config to fill (PathType Straight, Direction, StartPosition, bClimb)
+	 * @param Up Local up at the ground point (unit)
+	 * @param Ground The ground point the climb starts over
+	 * @param StartAltitude Height of the start over Ground
+	 * @param SiteForReport Latitude and longitude, or X and Y, as given, for the report
+	 */
+	static void MakeClimbAlong(FVoxelBenchConfig& InOutConfig, const FVector& Up, const FVector& Ground, float StartAltitude,
+		const FVector2D& SiteForReport);
+
+	/**
 	 * Configure a descent (spherical Phase 6, WM-BP10: descend=lat:lon:alt): MakeClimb's path flown the other way, from
 	 * StartAltitude over the ground point down along its local down, so the altitude falls by the distance flown.
 	 * @param InOutConfig Config to fill (PathType Straight, Direction, StartPosition, bClimb and bDescend)
@@ -262,6 +276,10 @@ public:
 	 */
 	static void MakeDescent(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
 		const FVector2D& LatLonForReport);
+
+	/** MakeDescent along a given local up (heightmap worlds: descend=X:Y:Alt, WM-MP11). */
+	static void MakeDescentAlong(FVoxelBenchConfig& InOutConfig, const FVector& Up, const FVector& Ground, float StartAltitude,
+		const FVector2D& SiteForReport);
 
 	/** Unit direction for a latitude and longitude (degrees; +Z north, longitude from +X toward +Y), as gc= and climb= read them. */
 	static FVector LatLonToDirection(double LatitudeDeg, double LongitudeDeg);

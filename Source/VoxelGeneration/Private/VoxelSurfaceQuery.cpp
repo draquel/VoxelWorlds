@@ -326,6 +326,87 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
 	return Mix;
 }
 
+FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMix(
+	float WorldX, float WorldY, float TerrainHeight,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
+	int32 WorldSeed,
+	bool bEnableWaterLevel, float WaterLevel)
+{
+	FVoxelSurfaceMaterialMix Mix;
+	if (!BiomeSnapshot.bIsValid)
+	{
+		return Mix;
+	}
+
+	// The climate and the blend as QuerySurfaceConditions samples them (the same noise parameters).
+	auto ClimateParams = [WorldSeed](int32 SeedOffset, float Frequency)
+	{
+		FVoxelNoiseParams Params;
+		Params.NoiseType = EVoxelNoiseType::Simplex;
+		Params.Octaves = 2;
+		Params.Persistence = 0.5f;
+		Params.Lacunarity = 2.0f;
+		Params.Amplitude = 1.0f;
+		Params.Seed = WorldSeed + SeedOffset;
+		Params.Frequency = Frequency;
+		return Params;
+	};
+	const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
+	const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency));
+	const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency));
+	const float Continentalness = BiomeSnapshot.bEnableContinentalness
+		? FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.ContinentalnessSeedOffset, BiomeSnapshot.ContinentalnessNoiseFrequency))
+		: 0.0f;
+	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
+	Mix.BiomeID = Blend.GetDominantBiome();
+
+	// The blend's surface materials and shares, height rules applied to each, merged per material (as the planet's mix).
+	uint8 Materials[MAX_BIOME_BLEND];
+	float Shares[MAX_BIOME_BLEND];
+	const int32 Num = BiomeSnapshot.GetBlendedMaterialShares(Blend, 0.0f, bEnableWaterLevel, TerrainHeight, WaterLevel, Materials, Shares);
+	uint8 Merged[MAX_BIOME_BLEND];
+	float MergedShares[MAX_BIOME_BLEND];
+	int32 MergedNum = 0;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		const uint8 Material = BiomeSnapshot.ApplyHeightMaterialRules(Materials[i], TerrainHeight, 0.0f);
+		int32 Slot = 0;
+		while (Slot < MergedNum && Merged[Slot] != Material)
+		{
+			++Slot;
+		}
+		if (Slot == MergedNum)
+		{
+			Merged[MergedNum] = Material;
+			MergedShares[MergedNum] = 0.0f;
+			++MergedNum;
+		}
+		MergedShares[Slot] += Shares[i];
+	}
+	int32 First = 0;
+	for (int32 i = 1; i < MergedNum; ++i)
+	{
+		First = MergedShares[i] > MergedShares[First] ? i : First;
+	}
+	int32 Second = -1;
+	for (int32 i = 0; i < MergedNum; ++i)
+	{
+		if (i != First && (Second < 0 || MergedShares[i] > MergedShares[Second]))
+		{
+			Second = i;
+		}
+	}
+	if (MergedNum == 0)
+	{
+		return Mix;
+	}
+	Mix.Materials[0] = Merged[First];
+	Mix.Materials[1] = Second >= 0 ? Merged[Second] : Merged[First];
+	const float Pair = MergedShares[First] + (Second >= 0 ? MergedShares[Second] : 0.0f);
+	Mix.Weight = (Second >= 0 && Pair > 0.0f) ? MergedShares[Second] / Pair : 0.0f;
+	return Mix;
+}
+
 FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 	const IVoxelWorldMode& WorldMode,
 	const FVector& WorldPos, float VoxelSize,

@@ -201,6 +201,22 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	ViewerSurfaceAltitude = 0.0;
 	CameraSurfaceAltitude = 0.0;
 	bCutoverResumeHeld = false;
+	bHeightmapCutoverAllowed = false;
+	HeightmapSeaZ = TNumericLimits<double>::Lowest();
+	HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
+	HeightmapGroundZ = 0.0;
+	if (IsHeightmapWorld())
+	{
+		// The voxel cut-over on a heightmap world (world modes review WM-MP2, D38): the same altitude rule as a planet's,
+		// over the generated ground under the viewer or the sea where higher, in force only while a far field draws the
+		// world beyond the window (FLODQueryContext::bFarFieldActive, read in Update).
+		PlanetCutoverConfigured = WorldConfig->PlanetVoxelCutoverAltitude > 0.0f ? WorldConfig->PlanetVoxelCutoverAltitude
+			: DefaultCutoverViewDistances * MaxViewDistance;
+		HeightmapSeaZ = WorldConfig->bEnableWaterLevel ? static_cast<double>(WorldConfig->WaterLevel) : TNumericLimits<double>::Lowest();
+		UE_LOG(LogVoxelLOD, Log, TEXT("  Voxel cut-over (with a far field): %.0f uu over the surface under the viewer (resumes below %.0f)%s"),
+			PlanetCutoverConfigured, PlanetCutoverConfigured * CutoverResumeFraction,
+			CVarPlanetVoxelCutover.GetValueOnAnyThread() >= 0.0f ? TEXT(" (voxel.World.VoxelCutover)") : TEXT(""));
+	}
 	if (WorldMode == EWorldMode::SphericalPlanet)
 	{
 		const FSphericalPlanetParams Planet = FVoxelWorldModeFactory::MakePlanetParams(*WorldConfig);
@@ -306,12 +322,28 @@ void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float Del
 		GroundRadiusViewer = Context.ViewerPosition;
 	}
 
-	// The voxel cut-over (WM-BP10): above it the window holds nothing (the far field draws the planet); below a fraction of
-	// it the window streams back. Measured over the terrain under the viewer, or the sea where that is higher.
-	if (PlanetWorldMode)
+	// The voxel cut-over (WM-BP10; heightmap worlds WM-MP2): above it the window holds nothing (the far field draws the
+	// world); below a fraction of it the window streams back. Measured over the terrain under the viewer, or the sea where
+	// that is higher.
+	bHeightmapCutoverAllowed = Context.bFarFieldActive;
+	if (PlanetWorldMode || (IsHeightmapWorld() && TerrainWorldMode.IsValid()))
 	{
-		const double SurfaceRadius = FMath::Max(GroundRadiusCached, PlanetSeaRadius);
-		ViewerSurfaceAltitude = FVector::Dist(Context.ViewerPosition, PlanetCenter) - SurfaceRadius;
+		if (PlanetWorldMode)
+		{
+			const double SurfaceRadius = FMath::Max(GroundRadiusCached, PlanetSeaRadius);
+			ViewerSurfaceAltitude = FVector::Dist(Context.ViewerPosition, PlanetCenter) - SurfaceRadius;
+		}
+		else
+		{
+			// One terrain sample when the viewer moves (as the planet's ground point).
+			if (Context.ViewerPosition != HeightmapGroundViewer)
+			{
+				HeightmapGroundZ = TerrainWorldMode->GetTerrainHeightAt(static_cast<float>(Context.ViewerPosition.X),
+					static_cast<float>(Context.ViewerPosition.Y), SlabNoiseParams);
+				HeightmapGroundViewer = Context.ViewerPosition;
+			}
+			ViewerSurfaceAltitude = Context.ViewerPosition.Z - FMath::Max(HeightmapGroundZ, HeightmapSeaZ);
+		}
 		// The camera is the viewer moved back up by the prefetch's lead, along the same direction (the same surface).
 		CameraSurfaceAltitude = ViewerSurfaceAltitude + FMath::Max(Context.ViewerLead, 0.0);
 		const bool bWasSuspended = bPlanetWindowSuspended;
@@ -330,8 +362,9 @@ void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float Del
 		if (bPlanetWindowSuspended != bWasSuspended)
 		{
 			bBalancedLODCacheDirty = true;
-			UE_LOG(LogVoxelLOD, Log, TEXT("Planet voxel window %s at %.0f uu over the surface, the camera at %.0f (cut-over %.0f, resumes below %.0f)."),
-				bPlanetWindowSuspended ? TEXT("SUSPENDED: the far field draws the planet") : TEXT("RESUMED"),
+			UE_LOG(LogVoxelLOD, Log, TEXT("%s voxel window %s at %.0f uu over the surface, the camera at %.0f (cut-over %.0f, resumes below %.0f)."),
+				PlanetWorldMode ? TEXT("Planet") : TEXT("Heightmap"),
+				bPlanetWindowSuspended ? TEXT("SUSPENDED: the far field draws the world") : TEXT("RESUMED"),
 				ViewerSurfaceAltitude, CameraSurfaceAltitude, Cutover, Cutover * CutoverResumeFraction);
 		}
 	}
@@ -521,6 +554,11 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 		return Requests;
 	}
 
+	// Above the voxel cut-over (WM-MP2) the window is empty: the far field draws the world.
+	if (bPlanetWindowSuspended)
+	{
+		return Requests;
+	}
 	// Every column within the horizon, and in each column the layers of its vertical window (absolute layers, the
 	// terrain's).
 	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius; ++X)
@@ -675,6 +713,15 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 		Info += FString::Printf(TEXT("  Voxel cut-over: %.0f over the surface (resumes below %.0f, the camera under the cut-over: %s); viewer %.0f over it, camera %.0f, window %s\n"),
 			GetPlanetCutoverAltitude(), GetPlanetCutoverAltitude() * CutoverResumeFraction,
 			CVarPlanetCutoverResumeGuard.GetValueOnAnyThread() != 0 ? TEXT("on") : TEXT("off"), ViewerSurfaceAltitude, CameraSurfaceAltitude,
+			bPlanetWindowSuspended ? (bCutoverResumeHeld ? TEXT("SUSPENDED (resume held: the camera over the cut-over)") : TEXT("SUSPENDED")) : TEXT("active"));
+	}
+	else if (IsHeightmapWorld())
+	{
+		Info += FString::Printf(TEXT("  Voxel cut-over (WM-MP2): %s; viewer %.0f over the surface under it, camera %.0f, window %s\n"),
+			bHeightmapCutoverAllowed
+				? *FString::Printf(TEXT("%.0f over the surface (resumes below %.0f)"), GetPlanetCutoverAltitude(), GetPlanetCutoverAltitude() * CutoverResumeFraction)
+				: TEXT("off (no far field)"),
+			ViewerSurfaceAltitude, CameraSurfaceAltitude,
 			bPlanetWindowSuspended ? (bCutoverResumeHeld ? TEXT("SUSPENDED (resume held: the camera over the cut-over)") : TEXT("SUSPENDED")) : TEXT("active"));
 	}
 
@@ -848,7 +895,7 @@ bool FDistanceBandLODStrategy::ComputeCutoverState(bool bWasSuspended, double Al
 
 double FDistanceBandLODStrategy::GetPlanetCutoverAltitude() const
 {
-	if (!PlanetWorldMode)
+	if (!PlanetWorldMode && !(IsHeightmapWorld() && bHeightmapCutoverAllowed))
 	{
 		return 0.0;
 	}
@@ -1002,7 +1049,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 			}
 		});
 	}
-	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius && IsHeightmapWorld(); ++X)
+	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius && IsHeightmapWorld() && !bPlanetWindowSuspended; ++X)
 	{
 		for (int32 Y = -MaxChunkRadius; Y <= MaxChunkRadius; ++Y)
 		{

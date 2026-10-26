@@ -137,9 +137,11 @@ static TAutoConsoleVariable<float> CVarFarOceanInland(
 static TAutoConsoleVariable<int32> CVarFarField(
 	TEXT("voxel.World.FarField"),
 	1,
-	TEXT("A planet's far field: the analytic surface drawn beyond the voxel window to the horizon (FVoxelPlanetFarField).\n")
-	TEXT("  1 = drawn (default); at scale its patches also draw the sea in place of the ocean shell\n")
-	TEXT("  0 = off: nothing past the voxel window but the ocean shell (P6.3's planet, for A/B)"),
+	TEXT("The far field: the analytic surface drawn beyond the voxel window to the horizon (FVoxelPlanetFarField). On a planet six\n")
+	TEXT("cube-face quadtrees; on a heightmap world (world modes review WM-MP1) a quadtree of root tiles over the XY plane out to\n")
+	TEXT("voxel.World.FarFieldDistance, with the sea at WaterLevel (an island's far ocean then keeps its open sea and seabed only).\n")
+	TEXT("  1 = drawn (default); at scale a planet's patches also draw the sea in place of the ocean shell\n")
+	TEXT("  0 = off: nothing past the voxel window but the ocean shell or the far ocean (as before, for A/B)"),
 	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
 	{
 		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
@@ -159,6 +161,14 @@ static TAutoConsoleVariable<float> CVarFarFieldError(
 	TEXT("than this from the camera (default 2)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarFarFieldHeightmapError(
+	TEXT("voxel.World.FarFieldHeightmapError"),
+	4.0f,
+	TEXT("Heightmap worlds (world modes review WM-MP1): the far field's screen-space error budget (pixels) in place of\n")
+	TEXT("voxel.World.FarFieldError (default 4; a plane has no horizon, so at 2 px VoxelDemo's far field held about 1,500\n")
+	TEXT("patches and 300 MB from the ground, a planet's a tenth of that). <= 0 = voxel.World.FarFieldError."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarFarFieldQuads(
 	TEXT("voxel.World.FarFieldQuads"),
 	16,
@@ -170,6 +180,24 @@ static TAutoConsoleVariable<int32> CVarFarFieldMaxBuilds(
 	TEXT("voxel.World.FarFieldMaxBuilds"),
 	6,
 	TEXT("Far-field patch builds in flight on the thread pool at once (default 6)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarFieldRootChunks(
+	TEXT("voxel.World.FarFieldRootChunks"),
+	0,
+	TEXT("Heightmap worlds (world modes review WM-MP1, D36): chunks along a far-field root tile's edge, a power of two from 4 to\n")
+	TEXT("4096. 0 (default) = about a quarter of the far distance (or an island's half extent) in chunks, rounded to a power of two\n")
+	TEXT("(64 with 6,400 uu chunks and the 2,000,000 uu default: 409,600 uu tiles, a few rows of roots about the camera). Band\n")
+	TEXT("patches are one chunk column. Read when the far field is built (voxel.World.FarField 0 then 1 rebuilds it)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarFarFieldDistance(
+	TEXT("voxel.World.FarFieldDistance"),
+	2000000.0f,
+	TEXT("Heightmap worlds (world modes review WM-MP1): how far from the camera the far field draws (uu; default 2,000,000, the\n")
+	TEXT("island far ocean's reach). Root tiles exist within it and patches past it are culled; a bounded world (an island) also\n")
+	TEXT("stops at its bounds. 0 = no limit on a bounded world, the tile under the camera alone on a plane. Read when the far\n")
+	TEXT("field is built."),
 	ECVF_Default);
 
 // Visual polish VP4: the terrain flicker on planets. A far-field patch that needed a build while nothing showed of it (a
@@ -977,7 +1005,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		++CutoverTransitionCount;
 		if (bWindowSuspended)
 		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Voxel window suspended above the cut-over (unloading; the far field draws the planet): camera %.0f over the surface, streaming viewer %.0f (lead %.0f); %d chunks held, %d queued generations dropped; %s, %lld chunks generated and %lld meshed in it."),
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Voxel window suspended above the cut-over (unloading; the far field draws the world): camera %.0f over the surface, streaming viewer %.0f (lead %.0f); %d chunks held, %d queued generations dropped; %s, %lld chunks generated and %lld meshed in it."),
 				Transition.CameraOverSurface, Transition.ViewerOverSurface, Transition.Lead, Transition.ChunksHeld, Transition.GenerationsDropped,
 				Transition.ActiveSeconds >= 0.0 ? *FString::Printf(TEXT("active %.2f s since it resumed"), Transition.ActiveSeconds) : TEXT("active since the world started"),
 				Transition.GeneratedSinceResume, Transition.MeshedSinceResume);
@@ -1728,7 +1756,7 @@ void UVoxelChunkManager::Initialize(
 	// The hard boundary at the world's edge (WM-I5, D9), and the sea beyond it (WM-E1); a planet's sea surface (SP-E2)
 	// and KillZ under it (SP-F5).
 	RebuildWorldBoundary();
-	RebuildFarOcean();
+	RebuildFarOcean(CVarFarField.GetValueOnGameThread() != 0);
 	RebuildFarField(CVarFarField.GetValueOnGameThread() != 0);
 	RebuildPlanetOcean();
 	ApplyPlanetKillZ();
@@ -3027,6 +3055,7 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 			Context.MaxChunksToUnloadPerFrame = Configuration->MaxChunksToUnloadPerFrame;
 			Context.TimeSliceMS = Configuration->StreamingTimeSliceMS;
 		}
+		Context.bFarFieldActive = FarField.IsValid();
 		Context.FrameNumber = CurrentFrame;
 		return Context;
 	}
@@ -3124,6 +3153,8 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 		Context.MaxChunksToUnloadPerFrame = Configuration->MaxChunksToUnloadPerFrame;
 		Context.TimeSliceMS = Configuration->StreamingTimeSliceMS;
 	}
+	// A heightmap world's cut-over applies only with a far field (WM-MP2).
+	Context.bFarFieldActive = FarField.IsValid();
 
 	Context.FrameNumber = CurrentFrame;
 
@@ -4015,7 +4046,7 @@ uint8 UVoxelChunkManager::ResolveFarSeabedMaterial(const FIslandBowlParams& Isla
 	return Best;
 }
 
-void UVoxelChunkManager::RebuildFarOcean()
+void UVoxelChunkManager::RebuildFarOcean(bool bFarFieldEnabled)
 {
 	using namespace VoxelFarOceanManagerPrivate;
 	DestroyFarOcean();
@@ -4069,6 +4100,9 @@ void UVoxelChunkManager::RebuildFarOcean()
 
 	// The water needs the water tiles' material (without it the world actor draws its fallback plane).
 	const bool bWater = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial;
+	// With the far field on (WM-MP1, D37) the terrain and the sea inside the bounds are the far field's: the grid water and
+	// its floor over the unloaded columns are not built (the open sea past the bounds and the static seabed stay).
+	bFarOceanGridRetired = bFarFieldEnabled;
 	int32 OpenSeaQuads = 0;
 	if (bWater)
 	{
@@ -4078,9 +4112,12 @@ void UVoxelChunkManager::RebuildFarOcean()
 		SetSection(FarOceanStatic, 2, Underside, Configuration->WaterMeshMaterial);
 		FarOceanStatic->SetTranslucentSortPriority(0);
 
-		FarOceanGrid = MakeComponent(Owner, TEXT("VoxelFarOceanGrid"), Origin);
-		FarOceanWindow = MakeComponent(Owner, TEXT("VoxelFarOceanWindow"), Origin);
-		UpdateFarOceanGrid(true);
+		if (!bFarOceanGridRetired)
+		{
+			FarOceanGrid = MakeComponent(Owner, TEXT("VoxelFarOceanGrid"), Origin);
+			FarOceanWindow = MakeComponent(Owner, TEXT("VoxelFarOceanWindow"), Origin);
+			UpdateFarOceanGrid(true);
+		}
 	}
 	for (UProceduralMeshComponent* Component : { FarOceanStatic.Get(), FarOceanGrid.Get(), FarOceanWindow.Get() })
 	{
@@ -4097,8 +4134,10 @@ void UVoxelChunkManager::RebuildFarOcean()
 	UE_LOG(LogVoxelStreaming, Log,
 		TEXT("Far ocean: seabed %d triangle(s) (material %d, %.0f uu under the profile), %s; grid %dx%d column(s), %d open; reaches %.0f uu past the edge; built in %.2f ms%s"),
 		SeabedTriangles, FarOceanSettings.SeabedMaterialID, FarOceanSettings.SeabedOffset,
-		bWater ? *FString::Printf(TEXT("open sea %d quad(s), grid %d quad(s) (%d in the window)"), OpenSeaQuads, FarOceanGridQuads,
-			FarOceanGridQuads - FarOceanFrameQuads)
+		bWater ? (bFarOceanGridRetired
+			? *FString::Printf(TEXT("open sea %d quad(s), no grid water or floor (the far field draws inside the bounds)"), OpenSeaQuads)
+			: *FString::Printf(TEXT("open sea %d quad(s), grid %d quad(s) (%d in the window)"), OpenSeaQuads, FarOceanGridQuads,
+				FarOceanGridQuads - FarOceanFrameQuads))
 			: TEXT("no water (needs bEnableWaterLevel and WaterMeshMaterial)"),
 		GridMax.X - GridMin.X + 1, GridMax.Y - GridMin.Y + 1, FarOceanOpenColumns.Num(), FarOceanSettings.OuterDistance,
 		(FPlatformTime::Seconds() - StartTime) * 1000.0, bVisible ? TEXT("") : TEXT(" (hidden: voxel.World.FarOcean 0)"));
@@ -4436,8 +4475,13 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	UWorld* World = GetWorld();
 	AActor* Owner = GetOwner();
 	// Visual only: a dedicated server draws nothing.
-	if (!bEnabled || !Configuration || !WorldMode || !World || !World->IsGameWorld() || !Owner || World->GetNetMode() == NM_DedicatedServer
-		|| Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	if (!bEnabled || !Configuration || !WorldMode || !World || !World->IsGameWorld() || !Owner || World->GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+	const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	const bool bHeightmap = Configuration->WorldMode == EWorldMode::InfinitePlane || Configuration->WorldMode == EWorldMode::IslandBowl;
+	if (!bPlanet && !bHeightmap)
 	{
 		return;
 	}
@@ -4446,12 +4490,8 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	{
 		return;
 	}
-	const FSphericalPlanetWorldMode& Planet = Surface->GetPlanet();
-	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 
 	FVoxelFarFieldSettings Settings;
-	Settings.Center = Params.PlanetCenter;
-	Settings.Radius = Params.PlanetRadius;
 	Settings.GridOrigin = Configuration->WorldOrigin;
 	Settings.ChunkWorldSize = Configuration->GetChunkWorldSize();
 	Settings.VoxelSize = Configuration->VoxelSize;
@@ -4461,23 +4501,62 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	// A voxel under the analytic surface: the voxel surface (which DC and MC follow within a few uu) hides it wherever a
 	// chunk is drawn over it.
 	Settings.Sink = Configuration->VoxelSize;
-	// The terrain's real bounds within the configured shell (terrain past it is cut off), as the streaming window's (WM-BP8).
-	float MinAltitude = 0.0f;
-	float MaxAltitude = 0.0f;
-	FSphericalPlanetWorldMode::GetDisplacementBounds(Planet.GetTerrainParams(), &Planet.GetBiomeSnapshot(), MinAltitude, MaxAltitude);
-	Settings.MinAltitude = FMath::Max(MinAltitude, -Params.MaxTerrainDepth);
-	Settings.MaxAltitude = FMath::Min(MaxAltitude, Params.MaxTerrainHeight);
-	// The sea is the far field's only at scale, where the ocean shell would sag past its budget (G40); the small planet
-	// keeps its shell.
-	const FVoxelPlanetOceanSettings OceanDefaults;
-	Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
-		&& FVoxelPlanetFarField::ShouldDrawSea(Configuration->WaterRadius, OceanDefaults.MaxSag, OceanDefaults.MinSegments, OceanDefaults.MaxSegments);
-	Settings.SeaRadius = Configuration->WaterRadius;
 	Settings.SeaMargin = 2.0 * Configuration->VoxelSize;
-	Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
-	// Zones (POI pads, a few chunks across) only for patches up to 32 chunks in radius: past that they do not show, and a
-	// wide cap would ask the POI system for every POI in it (G37).
-	Settings.ZoneGatherMaxAngle = 32.0 * Settings.ChunkWorldSize / FMath::Max(Settings.Radius, 1.0);
+	if (bPlanet)
+	{
+		const FSphericalPlanetWorldMode& Planet = Surface->GetPlanet();
+		const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
+		Settings.Center = Params.PlanetCenter;
+		Settings.Radius = Params.PlanetRadius;
+		// The terrain's real bounds within the configured shell (terrain past it is cut off), as the streaming window's (WM-BP8).
+		float MinAltitude = 0.0f;
+		float MaxAltitude = 0.0f;
+		FSphericalPlanetWorldMode::GetDisplacementBounds(Planet.GetTerrainParams(), &Planet.GetBiomeSnapshot(), MinAltitude, MaxAltitude);
+		Settings.MinAltitude = FMath::Max(MinAltitude, -Params.MaxTerrainDepth);
+		Settings.MaxAltitude = FMath::Min(MaxAltitude, Params.MaxTerrainHeight);
+		// The sea is the far field's only at scale, where the ocean shell would sag past its budget (G40); the small planet
+		// keeps its shell.
+		const FVoxelPlanetOceanSettings OceanDefaults;
+		Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
+			&& FVoxelPlanetFarField::ShouldDrawSea(Configuration->WaterRadius, OceanDefaults.MaxSag, OceanDefaults.MinSegments, OceanDefaults.MaxSegments);
+		Settings.SeaRadius = Configuration->WaterRadius;
+		Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
+		// Zones (POI pads, a few chunks across) only for patches up to 32 chunks in radius: past that they do not show, and a
+		// wide cap would ask the POI system for every POI in it (G37).
+		Settings.ZoneGatherMaxAngle = 32.0 * Settings.ChunkWorldSize / FMath::Max(Settings.Radius, 1.0);
+	}
+	else
+	{
+		// A heightmap world (world modes review WM-MP1, D36): root tiles of RootChunks chunks on the chunk grid, split down
+		// to one chunk column at the voxel window's edge, out to FarDistance from the camera (and an island's bounds).
+		Settings.bHeightmap = true;
+		Settings.FarDistance = FMath::Max(0.0f, CVarFarFieldDistance.GetValueOnGameThread());
+		Settings.Bounds = WorldMode->GetWorldBounds();
+		const int32 RootChunksCVar = CVarFarFieldRootChunks.GetValueOnGameThread();
+		if (RootChunksCVar > 0)
+		{
+			Settings.RootChunks = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(RootChunksCVar, 4, 4096))));
+		}
+		else
+		{
+			const double Reach = Settings.FarDistance > 0.0 ? Settings.FarDistance
+				: (Settings.Bounds.IsBounded() ? FMath::Max(Settings.Bounds.HalfExtent.X, Settings.Bounds.HalfExtent.Y) : 2.0e6);
+			Settings.RootChunks = FVoxelFarFieldSettings::ComputeHeightmapRootChunks(Reach, Settings.ChunkWorldSize);
+		}
+		float MinHeight = 0.0f;
+		float MaxHeight = 0.0f;
+		WorldMode->GetTerrainHeightBounds(MinHeight, MaxHeight);
+		Settings.MinAltitude = MinHeight;
+		Settings.MaxAltitude = MaxHeight;
+		// The sea at WaterLevel wherever the terrain dips near or under it, as the water tiles draw it over the streamed
+		// columns (D37: an island's far ocean keeps its open sea past the bounds and its seabed; its grid water and floor
+		// inside the bounds are the far field's now).
+		Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial;
+		Settings.SeaZ = Configuration->WaterLevel;
+		Settings.BandLevel = FVoxelFarFieldSettings::ComputeHeightmapBandLevel(Settings.RootChunks);
+		// Zones for patches up to 64 chunks across (a root tile of 64 included): the gather is a box query over the zones.
+		Settings.ZoneGatherMaxSize = 64.0 * Settings.ChunkWorldSize + 1.0;
+	}
 
 	FarField = MakeUnique<FVoxelPlanetFarField>();
 	FarField->Initialize(Settings, Surface);
@@ -4490,18 +4569,43 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 			Manager->GatherConditioningZonesOnSphere(Direction, AngularRadius, OutZones);
 		}
 	});
+	FarField->SetZoneGatherer2D([WeakThis](const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones)
+	{
+		if (const UVoxelChunkManager* Manager = WeakThis.Get())
+		{
+			Manager->GatherConditioningZonesForRegion(Region, OutZones);
+		}
+	});
+	FarField->SetWaterTileQuery([WeakThis](const FIntPoint& Column)
+	{
+		const UVoxelChunkManager* Manager = WeakThis.Get();
+		return Manager && Manager->HasWaterTile(Column);
+	});
 	FarFieldStats = FVoxelFarFieldStats();
 	FarFieldStats.bActive = true;
 	FarFieldStats.bDrawsSea = Settings.bSea;
 	bFarFieldUndersideShown = false;
 	FarFieldGroundViewer = FVector(TNumericLimits<double>::Max());
 
-	UE_LOG(LogVoxelStreaming, Log,
-		TEXT("Far field: radius %.0f, %d quads a patch, band level %d (patches %.0f uu across near the voxel window), drawn %.0f uu under the surface, altitudes %.0f to %.0f, sea %s"),
-		Settings.Radius, Settings.PatchQuads, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel), Settings.Sink,
-		Settings.MinAltitude, Settings.MaxAltitude,
-		Settings.bSea ? *FString::Printf(TEXT("drawn by the far field (radius %.0f)"), Settings.SeaRadius)
-			: (Configuration->bEnableWaterLevel ? TEXT("drawn by the ocean shell") : TEXT("off")));
+	if (bPlanet)
+	{
+		UE_LOG(LogVoxelStreaming, Log,
+			TEXT("Far field: radius %.0f, %d quads a patch, band level %d (patches %.0f uu across near the voxel window), drawn %.0f uu under the surface, altitudes %.0f to %.0f, sea %s"),
+			Settings.Radius, Settings.PatchQuads, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel), Settings.Sink,
+			Settings.MinAltitude, Settings.MaxAltitude,
+			Settings.bSea ? *FString::Printf(TEXT("drawn by the far field (radius %.0f)"), Settings.SeaRadius)
+				: (Configuration->bEnableWaterLevel ? TEXT("drawn by the ocean shell") : TEXT("off")));
+	}
+	else
+	{
+		UE_LOG(LogVoxelStreaming, Log,
+			TEXT("Far field (heightmap): root tiles of %d chunks (%.0f uu), %d quads a patch, band level %d (patches %.0f uu across near the voxel window), out to %.0f uu from the camera%s, drawn %.0f uu under the surface, heights %.0f to %.0f, sea %s%s"),
+			Settings.RootChunks, Settings.GetRootTileSize(), Settings.PatchQuads, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
+			Settings.FarDistance, Settings.Bounds.IsBounded() ? TEXT(" and within the world's bounds") : TEXT(""), Settings.Sink,
+			Settings.MinAltitude, Settings.MaxAltitude,
+			Settings.bSea ? *FString::Printf(TEXT("drawn by the far field at Z %.0f"), Settings.SeaZ) : TEXT("off"),
+			Surface->bBlockSurface ? TEXT("; block tops (cubic)") : TEXT(""));
+	}
 }
 
 void UVoxelChunkManager::DestroyFarField()
@@ -4535,8 +4639,11 @@ UProceduralMeshComponent* UVoxelChunkManager::GetFarFieldComponent(uint64 Packed
 
 void UVoxelChunkManager::SetFarFieldEnabled(bool bEnabled)
 {
-	// The far field decides whether the ocean shell draws the sea: rebuild both.
+	// The far field decides whether the ocean shell draws the sea, and whether an island's far ocean builds its grid water
+	// and floor (WM-MP1): rebuild all three, in Initialize's order.
 	DestroyPlanetOcean();
+	DestroyFarField();
+	RebuildFarOcean(bEnabled);
 	RebuildFarField(bEnabled);
 	RebuildPlanetOcean();
 	UE_LOG(LogVoxelStreaming, Log, TEXT("Far field %s"), FarField ? TEXT("on") : TEXT("off"));
@@ -4699,9 +4806,14 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	const double FieldOfViewRadians = FMath::DegreesToRadians(FMath::Clamp(FieldOfView > 0.0f ? static_cast<double>(FieldOfView) : 90.0, 5.0, 170.0));
 	View.PixelsPerRadian = ViewportWidth / (2.0 * FMath::Tan(FieldOfViewRadians * 0.5));
 	View.MaxScreenError = FMath::Max(0.25f, CVarFarFieldError.GetValueOnGameThread());
+	if (Settings.bHeightmap && CVarFarFieldHeightmapError.GetValueOnGameThread() > 0.0f)
+	{
+		View.MaxScreenError = FMath::Max(0.25f, CVarFarFieldHeightmapError.GetValueOnGameThread());
+	}
 	// The viewer's ground point, as the LOD strategy measures the window's horizons on it (GetPlanetGroundRadius: the
-	// analytic terrain along the viewer's direction, no zones). One sample when the viewer moves.
-	if (FVector::DistSquared(ViewerPosition, FarFieldGroundViewer) > 1.0)
+	// analytic terrain along the viewer's direction, no zones). One sample when the viewer moves. A heightmap world
+	// measures its distances on the XY plane (WM-MP1).
+	if (!Settings.bHeightmap && FVector::DistSquared(ViewerPosition, FarFieldGroundViewer) > 1.0)
 	{
 		const FVector Direction = (ViewerPosition - Settings.Center).GetSafeNormal();
 		const FSphericalPlanetWorldMode* Planet = WorldMode.IsValid() && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet
@@ -4738,7 +4850,9 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	AActor* Owner = GetOwner();
 	UMaterialInterface* TerrainMaterial = MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr;
 	UMaterialInterface* WaterMaterial = Configuration->WaterMeshMaterial.Get();
-	const bool bUnderSea = Settings.bSea && FVector::DistSquared(CameraPosition, Settings.Center) < Settings.SeaRadius * Settings.SeaRadius;
+	const bool bUnderSea = Settings.bSea && (Settings.bHeightmap
+		? CameraPosition.Z < Settings.SeaZ
+		: FVector::DistSquared(CameraPosition, Settings.Center) < Settings.SeaRadius * Settings.SeaRadius);
 	for (const uint64 Key : Changes.Removed)
 	{
 		if (TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key))
@@ -4888,21 +5002,36 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 {
 	if (!FarField)
 	{
-		return TEXT("no far field (not a planet, voxel.World.FarField 0, or not a game world)");
+		return TEXT("no far field (a cubic planet or no world mode, voxel.World.FarField 0, or not a game world)");
 	}
 	const FVoxelFarFieldStats& Stats = FarFieldStats;
 	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
 	int32 RootsBuilt = 0;
-	for (int32 Face = 0; Face < 6; ++Face)
+	int32 Roots = 6;
+	if (Settings.bHeightmap)
 	{
-		const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
-		RootsBuilt += Root && Root->bResident ? 1 : 0;
+		Roots = FarField->GetHeightmapRoots().Num();
+		for (const uint64 Key : FarField->GetHeightmapRoots())
+		{
+			const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(Key);
+			RootsBuilt += Root && Root->bResident ? 1 : 0;
+		}
 	}
-	return FString::Printf(TEXT("patches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of 6 (voxel.World.FarFieldBuildAllRoots %d); updates for the frame's camera after a cut %lld (voxel.World.FarFieldCameraUpdate %d)"),
+	else
+	{
+		for (int32 Face = 0; Face < 6; ++Face)
+		{
+			const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
+			RootsBuilt += Root && Root->bResident ? 1 : 0;
+		}
+	}
+	return FString::Printf(TEXT("%spatches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of %d (voxel.World.FarFieldBuildAllRoots %d); updates for the frame's camera after a cut %lld (voxel.World.FarFieldCameraUpdate %d)"),
+		Settings.bHeightmap ? *FString::Printf(TEXT("heightmap (root tiles of %d chunks, out to %.0f uu) "), Settings.RootChunks, Settings.FarDistance) : TEXT(""),
 		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenBand, Stats.Components, Stats.BuildsPending,
 		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
-		Settings.Sink, Settings.bSea ? TEXT("far field") : TEXT("ocean shell / none"), Stats.TotalStandIns, Stats.StandInUpdates,
-		CVarFarFieldAvoidStandIns.GetValueOnGameThread(), RootsBuilt, CVarFarFieldBuildAllRoots.GetValueOnGameThread(),
+		Settings.Sink, Settings.bSea ? TEXT("far field") : (Settings.bHeightmap ? TEXT("tiles / far ocean / none") : TEXT("ocean shell / none")),
+		Stats.TotalStandIns, Stats.StandInUpdates,
+		CVarFarFieldAvoidStandIns.GetValueOnGameThread(), RootsBuilt, Roots, CVarFarFieldBuildAllRoots.GetValueOnGameThread(),
 		FarFieldCameraUpdates, CVarFarFieldCameraUpdate.GetValueOnGameThread());
 }
 
@@ -4915,8 +5044,9 @@ FString UVoxelChunkManager::GetFarOceanDebugString() const
 	FIntPoint GridMin, GridMax;
 	FVoxelFarOcean::GetGridColumns(FarOceanSettings, GridMin, GridMax);
 	const FIntRect& W = FarOceanWindowColumns;
-	return FString::Printf(TEXT("visible=%d open columns=%d grid %dx%d quads=%d (window %dx%d: %d) rebuilds=%d (frame %d) water=%s seabed material=%d reaches %.0f uu past the edge, inland coverage %.0f"),
-		FarOceanStatic->IsVisible() ? 1 : 0, FarOceanOpenColumns.Num(), GridMax.X - GridMin.X + 1, GridMax.Y - GridMin.Y + 1,
+	return FString::Printf(TEXT("visible=%d%s open columns=%d grid %dx%d quads=%d (window %dx%d: %d) rebuilds=%d (frame %d) water=%s seabed material=%d reaches %.0f uu past the edge, inland coverage %.0f"),
+		FarOceanStatic->IsVisible() ? 1 : 0, bFarOceanGridRetired ? TEXT(" grid water and floor retired (the far field draws inside the bounds)") : TEXT(""),
+		FarOceanOpenColumns.Num(), GridMax.X - GridMin.X + 1, GridMax.Y - GridMin.Y + 1,
 		FarOceanGridQuads, W.Width(), W.Height(), FarOceanGridQuads - FarOceanFrameQuads, FarOceanRebuilds, FarOceanFrameRebuilds,
 		FarOceanGrid ? TEXT("yes") : TEXT("no"), FarOceanSettings.SeabedMaterialID,
 		FarOceanSettings.OuterDistance, FarOceanSettings.InlandCoverage);
@@ -4929,6 +5059,11 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 	{
 		// The far field's patches narrow enough to take zones rebuild with it (their old meshes draw until then).
 		FarField->InvalidateCap(Zone.Direction, (Zone.InnerRadius + Zone.FalloffWidth) / FarField->GetSettings().Radius);
+	}
+	else if (FarField && !Zone.IsRadial() && FarField->GetSettings().bHeightmap)
+	{
+		const FVector2D Reach(Zone.InnerRadius + Zone.FalloffWidth);
+		FarField->InvalidateBox(FBox2D(Zone.Center - Reach, Zone.Center + Reach));
 	}
 	if (Zone.IsRadial())
 	{
@@ -4957,6 +5092,7 @@ void UVoxelChunkManager::ClearConditioningZones()
 	if (FarField && ConditioningZones.Num() > 0)
 	{
 		FarField->InvalidateCap(FVector::UpVector, UE_DOUBLE_PI);
+		FarField->InvalidateBox(FBox2D(FVector2D(-1.0e15), FVector2D(1.0e15)));
 	}
 	ConditioningZones.Reset();
 	OnTerrainConditioningChanged.Broadcast();
@@ -8624,6 +8760,11 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	}
 }
 
+bool UVoxelChunkManager::HasWaterTile(const FIntPoint& Column) const
+{
+	return WaterTiles.Contains(FIntVector2(Column.X, Column.Y));
+}
+
 bool UVoxelChunkManager::GetWaterTileColumn(const FVector& WorldPosition, TArray<int32>& OutWetChunkZ) const
 {
 	OutWetChunkZ.Reset();
@@ -8934,9 +9075,11 @@ void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)
 // points, because -ExecCmds splits commands on commas):
 //   dir=X:Y[:Z]            straight-path direction (default +X); dir=up: local up at the start (a climb)
 //   climb=Lat:Lon[:Alt]    planets: climb along local up from Alt (default 500) over the ground at a latitude and
-//                          longitude (spherical Phase 6; the distance is how high it climbs)
+//                          longitude (spherical Phase 6; the distance is how high it climbs); on a heightmap world
+//                          climb=X:Y[:Alt] (world modes review WM-MP11), straight up from the ground at (X, Y)
 //   descend=Lat:Lon:Alt    planets: descend along local down from Alt over the ground (spherical Phase 6, WM-BP10:
-//                          through the voxel cut-over; the distance is how far down, at most Alt - 300)
+//                          through the voxel cut-over; the distance is how far down, at most Alt - 300); on a heightmap
+//                          world descend=X:Y:Alt
 //   start=X:Y[:Z]          start point instead of the player view; Z defaults to 500 above the surface
 //   route=X:Y[:Z]/X:Y/...  fly a polyline from the start through these points (distance 0 = whole route)
 //   orbit=CX:CY:R          fly a circle around (CX, CY) (distance 0 = one lap)
@@ -8960,7 +9103,7 @@ static bool ParseBenchVector(const FString& Value, FVector& Out, bool& bOutHasZ)
 static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 	TEXT("voxel.Bench.Run"),
 	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]|up] [start=X:Y[:Z]] ")
-	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [climb=Lat:Lon[:Alt]] [descend=Lat:Lon:Alt] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
+	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [climb=Lat:Lon[:Alt] | climb=X:Y[:Alt]] [descend=Lat:Lon:Alt | descend=X:Y:Alt] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		// Target the ticking game/PIE world, not the editor world the command may arrive on.
@@ -9023,7 +9166,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			}
 			else if (Key == TEXT("climb"))
 			{
-				// A climb along local up (spherical Phase 6, WM-BP3): from Alt over the generated ground at Lat, Lon.
+				// A climb along local up (spherical Phase 6, WM-BP3): from Alt over the generated ground at Lat, Lon; on a
+				// heightmap world (WM-MP11) straight up from the ground at (X, Y).
 				TArray<FString> Parts;
 				Value.ParseIntoArray(Parts, TEXT(":"), true);
 				const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
@@ -9037,14 +9181,24 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 						FVector2D(Lat, Lon));
 					bHasClimb = true;
 				}
+				else if (Parts.Num() >= 2 && Cfg)
+				{
+					const double X = FCString::Atod(*Parts[0]);
+					const double Y = FCString::Atod(*Parts[1]);
+					const FVector Ground(X, Y, CM->GetGeneratedSurfaceHeight(X, Y));
+					FVoxelStreamingBenchmark::MakeClimbAlong(Config, FVector::UpVector, Ground, Parts.Num() > 2 ? FCString::Atof(*Parts[2]) : 500.0f,
+						FVector2D(X, Y));
+					bHasClimb = true;
+				}
 				else
 				{
-					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: climb=Lat:Lon[:Alt] needs a planet world and two values"));
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: climb=Lat:Lon[:Alt] (a planet) or climb=X:Y[:Alt] (a heightmap world) needs two values"));
 				}
 			}
 			else if (Key == TEXT("descend"))
 			{
-				// A descent along local down (spherical Phase 6, WM-BP10): from Alt over the generated ground at Lat, Lon.
+				// A descent along local down (spherical Phase 6, WM-BP10): from Alt over the generated ground at Lat, Lon; on a
+				// heightmap world (WM-MP11) straight down onto the ground at (X, Y).
 				TArray<FString> Parts;
 				Value.ParseIntoArray(Parts, TEXT(":"), true);
 				const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
@@ -9057,9 +9211,17 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 					FVoxelStreamingBenchmark::MakeDescent(Config, Cfg->WorldOrigin, Ground, FCString::Atof(*Parts[2]), FVector2D(Lat, Lon));
 					bHasClimb = true;
 				}
+				else if (Parts.Num() >= 3 && Cfg)
+				{
+					const double X = FCString::Atod(*Parts[0]);
+					const double Y = FCString::Atod(*Parts[1]);
+					const FVector Ground(X, Y, CM->GetGeneratedSurfaceHeight(X, Y));
+					FVoxelStreamingBenchmark::MakeDescentAlong(Config, FVector::UpVector, Ground, FCString::Atof(*Parts[2]), FVector2D(X, Y));
+					bHasClimb = true;
+				}
 				else
 				{
-					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: descend=Lat:Lon:Alt needs a planet world and three values"));
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: descend=Lat:Lon:Alt (a planet) or descend=X:Y:Alt (a heightmap world) needs three values"));
 				}
 			}
 			else if (Key == TEXT("start") && ParseBenchVector(Value, StartArg, bStartHasZ))

@@ -685,13 +685,15 @@ A flyer above the surface slab adds nothing off it (G52); until then a flyer ins
 to 200 chunks of air on the 1,000 km planet), and only above the shell nothing.
 Beyond the window the far field draws the planet (below).
 
-### The Far Field (Spherical Planet)
+### The Far Field (Spherical Planet; heightmap worlds since WM-MP1)
 
 The voxel window has one chunk size and generates every chunk at full resolution, so it cannot reach the horizon (58,000
 chunks on the ground of a 50 km planet) or orbit. Past it a planet draws its far field (spherical Phase 6, WM-BP9,
 decision D19; WORLD_MODES_REVIEW_PLAN.md §20.5): `FVoxelPlanetFarField` (VoxelStreaming), a cube-sphere quadtree of
 patches of the analytic surface. It is not an `IVoxelLODStrategy`: its patches are heightfields with their own
-primitives, and the voxel window keeps its size.
+primitives, and the voxel window keeps its size. Since the world modes review's MP3 (WM-MP1, decision D36;
+WORLD_MODES_REVIEW_PLAN.md §23) a plane and an island draw the same far field over the XY plane ("On a heightmap world"
+below): before, nothing was drawn past the voxel window but an island's far ocean.
 
 - **Patches.** Six face quadtrees on the planet's surface coordinate (`FVoxelCubeSphere`'s faces and tangent warp; level 0
   is a face, each level halves a patch along U and V, `FVoxelFarFieldPatchKey`). A patch is `PatchQuads` x `PatchQuads`
@@ -746,17 +748,52 @@ primitives, and the voxel window keeps its size.
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
   its ocean shell.
+- **On a heightmap world** (world modes review WM-MP1, decisions D36 and D37; WORLD_MODES_REVIEW_PLAN.md §23.10) the same
+  class runs with a heightmap frame: the key's face is `FVoxelFarFieldPatchKey::HeightmapFace` and its X and Y are signed
+  cell indices of one quadtree over the XY plane whose level-0 cells are **root tiles** of `voxel.World.FarFieldRootChunks`
+  chunks aligned to the chunk grid (0, the default: about a quarter of the far distance in chunks rounded to a power of
+  two, `ComputeHeightmapRootChunks`: 64 with 64-voxel chunks of 100 uu, 409,600 uu tiles; 256 with 1,600 uu chunks),
+  so the band level is log2 of that and a band patch is one chunk column. Roots exist for the tiles within
+  `voxel.World.FarFieldDistance` of the camera (2,000,000 uu, the island far ocean's reach; about 10 x 10 tiles about
+  the camera, made as it moves and dropped with their trees past it) and, on a bounded world, only over the island's bounds box, which
+  they never leave; a patch is culled past the far distance or wholly outside the box (there is no horizon on a plane).
+  The surface is the generated height (`IVoxelWorldMode::GetTerrainHeightAt` with the heightmap conditioning zones, as
+  `GetGeneratedSurfaceHeight` reads it; in a cubic world the block top of the column, `FVoxelBlockSurface`, so the far
+  field meets the blocks at the window's edge without a step), local up is +Z, the materials
+  `FVoxelSurfaceQuery::QuerySurfaceConditions` and its mix (`QuerySurfaceMaterialMix`, G45's rule with the heightmap
+  climate), and the error, the skirts, the hole rule (band patches hidden once every chunk their surface passes through
+  is drawn, distances measured on the plane from the streaming viewer's XY), stand-in avoidance and the camera update
+  after a cut are the planet's. The sea is a section on the `WaterLevel` plane over the cells whose terrain dips near or
+  under it, with the water tiles' UVs (world X and Y over the voxel size, one pattern with the tiles and the far ocean),
+  and, since the water tiles draw the sea over the streamed columns, a band patch's sea hides where its column's water
+  tile is drawn (`SetWaterTileQuery`, `UVoxelChunkManager::HasWaterTile`) and draws where none is: the ring between the
+  window's load and unload horizons holds chunks without tiles, and before the query its sea went with its terrain (a
+  dry strip at the window's edge seen from above). A plane has no horizon, so its far field splits far more patches
+  than a planet's at the same screen error (on `VoxelDemo` at 2 px about 1,500 patches and 300 MB from the ground,
+  against a planet's 29-56 MB): heightmap worlds take their own budget, `voxel.World.FarFieldHeightmapError` (4 px; 0 =
+  `voxel.World.FarFieldError`). An island's far ocean keeps its open sea past the bounds box and its static seabed and
+  builds no grid water or floor while the far field is on (D37: two seas inside the bounds would z-fight;
+  `voxel.World.FarField 0` brings the grid back). Heightmap conditioning zones rebuild the patches they meet
+  (`InvalidateBox`), a planet's radial ones the caps. The build queue's priority offset for non-root patches is 1e12
+  (it was 1e30, which a double adds a distance to without change, so with six builds a tick the patches under the
+  camera could starve behind thousands of far ones: found on the plane, the planet's six roots and horizon hid it).
 
-`voxel.World.FarField 0` drops the far field (the ocean shell draws the sea, as before P6.4); `voxel.World.FarFieldStats`,
-`vox.Planet` and the bench's `FarFieldMs`, `FarFieldPatchN`, `FarFieldMB`, `FarFieldBuiltN` and `FarFieldStandInN`
-(stand-ins over band patches the chunks cover, VP4) report it; `voxel.World.FarFieldTrace 1` logs every update with
-such a stand-in and why.
+`voxel.World.FarField 0` drops the far field (the ocean shell draws a planet's sea and an island's far ocean its grid
+water, as before); `voxel.World.FarFieldStats`, `vox.Planet` / `vox.World` and the bench's `FarFieldMs`, `FarFieldPatchN`,
+`FarFieldMB`, `FarFieldBuiltN` and `FarFieldStandInN` (stand-ins over band patches the chunks cover, VP4) report it;
+`voxel.World.FarFieldTrace 1` logs every update with such a stand-in and why.
 
-### Orbit and Back: the Voxel Cut-Over (Spherical Planet)
+### Orbit and Back: the Voxel Cut-Over (Spherical Planet; heightmap worlds since WM-MP2)
 
 From high up the voxel window adds little the far field does not draw: its ground disk is a narrow cone under the
 viewer, all of it in the coarsest band. So a planet's window empties above a cut-over altitude and streams back on the
-way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md §20.6):
+way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md §20.6). A plane's or an island's window
+does the same since the world modes review's MP3 (WM-MP2, decision D38): the altitude is measured over the generated
+ground under the streaming viewer or the sea where higher, `PlanetVoxelCutoverAltitude` and the three-view-distance
+default, `voxel.World.VoxelCutover` and G49's guard apply as on a planet, a suspended heightmap window returns no column
+(`GetVisibleChunks`, the balanced LOD cache) and unloads every chunk, and the cut-over is in force only while the chunk
+manager has a far field (`FLODQueryContext::bFarFieldActive`): without one `GetCutoverAltitude` is 0 and the window keeps
+its ground disk at any altitude (D8), since a suspended window with nothing drawn under it is a hole in the world.
 
 - **The cut-over** (`FDistanceBandLODStrategy`, `IVoxelLODStrategy::IsWindowSuspended`): decided in `Update` from the
   streaming viewer's altitude over the surface under it, the analytic terrain along its direction or the sea where that
@@ -794,11 +831,11 @@ way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md �
   window with it, as it always has: above the cut-over the ground under a pawn left behind unloads. `vox.Orbit` holds the
   pawn (a swimmer too since G48) and settles it on release; survey cameras freeze streaming.
 
-`vox.Planet` reports the window's state, the cut-over and the lead; the bench adds `Suspended`, `LeadUU` and `SurfAlt`
-columns, a `voxelCutover` summary and the run's `cutoverTransitions` (each resume and suspension with the camera, the
-streaming viewer and the lead, and for a suspension the seconds active, the chunks held and generated and the queued
-generations dropped; `UVoxelChunkManager::GetCutoverTransitions`, also logged), and a descent route
-(`descend=Lat:Lon:Alt`).
+`vox.Planet` (and `vox.World` in every mode) reports the window's state, the cut-over and the lead; the bench adds
+`Suspended`, `LeadUU` and `SurfAlt` columns, a `voxelCutover` summary and the run's `cutoverTransitions` (each resume and
+suspension with the camera, the streaming viewer and the lead, and for a suspension the seconds active, the chunks held
+and generated and the queued generations dropped; `UVoxelChunkManager::GetCutoverTransitions`, also logged), and a
+descent route (`descend=Lat:Lon:Alt` on a planet, `descend=X:Y:Alt` on a heightmap world; climbs `climb=` likewise).
 
 ### Integration with Streaming
 

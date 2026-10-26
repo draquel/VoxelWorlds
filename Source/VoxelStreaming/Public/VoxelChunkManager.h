@@ -978,11 +978,12 @@ public:
 	/** Show or hide the planet ocean (voxel.World.PlanetOcean). */
 	void SetPlanetOceanVisible(bool bVisible);
 
-	// ==================== Planet Far Field (spherical Phase 6, WM-BP9) ====================
+	// ==================== Far Field (spherical Phase 6, WM-BP9; heightmap worlds WM-MP1) ====================
 
 	/**
-	 * Whether this planet draws its far field: the analytic surface beyond the voxel window, to the horizon and from orbit
-	 * (FVoxelPlanetFarField, decision D19). Game worlds on a planet with voxel.World.FarField on.
+	 * Whether this world draws its far field: the analytic surface beyond the voxel window, to the horizon and from orbit
+	 * (FVoxelPlanetFarField, decision D19; on a heightmap world a quadtree of root tiles over the plane, WM-MP1 / D36). Game
+	 * worlds on a planet or a heightmap world with voxel.World.FarField on.
 	 *
 	 * @return True when the far field exists
 	 */
@@ -1005,8 +1006,8 @@ public:
 	int32 GetFarFieldComponentCount() const { return FarFieldComponents.Num(); }
 
 	/**
-	 * Build or drop the far field and the ocean shell for voxel.World.FarField (game worlds on a planet): with the far
-	 * field off the ocean shell draws the sea as before.
+	 * Build or drop the far field, the ocean shell and the far ocean for voxel.World.FarField: with the far field off the
+	 * ocean shell draws a planet's sea and an island's far ocean builds its grid water, as before.
 	 *
 	 * @param bEnabled Far field on
 	 */
@@ -1150,6 +1151,15 @@ public:
 	 * @return True if the column's tile exists
 	 */
 	bool GetWaterTileColumn(const FVector& WorldPosition, TArray<int32>& OutWetChunkZ) const;
+
+	/**
+	 * Whether a chunk column (chunk X, Y) has a 2D water tile (heightmap worlds): the far field hides a band patch's sea
+	 * there (WM-MP1).
+	 *
+	 * @param Column Chunk X and Y
+	 * @return True while the column's tile exists
+	 */
+	bool HasWaterTile(const FIntPoint& Column) const;
 
 	/**
 	 * Get the collision manager.
@@ -2761,8 +2771,16 @@ private:
 	/** Show the water's undersides when the viewer is under the water plane, hide them when it is not. */
 	void UpdateFarOceanUnderside(const FVector& ViewerPosition);
 
-	/** Build the far ocean from the world mode's bounds and the island's seabed (game worlds, islands, bIslandFarOcean). */
-	void RebuildFarOcean();
+	/**
+	 * Build the far ocean from the world mode's bounds and the island's seabed (game worlds, islands, bIslandFarOcean).
+	 *
+	 * @param bFarFieldEnabled The far field is on (WM-MP1, D37): the grid water and its floor over the unloaded columns inside
+	 *        the bounds are not built, since the far field draws the terrain and the sea there; the open sea and the seabed stay
+	 */
+	void RebuildFarOcean(bool bFarFieldEnabled);
+
+	/** The far ocean's grid water and floor were left out because the far field draws inside the bounds (WM-MP1) */
+	bool bFarOceanGridRetired = false;
 
 	/** Destroy the far ocean's components. */
 	void DestroyFarOcean();
