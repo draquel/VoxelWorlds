@@ -27,6 +27,7 @@
 #include "VoxelSeaSurface.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelTreeInjector.h"
+#include <atomic>
 #include "VoxelChunkManager.generated.h"
 
 // Forward declarations
@@ -297,9 +298,10 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 };
 
 /**
- * The chunk manager's far-field update for the camera a frame renders with (visual polish F4.3). The chunk manager ticks
- * in TG_PrePhysics, before the player camera managers update (UWorld::Tick: after TG_PostPhysics), so its camera is the
- * frame before's; this runs in TG_PostUpdateWork, after them (UVoxelChunkManager::TickFarFieldCamera).
+ * The chunk manager's work for the camera a frame renders with (visual polish F4.3; world modes review WM-MP4). The chunk
+ * manager ticks in TG_PrePhysics, before the player camera managers update (UWorld::Tick: after TG_PostPhysics), so its
+ * camera is the frame before's; this runs in TG_PostUpdateWork, after them (UVoxelChunkManager::TickAfterCameraUpdate):
+ * after a cut the far field updates again for this frame's camera, and so do the streaming decisions.
  */
 USTRUCT()
 struct FVoxelFarFieldCameraTickFunction : public FTickFunction
@@ -1036,12 +1038,29 @@ public:
 	bool UpdateFarFieldForCamera(const FVector& CameraPosition, float FieldOfView);
 
 	/**
-	 * The camera tick's body: UpdateFarFieldForCamera with the first player camera manager's camera, unless
-	 * voxel.World.FarFieldCameraUpdate is 0, the bench drives the view (SetBenchmarkView) or there is no camera manager.
+	 * The camera tick's body, with the first player camera manager's camera (nothing while the bench drives the view,
+	 * SetBenchmarkView, or without a camera manager): UpdateFarFieldForCamera unless voxel.World.FarFieldCameraUpdate is 0,
+	 * then UpdateStreamingForCamera unless voxel.Stream.CameraCutUpdate is 0.
 	 */
-	void TickFarFieldCamera();
+	void TickAfterCameraUpdate();
 
-	/** The tick function that runs TickFarFieldCamera after the camera managers (tests run it as a world tick would). */
+	/**
+	 * The streaming decisions again for the camera a frame renders with, after a cut (world modes review WM-MP4, every world
+	 * mode). The tick streamed for the camera of the frame before; when this frame's camera lies more than a chunk from it
+	 * (a teleport, a respawn, a switch of view target), the strategy's view, the load and unload decisions, the queues'
+	 * order and the first generation launches run again for it, so the chunks under the new position are requested in the
+	 * frame of the cut rather than the next. The camera becomes the streaming viewer for the pass (the descent prefetch's
+	 * speed starts over after a jump). Under a chunk of motion a frame (every ordinary frame) nothing runs.
+	 *
+	 * @param CameraPosition This frame's camera
+	 * @return Whether the decisions ran again
+	 */
+	bool UpdateStreamingForCamera(const FVector& CameraPosition);
+
+	/** Streaming updates run again for a frame's camera after a cut (UpdateStreamingForCamera), in all. */
+	int64 GetCameraCutUpdates() const { return CameraCutUpdates; }
+
+	/** The tick function that runs TickAfterCameraUpdate after the camera managers (tests run it as a world tick would). */
 	FVoxelFarFieldCameraTickFunction& GetFarFieldCameraTickFunction() { return FarFieldCameraTick; }
 
 	// ==================== Orbit and back (spherical Phase 6, WM-BP10, D18) ====================
@@ -1057,10 +1076,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	bool IsVoxelWindowSuspended() const;
 
-	/** The camera the streaming follows this tick, before the descent prefetch (elsewhere than a planet: the streaming viewer). */
+	/** The camera the streaming follows this tick, before the descent prefetch moves the streaming viewer under it. */
 	FVector GetCameraPosition() const { return CurrentCameraPosition; }
 
-	/** The streaming viewer this tick: the camera, or under it while it descends over a planet (the descent prefetch). */
+	/** The streaming viewer this tick: the camera, or under it while it descends (the descent prefetch, every world mode). */
 	FVector GetStreamingViewerPosition() const { return CurrentViewerPosition; }
 
 	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
@@ -1076,10 +1095,11 @@ public:
 	static constexpr int32 MaxCutoverTransitions = 256;
 
 	/**
-	 * Pure: the descent prefetch's lead (WM-BP10): under a camera descending over a planet faster than MinDescentSpeed, the
-	 * streaming viewer goes ahead of it along local down by the distance it covers in LeadSeconds, at most half its altitude
-	 * and stopping Clearance over the surface, so the voxel window resumes from the cut-over and refines its LOD before the
-	 * camera gets there (a descent slowing toward the ground resumes it from twice the cut-over at most).
+	 * Pure: the descent prefetch's lead (WM-BP10; every world mode since world modes review WM-MP3): under a camera descending
+	 * faster than MinDescentSpeed, the streaming viewer goes ahead of it along local down by the distance it covers in
+	 * LeadSeconds, at most half its altitude and stopping Clearance over the surface, so the voxel window resumes from the
+	 * cut-over and refines its LOD before the camera gets there (a descent slowing toward the ground resumes it from twice
+	 * the cut-over at most).
 	 *
 	 * @param RadialSpeed The camera's smoothed speed along local up (uu/s, negative descending)
 	 * @param AltitudeOverSurface The camera's altitude over the surface under it (the terrain, or the sea where higher)
@@ -2210,6 +2230,12 @@ protected:
 	/** Lazily create (mode + config matched to the main mesher) and return the CPU seam mesher. */
 	IVoxelMesher* EnsureSeamMesher();
 
+	/**
+	 * Chunk-mesh and seam jobs on workers that hold a raw pointer to Mesher or SeamMesher (each counts itself from dispatch
+	 * to its end): Shutdown waits for them before the meshers go (G76).
+	 */
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> MesherWorkerJobs = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+
 public:
 	/** Seam registry access for diagnostics (performance HUD, tests). May be null. */
 	const FVoxelSeamRegistry* GetSeamRegistry() const { return SeamRegistry.Get(); }
@@ -2819,7 +2845,10 @@ private:
 	/** Far-field updates run again for a frame's camera after a cut (F4.3), in all */
 	int64 FarFieldCameraUpdates = 0;
 
-	/** Runs TickFarFieldCamera in TG_PostUpdateWork, after the player camera managers (F4.3) */
+	/** Streaming updates run again for a frame's camera after a cut (WM-MP4), in all */
+	int64 CameraCutUpdates = 0;
+
+	/** Runs TickAfterCameraUpdate in TG_PostUpdateWork, after the player camera managers (F4.3, WM-MP4) */
 	UPROPERTY()
 	FVoxelFarFieldCameraTickFunction FarFieldCameraTick;
 
@@ -2922,6 +2951,9 @@ private:
 
 	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
 	double StreamingViewerLead = 0.0;
+
+	/** Local down at the camera on the tick the lead was computed (toward a planet's centre; -Z on a heightmap world). */
+	FVector StreamingViewerDown = -FVector::UpVector;
 
 	/** The window's cut-over state on the last tick (IVoxelLODStrategy::IsWindowSuspended), to act when it changes. */
 	bool bWasWindowSuspended = false;

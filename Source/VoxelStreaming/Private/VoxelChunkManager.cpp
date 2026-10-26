@@ -202,6 +202,20 @@ static TAutoConsoleVariable<int32> CVarFarFieldBuildAllRoots(
 // Visual polish F4.3: the tick (TG_PrePhysics) reads the player camera manager's camera before the camera managers
 // update (after TG_PostPhysics), so the far field lagged the rendered camera a frame: the first frame after a teleport
 // was drawn with the selection for the old position.
+/**
+ * Counts a worker job that holds a raw pointer to one of the chunk manager's meshers (a chunk mesh, a seam job) from its
+ * dispatch to its end, so Shutdown can wait for them before the meshers go (world modes review G76: a seam job finishing
+ * after Shutdown called into a freed mesher). Copies count too: a lambda moved into its task keeps one.
+ */
+struct FMesherWorkerGuard
+{
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Count;
+	explicit FMesherWorkerGuard(const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe>& InCount) : Count(InCount) { ++(*Count); }
+	FMesherWorkerGuard(const FMesherWorkerGuard& Other) : Count(Other.Count) { ++(*Count); }
+	FMesherWorkerGuard& operator=(const FMesherWorkerGuard&) = delete;
+	~FMesherWorkerGuard() { --(*Count); }
+};
+
 static TAutoConsoleVariable<int32> CVarFarFieldCameraUpdate(
 	TEXT("voxel.World.FarFieldCameraUpdate"),
 	1,
@@ -211,6 +225,19 @@ static TAutoConsoleVariable<int32> CVarFarFieldCameraUpdate(
 	TEXT("      far field there (default)\n")
 	TEXT("  0 = as before: the tick's update only, for the frame before's camera; the first frame after a teleport drew the\n")
 	TEXT("      far field for the old position (nothing where the camera arrived)"),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamCameraCutUpdate(
+	TEXT("voxel.Stream.CameraCutUpdate"),
+	1,
+	TEXT("Every world mode (world modes review WM-MP4): after a cut, run the streaming decisions again for the camera the\n")
+	TEXT("frame renders with.\n")
+	TEXT("  1 = in TG_PostUpdateWork, after the camera managers, when the camera lies more than a chunk from the camera of\n")
+	TEXT("      the tick's update (a teleport, a respawn, a switch of view target), the load and unload decisions, the queues'\n")
+	TEXT("      order and the first generation launches run again for it: the chunks under the new position are requested\n")
+	TEXT("      in the frame of the cut (default)\n")
+	TEXT("  0 = as before: the tick's decisions only, for the frame before's camera; the frame of a teleport streamed for the\n")
+	TEXT("      old position and the next frame for the new one"),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
@@ -225,15 +252,15 @@ static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 static TAutoConsoleVariable<float> CVarStreamDescentLead(
 	TEXT("voxel.Stream.DescentLead"),
 	3.0f,
-	TEXT("Planets (spherical Phase 6, WM-BP10): seconds ahead of a descending camera the streaming viewer goes along local down\n")
-	TEXT("(the descent prefetch: the voxel window resumes from the cut-over and refines its LOD before the camera gets there).\n")
-	TEXT("0 = off (the streaming viewer is the camera)."),
+	TEXT("Seconds ahead of a descending camera the streaming viewer goes along local down (the descent prefetch, spherical\n")
+	TEXT("Phase 6 WM-BP10; every world mode since world modes review WM-MP3): the voxel window resumes from the cut-over and\n")
+	TEXT("refines its LOD before the camera gets there. 0 = off (the streaming viewer is the camera)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarStreamDescentMinSpeed(
 	TEXT("voxel.Stream.DescentMinSpeed"),
 	1500.0f,
-	TEXT("Planets: the descent prefetch leads only a camera descending faster than this (uu/s), not a jump or a walk downhill."),
+	TEXT("The descent prefetch leads only a camera descending faster than this (uu/s), not a jump or a walk downhill."),
 	ECVF_Default);
 
 static FAutoConsoleCommandWithWorld GVoxelFarFieldStatsCmd(
@@ -731,13 +758,13 @@ void FVoxelFarFieldCameraTickFunction::ExecuteTick(float DeltaTime, ELevelTick T
 {
 	FActorComponentTickFunction::ExecuteTickHelper(Target, /*bTickInEditor=*/ false, DeltaTime, TickType, [this](float DilatedTime)
 	{
-		Target->TickFarFieldCamera();
+		Target->TickAfterCameraUpdate();
 	});
 }
 
 FString FVoxelFarFieldCameraTickFunction::DiagnosticMessage()
 {
-	return GetFullNameSafe(Target) + TEXT("[UVoxelChunkManager::TickFarFieldCamera]");
+	return GetFullNameSafe(Target) + TEXT("[UVoxelChunkManager::TickAfterCameraUpdate]");
 }
 
 FName FVoxelFarFieldCameraTickFunction::DiagnosticContext(bool bDetailed)
@@ -862,8 +889,8 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Build query context from camera state
 	FLODQueryContext Context = BuildQueryContext();
 
-	// The camera; on a planet the streaming viewer goes ahead of it under a descending camera (spherical Phase 6, WM-BP10:
-	// the descent prefetch), so the window resumes from the cut-over and refines before the camera arrives.
+	// The camera; the streaming viewer goes ahead of it under a descending camera (spherical Phase 6, WM-BP10: the descent
+	// prefetch; every world mode since WM-MP3), so the window resumes from the cut-over and refines before the camera arrives.
 	CurrentCameraPosition = Context.ViewerPosition;
 	ApplyDescentPrefetch(Context, DeltaTime);
 	CutoverClock += DeltaTime;
@@ -1811,6 +1838,25 @@ void UVoxelChunkManager::Shutdown()
 	{
 		delete LODStrategy;
 		LODStrategy = nullptr;
+	}
+
+	// Chunk meshes and seam jobs on workers hold raw pointers to the meshers (G76): wait for them before the meshers go.
+	// Their results land in queues this Shutdown has emptied, or no-op through the weak manager pointer.
+	{
+		const double WaitStart = FPlatformTime::Seconds();
+		while (MesherWorkerJobs->load() > 0 && FPlatformTime::Seconds() - WaitStart < 10.0)
+		{
+			FPlatformProcess::Sleep(0.001f);
+		}
+		const double Waited = FPlatformTime::Seconds() - WaitStart;
+		if (MesherWorkerJobs->load() > 0)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Shutdown: %d mesh or seam jobs still on workers after %.1f s; the meshers go regardless."), MesherWorkerJobs->load(), Waited);
+		}
+		else if (Waited > 0.05)
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Shutdown: waited %.0f ms for the mesh and seam jobs on workers."), Waited * 1000.0);
+		}
 	}
 
 	// Shutdown and cleanup generation components
@@ -3087,9 +3133,10 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 FLODQueryContext UVoxelChunkManager::BuildStreamingContext() const
 {
 	FLODQueryContext Context = BuildQueryContext();
-	if (StreamingViewerLead > 0.0 && Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet)
+	if (StreamingViewerLead > 0.0)
 	{
-		Context.ViewerPosition -= (Context.ViewerPosition - Configuration->WorldOrigin).GetSafeNormal() * StreamingViewerLead;
+		// Under the camera by this tick's lead, along the local down the prefetch found there (WM-MP3: every world mode).
+		Context.ViewerPosition += StreamingViewerDown * StreamingViewerLead;
 		Context.ViewerLead = StreamingViewerLead;
 	}
 	return Context;
@@ -3111,31 +3158,35 @@ double UVoxelChunkManager::ComputeDescentLead(double RadialSpeed, double Altitud
 
 void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float DeltaTime)
 {
-	const bool bPlanet = Configuration && WorldMode && Configuration->WorldMode == EWorldMode::SphericalPlanet;
 	const double LeadSeconds = CVarStreamDescentLead.GetValueOnGameThread();
-	if (!bPlanet || LeadSeconds <= 0.0)
+	if (!Configuration || !WorldMode || LeadSeconds <= 0.0)
 	{
 		StreamingViewerLead = 0.0;
 		CameraRadialSpeed = 0.0;
 		LastPrefetchCamera = FVector(FLT_MAX);
 		return;
 	}
+
+	// Local up at the camera and its height along it: on a planet the direction from the centre and the distance to it;
+	// on a heightmap world +Z and Z (world modes review WM-MP3: the prefetch in every world mode).
+	const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
 	const FVector Centre = Configuration->WorldOrigin;
 	const FVector Camera = Context.ViewerPosition;
-	const FVector Up = (Camera - Centre).GetSafeNormal();
+	const FVector Up = bPlanet ? (Camera - Centre).GetSafeNormal() : FVector::UpVector;
 	if (Up.IsNearlyZero())
 	{
 		StreamingViewerLead = 0.0;
 		return;
 	}
+	auto HeightOf = [bPlanet, &Centre](const FVector& Position) { return bPlanet ? FVector::Dist(Position, Centre) : Position.Z; };
 
 	// The camera's speed along local up, smoothed. A jump of more than ten chunks in a frame is a teleport (or a switch of
 	// view target), not motion: the speed starts over.
 	const double ChunkWorldSize = Configuration->GetChunkWorldSize();
-	const double CameraRadius = FVector::Dist(Camera, Centre);
+	const double CameraHeight = HeightOf(Camera);
 	if (DeltaTime > SMALL_NUMBER && LastPrefetchCamera.X != FLT_MAX && FVector::DistSquared(Camera, LastPrefetchCamera) < FMath::Square(10.0 * ChunkWorldSize))
 	{
-		const double Instant = (CameraRadius - FVector::Dist(LastPrefetchCamera, Centre)) / DeltaTime;
+		const double Instant = (CameraHeight - HeightOf(LastPrefetchCamera)) / DeltaTime;
 		CameraRadialSpeed = FMath::FInterpTo(CameraRadialSpeed, Instant, static_cast<double>(DeltaTime), 4.0);
 	}
 	else
@@ -3145,19 +3196,33 @@ void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float D
 	LastPrefetchCamera = Camera;
 
 	// Ahead of the camera along local down by what it covers in LeadSeconds, stopping two chunks over the surface under it
-	// (the terrain along its direction, or the sea where that is higher): the near window's layers stay over the ground.
-	const FSphericalPlanetWorldMode* Planet = WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet
-		? static_cast<const FSphericalPlanetWorldMode*>(WorldMode.Get()) : nullptr;
-	double SurfaceRadius = Configuration->WorldRadius + (Planet ? static_cast<double>(Planet->GetTerrainAltitude(Up, Configuration->NoiseParams)) : 0.0);
-	if (Configuration->bEnableWaterLevel)
+	// (the generated terrain under the camera: along its direction on a planet, at its (X, Y) on a heightmap world; or the
+	// sea where that is higher): the near window's layers stay over the ground.
+	double SurfaceHeight;
+	if (bPlanet)
 	{
-		SurfaceRadius = FMath::Max(SurfaceRadius, static_cast<double>(Configuration->WaterRadius));
+		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
+		SurfaceHeight = Configuration->WorldRadius + static_cast<double>(Planet.GetTerrainAltitude(Up, Configuration->NoiseParams));
+		if (Configuration->bEnableWaterLevel)
+		{
+			SurfaceHeight = FMath::Max(SurfaceHeight, static_cast<double>(Configuration->WaterRadius));
+		}
 	}
-	StreamingViewerLead = ComputeDescentLead(CameraRadialSpeed, CameraRadius - SurfaceRadius, LeadSeconds,
+	else
+	{
+		SurfaceHeight = GetGeneratedSurfaceHeight(Camera.X, Camera.Y);
+		const FVoxelSeaSurface Sea = GetSeaSurface();
+		if (Sea.bEnabled)
+		{
+			SurfaceHeight = FMath::Max(SurfaceHeight, Sea.PlaneZ);
+		}
+	}
+	StreamingViewerLead = ComputeDescentLead(CameraRadialSpeed, CameraHeight - SurfaceHeight, LeadSeconds,
 		CVarStreamDescentMinSpeed.GetValueOnGameThread(), 2.0 * ChunkWorldSize);
+	StreamingViewerDown = -Up;
 	if (StreamingViewerLead > 0.0)
 	{
-		Context.ViewerPosition = Camera - Up * StreamingViewerLead;
+		Context.ViewerPosition = Camera + StreamingViewerDown * StreamingViewerLead;
 		// The cut-over reads the camera's altitude from it (G49: a suspended window resumes only with the camera under it).
 		Context.ViewerLead = StreamingViewerLead;
 	}
@@ -4532,9 +4597,9 @@ bool UVoxelChunkManager::UpdateFarFieldForCamera(const FVector& CameraPosition, 
 	return true;
 }
 
-void UVoxelChunkManager::TickFarFieldCamera()
+void UVoxelChunkManager::TickAfterCameraUpdate()
 {
-	if (!FarField || bBenchmarkViewActive || CVarFarFieldCameraUpdate.GetValueOnGameThread() == 0)
+	if (!bIsInitialized || !bStreamingEnabled || bBenchmarkViewActive)
 	{
 		return;
 	}
@@ -4545,7 +4610,60 @@ void UVoxelChunkManager::TickFarFieldCamera()
 	{
 		return;
 	}
-	UpdateFarFieldForCamera(PC->PlayerCameraManager->GetCameraLocation(), PC->PlayerCameraManager->GetFOVAngle());
+	const FVector Camera = PC->PlayerCameraManager->GetCameraLocation();
+	if (FarField && CVarFarFieldCameraUpdate.GetValueOnGameThread() != 0)
+	{
+		UpdateFarFieldForCamera(Camera, PC->PlayerCameraManager->GetFOVAngle());
+	}
+	if (CVarStreamCameraCutUpdate.GetValueOnGameThread() != 0)
+	{
+		UpdateStreamingForCamera(Camera);
+	}
+}
+
+bool UVoxelChunkManager::UpdateStreamingForCamera(const FVector& CameraPosition)
+{
+	if (!Configuration || !LODStrategy)
+	{
+		return false;
+	}
+	// Up to a chunk a frame the tick's decisions hold; more is a cut (a teleport, a respawn, a switch of view target), whose
+	// frame would otherwise stream for the camera of the frame before (world modes review WM-MP4).
+	if (FVector::DistSquared(CameraPosition, CurrentCameraPosition) <= FMath::Square(Configuration->GetChunkWorldSize()))
+	{
+		return false;
+	}
+	FLODQueryContext Context = BuildQueryContext();
+	if (FVector::DistSquared(Context.ViewerPosition, CurrentCameraPosition) <= FMath::Square(Configuration->GetChunkWorldSize()))
+	{
+		return false; // the context reads another viewer than the camera manager (the editor viewport, the owner)
+	}
+	// The camera is the streaming viewer for this pass: the prefetch's speed starts over after a jump (ApplyDescentPrefetch).
+	CurrentCameraPosition = Context.ViewerPosition;
+	CurrentViewerPosition = Context.ViewerPosition;
+	StreamingViewerLead = 0.0;
+	CameraRadialSpeed = 0.0;
+	LastPrefetchCamera = Context.ViewerPosition;
+	if (MeshRenderer)
+	{
+		MeshRenderer->SetViewerPosition(CurrentCameraPosition);
+	}
+
+	// The tick's streaming decisions again, for this camera: the strategy's view, the load and unload decisions, the queues'
+	// order, and the first generation launches, so the chunks under the new position are on their way in this frame.
+	LODStrategy->Update(Context, 0.0f);
+	const FIntVector ViewerChunk = WorldToChunkCoord(Context.ViewerPosition);
+	UpdateLoadDecisions(Context);
+	CachedViewerChunk = ViewerChunk;
+	LastStreamingUpdatePosition = Context.ViewerPosition;
+	UpdateUnloadDecisions(Context);
+	ReprioritizeQueues(Context);
+	const float TimeSlice = Configuration->StreamingTimeSliceMS;
+	ProcessGenerationQueue(TimeSlice * 0.4f);
+	++CameraCutUpdates;
+	UE_LOG(LogVoxelStreaming, Verbose, TEXT("Streaming updated for the frame's camera after a cut (WM-MP4): viewer chunk (%d, %d, %d), %d generations pending, %d in flight."),
+		ViewerChunk.X, ViewerChunk.Y, ViewerChunk.Z, GenerationQueue.Num(), AsyncGenerationInProgress.Num());
+	return true;
 }
 
 void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVector& ViewerPosition, float FieldOfView)
@@ -5630,7 +5748,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		// volume into upload buffers, copies + allocations per chunk) was a per-launch game-thread
 		// cost. The DC/MC meshers are worker-safe here (atomic request ids, lock-guarded result
 		// maps, and their render command is self-contained).
-		Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete,
+		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete,
 			DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
 		{
 			TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
@@ -5640,7 +5758,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	else
 	{
 		// CPU path: existing thread pool dispatch (unchanged)
-		Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
+		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
 			DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
 		{
 			// Generate mesh on background thread
@@ -6630,7 +6748,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
+		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
@@ -6677,7 +6795,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
+		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
@@ -6723,7 +6841,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
+		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
