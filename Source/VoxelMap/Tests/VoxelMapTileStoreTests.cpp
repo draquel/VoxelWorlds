@@ -297,4 +297,99 @@ bool FVoxelMapTileBudgetSubsystemTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * World modes review WM-MP9 (§23): voxel.Map.ExploreAllMaxTiles caps a heightmap world's ExploreAll as it caps a
+ * planet's (spherical Phase 6, WM-BP11): the tiles nearest the centre, in square rings, up to the cap. On a plane (whose
+ * tiles are unbounded) ExploreAll within 8,000 uu of a point over 1,600 uu tiles covers an 11 x 11 square: with the cap
+ * at 30 it explores 30 tiles, the centre tile, its first and second rings and five of the third, none farther; with the
+ * cap past the count it explores all 121, the same set the raster walk explored before.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapExploreAllCapPlaneTest,
+	"VoxelWorlds.Map.ExploreAllCap.Plane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelMapExploreAllCapPlaneTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelMapTileStoreTest;
+	IConsoleVariable* CapVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Map.ExploreAllMaxTiles"));
+	if (!TestNotNull(TEXT("The cap cvar"), CapVar))
+	{
+		return true;
+	}
+	const FString OldCap = CapVar->GetString();
+
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelMapExploreAllCapWorld"));
+	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
+	WorldContext.SetCurrentWorld(World);
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->AddToRoot();
+	Config->WorldMode = EWorldMode::InfinitePlane;
+	Config->MeshingMode = EMeshingMode::Cubic;
+	Config->ChunkSize = 16;
+	Config->VoxelSize = 100.0f;
+	Config->ViewDistance = 3200.0f;
+	Config->bUseGPUGeneration = false;
+	Config->bGenerateCollision = false;
+	Config->bEnableScatter = false;
+
+	AActor* Owner = World->SpawnActor<AActor>();
+	UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
+	Manager->RegisterComponent();
+	FNullRenderer Renderer;
+	Renderer.Initialize(World, Config);
+	Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+
+	UVoxelMapSubsystem* Map = World->GetSubsystem<UVoxelMapSubsystem>();
+	if (TestNotNull(TEXT("The game world has a map"), Map))
+	{
+		const FVector Center(12345.0, -6789.0, 0.0);
+		auto Unpack = [](uint64 PackedKey) { return FIntPoint(static_cast<int32>(static_cast<uint32>(PackedKey >> 32)), static_cast<int32>(static_cast<uint32>(PackedKey & 0xFFFFFFFF))); };
+
+		CapVar->Set(TEXT("30"), ECVF_SetByCode);
+		const int64 Capped = Map->ExploreAllTiles(Center, 8000.0f);
+		TestTrue(TEXT("Every tile drew"), DrainMap(Map));
+		// The centre tile once the map has resolved its world (its tile grid is the chunk manager's; before the first call
+		// the coordinate is not the grid's).
+		const FIntPoint CenterTile = Map->WorldToTileCoord(Center);
+		auto RingOf = [&CenterTile](const FIntPoint& Tile) { return FMath::Max(FMath::Abs(Tile.X - CenterTile.X), FMath::Abs(Tile.Y - CenterTile.Y)); };
+		// 30 tiles are the centre, its first ring (8), its second (16) and five of the third.
+		int32 Ring0 = 0, Ring1 = 0, Ring2 = 0, PastRing3 = 0;
+		for (const uint64 PackedKey : Map->GetExploredTiles())
+		{
+			const int32 Ring = RingOf(Unpack(PackedKey));
+			Ring0 += Ring == 0 ? 1 : 0;
+			Ring1 += Ring == 1 ? 1 : 0;
+			Ring2 += Ring == 2 ? 1 : 0;
+			PastRing3 += Ring > 3 ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("Cap 30: %lld tiles explored (%d kept), the centre tile %d, its first ring %d, its second %d, past the third ring %d"), Capped, Map->GetExploredTiles().Num(), Ring0, Ring1, Ring2, PastRing3));
+		TestEqual(TEXT("With the cap at 30, 30 tiles are explored"), Capped, int64(30));
+		TestEqual(TEXT("... the centre tile among them"), Ring0, 1);
+		TestEqual(TEXT("... its whole first ring"), Ring1, 8);
+		TestEqual(TEXT("... its whole second ring"), Ring2, 16);
+		TestEqual(TEXT("... none past the third ring (the nearest first)"), PastRing3, 0);
+
+		CapVar->Set(TEXT("1000000"), ECVF_SetByCode);
+		const int64 All = Map->ExploreAllTiles(Center, 8000.0f);
+		TestTrue(TEXT("Every tile drew"), DrainMap(Map));
+		int32 MaxRing = 0;
+		for (const uint64 PackedKey : Map->GetExploredTiles())
+		{
+			MaxRing = FMath::Max(MaxRing, RingOf(Unpack(PackedKey)));
+		}
+		AddInfo(FString::Printf(TEXT("Cap lifted: %lld tiles explored, %d kept, out to ring %d"), All, Map->GetExploredTiles().Num(), MaxRing));
+		TestEqual(TEXT("With the cap lifted the 11 x 11 square is explored"), All, int64(121));
+		TestEqual(TEXT("... and kept"), Map->GetExploredTiles().Num(), 121);
+		TestEqual(TEXT("... out to the fifth ring"), MaxRing, 5);
+	}
+
+	CapVar->Set(*OldCap, ECVF_SetByCode);
+	Manager->Shutdown();
+	Owner->Destroy();
+	GEngine->DestroyWorldContext(World);
+	World->DestroyWorld(false);
+	Config->RemoveFromRoot();
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

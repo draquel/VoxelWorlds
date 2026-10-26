@@ -86,8 +86,9 @@ static TAutoConsoleVariable<float> CVarMapOverviewBudgetMB(
 static TAutoConsoleVariable<int32> CVarMapExploreAllMaxTiles(
 	TEXT("voxel.Map.ExploreAllMaxTiles"),
 	1000000,
-	TEXT("Planets (spherical Phase 6, WM-BP11): voxel.Map.ExploreAll marks at most this many tiles explored, nearest the pawn ")
-	TEXT("first (a planet's atlas is 6 N^2 tiles: 40,000 on a 2.5 km planet, 16 million at 50 km, 6.4 billion at 1,000 km)."),
+	TEXT("voxel.Map.ExploreAll marks at most this many tiles explored, nearest the pawn first (spherical Phase 6, WM-BP11: a ")
+	TEXT("planet's atlas is 6 N^2 tiles: 40,000 on a 2.5 km planet, 16 million at 50 km, 6.4 billion at 1,000 km; every world ")
+	TEXT("mode since world modes review WM-MP9: a plane's are unbounded)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarMapEditRefreshMaxTiles(
@@ -596,30 +597,53 @@ int64 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 			PlanetCount, Total, Cap, Queued);
 		return PlanetCount;
 	}
+	// A heightmap world: the tiles of the area (an island's bounds, or Radius around Center on a plane), nearest Center
+	// first in square rings so the cap keeps the tiles around the player (world modes review WM-MP9, the planet's rule).
 	FBox2D Area = CachedWorldBounds.IsBounded() ? CachedWorldBounds.GetBox2D()
 		: FBox2D(FVector2D(Center.X - Radius, Center.Y - Radius), FVector2D(Center.X + Radius, Center.Y + Radius));
 	const FIntPoint Lo = WorldToTileCoord(FVector(Area.Min.X, Area.Min.Y, 0.0));
 	const FIntPoint Hi = WorldToTileCoord(FVector(Area.Max.X, Area.Max.Y, 0.0));
+	const FIntPoint CenterTile(FMath::Clamp(WorldToTileCoord(Center).X, Lo.X, Hi.X), FMath::Clamp(WorldToTileCoord(Center).Y, Lo.Y, Hi.Y));
+	const int64 Cap = FMath::Max<int64>(1, CVarMapExploreAllMaxTiles.GetValueOnGameThread());
+	const int32 MaxRing = FMath::Max(FMath::Max(CenterTile.X - Lo.X, Hi.X - CenterTile.X), FMath::Max(CenterTile.Y - Lo.Y, Hi.Y - CenterTile.Y));
 	int64 Count = 0;
-	for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
+	auto Explore = [this, &Count, Cap, &Lo, &Hi](const FIntPoint& Tile)
 	{
-		for (int32 X = Lo.X; X <= Hi.X; ++X)
+		if (Count >= Cap || Tile.X < Lo.X || Tile.X > Hi.X || Tile.Y < Lo.Y || Tile.Y > Hi.Y || !IsTileInsideWorld(Tile))
 		{
-			const FIntPoint Tile(X, Y);
-			if (!IsTileInsideWorld(Tile))
+			return;
+		}
+		const uint64 Key = PackTileKey(Tile);
+		ExploredTiles.Add(Key);
+		++Count;
+		if (!TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
+		{
+			TileQueue.Request(Key, /*bInvalidate*/ false);
+		}
+	};
+	for (int32 Ring = 0; Ring <= MaxRing && Count < Cap; ++Ring)
+	{
+		if (Ring == 0)
+		{
+			Explore(CenterTile);
+			continue;
+		}
+		for (int32 Along = -Ring; Along <= Ring && Count < Cap; ++Along)
+		{
+			Explore(FIntPoint(CenterTile.X + Along, CenterTile.Y - Ring));
+			Explore(FIntPoint(CenterTile.X + Along, CenterTile.Y + Ring));
+			if (Along > -Ring && Along < Ring)
 			{
-				continue;
-			}
-			const uint64 Key = PackTileKey(Tile);
-			ExploredTiles.Add(Key);
-			++Count;
-			if (!TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
-			{
-				TileQueue.Request(Key, /*bInvalidate*/ false);
+				Explore(FIntPoint(CenterTile.X - Ring, CenterTile.Y + Along));
+				Explore(FIntPoint(CenterTile.X + Ring, CenterTile.Y + Along));
 			}
 		}
 	}
 	LaunchWaitingTiles();
+	if (Count >= Cap)
+	{
+		UE_LOG(LogVoxelMap, Log, TEXT("ExploreAllTiles: %lld tiles explored, the nearest to (%.0f, %.0f): the cap (voxel.Map.ExploreAllMaxTiles)."), Count, Center.X, Center.Y);
+	}
 	return Count;
 }
 
