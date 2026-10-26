@@ -301,6 +301,7 @@ revision (§14):** D1, the D3 budget, D8 and D9, each as recommended. **Decided 
 | D38 | The heightmap cut-over's default and gate (WM-MP2) *(decided 2026-10-25)* | **Three view distances, in force only while a far field is on**: a suspended window with nothing to draw under it is a hole in the world (§23.4) |
 | D39 | The heightmap noise (WM-MP6, WM-MP7) *(decided 2026-10-25)* | **Both items with one `GenerationVersion` bump 2 → 3**, after MP3, the content re-surveyed: every heightmap save refused and kept on disk, one noise path. A per-configuration flag is the fallback if users have saved worlds first (§23.7) |
 | D40 | Regions on heightmaps by default (WM-MP5) *(decided 2026-10-25)* | **The planet's defaults in every mode** (16-chunk render regions, 4-chunk scatter regions): no measured cost on the planet and the same material path (§23.7) |
+| D41 | The heightmap cut-over's default after MP3's measurement (WM-MP2) *(decided 2026-10-26)* | **Keep D38: three view distances, only with a far field, one rule for every mode**, until something requires a heightmap default of its own. On a plane the cut-over buys little at altitude (D8's slabs and far compression leave an idle window at about 22 MB; the scatter's resident instances are the one saving not measured) and costs a re-stream on a descent (1,031 chunks, peak voxel data 752 against 102 MB), but nothing in gameplay reaches it: QA flights and orbit cameras only (§23.10) |
 
 ## 9. Order of work
 
@@ -10337,11 +10338,11 @@ PIE start, a fresh PIE per run, three runs per rule, medians; `Saved/ClaudeScrip
 The chord was also run on `Review_Cubic` by mistake (the override not cleared) before `VoxelDemo`: frame P95 17.3 against
 17.0 ms, manager P95 5.0 against 4.4 ms, catch-up 0.17 s either way, far field P95 0.9 ms and 149 MB; the same picture.
 
-**Decision pending.**
+**Decision** (D41, the user's, 2026-10-26: recorded in §8).
 
-| ID | Question | Options | Recommendation |
-|----|----------|---------|----------------|
-| D41 | The heightmap cut-over's default after the measurement above | (a) **Keep D38** (three view distances, only with a far field): parity with the planet, nothing drawn by the window above it, the re-stream on a descent within D3 and ahead of the camera by the lead; (b) off by default on heightmap worlds (a per-mode default; `PlanetVoxelCutoverAltitude` set by a configuration still applies), the window kept at any altitude as D8 had it, no re-stream on a descent; (c) a higher heightmap default (ten view distances) so a QA flight to three view distances keeps the window | **(a)** for now: the climb and the great-circle routes show no cost at altitude, the descent's re-stream is a teleport's worth of streaming the prefetch leads, and one rule per mode is simpler; (b) if a game flies players between 120,000 and 1,000,000 uu often enough for the re-stream to show |
+| ID | Question | Options | Decision |
+|----|----------|---------|----------|
+| D41 | The heightmap cut-over's default after the measurement above | (a) **Keep D38** (three view distances, only with a far field): parity with the planet, nothing drawn by the window above it, the re-stream on a descent within D3 and ahead of the camera by the lead; (b) off by default on heightmap worlds (a per-mode default; `PlanetVoxelCutoverAltitude` set by a configuration still applies), the window kept at any altitude as D8 had it, no re-stream on a descent; (c) a higher heightmap default (ten view distances) so a QA flight to three view distances keeps the window | **(a): one rule for every mode, until something requires it to change.** Nothing in gameplay reaches the cut-over on a heightmap world (the terrain tops out at 10,000 uu, flight is QA tooling by D20), so the re-stream is paid by QA flights and orbit cameras only; the scatter's resident instances at altitude (about 100 MB on `VoxelDemo`, not measured apart) are what would argue for keeping the mechanism if a game did fly there; (b) is a per-mode default in the LOD strategy and a line in the docs if it is ever wanted |
 
 **New finding.**
 
