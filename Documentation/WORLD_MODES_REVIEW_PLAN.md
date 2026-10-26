@@ -22,7 +22,7 @@ planet on the CPU): plan and results in §15. Spherical Phase 2 (the planet on t
 Spherical Phase 3 (walkable): plan and results in §17. Spherical Phase 4 (systems): plan in §18.1, results (met
 2026-10-17) in §18.2. Spherical Phase 5 (places): plan in §19.1, results (met 2026-10-17) in §19.2. Spherical
 Phase 6 (big planets and orbit): scope, survey and plan in §20 (planned 2026-10-17, its decisions D17-D24 taken the same day; not started).
-Cubic as a game world (KC6, KC7, KC9, KC12, in scope since D1 was amended 2026-10-24): plan and results in §21 (met 2026-10-24: §21.2). Mode parity (the planet's features on heightmap worlds): plan in §23 (planned 2026-10-25; D35-D40 decided the same day; MP1 met the same day: §23.8).
+Cubic as a game world (KC6, KC7, KC9, KC12, in scope since D1 was amended 2026-10-24): plan and results in §21 (met 2026-10-24: §21.2). Mode parity (the planet's features on heightmap worlds): plan in §23 (planned 2026-10-25; D35-D40 decided the same day; MP1 met the same day: §23.8; MP2 met 2026-10-26: §23.9).
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -9989,7 +9989,7 @@ their rows except where its column says otherwise.
 | The voxel window at altitude | D8's column slabs keep the ground under a high viewer; the window never unloads | Same | Same | Suspended above the cut-over, the far field alone (P6.5), resumed under 0.85 of it with G49's guard | WM-MP2 |
 | Streaming ahead of a fall | The settle hold and the landing hold after the fact | Same | Same | The descent prefetch leads the streaming viewer under a descending camera (`ApplyDescentPrefetch`) | WM-MP3 **(done 2026-10-25, §23.8)** |
 | The frame of a teleport | The streaming viewer reads the previous frame's camera | Same | Same | The same for the window; the far field is updated again for this frame's camera (F4.3) | WM-MP4 **(done 2026-10-25, §23.8)** |
-| Precision far from the origin | One primitive, absolute float vertices and instances: clean to about 100 km (`Research/TRAVERSAL_LIMITS.md`) | Not reached (bounded) | As the plane; block faces show drift sooner | Region primitives and scatter regions (D23, G42) | WM-MP5 |
+| Precision far from the origin | One primitive, absolute float vertices and instances: clean to about 100 km (`Research/TRAVERSAL_LIMITS.md`) | Not reached (bounded) | As the plane; block faces show drift sooner | Region primitives and scatter regions (D23, G42) | WM-MP5 **(done 2026-10-26, §23.9)** |
 | Noise at scale | A 256-entry permutation: features repeat every 222-256 noise units; float noise inputs | Not reached | As the plane | Split-origin hashed lattice (D22) | WM-MP6 |
 | Simplex continuity | Gustavson's 0.6 kernel: steps across simplex cells (G43's measurement, §20.24) | Same | Same, as block steps | The tangent-corrected kernel (D27) | WM-MP7 |
 | The near band | The viewer's layer ± `NearWindowLayers` within `NearWindowRadius`, clipped to the terrain's height bounds only | Same | Same | Capped at the surface slab's top near the viewer (G52) | WM-MP8 **(measured 2026-10-25, not needed: the heightmap band is clipped to the terrain's bounds, §23.8)** |
@@ -10009,7 +10009,7 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 | WM-MP2 | **The cut-over on heightmaps.** `FDistanceBandLODStrategy::GetPlanetCutoverAltitude` becomes the mode's cut-over: the altitude over the generated surface (or the sea) under the streaming viewer, from the configuration's `VoxelCutoverAltitude` (the planet field renamed, with a redirect) or three view distances; `ComputeCutoverState` with the camera (G49) as it is; a suspended heightmap window loads no column (`GetColumnWindow` returns an empty window, keep included, as `IsInPlanetWindow` does), edits' pins released as on a planet; the cut-over is in force only while a far field is on (D38: nothing else would draw the ground); the chunk manager's `FVoxelCutoverTransition` record and the bench's `cutoverTransitions` as they are | VoxelWorlds | M | WM-MP1 |
 | WM-MP3 *(done 2026-10-25, §23.8)* | **The descent prefetch on heightmaps.** `ApplyDescentPrefetch` loses its planet gate: local up is +Z, the surface under the camera the generated surface height (or the sea), `ComputeDescentLead` unchanged; the resume altitude's guard (G49) follows from WM-MP2. Check first whether the landing hold (P6.5: a pawn falling within two chunks, or a second, of land whose collision is not cooked is held) runs on heightmap worlds; if it is planet-gated, open it too | VoxelWorlds, VCP | S-M | — |
 | WM-MP4 *(done 2026-10-25, §23.8)* | **The streaming viewer after a camera cut.** F4.3's second tick (`FVoxelFarFieldCameraTickFunction`, `TG_PostUpdateWork`) updates the far field only; the window's selection waits a frame. Extend it: after a cut of more than a chunk, the chunk manager builds a second query context from this frame's camera and runs the LOD evaluation once more for it (the code the pre-physics tick runs, its hysteresis unchanged), so the chunks under the new position are requested in the frame of the teleport, respawn or fast travel; no second evaluation while the camera moves less than a chunk (every normal frame). Measured by the frames between a `vox.TP` and its first generation request, and the settle hold's length | VoxelWorlds | S-M | — |
-| WM-MP5 | **Render regions and scatter regions on heightmaps.** `FVoxelRenderRegions::FromConfig` takes `voxel.Render.RegionChunks` in every world mode (the SphericalPlanet condition removed; 0 keeps one primitive), `voxel.Scatter.RegionChunks -1` gives every mode the planet's 4-chunk regions (D40); nothing else changes: the triplanar material is LWC-safe since P6.2 and the GPU MC mesher's corners are chunk-local. Measured on `VoxelDemo` at the origin (no cost expected: the window spans 4-9 regions) and 100 km and 500 km out (`vox.TP` there: seam cracks, crossfade shimmer and scatter jitter gone) | VoxelWorlds | S | — |
+| WM-MP5 *(done 2026-10-26, §23.9)* | **Render regions and scatter regions on heightmaps.** `FVoxelRenderRegions::FromConfig` takes `voxel.Render.RegionChunks` in every world mode (the SphericalPlanet condition removed; 0 keeps one primitive), `voxel.Scatter.RegionChunks -1` gives every mode the planet's 4-chunk regions (D40); nothing else changes: the triplanar material is LWC-safe since P6.2 and the GPU MC mesher's corners are chunk-local. Measured on `VoxelDemo` at the origin (no cost expected: the window spans 4-9 regions) and 100 km and 500 km out (`vox.TP` there: seam cracks, crossfade shimmer and scatter jitter gone) | VoxelWorlds | S | — |
 | WM-MP6 | **Split-origin hashed noise on heightmaps (D39).** `FVoxelCPUNoiseGenerator`'s FBM, Perlin and Simplex (and `FBMNoise.ush`, `PerlinNoise.ush`, `SimplexNoise.ush`) sample as `FVoxelPlanetNoise` / `PlanetNoise.ush` do: a per-chunk origin split in double into an integer lattice cell and a float fraction, per octave, plus a small float offset, the lattice hashed from integer cell coordinates (no 256 period), the same hash on the CPU and the GPU; the 2D terrain, continentalness and climate fields and the 3D cave and ore fields alike. Every heightmap world's terrain changes (the lattice's values), so `FVoxelWorldModeFactory::GenerationVersion` 2 → 3 and every heightmap save is refused and kept on disk (as D21 did for planets); `VoxelDemo`'s POIs, dungeons and NPC cells reseat themselves on the new terrain (their placement reads the surface). The alternative is in D39 | VoxelWorlds, parent (the content re-surveyed) | L | D39 |
 | WM-MP7 | **The continuous Simplex kernel on heightmaps.** `FVoxelCPUNoiseGenerator::Simplex3D` and `SimplexNoise.ush` take G43's tangent-corrected kernel (v² (v² + 0.4 v + 0.06), scaled 33.25), within 1.2% rms of the classic noise; the same `GenerationVersion` bump as WM-MP6, so the two land together | VoxelWorlds | S | D39 |
 | WM-MP8 *(measured, not needed 2026-10-25, §23.8)* | **The near band's ceiling on heightmaps.** Measure first (`voxel.Stream.AuditResidency`, the bench's loaded chunks per layer): how many of the near band's chunks above the surface slab a climbing viewer loads on `VoxelDemo` (a `vox.Fly` climb to 20,000 and 50,000 uu) and what they cost. If it matters, `GetColumnWindow`'s `NearMaxZ` is capped at the slab's top over the near disk (the column surface range's maximum over the columns within `NearWindowRadius`, plus `NearWindowLayers`), the band below unchanged (caves and digging) | VoxelWorlds | S | — |
@@ -10025,7 +10025,7 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 | Milestone | Items | Rough total | Done when |
 |-----------|-------|-------------|-----------|
 | MP1 Small fixes | WM-MP3, WM-MP4, WM-MP8, WM-MP9, WM-MP10 | ~4 days | Each item's check; `VoxelDemo` and island M benches unchanged within batch noise; the planet GPU parity lines identical. **Met 2026-10-25 (§23.8)** |
-| MP2 Regions | WM-MP5 | ~1 day | `VoxelDemo` at the origin within the control on frame and manager P95; at 500 km no seam crack, shimmer or scatter jitter in the survey; the planet unchanged |
+| MP2 Regions | WM-MP5 | ~1 day | `VoxelDemo` at the origin within the control on frame and manager P95; at 500 km no seam crack, shimmer or scatter jitter in the survey; the planet unchanged. **Met 2026-10-26 (§23.9)** |
 | MP3 Altitude | WM-MP1, WM-MP2, WM-MP11 | ~2.5 weeks | From the ground on `VoxelDemo`, island M and `Review_Cubic` the terrain reaches the horizon with no gap, step or far-field floor through a dug hole; a `vox.FlyTo` to three view distances and back lands on cooked ground with the window suspended and resumed once; the far field's cost reported and within the D3 budget |
 | MP4 Noise | WM-MP6, WM-MP7 | ~1 week | No repeat over 10⁶ noise units on the plane; no step across simplex cells; the GPU equal to the CPU (parity CRCs re-baselined once); heightmap saves refused at `GenerationVersion` 3; `VoxelDemo`'s content re-surveyed and the QA rows that depend on places re-run |
 | Exit | WM-MP12 to WM-MP14 | ~1 week | §23.6 met; suites green headless and in the editor; every planet row of §20's exit check unchanged |
@@ -10183,3 +10183,49 @@ chord and perimeter benches run with MP3's changes, which move the window.
 PRs: draquel/VoxelWorlds#164 (`feat/mp1-mode-parity`), draquel/VoxelCharacterPlugin#35 (`feat/mp1-mode-parity`), draquel/UE5_PluginDev#172 (`claude/mp1-mode-parity`)
 (VoxelWorldPOI, the gitlinks, the doc map); merge VoxelWorlds and VoxelCharacterPlugin first, then re-point the parent's
 gitlinks at their merge commits.
+
+### 23.9 MP2 results: regions in every world mode (2026-10-26)
+
+Bases: VoxelWorlds `6b5a95c`, UE5_PluginDev `8b0ad90` (MP1 merged); branches `feat/mp2-regions` (VoxelWorlds), `claude/mp2-regions`
+(parent). Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree (`-NoHotReloadFromIDE`); tests
+headless and in a worktree editor; benches in that editor on `VoxelDemo`.
+
+| ID | Built | Tests |
+|----|-------|-------|
+| WM-MP5 | `FVoxelRenderRegions::FromConfig` takes `voxel.Render.RegionChunks` in every world mode (the SphericalPlanet condition removed; 0 = one primitive at the origin, the rule heightmap worlds had), and `voxel.Scatter.RegionChunks -1` gives every mode the planet's 4-chunk scatter regions (D40). Nothing else changed: the renderer's region components, the scatter renderer's HISMs per region, the LWC-safe triplanar position (P6.2) and the chunk-local GPU MC corners already served both kinds. Docs: `VoxelRenderRegions.h`, `RENDERING_SYSTEM.md`, `SCATTER_SYSTEM.md`, `WORLD_MODES.md`, `Research/TRAVERSAL_LIMITS.md` (the renderer's ~100 km ceiling is gone; what still degrades far out on a heightmap world is the noise, MP4) | `Rendering.Planet.RegionPrecision` (now the plane too), `Scatter.HISMBatch.Regions` |
+
+**Precision.** `Rendering.Planet.RegionPrecision` on a plane (chunks of 64 voxels of 75 uu, regions of 16 chunks, 2,000
+vertices a site): a vertex's world position against the double reference, with regions and with absolute floats (the
+rule before):
+
+| Site | Regions | Absolute float |
+|------|---------|----------------|
+| 100 km east | 0.0010 uu | 0.50 uu |
+| 1,000 km east | 0.0005 uu | 4.99 uu |
+| 500 km south-east | 0.0039 uu | 4.18 uu |
+
+The renderer keeps one component per region with content on a plane, each at its region's origin, and the scatter test's
+default (four chunks in one 4-chunk region) draws the same instances as regions of one chunk.
+
+**Live on `VoxelDemo`** (the worktree editor; `voxel.Render.RegionChunks` 16 / `voxel.Scatter.RegionChunks -1` against 0 / 0,
+each read at PIE start, so a fresh PIE per rule):
+
+- A static survey camera (2,500 uu up, 45° down) at the spawn, 100 km east and 500 km east, two shots 2 s apart and a
+  third 10 s later: the mean absolute pixel change between the first two is 0.74 / 0.69 (100 km, regions / none) and
+  0.93 / 0.92 (500 km), the same under both rules (what moves is wind and shadows); the 500 km shots show the same clean
+  coast, no crack or offset, under both. At 500 km an absolute float is 4 uu coarse, which this view does not resolve;
+  the test above measures it. The spawn's shots differ between the two PIEs by the clock (lighting), not by the rule.
+- The 40,000 uu chord at 1,500 uu/s from the spawn, three fresh PIEs per rule (medians, regions on / off): frame P95
+  20.23 / 20.21 ms, manager P95 5.50 / 5.37 ms (run-to-run 5.35-5.62), catch-up 0.17 / 0.17 s, peak loaded chunks
+  1,186 / 1,184, mesh batches drawn P95 349 / 347 (the window spans a few regions, each a primitive), LOD re-meshes
+  524 / 524, peak voxel-systems memory 466 / 468 MB, scatter 131 / 131 MB, renderer GPU 21.7 / 21.7 MB. No cost: D3 met.
+
+**Tests.** Headless, the six suites: 653 of 653 (no new test; the two region tests extended). In the worktree editor the
+eight GPU parity tests: 8 of 8 (no generation code changed).
+
+**Left for later.** MP3 (the far field, the cut-over, the tooling) and MP4 (the noise, one `GenerationVersion` bump) as
+planned. A far-out heightmap A/B at 1,000 km would also show the noise's float steps (MP4), so the renderer's own gain
+is best read from the precision test.
+
+PRs: VoxelWorlds `feat/mp2-regions`, UE5_PluginDev `claude/mp2-regions` (the gitlink, the doc map); merge VoxelWorlds first, then
+re-point the parent's gitlink at its merge commit.
