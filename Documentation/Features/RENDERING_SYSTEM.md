@@ -154,7 +154,16 @@ AVoxelWorldTestActor
   its origin loses float precision as a big planet does): `FVoxelCustomVFRenderer` keeps one `UVoxelWorldComponent` per region at the region's origin (its min
   corner, in double) and routes each chunk, seam, water tile and fade to it, creating it on demand with the material,
   RVTs, atlas, LOD collection, distances and viewer replayed, and retiring it when it holds nothing
-  (`UVoxelWorldComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays.
+  (`UVoxelWorldComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays. A region holding
+  only water tiles draws them (world modes review G77, fixed 2026-10-26, §23.14): a water tile goes to the region of
+  its column's Z-0 chunk, which over a lake is air with no mesh, and such a component drew nothing, since the proxy's
+  `GetDynamicMeshElements` returned at once with no chunk mesh (a lake drawn without water in a block of chunk columns
+  at a region's corner, seen from altitude; the block came and went with a chunk mesh at the region's Z-0 layer). With
+  the same fix a component's render bounds (`CalcBounds`) are the union of its chunk meshes and its water tiles' boxes
+  (`WaterTileWorldBounds`), padded by a chunk, and the scene's copy of them is sent by the component's tick
+  (`MarkRenderTransformDirty` when they moved), which every bounds change schedules (`RequestRenderBoundsRefresh`;
+  the component ticks only while a fade runs, so a region whose content changed without a fade kept the scene's
+  registration-time box).
 - Heightmap worlds keep one region: a single component at the world origin, as before.
 - The scene proxy stores vertices relative to its component's location (`FVoxelSceneProxy::RenderOrigin`,
   `ToRenderOffset`), so a float offset is at most a region across (under 0.01 uu anywhere;

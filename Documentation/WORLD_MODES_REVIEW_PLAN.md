@@ -10348,7 +10348,7 @@ The chord was also run on `Review_Cubic` by mistake (the override not cleared) b
 
 | ID | Finding | Status |
 |----|---------|--------|
-| G77 | On `VoxelDemo` (and `Review_Cubic`, the same terrain) the water tiles are dry in a block of columns west of the spawn's lake where the lake continues (around X 8,000-16,000, Y -20,000 to -40,000 from the spawn, 2-4 columns wide and 4 long): `voxel.Water.Stats` reads `dry (its tile has no water in this column)` there while the lake bed is drawn (a column-aligned grey strip from above). Present with the far field off from the PIE's start, so not MP3's (nothing in MP3 writes water flags or tiles); not traced | Recorded |
+| G77 | On `VoxelDemo` (and `Review_Cubic`, the same terrain) the water tiles are dry in a block of columns west of the spawn's lake where the lake continues (around X 8,000-16,000, Y -20,000 to -40,000 from the spawn, 2-4 columns wide and 4 long): `voxel.Water.Stats` reads `dry (its tile has no water in this column)` there while the lake bed is drawn (a column-aligned grey strip from above). Present with the far field off from the PIE's start, so not MP3's (nothing in MP3 writes water flags or tiles); not traced | **Fixed 2026-10-26 (§23.14)**: MP2's render regions, not the tiles: a region component holding only water tiles (air over a lake at its Z-0 layer) drew nothing, since the proxy's draw returned with no chunk mesh |
 
 PRs: draquel/VoxelWorlds#166 (`feat/mp3-altitude`), draquel/UE5_PluginDev#174 (`claude/mp3-altitude`: `UVoxelDebugSubsystem`, the gitlink, the doc map);
 merge VoxelWorlds first, then re-point the parent's gitlink at its merge commit.
@@ -10551,7 +10551,7 @@ code path per row, and what stays planet-only); `LOD_SYSTEM.md` (the far field a
 `RENDERING_SYSTEM.md` (regions in every mode), `NOISE_LIBRARY.md` (one noise), `Research/TRAVERSAL_LIMITS.md` (no known
 ceiling on heightmap worlds after WM-MP5 and MP4) and the plugin instructions were brought up to date by MP2-MP4 and
 checked here; the parent's doc map and `vox.*` table carry the exit's summary; §23.11's parity table corrected (above).
-§23 is closed: every item done, every §23.6 row met, G77 open and recorded, G78 fixed the same day (§23.13). Next free
+§23 is closed: every item done, every §23.6 row met, G78 (§23.13) and G77 (§23.14) fixed the same day. Next free
 finding G79, decision D42.
 
 ### 23.13 G78 fixed: the far-field gate on the cut-over in every mode (2026-10-26)
@@ -10591,3 +10591,47 @@ field on the same flight suspends once at 120,542 over the surface and resumes o
 at the pawn, so its mesh fills the frame's edges) show the sea sphere's limb from 150,000 either way; the window's
 state is the log's. Without a far field the cvar now means on a planet what it means on a plane: nothing past the
 window but the sea, the window kept at any altitude.
+
+### 23.14 G77 fixed: a render region holding only water tiles draws them (2026-10-26)
+
+**What it was.** Not the water tiles. `voxel.Water.TileAudit` (new: every voxel column of every loaded chunk column
+against the generated surface, and each chunk's stored mask against one rebuilt from its voxels) finds the tiles
+complete on `VoxelDemo`: 0 columns under the water plane without water in 219-254 chunk columns at the spawn and 20,000
+uu east (the one chunk column with 10 dry columns is a pond no flood reaches, with no water flag in its voxels), no
+stale mask; the MP3 "dry" readings were `voxel.Water.Stats` sampled on land beside the lake (the first probe here did
+the same at 41 chunk-column centres). The grey block is the lake's **bed drawn without its water** in every chunk column
+of one render region (MP2): the tiles of chunk columns X 0-2, Y −17 to −20 belong to region (0, −2, 0), the region of
+their column's Z-0 chunk, and that layer over the lake is air with no mesh, so the region's component holds water tiles
+and nothing else; `FVoxelSceneProxy::GetDynamicMeshElements` returned at its top when the proxy held no chunk mesh, so
+the component drew nothing. Traced with the renderer side of the audit (`IVoxelMeshRenderer::GetWaterTileDrawInfo`:
+the region and component, its bounds, the proxy's mesh for the tile, the frames since a main view drew it, the proxy's
+relevance and draw calls): from the exit's camera 50,000 uu over the spawn the proxy held the four probed tiles with
+valid buffers and bounds, the main view computed its relevance every frame with the frustum test passing, and its draw
+was never called; from a camera 20,000 uu over the block a chunk of the region's Z-0 layer streamed in, the proxy drew
+every frame and the block was blue; back at 50,000 the chunk unloaded and the draws stopped. Before MP2 the single
+component always held chunk meshes. Two more things found on the way and fixed with it: the component's render bounds
+(`CalcBounds`) were the union of its chunk meshes alone, so a water-only region bounded a chunk-sized box at its
+origin (the engine would cull it once the draw ran), and the scene's copy of the bounds is sent only by the component's
+tick, which runs only while a fade does, so a region whose content changed without a fade kept its registration-time
+box.
+
+**Fix** (VoxelWorlds, `fix/g77-water-tile-bounds`). `GetDynamicMeshElements` returns early only with neither chunk
+meshes nor water tiles; `UVoxelWorldComponent::WaterTileWorldBounds` (each tile's world box, kept with its key) is part
+of `CalcBounds`; every bounds change schedules a tick that sends them to the scene (`RequestRenderBoundsRefresh`:
+`bRenderBoundsStale` and the tick enabled; `AdvanceCrossfades` turns it off again after the refresh when no fade runs).
+Diagnostics kept: `voxel.Water.TileAudit [maxList] [chunkX chunkY]`, `voxel.Water.ResendTiles`, the renderer's
+`GetWaterTileDrawInfo` (the proxy records the frame each tile was last drawn and its relevance and draw counts).
+
+**Tests.** `Rendering.WaterTile.ComponentBounds` (new, headless): a component with no chunk mesh bounds a water tile
+(before: the chunk-sized fallback box), two tiles, a chunk mesh and the tiles together, a removed tile and cleared tiles
+leave, and a tile schedules the tick. The draw path's early return has no automated test (the proxy's draw runs only
+with a view); the live check below is its evidence. The six suites 671 of 671 headless.
+
+**Live** (`VoxelDemo`, the worktree editor, `Saved/ClaudeScripts/g77_live2.py`, `g77_compare.py`): from the exit's
+camera (3,000 uu west of the spawn, 50,000 up, pitch −80) the block's four probed tiles (chunk columns (0, −17),
+(1, −17), (0, −18), (1, −18), region (0, −2, 0)) are drawn every frame ("drawn 0 frames ago", the proxy's main-view
+draws advancing with the frames; before the fix 0 draws with the relevance computed every frame), after a
+`voxel.Water.ResendTiles`, from 20,000 over the block and back at 50,000 alike; the grey lake-bed pixels in the
+450 x 300 window of that view where the block sat, 25,043 in the exit's shot (`mp3_demo_x_high_e4_a.png`) and 25,034
+on the merged build the same day, are 117-127 on the fix (`g77i_high{1,2,3}.png`: the lake's water edge to edge). No
+fall-through line, nothing else in the frame changed.

@@ -339,6 +339,16 @@ public:
 	 */
 	bool GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const;
 
+	/**
+	 * What this component and its proxy hold for a water tile and when it was last drawn (world modes review G77;
+	 * flushes rendering commands). Game thread.
+	 *
+	 * @param TileCoord The tile (chunk column)
+	 * @param Out       Receives the component's side (key, bounds, registration, proxy) and the proxy's line
+	 * @return True if the proxy holds a mesh for the tile
+	 */
+	bool GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const;
+
 	// ==================== Configuration ====================
 
 	/**
@@ -624,6 +634,14 @@ private:
 	/** Water tiles sent to the proxy (HasRenderContent). */
 	TSet<FIntVector2> WaterTileKeys;
 
+	/**
+	 * Each water tile's world box, part of the component's bounds (CalcBounds; guarded by ChunkInfoLock). A region
+	 * component whose chunks hold no mesh (air above a lake at the water tiles' Z-0 layer) used to bound only a
+	 * chunk-sized box at its location, so the engine culled its water tiles: a lake drawn without water in a block of
+	 * chunk columns at a region's corner (world modes review G77).
+	 */
+	TMap<FIntVector2, FBox> WaterTileWorldBounds;
+
 	// ==================== Batched Render Operations ====================
 	// Instead of sending individual render commands, we batch operations
 	// and flush them once per frame to reduce render command overhead
@@ -778,6 +796,15 @@ private:
 
 	/** CalcBounds produced new bounds that the render scene has not received yet (sent once per tick). */
 	mutable bool bRenderBoundsStale = false;
+
+	/**
+	 * Have the next tick send the bounds to the render scene (TickComponent: UpdateBounds, then MarkRenderTransformDirty
+	 * when they moved), and make sure a tick comes: the component ticks only while fades run, so a region whose content
+	 * changes without a fade (a water tile added to a region with no chunk mesh, a chunk with voxel.MeshFade 0) never
+	 * refreshed the scene's copy of its bounds, which stayed the registration-time box at the region's origin, and the
+	 * engine culled the region wherever that box was out of view (world modes review G77).
+	 */
+	void RequestRenderBoundsRefresh();
 
 	/** The bounds last pushed to the render scene (MarkRenderTransformDirty), to skip no-op updates. */
 	FBox LastSentRenderBounds = FBox(ForceInit);

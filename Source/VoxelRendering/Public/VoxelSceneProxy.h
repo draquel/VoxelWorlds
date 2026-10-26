@@ -435,6 +435,15 @@ public:
 	bool GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const;
 
 	/**
+	 * What the proxy holds for a water tile and when a main view last drew it (world modes review G77). Render thread.
+	 *
+	 * @param TileCoord The tile (chunk column)
+	 * @param Out       Receives a line: vertices, bounds, the frames since it was drawn (or never)
+	 * @return True if the proxy holds a mesh for the tile
+	 */
+	bool GetWaterTileDrawInfo_RenderThread(const FIntVector2& TileCoord, FString& Out) const;
+
+	/**
 	 * The crossfade state the proxy holds, for diagnostics (voxel.MeshFade.Stats): fade states and retained Previous
 	 * meshes of chunk interiors and seam buckets, up to MaxEntries of the chunk ones, and for a focus chunk what the
 	 * proxy holds (GetChunkDrawInfo_RenderThread) and what the last frame drew of it. Render thread.
@@ -537,6 +546,21 @@ private:
 
 	/** Per-tile water render data (FIntVector2 key = XY chunk column) */
 	TMap<FIntVector2, FVoxelChunkRenderData> WaterTileRenderData;
+
+	/** The render-thread frame each water tile was last drawn in by a main view (G77 diagnostics; ChunkDataLock). */
+	mutable TMap<FIntVector2, uint32> WaterTileDrawnFrame;
+
+	/** The render-thread frame GetDynamicMeshElements last ran for a main view, and how often it has (G77 diagnostics). */
+	mutable uint32 LastMainViewFrame = 0;
+	mutable uint32 MainViewCalls = 0;
+	mutable uint32 RelevanceCalls = 0;
+	mutable uint32 LastRelevanceFrame = 0;
+	mutable bool bLastShown = false;
+	mutable uint32 MainRelevanceCalls = 0;
+	mutable uint32 LastMainRelevanceFrame = 0;
+	mutable uint32 ShadowGatherCalls = 0;
+	mutable FVector LastRelevanceViewOrigin = FVector::ZeroVector;
+	mutable bool bLastRelevanceFrustumHit = false;
 
 	/** Per-tile water vertex buffers */
 	TMap<FIntVector2, TSharedPtr<FVoxelLocalVertexBuffer>> WaterTileVertexBuffers;

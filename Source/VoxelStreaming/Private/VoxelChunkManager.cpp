@@ -8808,6 +8808,207 @@ bool UVoxelChunkManager::GetWaterTileColumn(const FVector& WorldPosition, TArray
 	return true;
 }
 
+void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailColumn)
+{
+	if (!Configuration || !UsesWaterTiles())
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.TileAudit: no water tiles in this world."));
+		return;
+	}
+	const int32 CS = Configuration->ChunkSize;
+	const double VS = Configuration->VoxelSize;
+	const double ChunkWorld = CS * VS;
+	const double WaterZ = Configuration->WaterLevel;
+	const int32 WaterLayer = FMath::FloorToInt32((WaterZ - Configuration->WorldOrigin.Z) / ChunkWorld);
+
+	struct FColumnAudit
+	{
+		FIntVector2 Tile = FIntVector2(0, 0);
+		bool bTile = false;
+		int32 Wet = 0;
+		int32 ShouldBeWet = 0;
+		int32 Missing = 0;
+		int32 Extra = 0;
+	};
+	// Every chunk column with a tile or a loaded chunk at the water plane's layer.
+	TSet<FIntVector2> Columns;
+	for (const TPair<FIntVector, FVoxelChunkState>& Pair : ChunkStates)
+	{
+		if (Pair.Key.Z == WaterLayer && Pair.Value.Descriptor.HasVoxelDataAvailable())
+		{
+			Columns.Add(FIntVector2(Pair.Key.X, Pair.Key.Y));
+		}
+	}
+	for (const TPair<FIntVector2, FWaterTileState>& Pair : WaterTiles)
+	{
+		Columns.Add(Pair.Key);
+	}
+	TArray<FColumnAudit> Audits;
+	int64 TotalWet = 0, TotalShould = 0, TotalMissing = 0, TotalExtra = 0;
+	int32 NoTileColumns = 0, NoTileMissing = 0, ColumnsMissing = 0;
+	for (const FIntVector2& TileCoord : Columns)
+	{
+		FColumnAudit A;
+		A.Tile = TileCoord;
+		const FWaterTileState* Tile = WaterTiles.Find(TileCoord);
+		A.bTile = Tile != nullptr;
+		TArray<bool> Wet;
+		Wet.SetNumZeroed(CS * CS);
+		if (Tile)
+		{
+			for (const TPair<int32, TArray<bool>>& Layer : Tile->PartialMasks)
+			{
+				for (int32 I = 0; I < CS * CS && I < Layer.Value.Num(); ++I)
+				{
+					Wet[I] = Wet[I] || Layer.Value[I];
+				}
+			}
+		}
+		for (int32 Y = 0; Y < CS; ++Y)
+		{
+			for (int32 X = 0; X < CS; ++X)
+			{
+				const double WX = Configuration->WorldOrigin.X + (static_cast<double>(TileCoord.X) * CS + X + 0.5) * VS;
+				const double WY = Configuration->WorldOrigin.Y + (static_cast<double>(TileCoord.Y) * CS + Y + 0.5) * VS;
+				const double Ground = GetGeneratedSurfaceHeight(WX, WY);
+				const bool bShould = Ground < WaterZ - VS; // at least a voxel of water over the ground
+				const bool bWet = Wet[X + Y * CS];
+				A.Wet += bWet ? 1 : 0;
+				A.ShouldBeWet += bShould ? 1 : 0;
+				A.Missing += (bShould && !bWet) ? 1 : 0;
+				A.Extra += (bWet && Ground > WaterZ + VS) ? 1 : 0;
+			}
+		}
+		TotalWet += A.Wet;
+		TotalShould += A.ShouldBeWet;
+		TotalMissing += A.Missing;
+		TotalExtra += A.Extra;
+		if (!A.bTile)
+		{
+			++NoTileColumns;
+			NoTileMissing += A.Missing;
+		}
+		ColumnsMissing += A.Missing > 0 ? 1 : 0;
+		Audits.Add(A);
+	}
+	Audits.Sort([](const FColumnAudit& L, const FColumnAudit& R) { return L.Missing > R.Missing; });
+	UE_LOG(LogVoxelStreaming, Warning,
+		TEXT("voxel.Water.TileAudit: water plane Z %.0f (chunk layer %d); %d chunk columns (%d tiles, %d loaded at the plane's layer with no tile); voxel columns wet %lld, under the plane by a voxel or more %lld, missing (under the plane, dry) %lld in %d chunk columns (%d of them in columns with no tile), extra (wet over the plane) %lld"),
+		WaterZ, WaterLayer, Columns.Num(), WaterTiles.Num(), NoTileColumns, TotalWet, TotalShould, TotalMissing, ColumnsMissing, NoTileMissing, TotalExtra);
+
+	int32 Listed = 0;
+	for (const FColumnAudit& A : Audits)
+	{
+		const bool bDetail = DetailColumn.X == A.Tile.X && DetailColumn.Y == A.Tile.Y;
+		if (!bDetail && (A.Missing == 0 || Listed >= MaxList))
+		{
+			continue;
+		}
+		if (!bDetail)
+		{
+			++Listed;
+		}
+		const double CX = Configuration->WorldOrigin.X + (A.Tile.X + 0.5) * ChunkWorld;
+		const double CY = Configuration->WorldOrigin.Y + (A.Tile.Y + 0.5) * ChunkWorld;
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("  chunk column (%d, %d) centre (%.0f, %.0f): tile %s; wet %d, under the plane %d, missing %d, extra %d"),
+			A.Tile.X, A.Tile.Y, CX, CY, A.bTile ? TEXT("yes") : TEXT("NO"), A.Wet, A.ShouldBeWet, A.Missing, A.Extra);
+		const FWaterTileState* Tile = WaterTiles.Find(A.Tile);
+		if (Tile && MeshRenderer)
+		{
+			FString RendererLine;
+			MeshRenderer->GetWaterTileDrawInfo(A.Tile, RendererLine);
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("    tile dirty %s, in the dirty queue %s; renderer: %s"),
+				Tile->bDirty ? TEXT("yes") : TEXT("no"), DirtyWaterTileSet.Contains(A.Tile) ? TEXT("yes") : TEXT("no"), *RendererLine);
+		}
+		for (TPair<FIntVector, FVoxelChunkState>& Pair : ChunkStates)
+		{
+			if (Pair.Key.X != A.Tile.X || Pair.Key.Y != A.Tile.Y)
+			{
+				continue;
+			}
+			const FIntVector Coord = Pair.Key;
+			FVoxelChunkState& State = Pair.Value;
+			const TCHAR* Residency = TEXT("?");
+			switch (State.Descriptor.Residency)
+			{
+			case EVoxelDataResidency::Resident: Residency = TEXT("resident"); break;
+			case EVoxelDataResidency::Uniform: Residency = TEXT("uniform"); break;
+			case EVoxelDataResidency::Compressed: Residency = TEXT("compressed"); break;
+			default: Residency = TEXT("empty"); break;
+			}
+			int32 StoredWet = -1;
+			const TArray<bool>* Stored = Tile ? Tile->PartialMasks.Find(Coord.Z) : nullptr;
+			if (Stored)
+			{
+				StoredWet = 0;
+				for (const bool B : *Stored)
+				{
+					StoredWet += B ? 1 : 0;
+				}
+			}
+			// The mask rebuilt from the chunk's voxels, as UpdateWaterTileContribution reads them.
+			int32 FreshWet = -1, Stale = 0, FreshMissing = 0;
+			if (State.Descriptor.HasVoxelDataAvailable())
+			{
+				TSharedPtr<const TArray<FVoxelData>> EditMerged;
+				if (EditManager && EditManager->ChunkHasEdits(Coord))
+				{
+					EditMerged = GetEditMergedSnapshot(Coord);
+				}
+				else if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State.Descriptor.IsCompact())
+				{
+					EditMerged = GetSeamVoxelSnapshot(Coord, State);
+				}
+				TArray<bool> Fresh;
+				Fresh.SetNumZeroed(CS * CS);
+				FVoxelWaterMesher::BuildColumnMask(EditMerged.IsValid() ? *EditMerged : State.Descriptor.GetVoxelDataForRead(), CS, Fresh);
+				FreshWet = 0;
+				for (int32 Y = 0; Y < CS; ++Y)
+				{
+					for (int32 X = 0; X < CS; ++X)
+					{
+						const int32 I = X + Y * CS;
+						FreshWet += Fresh[I] ? 1 : 0;
+						if (Stored && (*Stored)[I] != Fresh[I])
+						{
+							++Stale;
+						}
+						if (!Stored && Fresh[I])
+						{
+							++Stale; // a contribution the tile never received
+						}
+						if (Coord.Z == WaterLayer && !Fresh[I])
+						{
+							const double WX = Configuration->WorldOrigin.X + (static_cast<double>(Coord.X) * CS + X + 0.5) * VS;
+							const double WY = Configuration->WorldOrigin.Y + (static_cast<double>(Coord.Y) * CS + Y + 0.5) * VS;
+							FreshMissing += GetGeneratedSurfaceHeight(WX, WY) < WaterZ - VS ? 1 : 0;
+						}
+					}
+				}
+			}
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("    layer Z %d: state %d, %s (version %u), edits %s, water settled %s, LOD %d (meshed %d); stored mask wet %d; rebuilt wet %d, stale (stored != rebuilt) %d%s"),
+				Coord.Z, static_cast<int32>(State.State), Residency, State.Descriptor.ContentVersion,
+				(EditManager && EditManager->ChunkHasEdits(Coord)) ? TEXT("yes") : TEXT("no"), State.bWaterSettled ? TEXT("yes") : TEXT("no"),
+				State.LODLevel, State.MeshedLODLevel, StoredWet, FreshWet, Stale,
+				Coord.Z == WaterLayer ? *FString::Printf(TEXT(", under the plane with no water flag in the voxels %d"), FreshMissing) : TEXT(""));
+		}
+	}
+}
+
+int32 UVoxelChunkManager::ResendWaterTiles()
+{
+	for (TPair<FIntVector2, FWaterTileState>& Tile : WaterTiles)
+	{
+		Tile.Value.bDirty = true;
+		if (!DirtyWaterTileSet.Contains(Tile.Key))
+		{
+			DirtyWaterTileQueue.Add(Tile.Key);
+			DirtyWaterTileSet.Add(Tile.Key);
+		}
+	}
+	return WaterTiles.Num();
+}
+
 void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoord)
 {
 	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
@@ -11018,6 +11219,53 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 					: FString::Printf(TEXT("wet, from chunk layer(s) Z %s"), *Layers);
 				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: water tile column at (%.0f, %.0f): %s"),
 					*TargetWorld->GetName(), Column.X, Column.Y, *State);
+			}
+		}
+	}));
+
+// Console: voxel.Water.TileAudit [maxList=8] [chunkX chunkY]
+// G77: the water tiles against the generated surface (UVoxelChunkManager::AuditWaterTiles).
+static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterTileAuditCmd(
+	TEXT("voxel.Water.TileAudit"),
+	TEXT("G77: audit the 2D water tiles against the generated surface: voxel columns under the water plane that no tile marks ")
+	TEXT("wet, the worst chunk columns with their chunks (residency, edits, settled, LOD, the stored and the rebuilt mask). ")
+	TEXT("Args: [maxList=8] [chunkX chunkY: a chunk column to detail]."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.TileAudit: no PIE/Game world"));
+			return;
+		}
+		const int32 MaxList = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 8;
+		const FIntPoint Detail = Args.Num() >= 3 ? FIntPoint(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2])) : FIntPoint(MAX_int32, MAX_int32);
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			if (UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>())
+			{
+				CM->AuditWaterTiles(MaxList, Detail);
+			}
+		}
+	}));
+
+// Console: voxel.Water.ResendTiles
+// G77 diagnostics: mark every water tile dirty so its mesh is generated and sent to the renderer again.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterResendTilesCmd(
+	TEXT("voxel.Water.ResendTiles"),
+	TEXT("G77: send every 2D water tile's mesh to the renderer again (every tile marked dirty)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+		if (!TargetWorld)
+		{
+			return;
+		}
+		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		{
+			if (UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>())
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.ResendTiles: %d tile(s) marked dirty"), CM->ResendWaterTiles());
 			}
 		}
 	}));
