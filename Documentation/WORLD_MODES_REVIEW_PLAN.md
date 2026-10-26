@@ -10227,5 +10227,5 @@ eight GPU parity tests: 8 of 8 (no generation code changed).
 planned. A far-out heightmap A/B at 1,000 km would also show the noise's float steps (MP4), so the renderer's own gain
 is best read from the precision test.
 
-PRs: draquel/VoxelWorlds#165 (`feat/mp2-regions`), draquel/UE5_PluginDev (`claude/mp2-regions`: the gitlink, the doc map); merge VoxelWorlds first, then
+PRs: draquel/VoxelWorlds#165 (`feat/mp2-regions`), draquel/UE5_PluginDev#173 (`claude/mp2-regions`: the gitlink, the doc map); merge VoxelWorlds first, then
 re-point the parent's gitlink at its merge commit.
