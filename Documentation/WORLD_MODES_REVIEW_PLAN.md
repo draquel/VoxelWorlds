@@ -22,7 +22,7 @@ planet on the CPU): plan and results in §15. Spherical Phase 2 (the planet on t
 Spherical Phase 3 (walkable): plan and results in §17. Spherical Phase 4 (systems): plan in §18.1, results (met
 2026-10-17) in §18.2. Spherical Phase 5 (places): plan in §19.1, results (met 2026-10-17) in §19.2. Spherical
 Phase 6 (big planets and orbit): scope, survey and plan in §20 (planned 2026-10-17, its decisions D17-D24 taken the same day; not started).
-Cubic as a game world (KC6, KC7, KC9, KC12, in scope since D1 was amended 2026-10-24): plan and results in §21 (met 2026-10-24: §21.2). Mode parity (the planet's features on heightmap worlds): plan in §23 (planned 2026-10-25; D35-D40 decided the same day, MP1 started).
+Cubic as a game world (KC6, KC7, KC9, KC12, in scope since D1 was amended 2026-10-24): plan and results in §21 (met 2026-10-24: §21.2). Mode parity (the planet's features on heightmap worlds): plan in §23 (planned 2026-10-25; D35-D40 decided the same day; MP1 met the same day: §23.8).
 
 File references are relative to `Plugins/` unless noted. Line numbers are as of VoxelWorlds `a85b8c6` and
 UE5_PluginDev `2f3e6e0`. The R22 map-overlay merge that followed (VoxelWorlds `cc706f3`) added
@@ -9987,14 +9987,14 @@ their rows except where its column says otherwise.
 |---------|-------|--------|-------|--------|------|
 | Terrain past the view distance | Nothing (sky under the window's edge) | The far ocean past R+F (`FVoxelFarOcean`, M6); the island's land ends at the window | As its base; cubic's view distance is its only LOD, so the edge is closer | The far field to the horizon and from orbit (`FVoxelPlanetFarField`, P6.4), materials blended (G45) | WM-MP1 |
 | The voxel window at altitude | D8's column slabs keep the ground under a high viewer; the window never unloads | Same | Same | Suspended above the cut-over, the far field alone (P6.5), resumed under 0.85 of it with G49's guard | WM-MP2 |
-| Streaming ahead of a fall | The settle hold and the landing hold after the fact | Same | Same | The descent prefetch leads the streaming viewer under a descending camera (`ApplyDescentPrefetch`) | WM-MP3 |
-| The frame of a teleport | The streaming viewer reads the previous frame's camera | Same | Same | The same for the window; the far field is updated again for this frame's camera (F4.3) | WM-MP4 |
+| Streaming ahead of a fall | The settle hold and the landing hold after the fact | Same | Same | The descent prefetch leads the streaming viewer under a descending camera (`ApplyDescentPrefetch`) | WM-MP3 **(done 2026-10-25, §23.8)** |
+| The frame of a teleport | The streaming viewer reads the previous frame's camera | Same | Same | The same for the window; the far field is updated again for this frame's camera (F4.3) | WM-MP4 **(done 2026-10-25, §23.8)** |
 | Precision far from the origin | One primitive, absolute float vertices and instances: clean to about 100 km (`Research/TRAVERSAL_LIMITS.md`) | Not reached (bounded) | As the plane; block faces show drift sooner | Region primitives and scatter regions (D23, G42) | WM-MP5 |
 | Noise at scale | A 256-entry permutation: features repeat every 222-256 noise units; float noise inputs | Not reached | As the plane | Split-origin hashed lattice (D22) | WM-MP6 |
 | Simplex continuity | Gustavson's 0.6 kernel: steps across simplex cells (G43's measurement, §20.24) | Same | Same, as block steps | The tangent-corrected kernel (D27) | WM-MP7 |
-| The near band | The viewer's layer ± `NearWindowLayers` within `NearWindowRadius`, clipped to the terrain's height bounds only | Same | Same | Capped at the surface slab's top near the viewer (G52) | WM-MP8 |
-| The world map at scale | Every marker in the view's range (`GetMarkersInArea`), a redraw per tile image, `ExploreAll` unbounded | The same, with a bounded tile count | Same | A marker cap around the view's centre (G50), tile redraws every 2 s at most (G51), `voxel.Map.ExploreAllMaxTiles` | WM-MP9 |
-| The first spawn over the sea | A ring search within `MaxSearchRadius`; past it the pawn waits in the water | The same, inside the bounds | Same | The ring search, then the whole planet (`FindPlanetSpawnPointAtScale`, G36) | WM-MP10 |
+| The near band | The viewer's layer ± `NearWindowLayers` within `NearWindowRadius`, clipped to the terrain's height bounds only | Same | Same | Capped at the surface slab's top near the viewer (G52) | WM-MP8 **(measured 2026-10-25, not needed: the heightmap band is clipped to the terrain's bounds, §23.8)** |
+| The world map at scale | Every marker in the view's range (`GetMarkersInArea`), a redraw per tile image, `ExploreAll` unbounded | The same, with a bounded tile count | Same | A marker cap around the view's centre (G50), tile redraws every 2 s at most (G51), `voxel.Map.ExploreAllMaxTiles` | WM-MP9 **(done 2026-10-25, §23.8)** |
+| The first spawn over the sea | A ring search within `MaxSearchRadius`; past it the pawn waits in the water | The same, inside the bounds | Same | The ring search, then the whole planet (`FindPlanetSpawnPointAtScale`, G36) | WM-MP10 **(done 2026-10-25, §23.8)** |
 | Altitude QA tooling | `vox.Fly`; the bench's `dir=up` | Same | Same | `vox.FlyTo`, `vox.Orbit`, the bench's `climb=` and `descend=` with altitude and reach columns | WM-MP11 |
 | Everything else the review touched | The same code as the planet: biome dither, shading normals, HISM batching, snapshots and shells, water propagation, edit re-meshing, collision re-cooks, the undo budget, the minimap, MC seams | | | | — |
 
@@ -10007,14 +10007,14 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 |----|-----------|-------|------|-------|
 | WM-MP1 | **A heightmap far field.** The planet far field's patch builder, screen-space-error split, skirts, hole rule (a patch hidden once every chunk its surface passes through is drawn; band patches at the window's edge sunk a voxel), stand-in avoidance (VP4) and material mix (G45) behind a surface and a key that are not the sphere's: a quadtree per **root tile** of 2^k chunks on the XY grid (`FVoxelFarFieldTileKey`: tile, level, x, y), roots made around the viewer out to a configured far distance and released past it (the plane), or over the island's bounds to R+F with the far ocean beyond (D37); heights from the world mode's conditioned generated surface (what `UVoxelChunkManager::GetGeneratedSurfaceHeight` reads, thread-safe as the planet's `GetConditionedTerrainAltitude` is) and materials from `FVoxelSurfaceQuery` with the height rules; horizon culling by the view frustum alone (no occluding sphere); sea patches at `WaterLevel` where the terrain is under it; a cubic world's patches at the block-top surface (`FVoxelBlockSurface`) so the far field meets the blocks at the window's edge without a step; one procedural mesh component per patch at its own origin as today. `voxel.World.FarField` covers both kinds; `voxel.World.FarFieldStats` reports roots and patches per kind | VoxelWorlds, parent (`M_VoxelMaster` unchanged: the far-field pick is already in both masters) | XL | D36, D37 |
 | WM-MP2 | **The cut-over on heightmaps.** `FDistanceBandLODStrategy::GetPlanetCutoverAltitude` becomes the mode's cut-over: the altitude over the generated surface (or the sea) under the streaming viewer, from the configuration's `VoxelCutoverAltitude` (the planet field renamed, with a redirect) or three view distances; `ComputeCutoverState` with the camera (G49) as it is; a suspended heightmap window loads no column (`GetColumnWindow` returns an empty window, keep included, as `IsInPlanetWindow` does), edits' pins released as on a planet; the cut-over is in force only while a far field is on (D38: nothing else would draw the ground); the chunk manager's `FVoxelCutoverTransition` record and the bench's `cutoverTransitions` as they are | VoxelWorlds | M | WM-MP1 |
-| WM-MP3 | **The descent prefetch on heightmaps.** `ApplyDescentPrefetch` loses its planet gate: local up is +Z, the surface under the camera the generated surface height (or the sea), `ComputeDescentLead` unchanged; the resume altitude's guard (G49) follows from WM-MP2. Check first whether the landing hold (P6.5: a pawn falling within two chunks, or a second, of land whose collision is not cooked is held) runs on heightmap worlds; if it is planet-gated, open it too | VoxelWorlds, VCP | S-M | — |
-| WM-MP4 | **The streaming viewer after a camera cut.** F4.3's second tick (`FVoxelFarFieldCameraTickFunction`, `TG_PostUpdateWork`) updates the far field only; the window's selection waits a frame. Extend it: after a cut of more than a chunk, the chunk manager builds a second query context from this frame's camera and runs the LOD evaluation once more for it (the code the pre-physics tick runs, its hysteresis unchanged), so the chunks under the new position are requested in the frame of the teleport, respawn or fast travel; no second evaluation while the camera moves less than a chunk (every normal frame). Measured by the frames between a `vox.TP` and its first generation request, and the settle hold's length | VoxelWorlds | S-M | — |
+| WM-MP3 *(done 2026-10-25, §23.8)* | **The descent prefetch on heightmaps.** `ApplyDescentPrefetch` loses its planet gate: local up is +Z, the surface under the camera the generated surface height (or the sea), `ComputeDescentLead` unchanged; the resume altitude's guard (G49) follows from WM-MP2. Check first whether the landing hold (P6.5: a pawn falling within two chunks, or a second, of land whose collision is not cooked is held) runs on heightmap worlds; if it is planet-gated, open it too | VoxelWorlds, VCP | S-M | — |
+| WM-MP4 *(done 2026-10-25, §23.8)* | **The streaming viewer after a camera cut.** F4.3's second tick (`FVoxelFarFieldCameraTickFunction`, `TG_PostUpdateWork`) updates the far field only; the window's selection waits a frame. Extend it: after a cut of more than a chunk, the chunk manager builds a second query context from this frame's camera and runs the LOD evaluation once more for it (the code the pre-physics tick runs, its hysteresis unchanged), so the chunks under the new position are requested in the frame of the teleport, respawn or fast travel; no second evaluation while the camera moves less than a chunk (every normal frame). Measured by the frames between a `vox.TP` and its first generation request, and the settle hold's length | VoxelWorlds | S-M | — |
 | WM-MP5 | **Render regions and scatter regions on heightmaps.** `FVoxelRenderRegions::FromConfig` takes `voxel.Render.RegionChunks` in every world mode (the SphericalPlanet condition removed; 0 keeps one primitive), `voxel.Scatter.RegionChunks -1` gives every mode the planet's 4-chunk regions (D40); nothing else changes: the triplanar material is LWC-safe since P6.2 and the GPU MC mesher's corners are chunk-local. Measured on `VoxelDemo` at the origin (no cost expected: the window spans 4-9 regions) and 100 km and 500 km out (`vox.TP` there: seam cracks, crossfade shimmer and scatter jitter gone) | VoxelWorlds | S | — |
 | WM-MP6 | **Split-origin hashed noise on heightmaps (D39).** `FVoxelCPUNoiseGenerator`'s FBM, Perlin and Simplex (and `FBMNoise.ush`, `PerlinNoise.ush`, `SimplexNoise.ush`) sample as `FVoxelPlanetNoise` / `PlanetNoise.ush` do: a per-chunk origin split in double into an integer lattice cell and a float fraction, per octave, plus a small float offset, the lattice hashed from integer cell coordinates (no 256 period), the same hash on the CPU and the GPU; the 2D terrain, continentalness and climate fields and the 3D cave and ore fields alike. Every heightmap world's terrain changes (the lattice's values), so `FVoxelWorldModeFactory::GenerationVersion` 2 → 3 and every heightmap save is refused and kept on disk (as D21 did for planets); `VoxelDemo`'s POIs, dungeons and NPC cells reseat themselves on the new terrain (their placement reads the surface). The alternative is in D39 | VoxelWorlds, parent (the content re-surveyed) | L | D39 |
 | WM-MP7 | **The continuous Simplex kernel on heightmaps.** `FVoxelCPUNoiseGenerator::Simplex3D` and `SimplexNoise.ush` take G43's tangent-corrected kernel (v² (v² + 0.4 v + 0.06), scaled 33.25), within 1.2% rms of the classic noise; the same `GenerationVersion` bump as WM-MP6, so the two land together | VoxelWorlds | S | D39 |
-| WM-MP8 | **The near band's ceiling on heightmaps.** Measure first (`voxel.Stream.AuditResidency`, the bench's loaded chunks per layer): how many of the near band's chunks above the surface slab a climbing viewer loads on `VoxelDemo` (a `vox.Fly` climb to 20,000 and 50,000 uu) and what they cost. If it matters, `GetColumnWindow`'s `NearMaxZ` is capped at the slab's top over the near disk (the column surface range's maximum over the columns within `NearWindowRadius`, plus `NearWindowLayers`), the band below unchanged (caves and digging) | VoxelWorlds | S | — |
-| WM-MP9 | **The world map at scale on heightmaps.** `UPOIMapMarkerSubsystem::GetMarkersNear`'s heightmap path capped at `MarkerMaxCells` placement cells around the query's centre (the planet's `PlanetMarkerMaxCells`, one constant for both); `UVCWorldMapWidget` redraws for tile arrivals at most every 2 s in every mode once the view shows more than a threshold of tiles (today the throttle is planet-only, `bRenderedFromAlbedo`); `voxel.Map.ExploreAllMaxTiles` applies to every mode (an island's tile count is bounded, the plane's is not) | POI, VCP, VoxelWorlds | S-M | — |
-| WM-MP10 | **The land search past the ring on heightmaps.** `FVCVoxelNavigationHelper::FindSpawnablePosition`: when the ring search within `MaxSearchRadius` finds no land, a coarse spiral over the generated surface (a sample per chunk, out to a bound of a few hundred chunks on the plane, the bounds on an island) as `FindPlanetSpawnPointAtScale` does by direction; the result logged as the planet's is. Covers a seed whose spawn is open sea and an island whose radius shrank | VCP | S | — |
+| WM-MP8 *(measured, not needed 2026-10-25, §23.8)* | **The near band's ceiling on heightmaps.** Measure first (`voxel.Stream.AuditResidency`, the bench's loaded chunks per layer): how many of the near band's chunks above the surface slab a climbing viewer loads on `VoxelDemo` (a `vox.Fly` climb to 20,000 and 50,000 uu) and what they cost. If it matters, `GetColumnWindow`'s `NearMaxZ` is capped at the slab's top over the near disk (the column surface range's maximum over the columns within `NearWindowRadius`, plus `NearWindowLayers`), the band below unchanged (caves and digging) | VoxelWorlds | S | — |
+| WM-MP9 *(done 2026-10-25, §23.8)* | **The world map at scale on heightmaps.** `UPOIMapMarkerSubsystem::GetMarkersNear`'s heightmap path capped at `MarkerMaxCells` placement cells around the query's centre (the planet's `PlanetMarkerMaxCells`, one constant for both); `UVCWorldMapWidget` redraws for tile arrivals at most every 2 s in every mode once the view shows more than a threshold of tiles (today the throttle is planet-only, `bRenderedFromAlbedo`); `voxel.Map.ExploreAllMaxTiles` applies to every mode (an island's tile count is bounded, the plane's is not) | POI, VCP, VoxelWorlds | S-M | — |
+| WM-MP10 *(done 2026-10-25, §23.8)* | **The land search past the ring on heightmaps.** `FVCVoxelNavigationHelper::FindSpawnablePosition`: when the ring search within `MaxSearchRadius` finds no land, a coarse spiral over the generated surface (a sample per chunk, out to a bound of a few hundred chunks on the plane, the bounds on an island) as `FindPlanetSpawnPointAtScale` does by direction; the result logged as the planet's is. Covers a seed whose spawn is open sea and an island whose radius shrank | VCP | S | — |
 | WM-MP11 | **Altitude QA tooling on heightmaps.** `vox.FlyTo <altitude> [seconds]` on any world (along +Z over the generated surface or the sea under the pawn, held there; the same progress lines with the window's state and the far field's patches), `vox.Orbit` as a look-down camera on heightmaps (`vox.Orbit <altitude> [period] [x y]`: a circle of a fixed radius over a point, or a fixed look-down with period 0), the bench's `climb=x:y[:alt]` and `descend=x:y:alt` by XY, and `vox.Planet`'s window and far-field lines in a `vox.World` for every mode (the planet's command unchanged) | parent, VoxelWorlds | S-M | WM-MP1 for the far-field lines |
 | WM-MP12 | **Tests** with every item (§23.5) | all | M | — |
 | WM-MP13 | **Live verification and benches** (§23.6) | docs | L | all |
@@ -10024,7 +10024,7 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 
 | Milestone | Items | Rough total | Done when |
 |-----------|-------|-------------|-----------|
-| MP1 Small fixes | WM-MP3, WM-MP4, WM-MP8, WM-MP9, WM-MP10 | ~4 days | Each item's check; `VoxelDemo` and island M benches unchanged within batch noise; the planet GPU parity lines identical |
+| MP1 Small fixes | WM-MP3, WM-MP4, WM-MP8, WM-MP9, WM-MP10 | ~4 days | Each item's check; `VoxelDemo` and island M benches unchanged within batch noise; the planet GPU parity lines identical. **Met 2026-10-25 (§23.8)** |
 | MP2 Regions | WM-MP5 | ~1 day | `VoxelDemo` at the origin within the control on frame and manager P95; at 500 km no seam crack, shimmer or scatter jitter in the survey; the planet unchanged |
 | MP3 Altitude | WM-MP1, WM-MP2, WM-MP11 | ~2.5 weeks | From the ground on `VoxelDemo`, island M and `Review_Cubic` the terrain reaches the horizon with no gap, step or far-field floor through a dug hole; a `vox.FlyTo` to three view distances and back lands on cooked ground with the window suspended and resumed once; the far field's cost reported and within the D3 budget |
 | MP4 Noise | WM-MP6, WM-MP7 | ~1 week | No repeat over 10⁶ noise units on the plane; no step across simplex cells; the GPU equal to the CPU (parity CRCs re-baselined once); heightmap saves refused at `GenerationVersion` 3; `VoxelDemo`'s content re-surveyed and the QA rows that depend on places re-run |
@@ -10097,3 +10097,89 @@ D35 is the user's note of 2026-10-25; **D36-D40 were decided 2026-10-25, each as
 | D38 | The heightmap cut-over's default and gate | (a) **Three view distances, only while a far field is on**; (b) off by default (0) on heightmaps; (c) the same default without the gate | **(a).** The planet's measured default; a suspended window with no far field is a hole in the world, so the gate is a safety rule rather than a choice |
 | D39 | Does the heightmap noise change land, and how? | (a) **Both items, one `GenerationVersion` bump 2 → 3**: every heightmap save refused and kept, every heightmap world's terrain changes once, one noise path; (b) a per-configuration flag (`bHashedNoise`, in the save fingerprint's shape) so existing worlds keep the classic noise and new ones take the hashed one, two paths kept; (c) neither: the plane keeps the 256 period and the kernel steps | **(a)**, after MP3, with the content re-surveyed. The saves are test data, as D21 judged the planet's; (b) keeps two noise paths through every field on the CPU and the GPU for the life of the plugin. If the plugin ships to users with saved worlds first, (b) is the fallback |
 | D40 | Regions on heightmaps by default | (a) **The planet's defaults in every mode** (16-chunk render regions, 4-chunk scatter regions); (b) opt in per configuration | **(a).** No measured cost on the planet and the same material path; one rule |
+
+### 23.8 MP1 results: the small fixes (2026-10-25)
+
+Bases: VoxelWorlds `65450ee` (the plan), UE5_PluginDev `e06f841`; branches `feat/mp1-mode-parity` (VoxelWorlds), `claude/mp1-mode-parity`
+(parent), a branch in VoxelCharacterPlugin. Built with editor 5.8.3 from `D:\Program Files\Epic Games\UE_5.8` in a worktree
+(`-NoHotReloadFromIDE`); tests headless and in a worktree editor. The five items ran in one session, in the chunk manager
+first (WM-MP3, WM-MP4), then the LOD strategy's measurement (WM-MP8), the map (WM-MP9) and the spawn search (WM-MP10).
+
+| ID | Built | Tests |
+|----|-------|-------|
+| WM-MP3 | `UVoxelChunkManager::ApplyDescentPrefetch` in every world mode: local up is the direction from the centre on a planet and +Z on a heightmap world, the surface under the camera the generated terrain (along its direction, or at its X and Y) or the sea where higher; `BuildStreamingContext` applies the lead along the local down the prefetch found (`StreamingViewerDown`); `ComputeDescentLead`, `voxel.Stream.DescentLead` and `voxel.Stream.DescentMinSpeed` as they were. The landing hold (`UVoxelDebugSubsystem::TickLandingHold`) already ran on heightmap worlds: no change | `Streaming.Plane.DescentPrefetch` |
+| WM-MP4 | After a camera cut of more than a chunk the post-update tick (F4.3's `FVoxelFarFieldCameraTickFunction`, its body now `TickAfterCameraUpdate`) runs `UpdateStreamingForCamera`: the strategy's view, the load and unload decisions, the queues' order and the first generation launches again for the camera the frame renders with, the camera the streaming viewer for the pass; `voxel.Stream.CameraCutUpdate` (0 = before); `GetCameraCutUpdates` | `Streaming.Plane.CameraAfterCut` |
+| WM-MP8 | Measured and not needed: `GetColumnWindow` clips a heightmap world's near band (the viewer's layer ± 2) to the terrain's height bounds (`GetLayersOverlapping(TerrainMinHeight, TerrainMaxHeight)`), so a viewer above them has no near band at all and a climbing or descending viewer loads no layer of air; G52's planet band had no such clip. Confirmed live on `VoxelDemo` (below) | — |
+| WM-MP9 | `UPOIMapMarkerSubsystem::GetMarkersInArea` clamps its area to a square of `MarkerMaxCells` placement cells around the centre (`ClampMarkerHalfExtent`; the planet's `PlanetMarkerMaxCells` renamed, one constant); `UVCWorldMapWidget` redraws for tile arrivals at most every 2 s when the view holds more than `TileRedrawThrottleTiles` (256) tiles in any mode (`DefersTileRedraw`; the globe's albedo rule as before); `UVoxelMapSubsystem::ExploreAllTiles` walks a heightmap world's tiles in square rings from the centre up to `voxel.Map.ExploreAllMaxTiles` | `POI.Map.MarkerCap`, `VoxelCharacter.Map.TileRedrawThrottle`, `Map.ExploreAllCap.Plane` |
+| WM-MP10 | `FVCVoxelNavigationHelper::FindPlaneSpawnPointAtScale`: when the ring search within `MaxSearchRadius` finds no land, rings a quarter of their radius apart (at least a chunk) with as many bearings as fit (8 to 128), to the island's bounds or 512 chunks on a plane, at most 4,096 samples; `FindSpawnablePosition`'s `bAnywhereOnPlanet` is `bSearchWholeWorld` (the first spawn passes it in every mode) | `VoxelCharacter.Plane.SpawnPastRing`, `VoxelCharacter.Island.SpawnPastRing` |
+
+**G76, found by the new descent test and fixed here:** chunk-mesh and seam jobs on workers hold raw pointers to the chunk
+manager's meshers (`Mesher`, `SeamMesher`, both `TUniquePtr`), and `Shutdown` deleted the meshers with jobs in flight: a
+seam job that landed after the test's world shut down called `GenerateFaceSeamMeshCPU` on a freed mesher (an access
+violation on a worker, `UECC-Windows-0C2FB46D...`). A PIE stop while the streaming is busy ran the same risk. Each such
+job now counts itself from dispatch to its end (`FMesherWorkerGuard` over `MesherWorkerJobs`, a shared atomic the lambda
+copies), and `Shutdown` waits up to 10 s for the count to reach 0 before the meshers go (logged when it waited over 50 ms
+or timed out).
+
+**What the heightmap prefetch buys.** On a heightmap world the ground is loaded under a high viewer already (D8) and the
+near band is clipped to the terrain's height bounds, so the lead's work is the LOD: chunks refine for the led viewer before
+the camera gets near them. In the test world (a plane with terrain ±800, a sea at −200, chunks of 32 voxels of 50 uu,
+bands 0-2,000 / 2,000-4,000 / 4,000-6,000) a descent at 18,000 uu/s from 40,000 over the ground drew its first LOD 1
+chunk with the camera 12,400 over the ground against 5,800 without the lead; the led viewer kept two chunks (3,200) over
+the surface on all 121 led ticks, the largest lead 18,950. Its gain in the cut-over (WM-MP2) is the planet's: the window
+resumes ahead of the camera.
+
+**The frame of a cut.** In the test world (a plane, the camera a camera actor the player controller views, frames stepped
+in `UWorld::Tick`'s order) a cut of ten chunks east: with `voxel.Stream.CameraCutUpdate` the frame of the cut requests the
+chunk under the new camera and has 182 generations pending or in flight, the streaming viewer at the new camera, one update
+for the frame's camera; under the rule before that frame streamed for the old camera (the chunk under the new one
+unloaded, 12 generations pending from the old window), and the next frame requested it. Moving 400 uu a frame runs no
+second update.
+
+**Live on `VoxelDemo`** (the worktree editor, PIE at the spawn; `voxel.Stream.CameraCutUpdate` and `voxel.Stream.DescentLead` by cvar):
+
+- WM-MP8, the near band under a climb: `voxel.Bench.Run ... dir=up` from the spawn to 20,000 (1,500 uu/s) and to 50,000
+  (3,000 uu/s), chunks per layer at the peak: layers −3 to 3 hold 66 / 214 / 220 / 220 / 220 / 72 / 39 (1,051 in all) and
+  no layer above 3 (Z 19,200) ever loads; the 20,000 climb generated 72 chunks (the band inside the bounds), the 50,000
+  climb none. On a heightmap world the near band is clipped to the terrain's height bounds by D8's rule, so a climbing or
+  descending viewer loads no air above them: nothing to cap. WM-MP8 is closed without a change.
+- WM-MP4, the frame of a cut: three `vox.TP`s of 100 km (to (100,000, 0), (−100,000, 60,000), back to the origin) with the
+  streaming log at Verbose. With the pass, the frame after the command's logs "Streaming updated for the frame's camera
+  after a cut" with 24 generations pending and 8 in flight, the tick's own update of the new chunk following a frame
+  later; with `voxel.Stream.CameraCutUpdate 0` the first streaming update of the new chunk came two frames after the
+  command (frame 643 of 641, against 262 of 261). The settle released on cooked collision 0.54-0.78 s after each
+  teleport under either rule (the collision cook, which the pass does not change).
+- WM-MP3, a fall from 50,000: `vox.Fly 1`, `vox.TP X Y 50000 0`, `vox.Fly 0`, four sites, the lead on and off alternately:
+  every fall landed (two on the ground, two in the sea) 13.1-13.8 s after the drop with 0 landing holds under both rules.
+  On a heightmap world the ground under a falling pawn is loaded already (D8) and its collision cooks around the pawn, so
+  the prefetch changes no landing; its gain is the LOD refined ahead of the camera (the test's figures above) and the
+  cut-over's resume once WM-MP2 lands.
+- WM-MP9, the map under an ExploreAll: `vox.Map min` (zoom 0.25, the view 257 x 257 tiles), then `voxel.Map.ExploreAll
+  200000`: 7,140 tiles explored, 5,833 images streamed in over 15 s (every tile cached at the end), the frame rate at the
+  vsync cap of 60 throughout (sampled every 1-5 s; the rule before cannot be A/B'd on this build, the threshold is a
+  constant). The marker cap is inert on `VoxelDemo`'s zoom range (a 257-tile view is about 370 placement cells of 64,000
+  uu, under the 20,000-cell cap); it bounds a wide Blueprint query.
+- WM-MP10: covered by the tests (the demo spawns on land); the first spawn passes `bSearchWholeWorld` in every mode as it
+  did on planets.
+- Benches: the changes are inert on a flat traverse (the prefetch needs a descent over `voxel.Stream.DescentMinSpeed`, the
+  pass a cut, the map changes a map open or an ExploreAll), so the chord and perimeter benches were not re-run; the
+  climb benches above show the window unchanged on the plane.
+
+**Tests.** Headless (`-nullrhi`), `VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon`: 653 of
+653 (the 641 before plus `Streaming.Plane.{DescentPrefetch,CameraAfterCut}`, `Map.ExploreAllCap.Plane`, `POI.Map.MarkerCap`,
+`VoxelCharacter.Map.TileRedrawThrottle`, `VoxelCharacter.{Plane,Island}.SpawnPastRing` and tests merged to main since).
+In the worktree editor the eight GPU parity tests (`Generation.GPUvsCPU*Parity`, planet and heightmap): 8 of 8; MP1 changes
+no generation code, so their lines are main's.
+
+**New finding.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G76 | `UVoxelChunkManager::Shutdown` deleted `Mesher` and `SeamMesher` with chunk-mesh and seam jobs on workers holding raw pointers to them: a seam job landing after a test world's shutdown called into a freed mesher (an access violation on a worker); a PIE stop while streaming is busy ran the same risk | Fixed 2026-10-25 (above): the jobs count themselves and Shutdown waits for them |
+
+**Left for later.** The far field, the cut-over and the tooling (MP3), regions (MP2), the noise (MP4) as planned; the
+chord and perimeter benches run with MP3's changes, which move the window.
+
+PRs: VoxelWorlds `feat/mp1-mode-parity`, VoxelCharacterPlugin `feat/mp1-mode-parity`, UE5_PluginDev `claude/mp1-mode-parity`
+(VoxelWorldPOI, the gitlinks, the doc map); merge VoxelWorlds and VoxelCharacterPlugin first, then re-point the parent's
+gitlinks at their merge commits.
