@@ -10017,9 +10017,9 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 | WM-MP9 *(done 2026-10-25, §23.8)* | **The world map at scale on heightmaps.** `UPOIMapMarkerSubsystem::GetMarkersNear`'s heightmap path capped at `MarkerMaxCells` placement cells around the query's centre (the planet's `PlanetMarkerMaxCells`, one constant for both); `UVCWorldMapWidget` redraws for tile arrivals at most every 2 s in every mode once the view shows more than a threshold of tiles (today the throttle is planet-only, `bRenderedFromAlbedo`); `voxel.Map.ExploreAllMaxTiles` applies to every mode (an island's tile count is bounded, the plane's is not) | POI, VCP, VoxelWorlds | S-M | — |
 | WM-MP10 *(done 2026-10-25, §23.8)* | **The land search past the ring on heightmaps.** `FVCVoxelNavigationHelper::FindSpawnablePosition`: when the ring search within `MaxSearchRadius` finds no land, a coarse spiral over the generated surface (a sample per chunk, out to a bound of a few hundred chunks on the plane, the bounds on an island) as `FindPlanetSpawnPointAtScale` does by direction; the result logged as the planet's is. Covers a seed whose spawn is open sea and an island whose radius shrank | VCP | S | — |
 | WM-MP11 *(done 2026-10-26, §23.10)* | **Altitude QA tooling on heightmaps.** `vox.FlyTo <altitude> [seconds]` on any world (along +Z over the generated surface or the sea under the pawn, held there; the same progress lines with the window's state and the far field's patches), `vox.Orbit` as a look-down camera on heightmaps (`vox.Orbit <altitude> [period] [x y]`: a circle of a fixed radius over a point, or a fixed look-down with period 0), the bench's `climb=x:y[:alt]` and `descend=x:y:alt` by XY, and `vox.Planet`'s window and far-field lines in a `vox.World` for every mode (the planet's command unchanged) | parent, VoxelWorlds | S-M | WM-MP1 for the far-field lines |
-| WM-MP12 | **Tests** with every item (§23.5) | all | M | — |
-| WM-MP13 | **Live verification and benches** (§23.6) | docs | L | all |
-| WM-MP14 | **Docs:** these results, `WORLD_MODES.md`, `LOD_SYSTEM.md` (the cut-over and the far field per mode), `RENDERING_SYSTEM.md` (regions), `TRAVERSAL_LIMITS.md` (the ceiling after WM-MP5 and WM-MP6), the plugin instructions, the parent's doc map and `vox.*` table | all | M | — |
+| WM-MP12 *(done with each milestone, 2026-10-25/26; 668 headless, 12 in the editor at MP4)* | **Tests** with every item (§23.5) | all | M | — |
+| WM-MP13 *(done 2026-10-26, §23.12)* | **Live verification and benches** (§23.6) | docs | L | all |
+| WM-MP14 *(done 2026-10-26, §23.12)* | **Docs:** these results, `WORLD_MODES.md`, `LOD_SYSTEM.md` (the cut-over and the far field per mode), `RENDERING_SYSTEM.md` (regions), `TRAVERSAL_LIMITS.md` (the ceiling after WM-MP5 and WM-MP6), the plugin instructions, the parent's doc map and `vox.*` table | all | M | — |
 
 ### 23.3 Milestones and order
 
@@ -10029,7 +10029,7 @@ VoxelWorlds; parent = UE5_PluginDev; VCP = VoxelCharacterPlugin; POI = VoxelWorl
 | MP2 Regions | WM-MP5 | ~1 day | `VoxelDemo` at the origin within the control on frame and manager P95; at 500 km no seam crack, shimmer or scatter jitter in the survey; the planet unchanged. **Met 2026-10-26 (§23.9)** |
 | MP3 Altitude | WM-MP1, WM-MP2, WM-MP11 | ~2.5 weeks | From the ground on `VoxelDemo`, island M and `Review_Cubic` the terrain reaches the horizon with no gap, step or far-field floor through a dug hole; a `vox.FlyTo` to three view distances and back lands on cooked ground with the window suspended and resumed once; the far field's cost reported and within the D3 budget. **Met 2026-10-26 (§23.10)** |
 | MP4 Noise | WM-MP6, WM-MP7 | ~1 week | No repeat over 10⁶ noise units on the plane; no step across simplex cells; the GPU equal to the CPU (parity CRCs re-baselined once); heightmap saves refused at `GenerationVersion` 3; `VoxelDemo`'s content re-surveyed and the QA rows that depend on places re-run. **Met 2026-10-26 (§23.11)** |
-| Exit | WM-MP12 to WM-MP14 | ~1 week | §23.6 met; suites green headless and in the editor; every planet row of §20's exit check unchanged |
+| Exit | WM-MP12 to WM-MP14 | ~1 week | §23.6 met; suites green headless and in the editor; every planet row of §20's exit check unchanged. **Met 2026-10-26 (§23.12)** |
 
 **Order.** MP1 first: five independent, small items with their own measurements and no decision pending but D35. MP2
 next: one gate, cheap to verify, independent of the rest. MP3 is the largest and the most visible gap and has D36-D38 decided; WM-MP2 and WM-MP11's far-field lines wait for WM-MP1, WM-MP11's flight and bench routes do not. MP4
@@ -10391,18 +10391,21 @@ recompiled with the renamed parameters).
 **The parity lines, re-baselined.** The heightmap lines were bit-identical before MP4 (the CPU and the GPU sampled the
 same table noise at the same float positions); now the CPU splits each sample point and the GPU a chunk origin plus the
 voxel's offset, so they differ by float rounding, as the planet's have since spherical Phase 6. Recorded for the next
-comparison (`Saved/ClaudeScripts/mp4_parity_crcs.txt` holds every line):
+comparison (`Saved/ClaudeScripts/mp4_parity_crcs_final.txt` holds every line; the table as first written, and
+`mp4_parity_crcs.txt`, held the lines of an earlier MP4 build of the same morning, before its last generation fixes:
+corrected at the exit, §23.12, from the merged build's two editor sessions, which agree line for line; the 60 planet lines
+are the same in all four sessions):
 
 | Case | Density steps (over 2) | Material / biome / meta | GPU CRC |
 |------|------------------------|-------------------------|---------|
-| InfinitePlane | 11 of 4,096 (5) | 8 / 0 / 0 | `7320267b` |
-| IslandBowl | 13 (3) | 0 / 0 / 0 | `6ef5202a` |
-| IslandBowl seabed rectangle | 0 (0) | 0 / 0 / 0 | `a79df198` |
-| Caves | 24 (6) | 0 / 0 / 0 | `a2320721` |
-| Caves under the sea | 26 (10) | 2 / 0 / 0 | `4d1c60d5` |
-| Noise-Perlin / Simplex / Cellular / Voronoi | 0 / 4 (2) / 0 / 0 | 0 | `6e229991` / `c18f3d16` / `04b008a9` / `ec428337` |
-| OreVariant | 0 (0) | 0 / 0 / 0 | `e8542a26` |
-| BlendDither (on / off) | 4 (0) of 32,768 | 0 / 0 / 0 | `d8a1c537` / `16017c9f` |
+| InfinitePlane | 8 of 4,096 (0) | 7 / 0 / 0 | `28d420e7` |
+| IslandBowl | 0 (0) | 0 / 0 / 0 | `a35463a1` |
+| IslandBowl seabed rectangle | 0 (0) | 0 / 0 / 0 | `b6574cc2` |
+| Caves | 1 (0) | 0 / 0 / 0 | `c778e739` |
+| Caves under the sea | 6 (0) | 3 / 0 / 0 | `eb15a2ba` |
+| Noise-Perlin / Simplex / Cellular / Voronoi | 0 / 0 / 0 / 0 | 0 | `c94ac495` / `83291929` / `05f493a9` / `8148f654` |
+| OreVariant | 0 (0) | 0 / 0 / 0 | `69d01987` |
+| BlendDither (on / off) | 1 (0) of 32,768 | 0 / 0 / 0 | `d0e46ebd` / `7111db69` |
 | Planet (North pole, Equator, Cave, Coast) | 0 / 3 / 6 / 0 (0) | 0 / 1 / 0 / 0 biome | `ef35f91c` / `792c7782` / `6188791f` / `45ed6ca7` |
 
 **Live on `VoxelDemo`** (the worktree editor, a fresh PIE at noon; `Saved/ClaudeScripts/mp4_live.py`): the save subsystem
@@ -10425,3 +10428,127 @@ noise (surface queries, scatter, the map) was not timed apart. D3 met.
 
 PRs: draquel/VoxelWorlds#168 (`feat/mp4-noise`), draquel/UE5_PluginDev#176 (`claude/mp4-noise`: the save test, the gitlink, the doc map);
 merge VoxelWorlds first, then re-point the parent's gitlink at its merge commit.
+
+### 23.12 Exit results: per-mode verification and docs (2026-10-26)
+
+The §23.6 exit check on the merged build (VoxelWorlds `ca313da`, the parent `def32bb`: MP1-MP4 in), run from the
+worktree editor (Claudius 8098) by `Saved/ClaudeScripts/mp_exit_chain1.ps1` (the live rows) and `mp_exit_chain2.ps1`
+(the benches and the parity tests); every row below names its script. Nothing in the code changed for the exit; the
+docs did (WM-MP14, at the end).
+
+**The horizon, the climb and return, the orbit, a pit** (`mp3_live.py`, the full flight on all three worlds this time;
+`vox.Debug.Capture` on, noon pinned, the far field on at 4 px):
+
+| World | Window on the ground | Far field on the ground | Stand-ins, 10 s still | `vox.FlyTo 150000`: suspended at (camera) | `vox.FlyTo 300`: resumed at (camera) | Landing (`vox.Fly 0`) | `vox.Orbit 50000 0` | Pit | Fall-through |
+|---|---|---|---|---|---|---|---|---|---|
+| `VoxelDemo` (plane, DC) | 981 chunks, LOD 15 / 91 / 875 | 734 of 1,168 patches drawn, 135.8 MB, 0 pending | 0 in 0 updates | 120,034 (120,034); 1,092 chunks held then 0; 84.4 MB of far field at 150,000 | 59,795 (119,591, the lead 59,795); 1,047 chunks back at 300 | walking, mode 1, 123 over the ground | 1,051 chunks all LOD 2, 1,222 of 1,828 patches, 237 MB | 18 voxels emptied, a hole with no floor through it | 0 |
+| Island M (`Review_Island_M`) | 961, LOD 8 / 97 / 856 | 471 of 844, 73.8 MB (the far ocean past R+F, no grid water) | 0 in 0 | 120,661 (120,661); 1,069 held then 0; 22.6 MB at 150,000 | 59,795 (119,590); 1,009 back | walking | 1,014 chunks, 570 of 976 patches, 88.9 MB | 17 voxels | 0 |
+| `Review_Cubic` (cubic, no LOD) | 981 (LOD 0 only) | 725 of 1,164, 134.6 MB | 0 in 0 | 120,717 (120,717); 1,069 held then 0; 84.0 MB | 59,865 (119,674); 1,051 back | walking, 90 over the block top | 1,051 chunks, 1,213 of 1,824 patches | 24 voxels | 0 |
+
+Every world suspended the window once and resumed it once; the terrain reaches the horizon from the ground on all three
+(the shots `Saved/Screenshots/Claudius/mp3_{demo,island,cubic}_x_*`), the pit is a hole from above. Two shots 2 s
+apart differ by 971-1,306 pixels of 924,160 from 50,000 uu on the smooth worlds (the lake's ripples) and 17,986 on
+cubic (15,875 in §23.10's pass: the block terraces' contour lines under TSR from that height, as before); on the ground
+the differences are the water and the foliage's wind. G77's dry water-tile block (a stepped grey L over the lake west of
+the spawn, 3 columns by 3) shows in every look-down of the plane, island M (the same terrain at its centre) and cubic:
+the finding stands, not traced here.
+
+**A teleport and a fall** (`mp_exit_tp.py`, `VoxelDemo`, the streaming log at Verbose): `vox.TP 10000000 0 0` logs
+"Streaming updated for the frame's camera after a cut (WM-MP4): viewer chunk (2082, -10, -1), 24 generations pending,
+8 in flight" in the frame of the command and the settle released on cooked collision 1.0 s after it; at 100 km the window
+holds 999 chunks (LOD 13 / 96 / 890), `voxel.Stream.AuditResidency` reports 0 findings (0 beyond the unload radius, 0
+render or seam orphans, 0 stuck jobs; the worst dispatch to completion 123 ms generation, 143 ms mesh), the far field 706
+of 1,144 patches and 130 MB; two shots 2 s apart differ by 983 pixels from 50,000 uu (971 at the spawn) and by the same
+water and wind on the ground: no seam crack, shimmer or scatter jitter (`mpx_demo_100km_*`). The fall: `vox.Fly 1`,
+`vox.TP 10009600 39600 50000 0`, `vox.Fly 0` landed 14.2 s after the drop on ground at 2,096 with no landing hold and no
+fall-through line. The noise spot check: `vox.TP 30000000 0 0` lands standing 1.0 s after the command on terrain unlike
+the spawn's or the 100 km site's (`mpx_demo_300km_*`; the ground −582, −1,276 and −409 at the three sites), the window
+991 chunks, the far field 713 of 1,152 patches; a period in the terrain would repeat the spawn's lakes every 768 lattice
+units of the classic Simplex (`Noise.HeightmapNoise` is the measurement; this is the look).
+
+**The QA place rows on the new terrain** (`mp_exit_qa.py`, `mp_exit_campsite.py`; `VoxelDemo`, fresh PIEs):
+`vox.TPPOI Tiled` finds 'Tiled Dungeon' 2.38 km from the spawn at (224,810, −78,550) and settles beside it as two
+dungeons stamp (249,055 and 286,810 voxels, 7 and 9 chunks, 108 and 119 ms, the entrance shafts, 979 tile instances,
+the elevator entrance shuttling −584 to −4,904, the loot chest); `vox.TPRoom Boss` lands on the floor at once (tiles);
+`vox.Enemies` lists 13 skeletons (one dead by the time of the call) and the structure's counts; the boss killed the
+unarmed pawn 25 s after it arrived (AI on; the controller respawned it 5 s later: gameplay, not a defect); `vox.Trap`
+lands the respawned pawn on the plate 6,534 uu away and it takes 15; `vox.Save` writes 2 dungeon records, 457 explored
+tiles and the edits (28 chunks), `vox.SaveInfo` shows the fingerprint `InfinitePlane [...] gen 3`, `vox.Load` applies
+the save (the trap fires again on the pawn standing on it), `vox.DeleteSave` removes it. From the spawn, `vox.TPPOI`
+lands at the campsite claim (−16,886, 15,918; 0.23 km), `vox.Campsite` teleports beside `BP_DemoCampsite_C_0` and
+`vox.Rest` sets the respawn point. W-05 to W-07's manual steps (walking in by the elevator, fighting the boss) were not
+replayed by hand; every console shortcut they rest on works on the new terrain.
+
+**The map at scale** (`mp_exit_map.py`): on `Review_Island_L` `voxel.Map.ExploreAll 100000000` explores 34,512 tiles
+(every tile of the island, 0 outside the world) in 2.0 s with 216 cached; the world map at its most zoomed-out (`vox.Map
+min`) streams the tiles in (25,241 cached and 24.6 of 48 MB of overviews when `voxel.Map.Stats` is read 40 s later, 9,267
+still waiting) at the vsync cap of 60 in 9 of 10 samples over 15 s, the first sample at 2.1 (the map's first draw with
+34,512 explored tiles: one hitch at open, not seen again), zoom 1 and back to min at 60 throughout; on `VoxelDemo`
+`voxel.Map.ExploreAll 200000` explores 7,140 tiles, every one cached within the minute (7.0 MB of overviews), the map at
+60 at every zoom (59.8 the lowest sample). The marker cap (WM-MP9) logs nothing at these counts; `POI.Map.MarkerCap`
+is its measurement.
+
+**Budgets on the heightmap worlds** (`mp3_bench.py 3 chord override=...`: the 40,000 uu chord at 1,500 uu/s from the
+spawn, one build, the far field on against off by `voxel.World.FarField` read at PIE start, a fresh PIE per run, three
+runs per rule, medians with the runs' range where it matters; `VoxelDemo`'s chord is §23.11's on this build):
+
+| World | Far field | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Peak loaded | Batches P95 | LOD re-meshes | Far field P95 ms / patches / peak MB | Peak voxel data / systems MB |
+|---|---|---|---|---|---|---|---|---|---|
+| Island M | on | 16.7 / 23.2 (22.5-23.6) | 6.85 | 0.27 (0.21-0.29) | 1,130 | 593 | 480 | 1.07 / 510 / 88 | 254 / 487 |
+| | off | 16.7 / 21.6 (21.3-22.9) | 6.24 | 0.17 (0.17-0.33) | 1,130 | 592 | 483 | — | 254 / 487 |
+| `Review_Cubic` | on | — / 17.9 (17.6-19.8) | 4.97 | 0.17 | 1,166 | 524 | 0 | 0.96 / 776 / 153 | 204 / 686 |
+| | off | — / 16.7 | 4.37 | 0.17 | 1,166 | 525 | 0 | — | 203 / 681 |
+| `VoxelDemo` (§23.11) | on | — / 23.1 | 6.1 | 0.17 | 1,157 | 628 | 505 | 1.3 / 784 / 149 | 254 / 493 |
+| | off | — / 22.1 | 5.7 | 0.17 | 1,160 | 626 | 504 | — | 254 / 489 |
+
+The far field costs what §23.10 measured on the plane: 1.0-1.6 ms of frame P95 and 0.6 ms of manager P95, its own
+update 1.0-1.1 ms P95, no change to the voxel side (peak loaded, batches, re-meshes, generated chunks, voxel and scatter
+memory the same to the megabyte; 404-453 patches built on the way, 0 stand-ins). Island M's catch-up medians differ by
+0.1 s with the far field on, inside the runs' spread (one control run 0.33 s); cubic's and the plane's are 0.17 s either
+way. The island's far field holds 88 MB (510 patches inside the bounds, the far ocean beyond), the plane's 149-153 MB
+(776-784 patches out to 2,000,000 uu). D3 met on every world (the peak voxel systems 487-686 MB against 1.5 GB, the
+cubic world's 680 MB being its collision and scatter at LOD 0 everywhere, the same with the far field off).
+
+**The planet GPU parity lines** (`mp3_editor_tests.py` in the worktree editor after the benches, then
+`mp_exit_parity.py`): the eight `Generation.GPUvsCPU*Parity` tests and `Meshing.MarchingCubes.CPUvsGPU` 9 of 9, and the
+114 parity lines (38 cases at LOD 0, 1 and 2: every heightmap case and the 20 planet sites on the small planet and L)
+identical line for line, CRCs included, to the merged build's record (`mp4_parity_crcs_final.txt`, the two MP4 editor
+sessions of the morning); the 60 planet lines are also identical to the record from before MP4's last build
+(`mp4_parity_crcs.txt`) and, by §23.11, to G43's. Planets generate what they did before §23.
+
+**P6.5's planet benches** (`mp_exit_planet_bench.py 3`: `PlanetTest` with `voxel.ConfigOverride` `Review_Planet_M`
+/ `_L`, a fresh PIE per run, `vox.TPLatLon 45 20` and its settle plus 25 s, noon pinned, the far field on; §20.28's
+routes, `warmup=30 catchup=90`; means of three with the catch-up per run) against §20.28's "guard" rows, the last
+planet benches before §23 (2026-10-24):
+
+| Planet, route | Camera at the resume (suspension) | Peak loaded | Frame P50 / P95 ms | Manager P95 ms | Catch-up s | Far field P95 ms / peak MB | Peak voxel systems MB |
+|---|---|---|---|---|---|---|---|
+| M, land (5,000 uu/s) | 116,960-117,000 (§20.28: 116,927-116,999) | 1,102 (1,101) | 16.7 / 22.3 (18.9 / 37.3) | 4.8 (6.4) | 0.56 / 0.59 / 0.51 (1.78 / 0.71 / 0.72) | 0.71 / 56.5 | 538 (457) |
+| M, great circle | — | 1,254 (1,230) | 16.7 / 24.2 (21.3 / 35.9) | 5.3 (7.6) | 0.17 / 0.17 / 0.17 (0.21 / 0.17 / 0.18) | 0.90 / 48.4 | 470 (488) |
+| L, land | 116,922-116,998 (116,935-116,944) | 1,108 (1,108) | 16.7 / 21.9 (19.3 / 30.5) | 4.9 (6.5) | 0.23 / 0.18 / 0.23 (3.14 / 0.23 / 0.21) | 0.60 / 51.7 | 568 (499) |
+| L, great circle | — | 1,280 (1,280) | 16.7 / 24.3 (17.9 / 28.0) | 5.8 (6.0) | 0.44 / 0.54 / 0.46 (0.67 / 0.69 / 0.80) | 0.85 / 48.5 | 478 (482) |
+| L, climb (3,000 uu/s) | suspended at 120,006-120,035 (120,021-120,033) | 1,120 (1,127) | 16.7 / 16.7 (16.7 / 17.6) | 3.1 (3.3) | 0.17 x 3 (0.17 x 3) | 0.24 / 47.7 | 378 (379) |
+
+The resume and suspension altitudes, the peak loaded chunks and the chunks generated (1,093 / 1,108 on the landings,
+650 / 689 on the great circles, 14 on the climb) are §20.28's; frame, manager and catch-up are lower on this quieter
+day (§20.28 noted its machine busier: frame P95 26-37 ms against G52's 22); the great circles' and the climb's peak
+memory within 1-18 MB of the reference. The landings peak 70-80 MB higher (538 / 568 against 457 / 499): the landing's
+peak is the window streamed back in a few seconds before far compression compacts it (§20.11), and §20.28's own two
+rules, the same code on that route, differed by 82 MB on M and 54 MB on L, so the figure is the route's spread rather
+than a change; D3 met (the largest peak 568 MB against 1.5 GB). Chain 2's first pass ran these routes with
+`voxel.World.FarField 0` by accident (the cvar as the cubic chord's last run left it) and gave the same window
+figures (peaks 1,101 / 1,108 / 1,258 / 1,280 / 1,120, the same resume altitudes, 537-570 and 467-480 MB): on a planet
+the far field's absence changes nothing on the voxel side, and the window still cut over at 200,000 (G78 below).
+
+**New finding.**
+
+| ID | Finding | Status |
+|----|---------|--------|
+| G78 | D38's gate (the cut-over only while a far field is on, `FLODQueryContext::bFarFieldActive`) is applied on heightmap worlds only; a planet with `voxel.World.FarField 0` still suspends its window above the cut-over, so from orbit nothing draws the planet but the ocean shell at small radii (P6.4 builds none at scale). The cvar is a debug switch, so the hole is QA-only; the gate could cover planets in one line (`bHeightmapCutoverAllowed` → every mode) if a planet without a far field is ever wanted | Recorded |
+
+**Docs (WM-MP14).** `Features/WORLD_MODES.md` gains a "Mode parity" section (what every mode shares after §23, one
+code path per row, and what stays planet-only); `LOD_SYSTEM.md` (the far field and the cut-over per mode),
+`RENDERING_SYSTEM.md` (regions in every mode), `NOISE_LIBRARY.md` (one noise), `Research/TRAVERSAL_LIMITS.md` (no known
+ceiling on heightmap worlds after WM-MP5 and MP4) and the plugin instructions were brought up to date by MP2-MP4 and
+checked here; the parent's doc map and `vox.*` table carry the exit's summary; §23.11's parity table corrected (above).
+§23 is closed: every item done, every §23.6 row met, G77 and G78 open and recorded. Next free finding G79, decision D42.
