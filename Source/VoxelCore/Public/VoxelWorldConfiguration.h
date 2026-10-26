@@ -196,8 +196,11 @@ public:
 	 * (FDistanceBandLODStrategy::DefaultCutoverViewDistances): from there the window's ground disk is a narrow cone under
 	 * the viewer, and a descent at 5,000 uu/s still has about 20 s to stream it back before landing (at the view distance
 	 * a 50 km planet's window was 5 s short). voxel.World.VoxelCutover overrides it.
+	 *
+	 * Heightmap worlds too (world modes review WM-MP2, D38): the same altitude over the generated ground or the sea under
+	 * the streaming viewer, in force only while the far field draws the world beyond the window (voxel.World.FarField).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0", EditCondition = "WorldMode == EWorldMode::SphericalPlanet"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0"))
 	float PlanetVoxelCutoverAltitude = 0.0f;
 
 	// ==================== Water Settings ====================

@@ -224,6 +224,27 @@ public:
 		const FVoxelSeaSurface& Sea);
 
 	/**
+	 * The surface material mix at a heightmap world's surface point (world modes review WM-MP1, the heightmap far field):
+	 * what QuerySurfaceConditions's per-voxel picks cover there on average. The climate and blend as QuerySurfaceConditions
+	 * samples them, the blend's materials and shares at depth 0 (the sea's variant under WaterLevel), height rules applied
+	 * to each, summed per material; the two largest, with the second's share of the two.
+	 *
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @param TerrainHeight The generated surface height there (conditioning zones included)
+	 * @param BiomeSnapshot Value-captured biome data
+	 * @param WorldSeed The terrain noise's seed (the climate seeds derive from it)
+	 * @param bEnableWaterLevel Whether the world has a sea
+	 * @param WaterLevel The sea's level (world Z)
+	 * @return The mix (material 0 and weight 0 when the snapshot is invalid)
+	 */
+	static FVoxelSurfaceMaterialMix QuerySurfaceMaterialMix(
+		float WorldX, float WorldY, float TerrainHeight,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		int32 WorldSeed,
+		bool bEnableWaterLevel, float WaterLevel);
+
+	/**
 	 * Everything at the analytic surface on the local up-line through a position, in any world mode (spherical SP-A3):
 	 * heightmap modes return SampleSurface at (X, Y) with Position (X, Y, Height); a planet the surface along the
 	 * direction from its centre (GetSurfacePoint), the slope against local up, and QueryPlanetSurfaceConditions.

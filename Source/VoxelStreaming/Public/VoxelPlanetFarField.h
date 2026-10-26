@@ -17,20 +17,31 @@ class UVoxelWorldConfiguration;
  * A far-field patch's address (spherical Phase 6, WM-BP9): a node of one cube face's quadtree on the planet's surface
  * coordinate (FVoxelCubeSphere: the face's warped U and V in [-1, 1]). Level 0 is the whole face; each level halves the
  * patch along U and V.
+ *
+ * On a heightmap world (world modes review WM-MP1, D36) Face is HeightmapFace and the key is a node of one quadtree over
+ * the XY plane whose level-0 cells are root tiles of FVoxelFarFieldSettings::RootChunks chunks, aligned to the chunk grid:
+ * X and Y are the cell's signed indices at Level (the tile's minimum corner at GridOrigin + (X, Y) x the level's cell
+ * size), so a root tile is (0, X, Y) and the plane extends either way. Children and parents are the same arithmetic.
  */
 struct VOXELSTREAMING_API FVoxelFarFieldPatchKey
 {
-	/** Cube face 0..5 (+X, -X, +Y, -Y, +Z, -Z) */
+	/** Cube face 0..5 (+X, -X, +Y, -Y, +Z, -Z); HeightmapFace on a heightmap world */
 	int32 Face = 0;
 
-	/** Quadtree level, 0 = the whole face */
+	/** Quadtree level, 0 = the whole face (a root tile on a heightmap world) */
 	int32 Level = 0;
 
-	/** Column along the face's U, 0 .. 2^Level - 1 */
+	/** Column along the face's U, 0 .. 2^Level - 1 (signed cell index on a heightmap world) */
 	int32 X = 0;
 
-	/** Row along the face's V, 0 .. 2^Level - 1 */
+	/** Row along the face's V, 0 .. 2^Level - 1 (signed cell index on a heightmap world) */
 	int32 Y = 0;
+
+	/** The Face of a heightmap world's keys */
+	static constexpr int32 HeightmapFace = 7;
+
+	/** Heightmap keys pack X and Y offset by this (28 unsigned bits hold cells -2^27 .. 2^27 - 1) */
+	static constexpr int32 HeightmapBias = 1 << 27;
 
 	FVoxelFarFieldPatchKey() = default;
 	FVoxelFarFieldPatchKey(int32 InFace, int32 InLevel, int32 InX, int32 InY)
@@ -38,18 +49,48 @@ struct VOXELSTREAMING_API FVoxelFarFieldPatchKey
 	{
 	}
 
-	/** Packed for maps: face 3 bits, level 5 bits, X and Y 28 bits each (levels up to 28). */
+	bool IsHeightmap() const { return Face == HeightmapFace; }
+
+	/** Packed for maps: face 3 bits, level 5 bits, X and Y 28 bits each (levels up to 28; heightmap cells biased). */
 	uint64 Pack() const
 	{
+		const int32 Bias = IsHeightmap() ? HeightmapBias : 0;
 		return (static_cast<uint64>(Face & 7) << 61) | (static_cast<uint64>(Level & 31) << 56)
-			| (static_cast<uint64>(X & 0x0FFFFFFF) << 28) | static_cast<uint64>(Y & 0x0FFFFFFF);
+			| (static_cast<uint64>((X + Bias) & 0x0FFFFFFF) << 28) | static_cast<uint64>((Y + Bias) & 0x0FFFFFFF);
 	}
 
 	/** The key a Pack() came from. */
 	static FVoxelFarFieldPatchKey Unpack(uint64 Packed)
 	{
-		return FVoxelFarFieldPatchKey(static_cast<int32>((Packed >> 61) & 7), static_cast<int32>((Packed >> 56) & 31),
-			static_cast<int32>((Packed >> 28) & 0x0FFFFFFF), static_cast<int32>(Packed & 0x0FFFFFFF));
+		const int32 Face = static_cast<int32>((Packed >> 61) & 7);
+		const int32 Bias = Face == HeightmapFace ? HeightmapBias : 0;
+		return FVoxelFarFieldPatchKey(Face, static_cast<int32>((Packed >> 56) & 31),
+			static_cast<int32>((Packed >> 28) & 0x0FFFFFFF) - Bias, static_cast<int32>(Packed & 0x0FFFFFFF) - Bias);
+	}
+
+	/** Heightmap worlds: the cell's edge at this level, from the root tile's. */
+	double GetTileSize(double RootTileSize) const { return RootTileSize / static_cast<double>(1ll << FMath::Clamp(Level, 0, 40)); }
+
+	/**
+	 * Heightmap worlds: a world XY at a fraction of the patch: (0, 0) its minimum corner, (1, 1) the maximum. Fractions
+	 * outside [0, 1] continue past it.
+	 *
+	 * @param GridOrigin The chunk grid's origin (its XY)
+	 * @param RootTileSize A root tile's edge (RootChunks x ChunkWorldSize)
+	 * @param FU Fraction along X
+	 * @param FV Fraction along Y
+	 * @return World (X, Y)
+	 */
+	FVector2D GetPoint2D(const FVector& GridOrigin, double RootTileSize, double FU, double FV) const
+	{
+		const double Size = GetTileSize(RootTileSize);
+		return FVector2D(GridOrigin.X + (static_cast<double>(X) + FU) * Size, GridOrigin.Y + (static_cast<double>(Y) + FV) * Size);
+	}
+
+	/** Heightmap worlds: the patch's footprint. */
+	FBox2D GetBox2D(const FVector& GridOrigin, double RootTileSize) const
+	{
+		return FBox2D(GetPoint2D(GridOrigin, RootTileSize, 0.0, 0.0), GetPoint2D(GridOrigin, RootTileSize, 1.0, 1.0));
 	}
 
 	/** Child 0..3: (2X + (Index & 1), 2Y + (Index >> 1)) one level down. */
@@ -85,7 +126,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldPatchKey
 		return Face == Other.Face && Level == Other.Level && X == Other.X && Y == Other.Y;
 	}
 
-	FString ToString() const { return FString::Printf(TEXT("f%d L%d (%d,%d)"), Face, Level, X, Y); }
+	FString ToString() const { return FString::Printf(TEXT("%s%d L%d (%d,%d)"), IsHeightmap() ? TEXT("h") : TEXT("f"), Face, Level, X, Y); }
 };
 
 /**
@@ -163,18 +204,77 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	 */
 	static int32 ComputeBandLevel(double Radius, double ChunkWorldSize);
 
-	/** A patch's edge on the datum sphere along a face's centre lines at a level: pi / 2 x Radius / 2^Level. */
-	double GetPatchArc(int32 Level) const { return UE_DOUBLE_HALF_PI * Radius / static_cast<double>(1ll << FMath::Clamp(Level, 0, 40)); }
+	// ---- Heightmap worlds (world modes review WM-MP1, D36) ----
+
+	/**
+	 * A heightmap world (InfinitePlane, IslandBowl): one quadtree over the XY plane whose roots are tiles of RootChunks
+	 * chunks aligned to the chunk grid, the surface the generated height (Z), local up +Z, the sea the WaterLevel plane.
+	 * Center, Radius, SeaRadius and ZoneGatherMaxAngle are unused.
+	 */
+	bool bHeightmap = false;
+
+	/** Heightmap worlds: chunks along a root tile's edge, a power of two (the band level is its log2: band patches one chunk) */
+	int32 RootChunks = 64;
+
+	/**
+	 * Heightmap worlds: roots exist within this of the camera's ground point (uu) and patches farther are culled; on a
+	 * bounded world (an island) also only over its bounds. 0 = no limit (every root over the bounds)
+	 */
+	double FarDistance = 0.0;
+
+	/** Heightmap worlds: the world's bounds (IVoxelWorldMode::GetWorldBounds): an island's footprint, Unbounded on a plane */
+	FVoxelWorldBounds Bounds;
+
+	/** Heightmap worlds: the sea's world Z (WaterLevel), where the water tiles lie */
+	double SeaZ = 0.0;
+
+	/** Heightmap worlds: patches wider than this (uu) take no conditioning zones (as ZoneGatherMaxAngle) */
+	double ZoneGatherMaxSize = 0.0;
+
+	/** Heightmap worlds: a root tile's edge (RootChunks x ChunkWorldSize). */
+	double GetRootTileSize() const { return static_cast<double>(FMath::Max(RootChunks, 1)) * ChunkWorldSize; }
+
+	/**
+	 * Heightmap worlds: the finest level, at which a patch is one chunk across: log2(RootChunks).
+	 *
+	 * @param InRootChunks Chunks along a root tile's edge (a power of two; rounded down otherwise)
+	 * @return Band level
+	 */
+	static int32 ComputeHeightmapBandLevel(int32 InRootChunks);
+
+	/**
+	 * Heightmap worlds: the root tile size for a far reach (voxel.World.FarFieldRootChunks 0): about a quarter of the
+	 * reach in chunks, rounded to a power of two from 4 to 4,096, so a plane keeps a few rows of roots about the camera
+	 * whatever its chunk size (64 with 6,400 uu chunks and a 2,000,000 uu reach, 256 with 1,600 uu chunks).
+	 *
+	 * @param Reach The far distance, or a bounded world's half extent
+	 * @param InChunkWorldSize A chunk's edge
+	 * @return Chunks along a root tile's edge
+	 */
+	static int32 ComputeHeightmapRootChunks(double Reach, double InChunkWorldSize);
+
+	/**
+	 * A patch's edge at a level: on the datum sphere along a face's centre lines, pi / 2 x Radius / 2^Level; on a heightmap
+	 * world the root tile's edge / 2^Level.
+	 */
+	double GetPatchArc(int32 Level) const
+	{
+		const double Root = bHeightmap ? GetRootTileSize() : UE_DOUBLE_HALF_PI * Radius;
+		return Root / static_cast<double>(1ll << FMath::Clamp(Level, 0, 40));
+	}
 };
 
 /**
  * The analytic surface the far field samples: the planet's terrain altitude (FSphericalPlanetWorldMode, conditioning
  * zones applied as generation applies them) and its surface material and biome
- * (FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt). Immutable once made; read from build tasks on any thread.
+ * (FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt); on a heightmap world (WM-MP1) the generated height at a world
+ * (X, Y) (IVoxelWorldMode::GetTerrainHeightAt with the zones, FVoxelTerrainConditioning::ApplyToHeight; the block top of
+ * it in a cubic world, FVoxelBlockSurface) and FVoxelSurfaceQuery::QuerySurfaceConditions. Immutable once made; read from
+ * build tasks on any thread.
  */
 struct VOXELSTREAMING_API FVoxelFarFieldSurface
 {
-	/** The planet (an FSphericalPlanetWorldMode; its biome snapshot carries continentalness) */
+	/** The world mode: a planet (an FSphericalPlanetWorldMode; its biome snapshot carries continentalness) or a heightmap one */
 	TSharedPtr<const IVoxelWorldMode> WorldMode;
 
 	/** Terrain noise */
@@ -189,17 +289,61 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	/** Voxel size (generation's depth in voxels) */
 	float VoxelSize = 100.0f;
 
+	/** A heightmap world (WorldMode is InfinitePlane or IslandBowl) */
+	bool bHeightmap = false;
+
+	/** Heightmap worlds: the terrain noise's seed (the climate seeds derive from it), and the sea as the material rules read it */
+	int32 WorldSeed = 0;
+	bool bWater = false;
+	float WaterLevel = 0.0f;
+
+	/** Heightmap worlds: a cubic world whose surface is block tops (FVoxelBlockSurface::UsesBlockSurface), and the grid's origin */
+	bool bBlockSurface = false;
+	FVector WorldOrigin = FVector::ZeroVector;
+
 	/**
-	 * The surface of a world configuration's planet.
+	 * The surface of a world configuration's planet or heightmap world.
 	 *
-	 * @param Config World configuration (a SphericalPlanet)
-	 * @param InWorldMode The configuration's world mode (FVoxelWorldModeFactory::Create): must be a planet
-	 * @return The surface, or null when the world mode is not a planet
+	 * @param Config World configuration
+	 * @param InWorldMode The configuration's world mode (FVoxelWorldModeFactory::Create)
+	 * @return The surface, or null without a world mode
 	 */
 	static TSharedPtr<const FVoxelFarFieldSurface> Make(const UVoxelWorldConfiguration& Config, const TSharedPtr<IVoxelWorldMode>& InWorldMode);
 
-	/** The planet world mode. */
+	/** The planet world mode (planets only). */
 	const FSphericalPlanetWorldMode& GetPlanet() const;
+
+	/**
+	 * Heightmap worlds: the generated surface height at a world (X, Y), zones applied, the block top in a cubic world.
+	 *
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @param Zones Heightmap conditioning zones there (may be empty)
+	 * @return World Z of the surface
+	 */
+	float SampleHeight(double WorldX, double WorldY, const TArray<FVoxelConditioningZone>& Zones) const;
+
+	/**
+	 * Heightmap worlds: the surface material and biome where the terrain is at Height (depth 0), as generation writes them.
+	 *
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @param Height The surface height there (SampleHeight)
+	 * @param OutMaterial Surface material ID
+	 * @param OutBiome Dominant biome ID
+	 */
+	void SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome) const;
+
+	/**
+	 * Heightmap worlds: the surface material mix where the terrain is at Height (G45; FVoxelSurfaceQuery::
+	 * QuerySurfaceMaterialMix). Without biomes: generation's material by depth, alone.
+	 *
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @param Height The surface height there
+	 * @return The mix
+	 */
+	FVoxelSurfaceMaterialMix SampleMaterialMixXY(double WorldX, double WorldY, float Height) const;
 
 	/**
 	 * The terrain's altitude over the datum along a direction, zones applied (GetConditionedTerrainAltitude).
@@ -473,6 +617,9 @@ public:
 		FVector CapDirection = FVector::UpVector;
 		double CapAngle = 0.0;
 
+		/** Heightmap worlds: the patch's footprint (world XY) */
+		FBox2D Box = FBox2D(ForceInit);
+
 		/** Built once (the metadata below is valid) */
 		bool bBuilt = false;
 
@@ -571,6 +718,15 @@ public:
 	}
 
 	/**
+	 * Heightmap worlds: where a build's conditioning zones come from (UVoxelChunkManager::GatherConditioningZones), called
+	 * on the game thread when a build launches for a patch no wider than ZoneGatherMaxSize.
+	 */
+	void SetZoneGatherer2D(TFunction<void(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones)> InGatherer)
+	{
+		ZoneGatherer2D = MoveTemp(InGatherer);
+	}
+
+	/**
 	 * Rebuild every built patch narrow enough to take zones that meets a cap (a conditioning zone was added or removed
 	 * there). The old meshes keep drawing until the new ones arrive.
 	 *
@@ -578,6 +734,25 @@ public:
 	 * @param AngularRadius Cap radius (radians)
 	 */
 	void InvalidateCap(const FVector& Direction, double AngularRadius);
+
+	/**
+	 * Heightmap worlds: rebuild every built patch narrow enough to take zones that meets a region (a conditioning zone was
+	 * added or removed there).
+	 *
+	 * @param Region World XY box
+	 */
+	void InvalidateBox(const FBox2D& Region);
+
+	/**
+	 * Heightmap worlds: whether the voxel water tile of a chunk column (chunk X, Y) is drawn. A band patch (one chunk column)
+	 * hides its sea where the tile draws the same water and draws it where none does, so the ring between the window's load
+	 * and unload horizons, whose chunks are drawn without tiles, keeps its sea. Without the query a band patch's sea hides
+	 * with its terrain.
+	 */
+	void SetWaterTileQuery(TFunction<bool(const FIntPoint& Column)> InQuery)
+	{
+		WaterTileQuery = MoveTemp(InQuery);
+	}
 
 	/**
 	 * One step: take finished builds, select what to draw for the view, launch builds.
@@ -602,6 +777,19 @@ public:
 	 * @return The patch, or null
 	 */
 	const FPatchState* FindDrawnPatch(const FVector& Direction, bool bTerrainOnly = true) const;
+
+	/**
+	 * Heightmap worlds: the drawn patch whose footprint holds a world point's (X, Y) (the deepest drawn one on the way down
+	 * its root tile's tree), or null.
+	 *
+	 * @param WorldPoint Any point on the vertical through the place
+	 * @param bTerrainOnly Only a patch drawing its terrain
+	 * @return The patch, or null
+	 */
+	const FPatchState* FindDrawnPatchAt(const FVector& WorldPoint, bool bTerrainOnly = true) const;
+
+	/** Heightmap worlds: the root tiles the last update visited (keys). */
+	const TSet<uint64>& GetHeightmapRoots() const { return HeightmapRoots; }
 
 	/** Drop a built patch's CPU meshes once the owner has uploaded them (the metadata stays). */
 	void ReleaseMesh(uint64 PackedKey);
@@ -765,9 +953,15 @@ private:
 	/** Set what a patch draws (built). */
 	void SetDrawn(FPatchState& Patch);
 
-	/** Ground distance range from the viewer's ground point (along the ground). */
+	/** Ground distance range from the viewer's ground point (along the ground; on a heightmap world the XY distance to the footprint). */
 	double GetGroundDistanceMin(const FPatchState& Patch) const;
 	double GetGroundDistanceMax(const FPatchState& Patch) const;
+
+	/** Heightmap worlds: the XY distance from the camera to the patch's footprint (0 inside it). */
+	double GetCameraDistanceMin(const FPatchState& Patch) const;
+
+	/** Heightmap worlds: visit the root tiles within reach of the camera (and over the bounds), dropping the rest. */
+	void UpdateHeightmapRoots(FVoxelFarFieldChanges& OutChanges);
 
 	/** Whether a patch lies within the band region (with hysteresis while it is split). */
 	bool IsInBand(const FPatchState& Patch) const;
@@ -793,6 +987,11 @@ private:
 	TSharedPtr<const FVoxelFarFieldSurface> Surface;
 	TSharedPtr<FBuildSink, ESPMode::ThreadSafe> Sink;
 	TFunction<void(const FVector&, double, TArray<FVoxelConditioningZone>&)> ZoneGatherer;
+	TFunction<void(const FBox2D&, TArray<FVoxelConditioningZone>&)> ZoneGatherer2D;
+	TFunction<bool(const FIntPoint&)> WaterTileQuery;
+
+	/** Heightmap worlds: the root tiles of the last update (packed keys) */
+	TSet<uint64> HeightmapRoots;
 
 	/** Every patch in the trees, by packed key (stable addresses: children are added during the recursion) */
 	TMap<uint64, TUniquePtr<FPatchState>> Patches;

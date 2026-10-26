@@ -1092,12 +1092,13 @@ An island's far ocean (WM-E1) is not drawn by the renderer: the chunk manager bu
 components, using `IVoxelMeshRenderer::GetSurfaceMaterial()` (the material terrain is drawn with: the world component's
 atlas instance for the custom VF renderer, the dynamic instance for the PMC renderer) for its seabed.
 
-A planet's far field (spherical Phase 6, WM-BP9; [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") is not drawn by the
-renderer either: the chunk manager keeps one procedural mesh component per resident patch (`FarFieldComponents`), at the
-patch's origin in double with float offsets of the patch's size (the render regions' rule, a patch being its own region):
-section 0 the terrain with `GetSurfaceMaterial()`, 1 the sea and 2 its underside with the water material. A far-field
-terrain vertex is a voxel terrain vertex as the voxel vertex factory presents it (`FVoxelLocalVertex::FromVoxelVertex`
-with the planet's radial face up): UV1 = (material id, face type against local up), colour (the quad's second material,
+The far field (a planet's since spherical Phase 6, WM-BP9; a plane's and an island's since the world modes review's
+WM-MP1; [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") is not drawn by the renderer either: the chunk manager keeps one
+procedural mesh component per resident patch (`FarFieldComponents`), at the patch's origin in double with float offsets
+of the patch's size (the render regions' rule, a patch being its own region): section 0 the terrain with
+`GetSurfaceMaterial()`, 1 the sea and 2 its underside with the water material. A far-field terrain vertex is a voxel
+terrain vertex as the voxel vertex factory presents it (`FVoxelLocalVertex::FromVoxelVertex` with the planet's radial
+face up, +Z on a heightmap world): UV1 = (material id, face type against local up), colour (the quad's second material,
 biome, AO 0, alpha 255 less the second material's weight at the vertex; G45), the tangent cross(Z, N), UV0 the position
 on the normal's dominant plane in voxels (relative to the patch). Both materials are flat per triangle (vertices
 duplicated where quads' pairs differ) and the terrain material picks between them per pixel by the interpolated weight

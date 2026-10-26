@@ -112,7 +112,9 @@ bool FVoxelCrossfadeSwapReachesProxyTest::RunTest(const FString& Parameters)
 		}
 		TestNotNull(TEXT("The fade material is derived from the master (M_VoxelMaster_Fade)"), Component->GetFadeMaterial());
 
-		const FIntVector Chunk(2, -1, 0);
+		// A chunk of render region (0, 0, 0): the world component's own (since MP2 a heightmap world keeps 16-chunk regions
+		// too, and a chunk of another region is drawn by that region's component).
+		const FIntVector Chunk(2, 1, 0);
 		auto Submit = [&](int32 LOD, int32 Quads)
 		{
 			Renderer.UpdateChunkMeshFromCPU(Chunk, LOD, MakeQuads(Quads, 100.0f + LOD));

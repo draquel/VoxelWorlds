@@ -32,25 +32,30 @@
 
 namespace VoxelPlaneCameraStreamingTestUtils
 {
-	/** Set by code, as the planet orbit tests set voxel.Stream.DescentLead: a console-priority set here would outrank theirs. */
+	/**
+	 * Sets a console variable for a scope at the priority it already holds (code at least): a set below it is ignored (a
+	 * test that set it by console earlier in a suite run), one above it would outrank the other tests' code-priority sets.
+	 */
 	struct FScopedCVar
 	{
 		IConsoleVariable* Var = nullptr;
 		FString Previous;
+		EConsoleVariableFlags Priority = ECVF_SetByCode;
 		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
 		{
 			Var = IConsoleManager::Get().FindConsoleVariable(Name);
 			if (Var)
 			{
 				Previous = Var->GetString();
-				Var->Set(Value, ECVF_SetByCode);
+				Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Var->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
+				Var->Set(Value, Priority);
 			}
 		}
 		~FScopedCVar()
 		{
 			if (Var)
 			{
-				Var->Set(*Previous, ECVF_SetByCode);
+				Var->Set(*Previous, Priority);
 			}
 		}
 	};
@@ -96,6 +101,10 @@ bool FVoxelPlaneDescentPrefetchTest::RunTest(const FString& Parameters)
 	{
 		const TCHAR* Rule = bLead ? TEXT("the prefetch") : TEXT("voxel.Stream.DescentLead 0");
 		const FScopedCVar LeadVar(TEXT("voxel.Stream.DescentLead"), bLead ? TEXT("3") : TEXT("0"));
+		// No far field: since MP3 a heightmap window suspends above the cut-over while a far field draws the world (D38), and
+		// this test measures the prefetch under the window D8 keeps loaded at any altitude (the cut-over's own tests are
+		// LOD.Plane.Cutover and Streaming.Plane.CutoverDescentStop).
+		const FScopedCVar FarFieldVar(TEXT("voxel.World.FarField"), TEXT("0"));
 
 		FTestChunkWorld W;
 		W.Create(TEXT("PlaneDescentPrefetchWorld"));
@@ -110,12 +119,12 @@ bool FVoxelPlaneDescentPrefetchTest::RunTest(const FString& Parameters)
 		const double SurfaceZ = FMath::Max(Ground, static_cast<double>(W.Config->WaterLevel));
 		auto At = [&Site, SurfaceZ](double OverSurface) { return FVector(Site.X, Site.Y, SurfaceZ + OverSurface); };
 
-		// On the ground, and far above it: no lead once settled; never a suspended window on a plane.
+		// On the ground, and far above it: no lead once settled; without a far field a plane's window is never suspended.
 		W.SetViewer(At(300.0));
 		TestTrue(*FString::Printf(TEXT("%s: settled on the ground"), Rule), W.Settle());
 		const int32 OnTheGround = W.Manager->GetLoadedChunkCount();
 		TestTrue(*FString::Printf(TEXT("%s: the window holds chunks on the ground"), Rule), OnTheGround > 20);
-		TestFalse(*FString::Printf(TEXT("%s: a plane's window is never suspended"), Rule), W.Manager->IsVoxelWindowSuspended());
+		TestFalse(*FString::Printf(TEXT("%s: without a far field a plane's window is never suspended"), Rule), W.Manager->IsVoxelWindowSuspended());
 		TestEqual(*FString::Printf(TEXT("%s: settled, the streaming viewer is the camera"), Rule), W.Manager->GetStreamingViewerLead(), 0.0);
 
 		constexpr double Top = 40000.0;

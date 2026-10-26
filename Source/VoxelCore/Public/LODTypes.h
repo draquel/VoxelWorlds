@@ -51,6 +51,14 @@ struct VOXELCORE_API FLODQueryContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	double ViewerLead = 0.0;
 
+	/**
+	 * A far field draws the world beyond the voxel window (UVoxelChunkManager::HasFarField). A heightmap world's voxel
+	 * cut-over (world modes review WM-MP2, D38) applies only with one: above it the window would otherwise leave the sky.
+	 * Planets suspend their window either way (the ocean shell at least draws the sea).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
+	bool bFarFieldActive = false;
+
 	/** Field of view in degrees (for frustum calculations) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	float FieldOfView = 90.0f;

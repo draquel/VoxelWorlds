@@ -2,8 +2,8 @@
 
 **Module**: VoxelGeneration
 **Dependencies**: VoxelCore
-**Last Updated**: 2026-10-16 (milestone M6: the island's seabed slopes into a far ocean that reaches the horizon, and
-the island streams only the columns that touch it; WORLD_MODES_REVIEW_PLAN.md §14.10)
+**Last Updated**: 2026-10-26 (mode parity MP3: the far field and the voxel cut-over on a plane and an island, the island's
+far ocean past the bounds only; WORLD_MODES_REVIEW_PLAN.md §23.10)
 
 ## Overview
 
@@ -94,6 +94,14 @@ float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos,
   in the columns within band 0 + two chunks; all clipped to `GetTerrainHeightBounds` + one chunk. The viewer's altitude
   never removes the ground. Details: `Features/LOD_SYSTEM.md`, "The Vertical Window"
 - **Horizon** (load at the view distance, unload at 1.2×) is measured horizontally; **LOD distance** in 3D
+- **The far field** (mode parity WM-MP1, decision D36, 2026-10-26): past the window the generated surface is drawn to
+  `voxel.World.FarFieldDistance` (2,000,000 uu) by the planet's far field over root tiles of `voxel.World.FarFieldRootChunks`
+  chunks on the chunk grid, the sea at `WaterLevel` in it, band patches (one chunk column) hidden where the window's
+  chunks are drawn; `Features/LOD_SYSTEM.md`, "The Far Field". Before, the sky showed under the window's edge
+- **The voxel cut-over** (WM-MP2, D38): above three view distances over the ground or the sea under the streaming viewer
+  the window unloads and the far field alone draws; it streams back under 0.85 of it, ahead of a descending camera (the
+  descent prefetch, WM-MP3). Only while a far field is on (`voxel.World.FarField 0`: the window keeps its ground disk at
+  any altitude, as before); `Features/LOD_SYSTEM.md`, "Orbit and Back"
 
 ### Use Cases
 - Traditional Minecraft-style worlds
@@ -236,18 +244,21 @@ mesh components of the world actor (the static meshes, the grid's frame and the 
 
 | Mesh | Covers | Material | Updated |
 |------|--------|----------|---------|
-| Grid water | Every chunk column of the footprint's box (plus two columns) that the streaming has not opened: a column opens when it holds a chunk with voxel data or a water tile | `WaterMeshMaterial`, at `WaterLevel` like the water tiles | Whenever the open columns change (same tick, so a column's water tile and the far ocean never overlap: the water is translucent). Only the window around the open columns (their bounds plus 8 columns) is rebuilt then; the frame outside it is rebuilt when the open columns leave the window and it moves, so the cost does not grow with the island |
-| Grid floor | Under the grid water's columns that touch the footprint: flat at `EdgeHeight` inside the edge, the seabed outside | The terrain's material instance, with the seabed's material id | With the grid water |
+| Grid water | Every chunk column of the footprint's box (plus two columns) that the streaming has not opened: a column opens when it holds a chunk with voxel data or a water tile. **Not built while the far field is on** (mode parity WM-MP1, decision D37, 2026-10-26): the far field's patches draw the land and the sea inside the box, hidden where the window's chunks and tiles are | `WaterMeshMaterial`, at `WaterLevel` like the water tiles | Whenever the open columns change (same tick, so a column's water tile and the far ocean never overlap: the water is translucent). Only the window around the open columns (their bounds plus 8 columns) is rebuilt then; the frame outside it is rebuilt when the open columns leave the window and it moves, so the cost does not grow with the island |
+| Grid floor | Under the grid water's columns that touch the footprint: flat at `EdgeHeight` inside the edge, the seabed outside. Not built while the far field is on (D37) | The terrain's material instance, with the seabed's material id | With the grid water |
 | Open sea | From the grid's rectangle out to the footprint's box plus `IslandFarOceanDistance`, in widening rings | `WaterMeshMaterial` | Built once |
 | Seabed | From the edge out to the open sea's corners, half a voxel under the seabed profile, so the loaded voxel seabed hides it | Terrain material, seabed material id (the most common one generation gives just past the edge) | Built once |
 
 The water's undersides are separate sections, shown only while the viewer is under the water plane. The components are
-their own primitives, so a recreated terrain scene proxy (G15) does not touch them. Inside the island, columns past the
-view distance also get the far ocean's water: unloaded land there reads as sea at the horizon (as the plane shows the
-void past its view distance); `voxel.World.FarOceanInland <uu>` limits the water to columns within that distance of the
-edge (0 = only those that reach it). `voxel.World.FarOcean 0` hides it, `voxel.World.FarOceanStats` logs its state; the
-water needs `bEnableWaterLevel` and `WaterMeshMaterial` (without them the world actor draws its fallback plane), the
-seabed is drawn either way. `GetSettingsWarnings` flags an `IslandEdgeHeight` at or above the water.
+their own primitives, so a recreated terrain scene proxy (G15) does not touch them. With the far field off
+(`voxel.World.FarField 0`) the grid water is built as before M6's successor: inside the island, columns past the view
+distance get the far ocean's water, so unloaded land there reads as sea at the horizon; `voxel.World.FarOceanInland <uu>`
+limits that water to columns within that distance of the edge (0 = only those that reach it). With the far field on
+(the default since WM-MP1) the island's land and inland water are the far field's out to the bounds box, whose corners
+past the circle hold the far field's sea, and the open sea starts at the box. `voxel.World.FarOcean 0` hides the far
+ocean, `voxel.World.FarOceanStats` logs its state; the water needs `bEnableWaterLevel` and `WaterMeshMaterial` (without
+them the world actor draws its fallback plane), the seabed is drawn either way. `GetSettingsWarnings` flags an
+`IslandEdgeHeight` at or above the water.
 
 **Saves.** The seabed shapes only terrain past `R + F`, where a save holds nothing (POIs, map tiles and edits stay inside
 the walls), so it is not part of the save fingerprint and `FVoxelWorldModeFactory::GenerationVersion` stays 1: saves
@@ -350,8 +361,9 @@ Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
   (KI5, KI13); the residency audit agrees with the unload rule (KI11). See "Measured after M4".
 - ~~**Map tile eviction**~~ Fixed by WM-E2 (2026-10-16): tile images live under a fixed budget, least recently used
   first, and are drawn again when looked at; exploration is kept whole (KI15; MAP_SYSTEM.md).
-- **Unloaded island land past the view distance** reads as sea at the horizon (the far ocean stands in for it); a
-  distant silhouette of the island stays a nice-to-have (WORLD_MODES_REVIEW_PLAN.md §6).
+- ~~**Unloaded island land past the view distance** reads as sea at the horizon~~ Fixed by WM-MP1 (2026-10-26): the
+  far field draws the island's land and inland water out to its bounds, the far ocean the sea past them (D37;
+  WORLD_MODES_REVIEW_PLAN.md §23.10).
 
 ### Use Cases
 - Floating islands
@@ -577,8 +589,9 @@ use the block tops in a cubic heightmap world (`FVoxelBlockSurface::UsesBlockSur
 | Steps | Players and NPCs step one block (`UVCMovementComponent::MaxStepHeight` = V + 5, `vc.Move.StepUpBlocks`); two blocks are a wall; the camera eases a block step | VoxelCharacterPlugin |
 | Navigation | One cell per block column on the voxel grid, a step of at most one block (no √2 on diagonals, no corner cut past a pillar), the node budget scaled by the cell area (`voxel.Nav.BlockSteps`) | `VoxelSurfaceNavigationSubsystem`, see `SURFACE_NAVIGATION.md` |
 | Voxel trees | Recomputed from the injector's seeded positions (`FVoxelTreeInjector::FindTreesWithTrunkAt`, `CollectTreeVoxels`; `UVoxelChunkManager::FindVoxelTreeAt`, `GetVoxelTreeBlocks`, `FellVoxelTree`); chopped like a scatter tree, felled to a stump at the harvest entry's third hit | VoxelWorlds, VoxelCharacterPlugin |
+| The far field | Its patches sample the block tops (`FVoxelFarFieldSurface::SampleHeight`: the column's corner height through `BlockTopForHeight`), so past the window the terrain continues at the blocks' level, a voxel under them, with no step at the window's edge (mode parity WM-MP1, 2026-10-26) | `VoxelPlanetFarField` |
 
-Cubic planets are out of scope: a planet has no block surface.
+Cubic planets are out of scope: a planet has no block surface (decision D35).
 
 ---
 
