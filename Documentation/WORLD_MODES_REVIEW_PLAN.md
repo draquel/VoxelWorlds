@@ -10180,6 +10180,6 @@ no generation code, so their lines are main's.
 **Left for later.** The far field, the cut-over and the tooling (MP3), regions (MP2), the noise (MP4) as planned; the
 chord and perimeter benches run with MP3's changes, which move the window.
 
-PRs: VoxelWorlds `feat/mp1-mode-parity`, VoxelCharacterPlugin `feat/mp1-mode-parity`, UE5_PluginDev `claude/mp1-mode-parity`
+PRs: draquel/VoxelWorlds#164 (`feat/mp1-mode-parity`), draquel/VoxelCharacterPlugin#35 (`feat/mp1-mode-parity`), draquel/UE5_PluginDev#172 (`claude/mp1-mode-parity`)
 (VoxelWorldPOI, the gitlinks, the doc map); merge VoxelWorlds and VoxelCharacterPlugin first, then re-point the parent's
 gitlinks at their merge commits.
