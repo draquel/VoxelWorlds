@@ -3,22 +3,24 @@
 #include "VoxelPlanetNoise.h"
 #include "HAL/IConsoleManager.h"
 
-static TAutoConsoleVariable<int32> CVarPlanetContinuousSimplex(
-	TEXT("voxel.Planet.ContinuousSimplex"),
+static TAutoConsoleVariable<int32> CVarContinuousSimplex(
+	TEXT("voxel.Noise.ContinuousSimplex"),
 	1,
-	TEXT("Planet Simplex noise's corner kernel (world modes review G43): 1 = continuous at the simplex boundaries ((0.6 - d^2)^4 ")
-	TEXT("less its value and slope at d^2 = 0.5, PlanetGenerationVersion 6); 0 = the 0.6 kernel as before, which steps where a ")
-	TEXT("sample crosses into the next simplex (up to 136 uu along Review_Planet_L's cube face edges). For A/B only: 0 generates ")
-	TEXT("terrain that version 6 saves do not match. Read when chunks generate; CPU and GPU alike."),
+	TEXT("The Simplex noise's corner kernel, every world mode (world modes review G43 for planets, MP4 for heightmap worlds): ")
+	TEXT("1 = continuous at the simplex boundaries ((0.6 - d^2)^4 less its value and slope at d^2 = 0.5; PlanetGenerationVersion 6, ")
+	TEXT("GenerationVersion 3); 0 = the 0.6 kernel as before, which steps where a sample crosses into the next simplex (up to 136 uu ")
+	TEXT("along Review_Planet_L's cube face edges, about a quarter voxel on a heightmap world). For A/B only: 0 generates terrain ")
+	TEXT("that current saves do not match. Read when chunks generate; CPU and GPU alike. (voxel.Planet.ContinuousSimplex before MP4.)"),
 	ECVF_Default);
 
 bool FVoxelPlanetNoise::IsContinuousSimplex()
 {
-	return CVarPlanetContinuousSimplex.GetValueOnAnyThread() != 0;
+	return CVarContinuousSimplex.GetValueOnAnyThread() != 0;
 }
 
-// Spherical Phase 6, WM-BP5 (D22). Every function here has a twin in Shaders/Private/PlanetNoise.ush with the same float
-// operations in the same order; change both together (VoxelWorlds.Generation.GPUvsCPUSphericalParity).
+// Spherical Phase 6, WM-BP5 (D22); every world mode's noise since the world modes review's MP4 (D39). Every function here
+// has a twin in Shaders/Private/PlanetNoise.ush with the same float operations in the same order; change both together
+// (VoxelWorlds.Generation.GPUvsCPU*Parity).
 
 namespace VoxelPlanetNoiseDetail
 {

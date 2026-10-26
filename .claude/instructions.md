@@ -136,10 +136,12 @@ surveys it on purpose). Changing planet generation bumps
 
 Planets are precise to about 1,000 km (spherical Phase 6, P6.2; `Features/WORLD_MODES.md` "The radius ceiling"), so
 never hold a value of size R in float on a planet path: altitudes and signed distances are formed in double on the CPU
-(`ShellSignedDistanceAtAltitude`) and in the chunk's frame on the GPU (`PlanetFrame.ush`); planet noise is
-`FVoxelPlanetNoise` / `PlanetNoise.ush` (hashed lattice, split-origin; never the heightmap's `FBM3D` with an absolute
-float position); primitives on a planet sit at their render region's origin (`FVoxelRenderRegions`) and store float
-offsets from it (scene proxy vertices, seams, water, scatter HISMs per region).
+(`ShellSignedDistanceAtAltitude`) and in the chunk's frame on the GPU (`PlanetFrame.ush`); the noise of every world mode
+is `FVoxelPlanetNoise` / `PlanetNoise.ush` (hashed lattice, split-origin, the continuous Simplex kernel; heightmap worlds
+reach it through `FVoxelCPUNoiseGenerator::FBM3D` since the world modes review's MP4, D39, `GenerationVersion` 3, and the
+GPU's heightmap branch samples it at the chunk's origin corner; the classic table noise stays only as the tests' control,
+`ClassicFBM3D`); primitives sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it
+(scene proxy vertices, seams, water, scatter HISMs per region).
 
 A planet streams by chunk (spherical Phase 6, WM-BP8; `Features/LOD_SYSTEM.md`): `FDistanceBandLODStrategy::IsInPlanetWindow`
 keeps each chunk's surface slab (the analytic altitude range over the cube-sphere cells its corners span, ± 1.5 chunks)

@@ -16,36 +16,8 @@
 
 // ==================== Infinite Plane Mode ====================
 
-/**
- * Sample 2D terrain height noise for Infinite Plane mode.
- * Uses X,Y coordinates only (Z=0) for heightmap generation.
- *
- * @param X World X coordinate
- * @param Y World Y coordinate
- * @param NoiseType 0 = Perlin, 1 = Simplex
- * @param Seed Random seed
- * @param Octaves Number of noise layers
- * @param Frequency Base noise frequency
- * @param Amplitude Base noise amplitude
- * @param Lacunarity Frequency multiplier per octave
- * @param Persistence Amplitude multiplier per octave
- * @return Noise value in range [-1, 1]
- */
-float SampleTerrainHeight2D(
-    float X,
-    float Y,
-    int NoiseType,
-    int Seed,
-    int Octaves,
-    float Frequency,
-    float Amplitude,
-    float Lacunarity,
-    float Persistence)
-{
-    // Sample noise with Z=0 for 2D heightmap
-    float3 Position2D = float3(X, Y, 0.0f);
-    return FBM3D(Position2D, NoiseType, Seed, Octaves, Frequency, Amplitude, Lacunarity, Persistence);
-}
+// The terrain height noise itself is sampled by GenerateVoxelDensity.usf (PlanetFBM3D at the chunk's terrain origin +
+// the voxel's offset in the plane, MP4); what follows turns it into a height and a signed distance.
 
 /**
  * Convert noise value to terrain height.
@@ -100,54 +72,8 @@ uint SignedDistanceToDensity(float SignedDistance, float VoxelSize)
     return (uint)clamp(Density, 0.0f, 255.0f);
 }
 
-/**
- * Apply Infinite Plane SDF transformation.
- * Samples 2D noise and converts to density based on height.
- *
- * @param WorldPos World position of voxel
- * @param VoxelSize Size of voxel in world units
- * @param NoiseType 0 = Perlin, 1 = Simplex
- * @param Seed Random seed
- * @param Octaves Number of noise layers
- * @param Frequency Base noise frequency
- * @param Amplitude Base noise amplitude
- * @param Lacunarity Frequency multiplier per octave
- * @param Persistence Amplitude multiplier per octave
- * @param SeaLevel Base terrain elevation
- * @param HeightScale Noise amplitude multiplier
- * @param BaseHeight Additional height offset
- * @param OutTerrainHeight Output terrain height at this X,Y
- * @return Density value [0-255]
- */
-uint ApplyInfinitePlaneSDF(
-    float3 WorldPos,
-    float VoxelSize,
-    int NoiseType,
-    int Seed,
-    int Octaves,
-    float Frequency,
-    float Amplitude,
-    float Lacunarity,
-    float Persistence,
-    float SeaLevel,
-    float HeightScale,
-    float BaseHeight,
-    out float OutTerrainHeight)
-{
-    // Sample 2D noise at X,Y
-    float NoiseValue = SampleTerrainHeight2D(
-        WorldPos.x, WorldPos.y,
-        NoiseType, Seed, Octaves, Frequency, Amplitude, Lacunarity, Persistence);
-
-    // Convert to terrain height
-    OutTerrainHeight = NoiseToTerrainHeight(NoiseValue, SeaLevel, HeightScale, BaseHeight);
-
-    // Calculate signed distance
-    float SignedDistance = CalculateSignedDistance(WorldPos.z, OutTerrainHeight);
-
-    // Convert to density
-    return SignedDistanceToDensity(SignedDistance, VoxelSize);
-}
+// The monolithic ApplyInfinitePlaneSDF (noise -> height -> density in one call) is gone with the classic noise (MP4):
+// GenerateVoxelDensity.usf samples the noise at the chunk's origins and calls the steps below in order.
 
 /**
  * Get material ID based on depth below terrain surface.

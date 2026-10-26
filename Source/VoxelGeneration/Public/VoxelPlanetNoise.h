@@ -20,10 +20,12 @@ struct VOXELGENERATION_API FVoxelNoiseSplit
 };
 
 /**
- * Planet noise (spherical Phase 6, WM-BP5, decision D22): the noise every planet field samples (terrain, continentalness,
- * temperature, moisture, caves and ores), on the CPU and, bit for bit in its algebra, on the GPU (PlanetNoise.ush).
+ * The terrain noise (spherical Phase 6, WM-BP5, decision D22; every world mode since the world modes review's MP4, decision
+ * D39): the noise every field samples (terrain, continentalness, temperature, moisture, caves and ores), on the CPU and, bit
+ * for bit in its algebra, on the GPU (PlanetNoise.ush). The name is from spherical Phase 6, when planets alone had it;
+ * FVoxelCPUNoiseGenerator::FBM3D, the heightmap entry point, has come through here since MP4 (GenerationVersion 3).
  *
- * Two things differ from the heightmap noise (FVoxelCPUNoiseGenerator::FBM3D, which heightmap worlds keep bit for bit):
+ * Two things differ from the classic table noise heightmap worlds sampled before MP4 (FVoxelCPUNoiseGenerator::ClassicFBM3D):
  *
  * - A hashed integer lattice (LatticeHash, the ore Rarity hash's mixing) instead of Ken Perlin's 256-entry permutation
  *   table, so the noise has no period: the old table repeated every field every 256 lattice units, a 1,000 km planet's
@@ -37,8 +39,8 @@ struct VOXELGENERATION_API FVoxelNoiseSplit
  *
  * - A continuous Simplex kernel (G43, PlanetGenerationVersion 6): the classic (0.6 - d^2)^4 corner weight stepped where
  *   a sample crossed into the next simplex (up to 136 uu along Review_Planet_L's cube face edges, where every octave's
- *   boundary lies); it is now that weight less its value and slope at d^2 = 0.5. voxel.Planet.ContinuousSimplex 0
- *   restores the classic one (A/B).
+ *   boundary lies); it is now that weight less its value and slope at d^2 = 0.5. voxel.Noise.ContinuousSimplex 0
+ *   restores the classic one (A/B; voxel.Planet.ContinuousSimplex before MP4).
  *
  * The octave loop (frequencies multiplied in float, amplitudes, normalisation) is FVoxelCPUNoiseGenerator::FBM3D's.
  *
@@ -100,7 +102,7 @@ public:
 	static float Simplex(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed);
 
 	/**
-	 * voxel.Planet.ContinuousSimplex: whether Simplex uses the continuous corner kernel (G43, the default) or the classic one.
+	 * voxel.Noise.ContinuousSimplex: whether Simplex uses the continuous corner kernel (G43, the default) or the classic one.
 	 *
 	 * @return True for the continuous kernel
 	 */

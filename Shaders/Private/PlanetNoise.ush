@@ -1,13 +1,15 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 //
-// Planet noise on the GPU (spherical Phase 6, WM-BP5, D22; WORLD_MODES_REVIEW_PLAN.md §20.1): the twin of
-// FVoxelPlanetNoise (VoxelPlanetNoise.cpp), the same float operations in the same order. A hashed integer lattice with no
-// period and split-origin sampling: each field's origin is split per octave on the CPU, in double, into an integer
-// lattice cell and a float fraction (PlanetNoiseOrigins, 2 float4s a split: [asfloat(cell), 0][frac, 0]), and the shader
-// adds the voxel's small offset in noise units, so every float here is of the size of a lattice cell, at any radius.
-// Heightmap worlds keep FBMNoise.ush bit for bit.
+// The terrain noise on the GPU (spherical Phase 6, WM-BP5, D22, WORLD_MODES_REVIEW_PLAN.md §20.1; every world mode since
+// the world modes review's MP4, D39): the twin of FVoxelPlanetNoise (VoxelPlanetNoise.cpp), the same float operations in
+// the same order. A hashed integer lattice with no period and split-origin sampling: each field's origin is split per
+// octave on the CPU, in double, into an integer lattice cell and a float fraction (NoiseOrigins, 2 float4s a split:
+// [asfloat(cell), 0][frac, 0]), and the shader adds the voxel's small offset in noise units, so every float here is of
+// the size of a lattice cell, at any radius or distance from the origin. The names are from spherical Phase 6, when
+// planets alone had it; the heightmap branch of GenerateVoxelDensity.usf samples through PlanetFBM3D too (the classic
+// FBMNoise.ush functions are no longer called by generation).
 //
-// Include AFTER the generation globals (GenerateVoxelDensity.usf): reads PlanetNoiseOrigins and PlanetSimplexContinuous.
+// Include AFTER the generation globals (GenerateVoxelDensity.usf): reads NoiseOrigins and SimplexContinuous.
 
 #pragma once
 
@@ -40,11 +42,11 @@ static const int3 PlanetGrad3[12] = {
 
 // A simplex corner's contribution (FVoxelPlanetNoise's SimplexCorner). G43: the continuous kernel, (0.6 - d^2)^4 less its
 // value and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, reaches zero where the next simplex begins;
-// PlanetSimplexContinuous 0 (voxel.Planet.ContinuousSimplex) keeps the classic one, which steps there.
+// SimplexContinuous 0 (voxel.Planet.ContinuousSimplex) keeps the classic one, which steps there.
 float PlanetSimplexCorner(uint Hash, float3 X)
 {
     const int3 G = PlanetGrad3[Hash % 12u];
-    if (PlanetSimplexContinuous != 0)
+    if (SimplexContinuous != 0)
     {
         const float V = 0.5f - X.x * X.x - X.y * X.y - X.z * X.z;
         if (V <= 0.0f)
@@ -101,7 +103,7 @@ float PlanetSimplex(uint3 Cell, float3 Frac, float3 Offset, int Seed)
     const float N2 = PlanetSimplexCorner(PlanetLatticeHash(B + asuint(I2), Seed), X2);
     const float N3 = PlanetSimplexCorner(PlanetLatticeHash(B + uint3(1u, 1u, 1u), Seed), X3);
     // The sum's scale: 33.25 gives the continuous kernel the classic one's spread (32).
-    return (PlanetSimplexContinuous != 0 ? 33.25f : 32.0f) * (N0 + N1 + N2 + N3);
+    return (SimplexContinuous != 0 ? 33.25f : 32.0f) * (N0 + N1 + N2 + N3);
 }
 
 float PlanetGrad(uint Hash, float X, float Y, float Z)
@@ -199,7 +201,7 @@ float PlanetNoiseSample(uint3 Cell, float3 Frac, float3 Offset, int NoiseType, i
 }
 
 /**
- * FVoxelPlanetNoise::FBM3D(Origin, Offset, Params): fBm at a field's origin (its splits at PlanetNoiseOrigins[OriginBase +
+ * FVoxelPlanetNoise::FBM3D(Origin, Offset, Params): fBm at a field's origin (its splits at NoiseOrigins[OriginBase +
  * octave], uploaded by the CPU) + OffsetUU, the sample's offset from the origin in uu, scaled by each octave's frequency.
  * The octave loop is FBM3D's (FBMNoise.ush): frequencies multiplied in float, amplitudes, normalisation.
  */
@@ -214,8 +216,8 @@ float PlanetFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int 
     for (int i = 0; i < Count; ++i)
     {
         const int Index = (OriginBase + i) * 2;
-        const uint3 Cell = asuint(PlanetNoiseOrigins[Index].xyz);
-        const float3 Frac = PlanetNoiseOrigins[Index + 1].xyz;
+        const uint3 Cell = asuint(NoiseOrigins[Index].xyz);
+        const float3 Frac = NoiseOrigins[Index + 1].xyz;
         Total += PlanetNoiseSample(Cell, Frac, OffsetUU * CurrentFrequency, NoiseType, Seed) * CurrentAmplitude;
         MaxValue += CurrentAmplitude;
         CurrentAmplitude *= Persistence;

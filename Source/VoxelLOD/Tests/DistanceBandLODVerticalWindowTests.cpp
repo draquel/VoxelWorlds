@@ -170,7 +170,10 @@ bool FLODVerticalWindowFromTerrainTest::RunTest(const FString& Parameters)
 			for (const FIntVector& C : Got) { Extra += Expected.Contains(C) ? 0 : 1; }
 			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: window chunks not streamed"), ModeName, Layer), Missing, 0);
 			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: chunks streamed outside the window"), ModeName, Layer), Extra, 0);
-			TestTrue(*FString::Printf(TEXT("%s, viewer on layer %d: candidates"), ModeName, Layer), Got.Num() > 1000);
+			// Non-vacuous: the slabs of the ~550 columns within the horizon (about two layers each with MP4's noise, whose
+			// per-column ranges are tighter than the table noise's were) plus the near band where it lies within the bounds.
+			AddInfo(FString::Printf(TEXT("%s, viewer on layer %d: %d chunks streamed, %d expected"), ModeName, Layer, Got.Num(), Expected.Num()));
+			TestTrue(*FString::Printf(TEXT("%s, viewer on layer %d: candidates (%d)"), ModeName, Layer, Got.Num()), Got.Num() > 500);
 
 			// What the far columns stream does not depend on the viewer's altitude at all.
 			TSet<FIntVector> Far;

@@ -60,7 +60,25 @@ public:
 	// ==================== Noise Algorithms ====================
 
 	/**
-	 * Sample 3D Perlin noise at a position.
+	 * Sample fBm (Fractal Brownian Motion) noise at a position: the noise every world mode's fields sample (terrain,
+	 * continentalness, climate, caves, ores, the surface queries and the map). Since the world modes review's MP4 (WM-MP6,
+	 * WM-MP7, decision D39; GenerationVersion 3) it is FVoxelPlanetNoise::FBM3D for heightmap worlds too: a hashed integer
+	 * lattice with no period, split-origin sampling exact to float precision at any distance, and the continuous Simplex
+	 * kernel (G43). The GPU's heightmap branch samples the same noise at a per-chunk origin (GenerateVoxelDensity.usf,
+	 * PlanetNoise.ush), the two within float rounding of each other.
+	 *
+	 * @param Position World position to sample
+	 * @param Params Noise parameters (octaves, frequency, etc.)
+	 * @return Noise value in range approximately [-1, 1]
+	 */
+	static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
+
+	// The classic table noise (Ken Perlin's 256-entry permutation, the 0.6 Simplex kernel): what heightmap worlds sampled
+	// before MP4. No generation path reads it; the tests keep it as the control that repeats every 256 lattice units and
+	// steps across the simplex boundaries (Noise.PlanetHashNoPeriod, Noise.HeightmapNoise).
+
+	/**
+	 * Classic 3D Perlin noise (the permutation table; a 256-unit period).
 	 *
 	 * @param Position World position to sample
 	 * @param Seed Random seed for permutation table
@@ -69,7 +87,7 @@ public:
 	static float Perlin3D(const FVector& Position, int32 Seed = 0);
 
 	/**
-	 * Sample 3D Simplex noise at a position.
+	 * Classic 3D Simplex noise (the permutation table, the 0.6 corner kernel).
 	 *
 	 * @param Position World position to sample
 	 * @param Seed Random seed for permutation table
@@ -78,17 +96,16 @@ public:
 	static float Simplex3D(const FVector& Position, int32 Seed = 0);
 
 	/**
-	 * Sample fBm (Fractal Brownian Motion) noise at a position.
-	 * Combines multiple octaves of noise for natural-looking terrain.
+	 * Classic fBm over Perlin3D / Simplex3D / Cellular3D / Voronoi3D: what FBM3D was before MP4, for the tests' controls.
 	 *
 	 * @param Position World position to sample
 	 * @param Params Noise parameters (octaves, frequency, etc.)
 	 * @return Noise value in range approximately [-1, 1]
 	 */
-	static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
+	static float ClassicFBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
 
 	/**
-	 * Sample 3D Cellular (Worley) noise at a position.
+	 * Classic 3D Cellular (Worley) noise at a position.
 	 * Uses 3x3x3 cell search to find distances to nearest two feature points.
 	 *
 	 * @param Position World position to sample (pre-scaled by frequency)
@@ -99,7 +116,7 @@ public:
 	static void Cellular3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2);
 
 	/**
-	 * Sample 3D Voronoi noise at a position.
+	 * Classic 3D Voronoi noise at a position.
 	 * Same as Cellular but also returns a stable cell ID.
 	 *
 	 * @param Position World position to sample (pre-scaled by frequency)
