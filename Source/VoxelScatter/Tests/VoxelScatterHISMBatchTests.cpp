@@ -534,9 +534,10 @@ bool FVoxelScatterHISMBatchRegionsTest::RunTest(const FString& Parameters)
 	};
 	int32 OneRegionHISMs = 0;
 	int32 SplitHISMs = 0;
+	// The default (-1: regions of 4 chunks in every world mode since WM-MP5) puts the four chunks in one region.
 	const TArray<TPair<int32, FTransform>> OneRegion = Run(TEXT("-1"), OneRegionHISMs);
 	const TArray<TPair<int32, FTransform>> Split = Run(TEXT("1"), SplitHISMs);
-	AddInfo(FString::Printf(TEXT("one region: %d HISMs, %d instances; regions of one chunk: %d HISMs, %d instances"), OneRegionHISMs,
+	AddInfo(FString::Printf(TEXT("one region (the default's four chunks): %d HISMs, %d instances; regions of one chunk: %d HISMs, %d instances"), OneRegionHISMs,
 		OneRegion.Num(), SplitHISMs, Split.Num()));
 	TestEqual(TEXT("One region: a HISM per type"), OneRegionHISMs, 3);
 	TestEqual(TEXT("Regions of one chunk: a HISM per chunk and type"), SplitHISMs, 12);

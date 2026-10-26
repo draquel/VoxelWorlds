@@ -32,9 +32,8 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
 	TEXT("voxel.Scatter.RegionChunks"),
 	-1,
 	TEXT("Chunks along the edge of a scatter HISM's region (world modes review G42): each scatter type gets one HISM per region.\n")
-	TEXT("-1 = 4 on a planet, one region at the world origin on a heightmap world; 0 = the render regions (voxel.Render.RegionChunks\n")
-	TEXT("on a planet, one region on a heightmap world: the behaviour before G42); N > 0 = regions of N chunks in any world mode.\n")
-	TEXT("Read when the scatter manager initializes."),
+	TEXT("-1 = 4 in every world mode (planets since G42, heightmap worlds since WM-MP5, D40); 0 = the render regions\n")
+	TEXT("(voxel.Render.RegionChunks; the behaviour before G42); N > 0 = regions of N chunks. Read when the scatter manager initializes."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarVoxelScatterBuriedTopFace(
@@ -54,8 +53,8 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterPlanetFaceCaves(
 	TEXT("such a voxel was read as rock. Read when a chunk's extraction context is built."),
 	ECVF_Default);
 
-/** A planet's scatter HISM regions by default (voxel.Scatter.RegionChunks -1): a quarter of the render regions' edge. */
-static constexpr int32 PlanetScatterRegionChunks = 4;
+/** The scatter HISM regions by default (voxel.Scatter.RegionChunks -1), every world mode: a quarter of the render regions' edge. */
+static constexpr int32 DefaultScatterRegionChunks = 4;
 
 namespace
 {
@@ -389,19 +388,19 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	TotalSurfacePointsExtracted = 0;
 	TotalSpawnPointsGenerated = 0;
 
-	// Create scatter renderer for HISM instance management, its HISMs per render region on a planet (WM-BP7)
+	// Create scatter renderer for HISM instance management, its HISMs per render region (WM-BP7; every world mode since WM-MP5)
 	ScatterRenderer = NewObject<UVoxelScatterRenderer>(this);
 	// Its HISMs per region (world modes review G42): every change to a HISM costs all its instances (UVoxelScatterRenderer's
-	// batched writes), so a planet keeps scatter in regions a quarter of the render regions' edge; precision only gains.
+	// batched writes), so scatter is kept in regions a quarter of the render regions' edge; precision only gains.
 	FVoxelRenderRegions ScatterRegions = FVoxelRenderRegions::FromConfig(*Config);
 	const int32 ScatterRegionSetting = CVarVoxelScatterRegionChunks.GetValueOnGameThread();
 	if (ScatterRegionSetting > 0)
 	{
 		ScatterRegions.RegionChunks = ScatterRegionSetting;
 	}
-	else if (ScatterRegionSetting < 0 && Config->WorldMode == EWorldMode::SphericalPlanet)
+	else if (ScatterRegionSetting < 0)
 	{
-		ScatterRegions.RegionChunks = PlanetScatterRegionChunks;
+		ScatterRegions.RegionChunks = DefaultScatterRegionChunks;
 	}
 	ScatterRenderer->SetRenderRegions(ScatterRegions);
 	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter HISM regions: %d chunks along an edge (0 = one region)"), ScatterRegions.RegionChunks);

@@ -149,8 +149,9 @@ AVoxelWorldTestActor
 - Exposes statistics and chunk queries
 
 **Render regions** (`FVoxelRenderRegions`, `VoxelCore/Public/VoxelRenderRegions.h`; spherical Phase 6, WM-BP7, D23)
-- A planet's terrain renders in regions of `voxel.Render.RegionChunks`^3 chunks (16 by default, 76,800 uu; 0 turns
-  them off): `FVoxelCustomVFRenderer` keeps one `UVoxelWorldComponent` per region at the region's origin (its min
+- The terrain renders in regions of `voxel.Render.RegionChunks`^3 chunks in every world mode (16 by default, 76,800 uu; 0
+  turns them off; planets since WM-BP7, heightmap worlds since world modes review WM-MP5, D40, since a plane 100 km from
+  its origin loses float precision as a big planet does): `FVoxelCustomVFRenderer` keeps one `UVoxelWorldComponent` per region at the region's origin (its min
   corner, in double) and routes each chunk, seam, water tile and fade to it, creating it on demand with the material,
   RVTs, atlas, LOD collection, distances and viewer replayed, and retiring it when it holds nothing
   (`UVoxelWorldComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays.
