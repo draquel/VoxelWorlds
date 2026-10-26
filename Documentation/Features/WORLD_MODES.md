@@ -2,8 +2,8 @@
 
 **Module**: VoxelGeneration
 **Dependencies**: VoxelCore
-**Last Updated**: 2026-10-26 (mode parity MP3: the far field and the voxel cut-over on a plane and an island, the island's
-far ocean past the bounds only; WORLD_MODES_REVIEW_PLAN.md §23.10)
+**Last Updated**: 2026-10-26 (mode parity complete: the "Mode parity" section below sums up what every mode shares after
+MP1-MP4 and the exit check, WORLD_MODES_REVIEW_PLAN.md §23.8-§23.12)
 
 ## Overview
 
@@ -592,6 +592,31 @@ use the block tops in a cubic heightmap world (`FVoxelBlockSurface::UsesBlockSur
 | The far field | Its patches sample the block tops (`FVoxelFarFieldSurface::SampleHeight`: the column's corner height through `BlockTopForHeight`), so past the window the terrain continues at the blocks' level, a voxel under them, with no step at the window's edge (mode parity WM-MP1, 2026-10-26) | `VoxelPlanetFarField` |
 
 Cubic planets are out of scope: a planet has no block surface (decision D35).
+
+---
+
+## Mode parity (world modes review §23, 2026-10-26)
+
+The review's mode-parity milestones (MP1-MP4, WORLD_MODES_REVIEW_PLAN.md §23.8-§23.11; the exit check in §23.12) gave
+the heightmap modes every planet feature that is not tied to the sphere. One code path serves every mode in each row;
+"heightmap" is InfinitePlane and IslandBowl, smooth or cubic.
+
+| Feature | Heightmap worlds | Planets | Since |
+|---------|------------------|---------|-------|
+| Terrain past the view distance | The far field to the horizon: a quadtree per root tile on the XY grid (`FVoxelFarFieldTileKey`), the island's over its bounds with the far ocean beyond (D37), the sea at `WaterLevel`, a cubic world's patches at the block tops; `voxel.World.FarField`, `voxel.World.FarFieldDistance` (2,000,000 uu), `voxel.World.FarFieldHeightmapError` (4 px) | Six cube-face quadtrees (`voxel.World.FarFieldError` 2 px) | MP3 (WM-MP1, D36) |
+| The voxel window at altitude | Suspended above three view distances over the ground or the sea under the streaming viewer, only while a far field is on (D38, kept by D41); resumed under 0.85 of it with the camera under it (G49) | The same (`PlanetVoxelCutoverAltitude`, `voxel.World.VoxelCutover`) | MP3 (WM-MP2) |
+| Streaming ahead of a fall | The descent prefetch leads the streaming viewer under a descending camera (`voxel.Stream.DescentLead`) | The same | MP1 (WM-MP3) |
+| The frame of a teleport | A second streaming pass for the frame's camera after a cut of more than a chunk (`voxel.Stream.CameraCutUpdate`) | The same, and the far field's second update (F4.3) | MP1 (WM-MP4) |
+| Precision far from the origin | Render regions and scatter regions (`voxel.Render.RegionChunks` 16, `voxel.Scatter.RegionChunks`): no float of the world's size | The same | MP2 (WM-MP5, D40) |
+| Noise | `FVoxelPlanetNoise` / `PlanetNoise.ush` for every field: a hashed split-origin lattice (no period) and the continuous Simplex kernel (`voxel.Noise.ContinuousSimplex`); `GenerationVersion` 3 | The same (`PlanetGenerationVersion` 6) | MP4 (WM-MP6, WM-MP7, D39) |
+| The near band | Clipped to the terrain's height bounds (D8): a climbing viewer loads no air above them, measured, nothing to cap | Capped at the surface slab's top (G52) | MP1 (WM-MP8, no change) |
+| The world map at scale | The marker cap, the tile-redraw throttle and `voxel.Map.ExploreAllMaxTiles` | The same | MP1 (WM-MP9) |
+| The first spawn over the sea | The ring search, then a coarse spiral over the generated surface (`FindPlaneSpawnPointAtScale`) | `FindPlanetSpawnPointAtScale` | MP1 (WM-MP10) |
+| Altitude QA tooling | `vox.FlyTo`, `vox.Orbit` (a look-down camera over a point), `vox.World`, the bench's `climb=X:Y[:Alt]` and `descend=X:Y:Alt` | `vox.Planet`, `climb=Lat:Lon`, `descend=Lat:Lon:Alt` | MP3 (WM-MP11) |
+
+What stays planet-only is the sphere itself: gravity toward the centre and the gravity frame, the cube-sphere address of
+chunks, map tiles and PCG, pad space for POIs and dungeons, orbit cameras around the centre, the sea as a radius, and the
+local solar clock. Cubic meshing on a planet is out of scope (D35).
 
 ---
 
