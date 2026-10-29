@@ -375,7 +375,11 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 
 	FScopeLock Lock(&ChunkDataLock);
 
-	if (ChunkRenderData.Num() == 0)
+	// Nothing at all to draw. A proxy with water tiles and no chunk mesh draws them (world modes review G77): since
+	// render regions (MP2) a water tile goes to the region of its column's Z-0 chunk, which over a lake is air with no
+	// mesh, and a region component holding only water tiles returned here, so a lake under such a region drew its bed
+	// and no water (a block of chunk columns at the region's corner, seen from altitude).
+	if (ChunkRenderData.Num() == 0 && WaterTileRenderData.Num() == 0)
 	{
 		return;
 	}
@@ -422,6 +426,15 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	// A shadow gather passes one view carrying the shadow's caster volume (FVoxelViewCull)
 	const bool bUseShadowVolume = CVarVoxelShadowCullFrustum.GetValueOnAnyThread() != 0;
 	const bool bShadowGather = Views.Num() > 0 && Views[0]->GetDynamicMeshElementsShadowCullFrustum() != nullptr;
+	if (!bShadowGather)
+	{
+		LastMainViewFrame = GFrameNumberRenderThread;
+		++MainViewCalls;
+	}
+	else
+	{
+		++ShadowGatherCalls;
+	}
 
 	// Process each view
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
@@ -877,6 +890,10 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 							}
 						}
 					}
+					if (!bShadowGather)
+					{
+						WaterTileDrawnFrame.FindOrAdd(TileCoord) = GFrameNumberRenderThread;
+					}
 
 					FMeshBatch& MeshBatch = Collector.AllocateMesh();
 					MeshBatch.VertexFactory = VertexFactoryPtr->Get();
@@ -967,6 +984,16 @@ FPrimitiveViewRelevance FVoxelSceneProxy::GetViewRelevance(const FSceneView* Vie
 {
 	FPrimitiveViewRelevance Result;
 	Result.bDrawRelevance = IsShown(View);
+	++RelevanceCalls;
+	LastRelevanceFrame = GFrameNumberRenderThread;
+	bLastShown = Result.bDrawRelevance;
+	if (View && View->GetDynamicMeshElementsShadowCullFrustum() == nullptr)
+	{
+		++MainRelevanceCalls;
+		LastMainRelevanceFrame = GFrameNumberRenderThread;
+		LastRelevanceViewOrigin = View->ViewMatrices.GetViewOrigin();
+		bLastRelevanceFrustumHit = View->ViewFrustum.IntersectBox(GetBounds().Origin, GetBounds().BoxExtent);
+	}
 	Result.bShadowRelevance = IsShadowCast(View);
 	Result.bDynamicRelevance = true;
 	Result.bStaticRelevance = false;
@@ -2683,6 +2710,34 @@ bool FVoxelSceneProxy::GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoor
 	OutInfo.bCrossfading = IsChunkCrossfadeDrawable(FadeState, PreviousMesh);
 	OutInfo.bAppearing = !OutInfo.bCrossfading && FadeState && FadeState->bAppear && FadeState->FadeInProxy;
 	return OutInfo.CurrentTriangles > 0;
+}
+
+bool FVoxelSceneProxy::GetWaterTileDrawInfo_RenderThread(const FIntVector2& TileCoord, FString& Out) const
+{
+	check(IsInRenderingThread());
+
+	FScopeLock Lock(&ChunkDataLock);
+	const FVoxelChunkRenderData* Data = WaterTileRenderData.Find(TileCoord);
+	const TSharedPtr<FLocalVertexFactory>* VertexFactoryPtr = WaterTileVertexFactories.Find(TileCoord);
+	const uint32* Drawn = WaterTileDrawnFrame.Find(TileCoord);
+	const FString ProxyState = FString::Printf(TEXT("proxy (origin %s, scene bounds %s radius %.0f, draw distance %.0f to %.0f, main pass %s; relevance calls %u the last %u frames ago shown %s, of them main-view %u the last %u frames ago from %s frustum hit %s; main-view draws %u, the last %u frames ago, shadow gathers %u, water material %s)"),
+		*RenderOrigin.ToString(), *GetBounds().GetBox().ToString(), GetBounds().SphereRadius, GetMinDrawDistance(), GetMaxDrawDistance(),
+		ShouldRenderInMainPass() ? TEXT("yes") : TEXT("NO"),
+		RelevanceCalls, GFrameNumberRenderThread - LastRelevanceFrame, bLastShown ? TEXT("yes") : TEXT("NO"),
+		MainRelevanceCalls, GFrameNumberRenderThread - LastMainRelevanceFrame, *LastRelevanceViewOrigin.ToString(), bLastRelevanceFrustumHit ? TEXT("yes") : TEXT("NO"),
+		MainViewCalls, GFrameNumberRenderThread - LastMainViewFrame, ShadowGatherCalls, WaterMaterial ? TEXT("set") : TEXT("NONE"));
+	if (!Data)
+	{
+		Out = FString::Printf(TEXT("%s: no mesh for the tile%s"), *ProxyState,
+			Drawn ? *FString::Printf(TEXT(", last drawn %u frames ago"), GFrameNumberRenderThread - *Drawn) : TEXT(""));
+		return false;
+	}
+	Out = FString::Printf(TEXT("%s: %u vertices, %u indices, buffers %s, vertex factory %s, visible %s, world bounds %s; drawn %s"),
+		*ProxyState, Data->VertexCount, Data->IndexCount, Data->HasValidBuffers() ? TEXT("valid") : TEXT("INVALID"),
+		(VertexFactoryPtr && VertexFactoryPtr->IsValid()) ? TEXT("valid") : TEXT("MISSING"), Data->bIsVisible ? TEXT("yes") : TEXT("no"),
+		*Data->WorldBounds.ToString(),
+		Drawn ? *FString::Printf(TEXT("%u frames ago"), GFrameNumberRenderThread - *Drawn) : TEXT("NEVER by a main view"));
+	return Data->HasValidBuffers();
 }
 
 FString FVoxelSceneProxy::GetFadeDebugString_RenderThread(int32 MaxEntries, const FIntVector* FocusChunk) const

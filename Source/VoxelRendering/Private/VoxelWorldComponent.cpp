@@ -320,7 +320,9 @@ FBoxSphereBounds UVoxelWorldComponent::CalcBounds(const FTransform& LocalToWorld
 	// are culled again in GetDynamicMeshElements). This used to be a fixed +-5 km box around the origin: once the
 	// player travelled past it, the entire terrain vanished whenever the camera looked away from that box -- in a
 	// flash with camera motion, or held still (QA, 2026-10-11, player at X -615,000). Bound what is actually loaded
-	// instead: the union of the chunk bounds, padded by a chunk so water tiles, seam strips and crossfades stay inside.
+	// instead: the union of the chunk bounds and the water tiles' boxes, padded by a chunk so seam strips and crossfades
+	// stay inside. The water tiles count on their own (G77): a region component (MP2) whose chunks hold no mesh, air
+	// above a lake at the tiles' Z-0 layer, had no box but the fallback below, and the engine culled its tiles.
 	FBox Total(ForceInit);
 	{
 		FScopeLock Lock(&ChunkInfoLock);
@@ -333,6 +335,13 @@ FBoxSphereBounds UVoxelWorldComponent::CalcBounds(const FTransform& LocalToWorld
 				{
 					// Chunk bounds are chunk-local (the proxy shifts them the same way for its per-chunk culling).
 					CachedTotalBounds += Pair.Value.Bounds.ShiftBy(WorldOrigin + FVector(Pair.Key) * ChunkWorldSize);
+				}
+			}
+			for (const TPair<FIntVector2, FBox>& Pair : WaterTileWorldBounds)
+			{
+				if (Pair.Value.IsValid)
+				{
+					CachedTotalBounds += Pair.Value;
 				}
 			}
 			bTotalBoundsDirty = false;
@@ -469,8 +478,9 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& G
 		);
 	}
 
-	// Update bounds
+	// Update bounds, and have the tick send them to the scene (G77: a mesh without a fade is no tick on its own)
 	UpdateBounds();
+	RequestRenderBoundsRefresh();
 }
 
 void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
@@ -532,8 +542,9 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 		CancelFade(FadeKey, /*bClearRenderState=*/true);
 	}
 
-	// Update bounds
+	// Update bounds, and have the tick send them to the scene (G77: a mesh without a fade is no tick on its own)
 	UpdateBounds();
+	RequestRenderBoundsRefresh();
 }
 
 void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
@@ -565,6 +576,7 @@ void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
 	PendingRemovals.AddUnique(ChunkCoord);
 
 	UpdateBounds();
+	RequestRenderBoundsRefresh();
 }
 
 void UVoxelWorldComponent::ClearAllChunks()
@@ -662,6 +674,17 @@ void UVoxelWorldComponent::UpdateWaterTileFromCPUData(
 	}
 
 	WaterTileKeys.Add(TileCoord);
+	// The tile's world box (the vertices are tile-local, as the proxy reads them): part of the component's bounds (G77).
+	{
+		FBox TileBounds(ForceInit);
+		for (const FVoxelVertex& Vertex : Vertices)
+		{
+			TileBounds += FVector(Vertex.Position);
+		}
+		FScopeLock Lock(&ChunkInfoLock);
+		WaterTileWorldBounds.Add(TileCoord, TileBounds.ShiftBy(TileWorldPosition));
+		bTotalBoundsDirty = true;
+	}
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -672,6 +695,7 @@ void UVoxelWorldComponent::UpdateWaterTileFromCPUData(
 			}
 		);
 	}
+	RequestRenderBoundsRefresh();
 }
 
 void UVoxelWorldComponent::RemoveWaterTile(const FIntVector2& TileCoord)
@@ -679,6 +703,13 @@ void UVoxelWorldComponent::RemoveWaterTile(const FIntVector2& TileCoord)
 	check(IsInGameThread());
 
 	WaterTileKeys.Remove(TileCoord);
+	{
+		FScopeLock Lock(&ChunkInfoLock);
+		if (WaterTileWorldBounds.Remove(TileCoord) > 0)
+		{
+			bTotalBoundsDirty = true;
+		}
+	}
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -689,6 +720,7 @@ void UVoxelWorldComponent::RemoveWaterTile(const FIntVector2& TileCoord)
 			}
 		);
 	}
+	RequestRenderBoundsRefresh();
 }
 
 void UVoxelWorldComponent::ClearAllWaterTiles()
@@ -696,6 +728,11 @@ void UVoxelWorldComponent::ClearAllWaterTiles()
 	check(IsInGameThread());
 
 	WaterTileKeys.Empty();
+	{
+		FScopeLock Lock(&ChunkInfoLock);
+		WaterTileWorldBounds.Empty();
+		bTotalBoundsDirty = true;
+	}
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (Proxy)
 	{
@@ -706,6 +743,15 @@ void UVoxelWorldComponent::ClearAllWaterTiles()
 			}
 		);
 	}
+	RequestRenderBoundsRefresh();
+}
+
+void UVoxelWorldComponent::RequestRenderBoundsRefresh()
+{
+	bRenderBoundsStale = true;
+	// The tick refreshes the bounds and hands them to the scene; a component with no fade running does not tick on its
+	// own (AdvanceCrossfades turns the tick off when idle, after this frame's refresh).
+	SetComponentTickEnabled(true);
 }
 
 // ==================== Seam Meshes (seam-ownership P1) ====================
@@ -1174,6 +1220,44 @@ bool UVoxelWorldComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxel
 	FlushRenderingCommands();
 	OutInfo = Info;
 	return OutInfo.CurrentTriangles > 0;
+}
+
+bool UVoxelWorldComponent::GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const
+{
+	check(IsInGameThread());
+
+	FBox TileBox(ForceInit);
+	{
+		FScopeLock Lock(&ChunkInfoLock);
+		if (const FBox* Found = WaterTileWorldBounds.Find(TileCoord))
+		{
+			TileBox = *Found;
+		}
+	}
+	Out = FString::Printf(TEXT("component %s at %s: key %s, tile box %s, bounds %s (last sent %s), tick %s, registered %s, render state %s, visible %s, hidden in game %s, draw distance LD %.0f cached %.0f (cull volumes %s), bounds scale %.2f; "),
+		*GetName(), *GetComponentLocation().ToString(), WaterTileKeys.Contains(TileCoord) ? TEXT("held") : TEXT("MISSING"),
+		TileBox.IsValid ? *TileBox.ToString() : TEXT("none"), *Bounds.GetBox().ToString(), *LastSentRenderBounds.ToString(),
+		IsComponentTickEnabled() ? TEXT("on") : TEXT("off"),
+		IsRegistered() ? TEXT("yes") : TEXT("NO"), IsRenderStateCreated() ? TEXT("created") : TEXT("NOT created"),
+		GetVisibleFlag() ? TEXT("yes") : TEXT("NO"), bHiddenInGame ? TEXT("YES") : TEXT("no"), LDMaxDrawDistance, CachedMaxDrawDistance,
+		bAllowCullDistanceVolume ? TEXT("allowed") : TEXT("off"), BoundsScale);
+	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	if (!Proxy)
+	{
+		Out += TEXT("no proxy");
+		return false;
+	}
+	FString ProxyLine;
+	bool bHeld = false;
+	ENQUEUE_RENDER_COMMAND(VoxelWaterTileDrawInfo)(
+		[Proxy, TileCoord, &ProxyLine, &bHeld](FRHICommandListImmediate& RHICmdList)
+		{
+			bHeld = Proxy->GetWaterTileDrawInfo_RenderThread(TileCoord, ProxyLine);
+		}
+	);
+	FlushRenderingCommands();
+	Out += ProxyLine;
+	return bHeld;
 }
 
 // Console: voxel.MeshFade.Stats [fades=8] [x y z]

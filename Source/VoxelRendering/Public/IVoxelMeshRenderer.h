@@ -364,6 +364,20 @@ public:
 	}
 
 	/**
+	 * Diagnostics (world modes review G77): what the renderer holds for a water tile and when it last drew it.
+	 * Game thread; may flush rendering commands.
+	 *
+	 * @param TileCoord The tile (chunk column)
+	 * @param Out       Receives a line (the region, the component, the proxy)
+	 * @return True if the renderer holds a mesh for the tile
+	 */
+	virtual bool GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const
+	{
+		Out = TEXT("not reported by this renderer");
+		return false;
+	}
+
+	/**
 	 * Set material atlas for texture lookup.
 	 *
 	 * The material atlas defines how MaterialIDs map to atlas positions

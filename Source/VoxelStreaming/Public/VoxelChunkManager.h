@@ -1162,6 +1162,23 @@ public:
 	bool HasWaterTile(const FIntPoint& Column) const;
 
 	/**
+	 * G77: audit the 2D water tiles against the generated surface. Every voxel column whose generated ground lies more
+	 * than a voxel under the water plane should be wet in its chunk column's tile (the tile's masks OR-ed over the
+	 * layers). Logs the totals over every chunk column with a tile or a loaded chunk at the water plane's layer, then
+	 * the chunk columns with the most columns missing, each with its loaded chunks (residency, edits, water settled,
+	 * LOD, the stored mask's wet columns, and the mask rebuilt from the chunk's voxels as UpdateWaterTileContribution
+	 * reads them: a stored mask that differs from the rebuilt one is stale; a rebuilt mask still missing columns under
+	 * the water plane has no water flags there).
+	 *
+	 * @param MaxList      At most this many chunk columns listed (the worst first)
+	 * @param DetailColumn A chunk column (X, Y) detailed whatever its count; (MAX_int32, MAX_int32) for none
+	 */
+	void AuditWaterTiles(int32 MaxList, const FIntPoint& DetailColumn);
+
+	/** G77 diagnostics: mark every water tile dirty so its mesh is sent to the renderer again. @return The tile count */
+	int32 ResendWaterTiles();
+
+	/**
 	 * Get the collision manager.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")

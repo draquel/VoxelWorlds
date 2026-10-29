@@ -430,6 +430,19 @@ FVoxelSceneProxy         (render thread — GPU buffers, draw calls)
     ↓ GetDynamicMeshElements — second pass with water material
 ```
 
+With render regions (`RENDERING_SYSTEM.md`, "Render regions") a tile goes to the component of the region holding its
+column's Z-0 chunk, which over a lake is air with no mesh: the proxy draws its water tiles with no chunk mesh (its
+`GetDynamicMeshElements` once returned at the top without one, so a region holding only water tiles drew nothing: the
+lake bed without water in a block of chunk columns at a region's corner, world modes review G77, fixed 2026-10-26),
+and the component's bounds include the tile's box (`UVoxelWorldComponent::WaterTileWorldBounds`, `CalcBounds`) and
+reach the render scene on the next tick (`RequestRenderBoundsRefresh`).
+`voxel.Water.TileAudit [maxList] [chunkX chunkY]` checks
+the tiles against the generated surface (every voxel column more than a voxel under the water plane should be wet) and
+lists the worst chunk columns with their chunks' residency, edits, settled state, LOD and the stored against the rebuilt
+mask (a stale mask against flags missing in the voxels) and, per tile, the renderer's side (the region component, its
+bounds, the proxy's mesh and the frames since a main view drew it); `voxel.Water.ResendTiles` sends every tile's mesh
+again; `Rendering.WaterTile.ComponentBounds` is the bounds' test.
+
 **Scene Proxy Water Data** (render thread):
 ```cpp
 TMap<FIntVector2, FVoxelChunkRenderData> WaterTileRenderData;

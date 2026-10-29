@@ -844,6 +844,23 @@ bool FVoxelCustomVFRenderer::ConsumeLostRenderData(TArray<FIntVector>& OutChunks
 	return bLost;
 }
 
+bool FVoxelCustomVFRenderer::GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const
+{
+	check(IsInGameThread());
+	const FIntVector Chunk = WaterTileChunk(TileCoord);
+	const FIntVector Region = Regions.GetRegion(Chunk);
+	UVoxelWorldComponent* Component = FindRegionComponent(Chunk);
+	if (!Component)
+	{
+		Out = FString::Printf(TEXT("region %s: NO component"), *Region.ToString());
+		return false;
+	}
+	FString Line;
+	const bool bHeld = Component->GetWaterTileDrawInfo(TileCoord, Line);
+	Out = FString::Printf(TEXT("region %s (origin %s): %s"), *Region.ToString(), *Regions.GetRegionOrigin(Region).ToString(), *Line);
+	return bHeld;
+}
+
 // ==================== LOD Transitions ====================
 
 void FVoxelCustomVFRenderer::UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor)

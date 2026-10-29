@@ -99,6 +99,7 @@ public:
 	virtual void ClearAllSeamMeshes() override;
 	virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override;
 	virtual bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks) override;
+	virtual bool GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const override;
 
 	// LOD Transitions
 	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;
